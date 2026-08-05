@@ -5,14 +5,17 @@ Pure Python 3 standard library only -- no mtools, no root, no loopback
 devices. Used by image/make-image.sh and tools/inspect.sh.
 
 Modes:
-  create:  mkfat32.py [--size-mb 64] [--esp-offset 2048] IMAGE EFI_FILE
+  create:  mkfat32.py [--size-mb 64] [--esp-offset 2048] IMAGE EFI_FILE [KERNEL_FILE]
   list:    mkfat32.py --list IMAGE
 
 Layout produced:
   LBA 0        protective MBR
   LBA 1        GPT header (partition entries at LBA 2..33, backup at end)
   LBA 2048..   FAT32 volume (hidden_sectors = 2048) containing
-               EFI/BOOT/BOOTAA64.EFI
+               EFI/BOOT/BOOTAA64.EFI and, when a KERNEL_FILE is given,
+               KERNEL.BIN at the volume root (the milestone-one kernel
+               image). Deterministic: the same inputs always produce
+               byte-identical images.
 """
 
 import argparse
@@ -180,16 +183,27 @@ def dir_entry(name11, attr, cluster, size):
     return bytes(e)
 
 
-def build_fat32_image(img, geo, efi_bytes):
-    """Write a FAT32 volume (boot sector, FSInfo, FATs, directories, file)
-    into `img` at the volume's offset."""
+def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None):
+    """Write a FAT32 volume (boot sector, FSInfo, FATs, directories, files)
+    into `img` at the volume's offset.
+
+    Directory layout:
+      /              DIPSHITOS volume label, EFI/, KERNEL.BIN (when given)
+      /EFI/          ., .., BOOT/
+      /EFI/BOOT/     ., .., BOOTAA64.EFI
+    Cluster layout: 2=root, 3=EFI, 4=BOOT, then file data in order
+    (KERNEL.BIN first when present, then BOOTAA64.EFI). Deterministic.
+    """
     geo.checks()
     bps = geo.bps
+    kernel_clusters = (len(kernel_bytes) + bps - 1) // bps if kernel_bytes else 0
     file_clusters = (len(efi_bytes) + bps - 1) // bps
-    allocated = file_clusters + 3  # root(2), EFI(3), BOOT(4), file(5..)
+    kernel_start = 5
+    efi_start = kernel_start + kernel_clusters
+    allocated = efi_start + file_clusters - 2  # clusters used beyond root(2)
     if allocated > geo.clusters:
         raise ValueError(
-            "EFI binary needs %d clusters but the volume has only %d; "
+            "boot files need %d clusters but the volume has only %d; "
             "increase --size-mb" % (allocated, geo.clusters))
 
     # --- cluster chain -------------------------------------------------
@@ -201,10 +215,12 @@ def build_fat32_image(img, geo, efi_bytes):
         for i in range(count):
             fat[start + i] = start + i + 1 if i < count - 1 else FAT_EOC
 
-    chain(2, 1)          # root directory
-    chain(3, 1)          # EFI directory
-    chain(4, 1)          # BOOT directory
-    chain(5, file_clusters)  # file data
+    chain(2, 1)                     # root directory
+    chain(3, 1)                     # EFI directory
+    chain(4, 1)                     # BOOT directory
+    if kernel_bytes:
+        chain(kernel_start, kernel_clusters)  # KERNEL.BIN data
+    chain(efi_start, file_clusters)            # BOOTAA64.EFI data
 
     def wsec(sector, data):
         off = sector * bps
@@ -227,20 +243,27 @@ def build_fat32_image(img, geo, efi_bytes):
     vol_label = dir_entry(b"DIPSHITOS  ", 0x08, 0, 0)
     efi_entry = dir_entry(b"EFI        ", 0x10, 3, 0)
     boot_entry = dir_entry(b"BOOT       ", 0x10, 4, 0)
-    file_entry = dir_entry(b"BOOTAA64EFI", 0x20, 5, len(efi_bytes))
+    file_entry = dir_entry(b"BOOTAA64EFI", 0x20, efi_start, len(efi_bytes))
     dot_efi = dir_entry(b".          ", 0x10, 3, 0)
     dotdot_efi = dir_entry(b"..         ", 0x10, 2, 0)
     dot_boot = dir_entry(b".          ", 0x10, 4, 0)
     dotdot_boot = dir_entry(b"..         ", 0x10, 2, 0)
 
-    wsec(geo.cluster_sector(2), (vol_label + efi_entry).ljust(bps, b"\x00"))
+    root_entries = vol_label + efi_entry
+    if kernel_bytes:
+        root_entries += dir_entry(b"KERNEL  BIN", 0x20, kernel_start, len(kernel_bytes))
+    wsec(geo.cluster_sector(2), root_entries.ljust(bps, b"\x00"))
     wsec(geo.cluster_sector(3), (dot_efi + dotdot_efi + boot_entry).ljust(bps, b"\x00"))
     wsec(geo.cluster_sector(4), (dot_boot + dotdot_boot + file_entry).ljust(bps, b"\x00"))
 
     # --- file data --------------------------------------------------------
+    if kernel_bytes:
+        for i in range(kernel_clusters):
+            chunk = kernel_bytes[i * bps:(i + 1) * bps]
+            wsec(geo.cluster_sector(kernel_start + i), chunk.ljust(bps, b"\x00"))
     for i in range(file_clusters):
         chunk = efi_bytes[i * bps:(i + 1) * bps]
-        wsec(geo.cluster_sector(5 + i), chunk.ljust(bps, b"\x00"))
+        wsec(geo.cluster_sector(efi_start + i), chunk.ljust(bps, b"\x00"))
 
 
 # --------------------------------------------------------------------------
@@ -434,7 +457,7 @@ def list_image(path):
 # Main
 # --------------------------------------------------------------------------
 
-def build_image(total_sectors, esp_offset, efi_bytes):
+def build_image(total_sectors, esp_offset, efi_bytes, kernel_bytes=None):
     img = bytearray(total_sectors * BYTES_PER_SECTOR)
     last_usable = total_sectors - 34
     first_usable = 34
@@ -466,7 +489,7 @@ def build_image(total_sectors, esp_offset, efi_bytes):
     # FAT32 volume.
     volume_sectors = esp_last - esp_offset + 1
     geo = Fat32Geometry(volume_sectors, esp_offset)
-    build_fat32_image(img, geo, efi_bytes)
+    build_fat32_image(img, geo, efi_bytes, kernel_bytes)
     return bytes(img)
 
 
@@ -482,6 +505,8 @@ def main(argv):
                     help="print the contents of a file on the FAT volume")
     ap.add_argument("image", help="disk image path")
     ap.add_argument("efi_file", nargs="?", help="PE/COFF EFI application to embed")
+    ap.add_argument("kernel_file", nargs="?",
+                    help="optional flat kernel image (KERNEL.BIN) to embed at the volume root")
     args = ap.parse_args(argv)
 
     if args.list:
@@ -498,12 +523,22 @@ def main(argv):
         print("WARNING: %s does not start with 'MZ'; it may not be a valid "
               "PE/COFF EFI application" % args.efi_file, file=sys.stderr)
 
+    kernel_bytes = None
+    if args.kernel_file:
+        with open(args.kernel_file, "rb") as f:
+            kernel_bytes = f.read()
+        if kernel_bytes[:4] != b"DSK1":
+            print("WARNING: %s does not start with the 'DSK1' magic; it may "
+                  "not be a DipshitOS kernel image" % args.kernel_file,
+                  file=sys.stderr)
+
     total_sectors = args.size_mb * 1024 * 1024 // BYTES_PER_SECTOR
-    img = build_image(total_sectors, args.esp_offset, efi_bytes)
+    img = build_image(total_sectors, args.esp_offset, efi_bytes, kernel_bytes)
     with open(args.image, "wb") as f:
         f.write(img)
-    print("wrote %s: %d MiB, ESP at LBA %d, %d-byte EFI application embedded" %
-          (args.image, args.size_mb, args.esp_offset, len(efi_bytes)))
+    extra = ", %d-byte kernel image embedded" % len(kernel_bytes) if kernel_bytes else ""
+    print("wrote %s: %d MiB, ESP at LBA %d, %d-byte EFI application embedded%s" %
+          (args.image, args.size_mb, args.esp_offset, len(efi_bytes), extra))
     return 0
 
 

@@ -1,4 +1,4 @@
-# DipshitOS milestone-zero command aliases.
+# DipshitOS command aliases.
 # Requires: just (https://github.com/casey/just)
 # All recipes simply delegate to the Zig build system.
 
@@ -6,9 +6,13 @@ set shell := ["bash", "-c"]
 
 default: build
 
-# Compile the AArch64 UEFI application (zig build)
+# Compile the AArch64 UEFI application and kernel image (zig build)
 build:
     zig build
+
+# Extract the flat kernel image zig-out/bin/KERNEL.BIN (zig build kernel)
+kernel:
+    zig build kernel
 
 # Create the FAT32+GPT boot disk image (zig build image)
 image:

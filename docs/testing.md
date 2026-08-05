@@ -1,4 +1,4 @@
-# DipshitOS testing (milestone zero)
+# DipshitOS testing
 
 ## Evidence policy
 
@@ -34,6 +34,11 @@
 | `artifacts/qemu-serial.log` | `zig build run-qemu` | Serial console from the QEMU guest (when QEMU exists) |
 | `artifacts/efi-vars.bin` | VZ runner | Persisted EFI NVRAM |
 | `artifacts/context.md` | `zig build context` | Full deterministic project snapshot |
+| `\LOADER.TXT` on the ESP | loader (`zig build run`) | Loader-observed kernel placement: base, size, entry_offset, first 16 bytes in RAM |
+| `\RC.TXT` on the ESP | loader, after the kernel returns | `kernel_rc=0x0` — the kernel ran and returned (the handoff proof) |
+| `\MEMMAP.TXT` on the ESP | loader | EFI memory map (types + attributes of every region) |
+| `\KERNEL.TXT` on the ESP | kernel (best effort) | Kernel's own marker; **scrambled on VZ** (see ADR 0002 known issue) |
+| `\KERNEL.BIN` on the ESP | `zig build` | Flat kernel image, verified with `elf2bin.py --info` |
 
 ## How output is observed
 
@@ -58,4 +63,10 @@
 - [x] `zig build image` creates a GPT+FAT32 image with `EFI/BOOT/BOOTAA64.EFI`
 - [x] Virtualization.framework boot executed the guest (observed via
       `\BOOTED.TXT` on the ESP)
+- [x] Milestone one: `zig build run` loads `\KERNEL.BIN`, jumps, and the
+      kernel returns (observed via `\RC.TXT` = `kernel_rc=0x0`, plus
+      `\LOADER.TXT` base/size/first8 evidence)
+- [x] `\KERNEL.TXT` is created by the kernel (observed), but its content is
+      scrambled on Apple VZ firmware — known issue, see ADR 0002; the run
+      gate does not depend on it
 - [ ] QEMU boot observed (blocked: qemu-system-aarch64 not installed)

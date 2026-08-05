@@ -4,26 +4,37 @@ A from-scratch AArch64 operating system. Not Linux-based. No libc, no POSIX,
 no existing guest OS. Guest code is written in Zig; the host launcher is
 Swift. See `AGENTS.md` for the project rules.
 
-**Status: milestone zero complete.** Milestone zero proves the smallest
-reliable boot pipeline: a Zig-compiled AArch64 UEFI application on a FAT
-boot medium, executed by real firmware, with its output observed on the
-host. **No kernel, loader, allocator, scheduler, filesystem, graphics,
-networking, SMP, or userspace exists yet.**
+**Status: milestone one implemented** on branch `m1-kernel-handoff`.
+Milestone zero proved the smallest reliable boot pipeline (a
+Zig-compiled AArch64 UEFI application on a FAT boot medium, executed by
+real firmware, with its output observed on the host). Milestone one adds a
+separate freestanding kernel image: the boot app loads `\KERNEL.BIN` from
+the ESP, copies it to Boot Services memory, and jumps to its entry point;
+the kernel runs and returns. **No allocator, MMU setup, interrupts,
+scheduler, filesystem, graphics, networking, SMP, or userspace exists
+yet.** See `docs/roadmap.md` and `docs/decisions/0002-kernel-handoff.md`.
+
+Known issue: on Apple Virtualization firmware the kernel's own marker
+file (`\KERNEL.TXT`) lands scrambled (observed firmware quirk, ADR 0002);
+the milestone proof is `\RC.TXT` (`kernel_rc=0x0`), which is clean.
 
 ## The guest
 
-`boot/src/main.zig` is an AArch64 UEFI application. It prints exactly
+`boot/src/main.zig` is an AArch64 UEFI application — now a tiny boot
+**loader**. It prints via the UEFI Simple Text Output protocol, writes its
+evidence to `\BOOTED.TXT` on the ESP (Apple silicon exposes no visible text
+channel, see *Observed behavior*), then loads the separate kernel image
+`\KERNEL.BIN` (flat format v1, see `docs/decisions/0002-kernel-handoff.md`)
+from the ESP, allocates `EfiLoaderCode` pages, copies the image, performs
+D/I-cache maintenance, and jumps to the kernel entry. It writes
+`\LOADER.TXT` (observed placement), `\MEMMAP.TXT` (EFI memory map), and
+`\RC.TXT` (the kernel's return code) as host-readable evidence.
 
-```
-DIPSHITOS BOOTLOADER
-firmware has agreed to cooperate
-```
-
-via the UEFI Simple Text Output protocol, waits briefly, and returns control
-to the firmware. On Apple silicon, where the Virtualization firmware exposes
-no visible text channel (see *Observed behavior*), it additionally writes
-the same two lines to `\BOOTED.TXT` on the ESP through the UEFI Simple File
-System protocol — still pure UEFI services, still no libc/POSIX.
+`kernel/src/main.zig` is the milestone-one kernel stub: a few hundred bytes
+of `aarch64-freestanding` Zig (no libc/POSIX) that writes its own
+best-effort marker `\KERNEL.TXT`, prints via ConOut, and returns 0. It is
+converted to the flat image by `tools/elf2bin.py`. Still pure UEFI
+services throughout — no `ExitBootServices` yet (documented decision).
 
 ## Toolchain
 
@@ -55,7 +66,11 @@ dipshitos/
 ├── build.zig / build.zig.zon  root build system (Zig 0.16)
 ├── justfile                   command aliases
 ├── .zigversion                pinned Zig version (0.16.0)
-├── boot/src/main.zig          the AArch64 UEFI guest application
+├── boot/src/main.zig          the AArch64 UEFI boot loader (milestone one)
+├── kernel/                    freestanding AArch64 kernel stub
+│   ├── src/main.zig           kernel entry (writes \\KERNEL.TXT, returns 0)
+│   └── linker.ld              dense layout (avoids 64 KiB lld padding)
+├── tools/elf2bin.py           ELF → flat KERNEL.BIN (format v1) converter
 ├── host/vm-runner/            Swift Virtualization.framework launcher
 │   ├── Package.swift
 │   ├── entitlements.plist     com.apple.security.virtualization
@@ -82,7 +97,9 @@ Host: Apple M4, macOS 27.0 (arm64), Zig 0.16.0, Swift 6.2.3 (arm64), no QEMU.
 | Build image | `zig build image` | **Observed**: 64 MiB GPT+FAT32 image; `EFI/BOOT/BOOTAA64.EFI` (139264 B) present; volume label `DIPSHITOS` |
 | Inspect image | `zig build inspect` | **Observed**: `DOS/MBR boot sector` (protective), GPT header crc valid, ESP `LBA 2048..131038` |
 | Build Swift runner | `zig build run` | **Observed**: SwiftPM build succeeds |
-| Boot via Virtualization.framework | `zig build run` | **Observed**: VM boots; guest wrote `\BOOTED.TXT` to the ESP with exactly `DIPSHITOS BOOTLOADER\nfirmware has agreed to cooperate\n` |
+| Boot via Virtualization.framework | `zig build run` | **Observed**: VM boots; guest wrote `\BOOTED.TXT` (exact content), `\LOADER.TXT` (base/size/entry + first16 bytes), and `\RC.TXT` (`kernel_rc=0x0`) — the kernel loaded, ran, and returned |
+| Kernel image | `zig build` + `elf2bin.py` | **Observed**: `KERNEL.BIN` (format v1: magic `DSK1`, `entry_offset=0x18`, ~2 KiB) |
+| Kernel marker `\KERNEL.TXT` | kernel write | **Observed**: file created, but content scrambled on VZ firmware (known issue, ADR 0002) |
 | Boot via QEMU | `zig build run-qemu` | **Blocked**: `qemu-system-aarch64` not installed (command reports this clearly) |
 
 All command output and logs are saved under `artifacts/` (`inspect.txt`,
@@ -111,9 +128,11 @@ All command output and logs are saved under `artifacts/` (`inspect.txt`,
   installed. Install it with `brew install qemu` and run
   `zig build run-qemu`.
 
-## Next milestone
+## Next steps (see `docs/roadmap.md`)
 
-> Load a separate AArch64 kernel image and transfer control to its entry
-> point.
-
-Not implemented. See `docs/roadmap.md`.
+1. Root-cause the observed VZ `KERNEL.TXT` scrambling (ADR 0002 known
+   issue; all investigation logs in `artifacts/m1-run*.txt`).
+2. Verify the QEMU/edk2 path (`brew install qemu` → `zig build run-qemu`).
+3. Then milestone two: a real kernel proper (identity-map MMU, a UART
+   console driver, a hand-off contract from the boot stub) — described in
+   the roadmap, not implemented.

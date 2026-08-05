@@ -20,13 +20,34 @@ Deliverables: `boot/`, `host/vm-runner/`, `image/`, `tools/`, `docs/`,
 **No kernel, loader, allocator, scheduler, filesystem, graphics, networking,
 SMP, or userspace exists at the end of this milestone.**
 
-## Milestone one (next) — separate kernel image
+## Milestone one — separate kernel image (implemented)
 
-> Load a separate AArch64 kernel image and transfer control to its entry point.
+> Load a separate AArch64 kernel image and transfer control to its entry
+> point.
 
-Not started. Nothing in milestone zero anticipates it beyond keeping the
-guest free of libc/POSIX and keeping the firmware interface honest (UEFI
-Boot Services, loaded image protocol).
+**Implemented** on branch `m1-kernel-handoff` (see
+`docs/decisions/0002-kernel-handoff.md`): the boot UEFI app loads
+`\KERNEL.BIN` (flat format v1, magic "DSK1") from the ESP via the Simple
+File System protocol, allocates `EfiLoaderCode` pages with Boot Services,
+copies the image, performs D/I-cache maintenance, and jumps to the kernel
+entry (handoff ABI: x0 = base, x1 = size, x2 = System Table, x3 = open
+root directory; the kernel returns a u64 status). The kernel is a few
+hundred bytes of freestanding Zig and returns 0.
+
+Observed evidence on Apple M4 / macOS 27: `BOOTED.TXT` (loader ran),
+`LOADER.TXT` (loader-observed placement, byte-perfect copy), `RC.TXT`
+(`kernel_rc=0x0` — the kernel ran and returned), `MEMMAP.TXT`.
+
+**Known issue (observed):** the kernel's own `\KERNEL.TXT` write lands
+scrambled on Apple VZ firmware (shifted slices of the kernel image's
+.rodata) while the loader's identical writes are byte-perfect. Root cause
+not yet determined; investigation state is recorded in ADR 0002 and
+`artifacts/m1-run*.txt`. The milestone gates on `RC.TXT`, not `KERNEL.TXT`.
+
+Next steps for this milestone's loose ends:
+- Root-cause the VZ `KERNEL.TXT` corruption (ADR 0002 "Known issue").
+- Verify the QEMU/edk2 path (`brew install qemu`; `zig build run-qemu`)
+  — edk2 may not share the quirk.
 
 ## Later milestones (sketches only, not commitments)
 

@@ -1,4 +1,4 @@
-# DipshitOS hardware contract (milestone zero)
+# DipshitOS hardware contract
 
 This file records every hardware and firmware assumption the project makes.
 Anything listed here is a commitment: code in later milestones must either
@@ -59,6 +59,35 @@ assumption comes from documentation or reasoning only.
 - Console: `-nographic -serial stdio`; edk2 redirects UEFI console output
   to the serial port in this configuration. **[inferred]**
 - Disk: `virtio-blk-device` with a `format=raw` drive.
+
+## Milestone one: kernel handoff (2026-08-05, branch `m1-kernel-handoff`)
+
+- **Kernel image on the ESP**: `\KERNEL.BIN` is read from the same FAT
+  volume via the UEFI Simple File System protocol. **[observed]** — the
+  loader reads the file; `LOADER.TXT` records the size it read and the
+  first 16 bytes that landed in RAM.
+- **Kernel image allocation**: `AllocatePages` with type `EfiLoaderCode`.
+  The loader may place the image at any free 4K-aligned address (observed
+  at 0x7e55f000 and at 0x7f328000 in different runs); the kernel must be
+  position-independent. **[observed]** — `MEMMAP.TXT` shows the allocation
+  in ordinary cacheable RAM (`xp=0 wb=1`).
+- **Cache maintenance before the jump**: the loader cleans the D-cache and
+  invalidates the I-cache over the image (`dc cvau` / `ic ivau` / `dsb` /
+  `isb`) before transferring control. **[observed]** — without correct
+  handling the kernel never executes (RC.TXT absent); with it the kernel
+  runs and returns.
+- **The kernel runs without `ExitBootServices`**: it keeps using UEFI Boot
+  Services and the Simple File System protocol (its evidence write), on the
+  loader's stack. Until a later milestone records an ExitBootServices
+  design here, no guest code may touch MMU, interrupts, timers, or device
+  MMIO directly. **[inferred]** — we rely on the firmware keeping these
+  services available, per the UEFI spec.
+- **Known quirk (observed)**: on Apple VZ firmware the kernel's *own* file
+  writes land scrambled (the file is created with the right size, but the
+  bytes are shifted slices of the kernel image's `.rodata`), while the
+  loader's identical writes land byte-perfect. Recorded as a known issue in
+  ADR 0002; root cause not yet determined. QEMU/edk2 behavior is not yet
+  observed (QEMU not installed).
 
 ## What milestone zero does NOT assume (and does not touch)
 
