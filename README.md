@@ -40,9 +40,9 @@ services throughout — no `ExitBootServices` yet (documented decision).
 
 Pinned in `.zigversion`: **Zig 0.16.0**. The build system is written against
 that release (see `docs/decisions/0001-arm64-uefi-zig.md` for the API
-adjustments). Other tools used at build/run time: Swift (macOS 13+,
-Apple silicon for the Virtualization path), Python 3 (disk image tooling),
-`bash`. QEMU is optional and used only for the secondary boot path.
+adjustments). Other tools used at build/run time: Swift (macOS 13+, Apple silicon, for the Virtualization path), Python 3
+(disk image tooling), `bash`. The project targets Apple silicon /
+Virtualization.framework only — there is no QEMU path.
 
 ## Quickstart
 
@@ -50,7 +50,6 @@ Apple silicon for the Virtualization path), Python 3 (disk image tooling),
 zig build          # compile the AArch64 UEFI application -> zig-out/bin/BOOTAA64.EFI
 zig build image    # build the GPT+FAT32 boot image -> artifacts/disk.img
 zig build run      # boot it with Swift + Virtualization.framework (Apple silicon)
-zig build run-qemu # boot it with QEMU (requires qemu-system-aarch64)
 zig build inspect  # inspect the EFI binary and the disk image
 zig build context  # regenerate artifacts/context.md (deterministic project snapshot)
 ```
@@ -88,7 +87,7 @@ dipshitos/
 
 ## Verification results (observed on this development host)
 
-Host: Apple M4, macOS 27.0 (arm64), Zig 0.16.0, Swift 6.2.3 (arm64), no QEMU.
+Host: Apple M4, macOS 27.0 (arm64), Zig 0.16.0, Swift 6.2.3 (arm64).
 
 | Step | Command | Result |
 |------|---------|--------|
@@ -100,7 +99,6 @@ Host: Apple M4, macOS 27.0 (arm64), Zig 0.16.0, Swift 6.2.3 (arm64), no QEMU.
 | Boot via Virtualization.framework | `zig build run` | **Observed**: VM boots; guest wrote `\BOOTED.TXT` (exact content), `\LOADER.TXT` (base/size/entry + first16 bytes), and `\RC.TXT` (`kernel_rc=0x0`) — the kernel loaded, ran, and returned |
 | Kernel image | `zig build` + `elf2bin.py` | **Observed**: `KERNEL.BIN` (format v1: magic `DSK1`, `entry_offset=0x18`, ~2 KiB) |
 | Kernel marker `\KERNEL.TXT` | kernel write | **Observed**: file created, but content scrambled on VZ firmware (known issue, ADR 0002) |
-| Boot via QEMU | `zig build run-qemu` | **Blocked**: `qemu-system-aarch64` not installed (command reports this clearly) |
 
 All command output and logs are saved under `artifacts/` (`inspect.txt`,
 `vm-serial.log`, `vm-screen-*.png`, `efi-vars.bin`, `context.md`).
@@ -123,16 +121,11 @@ All command output and logs are saved under `artifacts/` (`inspect.txt`,
 - Apple's VZ EFI firmware loads `EFI/BOOT/BOOTAA64.EFI` from the ESP per the
   UEFI removable-media rule (consistent with the observed marker write, but
   the firmware's internal behavior is not directly observable).
-- The QEMU path (edk2, `-nographic -serial stdio`) will show the same text
-  on the serial console — **not yet observed** because QEMU is not
-  installed. Install it with `brew install qemu` and run
-  `zig build run-qemu`.
 
 ## Next steps (see `docs/roadmap.md`)
 
 1. Root-cause the observed VZ `KERNEL.TXT` scrambling (ADR 0002 known
    issue; all investigation logs in `artifacts/m1-run*.txt`).
-2. Verify the QEMU/edk2 path (`brew install qemu` → `zig build run-qemu`).
-3. Then milestone two: a real kernel proper (identity-map MMU, a UART
+2. Then milestone two: a real kernel proper (identity-map MMU, a UART
    console driver, a hand-off contract from the boot stub) — described in
    the roadmap, not implemented.

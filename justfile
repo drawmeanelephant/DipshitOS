@@ -22,10 +22,6 @@ image:
 run:
     zig build run
 
-# Boot with QEMU, if installed (zig build run-qemu)
-run-qemu:
-    zig build run-qemu
-
 # Inspect the EFI binary and disk image (zig build inspect)
 inspect:
     zig build inspect

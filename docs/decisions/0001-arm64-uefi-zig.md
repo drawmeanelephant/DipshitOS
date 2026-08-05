@@ -25,8 +25,8 @@ compiles for `aarch64-uefi`.
 The guest speaks only the UEFI 2.x System Table interface: it uses
 `SimpleTextOutput` (`ConOut`) to print and returns from its entry point to
 give control back to firmware. UEFI is the de-facto firmware interface for
-AArch64 servers and is what both Apple Virtualization and QEMU (edk2)
-provide, so one guest binary exercises both hosts. No legacy BIOS path.
+AArch64 servers and is what Apple Virtualization provides on this project's
+target host. No legacy BIOS path.
 
 ### 3. Zig as the guest implementation language
 
@@ -52,12 +52,13 @@ a FAT volume. Milestone zero ships a GPT disk with a FAT32 ESP built by a
 pure-Python tool (`image/mkfat32.py`) so image creation needs no root, no
 mtools, and no loopback mounts.
 
-### 6. QEMU as a secondary debugging environment
+### 6. QEMU as a secondary debugging environment — superseded 2026-08-05
 
-QEMU `-M virt` with edk2 is the portable fallback and debug target: it is
-scriptable, headless (`-nographic`), and shows the same UEFI output. It is
-optional at runtime; `zig build run-qemu` reports a clear error when QEMU
-is not installed.
+Originally: QEMU `-M virt` with edk2 as a portable fallback/debug target
+(scriptable, headless, shows the same UEFI output). **Superseded**: the
+project now targets Apple silicon / Virtualization.framework only. The
+`run-qemu` build step, the QEMU tooling, and all QEMU documentation were
+removed on 2026-08-05.
 
 ### 7. The kernel is explicitly excluded from milestone zero
 
@@ -69,8 +70,8 @@ architecture before the boot pipeline is demonstrated.
 
 ## Consequences
 
-- One Zig binary runs on two host environments (VZ, QEMU) behind one UEFI
-  interface.
+- The guest binary runs under Apple Virtualization.framework's UEFI — the
+  only supported host (QEMU support was removed 2026-08-05).
 - Guest code has no libc/POSIX dependency, satisfying a hard project
   constraint from day one.
 - The build tooling is pinned to Zig 0.16.0; upgrading requires revisiting

@@ -65,8 +65,8 @@ export fn _start(
     //    UEFI Simple File System protocol (root volume passed by the loader).
     write_marker(root, base, size, @intFromPtr(system_table));
 
-    // 2. Print via ConOut (host-visible only on the QEMU path; Apple's VZ
-    //    firmware routes no text to serial/framebuffer -- see README).
+    // 2. Print via ConOut (Apple's VZ firmware routes no text to
+    //    serial/framebuffer -- see README -- but the call is harmless).
     if (system_table.con_out) |con_out| {
         _ = con_out.outputString(&line_banner) catch {};
     }

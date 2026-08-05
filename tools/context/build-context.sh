@@ -32,7 +32,6 @@ section() { printf '\n## %s\n\n' "$1"; }
     printf 'Host: %s, macOS %s\n' "$(uname -m)" "$(sw_vers -productVersion 2>/dev/null || echo unknown)"
     printf 'Zig: %s\n' "$(zig version 2>/dev/null || echo 'not found')"
     printf 'Swift: %s\n' "$(swift --version 2>&1 | head -1 || echo 'not found')"
-    printf 'QEMU: %s\n' "$(qemu-system-aarch64 --version 2>/dev/null | head -1 || echo 'not installed')"
 
     section "Git status"
     if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
@@ -81,8 +80,20 @@ section() { printf '\n## %s\n\n' "$1"; }
     section "docs/decisions/0001-arm64-uefi-zig.md"
     fence docs/decisions/0001-arm64-uefi-zig.md
 
+    section "docs/decisions/0002-kernel-handoff.md"
+    fence docs/decisions/0002-kernel-handoff.md
+
     section "boot/src/main.zig"
     fence boot/src/main.zig
+
+    section "kernel/src/main.zig"
+    fence kernel/src/main.zig
+
+    section "kernel/linker.ld"
+    fence kernel/linker.ld
+
+    section "tools/elf2bin.py"
+    fence tools/elf2bin.py
 
     section "host/vm-runner/Package.swift"
     fence host/vm-runner/Package.swift

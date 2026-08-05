@@ -4,8 +4,8 @@
 
 A tiny AArch64 UEFI application, written in Zig, is built, placed at
 `EFI/BOOT/BOOTAA64.EFI` on a FAT32 ESP inside a GPT image, and booted under
-UEFI by (a) the Swift Virtualization.framework launcher and, where
-installed, (b) QEMU. The application prints
+UEFI by the Swift Virtualization.framework launcher (Apple silicon only;
+there is no QEMU path in this project). The application prints
 
 ```
 DIPSHITOS BOOTLOADER
@@ -46,8 +46,6 @@ not yet determined; investigation state is recorded in ADR 0002 and
 
 Next steps for this milestone's loose ends:
 - Root-cause the VZ `KERNEL.TXT` corruption (ADR 0002 "Known issue").
-- Verify the QEMU/edk2 path (`brew install qemu`; `zig build run-qemu`)
-  — edk2 may not share the quirk.
 
 ## Later milestones (sketches only, not commitments)
 
