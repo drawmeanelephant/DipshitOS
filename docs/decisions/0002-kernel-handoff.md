@@ -139,8 +139,8 @@ Consequence: milestone-one proof does **not** rest on `KERNEL.TXT`
 content. `zig build run` gates on `BOOTED.TXT` (loader ran) and `RC.TXT`
 (kernel ran and returned) and prints `KERNEL.TXT` for the record. The next
 milestone prompt carries the root-cause thread forward (see
-`docs/roadmap.md`); QEMU (edk2) may behave differently and should be
-checked once QEMU is installed.
+`docs/roadmap.md`). (There is no QEMU path in this project; Apple VZ is the
+only supported host.)
 
 ## Consequences
 

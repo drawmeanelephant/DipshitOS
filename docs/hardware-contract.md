@@ -51,14 +51,8 @@ assumption comes from documentation or reasoning only.
 - Config used: 256 MiB RAM, 2 vCPUs, optional virtio-gpu for observation,
   no networking.
 
-### QEMU `-M virt` (aarch64)
-
-- Firmware: edk2 `QEMU_EFI.fd` (`edk2-aarch64-code.fd`), either passed via
-  `-bios` or QEMU's built-in default. **[inferred]** on this machine —
-  QEMU is not installed here.
-- Console: `-nographic -serial stdio`; edk2 redirects UEFI console output
-  to the serial port in this configuration. **[inferred]**
-- Disk: `virtio-blk-device` with a `format=raw` drive.
+The project targets Apple silicon / Virtualization.framework only; there is
+no QEMU path.
 
 ## Milestone one: kernel handoff (2026-08-05, branch `m1-kernel-handoff`)
 
@@ -86,8 +80,7 @@ assumption comes from documentation or reasoning only.
   writes land scrambled (the file is created with the right size, but the
   bytes are shifted slices of the kernel image's `.rodata`), while the
   loader's identical writes land byte-perfect. Recorded as a known issue in
-  ADR 0002; root cause not yet determined. QEMU/edk2 behavior is not yet
-  observed (QEMU not installed).
+  ADR 0002; root cause not yet determined.
 
 ## What milestone zero does NOT assume (and does not touch)
 

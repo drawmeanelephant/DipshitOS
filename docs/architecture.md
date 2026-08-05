@@ -1,14 +1,16 @@
-# DipshitOS architecture (milestone zero)
+# DipshitOS architecture
 
-## Goal of milestone zero
+## Current state (milestones zero and one)
 
-Prove, end to end, that a Zig-compiled AArch64 UEFI application can be built,
-placed on a FAT-formatted boot medium at the standard removable-media path,
-and executed by real firmware, with its output observed on a host.
-
-Milestone zero deliberately introduces **no kernel, no ELF loader, no
-allocator, no scheduler, no filesystem, no graphics stack, no networking
-stack, and no userspace**.
+Milestone zero proved, end to end, that a Zig-compiled AArch64 UEFI
+application can be built, placed on a FAT-formatted boot medium at the
+standard removable-media path, and executed by real firmware, with its
+output observed on a host. Milestone one added a separate freestanding
+kernel image: the boot application loads `\KERNEL.BIN` from the ESP,
+allocates `EfiLoaderCode` pages, copies the image, performs D/I-cache
+maintenance, and jumps to the kernel entry (see
+`docs/decisions/0002-kernel-handoff.md`). The project targets Apple silicon
+/ Virtualization.framework only; there is no QEMU path.
 
 ## Components
 
@@ -16,9 +18,8 @@ stack, and no userspace**.
 |-----------|-------|------|
 | Guest boot application | `boot/src/main.zig` | AArch64 UEFI application; prints a fixed two-line message via the UEFI Simple Text Output protocol, waits briefly, returns to firmware |
 | Boot medium | `image/mkfat32.py` + `image/make-image.sh` | GPT disk with a FAT32 EFI System Partition containing `EFI/BOOT/BOOTAA64.EFI` |
-| macOS host launcher | `host/vm-runner/` (Swift + Virtualization.framework) | Boots the image under UEFI on Apple silicon, captures the guest serial console |
-| Secondary host | `zig build run-qemu` (QEMU `-M virt`) | Debug/secondary boot path; needs `qemu-system-aarch64` |
-| Build system | `build.zig`, `build.zig.zon`, `justfile` | Compile, image, run, run-qemu, inspect, context |
+| macOS host launcher | `host/vm-runner/` (Swift + Virtualization.framework) | Boots the image under UEFI on Apple silicon, captures the guest serial console and framebuffer |
+| Build system | `build.zig`, `build.zig.zon`, `justfile` | Compile, kernel, image, run, inspect, context |
 | Evidence tooling | `tools/inspect.sh`, `tools/context/` | Binary/image inspection and a deterministic project snapshot |
 
 ## Data flow
@@ -28,12 +29,12 @@ boot/src/main.zig  ──zig build──▶  zig-out/bin/BOOTAA64.EFI   (PE/COFF
                                         │
 image/make-image.sh ──mkfat32.py──▶  artifacts/disk.img        (GPT + FAT32 ESP)
                                         │
-        ┌───────────────────────────────┼───────────────────────────────┐
-        ▼                                                               ▼
-VZEFIBootLoader (macOS VZ)                                      qemu-system-aarch64 -M virt
-   └─ UEFI firmware boots EFI/BOOT/BOOTAA64.EFI                 └─ edk2 (if installed)
-        │                                                               │
-        └── ConOut ──▶ virtio console ──▶ artifacts/vm-serial.log       └── -serial stdio
+        ▼
+VZEFIBootLoader (macOS VZ)
+   └─ UEFI firmware boots EFI/BOOT/BOOTAA64.EFI
+        │
+        └── ConOut ──▶ virtio console ──▶ artifacts/vm-serial.log
+        └── loader loads \\KERNEL.BIN ──▶ jumps to kernel entry ──▶ RC.TXT
 ```
 
 ## Interfaces
@@ -41,14 +42,14 @@ VZEFIBootLoader (macOS VZ)                                      qemu-system-aarc
 - **Guest ↔ firmware:** the UEFI System Table only. Milestone zero calls
   `SimpleTextOutput.OutputString` (`ConOut`) and then returns, which is the
   UEFI-defined way to give control back to firmware.
-- **Guest ↔ host storage:** the disk is presented as a virtio block device
-  (VZ) or `virtio-blk` (QEMU). The guest never touches it in milestone zero;
-  the firmware reads `EFI/BOOT/BOOTAA64.EFI` from it.
+- **Guest ↔ host storage:** the disk is presented as a virtio block device.
+  The guest never touches the storage device directly in milestones zero
+  and one; the firmware reads `EFI/BOOT/BOOTAA64.EFI` from it, and both the
+  loader and the kernel write evidence files through the UEFI Simple File
+  System protocol.
 - **Guest → host console:** a virtio console serial port. Observed on Apple
   silicon: the VZ firmware does not route `ConOut` there (empty log) and
-  renders no text to the virtio-gpu framebuffer (blank captures). The QEMU
-  path routes `ConOut` to the serial console when running `-nographic`
-  (not yet observed here -- QEMU not installed).
+  renders no text to the virtio-gpu framebuffer (blank captures).
 - **Guest → host evidence:** because the VZ firmware exposes no visible
   text channel, the guest also writes its two lines to `\BOOTED.TXT` on the
   ESP via the UEFI Simple File System protocol. The host reads that file

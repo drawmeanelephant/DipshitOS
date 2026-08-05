@@ -74,7 +74,8 @@ pub fn build(b: *std.Build) void {
     // ------------------------------------------------------------------
     // Top-level steps. System-command steps are marked as having side
     // effects (and inherit stdio) so they always execute instead of being
-    // skipped by the build cache.
+    // skipped by the build cache. (No QEMU path: this project targets Apple
+    // Virtualization.framework only.)
     // ------------------------------------------------------------------
     const image_step = b.step("image", "Create the FAT32+GPT boot disk image at artifacts/disk.img");
     const image = b.addSystemCommand(&.{ "bash", "image/make-image.sh" });
@@ -99,13 +100,6 @@ pub fn build(b: *std.Build) void {
     run.has_side_effects = true;
     run.stdio = .inherit;
     run_step.dependOn(&run.step);
-
-    const run_qemu_step = b.step("run-qemu", "Boot the disk image with QEMU (requires qemu-system-aarch64)");
-    const run_qemu = b.addSystemCommand(&.{ "bash", "-c", run_qemu_command });
-    run_qemu.step.dependOn(&image.step);
-    run_qemu.has_side_effects = true;
-    run_qemu.stdio = .inherit;
-    run_qemu_step.dependOn(&run_qemu.step);
 
     const context_step = b.step("context", "Regenerate artifacts/context.md (deterministic project snapshot)");
     const context = b.addSystemCommand(&.{ "bash", "tools/context/build-context.sh" });
@@ -150,27 +144,3 @@ const run_vm_command =
     \\echo "run: boot completed; loader and kernel handoff observed (BOOTED.TXT, LOADER.TXT, RC.TXT)"
 ;
 
-const run_qemu_command =
-    \\set -e
-    \\if ! command -v qemu-system-aarch64 >/dev/null 2>&1; then
-    \\  echo "ERROR: qemu-system-aarch64 is not installed."
-    \\  echo "The QEMU boot path is unavailable on this machine."
-    \\  echo "Install it with: brew install qemu   (then re-run: zig build run-qemu)"
-    \\  exit 1
-    \\fi
-    \\FW=""
-    \\for f in /opt/homebrew/share/qemu/edk2-aarch64-code.fd /usr/local/share/qemu/edk2-aarch64-code.fd /usr/share/AAVMF/AAVMF_CODE.fd /usr/share/qemu/edk2-aarch64-code.fd; do
-    \\  if [ -f "$f" ]; then FW="$f"; break; fi
-    \\done
-    \\if [ -n "$FW" ]; then
-    \\  echo "run-qemu: using firmware $FW"
-    \\  exec qemu-system-aarch64 -M virt -cpu cortex-a72 -m 256 -nographic -serial stdio \
-    \\    -drive file=artifacts/disk.img,format=raw,if=none,id=hd \
-    \\    -device virtio-blk-device,drive=hd -bios "$FW"
-    \\else
-    \\  echo "run-qemu: no explicit edk2 firmware found; relying on QEMU default firmware for -M virt."
-    \\  exec qemu-system-aarch64 -M virt -cpu cortex-a72 -m 256 -nographic -serial stdio \
-    \\    -drive file=artifacts/disk.img,format=raw,if=none,id=hd \
-    \\    -device virtio-blk-device,drive=hd
-    \\fi
-;

@@ -20,9 +20,8 @@
 6. Build the Swift VM runner: `swift build --package-path host/vm-runner`.
 7. Boot with Apple Virtualization.framework (Apple silicon only):
    `zig build run`.
-8. Boot with QEMU when installed: `zig build run-qemu`.
-9. Save relevant logs under `artifacts/`.
-10. Generate the project snapshot: `zig build context` →
+8. Save relevant logs under `artifacts/`.
+9. Generate the project snapshot: `zig build context` →
     `artifacts/context.md`.
 
 ## Evidence artifacts
@@ -31,7 +30,6 @@
 |----------|-------------|----------|
 | `artifacts/inspect.txt` | `zig build inspect > artifacts/inspect.txt` | `file`, PE/COFF headers, sections, disassembly, FAT/GPT listing |
 | `artifacts/vm-serial.log` | `zig build run` | Serial console captured from the VZ guest |
-| `artifacts/qemu-serial.log` | `zig build run-qemu` | Serial console from the QEMU guest (when QEMU exists) |
 | `artifacts/efi-vars.bin` | VZ runner | Persisted EFI NVRAM |
 | `artifacts/context.md` | `zig build context` | Full deterministic project snapshot |
 | `\LOADER.TXT` on the ESP | loader (`zig build run`) | Loader-observed kernel placement: base, size, entry_offset, first 16 bytes in RAM |
@@ -42,11 +40,8 @@
 
 ## How output is observed
 
-- **QEMU path:** `-nographic -serial stdio`; edk2 routes UEFI `ConOut` to
-  the serial console. Expected message appears on the terminal and is
-  captured to a log. (QEMU is not installed on the development host, so
-  this path is currently reported as blocked, not observed.)
-- **Virtualization path (observed findings on macOS 27 / Apple M4):**
+- **Virtualization path (observed findings on macOS 27 / Apple M4; the
+  project targets Apple silicon only, no QEMU path):**
   - The virtio serial console stays empty: Apple's EFI firmware does not
     route `ConOut` there.
   - The virtio-gpu framebuffer stays blank: the firmware renders no text
@@ -69,4 +64,3 @@
 - [x] `\KERNEL.TXT` is created by the kernel (observed), but its content is
       scrambled on Apple VZ firmware — known issue, see ADR 0002; the run
       gate does not depend on it
-- [ ] QEMU boot observed (blocked: qemu-system-aarch64 not installed)
