@@ -1,3 +1,29 @@
+# --- Zig ---
 .zig-cache/
+zig-cache/
 zig-out/
 *.o
+
+# --- SwiftPM ---
+.build/
+.swiftpm/
+
+# --- Generated evidence & runtime state (never commit) ---
+artifacts/*
+!artifacts/.gitkeep
+
+# --- Disk images, firmware blobs, EFI binaries, debug files ---
+*.img
+*.fd
+*.bin
+*.efi
+*.pdb
+*.dSYM/
+core
+
+# --- Editors & OS noise ---
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*~
