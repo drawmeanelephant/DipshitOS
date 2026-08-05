@@ -1,0 +1,511 @@
+#!/usr/bin/env python3
+"""Build or inspect a bootable FAT32 + GPT disk image for DipshitOS.
+
+Pure Python 3 standard library only -- no mtools, no root, no loopback
+devices. Used by image/make-image.sh and tools/inspect.sh.
+
+Modes:
+  create:  mkfat32.py [--size-mb 64] [--esp-offset 2048] IMAGE EFI_FILE
+  list:    mkfat32.py --list IMAGE
+
+Layout produced:
+  LBA 0        protective MBR
+  LBA 1        GPT header (partition entries at LBA 2..33, backup at end)
+  LBA 2048..   FAT32 volume (hidden_sectors = 2048) containing
+               EFI/BOOT/BOOTAA64.EFI
+"""
+
+import argparse
+import struct
+import sys
+import zlib
+
+BYTES_PER_SECTOR = 512
+ESP_OFFSET_DEFAULT = 2048  # 1 MiB
+SIZE_MB_DEFAULT = 64
+FAT_EOC = 0x0FFFFFFF  # end-of-chain marker for FAT32
+FAT_BAD = 0x0FFFFFF7
+# GPT type GUID for the EFI System Partition (mixed-endian byte layout).
+ESP_GUID = bytes([0x28, 0x73, 0x2A, 0xC1, 0x1F, 0xF8, 0xD2, 0x11,
+                  0xBA, 0x4B, 0x00, 0xA0, 0xC9, 0x3E, 0xC9, 0x3B])
+# Fixed GUIDs so `zig build image` produces byte-identical images every run.
+DISK_GUID = bytes([0x44, 0x49, 0x50, 0x53, 0x48, 0x49, 0x54, 0x4F,
+                   0x53, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x31])
+PART_GUID = bytes([0x44, 0x49, 0x50, 0x53, 0x48, 0x49, 0x54, 0x4F,
+                   0x53, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x32])
+
+
+# --------------------------------------------------------------------------
+# GPT helpers
+# --------------------------------------------------------------------------
+
+def protective_mbr(total_sectors):
+    mbr = bytearray(BYTES_PER_SECTOR)
+    mbr[0] = 0x00  # no boot code
+    # Partition entry 0: type 0xEE (protective), covering the whole disk.
+    size = min(total_sectors - 1, 0xFFFFFFFF)
+    mbr[446:462] = struct.pack("<B3sB3sII", 0x00, b"\x00\x00\x00", 0xEE,
+                               b"\xff\xff\xff", 1, size)
+    mbr[510:512] = b"\x55\xaa"
+    return bytes(mbr)
+
+
+def gpt_header(current_lba, backup_lba, first_usable, last_usable,
+               entries_lba, entries_crc, disk_guid):
+    hdr = bytearray(92)
+    hdr[0:8] = b"EFI PART"
+    struct.pack_into("<I", hdr, 8, 0x00010000)     # revision 1.0
+    struct.pack_into("<I", hdr, 12, 92)            # header size
+    struct.pack_into("<I", hdr, 16, 0)             # crc32 (computed below)
+    struct.pack_into("<I", hdr, 20, 0)             # reserved
+    struct.pack_into("<Q", hdr, 24, current_lba)
+    struct.pack_into("<Q", hdr, 32, backup_lba)
+    struct.pack_into("<Q", hdr, 40, first_usable)
+    struct.pack_into("<Q", hdr, 48, last_usable)
+    hdr[56:72] = disk_guid
+    struct.pack_into("<Q", hdr, 72, entries_lba)
+    struct.pack_into("<I", hdr, 80, 128)           # number of entries
+    struct.pack_into("<I", hdr, 84, 128)           # entry size
+    struct.pack_into("<I", hdr, 88, entries_crc)
+    crc = zlib.crc32(hdr) & 0xFFFFFFFF
+    struct.pack_into("<I", hdr, 16, crc)
+    return bytes(hdr)
+
+
+def partition_entry(type_guid, first_lba, last_lba, name, unique_guid=PART_GUID):
+    e = bytearray(128)
+    e[0:16] = type_guid
+    e[16:32] = unique_guid
+    struct.pack_into("<Q", e, 32, first_lba)
+    struct.pack_into("<Q", e, 40, last_lba)
+    struct.pack_into("<Q", e, 48, 0)               # attributes
+    enc = name.encode("utf-16-le")
+    assert len(enc) <= 72, "partition name too long"
+    e[56:56 + len(enc)] = enc
+    return bytes(e)
+
+
+# --------------------------------------------------------------------------
+# FAT32 helpers
+# --------------------------------------------------------------------------
+
+class Fat32Geometry:
+    """FAT32 layout for one volume, computed from its sector count."""
+
+    def __init__(self, volume_sectors, esp_offset):
+        self.bps = BYTES_PER_SECTOR
+        self.spc = 1
+        self.reserved = 32
+        self.nfats = 2
+        self.esp_offset = esp_offset
+        self.total_sectors = volume_sectors
+        # Fixed-point iteration for sectors-per-FAT (FAT32: 4 bytes/entry).
+        fat_sectors = 1
+        while True:
+            clusters = volume_sectors - self.reserved - self.nfats * fat_sectors
+            need = (clusters * 4 + self.bps - 1) // self.bps
+            if need == fat_sectors:
+                break
+            fat_sectors = need
+        self.fat_sectors = fat_sectors
+        self.clusters = clusters
+        self.data_start = self.reserved + self.nfats * self.fat_sectors
+        self.root_cluster = 2
+
+    def cluster_sector(self, cluster):
+        """Absolute sector of a data cluster (cluster >= 2)."""
+        return self.esp_offset + self.data_start + (cluster - self.root_cluster) * self.spc
+
+    def fat_sector(self, fat_index):
+        return self.esp_offset + self.reserved + fat_index * self.fat_sectors
+
+    def checks(self):
+        if self.clusters <= 65525:
+            raise ValueError(
+                "FAT32 requires > 65525 clusters (got %d); increase image size" %
+                self.clusters)
+        if self.total_sectors > 0xFFFFFFFF:
+            raise ValueError("volume too large for FAT32 (max 2 TiB)")
+
+
+def boot_sector(geo):
+    b = bytearray(BYTES_PER_SECTOR)
+    b[0:3] = b"\xeb\x58\x90"
+    b[3:11] = b"MSDOS5.0"
+    struct.pack_into("<H", b, 11, geo.bps)
+    b[13] = geo.spc
+    struct.pack_into("<H", b, 14, geo.reserved)
+    b[16] = geo.nfats
+    struct.pack_into("<H", b, 17, 0)          # root entries (0 for FAT32)
+    struct.pack_into("<H", b, 19, 0)          # total sectors 16-bit
+    b[21] = 0xF8                              # media descriptor
+    struct.pack_into("<H", b, 22, 0)          # FAT size 16-bit
+    struct.pack_into("<H", b, 24, 32)         # sectors per track
+    struct.pack_into("<H", b, 26, 64)         # number of heads
+    struct.pack_into("<I", b, 28, geo.esp_offset)   # hidden sectors
+    struct.pack_into("<I", b, 32, geo.total_sectors)
+    struct.pack_into("<I", b, 36, geo.fat_sectors)
+    struct.pack_into("<H", b, 40, 0)          # extended flags
+    struct.pack_into("<H", b, 42, 0)          # filesystem version
+    struct.pack_into("<I", b, 44, geo.root_cluster)
+    struct.pack_into("<H", b, 48, 1)          # FSInfo sector
+    struct.pack_into("<H", b, 50, 6)          # backup boot sector
+    b[64] = 0x80                              # drive number
+    b[66] = 0x29                              # extended boot signature
+    struct.pack_into("<I", b, 67, 0x44495031)  # volume id
+    b[71:82] = b"DIPSHITOS  "
+    b[82:90] = b"FAT32   "
+    b[510:512] = b"\x55\xaa"
+    return bytes(b)
+
+
+def fs_info_sector():
+    fi = bytearray(BYTES_PER_SECTOR)
+    struct.pack_into("<I", fi, 0, 0x41615252)   # "RRaA"
+    struct.pack_into("<I", fi, 4, 0x61417272)   # "rrAa"
+    struct.pack_into("<I", fi, 8, 0xFFFFFFFF)   # free cluster count (unknown)
+    struct.pack_into("<I", fi, 12, 0xFFFFFFFF)  # next free cluster (unknown)
+    struct.pack_into("<I", fi, 508, 0xAA550000)
+    return bytes(fi)
+
+
+def dir_entry(name11, attr, cluster, size):
+    assert len(name11) == 11, "8.3 name must be exactly 11 bytes, got %r" % name11
+    e = bytearray(32)
+    e[0:11] = name11
+    e[11] = attr
+    struct.pack_into("<H", e, 20, (cluster >> 16) & 0xFFFF)  # cluster high
+    struct.pack_into("<H", e, 26, cluster & 0xFFFF)          # cluster low
+    struct.pack_into("<I", e, 28, size)
+    return bytes(e)
+
+
+def build_fat32_image(img, geo, efi_bytes):
+    """Write a FAT32 volume (boot sector, FSInfo, FATs, directories, file)
+    into `img` at the volume's offset."""
+    geo.checks()
+    bps = geo.bps
+    file_clusters = (len(efi_bytes) + bps - 1) // bps
+    allocated = file_clusters + 3  # root(2), EFI(3), BOOT(4), file(5..)
+    if allocated > geo.clusters:
+        raise ValueError(
+            "EFI binary needs %d clusters but the volume has only %d; "
+            "increase --size-mb" % (allocated, geo.clusters))
+
+    # --- cluster chain -------------------------------------------------
+    fat = [0] * (geo.clusters + 2)
+    fat[0] = 0x0FFFFFF8
+    fat[1] = 0x0FFFFFFF
+
+    def chain(start, count):
+        for i in range(count):
+            fat[start + i] = start + i + 1 if i < count - 1 else FAT_EOC
+
+    chain(2, 1)          # root directory
+    chain(3, 1)          # EFI directory
+    chain(4, 1)          # BOOT directory
+    chain(5, file_clusters)  # file data
+
+    def wsec(sector, data):
+        off = sector * bps
+        img[off:off + len(data)] = data
+
+    # --- boot sector / FSInfo / backups --------------------------------
+    bs = boot_sector(geo)
+    wsec(geo.esp_offset + 0, bs)
+    wsec(geo.esp_offset + 1, fs_info_sector())
+    wsec(geo.esp_offset + 6, bs)          # backup boot sector
+    wsec(geo.esp_offset + 7, fs_info_sector())
+
+    # --- FATs (two copies) ----------------------------------------------
+    fat_bytes = b"".join(struct.pack("<I", e) for e in fat)
+    fat_bytes = fat_bytes.ljust(geo.fat_sectors * bps, b"\x00")
+    for i in range(geo.nfats):
+        wsec(geo.fat_sector(i), fat_bytes)
+
+    # --- directory tree --------------------------------------------------
+    vol_label = dir_entry(b"DIPSHITOS  ", 0x08, 0, 0)
+    efi_entry = dir_entry(b"EFI        ", 0x10, 3, 0)
+    boot_entry = dir_entry(b"BOOT       ", 0x10, 4, 0)
+    file_entry = dir_entry(b"BOOTAA64EFI", 0x20, 5, len(efi_bytes))
+    dot_efi = dir_entry(b".          ", 0x10, 3, 0)
+    dotdot_efi = dir_entry(b"..         ", 0x10, 2, 0)
+    dot_boot = dir_entry(b".          ", 0x10, 4, 0)
+    dotdot_boot = dir_entry(b"..         ", 0x10, 2, 0)
+
+    wsec(geo.cluster_sector(2), (vol_label + efi_entry).ljust(bps, b"\x00"))
+    wsec(geo.cluster_sector(3), (dot_efi + dotdot_efi + boot_entry).ljust(bps, b"\x00"))
+    wsec(geo.cluster_sector(4), (dot_boot + dotdot_boot + file_entry).ljust(bps, b"\x00"))
+
+    # --- file data --------------------------------------------------------
+    for i in range(file_clusters):
+        chunk = efi_bytes[i * bps:(i + 1) * bps]
+        wsec(geo.cluster_sector(5 + i), chunk.ljust(bps, b"\x00"))
+
+
+# --------------------------------------------------------------------------
+# Shared FAT/GPT parsing for --list and --cat-file
+# --------------------------------------------------------------------------
+
+def find_esp_offset(data):
+    """Return the start LBA of the EFI System Partition (0 if absent)."""
+    if data[512:520] != b"EFI PART":
+        return 0
+    entries_lba = struct.unpack_from("<Q", data, 512 + 72)[0]
+    num = struct.unpack_from("<I", data, 512 + 80)[0]
+    for i in range(min(num, 16)):
+        e = data[(entries_lba + i) * BYTES_PER_SECTOR:][:128]
+        if e[0:16] == ESP_GUID:
+            return struct.unpack_from("<Q", e, 32)[0]
+    return 0
+
+
+def read_fat_geometry(data, esp_offset):
+    """Parse the FAT32 BPB at the ESP offset into a lightweight geo object."""
+    base = esp_offset * BYTES_PER_SECTOR
+    if data[base + 510] != 0x55 or data[base + 511] != 0xAA:
+        raise ValueError("no FAT boot signature at LBA %d" % esp_offset)
+    geo = Fat32Geometry.__new__(Fat32Geometry)
+    geo.bps = struct.unpack_from("<H", data, base + 11)[0]
+    geo.spc = data[base + 13]
+    geo.reserved = struct.unpack_from("<H", data, base + 14)[0]
+    geo.nfats = data[base + 16]
+    geo.fat_sectors = struct.unpack_from("<I", data, base + 36)[0]
+    geo.root_cluster = struct.unpack_from("<I", data, base + 44)[0]
+    geo.esp_offset = esp_offset
+    geo.data_start = geo.reserved + geo.nfats * geo.fat_sectors
+    geo.total_sectors = struct.unpack_from("<I", data, base + 32)[0]
+    geo.clusters = 0
+    return geo
+
+
+def encode_83(name):
+    """Encode a short path component as an 11-byte 8.3 name."""
+    stem, _, ext = name.upper().rpartition(".")
+    stem = stem[:8].ljust(8)
+    ext = ext[:3].ljust(3)
+    return (stem + ext).encode("latin-1")
+
+
+def cat_file(path, wanted):
+    """Print the contents of one file on the FAT volume, resolved by 8.3
+    path (e.g. /BOOTED.TXT). Returns 0 on success, 1 if not found."""
+    with open(path, "rb") as f:
+        data = f.read()
+    esp = find_esp_offset(data)
+    if esp == 0:
+        print("cat-file: no ESP partition found", file=sys.stderr)
+        return 1
+    geo = read_fat_geometry(data, esp)
+    parts = [p for p in wanted.strip("/\\").split("/") if p]
+    if not parts:
+        print("cat-file: empty path", file=sys.stderr)
+        return 1
+
+    def read_dir(cluster):
+        entries = []
+        seen = set()
+        while cluster not in (FAT_EOC, FAT_BAD) and cluster not in seen:
+            seen.add(cluster)
+            entries.extend(read_cluster(data, geo, cluster))
+            cluster = fat_next(data, geo, cluster)
+        return entries
+
+    cluster = geo.root_cluster
+    for part in parts:
+        target = encode_83(part)
+        found = None
+        for e in read_dir(cluster):
+            if e[0] in (0x00, 0xE5):
+                continue
+            if e[0:11] == target:
+                found = e
+                break
+        if found is None:
+            print("cat-file: %r not found in volume" % wanted, file=sys.stderr)
+            return 1
+        cluster = ((struct.unpack_from("<H", found, 20)[0] << 16)
+                   | struct.unpack_from("<H", found, 26)[0])
+        if not (found[11] & 0x10) and part is not parts[-1]:
+            print("cat-file: %r is not a directory" % part, file=sys.stderr)
+            return 1
+
+    size = struct.unpack_from("<I", found, 28)[0]
+    out = bytearray()
+    seen = set()
+    while cluster not in (FAT_EOC, FAT_BAD) and cluster not in seen and len(out) < size:
+        seen.add(cluster)
+        sec = geo.cluster_sector(cluster)
+        blob = data[sec * geo.bps:(sec + 1) * geo.bps]
+        out.extend(blob[:size - len(out)])
+        cluster = fat_next(data, geo, cluster)
+    sys.stdout.buffer.write(bytes(out))
+    if out and not out.endswith(b"\n"):
+        sys.stdout.buffer.write(b"\n")
+    return 0
+
+
+# --------------------------------------------------------------------------
+# Inspection (--list)
+# --------------------------------------------------------------------------
+
+def read_cluster(data, geo, cluster):
+    """Return the raw bytes of one cluster as a list of 32-byte entries."""
+    sec = geo.cluster_sector(cluster)
+    blob = data[sec * geo.bps:(sec + 1) * geo.bps]
+    return [blob[i * 32:(i + 1) * 32] for i in range(16)]
+
+
+def fat_next(data, geo, cluster):
+    """Read the FAT to find the next cluster in a chain (FAT copy 0)."""
+    off = geo.fat_sector(0) * geo.bps + cluster * 4
+    return struct.unpack_from("<I", data, off)[0] & 0x0FFFFFFF
+
+
+def decode_83(e):
+    name = e[0:8].decode("latin-1", "replace").rstrip(" ")
+    ext = e[8:11].decode("latin-1", "replace").rstrip(" ")
+    return (name + "." + ext) if ext else name
+
+
+def list_image(path):
+    with open(path, "rb") as f:
+        data = f.read()
+    total_sectors = len(data) // BYTES_PER_SECTOR
+
+    print("size: %d bytes (%d sectors)" % (len(data), total_sectors))
+    print("LBA0: %s" % ("MBR present" if data[510:512] == b"\x55\xaa" else "no MBR signature"))
+
+    if data[512:520] == b"EFI PART":
+        hdr_crc = struct.unpack_from("<I", data, 512 + 16)[0]
+        print("GPT: valid signature, header crc32=0x%08x" % hdr_crc)
+    else:
+        print("GPT: no GPT signature at LBA 1 (expecting one for DipshitOS images)")
+
+    esp_offset = find_esp_offset(data)
+    if esp_offset == 0:
+        print("FAT: no ESP partition found -- cannot list FAT contents")
+        return 1
+
+    try:
+        geo = read_fat_geometry(data, esp_offset)
+    except ValueError as exc:
+        print("FAT: %s" % exc)
+        return 1
+    base = esp_offset * BYTES_PER_SECTOR
+    vol_label = data[base + 71:base + 82].decode("latin-1", "replace").rstrip(" ")
+    print("GPT: ESP partition at LBA %d, %d sectors" %
+          (esp_offset, geo.total_sectors))
+    print("FAT: boot sig ok, label=%r, %d-byte sectors, %d sector/cluster, "
+          "%d reserved, %d FATs x %d sectors, root cluster %d" %
+          (vol_label, geo.bps, geo.spc, geo.reserved, geo.nfats,
+           geo.fat_sectors, geo.root_cluster))
+
+    def walk(cluster, indent):
+        seen = set()
+        while cluster not in (FAT_EOC, FAT_BAD) and cluster not in seen:
+            seen.add(cluster)
+            for e in read_cluster(data, geo, cluster):
+                if e[0] == 0x00:
+                    break
+                if e[0] == 0xE5:
+                    continue
+                attr = e[11]
+                if attr & 0x08:  # volume label
+                    continue
+                name = decode_83(e)
+                if name in (".", ".."):
+                    continue
+                cl = (struct.unpack_from("<H", e, 20)[0] << 16) | struct.unpack_from("<H", e, 26)[0]
+                size = struct.unpack_from("<I", e, 28)[0]
+                if attr & 0x10:
+                    print("%s%s/" % (indent, name))
+                    walk(cl, indent + "  ")
+                else:
+                    print("%s%s  (%d bytes)" % (indent, name, size))
+            cluster = fat_next(data, geo, cluster)
+
+    print("FAT: directory tree:")
+    walk(geo.root_cluster, "  ")
+    return 0
+
+
+# --------------------------------------------------------------------------
+# Main
+# --------------------------------------------------------------------------
+
+def build_image(total_sectors, esp_offset, efi_bytes):
+    img = bytearray(total_sectors * BYTES_PER_SECTOR)
+    last_usable = total_sectors - 34
+    first_usable = 34
+    disk_guid = DISK_GUID
+
+    # Partition table.
+    entries = bytearray(128 * 128)
+    esp_last = last_usable
+    entries[0:128] = partition_entry(ESP_GUID, esp_offset, esp_last, "EFI SYSTEM")
+    entries_crc = zlib.crc32(bytes(entries)) & 0xFFFFFFFF
+    backup_entries_lba = last_usable + 1  # == total_sectors - 33
+
+    img[0:BYTES_PER_SECTOR] = protective_mbr(total_sectors)
+    # NOTE: every write below uses closed slices whose length matches the
+    # RHS length. A mismatched slice assignment would silently grow or shrink
+    # the bytearray and corrupt the image.
+    hdr = gpt_header(1, total_sectors - 1, first_usable, last_usable,
+                     2, entries_crc, disk_guid)
+    img[BYTES_PER_SECTOR:2 * BYTES_PER_SECTOR] = hdr.ljust(BYTES_PER_SECTOR, b"\x00")
+    img[2 * BYTES_PER_SECTOR:2 * BYTES_PER_SECTOR + len(entries)] = entries
+    bhdr = gpt_header(total_sectors - 1, 1, first_usable, last_usable,
+                      backup_entries_lba, entries_crc, disk_guid)
+    img[(total_sectors - 1) * BYTES_PER_SECTOR:
+        (total_sectors - 1) * BYTES_PER_SECTOR + BYTES_PER_SECTOR] = \
+        bhdr.ljust(BYTES_PER_SECTOR, b"\x00")
+    img[backup_entries_lba * BYTES_PER_SECTOR:
+        backup_entries_lba * BYTES_PER_SECTOR + len(entries)] = entries
+
+    # FAT32 volume.
+    volume_sectors = esp_last - esp_offset + 1
+    geo = Fat32Geometry(volume_sectors, esp_offset)
+    build_fat32_image(img, geo, efi_bytes)
+    return bytes(img)
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--size-mb", type=int, default=SIZE_MB_DEFAULT,
+                    help="total image size in MiB (default %d)" % SIZE_MB_DEFAULT)
+    ap.add_argument("--esp-offset", type=int, default=ESP_OFFSET_DEFAULT,
+                    help="ESP start LBA (default %d)" % ESP_OFFSET_DEFAULT)
+    ap.add_argument("--list", action="store_true",
+                    help="inspect an existing image instead of building")
+    ap.add_argument("--cat-file", metavar="PATH",
+                    help="print the contents of a file on the FAT volume")
+    ap.add_argument("image", help="disk image path")
+    ap.add_argument("efi_file", nargs="?", help="PE/COFF EFI application to embed")
+    args = ap.parse_args(argv)
+
+    if args.list:
+        return list_image(args.image)
+
+    if args.cat_file:
+        return cat_file(args.image, args.cat_file)
+
+    if not args.efi_file:
+        ap.error("efi_file is required when not using --list")
+    with open(args.efi_file, "rb") as f:
+        efi_bytes = f.read()
+    if not efi_bytes.startswith(b"MZ"):
+        print("WARNING: %s does not start with 'MZ'; it may not be a valid "
+              "PE/COFF EFI application" % args.efi_file, file=sys.stderr)
+
+    total_sectors = args.size_mb * 1024 * 1024 // BYTES_PER_SECTOR
+    img = build_image(total_sectors, args.esp_offset, efi_bytes)
+    with open(args.image, "wb") as f:
+        f.write(img)
+    print("wrote %s: %d MiB, ESP at LBA %d, %d-byte EFI application embedded" %
+          (args.image, args.size_mb, args.esp_offset, len(efi_bytes)))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
