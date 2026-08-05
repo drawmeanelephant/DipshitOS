@@ -17,6 +17,7 @@
         "justfile",
         ".zigversion",
         "boot",
+        "kernel",
         "host",
         "image",
         "tools",
