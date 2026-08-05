@@ -1,5 +1,7 @@
 # DipshitOS
 
+[![CI](https://github.com/drawmeanelephant/DipshitOS/actions/workflows/ci.yml/badge.svg)](https://github.com/drawmeanelephant/DipshitOS/actions/workflows/ci.yml)
+
 A from-scratch AArch64 operating system. Not Linux-based. No libc, no POSIX,
 no existing guest OS. Guest code is written in Zig; the host launcher is
 Swift. See `AGENTS.md` for the project rules.
@@ -80,8 +82,8 @@ dipshitos/
 ├── tools/
 │   ├── inspect.sh             EFI binary + image inspection (degrades gracefully)
 │   └── context/               project-context generator + review prompt
-├── docs/                      architecture, hardware contract, roadmap,
-│                              testing, decisions/ADR 0001
+├── docs/                      architecture, branch protection, hardware contract,
+│                              roadmap, testing, decisions (ADRs 0001–0003)
 └── artifacts/                 build evidence (gitignored)
 ```
 

@@ -287,12 +287,18 @@ fn write_loader_trace(root: *uefi.protocol.File, dst: [*]const u8, base: u64, si
 fn flush_to_pou(base: [*]const u8, len: usize) void {
     var i: usize = 0;
     while (i < len) : (i += 1) {
-        asm volatile ("dc cvau, %[addr]" :: [addr] "r" (@intFromPtr(base + i)));
+        asm volatile ("dc cvau, %[addr]"
+            :
+            : [addr] "r" (@intFromPtr(base + i)),
+        );
     }
     asm volatile ("dsb ish" ::: .{ .memory = true });
     i = 0;
     while (i < len) : (i += 1) {
-        asm volatile ("ic ivau, %[addr]" :: [addr] "r" (@intFromPtr(base + i)));
+        asm volatile ("ic ivau, %[addr]"
+            :
+            : [addr] "r" (@intFromPtr(base + i)),
+        );
     }
     asm volatile ("dsb ish" ::: .{ .memory = true });
     asm volatile ("isb" ::: .{ .memory = true });
