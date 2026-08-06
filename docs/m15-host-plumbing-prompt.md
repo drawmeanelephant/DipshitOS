@@ -7,9 +7,10 @@ code.
 - Branch: `agent/.../m15-host-plumbing` (claim first via a claim file in
   `docs/claims/` + a log entry in `docs/logs/`; merge per ADR 0003)
 - Date: 2026-08-06
-- Inputs (read first; they are binding): `AGENTS.md`, `docs/status.md`
-  (M1.5 march steps 4–7, the "Best agent split" A row, the coordination
-  rules, the changelog), `docs/testing.md`, `docs/hardware-contract.md`,
+- Inputs (read first; they are binding): `AGENTS.md`, `docs/status.md`,
+  `docs/march-m15.md` (M1.5 steps 4–7, the "Best agent split" A row),
+  the coordination rules + changelog (`docs/logs/`, `docs/claims/`),
+  `docs/testing.md`, `docs/hardware-contract.md`,
   `docs/decisions/0004-kernel-proper.md`,
   `host/vm-runner/Sources/VMRunner/main.swift`, `build.zig`, `justfile`.
 
@@ -29,7 +30,7 @@ frame this slice:
 This slice makes the host able to send bytes into the guest and to show
 live output **without sacrificing the reproducible evidence log**.
 
-## Scope (steps 4–7 of `docs/status.md`)
+## Scope (steps 4–7 of `docs/march-m15.md`)
 
 1. **Step 4 — duplex serial attachment.** Give the serial attachment a
    readable host handle, initially standard input, so bytes typed in the
@@ -90,8 +91,8 @@ live output **without sacrificing the reproducible evidence log**.
   without losing the evidence log.
 - Terminal is safe under exit/signals; one-command interactive launch
   exists.
-- `docs/status.md` updated: steps 4–7 flipped with evidence files, changelog
-  appended, claim closed.
+- `docs/march-m15.md` updated: steps 4–7 flipped with evidence; branch
+  log appended, claim closed.
 - The end-to-end "keystroke reaches the kernel" proof is **deferred** to
   agent B after the serial gate (`docs/m2-vz-serial-gate-prompt.md`) — do
   not fake it in this slice.

@@ -8,9 +8,10 @@ on agent A's input proof or on the VZ serial gate outcome.
 - Branch: `agent/.../m15-commands` (claim first via a claim file in
   `docs/claims/` + a log entry in `docs/logs/`; merge per ADR 0003)
 - Date: 2026-08-06
-- Inputs (read first; they are binding): `AGENTS.md`, `docs/status.md`
-  (M1.5 march steps 12–18, the "Best agent split" C row, the coordination
-  rules, the changelog), `docs/testing.md`, `docs/hardware-contract.md`,
+- Inputs (read first; they are binding): `AGENTS.md`, `docs/status.md`,
+  `docs/march-m15.md` (M1.5 steps 12–18, the "Best agent split" C row),
+  the coordination rules + changelog (`docs/logs/`, `docs/claims/`),
+  `docs/testing.md`, `docs/hardware-contract.md`,
   `docs/decisions/0002-kernel-handoff.md`,
   `docs/decisions/0004-kernel-proper.md`,
   `docs/m2-kernel-proper-design.md`, `kernel/src/main.zig`
@@ -30,7 +31,7 @@ for the write/putc abstraction plus a test double, `kernel/src/monitor.zig`
 for the registry and commands) so it cannot collide with agent A/B's edits
 to `kernel/src/main.zig` and can be exercised with `zig test` on the host.
 
-## Scope (steps 12–18 of `docs/status.md`)
+## Scope (steps 12–18 of `docs/march-m15.md`)
 
 1. **Step 12 — command registry.** Name, help text, and function pointer per
    command; `help` generated from the registry. Adding commands must be
@@ -85,14 +86,16 @@ to `kernel/src/main.zig` and can be exercised with `zig test` on the host.
    (deterministic `echo`/`hex`/`mem`/`help` output; unknown command handled).
 3. `git diff` on `kernel/` shows **additions in new files only** — zero
    changes to `kernel/src/main.zig`.
-4. `docs/status.md` updated: steps 12–18 flipped with evidence, the step-15
-   fs decision recorded, changelog appended, claim closed.
+4. `docs/march-m15.md` updated: steps 12–18 flipped with evidence; the
+   step-15 fs decision recorded in `docs/status.md` (hard gate 5); branch
+   log appended, claim closed.
 
 ## Definition of done
 
 - A testable command layer with the identity, memory, utility, and control
   commands above (≥ the M1.5 "ten commands" bar), unit-tested against a
   mock console, with zero collisions on `kernel/src/main.zig`.
-- The step-15 filesystem decision is recorded in `docs/status.md`.
+- The step-15 filesystem decision is recorded in `docs/status.md` (hard
+  gate 5).
 - No hardware claim was made without a log; nothing from the serial gate or
   host-plumbing slices snuck in.

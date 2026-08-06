@@ -47,6 +47,13 @@
 > and therefore CI — fails immediately.
 11. Generate the project snapshot: `zig build context` →
     `artifacts/context.md`.
+12. Verify the multiagent coordination surface:
+    `bash tools/verify-coordination.sh` (also `just verify-coordination`
+    and CI). Fails if a claim/log file is malformed or the generated
+    claim/log index tables in `docs/claims/README.md` /
+    `docs/logs/README.md` drift from the files; fix by running
+    `bash tools/status/refresh-indexes.sh` after creating a claim file or
+    branch log.
 
 ## Evidence artifacts
 

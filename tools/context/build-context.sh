@@ -80,6 +80,9 @@ section() { printf '\n## %s\n\n' "$1"; }
     section "docs/status.md"
     fence docs/status.md
 
+    section "docs/march-m15.md (M1.5 per-step tracker)"
+    fence docs/march-m15.md
+
     section "docs/logs (per-branch changelogs)"
     for f in docs/logs/*.md; do
         [ -e "$f" ] || continue

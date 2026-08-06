@@ -24,15 +24,28 @@ one.
    Status legend: ⬜ claimed · 🔄 in progress · ✅ done · ⛔ blocked.
 3. Cite `artifacts/` evidence files. No observed claim without a saved log.
 4. Do **not** edit `docs/status.md` for logging — only for milestone-level
-   facts (gates, march steps, position). If you must touch
-   `README.md`/`roadmap.md`/`testing.md`, prefer pointer-level changes.
+   facts (position, gates). Per-step progress goes in the per-milestone
+   tracker (`docs/march-m15.md`); per-work detail goes here and in your
+   claim file. If you must touch `README.md`/`roadmap.md`/`testing.md`,
+   prefer pointer-level changes.
+5. Run `bash tools/status/refresh-indexes.sh` to regenerate the
+   [Log index](#log-index) below — it is **generated from the log files**,
+   so never hand-edit it (hand-appending rows to a shared table is how
+   parallel branches collide on merge).
 
 ## Log index
 
+**This table is generated** from the log files by
+`bash tools/status/refresh-indexes.sh` — do not hand-edit it. The
+coordination gate (`bash tools/verify-coordination.sh`, `just
+verify-coordination`, and CI) fails if it drifts from the files.
+
+<!-- LOGS_INDEX:START -->
 | Branch | Log file |
 |--------|----------|
-| M1.5 tracker origin (pre-branch era) | [`m1.5-tracker.md`](m1.5-tracker.md) |
-| `agent/buffy/m2-kernel-proper` (PR #10) | [`agent-buffy-m2-kernel-proper.md`](agent-buffy-m2-kernel-proper.md) |
-| `agent/buffy/m2-badhandoff-fix` (PR #11) | [`agent-buffy-m2-badhandoff-fix.md`](agent-buffy-m2-badhandoff-fix.md) |
 | `agent/buffy/m15-commands` (PR #12) | [`agent-buffy-m15-commands.md`](agent-buffy-m15-commands.md) |
 | `agent/buffy/m15-host-plumbing` (PR #13) | [`agent-buffy-m15-host-plumbing.md`](agent-buffy-m15-host-plumbing.md) |
+| `agent/buffy/m2-badhandoff-fix` (PR #11) | [`agent-buffy-m2-badhandoff-fix.md`](agent-buffy-m2-badhandoff-fix.md) |
+| `agent/buffy/m2-kernel-proper` (PR #10) | [`agent-buffy-m2-kernel-proper.md`](agent-buffy-m2-kernel-proper.md) |
+| M1.5 tracker origin (pre-branch era) | [`m1.5-tracker.md`](m1.5-tracker.md) |
+<!-- LOGS_INDEX:END -->

@@ -164,10 +164,11 @@ never returns; the monitor is its terminal-loop payload. It promises no new
 allocator, MMU work, interrupts, scheduler, userspace, or guest-side
 storage drivers.
 
-The twenty-step plan, hard gates, target screen, agent split, and a
-per-step progress tracker live in **`docs/status.md`** (the living status
-document — update it as work lands). The immediate blocker is the missing
-RX path: the kernel console is polled TX-only (ADR 0004) and the VM
+The M1.5 hard gates, target screen, and milestone status live in
+**`docs/status.md`** (the living status document); the twenty-step plan,
+agent split, and per-step progress tracker live in **`docs/march-m15.md`**
+(update it as work lands). The immediate blocker is the missing RX path:
+the kernel console is polled TX-only (ADR 0004) and the VM
 runner's serial attachment has no host-to-guest input handle today.
 
 ## Later milestones (sketches only, not commitments)
