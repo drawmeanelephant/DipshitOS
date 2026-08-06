@@ -5,8 +5,8 @@ implementing agent. It must produce a written plan **before** changing any
 code. **Build against a mock console first** — this slice must not depend
 on agent A's input proof or on the VZ serial gate outcome.
 
-- Branch: `agent/.../m15-commands` (claim the C row in `docs/status.md`
-  first; merge through the `m1.5-interactive-monitor` integration branch)
+- Branch: `agent/.../m15-commands` (claim first via a claim file in
+  `docs/claims/` + a log entry in `docs/logs/`; merge per ADR 0003)
 - Date: 2026-08-06
 - Inputs (read first; they are binding): `AGENTS.md`, `docs/status.md`
   (M1.5 march steps 12–18, the "Best agent split" C row, the coordination
@@ -69,8 +69,9 @@ to `kernel/src/main.zig` and can be exercised with `zig test` on the host.
 
 ## Process (hard gate)
 
-1. **Claim before you start.** Fill the C row in the Active claims table
-   (owner/branch, 🔄) and append a changelog entry *before* writing code.
+1. **Claim before you start.** Create `docs/claims/<NNN>-m15-commands.md`
+   from the TEMPLATE (owner/branch, 🔄) and append a log entry in
+   `docs/logs/agent-...-m15-commands.md` *before* writing code.
 2. Read the binding inputs; restate in your plan the exact evidence you
    expect from each command's unit test.
 3. Implement.

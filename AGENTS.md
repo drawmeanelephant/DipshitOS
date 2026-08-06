@@ -51,19 +51,23 @@ These rules bind any AI agent or human contributor working in this project.
 ## Multiagent coordination rules
 
 Multiple agents and humans develop this repo, sometimes in parallel. The
-full coordination setup (active-claims table, changelog, conventions) lives
-in `docs/status.md`; the binding rules are:
+full coordination setup (per-claim files, per-branch logs, conventions)
+lives under `docs/claims/`, `docs/logs/`, and `docs/status.md`; the binding
+rules are:
 
-- **Claim before you start.** Non-trivial work gets a row in the active
-  claims table and a changelog entry in `docs/status.md` before code is
-  written. Claimed work is not duplicated by other agents.
+- **Claim before you start.** Non-trivial work gets a claim file under
+  `docs/claims/` (copy `docs/claims/TEMPLATE.md`) and a log entry in
+  `docs/logs/<branch>.md` before code is written. Claimed work is not
+  duplicated by other agents.
 - **One editor per file at a time.** If two agents need the same file, the
   second waits or merges through the integration branch — never edit the
   same file (e.g. `kernel/src/main.zig`) concurrently.
-- **The changelog is append-only.** Never rewrite or delete entries;
-  corrections are new entries referencing the old one.
-- **Update on completion and on blockers.** Flip your claim's status and
-  append an entry when done; append one when blocked so the next agent does
-  not repeat the attempt.
-- **Doc edits go through `docs/status.md`.** Status prose lives there;
-  other docs link to it. Prefer pointer-level changes to other docs.
+- **The changelog is append-only, one file per branch.** Logs live under
+  `docs/logs/` so parallel appends cannot collide. Never rewrite or delete
+  entries; corrections are new entries referencing the old one.
+- **Update on completion and on blockers.** Flip your claim file's status
+  and append a log entry when done; append one when blocked so the next
+  agent does not repeat the attempt.
+- **Doc edits go through `docs/status.md`.** Milestone-level status prose
+  lives there; other docs link to it. Prefer pointer-level changes to other
+  docs; claims and logs live in their own sharded files.
