@@ -22,7 +22,10 @@ jobs:
           version: 0.16.0
 
       - name: Check Zig formatting
-        run: zig fmt --check boot/src/main.zig kernel/src/main.zig build.zig
+        run: zig fmt --check boot/src/*.zig kernel/src/*.zig build.zig
+
+      - name: Test kernel monitor modules
+        run: bash tools/verify-unit-tests.sh
 
       - name: Build UEFI application and kernel image
         run: zig build

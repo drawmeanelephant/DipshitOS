@@ -114,6 +114,13 @@ pub fn build(b: *std.Build) void {
     run.stdio = .inherit;
     run_step.dependOn(&run.step);
 
+    const console_step = b.step("console", "Boot the disk image and open an interactive host serial console (M1.5 host plumbing)");
+    const console = b.addSystemCommand(&.{ "bash", "-c", console_vm_command });
+    console.step.dependOn(&image.step);
+    console.has_side_effects = true;
+    console.stdio = .inherit;
+    console_step.dependOn(&console.step);
+
     const context_step = b.step("context", "Regenerate artifacts/context.md (deterministic project snapshot)");
     const context = b.addSystemCommand(&.{ "bash", "tools/context/build-context.sh" });
     context.has_side_effects = true;
@@ -149,4 +156,18 @@ const run_vm_command =
     \\printf '%s' "$SERIAL" | grep -q "memory-map descriptors=0x" || { echo "kernel memory-map print missing from vm-serial.log"; exit 1; }
     \\printf '%s' "$SERIAL" | grep -q "kernel terminal state" || { echo "kernel terminal state missing from vm-serial.log"; exit 1; }
     \\echo "run: milestone-two takeover observed (serial banner, memory-map view, terminal state)"
+;
+
+// M1.5 host plumbing: `zig build console` boots the image and opens an
+// interactive host console. stdin is inherited so keystrokes reach the
+// runner; the runner forwards them to the serial attachment (guest RX is a
+// separate milestone slice). `zig build run` above keeps the deterministic
+// evidence-gated behavior.
+const console_vm_command =
+    \\set -e
+    \\swift build --package-path host/vm-runner --configuration release
+    \\codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
+    \\host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log --console
+    \\echo
+    \\echo "console session ended."
 ;

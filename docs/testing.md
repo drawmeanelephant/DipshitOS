@@ -16,18 +16,25 @@
 ## Verification sequence
 
 1. Print the detected tool versions.
-2. Build the Zig UEFI application: `zig build`.
-3. Inspect the generated binary: `zig build inspect`.
-4. Create the FAT disk image: `zig build image`.
-5. Inspect the disk-image contents (part of `zig build inspect`).
-6. Build the Swift VM runner: `swift build --package-path host/vm-runner`.
-7. Boot with Apple Virtualization.framework (Apple silicon only):
+2. Check Zig formatting: `zig fmt --check boot/src/*.zig kernel/src/*.zig build.zig`.
+3. Run the M1.5 kernel monitor module unit tests:
+   `bash tools/verify-unit-tests.sh` — runs `zig test` on each module
+   present in `kernel/src/` (console/handoff/memmap/monitor). Modules that
+   have not landed yet are skipped with a notice, so the gate stays green
+   on `main` and becomes binding branch-protection evidence once each
+   module merges.
+4. Build the Zig UEFI application: `zig build`.
+5. Inspect the generated binary: `zig build inspect`.
+6. Create the FAT disk image: `zig build image`.
+7. Inspect the disk-image contents (part of `zig build inspect`).
+8. Build the Swift VM runner: `swift build --package-path host/vm-runner`.
+9. Boot with Apple Virtualization.framework (Apple silicon only):
    `zig build run`. Milestone two gates on `vm-serial.log` containing the
    exact banner `DipshitOS kernel has seized control.`, a
    `memory-map descriptors=0x...` line, and `kernel terminal state`. The
    pre-exit loader marker `\\BOOTED.TXT` remains required. `RC.TXT` is
    expected only for a deliberate pre-exit failure fixture, not success.
-8. Save command output and logs under `artifacts/m2-*.txt`, including the
+10. Save command output and logs under `artifacts/m2-*.txt`, including the
    probe output and the complete serial log. State blocked VZ capabilities
    precisely rather than inferring success.
 
@@ -38,7 +45,7 @@
 > header loaded into RAM) makes the kernel's `adrp`+`add` references read
 > 24 bytes early, so `KERNEL.TXT` is not byte-perfect and the run gate —
 > and therefore CI — fails immediately.
-9. Generate the project snapshot: `zig build context` →
+11. Generate the project snapshot: `zig build context` →
     `artifacts/context.md`.
 
 ## Evidence artifacts
