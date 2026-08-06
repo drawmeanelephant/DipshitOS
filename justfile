@@ -10,6 +10,10 @@ default: build
 build:
     zig build
 
+# Run the M1.5 kernel monitor module unit tests (zig test per module; skips modules not yet landed)
+test:
+    bash tools/verify-unit-tests.sh
+
 # Extract the flat kernel image zig-out/bin/KERNEL.BIN (zig build kernel)
 kernel:
     zig build kernel
@@ -21,6 +25,10 @@ image:
 # Boot with the Swift Virtualization.framework runner (zig build run)
 run:
     zig build run
+
+# Boot an interactive host serial console (zig build console)
+console:
+    zig build console
 
 # Inspect the EFI binary and disk image (zig build inspect)
 inspect:
@@ -36,7 +44,8 @@ ragshit *ARGS:
 
 # Run the build-gate verification sequence from docs/testing.md (no VM)
 verify:
-    zig fmt --check boot/src/main.zig kernel/src/main.zig build.zig
+    zig fmt --check boot/src/*.zig kernel/src/*.zig build.zig
+    bash tools/verify-unit-tests.sh
     zig build
     zig build image
     zig build inspect
@@ -46,3 +55,7 @@ verify:
 # Verify the pre-exit failure path (boots a VZ VM; Apple silicon only)
 verify-bad-handoff:
     bash tools/verify-bad-handoff.sh
+
+# Verify the M1.5 host-side interactive serial plumbing (boots VZ VMs; Apple silicon only)
+verify-host-console:
+    bash tools/verify-host-console.sh

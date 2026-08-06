@@ -96,11 +96,14 @@ interactive monitor — the monitor is simply the loop's payload. No new
 firmware dependencies, no allocator, no interrupts, no storage drivers.
 
 One immediate blocker, on both ends of the wire: the kernel console has **no
-RX path at all** (ADR 0004), and the VM runner's serial attachment sends
-guest output to a file but its host-to-guest input handle is `nil`
-(`VZFileHandleSerialPortAttachment(fileHandleForReading: nil, ...)` in
-`host/vm-runner/Sources/VMRunner/main.swift` — unchanged on the merged
-`main`). Until keystrokes can reach the guest, the monitor is output-only.
+RX path at all** (ADR 0004), and until 2026-08-06 the VM runner's serial
+attachment sent guest output to a file with a `nil` host-to-guest input
+handle (`VZFileHandleSerialPortAttachment(fileHandleForReading: nil, ...)`
+in `host/vm-runner/Sources/VMRunner/main.swift`). The M1.5 host-plumbing
+slice (steps 4–7, landed 2026-08-06) added a `--console` mode that wires a
+real stdin-backed input handle and tees guest output live; the evidence
+path (`zig build run`) keeps the `nil`-input attachment, unchanged. Until
+keystrokes can actually be read by the guest, the monitor is output-only.
 
 ### Definition of done — the target screen
 
@@ -147,10 +150,10 @@ Legend: ⬜ not started · 🔄 in progress · ✅ done · ⛔ blocked (note why
 | 1 | **Freeze the target.** Name it Milestone 1.5: Interactive Kernel Monitor. Keep the milestone-two kernel exactly as merged (no new firmware work). | Scope document says exactly what counts as done and what is deferred. | ✅ | This file is the scope/status doc (frozen 2026-08-06; see changelog). |
 | 2 | **Define the finish line.** Boot into a terminal, display a banner, accept commands at `dipshit>`, execute ≥ 10 useful commands. | Written acceptance checklist (above) prevents agents from wandering into scheduler astrology. | ✅ | Hard gates listed above; fs gate flagged for re-scope (frozen 2026-08-06; see changelog). |
 | 3 | **Create a dedicated integration branch.** e.g. `m1.5-interactive-monitor`. | All monitor work has one landing zone while agents use smaller branches. | ⬜ | See ADR 0003 branch rules. |
-| 4 | **Add interactive mode to the Swift runner.** Give `VZFileHandleSerialPortAttachment` a readable host handle, initially standard input. | Bytes typed in the host terminal can reach the guest serial device. | ⬜ | Input handle is `nil` today (verified in `main.swift` on merged `main`). |
-| 5 | **Tee guest output.** Send output to the terminal **and** `artifacts/vm-serial.log`. | Interact live without sacrificing reproducible evidence. | ⬜ | Runner currently polls the log file (`Data(contentsOf:)`); upgrade to duplex + tee. |
-| 6 | **Handle terminal state safely.** Raw/character-mode input; restore the terminal on exit and signals. | Backspace, Enter, Ctrl-C behave predictably. | ⬜ | |
-| 7 | **Add a first-class launch command.** `zig build console` and `just console`. | One command builds, images, boots, and opens DipshitOS interactively. | ⬜ | |
+| 4 | **Add interactive mode to the Swift runner.** Give `VZFileHandleSerialPortAttachment` a readable host handle, initially standard input. | Bytes typed in the host terminal can reach the guest serial device. | ✅ | `--console` wires a stdin pipe as `fileHandleForReading` (non-nil); `--debug-input` proves bytes are handed to the attachment (`artifacts/m15-host-console-gate.txt`). Guest receipt is **not** claimed — RX is agent B. |
+| 5 | **Tee guest output.** Send output to the terminal **and** `artifacts/vm-serial.log`. | Interact live without sacrificing reproducible evidence. | ✅ | Console mode streams guest output via a pipe tee to terminal + log (no full-log reloads). Evidence path (`zig build run`) keeps file-polling, unchanged. |
+| 6 | **Handle terminal state safely.** Raw/character-mode input; restore the terminal on exit and signals. | Backspace, Enter, Ctrl-C behave predictably. | ✅ | termios character mode (ICANON/ECHO off, ISIG on) restored via atexit + dispatch signal sources (^C/SIGTERM/SIGHUP) + failure path; PTY gate observed exit 130 with termios back to ICANON+ECHO. Backspace/Enter/Ctrl-C documented honestly (raw passthrough; ^C ends the host session). |
+| 7 | **Add a first-class launch command.** `zig build console` and `just console`. | One command builds, images, boots, and opens DipshitOS interactively. | ✅ | `zig build console` (depends on `image`) and `just console` exist; observed booting with full diagnostics + SIGTERM restore (`artifacts/m15-host-console-cmd.txt`). `just verify-host-console` runs the gate. |
 | 8 | **Confirm the serial console.** The M2 probe (`probe_serial`) already selects a MMIO candidate (PL011/16550/virtio-MMIO); verify which kind/base it drives and that TX reaches `vm-serial.log` on a real VZ run. | Log proves console kind + base and the first post-exit serial evidence (`DipshitOS kernel has seized control.`). | ⬜ | This replaces the plan's "probe UEFI Serial I/O" step: post-exit there is no UEFI Serial I/O protocol; M2's probe is the mechanism. VZ gate still blocked (no serial evidence on the saved run). The bad-handoff fix landed 2026-08-06 (shim LR clobber) and is no longer a suspect; the serial gate is a separate open question. |
 | 9 | **Build a console abstraction.** `write`, `putc`, `flush` on top of the M2 `uart` module; `readByte` is the RX gap to close (step 4 host side + a guest RX path). | Kernel code stops caring which MMIO candidate carries the bytes. | ⬜ | ConOut fallback is dead post-exit; primary = MMIO uart. |
 | 10 | **Make input bounded and boring.** Fixed 256-byte line buffer; CR/LF, backspace, Ctrl-C, overflow rejection. | Editable command lines without an allocator. | ⬜ | |
@@ -201,12 +204,17 @@ change.
   ("VZ may expose only a virtio console rather than a simple MMIO UART").
   The M2 kernel probes PL011/16550/virtio-MMIO candidates and selects one;
   which one wins on VZ is still **unobserved** (the VZ run gate is blocked).
-- **Runner serial input is `nil` today.** Verified on merged `main`:
-  `VZFileHandleSerialPortAttachment(fileHandleForReading: nil, ...)` in
-  `host/vm-runner/Sources/VMRunner/main.swift` — step 4 is a real change.
-- **Output observation is still file-polling.** The runner re-reads the
-  serial log (`Data(contentsOf:)`) on a timer; steps 4–6 replace this with a
-  duplex attachment, live teeing, and terminal-state management.
+- **Runner serial input was `nil`; it is now a real handle in `--console`
+  mode.** The evidence path (`zig build run`) still uses
+  `VZFileHandleSerialPortAttachment(fileHandleForReading: nil, ...)`
+  unchanged; the M1.5 `--console` mode (landed 2026-08-06) wires a stdin
+  pipe as `fileHandleForReading` and forwards host bytes into it
+  (evidence: `artifacts/m15-host-console-gate.txt`).
+- **Output observation: evidence path still file-polls; console mode
+  streams.** `zig build run` still re-reads the serial log
+  (`Data(contentsOf:)`) on a timer — unchanged, evidence semantics intact.
+  The M1.5 `--console` mode uses a pipe-based duplex attachment and tees
+  guest output live to the terminal and the log (no full-log reloads).
 - **"256 MiB detected"** matches the runner's configured
   `memorySize = 256 * 1024 * 1024` (unchanged on merged `main`); `mem`
   should derive it from the captured map, not hardcode it.
@@ -258,7 +266,7 @@ hours of each other and collided). The rules below make that safe. They are
 |-------|----------------|---------------|--------|------------|
 | Bad-handoff gate fix (M2 pre-exit return path) | buffy (`agent/buffy/m2-badhandoff-fix`) | `docs/m2-bad-handoff-fix-prompt.md` | ✅ fixed 2026-08-06 — `RC.TXT` → `kernel_rc=0x2`, gate exits 0 (`artifacts/m2-badhandoff-fix-after.txt`) | — |
 | VZ serial/MMU gate run (M1.5 step 8) | — | `docs/m2-vz-serial-gate-prompt.md` | ⬜ | bad-handoff fix |
-| M1.5 — host plumbing (agent A) | — | M1.5 steps 4–7 (`docs/m15-host-plumbing-prompt.md`) | ⬜ | — |
+| M1.5 — host plumbing (agent A) | buffy (`agent/buffy/m15-host-plumbing`) | M1.5 steps 4–7 (`docs/m15-host-plumbing-prompt.md`) | ✅ 2026-08-06 — steps 4–7 landed, evidence under `artifacts/m15-host-*.txt` | — |
 | M1.5 — console & shell core (agent B) | — | M1.5 steps 9–12 | ⬜ | A |
 | M1.5 — commands & personality (agent C) | — | M1.5 steps 13–18 (`docs/m15-commands-prompt.md`) | ⬜ | mock console |
 | Status/changelog machinery + PR #10 | buffy (`agent/buffy/m2-kernel-proper`) | this file | ✅ | — |
@@ -329,6 +337,42 @@ Status legend: ⬜ claimed · 🔄 in progress · ✅ done · ⛔ blocked.
   Both are unclaimed and ready to run in parallel with the VZ serial gate
   (`docs/m2-vz-serial-gate-prompt.md`). ✅ written — no implementation
   started.
+- **2026-08-06** — **Claim (buffy, `agent/buffy/m15-host-plumbing`):**
+  claimed the M1.5 host-plumbing row (agent A, steps 4–7) per AGENTS.md.
+  Branch created from updated `main` (post bad-handoff fix, `05ee69d`).
+  Plan: `--console` mode in `host/vm-runner/Sources/VMRunner/main.swift`
+  (duplex attachment with stdin input handle, streaming tee of guest output
+  to terminal + `vm-serial.log`, termios raw/character input with restore on
+  exit/signals), `zig build console` + `just console`, honest diagnostics.
+  No kernel files touched; `zig build run` evidence semantics unchanged.
+  🔄 in progress — implementation and gates to follow.
+- **2026-08-06** — **M1.5 host plumbing landed (buffy,
+  `agent/buffy/m15-host-plumbing`):** steps 4–7 done, host-side only; no
+  kernel files touched. `host/vm-runner/Sources/VMRunner/main.swift` gained
+  `--console` (duplex `VZFileHandleSerialPortAttachment` with a stdin pipe
+  as `fileHandleForReading`, streaming tee of guest output to the terminal +
+  `vm-serial.log`, termios character mode restored on exit/^C/SIGTERM/
+  SIGHUP/failure via atexit + dispatch signal sources, `--debug-input` byte
+  evidence on stderr, honest diagnostics); `build.zig` gained
+  `zig build console`; `justfile` gained `console` and `verify-host-console`;
+  new gate `tools/verify-host-console.sh`. **Observed:** scripted piped run
+  forwarded `hello\r` to the serial attachment as `68 65 6c 6c 6f 0d` and
+  ended cleanly by timeout; PTY run caught SIGINT and exited 130 with the
+  pty termios restored to ICANON+ECHO; `zig build console` booted with full
+  diagnostics and restored the terminal on SIGTERM; `zig build run`
+  unchanged (serial gate still blocked, `vm-serial.log` 0 bytes). Host
+  **input plumbing observed**; guest RX and the interactive monitor prompt
+  remain **unobserved** (guest RX is agent B's slice; the VZ serial gate is
+  still blocked). Evidence: `artifacts/m15-host-*.txt`. ✅
+- **2026-08-06** — **CI unit-test gate (buffy, `agent/buffy/m15-host-plumbing`):**
+  CI now format-checks `boot/src/*.zig kernel/src/*.zig build.zig` and runs
+  the M1.5 kernel monitor module unit tests via
+  `tools/verify-unit-tests.sh` — `zig test` on each module present in
+  `kernel/src/` (console/handoff/memmap/monitor). Modules that have not
+  landed yet (agent C's commands slice) are skipped with a notice so `main`
+  stays green; once each module merges, its tests become binding
+  branch-protection evidence instead of local-only claims. `just test`
+  added; `just verify` and `docs/testing.md` updated to match. ✅
 
 ## Immediate gate work (prerequisites for M1.5)
 
