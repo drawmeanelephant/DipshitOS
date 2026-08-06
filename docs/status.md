@@ -132,8 +132,8 @@ Legend: ⬜ not started · 🔄 in progress · ✅ done · ⛔ blocked (note why
 
 | # | Step | Observable result | Status | Notes / evidence |
 |---:|------|-------------------|--------|------------------|
-| 1 | **Freeze the target.** Name it Milestone 1.5: Interactive Kernel Monitor. Keep the milestone-two kernel exactly as merged (no new firmware work). | Scope document says exactly what counts as done and what is deferred. | ✅ | This file is the scope/status doc. |
-| 2 | **Define the finish line.** Boot into a terminal, display a banner, accept commands at `dipshit>`, execute ≥ 10 useful commands. | Written acceptance checklist (above) prevents agents from wandering into scheduler astrology. | ✅ | Hard gates listed above; fs gate flagged for re-scope. |
+| 1 | **Freeze the target.** Name it Milestone 1.5: Interactive Kernel Monitor. Keep the milestone-two kernel exactly as merged (no new firmware work). | Scope document says exactly what counts as done and what is deferred. | ✅ | This file is the scope/status doc (frozen 2026-08-06; see changelog). |
+| 2 | **Define the finish line.** Boot into a terminal, display a banner, accept commands at `dipshit>`, execute ≥ 10 useful commands. | Written acceptance checklist (above) prevents agents from wandering into scheduler astrology. | ✅ | Hard gates listed above; fs gate flagged for re-scope (frozen 2026-08-06; see changelog). |
 | 3 | **Create a dedicated integration branch.** e.g. `m1.5-interactive-monitor`. | All monitor work has one landing zone while agents use smaller branches. | ⬜ | See ADR 0003 branch rules. |
 | 4 | **Add interactive mode to the Swift runner.** Give `VZFileHandleSerialPortAttachment` a readable host handle, initially standard input. | Bytes typed in the host terminal can reach the guest serial device. | ⬜ | Input handle is `nil` today (verified in `main.swift` on merged `main`). |
 | 5 | **Tee guest output.** Send output to the terminal **and** `artifacts/vm-serial.log`. | Interact live without sacrificing reproducible evidence. | ⬜ | Runner currently polls the log file (`Data(contentsOf:)`); upgrade to duplex + tee. |
@@ -237,13 +237,18 @@ hours of each other and collided). The rules below make that safe. They are
 
 ### Active claims
 
+> **How to claim:** fill the Owner column and replace the row's `⬜` with
+> `🔄 <branch>` **before** starting work; move it to `✅` (with evidence) or
+> `⛔` (blocked, note why) on completion. Unclaimed (`⬜`) rows are fair
+> game; `🔄`/`✅` rows are not.
+
 | Claim | Owner (branch) | Prompt / plan | Status | Depends on |
 |-------|----------------|---------------|--------|------------|
-| Bad-handoff gate fix (M2 pre-exit return path) | ⬜ open — prompt ready | `docs/m2-bad-handoff-fix-prompt.md` | ⬜ | — |
-| VZ serial/MMU gate run (M1.5 step 8) | ⬜ open — prompt ready | `docs/m2-vz-serial-gate-prompt.md` | ⬜ | bad-handoff fix |
-| M1.5 — host plumbing (agent A) | ⬜ open | M1.5 steps 4–7 | ⬜ | — |
-| M1.5 — console & shell core (agent B) | ⬜ open | M1.5 steps 9–12 | ⬜ | A |
-| M1.5 — commands & personality (agent C) | ⬜ open | M1.5 steps 13–18 | ⬜ | mock console |
+| Bad-handoff gate fix (M2 pre-exit return path) | — | `docs/m2-bad-handoff-fix-prompt.md` | ⬜ | — |
+| VZ serial/MMU gate run (M1.5 step 8) | — | `docs/m2-vz-serial-gate-prompt.md` | ⬜ | bad-handoff fix |
+| M1.5 — host plumbing (agent A) | — | M1.5 steps 4–7 | ⬜ | — |
+| M1.5 — console & shell core (agent B) | — | M1.5 steps 9–12 | ⬜ | A |
+| M1.5 — commands & personality (agent C) | — | M1.5 steps 13–18 | ⬜ | mock console |
 | Status/changelog machinery + PR #10 | buffy (`agent/buffy/m2-kernel-proper`) | this file | ✅ | — |
 
 ## Changelog (append-only)
@@ -267,13 +272,19 @@ Status legend: ⬜ claimed · 🔄 in progress · ✅ done · ⛔ blocked.
   planning-first prompt docs for the immediate gate work
   (`docs/m2-bad-handoff-fix-prompt.md`, `docs/m2-vz-serial-gate-prompt.md`),
   housekeeping (`just verify*` aliases, context-snapshot coverage,
-  `.DS_Store` cleanup), and this changelog machinery. ✅ done — merged into
-  `main`'s M1.5 tracker as part of the conflict resolution below.
+  `.DS_Store` cleanup), and this changelog machinery. ✅ written — on the PR
+  branch awaiting review; reconciled with `main`'s M1.5 tracker in the
+  conflict-resolution entry below.
 - **2026-08-06** — **Conflict resolution:** PR #8's M1.5 tracker and PR
   #10's gate evidence collided on `docs/status.md` + `README.md`. Unified
   this file (M1.5 plan + gate evidence + coordination rules), resolved
   `README.md`, and preserved both sides' roadmap/testing/architecture edits
-  via a clean merge of `origin/main`. ✅ done.
+  via a clean merge of `origin/main` into the PR branch. ✅ done — awaits
+  merge review.
+- **2026-08-06** — **Reconciliation detail:** M1.5 march steps 1 and 2 are
+  marked ✅ — this file *is* the frozen scope document, and the finish line
+  / hard gates are defined above — and the active-claims "how to claim"
+  convention was added so the claim-before-you-start rule is expressible. ✅
 
 ## Immediate gate work (prerequisites for M1.5)
 
