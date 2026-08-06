@@ -83,7 +83,7 @@ dipshitos/
 │   ├── inspect.sh             EFI binary + image inspection (degrades gracefully)
 │   └── context/               project-context generator + review prompt
 ├── docs/                      architecture, branch protection, hardware contract,
-│                              roadmap, testing, decisions (ADRs 0001–0003)
+│                              roadmap, testing, decisions (ADRs 0001–0004)
 └── artifacts/                 build evidence (gitignored)
 ```
 

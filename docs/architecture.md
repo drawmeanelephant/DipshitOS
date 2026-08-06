@@ -1,6 +1,6 @@
 # DipshitOS architecture
 
-## Current state (milestones zero and one)
+## Current state (milestones zero and one implemented; milestone two next)
 
 Milestone zero proved, end to end, that a Zig-compiled AArch64 UEFI
 application can be built, placed on a FAT-formatted boot medium at the
@@ -12,11 +12,21 @@ maintenance, and jumps to the kernel entry (see
 `docs/decisions/0002-kernel-handoff.md`). The project targets Apple silicon
 / Virtualization.framework only; there is no QEMU path.
 
+**Next phase — milestone two, the kernel proper** (designed in
+`docs/decisions/0004-kernel-proper.md`, not yet implemented): the kernel
+calls `ExitBootServices` itself and keeps the machine — it captures the
+EFI memory map before exit, replaces the firmware's page tables with its
+own identity-map tables (TTBR0_EL1, 4K granule), and drives a minimal MMIO
+serial console, printing `DipshitOS kernel has seized control.` directly to
+the device the firmware never used. No firmware services remain in use
+after exit; output moves from `\BOOTED.TXT` (a UEFI protocol) to the
+serial log. See `docs/roadmap.md` for the milestone-two gates.
+
 ## Components
 
 | Component | Where | Role |
 |-----------|-------|------|
-| Guest boot application | `boot/src/main.zig` | AArch64 UEFI application; prints a fixed two-line message via the UEFI Simple Text Output protocol, waits briefly, returns to firmware |
+| Guest boot loader | `boot/src/main.zig` | AArch64 UEFI application; prints via Simple Text Output, loads `\KERNEL.BIN` from the ESP, jumps to the kernel entry, writes host-readable evidence (`\BOOTED.TXT`, `\LOADER.TXT`, `\RC.TXT`) |
 | Boot medium | `image/mkfat32.py` + `image/make-image.sh` | GPT disk with a FAT32 EFI System Partition containing `EFI/BOOT/BOOTAA64.EFI` |
 | macOS host launcher | `host/vm-runner/` (Swift + Virtualization.framework) | Boots the image under UEFI on Apple silicon, captures the guest serial console and framebuffer |
 | Build system | `build.zig`, `build.zig.zon`, `justfile` | Compile, kernel, image, run, inspect, context |
@@ -33,15 +43,21 @@ image/make-image.sh ──mkfat32.py──▶  artifacts/disk.img        (GPT + 
 VZEFIBootLoader (macOS VZ)
    └─ UEFI firmware boots EFI/BOOT/BOOTAA64.EFI
         │
-        └── ConOut ──▶ virtio console ──▶ artifacts/vm-serial.log
-        └── loader loads \\KERNEL.BIN ──▶ jumps to kernel entry ──▶ RC.TXT
+        └── ConOut ──▶ virtio console ──▶ artifacts/vm-serial.log  (empty: firmware doesn't route ConOut here)
+        └── loader loads \\KERNEL.BIN ──▶ kernel entry
+             │  milestone two: ExitBootServices, identity-map MMU
+             └── uart MMIO ──▶ virtio console ──▶ artifacts/vm-serial.log  (planned: first real content)
+             └── milestone one: kernel returns ──▶ RC.TXT
 ```
 
 ## Interfaces
 
-- **Guest ↔ firmware:** the UEFI System Table only. Milestone zero calls
+- **Guest ↔ firmware:** the UEFI System Table only, and only until
+  milestone two's `ExitBootServices`. Milestone zero calls
   `SimpleTextOutput.OutputString` (`ConOut`) and then returns, which is the
-  UEFI-defined way to give control back to firmware.
+  UEFI-defined way to give control back to firmware. In milestone two the
+  kernel calls `ExitBootServices` itself (per ADR 0004) and no UEFI
+  protocol is usable afterwards.
 - **Guest ↔ host storage:** the disk is presented as a virtio block device.
   The guest never touches the storage device directly in milestones zero
   and one; the firmware reads `EFI/BOOT/BOOTAA64.EFI` from it, and both the
@@ -50,18 +66,26 @@ VZEFIBootLoader (macOS VZ)
 - **Guest → host console:** a virtio console serial port. Observed on Apple
   silicon: the VZ firmware does not route `ConOut` there (empty log) and
   renders no text to the virtio-gpu framebuffer (blank captures).
+  Milestone two plans to drive that device directly from the kernel via
+  MMIO (the `uart` console driver, ADR 0004 D4) so the log gets its first
+  real content; the device's register layout is `[inferred]` until a probe
+  observes it (see `docs/hardware-contract.md`).
 - **Guest → host evidence:** because the VZ firmware exposes no visible
   text channel, the guest also writes its two lines to `\BOOTED.TXT` on the
   ESP via the UEFI Simple File System protocol. The host reads that file
   back with `image/mkfat32.py --cat-file`; this is the observed proof of
   execution on Apple silicon (see `docs/testing.md`).
 
-## Non-goals (explicit exclusions for this milestone)
+## Non-goals (explicit exclusions for the current phase)
 
-- Kernel, ELF loader, memory management, scheduler, processes, filesystems,
-  graphics, networking, SMP, syscalls.
+Milestone two ships the kernel proper but still excludes: an allocator
+beyond fixed carve-outs, an ELF loader, memory management beyond the
+identity map, interrupts/GIC, timers, a scheduler, processes, filesystems,
+graphics, networking, SMP, syscalls.
+
 - libc or POSIX in guest code. The guest is freestanding Zig for
-  `aarch64-uefi`; it links nothing and touches no hardware directly.
+  `aarch64-uefi`; the boot app links nothing, and the kernel's only direct
+  hardware touch in milestone two is the MMU and the serial device.
 
 ## Observed vs inferred
 
