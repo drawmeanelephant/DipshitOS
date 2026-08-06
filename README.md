@@ -20,6 +20,13 @@ shifted slices of the kernel image's `.rodata` on Apple VZ firmware) is
 0002), and `\KERNEL.TXT` is byte-perfect and gated by `zig build run`
 alongside `\BOOTED.TXT`, `\LOADER.TXT`, and `\RC.TXT`.
 
+**Next target: milestone 1.5, the interactive kernel monitor** — a live
+command monitor (`dipshit>` prompt) served by the kernel's polled serial
+console (the milestone-two terminal loop becomes its payload): identity
+commands, memory-map inspection, shell utilities, and machine controls.
+The goal, twenty-step plan, hard gates, and per-step progress live in
+**`docs/status.md`** (the living status & goals tracker).
+
 ## The guest
 
 `boot/src/main.zig` is an AArch64 UEFI application — now a tiny boot
@@ -84,7 +91,8 @@ dipshitos/
 │   ├── inspect.sh             EFI binary + image inspection (degrades gracefully)
 │   └── context/               project-context generator + review prompt
 ├── docs/                      architecture, branch protection, hardware contract,
-│                              roadmap, testing, decisions (ADRs 0001–0004)
+│                              roadmap, testing, decisions (ADRs 0001–0004),
+│                              status.md (living status & goals tracker)
 └── artifacts/                 build evidence (gitignored)
 ```
 
@@ -130,10 +138,17 @@ All command output and logs are saved under `artifacts/` (`inspect.txt`,
   UEFI removable-media rule (consistent with the observed marker write, but
   the firmware's internal behavior is not directly observable).
 
-## Next steps (see `docs/roadmap.md`)
+## Next steps (see `docs/roadmap.md` and `docs/status.md`)
 
-1. Resolve the VZ serial/MMIO discovery and run the complete Apple M4 / macOS 27 VZ gate, saving output under
-   `artifacts/`. Only then may the matching MMIO/MMU assumptions be changed
-   from `[inferred]` to `[observed]` in `docs/hardware-contract.md`.
-2. Keep later interrupt/GIC, timer, allocator, and process work out of this
-   milestone; those remain future milestones.
+1. **Milestone 1.5, the interactive kernel monitor**: the kernel console is
+   polled TX-only (ADR 0004, no RX path) and the VM runner's serial
+   attachment has no host-to-guest input handle (`fileHandleForReading:
+   nil`) — close the RX gap, then build the console abstraction, line
+   editor, command registry, and commands. Tracked step-by-step in
+   `docs/status.md`.
+2. Resolve the milestone-two VZ serial/MMIO discovery gate: run the complete
+   Apple M4 / macOS 27 VZ gate and save output under `artifacts/`. Only
+   then may the matching MMIO/MMU assumptions change from `[inferred]` to
+   `[observed]` in `docs/hardware-contract.md`.
+3. Keep later interrupt/GIC, timer, allocator, and process work out of
+   scope; those remain future milestones.
