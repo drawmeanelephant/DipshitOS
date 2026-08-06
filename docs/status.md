@@ -155,13 +155,13 @@ Legend: ⬜ not started · 🔄 in progress · ✅ done · ⛔ blocked (note why
 | 9 | **Build a console abstraction.** `write`, `putc`, `flush` on top of the M2 `uart` module; `readByte` is the RX gap to close (step 4 host side + a guest RX path). | Kernel code stops caring which MMIO candidate carries the bytes. | ⬜ | ConOut fallback is dead post-exit; primary = MMIO uart. |
 | 10 | **Make input bounded and boring.** Fixed 256-byte line buffer; CR/LF, backspace, Ctrl-C, overflow rejection. | Editable command lines without an allocator. | ⬜ | |
 | 11 | **Implement tokenization.** Fixed argument count, whitespace handling, optional quoted strings. | `echo "elephant business"` works without heap allocation. | ⬜ | |
-| 12 | **Create a command registry.** Name, help text, function pointer per command; `help` generated from the registry. | Adding commands is mechanical. | ⬜ | |
-| 13 | **Add identity commands.** `help`, `about`, `version`, `uname`, `handoff`. | The system explains what it is, how it booted, and which ABI it received (handoff **v2** struct — x3 is no longer the ESP root). | ⬜ | |
-| 14 | **Add memory inspection.** `mem` from the EFI map the kernel captured **before** `ExitBootServices`: total conventional RAM, reserved regions, descriptor count, kernel bounds. | CLI reports actual machine state. | ⬜ | 256 MiB configured in the runner; banner claims "256 MiB detected". No `GetMemoryMap` post-exit — use the captured map. |
-| 15 | **Add filesystem commands.** Root-only `ls`, `cat`, `write`, `touch` on the ESP. | Decision point: the ESP root died with Boot Services (x3 carries handoff v2). Either a **pre-exit file window** (kernel reads/writes evidence files before exit and the monitor reports them) or defer fs commands to a real storage driver milestone. | ⬜ | Hard gate 5 depends on this decision. Until then the monitor's fs commands are output-only (report the captured files). |
-| 16 | **Add basic shell utilities.** `echo`, `clear`, `hex`, `repeat`. | The monitor feels like a tiny environment. | ⬜ | |
-| 17 | **Add machine controls.** `reboot`, `shutdown`, `halt` via the Runtime Services table captured pre-exit (`ResetSystem` survives ExitBootServices) or a documented fallback (WFE loop / VM teardown). | The session can end intentionally. | ⬜ | |
-| 18 | **Install the sacred nonsense.** `elephant`, a rotating boot message, and one deeply stupid command (`beans`). | DipshitOS has an identity. 🐘 | ⬜ | |
+| 12 | **Create a command registry.** Name, help text, function pointer per command; `help` generated from the registry. | Adding commands is mechanical. | ✅ | Comptime `registry` in `kernel/src/monitor.zig` (14 commands: name/help/usage/min+max args/handler); `lookup` + `exec(argv)`; `help` derives its listing from the registry (host-tested, `artifacts/m15-commands-tests.txt`). |
+| 13 | **Add identity commands.** `help`, `about`, `version`, `uname`, `handoff`. | The system explains what it is, how it booted, and which ABI it received (handoff **v2** struct — x3 is no longer the ESP root). | ✅ | All five implemented + exact-output tests. `version` prints build info, **no invented release number** ("DIPSHITOS 0.1" exists only in the DoD screen sketch); `handoff` prints validated v2 fields (magic/version/base/size/system table/image handle/stack bounds/flags) + validity. |
+| 14 | **Add memory inspection.** `mem` from the EFI map the kernel captured **before** `ExitBootServices`: total conventional RAM, reserved regions, descriptor count, kernel bounds. | CLI reports actual machine state. | ✅ | `mem` summarizes the captured map view (`kernel/src/memmap.zig`): descriptor count/size/version/key, usable/conventional/loader/boot/runtime/reserved/mmio bytes+pages, kernel bounds from handoff. Derived from the map — **no hardcoded "256 MiB"** (the banner omits it; DoD screen's claim stays unclaimed). |
+| 15 | **Add filesystem commands.** Root-only `ls`, `cat`, `write`, `touch` on the ESP. | Decision point: the ESP root died with Boot Services (x3 carries handoff v2). Either a **pre-exit file window** (kernel reads/writes evidence files before exit and the monitor reports them) or defer fs commands to a real storage driver milestone. | ✅ decision | **Decision recorded (2026-08-06): defer fs commands to a storage-driver milestone.** No ESP access post-exit; hard gate 5 stays open. No `ls`/`cat`/`write`/`touch` in this stream. |
+| 16 | **Add basic shell utilities.** `echo`, `clear`, `hex`, `repeat`. | The monitor feels like a tiny environment. | ✅ | All four implemented + tested. `clear` emits documented `ESC[2J ESC[H`; `hex` parses decimal/0x-hex with explicit invalid-input errors; `repeat` bounded (count 1..64, output ≤ 4096 B). |
+| 17 | **Add machine controls.** `reboot`, `shutdown`, `halt` via the Runtime Services table captured pre-exit (`ResetSystem` survives ExitBootServices) or a documented fallback (WFE loop / VM teardown). | The session can end intentionally. | ✅ (commands) | `reboot`/`shutdown` implemented behind a `MachineControl` interface (mockable in host tests). The default honestly reports **not implemented** — no post-ExitBootServices mechanism is proven, so no fake "powered off". Hard gate 6 (real VM reboot) stays open. |
+| 18 | **Install the sacred nonsense.** `elephant`, a rotating boot message, and one deeply stupid command (`beans`). | DipshitOS has an identity. 🐘 | ✅ | `elephant` (fixed art + diagnostics: trunk/ears/console/handoff/memory), `beans` (bounded, deterministic), a stateless boot-message pool + `banner()` for the shell stream. All host-tested. |
 | 19 | **Automate the transcript test.** Feed `help`, `version`, `mem`, `echo test`; assert exact output in `vm-serial.log`. | `zig build test-console` proves prompt + commands without manual typing. | ⬜ | Gate on bytes the kernel actually sent, not on file evidence. |
 | 20 | **Close the milestone honestly.** Update README, roadmap, architecture, testing docs; regenerate the deterministic context snapshot; tag only after all gates pass. | Repo says "interactive firmware-assisted kernel monitor", not "complete OS". | ⬜ | |
 
@@ -260,7 +260,7 @@ hours of each other and collided). The rules below make that safe. They are
 | VZ serial/MMU gate run (M1.5 step 8) | — | `docs/m2-vz-serial-gate-prompt.md` | ⬜ | bad-handoff fix |
 | M1.5 — host plumbing (agent A) | — | M1.5 steps 4–7 (`docs/m15-host-plumbing-prompt.md`) | ⬜ | — |
 | M1.5 — console & shell core (agent B) | — | M1.5 steps 9–12 | ⬜ | A |
-| M1.5 — commands & personality (agent C) | — | M1.5 steps 13–18 (`docs/m15-commands-prompt.md`) | ⬜ | mock console |
+| M1.5 — commands & personality (agent C) | buffy (`agent/buffy/m15-commands`) | M1.5 steps 12–18 (`docs/m15-commands-prompt.md`) | ✅ 2026-08-06 — 14 commands host-tested, `kernel/src/main.zig` untouched (`artifacts/m15-commands-*.txt`) | mock console |
 | Status/changelog machinery + PR #10 | buffy (`agent/buffy/m2-kernel-proper`) | this file | ✅ | — |
 
 ## Changelog (append-only)
@@ -329,6 +329,30 @@ Status legend: ⬜ claimed · 🔄 in progress · ✅ done · ⛔ blocked.
   Both are unclaimed and ready to run in parallel with the VZ serial gate
   (`docs/m2-vz-serial-gate-prompt.md`). ✅ written — no implementation
   started.
+- **2026-08-06** — **Claim (buffy, `agent/buffy/m15-commands`):** claimed
+  the M1.5 commands & personality row (steps 12–18). Per the C-prompt
+  process gate: design written first (`docs/m15-commands-design.md`), all
+  code in new `kernel/src/*.zig` modules (`console.zig`, `monitor.zig`,
+  `handoff.zig`, `memmap.zig`) with host-side `zig test` coverage against a
+  mock console; `kernel/src/main.zig` untouched. 🔄 in progress — no code
+  written yet.
+- **2026-08-06** — **M1.5 commands & personality slice done (buffy,
+  `agent/buffy/m15-commands`):** implemented and host-tested the monitor
+  command layer in four new kernel modules: `console.zig` (transport-agnostic
+  `Console` interface + bounded `MockConsole`), `handoff.zig` (handoff-v2
+  struct + validation, ADR 0004 D5), `memmap.zig` (captured-map view +
+  saturating summary), `monitor.zig` (comptime registry, `lookup`/`exec`,
+  `MachineControl` interface + honest `disabled()` default, all 14 commands:
+  help/about/version/uname/handoff/mem/echo/clear/hex/repeat/reboot/shutdown/
+  elephant/beans, boot-message pool + banner). Design in
+  `docs/m15-commands-design.md`. **Observed:** `zig fmt --check` pass,
+  `zig build`/`zig build image`/`zig build inspect` pass (no regression),
+  `zig test` 53/53 pass on the host (console 7, handoff 3, memmap 5, monitor
+  38) — no VZ, no serial device; evidence `artifacts/m15-commands-{fmt,build,
+  image,inspect,tests}.txt`. Step-15 fs decision recorded (defer to storage
+  milestone; hard gates 5/6 stay open). `kernel/src/main.zig` has zero diff
+  (gate 3). ✅ — on branch awaiting merge through the
+  `m1.5-interactive-monitor` integration branch.
 
 ## Immediate gate work (prerequisites for M1.5)
 
