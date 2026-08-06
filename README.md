@@ -94,9 +94,11 @@ dipshitos/
 │   ├── inspect.sh             EFI binary + image inspection (degrades gracefully)
 │   ├── context/               project-context generator + review prompt
 │   └── ragshit/               local Git-aware context engine (Python, stdlib only)
-├── docs/                      status.md (canonical living status & changelog),
-│                              architecture, branch protection, hardware contract,
-│                              roadmap, testing, decisions (ADRs 0001–0004)
+├── docs/                      status.md (canonical living status & coordination
+│                              hub), claims/ (per-claim files), logs/ (per-branch
+│                              append-only changelogs), architecture, branch
+│                              protection, hardware contract, roadmap, testing,
+│                              decisions (ADRs 0001–0004)
 └── artifacts/                 build evidence (gitignored)
 ```
 

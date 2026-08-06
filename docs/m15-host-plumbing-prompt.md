@@ -4,8 +4,8 @@ Planning-first agent prompt for DipshitOS. Feed this file to the
 implementing agent. It must produce a written plan **before** changing any
 code.
 
-- Branch: `agent/.../m15-host-plumbing` (claim the A row in `docs/status.md`
-  first; merge through the `m1.5-interactive-monitor` integration branch)
+- Branch: `agent/.../m15-host-plumbing` (claim first via a claim file in
+  `docs/claims/` + a log entry in `docs/logs/`; merge per ADR 0003)
 - Date: 2026-08-06
 - Inputs (read first; they are binding): `AGENTS.md`, `docs/status.md`
   (M1.5 march steps 4–7, the "Best agent split" A row, the coordination
@@ -61,8 +61,9 @@ live output **without sacrificing the reproducible evidence log**.
 
 ## Process (hard gate)
 
-1. **Claim before you start.** Fill the A row in the Active claims table
-   (owner/branch, 🔄) and append a changelog entry *before* writing code.
+1. **Claim before you start.** Create `docs/claims/<NNN>-m15-host-plumbing.md`
+   from the TEMPLATE (owner/branch, 🔄) and append a log entry in
+   `docs/logs/agent-...-m15-host-plumbing.md` *before* writing code.
 2. Read the binding inputs; restate in your plan how each step will be
    verified and what the observable evidence is.
 3. Implement.

@@ -80,6 +80,18 @@ section() { printf '\n## %s\n\n' "$1"; }
     section "docs/status.md"
     fence docs/status.md
 
+    section "docs/logs (per-branch changelogs)"
+    for f in docs/logs/*.md; do
+        [ -e "$f" ] || continue
+        fence "$f"
+    done
+
+    section "docs/claims (per-claim files)"
+    for f in docs/claims/*.md; do
+        [ -e "$f" ] || continue
+        fence "$f"
+    done
+
     section "docs/decisions/0001-arm64-uefi-zig.md"
     fence docs/decisions/0001-arm64-uefi-zig.md
 

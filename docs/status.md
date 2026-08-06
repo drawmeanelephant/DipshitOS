@@ -2,9 +2,12 @@
 
 > This file is the project's **living status tracker** and its **multiagent
 > coordination surface**: where we are, what we are trying to build next, how
-> far along each step is, **who currently claims which piece of work**, and an
-> append-only changelog of what changed and when. Update it as work lands —
-> flip the checkboxes, fill in the notes, and **append** to the changelog.
+> far along each step is, **who currently claims which piece of work**, and
+> pointers to the append-only per-branch changelog. Claims and logs are
+> sharded (see [Multiagent coordination](#multiagent-coordination)) so
+> parallel agents never collide on one file. Update it as work lands —
+> flip the checkboxes, fill in the notes, and **append** to your branch's
+> log under `docs/logs/`.
 > Claims stay honest per `AGENTS.md`: **observed** (log evidence under
 > `artifacts/`) versus **inferred** (reasoning/docs only).
 
@@ -16,7 +19,8 @@
 > was refreshed accordingly — the plan's shape is kept, its factual anchors
 > are reconciled with the merged state. PR #10 later unified this tracker
 > with the milestone-two gate evidence and added the multiagent changelog
-> (see the [Changelog](#changelog-append-only)).
+> (now sharded per branch under [docs/logs/](logs/README.md); see the
+> [Changelog](#changelog-append-only-per-branch)).
 
 ## Current position
 
@@ -149,7 +153,7 @@ Legend: ⬜ not started · 🔄 in progress · ✅ done · ⛔ blocked (note why
 |---:|------|-------------------|--------|------------------|
 | 1 | **Freeze the target.** Name it Milestone 1.5: Interactive Kernel Monitor. Keep the milestone-two kernel exactly as merged (no new firmware work). | Scope document says exactly what counts as done and what is deferred. | ✅ | This file is the scope/status doc (frozen 2026-08-06; see changelog). |
 | 2 | **Define the finish line.** Boot into a terminal, display a banner, accept commands at `dipshit>`, execute ≥ 10 useful commands. | Written acceptance checklist (above) prevents agents from wandering into scheduler astrology. | ✅ | Hard gates listed above; fs gate flagged for re-scope (frozen 2026-08-06; see changelog). |
-| 3 | **Create a dedicated integration branch.** e.g. `m1.5-interactive-monitor`. | All monitor work has one landing zone while agents use smaller branches. | ⬜ | See ADR 0003 branch rules. |
+| 3 | **Create a dedicated integration branch.** e.g. `m1.5-interactive-monitor`. | All monitor work has one landing zone while agents use smaller branches. | ⬜ | Not created as of 2026-08-06; streams A and C targeted `main` directly per ADR 0003 / branch protection (PRs #12/#13). Revisit if parallel kernel-wiring streams collide. |
 | 4 | **Add interactive mode to the Swift runner.** Give `VZFileHandleSerialPortAttachment` a readable host handle, initially standard input. | Bytes typed in the host terminal can reach the guest serial device. | ✅ | `--console` wires a stdin pipe as `fileHandleForReading` (non-nil); `--debug-input` proves bytes are handed to the attachment (`artifacts/m15-host-console-gate.txt`). Guest receipt is **not** claimed — RX is agent B. |
 | 5 | **Tee guest output.** Send output to the terminal **and** `artifacts/vm-serial.log`. | Interact live without sacrificing reproducible evidence. | ✅ | Console mode streams guest output via a pipe tee to terminal + log (no full-log reloads). Evidence path (`zig build run`) keeps file-polling, unchanged. |
 | 6 | **Handle terminal state safely.** Raw/character-mode input; restore the terminal on exit and signals. | Backspace, Enter, Ctrl-C behave predictably. | ✅ | termios character mode (ICANON/ECHO off, ISIG on) restored via atexit + dispatch signal sources (^C/SIGTERM/SIGHUP) + failure path; PTY gate observed exit 130 with termios back to ICANON+ECHO. Backspace/Enter/Ctrl-C documented honestly (raw passthrough; ^C ends the host session). |
@@ -178,8 +182,8 @@ Legend: ⬜ not started · 🔄 in progress · ✅ done · ⛔ blocked (note why
 
 Merge through the integration branch — do not let three agents redecorate
 `kernel/src/main.zig` with chainsaws at once. **Before starting, claim your
-slot in [Multiagent coordination](#multiagent-coordination) and append a
-changelog entry.**
+slot via a claim file in [Multiagent coordination](#multiagent-coordination)
+and append a log entry under `docs/logs/`.**
 
 ## What comes immediately afterward
 
@@ -232,23 +236,26 @@ change.
 
 This repo is developed by multiple agents and humans, sometimes on the same
 day (e.g. PR #8's M1.5 tracker and PR #10's gate evidence landed within
-hours of each other and collided). The rules below make that safe. They are
-**binding** (mirrored in `AGENTS.md`).
+hours of each other and collided; PR #12/#13 collided again on the same
+changelog section). The rules below make that safe. They are **binding**
+(mirrored in `AGENTS.md`).
 
 ### Rules
 
-1. **Claim before you start.** Any non-trivial work gets a row in the
-   [active claims](#active-claims) table and a changelog entry *before* code
-   is written. Unclaimed rows are fair game; claimed rows are not.
+1. **Claim before you start.** Any non-trivial work gets a claim file in
+   [`docs/claims/`](claims/README.md) and a log entry in
+   [`docs/logs/`](logs/README.md) *before* code is written. Unclaimed work
+   is fair game; claimed work is not.
 2. **One editor per file at a time.** If two agents need the same file, the
    second waits, or merges through the integration branch — never both edit
    `kernel/src/main.zig` (or this file's tracked sections) simultaneously.
-3. **Append-only changelog.** The [Changelog](#changelog-append-only) is
-   append-only: never rewrite or delete an entry. Corrections are *new*
+3. **Append-only logs, one per branch.** The changelog is split by branch
+   under `docs/logs/<branch>.md` so parallel appends cannot collide.
+   Append-only: never rewrite or delete an entry. Corrections are *new*
    entries that reference the old one.
-4. **Update on completion (and on blockers).** Flip your claim's status and
-   append an entry when done; append one when blocked so the next agent
-   doesn't repeat the attempt.
+4. **Update on completion (and on blockers).** Flip your claim file's
+   status and append a log entry when done; append one when blocked so the
+   next agent doesn't repeat the attempt.
 5. **Own your evidence.** Every entry cites `artifacts/` files. No
    observed claim without a saved log.
 6. **Doc edits go through this file.** Status prose lives here; other docs
@@ -257,146 +264,49 @@ hours of each other and collided). The rules below make that safe. They are
 
 ### Active claims
 
-> **How to claim:** fill the Owner column and replace the row's `⬜` with
-> `🔄 <branch>` **before** starting work; move it to `✅` (with evidence) or
-> `⛔` (blocked, note why) on completion. Unclaimed (`⬜`) rows are fair
-> game; `🔄`/`✅` rows are not.
+> **How to claim:** copy `docs/claims/TEMPLATE.md` to
+> `docs/claims/<NNN>-<slug>.md`, fill it in, set Status to `🔄 <branch>`
+> **before** starting work, and add a link row below. Flip your claim
+> file to `✅` (evidence) or `⛔` (note why) on completion. Unclaimed
+> (`⬜`) claims are fair game; `🔄`/`✅` claims are not. The table below is
+> an index; the claim files in `docs/claims/` are the source of truth.
 
-| Claim | Owner (branch) | Prompt / plan | Status | Depends on |
-|-------|----------------|---------------|--------|------------|
-| Bad-handoff gate fix (M2 pre-exit return path) | buffy (`agent/buffy/m2-badhandoff-fix`) | `docs/m2-bad-handoff-fix-prompt.md` | ✅ fixed 2026-08-06 — `RC.TXT` → `kernel_rc=0x2`, gate exits 0 (`artifacts/m2-badhandoff-fix-after.txt`) | — |
-| VZ serial/MMU gate run (M1.5 step 8) | — | `docs/m2-vz-serial-gate-prompt.md` | ⬜ | bad-handoff fix |
-| M1.5 — host plumbing (agent A) | buffy (`agent/buffy/m15-host-plumbing`) | M1.5 steps 4–7 (`docs/m15-host-plumbing-prompt.md`) | ✅ 2026-08-06 — steps 4–7 landed, evidence under `artifacts/m15-host-*.txt` | — |
-| M1.5 — console & shell core (agent B) | — | M1.5 steps 9–12 | ⬜ | A |
-| M1.5 — commands & personality (agent C) | buffy (`agent/buffy/m15-commands`) | M1.5 steps 12–18 (`docs/m15-commands-prompt.md`) | ✅ 2026-08-06 — 14 commands host-tested, `kernel/src/main.zig` untouched (`artifacts/m15-commands-*.txt`) | mock console |
-| Status/changelog machinery + PR #10 | buffy (`agent/buffy/m2-kernel-proper`) | this file | ✅ | — |
+| Claim | Owner (branch) | Status |
+|-------|----------------|--------|
+| [Bad-handoff gate fix](claims/0001-bad-handoff-gate.md) | buffy (`agent/buffy/m2-badhandoff-fix`) | ✅ fixed 2026-08-06 — `RC.TXT` → `kernel_rc=0x2`, gate exits 0 (`artifacts/m2-badhandoff-fix-after.txt`) |
+| [VZ serial/MMU gate run](claims/0002-vz-serial-gate.md) | — | ⬜ |
+| [M1.5 — host plumbing (agent A)](claims/0003-m15-host-plumbing.md) | buffy (`agent/buffy/m15-host-plumbing`) | ✅ 2026-08-06 — steps 4–7 landed, evidence under `artifacts/m15-host-*.txt` |
+| [M1.5 — console & shell core (agent B)](claims/0004-m15-console-shell-core.md) | — | ⬜ |
+| [M1.5 — commands & personality (agent C)](claims/0005-m15-commands-personality.md) | buffy (`agent/buffy/m15-commands`) | ✅ 2026-08-06 — 14 commands host-tested, `kernel/src/main.zig` untouched (`artifacts/m15-commands-*.txt`) |
+| [Status/changelog machinery + PR #10](claims/0006-status-machinery.md) | buffy (`agent/buffy/m2-kernel-proper`) | ✅ |
 
-## Changelog (append-only)
+## Changelog (append-only, per branch)
+
+> **Moved 2026-08-06:** the changelog used to live in this file; every
+> agent appended here and parallel work collided (PR #8/#10, then
+> PR #12/#13). It is now **sharded by branch** under `docs/logs/` — each
+> branch owns its own append-only log, so cross-branch merges never touch
+> the same lines. The historical entries were moved verbatim; see the
+> [log index](logs/README.md).
 
 Format: `- **YYYY-MM-DD** — *owner (branch)*: claim → what changed → evidence → status`.
 Status legend: ⬜ claimed · 🔄 in progress · ✅ done · ⛔ blocked.
 
-- **2026-08-06** — Milestone 1.5 scope frozen and this living tracker
-  created from the "Dipshit Monitor" plan (premises: milestone-one-era
-  kernel on Boot Services). All gates open. *(entry preserved from the
-  M1.5 tracker)*
-- **2026-08-06** — **Refresh:** PRs #6/#7 merged the milestone-two kernel
-  proper (ADR 0004). Reconciled premises: post-exit kernel, polled TX-only
-  MMIO console, no ESP root, no `GetMemoryMap`; ADR 0004 now exists;
-  `KERNEL.TXT` corruption resolved. Fs commands (step 15 / gate 5) flagged
-  as a decision point. No implementation steps started. *(entry preserved
-  from the M1.5 tracker)*
-- **2026-08-06** — **PR #10** (buffy, `agent/buffy/m2-kernel-proper): added
-  the gate-status evidence table (build gates green; VZ serial gate unpassed;
-  bad-handoff gate re-verified failing with no `RC.TXT`), the two
-  planning-first prompt docs for the immediate gate work
-  (`docs/m2-bad-handoff-fix-prompt.md`, `docs/m2-vz-serial-gate-prompt.md`),
-  housekeeping (`just verify*` aliases, context-snapshot coverage,
-  `.DS_Store` cleanup), and this changelog machinery. ✅ written — on the PR
-  branch awaiting review; reconciled with `main`'s M1.5 tracker in the
-  conflict-resolution entry below.
-- **2026-08-06** — **Conflict resolution:** PR #8's M1.5 tracker and PR
-  #10's gate evidence collided on `docs/status.md` + `README.md`. Unified
-  this file (M1.5 plan + gate evidence + coordination rules), resolved
-  `README.md`, and preserved both sides' roadmap/testing/architecture edits
-  via a clean merge of `origin/main` into the PR branch. ✅ done — awaits
-  merge review.
-- **2026-08-06** — **Reconciliation detail:** M1.5 march steps 1 and 2 are
-  marked ✅ — this file *is* the frozen scope document, and the finish line
-  / hard gates are defined above — and the active-claims "how to claim"
-  convention was added so the claim-before-you-start rule is expressible. ✅
-- **2026-08-06** — **Claim (buffy, `agent/buffy/m2-badhandoff-fix`):** claimed
-  the bad-handoff gate fix. Disassembled the current kernel ELF
-  (`.zig-cache/o/300f11f…/dipshit-kernel`): the naked `_start` shim sits at
-  VMA 0 (matches `LOADER.TXT` `ram_first8`); its `bl kernel_main` at `0x30`
-  clobbers LR to `0x34`, so the shim's final `ret` loops `0x34→0x38→0x34`
-  instead of returning to the loader — the kernel can never reach the
-  pre-exit `return bad_handoff` handoff, so `RC.TXT` is never written. Fix:
-  save the loader's LR in a callee-saved register (x20, preserved by
-  `kernel_main` under AAPCS64) before the `bl`, restore it before `ret`. 🔄
-  in progress — before/after gate evidence to follow.
-- **2026-08-06** — **Bad-handoff gate fixed (buffy,
-  `agent/buffy/m2-badhandoff-fix`):** root cause confirmed as the naked
-  `_start` shim clobbering LR (above). Implemented the two-instruction fix
-  in `kernel/src/main.zig`; disassembly now shows `mov x20, x30` at shim
-  offset `0x14` and `mov x30, x20` at `0x3c` around `bl kernel_main`.
-  **Observed:** `verify-bad-handoff.sh` exits 0 and `RC.TXT` =
-  `kernel_rc=0x0000000000000002` (`artifacts/m2-badhandoff-fix-after.txt`);
-  all build gates green (`m2-badhandoff-fix-gates.txt`); good path
-  unregressed — `zig build run` reaches the same state as before (loader
-  evidence present, `vm-serial.log` empty, kernel never returns,
-  `m2-badhandoff-fix-goodpath.txt`). The VZ serial gate remains a separate
-  open question. ✅
-- **2026-08-06** — **Parallel-agent prompt docs (buffy,
-  `agent/buffy/m2-badhandoff-fix`):** added
-  `docs/m15-host-plumbing-prompt.md` (agent A, M1.5 steps 4–7: duplex
-  serial attachment, live teeing, terminal safety, `zig build console`) and
-  `docs/m15-commands-prompt.md` (agent C, M1.5 steps 12–18: registry,
-  identity/memory/utility/control commands, personality — mock-console
-  based, new kernel files only). Links added to the Active claims table.
-  Both are unclaimed and ready to run in parallel with the VZ serial gate
-  (`docs/m2-vz-serial-gate-prompt.md`). ✅ written — no implementation
-  started.
-- **2026-08-06** — **Claim (buffy, `agent/buffy/m15-commands`):** claimed
-  the M1.5 commands & personality row (steps 12–18). Per the C-prompt
-  process gate: design written first (`docs/m15-commands-design.md`), all
-  code in new `kernel/src/*.zig` modules (`console.zig`, `monitor.zig`,
-  `handoff.zig`, `memmap.zig`) with host-side `zig test` coverage against a
-  mock console; `kernel/src/main.zig` untouched. 🔄 in progress — no code
-  written yet.
-- **2026-08-06** — **M1.5 commands & personality slice done (buffy,
-  `agent/buffy/m15-commands`):** implemented and host-tested the monitor
-  command layer in four new kernel modules: `console.zig` (transport-agnostic
-  `Console` interface + bounded `MockConsole`), `handoff.zig` (handoff-v2
-  struct + validation, ADR 0004 D5), `memmap.zig` (captured-map view +
-  saturating summary), `monitor.zig` (comptime registry, `lookup`/`exec`,
-  `MachineControl` interface + honest `disabled()` default, all 14 commands:
-  help/about/version/uname/handoff/mem/echo/clear/hex/repeat/reboot/shutdown/
-  elephant/beans, boot-message pool + banner). Design in
-  `docs/m15-commands-design.md`. **Observed:** `zig fmt --check` pass,
-  `zig build`/`zig build image`/`zig build inspect` pass (no regression),
-  `zig test` 53/53 pass on the host (console 7, handoff 3, memmap 5, monitor
-  38) — no VZ, no serial device; evidence `artifacts/m15-commands-{fmt,build,
-  image,inspect,tests}.txt`. Step-15 fs decision recorded (defer to storage
-  milestone; hard gates 5/6 stay open). `kernel/src/main.zig` has zero diff
-  (gate 3). ✅ — on branch awaiting merge through the
-  `m1.5-interactive-monitor` integration branch.
-- **2026-08-06** — **Claim (buffy, `agent/buffy/m15-host-plumbing`):**
-  claimed the M1.5 host-plumbing row (agent A, steps 4–7) per AGENTS.md.
-  Branch created from updated `main` (post bad-handoff fix, `05ee69d`).
-  Plan: `--console` mode in `host/vm-runner/Sources/VMRunner/main.swift`
-  (duplex attachment with stdin input handle, streaming tee of guest output
-  to terminal + `vm-serial.log`, termios raw/character input with restore on
-  exit/signals), `zig build console` + `just console`, honest diagnostics.
-  No kernel files touched; `zig build run` evidence semantics unchanged.
-  🔄 in progress — implementation and gates to follow.
-- **2026-08-06** — **M1.5 host plumbing landed (buffy,
-  `agent/buffy/m15-host-plumbing`):** steps 4–7 done, host-side only; no
-  kernel files touched. `host/vm-runner/Sources/VMRunner/main.swift` gained
-  `--console` (duplex `VZFileHandleSerialPortAttachment` with a stdin pipe
-  as `fileHandleForReading`, streaming tee of guest output to the terminal +
-  `vm-serial.log`, termios character mode restored on exit/^C/SIGTERM/
-  SIGHUP/failure via atexit + dispatch signal sources, `--debug-input` byte
-  evidence on stderr, honest diagnostics); `build.zig` gained
-  `zig build console`; `justfile` gained `console` and `verify-host-console`;
-  new gate `tools/verify-host-console.sh`. **Observed:** scripted piped run
-  forwarded `hello\r` to the serial attachment as `68 65 6c 6c 6f 0d` and
-  ended cleanly by timeout; PTY run caught SIGINT and exited 130 with the
-  pty termios restored to ICANON+ECHO; `zig build console` booted with full
-  diagnostics and restored the terminal on SIGTERM; `zig build run`
-  unchanged (serial gate still blocked, `vm-serial.log` 0 bytes). Host
-  **input plumbing observed**; guest RX and the interactive monitor prompt
-  remain **unobserved** (guest RX is agent B's slice; the VZ serial gate is
-  still blocked). Evidence: `artifacts/m15-host-*.txt`. ✅
-- **2026-08-06** — **CI unit-test gate (buffy, `agent/buffy/m15-host-plumbing`):**
-  CI now format-checks `boot/src/*.zig kernel/src/*.zig build.zig` and runs
-  the M1.5 kernel monitor module unit tests via
-  `tools/verify-unit-tests.sh` — `zig test` on each module present in
-  `kernel/src/` (console/handoff/memmap/monitor). Modules that have not
-  landed yet (agent C's commands slice) are skipped with a notice so `main`
-  stays green; once each module merges, its tests become binding
-  branch-protection evidence instead of local-only claims. `just test`
-  added; `just verify` and `docs/testing.md` updated to match. ✅
+- **2026-08-06** — **Status system sharded for multiagent safety (buffy,
+  `agent/buffy/m15-commands`):** the append-only changelog moved out of
+  this file into per-branch logs under `docs/logs/` (historical entries
+  migrated verbatim), and claims moved into per-claim files under
+  `docs/claims/` (TEMPLATE + index). `docs/status.md` now holds only
+  milestone-level facts (position, gates, march) plus pointers to the
+  shards. Rationale: PR #12 and PR #13 both appended to this file's
+  changelog and collided; sharding makes parallel appends conflict-free.
+  ✅ — see `docs/logs/README.md` and `docs/claims/README.md`.
+- **2026-08-06** — **PR #12 rebased onto current `main` (buffy,
+  `agent/buffy/m15-commands`):** merged `origin/main` (PR #13 host
+  plumbing + CI unit-test gate) into this branch and resolved the
+  `docs/status.md` changelog collision by preserving both sides' entries
+  (append-only). The commands & personality slice is now mergeable against
+  `main`. ✅ — on branch awaiting merge.
 
 ## Immediate gate work (prerequisites for M1.5)
 
@@ -414,8 +324,8 @@ Ordered; each has a prompt doc and a gate:
    looped on itself and the kernel never returned. Fixed with two
    instructions (`mov x20, x30` before the `bl`, `mov x30, x20` before `ret`).
    Evidence: `artifacts/m2-badhandoff-fix-{before,after}.txt`, disassembly in
-   the [changelog](#changelog-append-only). The serial gate (item 2) no
-   longer shares this suspect.
+   the [changelog](#changelog-append-only-per-branch) (see `docs/logs/`).
+   The serial gate (item 2) no longer shares this suspect.
 2. **Run the VZ serial/MMU gate** — `docs/m2-vz-serial-gate-prompt.md`
    (M1.5 step 8's "confirm the serial console"). **Gate:** exact banner
    `DipshitOS kernel has seized control.`, `memory-map descriptors=0x...`,
@@ -430,7 +340,8 @@ Ordered; each has a prompt doc and a gate:
 
 - **This file is the single source of truth for status and coordination.**
   Update the moment a gate passes, fails, or a milestone completes; claim
-  work before starting; append to the changelog.
+  work before starting (claim file in `docs/claims/`); append to your
+  branch's log under `docs/logs/`.
 - **Evidence lives under `artifacts/`** (gitignored, except `.gitkeep`).
   Every gate claim names its evidence file and date. No evidence, no
   "observed".
@@ -446,6 +357,8 @@ Ordered; each has a prompt doc and a gate:
 
 - [`roadmap.md`](roadmap.md) — milestone planning (the "where we're going").
 - [`testing.md`](testing.md) — the verification sequence and evidence policy.
+- [`logs/README.md`](logs/README.md) — per-branch append-only changelog index (the sharded changelog).
+- [`claims/README.md`](claims/README.md) — per-claim files index (the sharded claims table).
 - [`hardware-contract.md`](hardware-contract.md) — hardware assumptions, `[observed]`/`[inferred]`.
 - [`architecture.md`](architecture.md) — components and data flow.
 - [`m2-bad-handoff-fix-prompt.md`](m2-bad-handoff-fix-prompt.md) — prompt: fix the failing failure-path gate (now passing; root cause was the shim LR clobber).
