@@ -143,4 +143,3 @@ const run_vm_command =
     \\echo
     \\echo "run: boot completed; loader and kernel handoff observed (BOOTED.TXT, LOADER.TXT, RC.TXT)"
 ;
-
