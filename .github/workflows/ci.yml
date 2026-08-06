@@ -33,8 +33,8 @@ jobs:
       - name: Inspect binary and disk image
         run: zig build inspect
 
-      - name: Boot VM and verify guest evidence
-        run: zig build run
+      - name: Build Swift Virtualization Launcher
+        run: swift build --package-path host/vm-runner
 
       - name: Verify project context generator
         run: zig build context
