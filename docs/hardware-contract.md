@@ -75,12 +75,67 @@ no QEMU path.
   loader's stack. Until a later milestone records an ExitBootServices
   design here, no guest code may touch MMU, interrupts, timers, or device
   MMIO directly. **[inferred]** — we rely on the firmware keeping these
-  services available, per the UEFI spec.
+  services available, per the UEFI spec. **Superseded for the kernel
+  proper by milestone two**: ADR 0004 records the ExitBootServices design;
+  from milestone two on, the boot stub never exits (it keeps this
+  constraint forever) while the kernel proper may touch MMU and device
+  MMIO under the assumptions in the next section.
 - **Known quirk (observed)**: on Apple VZ firmware the kernel's *own* file
   writes land scrambled (the file is created with the right size, but the
   bytes are shifted slices of the kernel image's `.rodata`), while the
   loader's identical writes land byte-perfect. Recorded as a known issue in
   ADR 0002; root cause not yet determined.
+
+## Milestone two: the kernel proper (planned, ADR 0004 — all assumptions **[inferred]**)
+
+Milestone two is designed but not implemented; every assumption below is
+**[inferred]** (documentation/reasoning only) and each must be flipped to
+**[observed]** with log evidence before milestone three may rely on it.
+The concrete numbers are deliberately isolated so one observed probe can
+correct them without redesign.
+
+### MMU
+
+- The kernel runs at EL1 with the MMU **enabled** and the firmware's
+  identity map in effect at kernel entry; the firmware does not disable
+  the MMU when jumping. **[inferred]** — standard UEFI AArch64 behavior;
+  consistent with milestone-one runs but not directly observed.
+- The kernel builds its own translation tables (never firmware tables):
+  TTBR0_EL1, 4K granule, identity map (VA == PA) for RAM, the kernel
+  image, and the MMIO windows the drivers need. **[inferred]** — this is a
+  design choice, not a hardware fact; it is recorded here because later
+  milestones depend on the address space being under kernel control.
+- MAIR_EL1 uses two attributes: Device `nGnRnE` for MMIO and Normal
+  Write-Back for RAM. **[inferred]** — standard ARMv8 attribute set.
+- IPS (physical address size) is read from `ID_AA64MMFR0_EL1` at runtime.
+  **[inferred]** — standard CPU register; the exact value reported by VZ
+  is unobserved.
+
+### MMIO / serial console (UART)
+
+- A memory-mapped serial console device is reachable by the guest from
+  EL1. **[inferred]** — VZ configures a virtio console serial port; its
+  register interface is undocumented by Apple and no register has been
+  observed.
+- The device's **base address and register layout** are unknown.
+  **[inferred]** — primary candidate is a PL011-style register file (ARM
+  SBSA standard); 16550-style and the VZ virtio-console register file are
+  the alternatives a milestone-starting device probe must discriminate
+  between. If no serial device is observable, evidence falls back to a
+  fixed physical memory marker the host dumps (ADR 0004 D4).
+- Virtio devices sit in an MMIO window whose address range is
+  undocumented. **[inferred]** — the exact range is discovered by the same
+  probe.
+
+### Interrupts (not programmed in milestone two)
+
+- A GIC (Generic Interrupt Controller, ARM GIC architecture) is present
+  and is the interrupt controller a later timer/GIC milestone will
+  program. **[inferred]** — per the ARM virtual-platform architecture VZ
+  emulates; not observed and not touched in milestone two.
+- Interrupts are masked at kernel entry (firmware boots with them
+  masked). **[inferred]** — standard firmware behavior; the kernel keeps
+  them masked in milestone two.
 
 ## What milestone zero does NOT assume (and does not touch)
 
