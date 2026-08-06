@@ -147,11 +147,32 @@ run successfully on Apple M4 / macOS 27, this branch makes no observed claim
 about the VZ guest MMIO address, register layout, or the post-switch MMU;
 those remain explicitly inferred in `docs/hardware-contract.md`.
 
+## Milestone 1.5 — interactive kernel monitor (current)
+
+> **Scope frozen 2026-08-06.** The next deliverable is an interactive
+> command monitor served by the kernel's own polled serial console — not
+> further kernel-proper plumbing first.
+
+Named **Milestone 1.5, the "Dipshit Monitor"**: boot into a terminal,
+display a banner, accept commands at `dipshit>`, and execute at least ten
+useful commands (identity, memory-map inspection, shell utilities, and
+machine controls). Milestone two's kernel already owns the console and
+never returns; the monitor is its terminal-loop payload. It promises no new
+allocator, MMU work, interrupts, scheduler, userspace, or guest-side
+storage drivers.
+
+The twenty-step plan, hard gates, target screen, agent split, and a
+per-step progress tracker live in **`docs/status.md`** (the living status
+document — update it as work lands). The immediate blocker is the missing
+RX path: the kernel console is polled TX-only (ADR 0004) and the VM
+runner's serial attachment has no host-to-guest input handle today.
+
 ## Later milestones (sketches only, not commitments)
 
 - A memory allocator and boot-time memory map walk (the EFI memory map
   the kernel captured at exit, walked by the kernel itself).
-- Interrupt setup (GIC) and a timer — the GIC is already recorded as an
+- A serial RX path (the milestone-two console is polled TX-only) and
+  interrupt setup (GIC) and a timer — the GIC is already recorded as an
   `[inferred]` hardware assumption.
 - Eventually: a process abstraction, a filesystem, a network stack — each
   only when the ones below it are demonstrably working.
