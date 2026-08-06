@@ -6,13 +6,15 @@ A from-scratch AArch64 operating system. Not Linux-based. No libc, no POSIX,
 no existing guest OS. Guest code is written in Zig; the host launcher is
 Swift. See `AGENTS.md` for the project rules.
 
-**Status: milestone-two implementation attempted; build gates pass, VZ hardware gate blocked** on branch `m2-kernel-proper`.
+**Status: milestone two implemented; build gates pass; the VZ serial and
+bad-handoff failure gates are unpassed — the canonical, always-current status
+is [`docs/status.md`](docs/status.md).**
+
 Milestone two adds the kernel proper: the stub allocates handoff contract v2,
 the kernel captures the EFI map, calls `ExitBootServices` with the required
 retry bound, installs identity-map TTBR0_EL1 tables, probes declared MMIO
 windows, and drives a polled serial console before entering a terminal WFE
-loop. The exact VZ UART/MMIO result remains an observed verification gate;
-see `docs/m2-kernel-proper-design.md`, `docs/roadmap.md`, and ADR 0004.
+loop. Design: `docs/m2-kernel-proper-design.md` and ADR 0004.
 
 The milestone-one `KERNEL.TXT` corruption (kernel writes landing as
 shifted slices of the kernel image's `.rodata` on Apple VZ firmware) is
@@ -83,8 +85,8 @@ dipshitos/
 ├── tools/
 │   ├── inspect.sh             EFI binary + image inspection (degrades gracefully)
 │   └── context/               project-context generator + review prompt
-├── docs/                      architecture, branch protection, hardware contract,
-│                              roadmap, testing, decisions (ADRs 0001–0004)
+├── docs/                      status (canonical), architecture, branch protection,
+│                              hardware contract, roadmap, testing, decisions (ADRs 0001–0004)
 └── artifacts/                 build evidence (gitignored)
 ```
 
@@ -130,10 +132,8 @@ All command output and logs are saved under `artifacts/` (`inspect.txt`,
   UEFI removable-media rule (consistent with the observed marker write, but
   the firmware's internal behavior is not directly observable).
 
-## Next steps (see `docs/roadmap.md`)
+## Next steps
 
-1. Resolve the VZ serial/MMIO discovery and run the complete Apple M4 / macOS 27 VZ gate, saving output under
-   `artifacts/`. Only then may the matching MMIO/MMU assumptions be changed
-   from `[inferred]` to `[observed]` in `docs/hardware-contract.md`.
-2. Keep later interrupt/GIC, timer, allocator, and process work out of this
-   milestone; those remain future milestones.
+The current gate-by-gate plan lives in [`docs/status.md`](docs/status.md)
+(the canonical status document); the milestone plan is in
+[`docs/roadmap.md`](docs/roadmap.md).

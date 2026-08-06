@@ -1,5 +1,8 @@
 # DipshitOS roadmap
 
+> Live gate-by-gate status is tracked in [`docs/status.md`](status.md). This
+> roadmap is the milestone plan; it does not track day-to-day gate progress.
+
 ## Milestone zero (implemented) — boot pipeline proof
 
 A tiny AArch64 UEFI application, written in Zig, is built, placed at

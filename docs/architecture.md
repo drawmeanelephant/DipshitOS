@@ -1,27 +1,18 @@
 # DipshitOS architecture
 
-## Current state (milestones zero and one verified; milestone-two implementation blocked at VZ gate)
+## Current state
 
-Milestone zero proved, end to end, that a Zig-compiled AArch64 UEFI
-application can be built, placed on a FAT-formatted boot medium at the
-standard removable-media path, and executed by real firmware, with its
-output observed on a host. Milestone one added a separate freestanding
-kernel image: the boot application loads `\KERNEL.BIN` from the ESP,
-allocates `EfiLoaderCode` pages, copies the image, performs D/I-cache
-maintenance, and jumps to the kernel entry (see
-`docs/decisions/0002-kernel-handoff.md`). The project targets Apple silicon
-/ Virtualization.framework only; there is no QEMU path.
-
-**Milestone two implementation is present but not hardware-verified** (ADR 0004 and
-`docs/m2-kernel-proper-design.md`): the stub allocates handoff v2 and the
-kernel calls `ExitBootServices` itself, captures the EFI map, replaces the
-firmware's page tables with fresh identity-map TTBR0_EL1 tables (4K
-granule), probes declared MMIO windows, and drives a polled serial console.
-The intended success path prints `DipshitOS kernel has seized control.` plus
-its map view and `kernel terminal state`, then enters a WFE loop. The saved VZ
-run did not reach observable serial output, so this path remains an empirical
-gate; no inferred hardware fact is labeled observed without matching saved
-evidence.
+Milestones zero and one are verified end to end (boot pipeline proof;
+separate freestanding kernel image with a versioned handoff — see
+`docs/decisions/0002-kernel-handoff.md`). Milestone two (the kernel proper,
+ADR 0004) is implemented: the stub allocates handoff v2, the kernel calls
+`ExitBootServices`, installs identity-map TTBR0_EL1 tables, probes declared
+MMIO windows, and drives a polled serial console before a terminal WFE loop.
+Its VZ serial gate and bad-handoff failure gate are **not passed**. The
+canonical, always-current status lives in
+[`docs/status.md`](status.md); this file documents the architecture that
+status refers to. The project targets Apple silicon /
+Virtualization.framework only; there is no QEMU path.
 
 ## Components
 

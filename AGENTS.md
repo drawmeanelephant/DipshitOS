@@ -37,4 +37,7 @@ These rules bind any AI agent or human contributor working in this project.
 - Record hardware assumptions in `docs/hardware-contract.md`.
 - Record important design choices as architecture decision records under
   `docs/decisions/`.
+- Keep `docs/status.md` current: it is the canonical "where we are" answer,
+  updated whenever a gate passes, fails, or a milestone completes. Other
+  docs link to it instead of duplicating status prose.
 - Keep `README.md` and `docs/testing.md` honest about what was observed.
