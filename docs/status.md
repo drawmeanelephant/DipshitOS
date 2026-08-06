@@ -24,7 +24,7 @@
 |-----------|---------------------|--------|
 | Zero — boot pipeline | A Zig AArch64 UEFI app on a FAT32 ESP boots under real firmware; output observed on host (`\BOOTED.TXT`) | ✅ done |
 | One — kernel handoff | Separate freestanding `KERNEL.BIN` loaded, cache-maintained, jumped to, and returned (`\RC.TXT` = `kernel_rc=0x0`); ADR 0002 | ✅ done |
-| Two — kernel proper | ExitBootServices, captured EFI map, identity TTBR0_EL1 tables, MMIO serial probe + polled TX console (ADR 0004) | 🔄 **attempted; gates not passed** (see [Gate status](#gate-status)); bad-handoff failure gate **failing** |
+| Two — kernel proper | ExitBootServices, captured EFI map, identity TTBR0_EL1 tables, MMIO serial probe + polled TX console (ADR 0004) | 🔄 **attempted; gates not passed** (see [Gate status](#gate-status)); bad-handoff failure gate **passing since 2026-08-06**, VZ serial gate still blocked |
 | **1.5 — Interactive Kernel Monitor ("Dipshit Monitor")** | A live, interactive command monitor served by the kernel's serial console (the milestone-two terminal loop becomes its payload) | 🎯 **current** |
 | Three+ — allocator, interrupts, tasks | Physical allocator, GIC + timer, then processes | ⏳ deferred (roadmap) |
 
@@ -46,11 +46,11 @@ Every milestone-two claim below is backed by evidence re-verified
 | Swift runner build | `swift build --package-path host/vm-runner` | ✅ pass | re-run 2026-08-06 |
 | Context snapshot | `zig build context` | ✅ pass | re-run 2026-08-06 |
 | **VZ serial gate** | `zig build run` | ❌ **not passed** | `vm-serial.log` empty (last run 2026-08-06 00:05) |
-| **Bad-handoff failure gate** | `bash tools/verify-bad-handoff.sh` | ❌ **failing** | no `RC.TXT` (re-run 2026-08-06 07:16) |
+| **Bad-handoff failure gate** | `bash tools/verify-bad-handoff.sh` | ✅ **pass** | `artifacts/m2-badhandoff-fix-after.txt`: `RC.TXT` → `kernel_rc=0x0000000000000002`, gate exits 0 (first observed 2026-08-06, fixed shim) |
 
 ### What we directly observe about the two failing gates
 
-From the bad-handoff run (re-verified 2026-08-06), fresh from
+From the bad-handoff run before the fix (re-verified 2026-08-06), fresh from
 `artifacts/bad-handoff.img`:
 
 - `BOOTED.TXT` — written by the loader: **observed** (loader executed under
@@ -60,17 +60,29 @@ From the bad-handoff run (re-verified 2026-08-06), fresh from
   `ram_first8=0xaa0103eaaa0003e9`, which decodes to `mov x9, x0; mov x10, x1` —
   the first two instructions of the kernel's naked shim. The image content is
   at `base+0` and the jump lands on the shim as designed.
-- `RC.TXT` — **absent**: the kernel never returned to the loader, so the
-  pre-exit failure path did not complete. `vm-serial.log` is empty (expected
-  for `ConOut`; the runner's `terminal=true` is only the no-marker default).
+- `RC.TXT` — **absent** before the fix: the kernel never returned to the
+  loader. `vm-serial.log` is empty (expected for `ConOut`; the runner's
+  `terminal=true` is only the no-marker default).
 
-**Hypothesis (inferred, not yet proven):** the kernel dies early — before it
-can either return (bad-handoff path) or reach serial init (good path). Both
-gates may share one root cause, most likely in the new naked entry shim /
-stack switch (`kernel/src/main.zig` `_start`) or in handoff validation. This
-is the **prerequisite investigation for Milestone 1.5 step 8** (confirm the
-serial console) and hard gate 1 (existing regression checks pass) — see
-[Multiagent coordination](#multiagent-coordination) for the claim.
+**Bad-handoff root cause (now observed, fixed 2026-08-06):** the naked
+`_start` shim's `bl kernel_main` overwrote the link register with the shim's
+own return address (disassembly of the current kernel ELF: `bl 0x3c` at
+shim offset `0x30`, so LR = `0x34`). The shim's final `ret` therefore looped
+`0x34 → 0x38 → 0x34` forever instead of returning to the loader, so the
+pre-exit `return bad_handoff` could never reach the loader and `RC.TXT` was
+never written. Fix: save the loader's `x30` in `x20` (callee-saved under
+AAPCS64, preserved by `kernel_main`) before the `bl` and restore it before
+`ret` — two instructions in `kernel/src/main.zig` `_start`. After the fix:
+`RC.TXT` = `kernel_rc=0x0000000000000002` and `verify-bad-handoff.sh` exits 0
+(`artifacts/m2-badhandoff-fix-after.txt`).
+
+The **VZ serial gate is a separate, still-open question**: with the fix, the
+bad-handoff VM provably returns through the shim, but the good-path run
+(`artifacts/m2-badhandoff-fix-goodpath.txt`) still produces no serial
+output (`vm-serial.log` 0 bytes) and the kernel never returns — the probe
+finding no usable MMIO serial device on VZ, or an early post-exit crash,
+remain hypotheses. The bad-handoff fix removes the shim/LR suspect from
+that investigation (M1.5 step 8).
 
 ## Milestone 1.5 — the call
 
@@ -117,7 +129,7 @@ dipshit>
 
 ### Hard gates (acceptance criteria)
 
-- [ ] `zig build`, `zig build image`, and the existing regression checks still pass. *(Note: the bad-handoff regression gate is currently **failing** — see [Gate status](#gate-status); fixing it is prerequisite work.)*
+- [ ] `zig build`, `zig build image`, and the existing regression checks still pass. *(The bad-handoff regression gate was **failing**; its root cause (shim LR clobber) was fixed 2026-08-06 — the gate now passes, see [Gate status](#gate-status).)*
 - [ ] `zig build console` reaches `dipshit>`.
 - [ ] Host keystrokes reach the kernel (RX path closed end to end).
 - [ ] At least ten commands work.
@@ -139,7 +151,7 @@ Legend: ⬜ not started · 🔄 in progress · ✅ done · ⛔ blocked (note why
 | 5 | **Tee guest output.** Send output to the terminal **and** `artifacts/vm-serial.log`. | Interact live without sacrificing reproducible evidence. | ⬜ | Runner currently polls the log file (`Data(contentsOf:)`); upgrade to duplex + tee. |
 | 6 | **Handle terminal state safely.** Raw/character-mode input; restore the terminal on exit and signals. | Backspace, Enter, Ctrl-C behave predictably. | ⬜ | |
 | 7 | **Add a first-class launch command.** `zig build console` and `just console`. | One command builds, images, boots, and opens DipshitOS interactively. | ⬜ | |
-| 8 | **Confirm the serial console.** The M2 probe (`probe_serial`) already selects a MMIO candidate (PL011/16550/virtio-MMIO); verify which kind/base it drives and that TX reaches `vm-serial.log` on a real VZ run. | Log proves console kind + base and the first post-exit serial evidence (`DipshitOS kernel has seized control.`). | ⬜ | This replaces the plan's "probe UEFI Serial I/O" step: post-exit there is no UEFI Serial I/O protocol; M2's probe is the mechanism. VZ gate currently blocked (no serial evidence on the saved run); the bad-handoff fix must land first (shared-root-cause hypothesis). |
+| 8 | **Confirm the serial console.** The M2 probe (`probe_serial`) already selects a MMIO candidate (PL011/16550/virtio-MMIO); verify which kind/base it drives and that TX reaches `vm-serial.log` on a real VZ run. | Log proves console kind + base and the first post-exit serial evidence (`DipshitOS kernel has seized control.`). | ⬜ | This replaces the plan's "probe UEFI Serial I/O" step: post-exit there is no UEFI Serial I/O protocol; M2's probe is the mechanism. VZ gate still blocked (no serial evidence on the saved run). The bad-handoff fix landed 2026-08-06 (shim LR clobber) and is no longer a suspect; the serial gate is a separate open question. |
 | 9 | **Build a console abstraction.** `write`, `putc`, `flush` on top of the M2 `uart` module; `readByte` is the RX gap to close (step 4 host side + a guest RX path). | Kernel code stops caring which MMIO candidate carries the bytes. | ⬜ | ConOut fallback is dead post-exit; primary = MMIO uart. |
 | 10 | **Make input bounded and boring.** Fixed 256-byte line buffer; CR/LF, backspace, Ctrl-C, overflow rejection. | Editable command lines without an allocator. | ⬜ | |
 | 11 | **Implement tokenization.** Fixed argument count, whitespace handling, optional quoted strings. | `echo "elephant business"` works without heap allocation. | ⬜ | |
@@ -244,11 +256,11 @@ hours of each other and collided). The rules below make that safe. They are
 
 | Claim | Owner (branch) | Prompt / plan | Status | Depends on |
 |-------|----------------|---------------|--------|------------|
-| Bad-handoff gate fix (M2 pre-exit return path) | — | `docs/m2-bad-handoff-fix-prompt.md` | ⬜ | — |
+| Bad-handoff gate fix (M2 pre-exit return path) | buffy (`agent/buffy/m2-badhandoff-fix`) | `docs/m2-bad-handoff-fix-prompt.md` | ✅ fixed 2026-08-06 — `RC.TXT` → `kernel_rc=0x2`, gate exits 0 (`artifacts/m2-badhandoff-fix-after.txt`) | — |
 | VZ serial/MMU gate run (M1.5 step 8) | — | `docs/m2-vz-serial-gate-prompt.md` | ⬜ | bad-handoff fix |
-| M1.5 — host plumbing (agent A) | — | M1.5 steps 4–7 | ⬜ | — |
+| M1.5 — host plumbing (agent A) | — | M1.5 steps 4–7 (`docs/m15-host-plumbing-prompt.md`) | ⬜ | — |
 | M1.5 — console & shell core (agent B) | — | M1.5 steps 9–12 | ⬜ | A |
-| M1.5 — commands & personality (agent C) | — | M1.5 steps 13–18 | ⬜ | mock console |
+| M1.5 — commands & personality (agent C) | — | M1.5 steps 13–18 (`docs/m15-commands-prompt.md`) | ⬜ | mock console |
 | Status/changelog machinery + PR #10 | buffy (`agent/buffy/m2-kernel-proper`) | this file | ✅ | — |
 
 ## Changelog (append-only)
@@ -285,6 +297,38 @@ Status legend: ⬜ claimed · 🔄 in progress · ✅ done · ⛔ blocked.
   marked ✅ — this file *is* the frozen scope document, and the finish line
   / hard gates are defined above — and the active-claims "how to claim"
   convention was added so the claim-before-you-start rule is expressible. ✅
+- **2026-08-06** — **Claim (buffy, `agent/buffy/m2-badhandoff-fix`):** claimed
+  the bad-handoff gate fix. Disassembled the current kernel ELF
+  (`.zig-cache/o/300f11f…/dipshit-kernel`): the naked `_start` shim sits at
+  VMA 0 (matches `LOADER.TXT` `ram_first8`); its `bl kernel_main` at `0x30`
+  clobbers LR to `0x34`, so the shim's final `ret` loops `0x34→0x38→0x34`
+  instead of returning to the loader — the kernel can never reach the
+  pre-exit `return bad_handoff` handoff, so `RC.TXT` is never written. Fix:
+  save the loader's LR in a callee-saved register (x20, preserved by
+  `kernel_main` under AAPCS64) before the `bl`, restore it before `ret`. 🔄
+  in progress — before/after gate evidence to follow.
+- **2026-08-06** — **Bad-handoff gate fixed (buffy,
+  `agent/buffy/m2-badhandoff-fix`):** root cause confirmed as the naked
+  `_start` shim clobbering LR (above). Implemented the two-instruction fix
+  in `kernel/src/main.zig`; disassembly now shows `mov x20, x30` at shim
+  offset `0x14` and `mov x30, x20` at `0x3c` around `bl kernel_main`.
+  **Observed:** `verify-bad-handoff.sh` exits 0 and `RC.TXT` =
+  `kernel_rc=0x0000000000000002` (`artifacts/m2-badhandoff-fix-after.txt`);
+  all build gates green (`m2-badhandoff-fix-gates.txt`); good path
+  unregressed — `zig build run` reaches the same state as before (loader
+  evidence present, `vm-serial.log` empty, kernel never returns,
+  `m2-badhandoff-fix-goodpath.txt`). The VZ serial gate remains a separate
+  open question. ✅
+- **2026-08-06** — **Parallel-agent prompt docs (buffy,
+  `agent/buffy/m2-badhandoff-fix`):** added
+  `docs/m15-host-plumbing-prompt.md` (agent A, M1.5 steps 4–7: duplex
+  serial attachment, live teeing, terminal safety, `zig build console`) and
+  `docs/m15-commands-prompt.md` (agent C, M1.5 steps 12–18: registry,
+  identity/memory/utility/control commands, personality — mock-console
+  based, new kernel files only). Links added to the Active claims table.
+  Both are unclaimed and ready to run in parallel with the VZ serial gate
+  (`docs/m2-vz-serial-gate-prompt.md`). ✅ written — no implementation
+  started.
 
 ## Immediate gate work (prerequisites for M1.5)
 
@@ -295,6 +339,15 @@ Ordered; each has a prompt doc and a gate:
    This unblocks M1.5 hard gate 1 and possibly the serial gate too.
    **Gate:** `bash tools/verify-bad-handoff.sh` exits 0 with
    `RC.TXT` → `kernel_rc=0x2`; good path unregressed.
+
+   **Status: ✅ passed 2026-08-06** (buffy, `agent/buffy/m2-badhandoff-fix`).
+   Root cause was the naked `_start` shim's `bl kernel_main` clobbering the
+   link register (no save/restore of the loader's `x30`), so the shim's `ret`
+   looped on itself and the kernel never returned. Fixed with two
+   instructions (`mov x20, x30` before the `bl`, `mov x30, x20` before `ret`).
+   Evidence: `artifacts/m2-badhandoff-fix-{before,after}.txt`, disassembly in
+   the [changelog](#changelog-append-only). The serial gate (item 2) no
+   longer shares this suspect.
 2. **Run the VZ serial/MMU gate** — `docs/m2-vz-serial-gate-prompt.md`
    (M1.5 step 8's "confirm the serial console"). **Gate:** exact banner
    `DipshitOS kernel has seized control.`, `memory-map descriptors=0x...`,
@@ -327,7 +380,9 @@ Ordered; each has a prompt doc and a gate:
 - [`testing.md`](testing.md) — the verification sequence and evidence policy.
 - [`hardware-contract.md`](hardware-contract.md) — hardware assumptions, `[observed]`/`[inferred]`.
 - [`architecture.md`](architecture.md) — components and data flow.
-- [`m2-bad-handoff-fix-prompt.md`](m2-bad-handoff-fix-prompt.md) — prompt: fix the failing failure-path gate.
+- [`m2-bad-handoff-fix-prompt.md`](m2-bad-handoff-fix-prompt.md) — prompt: fix the failing failure-path gate (now passing; root cause was the shim LR clobber).
 - [`m2-vz-serial-gate-prompt.md`](m2-vz-serial-gate-prompt.md) — prompt: run the VZ serial/MMU gate.
+- [`m15-host-plumbing-prompt.md`](m15-host-plumbing-prompt.md) — prompt (agent A): duplex serial attachment, teeing, terminal safety, `zig build console`.
+- [`m15-commands-prompt.md`](m15-commands-prompt.md) — prompt (agent C): command registry, identity/memory/utility/control commands, personality (mock-console based).
 - [`decisions/`](decisions/) — ADRs 0001–0004 (binding design records).
 - [`../AGENTS.md`](../AGENTS.md) — project rules (now including the multiagent coordination rules).

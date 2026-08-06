@@ -97,6 +97,14 @@ var console_base: u64 = 0;
 /// the four ABI arguments into caller-saved temporaries, installs the exact
 /// 16 KiB stack from HandoffV2, restores x0..x3, and calls the normal Zig
 /// takeover function. It returns only for a pre-exit failure.
+///
+/// The `bl` below overwrites the link register with this shim's own return
+/// address, so the loader's x30 is stashed in x20 first. x20 is callee-saved
+/// under AAPCS64: kernel_main (callconv(.c)) must preserve x19..x28, so the
+/// value survives the call. Restoring x30 before the final `ret` is what
+/// lets a pre-exit failure actually reach the loader (which then writes
+/// RC.TXT); without it the `ret` loops forever on the `bl`'s return address
+/// and the kernel never gets back (the observed bad-handoff gate failure).
 export fn _start(
     _: u64,
     _: u64,
@@ -108,6 +116,7 @@ export fn _start(
             "mov x11, x2\n" ++
             "mov x12, x3\n" ++
             "mov x19, sp\n" ++
+            "mov x20, x30\n" ++
             "ldr x4, [x12, #40]\n" ++
             "ldr x5, [x12, #48]\n" ++
             "add sp, x4, x5\n" ++
@@ -117,6 +126,7 @@ export fn _start(
             "mov x3, x12\n" ++
             "bl %[takeover]\n" ++
             "mov sp, x19\n" ++
+            "mov x30, x20\n" ++
             "ret"
         :
         : [takeover] "X" (&kernel_main),

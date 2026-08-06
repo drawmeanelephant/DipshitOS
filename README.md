@@ -6,9 +6,10 @@ A from-scratch AArch64 operating system. Not Linux-based. No libc, no POSIX,
 no existing guest OS. Guest code is written in Zig; the host launcher is
 Swift. See `AGENTS.md` for the project rules.
 
-**Status: milestone two implemented; build gates pass; the VZ serial and
-bad-handoff failure gates are unpassed — the canonical, always-current status
-is [`docs/status.md`](docs/status.md).**
+**Status: milestone two implemented; build gates pass; the bad-handoff
+failure gate passes (fixed 2026-08-06); the VZ serial gate remains unpassed —
+the canonical, always-current status is
+[`docs/status.md`](docs/status.md).**
 
 Milestone two adds the kernel proper: the stub allocates handoff contract v2,
 the kernel captures the EFI map, calls `ExitBootServices` with the required
@@ -121,10 +122,12 @@ configuration.
 
 ## Verification results (observed on this development host)
 
-The milestone-two VZ takeover and bad-handoff gates are **not passed**: the
-saved run has an empty `artifacts/vm-serial.log`, and the bad-handoff run has
-no `RC.TXT`. The implementation and build checks below must not be read as
-hardware evidence.
+The milestone-two VZ takeover gate is **not passed**: the saved run has an
+empty `artifacts/vm-serial.log`. The bad-handoff failure gate **is passed**
+(as of 2026-08-06: `RC.TXT` → `kernel_rc=0x2`, root cause was the naked
+`_start` shim clobbering the link register). See `docs/status.md` for the
+gate table and evidence. The implementation and build checks below must not
+be read as hardware evidence.
 
 Host: Apple M4, macOS 27.0 (arm64), Zig 0.16.0, Swift 6.2.3 (arm64).
 
@@ -174,6 +177,7 @@ All command output and logs are saved under `artifacts/` (`inspect.txt`,
  2. Resolve the milestone-two VZ serial/MMIO discovery gate: run the complete
     Apple M4 / macOS 27 VZ gate and save output under `artifacts/`. Only
     then may the matching MMIO/MMU assumptions change from `[inferred]` to
-    `[observed]` in `docs/hardware-contract.md`.
+    `[observed]` in `docs/hardware-contract.md`. (The bad-handoff failure
+    gate — formerly the other unpassed gate — is closed since 2026-08-06.)
  3. Keep later interrupt/GIC, timer, allocator, and process work out of
     scope; those remain future milestones.
