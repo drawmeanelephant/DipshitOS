@@ -8,7 +8,9 @@ separate freestanding kernel image with a versioned handoff — see
 ADR 0004) is implemented: the stub allocates handoff v2, the kernel calls
 `ExitBootServices`, installs identity-map TTBR0_EL1 tables, probes declared
 MMIO windows, and drives a polled serial console before a terminal WFE loop.
-Its VZ serial gate and bad-handoff failure gate are **not passed**. The
+Its VZ serial gate is **not passed**; the bad-handoff failure gate is
+**passed** since 2026-08-06 (root cause: the naked `_start` shim clobbered
+the link register, so a pre-exit failure never returned to the loader). The
 canonical, always-current status lives in
 [`docs/status.md`](status.md); this file documents the architecture that
 status refers to. The project targets Apple silicon /

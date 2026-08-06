@@ -83,8 +83,11 @@
       log, or terminal marker in `vm-serial.log`; no `RC.TXT` was produced.
       Do not label the hardware assumptions observed before that evidence
       exists.
-- [ ] Milestone two bad-handoff failure gate: **failing** (re-verified
-      2026-08-06). The VM boots and the loader writes `BOOTED.TXT`/
-      `LOADER.TXT` (correct shim entry), but the kernel never returns: no
-      `RC.TXT` is produced. See `docs/status.md` and
-      `artifacts/m2-bad-handoff-*.txt` for the open investigation.
+- [x] Milestone two bad-handoff failure gate: **passing** (fixed 2026-08-06,
+      `agent/buffy/m2-badhandoff-fix`). Root cause was the naked `_start`
+      shim's `bl kernel_main` overwriting the link register without
+      saving/restoring the loader's `x30`, so the shim's final `ret` looped
+      forever and the kernel never returned. After the two-instruction fix,
+      `verify-bad-handoff.sh` exits 0 and `RC.TXT` shows
+      `kernel_rc=0x0000000000000002`. Evidence:
+      `artifacts/m2-badhandoff-fix-{before,after,gates,goodpath}.txt`.
