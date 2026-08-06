@@ -7,9 +7,12 @@
 //! the separate kernel image `\KERNEL.BIN` from the ESP via the UEFI Simple
 //! File System protocol, allocates memory with Boot Services
 //! (AllocatePages, EfiLoaderCode so the pages are executable), copies the
-//! image there, flushes the data cache and invalidates the instruction cache
-//! (the same maintenance the firmware's LoadImage performs), and jumps to
-//! the kernel's entry point. The kernel writes its own evidence
+//! image CONTENT there -- the 24-byte DSK1 header is parsed but NOT loaded
+//! into RAM, so the kernel's content sits at base+0 where its PC-relative
+//! addressing (ADR and ADRP) resolves correctly; see ADR 0002 -- flushes
+//! the data cache and invalidates the instruction cache (the same
+//! maintenance the firmware's LoadImage performs), and jumps to the
+//! kernel's entry point. The kernel writes its own evidence
 //! (`\KERNEL.TXT`) and returns; the loader then returns to the firmware
 //! (EFI_SUCCESS). The loader also writes `\LOADER.TXT` (loader-observed
 //! placement of the kernel) and `\MEMMAP.TXT` (the EFI memory map) as
@@ -136,6 +139,10 @@ fn load_and_enter_kernel(st: *const uefi.tables.SystemTable) void {
     const image_size = std.mem.readInt(u64, header[16..24], .little);
     if (magic != kernel_magic) return;
     if (image_size < kernel_header_size or image_size > kernel_max_size) return;
+    // The entry is file-relative (includes the header) and must land inside
+    // the loadable content; anything else means a malformed image.
+    if (entry_offset < kernel_header_size) return;
+    if (entry_offset >= image_size) return;
 
     // 2. Allocate exactly enough pages (Boot Services, any free region).
     //    AllocatePages returns 4K-aligned pages -- the base alignment that
@@ -148,11 +155,22 @@ fn load_and_enter_kernel(st: *const uefi.tables.SystemTable) void {
     const dst: [*]u8 = @ptrCast(pages.ptr);
     const base: u64 = @intFromPtr(dst);
 
-    // 3. Read the whole image (header + content) into the allocation.
-    kernel_file.setPosition(0) catch return;
-    const dst_slice = dst[0..@intCast(image_size)];
+    // 3. Read the CONTENT (image_size - 24 header bytes) into the allocation
+    //    at offset 0. The 24-byte DSK1 header is parsed but NOT loaded into
+    //    RAM: the kernel is linked with VMA 0 == content start, so placing
+    //    the content at base+0 makes every PC-relative reference (both ADR
+    //    and ADRP+ADD) resolve to the right byte. Loading the file verbatim
+    //    (content at base+24) is what caused the KERNEL.TXT scramble: ADR
+    //    refs stayed correct because the +24 rides inside the PC, but
+    //    ADRP+ADD refs compute (PC page) + VMA offset and silently drop the
+    //    +24, reading the kernel's own .rodata 24 bytes early (see ADR
+    //    0002, known issue [resolved]).
+    if (image_size <= kernel_header_size) return; // no loadable content
+    const content_size: usize = @intCast(image_size - kernel_header_size);
+    kernel_file.setPosition(kernel_header_size) catch return;
+    const dst_slice = dst[0..content_size];
     var filled: usize = 0;
-    while (filled < image_size) {
+    while (filled < content_size) {
         const got = kernel_file.read(dst_slice[filled..]) catch return;
         if (got == 0) return; // short read: image truncated
         filled += got;
@@ -164,24 +182,27 @@ fn load_and_enter_kernel(st: *const uefi.tables.SystemTable) void {
     }
 
     // 3b. Loader trace: record base/size/entry on the ESP before the jump.
-    write_loader_trace(root, dst, base, image_size, entry_offset);
+    write_loader_trace(root, &header, dst, base, image_size, entry_offset);
 
-    // 3c. The image bytes were written by data accesses; make the instruction
-    //     stream see them (clean D-cache to PoU, invalidate I-cache, DSB, ISB
-    //     -- the same maintenance the firmware's LoadImage performs before
-    //     transferring control to a loaded image). Per-byte iteration so no
-    //     cache-line-size assumption is made; the kernel image is tiny.
-    flush_to_pou(dst, @intCast(image_size));
+    // 3c. The content bytes were written by data accesses; make the
+    //     instruction stream see them (clean D-cache to PoU, invalidate
+    //     I-cache, DSB, ISB -- the same maintenance the firmware's LoadImage
+    //     performs before transferring control to a loaded image).
+    //     Per-byte iteration so no cache-line-size assumption is made; the
+    //     kernel image is tiny.
+    flush_to_pou(dst, content_size);
 
     // 4. Jump. The kernel runs on our stack and keeps using Boot Services;
-    //    when it returns, we return to the firmware.
+    //    when it returns, we return to the firmware. entry_offset is
+    //    file-relative (includes the 24-byte header); with the content at
+    //    base+0 the in-RAM entry is base + (entry_offset - 24).
     const EntryFn = *const fn (
         base: u64,
         size: u64,
         st: *const uefi.tables.SystemTable,
         root: *uefi.protocol.File,
     ) callconv(.c) u64;
-    const entry: EntryFn = @ptrFromInt(base + entry_offset);
+    const entry: EntryFn = @ptrFromInt(base + (entry_offset - kernel_header_size));
     const rc = entry(base, image_size, st, root);
     write_rc(root, rc);
 
@@ -252,10 +273,11 @@ fn dump_memory_map(st: *const uefi.tables.SystemTable) void {
 }
 
 /// Write \LOADER.TXT: loader-observed kernel placement (base, size, entry
-/// offset) plus the first 16 bytes that actually landed at the image base
-/// (so host-side analysis can confirm the copy, not just trust it). Best
-/// effort, like the other marker writes.
-fn write_loader_trace(root: *uefi.protocol.File, dst: [*]const u8, base: u64, size: u64, entry_offset: u64) void {
+/// offset), the DSK1 header fields as read from the file (first8/second8),
+/// and the first 8 bytes that landed at the image base in RAM (ram_first8;
+/// with the content at base+0 these are the kernel's first instructions).
+/// Best effort, like the other marker writes.
+fn write_loader_trace(root: *uefi.protocol.File, header: *const [kernel_header_size]u8, dst: [*]const u8, base: u64, size: u64, entry_offset: u64) void {
     const trace = root.open(&loader_trace_path, .read_write_create, .{}) catch return;
     defer trace.close() catch {};
 
@@ -270,9 +292,11 @@ fn write_loader_trace(root: *uefi.protocol.File, dst: [*]const u8, base: u64, si
     n += copy_into(content[n..], " entry_offset=");
     n += append_hex(content[n..], entry_offset);
     n += copy_into(content[n..], " first8=");
-    n += append_hex(content[n..], std.mem.readInt(u64, dst[0..8], .little));
+    n += append_hex(content[n..], std.mem.readInt(u64, header[0..8], .little));
     n += copy_into(content[n..], " second8=");
-    n += append_hex(content[n..], std.mem.readInt(u64, dst[8..16], .little));
+    n += append_hex(content[n..], std.mem.readInt(u64, header[8..16], .little));
+    n += copy_into(content[n..], " ram_first8=");
+    n += append_hex(content[n..], std.mem.readInt(u64, dst[0..8], .little));
     n += copy_into(content[n..], "\n");
 
     _ = trace.write(content[0..n]) catch {};

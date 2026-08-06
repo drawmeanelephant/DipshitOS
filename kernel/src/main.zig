@@ -23,12 +23,15 @@
 //!
 //! Observed on Apple Virtualization.framework (macOS 27 / Apple silicon):
 //! the loader's own file writes (BOOTED.TXT, LOADER.TXT, MEMMAP.TXT,
-//! RC.TXT) land byte-perfect, but the kernel's writes land scrambled --
-//! the file is created with the right size and the kernel's write path
-//! executes, yet the bytes stored are shifted slices of the kernel image's
-//! own .rodata. This is an observed firmware/storage-path quirk (see ADR
-//! 0002, "Known issue"); the loader's RC.TXT (`kernel_rc=0x0`) is the
-//! clean, host-observable proof that control transferred and returned.
+//! RC.TXT) land byte-perfect, and -- since the loader places the kernel
+//! CONTENT at base+0 (the 24-byte DSK1 header is parsed but not loaded into
+//! RAM) -- the kernel's own \KERNEL.TXT write lands byte-perfect too. See
+//! ADR 0002 for the resolved scramble root cause: when the content sat at
+//! base+24 (file loaded verbatim), LLVM's ADRP+ADD references to .rodata
+//! computed (PC page) + VMA offset and silently dropped the +24, reading
+//! every literal 24 bytes early; ADR references carry the +24 inside the
+//! PC and were unaffected. With the content at base+0 both forms resolve
+//! to the correct bytes.
 //!
 //! Position independence: Zig/LLVM addresses everything in this kernel with
 //! PC-relative instructions (adr/adrp; verified by disassembly), so the
