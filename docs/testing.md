@@ -1,5 +1,8 @@
 # DipshitOS testing
 
+> For the current state of each verification gate (pass/fail/blocked), see
+> [`docs/status.md`](status.md). This file is the sequence and policy.
+
 ## Evidence policy
 
 - **Observed** = the claim is backed by command output or a log file saved
@@ -80,3 +83,8 @@
       log, or terminal marker in `vm-serial.log`; no `RC.TXT` was produced.
       Do not label the hardware assumptions observed before that evidence
       exists.
+- [ ] Milestone two bad-handoff failure gate: **failing** (re-verified
+      2026-08-06). The VM boots and the loader writes `BOOTED.TXT`/
+      `LOADER.TXT` (correct shim entry), but the kernel never returns: no
+      `RC.TXT` is produced. See `docs/status.md` and
+      `artifacts/m2-bad-handoff-*.txt` for the open investigation.

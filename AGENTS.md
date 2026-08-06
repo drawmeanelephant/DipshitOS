@@ -37,4 +37,27 @@ These rules bind any AI agent or human contributor working in this project.
 - Record hardware assumptions in `docs/hardware-contract.md`.
 - Record important design choices as architecture decision records under
   `docs/decisions/`.
+- Keep `docs/status.md` current: it is the canonical "where we are" answer,
+  updated whenever a gate passes, fails, or a milestone completes. Other
+  docs link to it instead of duplicating status prose.
 - Keep `README.md` and `docs/testing.md` honest about what was observed.
+
+## Multiagent coordination rules
+
+Multiple agents and humans develop this repo, sometimes in parallel. The
+full coordination setup (active-claims table, changelog, conventions) lives
+in `docs/status.md`; the binding rules are:
+
+- **Claim before you start.** Non-trivial work gets a row in the active
+  claims table and a changelog entry in `docs/status.md` before code is
+  written. Claimed work is not duplicated by other agents.
+- **One editor per file at a time.** If two agents need the same file, the
+  second waits or merges through the integration branch — never edit the
+  same file (e.g. `kernel/src/main.zig`) concurrently.
+- **The changelog is append-only.** Never rewrite or delete entries;
+  corrections are new entries referencing the old one.
+- **Update on completion and on blockers.** Flip your claim's status and
+  append an entry when done; append one when blocked so the next agent does
+  not repeat the attempt.
+- **Doc edits go through `docs/status.md`.** Status prose lives there;
+  other docs link to it. Prefer pointer-level changes to other docs.

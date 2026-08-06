@@ -77,11 +77,20 @@ section() { printf '\n## %s\n\n' "$1"; }
     section "docs/testing.md"
     fence docs/testing.md
 
+    section "docs/status.md"
+    fence docs/status.md
+
     section "docs/decisions/0001-arm64-uefi-zig.md"
     fence docs/decisions/0001-arm64-uefi-zig.md
 
     section "docs/decisions/0002-kernel-handoff.md"
     fence docs/decisions/0002-kernel-handoff.md
+
+    section "docs/decisions/0003-ci-and-branch-rules.md"
+    fence docs/decisions/0003-ci-and-branch-rules.md
+
+    section "docs/decisions/0004-kernel-proper.md"
+    fence docs/decisions/0004-kernel-proper.md
 
     section "boot/src/main.zig"
     fence boot/src/main.zig

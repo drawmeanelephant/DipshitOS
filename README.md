@@ -6,13 +6,15 @@ A from-scratch AArch64 operating system. Not Linux-based. No libc, no POSIX,
 no existing guest OS. Guest code is written in Zig; the host launcher is
 Swift. See `AGENTS.md` for the project rules.
 
-**Status: milestone-two implementation attempted; build gates pass, VZ hardware gate blocked** on branch `m2-kernel-proper`.
+**Status: milestone two implemented; build gates pass; the VZ serial and
+bad-handoff failure gates are unpassed — the canonical, always-current status
+is [`docs/status.md`](docs/status.md).**
+
 Milestone two adds the kernel proper: the stub allocates handoff contract v2,
 the kernel captures the EFI map, calls `ExitBootServices` with the required
 retry bound, installs identity-map TTBR0_EL1 tables, probes declared MMIO
 windows, and drives a polled serial console before entering a terminal WFE
-loop. The exact VZ UART/MMIO result remains an observed verification gate;
-see `docs/m2-kernel-proper-design.md`, `docs/roadmap.md`, and ADR 0004.
+loop. Design: `docs/m2-kernel-proper-design.md` and ADR 0004.
 
 The milestone-one `KERNEL.TXT` corruption (kernel writes landing as
 shifted slices of the kernel image's `.rodata` on Apple VZ firmware) is
@@ -89,10 +91,9 @@ dipshitos/
 │   └── mkfat32.py             pure-Python FAT32+GPT builder/lister/cat
 ├── tools/
 │   ├── inspect.sh             EFI binary + image inspection (degrades gracefully)
-│   └── context/               project-context generator + review prompt
-├── docs/                      architecture, branch protection, hardware contract,
-│                              roadmap, testing, decisions (ADRs 0001–0004),
-│                              status.md (living status & goals tracker)
+│   └── context/               project-context generator + review prompt ├── docs/                      status.md (canonical living status & changelog),
+ │                              architecture, branch protection, hardware contract,
+ │                              roadmap, testing, decisions (ADRs 0001–0004)
 └── artifacts/                 build evidence (gitignored)
 ```
 
@@ -136,19 +137,21 @@ All command output and logs are saved under `artifacts/` (`inspect.txt`,
 
 - Apple's VZ EFI firmware loads `EFI/BOOT/BOOTAA64.EFI` from the ESP per the
   UEFI removable-media rule (consistent with the observed marker write, but
-  the firmware's internal behavior is not directly observable).
-
-## Next steps (see `docs/roadmap.md` and `docs/status.md`)
-
-1. **Milestone 1.5, the interactive kernel monitor**: the kernel console is
-   polled TX-only (ADR 0004, no RX path) and the VM runner's serial
-   attachment has no host-to-guest input handle (`fileHandleForReading:
-   nil`) — close the RX gap, then build the console abstraction, line
-   editor, command registry, and commands. Tracked step-by-step in
-   `docs/status.md`.
-2. Resolve the milestone-two VZ serial/MMIO discovery gate: run the complete
-   Apple M4 / macOS 27 VZ gate and save output under `artifacts/`. Only
-   then may the matching MMIO/MMU assumptions change from `[inferred]` to
-   `[observed]` in `docs/hardware-contract.md`.
-3. Keep later interrupt/GIC, timer, allocator, and process work out of
-   scope; those remain future milestones.
+  the firmware's internal behavior is not directly observable). ## Next steps
+ 
+ The gate-by-gate plan and active work claims live in
+ [`docs/status.md`](docs/status.md); the milestone plan is in
+ [`docs/roadmap.md`](docs/roadmap.md).
+ 
+ 1. **Milestone 1.5, the interactive kernel monitor**: the kernel console is
+    polled TX-only (ADR 0004, no RX path) and the VM runner's serial
+    attachment has no host-to-guest input handle (`fileHandleForReading:
+    nil`) — close the RX gap, then build the console abstraction, line
+    editor, command registry, and commands. Tracked step-by-step in
+    `docs/status.md`.
+ 2. Resolve the milestone-two VZ serial/MMIO discovery gate: run the complete
+    Apple M4 / macOS 27 VZ gate and save output under `artifacts/`. Only
+    then may the matching MMIO/MMU assumptions change from `[inferred]` to
+    `[observed]` in `docs/hardware-contract.md`.
+ 3. Keep later interrupt/GIC, timer, allocator, and process work out of
+    scope; those remain future milestones.
