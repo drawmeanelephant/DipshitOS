@@ -19,8 +19,20 @@
 5. Inspect the disk-image contents (part of `zig build inspect`).
 6. Build the Swift VM runner: `swift build --package-path host/vm-runner`.
 7. Boot with Apple Virtualization.framework (Apple silicon only):
-   `zig build run`.
+   `zig build run`. The run **gates** on the guest evidence — all four
+   markers must match exactly: `\BOOTED.TXT` (loader ran), `\LOADER.TXT`
+   (kernel placement), `\RC.TXT` (`kernel_rc=0x0`), and `\KERNEL.TXT`
+   (byte-perfect content: `DIPSHITOS KERNEL`, `entry reached via
+   handoff`).
 8. Save relevant logs under `artifacts/`.
+
+> **Regression check (ADR 0002, resolved):** the `\KERNEL.TXT` content gate
+> in `zig build run` is the regression check for the loader's
+> content-at-`base+0` addressing invariant (ADR 0002). A future loader
+> change that reintroduces the old `base+24` layout (the 24-byte DSK1
+> header loaded into RAM) makes the kernel's `adrp`+`add` references read
+> 24 bytes early, so `KERNEL.TXT` is not byte-perfect and the run gate —
+> and therefore CI — fails immediately.
 9. Generate the project snapshot: `zig build context` →
     `artifacts/context.md`.
 
@@ -35,7 +47,7 @@
 | `\LOADER.TXT` on the ESP | loader (`zig build run`) | Loader-observed kernel placement: base, size, entry_offset, first 16 bytes in RAM |
 | `\RC.TXT` on the ESP | loader, after the kernel returns | `kernel_rc=0x0` — the kernel ran and returned (the handoff proof) |
 | `\MEMMAP.TXT` on the ESP | loader | EFI memory map (types + attributes of every region) |
-| `\KERNEL.TXT` on the ESP | kernel (best effort) | Kernel's own marker; **scrambled on VZ** (see ADR 0002 known issue) |
+| `\KERNEL.TXT` on the ESP | kernel (`zig build run`) | Kernel's own marker; **byte-perfect and byte-identical** across runs; `zig build run` gates on its content (`DIPSHITOS KERNEL`, `entry reached via handoff`) |
 | `\KERNEL.BIN` on the ESP | `zig build` | Flat kernel image, verified with `elf2bin.py --info` |
 
 ## How output is observed
@@ -61,6 +73,7 @@
 - [x] Milestone one: `zig build run` loads `\KERNEL.BIN`, jumps, and the
       kernel returns (observed via `\RC.TXT` = `kernel_rc=0x0`, plus
       `\LOADER.TXT` base/size/first8 evidence)
-- [x] `\KERNEL.TXT` is created by the kernel (observed), but its content is
-      scrambled on Apple VZ firmware — known issue, see ADR 0002; the run
-      gate does not depend on it
+- [x] `\KERNEL.TXT` is written by the kernel, byte-perfect and
+      byte-identical across repeated boots (ADR 0002 corruption is
+      resolved; see `artifacts/m1-fix-run{1,2,3}.txt`), and `zig build
+      run` gates on its content
