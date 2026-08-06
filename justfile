@@ -33,3 +33,16 @@ context:
 # Local Git-aware context engine — tools/ragshit (ragshit index/query/bundle/doctor ...)
 ragshit *ARGS:
     python3 tools/ragshit/ragshit {{ARGS}}
+
+# Run the build-gate verification sequence from docs/testing.md (no VM)
+verify:
+    zig fmt --check boot/src/main.zig kernel/src/main.zig build.zig
+    zig build
+    zig build image
+    zig build inspect
+    swift build --package-path host/vm-runner
+    zig build context
+
+# Verify the pre-exit failure path (boots a VZ VM; Apple silicon only)
+verify-bad-handoff:
+    bash tools/verify-bad-handoff.sh
