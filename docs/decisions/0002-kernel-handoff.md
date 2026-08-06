@@ -39,6 +39,12 @@ a dynamic section — a smaller, more auditable loader. The header keeps the
 loader honest (magic, size cap, explicit entry) and lets host tools
 (`elf2bin.py --info`, `mkfat32.py --cat-file`) verify the image on disk.
 
+The loader parses the 24-byte header but does **not** load it into RAM: the
+content is placed at `base+0`, so ELF VMA `V` sits at RAM `base+V`. This is
+load-bearing — with the content at `base+24` (file loaded verbatim),
+ADRP+ADD references to `.rodata` dropped the +24 and read every literal 24
+bytes early (see the resolved known issue below).
+
 ### D2. No `ExitBootServices` in milestone one
 
 The kernel keeps running with the full UEFI Boot Services environment
@@ -53,7 +59,9 @@ loader already has, so milestone one adds no new firmware dependencies.
 
 The loader reads the image header, sanity-checks magic/size, allocates
 `ceil(image_size / 4096)` pages of type `EfiLoaderCode` (not
-`EfiLoaderData`), and copies the file into them. `EfiLoaderCode` is used
+`EfiLoaderData`), and copies the image **content** (`image_size - 24` bytes)
+into them at offset 0 — the header is parsed but not loaded into RAM, so
+the content starts exactly at `base+0` (see D1). `EfiLoaderCode` is used
 because firmware may map data-type memory as execute-never, and the loader
 is about to execute this memory — the same choice real UEFI bootloaders
 make. `AllocatePages` returns 4K-aligned pages, which is the alignment the
@@ -72,6 +80,14 @@ padding inflates the image ~100x (66 KiB → 0.7 KiB for the same code).
 Position independence is verified before each change by disassembling the
 linked ELF: all internal references must be `adr`/`adrp` (PC-relative), with
 no absolute `movk` chains.
+
+PC-relative references resolve against the content-at-`base+0` layout that
+the loader guarantees (D1/D3): `adr` carries the content offset inside the
+PC (so it also worked under the old `base+24` layout), while `adrp`+
+`add` computes `(PC page) + VMA offset` and only resolves correctly when the
+content starts at `base+0`. Both forms are therefore correct with the
+current loader, and this is the invariant any future load-address scheme
+must preserve.
 
 ### D5. The loader performs cache maintenance before the jump
 
@@ -102,45 +118,71 @@ boot the ESP contains (all host-readable via `python3 image/mkfat32.py
 
 - `BOOTED.TXT` — loader evidence; exact expected content. **Observed.**
 - `LOADER.TXT` — loader-observed kernel placement: `base=`, `size=`,
-  `entry_offset=0x18`, `first8=0x314b5344` (magic), `second8` (entry) —
-  proving the copy landed byte-perfect. **Observed.**
+  `entry_offset=0x18`, `first8=0x314b5344` (magic) and `second8` (entry)
+  from the file header, plus `ram_first8` (the first 8 bytes that landed at
+  the image base — the kernel's first instructions, since the header is not
+  loaded into RAM). **Observed.**
 - `RC.TXT` — `kernel_rc=0x0000000000000000` — the kernel executed and
   returned 0 to the loader. **Observed.** This is the primary handoff proof.
 - `MEMMAP.TXT` — the EFI memory map (27+ descriptors, all RAM `xp=0 wb=1`);
   the kernel allocation sits in ordinary cacheable RAM. **Observed.**
 - `KERNEL.BIN` — the flat image, verified by `elf2bin.py --info`
   (`entry_offset=0x18`, size, magic). **Observed.**
+- `KERNEL.TXT` — the kernel's own marker, byte-perfect and byte-identical
+  across repeated boots (the scramble known issue below is **resolved**);
+  `zig build run` gates on its content. **Observed.**
 
-## Known issue (observed, unresolved): kernel-side file writes are scrambled on VZ
+## Known issue (observed, RESOLVED 2026-08-05): kernel-side file writes were scrambled on VZ
 
-The kernel's own write to `\KERNEL.TXT` executes (the file is created with
-the write's exact size and the kernel's write path returns normally), but
-the stored bytes are scrambled: they are shifted slices of the kernel
-image's own `.rodata` rather than the intended content. This is **observed**
-and reproducible across kernel load addresses (0x7e55f000 and 0x7f328000
-both corrupt) and with or without caller-side `dc cvac` cleaning of the
-write buffer.
+The kernel's own write to `\KERNEL.TXT` executed (the file was created with
+the write's exact size and the write path returned normally), but the stored
+bytes were scrambled: shifted slices of the kernel image's own `.rodata`
+rather than the intended content. Observed across kernel load addresses
+(0x7e55f000 and 0x7f328000 both corrupt) and with or without caller-side
+`dc cvac` cleaning of the write buffer.
 
-Investigation so far (all recorded in `artifacts/m1-run*.txt`):
-- The loader's identical file-write pattern (open → write → flush → close,
-  including repeated open/setPosition(0) probes) lands **byte-perfect**
-  before and after the jump — so the firmware's Simple File System path and
-  the loader's buffers are not the problem.
-- The kernel's string constants are byte-intact at their load-time offsets
-  (dumped from memory by the loader via the `IMGDATA.TXT` probe) and the
-  kernel's `adr` targets match them — so the kernel passes correct
-  pointers.
-- The scrambled bytes vary in offset run to run and are slices of the
-  kernel image region — consistent with the firmware's storage path reading
-  a stale/incoherent view of the kernel allocation (a VZ firmware cache or
-  DMA quirk), not with a kernel logic bug.
+### Root cause (observed)
 
-Consequence: milestone-one proof does **not** rest on `KERNEL.TXT`
-content. `zig build run` gates on `BOOTED.TXT` (loader ran) and `RC.TXT`
-(kernel ran and returned) and prints `KERNEL.TXT` for the record. The next
-milestone prompt carries the root-cause thread forward (see
-`docs/roadmap.md`). (There is no QEMU path in this project; Apple VZ is the
-only supported host.)
+The loader loaded `KERNEL.BIN` verbatim, placing the 24-byte DSK1 header at
+`base+0..23` and the loadable content at `base+24`. The kernel is linked
+with VMA 0 == content start, so a literal at ELF VMA `V` sat at RAM
+`base+24+V`. LLVM emits some data references as `adrp` + `add`: `adrp`
+yields `(PC & ~0xfff) + page-relative immediate` (the image base, for a
+sub-page image) and `add` adds the VMA low-12 offset — the +24 header
+offset is silently dropped, so those references read every `.rodata`
+literal 24 bytes early. `adr`-based references were unaffected because the
++24 rides inside the PC. The kernel's file writes therefore stored shifted
+slices of its own `.rodata`; the run-varying `base=`/`size=`/`st=` hex
+digits made the scramble offset appear to vary run to run. The loader's own
+writes were byte-perfect because the loader is a PE image whose addressing
+is set up by the firmware's `LoadImage`, with no hand-rolled offset.
+
+Evidence for this mechanism (`artifacts/m1-baseline-run.txt`,
+`artifacts/m1-exp1b-run.txt`, `artifacts/m1-exp1/` probe files,
+`artifacts/m1-fix-run{1,2,3}.txt`, `artifacts/m1-fix-gated-run.txt`):
+- Experiment 1 (loader-only): the loader wrote byte-perfect files **from the
+  flushed kernel allocation** (`PROBE-A.TXT`, `PROBE-C.TXT`, `IMGPROBE.TXT`)
+  with the kernel never jumping — the region + cache flush alone is clean;
+  the trigger is kernel execution.
+- Experiment 1b/1c: the kernel echoed its assembled write buffer into its
+  own page; the loader's post-return dump showed the buffer scrambled with
+  `.rodata` bytes even with **zero firmware calls** from the kernel.
+- Disassembly: `adrp x8, #0; add x8, x8, #0x188` loads the "entry reached
+  via handoff" literal 24 bytes before its RAM offset; the `adr` references
+  are correct. A loader-side dump of the allocation shows RAM is byte-
+  identical to the `KERNEL.BIN` file (0 differing bytes) — the data in RAM
+  was right; the kernel's ADRP-based loads targeted the wrong offset.
+
+### Fix (observed byte-perfect)
+
+The loader now parses the header but does **not** load it into RAM: the
+content is placed at `base+0` (ELF VMA `V` at RAM `base+V`) and control
+transfers to `base + (entry_offset - 24)`. Both `adr` and `adrp`+`add`
+references then resolve to the correct bytes. Verified over repeated
+`zig build run` boots: `KERNEL.TXT` is byte-perfect and byte-identical
+across runs, and `zig build run` now **gates** on its content
+(`DIPSHITOS KERNEL`, `entry reached via handoff`) in addition to
+`BOOTED.TXT` and `RC.TXT`.
 
 ## Consequences
 

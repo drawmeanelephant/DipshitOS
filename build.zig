@@ -134,12 +134,12 @@ const run_vm_command =
     \\printf '%s\n' "$RCEVIDENCE"
     \\printf '%s' "$RCEVIDENCE" | grep -q "kernel_rc=0x0000000000000000" || { echo "kernel returned a nonzero rc"; exit 1; }
     \\echo
-    \\echo "=== kernel marker: \\KERNEL.TXT (the kernel's own write, informational) ==="
-    \\python3 image/mkfat32.py --cat-file /KERNEL.TXT artifacts/disk.img 2>/dev/null || echo "(no KERNEL.TXT)"
     \\echo
-    \\echo "note: on Apple VZ firmware the KERNEL.TXT bytes are currently scrambled"
-    \\echo "(observed firmware quirk; see docs/decisions/0002-kernel-handoff.md). The"
-    \\echo "RC.TXT gate above is the clean proof that the kernel ran and returned."
+    \\echo "=== kernel marker: \\KERNEL.TXT on the ESP (the kernel's own write) ==="
+    \\KERNELTXT="$(python3 image/mkfat32.py --cat-file /KERNEL.TXT artifacts/disk.img)" || { echo "kernel marker missing: the kernel did not write KERNEL.TXT"; exit 1; }
+    \\printf '%s\n' "$KERNELTXT"
+    \\printf '%s' "$KERNELTXT" | grep -q "DIPSHITOS KERNEL" || { echo "KERNEL.TXT content mismatch"; exit 1; }
+    \\printf '%s' "$KERNELTXT" | grep -q "entry reached via handoff" || { echo "KERNEL.TXT content mismatch"; exit 1; }
     \\echo
-    \\echo "run: boot completed; loader and kernel handoff observed (BOOTED.TXT, LOADER.TXT, RC.TXT)"
+    \\echo "run: boot completed; loader and kernel handoff observed (BOOTED.TXT, LOADER.TXT, RC.TXT, KERNEL.TXT)"
 ;
