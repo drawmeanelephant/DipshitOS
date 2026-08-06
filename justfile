@@ -10,6 +10,10 @@ default: build
 build:
     zig build
 
+# Run the M1.5 kernel monitor module unit tests (zig test per module; skips modules not yet landed)
+test:
+    bash tools/verify-unit-tests.sh
+
 # Extract the flat kernel image zig-out/bin/KERNEL.BIN (zig build kernel)
 kernel:
     zig build kernel
@@ -40,7 +44,8 @@ ragshit *ARGS:
 
 # Run the build-gate verification sequence from docs/testing.md (no VM)
 verify:
-    zig fmt --check boot/src/main.zig kernel/src/main.zig build.zig
+    zig fmt --check boot/src/*.zig kernel/src/*.zig build.zig
+    bash tools/verify-unit-tests.sh
     zig build
     zig build image
     zig build inspect

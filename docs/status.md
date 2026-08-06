@@ -364,6 +364,15 @@ Status legend: ⬜ claimed · 🔄 in progress · ✅ done · ⛔ blocked.
   **input plumbing observed**; guest RX and the interactive monitor prompt
   remain **unobserved** (guest RX is agent B's slice; the VZ serial gate is
   still blocked). Evidence: `artifacts/m15-host-*.txt`. ✅
+- **2026-08-06** — **CI unit-test gate (buffy, `agent/buffy/m15-host-plumbing`):**
+  CI now format-checks `boot/src/*.zig kernel/src/*.zig build.zig` and runs
+  the M1.5 kernel monitor module unit tests via
+  `tools/verify-unit-tests.sh` — `zig test` on each module present in
+  `kernel/src/` (console/handoff/memmap/monitor). Modules that have not
+  landed yet (agent C's commands slice) are skipped with a notice so `main`
+  stays green; once each module merges, its tests become binding
+  branch-protection evidence instead of local-only claims. `just test`
+  added; `just verify` and `docs/testing.md` updated to match. ✅
 
 ## Immediate gate work (prerequisites for M1.5)
 
