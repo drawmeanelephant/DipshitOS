@@ -1,0 +1,26 @@
+# Ragshit ignores. Patterns are gitignore-style.
+# Tracked files stay eligible even when .gitignore matches them, unless
+# they are listed here explicitly.
+
+.git/
+.ragshit/
+.zig-cache/
+zig-out/
+node_modules/
+__pycache__/
+*.img
+*.bin
+*.efi
+*.elf
+*.o
+*.a
+*.dylib
+*.so
+artifacts/efi-vars.bin
+
+# The context engine itself (tools/ragshit/) is meta-tooling, not OS
+# context: its README and sources contain OS query strings as examples and
+# would pollute retrieval for this repository, so it is excluded from the
+# OS index. (Subdirectory scoping is not supported; run ragshit against a
+# standalone checkout to index the tool's own docs.)
+tools/ragshit/

@@ -30,6 +30,10 @@ inspect:
 context:
     zig build context
 
+# Local Git-aware context engine — tools/ragshit (ragshit index/query/bundle/doctor ...)
+ragshit *ARGS:
+    python3 tools/ragshit/ragshit {{ARGS}}
+
 # Run the build-gate verification sequence from docs/testing.md (no VM)
 verify:
     zig fmt --check boot/src/main.zig kernel/src/main.zig build.zig

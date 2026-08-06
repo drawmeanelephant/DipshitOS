@@ -42,6 +42,12 @@ These rules bind any AI agent or human contributor working in this project.
   docs link to it instead of duplicating status prose.
 - Keep `README.md` and `docs/testing.md` honest about what was observed.
 
+## Repository tooling
+
+- `tools/ragshit/` is a host-side context engine (local SQLite+FTS5 index,
+  deterministic LLM-context bundles, no network calls). It is developer
+  tooling, not guest software, and counts toward no milestone.
+
 ## Multiagent coordination rules
 
 Multiple agents and humans develop this repo, sometimes in parallel. The

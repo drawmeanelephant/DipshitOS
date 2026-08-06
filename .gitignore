@@ -12,6 +12,9 @@ zig-out/
 artifacts/*
 !artifacts/.gitkeep
 
+# --- Local context engine (tools/ragshit) index ---
+.ragshit/
+
 # --- Disk images, firmware blobs, EFI binaries, debug files ---
 *.img
 *.fd

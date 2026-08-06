@@ -91,11 +91,33 @@ dipshitos/
 │   └── mkfat32.py             pure-Python FAT32+GPT builder/lister/cat
 ├── tools/
 │   ├── inspect.sh             EFI binary + image inspection (degrades gracefully)
-│   └── context/               project-context generator + review prompt ├── docs/                      status.md (canonical living status & changelog),
- │                              architecture, branch protection, hardware contract,
- │                              roadmap, testing, decisions (ADRs 0001–0004)
+│   ├── context/               project-context generator + review prompt
+│   └── ragshit/               local Git-aware context engine (Python, stdlib only)
+├── docs/                      status.md (canonical living status & changelog),
+│                              architecture, branch protection, hardware contract,
+│                              roadmap, testing, decisions (ADRs 0001–0004)
 └── artifacts/                 build evidence (gitignored)
 ```
+
+## Local context engine (`tools/ragshit/`)
+
+`tools/ragshit/` is **ragshit** — a local, Git-aware retrieval engine that
+builds a SQLite+FTS5 index of this repository and emits deterministic
+context bundles for LLM reviewers. Every source chunk in a bundle is
+addressable by path, line range, commit, and score, so agents and
+reviewers can cite exactly where a claim came from. Python 3.12+, standard
+library only, no network calls, no embeddings yet.
+
+```bash
+./tools/ragshit/ragshit index .
+./tools/ragshit/ragshit query . "kernel handoff ABI"
+./tools/ragshit/ragshit bundle . "review milestone two" --output artifacts/review-context.md
+./tools/ragshit/ragshit doctor .
+```
+
+`just ragshit <subcommand> <args>` aliases the launcher. See
+`tools/ragshit/README.md` for the full command set, ranking formula, and
+configuration.
 
 ## Verification results (observed on this development host)
 
