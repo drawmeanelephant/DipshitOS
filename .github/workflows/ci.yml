@@ -9,7 +9,7 @@ on:
 
 jobs:
   build-and-test-macos:
-    name: Build & Test (macOS + Swift Launcher)
+    name: Build (macOS + Swift Launcher)
     runs-on: macos-latest
 
     steps:
