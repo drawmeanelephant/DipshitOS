@@ -53,15 +53,25 @@ byte-identical across runs, and `zig build run` **gates** on its content
 `BOOTED.TXT` and `RC.TXT`. Full investigation: ADR 0002 and
 `artifacts/m1-run*.txt` / `m1-fix-*.txt`.
 
-## Milestone two — the kernel proper (next phase)
+## Milestone two — the kernel proper (implementation on `m2-kernel-proper`; VZ gate blocked)
 
 > The kernel seizes the machine: it ends UEFI Boot Services, takes over the
 > MMU with its own identity-map page tables, and drives a minimal MMIO
 > serial console. No firmware services remain in use.
 
-Design: `docs/decisions/0004-kernel-proper.md` (ADR 0004). Apple
-Virtualization.framework is the only supported host; there is no QEMU
+Design: `docs/decisions/0004-kernel-proper.md` (ADR 0004), with the
+implementation design and review in `docs/m2-kernel-proper-design.md`.
+Apple Virtualization.framework is the only supported host; there is no QEMU
 path. The guest stays freestanding Zig — no libc, no POSIX.
+
+**Implementation attempted; build verification is available but hardware verification is blocked:** the boot stub
+allocates the v2 stack/handoff contract; the kernel captures the map, retries
+ExitBootServices up to eight times, builds/installs identity TTBR0_EL1 tables,probes declared MMIO windows, and is designed to enter a terminal WFE loop
+after serial evidence. The saved VZ run did not produce serial output or
+RC.TXT, so the hardware takeover and failure gates remain unpassed; UART/MMIO
+and MMU hardware assumptions remain inferred. The branch is not milestone-two
+complete until those gates are directly observed.
+
 
 ### Goal
 
@@ -96,20 +106,21 @@ into a kernel that **keeps** the machine:
 - `docs/` — this roadmap section, ADR 0004, architecture update, and the
   new `[inferred]` hardware-contract assumptions.
 
-### Verification gates (must be observed, saved under `artifacts/`)
+### Verification gates (observed or precisely blocked; saved under `artifacts/`)
 
-1. `zig build`, `zig build image`, `zig build run` complete on Apple M4 /
-   macOS 27.
-2. **Primary:** `vm-serial.log` contains the exact banner
-   `DipshitOS kernel has seized control.` and the memory-map hex print
-   after a VZ boot. (Milestone-one logs are empty; first content = proof.)
-3. The kernel does **not** return: the VM reaches its terminal state
-   (wait loop or clean halt) as the runner observes it.
-4. Failure path still works: a broken handoff (bad magic) yields `RC.TXT`
-   with a non-zero status via the pre-exit return path.
+1. `zig fmt --check`, `zig build`, `zig build image`, `zig build inspect`,
+   and `swift build --package-path host/vm-runner` complete; outputs are
+   saved as `artifacts/m2-*.txt`.
+2. **Primary:** a successful VZ run must put the exact banner
+   `DipshitOS kernel has seized control.` and the memory-map hex print in
+   `vm-serial.log`. The log must also contain `kernel terminal state`.
+3. The kernel does **not** return: the runner requires the terminal marker
+   emitted immediately before the WFE loop.
+4. Failure path still works: the bad-handoff fixture must yield non-zero
+   `RC.TXT` before exit.
 5. Every `[inferred]` hardware assumption (UART base/layout, MMU behavior,
-   GIC presence) is flipped to `[observed]` in
-   `docs/hardware-contract.md` only with matching log evidence.
+   GIC presence) is flipped to `[observed]` only with matching probe/serial
+   evidence. A blocked host run leaves the entries inferred and is reported.
 
 ### Non-goals (explicit exclusions for this milestone)
 
@@ -127,6 +138,14 @@ byte-perfect, and `zig build run` now gates on it. The issue sat on the
 UEFI storage path; `ExitBootServices` removes that path entirely, so it
 would not have gated milestone-two evidence (which moves to the serial
 console) either way.
+
+### Milestone-two evidence status
+
+The repository's prior milestone-one run logs observed an empty
+`vm-serial.log`. The new VZ run is the decisive hardware probe. Until it is
+run successfully on Apple M4 / macOS 27, this branch makes no observed claim
+about the VZ guest MMIO address, register layout, or the post-switch MMU;
+those remain explicitly inferred in `docs/hardware-contract.md`.
 
 ## Later milestones (sketches only, not commitments)
 

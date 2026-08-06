@@ -19,8 +19,10 @@
 //! host-observable evidence.
 //!
 //! Kernel image format v1 and the handoff ABI are documented in
-//! docs/decisions/0002-kernel-handoff.md. Still pure UEFI services
-//! throughout: no libc, no POSIX, no filesystem driver of our own.
+//! docs/decisions/0002-kernel-handoff.md and ADR 0004. The stub remains
+//! pure UEFI services throughout: no libc, no POSIX, no filesystem driver
+//! of our own. It allocates the v2 kernel stack and handoff record but never
+//! calls ExitBootServices itself.
 //!
 //! Zig 0.16.0 adjustment: older Zig examples exported `efi_main` with
 //! `callconv(.win64)`. Zig 0.16's `std.start` for the `uefi` OS target
@@ -31,6 +33,7 @@
 
 const std = @import("std");
 const uefi = std.os.uefi;
+const build_options = @import("build_options");
 
 /// Convert a comptime ASCII string into a null-terminated UTF-16LE array as
 /// required by the EFI APIs. (All of our strings are pure ASCII.)
@@ -65,6 +68,23 @@ const kernel_path = utf16z("\\KERNEL.BIN");
 const kernel_magic: u32 = 0x314B5344;
 const kernel_header_size: usize = 24;
 const kernel_max_size: u64 = 16 * 1024 * 1024; // sanity cap for this milestone
+
+/// Handoff contract v2 (ADR 0004 D5). The stub allocates this record in a
+/// dedicated EfiLoaderData page and passes its address in x3.
+const HandoffV2 = extern struct {
+    magic: u32,
+    version: u32,
+    kernel_base: u64,
+    kernel_size: u64,
+    system_table: u64,
+    image_handle: u64,
+    stack_base: u64,
+    stack_size: u64,
+    flags: u64,
+};
+const handoff_magic: u32 = 0x324B5344; // "DSK2"
+const handoff_version: u32 = 2;
+const kernel_stack_size: usize = 16 * 1024;
 
 pub fn main() void {
     const st = uefi.system_table;
@@ -111,8 +131,8 @@ fn write_marker(st: *const uefi.tables.SystemTable) void {
 /// Milestone one: read \KERNEL.BIN from the ESP, allocate pages with Boot
 /// Services, copy the image there, make the instruction stream see it, and
 /// jump to its entry point (handoff ABI: x0 = image base, x1 = image size,
-/// x2 = System Table, x3 = open root directory; the kernel returns a u64
-/// status). Best effort: if anything is missing or malformed, the loader
+/// x2 = System Table, x3 = handoff-v2 page; only a pre-exit failure returns
+/// a u64 status). Best effort: if anything is missing or malformed, the loader
 /// quietly returns to the firmware.
 fn load_and_enter_kernel(st: *const uefi.tables.SystemTable) void {
     const boot_services = st.boot_services orelse return;
@@ -192,18 +212,35 @@ fn load_and_enter_kernel(st: *const uefi.tables.SystemTable) void {
     //     kernel image is tiny.
     flush_to_pou(dst, content_size);
 
-    // 4. Jump. The kernel runs on our stack and keeps using Boot Services;
-    //    when it returns, we return to the firmware. entry_offset is
-    //    file-relative (includes the 24-byte header); with the content at
-    //    base+0 the in-RAM entry is base + (entry_offset - 24).
+    // 4. Allocate the kernel-owned stack and the v2 handoff page. Both are
+    //    4K-aligned EfiLoaderData allocations adopted by the kernel after
+    //    ExitBootServices. The stack is exactly 16 KiB as required by ADR 0004.
+    const stack_pages = boot_services.allocatePages(.any, .loader_data, kernel_stack_size / 4096) catch return;
+    const handoff_pages = boot_services.allocatePages(.any, .loader_data, 1) catch return;
+    const stack_base: u64 = @intFromPtr(stack_pages.ptr);
+    const handoff: *HandoffV2 = @ptrCast(@alignCast(handoff_pages.ptr));
+    handoff.* = .{
+        .magic = if (build_options.bad_handoff) 0 else handoff_magic,
+        .version = handoff_version,
+        .kernel_base = base,
+        .kernel_size = image_size,
+        .system_table = @intFromPtr(st),
+        .image_handle = @intFromPtr(uefi.handle),
+        .stack_base = stack_base,
+        .stack_size = kernel_stack_size,
+        .flags = 0,
+    };
+
+    // 5. Jump. entry_offset is file-relative (includes the 24-byte header);
+    //    with content at base+0 the in-RAM entry is base + (entry_offset - 24).
     const EntryFn = *const fn (
         base: u64,
         size: u64,
         st: *const uefi.tables.SystemTable,
-        root: *uefi.protocol.File,
+        handoff_ptr: *HandoffV2,
     ) callconv(.c) u64;
     const entry: EntryFn = @ptrFromInt(base + (entry_offset - kernel_header_size));
-    const rc = entry(base, image_size, st, root);
+    const rc = entry(base, image_size, st, handoff);
     write_rc(root, rc);
 
     if (st.con_out) |con_out| {

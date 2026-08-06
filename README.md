@@ -6,15 +6,13 @@ A from-scratch AArch64 operating system. Not Linux-based. No libc, no POSIX,
 no existing guest OS. Guest code is written in Zig; the host launcher is
 Swift. See `AGENTS.md` for the project rules.
 
-**Status: milestone one implemented** on branch `m1-kernel-handoff`.
-Milestone zero proved the smallest reliable boot pipeline (a
-Zig-compiled AArch64 UEFI application on a FAT boot medium, executed by
-real firmware, with its output observed on the host). Milestone one adds a
-separate freestanding kernel image: the boot app loads `\KERNEL.BIN` from
-the ESP, copies it to Boot Services memory, and jumps to its entry point;
-the kernel runs and returns. **No allocator, MMU setup, interrupts,
-scheduler, filesystem, graphics, networking, SMP, or userspace exists
-yet.** See `docs/roadmap.md` and `docs/decisions/0002-kernel-handoff.md`.
+**Status: milestone-two implementation attempted; build gates pass, VZ hardware gate blocked** on branch `m2-kernel-proper`.
+Milestone two adds the kernel proper: the stub allocates handoff contract v2,
+the kernel captures the EFI map, calls `ExitBootServices` with the required
+retry bound, installs identity-map TTBR0_EL1 tables, probes declared MMIO
+windows, and drives a polled serial console before entering a terminal WFE
+loop. The exact VZ UART/MMIO result remains an observed verification gate;
+see `docs/m2-kernel-proper-design.md`, `docs/roadmap.md`, and ADR 0004.
 
 The milestone-one `KERNEL.TXT` corruption (kernel writes landing as
 shifted slices of the kernel image's `.rodata` on Apple VZ firmware) is
@@ -34,11 +32,12 @@ D/I-cache maintenance, and jumps to the kernel entry. It writes
 `\LOADER.TXT` (observed placement), `\MEMMAP.TXT` (EFI memory map), and
 `\RC.TXT` (the kernel's return code) as host-readable evidence.
 
-`kernel/src/main.zig` is the milestone-one kernel stub: a few hundred bytes
-of `aarch64-freestanding` Zig (no libc/POSIX) that writes its own
-best-effort marker `\KERNEL.TXT`, prints via ConOut, and returns 0. It is
-converted to the flat image by `tools/elf2bin.py`. Still pure UEFI
-services throughout — no `ExitBootServices` yet (documented decision).
+`kernel/src/main.zig` is the milestone-two freestanding kernel proper. It
+validates handoff v2, captures the map, exits Boot Services, builds and
+installs identity TTBR0_EL1 tables, probes PL011/16550/virtio-MMIO candidates,
+prints the exact takeover banner and hexadecimal map view, and then never
+returns. Its fixed page tables and virtio queue storage are BSS carve-outs;
+there is no general allocator or libc/POSIX.
 
 ## Toolchain
 
@@ -69,9 +68,9 @@ dipshitos/
 ├── build.zig / build.zig.zon  root build system (Zig 0.16)
 ├── justfile                   command aliases
 ├── .zigversion                pinned Zig version (0.16.0)
-├── boot/src/main.zig          the AArch64 UEFI boot loader (milestone one)
-├── kernel/                    freestanding AArch64 kernel stub
-│   ├── src/main.zig           kernel entry (writes \\KERNEL.TXT, returns 0)
+├── boot/src/main.zig          the AArch64 UEFI boot loader (handoff v2)
+├── kernel/                    freestanding AArch64 kernel proper
+│   ├── src/main.zig           ExitBootServices, MMU, probe, serial, terminal loop
 │   └── linker.ld              dense layout (avoids 64 KiB lld padding)
 ├── tools/elf2bin.py           ELF → flat KERNEL.BIN (format v1) converter
 ├── host/vm-runner/            Swift Virtualization.framework launcher
@@ -91,6 +90,11 @@ dipshitos/
 
 ## Verification results (observed on this development host)
 
+The milestone-two VZ takeover and bad-handoff gates are **not passed**: the
+saved run has an empty `artifacts/vm-serial.log`, and the bad-handoff run has
+no `RC.TXT`. The implementation and build checks below must not be read as
+hardware evidence.
+
 Host: Apple M4, macOS 27.0 (arm64), Zig 0.16.0, Swift 6.2.3 (arm64).
 
 | Step | Command | Result |
@@ -109,7 +113,7 @@ All command output and logs are saved under `artifacts/` (`inspect.txt`,
 
 ### Observed behavior
 
-- `zig build`/`image`/`inspect`/`run` all complete successfully on this host.
+- `zig build`, `image`, and `inspect` complete on this host; the milestone-two `run` gate is blocked by missing serial evidence.
 - The Virtualization.framework VM boots the GPT+FAT image: configuration
   validates, the EFI variable store is created, the VM starts and runs, and
   after boot the guest-written marker file `\BOOTED.TXT` exists on the ESP
@@ -128,7 +132,8 @@ All command output and logs are saved under `artifacts/` (`inspect.txt`,
 
 ## Next steps (see `docs/roadmap.md`)
 
-1. Milestone two: a real kernel proper (identity-map MMU, a UART console
-   driver, a hand-off contract from the boot stub) — described in the
-   roadmap, not implemented. (The milestone-one `KERNEL.TXT` loose end is
-   closed: resolved in ADR 0002, byte-perfect and gated.)
+1. Resolve the VZ serial/MMIO discovery and run the complete Apple M4 / macOS 27 VZ gate, saving output under
+   `artifacts/`. Only then may the matching MMIO/MMU assumptions be changed
+   from `[inferred]` to `[observed]` in `docs/hardware-contract.md`.
+2. Keep later interrupt/GIC, timer, allocator, and process work out of this
+   milestone; those remain future milestones.
