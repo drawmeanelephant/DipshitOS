@@ -151,8 +151,8 @@ Legend: ⬜ not started · 🔄 in progress · ✅ done · ⛔ blocked (note why
 
 | # | Step | Observable result | Status | Notes / evidence |
 |---:|------|-------------------|--------|------------------|
-| 1 | **Freeze the target.** Name it Milestone 1.5: Interactive Kernel Monitor. Keep the milestone-two kernel exactly as merged (no new firmware work). | Scope document says exactly what counts as done and what is deferred. | ✅ | This file is the scope/status doc (frozen 2026-08-06; see changelog). |
-| 2 | **Define the finish line.** Boot into a terminal, display a banner, accept commands at `dipshit>`, execute ≥ 10 useful commands. | Written acceptance checklist (above) prevents agents from wandering into scheduler astrology. | ✅ | Hard gates listed above; fs gate flagged for re-scope (frozen 2026-08-06; see changelog). |
+| 1 | **Freeze the target.** Name it Milestone 1.5: Interactive Kernel Monitor. Keep the milestone-two kernel exactly as merged (no new firmware work). | Scope document says exactly what counts as done and what is deferred. | ✅ | This file is the scope/status doc (frozen 2026-08-06; see `docs/logs/m1.5-tracker.md`). |
+| 2 | **Define the finish line.** Boot into a terminal, display a banner, accept commands at `dipshit>`, execute ≥ 10 useful commands. | Written acceptance checklist (above) prevents agents from wandering into scheduler astrology. | ✅ | Hard gates listed above; fs gate flagged for re-scope (frozen 2026-08-06; see `docs/logs/m1.5-tracker.md`). |
 | 3 | **Create a dedicated integration branch.** e.g. `m1.5-interactive-monitor`. | All monitor work has one landing zone while agents use smaller branches. | ⬜ | Not created as of 2026-08-06; streams A and C targeted `main` directly per ADR 0003 / branch protection (PRs #12/#13). Revisit if parallel kernel-wiring streams collide. |
 | 4 | **Add interactive mode to the Swift runner.** Give `VZFileHandleSerialPortAttachment` a readable host handle, initially standard input. | Bytes typed in the host terminal can reach the guest serial device. | ✅ | `--console` wires a stdin pipe as `fileHandleForReading` (non-nil); `--debug-input` proves bytes are handed to the attachment (`artifacts/m15-host-console-gate.txt`). Guest receipt is **not** claimed — RX is agent B. |
 | 5 | **Tee guest output.** Send output to the terminal **and** `artifacts/vm-serial.log`. | Interact live without sacrificing reproducible evidence. | ✅ | Console mode streams guest output via a pipe tee to terminal + log (no full-log reloads). Evidence path (`zig build run`) keeps file-polling, unchanged. |
@@ -266,19 +266,22 @@ changelog section). The rules below make that safe. They are **binding**
 
 > **How to claim:** copy `docs/claims/TEMPLATE.md` to
 > `docs/claims/<NNN>-<slug>.md`, fill it in, set Status to `🔄 <branch>`
-> **before** starting work, and add a link row below. Flip your claim
-> file to `✅` (evidence) or `⛔` (note why) on completion. Unclaimed
-> (`⬜`) claims are fair game; `🔄`/`✅` claims are not. The table below is
-> an index; the claim files in `docs/claims/` are the source of truth.
+> **before** starting work, and add a row to the index in
+> [`docs/claims/README.md`](claims/README.md) — **not** to this file, so
+> parallel agents never edit the same lines. Flip your claim file to `✅`
+> (evidence) or `⛔` (note why) on completion. Unclaimed (`⬜`) claims are
+> fair game; `🔄`/`✅` claims are not. The **canonical index with status is
+> [`docs/claims/README.md`](claims/README.md)**; this section only links
+> the claim files.
 
-| Claim | Owner (branch) | Status |
-|-------|----------------|--------|
-| [Bad-handoff gate fix](claims/0001-bad-handoff-gate.md) | buffy (`agent/buffy/m2-badhandoff-fix`) | ✅ fixed 2026-08-06 — `RC.TXT` → `kernel_rc=0x2`, gate exits 0 (`artifacts/m2-badhandoff-fix-after.txt`) |
-| [VZ serial/MMU gate run](claims/0002-vz-serial-gate.md) | — | ⬜ |
-| [M1.5 — host plumbing (agent A)](claims/0003-m15-host-plumbing.md) | buffy (`agent/buffy/m15-host-plumbing`) | ✅ 2026-08-06 — steps 4–7 landed, evidence under `artifacts/m15-host-*.txt` |
-| [M1.5 — console & shell core (agent B)](claims/0004-m15-console-shell-core.md) | — | ⬜ |
-| [M1.5 — commands & personality (agent C)](claims/0005-m15-commands-personality.md) | buffy (`agent/buffy/m15-commands`) | ✅ 2026-08-06 — 14 commands host-tested, `kernel/src/main.zig` untouched (`artifacts/m15-commands-*.txt`) |
-| [Status/changelog machinery + PR #10](claims/0006-status-machinery.md) | buffy (`agent/buffy/m2-kernel-proper`) | ✅ |
+| Claim | File |
+|-------|------|
+| Bad-handoff gate fix (M2 pre-exit return path) | [`0001-bad-handoff-gate.md`](claims/0001-bad-handoff-gate.md) |
+| VZ serial/MMU gate run (M1.5 step 8) | [`0002-vz-serial-gate.md`](claims/0002-vz-serial-gate.md) |
+| M1.5 — host plumbing (agent A) | [`0003-m15-host-plumbing.md`](claims/0003-m15-host-plumbing.md) |
+| M1.5 — console & shell core (agent B) | [`0004-m15-console-shell-core.md`](claims/0004-m15-console-shell-core.md) |
+| M1.5 — commands & personality (agent C) | [`0005-m15-commands-personality.md`](claims/0005-m15-commands-personality.md) |
+| Status/changelog machinery + PR #10 | [`0006-status-machinery.md`](claims/0006-status-machinery.md) |
 
 ## Changelog (append-only, per branch)
 
@@ -301,7 +304,7 @@ Status legend: ⬜ claimed · 🔄 in progress · ✅ done · ⛔ blocked.
   shards. Rationale: PR #12 and PR #13 both appended to this file's
   changelog and collided; sharding makes parallel appends conflict-free.
   ✅ — see `docs/logs/README.md` and `docs/claims/README.md`.
-- **2026-08-06** — **PR #12 rebased onto current `main` (buffy,
+- **2026-08-06** — **PR #12 merged onto current `main` (buffy,
   `agent/buffy/m15-commands`):** merged `origin/main` (PR #13 host
   plumbing + CI unit-test gate) into this branch and resolved the
   `docs/status.md` changelog collision by preserving both sides' entries

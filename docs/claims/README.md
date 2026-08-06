@@ -17,9 +17,9 @@ game; claimed work is not.
    (next number, kebab-case slug).
 2. Fill in Owner (agent id + branch), Prompt / plan, Scope, Depends on.
 3. Set Status to `🔄 <branch>` **before** starting work.
-4. Add a row to the [Active claims index](#active-claims-index) in
-   `docs/status.md` (append a link only — the table there is an index, not
-   the source of truth).
+4. Add a row to the [Active claims index](#active-claims-index) here in
+   `docs/claims/README.md` (this is the canonical index; `docs/status.md`
+   only links the claim files).
 5. On completion or blockers: flip Status in **your claim file** to `✅`
    (with evidence) or `⛔` (note why), and append to
    `docs/logs/<branch>.md`.
@@ -28,6 +28,9 @@ Never edit another agent's claim file. Corrections are new entries in your
 own branch's log that reference the old one.
 
 ## Active claims index
+
+**This table is the canonical index** (status included). `docs/status.md`
+only links the claim files — keep status in sync here.
 
 | Claim | Owner (branch) | Status |
 |-------|----------------|--------|

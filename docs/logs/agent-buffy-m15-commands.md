@@ -26,3 +26,9 @@ Append-only. See [`README.md`](README.md) for the convention.
   milestone; hard gates 5/6 stay open). `kernel/src/main.zig` has zero diff
   (gate 3). ✅ — on branch awaiting merge through the
   `m1.5-interactive-monitor` integration branch.
+- **2026-08-06** — **Correction (buffy, `agent/buffy/m15-commands`):**
+  the `m1.5-interactive-monitor` integration branch was **never created**;
+  streams A and C targeted `main` directly per ADR 0003 / branch
+  protection (PRs #12/#13 — see march step 3 in `docs/status.md`). This
+  entry supersedes the "awaiting merge through the integration branch"
+  wording in the slice-done entry above. ✅
