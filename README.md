@@ -22,6 +22,13 @@ shifted slices of the kernel image's `.rodata` on Apple VZ firmware) is
 0002), and `\KERNEL.TXT` is byte-perfect and gated by `zig build run`
 alongside `\BOOTED.TXT`, `\LOADER.TXT`, and `\RC.TXT`.
 
+**Next target: milestone 1.5, the interactive kernel monitor** — a live
+command monitor (`dipshit>` prompt) served by the kernel's polled serial
+console (the milestone-two terminal loop becomes its payload): identity
+commands, memory-map inspection, shell utilities, and machine controls.
+The goal, twenty-step plan, hard gates, and per-step progress live in
+**`docs/status.md`** (the living status & goals tracker).
+
 ## The guest
 
 `boot/src/main.zig` is an AArch64 UEFI application — now a tiny boot
@@ -84,9 +91,9 @@ dipshitos/
 │   └── mkfat32.py             pure-Python FAT32+GPT builder/lister/cat
 ├── tools/
 │   ├── inspect.sh             EFI binary + image inspection (degrades gracefully)
-│   └── context/               project-context generator + review prompt
-├── docs/                      status (canonical), architecture, branch protection,
-│                              hardware contract, roadmap, testing, decisions (ADRs 0001–0004)
+│   └── context/               project-context generator + review prompt ├── docs/                      status.md (canonical living status & changelog),
+ │                              architecture, branch protection, hardware contract,
+ │                              roadmap, testing, decisions (ADRs 0001–0004)
 └── artifacts/                 build evidence (gitignored)
 ```
 
@@ -130,10 +137,21 @@ All command output and logs are saved under `artifacts/` (`inspect.txt`,
 
 - Apple's VZ EFI firmware loads `EFI/BOOT/BOOTAA64.EFI` from the ESP per the
   UEFI removable-media rule (consistent with the observed marker write, but
-  the firmware's internal behavior is not directly observable).
-
-## Next steps
-
-The current gate-by-gate plan lives in [`docs/status.md`](docs/status.md)
-(the canonical status document); the milestone plan is in
-[`docs/roadmap.md`](docs/roadmap.md).
+  the firmware's internal behavior is not directly observable). ## Next steps
+ 
+ The gate-by-gate plan and active work claims live in
+ [`docs/status.md`](docs/status.md); the milestone plan is in
+ [`docs/roadmap.md`](docs/roadmap.md).
+ 
+ 1. **Milestone 1.5, the interactive kernel monitor**: the kernel console is
+    polled TX-only (ADR 0004, no RX path) and the VM runner's serial
+    attachment has no host-to-guest input handle (`fileHandleForReading:
+    nil`) — close the RX gap, then build the console abstraction, line
+    editor, command registry, and commands. Tracked step-by-step in
+    `docs/status.md`.
+ 2. Resolve the milestone-two VZ serial/MMIO discovery gate: run the complete
+    Apple M4 / macOS 27 VZ gate and save output under `artifacts/`. Only
+    then may the matching MMIO/MMU assumptions change from `[inferred]` to
+    `[observed]` in `docs/hardware-contract.md`.
+ 3. Keep later interrupt/GIC, timer, allocator, and process work out of
+    scope; those remain future milestones.
