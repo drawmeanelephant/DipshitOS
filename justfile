@@ -29,3 +29,7 @@ inspect:
 # Regenerate artifacts/context.md (zig build context)
 context:
     zig build context
+
+# Local Git-aware context engine — tools/ragshit (ragshit index/query/bundle/doctor ...)
+ragshit *ARGS:
+    python3 tools/ragshit/ragshit {{ARGS}}

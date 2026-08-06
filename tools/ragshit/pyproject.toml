@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ragshit"
+version = "0.1.0"
+description = "Local, Git-aware repository context and retrieval engine for coding agents and reviewers"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [{ name = "Ragshit contributors" }]
+keywords = ["rag", "retrieval", "context", "git", "sqlite", "fts5"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development :: Libraries",
+    "Environment :: Console",
+]
+dependencies = []
+
+[project.scripts]
+ragshit = "ragshit.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

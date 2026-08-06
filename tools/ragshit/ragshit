@@ -1,0 +1,15 @@
+#!/usr/bin/env python3
+"""Ragshit launcher — runs from a checkout without installation.
+
+Usage: ./ragshit <command> [args...]
+"""
+import os
+import sys
+
+_HERE = os.path.dirname(os.path.abspath(os.path.realpath(__file__)))
+sys.path.insert(0, os.path.join(_HERE, "src"))
+
+from ragshit.cli import main  # noqa: E402
+
+if __name__ == "__main__":
+    sys.exit(main())

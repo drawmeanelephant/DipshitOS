@@ -38,3 +38,9 @@ These rules bind any AI agent or human contributor working in this project.
 - Record important design choices as architecture decision records under
   `docs/decisions/`.
 - Keep `README.md` and `docs/testing.md` honest about what was observed.
+
+## Repository tooling
+
+- `tools/ragshit/` is a host-side context engine (local SQLite+FTS5 index,
+  deterministic LLM-context bundles, no network calls). It is developer
+  tooling, not guest software, and counts toward no milestone.
