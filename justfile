@@ -22,6 +22,10 @@ image:
 run:
     zig build run
 
+# Boot an interactive host serial console (zig build console)
+console:
+    zig build console
+
 # Inspect the EFI binary and disk image (zig build inspect)
 inspect:
     zig build inspect
@@ -46,3 +50,7 @@ verify:
 # Verify the pre-exit failure path (boots a VZ VM; Apple silicon only)
 verify-bad-handoff:
     bash tools/verify-bad-handoff.sh
+
+# Verify the M1.5 host-side interactive serial plumbing (boots VZ VMs; Apple silicon only)
+verify-host-console:
+    bash tools/verify-host-console.sh
