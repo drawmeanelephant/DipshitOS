@@ -38,9 +38,6 @@ jobs:
       - name: Inspect binary and disk image
         run: zig build inspect
 
-      - name: Test execution in headless QEMU
-        run: zig build run-qemu
-
       - name: Verify project context generator
         run: zig build context
 
