@@ -16,9 +16,11 @@ the kernel runs and returns. **No allocator, MMU setup, interrupts,
 scheduler, filesystem, graphics, networking, SMP, or userspace exists
 yet.** See `docs/roadmap.md` and `docs/decisions/0002-kernel-handoff.md`.
 
-Known issue: on Apple Virtualization firmware the kernel's own marker
-file (`\KERNEL.TXT`) lands scrambled (observed firmware quirk, ADR 0002);
-the milestone proof is `\RC.TXT` (`kernel_rc=0x0`), which is clean.
+The milestone-one `KERNEL.TXT` corruption (kernel writes landing as
+shifted slices of the kernel image's `.rodata` on Apple VZ firmware) is
+**fixed**: the loader now places the image content at `base+0` (ADR
+0002), and `\KERNEL.TXT` is byte-perfect and gated by `zig build run`
+alongside `\BOOTED.TXT`, `\LOADER.TXT`, and `\RC.TXT`.
 
 ## The guest
 
@@ -100,7 +102,7 @@ Host: Apple M4, macOS 27.0 (arm64), Zig 0.16.0, Swift 6.2.3 (arm64).
 | Build Swift runner | `zig build run` | **Observed**: SwiftPM build succeeds |
 | Boot via Virtualization.framework | `zig build run` | **Observed**: VM boots; guest wrote `\BOOTED.TXT` (exact content), `\LOADER.TXT` (base/size/entry + first16 bytes), and `\RC.TXT` (`kernel_rc=0x0`) — the kernel loaded, ran, and returned |
 | Kernel image | `zig build` + `elf2bin.py` | **Observed**: `KERNEL.BIN` (format v1: magic `DSK1`, `entry_offset=0x18`, ~2 KiB) |
-| Kernel marker `\KERNEL.TXT` | kernel write | **Observed**: file created, but content scrambled on VZ firmware (known issue, ADR 0002) |
+| Kernel marker `\KERNEL.TXT` | kernel write | **Observed**: byte-perfect and byte-identical across runs (ADR 0002 corruption fixed); `zig build run` gates on its content |
 
 All command output and logs are saved under `artifacts/` (`inspect.txt`,
 `vm-serial.log`, `vm-screen-*.png`, `efi-vars.bin`, `context.md`).
@@ -126,8 +128,7 @@ All command output and logs are saved under `artifacts/` (`inspect.txt`,
 
 ## Next steps (see `docs/roadmap.md`)
 
-1. Root-cause the observed VZ `KERNEL.TXT` scrambling (ADR 0002 known
-   issue; all investigation logs in `artifacts/m1-run*.txt`).
-2. Then milestone two: a real kernel proper (identity-map MMU, a UART
-   console driver, a hand-off contract from the boot stub) — described in
-   the roadmap, not implemented.
+1. Milestone two: a real kernel proper (identity-map MMU, a UART console
+   driver, a hand-off contract from the boot stub) — described in the
+   roadmap, not implemented. (The milestone-one `KERNEL.TXT` loose end is
+   closed: resolved in ADR 0002, byte-perfect and gated.)

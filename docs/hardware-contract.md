@@ -80,11 +80,17 @@ no QEMU path.
   from milestone two on, the boot stub never exits (it keeps this
   constraint forever) while the kernel proper may touch MMU and device
   MMIO under the assumptions in the next section.
-- **Known quirk (observed)**: on Apple VZ firmware the kernel's *own* file
-  writes land scrambled (the file is created with the right size, but the
-  bytes are shifted slices of the kernel image's `.rodata`), while the
-  loader's identical writes land byte-perfect. Recorded as a known issue in
-  ADR 0002; root cause not yet determined.
+- **Resolved quirk (observed)**: the milestone-one `KERNEL.TXT` corruption
+  — the kernel's *own* file writes landing as shifted slices of its
+  `.rodata` while the loader's identical writes landed byte-perfect — is
+  fixed. The loader parses the 24-byte DSK1 header but does **not** load it
+  into RAM: the image content sits at `base+0`, so ELF VMA `V` is at RAM
+  `base+V`. This is the addressing invariant the kernel's PC-relative
+  references depend on — `adr` rides the content offset inside the PC,
+  while `adrp`+`add` computes `(PC page) + VMA offset` and only resolves
+  correctly with the content at `base+0`. **[observed]** — `KERNEL.TXT` is
+  byte-perfect and byte-identical across repeated boots (ADR 0002,
+  `artifacts/m1-fix-run{1,2,3}.txt`).
 
 ## Milestone two: the kernel proper (planned, ADR 0004 — all assumptions **[inferred]**)
 

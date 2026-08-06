@@ -255,9 +255,10 @@ must pass, written so they cannot be faked (see AGENTS.md evidence rules):
 - ADR 0002's "no `ExitBootServices`" posture (D2) is superseded **for the
   kernel proper only**; ADR 0002 remains binding for milestone-one behavior
   and for the boot stub, which never exits Boot Services.
-- ADR 0002's `KERNEL.TXT` scrambling becomes moot for evidence: after
-  `ExitBootServices` the storage path that misbehaves no longer exists. The
-  root-cause thread stays open in the roadmap but no longer gates anything.
+- ADR 0002's `KERNEL.TXT` corruption becomes moot for evidence: after
+  `ExitBootServices` the storage path that misbehaves no longer exists.
+  (It is also resolved outright — content-at-`base+0` fix, byte-perfect
+  and gated — so nothing is carried forward.)
 - New hardware assumptions (MMU identity map, MMIO/UART base and layout,
   GIC presence) are recorded `[inferred]` in `docs/hardware-contract.md`
   and must be observed before milestone three can rely on them.

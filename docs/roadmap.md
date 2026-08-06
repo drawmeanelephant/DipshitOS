@@ -38,14 +38,20 @@ Observed evidence on Apple M4 / macOS 27: `BOOTED.TXT` (loader ran),
 `LOADER.TXT` (loader-observed placement, byte-perfect copy), `RC.TXT`
 (`kernel_rc=0x0` — the kernel ran and returned), `MEMMAP.TXT`.
 
-**Known issue (observed):** the kernel's own `\KERNEL.TXT` write lands
-scrambled on Apple VZ firmware (shifted slices of the kernel image's
-.rodata) while the loader's identical writes are byte-perfect. Root cause
-not yet determined; investigation state is recorded in ADR 0002 and
-`artifacts/m1-run*.txt`. The milestone gates on `RC.TXT`, not `KERNEL.TXT`.
-
-Next steps for this milestone's loose ends:
-- Root-cause the VZ `KERNEL.TXT` corruption (ADR 0002 "Known issue").
+**Known issue (observed, RESOLVED 2026-08-05):** the kernel's own
+`\KERNEL.TXT` write previously landed corrupted on Apple VZ firmware
+(shifted slices of the kernel image's .rodata) while the loader's
+identical writes were byte-perfect. Root cause: the loader loaded the
+file verbatim, putting the 24-byte DSK1 header at `base+0` and the
+content at `base+24`; LLVM's `adrp`+`add` references to `.rodata`
+silently dropped the +24 header offset and read every literal 24 bytes
+early. Fix: the loader now parses the header but places the content at
+`base+0` (ELF VMA `V` at RAM `base+V`) and jumps to
+`base + (entry_offset - 24)`. `KERNEL.TXT` is now byte-perfect and
+byte-identical across runs, and `zig build run` **gates** on its content
+(`DIPSHITOS KERNEL`, `entry reached via handoff`) in addition to
+`BOOTED.TXT` and `RC.TXT`. Full investigation: ADR 0002 and
+`artifacts/m1-run*.txt` / `m1-fix-*.txt`.
 
 ## Milestone two — the kernel proper (next phase)
 
@@ -115,11 +121,12 @@ into a kernel that **keeps** the machine:
 
 ### Loose end carried forward
 
-The milestone-one `KERNEL.TXT` scrambling (ADR 0002 known issue) is on the
-UEFI storage path; `ExitBootServices` removes that path entirely, so it no
-longer gates milestone-two evidence (which moves to the serial console).
-The root-cause investigation remains open as a separate thread for anyone
-who wants to close it.
+The milestone-one `KERNEL.TXT` corruption (ADR 0002 known issue) is
+**closed**: the loader's content-at-`base+0` fix made the kernel's write
+byte-perfect, and `zig build run` now gates on it. The issue sat on the
+UEFI storage path; `ExitBootServices` removes that path entirely, so it
+would not have gated milestone-two evidence (which moves to the serial
+console) either way.
 
 ## Later milestones (sketches only, not commitments)
 
