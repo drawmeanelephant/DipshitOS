@@ -51,6 +51,15 @@ verify:
     zig build inspect
     swift build --package-path host/vm-runner
     zig build context
+    bash tools/verify-coordination.sh
+
+# Verify the multiagent coordination surface (claims/logs files + generated indexes)
+verify-coordination:
+    bash tools/verify-coordination.sh
+
+# Regenerate the claim/log index tables from the files (run after creating a claim or branch log)
+refresh-indexes:
+    bash tools/status/refresh-indexes.sh
 
 # Verify the pre-exit failure path (boots a VZ VM; Apple silicon only)
 verify-bad-handoff:

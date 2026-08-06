@@ -1,0 +1,53 @@
+# M1.5 march — Interactive Kernel Monitor (living tracker)
+
+> **Why this file exists:** the per-step tracker and the best-agent-split
+> table used to live inside `docs/status.md`. Agents marking steps landed
+> edits in the same file where gates and milestone status changed, so
+> parallel work collided on every merge. The march is now **one file per
+> milestone** — this file holds only M1.5's per-step progress and agent
+> split, while `docs/status.md` holds the milestone-level facts (position,
+> gates, hard gates) and links here. Marking a step in this file never
+> collides with status.md edits.
+>
+> Milestone scope, definition of done, and hard gates: [`docs/status.md`](status.md).
+> Claim work first (`docs/claims/`), append to your branch's log
+> (`docs/logs/`), and record per-step progress in your claim file — then
+> flip your row here. Evidence in `artifacts/`; no evidence, no `✅`.
+
+Legend: ⬜ not started · 🔄 in progress · ✅ done · ⛔ blocked (note why).
+
+| # | Step | Observable result | Status | Notes / evidence |
+|---:|------|-------------------|--------|------------------|
+| 1 | **Freeze the target.** Name it Milestone 1.5: Interactive Kernel Monitor. Keep the milestone-two kernel exactly as merged (no new firmware work). | Scope document says exactly what counts as done and what is deferred. | ✅ | `docs/status.md` is the scope/status doc (frozen 2026-08-06; see `docs/logs/m1.5-tracker.md`). |
+| 2 | **Define the finish line.** Boot into a terminal, display a banner, accept commands at `dipshit>`, execute ≥ 10 useful commands. | Written acceptance checklist (in `docs/status.md`) prevents agents from wandering into scheduler astrology. | ✅ | Hard gates in `docs/status.md`; fs gate flagged for re-scope (frozen 2026-08-06; see `docs/logs/m1.5-tracker.md`). |
+| 3 | **Create a dedicated integration branch.** e.g. `m1.5-interactive-monitor`. | All monitor work has one landing zone while agents use smaller branches. | ⬜ | Not created as of 2026-08-06; streams A and C targeted `main` directly per ADR 0003 / branch protection (PRs #12/#13). Revisit if parallel kernel-wiring streams collide. |
+| 4 | **Add interactive mode to the Swift runner.** Give `VZFileHandleSerialPortAttachment` a readable host handle, initially standard input. | Bytes typed in the host terminal can reach the guest serial device. | ✅ | `--console` wires a stdin pipe as `fileHandleForReading` (non-nil); `--debug-input` proves bytes are handed to the attachment (`artifacts/m15-host-console-gate.txt`). Guest receipt is **not** claimed — RX is agent B. |
+| 5 | **Tee guest output.** Send output to the terminal **and** `artifacts/vm-serial.log`. | Interact live without sacrificing reproducible evidence. | ✅ | Console mode streams guest output via a pipe tee to terminal + log (no full-log reloads). Evidence path (`zig build run`) keeps file-polling, unchanged. |
+| 6 | **Handle terminal state safely.** Raw/character-mode input; restore the terminal on exit and signals. | Backspace, Enter, Ctrl-C behave predictably. | ✅ | termios character mode (ICANON/ECHO off, ISIG on) restored via atexit + dispatch signal sources (^C/SIGTERM/SIGHUP) + failure path; PTY gate observed exit 130 with termios back to ICANON+ECHO. Backspace/Enter/Ctrl-C documented honestly (raw passthrough; ^C ends the host session). |
+| 7 | **Add a first-class launch command.** `zig build console` and `just console`. | One command builds, images, boots, and opens DipshitOS interactively. | ✅ | `zig build console` (depends on `image`) and `just console` exist; observed booting with full diagnostics + SIGTERM restore (`artifacts/m15-host-console-cmd.txt`). `just verify-host-console` runs the gate. |
+| 8 | **Confirm the serial console.** The M2 probe (`probe_serial`) already selects a MMIO candidate (PL011/16550/virtio-MMIO); verify which kind/base it drives and that TX reaches `vm-serial.log` on a real VZ run. | Log proves console kind + base and the first post-exit serial evidence (`DipshitOS kernel has seized control.`). | ⬜ | This replaces the plan's "probe UEFI Serial I/O" step: post-exit there is no UEFI Serial I/O protocol; M2's probe is the mechanism. VZ gate still blocked (no serial evidence on the saved run). The bad-handoff fix landed 2026-08-06 (shim LR clobber) and is no longer a suspect; the serial gate is a separate open question. |
+| 9 | **Build a console abstraction.** `write`, `putc`, `flush` on top of the M2 `uart` module; `readByte` is the RX gap to close (step 4 host side + a guest RX path). | Kernel code stops caring which MMIO candidate carries the bytes. | ⬜ | ConOut fallback is dead post-exit; primary = MMIO uart. |
+| 10 | **Make input bounded and boring.** Fixed 256-byte line buffer; CR/LF, backspace, Ctrl-C, overflow rejection. | Editable command lines without an allocator. | ⬜ | |
+| 11 | **Implement tokenization.** Fixed argument count, whitespace handling, optional quoted strings. | `echo "elephant business"` works without heap allocation. | ⬜ | |
+| 12 | **Create a command registry.** Name, help text, function pointer per command; `help` generated from the registry. | Adding commands is mechanical. | ✅ | Comptime `registry` in `kernel/src/monitor.zig` (14 commands: name/help/usage/min+max args/handler); `lookup` + `exec(argv)`; `help` derives its listing from the registry (host-tested, `artifacts/m15-commands-tests.txt`). |
+| 13 | **Add identity commands.** `help`, `about`, `version`, `uname`, `handoff`. | The system explains what it is, how it booted, and which ABI it received (handoff **v2** struct — x3 is no longer the ESP root). | ✅ | All five implemented + exact-output tests. `version` prints build info, **no invented release number** ("DIPSHITOS 0.1" exists only in the DoD screen sketch); `handoff` prints validated v2 fields (magic/version/base/size/system table/image handle/stack bounds/flags) + validity. |
+| 14 | **Add memory inspection.** `mem` from the EFI map the kernel captured **before** `ExitBootServices`: total conventional RAM, reserved regions, descriptor count, kernel bounds. | CLI reports actual machine state. | ✅ | `mem` summarizes the captured map view (`kernel/src/memmap.zig`): descriptor count/size/version/key, usable/conventional/loader/boot/runtime/reserved/mmio bytes+pages, kernel bounds from handoff. Derived from the map — **no hardcoded "256 MiB"** (the banner omits it; DoD screen's claim stays unclaimed). |
+| 15 | **Add filesystem commands.** Root-only `ls`, `cat`, `write`, `touch` on the ESP. | Decision point: the ESP root died with Boot Services (x3 carries handoff v2). Either a **pre-exit file window** (kernel reads/writes evidence files before exit and the monitor reports them) or defer fs commands to a real storage driver milestone. | ✅ decision | **Decision recorded (2026-08-06): defer fs commands to a storage-driver milestone.** No ESP access post-exit; hard gate 5 stays open. No `ls`/`cat`/`write`/`touch` in this stream. |
+| 16 | **Add basic shell utilities.** `echo`, `clear`, `hex`, `repeat`. | The monitor feels like a tiny environment. | ✅ | All four implemented + tested. `clear` emits documented `ESC[2J ESC[H`; `hex` parses decimal/0x-hex with explicit invalid-input errors; `repeat` bounded (count 1..64, output ≤ 4096 B). |
+| 17 | **Add machine controls.** `reboot`, `shutdown`, `halt` via the Runtime Services table captured pre-exit (`ResetSystem` survives ExitBootServices) or a documented fallback (WFE loop / VM teardown). | The session can end intentionally. | ✅ (commands) | `reboot`/`shutdown` implemented behind a `MachineControl` interface (mockable in host tests). The default honestly reports **not implemented** — no post-ExitBootServices mechanism is proven, so no fake "powered off". Hard gate 6 (real VM reboot) stays open. |
+| 18 | **Install the sacred nonsense.** `elephant`, a rotating boot message, and one deeply stupid command (`beans`). | DipshitOS has an identity. 🐘 | ✅ | `elephant` (fixed art + diagnostics: trunk/ears/console/handoff/memory), `beans` (bounded, deterministic), a stateless boot-message pool + `banner()` for the shell stream. All host-tested. |
+| 19 | **Automate the transcript test.** Feed `help`, `version`, `mem`, `echo test`; assert exact output in `vm-serial.log`. | `zig build test-console` proves prompt + commands without manual typing. | ⬜ | Gate on bytes the kernel actually sent, not on file evidence. |
+| 20 | **Close the milestone honestly.** Update README, roadmap, architecture, testing docs; regenerate the deterministic context snapshot; tag only after all gates pass. | Repo says "interactive firmware-assisted kernel monitor", not "complete OS". | ⬜ | |
+
+## Best agent split
+
+| Agent | Owns | Depends on |
+|-------|------|------------|
+| **A — Host plumbing** | Swift runner, duplex serial attachment, terminal handling, output teeing, `zig build console`, scripted input | — |
+| **B — Console & shell core** | RX path + console abstraction (`uart` + read), line editor, tokenizer, command registry, prompt loop | A proving input reaches the serial attachment |
+| **C — Commands & personality** | Memory reporting (captured map), fs-command decision, reboot/shutdown, banner, `elephant`, documentation, transcript fixtures | Can build against a mock console before A's proof lands |
+
+Merge through the integration branch — do not let three agents redecorate
+`kernel/src/main.zig` with chainsaws at once. **Before starting, claim your
+slot via a claim file in `docs/claims/` and append a log entry under
+`docs/logs/`.**

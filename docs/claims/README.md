@@ -13,30 +13,38 @@ game; claimed work is not.
 
 ## How to claim
 
-1. Copy [`TEMPLATE.md`](TEMPLATE.md) to `docs/claims/<NNN>-<slug>.md`
+1. Copy [`TEMPLATE.md`](TEMPLATE.md) to `docs/claims/<NNNN>-<slug>.md`
    (next number, kebab-case slug).
 2. Fill in Owner (agent id + branch), Prompt / plan, Scope, Depends on.
 3. Set Status to `🔄 <branch>` **before** starting work.
-4. Add a row to the [Active claims index](#active-claims-index) here in
-   `docs/claims/README.md` (this is the canonical index; `docs/status.md`
-   only links the claim files).
+4. Run `bash tools/status/refresh-indexes.sh` to regenerate the
+   [Active claims index](#active-claims-index) below. The table is
+   **generated from the claim files** — never hand-edit it (two agents
+   hand-appending to the same table is exactly how parallel claims
+   collide on merge).
 5. On completion or blockers: flip Status in **your claim file** to `✅`
-   (with evidence) or `⛔` (note why), and append to
-   `docs/logs/<branch>.md`.
+   (with evidence) or `⛔` (note why), append to `docs/logs/<branch>.md`,
+   and re-run the refresh script so the index shows it.
 
 Never edit another agent's claim file. Corrections are new entries in your
 own branch's log that reference the old one.
 
 ## Active claims index
 
-**This table is the canonical index** (status included). `docs/status.md`
-only links the claim files — keep status in sync here.
+**This table is the canonical index** (status included) and it is
+**generated** from the claim files by `bash tools/status/refresh-indexes.sh`
+— do not hand-edit it. `docs/status.md` points here. The coordination
+gate (`bash tools/verify-coordination.sh`, `just verify-coordination`, and
+CI) fails if the table drifts from the claim files.
 
+<!-- CLAIMS_INDEX:START -->
 | Claim | Owner (branch) | Status |
 |-------|----------------|--------|
 | [0001-bad-handoff-gate](0001-bad-handoff-gate.md) | buffy (`agent/buffy/m2-badhandoff-fix`) | ✅ fixed 2026-08-06 |
-| [0002-vz-serial-gate](0002-vz-serial-gate.md) | — | ⬜ |
-| [0003-m15-host-plumbing](0003-m15-host-plumbing.md) | buffy (`agent/buffy/m15-host-plumbing`) | ✅ 2026-08-06 |
-| [0004-m15-console-shell-core](0004-m15-console-shell-core.md) | — | ⬜ |
-| [0005-m15-commands-personality](0005-m15-commands-personality.md) | buffy (`agent/buffy/m15-commands`) | ✅ 2026-08-06 |
+| [0002-vz-serial-gate](0002-vz-serial-gate.md) | — | ⬜ unclaimed |
+| [0003-m15-host-plumbing](0003-m15-host-plumbing.md) | buffy (`agent/buffy/m15-host-plumbing`) | ✅ 2026-08-06 — steps 4–7 landed |
+| [0004-m15-console-shell-core](0004-m15-console-shell-core.md) | — | ⬜ unclaimed |
+| [0005-m15-commands-personality](0005-m15-commands-personality.md) | buffy (`agent/buffy/m15-commands`) | ✅ 2026-08-06 — 14 commands host-tested, `kernel/src/main.zig` untouched |
 | [0006-status-machinery](0006-status-machinery.md) | buffy (`agent/buffy/m2-kernel-proper`) | ✅ |
+| [0007-status-sharding-hardening](0007-status-sharding-hardening.md) | buffy (`agent/buffy/m15-commands`) | ✅ 2026-08-06 — indexes generated; gate in just/CI; status.md pointers-only incl. gate work |
+<!-- CLAIMS_INDEX:END -->
