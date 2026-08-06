@@ -8,9 +8,9 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-and-test-linux:
-    name: Build & Test (Linux + QEMU)
-    runs-on: ubuntu-latest
+  build-and-test-macos:
+    name: Build (macOS + Swift Launcher)
+    runs-on: macos-latest
 
     steps:
       - name: Checkout repository
@@ -20,11 +20,6 @@ jobs:
         uses: goto-bus-stop/setup-zig@v2
         with:
           version: 0.16.0
-
-      - name: Install QEMU and EDK2 UEFI Firmware
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y qemu-system-arm qemu-efi-aarch64 python3
 
       - name: Check Zig formatting
         run: zig fmt --check boot/src/main.zig kernel/src/main.zig build.zig
@@ -38,35 +33,16 @@ jobs:
       - name: Inspect binary and disk image
         run: zig build inspect
 
+      - name: Build Swift Virtualization Launcher
+        run: swift build --package-path host/vm-runner
+
       - name: Verify project context generator
         run: zig build context
 
       - name: Upload Build Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: dipshitos-artifacts-linux
+          name: dipshitos-artifacts-macos
           path: |
             zig-out/
             artifacts/
-
-  build-swift-runner-macos:
-    name: Build (macOS + Swift Launcher)
-    runs-on: macos-latest
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup Zig 0.16.0
-        uses: goto-bus-stop/setup-zig@v2
-        with:
-          version: 0.16.0
-
-      - name: Build UEFI application and kernel image
-        run: zig build
-
-      - name: Create FAT32+GPT boot disk image
-        run: zig build image
-
-      - name: Build Swift Virtualization Launcher
-        run: swift build --package-path host/vm-runner
