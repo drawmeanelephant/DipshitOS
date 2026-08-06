@@ -1,6 +1,6 @@
 # DipshitOS architecture
 
-## Current state (milestones zero and one implemented; milestone two next)
+## Current state (milestones zero and one verified; milestone-two implementation blocked at VZ gate)
 
 Milestone zero proved, end to end, that a Zig-compiled AArch64 UEFI
 application can be built, placed on a FAT-formatted boot medium at the
@@ -12,15 +12,16 @@ maintenance, and jumps to the kernel entry (see
 `docs/decisions/0002-kernel-handoff.md`). The project targets Apple silicon
 / Virtualization.framework only; there is no QEMU path.
 
-**Next phase — milestone two, the kernel proper** (designed in
-`docs/decisions/0004-kernel-proper.md`, not yet implemented): the kernel
-calls `ExitBootServices` itself and keeps the machine — it captures the
-EFI memory map before exit, replaces the firmware's page tables with its
-own identity-map tables (TTBR0_EL1, 4K granule), and drives a minimal MMIO
-serial console, printing `DipshitOS kernel has seized control.` directly to
-the device the firmware never used. No firmware services remain in use
-after exit; output moves from `\BOOTED.TXT` (a UEFI protocol) to the
-serial log. See `docs/roadmap.md` for the milestone-two gates.
+**Milestone two implementation is present but not hardware-verified** (ADR 0004 and
+`docs/m2-kernel-proper-design.md`): the stub allocates handoff v2 and the
+kernel calls `ExitBootServices` itself, captures the EFI map, replaces the
+firmware's page tables with fresh identity-map TTBR0_EL1 tables (4K
+granule), probes declared MMIO windows, and drives a polled serial console.
+The intended success path prints `DipshitOS kernel has seized control.` plus
+its map view and `kernel terminal state`, then enters a WFE loop. The saved VZ
+run did not reach observable serial output, so this path remains an empirical
+gate; no inferred hardware fact is labeled observed without matching saved
+evidence.
 
 ## Components
 
@@ -46,8 +47,8 @@ VZEFIBootLoader (macOS VZ)
         └── ConOut ──▶ virtio console ──▶ artifacts/vm-serial.log  (empty: firmware doesn't route ConOut here)
         └── loader loads \\KERNEL.BIN ──▶ kernel entry
              │  milestone two: ExitBootServices, identity-map MMU
-             └── uart MMIO ──▶ virtio console ──▶ artifacts/vm-serial.log  (planned: first real content)
-             └── milestone one: kernel returns ──▶ RC.TXT
+             └── intended declared MMIO probe (pre-exit map: 0x01000000/0x20050000) ──▶ virtio console ──▶ artifacts/vm-serial.log (blocked: empty)
+             └── intended kernel terminal WFE loop (not observed)
 ```
 
 ## Interfaces
@@ -60,16 +61,17 @@ VZEFIBootLoader (macOS VZ)
   protocol is usable afterwards.
 - **Guest ↔ host storage:** the disk is presented as a virtio block device.
   The guest never touches the storage device directly in milestones zero
-  and one; the firmware reads `EFI/BOOT/BOOTAA64.EFI` from it, and both the
-  loader and the kernel write evidence files through the UEFI Simple File
-  System protocol.
+  and one; the  firmware reads `EFI/BOOT/BOOTAA64.EFI` from it, and the boot stub writes
+  pre-exit evidence files through the UEFI Simple File System protocol. The
+  kernel proper never uses storage after `ExitBootServices`.
+
 - **Guest → host console:** a virtio console serial port. Observed on Apple
   silicon: the VZ firmware does not route `ConOut` there (empty log) and
   renders no text to the virtio-gpu framebuffer (blank captures).
   Milestone two plans to drive that device directly from the kernel via
-  MMIO (the `uart` console driver, ADR 0004 D4) so the log gets its first
-  real content; the device's register layout is `[inferred]` until a probe
-  observes it (see `docs/hardware-contract.md`).
+  MMIO (the polled console driver, ADR 0004 D4). The exact device layout
+  remains `[inferred]` until the saved probe log proves it
+  (see `docs/hardware-contract.md`).
 - **Guest → host evidence:** because the VZ firmware exposes no visible
   text channel, the guest also writes its two lines to `\BOOTED.TXT` on the
   ESP via the UEFI Simple File System protocol. The host reads that file

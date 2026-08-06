@@ -92,11 +92,11 @@ no QEMU path.
   byte-perfect and byte-identical across repeated boots (ADR 0002,
   `artifacts/m1-fix-run{1,2,3}.txt`).
 
-## Milestone two: the kernel proper (planned, ADR 0004 — all assumptions **[inferred]**)
+## Milestone two: the kernel proper (implemented, ADR 0004 — hardware assumptions remain **[inferred]** pending VZ probe evidence)
 
-Milestone two is designed but not implemented; every assumption below is
-**[inferred]** (documentation/reasoning only) and each must be flipped to
-**[observed]** with log evidence before milestone three may rely on it.
+Milestone two is implemented in the guest, but every hardware assumption
+below remains **[inferred]** until a real Apple M4 / macOS 27 VZ probe log and
+serial output prove it. Code/build success alone is not hardware evidence.
 The concrete numbers are deliberately isolated so one observed probe can
 correct them without redesign.
 
@@ -127,11 +127,14 @@ correct them without redesign.
   **[inferred]** — primary candidate is a PL011-style register file (ARM
   SBSA standard); 16550-style and the VZ virtio-console register file are
   the alternatives a milestone-starting device probe must discriminate
-  between. If no serial device is observable, evidence falls back to a
-  fixed physical memory marker the host dumps (ADR 0004 D4).
-- Virtio devices sit in an MMIO window whose address range is
-  undocumented. **[inferred]** — the exact range is discovered by the same
-  probe.
+  between. The pre-exit EFI map directly observed two MMIO windows,
+  `0x01000000..0x01010000` and `0x20050000..0x20051000`; this is range
+  evidence only, not serial-device evidence. If no serial device is
+  observable, evidence falls back to a fixed physical memory marker the host
+  dumps (ADR 0004 D4).
+- Virtio devices sit in an MMIO window whose exact address and transport are
+  undocumented. **[inferred]** — the two map windows are candidates, and
+  the probe must discriminate virtio-mmio from PL011/16550 before use.
 
 ### Interrupts (not programmed in milestone two)
 

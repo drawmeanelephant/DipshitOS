@@ -21,6 +21,9 @@ artifacts/*
 *.dSYM/
 core
 
+# --- Freebuff local state ---
+.freebuff/
+
 # --- Editors & OS noise ---
 .DS_Store
 .vscode/

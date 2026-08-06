@@ -20,6 +20,9 @@ pub fn build(b: *std.Build) void {
         .os_tag = .uefi,
     });
     const optimize = b.standardOptimizeOption(.{ .preferred_optimize_mode = .ReleaseSmall });
+    const bad_handoff = b.option(bool, "bad-handoff", "Corrupt handoff v2 magic for the pre-exit failure-path test") orelse false;
+    const boot_options = b.addOptions();
+    boot_options.addOption(bool, "bad_handoff", bad_handoff);
 
     const efi = b.addExecutable(.{
         .name = "bootaa64",
@@ -29,6 +32,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    efi.root_module.addOptions("build_options", boot_options);
     // Canonical removable-media ARM64 UEFI filename (EFI/BOOT/BOOTAA64.EFI).
     // Set directly on the compile so the installed artifact is named exactly
     // BOOTAA64.EFI. (On case-insensitive APFS a separate install step would
@@ -94,6 +98,15 @@ pub fn build(b: *std.Build) void {
     inspect.stdio = .inherit;
     inspect_step.dependOn(&inspect.step);
 
+    const failure_step = b.step("bad-handoff", "Build a deliberately corrupted handoff image for the pre-exit failure-path test");
+    const failure_image = b.addSystemCommand(&.{ "bash", "image/make-image.sh" });
+    failure_image.addFileArg(efi.getEmittedBin());
+    failure_image.addArg("artifacts/bad-handoff.img");
+    failure_image.addFileArg(kernel_bin);
+    failure_image.has_side_effects = true;
+    failure_image.stdio = .inherit;
+    failure_step.dependOn(&failure_image.step);
+
     const run_step = b.step("run", "Boot the disk image with the Swift Virtualization.framework runner");
     const run = b.addSystemCommand(&.{ "bash", "-c", run_vm_command });
     run.step.dependOn(&image.step);
@@ -117,9 +130,9 @@ const run_vm_command =
     \\# Apple's EFI firmware does not route its console to the virtio serial
     \\# port or render it to the framebuffer, so the guest also writes its
     \\# message to \\BOOTED.TXT on the ESP (UEFI Simple File System).
-    \\# VMRunner exits 0 once the VM ran; the cat below is the real gate:
-    \\# it fails the step unless the guest wrote the marker files.
-    \\host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log --screen artifacts/vm-screen.png
+    \\# The runner waits for the kernel's terminal marker. It accepts the
+    \\# serial banner and marker as the milestone-two success signal.
+    \\host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log --screen artifacts/vm-screen.png --expect "DipshitOS kernel has seized control." --terminal-marker "kernel terminal state"
     \\echo
     \\echo "=== guest execution evidence: \\BOOTED.TXT on the ESP ==="
     \\EVIDENCE="$(python3 image/mkfat32.py --cat-file /BOOTED.TXT artifacts/disk.img)" || { echo "evidence missing: the guest did not write BOOTED.TXT"; exit 1; }
@@ -129,17 +142,11 @@ const run_vm_command =
     \\echo "=== loader trace: \\LOADER.TXT on the ESP ==="
     \\python3 image/mkfat32.py --cat-file /LOADER.TXT artifacts/disk.img 2>/dev/null || echo "(no LOADER.TXT -- the loader did not reach the kernel jump)"
     \\echo
-    \\echo "=== kernel return evidence: \\RC.TXT on the ESP ==="
-    \\RCEVIDENCE="$(python3 image/mkfat32.py --cat-file /RC.TXT artifacts/disk.img)" || { echo "kernel return missing: the kernel did not return to the loader"; exit 1; }
-    \\printf '%s\n' "$RCEVIDENCE"
-    \\printf '%s' "$RCEVIDENCE" | grep -q "kernel_rc=0x0000000000000000" || { echo "kernel returned a nonzero rc"; exit 1; }
-    \\echo
-    \\echo
-    \\echo "=== kernel marker: \\KERNEL.TXT on the ESP (the kernel's own write) ==="
-    \\KERNELTXT="$(python3 image/mkfat32.py --cat-file /KERNEL.TXT artifacts/disk.img)" || { echo "kernel marker missing: the kernel did not write KERNEL.TXT"; exit 1; }
-    \\printf '%s\n' "$KERNELTXT"
-    \\printf '%s' "$KERNELTXT" | grep -q "DIPSHITOS KERNEL" || { echo "KERNEL.TXT content mismatch"; exit 1; }
-    \\printf '%s' "$KERNELTXT" | grep -q "entry reached via handoff" || { echo "KERNEL.TXT content mismatch"; exit 1; }
-    \\echo
-    \\echo "run: boot completed; loader and kernel handoff observed (BOOTED.TXT, LOADER.TXT, RC.TXT, KERNEL.TXT)"
+    \\echo "=== milestone-two serial evidence ==="
+    \\SERIAL="$(cat artifacts/vm-serial.log)" || { echo "serial log missing"; exit 1; }
+    \\printf '%s\n' "$SERIAL"
+    \\printf '%s' "$SERIAL" | grep -q "DipshitOS kernel has seized control." || { echo "kernel banner missing from vm-serial.log"; exit 1; }
+    \\printf '%s' "$SERIAL" | grep -q "memory-map descriptors=0x" || { echo "kernel memory-map print missing from vm-serial.log"; exit 1; }
+    \\printf '%s' "$SERIAL" | grep -q "kernel terminal state" || { echo "kernel terminal state missing from vm-serial.log"; exit 1; }
+    \\echo "run: milestone-two takeover observed (serial banner, memory-map view, terminal state)"
 ;
