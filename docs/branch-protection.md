@@ -21,9 +21,8 @@ To enforce quality and prevent broken code from reaching the `main` branch, conf
      - Dismiss stale pull request approvals when new commits are pushed.
    - [x] **Require status checks to pass before merging**
      - Check **Require branches to be up to date before merging**.
-     - Search and select the following status checks:
-       - `Build & Test (Linux + QEMU)`
-       - `Build (macOS + Swift Launcher)`
+     - Search and select the status check:
+       - `Build & Test (macOS + Swift Launcher)`
    - [x] **Require linear history** (prevents merge commits, keeps `git log` clean).
    - [x] **Do not allow bypassing the above settings** (applies to administrators as well).
 
