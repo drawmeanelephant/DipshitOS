@@ -7,9 +7,11 @@ no existing guest OS. Guest code is written in Zig; the host launcher is
 Swift. See `AGENTS.md` for the project rules.
 
 **Status: milestone two implemented; build gates pass; the bad-handoff
-failure gate passes (fixed 2026-08-06); the VZ serial gate remains unpassed —
-the canonical, always-current status is
-[`docs/status.md`](docs/status.md).**
+failure gate passes (fixed 2026-08-06); the ADR 0004 D4 marker fallback
+gate passes (2026-08-07 — it discriminates why the VZ serial gate is
+silent: the kernel dies in the MMU-takeover window, `M2_MAPD!` ladder end,
+claim 0009); the VZ serial gate itself remains unpassed — the canonical,
+always-current status is [`docs/status.md`](docs/status.md).**
 
 Milestone two adds the kernel proper: the stub allocates handoff contract v2,
 the kernel captures the EFI map, calls `ExitBootServices` with the required
@@ -127,9 +129,13 @@ configuration.
 The milestone-two VZ takeover gate is **not passed**: the saved run has an
 empty `artifacts/vm-serial.log`. The bad-handoff failure gate **is passed**
 (as of 2026-08-06: `RC.TXT` → `kernel_rc=0x2`, root cause was the naked
-`_start` shim clobbering the link register). See `docs/status.md` for the
-gate table and evidence. The implementation and build checks below must not
-be read as hardware evidence.
+`_start` shim clobbering the link register). The **ADR 0004 D4 marker
+fallback gate is passed** (2026-08-07, claim 0009): the kernel persists each
+takeover stage as the EFI variable `DipshitM2`, and the ladder ends at
+`M2_MAPD!` on every VZ run — the kernel dies in the MMU-takeover window
+(`install_identity_map()` or the first post-switch call), before the serial
+probe ever runs. See `docs/status.md` for the gate table and evidence. The
+implementation and build checks below must not be read as hardware evidence.
 
 Host: Apple M4, macOS 27.0 (arm64), Zig 0.16.0, Swift 6.2.3 (arm64).
 
@@ -143,6 +149,7 @@ Host: Apple M4, macOS 27.0 (arm64), Zig 0.16.0, Swift 6.2.3 (arm64).
 | Boot via Virtualization.framework | `zig build run` | **Observed**: VM boots; guest wrote `\BOOTED.TXT` (exact content), `\LOADER.TXT` (base/size/entry + first16 bytes), and `\RC.TXT` (`kernel_rc=0x0`) — the kernel loaded, ran, and returned |
 | Kernel image | `zig build` + `elf2bin.py` | **Observed**: `KERNEL.BIN` (format v1: magic `DSK1`, `entry_offset=0x18`, ~2 KiB) |
 | Kernel marker `\KERNEL.TXT` | kernel write | **Observed**: byte-perfect and byte-identical across runs (ADR 0002 corruption fixed); `zig build run` gates on its content |
+| Marker fallback gate | `bash tools/verify-marker.sh` | **Observed** (2026-08-07, claim 0009): NVRAM ladder `M2_ENTRY → M2_CMAP! → M2_PREX! → M2_EXIT! → M2_MAPD!` — the kernel dies in the MMU-takeover window, never reaching the serial probe |
 
 All command output and logs are saved under `artifacts/` (`inspect.txt`,
 `vm-serial.log`, `vm-screen-*.png`, `efi-vars.bin`, `context.md`).

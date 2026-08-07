@@ -48,6 +48,17 @@ assumption comes from documentation or reasoning only.
   `artifacts/efi-vars.bin`. Creating one requires
   `init(creatingVariableStoreAt:options:)` on first boot; `init(url:)` only
   opens an existing store.
+- **EFI runtime services survive `ExitBootServices` on VZ**: the kernel's
+  post-exit `SetVariable` calls are persisted into the file-backed store.
+  **[observed]** — after every VZ run, `artifacts/efi-vars.bin` holds the
+  `DipshitM2` variable whose final instance names the kernel's last takeover
+  stage (`artifacts/m2-marker-gate.txt`, claim 0009, 2026-08-07).
+- **Guest RAM is NOT mapped into the host runner process.**
+  **[observed]** — a full submap-aware walk of the VMRunner process's own
+  address space finds no 256 MiB region and every `M2_*` constant hit is
+  the runner's own rodata/heap array (claim 0009). The ADR 0004 D4
+  memory-dump fallback is therefore impossible on VZ; the NVRAM ladder is
+  the working form.
 - Config used: 256 MiB RAM, 2 vCPUs, optional virtio-gpu for observation,
   no networking.
 
@@ -106,6 +117,17 @@ correct them without redesign.
   identity map in effect at kernel entry; the firmware does not disable
   the MMU when jumping. **[inferred]** — standard UEFI AArch64 behavior;
   consistent with milestone-one runs but not directly observed.
+- **The kernel dies in the MMU-takeover window on VZ: between the
+  pre-install marker write and the first post-switch call.** **[observed]**
+  — the NVRAM marker ladder ends at `M2_MAPD!` (identity map built,
+  pre-install) on every run; the `M2_MMUP!` post-install stage never
+  appears (`artifacts/m2-marker-gate.txt`, claim 0009, 2026-08-07). The
+  window covers `install_identity_map()` itself and the immediately
+  following post-switch `SetVariable`; the marker channel cannot narrow it
+  further (it *is* the post-switch call). With the switch disabled
+  (diagnostic build, see the claim), the ladder advances past `M2_MMUP!` to
+  `M2_SERIA`, proving the map build and the rest of the takeover path work
+  on the firmware map — the death is specific to the takeover window.
 - The kernel builds its own translation tables (never firmware tables):
   TTBR0_EL1, 4K granule, identity map (VA == PA) for RAM, the kernel
   image, and the MMIO windows the drivers need. **[inferred]** — this is a
@@ -123,6 +145,14 @@ correct them without redesign.
   EL1. **[inferred]** — VZ configures a virtio console serial port; its
   register interface is undocumented by Apple and no register has been
   observed.
+- **The serial probe finds no usable device in the declared MMIO windows.**
+  **[observed]** — with the MMU switch disabled (diagnostic build), the
+  probe runs to completion and the ladder records `M2_SERIA` (layout=none
+  halt) (`artifacts/m2-marker-gate.txt`, claim 0009, 2026-08-07). The two
+  EFI-declared MMIO windows (`0x01000000..0x01010000`,
+  `0x20050000..0x20051000`) contain no PL011/16550/virtio signature the
+  probe accepts. This is a probe-window observation; the VZ virtio console
+  register file itself remains undocumented (inferred).
 - The device's **base address and register layout** are unknown.
   **[inferred]** — primary candidate is a PL011-style register file (ARM
   SBSA standard); 16550-style and the VZ virtio-console register file are

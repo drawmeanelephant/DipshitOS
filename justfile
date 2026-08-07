@@ -18,6 +18,14 @@ test:
 test-console:
     zig build test-console
 
+# Boot the VM and save the host-side NVRAM marker ladder (ADR 0004 D4 fallback, `zig build marker`)
+marker:
+    zig build marker
+
+# Verify the ADR 0004 D4 fixed-memory-marker fallback gate (boots a VZ VM; Apple silicon only)
+verify-marker:
+    bash tools/verify-marker.sh
+
 # Extract the flat kernel image zig-out/bin/KERNEL.BIN (zig build kernel)
 kernel:
     zig build kernel

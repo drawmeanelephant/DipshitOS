@@ -48,4 +48,5 @@ CI) fails if the table drifts from the claim files.
 | [0006-status-machinery](0006-status-machinery.md) | buffy (`agent/buffy/m2-kernel-proper`) | ✅ |
 | [0007-status-sharding-hardening](0007-status-sharding-hardening.md) | buffy (`agent/buffy/m15-commands`) | ✅ 2026-08-06 — indexes generated; gate in just/CI; status.md pointers-only incl. gate work |
 | [0008-m15-transcript-test](0008-m15-transcript-test.md) | buffy (`freebuff/m15-transcript-test`) | ✅ 2026-08-06 — mock-level transcript gate landed; live `vm-serial.log` assertion deferred to claim 0002 |
+| [0009-m2-marker-fallback](0009-m2-marker-fallback.md) | buffy (`agent/buffy/m2-marker-fallback`) | ✅ done 2026-08-07 (gate work item 3 passes; evidence in |
 <!-- CLAIMS_INDEX:END -->
