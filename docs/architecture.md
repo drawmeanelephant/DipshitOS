@@ -14,13 +14,20 @@ separate freestanding kernel image with a versioned handoff — see
 ADR 0004) is implemented: the stub allocates handoff v2, the kernel calls
 `ExitBootServices`, installs identity-map TTBR0_EL1 tables, probes declared
 MMIO windows, and drives a polled serial console before a terminal WFE loop.
-Its VZ serial gate is **not passed**; the bad-handoff failure gate is
-**passed** since 2026-08-06 (root cause: the naked `_start` shim clobbered
-the link register, so a pre-exit failure never returned to the loader). The
-MMU-takeover death was root-caused and **fixed** (claim 0010) — the
-identity-map switch completes on VZ and the serial gate is now blocked on
-device absence, not a crash. The
-canonical, always-current status lives in
+Its VZ serial gate is **not passed**, but the gates around it are: the
+bad-handoff failure gate passes since 2026-08-06 (root cause: the naked
+`_start` shim clobbered the link register, so a pre-exit failure never
+returned to the loader), the ADR 0004 D4 marker-fallback gate passes, and
+the MMU-takeover death the marker ladder exposed (claim 0009) was
+root-caused and fixed (claim 0010, 2026-08-07) — the identity-map switch
+now completes on VZ, and the VZ serial gate's remaining blocker is the
+absence of a usable MMIO serial device in the declared windows, not a
+crash. Milestone 1.5 adds the interactive monitor on top of this kernel:
+console abstraction, line editor, tokenizer, a 14-command registry
+(`kernel/src/{console,lineedit,tokenizer,shell,monitor,handoff,memmap}.zig`),
+host-tested with a mock console and a byte-exact transcript gate; its live
+serial channel is still blocked on device discovery/RX. The canonical,
+always-current status lives in
 [`docs/status.md`](status.md); this file documents the architecture that
 status refers to. The project targets Apple silicon /
 Virtualization.framework only; there is no QEMU path.
@@ -50,9 +57,10 @@ VZEFIBootLoader (macOS VZ)
         └── ConOut ──▶ virtio console ──▶ artifacts/vm-serial.log  (empty: firmware doesn't route ConOut here)
         └── loader loads \\KERNEL.BIN ──▶ kernel entry
              │  milestone two: ExitBootServices, identity-map MMU
-             └── intended declared MMIO probe (pre-exit map: 0x01000000/0x20050000) ──▶ virtio console ──▶ artifacts/vm-serial.log (blocked: empty)
-             └── intended kernel terminal WFE loop (not observed)
-             └── post-exit evidence: kernel persists DipshitM2 NVRAM ladder ──▶ artifacts/efi-vars.bin (observed: reaches M2_SERIA — takeover completes, probe finds no usable device)
+             │  post-exit evidence channel: NVRAM ladder (EFI var DipshitM2) ──▶ artifacts/efi-vars.bin  [observed: reaches M2_MMUP! → M2_SERIA]
+             └── MMIO serial probe (0x01000000/0x20050000) ──▶ runs to completion, selects no usable device (layout=none on VZ) ──▶ artifacts/vm-serial.log (empty: no device to drive)
+             └── M1.5 monitor loop (console/lineedit/tokenizer/shell) ──▶ exists, host-tested via MockConsole; parks in WFE on the real kernel (RX not wired — readByte is a no-RX stub)
+
 ```
 
 ## Interfaces
@@ -72,10 +80,14 @@ VZEFIBootLoader (macOS VZ)
 - **Guest → host console:** a virtio console serial port. Observed on Apple
   silicon: the VZ firmware does not route `ConOut` there (empty log) and
   renders no text to the virtio-gpu framebuffer (blank captures).
-  Milestone two plans to drive that device directly from the kernel via
-  MMIO (the polled console driver, ADR 0004 D4). The exact device layout
-  remains `[inferred]` until the saved probe log proves it
-  (see `docs/hardware-contract.md`).
+  Milestone two drives the console via MMIO (the polled console driver,
+  ADR 0004 D4); the kernel's serial probe now runs to completion but finds
+  **no usable PL011/16550/virtio device** in the declared windows
+  (observed via the NVRAM ladder, `M2_SERIA`, claim 0010), so no console
+  is actually driven on VZ yet and the exact device layout stays
+  `[inferred]` (see `docs/hardware-contract.md`). The M1.5 monitor
+  therefore runs against a mock console in tests; the live channel awaits
+  device discovery + RX.
 - **Guest → host evidence:** because the VZ firmware exposes no visible
   text channel, the guest also writes its two lines to `\BOOTED.TXT` on the
   ESP via the UEFI Simple File System protocol. The host reads that file
