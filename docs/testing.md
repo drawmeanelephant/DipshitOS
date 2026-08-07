@@ -34,15 +34,18 @@
    `memory-map descriptors=0x...` line, and `kernel terminal state`. The
    pre-exit loader marker `\\BOOTED.TXT` remains required. `RC.TXT` is
    expected only for a deliberate pre-exit failure fixture, not success.
-9b. ADR 0004 D4 marker fallback gate (gate work item 3, claim 0009):
-   `bash tools/verify-marker.sh` (also `just verify-marker` /
+9b. ADR 0004 D4 marker fallback gate (gate work item 3, claims 0009/
+   0010): `bash tools/verify-marker.sh` (also `just verify-marker` /
    `zig build marker`) boots the VM and asserts the NVRAM marker ladder —
    the kernel persists each takeover stage as the EFI variable `DipshitM2`,
    and the runner saves the ordered ladder to `artifacts/marker-dump.txt`.
    The gate passes iff at least one marker instance is present; the final
-   stage names the crash window (observed: `M2_MAPD!` — the MMU switch is
-   the death site). The memory-dump form is impossible on VZ (guest RAM is
-   not host-mapped — observed, claim 0009).
+   stage names the death/crash site. Claim 0009 observed the ladder ending
+   at `M2_MAPD!` (MMU-takeover window); claim 0010 root-caused and fixed it
+   — the ladder now runs `M2_MAPD! → M2_MMUP! → M2_SERIA`, i.e. the switch
+   completes and the serial probe runs to completion finding no usable
+   device. The memory-dump form is impossible on VZ (guest RAM is not
+   host-mapped — observed, claim 0009).
 10. Save command output and logs under `artifacts/m2-*.txt`, including the
    probe output and the complete serial log. State blocked VZ capabilities
    precisely rather than inferring success.
@@ -113,17 +116,19 @@
       either `layout=none` (no usable MMIO serial device; `M2_SERIA` halt)
       or an early post-exit crash. Do not label the hardware assumptions
       observed before that evidence exists.
-- [x] Milestone two marker fallback gate (gate work item 3, claim 0009):
-      **passing** (2026-08-07, `agent/buffy/m2-marker-fallback`). The
-      NVRAM ladder discriminates the serial gate: every run ends at
-      `M2_MAPD!` — the identity map is built but the post-install `M2_MMUP!`
-      stage never appears, so the kernel dies in the MMU-takeover window
-      (`install_identity_map()` or the first post-switch call) and never
-      reaches the serial probe. A diagnostic run with the switch skipped
-      advances the ladder to `M2_SERIA`, proving the probe then finds no
-      usable MMIO serial device in the declared windows. Evidence:
-      `artifacts/m2-marker-gate.txt`, `artifacts/marker-dump.txt`,
-      `artifacts/probe*-run.txt`; full outcome in claim 0009.
+- [x] Milestone two marker fallback gate (gate work item 3, claims
+      0009/0010): **passing** (2026-08-07). Claim 0009's ladder
+      discriminated the serial gate: every run ended at `M2_MAPD!` — the
+      identity map was built but the post-install `M2_MMUP!` stage never
+      appeared, so the kernel died in the MMU-takeover window and never
+      reached the serial probe. Claim 0010 then **root-caused and fixed
+      it**: the ladder now runs `M2_MAPD! → M2_MMUP! → M2_SERIA` — the MMU
+      switch completes on VZ and the serial probe runs to completion,
+      finding no usable MMIO serial device in the declared windows
+      (evidence: `artifacts/m2-mmu-takeover-gate.txt`,
+      `artifacts/m2-firmware-regs.txt`, `artifacts/m2-table-walk.txt`,
+      `artifacts/m2-mmu-bisect-tlbi.txt`). The VZ serial gate's remaining
+      blocker is device absence, not a crash.
 - [x] Milestone two bad-handoff failure gate: **passing** (fixed 2026-08-06,
       `agent/buffy/m2-badhandoff-fix`). Root cause was the naked `_start`
       shim's `bl kernel_main` overwriting the link register without
