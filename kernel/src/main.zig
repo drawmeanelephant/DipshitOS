@@ -178,6 +178,10 @@ var virtio_avail: VirtqAvail align(2) = undefined;
 var virtio_used: VirtqUsed align(4) = undefined;
 var virtio_tx: [128]u8 align(16) = undefined;
 var virtio_last_used: u16 = 0;
+// Split-ring size (must be a power of 2, Virtio 1.3 §4.1.4.3): one
+// descriptor, no chaining. The number of outstanding buffers
+// (avail.idx - used.idx) must never exceed this (§2.7).
+const virtio_queue_size: u16 = 1;
 
 // Claim 0013 virtio-pci console (the VZ serial attachment): the runner's
 // VZVirtioConsoleDeviceSerialPortConfiguration appears to the guest as a
@@ -1504,6 +1508,18 @@ fn virtio_pci_init(st: *const SystemTable) bool {
     // Modern transport init: reset, ACKNOWLEDGE|DRIVER, accept
     // VIRTIO_F_VERSION_1, FEATURES_OK.
     vp_write8(0x14, 0); // reset
+    // Virtio 1.3 §4.1.4.3: "After writing 0 to device_status, the driver
+    // MUST wait for a read of device_status to return 0 before reinitializing
+    // the device." Bounded poll so a stuck device fails honestly instead of
+    // hanging, and the ACKNOWLEDGE write below can never race a device that
+    // is still mid-reset.
+    var reset_spins: usize = 0;
+    while (vp_read8(0x14) != 0) : (reset_spins += 1) {
+        if (reset_spins >= 1_000_000) {
+            dump_str("VP: reset timeout\n");
+            return false;
+        }
+    }
     vp_write8(0x14, 1 | 2); // ACKNOWLEDGE | DRIVER
     const features_lo = vp_read32(0x04);
     // device_feature_select lives at 0x00 (0x08 is the DRIVER's select).
@@ -1536,10 +1552,16 @@ fn virtio_pci_init(st: *const SystemTable) bool {
         dump_str("VP: queue 1 absent\n");
         return false;
     }
-    vp_write16(0x18, 1); // queue_size = 1
+    vp_write16(0x18, virtio_queue_size); // queue_size = 1 (power of 2, §4.1.4.3)
     virtio_desc[0] = .{ .addr = 0, .len = 0, .flags = 0, .next = 0 };
     virtio_avail = .{ .flags = 0, .idx = 0, .ring = .{0} };
     virtio_used = .{ .flags = 0, .idx = 0, .ring = .{.{ .id = 0, .len = 0 }} };
+    // Clean the used ring's init write to RAM now: BSS is not trusted zeroed
+    // here, and the flush's dc ivac on this line (the ring-full guard and the
+    // used-poll) would otherwise discard this dirty write and re-read stale
+    // RAM garbage as used.idx — which the guard would then treat as "ring
+    // full" and drop TX forever.
+    clean_dcache_range(@intFromPtr(&virtio_used), @sizeOf(VirtqUsed));
     virtio_last_used = 0;
     vp_tx_len = 0;
     // Queue GPA registers are le64; VZ's common-cfg emulation accepts 32-bit
@@ -1598,6 +1620,20 @@ fn virtio_pci_init(st: *const SystemTable) bool {
 /// serial log is the gate, and M2_TXOK! records that the path returned).
 fn virtio_pci_flush() void {
     if (!vp_ready or vp_tx_len == 0) return;
+    // Split-ring invariant (Virtio 1.3 §2.7): the number of outstanding
+    // buffers (avail.idx - used.idx) must never exceed the queue size, or a
+    // new entry would overwrite a ring slot the device has not yet consumed.
+    // Re-read used.idx fresh (the device writes it; invalidate its line
+    // first). If the ring is still full — the previous buffer was never
+    // consumed (e.g. the notify or the used-poll timed out) — drop this line
+    // without touching the rings: the device is stuck, and dropping stays
+    // honest without corrupting the ring.
+    invalidate_dcache_range(@intFromPtr(&virtio_used), @sizeOf(VirtqUsed));
+    const outstanding = virtio_avail.idx -% virtio_used.idx;
+    if (outstanding >= virtio_queue_size) {
+        vp_tx_len = 0;
+        return;
+    }
     virtio_desc[0] = .{ .addr = @intFromPtr(&virtio_tx), .len = @intCast(vp_tx_len), .flags = 0, .next = 0 };
     virtio_avail.ring[0] = 0; // descriptor index 0
     virtio_avail.idx +%= 1;
@@ -1619,9 +1655,15 @@ fn virtio_pci_flush() void {
     if (comptime !build_options.nvram_console) {
         if (st_tx != null) write_probe_tail(st_tx.?);
     }
-    // Notify via a 32-bit store (VZ common-cfg/notify emulation accepts
-    // 32-bit accesses; a 16-bit store may be dropped — claim 0013).
-    mmio_write32(vp_notify + @as(u64, vp_queue_notify_off) * vp_notify_mult, 1);
+    // Virtio 1.3 §4.1.5.2.1: VIRTIO_F_NOTIFICATION_DATA is NOT negotiated
+    // (only VERSION_1 was accepted above), so the driver notification MUST be
+    // a 16-bit write whose value is the virtqueue index (1 = TX queue); the
+    // address is cap.offset + queue_notify_off * notify_off_multiplier
+    // (§4.1.4.4). A 32-bit store is a MUST violation even though many devices
+    // tolerate it; a device not offering NOTIFICATION_DATA MUST accept 2-byte
+    // accesses (§4.1.4.4.1). (Claim 0013's "16-bit store may be dropped"
+    // belief has no documented evidence; the report flags it as inference.)
+    mmio_write16(vp_notify + @as(u64, vp_queue_notify_off) * vp_notify_mult, 1);
     if (st_tx != null) write_marker_var(st_tx.?, marker_txnt);
     var spins: usize = 0;
     while (spins < 2_000_000) : (spins += 1) {
