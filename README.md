@@ -59,8 +59,8 @@ D/I-cache maintenance, and jumps to the kernel entry. It writes
 validates handoff v2, captures the map, exits Boot Services, builds and
 installs identity TTBR0_EL1 tables, probes PL011/16550/virtio-MMIO candidates,
 and is designed to print the takeover banner and enter a terminal WFE loop
-(**not yet observed on VZ** — the serial gate is blocked; see
-`docs/status.md`). Its fixed page tables and virtio queue storage are BSS
+(**not yet observed on VZ** — the serial gate is blocked on device absence;
+see `docs/status.md`). Its fixed page tables and virtio queue storage are BSS
 carve-outs; there is no general allocator or libc/POSIX. Milestone 1.5 adds
 the interactive monitor (`kernel/src/{console,lineedit,tokenizer,shell,monitor}.zig`).
 
@@ -169,7 +169,7 @@ Host: Apple M4, macOS 27.0 (arm64), Zig 0.16.0, Swift 6.2.3 (arm64).
 | Build image | `zig build image` | **Observed**: 64 MiB GPT+FAT32 image; `EFI/BOOT/BOOTAA64.EFI` (139264 B) present; volume label `DIPSHITOS` |
 | Inspect image | `zig build inspect` | **Observed**: `DOS/MBR boot sector` (protective), GPT header crc valid, ESP `LBA 2048..131038` |
 | Build Swift runner | `swift build --package-path host/vm-runner` | **Observed**: SwiftPM build succeeds |
-| Boot via Virtualization.framework | `zig build run` | **Observed**: VM boots; loader writes `\BOOTED.TXT` + `\LOADER.TXT` byte-perfect. M2 serial gate **blocked** — no serial bytes yet |
+| Boot via Virtualization.framework | `zig build run` | **Observed**: VM boots; loader writes `\BOOTED.TXT` + `\LOADER.TXT` byte-perfect. M2 serial gate **blocked** — no serial bytes (ladder reaches `M2_SERIA`; no usable device) |
 | Kernel image | `zig build` + `elf2bin.py` | **Observed**: `KERNEL.BIN` (format v1: magic `DSK1`, `entry_offset=0x18`, ~2 KiB) |
 | Kernel marker `\KERNEL.TXT` | M1 regression only | **Observed**: byte-perfect and byte-identical across runs (ADR 0002 corruption fixed); not written post-`ExitBootServices` |
 | Marker fallback gate | `bash tools/verify-marker.sh` | **Observed** (2026-08-07): NVRAM ladder `M2_ENTRY → M2_CMAP! → M2_PREX! → M2_EXIT! → M2_MAPD!` (claim 0009); **fixed 2026-08-07 (claim 0010)**: ladder now reaches `M2_MMUP! → M2_SERIA` — MMU takeover completes; serial probe finds no usable device (`artifacts/m2-mmu-takeover-gate.txt`) |
@@ -180,7 +180,7 @@ All command output and logs are saved under `artifacts/` (`inspect.txt`,
 
 ### Observed behavior
 
-- `zig build`, `image`, and `inspect` complete on this host; the milestone-two `run` gate is blocked by missing serial evidence (the NVRAM marker ladder ends `M2_MAPD!` — claim 0009).
+- `zig build`, `image`, and `inspect` complete on this host; the milestone-two `run` gate is blocked by missing serial evidence (claim 0010 fixed the MMU-takeover death — the NVRAM ladder now reaches `M2_SERIA`, and the serial probe finds no usable MMIO device).
 - The Virtualization.framework VM boots the GPT+FAT image: configuration
   validates, the EFI variable store is created, the VM starts and runs, and
   after boot the guest-written marker file `\BOOTED.TXT` exists on the ESP

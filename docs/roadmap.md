@@ -76,11 +76,12 @@ stub allocates the v2 stack/handoff contract; the kernel captures the map,
 retries `ExitBootServices` up to eight times, builds/installs identity
 TTBR0_EL1 tables, probes declared MMIO windows, and is designed to enter a
 terminal WFE loop after serial evidence. The saved VZ runs produced no
-serial output or RC.TXT; the NVRAM marker ladder (claim 0009) shows the
-kernel dies in the MMU-takeover window (`M2_MAPD!`) before the serial probe
-runs (with the switch skipped it reaches `M2_SERIA` and finds no usable
-MMIO serial device). UART/MMIO and MMU hardware assumptions remain
-`[inferred]`. Live gate-by-gate status: `docs/status.md`.
+serial output or RC.TXT; the MMU-takeover death those runs first exposed
+(claim 0009, `M2_MAPD!`) is **root-caused and fixed** (claim 0010: the
+identity-map switch now completes on VZ, ladder reaches `M2_SERIA`) and
+the serial probe then runs to completion, finding **no usable MMIO serial
+device** in the declared windows. UART/MMIO and MMU hardware assumptions
+remain `[inferred]`. Live gate-by-gate status: `docs/status.md`.
 
 
 ### Goal
@@ -132,8 +133,9 @@ into a kernel that **keeps** the machine:
    GIC presence) is flipped to `[observed]` only with matching probe/serial
    evidence. A blocked host run leaves the entries inferred and is reported.
 6. Marker fallback (ADR 0004 D4): `bash tools/verify-marker.sh` —
-   **passing since 2026-08-07**; the NVRAM ladder ends `M2_MAPD!`, naming
-   the MMU-takeover window as the death site (claim 0009).
+   **passing since 2026-08-07**; the ladder discriminated the death site
+   (`M2_MAPD!`, claim 0009), which claim 0010 then root-caused and fixed
+   (ladder now reaches `M2_MMUP! → M2_SERIA`; see `docs/status.md`).
 
 ### Non-goals (explicit exclusions for this milestone)
 
@@ -158,8 +160,9 @@ Every VZ run so far observed an empty `vm-serial.log`. The VZ serial gate
 is the decisive hardware probe: until it passes on Apple M4 / macOS 27,
 the project makes no observed claim about the VZ guest MMIO address,
 register layout, or the post-switch MMU; those remain explicitly
-`[inferred]` in `docs/hardware-contract.md` (the NVRAM marker ladder
-narrows where the kernel dies, but is not device evidence).
+`[inferred]` in `docs/hardware-contract.md` (the NVRAM ladder shows the
+takeover now completes — claim 0010 — but the probe still finds no usable
+device; neither observation is device evidence).
 
 ## Milestone 1.5 — interactive kernel monitor (current)
 
