@@ -90,21 +90,36 @@ pub const MachineControl = struct {
     }
 
     /// Honest default: no proven post-exit machine-control mechanism.
+    /// The vtable is built at runtime (not a const table) so its function
+    /// pointers resolve PC-relatively at the kernel's runtime load base
+    /// (claim 0015 root cause).
     pub fn disabled() MachineControl {
-        const Noop = struct {
-            fn reboot(_: *anyopaque) MachineResult {
-                return .not_implemented;
-            }
-            fn shutdown(_: *anyopaque) MachineResult {
-                return .not_implemented;
-            }
-        };
+        ensure_disabled_vtable();
         return .{
-            .ctx = @ptrCast(@constCast(&Noop)),
-            .vtable = &.{ .reboot = Noop.reboot, .shutdown = Noop.shutdown },
+            .ctx = @ptrCast(@constCast(&NoopDisabled)),
+            .vtable = &disabled_vtable,
         };
     }
 };
+
+/// Storage + builder for `MachineControl.disabled()`'s vtable (module-level
+/// so the pointer outlives the call).
+const NoopDisabled = struct {
+    fn reboot(_: *anyopaque) MachineResult {
+        return .not_implemented;
+    }
+    fn shutdown(_: *anyopaque) MachineResult {
+        return .not_implemented;
+    }
+};
+var disabled_vtable: MachineControl.VTable = undefined;
+var disabled_vtable_ready = false;
+fn ensure_disabled_vtable() void {
+    if (!disabled_vtable_ready) {
+        disabled_vtable = .{ .reboot = NoopDisabled.reboot, .shutdown = NoopDisabled.shutdown };
+        disabled_vtable_ready = true;
+    }
+}
 
 /// Host-test double: records calls and returns scripted results.
 pub const MockMachineControl = struct {
@@ -113,8 +128,12 @@ pub const MockMachineControl = struct {
     reboot_calls: usize = 0,
     shutdown_calls: usize = 0,
 
+    /// Runtime-built vtable (claim 0015 root cause): a const table would
+    /// hold link-time absolute addresses, wrong at the runtime load base.
+    /// Module-level storage so the returned pointer outlives the call.
     pub fn control(self: *MockMachineControl) MachineControl {
-        return .{ .ctx = self, .vtable = &.{ .reboot = rebootFn, .shutdown = shutdownFn } };
+        ensure_mock_vtable();
+        return .{ .ctx = self, .vtable = &mock_vtable };
     }
 
     fn rebootFn(ctx: *anyopaque) MachineResult {
@@ -129,6 +148,16 @@ pub const MockMachineControl = struct {
         return self.shutdown_result;
     }
 };
+
+/// Storage + builder for `MockMachineControl.control()`'s vtable.
+var mock_vtable: MachineControl.VTable = undefined;
+var mock_vtable_ready = false;
+fn ensure_mock_vtable() void {
+    if (!mock_vtable_ready) {
+        mock_vtable = .{ .reboot = MockMachineControl.rebootFn, .shutdown = MockMachineControl.shutdownFn };
+        mock_vtable_ready = true;
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Monitor context
@@ -157,28 +186,46 @@ pub const Command = struct {
     handler: *const fn (m: *Monitor, args: []const []const u8) ExecError,
 };
 
-/// Comptime registry: adding a command is one entry here (name, help,
-/// usage, arg constraints, handler). `help` derives its listing from this
-/// array, so the two cannot drift.
-pub const registry = [_]Command{
-    .{ .name = "about", .help = "explain this questionable system", .usage = "about", .handler = cmd_about },
-    .{ .name = "beans", .help = "count beans, probably", .usage = "beans [count]", .max_args = 1, .handler = cmd_beans },
-    .{ .name = "clear", .help = "clean up the crime scene", .usage = "clear", .handler = cmd_clear },
-    .{ .name = "echo", .help = "repeat your regrettable decisions", .usage = "echo <text...>", .handler = cmd_echo },
-    .{ .name = "elephant", .help = "operational mascot diagnostics", .usage = "elephant", .handler = cmd_elephant },
-    .{ .name = "handoff", .help = "display boot-to-kernel ABI data", .usage = "handoff", .handler = cmd_handoff },
-    .{ .name = "help", .help = "list commands and their help text", .usage = "help [command]", .max_args = 1, .handler = cmd_help },
-    .{ .name = "hex", .help = "format an integer in hexadecimal", .usage = "hex <number>...", .min_args = 1, .handler = cmd_hex },
-    .{ .name = "mem", .help = "summarize the EFI memory map", .usage = "mem", .handler = cmd_mem },
-    .{ .name = "reboot", .help = "restart the machine", .usage = "reboot", .handler = cmd_reboot },
-    .{ .name = "repeat", .help = "repeat text, safely bounded", .usage = "repeat <count> <text...>", .min_args = 1, .handler = cmd_repeat },
-    .{ .name = "shutdown", .help = "request power-off", .usage = "shutdown", .handler = cmd_shutdown },
-    .{ .name = "uname", .help = "compact system identity", .usage = "uname", .handler = cmd_uname },
-    .{ .name = "version", .help = "display build information", .usage = "version", .handler = cmd_version },
-};
+/// Number of commands. The registry is built at runtime (not a const
+/// table): see `ensure_registry`.
+pub const registry_count: usize = 14;
+
+/// Command registry, built at runtime into BSS. A `const` table would hold
+/// link-time absolute addresses for BOTH the string slices and the handler
+/// function pointers, which are wrong at the kernel's runtime-chosen load
+/// base (claim 0015 root cause: the first vtable dispatch crashed; the
+/// flat loader applies no relocations, unlike macOS for host tests). Built
+/// once here in RAM so every pointer resolves PC-relatively (ADRP) and is
+/// correct at any load base. `help` derives its listing from this table,
+/// so the two cannot drift.
+var registry_storage: [registry_count]Command = undefined;
+var registry_ready = false;
+
+fn ensure_registry() []const Command {
+    if (!registry_ready) {
+        registry_storage = .{
+            .{ .name = "about", .help = "explain this questionable system", .usage = "about", .handler = cmd_about },
+            .{ .name = "beans", .help = "count beans, probably", .usage = "beans [count]", .max_args = 1, .handler = cmd_beans },
+            .{ .name = "clear", .help = "clean up the crime scene", .usage = "clear", .handler = cmd_clear },
+            .{ .name = "echo", .help = "repeat your regrettable decisions", .usage = "echo <text...>", .handler = cmd_echo },
+            .{ .name = "elephant", .help = "operational mascot diagnostics", .usage = "elephant", .handler = cmd_elephant },
+            .{ .name = "handoff", .help = "display boot-to-kernel ABI data", .usage = "handoff", .handler = cmd_handoff },
+            .{ .name = "help", .help = "list commands and their help text", .usage = "help [command]", .max_args = 1, .handler = cmd_help },
+            .{ .name = "hex", .help = "format an integer in hexadecimal", .usage = "hex <number>...", .min_args = 1, .handler = cmd_hex },
+            .{ .name = "mem", .help = "summarize the EFI memory map", .usage = "mem", .handler = cmd_mem },
+            .{ .name = "reboot", .help = "restart the machine", .usage = "reboot", .handler = cmd_reboot },
+            .{ .name = "repeat", .help = "repeat text, safely bounded", .usage = "repeat <count> <text...>", .min_args = 1, .handler = cmd_repeat },
+            .{ .name = "shutdown", .help = "request power-off", .usage = "shutdown", .handler = cmd_shutdown },
+            .{ .name = "uname", .help = "compact system identity", .usage = "uname", .handler = cmd_uname },
+            .{ .name = "version", .help = "display build information", .usage = "version", .handler = cmd_version },
+        };
+        registry_ready = true;
+    }
+    return &registry_storage;
+}
 
 pub fn lookup(name: []const u8) ?*const Command {
-    for (&registry) |*cmd| {
+    for (ensure_registry()) |*cmd| {
         if (std.mem.eql(u8, cmd.name, name)) return cmd;
     }
     return null;
@@ -303,9 +350,10 @@ fn cmd_help(m: *Monitor, args: []const []const u8) ExecError {
         return .none;
     }
     m.console.print_line("available commands:");
+    const reg = ensure_registry();
     var width: usize = 0;
-    for (registry) |cmd| width = @max(width, cmd.name.len);
-    for (registry) |cmd| {
+    for (reg) |cmd| width = @max(width, cmd.name.len);
+    for (reg) |cmd| {
         m.console.puts("  ");
         m.console.puts(cmd.name);
         var pad: usize = cmd.name.len;
@@ -514,25 +562,34 @@ fn cmd_shutdown(m: *Monitor, args: []const []const u8) ExecError {
 // Personality commands
 // ---------------------------------------------------------------------------
 
-/// Fixed mascot art (bounded, deterministic, no state).
-pub const elephant_lines = [_][]const u8{
-    "      _    _",
-    "     (o)  (o)",
-    "       \\  /",
-    "       _||_",
-    "      /    \\",
-    "     |  __  |",
-    "     | |  | |",
-    "     |_|  |_|",
-    "    /  |  |  \\",
-    "   /   |  |   \\",
-    "  |    |  |    |",
-    "  |____|  |____|",
-};
+/// Fixed mascot art (bounded, deterministic, no state). Runtime-built into
+/// module storage (not a const table): a const array of string slices would
+/// hold link-time absolute pointers, wrong at the kernel's runtime load
+/// base (claim 0015 root cause — the flat loader applies no relocations).
+var elephant_storage: [12][]const u8 = undefined;
+var elephant_ready = false;
+pub fn elephant_lines() []const []const u8 {
+    if (!elephant_ready) {
+        elephant_storage[0] = "      _    _";
+        elephant_storage[1] = "     (o)  (o)";
+        elephant_storage[2] = "       \\  /";
+        elephant_storage[3] = "       _||_";
+        elephant_storage[4] = "      /    \\";
+        elephant_storage[5] = "     |  __  |";
+        elephant_storage[6] = "     | |  | |";
+        elephant_storage[7] = "     |_|  |_|";
+        elephant_storage[8] = "    /  |  |  \\";
+        elephant_storage[9] = "   /   |  |   \\";
+        elephant_storage[10] = "  |    |  |    |";
+        elephant_storage[11] = "  |____|  |____|";
+        elephant_ready = true;
+    }
+    return &elephant_storage;
+}
 
 fn cmd_elephant(m: *Monitor, args: []const []const u8) ExecError {
     _ = args;
-    for (elephant_lines) |line| m.console.print_line(line);
+    for (elephant_lines()) |line| m.console.print_line(line);
     m.console.print_line("ELEPHANT ONLINE");
     print_plain_field(m, "trunk", "up");
     m.console.puts("\n");
@@ -584,20 +641,30 @@ fn cmd_beans(m: *Monitor, args: []const []const u8) ExecError {
 // ---------------------------------------------------------------------------
 
 pub const BootMessages = struct {
-    pub const messages = [_][]const u8{
-        "DipshitOS: the elephant has left the building.",
-        "DipshitOS: 42 beans, zero dignity.",
-        "DipshitOS: memory is a map, not a territory.",
-        "DipshitOS: no libc was harmed in the making of this kernel.",
-        "DipshitOS: terminal loop, meet the monitor.",
-        "DipshitOS: from scratch, with love and beans.",
-    };
+    /// Runtime-built message table into module storage (not a const array
+    /// of string slices: those hold link-time absolute pointers, wrong at
+    /// the kernel's runtime load base — claim 0015 root cause).
+    var storage: [6][]const u8 = undefined;
+    var ready = false;
+    pub fn messages() []const []const u8 {
+        if (!ready) {
+            storage[0] = "DipshitOS: the elephant has left the building.";
+            storage[1] = "DipshitOS: 42 beans, zero dignity.";
+            storage[2] = "DipshitOS: memory is a map, not a territory.";
+            storage[3] = "DipshitOS: no libc was harmed in the making of this kernel.";
+            storage[4] = "DipshitOS: terminal loop, meet the monitor.";
+            storage[5] = "DipshitOS: from scratch, with love and beans.";
+            ready = true;
+        }
+        return &storage;
+    }
 
     /// Deterministic, stateless "rotation": the choice depends only on the
     /// boot's image handle, so it is stable within a boot, varies across
     /// boots, and needs no hidden mutable state.
     pub fn pick(image_handle: u64) []const u8 {
-        return messages[@as(usize, @intCast(image_handle % messages.len))];
+        const msgs = messages();
+        return msgs[@as(usize, @intCast(image_handle % msgs.len))];
     }
 };
 
@@ -680,14 +747,15 @@ test "monitor: command lookup" {
 }
 
 test "monitor: registry is well-formed" {
-    try std.testing.expect(registry.len >= 10);
-    for (registry, 0..) |cmd, index| {
+    const reg = ensure_registry();
+    try std.testing.expect(reg.len >= 10);
+    for (reg, 0..) |cmd, index| {
         try std.testing.expect(cmd.name.len > 0);
         try std.testing.expect(cmd.help.len > 0);
         try std.testing.expect(cmd.usage.len > 0);
         try std.testing.expect(cmd.min_args <= cmd.max_args);
         try std.testing.expect(cmd.max_args <= max_args_limit);
-        for (registry[0..index]) |other| {
+        for (reg[0..index]) |other| {
             try std.testing.expect(!std.mem.eql(u8, cmd.name, other.name));
         }
     }
@@ -699,7 +767,7 @@ test "monitor: help listing is generated from the registry" {
     try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"help"}));
     const out = env.mock.contents();
     try std.testing.expect(std.mem.indexOf(u8, out, "available commands:") != null);
-    for (registry) |cmd| {
+    for (ensure_registry()) |cmd| {
         try std.testing.expect(std.mem.indexOf(u8, out, cmd.name) != null);
         try std.testing.expect(std.mem.indexOf(u8, out, cmd.help) != null);
     }
@@ -949,7 +1017,7 @@ test "monitor: elephant is deterministic and reports diagnostics" {
     var mon = env.monitor();
     try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"elephant"}));
     const first = env.mock.contents();
-    try std.testing.expect(std.mem.startsWith(u8, first, elephant_lines[0]));
+    try std.testing.expect(std.mem.startsWith(u8, first, elephant_lines()[0]));
     const expected_tail = "ELEPHANT ONLINE\n" ++
         "  trunk: up\n" ++
         "  ears: floppy\n" ++
@@ -1007,10 +1075,11 @@ test "monitor: output overflow is bounded and flagged, never fatal" {
 }
 
 test "monitor: boot message selection is deterministic" {
-    try std.testing.expectEqualStrings(BootMessages.messages[0], BootMessages.pick(0));
-    try std.testing.expectEqualStrings(BootMessages.messages[1], BootMessages.pick(1));
-    try std.testing.expectEqualStrings(BootMessages.messages[5], BootMessages.pick(5));
-    try std.testing.expectEqualStrings(BootMessages.messages[0], BootMessages.pick(6));
+    const msgs = BootMessages.messages();
+    try std.testing.expectEqualStrings(msgs[0], BootMessages.pick(0));
+    try std.testing.expectEqualStrings(msgs[1], BootMessages.pick(1));
+    try std.testing.expectEqualStrings(msgs[5], BootMessages.pick(5));
+    try std.testing.expectEqualStrings(msgs[0], BootMessages.pick(6));
 }
 
 test "monitor: banner is deterministic and avoids invented claims" {
@@ -1019,7 +1088,7 @@ test "monitor: banner is deterministic and avoids invented claims" {
     banner(&mon);
     const out = env.mock.contents();
     try std.testing.expect(std.mem.indexOf(u8, out, "DipshitOS - AArch64 firmware-assisted kernel monitor") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, BootMessages.messages[2]) != null); // image_handle=2
+    try std.testing.expect(std.mem.indexOf(u8, out, BootMessages.messages()[2]) != null); // image_handle=2
     try std.testing.expect(std.mem.indexOf(u8, out, "Type 'help' before touching anything expensive.") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "0.1") == null);
     try std.testing.expect(std.mem.indexOf(u8, out, "256 MiB") == null);

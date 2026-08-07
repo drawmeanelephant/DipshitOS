@@ -51,6 +51,14 @@ pub fn build(b: *std.Build) void {
     // mode: Debug's safety runtime (ubsan_rt etc.) bloats the flat blob and
     // emits absolute-address movk chains, which would break the kernel's
     // load-anywhere (PC-relative) contract. See ADR 0002.
+    // Claim 0015: `-Dnvram-console` diverts console TX through the NVRAM
+    // variable channel (post-exit access to the virtio transport hangs on
+    // VZ — claim 0013), so the kernel can produce host-observable console
+    // bytes after the MMU switch. Default off: the virtio TX path is
+    // unchanged.
+    const nvram_console = b.option(bool, "nvram-console", "Route kernel console TX through the NVRAM variable channel instead of the MMIO serial transport (claim 0015; for the VZ post-exit evidence gate)") orelse false;
+    const kernel_options = b.addOptions();
+    kernel_options.addOption(bool, "nvram_console", nvram_console);
     const kernel = b.addExecutable(.{
         .name = "dipshit-kernel",
         .root_module = b.createModule(.{
@@ -59,6 +67,7 @@ pub fn build(b: *std.Build) void {
             .optimize = .ReleaseSmall,
         }),
     });
+    kernel.root_module.addOptions("build_options", kernel_options);
     // Dense layout from address 0 (kernel/linker.ld): without this, lld's
     // 64 KiB max-page-size padding would inflate the flat image ~100x.
     kernel.linker_script = b.path("kernel/linker.ld");
@@ -152,6 +161,17 @@ pub fn build(b: *std.Build) void {
     test_console.has_side_effects = true;
     test_console.stdio = .inherit;
     test_console_step.dependOn(&test_console.step);
+
+    // Claim 0015: NVRAM console channel. `zig build nvram-console` rebuilds
+    // the image with `-Dnvram-console=true` and boots it, reconstructing
+    // the post-exit console stream from the EFI variable store. The hard
+    // gate with substring assertions lives in tools/verify-nvram-console.sh
+    // (`just verify-nvram-console`). Apple silicon only (VZ VM).
+    const nvram_console_step = b.step("nvram-console", "Boot the -Dnvram-console=true image and reconstruct the post-exit NVRAM console stream (claim 0015)");
+    const nvram_console_run = b.addSystemCommand(&.{ "bash", "-c", nvram_console_vm_command });
+    nvram_console_run.has_side_effects = true;
+    nvram_console_run.stdio = .inherit;
+    nvram_console_step.dependOn(&nvram_console_run.step);
 }
 
 const run_vm_command =
@@ -221,6 +241,34 @@ const marker_vm_command =
     \\echo
     \\echo "=== marker dump (artifacts/marker-dump.txt) ==="
     \\cat artifacts/marker-dump.txt 2>/dev/null || true
+    \\echo
+    \\echo "=== loader trace: \\LOADER.TXT on the ESP ==="
+    \\python3 image/mkfat32.py --cat-file /LOADER.TXT artifacts/disk.img 2>/dev/null || echo "(no LOADER.TXT -- the loader did not reach the kernel jump)"
+    \\exit $RUNNER_RC
+;
+
+// Claim 0015: NVRAM console channel. The kernel is rebuilt with
+// -Dnvram-console=true (its console TX then rides the NVRAM variable
+// channel instead of the hanging virtio transport), the image is rebuilt,
+// and the runner reconstructs the console stream from efi-vars.bin. The
+// hard gate (substring assertions + saved evidence) lives in
+// tools/verify-nvram-console.sh.
+const nvram_console_vm_command =
+    \\set -e
+    \\# Claim 0015: rebuild the kernel + image with console TX routed through
+    \\# the NVRAM variable channel (post-exit virtio transport access hangs
+    \\# on VZ — claim 0013).
+    \\zig build -Dnvram-console=true image
+    \\swift build --package-path host/vm-runner --configuration release
+    \\codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
+    \\rm -f artifacts/efi-vars.bin
+    \\set +e
+    \\host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log --nvram-console artifacts/nvram-console.log --timeout 25
+    \\RUNNER_RC=$?
+    \\set -e
+    \\echo
+    \\echo "=== nvram console stream (artifacts/nvram-console.log) ==="
+    \\cat artifacts/nvram-console.log 2>/dev/null || true
     \\echo
     \\echo "=== loader trace: \\LOADER.TXT on the ESP ==="
     \\python3 image/mkfat32.py --cat-file /LOADER.TXT artifacts/disk.img 2>/dev/null || echo "(no LOADER.TXT -- the loader did not reach the kernel jump)"

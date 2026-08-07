@@ -24,6 +24,15 @@ const memmap = @import("memmap.zig");
 const monitor = @import("monitor.zig");
 const shell = @import("shell.zig");
 
+// Claim 0015: NVRAM console channel (build-gated by `-Dnvram-console`).
+// Post-exit access to the virtio-pci transport hangs on VZ (claim 0013), so
+// in nvram-console builds console bytes ride the proven post-exit-safe
+// runtime-SetVariable channel instead of the MMIO transport. The option
+// comes from build.zig (kernel module options); a default build has it
+// false and the virtio TX path is byte-identical.
+const build_options = @import("build_options");
+const nvram_console = @import("nvram_console.zig");
+
 const HandoffV2 = extern struct {
     magic: u32,
     version: u32,
@@ -64,6 +73,7 @@ const marker_txst: u64 = 0x4d325f5458535421; // "M2_TXST!" — virtio flush ente
 const marker_txnt: u64 = 0x4d325f54584e5421; // "M2_TXNT!" — notify write issued
 const marker_txpl: u64 = 0x4d325f5458504c21; // "M2_TXPL!" — used-ring poll finished
 const marker_vpscan: u64 = 0x4d325f5650533031; // "M2_VPS01" — virtio-pci console dev scan done
+const marker_seam: u64 = 0x4d325f5345414d21; // "M2_SEAM!" — claim 0015 diag: shell seam entered
 const marker_vpbar: u64 = 0x4d325f5650533032; // "M2_VPS02" — BAR bases read
 const marker_vpcap: u64 = 0x4d325f5650533033; // "M2_VPS03" — about to read the capability pointer (0x34)
 const marker_vpcapr: u64 = 0x4d325f5650533034; // "M2_VPS04" — capability pointer read; walk about to start
@@ -256,6 +266,11 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff: *HandoffV2
     // ladder below (observed working post-exit on VZ, claims 0009/0010).
     machine.init(st.runtime_services);
 
+    // Claim 0015: capture the same table for the NVRAM console channel.
+    // Active only in `-Dnvram-console` builds; otherwise the module's
+    // writes are never called.
+    nvram_console.init(st.runtime_services);
+
     print_pre_exit_error(st, "DipshitOS: kernel entered\r\n");
     set_marker(marker_entry);
     write_marker_var(st, marker_entry);
@@ -287,7 +302,12 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff: *HandoffV2
     dump_mmio_descriptors(map_buffer.map);
     dump_config_table(st);
     dump_acpi(st);
-    write_probe_var(st);
+    // Claim 0015: in nvram-console builds the console stream itself carries
+    // the map/probe evidence through the NVRAM channel, so persisting the
+    // separate ~40 KB DipshitProbe variable is redundant AND starves the
+    // chunk channel (the store is only ~61 KB writable on VZ, observed:
+    // both gate runs died at 0xf061 with the session cut off mid-help).
+    if (comptime !build_options.nvram_console) write_probe_var(st);
 
     // Claim 0013: the serial probe runs PRE-EXIT — post-exit reads of the
     // declared MMIO windows hang on VZ (observed every run). The selection
@@ -296,7 +316,7 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff: *HandoffV2
     console_kind = pre.kind;
     console_base = pre.base;
     dump_sel(pre.kind, pre.base);
-    write_probe_var(st);
+    if (comptime !build_options.nvram_console) write_probe_var(st);
 
     // Pre-exit stage: proves the kernel passed valid_handoff + capture_map
     // and reached the exit call. The persisted NVRAM marker being M2_ENTRY
@@ -440,8 +460,36 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff: *HandoffV2
         },
         machine.control(),
     );
+    // Claim 0015 diagnostic: mark the seam entry so a missing shell banner
+    // is attributable to the seam setup vs. the shell write path.
+    if (comptime build_options.nvram_console) {
+        write_marker_var(st, marker_seam);
+        // Stack + console-pointer probe: the banner write path crashed
+        // without entering M15Console.writeFn, so record the state at the
+        // seam (sp, vtable/ctx addresses, and a direct vtable dispatch).
+        var sp: u64 = undefined;
+        asm volatile ("mov %[sp], sp"
+            : [sp] "=r" (sp),
+        );
+        uart_puts("[seam] sp=");
+        uart_hex(sp);
+        uart_puts(" base=");
+        uart_hex(handoff.stack_base);
+        uart_puts(" ctx=");
+        uart_hex(@intFromPtr(mon.console.ctx));
+        uart_puts(" vt=");
+        uart_hex(@intFromPtr(mon.console.vtable));
+        uart_puts("\n");
+        const probe_con = m15.to_console();
+        probe_con.print_line("[seam] direct dispatch");
+    }
     shell.boot_and_park(&mon, m15.rx_wired());
     // No return after takeover. WFE is a terminal state, not a firmware call.
+    // Note: with RX wired (nvram builds) boot_and_park loops forever, so
+    // this flush is unreachable there — the trailing prompt is flushed by
+    // readByteFn when the scripted session ends. Kept as a safety net for
+    // the no-RX path, where boot_and_park returns after the prompt.
+    if (comptime build_options.nvram_console) nvram_console.flush();
     halt_forever();
 }
 
@@ -1449,8 +1497,9 @@ fn virtio_pci_init(st: *const SystemTable) bool {
     // stops here, a config-space read in the walk is the death site.
     write_marker_var(st, marker_vpdev);
     // Persist the walk results now: if a transport write below stalls, the
-    // host still sees the resolved common/notify addresses.
-    write_probe_var(st);
+    // host still sees the resolved common/notify addresses. Claim 0015: not
+    // in nvram-console builds — the chunk channel needs the store space.
+    if (comptime !build_options.nvram_console) write_probe_var(st);
 
     // Modern transport init: reset, ACKNOWLEDGE|DRIVER, accept
     // VIRTIO_F_VERSION_1, FEATURES_OK.
@@ -1565,7 +1614,11 @@ fn virtio_pci_flush() void {
     dump_str("VP pst=");
     dump_hex(vp_read8(0x14));
     dump_str("\n");
-    if (st_tx != null) write_probe_tail(st_tx.?);
+    // Claim 0015: the post-exit probe tail is skipped in nvram-console
+    // builds for the same store-budget reason as the full dump.
+    if (comptime !build_options.nvram_console) {
+        if (st_tx != null) write_probe_tail(st_tx.?);
+    }
     // Notify via a 32-bit store (VZ common-cfg/notify emulation accepts
     // 32-bit accesses; a 16-bit store may be dropped — claim 0013).
     mmio_write32(vp_notify + @as(u64, vp_queue_notify_off) * vp_notify_mult, 1);
@@ -1714,6 +1767,13 @@ fn pl011_init() void {
 }
 
 fn uart_putc(byte: u8) void {
+    // Claim 0015: in nvram-console builds every console byte rides the
+    // NVRAM channel instead of the MMIO transport (which hangs post-exit
+    // on VZ). Comptime-gated, so a default build is byte-identical.
+    if (comptime build_options.nvram_console) {
+        nvram_console.putc(byte);
+        return;
+    }
     switch (console_kind) {
         .pl011 => {
             if (!pl011_initialized) {
@@ -1746,7 +1806,11 @@ fn uart_puts(text: []const u8) void {
     for (text) |byte| uart_putc(byte);
     // Claim 0013: a virtio-console line without a trailing newline (e.g. the
     // shell's prompt) must still reach the host — flush any buffered bytes.
-    if (console_kind == .virtio and vp_tx_len > 0) virtio_pci_flush();
+    // In nvram-console builds the virtio transport is never touched; the
+    // NVRAM sink does its own newline/buffer-flush batching.
+    if (comptime !build_options.nvram_console) {
+        if (console_kind == .virtio and vp_tx_len > 0) virtio_pci_flush();
+    }
 }
 
 fn uart_hex(value: u64) void {
@@ -1834,32 +1898,84 @@ fn print_pre_exit_error(st: *const SystemTable, msg: []const u8) void {
 const M15Console = struct {
     const Self = @This();
 
-    pub const vtable = console.Console.VTable{
-        .write = writeFn,
-        .flush = flushFn,
-        .readByte = readByteFn,
-    };
+    // Claim 0015 root cause: the vtable is built at runtime into BSS, NOT
+    // as a const in .rodata. The kernel ELF is linked at address 0 with no
+    // relocation sections and the flat loader copies the image to a
+    // runtime-chosen base (observed 0x7e4d1000), so a const vtable would
+    // hold link-time absolute function addresses (observed: write=0x44c4,
+    // should be base+0x44c4) and the first dispatch would jump into the
+    // weeds — the claim-0015 seam crash (chunk 30 persisted, the first
+    // vtable write never did; writeFn was never entered). Building the
+    // table in RAM makes every `&fn` resolve PC-relatively (ADRP), which is
+    // correct at any load base. Host tests never caught this because macOS
+    // relocates test binaries; the flat kernel loader does not.
+    var vtable_storage: console.Console.VTable = undefined;
+    var vtable_ready = false;
+
+    fn ensure_vtable() *const console.Console.VTable {
+        if (!vtable_ready) {
+            vtable_storage = .{
+                .write = writeFn,
+                .flush = flushFn,
+                .readByte = readByteFn,
+            };
+            vtable_ready = true;
+        }
+        return &vtable_storage;
+    }
+
+    // Claim 0015: in nvram-console builds the shell loop runs a scripted
+    // session. The input is a STATIC kernel-side byte buffer (the same
+    // technique the mock transcript uses), NOT host keystrokes — host RX
+    // stays unclaimed. It proves the real command loop executes post-exit
+    // on VZ and its output is observable through the NVRAM channel. The
+    // script is compile-time elided in default builds.
+    script_pos: usize = 0,
 
     fn writeFn(_: *anyopaque, bytes: []const u8) void {
         uart_puts(bytes);
     }
 
-    fn flushFn(_: *anyopaque) void {}
+    fn flushFn(_: *anyopaque) void {
+        if (comptime build_options.nvram_console) nvram_console.flush();
+    }
 
-    fn readByteFn(_: *anyopaque) ?u8 {
+    fn readByteFn(ctx: *anyopaque) ?u8 {
+        const self: *Self = @ptrCast(@alignCast(ctx));
+        if (comptime build_options.nvram_console) {
+            if (self.script_pos < nvram_script.len) {
+                const byte = nvram_script[self.script_pos];
+                self.script_pos += 1;
+                return byte;
+            }
+            // Script exhausted: persist any buffered output (the trailing
+            // prompt has no newline) on the first idle poll, then stay idle.
+            nvram_console.flush();
+            return null;
+        }
         // [inferred] No RX path yet: reading the real device registers is
         // gated on claim 0002. The shell sees no input and parks.
         return null;
     }
 
     fn to_console(self: *Self) console.Console {
-        return .{ .ctx = self, .vtable = &vtable };
+        return .{ .ctx = self, .vtable = ensure_vtable() };
     }
 
-    /// [inferred] No RX source is wired until the VZ serial gate passes,
-    /// so the shell prints banner + prompt and the kernel parks in WFE.
+    /// [inferred] In default builds no RX source is wired (the VZ serial
+    /// gate is unpassed), so the shell prints banner + prompt and the
+    /// kernel parks in WFE. In nvram-console builds the scripted session
+    /// counts as a wired input source, so the loop runs to completion.
     fn rx_wired(self: *Self) bool {
         _ = self;
-        return false;
+        return comptime build_options.nvram_console;
     }
 };
+
+/// Claim 0015: the scripted session served by `M15Console.readByte` in
+/// nvram-console builds — the same shape of input the mock transcript test
+/// feeds (help/version/mem/echo), proving real command execution post-exit.
+const nvram_script = if (build_options.nvram_console)
+    "version\nmem\necho nvram-console-ok\nhelp\n"
+else
+    "";

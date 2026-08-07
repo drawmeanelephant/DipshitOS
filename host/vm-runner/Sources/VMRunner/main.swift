@@ -3,7 +3,27 @@
 // Usage: VMRunner <disk-image> [serial-log] [--screen <png>]
 //         [--timeout <s>] [--expect <line>] [--terminal-marker <line>]
 //         [--console] [--debug-input] [--dump-marker <file>]
+//         [--nvram-console <file>]
 //
+// * --nvram-console <file> (M1.5 VZ serial-gate successor, claim 0015):
+//   before exiting, reconstruct the kernel's post-exit console stream from
+//   the EFI variable store (artifacts/efi-vars.bin). In nvram-console
+//   builds the kernel writes every console byte as chunked EFI variables
+//   `DipshitC0`, `DipshitC1`, ... via runtime SetVariable — the one
+//   post-exit-safe device channel on VZ (post-exit access to the
+//   virtio-pci transport hangs, claim 0013). Each chunk value is prefixed
+//   with the in-band marker `DIPSHITC <idx>:`; the host byte-scans the
+//   store (file order == write order), validates the chunk indices, and
+//   concatenates the payloads. The reconstructed text is written to
+//   <file> and printed. In this mode the exit code is 0 iff reconstructed
+//   output is non-empty — the NVRAM channel, not the (silent) serial
+//   channel, is the gate. The serial evidence gate above is unchanged
+//   when the flag is absent.
+//
+//   NOTE: the reconstructed bytes travelled the NVRAM variable channel,
+//   NOT the virtio serial pipe — vm-serial.log stays 0 B. This is the
+//   fallback channel claim 0013 named, and it makes post-exit console
+//   evidence observable on VZ for the first time.
 // * --dump-marker <file> (ADR 0004 D4 fixed-memory-marker fallback, gate
 //   work item 3, claim 0009): before exiting, read the EFI variable store
 //   (artifacts/efi-vars.bin) and save the ordered ladder of M2_* marker
@@ -64,6 +84,7 @@ var terminalMarker: String?
 var consoleMode = false
 var debugInput = false
 var markerDumpPath: String?
+var nvramConsolePath: String?
 
 var idx = 2
 while idx < arguments.count {
@@ -89,6 +110,9 @@ while idx < arguments.count {
         idx += 1
     } else if arg == "--dump-marker", idx + 1 < arguments.count {
         markerDumpPath = arguments[idx + 1]
+        idx += 2
+    } else if arg == "--nvram-console", idx + 1 < arguments.count {
+        nvramConsolePath = arguments[idx + 1]
         idx += 2
     } else {
         serialLogPath = arg
@@ -307,6 +331,9 @@ if consoleMode {
     if let markerDumpPath {
         print("  marker dump: \(markerDumpPath)  (ADR 0004 D4 fallback — NVRAM ladder; exit 0 iff an M2_* marker is found)")
     }
+    if let nvramConsolePath {
+        print("  nvram console: \(nvramConsolePath)  (claim 0015 — post-exit console stream from the NVRAM channel; exit 0 iff bytes were found)")
+    }
 }
 
 runner.queue.async {
@@ -343,31 +370,46 @@ func captureScreenshot(at t: TimeInterval) {
 
 func finish(success: Bool) {
     let wantDump = markerDumpPath != nil
+    let wantNvram = nvramConsolePath != nil
     runner.queue.async {
         runner.vm.stop { _ in
-            guard wantDump, let dumpPath = markerDumpPath else {
-                exit(success ? 0 : 1)
-            }
-            // ADR 0004 D4 fixed-memory-marker fallback (working form, claim
-            // 0009): the kernel persists its takeover stage as the EFI
-            // non-volatile variable `DipshitM2` (runtime SetVariable survives
-            // ExitBootServices on VZ — observed), and the host reads the
-            // store after the VM stops. The memory-scan variant is impossible
-            // on VZ: guest RAM is not mapped into the runner process
-            // (observed — a full submap-aware walk finds no 256 MiB region
-            // and every M2_* hit is the runner's own constant array). The
-            // NVRAM ladder is the gate here; the exit code becomes 0 iff at
-            // least one marker instance is present in the store.
-            print("marker ladder: reading EFI variable store")
-            let ladder = readMarkerLadder(from: varsURL)
-            writeMarkerDump(to: dumpPath, ladder: ladder)
+            // Exit code: the serial evidence `success` is the default; each
+            // NVRAM-gated channel (marker ladder, nvram console) flips it to
+            // true when its bytes are found. With no such flag the original
+            // serial-gate semantics are unchanged.
             var finalSuccess = success
-            if ladder.isEmpty {
-                print("MARKER-GATE: no M2_* marker in the EFI variable store (kernel died before its first marker write, or SetVariable failed)")
-            } else {
-                finalSuccess = true
-                for (name, _) in ladder {
-                    print("MARKER-GATE: \(name)")
+            if wantDump, let dumpPath = markerDumpPath {
+                // ADR 0004 D4 fixed-memory-marker fallback (working form, claim
+                // 0009): the kernel persists its takeover stage as the EFI
+                // non-volatile variable `DipshitM2` (runtime SetVariable survives
+                // ExitBootServices on VZ — observed), and the host reads the
+                // store after the VM stops. The memory-scan variant is impossible
+                // on VZ: guest RAM is not mapped into the runner process
+                // (observed — a full submap-aware walk finds no 256 MiB region
+                // and every M2_* hit is the runner's own constant array). The
+                // NVRAM ladder is the gate here; the exit code becomes 0 iff at
+                // least one marker instance is present in the store.
+                print("marker ladder: reading EFI variable store")
+                let ladder = readMarkerLadder(from: varsURL)
+                writeMarkerDump(to: dumpPath, ladder: ladder)
+                if ladder.isEmpty {
+                    print("MARKER-GATE: no M2_* marker in the EFI variable store (kernel died before its first marker write, or SetVariable failed)")
+                } else {
+                    finalSuccess = true
+                    for (name, _) in ladder {
+                        print("MARKER-GATE: \(name)")
+                    }
+                }
+            }
+            if wantNvram, let path = nvramConsolePath {
+                print("nvram console: reconstructing console stream from EFI variable store")
+                let result = readNvramConsole(from: varsURL)
+                writeNvramConsole(to: path, result: result)
+                if result.text.isEmpty {
+                    print("NVRAM-CONSOLE: no console chunks in the EFI variable store (kernel wrote nothing, or SetVariable failed post-exit)")
+                } else {
+                    finalSuccess = true
+                    print("NVRAM-CONSOLE: \(result.chunks) chunk(s) reconstructed\(result.complete ? "" : " (INCOMPLETE — missing chunk index \(result.missing!))"), \(result.text.count) bytes")
                 }
             }
             exit(finalSuccess ? 0 : 1)
@@ -428,6 +470,117 @@ func readMarkerLadder(from storeURL: URL) -> [(name: String, offset: Int)] {
     }
     hits.sort { $0.offset < $1.offset }
     return hits
+}
+
+// ---------------------------------------------------------------------------
+// Claim 0015: NVRAM console reconstruction. The kernel persists console
+// bytes as chunked EFI variables DipshitC0..N (runtime SetVariable — the
+// proven post-exit-safe channel on VZ), each value prefixed with the
+// in-band marker "DIPSHITC <4-digit-index>:" inside the value bytes. A
+// plain byte scan of the store finds every chunk in file order (the store
+// is append-per-write), exactly like the marker ladder — no struct-layout
+// parsing. Payloads are concatenated after validating the indices are
+// sequential from 0 (a gap means a SetVariable call was dropped; reported
+// honestly).
+// ---------------------------------------------------------------------------
+
+struct NvramConsoleResult {
+    var text: String = ""
+    var chunks: Int = 0
+    var complete: Bool = true
+    var missing: Int? = nil
+}
+
+func readNvramConsole(from storeURL: URL) -> NvramConsoleResult {
+    var result = NvramConsoleResult()
+    guard let data = try? Data(contentsOf: storeURL) else { return result }
+    let bytes = [UInt8](data)
+    let prefix = Array("DIPSHITC ".utf8) // 9 bytes; +4 digits + ":" = marker at i+13
+    let endMarker = Array("DIPSHITC-END".utf8) // 12 bytes; closes every chunk value
+    guard prefix.count == 9, endMarker.count == 12 else { return result }
+
+    // Find every chunk start marker, in file order.
+    var starts: [(index: Int, pos: Int)] = []
+    var i = 0
+    while i + 14 <= bytes.count {
+        if bytes[i..<(i + 9)].elementsEqual(prefix) {
+            var ok = true
+            var index = 0
+            for k in 9..<13 {
+                let c = bytes[i + k]
+                guard c >= 0x30, c <= 0x39 else { ok = false; break }
+                index = index * 10 + Int(c - 0x30)
+            }
+            if ok, bytes[i + 13] == 0x3a { // ":"
+                starts.append((index, i))
+                i += 14
+                continue
+            }
+        }
+        i += 1
+    }
+
+    // Payload of each chunk = bytes between its start marker and the first
+    // DIPSHITC-END after it. The end marker is written atomically with the
+    // value by the kernel, so this delimits payloads exactly without parsing
+    // the store's structure (variable headers / GUIDs / other variables sit
+    // between chunks). Validate the index sequence 0..n-1: a dropped
+    // SetVariable shows as a gap and is reported honestly.
+    var expected = 0
+    var out = Data()
+    var sawUnterminated = false
+    for (n, (index, pos)) in starts.enumerated() {
+        if index != expected {
+            result.complete = false
+            result.missing = expected
+        }
+        expected = index + 1
+        let payloadStart = pos + 14
+        let searchStart = (n + 1 < starts.count) ? min(payloadStart, starts[n + 1].pos) : payloadStart
+        var end = -1
+        var j = searchStart
+        while j + 12 <= bytes.count {
+            if bytes[j..<(j + 12)].elementsEqual(endMarker) {
+                end = j
+                break
+            }
+            j += 1
+        }
+        if end < 0 {
+            sawUnterminated = true
+            continue // no end marker: skip the chunk rather than swallow the store tail
+        }
+        out.append(contentsOf: bytes[payloadStart..<end])
+    }
+    result.chunks = starts.count
+    if sawUnterminated {
+        result.complete = false
+        if result.missing == nil { result.missing = expected }
+    }
+    if result.chunks == 0 { return result }
+
+    result.text = String(decoding: out, as: UTF8.self)
+    return result
+}
+
+func writeNvramConsole(to path: String, result: NvramConsoleResult) {
+    var lines: [String] = []
+    lines.append("DIPSHITOS nvram console — claim 0015 (post-exit console bytes via the NVRAM variable channel)")
+    lines.append("date=\(ISO8601DateFormatter().string(from: Date()))")
+    lines.append("store=\(varsURL.path)")
+    lines.append("chunks=\(result.chunks) complete=\(result.complete)\(result.missing.map { " missing=\($0)" } ?? "") bytes=\(result.text.count)")
+    lines.append("NOTE: these bytes rode the NVRAM variable channel (runtime SetVariable), not the virtio serial pipe.")
+    lines.append("")
+    lines.append("----- reconstructed console stream -----")
+    lines.append(result.text)
+    lines.append("----------------------------------------")
+    let text = lines.joined(separator: "\n") + "\n"
+    do {
+        try text.write(toFile: path, atomically: true, encoding: .utf8)
+        print("nvram console output saved to \(path) (\(result.chunks) chunk(s), \(result.text.count) bytes)")
+    } catch {
+        FileHandle.standardError.write(Data("ERROR: could not write nvram console output to \(path): \(error)\n".utf8))
+    }
 }
 
 func writeMarkerDump(to path: String, ladder: [(name: String, offset: Int)]) {
