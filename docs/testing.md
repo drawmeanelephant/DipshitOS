@@ -92,11 +92,16 @@
       `\BOOTED.TXT` on the ESP)
 - [x] Milestone one remains covered by the historical evidence in
       `artifacts/m1-fix-run{1,2,3}.txt`.
-- [ ] Milestone two VZ serial/MMU takeover gate: **blocked**. The directly
+- [ ] Milestone two VZ serial/MMU takeover gate: **blocked**. Every directly
       observed Apple M4 / macOS 27 run produced no banner, map print, probe
       log, or terminal marker in `vm-serial.log`; no `RC.TXT` was produced.
-      Do not label the hardware assumptions observed before that evidence
-      exists.
+      Latest re-run 2026-08-06 21:19 (`artifacts/m2-vz-run-20260806.txt`,
+      `vm-serial.log` 0 B): loader→shim jump proven by `LOADER.TXT`
+      `ram_first8=0xaa0103eaaa0003e9` (= `mov x9,x0; mov x10,x1`), then the
+      kernel dies before its first post-exit `uart_puts` — consistent with
+      either `layout=none` (no usable MMIO serial device; `M2_SERIA` halt)
+      or an early post-exit crash. Do not label the hardware assumptions
+      observed before that evidence exists.
 - [x] Milestone two bad-handoff failure gate: **passing** (fixed 2026-08-06,
       `agent/buffy/m2-badhandoff-fix`). Root cause was the naked `_start`
       shim's `bl kernel_main` overwriting the link register without
