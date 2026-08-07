@@ -23,32 +23,50 @@
    have not landed yet are skipped with a notice, so the gate stays green
    on `main` and becomes binding branch-protection evidence once each
    module merges.
-4. Build the Zig UEFI application: `zig build`.
-5. Inspect the generated binary: `zig build inspect`.
-6. Create the FAT disk image: `zig build image`.
-7. Inspect the disk-image contents (part of `zig build inspect`).
-8. Build the Swift VM runner: `swift build --package-path host/vm-runner`.
-9. Boot with Apple Virtualization.framework (Apple silicon only):
-   `zig build run`. Milestone two gates on `vm-serial.log` containing the
-   exact banner `DipshitOS kernel has seized control.`, a
-   `memory-map descriptors=0x...` line, and `kernel terminal state`. The
-   pre-exit loader marker `\\BOOTED.TXT` remains required. `RC.TXT` is
-   expected only for a deliberate pre-exit failure fixture, not success.
-9b. ADR 0004 D4 marker fallback gate (gate work item 3, claims 0009/
-   0010): `bash tools/verify-marker.sh` (also `just verify-marker` /
-   `zig build marker`) boots the VM and asserts the NVRAM marker ladder —
-   the kernel persists each takeover stage as the EFI variable `DipshitM2`,
-   and the runner saves the ordered ladder to `artifacts/marker-dump.txt`.
-   The gate passes iff at least one marker instance is present; the final
-   stage names the death/crash site. Claim 0009 observed the ladder ending
-   at `M2_MAPD!` (MMU-takeover window); claim 0010 root-caused and fixed it
-   — the ladder now runs `M2_MAPD! → M2_MMUP! → M2_SERIA`, i.e. the switch
-   completes and the serial probe runs to completion finding no usable
-   device. The memory-dump form is impossible on VZ (guest RAM is not
-   host-mapped — observed, claim 0009).
-10. Save command output and logs under `artifacts/m2-*.txt`, including the
-   probe output and the complete serial log. State blocked VZ capabilities
-   precisely rather than inferring success.
+4. Run the automated transcript gate (M1.5 march step 19):
+   `zig build test-console` (also `just test-console`; CI runs
+   `tools/verify-transcript.sh`) — the shell module tests plus a byte-exact
+   diff of the mock-console transcript against the canonical fixture
+   `tests/transcript-console.txt`.
+5. Build the Zig UEFI application: `zig build`.
+6. Inspect the generated binary: `zig build inspect`.
+7. Create the FAT disk image: `zig build image`.
+8. Inspect the disk-image contents (part of `zig build inspect`).
+9. Build the Swift VM runner: `swift build --package-path host/vm-runner`.
+10. Boot with Apple Virtualization.framework (Apple silicon only):
+    `zig build run`. Milestone two gates on `vm-serial.log` containing the
+    exact banner `DipshitOS kernel has seized control.`, a
+    `memory-map descriptors=0x...` line, and `kernel terminal state`. The
+    pre-exit loader marker `\\BOOTED.TXT` remains required. `RC.TXT` is
+    expected only for a deliberate pre-exit failure fixture, not success.
+    **Currently not passed** — the VZ serial gate stays open (no usable
+    MMIO serial device in the declared windows; see `docs/status.md`).
+11. Run the pre-exit failure-path gate:
+    `bash tools/verify-bad-handoff.sh` (also `just verify-bad-handoff`) —
+    boots a bad-magic fixture and asserts the loader's `RC.TXT` reads
+    `kernel_rc=0x2`; **passing since 2026-08-06** (shim LR clobber fixed,
+    claim 0001).
+12. Run the ADR 0004 D4 marker fallback gate (gate work item 3, claims
+    0009/0010): `bash tools/verify-marker.sh` (also `just verify-marker` /
+    `zig build marker`) boots the VM and asserts the NVRAM marker ladder —
+    the kernel persists each takeover stage as the EFI variable
+    `DipshitM2`, and the runner saves the ordered ladder to
+    `artifacts/marker-dump.txt`. The gate passes iff at least one marker
+    instance is present; the final stage names the death/crash site. Claim
+    0009 observed the ladder ending at `M2_MAPD!` (MMU-takeover window);
+    claim 0010 root-caused and fixed it — the ladder now runs
+    `M2_MAPD! → M2_MMUP! → M2_SERIA`, i.e. the switch completes and the
+    serial probe runs to completion finding no usable device. The
+    memory-dump form is impossible on VZ (guest RAM is not host-mapped —
+    observed, claim 0009).
+13. Run the M1.5 host-side console plumbing gate (march steps 4–7):
+    `bash tools/verify-host-console.sh` (also `just verify-host-console`;
+    Apple silicon only) — wires a stdin-backed serial attachment, tees
+    guest output to terminal + `vm-serial.log`, and restores the terminal
+    on exit/signals.
+14. Save command output and logs under `artifacts/m2-*.txt`, including the
+    probe output and the complete serial log. State blocked VZ capabilities
+    precisely rather than inferring success.
 
 > **Historical regression check (ADR 0002, resolved):** the `\KERNEL.TXT` content gate
 > in `zig build run` is the regression check for the loader's
@@ -57,15 +75,22 @@
 > header loaded into RAM) makes the kernel's `adrp`+`add` references read
 > 24 bytes early, so `KERNEL.TXT` is not byte-perfect and the run gate —
 > and therefore CI — fails immediately.
-11. Generate the project snapshot: `zig build context` →
+15. Generate the project snapshot: `zig build context` →
     `artifacts/context.md`.
-12. Verify the multiagent coordination surface:
+16. Verify the multiagent coordination surface:
     `bash tools/verify-coordination.sh` (also `just verify-coordination`
     and CI). Fails if a claim/log file is malformed or the generated
     claim/log index tables in `docs/claims/README.md` /
     `docs/logs/README.md` drift from the files; fix by running
     `bash tools/status/refresh-indexes.sh` after creating a claim file or
     branch log.
+
+> The full no-VM gate set runs as `just verify` and in CI
+> (`.github/workflows/ci.yml`): fmt → unit tests → transcript gate →
+> `zig build` → image → inspect → Swift runner build → context →
+> coordination. The VM gates (`run`, bad-handoff, marker, host-console)
+> are Apple-silicon-only and are run by their own `tools/verify-*.sh`
+> scripts or `zig build run`.
 
 ## Evidence artifacts
 
@@ -106,16 +131,22 @@
       `\BOOTED.TXT` on the ESP)
 - [x] Milestone one remains covered by the historical evidence in
       `artifacts/m1-fix-run{1,2,3}.txt`.
-- [ ] Milestone two VZ serial/MMU takeover gate: **blocked**. Every directly
-      observed Apple M4 / macOS 27 run produced no banner, map print, probe
-      log, or terminal marker in `vm-serial.log`; no `RC.TXT` was produced.
-      Latest re-run 2026-08-06 21:19 (`artifacts/m2-vz-run-20260806.txt`,
-      `vm-serial.log` 0 B): loader→shim jump proven by `LOADER.TXT`
-      `ram_first8=0xaa0103eaaa0003e9` (= `mov x9,x0; mov x10,x1`), then the
-      kernel dies before its first post-exit `uart_puts` — consistent with
-      either `layout=none` (no usable MMIO serial device; `M2_SERIA` halt)
-      or an early post-exit crash. Do not label the hardware assumptions
-      observed before that evidence exists.
+- [ ] Milestone two VZ serial/MMU takeover gate: **not passed** — and the
+      blocker is now isolated. Every directly observed Apple M4 / macOS 27
+      run still produces no banner, map print, probe log, or terminal
+      marker in `vm-serial.log`; no `RC.TXT` is produced (good path,
+      expected). The early-post-exit-crash hypothesis is **closed**: claim
+      0009's NVRAM ladder showed the death was in the MMU-takeover window
+      (`M2_MAPD!`), and claim 0010 (2026-08-07) root-caused and fixed it —
+      the MMU takeover now **completes** on VZ (ladder reaches `M2_MMUP!`)
+      and the serial probe runs to completion, selecting **no usable MMIO
+      serial device** in the declared windows (`M2_SERIA`, `layout=none`).
+      The remaining blocker is device absence (find the VZ virtio-console
+      register file or a documented console fallback), not a crash.
+      Evidence: `artifacts/m2-mmu-takeover-gate.txt`, `artifacts/m2-firmware-regs.txt`,
+      `artifacts/m2-table-walk.txt`, `artifacts/m2-mmu-bisect-tlbi.txt`.
+      Serial-device hardware assumptions stay `[inferred]` until a real
+      device is observed.
 - [x] Milestone two marker fallback gate (gate work item 3, claims
       0009/0010): **passing** (2026-08-07). Claim 0009's ladder
       discriminated the serial gate: every run ended at `M2_MAPD!` — the

@@ -51,4 +51,5 @@ CI) fails if the table drifts from the claim files.
 | [0009-m2-marker-fallback](0009-m2-marker-fallback.md) | buffy (`agent/buffy/m2-marker-fallback`) | ✅ done 2026-08-07 (gate work item 3 passes; evidence in |
 | [0010-m2-mmu-takeover-fix](0010-m2-mmu-takeover-fix.md) | buffy (`freebuff/grab-newest-files-from-github-and-pick-something-t-a3eb337e-4b37-4bae-8548-242c49be7456`) | ✅ fixed 2026-08-07 — the MMU takeover completes on VZ; the |
 | [0011-m15-machine-controls](0011-m15-machine-controls.md) | buffy (`agent/buffy/m15-machine-controls`) | ⛔ live gate blocked 2026-08-07 — real `ResetSystem` |
+| [0012-m15-milestone-docs](0012-m15-milestone-docs.md) | buffy (`agent/buffy/m15-milestone-docs`) | ✅ done 2026-08-07 — README/roadmap/architecture/testing |
 <!-- CLAIMS_INDEX:END -->

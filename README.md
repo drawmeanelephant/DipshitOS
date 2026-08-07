@@ -180,7 +180,17 @@ All command output and logs are saved under `artifacts/` (`inspect.txt`,
 
 ### Observed behavior
 
-- `zig build`, `image`, and `inspect` complete on this host; the milestone-two `run` gate is blocked by missing serial evidence (claim 0010 fixed the MMU-takeover death — the NVRAM ladder now reaches `M2_SERIA`, and the serial probe finds no usable MMIO device).
+- `zig build`, `image`, and `inspect` complete on this host. The milestone-two
+  `run` gate remains blocked on serial evidence, but the gates around it
+  now pass: `bash tools/verify-bad-handoff.sh` (failure path,
+  `kernel_rc=0x2`), `bash tools/verify-marker.sh` (NVRAM marker ladder —
+  the MMU-takeover death was root-caused and fixed, claim 0010, so the
+  ladder reaches `M2_SERIA`), `zig build test-console` (M1.5 transcript
+  gate, mock console), and `bash tools/verify-host-console.sh` (M1.5 host
+  plumbing). The M1.5 monitor (14 commands) is implemented and
+  host-tested; the VZ serial gate's remaining blocker is the absence of a
+  usable MMIO serial device in the declared windows (see
+  `docs/status.md`).
 - The Virtualization.framework VM boots the GPT+FAT image: configuration
   validates, the EFI variable store is created, the VM starts and runs, and
   after boot the guest-written marker file `\BOOTED.TXT` exists on the ESP
@@ -200,19 +210,27 @@ All command output and logs are saved under `artifacts/` (`inspect.txt`,
 ## Next steps
 
 The gate-by-gate plan and active work claims live in
- [`docs/status.md`](docs/status.md); the milestone plan is in
- [`docs/roadmap.md`](docs/roadmap.md).
- 
- 1. **Milestone 1.5, the interactive kernel monitor**: the kernel console is
-    polled TX-only (ADR 0004, no RX path) and the VM runner's serial
-    attachment has no host-to-guest input handle (`fileHandleForReading:
-    nil`) — close the RX gap, then build the console abstraction, line
-    editor, command registry, and commands. Tracked step-by-step in
-    `docs/status.md`.
- 2. Resolve the milestone-two VZ serial/MMIO discovery gate: run the complete
-    Apple M4 / macOS 27 VZ gate and save output under `artifacts/`. Only
-    then may the matching MMIO/MMU assumptions change from `[inferred]` to
-    `[observed]` in `docs/hardware-contract.md`. (The bad-handoff failure
-    gate — formerly the other unpassed gate — is closed since 2026-08-06.)
- 3. Keep later interrupt/GIC, timer, allocator, and process work out of
-    scope; those remain future milestones.
+[`docs/status.md`](docs/status.md); the milestone plan is in
+[`docs/roadmap.md`](docs/roadmap.md).
+
+1. **Close the M1.5 serial gap: device discovery + RX path.** The monitor
+   itself is implemented and host-tested (console abstraction, line
+   editor, tokenizer, 14 commands, `zig build test-console` transcript
+   gate at the mock level; the host-side `--console` plumbing is gated by
+   `bash tools/verify-host-console.sh`). What remains is the live serial
+   channel: the MMU takeover now completes (claim 0010, NVRAM ladder
+   reaches `M2_SERIA`) but the probe finds **no usable MMIO serial
+   device** in the declared windows, so the kernel's `readByte` is still
+   a no-RX stub and keystrokes cannot reach a live VM. Next: device
+   discovery (find the VZ virtio-console register file or a documented
+   console fallback), then wire RX end to end. Tracked step-by-step in
+   `docs/status.md` / `docs/march-m15.md`.
+2. Resolve the milestone-two VZ serial gate itself: with the MMU-takeover
+   death fixed, the gate's remaining blocker is device absence — run the
+   complete Apple M4 / macOS 27 gate once a console transport exists and
+   save output under `artifacts/`. Only then may the matching
+   MMIO/serial assumptions change from `[inferred]` to `[observed]` in
+   `docs/hardware-contract.md`. (The bad-handoff failure gate — formerly
+   the other unpassed gate — is closed since 2026-08-06.)
+3. Keep later interrupt/GIC, timer, allocator, and process work out of
+   scope; those remain future milestones (roadmap).
