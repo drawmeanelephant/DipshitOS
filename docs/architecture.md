@@ -17,6 +17,9 @@ MMIO windows, and drives a polled serial console before a terminal WFE loop.
 Its VZ serial gate is **not passed**; the bad-handoff failure gate is
 **passed** since 2026-08-06 (root cause: the naked `_start` shim clobbered
 the link register, so a pre-exit failure never returned to the loader). The
+MMU-takeover death was root-caused and **fixed** (claim 0010) — the
+identity-map switch completes on VZ and the serial gate is now blocked on
+device absence, not a crash. The
 canonical, always-current status lives in
 [`docs/status.md`](status.md); this file documents the architecture that
 status refers to. The project targets Apple silicon /
@@ -49,7 +52,7 @@ VZEFIBootLoader (macOS VZ)
              │  milestone two: ExitBootServices, identity-map MMU
              └── intended declared MMIO probe (pre-exit map: 0x01000000/0x20050000) ──▶ virtio console ──▶ artifacts/vm-serial.log (blocked: empty)
              └── intended kernel terminal WFE loop (not observed)
-             └── post-exit evidence: kernel persists DipshitM2 NVRAM ladder ──▶ artifacts/efi-vars.bin (observed: ends M2_MAPD!)
+             └── post-exit evidence: kernel persists DipshitM2 NVRAM ladder ──▶ artifacts/efi-vars.bin (observed: reaches M2_SERIA — takeover completes, probe finds no usable device)
 ```
 
 ## Interfaces
