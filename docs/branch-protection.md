@@ -21,8 +21,9 @@ To enforce quality and prevent broken code from reaching the `main` branch, conf
      - Dismiss stale pull request approvals when new commits are pushed.
    - [x] **Require status checks to pass before merging**
      - Check **Require branches to be up to date before merging**.
-     - Search and select the status check:
-       - `Build & Test (macOS + Swift Launcher)`
+     - Search and select the status check (matches the job name in
+       `.github/workflows/ci.yml`):
+       - `Build (macOS + Swift Launcher)`
    - [x] **Require linear history** (prevents merge commits, keeps `git log` clean).
    - [x] **Do not allow bypassing the above settings** (applies to administrators as well).
 
@@ -41,12 +42,18 @@ When operating multiple AI agents in parallel (e.g. across worktrees `calm-lavoi
    ```
 
 2. **Pre-Push Local Verification**:
-   Before pushing, the agent must execute and pass:
+   Before pushing, the agent must execute and pass (`just verify` runs the
+   whole sequence):
    ```bash
-   zig fmt --check boot/src/main.zig kernel/src/main.zig build.zig
+   zig fmt --check boot/src/*.zig kernel/src/*.zig build.zig
+   bash tools/verify-unit-tests.sh
+   zig build test-console
    zig build
    zig build image
    zig build inspect
+   swift build --package-path host/vm-runner
+   zig build context
+   bash tools/verify-coordination.sh
    ```
 
 3. **Submitting Work**:
@@ -56,7 +63,8 @@ When operating multiple AI agents in parallel (e.g. across worktrees `calm-lavoi
    ```
 
 4. **Merging to `main`**:
-   Once GitHub Actions CI passes (`Build & Test (Linux + QEMU)` & `Build (macOS + Swift Launcher)`), rebase or merge the PR into `main`.
+   Once GitHub Actions CI passes (`Build (macOS + Swift Launcher)` — the
+   sole status check), rebase or merge the PR into `main`.
 
 5. **Updating Other Worktrees**:
    In other worktree instances, pull the updated `main` branch:

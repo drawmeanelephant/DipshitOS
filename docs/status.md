@@ -1,5 +1,9 @@
 # DipshitOS living status, goals & changelog
 
+> **Host identity:** Apple silicon only — hosted by Apple's
+> Virtualization.framework; **not Linux, not Unix, not QEMU** (see
+> `AGENTS.md`).
+
 > This file is the project's **living status tracker** and its **multiagent
 > coordination surface**: where we are, what we are trying to build next, how
 > far along each step is, **who currently claims which piece of work**, and

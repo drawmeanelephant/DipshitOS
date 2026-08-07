@@ -1,5 +1,11 @@
 # DipshitOS architecture
 
+**Host identity:** this project is Apple silicon only — the guest runs
+under Apple's Virtualization.framework UEFI firmware on macOS. It is **not
+Linux, not Unix, and not QEMU**: no emulator, no libc/POSIX, no existing
+guest OS in the boot path. (Canonical, always-current status:
+[`docs/status.md`](status.md).)
+
 ## Current state
 
 Milestones zero and one are verified end to end (boot pipeline proof;
@@ -21,10 +27,11 @@ Virtualization.framework only; there is no QEMU path.
 | Component | Where | Role |
 |-----------|-------|------|
 | Guest boot loader | `boot/src/main.zig` | AArch64 UEFI application; prints via Simple Text Output, loads `\KERNEL.BIN` from the ESP, jumps to the kernel entry, writes host-readable evidence (`\BOOTED.TXT`, `\LOADER.TXT`, `\RC.TXT`) |
+| Guest kernel | `kernel/src/*.zig` | Freestanding kernel proper: `ExitBootServices`, identity-map MMU, polled serial console; M1.5 adds the interactive monitor (console, lineedit, tokenizer, shell, monitor modules) |
 | Boot medium | `image/mkfat32.py` + `image/make-image.sh` | GPT disk with a FAT32 EFI System Partition containing `EFI/BOOT/BOOTAA64.EFI` |
 | macOS host launcher | `host/vm-runner/` (Swift + Virtualization.framework) | Boots the image under UEFI on Apple silicon, captures the guest serial console and framebuffer |
 | Build system | `build.zig`, `build.zig.zon`, `justfile` | Compile, kernel, image, run, inspect, context |
-| Evidence tooling | `tools/inspect.sh`, `tools/context/` | Binary/image inspection and a deterministic project snapshot |
+| Evidence tooling | `tools/inspect.sh`, `tools/context/`, `tools/status/`, `tools/verify-*.sh` | Binary/image inspection, deterministic project snapshot, coordination indexes and gate scripts |
 
 ## Data flow
 
@@ -42,6 +49,7 @@ VZEFIBootLoader (macOS VZ)
              │  milestone two: ExitBootServices, identity-map MMU
              └── intended declared MMIO probe (pre-exit map: 0x01000000/0x20050000) ──▶ virtio console ──▶ artifacts/vm-serial.log (blocked: empty)
              └── intended kernel terminal WFE loop (not observed)
+             └── post-exit evidence: kernel persists DipshitM2 NVRAM ladder ──▶ artifacts/efi-vars.bin (observed: ends M2_MAPD!)
 ```
 
 ## Interfaces
