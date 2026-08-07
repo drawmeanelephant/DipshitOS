@@ -2,19 +2,27 @@
 
 [![CI](https://github.com/drawmeanelephant/DipshitOS/actions/workflows/ci.yml/badge.svg)](https://github.com/drawmeanelephant/DipshitOS/actions/workflows/ci.yml)
 
-A from-scratch AArch64 operating system. Not Linux-based. No libc, no POSIX,
-no existing guest OS. Guest code is written in Zig; the host launcher is
-Swift. See `AGENTS.md` for the project rules.
+A from-scratch AArch64 operating system that boots under real UEFI firmware
+on **Apple silicon**, hosted by **Apple's Virtualization.framework**
+(macOS). It is **not Linux, not Unix, and not QEMU-based**: no libc, no
+POSIX, no existing guest OS, and no emulator anywhere in the boot path.
+Guest code is written in Zig; the host launcher is Swift. See `AGENTS.md`
+for the project rules.
 
-**Status: milestone two implemented; build gates pass; the bad-handoff
-failure gate passes (fixed 2026-08-06); the ADR 0004 D4 marker fallback
-gate passes (2026-08-07) and the MMU-takeover root cause is **fixed**
-(claim 0010, same day — the identity-map switch now completes on VZ and
-the marker ladder reaches `M2_SERIA`); the VZ serial gate itself remains
-unpassed, but its blocker is now isolated: the serial probe finds **no
-usable MMIO serial device** in the declared windows, not a kernel crash —
-the canonical, always-current status is
-[`docs/status.md`](docs/status.md).**
+**Status at a glance** (canonical, always-current:
+[`docs/status.md`](docs/status.md)):
+
+- **Done:** milestone zero (boot pipeline), milestone one (kernel
+  handoff).
+- **Implemented, gate open:** milestone two (kernel proper:
+  `ExitBootServices`, identity-map MMU, polled serial console) — the
+  MMU-takeover death is root-caused and **fixed** (claim 0010: the
+  identity-map switch now completes on VZ; marker ladder reaches
+  `M2_SERIA`); the VZ serial gate remains blocked because the probe finds
+  **no usable MMIO serial device** in the declared windows. The bad-handoff
+  and marker-fallback gates pass.
+- **Current:** milestone 1.5 — the interactive `dipshit>` kernel monitor.
+- The milestone-one `KERNEL.TXT` corruption is fixed (ADR 0002).
 
 Milestone two adds the kernel proper: the stub allocates handoff contract v2,
 the kernel captures the EFI map, calls `ExitBootServices` with the required
@@ -50,9 +58,11 @@ D/I-cache maintenance, and jumps to the kernel entry. It writes
 `kernel/src/main.zig` is the milestone-two freestanding kernel proper. It
 validates handoff v2, captures the map, exits Boot Services, builds and
 installs identity TTBR0_EL1 tables, probes PL011/16550/virtio-MMIO candidates,
-prints the exact takeover banner and hexadecimal map view, and then never
-returns. Its fixed page tables and virtio queue storage are BSS carve-outs;
-there is no general allocator or libc/POSIX.
+and is designed to print the takeover banner and enter a terminal WFE loop
+(**not yet observed on VZ** — the serial gate is blocked; see
+`docs/status.md`). Its fixed page tables and virtio queue storage are BSS
+carve-outs; there is no general allocator or libc/POSIX. Milestone 1.5 adds
+the interactive monitor (`kernel/src/{console,lineedit,tokenizer,shell,monitor}.zig`).
 
 ## Toolchain
 
@@ -68,6 +78,9 @@ Virtualization.framework only — there is no QEMU path.
 zig build          # compile the AArch64 UEFI application -> zig-out/bin/BOOTAA64.EFI
 zig build image    # build the GPT+FAT32 boot image -> artifacts/disk.img
 zig build run      # boot it with Swift + Virtualization.framework (Apple silicon)
+zig build console  # boot an interactive dipshit> console (Apple silicon)
+zig build test-console  # M1.5 transcript test (mock console, no VM)
+zig build marker    # boot and save the NVRAM marker ladder (ADR 0004 D4)
 zig build inspect  # inspect the EFI binary and the disk image
 zig build context  # regenerate artifacts/context.md (deterministic project snapshot)
 ```
@@ -87,6 +100,7 @@ dipshitos/
 ├── boot/src/main.zig          the AArch64 UEFI boot loader (handoff v2)
 ├── kernel/                    freestanding AArch64 kernel proper
 │   ├── src/main.zig           ExitBootServices, MMU, probe, serial, terminal loop
+│   ├── src/{console,lineedit,tokenizer,shell,monitor}.zig   M1.5 monitor
 │   └── linker.ld              dense layout (avoids 64 KiB lld padding)
 ├── tools/elf2bin.py           ELF → flat KERNEL.BIN (format v1) converter
 ├── host/vm-runner/            Swift Virtualization.framework launcher
@@ -99,6 +113,8 @@ dipshitos/
 ├── tools/
 │   ├── inspect.sh             EFI binary + image inspection (degrades gracefully)
 │   ├── context/               project-context generator + review prompt
+│   ├── status/                coordination index generator (refresh-indexes.sh)
+│   ├── verify-*.sh            gate scripts (marker, bad-handoff, console, …)
 │   └── ragshit/               local Git-aware context engine (Python, stdlib only)
 ├── docs/                      status.md (canonical living status & coordination
 │                              hub), claims/ (per-claim files), logs/ (per-branch
@@ -152,18 +168,19 @@ Host: Apple M4, macOS 27.0 (arm64), Zig 0.16.0, Swift 6.2.3 (arm64).
 | Inspect binary | `zig build inspect` | **Observed**: `file format coff-arm64`, subsystem `0x0a (EFI application)`, `.text/.data/.pdata/.reloc` sections, real AArch64 disassembly |
 | Build image | `zig build image` | **Observed**: 64 MiB GPT+FAT32 image; `EFI/BOOT/BOOTAA64.EFI` (139264 B) present; volume label `DIPSHITOS` |
 | Inspect image | `zig build inspect` | **Observed**: `DOS/MBR boot sector` (protective), GPT header crc valid, ESP `LBA 2048..131038` |
-| Build Swift runner | `zig build run` | **Observed**: SwiftPM build succeeds |
-| Boot via Virtualization.framework | `zig build run` | **Observed**: VM boots; guest wrote `\BOOTED.TXT` (exact content), `\LOADER.TXT` (base/size/entry + first16 bytes), and `\RC.TXT` (`kernel_rc=0x0`) — the kernel loaded, ran, and returned |
+| Build Swift runner | `swift build --package-path host/vm-runner` | **Observed**: SwiftPM build succeeds |
+| Boot via Virtualization.framework | `zig build run` | **Observed**: VM boots; loader writes `\BOOTED.TXT` + `\LOADER.TXT` byte-perfect. M2 serial gate **blocked** — no serial bytes yet |
 | Kernel image | `zig build` + `elf2bin.py` | **Observed**: `KERNEL.BIN` (format v1: magic `DSK1`, `entry_offset=0x18`, ~2 KiB) |
-| Kernel marker `\KERNEL.TXT` | kernel write | **Observed**: byte-perfect and byte-identical across runs (ADR 0002 corruption fixed); `zig build run` gates on its content |
+| Kernel marker `\KERNEL.TXT` | M1 regression only | **Observed**: byte-perfect and byte-identical across runs (ADR 0002 corruption fixed); not written post-`ExitBootServices` |
 | Marker fallback gate | `bash tools/verify-marker.sh` | **Observed** (2026-08-07): NVRAM ladder `M2_ENTRY → M2_CMAP! → M2_PREX! → M2_EXIT! → M2_MAPD!` (claim 0009); **fixed 2026-08-07 (claim 0010)**: ladder now reaches `M2_MMUP! → M2_SERIA` — MMU takeover completes; serial probe finds no usable device (`artifacts/m2-mmu-takeover-gate.txt`) |
+| Bad-handoff failure gate | `bash tools/verify-bad-handoff.sh` | **Observed** (2026-08-06): `RC.TXT` → `kernel_rc=0x2`; gate passes (shim LR clobber fixed) | (docs: documentation tightening pass — Apple-VZ identity, drop stale QEMU/CI references)
 
 All command output and logs are saved under `artifacts/` (`inspect.txt`,
 `vm-serial.log`, `vm-screen-*.png`, `efi-vars.bin`, `context.md`).
 
 ### Observed behavior
 
-- `zig build`, `image`, and `inspect` complete on this host; the milestone-two `run` gate is blocked by missing serial evidence.
+- `zig build`, `image`, and `inspect` complete on this host; the milestone-two `run` gate is blocked by missing serial evidence (the NVRAM marker ladder ends `M2_MAPD!` — claim 0009).
 - The Virtualization.framework VM boots the GPT+FAT image: configuration
   validates, the EFI variable store is created, the VM starts and runs, and
   after boot the guest-written marker file `\BOOTED.TXT` exists on the ESP
@@ -178,9 +195,11 @@ All command output and logs are saved under `artifacts/` (`inspect.txt`,
 
 - Apple's VZ EFI firmware loads `EFI/BOOT/BOOTAA64.EFI` from the ESP per the
   UEFI removable-media rule (consistent with the observed marker write, but
-  the firmware's internal behavior is not directly observable). ## Next steps
- 
- The gate-by-gate plan and active work claims live in
+  the firmware's internal behavior is not directly observable).
+
+## Next steps
+
+The gate-by-gate plan and active work claims live in
  [`docs/status.md`](docs/status.md); the milestone plan is in
  [`docs/roadmap.md`](docs/roadmap.md).
  
