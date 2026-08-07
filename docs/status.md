@@ -49,7 +49,7 @@ Every milestone-two claim below is backed by evidence re-verified
 | Binary + image inspect | `zig build inspect` | ✅ pass | re-run 2026-08-06 |
 | Swift runner build | `swift build --package-path host/vm-runner` | ✅ pass | re-run 2026-08-06 |
 | Context snapshot | `zig build context` | ✅ pass | re-run 2026-08-06 |
-| **VZ serial gate** | `zig build run` | ❌ **not passed** | `vm-serial.log` empty (last run 2026-08-06 00:05) |
+| **VZ serial gate** | `zig build run` | ❌ **not passed** | `vm-serial.log` still 0 bytes (re-run 2026-08-06 21:19, `artifacts/m2-vz-run-20260806.txt`) |
 | **Bad-handoff failure gate** | `bash tools/verify-bad-handoff.sh` | ✅ **pass** | `artifacts/m2-badhandoff-fix-after.txt`: `RC.TXT` → `kernel_rc=0x0000000000000002`, gate exits 0 (first observed 2026-08-06, fixed shim) |
 
 ### What we directly observe about the two failing gates
@@ -81,12 +81,22 @@ AAPCS64, preserved by `kernel_main`) before the `bl` and restore it before
 (`artifacts/m2-badhandoff-fix-after.txt`).
 
 The **VZ serial gate is a separate, still-open question**: with the fix, the
-bad-handoff VM provably returns through the shim, but the good-path run
-(`artifacts/m2-badhandoff-fix-goodpath.txt`) still produces no serial
-output (`vm-serial.log` 0 bytes) and the kernel never returns — the probe
-finding no usable MMIO serial device on VZ, or an early post-exit crash,
-remain hypotheses. The bad-handoff fix removes the shim/LR suspect from
-that investigation (M1.5 march step 8, `docs/march-m15.md`).
+bad-handoff VM provably returns through the shim, but every good-path run
+still produces no serial output and the kernel never returns. Re-run
+2026-08-06 21:19 (claim 0002, `artifacts/m2-vz-run-20260806.txt`):
+`vm-serial.log` **0 bytes** after a 30 s run; loader evidence intact
+(`BOOTED.TXT` exact content, `LOADER.TXT` `base=0x7e4df000 size=0x823e8
+entry_offset=0x18`, `ram_first8=0xaa0103eaaa0003e9` = the shim's first two
+instructions `mov x9,x0; mov x10,x1` — the loader→shim jump is proven);
+`RC.TXT` absent (good path, expected — D6). So the kernel dies **after
+shim entry and before its first post-exit `uart_puts`**. The two
+hypotheses: the probe finds no usable MMIO serial device on VZ
+(`layout=none` → `M2_SERIA` BSS-marker halt, which produces exactly zero
+output, consistent with the log), or an early post-exit crash (map build /
+MMU install / probe read). The ADR 0004 D4 fixed-memory-marker fallback
+(host-side dump of `takeover_marker`) discriminates them; the bad-handoff
+fix already removed the shim/LR suspect (M1.5 march step 8,
+`docs/march-m15.md`).
 
 ## Milestone 1.5 — the call
 
@@ -286,7 +296,7 @@ here.
    `memory-map descriptors=0x...`, and `kernel terminal state` in
    `vm-serial.log`; then flip matching `[inferred] → [observed]` entries in
    `docs/hardware-contract.md`.
-   **Status:** see [`0002-vz-serial-gate`](claims/0002-vz-serial-gate.md) — ⬜ unclaimed.
+   **Status:** see [`0002-vz-serial-gate`](claims/0002-vz-serial-gate.md) — ⛔ blocked (re-run 2026-08-06 21:19: still zero serial bytes; kernel dies before its first post-exit print — see claim and `artifacts/m2-vz-run-20260806.txt`).
 3. **If no usable serial device exists on VZ**, implement the ADR 0004 D4
    fixed-memory-marker fallback (host-side dump of the kernel's BSS
    `takeover_marker`). **Gate:** saved host-side dump matching the `M2_*`
