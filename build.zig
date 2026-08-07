@@ -126,6 +126,18 @@ pub fn build(b: *std.Build) void {
     context.has_side_effects = true;
     context.stdio = .inherit;
     context_step.dependOn(&context.step);
+
+    // M1.5 march step 19: automated transcript test. No VM, no live RX —
+    // the shell's mock-fed e2e test asserts the exact `dipshit>` transcript
+    // in-test and emits the captured bytes to artifacts/, which this gate
+    // diffs byte-for-byte against the canonical fixture
+    // tests/transcript-console.txt. The live vm-serial.log assertion stays
+    // gated on the VZ serial gate (claim 0002).
+    const test_console_step = b.step("test-console", "Run the automated 'dipshit>' transcript test (M1.5 march step 19; mock console, no VM)");
+    const test_console = b.addSystemCommand(&.{ "bash", "tools/verify-transcript.sh" });
+    test_console.has_side_effects = true;
+    test_console.stdio = .inherit;
+    test_console_step.dependOn(&test_console.step);
 }
 
 const run_vm_command =

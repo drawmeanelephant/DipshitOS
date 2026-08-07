@@ -27,6 +27,9 @@ jobs:
       - name: Test kernel monitor modules
         run: bash tools/verify-unit-tests.sh
 
+      - name: Test automated console transcript
+        run: zig build test-console
+
       - name: Build UEFI application and kernel image
         run: zig build
 

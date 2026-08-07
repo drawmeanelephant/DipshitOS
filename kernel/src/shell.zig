@@ -220,6 +220,18 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
     mock.feed("\n\x03\n");
     while (shell.poll() != .idle) {}
     try std.testing.expectEqualStrings(expected, mock.contents());
+    // Emit the captured transcript so the automated gate
+    // (tools/verify-transcript.sh, `zig build test-console`) can diff it
+    // byte-for-byte against the checked-in canonical fixture
+    // (tests/transcript-console.txt). Host-test-only: kernel builds never
+    // execute tests, so std.Io never appears in the freestanding image.
+    // Zig 0.16 moved file I/O out of std.fs into the std.Io interface; the
+    // single-threaded instance is the minimal one for a plain write.
+    var io_impl = std.Io.Threaded.init_single_threaded;
+    try std.Io.Dir.cwd().writeFile(io_impl.io(), .{
+        .sub_path = "artifacts/m15-mock-transcript.txt",
+        .data = mock.contents(),
+    });
 }
 
 test "shell: over-long line is refused with a bell and an overflow notice" {

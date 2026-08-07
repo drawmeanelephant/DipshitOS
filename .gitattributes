@@ -1,0 +1,4 @@
+# The console transcript fixture must stay byte-exact: the editor echoes
+# CRLF on submitted lines, so the file intentionally contains CR bytes.
+# -text disables any line-ending normalization on checkout.
+tests/transcript-console.txt -text

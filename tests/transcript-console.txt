@@ -1,0 +1,44 @@
+DipshitOS - AArch64 firmware-assisted kernel monitor
+DipshitOS: memory is a map, not a territory.
+Type 'help' before touching anything expensive.
+dipshit> help
+available commands:
+  about     explain this questionable system
+  beans     count beans, probably
+  clear     clean up the crime scene
+  echo      repeat your regrettable decisions
+  elephant  operational mascot diagnostics
+  handoff   display boot-to-kernel ABI data
+  help      list commands and their help text
+  hex       format an integer in hexadecimal
+  mem       summarize the EFI memory map
+  reboot    restart the machine
+  repeat    repeat text, safely bounded
+  shutdown  request power-off
+  uname     compact system identity
+  version   display build information
+type 'help <command>' for details on a single command.
+dipshit> version
+dipshit-kernel
+milestone-two kernel proper (ADR 0004)
+handoff ABI v2
+build label: m1.5 commands & personality (mock console)
+dipshit> mem
+mem: descriptors=0x0000000000000006 size=0x0000000000000028 version=0x0000000000000002 key=0x0000000000000042
+  usable: 0x0000000000480000 bytes (0x0000000000000480 pages)
+  conventional: 0x00000000003c0000 bytes (0x00000000000003c0 pages)
+  loader: 0x0000000000040000 bytes (0x0000000000000040 pages)
+  boot_services: 0x0000000000080000 bytes (0x0000000000000080 pages)
+  runtime: 0x0000000000008000 bytes (0x0000000000000008 pages)
+  reserved: 0x0000000000009000 bytes (0x0000000000000009 pages)
+  mmio: 0x0000000000010000 bytes (0x0000000000000010 pages)
+  kernel: 0x000000007e4df000..0x000000007e5613e8 (0x00000000000823e8 bytes)
+dipshit> echo "elephant business"
+elephant business
+dipshit> aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+unknown command: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+type 'help' for a list of commands
+dipshit> ^C
+dipshit> 
+no command given; type 'help' for a list of commands
+dipshit> 
