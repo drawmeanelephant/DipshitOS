@@ -48,6 +48,19 @@ Every gate below is backed by evidence re-verified
 
 | Gate | Command | Result | Last evidence |
 |------|---------|--------|---------------|
+| Format | `zig fmt --check boot/src/main.zig kernel/src/main.zig build.zig` | ✅ pass | re-run 2026-08-06 |
+| Guest build | `zig build` | ✅ pass | re-run 2026-08-06 |
+| Disk image | `zig build image` | ✅ pass | re-run 2026-08-06 |
+| Binary + image inspect | `zig build inspect` | ✅ pass | re-run 2026-08-06 |
+| Swift runner build | `swift build --package-path host/vm-runner` | ✅ pass | re-run 2026-08-06 |
+| Context snapshot | `zig build context` | ✅ pass | re-run 2026-08-06 |
+| **VZ serial gate** | `zig build run` | ❌ **not passed** | `vm-serial.log` still 0 bytes; **blocker now precise (claim 0013, 2026-08-07):** console is a virtio-pci device (bus 0 D5 `0x1af4/0x1043`), transport armed pre-exit (`SEL=VIRTIO`, ladder reaches `M2_READY`), but **post-exit access to the transport window hangs on VZ** (first TX dies somewhere in the first flush). See [VZ serial gate](#vz-serial-gate) |
+| **Bad-handoff failure gate** | `bash tools/verify-bad-handoff.sh` | ✅ **pass** | `artifacts/m2-badhandoff-fix-after.txt`: `RC.TXT` → `kernel_rc=0x0000000000000002`, gate exits 0 (first observed 2026-08-06, fixed shim) |
+| **Marker fallback gate** (gate work item 3) | `bash tools/verify-marker.sh` | ✅ **pass** | `artifacts/m2-marker-gate.txt` (2026-08-07): NVRAM ladder `M2_ENTRY → M2_CMAP! → M2_PREX! → M2_EXIT! → M2_MAPD!` — final stage `M2_MAPD!` (see [gate work item 3](#immediate-gate-work-prerequisites-for-m15) and claim 0009) |
+| **MMU-takeover root cause & fix** (claim 0010) | `bash tools/verify-marker.sh` | ✅ **fixed 2026-08-07** | ladder now advances `M2_MAPD! → M2_MMUP! → M2_SERIA` — the identity-map switch **completes** on VZ for the first time (`artifacts/m2-mmu-takeover-gate.txt`; see claim 0010) |
+| **VZ serial console discovery** (claim 0013) | pre-exit probe + NVRAM dump | ✅ **discovered 2026-08-07** | console = modern virtio-pci (bus 0 D5 `VID=0x1af4 DID=0x1043 class=0x078000`), ECAM `0x40000000`, BAR0 (64-bit) @ `0x100010000`, transport decoded + armed pre-exit (`SEL=VIRTIO`, ladder `M2_READY`); declared MMIO windows decoded as Apple efivars store + internal debug UART. Gate still blocked: post-exit transport access hangs (see claim 0013) |
+
+### What we directly observe about the two failing gates
 | Format | `zig fmt --check boot/src/*.zig kernel/src/*.zig build.zig` | ✅ pass | re-run 2026-08-07 |
 | Guest build | `zig build` | ✅ pass | re-run 2026-08-07 |
 | Disk image | `zig build image` | ✅ pass | re-run 2026-08-07 |
@@ -145,6 +158,28 @@ milestone). Result: the ladder now runs `M2_MAPD! → M2_MMUP! → M2_SERIA`
 the serial probe runs to completion and finds no usable device. This
 confirms claim 0009's diagnostic prediction: the VZ serial gate is blocked
 on **device absence in the declared windows**, not on a kernel crash.
+
+**The device absence is now fully explained (claim 0013, 2026-08-07).** The
+console is not in the declared MMIO windows at all. Pre-exit diagnostics
+persisted through the NVRAM channel (the probe dump variables `DipshitP*` in
+`artifacts/efi-vars.bin`) decoded the ground truth: `0x01000000..0x01010000`
+contains Apple's EFI variable-store region (raw bytes spell `efivars\0`),
+and `0x20050000..0x20051000` is a PL011-family PrimeCell UART whose DR
+writes produce zero bytes in `vm-serial.log` (Apple's internal EFI debug
+UART). ACPI names no console (no SPCR/DBG2; the DSDT, Apple's own `Apple Vz`
+AML, declares only `PCI0` + `efivars`). The VZ serial attachment is a
+**modern virtio-pci console** — bus 0 device 5, `VID=0x1af4 DID=0x1043
+class=0x078000` — found by pre-exit PCI enumeration over ECAM `0x40000000`
+(MCFG). Its 64-bit BAR0 is firmware-assigned at `0x100010000` (above the
+4 GiB identity-map blanket; assignment varies across boots, which is why the
+fixed-window probe never saw it), and the transport is fully armed pre-exit
+(`SEL=VIRTIO`, ladder reaches `M2_READY`). The remaining wall is **post-exit
+access to the transport window hangs on VZ** — the same wall that blocks
+post-exit MMIO reads of the declared windows (the first banner TX dies
+somewhere in the first flush; `vm-serial.log` stays 0 B). Next step: carry
+the console bytes over a post-exit-safe channel (the runtime `SetVariable`
+NVRAM channel is proven alive post-exit) or find a VZ configuration that
+keeps the transport reachable after the MMU switch.
 
 ## Milestone 1.5 — the call
 

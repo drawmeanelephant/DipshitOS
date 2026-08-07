@@ -13,6 +13,7 @@ const SystemTable = uefi.tables.SystemTable;
 const BootServices = uefi.tables.BootServices;
 const MemoryMapSlice = uefi.tables.MemoryMapSlice;
 const MemoryType = uefi.tables.MemoryType;
+const ConfigurationTable = uefi.tables.ConfigurationTable;
 
 // M1.5 console & shell core (agent B): the interactive `dipshit>` monitor
 // runs on the polled TX console through these modules. The takeover path
@@ -57,6 +58,19 @@ const marker_mmu: u64 = 0x4d325f4d4d555021; // "M2_MMUP!"
 const marker_table: u64 = 0x4d325f5441424c45; // "M2_TABLE"
 const marker_seria: u64 = 0x4d325f5345524941; // "M2_SERIA"
 const marker_ready: u64 = 0x4d325f5245414459; // "M2_READY" — console ready, banner next
+const marker_raw: u64 = 0x4d325f52415721; // "M2_RAW!" — post-switch probe: declared-window base checks
+const marker_txok: u64 = 0x4d325f54584f4b21; // "M2_TXOK!" — first serial TX completed (bytes may still be dropped; the log is the gate)
+const marker_txst: u64 = 0x4d325f5458535421; // "M2_TXST!" — virtio flush entered (desc/avail posted)
+const marker_txnt: u64 = 0x4d325f54584e5421; // "M2_TXNT!" — notify write issued
+const marker_txpl: u64 = 0x4d325f5458504c21; // "M2_TXPL!" — used-ring poll finished
+const marker_vpscan: u64 = 0x4d325f5650533031; // "M2_VPS01" — virtio-pci console dev scan done
+const marker_vpbar: u64 = 0x4d325f5650533032; // "M2_VPS02" — BAR bases read
+const marker_vpcap: u64 = 0x4d325f5650533033; // "M2_VPS03" — about to read the capability pointer (0x34)
+const marker_vpcapr: u64 = 0x4d325f5650533034; // "M2_VPS04" — capability pointer read; walk about to start
+const marker_vpwalk: u64 = 0x4d325f5650533035; // "M2_VPS05" — walk exited
+const marker_vpdev: u64 = 0x4d325f5650444556; // "M2_VPDEV" — virtio-pci console device found, caps walked
+const marker_vptx: u64 = 0x4d325f5650545821; // "M2_VPTX!" — transport programmed (features + queue)
+const marker_vpok: u64 = 0x4d325f56504f4b21; // "M2_VPOK!" — DRIVER_OK, TX path armed
 
 // Marker NVRAM channel: EFI Runtime Services `SetVariable` survives
 // ExitBootServices (it is a *runtime* service, not a boot service — the same
@@ -104,6 +118,21 @@ fn clean_dcache_range(start: u64, len: u64) void {
     asm volatile ("dsb ish" ::: .{ .memory = true });
 }
 
+/// Invalidate the D-cache over [start, start+len) so the CPU re-reads RAM
+/// the device just wrote (the virtio used ring). Pairs with
+/// clean_dcache_range for device-visible DMA buffers.
+fn invalidate_dcache_range(start: u64, len: u64) void {
+    var addr = start & ~@as(u64, 63);
+    const end = start + len;
+    while (addr < end) : (addr += 64) {
+        asm volatile ("dc ivac, %[addr]"
+            :
+            : [addr] "r" (addr),
+        );
+    }
+    asm volatile ("dsb ish" ::: .{ .memory = true });
+}
+
 const ProbeRecord = extern struct {
     base: u64,
     magic: u32,
@@ -111,7 +140,7 @@ const ProbeRecord = extern struct {
     device: u32,
     layout: u32,
 };
-var probe_records: [32]ProbeRecord = undefined;
+var probe_records: [96]ProbeRecord = undefined;
 var probe_count: usize = 0;
 
 const VirtqDesc = extern struct {
@@ -139,6 +168,29 @@ var virtio_avail: VirtqAvail align(2) = undefined;
 var virtio_used: VirtqUsed align(4) = undefined;
 var virtio_tx: [128]u8 align(16) = undefined;
 var virtio_last_used: u16 = 0;
+
+// Claim 0013 virtio-pci console (the VZ serial attachment): the runner's
+// VZVirtioConsoleDeviceSerialPortConfiguration appears to the guest as a
+// modern virtio-pci console (VID 0x1af4, DID 0x1043) on bus 0, found via
+// the MCFG ECAM base — not the EFI MMIO windows (which the DSDT proves hold
+// only PCI0 + the efivars store; the 0x20050000 PrimeCell UART is Apple's
+// internal debug console, unconnected to the serial pipe). Discovery and
+// transport setup run PRE-EXIT (config-space and BAR MMIO are
+// firmware-identity-mapped and deterministic); post-exit only the notify
+// MMIO + queue RAM are touched for TX, and every VA used sits below the
+// 4 GiB blanket (mapped Device), so no post-switch fault is possible.
+var pci_ecam: u64 = 0; // set from the MCFG table during dump_acpi
+var vp_dev: u32 = 0; // console PCI device number
+var vp_ready: bool = false; // transport initialized, TX path armed
+var vp_common: u64 = 0; // common-config struct address (BAR + cap offset)
+var vp_notify: u64 = 0; // notify region base (BAR + cap offset)
+var vp_notify_mult: u32 = 0; // notify_off_multiplier
+var vp_queue_notify_off: u16 = 0; // queue 1 notify offset
+var vp_common_off: u32 = 0; // common cfg offset within the BAR
+var vp_notify_off: u32 = 0; // notify cfg offset within the BAR
+var vp_bar0: u64 = 0; // console BAR0 base (the SEL record)
+var vp_tx_len: usize = 0; // bytes buffered in virtio_tx
+var st_tx: ?*const SystemTable = null; // for post-exit flush stage markers
 
 const Candidate = struct {
     base: u64,
@@ -223,6 +275,29 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff: *HandoffV2
         return map_failure;
     };
 
+    // Claim 0013 diagnostic (PRE-EXIT, all firmware memory still readable):
+    // record the declared MMIO windows, the EFI configuration table
+    // (sniffing for the flattened device tree, magic 0xd00dfeed), and the
+    // ACPI tables (SPCR names the console UART) into the probe-dump buffer.
+    // Persist ONCE, immediately: big SetVariable writes are proven to work
+    // pre-exit but hang post-exit on VZ (observed: the ladder stopped at
+    // M2_RAW! with a 2.6 KB re-write pending), and a post-switch fault must
+    // not lose this evidence. The post-exit probe appends only a small tail
+    // (write_probe_tail).
+    dump_mmio_descriptors(map_buffer.map);
+    dump_config_table(st);
+    dump_acpi(st);
+    write_probe_var(st);
+
+    // Claim 0013: the serial probe runs PRE-EXIT — post-exit reads of the
+    // declared MMIO windows hang on VZ (observed every run). The selection
+    // is remembered in the console_* globals and used post-exit for TX only.
+    const pre = probe_serial_pre(map_buffer.map, st);
+    console_kind = pre.kind;
+    console_base = pre.base;
+    dump_sel(pre.kind, pre.base);
+    write_probe_var(st);
+
     // Pre-exit stage: proves the kernel passed valid_handoff + capture_map
     // and reached the exit call. The persisted NVRAM marker being M2_ENTRY
     // instead means the kernel died in that window.
@@ -279,19 +354,24 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff: *HandoffV2
     set_marker(marker_mmu);
     write_marker_var(st, marker_mmu);
 
-    const selected = probe_serial(map_after_exit);
+    const selected = probe_serial(map_after_exit, st);
+    console_kind = selected.kind;
+    console_base = selected.base;
     if (selected.kind == .none) {
         set_marker(marker_seria);
         write_marker_var(st, marker_seria);
         write_marker_fallback(base, size, map_after_exit);
         halt_forever();
     }
-    console_kind = selected.kind;
-    console_base = selected.base;
     set_marker(marker_ready);
     write_marker_var(st, marker_ready);
 
+    st_tx = st; // for flush stage markers
     uart_puts("DipshitOS kernel has seized control.\n");
+    // Claim 0013: after the first TX, record whether the TX path returned
+    // (bytes may still be dropped by the device; the serial log is the gate,
+    // but M2_TXOK! separates "TX hung" from "TX returned silently").
+    write_marker_var(st, marker_txok);
     uart_puts("memory-map descriptors=");
     uart_hex(@intCast(map_after_exit.info.len));
     uart_puts(" descriptor_size=");
@@ -425,6 +505,16 @@ fn build_identity_map(map: MemoryMapSlice, map_buffer: []align(8) u8, base: u64,
         } else if (desc.type == .memory_mapped_io or desc.type == .memory_mapped_io_port_space) {
             if (!map_range(desc.physical_start, desc.physical_start + bytes, Attr.device)) return false;
         }
+    }
+
+    // Claim 0013: the virtio-pci console transport window (firmware-assigned
+    // at 0x100010000, ABOVE the blanket) must stay reachable post-exit for
+    // TX. Map it Device (4 KiB pages; the low blanketed world is untouched).
+    // Post-exit config writes cannot move the BAR on VZ (observed: a rebase
+    // "completed" but the device never answered at the new base), so the
+    // firmware's placement is mapped in place instead.
+    if (vp_ready and vp_bar0 != 0 and vp_bar0 >= blanket_end) {
+        if (!map_range(vp_bar0, vp_bar0 + 0x10000, Attr.device)) return false;
     }
 
     // All adopted fixed regions sit inside declared RAM below the blanket;
@@ -710,8 +800,483 @@ fn record_probe(base: u64, magic: u32, version: u32, device: u32, layout: u32) v
     }
 }
 
+// ---------------------------------------------------------------------------
+// Claim 0013 diagnostic: the probe's ground truth is persisted to the NVRAM
+// channel (a second variable, `DipshitProbe`, same vendor GUID as the marker
+// ladder) so the host can read exactly what each declared MMIO window
+// contains even though the serial log is silent. The ladder (DipshitM2) is
+// untouched. Lines are plain ASCII so `strings artifacts/efi-vars.bin` shows
+// them.
+// ---------------------------------------------------------------------------
+const probe_variable_name = utf16z("DipshitProbe");
+var probe_dump: [32768]u8 = undefined;
+var probe_dump_len: usize = 0;
+
+fn dump_str(text: []const u8) void {
+    if (text.len > probe_dump.len - probe_dump_len) return;
+    @memcpy(probe_dump[probe_dump_len .. probe_dump_len + text.len], text);
+    probe_dump_len += text.len;
+}
+
+fn dump_hex(value: u64) void {
+    var tmp: [18]u8 = undefined;
+    tmp[0] = '0';
+    tmp[1] = 'x';
+    var index: usize = 2;
+    var shift: u6 = 60;
+    while (true) : (shift -= 4) {
+        const digit: u8 = @intCast((value >> shift) & 0xf);
+        tmp[index] = if (digit < 10) '0' + digit else 'a' + digit - 10;
+        index += 1;
+        if (shift == 0) break;
+    }
+    dump_str(tmp[0..index]);
+}
+
+fn dump_probe_line(off: u64, base: u64, magic: u32, version: u32, device: u32, vendor: u32) void {
+    dump_str("VIRTIO O=");
+    dump_hex(off);
+    dump_str(" B=");
+    dump_hex(base);
+    dump_str(" M=");
+    dump_hex(magic);
+    dump_str(" V=");
+    dump_hex(version);
+    dump_str(" D=");
+    dump_hex(device);
+    dump_str(" R=");
+    dump_hex(vendor);
+    dump_str("\n");
+}
+
+fn dump_pl011_line(off: u64, addr: u64, pid0: u32, pid1: u32, pid2: u32, fr: u32) void {
+    dump_str("UART PL011 O=");
+    dump_hex(off);
+    dump_str(" B=");
+    dump_hex(addr);
+    dump_str(" PID=");
+    dump_hex(pid0 | (pid1 << 8) | (pid2 << 16));
+    dump_str(" FR=");
+    dump_hex(fr);
+    dump_str("\n");
+}
+
+fn dump_16550_line(off: u64, addr: u64, ier: u32, iir: u32, lcr: u32, mcr: u32, lsr: u32, msr: u32, scratch: u32) void {
+    dump_str("UART 16550 O=");
+    dump_hex(off);
+    dump_str(" B=");
+    dump_hex(addr);
+    dump_str(" IER=");
+    dump_hex(ier);
+    dump_str(" IIR=");
+    dump_hex(iir);
+    dump_str(" LCR=");
+    dump_hex(lcr);
+    dump_str(" MCR=");
+    dump_hex(mcr);
+    dump_str(" LSR=");
+    dump_hex(lsr);
+    dump_str(" MSR=");
+    dump_hex(msr);
+    dump_str(" SCR=");
+    dump_hex(scratch);
+    dump_str("\n");
+}
+
+fn dump_sel(kind: Kind, base: u64) void {
+    dump_str("SEL=");
+    switch (kind) {
+        .pl011 => dump_str("PL011 "),
+        .ns16550 => dump_str("16550 "),
+        .virtio => dump_str("VIRTIO "),
+        .none => dump_str("NONE "),
+    }
+    dump_str("base=");
+    dump_hex(base);
+    dump_str("\n");
+}
+
+/// Persist the probe dump to the NVRAM channel as a sequence of ≤ 2048-byte
+/// chunks (variables `DipshitP0`, `DipshitP1`, ...). Chunked because a
+/// single large SetVariable silently FAILS on VZ above ~4-5 KB (claim 0013:
+/// a ~6 KB write vanished while a ~4.5 KB instance persisted). Best effort
+/// per chunk; a failed call never changes control flow. Used PRE-EXIT only:
+/// big SetVariable re-writes hang post-exit on VZ (claim 0013).
+const probe_chunk_size: usize = 2048;
+fn write_probe_var(st: *const SystemTable) void {
+    if (probe_dump_len == 0) return;
+    var pos: usize = 0;
+    var chunk: usize = 0;
+    while (pos < probe_dump_len) : (pos += probe_chunk_size) {
+        const len = @min(probe_chunk_size, probe_dump_len - pos);
+        var name: [16:0]u16 = undefined;
+        const prefix = "DipshitP";
+        var i: usize = 0;
+        while (i < prefix.len) : (i += 1) name[i] = prefix[i];
+        var digits: [4]u8 = undefined;
+        var n = chunk;
+        var nd: usize = 0;
+        while (true) : (nd += 1) {
+            digits[nd] = @intCast('0' + (n % 10));
+            n /= 10;
+            if (n == 0) break;
+        }
+        while (nd > 0) : (nd -= 1) {
+            name[i] = digits[nd - 1];
+            i += 1;
+        }
+        name[i] = 0;
+        _ = st.runtime_services._setVariable(
+            &name,
+            &marker_vendor_guid,
+            .{ .non_volatile = true, .bootservice_access = true, .runtime_access = true },
+            len,
+            probe_dump[pos .. pos + len].ptr,
+        );
+        chunk += 1;
+    }
+}
+
+/// POST-EXIT variant: persist only the newest tail of the dump buffer (≤ 512
+/// bytes) as a SEPARATE variable, so post-exit probe additions (candidate
+/// hits, SEL) are observable without a large re-write of `DipshitProbe`
+/// (which hangs post-exit on VZ). Best effort; a failure is ignored.
+const probe_tail_variable_name = utf16z("DipshitP2");
+fn write_probe_tail(st: *const SystemTable) void {
+    if (probe_dump_len == 0) return;
+    const start: usize = if (probe_dump_len > 512) probe_dump_len - 512 else 0;
+    const len = probe_dump_len - start;
+    _ = st.runtime_services._setVariable(
+        &probe_tail_variable_name,
+        &marker_vendor_guid,
+        .{ .non_volatile = true, .bootservice_access = true, .runtime_access = true },
+        len,
+        probe_dump[start..].ptr,
+    );
+}
+
+fn dump_raw(addr: u64, len: usize, tag: []const u8) void {
+    dump_str(tag);
+    dump_str(" @");
+    dump_hex(addr);
+    dump_str(": ");
+    var i: usize = 0;
+    while (i < len) : (i += 1) {
+        dump_hex(mmio_read8(addr + i));
+        dump_str(" ");
+    }
+    dump_str("\n");
+}
+
+fn dump_guid_bytes(guid: *const uefi.Guid) void {
+    const raw: [*]const u8 = @ptrCast(guid);
+    var i: usize = 0;
+    while (i < 16) : (i += 1) dump_hex(raw[i]);
+}
+
+/// Pre-exit dump of every EFI configuration-table entry: vendor GUID, table
+/// pointer, and the first 32-bit word of the table (a flattened device tree
+/// starts with the big-endian magic 0xd00dfeed — the authoritative VZ device
+/// list). This runs before ExitBootServices so all firmware memory is
+/// readable; the buffer is persisted post-exit by write_probe_var.
+fn dump_config_table(st: *const SystemTable) void {
+    const entries = st.number_of_table_entries;
+    dump_str("CFG n=");
+    dump_hex(entries);
+    dump_str("\n");
+    const table = st.configuration_table;
+    var i: usize = 0;
+    while (i < entries and i < 12) : (i += 1) {
+        const entry = &table[i];
+        dump_str("CFG ");
+        dump_hex(i);
+        dump_str(" G=");
+        dump_guid_bytes(&entry.vendor_guid);
+        dump_str(" P=");
+        dump_hex(@intCast(@intFromPtr(entry.vendor_table)));
+        const first = @as(*const volatile u32, @ptrFromInt(@intFromPtr(entry.vendor_table))).*;
+        dump_str(" F=");
+        dump_hex(first);
+        dump_str("\n");
+    }
+}
+
+fn dump_raw_sparse(addr: u64, len: usize, tag: []const u8) void {
+    // Dump only the non-zero 16-byte groups of a window: a sparse register
+    // file (claim 0013: 0x20050000 reads 0x23 0xd3 0x75 0x6a at +0, 0x01 at
+    // +0x0c, and 0x31/0x10/0x04 in the +0xfe0 area) is shown completely
+    // without paying 20 KB of ASCII for the zero pages.
+    var pos: usize = 0;
+    while (pos < len) : (pos += 16) {
+        const group = @min(16, len - pos);
+        var nonzero = false;
+        var i: usize = 0;
+        while (i < group) : (i += 1) {
+            if (mmio_read8(addr + pos + i) != 0) {
+                nonzero = true;
+                break;
+            }
+        }
+        if (!nonzero) continue;
+        dump_str(tag);
+        dump_str(" @");
+        dump_hex(addr + pos);
+        dump_str(": ");
+        i = 0;
+        while (i < group) : (i += 1) {
+            dump_hex(mmio_read8(addr + pos + i));
+            dump_str(" ");
+        }
+        dump_str("\n");
+    }
+}
+
+/// Pre-exit dump of the FULL EFI map (every descriptor — no device window
+/// or high region missed) plus the complete non-zero register bytes of each
+/// declared MMIO window. PRE-EXIT only: post-exit reads of these windows
+/// hang on VZ (claim 0013).
+fn dump_mmio_descriptors(map: MemoryMapSlice) void {
+    var count: usize = 0;
+    var it = map.iterator();
+    while (it.next()) |desc| : (count += 1) {
+        if (count >= 64) break;
+        if (desc.number_of_pages == 0 or desc.number_of_pages > std.math.maxInt(u64) / 4096) continue;
+        dump_str("MAP T=");
+        dump_hex(@intFromEnum(desc.type));
+        dump_str(" B=");
+        dump_hex(desc.physical_start);
+        dump_str(" N=");
+        dump_hex(desc.number_of_pages);
+        dump_str(" A=");
+        dump_hex(@bitCast(desc.attribute));
+        dump_str("\n");
+    }
+    var it2 = map.iterator();
+    while (it2.next()) |desc| {
+        if (desc.type != .memory_mapped_io and desc.type != .memory_mapped_io_port_space) continue;
+        if (desc.number_of_pages == 0 or desc.number_of_pages > std.math.maxInt(u64) / 4096) continue;
+        const bytes = desc.number_of_pages * 4096;
+        if (desc.physical_start > std.math.maxInt(u64) - bytes) continue;
+        if (bytes <= 4096) {
+            // Small window: dump every non-zero register byte in full.
+            dump_raw_sparse(desc.physical_start, @intCast(bytes), "RAW");
+        } else {
+            // Big window (e.g. the efivars store): base string only.
+            dump_raw(desc.physical_start, 64, "RAW");
+        }
+    }
+}
+
+/// Post-exit ACPI discovery (claim 0013): locate the RSDP via the ACPI 2.0
+/// config-table GUID (observed present in run 2), walk the RSDT/XSDT, and
+/// dump every table's signature + address plus the raw first 96 bytes of the
+/// SPCR (Serial Port Console Redirection — names the console UART and its
+/// exact base) and DBG2 (debug ports) tables. This is the authoritative VZ
+/// device list; it supersedes heuristic MMIO scanning. Tables live in
+/// firmware RAM below 4 GiB (covered by the blanket map); reads are volatile.
+fn dump_acpi(st: *const SystemTable) void {
+    // Runs PRE-EXIT (all firmware RAM readable; the full buffer is persisted
+    // once by the caller). ACPI tables are plain RAM below 4 GiB, so no MMIO
+    // reads here — this cannot hit the post-exit fivars-region stall.
+    dump_str("ACPI start\n");
+    var rsdp_addr: u64 = 0;
+    const entries = st.number_of_table_entries;
+    const cfg = st.configuration_table;
+    var i: usize = 0;
+    while (i < entries) : (i += 1) {
+        if (std.mem.eql(u8, std.mem.asBytes(&cfg[i].vendor_guid), std.mem.asBytes(&ConfigurationTable.acpi_20_table_guid))) {
+            rsdp_addr = @intFromPtr(cfg[i].vendor_table);
+            break;
+        }
+    }
+    if (rsdp_addr == 0) {
+        dump_str("ACPI: no RSDP config-table entry\n");
+        return;
+    }
+    dump_str("ACPI RSDP @");
+    dump_hex(rsdp_addr);
+    dump_str("\n");
+    // Revision sits at offset 15 (after sig+checksum+OEM ID); offset 8 is an
+    // OEM ID byte. ACPI 2.0+ carries the XSDT address at +24.
+    const revision = mmio_read8(rsdp_addr + 15);
+    dump_str("ACPI rev=");
+    dump_hex(revision);
+    dump_str("\n");
+    const is_xsdt = revision >= 2;
+    const root_addr: u64 = if (is_xsdt) mmio_read64(rsdp_addr + 24) else mmio_read32(rsdp_addr + 16);
+    if (root_addr == 0) {
+        dump_str("ACPI: no RSDT/XSDT\n");
+        return;
+    }
+    const root_len = mmio_read32(root_addr + 4);
+    dump_str("ACPI root @");
+    dump_hex(root_addr);
+    dump_str(" len=");
+    dump_hex(root_len);
+    dump_str("\n");
+    const stride: u64 = if (is_xsdt) 8 else 4;
+    var off: u64 = 36;
+    var count: usize = 0;
+    while (off + stride <= root_len and count < 24) : (off += stride) {
+        const taddr: u64 = if (is_xsdt) mmio_read64(root_addr + off) else mmio_read32(root_addr + off);
+        if (taddr == 0 or taddr > 4 * 1024 * 1024 * 1024) continue;
+        const sig = mmio_read32(taddr);
+        dump_str("ACPI T=");
+        dump_hex(sig);
+        dump_str(" @");
+        dump_hex(taddr);
+        dump_str("\n");
+        if (sig == 0x52504353) { // "SPCR" (LE)
+            dump_str("SPCR\n");
+            dump_raw(taddr, 96, "  ");
+        }
+        if (sig == 0x32474244) { // "DBG2" (LE)
+            dump_str("DBG2\n");
+            dump_raw(taddr, 96, "  ");
+        }
+        if (sig == 0x50434146) { // "FACP" (LE) — FADT
+            // DSDT pointer at offset 40: the AML device list (claims the
+            // platform's serial devices with _HID/_CRS base addresses).
+            const dsdt = mmio_read32(taddr + 40);
+            dump_str("FACP DSDT @");
+            dump_hex(dsdt);
+            dump_str("\n");
+            if (dsdt != 0 and dsdt < 4 * 1024 * 1024 * 1024) {
+                const dsdt_len = mmio_read32(dsdt + 4);
+                dump_str("DSDT len=");
+                dump_hex(dsdt_len);
+                dump_str("\n");
+                dump_raw(dsdt, 96, "DSDT");
+            }
+        }
+        if (sig == 0x4746434d) { // "MCFG" (LE) — PCI ECAM base
+            const ecam = mmio_read64(taddr + 44);
+            pci_ecam = ecam;
+            dump_str("MCFG ECAM @");
+            dump_hex(ecam);
+            dump_str("\n");
+            dump_pci(ecam);
+        }
+        count += 1;
+    }
+}
+
+fn pci_read32(ecam: u64, bus: u32, dev: u32, func: u32, off: u32) u32 {
+    const addr = ecam | (@as(u64, bus) << 20) | (@as(u64, dev) << 15) | (@as(u64, func) << 12) | off;
+    return mmio_read32(addr);
+}
+
+fn pci_write32(ecam: u64, bus: u32, dev: u32, func: u32, off: u32, value: u32) void {
+    const addr = ecam | (@as(u64, bus) << 20) | (@as(u64, dev) << 15) | (@as(u64, func) << 12) | off;
+    mmio_write32(addr, value);
+}
+
+/// Byte-granular config-space read: the capability header fields sit at odd
+/// offsets (c+1, c+3, c+4), and an unaligned 32-bit read on Device (nGnRnE)
+/// memory is an alignment fault on ARMv8 — the cap walk MUST use byte reads
+/// (claim 0013: every walk run faulted here, ladder M2_VPS04 → M2_VPS05 gap,
+/// while the aligned/byte dumps in dump_pci survived).
+fn pci_read8(ecam: u64, bus: u32, dev: u32, func: u32, off: u32) u8 {
+    const addr = ecam | (@as(u64, bus) << 20) | (@as(u64, dev) << 15) | (@as(u64, func) << 12) | off;
+    return mmio_read8(addr);
+}
+
+/// 32-bit config-space read assembled from four byte reads (safe at any
+/// offset). Only for fields that may sit unaligned (capability header
+/// payloads); the BAR/command fields at 0x10..0x24 stay aligned reads.
+fn pci_read32_unaligned(ecam: u64, bus: u32, dev: u32, func: u32, off: u32) u32 {
+    var result: u32 = 0;
+    var i: u32 = 0;
+    while (i < 4) : (i += 1) {
+        result |= @as(u32, pci_read8(ecam, bus, dev, func, off + i)) << @as(u5, @intCast(i * 8));
+    }
+    return result;
+}
+
+/// Claim 0013 PCI discovery: the decoded DSDT declares a PCI0 root complex
+/// (no UART, no MMIO virtio-console), so the VZ serial attachment is a
+/// virtio-pci device found only through config space. Scan bus 0 for every
+/// present device and dump VID/DID/class + all six BARs. PRE-EXIT only
+/// (firmware maps the ECAM window; post-exit it is undeclared and the read
+/// could fault/hang).
+fn dump_pci(ecam: u64) void {
+    if (ecam == 0 or ecam > 4 * 1024 * 1024 * 1024) {
+        dump_str("PCI: no ECAM\n");
+        return;
+    }
+    var found: usize = 0;
+    var dev: u32 = 0;
+    while (dev < 32 and found < 48) : (dev += 1) {
+        var func: u32 = 0;
+        var funcs: u32 = 1;
+        while (func < funcs and found < 48) : (func += 1) {
+            const id = pci_read32(ecam, 0, dev, func, 0);
+            const vid = id & 0xffff;
+            if (vid == 0xffff) continue;
+            const hdr = pci_read32(ecam, 0, dev, func, 0x0c);
+            const ht = (hdr >> 8) & 0xff;
+            if (func == 0 and (ht & 0x80) != 0) funcs = 8;
+            const did = id >> 16;
+            dump_str("PCI D=");
+            dump_hex(dev);
+            dump_str(" F=");
+            dump_hex(func);
+            dump_str(" VID=");
+            dump_hex(vid);
+            dump_str(" DID=");
+            dump_hex(did);
+            dump_str(" CLS=");
+            dump_hex((pci_read32(ecam, 0, dev, func, 8) >> 8) & 0xffffff);
+            var b: u32 = 0;
+            while (b < 6) : (b += 1) {
+                dump_str(" B");
+                dump_hex(b);
+                dump_str("=");
+                dump_hex(pci_read32(ecam, 0, dev, func, 0x10 + b * 4));
+            }
+            dump_str("\n");
+            found += 1;
+        }
+    }
+    dump_str("PCI found=");
+    dump_hex(found);
+    dump_str("\n");
+    // Full aligned-u32 config-space dump of the virtio console (the
+    // capability list at 0x34 is what the virtio-pci transport needs),
+    // persisted pre-exit so the host sees the exact cap layout. ALIGNED u32
+    // reads are the only coherent access on VZ (claim 0013: byte reads of
+    // config space return shifted/garbage offset fields).
+    var dev2: u32 = 0;
+    while (dev2 < 32) : (dev2 += 1) {
+        const id2 = pci_read32(ecam, 0, dev2, 0, 0);
+        if ((id2 & 0xffff) == 0xffff) continue;
+        const did2 = id2 >> 16;
+        if (did2 != 0x1043 and did2 != 0x1003) continue;
+        dump_str("CFGSPACE D=");
+        dump_hex(dev2);
+        dump_str("\n");
+        var w: u32 = 0;
+        while (w < 0x80) : (w += 4) {
+            dump_str("W ");
+            dump_hex(w);
+            dump_str("=");
+            dump_hex(pci_read32(ecam, 0, dev2, 0, w));
+            dump_str("\n");
+        }
+        break;
+    }
+}
+
 fn mmio_read32(address: u64) u32 {
     return @as(*volatile u32, @ptrFromInt(address)).*;
+}
+
+fn mmio_read64(address: u64) u64 {
+    return @as(*volatile u64, @ptrFromInt(address)).*;
+}
+
+fn mmio_write64(address: u64, value: u64) void {
+    @as(*volatile u64, @ptrFromInt(address)).* = value;
 }
 
 fn mmio_write32(address: u64, value: u32) void {
@@ -726,51 +1291,367 @@ fn mmio_write8(address: u64, value: u8) void {
     @as(*volatile u8, @ptrFromInt(address)).* = value;
 }
 
-fn probe_serial(map: MemoryMapSlice) Candidate {
+fn mmio_read16(address: u64) u16 {
+    return @as(*volatile u16, @ptrFromInt(address)).*;
+}
+
+fn mmio_write16(address: u64, value: u16) void {
+    @as(*volatile u16, @ptrFromInt(address)).* = value;
+}
+
+fn vp_read8(off: u32) u8 {
+    return mmio_read8(vp_common + off);
+}
+
+fn vp_write8(off: u32, value: u8) void {
+    mmio_write8(vp_common + off, value);
+}
+
+fn vp_read16(off: u32) u16 {
+    return mmio_read16(vp_common + off);
+}
+
+fn vp_write16(off: u32, value: u16) void {
+    mmio_write16(vp_common + off, value);
+}
+
+fn vp_read32(off: u32) u32 {
+    return mmio_read32(vp_common + off);
+}
+
+fn vp_write32(off: u32, value: u32) void {
+    mmio_write32(vp_common + off, value);
+}
+
+/// Claim 0013: initialize the modern virtio-pci console as the kernel
+/// console. Walks the device's virtio capabilities (ID 0x09, cfg types
+/// common/notify), programs the modern transport (features, queue 1 =
+/// transmit), and arms TX. PRE-EXIT only; evidence is dumped to the probe
+/// buffer so the host sees the state either way.
+fn virtio_pci_init(st: *const SystemTable) bool {
+    if (pci_ecam == 0) {
+        dump_str("VP: no ECAM\n");
+        return false;
+    }
+
+    // Locate the console: modern DID 0x1043, legacy 0x1003 (this milestone
+    // drives the modern transport only). Bus 0, function 0.
+    var console_dev: u32 = 32;
+    var dev: u32 = 0;
+    while (dev < 32) : (dev += 1) {
+        const id = pci_read32(pci_ecam, 0, dev, 0, 0);
+        if ((id & 0xffff) == 0xffff) continue;
+        const did = id >> 16;
+        if (did == 0x1043 or did == 0x1003) {
+            console_dev = dev;
+            break;
+        }
+    }
+    if (console_dev == 32) {
+        dump_str("VP: no virtio-console PCI device\n");
+        return false;
+    }
+    vp_dev = console_dev;
+    dump_str("VP dev=");
+    dump_hex(console_dev);
+    dump_str("\n");
+    write_marker_var(st, marker_vpscan);
+
+    // BAR bases (memory BARs; 64-bit pairs merged).
+    var bar_base: [6]u64 = .{0} ** 6;
+    var bi: usize = 0;
+    while (bi < 6) : (bi += 1) {
+        const low = pci_read32(pci_ecam, 0, console_dev, 0, 0x10 + @as(u32, @intCast(bi)) * 4);
+        if ((low & 1) != 0) continue; // I/O space — ignored
+        const base: u64 = low & ~@as(u32, 0xf);
+        bar_base[bi] = base;
+        if (((low >> 1) & 0x3) == 2 and bi + 1 < 6) { // 64-bit BAR
+            const high = pci_read32(pci_ecam, 0, console_dev, 0, 0x10 + @as(u32, @intCast(bi + 1)) * 4);
+            bar_base[bi] |= @as(u64, high) << 32;
+            bi += 1;
+        }
+    }
+    write_marker_var(st, marker_vpbar);
+
+    // Walk the capability list for the virtio vendor-specific caps (ID 0x09):
+    // each carries cfg_type + bar + offset; the notify cap adds a multiplier.
+    write_marker_var(st, marker_vpcap);
+    const cap_ptr = pci_read32(pci_ecam, 0, console_dev, 0, 0x34) & 0xff;
+    write_marker_var(st, marker_vpcapr);
+    var common_bar: u32 = 0;
+    var common_off: u32 = 0;
+    var notify_bar: u32 = 0;
+    var notify_off: u32 = 0;
+    var notify_mult: u32 = 0;
+    var found_common = false;
+    var found_notify = false;
+    var c: u32 = cap_ptr;
+    var caps: usize = 0;
+    // The virtio_pci_cap header packs id/next/len/cfg_type into one aligned
+    // u32; offset/length are the next two aligned u32s. Cap bases are 4-byte
+    // aligned (0x40/0x50/0x60/0x74 on VZ), so every read below is aligned —
+    // unaligned accesses fault on Device memory, and byte reads return
+    // garbage on VZ (claim 0013); aligned u32 reads are the coherent view.
+    while (c != 0 and c < 0x100 and (c & 3) == 0 and caps < 16) : (caps += 1) {
+        const head = pci_read32(pci_ecam, 0, console_dev, 0, c);
+        const id = head & 0xff;
+        const next = (head >> 8) & 0xff;
+        if (id == 0x09) {
+            const cfg_type = (head >> 24) & 0xff;
+            const bar = pci_read32(pci_ecam, 0, console_dev, 0, c + 4) & 0xff;
+            const off = pci_read32(pci_ecam, 0, console_dev, 0, c + 8);
+            switch (cfg_type) {
+                1 => {
+                    common_bar = bar;
+                    common_off = off;
+                    found_common = true;
+                },
+                2 => {
+                    notify_bar = bar;
+                    notify_off = off;
+                    notify_mult = pci_read32(pci_ecam, 0, console_dev, 0, c + 16);
+                    found_notify = true;
+                },
+                else => {},
+            }
+        }
+        c = next;
+    }
+    write_marker_var(st, marker_vpwalk);
+
+    // NOTE: no BAR rebase pre-exit — moving the window makes the device
+    // unreachable pre-exit (observed: after rebasing to 0x10000, reads of
+    // BOTH the old firmware base and 0x10000 hang — the firmware never maps
+    // the low address). The firmware-assigned base is used for setup; a
+    // post-exit rebase to below-the-blanket 0x10000 happens in
+    // virtio_pci_rebase_post_exit (ECAM config writes survive post-exit,
+    // and the blanket maps 0x10000 as Device).
+    // Offset 0 is a legitimate common-cfg offset (VZ: common @ BAR0+0x00);
+    // the caps must simply both be present.
+    if (!found_common or !found_notify or common_bar >= 6 or notify_bar >= 6) {
+        dump_str("VP: missing capability structs\n");
+        return false;
+    }
+    vp_common = bar_base[common_bar] + common_off;
+    vp_notify = bar_base[notify_bar] + notify_off;
+    vp_notify_mult = notify_mult;
+    vp_common_off = common_off;
+    vp_notify_off = notify_off;
+    vp_bar0 = bar_base[0];
+    dump_str("VP common=");
+    dump_hex(vp_common);
+    dump_str(" notify=");
+    dump_hex(vp_notify);
+    dump_str(" mult=");
+    dump_hex(notify_mult);
+    dump_str("\n");
+    // Stage marker: device found, BARs + capabilities resolved. If the ladder
+    // stops here, a config-space read in the walk is the death site.
+    write_marker_var(st, marker_vpdev);
+    // Persist the walk results now: if a transport write below stalls, the
+    // host still sees the resolved common/notify addresses.
+    write_probe_var(st);
+
+    // Modern transport init: reset, ACKNOWLEDGE|DRIVER, accept
+    // VIRTIO_F_VERSION_1, FEATURES_OK.
+    vp_write8(0x14, 0); // reset
+    vp_write8(0x14, 1 | 2); // ACKNOWLEDGE | DRIVER
+    const features_lo = vp_read32(0x04);
+    // device_feature_select lives at 0x00 (0x08 is the DRIVER's select).
+    vp_write32(0x00, 1);
+    const features_hi = vp_read32(0x04);
+    vp_write32(0x00, 0);
+    dump_str("VP feats=");
+    dump_hex(features_lo);
+    dump_str("/");
+    dump_hex(features_hi);
+    dump_str("\n");
+    if ((features_hi & 1) == 0) {
+        dump_str("VP: no VIRTIO_F_VERSION_1\n");
+        return false;
+    }
+    vp_write32(0x08, 1);
+    vp_write32(0x0c, 1); // accept VIRTIO_F_VERSION_1
+    vp_write32(0x08, 0);
+    vp_write32(0x0c, 0);
+    vp_write8(0x14, 1 | 2 | 8); // FEATURES_OK
+    if ((vp_read8(0x14) & 8) == 0) {
+        dump_str("VP: FEATURES_OK failed\n");
+        return false;
+    }
+
+    // Queue 1 = console transmit. Size 1 (one descriptor, no chaining).
+    vp_write16(0x16, 1); // queue_select
+    const qsz = vp_read16(0x18);
+    if (qsz == 0) {
+        dump_str("VP: queue 1 absent\n");
+        return false;
+    }
+    vp_write16(0x18, 1); // queue_size = 1
+    virtio_desc[0] = .{ .addr = 0, .len = 0, .flags = 0, .next = 0 };
+    virtio_avail = .{ .flags = 0, .idx = 0, .ring = .{0} };
+    virtio_used = .{ .flags = 0, .idx = 0, .ring = .{.{ .id = 0, .len = 0 }} };
+    virtio_last_used = 0;
+    vp_tx_len = 0;
+    // Queue GPA registers are le64; VZ's common-cfg emulation accepts 32-bit
+    // accesses (claim 0013: byte reads of config space return garbage — the
+    // emulation has access-size quirks), so write each half as a 32-bit store
+    // rather than a single 64-bit one that may be dropped.
+    const qd = @intFromPtr(&virtio_desc);
+    mmio_write32(vp_common + 0x20, @truncate(qd));
+    mmio_write32(vp_common + 0x24, @truncate(qd >> 32));
+    const qa = @intFromPtr(&virtio_avail);
+    mmio_write32(vp_common + 0x28, @truncate(qa));
+    mmio_write32(vp_common + 0x2c, @truncate(qa >> 32));
+    const qu = @intFromPtr(&virtio_used);
+    mmio_write32(vp_common + 0x30, @truncate(qu));
+    mmio_write32(vp_common + 0x34, @truncate(qu >> 32));
+    vp_write16(0x1c, 1); // queue_enable
+    vp_queue_notify_off = vp_read16(0x1e);
+    vp_write8(0x14, 1 | 2 | 8 | 4); // DRIVER_OK
+    if ((vp_read8(0x14) & 4) == 0) {
+        dump_str("VP: DRIVER_OK failed\n");
+        return false;
+    }
+    // Stage marker: transport armed. If the ladder stops here, a queue-setup
+    // write (mmio_write64 at vp_common+0x20..0x30) is the death site.
+    write_marker_var(st, marker_vptx);
+    // Pre-exit readback of the queue setup: qsz/qen/qoff + the GPA halves
+    // written above + device status. Verifies the 32-bit queue writes landed.
+    dump_str("VP qsz=");
+    dump_hex(vp_read16(0x18));
+    dump_str(" qen=");
+    dump_hex(vp_read16(0x1c));
+    dump_str(" qoff=");
+    dump_hex(vp_read16(0x1e));
+    dump_str(" qd=");
+    dump_hex(mmio_read32(vp_common + 0x20));
+    dump_str(" qa=");
+    dump_hex(mmio_read32(vp_common + 0x28));
+    dump_str(" qu=");
+    dump_hex(mmio_read32(vp_common + 0x30));
+    dump_str(" st=");
+    dump_hex(vp_read8(0x14));
+    dump_str("\n");
+    vp_ready = true;
+    dump_str("VP ready qoff=");
+    dump_hex(vp_queue_notify_off);
+    dump_str("\n");
+    write_marker_var(st, marker_vpok);
+    return true;
+}
+
+/// Transmit the buffered TX bytes through queue 1: post the buffer in the
+/// desc/avail rings, clean the D-cache (the device reads guest RAM
+/// directly), kick via the notify region, and wait for the used ring.
+/// Runs POST-EXIT on the pre-exit-captured VAs. A stuck device times out
+/// and drops the line instead of hanging the kernel (TX remains honest: the
+/// serial log is the gate, and M2_TXOK! records that the path returned).
+fn virtio_pci_flush() void {
+    if (!vp_ready or vp_tx_len == 0) return;
+    virtio_desc[0] = .{ .addr = @intFromPtr(&virtio_tx), .len = @intCast(vp_tx_len), .flags = 0, .next = 0 };
+    virtio_avail.ring[0] = 0; // descriptor index 0
+    virtio_avail.idx +%= 1;
+    clean_dcache_range(@intFromPtr(&virtio_desc), @sizeOf(VirtqDesc));
+    clean_dcache_range(@intFromPtr(&virtio_avail), @sizeOf(VirtqAvail));
+    clean_dcache_range(@intFromPtr(&virtio_tx), vp_tx_len);
+    if (st_tx != null) write_marker_var(st_tx.?, marker_txst);
+    // Post-exit probe of the transport before the notify: read device status
+    // through the mapped window. Both this read and the notify write sit
+    // between the M2_TXST!/M2_TXNT! markers, so a hang here or at the notify
+    // both present as "TXST! without TXNT!" — the markers cannot fully
+    // discriminate them; the honest invariant is "post-exit transport access
+    // hangs".
+    dump_str("VP pst=");
+    dump_hex(vp_read8(0x14));
+    dump_str("\n");
+    if (st_tx != null) write_probe_tail(st_tx.?);
+    // Notify via a 32-bit store (VZ common-cfg/notify emulation accepts
+    // 32-bit accesses; a 16-bit store may be dropped — claim 0013).
+    mmio_write32(vp_notify + @as(u64, vp_queue_notify_off) * vp_notify_mult, 1);
+    if (st_tx != null) write_marker_var(st_tx.?, marker_txnt);
+    var spins: usize = 0;
+    while (spins < 2_000_000) : (spins += 1) {
+        invalidate_dcache_range(@intFromPtr(&virtio_used), @sizeOf(VirtqUsed));
+        if (virtio_used.idx != virtio_last_used) break;
+    }
+    virtio_last_used = virtio_used.idx;
+    if (st_tx != null) write_marker_var(st_tx.?, marker_txpl);
+    vp_tx_len = 0;
+}
+
+fn probe_serial(_: MemoryMapSlice, st: *const SystemTable) Candidate {
+    // Selection happened PRE-EXIT in probe_serial_pre (post-exit reads of
+    // the declared MMIO windows hang on VZ — claim 0013). This records the
+    // stage marker and returns the pre-exit result so the banner/TX path
+    // proceeds without any post-exit window read beyond TX itself.
+    write_marker_var(st, marker_raw);
+    return .{ .base = console_base, .kind = console_kind };
+}
+
+/// PRE-EXIT serial probe (claim 0013): scan the declared MMIO windows for a
+/// PrimeCell UART. Run 5's raw dumps showed the 0x20050000 window carries
+/// the standard PrimeCell CID block (0x0d/0xf0/0x05/0xb1 at +0xff0..0xffc)
+/// with PL011-family PIDs (PID1=0x10, PID3=0x00, PID2 JEDEC nibble 0x4) but
+/// PID0=0x31 instead of the textbook 0x11 — a VZ PL011-variant the old
+/// probe's rigid `pid0 == 0x11` check rejected. Accept the CID+PID family
+/// fingerprint instead. Pre-exit reads are deterministic (the pre-exit raw
+/// dumps already read both windows safely); post-exit they hang.
+fn probe_serial_pre(map: MemoryMapSlice, st: *const SystemTable) Candidate {
     probe_count = 0;
+    // Claim 0013: the authoritative console is the virtio-pci device the
+    // runner attaches (VZVirtioConsoleDeviceSerialPortConfiguration), found
+    // via the MCFG ECAM base — not the EFI MMIO windows. It is preferred
+    // whenever it initializes; the MMIO heuristics below remain as fallback
+    // (the 0x20050000 PrimeCell UART is Apple's internal debug console, not
+    // the serial attachment).
+    if (virtio_pci_init(st)) {
+        return .{ .base = vp_bar0, .kind = .virtio };
+    }
     var it = map.iterator();
     while (it.next()) |desc| {
         if (desc.type != .memory_mapped_io and desc.type != .memory_mapped_io_port_space) continue;
         if (desc.number_of_pages == 0 or desc.number_of_pages > std.math.maxInt(u64) / 4096) continue;
         const bytes = desc.number_of_pages * 4096;
         if (desc.physical_start > std.math.maxInt(u64) - bytes) continue;
-        const end = desc.physical_start + bytes;
         const base = desc.physical_start;
-        if (base > std.math.maxInt(u64) - 4096 or base + 4096 > end or probe_count >= probe_records.len) continue;
+        if (bytes < 0x1000) continue;
+
         const magic = mmio_read32(base);
         const version = mmio_read32(base + 4);
         const device = mmio_read32(base + 8);
         const vendor = mmio_read32(base + 12);
-        record_probe(base, magic, version, device, vendor);
-        if (magic == 0x74726976 and (version == 1 or version == 2) and device == 3 and vendor != 0) {
-            if (virtio_init(base)) return .{ .base = base, .kind = .virtio };
-        }
-        if (bytes >= 0x1000) {
-            const pid0 = mmio_read32(base + 0xfe0) & 0xff;
-            const pid1 = mmio_read32(base + 0xfe4) & 0xff;
-            const pid2 = mmio_read32(base + 0xfe8) & 0xff;
-            const fr = mmio_read32(base + 0x18);
-            record_probe(base, pid0 | (pid1 << 8), pid2, fr, 0x504c3031); // PL01
-            if (pid0 == 0x11 and pid1 == 0x10 and pid2 == 0x14 and (fr & 0x80) == 0) {
-                return .{ .base = base, .kind = .pl011 };
+        if (magic == 0x74726976) { // "virt"
+            record_probe(base, magic, version, device, vendor);
+            dump_probe_line(0, base, magic, version, device, vendor);
+            if ((version == 1 or version == 2) and device == 3 and vendor != 0) {
+                dump_str("PRE: virtio-console candidate @");
+                dump_hex(base);
+                dump_str("\n");
+                return .{ .base = base, .kind = .virtio };
             }
         }
 
-        // 16550 registers are byte-wide. This read-only signature avoids
-        // writing arbitrary device registers during discovery; a scratch
-        // round-trip is deliberately not used on an un-described window.
-        if (bytes >= 8) {
-            const ier = mmio_read8(base + 1);
-            const iir = mmio_read8(base + 2);
-            const lcr = mmio_read8(base + 3);
-            const mcr = mmio_read8(base + 4);
-            const lsr = mmio_read8(base + 5);
-            const msr = mmio_read8(base + 6);
-            const scratch = mmio_read8(base + 7);
-            record_probe(base, (@as(u32, lsr) << 24) | (@as(u32, iir) << 16) | (@as(u32, lcr) << 8) | mcr, ier, msr, 0x31363535); // 1655
-            if ((iir & 0xc0) == 0xc0 and lcr == 0x03 and (mcr & 0xe0) == 0 and (lsr & 0x60) == 0x60 and (lsr & 0x80) == 0 and scratch != 0xff) {
-                return .{ .base = base, .kind = .ns16550 };
-            }
+        const cid0 = mmio_read32(base + 0xff0) & 0xff;
+        const cid1 = mmio_read32(base + 0xff4) & 0xff;
+        const cid2 = mmio_read32(base + 0xff8) & 0xff;
+        const cid3 = mmio_read32(base + 0xffc) & 0xff;
+        const pid0 = mmio_read32(base + 0xfe0) & 0xff;
+        const pid1 = mmio_read32(base + 0xfe4) & 0xff;
+        const pid2 = mmio_read32(base + 0xfe8) & 0xff;
+        const pid3 = mmio_read32(base + 0xfec) & 0xff;
+        const fr = mmio_read32(base + 0x18);
+        if (cid0 != 0 or cid1 != 0 or cid2 != 0 or cid3 != 0 or pid0 != 0 or pid1 != 0 or pid2 != 0 or pid3 != 0 or fr != 0) {
+            record_probe(base, pid0 | (pid1 << 8) | (pid2 << 16) | (pid3 << 24), fr, cid0 | (cid1 << 8) | (cid2 << 16) | (cid3 << 24), 0x504c3031); // PL01
+            dump_pl011_line(0, base, pid0, pid1, pid2, fr);
+        }
+        if (cid0 == 0x0d and cid1 == 0xf0 and cid2 == 0x05 and cid3 == 0xb1 and pid1 == 0x10 and pid3 == 0x00 and (pid2 & 0x0f) == 0x04) {
+            dump_str("PRE: PL011-family UART @");
+            dump_hex(base);
+            dump_str(" PID0=");
+            dump_hex(pid0);
+            dump_str("\n");
+            return .{ .base = base, .kind = .pl011 };
         }
     }
     return .{ .base = 0, .kind = .none };
@@ -816,9 +1697,29 @@ fn virtio_init(base: u64) bool {
     return (mmio_read32(base + 0x70) & 4) != 0;
 }
 
+/// PL011-family UART init (claim 0013): the VZ console at 0x20050000 is a
+/// PrimeCell PL011-variant (CID 0x0d/0xf0/0x05/0xb1, PID1=0x10, PID2 JEDEC
+/// 4, PID0=0x31) but boots DISABLED — writing DR without CR=UARTEN|TXE|RXE
+/// produces no output (observed: M2_READY set, vm-serial.log empty). Program
+/// the standard PL011 setup: disable, baud divisor, 8N1+FIFO, re-enable.
+/// VZ likely ignores the baud divisor; the sequence is what matters.
+var pl011_initialized: bool = false;
+fn pl011_init() void {
+    const base = console_base;
+    mmio_write32(base + 0x30, 0); // CR = 0 (disable UART)
+    mmio_write32(base + 0x24, 13); // IBRD: 115200 baud @ 24 MHz reference
+    mmio_write32(base + 0x28, 1); // FBRD
+    mmio_write32(base + 0x2c, 0x70); // LCR_H: 8 data, 1 stop, no parity, FIFO enable
+    mmio_write32(base + 0x30, 0x301); // CR: UARTEN | TXE | RXE
+}
+
 fn uart_putc(byte: u8) void {
     switch (console_kind) {
         .pl011 => {
+            if (!pl011_initialized) {
+                pl011_init();
+                pl011_initialized = true;
+            }
             var timeout: usize = 0;
             while ((mmio_read32(console_base + 0x18) & (1 << 5)) != 0 and timeout < 1_000_000) : (timeout += 1) {}
             if (timeout < 1_000_000) mmio_write32(console_base, byte);
@@ -829,16 +1730,13 @@ fn uart_putc(byte: u8) void {
             if (timeout < 1_000_000) mmio_write8(console_base, byte);
         },
         .virtio => {
-            virtio_tx[0] = byte;
-            virtio_desc[0] = .{ .addr = @intFromPtr(&virtio_tx), .len = 1, .flags = 0, .next = 0 };
-            const next = virtio_avail.idx + 1;
-            virtio_avail.ring[0] = virtio_avail.idx;
-            virtio_avail.idx = next;
-            asm volatile ("dmb ish" ::: .{ .memory = true });
-            mmio_write32(console_base + 0x50, 1);
-            var timeout: usize = 0;
-            while (virtio_used.idx == virtio_last_used and timeout < 1_000_000) : (timeout += 1) {}
-            virtio_last_used = virtio_used.idx;
+            // Claim 0013: the VZ serial attachment is a modern virtio-pci
+            // console (BAR0 transport, queue 1 TX). Bytes are line-buffered
+            // and flushed as one descriptor — one kick per line instead of
+            // one per byte.
+            virtio_tx[vp_tx_len] = byte;
+            vp_tx_len += 1;
+            if (byte == '\n' or vp_tx_len >= virtio_tx.len) virtio_pci_flush();
         },
         .none => {},
     }
@@ -846,6 +1744,9 @@ fn uart_putc(byte: u8) void {
 
 fn uart_puts(text: []const u8) void {
     for (text) |byte| uart_putc(byte);
+    // Claim 0013: a virtio-console line without a trailing newline (e.g. the
+    // shell's prompt) must still reach the host — flush any buffered bytes.
+    if (console_kind == .virtio and vp_tx_len > 0) virtio_pci_flush();
 }
 
 fn uart_hex(value: u64) void {
