@@ -13,7 +13,7 @@ set -u
 # stray `just test` from a subdirectory cannot silently skip every module.
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-MODULES=(console handoff lineedit memmap monitor shell tokenizer)
+MODULES=(console handoff lineedit machine memmap monitor shell tokenizer)
 
 status=0
 present=0
