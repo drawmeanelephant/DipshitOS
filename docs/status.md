@@ -59,6 +59,7 @@ Every gate below is backed by evidence re-verified
 | **Marker fallback gate** (gate work item 3) | `bash tools/verify-marker.sh` | ✅ **pass** | `artifacts/m2-marker-gate.txt` (2026-08-07): NVRAM ladder `M2_ENTRY → M2_CMAP! → M2_PREX! → M2_EXIT! → M2_MAPD!` — final stage `M2_MAPD!` (see [gate work item 3](#immediate-gate-work-prerequisites-for-m15) and claim 0009) |
 | **MMU-takeover root cause & fix** (claim 0010) | `bash tools/verify-marker.sh` | ✅ **fixed 2026-08-07** | ladder now advances `M2_MAPD! → M2_MMUP! → M2_SERIA` — the identity-map switch **completes** on VZ for the first time (`artifacts/m2-mmu-takeover-gate.txt`; see claim 0010) |
 | **VZ serial console discovery** (claim 0013) | pre-exit probe + NVRAM dump | ✅ **discovered 2026-08-07** | console = modern virtio-pci (bus 0 D5 `VID=0x1af4 DID=0x1043 class=0x078000`), ECAM `0x40000000`, BAR0 (64-bit) @ `0x100010000`, transport decoded + armed pre-exit (`SEL=VIRTIO`, ladder `M2_READY`); declared MMIO windows decoded as Apple efivars store + internal debug UART. Gate still blocked: post-exit transport access hangs (see claim 0013) |
+| **NVRAM console channel** (claim 0015) | `bash tools/verify-nvram-console.sh` | ✅ **PASS 2026-08-07** | **first post-exit console bytes from a real VZ run**: 69–70 chunks reconstructed from `efi-vars.bin` — takeover banner, full memory map, probe record, shell banner, and real `version`/`mem`/`echo`/`help` command output (`artifacts/nvram-console-gate.txt`). Found + fixed a latent kernel bug on the way (ADR 0005: const function-pointer tables are not relocated by the flat loader — the first vtable dispatch on real hardware faulted; tables now built at runtime in BSS). See [VZ serial gate](#vz-serial-gate) |
 
 ### What we directly observe about the two failing gates
 | Format | `zig fmt --check boot/src/*.zig kernel/src/*.zig build.zig` | ✅ pass | re-run 2026-08-07 |
@@ -180,6 +181,36 @@ somewhere in the first flush; `vm-serial.log` stays 0 B). Next step: carry
 the console bytes over a post-exit-safe channel (the runtime `SetVariable`
 NVRAM channel is proven alive post-exit) or find a VZ configuration that
 keeps the transport reachable after the MMU switch.
+
+**The post-exit-safe channel is now live (claim 0015, 2026-08-07).** The
+NVRAM console channel carries the kernel's console bytes over runtime
+`SetVariable` after `ExitBootServices` (the channel claim 0009 proved
+alive). `bash tools/verify-nvram-console.sh` **passes**: 69–70 chunks
+reconstructed from `efi-vars.bin` give the takeover banner, the full
+25-descriptor memory map, the probe record, the seam diagnostics, the
+shell banner, and real command output (`version`, `mem`, `echo`, `help`)
+— the first post-exit console evidence from a real VZ run
+(`artifacts/nvram-console-gate.txt`, claim 0015). Two findings surfaced:
+
+1. **Latent kernel bug fixed (ADR 0005):** the flat loader copies the
+   kernel image to a runtime base with **no relocations**, so every `const`
+   function-pointer table in `.rodata` (vtables, the 14-command registry,
+   string-slice tables) held link-time absolute addresses. The first
+   vtable dispatch on real hardware — claim 0015's shell seam — faulted
+   instantly; host tests never caught it (macOS relocates test binaries).
+   All such tables are now built at runtime in BSS.
+2. **The NVRAM store is ~61 KiB writable, not 128 KiB** — the probe-dump
+   variable was starving the chunk channel; it is gated off in nvram
+   builds (the console stream carries the same evidence). The 64-chunk cap
+   also truncated the session (the store still had ~47 KiB free); raised
+   to 128.
+
+The virtio-console TX gate (claim 0002, `zig build run`) remains blocked;
+claim 0015 is the fallback channel claim 0013 named, and it makes the
+milestone's console evidence host-observable. The VZ post-exit death
+window is flaky (claim 0009, re-observed: runs sometimes die at
+`M2_MAPD!` or mid map-dump after `M2_TXOK!`); the gate retries up to 3
+boots with fresh stores.
 
 ## Milestone 1.5 — the call
 
@@ -379,7 +410,7 @@ here.
    `memory-map descriptors=0x...`, and `kernel terminal state` in
    `vm-serial.log`; then flip matching `[inferred] → [observed]` entries in
    `docs/hardware-contract.md`.
-   **Status:** see [`0002-vz-serial-gate`](claims/0002-vz-serial-gate.md) — ⛔ blocked, but the blocker is now isolated: the MMU takeover is fixed (claim 0010, ladder reaches `M2_SERIA`) and the probe finds **no usable MMIO serial device** in the declared windows — the remaining work is device discovery/console transport, not a crash (see claims 0002/0009/0010).
+   **Status:** see [`0002-vz-serial-gate`](claims/0002-vz-serial-gate.md) — ⛔ blocked (virtio TX hangs post-exit on VZ), but the post-exit-safe fallback now passes: the NVRAM console channel (claim 0015, `bash tools/verify-nvram-console.sh`) reconstructs the kernel's post-exit console stream from `efi-vars.bin` — first post-exit console evidence from a real VZ run (also found + fixed the ADR-0005 flat-loader relocation bug). The blocker is isolated to the virtio transport itself (claims 0013/0002).
 3. **If no usable serial device exists on VZ**, implement the ADR 0004 D4
    fixed-memory-marker fallback (host-side dump of the kernel's BSS
    `takeover_marker`). **Gate:** saved host-side dump matching the `M2_*`

@@ -26,6 +26,14 @@ marker:
 verify-marker:
     bash tools/verify-marker.sh
 
+# Boot the -Dnvram-console=true image and reconstruct the post-exit NVRAM console stream (zig build nvram-console; claim 0015)
+nvram-console:
+    zig build nvram-console
+
+# Verify the claim-0015 NVRAM console gate (post-exit console bytes via the NVRAM channel; boots a VZ VM; Apple silicon only)
+verify-nvram-console:
+    bash tools/verify-nvram-console.sh
+
 # Extract the flat kernel image zig-out/bin/KERNEL.BIN (zig build kernel)
 kernel:
     zig build kernel

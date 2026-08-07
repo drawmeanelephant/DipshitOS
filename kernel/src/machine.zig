@@ -96,6 +96,12 @@ pub fn init(rt: *RuntimeServices) void {
 /// The M1.5 machine-control implementation for the monitor seam: real
 /// ResetSystem-backed reboot/shutdown, honest `not_implemented` when no
 /// runtime services were captured.
+///
+/// The vtable is built at runtime into module storage (claim 0015 root
+/// cause): a const table in .rodata would hold link-time absolute function
+/// addresses, wrong at the kernel's runtime-chosen load base (the flat
+/// loader applies no relocations; host tests never caught this because
+/// macOS relocates test binaries).
 pub fn control() MachineControl {
     const Impl = struct {
         fn reboot(ctx: *anyopaque) MachineResult {
@@ -111,10 +117,22 @@ pub fn control() MachineControl {
             return result;
         }
     };
+    ensure_control_vtable(Impl);
     return .{
         .ctx = &state,
-        .vtable = &.{ .reboot = Impl.reboot, .shutdown = Impl.shutdown },
+        .vtable = &control_vtable,
     };
+}
+
+/// Storage + builder for `control()`'s vtable (module-level so the returned
+/// pointer outlives the call).
+var control_vtable: MachineControl.VTable = undefined;
+var control_vtable_ready = false;
+fn ensure_control_vtable(comptime Impl: type) void {
+    if (!control_vtable_ready) {
+        control_vtable = .{ .reboot = Impl.reboot, .shutdown = Impl.shutdown };
+        control_vtable_ready = true;
+    }
 }
 
 /// ResetSystem is declared noreturn; if a firmware returns anyway the

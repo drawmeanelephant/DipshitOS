@@ -54,4 +54,5 @@ CI) fails if the table drifts from the claim files.
 | [0012-m15-milestone-docs](0012-m15-milestone-docs.md) | buffy (`agent/buffy/m15-milestone-docs`) | ✅ done 2026-08-07 — README/roadmap/architecture/testing |
 | [0013-m15-serial-discovery](0013-m15-serial-discovery.md) | buffy (`freebuff/pull-the-latest-from-github-and-find-something-in--a639920e-ebe1-47a0-a380-54cece9b4c40`) | ⛔ blocked (closed honestly — discovery complete, gate not passed) |
 | [0014-status-reverify](0014-status-reverify.md) | buffy (`freebuff/let-s-get-the-latest-github-and-do-something-benef-e128807b-0418-4d4e-aebe-ba30b18c18c5`) | ✅ done 2026-08-07 — all gates re-run green on merged `main`; evidence saved under `artifacts/` and cited in `docs/status.md` |
+| [0015-nvram-console](0015-nvram-console.md) | buffy (`agent/buffy/m15-nvram-console`) | ✅ done 2026-08-07 (gate passing — post-exit console bytes |
 <!-- CLAIMS_INDEX:END -->
