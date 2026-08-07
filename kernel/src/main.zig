@@ -14,6 +14,14 @@ const BootServices = uefi.tables.BootServices;
 const MemoryMapSlice = uefi.tables.MemoryMapSlice;
 const MemoryType = uefi.tables.MemoryType;
 
+// M1.5 console & shell core (agent B): the interactive `dipshit>` monitor
+// runs on the polled TX console through these modules. The takeover path
+// below is untouched; this is the seam's import surface.
+const console = @import("console.zig");
+const memmap = @import("memmap.zig");
+const monitor = @import("monitor.zig");
+const shell = @import("shell.zig");
+
 const HandoffV2 = extern struct {
     magic: u32,
     version: u32,
@@ -245,6 +253,30 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff: *HandoffV2
     }
 
     uart_puts("kernel terminal state\n");
+
+    // ------------------------------------------------------------------
+    // M1.5 console & shell core seam (agent B). The takeover path above
+    // (exit, map, MMU, probe, uart_*) is byte-identical; this section only
+    // wires the mock-proven shell loop onto the polled TX console. RX
+    // reads are [inferred] and gated on the VZ serial gate (claim 0002,
+    // unpassed): no device register is read, rx_wired() is false, so the
+    // banner + prompt print and the kernel parks below — it never spins
+    // hot. The loop's correctness is proven in kernel/src/shell.zig
+    // against a scripted MockConsole (artifacts/m15-shell-core-loop.txt).
+    // ------------------------------------------------------------------
+    var m15 = M15Console{};
+    const map_view = memmap.MapView.init(map_buffer.buffer, map_after_exit.info.descriptor_size, map_after_exit.info.len);
+    const console_name = layout_name(console_kind);
+    var mon = monitor.Monitor.init(
+        m15.to_console(),
+        .{
+            .handoff = @bitCast(handoff.*),
+            .map = map_view,
+            .console_name = console_name[0 .. console_name.len - 1],
+        },
+        monitor.MachineControl.disabled(),
+    );
+    shell.boot_and_park(&mon, m15.rx_wired());
     // No return after takeover. WFE is a terminal state, not a firmware call.
     halt_forever();
 }
@@ -653,3 +685,47 @@ fn print_pre_exit_error(st: *const SystemTable, msg: []const u8) void {
         _ = out.outputString(&wide) catch {};
     }
 }
+
+// ===========================================================================
+// M1.5 console & shell core (agent B) — prompt-loop seam support.
+// Additive section; the takeover path above is byte-identical.
+// ===========================================================================
+
+/// Console adapter over the polled TX uart. `readByte`/`rx_wired` are
+/// [inferred] stubs: live RX reads are gated on the VZ serial gate
+/// (claim 0002, unpassed) and are NOT implemented in this slice — no
+/// device register is touched by the input path. The shell loop's
+/// correctness is proven against a scripted MockConsole in
+/// `kernel/src/shell.zig` instead.
+const M15Console = struct {
+    const Self = @This();
+
+    pub const vtable = console.Console.VTable{
+        .write = writeFn,
+        .flush = flushFn,
+        .readByte = readByteFn,
+    };
+
+    fn writeFn(_: *anyopaque, bytes: []const u8) void {
+        uart_puts(bytes);
+    }
+
+    fn flushFn(_: *anyopaque) void {}
+
+    fn readByteFn(_: *anyopaque) ?u8 {
+        // [inferred] No RX path yet: reading the real device registers is
+        // gated on claim 0002. The shell sees no input and parks.
+        return null;
+    }
+
+    fn to_console(self: *Self) console.Console {
+        return .{ .ctx = self, .vtable = &vtable };
+    }
+
+    /// [inferred] No RX source is wired until the VZ serial gate passes,
+    /// so the shell prints banner + prompt and the kernel parks in WFE.
+    fn rx_wired(self: *Self) bool {
+        _ = self;
+        return false;
+    }
+};

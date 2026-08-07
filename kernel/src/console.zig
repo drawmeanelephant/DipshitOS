@@ -27,10 +27,22 @@ pub const Console = struct {
         write: *const fn (ctx: *anyopaque, bytes: []const u8) void,
         /// Push any buffered output; a no-op for polled byte-at-a-time TX.
         flush: *const fn (ctx: *anyopaque) void,
+        /// Polled, non-blocking input: the next received byte, or null when
+        /// no input is available right now. A transport with no RX path
+        /// (the milestone-two uart, until the VZ serial gate proves a
+        /// device) returns null always. Never blocks, never allocates.
+        readByte: *const fn (ctx: *anyopaque) ?u8,
     };
 
     pub fn write(self: Console, bytes: []const u8) void {
         self.vtable.write(self.ctx, bytes);
+    }
+
+    /// Poll one input byte; null means "no input available now". The shell
+    /// loop parks (WFE) between polls, so a no-RX transport idles instead
+    /// of spinning.
+    pub fn readByte(self: Console) ?u8 {
+        return self.vtable.readByte(self.ctx);
     }
 
     pub fn putc(self: Console, byte: u8) void {
@@ -109,12 +121,26 @@ pub fn MockConsole(comptime capacity: usize) type {
         pub const vtable = Console.VTable{
             .write = writeFn,
             .flush = flushFn,
+            .readByte = readByteFn,
         };
 
+        // Output capture (existing).
         buffer: [capacity]u8 = undefined,
         len: usize = 0,
         overflowed: bool = false,
         flush_count: usize = 0,
+        // Scripted input (M1.5 console & shell core): a fixed byte queue
+        // the tests feed; readByte pops it in order. Sized at least one
+        // byte so a zero-capacity mock still type-checks; `feed` refuses
+        // everything for capacity 0 (available == 0), so the semantics of
+        // a zero-capacity console are unchanged. Note: the input queue
+        // shares the same `capacity` as the output buffer, so a test with
+        // a large scripted session (e.g. the shell's 8192-byte e2e) sizes
+        // both directions together.
+        input: [@max(capacity, 1)]u8 = undefined,
+        input_len: usize = 0,
+        input_pos: usize = 0,
+        input_overflowed: bool = false,
 
         pub fn console(self: *Self) Console {
             return .{ .ctx = self, .vtable = &vtable };
@@ -125,10 +151,27 @@ pub fn MockConsole(comptime capacity: usize) type {
             return self.buffer[0..self.len];
         }
 
+        /// Script input bytes for `readByte` to consume in order. Bytes
+        /// beyond the fixed queue are refused (flagged), never wrapped.
+        pub fn feed(self: *Self, bytes: []const u8) void {
+            const available = capacity - self.input_len;
+            if (available == 0) {
+                if (bytes.len > 0) self.input_overflowed = true;
+                return;
+            }
+            const n = @min(bytes.len, available);
+            @memcpy(self.input[self.input_len..][0..n], bytes[0..n]);
+            self.input_len += n;
+            if (n < bytes.len) self.input_overflowed = true;
+        }
+
         pub fn reset(self: *Self) void {
             self.len = 0;
             self.overflowed = false;
             self.flush_count = 0;
+            self.input_len = 0;
+            self.input_pos = 0;
+            self.input_overflowed = false;
         }
 
         fn writeFn(ctx: *anyopaque, bytes: []const u8) void {
@@ -147,6 +190,14 @@ pub fn MockConsole(comptime capacity: usize) type {
         fn flushFn(ctx: *anyopaque) void {
             const self: *Self = @ptrCast(@alignCast(ctx));
             self.flush_count += 1;
+        }
+
+        fn readByteFn(ctx: *anyopaque) ?u8 {
+            const self: *Self = @ptrCast(@alignCast(ctx));
+            if (self.input_pos >= self.input_len) return null;
+            const byte = self.input[self.input_pos];
+            self.input_pos += 1;
+            return byte;
         }
     };
 }
@@ -235,4 +286,38 @@ test "console: print_u64 prints decimal without leading zeros" {
     mock.reset();
     mock.console().print_u64(std.math.maxInt(u64));
     try std.testing.expectEqualStrings("18446744073709551615", mock.contents());
+}
+
+test "console: mock readByte returns scripted input in order" {
+    var mock = MockConsole(64){};
+    const con = mock.console();
+    try std.testing.expect(con.readByte() == null); // empty queue
+    mock.feed("ab");
+    mock.feed("c");
+    try std.testing.expectEqual(@as(u8, 'a'), con.readByte().?);
+    try std.testing.expectEqual(@as(u8, 'b'), con.readByte().?);
+    try std.testing.expectEqual(@as(u8, 'c'), con.readByte().?);
+    try std.testing.expect(con.readByte() == null); // drained
+}
+
+test "console: mock feed overflow is refused and flagged, never wraps" {
+    var mock = MockConsole(4){};
+    mock.feed("abcdef"); // 6 bytes into a 4-byte queue
+    try std.testing.expect(mock.input_overflowed);
+    const con = mock.console();
+    try std.testing.expectEqual(@as(u8, 'a'), con.readByte().?);
+    try std.testing.expectEqual(@as(u8, 'b'), con.readByte().?);
+    try std.testing.expectEqual(@as(u8, 'c'), con.readByte().?);
+    try std.testing.expectEqual(@as(u8, 'd'), con.readByte().?);
+    try std.testing.expect(con.readByte() == null);
+    mock.reset();
+    try std.testing.expect(!mock.input_overflowed);
+}
+
+test "console: reset clears the scripted input queue too" {
+    var mock = MockConsole(16){};
+    mock.feed("xyz");
+    mock.reset();
+    try std.testing.expect(mock.console().readByte() == null);
+    try std.testing.expect(!mock.input_overflowed);
 }
