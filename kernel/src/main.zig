@@ -42,6 +42,39 @@ const exit_failure: u64 = 4;
 const table_failure: u64 = 5;
 const serial_failure: u64 = 6;
 
+// ADR 0004 D4 fixed-memory-marker fallback (gate work item 3): `takeover_marker`
+// is a BSS word a host-side dump can read. It records the takeover stage so a
+// silent post-exit death (no serial output) is discriminable: the stage present
+// when the kernel halts names the failure window, and a missing later stage
+// names the crash site. Values are 8-byte ASCII, little-endian in RAM.
+const marker_entry: u64 = 0x4d325f454e545259; // "M2_ENTRY"
+const marker_cmap: u64 = 0x4d325f434d415021; // "M2_CMAP!" — about to capture the EFI map
+const marker_mapd: u64 = 0x4d325f4d41504421; // "M2_MAPD!" — identity map built, about to install it
+const marker_prex: u64 = 0x4d325f5052455821; // "M2_PREX!" — about to call ExitBootServices
+const marker_exit: u64 = 0x4d325f4558495421; // "M2_EXIT!"
+const marker_mmu: u64 = 0x4d325f4d4d555021; // "M2_MMUP!"
+const marker_table: u64 = 0x4d325f5441424c45; // "M2_TABLE"
+const marker_seria: u64 = 0x4d325f5345524941; // "M2_SERIA"
+const marker_ready: u64 = 0x4d325f5245414459; // "M2_READY" — console ready, banner next
+
+// Marker NVRAM channel: EFI Runtime Services `SetVariable` survives
+// ExitBootServices (it is a *runtime* service, not a boot service — the same
+// table M1.5's reboot/shutdown design cites via `ResetSystem`). Writing each
+// stage as a non-volatile variable gives the host a post-exit-visible marker:
+// artifacts/efi-vars.bin is host-readable after the run. This is the working
+// form of the ADR 0004 D4 fallback on VZ — the memory-dump variant is
+// impossible there (guest RAM is not mapped into the runner process, claim
+// 0009).
+const marker_variable_name = utf16z("DipshitM2");
+const marker_vendor_guid = uefi.Guid{
+    .time_low = 0x4d324d32, // "M2M2"
+    .time_mid = 0x5f44, // "_D"
+    .time_high_and_version = 0x4950, // "IP"
+    .clock_seq_high_and_reserved = 0x53, // "S"
+    .clock_seq_low = 0x48, // "H"
+    .node = .{ 0x49, 0x54, 0x4f, 0x53, 0x2d, 0x4d }, // "ITOS-M"
+};
+
 fn utf16z(comptime text: []const u8) [text.len + 1:0]u16 {
     var result: [text.len + 1:0]u16 = undefined;
     for (text, 0..) |byte, index| result[index] = byte;
@@ -148,6 +181,13 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff: *HandoffV2
     }
 
     print_pre_exit_error(st, "DipshitOS: kernel entered\r\n");
+    set_marker(marker_entry);
+    write_marker_var(st, marker_entry);
+    // Second pre-exit write immediately after the first: if the persisted
+    // variable still reads M2_ENTRY, a *repeated* SetVariable failed (the
+    // marker ladder would be stuck); if it reads M2_CMAP!, the kernel died
+    // inside capture_map below.
+    write_marker_var(st, marker_cmap);
 
     const bs = st.boot_services orelse {
         print_pre_exit_error(st, "DipshitOS: no Boot Services\r\n");
@@ -158,6 +198,11 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff: *HandoffV2
         print_pre_exit_error(st, "DipshitOS: GetMemoryMap failed\r\n");
         return map_failure;
     };
+
+    // Pre-exit stage: proves the kernel passed valid_handoff + capture_map
+    // and reached the exit call. The persisted NVRAM marker being M2_ENTRY
+    // instead means the kernel died in that window.
+    write_marker_var(st, marker_prex);
 
     var exited = false;
     var attempt: usize = 0;
@@ -185,6 +230,8 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff: *HandoffV2
         print_pre_exit_error(st, "DipshitOS: ExitBootServices failed after 8 attempts\r\n");
         halt_forever();
     }
+    set_marker(marker_exit);
+    write_marker_var(st, marker_exit); // first post-exit runtime-services call
 
     // After successful exit, no longer allowed: AllocatePool/AllocatePages,
     // GetMemoryMap, SimpleTextOutput, Simple File System,
@@ -193,19 +240,32 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff: *HandoffV2
     // subsequent work is direct memory/register access only.
     const map_after_exit = map_buffer.map;
     if (!build_identity_map(map_after_exit, map_buffer.buffer, base, size, handoff)) {
-        takeover_marker = 0x4d325f5441424c45; // M2_TABLE
+        set_marker(marker_table);
+        write_marker_var(st, marker_table);
         halt_forever();
     }
+    // Pre-install write (still on the firmware identity map, reliable): if the
+    // persisted ladder stops here, the kernel died between this write and the
+    // post-install M2_MMUP! write — i.e. inside install_identity_map() or at
+    // the first post-switch call (claim 0009: observed — every VZ run stops
+    // at M2_MAPD!, so the MMU takeover window is the death site; the kernel
+    // never reaches the serial probe).
+    write_marker_var(st, marker_mapd);
     install_identity_map();
+    set_marker(marker_mmu);
+    write_marker_var(st, marker_mmu);
 
     const selected = probe_serial(map_after_exit);
     if (selected.kind == .none) {
-        takeover_marker = 0x4d325f5345524941; // M2_SERIA
+        set_marker(marker_seria);
+        write_marker_var(st, marker_seria);
         write_marker_fallback(base, size, map_after_exit);
         halt_forever();
     }
     console_kind = selected.kind;
     console_base = selected.base;
+    set_marker(marker_ready);
+    write_marker_var(st, marker_ready);
 
     uart_puts("DipshitOS kernel has seized control.\n");
     uart_puts("memory-map descriptors=");
@@ -361,6 +421,12 @@ const block_size: u64 = 2 * 1024 * 1024;
 fn is_ram(kind: MemoryType) bool {
     return switch (kind) {
         .loader_code, .loader_data, .boot_services_code, .boot_services_data, .conventional_memory, .persistent_memory => true,
+        // EFI runtime services code/data stay mapped (Normal WB, executable
+        // this milestone) so SetVariable/ResetSystem remain callable after
+        // ExitBootServices — the marker NVRAM channel and the M1.5 machine
+        // controls both need them. They are RAM; they are never used as
+        // general-purpose memory.
+        .runtime_services_code, .runtime_services_data => true,
         else => false,
     };
 }
@@ -660,10 +726,36 @@ fn layout_name(kind: Kind) []const u8 {
     };
 }
 
+/// Volatile marker write: a bare dead store to BSS could be elided under
+/// ReleaseSmall (nothing in the guest reads `takeover_marker` back), which
+/// would silently rob the host dump of its discriminator.
+fn set_marker(value: u64) void {
+    @as(*volatile u64, &takeover_marker).* = value;
+}
+
+/// Write the current marker stage as an EFI non-volatile variable. Best
+/// effort: a failed runtime call never changes control flow (on VZ the
+/// firmware may not keep runtime services resident — then this is a no-op and
+/// the BSS marker remains the only record). The first write (pre-exit)
+/// creates the variable; later writes update it in place.
+fn write_marker_var(st: *const SystemTable, value: u64) void {
+    var bytes: [8]u8 = undefined;
+    std.mem.writeInt(u64, &bytes, value, .little);
+    _ = st.runtime_services._setVariable(
+        &marker_variable_name,
+        &marker_vendor_guid,
+        .{ .non_volatile = true, .bootservice_access = true, .runtime_access = true },
+        bytes.len,
+        &bytes,
+    );
+}
+
 fn write_marker_fallback(base: u64, size: u64, map: MemoryMapSlice) void {
     // Fixed BSS evidence remains available to a host-side debugger if the
-    // serial probe is blocked. It is not reported as serial success.
-    takeover_marker = 0x4d324d21; // M2M!
+    // serial probe is blocked. It is not reported as serial success. The
+    // discriminating marker word was already set to M2_SERIA by the caller;
+    // the M2M! breadcrumb lives in the virtio scratch region only, so the
+    // halt reason is never clobbered.
     virtio_tx[0] = 'M';
     virtio_tx[1] = '2';
     virtio_tx[2] = '!';

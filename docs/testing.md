@@ -34,6 +34,15 @@
    `memory-map descriptors=0x...` line, and `kernel terminal state`. The
    pre-exit loader marker `\\BOOTED.TXT` remains required. `RC.TXT` is
    expected only for a deliberate pre-exit failure fixture, not success.
+9b. ADR 0004 D4 marker fallback gate (gate work item 3, claim 0009):
+   `bash tools/verify-marker.sh` (also `just verify-marker` /
+   `zig build marker`) boots the VM and asserts the NVRAM marker ladder —
+   the kernel persists each takeover stage as the EFI variable `DipshitM2`,
+   and the runner saves the ordered ladder to `artifacts/marker-dump.txt`.
+   The gate passes iff at least one marker instance is present; the final
+   stage names the crash window (observed: `M2_MAPD!` — the MMU switch is
+   the death site). The memory-dump form is impossible on VZ (guest RAM is
+   not host-mapped — observed, claim 0009).
 10. Save command output and logs under `artifacts/m2-*.txt`, including the
    probe output and the complete serial log. State blocked VZ capabilities
    precisely rather than inferring success.
@@ -61,7 +70,9 @@
 |----------|-------------|----------|
 | `artifacts/inspect.txt` | `zig build inspect > artifacts/inspect.txt` | `file`, PE/COFF headers, sections, disassembly, FAT/GPT listing |
 | `artifacts/vm-serial.log` | `zig build run` | Kernel serial probe, exact banner, map hex view, and terminal marker |
-| `artifacts/efi-vars.bin` | VZ runner | Persisted EFI NVRAM |
+| `artifacts/efi-vars.bin` | VZ runner | Persisted EFI NVRAM; holds the `DipshitM2` marker ladder after a marker-gate run |
+| `artifacts/marker-dump.txt` | `zig build marker` / `verify-marker.sh` | Ordered M2_* NVRAM marker ladder (ADR 0004 D4 fallback) |
+| `artifacts/m2-marker-gate.txt` | `verify-marker.sh` | Full marker-gate run log (2026-08-07: ladder ends `M2_MAPD!`) |
 | `artifacts/context.md` | `zig build context` | Full deterministic project snapshot |
 | `\LOADER.TXT` on the ESP | loader (`zig build run`) | Loader-observed placement and handoff-v2 jump inputs |
 | `\RC.TXT` on the ESP | loader, only after pre-exit failure | Non-zero kernel status for the bad-handoff fixture |
@@ -102,6 +113,17 @@
       either `layout=none` (no usable MMIO serial device; `M2_SERIA` halt)
       or an early post-exit crash. Do not label the hardware assumptions
       observed before that evidence exists.
+- [x] Milestone two marker fallback gate (gate work item 3, claim 0009):
+      **passing** (2026-08-07, `agent/buffy/m2-marker-fallback`). The
+      NVRAM ladder discriminates the serial gate: every run ends at
+      `M2_MAPD!` — the identity map is built but the post-install `M2_MMUP!`
+      stage never appears, so the kernel dies in the MMU-takeover window
+      (`install_identity_map()` or the first post-switch call) and never
+      reaches the serial probe. A diagnostic run with the switch skipped
+      advances the ladder to `M2_SERIA`, proving the probe then finds no
+      usable MMIO serial device in the declared windows. Evidence:
+      `artifacts/m2-marker-gate.txt`, `artifacts/marker-dump.txt`,
+      `artifacts/probe*-run.txt`; full outcome in claim 0009.
 - [x] Milestone two bad-handoff failure gate: **passing** (fixed 2026-08-06,
       `agent/buffy/m2-badhandoff-fix`). Root cause was the naked `_start`
       shim's `bl kernel_main` overwriting the link register without

@@ -179,6 +179,19 @@ prompt anticipated. Serial is primary because the host already captures
 `vm-serial.log`; the marker is the fallback, decided at the probe, not
 during implementation.
 
+> **D4 addendum (2026-08-07, claim 0009, observed):** the *memory-dump*
+> form of the contingency is impossible on VZ — guest RAM is not mapped
+> into the host runner process (a full submap-aware walk finds no 256 MiB
+> region; every hit is the runner's own constant array). The working form,
+> implemented and gated (gate work item 3, `tools/verify-marker.sh`), is
+> the **EFI NVRAM ladder**: the kernel persists each takeover stage as the
+> non-volatile variable `DipshitM2` via runtime `SetVariable`, which
+> survives `ExitBootServices` on VZ, and the host reads the variable store
+> after the run. The ladder discriminates the serial-gate silence: every
+> VZ run ends at `M2_MAPD!` (identity map built, pre-install) — the MMU
+> switch in D3 is the death site; the serial probe never runs. See
+> `docs/claims/0009-m2-marker-fallback.md` and `artifacts/m2-marker-gate.txt`.
+
 The kernel's banner is exactly:
 
 ```

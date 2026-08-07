@@ -127,6 +127,20 @@ pub fn build(b: *std.Build) void {
     context.stdio = .inherit;
     context_step.dependOn(&context.step);
 
+    // ADR 0004 D4 fixed-memory-marker fallback (status.md gate work item 3):
+    // boot the VM and save the host-side NVRAM marker ladder (the kernel
+    // persists each takeover stage as the EFI variable `DipshitM2`, which
+    // runtime SetVariable keeps alive past ExitBootServices on VZ). The gate
+    // here is the marker channel, not the serial channel: the runner exits 0
+    // iff an M2_* marker was found. The hard gate lives in
+    // tools/verify-marker.sh (`just verify-marker`).
+    const marker_step = b.step("marker", "Boot the disk image and save the host-side kernel marker dump (ADR 0004 D4 fixed-memory-marker fallback)");
+    const marker = b.addSystemCommand(&.{ "bash", "-c", marker_vm_command });
+    marker.step.dependOn(&image.step);
+    marker.has_side_effects = true;
+    marker.stdio = .inherit;
+    marker_step.dependOn(&marker.step);
+
     // M1.5 march step 19: automated transcript test. No VM, no live RX —
     // the shell's mock-fed e2e test asserts the exact `dipshit>` transcript
     // in-test and emits the captured bytes to artifacts/, which this gate
@@ -182,4 +196,33 @@ const console_vm_command =
     \\host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log --console
     \\echo
     \\echo "console session ended."
+;
+
+// ADR 0004 D4 fixed-memory-marker fallback (status.md gate work item 3):
+// `zig build marker` boots the image, saves artifacts/marker-dump.txt (the
+// host-side NVRAM marker ladder — the working form of the fallback; the
+// memory-scan form is impossible on VZ because guest RAM is not host-mapped),
+// and exits with the runner's code (0 iff an M2_* marker was found).
+// `tools/verify-marker.sh` is the hard gate that also asserts the dump and
+// saves the evidence.
+const marker_vm_command =
+    \\set -e
+    \\swift build --package-path host/vm-runner --configuration release
+    \\# Recent macOS requires the com.apple.security.virtualization entitlement;
+    \\# ad-hoc codesign the binary with it before running.
+    \\codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
+    \\# Fresh variable store so the dump is exactly this run's ladder (the
+    \\# store is append-per-write and survives across runs otherwise).
+    \\rm -f artifacts/efi-vars.bin
+    \\set +e
+    \\host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log --dump-marker artifacts/marker-dump.txt --timeout 25 --expect "DipshitOS kernel has seized control." --terminal-marker "kernel terminal state"
+    \\RUNNER_RC=$?
+    \\set -e
+    \\echo
+    \\echo "=== marker dump (artifacts/marker-dump.txt) ==="
+    \\cat artifacts/marker-dump.txt 2>/dev/null || true
+    \\echo
+    \\echo "=== loader trace: \\LOADER.TXT on the ESP ==="
+    \\python3 image/mkfat32.py --cat-file /LOADER.TXT artifacts/disk.img 2>/dev/null || echo "(no LOADER.TXT -- the loader did not reach the kernel jump)"
+    \\exit $RUNNER_RC
 ;

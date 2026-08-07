@@ -51,6 +51,7 @@ Every milestone-two claim below is backed by evidence re-verified
 | Context snapshot | `zig build context` | ✅ pass | re-run 2026-08-06 |
 | **VZ serial gate** | `zig build run` | ❌ **not passed** | `vm-serial.log` still 0 bytes (re-run 2026-08-06 21:19, `artifacts/m2-vz-run-20260806.txt`) |
 | **Bad-handoff failure gate** | `bash tools/verify-bad-handoff.sh` | ✅ **pass** | `artifacts/m2-badhandoff-fix-after.txt`: `RC.TXT` → `kernel_rc=0x0000000000000002`, gate exits 0 (first observed 2026-08-06, fixed shim) |
+| **Marker fallback gate** (gate work item 3) | `bash tools/verify-marker.sh` | ✅ **pass** | `artifacts/m2-marker-gate.txt` (2026-08-07): NVRAM ladder `M2_ENTRY → M2_CMAP! → M2_PREX! → M2_EXIT! → M2_MAPD!` — final stage `M2_MAPD!` (see [gate work item 3](#immediate-gate-work-prerequisites-for-m15) and claim 0009) |
 
 ### What we directly observe about the two failing gates
 
@@ -88,15 +89,36 @@ still produces no serial output and the kernel never returns. Re-run
 (`BOOTED.TXT` exact content, `LOADER.TXT` `base=0x7e4df000 size=0x823e8
 entry_offset=0x18`, `ram_first8=0xaa0103eaaa0003e9` = the shim's first two
 instructions `mov x9,x0; mov x10,x1` — the loader→shim jump is proven);
-`RC.TXT` absent (good path, expected — D6). So the kernel dies **after
-shim entry and before its first post-exit `uart_puts`**. The two
-hypotheses: the probe finds no usable MMIO serial device on VZ
-(`layout=none` → `M2_SERIA` BSS-marker halt, which produces exactly zero
-output, consistent with the log), or an early post-exit crash (map build /
-MMU install / probe read). The ADR 0004 D4 fixed-memory-marker fallback
-(host-side dump of `takeover_marker`) discriminates them; the bad-handoff
-fix already removed the shim/LR suspect (M1.5 march step 8,
-`docs/march-m15.md`).
+`RC.TXT` absent (good path, expected — D6).
+
+**The serial gate's silence is now explained (claim 0009, gate work item 3,
+2026-08-07).** The ADR 0004 D4 marker fallback is implemented and its first
+VZ runs discriminate the death site: the kernel persists each takeover stage
+as the EFI non-volatile variable `DipshitM2` (runtime `SetVariable`
+survives `ExitBootServices` on VZ — observed), and the host reads the store
+(`artifacts/efi-vars.bin`) after the run. Every VZ run's ladder ends at
+`M2_MAPD!` — the identity map was **built** (pre-install stage written) but
+the post-install `M2_MMUP!` stage never appears. The kernel dies in the
+**MMU-takeover window** — between the pre-install write and the first
+post-switch call, i.e. inside `install_identity_map()` or at that call
+itself — before the serial probe ever runs (`artifacts/m2-marker-gate.txt`,
+`docs/claims/0009-m2-marker-fallback.md`). A diagnostic run with the switch
+disabled (documented in the claim) proves the rest of the takeover path
+works on the firmware map: the ladder advances `M2_MAPD! → M2_MMUP! →
+M2_SERIA`, i.e. the serial probe then runs and finds **no usable MMIO
+serial device** in the declared windows (`layout=none` halt). Two
+independent findings, both observed:
+
+1. The kernel never reaches the serial probe on the real path — the death
+   is in the MMU-takeover window (switch or first post-switch call).
+2. Even past the switch, the probe finds no usable device — `M2_SERIA`
+   (zero output, consistent with the empty log).
+
+Also observed: the ADR 0004 D4 *memory-dump* form is **impossible on VZ** —
+a full submap-aware walk of the runner's own address space finds no 256 MiB
+guest-RAM region and every `M2_*` hit is the runner's own constant array
+(guest RAM is not host-mapped; Virtualization.framework isolation). The
+NVRAM ladder is the working form of the fallback.
 
 ## Milestone 1.5 — the call
 
@@ -300,8 +322,17 @@ here.
 3. **If no usable serial device exists on VZ**, implement the ADR 0004 D4
    fixed-memory-marker fallback (host-side dump of the kernel's BSS
    `takeover_marker`). **Gate:** saved host-side dump matching the `M2_*`
-   markers. **Status:** no claim yet — claim it (see
-   [`docs/claims/README.md`](claims/README.md)) before starting.
+   markers. **Status:** ✅ done 2026-08-07 — see
+   [`0009-m2-marker-fallback`](claims/0009-m2-marker-fallback.md) and
+   `artifacts/m2-marker-gate.txt`. The gate passes with the **NVRAM ladder**
+   form (the memory-dump form is impossible on VZ — guest RAM is not
+   host-mapped, observed), and the ladder discriminates the serial gate:
+   every run ends at `M2_MAPD!`, so the death is in the **MMU-takeover
+   window** (`install_identity_map()` or the first post-switch call) — the
+   kernel never reaches the serial probe; with the switch skipped
+   (diagnostic), the probe runs and finds no usable device (`M2_SERIA`).
+   See the claim for the full ladder and the hardware-contract updates with
+   quoted evidence.
 
 ## Housekeeping conventions (keep the project nice as it evolves)
 

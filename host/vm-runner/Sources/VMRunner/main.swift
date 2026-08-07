@@ -2,7 +2,24 @@
 //
 // Usage: VMRunner <disk-image> [serial-log] [--screen <png>]
 //         [--timeout <s>] [--expect <line>] [--terminal-marker <line>]
-//         [--console] [--debug-input]
+//         [--console] [--debug-input] [--dump-marker <file>]
+//
+// * --dump-marker <file> (ADR 0004 D4 fixed-memory-marker fallback, gate
+//   work item 3, claim 0009): before exiting, read the EFI variable store
+//   (artifacts/efi-vars.bin) and save the ordered ladder of M2_* marker
+//   instances the kernel wrote (the kernel persists each takeover stage as
+//   the non-volatile variable `DipshitM2` via runtime SetVariable, which
+//   survives ExitBootServices on VZ). In this mode the exit code is 0 iff at
+//   least one marker instance was found — the marker channel, not the
+//   (silent) serial channel, is the gate. The serial evidence gate above is
+//   unchanged when the flag is absent.
+//
+//   NOTE: the original memory-dump form (scanning this process's address
+//   space for the BSS marker, on the assumption that the in-process VZ guest
+//   RAM is host-mapped) is provably impossible on VZ: a full submap-aware
+//   walk finds no 256 MiB guest-RAM region and every M2_* hit is this
+//   runner's own constant array (claim 0009, artifacts/marker-dump.txt). The
+//   NVRAM ladder is the working form of the fallback.
 //
 // Two modes:
 //   * default (evidence gate): starts the VZ guest, captures the
@@ -46,6 +63,7 @@ var expectLine = "firmware has agreed to cooperate"
 var terminalMarker: String?
 var consoleMode = false
 var debugInput = false
+var markerDumpPath: String?
 
 var idx = 2
 while idx < arguments.count {
@@ -69,6 +87,9 @@ while idx < arguments.count {
     } else if arg == "--debug-input" {
         debugInput = true
         idx += 1
+    } else if arg == "--dump-marker", idx + 1 < arguments.count {
+        markerDumpPath = arguments[idx + 1]
+        idx += 2
     } else {
         serialLogPath = arg
         idx += 1
@@ -283,6 +304,9 @@ if consoleMode {
     print("  serial log: \(serialLogPath)  (timeout: \(Int(timeout))s)")
     print("  expecting: \"\(expectLine)\"")
     if let terminalMarker { print("  terminal marker: \"\(terminalMarker)\"") }
+    if let markerDumpPath {
+        print("  marker dump: \(markerDumpPath)  (ADR 0004 D4 fallback — NVRAM ladder; exit 0 iff an M2_* marker is found)")
+    }
 }
 
 runner.queue.async {
@@ -318,7 +342,113 @@ func captureScreenshot(at t: TimeInterval) {
 }
 
 func finish(success: Bool) {
-    runner.queue.async { runner.vm.stop { _ in exit(success ? 0 : 1) } }
+    let wantDump = markerDumpPath != nil
+    runner.queue.async {
+        runner.vm.stop { _ in
+            guard wantDump, let dumpPath = markerDumpPath else {
+                exit(success ? 0 : 1)
+            }
+            // ADR 0004 D4 fixed-memory-marker fallback (working form, claim
+            // 0009): the kernel persists its takeover stage as the EFI
+            // non-volatile variable `DipshitM2` (runtime SetVariable survives
+            // ExitBootServices on VZ — observed), and the host reads the
+            // store after the VM stops. The memory-scan variant is impossible
+            // on VZ: guest RAM is not mapped into the runner process
+            // (observed — a full submap-aware walk finds no 256 MiB region
+            // and every M2_* hit is the runner's own constant array). The
+            // NVRAM ladder is the gate here; the exit code becomes 0 iff at
+            // least one marker instance is present in the store.
+            print("marker ladder: reading EFI variable store")
+            let ladder = readMarkerLadder(from: varsURL)
+            writeMarkerDump(to: dumpPath, ladder: ladder)
+            var finalSuccess = success
+            if ladder.isEmpty {
+                print("MARKER-GATE: no M2_* marker in the EFI variable store (kernel died before its first marker write, or SetVariable failed)")
+            } else {
+                finalSuccess = true
+                for (name, _) in ladder {
+                    print("MARKER-GATE: \(name)")
+                }
+            }
+            exit(finalSuccess ? 0 : 1)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ADR 0004 D4 fixed-memory-marker fallback (working form, claim 0009): the
+// kernel writes each takeover stage as the EFI non-volatile variable
+// `DipshitM2` (VendorGuid M2M2_DIPSHITOS-M). EFI runtime services survive
+// ExitBootServices on VZ, so after the run the host reads the variable store
+// (artifacts/efi-vars.bin) and sees the ordered ladder of stages the kernel
+// reached. A missing later stage names the crash window: a ladder ending at
+// M2_MAPD! (identity map built, pre-install) with no M2_MMUP! means the MMU
+// switch itself faulted — observed on every VZ run (claim 0009).
+// ---------------------------------------------------------------------------
+
+// The kernel's stage words, little-endian as stored by SetVariable. The LE
+// byte strings are distinctive ASCII (e.g. "YRTNE_2M" for M2_ENTRY), so a
+// plain byte scan of the store finds every instance in file order; the store
+// is append-per-write, so file order == write order and the LAST instance is
+// the kernel's final stage.
+let markerNeedles: [(name: String, leBytes: [UInt8])] = [
+    ("M2_TABLE", [0x45, 0x4c, 0x42, 0x41, 0x54, 0x5f, 0x32, 0x4d]), // ELBAT_2M
+    ("M2_SERIA", [0x41, 0x49, 0x52, 0x45, 0x53, 0x5f, 0x32, 0x4d]), // AIRES_2M
+    ("M2_ENTRY", [0x59, 0x52, 0x54, 0x4e, 0x45, 0x5f, 0x32, 0x4d]), // YRTNE_2M
+    ("M2_CMAP!", [0x21, 0x50, 0x41, 0x4d, 0x43, 0x5f, 0x32, 0x4d]), // !PAMC_2M
+    ("M2_MAPD!", [0x21, 0x44, 0x50, 0x41, 0x4d, 0x5f, 0x32, 0x4d]), // !DPAM_2M
+    ("M2_PREX!", [0x21, 0x58, 0x45, 0x52, 0x50, 0x5f, 0x32, 0x4d]), // !XERP_2M
+    ("M2_EXIT!", [0x21, 0x54, 0x49, 0x58, 0x45, 0x5f, 0x32, 0x4d]), // !TIXE_2M
+    ("M2_MMUP!", [0x21, 0x50, 0x55, 0x4d, 0x4d, 0x5f, 0x32, 0x4d]), // !PUMM_2M
+    ("M2_READY", [0x59, 0x44, 0x41, 0x45, 0x52, 0x5f, 0x32, 0x4d]), // YDAER_2M
+]
+
+/// Read the EFI variable store and return the marker ladder (name, store
+/// offset), in file order. Byte-scan only — no struct-layout assumption
+/// beyond the value being present: the marker strings are distinctive 8-byte
+/// ASCII sequences, and every hit is checked against the needle table.
+func readMarkerLadder(from storeURL: URL) -> [(name: String, offset: Int)] {
+    guard let data = try? Data(contentsOf: storeURL) else { return [] }
+    let bytes = [UInt8](data)
+    var hits: [(name: String, offset: Int)] = []
+    var i = 0
+    while i + 8 <= bytes.count {
+        for (name, needle) in markerNeedles {
+            var match = true
+            var j = 0
+            while j < 8 {
+                if bytes[i + j] != needle[j] { match = false; break }
+                j += 1
+            }
+            if match { hits.append((name, i)) }
+        }
+        i += 1
+    }
+    hits.sort { $0.offset < $1.offset }
+    return hits
+}
+
+func writeMarkerDump(to path: String, ladder: [(name: String, offset: Int)]) {
+    var lines: [String] = []
+    lines.append("DIPSHITOS marker dump — ADR 0004 D4 fixed-memory-marker fallback (NVRAM ladder)")
+    lines.append("date=\(ISO8601DateFormatter().string(from: Date()))")
+    lines.append("store=\(varsURL.path)")
+    lines.append("")
+    lines.append("marker ladder (file order == write order):")
+    if ladder.isEmpty {
+        lines.append("  (none — no M2_* marker instance in the store)")
+    } else {
+        for (name, offset) in ladder {
+            lines.append("  \(name) @0x\(String(format: "%x", offset))")
+        }
+    }
+    let text = lines.joined(separator: "\n") + "\n"
+    do {
+        try text.write(toFile: path, atomically: true, encoding: .utf8)
+        print("marker dump saved to \(path) (\(ladder.count) marker instance(s))")
+    } catch {
+        FileHandle.standardError.write(Data("ERROR: could not write marker dump to \(path): \(error)\n".utf8))
+    }
 }
 
 func poll() {
