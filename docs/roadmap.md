@@ -21,21 +21,24 @@ Deliverables: `boot/`, `host/vm-runner/`, `image/`, `tools/`, `docs/`,
 `build.zig`, `build.zig.zon`, `AGENTS.md`, `README.md`.
 
 **No kernel, loader, allocator, scheduler, filesystem, graphics, networking,
-SMP, or userspace exists at the end of this milestone.**
+SMP, or userspace existed at the end of milestone zero** *(historical
+statement of the M0 end state)*.
 
 ## Milestone one — separate kernel image (implemented)
 
 > Load a separate AArch64 kernel image and transfer control to its entry
 > point.
 
-**Implemented** on branch `m1-kernel-handoff` (see
-`docs/decisions/0002-kernel-handoff.md`): the boot UEFI app loads
+**Implemented** (2026-08-05; branch `m1-kernel-handoff`, merged to `main`;
+see `docs/decisions/0002-kernel-handoff.md`): the boot UEFI app loads
 `\KERNEL.BIN` (flat format v1, magic "DSK1") from the ESP via the Simple
 File System protocol, allocates `EfiLoaderCode` pages with Boot Services,
 copies the image, performs D/I-cache maintenance, and jumps to the kernel
 entry (handoff ABI: x0 = base, x1 = size, x2 = System Table, x3 = open
-root directory; the kernel returns a u64 status). The kernel is a few
-hundred bytes of freestanding Zig and returns 0.
+root directory; the kernel returns a u64 status). The kernel was then a
+few hundred bytes of freestanding Zig that returned 0 *(historical
+description of the M1 stub — superseded by the milestone-two kernel
+proper)*.
 
 Observed evidence on Apple M4 / macOS 27: `BOOTED.TXT` (loader ran),
 `LOADER.TXT` (loader-observed placement, byte-perfect copy), `RC.TXT`
@@ -56,7 +59,7 @@ byte-identical across runs, and `zig build run` **gates** on its content
 `BOOTED.TXT` and `RC.TXT`. Full investigation: ADR 0002 and
 `artifacts/m1-run*.txt` / `m1-fix-*.txt`.
 
-## Milestone two — the kernel proper (implementation on `m2-kernel-proper`; VZ gate blocked)
+## Milestone two — the kernel proper (implemented; VZ serial gate not passed)
 
 > The kernel seizes the machine: it ends UEFI Boot Services, takes over the
 > MMU with its own identity-map page tables, and drives a minimal MMIO
@@ -67,13 +70,20 @@ implementation design and review in `docs/m2-kernel-proper-design.md`.
 Apple Virtualization.framework is the only supported host; there is no QEMU
 path. The guest stays freestanding Zig — no libc, no POSIX.
 
-**Implementation attempted; build verification is available but hardware verification is blocked:** the boot stub
-allocates the v2 stack/handoff contract; the kernel captures the map, retries
-ExitBootServices up to eight times, builds/installs identity TTBR0_EL1 tables,probes declared MMIO windows, and is designed to enter a terminal WFE loop
-after serial evidence. The saved VZ run did not produce serial output or
-RC.TXT, so the hardware takeover and failure gates remain unpassed; UART/MMIO
-and MMU hardware assumptions remain inferred. The branch is not milestone-two
-complete until those gates are directly observed.
+**Implemented; build gates, the bad-handoff failure gate, and the ADR 0004
+D4 marker-fallback gate pass; the VZ serial gate is not passed, its blocker
+now isolated.** The boot stub allocates the v2 stack/handoff contract; the
+kernel captures the map, retries ExitBootServices up to eight times,
+builds/installs identity TTBR0_EL1 tables, probes declared MMIO windows, and
+is designed to enter a terminal WFE loop after serial evidence. The MMU-
+takeover death the marker ladder first exposed (claim 0009, `M2_MAPD!`) was
+root-caused and **fixed** (claim 0010, 2026-08-07): the identity-map switch
+now completes on VZ and the ladder reaches `M2_SERIA` — the serial probe runs
+to completion but finds **no usable MMIO serial device** in the declared
+windows. That device absence, not a kernel crash, is the VZ serial gate's
+remaining blocker. UART/MMIO hardware assumptions stay `[inferred]`; the
+canonical, always-current gate table lives in
+[`docs/status.md`](status.md).
 
 
 ### Goal
@@ -120,10 +130,14 @@ into a kernel that **keeps** the machine:
 3. The kernel does **not** return: the runner requires the terminal marker
    emitted immediately before the WFE loop.
 4. Failure path still works: the bad-handoff fixture must yield non-zero
-   `RC.TXT` before exit.
+   `RC.TXT` before exit. **Passing since 2026-08-06** (`kernel_rc=0x2`).
 5. Every `[inferred]` hardware assumption (UART base/layout, MMU behavior,
    GIC presence) is flipped to `[observed]` only with matching probe/serial
    evidence. A blocked host run leaves the entries inferred and is reported.
+6. Marker fallback (ADR 0004 D4): `bash tools/verify-marker.sh` —
+   **passing since 2026-08-07**; the ladder discriminated the death site
+   (`M2_MAPD!`, claim 0009), which claim 0010 then root-caused and fixed
+   (ladder now reaches `M2_MMUP! → M2_SERIA`; see `docs/status.md`).
 
 ### Non-goals (explicit exclusions for this milestone)
 
@@ -144,11 +158,15 @@ console) either way.
 
 ### Milestone-two evidence status
 
-The repository's prior milestone-one run logs observed an empty
-`vm-serial.log`. The new VZ run is the decisive hardware probe. Until it is
-run successfully on Apple M4 / macOS 27, this branch makes no observed claim
-about the VZ guest MMIO address, register layout, or the post-switch MMU;
-those remain explicitly inferred in `docs/hardware-contract.md`.
+Every VZ run so far observed an empty `vm-serial.log`. The **NVRAM marker
+ladder** (ADR 0004 D4, claim 0009/0010, `artifacts/m2-mmu-takeover-gate.txt`)
+is the working evidence channel: the MMU takeover is observed to complete
+on VZ (ladder reaches `M2_MMUP!`), and the probe is observed to run to
+completion and find no usable MMIO serial device (`M2_SERIA`). No
+serial-device hardware assumption is flipped to `[observed]` — the guest
+MMIO address and register layout remain explicitly `[inferred]` in
+`docs/hardware-contract.md` until a real device is found; neither
+observation is device evidence.
 
 ## Milestone 1.5 — interactive kernel monitor (current)
 
@@ -167,16 +185,26 @@ storage drivers.
 The M1.5 hard gates, target screen, and milestone status live in
 **`docs/status.md`** (the living status document); the twenty-step plan,
 agent split, and per-step progress tracker live in **`docs/march-m15.md`**
-(update it as work lands). The immediate blocker is the missing RX path:
-the kernel console is polled TX-only (ADR 0004) and the VM
-runner's serial attachment has no host-to-guest input handle today.
+(update it as work lands). The monitor itself is implemented and
+host-tested (console abstraction, line editor, tokenizer, 14 commands,
+banner, mock-level transcript gate), and the host-side `--console`
+plumbing landed (steps 4–7); the milestone is **not** closed yet because
+the live serial channel is still open: the kernel console is polled
+TX-only with no RX path (ADR 0004) and the VZ serial gate remains blocked
+on the absence of a usable MMIO serial device in the declared windows —
+device discovery and the RX path are the next steps (see
+[`docs/status.md`](status.md)).
 
 ## Later milestones (sketches only, not commitments)
 
+- **M1.5 close-out: device discovery + serial RX.** Find the VZ
+  virtio-console register file or a documented console fallback, then wire
+  the RX path (the milestone-two console is polled TX-only, ADR 0004; the
+  kernel's `readByte` is a no-RX stub). This is what stands between the
+  current mock-level monitor and a live `dipshit>` session.
 - A memory allocator and boot-time memory map walk (the EFI memory map
   the kernel captured at exit, walked by the kernel itself).
-- A serial RX path (the milestone-two console is polled TX-only) and
-  interrupt setup (GIC) and a timer — the GIC is already recorded as an
+- Interrupt setup (GIC) and a timer — the GIC is already recorded as an
   `[inferred]` hardware assumption.
 - Eventually: a process abstraction, a filesystem, a network stack — each
   only when the ones below it are demonstrably working.

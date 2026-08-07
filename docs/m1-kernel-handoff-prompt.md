@@ -1,8 +1,14 @@
 # Milestone one: separate kernel image + control transfer
 
-Planning-first agent prompt for DipshitOS milestone one. Feed this file to
-the implementing agent. It must produce a written design covering all five
-mandated sections **before** writing any implementation code.
+> **ARCHIVED (2026-08-07).** Milestone one is implemented and merged to
+> `main` — see `docs/decisions/0002-kernel-handoff.md` and
+> `docs/status.md`. This prompt is retained as a historical record; do not
+> feed it to an implementing agent.
+
+Planning-first agent prompt for DipshitOS milestone one (historical
+record). At the time it was active, the implementing agent had to produce
+a written design covering all five mandated sections **before** writing
+any implementation code.
 
 - Branch: `m1-kernel-handoff`
 - Date: 2026-08-05
@@ -93,8 +99,8 @@ reviewed. Deliver in this order:
 
 - Design written and reviewed, all five sections decided.
 - Kernel image loads, validates, transfers control; host shows
-  `DipshitOS kernel has seized control.` from a real boot (VZ on Apple
-  silicon, and/or QEMU when installed), logs saved.
+  `DipshitOS kernel has seized control.` from a real boot on Apple silicon
+  (VZ — the only supported host), logs saved.
 - Docs updated: roadmap (M1 complete), architecture, hardware contract,
   an ADR for the boot ABI (ADR 0002), README status.
 - Nothing from later milestones snuck in.

@@ -19,6 +19,7 @@ const ConfigurationTable = uefi.tables.ConfigurationTable;
 // runs on the polled TX console through these modules. The takeover path
 // below is untouched; this is the seam's import surface.
 const console = @import("console.zig");
+const machine = @import("machine.zig");
 const memmap = @import("memmap.zig");
 const monitor = @import("monitor.zig");
 const shell = @import("shell.zig");
@@ -248,6 +249,13 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff: *HandoffV2
         return bad_handoff;
     }
 
+    // M1.5 machine controls: capture the EFI Runtime Services table
+    // pre-exit. Runtime services (unlike boot services) survive
+    // ExitBootServices, so `ResetSystem` remains callable after the
+    // takeover — the same table whose SetVariable drives the marker
+    // ladder below (observed working post-exit on VZ, claims 0009/0010).
+    machine.init(st.runtime_services);
+
     print_pre_exit_error(st, "DipshitOS: kernel entered\r\n");
     set_marker(marker_entry);
     write_marker_var(st, marker_entry);
@@ -430,7 +438,7 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff: *HandoffV2
             .map = map_view,
             .console_name = console_name[0 .. console_name.len - 1],
         },
-        monitor.MachineControl.disabled(),
+        machine.control(),
     );
     shell.boot_and_park(&mon, m15.rx_wired());
     // No return after takeover. WFE is a terminal state, not a firmware call.

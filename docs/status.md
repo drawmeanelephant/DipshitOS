@@ -1,5 +1,9 @@
 # DipshitOS living status, goals & changelog
 
+> **Host identity:** Apple silicon only — hosted by Apple's
+> Virtualization.framework; **not Linux, not Unix, not QEMU** (see
+> `AGENTS.md`).
+
 > This file is the project's **living status tracker** and its **multiagent
 > coordination surface**: where we are, what we are trying to build next, how
 > far along each step is, **who currently claims which piece of work**, and
@@ -217,7 +221,7 @@ dipshit>
 - [ ] At least ten commands work.
 - [ ] `ls`, `cat`, and `write` persist through reboot — **needs re-scoping**: post-exit there is no ESP root / Simple File System (x3 carries handoff v2), so these need a pre-exit file window or a storage driver; see march step 15 (`docs/march-m15.md`).
 - [ ] A scripted console session passes automatically (asserting in `vm-serial.log`).
-- [ ] The VM can reboot or shut down from the shell.
+- [ ] The VM can reboot or shut down from the shell. *(Real EFI `ResetSystem` mechanism shipped + unit-proven — claim 0011; the live gate stays open until a VZ reset is actually observed.)*
 - [ ] No allocator, MMU replacement, interrupts, scheduler, or userspace is falsely claimed.
 
 ## The march tracker (per milestone)

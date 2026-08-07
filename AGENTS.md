@@ -5,15 +5,27 @@ These rules bind any AI agent or human contributor working in this project.
 ## Project identity
 
 - This is a from-scratch AArch64 operating system project.
-- It is not Linux-based.
+- It runs on Apple silicon (macOS), hosted by Apple's
+  Virtualization.framework. It is **not Linux, not Unix, and not QEMU**:
+  no emulator, no libc, no POSIX, and no existing guest OS anywhere in the
+  boot path.
 - It must not depend on libc, POSIX, or an existing guest operating system.
 - The guest implementation language is Zig; the host launcher is Swift.
+
+## Current milestone
+
+Milestones zero, one, and two are implemented (milestone two's VZ serial
+gate remains blocked). The current milestone is **1.5 — the interactive
+kernel monitor** (`dipshit>` shell on the kernel's serial console).
+`docs/status.md` is the canonical, always-current answer to "where are we,
+and what's next".
 
 ## Milestone scope rules
 
 - Do not implement work from later milestones.
 - Do not introduce libc or POSIX.
-- Do not add a kernel during milestone zero.
+- Do not add a kernel during milestone zero. *(Historical — milestones
+  zero and one are complete; a kernel has existed since milestone two.)*
 - Do not add graphics, networking, SMP, processes, or filesystems.
 - Host-side observation devices (serial console, a framebuffer used only to
   screenshot the guest, the BOOTED.TXT evidence file) are permitted and are
