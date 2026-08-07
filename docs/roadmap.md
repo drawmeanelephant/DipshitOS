@@ -182,6 +182,15 @@ never returns; the monitor is its terminal-loop payload. It promises no new
 allocator, MMU work, interrupts, scheduler, userspace, or guest-side
 storage drivers.
 
+**Progress as of 2026-08-07:** the host plumbing (duplex serial attachment,
+terminal handling, `zig build console`), console & shell core (RX abstraction,
+line editor, tokenizer, `dipshit>` prompt loop), command registry (14 commands,
+mock-tested), and transcript test gate (`zig build test-console`) are all
+✅ done and gate-passing in CI. The **VZ serial gate** remains ⛔ blocked
+(vm-serial.log is 0 bytes — the kernel dies between shim entry and its first
+post-exit `uart_puts`; the ADR 0004 D4 marker fallback is the next step).
+Live guest keystrokes cannot be proven until that gate passes.
+
 The M1.5 hard gates, target screen, and milestone status live in
 **`docs/status.md`** (the living status document); the twenty-step plan,
 agent split, and per-step progress tracker live in **`docs/march-m15.md`**

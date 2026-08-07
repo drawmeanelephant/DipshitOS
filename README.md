@@ -36,11 +36,16 @@ shifted slices of the kernel image's `.rodata` on Apple VZ firmware) is
 0002), and `\KERNEL.TXT` is byte-perfect and gated by `zig build run`
 alongside `\BOOTED.TXT`, `\LOADER.TXT`, and `\RC.TXT`.
 
-**Next target: milestone 1.5, the interactive kernel monitor** — a live
+**Current: milestone 1.5, the interactive kernel monitor** — a live
 command monitor (`dipshit>` prompt) served by the kernel's polled serial
-console (the milestone-two terminal loop becomes its payload): identity
-commands, memory-map inspection, shell utilities, and machine controls.
-The goal, twenty-step plan, hard gates, and per-step progress live in
+console: identity commands, memory-map inspection, shell utilities, and
+machine controls. The host plumbing (duplex serial, terminal handling,
+`zig build console`), console & shell core (RX abstraction, line editor,
+tokenizer, prompt loop), and command registry (14 commands, mock-tested)
+are built; the transcript test gate passes (`zig build test-console`).
+The **VZ serial gate remains blocked** (zero bytes in `vm-serial.log`)
+so live guest keystrokes are not yet proven.
+The goal, hard gates, and per-step progress live in
 **`docs/status.md`** (the living status & goals tracker).
 
 ## The guest
@@ -98,9 +103,15 @@ dipshitos/
 ├── justfile                   command aliases
 ├── .zigversion                pinned Zig version (0.16.0)
 ├── boot/src/main.zig          the AArch64 UEFI boot loader (handoff v2)
-├── kernel/                    freestanding AArch64 kernel proper
-│   ├── src/main.zig           ExitBootServices, MMU, probe, serial, terminal loop
-│   ├── src/{console,lineedit,tokenizer,shell,monitor}.zig   M1.5 monitor
+├── kernel/                    freestanding AArch64 kernel proper + M1.5 shell
+│   ├── src/main.zig           ExitBootServices, MMU, probe, uart, shell seam
+│   ├── src/console.zig        Console abstraction + mock (write/flush/readByte)
+│   ├── src/memmap.zig         Dense-stride EFI memory-map view
+│   ├── src/handoff.zig        Handoff v2 struct validation
+│   ├── src/lineedit.zig       Fixed-buffer line editor (no allocator)
+│   ├── src/tokenizer.zig      Command-line tokenizer (no allocator)
+│   ├── src/monitor.zig        Comptime command registry (14 commands)
+│   ├── src/shell.zig          Prompt loop: banner → lineedit → tokenize → exec
 │   └── linker.ld              dense layout (avoids 64 KiB lld padding)
 ├── tools/elf2bin.py           ELF → flat KERNEL.BIN (format v1) converter
 ├── host/vm-runner/            Swift Virtualization.framework launcher
