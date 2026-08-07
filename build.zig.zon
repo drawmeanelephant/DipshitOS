@@ -13,6 +13,7 @@
         "build.zig",
         "build.zig.zon",
         "AGENTS.md",
+        "LICENSE",
         "README.md",
         "justfile",
         ".zigversion",

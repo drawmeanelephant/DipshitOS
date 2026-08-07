@@ -76,6 +76,7 @@ zig build context  # regenerate artifacts/context.md (deterministic project snap
 ```
 dipshitos/
 ├── AGENTS.md                  project rules (read this first)
+├── LICENSE                    proprietary source-available license
 ├── README.md
 ├── build.zig / build.zig.zon  root build system (Zig 0.16)
 ├── justfile                   command aliases
