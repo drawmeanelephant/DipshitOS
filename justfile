@@ -14,6 +14,10 @@ build:
 test:
     bash tools/verify-unit-tests.sh
 
+# Run the automated dipshit> transcript test — mock console, no VM (M1.5 march step 19)
+test-console:
+    zig build test-console
+
 # Extract the flat kernel image zig-out/bin/KERNEL.BIN (zig build kernel)
 kernel:
     zig build kernel
@@ -46,6 +50,7 @@ ragshit *ARGS:
 verify:
     zig fmt --check boot/src/*.zig kernel/src/*.zig build.zig
     bash tools/verify-unit-tests.sh
+    zig build test-console
     zig build
     zig build image
     zig build inspect
