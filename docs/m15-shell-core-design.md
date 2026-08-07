@@ -16,19 +16,23 @@ is made. Live RX reads are `[inferred]` and gated on the VZ serial gate
 
 The agent-B prompt names `docs/claims/0004-m15-console-shell-core.md`,
 `docs/logs/`, `docs/march-m15.md`, `tools/status/refresh-indexes.sh`, and
-`docs/status.md` as binding. **The claims/logs/march files and the
-refresh-indexes script do not exist in this repository** (verified across
-every local and remote branch on 2026-08-06). The repo's actual binding
-coordination surface is `docs/status.md` (active-claims table + append-only
-changelog), and the march lives there. This slice therefore:
+`docs/status.md` as binding — and on the current `main` they all exist.
+Timeline honesty: this branch's base (`agent/buffy/m15-commands` tip)
+**predated** the claims/logs split (PRs #14/#15 landed the coordination
+infrastructure afterwards), so during development the claim was registered
+in `docs/status.md`'s then-binding table and the march lived there. On the
+current coordination surface the slice is re-registered properly:
 
-- claims via the active-claims table + a changelog entry (done, see
-  `docs/status.md`), not via a nonexistent `docs/claims/` file;
-- creates `tools/verify-unit-tests.sh` (binding kernel-module test list —
-  the B-prompt's gate 3 requires it and it does not exist) and
-  `tools/verify-coordination.sh` (gate 6) fresh, wired into `just verify`
-  and the CI workflow;
-- flips steps 9–11 in `docs/status.md`'s march, not a `docs/march-m15.md`.
+- claim `docs/claims/0004-m15-console-shell-core.md` flipped ✅ with
+  evidence;
+- branch log `docs/logs/agent-buffy-m15-shell-core.md` created;
+- `bash tools/status/refresh-indexes.sh` run to regenerate the index
+  tables;
+- steps 9–11 flipped in `docs/march-m15.md` (the per-milestone tracker),
+  while `docs/status.md` stays edit-free;
+- `tools/verify-unit-tests.sh` (binding kernel-module test list) extended
+  with the three new modules; `tools/verify-coordination.sh` is main's
+  authoritative version, reused as-is.
 
 ## 1. Goal and scope
 
