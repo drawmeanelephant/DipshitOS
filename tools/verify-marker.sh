@@ -12,11 +12,14 @@
 #   * ladder ends at M2_SERIA -- the serial probe completed and found no
 #     usable MMIO device in the declared windows (layout=none halt).
 #   * ladder ends at M2_TABLE -- the identity-map build failed.
+#   * ladder ends at M2_READY -- the virtio-pci console was discovered and
+#     armed pre-exit (claim 0013, 2026-08-07), then the first banner TX died
+#     (post-exit access to the transport hangs on VZ; vm-serial.log 0 B).
 #   * a missing later stage (M2_ENTRY / M2_EXIT! / M2_MMUP! / M2_READY)
-#     names the window in which the kernel crashed. Observed on VZ: the
-#     ladder always ends at M2_MAPD! (identity map built, pre-install) with
-#     no M2_MMUP! -- the MMU switch itself is the death site, and the kernel
-#     never reaches the serial probe.
+#     names the window in which the kernel crashed. Historical: before
+#     claim 0010 the ladder always ended at M2_MAPD! (identity map built,
+#     pre-install) with no M2_MMUP! -- the MMU switch itself was the death
+#     site, and the kernel never reached the serial probe.
 #
 # NOTE on the memory-dump form: the original design scanned this process's
 # address space for the BSS marker word on the assumption that the in-process

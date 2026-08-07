@@ -153,30 +153,39 @@ correct them without redesign.
 
 ### MMIO / serial console (UART)
 
-- A memory-mapped serial console device is reachable by the guest from
-  EL1. **[inferred]** — VZ configures a virtio console serial port; its
-  register interface is undocumented by Apple and no register has been
-  observed.
-- **The serial probe finds no usable device in the declared MMIO windows.**
-  **[observed]** — with the MMU switch disabled (diagnostic build), the
-  probe runs to completion and the ladder records `M2_SERIA` (layout=none
-  halt) (`artifacts/m2-marker-gate.txt`, claim 0009, 2026-08-07). The two
-  EFI-declared MMIO windows (`0x01000000..0x01010000`,
-  `0x20050000..0x20051000`) contain no PL011/16550/virtio signature the
-  probe accepts. This is a probe-window observation; the VZ virtio console
-  register file itself remains undocumented (inferred).
-- The device's **base address and register layout** are unknown.
-  **[inferred]** — primary candidate is a PL011-style register file (ARM
-  SBSA standard); 16550-style and the VZ virtio-console register file are
-  the alternatives a milestone-starting device probe must discriminate
-  between. The pre-exit EFI map directly observed two MMIO windows,
-  `0x01000000..0x01010000` and `0x20050000..0x20051000`; this is range
-  evidence only, not serial-device evidence. If no serial device is
-  observable, evidence falls back to a fixed physical memory marker the host
-  dumps (ADR 0004 D4).
-- Virtio devices sit in an MMIO window whose exact address and transport are
-  undocumented. **[inferred]** — the two map windows are candidates, and
-  the probe must discriminate virtio-mmio from PL011/16550 before use.
+- **The declared MMIO windows are not the console (decoded, claim 0013,
+  2026-08-07).** **[observed]** — `0x01000000..0x01010000` is Apple's EFI
+  variable-store region (raw bytes spell `efivars\0`; post-exit reads hang
+  on the fivars controller); `0x20050000..0x20051000` is a PL011-family
+  PrimeCell UART (CID0-3 `0x0d 0xf0 0x05 0xb1`, PID1=0x10, PID2=0x04,
+  PID3=0x00, PID0=0x31) — but writing DR after full PL011 init yields zero
+  bytes in `vm-serial.log`, so it is Apple's internal EFI debug UART, not
+  the guest console. Evidence in `artifacts/efi-vars.bin` (probe-dump
+  variables `DipshitP*`) and claim 0013.
+- **The VZ serial attachment is a modern virtio-pci console.** **[observed]**
+  — bus 0 device 5, `VID=0x1af4 DID=0x1043 class=0x078000` (virtio
+  communications controller), discovered by pre-exit PCI enumeration over
+  ECAM `0x40000000` (MCFG). BAR0 is a 64-bit BAR firmware-assigned at
+  `0x100010000` — *above* the 4 GiB identity-map blanket; the assignment
+  varies across boots and the device moves with the BAR, which is why the
+  old fixed-window probe never saw it.
+- **Transport layout decoded via aligned-u32 config reads** (VZ returns
+  garbage for byte reads of config space; unaligned reads alignment-fault):
+  common cfg @ BAR0+`0x0000` (len 0x38), ISR @ `+0x1000`, notify @ `+0x4000`
+  (multiplier 4), device cfg @ `+0x8000`. Pre-exit the transport arms fully
+  (features `0x30000000`/`0x5`, queue 1 configured, DRIVER_OK).
+- **Post-exit access to the transport hangs on VZ.** **[observed, claim
+  0013]** — the first banner TX dies somewhere in the first flush
+  (death site boot-variable); `vm-serial.log` stays 0 B. Rebasing the BAR
+  below the blanket was tried and abandoned: the BAR write *does* move the
+  transport, but to an address the firmware never mapped pre-exit, and
+  post-exit config writes aren't reliable — so the firmware-assigned base
+  is mapped in place (stays armed, but unreachable for TX). The only proven
+  post-exit device channel is runtime `SetVariable` (NVRAM marker ladder,
+  ADR 0004 D4).
+- ACPI names no console: no SPCR/DBG2 in the XSDT (FACP/GTDT/APIC/MCFG
+  only); DSDT (Apple's own, `Apple Vz`) declares only `PCI0` + `efivars`.
+  **[observed]**
 
 ### Interrupts (not programmed in milestone two)
 

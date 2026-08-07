@@ -52,5 +52,6 @@ verify-coordination`, and CI) fails if it drifts from the files.
 | M2 fixed-memory-marker fallback (ADR 0004 D4, gate work item 3) | [`agent-buffy-m2-marker-fallback.md`](agent-buffy-m2-marker-fallback.md) |
 | M2 MMU-takeover root cause & fix (claim 0010) | [`freebuff-grab-newest-files-from-github-and-pick-something-t-a3eb337e-4b37-4bae-8548-242c49be7456.md`](freebuff-grab-newest-files-from-github-and-pick-something-t-a3eb337e-4b37-4bae-8548-242c49be7456.md) |
 | M1.5 transcript test automation (`freebuff/m15-transcript-test`) | [`freebuff-m15-transcript-test.md`](freebuff-m15-transcript-test.md) |
+| freebuff/pull-the-latest-from-github-and-find-something-in--a639920e (serial device discovery) | [`freebuff-pull-the-latest-from-github-and-find-something-in--a639920e-ebe1-47a0-a380-54cece9b4c40.md`](freebuff-pull-the-latest-from-github-and-find-something-in--a639920e-ebe1-47a0-a380-54cece9b4c40.md) |
 | M1.5 tracker origin (pre-branch era) | [`m1.5-tracker.md`](m1.5-tracker.md) |
 <!-- LOGS_INDEX:END -->
