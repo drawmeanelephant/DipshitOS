@@ -41,7 +41,7 @@ CI) fails if the table drifts from the claim files.
 | Claim | Owner (branch) | Status |
 |-------|----------------|--------|
 | [0001-bad-handoff-gate](0001-bad-handoff-gate.md) | buffy (`agent/buffy/m2-badhandoff-fix`) | ✅ fixed 2026-08-06 |
-| [0002-vz-serial-gate](0002-vz-serial-gate.md) | — | ⬜ unclaimed |
+| [0002-vz-serial-gate](0002-vz-serial-gate.md) | buffy (`agent/buffy/m15-vz-serial-gate`) | 🔄 in progress (agent/buffy/m15-vz-serial-gate, claimed 2026-08-06) |
 | [0003-m15-host-plumbing](0003-m15-host-plumbing.md) | buffy (`agent/buffy/m15-host-plumbing`) | ✅ 2026-08-06 — steps 4–7 landed |
 | [0004-m15-console-shell-core](0004-m15-console-shell-core.md) | — | ⬜ unclaimed |
 | [0005-m15-commands-personality](0005-m15-commands-personality.md) | buffy (`agent/buffy/m15-commands`) | ✅ 2026-08-06 — 14 commands host-tested, `kernel/src/main.zig` untouched |
