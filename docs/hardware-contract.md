@@ -117,17 +117,29 @@ correct them without redesign.
   identity map in effect at kernel entry; the firmware does not disable
   the MMU when jumping. **[inferred]** — standard UEFI AArch64 behavior;
   consistent with milestone-one runs but not directly observed.
-- **The kernel dies in the MMU-takeover window on VZ: between the
-  pre-install marker write and the first post-switch call.** **[observed]**
-  — the NVRAM marker ladder ends at `M2_MAPD!` (identity map built,
-  pre-install) on every run; the `M2_MMUP!` post-install stage never
-  appears (`artifacts/m2-marker-gate.txt`, claim 0009, 2026-08-07). The
-  window covers `install_identity_map()` itself and the immediately
-  following post-switch `SetVariable`; the marker channel cannot narrow it
-  further (it *is* the post-switch call). With the switch disabled
-  (diagnostic build, see the claim), the ladder advances past `M2_MMUP!` to
-  `M2_SERIA`, proving the map build and the rest of the takeover path work
-  on the firmware map — the death is specific to the takeover window.
+- **The MMU takeover completes on VZ (fixed 2026-08-07, claim 0010).** The
+  kernel's own identity map installs and the first post-switch runtime call
+  succeeds; the NVRAM marker ladder runs `M2_MAPD! → M2_MMUP! → M2_SERIA`
+  (`artifacts/m2-mmu-takeover-gate.txt`). The prior claim-0009 finding
+  (kernel dies in the MMU-takeover window, ladder ending at `M2_MAPD!`,
+  `artifacts/m2-marker-gate.txt`) is superseded: three ladder-gated
+  experiments discriminated the death site, and the fix has three parts —
+  (a) a pre-switch register capture proved the guest implements the
+  ARMv8.1+ TCR_EL1 layout (TG0 at bits [15:14] = 0b00 = 4 KB granule,
+  36-bit IPS; `artifacts/m2-firmware-regs.txt`), so the granule was never
+  the cause; (b) the identity map now covers the low 4 GiB with declared
+  RAM as Normal Write-Back and **every other address (including undeclared
+  firmware MMIO such as the NVRAM controller)** as Device nGnRnE, so no
+  post-switch access can fault on an unmapped address or hang on a
+  cacheable access to an emulated device (verified by a host-side table
+  walk, `artifacts/m2-table-walk.txt`); (c) **the `tlbi vmalle1` is
+  dropped at the switch** — bisect stages proved the switch and first
+  post-switch call succeed but any TLBI-forced re-walk faults on VZ
+  (`artifacts/m2-mmu-bisect-tlbi.txt`); the stale firmware TLB entries are
+  identity-compatible with the new map and the map never changes
+  descriptors post-switch in this milestone, so skipping the invalidate is
+  safe. The D-cache over the 512 KiB table carve-out is cleaned before the
+  switch (architectural hardening; independently verified not the fix).
 - The kernel builds its own translation tables (never firmware tables):
   TTBR0_EL1, 4K granule, identity map (VA == PA) for RAM, the kernel
   image, and the MMIO windows the drivers need. **[inferred]** — this is a
