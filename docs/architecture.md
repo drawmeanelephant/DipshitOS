@@ -60,7 +60,6 @@ VZEFIBootLoader (macOS VZ)
              │  post-exit evidence channel: NVRAM ladder (EFI var DipshitM2) ──▶ artifacts/efi-vars.bin  [observed: reaches M2_MMUP! → M2_SERIA]
              └── MMIO serial probe (0x01000000/0x20050000) ──▶ runs to completion, selects no usable device (layout=none on VZ) ──▶ artifacts/vm-serial.log (empty: no device to drive)
              └── M1.5 monitor loop (console/lineedit/tokenizer/shell) ──▶ exists, host-tested via MockConsole; parks in WFE on the real kernel (RX not wired — readByte is a no-RX stub)
-
 ```
 
 ## Interfaces
