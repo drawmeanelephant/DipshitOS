@@ -42,8 +42,9 @@ byte-perfect and gated by `zig build run`).
 
 ## Gate status
 
-Every milestone-two claim below is backed by evidence re-verified
-2026-08-06; files under `artifacts/`.
+Every gate below is backed by evidence re-verified
+2026-08-07 (full suite re-run on merged `main` 4702548,
+`artifacts/status-reverify-20260807.txt`); files under `artifacts/`.
 
 | Gate | Command | Result | Last evidence |
 |------|---------|--------|---------------|
@@ -60,6 +61,19 @@ Every milestone-two claim below is backed by evidence re-verified
 | **VZ serial console discovery** (claim 0013) | pre-exit probe + NVRAM dump | ✅ **discovered 2026-08-07** | console = modern virtio-pci (bus 0 D5 `VID=0x1af4 DID=0x1043 class=0x078000`), ECAM `0x40000000`, BAR0 (64-bit) @ `0x100010000`, transport decoded + armed pre-exit (`SEL=VIRTIO`, ladder `M2_READY`); declared MMIO windows decoded as Apple efivars store + internal debug UART. Gate still blocked: post-exit transport access hangs (see claim 0013) |
 
 ### What we directly observe about the two failing gates
+| Format | `zig fmt --check boot/src/*.zig kernel/src/*.zig build.zig` | ✅ pass | re-run 2026-08-07 |
+| Guest build | `zig build` | ✅ pass | re-run 2026-08-07 |
+| Disk image | `zig build image` | ✅ pass | re-run 2026-08-07 |
+| Binary + image inspect | `zig build inspect` | ✅ pass | re-run 2026-08-07 |
+| Swift runner build | `swift build --package-path host/vm-runner` | ✅ pass | re-run 2026-08-07 |
+| Context snapshot | `zig build context` | ✅ pass | re-run 2026-08-07 |
+| M1.5 host-console gate | `bash tools/verify-host-console.sh` | ✅ pass | re-run 2026-08-07 (scripted + PTY/SIGINT; `artifacts/m15-host-console-reverify-20260807.txt`) |
+| **VZ serial gate** | `zig build run` | ❌ **not passed** | serial still silent; marker ladder re-observed 2026-08-07 reaching `M2_SERIA` — device absence, not a crash (`artifacts/m2-marker-reverify-20260807.txt`; original 2026-08-06 run: `artifacts/m2-vz-run-20260806.txt`) |
+| **Bad-handoff failure gate** | `bash tools/verify-bad-handoff.sh` | ✅ **pass** | re-run 2026-08-07: `RC.TXT` → `kernel_rc=0x0000000000000002`, gate exits 0 (`artifacts/m2-badhandoff-reverify-20260807.txt`; first observed 2026-08-06, fixed shim) |
+| **Marker fallback gate** (gate work item 3) | `bash tools/verify-marker.sh` | ✅ **pass** | re-run 2026-08-07: NVRAM ladder `M2_ENTRY → M2_CMAP! → M2_PREX! → M2_EXIT! → M2_MAPD! → M2_MMUP! → M2_SERIA` (`artifacts/m2-marker-reverify-20260807.txt`; see [gate work item 3](#immediate-gate-work-prerequisites-for-m15) and claim 0009) |
+| **MMU-takeover root cause & fix** (claim 0010) | `bash tools/verify-marker.sh` | ✅ **fixed** | re-confirmed 2026-08-07 on merged `main`: ladder advances `M2_MAPD! → M2_MMUP! → M2_SERIA` — the identity-map switch **completes** on VZ (`artifacts/m2-marker-reverify-20260807.txt`; first observed `artifacts/m2-mmu-takeover-gate.txt`; see claim 0010) |
+
+### What we directly observe about the serial gate and the bad-handoff fix
 
 From the bad-handoff run before the fix (re-verified 2026-08-06), fresh from
 `artifacts/bad-handoff.img`:
