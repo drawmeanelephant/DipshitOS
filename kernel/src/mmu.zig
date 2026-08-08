@@ -21,6 +21,7 @@ const uefi = std.os.uefi;
 const MemoryMapSlice = uefi.tables.MemoryMapSlice;
 const MemoryType = uefi.tables.MemoryType;
 const handoff = @import("handoff.zig");
+const build_options = @import("build_options");
 
 const table_page_count = 128; // 512 KiB fixed BSS carve-out, no allocator.
 var table_storage: [table_page_count][512]u64 align(4096) = undefined;
@@ -32,6 +33,14 @@ var table_count: usize = 0;
 pub fn table_root() u64 {
     return @intFromPtr(&table_storage[0]);
 }
+
+/// TCR_EL1.T0SZ that install_identity_map() programs: 25 in production
+/// (W=39, 4 KiB stage-1 walk starts at level 1); 16 under the claim-6460
+/// diagnostic option -Dt0sz16 (W=48, walk starts at level 0 — matching the
+/// built L0-rooted hierarchy). The kernel-plan capture (evidence.zig) prints
+/// this same value so a -Dfw-mmu-capture + -Dt0sz16 build reports the true
+/// planned TCR.
+pub const plan_t0sz: u64 = if (build_options.t0sz16) 16 else 25;
 
 /// Clean the D-cache over [start, start+len) to the point of coherence so a
 /// subsequent translation walk (which may read memory directly, bypassing a
@@ -357,8 +366,16 @@ pub fn install_identity_map() void {
     // post-TLBI re-walk to fault on. Clean the whole 512 KiB carve-out so the
     // walker always reads the real tables.
     clean_dcache_range(@intFromPtr(&table_storage), table_page_count * 4096);
-    // T0SZ=25 selects the 2^39 VA space the map builder assumes (va_limit in
-    // map_range). TG0 (the TTBR0 walker's granule) is left 0b00 = 4 KB in
+    // T0SZ selects the TTBR0 VA space size and therefore the initial lookup
+    // level of the walk. Production T0SZ=25 (W=39, 2^39 space) starts the 4
+    // KiB stage-1 walk at LEVEL 1; the claim-6460 diagnostic (-Dt0sz16)
+    // programs T0SZ=16 (W=48), which starts the walk at LEVEL 0 — the level
+    // the built L0-rooted hierarchy (root -> L1 -> L2 -> optional L3)
+    // actually targets. The built tables are byte-identical in both
+    // variants; only the programmed T0SZ differs. The map builder's
+    // va_limit (1 << 39) still bounds every mapped VA (blanket + extra
+    // device window sit far below it) under either T0SZ. TG0 (the TTBR0
+    // walker's granule) is left 0b00 = 4 KB in
     // BOTH architectural field positions: ARMv8.0 puts TG0 at bits [9:8]
     // (0b01 = 64 KB), ARMv8.1+ with 16 KB granule support puts it at bits
     // [15:14] with IRGN0/ORGN0/SH0 at [9:8]/[11:10]/[13:12]. The tables are
@@ -369,7 +386,7 @@ pub fn install_identity_map() void {
     // with a 4K-correct value, so the granule is defensive rather than the
     // root cause.) IPS is bits [34:32] in both layouts and is taken from
     // ID_AA64MMFR0_EL1 per ADR 0004 D3.
-    const tcr: u64 = 25 | (ips << 32);
+    const tcr: u64 = plan_t0sz | (ips << 32);
     const mair: u64 = 0x000000000000ff00; // Attr0 Device-nGnRnE, Attr1 Normal WB.
     const root = @intFromPtr(&table_storage[0]);
     asm volatile ("dsb ishst" ::: .{ .memory = true });
