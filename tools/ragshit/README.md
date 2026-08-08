@@ -62,6 +62,9 @@ resolved to the **repository root** (via `git rev-parse --show-toplevel`).
 ./tools/ragshit/ragshit impact . HEAD~5..HEAD
 ./tools/ragshit/ragshit impact . HEAD~5..HEAD --bundle artifacts/impact.md
 ./tools/ragshit/ragshit impact . HEAD~5..HEAD --json
+./tools/ragshit/ragshit review . HEAD~5..HEAD --budget-chars 30000
+./tools/ragshit/ragshit review . HEAD~5..HEAD --budget-chars 30000 --explain
+./tools/ragshit/ragshit review . HEAD~5..HEAD --json --budget-chars 25000
 ./tools/ragshit/ragshit doctor .
 ```
 
@@ -146,6 +149,38 @@ branch/HEAD, changed files, changed line ranges, and history. Ragshit
 never recursively walks `.git`, never writes to the repository (except the
 `.ragshit/` index and the config files `init` creates), and works with
 detached HEADs and repositories with no commits yet.
+
+## Review packets (`ragshit review`)
+
+`ragshit review <repo> <range> --budget-chars N` builds the *smallest high-value* reviewer
+packet under a hard character budget (default 30000). It reuses the existing index and
+`ragshit impact` analysis as inputs.
+
+What it does:
+
+* Deterministic candidate generation from changed symbols, surrounding context,
+  tests/docs/claims/hardware-contract, stale hints, and high-risk files.
+* Explicit coverage dimensions (changed symbols/files, high-risk files, tests, docs,
+  decisions, stale warnings) with `covered / total` reporting.
+* Budgeted selection: a greedy weighted set-cover that maximizes coverage under
+  the budget, with redundancy penalties (line overlap, token Jaccard, hash)
+  so the packet is diverse, not five copies of the same function.
+* Mandatory-content reserve (changed functions + critical files) with safe
+  truncation and provenance preservation when the budget would otherwise
+  overflow.
+* `--explain` shows rejected candidates and why (`budget pressure` or
+  `redundant: 92% token Jaccard` etc.).
+* Machine-readable `ragshit.review/v1` JSON (`--json`): budget, actual size,
+  coverage matrix, selected/rejected candidates, baseline comparison, index
+  staleness, deterministic ordering.
+* Deterministic: byte-identical for unchanged repo/index/range/args.
+* Index-head safety: warns loudly when `index HEAD != range head`.
+* Naive baseline (`impact-ranked chunks in order until full`) is computed for
+  comparison; the diversity selector measurably wins on intentionally
+  constructed cases.
+
+See `docs/ranking.md` for the exact selection/utility/redundancy formulas
+and `docs/architecture.md` for the component design.
 
 ## Optional future embeddings
 
