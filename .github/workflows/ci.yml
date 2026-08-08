@@ -1,3 +1,14 @@
+# CI proves ONLY the portable/build gate set — class A in
+# docs/gate-inventory.md: formatting, unit tests, transcript mock test,
+# guest/image builds, inspect, Swift runner build, context generation, and
+# the coordination gates. It does NOT and cannot run the Apple-silicon
+# Virtualization.framework hardware gates (class B: bad-handoff, marker,
+# NVRAM console, host-console PTY, live serial takeover, live transcript/RX),
+# the interactive class-C console, or the class-D diagnostics. GitHub-hosted
+# runners do not prove VZ hardware behavior — a green CI badge means "the
+# portable gates passed", nothing more. Run `just verify-vz` on an Apple
+# silicon host for the VZ gates.
+
 name: CI
 
 on:
@@ -21,38 +32,50 @@ jobs:
         with:
           version: 0.16.0
 
-      - name: Check Zig formatting
+      # --- Class A: portable/build gates (see docs/gate-inventory.md) ---
+
+      - name: Check Zig formatting (class A)
         run: zig fmt --check boot/src/*.zig kernel/src/*.zig build.zig
 
-      - name: Test kernel monitor modules
+      - name: Test kernel monitor modules (class A)
         run: bash tools/verify-unit-tests.sh
 
-      - name: Test automated console transcript
+      - name: Test automated console transcript (class A)
         run: zig build test-console
 
-      - name: Build UEFI application and kernel image
+      - name: Build UEFI application and kernel image (class A)
         run: zig build
 
-      - name: Create FAT32+GPT boot disk image
+      - name: Create FAT32+GPT boot disk image (class A)
         run: zig build image
 
-      - name: Inspect binary and disk image
+      - name: Inspect binary and disk image (class A)
         run: zig build inspect
 
-      - name: Build Swift Virtualization Launcher
+      - name: Build Swift Virtualization Launcher (class A — build only, does not boot)
         run: swift build --package-path host/vm-runner
 
-      - name: Verify project context generator
+      - name: Verify project context generator (class A)
         run: zig build context
 
-      - name: Verify multiagent coordination indexes
+      - name: Verify multiagent coordination indexes (class A)
         run: bash tools/verify-coordination.sh
 
-      - name: Test multiagent coordination tooling
+      - name: Test multiagent coordination tooling (class A)
         run: bash tools/status/test-coordination.sh
 
-      - name: Verify MMU-debt boundary contract (ADR 0006, no-TLBI comments)
+      - name: Verify MMU-debt boundary contract (class A — ADR 0006, no-TLBI comments)
         run: bash tools/verify-mmu-debt.sh
+
+      # --- Class B: Apple-silicon VZ hardware gates are NOT run here ---
+
+      - name: State which gates this CI does NOT prove
+        run: |
+          echo "CI complete: portable/build gates (class A) passed."
+          echo "NOT proven by this CI — run on an Apple silicon host (just verify-vz):"
+          sed -n '/^<!-- GATE_INVENTORY:START -->$/,/^<!-- GATE_INVENTORY:END -->$/p' docs/gate-inventory.md \
+            | grep ' class=B ' \
+            | sed -E 's/^GATE id=([^ ]+) .*cmd=(.*)$/  - \1: \2/'
 
       - name: Upload Build Artifacts
         uses: actions/upload-artifact@v4

@@ -1,7 +1,25 @@
 # DipshitOS testing
 
 > For the current state of each verification gate (pass/fail/blocked), see
-> [`docs/status.md`](status.md). This file is the sequence and policy.
+> [`docs/status.md`](status.md). This file is the sequence and policy. The
+> canonical A/B/C/D classification of every verification command is
+> [`docs/gate-inventory.md`](gate-inventory.md).
+
+## Verification classes
+
+Every verification command belongs to exactly one class (canonical inventory:
+[`docs/gate-inventory.md`](gate-inventory.md)):
+
+- **A — portable / build CI.** Deterministic, no Apple silicon, no VZ VM.
+  This is the set GitHub CI proves. A green CI badge means exactly these
+  passed — nothing more.
+- **B — Apple-silicon Virtualization.framework hardware gate.** Boots a real
+  VZ VM on Apple silicon. GitHub-hosted CI does **not** run these and cannot
+  prove them; run `just verify-vz` on a development host.
+- **C — interactive / manual hardware gate.** Requires a human at the
+  keyboard (`zig build console`).
+- **D — diagnostic experiment.** Answers a question (claims
+  0017/0018/0020/0021); **not an acceptance gate**.
 
 ## Evidence policy
 
@@ -93,13 +111,17 @@
     CI) — positive/negative cases for cell escaping, structural table
     validation, and deterministic claim IDs, run in a throwaway sandbox.
 
-> The full no-VM gate set runs as `just verify` and in CI
-> (`.github/workflows/ci.yml`): fmt → unit tests → transcript gate →
-> `zig build` → image → inspect → Swift runner build → context →
-> coordination → coordination tooling tests. The VM gates (`run`,
-> bad-handoff, marker, host-console)
-> are Apple-silicon-only and are run by their own `tools/verify-*.sh`
-> scripts or `zig build run`.
+> The full class-A (portable, no-VM) gate set runs as `just verify-portable`
+> (legacy alias `just verify`) and in CI (`.github/workflows/ci.yml`): fmt →
+> unit tests → transcript gate → `zig build` → image → inspect → Swift
+> runner build → context → coordination → coordination tooling tests.
+> **CI proves only this class** — a green badge says nothing about the
+> Apple-silicon VZ hardware gates (class B). Those run as `just verify-vz`
+> (bad-handoff, marker, NVRAM console, host-console — Apple silicon only)
+> plus the blocked `zig build run` serial takeover gate and the deferred
+> live transcript/RX gate; the class-D diagnostics (preexit-tx, tx-diag,
+> tx-transition, fw-mmu-capture) run individually per claim. See
+> [`docs/gate-inventory.md`](gate-inventory.md).
 
 ## Evidence artifacts
 
