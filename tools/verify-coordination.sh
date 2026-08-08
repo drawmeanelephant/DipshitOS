@@ -6,11 +6,17 @@
 #   1. Every claim file (docs/claims/NNNN-slug.md) is well-formed: correct
 #      filename, unique number, Owner field, Status field starting with one
 #      of the status emoji (⬜ 🔄 ✅ ⛔).
-#   2. Every branch log (docs/logs/*.md, except README.md) opens with a
+#   2. Every claim numbered 0024+ carries the deterministic claim ID derived
+#      from its owner branch + filename slug (tools/status/claim-id.sh), so
+#      concurrent claimers cannot pick the same number; 0001-0023 are
+#      grandfathered sequential numbers.
+#   3. Every branch log (docs/logs/*.md, except README.md) opens with a
 #      "# Log — <title>" header.
-#   3. The generated index tables in docs/claims/README.md and
-#      docs/logs/README.md are in sync with the actual files.
-#   4. docs/status.md stays an edit-free coordination surface: no changelog
+#   4. The generated index tables in docs/claims/README.md and
+#      docs/logs/README.md are in sync with the actual files AND
+#      structurally valid (every row has the expected column count, so an
+#      unescaped '|' cannot corrupt a table).
+#   5. docs/status.md stays an edit-free coordination surface: no changelog
 #      entries, no claims table, no march/agent-split tables (those live in
 #      docs/logs/, docs/claims/README.md, and docs/march-m15.md).
 #
@@ -49,6 +55,26 @@ for f in $claim_files; do
         && ! grep -q -- '^- \*\*Status:\*\* ✅' "$f" \
         && ! grep -q -- '^- \*\*Status:\*\* ⛔' "$f"; then
         bad "$base: Status must start with one of ⬜ 🔄 ✅ ⛔"
+    fi
+    # Deterministic claim-ID check (0024+). The sequential "next NNNN"
+    # convention collided once already (claim 0013 -> 0014, commit be811cb):
+    # two agents both picked the next free number. Claims 0001-0023 are
+    # grandfathered sequential numbers; 0024+ must equal the ID derived from
+    # the owner branch + filename slug (tools/status/claim-id.sh), a pure
+    # function of the claim itself, so concurrent claimers cannot collide.
+    n=$((10#$num))
+    if [ "$n" -ge 24 ]; then
+        slug="${base#????-}"
+        slug="${slug%.md}"
+        branch="$(sed -n 's/^- \*\*Owner:\*\* [^`]*`\([^`]*\)`.*/\1/p' "$f" | head -1)"
+        if [ -z "$branch" ]; then
+            bad "$base: Owner must include a backticked branch (needed for the deterministic claim ID)"
+        else
+            want="$(bash tools/status/claim-id.sh "$branch" "$slug")"
+            if [ "$num" != "$want" ]; then
+                bad "$base: claim number $num does not match the deterministic ID $want (renumber with: bash tools/status/claim-id.sh \"$branch\" \"$slug\")"
+            fi
+        fi
     fi
 done
 

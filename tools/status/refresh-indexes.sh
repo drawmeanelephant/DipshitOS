@@ -12,6 +12,13 @@
 #   refresh-indexes.sh          # regenerate the tables in place
 #   refresh-indexes.sh --check  # verify the tables match the files (exit 1 if not)
 #
+# Generated cell content (claim Owner/Status, log titles) is escaped for
+# Markdown tables (| -> \|, \ -> \\) so a literal pipe in a claim file can
+# never widen (and corrupt) the index table. --check also validates the
+# table structure row-by-row (every row must have the exact expected number
+# of columns), so a table cannot pass merely because it matches a broken
+# generator's own output.
+#
 # The tables live between marker comments; the surrounding prose is kept
 # as-is:
 #   <!-- CLAIMS_INDEX:START --> ... <!-- CLAIMS_INDEX:END -->
@@ -29,6 +36,13 @@ trap 'rm -rf "$tmp"' EXIT
 
 # --- generated table bodies ---------------------------------------------
 
+# esc CELL -- make CELL safe inside a Markdown table cell: escape backslashes
+# first, then pipes, so a literal "\|" in the source cannot re-introduce an
+# unescaped pipe into the generated table.
+esc() {
+    printf '%s\n' "$1" | awk '{ gsub(/\\/, "\\\\"); gsub(/\|/, "\\|"); printf "%s", $0 }'
+}
+
 claims_index() {
     local f num owner status
     printf '| Claim | Owner (branch) | Status |\n'
@@ -38,7 +52,8 @@ claims_index() {
         num="$(basename "$f" .md)"
         owner="$(sed -n 's/^- \*\*Owner:\*\* //p' "$f" | head -1)"
         status="$(sed -n 's/^- \*\*Status:\*\* //p' "$f" | head -1)"
-        printf '| [%s](%s) | %s | %s |\n' "$num" "$num.md" "${owner:-—}" "${status:-—}"
+        printf '| [%s](%s) | %s | %s |\n' "$num" "$num.md" \
+            "$(esc "${owner:-—}")" "$(esc "${status:-—}")"
     done
 }
 
@@ -50,7 +65,7 @@ logs_index() {
         b="$(basename "$f")"
         [ "$b" = "README.md" ] && continue
         title="$(head -1 "$f" | sed 's/^# Log — //; s/^# Log - //')"
-        printf '| %s | [`%s`](%s) |\n' "${title:-$b}" "$b" "$b"
+        printf '| %s | [`%s`](%s) |\n' "$(esc "${title:-$b}")" "$b" "$b"
     done
 }
 
@@ -80,6 +95,29 @@ extract_region() {
     ' "$1"
 }
 
+# validate_table FILE MARKER CELLS
+# Every row in the region (header, separator, and data) must have exactly
+# CELLS columns once escaped pipes are taken into account. Catches a broken
+# generator (or hand-edit) that lets a raw '|' into a cell, which the plain
+# --check diff cannot: --check only proves the table matches the generator's
+# own output, and a broken generator is consistent with itself.
+validate_table() {
+    local file="$1" marker="$2" cells="$3"
+    local expect=$((cells + 2))  # fields after splitting on '|' == cells + 2
+    extract_region "$file" "$marker" | awk -v expect="$expect" -v marker="$marker" -v cells="$cells" '
+        {
+            gsub(/\\\|/, "PIPE")       # an escaped pipe is cell content
+            n = split($0, a, "|")
+            if (n != expect) {
+                printf "error: %s row %d has %d cells (expected %d): %s\n", \
+                    marker, NR, n - 2, cells, $0 > "/dev/stderr"
+                bad = 1
+            }
+        }
+        END { if (bad) exit 1 }
+    '
+}
+
 require_markers() { # FILE MARKER
     grep -q -- "<!-- $2:START -->" "$1" && grep -q -- "<!-- $2:END -->" "$1"
 }
@@ -97,6 +135,16 @@ check_mode() {
         rc=1
     }
     if [ "$rc" -ne 0 ]; then return 1; fi
+    # Structural validation runs before the sync diff: a table that matches a
+    # broken generator's output must still fail here, not just on drift.
+    if ! validate_table docs/claims/README.md CLAIMS_INDEX 3; then
+        echo "error: docs/claims/README.md claim index is structurally malformed (a cell contains an unescaped '|'?)" >&2
+        rc=1
+    fi
+    if ! validate_table docs/logs/README.md LOGS_INDEX 2; then
+        echo "error: docs/logs/README.md log index is structurally malformed (a cell contains an unescaped '|'?)" >&2
+        rc=1
+    fi
     if ! diff -u <(extract_region docs/claims/README.md CLAIMS_INDEX) "$tmp/claims.table"; then
         echo "error: docs/claims/README.md claim index is out of sync" >&2
         rc=1

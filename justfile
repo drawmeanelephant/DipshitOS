@@ -89,6 +89,7 @@ verify:
     swift build --package-path host/vm-runner
     zig build context
     bash tools/verify-coordination.sh
+    bash tools/status/test-coordination.sh
     bash tools/verify-mmu-debt.sh
 
 # Verify the MMU-debt boundary contract is intact (ADR 0006 + kernel no-TLBI comments; deterministic, no VM — claim 0022)
@@ -98,6 +99,10 @@ verify-mmu-debt:
 # Verify the multiagent coordination surface (claims/logs files + generated indexes)
 verify-coordination:
     bash tools/verify-coordination.sh
+
+# Test the coordination tooling itself (escaped cells, deterministic claim IDs, structural validation)
+test-coordination:
+    bash tools/status/test-coordination.sh
 
 # Regenerate the claim/log index tables from the files (run after creating a claim or branch log)
 refresh-indexes:
