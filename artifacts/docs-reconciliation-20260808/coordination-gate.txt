@@ -1,0 +1,2 @@
+coordination indexes are in sync
+verify-coordination: ok
