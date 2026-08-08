@@ -103,13 +103,15 @@ no QEMU path.
   byte-perfect and byte-identical across repeated boots (ADR 0002,
   `artifacts/m1-fix-run{1,2,3}.txt`).
 
-## Milestone two: the kernel proper (implemented, ADR 0004 — hardware assumptions remain **[inferred]** pending VZ probe evidence)
+## Milestone two: the kernel proper (implemented, ADR 0004 — MMU/serial findings are **[observed]** per claims 0010/0013/0020/0021; the remaining items below stay **[inferred]**)
 
-Milestone two is implemented in the guest, but every hardware assumption
-below remains **[inferred]** until a real Apple M4 / macOS 27 VZ probe log and
-serial output prove it. Code/build success alone is not hardware evidence.
-The concrete numbers are deliberately isolated so one observed probe can
-correct them without redesign.
+Milestone two is implemented in the guest; the MMU and serial findings
+below are **[observed]** (claims 0010/0013/0020/0021 on a real Apple M4 /
+macOS 27 VZ host), and the remaining items stay **[inferred]** until a
+console is actually driven and serial output proves them. Code/build
+success alone is not hardware evidence. The concrete numbers are
+deliberately isolated so one observed probe can correct them without
+redesign.
 
 ### MMU
 
@@ -179,7 +181,7 @@ correct them without redesign.
 - **The declared MMIO windows are not the console (decoded, claim 0013,
   2026-08-07).** **[observed]** — `0x01000000..0x01010000` is Apple's EFI
   variable-store region (raw bytes spell `efivars\0`; post-exit reads hang
-  on the fivars controller); `0x20050000..0x20051000` is a PL011-family
+  on the efivars controller); `0x20050000..0x20051000` is a PL011-family
   PrimeCell UART (CID0-3 `0x0d 0xf0 0x05 0xb1`, PID1=0x10, PID2=0x04,
   PID3=0x00, PID0=0x31) — but writing DR after full PL011 init yields zero
   bytes in `vm-serial.log`, so it is Apple's internal EFI debug UART, not
