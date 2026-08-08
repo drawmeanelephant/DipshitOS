@@ -118,12 +118,25 @@ candidate chunks built from `ragshit impact` signals, pick the smallest high-val
 packet that still covers the important implementation/tests/docs/claims/risk signals
 under a hard character budget.
 
-### Candidate cost
+### Packet-size accounting (the three values must agree)
 
-Cost = rendered Markdown block bytes (header `### path:start-end` + `reason/covers/score/provenance`
-+ code fence overhead + `content`). Covers, provenance, and fences are counted so `len(markdown)`
-is predictable; the final `report_to_markdown` envelope truncation reserves the packet header
-and measures real `len(markdown)` (chars) so `--budget-chars` is never exceeded.
+* `report.actual_size` and `selection_summary.actual_chars` describe the
+  **actual final rendered Markdown packet**: both equal `len(markdown)` (chars)
+  of the packet the CLI writes. The framing-aware helper patches the report and
+  re-renders to a fixed point, so the Markdown header `Actual size: N chars`
+  and the body line `budget utilization: N / BUDGET (P%)` always describe the
+  same N.
+* The raw sum of selected **candidate block costs** is a different quantity
+  (it excludes packet framing) and is reported under a distinct, explicit
+  name: `selection_summary.candidate_cost_chars`. It is never overloaded onto
+  `actual_chars`.
+* Candidate block cost = rendered Markdown block chars (header
+  `### path:start-end` + `reason/covers/score/provenance` + code fence
+  overhead + `content`). The final `report_to_markdown` envelope truncation
+  reserves the packet header and measures real `len(markdown)` (chars) so
+  `--budget-chars` is never exceeded. JSON generated with the same
+  repo/range/budget reports `actual_size == selection_summary.actual_chars ==
+  len(markdown_output)`.
 
 ### Candidate utility (base)
 
@@ -142,7 +155,28 @@ reason weights (base_utility before redundancy/penalties):
 
 file_priority bonus: min(5.0, file_score/20) added to changed-symbol/changed-chunk/high-risk
 when the candidate path is a critical/high file. Stale hints and direct symbol links add +1.
-```
+
+### Shell structural importance
+
+Symbols carry a precise kind (`map_symbols` refines chunk kinds): shell
+declarations become `function`/`constant`, markdown sections become
+`heading`, YAML/TOML keys become `key`. For shells:
+
+* An assignment **inside a function body** (`tmp="$(mktemp -d)"` under
+  `foo() { ... }`) is *not* an independent declaration — the parser folds it
+  into the enclosing function chunk, so a changed local maps to the function
+  (`foo`), not to `tmp`. Changed-file coverage is not lost: the function
+  carries `changed_file:`.
+* A top-level one-line assignment (`ROOT=`, `pass=`, `id1=`, ...) stays a
+  `constant` symbol but is **low-value**: its changed-symbol base utility is
+  reduced by 8.0 and it never enters the mandatory pool. It remains
+  selectable in the diversity step (small, cheap context; file coverage), so
+  it can only be chosen after meaningful structural context and only when
+  budget actually remains.
+
+Net effect: a rewritten build/test script surfaces its **functions** (and
+changed chunks) as the mandatory units instead of a pile of throwaway
+variables.
 
 ### Coverage model
 
@@ -152,12 +186,23 @@ Explicit dimensions counted as `covered / total`:
 * `changed_files` / `changed_implementation` — files in the git range.
 * `high_risk_files` — files where `file_scores.level ∈ {critical, high}`.
 * `related_tests` — neighbor `test-reference` paths.
-* `relevant_docs` — `documentation-reference / claim-reference / decision-reference / hardware-contract`.
-* `decision_docs` — subset under `docs/decisions/`, `docs/claims/`, or `hardware-contract`.
+* `relevant_docs` — documentation-relevant paths: neighbor
+  `documentation-reference / claim-reference / decision-reference /
+  hardware-contract` paths, stale-hint paths, **and every doc-like path that
+  is itself part of the change** (`docs/`, `*.md`, `*.markdown`).
+* `decision_docs` — subset of `relevant_docs` under `docs/decisions/`,
+  `docs/claims/`, or `hardware-contract`.
 * `stale_warnings` — `path:symbol` from `detect_stale`.
 
-Coverage keys are carried per candidate (`changed_symbol:<name>`, `doc:<path>`, ...)
-and `coverage_metrics` counts covered vs universe; one giant file cannot fake full coverage.
+Coverage describes **WHAT context is selected, not only WHY the candidate
+was generated**: a selected candidate whose own path is doc-like contributes
+`relevant_docs:<path>` (and `decision_docs:<path>` for claims/ADRs/hardware-
+contract) even when it entered the pool as `changed-symbol` /
+`changed-chunk` / `high-risk-file`. A directly changed doc therefore
+satisfies document coverage the moment its chunk is selected. One candidate
+may legitimately contribute to several dimensions; sets dedupe, so a path is
+never double-counted. The metrics intersect candidate keys with the universe,
+so coverage can never be invented for a path outside the universe.
 
 ### Selection algorithm (deterministic greedy weighted set cover)
 
@@ -206,6 +251,35 @@ the candidate is rejected as `redundant ... coverage already 92% duplicated`.
   run. Normal 5k/10k/25k/30k budgets do not use the envelope; this is
   surfaced as `envelope_fallback_used: bool` in `ReviewReport`,
   `selection_summary`, and the `ragshit.review/v1` JSON.
+
+### Stale-doc generic-symbol filter (ragshit impact/review)
+
+`detect_stale` flags docs that mention a changed symbol but were not updated
+in the range. To stop generic symbols from creating stale-warning avalanches,
+a changed symbol is **excluded** from stale-hint generation when any of these
+conservative, deterministic rules fires (all thresholds documented here;
+the excluded symbols and their reasons are exposed in the report as
+`stale_filtered`):
+
+| Rule | Condition | Rationale |
+|------|-----------|-----------|
+| project-name | symbol == repository/project name (case-insensitive; from `git remote get-url origin` basename, else repo dir name) | the whole-repo identity; a README heading change says nothing about other docs |
+| generic-heading | symbol is a markdown heading AND appears in ≥ 3 distinct `docs/` documents | generic section titles (`Current state`, `Notes`, ...) |
+| ubiquitous | symbol appears in ≥ 10 distinct `docs/` documents | a word that specific across the whole doc corpus is noise (`build`, `branch`) |
+| generic-shell-name | symbol kind == `constant` (a shell assignment) AND appears in ≥ 2 `docs/` documents | a variable name appearing in prose is almost certainly a word, not a variable reference (`pass`, `fail`, `derived`) |
+| generic-config-key | symbol kind == `key` (YAML/TOML) AND name ≤ 6 chars AND appears in ≥ 2 `docs/` documents | short config keys (`name`, `id`) are generic; longer keys stay load-bearing |
+
+A symbol that does not fire any rule keeps producing hints — a specific,
+load-bearing identifier such as `virtio_pci_flush` must still warn.
+
+**False-negative risk (deliberate, documented):** the rules suppress *every*
+hint for the filtered symbol. A genuinely load-bearing identifier that
+happens to be a common word (e.g. a shell constant `out` that several docs
+reference by name) will stop producing hints once its document frequency
+clears the threshold. The thresholds are therefore intentionally small in
+number and high in frequency — suppression only kicks in with strong
+evidence of genericity. When in doubt, the conservative choice is to keep
+producing hints; the filter errs toward *fewer* suppressions, not more.
 
 ### Budget + index-head safety
 

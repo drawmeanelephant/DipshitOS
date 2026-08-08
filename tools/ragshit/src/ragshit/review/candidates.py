@@ -17,6 +17,7 @@ from ..impact.neighborhood import Neighbor
 from ..impact.stale import StaleDoc
 from ..impact.scoring import FileScore
 from ..models import Chunk
+from ..parsing.source import shell_decl_kind
 
 
 def _historical_chunks_for_deleted(
@@ -125,11 +126,36 @@ class Candidate:
     provenance: str
     # For truncation bookkeeping
     original_content: str = field(default="")
+    # Precise structural kind (fix D): "function" / "constant" for shell
+    # declarations, "heading" for markdown sections, None otherwise. Drives
+    # importance weighting and the mandatory-pool exclusion below.
+    symbol_kind: Optional[str] = None
 
 
 def _candidate_id(repo_id: str, path: str, start: int, end: int, reason: str, origin: str) -> str:
     return _sha(f"{repo_id}\x00{path}\x00{start}\x00{end}\x00{reason}\x00{origin}")
 
+
+# Fix D: one-line shell assignments (ROOT=, tmp=, pass=, id1=, ...) are
+# low-value bookkeeping, not meaningful structural context. They keep a low
+# base utility so they only get selected when budget actually remains, and
+# they never enter the mandatory changed-symbol pool — the enclosing function
+# or file carries the changed lines instead (no changed-file coverage lost).
+def _shell_constant_penalty(symbol_kind: Optional[str], language: str) -> float:
+    if symbol_kind == "constant" and language == "shell":
+        return 8.0
+    return 0.0
+
+
+def _chunk_symbol_kind(chunk) -> Optional[str]:
+    """Precise kind for a chunk: heading / function / constant / None."""
+    if getattr(chunk, "kind", "") == "section":
+        return "heading"
+    if getattr(chunk, "language", "") == "shell":
+        return shell_decl_kind(chunk.content or "")
+    if str(getattr(chunk, "path", "")).endswith((".sh", ".bash", ".zsh")):
+        return shell_decl_kind(chunk.content or "")
+    return None
 
 def build_candidates(
     db: Database,
@@ -189,8 +215,13 @@ def build_candidates(
                 covers.append(f"symbol_range:{sym.path}:{sym.start_line}-{sym.end_line}")
                 fs = score_by_path.get(sym.path)
                 file_boost = round(min(5.0, (fs.score / 20.0) if fs else 0), 2)
-                base = REASON_WEIGHTS["changed-symbol"] + file_boost
+                hist_language = "shell" if sym.path.endswith((".sh", ".bash", ".zsh")) else ""
+                symbol_kind = sym.kind if sym.kind in ("function", "constant", "heading") else None
+                penalty = _shell_constant_penalty(symbol_kind, hist_language)
+                base = REASON_WEIGHTS["changed-symbol"] + file_boost - penalty
                 comps = {"reason": REASON_WEIGHTS["changed-symbol"], "file_priority": file_boost}
+                if penalty:
+                    comps["low_value_shell_assignment"] = -penalty
                 cost = _rendered_block_len(sym.path, pc.start_line, pc.end_line, "changed-symbol", covers, base, pc.content, None, pc.structural_name, prov)
                 cid = _candidate_id(repo_id, sym.path, pc.start_line, pc.end_line, "changed-symbol", sym.name)
                 key = (sym.path, pc.start_line, pc.end_line, "changed-symbol")
@@ -199,11 +230,12 @@ def build_candidates(
                     out.append(Candidate(
                         cid=cid, path=sym.path, start_line=pc.start_line, end_line=pc.end_line,
                         content=pc.content, content_hash=h, kind=pc.kind,
-                        structural_name=pc.structural_name, heading=pc.heading, language="",
+                        structural_name=pc.structural_name, heading=pc.heading, language=hist_language,
                         commit=None, reason="changed-symbol", origin_changed_file=sym.path, origin_symbol=sym.name,
                         covers=covers, token_set=_token_set(pc.content), cost=cost, base_utility=base,
                         components=comps, provenance=prov,
                         original_content=pc.content,
+                        symbol_kind=symbol_kind,
                     ))
                 continue
             else:
@@ -228,8 +260,12 @@ def build_candidates(
         covers.append(f"symbol_range:{sym.path}:{sym.start_line}-{sym.end_line}")
         fs = score_by_path.get(sym.path)
         file_boost = round(min(5.0, (fs.score / 20.0) if fs else 0), 2)
-        base = REASON_WEIGHTS["changed-symbol"] + file_boost
+        symbol_kind = sym.kind if sym.kind in ("function", "constant", "heading") else None
+        penalty = _shell_constant_penalty(symbol_kind, chunk.language)
+        base = REASON_WEIGHTS["changed-symbol"] + file_boost - penalty
         comps = {"reason": REASON_WEIGHTS["changed-symbol"], "file_priority": file_boost}
+        if penalty:
+            comps["low_value_shell_assignment"] = -penalty
         cost = _chunk_block_len(chunk.path, chunk.start_line, chunk.end_line, "changed-symbol", covers, base, chunk.content, chunk.commit)
         cid = _candidate_id(repo_id, chunk.path, chunk.start_line, chunk.end_line, "changed-symbol", sym.name)
         out.append(Candidate(
@@ -240,6 +276,7 @@ def build_candidates(
             covers=covers, token_set=_token_set(chunk.content), cost=cost, base_utility=base,
             components=comps, provenance=f"commit:{chunk.commit or '?'} index:{index_head[:12] if index_head else '?'}",
             original_content=chunk.content,
+            symbol_kind=symbol_kind,
         ))
 
     # 2. changed-chunk / overlapping chunk not already symbol (hunk-aligned)
@@ -269,8 +306,12 @@ def build_candidates(
                 covers.append(f"changed_symbol:{chunk.structural_name}")
             fs = score_by_path.get(cf.path)
             file_boost = round(min(5.0, (fs.score / 20.0) if fs else 0), 2)
-            base = REASON_WEIGHTS["changed-chunk"] + file_boost
+            symbol_kind = _chunk_symbol_kind(chunk)
+            penalty = _shell_constant_penalty(symbol_kind, chunk.language)
+            base = REASON_WEIGHTS["changed-chunk"] + file_boost - penalty
             comps = {"reason": REASON_WEIGHTS["changed-chunk"], "file_priority": file_boost}
+            if penalty:
+                comps["low_value_shell_assignment"] = -penalty
             cost = _chunk_block_len(chunk.path, chunk.start_line, chunk.end_line, "changed-chunk", covers, base, chunk.content, chunk.commit)
             cid = _candidate_id(repo_id, chunk.path, chunk.start_line, chunk.end_line, "changed-chunk", cf.path)
             out.append(Candidate(
@@ -281,6 +322,7 @@ def build_candidates(
                 covers=covers, token_set=_token_set(chunk.content), cost=cost, base_utility=base,
                 components=comps, provenance=f"commit:{chunk.commit or '?'} index:{index_head[:12] if index_head else '?'}",
                 original_content=chunk.content,
+                symbol_kind=symbol_kind,
             ))
             # One per file is enough for changed-chunk unless multiple distinct hunks far apart
             # but we allow up to 2 per file to keep diversity
@@ -451,8 +493,12 @@ def build_candidates(
             continue
         seen_keys.add(key)
         covers = [f"high_risk:{fs.path}", f"changed_file:{fs.path}"]
-        base = REASON_WEIGHTS["high-risk-file"]
-        comps = {"reason": base, "high_risk": fs.score}
+        symbol_kind = _chunk_symbol_kind(picked)
+        penalty = _shell_constant_penalty(symbol_kind, picked.language)
+        base = REASON_WEIGHTS["high-risk-file"] - penalty
+        comps = {"reason": REASON_WEIGHTS["high-risk-file"], "high_risk": fs.score}
+        if penalty:
+            comps["low_value_shell_assignment"] = -penalty
         cost = _chunk_block_len(picked.path, picked.start_line, picked.end_line, "high-risk-file", covers, base, picked.content, picked.commit)
         cid = _candidate_id(repo_id, picked.path, picked.start_line, picked.end_line, "high-risk-file", fs.path)
         out.append(Candidate(
@@ -463,6 +509,7 @@ def build_candidates(
             covers=covers, token_set=_token_set(picked.content), cost=cost, base_utility=base,
             components=comps, provenance=f"commit:{picked.commit or '?'} index:{index_head[:12] if index_head else '?'}",
             original_content=picked.content,
+            symbol_kind=symbol_kind,
         ))
 
     # 7. Ensure hardware-contract appears if high-risk or any symbol touches kernel/boot (even without neighbor)

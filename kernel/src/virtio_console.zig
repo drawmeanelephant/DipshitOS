@@ -256,10 +256,10 @@ pub fn virtio_pci_init(st: *const SystemTable) bool {
     // NOTE: no BAR rebase pre-exit — moving the window makes the device
     // unreachable pre-exit (observed: after rebasing to 0x10000, reads of
     // BOTH the old firmware base and 0x10000 hang — the firmware never maps
-    // the low address). The firmware-assigned base is used for setup; a
-    // post-exit rebase to below-the-blanket 0x10000 happens in
-    // virtio_pci_rebase_post_exit (ECAM config writes survive post-exit,
-    // and the blanket maps 0x10000 as Device).
+    // the low address). The firmware-assigned base is used for setup and
+    // mapped in place post-switch (mmu.zig); no post-exit rebase runs — the
+    // attempt was abandoned because post-exit config writes cannot move the
+    // BAR on VZ (claims 0013/0020, docs/hardware-contract.md).
     // Offset 0 is a legitimate common-cfg offset (VZ: common @ BAR0+0x00);
     // the caps must simply both be present.
     if (!found_common or !found_notify or common_bar >= 6 or notify_bar >= 6) {

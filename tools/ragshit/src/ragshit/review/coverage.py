@@ -35,7 +35,14 @@ class CoverageSpec:
         # Also docs from stale
         for s in stale:
             relevant_docs.add(s.path)
-        # Include hardware-contract if it was added
+        # Coverage fix (B): a doc that is itself part of the change is
+        # inherently relevant. Its selected chunks satisfy relevant_docs even
+        # when they entered the pool as changed-symbol / changed-chunk /
+        # high-risk-file rather than documentation-reference — coverage
+        # describes WHAT context is selected, not only WHY it was generated.
+        for f in inv.files:
+            if _is_doc_path(f.path):
+                relevant_docs.add(f.path)
         decision_docs = {p for p in relevant_docs if p.startswith("docs/decisions/") or p.startswith("docs/claims/") or p == "docs/hardware-contract.md"}
         stale_warnings = {f"{s.path}:{s.symbol}" for s in stale}
         return cls(
@@ -60,6 +67,11 @@ class CoverageSpec:
         }
 
 
+def _is_doc_path(path: str) -> bool:
+    """Doc-like path: under docs/ or a Markdown file anywhere in the repo."""
+    return path.startswith("docs/") or path.endswith(".md") or path.endswith(".markdown")
+
+
 def _candidate_covers_keys(c: Candidate) -> Set[str]:
     keys: Set[str] = set()
     for cov in c.covers:
@@ -82,6 +94,16 @@ def _candidate_covers_keys(c: Candidate) -> Set[str]:
             # rest = path:symbol (path may contain colons? not in repo)
             # reconstruct key as stale_warnings:path:symbol
             keys.add(f"stale_warnings:{rest}")
+    # Path-based doc coverage (fix B): a selected candidate contributes to
+    # document coverage when its OWN path is in the relevant document universe,
+    # even if it entered the pool as changed-symbol / changed-chunk /
+    # high-risk-file. The metrics intersect keys with the universe, so this can
+    # never invent coverage for a path outside the universe, and sets dedupe
+    # paths — one candidate may cover several dimensions, never double-count.
+    if _is_doc_path(c.path):
+        keys.add(f"relevant_docs:{c.path}")
+        if c.path.startswith("docs/decisions/") or c.path.startswith("docs/claims/") or c.path == "docs/hardware-contract.md":
+            keys.add(f"decision_docs:{c.path}")
     return keys
 
 

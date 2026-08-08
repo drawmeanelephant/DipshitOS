@@ -518,10 +518,15 @@ def test_budget_actual_size_equals_rendered_len(tmp_path):
         m = re.search(r"Actual size: (\d+) chars", md)
         assert m, "Actual size line missing"
         assert int(m.group(1)) == len(md), f"Actual size {m.group(1)} != len(md) {len(md)}"
+        # A: the body's budget-utilization line must describe the SAME packet.
+        u = re.search(r"budget utilization: (\d+) / \d+ \([^)]*\)", md)
+        assert u, "budget utilization line missing"
+        assert int(u.group(1)) == len(md), f"utilization {u.group(1)} != len(md) {len(md)}"
         rc2, jtxt, _ = run_cli(["review", str(r), "HEAD~1..HEAD", "--budget-chars", str(budget), "--json"])
         j = json.loads(jtxt)
         assert j["actual_size"] == len(md), f"json actual_size {j['actual_size']} != md len {len(md)}"
         assert j["selection_summary"]["actual_chars"] == len(md)
+        assert "candidate_cost_chars" in j["selection_summary"]
 
 def test_framing_aware_iterative_avoids_envelope(tmp_path):
     """Regression: raw render over budget must trigger reselect, not envelope chop.

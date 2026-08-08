@@ -77,15 +77,31 @@ discovery → parsing → indexing → retrieval → rendering → (doctor/statu
 - `symbols.py` — changed hunks → enclosing indexed symbol (fallback `git show` for deleted files).
 - `neighborhood.py` — index-only reference neighborhood (direct-symbol / identifier / doc / test / lexical).
 - `scoring.py` — per-file review-priority heuristic, normalized 0..100.
-- `stale.py` — docs mentioning a changed symbol but not changed in range.
+- `stale.py` — docs mentioning a changed symbol but not changed in range,
+  with a conservative generic-symbol filter (project name, ubiquitous
+  words, generic headings, throwaway shell names/config keys) and the
+  exclusion reasons surfaced as `stale_filtered`.
+- `symbols.py` also refines chunk kinds: shell declarations become
+  `function`/`constant`, markdown sections `heading`, YAML/TOML keys `key`
+  — these drive shell importance weights and the stale filter.
 - `report.py` — `ragshit.impact/v1` JSON + Markdown.
 
 ### `review/` — budgeted reviewer packet
-- `candidates.py` — deterministic pool with provenance, cost, coverage keys, token sets.
-- `coverage.py` — explicit dimensions and `covered/total` metrics.
+- `candidates.py` — deterministic pool with provenance, cost, coverage keys,
+  token sets, and precise `symbol_kind` (function/constant/heading) that
+  weights shell assignments low and keeps them out of the mandatory pool.
+- `coverage.py` — explicit dimensions and `covered/total` metrics; selected
+  candidates also satisfy doc dimensions by their OWN path (coverage
+  describes WHAT is selected).
 - `redundancy.py` — line overlap, token Jaccard, hash, structural identity.
-- `selection.py` — greedy weighted set cover under hard budget with mandatory reserve + truncation.
-- `report.py` — `ragshit.review/v1` JSON + Markdown, baseline comparison, `len(markdown) ≤ budget`.
+- `selection.py` — greedy weighted set cover under hard budget with
+  mandatory reserve + truncation; low-value shell assignments are never
+  mandatory.
+- `report.py` — `ragshit.review/v1` JSON + Markdown, baseline comparison,
+  `len(markdown) ≤ budget`. `actual_size` / `selection_summary.actual_chars`
+  equal the final rendered Markdown length; the raw sum of candidate block
+  costs is exposed separately as `selection_summary.candidate_cost_chars`.
+  Code fences are language-tagged when the candidate's language is known.
 
 ### `doctor.py`, `cli.py`, `embeddings/`
 - `doctor.py` — ten checks (repo, git, config, DB, FTS5, ignore behavior,

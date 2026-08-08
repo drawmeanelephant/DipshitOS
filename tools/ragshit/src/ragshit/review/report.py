@@ -46,10 +46,31 @@ class ReviewReport:
     file_scores: List[Dict[str, Any]]
     symbols: List[Dict[str, Any]]
     stale: List[Dict[str, Any]]
+    stale_filtered: List[Dict[str, Any]]
     selection_summary: Dict[str, Any]
     baseline: Dict[str, Any]
     envelope_fallback_used: bool = False
     # Human markdown is separate; JSON carries data
+
+
+# Language-tagged fences (fix G): candidates carry language metadata, so the
+# packet emits ```zig / ```python / ```shell / ```markdown fences instead of
+# untyped ones. Deterministic; safe fallback to a plain fence for unknown or
+# plaintext content (including content the language field cannot vouch for).
+_TAGGED_FENCE_LANGS = {
+    "zig", "swift", "python", "shell", "bash", "c", "assembly", "as",
+    "linker", "toml", "yaml", "yml", "json", "c++", "cpp", "go", "rust",
+    "ruby", "javascript", "js", "typescript", "ts", "sh",
+}
+
+
+def _fence_tag(language: Optional[str], kind: Optional[str]) -> str:
+    lang = (language or "").strip().lower()
+    if lang in _TAGGED_FENCE_LANGS:
+        return "```" + ("bash" if lang == "sh" else lang)
+    if lang == "markdown" or kind == "markdown":
+        return "```markdown"
+    return "```"
 
 
 def _candidate_to_dict(c: Candidate) -> Dict[str, Any]:
@@ -69,6 +90,7 @@ def _candidate_to_dict(c: Candidate) -> Dict[str, Any]:
         "commit": c.commit,
         "language": c.language,
         "kind": c.kind,
+        "symbol_kind": c.symbol_kind,
         "origin_changed_file": c.origin_changed_file,
         "origin_symbol": c.origin_symbol,
         "content": c.content,
@@ -121,6 +143,7 @@ def build_review(
     index_stale: bool,
     index_warning: Optional[str],
     timing_ms: int = 0,
+    stale_filtered: Optional[List[Dict[str, Any]]] = None,
 ) -> ReviewReport:
     metrics = coverage_metrics(spec, result.selected)
     missing = missing_coverage(spec, result.selected)
@@ -159,11 +182,17 @@ def build_review(
     # Compact rejected: cap to 30 for markdown, but JSON keeps up to 50
     symbols = [{"path": s.path, "name": s.name, "lines": [s.start_line, s.end_line], "kind": s.kind, "confidence": s.confidence, "commit": s.commit} for s in sorted(mapping.symbols, key=lambda x: (x.path, x.start_line))]
     stale_list = [{"path": s.path, "symbol": s.symbol, "lines": [s.start_line, s.end_line], "heading": s.heading, "reason": s.reason} for s in sorted(stale, key=lambda x: (x.path, x.symbol))]
+    stale_filtered_list = [dict(f) for f in (stale_filtered or [])]
     file_score_dicts = [{"path": f.path, "score": f.score, "level": f.level, "components": f.components, "lines_changed": f.lines_changed, "symbols_touched": f.symbols_touched, "status": f.status} for f in file_scores]
 
+    # Accounting fix (A): actual_chars is the ACTUAL FINAL RENDERED MARKDOWN
+    # size (patched by the framing-aware helper to equal len(markdown)); the
+    # raw sum of selected candidate block costs is kept under a DISTINCT name
+    # so the two semantics can never be confused or overloaded.
     selection_summary = {
         "budget": budget,
         "actual_chars": result.actual_chars,
+        "candidate_cost_chars": result.actual_chars,
         "utilization": round((result.actual_chars / budget * 100) if budget else 0, 1),
         "candidates_considered": len(candidates),
         "selected": len(result.selected),
@@ -199,6 +228,7 @@ def build_review(
         file_scores=file_score_dicts,
         symbols=symbols,
         stale=stale_list,
+        stale_filtered=stale_filtered_list,
         selection_summary=selection_summary,
         baseline=baseline_info,
         envelope_fallback_used=False,
@@ -258,8 +288,8 @@ def report_to_markdown(report: ReviewReport, explain: bool = False, enforce_budg
             if s.get("structural_name"):
                 lines.append(f"symbol: {s['structural_name']}")
             lines.append("")
-            # code fence with content
-            lines.append("```")
+            # code fence with content (language-tagged where known, fix G)
+            lines.append(_fence_tag(s.get("language"), s.get("kind")))
             # content already truncated safely if needed
             lines.append(s["content"].rstrip("\n"))
             lines.append("```")
@@ -287,6 +317,9 @@ def report_to_markdown(report: ReviewReport, explain: bool = False, enforce_budg
             lines.append(f"- `{s['path']}`:{s['lines'][0]}-{s['lines'][1]} -- mentions `{s['symbol']}` -- {s['reason']}" + (f" -- {s['heading']}" if s.get("heading") else ""))
     else:
         lines.append("- (no stale-doc hints)")
+    if report.stale_filtered:
+        details = ", ".join(f"`{f['symbol']}` ({'; '.join(f['reasons']) })" for f in report.stale_filtered)
+        lines.append(f"- filtered generic symbols (no hints generated): {details}")
     lines.append("")
 
     lines.append("## Selection summary")
@@ -296,10 +329,12 @@ def report_to_markdown(report: ReviewReport, explain: bool = False, enforce_budg
     lines.append(f"- selected: {ss['selected']}")
     lines.append(f"- rejected: {ss['rejected']}")
     lines.append(f"- budget utilization: {ss['actual_chars']} / {ss['budget']} ({ss['utilization']}%)")
+    if ss.get("candidate_cost_chars") is not None and ss.get("candidate_cost_chars") != ss["actual_chars"]:
+        lines.append(f"- candidate content cost: {ss['candidate_cost_chars']} chars (sum of selected block costs, before framing)")
     if ss.get("truncated"):
         lines.append(f"- note: mandatory content exceeded budget; excerpts were safely truncated to stay under budget")
-    # Baseline note
-    lines.append(f"- baseline (naive impact-ranked) would select {report.baseline['selected']} at {report.baseline['actual_chars']} chars")
+    # Baseline note (candidate-cost comparison, distinct from final packet size)
+    lines.append(f"- baseline (naive impact-ranked) would select {report.baseline['selected']} at {report.baseline['actual_chars']} candidate chars")
     if report.baseline.get("improved_dimensions"):
         lines.append(f"- diversity selector improved: {', '.join(report.baseline['improved_dimensions'])} vs baseline")
     else:

@@ -66,5 +66,6 @@ verify-coordination`, and CI) fails if it drifts from the files.
 | `freebuff/ragshit-impact` | [`freebuff-ragshit-impact.md`](freebuff-ragshit-impact.md) |
 | `freebuff/ragshit-review` | [`freebuff-ragshit-review.md`](freebuff-ragshit-review.md) |
 | stale-doc cleanup (claim 3109) | [`freebuff-stale-doc-cleanup.md`](freebuff-stale-doc-cleanup.md) |
+| freebuff/you-are-working-in-the-dipshitos-repository-on-cur-264903eb-313e-440f-a0e4-224e3311933d | [`freebuff-you-are-working-in-the-dipshitos-repository-on-cur-264903eb-313e-440f-a0e4-224e3311933d.md`](freebuff-you-are-working-in-the-dipshitos-repository-on-cur-264903eb-313e-440f-a0e4-224e3311933d.md) |
 | M1.5 tracker origin (pre-branch era) | [`m1.5-tracker.md`](m1.5-tracker.md) |
 <!-- LOGS_INDEX:END -->

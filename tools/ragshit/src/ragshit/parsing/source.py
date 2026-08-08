@@ -63,6 +63,38 @@ _BRACED_LANGUAGES = {"zig", "swift", "c"}
 _CONTROL_GUARD = re.compile(r"^\s*(for|if|while|switch|return|sizeof|catch|do)\b")
 _COMMENT_PREFIXES = ("#", "//", ";")
 
+# Shell structural importance (fix D): a function opener `name() {` starts a
+# body block; assignments inside the body belong to the enclosing function
+# chunk, never becoming independent declaration units. The block closes at the
+# first `}` line. Trailing `#` comments are tolerated; `name()` with the brace
+# on the NEXT line is a documented limitation (kept at the old behavior).
+_SHELL_FUNC_OPEN = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*\)\s*\{\s*(?:#.*)?$")
+_SHELL_BLOCK_CLOSE = re.compile(r"^\}\s*(?:#.*)?$")
+_SHELL_DECL_FUNC = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\s*\(\s*\)\s*\{?\s*$")
+_SHELL_DECL_ASSIGN = re.compile(r"^(?:export\s+)?[A-Za-z_][A-Za-z0-9_]*=(?!=)")
+
+
+def shell_decl_kind(text: str) -> Optional[str]:
+    """Classify the leading shell declaration of a chunk: ``"function"``,
+    ``"constant"`` (assignment), or ``None``. Scans past comment and command
+    lines (a chunk may open with the file header before its first
+    declaration) until the first declaration line, mirroring the parser's own
+    decl patterns so classification can never drift from what produced the
+    chunk. Used by impact/review to weight shell symbols: functions are
+    meaningful structural context, one-line assignments are low-value
+    bookkeeping."""
+    if not text:
+        return None
+    for line in text.splitlines():
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        if _SHELL_DECL_FUNC.match(s):
+            return "function"
+        if _SHELL_DECL_ASSIGN.match(s):
+            return "constant"
+    return None
+
 
 def _braced_end(lines: List[str], start: int) -> Optional[int]:
     """Index of the line where the brace block opened at *start* closes."""
@@ -82,9 +114,24 @@ def _braced_end(lines: List[str], start: int) -> Optional[int]:
 
 def _find_decls(language: str, lines: List[str]) -> List[Tuple[int, str, str]]:
     decls: List[Tuple[int, str, str]] = []
+    in_shell_func = False
     for i, line in enumerate(lines):
         if language == "c" and _CONTROL_GUARD.match(line):
             continue
+        if language == "shell":
+            # Fix D: inside a function body, swallow everything (assignments
+            # like `tmp="$(mktemp -d)"` stay part of the function chunk) so
+            # the function — not the throwaway variable — is the structural
+            # unit a changed line maps to.
+            if in_shell_func:
+                if _SHELL_BLOCK_CLOSE.match(line):
+                    in_shell_func = False
+                continue
+            m = _SHELL_FUNC_OPEN.match(line)
+            if m:
+                decls.append((i, m.group(1), "function"))
+                in_shell_func = True
+                continue
         for pattern, kind in _DECL_PATTERNS.get(language, []):
             match = re.match(pattern, line)
             if match:
