@@ -56,4 +56,5 @@ CI) fails if the table drifts from the claim files.
 | [0014-status-reverify](0014-status-reverify.md) | buffy (`freebuff/let-s-get-the-latest-github-and-do-something-benef-e128807b-0418-4d4e-aebe-ba30b18c18c5`) | ✅ done 2026-08-07 — all gates re-run green on merged `main`; evidence saved under `artifacts/` and cited in `docs/status.md` |
 | [0015-nvram-console](0015-nvram-console.md) | buffy (`agent/buffy/m15-nvram-console`) | ✅ done 2026-08-07 (gate passing — post-exit console bytes |
 | [0016-virtio-pci-spec-review](0016-virtio-pci-spec-review.md) | buffy (`agent/buffy/m15-nvram-console`) | ✅ done 2026-08-07 (evidence under `artifacts/virtio-spec-review-20260807.txt`) |
+| [0017-ragshit-impact](0017-ragshit-impact.md) | buffy (`freebuff/ragshit-impact`) | ✅ done 2026-08-07 — `ragshit impact . HEAD~5..HEAD` deterministic, provenance-backed; tests 99 passed, doctor ok, dogfood HEAD~1/~5/~10 saved under artifacts/ |
 <!-- CLAIMS_INDEX:END -->
