@@ -1,0 +1,3619 @@
+{
+  "actual_size": 39992,
+  "base": "HEAD~5",
+  "base_oid": "fbc0e146095b9ff821a44100f1afafbcc4efdfa0",
+  "baseline": {
+    "actual_chars": 39810,
+    "coverage": {
+      "changed_files": {
+        "covered": 9,
+        "total": 41
+      },
+      "changed_symbols": {
+        "covered": 18,
+        "total": 40
+      },
+      "decision_docs": {
+        "covered": 6,
+        "total": 31
+      },
+      "high_risk_files": {
+        "covered": 9,
+        "total": 23
+      },
+      "related_tests": {
+        "covered": 0,
+        "total": 0
+      },
+      "relevant_docs": {
+        "covered": 10,
+        "total": 52
+      },
+      "stale_warnings": {
+        "covered": 0,
+        "total": 4
+      }
+    },
+    "improved_dimensions": [
+      "changed_files",
+      "changed_symbols",
+      "decision_docs",
+      "high_risk_files",
+      "relevant_docs"
+    ],
+    "same_or_better": true,
+    "selected": 23
+  },
+  "coverage": {
+    "changed_files": "23 / 41",
+    "changed_symbols": "40 / 40",
+    "decision_docs": "7 / 31",
+    "high_risk_files": "15 / 23",
+    "related_tests": "0 / 0",
+    "relevant_docs": "19 / 52",
+    "stale_warnings": "0 / 4"
+  },
+  "coverage_detail": {
+    "changed_files": {
+      "covered": 23,
+      "total": 41
+    },
+    "changed_symbols": {
+      "covered": 40,
+      "total": 40
+    },
+    "decision_docs": {
+      "covered": 7,
+      "total": 31
+    },
+    "high_risk_files": {
+      "covered": 15,
+      "total": 23
+    },
+    "related_tests": {
+      "covered": 0,
+      "total": 0
+    },
+    "relevant_docs": {
+      "covered": 19,
+      "total": 52
+    },
+    "stale_warnings": {
+      "covered": 0,
+      "total": 4
+    }
+  },
+  "envelope_fallback_used": false,
+  "file_scores": [
+    {
+      "components": {
+        "base": 3.0,
+        "lines": 10.0,
+        "references": 9.0,
+        "symbols": 12.0
+      },
+      "level": "critical",
+      "lines_changed": 35,
+      "path": "README.md",
+      "score": 100.0,
+      "status": "M",
+      "symbols_touched": 5
+    },
+    {
+      "components": {
+        "base": 3.0,
+        "doc_touched": 4.0,
+        "lines": 10.0,
+        "references": 9.0,
+        "symbols": 6.0
+      },
+      "level": "critical",
+      "lines_changed": 74,
+      "path": "docs/claims/0594-verify-gate-classification.md",
+      "score": 94.1,
+      "status": "A",
+      "symbols_touched": 2
+    },
+    {
+      "components": {
+        "base": 3.0,
+        "doc_touched": 4.0,
+        "lines": 10.0,
+        "references": 9.0,
+        "symbols": 6.0
+      },
+      "level": "critical",
+      "lines_changed": 31,
+      "path": "docs/claims/3109-stale-doc-cleanup.md",
+      "score": 94.1,
+      "status": "A",
+      "symbols_touched": 2
+    },
+    {
+      "components": {
+        "base": 3.0,
+        "doc_touched": 4.0,
+        "lines": 9.81,
+        "references": 9.0,
+        "symbols": 6.0
+      },
+      "level": "critical",
+      "lines_changed": 29,
+      "path": "docs/claims/8592-status-preflight.md",
+      "score": 93.6,
+      "status": "A",
+      "symbols_touched": 2
+    },
+    {
+      "components": {
+        "base": 3.0,
+        "doc_touched": 4.0,
+        "lines": 8.92,
+        "references": 9.0,
+        "symbols": 6.0
+      },
+      "level": "critical",
+      "lines_changed": 21,
+      "path": "docs/claims/3320-ragshit-dogfood-hardening.md",
+      "score": 90.9,
+      "status": "A",
+      "symbols_touched": 2
+    },
+    {
+      "components": {
+        "base": 3.0,
+        "critical_path": 5.0,
+        "interface": 3.0,
+        "lines": 7.4,
+        "references": 9.0,
+        "symbols": 3.0
+      },
+      "level": "critical",
+      "lines_changed": 12,
+      "path": "build.zig",
+      "score": 89.4,
+      "status": "M",
+      "symbols_touched": 1
+    },
+    {
+      "components": {
+        "base": 3.0,
+        "doc_touched": 4.0,
+        "lines": 7.17,
+        "references": 9.0,
+        "symbols": 6.0
+      },
+      "level": "critical",
+      "lines_changed": 11,
+      "path": "docs/claims/9112-ragshit-review.md",
+      "score": 85.8,
+      "status": "A",
+      "symbols_touched": 2
+    },
+    {
+      "components": {
+        "base": 3.0,
+        "lines": 10.0,
+        "references": 4.75,
+        "symbols": 12.0,
+        "test_file": -1.5
+      },
+      "level": "critical",
+      "lines_changed": 53,
+      "path": "docs/testing.md",
+      "score": 83.1,
+      "status": "M",
+      "symbols_touched": 4
+    },
+    {
+      "components": {
+        "base": 3.0,
+        "lines": 10.0,
+        "references": 8.42,
+        "symbols": 6.0
+      },
+      "level": "critical",
+      "lines_changed": 34,
+      "path": ".github/workflows/ci.yml",
+      "score": 80.6,
+      "status": "M",
+      "symbols_touched": 2
+    },
+    {
+      "components": {
+        "base": 3.0,
+        "lines": 10.0,
+        "symbols": 12.0
+      },
+      "level": "high",
+      "lines_changed": 102,
+      "path": "docs/gate-inventory.md",
+      "score": 73.5,
+      "status": "A",
+      "symbols_touched": 4
+    },
+    {
+      "components": {
+        "base": 3.0,
+        "lines": 9.61,
+        "symbols": 12.0
+      },
+      "level": "high",
+      "lines_changed": 27,
+      "path": "docs/roadmap.md",
+      "score": 72.4,
+      "status": "M",
+      "symbols_touched": 4
+    },
+    {
+      "components": {
+        "base": 3.0,
+        "critical_path": 5.0,
+        "interface": 3.0,
+        "lines": 10.0,
+        "references": 3.0
+      },
+      "level": "high",
+      "lines_changed": 66,
+      "path": "justfile",
+      "score": 70.6,
+      "status": "M",
+      "symbols_touched": 0
+    },
+    {
+      "components": {
+        "base": 3.0,
+        "lines": 10.0,
+        "references": 7.75
+      },
+      "level": "high",
+      "lines_changed": 35,
+      "path": "tools/ragshit/README.md",
+      "score": 61.0,
+      "status": "M",
+      "symbols_touched": 0
+    },
+    {
+      "components": {
+        "base": 3.0,
+        "lines": 10.0,
+        "references": 6.97
+      },
+      "level": "high",
+      "lines_changed": 47,
+      "path": "tools/ragshit/src/ragshit/parsing/source.py",
+      "score": 58.7,
+      "status": "M",
+      "symbols_touched": 0
+    },
+    {
+      "components": {
+        "base": 3.0,
+        "lines": 7.81,
+        "symbols": 9.0
+      },
+      "level": "high",
+      "lines_changed": 14,
+      "path": "docs/architecture.md",
+      "score": 58.3,
+      "status": "M",
+      "symbols_touched": 3
+    },
+    {
+      "components": {
+        "base": 3.0,
+        "doc_touched": 4.0,
+        "lines": 6.64,
+        "symbols": 6.0
+      },
+      "level": "high",
+      "lines_changed": 9,
+      "path": "docs/hardware-contract.md",
+      "score": 57.8,
+      "status": "M",
+      "symbols_touched": 2
+    },
+    {
+      "components": {
+        "base": 3.0,
+        "lines": 10.0,
+        "references": 6.0
+      },
+      "level": "high",
+      "lines_changed": 408,
+      "path": "tools/ragshit/src/ragshit/review/report.py",
+      "score": 55.9,
+      "status": "A",
+      "symbols_touched": 0
+    },
+    {
+      "components": {
+        "base": 3.0,
+        "critical_path": 8.0,
+        "lines": 4.64,
+        "symbols": 3.0
+      },
+      "level": "high",
+      "lines_changed": 4,
+      "path": "kernel/src/virtio_console.zig",
+      "score": 54.8,
+      "status": "M",
+      "symbols_touched": 1
+    },
+    {
+      "components": {
+        "base": 3.0,
+        "lines": 10.0,
+        "references": 4.75
+      },
+      "level": "high",
+      "lines_changed": 223,
+      "path": "tools/ragshit/src/ragshit/cli.py",
+      "score": 52.2,
+      "status": "M",
+      "symbols_touched": 0
+    },
+    {
+      "components": {
+        "base": 3.0,
+        "lines": 10.0,
+        "references": 3.0
+      },
+      "level": "high",
+      "lines_changed": 34,
+      "path": "tools/ragshit/CHANGELOG.md",
+      "score": 47.1,
+      "status": "M",
+      "symbols_touched": 0
+    },
+    {
+      "components": {
+        "base": 3.0,
+        "lines": 10.0,
+        "references": 3.0
+      },
+      "level": "high",
+      "lines_changed": 32,
+      "path": "tools/ragshit/docs/architecture.md",
+      "score": 47.1,
+      "status": "M",
+      "symbols_touched": 0
+    },
+    {
+      "components": {
+        "base": 3.0,
+        "lines": 10.0,
+        "references": 3.0
+      },
+      "level": "high",
+      "lines_changed": 172,
+      "path": "tools/ragshit/src/ragshit/impact/stale.py",
+      "score": 47.1,
+      "status": "M",
+      "symbols_touched": 0
+    },
+    {
+      "components": {
+        "base": 3.0,
+        "lines": 6.34,
+        "references": 6.0
+      },
+      "level": "high",
+      "lines_changed": 8,
+      "path": "tools/ragshit/src/ragshit/impact/report.py",
+      "score": 45.1,
+      "status": "M",
+      "symbols_touched": 0
+    },
+    {
+      "components": {
+        "base": 3.0,
+        "doc_touched": 4.0,
+        "lines": 5.17,
+        "symbols": 3.0
+      },
+      "level": "medium",
+      "lines_changed": 5,
+      "path": "docs/claims/README.md",
+      "score": 44.6,
+      "status": "M",
+      "symbols_touched": 1
+    },
+    {
+      "components": {
+        "base": 3.0,
+        "lines": 5.17,
+        "references": 3.0,
+        "symbols": 3.0
+      },
+      "level": "medium",
+      "lines_changed": 5,
+      "path": "docs/logs/README.md",
+      "score": 41.7,
+      "status": "M",
+      "symbols_touched": 1
+    },
+    {
+      "components": {
+        "base": 3.0,
+        "lines": 10.0
+      },
+      "level": "medium",
+      "lines_changed": 188,
+      "path": "tools/ragshit/docs/ranking.md",
+      "score": 38.2,
+      "status": "M",
+      "symbols_touched": 0
+    },
+    {
+      "components": {
+        "base": 3.0,
+        "lines": 10.0
+      },
+      "level": "medium",
+      "lines_changed": 545,
+      "path": "tools/ragshit/src/ragshit/review/candidates.py",
+      "score": 38.2,
+      "status": "A",
+      "symbols_touched": 0
+    },
+    {
+      "components": {
+        "base": 3.0,
+        "lines": 10.0
+      },
+      "level": "medium",
+      "lines_changed": 167,
+      "path": "tools/ragshit/src/ragshit/review/coverage.py",
+      "score": 38.2,
+      "status": "A",
+      "symbols_touched": 0
+    },
+    {
+      "components": {
+        "base": 3.0,
+        "lines": 10.0
+      },
+      "level": "medium",
+      "lines_changed": 73,
+      "path": "tools/ragshit/src/ragshit/review/redundancy.py",
+      "score": 38.2,
+      "status": "A",
+      "symbols_touched": 0
+    },
+    {
+      "components": {
+        "base": 3.0,
+        "lines": 10.0
+      },
+      "level": "medium",
+      "lines_changed": 311,
+      "path": "tools/ragshit/src/ragshit/review/selection.py",
+      "score": 38.2,
+      "status": "A",
+      "symbols_touched": 0
+    },
+    {
+      "components": {
+        "base": 3.0,
+        "lines": 6.0,
+        "symbols": 3.0
+      },
+      "level": "medium",
+      "lines_changed": 7,
+      "path": "docs/logs/freebuff-ragshit-review.md",
+      "score": 35.3,
+      "status": "A",
+      "symbols_touched": 1
+    },
+    {
+      "components": {
+        "base": 3.0,
+        "lines": 8.92
+      },
+      "level": "medium",
+      "lines_changed": 21,
+      "path": "tools/ragshit/src/ragshit/impact/symbols.py",
+      "score": 35.1,
+      "status": "M",
+      "symbols_touched": 0
+    },
+    {
+      "components": {
+        "base": 3.0,
+        "lines": 10.0,
+        "test_file": -1.5
+      },
+      "level": "medium",
+      "lines_changed": 136,
+      "path": "tools/ragshit/tests/test_dogfood_review.py",
+      "score": 33.8,
+      "status": "A",
+      "symbols_touched": 0
+    },
+    {
+      "components": {
+        "base": 3.0,
+        "lines": 10.0,
+        "test_file": -1.5
+      },
+      "level": "medium",
+      "lines_changed": 610,
+      "path": "tools/ragshit/tests/test_review.py",
+      "score": 33.8,
+      "status": "A",
+      "symbols_touched": 0
+    },
+    {
+      "components": {
+        "base": 3.0,
+        "lines": 10.0,
+        "test_file": -1.5
+      },
+      "level": "medium",
+      "lines_changed": 309,
+      "path": "tools/ragshit/tests/test_review_hardening.py",
+      "score": 33.8,
+      "status": "A",
+      "symbols_touched": 0
+    },
+    {
+      "components": {
+        "base": 3.0,
+        "lines": 4.64,
+        "symbols": 3.0
+      },
+      "level": "medium",
+      "lines_changed": 4,
+      "path": "docs/logs/freebuff-you-are-working-in-the-dipshitos-repository-on-cur-264903eb-313e-440f-a0e4-224e3311933d.md",
+      "score": 31.3,
+      "status": "A",
+      "symbols_touched": 1
+    },
+    {
+      "components": {
+        "base": 3.0,
+        "lines": 4.0,
+        "symbols": 3.0
+      },
+      "level": "medium",
+      "lines_changed": 3,
+      "path": "docs/logs/freebuff-stale-doc-cleanup.md",
+      "score": 29.4,
+      "status": "A",
+      "symbols_touched": 1
+    },
+    {
+      "components": {
+        "base": 3.0,
+        "lines": 4.0,
+        "references": 3.0
+      },
+      "level": "medium",
+      "lines_changed": 3,
+      "path": "tools/ragshit/src/ragshit/review/__init__.py",
+      "score": 29.4,
+      "status": "A",
+      "symbols_touched": 0
+    },
+    {
+      "components": {
+        "base": 3.0,
+        "lines": 4.64,
+        "symbols": 3.0,
+        "test_file": -1.5
+      },
+      "level": "medium",
+      "lines_changed": 4,
+      "path": "docs/logs/freebuff-pull-latest-dipshitos-main-after-all-preceding-rel-1fe779b0-133e-4303-81f1-397087634352.md",
+      "score": 26.9,
+      "status": "A",
+      "symbols_touched": 1
+    },
+    {
+      "components": {
+        "base": 3.0,
+        "lines": 4.0,
+        "symbols": 3.0,
+        "test_file": -1.5
+      },
+      "level": "medium",
+      "lines_changed": 3,
+      "path": "docs/logs/freebuff-pull-latest-dipshitos-main-ebe15999-a14a-4066-9551-00deb3d2323a.md",
+      "score": 25.0,
+      "status": "A",
+      "symbols_touched": 1
+    },
+    {
+      "components": {
+        "base": 3.0,
+        "lines": 2.0,
+        "symbols": 3.0
+      },
+      "level": "medium",
+      "lines_changed": 1,
+      "path": "docs/march-m15.md",
+      "score": 23.5,
+      "status": "M",
+      "symbols_touched": 1
+    }
+  ],
+  "head": "HEAD",
+  "head_oid": "fff37a5e6af8476c273dc959aefce0f412e11554",
+  "index_head": "fff37a5e6af8476c273dc959aefce0f412e11554",
+  "index_stale": false,
+  "index_warning": null,
+  "missing_coverage": {
+    "changed_files": [
+      "tools/ragshit/CHANGELOG.md",
+      "tools/ragshit/README.md",
+      "tools/ragshit/docs/architecture.md",
+      "tools/ragshit/docs/ranking.md",
+      "tools/ragshit/src/ragshit/cli.py",
+      "tools/ragshit/src/ragshit/impact/report.py",
+      "tools/ragshit/src/ragshit/impact/stale.py",
+      "tools/ragshit/src/ragshit/impact/symbols.py",
+      "tools/ragshit/src/ragshit/parsing/source.py",
+      "tools/ragshit/src/ragshit/review/__init__.py",
+      "tools/ragshit/src/ragshit/review/candidates.py",
+      "tools/ragshit/src/ragshit/review/coverage.py",
+      "tools/ragshit/src/ragshit/review/redundancy.py",
+      "tools/ragshit/src/ragshit/review/report.py",
+      "tools/ragshit/src/ragshit/review/selection.py",
+      "tools/ragshit/tests/test_dogfood_review.py",
+      "tools/ragshit/tests/test_review.py",
+      "tools/ragshit/tests/test_review_hardening.py"
+    ],
+    "changed_symbols": [],
+    "decision_docs": [
+      "docs/claims/0001-bad-handoff-gate.md",
+      "docs/claims/0002-vz-serial-gate.md",
+      "docs/claims/0003-m15-host-plumbing.md",
+      "docs/claims/0004-m15-console-shell-core.md",
+      "docs/claims/0005-m15-commands-personality.md",
+      "docs/claims/0006-status-machinery.md",
+      "docs/claims/0007-status-sharding-hardening.md",
+      "docs/claims/0008-m15-transcript-test.md",
+      "docs/claims/0009-m2-marker-fallback.md",
+      "docs/claims/0011-m15-machine-controls.md",
+      "docs/claims/0012-m15-milestone-docs.md",
+      "docs/claims/0013-m15-serial-discovery.md",
+      "docs/claims/0014-status-reverify.md",
+      "docs/claims/0015-nvram-console.md",
+      "docs/claims/0016-virtio-pci-spec-review.md",
+      "docs/claims/0017-preexit-virtio-tx.md",
+      "docs/claims/0018-postexit-tx-bisect.md",
+      "docs/claims/0019-ragshit-impact.md",
+      "docs/claims/0020-tx-transition-matrix.md",
+      "docs/claims/0021-fw-mmu-capture.md",
+      "docs/claims/0022-mmu-debt-boundary.md",
+      "docs/claims/0023-mainzig-module-split.md",
+      "docs/claims/1801-coordination-hardening.md",
+      "docs/claims/TEMPLATE.md"
+    ],
+    "high_risk_files": [
+      "tools/ragshit/CHANGELOG.md",
+      "tools/ragshit/README.md",
+      "tools/ragshit/docs/architecture.md",
+      "tools/ragshit/src/ragshit/cli.py",
+      "tools/ragshit/src/ragshit/impact/report.py",
+      "tools/ragshit/src/ragshit/impact/stale.py",
+      "tools/ragshit/src/ragshit/parsing/source.py",
+      "tools/ragshit/src/ragshit/review/report.py"
+    ],
+    "related_tests": [],
+    "relevant_docs": [
+      ".github/PULL_REQUEST_TEMPLATE.md",
+      "AGENTS.md",
+      "docs/branch-protection.md",
+      "docs/claims/0001-bad-handoff-gate.md",
+      "docs/claims/0002-vz-serial-gate.md",
+      "docs/claims/0003-m15-host-plumbing.md",
+      "docs/claims/0004-m15-console-shell-core.md",
+      "docs/claims/0005-m15-commands-personality.md",
+      "docs/claims/0006-status-machinery.md",
+      "docs/claims/0007-status-sharding-hardening.md",
+      "docs/claims/0008-m15-transcript-test.md",
+      "docs/claims/0009-m2-marker-fallback.md",
+      "docs/claims/0011-m15-machine-controls.md",
+      "docs/claims/0012-m15-milestone-docs.md",
+      "docs/claims/0013-m15-serial-discovery.md",
+      "docs/claims/0014-status-reverify.md",
+      "docs/claims/0015-nvram-console.md",
+      "docs/claims/0016-virtio-pci-spec-review.md",
+      "docs/claims/0017-preexit-virtio-tx.md",
+      "docs/claims/0018-postexit-tx-bisect.md",
+      "docs/claims/0019-ragshit-impact.md",
+      "docs/claims/0020-tx-transition-matrix.md",
+      "docs/claims/0021-fw-mmu-capture.md",
+      "docs/claims/0022-mmu-debt-boundary.md",
+      "docs/claims/0023-mainzig-module-split.md",
+      "docs/claims/1801-coordination-hardening.md",
+      "docs/claims/TEMPLATE.md",
+      "docs/logs/agent-buffy-m15-milestone-docs.md",
+      "docs/m2-vz-serial-gate-prompt.md",
+      "tools/ragshit/CHANGELOG.md",
+      "tools/ragshit/README.md",
+      "tools/ragshit/docs/architecture.md",
+      "tools/ragshit/docs/ranking.md"
+    ],
+    "stale_warnings": [
+      "docs/claims/0017-preexit-virtio-tx.md:virtio_pci_init",
+      "docs/claims/0023-mainzig-module-split.md:virtio_pci_init",
+      "docs/logs/agent-buffy-m15-milestone-docs.md:Next steps",
+      "docs/m2-vz-serial-gate-prompt.md:Verification sequence"
+    ]
+  },
+  "range_spec": "HEAD~5..HEAD",
+  "rejected": [
+    {
+      "cost": 3428,
+      "covers": [
+        "changed_file:docs/claims/0594-verify-gate-classification.md",
+        "changed_symbol:Notes",
+        "high_risk:docs/claims/0594-verify-gate-classification.md",
+        "symbol_range:docs/claims/0594-verify-gate-classification.md:14-74"
+      ],
+      "id": "5273a0adf421308b",
+      "lines": [
+        14,
+        74
+      ],
+      "origin_changed_file": "docs/claims/0594-verify-gate-classification.md",
+      "origin_symbol": "Notes",
+      "path": "docs/claims/0594-verify-gate-classification.md",
+      "reason": "changed-symbol",
+      "rejected_because": "budget pressure (mandatory content truncated to fit)",
+      "score": 14.71
+    },
+    {
+      "cost": 1066,
+      "covers": [
+        "changed_file:docs/claims/8592-status-preflight.md",
+        "changed_symbol:Notes",
+        "high_risk:docs/claims/8592-status-preflight.md",
+        "symbol_range:docs/claims/8592-status-preflight.md:17-29"
+      ],
+      "id": "9e00d9e37da03214",
+      "lines": [
+        17,
+        29
+      ],
+      "origin_changed_file": "docs/claims/8592-status-preflight.md",
+      "origin_symbol": "Notes",
+      "path": "docs/claims/8592-status-preflight.md",
+      "reason": "changed-symbol",
+      "rejected_because": "budget pressure (mandatory content truncated to fit)",
+      "score": 14.68
+    },
+    {
+      "cost": 2199,
+      "covers": [
+        "changed_file:docs/claims/3320-ragshit-dogfood-hardening.md",
+        "changed_symbol:Notes",
+        "high_risk:docs/claims/3320-ragshit-dogfood-hardening.md",
+        "symbol_range:docs/claims/3320-ragshit-dogfood-hardening.md:9-21"
+      ],
+      "id": "04a631502d1822c6",
+      "lines": [
+        9,
+        21
+      ],
+      "origin_changed_file": "docs/claims/3320-ragshit-dogfood-hardening.md",
+      "origin_symbol": "Notes",
+      "path": "docs/claims/3320-ragshit-dogfood-hardening.md",
+      "reason": "changed-symbol",
+      "rejected_because": "budget pressure (mandatory content truncated to fit)",
+      "score": 14.54
+    },
+    {
+      "cost": 15349,
+      "covers": [
+        "changed_file:build.zig",
+        "changed_symbol:build",
+        "high_risk:build.zig",
+        "symbol_range:build.zig:1-237"
+      ],
+      "id": "99abc585e8fbc995",
+      "lines": [
+        1,
+        237
+      ],
+      "origin_changed_file": "build.zig",
+      "origin_symbol": "build",
+      "path": "build.zig",
+      "reason": "changed-symbol",
+      "rejected_because": "budget pressure (needs 15349 chars, 14327 remaining) mandatory deferred",
+      "score": 14.47
+    },
+    {
+      "cost": 937,
+      "covers": [
+        "changed_file:docs/claims/9112-ragshit-review.md",
+        "changed_symbol:Notes",
+        "high_risk:docs/claims/9112-ragshit-review.md",
+        "symbol_range:docs/claims/9112-ragshit-review.md:9-11"
+      ],
+      "id": "4ea14c539e54de78",
+      "lines": [
+        9,
+        11
+      ],
+      "origin_changed_file": "docs/claims/9112-ragshit-review.md",
+      "origin_symbol": "Notes",
+      "path": "docs/claims/9112-ragshit-review.md",
+      "reason": "changed-symbol",
+      "rejected_because": "budget pressure (mandatory content truncated to fit)",
+      "score": 14.29
+    },
+    {
+      "cost": 2571,
+      "covers": [
+        "changed_file:.github/workflows/ci.yml",
+        "changed_symbol:jobs",
+        "high_risk:.github/workflows/ci.yml",
+        "symbol_range:.github/workflows/ci.yml:21-86"
+      ],
+      "id": "540c63908c8ee157",
+      "lines": [
+        21,
+        86
+      ],
+      "origin_changed_file": ".github/workflows/ci.yml",
+      "origin_symbol": "jobs",
+      "path": ".github/workflows/ci.yml",
+      "reason": "changed-symbol",
+      "rejected_because": "budget pressure (needs 2571 chars, 3 remaining) mandatory deferred",
+      "score": 14.03
+    },
+    {
+      "cost": 893,
+      "covers": [
+        "changed_file:docs/gate-inventory.md",
+        "changed_symbol:DipshitOS verification gate inventory",
+        "high_risk:docs/gate-inventory.md",
+        "symbol_range:docs/gate-inventory.md:1-10"
+      ],
+      "id": "6a1b475f22b72a01",
+      "lines": [
+        1,
+        10
+      ],
+      "origin_changed_file": "docs/gate-inventory.md",
+      "origin_symbol": "DipshitOS verification gate inventory",
+      "path": "docs/gate-inventory.md",
+      "reason": "changed-symbol",
+      "rejected_because": "budget pressure (needs 893 chars, 3 remaining) mandatory deferred",
+      "score": 13.67
+    },
+    {
+      "cost": 1161,
+      "covers": [
+        "changed_file:docs/gate-inventory.md",
+        "changed_symbol:Classes",
+        "high_risk:docs/gate-inventory.md",
+        "symbol_range:docs/gate-inventory.md:11-26"
+      ],
+      "id": "0171348a875162b1",
+      "lines": [
+        11,
+        26
+      ],
+      "origin_changed_file": "docs/gate-inventory.md",
+      "origin_symbol": "Classes",
+      "path": "docs/gate-inventory.md",
+      "reason": "changed-symbol",
+      "rejected_because": "budget pressure (needs 1161 chars, 3 remaining) mandatory deferred",
+      "score": 13.67
+    },
+    {
+      "cost": 3763,
+      "covers": [
+        "changed_file:docs/gate-inventory.md",
+        "changed_symbol:Gate table",
+        "high_risk:docs/gate-inventory.md",
+        "symbol_range:docs/gate-inventory.md:27-69"
+      ],
+      "id": "f8715b581c83d371",
+      "lines": [
+        27,
+        69
+      ],
+      "origin_changed_file": "docs/gate-inventory.md",
+      "origin_symbol": "Gate table",
+      "path": "docs/gate-inventory.md",
+      "reason": "changed-symbol",
+      "rejected_because": "budget pressure (needs 3763 chars, 3 remaining) mandatory deferred",
+      "score": 13.67
+    },
+    {
+      "cost": 3063,
+      "covers": [
+        "changed_file:docs/gate-inventory.md",
+        "changed_symbol:Machine-readable records",
+        "high_risk:docs/gate-inventory.md",
+        "symbol_range:docs/gate-inventory.md:70-102"
+      ],
+      "id": "23f3b97788aef5cb",
+      "lines": [
+        70,
+        102
+      ],
+      "origin_changed_file": "docs/gate-inventory.md",
+      "origin_symbol": "Machine-readable records",
+      "path": "docs/gate-inventory.md",
+      "reason": "changed-symbol",
+      "rejected_because": "budget pressure (needs 3063 chars, 3 remaining) mandatory deferred",
+      "score": 13.67
+    },
+    {
+      "cost": 1982,
+      "covers": [
+        "changed_file:docs/roadmap.md",
+        "changed_symbol:Milestone two \u2014 the kernel proper (implemented; VZ serial gate not passed)",
+        "high_risk:docs/roadmap.md",
+        "symbol_range:docs/roadmap.md:62-88"
+      ],
+      "id": "c6660c89f077a59d",
+      "lines": [
+        62,
+        88
+      ],
+      "origin_changed_file": "docs/roadmap.md",
+      "origin_symbol": "Milestone two \u2014 the kernel proper (implemented; VZ serial gate not passed)",
+      "path": "docs/roadmap.md",
+      "reason": "changed-symbol",
+      "rejected_because": "budget pressure (needs 1982 chars, 3 remaining) mandatory deferred",
+      "score": 13.62
+    },
+    {
+      "cost": 1225,
+      "covers": [
+        "changed_file:docs/roadmap.md",
+        "changed_symbol:Milestone-two evidence status",
+        "high_risk:docs/roadmap.md",
+        "symbol_range:docs/roadmap.md:159-173"
+      ],
+      "id": "44fb198108398b9c",
+      "lines": [
+        159,
+        173
+      ],
+      "origin_changed_file": "docs/roadmap.md",
+      "origin_symbol": "Milestone-two evidence status",
+      "path": "docs/roadmap.md",
+      "reason": "changed-symbol",
+      "rejected_because": "budget pressure (needs 1225 chars, 3 remaining) mandatory deferred",
+      "score": 13.62
+    },
+    {
+      "cost": 2573,
+      "covers": [
+        "changed_file:docs/roadmap.md",
+        "changed_symbol:Milestone 1.5 \u2014 interactive kernel monitor (current)",
+        "high_risk:docs/roadmap.md",
+        "symbol_range:docs/roadmap.md:174-211"
+      ],
+      "id": "dc64cc6f39427580",
+      "lines": [
+        174,
+        211
+      ],
+      "origin_changed_file": "docs/roadmap.md",
+      "origin_symbol": "Milestone 1.5 \u2014 interactive kernel monitor (current)",
+      "path": "docs/roadmap.md",
+      "reason": "changed-symbol",
+      "rejected_because": "budget pressure (needs 2573 chars, 3 remaining) mandatory deferred",
+      "score": 13.62
+    },
+    {
+      "cost": 1377,
+      "covers": [
+        "changed_file:docs/roadmap.md",
+        "changed_symbol:Later milestones (sketches only, not commitments)",
+        "high_risk:docs/roadmap.md",
+        "symbol_range:docs/roadmap.md:212-228"
+      ],
+      "id": "a766a2f2268dbd12",
+      "lines": [
+        212,
+        228
+      ],
+      "origin_changed_file": "docs/roadmap.md",
+      "origin_symbol": "Later milestones (sketches only, not commitments)",
+      "path": "docs/roadmap.md",
+      "reason": "changed-symbol",
+      "rejected_because": "budget pressure (needs 1377 chars, 3 remaining) mandatory deferred",
+      "score": 13.62
+    },
+    {
+      "cost": 2005,
+      "covers": [
+        "changed_file:docs/architecture.md",
+        "changed_symbol:Current state",
+        "high_risk:docs/architecture.md",
+        "symbol_range:docs/architecture.md:9-35"
+      ],
+      "id": "0d65c72272b99b7c",
+      "lines": [
+        9,
+        35
+      ],
+      "origin_changed_file": "docs/architecture.md",
+      "origin_symbol": "Current state",
+      "path": "docs/architecture.md",
+      "reason": "changed-symbol",
+      "rejected_because": "budget pressure (needs 2005 chars, 3 remaining) mandatory deferred",
+      "score": 12.92
+    },
+    {
+      "cost": 1460,
+      "covers": [
+        "changed_file:docs/architecture.md",
+        "changed_symbol:Data flow",
+        "high_risk:docs/architecture.md",
+        "symbol_range:docs/architecture.md:47-65"
+      ],
+      "id": "a200e4951f3f228f",
+      "lines": [
+        47,
+        65
+      ],
+      "origin_changed_file": "docs/architecture.md",
+      "origin_symbol": "Data flow",
+      "path": "docs/architecture.md",
+      "reason": "changed-symbol",
+      "rejected_because": "budget pressure (needs 1460 chars, 3 remaining) mandatory deferred",
+      "score": 12.92
+    },
+    {
+      "cost": 2265,
+      "covers": [
+        "changed_file:docs/architecture.md",
+        "changed_symbol:Interfaces",
+        "high_risk:docs/architecture.md",
+        "symbol_range:docs/architecture.md:66-97"
+      ],
+      "id": "a54e0ea2fe9e3d52",
+      "lines": [
+        66,
+        97
+      ],
+      "origin_changed_file": "docs/architecture.md",
+      "origin_symbol": "Interfaces",
+      "path": "docs/architecture.md",
+      "reason": "changed-symbol",
+      "rejected_because": "budget pressure (needs 2265 chars, 3 remaining) mandatory deferred",
+      "score": 12.92
+    },
+    {
+      "cost": 1294,
+      "covers": [
+        "changed_file:docs/hardware-contract.md",
+        "changed_symbol:Milestone two: the kernel proper (implemented, ADR 0004 \u2014 MMU/serial findings are **[observed]** per claims 0010/0013/0020/0021; the remaining items below stay **[inferred]**)",
+        "high_risk:docs/hardware-contract.md",
+        "symbol_range:docs/hardware-contract.md:106-115"
+      ],
+      "id": "d7f739b4bb1c5c6a",
+      "lines": [
+        106,
+        115
+      ],
+      "origin_changed_file": "docs/hardware-contract.md",
+      "origin_symbol": "Milestone two: the kernel proper (implemented, ADR 0004 \u2014 MMU/serial findings are **[observed]** per claims 0010/0013/0020/0021; the remaining items below stay **[inferred]**)",
+      "path": "docs/hardware-contract.md",
+      "reason": "changed-symbol",
+      "rejected_because": "budget pressure (needs 1294 chars, 3 remaining) mandatory deferred",
+      "score": 12.89
+    },
+    {
+      "cost": 2649,
+      "covers": [
+        "changed_file:docs/hardware-contract.md",
+        "changed_symbol:MMIO / serial console (UART)",
+        "high_risk:docs/hardware-contract.md",
+        "symbol_range:docs/hardware-contract.md:179-214"
+      ],
+      "id": "740eff0a2b180c24",
+      "lines": [
+        179,
+        214
+      ],
+      "origin_changed_file": "docs/hardware-contract.md",
+      "origin_symbol": "MMIO / serial console (UART)",
+      "path": "docs/hardware-contract.md",
+      "reason": "changed-symbol",
+      "rejected_because": "budget pressure (needs 2649 chars, 3 remaining) mandatory deferred",
+      "score": 12.89
+    },
+    {
+      "cost": 10512,
+      "covers": [
+        "changed_file:kernel/src/virtio_console.zig",
+        "changed_symbol:virtio_pci_init",
+        "high_risk:kernel/src/virtio_console.zig",
+        "symbol_range:kernel/src/virtio_console.zig:165-395"
+      ],
+      "id": "cf28df7c90cb1322",
+      "lines": [
+        165,
+        395
+      ],
+      "origin_changed_file": "kernel/src/virtio_console.zig",
+      "origin_symbol": "virtio_pci_init",
+      "path": "kernel/src/virtio_console.zig",
+      "reason": "changed-symbol",
+      "rejected_because": "budget pressure (needs 10512 chars, 3 remaining) mandatory deferred",
+      "score": 12.74
+    },
+    {
+      "cost": 5243,
+      "covers": [
+        "changed_file:justfile",
+        "high_risk:justfile"
+      ],
+      "id": "6fd3c30035594211",
+      "lines": [
+        1,
+        120
+      ],
+      "origin_changed_file": "justfile",
+      "origin_symbol": null,
+      "path": "justfile",
+      "reason": "changed-chunk",
+      "rejected_because": "budget pressure (mandatory content truncated to fit)",
+      "score": 12.53
+    },
+    {
+      "cost": 1858,
+      "covers": [
+        "changed_file:justfile",
+        "high_risk:justfile"
+      ],
+      "id": "41f426d10ba66915",
+      "lines": [
+        101,
+        146
+      ],
+      "origin_changed_file": "justfile",
+      "origin_symbol": null,
+      "path": "justfile",
+      "reason": "changed-chunk",
+      "rejected_because": "budget pressure (needs 1858 chars, 3 remaining) mandatory deferred",
+      "score": 12.53
+    },
+    {
+      "cost": 8531,
+      "covers": [
+        "changed_file:docs/claims/README.md",
+        "changed_symbol:Active claims index",
+        "symbol_range:docs/claims/README.md:56-96"
+      ],
+      "id": "93823bfff45a0fb6",
+      "lines": [
+        56,
+        96
+      ],
+      "origin_changed_file": "docs/claims/README.md",
+      "origin_symbol": "Active claims index",
+      "path": "docs/claims/README.md",
+      "reason": "changed-symbol",
+      "rejected_because": "budget pressure (needs 8531 chars, 3 remaining) mandatory deferred",
+      "score": 12.23
+    },
+    {
+      "cost": 4612,
+      "covers": [
+        "changed_file:docs/logs/README.md",
+        "changed_symbol:Log index",
+        "symbol_range:docs/logs/README.md:36-71"
+      ],
+      "id": "2cc22152ef05309a",
+      "lines": [
+        36,
+        71
+      ],
+      "origin_changed_file": "docs/logs/README.md",
+      "origin_symbol": "Log index",
+      "path": "docs/logs/README.md",
+      "reason": "changed-symbol",
+      "rejected_because": "budget pressure (needs 4612 chars, 3 remaining) mandatory deferred",
+      "score": 12.08
+    },
+    {
+      "cost": 1321,
+      "covers": [
+        "changed_file:docs/logs/freebuff-ragshit-review.md",
+        "changed_symbol:Log \u2014 `freebuff/ragshit-review`",
+        "symbol_range:docs/logs/freebuff-ragshit-review.md:1-7"
+      ],
+      "id": "897b7cee00ed5d75",
+      "lines": [
+        1,
+        7
+      ],
+      "origin_changed_file": "docs/logs/freebuff-ragshit-review.md",
+      "origin_symbol": "Log \u2014 `freebuff/ragshit-review`",
+      "path": "docs/logs/freebuff-ragshit-review.md",
+      "reason": "changed-symbol",
+      "rejected_because": "budget pressure (needs 1321 chars, 3 remaining) mandatory deferred",
+      "score": 11.76
+    },
+    {
+      "cost": 2963,
+      "covers": [
+        "changed_file:docs/logs/freebuff-you-are-working-in-the-dipshitos-repository-on-cur-264903eb-313e-440f-a0e4-224e3311933d.md",
+        "changed_symbol:Log \u2014 freebuff/you-are-working-in-the-dipshitos-repository-on-cur-264903eb-313e-440f-a0e4-224e3311933d",
+        "symbol_range:docs/logs/freebuff-you-are-working-in-the-dipshitos-repository-on-cur-264903eb-313e-440f-a0e4-224e3311933d.md:1-4"
+      ],
+      "id": "d862b08f232ba374",
+      "lines": [
+        1,
+        4
+      ],
+      "origin_changed_file": "docs/logs/freebuff-you-are-working-in-the-dipshitos-repository-on-cur-264903eb-313e-440f-a0e4-224e3311933d.md",
+      "origin_symbol": "Log \u2014 freebuff/you-are-working-in-the-dipshitos-repository-on-cur-264903eb-313e-440f-a0e4-224e3311933d",
+      "path": "docs/logs/freebuff-you-are-working-in-the-dipshitos-repository-on-cur-264903eb-313e-440f-a0e4-224e3311933d.md",
+      "reason": "changed-symbol",
+      "rejected_because": "budget pressure (needs 2963 chars, 3 remaining) mandatory deferred",
+      "score": 11.56
+    },
+    {
+      "cost": 1446,
+      "covers": [
+        "changed_file:docs/logs/freebuff-stale-doc-cleanup.md",
+        "changed_symbol:Log \u2014 stale-doc cleanup (claim 3109)",
+        "symbol_range:docs/logs/freebuff-stale-doc-cleanup.md:1-3"
+      ],
+      "id": "5b5326c6d0f2f07c",
+      "lines": [
+        1,
+        3
+      ],
+      "origin_changed_file": "docs/logs/freebuff-stale-doc-cleanup.md",
+      "origin_symbol": "Log \u2014 stale-doc cleanup (claim 3109)",
+      "path": "docs/logs/freebuff-stale-doc-cleanup.md",
+      "reason": "changed-symbol",
+      "rejected_because": "budget pressure (needs 1446 chars, 3 remaining) mandatory deferred",
+      "score": 11.47
+    },
+    {
+      "cost": 2358,
+      "covers": [
+        "changed_file:docs/logs/freebuff-pull-latest-dipshitos-main-after-all-preceding-rel-1fe779b0-133e-4303-81f1-397087634352.md",
+        "changed_symbol:Log \u2014 status-preflight review (claim 8592)",
+        "symbol_range:docs/logs/freebuff-pull-latest-dipshitos-main-after-all-preceding-rel-1fe779b0-133e-4303-81f1-397087634352.md:1-4"
+      ],
+      "id": "5cd708c58ac1c8ad",
+      "lines": [
+        1,
+        4
+      ],
+      "origin_changed_file": "docs/logs/freebuff-pull-latest-dipshitos-main-after-all-preceding-rel-1fe779b0-133e-4303-81f1-397087634352.md",
+      "origin_symbol": "Log \u2014 status-preflight review (claim 8592)",
+      "path": "docs/logs/freebuff-pull-latest-dipshitos-main-after-all-preceding-rel-1fe779b0-133e-4303-81f1-397087634352.md",
+      "reason": "changed-symbol",
+      "rejected_because": "budget pressure (needs 2358 chars, 3 remaining) mandatory deferred",
+      "score": 11.34
+    },
+    {
+      "cost": 1443,
+      "covers": [
+        "changed_file:docs/logs/freebuff-pull-latest-dipshitos-main-ebe15999-a14a-4066-9551-00deb3d2323a.md",
+        "changed_symbol:Log \u2014 verification gate classification (claim 0594)",
+        "symbol_range:docs/logs/freebuff-pull-latest-dipshitos-main-ebe15999-a14a-4066-9551-00deb3d2323a.md:1-3"
+      ],
+      "id": "391c4a6296925273",
+      "lines": [
+        1,
+        3
+      ],
+      "origin_changed_file": "docs/logs/freebuff-pull-latest-dipshitos-main-ebe15999-a14a-4066-9551-00deb3d2323a.md",
+      "origin_symbol": "Log \u2014 verification gate classification (claim 0594)",
+      "path": "docs/logs/freebuff-pull-latest-dipshitos-main-ebe15999-a14a-4066-9551-00deb3d2323a.md",
+      "reason": "changed-symbol",
+      "rejected_because": "budget pressure (needs 1443 chars, 3 remaining) mandatory deferred",
+      "score": 11.25
+    },
+    {
+      "cost": 12579,
+      "covers": [
+        "changed_file:docs/march-m15.md",
+        "changed_symbol:M1.5 march \u2014 Interactive Kernel Monitor (living tracker)",
+        "symbol_range:docs/march-m15.md:1-41"
+      ],
+      "id": "a8a4f34a4f23668b",
+      "lines": [
+        1,
+        41
+      ],
+      "origin_changed_file": "docs/march-m15.md",
+      "origin_symbol": "M1.5 march \u2014 Interactive Kernel Monitor (living tracker)",
+      "path": "docs/march-m15.md",
+      "reason": "changed-symbol",
+      "rejected_because": "budget pressure (needs 12579 chars, 3 remaining) mandatory deferred",
+      "score": 11.18
+    },
+    {
+      "cost": 542,
+      "covers": [
+        "changed_symbol:build",
+        "doc:.github/PULL_REQUEST_TEMPLATE.md",
+        "related:documentation-reference:build"
+      ],
+      "id": "eac0d946fbde342f",
+      "lines": [
+        21,
+        25
+      ],
+      "origin_changed_file": null,
+      "origin_symbol": "build",
+      "path": ".github/PULL_REQUEST_TEMPLATE.md",
+      "reason": "documentation-reference",
+      "rejected_because": "budget pressure (mandatory content truncated to fit)",
+      "score": 6.0
+    },
+    {
+      "cost": 733,
+      "covers": [
+        "changed_symbol:build",
+        "doc:.github/PULL_REQUEST_TEMPLATE.md",
+        "related:documentation-reference:build"
+      ],
+      "id": "31c432b1ba96f864",
+      "lines": [
+        29,
+        38
+      ],
+      "origin_changed_file": null,
+      "origin_symbol": "build",
+      "path": ".github/PULL_REQUEST_TEMPLATE.md",
+      "reason": "documentation-reference",
+      "rejected_because": "budget pressure (mandatory content truncated to fit)",
+      "score": 6.0
+    },
+    {
+      "cost": 763,
+      "covers": [
+        "changed_symbol:The guest",
+        "doc:AGENTS.md",
+        "related:documentation-reference:The guest"
+      ],
+      "id": "afdad382697736e5",
+      "lines": [
+        5,
+        14
+      ],
+      "origin_changed_file": null,
+      "origin_symbol": "The guest",
+      "path": "AGENTS.md",
+      "reason": "documentation-reference",
+      "rejected_because": "budget pressure (mandatory content truncated to fit)",
+      "score": 6.0
+    },
+    {
+      "cost": 1054,
+      "covers": [
+        "changed_symbol:The guest",
+        "doc:AGENTS.md",
+        "related:documentation-reference:The guest"
+      ],
+      "id": "d9d0638cad52acbe",
+      "lines": [
+        23,
+        36
+      ],
+      "origin_changed_file": null,
+      "origin_symbol": "The guest",
+      "path": "AGENTS.md",
+      "reason": "documentation-reference",
+      "rejected_because": "budget pressure (mandatory content truncated to fit)",
+      "score": 6.0
+    },
+    {
+      "cost": 2101,
+      "covers": [
+        "changed_symbol:Log index",
+        "doc:AGENTS.md",
+        "related:documentation-reference:Log index"
+      ],
+      "id": "60ef73c585a00f7e",
+      "lines": [
+        63,
+        92
+      ],
+      "origin_changed_file": null,
+      "origin_symbol": "Log index",
+      "path": "AGENTS.md",
+      "reason": "documentation-reference",
+      "rejected_because": "budget pressure (mandatory content truncated to fit)",
+      "score": 6.0
+    },
+    {
+      "cost": 668,
+      "covers": [
+        "changed_symbol:DipshitOS",
+        "doc:docs/branch-protection.md",
+        "related:documentation-reference:DipshitOS"
+      ],
+      "id": "65be4eeac3b99c46",
+      "lines": [
+        1,
+        6
+      ],
+      "origin_changed_file": null,
+      "origin_symbol": "DipshitOS",
+      "path": "docs/branch-protection.md",
+      "reason": "documentation-reference",
+      "rejected_because": "budget pressure (mandatory content truncated to fit)",
+      "score": 6.0
+    },
+    {
+      "cost": 1424,
+      "covers": [
+        "changed_symbol:DipshitOS",
+        "doc:docs/branch-protection.md",
+        "related:documentation-reference:DipshitOS"
+      ],
+      "id": "9b4b669484dc005f",
+      "lines": [
+        11,
+        31
+      ],
+      "origin_changed_file": null,
+      "origin_symbol": "DipshitOS",
+      "path": "docs/branch-protection.md",
+      "reason": "documentation-reference",
+      "rejected_because": "budget pressure (mandatory content truncated to fit)",
+      "score": 6.0
+    },
+    {
+      "cost": 1480,
+      "covers": [
+        "changed_symbol:build",
+        "doc:docs/branch-protection.md",
+        "related:documentation-reference:build"
+      ],
+      "id": "8c8716628a303099",
+      "lines": [
+        36,
+        74
+      ],
+      "origin_changed_file": null,
+      "origin_symbol": "build",
+      "path": "docs/branch-protection.md",
+      "reason": "documentation-reference",
+      "rejected_because": "budget pressure (mandatory content truncated to fit)",
+      "score": 6.0
+    },
+    {
+      "cost": 787,
+      "covers": [
+        "changed_symbol:Notes",
+        "doc:docs/claims/0001-bad-handoff-gate.md",
+        "related:claim-reference:Notes"
+      ],
+      "id": "a88574112a70a77e",
+      "lines": [
+        9,
+        18
+      ],
+      "origin_changed_file": null,
+      "origin_symbol": "Notes",
+      "path": "docs/claims/0001-bad-handoff-gate.md",
+      "reason": "claim-reference",
+      "rejected_because": "budget pressure (mandatory content truncated to fit)",
+      "score": 5.0
+    },
+    {
+      "cost": 1282,
+      "covers": [
+        "changed_symbol:DipshitOS",
+        "doc:docs/claims/0002-vz-serial-gate.md",
+        "related:claim-reference:DipshitOS"
+      ],
+      "id": "a548ddec006aec03",
+      "lines": [
+        9,
+        26
+      ],
+      "origin_changed_file": null,
+      "origin_symbol": "DipshitOS",
+      "path": "docs/claims/0002-vz-serial-gate.md",
+      "reason": "claim-reference",
+      "rejected_because": "budget pressure (mandatory content truncated to fit)",
+      "score": 5.0
+    },
+    {
+      "cost": 1936,
+      "covers": [
+        "changed_symbol:Verification sequence",
+        "doc:docs/claims/0002-vz-serial-gate.md",
+        "related:claim-reference:Verification sequence"
+      ],
+      "id": "444a36361e240764",
+      "lines": [
+        27,
+        53
+      ],
+      "origin_changed_file": null,
+      "origin_symbol": "Verification sequence",
+      "path": "docs/claims/0002-vz-serial-gate.md",
+      "reason": "claim-reference",
+      "rejected_because": "budget pressure (mandatory content truncated to fit)",
+      "score": 5.0
+    },
+    {
+      "cost": 690,
+      "covers": [
+        "changed_symbol:build",
+        "doc:docs/claims/0003-m15-host-plumbing.md",
+        "related:claim-reference:build"
+      ],
+      "id": "801346655947f3ab",
+      "lines": [
+        1,
+        8
+      ],
+      "origin_changed_file": null,
+      "origin_symbol": "build",
+      "path": "docs/claims/0003-m15-host-plumbing.md",
+      "reason": "claim-reference",
+      "rejected_because": "budget pressure (mandatory content truncated to fit)",
+      "score": 5.0
+    },
+    {
+      "cost": 746,
+      "covers": [
+        "changed_symbol:Notes",
+        "doc:docs/claims/0003-m15-host-plumbing.md",
+        "related:claim-reference:Notes"
+      ],
+      "id": "25a390ae617f5a58",
+      "lines": [
+        9,
+        16
+      ],
+      "origin_changed_file": null,
+      "origin_symbol": "Notes",
+      "path": "docs/claims/0003-m15-host-plumbing.md",
+      "reason": "claim-reference",
+      "rejected_because": "budget pressure (mandatory content truncated to fit)",
+      "score": 5.0
+    },
+    {
+      "cost": 1608,
+      "covers": [
+        "changed_symbol:Notes",
+        "doc:docs/claims/0004-m15-console-shell-core.md",
+        "related:claim-reference:Notes"
+      ],
+      "id": "35cfc5804d9f2830",
+      "lines": [
+        9,
+        33
+      ],
+      "origin_changed_file": null,
+      "origin_symbol": "Notes",
+      "path": "docs/claims/0004-m15-console-shell-core.md",
+      "reason": "claim-reference",
+      "rejected_because": "budget pressure (mandatory content truncated to fit)",
+      "score": 5.0
+    },
+    {
+      "cost": 828,
+      "covers": [
+        "changed_symbol:Notes",
+        "doc:docs/claims/0005-m15-commands-personality.md",
+        "related:claim-reference:Notes"
+      ],
+      "id": "ced0074f169c2bf1",
+      "lines": [
+        9,
+        17
+      ],
+      "origin_changed_file": null,
+      "origin_symbol": "Notes",
+      "path": "docs/claims/0005-m15-commands-personality.md",
+      "reason": "claim-reference",
+      "rejected_because": "budget pressure (mandatory content truncated to fit)",
+      "score": 5.0
+    },
+    {
+      "cost": 649,
+      "covers": [
+        "changed_symbol:Notes",
+        "doc:docs/claims/0006-status-machinery.md",
+        "related:claim-reference:Notes"
+      ],
+      "id": "d1a7222979049bbd",
+      "lines": [
+        9,
+        15
+      ],
+      "origin_changed_file": null,
+      "origin_symbol": "Notes",
+      "path": "docs/claims/0006-status-machinery.md",
+      "reason": "claim-reference",
+      "rejected_because": "budget pressure (mandatory content truncated to fit)",
+      "score": 5.0
+    },
+    {
+      "cost": 1917,
+      "covers": [
+        "changed_symbol:Notes",
+        "doc:docs/claims/0007-status-sharding-hardening.md",
+        "related:claim-reference:Notes"
+      ],
+      "id": "6d0bf3ef434c1b3f",
+      "lines": [
+        9,
+        35
+      ],
+      "origin_changed_file": null,
+      "origin_symbol": "Notes",
+      "path": "docs/claims/0007-status-sharding-hardening.md",
+      "reason": "claim-reference",
+      "rejected_because": "budget pressure (mandatory content truncated to fit)",
+      "score": 5.0
+    },
+    {
+      "cost": 2389,
+      "covers": [
+        "changed_symbol:Notes",
+        "doc:docs/claims/0008-m15-transcript-test.md",
+        "related:claim-reference:Notes"
+      ],
+      "id": "49b83dd39ca3b542",
+      "lines": [
+        9,
+        47
+      ],
+      "origin_changed_file": null,
+      "origin_symbol": "Notes",
+      "path": "docs/claims/0008-m15-transcript-test.md",
+      "reason": "claim-reference",
+      "rejected_because": "budget pressure (mandatory content truncated to fit)",
+      "score": 5.0
+    },
+    {
+      "cost": 2124,
+      "covers": [
+        "changed_symbol:Notes",
+        "doc:docs/claims/0009-m2-marker-fallback.md",
+        "related:claim-reference:Notes"
+      ],
+      "id": "65b3bff3f2263843",
+      "lines": [
+        13,
+        44
+      ],
+      "origin_changed_file": null,
+      "origin_symbol": "Notes",
+      "path": "docs/claims/0009-m2-marker-fallback.md",
+      "reason": "claim-reference",
+      "rejected_because": "budget pressure (mandatory content truncated to fit)",
+      "score": 5.0
+    },
+    {
+      "cost": 4621,
+      "covers": [
+        "changed_symbol:Notes",
+        "doc:docs/claims/0011-m15-machine-controls.md",
+        "related:claim-reference:Notes"
+      ],
+      "id": "3b40e75c00677cb4",
+      "lines": [
+        29,
+        98
+      ],
+      "origin_changed_file": null,
+      "origin_symbol": "Notes",
+      "path": "docs/claims/0011-m15-machine-controls.md",
+      "reason": "claim-reference",
+      "rejected_because": "budget pressure (mandatory content truncated to fit)",
+      "score": 5.0
+    }
+  ],
+  "repo_id": "abebfa76090cbb914cb2122f03baeba8e71b7d2118711ed334a03944f2baf625",
+  "repo_root": "/private/tmp/ragshit-before",
+  "requested_budget": 40000,
+  "review_version": "1",
+  "schema_version": "ragshit.review/v1",
+  "selected": [
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "components": {
+        "file_priority": 5.0,
+        "reason": 10.0
+      },
+      "content": "#\u2026\n... [truncated 50 line(s) omitted -- retained 1 of 51 line(s)]",
+      "content_hash": "4179e1ca3cd72c2b",
+      "cost": 348,
+      "covers": [
+        "changed_file:README.md",
+        "changed_symbol:DipshitOS",
+        "high_risk:README.md",
+        "symbol_range:README.md:1-52"
+      ],
+      "heading": "DipshitOS",
+      "id": "3187e1f041e39f11",
+      "kind": "section",
+      "language": "markdown",
+      "lines": [
+        1,
+        1
+      ],
+      "origin_changed_file": "README.md",
+      "origin_symbol": "DipshitOS",
+      "path": "README.md",
+      "provenance": "commit:fff37a5e6af8476c273dc959aefce0f412e11554 index:fff37a5e6af8",
+      "reason": "changed-symbol",
+      "score": 15.0,
+      "structural_name": "DipshitOS",
+      "symbol_kind": "heading"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "components": {
+        "file_priority": 5.0,
+        "reason": 10.0
+      },
+      "content": "## The guest\n\n`boot/src/main.zig` is an AArch64 UEFI application \u2014 now a tiny boot\n**loader**. It prints via the UEFI Simple Text Output protocol, writes its\nevidence to `\\BOOTED.TXT` on the ESP (Apple silicon exposes no visible text\nchannel, see *Observed behavior*), then loads the separate kernel image\n`\\KERNEL.BIN` (flat format v1, see `docs/decisions/0002-kernel-handoff.md`)\nfrom the ESP, allocates `EfiLoaderCode` pages, copies the image, performs\nD/I-cache maintenance, and jumps to the kernel entry. It writes\n`\\LOADER.TXT` (observed placement), `\\MEMMAP.TXT` (EFI memory map), and\n`\\RC.TXT` (the kernel's return code) as host-readable evidence.\n\n`kernel/src/main.zig` is the milestone-two freestanding kernel proper. It\nvalidates handoff v2, captures the map, exits Boot Services, builds and\ninstalls identity TTBR0_EL1 tables, probes PL011/16550/virtio-MMIO candidates,\nand is designed to print the takeover banner and enter a terminal WFE loop\n(**not yet observed on VZ** \u2014 post-exit access to the virtio-pci console\ntransport hangs; see `docs/status.md`). Its fixed page tables and virtio queue storage are BSS\ncarve-outs; there is no general allocator or libc/POSIX. Milestone 1.5 adds\nthe interactive monitor (`kernel/src/{console,lineedit,tokenizer,shell,monitor}.zig`).\n",
+      "content_hash": "c9c2dad9eea76e940ee6fac2c418062ccb581fea8986d538af5eacf10cb50e6a",
+      "cost": 1573,
+      "covers": [
+        "changed_file:README.md",
+        "changed_symbol:The guest",
+        "high_risk:README.md",
+        "symbol_range:README.md:53-73"
+      ],
+      "heading": "DipshitOS > The guest",
+      "id": "a6688543a1f06c2f",
+      "kind": "section",
+      "language": "markdown",
+      "lines": [
+        53,
+        73
+      ],
+      "origin_changed_file": "README.md",
+      "origin_symbol": "The guest",
+      "path": "README.md",
+      "provenance": "commit:fff37a5e6af8476c273dc959aefce0f412e11554 index:fff37a5e6af8",
+      "reason": "changed-symbol",
+      "score": 15.0,
+      "structural_name": "The guest",
+      "symbol_kind": "heading"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "components": {
+        "file_priority": 5.0,
+        "reason": 10.0
+      },
+      "content": "#\u2026\n... [truncated 34 line(s) omitted -- retained 1 of 35 line(s)]",
+      "content_hash": "083a17baf0099b54",
+      "cost": 449,
+      "covers": [
+        "changed_file:README.md",
+        "changed_symbol:Verification results (observed on this development host)",
+        "high_risk:README.md",
+        "symbol_range:README.md:160-195"
+      ],
+      "heading": "DipshitOS > Verification results (observed on this development host)",
+      "id": "ddba772d5ddef443",
+      "kind": "section",
+      "language": "markdown",
+      "lines": [
+        160,
+        160
+      ],
+      "origin_changed_file": "README.md",
+      "origin_symbol": "Verification results (observed on this development host)",
+      "path": "README.md",
+      "provenance": "commit:fff37a5e6af8476c273dc959aefce0f412e11554 index:fff37a5e6af8",
+      "reason": "changed-symbol",
+      "score": 15.0,
+      "structural_name": "Verification results (observed on this development host)",
+      "symbol_kind": "heading"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "components": {
+        "file_priority": 5.0,
+        "reason": 10.0
+      },
+      "content": "### Observed behavior\n\n- `zig build`, `image`, and `inspect` complete on this host. The milestone-two\n  `run` gate remains blocked on serial evidence, but the gates around it\n  now pass: `bash tools/verify-bad-handoff.sh` (failure path,\n  `kernel_rc=0x2`), `bash tools/verify-marker.sh` (NVRAM marker ladder \u2014\n  the MMU-takeover death was root-caused and fixed, claim 0010, so the\n  ladder reaches `M2_SERIA`), `zig build test-console` (M1.5 transcript\n  gate, mock console), and `bash tools/verify-host-console.sh` (M1.5 host\n  plumbing). The M1.5 monitor (14 commands) is implemented and\n  host-tested; the VZ serial gate's remaining blocker is post-exit access\n  to the virtio-pci console transport (see `docs/status.md`).\n- The Virtualization.framework VM boots the GPT+FAT image: configuration\n  validates, the EFI variable store is created, the VM starts and runs, and\n  after boot the guest-written marker file `\\BOOTED.TXT` exists on the ESP\n  with the exact expected content. **This is direct evidence that the Zig\n  UEFI application executed under Apple's firmware.**\n- Apple's VZ EFI firmware does **not** route UEFI text to the virtio serial\n  console (`vm-serial.log` is empty) nor render it to the virtio-gpu\n  framebuffer (captured PNGs are blank; OCR finds no text). Hence the\n  marker-file mechanism \u2014 no claim is made that serial output works on VZ.\n",
+      "content_hash": "3d64db4692294af1b2803e58904d1828cbb1046449b8dac62e088fb9cb5ed9e9",
+      "cost": 1673,
+      "covers": [
+        "changed_file:README.md",
+        "changed_symbol:Observed behavior",
+        "high_risk:README.md",
+        "symbol_range:README.md:196-217"
+      ],
+      "heading": "DipshitOS > Verification results (observed on this development host) > Observed behavior",
+      "id": "b57863b4bef66845",
+      "kind": "section",
+      "language": "markdown",
+      "lines": [
+        196,
+        217
+      ],
+      "origin_changed_file": "README.md",
+      "origin_symbol": "Observed behavior",
+      "path": "README.md",
+      "provenance": "commit:fff37a5e6af8476c273dc959aefce0f412e11554 index:fff37a5e6af8",
+      "reason": "changed-symbol",
+      "score": 15.0,
+      "structural_name": "Observed behavior",
+      "symbol_kind": "heading"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "components": {
+        "file_priority": 5.0,
+        "reason": 10.0
+      },
+      "content": "#\u2026\n... [truncated 26 line(s) omitted -- retained 1 of 27 line(s)]",
+      "content_hash": "00e18f0b17586749",
+      "cost": 357,
+      "covers": [
+        "changed_file:README.md",
+        "changed_symbol:Next steps",
+        "high_risk:README.md",
+        "symbol_range:README.md:224-250"
+      ],
+      "heading": "DipshitOS > Next steps",
+      "id": "2408beaf470fc675",
+      "kind": "section",
+      "language": "markdown",
+      "lines": [
+        224,
+        224
+      ],
+      "origin_changed_file": "README.md",
+      "origin_symbol": "Next steps",
+      "path": "README.md",
+      "provenance": "commit:fff37a5e6af8476c273dc959aefce0f412e11554 index:fff37a5e6af8",
+      "reason": "changed-symbol",
+      "score": 15.0,
+      "structural_name": "Next steps",
+      "symbol_kind": "heading"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "components": {
+        "file_priority": 4.71,
+        "reason": 10.0
+      },
+      "content": "# Claim: Verification gate classification \u2014 portable/build CI vs Apple-VZ hardware gates\n\n- **Owner:** buffy (`freebuff/pull-latest-dipshitos-main-ebe15999-a14a-4066-9551-00deb3d2323a`)\n- **Prompt / plan:** inline \u2014 see Notes\n- **Scope:** docs + command naming/wiring only. New `docs/gate-inventory.md`\n  (canonical A/B/C/D classification with machine-readable records),\n  `justfile` aggregates (`verify-portable`, `verify-vz`, `alias verify`),\n  CI step labels + explicit \"not proven by CI\" step, `build.zig` step-help\n  annotations, `docs/testing.md` classification section. NO kernel/host code\n  changes, NO edit to `docs/status.md`.\n- **Depends on:** \u2014\n- **Status:** \u2705 done 2026-08-08 \u2014 classification + inventory + aggregates landed; full class-A set green, coordination gate green\n",
+      "content_hash": "4580ae116c9f1e49cc300e6c2d03fea1a06f26826da227dc5da68e0a4cd93f20",
+      "cost": 1372,
+      "covers": [
+        "changed_file:docs/claims/0594-verify-gate-classification.md",
+        "changed_symbol:Claim: Verification gate classification \u2014 portable/build CI vs Apple-VZ hardware gates",
+        "high_risk:docs/claims/0594-verify-gate-classification.md",
+        "symbol_range:docs/claims/0594-verify-gate-classification.md:1-13"
+      ],
+      "heading": "Claim: Verification gate classification \u2014 portable/build CI vs Apple-VZ hardware gates",
+      "id": "f710accfced86d0f",
+      "kind": "section",
+      "language": "markdown",
+      "lines": [
+        1,
+        13
+      ],
+      "origin_changed_file": "docs/claims/0594-verify-gate-classification.md",
+      "origin_symbol": "Claim: Verification gate classification \u2014 portable/build CI vs Apple-VZ hardware gates",
+      "path": "docs/claims/0594-verify-gate-classification.md",
+      "provenance": "commit:fff37a5e6af8476c273dc959aefce0f412e11554 index:fff37a5e6af8",
+      "reason": "changed-symbol",
+      "score": 14.71,
+      "structural_name": "Claim: Verification gate classification \u2014 portable/build CI vs Apple-VZ hardware gates",
+      "symbol_kind": "heading"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "components": {
+        "file_priority": 4.71,
+        "reason": 10.0
+      },
+      "content": "# Claim: Stale-doc cleanup \u2014 replace old blocker snapshots with pointers to docs/status.md\n\n- **Owner:** buffy (`freebuff/stale-doc-cleanup`)\n- **Prompt / plan:** inline \u2014 see Notes\n- **Scope:** docs only (README, roadmap, architecture, testing, hardware-contract,\n  march-m15, plus claims/logs as needed for the before/after report). NO code\n  changes, NO edit to `docs/status.md`.\n- **Depends on:** hardware findings already on `main` (claims 0009/0010/0013/0015/0017/0018/0020/0021)\n- **Status:** \u2705 done 2026-08-08 \u2014 stale blocker snapshots removed/corrected across README, roadmap, architecture, testing, hardware-contract, march-m15; before/after stale-phrase report in `artifacts/stale-doc-report.txt` (26 \u2192 0 hits); link check clean; `docs/status.md` untouched\n",
+      "content_hash": "11f309aa2b0821ba83072f0fd9ee61b481cc2879ac347e3f51d2760ad0f37fe2",
+      "cost": 1321,
+      "covers": [
+        "changed_file:docs/claims/3109-stale-doc-cleanup.md",
+        "changed_symbol:Claim: Stale-doc cleanup \u2014 replace old blocker snapshots with pointers to docs/status.md",
+        "high_risk:docs/claims/3109-stale-doc-cleanup.md",
+        "symbol_range:docs/claims/3109-stale-doc-cleanup.md:1-10"
+      ],
+      "heading": "Claim: Stale-doc cleanup \u2014 replace old blocker snapshots with pointers to docs/status.md",
+      "id": "13f5cfc0d17acb80",
+      "kind": "section",
+      "language": "markdown",
+      "lines": [
+        1,
+        10
+      ],
+      "origin_changed_file": "docs/claims/3109-stale-doc-cleanup.md",
+      "origin_symbol": "Claim: Stale-doc cleanup \u2014 replace old blocker snapshots with pointers to docs/status.md",
+      "path": "docs/claims/3109-stale-doc-cleanup.md",
+      "provenance": "commit:fff37a5e6af8476c273dc959aefce0f412e11554 index:fff37a5e6af8",
+      "reason": "changed-symbol",
+      "score": 14.71,
+      "structural_name": "Claim: Stale-doc cleanup \u2014 replace old blocker snapshots with pointers to docs/status.md",
+      "symbol_kind": "heading"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "components": {
+        "file_priority": 4.71,
+        "reason": 10.0
+      },
+      "content": "## Notes\n\n`docs/status.md` is the canonical, always-current status. Several other docs\naccumulated snapshots of old blocker descriptions (\"device discovery is\nnext\", \"no usable serial device in declared MMIO windows\" as the whole\nblocker, pre-claim-0010 M2 death-site descriptions, old M1.5 progress\npercentages, \"monitor not implemented\", \"machine controls fake\", step-20\nlanguage that reads as milestone-closed). Goal: reduce stale duplication \u2014\nclassify each non-status document's content:\n\n1. timeless architecture/design/history \u2192 keep;\n2. current gate status \u2192 replace with a short pointer to `docs/status.md`;\n3. historical result \u2192 retain only if clearly labeled with date/context;\n4. stale or contradictory statement \u2192 remove or correct.\n\nDo NOT turn README/architecture/roadmap/testing into mirrors of status.md.\nPrefer sentences like \"Current VZ gate state: see docs/status.md.\"\n\nDeliverable: grep/link-based stale-phrase check before/after, saved as a\nreport under `docs/` or `artifacts/` (gitignored) \u2014 the before/after diff is\nthe evidence. No milestone-status duplication added anywhere.",
+      "content_hash": "304aabb9a49b09085c415fbfde9a357ef3cbdb548da082dac4e5b3febd122ee4",
+      "cost": 1492,
+      "covers": [
+        "changed_file:docs/claims/3109-stale-doc-cleanup.md",
+        "changed_symbol:Notes",
+        "high_risk:docs/claims/3109-stale-doc-cleanup.md",
+        "symbol_range:docs/claims/3109-stale-doc-cleanup.md:11-31"
+      ],
+      "heading": "Claim: Stale-doc cleanup \u2014 replace old blocker snapshots with pointers to docs/status.md > Notes",
+      "id": "1b99927f7c12d0cc",
+      "kind": "section",
+      "language": "markdown",
+      "lines": [
+        11,
+        31
+      ],
+      "origin_changed_file": "docs/claims/3109-stale-doc-cleanup.md",
+      "origin_symbol": "Notes",
+      "path": "docs/claims/3109-stale-doc-cleanup.md",
+      "provenance": "commit:fff37a5e6af8476c273dc959aefce0f412e11554 index:fff37a5e6af8",
+      "reason": "changed-symbol",
+      "score": 14.71,
+      "structural_name": "Notes",
+      "symbol_kind": "heading"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "components": {
+        "file_priority": 4.68,
+        "reason": 10.0
+      },
+      "content": "#\u2026\n... [truncated 14 line(s) omitted -- retained 1 of 15 line(s)]",
+      "content_hash": "0e9af1dc9d1efbef",
+      "cost": 626,
+      "covers": [
+        "changed_file:docs/claims/8592-status-preflight.md",
+        "changed_symbol:Claim: Final pre-status review \u2014 status-ready preflight report (artifacts/status-preflight.md)",
+        "high_risk:docs/claims/8592-status-preflight.md",
+        "symbol_range:docs/claims/8592-status-preflight.md:1-16"
+      ],
+      "heading": "Claim: Final pre-status review \u2014 status-ready preflight report (artifacts/status-preflight.md)",
+      "id": "417122d416ef4b5a",
+      "kind": "section",
+      "language": "markdown",
+      "lines": [
+        1,
+        1
+      ],
+      "origin_changed_file": "docs/claims/8592-status-preflight.md",
+      "origin_symbol": "Claim: Final pre-status review \u2014 status-ready preflight report (artifacts/status-preflight.md)",
+      "path": "docs/claims/8592-status-preflight.md",
+      "provenance": "commit:fff37a5e6af8476c273dc959aefce0f412e11554 index:fff37a5e6af8",
+      "reason": "changed-symbol",
+      "score": 14.68,
+      "structural_name": "Claim: Final pre-status review \u2014 status-ready preflight report (artifacts/status-preflight.md)",
+      "symbol_kind": "heading"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "components": {
+        "file_priority": 4.54,
+        "reason": 10.0
+      },
+      "content": "# Claim: Ragshit review dogfood-hardening \u2014 honest accounting, coverage\u2026\n... [truncated 6 line(s) omitted -- retained 1 of 7 line(s)]",
+      "content_hash": "7ecde548a533f53d",
+      "cost": 743,
+      "covers": [
+        "changed_file:docs/claims/3320-ragshit-dogfood-hardening.md",
+        "changed_symbol:Claim: Ragshit review dogfood-hardening \u2014 honest accounting, coverage, stale filter, shell importance",
+        "high_risk:docs/claims/3320-ragshit-dogfood-hardening.md",
+        "symbol_range:docs/claims/3320-ragshit-dogfood-hardening.md:1-8"
+      ],
+      "heading": "Claim: Ragshit review dogfood-hardening \u2014 honest accounting, coverage, stale filter, shell importance",
+      "id": "dec437ce1a7da99b",
+      "kind": "section",
+      "language": "markdown",
+      "lines": [
+        1,
+        1
+      ],
+      "origin_changed_file": "docs/claims/3320-ragshit-dogfood-hardening.md",
+      "origin_symbol": "Claim: Ragshit review dogfood-hardening \u2014 honest accounting, coverage, stale filter, shell importance",
+      "path": "docs/claims/3320-ragshit-dogfood-hardening.md",
+      "provenance": "commit:fff37a5e6af8476c273dc959aefce0f412e11554 index:fff37a5e6af8",
+      "reason": "changed-symbol",
+      "score": 14.54,
+      "structural_name": "Claim: Ragshit review dogfood-hardening \u2014 honest accounting, coverage, stale filter, shell importance",
+      "symbol_kind": "heading"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "components": {
+        "file_priority": 4.47,
+        "reason": 10.0
+      },
+      "content": "/\u2026\n... [truncated 236 line(s) omitted -- retained 1 of 237 line(s)]",
+      "content_hash": "c7c8046e474390a3",
+      "cost": 343,
+      "covers": [
+        "changed_file:build.zig",
+        "changed_symbol:build",
+        "high_risk:build.zig",
+        "symbol_range:build.zig:1-237"
+      ],
+      "heading": null,
+      "id": "99abc585e8fbc995",
+      "kind": "symbol",
+      "language": "zig",
+      "lines": [
+        1,
+        1
+      ],
+      "origin_changed_file": "build.zig",
+      "origin_symbol": "build",
+      "path": "build.zig",
+      "provenance": "commit:fff37a5e6af8476c273dc959aefce0f412e11554 index:fff37a5e6af8",
+      "reason": "changed-symbol",
+      "score": 14.47,
+      "structural_name": "build",
+      "symbol_kind": null
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "components": {
+        "file_priority": 4.29,
+        "reason": 10.0
+      },
+      "content": "# Claim: Ragshit `review` \u2014 deterministic budgeted reviewer context packet\n\n- **Owner:** buffy (`freebuff/ragshit-review`)\n- **Prompt / plan:** task prompt 2026-08-08 \u2014 `ragshit review <repo> <git-range> --budget-chars` with budgeted selection, coverage model, redundancy control, mandatory content, truncation, JSON schema, tests, baseline, dogfood; plan in `artifacts/review-plan.md`\n- **Scope:** `tools/ragshit/` only \u2014 new `review` package (candidates, coverage, scoring, selection, truncation, report, baseline), CLI wiring, tests, docs (`tools/ragshit/README.md`, `tools/ragshit/docs/*`), one claim/log, narrow justfile alias\n- **Depends on:** `tools/ragshit/impact` (inventory, symbol mapping, neighborhood, scoring, stale) \u2014 reuse as input; `tools/ragshit/indexing` for chunk access\n- **Status:** \u2705 done 2026-08-08 \u2014 `ragshit review . HEAD~5..HEAD --budget-chars 30000` deterministic budgeted packet; 124 passed, doctor ok, coordination ok, dogfood HEAD~1/~5/~10 at 10k/25k/50k under artifacts/review-packets/; baseline comparison measurably improved\n",
+      "content_hash": "d30d7b088d9de5b66caaeb98f7ff509e700f50d89b76f3c1b083d932e2e0785a",
+      "cost": 1566,
+      "covers": [
+        "changed_file:docs/claims/9112-ragshit-review.md",
+        "changed_symbol:Claim: Ragshit `review` \u2014 deterministic budgeted reviewer context packet",
+        "high_risk:docs/claims/9112-ragshit-review.md",
+        "symbol_range:docs/claims/9112-ragshit-review.md:1-8"
+      ],
+      "heading": "Claim: Ragshit `review` \u2014 deterministic budgeted reviewer context packet",
+      "id": "80b4b2dc642b31b7",
+      "kind": "section",
+      "language": "markdown",
+      "lines": [
+        1,
+        8
+      ],
+      "origin_changed_file": "docs/claims/9112-ragshit-review.md",
+      "origin_symbol": "Claim: Ragshit `review` \u2014 deterministic budgeted reviewer context packet",
+      "path": "docs/claims/9112-ragshit-review.md",
+      "provenance": "commit:fff37a5e6af8476c273dc959aefce0f412e11554 index:fff37a5e6af8",
+      "reason": "changed-symbol",
+      "score": 14.29,
+      "structural_name": "Claim: Ragshit `review` \u2014 deterministic budgeted reviewer context packet",
+      "symbol_kind": "heading"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "components": {
+        "file_priority": 4.15,
+        "reason": 10.0
+      },
+      "content": "# DipshitOS testing\n\n> For the current state of each verification gate (pass/fail/blocked), see\n> [`docs/status.md`](status.md). This file is the sequence and policy. The\n> canonical A/B/C/D classification of every verification command is\n> [`docs/gate-inventory.md`](gate-inventory.md).\n",
+      "content_hash": "f6d9fbd2ae2d774b6d251ac49b42b930244a7820a9519f847707df9a9a83a6db",
+      "cost": 609,
+      "covers": [
+        "changed_file:docs/testing.md",
+        "changed_symbol:DipshitOS testing",
+        "high_risk:docs/testing.md",
+        "symbol_range:docs/testing.md:1-7"
+      ],
+      "heading": "DipshitOS testing",
+      "id": "698dc3ee5a167b74",
+      "kind": "section",
+      "language": "markdown",
+      "lines": [
+        1,
+        7
+      ],
+      "origin_changed_file": "docs/testing.md",
+      "origin_symbol": "DipshitOS testing",
+      "path": "docs/testing.md",
+      "provenance": "commit:fff37a5e6af8476c273dc959aefce0f412e11554 index:fff37a5e6af8",
+      "reason": "changed-symbol",
+      "score": 14.15,
+      "structural_name": "DipshitOS testing",
+      "symbol_kind": "heading"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "components": {
+        "file_priority": 4.15,
+        "reason": 10.0
+      },
+      "content": "## Verification classes\n\nEvery verification command belongs to exactly one class (canonical inventory:\n[`docs/gate-inventory.md`](gate-inventory.md)):\n\n- **A \u2014 portable / build CI.** Deterministic, no Apple silicon, no VZ VM.\n  This is the set GitHub CI proves. A green CI badge means exactly these\n  passed \u2014 nothing more.\n- **B \u2014 Apple-silicon Virtualization.framework hardware gate.** Boots a real\n  VZ VM on Apple silicon. GitHub-hosted CI does **not** run these and cannot\n  prove them; run `just verify-vz` on a development host.\n- **C \u2014 interactive / manual hardware gate.** Requires a human at the\n  keyboard (`zig build console`).\n- **D \u2014 diagnostic experiment.** Answers a question (claims\n  0017/0018/0020/0021); **not an acceptance gate**.\n",
+      "content_hash": "e5644991e50d4265f27bad1c102232d9922ec6ee79bffcd8fe37cacb18e81d17",
+      "cost": 1081,
+      "covers": [
+        "changed_file:docs/testing.md",
+        "changed_symbol:Verification classes",
+        "high_risk:docs/testing.md",
+        "symbol_range:docs/testing.md:8-23"
+      ],
+      "heading": "DipshitOS testing > Verification classes",
+      "id": "617a9a4e6c584707",
+      "kind": "section",
+      "language": "markdown",
+      "lines": [
+        8,
+        23
+      ],
+      "origin_changed_file": "docs/testing.md",
+      "origin_symbol": "Verification classes",
+      "path": "docs/testing.md",
+      "provenance": "commit:fff37a5e6af8476c273dc959aefce0f412e11554 index:fff37a5e6af8",
+      "reason": "changed-symbol",
+      "score": 14.15,
+      "structural_name": "Verification classes",
+      "symbol_kind": "heading"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "components": {
+        "file_priority": 4.15,
+        "reason": 10.0
+      },
+      "content": "#\u2026\n... [truncated 93 line(s) omitted -- retained 1 of 94 line(s)]",
+      "content_hash": "dc07443ec8ae1ae7",
+      "cost": 400,
+      "covers": [
+        "changed_file:docs/testing.md",
+        "changed_symbol:Verification sequence",
+        "high_risk:docs/testing.md",
+        "symbol_range:docs/testing.md:34-128"
+      ],
+      "heading": "DipshitOS testing > Verification sequence",
+      "id": "52757b94c1764175",
+      "kind": "section",
+      "language": "markdown",
+      "lines": [
+        34,
+        34
+      ],
+      "origin_changed_file": "docs/testing.md",
+      "origin_symbol": "Verification sequence",
+      "path": "docs/testing.md",
+      "provenance": "commit:fff37a5e6af8476c273dc959aefce0f412e11554 index:fff37a5e6af8",
+      "reason": "changed-symbol",
+      "score": 14.15,
+      "structural_name": "Verification sequence",
+      "symbol_kind": "heading"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "components": {
+        "file_priority": 4.15,
+        "reason": 10.0
+      },
+      "content": "#\u2026\n... [truncated 53 line(s) omitted -- retained 1 of 54 line(s)]",
+      "content_hash": "e20e8b4a9c43fc33",
+      "cost": 459,
+      "covers": [
+        "changed_file:docs/testing.md",
+        "changed_symbol:Results log (as verified on the development host)",
+        "high_risk:docs/testing.md",
+        "symbol_range:docs/testing.md:159-212"
+      ],
+      "heading": "DipshitOS testing > Results log (as verified on the development host)",
+      "id": "b9772e5fc36de1b7",
+      "kind": "section",
+      "language": "markdown",
+      "lines": [
+        159,
+        159
+      ],
+      "origin_changed_file": "docs/testing.md",
+      "origin_symbol": "Results log (as verified on the development host)",
+      "path": "docs/testing.md",
+      "provenance": "commit:fff37a5e6af8476c273dc959aefce0f412e11554 index:fff37a5e6af8",
+      "reason": "changed-symbol",
+      "score": 14.15,
+      "structural_name": "Results log (as verified on the development host)",
+      "symbol_kind": "heading"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "components": {
+        "file_priority": 4.03,
+        "reason": 10.0
+      },
+      "content": "# CI proves ONLY the portable/build gate set \u2014 class A in\n# docs/gate-inventory.md: formatting, unit tests, transcript mock test,\n# guest/image builds, inspect, Swift runner build, context generation, and\n# the coordination gates. It does NOT and cannot run the Apple-silicon\n# Virtualization.framework hardware gates (class B: bad-handoff, marker,\n# NVRAM console, host-console PTY, live serial takeover, live transcript/RX),\n# the interactive class-C console, or the class-D diagnostics. GitHub-hosted\n# runners do not prove VZ hardware behavior \u2014 a green CI badge means \"the\n# portable gates passed\", nothing more. Run `just verify-vz` on an Apple\n# silicon host for the VZ gates.\n\nname: CI\n",
+      "content_hash": "6ccff7ccceaddb1119c85811819498ee96401cd88df77e4d4936d6971d6709b1",
+      "cost": 1027,
+      "covers": [
+        "changed_file:.github/workflows/ci.yml",
+        "changed_symbol:name",
+        "high_risk:.github/workflows/ci.yml",
+        "symbol_range:.github/workflows/ci.yml:1-13"
+      ],
+      "heading": null,
+      "id": "3ebabd474fb4455d",
+      "kind": "symbol",
+      "language": "yaml",
+      "lines": [
+        1,
+        13
+      ],
+      "origin_changed_file": ".github/workflows/ci.yml",
+      "origin_symbol": "name",
+      "path": ".github/workflows/ci.yml",
+      "provenance": "commit:fff37a5e6af8476c273dc959aefce0f412e11554 index:fff37a5e6af8",
+      "reason": "changed-symbol",
+      "score": 14.03,
+      "structural_name": "name",
+      "symbol_kind": null
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "components": {
+        "file_priority": 4.03,
+        "reason": 10.0
+      },
+      "content": "j\u2026\n... [truncated 65 line(s) omitted -- retained 1 of 66 line(s)]",
+      "content_hash": "da3aff2972eeebd5",
+      "cost": 401,
+      "covers": [
+        "changed_file:.github/workflows/ci.yml",
+        "changed_symbol:jobs",
+        "high_risk:.github/workflows/ci.yml",
+        "symbol_range:.github/workflows/ci.yml:21-86"
+      ],
+      "heading": null,
+      "id": "540c63908c8ee157",
+      "kind": "symbol",
+      "language": "yaml",
+      "lines": [
+        21,
+        21
+      ],
+      "origin_changed_file": ".github/workflows/ci.yml",
+      "origin_symbol": "jobs",
+      "path": ".github/workflows/ci.yml",
+      "provenance": "commit:fff37a5e6af8476c273dc959aefce0f412e11554 index:fff37a5e6af8",
+      "reason": "changed-symbol",
+      "score": 14.03,
+      "structural_name": "jobs",
+      "symbol_kind": null
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "components": {
+        "file_priority": 3.67,
+        "reason": 10.0
+      },
+      "content": "# DipshitOS verification gate inventory\n\n> Canonical classification of every verification command. **A green GitHub CI\n> badge proves class A only** \u2014 it says nothing about the Apple-silicon\n> Virtualization.framework hardware gates (class B), the interactive gates\n> (class C), or the diagnostics (class D). Run the class-B set with\n> `just verify-vz` on a real Apple silicon host. Per-gate pass/fail status\n> lives in [`docs/status.md`](status.md); this file is the classification,\n> not the status.\n",
+      "content_hash": "a82e634f62aeed9ebc8d8882eb9e365fd7784b10f54de7ff7a1fcc3cf32897ec",
+      "cost": 893,
+      "covers": [
+        "changed_file:docs/gate-inventory.md",
+        "changed_symbol:DipshitOS verification gate inventory",
+        "high_risk:docs/gate-inventory.md",
+        "symbol_range:docs/gate-inventory.md:1-10"
+      ],
+      "heading": "DipshitOS verification gate inventory",
+      "id": "6a1b475f22b72a01",
+      "kind": "section",
+      "language": "markdown",
+      "lines": [
+        1,
+        10
+      ],
+      "origin_changed_file": "docs/gate-inventory.md",
+      "origin_symbol": "DipshitOS verification gate inventory",
+      "path": "docs/gate-inventory.md",
+      "provenance": "commit:fff37a5e6af8476c273dc959aefce0f412e11554 index:fff37a5e6af8",
+      "reason": "changed-symbol",
+      "score": 13.67,
+      "structural_name": "DipshitOS verification gate inventory",
+      "symbol_kind": "heading"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "components": {
+        "file_priority": 3.67,
+        "reason": 10.0
+      },
+      "content": "## Classes\n\n- **A \u2014 portable / build CI.** Deterministic, no Apple silicon, no VZ VM.\n  Runs in GitHub CI (`.github/workflows/ci.yml`) and as `just verify-portable`\n  (`just verify` is a legacy alias). A green CI badge means exactly these\n  passed and nothing else.\n- **B \u2014 Apple-silicon Virtualization.framework hardware gate.** Boots a real\n  VZ VM on Apple silicon. GitHub-hosted CI does **not** run these and cannot\n  prove them; run `just verify-vz` on a development host. Evidence lives\n  under `artifacts/` and status in `docs/status.md`.\n- **C \u2014 interactive / manual hardware gate.** Requires a human at the\n  keyboard. Not automatable, not in CI.\n- **D \u2014 diagnostic experiment.** Answers a question (claims 0017/0018/0020/\n  0021); **not an acceptance gate**. Passing a diagnostic proves nothing\n  about the milestone.\n",
+      "content_hash": "f0a6a91c6864e0ee1ccf9c75d24931a568eb7f1f2d9c5f8cb087ded18c4a4a65",
+      "cost": 1161,
+      "covers": [
+        "changed_file:docs/gate-inventory.md",
+        "changed_symbol:Classes",
+        "high_risk:docs/gate-inventory.md",
+        "symbol_range:docs/gate-inventory.md:11-26"
+      ],
+      "heading": "DipshitOS verification gate inventory > Classes",
+      "id": "0171348a875162b1",
+      "kind": "section",
+      "language": "markdown",
+      "lines": [
+        11,
+        26
+      ],
+      "origin_changed_file": "docs/gate-inventory.md",
+      "origin_symbol": "Classes",
+      "path": "docs/gate-inventory.md",
+      "provenance": "commit:fff37a5e6af8476c273dc959aefce0f412e11554 index:fff37a5e6af8",
+      "reason": "changed-symbol",
+      "score": 13.67,
+      "structural_name": "Classes",
+      "symbol_kind": "heading"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "components": {
+        "file_priority": 3.67,
+        "reason": 10.0
+      },
+      "content": "#\u2026\n... [truncated 41 line(s) omitted -- retained 1 of 42 line(s)]",
+      "content_hash": "072e49c08ba423a0",
+      "cost": 405,
+      "covers": [
+        "changed_file:docs/gate-inventory.md",
+        "changed_symbol:Gate table",
+        "high_risk:docs/gate-inventory.md",
+        "symbol_range:docs/gate-inventory.md:27-69"
+      ],
+      "heading": "DipshitOS verification gate inventory > Gate table",
+      "id": "f8715b581c83d371",
+      "kind": "section",
+      "language": "markdown",
+      "lines": [
+        27,
+        27
+      ],
+      "origin_changed_file": "docs/gate-inventory.md",
+      "origin_symbol": "Gate table",
+      "path": "docs/gate-inventory.md",
+      "provenance": "commit:fff37a5e6af8476c273dc959aefce0f412e11554 index:fff37a5e6af8",
+      "reason": "changed-symbol",
+      "score": 13.67,
+      "structural_name": "Gate table",
+      "symbol_kind": "heading"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "components": {
+        "file_priority": 3.67,
+        "reason": 10.0
+      },
+      "content": "#\u2026\n... [truncated 32 line(s) omitted -- retained 1 of 33 line(s)]",
+      "content_hash": "29a14f68ffdb4fe9",
+      "cost": 434,
+      "covers": [
+        "changed_file:docs/gate-inventory.md",
+        "changed_symbol:Machine-readable records",
+        "high_risk:docs/gate-inventory.md",
+        "symbol_range:docs/gate-inventory.md:70-102"
+      ],
+      "heading": "DipshitOS verification gate inventory > Machine-readable records",
+      "id": "23f3b97788aef5cb",
+      "kind": "section",
+      "language": "markdown",
+      "lines": [
+        70,
+        70
+      ],
+      "origin_changed_file": "docs/gate-inventory.md",
+      "origin_symbol": "Machine-readable records",
+      "path": "docs/gate-inventory.md",
+      "provenance": "commit:fff37a5e6af8476c273dc959aefce0f412e11554 index:fff37a5e6af8",
+      "reason": "changed-symbol",
+      "score": 13.67,
+      "structural_name": "Machine-readable records",
+      "symbol_kind": "heading"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "components": {
+        "file_priority": 3.62,
+        "reason": 10.0
+      },
+      "content": "#\u2026\n... [truncated 25 line(s) omitted -- retained 1 of 26 line(s)]",
+      "content_hash": "f8f940494ccf3398",
+      "cost": 505,
+      "covers": [
+        "changed_file:docs/roadmap.md",
+        "changed_symbol:Milestone two \u2014 the kernel proper (implemented; VZ serial gate not passed)",
+        "high_risk:docs/roadmap.md",
+        "symbol_range:docs/roadmap.md:62-88"
+      ],
+      "heading": "DipshitOS roadmap > Milestone two \u2014 the kernel proper (implemented; VZ serial gate not passed)",
+      "id": "c6660c89f077a59d",
+      "kind": "section",
+      "language": "markdown",
+      "lines": [
+        62,
+        62
+      ],
+      "origin_changed_file": "docs/roadmap.md",
+      "origin_symbol": "Milestone two \u2014 the kernel proper (implemented; VZ serial gate not passed)",
+      "path": "docs/roadmap.md",
+      "provenance": "commit:fff37a5e6af8476c273dc959aefce0f412e11554 index:fff37a5e6af8",
+      "reason": "changed-symbol",
+      "score": 13.62,
+      "structural_name": "Milestone two \u2014 the kernel proper (implemented; VZ serial gate not passed)",
+      "symbol_kind": "heading"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "components": {
+        "file_priority": 3.62,
+        "reason": 10.0
+      },
+      "content": "### Milestone-two evidence status\n\nEvery VZ run so far observed an empty `vm-serial.log`. The **NVRAM marker\nladder** (ADR 0004 D4, claims 0009/0010, `artifacts/m2-mmu-takeover-gate.txt`)\nis the working evidence channel: the MMU takeover is observed to complete\non VZ (ladder reaches `M2_MMUP!`), and claim 0013 observed the actual\nconsole \u2014 a modern virtio-pci device (`VID=0x1af4 DID=0x1043`) outside the\ndeclared windows (which it decoded as Apple's efivars store + an internal\ndebug UART). Post-exit access to the virtio transport hangs on VZ (claims\n0013/0020), which is the serial gate's remaining blocker; the NVRAM console\nchannel (claim 0015) carries post-exit console bytes in the meantime. The\ndeclared-window and virtio-pci findings are `[observed]` in\n`docs/hardware-contract.md`; the device register layout stays `[inferred]`\nuntil a real console is driven.\n",
+      "content_hash": "168b3ad572f23b35483937ed3eb7ef0296c93df9063a9b766e1092187be09657",
+      "cost": 1225,
+      "covers": [
+        "changed_file:docs/roadmap.md",
+        "changed_symbol:Milestone-two evidence status",
+        "high_risk:docs/roadmap.md",
+        "symbol_range:docs/roadmap.md:159-173"
+      ],
+      "heading": "DipshitOS roadmap > Milestone two \u2014 the kernel proper (implemented; VZ serial gate not passed) > Milestone-two evidence status",
+      "id": "44fb198108398b9c",
+      "kind": "section",
+      "language": "markdown",
+      "lines": [
+        159,
+        173
+      ],
+      "origin_changed_file": "docs/roadmap.md",
+      "origin_symbol": "Milestone-two evidence status",
+      "path": "docs/roadmap.md",
+      "provenance": "commit:fff37a5e6af8476c273dc959aefce0f412e11554 index:fff37a5e6af8",
+      "reason": "changed-symbol",
+      "score": 13.62,
+      "structural_name": "Milestone-two evidence status",
+      "symbol_kind": "heading"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "components": {
+        "file_priority": 3.62,
+        "reason": 10.0
+      },
+      "content": "#\u2026\n... [truncated 36 line(s) omitted -- retained 1 of 37 line(s)]",
+      "content_hash": "73d66afe9a8cfb93",
+      "cost": 465,
+      "covers": [
+        "changed_file:docs/roadmap.md",
+        "changed_symbol:Milestone 1.5 \u2014 interactive kernel monitor (current)",
+        "high_risk:docs/roadmap.md",
+        "symbol_range:docs/roadmap.md:174-211"
+      ],
+      "heading": "DipshitOS roadmap > Milestone 1.5 \u2014 interactive kernel monitor (current)",
+      "id": "dc64cc6f39427580",
+      "kind": "section",
+      "language": "markdown",
+      "lines": [
+        174,
+        174
+      ],
+      "origin_changed_file": "docs/roadmap.md",
+      "origin_symbol": "Milestone 1.5 \u2014 interactive kernel monitor (current)",
+      "path": "docs/roadmap.md",
+      "provenance": "commit:fff37a5e6af8476c273dc959aefce0f412e11554 index:fff37a5e6af8",
+      "reason": "changed-symbol",
+      "score": 13.62,
+      "structural_name": "Milestone 1.5 \u2014 interactive kernel monitor (current)",
+      "symbol_kind": "heading"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "components": {
+        "file_priority": 3.62,
+        "reason": 10.0
+      },
+      "content": "## Later milestones (sketches only, not commitments)\n\n- **M1.5 close-out: post-exit console transport + serial RX.** The console\n  is already identified (virtio-pci, claim 0013); the work is a\n  post-exit-safe way to reach it (post-exit access hangs on VZ) and then\n  the RX path (the milestone-two console is polled TX-only, ADR 0004; the\n  kernel's `readByte` is a no-RX stub). This is what stands between the\n  current mock-level monitor and a live `dipshit>` session.\n- A memory allocator and boot-time memory map walk (the EFI memory map\n  the kernel captured at exit, walked by the kernel itself).\n- Interrupt setup (GIC) and a timer \u2014 the GIC is already recorded as an\n  `[inferred]` hardware assumption.\n- Eventually: a process abstraction, a filesystem, a network stack \u2014 each\n  only when the ones below it are demonstrably working.\n\nEach milestone must state what was **observed** versus **inferred** and must\nrecord new hardware assumptions in `docs/hardware-contract.md`.",
+      "content_hash": "69e4040cf3bf7b48029868a08ef8ffb6e185db2fd8674faaaee404138bfa19f7",
+      "cost": 1377,
+      "covers": [
+        "changed_file:docs/roadmap.md",
+        "changed_symbol:Later milestones (sketches only, not commitments)",
+        "high_risk:docs/roadmap.md",
+        "symbol_range:docs/roadmap.md:212-228"
+      ],
+      "heading": "DipshitOS roadmap > Later milestones (sketches only, not commitments)",
+      "id": "a766a2f2268dbd12",
+      "kind": "section",
+      "language": "markdown",
+      "lines": [
+        212,
+        228
+      ],
+      "origin_changed_file": "docs/roadmap.md",
+      "origin_symbol": "Later milestones (sketches only, not commitments)",
+      "path": "docs/roadmap.md",
+      "provenance": "commit:fff37a5e6af8476c273dc959aefce0f412e11554 index:fff37a5e6af8",
+      "reason": "changed-symbol",
+      "score": 13.62,
+      "structural_name": "Later milestones (sketches only, not commitments)",
+      "symbol_kind": "heading"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "components": {
+        "file_priority": 2.92,
+        "reason": 10.0
+      },
+      "content": "#\u2026\n... [truncated 25 line(s) omitted -- retained 1 of 26 line(s)]",
+      "content_hash": "f8f940494ccf3398",
+      "cost": 400,
+      "covers": [
+        "changed_file:docs/architecture.md",
+        "changed_symbol:Current state",
+        "high_risk:docs/architecture.md",
+        "symbol_range:docs/architecture.md:9-35"
+      ],
+      "heading": "DipshitOS architecture > Current state",
+      "id": "0d65c72272b99b7c",
+      "kind": "section",
+      "language": "markdown",
+      "lines": [
+        9,
+        9
+      ],
+      "origin_changed_file": "docs/architecture.md",
+      "origin_symbol": "Current state",
+      "path": "docs/architecture.md",
+      "provenance": "commit:fff37a5e6af8476c273dc959aefce0f412e11554 index:fff37a5e6af8",
+      "reason": "changed-symbol",
+      "score": 12.92,
+      "structural_name": "Current state",
+      "symbol_kind": "heading"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "components": {
+        "file_priority": 2.92,
+        "reason": 10.0
+      },
+      "content": "## Data flow\n\n```\nboot/src/main.zig  \u2500\u2500zig build\u2500\u2500\u25b6  zig-out/bin/BOOTAA64.EFI   (PE/COFF, AArch64)\n                                        \u2502\nimage/make-image.sh \u2500\u2500mkfat32.py\u2500\u2500\u25b6  artifacts/disk.img        (GPT + FAT32 ESP)\n                                        \u2502\n        \u25bc\nVZEFIBootLoader (macOS VZ)\n   \u2514\u2500 UEFI firmware boots EFI/BOOT/BOOTAA64.EFI\n        \u2502\n        \u2514\u2500\u2500 ConOut \u2500\u2500\u25b6 virtio console \u2500\u2500\u25b6 artifacts/vm-serial.log  (empty: firmware doesn't route ConOut here)\n        \u2514\u2500\u2500 loader loads \\\\KERNEL.BIN \u2500\u2500\u25b6 kernel entry\n             \u2502  milestone two: ExitBootServices, identity-map MMU\n             \u2502  post-exit evidence channel: NVRAM ladder (EFI var DipshitM2) \u2500\u2500\u25b6 artifacts/efi-vars.bin  [observed: reaches M2_MMUP! \u2192 M2_SERIA]\n             \u2514\u2500\u2500 serial probe \u2500\u2500\u25b6 declared windows decoded (efivars store + debug UART, claim 0013); real console = virtio-pci @ BAR 0x100010000 \u2500\u2500\u25b6 post-exit transport access hangs \u2500\u2500\u25b6 vm-serial.log empty\n             \u2514\u2500\u2500 M1.5 monitor loop (console/lineedit/tokenizer/shell) \u2500\u2500\u25b6 exists, host-tested via MockConsole; parks in WFE on the real kernel (RX not wired \u2014 readByte is a no-RX stub)\n```\n",
+      "content_hash": "c1f0035085071196da7c461af7bf4383be90d17f720db0699168091e91be34f5",
+      "cost": 1460,
+      "covers": [
+        "changed_file:docs/architecture.md",
+        "changed_symbol:Data flow",
+        "high_risk:docs/architecture.md",
+        "symbol_range:docs/architecture.md:47-65"
+      ],
+      "heading": "DipshitOS architecture > Data flow",
+      "id": "a200e4951f3f228f",
+      "kind": "section",
+      "language": "markdown",
+      "lines": [
+        47,
+        65
+      ],
+      "origin_changed_file": "docs/architecture.md",
+      "origin_symbol": "Data flow",
+      "path": "docs/architecture.md",
+      "provenance": "commit:fff37a5e6af8476c273dc959aefce0f412e11554 index:fff37a5e6af8",
+      "reason": "changed-symbol",
+      "score": 12.92,
+      "structural_name": "Data flow",
+      "symbol_kind": "heading"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "components": {
+        "file_priority": 2.92,
+        "reason": 10.0
+      },
+      "content": "#\u2026\n... [truncated 30 line(s) omitted -- retained 1 of 31 line(s)]",
+      "content_hash": "5c458031cb51a037",
+      "cost": 397,
+      "covers": [
+        "changed_file:docs/architecture.md",
+        "changed_symbol:Interfaces",
+        "high_risk:docs/architecture.md",
+        "symbol_range:docs/architecture.md:66-97"
+      ],
+      "heading": "DipshitOS architecture > Interfaces",
+      "id": "a54e0ea2fe9e3d52",
+      "kind": "section",
+      "language": "markdown",
+      "lines": [
+        66,
+        66
+      ],
+      "origin_changed_file": "docs/architecture.md",
+      "origin_symbol": "Interfaces",
+      "path": "docs/architecture.md",
+      "provenance": "commit:fff37a5e6af8476c273dc959aefce0f412e11554 index:fff37a5e6af8",
+      "reason": "changed-symbol",
+      "score": 12.92,
+      "structural_name": "Interfaces",
+      "symbol_kind": "heading"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "components": {
+        "file_priority": 2.89,
+        "reason": 10.0
+      },
+      "content": "## Milestone two: the kernel proper (implemented, ADR 0004 \u2014 MMU/serial findings are **[observed]** per claims 0010/0013/0020/0021; the remaining items below stay **[inferred]**)\n\nMilestone two is implemented in the guest; the MMU and serial findings\nbelow are **[observed]** (claims 0010/0013/0020/0021 on a real Apple M4 /\nmacOS 27 VZ host), and the remaining items stay **[inferred]** until a\nconsole is actually driven and serial output proves them. Code/build\nsuccess alone is not hardware evidence. The concrete numbers are\ndeliberately isolated so one observed probe can correct them without\nredesign.\n",
+      "content_hash": "ad5d565ed7d350e05cf272ab3c5b1b8eaae5431563a74543ee1f8af355f9d949",
+      "cost": 1294,
+      "covers": [
+        "changed_file:docs/hardware-contract.md",
+        "changed_symbol:Milestone two: the kernel proper (implemented, ADR 0004 \u2014 MMU/serial findings are **[observed]** per claims 0010/0013/0020/0021; the remaining items below stay **[inferred]**)",
+        "high_risk:docs/hardware-contract.md",
+        "symbol_range:docs/hardware-contract.md:106-115"
+      ],
+      "heading": "DipshitOS hardware contract > Milestone two: the kernel proper (implemented, ADR 0004 \u2014 MMU/serial findings are **[observed]** per claims 0010/0013/0020/0021; the remaining items below stay **[inferred]**)",
+      "id": "d7f739b4bb1c5c6a",
+      "kind": "section",
+      "language": "markdown",
+      "lines": [
+        106,
+        115
+      ],
+      "origin_changed_file": "docs/hardware-contract.md",
+      "origin_symbol": "Milestone two: the kernel proper (implemented, ADR 0004 \u2014 MMU/serial findings are **[observed]** per claims 0010/0013/0020/0021; the remaining items below stay **[inferred]**)",
+      "path": "docs/hardware-contract.md",
+      "provenance": "commit:fff37a5e6af8476c273dc959aefce0f412e11554 index:fff37a5e6af8",
+      "reason": "changed-symbol",
+      "score": 12.89,
+      "structural_name": "Milestone two: the kernel proper (implemented, ADR 0004 \u2014 MMU/serial findings are **[observed]** per claims 0010/0013/0020/0021; the remaining items below stay **[inferred]**)",
+      "symbol_kind": "heading"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "components": {
+        "file_priority": 2.89,
+        "reason": 10.0
+      },
+      "content": "#\u2026\n... [truncated 34 line(s) omitted -- retained 1 of 35 line(s)]",
+      "content_hash": "083a17baf0099b54",
+      "cost": 457,
+      "covers": [
+        "changed_file:docs/hardware-contract.md",
+        "changed_symbol:MMIO / serial console (UART)",
+        "high_risk:docs/hardware-contract.md",
+        "symbol_range:docs/hardware-contract.md:179-214"
+      ],
+      "heading": "DipshitOS hardware contract > Milestone two: the kernel proper (implemented, ADR 0004 \u2014 MMU/serial findings are **[observed]** per claims 0010/0013/0020/0021; the remaining items below stay **[inferred]**) > MMIO / serial console (UART)",
+      "id": "740eff0a2b180c24",
+      "kind": "section",
+      "language": "markdown",
+      "lines": [
+        179,
+        179
+      ],
+      "origin_changed_file": "docs/hardware-contract.md",
+      "origin_symbol": "MMIO / serial console (UART)",
+      "path": "docs/hardware-contract.md",
+      "provenance": "commit:fff37a5e6af8476c273dc959aefce0f412e11554 index:fff37a5e6af8",
+      "reason": "changed-symbol",
+      "score": 12.89,
+      "structural_name": "MMIO / serial console (UART)",
+      "symbol_kind": "heading"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "components": {
+        "file_priority": 2.74,
+        "reason": 10.0
+      },
+      "content": "p\u2026\n... [truncated 230 line(s) omitted -- retained 1 of 231 line(s)]",
+      "content_hash": "6e3bd81ab55d8dc0",
+      "cost": 449,
+      "covers": [
+        "changed_file:kernel/src/virtio_console.zig",
+        "changed_symbol:virtio_pci_init",
+        "high_risk:kernel/src/virtio_console.zig",
+        "symbol_range:kernel/src/virtio_console.zig:165-395"
+      ],
+      "heading": null,
+      "id": "cf28df7c90cb1322",
+      "kind": "symbol",
+      "language": "zig",
+      "lines": [
+        165,
+        165
+      ],
+      "origin_changed_file": "kernel/src/virtio_console.zig",
+      "origin_symbol": "virtio_pci_init",
+      "path": "kernel/src/virtio_console.zig",
+      "provenance": "commit:fff37a5e6af8476c273dc959aefce0f412e11554 index:fff37a5e6af8",
+      "reason": "changed-symbol",
+      "score": 12.74,
+      "structural_name": "virtio_pci_init",
+      "symbol_kind": null
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "components": {
+        "file_priority": 3.53,
+        "reason": 9.0
+      },
+      "content": "c\u2026\n... [truncated 45 line(s) omitted -- retained 1 of 46 line(s)]",
+      "content_hash": "9fc0457cbe33d227",
+      "cost": 275,
+      "covers": [
+        "changed_file:justfile",
+        "high_risk:justfile"
+      ],
+      "heading": null,
+      "id": "41f426d10ba66915",
+      "kind": "window",
+      "language": "plaintext",
+      "lines": [
+        101,
+        101
+      ],
+      "origin_changed_file": "justfile",
+      "origin_symbol": null,
+      "path": "justfile",
+      "provenance": "commit:fff37a5e6af8476c273dc959aefce0f412e11554 index:fff37a5e6af8",
+      "reason": "changed-chunk",
+      "score": 12.53,
+      "structural_name": null,
+      "symbol_kind": null
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "components": {
+        "file_priority": 2.23,
+        "reason": 10.0
+      },
+      "content": "#\u2026\n... [truncated 40 line(s) omitted -- retained 1 of 41 line(s)]",
+      "content_hash": "17b591a4c76a741d",
+      "cost": 386,
+      "covers": [
+        "changed_file:docs/claims/README.md",
+        "changed_symbol:Active claims index",
+        "symbol_range:docs/claims/README.md:56-96"
+      ],
+      "heading": "Active claims (one file per claim) > Active claims index",
+      "id": "93823bfff45a0fb6",
+      "kind": "section",
+      "language": "markdown",
+      "lines": [
+        56,
+        56
+      ],
+      "origin_changed_file": "docs/claims/README.md",
+      "origin_symbol": "Active claims index",
+      "path": "docs/claims/README.md",
+      "provenance": "commit:fff37a5e6af8476c273dc959aefce0f412e11554 index:fff37a5e6af8",
+      "reason": "changed-symbol",
+      "score": 12.23,
+      "structural_name": "Active claims index",
+      "symbol_kind": "heading"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "components": {
+        "file_priority": 2.08,
+        "reason": 10.0
+      },
+      "content": "#\u2026\n... [truncated 35 line(s) omitted -- retained 1 of 36 line(s)]",
+      "content_hash": "4cbd4fb8eb29e73a",
+      "cost": 360,
+      "covers": [
+        "changed_file:docs/logs/README.md",
+        "changed_symbol:Log index",
+        "symbol_range:docs/logs/README.md:36-71"
+      ],
+      "heading": "Coordination logs (append-only, per branch) > Log index",
+      "id": "2cc22152ef05309a",
+      "kind": "section",
+      "language": "markdown",
+      "lines": [
+        36,
+        36
+      ],
+      "origin_changed_file": "docs/logs/README.md",
+      "origin_symbol": "Log index",
+      "path": "docs/logs/README.md",
+      "provenance": "commit:fff37a5e6af8476c273dc959aefce0f412e11554 index:fff37a5e6af8",
+      "reason": "changed-symbol",
+      "score": 12.08,
+      "structural_name": "Log index",
+      "symbol_kind": "heading"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "components": {
+        "file_priority": 1.76,
+        "reason": 10.0
+      },
+      "content": "# Log \u2014 `freebuff/ragshit-review`\n\nAppend-only. See [`README.md`](README.md) for the convention.\n\n- **2026-08-08** \u2014 *buffy (freebuff/ragshit-review)*: claim 0020 \u2014 Ragshit `review` budgeted reviewer packet (task 2026-08-08); claim filed; reuse `tools/ragshit/impact` as input; scope `tools/ragshit/` only; plan in `artifacts/review-plan.md`. \ud83d\udd04 in progress\n- **2026-08-08** \u2014 *buffy (freebuff/ragshit-review)*: review implemented \u2014 `review/{candidates,coverage,redundancy,selection,report}.py` + CLI `--budget-chars/--json/--explain` + baseline + docs; tests 23 new, full suite 124 passed, doctor ok. \ud83d\udd04\n- **2026-08-08** \u2014 *buffy (freebuff/ragshit-review)*: dogfood done \u2014 HEAD~1/~5/~10 at 10k/25k/50k under `artifacts/review-packets/`; 10k contains most valuable impl, 25k improves coverage, 50k adds secondary evidence without duplicates; timing ~110ms HEAD~1, ~230ms HEAD~5, ~290ms HEAD~10 (index reuse); determinism verified. \u2705 done",
+      "content_hash": "0b64822eb7ca6cdbe75978564b5d7e5fcf9571d8a573e65b50428f2431580fd9",
+      "cost": 1321,
+      "covers": [
+        "changed_file:docs/logs/freebuff-ragshit-review.md",
+        "changed_symbol:Log \u2014 `freebuff/ragshit-review`",
+        "symbol_range:docs/logs/freebuff-ragshit-review.md:1-7"
+      ],
+      "heading": "Log \u2014 `freebuff/ragshit-review`",
+      "id": "897b7cee00ed5d75",
+      "kind": "section",
+      "language": "markdown",
+      "lines": [
+        1,
+        7
+      ],
+      "origin_changed_file": "docs/logs/freebuff-ragshit-review.md",
+      "origin_symbol": "Log \u2014 `freebuff/ragshit-review`",
+      "path": "docs/logs/freebuff-ragshit-review.md",
+      "provenance": "commit:fff37a5e6af8476c273dc959aefce0f412e11554 index:fff37a5e6af8",
+      "reason": "changed-symbol",
+      "score": 11.76,
+      "structural_name": "Log \u2014 `freebuff/ragshit-review`",
+      "symbol_kind": "heading"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "components": {
+        "file_priority": 1.56,
+        "reason": 10.0
+      },
+      "content": "#\u2026\n... [truncated 3 line(s) omitted -- retained 1 of 4 line(s)]",
+      "content_hash": "fad95fe2a3c6d457",
+      "cost": 810,
+      "covers": [
+        "changed_file:docs/logs/freebuff-you-are-working-in-the-dipshitos-repository-on-cur-264903eb-313e-440f-a0e4-224e3311933d.md",
+        "changed_symbol:Log \u2014 freebuff/you-are-working-in-the-dipshitos-repository-on-cur-264903eb-313e-440f-a0e4-224e3311933d",
+        "symbol_range:docs/logs/freebuff-you-are-working-in-the-dipshitos-repository-on-cur-264903eb-313e-440f-a0e4-224e3311933d.md:1-4"
+      ],
+      "heading": "Log \u2014 freebuff/you-are-working-in-the-dipshitos-repository-on-cur-264903eb-313e-440f-a0e4-224e3311933d",
+      "id": "d862b08f232ba374",
+      "kind": "section",
+      "language": "markdown",
+      "lines": [
+        1,
+        1
+      ],
+      "origin_changed_file": "docs/logs/freebuff-you-are-working-in-the-dipshitos-repository-on-cur-264903eb-313e-440f-a0e4-224e3311933d.md",
+      "origin_symbol": "Log \u2014 freebuff/you-are-working-in-the-dipshitos-repository-on-cur-264903eb-313e-440f-a0e4-224e3311933d",
+      "path": "docs/logs/freebuff-you-are-working-in-the-dipshitos-repository-on-cur-264903eb-313e-440f-a0e4-224e3311933d.md",
+      "provenance": "commit:fff37a5e6af8476c273dc959aefce0f412e11554 index:fff37a5e6af8",
+      "reason": "changed-symbol",
+      "score": 11.56,
+      "structural_name": "Log \u2014 freebuff/you-are-working-in-the-dipshitos-repository-on-cur-264903eb-313e-440f-a0e4-224e3311933d",
+      "symbol_kind": "heading"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "components": {
+        "file_priority": 1.47,
+        "reason": 10.0
+      },
+      "content": "# Log \u2014 stale-doc cleanup (claim 3109)\n\n- **2026-08-08** \u2014 *buffy (`freebuff/stale-doc-cleanup`)*: claim 3109 \u2014 reduced stale blocker duplication in non-status docs. Classified each doc's content (timeless kept; current gate status \u2192 pointer to `docs/status.md`; historical kept dated; stale removed/corrected). Fixed: \"device discovery is next\" \u2192 \"post-exit console transport + RX\" (README/roadmap/architecture); \"no usable MMIO serial device in declared windows\" as the whole blocker \u2192 claim-0013 decoded windows + virtio-pci console + post-exit hang (README/roadmap/architecture/testing); roadmap's \"kernel dies between shim entry\" + \"marker fallback is the next step\" (superseded); README bad-handoff table row stray 4th cell; hardware-contract M2 header + intro (inferred\u2192observed/inferred mix) and \"fivars\"\u2192\"efivars\" typo; march step 20 status cell now \"\u2705 (docs only \u2014 milestone NOT closed)\". Before/after stale-phrase report: `artifacts/stale-doc-report.txt` (26 \u2192 0 hits); link check 38 links, 0 broken. `docs/status.md` untouched. \u2705",
+      "content_hash": "ab27c2469ece4f829924324ffb1932cd3e4feef1f4a796804b6fcd64d1478abd",
+      "cost": 1446,
+      "covers": [
+        "changed_file:docs/logs/freebuff-stale-doc-cleanup.md",
+        "changed_symbol:Log \u2014 stale-doc cleanup (claim 3109)",
+        "symbol_range:docs/logs/freebuff-stale-doc-cleanup.md:1-3"
+      ],
+      "heading": "Log \u2014 stale-doc cleanup (claim 3109)",
+      "id": "5b5326c6d0f2f07c",
+      "kind": "section",
+      "language": "markdown",
+      "lines": [
+        1,
+        3
+      ],
+      "origin_changed_file": "docs/logs/freebuff-stale-doc-cleanup.md",
+      "origin_symbol": "Log \u2014 stale-doc cleanup (claim 3109)",
+      "path": "docs/logs/freebuff-stale-doc-cleanup.md",
+      "provenance": "commit:fff37a5e6af8476c273dc959aefce0f412e11554 index:fff37a5e6af8",
+      "reason": "changed-symbol",
+      "score": 11.47,
+      "structural_name": "Log \u2014 stale-doc cleanup (claim 3109)",
+      "symbol_kind": "heading"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "components": {
+        "file_priority": 1.34,
+        "reason": 10.0
+      },
+      "content": "#\u2026\n... [truncated 3 line(s) omitted -- retained 1 of 4 line(s)]",
+      "content_hash": "fad95fe2a3c6d457",
+      "cost": 690,
+      "covers": [
+        "changed_file:docs/logs/freebuff-pull-latest-dipshitos-main-after-all-preceding-rel-1fe779b0-133e-4303-81f1-397087634352.md",
+        "changed_symbol:Log \u2014 status-preflight review (claim 8592)",
+        "symbol_range:docs/logs/freebuff-pull-latest-dipshitos-main-after-all-preceding-rel-1fe779b0-133e-4303-81f1-397087634352.md:1-4"
+      ],
+      "heading": "Log \u2014 status-preflight review (claim 8592)",
+      "id": "5cd708c58ac1c8ad",
+      "kind": "section",
+      "language": "markdown",
+      "lines": [
+        1,
+        1
+      ],
+      "origin_changed_file": "docs/logs/freebuff-pull-latest-dipshitos-main-after-all-preceding-rel-1fe779b0-133e-4303-81f1-397087634352.md",
+      "origin_symbol": "Log \u2014 status-preflight review (claim 8592)",
+      "path": "docs/logs/freebuff-pull-latest-dipshitos-main-after-all-preceding-rel-1fe779b0-133e-4303-81f1-397087634352.md",
+      "provenance": "commit:fff37a5e6af8476c273dc959aefce0f412e11554 index:fff37a5e6af8",
+      "reason": "changed-symbol",
+      "score": 11.34,
+      "structural_name": "Log \u2014 status-preflight review (claim 8592)",
+      "symbol_kind": "heading"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "components": {
+        "file_priority": 1.25,
+        "reason": 10.0
+      },
+      "content": "# Log \u2014 verification gate classification (claim 0594)\n\n- **2026-08-08** \u2014 *buffy (`freebuff/pull-latest-dipshitos-main-ebe15999-a14a-4066-9551-00deb3d2323a`)*: claim 0594 \u2014 classify every verification command into A (portable/build CI) / B (Apple-silicon VZ hardware gate) / C (interactive/manual) / D (diagnostic, not an acceptance gate); new `docs/gate-inventory.md` with machine-readable `GATE` records (consumable by a status preflight via sed/grep); `just verify` \u2192 `verify-portable` (+ alias) and new `just verify-vz`; CI labelled by class + explicit \"gates NOT proven by CI\" step; `build.zig` step help annotated; `docs/testing.md` classification section. Full class-A set re-run green (fmt/unit/transcript/build/image/inspect/swift/context/coordination/tooling/mmu-debt), coordination gate green, justfile validated with just 1.38.0. No `docs/status.md` edits. \u2705",
+      "content_hash": "8653c12349f62edb2c07f351fa1340769bd71da20deb9048074335bf1a593469",
+      "cost": 1443,
+      "covers": [
+        "changed_file:docs/logs/freebuff-pull-latest-dipshitos-main-ebe15999-a14a-4066-9551-00deb3d2323a.md",
+        "changed_symbol:Log \u2014 verification gate classification (claim 0594)",
+        "symbol_range:docs/logs/freebuff-pull-latest-dipshitos-main-ebe15999-a14a-4066-9551-00deb3d2323a.md:1-3"
+      ],
+      "heading": "Log \u2014 verification gate classification (claim 0594)",
+      "id": "391c4a6296925273",
+      "kind": "section",
+      "language": "markdown",
+      "lines": [
+        1,
+        3
+      ],
+      "origin_changed_file": "docs/logs/freebuff-pull-latest-dipshitos-main-ebe15999-a14a-4066-9551-00deb3d2323a.md",
+      "origin_symbol": "Log \u2014 verification gate classification (claim 0594)",
+      "path": "docs/logs/freebuff-pull-latest-dipshitos-main-ebe15999-a14a-4066-9551-00deb3d2323a.md",
+      "provenance": "commit:fff37a5e6af8476c273dc959aefce0f412e11554 index:fff37a5e6af8",
+      "reason": "changed-symbol",
+      "score": 11.25,
+      "structural_name": "Log \u2014 verification gate classification (claim 0594)",
+      "symbol_kind": "heading"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "components": {
+        "file_priority": 1.18,
+        "reason": 10.0
+      },
+      "content": "#\u2026\n... [truncated 39 line(s) omitted -- retained 1 of 40 line(s)]",
+      "content_hash": "38a18bce1eddb34e",
+      "cost": 445,
+      "covers": [
+        "changed_file:docs/march-m15.md",
+        "changed_symbol:M1.5 march \u2014 Interactive Kernel Monitor (living tracker)",
+        "symbol_range:docs/march-m15.md:1-41"
+      ],
+      "heading": "M1.5 march \u2014 Interactive Kernel Monitor (living tracker)",
+      "id": "a8a4f34a4f23668b",
+      "kind": "section",
+      "language": "markdown",
+      "lines": [
+        1,
+        1
+      ],
+      "origin_changed_file": "docs/march-m15.md",
+      "origin_symbol": "M1.5 march \u2014 Interactive Kernel Monitor (living tracker)",
+      "path": "docs/march-m15.md",
+      "provenance": "commit:fff37a5e6af8476c273dc959aefce0f412e11554 index:fff37a5e6af8",
+      "reason": "changed-symbol",
+      "score": 11.18,
+      "structural_name": "M1.5 march \u2014 Interactive Kernel Monitor (living tracker)",
+      "symbol_kind": "heading"
+    }
+  ],
+  "selection_summary": {
+    "actual_chars": 39992,
+    "budget": 40000,
+    "candidate_cost_chars": 33938,
+    "candidates_considered": 108,
+    "envelope_fallback_used": false,
+    "rejected": 92,
+    "selected": 41,
+    "truncated": true,
+    "utilization": 100.0
+  },
+  "stale": [
+    {
+      "heading": "Claim: M1.5 \u2014 pre-ExitBootServices virtio-pci console TX experiment (diagnostic) > Notes",
+      "lines": [
+        21,
+        77
+      ],
+      "path": "docs/claims/0017-preexit-virtio-tx.md",
+      "reason": "mentions changed symbol but not updated in range",
+      "symbol": "virtio_pci_init"
+    },
+    {
+      "heading": "Claim: mechanical split of kernel/src/main.zig into hardware modules > Notes > Module boundaries (moved verbatim, only import/name plumbing changes)",
+      "lines": [
+        18,
+        49
+      ],
+      "path": "docs/claims/0023-mainzig-module-split.md",
+      "reason": "mentions changed symbol but not updated in range",
+      "symbol": "virtio_pci_init"
+    },
+    {
+      "heading": "Log \u2014 `agent/buffy/m15-milestone-docs`",
+      "lines": [
+        1,
+        45
+      ],
+      "path": "docs/logs/agent-buffy-m15-milestone-docs.md",
+      "reason": "mentions changed symbol but not updated in range",
+      "symbol": "Next steps"
+    },
+    {
+      "heading": "Milestone 1.5 \u2014 the VZ serial/MMU gate run (M1.5 march step 8, claim 0002) > Verification sequence (run in order; save every output)",
+      "lines": [
+        135,
+        174
+      ],
+      "path": "docs/m2-vz-serial-gate-prompt.md",
+      "reason": "mentions changed symbol but not updated in range",
+      "symbol": "Verification sequence"
+    }
+  ],
+  "stale_filtered": [
+    {
+      "reasons": [
+        "generic-heading (appears in 4 documents)"
+      ],
+      "symbol": "Current state"
+    },
+    {
+      "reasons": [
+        "project-name",
+        "generic-heading (appears in 27 documents)",
+        "ubiquitous (appears in 27 documents)"
+      ],
+      "symbol": "DipshitOS"
+    },
+    {
+      "reasons": [
+        "generic-heading (appears in 31 documents)",
+        "ubiquitous (appears in 31 documents)"
+      ],
+      "symbol": "Notes"
+    },
+    {
+      "reasons": [
+        "generic-heading (appears in 6 documents)"
+      ],
+      "symbol": "The guest"
+    },
+    {
+      "reasons": [
+        "ubiquitous (appears in 53 documents)"
+      ],
+      "symbol": "build"
+    },
+    {
+      "reasons": [
+        "ubiquitous (appears in 10 documents)",
+        "generic-config-key (appears in 10 documents)"
+      ],
+      "symbol": "name"
+    }
+  ],
+  "stats": {
+    "candidates_considered": 108,
+    "candidates_rejected": 92,
+    "candidates_selected": 41,
+    "commits": 16,
+    "files_changed": 41,
+    "neighbors": 80,
+    "stale_hints": 4,
+    "symbols_touched": 44
+  },
+  "symbols": [
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "confidence": 0.9,
+      "kind": "key",
+      "lines": [
+        1,
+        13
+      ],
+      "name": "name",
+      "path": ".github/workflows/ci.yml"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "confidence": 0.9,
+      "kind": "key",
+      "lines": [
+        21,
+        86
+      ],
+      "name": "jobs",
+      "path": ".github/workflows/ci.yml"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "confidence": 0.95,
+      "kind": "heading",
+      "lines": [
+        1,
+        52
+      ],
+      "name": "DipshitOS",
+      "path": "README.md"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "confidence": 0.95,
+      "kind": "heading",
+      "lines": [
+        53,
+        73
+      ],
+      "name": "The guest",
+      "path": "README.md"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "confidence": 0.95,
+      "kind": "heading",
+      "lines": [
+        160,
+        195
+      ],
+      "name": "Verification results (observed on this development host)",
+      "path": "README.md"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "confidence": 0.95,
+      "kind": "heading",
+      "lines": [
+        196,
+        217
+      ],
+      "name": "Observed behavior",
+      "path": "README.md"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "confidence": 0.95,
+      "kind": "heading",
+      "lines": [
+        224,
+        250
+      ],
+      "name": "Next steps",
+      "path": "README.md"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "confidence": 0.9,
+      "kind": "symbol",
+      "lines": [
+        1,
+        237
+      ],
+      "name": "build",
+      "path": "build.zig"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "confidence": 0.95,
+      "kind": "heading",
+      "lines": [
+        9,
+        35
+      ],
+      "name": "Current state",
+      "path": "docs/architecture.md"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "confidence": 0.95,
+      "kind": "heading",
+      "lines": [
+        47,
+        65
+      ],
+      "name": "Data flow",
+      "path": "docs/architecture.md"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "confidence": 0.95,
+      "kind": "heading",
+      "lines": [
+        66,
+        97
+      ],
+      "name": "Interfaces",
+      "path": "docs/architecture.md"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "confidence": 0.95,
+      "kind": "heading",
+      "lines": [
+        1,
+        13
+      ],
+      "name": "Claim: Verification gate classification \u2014 portable/build CI vs Apple-VZ hardware gates",
+      "path": "docs/claims/0594-verify-gate-classification.md"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "confidence": 0.95,
+      "kind": "heading",
+      "lines": [
+        14,
+        74
+      ],
+      "name": "Notes",
+      "path": "docs/claims/0594-verify-gate-classification.md"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "confidence": 0.95,
+      "kind": "heading",
+      "lines": [
+        1,
+        10
+      ],
+      "name": "Claim: Stale-doc cleanup \u2014 replace old blocker snapshots with pointers to docs/status.md",
+      "path": "docs/claims/3109-stale-doc-cleanup.md"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "confidence": 0.95,
+      "kind": "heading",
+      "lines": [
+        11,
+        31
+      ],
+      "name": "Notes",
+      "path": "docs/claims/3109-stale-doc-cleanup.md"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "confidence": 0.95,
+      "kind": "heading",
+      "lines": [
+        1,
+        8
+      ],
+      "name": "Claim: Ragshit review dogfood-hardening \u2014 honest accounting, coverage, stale filter, shell importance",
+      "path": "docs/claims/3320-ragshit-dogfood-hardening.md"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "confidence": 0.95,
+      "kind": "heading",
+      "lines": [
+        9,
+        21
+      ],
+      "name": "Notes",
+      "path": "docs/claims/3320-ragshit-dogfood-hardening.md"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "confidence": 0.95,
+      "kind": "heading",
+      "lines": [
+        1,
+        16
+      ],
+      "name": "Claim: Final pre-status review \u2014 status-ready preflight report (artifacts/status-preflight.md)",
+      "path": "docs/claims/8592-status-preflight.md"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "confidence": 0.95,
+      "kind": "heading",
+      "lines": [
+        17,
+        29
+      ],
+      "name": "Notes",
+      "path": "docs/claims/8592-status-preflight.md"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "confidence": 0.95,
+      "kind": "heading",
+      "lines": [
+        1,
+        8
+      ],
+      "name": "Claim: Ragshit `review` \u2014 deterministic budgeted reviewer context packet",
+      "path": "docs/claims/9112-ragshit-review.md"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "confidence": 0.95,
+      "kind": "heading",
+      "lines": [
+        9,
+        11
+      ],
+      "name": "Notes",
+      "path": "docs/claims/9112-ragshit-review.md"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "confidence": 0.95,
+      "kind": "heading",
+      "lines": [
+        56,
+        96
+      ],
+      "name": "Active claims index",
+      "path": "docs/claims/README.md"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "confidence": 0.95,
+      "kind": "heading",
+      "lines": [
+        1,
+        10
+      ],
+      "name": "DipshitOS verification gate inventory",
+      "path": "docs/gate-inventory.md"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "confidence": 0.95,
+      "kind": "heading",
+      "lines": [
+        11,
+        26
+      ],
+      "name": "Classes",
+      "path": "docs/gate-inventory.md"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "confidence": 0.95,
+      "kind": "heading",
+      "lines": [
+        27,
+        69
+      ],
+      "name": "Gate table",
+      "path": "docs/gate-inventory.md"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "confidence": 0.95,
+      "kind": "heading",
+      "lines": [
+        70,
+        102
+      ],
+      "name": "Machine-readable records",
+      "path": "docs/gate-inventory.md"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "confidence": 0.95,
+      "kind": "heading",
+      "lines": [
+        106,
+        115
+      ],
+      "name": "Milestone two: the kernel proper (implemented, ADR 0004 \u2014 MMU/serial findings are **[observed]** per claims 0010/0013/0020/0021; the remaining items below stay **[inferred]**)",
+      "path": "docs/hardware-contract.md"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "confidence": 0.95,
+      "kind": "heading",
+      "lines": [
+        179,
+        214
+      ],
+      "name": "MMIO / serial console (UART)",
+      "path": "docs/hardware-contract.md"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "confidence": 0.95,
+      "kind": "heading",
+      "lines": [
+        36,
+        71
+      ],
+      "name": "Log index",
+      "path": "docs/logs/README.md"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "confidence": 0.95,
+      "kind": "heading",
+      "lines": [
+        1,
+        4
+      ],
+      "name": "Log \u2014 status-preflight review (claim 8592)",
+      "path": "docs/logs/freebuff-pull-latest-dipshitos-main-after-all-preceding-rel-1fe779b0-133e-4303-81f1-397087634352.md"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "confidence": 0.95,
+      "kind": "heading",
+      "lines": [
+        1,
+        3
+      ],
+      "name": "Log \u2014 verification gate classification (claim 0594)",
+      "path": "docs/logs/freebuff-pull-latest-dipshitos-main-ebe15999-a14a-4066-9551-00deb3d2323a.md"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "confidence": 0.95,
+      "kind": "heading",
+      "lines": [
+        1,
+        7
+      ],
+      "name": "Log \u2014 `freebuff/ragshit-review`",
+      "path": "docs/logs/freebuff-ragshit-review.md"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "confidence": 0.95,
+      "kind": "heading",
+      "lines": [
+        1,
+        3
+      ],
+      "name": "Log \u2014 stale-doc cleanup (claim 3109)",
+      "path": "docs/logs/freebuff-stale-doc-cleanup.md"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "confidence": 0.95,
+      "kind": "heading",
+      "lines": [
+        1,
+        4
+      ],
+      "name": "Log \u2014 freebuff/you-are-working-in-the-dipshitos-repository-on-cur-264903eb-313e-440f-a0e4-224e3311933d",
+      "path": "docs/logs/freebuff-you-are-working-in-the-dipshitos-repository-on-cur-264903eb-313e-440f-a0e4-224e3311933d.md"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "confidence": 0.95,
+      "kind": "heading",
+      "lines": [
+        1,
+        41
+      ],
+      "name": "M1.5 march \u2014 Interactive Kernel Monitor (living tracker)",
+      "path": "docs/march-m15.md"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "confidence": 0.95,
+      "kind": "heading",
+      "lines": [
+        62,
+        88
+      ],
+      "name": "Milestone two \u2014 the kernel proper (implemented; VZ serial gate not passed)",
+      "path": "docs/roadmap.md"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "confidence": 0.95,
+      "kind": "heading",
+      "lines": [
+        159,
+        173
+      ],
+      "name": "Milestone-two evidence status",
+      "path": "docs/roadmap.md"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "confidence": 0.95,
+      "kind": "heading",
+      "lines": [
+        174,
+        211
+      ],
+      "name": "Milestone 1.5 \u2014 interactive kernel monitor (current)",
+      "path": "docs/roadmap.md"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "confidence": 0.95,
+      "kind": "heading",
+      "lines": [
+        212,
+        228
+      ],
+      "name": "Later milestones (sketches only, not commitments)",
+      "path": "docs/roadmap.md"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "confidence": 0.95,
+      "kind": "heading",
+      "lines": [
+        1,
+        7
+      ],
+      "name": "DipshitOS testing",
+      "path": "docs/testing.md"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "confidence": 0.95,
+      "kind": "heading",
+      "lines": [
+        8,
+        23
+      ],
+      "name": "Verification classes",
+      "path": "docs/testing.md"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "confidence": 0.95,
+      "kind": "heading",
+      "lines": [
+        34,
+        128
+      ],
+      "name": "Verification sequence",
+      "path": "docs/testing.md"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "confidence": 0.95,
+      "kind": "heading",
+      "lines": [
+        159,
+        212
+      ],
+      "name": "Results log (as verified on the development host)",
+      "path": "docs/testing.md"
+    },
+    {
+      "commit": "fff37a5e6af8476c273dc959aefce0f412e11554",
+      "confidence": 0.9,
+      "kind": "symbol",
+      "lines": [
+        165,
+        395
+      ],
+      "name": "virtio_pci_init",
+      "path": "kernel/src/virtio_console.zig"
+    }
+  ],
+  "timing_ms": 0
+}
