@@ -67,6 +67,7 @@ verify-coordination`, and CI) fails if it drifts from the files.
 | `freebuff/ragshit-impact` | [`freebuff-ragshit-impact.md`](freebuff-ragshit-impact.md) |
 | `freebuff/ragshit-review` | [`freebuff-ragshit-review.md`](freebuff-ragshit-review.md) |
 | stale-doc cleanup (claim 3109) | [`freebuff-stale-doc-cleanup.md`](freebuff-stale-doc-cleanup.md) |
+| ragshit review coverage truncation (claim 0176) | [`freebuff-start-from-current-dipshitos-main-record-the-exact-af2bed0e-1f29-49ea-b233-bf528e5ce88e.md`](freebuff-start-from-current-dipshitos-main-record-the-exact-af2bed0e-1f29-49ea-b233-bf528e5ce88e.md) |
 | freebuff/start-from-the-latest-dipshitos-main-record-the-ex-b37e0c09-ea4e-44cd-a4dd-8576e651c7a2 | [`freebuff-start-from-the-latest-dipshitos-main-record-the-ex-b37e0c09-ea4e-44cd-a4dd-8576e651c7a2.md`](freebuff-start-from-the-latest-dipshitos-main-record-the-ex-b37e0c09-ea4e-44cd-a4dd-8576e651c7a2.md) |
 | `freebuff/t0sz16-startlevel-diag` | [`freebuff-t0sz16-startlevel-diag.md`](freebuff-t0sz16-startlevel-diag.md) |
 | freebuff/you-are-working-in-the-dipshitos-repository-on-cur-264903eb-313e-440f-a0e4-224e3311933d | [`freebuff-you-are-working-in-the-dipshitos-repository-on-cur-264903eb-313e-440f-a0e4-224e3311933d.md`](freebuff-you-are-working-in-the-dipshitos-repository-on-cur-264903eb-313e-440f-a0e4-224e3311933d.md) |

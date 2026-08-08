@@ -93,6 +93,12 @@ def _framing_aware_select_and_report(candidates, spec, budget, repo_root, repo_i
     best_report = None
     best_md = None
     stale_filtered = stale_filtered or []
+    # Claim 0176: anchor-floor truncation can make the selection total
+    # UNRESPONSIVE to small allowance shrinks (every mandatory candidate is
+    # already at its useful floor). Detect that plateau and jump the
+    # allowance below it so phase-2 shaving actually sheds content instead of
+    # grinding in place until the envelope is needed.
+    prev_actual: Optional[int] = None
     for _ in range(8):
         result = select(candidates, spec, candidate_budget)
         report = build_review(repo_root, repo_id, inv, mapping, neighbors, stale, file_scores, spec, result, candidates, budget, index_head, index_stale, index_warning, timing_ms, stale_filtered=stale_filtered)
@@ -120,15 +126,27 @@ def _framing_aware_select_and_report(candidates, spec, budget, repo_root, repo_i
                 report.envelope_fallback_used = False
                 report._rendered_markdown = md  # type: ignore[attr-defined]
                 return result, report
-            # Re-render pushed the packet past budget (digits grew): shrink and retry
+            # Re-render pushed the packet past budget (digits grew): shrink
+            # and retry. If the selection total did not move (anchor-floor
+            # plateau), jump below it so the next selection sheds content.
             best_result, best_report, best_md = result, report, md
             excess = len(md) - budget
-            candidate_budget = max(0, candidate_budget - excess - 8)
+            if prev_actual is not None and result.actual_chars == prev_actual:
+                candidate_budget = max(0, result.actual_chars - excess - 8)
+            else:
+                candidate_budget = max(0, candidate_budget - excess - 8)
+            prev_actual = result.actual_chars
             continue
-        # Raw over budget: shrink candidate allowance and retry (no envelope yet)
+        # Raw over budget: shrink candidate allowance and retry (no envelope
+        # yet). If the selection total did not move (anchor-floor plateau),
+        # jump below it so the next selection actually sheds content.
         best_result, best_report, best_md = result, report, raw_md
         excess = md_len - budget
-        candidate_budget = max(0, candidate_budget - excess - 16)
+        if prev_actual is not None and result.actual_chars == prev_actual:
+            candidate_budget = max(0, result.actual_chars - excess - 16)
+        else:
+            candidate_budget = max(0, candidate_budget - excess - 16)
+        prev_actual = result.actual_chars
         if candidate_budget == 0 and md_len > budget:
             # Framing alone > budget: patch report fields for a consistent
             # re-render, then use the defensive envelope as last resort.

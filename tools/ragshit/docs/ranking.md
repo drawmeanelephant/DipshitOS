@@ -209,8 +209,18 @@ so coverage can never be invented for a path outside the universe.
 1. **Mandatory reserve.** One candidate per changed symbol (`changed-symbol`) and one per
    high-risk file; sorted `(-utility, cost, path, start, id)`. Budget is reserved for
    mandatory first. If mandatory cost alone exceeds the budget, the mandatory pool is
-   *safely truncated* (largest content shaved deterministically, provenance kept, omitted
-   lines marked) rather than silently dropping a changed function.
+   *safely truncated* (anchor-aware, two-phase; provenance kept, omitted lines marked)
+   rather than silently dropping a changed function. Truncation is distributed across
+   every mandatory symbol instead of collapsing the largest one to a content-free
+   prefix (claim 0176):
+   - **Phase 1** shaves every mandatory excerpt down to its *useful floor* — the
+     structural identity line (signature/heading) plus a bounded window around the
+     first changed line (git `--unified=2` context). With a normal budget every
+     changed symbol therefore stays decision-useful.
+   - **Phase 2** (still over budget) shaves the largest excerpts below their floor and,
+     as the genuine last resort, drops the lowest-utility candidates. Excerpts that
+     lose the structural identity line or the changed-line neighborhood are marked
+     **weak** and never count as useful coverage.
 2. **Greedy diversity step.** Remaining candidates ordered by `effective_utility / cost` where
    `effective_utility = base_utility * (1 - redundancy_penalty)`. Redundancy penalty 0..0.9
    from line-overlap, token Jaccard, or hash equality with already-selected chunks.
@@ -239,18 +249,39 @@ the candidate is rejected as `redundant ... coverage already 92% duplicated`.
 ### Safe truncation
 
 * Never removes provenance header.
-* Keeps the changed region: largest-content-first shaving retains the start of the
-  content + appends `"... [truncated N lines omitted -- retained K of TOTAL]"`
-  with an exact omitted count (`kept + omitted == total`) and an accurate
-  `end_line` (`start + kept - 1`). Provenance survives.
+* **Anchor-aware (claim 0176):** each excerpt keeps the structural identity line
+  (signature/heading — skipping leading comments) plus the actual changed-line
+  neighborhood (each changed range clamped to the chunk, expanded by
+  `_CTX = 2` context lines each side, mirroring git `--unified=2`). A large
+  changed symbol therefore renders as *signature + the lines that actually
+  changed*, not a nearly content-free prefix. Excerpts are built in priority
+  order (anchor, then changed core lines, then context, then remaining lines in
+  ascending order) and then trimmed to the exact allowance; omission markers
+  give an exact omitted count (`kept + omitted == total`) and `end_line` stays
+  accurate (`start + kept - 1`). Provenance survives.
+* **Weak / truncated coverage (claim 0176):** a truncated excerpt that loses the
+  structural identity line, or whose symbol has a changed region disjoint from
+  the identity line that is not represented at all, is flagged `weak` with a
+  `weak_reason` (`"excerpt lost the structural identity line"` /
+  `"excerpt lost the changed region (changed-line neighborhood)"`). Weak
+  candidates are **excluded from covered counts** (they are counted in
+  `coverage_detail.<dim>.weak` and listed in `missing_coverage`), surfaced in a
+  `## Weak / truncated coverage` section, and carried in JSON (`weak` array +
+  `weak`/`weak_reason`/`anchor_ranges` per candidate — additive schema
+  extension). A packet with weak symbols can no longer report ordinary complete
+  coverage for those symbols.
 * Framing-aware budget loop measures the **UNTRUNCATED** Markdown render
   (`report_to_markdown(..., enforce_budget=False)`) and iteratively reduces
-  candidate allowance until the real packet fits. Only when framing alone
-  exceeds the budget (genuinely impossible tiny budget) does the defensive
-  Markdown envelope (`_enforce_budget` → `"... [truncated to fit budget]"`)
-  run. Normal 5k/10k/25k/30k budgets do not use the envelope; this is
-  surfaced as `envelope_fallback_used: bool` in `ReviewReport`,
-  `selection_summary`, and the `ragshit.review/v1` JSON.
+  candidate allowance until the real packet fits. If an allowance reduction
+  does not move the selection total (every mandatory excerpt already sits at
+  its useful floor), the loop detects the plateau and jumps the allowance below
+  it so phase-2 shaving actually engages, instead of grinding until the
+  envelope is needed. Only when framing alone exceeds the budget (genuinely
+  impossible tiny budget) does the defensive Markdown envelope
+  (`_enforce_budget` → `"... [truncated to fit budget]"`) run. Normal
+  5k/10k/25k/30k budgets do not use the envelope; this is surfaced as
+  `envelope_fallback_used: bool` in `ReviewReport`, `selection_summary`, and
+  the `ragshit.review/v1` JSON.
 
 ### Stale-doc generic-symbol filter (ragshit impact/review)
 

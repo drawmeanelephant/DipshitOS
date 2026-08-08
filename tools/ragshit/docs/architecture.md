@@ -89,19 +89,25 @@ discovery → parsing → indexing → retrieval → rendering → (doctor/statu
 ### `review/` — budgeted reviewer packet
 - `candidates.py` — deterministic pool with provenance, cost, coverage keys,
   token sets, and precise `symbol_kind` (function/constant/heading) that
-  weights shell assignments low and keeps them out of the mandatory pool.
+  weights shell assignments low and keeps them out of the mandatory pool;
+  carries `anchor_ranges` (changed-line ranges within each chunk) that drive
+  anchor-aware truncation, and a `weak`/`weak_reason` signal.
 - `coverage.py` — explicit dimensions and `covered/total` metrics; selected
   candidates also satisfy doc dimensions by their OWN path (coverage
-  describes WHAT is selected).
+  describes WHAT is selected); weak (truncated-beyond-useful) candidates are
+  excluded from covered counts and tallied per dimension.
 - `redundancy.py` — line overlap, token Jaccard, hash, structural identity.
 - `selection.py` — greedy weighted set cover under hard budget with
-  mandatory reserve + truncation; low-value shell assignments are never
-  mandatory.
+  mandatory reserve + anchor-aware truncation (signature + changed region,
+  two-phase: useful floors first, then below-floor/weak as last resort);
+  low-value shell assignments are never mandatory.
 - `report.py` — `ragshit.review/v1` JSON + Markdown, baseline comparison,
   `len(markdown) ≤ budget`. `actual_size` / `selection_summary.actual_chars`
   equal the final rendered Markdown length; the raw sum of candidate block
   costs is exposed separately as `selection_summary.candidate_cost_chars`.
-  Code fences are language-tagged when the candidate's language is known.
+  Code fences are language-tagged when the candidate's language is known;
+  weak excerpts are surfaced in a `## Weak / truncated coverage` section
+  and the JSON `weak` array.
 
 ### `doctor.py`, `cli.py`, `embeddings/`
 - `doctor.py` — ten checks (repo, git, config, DB, FTS5, ignore behavior,

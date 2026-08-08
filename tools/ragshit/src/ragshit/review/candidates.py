@@ -130,6 +130,17 @@ class Candidate:
     # declarations, "heading" for markdown sections, None otherwise. Drives
     # importance weighting and the mandatory-pool exclusion below.
     symbol_kind: Optional[str] = None
+    # Absolute 1-based changed-line ranges INSIDE this chunk (the actual
+    # hunks the candidate is mandatory for). Anchor-aware truncation keeps a
+    # neighborhood around these lines so a changed region deep in a large
+    # structural symbol stays represented. Empty for candidates with no
+    # direct changed lines (neighbors, stale hints, referenced docs).
+    anchor_ranges: List[Tuple[int, int]] = field(default_factory=list)
+    # Explicit weak/truncated-coverage signal (claim 0176): a truncated
+    # excerpt that lost its structural identity line or its changed-line
+    # neighborhood is NOT counted identically to useful coverage.
+    weak: bool = False
+    weak_reason: Optional[str] = None
 
 
 def _candidate_id(repo_id: str, path: str, start: int, end: int, reason: str, origin: str) -> str:
@@ -156,6 +167,21 @@ def _chunk_symbol_kind(chunk) -> Optional[str]:
     if str(getattr(chunk, "path", "")).endswith((".sh", ".bash", ".zsh")):
         return shell_decl_kind(chunk.content or "")
     return None
+
+
+def changed_ranges_in_chunk(cf, start: int, end: int) -> List[Tuple[int, int]]:
+    """The absolute 1-based changed hunks of *cf* that fall inside
+    [start, end] (clamped). Deterministic; empty when the file or its hunks
+    are unknown. Drives anchor-aware truncation."""
+    if cf is None or not getattr(cf, "ranges", None):
+        return []
+    out: List[Tuple[int, int]] = []
+    for rs, re in cf.ranges:
+        lo = max(rs, start)
+        hi = min(re, end)
+        if lo <= hi:
+            out.append((lo, hi))
+    return out
 
 def build_candidates(
     db: Database,
@@ -186,6 +212,8 @@ def build_candidates(
         parsed, _ = _historical_chunks_for_deleted(repo, inv.base_oid, path)
         _historical_cache[path] = parsed
         return parsed
+
+    changed_file_by_path = {f.path: f for f in inv.files}
 
     # 1. changed-symbol candidates (mandatory class)
     for sym in sorted(mapping.symbols, key=lambda s: (s.path, s.start_line, s.name)):
@@ -236,6 +264,8 @@ def build_candidates(
                         components=comps, provenance=prov,
                         original_content=pc.content,
                         symbol_kind=symbol_kind,
+                        # A deleted file: every surviving line is the change.
+                        anchor_ranges=[(pc.start_line, pc.end_line)],
                     ))
                 continue
             else:
@@ -277,6 +307,7 @@ def build_candidates(
             components=comps, provenance=f"commit:{chunk.commit or '?'} index:{index_head[:12] if index_head else '?'}",
             original_content=chunk.content,
             symbol_kind=symbol_kind,
+            anchor_ranges=changed_ranges_in_chunk(changed_file_by_path.get(sym.path), chunk.start_line, chunk.end_line),
         ))
 
     # 2. changed-chunk / overlapping chunk not already symbol (hunk-aligned)
@@ -323,6 +354,7 @@ def build_candidates(
                 components=comps, provenance=f"commit:{chunk.commit or '?'} index:{index_head[:12] if index_head else '?'}",
                 original_content=chunk.content,
                 symbol_kind=symbol_kind,
+                anchor_ranges=changed_ranges_in_chunk(cf, chunk.start_line, chunk.end_line),
             ))
             # One per file is enough for changed-chunk unless multiple distinct hunks far apart
             # but we allow up to 2 per file to keep diversity
@@ -510,6 +542,7 @@ def build_candidates(
             components=comps, provenance=f"commit:{picked.commit or '?'} index:{index_head[:12] if index_head else '?'}",
             original_content=picked.content,
             symbol_kind=symbol_kind,
+            anchor_ranges=changed_ranges_in_chunk(cf, picked.start_line, picked.end_line),
         ))
 
     # 7. Ensure hardware-contract appears if high-risk or any symbol touches kernel/boot (even without neighbor)
