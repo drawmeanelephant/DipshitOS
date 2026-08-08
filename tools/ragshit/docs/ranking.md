@@ -195,15 +195,23 @@ the candidate is rejected as `redundant ... coverage already 92% duplicated`.
 
 * Never removes provenance header.
 * Keeps the changed region: largest-content-first shaving retains the start of the
-  content + appends `"... [truncated N lines omitted]"`.
-* Markdown envelope (`_enforce_budget`) reserves `## Review packet` header and truncates
-  the tail, closing an open fence if needed, and is recomputed after selection so
-  `len(markdown) ≤ budget` always.
+  content + appends `"... [truncated N lines omitted -- retained K of TOTAL]"`
+  with an exact omitted count (`kept + omitted == total`) and an accurate
+  `end_line` (`start + kept - 1`). Provenance survives.
+* Framing-aware budget loop measures the **UNTRUNCATED** Markdown render
+  (`report_to_markdown(..., enforce_budget=False)`) and iteratively reduces
+  candidate allowance until the real packet fits. Only when framing alone
+  exceeds the budget (genuinely impossible tiny budget) does the defensive
+  Markdown envelope (`_enforce_budget` → `"... [truncated to fit budget]"`)
+  run. Normal 5k/10k/25k/30k budgets do not use the envelope; this is
+  surfaced as `envelope_fallback_used: bool` in `ReviewReport`,
+  `selection_summary`, and the `ragshit.review/v1` JSON.
 
 ### Budget + index-head safety
 
-Budget is a hard envelope; tiny budgets degrade gracefully with truncation and a
-`truncated` flag. Index mismatch (`index HEAD != range head`) is surfaced loudly in
+Budget is a hard envelope on the **real Markdown packet**; tiny budgets fall back
+to the envelope with `envelope_fallback_used == true` and `"... [truncated to
+fit budget]"`. Index mismatch (`index HEAD != range head`) is surfaced loudly in
 both Markdown and JSON and on `stderr`, but does not rebuild the index (existing
 conventions). Real wall-clock timing is written to `stderr` only; deterministic
 output `timing_ms` is always `0`.
