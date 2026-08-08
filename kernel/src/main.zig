@@ -12,8 +12,6 @@ const uefi = std.os.uefi;
 const SystemTable = uefi.tables.SystemTable;
 const BootServices = uefi.tables.BootServices;
 const MemoryMapSlice = uefi.tables.MemoryMapSlice;
-const MemoryType = uefi.tables.MemoryType;
-const ConfigurationTable = uefi.tables.ConfigurationTable;
 
 // M1.5 console & shell core (agent B): the interactive `dipshit>` monitor
 // runs on the polled TX console through these modules. The takeover path
@@ -24,6 +22,40 @@ const memmap = @import("memmap.zig");
 const monitor = @import("monitor.zig");
 const shell = @import("shell.zig");
 
+// Claim 0023: the handoff-v2 contract, the identity-map MMU, and the
+// evidence channel (takeover markers + probe dumps) live in their own
+// modules. This file keeps local aliases so the orchestration below reads
+// like the original; the marker names and values are evidence.zig's.
+const handoff = @import("handoff.zig");
+const mmu = @import("mmu.zig");
+const mmio = @import("mmio.zig");
+const pci = @import("pci.zig");
+const evidence = @import("evidence.zig");
+const virtio_console = @import("virtio_console.zig");
+const HandoffV2 = handoff.HandoffV2;
+
+// Claim 0020 phase selectors live with the transport (the exact-one-phase
+// comptime check is virtio_console.zig's); the orchestration reads them.
+const tx_transition_a = virtio_console.tx_transition_a; // pre-ExitBootServices
+const tx_transition_b = virtio_console.tx_transition_b; // post-EBS, firmware translation still active
+const tx_transition_c = virtio_console.tx_transition_c; // post identity-map install, before unrelated work
+const tx_transition_d = virtio_console.tx_transition_d; // normal final location (banner site)
+
+// Only the markers the orchestration itself writes are aliased here; the
+// virtio/transition markers are internal to virtio_console.zig.
+const marker_entry = evidence.marker_entry;
+const marker_cmap = evidence.marker_cmap;
+const marker_prex = evidence.marker_prex;
+const marker_exit = evidence.marker_exit;
+const marker_table = evidence.marker_table;
+const marker_mapd = evidence.marker_mapd;
+const marker_mmu = evidence.marker_mmu;
+const marker_seria = evidence.marker_seria;
+const marker_ready = evidence.marker_ready;
+const marker_raw = evidence.marker_raw;
+const marker_txok = evidence.marker_txok;
+const marker_seam = evidence.marker_seam;
+
 // Claim 0015: NVRAM console channel (build-gated by `-Dnvram-console`).
 // Post-exit access to the virtio-pci transport hangs on VZ (claim 0013), so
 // in nvram-console builds console bytes ride the proven post-exit-safe
@@ -33,179 +65,17 @@ const shell = @import("shell.zig");
 const build_options = @import("build_options");
 const nvram_console = @import("nvram_console.zig");
 
-// Claim 0020: TX-transition matrix phases. Each option is default off; a
-// default build is byte-identical. A diagnostic build enables exactly ONE
-// phase, which runs a single controlled TX attempt at its named location
-// (A pre-EBS, B post-EBS/pre-MMU, C post-MMU, D final location).
-const tx_transition_a = build_options.tx_transition_a; // pre-ExitBootServices
-const tx_transition_b = build_options.tx_transition_b; // post-EBS, firmware translation still active
-const tx_transition_c = build_options.tx_transition_c; // post identity-map install, before unrelated work
-const tx_transition_d = build_options.tx_transition_d; // normal final location (banner site)
-const tx_transition_enabled = tx_transition_a or tx_transition_b or tx_transition_c or tx_transition_d;
 // Claim 0021: firmware MMU-state capture (default off; the default build is
 // byte-identical). Records the firmware's live MMU registers and a bounded
 // walk of its TTBR0 tables for the virtio BAR0 window + a RAM control
 // address, plus the kernel's planned values, persisted pre-exit.
 const fw_mmu_capture = build_options.fw_mmu_capture;
-// Claim 0020: the matrix is only meaningful with ONE phase per build — a
-// second experiment in the same boot would contaminate the transport state
-// of the later phase (its TX attempt would no longer be the first on the
-// armed transport). Reject combined phase options at compile time.
-comptime {
-    if (tx_transition_enabled) {
-        const phases = @as(usize, @intFromBool(tx_transition_a)) +
-            @as(usize, @intFromBool(tx_transition_b)) +
-            @as(usize, @intFromBool(tx_transition_c)) +
-            @as(usize, @intFromBool(tx_transition_d));
-        if (phases != 1) @compileError("tx-transition: enable EXACTLY ONE phase (-Dtx-transition-{a,b,c,d})");
-    }
-}
 
-const HandoffV2 = extern struct {
-    magic: u32,
-    version: u32,
-    kernel_base: u64,
-    kernel_size: u64,
-    system_table: u64,
-    image_handle: u64,
-    stack_base: u64,
-    stack_size: u64,
-    flags: u64,
-};
-
-const handoff_magic: u32 = 0x324B5344; // "DSK2"
-const handoff_version: u32 = 2;
 const bad_handoff: u64 = 2;
 const map_failure: u64 = 3;
 const exit_failure: u64 = 4;
 const table_failure: u64 = 5;
 const serial_failure: u64 = 6;
-
-// ADR 0004 D4 fixed-memory-marker fallback (gate work item 3): `takeover_marker`
-// is a BSS word a host-side dump can read. It records the takeover stage so a
-// silent post-exit death (no serial output) is discriminable: the stage present
-// when the kernel halts names the failure window, and a missing later stage
-// names the crash site. Values are 8-byte ASCII, little-endian in RAM.
-const marker_entry: u64 = 0x4d325f454e545259; // "M2_ENTRY"
-const marker_cmap: u64 = 0x4d325f434d415021; // "M2_CMAP!" — about to capture the EFI map
-const marker_mapd: u64 = 0x4d325f4d41504421; // "M2_MAPD!" — identity map built, about to install it
-const marker_prex: u64 = 0x4d325f5052455821; // "M2_PREX!" — about to call ExitBootServices
-const marker_exit: u64 = 0x4d325f4558495421; // "M2_EXIT!"
-const marker_mmu: u64 = 0x4d325f4d4d555021; // "M2_MMUP!"
-const marker_table: u64 = 0x4d325f5441424c45; // "M2_TABLE"
-const marker_seria: u64 = 0x4d325f5345524941; // "M2_SERIA"
-const marker_ready: u64 = 0x4d325f5245414459; // "M2_READY" — console ready, banner next
-const marker_raw: u64 = 0x4d325f52415721; // "M2_RAW!" — post-switch probe: declared-window base checks
-const marker_txok: u64 = 0x4d325f54584f4b21; // "M2_TXOK!" — first serial TX completed (bytes may still be dropped; the log is the gate)
-const marker_txst: u64 = 0x4d325f5458535421; // "M2_TXST!" — virtio flush entered (desc/avail posted)
-const marker_txnt: u64 = 0x4d325f54584e5421; // "M2_TXNT!" — notify write issued
-const marker_txpl: u64 = 0x4d325f5458504c21; // "M2_TXPL!" — used-ring poll finished
-const marker_vpscan: u64 = 0x4d325f5650533031; // "M2_VPS01" — virtio-pci console dev scan done
-const marker_seam: u64 = 0x4d325f5345414d21; // "M2_SEAM!" — claim 0015 diag: shell seam entered
-const marker_vpbar: u64 = 0x4d325f5650533032; // "M2_VPS02" — BAR bases read
-const marker_vpcap: u64 = 0x4d325f5650533033; // "M2_VPS03" — about to read the capability pointer (0x34)
-const marker_vpcapr: u64 = 0x4d325f5650533034; // "M2_VPS04" — capability pointer read; walk about to start
-const marker_vpwalk: u64 = 0x4d325f5650533035; // "M2_VPS05" — walk exited
-const marker_vpdev: u64 = 0x4d325f5650444556; // "M2_VPDEV" — virtio-pci console device found, caps walked
-const marker_vptx: u64 = 0x4d325f5650545821; // "M2_VPTX!" — transport programmed (features + queue)
-const marker_vpok: u64 = 0x4d325f56504f4b21; // "M2_VPOK!" — DRIVER_OK, TX path armed
-const marker_pext: u64 = 0x4d325f5045585421; // "M2_PEXT!" — claim 0017: pre-exit TX experiment entered, about to flush
-const marker_pexd: u64 = 0x4d325f5045584421; // "M2_PEXD!" — claim 0017: pre-exit TX experiment flush returned
-// Claim 0018: per-stage bisect markers for the FIRST post-exit virtio TX.
-// Ten ordered 8-byte NVRAM writes bracket each potentially fatal operation;
-// the ladder's last marker names the smallest confirmed failure interval
-// (tools/verify-tx-diag.sh, build-gated -Dtx-diag).
-const marker_txfl: u64 = 0x4d325f5458464c21; // "M2_TXFL!" — 1 entered virtio flush
-const marker_txda: u64 = 0x4d325f5458444121; // "M2_TXDA!" — 2 descriptor/avail buffers prepared
-const marker_txcc: u64 = 0x4d325f5458434321; // "M2_TXCC!" — 3 DMA cache clean completed
-const marker_txbr: u64 = 0x4d325f5458425221; // "M2_TXBR!" — 4 before first post-exit BAR/common-cfg read
-const marker_txar: u64 = 0x4d325f5458415221; // "M2_TXAR!" — 5 after that read
-const marker_txbn: u64 = 0x4d325f5458424e21; // "M2_TXBN!" — 6 before queue notify MMIO write
-const marker_txan: u64 = 0x4d325f5458414e21; // "M2_TXAN!" — 7 after notify
-const marker_txup: u64 = 0x4d325f5458555021; // "M2_TXUP!" — 8 entered used-ring poll
-const marker_txuc: u64 = 0x4d325f5458554321; // "M2_TXUC!" — 9 device changed used.idx (break condition seen)
-const marker_txfr: u64 = 0x4d325f5458465221; // "M2_TXFR!" — 10 flush returned
-// Claim 0020: TX-transition matrix markers. Build-gated `-Dtx-transition-*`
-// (one phase per build). For each phase x ∈ {A=pre-EBS, B=post-EBS/pre-MMU,
-// C=post-MMU, D=final location}: M2_TRx1! = experiment entered, about to
-// flush; M2_TRx2! = flush returned; M2_TRxU! = flush returned AND used.idx
-// advanced (device consumed). Absence of x2 with x1 present = hung inside
-// the flush; x2 present without xU = returned but the device never consumed.
-// M2_TRNX! = experiment skipped (transport not armed pre-exit).
-const marker_tra1: u64 = 0x4d325f5452413121; // "M2_TRA1!"
-const marker_tra2: u64 = 0x4d325f5452413221; // "M2_TRA2!"
-const marker_trau: u64 = 0x4d325f5452415521; // "M2_TRAU!"
-const marker_trb1: u64 = 0x4d325f5452423121; // "M2_TRB1!"
-const marker_trb2: u64 = 0x4d325f5452423221; // "M2_TRB2!"
-const marker_trbu: u64 = 0x4d325f5452425521; // "M2_TRBU!"
-const marker_trc1: u64 = 0x4d325f5452433121; // "M2_TRC1!"
-const marker_trc2: u64 = 0x4d325f5452433221; // "M2_TRC2!"
-const marker_trcu: u64 = 0x4d325f5452435521; // "M2_TRCU!"
-const marker_trd1: u64 = 0x4d325f5452443121; // "M2_TRD1!"
-const marker_trd2: u64 = 0x4d325f5452443221; // "M2_TRD2!"
-const marker_trdu: u64 = 0x4d325f5452445521; // "M2_TRDU!"
-const marker_trnx: u64 = 0x4d325f54524e5821; // "M2_TRNX!"
-
-// Marker NVRAM channel: EFI Runtime Services `SetVariable` survives
-// ExitBootServices (it is a *runtime* service, not a boot service — the same
-// table M1.5's reboot/shutdown design cites via `ResetSystem`). Writing each
-// stage as a non-volatile variable gives the host a post-exit-visible marker:
-// artifacts/efi-vars.bin is host-readable after the run. This is the working
-// form of the ADR 0004 D4 fallback on VZ — the memory-dump variant is
-// impossible there (guest RAM is not mapped into the runner process, claim
-// 0009).
-const marker_variable_name = utf16z("DipshitM2");
-const marker_vendor_guid = uefi.Guid{
-    .time_low = 0x4d324d32, // "M2M2"
-    .time_mid = 0x5f44, // "_D"
-    .time_high_and_version = 0x4950, // "IP"
-    .clock_seq_high_and_reserved = 0x53, // "S"
-    .clock_seq_low = 0x48, // "H"
-    .node = .{ 0x49, 0x54, 0x4f, 0x53, 0x2d, 0x4d }, // "ITOS-M"
-};
-
-fn utf16z(comptime text: []const u8) [text.len + 1:0]u16 {
-    var result: [text.len + 1:0]u16 = undefined;
-    for (text, 0..) |byte, index| result[index] = byte;
-    result[text.len] = 0;
-    return result;
-}
-
-const table_page_count = 128; // 512 KiB fixed BSS carve-out, no allocator.
-var table_storage: [table_page_count][512]u64 align(4096) = undefined;
-var table_count: usize = 0;
-var takeover_marker: u64 = 0;
-
-/// Clean the D-cache over [start, start+len) to the point of coherence so a
-/// subsequent translation walk (which may read memory directly, bypassing a
-/// dirty cache) sees the real contents. 64-byte lines (Apple silicon
-/// MMU_CLINE = 6); addresses are 64-byte aligned.
-fn clean_dcache_range(start: u64, len: u64) void {
-    var addr = start & ~@as(u64, 63);
-    const end = start + len;
-    while (addr < end) : (addr += 64) {
-        asm volatile ("dc cvac, %[addr]"
-            :
-            : [addr] "r" (addr),
-        );
-    }
-    asm volatile ("dsb ish" ::: .{ .memory = true });
-}
-
-/// Invalidate the D-cache over [start, start+len) so the CPU re-reads RAM
-/// the device just wrote (the virtio used ring). Pairs with
-/// clean_dcache_range for device-visible DMA buffers.
-fn invalidate_dcache_range(start: u64, len: u64) void {
-    var addr = start & ~@as(u64, 63);
-    const end = start + len;
-    while (addr < end) : (addr += 64) {
-        asm volatile ("dc ivac, %[addr]"
-            :
-            : [addr] "r" (addr),
-        );
-    }
-    asm volatile ("dsb ish" ::: .{ .memory = true });
-}
 
 const ProbeRecord = extern struct {
     base: u64,
@@ -217,64 +87,11 @@ const ProbeRecord = extern struct {
 var probe_records: [96]ProbeRecord = undefined;
 var probe_count: usize = 0;
 
-const VirtqDesc = extern struct {
-    addr: u64,
-    len: u32,
-    flags: u16,
-    next: u16,
-};
-const VirtqAvail = extern struct {
-    flags: u16,
-    idx: u16,
-    ring: [1]u16,
-};
-const VirtqUsedElem = extern struct {
-    id: u32,
-    len: u32,
-};
-const VirtqUsed = extern struct {
-    flags: u16,
-    idx: u16,
-    ring: [1]VirtqUsedElem,
-};
-var virtio_desc: [1]VirtqDesc align(16) = undefined;
-var virtio_avail: VirtqAvail align(2) = undefined;
-var virtio_used: VirtqUsed align(4) = undefined;
-var virtio_tx: [128]u8 align(16) = undefined;
-var virtio_last_used: u16 = 0;
-// Split-ring size (must be a power of 2, Virtio 1.3 §4.1.4.3): one
-// descriptor, no chaining. The number of outstanding buffers
-// (avail.idx - used.idx) must never exceed this (§2.7).
-const virtio_queue_size: u16 = 1;
-
-// Claim 0013 virtio-pci console (the VZ serial attachment): the runner's
-// VZVirtioConsoleDeviceSerialPortConfiguration appears to the guest as a
-// modern virtio-pci console (VID 0x1af4, DID 0x1043) on bus 0, found via
-// the MCFG ECAM base — not the EFI MMIO windows (which the DSDT proves hold
-// only PCI0 + the efivars store; the 0x20050000 PrimeCell UART is Apple's
-// internal debug console, unconnected to the serial pipe). Discovery and
-// transport setup run PRE-EXIT (config-space and BAR MMIO are
-// firmware-identity-mapped and deterministic); post-exit only the notify
-// MMIO + queue RAM are touched for TX, and every VA used sits below the
-// 4 GiB blanket (mapped Device), so no post-switch fault is possible.
-var pci_ecam: u64 = 0; // set from the MCFG table during dump_acpi
-var vp_dev: u32 = 0; // console PCI device number
-var vp_ready: bool = false; // transport initialized, TX path armed
-var vp_common: u64 = 0; // common-config struct address (BAR + cap offset)
-var vp_notify: u64 = 0; // notify region base (BAR + cap offset)
-var vp_notify_mult: u32 = 0; // notify_off_multiplier
-var vp_queue_notify_off: u16 = 0; // queue 1 notify offset
-var vp_common_off: u32 = 0; // common cfg offset within the BAR
-var vp_notify_off: u32 = 0; // notify cfg offset within the BAR
-var vp_bar0: u64 = 0; // console BAR0 base (the SEL record)
-var vp_tx_len: usize = 0; // bytes buffered in virtio_tx
-var st_tx: ?*const SystemTable = null; // for post-exit flush stage markers
-
 const Candidate = struct {
     base: u64,
     kind: Kind,
 };
-const Kind = enum { none, pl011, ns16550, virtio };
+const Kind = evidence.Kind;
 var console_kind: Kind = .none;
 var console_base: u64 = 0;
 
@@ -321,8 +138,8 @@ export fn _start(
     );
 }
 
-fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff: *HandoffV2) callconv(.c) u64 {
-    if (!valid_handoff(base, size, st, handoff)) {
+fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *HandoffV2) callconv(.c) u64 {
+    if (!valid_handoff(base, size, st, handoff_rec)) {
         print_pre_exit_error(st, "DipshitOS: invalid handoff\r\n");
         return bad_handoff;
     }
@@ -340,13 +157,13 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff: *HandoffV2
     nvram_console.init(st.runtime_services);
 
     print_pre_exit_error(st, "DipshitOS: kernel entered\r\n");
-    set_marker(marker_entry);
-    write_marker_var(st, marker_entry);
+    evidence.set_marker(marker_entry);
+    evidence.write_marker_var(st, marker_entry);
     // Second pre-exit write immediately after the first: if the persisted
     // variable still reads M2_ENTRY, a *repeated* SetVariable failed (the
     // marker ladder would be stuck); if it reads M2_CMAP!, the kernel died
     // inside capture_map below.
-    write_marker_var(st, marker_cmap);
+    evidence.write_marker_var(st, marker_cmap);
 
     const bs = st.boot_services orelse {
         print_pre_exit_error(st, "DipshitOS: no Boot Services\r\n");
@@ -367,15 +184,15 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff: *HandoffV2
     // M2_RAW! with a 2.6 KB re-write pending), and a post-switch fault must
     // not lose this evidence. The post-exit probe appends only a small tail
     // (write_probe_tail).
-    dump_mmio_descriptors(map_buffer.map);
-    dump_config_table(st);
-    dump_acpi(st);
+    evidence.dump_mmio_descriptors(map_buffer.map);
+    evidence.dump_config_table(st);
+    pci.dump_acpi(st);
     // Claim 0015: in nvram-console builds the console stream itself carries
     // the map/probe evidence through the NVRAM channel, so persisting the
     // separate ~40 KB DipshitProbe variable is redundant AND starves the
     // chunk channel (the store is only ~61 KB writable on VZ, observed:
     // both gate runs died at 0xf061 with the session cut off mid-help).
-    if (comptime !build_options.nvram_console) write_probe_var(st);
+    if (comptime !build_options.nvram_console) evidence.write_probe_var(st);
 
     // Claim 0013: the serial probe runs PRE-EXIT — post-exit reads of the
     // declared MMIO windows hang on VZ (observed every run). The selection
@@ -383,8 +200,8 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff: *HandoffV2
     const pre = probe_serial_pre(map_buffer.map, st);
     console_kind = pre.kind;
     console_base = pre.base;
-    dump_sel(pre.kind, pre.base);
-    if (comptime !build_options.nvram_console) write_probe_var(st);
+    evidence.dump_sel(pre.kind, pre.base);
+    if (comptime !build_options.nvram_console) evidence.write_probe_var(st);
 
     // Claim 0017 diagnostic (build-gated `-Dpreexit-tx`): transmit a fixed
     // line through the SAME virtio-pci transport the post-exit path uses
@@ -395,11 +212,11 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff: *HandoffV2
     // M2_TXPL! ... M2_PEXD!); vm-serial.log is the "bytes reached the host"
     // gate (tools/verify-preexit-tx.sh). Diagnostic only — the post-exit
     // banner TX is untouched.
-    if (comptime build_options.preexit_tx) preexit_tx_experiment(st);
+    if (comptime build_options.preexit_tx) virtio_console.preexit_tx_experiment(st);
     // Claim 0020 phase A: the same fixed line through the same transport,
     // still pre-ExitBootServices. Runs immediately before the pre-exit
     // marker so a hang cannot lose the persisted probe evidence.
-    if (comptime tx_transition_a) transition_tx_experiment(st, .a);
+    if (comptime tx_transition_a) virtio_console.transition_tx_experiment(st, .a);
     // Claim 0021 diagnostic (build-gated `-Dfw-mmu-capture`): while the
     // firmware translation is still live, record the firmware's MMU
     // registers + a bounded walk of its TTBR0 tables for the virtio BAR0
@@ -407,19 +224,19 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff: *HandoffV2
     // address, plus the kernel's planned values. Persisted as its own small
     // ASCII variable, immediately before the pre-exit marker/exit so a hang
     // cannot lose it.
-    if (comptime fw_mmu_capture) fw_mmu_capture_diag(st, handoff);
+    if (comptime fw_mmu_capture) evidence.fw_mmu_capture_diag(st, handoff_rec, virtio_console.vp_ready, virtio_console.vp_bar0);
 
     // Pre-exit stage: proves the kernel passed valid_handoff + capture_map
     // and reached the exit call. The persisted NVRAM marker being M2_ENTRY
     // instead means the kernel died in that window.
-    write_marker_var(st, marker_prex);
+    evidence.write_marker_var(st, marker_prex);
 
     var exited = false;
     var attempt: usize = 0;
     while (attempt < 8) : (attempt += 1) {
         // The map buffer is already allocated. Re-reading it is the only
         // permitted operation between an INVALID_PARAMETER retry.
-        if (bs.exitBootServices(@ptrFromInt(handoff.image_handle), map_buffer.map.info.key)) |_| {
+        if (bs.exitBootServices(@ptrFromInt(handoff_rec.image_handle), map_buffer.map.info.key)) |_| {
             exited = true;
             break;
         } else |err| switch (err) {
@@ -440,14 +257,14 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff: *HandoffV2
         print_pre_exit_error(st, "DipshitOS: ExitBootServices failed after 8 attempts\r\n");
         halt_forever();
     }
-    set_marker(marker_exit);
-    write_marker_var(st, marker_exit); // first post-exit runtime-services call
+    evidence.set_marker(marker_exit);
+    evidence.write_marker_var(st, marker_exit); // first post-exit runtime-services call
     // Claim 0020 phase B: the FIRST post-exit TX attempt, immediately after
     // a successful ExitBootServices while the firmware's translation regime
     // is still active (DipshitOS page tables are not yet built). This is
     // the controlled test of whether ExitBootServices itself destroys
     // access to the transport window.
-    if (comptime tx_transition_b) transition_tx_experiment(st, .b);
+    if (comptime tx_transition_b) virtio_console.transition_tx_experiment(st, .b);
 
     // After successful exit, no longer allowed: AllocatePool/AllocatePages,
     // GetMemoryMap, SimpleTextOutput, Simple File System,
@@ -455,9 +272,16 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff: *HandoffV2
     // Services call. The map buffer is now owned by this kernel and all
     // subsequent work is direct memory/register access only.
     const map_after_exit = map_buffer.map;
-    if (!build_identity_map(map_after_exit, map_buffer.buffer, base, size, handoff)) {
-        set_marker(marker_table);
-        write_marker_var(st, marker_table);
+    // Claim 0023: the virtio BAR window (discovered pre-exit) is handed to
+    // mmu.build_identity_map as the optional extra Device window above the
+    // blanket; mmu.zig stays transport-agnostic.
+    const extra_window: ?mmu.DeviceWindow = if (virtio_console.vp_ready and virtio_console.vp_bar0 != 0)
+        .{ .base = virtio_console.vp_bar0, .len = 0x10000 }
+    else
+        null;
+    if (!mmu.build_identity_map(map_after_exit, map_buffer.buffer, base, size, handoff_rec, extra_window)) {
+        evidence.set_marker(marker_table);
+        evidence.write_marker_var(st, marker_table);
         halt_forever();
     }
     // Pre-install write (still on the firmware identity map, reliable): if the
@@ -466,39 +290,39 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff: *HandoffV2
     // the first post-switch call (claim 0009: observed — every VZ run stops
     // at M2_MAPD!, so the MMU takeover window is the death site; the kernel
     // never reaches the serial probe).
-    write_marker_var(st, marker_mapd);
-    install_identity_map();
-    set_marker(marker_mmu);
-    write_marker_var(st, marker_mmu);
+    evidence.write_marker_var(st, marker_mapd);
+    mmu.install_identity_map();
+    evidence.set_marker(marker_mmu);
+    evidence.write_marker_var(st, marker_mmu);
     // Claim 0020 phase C: the FIRST MMIO access to the transport after the
     // identity-map switch, before the post-switch probe (M2_RAW!) or any
     // other runtime-service/diagnostic work. Tests whether installing the
     // DipshitOS page tables destroys access (the claim-0013/0018
     // hypothesis), with the marker write above being the only prior
     // post-switch call.
-    if (comptime tx_transition_c) transition_tx_experiment(st, .c);
+    if (comptime tx_transition_c) virtio_console.transition_tx_experiment(st, .c);
 
     const selected = probe_serial(map_after_exit, st);
     console_kind = selected.kind;
     console_base = selected.base;
     if (selected.kind == .none) {
-        set_marker(marker_seria);
-        write_marker_var(st, marker_seria);
-        write_marker_fallback(base, size, map_after_exit);
+        evidence.set_marker(marker_seria);
+        evidence.write_marker_var(st, marker_seria);
+        evidence.write_marker_fallback(&virtio_console.virtio_tx, base, size, map_after_exit);
         halt_forever();
     }
-    set_marker(marker_ready);
-    write_marker_var(st, marker_ready);
+    evidence.set_marker(marker_ready);
+    evidence.write_marker_var(st, marker_ready);
 
-    st_tx = st; // for flush stage markers
+    virtio_console.st_tx = st; // for flush stage markers
     // Claim 0020 phase D: TX at the normal final location — the same site
     // where the production banner transmits. Same payload as phases A/B/C.
-    if (comptime tx_transition_d) transition_tx_experiment(st, .d);
+    if (comptime tx_transition_d) virtio_console.transition_tx_experiment(st, .d);
     uart_puts("DipshitOS kernel has seized control.\n");
     // Claim 0013: after the first TX, record whether the TX path returned
     // (bytes may still be dropped by the device; the serial log is the gate,
     // but M2_TXOK! separates "TX hung" from "TX returned silently").
-    write_marker_var(st, marker_txok);
+    evidence.write_marker_var(st, marker_txok);
     uart_puts("memory-map descriptors=");
     uart_hex(@intCast(map_after_exit.info.len));
     uart_puts(" descriptor_size=");
@@ -561,7 +385,8 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff: *HandoffV2
     var mon = monitor.Monitor.init(
         m15.to_console(),
         .{
-            .handoff = @bitCast(handoff.*),
+            // Claim 0023: the shared handoff.zig type is used directly.
+            .handoff = handoff_rec.*,
             .map = map_view,
             .console_name = console_name[0 .. console_name.len - 1],
         },
@@ -570,7 +395,7 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff: *HandoffV2
     // Claim 0015 diagnostic: mark the seam entry so a missing shell banner
     // is attributable to the seam setup vs. the shell write path.
     if (comptime build_options.nvram_console) {
-        write_marker_var(st, marker_seam);
+        evidence.write_marker_var(st, marker_seam);
         // Stack + console-pointer probe: the banner write path crashed
         // without entering M15Console.writeFn, so record the state at the
         // seam (sp, vtable/ctx addresses, and a direct vtable dispatch).
@@ -581,7 +406,7 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff: *HandoffV2
         uart_puts("[seam] sp=");
         uart_hex(sp);
         uart_puts(" base=");
-        uart_hex(handoff.stack_base);
+        uart_hex(handoff_rec.stack_base);
         uart_puts(" ctx=");
         uart_hex(@intFromPtr(mon.console.ctx));
         uart_puts(" vt=");
@@ -617,335 +442,14 @@ fn capture_map(bs: *BootServices) !CapturedMap {
     return .{ .buffer = buffer, .map = map };
 }
 
-fn valid_handoff(base: u64, size: u64, st: *const SystemTable, handoff: *const HandoffV2) bool {
-    if (@intFromPtr(st) != handoff.system_table) return false;
-    if (handoff.magic != handoff_magic or handoff.version != handoff_version) return false;
-    if (handoff.kernel_base != base or handoff.kernel_size != size) return false;
-    if (size == 0 or base > std.math.maxInt(u64) - size) return false;
-    if (handoff.image_handle == 0 or handoff.stack_base == 0) return false;
-    if (handoff.stack_size != 16 * 1024 or handoff.flags != 0) return false;
-    if ((base & 0xfff) != 0 or (handoff.stack_base & 0xfff) != 0) return false;
-    if (handoff.stack_base + handoff.stack_size < handoff.stack_base) return false;
-    return true;
-}
-
-fn build_identity_map(map: MemoryMapSlice, map_buffer: []align(8) u8, base: u64, size: u64, handoff: *const HandoffV2) bool {
-    table_count = 0;
-    _ = new_table() orelse return false; // root table at index zero
-
-    // One-pass identity map of the low physical space. Declared RAM maps
-    // Normal Write-Back (2 MiB blocks where aligned, 4 KiB pages at region
-    // edges); declared MMIO windows and every *undeclared* region map Device
-    // nGnRnE, so no post-switch access can fault on an unmapped address and
-    // device semantics are preserved. The firmware's runtime SetVariable
-    // (the marker ladder's channel) touches its NVRAM controller, which the
-    // EFI map does not declare; the firmware's own map covers it as Device —
-    // mapping it Normal (a previous iteration) lets a cacheable access to an
-    // emulated device hang forever, and leaving it unmapped faults — both
-    // present as the observed claim-0009 ladder (M2_MAPD! then nothing).
-    // Bounded: 4 GiB at 2 MiB = 2048 blocks = 4 L2 tables + L1 + root
-    // (~24 KiB of the 512 KiB carve-out).
-    const blanket_end = 4 * 1024 * 1024 * 1024;
-    if (!map_low_identity(blanket_end, map)) return false;
-
-    // Regions above the blanket (none observed on VZ) still get mapped.
-    var it = map.iterator();
-    while (it.next()) |desc| {
-        if (desc.number_of_pages == 0 or desc.number_of_pages > std.math.maxInt(u64) / 4096) return false;
-        const bytes = desc.number_of_pages * 4096;
-        if (desc.physical_start > std.math.maxInt(u64) - bytes) return false;
-        if (desc.physical_start + bytes <= blanket_end) continue; // covered by the blanket
-        if (is_ram(desc.type)) {
-            if (!map_range(desc.physical_start, desc.physical_start + bytes, Attr.normal)) return false;
-        } else if (desc.type == .memory_mapped_io or desc.type == .memory_mapped_io_port_space) {
-            if (!map_range(desc.physical_start, desc.physical_start + bytes, Attr.device)) return false;
-        }
-    }
-
-    // Claim 0013: the virtio-pci console transport window (firmware-assigned
-    // at 0x100010000, ABOVE the blanket) must stay reachable post-exit for
-    // TX. Map it Device (4 KiB pages; the low blanketed world is untouched).
-    // Post-exit config writes cannot move the BAR on VZ (observed: a rebase
-    // "completed" but the device never answered at the new base), so the
-    // firmware's placement is mapped in place instead.
-    if (vp_ready and vp_bar0 != 0 and vp_bar0 >= blanket_end) {
-        if (!map_range(vp_bar0, vp_bar0 + 0x10000, Attr.device)) return false;
-    }
-
-    // All adopted fixed regions sit inside declared RAM below the blanket;
-    // verify they resolve to Normal mappings as a consistency check.
-    if (base > std.math.maxInt(u64) - size) return false;
-    if (handoff.stack_base > std.math.maxInt(u64) - handoff.stack_size) return false;
-    if (!mapped_normal(base)) return false;
-    if (!mapped_normal(handoff.stack_base)) return false;
-    if (!mapped_normal(@intFromPtr(handoff))) return false;
-    if (!mapped_normal(@intFromPtr(map_buffer.ptr))) return false;
-    if (!mapped_normal(@intFromPtr(&table_storage))) return false;
-    return true;
-}
-
-const Attr = enum { normal, device };
-const page_size: u64 = 4096;
-const block_size: u64 = 2 * 1024 * 1024;
-
-const RegionKind = enum { ram, mmio };
-
-/// True if any descriptor of the given kind overlaps [start, end).
-fn region_overlap(start: u64, end: u64, map: MemoryMapSlice, kind: RegionKind) bool {
-    var it = map.iterator();
-    while (it.next()) |desc| {
-        if (desc.number_of_pages == 0 or desc.number_of_pages > std.math.maxInt(u64) / 4096) continue;
-        const bytes = desc.number_of_pages * 4096;
-        if (desc.physical_start > std.math.maxInt(u64) - bytes) continue;
-        const matches = switch (kind) {
-            .ram => is_ram(desc.type),
-            .mmio => desc.type == .memory_mapped_io or desc.type == .memory_mapped_io_port_space,
-        };
-        if (!matches) continue;
-        if (start < desc.physical_start + bytes and end > desc.physical_start) return true;
-    }
-    return false;
-}
-
-/// True if a single RAM descriptor fully covers [start, start + block_size).
-fn block_covered_by_ram(start: u64, map: MemoryMapSlice) bool {
-    const end = start + block_size;
-    var it = map.iterator();
-    while (it.next()) |desc| {
-        if (!is_ram(desc.type)) continue;
-        if (desc.number_of_pages == 0) continue;
-        const bytes = desc.number_of_pages * 4096;
-        if (desc.physical_start <= start and desc.physical_start + bytes >= end) return true;
-    }
-    return false;
-}
-
-/// Identity-map [0, end): 2 MiB blocks of Device nGnRnE by default; blocks
-/// fully covered by a RAM descriptor map Normal; blocks with any MMIO or
-/// partial RAM coverage are mapped at 4 KiB granularity (RAM pages Normal,
-/// everything else Device). No post-switch access can then fault, and nothing
-/// the firmware reaches with device semantics is ever cacheable.
-fn map_low_identity(end: u64, map: MemoryMapSlice) bool {
-    const root = &table_storage[0];
-    const l1 = ensure_table(&root[0]) orelse return false;
-    var va: u64 = 0;
-    while (va < end) : (va += block_size) {
-        const ix = indices(va);
-        const l2 = ensure_table(&l1[ix.l1]) orelse return false;
-        const has_ram = region_overlap(va, va + block_size, map, .ram);
-        const has_mmio = region_overlap(va, va + block_size, map, .mmio);
-        if (!has_ram and !has_mmio) {
-            l2[ix.l2] = va | attr_bits(.device, false);
-        } else if (has_ram and !has_mmio and block_covered_by_ram(va, map)) {
-            l2[ix.l2] = va | attr_bits(.normal, false);
-        } else {
-            const pages = new_table() orelse return false;
-            l2[ix.l2] = @intFromPtr(pages) | 3;
-            var page: u64 = 0;
-            while (page < block_size) : (page += page_size) {
-                const pa = va + page;
-                const attr: Attr = if (region_overlap(pa, pa + page_size, map, .ram)) .normal else .device;
-                pages[page >> 12] = pa | attr_bits(attr, true);
-            }
-        }
-    }
-    return true;
-}
-
-/// Walk VA through the built 4 KB-granule tables (T0SZ=25) and report whether
-/// it resolves to a Normal mapping (MAIR AttrIndex = 0b01, descriptor bit 2).
-fn mapped_normal(va: u64) bool {
-    const ix = indices(va);
-    const root = &table_storage[0];
-    const l1 = table_entry(&root[ix.l0]) orelse return false;
-    var l2e = l1[ix.l1];
-    if ((l2e & 3) == 1) return (l2e & 0x4) != 0;
-    if ((l2e & 3) != 3) return false;
-    const l2 = table_entry(&l2e) orelse return false;
-    var l3e = l2[ix.l2];
-    if ((l3e & 3) == 1) return (l3e & 0x4) != 0;
-    if ((l3e & 3) != 3) return false;
-    const l3 = table_entry(&l3e) orelse return false;
-    const e = l3[ix.l3];
-    if ((e & 3) == 0) return false;
-    return (e & 0x4) != 0;
-}
-
-fn is_ram(kind: MemoryType) bool {
-    return switch (kind) {
-        .loader_code, .loader_data, .boot_services_code, .boot_services_data, .conventional_memory, .persistent_memory => true,
-        // EFI runtime services code/data stay mapped (Normal WB, executable
-        // this milestone) so SetVariable/ResetSystem remain callable after
-        // ExitBootServices — the marker NVRAM channel and the M1.5 machine
-        // controls both need them. They are RAM; they are never used as
-        // general-purpose memory.
-        .runtime_services_code, .runtime_services_data => true,
-        else => false,
-    };
-}
-
-fn attr_bits(attr: Attr, page: bool) u64 {
-    const base: u64 = if (page) 0x3 else 0x1;
-    const mem_attr: u64 = if (attr == .normal) 1 << 2 else 0;
-    const share: u64 = if (attr == .normal) 3 << 8 else 0;
-    return base | (1 << 10) | share | mem_attr;
-}
-
-fn new_table() ?*align(4096) [512]u64 {
-    if (table_count >= table_page_count) return null;
-    const table: *align(4096) [512]u64 = @ptrCast(&table_storage[table_count]);
-    table_count += 1;
-    @memset(table, 0);
-    return table;
-}
-
-fn table_entry(entry: *u64) ?*align(4096) [512]u64 {
-    if ((entry.* & 3) != 3) return null;
-    return @ptrFromInt(entry.* & ~@as(u64, 0xfff));
-}
-
-fn ensure_table(entry: *u64) ?*align(4096) [512]u64 {
-    if (entry.* == 0) {
-        const table = new_table() orelse return null;
-        entry.* = @intFromPtr(table) | 3;
-        return table;
-    }
-    return table_entry(entry);
-}
-
-fn map_range(start: u64, end: u64, attr: Attr) bool {
-    const va_limit: u64 = 1 << 39;
-    if (end <= start) return true;
-    if (start >= va_limit or end > va_limit) return false;
-    if (end > std.math.maxInt(u64) - 4095) return false;
-    var pos = start & ~@as(u64, 0xfff);
-    const limit = (end + 4095) & ~@as(u64, 0xfff);
-    while (pos < limit) {
-        if ((pos & (block_size - 1)) == 0 and limit - pos >= block_size) {
-            if (!map_block(pos, attr)) return false;
-            pos += block_size;
-        } else {
-            if (!map_page(pos, attr)) return false;
-            pos += page_size;
-        }
-    }
-    return true;
-}
-
-fn indices(va: u64) struct { l0: usize, l1: usize, l2: usize, l3: usize } {
-    return .{
-        .l0 = @intCast((va >> 39) & 0x1ff),
-        .l1 = @intCast((va >> 30) & 0x1ff),
-        .l2 = @intCast((va >> 21) & 0x1ff),
-        .l3 = @intCast((va >> 12) & 0x1ff),
-    };
-}
-
-fn map_block(va: u64, attr: Attr) bool {
-    const ix = indices(va);
-    const root = &table_storage[0];
-    const l1 = ensure_table(&root[ix.l0]) orelse return false;
-    const l2 = ensure_table(&l1[ix.l1]) orelse return false;
-    const want = (va & ~@as(u64, block_size - 1)) | attr_bits(attr, false);
-    if (l2[ix.l2] == 0) {
-        l2[ix.l2] = want;
-        return true;
-    }
-    return l2[ix.l2] == want;
-}
-
-fn split_block(entry: *u64) bool {
-    if ((entry.* & 3) != 1) return false;
-    const old = entry.*;
-    const base = old & ~@as(u64, block_size - 1);
-    const attr = old & 0xfff;
-    const pages = new_table() orelse return false;
-    var i: usize = 0;
-    while (i < 512) : (i += 1) pages[i] = (base + i * page_size) | attr | 3;
-    entry.* = @intFromPtr(pages) | 3;
-    return true;
-}
-
-fn map_page(va: u64, attr: Attr) bool {
-    const ix = indices(va);
-    const root = &table_storage[0];
-    const l1 = ensure_table(&root[ix.l0]) orelse return false;
-    const l2 = ensure_table(&l1[ix.l1]) orelse return false;
-    if (l2[ix.l2] != 0 and (l2[ix.l2] & 3) == 1 and !split_block(&l2[ix.l2])) return false;
-    const l3 = ensure_table(&l2[ix.l2]) orelse return false;
-    const want = (va & ~@as(u64, 0xfff)) | attr_bits(attr, true);
-    if (l3[ix.l3] == 0 or l3[ix.l3] == want) {
-        l3[ix.l3] = want;
-        return true;
-    }
-    return false;
-}
-
-fn read_mmfr0() u64 {
-    var value: u64 = undefined;
-    asm volatile ("mrs %[value], id_aa64mmfr0_el1"
-        : [value] "=r" (value),
-    );
-    return value;
-}
-
-fn install_identity_map() void {
-    const mmfr0 = read_mmfr0();
-    var ips: u64 = mmfr0 & 0xf;
-    if (ips > 5) ips = 5;
-    // Claim 0010 root cause: the freshly-built tables must be cleaned to
-    // memory BEFORE the first walk can read them. The kernel writes them as
-    // Normal WB stores (dirty in the D-cache only); the first post-switch
-    // access walks them, and any D-cache line invalidation without a clean in
-    // between (observed: the firmware runtime SetVariable call between the
-    // switch and the TLBI drops the dirty lines) leaves stale RAM for the
-    // post-TLBI re-walk to fault on. Clean the whole 512 KiB carve-out so the
-    // walker always reads the real tables.
-    clean_dcache_range(@intFromPtr(&table_storage), table_page_count * 4096);
-    // T0SZ=25 selects the 2^39 VA space the map builder assumes (va_limit in
-    // map_range). TG0 (the TTBR0 walker's granule) is left 0b00 = 4 KB in
-    // BOTH architectural field positions: ARMv8.0 puts TG0 at bits [9:8]
-    // (0b01 = 64 KB), ARMv8.1+ with 16 KB granule support puts it at bits
-    // [15:14] with IRGN0/ORGN0/SH0 at [9:8]/[11:10]/[13:12]. The tables are
-    // 4 KB-granule, so the walker MUST be programmed for 4 KB under whichever
-    // revision the CPU implements. (Claim 0010 measured the firmware's own
-    // TCR_EL1 on VZ: TG0 at [15:14] = 0b00 — the guest is the ARMv8.1+
-    // layout, and the prior `1 << 8` was IRGN0, not TG0; the death persisted
-    // with a 4K-correct value, so the granule is defensive rather than the
-    // root cause.) IPS is bits [34:32] in both layouts and is taken from
-    // ID_AA64MMFR0_EL1 per ADR 0004 D3.
-    const tcr: u64 = 25 | (ips << 32);
-    const mair: u64 = 0x000000000000ff00; // Attr0 Device-nGnRnE, Attr1 Normal WB.
-    const root = @intFromPtr(&table_storage[0]);
-    asm volatile ("dsb ishst" ::: .{ .memory = true });
-    asm volatile ("msr mair_el1, %[value]"
-        :
-        : [value] "r" (mair),
-    );
-    asm volatile ("msr tcr_el1, %[value]"
-        :
-        : [value] "r" (tcr),
-    );
-    asm volatile ("msr ttbr0_el1, %[value]"
-        :
-        : [value] "r" (root),
-    );
-    asm volatile ("isb");
-    // Claim 0010: NO `tlbi vmalle1` at the switch. Bisect markers proved the
-    // switch and the first post-switch runtime call succeed, but any re-walk
-    // FORCED by a TLBI then faults on VZ (ladder ended at M2_TTBR!; claim
-    // 0010). The stale firmware TLB entries are identity-compatible with our
-    // map below the blanket boundary — the blanket maps every VA < 4 GiB with
-    // the same VA==PA translations the firmware had (RAM Normal WB, MMIO
-    // Device), so any stale entry still in the TLB resolves identically. The
-    // safety argument stops at 4 GiB: above it only EFI-declared regions are
-    // mapped, so this milestone must not touch VAs the firmware previously
-    // translated above the blanket (none observed on VZ). Skipping the
-    // invalidate is safe because the map never changes descriptors
-    // post-switch; a later milestone that re-maps regions must revisit this
-    // and characterise the VZ re-walk fault.
-    asm volatile ("dsb ish" ::: .{ .memory = true });
-    asm volatile ("isb");
+fn valid_handoff(base: u64, size: u64, st: *const SystemTable, handoff_rec: *const HandoffV2) bool {
+    // Entry-time mirror checks (the struct against the x0/x2 register
+    // arguments) + the struct-internal validation from handoff.zig
+    // (magic/version/flags/stack-size/alignment/bounds). Same semantics as
+    // the previous inline checks; the canonical rules live in handoff.zig.
+    if (@intFromPtr(st) != handoff_rec.system_table) return false;
+    if (handoff_rec.kernel_base != base or handoff_rec.kernel_size != size) return false;
+    return handoff.validate(handoff_rec) == .none;
 }
 
 fn record_probe(base: u64, magic: u32, version: u32, device: u32, layout: u32) void {
@@ -955,1217 +459,12 @@ fn record_probe(base: u64, magic: u32, version: u32, device: u32, layout: u32) v
     }
 }
 
-// ---------------------------------------------------------------------------
-// Claim 0013 diagnostic: the probe's ground truth is persisted to the NVRAM
-// channel (a second variable, `DipshitProbe`, same vendor GUID as the marker
-// ladder) so the host can read exactly what each declared MMIO window
-// contains even though the serial log is silent. The ladder (DipshitM2) is
-// untouched. Lines are plain ASCII so `strings artifacts/efi-vars.bin` shows
-// them.
-// ---------------------------------------------------------------------------
-const probe_variable_name = utf16z("DipshitProbe");
-var probe_dump: [32768]u8 = undefined;
-var probe_dump_len: usize = 0;
-
-fn dump_str(text: []const u8) void {
-    if (text.len > probe_dump.len - probe_dump_len) return;
-    @memcpy(probe_dump[probe_dump_len .. probe_dump_len + text.len], text);
-    probe_dump_len += text.len;
-}
-
-fn dump_hex(value: u64) void {
-    var tmp: [18]u8 = undefined;
-    tmp[0] = '0';
-    tmp[1] = 'x';
-    var index: usize = 2;
-    var shift: u6 = 60;
-    while (true) : (shift -= 4) {
-        const digit: u8 = @intCast((value >> shift) & 0xf);
-        tmp[index] = if (digit < 10) '0' + digit else 'a' + digit - 10;
-        index += 1;
-        if (shift == 0) break;
-    }
-    dump_str(tmp[0..index]);
-}
-
-fn dump_probe_line(off: u64, base: u64, magic: u32, version: u32, device: u32, vendor: u32) void {
-    dump_str("VIRTIO O=");
-    dump_hex(off);
-    dump_str(" B=");
-    dump_hex(base);
-    dump_str(" M=");
-    dump_hex(magic);
-    dump_str(" V=");
-    dump_hex(version);
-    dump_str(" D=");
-    dump_hex(device);
-    dump_str(" R=");
-    dump_hex(vendor);
-    dump_str("\n");
-}
-
-fn dump_pl011_line(off: u64, addr: u64, pid0: u32, pid1: u32, pid2: u32, fr: u32) void {
-    dump_str("UART PL011 O=");
-    dump_hex(off);
-    dump_str(" B=");
-    dump_hex(addr);
-    dump_str(" PID=");
-    dump_hex(pid0 | (pid1 << 8) | (pid2 << 16));
-    dump_str(" FR=");
-    dump_hex(fr);
-    dump_str("\n");
-}
-
-fn dump_16550_line(off: u64, addr: u64, ier: u32, iir: u32, lcr: u32, mcr: u32, lsr: u32, msr: u32, scratch: u32) void {
-    dump_str("UART 16550 O=");
-    dump_hex(off);
-    dump_str(" B=");
-    dump_hex(addr);
-    dump_str(" IER=");
-    dump_hex(ier);
-    dump_str(" IIR=");
-    dump_hex(iir);
-    dump_str(" LCR=");
-    dump_hex(lcr);
-    dump_str(" MCR=");
-    dump_hex(mcr);
-    dump_str(" LSR=");
-    dump_hex(lsr);
-    dump_str(" MSR=");
-    dump_hex(msr);
-    dump_str(" SCR=");
-    dump_hex(scratch);
-    dump_str("\n");
-}
-
-fn dump_sel(kind: Kind, base: u64) void {
-    dump_str("SEL=");
-    switch (kind) {
-        .pl011 => dump_str("PL011 "),
-        .ns16550 => dump_str("16550 "),
-        .virtio => dump_str("VIRTIO "),
-        .none => dump_str("NONE "),
-    }
-    dump_str("base=");
-    dump_hex(base);
-    dump_str("\n");
-}
-
-/// Persist the probe dump to the NVRAM channel as a sequence of ≤ 2048-byte
-/// chunks (variables `DipshitP0`, `DipshitP1`, ...). Chunked because a
-/// single large SetVariable silently FAILS on VZ above ~4-5 KB (claim 0013:
-/// a ~6 KB write vanished while a ~4.5 KB instance persisted). Best effort
-/// per chunk; a failed call never changes control flow. Used PRE-EXIT only:
-/// big SetVariable re-writes hang post-exit on VZ (claim 0013).
-const probe_chunk_size: usize = 2048;
-fn write_probe_var(st: *const SystemTable) void {
-    if (probe_dump_len == 0) return;
-    var pos: usize = 0;
-    var chunk: usize = 0;
-    while (pos < probe_dump_len) : (pos += probe_chunk_size) {
-        const len = @min(probe_chunk_size, probe_dump_len - pos);
-        var name: [16:0]u16 = undefined;
-        const prefix = "DipshitP";
-        var i: usize = 0;
-        while (i < prefix.len) : (i += 1) name[i] = prefix[i];
-        var digits: [4]u8 = undefined;
-        var n = chunk;
-        var nd: usize = 0;
-        while (true) : (nd += 1) {
-            digits[nd] = @intCast('0' + (n % 10));
-            n /= 10;
-            if (n == 0) break;
-        }
-        while (nd > 0) : (nd -= 1) {
-            name[i] = digits[nd - 1];
-            i += 1;
-        }
-        name[i] = 0;
-        _ = st.runtime_services._setVariable(
-            &name,
-            &marker_vendor_guid,
-            .{ .non_volatile = true, .bootservice_access = true, .runtime_access = true },
-            len,
-            probe_dump[pos .. pos + len].ptr,
-        );
-        chunk += 1;
-    }
-}
-
-/// POST-EXIT variant: persist only the newest tail of the dump buffer (≤ 512
-/// bytes) as a SEPARATE variable, so post-exit probe additions (candidate
-/// hits, SEL) are observable without a large re-write of `DipshitProbe`
-/// (which hangs post-exit on VZ). Best effort; a failure is ignored.
-const probe_tail_variable_name = utf16z("DipshitP2");
-fn write_probe_tail(st: *const SystemTable) void {
-    if (probe_dump_len == 0) return;
-    const start: usize = if (probe_dump_len > 512) probe_dump_len - 512 else 0;
-    const len = probe_dump_len - start;
-    _ = st.runtime_services._setVariable(
-        &probe_tail_variable_name,
-        &marker_vendor_guid,
-        .{ .non_volatile = true, .bootservice_access = true, .runtime_access = true },
-        len,
-        probe_dump[start..].ptr,
-    );
-}
-
-fn dump_raw(addr: u64, len: usize, tag: []const u8) void {
-    dump_str(tag);
-    dump_str(" @");
-    dump_hex(addr);
-    dump_str(": ");
-    var i: usize = 0;
-    while (i < len) : (i += 1) {
-        dump_hex(mmio_read8(addr + i));
-        dump_str(" ");
-    }
-    dump_str("\n");
-}
-
-fn dump_guid_bytes(guid: *const uefi.Guid) void {
-    const raw: [*]const u8 = @ptrCast(guid);
-    var i: usize = 0;
-    while (i < 16) : (i += 1) dump_hex(raw[i]);
-}
-
-/// Pre-exit dump of every EFI configuration-table entry: vendor GUID, table
-/// pointer, and the first 32-bit word of the table (a flattened device tree
-/// starts with the big-endian magic 0xd00dfeed — the authoritative VZ device
-/// list). This runs before ExitBootServices so all firmware memory is
-/// readable; the buffer is persisted post-exit by write_probe_var.
-fn dump_config_table(st: *const SystemTable) void {
-    const entries = st.number_of_table_entries;
-    dump_str("CFG n=");
-    dump_hex(entries);
-    dump_str("\n");
-    const table = st.configuration_table;
-    var i: usize = 0;
-    while (i < entries and i < 12) : (i += 1) {
-        const entry = &table[i];
-        dump_str("CFG ");
-        dump_hex(i);
-        dump_str(" G=");
-        dump_guid_bytes(&entry.vendor_guid);
-        dump_str(" P=");
-        dump_hex(@intCast(@intFromPtr(entry.vendor_table)));
-        const first = @as(*const volatile u32, @ptrFromInt(@intFromPtr(entry.vendor_table))).*;
-        dump_str(" F=");
-        dump_hex(first);
-        dump_str("\n");
-    }
-}
-
-fn dump_raw_sparse(addr: u64, len: usize, tag: []const u8) void {
-    // Dump only the non-zero 16-byte groups of a window: a sparse register
-    // file (claim 0013: 0x20050000 reads 0x23 0xd3 0x75 0x6a at +0, 0x01 at
-    // +0x0c, and 0x31/0x10/0x04 in the +0xfe0 area) is shown completely
-    // without paying 20 KB of ASCII for the zero pages.
-    var pos: usize = 0;
-    while (pos < len) : (pos += 16) {
-        const group = @min(16, len - pos);
-        var nonzero = false;
-        var i: usize = 0;
-        while (i < group) : (i += 1) {
-            if (mmio_read8(addr + pos + i) != 0) {
-                nonzero = true;
-                break;
-            }
-        }
-        if (!nonzero) continue;
-        dump_str(tag);
-        dump_str(" @");
-        dump_hex(addr + pos);
-        dump_str(": ");
-        i = 0;
-        while (i < group) : (i += 1) {
-            dump_hex(mmio_read8(addr + pos + i));
-            dump_str(" ");
-        }
-        dump_str("\n");
-    }
-}
-
-/// Pre-exit dump of the FULL EFI map (every descriptor — no device window
-/// or high region missed) plus the complete non-zero register bytes of each
-/// declared MMIO window. PRE-EXIT only: post-exit reads of these windows
-/// hang on VZ (claim 0013).
-fn dump_mmio_descriptors(map: MemoryMapSlice) void {
-    var count: usize = 0;
-    var it = map.iterator();
-    while (it.next()) |desc| : (count += 1) {
-        if (count >= 64) break;
-        if (desc.number_of_pages == 0 or desc.number_of_pages > std.math.maxInt(u64) / 4096) continue;
-        dump_str("MAP T=");
-        dump_hex(@intFromEnum(desc.type));
-        dump_str(" B=");
-        dump_hex(desc.physical_start);
-        dump_str(" N=");
-        dump_hex(desc.number_of_pages);
-        dump_str(" A=");
-        dump_hex(@bitCast(desc.attribute));
-        dump_str("\n");
-    }
-    var it2 = map.iterator();
-    while (it2.next()) |desc| {
-        if (desc.type != .memory_mapped_io and desc.type != .memory_mapped_io_port_space) continue;
-        if (desc.number_of_pages == 0 or desc.number_of_pages > std.math.maxInt(u64) / 4096) continue;
-        const bytes = desc.number_of_pages * 4096;
-        if (desc.physical_start > std.math.maxInt(u64) - bytes) continue;
-        if (bytes <= 4096) {
-            // Small window: dump every non-zero register byte in full.
-            dump_raw_sparse(desc.physical_start, @intCast(bytes), "RAW");
-        } else {
-            // Big window (e.g. the efivars store): base string only.
-            dump_raw(desc.physical_start, 64, "RAW");
-        }
-    }
-}
-
-/// Post-exit ACPI discovery (claim 0013): locate the RSDP via the ACPI 2.0
-/// config-table GUID (observed present in run 2), walk the RSDT/XSDT, and
-/// dump every table's signature + address plus the raw first 96 bytes of the
-/// SPCR (Serial Port Console Redirection — names the console UART and its
-/// exact base) and DBG2 (debug ports) tables. This is the authoritative VZ
-/// device list; it supersedes heuristic MMIO scanning. Tables live in
-/// firmware RAM below 4 GiB (covered by the blanket map); reads are volatile.
-fn dump_acpi(st: *const SystemTable) void {
-    // Runs PRE-EXIT (all firmware RAM readable; the full buffer is persisted
-    // once by the caller). ACPI tables are plain RAM below 4 GiB, so no MMIO
-    // reads here — this cannot hit the post-exit fivars-region stall.
-    dump_str("ACPI start\n");
-    var rsdp_addr: u64 = 0;
-    const entries = st.number_of_table_entries;
-    const cfg = st.configuration_table;
-    var i: usize = 0;
-    while (i < entries) : (i += 1) {
-        if (std.mem.eql(u8, std.mem.asBytes(&cfg[i].vendor_guid), std.mem.asBytes(&ConfigurationTable.acpi_20_table_guid))) {
-            rsdp_addr = @intFromPtr(cfg[i].vendor_table);
-            break;
-        }
-    }
-    if (rsdp_addr == 0) {
-        dump_str("ACPI: no RSDP config-table entry\n");
-        return;
-    }
-    dump_str("ACPI RSDP @");
-    dump_hex(rsdp_addr);
-    dump_str("\n");
-    // Revision sits at offset 15 (after sig+checksum+OEM ID); offset 8 is an
-    // OEM ID byte. ACPI 2.0+ carries the XSDT address at +24.
-    const revision = mmio_read8(rsdp_addr + 15);
-    dump_str("ACPI rev=");
-    dump_hex(revision);
-    dump_str("\n");
-    const is_xsdt = revision >= 2;
-    const root_addr: u64 = if (is_xsdt) mmio_read64(rsdp_addr + 24) else mmio_read32(rsdp_addr + 16);
-    if (root_addr == 0) {
-        dump_str("ACPI: no RSDT/XSDT\n");
-        return;
-    }
-    const root_len = mmio_read32(root_addr + 4);
-    dump_str("ACPI root @");
-    dump_hex(root_addr);
-    dump_str(" len=");
-    dump_hex(root_len);
-    dump_str("\n");
-    const stride: u64 = if (is_xsdt) 8 else 4;
-    var off: u64 = 36;
-    var count: usize = 0;
-    while (off + stride <= root_len and count < 24) : (off += stride) {
-        const taddr: u64 = if (is_xsdt) mmio_read64(root_addr + off) else mmio_read32(root_addr + off);
-        if (taddr == 0 or taddr > 4 * 1024 * 1024 * 1024) continue;
-        const sig = mmio_read32(taddr);
-        dump_str("ACPI T=");
-        dump_hex(sig);
-        dump_str(" @");
-        dump_hex(taddr);
-        dump_str("\n");
-        if (sig == 0x52504353) { // "SPCR" (LE)
-            dump_str("SPCR\n");
-            dump_raw(taddr, 96, "  ");
-        }
-        if (sig == 0x32474244) { // "DBG2" (LE)
-            dump_str("DBG2\n");
-            dump_raw(taddr, 96, "  ");
-        }
-        if (sig == 0x50434146) { // "FACP" (LE) — FADT
-            // DSDT pointer at offset 40: the AML device list (claims the
-            // platform's serial devices with _HID/_CRS base addresses).
-            const dsdt = mmio_read32(taddr + 40);
-            dump_str("FACP DSDT @");
-            dump_hex(dsdt);
-            dump_str("\n");
-            if (dsdt != 0 and dsdt < 4 * 1024 * 1024 * 1024) {
-                const dsdt_len = mmio_read32(dsdt + 4);
-                dump_str("DSDT len=");
-                dump_hex(dsdt_len);
-                dump_str("\n");
-                dump_raw(dsdt, 96, "DSDT");
-            }
-        }
-        if (sig == 0x4746434d) { // "MCFG" (LE) — PCI ECAM base
-            const ecam = mmio_read64(taddr + 44);
-            pci_ecam = ecam;
-            dump_str("MCFG ECAM @");
-            dump_hex(ecam);
-            dump_str("\n");
-            dump_pci(ecam);
-        }
-        count += 1;
-    }
-}
-
-fn pci_read32(ecam: u64, bus: u32, dev: u32, func: u32, off: u32) u32 {
-    const addr = ecam | (@as(u64, bus) << 20) | (@as(u64, dev) << 15) | (@as(u64, func) << 12) | off;
-    return mmio_read32(addr);
-}
-
-fn pci_write32(ecam: u64, bus: u32, dev: u32, func: u32, off: u32, value: u32) void {
-    const addr = ecam | (@as(u64, bus) << 20) | (@as(u64, dev) << 15) | (@as(u64, func) << 12) | off;
-    mmio_write32(addr, value);
-}
-
-/// Byte-granular config-space read: the capability header fields sit at odd
-/// offsets (c+1, c+3, c+4), and an unaligned 32-bit read on Device (nGnRnE)
-/// memory is an alignment fault on ARMv8 — the cap walk MUST use byte reads
-/// (claim 0013: every walk run faulted here, ladder M2_VPS04 → M2_VPS05 gap,
-/// while the aligned/byte dumps in dump_pci survived).
-fn pci_read8(ecam: u64, bus: u32, dev: u32, func: u32, off: u32) u8 {
-    const addr = ecam | (@as(u64, bus) << 20) | (@as(u64, dev) << 15) | (@as(u64, func) << 12) | off;
-    return mmio_read8(addr);
-}
-
-/// 32-bit config-space read assembled from four byte reads (safe at any
-/// offset). Only for fields that may sit unaligned (capability header
-/// payloads); the BAR/command fields at 0x10..0x24 stay aligned reads.
-fn pci_read32_unaligned(ecam: u64, bus: u32, dev: u32, func: u32, off: u32) u32 {
-    var result: u32 = 0;
-    var i: u32 = 0;
-    while (i < 4) : (i += 1) {
-        result |= @as(u32, pci_read8(ecam, bus, dev, func, off + i)) << @as(u5, @intCast(i * 8));
-    }
-    return result;
-}
-
-/// Claim 0013 PCI discovery: the decoded DSDT declares a PCI0 root complex
-/// (no UART, no MMIO virtio-console), so the VZ serial attachment is a
-/// virtio-pci device found only through config space. Scan bus 0 for every
-/// present device and dump VID/DID/class + all six BARs. PRE-EXIT only
-/// (firmware maps the ECAM window; post-exit it is undeclared and the read
-/// could fault/hang).
-fn dump_pci(ecam: u64) void {
-    if (ecam == 0 or ecam > 4 * 1024 * 1024 * 1024) {
-        dump_str("PCI: no ECAM\n");
-        return;
-    }
-    var found: usize = 0;
-    var dev: u32 = 0;
-    while (dev < 32 and found < 48) : (dev += 1) {
-        var func: u32 = 0;
-        var funcs: u32 = 1;
-        while (func < funcs and found < 48) : (func += 1) {
-            const id = pci_read32(ecam, 0, dev, func, 0);
-            const vid = id & 0xffff;
-            if (vid == 0xffff) continue;
-            const hdr = pci_read32(ecam, 0, dev, func, 0x0c);
-            const ht = (hdr >> 8) & 0xff;
-            if (func == 0 and (ht & 0x80) != 0) funcs = 8;
-            const did = id >> 16;
-            dump_str("PCI D=");
-            dump_hex(dev);
-            dump_str(" F=");
-            dump_hex(func);
-            dump_str(" VID=");
-            dump_hex(vid);
-            dump_str(" DID=");
-            dump_hex(did);
-            dump_str(" CLS=");
-            dump_hex((pci_read32(ecam, 0, dev, func, 8) >> 8) & 0xffffff);
-            var b: u32 = 0;
-            while (b < 6) : (b += 1) {
-                dump_str(" B");
-                dump_hex(b);
-                dump_str("=");
-                dump_hex(pci_read32(ecam, 0, dev, func, 0x10 + b * 4));
-            }
-            dump_str("\n");
-            found += 1;
-        }
-    }
-    dump_str("PCI found=");
-    dump_hex(found);
-    dump_str("\n");
-    // Full aligned-u32 config-space dump of the virtio console (the
-    // capability list at 0x34 is what the virtio-pci transport needs),
-    // persisted pre-exit so the host sees the exact cap layout. ALIGNED u32
-    // reads are the only coherent access on VZ (claim 0013: byte reads of
-    // config space return shifted/garbage offset fields).
-    var dev2: u32 = 0;
-    while (dev2 < 32) : (dev2 += 1) {
-        const id2 = pci_read32(ecam, 0, dev2, 0, 0);
-        if ((id2 & 0xffff) == 0xffff) continue;
-        const did2 = id2 >> 16;
-        if (did2 != 0x1043 and did2 != 0x1003) continue;
-        dump_str("CFGSPACE D=");
-        dump_hex(dev2);
-        dump_str("\n");
-        var w: u32 = 0;
-        while (w < 0x80) : (w += 4) {
-            dump_str("W ");
-            dump_hex(w);
-            dump_str("=");
-            dump_hex(pci_read32(ecam, 0, dev2, 0, w));
-            dump_str("\n");
-        }
-        break;
-    }
-}
-
-fn mmio_read32(address: u64) u32 {
-    return @as(*volatile u32, @ptrFromInt(address)).*;
-}
-
-fn mmio_read64(address: u64) u64 {
-    return @as(*volatile u64, @ptrFromInt(address)).*;
-}
-
-fn mmio_write64(address: u64, value: u64) void {
-    @as(*volatile u64, @ptrFromInt(address)).* = value;
-}
-
-fn mmio_write32(address: u64, value: u32) void {
-    @as(*volatile u32, @ptrFromInt(address)).* = value;
-}
-
-fn mmio_read8(address: u64) u8 {
-    return @as(*volatile u8, @ptrFromInt(address)).*;
-}
-
-fn mmio_write8(address: u64, value: u8) void {
-    @as(*volatile u8, @ptrFromInt(address)).* = value;
-}
-
-fn mmio_read16(address: u64) u16 {
-    return @as(*volatile u16, @ptrFromInt(address)).*;
-}
-
-fn mmio_write16(address: u64, value: u16) void {
-    @as(*volatile u16, @ptrFromInt(address)).* = value;
-}
-
-fn vp_read8(off: u32) u8 {
-    return mmio_read8(vp_common + off);
-}
-
-fn vp_write8(off: u32, value: u8) void {
-    mmio_write8(vp_common + off, value);
-}
-
-fn vp_read16(off: u32) u16 {
-    return mmio_read16(vp_common + off);
-}
-
-fn vp_write16(off: u32, value: u16) void {
-    mmio_write16(vp_common + off, value);
-}
-
-fn vp_read32(off: u32) u32 {
-    return mmio_read32(vp_common + off);
-}
-
-fn vp_write32(off: u32, value: u32) void {
-    mmio_write32(vp_common + off, value);
-}
-
-/// Claim 0013: initialize the modern virtio-pci console as the kernel
-/// console. Walks the device's virtio capabilities (ID 0x09, cfg types
-/// common/notify), programs the modern transport (features, queue 1 =
-/// transmit), and arms TX. PRE-EXIT only; evidence is dumped to the probe
-/// buffer so the host sees the state either way.
-fn virtio_pci_init(st: *const SystemTable) bool {
-    if (pci_ecam == 0) {
-        dump_str("VP: no ECAM\n");
-        return false;
-    }
-
-    // Locate the console: modern DID 0x1043, legacy 0x1003 (this milestone
-    // drives the modern transport only). Bus 0, function 0.
-    var console_dev: u32 = 32;
-    var dev: u32 = 0;
-    while (dev < 32) : (dev += 1) {
-        const id = pci_read32(pci_ecam, 0, dev, 0, 0);
-        if ((id & 0xffff) == 0xffff) continue;
-        const did = id >> 16;
-        if (did == 0x1043 or did == 0x1003) {
-            console_dev = dev;
-            break;
-        }
-    }
-    if (console_dev == 32) {
-        dump_str("VP: no virtio-console PCI device\n");
-        return false;
-    }
-    vp_dev = console_dev;
-    dump_str("VP dev=");
-    dump_hex(console_dev);
-    dump_str("\n");
-    write_marker_var(st, marker_vpscan);
-
-    // BAR bases (memory BARs; 64-bit pairs merged).
-    var bar_base: [6]u64 = .{0} ** 6;
-    var bi: usize = 0;
-    while (bi < 6) : (bi += 1) {
-        const low = pci_read32(pci_ecam, 0, console_dev, 0, 0x10 + @as(u32, @intCast(bi)) * 4);
-        if ((low & 1) != 0) continue; // I/O space — ignored
-        const base: u64 = low & ~@as(u32, 0xf);
-        bar_base[bi] = base;
-        if (((low >> 1) & 0x3) == 2 and bi + 1 < 6) { // 64-bit BAR
-            const high = pci_read32(pci_ecam, 0, console_dev, 0, 0x10 + @as(u32, @intCast(bi + 1)) * 4);
-            bar_base[bi] |= @as(u64, high) << 32;
-            bi += 1;
-        }
-    }
-    write_marker_var(st, marker_vpbar);
-
-    // Walk the capability list for the virtio vendor-specific caps (ID 0x09):
-    // each carries cfg_type + bar + offset; the notify cap adds a multiplier.
-    write_marker_var(st, marker_vpcap);
-    const cap_ptr = pci_read32(pci_ecam, 0, console_dev, 0, 0x34) & 0xff;
-    write_marker_var(st, marker_vpcapr);
-    var common_bar: u32 = 0;
-    var common_off: u32 = 0;
-    var notify_bar: u32 = 0;
-    var notify_off: u32 = 0;
-    var notify_mult: u32 = 0;
-    var found_common = false;
-    var found_notify = false;
-    var c: u32 = cap_ptr;
-    var caps: usize = 0;
-    // The virtio_pci_cap header packs id/next/len/cfg_type into one aligned
-    // u32; offset/length are the next two aligned u32s. Cap bases are 4-byte
-    // aligned (0x40/0x50/0x60/0x74 on VZ), so every read below is aligned —
-    // unaligned accesses fault on Device memory, and byte reads return
-    // garbage on VZ (claim 0013); aligned u32 reads are the coherent view.
-    while (c != 0 and c < 0x100 and (c & 3) == 0 and caps < 16) : (caps += 1) {
-        const head = pci_read32(pci_ecam, 0, console_dev, 0, c);
-        const id = head & 0xff;
-        const next = (head >> 8) & 0xff;
-        if (id == 0x09) {
-            const cfg_type = (head >> 24) & 0xff;
-            const bar = pci_read32(pci_ecam, 0, console_dev, 0, c + 4) & 0xff;
-            const off = pci_read32(pci_ecam, 0, console_dev, 0, c + 8);
-            switch (cfg_type) {
-                1 => {
-                    common_bar = bar;
-                    common_off = off;
-                    found_common = true;
-                },
-                2 => {
-                    notify_bar = bar;
-                    notify_off = off;
-                    notify_mult = pci_read32(pci_ecam, 0, console_dev, 0, c + 16);
-                    found_notify = true;
-                },
-                else => {},
-            }
-        }
-        c = next;
-    }
-    write_marker_var(st, marker_vpwalk);
-
-    // NOTE: no BAR rebase pre-exit — moving the window makes the device
-    // unreachable pre-exit (observed: after rebasing to 0x10000, reads of
-    // BOTH the old firmware base and 0x10000 hang — the firmware never maps
-    // the low address). The firmware-assigned base is used for setup; a
-    // post-exit rebase to below-the-blanket 0x10000 happens in
-    // virtio_pci_rebase_post_exit (ECAM config writes survive post-exit,
-    // and the blanket maps 0x10000 as Device).
-    // Offset 0 is a legitimate common-cfg offset (VZ: common @ BAR0+0x00);
-    // the caps must simply both be present.
-    if (!found_common or !found_notify or common_bar >= 6 or notify_bar >= 6) {
-        dump_str("VP: missing capability structs\n");
-        return false;
-    }
-    vp_common = bar_base[common_bar] + common_off;
-    vp_notify = bar_base[notify_bar] + notify_off;
-    vp_notify_mult = notify_mult;
-    vp_common_off = common_off;
-    vp_notify_off = notify_off;
-    vp_bar0 = bar_base[0];
-    dump_str("VP common=");
-    dump_hex(vp_common);
-    dump_str(" notify=");
-    dump_hex(vp_notify);
-    dump_str(" mult=");
-    dump_hex(notify_mult);
-    dump_str("\n");
-    // Stage marker: device found, BARs + capabilities resolved. If the ladder
-    // stops here, a config-space read in the walk is the death site.
-    write_marker_var(st, marker_vpdev);
-    // Persist the walk results now: if a transport write below stalls, the
-    // host still sees the resolved common/notify addresses. Claim 0015: not
-    // in nvram-console builds — the chunk channel needs the store space.
-    if (comptime !build_options.nvram_console) write_probe_var(st);
-
-    // Modern transport init: reset, ACKNOWLEDGE|DRIVER, accept
-    // VIRTIO_F_VERSION_1, FEATURES_OK.
-    vp_write8(0x14, 0); // reset
-    // Virtio 1.3 §4.1.4.3: "After writing 0 to device_status, the driver
-    // MUST wait for a read of device_status to return 0 before reinitializing
-    // the device." Bounded poll so a stuck device fails honestly instead of
-    // hanging, and the ACKNOWLEDGE write below can never race a device that
-    // is still mid-reset.
-    var reset_spins: usize = 0;
-    while (vp_read8(0x14) != 0) : (reset_spins += 1) {
-        if (reset_spins >= 1_000_000) {
-            dump_str("VP: reset timeout\n");
-            return false;
-        }
-    }
-    vp_write8(0x14, 1 | 2); // ACKNOWLEDGE | DRIVER
-    const features_lo = vp_read32(0x04);
-    // device_feature_select lives at 0x00 (0x08 is the DRIVER's select).
-    vp_write32(0x00, 1);
-    const features_hi = vp_read32(0x04);
-    vp_write32(0x00, 0);
-    dump_str("VP feats=");
-    dump_hex(features_lo);
-    dump_str("/");
-    dump_hex(features_hi);
-    dump_str("\n");
-    if ((features_hi & 1) == 0) {
-        dump_str("VP: no VIRTIO_F_VERSION_1\n");
-        return false;
-    }
-    vp_write32(0x08, 1);
-    vp_write32(0x0c, 1); // accept VIRTIO_F_VERSION_1
-    vp_write32(0x08, 0);
-    vp_write32(0x0c, 0);
-    vp_write8(0x14, 1 | 2 | 8); // FEATURES_OK
-    if ((vp_read8(0x14) & 8) == 0) {
-        dump_str("VP: FEATURES_OK failed\n");
-        return false;
-    }
-
-    // Queue 1 = console transmit. Size 1 (one descriptor, no chaining).
-    vp_write16(0x16, 1); // queue_select
-    const qsz = vp_read16(0x18);
-    if (qsz == 0) {
-        dump_str("VP: queue 1 absent\n");
-        return false;
-    }
-    vp_write16(0x18, virtio_queue_size); // queue_size = 1 (power of 2, §4.1.4.3)
-    virtio_desc[0] = .{ .addr = 0, .len = 0, .flags = 0, .next = 0 };
-    virtio_avail = .{ .flags = 0, .idx = 0, .ring = .{0} };
-    virtio_used = .{ .flags = 0, .idx = 0, .ring = .{.{ .id = 0, .len = 0 }} };
-    // Clean the used ring's init write to RAM now: BSS is not trusted zeroed
-    // here, and the flush's dc ivac on this line (the ring-full guard and the
-    // used-poll) would otherwise discard this dirty write and re-read stale
-    // RAM garbage as used.idx — which the guard would then treat as "ring
-    // full" and drop TX forever.
-    clean_dcache_range(@intFromPtr(&virtio_used), @sizeOf(VirtqUsed));
-    virtio_last_used = 0;
-    vp_tx_len = 0;
-    // Queue GPA registers are le64; VZ's common-cfg emulation accepts 32-bit
-    // accesses (claim 0013: byte reads of config space return garbage — the
-    // emulation has access-size quirks), so write each half as a 32-bit store
-    // rather than a single 64-bit one that may be dropped.
-    const qd = @intFromPtr(&virtio_desc);
-    mmio_write32(vp_common + 0x20, @truncate(qd));
-    mmio_write32(vp_common + 0x24, @truncate(qd >> 32));
-    const qa = @intFromPtr(&virtio_avail);
-    mmio_write32(vp_common + 0x28, @truncate(qa));
-    mmio_write32(vp_common + 0x2c, @truncate(qa >> 32));
-    const qu = @intFromPtr(&virtio_used);
-    mmio_write32(vp_common + 0x30, @truncate(qu));
-    mmio_write32(vp_common + 0x34, @truncate(qu >> 32));
-    vp_write16(0x1c, 1); // queue_enable
-    vp_queue_notify_off = vp_read16(0x1e);
-    vp_write8(0x14, 1 | 2 | 8 | 4); // DRIVER_OK
-    if ((vp_read8(0x14) & 4) == 0) {
-        dump_str("VP: DRIVER_OK failed\n");
-        return false;
-    }
-    // Stage marker: transport armed. If the ladder stops here, a queue-setup
-    // write (mmio_write64 at vp_common+0x20..0x30) is the death site.
-    write_marker_var(st, marker_vptx);
-    // Pre-exit readback of the queue setup: qsz/qen/qoff + the GPA halves
-    // written above + device status. Verifies the 32-bit queue writes landed.
-    dump_str("VP qsz=");
-    dump_hex(vp_read16(0x18));
-    dump_str(" qen=");
-    dump_hex(vp_read16(0x1c));
-    dump_str(" qoff=");
-    dump_hex(vp_read16(0x1e));
-    dump_str(" qd=");
-    dump_hex(mmio_read32(vp_common + 0x20));
-    dump_str(" qa=");
-    dump_hex(mmio_read32(vp_common + 0x28));
-    dump_str(" qu=");
-    dump_hex(mmio_read32(vp_common + 0x30));
-    dump_str(" st=");
-    dump_hex(vp_read8(0x14));
-    dump_str("\n");
-    vp_ready = true;
-    dump_str("VP ready qoff=");
-    dump_hex(vp_queue_notify_off);
-    dump_str("\n");
-    write_marker_var(st, marker_vpok);
-    return true;
-}
-
-/// Transmit the buffered TX bytes through queue 1: post the buffer in the
-/// desc/avail rings, clean the D-cache (the device reads guest RAM
-/// directly), kick via the notify region, and wait for the used ring.
-/// Runs POST-EXIT on the pre-exit-captured VAs. A stuck device times out
-/// and drops the line instead of hanging the kernel (TX remains honest: the
-/// serial log is the gate, and M2_TXOK! records that the path returned).
-fn virtio_pci_flush() void {
-    if (!vp_ready or vp_tx_len == 0) return;
-    const st = st_tx;
-    // Claim 0018 (build-gated -Dtx-diag): ten ordered 8-byte NVRAM markers
-    // bracket each potentially fatal operation of the (first) post-exit
-    // transmission — the ladder's last marker names the smallest confirmed
-    // failure interval. The diag flush also drops the large post-exit
-    // probe-tail SetVariable (a big post-exit write, the class claim 0013
-    // proved hangs on VZ) and the logging-only status dump; the status read
-    // itself stays, bracketed by TXBR!/TXAR!. Default builds are
-    // byte-identical (coarse TXST!/TXNT!/TXPL! evidence path unchanged).
-    if (comptime build_options.tx_diag) {
-        if (st != null) write_marker_var(st.?, marker_txfl); // 1 entered virtio flush
-    }
-    // Split-ring invariant (Virtio 1.3 §2.7): the number of outstanding
-    // buffers (avail.idx - used.idx) must never exceed the queue size, or a
-    // new entry would overwrite a ring slot the device has not yet consumed.
-    // Re-read used.idx fresh (the device writes it; invalidate its line
-    // first). If the ring is still full — the previous buffer was never
-    // consumed (e.g. the notify or the used-poll timed out) — drop this line
-    // without touching the rings: the device is stuck, and dropping stays
-    // honest without corrupting the ring.
-    invalidate_dcache_range(@intFromPtr(&virtio_used), @sizeOf(VirtqUsed));
-    const outstanding = virtio_avail.idx -% virtio_used.idx;
-    if (outstanding >= virtio_queue_size) {
-        vp_tx_len = 0;
-        return;
-    }
-    virtio_desc[0] = .{ .addr = @intFromPtr(&virtio_tx), .len = @intCast(vp_tx_len), .flags = 0, .next = 0 };
-    virtio_avail.ring[0] = 0; // descriptor index 0
-    virtio_avail.idx +%= 1;
-    if (comptime build_options.tx_diag) {
-        if (st != null) write_marker_var(st.?, marker_txda); // 2 descriptor/avail buffers prepared
-    }
-    clean_dcache_range(@intFromPtr(&virtio_desc), @sizeOf(VirtqDesc));
-    clean_dcache_range(@intFromPtr(&virtio_avail), @sizeOf(VirtqAvail));
-    clean_dcache_range(@intFromPtr(&virtio_tx), vp_tx_len);
-    if (comptime build_options.tx_diag) {
-        if (st != null) write_marker_var(st.?, marker_txcc); // 3 DMA cache clean completed
-    }
-    if (comptime build_options.tx_diag) {
-        // 4/5: the first post-exit BAR/common-config access (device status
-        // read). Bracketed so a hang here is distinguishable from a hang at
-        // the notify.
-        if (st != null) write_marker_var(st.?, marker_txbr);
-        _ = vp_read8(0x14);
-        if (st != null) write_marker_var(st.?, marker_txar);
-    } else {
-        // Claim 0013 evidence path (default build, unchanged): coarse
-        // markers + post-exit status probe + probe tail.
-        if (st_tx != null) write_marker_var(st_tx.?, marker_txst);
-        dump_str("VP pst=");
-        dump_hex(vp_read8(0x14));
-        dump_str("\n");
-        // Claim 0015: the post-exit probe tail is skipped in nvram-console
-        // builds for the same store-budget reason as the full dump. Claim
-        // 0020: it is also skipped in TX-transition builds — a 512-byte
-        // post-exit SetVariable inside the bracketed window would be a
-        // confound (the class of write claim 0013 proved hangs post-exit;
-        // claim 0018 removed it in diag builds for the same reason), leaving
-        // only MMIO accesses + marker writes in the window.
-        if (comptime (!build_options.nvram_console and !tx_transition_enabled)) {
-            if (st_tx != null) write_probe_tail(st_tx.?);
-        }
-    }
-    if (comptime build_options.tx_diag) {
-        if (st != null) write_marker_var(st.?, marker_txbn); // 6 before queue notify MMIO write
-    }
-    // Virtio 1.3 §4.1.5.2.1: VIRTIO_F_NOTIFICATION_DATA is NOT negotiated
-    // (only VERSION_1 was accepted above), so the driver notification MUST be
-    // a 16-bit write whose value is the virtqueue index (1 = TX queue); the
-    // address is cap.offset + queue_notify_off * notify_off_multiplier
-    // (§4.1.4.4). A 32-bit store is a MUST violation even though many devices
-    // tolerate it; a device not offering NOTIFICATION_DATA MUST accept 2-byte
-    // accesses (§4.1.4.4.1). (Claim 0013's "16-bit store may be dropped"
-    // belief has no documented evidence; the report flags it as inference.)
-    mmio_write16(vp_notify + @as(u64, vp_queue_notify_off) * vp_notify_mult, 1);
-    if (comptime build_options.tx_diag) {
-        if (st != null) write_marker_var(st.?, marker_txan); // 7 after notify
-    } else {
-        if (st_tx != null) write_marker_var(st_tx.?, marker_txnt);
-    }
-    if (comptime build_options.tx_diag) {
-        if (st != null) write_marker_var(st.?, marker_txup); // 8 entered used-ring poll
-    }
-    var spins: usize = 0;
-    while (spins < 2_000_000) : (spins += 1) {
-        invalidate_dcache_range(@intFromPtr(&virtio_used), @sizeOf(VirtqUsed));
-        if (virtio_used.idx != virtio_last_used) {
-            if (comptime build_options.tx_diag) {
-                if (st != null) write_marker_var(st.?, marker_txuc); // 9 device changed used.idx
-            }
-            break;
-        }
-    }
-    virtio_last_used = virtio_used.idx;
-    if (comptime build_options.tx_diag) {
-        if (st != null) write_marker_var(st.?, marker_txfr); // 10 flush returned
-    } else {
-        if (st_tx != null) write_marker_var(st_tx.?, marker_txpl);
-    }
-    vp_tx_len = 0;
-}
-
-// ---------------------------------------------------------------------------
-// Claim 0017 diagnostic: PRE-EXIT virtio-pci TX experiment. Answers whether
-// the current transport can transmit a known string while Boot Services and
-// the firmware address space are still active. Uses the SAME discovered
-// device, BAR, capability-decoded common/notify addresses, negotiated
-// features, TX queue, desc/avail/used rings and 16-bit notify mechanism as
-// the post-exit path — it stages a fixed line into `virtio_tx` and calls
-// `virtio_pci_flush()` verbatim. Build-gated by `-Dpreexit-tx` (default off:
-// every existing gate is byte-identical). Bracketed by the NVRAM marker
-// ladder (claim 0009 channel): M2_PEXT! before the flush, the flush's own
-// M2_TXST!/M2_TXNT!/M2_TXPL! stage markers (persisted because st_tx is
-// set), M2_PEXD! after. If the experiment hangs, the ladder's last marker
-// names the death site. NOTE: the flush also appends "VP pst=" to
-// probe_dump — the probe variable is already persisted at this point, so
-// that line stays in the in-RAM buffer only (harmless; the placement after
-// persistence is deliberate so a hang cannot lose the probe evidence).
-// ---------------------------------------------------------------------------
-const preexit_tx_line = "DIPSHITOS PREEXIT VIRTIO TX\n";
-fn preexit_tx_experiment(st: *const SystemTable) void {
-    if (!vp_ready or vp_tx_len != 0) return;
-    st_tx = st; // the flush's TXST/TXNT/TXPL stage markers now persist pre-exit
-    write_marker_var(st, marker_pext);
-    var i: usize = 0;
-    while (i < preexit_tx_line.len and i < virtio_tx.len) : (i += 1) {
-        virtio_tx[i] = preexit_tx_line[i];
-    }
-    vp_tx_len = i;
-    virtio_pci_flush();
-    write_marker_var(st, marker_pexd);
-    st_tx = null;
-}
-
-// ---------------------------------------------------------------------------
-// Claim 0020 diagnostic: TX-transition matrix. One phase per build (selected
-// by -Dtx-transition-{a,b,c,d}), each running ONE controlled TX attempt at
-// its named location with the SAME fixed payload, the SAME armed transport
-// (armed pre-exit by virtio_pci_init, never transmitted before the phase's
-// experiment) and the SAME virtio_pci_flush() as the production path. The
-// attempt is bracketed by persistent NVRAM markers (claim-0009 channel):
-// M2_TRx1! before the flush, M2_TRx2! when the flush returns, M2_TRxU! if
-// used.idx advanced (the device consumed the buffer). The flush's own
-// M2_TXST!/M2_TXNT!/M2_TXPL! stage markers (persisted because st_tx is set)
-// name the hang site inside the flush. M2_TRNX! records a skipped attempt
-// (transport not armed). The FIRST failed phase names the transition that
-// destroys console access (see the claim file's interpretation table).
-// ---------------------------------------------------------------------------
-const transition_tx_line = "DIPSHITOS TRANSITION TX\n";
-const TxPhase = enum { a, b, c, d };
-
-fn transition_tx_experiment(st: *const SystemTable, phase: TxPhase) void {
-    const enter: u64 = switch (phase) {
-        .a => marker_tra1,
-        .b => marker_trb1,
-        .c => marker_trc1,
-        .d => marker_trd1,
-    };
-    const returned: u64 = switch (phase) {
-        .a => marker_tra2,
-        .b => marker_trb2,
-        .c => marker_trc2,
-        .d => marker_trd2,
-    };
-    const used_adv: u64 = switch (phase) {
-        .a => marker_trau,
-        .b => marker_trbu,
-        .c => marker_trcu,
-        .d => marker_trdu,
-    };
-    if (!vp_ready or vp_tx_len != 0) {
-        write_marker_var(st, marker_trnx);
-        return;
-    }
-    write_marker_var(st, enter);
-    st_tx = st; // flush stage markers (TXST!/TXNT!/TXPL!) persist
-    var i: usize = 0;
-    while (i < transition_tx_line.len and i < virtio_tx.len) : (i += 1) {
-        virtio_tx[i] = transition_tx_line[i];
-    }
-    vp_tx_len = i;
-    const used_before = virtio_last_used;
-    virtio_pci_flush(); // may hang — the ladder's last marker names the site
-    write_marker_var(st, returned);
-    invalidate_dcache_range(@intFromPtr(&virtio_used), @sizeOf(VirtqUsed));
-    if (virtio_used.idx != used_before) write_marker_var(st, used_adv);
-    st_tx = null;
-}
-
-// ---------------------------------------------------------------------------
-// Claim 0021 diagnostic: firmware MMU-state capture (-Dfw-mmu-capture,
-// default off). Pre-exit, while the firmware translation regime is still
-// live, record SCTLR/TCR/MAIR/TTBR0/TTBR1/ID_AA64MMFR0 plus a bounded walk
-// of the firmware's TTBR0 tables for the virtio BAR0 window (the
-// claim-0020 post-switch hang target) and a RAM control address, and the
-// kernel's planned values — so the host can diff the two translation
-// regimes. Persisted as the single small ASCII variable `DipshitMmu` via
-// the proven pre-exit SetVariable channel (no re-write of the big
-// `DipshitProbe` chunks — the store budget is ~61 KB on VZ, claim 0015).
-// ---------------------------------------------------------------------------
-const mmu_var_name = utf16z("DipshitMmu");
-var mmu_dump: [4096]u8 = undefined;
-var mmu_dump_len: usize = 0;
-
-fn mmu_str(text: []const u8) void {
-    if (text.len > mmu_dump.len - mmu_dump_len) return;
-    @memcpy(mmu_dump[mmu_dump_len .. mmu_dump_len + text.len], text);
-    mmu_dump_len += text.len;
-}
-
-fn mmu_hex(value: u64) void {
-    var tmp: [18]u8 = undefined;
-    tmp[0] = '0';
-    tmp[1] = 'x';
-    var index: usize = 2;
-    var shift: u6 = 60;
-    while (true) : (shift -= 4) {
-        const digit: u8 = @intCast((value >> shift) & 0xf);
-        tmp[index] = if (digit < 10) '0' + digit else 'a' + digit - 10;
-        index += 1;
-        if (shift == 0) break;
-    }
-    mmu_str(tmp[0..index]);
-}
-
-fn read_sctlr() u64 {
-    var value: u64 = undefined;
-    asm volatile ("mrs %[value], sctlr_el1"
-        : [value] "=r" (value),
-    );
-    return value;
-}
-
-fn read_tcr() u64 {
-    var value: u64 = undefined;
-    asm volatile ("mrs %[value], tcr_el1"
-        : [value] "=r" (value),
-    );
-    return value;
-}
-
-fn read_mair() u64 {
-    var value: u64 = undefined;
-    asm volatile ("mrs %[value], mair_el1"
-        : [value] "=r" (value),
-    );
-    return value;
-}
-
-fn read_ttbr0() u64 {
-    var value: u64 = undefined;
-    asm volatile ("mrs %[value], ttbr0_el1"
-        : [value] "=r" (value),
-    );
-    return value;
-}
-
-fn read_ttbr1() u64 {
-    var value: u64 = undefined;
-    asm volatile ("mrs %[value], ttbr1_el1"
-        : [value] "=r" (value),
-    );
-    return value;
-}
-
-/// Initial lookup level for a 4 K-granule TTBR0 walk from the VA width
-/// W = 64 - T0SZ (ARM ARM, translation table lookup rules): W 39..48 → L0,
-/// 30..38 → L1, 21..29 → L2, 12..20 → L3.
-fn fw_initial_level(va_width: usize) u8 {
-    if (va_width >= 39) return 0;
-    if (va_width >= 30) return 1;
-    if (va_width >= 21) return 2;
-    return 3;
-}
-
-const FwWalk = struct {
-    found: bool,
-    level: u8,
-    entry: u64,
-    entry_addr: u64,
-};
-
-/// Bounded walk of a TTBR0 table tree (4 K granule) for `va`, starting at
-/// the initial level implied by T0SZ. Records the final descriptor (block or
-/// page) or stops at an invalid entry. Volatile reads: the tables are plain
-/// firmware RAM, fully readable pre-exit.
-fn fw_walk(ttbr0: u64, t0sz: u6, va: u64) FwWalk {
-    var result = FwWalk{ .found = false, .level = 0, .entry = 0, .entry_addr = 0 };
-    if (ttbr0 == 0) return result;
-    const va_width: usize = 64 - @as(usize, t0sz);
-    var level: u8 = fw_initial_level(va_width);
-    var addr = ttbr0 & ~@as(u64, 0xfff);
-    while (level <= 3) {
-        const shift: u6 = switch (level) {
-            0 => 39,
-            1 => 30,
-            2 => 21,
-            else => 12,
-        };
-        const index = (va >> shift) & 0x1ff;
-        const entry_addr = addr + index * 8;
-        const entry = @as(*const volatile u64, @ptrFromInt(entry_addr)).*;
-        result.entry_addr = entry_addr;
-        const kind = entry & 3;
-        if (kind == 0) return result; // invalid
-        if (kind == 1 or level == 3) { // block (or page at L3)
-            result.found = true;
-            result.level = level;
-            result.entry = entry;
-            return result;
-        }
-        addr = entry & ~@as(u64, 0xfff); // table: descend
-        level += 1;
-    }
-    return result;
-}
-
-/// Append one decoded descriptor line: kind, output base, MAIR attr index +
-/// byte, AF/SH/AP/XN bits.
-fn mmu_describe(tag: []const u8, walk: FwWalk, mair: u64) void {
-    mmu_str(tag);
-    mmu_str(" L");
-    mmu_str(&.{'0' + walk.level});
-    mmu_str(" @");
-    mmu_hex(walk.entry_addr);
-    mmu_str(" E=");
-    mmu_hex(walk.entry);
-    if (!walk.found) {
-        mmu_str(" INV\n");
-        return;
-    }
-    const out_shift: u6 = switch (walk.level) {
-        0 => 39,
-        1 => 30,
-        2 => 21,
-        else => 12,
-    };
-    // Output address field = bits [47:out_shift] of the descriptor (the
-    // bits above 47 are attributes such as XN/PXN and must be masked out).
-    const out_bits: u6 = 48 - out_shift;
-    const out = ((walk.entry >> out_shift) & ((@as(u64, 1) << out_bits) - 1)) << out_shift;
-    mmu_str(if ((walk.entry & 3) == 1) " BLK out=" else " PAG out=");
-    mmu_hex(out);
-    const aidx = (walk.entry >> 2) & 7;
-    mmu_str(" AIDX=");
-    mmu_hex(aidx);
-    mmu_str(" A=");
-    mmu_hex((mair >> @intCast(aidx * 8)) & 0xff);
-    mmu_str(" AF=");
-    mmu_hex((walk.entry >> 10) & 1);
-    mmu_str(" SH=");
-    mmu_hex((walk.entry >> 8) & 3);
-    mmu_str(" AP=");
-    mmu_hex((walk.entry >> 6) & 3);
-    mmu_str(" XN=");
-    mmu_hex((walk.entry >> 54) & 1);
-    mmu_str("\n");
-}
-
-fn fw_mmu_capture_diag(st: *const SystemTable, handoff: *const HandoffV2) void {
-    mmu_dump_len = 0;
-    const sctlr = read_sctlr();
-    const tcr = read_tcr();
-    const mair = read_mair();
-    const ttbr0 = read_ttbr0();
-    const ttbr1 = read_ttbr1();
-    const mmfr0 = read_mmfr0();
-
-    mmu_str("MMU SCTLR=");
-    mmu_hex(sctlr);
-    mmu_str("\n");
-    mmu_str("MMU TCR=");
-    mmu_hex(tcr);
-    const t0sz: u6 = @intCast(tcr & 0x3f);
-    const va_width: usize = 64 - @as(usize, t0sz);
-    mmu_str(" T0SZ=");
-    mmu_hex(t0sz);
-    mmu_str(" W=");
-    mmu_hex(va_width);
-    mmu_str(" INITLVL=");
-    mmu_hex(fw_initial_level(va_width));
-    mmu_str(" TG0=");
-    // ARMv8.1+ layout: TG0 at bits [15:14] (0b00 = 4 K granule).
-    mmu_hex((tcr >> 14) & 3);
-    mmu_str("\n");
-    mmu_str("MMU MAIR=");
-    mmu_hex(mair);
-    mmu_str("\n");
-    mmu_str("MMU TTBR0=");
-    mmu_hex(ttbr0);
-    mmu_str("\n");
-    mmu_str("MMU TTBR1=");
-    mmu_hex(ttbr1);
-    mmu_str("\n");
-    mmu_str("MMU IDAA64MMFR0=");
-    mmu_hex(mmfr0);
-    mmu_str("\n");
-
-    // Walk the firmware's TTBR0 tables for the virtio BAR0 window (the
-    // post-switch hang target, claim 0020) and a RAM control address.
-    if (vp_ready and vp_bar0 != 0) {
-        mmu_str("MMU WALK BAR va=");
-        mmu_hex(vp_bar0);
-        mmu_str("\n");
-        mmu_describe("MMU   ", fw_walk(ttbr0, t0sz, vp_bar0), mair);
-    } else {
-        mmu_str("MMU WALK BAR va=none (transport not armed)\n");
-    }
-    mmu_str("MMU WALK RAM va=");
-    mmu_hex(handoff.stack_base);
-    mmu_str("\n");
-    mmu_describe("MMU   ", fw_walk(ttbr0, t0sz, handoff.stack_base), mair);
-
-    // The kernel's planned values, for the host-side diff.
-    const ips: u64 = @min(read_mmfr0() & 0xf, 5);
-    mmu_str("MMU KERNEL-PLAN MAIR=");
-    mmu_hex(0x000000000000ff00); // Attr0 Device-nGnRnE, Attr1 Normal WB
-    mmu_str(" TCR=");
-    mmu_hex(25 | (ips << 32));
-    mmu_str(" TTBR0=");
-    mmu_hex(@intFromPtr(&table_storage[0]));
-    if (vp_ready and vp_bar0 != 0) {
-        mmu_str(" BAR=");
-        mmu_hex(vp_bar0);
-        mmu_str("|0x403"); // Device 4 K page descriptor: 0x3 | AF(1<<10)
-    }
-    mmu_str("\n");
-
-    _ = st.runtime_services._setVariable(
-        &mmu_var_name,
-        &marker_vendor_guid,
-        .{ .non_volatile = true, .bootservice_access = true, .runtime_access = true },
-        mmu_dump_len,
-        mmu_dump[0..mmu_dump_len].ptr,
-    );
-}
-
 fn probe_serial(_: MemoryMapSlice, st: *const SystemTable) Candidate {
     // Selection happened PRE-EXIT in probe_serial_pre (post-exit reads of
     // the declared MMIO windows hang on VZ — claim 0013). This records the
     // stage marker and returns the pre-exit result so the banner/TX path
     // proceeds without any post-exit window read beyond TX itself.
-    write_marker_var(st, marker_raw);
+    evidence.write_marker_var(st, marker_raw);
     return .{ .base = console_base, .kind = console_kind };
 }
 
@@ -2185,8 +484,8 @@ fn probe_serial_pre(map: MemoryMapSlice, st: *const SystemTable) Candidate {
     // whenever it initializes; the MMIO heuristics below remain as fallback
     // (the 0x20050000 PrimeCell UART is Apple's internal debug console, not
     // the serial attachment).
-    if (virtio_pci_init(st)) {
-        return .{ .base = vp_bar0, .kind = .virtio };
+    if (virtio_console.virtio_pci_init(st)) {
+        return .{ .base = virtio_console.vp_bar0, .kind = .virtio };
     }
     var it = map.iterator();
     while (it.next()) |desc| {
@@ -2197,100 +496,54 @@ fn probe_serial_pre(map: MemoryMapSlice, st: *const SystemTable) Candidate {
         const base = desc.physical_start;
         if (bytes < 0x1000) continue;
 
-        const magic = mmio_read32(base);
-        const version = mmio_read32(base + 4);
-        const device = mmio_read32(base + 8);
-        const vendor = mmio_read32(base + 12);
+        const magic = mmio.mmio_read32(base);
+        const version = mmio.mmio_read32(base + 4);
+        const device = mmio.mmio_read32(base + 8);
+        const vendor = mmio.mmio_read32(base + 12);
         if (magic == 0x74726976) { // "virt"
             record_probe(base, magic, version, device, vendor);
-            dump_probe_line(0, base, magic, version, device, vendor);
+            evidence.dump_probe_line(0, base, magic, version, device, vendor);
             if ((version == 1 or version == 2) and device == 3 and vendor != 0) {
-                dump_str("PRE: virtio-console candidate @");
-                dump_hex(base);
-                dump_str("\n");
+                evidence.dump_str("PRE: virtio-console candidate @");
+                evidence.dump_hex(base);
+                evidence.dump_str("\n");
                 return .{ .base = base, .kind = .virtio };
             }
         }
 
-        const cid0 = mmio_read32(base + 0xff0) & 0xff;
-        const cid1 = mmio_read32(base + 0xff4) & 0xff;
-        const cid2 = mmio_read32(base + 0xff8) & 0xff;
-        const cid3 = mmio_read32(base + 0xffc) & 0xff;
-        const pid0 = mmio_read32(base + 0xfe0) & 0xff;
-        const pid1 = mmio_read32(base + 0xfe4) & 0xff;
-        const pid2 = mmio_read32(base + 0xfe8) & 0xff;
-        const pid3 = mmio_read32(base + 0xfec) & 0xff;
-        const fr = mmio_read32(base + 0x18);
+        const cid0 = mmio.mmio_read32(base + 0xff0) & 0xff;
+        const cid1 = mmio.mmio_read32(base + 0xff4) & 0xff;
+        const cid2 = mmio.mmio_read32(base + 0xff8) & 0xff;
+        const cid3 = mmio.mmio_read32(base + 0xffc) & 0xff;
+        const pid0 = mmio.mmio_read32(base + 0xfe0) & 0xff;
+        const pid1 = mmio.mmio_read32(base + 0xfe4) & 0xff;
+        const pid2 = mmio.mmio_read32(base + 0xfe8) & 0xff;
+        const pid3 = mmio.mmio_read32(base + 0xfec) & 0xff;
+        const fr = mmio.mmio_read32(base + 0x18);
         if (cid0 != 0 or cid1 != 0 or cid2 != 0 or cid3 != 0 or pid0 != 0 or pid1 != 0 or pid2 != 0 or pid3 != 0 or fr != 0) {
             record_probe(base, pid0 | (pid1 << 8) | (pid2 << 16) | (pid3 << 24), fr, cid0 | (cid1 << 8) | (cid2 << 16) | (cid3 << 24), 0x504c3031); // PL01
-            dump_pl011_line(0, base, pid0, pid1, pid2, fr);
+            evidence.dump_pl011_line(0, base, pid0, pid1, pid2, fr);
         }
         if (cid0 == 0x0d and cid1 == 0xf0 and cid2 == 0x05 and cid3 == 0xb1 and pid1 == 0x10 and pid3 == 0x00 and (pid2 & 0x0f) == 0x04) {
-            dump_str("PRE: PL011-family UART @");
-            dump_hex(base);
-            dump_str(" PID0=");
-            dump_hex(pid0);
-            dump_str("\n");
+            evidence.dump_str("PRE: PL011-family UART @");
+            evidence.dump_hex(base);
+            evidence.dump_str(" PID0=");
+            evidence.dump_hex(pid0);
+            evidence.dump_str("\n");
             return .{ .base = base, .kind = .pl011 };
         }
     }
     return .{ .base = 0, .kind = .none };
 }
 
-fn virtio_init(base: u64) bool {
-    // This implementation uses only the modern virtio-mmio register path.
-    // A version-1 (legacy) device is not selected because its PFN queue
-    // layout would require a separate setup path.
-    if (mmio_read32(base + 0x04) != 2) return false;
-    mmio_write32(base + 0x14, 0);
-    const device_features_low = mmio_read32(base + 0x10);
-    mmio_write32(base + 0x14, 1);
-    const device_features_high = mmio_read32(base + 0x10);
-    if ((device_features_high & 1) == 0) return false; // VIRTIO_F_VERSION_1 (bit 32)
-
-    mmio_write32(base + 0x70, 0);
-    mmio_write32(base + 0x70, 1 | 2); // ACKNOWLEDGE | DRIVER
-    mmio_write32(base + 0x24, 0);
-    mmio_write32(base + 0x20, 0); // no optional low-word features
-    mmio_write32(base + 0x24, 1);
-    mmio_write32(base + 0x20, 1); // negotiate VIRTIO_F_VERSION_1
-    _ = device_features_low;
-    mmio_write32(base + 0x70, 1 | 2 | 8); // FEATURES_OK
-    if ((mmio_read32(base + 0x70) & 8) == 0) return false;
-
-    virtio_desc[0] = .{ .addr = 0, .len = 0, .flags = 0, .next = 0 };
-    virtio_avail = .{ .flags = 0, .idx = 0, .ring = .{0} };
-    virtio_used = .{ .flags = 0, .idx = 0, .ring = .{.{ .id = 0, .len = 0 }} };
-    virtio_last_used = 0;
-    mmio_write32(base + 0x30, 1); // queue 1: console transmit queue
-    const max = mmio_read32(base + 0x34);
-    if (max == 0) return false;
-    mmio_write32(base + 0x38, 1);
-    mmio_write32(base + 0x80, @truncate(@intFromPtr(&virtio_desc)));
-    mmio_write32(base + 0x84, @truncate(@intFromPtr(&virtio_desc) >> 32));
-    mmio_write32(base + 0x90, @truncate(@intFromPtr(&virtio_avail)));
-    mmio_write32(base + 0x94, @truncate(@intFromPtr(&virtio_avail) >> 32));
-    mmio_write32(base + 0xa0, @truncate(@intFromPtr(&virtio_used)));
-    mmio_write32(base + 0xa4, @truncate(@intFromPtr(&virtio_used) >> 32));
-    mmio_write32(base + 0x44, 1);
-    mmio_write32(base + 0x70, 1 | 2 | 8 | 4); // DRIVER_OK
-    return (mmio_read32(base + 0x70) & 4) != 0;
-}
-
-/// PL011-family UART init (claim 0013): the VZ console at 0x20050000 is a
-/// PrimeCell PL011-variant (CID 0x0d/0xf0/0x05/0xb1, PID1=0x10, PID2 JEDEC
-/// 4, PID0=0x31) but boots DISABLED — writing DR without CR=UARTEN|TXE|RXE
-/// produces no output (observed: M2_READY set, vm-serial.log empty). Program
-/// the standard PL011 setup: disable, baud divisor, 8N1+FIFO, re-enable.
-/// VZ likely ignores the baud divisor; the sequence is what matters.
 var pl011_initialized: bool = false;
 fn pl011_init() void {
     const base = console_base;
-    mmio_write32(base + 0x30, 0); // CR = 0 (disable UART)
-    mmio_write32(base + 0x24, 13); // IBRD: 115200 baud @ 24 MHz reference
-    mmio_write32(base + 0x28, 1); // FBRD
-    mmio_write32(base + 0x2c, 0x70); // LCR_H: 8 data, 1 stop, no parity, FIFO enable
-    mmio_write32(base + 0x30, 0x301); // CR: UARTEN | TXE | RXE
+    mmio.mmio_write32(base + 0x30, 0); // CR = 0 (disable UART)
+    mmio.mmio_write32(base + 0x24, 13); // IBRD: 115200 baud @ 24 MHz reference
+    mmio.mmio_write32(base + 0x28, 1); // FBRD
+    mmio.mmio_write32(base + 0x2c, 0x70); // LCR_H: 8 data, 1 stop, no parity, FIFO enable
+    mmio.mmio_write32(base + 0x30, 0x301); // CR: UARTEN | TXE | RXE
 }
 
 fn uart_putc(byte: u8) void {
@@ -2308,22 +561,22 @@ fn uart_putc(byte: u8) void {
                 pl011_initialized = true;
             }
             var timeout: usize = 0;
-            while ((mmio_read32(console_base + 0x18) & (1 << 5)) != 0 and timeout < 1_000_000) : (timeout += 1) {}
-            if (timeout < 1_000_000) mmio_write32(console_base, byte);
+            while ((mmio.mmio_read32(console_base + 0x18) & (1 << 5)) != 0 and timeout < 1_000_000) : (timeout += 1) {}
+            if (timeout < 1_000_000) mmio.mmio_write32(console_base, byte);
         },
         .ns16550 => {
             var timeout: usize = 0;
-            while ((mmio_read8(console_base + 5) & (1 << 5)) == 0 and timeout < 1_000_000) : (timeout += 1) {}
-            if (timeout < 1_000_000) mmio_write8(console_base, byte);
+            while ((mmio.mmio_read8(console_base + 5) & (1 << 5)) == 0 and timeout < 1_000_000) : (timeout += 1) {}
+            if (timeout < 1_000_000) mmio.mmio_write8(console_base, byte);
         },
         .virtio => {
             // Claim 0013: the VZ serial attachment is a modern virtio-pci
             // console (BAR0 transport, queue 1 TX). Bytes are line-buffered
             // and flushed as one descriptor — one kick per line instead of
             // one per byte.
-            virtio_tx[vp_tx_len] = byte;
-            vp_tx_len += 1;
-            if (byte == '\n' or vp_tx_len >= virtio_tx.len) virtio_pci_flush();
+            virtio_console.virtio_tx[virtio_console.vp_tx_len] = byte;
+            virtio_console.vp_tx_len += 1;
+            if (byte == '\n' or virtio_console.vp_tx_len >= virtio_console.virtio_tx.len) virtio_console.virtio_pci_flush();
         },
         .none => {},
     }
@@ -2336,7 +589,7 @@ fn uart_puts(text: []const u8) void {
     // In nvram-console builds the virtio transport is never touched; the
     // NVRAM sink does its own newline/buffer-flush batching.
     if (comptime !build_options.nvram_console) {
-        if (console_kind == .virtio and vp_tx_len > 0) virtio_pci_flush();
+        if (console_kind == .virtio and virtio_console.vp_tx_len > 0) virtio_console.virtio_pci_flush();
     }
 }
 
@@ -2357,45 +610,6 @@ fn layout_name(kind: Kind) []const u8 {
         .virtio => "virtio-console\n",
         .none => "none\n",
     };
-}
-
-/// Volatile marker write: a bare dead store to BSS could be elided under
-/// ReleaseSmall (nothing in the guest reads `takeover_marker` back), which
-/// would silently rob the host dump of its discriminator.
-fn set_marker(value: u64) void {
-    @as(*volatile u64, &takeover_marker).* = value;
-}
-
-/// Write the current marker stage as an EFI non-volatile variable. Best
-/// effort: a failed runtime call never changes control flow (on VZ the
-/// firmware may not keep runtime services resident — then this is a no-op and
-/// the BSS marker remains the only record). The first write (pre-exit)
-/// creates the variable; later writes update it in place.
-fn write_marker_var(st: *const SystemTable, value: u64) void {
-    var bytes: [8]u8 = undefined;
-    std.mem.writeInt(u64, &bytes, value, .little);
-    _ = st.runtime_services._setVariable(
-        &marker_variable_name,
-        &marker_vendor_guid,
-        .{ .non_volatile = true, .bootservice_access = true, .runtime_access = true },
-        bytes.len,
-        &bytes,
-    );
-}
-
-fn write_marker_fallback(base: u64, size: u64, map: MemoryMapSlice) void {
-    // Fixed BSS evidence remains available to a host-side debugger if the
-    // serial probe is blocked. It is not reported as serial success. The
-    // discriminating marker word was already set to M2_SERIA by the caller;
-    // the M2M! breadcrumb lives in the virtio scratch region only, so the
-    // halt reason is never clobbered.
-    virtio_tx[0] = 'M';
-    virtio_tx[1] = '2';
-    virtio_tx[2] = '!';
-    virtio_tx[3] = 0;
-    _ = base;
-    _ = size;
-    _ = map;
 }
 
 fn halt_forever() noreturn {
