@@ -8,6 +8,7 @@ Commands:
     bundle   assemble a deterministic context bundle
     diff     retrieval-oriented summary of a git range
     inspect  show indexed metadata for one file
+    impact   Git-aware change-impact reviewer context
     doctor   verify repository, index, and configuration
 
 Every command exits non-zero on failure; errors are printed to stderr.
@@ -213,6 +214,105 @@ def cmd_diff(args: argparse.Namespace) -> int:
         db.close()
 
 
+def cmd_impact(args: argparse.Namespace) -> int:
+        import time
+        from .impact.inventory import build_inventory
+        from .impact.symbols import map_symbols
+        from .impact.neighborhood import collect_neighborhood
+        from .impact.stale import detect_stale
+        from .impact.scoring import score_files
+        from .impact.report import build_report, report_to_json, report_to_markdown
+        from .rendering.markdown import render_source_block
+        repo = resolve_repo(args.path)
+        config = load_config(repo)
+        t0 = time.monotonic()
+        inv = build_inventory(repo, args.range)
+        db = open_db(repo, config)
+        try:
+            mapping = map_symbols(db, repo.repo_id, inv, repo=repo)
+            symbols_by_path = {k: [s.name for s in v] for k, v in mapping.per_file.items()}
+            all_symbols = {s.name for s in mapping.symbols}
+            changed_paths = {f.path for f in inv.files}
+            neighbors, per_path = collect_neighborhood(db, repo.repo_id, changed_paths, symbols_by_path, all_symbols)
+            stale = detect_stale(db, repo.repo_id, changed_paths, all_symbols)
+            file_scores = score_files(inv, mapping, per_path)
+            refs = db.get_git_refs(repo.repo_id)
+            index_head = refs["head"] if refs is not None else None
+            # Real elapsed for humans goes to stderr; deterministic JSON/markdown is always 0
+            real_timing_ms = int((time.monotonic() - t0) * 1000)
+            timing_ms = 0
+            # Loud mismatch warning when index HEAD != range head
+            index_stale = False
+            index_warning = None
+            if index_head and inv.head_oid and index_head != inv.head_oid:
+                index_stale = True
+                index_warning = f"index HEAD {index_head[:12]} != range head {inv.head_oid[:12]} ({inv.head}); symbols/excerpts reflect indexed HEAD, not the requested range"
+            elif index_head is None:
+                index_stale = True
+                index_warning = "index has no git HEAD recorded; impact context may not match requested range"
+            report = build_report(str(repo.root), repo.repo_id, inv, mapping, neighbors, file_scores, stale, timing_ms, index_head, index_stale=index_stale, index_warning=index_warning)
+            # Always surface real timing + stale warning to stderr (does not affect determinism)
+            print(f"impact: {real_timing_ms} ms -- index HEAD {index_head[:12] if index_head else '(unknown)'}; range head {inv.head_oid[:12]}", file=sys.stderr)
+            if index_warning:
+                print(f"impact: WARNING: {index_warning}", file=sys.stderr)
+            if args.json:
+                text_out = report_to_json(report)
+                if args.bundle:
+                    import json as _j
+                    d = _j.loads(text_out)
+                    d["note"] = "bundle requested with --json not embedded; use --bundle without --json for packet"
+                    text_out = _j.dumps(d, indent=2, sort_keys=True) + "\n"
+                if args.output and args.output != "-":
+                    Path(args.output).write_text(text_out, encoding="utf-8")
+                    print(f"impact: wrote {len(text_out)} characters to {args.output}", file=sys.stderr)
+                else:
+                    sys.stdout.write(text_out)
+                return 0
+            bundle_text = None
+            if args.bundle:
+                parts = []
+                top = file_scores[:3] if file_scores else []
+                for fs in top:
+                    chunks = db.chunks_for_path(repo.repo_id, fs.path)
+                    ranges = next((f.ranges for f in inv.files if f.path == fs.path), [])
+                    picked = []
+                    for c in chunks:
+                        is_sym = any(s.name == (c.structural_name or "") for s in mapping.per_file.get(fs.path, []))
+                        overlaps = any(c.start_line <= e and c.end_line >= s for s, e in ranges) if ranges else False
+                        if is_sym or overlaps:
+                            picked.append(c)
+                    picked = sorted(picked, key=lambda c: (c.start_line, c.chunk_id))[:3]
+                    for c in picked:
+                        from .models import RetrievedChunk
+                        rc = RetrievedChunk(chunk=c, score=fs.score, components=fs.components)
+                        parts.append(render_source_block(rc, explain=False))
+                for n in neighbors[:2]:
+                    chunks = db.chunks_for_path(repo.repo_id, n.path)
+                    tgt = next((c for c in chunks if c.start_line == n.start_line and c.end_line == n.end_line), None)
+                    if tgt is None and chunks:
+                        tgt = chunks[0]
+                    if tgt is not None:
+                        from .models import RetrievedChunk
+                        rc = RetrievedChunk(chunk=tgt, score=0.0, components={n.reason: 1.0})
+                        parts.append(render_source_block(rc, explain=False))
+                if parts:
+                    bundle_text = "\n\n".join(parts)
+                else:
+                    bundle_text = "(no index excerpts available for this range)"
+            md = report_to_markdown(report, bundle=bundle_text)
+            if args.bundle and args.bundle != "-":
+                Path(args.bundle).write_text(md, encoding="utf-8")
+                print(f"impact: wrote {len(md)} characters to {args.bundle}", file=sys.stderr)
+                sys.stdout.write(md)
+            elif args.bundle == "-":
+                sys.stdout.write(md)
+            else:
+                sys.stdout.write(md)
+            return 0
+        finally:
+            db.close()
+
+
 def cmd_inspect(args: argparse.Namespace) -> int:
     repo = resolve_repo(args.path)
     config = load_config(repo)
@@ -329,6 +429,14 @@ def build_parser() -> argparse.ArgumentParser:
     add_path(p)
     p.add_argument("file", help="repository-relative path of the file")
     p.set_defaults(func=cmd_inspect)
+
+    p = sub.add_parser("impact", help="Git-aware change-impact reviewer context")
+    add_path(p)
+    p.add_argument("range", help="git range, e.g. HEAD~5..HEAD or main..HEAD")
+    p.add_argument("--json", action="store_true", help="machine-readable JSON output")
+    p.add_argument("--bundle", default=None, help="write a review packet to FILE (or '-' for stdout)")
+    p.add_argument("--output", default=None, help="JSON output file (alternative to stdout)")
+    p.set_defaults(func=cmd_impact)
 
     p = sub.add_parser("doctor", help="verify repository, index, and configuration")
     add_path(p)

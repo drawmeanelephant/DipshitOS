@@ -105,3 +105,7 @@ verify-bad-handoff:
 # Verify the M1.5 host-side interactive serial plumbing (boots VZ VMs; Apple silicon only)
 verify-host-console:
     bash tools/verify-host-console.sh
+
+# Git-aware change-impact reviewer context (ragshit impact)
+impact *ARGS:
+    python3 tools/ragshit/ragshit impact {{ARGS}}

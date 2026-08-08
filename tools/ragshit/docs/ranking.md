@@ -82,3 +82,31 @@ score: 14.72
   modified file: +2.00
   changed-line overlap: +2.00
 ```
+
+
+## Impact review-priority scoring (ragshit impact)
+
+`ragshit impact` ranks **files** by a deterministic review-priority heuristic (not a bug predictor).
+Per-file score is the sum of components, then normalized to 0..100.
+
+```
+components (before 0..100 normalization, max theoretical ~42):
+  base               3.0 if hunks exist else 2.0 (added) / 1.0
+  lines              log2(lines+1)*2, capped 10   — amount of new lines
+  symbols            symbols_touched*3, capped 12 — how many indexed symbols the hunks map to
+  references         log2(refs+1)*3, capped 9     — centrality: number of index hits (direct-symbol/identifier/doc/test)
+  critical_path      8 if kernel/boot/host, 5 if build.zig|justfile or buildlike, else 0
+  doc_touched        4 if docs/decisions|hardware-contract|claims is in the changed set
+  deleted            6 if file status D
+  interface          3 if build.zig|justfile or host/ or boot/src/main.zig
+  no_test            4 if impl and not has_test_changed and refs==0 and lines/symbols>0 else 2 if impl and refs<3, else 0
+  test_file         -1.5 if path contains "test" (dampens churn-only test files)
+score = sum(components)   (rounded 2dp)
+normalized = min(100, (score / max(max_score, 20)) * 100)  -> round 1dp
+level:  <22 low, 22-44 medium, 45-69 high, >=70 high/critical (kernel/boot/host -> critical)
+       high+>=80 also critical
+has_rename flag is carried in stats but not scored separately; dirty working tree is noted not scored.
+```
+All components are exposed per file in both markdown and JSON (`file_scores[].components`).
+Normalization uses max 20 as a floor so docs-only changes don't inflate to 100.
+Deterministic: all inputs are local (git range, index), sorted, and capped.

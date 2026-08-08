@@ -19,7 +19,7 @@ subcommands.
   ranking (changed files, changed-line overlap, recency, decision docs).
 * Deterministic Markdown or JSONL **context bundles** — one file you can
   drop into any LLM, with every source chunk bounded and addressable.
-* A `doctor` for verifying the index, and a `diff` command that summarizes
+* A `doctor` for verifying the index, and `diff` / `impact` commands that summarizes
   a git range for review.
 
 ## What it is not
@@ -59,6 +59,9 @@ resolved to the **repository root** (via `git rev-parse --show-toplevel`).
 ./tools/ragshit/ragshit query . "ExitBootServices memory ownership"
 ./tools/ragshit/ragshit bundle . "review milestone two" --output artifacts/review-context.md
 ./tools/ragshit/ragshit diff . main..HEAD
+./tools/ragshit/ragshit impact . HEAD~5..HEAD
+./tools/ragshit/ragshit impact . HEAD~5..HEAD --bundle artifacts/impact.md
+./tools/ragshit/ragshit impact . HEAD~5..HEAD --json
 ./tools/ragshit/ragshit doctor .
 ```
 
