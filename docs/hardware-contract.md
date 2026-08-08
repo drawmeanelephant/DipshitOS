@@ -120,26 +120,49 @@ correct them without redesign.
 - **The MMU takeover completes on VZ (fixed 2026-08-07, claim 0010).** The
   kernel's own identity map installs and the first post-switch runtime call
   succeeds; the NVRAM marker ladder runs `M2_MAPD! → M2_MMUP! → M2_SERIA`
-  (`artifacts/m2-mmu-takeover-gate.txt`). The prior claim-0009 finding
-  (kernel dies in the MMU-takeover window, ladder ending at `M2_MAPD!`,
-  `artifacts/m2-marker-gate.txt`) is superseded: three ladder-gated
-  experiments discriminated the death site, and the fix has three parts —
-  (a) a pre-switch register capture proved the guest implements the
-  ARMv8.1+ TCR_EL1 layout (TG0 at bits [15:14] = 0b00 = 4 KB granule,
-  36-bit IPS; `artifacts/m2-firmware-regs.txt`), so the granule was never
-  the cause; (b) the identity map now covers the low 4 GiB with declared
-  RAM as Normal Write-Back and **every other address (including undeclared
-  firmware MMIO such as the NVRAM controller)** as Device nGnRnE, so no
-  post-switch access can fault on an unmapped address or hang on a
-  cacheable access to an emulated device (verified by a host-side table
-  walk, `artifacts/m2-table-walk.txt`); (c) **the `tlbi vmalle1` is
-  dropped at the switch** — bisect stages proved the switch and first
-  post-switch call succeed but any TLBI-forced re-walk faults on VZ
-  (`artifacts/m2-mmu-bisect-tlbi.txt`); the stale firmware TLB entries are
-  identity-compatible with the new map and the map never changes
-  descriptors post-switch in this milestone, so skipping the invalidate is
-  safe. The D-cache over the 512 KiB table carve-out is cleaned before the
-  switch (architectural hardening; independently verified not the fix).
+  (`artifacts/m2-marker-gate.txt`, claim 0009). The prior claim-0009
+  finding (kernel dies in the MMU-takeover window, ladder ending at
+  `M2_MAPD!`) is superseded: three ladder-gated experiments discriminated
+  the death site, and the fix has three parts — (a) a pre-switch register
+  capture proved the guest implements the ARMv8.1+ TCR_EL1 layout (TG0 at
+  bits [15:14] = 0b00 = 4 KB granule, 36-bit IPS; re-captured by claim
+  0021, `artifacts/fw-mmu-capture-lines.txt` — the claim-0010 raw
+  artifact `m2-firmware-regs.txt` is not in this checkout); (b) the
+  identity map now covers the low 4 GiB with declared RAM as Normal
+  Write-Back and **every other address (including undeclared firmware MMIO
+  such as the NVRAM controller)** as Device nGnRnE, so no post-switch
+  access can fault on an unmapped address or hang on a cacheable access to
+  an emulated device; (c) **the `tlbi vmalle1` is dropped at the switch**
+  — see the TLBI bullets below. The D-cache over the 512 KiB table
+  carve-out is cleaned before the switch (architectural hardening;
+  independently verified not the fix).
+- **A TLBI-forced re-walk faults on VZ; omitting the TLBI survives.
+  **[observed]** (claim 0010, bisect)** — with `tlbi vmalle1` at the switch
+  the ladder stops at `M2_TTBR!` (post-TTBR write, post-TLBI) on every run;
+  without it the takeover completes (`M2_MMUP!` and beyond, every run since
+  claim 0010). The mechanism is uncharacterized; the no-TLBI safety
+  argument and its validity window are the controlling contract in **ADR
+  0006**. "MMU takeover fixed" (claim 0010) means the identity map installs
+  and this milestone's accesses work — it does **not** mean TLB
+  invalidation, remapping, or unmapping is proven.
+- **Post-switch MMIO access to the virtio-pci BAR window hangs on VZ.
+  **[observed]** (claim 0020, transition matrix)** — the same flush works
+  pre-EBS (phase A) and post-EBS on the firmware translation (phase B),
+  and hangs at the first common-cfg read immediately after the DipshitOS
+  identity-map install (phases C/D); `vm-serial.log` stays 0 B. The
+  transition that destroys access is the MMU switch, not ExitBootServices.
+- **Firmware translation state at the switch. **[observed]** (claim 0021,
+  `artifacts/fw-mmu-capture-lines.txt`)** — `SCTLR_EL1.M=1` (MMU on),
+  `TCR_EL1=0x18080351c` (T0SZ=28 → 2^36 VA space, TG0 bits [15:14]=0b00 =
+  4 KB granule, 36-bit IPS), `MAIR_EL1=0xffbb4400` (Attr0=0x00
+  Device-nGnRnE, Attr3=0xff Normal WB), `TTBR1_EL1=0` (no high-half
+  tables). The firmware maps the virtio BAR0 window (VA `0x100010000`) as a
+  **1 GiB identity block at L1, Device-nGnRnE, XN=1, AF=1, non-shareable**
+  and RAM as L3 pages **Normal WB (0xff), inner-shareable** — memory
+  attributes byte-identical to the kernel's choices (Device 0x00 / Normal
+  0xff), so the post-switch hang is not an attribute mismatch; the
+  structural differences are granularity (1 GiB block vs 4 K pages),
+  XN/PXN, T0SZ, and MAIR index numbering.
 - The kernel builds its own translation tables (never firmware tables):
   TTBR0_EL1, 4K granule, identity map (VA == PA) for RAM, the kernel
   image, and the MMIO windows the drivers need. **[inferred]** — this is a
