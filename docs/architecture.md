@@ -22,12 +22,13 @@ the MMU-takeover death the marker ladder exposed (claim 0009) was
 root-caused and fixed (claim 0010, 2026-08-07) — the identity-map switch
 now completes on VZ; claim 0013 found the real console (a virtio-pci
 device outside the declared windows) and the VZ serial gate's remaining
-blocker is post-exit access to its transport, not a crash. Milestone 1.5
+blocker is post-MMU access to its transport (claims 0018/0020), not a
+crash. Milestone 1.5
 adds the interactive monitor on top of this kernel:
 console abstraction, line editor, tokenizer, a 14-command registry
 (`kernel/src/{console,lineedit,tokenizer,shell,monitor,handoff,memmap}.zig`),
 host-tested with a mock console and a byte-exact transcript gate; its live
-serial channel is still blocked on the post-exit console transport / RX.
+serial channel is still blocked on post-MMU console transport access / RX.
 The canonical, always-current status lives in
 [`docs/status.md`](status.md); this file documents the architecture that
 status refers to. The project targets Apple silicon /
@@ -59,7 +60,7 @@ VZEFIBootLoader (macOS VZ)
         └── loader loads \\KERNEL.BIN ──▶ kernel entry
              │  milestone two: ExitBootServices, identity-map MMU
              │  post-exit evidence channel: NVRAM ladder (EFI var DipshitM2) ──▶ artifacts/efi-vars.bin  [observed: reaches M2_MMUP! → M2_SERIA]
-             └── serial probe ──▶ declared windows decoded (efivars store + debug UART, claim 0013); real console = virtio-pci @ BAR 0x100010000 ──▶ post-exit transport access hangs ──▶ vm-serial.log empty
+             └── serial probe ──▶ declared windows decoded (efivars store + debug UART, claim 0013); real console = virtio-pci @ BAR 0x100010000 ──▶ post-MMU transport access hangs ──▶ vm-serial.log empty
              └── M1.5 monitor loop (console/lineedit/tokenizer/shell) ──▶ exists, host-tested via MockConsole; parks in WFE on the real kernel (RX not wired — readByte is a no-RX stub)
 ```
 
@@ -84,11 +85,11 @@ VZEFIBootLoader (macOS VZ)
   ADR 0004 D4). The declared windows are not the console — claim 0013
   decoded them as Apple's efivars store + an internal debug UART and
   found the real console is a modern virtio-pci device (BAR
-  `0x100010000`) whose post-exit transport access hangs on VZ (claims
-  0013/0020), so no console is driven on VZ yet and the register layout
+  `0x100010000`) whose post-MMU transport access hangs on VZ (claims
+  0018/0020), so no console is driven on VZ yet and the register layout
   stays `[inferred]` (see `docs/hardware-contract.md`). The M1.5 monitor
   therefore runs against a mock console in tests; the live channel awaits
-  a post-exit-safe console transport + RX.
+  reliable post-MMU console transport access + RX.
 - **Guest → host evidence:** because the VZ firmware exposes no visible
   text channel, the guest also writes its two lines to `\BOOTED.TXT` on the
   ESP via the UEFI Simple File System protocol. The host reads that file

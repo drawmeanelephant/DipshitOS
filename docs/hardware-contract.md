@@ -200,8 +200,12 @@ redesign.
   (multiplier 4), device cfg @ `+0x8000`. Pre-exit the transport arms fully
   (features `0x30000000`/`0x5`, queue 1 configured, DRIVER_OK).
 - **Post-exit access to the transport hangs on VZ.** **[observed, claim
-  0013]** — the first banner TX dies somewhere in the first flush
-  (death site boot-variable); `vm-serial.log` stays 0 B. Rebasing the BAR
+  0013; refined by claims 0018/0020]** — the first banner TX dies somewhere
+  in the first flush (death site boot-variable); `vm-serial.log` stays
+  0 B. Claim 0018 bisected the death to the first post-switch
+  BAR/common-config read (`M2_TXBR!` written, `M2_TXAR!` absent, 10/12
+  boots), and claim 0020 attributed it to the MMU switch: post-exit access
+  on the firmware translation works (phase B) — see the next bullet. Rebasing the BAR
   below the blanket was tried and abandoned: the BAR write *does* move the
   transport, but to an address the firmware never mapped pre-exit, and
   post-exit config writes aren't reliable — so the firmware-assigned base

@@ -57,9 +57,9 @@ Every verification command belongs to exactly one class (canonical inventory:
     `memory-map descriptors=0x...` line, and `kernel terminal state`. The
     pre-exit loader marker `\\BOOTED.TXT` remains required. `RC.TXT` is
     expected only for a deliberate pre-exit failure fixture, not success.
-    **Currently not passed** — the VZ serial gate stays open (post-exit
-    access to the virtio-pci console transport hangs on VZ; see
-    `docs/status.md`).
+    **Currently not passed** — the VZ serial gate stays open (post-MMU
+    access to the virtio-pci console transport hangs on VZ — the MMU switch
+    destroys access, claim 0020; see `docs/status.md`).
 11. Run the pre-exit failure-path gate:
     `bash tools/verify-bad-handoff.sh` (also `just verify-bad-handoff`) —
     boots a bad-magic fixture and asserts the loader's `RC.TXT` reads
@@ -180,8 +180,8 @@ Every verification command belongs to exactly one class (canonical inventory:
       declared windows (`M2_SERIA`; claim 0013 later decoded those windows
       as Apple's efivars store + an internal debug UART and found the real
       console is a virtio-pci device outside them).
-      The remaining blocker is post-exit access to that virtio-pci console
-      transport (claims 0013/0020), not a crash.
+      The remaining blocker is post-MMU access to that virtio-pci console
+      transport (claims 0018/0020), not a crash.
       Evidence: `artifacts/m2-mmu-takeover-gate.txt`, `artifacts/m2-firmware-regs.txt`,
       `artifacts/m2-table-walk.txt`, `artifacts/m2-mmu-bisect-tlbi.txt`.
       The console device itself is now observed (claim 0013); its register
@@ -200,7 +200,7 @@ Every verification command belongs to exactly one class (canonical inventory:
       evidence: `artifacts/m2-mmu-takeover-gate.txt`,
       `artifacts/m2-firmware-regs.txt`, `artifacts/m2-table-walk.txt`,
       `artifacts/m2-mmu-bisect-tlbi.txt`). The VZ serial gate's remaining
-      blocker is post-exit access to the virtio-pci console transport,
+      blocker is post-MMU access to the virtio-pci console transport,
       not a crash.
 - [x] Milestone two bad-handoff failure gate: **passing** (fixed 2026-08-06,
       `agent/buffy/m2-badhandoff-fix`). Root cause was the naked `_start`
