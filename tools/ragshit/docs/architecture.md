@@ -72,10 +72,25 @@ discovery → parsing → indexing → retrieval → rendering → (doctor/statu
   final resort, with omissions always reported and unresolved-evidence
   markers scanned from retrieved content.
 
+### `impact/` — change-impact analysis (inputs to `review`)
+- `inventory.py` — NUL-delimited `name-status` + `unified=0` hunk parsing.
+- `symbols.py` — changed hunks → enclosing indexed symbol (fallback `git show` for deleted files).
+- `neighborhood.py` — index-only reference neighborhood (direct-symbol / identifier / doc / test / lexical).
+- `scoring.py` — per-file review-priority heuristic, normalized 0..100.
+- `stale.py` — docs mentioning a changed symbol but not changed in range.
+- `report.py` — `ragshit.impact/v1` JSON + Markdown.
+
+### `review/` — budgeted reviewer packet
+- `candidates.py` — deterministic pool with provenance, cost, coverage keys, token sets.
+- `coverage.py` — explicit dimensions and `covered/total` metrics.
+- `redundancy.py` — line overlap, token Jaccard, hash, structural identity.
+- `selection.py` — greedy weighted set cover under hard budget with mandatory reserve + truncation.
+- `report.py` — `ragshit.review/v1` JSON + Markdown, baseline comparison, `len(markdown) ≤ budget`.
+
 ### `doctor.py`, `cli.py`, `embeddings/`
 - `doctor.py` — ten checks (repo, git, config, DB, FTS5, ignore behavior,
   freshness, referenced files, duplicate chunk ids, orphans).
-- `cli.py` — eight subcommands with non-zero exit codes on failure.
+- `cli.py` — nine subcommands (`init`, `index`, `status`, `query`, `bundle`, `diff`, `inspect`, `impact`, `review`, `doctor`) with non-zero exit codes on failure.
 - `embeddings/` — `EmbeddingProvider` protocol + disabled provider; no
   retrieval path depends on embeddings.
 

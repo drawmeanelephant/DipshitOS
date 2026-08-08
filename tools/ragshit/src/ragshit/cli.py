@@ -9,6 +9,7 @@ Commands:
     diff     retrieval-oriented summary of a git range
     inspect  show indexed metadata for one file
     impact   Git-aware change-impact reviewer context
+    review   deterministic budgeted reviewer packet
     doctor   verify repository, index, and configuration
 
 Every command exits non-zero on failure; errors are printed to stderr.
@@ -358,6 +359,80 @@ def cmd_inspect(args: argparse.Namespace) -> int:
         db.close()
 
 
+def cmd_review(args: argparse.Namespace) -> int:
+        import time
+        from .impact.inventory import build_inventory
+        from .impact.symbols import map_symbols
+        from .impact.neighborhood import collect_neighborhood
+        from .impact.stale import detect_stale
+        from .impact.scoring import score_files
+        from .review.candidates import build_candidates
+        from .review.coverage import CoverageSpec
+        from .review.selection import select
+        from .review.report import build_review, report_to_json, report_to_markdown
+        repo = resolve_repo(args.path)
+        config = load_config(repo)
+        t0 = time.monotonic()
+        budget = args.budget_chars
+        if budget is not None:
+            try:
+                budget = int(budget)
+            except ValueError:
+                from .errors import UsageError
+                raise UsageError(f"invalid --budget-chars '{args.budget_chars}' (expected integer)")
+            if budget < 500:
+                raise UsageError(f"--budget-chars must be >= 500 (got {budget})")
+        else:
+            budget = 30000
+        inv = build_inventory(repo, args.range)
+        db = open_db(repo, config)
+        try:
+            mapping = map_symbols(db, repo.repo_id, inv, repo=repo)
+            symbols_by_path = {k: [s.name for s in v] for k, v in mapping.per_file.items()}
+            all_symbols = {s.name for s in mapping.symbols}
+            changed_paths = {f.path for f in inv.files}
+            neighbors, per_path = collect_neighborhood(db, repo.repo_id, changed_paths, symbols_by_path, all_symbols)
+            stale = detect_stale(db, repo.repo_id, changed_paths, all_symbols)
+            file_scores = score_files(inv, mapping, per_path)
+            refs = db.get_git_refs(repo.repo_id)
+            index_head = refs["head"] if refs is not None else None
+            real_timing_ms = int((time.monotonic() - t0) * 1000)
+            timing_ms = 0
+            index_stale = False
+            index_warning = None
+            if index_head and inv.head_oid and index_head != inv.head_oid:
+                index_stale = True
+                index_warning = f"index HEAD {index_head[:12]} != range head {inv.head_oid[:12]} ({inv.head}); symbols/excerpts reflect indexed HEAD, not the requested range"
+            elif index_head is None:
+                index_stale = True
+                index_warning = "index has no git HEAD recorded; review context may not match requested range"
+            spec = CoverageSpec.from_impact(inv, mapping, neighbors, stale, file_scores)
+            candidates = build_candidates(db, repo.repo_id, inv, mapping, neighbors, stale, file_scores, index_head)
+            result = select(candidates, spec, budget)
+            report = build_review(str(repo.root), repo.repo_id, inv, mapping, neighbors, stale, file_scores, spec, result, candidates, budget, index_head, index_stale, index_warning, timing_ms)
+            print(f"review: {real_timing_ms} ms -- index HEAD {index_head[:12] if index_head else '(unknown)'}; range head {inv.head_oid[:12]} -- {len(candidates)} candidates, {len(result.selected)} selected", file=sys.stderr)
+            if index_warning:
+                print(f"review: WARNING: {index_warning}", file=sys.stderr)
+            if args.json:
+                text_out = report_to_json(report)
+                if args.output and args.output != "-":
+                    Path(args.output).write_text(text_out, encoding="utf-8")
+                    print(f"review: wrote {len(text_out)} characters to {args.output}", file=sys.stderr)
+                else:
+                    sys.stdout.write(text_out)
+                return 0
+            md = report_to_markdown(report, explain=args.explain)
+            if args.output and args.output != "-":
+                Path(args.output).write_text(md, encoding="utf-8")
+                print(f"review: wrote {len(md)} characters to {args.output} (budget {budget}) -- actual packet {len(md)} chars", file=sys.stderr)
+                sys.stdout.write(md)
+            else:
+                sys.stdout.write(md)
+            return 0
+        finally:
+            db.close()
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     repo = resolve_repo(args.path)
     config = load_config(repo)
@@ -437,6 +512,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--bundle", default=None, help="write a review packet to FILE (or '-' for stdout)")
     p.add_argument("--output", default=None, help="JSON output file (alternative to stdout)")
     p.set_defaults(func=cmd_impact)
+
+    p = sub.add_parser("review", help="deterministic budgeted reviewer packet")
+    add_path(p)
+    p.add_argument("range", help="git range, e.g. HEAD~5..HEAD or main..HEAD")
+    p.add_argument("--budget-chars", dest="budget_chars", default=None, help="hard character budget for the Markdown packet (default 30000)")
+    p.add_argument("--json", action="store_true", help="machine-readable JSON output (ragshit.review/v1)")
+    p.add_argument("--explain", action="store_true", help="include rejected-candidate explanations")
+    p.add_argument("--output", default=None, help="output file ('-' for stdout)")
+    p.set_defaults(func=cmd_review)
 
     p = sub.add_parser("doctor", help="verify repository, index, and configuration")
     add_path(p)

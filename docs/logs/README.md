@@ -59,5 +59,6 @@ verify-coordination`, and CI) fails if it drifts from the files.
 | `freebuff/pull-the-latest-dipshitos-main-after-the-virtio-pc-fc4c7c03-1dba-4af3-857d-af8cfa2c1e91` | [`freebuff-pull-the-latest-dipshitos-main-after-the-virtio-pc-fc4c7c03-1dba-4af3-857d-af8cfa2c1e91.md`](freebuff-pull-the-latest-dipshitos-main-after-the-virtio-pc-fc4c7c03-1dba-4af3-857d-af8cfa2c1e91.md) |
 | freebuff/pull-the-latest-from-github-and-find-something-in--a639920e (serial device discovery) | [`freebuff-pull-the-latest-from-github-and-find-something-in--a639920e-ebe1-47a0-a380-54cece9b4c40.md`](freebuff-pull-the-latest-from-github-and-find-something-in--a639920e-ebe1-47a0-a380-54cece9b4c40.md) |
 | `freebuff/ragshit-impact` | [`freebuff-ragshit-impact.md`](freebuff-ragshit-impact.md) |
+| `freebuff/ragshit-review` | [`freebuff-ragshit-review.md`](freebuff-ragshit-review.md) |
 | M1.5 tracker origin (pre-branch era) | [`m1.5-tracker.md`](m1.5-tracker.md) |
 <!-- LOGS_INDEX:END -->

@@ -110,3 +110,109 @@ has_rename flag is carried in stats but not scored separately; dirty working tre
 All components are exposed per file in both markdown and JSON (`file_scores[].components`).
 Normalization uses max 20 as a floor so docs-only changes don't inflate to 100.
 Deterministic: all inputs are local (git range, index), sorted, and capped.
+
+## Review budgeted selection (ragshit review)
+
+`ragshit review --budget-chars N` is a deterministic context-selection problem: given
+candidate chunks built from `ragshit impact` signals, pick the smallest high-value
+packet that still covers the important implementation/tests/docs/claims/risk signals
+under a hard character budget.
+
+### Candidate cost
+
+Cost = rendered Markdown block bytes (header `### path:start-end` + `reason/covers/score/provenance`
++ code fence overhead + `content`). Covers, provenance, and fences are counted so `len(markdown)`
+is predictable; the final `report_to_markdown` envelope truncation reserves the packet header
+and measures real `len(markdown)` (chars) so `--budget-chars` is never exceeded.
+
+### Candidate utility (base)
+
+```
+reason weights (base_utility before redundancy/penalties):
+  changed-symbol         10.0    the changed function itself (near-mandatory)
+  changed-chunk           9.0    hunk-overlapping chunk not already a symbol
+  high-risk-file          8.0    one per critical/high file from file_scores
+  hardware-contract       7.0    docs/hardware-contract.md excerpt
+  test-reference          6.0    test file mentioning a changed symbol
+  documentation-reference 5.0    doc mentioning a changed symbol
+  claim-reference         5.0    docs/claims/*  |  decision-reference 5.0  |  build-file 5.0
+  stale-hint              4.0    doc mentioning changed symbol but not updated in range
+  surrounding-context     3.0    adjacent symbol to give caller/transport context
+  lexical-related         1.0    weaker shared-token hit
+
+file_priority bonus: min(5.0, file_score/20) added to changed-symbol/changed-chunk/high-risk
+when the candidate path is a critical/high file. Stale hints and direct symbol links add +1.
+```
+
+### Coverage model
+
+Explicit dimensions counted as `covered / total`:
+
+* `changed_symbols` — distinct changed symbol names from `map_symbols`.
+* `changed_files` / `changed_implementation` — files in the git range.
+* `high_risk_files` — files where `file_scores.level ∈ {critical, high}`.
+* `related_tests` — neighbor `test-reference` paths.
+* `relevant_docs` — `documentation-reference / claim-reference / decision-reference / hardware-contract`.
+* `decision_docs` — subset under `docs/decisions/`, `docs/claims/`, or `hardware-contract`.
+* `stale_warnings` — `path:symbol` from `detect_stale`.
+
+Coverage keys are carried per candidate (`changed_symbol:<name>`, `doc:<path>`, ...)
+and `coverage_metrics` counts covered vs universe; one giant file cannot fake full coverage.
+
+### Selection algorithm (deterministic greedy weighted set cover)
+
+1. **Mandatory reserve.** One candidate per changed symbol (`changed-symbol`) and one per
+   high-risk file; sorted `(-utility, cost, path, start, id)`. Budget is reserved for
+   mandatory first. If mandatory cost alone exceeds the budget, the mandatory pool is
+   *safely truncated* (largest content shaved deterministically, provenance kept, omitted
+   lines marked) rather than silently dropping a changed function.
+2. **Greedy diversity step.** Remaining candidates ordered by `effective_utility / cost` where
+   `effective_utility = base_utility * (1 - redundancy_penalty)`. Redundancy penalty 0..0.9
+   from line-overlap, token Jaccard, or hash equality with already-selected chunks.
+   At each step the max ratio affordable candidate is taken; if it would exceed the budget
+   it is rejected as `budget pressure`. Highly redundant candidates whose coverage is
+   already fully duplicated are rejected as `redundant` instead of being selected.
+3. **Ordering.** All pools are `sorted` with deterministic keys; ties break by
+   `(utility desc, cost asc, path, start_line, cid)`. No randomness.
+
+The selector prefers a diverse useful packet (implementation + caller + test + contract + claim)
+over five near-identical chunks from the same function.
+
+### Redundancy control
+
+Deterministic local signals (no embeddings):
+
+* line overlap: `overlap / min(len(a), len(b)) > 0.9` → penalty 0.85
+* structural identity: same `path+start+end` → penalty 0.9
+* content hash equality → penalty 0.9
+* normalized token Jaccard (word set of content, lowercased `[a-z0-9_]+`) `≥ 0.85` → 0.8,
+  `≥ 0.60` → 0.3. Exposed as `"92% token Jaccard with path:line (reason)"`.
+
+Coverage already covered by selected chunks raises the effective duplication to 100% and
+the candidate is rejected as `redundant ... coverage already 92% duplicated`.
+
+### Safe truncation
+
+* Never removes provenance header.
+* Keeps the changed region: largest-content-first shaving retains the start of the
+  content + appends `"... [truncated N lines omitted]"`.
+* Markdown envelope (`_enforce_budget`) reserves `## Review packet` header and truncates
+  the tail, closing an open fence if needed, and is recomputed after selection so
+  `len(markdown) ≤ budget` always.
+
+### Budget + index-head safety
+
+Budget is a hard envelope; tiny budgets degrade gracefully with truncation and a
+`truncated` flag. Index mismatch (`index HEAD != range head`) is surfaced loudly in
+both Markdown and JSON and on `stderr`, but does not rebuild the index (existing
+conventions). Real wall-clock timing is written to `stderr` only; deterministic
+output `timing_ms` is always `0`.
+
+### Baseline
+
+Naive: *take candidates sorted by `base_utility` then path until budget is full* (no
+redundancy, no diversity). The diversity selector demonstrably wins on intentionally
+constructed cases (more changed-files/symbols/high-risk coverage per budget) and ties
+when the naive order is already optimal. Both are computed and reported in the packet
+and in JSON (`baseline.improved_dimensions`).
+

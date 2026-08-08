@@ -109,3 +109,7 @@ verify-host-console:
 # Git-aware change-impact reviewer context (ragshit impact)
 impact *ARGS:
     python3 tools/ragshit/ragshit impact {{ARGS}}
+
+# Deterministic budgeted reviewer packet (ragshit review)
+review *ARGS:
+    python3 tools/ragshit/ragshit review {{ARGS}}
