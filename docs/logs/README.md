@@ -59,6 +59,7 @@ verify-coordination`, and CI) fails if it drifts from the files.
 | freebuff/mainzig-modules | [`freebuff-mainzig-modules.md`](freebuff-mainzig-modules.md) |
 | Coordination-tooling hardening (claim 1801) | [`freebuff-make-sure-git-is-current-first-18548850-6288-40ff-bca2-007971e567ac.md`](freebuff-make-sure-git-is-current-first-18548850-6288-40ff-bca2-007971e567ac.md) |
 | `freebuff/mmu-debt-contract` | [`freebuff-mmu-debt-contract.md`](freebuff-mmu-debt-contract.md) |
+| verification gate classification (claim 0594) | [`freebuff-pull-latest-dipshitos-main-ebe15999-a14a-4066-9551-00deb3d2323a.md`](freebuff-pull-latest-dipshitos-main-ebe15999-a14a-4066-9551-00deb3d2323a.md) |
 | `freebuff/pull-the-latest-dipshitos-main-after-the-virtio-pc-fc4c7c03-1dba-4af3-857d-af8cfa2c1e91` | [`freebuff-pull-the-latest-dipshitos-main-after-the-virtio-pc-fc4c7c03-1dba-4af3-857d-af8cfa2c1e91.md`](freebuff-pull-the-latest-dipshitos-main-after-the-virtio-pc-fc4c7c03-1dba-4af3-857d-af8cfa2c1e91.md) |
 | freebuff/pull-the-latest-from-github-and-find-something-in--a639920e (serial device discovery) | [`freebuff-pull-the-latest-from-github-and-find-something-in--a639920e-ebe1-47a0-a380-54cece9b4c40.md`](freebuff-pull-the-latest-from-github-and-find-something-in--a639920e-ebe1-47a0-a380-54cece9b4c40.md) |
 | `freebuff/ragshit-impact` | [`freebuff-ragshit-impact.md`](freebuff-ragshit-impact.md) |

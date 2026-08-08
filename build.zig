@@ -113,7 +113,7 @@ pub fn build(b: *std.Build) void {
     // tools/elf2bin.py converts the linked ELF into the flat kernel image
     // format v1 (magic "DSK1", entry offset, size; see docs/decisions/
     // 0002-kernel-handoff.md). The loader on the ESP reads KERNEL.BIN.
-    const kernel_step = b.step("kernel", "Extract the flat kernel image (zig-out/bin/KERNEL.BIN) from the freestanding ELF");
+    const kernel_step = b.step("kernel", "Extract the flat kernel image (zig-out/bin/KERNEL.BIN) from the freestanding ELF (class A tooling, no VM)");
     const elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
     elf2bin.addFileArg(kernel.getEmittedBin());
     const kernel_bin = elf2bin.addOutputFileArg("KERNEL.BIN");
@@ -129,7 +129,7 @@ pub fn build(b: *std.Build) void {
     // skipped by the build cache. (No QEMU path: this project targets Apple
     // Virtualization.framework only.)
     // ------------------------------------------------------------------
-    const image_step = b.step("image", "Create the FAT32+GPT boot disk image at artifacts/disk.img");
+    const image_step = b.step("image", "Create the FAT32+GPT boot disk image at artifacts/disk.img (class A gate)");
     const image = b.addSystemCommand(&.{ "bash", "image/make-image.sh" });
     image.addFileArg(efi.getEmittedBin());
     image.addArg("artifacts/disk.img");
@@ -138,7 +138,7 @@ pub fn build(b: *std.Build) void {
     image.stdio = .inherit;
     image_step.dependOn(&image.step);
 
-    const inspect_step = b.step("inspect", "Inspect the EFI binary and the disk image");
+    const inspect_step = b.step("inspect", "Inspect the EFI binary and the disk image (class A gate)");
     const inspect = b.addSystemCommand(&.{ "bash", "tools/inspect.sh" });
     inspect.addFileArg(efi.getEmittedBin());
     inspect.addArg("artifacts/disk.img");
@@ -146,7 +146,7 @@ pub fn build(b: *std.Build) void {
     inspect.stdio = .inherit;
     inspect_step.dependOn(&inspect.step);
 
-    const failure_step = b.step("bad-handoff", "Build a deliberately corrupted handoff image for the pre-exit failure-path test");
+    const failure_step = b.step("bad-handoff", "Build a deliberately corrupted handoff image for the pre-exit failure-path test (class A tooling; feeds the class B bad-handoff gate)");
     const failure_image = b.addSystemCommand(&.{ "bash", "image/make-image.sh" });
     failure_image.addFileArg(efi.getEmittedBin());
     failure_image.addArg("artifacts/bad-handoff.img");
@@ -155,21 +155,21 @@ pub fn build(b: *std.Build) void {
     failure_image.stdio = .inherit;
     failure_step.dependOn(&failure_image.step);
 
-    const run_step = b.step("run", "Boot the disk image with the Swift Virtualization.framework runner");
+    const run_step = b.step("run", "Boot the disk image with the Swift Virtualization.framework runner (class B — live serial takeover gate, claim 0002; Apple silicon only; currently blocked)");
     const run = b.addSystemCommand(&.{ "bash", "-c", run_vm_command });
     run.step.dependOn(&image.step);
     run.has_side_effects = true;
     run.stdio = .inherit;
     run_step.dependOn(&run.step);
 
-    const console_step = b.step("console", "Boot the disk image and open an interactive host serial console (M1.5 host plumbing)");
+    const console_step = b.step("console", "Boot the disk image and open an interactive host serial console (class C — interactive/manual hardware gate; Apple silicon only)");
     const console = b.addSystemCommand(&.{ "bash", "-c", console_vm_command });
     console.step.dependOn(&image.step);
     console.has_side_effects = true;
     console.stdio = .inherit;
     console_step.dependOn(&console.step);
 
-    const context_step = b.step("context", "Regenerate artifacts/context.md (deterministic project snapshot)");
+    const context_step = b.step("context", "Regenerate artifacts/context.md (deterministic project snapshot; class A gate)");
     const context = b.addSystemCommand(&.{ "bash", "tools/context/build-context.sh" });
     context.has_side_effects = true;
     context.stdio = .inherit;
@@ -182,7 +182,7 @@ pub fn build(b: *std.Build) void {
     // here is the marker channel, not the serial channel: the runner exits 0
     // iff an M2_* marker was found. The hard gate lives in
     // tools/verify-marker.sh (`just verify-marker`).
-    const marker_step = b.step("marker", "Boot the disk image and save the host-side kernel marker dump (ADR 0004 D4 fixed-memory-marker fallback)");
+    const marker_step = b.step("marker", "Boot the disk image and save the host-side kernel marker dump (ADR 0004 D4 fallback; class B mechanism behind tools/verify-marker.sh; Apple silicon only)");
     const marker = b.addSystemCommand(&.{ "bash", "-c", marker_vm_command });
     marker.step.dependOn(&image.step);
     marker.has_side_effects = true;
@@ -195,7 +195,7 @@ pub fn build(b: *std.Build) void {
     // diffs byte-for-byte against the canonical fixture
     // tests/transcript-console.txt. The live vm-serial.log assertion stays
     // gated on the VZ serial gate (claim 0002).
-    const test_console_step = b.step("test-console", "Run the automated 'dipshit>' transcript test (M1.5 march step 19; mock console, no VM)");
+    const test_console_step = b.step("test-console", "Run the automated 'dipshit>' transcript test (M1.5 march step 19; class A — mock console, no VM)");
     const test_console = b.addSystemCommand(&.{ "bash", "tools/verify-transcript.sh" });
     test_console.has_side_effects = true;
     test_console.stdio = .inherit;
@@ -206,7 +206,7 @@ pub fn build(b: *std.Build) void {
     // the post-exit console stream from the EFI variable store. The hard
     // gate with substring assertions lives in tools/verify-nvram-console.sh
     // (`just verify-nvram-console`). Apple silicon only (VZ VM).
-    const nvram_console_step = b.step("nvram-console", "Boot the -Dnvram-console=true image and reconstruct the post-exit NVRAM console stream (claim 0015)");
+    const nvram_console_step = b.step("nvram-console", "Boot the -Dnvram-console=true image and reconstruct the post-exit NVRAM console stream (class B mechanism behind tools/verify-nvram-console.sh; claim 0015; Apple silicon only)");
     const nvram_console_run = b.addSystemCommand(&.{ "bash", "-c", nvram_console_vm_command });
     nvram_console_run.has_side_effects = true;
     nvram_console_run.stdio = .inherit;
@@ -218,7 +218,7 @@ pub fn build(b: *std.Build) void {
     // NVRAM ladder bracket. The hard gate with the full assertions lives in
     // tools/verify-preexit-tx.sh (`just verify-preexit-tx`). Apple silicon
     // only (VZ VM).
-    const preexit_tx_step = b.step("preexit-tx", "Boot the -Dpreexit-tx=true image and check whether the pre-exit virtio TX reaches vm-serial.log (claim 0017 diagnostic)");
+    const preexit_tx_step = b.step("preexit-tx", "Boot the -Dpreexit-tx=true image and check whether the pre-exit virtio TX reaches vm-serial.log (class D diagnostic — claim 0017; Apple silicon only)");
     const preexit_tx_run = b.addSystemCommand(&.{ "bash", "-c", preexit_tx_vm_command });
     preexit_tx_run.has_side_effects = true;
     preexit_tx_run.stdio = .inherit;
@@ -229,7 +229,7 @@ pub fn build(b: *std.Build) void {
     // determinism gate (N identical boots, per-boot ladders + serial logs +
     // revision) lives in tools/verify-tx-diag.sh (`just verify-tx-diag`).
     // Apple silicon only (VZ VM).
-    const tx_diag_step = b.step("tx-diag", "Boot the -Dtx-diag=true image and save the per-stage post-exit TX marker ladder (claim 0018 diagnostic)");
+    const tx_diag_step = b.step("tx-diag", "Boot the -Dtx-diag=true image and save the per-stage post-exit TX marker ladder (class D diagnostic — claim 0018; Apple silicon only)");
     const tx_diag_run = b.addSystemCommand(&.{ "bash", "-c", tx_diag_vm_command });
     tx_diag_run.has_side_effects = true;
     tx_diag_run.stdio = .inherit;
