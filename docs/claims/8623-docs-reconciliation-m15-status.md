@@ -4,7 +4,7 @@
 - **Prompt / plan:** task prompt 2026-08-08 — docs-only reconciliation from latest main `fff37a5`; scope restricted to canonical stable-context docs; do not modify kernel, host, build, verification, or hardware code; reconcile suspect areas 1–7 against current tracked evidence
 - **Scope:** docs-only reconciliation of `docs/status.md`, `docs/march-m15.md`, `docs/roadmap.md`, `docs/architecture.md`, `docs/hardware-contract.md`, `docs/gate-inventory.md` (pointers/classification only), `docs/testing.md`, `README.md` — make them accurately reflect evidence ALREADY landed (claims 0002/0015/0017/0018/0020/0021/0022/8592 and ADRs 0004/0005/0006); delete stale duplicate status prose, label superseded narratives as historical, make blocker/next-work ordering canonical; no milestone-scope change, no invented results, no [inferred]→[observed] upgrades beyond what claims already record
 - **Depends on:** main `fff37a5`, claims 0002/0010/0013/0015/0017/0018/0020/0021/0022, ADRs 0004/0005/0006, claim 3109 (prior stale-doc cleanup) and 8592 (preflight report, gitignored)
-- **Status:** 🔄 freebuff/docs-reconciliation-m15-status-20260808
+- **Status:** ✅ done 2026-08-08 — docs/status.md and docs/march-m15.md reconciled against claims 0013/0015/0017/0018/0020/0021/0022 and ADRs 0004/0005/0006; verification gates pass (see artifacts/docs-reconciliation-20260808/)
 
 ## Notes
 
