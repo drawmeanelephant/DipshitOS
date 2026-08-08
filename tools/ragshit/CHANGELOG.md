@@ -3,6 +3,39 @@
 All notable changes to Ragshit are recorded here, following the evidence
 rules: entries describe what was built and what was verified.
 
+## [0.1.2] - 2026-08-08
+
+Decision-useful coverage under hard budget pressure (claim 0176): a
+structurally large changed symbol must not be reported as usefully covered
+because one content-free prefix line survived truncation.
+
+### Added
+
+- **Anchor-aware truncation:** a truncated mandatory excerpt keeps the
+  structural identity line (signature/heading) plus the actual changed-line
+  neighborhood (git `--unified=2` context) instead of collapsing to a
+  content-free prefix. Truncation pressure is distributed across mandatory
+  symbols (phase 1: shave to the useful floor; phase 2: shave below the
+  floor / drop as genuine last resort).
+- **Weak / truncated coverage:** an excerpt that lost its structural
+  identity line or its changed region is flagged `weak` with a `weak_reason`;
+  weak candidates are excluded from covered counts (per-dimension `weak`
+  counts), listed in `missing_coverage`, and surfaced in a `## Weak /
+  truncated coverage` section. Additive JSON schema extension (`weak`
+  array; per-candidate `weak`/`weak_reason`/`anchor_ranges`) —
+  `ragshit.review/v1` is unchanged.
+- **Framing-loop plateau handling:** when every mandatory excerpt already
+  sits at its useful floor, an allowance reduction no longer changes the
+  selection; the framing loop now detects this and jumps below the plateau
+  so phase-2 shaving engages, keeping budget accounting exact without the
+  envelope.
+- Synthetic regression test (`tests/test_review_weak_coverage.py`): large
+  changed function, changed line far from the first line, many mandatory
+  candidates, tight budget — either the excerpt keeps identity + changed
+  region, or the symbol is explicitly weak. Extended the real-repository
+  dogfood test with the same invariant (no one-line-`virtio_pci_init` style
+  coverage claims).
+
 ## [0.1.1] - 2026-08-08
 
 Dogfood-hardening of `ragshit review` from real DipshitOS output (claim

@@ -103,14 +103,77 @@ def test_review_dogfood_invariants():
     # envelope must not be silently relied on at a normal budget
     assert j["envelope_fallback_used"] is False
 
-    # --- B: selected docs are never "missing" from relevant_docs ----------- #
-    sel_paths = {s["path"] for s in j["selected"]}
+    # --- B: USEFULLY selected docs are never "missing" from relevant_docs -- #
+    # (claim 0176: a weak/truncated doc excerpt is explicitly NOT useful
+    # coverage, so it is exempt from this invariant — it is listed as weak.)
+    sel_paths = {s["path"] for s in j["selected"] if not s.get("weak")}
     doc_paths = {p for p in sel_paths if p.startswith("docs/") or p.endswith((".md", ".markdown"))}
     missing_relevant = set(j["missing_coverage"].get("relevant_docs", []))
     overlap = doc_paths & missing_relevant
     assert not overlap, f"selected doc(s) reported missing from relevant_docs: {sorted(overlap)}"
     if doc_paths and j["coverage_detail"]["relevant_docs"]["total"] > 0:
         assert j["coverage_detail"]["relevant_docs"]["covered"] >= 1, j["coverage_detail"]
+
+    # --- E: weak/truncated coverage never counts as useful (claim 0176) ---- #
+    # A structurally large changed symbol must not be reported as usefully
+    # covered merely because a one-line prefix survived truncation: a
+    # truncated excerpt is either explicitly weak (never counted as covered,
+    # listed in missing_coverage) or keeps structural identity AND overlaps
+    # the changed-line neighborhood.
+    for s in j["selected"]:
+        if s.get("weak"):
+            syms = [c.split(":", 1)[1] for c in s["covers"] if c.startswith("changed_symbol:")]
+            for sym in syms:
+                assert sym in j["missing_coverage"]["changed_symbols"], \
+                    f"weak {sym} still counted as covered: {s['path']}:{s['lines']}"
+            continue
+        if s["reason"] != "changed-symbol" or "truncated" not in s["content"]:
+            continue
+        # useful truncated excerpt: structural identity retained. Prefer a
+        # word-boundary match, but fall back to verbatim containment for
+        # symbols that end in punctuation (e.g. a markdown heading ending in
+        # ')' has no trailing word boundary). A document symbol is named by
+        # its own file path, which never appears inside the file's content —
+        # its identity is the retained opening line (guaranteed by non-weak)
+        # plus the path in the packet metadata, so it is exempt.
+        name = s.get("origin_symbol") or s.get("structural_name")
+        if name and name != s["path"]:
+            assert (
+                re.search(rf"\b{re.escape(name)}\b", s["content"])
+                or re.search(re.escape(name), s["content"])
+            ), f"truncated non-weak changed-symbol excerpt lost identity: {s['path']}:{s['lines']}"
+        # and the retained line range overlaps the changed region
+        anchors = s.get("anchor_ranges") or []
+        if anchors:
+            rs, re_ = s["lines"]
+            assert any(rs <= er and re_ >= sr for sr, er in anchors), \
+                f"truncated non-weak excerpt misses changed region: {s['path']}:{s['lines']} anchors={anchors}"
+    # No one-line-`virtio_pci_init` shape: a truncated excerpt of a large
+    # symbol that does NOT represent its changed region must be weak, and a
+    # packet with weak symbols must not report ordinary complete coverage.
+    weak_syms = set()
+    for s in j["selected"]:
+        if s["reason"] != "changed-symbol":
+            continue
+        rng = next((c for c in s["covers"] if c.startswith("symbol_range:")), None)
+        if not rng:
+            continue
+        m = re.search(r"symbol_range:.*:(\d+)-(\d+)$", rng)
+        if not m:
+            continue
+        st, en = int(m.group(1)), int(m.group(2))
+        retained = s["lines"][1] - s["lines"][0] + 1
+        anchors = s.get("anchor_ranges") or []
+        overlaps_region = any(s["lines"][0] <= er and s["lines"][1] >= sr for sr, er in anchors)
+        if en - st + 1 >= 40 and retained <= 1 and "truncated" in s["content"] and not overlaps_region:
+            assert s.get("weak"), \
+                f"large symbol {s['path']}:{st}-{en} truncated to {retained} line(s), not weak, still counted covered"
+        if s.get("weak"):
+            weak_syms.update(c.split(":", 1)[1] for c in s["covers"] if c.startswith("changed_symbol:"))
+    if weak_syms:
+        cov = j["coverage_detail"]["changed_symbols"]
+        assert cov["covered"] < cov["total"], \
+            f"100% changed-symbol coverage claimed while weak symbols exist: {weak_syms}"
 
     # --- C: no project-name stale avalanche --------------------------------- #
     stale_syms = {s["symbol"] for s in j["stale"]}

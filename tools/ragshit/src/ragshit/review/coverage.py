@@ -72,7 +72,16 @@ def _is_doc_path(path: str) -> bool:
     return path.startswith("docs/") or path.endswith(".md") or path.endswith(".markdown")
 
 
-def _candidate_covers_keys(c: Candidate) -> Set[str]:
+def _candidate_covers_keys(c: Candidate, include_weak: bool = False) -> Set[str]:
+    """The coverage-universe keys a candidate satisfies.
+
+    A WEAK candidate (claim 0176 — a truncated excerpt that lost its
+    structural identity or its changed-line neighborhood) never counts
+    identically to useful coverage: unless include_weak is set (used to
+    COUNT weak items per dimension), it contributes nothing.
+    """
+    if c.weak and not include_weak:
+        return set()
     keys: Set[str] = set()
     for cov in c.covers:
         if cov.startswith("changed_symbol:"):
@@ -108,7 +117,11 @@ def _candidate_covers_keys(c: Candidate) -> Set[str]:
 
 
 def coverage_metrics(spec: CoverageSpec, selected: List[Candidate]) -> Dict[str, Dict[str, int]]:
-    """Return per-dimension covered/total."""
+    """Return per-dimension covered/total/weak.
+
+    ``weak`` counts items represented ONLY by weak (truncated-beyond-
+    usefulness) candidates — they are deliberately NOT part of ``covered``.
+    """
     all_keys: Dict[str, Set[str]] = {
         "changed_symbols": {f"changed_symbols:{s}" for s in spec.changed_symbols},
         "changed_files": {f"changed_files:{p}" for p in spec.changed_files},
@@ -119,30 +132,29 @@ def coverage_metrics(spec: CoverageSpec, selected: List[Candidate]) -> Dict[str,
         "stale_warnings": {f"stale_warnings:{s}" for s in spec.stale_warnings},
     }
     covered: Dict[str, Set[str]] = {k: set() for k in all_keys}
+    weak_items: Dict[str, Set[str]] = {k: set() for k in all_keys}
     for c in selected:
         for k in _candidate_covers_keys(c):
             dim = k.split(":", 1)[0]
-            # handle stale key which has dimension stale_warnings
-            if dim == "stale_warnings" or dim in covered:
-                # Normalize dim name
-                real_dim = dim
-                if real_dim in covered and k in all_keys.get(real_dim, set()):
-                    covered[real_dim].add(k)
-                elif real_dim == "stale_warnings" and k in all_keys.get("stale_warnings", set()):
-                    covered[real_dim].add(k)
-                # else candidate covers something not in spec -> counts as extra but not in metric denominator
+            if dim in covered and k in all_keys.get(dim, set()):
+                covered[dim].add(k)
+        if c.weak:
+            for k in _candidate_covers_keys(c, include_weak=True):
+                dim = k.split(":", 1)[0]
+                if dim in weak_items and k in all_keys.get(dim, set()):
+                    weak_items[dim].add(k)
     metrics: Dict[str, Dict[str, int]] = {}
     for dim, universe in sorted(all_keys.items()):
-        metrics[dim] = {"covered": len(covered[dim] & universe), "total": len(universe)}
+        metrics[dim] = {
+            "covered": len(covered[dim] & universe),
+            "total": len(universe),
+            "weak": len(weak_items[dim] & universe),
+        }
     return metrics
 
 
 def missing_coverage(spec: CoverageSpec, selected: List[Candidate]) -> Dict[str, List[str]]:
-    metrics = coverage_metrics(spec, selected)
-    # For each dimension list missing items deterministically
-    out: Dict[str, List[str]] = {}
-    covered_map = {}
-    # Build covered per dim
+    """Items missing from USEFUL coverage (weak items count as missing)."""
     all_sets = {
         "changed_symbols": {f"changed_symbols:{s}" for s in spec.changed_symbols},
         "related_tests": {f"related_tests:{p}" for p in spec.related_tests},
@@ -152,16 +164,15 @@ def missing_coverage(spec: CoverageSpec, selected: List[Candidate]) -> Dict[str,
         "changed_files": {f"changed_files:{p}" for p in spec.changed_files},
         "stale_warnings": {f"stale_warnings:{s}" for s in spec.stale_warnings},
     }
-    # collect covered
     covered: Dict[str, Set[str]] = {k: set() for k in all_sets}
     for c in selected:
         for k in _candidate_covers_keys(c):
             dim = k.split(":", 1)[0]
             if dim in covered and k in all_sets.get(dim, set()):
                 covered[dim].add(k)
+    out: Dict[str, List[str]] = {}
     for dim in sorted(all_sets.keys()):
         missing = sorted(all_sets[dim] - covered[dim])
-        # Strip prefix for readability
         stripped = [m.split(":", 1)[1] for m in missing]
         out[dim] = stripped
     return out

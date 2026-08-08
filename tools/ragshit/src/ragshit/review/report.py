@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional
 
 from ..indexing.database import Database
@@ -49,6 +49,9 @@ class ReviewReport:
     stale_filtered: List[Dict[str, Any]]
     selection_summary: Dict[str, Any]
     baseline: Dict[str, Any]
+    # Claim 0176: selected-but-weak candidates (truncated excerpts that lost
+    # structural identity or the changed region). Additive schema extension.
+    weak: List[Dict[str, Any]] = field(default_factory=list)
     envelope_fallback_used: bool = False
     # Human markdown is separate; JSON carries data
 
@@ -94,6 +97,11 @@ def _candidate_to_dict(c: Candidate) -> Dict[str, Any]:
         "origin_changed_file": c.origin_changed_file,
         "origin_symbol": c.origin_symbol,
         "content": c.content,
+        # Claim 0176: weak/truncated coverage signal + the changed-line
+        # anchors the excerpt was built around (additive schema extension).
+        "weak": bool(c.weak),
+        "weak_reason": c.weak_reason,
+        "anchor_ranges": [list(r) for r in (c.anchor_ranges or [])],
     }
 
 
@@ -199,9 +207,25 @@ def build_review(
         "rejected": len(result.rejected),
         "truncated": result.truncated,
         "envelope_fallback_used": False,
+        "weak_selected": sum(1 for c in result.selected if c.weak),
     }
 
     coverage = {dim: f"{v['covered']} / {v['total']}" for dim, v in sorted(metrics.items())}
+
+    # Claim 0176: explicit weak/truncated-coverage list (JSON + Markdown).
+    weak_list = []
+    for c in sorted(result.selected, key=lambda c: (-c.base_utility, c.path, c.start_line, c.cid)):
+        if not c.weak:
+            continue
+        weak_list.append({
+            "path": c.path,
+            "lines": [c.start_line, c.end_line],
+            "reason": c.reason,
+            "weak_reason": c.weak_reason,
+            "origin_symbol": c.origin_symbol,
+            "structural_name": c.structural_name,
+            "retained_lines": (c.end_line - c.start_line + 1) if c.end_line >= c.start_line else 0,
+        })
 
     return ReviewReport(
         schema_version=SCHEMA_VERSION,
@@ -231,6 +255,7 @@ def build_review(
         stale_filtered=stale_filtered_list,
         selection_summary=selection_summary,
         baseline=baseline_info,
+        weak=weak_list,
         envelope_fallback_used=False,
     )
 
@@ -263,7 +288,9 @@ def report_to_markdown(report: ReviewReport, explain: bool = False, enforce_budg
         total = v["total"]
         covered = v["covered"]
         pct = int(covered / total * 100) if total else 100
-        lines.append(f"- {dim}: {covered} / {total} ({pct}%)")
+        weak_n = v.get("weak", 0) or 0
+        suffix = f" ({weak_n} weak)" if weak_n else ""
+        lines.append(f"- {dim}: {covered} / {total} ({pct}%){suffix}")
     lines.append("")
     lines.append("## Highest-risk changes")
     lines.append("")
@@ -308,6 +335,16 @@ def report_to_markdown(report: ReviewReport, explain: bool = False, enforce_budg
             lines.append(f"- {dim}: missing {', '.join(f'`{m}`' for m in miss[:8])}" + (f" (+{len(miss)-8} more)" if len(miss) > 8 else ""))
     if not has_missing:
         lines.append("- (all coverage dimensions fully satisfied or no universe)")
+    lines.append("")
+
+    lines.append("## Weak / truncated coverage")
+    lines.append("")
+    if report.weak:
+        for w in report.weak:
+            sym = w.get("origin_symbol") or w.get("structural_name") or "?"
+            lines.append(f"- `{w['path']}`:{w['lines'][0]}-{w['lines'][1]} -- {w['reason']} `{sym}` -- {w['weak_reason']}")
+    else:
+        lines.append("- (no weak/truncated excerpts)")
     lines.append("")
 
     lines.append("## Stale-context warnings")

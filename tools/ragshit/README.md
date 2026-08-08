@@ -165,14 +165,20 @@ What it does:
 * Budgeted selection: a greedy weighted set-cover that maximizes coverage under
   the budget, with redundancy penalties (line overlap, token Jaccard, hash)
   so the packet is diverse, not five copies of the same function.
-* Mandatory-content reserve (changed functions + critical files) with safe
-  truncation and provenance preservation when the budget would otherwise
-  overflow.
+* Mandatory-content reserve (changed functions + critical files) with safe,
+  anchor-aware truncation when the budget would otherwise overflow: a large
+  changed symbol renders as its signature *plus* the lines that actually
+  changed (git `--unified=2` context), never as a content-free prefix.
+* Explicit weak/truncated coverage: an excerpt that lost its structural
+  identity or its changed region is flagged `weak`, excluded from covered
+  counts, and listed in a `## Weak / truncated coverage` section — it never
+  counts identically to useful coverage.
 * `--explain` shows rejected candidates and why (`budget pressure` or
   `redundant: 92% token Jaccard` etc.).
 * Machine-readable `ragshit.review/v1` JSON (`--json`): budget, actual size,
-  coverage matrix, selected/rejected candidates, baseline comparison, index
-  staleness, deterministic ordering.
+  coverage matrix (with per-dimension weak counts), selected/rejected
+  candidates, weak list, baseline comparison, index staleness, deterministic
+  ordering.
 * Deterministic: byte-identical for unchanged repo/index/range/args.
 * Index-head safety: warns loudly when `index HEAD != range head`.
 * Naive baseline (`impact-ranked chunks in order until full`) is computed for

@@ -4,6 +4,8 @@ Deterministic, no randomness.
 """
 from __future__ import annotations
 
+import re
+
 from dataclasses import dataclass
 from typing import List, Set, Tuple, Optional
 
@@ -203,14 +205,197 @@ def _covers_already(c: Candidate, selected: List[Candidate]) -> float:
     return dup / len(c.covers)
 
 
-def _truncate_excerpt_line_aware(c: Candidate, max_content_chars: int) -> Candidate:
-    """Deterministic line-aware truncation (Fix C).
+# Context lines around each changed range kept by anchor-aware truncation
+# (mirrors git's --unified=2 default; deterministic, not a magic count).
+_CTX = 2
+# Fallback fill used when a candidate's own changed range is unknown but the
+# excerpt must still keep the structural anchor line (see _build_excerpt).
+_COMMENT_PREFIXES = ("#", "//", "/*", ";")
 
-    - Operates on line boundaries, not arbitrary char slices.
-    - Retained excerpt line numbers are accurate; omitted count is exact.
+
+def _anchor_line_index(lines: List[str], kind: Optional[str], language: Optional[str],
+                       name: Optional[str] = None) -> int:
+    """0-based index of the structural identity line (signature / heading /
+    function opener). When a structural name is known, the line that DECLARES
+    it (word-boundary token, comments/blanks skipped) is preferred: for a
+    source chunk whose leading imports or doc comments precede the
+    declaration, the first non-comment line is not the symbol's identity —
+    keeping it while dropping the signature would lose identity without
+    marking the excerpt weak (claim 0176). Falls back to the first
+    non-comment, non-blank line, then any non-blank line."""
+    is_markdown = kind == "section" or str(language or "").lower() == "markdown"
+
+    def is_comment(s: str) -> bool:
+        return not is_markdown and s.startswith(_COMMENT_PREFIXES)
+
+    if name:
+        pat = re.compile(r"(?<![A-Za-z0-9_])" + re.escape(name) + r"(?![A-Za-z0-9_])")
+        for i, ln in enumerate(lines):
+            s = ln.strip()
+            if not s or is_comment(s):
+                continue
+            if pat.search(ln):
+                return i
+    for i, ln in enumerate(lines):
+        s = ln.strip()
+        if not s:
+            continue
+        if is_comment(s):
+            continue
+        return i
+    for i, ln in enumerate(lines):
+        if ln.strip():
+            return i
+    return 0
+
+
+def _clamped_changed_indices(lines: List[str], chunk_start_abs: int, anchor_ranges) -> Set[int]:
+    """0-based indices of the ACTUAL changed lines inside the chunk (the
+    core payload the candidate is mandatory for). Empty when the candidate
+    has no direct changed lines."""
+    idx: Set[int] = set()
+    n = len(lines)
+    for rs, re in anchor_ranges or []:
+        lo = max(rs, chunk_start_abs)
+        hi = min(re, chunk_start_abs + n - 1)
+        if lo > hi:
+            continue
+        idx.update(range(lo - chunk_start_abs, hi - chunk_start_abs + 1))
+    return idx
+
+
+def _region_line_indices(lines: List[str], chunk_start_abs: int, anchor_ranges) -> Set[int]:
+    """0-based indices of the changed-line neighborhoods: each changed range
+    clamped to the chunk, expanded by _CTX context lines each side. Empty
+    when the candidate has no direct changed lines."""
+    idx: Set[int] = set()
+    n = len(lines)
+    for rs, re in anchor_ranges or []:
+        lo = max(rs, chunk_start_abs)
+        hi = min(re, chunk_start_abs + n - 1)
+        if lo > hi:
+            continue
+        idx.update(range(max(0, lo - chunk_start_abs - _CTX),
+                         min(n - 1, hi - chunk_start_abs + _CTX) + 1))
+    return idx
+
+
+def _render_excerpt(lines: List[str], keep: Set[int]) -> Tuple[str, int]:
+    """Render kept line indices in ascending order with exact omission
+    markers between gaps and a trailing summary marker. Returns (content,
+    omitted_total). Deterministic."""
+    total = len(lines)
+    if not keep:
+        return "", total
+    kept = sorted(keep)
+    omitted_total = 0
+    parts: List[str] = []
+    if kept[0] > 0:
+        parts.append(f"... [truncated {kept[0]} line(s) omitted]")
+        omitted_total += kept[0]
+    parts.append(lines[kept[0]])
+    prev = kept[0]
+    for i in kept[1:]:
+        if i == prev + 1:
+            parts.append(lines[i])
+        else:
+            gap = i - prev - 1
+            parts.append(f"... [truncated {gap} line(s) omitted]")
+            parts.append(lines[i])
+            omitted_total += gap
+        prev = i
+    omitted_total += total - 1 - prev
+    content = "\n".join(parts)
+    if omitted_total > 0:
+        content += (f"\n... [truncated {omitted_total} line(s) omitted -- "
+                    f"retained {len(keep)} of {total} line(s)]")
+    return content, omitted_total
+
+
+def _build_excerpt(lines: List[str], anchor: int, region: Set[int], core: Set[int], allowance: int) -> Tuple[str, Set[int], bool]:
+    """Deterministic anchor-aware excerpt.
+
+    Priority: structural anchor line, then the ACTUAL changed lines (core),
+    then their context neighborhood, then the remaining lines in ascending
+    order (so the excerpt reads naturally). Markers are sized exactly
+    afterwards by dropping lowest-priority kept lines until the content fits
+    the allowance — the anchor and the core changed lines are never dropped,
+    so a useful excerpt cannot lose the change it is mandatory for (a
+    too-small allowance falls through to a hard slice and weak marking).
+    Returns (content, keep, partial_anchor) where partial_anchor means the
+    anchor line itself had to be hard-sliced (a lost-identity signal).
+    """
+    total = len(lines)
+    total_chars = sum(len(l) + 1 for l in lines)
+    if total_chars <= allowance:
+        return "\n".join(lines).rstrip("\n"), set(range(total)), False
+    order: List[int] = [anchor]
+    order += sorted(core - {anchor})
+    order += sorted(region - core - {anchor})
+    order += [i for i in range(total) if i not in order]
+    keep: Set[int] = set()
+    used = 0
+    for i in order:
+        cost = len(lines[i]) + 1
+        if used + cost <= allowance:
+            keep.add(i)
+            used += cost
+    content, omitted = _render_excerpt(lines, keep)
+    # Shrink to the exact allowance by dropping lowest-priority kept lines
+    # (fill lines first, then context lines; the anchor and the core changed
+    # lines are never dropped — if they cannot fit it is hard-sliced below).
+    sel_order = [i for i in order if i in keep and i != anchor and i not in core]
+    while len(content) > allowance and sel_order:
+        i = sel_order.pop()
+        if i not in keep:
+            continue
+        keep.remove(i)
+        content, omitted = _render_excerpt(lines, keep)
+    partial_anchor = False
+    if len(content) > allowance or not keep:
+        # The allowance cannot hold even the anchor plus the core changed
+        # lines (or the selection kept nothing): hard-slice the anchor to
+        # the allowance rather than emit an empty excerpt. The slice is a
+        # lost-identity signal; losing the core marks the excerpt weak.
+        i = anchor if anchor < len(lines) else (next(iter(keep)) if keep else 0)
+        keep = {i}
+        line = lines[i]
+        tail_v = (f"... [truncated {total - 1} line(s) omitted -- "
+                  f"retained 1 of {total} line(s)]")
+        tail_c = f"... [truncated {total - 1} line(s) omitted]"
+        for tail in (tail_v, tail_c, ""):
+            need = len(tail) + 1 if tail else 0
+            room = allowance - need
+            if room < 1:
+                continue
+            piece = line[:room].rstrip() or line[:room]
+            if len(piece) < len(line):
+                partial_anchor = (i == anchor)
+            if tail and len(piece) + 1 + len(tail) <= allowance:
+                content = piece + "\n" + tail
+            else:
+                content = piece
+            if len(content) <= allowance:
+                break
+        if len(content) > allowance:
+            content = content[:allowance].rstrip()
+            partial_anchor = True
+    return content, keep, partial_anchor
+
+
+def _truncate_excerpt_line_aware(c: Candidate, max_content_chars: int) -> Candidate:
+    """Deterministic anchor-aware line truncation (claims 9112/3320 C + 0176).
+
+    - Operates on line boundaries, never arbitrary char slices.
+    - Retained excerpt line numbers are accurate (start/end = first/last
+      retained line); omitted count is exact.
     - Provenance survives (never stripped).
-    - Marker claims exact omitted lines (no estimates like len//40).
-    - Prefers retaining the changed region: keeps the start of the excerpt.
+    - Prefers the structural anchor (signature/heading) PLUS the actual
+      changed-line neighborhood, so a changed region deep in a large symbol
+      stays represented instead of collapsing to a content-free prefix.
+    - Sets weak/weak_reason when the excerpt lost its structural identity
+      line or its changed-line neighborhood: such an excerpt never counts
+      identically to useful coverage (claim 0176).
     - Avoids cutting code fences into invalid structure by truncating inside
       the candidate's own code block fence pair, not across blocks; fences
       are balanced by block rendering, not per-candidate truncation.
@@ -221,40 +406,43 @@ def _truncate_excerpt_line_aware(c: Candidate, max_content_chars: int) -> Candid
     lines = raw.splitlines()
     total_lines = len(lines)
     if total_lines == 0:
-        return c
-    # max_content_chars must accommodate marker line(s)
-    marker_template_omitted = "... [truncated {omitted} line(s) omitted]"
-    # Reserve ~50 chars for marker worst-case digits
-    reserve = 48
-    keep_chars_limit = max(1, max_content_chars - reserve)
-    kept_lines = []
-    kept_chars = 0
-    omitted = 0
-    for ln in lines:
-        add = len(ln) + 1  # newline
-        if kept_chars + add > keep_chars_limit and kept_lines:
-            break
-        if kept_chars + add > keep_chars_limit and not kept_lines and total_lines > 1:
-            # Even first line too long: hard-slice that single line deterministically
-            ln = ln[: max(1, keep_chars_limit - 12)].rstrip() + "…"
-            kept_lines.append(ln)
-            kept_chars += len(ln) + 1
-            break
-        kept_lines.append(ln)
-        kept_chars += add
-    omitted = total_lines - len(kept_lines)
-    if omitted <= 0:
-        # Fits whole excerpt; no marker needed
-        new_content = raw
-        new_lines = total_lines
-    else:
-        marker = f"\n... [truncated {omitted} line(s) omitted -- retained {len(kept_lines)} of {total_lines} line(s)]"
-        new_content = "\n".join(kept_lines).rstrip("\n") + marker
-        new_lines = len(kept_lines)
-    # Update line range to reflect retained excerpt (accurate per C)
+        nc = copy.copy(c)
+        nc.weak = False
+        nc.weak_reason = None
+        return nc
+    total_chars = sum(len(l) + 1 for l in lines)
+    if total_chars <= max_content_chars:
+        # Fits whole excerpt; no truncation, never weak.
+        nc = copy.copy(c)
+        nc.weak = False
+        nc.weak_reason = None
+        return nc
+    anchor = _anchor_line_index(lines, c.kind, c.language, c.structural_name or c.origin_symbol)
+    core = _clamped_changed_indices(lines, c.start_line, c.anchor_ranges)
+    region = _region_line_indices(lines, c.start_line, c.anchor_ranges)
+    content, keep, partial_anchor = _build_excerpt(lines, anchor, region, core, max_content_chars)
+    omitted = total_lines - len(keep)
+    truncated = omitted > 0 or partial_anchor
+    # Weak coverage determination (claim 0176): a truncated excerpt is weak
+    # when it lost the structural identity line, or when the symbol has a
+    # distinct changed region (disjoint from the identity line) that is not
+    # represented at all.
+    weak = False
+    weak_reason = None
+    if truncated:
+        if partial_anchor or anchor not in keep:
+            weak = True
+            weak_reason = "excerpt lost the structural identity line"
+        elif core and not (core & keep):
+            weak = True
+            weak_reason = "excerpt lost the changed region (changed-line neighborhood)"
     nc = copy.copy(c)
-    nc.content = new_content
-    nc.end_line = c.start_line + max(0, new_lines - 1)
+    nc.content = content
+    if keep:
+        nc.start_line = c.start_line + min(keep)
+        nc.end_line = c.start_line + max(keep)
+    nc.weak = weak
+    nc.weak_reason = weak_reason
     # Deterministic recompute of cost using same helper as candidates (exact block len)
     from .candidates import _rendered_block_len
     nc.cost = _rendered_block_len(nc.path, nc.start_line, nc.end_line, nc.reason, nc.covers, nc.base_utility, nc.content, nc.commit, nc.structural_name, nc.provenance)
@@ -262,50 +450,97 @@ def _truncate_excerpt_line_aware(c: Candidate, max_content_chars: int) -> Candid
     return nc
 
 
+def _useful_floor_content_len(c: Candidate) -> int:
+    """Minimal CONTENT allowance that still yields a useful excerpt: the
+    structural anchor line plus a BOUNDED window around the first changed
+    line (git --unified=2 context, i.e. 2*_CTX+1 lines). The truncator sizes
+    the result exactly and fills any remaining allowance with further
+    changed/context lines, so this is a sizing floor for budget distribution
+    — it deliberately bounds whole-file rewrites so one massive symbol cannot
+    starve the packet (claim 0176). Candidates without direct changed lines
+    keep the anchor line."""
+    lines = (c.original_content if c.original_content else c.content).splitlines()
+    if not lines:
+        return 1
+    anchor = _anchor_line_index(lines, c.kind, c.language, c.structural_name or c.origin_symbol)
+    core = _clamped_changed_indices(lines, c.start_line, c.anchor_ranges)
+    if not core:
+        # No direct changed lines: the useful floor is the anchor line.
+        return sum(len(l) + 1 for l in lines[:anchor + 1])
+    first_core = min(core)
+    lo = max(0, first_core - _CTX)
+    hi = min(len(lines) - 1, first_core + _CTX)
+    window_cost = sum(len(l) + 1 for l in lines[lo:hi + 1])
+    # Markers are exact: one inter-run marker when the anchor is disjoint
+    # from the changed window (either side), plus the trailing summary
+    # (~70 chars). Include the anchor line's own cost when it is outside the
+    # window, so the floor is genuinely achievable by _build_excerpt.
+    anchor_in_window = lo <= anchor <= hi
+    anchor_cost = 0 if anchor_in_window else sum(len(l) + 1 for l in lines[anchor:anchor + 1])
+    gap_marker = 50 if not anchor_in_window else 0
+    return window_cost + anchor_cost + gap_marker + 70
+
+
 def _truncate_to_budget(candidates: List[Candidate], budget: int) -> List[Candidate]:
-    """Truncate candidate contents (line-aware) to fit budget; preserve provenance."""
+    """Truncate candidate contents (anchor-aware, line-exact) to fit budget;
+    preserve provenance.
+
+    Two phases so the pressure is DISTRIBUTED instead of nuking the largest
+    symbol to a content-free prefix (claim 0176):
+      1. shave every candidate down to its useful floor (structural anchor +
+         changed region) — with a normal budget every mandatory symbol then
+         stays decision-useful;
+      2. only if still over budget, shave the largest below its floor
+         (weak fragments), then drop lowest-utility candidates as the
+         genuine last resort.
+    """
     import copy
     cands = sorted(candidates, key=lambda c: (-c.cost, c.path, c.start_line, c.cid))
     total = sum(c.cost for c in cands)
     if total <= budget:
         return cands
     truncated = [copy.copy(c) for c in cands]
-    # Iterative: shave from largest by exact char excess, but truncation itself is line-aware
+    # Phase 1: shave every candidate to its useful floor.
+    for i, c in enumerate(truncated):
+        floor = _useful_floor_content_len(c)
+        if len(c.content) > floor:
+            trimmed = _truncate_excerpt_line_aware(c, floor)
+            if len(trimmed.content) < len(c.content):
+                truncated[i] = trimmed
+    # Phase 2: still over budget — shave the largest below its floor.
     guard = 0
-    while sum(c.cost for c in truncated) > budget and guard < 40:
+    while sum(c.cost for c in truncated) > budget and guard < 60:
         guard += 1
         excess = sum(c.cost for c in truncated) - budget
         largest = max(truncated, key=lambda c: c.cost)
-        if len(largest.content) <= 24:
-            break
-        # Target content length = current content len - excess - small margin; converted to line truncation
-        target_content_len = max(24, len(largest.content) - excess - 12)
+        target_content_len = max(1, len(largest.content) - excess - 8)
         trimmed = _truncate_excerpt_line_aware(largest, target_content_len)
         if len(trimmed.content) >= len(largest.content):
-            # Could not shrink further via line trimming (single line case)
-            # Fall back to single-line hard slice inside the excerpt
-            trimmed.content = largest.content[:max(24, target_content_len)].rstrip() + "\n... [truncated to fit budget]"
-            trimmed.cost = len(trimmed.content) + 80  # overhead fallback (will be recomputed if needed)
-            from .candidates import _rendered_block_len
-            trimmed.cost = _rendered_block_len(trimmed.path, trimmed.start_line, trimmed.end_line, trimmed.reason, trimmed.covers, trimmed.base_utility, trimmed.content, trimmed.commit, trimmed.structural_name, trimmed.provenance)
-        # Replace in place
-        idx = truncated.index(largest)
-        truncated[idx] = trimmed
-        if guard > 30 and sum(c.cost for c in truncated) > budget:
-            break
-    # If still over, drop smallest utility until fits (keep at least one)
-    truncated.sort(key=lambda c: (-c.base_utility, c.cost, c.path))
+            # Already a minimal hard-sliced fragment: move to the next largest.
+            remaining = [t for t in truncated if t.cid != largest.cid]
+            if not remaining:
+                break
+            largest = max(remaining, key=lambda c: c.cost)
+            target_content_len = max(1, len(largest.content) - excess - 8)
+            trimmed = _truncate_excerpt_line_aware(largest, target_content_len)
+            if len(trimmed.content) >= len(largest.content):
+                break
+        for i, t in enumerate(truncated):
+            if t.cid == trimmed.cid:
+                truncated[i] = trimmed
+                break
+    # Phase 3 (genuine last resort): drop the LOWEST-utility mandatory
+    # candidate (ties drop the highest cost, freeing the most budget).
+    truncated.sort(key=lambda c: (c.base_utility, -c.cost, c.path, c.start_line, c.cid))
     while sum(c.cost for c in truncated) > budget and len(truncated) > 1:
-        truncated.pop()
-    if sum(c.cost for c in truncated) > budget:
+        truncated.pop(0)
+    if sum(c.cost for c in truncated) > budget and truncated:
+        # Must fit at least one candidate: hard anchor-aware trim to the
+        # allowance (may produce a weak fragment rather than an empty block).
         c = truncated[0]
-        # Must fit at least one candidate: hard line-aware trim to allowance
         from .candidates import _rendered_block_len
         overhead_est = _rendered_block_len(c.path, c.start_line, c.start_line, c.reason, c.covers, c.base_utility, "", c.commit, c.structural_name, c.provenance)
-        allow_content = max(16, budget - overhead_est + len("".rstrip()))
+        allow_content = max(16, budget - overhead_est)
         trimmed = _truncate_excerpt_line_aware(c, allow_content)
-        if len(trimmed.content) + overhead_est > budget:
-            trimmed.content = trimmed.content[: max(16, allow_content - 24)].rstrip() + "\n... [truncated to fit budget]"
-            trimmed.cost = _rendered_block_len(trimmed.path, trimmed.start_line, trimmed.end_line, trimmed.reason, trimmed.covers, trimmed.base_utility, trimmed.content, trimmed.commit, trimmed.structural_name, trimmed.provenance)
         truncated[0] = trimmed
     return truncated
