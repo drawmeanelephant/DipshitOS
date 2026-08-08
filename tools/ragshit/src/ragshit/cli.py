@@ -229,7 +229,7 @@ def cmd_impact(args: argparse.Namespace) -> int:
         inv = build_inventory(repo, args.range)
         db = open_db(repo, config)
         try:
-            mapping = map_symbols(db, repo.repo_id, inv)
+            mapping = map_symbols(db, repo.repo_id, inv, repo=repo)
             symbols_by_path = {k: [s.name for s in v] for k, v in mapping.per_file.items()}
             all_symbols = {s.name for s in mapping.symbols}
             changed_paths = {f.path for f in inv.files}
@@ -238,8 +238,23 @@ def cmd_impact(args: argparse.Namespace) -> int:
             file_scores = score_files(inv, mapping, per_path)
             refs = db.get_git_refs(repo.repo_id)
             index_head = refs["head"] if refs is not None else None
-            timing_ms = int((time.monotonic() - t0) * 1000)
-            report = build_report(str(repo.root), repo.repo_id, inv, mapping, neighbors, file_scores, stale, timing_ms, index_head)
+            # Real elapsed for humans goes to stderr; deterministic JSON/markdown is always 0
+            real_timing_ms = int((time.monotonic() - t0) * 1000)
+            timing_ms = 0
+            # Loud mismatch warning when index HEAD != range head
+            index_stale = False
+            index_warning = None
+            if index_head and inv.head_oid and index_head != inv.head_oid:
+                index_stale = True
+                index_warning = f"index HEAD {index_head[:12]} != range head {inv.head_oid[:12]} ({inv.head}); symbols/excerpts reflect indexed HEAD, not the requested range"
+            elif index_head is None:
+                index_stale = True
+                index_warning = "index has no git HEAD recorded; impact context may not match requested range"
+            report = build_report(str(repo.root), repo.repo_id, inv, mapping, neighbors, file_scores, stale, timing_ms, index_head, index_stale=index_stale, index_warning=index_warning)
+            # Always surface real timing + stale warning to stderr (does not affect determinism)
+            print(f"impact: {real_timing_ms} ms -- index HEAD {index_head[:12] if index_head else '(unknown)'}; range head {inv.head_oid[:12]}", file=sys.stderr)
+            if index_warning:
+                print(f"impact: WARNING: {index_warning}", file=sys.stderr)
             if args.json:
                 text_out = report_to_json(report)
                 if args.bundle:

@@ -63,39 +63,59 @@ def test_deleted_symbol_file(tmp_path):
     write_file(r, "deleteme.py", "def gone():\n    pass\n")
     commit_all(r, "add deleteme")
     assert main(["index", str(r)]) == 0
+    # keep base OID so fallback can recover even though DB deletes the file
+    import subprocess as _sp
+    base = _sp.run(["git","-C", str(r), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
     (r / "deleteme.py").unlink()
     git(r, "rm", "deleteme.py")
     commit_all(r, "delete")
     assert main(["index", str(r)]) == 0
-    rc, out, _ = run_cli(["impact", str(r), "HEAD~1..HEAD"])
+    rc, out, _ = run_cli(["impact", str(r), "HEAD~1..HEAD", "--json"])
     assert rc == 0
-    assert "deleteme.py" in out
-    assert "deleted" in out.lower() or "D" in out
+    j = json.loads(out)
+    assert any(f["path"] == "deleteme.py" and f["status"].startswith("D") for f in j["files"])
+    # The deleted symbol itself must be recovered via git-show fallback
+    assert any(s["path"] == "deleteme.py" and s["name"] == "gone" for s in j["symbols"]), f"symbols={j['symbols']}"
+    rc2, md, _ = run_cli(["impact", str(r), "HEAD~1..HEAD"])
+    assert "gone" in md and "deleteme.py" in md
+    # deterministic byte-identical JSON too
+    assert j["timing_ms"] == 0
 
 def test_documentation_reference(tmp_path):
     r = make_repo(tmp_path)
     write_file(r, "a.py", "def foo():\n    return 42\n\ndef bar():\n    return 2\n")
     commit_all(r, "change foo for docs")
     assert main(["index", str(r)]) == 0
-    rc, out, _ = run_cli(["impact", str(r), "HEAD~1..HEAD"])
+    rc, out, _ = run_cli(["impact", str(r), "HEAD~1..HEAD", "--json"])
     assert rc == 0
-    # docs/guide.md mentions foo; should appear as documentation-reference when foo changes
-    # At least the neighborhood section should list something doc-related if index finds it
-    # We check that docs/guide.md not in range but mentioned
-    # If not, just ensure command succeeded; doc ref may be absent if too generic - but foo is specific
-    # We'll allow either but check not error
-    assert rc == 0
+    j = json.loads(out)
+    # Must surface docs/guide.md as doc-related when foo changed
+    reasons = {n["reason"] for n in j["neighbors"]}
+    paths = {n["path"] for n in j["neighbors"]}
+    assert "docs/guide.md" in paths, f"expected docs/guide.md in neighbors, got {paths}"
+    # Either documentation-reference or direct-symbol counts as doc signal
+    assert ("documentation-reference" in reasons or "direct-symbol" in reasons), f"neighbors reasons {reasons}"
+    # And stale-docs should flag it until docs updated
+    assert any(d["path"] == "docs/guide.md" and d["symbol"] == "foo" for d in j["stale_docs"])
+    # Markdown also must expose it
+    rc2, md, _ = run_cli(["impact", str(r), "HEAD~1..HEAD"])
+    assert "docs/guide.md" in md
 
 def test_test_reference(tmp_path):
     r = make_repo(tmp_path)
     write_file(r, "a.py", "def foo():\n    return 42\n\ndef bar():\n    return 2\n")
     commit_all(r, "foo again")
     assert main(["index", str(r)]) == 0
-    rc, out, _ = run_cli(["impact", str(r), "HEAD~1..HEAD"])
+    rc, out, _ = run_cli(["impact", str(r), "HEAD~1..HEAD", "--json"])
     assert rc == 0
-    # tests/test_a.py mentions test_foo which contains foo token -> may be test-reference
-    # Not strict; just check section exists
-    assert "Related tests" in out
+    j = json.loads(out)
+    reasons = {n["reason"] for n in j["neighbors"]}
+    assert "test-reference" in reasons, f"expected test-reference, got {reasons}"
+    assert any(n["path"] == "tests/test_a.py" for n in j["neighbors"] if n["reason"] == "test-reference")
+    rc2, md, _ = run_cli(["impact", str(r), "HEAD~1..HEAD"])
+    assert "test_a.py" in md
+    # heading-less json path still materializes the test evidence
+    assert "Related tests" in md
 
 def test_dirty_working_tree(tmp_path):
     r = make_repo(tmp_path)
@@ -122,10 +142,13 @@ def test_deterministic_repeated(tmp_path):
     rc1, out1, _ = run_cli(["impact", str(r), "HEAD~1..HEAD", "--json"])
     rc2, out2, _ = run_cli(["impact", str(r), "HEAD~1..HEAD", "--json"])
     assert rc1 == 0 and rc2 == 0
-    j1 = json.loads(out1); j2 = json.loads(out2)
-    # ignore timing/gen
-    for j in (j1,j2): j.pop("timing_ms",None); j.pop("generated_at",None)
-    assert json.dumps(j1, sort_keys=True) == json.dumps(j2, sort_keys=True)
+    # Byte-identical without stripping anything: timing_ms must be deterministic (0)
+    assert out1 == out2
+    j1 = json.loads(out1)
+    assert j1["timing_ms"] == 0
+    rc3, md1, _ = run_cli(["impact", str(r), "HEAD~1..HEAD"])
+    rc4, md2, _ = run_cli(["impact", str(r), "HEAD~1..HEAD"])
+    assert md1 == md2
 
 def test_json_schema_version(tmp_path):
     r = make_repo(tmp_path)
@@ -193,3 +216,20 @@ def test_bundle_output(tmp_path):
     assert "# Change impact" in txt
     assert "Highest-priority" in txt
 
+def test_index_head_mismatch_warning(tmp_path):
+    r = make_repo(tmp_path)
+    write_file(r, "a.py", "def foo():\n    return 99\n")
+    commit_all(r, "c for mismatch")
+    assert main(["index", str(r)]) == 0
+    # Create a new commit that the index does NOT see
+    write_file(r, "a.py", "def foo():\n    return 100\n")
+    commit_all(r, "new head not indexed")
+    # Range points at the new head, but index still at prior HEAD -> warning
+    rc, out, err = run_cli(["impact", str(r), "HEAD~1..HEAD", "--json"])
+    assert rc == 0
+    j = json.loads(out)
+    assert j["index_stale"] is True
+    assert j["index_warning"] is not None
+    assert "range head" in j["index_warning"]
+    assert "index HEAD" in j["index_warning"]
+    assert "WARNING" in err

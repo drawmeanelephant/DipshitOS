@@ -35,13 +35,15 @@ def collect_neighborhood(db: Database, repo_id: str, changed_paths: Set[str], sy
             key=(c.path,c.start_line,c.end_line,sym)
             if key in neighbors: continue
             if c.path in changed_paths: continue
-            if sym not in c.content: continue
+            if sym.lower() not in c.content.lower(): continue
             has_word=bool(_word_pat(sym).search(c.content))
-            if not has_word: reason="lexical-related"
+            # Test/doc paths are high-value even on substring matches
+            if _is_test_path(c.path):
+                reason="test-reference" if (has_word or sym.lower() in c.content.lower()) else "lexical-related"
+            elif _is_doc_path(c.path) or c.language=="markdown":
+                reason="documentation-reference" if (has_word or sym.lower() in c.content.lower()) else "lexical-related"
             else:
-                if _is_test_path(c.path): reason="test-reference"
-                elif _is_doc_path(c.path) or c.language=="markdown": reason="documentation-reference"
-                else: reason="identifier-reference"
+                reason="identifier-reference" if has_word else "lexical-related"
             neighbors[key]=Neighbor(path=c.path, start_line=c.start_line, end_line=c.end_line, kind=c.kind, structural_name=c.structural_name, reason=reason, query=sym, commit=c.commit, language=c.language, heading=c.heading)
     for path in sorted(changed_paths):
         if path in symbols_by_path: continue

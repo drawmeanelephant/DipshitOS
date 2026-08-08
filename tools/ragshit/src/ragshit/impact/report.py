@@ -12,8 +12,8 @@ SCHEMA_VERSION="ragshit.impact/v1"
 IMPACT_VERSION="1"
 @dataclass
 class ImpactReport:
-    schema_version: str; impact_version: str; repo_root: str; repo_id: str; range_spec: str; base: str; head: str; base_oid: str; head_oid: str; generated_at: str; commits: List[Dict[str,Any]]; files: List[Dict[str,Any]]; symbols: List[Dict[str,Any]]; unresolved_files: List[str]; file_scores: List[Dict[str,Any]]; neighbors: List[Dict[str,Any]]; stale_docs: List[Dict[str,Any]]; stats: Dict[str,Any]; index_head: Optional[str]; timing_ms: int
-def build_report(repo_root, repo_id, inv, mapping, neighbors, file_scores, stale, timing_ms, index_head):
+    schema_version: str; impact_version: str; repo_root: str; repo_id: str; range_spec: str; base: str; head: str; base_oid: str; head_oid: str; generated_at: str; commits: List[Dict[str,Any]]; files: List[Dict[str,Any]]; symbols: List[Dict[str,Any]]; unresolved_files: List[str]; file_scores: List[Dict[str,Any]]; neighbors: List[Dict[str,Any]]; stale_docs: List[Dict[str,Any]]; stats: Dict[str,Any]; index_head: Optional[str]; index_stale: bool; index_warning: Optional[str]; timing_ms: int
+def build_report(repo_root, repo_id, inv, mapping, neighbors, file_scores, stale, timing_ms, index_head, index_stale=False, index_warning=None):
     files=[{"path":f.path,"status":f.status,"old_path":f.old_path,"ranges":f.ranges,"extension":f.extension} for f in sorted(inv.files,key=lambda x:x.path)]
     symbols=[{"path":s.path,"name":s.name,"kind":s.kind,"lines":[s.start_line,s.end_line],"confidence":s.confidence,"commit":s.commit} for s in sorted(mapping.symbols,key=lambda x:(x.path,x.start_line,x.name))]
     nd=[{"path":n.path,"lines":[n.start_line,n.end_line],"kind":n.kind,"symbol":n.structural_name,"reason":n.reason,"query":n.query,"language":n.language,"heading":n.heading,"commit":n.commit} for n in sorted(neighbors,key=lambda x:(x.path,x.start_line,x.query))]
@@ -21,7 +21,7 @@ def build_report(repo_root, repo_id, inv, mapping, neighbors, file_scores, stale
     fsd=[{"path":f.path,"status":f.status,"score":f.score,"level":f.level,"components":f.components,"lines_changed":f.lines_changed,"symbols_touched":f.symbols_touched} for f in file_scores]
     commits=[{"hash":c.hash,"short":c.short,"subject":c.subject,"author":c.author,"date":c.date} for c in inv.commits]
     stats={"commits":len(commits),"files_changed":len(files),"symbols_touched":len(symbols),"neighbors":len(nd),"stale_hints":len(sd),"has_rename":inv.has_rename,"dirty_note":inv.dirty_note}
-    return ImpactReport(schema_version=SCHEMA_VERSION, impact_version=IMPACT_VERSION, repo_root=repo_root, repo_id=repo_id, range_spec=inv.range_spec, base=inv.base, head=inv.head, base_oid=inv.base_oid, head_oid=inv.head_oid, generated_at=(commits[0]["date"] if commits else "1970-01-01T00:00:00Z"), commits=commits, files=files, symbols=symbols, unresolved_files=sorted(mapping.unresolved_files), file_scores=fsd, neighbors=nd, stale_docs=sd, stats=stats, index_head=index_head, timing_ms=timing_ms)
+    return ImpactReport(schema_version=SCHEMA_VERSION, impact_version=IMPACT_VERSION, repo_root=repo_root, repo_id=repo_id, range_spec=inv.range_spec, base=inv.base, head=inv.head, base_oid=inv.base_oid, head_oid=inv.head_oid, generated_at=(commits[0]["date"] if commits else "1970-01-01T00:00:00Z"), commits=commits, files=files, symbols=symbols, unresolved_files=sorted(mapping.unresolved_files), file_scores=fsd, neighbors=nd, stale_docs=sd, stats=stats, index_head=index_head, index_stale=index_stale, index_warning=index_warning, timing_ms=timing_ms)
 def report_to_json(report):
     return json.dumps(asdict(report), indent=2, sort_keys=True)+"\n"
 def report_to_markdown(report, bundle=None):
@@ -29,7 +29,12 @@ def report_to_markdown(report, bundle=None):
     lines.append("# Change impact"); lines.append("")
     lines.append(f"Git range: `{report.range_spec}`")
     lines.append(f"Base: `{report.base}` (`{report.base_oid[:12]}`)")
-    lines.append(f"Head: `{report.head}` (`{report.head_oid[:12]}`)"); lines.append("")
+    lines.append(f"Head: `{report.head}` (`{report.head_oid[:12]}`)")
+    if report.index_stale and report.index_warning:
+        lines.append("")
+        lines.append(f"> ⚠️ {report.index_warning}")
+        lines.append(f"> Run `ragshit index {report.repo_root}` to refresh the index for this range.")
+    lines.append("")
     lines.append("## Commits")
     if report.commits:
         for c in report.commits: lines.append(f"- `{c['short']}` {c['subject']} -- {c['author']}")
@@ -80,5 +85,10 @@ def report_to_markdown(report, bundle=None):
     else: lines.append("- (no stale-doc hints)")
     lines.append("")
     if bundle: lines.append("## Review packet (provenance-backed excerpts)"); lines.append(bundle.rstrip()); lines.append("")
-    lines.append("---"); lines.append(f"stats: {report.stats} -- timing: {report.timing_ms} ms -- index HEAD: {report.index_head[:12] if report.index_head else '(unknown)'}"); lines.append("")
+    # Deterministic footer: no timing; index staleness is explicit
+    if report.index_stale and report.index_warning:
+        lines.append(f"> ⚠️ {report.index_warning}")
+        lines.append("")
+    lines.append(f"stats: {report.stats} -- index HEAD: {report.index_head[:12] if report.index_head else '(unknown)'} -- deterministic: timing_ms is 0 (real timing on stderr)")
+    lines.append("")
     return "\n".join(lines)
