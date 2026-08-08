@@ -654,12 +654,14 @@ pub fn fw_mmu_capture_diag(st: *const SystemTable, handoff_rec: *const handoff.H
     mmu_str("\n");
     mmu_describe("MMU   ", fw_walk(ttbr0, t0sz, handoff_rec.stack_base), mair);
 
-    // The kernel's planned values, for the host-side diff.
+    // The kernel's planned values, for the host-side diff. T0SZ is
+    // mmu.plan_t0sz (production 25; claim-6460 -Dt0sz16 selects 16), so the
+    // capture reports the true planned TCR in both variants.
     const ips: u64 = @min(mmu.read_mmfr0() & 0xf, 5);
     mmu_str("MMU KERNEL-PLAN MAIR=");
     mmu_hex(0x000000000000ff00); // Attr0 Device-nGnRnE, Attr1 Normal WB
     mmu_str(" TCR=");
-    mmu_hex(25 | (ips << 32));
+    mmu_hex(mmu.plan_t0sz | (ips << 32));
     mmu_str(" TTBR0=");
     mmu_hex(mmu.table_root());
     if (vp_ready and vp_bar0 != 0) {

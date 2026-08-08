@@ -89,6 +89,15 @@ pub fn build(b: *std.Build) void {
     // ASCII variable `DipshitMmu` for a host-side firmware-vs-kernel diff.
     // Default off: the default build is byte-identical.
     const fw_mmu_capture = b.option(bool, "fw-mmu-capture", "Capture firmware MMU registers + a virtio BAR-window table walk pre-exit, persisted to NVRAM (claim 0021 diagnostic)") orelse false;
+    // Claim 6460: `-Dt0sz16` programs TCR_EL1.T0SZ=16 (W=48) instead of the
+    // production 25 (W=39) in install_identity_map(), so the 4 KiB stage-1
+    // walk starts at level 0 — matching the built L0-rooted hierarchy the
+    // tables already implement (at T0SZ=25 the walk starts at level 1; the
+    // start-level mismatch is the claim-6460 hypothesis for the first
+    // post-MMU virtio-pci console failure). ONLY T0SZ changes: same tables,
+    // same TTBR0 root, same MAIR/attributes/blanket/BAR window, same
+    // no-TLBI behavior. Default off: the default build is byte-identical.
+    const t0sz16 = b.option(bool, "t0sz16", "Diagnostic: install_identity_map programs T0SZ=16 (walk starts at level 0) instead of 25 (claim 6460; default off)") orelse false;
     const kernel_options = b.addOptions();
     kernel_options.addOption(bool, "nvram_console", nvram_console);
     kernel_options.addOption(bool, "preexit_tx", preexit_tx);
@@ -98,6 +107,7 @@ pub fn build(b: *std.Build) void {
     kernel_options.addOption(bool, "tx_transition_c", tx_transition_c);
     kernel_options.addOption(bool, "tx_transition_d", tx_transition_d);
     kernel_options.addOption(bool, "fw_mmu_capture", fw_mmu_capture);
+    kernel_options.addOption(bool, "t0sz16", t0sz16);
     const kernel = b.addExecutable(.{
         .name = "dipshit-kernel",
         .root_module = b.createModule(.{
