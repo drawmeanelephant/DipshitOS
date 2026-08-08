@@ -189,41 +189,109 @@ def _covers_already(c: Candidate, selected: List[Candidate]) -> float:
     return dup / len(c.covers)
 
 
+def _truncate_excerpt_line_aware(c: Candidate, max_content_chars: int) -> Candidate:
+    """Deterministic line-aware truncation (Fix C).
+
+    - Operates on line boundaries, not arbitrary char slices.
+    - Retained excerpt line numbers are accurate; omitted count is exact.
+    - Provenance survives (never stripped).
+    - Marker claims exact omitted lines (no estimates like len//40).
+    - Prefers retaining the changed region: keeps the start of the excerpt.
+    - Avoids cutting code fences into invalid structure by truncating inside
+      the candidate's own code block fence pair, not across blocks; fences
+      are balanced by block rendering, not per-candidate truncation.
+    """
+    import copy
+    import hashlib
+    raw = c.original_content if c.original_content else c.content
+    lines = raw.splitlines()
+    total_lines = len(lines)
+    if total_lines == 0:
+        return c
+    # max_content_chars must accommodate marker line(s)
+    marker_template_omitted = "... [truncated {omitted} line(s) omitted]"
+    # Reserve ~50 chars for marker worst-case digits
+    reserve = 48
+    keep_chars_limit = max(1, max_content_chars - reserve)
+    kept_lines = []
+    kept_chars = 0
+    omitted = 0
+    for ln in lines:
+        add = len(ln) + 1  # newline
+        if kept_chars + add > keep_chars_limit and kept_lines:
+            break
+        if kept_chars + add > keep_chars_limit and not kept_lines and total_lines > 1:
+            # Even first line too long: hard-slice that single line deterministically
+            ln = ln[: max(1, keep_chars_limit - 12)].rstrip() + "…"
+            kept_lines.append(ln)
+            kept_chars += len(ln) + 1
+            break
+        kept_lines.append(ln)
+        kept_chars += add
+    omitted = total_lines - len(kept_lines)
+    if omitted <= 0:
+        # Fits whole excerpt; no marker needed
+        new_content = raw
+        new_lines = total_lines
+    else:
+        marker = f"\n... [truncated {omitted} line(s) omitted -- retained {len(kept_lines)} of {total_lines} line(s)]"
+        new_content = "\n".join(kept_lines).rstrip("\n") + marker
+        new_lines = len(kept_lines)
+    # Update line range to reflect retained excerpt (accurate per C)
+    nc = copy.copy(c)
+    nc.content = new_content
+    nc.end_line = c.start_line + max(0, new_lines - 1)
+    # Deterministic recompute of cost using same helper as candidates (exact block len)
+    from .candidates import _rendered_block_len
+    nc.cost = _rendered_block_len(nc.path, nc.start_line, nc.end_line, nc.reason, nc.covers, nc.base_utility, nc.content, nc.commit, nc.structural_name, nc.provenance)
+    nc.content_hash = hashlib.sha256(nc.content.encode()).hexdigest()[:16]
+    return nc
+
+
 def _truncate_to_budget(candidates: List[Candidate], budget: int) -> List[Candidate]:
-    """Truncate candidate contents proportionally (largest first) to fit budget."""
-    # Sort by cost descending for truncation priority (largest first), stable
+    """Truncate candidate contents (line-aware) to fit budget; preserve provenance."""
+    import copy
     cands = sorted(candidates, key=lambda c: (-c.cost, c.path, c.start_line, c.cid))
     total = sum(c.cost for c in cands)
     if total <= budget:
         return cands
-    # Overhead per candidate block (header etc) approx 60-120; keep at least 120 chars content + header
-    # We'll truncate content iteratively
-    import copy
     truncated = [copy.copy(c) for c in cands]
-    # Keep trying to shave off from largest
-    overhead = 80  # minimal header overhead
-    while sum(c.cost for c in truncated) > budget and any(len(c.content) > 80 for c in truncated):
-        # pick largest by cost
-        largest = max(truncated, key=lambda c: c.cost)
+    # Iterative: shave from largest by exact char excess, but truncation itself is line-aware
+    guard = 0
+    while sum(c.cost for c in truncated) > budget and guard < 40:
+        guard += 1
         excess = sum(c.cost for c in truncated) - budget
-        # trim 25% or excess, whichever smaller, but at least 60 chars
-        new_len = max(80, len(largest.content) - max(64, min(int(len(largest.content) * 0.25), excess + 10)))
-        if new_len >= len(largest.content):
+        largest = max(truncated, key=lambda c: c.cost)
+        if len(largest.content) <= 24:
             break
-        # Keep start of content (retain changed region at top); deterministic
-        new_content = largest.content[:new_len].rstrip() + f"\n... [truncated {len(largest.original_content.splitlines()) - new_len//40} lines omitted]"
-        largest.content = new_content
-        largest.cost = len(new_content) + overhead + len(largest.path) + len(largest.reason)
-        # update token set approx (not needed for truncated selection)
-    # If still over budget, drop smallest utility until fits
+        # Target content length = current content len - excess - small margin; converted to line truncation
+        target_content_len = max(24, len(largest.content) - excess - 12)
+        trimmed = _truncate_excerpt_line_aware(largest, target_content_len)
+        if len(trimmed.content) >= len(largest.content):
+            # Could not shrink further via line trimming (single line case)
+            # Fall back to single-line hard slice inside the excerpt
+            trimmed.content = largest.content[:max(24, target_content_len)].rstrip() + "\n... [truncated to fit budget]"
+            trimmed.cost = len(trimmed.content) + 80  # overhead fallback (will be recomputed if needed)
+            from .candidates import _rendered_block_len
+            trimmed.cost = _rendered_block_len(trimmed.path, trimmed.start_line, trimmed.end_line, trimmed.reason, trimmed.covers, trimmed.base_utility, trimmed.content, trimmed.commit, trimmed.structural_name, trimmed.provenance)
+        # Replace in place
+        idx = truncated.index(largest)
+        truncated[idx] = trimmed
+        if guard > 30 and sum(c.cost for c in truncated) > budget:
+            break
+    # If still over, drop smallest utility until fits (keep at least one)
     truncated.sort(key=lambda c: (-c.base_utility, c.cost, c.path))
     while sum(c.cost for c in truncated) > budget and len(truncated) > 1:
         truncated.pop()
-    # Final safety: hard truncate largest content to exactly fit
     if sum(c.cost for c in truncated) > budget:
-        # single candidate remains, must fit
         c = truncated[0]
-        allow = budget - overhead
-        c.content = c.content[:max(40, allow)].rstrip() + "\n... [truncated to fit budget]"
-        c.cost = len(c.content) + overhead
+        # Must fit at least one candidate: hard line-aware trim to allowance
+        from .candidates import _rendered_block_len
+        overhead_est = _rendered_block_len(c.path, c.start_line, c.start_line, c.reason, c.covers, c.base_utility, "", c.commit, c.structural_name, c.provenance)
+        allow_content = max(16, budget - overhead_est + len("".rstrip()))
+        trimmed = _truncate_excerpt_line_aware(c, allow_content)
+        if len(trimmed.content) + overhead_est > budget:
+            trimmed.content = trimmed.content[: max(16, allow_content - 24)].rstrip() + "\n... [truncated to fit budget]"
+            trimmed.cost = _rendered_block_len(trimmed.path, trimmed.start_line, trimmed.end_line, trimmed.reason, trimmed.covers, trimmed.base_utility, trimmed.content, trimmed.commit, trimmed.structural_name, trimmed.provenance)
+        truncated[0] = trimmed
     return truncated
