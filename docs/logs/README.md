@@ -59,6 +59,7 @@ verify-coordination`, and CI) fails if it drifts from the files.
 | M1.5 transcript test automation (`freebuff/m15-transcript-test`) | [`freebuff-m15-transcript-test.md`](freebuff-m15-transcript-test.md) |
 | freebuff/mainzig-modules | [`freebuff-mainzig-modules.md`](freebuff-mainzig-modules.md) |
 | Coordination-tooling hardening (claim 1801) | [`freebuff-make-sure-git-is-current-first-18548850-6288-40ff-bca2-007971e567ac.md`](freebuff-make-sure-git-is-current-first-18548850-6288-40ff-bca2-007971e567ac.md) |
+| make-sure-git-main-is-current (claim 4922) | [`freebuff-make-sure-git-main-is-current-7f307de5-d3c0-4d90-966c-3a4221ad4d24.md`](freebuff-make-sure-git-main-is-current-7f307de5-d3c0-4d90-966c-3a4221ad4d24.md) |
 | `freebuff/mmu-debt-contract` | [`freebuff-mmu-debt-contract.md`](freebuff-mmu-debt-contract.md) |
 | status-preflight review (claim 8592) | [`freebuff-pull-latest-dipshitos-main-after-all-preceding-rel-1fe779b0-133e-4303-81f1-397087634352.md`](freebuff-pull-latest-dipshitos-main-after-all-preceding-rel-1fe779b0-133e-4303-81f1-397087634352.md) |
 | verification gate classification (claim 0594) | [`freebuff-pull-latest-dipshitos-main-ebe15999-a14a-4066-9551-00deb3d2323a.md`](freebuff-pull-latest-dipshitos-main-ebe15999-a14a-4066-9551-00deb3d2323a.md) |

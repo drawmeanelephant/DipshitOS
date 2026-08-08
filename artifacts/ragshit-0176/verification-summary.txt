@@ -1,0 +1,40 @@
+Claim 4922 — verify claim 0176 (ragshit review coverage truncation) landed at current main
+==========================================================================
+Date: 2026-08-08
+Starting main: 2f20e5aaad571440ab88e8caf6a246a2e9329aab (origin/main after fetch; local main fast-forwarded from fff37a5)
+Claim 0176 commit: 0d69ef972a9ce65d16b8af1c0846441287421497 (single commit, parent bc76c42; merged in PR #43)
+
+Reproduction (before = pre-0176 code at bc76c42/fff37a5, after = 0176 code; identical tree fff37a5,
+range HEAD~5..HEAD, --budget-chars 40000 --explain, fresh index each):
+  before-40000.md: kernel/src/virtio_console.zig:165-165  symbol virtio_pci_init (symbol_range 165-395,
+    231 lines) content: "p..." + "... [truncated 230 line(s) omitted -- retained 1 of 231 line(s)]"
+    changed_symbols: 40 / 40 (100%)
+  after-40000.md:  kernel/src/virtio_console.zig:165-262  signature "pub fn virtio_pci_init(...)" PLUS
+    changed region (lines 256-265, the claim-3320 comment change) with exact omission markers
+    changed_symbols: 27 / 40 (67%) (13 weak);  ## Weak / truncated coverage lists the 13 weak symbols
+    (matches claim 0176's recorded numbers exactly)
+
+Regression tests vs pre-fix code (copied test_review_weak_coverage.py onto the pre-0176 tree):
+  8 failed, 2 passed  -> the tests genuinely catch the pre-fix defect
+
+Current-main verification (HEAD 2f20e5a, fresh index, range HEAD~5..HEAD, --explain on md+json runs):
+  full suite:  147 passed, 1 skipped
+  doctor:      all required checks passed
+  budget 20000: len(md)=18564 == actual_size == actual_chars, truncated=True weak=7  envelope=False
+  budget 30000: len(md)=27849 == actual_size == actual_chars, truncated=True weak=18 envelope=False
+  budget 40000: len(md)=39896 == actual_size == actual_chars, truncated=True weak=35 envelope=False
+  budget 60000: len(md)=57357 == actual_size == actual_chars, truncated=True weak=12 envelope=False
+  determinism:  duplicate runs byte-identical (cmp) at 20k/40k/60k for md and json; sha256 stable
+  envelope_fallback_used: False at every budget
+Coordination gate: verify-coordination ok (after claim/log/index refresh).
+
+Files in this directory:
+  before-40000.md/json, after-40000.md/json, dogfood-{20000,30000,40000,60000}.md/json,
+  verification-summary.txt
+Tracked in the repo (force-added over the artifacts/ gitignore; docs-reconciliation-20260808
+precedent): before-40000.md, before-40000.json, after-40000.md, after-40000.json,
+dogfood-{20000,30000,40000,60000}.md, verification-summary.txt
+Reproducible on demand (byte-identical, verified) and kept out of the repo to avoid ~500KB of
+generated JSON: dogfood-{20000,30000,40000,60000}.json. The accounting/weak invariants are
+code-guarded permanently by tools/ragshit/tests/test_dogfood_review.py and
+tools/ragshit/tests/test_review_weak_coverage.py.
