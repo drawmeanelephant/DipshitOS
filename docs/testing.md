@@ -79,16 +79,25 @@
     `artifacts/context.md`.
 16. Verify the multiagent coordination surface:
     `bash tools/verify-coordination.sh` (also `just verify-coordination`
-    and CI). Fails if a claim/log file is malformed or the generated
-    claim/log index tables in `docs/claims/README.md` /
-    `docs/logs/README.md` drift from the files; fix by running
-    `bash tools/status/refresh-indexes.sh` after creating a claim file or
-    branch log.
+    and CI). Fails if a claim/log file is malformed, if a claim numbered
+    `0024+` does not carry its deterministic ID (computed from the owner
+    branch + filename slug by `tools/status/claim-id.sh`; `0001–0023` are
+    grandfathered), or if the generated claim/log index tables in
+    `docs/claims/README.md` / `docs/logs/README.md` drift from the files
+    or are structurally malformed (every row must have the exact expected
+    column count, so an unescaped `|` in a claim status cannot corrupt a
+    table). Fix by running `bash tools/status/refresh-indexes.sh` after
+    creating a claim file or branch log.
+17. Test the coordination tooling itself: `bash
+    tools/status/test-coordination.sh` (also `just test-coordination` and
+    CI) — positive/negative cases for cell escaping, structural table
+    validation, and deterministic claim IDs, run in a throwaway sandbox.
 
 > The full no-VM gate set runs as `just verify` and in CI
 > (`.github/workflows/ci.yml`): fmt → unit tests → transcript gate →
 > `zig build` → image → inspect → Swift runner build → context →
-> coordination. The VM gates (`run`, bad-handoff, marker, host-console)
+> coordination → coordination tooling tests. The VM gates (`run`,
+> bad-handoff, marker, host-console)
 > are Apple-silicon-only and are run by their own `tools/verify-*.sh`
 > scripts or `zig build run`.
 

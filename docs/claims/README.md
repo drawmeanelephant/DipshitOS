@@ -11,10 +11,34 @@ you start. Non-trivial work gets a claim file (and a log entry in
 `docs/logs/<branch>.md`) *before* code is written. Unclaimed work is fair
 game; claimed work is not.
 
+## Claim numbers (deterministic, collision-resistant)
+
+Claims used to be numbered sequentially ("next NNNN"). That collided when
+two agents claimed concurrently: claim 0013 was claimed by serial-discovery
+at 10:27 and by status-reverify at 15:18 on the same day, and the loser had
+to be manually renumbered to 0014 (commit `be811cb`).
+
+Numbers are now derived from the claim itself, so concurrent claimers pick
+different IDs without editing any shared file:
+
+```sh
+bash tools/status/claim-id.sh "<branch>" "<slug>"
+```
+
+The ID is `0024 + (cksum("<branch>:<slug>") % 9976)` — deterministic,
+reproducible on any machine, and always in `[0024, 9999]`. Claims
+`0001–0023` are grandfathered sequential numbers; `0024+` is enforced by
+`verify-coordination.sh`, which recomputes the ID from each claim file
+(owner branch + filename slug) and fails on a mismatch, so a hand-picked
+"next" number cannot slip through. If the extremely rare hash collision
+happens (same ID from different branch/slug pairs), the duplicate-number
+check fails the gate — change the slug and the ID changes.
+
 ## How to claim
 
-1. Copy [`TEMPLATE.md`](TEMPLATE.md) to `docs/claims/<NNNN>-<slug>.md`
-   (next number, kebab-case slug).
+1. Pick a kebab-case slug for the work and derive the number:
+   `bash tools/status/claim-id.sh "<branch>" "<slug>"` → `NNNN`. Copy
+   [`TEMPLATE.md`](TEMPLATE.md) to `docs/claims/<NNNN>-<slug>.md`.
 2. Fill in Owner (agent id + branch), Prompt / plan, Scope, Depends on.
 3. Set Status to `🔄 <branch>` **before** starting work.
 4. Run `bash tools/status/refresh-indexes.sh` to regenerate the
@@ -63,4 +87,5 @@ CI) fails if the table drifts from the claim files.
 | [0021-fw-mmu-capture](0021-fw-mmu-capture.md) | buffy (`freebuff/mmu-debt-contract`) | ✅ done 2026-08-07 — firmware MMU state + BAR-window walk captured; **firmware and kernel use byte-identical memory attributes** (evidence under `artifacts/fw-mmu-capture-gate.txt`, `fw-mmu-capture-lines.txt`, `fw-mmu-capture-efi-vars.bin`, `fw-mmu-capture-run.txt`) |
 | [0022-mmu-debt-boundary](0022-mmu-debt-boundary.md) | buffy (`freebuff/mmu-debt-contract`) | ✅ done 2026-08-07 — ADR 0006 landed, ADR 0004 D3 addendum + hardware-contract updated, deterministic `verify-mmu-debt` gate wired into just verify + CI (evidence under `artifacts/mmu-debt-gate.txt`) |
 | [0023-mainzig-module-split](0023-mainzig-module-split.md) | buffy (`freebuff/mainzig-modules`) | ✅ done 2026-08-07 — main.zig split into mmio/mmu/pci/evidence/virtio_console (2508 → 758 lines); KERNEL.BIN byte-identical (580312 B, sha 55325752…) across every extraction; verify-marker + verify-nvram-console ladders unchanged (final M2_TXST!); all portable gates + all 9 diagnostic builds pass (evidence under artifacts/mainzig-*) |
+| [1801-coordination-hardening](1801-coordination-hardening.md) | buffy (`freebuff/make-sure-git-is-current-first-18548850-6288-40ff-bca2-007971e567ac`) | ✅ done 2026-08-08 — escaping, deterministic claim IDs (gate-enforced 0024+), structural table validation, and 15 positive/negative tests landed; all coordination gates + verify-mmu-debt pass (log entry documents exact before/after) |
 <!-- CLAIMS_INDEX:END -->

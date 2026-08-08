@@ -48,6 +48,9 @@ jobs:
       - name: Verify multiagent coordination indexes
         run: bash tools/verify-coordination.sh
 
+      - name: Test multiagent coordination tooling
+        run: bash tools/status/test-coordination.sh
+
       - name: Verify MMU-debt boundary contract (ADR 0006, no-TLBI comments)
         run: bash tools/verify-mmu-debt.sh
 
