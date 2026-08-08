@@ -11,10 +11,34 @@ you start. Non-trivial work gets a claim file (and a log entry in
 `docs/logs/<branch>.md`) *before* code is written. Unclaimed work is fair
 game; claimed work is not.
 
+## Claim numbers (deterministic, collision-resistant)
+
+Claims used to be numbered sequentially ("next NNNN"). That collided when
+two agents claimed concurrently: claim 0013 was claimed by serial-discovery
+at 10:27 and by status-reverify at 15:18 on the same day, and the loser had
+to be manually renumbered to 0014 (commit `be811cb`).
+
+Numbers are now derived from the claim itself, so concurrent claimers pick
+different IDs without editing any shared file:
+
+```sh
+bash tools/status/claim-id.sh "<branch>" "<slug>"
+```
+
+The ID is `0024 + (cksum("<branch>:<slug>") % 9976)` — deterministic,
+reproducible on any machine, and always in `[0024, 9999]`. Claims
+`0001–0023` are grandfathered sequential numbers; `0024+` is enforced by
+`verify-coordination.sh`, which recomputes the ID from each claim file
+(owner branch + filename slug) and fails on a mismatch, so a hand-picked
+"next" number cannot slip through. If the extremely rare hash collision
+happens (same ID from different branch/slug pairs), the duplicate-number
+check fails the gate — change the slug and the ID changes.
+
 ## How to claim
 
-1. Copy [`TEMPLATE.md`](TEMPLATE.md) to `docs/claims/<NNNN>-<slug>.md`
-   (next number, kebab-case slug).
+1. Pick a kebab-case slug for the work and derive the number:
+   `bash tools/status/claim-id.sh "<branch>" "<slug>"` → `NNNN`. Copy
+   [`TEMPLATE.md`](TEMPLATE.md) to `docs/claims/<NNNN>-<slug>.md`.
 2. Fill in Owner (agent id + branch), Prompt / plan, Scope, Depends on.
 3. Set Status to `🔄 <branch>` **before** starting work.
 4. Run `bash tools/status/refresh-indexes.sh` to regenerate the
@@ -62,5 +86,10 @@ CI) fails if the table drifts from the claim files.
 | [0020-tx-transition-matrix](0020-tx-transition-matrix.md) | buffy (`freebuff/pull-the-latest-dipshitos-main-after-the-virtio-pc-fc4c7c03-1dba-4af3-857d-af8cfa2c1e91`) | ✅ done 2026-08-07 — **the transition that destroys access is the MMU switch (B→C); ExitBootServices is exonerated** (evidence under `artifacts/transition-gate.txt`, `transition-report.txt`, `transition-matrix.txt`, `transition-run-{a,b,c,d}-*.txt`, `transition-serial-*.log`) |
 | [0021-fw-mmu-capture](0021-fw-mmu-capture.md) | buffy (`freebuff/mmu-debt-contract`) | ✅ done 2026-08-07 — firmware MMU state + BAR-window walk captured; **firmware and kernel use byte-identical memory attributes** (evidence under `artifacts/fw-mmu-capture-gate.txt`, `fw-mmu-capture-lines.txt`, `fw-mmu-capture-efi-vars.bin`, `fw-mmu-capture-run.txt`) |
 | [0022-mmu-debt-boundary](0022-mmu-debt-boundary.md) | buffy (`freebuff/mmu-debt-contract`) | ✅ done 2026-08-07 — ADR 0006 landed, ADR 0004 D3 addendum + hardware-contract updated, deterministic `verify-mmu-debt` gate wired into just verify + CI (evidence under `artifacts/mmu-debt-gate.txt`) |
-| [0023-ragshit-review](0023-ragshit-review.md) | buffy (`freebuff/ragshit-review`) | ✅ done 2026-08-08 — `ragshit review . HEAD~5..HEAD --budget-chars 30000` deterministic budgeted packet; 124 passed, doctor ok, coordination ok, dogfood HEAD~1/~5/~10 at 10k/25k/50k under artifacts/review-packets/; baseline comparison measurably improved |
+| [0023-mainzig-module-split](0023-mainzig-module-split.md) | buffy (`freebuff/mainzig-modules`) | ✅ done 2026-08-07 — main.zig split into mmio/mmu/pci/evidence/virtio_console (2508 → 758 lines); KERNEL.BIN byte-identical (580312 B, sha 55325752…) across every extraction; verify-marker + verify-nvram-console ladders unchanged (final M2_TXST!); all portable gates + all 9 diagnostic builds pass (evidence under artifacts/mainzig-*) |
+| [0594-verify-gate-classification](0594-verify-gate-classification.md) | buffy (`freebuff/pull-latest-dipshitos-main-ebe15999-a14a-4066-9551-00deb3d2323a`) | ✅ done 2026-08-08 — classification + inventory + aggregates landed; full class-A set green, coordination gate green |
+| [1801-coordination-hardening](1801-coordination-hardening.md) | buffy (`freebuff/make-sure-git-is-current-first-18548850-6288-40ff-bca2-007971e567ac`) | ✅ done 2026-08-08 — escaping, deterministic claim IDs (gate-enforced 0024+), structural table validation, and 15 positive/negative tests landed; all coordination gates + verify-mmu-debt pass (log entry documents exact before/after) |
+| [3109-stale-doc-cleanup](3109-stale-doc-cleanup.md) | buffy (`freebuff/stale-doc-cleanup`) | ✅ done 2026-08-08 — stale blocker snapshots removed/corrected across README, roadmap, architecture, testing, hardware-contract, march-m15; before/after stale-phrase report in `artifacts/stale-doc-report.txt` (26 → 0 hits); link check clean; `docs/status.md` untouched |
+| [8592-status-preflight](8592-status-preflight.md) | buffy (`freebuff/pull-latest-dipshitos-main-after-all-preceding-rel-1fe779b0-133e-4303-81f1-397087634352`) | ✅ done 2026-08-08 — report at `artifacts/status-preflight.md`; all class-A + class-B gates re-run at HEAD `5160eef` (evidence `artifacts/status-preflight-*.txt`); snapshots regenerated |
+| [9112-ragshit-review](9112-ragshit-review.md) | buffy (`freebuff/ragshit-review`) | ✅ done 2026-08-08 — `ragshit review . HEAD~5..HEAD --budget-chars 30000` deterministic budgeted packet; 124 passed, doctor ok, coordination ok, dogfood HEAD~1/~5/~10 at 10k/25k/50k under artifacts/review-packets/; baseline comparison measurably improved |
 <!-- CLAIMS_INDEX:END -->

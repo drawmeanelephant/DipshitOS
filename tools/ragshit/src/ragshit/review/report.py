@@ -48,6 +48,7 @@ class ReviewReport:
     stale: List[Dict[str, Any]]
     selection_summary: Dict[str, Any]
     baseline: Dict[str, Any]
+    envelope_fallback_used: bool = False
     # Human markdown is separate; JSON carries data
 
 
@@ -168,6 +169,7 @@ def build_review(
         "selected": len(result.selected),
         "rejected": len(result.rejected),
         "truncated": result.truncated,
+        "envelope_fallback_used": False,
     }
 
     coverage = {dim: f"{v['covered']} / {v['total']}" for dim, v in sorted(metrics.items())}
@@ -199,6 +201,7 @@ def build_review(
         stale=stale_list,
         selection_summary=selection_summary,
         baseline=baseline_info,
+        envelope_fallback_used=False,
     )
 
 
@@ -208,7 +211,7 @@ def report_to_json(report: ReviewReport) -> str:
     return json.dumps(d, indent=2, sort_keys=True) + "\n"
 
 
-def report_to_markdown(report: ReviewReport, explain: bool = False) -> str:
+def report_to_markdown(report: ReviewReport, explain: bool = False, enforce_budget: bool = True) -> str:
     lines: List[str] = []
     lines.append("# Review packet")
     lines.append("")
@@ -326,7 +329,7 @@ def report_to_markdown(report: ReviewReport, explain: bool = False) -> str:
     lines.append("")
 
     md = "\n".join(lines)
-    if len(md) > report.requested_budget:
+    if enforce_budget and len(md) > report.requested_budget:
         md = _enforce_budget(md, report.requested_budget, report)
     # Keep report.actual_size consistent with real markdown bytes for determinism
     # Note: callers should check len(md) <= budget; report.actual_size is informational

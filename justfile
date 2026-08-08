@@ -1,85 +1,23 @@
 # DipshitOS command aliases.
 # Requires: just (https://github.com/casey/just)
 # All recipes simply delegate to the Zig build system.
+#
+# Verification classes (canonical inventory: docs/gate-inventory.md):
+#   A — portable / build CI. Deterministic, no Apple silicon, no VZ VM.
+#       This is exactly what GitHub CI proves. `just verify-portable` runs
+#       the same set locally (`just verify` is a legacy alias).
+#   B — Apple-silicon Virtualization.framework hardware gate. Boots a real
+#       VZ VM on Apple silicon. CI does NOT run these and cannot prove them;
+#       run `just verify-vz` on a development host.
+#   C — interactive / manual hardware gate. Needs a human at the keyboard.
+#   D — diagnostic experiment. NOT an acceptance gate.
 
-set shell := ["bash", "-c"]
+# Legacy alias for the full portable/build gate set (class A)
+alias verify := verify-portable
 
-default: build
-
-# Compile the AArch64 UEFI application and kernel image (zig build)
-build:
-    zig build
-
-# Run the M1.5 kernel monitor module unit tests (zig test per module; skips modules not yet landed)
-test:
-    bash tools/verify-unit-tests.sh
-
-# Run the automated dipshit> transcript test — mock console, no VM (M1.5 march step 19)
-test-console:
-    zig build test-console
-
-# Boot the VM and save the host-side NVRAM marker ladder (ADR 0004 D4 fallback, `zig build marker`)
-marker:
-    zig build marker
-
-# Verify the ADR 0004 D4 fixed-memory-marker fallback gate (boots a VZ VM; Apple silicon only)
-verify-marker:
-    bash tools/verify-marker.sh
-
-# Boot the -Dnvram-console=true image and reconstruct the post-exit NVRAM console stream (zig build nvram-console; claim 0015)
-nvram-console:
-    zig build nvram-console
-
-# Verify the claim-0015 NVRAM console gate (post-exit console bytes via the NVRAM channel; boots a VZ VM; Apple silicon only)
-verify-nvram-console:
-    bash tools/verify-nvram-console.sh
-
-# Verify the claim-0017 pre-exit virtio-pci TX diagnostic (can the transport TX while Boot Services + firmware address space are still active? boots a VZ VM; Apple silicon only)
-verify-preexit-tx:
-    bash tools/verify-preexit-tx.sh
-
-# Boot the -Dpreexit-tx=true image and report whether the pre-exit virtio TX reached vm-serial.log (zig build preexit-tx; claim 0017)
-preexit-tx:
-    zig build preexit-tx
-
-# Verify the claim-0018 post-exit virtio TX bisect gate (N identical VZ boots, per-stage markers, determinism report; Apple silicon only)
-verify-tx-diag:
-    bash tools/verify-tx-diag.sh
-
-# Boot the -Dtx-diag=true image once and save the per-stage post-exit TX marker ladder (zig build tx-diag; claim 0018)
-tx-diag:
-    zig build tx-diag
-
-# Extract the flat kernel image zig-out/bin/KERNEL.BIN (zig build kernel)
-kernel:
-    zig build kernel
-
-# Create the FAT32+GPT boot disk image (zig build image)
-image:
-    zig build image
-
-# Boot with the Swift Virtualization.framework runner (zig build run)
-run:
-    zig build run
-
-# Boot an interactive host serial console (zig build console)
-console:
-    zig build console
-
-# Inspect the EFI binary and disk image (zig build inspect)
-inspect:
-    zig build inspect
-
-# Regenerate artifacts/context.md (zig build context)
-context:
-    zig build context
-
-# Local Git-aware context engine — tools/ragshit (ragshit index/query/bundle/doctor ...)
-ragshit *ARGS:
-    python3 tools/ragshit/ragshit {{ARGS}}
-
-# Run the build-gate verification sequence from docs/testing.md (no VM)
-verify:
+# Run the full portable/build gate set (class A; mirrors CI). Does NOT run
+# the Apple-silicon VZ hardware gates (class B) — that is `just verify-vz`.
+verify-portable:
     zig fmt --check boot/src/*.zig kernel/src/*.zig build.zig
     bash tools/verify-unit-tests.sh
     zig build test-console
@@ -89,29 +27,117 @@ verify:
     swift build --package-path host/vm-runner
     zig build context
     bash tools/verify-coordination.sh
+    bash tools/status/test-coordination.sh
     bash tools/verify-mmu-debt.sh
 
-# Verify the MMU-debt boundary contract is intact (ADR 0006 + kernel no-TLBI comments; deterministic, no VM — claim 0022)
+# Run the Apple-silicon VZ hardware gates (class B): bad-handoff, marker,
+# NVRAM console, host-console PTY. Apple silicon only — each boots VZ VMs.
+# Intentionally NOT chained here (blocked/deferred, see
+# docs/gate-inventory.md): the live serial takeover gate (`zig build run`,
+# claim 0002) and the live M1.5 transcript/RX gate.
+verify-vz:
+    bash tools/verify-bad-handoff.sh
+    bash tools/verify-marker.sh
+    bash tools/verify-nvram-console.sh
+    bash tools/verify-host-console.sh
+
+# Compile the AArch64 UEFI application and kernel image (class A — zig build)
+build:
+    zig build
+
+# Run the M1.5 kernel monitor module unit tests (class A — zig test per module; skips modules not yet landed)
+test:
+    bash tools/verify-unit-tests.sh
+
+# Run the automated dipshit> transcript test — mock console, no VM (class A; M1.5 march step 19)
+test-console:
+    zig build test-console
+
+# Boot the VM and save the host-side NVRAM marker ladder (class B mechanism — ADR 0004 D4 fallback, `zig build marker`; Apple silicon only)
+marker:
+    zig build marker
+
+# Verify the ADR 0004 D4 fixed-memory-marker fallback gate (class B — boots a VZ VM; Apple silicon only)
+verify-marker:
+    bash tools/verify-marker.sh
+
+# Boot the -Dnvram-console=true image and reconstruct the post-exit NVRAM console stream (class B mechanism — zig build nvram-console; claim 0015; Apple silicon only)
+nvram-console:
+    zig build nvram-console
+
+# Verify the claim-0015 NVRAM console gate (class B — post-exit console bytes via the NVRAM channel; boots a VZ VM; Apple silicon only)
+verify-nvram-console:
+    bash tools/verify-nvram-console.sh
+
+# Verify the claim-0017 pre-exit virtio-pci TX diagnostic (class D — can the transport TX while Boot Services + firmware address space are still active? boots a VZ VM; Apple silicon only)
+verify-preexit-tx:
+    bash tools/verify-preexit-tx.sh
+
+# Boot the -Dpreexit-tx=true image and report whether the pre-exit virtio TX reached vm-serial.log (class D mechanism — zig build preexit-tx; claim 0017; Apple silicon only)
+preexit-tx:
+    zig build preexit-tx
+
+# Verify the claim-0018 post-exit virtio TX bisect gate (class D — N identical VZ boots, per-stage markers, determinism report; Apple silicon only)
+verify-tx-diag:
+    bash tools/verify-tx-diag.sh
+
+# Boot the -Dtx-diag=true image once and save the per-stage post-exit TX marker ladder (class D mechanism — zig build tx-diag; claim 0018; Apple silicon only)
+tx-diag:
+    zig build tx-diag
+
+# Extract the flat kernel image zig-out/bin/KERNEL.BIN (class A tooling — zig build kernel; no VM)
+kernel:
+    zig build kernel
+
+# Create the FAT32+GPT boot disk image (class A — zig build image)
+image:
+    zig build image
+
+# Boot with the Swift Virtualization.framework runner (class B gate — the live serial takeover gate, claim 0002; currently BLOCKED; Apple silicon only)
+run:
+    zig build run
+
+# Boot an interactive host serial console (class C — interactive/manual hardware gate; requires a human at the keyboard; Apple silicon only)
+console:
+    zig build console
+
+# Inspect the EFI binary and disk image (class A — zig build inspect)
+inspect:
+    zig build inspect
+
+# Regenerate artifacts/context.md (class A — zig build context)
+context:
+    zig build context
+
+# Local Git-aware context engine — tools/ragshit (ragshit index/query/bundle/doctor ...)
+ragshit *ARGS:
+    python3 tools/ragshit/ragshit {{ARGS}}
+
+# Verify the MMU-debt boundary contract is intact (class A — ADR 0006 + kernel no-TLBI comments; deterministic, no VM — claim 0022)
 verify-mmu-debt:
     bash tools/verify-mmu-debt.sh
 
-# Verify the multiagent coordination surface (claims/logs files + generated indexes)
+# Verify the multiagent coordination surface (class A — claims/logs files + generated indexes)
 verify-coordination:
     bash tools/verify-coordination.sh
 
-# Regenerate the claim/log index tables from the files (run after creating a claim or branch log)
+# Test the coordination tooling itself (class A — escaped cells, deterministic claim IDs, structural validation)
+test-coordination:
+    bash tools/status/test-coordination.sh
+
+# Regenerate the claim/log index tables from the files (developer tooling, not a gate — run after creating a claim or branch log)
 refresh-indexes:
     bash tools/status/refresh-indexes.sh
 
-# Verify the pre-exit failure path (boots a VZ VM; Apple silicon only)
+# Verify the pre-exit failure path (class B — boots a VZ VM; Apple silicon only)
 verify-bad-handoff:
     bash tools/verify-bad-handoff.sh
 
-# Verify the M1.5 host-side interactive serial plumbing (boots VZ VMs; Apple silicon only)
+# Verify the M1.5 host-side interactive serial plumbing (class B — boots VZ VMs; Apple silicon only)
 verify-host-console:
     bash tools/verify-host-console.sh
 
-# Git-aware change-impact reviewer context (ragshit impact)
+# Git-aware change-impact reviewer context (developer tooling — ragshit impact)
 impact *ARGS:
     python3 tools/ragshit/ragshit impact {{ARGS}}
 

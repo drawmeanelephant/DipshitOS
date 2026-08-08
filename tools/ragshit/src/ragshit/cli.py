@@ -71,7 +71,7 @@ def clamp_limit(value: Optional[int], config: RagshitConfig) -> int:
 # patched to equal len(markdown) (the actual packet size), with stable Actual
 # size line.
 def _framing_aware_select_and_report(candidates, spec, budget, repo_root, repo_id, inv, mapping, neighbors, stale, file_scores, index_head, index_stale, index_warning, timing_ms, explain: bool = False):
-    from .review.report import build_review, report_to_markdown
+    from .review.report import build_review, report_to_markdown, _enforce_budget
     from .review.selection import select
     import re
     candidate_budget = budget
@@ -79,75 +79,86 @@ def _framing_aware_select_and_report(candidates, spec, budget, repo_root, repo_i
         from .review.selection import SelectionResult
         empty_result = SelectionResult(selected=[], rejected=[], budget=budget, actual_chars=0, truncated=False)
         empty_report = build_review(repo_root, repo_id, inv, mapping, neighbors, stale, file_scores, spec, empty_result, candidates, budget, index_head, index_stale, index_warning, timing_ms)
-        empty_md = report_to_markdown(empty_report, explain=explain)
+        empty_md = report_to_markdown(empty_report, explain=explain, enforce_budget=False)
         framing = len(empty_md)
-        # Reserve framing; leave margin for Actual size digit growth.
         candidate_budget = max(0, budget - framing - 16)
     except Exception:
         candidate_budget = max(0, budget - 1200)
     best_result = None
     best_report = None
     best_md = None
+    envelope_used = False
     for _ in range(8):
         result = select(candidates, spec, candidate_budget)
         report = build_review(repo_root, repo_id, inv, mapping, neighbors, stale, file_scores, spec, result, candidates, budget, index_head, index_stale, index_warning, timing_ms)
-        md = report_to_markdown(report, explain=explain)
-        md_len = len(md)
-        # Save best so helper never returns None
-        best_result, best_report, best_md = result, report, md
+        # Measure UNTRUNCATED render so envelope cannot hide over-budget
+        raw_md = report_to_markdown(report, explain=explain, enforce_budget=False)
+        md_len = len(raw_md)
         if md_len <= budget:
-            # Patch Actual size line to equal real len(md) - iterate to stable digit length.
-            patched_md = md
+            # Raw fits: patch Actual size line to equal real len and mark no envelope
+            md = raw_md
             patched_len = md_len
             for __ in range(4):
-                patched = re.sub(r"Actual size: \d+ chars", f"Actual size: {patched_len} chars", patched_md, count=1)
+                patched = re.sub(r"Actual size: \d+ chars", f"Actual size: {patched_len} chars", md, count=1)
                 new_len = len(patched)
                 if new_len == patched_len:
-                    patched_md = patched
+                    md = patched
                     break
-                patched_md = patched
+                md = patched
                 patched_len = new_len
                 if patched_len > budget:
                     break
             if patched_len > budget:
-                # Patch pushed over; shrink and retry
                 excess = patched_len - budget
                 candidate_budget = max(0, candidate_budget - excess - 8)
-                # keep best as fallback but continue loop
+                best_result, best_report, best_md = result, report, raw_md
                 continue
-            md = patched_md
             md_len = patched_len
             report.actual_size = md_len
             report.selection_summary["actual_chars"] = md_len
             report.selection_summary["utilization"] = round((md_len / budget * 100) if budget else 0, 1)
+            report.selection_summary["envelope_fallback_used"] = False
+            report.envelope_fallback_used = False
             best_result, best_report, best_md = result, report, md
             report._rendered_markdown = md  # type: ignore[attr-defined]
             return best_result, best_report
-        # Over budget: shrink candidate allowance and retry
+        # Raw over budget: shrink candidate allowance and retry (no envelope yet)
+        best_result, best_report, best_md = result, report, raw_md
         excess = md_len - budget
-        # Ensure progress even when candidate_budget already 0 (framing alone > budget)
-        # then defensive envelope in report_to_markdown will be used; but still try smaller
         candidate_budget = max(0, candidate_budget - excess - 16)
-        # If candidate_budget is already 0 and still over, break to use envelope fallback
         if candidate_budget == 0 and md_len > budget:
-            # Defensive envelope already applied inside report_to_markdown for md,
-            # but we need to ensure report fields match final md_len (which is <=budget after envelope)
-            # report_to_markdown already enforced budget, so md is now <=budget; patch Actual size
-            # Re-render is already enforced; just patch report fields to match md
-            final_len = len(md)
-            report.actual_size = final_len
-            report.selection_summary["actual_chars"] = final_len
-            report.selection_summary["utilization"] = round((final_len / budget * 100) if budget else 0, 1)
-            report._rendered_markdown = md  # type: ignore[attr-defined]
+            # Framing alone > budget: must use defensive envelope as last resort
+            enforced = _enforce_budget(raw_md, budget, report)
+            # Patch Actual size inside enforced output
+            final = re.sub(r"Actual size: \d+ chars", f"Actual size: {len(enforced)} chars", enforced, count=1)
+            # If patch changed length, re-enforce to stay <= budget
+            if len(final) > budget:
+                final = _enforce_budget(final, budget, report)
+                final = re.sub(r"Actual size: \d+ chars", f"Actual size: {len(final)} chars", final, count=1)
+                if len(final) > budget:
+                    final = _enforce_budget(final, budget, report)
+            report.actual_size = len(final)
+            report.selection_summary["actual_chars"] = len(final)
+            report.selection_summary["utilization"] = round((len(final) / budget * 100) if budget else 0, 1)
+            report.selection_summary["envelope_fallback_used"] = True
+            report.envelope_fallback_used = True
+            report._rendered_markdown = final  # type: ignore[attr-defined]
             return result, report
-    # Fell through: use last attempt (defensive envelope ensures <=budget)
-    md = best_md or ""
-    md_len = len(md)
+    # Fell through: no raw fits but candidate_budget still >0 (rare). Use envelope as final fallback.
+    raw = best_md or ""
+    enforced = _enforce_budget(raw, budget, best_report) if best_report is not None else raw[:budget]
+    # Patch Actual size inside enforced
+    import re as _re
+    enforced = _re.sub(r"Actual size: \d+ chars", f"Actual size: {len(enforced)} chars", enforced, count=1)
+    if len(enforced) > budget:
+        enforced = _enforce_budget(enforced, budget, best_report)  # type: ignore[arg-type]
     if best_report is not None:
-        best_report.actual_size = md_len
-        best_report.selection_summary["actual_chars"] = md_len
-        best_report.selection_summary["utilization"] = round((md_len / budget * 100) if budget else 0, 1)
-        best_report._rendered_markdown = md  # type: ignore[attr-defined]
+        best_report.actual_size = len(enforced)
+        best_report.selection_summary["actual_chars"] = len(enforced)
+        best_report.selection_summary["utilization"] = round((len(enforced) / budget * 100) if budget else 0, 1)
+        best_report.selection_summary["envelope_fallback_used"] = True
+        best_report.envelope_fallback_used = True
+        best_report._rendered_markdown = enforced  # type: ignore[attr-defined]
     return best_result, best_report
 
 

@@ -523,3 +523,83 @@ def test_budget_actual_size_equals_rendered_len(tmp_path):
         assert j["actual_size"] == len(md), f"json actual_size {j['actual_size']} != md len {len(md)}"
         assert j["selection_summary"]["actual_chars"] == len(md)
 
+def test_framing_aware_iterative_avoids_envelope(tmp_path):
+    """Regression: raw render over budget must trigger reselect, not envelope chop.
+
+    The helper must measure the UNTRUNCATED render (enforce_budget=False) and
+    iteratively reduce candidate allowance until the real packet fits.
+    Normal 5k/10k budgets must NOT use the defensive envelope.
+    Asserts: len<=budget, actual_size==len, selected blocks complete,
+    no envelope marker, envelope_fallback_used==False.
+    """
+    r = tmp_path / "r"
+    init_repo(r)
+    big = "\n".join([f"    x{i} = {i}" for i in range(30)]) + "\n    return 1\n"
+    write_file(r, "a.py", f"def foo():\n{big}def bar():\n    return 2\n")
+    write_file(r, "b.py", "def baz():\n    return 3\n")
+    write_file(r, "docs/guide.md", "# Guide\nfoo bar baz\n")
+    write_file(r, "docs/claims/0001-demo.md", "# Claim\nfoo\n")
+    write_file(r, "docs/decisions/0001-foo.md", "# Decision\nfoo\n")
+    commit_all(r, "init")
+    assert main(["index", str(r)]) == 0
+    write_file(r, "a.py", f"def foo():\n{big.replace('x0 = 0', 'x0_changed = 0')}\ndef bar():\n    return 2\n")
+    write_file(r, "b.py", "def baz():\n    return 77\n")
+    commit_all(r, "change")
+    assert main(["index", str(r)]) == 0
+    # Tight budget: framing + several candidates > budget, so raw first render would be over.
+    # After framing-aware shrink it must fit without envelope.
+    for budget in [4000, 5000, 8000]:
+        rc, md, _ = run_cli(["review", str(r), "HEAD~1..HEAD", "--budget-chars", str(budget)])
+        assert rc == 0
+        assert len(md) <= budget, f"len {len(md)} > budget {budget}"
+        import re, json
+        m = re.search(r"Actual size: (\d+) chars", md)
+        assert m and int(m.group(1)) == len(md)
+        rc2, jtxt, _ = run_cli(["review", str(r), "HEAD~1..HEAD", "--budget-chars", str(budget), "--json"])
+        j = json.loads(jtxt)
+        assert j["actual_size"] == len(md)
+        assert j["selection_summary"]["actual_chars"] == len(md)
+        # Must NOT have used envelope fallback on normal budgets
+        assert j.get("envelope_fallback_used") is False, j
+        assert j["selection_summary"].get("envelope_fallback_used") is False, j["selection_summary"]
+        assert "[truncated to fit budget]" not in md, "envelope marker must not appear on normal budget"
+        # Selected candidate blocks must be complete in markdown (verbatim content)
+        for s in j["selected"]:
+            assert s["content"].rstrip("\n") in md, f"selected {s['path']}:{s['lines']} content missing from md"
+            # Also verify fence structure not broken
+        assert md.count("```") % 2 == 0
+
+
+def test_tiny_budget_envelope_fallback(tmp_path):
+    """Tiny budget where framing alone > budget must use emergency envelope.
+
+    Asserts fallback activates, packet still respects budget, is clearly marked,
+    and is distinct from normal framing-aware path.
+    """
+    r = tmp_path / "r"
+    init_repo(r)
+    write_file(r, "a.py", "def foo():\n    return 1\n")
+    commit_all(r, "init")
+    assert main(["index", str(r)]) == 0
+    write_file(r, "a.py", "def foo():\n    return 42\n")
+    commit_all(r, "change")
+    assert main(["index", str(r)]) == 0
+    budget = 800  # genuinely impossible: framing alone > budget
+    rc, md, _ = run_cli(["review", str(r), "HEAD~1..HEAD", "--budget-chars", str(budget)])
+    assert rc == 0
+    assert len(md) <= budget
+    assert "[truncated to fit budget]" in md, "tiny budget must be marked by envelope"
+    rc2, jtxt, _ = run_cli(["review", str(r), "HEAD~1..HEAD", "--budget-chars", str(budget), "--json"])
+    import json as _j
+    j = _j.loads(jtxt)
+    assert j.get("envelope_fallback_used") is True
+    assert j["selection_summary"].get("envelope_fallback_used") is True
+    assert j["actual_size"] == len(md)
+    assert j["selection_summary"]["actual_chars"] == len(md)
+    # Normal budget on same repo must NOT use envelope (distinct path)
+    rc3, md3, _ = run_cli(["review", str(r), "HEAD~1..HEAD", "--budget-chars", "8000"])
+    rc4, jtxt4, _ = run_cli(["review", str(r), "HEAD~1..HEAD", "--budget-chars", "8000", "--json"])
+    j4 = _j.loads(jtxt4)
+    assert j4.get("envelope_fallback_used") is False
+    assert "[truncated to fit budget]" not in md3
+

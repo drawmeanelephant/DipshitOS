@@ -1,7 +1,25 @@
 # DipshitOS testing
 
 > For the current state of each verification gate (pass/fail/blocked), see
-> [`docs/status.md`](status.md). This file is the sequence and policy.
+> [`docs/status.md`](status.md). This file is the sequence and policy. The
+> canonical A/B/C/D classification of every verification command is
+> [`docs/gate-inventory.md`](gate-inventory.md).
+
+## Verification classes
+
+Every verification command belongs to exactly one class (canonical inventory:
+[`docs/gate-inventory.md`](gate-inventory.md)):
+
+- **A — portable / build CI.** Deterministic, no Apple silicon, no VZ VM.
+  This is the set GitHub CI proves. A green CI badge means exactly these
+  passed — nothing more.
+- **B — Apple-silicon Virtualization.framework hardware gate.** Boots a real
+  VZ VM on Apple silicon. GitHub-hosted CI does **not** run these and cannot
+  prove them; run `just verify-vz` on a development host.
+- **C — interactive / manual hardware gate.** Requires a human at the
+  keyboard (`zig build console`).
+- **D — diagnostic experiment.** Answers a question (claims
+  0017/0018/0020/0021); **not an acceptance gate**.
 
 ## Evidence policy
 
@@ -39,8 +57,9 @@
     `memory-map descriptors=0x...` line, and `kernel terminal state`. The
     pre-exit loader marker `\\BOOTED.TXT` remains required. `RC.TXT` is
     expected only for a deliberate pre-exit failure fixture, not success.
-    **Currently not passed** — the VZ serial gate stays open (no usable
-    MMIO serial device in the declared windows; see `docs/status.md`).
+    **Currently not passed** — the VZ serial gate stays open (post-exit
+    access to the virtio-pci console transport hangs on VZ; see
+    `docs/status.md`).
 11. Run the pre-exit failure-path gate:
     `bash tools/verify-bad-handoff.sh` (also `just verify-bad-handoff`) —
     boots a bad-magic fixture and asserts the loader's `RC.TXT` reads
@@ -56,7 +75,9 @@
     0009 observed the ladder ending at `M2_MAPD!` (MMU-takeover window);
     claim 0010 root-caused and fixed it — the ladder now runs
     `M2_MAPD! → M2_MMUP! → M2_SERIA`, i.e. the switch completes and the
-    serial probe runs to completion finding no usable device. The
+    serial probe runs to completion finding no device in the declared
+    windows (decoded later, claim 0013 — the real console is a virtio-pci
+    device outside them). The
     memory-dump form is impossible on VZ (guest RAM is not host-mapped —
     observed, claim 0009).
 13. Run the M1.5 host-side console plumbing gate (march steps 4–7):
@@ -79,18 +100,31 @@
     `artifacts/context.md`.
 16. Verify the multiagent coordination surface:
     `bash tools/verify-coordination.sh` (also `just verify-coordination`
-    and CI). Fails if a claim/log file is malformed or the generated
-    claim/log index tables in `docs/claims/README.md` /
-    `docs/logs/README.md` drift from the files; fix by running
-    `bash tools/status/refresh-indexes.sh` after creating a claim file or
-    branch log.
+    and CI). Fails if a claim/log file is malformed, if a claim numbered
+    `0024+` does not carry its deterministic ID (computed from the owner
+    branch + filename slug by `tools/status/claim-id.sh`; `0001–0023` are
+    grandfathered), or if the generated claim/log index tables in
+    `docs/claims/README.md` / `docs/logs/README.md` drift from the files
+    or are structurally malformed (every row must have the exact expected
+    column count, so an unescaped `|` in a claim status cannot corrupt a
+    table). Fix by running `bash tools/status/refresh-indexes.sh` after
+    creating a claim file or branch log.
+17. Test the coordination tooling itself: `bash
+    tools/status/test-coordination.sh` (also `just test-coordination` and
+    CI) — positive/negative cases for cell escaping, structural table
+    validation, and deterministic claim IDs, run in a throwaway sandbox.
 
-> The full no-VM gate set runs as `just verify` and in CI
-> (`.github/workflows/ci.yml`): fmt → unit tests → transcript gate →
-> `zig build` → image → inspect → Swift runner build → context →
-> coordination. The VM gates (`run`, bad-handoff, marker, host-console)
-> are Apple-silicon-only and are run by their own `tools/verify-*.sh`
-> scripts or `zig build run`.
+> The full class-A (portable, no-VM) gate set runs as `just verify-portable`
+> (legacy alias `just verify`) and in CI (`.github/workflows/ci.yml`): fmt →
+> unit tests → transcript gate → `zig build` → image → inspect → Swift
+> runner build → context → coordination → coordination tooling tests.
+> **CI proves only this class** — a green badge says nothing about the
+> Apple-silicon VZ hardware gates (class B). Those run as `just verify-vz`
+> (bad-handoff, marker, NVRAM console, host-console — Apple silicon only)
+> plus the blocked `zig build run` serial takeover gate and the deferred
+> live transcript/RX gate; the class-D diagnostics (preexit-tx, tx-diag,
+> tx-transition, fw-mmu-capture) run individually per claim. See
+> [`docs/gate-inventory.md`](gate-inventory.md).
 
 ## Evidence artifacts
 
@@ -124,6 +158,9 @@
 
 ## Results log (as verified on the development host)
 
+> Current pass/fail/blocked state lives in [`docs/status.md`](status.md);
+> this log is the dated historical record, kept because it is labeled.
+
 - [x] `zig build` compiles `BOOTAA64.EFI` (PE32+ EFI application, AArch64)
 - [x] `zig build inspect` reports a valid AArch64 PE/COFF EFI application
 - [x] `zig build image` creates a GPT+FAT32 image with `EFI/BOOT/BOOTAA64.EFI`
@@ -139,14 +176,16 @@
       0009's NVRAM ladder showed the death was in the MMU-takeover window
       (`M2_MAPD!`), and claim 0010 (2026-08-07) root-caused and fixed it —
       the MMU takeover now **completes** on VZ (ladder reaches `M2_MMUP!`)
-      and the serial probe runs to completion, selecting **no usable MMIO
-      serial device** in the declared windows (`M2_SERIA`, `layout=none`).
-      The remaining blocker is device absence (find the VZ virtio-console
-      register file or a documented console fallback), not a crash.
+      and the serial probe runs to completion, selecting no device in the
+      declared windows (`M2_SERIA`; claim 0013 later decoded those windows
+      as Apple's efivars store + an internal debug UART and found the real
+      console is a virtio-pci device outside them).
+      The remaining blocker is post-exit access to that virtio-pci console
+      transport (claims 0013/0020), not a crash.
       Evidence: `artifacts/m2-mmu-takeover-gate.txt`, `artifacts/m2-firmware-regs.txt`,
       `artifacts/m2-table-walk.txt`, `artifacts/m2-mmu-bisect-tlbi.txt`.
-      Serial-device hardware assumptions stay `[inferred]` until a real
-      device is observed.
+      The console device itself is now observed (claim 0013); its register
+      layout stays `[inferred]` until a real console is driven.
 - [x] Milestone two marker fallback gate (gate work item 3, claims
       0009/0010): **passing** (2026-08-07). Claim 0009's ladder
       discriminated the serial gate: every run ended at `M2_MAPD!` — the
@@ -155,11 +194,14 @@
       reached the serial probe. Claim 0010 then **root-caused and fixed
       it**: the ladder now runs `M2_MAPD! → M2_MMUP! → M2_SERIA` — the MMU
       switch completes on VZ and the serial probe runs to completion,
-      finding no usable MMIO serial device in the declared windows
-      (evidence: `artifacts/m2-mmu-takeover-gate.txt`,
+      finding no device in the declared windows (later decoded as Apple's
+      efivars store + an internal debug UART — claim 0013 — which also
+      found the real console is a virtio-pci device outside them;
+      evidence: `artifacts/m2-mmu-takeover-gate.txt`,
       `artifacts/m2-firmware-regs.txt`, `artifacts/m2-table-walk.txt`,
       `artifacts/m2-mmu-bisect-tlbi.txt`). The VZ serial gate's remaining
-      blocker is device absence, not a crash.
+      blocker is post-exit access to the virtio-pci console transport,
+      not a crash.
 - [x] Milestone two bad-handoff failure gate: **passing** (fixed 2026-08-06,
       `agent/buffy/m2-badhandoff-fix`). Root cause was the naked `_start`
       shim's `bl kernel_main` overwriting the link register without
