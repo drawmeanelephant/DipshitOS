@@ -81,8 +81,8 @@ root-caused and **fixed** (claim 0010, 2026-08-07): the identity-map switch
 now completes on VZ and the ladder reaches `M2_SERIA`. Claim 0013 then
 decoded the declared windows (Apple's efivars store + an internal debug
 UART) and found the real console — a virtio-pci device outside them — but
-post-exit access to its transport hangs on VZ, which remains the VZ serial
-gate's blocker. The canonical, always-current gate table lives in
+post-MMU access to its transport hangs on VZ (the MMU switch destroys
+access, claim 0020), which remains the VZ serial gate's blocker. The canonical, always-current gate table lives in
 [`docs/status.md`](status.md).
 
 
@@ -192,7 +192,7 @@ mock-tested), and transcript test gate (`zig build test-console`) are all
 ✅ done and gate-passing in CI. The MMU-takeover death is fixed (claim 0010),
 the console is identified (virtio-pci, claim 0013), and the NVRAM console
 channel carries post-exit bytes (claim 0015) — but the **VZ serial gate**
-remains ⛔ blocked on post-exit access to the virtio transport, so live
+remains ⛔ blocked on post-MMU access to the virtio transport, so live
 guest keystrokes cannot be proven yet. Current gate state:
 [`docs/status.md`](status.md).
 
@@ -205,15 +205,16 @@ banner, mock-level transcript gate), and the host-side `--console`
 plumbing landed (steps 4–7); the milestone is **not** closed yet because
 the live serial channel is still open: the kernel console is polled
 TX-only with no RX path (ADR 0004) and the VZ serial gate remains blocked
-on post-exit access to the virtio-pci console transport — a post-exit-safe
-transport and the RX path are the next steps (see
+on post-MMU access to the virtio-pci console transport — reliable
+post-MMU transport access and the RX path are the next steps (see
 [`docs/status.md`](status.md)).
 
 ## Later milestones (sketches only, not commitments)
 
-- **M1.5 close-out: post-exit console transport + serial RX.** The console
-  is already identified (virtio-pci, claim 0013); the work is a
-  post-exit-safe way to reach it (post-exit access hangs on VZ) and then
+- **M1.5 close-out: post-MMU console transport + serial RX.** The console
+  is already identified (virtio-pci, claim 0013); the work is reliable
+  post-MMU access to it (post-MMU access hangs on VZ — the MMU switch is
+  the killer, claim 0020) and then
   the RX path (the milestone-two console is polled TX-only, ADR 0004; the
   kernel's `readByte` is a no-RX stub). This is what stands between the
   current mock-level monitor and a live `dipshit>` session.

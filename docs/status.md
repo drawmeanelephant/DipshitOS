@@ -54,16 +54,16 @@ Every gate below is backed by evidence re-verified
 | Binary + image inspect | `zig build inspect` | ✅ pass | re-run 2026-08-06 |
 | Swift runner build | `swift build --package-path host/vm-runner` | ✅ pass | re-run 2026-08-06 |
 | Context snapshot | `zig build context` | ✅ pass | re-run 2026-08-06 |
-| **VZ serial gate** | `zig build run` | ❌ **not passed** | `vm-serial.log` still 0 bytes; **blocker now precise (claim 0013, 2026-08-07):** console is a virtio-pci device (bus 0 D5 `0x1af4/0x1043`), transport armed pre-exit (`SEL=VIRTIO`, ladder reaches `M2_READY`), but **post-exit access to the transport window hangs on VZ** (first TX dies somewhere in the first flush). See [VZ serial gate](#vz-serial-gate) |
+| **VZ serial gate** | `zig build run` | ❌ **not passed** | `vm-serial.log` still 0 bytes; **blocker precise (claims 0013/0018/0020):** console is a virtio-pci device (bus 0 D5 `0x1af4/0x1043`), transport armed pre-exit (`SEL=VIRTIO`, ladder reaches `M2_READY`), but **post-MMU access to the transport window hangs on VZ** — the first post-switch BAR/common-config read does not return (claim 0018), and the MMU switch is the transition that destroys access, not ExitBootServices (claim 0020). See [Current blocker](#current-blocker-canonical--one-description-one-ordering) |
 | **Bad-handoff failure gate** | `bash tools/verify-bad-handoff.sh` | ✅ **pass** | `artifacts/m2-badhandoff-fix-after.txt`: `RC.TXT` → `kernel_rc=0x0000000000000002`, gate exits 0 (first observed 2026-08-06, fixed shim) |
 | **Marker fallback gate** (gate work item 3) | `bash tools/verify-marker.sh` | ✅ **pass** | `artifacts/m2-marker-gate.txt` (2026-08-07, re-verified `artifacts/m2-marker-reverify-20260807.txt`): NVRAM ladder `M2_ENTRY → … → M2_MAPD! → M2_MMUP! → M2_SERIA → M2_READY` — identity-map switch completes and probe/transport are reached (see [gate work item 3](#immediate-gate-work-prerequisites-for-m15), claims 0009/0010/0013) |
 | **MMU-takeover root cause & fix** (claim 0010) | `bash tools/verify-marker.sh` | ✅ **fixed 2026-08-07** | ladder now advances `M2_MAPD! → M2_MMUP! → M2_SERIA` — the identity-map switch **completes** on VZ for the first time (`artifacts/m2-mmu-takeover-gate.txt`; see claim 0010) |
-| **VZ serial console discovery** (claim 0013) | pre-exit probe + NVRAM dump | ✅ **discovered 2026-08-07** | console = modern virtio-pci (bus 0 D5 `VID=0x1af4 DID=0x1043 class=0x078000`), ECAM `0x40000000`, BAR0 (64-bit) @ `0x100010000`, transport decoded + armed pre-exit (`SEL=VIRTIO`, ladder `M2_READY`); declared MMIO windows decoded as Apple efivars store + internal debug UART. Gate still blocked: post-exit transport access hangs (see claim 0013) |
-| **NVRAM console channel** (claim 0015) | `bash tools/verify-nvram-console.sh` | ✅ **PASS 2026-08-07** | **first post-exit console bytes from a real VZ run**: 69–70 chunks reconstructed from `efi-vars.bin` — takeover banner, full memory map, probe record, shell banner, and real `version`/`mem`/`echo`/`help` command output (`artifacts/nvram-console-gate.txt`). Found + fixed a latent kernel bug on the way (ADR 0005: const function-pointer tables are not relocated by the flat loader — the first vtable dispatch on real hardware faulted; tables now built at runtime in BSS). See [VZ serial gate](#vz-serial-gate) |
+| **VZ serial console discovery** (claim 0013) | pre-exit probe + NVRAM dump | ✅ **discovered 2026-08-07** | console = modern virtio-pci (bus 0 D5 `VID=0x1af4 DID=0x1043 class=0x078000`), ECAM `0x40000000`, BAR0 (64-bit) @ `0x100010000`, transport decoded + armed pre-exit (`SEL=VIRTIO`, ladder `M2_READY`); declared MMIO windows decoded as Apple efivars store + internal debug UART. Gate still blocked: post-MMU transport access hangs (claims 0018/0020) |
+| **NVRAM console channel** (claim 0015) | `bash tools/verify-nvram-console.sh` | ✅ **PASS 2026-08-07** | **first post-exit console bytes from a real VZ run**: 69–70 chunks reconstructed from `efi-vars.bin` — takeover banner, full memory map, probe record, shell banner, and real `version`/`mem`/`echo`/`help` command output (`artifacts/nvram-console-gate.txt`). Found + fixed a latent kernel bug on the way (ADR 0005: const function-pointer tables are not relocated by the flat loader — the first vtable dispatch on real hardware faulted; tables now built at runtime in BSS). See [Current blocker](#current-blocker-canonical--one-description-one-ordering) |
 
 ### Current blocker (canonical — one description, one ordering)
 
-**Blocker — reliable post-MMU access to the already-discovered virtio-pci console transport (class B) is required before live RX and a real interactive `dipshit>` session.** The console is a modern virtio-pci device (bus 0 D5 `0x1af4/0x1043`, BAR0 `0x100010000`, claim 0013); the transport arms pre-exit (`M2_READY`) and TX works pre-exit (claim 0017) and post-ExitBootServices on the firmware translation (claim 0020 phase B), but **hangs on the first post-MMU BAR/common-config read after the DipshitOS identity-map install** (claims 0018/0020, phase C/D). ExitBootServices itself is exonerated; the MMU switch (B→C) is the transition that destroys access (claim 0020). Firmware and kernel memory attributes are byte-identical (claim 0021), so the hang is not an attribute mismatch; the no-TLBI safety contract and its validity window are in **ADR 0006** (claim 0022). The **NVRAM fallback console (claim 0015)** carries post-exit bytes via runtime `SetVariable` (69–70 chunks, shell + commands observed) but is not the virtio serial pipe; the **mock transcript (`zig build test-console`, class A)** is a portable host test, not VZ hardware. Ordering is explicit: **post-MMU virtio TX first, then virtio RX / live transcript** — RX cannot bypass the unresolved TX/MMU layer. Class definitions: `docs/gate-inventory.md` (class A = portable/CI, class B = Apple-silicon/VZ hardware, class C = interactive, class D = diagnostic); a green CI badge proves class A only.
+**Blocker — reliable post-MMU access to the already-discovered virtio-pci console transport (class B) is required before live RX and a real interactive `dipshit>` session.** The console is a modern virtio-pci device (bus 0 D5 `0x1af4/0x1043`, BAR0 `0x100010000`, claim 0013); the transport arms pre-exit (`M2_READY`) and TX works pre-exit (claim 0017) and post-ExitBootServices on the firmware translation (claim 0020 phase B), but **hangs on the first post-MMU BAR/common-config read after the DipshitOS identity-map install** (claims 0018/0020, phase C/D). ExitBootServices itself is exonerated; the MMU switch (B→C) is the transition that destroys access (claim 0020). Firmware and kernel memory attributes are byte-identical (claim 0021), so the hang is not an attribute mismatch; the no-TLBI safety contract and its validity window are in **ADR 0006** (claim 0022). The **NVRAM fallback console (claim 0015)** carries post-exit bytes via runtime `SetVariable` (69–70 chunks, shell + commands observed) but is not the virtio serial pipe; the **mock transcript (`zig build test-console`, class A)** is a portable host test, not VZ hardware. Ordering is explicit: **post-MMU virtio TX first, then virtio RX / live transcript** — RX cannot bypass the unresolved TX/MMU layer. Newest diagnostic on this exact layer (claim 6460, class D, 2026-08-08): correcting the T0SZ start-level mismatch (25→16) restored end-to-end post-MMU TX in 6/18 boots across three runs — hypothesis strengthened, not reproducible; production T0SZ stays 25 (see `docs/gate-inventory.md`). Class definitions: `docs/gate-inventory.md` (class A = portable/CI, class B = Apple-silicon/VZ hardware, class C = interactive, class D = diagnostic); a green CI badge proves class A only.
 
 Re-verified marker/host gates on merged `main` (2026-08-07): host-console gate ✅ `artifacts/m15-host-console-reverify-20260807.txt`; marker re-verify ladder `M2_ENTRY → … → M2_READY` (`artifacts/m2-marker-reverify-20260807.txt`); bad-handoff re-verify ✅ `artifacts/m2-badhandoff-reverify-20260807.txt`.
 
@@ -122,7 +122,7 @@ bullets in `hardware-contract.md` and ADR 0006). The ladder now runs
 That "device absence in the declared windows" reading of `M2_SERIA` is
 itself superseded by claim 0013 (declared windows are Apple's efivars store
 + debug UART; the real console is virtio-pci outside them). See
-[Current blocker](#current-blocker) and [The device absence is now fully explained](#what-we-directly-observe-about-the-serial-gate-and-the-bad-handoff-fix).
+[Current blocker](#current-blocker-canonical--one-description-one-ordering) and [The device absence is now fully explained](#what-we-directly-observe-about-the-serial-gate-and-the-bad-handoff-fix).
 
 Also observed (still current): the ADR 0004 D4 *memory-dump* form is
 **impossible on VZ** — guest RAM is not host-mapped (claim 0009).
@@ -143,13 +143,13 @@ class=0x078000` — found by pre-exit PCI enumeration over ECAM `0x40000000`
 (MCFG). Its 64-bit BAR0 is firmware-assigned at `0x100010000` (above the
 4 GiB identity-map blanket; assignment varies across boots, which is why the
 fixed-window probe never saw it), and the transport is fully armed pre-exit
-(`SEL=VIRTIO`, ladder reaches `M2_READY`). The remaining wall is **post-exit
-access to the transport window hangs on VZ** — the same wall that blocks
-post-exit MMIO reads of the declared windows (the first banner TX dies
-somewhere in the first flush; `vm-serial.log` stays 0 B). Next step: carry
-the console bytes over a post-exit-safe channel (the runtime `SetVariable`
-NVRAM channel is proven alive post-exit) or find a VZ configuration that
-keeps the transport reachable after the MMU switch.
+(`SEL=VIRTIO`, ladder reaches `M2_READY`). The remaining wall is **post-MMU access to the transport window hangs on
+VZ** — the first post-switch BAR/common-config read does not return
+(claims 0018/0020; the MMU switch is the killer, not ExitBootServices).
+Claim 0015 then carried the console bytes over a post-exit-safe channel
+(the runtime `SetVariable` NVRAM channel — next paragraph); the open work
+is reliable post-MMU access to the transport (see
+[Current blocker](#current-blocker-canonical--one-description-one-ordering)).
 
 **The post-exit-safe channel is now live (claim 0015, 2026-08-07).** The
 NVRAM console channel carries the kernel's console bytes over runtime
@@ -251,7 +251,7 @@ dipshit>
 
 **Ordering after M1.5 is explicit and enforced by evidence classification** (`docs/gate-inventory.md`):
 
-1. **Reliable post-MMU access to the already-discovered virtio-pci console transport (post-MMU virtio TX, class B).** This is the blocker that must be solved first (see [Current blocker](#current-blocker)): transport is armed pre-exit and works pre-ExitBootServices and on the firmware translation (claims 0017/0020 A–B) but hangs on the first post-MMU BAR read (claims 0018/0020 C–D). Live RX and a real `dipshit>` session cannot be proven until this TX/MMU layer is reliable — RX cannot bypass it.
+1. **Reliable post-MMU access to the already-discovered virtio-pci console transport (post-MMU virtio TX, class B).** This is the blocker that must be solved first (see [Current blocker](#current-blocker-canonical--one-description-one-ordering)): transport is armed pre-exit and works pre-ExitBootServices and on the firmware translation (claims 0017/0020 A–B) but hangs on the first post-MMU BAR read (claims 0018/0020 C–D). Live RX and a real `dipshit>` session cannot be proven until this TX/MMU layer is reliable — RX cannot bypass it.
 2. **Virtio RX / live transcript (class B `live-transcript-rx`)** — host keystrokes reaching the kernel end to end, then a live `vm-serial.log` transcript assertion (deferred to claim 0002; mock transcript `zig build test-console` is class A and is not that gate).
 3. A physical page allocator over the captured EFI map (deferred).
 4. Exception vectors, GIC + timer interrupts — then, and only then, talk about tasks or userspace (deferred).
@@ -268,8 +268,8 @@ The command layer above is already portable; `docs/march-m15.md` step 15's files
   (claim 0013, bus 0 D5 `0x1af4/0x1043`, BAR `0x100010000`); the transport is
   armed pre-exit and pre-exit TX works (claims 0013/0017). What remains
   blocked is **post-MMU access to that transport** (claims 0018/0020), not
-  discovery; the block device register layout stays [inferred] until TX is
-  driven post-MMU.
+  discovery; the virtio console's register layout stays [inferred] until TX
+  is actually driven post-MMU (see `docs/hardware-contract.md`).
 - **Runner serial input was `nil`; it is now a real handle in `--console`
   mode.** The evidence path (`zig build run`) still uses
   `VZFileHandleSerialPortAttachment(fileHandleForReading: nil, ...)`
@@ -384,7 +384,7 @@ here.
    `memory-map descriptors=0x...`, and `kernel terminal state` in
    `vm-serial.log`; then flip matching `[inferred] → [observed]` entries in
    `docs/hardware-contract.md`.
-   **Status:** see [`0002-vz-serial-gate`](claims/0002-vz-serial-gate.md) — ⛔ blocked (virtio TX hangs post-exit on VZ), but the post-exit-safe fallback now passes: the NVRAM console channel (claim 0015, `bash tools/verify-nvram-console.sh`) reconstructs the kernel's post-exit console stream from `efi-vars.bin` — first post-exit console evidence from a real VZ run (also found + fixed the ADR-0005 flat-loader relocation bug). The blocker is isolated to the virtio transport itself (claims 0013/0002).
+   **Status:** see [`0002-vz-serial-gate`](claims/0002-vz-serial-gate.md) — ⛔ blocked (virtio TX hangs post-MMU on VZ — the MMU switch destroys access, claims 0018/0020), but the post-exit-safe fallback now passes: the NVRAM console channel (claim 0015, `bash tools/verify-nvram-console.sh`) reconstructs the kernel's post-exit console stream from `efi-vars.bin` — first post-exit console evidence from a real VZ run (also found + fixed the ADR-0005 flat-loader relocation bug). The blocker is isolated to the virtio transport itself (claims 0013/0002).
 3. **If no usable serial device exists on VZ**, implement the ADR 0004 D4
    fixed-memory-marker fallback (host-side dump of the kernel's BSS
    `takeover_marker`). **Gate:** saved host-side dump matching the `M2_*`
@@ -397,8 +397,10 @@ here.
    window**. That death is now **root-caused and fixed by claim 0010** (see
    the [gate table](#gate-status)): the ladder advances
    `M2_MAPD! → M2_MMUP! → M2_SERIA`, the switch completes, and the probe
-   runs to completion finding no usable device. See claim 0009 for the
-   original ladder and claim 0010 for the root cause and fix.
+   runs to completion finding no usable device in the declared windows
+   (that reading is superseded by claim 0013 — the real console is a
+   virtio-pci device outside them, see the gate table). See claim 0009 for
+   the original ladder and claim 0010 for the root cause and fix.
 
 ## Housekeeping conventions (keep the project nice as it evolves)
 

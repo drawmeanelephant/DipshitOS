@@ -19,8 +19,9 @@ for the project rules.
   MMU-takeover death is root-caused and **fixed** (claim 0010: the
   identity-map switch now completes on VZ; marker ladder reaches
   `M2_SERIA`); claim 0013 found the real console is a virtio-pci device
-  outside the declared MMIO windows, but post-exit access to its
-  transport hangs on VZ, so the VZ serial gate remains blocked. The
+  outside the declared MMIO windows, but post-MMU access to its
+  transport hangs on VZ (the MMU switch destroys access, claims
+  0018/0020), so the VZ serial gate remains blocked. The
   bad-handoff, marker-fallback, and NVRAM-console gates pass. Current VZ
   gate state: see [`docs/status.md`](docs/status.md).
 - **Current:** milestone 1.5 — the interactive `dipshit>` kernel monitor.
@@ -66,7 +67,7 @@ D/I-cache maintenance, and jumps to the kernel entry. It writes
 validates handoff v2, captures the map, exits Boot Services, builds and
 installs identity TTBR0_EL1 tables, probes PL011/16550/virtio-MMIO candidates,
 and is designed to print the takeover banner and enter a terminal WFE loop
-(**not yet observed on VZ** — post-exit access to the virtio-pci console
+(**not yet observed on VZ** — post-MMU access to the virtio-pci console
 transport hangs; see `docs/status.md`). Its fixed page tables and virtio queue storage are BSS
 carve-outs; there is no general allocator or libc/POSIX. Milestone 1.5 adds
 the interactive monitor (`kernel/src/{console,lineedit,tokenizer,shell,monitor}.zig`).
@@ -171,7 +172,7 @@ M2_SERIA`, the switch completes, and the declared-window probe runs to
 completion without a hit (claim 0013 later decoded those windows as Apple's
 efivars store + an internal debug UART, and found the real console is a
 virtio-pci device outside them). The VZ serial gate remains blocked on
-post-exit access to that transport. Current gate state:
+post-MMU access to that transport (claims 0018/0020). Current gate state:
 [`docs/status.md`](docs/status.md). The implementation and build checks
 below must not be read as hardware evidence.
 
@@ -184,7 +185,7 @@ Host: Apple M4, macOS 27.0 (arm64), Zig 0.16.0, Swift 6.2.3 (arm64).
 | Build image | `zig build image` | **Observed**: 64 MiB GPT+FAT32 image; `EFI/BOOT/BOOTAA64.EFI` (139264 B) present; volume label `DIPSHITOS` |
 | Inspect image | `zig build inspect` | **Observed**: `DOS/MBR boot sector` (protective), GPT header crc valid, ESP `LBA 2048..131038` |
 | Build Swift runner | `swift build --package-path host/vm-runner` | **Observed**: SwiftPM build succeeds |
-| Boot via Virtualization.framework | `zig build run` | **Observed**: VM boots; loader writes `\BOOTED.TXT` + `\LOADER.TXT` byte-perfect. M2 serial gate **blocked** — no serial bytes (post-exit access to the virtio-pci console transport hangs, claims 0013/0020) |
+| Boot via Virtualization.framework | `zig build run` | **Observed**: VM boots; loader writes `\BOOTED.TXT` + `\LOADER.TXT` byte-perfect. M2 serial gate **blocked** — no serial bytes (post-MMU access to the virtio-pci console transport hangs, claims 0018/0020) |
 | Kernel image | `zig build` + `elf2bin.py` | **Observed**: `KERNEL.BIN` (format v1: magic `DSK1`, `entry_offset=0x18`, ~2 KiB) |
 | Kernel marker `\KERNEL.TXT` | M1 regression only | **Observed**: byte-perfect and byte-identical across runs (ADR 0002 corruption fixed); not written post-`ExitBootServices` |
 | Marker fallback gate | `bash tools/verify-marker.sh` | **Observed** (2026-08-07): NVRAM ladder `M2_ENTRY → M2_CMAP! → M2_PREX! → M2_EXIT! → M2_MAPD!` (claim 0009); **fixed 2026-08-07 (claim 0010)**: ladder now reaches `M2_MMUP! → M2_SERIA` — MMU takeover completes; declared-window probe finds no device (windows later decoded as efivars store + debug UART, claim 0013) (`artifacts/m2-mmu-takeover-gate.txt`) |
@@ -203,8 +204,9 @@ All command output and logs are saved under `artifacts/` (`inspect.txt`,
   ladder reaches `M2_SERIA`), `zig build test-console` (M1.5 transcript
   gate, mock console), and `bash tools/verify-host-console.sh` (M1.5 host
   plumbing). The M1.5 monitor (14 commands) is implemented and
-  host-tested; the VZ serial gate's remaining blocker is post-exit access
-  to the virtio-pci console transport (see `docs/status.md`).
+  host-tested; the VZ serial gate's remaining blocker is post-MMU access
+  to the virtio-pci console transport (claims 0018/0020; see
+  `docs/status.md`).
 - The Virtualization.framework VM boots the GPT+FAT image: configuration
   validates, the EFI variable store is created, the VM starts and runs, and
   after boot the guest-written marker file `\BOOTED.TXT` exists on the ESP
@@ -227,21 +229,21 @@ The gate-by-gate plan and active work claims live in
 [`docs/status.md`](docs/status.md); the milestone plan is in
 [`docs/roadmap.md`](docs/roadmap.md).
 
-1. **Close the M1.5 serial gap: post-exit console transport + RX.** The
+1. **Close the M1.5 serial gap: post-MMU console transport + RX.** The
    monitor itself is implemented and host-tested (console abstraction,
    line editor, tokenizer, 14 commands, `zig build test-console`
    transcript gate at the mock level; the host-side `--console` plumbing
    is gated by `bash tools/verify-host-console.sh`). The console device
    is found (a virtio-pci console, claim 0013) and the NVRAM channel
-   carries post-exit console bytes (claim 0015), but post-exit access to
+   carries post-exit console bytes (claim 0015), but post-MMU access to
    the virtio transport itself hangs on VZ, so the kernel's `readByte`
-   is still a no-RX stub and keystrokes cannot reach a live VM. Next: a
-   post-exit-safe console transport and the RX path, end to end. Tracked
-   step-by-step in `docs/status.md` / `docs/march-m15.md`.
+   is still a no-RX stub and keystrokes cannot reach a live VM. Next:
+   reliable post-MMU console transport access and the RX path, end to
+   end. Tracked step-by-step in `docs/status.md` / `docs/march-m15.md`.
 2. Resolve the milestone-two VZ serial gate itself: with the MMU-takeover
    death fixed and the console identified, the remaining blocker is
-   post-exit access to the virtio transport — run the complete Apple M4 /
-   macOS 27 gate once a post-exit-safe console transport exists and save
+   post-MMU access to the virtio transport — run the complete Apple M4 /
+   macOS 27 gate once reliable post-MMU transport access exists and save
    output under `artifacts/`. Only then may the matching MMIO/serial
    assumptions change from `[inferred]` to `[observed]` in
    `docs/hardware-contract.md`. (The bad-handoff failure gate — formerly
