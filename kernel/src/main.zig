@@ -33,6 +33,34 @@ const shell = @import("shell.zig");
 const build_options = @import("build_options");
 const nvram_console = @import("nvram_console.zig");
 
+// Claim 0020: TX-transition matrix phases. Each option is default off; a
+// default build is byte-identical. A diagnostic build enables exactly ONE
+// phase, which runs a single controlled TX attempt at its named location
+// (A pre-EBS, B post-EBS/pre-MMU, C post-MMU, D final location).
+const tx_transition_a = build_options.tx_transition_a; // pre-ExitBootServices
+const tx_transition_b = build_options.tx_transition_b; // post-EBS, firmware translation still active
+const tx_transition_c = build_options.tx_transition_c; // post identity-map install, before unrelated work
+const tx_transition_d = build_options.tx_transition_d; // normal final location (banner site)
+const tx_transition_enabled = tx_transition_a or tx_transition_b or tx_transition_c or tx_transition_d;
+// Claim 0021: firmware MMU-state capture (default off; the default build is
+// byte-identical). Records the firmware's live MMU registers and a bounded
+// walk of its TTBR0 tables for the virtio BAR0 window + a RAM control
+// address, plus the kernel's planned values, persisted pre-exit.
+const fw_mmu_capture = build_options.fw_mmu_capture;
+// Claim 0020: the matrix is only meaningful with ONE phase per build — a
+// second experiment in the same boot would contaminate the transport state
+// of the later phase (its TX attempt would no longer be the first on the
+// armed transport). Reject combined phase options at compile time.
+comptime {
+    if (tx_transition_enabled) {
+        const phases = @as(usize, @intFromBool(tx_transition_a)) +
+            @as(usize, @intFromBool(tx_transition_b)) +
+            @as(usize, @intFromBool(tx_transition_c)) +
+            @as(usize, @intFromBool(tx_transition_d));
+        if (phases != 1) @compileError("tx-transition: enable EXACTLY ONE phase (-Dtx-transition-{a,b,c,d})");
+    }
+}
+
 const HandoffV2 = extern struct {
     magic: u32,
     version: u32,
@@ -97,6 +125,26 @@ const marker_txan: u64 = 0x4d325f5458414e21; // "M2_TXAN!" — 7 after notify
 const marker_txup: u64 = 0x4d325f5458555021; // "M2_TXUP!" — 8 entered used-ring poll
 const marker_txuc: u64 = 0x4d325f5458554321; // "M2_TXUC!" — 9 device changed used.idx (break condition seen)
 const marker_txfr: u64 = 0x4d325f5458465221; // "M2_TXFR!" — 10 flush returned
+// Claim 0020: TX-transition matrix markers. Build-gated `-Dtx-transition-*`
+// (one phase per build). For each phase x ∈ {A=pre-EBS, B=post-EBS/pre-MMU,
+// C=post-MMU, D=final location}: M2_TRx1! = experiment entered, about to
+// flush; M2_TRx2! = flush returned; M2_TRxU! = flush returned AND used.idx
+// advanced (device consumed). Absence of x2 with x1 present = hung inside
+// the flush; x2 present without xU = returned but the device never consumed.
+// M2_TRNX! = experiment skipped (transport not armed pre-exit).
+const marker_tra1: u64 = 0x4d325f5452413121; // "M2_TRA1!"
+const marker_tra2: u64 = 0x4d325f5452413221; // "M2_TRA2!"
+const marker_trau: u64 = 0x4d325f5452415521; // "M2_TRAU!"
+const marker_trb1: u64 = 0x4d325f5452423121; // "M2_TRB1!"
+const marker_trb2: u64 = 0x4d325f5452423221; // "M2_TRB2!"
+const marker_trbu: u64 = 0x4d325f5452425521; // "M2_TRBU!"
+const marker_trc1: u64 = 0x4d325f5452433121; // "M2_TRC1!"
+const marker_trc2: u64 = 0x4d325f5452433221; // "M2_TRC2!"
+const marker_trcu: u64 = 0x4d325f5452435521; // "M2_TRCU!"
+const marker_trd1: u64 = 0x4d325f5452443121; // "M2_TRD1!"
+const marker_trd2: u64 = 0x4d325f5452443221; // "M2_TRD2!"
+const marker_trdu: u64 = 0x4d325f5452445521; // "M2_TRDU!"
+const marker_trnx: u64 = 0x4d325f54524e5821; // "M2_TRNX!"
 
 // Marker NVRAM channel: EFI Runtime Services `SetVariable` survives
 // ExitBootServices (it is a *runtime* service, not a boot service — the same
@@ -348,6 +396,18 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff: *HandoffV2
     // gate (tools/verify-preexit-tx.sh). Diagnostic only — the post-exit
     // banner TX is untouched.
     if (comptime build_options.preexit_tx) preexit_tx_experiment(st);
+    // Claim 0020 phase A: the same fixed line through the same transport,
+    // still pre-ExitBootServices. Runs immediately before the pre-exit
+    // marker so a hang cannot lose the persisted probe evidence.
+    if (comptime tx_transition_a) transition_tx_experiment(st, .a);
+    // Claim 0021 diagnostic (build-gated `-Dfw-mmu-capture`): while the
+    // firmware translation is still live, record the firmware's MMU
+    // registers + a bounded walk of its TTBR0 tables for the virtio BAR0
+    // window (the claim-0020 post-switch hang target) and a RAM control
+    // address, plus the kernel's planned values. Persisted as its own small
+    // ASCII variable, immediately before the pre-exit marker/exit so a hang
+    // cannot lose it.
+    if (comptime fw_mmu_capture) fw_mmu_capture_diag(st, handoff);
 
     // Pre-exit stage: proves the kernel passed valid_handoff + capture_map
     // and reached the exit call. The persisted NVRAM marker being M2_ENTRY
@@ -382,6 +442,12 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff: *HandoffV2
     }
     set_marker(marker_exit);
     write_marker_var(st, marker_exit); // first post-exit runtime-services call
+    // Claim 0020 phase B: the FIRST post-exit TX attempt, immediately after
+    // a successful ExitBootServices while the firmware's translation regime
+    // is still active (DipshitOS page tables are not yet built). This is
+    // the controlled test of whether ExitBootServices itself destroys
+    // access to the transport window.
+    if (comptime tx_transition_b) transition_tx_experiment(st, .b);
 
     // After successful exit, no longer allowed: AllocatePool/AllocatePages,
     // GetMemoryMap, SimpleTextOutput, Simple File System,
@@ -404,6 +470,13 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff: *HandoffV2
     install_identity_map();
     set_marker(marker_mmu);
     write_marker_var(st, marker_mmu);
+    // Claim 0020 phase C: the FIRST MMIO access to the transport after the
+    // identity-map switch, before the post-switch probe (M2_RAW!) or any
+    // other runtime-service/diagnostic work. Tests whether installing the
+    // DipshitOS page tables destroys access (the claim-0013/0018
+    // hypothesis), with the marker write above being the only prior
+    // post-switch call.
+    if (comptime tx_transition_c) transition_tx_experiment(st, .c);
 
     const selected = probe_serial(map_after_exit, st);
     console_kind = selected.kind;
@@ -418,6 +491,9 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff: *HandoffV2
     write_marker_var(st, marker_ready);
 
     st_tx = st; // for flush stage markers
+    // Claim 0020 phase D: TX at the normal final location — the same site
+    // where the production banner transmits. Same payload as phases A/B/C.
+    if (comptime tx_transition_d) transition_tx_experiment(st, .d);
     uart_puts("DipshitOS kernel has seized control.\n");
     // Claim 0013: after the first TX, record whether the TX path returned
     // (bytes may still be dropped by the device; the serial log is the gate,
@@ -1700,8 +1776,13 @@ fn virtio_pci_flush() void {
         dump_hex(vp_read8(0x14));
         dump_str("\n");
         // Claim 0015: the post-exit probe tail is skipped in nvram-console
-        // builds for the same store-budget reason as the full dump.
-        if (comptime !build_options.nvram_console) {
+        // builds for the same store-budget reason as the full dump. Claim
+        // 0020: it is also skipped in TX-transition builds — a 512-byte
+        // post-exit SetVariable inside the bracketed window would be a
+        // confound (the class of write claim 0013 proved hangs post-exit;
+        // claim 0018 removed it in diag builds for the same reason), leaving
+        // only MMIO accesses + marker writes in the window.
+        if (comptime (!build_options.nvram_console and !tx_transition_enabled)) {
             if (st_tx != null) write_probe_tail(st_tx.?);
         }
     }
@@ -1774,6 +1855,309 @@ fn preexit_tx_experiment(st: *const SystemTable) void {
     virtio_pci_flush();
     write_marker_var(st, marker_pexd);
     st_tx = null;
+}
+
+// ---------------------------------------------------------------------------
+// Claim 0020 diagnostic: TX-transition matrix. One phase per build (selected
+// by -Dtx-transition-{a,b,c,d}), each running ONE controlled TX attempt at
+// its named location with the SAME fixed payload, the SAME armed transport
+// (armed pre-exit by virtio_pci_init, never transmitted before the phase's
+// experiment) and the SAME virtio_pci_flush() as the production path. The
+// attempt is bracketed by persistent NVRAM markers (claim-0009 channel):
+// M2_TRx1! before the flush, M2_TRx2! when the flush returns, M2_TRxU! if
+// used.idx advanced (the device consumed the buffer). The flush's own
+// M2_TXST!/M2_TXNT!/M2_TXPL! stage markers (persisted because st_tx is set)
+// name the hang site inside the flush. M2_TRNX! records a skipped attempt
+// (transport not armed). The FIRST failed phase names the transition that
+// destroys console access (see the claim file's interpretation table).
+// ---------------------------------------------------------------------------
+const transition_tx_line = "DIPSHITOS TRANSITION TX\n";
+const TxPhase = enum { a, b, c, d };
+
+fn transition_tx_experiment(st: *const SystemTable, phase: TxPhase) void {
+    const enter: u64 = switch (phase) {
+        .a => marker_tra1,
+        .b => marker_trb1,
+        .c => marker_trc1,
+        .d => marker_trd1,
+    };
+    const returned: u64 = switch (phase) {
+        .a => marker_tra2,
+        .b => marker_trb2,
+        .c => marker_trc2,
+        .d => marker_trd2,
+    };
+    const used_adv: u64 = switch (phase) {
+        .a => marker_trau,
+        .b => marker_trbu,
+        .c => marker_trcu,
+        .d => marker_trdu,
+    };
+    if (!vp_ready or vp_tx_len != 0) {
+        write_marker_var(st, marker_trnx);
+        return;
+    }
+    write_marker_var(st, enter);
+    st_tx = st; // flush stage markers (TXST!/TXNT!/TXPL!) persist
+    var i: usize = 0;
+    while (i < transition_tx_line.len and i < virtio_tx.len) : (i += 1) {
+        virtio_tx[i] = transition_tx_line[i];
+    }
+    vp_tx_len = i;
+    const used_before = virtio_last_used;
+    virtio_pci_flush(); // may hang — the ladder's last marker names the site
+    write_marker_var(st, returned);
+    invalidate_dcache_range(@intFromPtr(&virtio_used), @sizeOf(VirtqUsed));
+    if (virtio_used.idx != used_before) write_marker_var(st, used_adv);
+    st_tx = null;
+}
+
+// ---------------------------------------------------------------------------
+// Claim 0021 diagnostic: firmware MMU-state capture (-Dfw-mmu-capture,
+// default off). Pre-exit, while the firmware translation regime is still
+// live, record SCTLR/TCR/MAIR/TTBR0/TTBR1/ID_AA64MMFR0 plus a bounded walk
+// of the firmware's TTBR0 tables for the virtio BAR0 window (the
+// claim-0020 post-switch hang target) and a RAM control address, and the
+// kernel's planned values — so the host can diff the two translation
+// regimes. Persisted as the single small ASCII variable `DipshitMmu` via
+// the proven pre-exit SetVariable channel (no re-write of the big
+// `DipshitProbe` chunks — the store budget is ~61 KB on VZ, claim 0015).
+// ---------------------------------------------------------------------------
+const mmu_var_name = utf16z("DipshitMmu");
+var mmu_dump: [4096]u8 = undefined;
+var mmu_dump_len: usize = 0;
+
+fn mmu_str(text: []const u8) void {
+    if (text.len > mmu_dump.len - mmu_dump_len) return;
+    @memcpy(mmu_dump[mmu_dump_len .. mmu_dump_len + text.len], text);
+    mmu_dump_len += text.len;
+}
+
+fn mmu_hex(value: u64) void {
+    var tmp: [18]u8 = undefined;
+    tmp[0] = '0';
+    tmp[1] = 'x';
+    var index: usize = 2;
+    var shift: u6 = 60;
+    while (true) : (shift -= 4) {
+        const digit: u8 = @intCast((value >> shift) & 0xf);
+        tmp[index] = if (digit < 10) '0' + digit else 'a' + digit - 10;
+        index += 1;
+        if (shift == 0) break;
+    }
+    mmu_str(tmp[0..index]);
+}
+
+fn read_sctlr() u64 {
+    var value: u64 = undefined;
+    asm volatile ("mrs %[value], sctlr_el1"
+        : [value] "=r" (value),
+    );
+    return value;
+}
+
+fn read_tcr() u64 {
+    var value: u64 = undefined;
+    asm volatile ("mrs %[value], tcr_el1"
+        : [value] "=r" (value),
+    );
+    return value;
+}
+
+fn read_mair() u64 {
+    var value: u64 = undefined;
+    asm volatile ("mrs %[value], mair_el1"
+        : [value] "=r" (value),
+    );
+    return value;
+}
+
+fn read_ttbr0() u64 {
+    var value: u64 = undefined;
+    asm volatile ("mrs %[value], ttbr0_el1"
+        : [value] "=r" (value),
+    );
+    return value;
+}
+
+fn read_ttbr1() u64 {
+    var value: u64 = undefined;
+    asm volatile ("mrs %[value], ttbr1_el1"
+        : [value] "=r" (value),
+    );
+    return value;
+}
+
+/// Initial lookup level for a 4 K-granule TTBR0 walk from the VA width
+/// W = 64 - T0SZ (ARM ARM, translation table lookup rules): W 39..48 → L0,
+/// 30..38 → L1, 21..29 → L2, 12..20 → L3.
+fn fw_initial_level(va_width: usize) u8 {
+    if (va_width >= 39) return 0;
+    if (va_width >= 30) return 1;
+    if (va_width >= 21) return 2;
+    return 3;
+}
+
+const FwWalk = struct {
+    found: bool,
+    level: u8,
+    entry: u64,
+    entry_addr: u64,
+};
+
+/// Bounded walk of a TTBR0 table tree (4 K granule) for `va`, starting at
+/// the initial level implied by T0SZ. Records the final descriptor (block or
+/// page) or stops at an invalid entry. Volatile reads: the tables are plain
+/// firmware RAM, fully readable pre-exit.
+fn fw_walk(ttbr0: u64, t0sz: u6, va: u64) FwWalk {
+    var result = FwWalk{ .found = false, .level = 0, .entry = 0, .entry_addr = 0 };
+    if (ttbr0 == 0) return result;
+    const va_width: usize = 64 - @as(usize, t0sz);
+    var level: u8 = fw_initial_level(va_width);
+    var addr = ttbr0 & ~@as(u64, 0xfff);
+    while (level <= 3) {
+        const shift: u6 = switch (level) {
+            0 => 39,
+            1 => 30,
+            2 => 21,
+            else => 12,
+        };
+        const index = (va >> shift) & 0x1ff;
+        const entry_addr = addr + index * 8;
+        const entry = @as(*const volatile u64, @ptrFromInt(entry_addr)).*;
+        result.entry_addr = entry_addr;
+        const kind = entry & 3;
+        if (kind == 0) return result; // invalid
+        if (kind == 1 or level == 3) { // block (or page at L3)
+            result.found = true;
+            result.level = level;
+            result.entry = entry;
+            return result;
+        }
+        addr = entry & ~@as(u64, 0xfff); // table: descend
+        level += 1;
+    }
+    return result;
+}
+
+/// Append one decoded descriptor line: kind, output base, MAIR attr index +
+/// byte, AF/SH/AP/XN bits.
+fn mmu_describe(tag: []const u8, walk: FwWalk, mair: u64) void {
+    mmu_str(tag);
+    mmu_str(" L");
+    mmu_str(&.{'0' + walk.level});
+    mmu_str(" @");
+    mmu_hex(walk.entry_addr);
+    mmu_str(" E=");
+    mmu_hex(walk.entry);
+    if (!walk.found) {
+        mmu_str(" INV\n");
+        return;
+    }
+    const out_shift: u6 = switch (walk.level) {
+        0 => 39,
+        1 => 30,
+        2 => 21,
+        else => 12,
+    };
+    // Output address field = bits [47:out_shift] of the descriptor (the
+    // bits above 47 are attributes such as XN/PXN and must be masked out).
+    const out_bits: u6 = 48 - out_shift;
+    const out = ((walk.entry >> out_shift) & ((@as(u64, 1) << out_bits) - 1)) << out_shift;
+    mmu_str(if ((walk.entry & 3) == 1) " BLK out=" else " PAG out=");
+    mmu_hex(out);
+    const aidx = (walk.entry >> 2) & 7;
+    mmu_str(" AIDX=");
+    mmu_hex(aidx);
+    mmu_str(" A=");
+    mmu_hex((mair >> @intCast(aidx * 8)) & 0xff);
+    mmu_str(" AF=");
+    mmu_hex((walk.entry >> 10) & 1);
+    mmu_str(" SH=");
+    mmu_hex((walk.entry >> 8) & 3);
+    mmu_str(" AP=");
+    mmu_hex((walk.entry >> 6) & 3);
+    mmu_str(" XN=");
+    mmu_hex((walk.entry >> 54) & 1);
+    mmu_str("\n");
+}
+
+fn fw_mmu_capture_diag(st: *const SystemTable, handoff: *const HandoffV2) void {
+    mmu_dump_len = 0;
+    const sctlr = read_sctlr();
+    const tcr = read_tcr();
+    const mair = read_mair();
+    const ttbr0 = read_ttbr0();
+    const ttbr1 = read_ttbr1();
+    const mmfr0 = read_mmfr0();
+
+    mmu_str("MMU SCTLR=");
+    mmu_hex(sctlr);
+    mmu_str("\n");
+    mmu_str("MMU TCR=");
+    mmu_hex(tcr);
+    const t0sz: u6 = @intCast(tcr & 0x3f);
+    const va_width: usize = 64 - @as(usize, t0sz);
+    mmu_str(" T0SZ=");
+    mmu_hex(t0sz);
+    mmu_str(" W=");
+    mmu_hex(va_width);
+    mmu_str(" INITLVL=");
+    mmu_hex(fw_initial_level(va_width));
+    mmu_str(" TG0=");
+    // ARMv8.1+ layout: TG0 at bits [15:14] (0b00 = 4 K granule).
+    mmu_hex((tcr >> 14) & 3);
+    mmu_str("\n");
+    mmu_str("MMU MAIR=");
+    mmu_hex(mair);
+    mmu_str("\n");
+    mmu_str("MMU TTBR0=");
+    mmu_hex(ttbr0);
+    mmu_str("\n");
+    mmu_str("MMU TTBR1=");
+    mmu_hex(ttbr1);
+    mmu_str("\n");
+    mmu_str("MMU IDAA64MMFR0=");
+    mmu_hex(mmfr0);
+    mmu_str("\n");
+
+    // Walk the firmware's TTBR0 tables for the virtio BAR0 window (the
+    // post-switch hang target, claim 0020) and a RAM control address.
+    if (vp_ready and vp_bar0 != 0) {
+        mmu_str("MMU WALK BAR va=");
+        mmu_hex(vp_bar0);
+        mmu_str("\n");
+        mmu_describe("MMU   ", fw_walk(ttbr0, t0sz, vp_bar0), mair);
+    } else {
+        mmu_str("MMU WALK BAR va=none (transport not armed)\n");
+    }
+    mmu_str("MMU WALK RAM va=");
+    mmu_hex(handoff.stack_base);
+    mmu_str("\n");
+    mmu_describe("MMU   ", fw_walk(ttbr0, t0sz, handoff.stack_base), mair);
+
+    // The kernel's planned values, for the host-side diff.
+    const ips: u64 = @min(read_mmfr0() & 0xf, 5);
+    mmu_str("MMU KERNEL-PLAN MAIR=");
+    mmu_hex(0x000000000000ff00); // Attr0 Device-nGnRnE, Attr1 Normal WB
+    mmu_str(" TCR=");
+    mmu_hex(25 | (ips << 32));
+    mmu_str(" TTBR0=");
+    mmu_hex(@intFromPtr(&table_storage[0]));
+    if (vp_ready and vp_bar0 != 0) {
+        mmu_str(" BAR=");
+        mmu_hex(vp_bar0);
+        mmu_str("|0x403"); // Device 4 K page descriptor: 0x3 | AF(1<<10)
+    }
+    mmu_str("\n");
+
+    _ = st.runtime_services._setVariable(
+        &mmu_var_name,
+        &marker_vendor_guid,
+        .{ .non_volatile = true, .bootservice_access = true, .runtime_access = true },
+        mmu_dump_len,
+        mmu_dump[0..mmu_dump_len].ptr,
+    );
 }
 
 fn probe_serial(_: MemoryMapSlice, st: *const SystemTable) Candidate {
