@@ -78,11 +78,11 @@ builds/installs identity TTBR0_EL1 tables, probes declared MMIO windows, and
 is designed to enter a terminal WFE loop after serial evidence. The MMU-
 takeover death the marker ladder first exposed (claim 0009, `M2_MAPD!`) was
 root-caused and **fixed** (claim 0010, 2026-08-07): the identity-map switch
-now completes on VZ and the ladder reaches `M2_SERIA` — the serial probe runs
-to completion but finds **no usable MMIO serial device** in the declared
-windows. That device absence, not a kernel crash, is the VZ serial gate's
-remaining blocker. UART/MMIO hardware assumptions stay `[inferred]`; the
-canonical, always-current gate table lives in
+now completes on VZ and the ladder reaches `M2_SERIA`. Claim 0013 then
+decoded the declared windows (Apple's efivars store + an internal debug
+UART) and found the real console — a virtio-pci device outside them — but
+post-exit access to its transport hangs on VZ, which remains the VZ serial
+gate's blocker. The canonical, always-current gate table lives in
 [`docs/status.md`](status.md).
 
 
@@ -159,14 +159,17 @@ console) either way.
 ### Milestone-two evidence status
 
 Every VZ run so far observed an empty `vm-serial.log`. The **NVRAM marker
-ladder** (ADR 0004 D4, claim 0009/0010, `artifacts/m2-mmu-takeover-gate.txt`)
+ladder** (ADR 0004 D4, claims 0009/0010, `artifacts/m2-mmu-takeover-gate.txt`)
 is the working evidence channel: the MMU takeover is observed to complete
-on VZ (ladder reaches `M2_MMUP!`), and the probe is observed to run to
-completion and find no usable MMIO serial device (`M2_SERIA`). No
-serial-device hardware assumption is flipped to `[observed]` — the guest
-MMIO address and register layout remain explicitly `[inferred]` in
-`docs/hardware-contract.md` until a real device is found; neither
-observation is device evidence.
+on VZ (ladder reaches `M2_MMUP!`), and claim 0013 observed the actual
+console — a modern virtio-pci device (`VID=0x1af4 DID=0x1043`) outside the
+declared windows (which it decoded as Apple's efivars store + an internal
+debug UART). Post-exit access to the virtio transport hangs on VZ (claims
+0013/0020), which is the serial gate's remaining blocker; the NVRAM console
+channel (claim 0015) carries post-exit console bytes in the meantime. The
+declared-window and virtio-pci findings are `[observed]` in
+`docs/hardware-contract.md`; the device register layout stays `[inferred]`
+until a real console is driven.
 
 ## Milestone 1.5 — interactive kernel monitor (current)
 
@@ -182,14 +185,16 @@ never returns; the monitor is its terminal-loop payload. It promises no new
 allocator, MMU work, interrupts, scheduler, userspace, or guest-side
 storage drivers.
 
-**Progress as of 2026-08-07:** the host plumbing (duplex serial attachment,
+**Progress as of 2026-08-08:** the host plumbing (duplex serial attachment,
 terminal handling, `zig build console`), console & shell core (RX abstraction,
 line editor, tokenizer, `dipshit>` prompt loop), command registry (14 commands,
 mock-tested), and transcript test gate (`zig build test-console`) are all
-✅ done and gate-passing in CI. The **VZ serial gate** remains ⛔ blocked
-(vm-serial.log is 0 bytes — the kernel dies between shim entry and its first
-post-exit `uart_puts`; the ADR 0004 D4 marker fallback is the next step).
-Live guest keystrokes cannot be proven until that gate passes.
+✅ done and gate-passing in CI. The MMU-takeover death is fixed (claim 0010),
+the console is identified (virtio-pci, claim 0013), and the NVRAM console
+channel carries post-exit bytes (claim 0015) — but the **VZ serial gate**
+remains ⛔ blocked on post-exit access to the virtio transport, so live
+guest keystrokes cannot be proven yet. Current gate state:
+[`docs/status.md`](status.md).
 
 The M1.5 hard gates, target screen, and milestone status live in
 **`docs/status.md`** (the living status document); the twenty-step plan,
@@ -200,14 +205,15 @@ banner, mock-level transcript gate), and the host-side `--console`
 plumbing landed (steps 4–7); the milestone is **not** closed yet because
 the live serial channel is still open: the kernel console is polled
 TX-only with no RX path (ADR 0004) and the VZ serial gate remains blocked
-on the absence of a usable MMIO serial device in the declared windows —
-device discovery and the RX path are the next steps (see
+on post-exit access to the virtio-pci console transport — a post-exit-safe
+transport and the RX path are the next steps (see
 [`docs/status.md`](status.md)).
 
 ## Later milestones (sketches only, not commitments)
 
-- **M1.5 close-out: device discovery + serial RX.** Find the VZ
-  virtio-console register file or a documented console fallback, then wire
+- **M1.5 close-out: post-exit console transport + serial RX.** The console
+  is already identified (virtio-pci, claim 0013); the work is a
+  post-exit-safe way to reach it (post-exit access hangs on VZ) and then
   the RX path (the milestone-two console is polled TX-only, ADR 0004; the
   kernel's `readByte` is a no-RX stub). This is what stands between the
   current mock-level monitor and a live `dipshit>` session.
