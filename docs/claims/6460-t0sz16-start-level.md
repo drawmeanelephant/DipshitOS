@@ -22,7 +22,7 @@
   common-cfg read), claim 0021 (firmware TCR/TTBR capture: T0SZ=28, initial
   level L1, BAR as 1 GiB Device block), ADR 0004 D3 (identity-map install,
   no-TLBI), ADR 0006 (MMU debt boundary), claim 0010 (no-TLBI survival)
-- **Status:** ✅ done 2026-08-08 — **T0SZ=16 lets the first post-MMU virtio-pci TX complete end-to-end in 5/12 boots (phase C returns, `used.idx` advances, exact payload in `vm-serial.log`, kernel reaches the live `dipshit>` shell); 7/12 still hang at the same boundary — hypothesis strengthened, not reproducible** (evidence under `artifacts/t0sz16-compare-final.txt`, `t0sz16-report-{baseline,candidate}.txt`, `t0sz16-gate.txt`, `t0sz16-{baseline,candidate}-{run,marker,serial}-*.{txt,log}`)
+- **Status:** ✅ done 2026-08-08 — **T0SZ=16 lets the first post-MMU virtio-pci TX complete end-to-end in 6/18 boots across three independent runs (2/6, 3/6, 1/6): phase C returns, `used.idx` advances, exact payload in `vm-serial.log`, kernel reaches the live `dipshit>` shell; 12/18 still hang at the same boundary — hypothesis strengthened, not reproducible** (evidence under `artifacts/t0sz16-compare-final.txt`, `t0sz16-report-baseline.txt`, `t0sz16-report-candidate-18.txt`, `t0sz16-gate.txt`, `t0sz16-{baseline,candidate}-{run,marker,serial}-*.{txt,log}`, `t0sz16-run{1,2,3}/` per-run batches)
 
 ## Notes
 
@@ -107,7 +107,7 @@ no-TLBI switch are identical. Default builds are byte-identical to main
 (KERNEL.BIN sha256 `55325752e3f85d1f495f46c00e9f5f387f399f3215efa325904a6fc5d41e8919`
 on both).
 
-**A/B matrix (baseline 6 boots, candidate 12 boots — two runs of 6):**
+**A/B matrix (baseline 6 boots, candidate 18 boots — three runs of 6):**
 
 | boot | entered | returned | used.adv | payload | alive | last marker |
 |------|---------|----------|----------|---------|-------|-------------|
@@ -116,14 +116,17 @@ on both).
 | candidate-04,05 (run1) | 1 | **1** | **1** | **1** | **1** | `M2_TXPL!` |
 | candidate-01,04,06 (run2) | 1 | 0 | 0 | 0 | 0 | `M2_TXST!` |
 | candidate-02,03,05 (run2) | 1 | **1** | **1** | **1** | **1** | `M2_TXPL!` |
+| candidate-01,02,03,05,06 (run3) | 1 | 0 | 0 | 0 | 0 | `M2_TXST!` |
+| candidate-04 (run3) | 1 | **1** | **1** | **1** | **1** | `M2_TXPL!` |
 
 **Baseline total: 0/6 returned, 0/6 used-advanced, 0/6 payload — the known
 post-MMU failure reproduces on every boot** (ladder ends `M2_MMUP! →
 M2_TRC1! → M2_TXST!`, 0 serial bytes: the first post-switch common-cfg read,
 claims 0018/0020).
 
-**Candidate total: 5/12 returned + used-advanced + payload; 7/12 hang at
-the same boundary.** On the 5 successful boots the ladder is complete:
+**Candidate total: 6/18 returned + used-advanced + payload across three
+independent runs (2/6, 3/6, 1/6); 12/18 hang at the same boundary.** On the
+6 successful boots the ladder is complete:
 `M2_TRC1! → M2_TXST! → M2_TXNT! → M2_TXPL! → M2_TRC2! → M2_TRCU! →
 M2_RAW! → M2_READY → M2_TXST!/M2_TXNT!/M2_TXPL! (banner) → M2_TXOK!`, and
 `vm-serial.log` contains the exact `DIPSHITOS TRANSITION TX` payload, the
@@ -139,16 +142,17 @@ boots, which has never been observed at T0SZ=25.
   layouts). The current T0SZ=25 build programs a level-1 walk over an
   L0-rooted tree.
 - Correcting ONLY T0SZ to 16 demonstrably CAN restore the first post-MMU
-  virtio-pci access: 5/12 boots complete TX end-to-end (return, used.idx
-  advance, exact payload in serial), vs 0/6 at baseline. When it works, the
-  whole kernel console comes up.
-- The discriminator is NOT reproducible on VZ: 7/12 candidate boots still
-  die at the same first-read boundary. The failure is therefore not *only*
-  the start level; a residual boot-varying component remains at the same
-  site. That residual is consistent with the ADR 0006 debt — the no-TLBI
-  design keeps stale firmware TLB entries in play, and the VZ re-walk/MMIO
-  behavior is uncharacterized — but this experiment does not characterize
-  it further.
+  virtio-pci access: 6/18 boots complete TX end-to-end (return, used.idx
+  advance, exact payload in serial) across three independent runs, vs 0/6 at
+  baseline. When it works, the whole kernel console comes up.
+- The discriminator is NOT reproducible on VZ: 12/18 candidate boots still
+  die at the same first-read boundary (per-run success: 2/6, 3/6, 1/6 — a
+  stable ~1/3 rate, not a single lucky run). The failure is therefore not
+  *only* the start level; a residual boot-varying component remains at the
+  same site. That residual is consistent with the ADR 0006 debt — the
+  no-TLBI design keeps stale firmware TLB entries in play, and the VZ
+  re-walk/MMIO behavior is uncharacterized — but this experiment does not
+  characterize it further.
 - Per the prompt's rules, this is a STOP point (no second speculative MMU
   variable). The production default T0SZ stays 25. Smallest production
   follow-up if pursued: keep the corrected start level (T0SZ=16 with the

@@ -23,3 +23,10 @@ Append-only per-branch changelog (AGENTS.md). One entry per change.
   `artifacts/t0sz16-compare-final.txt`, `t0sz16-gate.txt`,
   `t0sz16-report-{baseline,candidate}.txt`, `t0sz16-{baseline,candidate}-{run,marker,serial}-*`,
   `t0sz16-run1/` (first candidate run). ✅ done.
+- **2026-08-08** — *buffy (freebuff/t0sz16-startlevel-diag)*: claim 6460
+  data extended → two more candidate batches (run2: 3/6, run3: 1/6) for 18
+  candidate boots total; success rate stable at ~1/3 (6/18; runs 2/6, 3/6,
+  1/6), 12/18 still hang at the same boundary. Conclusion unchanged
+  (hypothesis strengthened, not reproducible); claim file + compare table
+  updated to the 18-boot dataset
+  (`artifacts/t0sz16-report-candidate-18.txt`, `t0sz16-run{2,3}/`). ✅ done.
