@@ -1,0 +1,23 @@
+# AFTER (this branch)
+--- device absence ---
+docs/status.md:122:That "device absence in the declared windows" reading of `M2_SERIA` is
+docs/status.md:125:[Current blocker](#current-blocker) and [The device absence is now fully explained](#what-we-directly-observe-about-the-serial-gate-and-the-bad-handoff-fix).
+docs/status.md:132:**The device absence is now fully explained (claim 0013, 2026-08-07).** The
+  NOTE: has hits (need to check if historical-labeled)
+--- needs re-scoping ---
+ (0 hits in current - check)
+--- which one wins.*unobserved ---
+ (0 hits in current - check)
+--- M2_SERIA.*before the monitor ---
+docs/march-m15.md:37:| 17 | **Add machine controls.** `reboot`, `shutdown`, `halt` via the Runtime Services table captured pre-exit (`ResetSystem` survives ExitBootServices) or a documented fallback (WFE loop / VM teardown). | The session can end intentionally. | ✅ (real mechanism, unit-proven; live gate ⛔ open) | `reboot`/`shutdown` now issue **real EFI Runtime Services `ResetSystem` calls** — cold for `reboot`, shutdown for `shutdown`, status 0, null data — from `kernel/src/machine.zig` (claim 0011, `agent/buffy/m15-machine-controls`), wired through the `MachineControl` seam; the runtime-services pointer is captured pre-exit (`machine.init`) and the claim-0009 NVRAM channel persists the `M2_RST!` stage immediately before the call. Arg construction is **unit-proven** (reboot→cold, shutdown→shutdown, no-pointer→honest `not_implemented`); if a firmware returns anyway the kernel parks in WFE rather than running off. **Live observation stays blocked — post-MMU virtio transport access hangs (claims 0018/0020), so `ResetSystem` is never reached post-exit on VZ this cycle and no `M2_RST!` is observed** — the monitor itself does run post-exit via the NVRAM fallback channel (claim 0015: shell + commands observed), so the `M2_SERIA` halt before the monitor is superseded. Hard gate 6 flips only on an observed live reset (evidence `artifacts/m15-machine-*.txt`). |
+  NOTE: has hits (need to check if historical-labeled)
+--- halts at M2_SERIA ---
+ (0 hits in current - check)
+--- What we directly observe about the two failing gates ---
+ (0 hits in current - check)
+--- kernel halts at ---
+ (0 hits in current - check)
+CLEAN: needs re-scoping
+CLEAN: which one wins.*unobserved
+CLEAN: What we directly observe about the two failing gates
+CLEAN: halts at M2_SERIA

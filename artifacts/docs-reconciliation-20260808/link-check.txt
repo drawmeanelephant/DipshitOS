@@ -1,0 +1,49 @@
+relative link check over docs/status.md docs/march-m15.md
+--- docs/status.md ---
+[docs/logs/](logs/README.md)
+[`docs/march-m15.md`](march-m15.md)
+[`docs/claims/`](claims/README.md)
+[`docs/logs/`](logs/README.md)
+[`docs/claims/README.md`](claims/README.md)
+[log index](logs/README.md)
+[`docs/claims/README.md`](claims/README.md)
+[`0001-bad-handoff-gate`](claims/0001-bad-handoff-gate.md)
+[`0002-vz-serial-gate`](claims/0002-vz-serial-gate.md)
+[`0009-m2-marker-fallback`](claims/0009-m2-marker-fallback.md)
+[`roadmap.md`](roadmap.md)
+[`march-m15.md`](march-m15.md)
+[`testing.md`](testing.md)
+[`logs/README.md`](logs/README.md)
+[`claims/README.md`](claims/README.md)
+[`hardware-contract.md`](hardware-contract.md)
+[`architecture.md`](architecture.md)
+[`m2-bad-handoff-fix-prompt.md`](m2-bad-handoff-fix-prompt.md)
+[`m2-vz-serial-gate-prompt.md`](m2-vz-serial-gate-prompt.md)
+[`m15-host-plumbing-prompt.md`](m15-host-plumbing-prompt.md)
+[`m15-commands-prompt.md`](m15-commands-prompt.md)
+[`../AGENTS.md`](../AGENTS.md)
+ OK logs/README.md
+ OK march-m15.md
+ OK claims/README.md
+ OK logs/README.md
+ OK claims/README.md
+ OK logs/README.md
+ OK claims/README.md
+ OK claims/0001-bad-handoff-gate.md
+ OK claims/0002-vz-serial-gate.md
+ OK claims/0009-m2-marker-fallback.md
+ OK roadmap.md
+ OK march-m15.md
+ OK testing.md
+ OK logs/README.md
+ OK claims/README.md
+ OK hardware-contract.md
+ OK architecture.md
+ OK m2-bad-handoff-fix-prompt.md
+ OK m2-vz-serial-gate-prompt.md
+ OK m15-host-plumbing-prompt.md
+ OK m15-commands-prompt.md
+ OK ../AGENTS.md
+--- docs/march-m15.md ---
+[`docs/status.md`](status.md)
+ OK status.md
