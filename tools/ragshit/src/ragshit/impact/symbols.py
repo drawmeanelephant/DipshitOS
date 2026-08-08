@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional
 from ..indexing.database import Database
 from ..models import Chunk
+from ..parsing.source import shell_decl_kind
 from .inventory import Inventory
 
 @dataclass
@@ -25,6 +26,23 @@ class SymbolMapping:
 
 def _overlaps(a,b,c,d):
     return a<=d and b>=c
+
+def _precise_kind(path: str, chunk) -> str:
+    """Refine a chunk's kind for impact/review weighting (fixes C/D):
+    markdown sections become "heading", shell declarations become
+    "function"/"constant", YAML/TOML keys become "key", everything else
+    stays the chunk's own kind. These kinds feed the generic-symbol stale
+    filter (C) and the shell importance weights (D) without a schema change."""
+    if getattr(chunk, "kind", "") == "section":
+        return "heading"
+    lang = getattr(chunk, "language", "") or ""
+    if lang == "shell" or str(path).endswith((".sh", ".bash", ".zsh")):
+        k = shell_decl_kind(chunk.content or "")
+        if k:
+            return k
+    if lang in ("yaml", "toml") or str(path).endswith((".yml", ".yaml", ".toml")):
+        return "key"
+    return chunk.kind
 
 def _fallback_parse_deleted(repo, base_oid: str, path: str) -> List[ChangedSymbol]:
     """When a file was deleted and the index no longer has chunks for it,
@@ -53,7 +71,7 @@ def _fallback_parse_deleted(repo, base_oid: str, path: str) -> List[ChangedSymbo
         out: List[ChangedSymbol] = []
         for pc in result.chunks:
             if pc.structural_name:
-                out.append(ChangedSymbol(path=path, name=pc.structural_name, kind=pc.kind, start_line=pc.start_line, end_line=pc.end_line, confidence=pc.confidence, commit=None))
+                out.append(ChangedSymbol(path=path, name=pc.structural_name, kind=_precise_kind(path, pc), start_line=pc.start_line, end_line=pc.end_line, confidence=pc.confidence, commit=None))
         # If no structural symbols but file existed, fall back to a synthetic
         # entry so the deleted symbol is at least surfaced as the file itself.
         if not out:
@@ -76,7 +94,7 @@ def map_symbols(db: Database, repo_id: str, inv: Inventory, repo=None) -> Symbol
             structural = [c for c in chunks if c.structural_name]
             if structural:
                 for c in structural:
-                    cs=ChangedSymbol(path=cf.path, name=c.structural_name, kind=c.kind, start_line=c.start_line, end_line=c.end_line, confidence=c.confidence, commit=c.commit)
+                    cs=ChangedSymbol(path=cf.path, name=c.structural_name, kind=_precise_kind(cf.path, c), start_line=c.start_line, end_line=c.end_line, confidence=c.confidence, commit=c.commit)
                     symbols.append(cs); per_file.setdefault(cf.path,[]).append(cs)
             else:
                 # DB has no chunks (index refreshed past deletion) -> fallback to base
@@ -109,7 +127,7 @@ def map_symbols(db: Database, repo_id: str, inv: Inventory, repo=None) -> Symbol
                 key=(c.structural_name,c.start_line,c.end_line)
                 if key in seen: continue
                 seen.add(key)
-                file_syms.append(ChangedSymbol(path=cf.path, name=c.structural_name or "", kind=c.kind, start_line=c.start_line, end_line=c.end_line, confidence=c.confidence, commit=c.commit))
+                file_syms.append(ChangedSymbol(path=cf.path, name=c.structural_name or "", kind=_precise_kind(cf.path, c), start_line=c.start_line, end_line=c.end_line, confidence=c.confidence, commit=c.commit))
         if file_syms:
             file_syms.sort(key=lambda s:(s.start_line,s.name))
             per_file[cf.path]=file_syms; symbols.extend(file_syms)

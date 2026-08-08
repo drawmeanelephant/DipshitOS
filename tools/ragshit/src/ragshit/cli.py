@@ -63,14 +63,19 @@ def clamp_limit(value: Optional[int], config: RagshitConfig) -> int:
     return max(1, min(value, config.retrieval.maximum_limit))
 
 
-# Framing-aware budget helper for B: ensures the *real* rendered Markdown packet
-# (including headers, coverage summary, etc.) respects --budget-chars, not just
-# the sum of candidate block costs. Deterministic, iterative render→adjust
-# →reselect; final markdown is never chopped except via defensive envelope.
-# After selection, report.actual_size and selection_summary.actual_chars are
-# patched to equal len(markdown) (the actual packet size), with stable Actual
-# size line.
-def _framing_aware_select_and_report(candidates, spec, budget, repo_root, repo_id, inv, mapping, neighbors, stale, file_scores, index_head, index_stale, index_warning, timing_ms, explain: bool = False):
+# Framing-aware budget helper (fix B/A): ensures the *real* rendered Markdown
+# packet (including headers, coverage summary, etc.) respects --budget-chars,
+# not just the sum of candidate block costs. Deterministic, iterative
+# render→adjust→reselect; final markdown is never chopped except via defensive
+# envelope.
+#
+# Accounting fix (A): report.actual_size and selection_summary.actual_chars are
+# set to equal len(final_markdown) BEFORE the final render and the packet is
+# re-rendered to a fixed point, so the "Actual size" header line and the
+# "budget utilization" body line describe the same final packet. The raw sum
+# of candidate block costs stays available under the distinct name
+# selection_summary.candidate_cost_chars (never overloaded onto actual_chars).
+def _framing_aware_select_and_report(candidates, spec, budget, repo_root, repo_id, inv, mapping, neighbors, stale, file_scores, index_head, index_stale, index_warning, timing_ms, explain: bool = False, stale_filtered=None):
     from .review.report import build_review, report_to_markdown, _enforce_budget
     from .review.selection import select
     import re
@@ -78,7 +83,7 @@ def _framing_aware_select_and_report(candidates, spec, budget, repo_root, repo_i
     try:
         from .review.selection import SelectionResult
         empty_result = SelectionResult(selected=[], rejected=[], budget=budget, actual_chars=0, truncated=False)
-        empty_report = build_review(repo_root, repo_id, inv, mapping, neighbors, stale, file_scores, spec, empty_result, candidates, budget, index_head, index_stale, index_warning, timing_ms)
+        empty_report = build_review(repo_root, repo_id, inv, mapping, neighbors, stale, file_scores, spec, empty_result, candidates, budget, index_head, index_stale, index_warning, timing_ms, stale_filtered=stale_filtered or [])
         empty_md = report_to_markdown(empty_report, explain=explain, enforce_budget=False)
         framing = len(empty_md)
         candidate_budget = max(0, budget - framing - 16)
@@ -87,49 +92,51 @@ def _framing_aware_select_and_report(candidates, spec, budget, repo_root, repo_i
     best_result = None
     best_report = None
     best_md = None
-    envelope_used = False
+    stale_filtered = stale_filtered or []
     for _ in range(8):
         result = select(candidates, spec, candidate_budget)
-        report = build_review(repo_root, repo_id, inv, mapping, neighbors, stale, file_scores, spec, result, candidates, budget, index_head, index_stale, index_warning, timing_ms)
+        report = build_review(repo_root, repo_id, inv, mapping, neighbors, stale, file_scores, spec, result, candidates, budget, index_head, index_stale, index_warning, timing_ms, stale_filtered=stale_filtered)
         # Measure UNTRUNCATED render so envelope cannot hide over-budget
         raw_md = report_to_markdown(report, explain=explain, enforce_budget=False)
         md_len = len(raw_md)
         if md_len <= budget:
-            # Raw fits: patch Actual size line to equal real len and mark no envelope
-            md = raw_md
-            patched_len = md_len
-            for __ in range(4):
-                patched = re.sub(r"Actual size: \d+ chars", f"Actual size: {patched_len} chars", md, count=1)
-                new_len = len(patched)
-                if new_len == patched_len:
-                    md = patched
-                    break
-                md = patched
-                patched_len = new_len
-                if patched_len > budget:
-                    break
-            if patched_len > budget:
-                excess = patched_len - budget
-                candidate_budget = max(0, candidate_budget - excess - 8)
-                best_result, best_report, best_md = result, report, raw_md
-                continue
-            md_len = patched_len
+            # Raw fits: patch report fields to the real rendered size, then
+            # RE-RENDER to a fixed point so the body's "budget utilization"
+            # line agrees with the "Actual size" header (both == len(md)).
             report.actual_size = md_len
             report.selection_summary["actual_chars"] = md_len
             report.selection_summary["utilization"] = round((md_len / budget * 100) if budget else 0, 1)
-            report.selection_summary["envelope_fallback_used"] = False
-            report.envelope_fallback_used = False
+            md = None
+            for __ in range(6):
+                md = report_to_markdown(report, explain=explain, enforce_budget=False)
+                n = len(md)
+                if n == report.actual_size:
+                    break
+                report.actual_size = n
+                report.selection_summary["actual_chars"] = n
+                report.selection_summary["utilization"] = round((n / budget * 100) if budget else 0, 1)
+            if len(md) <= budget:
+                report.selection_summary["envelope_fallback_used"] = False
+                report.envelope_fallback_used = False
+                report._rendered_markdown = md  # type: ignore[attr-defined]
+                return result, report
+            # Re-render pushed the packet past budget (digits grew): shrink and retry
             best_result, best_report, best_md = result, report, md
-            report._rendered_markdown = md  # type: ignore[attr-defined]
-            return best_result, best_report
+            excess = len(md) - budget
+            candidate_budget = max(0, candidate_budget - excess - 8)
+            continue
         # Raw over budget: shrink candidate allowance and retry (no envelope yet)
         best_result, best_report, best_md = result, report, raw_md
         excess = md_len - budget
         candidate_budget = max(0, candidate_budget - excess - 16)
         if candidate_budget == 0 and md_len > budget:
-            # Framing alone > budget: must use defensive envelope as last resort
-            enforced = _enforce_budget(raw_md, budget, report)
-            # Patch Actual size inside enforced output
+            # Framing alone > budget: patch report fields for a consistent
+            # re-render, then use the defensive envelope as last resort.
+            report.actual_size = md_len
+            report.selection_summary["actual_chars"] = md_len
+            report.selection_summary["utilization"] = round((md_len / budget * 100) if budget else 0, 1)
+            consistent = report_to_markdown(report, explain=explain, enforce_budget=False)
+            enforced = _enforce_budget(consistent, budget, report)
             final = re.sub(r"Actual size: \d+ chars", f"Actual size: {len(enforced)} chars", enforced, count=1)
             # If patch changed length, re-enforce to stay <= budget
             if len(final) > budget:
@@ -334,7 +341,8 @@ def cmd_impact(args: argparse.Namespace) -> int:
             all_symbols = {s.name for s in mapping.symbols}
             changed_paths = {f.path for f in inv.files}
             neighbors, per_path = collect_neighborhood(db, repo.repo_id, changed_paths, symbols_by_path, all_symbols)
-            stale = detect_stale(db, repo.repo_id, changed_paths, all_symbols)
+            symbol_kinds = {s.name: s.kind for s in mapping.symbols if s.kind in ("function", "constant", "heading", "key")}
+            stale, stale_filtered = detect_stale(db, repo.repo_id, changed_paths, all_symbols, repo=repo, symbol_kinds=symbol_kinds, return_filtered=True)
             file_scores = score_files(inv, mapping, per_path)
             refs = db.get_git_refs(repo.repo_id)
             index_head = refs["head"] if refs is not None else None
@@ -350,7 +358,7 @@ def cmd_impact(args: argparse.Namespace) -> int:
             elif index_head is None:
                 index_stale = True
                 index_warning = "index has no git HEAD recorded; impact context may not match requested range"
-            report = build_report(str(repo.root), repo.repo_id, inv, mapping, neighbors, file_scores, stale, timing_ms, index_head, index_stale=index_stale, index_warning=index_warning)
+            report = build_report(str(repo.root), repo.repo_id, inv, mapping, neighbors, file_scores, stale, timing_ms, index_head, index_stale=index_stale, index_warning=index_warning, stale_filtered=stale_filtered)
             # Always surface real timing + stale warning to stderr (does not affect determinism)
             print(f"impact: {real_timing_ms} ms -- index HEAD {index_head[:12] if index_head else '(unknown)'}; range head {inv.head_oid[:12]}", file=sys.stderr)
             if index_warning:
@@ -491,7 +499,8 @@ def cmd_review(args: argparse.Namespace) -> int:
             all_symbols = {s.name for s in mapping.symbols}
             changed_paths = {f.path for f in inv.files}
             neighbors, per_path = collect_neighborhood(db, repo.repo_id, changed_paths, symbols_by_path, all_symbols)
-            stale = detect_stale(db, repo.repo_id, changed_paths, all_symbols)
+            symbol_kinds = {s.name: s.kind for s in mapping.symbols if s.kind in ("function", "constant", "heading", "key")}
+            stale, stale_filtered = detect_stale(db, repo.repo_id, changed_paths, all_symbols, repo=repo, symbol_kinds=symbol_kinds, return_filtered=True)
             file_scores = score_files(inv, mapping, per_path)
             refs = db.get_git_refs(repo.repo_id)
             index_head = refs["head"] if refs is not None else None
@@ -517,6 +526,7 @@ def cmd_review(args: argparse.Namespace) -> int:
                 str(repo.root), repo.repo_id, inv, mapping, neighbors, stale, file_scores,
                 index_head, index_stale, index_warning, timing_ms,
                 explain=args.explain,
+                stale_filtered=stale_filtered,
             )
             print(f"review: {real_timing_ms} ms -- index HEAD {index_head[:12] if index_head else '(unknown)'}; range head {inv.head_oid[:12]} -- {len(candidates)} candidates, {len(result.selected)} selected", file=sys.stderr)
             if index_warning:

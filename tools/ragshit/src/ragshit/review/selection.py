@@ -21,6 +21,16 @@ class SelectionResult:
     truncated: bool
 
 
+def _is_low_value(c: Candidate) -> bool:
+    # Fix D: one-line shell assignments (ROOT=, tmp=, pass=, id1=, ...) are
+    # low-value bookkeeping. They never enter the mandatory changed-symbol
+    # pool, so they cannot eat mandatory budget ahead of meaningful structural
+    # context (the enclosing function/file carries the changed lines). They
+    # remain selectable in phase 2 when budget actually remains, so no
+    # changed-file coverage is lost.
+    return c.symbol_kind == "constant" and c.language == "shell"
+
+
 def _mandatory_pool(candidates: List[Candidate], spec: CoverageSpec) -> List[Candidate]:
     # Near-mandatory: changed-symbol and one per high-risk file
     mandatory: List[Candidate] = []
@@ -30,6 +40,8 @@ def _mandatory_pool(candidates: List[Candidate], spec: CoverageSpec) -> List[Can
         best = None
         for c in candidates:
             if c.reason == "changed-symbol" and c.origin_symbol == sym:
+                if _is_low_value(c):
+                    continue
                 if best is None or (c.base_utility > best.base_utility) or (c.base_utility == best.base_utility and c.cost < best.cost):
                     best = c
         if best and best.cid not in {m.cid for m in mandatory}:
@@ -43,6 +55,8 @@ def _mandatory_pool(candidates: List[Candidate], spec: CoverageSpec) -> List[Can
         best = None
         for c in candidates:
             if c.path == hf and c.reason in ("changed-symbol", "changed-chunk", "high-risk-file"):
+                if _is_low_value(c):
+                    continue
                 if best is None or c.base_utility > best.base_utility:
                     best = c
         if best and best.cid not in {m.cid for m in mandatory}:
