@@ -18,6 +18,37 @@ from ..impact.stale import StaleDoc
 from ..impact.scoring import FileScore
 from ..models import Chunk
 
+
+def _historical_chunks_for_deleted(
+    repo, base_oid: str, path: str
+):
+    """Parse base revision content for a deleted path; return list of ParsedChunk.
+
+    Deterministic helper shared with impact fallback. Returns [] on any failure.
+    """
+    if repo is None or not base_oid or not path:
+        return [], ""
+    import subprocess
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(repo.root), "show", f"{base_oid}:{path}"],
+            capture_output=True, timeout=30,
+        )
+        if proc.returncode != 0:
+            return [], ""
+        raw = proc.stdout
+        if not raw or b"\x00" in raw[:8192]:
+            return [], ""
+        text = raw.decode("utf-8", errors="replace")
+        from ..discovery.files import detect_kind
+        from ..parsing import get_parser
+        first_line = text.splitlines()[0] if text else ""
+        kind, language = detect_kind(path, first_line)
+        result = get_parser(kind, language).parse(text, path)
+        return result.chunks, text
+    except Exception:
+        return [], ""
+
 REASON_WEIGHTS = {
     "changed-symbol": 10.0,
     "changed-chunk": 9.0,
@@ -109,6 +140,7 @@ def build_candidates(
     stale: List[StaleDoc],
     file_scores: List[FileScore],
     index_head: Optional[str],
+    repo=None,
 ) -> List[Candidate]:
     """Build deterministic candidate pool from impact signals."""
     out: List[Candidate] = []
@@ -116,8 +148,18 @@ def build_candidates(
     # Map path -> score level
     score_by_path = {fs.path: fs for fs in file_scores}
     changed_paths = {f.path for f in inv.files}
+    deleted_paths = {f.path for f in inv.files if f.status.startswith("D")}
     # Symbols per file
     high_risk_paths = {fs.path for fs in file_scores if fs.level in ("critical", "high")}
+
+    # Cache historical parses for deleted paths to avoid repeated git show
+    _historical_cache: Dict[str, list] = {}
+    def _get_hist(path: str):
+        if path in _historical_cache:
+            return _historical_cache[path]
+        parsed, _ = _historical_chunks_for_deleted(repo, inv.base_oid, path)
+        _historical_cache[path] = parsed
+        return parsed
 
     # 1. changed-symbol candidates (mandatory class)
     for sym in sorted(mapping.symbols, key=lambda s: (s.path, s.start_line, s.name)):
@@ -126,6 +168,54 @@ def build_candidates(
         if chunk is None:
             # fallback: any chunk overlapping symbol range
             chunk = next((c for c in chunks if c.start_line <= sym.end_line and c.end_line >= sym.start_line), None)
+        historical_provenance = None
+        historical_content_hash = None
+        if chunk is None and sym.path in deleted_paths:
+            # No index chunks (reindexed past deletion) — synthesize from base revision
+            hist_chunks = _get_hist(sym.path)
+            # Find matching parsed chunk by structural name and line
+            pc = next((p for p in hist_chunks if p.structural_name == sym.name and p.start_line == sym.start_line), None)
+            if pc is None:
+                pc = next((p for p in hist_chunks if p.structural_name == sym.name), None)
+            if pc is not None:
+                # Synthesize a Chunk-like candidate directly from ParsedChunk
+                import hashlib as _hl
+                h = _hl.sha256(pc.content.encode()).hexdigest()[:16]
+                # Do NOT pretend it came from current index
+                prov = f"base:{inv.base_oid[:12]} (historical, not index) path:{sym.path}"
+                covers = [f"changed_symbol:{sym.name}", f"changed_file:{sym.path}"]
+                if sym.path in high_risk_paths:
+                    covers.append(f"high_risk:{sym.path}")
+                covers.append(f"symbol_range:{sym.path}:{sym.start_line}-{sym.end_line}")
+                fs = score_by_path.get(sym.path)
+                file_boost = round(min(5.0, (fs.score / 20.0) if fs else 0), 2)
+                base = REASON_WEIGHTS["changed-symbol"] + file_boost
+                comps = {"reason": REASON_WEIGHTS["changed-symbol"], "file_priority": file_boost}
+                cost = _rendered_block_len(sym.path, pc.start_line, pc.end_line, "changed-symbol", covers, base, pc.content, None, pc.structural_name, prov)
+                cid = _candidate_id(repo_id, sym.path, pc.start_line, pc.end_line, "changed-symbol", sym.name)
+                key = (sym.path, pc.start_line, pc.end_line, "changed-symbol")
+                if key not in seen_keys:
+                    seen_keys.add(key)
+                    out.append(Candidate(
+                        cid=cid, path=sym.path, start_line=pc.start_line, end_line=pc.end_line,
+                        content=pc.content, content_hash=h, kind=pc.kind,
+                        structural_name=pc.structural_name, heading=pc.heading, language="",
+                        commit=None, reason="changed-symbol", origin_changed_file=sym.path, origin_symbol=sym.name,
+                        covers=covers, token_set=_token_set(pc.content), cost=cost, base_utility=base,
+                        components=comps, provenance=prov,
+                        original_content=pc.content,
+                    ))
+                continue
+            else:
+                # No parsed chunk for this symbol but file was deleted — synthesize minimal window if file had content
+                # (e.g., synthetic file stem case)
+                if hist_chunks is None or len(hist_chunks) == 0:
+                    # Try to synthesize from raw historical text as a single window
+                    _, raw_text = _historical_chunks_for_deleted(repo, inv.base_oid, sym.path)
+                    # Avoid double git show: use cached text if available — re-fetch via helper that returns text
+                    # For now skip if no chunks
+                    pass
+                continue
         if chunk is None:
             continue
         key = (chunk.path, chunk.start_line, chunk.end_line, "changed-symbol")
