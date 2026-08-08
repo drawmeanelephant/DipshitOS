@@ -148,6 +148,25 @@ cache maintenance from this point on — no firmware cleanup is guaranteed.
   marking code-non-executable everywhere except text is a hardening item
   for the allocator milestone, not a requirement here.
 
+> **D3 addendum (2026-08-07, claims 0010/0020/0021, observed):** the
+> `tlbi vmalle1` written in D3 above is **NOT executed**. Claim 0010 proved
+> on VZ that a TLBI at the switch forces a page-table re-walk that faults
+> on every run (ladder stops at `M2_TTBR!`); the implemented switch is
+> `msr mair_el1` → `msr tcr_el1` → `msr ttbr0_el1` → `isb` → `dsb ish` →
+> `isb` with **no** TLBI (the implemented sequence also opens with a
+> `dsb ishst` before the first `msr`, per `install_identity_map()`),
+> relying on the stale firmware TLB entries being
+> identity-compatible with the new descriptors (same VA==PA, same
+> attributes below the 4 GiB blanket) and on the map never changing
+> descriptors post-switch. This is **technical debt with a precise
+> boundary, not a completed VM subsystem**: see **ADR 0006** for the full
+> safety argument, its validity window, and the binding list of later
+> operations (descriptor changes, permission changes, page reclamation,
+> non-identity mappings, ASID work, unmapping, above-blanket mappings,
+> TCR/MAIR changes) that invalidate it. "MMU takeover fixed" means the
+> identity map installs and this milestone's accesses work — it does **not**
+> mean TLB invalidation or remapping is proven.
+
 ### D4. Minimal serial console driver
 
 After exit, the only sanctioned output is direct device MMIO. The driver is

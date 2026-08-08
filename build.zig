@@ -71,10 +71,33 @@ pub fn build(b: *std.Build) void {
     // status dump from the flush. Default off: the default build's flush is
     // byte-identical.
     const tx_diag = b.option(bool, "tx-diag", "Bisect the post-exit virtio TX failure with per-stage NVRAM markers (claim 0018 diagnostic)") orelse false;
+    // Claim 0020: TX-transition matrix phases. Each is default off; a
+    // diagnostic build enables EXACTLY ONE phase, which runs a single
+    // controlled TX attempt at its named location (A pre-ExitBootServices,
+    // B immediately post-ExitBootServices on the firmware translation,
+    // C immediately after the identity-map install, D at the normal final
+    // location). Same payload + same transport + same flush in every phase.
+    // Default builds stay byte-identical.
+    const tx_transition_a = b.option(bool, "tx-transition-a", "Phase A: one virtio TX attempt before ExitBootServices (claim 0020 diagnostic)") orelse false;
+    const tx_transition_b = b.option(bool, "tx-transition-b", "Phase B: one virtio TX attempt immediately after ExitBootServices, before DipshitOS page tables (claim 0020 diagnostic)") orelse false;
+    const tx_transition_c = b.option(bool, "tx-transition-c", "Phase C: one virtio TX attempt immediately after the identity-map install, before unrelated work (claim 0020 diagnostic)") orelse false;
+    const tx_transition_d = b.option(bool, "tx-transition-d", "Phase D: one virtio TX attempt at the normal final location (claim 0020 diagnostic)") orelse false;
+    // Claim 0021: firmware MMU-state capture. `-Dfw-mmu-capture` records the
+    // firmware's live SCTLR/TCR/MAIR/TTBR0/TTBR1 + a bounded walk of the
+    // firmware TTBR0 tables for the virtio BAR0 window and a RAM control
+    // address, plus the kernel's planned values, persisted pre-exit as the
+    // ASCII variable `DipshitMmu` for a host-side firmware-vs-kernel diff.
+    // Default off: the default build is byte-identical.
+    const fw_mmu_capture = b.option(bool, "fw-mmu-capture", "Capture firmware MMU registers + a virtio BAR-window table walk pre-exit, persisted to NVRAM (claim 0021 diagnostic)") orelse false;
     const kernel_options = b.addOptions();
     kernel_options.addOption(bool, "nvram_console", nvram_console);
     kernel_options.addOption(bool, "preexit_tx", preexit_tx);
     kernel_options.addOption(bool, "tx_diag", tx_diag);
+    kernel_options.addOption(bool, "tx_transition_a", tx_transition_a);
+    kernel_options.addOption(bool, "tx_transition_b", tx_transition_b);
+    kernel_options.addOption(bool, "tx_transition_c", tx_transition_c);
+    kernel_options.addOption(bool, "tx_transition_d", tx_transition_d);
+    kernel_options.addOption(bool, "fw_mmu_capture", fw_mmu_capture);
     const kernel = b.addExecutable(.{
         .name = "dipshit-kernel",
         .root_module = b.createModule(.{
