@@ -81,6 +81,22 @@ const marker_vpwalk: u64 = 0x4d325f5650533035; // "M2_VPS05" — walk exited
 const marker_vpdev: u64 = 0x4d325f5650444556; // "M2_VPDEV" — virtio-pci console device found, caps walked
 const marker_vptx: u64 = 0x4d325f5650545821; // "M2_VPTX!" — transport programmed (features + queue)
 const marker_vpok: u64 = 0x4d325f56504f4b21; // "M2_VPOK!" — DRIVER_OK, TX path armed
+const marker_pext: u64 = 0x4d325f5045585421; // "M2_PEXT!" — claim 0017: pre-exit TX experiment entered, about to flush
+const marker_pexd: u64 = 0x4d325f5045584421; // "M2_PEXD!" — claim 0017: pre-exit TX experiment flush returned
+// Claim 0018: per-stage bisect markers for the FIRST post-exit virtio TX.
+// Ten ordered 8-byte NVRAM writes bracket each potentially fatal operation;
+// the ladder's last marker names the smallest confirmed failure interval
+// (tools/verify-tx-diag.sh, build-gated -Dtx-diag).
+const marker_txfl: u64 = 0x4d325f5458464c21; // "M2_TXFL!" — 1 entered virtio flush
+const marker_txda: u64 = 0x4d325f5458444121; // "M2_TXDA!" — 2 descriptor/avail buffers prepared
+const marker_txcc: u64 = 0x4d325f5458434321; // "M2_TXCC!" — 3 DMA cache clean completed
+const marker_txbr: u64 = 0x4d325f5458425221; // "M2_TXBR!" — 4 before first post-exit BAR/common-cfg read
+const marker_txar: u64 = 0x4d325f5458415221; // "M2_TXAR!" — 5 after that read
+const marker_txbn: u64 = 0x4d325f5458424e21; // "M2_TXBN!" — 6 before queue notify MMIO write
+const marker_txan: u64 = 0x4d325f5458414e21; // "M2_TXAN!" — 7 after notify
+const marker_txup: u64 = 0x4d325f5458555021; // "M2_TXUP!" — 8 entered used-ring poll
+const marker_txuc: u64 = 0x4d325f5458554321; // "M2_TXUC!" — 9 device changed used.idx (break condition seen)
+const marker_txfr: u64 = 0x4d325f5458465221; // "M2_TXFR!" — 10 flush returned
 
 // Marker NVRAM channel: EFI Runtime Services `SetVariable` survives
 // ExitBootServices (it is a *runtime* service, not a boot service — the same
@@ -321,6 +337,17 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff: *HandoffV2
     console_base = pre.base;
     dump_sel(pre.kind, pre.base);
     if (comptime !build_options.nvram_console) write_probe_var(st);
+
+    // Claim 0017 diagnostic (build-gated `-Dpreexit-tx`): transmit a fixed
+    // line through the SAME virtio-pci transport the post-exit path uses
+    // while Boot Services and the firmware address space are still active.
+    // Runs after the probe evidence is persisted (a hang must not lose it)
+    // and immediately before the pre-exit marker / ExitBootServices. The
+    // marker ladder brackets the flush (M2_PEXT! ... M2_TXST!/M2_TXNT!/
+    // M2_TXPL! ... M2_PEXD!); vm-serial.log is the "bytes reached the host"
+    // gate (tools/verify-preexit-tx.sh). Diagnostic only — the post-exit
+    // banner TX is untouched.
+    if (comptime build_options.preexit_tx) preexit_tx_experiment(st);
 
     // Pre-exit stage: proves the kernel passed valid_handoff + capture_map
     // and reached the exit call. The persisted NVRAM marker being M2_ENTRY
@@ -1620,6 +1647,18 @@ fn virtio_pci_init(st: *const SystemTable) bool {
 /// serial log is the gate, and M2_TXOK! records that the path returned).
 fn virtio_pci_flush() void {
     if (!vp_ready or vp_tx_len == 0) return;
+    const st = st_tx;
+    // Claim 0018 (build-gated -Dtx-diag): ten ordered 8-byte NVRAM markers
+    // bracket each potentially fatal operation of the (first) post-exit
+    // transmission — the ladder's last marker names the smallest confirmed
+    // failure interval. The diag flush also drops the large post-exit
+    // probe-tail SetVariable (a big post-exit write, the class claim 0013
+    // proved hangs on VZ) and the logging-only status dump; the status read
+    // itself stays, bracketed by TXBR!/TXAR!. Default builds are
+    // byte-identical (coarse TXST!/TXNT!/TXPL! evidence path unchanged).
+    if (comptime build_options.tx_diag) {
+        if (st != null) write_marker_var(st.?, marker_txfl); // 1 entered virtio flush
+    }
     // Split-ring invariant (Virtio 1.3 §2.7): the number of outstanding
     // buffers (avail.idx - used.idx) must never exceed the queue size, or a
     // new entry would overwrite a ring slot the device has not yet consumed.
@@ -1637,23 +1676,37 @@ fn virtio_pci_flush() void {
     virtio_desc[0] = .{ .addr = @intFromPtr(&virtio_tx), .len = @intCast(vp_tx_len), .flags = 0, .next = 0 };
     virtio_avail.ring[0] = 0; // descriptor index 0
     virtio_avail.idx +%= 1;
+    if (comptime build_options.tx_diag) {
+        if (st != null) write_marker_var(st.?, marker_txda); // 2 descriptor/avail buffers prepared
+    }
     clean_dcache_range(@intFromPtr(&virtio_desc), @sizeOf(VirtqDesc));
     clean_dcache_range(@intFromPtr(&virtio_avail), @sizeOf(VirtqAvail));
     clean_dcache_range(@intFromPtr(&virtio_tx), vp_tx_len);
-    if (st_tx != null) write_marker_var(st_tx.?, marker_txst);
-    // Post-exit probe of the transport before the notify: read device status
-    // through the mapped window. Both this read and the notify write sit
-    // between the M2_TXST!/M2_TXNT! markers, so a hang here or at the notify
-    // both present as "TXST! without TXNT!" — the markers cannot fully
-    // discriminate them; the honest invariant is "post-exit transport access
-    // hangs".
-    dump_str("VP pst=");
-    dump_hex(vp_read8(0x14));
-    dump_str("\n");
-    // Claim 0015: the post-exit probe tail is skipped in nvram-console
-    // builds for the same store-budget reason as the full dump.
-    if (comptime !build_options.nvram_console) {
-        if (st_tx != null) write_probe_tail(st_tx.?);
+    if (comptime build_options.tx_diag) {
+        if (st != null) write_marker_var(st.?, marker_txcc); // 3 DMA cache clean completed
+    }
+    if (comptime build_options.tx_diag) {
+        // 4/5: the first post-exit BAR/common-config access (device status
+        // read). Bracketed so a hang here is distinguishable from a hang at
+        // the notify.
+        if (st != null) write_marker_var(st.?, marker_txbr);
+        _ = vp_read8(0x14);
+        if (st != null) write_marker_var(st.?, marker_txar);
+    } else {
+        // Claim 0013 evidence path (default build, unchanged): coarse
+        // markers + post-exit status probe + probe tail.
+        if (st_tx != null) write_marker_var(st_tx.?, marker_txst);
+        dump_str("VP pst=");
+        dump_hex(vp_read8(0x14));
+        dump_str("\n");
+        // Claim 0015: the post-exit probe tail is skipped in nvram-console
+        // builds for the same store-budget reason as the full dump.
+        if (comptime !build_options.nvram_console) {
+            if (st_tx != null) write_probe_tail(st_tx.?);
+        }
+    }
+    if (comptime build_options.tx_diag) {
+        if (st != null) write_marker_var(st.?, marker_txbn); // 6 before queue notify MMIO write
     }
     // Virtio 1.3 §4.1.5.2.1: VIRTIO_F_NOTIFICATION_DATA is NOT negotiated
     // (only VERSION_1 was accepted above), so the driver notification MUST be
@@ -1664,15 +1717,63 @@ fn virtio_pci_flush() void {
     // accesses (§4.1.4.4.1). (Claim 0013's "16-bit store may be dropped"
     // belief has no documented evidence; the report flags it as inference.)
     mmio_write16(vp_notify + @as(u64, vp_queue_notify_off) * vp_notify_mult, 1);
-    if (st_tx != null) write_marker_var(st_tx.?, marker_txnt);
+    if (comptime build_options.tx_diag) {
+        if (st != null) write_marker_var(st.?, marker_txan); // 7 after notify
+    } else {
+        if (st_tx != null) write_marker_var(st_tx.?, marker_txnt);
+    }
+    if (comptime build_options.tx_diag) {
+        if (st != null) write_marker_var(st.?, marker_txup); // 8 entered used-ring poll
+    }
     var spins: usize = 0;
     while (spins < 2_000_000) : (spins += 1) {
         invalidate_dcache_range(@intFromPtr(&virtio_used), @sizeOf(VirtqUsed));
-        if (virtio_used.idx != virtio_last_used) break;
+        if (virtio_used.idx != virtio_last_used) {
+            if (comptime build_options.tx_diag) {
+                if (st != null) write_marker_var(st.?, marker_txuc); // 9 device changed used.idx
+            }
+            break;
+        }
     }
     virtio_last_used = virtio_used.idx;
-    if (st_tx != null) write_marker_var(st_tx.?, marker_txpl);
+    if (comptime build_options.tx_diag) {
+        if (st != null) write_marker_var(st.?, marker_txfr); // 10 flush returned
+    } else {
+        if (st_tx != null) write_marker_var(st_tx.?, marker_txpl);
+    }
     vp_tx_len = 0;
+}
+
+// ---------------------------------------------------------------------------
+// Claim 0017 diagnostic: PRE-EXIT virtio-pci TX experiment. Answers whether
+// the current transport can transmit a known string while Boot Services and
+// the firmware address space are still active. Uses the SAME discovered
+// device, BAR, capability-decoded common/notify addresses, negotiated
+// features, TX queue, desc/avail/used rings and 16-bit notify mechanism as
+// the post-exit path — it stages a fixed line into `virtio_tx` and calls
+// `virtio_pci_flush()` verbatim. Build-gated by `-Dpreexit-tx` (default off:
+// every existing gate is byte-identical). Bracketed by the NVRAM marker
+// ladder (claim 0009 channel): M2_PEXT! before the flush, the flush's own
+// M2_TXST!/M2_TXNT!/M2_TXPL! stage markers (persisted because st_tx is
+// set), M2_PEXD! after. If the experiment hangs, the ladder's last marker
+// names the death site. NOTE: the flush also appends "VP pst=" to
+// probe_dump — the probe variable is already persisted at this point, so
+// that line stays in the in-RAM buffer only (harmless; the placement after
+// persistence is deliberate so a hang cannot lose the probe evidence).
+// ---------------------------------------------------------------------------
+const preexit_tx_line = "DIPSHITOS PREEXIT VIRTIO TX\n";
+fn preexit_tx_experiment(st: *const SystemTable) void {
+    if (!vp_ready or vp_tx_len != 0) return;
+    st_tx = st; // the flush's TXST/TXNT/TXPL stage markers now persist pre-exit
+    write_marker_var(st, marker_pext);
+    var i: usize = 0;
+    while (i < preexit_tx_line.len and i < virtio_tx.len) : (i += 1) {
+        virtio_tx[i] = preexit_tx_line[i];
+    }
+    vp_tx_len = i;
+    virtio_pci_flush();
+    write_marker_var(st, marker_pexd);
+    st_tx = null;
 }
 
 fn probe_serial(_: MemoryMapSlice, st: *const SystemTable) Candidate {

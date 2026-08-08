@@ -34,6 +34,22 @@ nvram-console:
 verify-nvram-console:
     bash tools/verify-nvram-console.sh
 
+# Verify the claim-0017 pre-exit virtio-pci TX diagnostic (can the transport TX while Boot Services + firmware address space are still active? boots a VZ VM; Apple silicon only)
+verify-preexit-tx:
+    bash tools/verify-preexit-tx.sh
+
+# Boot the -Dpreexit-tx=true image and report whether the pre-exit virtio TX reached vm-serial.log (zig build preexit-tx; claim 0017)
+preexit-tx:
+    zig build preexit-tx
+
+# Verify the claim-0018 post-exit virtio TX bisect gate (N identical VZ boots, per-stage markers, determinism report; Apple silicon only)
+verify-tx-diag:
+    bash tools/verify-tx-diag.sh
+
+# Boot the -Dtx-diag=true image once and save the per-stage post-exit TX marker ladder (zig build tx-diag; claim 0018)
+tx-diag:
+    zig build tx-diag
+
 # Extract the flat kernel image zig-out/bin/KERNEL.BIN (zig build kernel)
 kernel:
     zig build kernel

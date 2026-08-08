@@ -57,8 +57,24 @@ pub fn build(b: *std.Build) void {
     // bytes after the MMU switch. Default off: the virtio TX path is
     // unchanged.
     const nvram_console = b.option(bool, "nvram-console", "Route kernel console TX through the NVRAM variable channel instead of the MMIO serial transport (claim 0015; for the VZ post-exit evidence gate)") orelse false;
+    // Claim 0017: `-Dpreexit-tx` transmits a fixed diagnostic line
+    // ("DIPSHITOS PREEXIT VIRTIO TX") through the virtio-pci console
+    // transport BEFORE ExitBootServices, while Boot Services and the
+    // firmware address space are still active — using the same device, BAR,
+    // rings and notify mechanism as the post-exit path. Default off: the
+    // post-exit TX path and every existing gate are byte-identical.
+    const preexit_tx = b.option(bool, "preexit-tx", "Transmit 'DIPSHITOS PREEXIT VIRTIO TX' through the virtio-pci transport before ExitBootServices (claim 0017 diagnostic)") orelse false;
+    // Claim 0018: `-Dtx-diag` replaces the flush's coarse TXST/TXNT/TXPL
+    // markers with ten ordered per-stage NVRAM markers around each
+    // potentially fatal operation of the first post-exit virtio TX, and
+    // removes the large post-exit probe-tail SetVariable + logging-only
+    // status dump from the flush. Default off: the default build's flush is
+    // byte-identical.
+    const tx_diag = b.option(bool, "tx-diag", "Bisect the post-exit virtio TX failure with per-stage NVRAM markers (claim 0018 diagnostic)") orelse false;
     const kernel_options = b.addOptions();
     kernel_options.addOption(bool, "nvram_console", nvram_console);
+    kernel_options.addOption(bool, "preexit_tx", preexit_tx);
+    kernel_options.addOption(bool, "tx_diag", tx_diag);
     const kernel = b.addExecutable(.{
         .name = "dipshit-kernel",
         .root_module = b.createModule(.{
@@ -172,6 +188,29 @@ pub fn build(b: *std.Build) void {
     nvram_console_run.has_side_effects = true;
     nvram_console_run.stdio = .inherit;
     nvram_console_step.dependOn(&nvram_console_run.step);
+
+    // Claim 0017: pre-exit virtio-pci TX diagnostic. `zig build preexit-tx`
+    // rebuilds the image with -Dpreexit-tx=true and boots it, checking
+    // whether the fixed line reaches vm-serial.log while the host saves the
+    // NVRAM ladder bracket. The hard gate with the full assertions lives in
+    // tools/verify-preexit-tx.sh (`just verify-preexit-tx`). Apple silicon
+    // only (VZ VM).
+    const preexit_tx_step = b.step("preexit-tx", "Boot the -Dpreexit-tx=true image and check whether the pre-exit virtio TX reaches vm-serial.log (claim 0017 diagnostic)");
+    const preexit_tx_run = b.addSystemCommand(&.{ "bash", "-c", preexit_tx_vm_command });
+    preexit_tx_run.has_side_effects = true;
+    preexit_tx_run.stdio = .inherit;
+    preexit_tx_step.dependOn(&preexit_tx_run.step);
+
+    // Claim 0018: post-exit virtio TX bisect. `zig build tx-diag` boots the
+    // -Dtx-diag=true image once and saves the per-stage marker ladder; the
+    // determinism gate (N identical boots, per-boot ladders + serial logs +
+    // revision) lives in tools/verify-tx-diag.sh (`just verify-tx-diag`).
+    // Apple silicon only (VZ VM).
+    const tx_diag_step = b.step("tx-diag", "Boot the -Dtx-diag=true image and save the per-stage post-exit TX marker ladder (claim 0018 diagnostic)");
+    const tx_diag_run = b.addSystemCommand(&.{ "bash", "-c", tx_diag_vm_command });
+    tx_diag_run.has_side_effects = true;
+    tx_diag_run.stdio = .inherit;
+    tx_diag_step.dependOn(&tx_diag_run.step);
 }
 
 const run_vm_command =
@@ -245,6 +284,67 @@ const marker_vm_command =
     \\echo "=== loader trace: \\LOADER.TXT on the ESP ==="
     \\python3 image/mkfat32.py --cat-file /LOADER.TXT artifacts/disk.img 2>/dev/null || echo "(no LOADER.TXT -- the loader did not reach the kernel jump)"
     \\exit $RUNNER_RC
+;
+
+// Claim 0017: pre-exit virtio-pci TX diagnostic. Rebuilds the kernel +
+// image with -Dpreexit-tx=true (a fixed line is TX'd through the virtio-pci
+// transport BEFORE ExitBootServices), boots it, and reports whether the
+// exact string reached vm-serial.log while saving the NVRAM ladder bracket
+// (M2_PEXT!/M2_TXST!/M2_TXNT!/M2_TXPL!/M2_PEXD!). The hard gate lives in
+// tools/verify-preexit-tx.sh.
+// Claim 0018: post-exit virtio TX bisect. Rebuilds the kernel + image with
+// -Dtx-diag=true (the flush writes ten ordered per-stage NVRAM markers;
+// see the claim file for the interpretation table), boots it once, and
+// saves the ladder. The determinism gate is tools/verify-tx-diag.sh.
+const tx_diag_vm_command =
+    \\set -e
+    \\zig build -Dtx-diag=true image
+    \\swift build --package-path host/vm-runner --configuration release
+    \\# Recent macOS requires the com.apple.security.virtualization entitlement;
+    \\# ad-hoc codesign the binary with it before running.
+    \\codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
+    \\# Fresh variable store so the ladder is exactly this run's writes.
+    \\rm -f artifacts/efi-vars.bin
+    \\set +e
+    \\host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log --dump-marker artifacts/tx-diag-marker-dump.txt --timeout 25
+    \\RUNNER_RC=$?
+    \\set -e
+    \\echo
+    \\echo "=== marker ladder (artifacts/tx-diag-marker-dump.txt) ==="
+    \\cat artifacts/tx-diag-marker-dump.txt 2>/dev/null || true
+    \\echo
+    \\echo "=== vm-serial.log (artifacts/vm-serial.log) ==="
+    \\cat artifacts/vm-serial.log 2>/dev/null || true
+    \\exit $RUNNER_RC
+;
+
+const preexit_tx_vm_command =
+    \\set -e
+    \\zig build -Dpreexit-tx=true image
+    \\swift build --package-path host/vm-runner --configuration release
+    \\# Recent macOS requires the com.apple.security.virtualization entitlement;
+    \\# ad-hoc codesign the binary with it before running.
+    \\codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
+    \\# Fresh variable store so the ladder bracket is exactly this run's writes.
+    \\rm -f artifacts/efi-vars.bin
+    \\set +e
+    \\host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log --dump-marker artifacts/preexit-marker-dump.txt --timeout 25 --expect "DIPSHITOS PREEXIT VIRTIO TX"
+    \\RUNNER_RC=$?
+    \\set -e
+    \\echo
+    \\echo "=== marker ladder (artifacts/preexit-marker-dump.txt) ==="
+    \\cat artifacts/preexit-marker-dump.txt 2>/dev/null || true
+    \\echo
+    \\echo "=== vm-serial.log (artifacts/vm-serial.log) ==="
+    \\cat artifacts/vm-serial.log 2>/dev/null || true
+    \\echo
+    \\if grep -qF -- "DIPSHITOS PREEXIT VIRTIO TX" artifacts/vm-serial.log; then
+    \\  echo "PREEXIT-TX: OBSERVED in vm-serial.log (interpretation A — pre-exit TX works; the residual failure is across ExitBootServices/MMU/post-exit)"
+    \\  exit 0
+    \\else
+    \\  echo "PREEXIT-TX: NOT OBSERVED in vm-serial.log (interpretation B / indeterminate — see the marker bracket in artifacts/preexit-marker-dump.txt)"
+    \\  exit 1
+    \\fi
 ;
 
 // Claim 0015: NVRAM console channel. The kernel is rebuilt with
