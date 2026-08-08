@@ -19,7 +19,7 @@
 #   3. docs/hardware-contract.md records the VZ re-walk fault / no-TLBI
 #      survival as [observed] and carries the "does not mean TLB
 #      invalidation is proven" warning.
-#   4. kernel/src/main.zig install_identity_map() still contains the no-TLBI
+#   4. kernel/src/mmu.zig install_identity_map() still contains the no-TLBI
 #      safety comment, the 4 GiB blanket constant, and the "map never
 #      changes descriptors post-switch" statement — so re-adding a TLBI or
 #      re-mapping code must update the contract in the same change or CI
@@ -82,7 +82,10 @@ check '**ADR' 'hardware-contract: ADR 0006 pointer' docs/hardware-contract.md
 
 echo
 echo "--- 4. kernel install_identity_map() still carries the load-bearing comments ---"
-KERNEL=kernel/src/main.zig
+# Claim 0023: install_identity_map() moved out of main.zig into
+# kernel/src/mmu.zig (mechanical module split); the contract travels with
+# the code.
+KERNEL=kernel/src/mmu.zig
 check 'NO `tlbi vmalle1` at the switch' 'kernel: no-TLBI comment' "$KERNEL"
 check '4 * 1024 * 1024 * 1024' 'kernel: 4 GiB blanket constant' "$KERNEL"
 check 'map never changes descriptors' 'kernel: descriptors-immutable statement' "$KERNEL"
