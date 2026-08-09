@@ -22,8 +22,10 @@ const alloc = @import("alloc.zig");
 const memmap = @import("memmap.zig");
 const monitor = @import("monitor.zig");
 const shell = @import("shell.zig");
-// Claim 3475: ESP file window (pre-exit snapshot + NVRAM-persisted write).
+// Claim 3475: ESP file window. Claim 6420: now FAT-backed (live ESP via
+// the virtio-blk transport), replacing the NVRAM persistence medium.
 const esp = @import("esp.zig");
+const virtio_blk = @import("virtio_blk.zig");
 
 // Claim 0023: the handoff-v2 contract, the identity-map MMU, and the
 // evidence channel (takeover markers + probe dumps) live in their own
@@ -237,20 +239,22 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
     // instead means the kernel died in that window.
     evidence.write_marker_var(st, marker_prex);
 
-    // Claim 3475: the ESP file window. Boot Services are still alive here,
-    // so the kernel snapshots the ESP root (names/sizes/content for small
-    // files) via the Simple File System protocol — the loader's proven
-    // pattern — and scans the runtime-variable store for files persisted by
-    // a PREVIOUS boot (`write` stores content as `DipshitF:*` variables;
-    // the runner's VZEFIVariableStore keeps them across boots, so files
-    // survive reboot). Both are best effort; a failure leaves the window
-    // empty and the monitor reports it honestly. The scan runs PRE-exit so
-    // a hang would stop the marker ladder at M2_PREX! (distinguishable),
-    // and post-exit `write` still works: SetVariable is a runtime service
-    // (proven post-exit on VZ, claims 0009/0015), not a boot service.
-    esp.set_runtime(st.runtime_services);
-    esp.snapshot_esp(st, handoff_rec.image_handle);
-    esp.scan_nvram();
+    // Claim 6420: the virtio-pci block transport (the runner's disk is a
+    // VZVirtioBlockDeviceConfiguration — modern virtio-blk, DID 0x1041).
+    // Armed PRE-EXIT like the console (config-space + BAR reads hang
+    // post-exit on VZ, claim 0013); its BAR0 window is handed to the
+    // identity map below so post-MMU sector I/O reaches the device
+    // (claim 1517's transport reliability applies).
+    const blk_ready = virtio_blk.virtio_blk_init();
+
+    // Claim 6420: the ESP file window. The FAT32 volume on the ESP is
+    // mounted through the virtio-blk transport and the root directory
+    // snapshotted into the window (names/sizes/content for small files) —
+    // replacing claim 3475's pre-exit Simple File System snapshot AND its
+    // NVRAM persistence medium: `write` now writes the live FAT volume, so
+    // files survive reboot on the disk itself. Best effort; a failed mount
+    // leaves the window empty and the monitor reports it honestly.
+    if (blk_ready) _ = esp.set_disk(virtio_blk.disk_ops());
 
     var exited = false;
     var attempt: usize = 0;
@@ -293,14 +297,21 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
     // Services call. The map buffer is now owned by this kernel and all
     // subsequent work is direct memory/register access only.
     const map_after_exit = map_buffer.map;
-    // Claim 0023: the virtio BAR window (discovered pre-exit) is handed to
-    // mmu.build_identity_map as the optional extra Device window above the
-    // blanket; mmu.zig stays transport-agnostic.
-    const extra_window: ?mmu.DeviceWindow = if (virtio_console.vp_ready and virtio_console.vp_bar0 != 0)
-        .{ .base = virtio_console.vp_bar0, .len = 0x10000 }
-    else
-        null;
-    if (!mmu.build_identity_map(map_after_exit, map_buffer.buffer, base, size, handoff_rec, extra_window)) {
+    // Claim 0023 (+ 6420): the virtio console + block BAR windows
+    // (discovered pre-exit) are handed to mmu.build_identity_map as the
+    // extra Device windows above the blanket; mmu.zig stays
+    // transport-agnostic.
+    var extra_windows: [2]mmu.DeviceWindow = undefined;
+    var extra_count: usize = 0;
+    if (virtio_console.vp_ready and virtio_console.vp_bar0 != 0) {
+        extra_windows[extra_count] = .{ .base = virtio_console.vp_bar0, .len = 0x10000 };
+        extra_count += 1;
+    }
+    if (virtio_blk.blk_ready and virtio_blk.blk_bar0 != 0) {
+        extra_windows[extra_count] = .{ .base = virtio_blk.blk_bar0, .len = 0x10000 };
+        extra_count += 1;
+    }
+    if (!mmu.build_identity_map(map_after_exit, map_buffer.buffer, base, size, handoff_rec, extra_windows[0..extra_count])) {
         evidence.set_marker(marker_table);
         evidence.write_marker_var(st, marker_table);
         halt_forever();
@@ -432,17 +443,23 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
     uart_hex(timer.freq);
     uart_puts("\n");
 
-    // Claim 3475: the ESP file window summary (names/sizes/content
-    // snapshotted pre-exit, plus NVRAM-backed files from previous boots).
-    // A second boot's line showing the file `write` stored in boot one is
-    // the persistence-through-reboot evidence in the serial log.
+    // Claim 6420: the ESP file window summary (the FAT volume mount result
+    // + the root listing count). A second boot's line showing the file
+    // `write` stored in boot one is the persistence-through-reboot
+    // evidence in the serial log — the file now lives on the disk, not in
+    // NVRAM variables (claim 3475's medium is replaced).
     uart_puts("esp window: esp=");
     uart_hex(@intCast(esp.esp_count()));
-    uart_puts(" nvram=");
-    uart_hex(@intCast(esp.nvram_count()));
-    uart_puts(" store-free=");
-    uart_hex(esp.remaining_bytes());
+    uart_puts(" disk=");
+    uart_puts(if (esp.disk_ready()) "1" else "0");
     uart_puts("\n");
+
+    // Claim 6420: VZ resets the virtio-blk device at ExitBootServices (its
+    // status reads 0 post-exit and the queue is dead). Re-arm the queue
+    // now that the identity map is live, so the shell's `write` (live FAT
+    // reads/writes through the transport) works. The pre-exit queue was
+    // used only for the boot-time ESP mount.
+    if (virtio_blk.blk_common != 0) _ = virtio_blk.blk_rearm();
 
     uart_puts("kernel terminal state\n");
 

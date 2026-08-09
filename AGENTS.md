@@ -31,6 +31,9 @@ and what's next".
 - Do not add a kernel during milestone zero. *(Historical — milestones
   zero and one are complete; a kernel has existed since milestone two.)*
 - Do not add graphics, networking, SMP, processes, or filesystems.
+  *(Historical — the allocator (claims 3972/5162), exception vectors (9746),
+  and the guest-side FAT32 storage driver on the ESP (claim 6420) all
+  landed post-tag; the list is the milestone promise.)*
 - Host-side observation devices (serial console, a framebuffer used only to
   screenshot the guest, the BOOTED.TXT evidence file) are permitted and are
   not "graphics" or "filesystem" milestones; guest-side graphics, network,

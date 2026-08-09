@@ -30,7 +30,14 @@ assumption comes from documentation or reasoning only.
 - UEFI firmware: Apple's Virtualization EFI. Vendor and revision are
   unknown/undocumented by Apple. **[inferred]**
 - Disk: virtio block device (`VZVirtioBlockDeviceConfiguration`), attached
-  read-write so the guest can write its evidence file.
+  read-write so the guest can write its evidence file. **Discovered by
+  claim 6420**: the guest sees the disk on bus 0 as `VID=0x1af4
+  DID=0x1042 class=0x018000` — **not** the virtio-blk spec DID 0x1041
+  (the standard DID table does not apply to VZ; 0x1042 is block, 0x1043
+  console). The device also **resets at ExitBootServices**: its status
+  register reads 0 post-exit and the queue is dead, so the driver re-arms
+  the queue post-MMU (common-config MMIO writes to the BAR window work
+  post-exit; PCI config-space reads must stay pre-exit, claim 0013).
 - Console: virtio console serial port
   (`VZVirtioConsoleDeviceSerialPortConfiguration`). **Observed**: on
   macOS 27 / Apple silicon, Apple's EFI firmware does NOT route UEFI

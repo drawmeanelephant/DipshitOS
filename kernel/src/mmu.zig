@@ -74,9 +74,10 @@ pub fn invalidate_dcache_range(start: u64, len: u64) void {
     asm volatile ("dsb ish" ::: .{ .memory = true });
 }
 
-/// Optional extra Device window the identity map must cover above the
+/// Optional extra Device windows the identity map must cover above the
 /// blanket (the virtio-pci console BAR, discovered pre-exit by
-/// virtio_console.zig). The caller passes the window it needs.
+/// virtio_console.zig, and the virtio-pci block BAR, discovered by
+/// virtio_blk.zig — claim 6420). The caller passes the windows it needs.
 pub const DeviceWindow = struct {
     base: u64,
     len: u64,
@@ -88,7 +89,7 @@ pub fn build_identity_map(
     base: u64,
     size: u64,
     handoff_rec: *const handoff.HandoffV2,
-    extra_device: ?DeviceWindow,
+    extra_device: []const DeviceWindow,
 ) bool {
     table_count = 0;
     _ = new_table() orelse return false; // root table at index zero
@@ -122,14 +123,14 @@ pub fn build_identity_map(
         }
     }
 
-    // Claim 0013: the virtio-pci console transport window (firmware-assigned
-    // at 0x100010000, ABOVE the blanket) must stay reachable post-exit for
-    // TX. Map it Device (4 KiB pages; the low blanketed world is untouched).
-    // Post-exit config writes cannot move the BAR on VZ (observed: a rebase
-    // "completed" but the device never answered at the new base), so the
-    // firmware's placement is mapped in place instead. The window comes from
-    // the caller, who owns the virtio transport discovery.
-    if (extra_device) |window| {
+    // Claim 0013 (+ claim 6420): the virtio-pci console and block transport
+    // windows (firmware-assigned ABOVE the blanket) must stay reachable
+    // post-exit. Map each Device (4 KiB pages; the low blanketed world is
+    // untouched). Post-exit config writes cannot move the BARs on VZ
+    // (observed: a rebase "completed" but the device never answered at the
+    // new base), so the firmware's placement is mapped in place instead.
+    // The windows come from the caller, who owns the virtio discovery.
+    for (extra_device) |window| {
         if (window.base >= blanket_end) {
             if (!map_range(window.base, window.base + window.len, Attr.device)) return false;
         }

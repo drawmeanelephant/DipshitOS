@@ -186,8 +186,10 @@ display a banner, accept commands at `dipshit>`, and execute at least ten
 useful commands (identity, memory-map inspection, shell utilities, and
 machine controls). Milestone two's kernel already owns the console and
 never returns; the monitor is its terminal-loop payload. It promises no new
-allocator, MMU work, interrupts, scheduler, userspace, or guest-side
-storage drivers.
+allocator, MMU work, interrupts, scheduler, or userspace. *(Post-tag, the
+allocator, exception vectors, and — claim 6420 — a guest-side FAT32
+storage driver on the ESP landed anyway; the milestone's promise list is
+historical.)*
 
 **Progress as of 2026-08-08:** the host plumbing (duplex serial attachment,
 terminal handling, `zig build console`), console & shell core (RX abstraction,
@@ -206,8 +208,12 @@ powers it off — 4/4 boots via `verify-live-reboot.sh`), and the
 **filesystem gate is closed** (claim 3475, 2026-08-09: `ls`/`cat`/`write`
 persist through reboot via the pre-exit ESP snapshot + NVRAM-persisted
 writes, `verify-live-fs.sh` — the ESP file window, registry now 20
-commands). **Closed 2026-08-09: all 7 hard gates pass; the milestone is
-tagged `m1.5-interactive-monitor`.** Current gate
+commands) **and upgraded the same day to a real FAT32 storage driver**
+(claim 6420: `ls`/`cat`/`write` read and write the live ESP's FAT volume
+through a virtio-blk transport; files persist on the disk itself;
+NVRAM variables are no longer the persistence medium). **Closed
+2026-08-09: all 7 hard gates pass; the milestone is tagged
+`m1.5-interactive-monitor`.** Current gate
 state: [`docs/status.md`](status.md).
 
 The M1.5 hard gates, target screen, and milestone status live in
@@ -225,9 +231,11 @@ reboot/shutdown is observed end to end** (claim 0527:
 `verify-live-reboot.sh` — `reboot` resets the machine, `shutdown` powers
 it off), and the **filesystem gate is closed** (claim 3475, 2026-08-09:
 `ls`/`cat`/`write` persist through reboot via the pre-exit ESP snapshot +
-NVRAM-persisted writes, `verify-live-fs.sh`, 1/1 pair). **The milestone
-is closed 2026-08-09: all 7 M1.5 hard gates pass; tagged
-`m1.5-interactive-monitor`** (see
+NVRAM-persisted writes, `verify-live-fs.sh`, 1/1 pair) **and upgraded to
+a real FAT32 storage driver** (claim 6420: the ESP's FAT volume is
+mounted and written through a virtio-blk transport, files persist on the
+disk itself). **The milestone is closed 2026-08-09: all 7 M1.5 hard
+gates pass; tagged `m1.5-interactive-monitor`** (see
 [`docs/status.md`](status.md)).
 
 ## Later milestones (sketches only, not commitments)
@@ -243,9 +251,12 @@ is closed 2026-08-09: all 7 M1.5 hard gates pass; tagged
   unit-proven in claim 0011), and the **filesystem gate** (claim 3475:
   `ls`/`cat`/`write` persist through reboot via the pre-exit ESP snapshot
   + NVRAM-persisted writes, `verify-live-fs.sh`, 1/1 pair — the last
-  previously-deferred hard gate). **All 7 hard gates pass; milestone
-  closed.** The next milestone is a physical page allocator over the
-  captured EFI map (canonical ordering: `docs/status.md`).
+  previously-deferred hard gate) **upgraded to a real FAT32 storage
+  driver** (claim 6420: the ESP's FAT volume is mounted + written through
+  a virtio-blk transport; files persist on the disk; NVRAM is no longer
+  the persistence medium). **All 7 hard gates pass; milestone closed.**
+  The next milestone is a physical page allocator over the captured EFI
+  map (canonical ordering: `docs/status.md`).
 - ~~A physical page allocator over the captured EFI map.~~ **First step
   DONE 2026-08-08 (claim 3972):** first-fit bitmap allocator over the
   captured map's ConventionalMemory (fixed 128 KiB BSS bitmap over the
@@ -270,8 +281,15 @@ is closed 2026-08-09: all 7 M1.5 hard gates pass; tagged
   (GICR is RAZ/WI; PPI/SGI/SPI all inert; full evidence in the claim), so
   IRQ delivery into the claim-9746 vectors stays open for a platform that
   actually signals. The GIC is now `[observed]` in the hardware contract.
-- Eventually: a process abstraction, a filesystem, a network stack — each
-  only when the ones below it are demonstrably working.
+- A guest-side filesystem — **the ESP FAT32 driver landed 2026-08-09
+  (claim 6420):** `kernel/src/fat.zig` (GPT + FAT32 mount/list/read/write
+  with injected sector I/O) over `kernel/src/virtio_blk.zig` (the
+  runner's disk as a modern virtio-blk transport, DID 0x1042 on VZ,
+  re-armed post-exit after VZ resets the device at ExitBootServices).
+  `ls`/`cat`/`write` serve the live ESP volume; files persist on the
+  disk itself. A general (non-ESP) filesystem remains future work.
+- Eventually: a process abstraction, a network stack — each only when the
+  ones below it are demonstrably working.
 
 Each milestone must state what was **observed** versus **inferred** and must
 record new hardware assumptions in `docs/hardware-contract.md`.
