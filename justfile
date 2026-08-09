@@ -32,7 +32,8 @@ verify-portable:
 
 # Run the Apple-silicon VZ hardware gates (class B): serial takeover
 # (zig build run, claim 1517), bad-handoff, marker, NVRAM console,
-# host-console PTY, and the live-transcript RX gate (claim 6684).
+# host-console PTY, the live-transcript RX gate (claim 6684), and the
+# live reboot/shutdown gate (claim 0527).
 # Apple silicon only — each boots VZ VMs.
 verify-vz:
     zig build run
@@ -41,6 +42,7 @@ verify-vz:
     bash tools/verify-nvram-console.sh
     bash tools/verify-host-console.sh
     bash tools/verify-live-transcript.sh
+    bash tools/verify-live-reboot.sh
 
 # Compile the AArch64 UEFI application and kernel image (class A — zig build)
 build:
@@ -137,6 +139,10 @@ verify-bad-handoff:
 # Verify the live RX path + live dipshit> transcript (class B — boots a VZ VM; host scripted keystrokes reach the kernel end to end; claim 6684; Apple silicon only)
 verify-live-transcript:
     bash tools/verify-live-transcript.sh
+
+# Verify the live reboot/shutdown observation (class B — boots VZ VMs; a real EFI ResetSystem from a live dipshit> shell: reboot resets the machine, shutdown powers it off; claim 0527, hard gate 6; Apple silicon only)
+verify-live-reboot:
+    bash tools/verify-live-reboot.sh
 
 # Verify the M1.5 host-side interactive serial plumbing (class B — boots VZ VMs; Apple silicon only)
 verify-host-console:

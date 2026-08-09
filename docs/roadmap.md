@@ -200,8 +200,10 @@ channel carries post-exit bytes (claim 0015), and — since claim 1517 — the
 banner + `dipshit>` prompt in `vm-serial.log`), and **live RX is wired**
 (claim 6684: the polled virtio receive queue delivers host keystrokes end
 to end — `verify-live-transcript.sh` asserts the live `dipshit>`
-transcript in `vm-serial.log`). The remaining live-gate gap is a live
-reboot/shutdown observation. Current gate state: [`docs/status.md`](status.md).
+transcript in `vm-serial.log`), and the **live reboot/shutdown
+observation is done** (claim 0527: `reboot` resets the machine, `shutdown`
+powers it off — 4/4 boots via `verify-live-reboot.sh`). Current gate
+state: [`docs/status.md`](status.md).
 
 The M1.5 hard gates, target screen, and milestone status live in
 **`docs/status.md`** (the living status document); the twenty-step plan,
@@ -214,23 +216,33 @@ serial gate **passes** (claim 1517 — post-MMU virtio TX fixed with
 T0SZ=16 + TLBI at the switch) and the **RX path is live** (claim 6684 —
 the polled virtio receive queue delivers host keystrokes; the live
 `dipshit>` transcript is asserted in `vm-serial.log` by
-`verify-live-transcript.sh`), but a live reboot/shutdown has not yet been
-observed end to end (see [`docs/status.md`](status.md)).
+`verify-live-transcript.sh`), and a **live reboot/shutdown is observed
+end to end** (claim 0527: `verify-live-reboot.sh` — `reboot` resets the
+machine, `shutdown` powers it off). Every M1.5 hard gate now passes; the
+remaining close-out is the milestone tag (see
+[`docs/status.md`](status.md)).
 
 ## Later milestones (sketches only, not commitments)
 
-- **M1.5 close-out: live reboot/shutdown observation, then the milestone
-  tag.** The transport layer is **done**: post-MMU TX (claim 1517:
-  T0SZ=16 + TLBI at the switch) and **live RX** (claim 6684: the polled
-  virtio receive queue delivers host keystrokes end to end —
-  `verify-live-transcript.sh` asserts the live `dipshit>` transcript in
-  `vm-serial.log`). What remains before the milestone can close: a live
-  `ResetSystem` observation from the shell (unit-proven, claim 0011;
-  never yet observed end to end) and the doc close-out. Then the next
-  milestone is a physical page allocator over the captured EFI map
-  (canonical ordering: `docs/status.md`).
-- A memory allocator and boot-time memory map walk (the EFI memory map
-  the kernel captured at exit, walked by the kernel itself).
+- **M1.5 close-out: milestone tag (all hard gates now pass).** The
+  transport layer is **done**: post-MMU TX (claim 1517: T0SZ=16 + TLBI at
+  the switch), **live RX** (claim 6684: the polled virtio receive queue
+  delivers host keystrokes end to end — `verify-live-transcript.sh`
+  asserts the live `dipshit>` transcript in `vm-serial.log`), and the
+  **live reboot/shutdown observation** (claim 0527: `verify-live-reboot.sh`
+  — `reboot` resets the machine, `shutdown` powers it off, 4/4 boots;
+  `ResetSystem` unit-proven in claim 0011). All hard gates pass; what
+  remains before the milestone is tagged is the tag itself and any final
+  doc sweep. Then the next milestone is a physical page allocator over
+  the captured EFI map (canonical ordering: `docs/status.md`).
+- ~~A physical page allocator over the captured EFI map.~~ **First step
+  DONE 2026-08-08 (claim 3972):** first-fit bitmap allocator over the
+  captured map's ConventionalMemory (fixed 128 KiB BSS bitmap over the
+  4 GiB identity-map span), wired post-exit; `pages`/`pages selftest`
+  monitor commands; 18 unit tests; live-observed on VZ. Still open from
+  this sketch: pooling loader/boot-services regions (needs kernel-image +
+  map-buffer exclusion ranges), and the boot-time map walk is already
+  served by `memmap.MapView` + `mem`/`pages`.
 - Interrupt setup (GIC) and a timer — the GIC is already recorded as an
   `[inferred]` hardware assumption.
 - Eventually: a process abstraction, a filesystem, a network stack — each

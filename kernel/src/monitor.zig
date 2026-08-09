@@ -16,6 +16,7 @@
 //! `kernel/src/main.zig` is intentionally untouched by this stream.
 
 const std = @import("std");
+const alloc = @import("alloc.zig");
 const console = @import("console.zig");
 const handoff = @import("handoff.zig");
 const memmap = @import("memmap.zig");
@@ -188,7 +189,7 @@ pub const Command = struct {
 
 /// Number of commands. The registry is built at runtime (not a const
 /// table): see `ensure_registry`.
-pub const registry_count: usize = 14;
+pub const registry_count: usize = 15;
 
 /// Command registry, built at runtime into BSS. A `const` table would hold
 /// link-time absolute addresses for BOTH the string slices and the handler
@@ -213,6 +214,7 @@ fn ensure_registry() []const Command {
             .{ .name = "help", .help = "list commands and their help text", .usage = "help [command]", .max_args = 1, .handler = cmd_help },
             .{ .name = "hex", .help = "format an integer in hexadecimal", .usage = "hex <number>...", .min_args = 1, .handler = cmd_hex },
             .{ .name = "mem", .help = "summarize the EFI memory map", .usage = "mem", .handler = cmd_mem },
+            .{ .name = "pages", .help = "physical page allocator pool", .usage = "pages [selftest]", .max_args = 1, .handler = cmd_pages },
             .{ .name = "reboot", .help = "restart the machine", .usage = "reboot", .handler = cmd_reboot },
             .{ .name = "repeat", .help = "repeat text, safely bounded", .usage = "repeat <count> <text...>", .min_args = 1, .handler = cmd_repeat },
             .{ .name = "shutdown", .help = "request power-off", .usage = "shutdown", .handler = cmd_shutdown },
@@ -468,6 +470,98 @@ fn cmd_mem(m: *Monitor, args: []const []const u8) ExecError {
     m.console.print_hex(h.kernel_size);
     m.console.puts(" bytes)\n");
     return .none;
+}
+
+// ---------------------------------------------------------------------------
+// Physical page allocator command (next-card milestone)
+// ---------------------------------------------------------------------------
+
+fn cmd_pages(m: *Monitor, args: []const []const u8) ExecError {
+    if (args.len == 1 and !std.mem.eql(u8, args[0], "selftest")) {
+        m.console.puts("usage: pages [selftest]\n");
+        return .usage;
+    }
+    const s = alloc.stats();
+    if (!s.armed) {
+        if (args.len == 1) {
+            m.console.print_line("pages selftest: allocator not armed");
+        } else {
+            m.console.print_line("pages: allocator not armed (no conventional memory in span)");
+        }
+        return .none;
+    }
+    if (args.len == 1) return pages_selftest(m, s);
+    m.console.puts("pages: armed=1 total=");
+    m.console.print_hex(s.total_pages);
+    m.console.puts(" free=");
+    m.console.print_hex(s.free_pages);
+    m.console.puts(" regions=");
+    m.console.print_hex(@intCast(s.region_count));
+    m.console.puts(" span=");
+    m.console.print_hex(s.span_pages);
+    m.console.puts("\n");
+    return .none;
+}
+
+/// Deterministic bounded alloc/free battery against the module allocator:
+/// alloc 1 / free, alloc 8 / free, alloc 3 + alloc 5 (contiguous) / free
+/// both, alloc the largest free run / free, alloc total+1 -> none. Leaves
+/// the pool exactly as it found it. The pool may be fragmented across
+/// regions (real VZ maps are), so the "big" step allocates the largest
+/// contiguous free run — which is guaranteed to fit — rather than the
+/// whole pool (which need not be contiguous).
+fn pages_selftest(m: *Monitor, s: alloc.Stats) ExecError {
+    const total = s.total_pages;
+    var failed = false;
+    if (pages_alloc_line(m, 1)) |base| failed = failed or !pages_free_line(m, base, 1, "free");
+    if (pages_alloc_line(m, 8)) |base| failed = failed or !pages_free_line(m, base, 8, "free");
+    const a3 = pages_alloc_line(m, 3);
+    const a5 = pages_alloc_line(m, 5);
+    if (a3 != null and a5 != null) {
+        const ok3 = alloc.free_pages(a3.?, 3);
+        const ok5 = alloc.free_pages(a5.?, 5);
+        m.console.print_line(if (ok3 and ok5) "pages selftest: free both ok" else "pages selftest: free both FAILED");
+        failed = failed or !(ok3 and ok5);
+    } else {
+        failed = true;
+    }
+    const largest = alloc.largest_free_run();
+    if (pages_alloc_line(m, largest)) |base| failed = failed or !pages_free_line(m, base, largest, "free");
+    // Allocating one more than the whole pool must fail.
+    if (pages_alloc_line(m, total + 1) != null) failed = true;
+    const after = alloc.stats();
+    const restored = after.free_pages == after.total_pages and after.free_pages == total;
+    m.console.puts("pages selftest: ");
+    m.console.puts(if (failed or !restored) "FAILED" else "ok");
+    m.console.puts(" free=");
+    m.console.print_hex(after.free_pages);
+    m.console.puts("\n");
+    return .none;
+}
+
+/// Print "alloc <n> -> <base>" (or "-> none (out of memory)") and return
+/// the base on success.
+fn pages_alloc_line(m: *Monitor, n: u64) ?u64 {
+    m.console.puts("pages selftest: alloc ");
+    m.console.print_u64(n);
+    m.console.puts(" -> ");
+    const base = alloc.alloc_pages(n);
+    if (base) |b| {
+        m.console.print_hex(b);
+    } else {
+        m.console.puts("none (out of memory)");
+    }
+    m.console.puts("\n");
+    return base;
+}
+
+fn pages_free_line(m: *Monitor, base: u64, n: u64, label: []const u8) bool {
+    const ok = alloc.free_pages(base, n);
+    m.console.puts("pages selftest: ");
+    m.console.puts(label);
+    m.console.puts(if (ok) " ok" else " FAILED");
+    m.console.puts("\n");
+    return ok;
 }
 
 // ---------------------------------------------------------------------------
