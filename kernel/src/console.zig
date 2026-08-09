@@ -39,8 +39,9 @@ pub const Console = struct {
     }
 
     /// Poll one input byte; null means "no input available now". The shell
-    /// loop parks (WFE) between polls, so a no-RX transport idles instead
-    /// of spinning.
+    /// loop waits between polls (WFE in the parked no-RX case; a bounded
+    /// delay when RX is wired — claim 6684), so a no-RX transport idles
+    /// instead of spinning.
     pub fn readByte(self: Console) ?u8 {
         return self.vtable.readByte(self.ctx);
     }

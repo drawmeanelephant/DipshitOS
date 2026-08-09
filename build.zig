@@ -89,32 +89,22 @@ pub fn build(b: *std.Build) void {
     // ASCII variable `DipshitMmu` for a host-side firmware-vs-kernel diff.
     // Default off: the default build is byte-identical.
     const fw_mmu_capture = b.option(bool, "fw-mmu-capture", "Capture firmware MMU registers + a virtio BAR-window table walk pre-exit, persisted to NVRAM (claim 0021 diagnostic)") orelse false;
-    // Claim 6460: `-Dt0sz16` programs TCR_EL1.T0SZ=16 (W=48) instead of the
-    // production 25 (W=39) in install_identity_map(), so the 4 KiB stage-1
-    // walk starts at level 0 — matching the built L0-rooted hierarchy the
-    // tables already implement (at T0SZ=25 the walk starts at level 1; the
-    // start-level mismatch is the claim-6460 hypothesis for the first
-    // post-MMU virtio-pci console failure). ONLY T0SZ changes: same tables,
-    // same TTBR0 root, same MAIR/attributes/blanket/BAR window, same
-    // no-TLBI behavior. Default off: the default build is byte-identical.
-    const t0sz16 = b.option(bool, "t0sz16", "Diagnostic: install_identity_map programs T0SZ=16 (walk starts at level 0) instead of 25 (claim 6460; default off)") orelse false;
-    // Claim 7896 (6460 follow-up): `-Dtlbi-after-switch` drops the no-TLBI
-    // crutch for the diagnostic: immediately after install_identity_map, the
-    // kernel executes `tlbi vmalle1; dsb ish; isb`, so the FIRST post-switch
-    // access must re-walk the installed tables (stale firmware TLB entries
-    // are gone by construction). At T0SZ=25 the walk of the L0-rooted tables
-    // faults (start-level mismatch — claim 0010's M2_TTBR! death); at
-    // T0SZ=16 it resolves. This is the deterministic lever that separates
-    // the start-level defect from the residual hang. Default off: default
-    // builds are byte-identical (no-TLBI contract, ADR 0006, unchanged).
-    const tlbi_after_switch = b.option(bool, "tlbi-after-switch", "Diagnostic: execute tlbi vmalle1 immediately after the identity-map install, forcing a full re-walk (claim 7896; default off)") orelse false;
+    // Claim 1517: production T0SZ is 16 (correct start level for the built
+    // L0-rooted hierarchy). `-Dt0sz25` selects the legacy 25 (W=39, walk
+    // starts at level 1 — the claim-6460/7896 start-level mismatch that
+    // made every fresh post-switch walk fault on VZ) for class-D A/B
+    // regression. ONLY T0SZ changes: same tables, same TTBR0 root, same
+    // MAIR/attributes/blanket/BAR window; the TLBI at the switch is
+    // unconditional production behavior (claim 1517). Default off: default
+    // builds are the production T0SZ=16 + TLBI kernel.
+    const t0sz25 = b.option(bool, "t0sz25", "Diagnostic: install_identity_map programs T0SZ=25 (legacy start level, W=39 — the claim-6460/7896 start-level mismatch) instead of production 16 (claim 1517; default off)") orelse false;
     // Claim 7896: `-Dwalk-probe` runs a post-switch cold-address probe
     // battery, each probe bracketed by an NVRAM marker, to test whether the
     // installed tables resolve under the programmed T0SZ and to NAME the
     // first address whose walk (or MMIO read) does not return. Runs after
-    // install_identity_map (and after the optional -Dtlbi-after-switch)
-    // before the claim-0020 phase-C experiment. Default off: the module is
-    // linker-eliminated from default builds (byte-identical).
+    // install_identity_map (which now always ends with the full TLBI,
+    // claim 1517) before the claim-0020 phase-C experiment. Default off: the
+    // module is linker-eliminated from default builds (byte-identical).
     const walk_probe = b.option(bool, "walk-probe", "Diagnostic: post-switch walk-validity probe battery with per-probe NVRAM markers (claim 7896; default off)") orelse false;
     const kernel_options = b.addOptions();
     kernel_options.addOption(bool, "nvram_console", nvram_console);
@@ -125,8 +115,7 @@ pub fn build(b: *std.Build) void {
     kernel_options.addOption(bool, "tx_transition_c", tx_transition_c);
     kernel_options.addOption(bool, "tx_transition_d", tx_transition_d);
     kernel_options.addOption(bool, "fw_mmu_capture", fw_mmu_capture);
-    kernel_options.addOption(bool, "t0sz16", t0sz16);
-    kernel_options.addOption(bool, "tlbi_after_switch", tlbi_after_switch);
+    kernel_options.addOption(bool, "t0sz25", t0sz25);
     kernel_options.addOption(bool, "walk_probe", walk_probe);
     const kernel = b.addExecutable(.{
         .name = "dipshit-kernel",
@@ -185,7 +174,7 @@ pub fn build(b: *std.Build) void {
     failure_image.stdio = .inherit;
     failure_step.dependOn(&failure_image.step);
 
-    const run_step = b.step("run", "Boot the disk image with the Swift Virtualization.framework runner (class B — live serial takeover gate, claim 0002; Apple silicon only; currently blocked)");
+    const run_step = b.step("run", "Boot the disk image with the Swift Virtualization.framework runner (class B — live serial takeover gate, claim 0002; Apple silicon only; PASSING since claim 1517)");
     const run = b.addSystemCommand(&.{ "bash", "-c", run_vm_command });
     run.step.dependOn(&image.step);
     run.has_side_effects = true;

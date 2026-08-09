@@ -9,9 +9,11 @@
 //! once the VZ serial gate (claim 0002) proves a device.
 //!
 //! Kernel seam (`kernel/src/main.zig`): `boot_and_park` prints the banner;
-//! if an RX source is wired it runs the loop forever (never returns);
-//! without RX it prints the prompt and returns so the kernel parks in WFE
-//! — it never spins hot. No device register is read by this module.
+//! if an RX source is wired it runs the loop forever (never returns),
+//! idling between polls with a bounded nop delay (the virtio device
+//! delivers input with no interrupt, so WFE would never wake — claim
+//! 6684); without RX it prints the prompt and returns so the kernel parks
+//! in WFE. No device register is read by this module.
 //!
 //! No libc, no POSIX, no allocation, no global mutable state.
 
@@ -104,16 +106,20 @@ pub fn boot_and_park(mon: *monitor.Monitor, rx_wired: bool) void {
     }
     var shell = Shell.init(mon.console, mon.state, mon.machine);
     while (true) {
-        if (shell.poll() == .idle) idle_wait();
+        if (shell.poll() == .idle) idle_wait_rx();
     }
 }
 
-/// Idle between input polls: WFE when the wait instruction exists (the
-/// kernel target). Elided entirely on non-aarch64 hosts so the module
-/// stays host-testable on x86_64 CI.
-fn idle_wait() void {
+/// Idle between input polls in RX-wired mode: a bounded nop delay, not WFE.
+/// The device delivers input with no interrupt (ADR 0004: no GIC
+/// programming this milestone), so a WFE would sleep forever and the kernel
+/// would never re-poll (claim 6684). The bounded delay keeps the loop
+/// responsive without a timer. Elided entirely on non-aarch64 hosts so the
+/// module stays host-testable on x86_64 CI.
+fn idle_wait_rx() void {
     if (comptime builtin.cpu.arch == .aarch64) {
-        asm volatile ("wfe");
+        var spins: usize = 0;
+        while (spins < 100_000) : (spins += 1) asm volatile ("nop");
     }
 }
 

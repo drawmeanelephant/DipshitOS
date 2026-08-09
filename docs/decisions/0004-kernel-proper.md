@@ -166,6 +166,23 @@ cache maintenance from this point on — no firmware cleanup is guaranteed.
 > TCR/MAIR changes) that invalidate it. "MMU takeover fixed" means the
 > identity map installs and this milestone's accesses work — it does **not**
 > mean TLB invalidation or remapping is proven.
+>
+> **D3 addendum #2 (2026-08-08, claim 1517; preceded by claims 6460/7896,
+> supersedes addendum #1):** the TLBI is now **EXECUTED**, and the start level is corrected.
+> Claims 6460/7896 proved the addendum-#1 survival was stale-firmware-TLB
+> interference masking a real translation defect: production T0SZ=25/W=39
+> started the 4 KiB stage-1 walk at level 1 over the L0-rooted tables, so
+> every fresh walk faulted (the first post-MMU virtio BAR read — claims
+> 0018/0020 — was the first access whose firmware TLB entry was evicted).
+> Claim 1517 lands the production fix: `install_identity_map()` programs
+> **T0SZ=16** (walk starts at level 0, matching the built hierarchy) and
+> ends with **`tlbi vmalle1; dsb ish; isb`**, so the first post-switch
+> access deterministically re-walks correct tables. The implemented switch
+> is now `dsb ishst` → `msr mair_el1` → `msr tcr_el1` → `msr ttbr0_el1` →
+> `isb` → `dsb ish` → `isb` → `tlbi vmalle1` → `dsb ish` → `isb`. The
+> ADR-0006 no-TLBI validity window is closed; the invalidation list
+> (re-mapping/unmapping/permission/ASID/TCR-MAIR changes after the switch)
+> remains binding for later milestones (see **ADR 0006**).
 
 ### D4. Minimal serial console driver
 

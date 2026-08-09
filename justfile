@@ -30,16 +30,17 @@ verify-portable:
     bash tools/status/test-coordination.sh
     bash tools/verify-mmu-debt.sh
 
-# Run the Apple-silicon VZ hardware gates (class B): bad-handoff, marker,
-# NVRAM console, host-console PTY. Apple silicon only — each boots VZ VMs.
-# Intentionally NOT chained here (blocked/deferred, see
-# docs/gate-inventory.md): the live serial takeover gate (`zig build run`,
-# claim 0002) and the live M1.5 transcript/RX gate.
+# Run the Apple-silicon VZ hardware gates (class B): serial takeover
+# (zig build run, claim 1517), bad-handoff, marker, NVRAM console,
+# host-console PTY, and the live-transcript RX gate (claim 6684).
+# Apple silicon only — each boots VZ VMs.
 verify-vz:
+    zig build run
     bash tools/verify-bad-handoff.sh
     bash tools/verify-marker.sh
     bash tools/verify-nvram-console.sh
     bash tools/verify-host-console.sh
+    bash tools/verify-live-transcript.sh
 
 # Compile the AArch64 UEFI application and kernel image (class A — zig build)
 build:
@@ -93,7 +94,7 @@ kernel:
 image:
     zig build image
 
-# Boot with the Swift Virtualization.framework runner (class B gate — the live serial takeover gate, claim 0002; currently BLOCKED; Apple silicon only)
+# Boot with the Swift Virtualization.framework runner (class B gate — the live serial takeover gate, claim 0002; PASSING since claim 1517; Apple silicon only)
 run:
     zig build run
 
@@ -113,7 +114,7 @@ context:
 ragshit *ARGS:
     python3 tools/ragshit/ragshit {{ARGS}}
 
-# Verify the MMU-debt boundary contract is intact (class A — ADR 0006 + kernel no-TLBI comments; deterministic, no VM — claim 0022)
+# Verify the MMU takeover contract is intact (class A — ADR 0006 supersession + kernel T0SZ=16/TLBI comments; deterministic, no VM — claims 0022/1517)
 verify-mmu-debt:
     bash tools/verify-mmu-debt.sh
 
@@ -132,6 +133,10 @@ refresh-indexes:
 # Verify the pre-exit failure path (class B — boots a VZ VM; Apple silicon only)
 verify-bad-handoff:
     bash tools/verify-bad-handoff.sh
+
+# Verify the live RX path + live dipshit> transcript (class B — boots a VZ VM; host scripted keystrokes reach the kernel end to end; claim 6684; Apple silicon only)
+verify-live-transcript:
+    bash tools/verify-live-transcript.sh
 
 # Verify the M1.5 host-side interactive serial plumbing (class B — boots VZ VMs; Apple silicon only)
 verify-host-console:

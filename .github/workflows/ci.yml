@@ -64,7 +64,7 @@ jobs:
       - name: Test multiagent coordination tooling (class A)
         run: bash tools/status/test-coordination.sh
 
-      - name: Verify MMU-debt boundary contract (class A — ADR 0006, no-TLBI comments)
+      - name: Verify MMU takeover contract (class A — ADR 0006 supersession, T0SZ=16 + TLBI comments)
         run: bash tools/verify-mmu-debt.sh
 
       # --- Class B: Apple-silicon VZ hardware gates are NOT run here ---

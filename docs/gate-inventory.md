@@ -44,18 +44,17 @@
 | `marker` | B | gate | yes | no | yes | `bash tools/verify-marker.sh` (mechanism: `zig build marker`) |
 | `nvram-console` | B | gate | yes | no | yes | `bash tools/verify-nvram-console.sh` (mechanism: `zig build nvram-console`) |
 | `host-console-pty` | B | gate | yes | no | yes | `bash tools/verify-host-console.sh` |
-| `serial-takeover` | B | gate | yes | no | yes | `zig build run` — **blocked** (claim 0002); not in `verify-vz` until it can pass |
-| `live-transcript-rx` | B | gate | yes | no | yes | assert transcript bytes in `vm-serial.log` on a live VZ run — **deferred** to claim 0002; no script yet |
-| `verify-vz` | B | aggregate | no | no | yes | `just verify-vz` — bad-handoff + marker + nvram-console + host-console (Apple silicon only) |
+| `serial-takeover` | B | gate | yes | no | yes | `zig build run` — **PASS 2026-08-08** (claim 1517); in `verify-vz` |
+| `live-transcript-rx` | B | gate | yes | no | yes | `bash tools/verify-live-transcript.sh` — **PASS 2026-08-08** (claim 6684): live RX, host scripted keystrokes reach the kernel end to end and the `dipshit>` transcript is asserted in `vm-serial.log` |
+| `verify-vz` | B | aggregate | no | no | yes | `just verify-vz` — serial takeover + bad-handoff + marker + nvram-console + host-console + live-transcript (Apple silicon only) |
 | `console` | C | interactive | yes | no | yes | `zig build console` — interactive host serial console; needs a human at the keyboard |
 | `preexit-tx` | D | diagnostic | no | no | yes | `bash tools/verify-preexit-tx.sh` (mechanism: `zig build preexit-tx`) — claim 0017 |
 | `tx-diag` | D | diagnostic | no | no | yes | `bash tools/verify-tx-diag.sh` (mechanism: `zig build tx-diag`) — claim 0018 |
 | `tx-transition` | D | diagnostic | no | no | yes | `bash tools/verify-tx-transition.sh` — claim 0020 |
 | `fw-mmu-capture` | D | diagnostic | no | no | yes | `bash tools/verify-fw-mmu-capture.sh` — claim 0021 |
-| `t0sz16` | D | diagnostic | no | no | yes | `bash tools/verify-t0sz16.sh` (mechanism: `zig build kernel -Dt0sz16`) — claim 6460 |
-| `tlbi-after-switch` | D | diagnostic | no | no | yes | `zig build kernel -Dtlbi-after-switch` (empty-TLB lever) — claim 7896 |
-| `walk-probe` | D | diagnostic | no | no | yes | `zig build kernel -Dwalk-probe` (cold-address probe battery, `M2_WP_*` markers) — claim 7896 |
-| `t0sz16-walkprobe` | D | diagnostic | no | no | yes | `bash tools/verify-t0sz16-walkprobe.sh` — claim 7896 (4-cell start-level/residual separation matrix) |
+| `t0sz25` | D | diagnostic | no | no | yes | `bash tools/verify-t0sz16.sh` (mechanism: `zig build kernel -Dt0sz25`) — claims 6460/1517 (legacy start-level regression) |
+| `walk-probe` | D | diagnostic | no | no | yes | `zig build kernel -Dwalk-probe` (cold-address probe battery, `M2_WP_*` markers) — claims 7896/1517 |
+| `t0sz16-walkprobe` | D | diagnostic | no | no | yes | `bash tools/verify-t0sz16-walkprobe.sh` — claims 7896/1517 (start-level/residual separation + production regression matrix) |
 
 Notes:
 
@@ -95,16 +94,15 @@ GATE id=bad-handoff class=B kind=gate ci=no apple=yes gate=yes cmd=bash tools/ve
 GATE id=marker class=B kind=gate ci=no apple=yes gate=yes cmd=bash tools/verify-marker.sh
 GATE id=nvram-console class=B kind=gate ci=no apple=yes gate=yes cmd=bash tools/verify-nvram-console.sh
 GATE id=host-console-pty class=B kind=gate ci=no apple=yes gate=yes cmd=bash tools/verify-host-console.sh
-GATE id=serial-takeover class=B kind=gate ci=no apple=yes gate=yes status=blocked cmd=zig build run
-GATE id=live-transcript-rx class=B kind=gate ci=no apple=yes gate=yes status=deferred cmd=(none -- deferred to claim 0002)
+GATE id=serial-takeover class=B kind=gate ci=no apple=yes gate=yes status=pass cmd=zig build run
+GATE id=live-transcript-rx class=B kind=gate ci=no apple=yes gate=yes status=pass cmd=bash tools/verify-live-transcript.sh
 GATE id=verify-vz class=B kind=aggregate ci=no apple=yes gate=no cmd=just verify-vz
 GATE id=console class=C kind=interactive ci=no apple=yes gate=yes cmd=zig build console
 GATE id=preexit-tx class=D kind=diagnostic ci=no apple=yes gate=no cmd=bash tools/verify-preexit-tx.sh
 GATE id=tx-diag class=D kind=diagnostic ci=no apple=yes gate=no cmd=bash tools/verify-tx-diag.sh
 GATE id=tx-transition class=D kind=diagnostic ci=no apple=yes gate=no cmd=bash tools/verify-tx-transition.sh
 GATE id=fw-mmu-capture class=D kind=diagnostic ci=no apple=yes gate=no cmd=bash tools/verify-fw-mmu-capture.sh
-GATE id=t0sz16 class=D kind=diagnostic ci=no apple=yes gate=no cmd=bash tools/verify-t0sz16.sh
-GATE id=tlbi-after-switch class=D kind=diagnostic ci=no apple=yes gate=no cmd=zig build kernel -Dtlbi-after-switch
+GATE id=t0sz25 class=D kind=diagnostic ci=no apple=yes gate=no cmd=bash tools/verify-t0sz16.sh
 GATE id=walk-probe class=D kind=diagnostic ci=no apple=yes gate=no cmd=zig build kernel -Dwalk-probe
 GATE id=t0sz16-walkprobe class=D kind=diagnostic ci=no apple=yes gate=no cmd=bash tools/verify-t0sz16-walkprobe.sh
 <!-- GATE_INVENTORY:END -->

@@ -15,8 +15,9 @@ These rules bind any AI agent or human contributor working in this project.
 ## Current milestone
 
 Milestones zero, one, and two are implemented (milestone two's VZ serial
-gate remains blocked). The current milestone is **1.5 — the interactive
-kernel monitor** (`dipshit>` shell on the kernel's serial console).
+gate passes since 2026-08-08, claim 1517). The current milestone is
+**1.5 — the interactive kernel monitor** (`dipshit>` shell on the kernel's
+serial console).
 `docs/status.md` is the canonical, always-current answer to "where are we,
 and what's next".
 

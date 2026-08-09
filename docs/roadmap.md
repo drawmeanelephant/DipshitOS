@@ -59,7 +59,7 @@ byte-identical across runs, and `zig build run` **gates** on its content
 `BOOTED.TXT` and `RC.TXT`. Full investigation: ADR 0002 and
 `artifacts/m1-run*.txt` / `m1-fix-*.txt`.
 
-## Milestone two — the kernel proper (implemented; VZ serial gate not passed)
+## Milestone two — the kernel proper (implemented; VZ serial gate passed 2026-08-08)
 
 > The kernel seizes the machine: it ends UEFI Boot Services, takes over the
 > MMU with its own identity-map page tables, and drives a minimal MMIO
@@ -70,19 +70,22 @@ implementation design and review in `docs/m2-kernel-proper-design.md`.
 Apple Virtualization.framework is the only supported host; there is no QEMU
 path. The guest stays freestanding Zig — no libc, no POSIX.
 
-**Implemented; build gates, the bad-handoff failure gate, and the ADR 0004
-D4 marker-fallback gate pass; the VZ serial gate is not passed, its blocker
-now isolated.** The boot stub allocates the v2 stack/handoff contract; the
-kernel captures the map, retries ExitBootServices up to eight times,
-builds/installs identity TTBR0_EL1 tables, probes declared MMIO windows, and
-is designed to enter a terminal WFE loop after serial evidence. The MMU-
+**Implemented; all milestone-two gates pass (2026-08-08, claim 1517):**
+build gates, the bad-handoff failure gate, the ADR 0004 D4 marker-fallback
+gate, and — since claim 1517 — the **VZ serial gate** (`zig build run`:
+post-MMU virtio TX puts the exact banner, memory-map print, and terminal
+state in `vm-serial.log`). The boot stub allocates the v2 stack/handoff
+contract; the kernel captures the map, retries ExitBootServices up to eight
+times, builds/installs identity TTBR0_EL1 tables, probes declared MMIO
+windows, and enters a terminal WFE loop after serial evidence. The MMU-
 takeover death the marker ladder first exposed (claim 0009, `M2_MAPD!`) was
 root-caused and **fixed** (claim 0010, 2026-08-07): the identity-map switch
-now completes on VZ and the ladder reaches `M2_SERIA`. Claim 0013 then
-decoded the declared windows (Apple's efivars store + an internal debug
-UART) and found the real console — a virtio-pci device outside them — but
-post-MMU access to its transport hangs on VZ (the MMU switch destroys
-access, claim 0020), which remains the VZ serial gate's blocker. The canonical, always-current gate table lives in
+now completes on VZ and the ladder reaches `M2_SERIA`. Claim 0013 decoded
+the declared windows (Apple's efivars store + an internal debug UART) and
+found the real console — a virtio-pci device outside them; claims 6460/7896
+root-caused the post-MMU transport hang (translation start-level mismatch +
+stale-TLB crutch) and claim 1517 fixed it in production (T0SZ=16 + TLBI at
+the switch). The canonical, always-current gate table lives in
 [`docs/status.md`](status.md).
 
 
@@ -158,18 +161,19 @@ console) either way.
 
 ### Milestone-two evidence status
 
-Every VZ run so far observed an empty `vm-serial.log`. The **NVRAM marker
-ladder** (ADR 0004 D4, claims 0009/0010, `artifacts/m2-mmu-takeover-gate.txt`)
-is the working evidence channel: the MMU takeover is observed to complete
-on VZ (ladder reaches `M2_MMUP!`), and claim 0013 observed the actual
-console — a modern virtio-pci device (`VID=0x1af4 DID=0x1043`) outside the
-declared windows (which it decoded as Apple's efivars store + an internal
-debug UART). Post-exit access to the virtio transport hangs on VZ (claims
-0013/0020), which is the serial gate's remaining blocker; the NVRAM console
-channel (claim 0015) carries post-exit console bytes in the meantime. The
-declared-window and virtio-pci findings are `[observed]` in
-`docs/hardware-contract.md`; the device register layout stays `[inferred]`
-until a real console is driven.
+Historical: every VZ run observed an empty `vm-serial.log` until claim 1517;
+the **NVRAM marker ladder** (ADR 0004 D4, claims 0009/0010,
+`artifacts/m2-mmu-takeover-gate.txt`) was the working evidence channel, and
+claim 0013 observed the actual console — a modern virtio-pci device
+(`VID=0x1af4 DID=0x1043`) outside the declared windows (Apple's efivars
+store + an internal debug UART). Post-exit access to the virtio transport
+hung on VZ (claims 0013/0020) until claims 6460/7896 root-caused it (the
+start-level mismatch + stale-TLB crutch) and claim 1517 fixed it in
+production: the VZ serial gate now passes (banner + memory-map + terminal
+state in `vm-serial.log`). The NVRAM console channel (claim 0015) remains
+for nvram-console builds. The declared-window and virtio-pci findings are
+`[observed]` in `docs/hardware-contract.md`; the device register layout
+stays `[inferred]` where RX is concerned until the RX path is driven.
 
 ## Milestone 1.5 — interactive kernel monitor (current)
 
@@ -190,11 +194,14 @@ terminal handling, `zig build console`), console & shell core (RX abstraction,
 line editor, tokenizer, `dipshit>` prompt loop), command registry (14 commands,
 mock-tested), and transcript test gate (`zig build test-console`) are all
 ✅ done and gate-passing in CI. The MMU-takeover death is fixed (claim 0010),
-the console is identified (virtio-pci, claim 0013), and the NVRAM console
-channel carries post-exit bytes (claim 0015) — but the **VZ serial gate**
-remains ⛔ blocked on post-MMU access to the virtio transport, so live
-guest keystrokes cannot be proven yet. Current gate state:
-[`docs/status.md`](status.md).
+the console is identified (virtio-pci, claim 0013), the NVRAM console
+channel carries post-exit bytes (claim 0015), and — since claim 1517 — the
+**VZ serial gate passes** (`zig build run`: post-MMU virtio TX lands the
+banner + `dipshit>` prompt in `vm-serial.log`), and **live RX is wired**
+(claim 6684: the polled virtio receive queue delivers host keystrokes end
+to end — `verify-live-transcript.sh` asserts the live `dipshit>`
+transcript in `vm-serial.log`). The remaining live-gate gap is a live
+reboot/shutdown observation. Current gate state: [`docs/status.md`](status.md).
 
 The M1.5 hard gates, target screen, and milestone status live in
 **`docs/status.md`** (the living status document); the twenty-step plan,
@@ -202,26 +209,26 @@ agent split, and per-step progress tracker live in **`docs/march-m15.md`**
 (update it as work lands). The monitor itself is implemented and
 host-tested (console abstraction, line editor, tokenizer, 14 commands,
 banner, mock-level transcript gate), and the host-side `--console`
-plumbing landed (steps 4–7); the milestone is **not** closed yet because
-the live serial channel is still open: the kernel console is polled
-TX-only with no RX path (ADR 0004) and the VZ serial gate remains blocked
-on post-MMU access to the virtio-pci console transport — reliable
-post-MMU transport access and the RX path are the next steps (see
-[`docs/status.md`](status.md)).
+plumbing landed (steps 4–7); the milestone is **not** closed yet: the VZ
+serial gate **passes** (claim 1517 — post-MMU virtio TX fixed with
+T0SZ=16 + TLBI at the switch) and the **RX path is live** (claim 6684 —
+the polled virtio receive queue delivers host keystrokes; the live
+`dipshit>` transcript is asserted in `vm-serial.log` by
+`verify-live-transcript.sh`), but a live reboot/shutdown has not yet been
+observed end to end (see [`docs/status.md`](status.md)).
 
 ## Later milestones (sketches only, not commitments)
 
-- **M1.5 close-out: post-MMU console transport + serial RX.** The console
-  is already identified (virtio-pci, claim 0013); the work is reliable
-  post-MMU access to it (post-MMU access hangs on VZ — the MMU switch is
-  the killer, claim 0020) and then
-  the RX path (the milestone-two console is polled TX-only, ADR 0004; the
-  kernel's `readByte` is a no-RX stub). Newest diagnostic on the transport
-  layer (claim 6460, class D, 2026-08-08): correcting the T0SZ start-level
-  mismatch (25→16) restored end-to-end post-MMU TX in 6/18 boots across
-  three runs — hypothesis strengthened, not reproducible; production T0SZ
-  stays 25 (canonical blocker: `docs/status.md`). This is what stands
-  between the current mock-level monitor and a live `dipshit>` session.
+- **M1.5 close-out: live reboot/shutdown observation, then the milestone
+  tag.** The transport layer is **done**: post-MMU TX (claim 1517:
+  T0SZ=16 + TLBI at the switch) and **live RX** (claim 6684: the polled
+  virtio receive queue delivers host keystrokes end to end —
+  `verify-live-transcript.sh` asserts the live `dipshit>` transcript in
+  `vm-serial.log`). What remains before the milestone can close: a live
+  `ResetSystem` observation from the shell (unit-proven, claim 0011;
+  never yet observed end to end) and the doc close-out. Then the next
+  milestone is a physical page allocator over the captured EFI map
+  (canonical ordering: `docs/status.md`).
 - A memory allocator and boot-time memory map walk (the EFI memory map
   the kernel captured at exit, walked by the kernel itself).
 - Interrupt setup (GIC) and a timer — the GIC is already recorded as an

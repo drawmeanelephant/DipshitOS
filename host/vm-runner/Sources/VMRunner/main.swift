@@ -85,6 +85,8 @@ var consoleMode = false
 var debugInput = false
 var markerDumpPath: String?
 var nvramConsolePath: String?
+var scriptPath: String?
+var scriptExpect: String?
 
 var idx = 2
 while idx < arguments.count {
@@ -114,6 +116,12 @@ while idx < arguments.count {
     } else if arg == "--nvram-console", idx + 1 < arguments.count {
         nvramConsolePath = arguments[idx + 1]
         idx += 2
+    } else if arg == "--script", idx + 1 < arguments.count {
+        scriptPath = arguments[idx + 1]
+        idx += 2
+    } else if arg == "--script-expect", idx + 1 < arguments.count {
+        scriptExpect = arguments[idx + 1]
+        idx += 2
     } else {
         serialLogPath = arg
         idx += 1
@@ -121,8 +129,10 @@ while idx < arguments.count {
 }
 
 // Console sessions run until the VM stops or the user ends the session,
-// unless an explicit --timeout was requested.
+// unless an explicit --timeout was requested. Script mode is a non-
+// interactive variant of the duplex console plumbing (claim 6684).
 let consoleTimeout: TimeInterval = (consoleMode && !timeoutExplicit) ? 0 : timeout
+let scriptMode = scriptPath != nil
 
 // ---------------------------------------------------------------------------
 // Terminal state management (used in console mode; no-ops elsewhere).
@@ -246,7 +256,7 @@ var serialLogHandle: FileHandle?
 
 let serialURL = URL(fileURLWithPath: serialLogPath)
 FileManager.default.createFile(atPath: serialURL.path, contents: nil)
-if consoleMode {
+if consoleMode || scriptMode {
     do {
         serialLogHandle = try FileHandle(forWritingTo: serialURL)
     } catch {
@@ -255,7 +265,7 @@ if consoleMode {
 }
 
 let serialConfig = VZVirtioConsoleDeviceSerialPortConfiguration()
-if consoleMode {
+if consoleMode || scriptMode {
     // Duplex attachment: the host-to-guest input handle is non-nil.
     serialConfig.attachment = VZFileHandleSerialPortAttachment(
         fileHandleForReading: consoleInputPipe.fileHandleForReading,
@@ -321,9 +331,13 @@ if consoleMode {
     print("  mode: interactive console")
     print("  serial log: \(serialLogPath)  (guest output teed to terminal + log)")
     print("  interactive input: enabled — stdin → serial attachment (fileHandleForReading non-nil)")
-    print("  NOTE: guest RX is not implemented (ADR 0004) — bytes are forwarded to the serial attachment, but nothing yet proves the kernel received them")
-    print("  NOTE: the VZ serial gate is blocked as of this run — no guest serial output is expected until that gate passes")
+    print("  NOTE: guest RX is the polled virtio receive queue (claim 6684) — host bytes reach the kernel via the serial attachment")
     print("  controls: Ctrl-C ends the session and restores the terminal; Backspace/Enter are forwarded raw (no host line editing)")
+} else if scriptMode {
+    print("  mode: scripted input (non-interactive; claim 6684)")
+    print("  serial log: \(serialLogPath)  (guest output teed to log)")
+    print("  script: \(scriptPath!)  (forwarded to the guest serial attachment after the terminal state appears)")
+    if let scriptExpect { print("  script-expect: \"\(scriptExpect)\"  (exit 0 iff observed in the serial log)") }
 } else {
     print("  serial log: \(serialLogPath)  (timeout: \(Int(timeout))s)")
     print("  expecting: \"\(expectLine)\"")
@@ -691,7 +705,7 @@ func poll() {
 // Console mode: streaming tee, stdin forwarding, signal-safe exit.
 // ---------------------------------------------------------------------------
 
-func startConsoleStreams() {
+func startGuestOutputTee() {
     // Guest output → terminal + serial log. Streaming tee: each chunk is
     // written as it arrives; the log is never reloaded to show new bytes.
     let teeQueue = DispatchQueue(label: "dipshitos.tee")
@@ -716,7 +730,9 @@ func startConsoleStreams() {
         }
         try? serialLogHandle?.synchronize()
     }
+}
 
+func startStdinForwarding() {
     // Host stdin → guest serial input (raw bytes, character-oriented).
     let inputQueue = DispatchQueue(label: "dipshitos.stdin")
     inputQueue.async {
@@ -735,6 +751,81 @@ func startConsoleStreams() {
         }
         try? consoleInputPipe.fileHandleForWriting.close()
     }
+}
+
+func startConsoleStreams() {
+    startGuestOutputTee()
+    startStdinForwarding()
+}
+
+// Claim 6684: scripted-input mode. Waits until the guest has reached the
+// takeover terminal state (its marker in the serial log), then forwards the
+// script file's bytes into the serial attachment. The guest supplied its
+// virtio RX buffer pre-exit, so nothing is lost while we wait; the settle
+// delay only avoids racing the shell's very first poll.
+func startScriptInput() {
+    guard let scriptPath else { return }
+    let q = DispatchQueue(label: "dipshitos.script")
+    q.async {
+        let scriptData: Data
+        do {
+            scriptData = try Data(contentsOf: URL(fileURLWithPath: scriptPath))
+        } catch {
+            FileHandle.standardError.write(Data("ERROR: could not read script file '\(scriptPath)': \(error)\n".utf8))
+            exit(1)
+        }
+        let waitDeadline = Date().addingTimeInterval(40)
+        var sent = false
+        while Date() < waitDeadline {
+            if let text = try? String(contentsOf: serialURL, encoding: .utf8),
+               text.contains("kernel terminal state") {
+                Thread.sleep(forTimeInterval: 0.5)
+                do { try consoleInputPipe.fileHandleForWriting.write(contentsOf: scriptData) }
+                catch {
+                    FileHandle.standardError.write(Data("ERROR: could not forward script to the guest serial attachment: \(error)\n".utf8))
+                }
+                sent = true
+                break
+            }
+            Thread.sleep(forTimeInterval: 0.5)
+        }
+        if !sent {
+            FileHandle.standardError.write(Data("ERROR: guest did not reach the terminal state within 40s; script input not sent\n".utf8))
+        }
+    }
+}
+
+// Claim 6684: script-mode lifecycle. Polls the serial log for the expected
+// transcript; success (exit 0) as soon as it appears, failure on timeout or
+// an early VM stop.
+func scriptPoll() {
+    if vmDidStart && (runner.vm.state == .stopped || runner.vm.state == .error) {
+        print("FAILURE: VM ended before the expected transcript appeared (state=\(runner.vm.state.rawValue)).")
+        finish(success: false)
+        return
+    }
+    if let data = try? Data(contentsOf: serialURL), let text = String(data: data, encoding: .utf8) {
+        if !text.isEmpty { lastText = text }
+        if let expect = scriptExpect, text.contains(expect) {
+            print("SUCCESS: expected transcript '\(expect)' observed in the serial log.")
+            print("----- captured serial console -----")
+            print(text)
+            print("-----------------------------------")
+            finish(success: true)
+            return
+        }
+    }
+    if Date() > deadline {
+        print("FAILURE: expected transcript '\(scriptExpect ?? "<none>")' not observed within \(Int(timeout))s.")
+        if !lastText.isEmpty {
+            print("----- captured serial console (partial) -----")
+            print(lastText)
+            print("---------------------------------------------")
+        }
+        finish(success: scriptExpect == nil)
+        return
+    }
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { scriptPoll() }
 }
 
 var signalSources: [DispatchSourceSignal] = []
@@ -782,6 +873,13 @@ if consoleMode {
     setupTerminal()
     startConsoleStreams()
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { consolePoll() }
+} else if scriptMode {
+    // Claim 6684: non-interactive scripted input — tee guest output to the
+    // log, forward the script after the terminal state, poll for the
+    // expected transcript.
+    startGuestOutputTee()
+    startScriptInput()
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { scriptPoll() }
 } else {
     if screenshotPath != nil {
         let app = NSApplication.shared

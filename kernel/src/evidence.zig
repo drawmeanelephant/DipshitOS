@@ -666,8 +666,9 @@ pub fn fw_mmu_capture_diag(st: *const SystemTable, handoff_rec: *const handoff.H
     mmu_describe("MMU   ", fw_walk(ttbr0, t0sz, handoff_rec.stack_base), mair);
 
     // The kernel's planned values, for the host-side diff. T0SZ is
-    // mmu.plan_t0sz (production 25; claim-6460 -Dt0sz16 selects 16), so the
-    // capture reports the true planned TCR in both variants.
+    // mmu.plan_t0sz (production 16, claim 1517; class-D -Dt0sz25 selects the
+    // legacy 25), so the capture reports the true planned TCR in both
+    // variants.
     const ips: u64 = @min(mmu.read_mmfr0() & 0xf, 5);
     mmu_str("MMU KERNEL-PLAN MAIR=");
     mmu_hex(0x000000000000ff00); // Attr0 Device-nGnRnE, Attr1 Normal WB

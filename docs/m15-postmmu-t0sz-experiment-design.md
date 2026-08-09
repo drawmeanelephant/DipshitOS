@@ -5,6 +5,13 @@ Claim: `docs/claims/7896-t0sz16-residual-separation.md` · Follows from:
 claim 6460 (T0SZ 25→16 restored post-MMU virtio TX in only 6/18 boots),
 claim 0010, claim 0018, claim 0020, claim 0021, ADR 0006.
 
+> **Superseded in part 2026-08-08 (claim 1517):** this experiment's
+> conclusion (T0SZ=16 + TLBI works 100% on this host) is now the production
+> design. The `-Dtlbi-after-switch` diagnostic option was removed (the TLBI
+> is unconditional production behavior) and `-Dt0sz16` was renamed to
+> `-Dt0sz25` (legacy start level, default off). Cells A/B/C/D in
+> `tools/verify-t0sz16-walkprobe.sh` were re-mapped accordingly.
+
 ## 1. Goal
 
 Characterize *why* T0SZ=16 restored post-MMU virtio TX in only 6/18 boots
