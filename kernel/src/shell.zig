@@ -26,6 +26,7 @@ const tokenizer = @import("tokenizer.zig");
 const monitor = @import("monitor.zig");
 const handoff = @import("handoff.zig");
 const memmap = @import("memmap.zig");
+const timer = @import("timer.zig"); // claim 7948: heartbeat printing (main context only)
 
 pub const PollResult = enum {
     /// No input byte is available right now; the caller should wait before
@@ -107,7 +108,17 @@ pub fn boot_and_park(mon: *monitor.Monitor, rx_wired: bool) void {
     }
     var shell = Shell.init(mon.console, mon.state, mon.machine);
     while (true) {
-        if (shell.poll() == .idle) idle_wait_rx();
+        if (shell.poll() == .idle) {
+            // Claim 7948: consume a fired timer comparator in the MAIN
+            // context. With a working GIC the IRQ handler re-arms before
+            // this runs (no-op); on Apple VZ no interrupt is ever delivered
+            // (the GICR is a RAZ/WI stub — claim evidence), so this poll is
+            // what keeps the cadence honest. Never from the IRQ handler:
+            // the polled virtio TX path is not reentrancy-safe.
+            timer.poll();
+            timer.maybe_heartbeat(&mon.console);
+            idle_wait_rx();
+        }
     }
 }
 
@@ -182,6 +193,7 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "  clear     clean up the crime scene\n" ++
         "  echo      repeat your regrettable decisions\n" ++
         "  elephant  operational mascot diagnostics\n" ++
+        "  fault     trigger a synchronous exception (diagnostic)\n" ++
         "  handoff   display boot-to-kernel ABI data\n" ++
         "  help      list commands and their help text\n" ++
         "  hex       format an integer in hexadecimal\n" ++
@@ -190,6 +202,7 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "  reboot    restart the machine\n" ++
         "  repeat    repeat text, safely bounded\n" ++
         "  shutdown  request power-off\n" ++
+        "  timer     interrupt controller + timer status\n" ++
         "  uname     compact system identity\n" ++
         "  version   display build information\n" ++
         "type 'help <command>' for details on a single command.\n" ++

@@ -55,6 +55,7 @@ verify-coordination`, and CI) fails if it drifts from the files.
 | M2 fixed-memory-marker fallback (ADR 0004 D4, gate work item 3) | [`agent-buffy-m2-marker-fallback.md`](agent-buffy-m2-marker-fallback.md) |
 | freebuff/docs-reconciliation-m15-status-20260808 | [`freebuff-docs-reconciliation-m15-status-20260808.md`](freebuff-docs-reconciliation-m15-status-20260808.md) |
 | M2 MMU-takeover root cause & fix (claim 0010) | [`freebuff-grab-newest-files-from-github-and-pick-something-t-a3eb337e-4b37-4bae-8548-242c49be7456.md`](freebuff-grab-newest-files-from-github-and-pick-something-t-a3eb337e-4b37-4bae-8548-242c49be7456.md) |
+| `freebuff/grab-newest-git-and-check-status-if-there-s-any-im-b9d5c028-9379-48e0-8ddb-ebfbf45ef2df` | [`freebuff-grab-newest-git-and-check-status-if-there-s-any-im-b9d5c028-9379-48e0-8ddb-ebfbf45ef2df.md`](freebuff-grab-newest-git-and-check-status-if-there-s-any-im-b9d5c028-9379-48e0-8ddb-ebfbf45ef2df.md) |
 | Status re-verification on merged main (claim 0014) | [`freebuff-let-s-get-the-latest-github-and-do-something-benef-e128807b-0418-4d4e-aebe-ba30b18c18c5.md`](freebuff-let-s-get-the-latest-github-and-do-something-benef-e128807b-0418-4d4e-aebe-ba30b18c18c5.md) |
 | M1.5 transcript test automation (`freebuff/m15-transcript-test`) | [`freebuff-m15-transcript-test.md`](freebuff-m15-transcript-test.md) |
 | freebuff/mainzig-modules | [`freebuff-mainzig-modules.md`](freebuff-mainzig-modules.md) |

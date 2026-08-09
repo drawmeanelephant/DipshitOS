@@ -236,15 +236,33 @@ redesign.
   only); DSDT (Apple's own, `Apple Vz`) declares only `PCI0` + `efivars`.
   **[observed]**
 
-### Interrupts (not programmed in milestone two)
+### Interrupts (probed 2026-08-08, claim 7948 — delivery blocked)
 
-- A GIC (Generic Interrupt Controller, ARM GIC architecture) is present
-  and is the interrupt controller a later timer/GIC milestone will
-  program. **[inferred]** — per the ARM virtual-platform architecture VZ
-  emulates; not observed and not touched in milestone two.
+- A **GICv3** (Generic Interrupt Controller, ARM GIC architecture) is
+  present: distributor `GICD` @ `0x10000000` and redistributor `GICR` @
+  `0x10010000`, with `GICD_CTLR=0x50` (ARE_NS set → v3) and sane
+  `GICD_TYPER`. **[observed]** — live MMIO read-backs on VZ (claim 7948).
+  ACPI MADT discovery: VZ's MADT is **non-conformant** (two 80-byte
+  type-0x0B entries with no usable distributor base — an Apple quirk);
+  discovery parses it per spec and falls back to the live-probed v3
+  layout. The GTDT is standard: EL1 physical-timer GSIV **30** (PPI 30).
+  **[observed]**
+- **The GIC never delivers an interrupt to the guest on VZ.** The
+  distributor and CPU interface accept and read back config (SPI
+  isen/igrp/prio, ICC_SRE=7, PMR, IGRPEN1 all verified), but the
+  redistributor is **RAZ/WI** (GICR_TYPER/WAKER/IGROUPR0/ISENABLER0 all
+  read 0) and no interrupt — PPI 30, SGI, SPI 32–39, explicit IROUTER,
+  DAIF fully cleared — is ever presented (HPPIR0/1 stay 1023, zero
+  exceptions taken even though the CNTP comparator provably fires).
+  **[observed, claim 7948]** — VZ's GIC is a config-accepting stub; the
+  runner's `VZGICConfiguration` API is not exposed on this macOS SDK.
+- The ARM generic timer (CNTP) exists and runs: `CNTFRQ_EL0=24 MHz`,
+  `CNTP_CVAL_EL0`/`CNTP_CTL_EL0` arm correctly and `ISTATUS=1` when the
+  comparator passes. **[observed]** — the tick fires at the timer but is
+  never routed to the CPU (see previous bullet).
 - Interrupts are masked at kernel entry (firmware boots with them
   masked). **[inferred]** — standard firmware behavior; the kernel keeps
-  them masked in milestone two.
+  them masked (IRQ unmasking is harmless but no IRQ ever arrives on VZ).
 
 ## What milestone zero does NOT assume (and does not touch)
 
