@@ -261,3 +261,13 @@ Every verification command belongs to exactly one class (canonical inventory:
       persisted through reboot. 1/1 pair. Evidence:
       `artifacts/live-fs-*` (`live-fs-gate.txt`, `live-fs-report.txt`,
       `live-fs-run-<A|B>-<NN>.txt`, `live-fs-serial-<A|B>-<NN>.log`).
+
+**Post-tag reverify (claim 7873, 2026-08-09):** the complete class A set
+(just verify-portable: fmt, 95 + 110 unit tests, transcript gate, build,
+image, inspect, swift runner build, context, coordination, coordination
+tooling, mmu-debt) and the complete class B set (serial takeover
+`zig build run`, bad-handoff, marker, nvram-console, host-console,
+live-transcript, live-fs, live-timer, live-reboot, live-exceptions) were
+re-run at the **`m1.5-interactive-monitor` tag (`74a51f3`, clean tree)**
+— **all green**. Summary evidence:
+`artifacts/gates-reverify-20260809-m15-tag.txt`.

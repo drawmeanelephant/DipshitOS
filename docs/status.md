@@ -48,7 +48,12 @@ Every gate below is backed by evidence re-verified
 `5160eef` on 2026-08-08 (claim 8592 preflight, `artifacts/status-preflight-*.txt`),
 and re-run at the newest HEAD `076ddf1` on 2026-08-08 (claim 8073,
 `artifacts/gates-reverify-20260808-076ddf1.txt` — all class A gates plus
-the primary VZ serial gate); files under `artifacts/`.
+the primary VZ serial gate), **and re-run in full at the
+`m1.5-interactive-monitor` tag (`74a51f3`) on 2026-08-09 (claim 7873,
+`artifacts/gates-reverify-20260809-m15-tag.txt` — the complete class A
+set plus the complete class B set: serial takeover, bad-handoff, marker,
+nvram-console, host-console, live-transcript, live-fs, live-timer,
+live-reboot, live-exceptions); all green**; files under `artifacts/`.
 
 | Gate | Command | Result | Last evidence |
 |------|---------|--------|---------------|
