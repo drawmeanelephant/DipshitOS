@@ -311,7 +311,10 @@ if screenshotPath != nil {
     config.graphicsDevices = []
 }
 config.networkDevices = []
-if customVirtioEnabled {
+if customVirtioEnabled, #available(macOS 27.0, *) {
+    // The runtime guard above already requires macOS 27+; the availability
+    // check exists only because the manifest floor (.v26, for the CI
+    // toolchain) is below the custom-virtio APIs' 27.0 introduction.
     print(CustomVirtioSpike.attach(to: config))
 }
 do { try config.validate() } catch { fail("Invalid VM configuration: \(error)") }
@@ -935,6 +938,7 @@ RunLoop.main.run()
 // logs below give the audit its step-4 hooks for free.
 // ---------------------------------------------------------------------------
 
+@available(macOS 27.0, *)
 enum CustomVirtioSpike {
     /// Virtio device ID; PCI DID presented to the guest = 0x1040 | deviceID.
     static let deviceID: UInt16 = 0x42
@@ -974,6 +978,7 @@ enum CustomVirtioSpike {
 
 /// Receives the created device and wires the device delegate. Called on the
 /// VM's serial queue when VZVirtualMachine is created.
+@available(macOS 27.0, *)
 final class CustomVirtioSpikeConfigDelegate: NSObject, VZCustomVirtioDeviceConfigurationDelegate {
     func customVirtioConfiguration(_ deviceConfiguration: VZCustomVirtioDeviceConfiguration, didCreateDevice device: VZCustomVirtioDevice) {
         print("CUSTOM-VIRTIO: device created (didCreateDevice)")
@@ -983,6 +988,7 @@ final class CustomVirtioSpikeConfigDelegate: NSObject, VZCustomVirtioDeviceConfi
 
 /// Device lifecycle + guest-driver evidence. Every method here is optional in
 /// the protocol; only the ones the spike needs are implemented.
+@available(macOS 27.0, *)
 final class CustomVirtioSpikeDeviceDelegate: NSObject, VZCustomVirtioDeviceDelegate {
     func customVirtioDeviceDidAcceptDriverOk(_ device: VZCustomVirtioDevice) {
         print("CUSTOM-VIRTIO: guest set DRIVER_OK — negotiation complete, queues ready")
