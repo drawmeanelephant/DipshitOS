@@ -55,9 +55,11 @@ vmalle1` at the switch), **live RX** delivers host keystrokes end to end
 (claim 6684 — `verify-live-transcript.sh` asserts the live transcript),
 **live reboot/shutdown** is observed (claim 0527 — `verify-live-reboot.sh`:
 `reboot` resets the machine, `shutdown` powers it off), and **`ls`/`cat`/
-`write` persist through reboot** via the pre-exit ESP snapshot +
-NVRAM-persisted writes (claim 3475 — `verify-live-fs.sh`). **All 7 hard
-gates pass; the milestone is tagged `m1.5-interactive-monitor`.** Canonical
+`write` persist through reboot on the disk itself** via a real FAT32
+storage driver (claim 6420 — `verify-live-fs.sh`; `fat.zig` over a
+virtio-blk transport, replacing claim 3475's pre-exit snapshot + NVRAM
+persistence). **All 7 hard gates pass; the milestone is tagged
+`m1.5-interactive-monitor`.** Canonical
 state: [`docs/status.md`](docs/status.md).
 The goal, hard gates, and per-step progress live in
 **`docs/status.md`** (the living status & goals tracker).
@@ -134,7 +136,9 @@ dipshitos/
 │   ├── src/tokenizer.zig      Command-line tokenizer (no allocator)
 │   ├── src/monitor.zig        Comptime command registry (20 commands)
 │   ├── src/shell.zig          Prompt loop: banner → lineedit → tokenize → exec
-│   ├── src/esp.zig            Pre-exit ESP snapshot + NVRAM file window (ls/cat/write)
+│   ├── src/esp.zig            ESP file window over the live FAT32 volume (ls/cat/write)
+│   ├── src/fat.zig            GPT + FAT32 mount/list/read/write (injected sector I/O)
+│   ├── src/virtio_blk.zig     virtio-blk transport (DID 0x1042 on VZ, post-exit re-arm)
 │   └── linker.ld              dense layout (avoids 64 KiB lld padding)
 ├── tools/elf2bin.py           ELF → flat KERNEL.BIN (format v1) converter
 ├── host/vm-runner/            Swift Virtualization.framework launcher
@@ -275,7 +279,9 @@ The gate-by-gate plan and active work claims live in
    4/4 boots via `verify-live-reboot.sh`), and the **filesystem gate is
    closed** (claim 3475 — `ls`/`cat`/`write` persist through reboot via
    the pre-exit ESP snapshot + NVRAM-persisted writes,
-   `verify-live-fs.sh`). **All 7 M1.5 hard gates pass; milestone tagged.**
+   `verify-live-fs.sh` — **upgraded the same day to a real FAT32 storage
+   driver, claim 6420**, so files persist on the disk itself). **All 7
+   M1.5 hard gates pass; milestone tagged.**
    Tracked step-by-step in `docs/status.md` / `docs/march-m15.md`.
 2. ~~Resolve the milestone-two VZ serial gate itself.~~ **DONE 2026-08-08
    (claim 1517):** the post-MMU transport blocker (start-level mismatch +

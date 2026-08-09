@@ -250,15 +250,18 @@ Every verification command belongs to exactly one class (canonical inventory:
       (`live-transcript-gate.txt`, `live-transcript-report.txt`,
       `live-transcript-run-<NN>.txt`, `live-transcript-serial-<NN>.log`).
 
-- [x] M1.5 live ESP file-window gate (class B, claim 3475): **passing
-      (2026-08-09)** — `bash tools/verify-live-fs.sh` boots two VMs
-      against the SAME runner variable store: run A (fresh store) drives
-      `write hello.txt hello world` + `ls` + `cat hello.txt` and asserts
-      the write-ok reply, the real ESP snapshot listing (`EFI/`,
-      `KERNEL.BIN`, `BOOTED.TXT`, `MEMMAP.TXT`, `LOADER.TXT`), `hello.txt`
-      listed `[nvram]`, and the cat reply; run B (fresh boot, same store)
-      still lists `hello.txt [nvram]` and prints the content — the file
-      persisted through reboot. 1/1 pair. Evidence:
+- [x] M1.5 live FAT32 storage gate (class B, claims 3475/6420):
+      **passing (2026-08-09, upgraded to the real FAT driver by claim
+      6420)** — `bash tools/verify-live-fs.sh` boots two VMs against the
+      SAME disk image: run A (fresh image) drives `write hello.txt hello
+      world` + `ls` + `cat hello.txt` and asserts the write-ok reply
+      ("persisted .. bytes to FAT on the ESP"), the live volume listing
+      (`EFI/`, `KERNEL.BIN`, `BOOTED.TXT`, `MEMMAP.TXT`, `LOADER.TXT`),
+      `hello.txt` listed `[esp]`, and the cat reply; run B (fresh boot,
+      same image) still lists `HELLO.TXT [esp]` (the FAT 8.3 short name)
+      and prints the content — the file persisted through reboot **on the
+      disk itself** via the virtio-blk transport (claim 3475's NVRAM
+      persistence medium is replaced). 1/1 pair. Evidence:
       `artifacts/live-fs-*` (`live-fs-gate.txt`, `live-fs-report.txt`,
       `live-fs-run-<A|B>-<NN>.txt`, `live-fs-serial-<A|B>-<NN>.log`).
 

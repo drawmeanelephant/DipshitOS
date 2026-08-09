@@ -1,37 +1,40 @@
 #!/usr/bin/env bash
 #
-# verify-live-fs.sh -- claim 3475 class-B gate: the ESP file window. M1.5
-# hard gate 5 ("ls, cat, and write persist through reboot") observed end to
-# end on real VZ hardware.
+# verify-live-fs.sh -- claim 6420 class-B gate: the real FAT32 storage
+# driver on the live ESP. M1.5 hard gate 5 ("ls, cat, and write persist
+# through reboot") observed end to end on real VZ hardware — now over the
+# disk itself, replacing claim 3475's NVRAM persistence medium.
 #
-# Mechanism: kernel/src/esp.zig snapshots the ESP root PRE-exit via the
-# EFI Simple File System protocol (the loader's proven pattern) into a
-# bounded BSS window; `ls` lists it, `cat` prints snapshotted content, and
-# `write` persists content as the non-volatile EFI runtime variable
-# `DipshitF:<name>` (SetVariable is proven alive post-exit on VZ, claims
-# 0009/0015). The runner's VZEFIVariableStore file (artifacts/efi-vars.bin)
-# survives across boots, so a file written in one boot is scanned back in
-# (`GetNextVariableName`/`GetVariable`) at the next boot and visible to
-# `ls`/`cat` — persistence through reboot.
+# Mechanism: the runner attaches the boot disk as a virtio-blk device
+# (VZVirtioBlockDeviceConfiguration); the kernel's virtio_blk.zig transport
+# (modern virtio-pci, claim 6420) services sector reads/writes POST-exit,
+# and fat.zig mounts the ESP's FAT32 volume (GPT LBA 2048) and serves the
+# root directory. `ls` lists the volume, `cat` prints file content, and
+# `write` allocates clusters + FAT entries + a directory slot and writes
+# the sectors back to the DISK. Because the runner's artifacts/disk.img
+# backs the VM's block device across boots, a file written in one boot is
+# read back from the disk in the next — persistence through reboot, with
+# no NVRAM variables involved (the loader's per-boot BOOTED.TXT /
+# MEMMAP.TXT / LOADER.TXT are also visible to the kernel mount).
 #
-# The gate is TWO boots against the SAME variable store:
-#   run A (fresh store):  script `write hello.txt hello world` + `ls` +
-#                         `cat hello.txt`; asserts the write-ok reply, the
-#                         ESP snapshot listing (KERNEL.BIN / BOOTED.TXT),
-#                         hello.txt listed as [nvram], and the cat reply.
-#   run B (same store):   script `ls` + `cat hello.txt`; asserts hello.txt
-#                         still listed as [nvram] and cat still prints the
-#                         content — the file persisted across the reboot.
-# The boot-time `esp window: esp=.. nvram=..` line is asserted in both runs
-# (the snapshot ran; run B's listing of hello.txt is the persistence proof).
+# The gate is TWO boots against the SAME disk image:
+#   run A (fresh image, rebuilt at gate start): script `write hello.txt
+#         hello world` + `ls` + `cat hello.txt`; asserts the write-ok
+#         reply, the volume listing (KERNEL.BIN / BOOTED.TXT), hello.txt
+#         listed as a real [esp] file, and the cat reply.
+#   run B (same image): script `ls` + `cat hello.txt`; asserts hello.txt
+#         still listed from the disk and cat still prints the content —
+#         the file persisted across the reboot ON THE DISK.
+# The boot-time `esp window: esp=.. disk=1` line is asserted in both runs
+# (the FAT mount ran; run B's listing of hello.txt is the persistence
+# proof).
 #
 # Honesty: the runner exits 0 only when the expected reply appears; the
 # gate additionally asserts the full transcript (write reply, ls listing
 # lines, cat reply), so an early exit on the echoed input line cannot pass.
-# The [nvram] listing marker — not the echoed filename — is the proof the
-# entry is in the window. The ESP itself is READ-ONLY this milestone:
-# NVRAM variables are the persistence medium (a full FAT storage driver
-# remains deferred at march step 15).
+# The write reply names the FAT volume ("persisted .. bytes to FAT on the
+# ESP"); the ls listing marks the entry [esp], not [nvram] — the file is
+# real disk storage now.
 #
 # Per run this reports: rc, serial-bytes, and per-assertion flags.
 # Class B — Apple silicon + VZ only; boots real VMs. A green CI badge
@@ -58,7 +61,7 @@ trap 'sleep 0.5' EXIT
 PAIRS="${BOOTS:-1}"
 REPORT="artifacts/live-fs-report.txt"
 
-echo "=== verify-live-fs: claim 3475 — ESP file window (ls/cat/write persist through reboot), $PAIRS pair(s) of boots ==="
+echo "=== verify-live-fs: claim 6420 — FAT32 storage driver (ls/cat/write persist through reboot on the disk), $PAIRS pair(s) of boots ==="
 
 # --- tool versions + revision -----------------------------------------------
 zig version; swift --version 2>&1 | head -1; sw_vers
@@ -86,12 +89,16 @@ cat hello.txt
 EOF
 
 # --- per-run gate ------------------------------------------------------------
-# $1 = tag, $2 = script file, $3 = expect substring, $4 = fresh store (1|0).
+# $1 = tag, $2 = script file, $3 = expect substring, $4 = fresh disk (1|0).
+# The disk image is rebuilt at gate start, so run A sees a fresh volume and
+# run B — against the SAME image — sees the file run A wrote on the disk.
 # Returns 0 iff the runner saw the expected reply AND every transcript
 # assertion held. For run A the write-ok reply is additionally required.
 run_one() {
     local tag="$1" script="$2" expect="$3" fresh="$4"
     if [ "$fresh" = 1 ]; then
+        # Fresh NVRAM store: the FAT path does not use variables, but a
+        # clean store keeps the marker/probe evidence legible.
         rm -f artifacts/efi-vars.bin
     fi
     rm -f artifacts/vm-serial.log
@@ -104,44 +111,50 @@ run_one() {
     [ -f artifacts/vm-serial.log ] && cp artifacts/vm-serial.log "artifacts/live-fs-serial-$tag.log" || true
 
     local SERIAL_BYTES=0
-    local WRITEOK=0 NVRAM=0 ESPFILES=0 CATREPLY=0 WINDOW=0 LSHEAD=0
+    local WRITEOK=0 FILELISTED=0 ESPFILES=0 CATREPLY=0 WINDOW=0 LSHEAD=0
     if [ -f artifacts/vm-serial.log ]; then
         SERIAL_BYTES=$(wc -c < artifacts/vm-serial.log | tr -d ' ')
-        # The write-ok reply: "write: ok (persisted 11 bytes to EFI variable DipshitF:hello.txt)"
+        # The write-ok reply: "write: ok (persisted 11 bytes to FAT on the ESP)".
         grep -a -qF -- "write: ok (persisted" artifacts/vm-serial.log && WRITEOK=1
-        # The persistence proof: hello.txt LISTED in the ls output as [nvram].
-        grep -a -qF -- "  hello.txt" artifacts/vm-serial.log && NVRAM=1
-        grep -a -qF -- "[nvram]" artifacts/vm-serial.log && NVRAM=1
-        # The ESP snapshot itself is listed (real files from the disk).
+        # The persistence proof: hello.txt LISTED in the ls output as a
+        # real [esp] disk file (the FAT volume, not an NVRAM variable).
+        # The listing shows the FAT 8.3 short name — the write-time window
+        # name in run A ("hello.txt") and the on-disk name after a reboot
+        # ("HELLO.TXT", uppercase) — so the match is case-insensitive and
+        # anchored to the two-space listing indent.
+        grep -a -qi -- "  hello" artifacts/vm-serial.log && FILELISTED=1
+        # The FAT volume listing itself (loader-written files on the disk).
         grep -a -qF -- "KERNEL.BIN" artifacts/vm-serial.log && ESPFILES=1
         grep -a -qF -- "BOOTED.TXT" artifacts/vm-serial.log && ESPFILES=1
         # The cat reply (run A: also echoed in the write line; run B: only
         # the reply can produce it).
         grep -a -qF -- "hello world" artifacts/vm-serial.log && CATREPLY=1
-        # The boot-time window line proves the snapshot+scan ran at boot.
+        # The boot-time window line proves the FAT mount ran at boot with
+        # the disk ready (disk=1).
         grep -a -qF -- "esp window: esp=" artifacts/vm-serial.log && WINDOW=1
+        grep -a -qF -- "disk=1" artifacts/vm-serial.log && WINDOW=1
         grep -a -qF -- "ls: esp=" artifacts/vm-serial.log && LSHEAD=1
     fi
     local PASS=0
-    if [ "$RC" = 0 ] && [ "$WINDOW" = 1 ] && [ "$LSHEAD" = 1 ] && [ "$ESPFILES" = 1 ] && [ "$NVRAM" = 1 ] && [ "$CATREPLY" = 1 ]; then
+    if [ "$RC" = 0 ] && [ "$WINDOW" = 1 ] && [ "$LSHEAD" = 1 ] && [ "$ESPFILES" = 1 ] && [ "$FILELISTED" = 1 ] && [ "$CATREPLY" = 1 ]; then
         PASS=1
     fi
     if [ "$tag" = "A" ] && [ "$WRITEOK" != 1 ]; then
         PASS=0
     fi
     {
-        echo "$tag: rc=$RC serial-bytes=$SERIAL_BYTES write-ok=$WRITEOK nvram-listed=$NVRAM esp-files=$ESPFILES cat-reply=$CATREPLY window-line=$WINDOW ls-header=$LSHEAD pass=$PASS"
+        echo "$tag: rc=$RC serial-bytes=$SERIAL_BYTES write-ok=$WRITEOK file-listed=$FILELISTED volume-files=$ESPFILES cat-reply=$CATREPLY window-line=$WINDOW ls-header=$LSHEAD pass=$PASS"
     } >> "$REPORT"
-    echo "$tag rc=$RC serial-bytes=$SERIAL_BYTES write-ok=$WRITEOK nvram-listed=$NVRAM esp-files=$ESPFILES cat-reply=$CATREPLY window-line=$WINDOW ls-header=$LSHEAD pass=$PASS"
+    echo "$tag rc=$RC serial-bytes=$SERIAL_BYTES write-ok=$WRITEOK file-listed=$FILELISTED volume-files=$ESPFILES cat-reply=$CATREPLY window-line=$WINDOW ls-header=$LSHEAD pass=$PASS"
     [ "$PASS" = 1 ]
 }
 
 : > "$REPORT"
 {
-    echo "DIPSHITOS live ESP file-window gate (claim 3475) — ls/cat/write on real VZ hardware"
+    echo "DIPSHITOS live FAT32 storage gate (claim 6420) — ls/cat/write persist through reboot on the real disk (VZ hardware)"
     echo "revision: $REVISION branch=$BRANCH pairs=$PAIRS dirty-files=$DIRTY"
-    echo "run A: write hello.txt 'hello world' + ls + cat (fresh variable store)"
-    echo "run B: ls + cat hello.txt (SAME store — persistence through reboot)"
+    echo "run A: write hello.txt 'hello world' + ls + cat (fresh disk image)"
+    echo "run B: ls + cat hello.txt (SAME image — persistence through reboot on the disk)"
     echo "date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     echo
 } >> "$REPORT"
@@ -151,12 +164,15 @@ n=0
 while [ "$n" -lt "$PAIRS" ]; do
     n=$((n + 1))
     echo
-    echo "=== live-fs pair $n, run A (write/ls/cat, fresh store) ==="
+    echo "=== live-fs pair $n, run A (write/ls/cat, fresh disk) ==="
     AOK=0
-    run_one "A-$n" "artifacts/live-fs-script-A.txt" "hello world" 1 && AOK=1 || true
-    echo "=== live-fs pair $n, run B (persistence through reboot, same store) ==="
+    # The expect is the cat reply followed by the next prompt — it appears
+    # only after the whole script ran (the write line's echo contains
+    # "hello world" too, so it must not be the exit trigger).
+    run_one "A-$n" "artifacts/live-fs-script-A.txt" $'hello world\ndipshit> ' 1 && AOK=1 || true
+    echo "=== live-fs pair $n, run B (persistence through reboot, same disk) ==="
     BOK=0
-    run_one "B-$n" "artifacts/live-fs-script-B.txt" "hello world" 0 && BOK=1 || true
+    run_one "B-$n" "artifacts/live-fs-script-B.txt" $'hello world\ndipshit> ' 0 && BOK=1 || true
     if [ "$AOK" = 1 ] && [ "$BOK" = 1 ]; then
         PASS=$((PASS + 1))
     fi
@@ -165,7 +181,7 @@ done
 echo
 echo "=== result ==="
 if [ "$PASS" = "$PAIRS" ]; then
-    echo "verify-live-fs: PASS — ls/cat/write persist through reboot on real VZ hardware: run A persisted 'hello world' to NVRAM (write-ok, hello.txt [nvram] in ls, cat reply) and run B — a fresh boot against the same variable store — still lists and prints the file ($PASS/$PAIRS pair(s))."
+    echo "verify-live-fs: PASS — ls/cat/write persist through reboot on real VZ hardware via the FAT32 driver: run A persisted 'hello world' to the ESP's FAT volume (write-ok, hello.txt [esp] in ls, cat reply) and run B — a fresh boot against the same disk image — still lists and prints the file from the disk ($PASS/$PAIRS pair(s))."
     echo "PASS: $PASS/$PAIRS" >> "$REPORT"
     sleep 0.5
     exit 0

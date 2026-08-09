@@ -32,9 +32,11 @@ host-tested with a mock console and a byte-exact transcript gate; its live
 serial channel is up for TX (claim 1517) and **RX** (claim 6684: the
 polled virtio receive queue delivers host keystrokes end to end, asserted
 in `vm-serial.log` by `verify-live-transcript.sh`), **live
-reboot/shutdown** is observed (claim 0527), and the **ESP file window**
-(claim 3475) gives `ls`/`cat`/`write` with persistence through reboot via
-a pre-exit EFI Simple File System snapshot + NVRAM-persisted writes. All
+reboot/shutdown** is observed (claim 0527), and **a real FAT32 storage
+driver** (claim 6420: `kernel/src/fat.zig` over the virtio-blk transport
+`kernel/src/virtio_blk.zig`) gives `ls`/`cat`/`write` with persistence
+through reboot **on the disk itself** — replacing claim 3475's pre-exit
+EFI Simple File System snapshot + NVRAM-persisted writes. All
 7 M1.5 hard gates pass; milestone tagged `m1.5-interactive-monitor`.
 The canonical, always-current status lives in
 [`docs/status.md`](status.md); this file documents the architecture that
