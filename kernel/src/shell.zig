@@ -226,7 +226,7 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "  mmio: 0x0000000000010000 bytes (0x0000000000000010 pages)\n" ++
         "  kernel: 0x000000007e4df000..0x000000007e5613e8 (0x00000000000823e8 bytes)\n" ++
         "dipshit> pages\r\n" ++
-        "pages: armed=1 total=0x00000000000003c0 free=0x00000000000003c0 regions=0x0000000000000001 span=0x00000000000003c0\n" ++
+        "pages: armed=1 total=0x0000000000000480 free=0x0000000000000480 excluded=0x0000000000000000 regions=0x0000000000000003 span=0x0000000000007f80\n" ++
         "dipshit> pages selftest\r\n" ++
         "pages selftest: alloc 1 -> 0x0000000000100000\n" ++
         "pages selftest: free ok\n" ++
@@ -237,8 +237,8 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "pages selftest: free both ok\n" ++
         "pages selftest: alloc 960 -> 0x0000000000100000\n" ++
         "pages selftest: free ok\n" ++
-        "pages selftest: alloc 961 -> none (out of memory)\n" ++
-        "pages selftest: ok free=0x00000000000003c0\n" ++
+        "pages selftest: alloc 1153 -> none (out of memory)\n" ++
+        "pages selftest: ok free=0x0000000000000480\n" ++
         "dipshit> echo \"elephant business\"\r\n" ++
         "elephant business\n" ++
         "dipshit> ls\r\n" ++
@@ -269,7 +269,7 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
     // Arm the module allocator from the same fixture map the monitor sees,
     // exactly as kernel_main does — the `pages` command reports/exercises
     // that pool.
-    _ = alloc.init(make_view());
+    _ = alloc.init(make_view(), &.{});
     // Claim 3475: populate the ESP file window the way kernel_main's
     // pre-exit snapshot does (KERNEL.BIN listed-but-unloaded, an EFI
     // directory, BOOTED.TXT content-loaded). A test process has no EFI

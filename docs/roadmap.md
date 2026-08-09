@@ -250,10 +250,13 @@ is closed 2026-08-09: all 7 M1.5 hard gates pass; tagged
   DONE 2026-08-08 (claim 3972):** first-fit bitmap allocator over the
   captured map's ConventionalMemory (fixed 128 KiB BSS bitmap over the
   4 GiB identity-map span), wired post-exit; `pages`/`pages selftest`
-  monitor commands; 18 unit tests; live-observed on VZ. Still open from
-  this sketch: pooling loader/boot-services regions (needs kernel-image +
-  map-buffer exclusion ranges), and the boot-time map walk is already
-  served by `memmap.MapView` + `mem`/`pages`.
+  monitor commands; 18 unit tests; live-observed on VZ. **Loader/boot-
+  services pooling DONE 2026-08-09 (claim 5162):** the pool now covers
+  conventional + loader + boot-services RAM, with explicit exclusion
+  ranges protecting the live kernel image, stack, handoff page, and
+  captured-map buffer (25 unit tests, class-A green, `pages` reports
+  `excluded=`). The boot-time map walk is already served by
+  `memmap.MapView` + `mem`/`pages`.
 - ~~Exception vectors (VBAR_EL1 + basic synchronous/IRQ handlers).~~
   **DONE 2026-08-08 (claim 9746)** — a real vector table + sync/IRQ
   handlers installed post-MMU; `dipshit> fault` triggers a synchronous
