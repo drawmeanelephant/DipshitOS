@@ -59,7 +59,14 @@ newest HEAD `706712c` on 2026-08-09 (claim 2233,
 10/10: serial takeover, bad-handoff `kernel_rc=0x2`, marker ladder to
 `M2_TXOK!`, nvram-console, host-console, live-transcript RX 1/1, live-fs
 persistence pair 1/1, live-timer 1/1, live-reboot 2/2, live-exceptions
-1/1; all green)**; files under `artifacts/`.
+1/1; all green)** — **and re-run again at the newest HEAD `a3644cf`
+(PR #53, claim 6420's FAT32 storage driver merged) on 2026-08-09
+(claim 0658, `artifacts/gates-reverify-20260809-a3644cf.txt` +
+`artifacts/classB-chunk{1,2,3}-a3644cf.log` — class A 11/11, class B
+10/10: serial takeover, bad-handoff `kernel_rc=0x2`, marker ladder to
+`M2_TXOK!`, nvram-console 82 chunks/5027 B, host-console, live-transcript
+RX 1/1, live-fs persistence pair 1/1, live-timer 1/1, live-reboot 2/2,
+live-exceptions 1/1; all green)**; files under `artifacts/`.
 
 | Gate | Command | Result | Last evidence |
 |------|---------|--------|---------------|
@@ -69,7 +76,7 @@ persistence pair 1/1, live-timer 1/1, live-reboot 2/2, live-exceptions
 | Binary + image inspect | `zig build inspect` | ✅ pass | re-run 2026-08-08 (preflight); re-verified at `076ddf1` (claim 8073) |
 | Swift runner build | `swift build --package-path host/vm-runner` | ✅ pass | re-run 2026-08-08 (preflight); re-verified at `076ddf1` (claim 8073) |
 | Context snapshot | `zig build context` | ✅ pass | re-run 2026-08-08 (preflight); re-verified at `076ddf1` (claim 8073) |
-| **VZ serial gate** | `zig build run` | ✅ **PASS 2026-08-08** | banner `DipshitOS kernel has seized control.` + `memory-map descriptors=0x…` + `kernel terminal state` in `vm-serial.log` (claim 1517; artifacts under `artifacts/`). **Re-verified live at `076ddf1` (claim 8073):** banner + 27-descriptor map (`key=0x2c4`) + `dipshit>` prompt in `artifacts/vm-serial.log`, runner exit 0. **Re-verified live at `706712c` (claim 2233):** banner + 27-descriptor map (`key=0x2d4`) + `dipshit>` prompt, runner exit 0. Root cause was the translation start-level mismatch (claims 6460/7896); fixed in production with T0SZ=16 + `tlbi vmalle1` at the switch. Historical blocker detail (claims 0013/0018/0020): console is a virtio-pci device (bus 0 D5 `0x1af4/0x1043`), transport armed pre-exit, first post-switch BAR/common-config read did not return |
+| **VZ serial gate** | `zig build run` | ✅ **PASS 2026-08-08** | banner `DipshitOS kernel has seized control.` + `memory-map descriptors=0x…` + `kernel terminal state` in `vm-serial.log` (claim 1517; artifacts under `artifacts/`). **Re-verified live at `076ddf1` (claim 8073):** banner + 27-descriptor map (`key=0x2c4`) + `dipshit>` prompt in `artifacts/vm-serial.log`, runner exit 0. **Re-verified live at `706712c` (claim 2233):** banner + 27-descriptor map (`key=0x2d4`) + `dipshit>` prompt, runner exit 0. **Re-verified live at `a3644cf` (claim 0658):** banner + 27-descriptor map (`key=0x2c4`) + `dipshit>` prompt, runner exit 0. Root cause was the translation start-level mismatch (claims 6460/7896); fixed in production with T0SZ=16 + `tlbi vmalle1` at the switch. Historical blocker detail (claims 0013/0018/0020): console is a virtio-pci device (bus 0 D5 `0x1af4/0x1043`), transport armed pre-exit, first post-switch BAR/common-config read did not return |
 | **Live transcript / RX gate** | `bash tools/verify-live-transcript.sh` | ✅ **PASS 2026-08-08** | host scripted keystrokes reach the kernel end to end through the polled virtio receive queue and the live `dipshit>` transcript is asserted in `vm-serial.log` (claim 6684, 3/3 boots; artifacts `live-transcript-*`) |
 | **Live exception-vector gate** | `bash tools/verify-live-exceptions.sh` | ✅ **PASS 2026-08-08** | VBAR_EL1 vectors installed; `dipshit> fault` triggers a real synchronous exception (`udf`) that the handler reports (`[EXC] sync from EL1t`, `ec=0x00 unknown-reason`, ESR/FAR/ELR/SPSR) and resumes — shell continues (`fault: handled, resumed after faulting instruction` → follow-up `echo` reply), 2/2 boots (claim 9746; artifacts `live-exceptions-*`) |
 | **Live timer gate** | `bash tools/verify-live-timer.sh` | ✅ **PASS 2026-08-08** | GICv3 (`GICD` @ `0x10000000`, `GICR` @ `0x10010000`, live-probed — VZ's MADT is non-conformant) + CNTP (24 MHz, GTDT PPI 30) programmed and read-back verified; `dipshit> timer` shows `armed=1`; the poll-driven heartbeat grows across the idle loop — 3/3 boots (claim 7948; artifacts `live-timer-*`). **IRQ delivery blocked by VZ:** the GIC accepts config but never signals the CPU (GICR RAZ/WI, HPPIR0/1=1023, zero exceptions taken despite ISTATUS firing) — full evidence in the claim |
