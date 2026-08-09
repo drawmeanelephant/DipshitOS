@@ -308,7 +308,9 @@ const run_vm_command =
 
 const spike_virtio_vm_command =
     \\set -e
-    \\swift build --package-path host/vm-runner --configuration release
+    \\# -DSPIKE compiles the custom-virtio section (macOS 27 SDK types); the
+    \\# base class-A build omits it so the CI toolchain (macOS 26 SDK) parses.
+    \\swift build --package-path host/vm-runner --configuration release -Xswiftc -DSPIKE
     \\# Recent macOS requires the com.apple.security.virtualization entitlement;
     \\# ad-hoc codesign the binary with it before running.
     \\codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner

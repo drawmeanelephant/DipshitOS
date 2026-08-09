@@ -311,12 +311,17 @@ if screenshotPath != nil {
     config.graphicsDevices = []
 }
 config.networkDevices = []
+#if SPIKE
 if customVirtioEnabled, #available(macOS 27.0, *) {
     // The runtime guard above already requires macOS 27+; the availability
     // check exists only because the manifest floor (.v26, for the CI
-    // toolchain) is below the custom-virtio APIs' 27.0 introduction.
+    // toolchain) is below the custom-virtio APIs' 27.0 introduction. The
+    // whole spike is additionally gated behind the SPIKE define: the CI
+    // toolchain's SDK (macOS 26) does not declare the custom-virtio types
+    // at all, so the base `swift build` must not reference them.
     print(CustomVirtioSpike.attach(to: config))
 }
+#endif
 do { try config.validate() } catch { fail("Invalid VM configuration: \(error)") }
 
 final class Runner: NSObject {
@@ -924,6 +929,10 @@ RunLoop.main.run()
 // macOS 27 spike (capability-audit step 3): one default-off custom virtio
 // device, so the guest's PCI discovery can observe it on a real VZ boot.
 //
+// Compiled only with -DSPIKE (the `zig build spike-virtio` step): the CI
+// toolchain's macOS 26 SDK does not declare VZCustomVirtioDevice at all, so
+// this whole section must be absent from the base class-A build.
+//
 // Device identity (guest-facing): virtio-pci VID 0x1af4, DID = 0x1040 | 0x42
 // = 0x1082 — distinct from the console's DID 0x1043 (claim 0013) and blk's
 // 0x1042 (claim 6420). PCI class 0x00 / subclass 0x00, one virtqueue.
@@ -937,6 +946,8 @@ RunLoop.main.run()
 // is discovery + transport evidence only; the DRIVER_OK / queue-notification
 // logs below give the audit its step-4 hooks for free.
 // ---------------------------------------------------------------------------
+
+#if SPIKE
 
 @available(macOS 27.0, *)
 enum CustomVirtioSpike {
@@ -1006,3 +1017,5 @@ final class CustomVirtioSpikeDeviceDelegate: NSObject, VZCustomVirtioDeviceDeleg
         print("CUSTOM-VIRTIO: device stopped")
     }
 }
+
+#endif
