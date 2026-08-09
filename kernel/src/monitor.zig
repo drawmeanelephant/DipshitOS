@@ -16,10 +16,14 @@
 //! `kernel/src/main.zig` is intentionally untouched by this stream.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const alloc = @import("alloc.zig");
 const console = @import("console.zig");
+const exceptions = @import("exceptions.zig");
+const gic = @import("gic.zig");
 const handoff = @import("handoff.zig");
 const memmap = @import("memmap.zig");
+const timer = @import("timer.zig");
 
 // ---------------------------------------------------------------------------
 // Limits (fixed-size, explicit bounds)
@@ -189,7 +193,7 @@ pub const Command = struct {
 
 /// Number of commands. The registry is built at runtime (not a const
 /// table): see `ensure_registry`.
-pub const registry_count: usize = 15;
+pub const registry_count: usize = 17;
 
 /// Command registry, built at runtime into BSS. A `const` table would hold
 /// link-time absolute addresses for BOTH the string slices and the handler
@@ -210,6 +214,7 @@ fn ensure_registry() []const Command {
             .{ .name = "clear", .help = "clean up the crime scene", .usage = "clear", .handler = cmd_clear },
             .{ .name = "echo", .help = "repeat your regrettable decisions", .usage = "echo <text...>", .handler = cmd_echo },
             .{ .name = "elephant", .help = "operational mascot diagnostics", .usage = "elephant", .handler = cmd_elephant },
+            .{ .name = "fault", .help = "trigger a synchronous exception (diagnostic)", .usage = "fault", .handler = cmd_fault },
             .{ .name = "handoff", .help = "display boot-to-kernel ABI data", .usage = "handoff", .handler = cmd_handoff },
             .{ .name = "help", .help = "list commands and their help text", .usage = "help [command]", .max_args = 1, .handler = cmd_help },
             .{ .name = "hex", .help = "format an integer in hexadecimal", .usage = "hex <number>...", .min_args = 1, .handler = cmd_hex },
@@ -218,6 +223,7 @@ fn ensure_registry() []const Command {
             .{ .name = "reboot", .help = "restart the machine", .usage = "reboot", .handler = cmd_reboot },
             .{ .name = "repeat", .help = "repeat text, safely bounded", .usage = "repeat <count> <text...>", .min_args = 1, .handler = cmd_repeat },
             .{ .name = "shutdown", .help = "request power-off", .usage = "shutdown", .handler = cmd_shutdown },
+            .{ .name = "timer", .help = "interrupt controller + timer status", .usage = "timer", .handler = cmd_timer },
             .{ .name = "uname", .help = "compact system identity", .usage = "uname", .handler = cmd_uname },
             .{ .name = "version", .help = "display build information", .usage = "version", .handler = cmd_version },
         };
@@ -679,6 +685,57 @@ pub fn elephant_lines() []const []const u8 {
         elephant_ready = true;
     }
     return &elephant_storage;
+}
+
+// ---------------------------------------------------------------------------
+// Interrupt-controller + timer command (claim 7948)
+// ---------------------------------------------------------------------------
+
+/// Report the GIC + generic-timer state. Hardware-free: reads the discovery
+/// globals (pre-exit ACPI values) and the timer counters, so it runs
+/// unchanged in a host test process (armed=0, gic=none there).
+fn cmd_timer(m: *Monitor, args: []const []const u8) ExecError {
+    _ = args;
+    m.console.puts("timer: armed=");
+    m.console.print_u64(if (gic.armed() and timer.armed()) 1 else 0);
+    m.console.puts(" gic=");
+    m.console.puts(gic.kind_name());
+    m.console.puts(" dist=");
+    m.console.print_hex_min(gic.dist_base);
+    m.console.puts(" ppi=");
+    m.console.print_hex_min(timer.ppi);
+    m.console.puts(" freq=");
+    m.console.print_hex_min(timer.freq);
+    m.console.puts(" ticks=");
+    m.console.print_u64(timer.ticks);
+    m.console.puts(" acked=");
+    m.console.print_u64(gic.irqs_acked);
+    m.console.puts(" first=");
+    m.console.print_hex_min(gic.first_intid);
+    m.console.puts("\n");
+    return .none;
+}
+
+// ---------------------------------------------------------------------------
+// Exception-vector diagnostic command (claim 9746)
+// ---------------------------------------------------------------------------
+
+/// Deliberately trigger a synchronous exception (`udf`) with the resume
+/// flag armed: the kernel's exception handler (installed at boot, claim
+/// 9746) reports the fault, skips the faulting instruction, and the shell
+/// resumes. Gates on `exceptions.installed()` — a host test process has no
+/// vectors (even on an aarch64 host, where executing `udf` would SIGILL),
+/// so the command honestly reports that instead.
+fn cmd_fault(m: *Monitor, args: []const []const u8) ExecError {
+    _ = args;
+    if (!exceptions.installed()) {
+        m.console.print_line("fault: exception vectors not installed; nothing to trigger");
+        return .not_implemented;
+    }
+    m.console.print_line("fault: triggering udf (synchronous exception)...");
+    exceptions.trigger_test_fault();
+    m.console.print_line("fault: handled, resumed after faulting instruction");
+    return .none;
 }
 
 fn cmd_elephant(m: *Monitor, args: []const []const u8) ExecError {
@@ -1146,6 +1203,36 @@ test "monitor: beans is deterministic and bounded" {
     env.mock.reset();
     try std.testing.expectEqual(ExecError.invalid_argument, exec(&mon, &.{ "beans", "101" }));
     try std.testing.expectEqualStrings("beans: count must be between 1 and 100\n", env.mock.contents());
+}
+
+test "monitor: fault is registered and honestly reports no vectors in a test process" {
+    var env = TestEnv.init();
+    var mon = env.monitor();
+    try std.testing.expect(lookup("fault") != null);
+    try std.testing.expectEqualStrings("trigger a synchronous exception (diagnostic)", lookup("fault").?.help);
+    // Test processes never install the vectors (even on an aarch64 host,
+    // where executing `udf` would SIGILL); the command must say so and must
+    // not fault the test process.
+    try std.testing.expectEqual(ExecError.not_implemented, exec(&mon, &.{"fault"}));
+    try std.testing.expectEqualStrings(
+        "fault: exception vectors not installed; nothing to trigger\n",
+        env.mock.contents(),
+    );
+}
+
+test "monitor: timer is registered and reports the unarmed host state" {
+    var env = TestEnv.init();
+    var mon = env.monitor();
+    try std.testing.expect(lookup("timer") != null);
+    try std.testing.expectEqualStrings("interrupt controller + timer status", lookup("timer").?.help);
+    // In a test process the GIC/timer are never programmed (the init paths
+    // are aarch64-only); the command must report the honest unarmed state
+    // with the conventional PPI default.
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"timer"}));
+    try std.testing.expectEqualStrings(
+        "timer: armed=0 gic=none dist=0x0 ppi=0x1e freq=0x0 ticks=0 acked=0 first=0xffffffff\n",
+        env.mock.contents(),
+    );
 }
 
 test "monitor: output overflow is bounded and flagged, never fatal" {

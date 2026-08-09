@@ -8,6 +8,7 @@ available commands:
   clear     clean up the crime scene
   echo      repeat your regrettable decisions
   elephant  operational mascot diagnostics
+  fault     trigger a synchronous exception (diagnostic)
   handoff   display boot-to-kernel ABI data
   help      list commands and their help text
   hex       format an integer in hexadecimal
@@ -16,6 +17,7 @@ available commands:
   reboot    restart the machine
   repeat    repeat text, safely bounded
   shutdown  request power-off
+  timer     interrupt controller + timer status
   uname     compact system identity
   version   display build information
 type 'help <command>' for details on a single command.

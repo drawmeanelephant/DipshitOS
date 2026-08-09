@@ -243,8 +243,19 @@ remaining close-out is the milestone tag (see
   this sketch: pooling loader/boot-services regions (needs kernel-image +
   map-buffer exclusion ranges), and the boot-time map walk is already
   served by `memmap.MapView` + `mem`/`pages`.
-- Interrupt setup (GIC) and a timer — the GIC is already recorded as an
-  `[inferred]` hardware assumption.
+- ~~Exception vectors (VBAR_EL1 + basic synchronous/IRQ handlers).~~
+  **DONE 2026-08-08 (claim 9746)** — a real vector table + sync/IRQ
+  handlers installed post-MMU; `dipshit> fault` triggers a synchronous
+  exception that is reported and resumed live on VZ (class B gate
+  `tools/verify-live-exceptions.sh`).
+- Interrupt setup (GIC) and a timer — **attempted 2026-08-08 (claim
+  7948):** the GICv3 (GICD @ `0x10000000` / GICR @ `0x10010000`, live-
+  probed) and the generic timer (CNTP, 24 MHz, GTDT PPI 30) are
+  programmed and read-back verified on VZ, and a poll-driven heartbeat is
+  live-gate-tested — but **VZ never delivers an interrupt to the guest**
+  (GICR is RAZ/WI; PPI/SGI/SPI all inert; full evidence in the claim), so
+  IRQ delivery into the claim-9746 vectors stays open for a platform that
+  actually signals. The GIC is now `[observed]` in the hardware contract.
 - Eventually: a process abstraction, a filesystem, a network stack — each
   only when the ones below it are demonstrably working.
 

@@ -34,6 +34,9 @@ const pci = @import("pci.zig");
 const evidence = @import("evidence.zig");
 const virtio_console = @import("virtio_console.zig");
 const walkprobe = @import("walkprobe.zig"); // claim 7896 diagnostic (linker-eliminated from default builds)
+const exceptions = @import("exceptions.zig"); // claim 9746: VBAR_EL1 vector table + basic sync/IRQ handlers
+const gic = @import("gic.zig"); // claim 7948: GIC distributor + CPU interface
+const timer = @import("timer.zig"); // claim 7948: ARM generic timer (CNTP)
 const HandoffV2 = handoff.HandoffV2;
 
 // Claim 0020 phase selectors live with the transport (the exact-one-phase
@@ -294,6 +297,31 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
     // never reaches the serial probe).
     evidence.write_marker_var(st, marker_mapd);
     mmu.install_identity_map();
+    // Claim 9746 (roadmap item 5, first half): install the VBAR_EL1
+    // exception vectors + basic synchronous/IRQ handlers NOW — after
+    // ExitBootServices and the identity-map switch, when the kernel owns
+    // EL1 and no pre-exit firmware Boot Services are still active. Writing
+    // VBAR_EL1 earlier (pre-ExitBootServices) is catastrophic on VZ
+    // (observed: the pre-exit firmware calls hang ~7/8 boots — firmware
+    // exceptions would land in the kernel's vectors, claim 9746). From
+    // here on any fault produces an `[EXC]` report instead of a silent
+    // hang. The report writer degrades to a no-op until the serial console
+    // is probed below (console_kind == .none); the GIC is NOT programmed
+    // here — that is the next card.
+    exceptions.init(exception_report_writer);
+    exceptions.install();
+    // Claim 7948 (roadmap item 5, second half): GIC + generic timer. The
+    // MADT/GTDT discovery ran PRE-EXIT inside pci.dump_acpi (post-exit ACPI
+    // reads hang on VZ, claim 0013); program the controller + timer NOW —
+    // post-MMU, when the kernel owns EL1 and device MMIO is reachable
+    // (claim 1517), with the claim-9746 vectors already installed so any
+    // misstep reports instead of hanging. Only then register the IRQ chain
+    // and unmask IRQs, so no interrupt can arrive before the whole path
+    // (GIC -> vector -> dispatcher -> timer) is armed.
+    gic.init();
+    timer.init();
+    exceptions.set_irq_dispatcher(irq_dispatch);
+    exceptions.irq_unmask();
     evidence.set_marker(marker_mmu);
     evidence.write_marker_var(st, marker_mmu);
     // Claim 1517: the TLBI is now executed inside install_identity_map()
@@ -374,6 +402,19 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
         uart_hex(record.layout);
         uart_puts("\n");
     }
+
+    // Claim 7948: the interrupt-controller/timer state lands in the serial
+    // log at every boot — the live gate's first assertion (before the
+    // scripted `timer` command runs).
+    uart_puts("interrupts: gic=");
+    uart_puts(gic.kind_name());
+    uart_puts(" armed=");
+    uart_puts(if (gic.armed() and timer.armed()) "1" else "0");
+    uart_puts(" ppi=");
+    uart_hex(timer.ppi);
+    uart_puts(" freq=");
+    uart_hex(timer.freq);
+    uart_puts("\n");
 
     uart_puts("kernel terminal state\n");
 
@@ -627,6 +668,25 @@ fn layout_name(kind: Kind) []const u8 {
 
 fn halt_forever() noreturn {
     while (true) asm volatile ("wfe");
+}
+
+/// Console writer for the claim-9746 exception report. Wraps the polled
+/// uart; a no-op until the console is probed (console_kind == .none).
+fn exception_report_writer(text: []const u8) void {
+    uart_puts(text);
+}
+
+/// Claim 7948 IRQ chain, registered as the exception module's dispatcher:
+/// ack from the GIC, handle the timer tick if the INTID is the timer's
+/// PPI, then EOI. Runs in IRQ context with a register frame on the stack —
+/// NO console access (the heartbeat prints from the shell idle loop, where
+/// a print cannot re-enter the polled virtio TX path mid-flush).
+fn irq_dispatch() void {
+    const intid = gic.ack();
+    if (gic.is_spurious(intid)) return;
+    gic.note_irq(intid);
+    if (timer.is_ppi(intid)) timer.handle();
+    gic.eoi(intid);
 }
 
 fn print_pre_exit_error(st: *const SystemTable, msg: []const u8) void {

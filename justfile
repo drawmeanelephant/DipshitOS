@@ -32,8 +32,9 @@ verify-portable:
 
 # Run the Apple-silicon VZ hardware gates (class B): serial takeover
 # (zig build run, claim 1517), bad-handoff, marker, NVRAM console,
-# host-console PTY, the live-transcript RX gate (claim 6684), and the
-# live reboot/shutdown gate (claim 0527).
+# host-console PTY, the live-transcript RX gate (claim 6684), the
+# live GIC + generic timer gate (claim 7948), and the live
+# reboot/shutdown gate (claim 0527).
 # Apple silicon only — each boots VZ VMs.
 verify-vz:
     zig build run
@@ -42,6 +43,7 @@ verify-vz:
     bash tools/verify-nvram-console.sh
     bash tools/verify-host-console.sh
     bash tools/verify-live-transcript.sh
+    bash tools/verify-live-timer.sh
     bash tools/verify-live-reboot.sh
 
 # Compile the AArch64 UEFI application and kernel image (class A — zig build)
@@ -139,6 +141,14 @@ verify-bad-handoff:
 # Verify the live RX path + live dipshit> transcript (class B — boots a VZ VM; host scripted keystrokes reach the kernel end to end; claim 6684; Apple silicon only)
 verify-live-transcript:
     bash tools/verify-live-transcript.sh
+
+# Verify the live exception-vector gate (class B — boots a VZ VM; drives `fault`, asserts the [EXC] sync report + resume in vm-serial.log; claim 9746; Apple silicon only)
+verify-live-exceptions:
+    bash tools/verify-live-exceptions.sh
+
+# Verify the live GIC + generic timer gate (class B — boots a VZ VM; GIC + CNTP programmed, drives `timer`, asserts armed=1 + ≥5 consumed/re-armed comparator heartbeats in vm-serial.log; claim 7948; Apple silicon only)
+verify-live-timer:
+    bash tools/verify-live-timer.sh
 
 # Verify the live reboot/shutdown observation (class B — boots VZ VMs; a real EFI ResetSystem from a live dipshit> shell: reboot resets the machine, shutdown powers it off; claim 0527, hard gate 6; Apple silicon only)
 verify-live-reboot:

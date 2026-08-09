@@ -22,6 +22,11 @@ const SystemTable = uefi.tables.SystemTable;
 const ConfigurationTable = uefi.tables.ConfigurationTable;
 const mmio = @import("mmio.zig");
 const evidence = @import("evidence.zig");
+// Claim 7948: the ACPI walk also names the interrupt controller. The MADT
+// (sig "APIC") and GTDT are parsed here, pre-exit, into the gic.zig /
+// timer.zig discovery globals so the kernel can program them post-MMU.
+const gic = @import("gic.zig");
+const timer = @import("timer.zig");
 
 /// Set from the MCFG table during dump_acpi; read by virtio_console.zig
 /// for the console's config-space access.
@@ -119,6 +124,31 @@ pub fn dump_acpi(st: *const SystemTable) void {
             evidence.dump_hex(ecam);
             evidence.dump_str("\n");
             dump_pci(ecam);
+        }
+        // Claim 7948: the interrupt controller + generic timer live in ACPI
+        // too. Parse the MADT (sig "APIC") for the GIC distributor /
+        // redistributor / CPU-interface bases and the GTDT for the EL1
+        // physical-timer PPI — PRE-EXIT (post-exit ACPI reads hang on VZ,
+        // claim 0013). The parsed values are persisted through the evidence
+        // dump so the host can see the real VZ GIC.
+        if (sig == 0x43495041) { // "APIC" (LE) — MADT
+            const len = mmio.mmio_read32(taddr + 4);
+            gic.discover(taddr, len);
+            evidence.dump_str("MADT GIC kind=");
+            evidence.dump_str(gic.kind_name());
+            evidence.dump_str(" dist=");
+            evidence.dump_hex(gic.dist_base);
+            evidence.dump_str(" redist=");
+            evidence.dump_hex(gic.redist_base);
+            evidence.dump_str(" cpu=");
+            evidence.dump_hex(gic.cpu_base);
+            evidence.dump_str("\n");
+        }
+        if (sig == 0x54445447) { // "GTDT" (LE)
+            timer.discover(taddr);
+            evidence.dump_str("GTDT timer ppi=");
+            evidence.dump_hex(timer.ppi);
+            evidence.dump_str("\n");
         }
         count += 1;
     }
