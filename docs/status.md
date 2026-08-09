@@ -58,6 +58,7 @@ files under `artifacts/`.
 | Context snapshot | `zig build context` | ✅ pass | re-run 2026-08-08 (preflight) |
 | **VZ serial gate** | `zig build run` | ✅ **PASS 2026-08-08** | banner `DipshitOS kernel has seized control.` + `memory-map descriptors=0x…` + `kernel terminal state` in `vm-serial.log` (claim 1517; artifacts under `artifacts/`). Root cause was the translation start-level mismatch (claims 6460/7896); fixed in production with T0SZ=16 + `tlbi vmalle1` at the switch. Historical blocker detail (claims 0013/0018/0020): console is a virtio-pci device (bus 0 D5 `0x1af4/0x1043`), transport armed pre-exit, first post-switch BAR/common-config read did not return |
 | **Live transcript / RX gate** | `bash tools/verify-live-transcript.sh` | ✅ **PASS 2026-08-08** | host scripted keystrokes reach the kernel end to end through the polled virtio receive queue and the live `dipshit>` transcript is asserted in `vm-serial.log` (claim 6684, 3/3 boots; artifacts `live-transcript-*`) |
+| **Live reboot/shutdown gate** | `bash tools/verify-live-reboot.sh` | ✅ **PASS 2026-08-08** | hard gate 6 closed — a real EFI `ResetSystem` from a live `dipshit>` shell observed end to end (claim 0527, 4/4 boots): `reboot` reset the machine (second full takeover + fresh map key in `vm-serial.log`), `shutdown` powered it off (runner reports VM state → stopped); artifacts `live-reboot-*`. The claim-0011 `M2_RST!` marker write is scanned + reported but is best-effort by design (lost in the teardown race; the machine-level effect is the evidence) |
 | **Bad-handoff failure gate** | `bash tools/verify-bad-handoff.sh` | ✅ **pass** | `artifacts/m2-badhandoff-fix-after.txt`: `RC.TXT` → `kernel_rc=0x0000000000000002`, gate exits 0 (first observed 2026-08-06, fixed shim) |
 | **Marker fallback gate** (gate work item 3) | `bash tools/verify-marker.sh` | ✅ **pass** | `artifacts/m2-marker-gate.txt` (2026-08-07, re-verified `artifacts/m2-marker-reverify-20260807.txt`): NVRAM ladder `M2_ENTRY → … → M2_MAPD! → M2_MMUP! → M2_SERIA → M2_READY` — identity-map switch completes and probe/transport are reached (see [gate work item 3](#immediate-gate-work-prerequisites-for-m15), claims 0009/0010/0013) |
 | **MMU-takeover root cause & fix** (claim 0010) | `bash tools/verify-marker.sh` | ✅ **fixed 2026-08-07** | ladder now advances `M2_MAPD! → M2_MMUP! → M2_SERIA` — the identity-map switch **completes** on VZ for the first time (`artifacts/m2-mmu-takeover-gate.txt`; see claim 0010) |
@@ -66,16 +67,18 @@ files under `artifacts/`.
 
 ### Current blocker (canonical — one description, one ordering)
 
-> **RESOLVED 2026-08-08 (claims 1517 + 6684).** The post-MMU virtio TX
+> **RESOLVED 2026-08-08 (claims 1517 + 6684 + 0527).** The post-MMU virtio TX
 > blocker is fixed in production (claim 1517: T0SZ=16 + TLBI at the switch
 > — the start-level mismatch from claims 6460/7896) **and the RX path is
 > live** (claim 6684: the polled virtio receive queue delivers host
 > keystrokes end to end — `bash tools/verify-live-transcript.sh` asserts
-> the real `dipshit>` transcript in `vm-serial.log`, 3/3 boots). The
-> remaining open hard-gate items are the **live reboot/shutdown
-> observation** (machine-controls, claim 0011) and the deferred
-> filesystem commands; a physical allocator and interrupts remain later
-> milestones.
+> the real `dipshit>` transcript in `vm-serial.log`, 3/3 boots) **and the
+> live reboot/shutdown observation is done** (claim 0527: `reboot`
+> resets the machine, `shutdown` powers it off — 4/4 boots via
+> `bash tools/verify-live-reboot.sh`). Every M1.5 hard gate now passes;
+> the only remaining open hard-gate item is the **deferred filesystem
+> commands** (storage-driver milestone), and a physical allocator and
+> interrupts remain later milestones.
 
 **Historical blocker (superseded by claim 1517):** reliable post-MMU access to the already-discovered virtio-pci console transport (class B) was required before live RX and a real interactive `dipshit>` session. The console is a modern virtio-pci device (bus 0 D5 `0x1af4/0x1043`, BAR0 `0x100010000`, claim 0013); the transport arms pre-exit (`M2_READY`) and TX works pre-exit (claim 0017) and post-ExitBootServices on the firmware translation (claim 0020 phase B), but **hung on the first post-MMU BAR/common-config read after the DipshitOS identity-map install** (claims 0018/0020, phase C/D). ExitBootServices itself is exonerated; the MMU switch (B→C) was the transition that destroyed access (claim 0020). Firmware and kernel memory attributes are byte-identical (claim 0021), so the hang was not an attribute mismatch; the no-TLBI safety contract and its validity window were in **ADR 0006** (claim 0022; superseded by claim 1517). The **NVRAM fallback console (claim 0015)** carried post-exit bytes via runtime `SetVariable` (69–70 chunks, shell + commands observed) but is not the virtio serial pipe; the **mock transcript (`zig build test-console`, class A)** is a portable host test, not VZ hardware. Ordering remains explicit: **post-MMU virtio TX (done, claim 1517), then virtio RX / live transcript** — RX cannot bypass the TX/MMU layer. Claims 6460/7896 characterized the layer: correcting the T0SZ start-level mismatch (25→16) restored end-to-end post-MMU TX in 6/18 boots, and the 4-cell walk-probe matrix proved the residual was stale-TLB interference, not a device hang — cell B (T0SZ=16 + TLBI) completed 9/9, which is exactly what claim 1517 makes production (see `docs/gate-inventory.md`). Class definitions: `docs/gate-inventory.md` (class A = portable/CI, class B = Apple-silicon/VZ hardware, class C = interactive, class D = diagnostic); a green CI badge proves class A only.
 
@@ -250,7 +253,7 @@ dipshit>
 - [x] At least ten commands work (14 commands, host-tested; real command output observed post-exit via the NVRAM channel, claim 0015, and live post-MMU via claim 1517).
 - [ ] `ls`, `cat`, and `write` persist through reboot — **deferred by decision (march step 15, 2026-08-06):** filesystem commands are deferred to a storage-driver milestone; post-exit there is no ESP root / Simple File System (x3 carries handoff v2, ADR 0004 D5), so a pre-exit file window or a real storage driver is required — no `ls`/`cat`/`write` in this stream. See `docs/march-m15.md` step 15.
 - [x] A scripted console session passes automatically (asserting in `vm-serial.log`) — the mock transcript (`zig build test-console`, class A) passes, and the **live** `vm-serial.log` transcript assertion now passes too (`bash tools/verify-live-transcript.sh`, claim 6684, class B).
-- [ ] The VM can reboot or shut down from the shell. *(Real EFI `ResetSystem` mechanism shipped + unit-proven — claim 0011; the live gate stays open until a VZ reset is actually observed.)*
+- [x] The VM can reboot or shut down from the shell — **PASS 2026-08-08 (claim 0527)**: a real EFI `ResetSystem` driven from a live `dipshit>` shell is observed end to end on VZ — `reboot` resets the machine (second full takeover, fresh memory-map key in `vm-serial.log`) and `shutdown` powers it off (VM state → stopped), 4/4 boots via `bash tools/verify-live-reboot.sh` (class B). The mechanism itself shipped + unit-proven in claim 0011. *(The claim-0011 `M2_RST!` marker write is best-effort by design and was lost in the teardown race; the machine-level reset/power-off is the evidence.)*
 - [x] No allocator, MMU replacement, interrupts, scheduler, or userspace is falsely claimed.
 
 ## The march tracker (per milestone)
@@ -267,9 +270,10 @@ dipshit>
 **Ordering after M1.5 is explicit and enforced by evidence classification** (`docs/gate-inventory.md`):
 
 1. ~~**Reliable post-MMU access to the already-discovered virtio-pci console transport (post-MMU virtio TX, class B).**~~ **DONE 2026-08-08 (claim 1517)** — root cause (translation start-level mismatch + stale-TLB crutch, claims 6460/7896) fixed in production: T0SZ=16 + `tlbi vmalle1` at the switch; `zig build run` passes (banner + memory-map + terminal state in `vm-serial.log`).
-2. ~~**Virtio RX / live transcript (class B `live-transcript-rx`).**~~ **DONE 2026-08-08 (claim 6684)** — the polled virtio receive queue delivers host keystrokes end to end; `bash tools/verify-live-transcript.sh` asserts the live `dipshit>` transcript in `vm-serial.log` (3/3 boots). **The next card after the M1.5 close-out is a physical page allocator over the captured EFI map (item 3).**
-3. A physical page allocator over the captured EFI map (deferred).
-4. Exception vectors, GIC + timer interrupts — then, and only then, talk about tasks or userspace (deferred).
+2. ~~**Virtio RX / live transcript (class B `live-transcript-rx`).**~~ **DONE 2026-08-08 (claim 6684)** — the polled virtio receive queue delivers host keystrokes end to end; `bash tools/verify-live-transcript.sh` asserts the live `dipshit>` transcript in `vm-serial.log` (3/3 boots).
+3. ~~**Live reboot/shutdown observation (M1.5 close-out, hard gate 6).**~~ **DONE 2026-08-08 (claim 0527)** — a real EFI `ResetSystem` from a live `dipshit>` shell observed end to end (`bash tools/verify-live-reboot.sh`, 4/4 boots: `reboot` resets the machine, `shutdown` powers it off). With this, every M1.5 hard gate passes; the remaining close-out is the milestone tag.
+4. ~~**A physical page allocator over the captured EFI map.**~~ **DONE 2026-08-08 (claim 3972)** — first-fit bitmap allocator over the captured map's ConventionalMemory (fixed 128 KiB BSS bitmap over the 4 GiB identity-map span), wired post-exit in `kernel_main`; `pages`/`pages selftest` monitor commands; 18 unit tests; live-observed on VZ (`total=0xee2b` pages across 7 regions; selftest allocates the largest contiguous run and restores the pool). **The next card is exception vectors, then GIC + timer interrupts (item 5).**
+5. Exception vectors, GIC + timer interrupts — then, and only then, talk about tasks or userspace (deferred).
 
 The command layer above is already portable; `docs/march-m15.md` step 15's filesystem-command deferral carries forward. That keeps a useful CLI on the milestone-two kernel without faking a "complete OS", while the shell architecture survives the console driver change.
 

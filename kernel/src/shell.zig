@@ -19,6 +19,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const alloc = @import("alloc.zig");
 const console = @import("console.zig");
 const lineedit = @import("lineedit.zig");
 const tokenizer = @import("tokenizer.zig");
@@ -185,6 +186,7 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "  help      list commands and their help text\n" ++
         "  hex       format an integer in hexadecimal\n" ++
         "  mem       summarize the EFI memory map\n" ++
+        "  pages     physical page allocator pool\n" ++
         "  reboot    restart the machine\n" ++
         "  repeat    repeat text, safely bounded\n" ++
         "  shutdown  request power-off\n" ++
@@ -206,6 +208,20 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "  reserved: 0x0000000000009000 bytes (0x0000000000000009 pages)\n" ++
         "  mmio: 0x0000000000010000 bytes (0x0000000000000010 pages)\n" ++
         "  kernel: 0x000000007e4df000..0x000000007e5613e8 (0x00000000000823e8 bytes)\n" ++
+        "dipshit> pages\r\n" ++
+        "pages: armed=1 total=0x00000000000003c0 free=0x00000000000003c0 regions=0x0000000000000001 span=0x00000000000003c0\n" ++
+        "dipshit> pages selftest\r\n" ++
+        "pages selftest: alloc 1 -> 0x0000000000100000\n" ++
+        "pages selftest: free ok\n" ++
+        "pages selftest: alloc 8 -> 0x0000000000100000\n" ++
+        "pages selftest: free ok\n" ++
+        "pages selftest: alloc 3 -> 0x0000000000100000\n" ++
+        "pages selftest: alloc 5 -> 0x0000000000103000\n" ++
+        "pages selftest: free both ok\n" ++
+        "pages selftest: alloc 960 -> 0x0000000000100000\n" ++
+        "pages selftest: free ok\n" ++
+        "pages selftest: alloc 961 -> none (out of memory)\n" ++
+        "pages selftest: ok free=0x00000000000003c0\n" ++
         "dipshit> echo \"elephant business\"\r\n" ++
         "elephant business\n" ++
         "dipshit> " ++ long ++ "\r\n" ++
@@ -221,7 +237,11 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
     var mock = console.MockConsole(8192){};
     var shell = make_shell(&mock, make_view());
     shell.boot();
-    mock.feed("help\nversion\nmem\necho \"elephant business\"\n");
+    // Arm the module allocator from the same fixture map the monitor sees,
+    // exactly as kernel_main does — the `pages` command reports/exercises
+    // that pool.
+    _ = alloc.init(make_view());
+    mock.feed("help\nversion\nmem\npages\npages selftest\necho \"elephant business\"\n");
     mock.feed(long);
     mock.feed("\n\x03\n");
     while (shell.poll() != .idle) {}

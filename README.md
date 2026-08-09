@@ -224,9 +224,12 @@ All command output and logs are saved under `artifacts/` (`inspect.txt`,
   `bash tools/verify-host-console.sh` (M1.5 host plumbing), and
   `bash tools/verify-nvram-console.sh` (M1.5 NVRAM fallback console), and
   `bash tools/verify-live-transcript.sh` (M1.5 live RX — host keystrokes
-  reach the kernel end to end, claim 6684). The M1.5 monitor (14
-  commands) is implemented and host-tested; the remaining live-gate gap is
-  a live reboot/shutdown observation (see `docs/status.md`).
+  reach the kernel end to end, claim 6684), and
+  `bash tools/verify-live-reboot.sh` (M1.5 live reboot/shutdown — a real
+  EFI `ResetSystem` from a live `dipshit>` shell: `reboot` resets the
+  machine, `shutdown` powers it off, claim 0527). The M1.5 monitor (14
+  commands) is implemented, host-tested, and gate-complete (see
+  `docs/status.md`).
 - The Virtualization.framework VM boots the GPT+FAT image: configuration
   validates, the EFI variable store is created, the VM starts and runs, and
   after boot the guest-written marker file `\BOOTED.TXT` exists on the ESP
@@ -259,9 +262,13 @@ The gate-by-gate plan and active work claims live in
    layer is **fixed** (claim 1517: T0SZ=16 + TLBI at the switch), and
    **live RX is wired** (claim 6684: the polled virtio receive queue
    delivers host keystrokes end to end — `verify-live-transcript.sh`
-   asserts the live `dipshit>` transcript in `vm-serial.log`). Next: a
-   live reboot/shutdown observation, then the milestone close-out.
-   Tracked step-by-step in `docs/status.md` / `docs/march-m15.md`.
+   asserts the live `dipshit>` transcript in `vm-serial.log`). Done
+   2026-08-08 (claim 0527): the live reboot/shutdown observation —
+   `reboot` resets the machine (second full takeover, fresh map key),
+   `shutdown` powers it off (VM state → stopped), 4/4 boots via
+   `verify-live-reboot.sh`. Every M1.5 hard gate passes; the remaining
+   close-out is the milestone tag. Tracked step-by-step in
+   `docs/status.md` / `docs/march-m15.md`.
 2. ~~Resolve the milestone-two VZ serial gate itself.~~ **DONE 2026-08-08
    (claim 1517):** the post-MMU transport blocker (start-level mismatch +
    stale-TLB crutch, claims 6460/7896) is fixed in production (T0SZ=16 +
@@ -269,5 +276,12 @@ The gate-by-gate plan and active work claims live in
    saved under `artifacts/`, and the matching MMIO/serial assumptions are
    flipped in `docs/hardware-contract.md`. (The bad-handoff failure gate
    — formerly the other unpassed gate — is closed since 2026-08-06.)
-3. Keep later interrupt/GIC, timer, allocator, and process work out of
+3. **Next milestone: exception vectors, then GIC + timer.** The physical
+   page allocator over the captured EFI map is **done 2026-08-08 (claim
+   3972)** — first-fit bitmap allocator over ConventionalMemory (fixed
+   128 KiB BSS bitmap over the 4 GiB identity-map span), wired post-exit;
+   `pages`/`pages selftest` monitor commands; 18 unit tests; live-observed
+   on VZ. The next card is exception vectors, then GIC + timer interrupts
+   (canonical ordering: `docs/status.md`).
+4. Keep later interrupt/GIC, timer, allocator, and process work out of
    scope; those remain future milestones (roadmap).

@@ -18,6 +18,7 @@ const MemoryMapSlice = uefi.tables.MemoryMapSlice;
 // below is untouched; this is the seam's import surface.
 const console = @import("console.zig");
 const machine = @import("machine.zig");
+const alloc = @import("alloc.zig");
 const memmap = @import("memmap.zig");
 const monitor = @import("monitor.zig");
 const shell = @import("shell.zig");
@@ -388,6 +389,11 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
     // ------------------------------------------------------------------
     var m15 = M15Console{};
     const map_view = memmap.MapView.init(map_buffer.buffer, map_after_exit.info.descriptor_size, map_after_exit.info.len);
+    // Physical page allocator (next-card milestone): arm the pool from the
+    // captured map's ConventionalMemory regions. Fixed BSS bitmap, no
+    // allocation; the `pages` monitor command reports the pool. Not armed
+    // (silently) when the map declares no conventional memory in span.
+    _ = alloc.init(map_view);
     const console_name = layout_name(console_kind);
     var mon = monitor.Monitor.init(
         m15.to_console(),
