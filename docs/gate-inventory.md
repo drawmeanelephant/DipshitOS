@@ -35,6 +35,7 @@
 | `image-build` | A | gate | yes | yes | no | `zig build image` |
 | `inspect` | A | gate | yes | yes | no | `zig build inspect` |
 | `swift-runner-build` | A | gate | yes | yes | no | `swift build --package-path host/vm-runner` (build only — does not boot) |
+| `swift-spike-build` | A | gate | yes | yes | no | `swift build --package-path host/vm-runner -Xswiftc -DSPIKE` on the `xcode-27` public-preview arm64 runner (macOS 27 SDK; compiles the custom-virtio spike, claim 5844; does not boot) |
 | `context` | A | gate | yes | yes | no | `zig build context` |
 | `coordination` | A | gate | yes | yes | no | `bash tools/verify-coordination.sh` |
 | `coordination-tooling` | A | gate | yes | yes | no | `bash tools/status/test-coordination.sh` |
@@ -74,6 +75,13 @@ Notes:
 - **Class A is exactly what GitHub CI proves.** CI also builds the Swift
   runner, but a successful build is not a boot; only class-B runs on Apple
   silicon produce hardware-gate evidence.
+- **`swift-spike-build` runs on the `xcode-27` public-preview runner.**
+  GitHub announced the Xcode 27 image (arm64, macOS 26 OS with Xcode 27 /
+  the macOS 27.0 SDK) on 2026-07-16. It is the only GitHub-hosted way to
+  compile the macOS-27-only custom-virtio spike (claim 5844); the
+  macos-latest job builds the base runner against the macOS 26 SDK. The
+  spike check boots no VM, so it stays class A despite needing the newest
+  SDK.
 
 ## Machine-readable records
 
@@ -90,6 +98,7 @@ GATE id=guest-build class=A kind=gate ci=yes apple=no gate=yes cmd=zig build
 GATE id=image-build class=A kind=gate ci=yes apple=no gate=yes cmd=zig build image
 GATE id=inspect class=A kind=gate ci=yes apple=no gate=yes cmd=zig build inspect
 GATE id=swift-runner-build class=A kind=gate ci=yes apple=no gate=yes cmd=swift build --package-path host/vm-runner
+GATE id=swift-spike-build class=A kind=gate ci=yes apple=no gate=yes cmd=swift build --package-path host/vm-runner -Xswiftc -DSPIKE  # xcode-27 public-preview runner (macOS 27 SDK); claim 5844
 GATE id=context class=A kind=gate ci=yes apple=no gate=yes cmd=zig build context
 GATE id=coordination class=A kind=gate ci=yes apple=no gate=yes cmd=bash tools/verify-coordination.sh
 GATE id=coordination-tooling class=A kind=gate ci=yes apple=no gate=yes cmd=bash tools/status/test-coordination.sh

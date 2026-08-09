@@ -1,9 +1,10 @@
 # DipshitOS architecture
 
-**Host identity:** this project is Apple silicon only — the guest runs
-under Apple's Virtualization.framework UEFI firmware on macOS. It is **not
-Linux, not Unix, and not QEMU**: no emulator, no libc/POSIX, no existing
-guest OS in the boot path. (Canonical, always-current status:
+**Host identity:** this project is Apple silicon running macOS 27 or newer
+only — the guest runs under Apple's Virtualization.framework UEFI firmware
+on macOS. It is **not Linux, not Unix, and not QEMU**: no emulator, no
+libc/POSIX, no existing guest OS in the boot path. (Canonical, always-current
+status:
 [`docs/status.md`](status.md).)
 
 ## Current state

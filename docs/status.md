@@ -1,8 +1,8 @@
 # DipshitOS living status, goals & changelog
 
-> **Host identity:** Apple silicon only — hosted by Apple's
-> Virtualization.framework; **not Linux, not Unix, not QEMU** (see
-> `AGENTS.md`).
+> **Host identity:** Apple silicon running macOS 27 or newer only — hosted by
+> Apple's Virtualization.framework; **not Linux, not Unix, not QEMU** (see
+> `AGENTS.md`). The runner enforces the floor at runtime (macOS 27+).
 
 > This file is the project's **living status tracker** and its **multiagent
 > coordination surface**: where we are, what we are trying to build next, how
@@ -276,7 +276,7 @@ dipshit>
 - [x] `zig build`, `zig build image`, and the existing regression checks still pass. *(The bad-handoff regression gate was **failing**; its root cause (shim LR clobber) was fixed 2026-08-06 — the gate now passes, see [Gate status](#gate-status).)*
 - [x] `zig build console` reaches `dipshit>` — the post-MMU TX fix (claim 1517) puts the live banner + `dipshit>` prompt in `vm-serial.log` on real VZ runs.
 - [x] Host keystrokes reach the kernel (RX path closed end to end) — **PASS 2026-08-08 (claim 6684)**: the polled virtio receive queue delivers host keystrokes; `verify-live-transcript.sh` drives `help`/`version`/`mem`/`echo` into a live session and asserts the replies in `vm-serial.log` (3/3 boots).
-- [x] At least ten commands work (20 commands, host-tested; real command output observed post-exit via the NVRAM channel, claim 0015, and live post-MMU via claim 1517).
+- [x] At least ten commands work (21 commands, host-tested; real command output observed post-exit via the NVRAM channel, claim 0015, and live post-MMU via claim 1517).
 - [x] `ls`, `cat`, and `write` persist through reboot — **PASS 2026-08-09, upgraded to a real FAT storage driver (claim 6420)**: claim 3475's pre-exit snapshot + NVRAM persistence (passing 1/1) is **replaced** by a live FAT32 driver on the ESP (`kernel/src/fat.zig` — GPT + FAT32 mount/list/read/write with injected sector I/O, 11 host tests) over a virtio-blk transport (`kernel/src/virtio_blk.zig` — DID 0x1042 on this VZ, not the spec's 0x1041; queue 4, one request at a time). `write` now allocates clusters, updates both FAT copies, and writes the directory entry to the **disk itself**; run A persisted `hello world` and listed it `[esp]`, and run B — a fresh boot against the same disk image — still lists `HELLO.TXT [esp]` (the FAT 8.3 short name) and prints the content. **Hardware discovery fixed on the way:** VZ resets the virtio-blk device at ExitBootServices (its status reads 0 post-exit), so the queue is re-armed post-MMU (`blk_rearm`, common-config MMIO writes — verified DRIVER_OK + live reads/writes); the NVRAM variable store is no longer the persistence medium. `bash tools/verify-live-fs.sh`, class B, 1/1 pair. *(Claim 3475's other fixes stand: the per-flush TX markers/probe persist are first-flush-only / `-Dprobe-var`-gated.)*
 - [x] A scripted console session passes automatically (asserting in `vm-serial.log`) — the mock transcript (`zig build test-console`, class A) passes, and the **live** `vm-serial.log` transcript assertion now passes too (`bash tools/verify-live-transcript.sh`, claim 6684, class B).
 - [x] The VM can reboot or shut down from the shell — **PASS 2026-08-08 (claim 0527)**: a real EFI `ResetSystem` driven from a live `dipshit>` shell is observed end to end on VZ — `reboot` resets the machine (second full takeover, fresh memory-map key in `vm-serial.log`) and `shutdown` powers it off (VM state → stopped), 4/4 boots via `bash tools/verify-live-reboot.sh` (class B). The mechanism itself shipped + unit-proven in claim 0011. *(The claim-0011 `M2_RST!` marker write is best-effort by design and was lost in the teardown race; the machine-level reset/power-off is the evidence.)*

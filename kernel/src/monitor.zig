@@ -25,6 +25,7 @@ const exceptions = @import("exceptions.zig");
 const gic = @import("gic.zig");
 const handoff = @import("handoff.zig");
 const memmap = @import("memmap.zig");
+const pci = @import("pci.zig");
 const timer = @import("timer.zig");
 
 // ---------------------------------------------------------------------------
@@ -195,7 +196,7 @@ pub const Command = struct {
 
 /// Number of commands. The registry is built at runtime (not a const
 /// table): see `ensure_registry`.
-pub const registry_count: usize = 20;
+pub const registry_count: usize = 21;
 
 /// Command registry, built at runtime into BSS. A `const` table would hold
 /// link-time absolute addresses for BOTH the string slices and the handler
@@ -224,6 +225,7 @@ fn ensure_registry() []const Command {
             .{ .name = "ls", .help = "list files on the ESP", .usage = "ls", .handler = cmd_ls },
             .{ .name = "mem", .help = "summarize the EFI memory map", .usage = "mem", .handler = cmd_mem },
             .{ .name = "pages", .help = "physical page allocator pool", .usage = "pages [selftest]", .max_args = 1, .handler = cmd_pages },
+            .{ .name = "pci", .help = "enumerate PCI devices on the bus", .usage = "pci", .handler = cmd_pci },
             .{ .name = "reboot", .help = "restart the machine", .usage = "reboot", .handler = cmd_reboot },
             .{ .name = "repeat", .help = "repeat text, safely bounded", .usage = "repeat <count> <text...>", .min_args = 1, .handler = cmd_repeat },
             .{ .name = "shutdown", .help = "request power-off", .usage = "shutdown", .handler = cmd_shutdown },
@@ -886,6 +888,68 @@ fn cmd_timer(m: *Monitor, args: []const []const u8) ExecError {
 }
 
 // ---------------------------------------------------------------------------
+// PCI enumeration command (macOS 27 custom-virtio spike, audit step 3)
+// ---------------------------------------------------------------------------
+
+/// Live bus-0 PCI enumeration through the ECAM window discovered pre-exit
+/// (claim 0013). Post-exit ECAM reads work — the virtio console transport
+/// does config-space reads post-MMU (claims 1517/6684); the historical
+/// "pre-exit only" note predates the T0SZ=16 + TLBI fix. Aligned u32 reads
+/// only (claim 0013: byte reads of config space return shifted/garbage
+/// fields on VZ). This is the guest-side evidence for the custom virtio
+/// spike device at DID 0x1082 (deviceID 0x42; host runner: `zig build
+/// spike-virtio`).
+fn cmd_pci(m: *Monitor, args: []const []const u8) ExecError {
+    _ = args;
+    const ecam = pci.pci_ecam;
+    m.console.puts("pci: ecam=");
+    m.console.print_hex(ecam);
+    m.console.puts("\n");
+    if (ecam == 0 or ecam > 4 * 1024 * 1024 * 1024) {
+        m.console.print_line("pci: no ECAM (not discovered pre-exit)");
+        return .none;
+    }
+    var found: usize = 0;
+    var dev: u32 = 0;
+    while (dev < 32 and found < 48) : (dev += 1) {
+        var func: u32 = 0;
+        var funcs: u32 = 1;
+        while (func < funcs and found < 48) : (func += 1) {
+            const id = pci.pci_read32(ecam, 0, dev, func, 0);
+            const vid = id & 0xffff;
+            if (vid == 0xffff) continue;
+            const hdr = pci.pci_read32(ecam, 0, dev, func, 0x0c);
+            const ht = (hdr >> 8) & 0xff;
+            if (func == 0 and (ht & 0x80) != 0) funcs = 8;
+            const did = id >> 16;
+            m.console.puts("PCI D=");
+            m.console.print_hex(@intCast(dev));
+            m.console.puts(" F=");
+            m.console.print_hex(@intCast(func));
+            m.console.puts(" VID=");
+            m.console.print_hex(vid);
+            m.console.puts(" DID=");
+            m.console.print_hex(did);
+            m.console.puts(" CLS=");
+            m.console.print_hex((pci.pci_read32(ecam, 0, dev, func, 8) >> 8) & 0xffffff);
+            var b: u32 = 0;
+            while (b < 6) : (b += 1) {
+                m.console.puts(" B");
+                m.console.print_hex(@intCast(b));
+                m.console.puts("=");
+                m.console.print_hex(pci.pci_read32(ecam, 0, dev, func, 0x10 + b * 4));
+            }
+            m.console.puts("\n");
+            found += 1;
+        }
+    }
+    m.console.puts("pci: found=");
+    m.console.print_hex(@intCast(found));
+    m.console.puts("\n");
+    return .none;
+}
+
+// ---------------------------------------------------------------------------
 // Exception-vector diagnostic command (claim 9746)
 // ---------------------------------------------------------------------------
 
@@ -1102,6 +1166,15 @@ test "monitor: help for a specific command" {
     env.mock.reset();
     try std.testing.expectEqual(ExecError.invalid_argument, exec(&mon, &.{ "help", "bogus" }));
     try std.testing.expectEqualStrings("help: no such command: bogus\n", env.mock.contents());
+}
+
+test "monitor: pci command reports no-ECAM honestly" {
+    var env = TestEnv.init();
+    var mon = env.monitor();
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"pci"}));
+    const out = env.mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "pci: ecam=0x0000000000000000") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "pci: no ECAM") != null);
 }
 
 test "monitor: unknown command is diagnosed" {

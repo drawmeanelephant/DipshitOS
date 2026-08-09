@@ -200,6 +200,7 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "  ls        list files on the ESP\n" ++
         "  mem       summarize the EFI memory map\n" ++
         "  pages     physical page allocator pool\n" ++
+        "  pci       enumerate PCI devices on the bus\n" ++
         "  reboot    restart the machine\n" ++
         "  repeat    repeat text, safely bounded\n" ++
         "  shutdown  request power-off\n" ++
