@@ -53,6 +53,9 @@
 | `tx-transition` | D | diagnostic | no | no | yes | `bash tools/verify-tx-transition.sh` — claim 0020 |
 | `fw-mmu-capture` | D | diagnostic | no | no | yes | `bash tools/verify-fw-mmu-capture.sh` — claim 0021 |
 | `t0sz16` | D | diagnostic | no | no | yes | `bash tools/verify-t0sz16.sh` (mechanism: `zig build kernel -Dt0sz16`) — claim 6460 |
+| `tlbi-after-switch` | D | diagnostic | no | no | yes | `zig build kernel -Dtlbi-after-switch` (empty-TLB lever) — claim 7896 |
+| `walk-probe` | D | diagnostic | no | no | yes | `zig build kernel -Dwalk-probe` (cold-address probe battery, `M2_WP_*` markers) — claim 7896 |
+| `t0sz16-walkprobe` | D | diagnostic | no | no | yes | `bash tools/verify-t0sz16-walkprobe.sh` — claim 7896 (4-cell start-level/residual separation matrix) |
 
 Notes:
 
@@ -101,4 +104,7 @@ GATE id=tx-diag class=D kind=diagnostic ci=no apple=yes gate=no cmd=bash tools/v
 GATE id=tx-transition class=D kind=diagnostic ci=no apple=yes gate=no cmd=bash tools/verify-tx-transition.sh
 GATE id=fw-mmu-capture class=D kind=diagnostic ci=no apple=yes gate=no cmd=bash tools/verify-fw-mmu-capture.sh
 GATE id=t0sz16 class=D kind=diagnostic ci=no apple=yes gate=no cmd=bash tools/verify-t0sz16.sh
+GATE id=tlbi-after-switch class=D kind=diagnostic ci=no apple=yes gate=no cmd=zig build kernel -Dtlbi-after-switch
+GATE id=walk-probe class=D kind=diagnostic ci=no apple=yes gate=no cmd=zig build kernel -Dwalk-probe
+GATE id=t0sz16-walkprobe class=D kind=diagnostic ci=no apple=yes gate=no cmd=bash tools/verify-t0sz16-walkprobe.sh
 <!-- GATE_INVENTORY:END -->

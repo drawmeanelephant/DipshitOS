@@ -98,6 +98,24 @@ pub fn build(b: *std.Build) void {
     // same TTBR0 root, same MAIR/attributes/blanket/BAR window, same
     // no-TLBI behavior. Default off: the default build is byte-identical.
     const t0sz16 = b.option(bool, "t0sz16", "Diagnostic: install_identity_map programs T0SZ=16 (walk starts at level 0) instead of 25 (claim 6460; default off)") orelse false;
+    // Claim 7896 (6460 follow-up): `-Dtlbi-after-switch` drops the no-TLBI
+    // crutch for the diagnostic: immediately after install_identity_map, the
+    // kernel executes `tlbi vmalle1; dsb ish; isb`, so the FIRST post-switch
+    // access must re-walk the installed tables (stale firmware TLB entries
+    // are gone by construction). At T0SZ=25 the walk of the L0-rooted tables
+    // faults (start-level mismatch — claim 0010's M2_TTBR! death); at
+    // T0SZ=16 it resolves. This is the deterministic lever that separates
+    // the start-level defect from the residual hang. Default off: default
+    // builds are byte-identical (no-TLBI contract, ADR 0006, unchanged).
+    const tlbi_after_switch = b.option(bool, "tlbi-after-switch", "Diagnostic: execute tlbi vmalle1 immediately after the identity-map install, forcing a full re-walk (claim 7896; default off)") orelse false;
+    // Claim 7896: `-Dwalk-probe` runs a post-switch cold-address probe
+    // battery, each probe bracketed by an NVRAM marker, to test whether the
+    // installed tables resolve under the programmed T0SZ and to NAME the
+    // first address whose walk (or MMIO read) does not return. Runs after
+    // install_identity_map (and after the optional -Dtlbi-after-switch)
+    // before the claim-0020 phase-C experiment. Default off: the module is
+    // linker-eliminated from default builds (byte-identical).
+    const walk_probe = b.option(bool, "walk-probe", "Diagnostic: post-switch walk-validity probe battery with per-probe NVRAM markers (claim 7896; default off)") orelse false;
     const kernel_options = b.addOptions();
     kernel_options.addOption(bool, "nvram_console", nvram_console);
     kernel_options.addOption(bool, "preexit_tx", preexit_tx);
@@ -108,6 +126,8 @@ pub fn build(b: *std.Build) void {
     kernel_options.addOption(bool, "tx_transition_d", tx_transition_d);
     kernel_options.addOption(bool, "fw_mmu_capture", fw_mmu_capture);
     kernel_options.addOption(bool, "t0sz16", t0sz16);
+    kernel_options.addOption(bool, "tlbi_after_switch", tlbi_after_switch);
+    kernel_options.addOption(bool, "walk_probe", walk_probe);
     const kernel = b.addExecutable(.{
         .name = "dipshit-kernel",
         .root_module = b.createModule(.{

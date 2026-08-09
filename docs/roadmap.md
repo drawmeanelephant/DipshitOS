@@ -216,8 +216,12 @@ post-MMU transport access and the RX path are the next steps (see
   post-MMU access to it (post-MMU access hangs on VZ — the MMU switch is
   the killer, claim 0020) and then
   the RX path (the milestone-two console is polled TX-only, ADR 0004; the
-  kernel's `readByte` is a no-RX stub). This is what stands between the
-  current mock-level monitor and a live `dipshit>` session.
+  kernel's `readByte` is a no-RX stub). Newest diagnostic on the transport
+  layer (claim 6460, class D, 2026-08-08): correcting the T0SZ start-level
+  mismatch (25→16) restored end-to-end post-MMU TX in 6/18 boots across
+  three runs — hypothesis strengthened, not reproducible; production T0SZ
+  stays 25 (canonical blocker: `docs/status.md`). This is what stands
+  between the current mock-level monitor and a live `dipshit>` session.
 - A memory allocator and boot-time memory map walk (the EFI memory map
   the kernel captured at exit, walked by the kernel itself).
 - Interrupt setup (GIC) and a timer — the GIC is already recorded as an

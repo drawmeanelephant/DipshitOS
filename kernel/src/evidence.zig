@@ -99,6 +99,17 @@ pub const marker_trd1: u64 = 0x4d325f5452443121; // "M2_TRD1!"
 pub const marker_trd2: u64 = 0x4d325f5452443221; // "M2_TRD2!"
 pub const marker_trdu: u64 = 0x4d325f5452445521; // "M2_TRDU!"
 pub const marker_trnx: u64 = 0x4d325f54524e5821; // "M2_TRNX!"
+// Claim 7896 (6460 follow-up): post-switch walk-probe markers. M2_WP_00 =
+// probe battery entered; M2_WP_01..M2_WP_05 = the corresponding probe's
+// volatile read returned (self / ram-hi / ram-mid / ram-lo / BAR). The
+// ladder's last WP marker names the first address whose walk (or MMIO read)
+// does not return under the programmed T0SZ.
+pub const marker_wp00: u64 = 0x4d325f57505f3030; // "M2_WP_00"
+pub const marker_wp01: u64 = 0x4d325f57505f3031; // "M2_WP_01"
+pub const marker_wp02: u64 = 0x4d325f57505f3032; // "M2_WP_02"
+pub const marker_wp03: u64 = 0x4d325f57505f3033; // "M2_WP_03"
+pub const marker_wp04: u64 = 0x4d325f57505f3034; // "M2_WP_04"
+pub const marker_wp05: u64 = 0x4d325f57505f3035; // "M2_WP_05"
 
 const marker_variable_name = utf16z("DipshitM2");
 pub const marker_vendor_guid = uefi.Guid{

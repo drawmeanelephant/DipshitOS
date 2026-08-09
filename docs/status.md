@@ -44,16 +44,18 @@ byte-perfect and gated by `zig build run`).
 
 Every gate below is backed by evidence re-verified
 2026-08-07 (full suite re-run on merged `main` 4702548,
-`artifacts/status-reverify-20260807.txt`); files under `artifacts/`.
+`artifacts/status-reverify-20260807.txt`) and re-run again at HEAD
+`5160eef` on 2026-08-08 (claim 8592 preflight, `artifacts/status-preflight-*.txt`);
+files under `artifacts/`.
 
 | Gate | Command | Result | Last evidence |
 |------|---------|--------|---------------|
-| Format | `zig fmt --check boot/src/main.zig kernel/src/main.zig build.zig` | ✅ pass | re-run 2026-08-06 |
-| Guest build | `zig build` | ✅ pass | re-run 2026-08-06 |
-| Disk image | `zig build image` | ✅ pass | re-run 2026-08-06 |
-| Binary + image inspect | `zig build inspect` | ✅ pass | re-run 2026-08-06 |
-| Swift runner build | `swift build --package-path host/vm-runner` | ✅ pass | re-run 2026-08-06 |
-| Context snapshot | `zig build context` | ✅ pass | re-run 2026-08-06 |
+| Format | `zig fmt --check boot/src/*.zig kernel/src/*.zig build.zig` | ✅ pass | re-run 2026-08-08 (preflight) |
+| Guest build | `zig build` | ✅ pass | re-run 2026-08-08 (preflight) |
+| Disk image | `zig build image` | ✅ pass | re-run 2026-08-08 (preflight) |
+| Binary + image inspect | `zig build inspect` | ✅ pass | re-run 2026-08-08 (preflight) |
+| Swift runner build | `swift build --package-path host/vm-runner` | ✅ pass | re-run 2026-08-08 (preflight) |
+| Context snapshot | `zig build context` | ✅ pass | re-run 2026-08-08 (preflight) |
 | **VZ serial gate** | `zig build run` | ❌ **not passed** | `vm-serial.log` still 0 bytes; **blocker precise (claims 0013/0018/0020):** console is a virtio-pci device (bus 0 D5 `0x1af4/0x1043`), transport armed pre-exit (`SEL=VIRTIO`, ladder reaches `M2_READY`), but **post-MMU access to the transport window hangs on VZ** — the first post-switch BAR/common-config read does not return (claim 0018), and the MMU switch is the transition that destroys access, not ExitBootServices (claim 0020). See [Current blocker](#current-blocker-canonical--one-description-one-ordering) |
 | **Bad-handoff failure gate** | `bash tools/verify-bad-handoff.sh` | ✅ **pass** | `artifacts/m2-badhandoff-fix-after.txt`: `RC.TXT` → `kernel_rc=0x0000000000000002`, gate exits 0 (first observed 2026-08-06, fixed shim) |
 | **Marker fallback gate** (gate work item 3) | `bash tools/verify-marker.sh` | ✅ **pass** | `artifacts/m2-marker-gate.txt` (2026-08-07, re-verified `artifacts/m2-marker-reverify-20260807.txt`): NVRAM ladder `M2_ENTRY → … → M2_MAPD! → M2_MMUP! → M2_SERIA → M2_READY` — identity-map switch completes and probe/transport are reached (see [gate work item 3](#immediate-gate-work-prerequisites-for-m15), claims 0009/0010/0013) |
