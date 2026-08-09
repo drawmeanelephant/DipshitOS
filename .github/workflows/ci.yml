@@ -8,6 +8,11 @@
 # runners do not prove VZ hardware behavior — a green CI badge means "the
 # portable gates passed", nothing more. Run `just verify-vz` on an Apple
 # silicon host for the VZ gates.
+#
+# One build check requires the macOS 27 SDK (the custom-virtio spike): it
+# runs in a separate job on GitHub's `xcode-27` public-preview arm64 runner
+# (announced 2026-07-16; macOS 26 OS with Xcode 27 / the macOS 27.0 SDK). It
+# still boots no VM, so it remains class A.
 
 name: CI
 
@@ -84,3 +89,20 @@ jobs:
           path: |
             zig-out/
             artifacts/
+
+  # The custom-virtio spike (kernel/src/monitor.zig `pci` + the runner's
+  # --custom-virtio section, claim 5844) references macOS-27-only
+  # Virtualization.framework types, so it compiles only against the macOS 27
+  # SDK. The macos-latest job above cannot build it; this job runs on
+  # GitHub's `xcode-27` public-preview image (arm64, Xcode 27 / macOS 27.0
+  # SDK) and compiles the SPIKE-gated Swift code. No VM is booted.
+  build-swift-spike-macos27:
+    name: Build Swift launcher + custom-virtio spike (macOS 27 SDK)
+    runs-on: xcode-27
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build Swift launcher with SPIKE define (class A, macOS 27 SDK)
+        run: swift build --package-path host/vm-runner -Xswiftc -DSPIKE
