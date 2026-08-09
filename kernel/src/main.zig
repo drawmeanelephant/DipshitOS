@@ -458,11 +458,19 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
     // ------------------------------------------------------------------
     var m15 = M15Console{};
     const map_view = memmap.MapView.init(map_buffer.buffer, map_after_exit.info.descriptor_size, map_after_exit.info.len);
-    // Physical page allocator (next-card milestone): arm the pool from the
-    // captured map's ConventionalMemory regions. Fixed BSS bitmap, no
-    // allocation; the `pages` monitor command reports the pool. Not armed
-    // (silently) when the map declares no conventional memory in span.
-    _ = alloc.init(map_view);
+    // Physical page allocator (claims 3972 + 5162): arm the pool from the
+    // captured map's conventional + loader + boot-services regions,
+    // excluding the live kernel image, stack, handoff page, and captured
+    // map buffer. Fixed BSS bitmap, no allocation; the `pages` monitor
+    // command reports the pool. Not armed (silently) when the map declares
+    // no poolable memory in span.
+    const exclusions = [_]alloc.Exclusion{
+        alloc.exclusion_from_bytes(handoff_rec.kernel_base, handoff_rec.kernel_size),
+        alloc.exclusion_from_bytes(handoff_rec.stack_base, handoff_rec.stack_size),
+        alloc.exclusion_from_bytes(@intFromPtr(handoff_rec), memmap.page_size),
+        alloc.exclusion_from_bytes(@intFromPtr(map_buffer.buffer.ptr), map_buffer.buffer.len),
+    };
+    _ = alloc.init(map_view, &exclusions);
     const console_name = layout_name(console_kind);
     var mon = monitor.Monitor.init(
         m15.to_console(),

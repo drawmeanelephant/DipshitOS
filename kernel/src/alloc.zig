@@ -1,17 +1,29 @@
 //! DipshitOS physical page allocator over the captured EFI map.
 //!
 //! Next-card milestone (canonical ordering: `docs/status.md`): a first-fit
-//! **bitmap** allocator whose pool is the ConventionalMemory regions of the
-//! map the kernel captured pre-exit. ADR 0004 D2: the captured map is the
-//! sole authority on memory layout — there is no `GetMemoryMap` after
-//! exit, so the pool is built once, post-exit, from `MapView` bytes.
+//! **bitmap** allocator whose pool is the RAM regions of the map the
+//! kernel captured pre-exit — conventional, loader, and boot-services
+//! (claim 5162: loader/boot-services pooling with exclusion ranges).
+//! ADR 0004 D2: the captured map is the sole authority on memory layout —
+//! there is no `GetMemoryMap` after exit, so the pool is built once,
+//! post-exit, from `MapView` bytes.
 //!
-//! ConventionalMemory-only is deliberate and safe with zero exclusions:
-//! the kernel image (loader_code), the map buffer (loader_data), the
-//! stack, the identity-map tables (BSS), and the virtio BAR (MMIO) all
-//! live outside conventional memory, so the pool can never hand back the
-//! kernel itself. Loader/boot-services regions are explicitly deferred
-//! (they would need kernel-image + map-buffer exclusion ranges).
+//! Pooled types: conventional, loader_code, loader_data, boot_services_code,
+//! boot_services_data. NOT pooled: runtime code/data (the kernel still
+//! calls ResetSystem/SetVariable through the runtime services table),
+//! persistent, ACPI, reserved, MMIO, and every other type — those bits
+//! stay set, so they are never handed out.
+//!
+//! Pooling loader/boot-services regions requires **exclusion ranges**: the
+//! kernel image (loader_code, `handoff.kernel_base/size`), the stack
+//! (loader_data, `handoff.stack_base/size`), the handoff struct page, and
+//! the captured-map buffer (loader_data) are live after exit and must
+//! never be handed out. `init` takes an `Exclusion` list; excluded pages
+//! are marked allocated (and counted in `Stats.excluded_pages`) exactly
+//! like gaps, so `alloc_pages` can never return them. `free_pages` clears
+//! only bits it is given, so a caller must never free a page it did not
+//! get from `alloc_pages`/`reserve` — freeing an excluded page would
+//! unprotect it (caller contract).
 //!
 //! The bitmap covers the same 4 GiB span the identity map blankets
 //! (`mmu.zig`): one bit per 4 KiB page, 1 = allocated, 0 = free. During
@@ -38,21 +50,43 @@ pub const span_bytes: u64 = 0x1_0000_0000;
 pub const max_span_pages: u64 = span_bytes / page_size; // 1 Mi pages
 pub const bitmap_bytes: usize = @intCast(max_span_pages / 8); // 128 KiB
 
-/// Maximum pooled conventional regions recorded for reporting. Maps with
-/// more regions pool the first `max_regions` (in map order) and leave the
-/// rest untracked (honestly visible via `region_count`).
+/// Maximum pooled regions recorded for reporting. Maps with more regions
+/// pool the first `max_regions` (in map order) and leave the rest
+/// untracked (honestly visible via `region_count`).
 pub const max_regions: usize = 64;
 
-/// One pooled conventional region (whole pages only).
+/// One pooled region (whole pages only).
 pub const Region = struct {
     base: u64,
     pages: u64,
 };
 
+/// A whole-page physical range that must never be handed out, even though
+/// it sits inside a pooled region (live kernel image, stack, handoff
+/// struct, captured-map buffer). Pages outside every pooled region are
+/// already unallocatable (gaps), so an exclusion only ever bites inside
+/// pooled regions.
+pub const Exclusion = struct {
+    base: u64,
+    pages: u64,
+};
+
+/// Build an exclusion from a byte range: rounds the base down and the size
+/// up to whole pages, so a partially-used page is protected whole. A zero
+/// `bytes` produces a zero-page (no-op) exclusion.
+pub fn exclusion_from_bytes(base: u64, bytes: u64) Exclusion {
+    const aligned = base - (base % page_size);
+    const end = std.math.add(u64, base, bytes) catch std.math.maxInt(u64);
+    const span = std.math.sub(u64, end, aligned) catch 0;
+    return .{ .base = aligned, .pages = (span + page_size - 1) / page_size };
+}
+
 pub const Stats = struct {
     armed: bool,
     total_pages: u64,
     free_pages: u64,
+    /// Pages pooled but excluded (protected) — `total_pages - free_pages`.
+    excluded_pages: u64,
     region_count: usize,
     span_pages: u64,
 };
@@ -60,36 +94,39 @@ pub const Stats = struct {
 pub const State = struct {
     /// 1 = allocated, 0 = free. Bit `i` is page
     /// `bitmap_base + i * page_size`. All bits start SET (allocated); init
-    /// clears exactly the pooled conventional pages, so any page the map
-    /// does not declare conventional is unallocatable.
+    /// clears exactly the pooled pages, so any page the map does not
+    /// declare poolable (or that an exclusion protects) is unallocatable.
     bitmap: [bitmap_bytes]u8 = [_]u8{0} ** bitmap_bytes,
     regions: [max_regions]Region = undefined,
     region_count: usize = 0,
     bitmap_base: u64 = 0,
     span_pages: u64 = 0,
     total_pages: u64 = 0,
+    excluded_pages: u64 = 0,
     free_count: u64 = 0,
     armed: bool = false,
 
-    /// Build the pool from a captured map view. Resets any prior state.
-    /// Returns true iff at least one conventional page is pooled.
-    pub fn init(self: *State, view: memmap.MapView) bool {
+    /// Build the pool from a captured map view and a list of protected
+    /// exclusion ranges. Resets any prior state. Returns true iff at least
+    /// one page is pooled.
+    pub fn init(self: *State, view: memmap.MapView, exclusions: []const Exclusion) bool {
         self.bitmap = [_]u8{0} ** bitmap_bytes;
         self.region_count = 0;
         self.bitmap_base = 0;
         self.span_pages = 0;
         self.total_pages = 0;
+        self.excluded_pages = 0;
         self.free_count = 0;
         self.armed = false;
         self.regions = undefined;
 
-        // Pass 1: the aligned conventional span (min aligned base, max end).
+        // Pass 1: the aligned pooled span (min aligned base, max end).
         var min_base: u64 = std.math.maxInt(u64);
         var max_end: u64 = 0;
         var index: usize = 0;
         while (index < view.count) : (index += 1) {
             const d = view.get(index) orelse continue;
-            if (d.type != .conventional_memory) continue;
+            if (!is_poolable(d.type)) continue;
             const start = ceil_page(d.physical_start);
             const end_addr = std.math.add(u64, d.physical_start, std.math.mul(u64, d.number_of_pages, page_size) catch continue) catch continue;
             const end = floor_page(end_addr);
@@ -108,19 +145,19 @@ pub const State = struct {
         if (self.span_pages > max_span_pages) self.span_pages = max_span_pages;
 
         // Mark the whole span allocated, then clear exactly the pooled
-        // conventional pages — gaps stay unallocatable.
+        // pages — gaps stay unallocatable.
         const span_bytes_full = @as(usize, @intCast((self.span_pages + 7) / 8));
         @memset(self.bitmap[0..span_bytes_full], 0xff);
         if (span_bytes_full * 8 > self.span_pages) {
             // Tail bits beyond span_pages are never addressed; keep them set.
         }
 
-        // Pass 2: pool each whole-page conventional region inside the span.
+        // Pass 2: pool each whole-page poolable region inside the span.
         var total: u64 = 0;
         index = 0;
         while (index < view.count and self.region_count < max_regions) : (index += 1) {
             const d = view.get(index) orelse continue;
-            if (d.type != .conventional_memory) continue;
+            if (!is_poolable(d.type)) continue;
             const start = ceil_page(d.physical_start);
             const end_addr = std.math.add(u64, d.physical_start, std.math.mul(u64, d.number_of_pages, page_size) catch continue) catch continue;
             const end = floor_page(end_addr);
@@ -134,9 +171,32 @@ pub const State = struct {
             self.region_count += 1;
             total = std.math.add(u64, total, pages) catch std.math.maxInt(u64);
         }
+
+        // Pass 3: exclusions — protect live ranges (kernel image, stack,
+        // handoff page, map buffer). Each overlap with a pooled region sets
+        // those bits back to allocated; counting only 0→1 transitions keeps
+        // the free count exact (gaps are already allocated).
+        var excluded: u64 = 0;
+        for (exclusions) |ex| {
+            if (ex.pages == 0) continue;
+            const ex_start = @max(ceil_page(ex.base), min_base);
+            const ex_end_addr = std.math.add(u64, ex.base, std.math.mul(u64, ex.pages, page_size) catch continue) catch continue;
+            const ex_end = @min(floor_page(ex_end_addr), span_end);
+            if (ex_start >= ex_end) continue;
+            const ex_idx = (ex_start - min_base) / page_size;
+            const ex_pages = (ex_end - ex_start) / page_size;
+            var i: u64 = 0;
+            while (i < ex_pages) : (i += 1) {
+                if (!self.bit_get(ex_idx + i)) {
+                    self.bit_set(ex_idx + i);
+                    excluded += 1;
+                }
+            }
+        }
+        self.excluded_pages = excluded;
         self.total_pages = total;
-        self.free_count = total;
-        self.armed = total > 0;
+        self.free_count = total - excluded;
+        self.armed = self.free_count > 0;
         return self.armed;
     }
 
@@ -224,6 +284,7 @@ pub const State = struct {
             .armed = self.armed,
             .total_pages = self.total_pages,
             .free_pages = self.free_count,
+            .excluded_pages = self.excluded_pages,
             .region_count = self.region_count,
             .span_pages = self.span_pages,
         };
@@ -264,14 +325,29 @@ fn floor_page(addr: u64) u64 {
     return addr - (addr % page_size);
 }
 
+/// The map types the pool is built from. Runtime code/data is deliberately
+/// excluded (ResetSystem/SetVariable still run through it post-exit),
+/// persistent/acpi/reserved/MMIO stay unpooled.
+fn is_poolable(kind: memmap.MemoryType) bool {
+    return switch (kind) {
+        .conventional_memory,
+        .loader_code,
+        .loader_data,
+        .boot_services_code,
+        .boot_services_data,
+        => true,
+        else => false,
+    };
+}
+
 // ---------------------------------------------------------------------------
 // Module state (kernel + `pages` monitor command surface; machine.zig style)
 // ---------------------------------------------------------------------------
 
 var state: State = .{};
 
-pub fn init(view: memmap.MapView) bool {
-    return state.init(view);
+pub fn init(view: memmap.MapView, exclusions: []const Exclusion) bool {
+    return state.init(view, exclusions);
 }
 
 pub fn alloc_pages(n: u64) ?u64 {
@@ -311,27 +387,38 @@ fn make_view() memmap.MapView {
     return memmap.MapView.init(std.mem.asBytes(&test_descriptors), @sizeOf(memmap.MemoryDescriptor), test_descriptors.len);
 }
 
-test "alloc: init arms a pool from conventional memory only" {
+test "alloc: init pools conventional + loader + boot-services regions" {
     var st = State{};
-    try std.testing.expect(st.init(make_view()));
+    try std.testing.expect(st.init(make_view(), &.{}));
     const s = st.stats();
     try std.testing.expect(s.armed);
-    try std.testing.expectEqual(@as(u64, 960), s.total_pages);
-    try std.testing.expectEqual(@as(u64, 960), s.free_pages);
-    try std.testing.expectEqual(@as(usize, 1), s.region_count);
-    // Only conventional pages are free; everything else in the span is set.
-    try std.testing.expectEqual(@as(u64, 960), s.span_pages);
+    // conventional 960 + loader_code 64 + boot_services_data 128.
+    try std.testing.expectEqual(@as(u64, 1152), s.total_pages);
+    try std.testing.expectEqual(@as(u64, 1152), s.free_pages);
+    try std.testing.expectEqual(@as(u64, 0), s.excluded_pages);
+    try std.testing.expectEqual(@as(usize, 3), s.region_count);
+    // The span now covers the highest pooled region end (0x8080000).
+    try std.testing.expectEqual(@as(u64, 0x7f80), s.span_pages);
     try std.testing.expectEqual(@as(u64, 0x100000), st.bitmap_base);
+    // Conventional pages come first; the loader and boot regions follow,
+    // and the mmio gap at 0x1000000 stays unallocatable.
+    try std.testing.expectEqual(@as(u64, 0x100000), (st.alloc_pages(960) orelse return error.TestUnexpectedResult));
+    try std.testing.expectEqual(@as(u64, 0x7000000), (st.alloc_pages(64) orelse return error.TestUnexpectedResult));
+    try std.testing.expectEqual(@as(u64, 0x8000000), (st.alloc_pages(128) orelse return error.TestUnexpectedResult));
+    try std.testing.expect(st.alloc_pages(1) == null);
 }
 
-test "alloc: no conventional memory leaves the allocator unarmed" {
+test "alloc: no poolable memory leaves the allocator unarmed" {
     var st = State{};
-    const no_conv = [_]memmap.MemoryDescriptor{
-        .{ .type = .loader_code, .physical_start = 0x100000, .virtual_start = 0, .number_of_pages = 64, .attribute = 0 },
-        .{ .type = .memory_mapped_io, .physical_start = 0x2000000, .virtual_start = 0, .number_of_pages = 16, .attribute = 0 },
+    // mmio + reserved only: nothing is poolable (loader_code alone WOULD
+    // arm the pool now — claim 5162).
+    const no_ram = [_]memmap.MemoryDescriptor{
+        .{ .type = .memory_mapped_io, .physical_start = 0x100000, .virtual_start = 0, .number_of_pages = 16, .attribute = 0 },
+        .{ .type = .reserved_memory_type, .physical_start = 0x2000000, .virtual_start = 0, .number_of_pages = 8, .attribute = 0 },
+        .{ .type = .runtime_services_data, .physical_start = 0x3000000, .virtual_start = 0, .number_of_pages = 4, .attribute = 0 },
     };
-    const view = memmap.MapView.init(std.mem.asBytes(&no_conv), @sizeOf(memmap.MemoryDescriptor), no_conv.len);
-    try std.testing.expect(!st.init(view));
+    const view = memmap.MapView.init(std.mem.asBytes(&no_ram), @sizeOf(memmap.MemoryDescriptor), no_ram.len);
+    try std.testing.expect(!st.init(view, &.{}));
     try std.testing.expect(!st.stats().armed);
     try std.testing.expect(st.alloc_pages(1) == null);
     try std.testing.expect(!st.free_pages(0x100000, 1));
@@ -339,13 +426,13 @@ test "alloc: no conventional memory leaves the allocator unarmed" {
 
 test "alloc: first-fit alloc returns contiguous page-aligned runs" {
     var st = State{};
-    _ = st.init(make_view());
+    _ = st.init(make_view(), &.{});
     const a1 = st.alloc_pages(1) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u64, 0x100000), a1);
     const a8 = st.alloc_pages(8) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u64, 0x101000), a8); // contiguous right after a1
     try std.testing.expectEqual(@as(u64, a1 + 0x1000), a8);
-    try std.testing.expectEqual(@as(u64, 960 - 1 - 8), st.free_count);
+    try std.testing.expectEqual(@as(u64, 1152 - 1 - 8), st.free_count);
     try std.testing.expect(st.free_pages(a1, 1));
     // Bit 0 is now a lone free bit (a8 still occupies bits 1..8), so the
     // first 3-page run starts at bit 9.
@@ -357,20 +444,28 @@ test "alloc: first-fit alloc returns contiguous page-aligned runs" {
     try std.testing.expect(st.free_pages(a3, 3));
     try std.testing.expect(st.free_pages(a5, 5));
     try std.testing.expect(st.free_pages(a8, 8));
-    try std.testing.expectEqual(@as(u64, 960), st.free_count);
+    try std.testing.expectEqual(@as(u64, 1152), st.free_count);
 }
 
 test "alloc: exhaustion returns null and leaves the pool unchanged" {
     var st = State{};
-    _ = st.init(make_view());
-    const all = st.alloc_pages(960) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(u64, 0x100000), all);
+    _ = st.init(make_view(), &.{});
+    // The pool is fragmented (conventional + loader + boot regions are not
+    // contiguous), so exhaust it region by region: 960 + 64 + 128 = 1152.
+    const c = st.alloc_pages(960) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 0x100000), c);
+    const l = st.alloc_pages(64) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 0x7000000), l);
+    const b = st.alloc_pages(128) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 0x8000000), b);
     try std.testing.expectEqual(@as(u64, 0), st.free_count);
     try std.testing.expect(st.alloc_pages(1) == null);
     try std.testing.expect(st.alloc_pages(0) == null);
     try std.testing.expectEqual(@as(u64, 0), st.free_count); // failed alloc changed nothing
-    try std.testing.expect(st.free_pages(all, 960));
-    try std.testing.expectEqual(@as(u64, 960), st.free_count);
+    try std.testing.expect(st.free_pages(c, 960));
+    try std.testing.expect(st.free_pages(l, 64));
+    try std.testing.expect(st.free_pages(b, 128));
+    try std.testing.expectEqual(@as(u64, 1152), st.free_count);
 }
 
 test "alloc: gaps between regions are never allocatable" {
@@ -383,7 +478,7 @@ test "alloc: gaps between regions are never allocatable" {
     };
     const view = memmap.MapView.init(std.mem.asBytes(&two_regions), @sizeOf(memmap.MemoryDescriptor), two_regions.len);
     var st = State{};
-    _ = st.init(view);
+    _ = st.init(view, &.{});
     try std.testing.expectEqual(@as(u64, 8), st.total_pages);
     const first = st.alloc_pages(4) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u64, 0x100000), first);
@@ -405,7 +500,7 @@ test "alloc: unaligned conventional bases are rounded to whole pages" {
     };
     const view = memmap.MapView.init(std.mem.asBytes(&unaligned), @sizeOf(memmap.MemoryDescriptor), unaligned.len);
     var st = State{};
-    _ = st.init(view);
+    _ = st.init(view, &.{});
     try std.testing.expectEqual(@as(u64, 1), st.total_pages);
     const a = st.alloc_pages(1) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u64, 0x101000), a);
@@ -413,44 +508,47 @@ test "alloc: unaligned conventional bases are rounded to whole pages" {
 
 test "alloc: free_pages bounds-checks alignment and span" {
     var st = State{};
-    _ = st.init(make_view());
+    _ = st.init(make_view(), &.{});
     try std.testing.expect(!st.free_pages(0x100001, 1)); // unaligned
     try std.testing.expect(!st.free_pages(0x100000 - 0x1000, 1)); // below base
-    try std.testing.expect(!st.free_pages(0x100000, 961)); // past the end
+    try std.testing.expect(!st.free_pages(0x100000, 32641)); // more than the whole span
+    try std.testing.expect(!st.free_pages(0x90000000, 1)); // above the span end
     try std.testing.expect(!st.free_pages(0x100000, 0)); // zero pages
     // Freeing pages that were never allocated frees nothing.
     try std.testing.expect(!st.free_pages(0x100000, 1));
-    try std.testing.expectEqual(@as(u64, 960), st.free_count);
+    try std.testing.expectEqual(@as(u64, 1152), st.free_count);
 }
 
 test "alloc: double free cannot inflate the free count" {
     var st = State{};
-    _ = st.init(make_view());
+    _ = st.init(make_view(), &.{});
     const a = st.alloc_pages(4) orelse return error.TestUnexpectedResult;
     try std.testing.expect(st.free_pages(a, 4));
-    try std.testing.expectEqual(@as(u64, 960), st.free_count);
+    try std.testing.expectEqual(@as(u64, 1152), st.free_count);
     // Second free of the same pages frees nothing and reports false.
     try std.testing.expect(!st.free_pages(a, 4));
-    try std.testing.expectEqual(@as(u64, 960), st.free_count);
+    try std.testing.expectEqual(@as(u64, 1152), st.free_count);
 }
 
 test "alloc: reserve atomically removes pages from the pool" {
     var st = State{};
-    _ = st.init(make_view());
+    _ = st.init(make_view(), &.{});
     try std.testing.expect(st.reserve(0x100000, 4));
-    try std.testing.expectEqual(@as(u64, 956), st.free_count);
+    try std.testing.expectEqual(@as(u64, 1148), st.free_count);
     try std.testing.expect(!st.reserve(0x100000, 4)); // already reserved
-    try std.testing.expectEqual(@as(u64, 956), st.free_count); // atomic: unchanged
+    try std.testing.expectEqual(@as(u64, 1148), st.free_count); // atomic: unchanged
     // The reserved run is not allocatable; the next run is after it.
     const a = st.alloc_pages(4) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u64, 0x104000), a);
     try std.testing.expect(st.free_pages(0x100000, 4));
-    try std.testing.expectEqual(@as(u64, 956 + 4 - 4), st.free_count);
+    try std.testing.expectEqual(@as(u64, 1148), st.free_count);
 }
 
 test "alloc: largest_free_run reports the biggest contiguous run" {
     var st = State{};
-    _ = st.init(make_view());
+    _ = st.init(make_view(), &.{});
+    // The regions are not contiguous, so the biggest single run is the
+    // 960-page conventional region.
     try std.testing.expectEqual(@as(u64, 960), st.largest_free_run());
     const a = st.alloc_pages(300) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u64, 660), st.largest_free_run());
@@ -460,13 +558,13 @@ test "alloc: largest_free_run reports the biggest contiguous run" {
 
 test "alloc: init is resettable (a second map rebuilds the pool)" {
     var st = State{};
-    _ = st.init(make_view());
+    _ = st.init(make_view(), &.{});
     const a = st.alloc_pages(1) orelse return error.TestUnexpectedResult;
     _ = a;
-    try std.testing.expectEqual(@as(u64, 959), st.free_count);
-    // Re-init with the same map resets the bitmap: all 960 pages free again.
-    try std.testing.expect(st.init(make_view()));
-    try std.testing.expectEqual(@as(u64, 960), st.free_count);
+    try std.testing.expectEqual(@as(u64, 1151), st.free_count);
+    // Re-init with the same map resets the bitmap: all 1152 pages free again.
+    try std.testing.expect(st.init(make_view(), &.{}));
+    try std.testing.expectEqual(@as(u64, 1152), st.free_count);
     try std.testing.expect(st.alloc_pages(1) != null);
 }
 
@@ -478,7 +576,7 @@ test "alloc: regions beyond the 4 GiB bitmap span are untracked" {
     };
     const view = memmap.MapView.init(std.mem.asBytes(&far), @sizeOf(memmap.MemoryDescriptor), far.len);
     var st = State{};
-    _ = st.init(view);
+    _ = st.init(view, &.{});
     try std.testing.expectEqual(@as(u64, 4), st.total_pages);
     const a = st.alloc_pages(4) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u64, 0x100000), a);
@@ -498,8 +596,114 @@ test "alloc: more than max_regions pools the first max_regions in map order" {
     }
     const view = memmap.MapView.init(std.mem.asBytes(&many), @sizeOf(memmap.MemoryDescriptor), many.len);
     var st = State{};
-    _ = st.init(view);
+    _ = st.init(view, &.{});
     try std.testing.expectEqual(@as(usize, max_regions), st.region_count);
     try std.testing.expectEqual(@as(u64, max_regions * 2), st.total_pages);
     try std.testing.expectEqual(@as(u64, max_regions * 2), st.free_count);
+}
+
+test "alloc: exclusions protect pooled pages and reduce free" {
+    var st = State{};
+    // Exclude the first 4 pages of the loader region (0x7000000..0x703fff).
+    const exclusions = [_]Exclusion{.{ .base = 0x7000000, .pages = 4 }};
+    try std.testing.expect(st.init(make_view(), &exclusions));
+    const s = st.stats();
+    try std.testing.expectEqual(@as(u64, 1152), s.total_pages);
+    try std.testing.expectEqual(@as(u64, 1148), s.free_pages);
+    try std.testing.expectEqual(@as(u64, 4), s.excluded_pages);
+    // Conventional first, then the loader minus its excluded head (the
+    // first free loader page is 0x7004000 because 0x7000000..0x7003fff is
+    // excluded).
+    try std.testing.expectEqual(@as(u64, 0x100000), (st.alloc_pages(960) orelse return error.TestUnexpectedResult));
+    try std.testing.expectEqual(@as(u64, 0x7004000), (st.alloc_pages(60) orelse return error.TestUnexpectedResult));
+    // An alloc that would need the excluded head must not land there.
+    const b = st.alloc_pages(64) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 0x8000000), b); // boot region, never 0x7000000
+    try std.testing.expectEqual(@as(u64, 128 - 64), st.free_count);
+    try std.testing.expect(st.free_pages(0x100000, 960));
+    try std.testing.expect(st.free_pages(0x704000, 60));
+    try std.testing.expect(st.free_pages(0x8000000, 64));
+    try std.testing.expectEqual(@as(u64, 1148), st.free_count);
+}
+
+test "alloc: exclusions over gaps are no-ops" {
+    var st = State{};
+    // 0x1000000..0x100ffff is the mmio gap — not pooled, so excluding it
+    // must change nothing (its bits were already set).
+    const exclusions = [_]Exclusion{.{ .base = 0x1000000, .pages = 16 }};
+    try std.testing.expect(st.init(make_view(), &exclusions));
+    const s = st.stats();
+    try std.testing.expectEqual(@as(u64, 1152), s.total_pages);
+    try std.testing.expectEqual(@as(u64, 1152), s.free_pages);
+    try std.testing.expectEqual(@as(u64, 0), s.excluded_pages);
+}
+
+test "alloc: exclusions outside the span are ignored" {
+    var st = State{};
+    // Above the span end (0x8080000) and below the base (0x100000).
+    const exclusions = [_]Exclusion{
+        .{ .base = 0x90000000, .pages = 8 },
+        .{ .base = 0x0, .pages = 4 },
+    };
+    try std.testing.expect(st.init(make_view(), &exclusions));
+    const s = st.stats();
+    try std.testing.expectEqual(@as(u64, 1152), s.total_pages);
+    try std.testing.expectEqual(@as(u64, 1152), s.free_pages);
+    try std.testing.expectEqual(@as(u64, 0), s.excluded_pages);
+}
+
+test "alloc: an exclusion covering a whole pooled region empties it" {
+    var st = State{};
+    const exclusions = [_]Exclusion{.{ .base = 0x7000000, .pages = 64 }};
+    try std.testing.expect(st.init(make_view(), &exclusions));
+    const s = st.stats();
+    try std.testing.expectEqual(@as(u64, 1088), s.free_pages);
+    try std.testing.expectEqual(@as(u64, 64), s.excluded_pages);
+    try std.testing.expectEqual(@as(u64, 0x100000), (st.alloc_pages(960) orelse return error.TestUnexpectedResult));
+    try std.testing.expectEqual(@as(u64, 0x8000000), (st.alloc_pages(128) orelse return error.TestUnexpectedResult));
+    try std.testing.expect(st.alloc_pages(1) == null); // loader region is gone
+}
+
+test "alloc: an exclusion can span two regions and the gap between them" {
+    var st = State{};
+    // Covers the loader tail (last 8 pages: 0x7038000..0x703ffff), the gap,
+    // and the boot head (first 2 pages: 0x8000000..0x8001fff).
+    const exclusions = [_]Exclusion{.{ .base = 0x7038000, .pages = (0x8002000 - 0x7038000) / page_size }};
+    try std.testing.expect(st.init(make_view(), &exclusions));
+    const s = st.stats();
+    try std.testing.expectEqual(@as(u64, 10), s.excluded_pages);
+    try std.testing.expectEqual(@as(u64, 1142), s.free_pages);
+    try std.testing.expectEqual(@as(u64, 0x100000), (st.alloc_pages(960) orelse return error.TestUnexpectedResult));
+    // Loader has 56 usable pages left (its tail is excluded).
+    try std.testing.expectEqual(@as(u64, 0x7000000), (st.alloc_pages(56) orelse return error.TestUnexpectedResult));
+    // Boot has 126 usable pages (its head is excluded).
+    try std.testing.expectEqual(@as(u64, 0x8002000), (st.alloc_pages(126) orelse return error.TestUnexpectedResult));
+    try std.testing.expect(st.alloc_pages(1) == null);
+}
+
+test "alloc: exclusion_from_bytes rounds base down and size up" {
+    // Aligned base, exact page.
+    var ex = exclusion_from_bytes(0x100000, 0x1000);
+    try std.testing.expectEqual(@as(u64, 0x100000), ex.base);
+    try std.testing.expectEqual(@as(u64, 1), ex.pages);
+    // Unaligned base + sub-page size protects the whole containing page(s).
+    ex = exclusion_from_bytes(0x100001, 0x1000);
+    try std.testing.expectEqual(@as(u64, 0x100000), ex.base);
+    try std.testing.expectEqual(@as(u64, 2), ex.pages);
+    // Zero bytes is a no-op.
+    ex = exclusion_from_bytes(0x100000, 0);
+    try std.testing.expectEqual(@as(u64, 0), ex.pages);
+}
+
+test "alloc: init with exclusions is resettable" {
+    var st = State{};
+    const first = [_]Exclusion{.{ .base = 0x7000000, .pages = 64 }};
+    try std.testing.expect(st.init(make_view(), &first));
+    try std.testing.expectEqual(@as(u64, 64), st.stats().excluded_pages);
+    // Re-init with different exclusions rebuilds the pool from scratch.
+    const second = [_]Exclusion{.{ .base = 0x8000000, .pages = 8 }};
+    try std.testing.expect(st.init(make_view(), &second));
+    const s = st.stats();
+    try std.testing.expectEqual(@as(u64, 8), s.excluded_pages);
+    try std.testing.expectEqual(@as(u64, 1144), s.free_pages);
 }

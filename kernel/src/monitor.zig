@@ -655,7 +655,7 @@ fn cmd_pages(m: *Monitor, args: []const []const u8) ExecError {
         if (args.len == 1) {
             m.console.print_line("pages selftest: allocator not armed");
         } else {
-            m.console.print_line("pages: allocator not armed (no conventional memory in span)");
+            m.console.print_line("pages: allocator not armed (no poolable memory in span)");
         }
         return .none;
     }
@@ -664,6 +664,8 @@ fn cmd_pages(m: *Monitor, args: []const []const u8) ExecError {
     m.console.print_hex(s.total_pages);
     m.console.puts(" free=");
     m.console.print_hex(s.free_pages);
+    m.console.puts(" excluded=");
+    m.console.print_hex(s.excluded_pages);
     m.console.puts(" regions=");
     m.console.print_hex(@intCast(s.region_count));
     m.console.puts(" span=");
@@ -681,6 +683,7 @@ fn cmd_pages(m: *Monitor, args: []const []const u8) ExecError {
 /// whole pool (which need not be contiguous).
 fn pages_selftest(m: *Monitor, s: alloc.Stats) ExecError {
     const total = s.total_pages;
+    const initial_free = s.free_pages;
     var failed = false;
     if (pages_alloc_line(m, 1)) |base| failed = failed or !pages_free_line(m, base, 1, "free");
     if (pages_alloc_line(m, 8)) |base| failed = failed or !pages_free_line(m, base, 8, "free");
@@ -699,7 +702,9 @@ fn pages_selftest(m: *Monitor, s: alloc.Stats) ExecError {
     // Allocating one more than the whole pool must fail.
     if (pages_alloc_line(m, total + 1) != null) failed = true;
     const after = alloc.stats();
-    const restored = after.free_pages == after.total_pages and after.free_pages == total;
+    // The pool is "restored" when free is back to where the battery found
+    // it (with exclusions, free < total by design — claim 5162).
+    const restored = after.free_pages == initial_free;
     m.console.puts("pages selftest: ");
     m.console.puts(if (failed or !restored) "FAILED" else "ok");
     m.console.puts(" free=");

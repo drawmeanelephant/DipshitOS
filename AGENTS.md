@@ -14,10 +14,13 @@ These rules bind any AI agent or human contributor working in this project.
 
 ## Current milestone
 
-Milestones zero, one, and two are implemented (milestone two's VZ serial
-gate passes since 2026-08-08, claim 1517). The current milestone is
-**1.5 — the interactive kernel monitor** (`dipshit>` shell on the kernel's
-serial console).
+Milestones zero, one, two, and 1.5 are implemented (1.5 — the interactive
+kernel monitor — closed and tagged `m1.5-interactive-monitor` on
+2026-08-09; milestone two's VZ serial gate passes since 2026-08-08, claim
+1517). The current stream is **milestone three's first cards**: the
+physical page allocator is done (claims 3972/5162), GIC + timer interrupts
+are programmed but IRQ delivery is blocked on VZ (claim 7948), and tasks
+come after interrupts.
 `docs/status.md` is the canonical, always-current answer to "where are we,
 and what's next".
 
