@@ -14,8 +14,9 @@ Every verification command belongs to exactly one class (canonical inventory:
   This is the set GitHub CI proves. A green CI badge means exactly these
   passed — nothing more.
 - **B — Apple-silicon Virtualization.framework hardware gate.** Boots a real
-  VZ VM on Apple silicon. GitHub-hosted CI does **not** run these and cannot
-  prove them; run `just verify-vz` on a development host.
+  VZ VM on Apple silicon (macOS 27+ — the project's required host).
+  GitHub-hosted CI does **not** run these and cannot prove them; run
+  `just verify-vz` on a development host.
 - **C — interactive / manual hardware gate.** Requires a human at the
   keyboard (`zig build console`).
 - **D — diagnostic experiment.** Answers a question (claims

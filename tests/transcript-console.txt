@@ -16,6 +16,7 @@ available commands:
   ls        list files on the ESP
   mem       summarize the EFI memory map
   pages     physical page allocator pool
+  pci       enumerate PCI devices on the bus
   reboot    restart the machine
   repeat    repeat text, safely bounded
   shutdown  request power-off

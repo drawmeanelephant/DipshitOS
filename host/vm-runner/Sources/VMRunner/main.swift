@@ -3,7 +3,15 @@
 // Usage: VMRunner <disk-image> [serial-log] [--screen <png>]
 //         [--timeout <s>] [--expect <line>] [--terminal-marker <line>]
 //         [--console] [--debug-input] [--dump-marker <file>]
-//         [--nvram-console <file>]
+//         [--nvram-console <file>] [--custom-virtio]
+//
+// * --custom-virtio (macOS 27 spike, audit step 3): attaches one
+//   default-off VZCustomVirtioDeviceConfiguration so the guest's PCI
+//   discovery can observe it on a real VZ boot (VID 0x1af4, DID 0x1082,
+//   class 0x00/0x00, 1 queue). Without the flag the VM configuration is
+//   byte-identical to before — all existing gates are unchanged. NOTE:
+//   Xcode 27 beta 4 exposes no host-triggered guest-interrupt API; this
+//   spike proves discovery + queue transport only.
 //
 // * --nvram-console <file> (M1.5 VZ serial-gate successor, claim 0015):
 //   before exiting, reconstruct the kernel's post-exit console stream from
@@ -87,6 +95,7 @@ var markerDumpPath: String?
 var nvramConsolePath: String?
 var scriptPath: String?
 var scriptExpect: String?
+var customVirtioEnabled = false
 
 var idx = 2
 while idx < arguments.count {
@@ -122,6 +131,9 @@ while idx < arguments.count {
     } else if arg == "--script-expect", idx + 1 < arguments.count {
         scriptExpect = arguments[idx + 1]
         idx += 2
+    } else if arg == "--custom-virtio" {
+        customVirtioEnabled = true
+        idx += 1
     } else {
         serialLogPath = arg
         idx += 1
@@ -206,8 +218,11 @@ guard hostArchitecture() == "arm64" else {
     fail("Unsupported host architecture '\(hostArchitecture())' -- Apple silicon is required.")
 }
 let osVersion = ProcessInfo.processInfo.operatingSystemVersion
-guard osVersion.majorVersion >= 13 else {
-    fail("macOS \(osVersion.majorVersion) is too old for Virtualization.framework UEFI boot.")
+// Project requirement: macOS 27+ (Apple silicon + Virtualization.framework).
+// macOS 27 is the floor — the host-side custom-virtio interrupt path
+// (VZCustomVirtioDevice) and the project's SDK/toolchain target assume it.
+guard osVersion.majorVersion >= 27 else {
+    fail("macOS \(osVersion.majorVersion) is too old — this project requires macOS 27 or newer (Apple silicon + Virtualization.framework).")
 }
 
 let diskURL = URL(fileURLWithPath: diskImagePath)
@@ -296,6 +311,9 @@ if screenshotPath != nil {
     config.graphicsDevices = []
 }
 config.networkDevices = []
+if customVirtioEnabled {
+    print(CustomVirtioSpike.attach(to: config))
+}
 do { try config.validate() } catch { fail("Invalid VM configuration: \(error)") }
 
 final class Runner: NSObject {
@@ -898,3 +916,87 @@ if consoleMode {
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { poll() }
 }
 RunLoop.main.run()
+
+// ---------------------------------------------------------------------------
+// macOS 27 spike (capability-audit step 3): one default-off custom virtio
+// device, so the guest's PCI discovery can observe it on a real VZ boot.
+//
+// Device identity (guest-facing): virtio-pci VID 0x1af4, DID = 0x1040 | 0x42
+// = 0x1082 — distinct from the console's DID 0x1043 (claim 0013) and blk's
+// 0x1042 (claim 6420). PCI class 0x00 / subclass 0x00, one virtqueue.
+//
+// SDK reality (Xcode 27 beta 4, macOS 27.0): the framework exposes NO
+// host-triggered guest-interrupt API — the WWDC26 "trigger an interrupt on
+// the device" claim has no public symbol; the word "interrupt" appears in
+// exactly one framework header (a POSIX EINTR param). The only host->guest
+// signaling is the framework-internal used-buffer notification when queue
+// elements are returned via VZVirtioQueueElement.returnToQueue. This spike
+// is discovery + transport evidence only; the DRIVER_OK / queue-notification
+// logs below give the audit its step-4 hooks for free.
+// ---------------------------------------------------------------------------
+
+enum CustomVirtioSpike {
+    /// Virtio device ID; PCI DID presented to the guest = 0x1040 | deviceID.
+    static let deviceID: UInt16 = 0x42
+    static let pciClass: UInt8 = 0x00
+    static let pciSubclass: UInt8 = 0x00
+    static let queueCount: UInt16 = 1
+
+    // The provider holds the configuration delegate *weakly* and the created
+    // VZCustomVirtioDevice holds the device delegate *weakly* too, so both
+    // delegates must be kept alive for the VM's whole lifetime or the device
+    // silently goes deaf. Static stored properties live forever.
+    static let configDelegate = CustomVirtioSpikeConfigDelegate()
+    static let deviceDelegate = CustomVirtioSpikeDeviceDelegate()
+
+    static func attach(to config: VZVirtualMachineConfiguration) -> String {
+        let provider = VZCustomVirtioDeviceDelegateProvider(
+            deviceQueue: DispatchQueue(label: "dipshitos.customvirtio"),
+            delegate: configDelegate
+        )
+
+        let deviceConfig = VZCustomVirtioDeviceConfiguration()
+        deviceConfig.deviceID = deviceID
+        deviceConfig.pciClassID = pciClass
+        deviceConfig.pciSubclassID = pciSubclass
+        deviceConfig.virtioQueueCount = queueCount
+        deviceConfig.provider = provider
+
+        config.customVirtioDevices = [deviceConfig]
+
+        let did = 0x1040 + Int(deviceID)  // virtio transitional PCI DID = 0x1040 + device_id (add, not OR)
+        return String(
+            format: "  custom virtio: ENABLED — VID 0x1af4 DID 0x%04x (virtio deviceID 0x%02x), class 0x%02x/0x%02x, %d queue(s); guest PCI discovery evidence (spike)",
+            did, Int(deviceID), Int(pciClass), Int(pciSubclass), Int(queueCount)
+        )
+    }
+}
+
+/// Receives the created device and wires the device delegate. Called on the
+/// VM's serial queue when VZVirtualMachine is created.
+final class CustomVirtioSpikeConfigDelegate: NSObject, VZCustomVirtioDeviceConfigurationDelegate {
+    func customVirtioConfiguration(_ deviceConfiguration: VZCustomVirtioDeviceConfiguration, didCreateDevice device: VZCustomVirtioDevice) {
+        print("CUSTOM-VIRTIO: device created (didCreateDevice)")
+        device.delegate = CustomVirtioSpike.deviceDelegate
+    }
+}
+
+/// Device lifecycle + guest-driver evidence. Every method here is optional in
+/// the protocol; only the ones the spike needs are implemented.
+final class CustomVirtioSpikeDeviceDelegate: NSObject, VZCustomVirtioDeviceDelegate {
+    func customVirtioDeviceDidAcceptDriverOk(_ device: VZCustomVirtioDevice) {
+        print("CUSTOM-VIRTIO: guest set DRIVER_OK — negotiation complete, queues ready")
+    }
+
+    func customVirtioDevice(_ device: VZCustomVirtioDevice, didReceiveNotificationFor queue: VZVirtioQueue) {
+        print("CUSTOM-VIRTIO: guest notified queue \(queue.queueIndex) (size \(queue.queueSize))")
+    }
+
+    func customVirtioDeviceWillReset(_ device: VZCustomVirtioDevice) {
+        print("CUSTOM-VIRTIO: device reset")
+    }
+
+    func customVirtioDeviceWillStop(_ device: VZCustomVirtioDevice) {
+        print("CUSTOM-VIRTIO: device stopped")
+    }
+}

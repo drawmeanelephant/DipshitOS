@@ -7,8 +7,8 @@
 
 A tiny AArch64 UEFI application, written in Zig, is built, placed at
 `EFI/BOOT/BOOTAA64.EFI` on a FAT32 ESP inside a GPT image, and booted under
-UEFI by the Swift Virtualization.framework launcher (Apple silicon only;
-there is no QEMU path in this project). The application prints
+UEFI by the Swift Virtualization.framework launcher (Apple silicon running
+macOS 27 or newer only; there is no QEMU path in this project). The application prints
 
 ```
 DIPSHITOS BOOTLOADER
@@ -67,8 +67,9 @@ byte-identical across runs, and `zig build run` **gates** on its content
 
 Design: `docs/decisions/0004-kernel-proper.md` (ADR 0004), with the
 implementation design and review in `docs/m2-kernel-proper-design.md`.
-Apple Virtualization.framework is the only supported host; there is no QEMU
-path. The guest stays freestanding Zig — no libc, no POSIX.
+Apple Virtualization.framework is the only supported host (Apple silicon,
+macOS 27+); there is no QEMU path. The guest stays freestanding Zig — no
+libc, no POSIX.
 
 **Implemented; all milestone-two gates pass (2026-08-08, claim 1517):**
 build gates, the bad-handoff failure gate, the ADR 0004 D4 marker-fallback

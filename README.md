@@ -4,7 +4,8 @@
 
 A from-scratch AArch64 operating system that boots under real UEFI firmware
 on **Apple silicon**, hosted by **Apple's Virtualization.framework**
-(macOS). It is **not Linux, not Unix, and not QEMU-based**: no libc, no
+(macOS **27 or newer** — the project's required host). It is **not Linux,
+not Unix, and not QEMU-based**: no libc, no
 POSIX, no existing guest OS, and no emulator anywhere in the boot path.
 Guest code is written in Zig; the host launcher is Swift. See `AGENTS.md`
 for the project rules.
@@ -48,7 +49,7 @@ serial console: identity commands, memory-map inspection, shell utilities,
 machine controls, and an ESP file window. The host plumbing (duplex
 serial, terminal handling, `zig build console`), console & shell core (RX
 abstraction, line editor, tokenizer, prompt loop), and command registry
-(20 commands, mock-tested) are built; the transcript test gate passes
+(21 commands, mock-tested) are built; the transcript test gate passes
 (`zig build test-console`, byte-identical fixture). The **VZ serial gate
 passes** (claim 1517 — post-MMU virtio TX fixed with T0SZ=16 + `tlbi
 vmalle1` at the switch), **live RX** delivers host keystrokes end to end
@@ -89,8 +90,8 @@ the interactive monitor (`kernel/src/{console,lineedit,tokenizer,shell,monitor}.
 
 Pinned in `.zigversion`: **Zig 0.16.0**. The build system is written against
 that release (see `docs/decisions/0001-arm64-uefi-zig.md` for the API
-adjustments). Other tools used at build/run time: Swift (macOS 13+, Apple silicon, for the Virtualization path), Python 3
-(disk image tooling), `bash`. The project targets Apple silicon /
+adjustments). Other tools used at build/run time: Swift (macOS 27+, Apple silicon, for the Virtualization path), Python 3
+(disk image tooling), `bash`. The project targets Apple silicon / macOS 27+ /
 Virtualization.framework only — there is no QEMU path.
 
 ## Quickstart

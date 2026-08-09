@@ -190,6 +190,18 @@ pub fn build(b: *std.Build) void {
     run.stdio = .inherit;
     run_step.dependOn(&run.step);
 
+    // macOS 27 spike (capability-audit step 3): boot with one custom virtio
+    // device attached (--custom-virtio) so the guest's PCI discovery can
+    // observe it on a real VZ boot. The runner prints the host-side
+    // CUSTOM-VIRTIO evidence to stdout; guest-side discovery evidence still
+    // needs a kernel PCI dump (the audit's next slice).
+    const spike_virtio_step = b.step("spike-virtio", "Boot the disk image with the custom virtio spike device attached (macOS 27 capability-audit step 3; class B; Apple silicon only)");
+    const spike_virtio = b.addSystemCommand(&.{ "bash", "-c", spike_virtio_vm_command });
+    spike_virtio.step.dependOn(&image.step);
+    spike_virtio.has_side_effects = true;
+    spike_virtio.stdio = .inherit;
+    spike_virtio_step.dependOn(&spike_virtio.step);
+
     const console_step = b.step("console", "Boot the disk image and open an interactive host serial console (class C — interactive/manual hardware gate; Apple silicon only)");
     const console = b.addSystemCommand(&.{ "bash", "-c", console_vm_command });
     console.step.dependOn(&image.step);
@@ -292,6 +304,24 @@ const run_vm_command =
     \\printf '%s' "$SERIAL" | grep -q "memory-map descriptors=0x" || { echo "kernel memory-map print missing from vm-serial.log"; exit 1; }
     \\printf '%s' "$SERIAL" | grep -q "kernel terminal state" || { echo "kernel terminal state missing from vm-serial.log"; exit 1; }
     \\echo "run: milestone-two takeover observed (serial banner, memory-map view, terminal state)"
+;
+
+const spike_virtio_vm_command =
+    \\set -e
+    \\swift build --package-path host/vm-runner --configuration release
+    \\# Recent macOS requires the com.apple.security.virtualization entitlement;
+    \\# ad-hoc codesign the binary with it before running.
+    \\codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
+    \\# macOS 27 spike: same evidence path as `run` but with the custom virtio
+    \\# device attached (DID 0x1082). The host-side CUSTOM-VIRTIO logs (device
+    \\# created / DRIVER_OK / queue notifications) print to stdout; the serial
+    \\# gate asserts the kernel still reaches terminal state with the device
+    \\# present.
+    \\host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-spike.log --custom-virtio --expect "DipshitOS kernel has seized control." --terminal-marker "kernel terminal state"
+    \\echo
+    \\echo "=== spike serial log ==="
+    \\cat artifacts/vm-spike.log 2>/dev/null || echo "(no serial output)"
+    \\echo "spike-virtio: boot with the custom virtio device attached (host evidence above; guest PCI discovery evidence needs a kernel-side dump)"
 ;
 
 // M1.5 host plumbing: `zig build console` boots the image and opens an

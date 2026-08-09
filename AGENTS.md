@@ -5,7 +5,7 @@ These rules bind any AI agent or human contributor working in this project.
 ## Project identity
 
 - This is a from-scratch AArch64 operating system project.
-- It runs on Apple silicon (macOS), hosted by Apple's
+- It runs on Apple silicon running macOS 27 or newer, hosted by Apple's
   Virtualization.framework. It is **not Linux, not Unix, and not QEMU**:
   no emulator, no libc, no POSIX, and no existing guest OS anywhere in the
   boot path.
