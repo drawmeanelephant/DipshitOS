@@ -295,20 +295,11 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
     mmu.install_identity_map();
     evidence.set_marker(marker_mmu);
     evidence.write_marker_var(st, marker_mmu);
-    // Claim 7896 (6460 follow-up, class D, build-gated): with
-    // -Dtlbi-after-switch, drop the no-TLBI crutch immediately after the
-    // switch — the next access must re-walk the installed tables. At
-    // T0SZ=25 (walk starts at level 1 over the L0-rooted tables) that first
-    // re-walk faults deterministically (claim-0010's M2_TTBR! death); at
-    // T0SZ=16 it resolves. Then, with -Dwalk-probe, run the cold-address
-    // probe battery so the ladder names the first address that does not
-    // resolve. Both default off; default builds are byte-identical (the
-    // ADR 0006 no-TLBI contract is unchanged).
-    if (comptime build_options.tlbi_after_switch) {
-        asm volatile ("tlbi vmalle1" ::: .{ .memory = true });
-        asm volatile ("dsb ish" ::: .{ .memory = true });
-        asm volatile ("isb");
-    }
+    // Claim 1517: the TLBI is now executed inside install_identity_map()
+    // (corrected start level T0SZ=16 + full invalidation at the switch —
+    // the ADR-0006 no-TLBI debt is paid). With -Dwalk-probe (class D,
+    // default off), run the cold-address probe battery so the ladder names
+    // the first address that does not resolve.
     if (comptime build_options.walk_probe) walkprobe.run(st);
     // Claim 0020 phase C: the FIRST MMIO access to the transport after the
     // identity-map switch, before the post-switch probe (M2_RAW!) or any
@@ -646,12 +637,12 @@ fn print_pre_exit_error(st: *const SystemTable, msg: []const u8) void {
 // Additive section; the takeover path above is byte-identical.
 // ===========================================================================
 
-/// Console adapter over the polled TX uart. `readByte`/`rx_wired` are
-/// [inferred] stubs: live RX reads are gated on the VZ serial gate
-/// (claim 0002, unpassed) and are NOT implemented in this slice — no
-/// device register is touched by the input path. The shell loop's
-/// correctness is proven against a scripted MockConsole in
-/// `kernel/src/shell.zig` instead.
+/// Console adapter over the polled TX uart. `readByte`/`rx_wired` dispatch
+/// to the live virtio receive queue when the console is the virtio device
+/// (claim 6684; the shell loop's correctness is also proven against a
+/// scripted MockConsole in `kernel/src/shell.zig`). For the PL011/16550
+/// fallback consoles RX stays an unimplemented null stub — no device
+/// register is read on that path.
 const M15Console = struct {
     const Self = @This();
 
@@ -710,8 +701,10 @@ const M15Console = struct {
             nvram_console.flush();
             return null;
         }
-        // [inferred] No RX path yet: reading the real device registers is
-        // gated on claim 0002. The shell sees no input and parks.
+        // Claim 6684: live RX through the polled virtio receive queue
+        // (queue 0). Runs whenever the console is the virtio device — post-MMU
+        // the transport is reachable (claim 1517). Never blocks.
+        if (console_kind == .virtio) return virtio_console.virtio_read_byte();
         return null;
     }
 
@@ -719,13 +712,15 @@ const M15Console = struct {
         return .{ .ctx = self, .vtable = ensure_vtable() };
     }
 
-    /// [inferred] In default builds no RX source is wired (the VZ serial
-    /// gate is unpassed), so the shell prints banner + prompt and the
-    /// kernel parks in WFE. In nvram-console builds the scripted session
-    /// counts as a wired input source, so the loop runs to completion.
+    /// True when an input source is wired so the shell loop runs instead
+    /// of parking. Nvram-console builds run the scripted session; default
+    /// builds run the live loop when the virtio receive queue is armed
+    /// (claim 6684). Otherwise the shell prints banner + prompt and the
+    /// kernel parks.
     fn rx_wired(self: *Self) bool {
         _ = self;
-        return comptime build_options.nvram_console;
+        if (comptime build_options.nvram_console) return true;
+        return console_kind == .virtio and virtio_console.rx_armed();
     }
 };
 

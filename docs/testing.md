@@ -57,9 +57,10 @@ Every verification command belongs to exactly one class (canonical inventory:
     `memory-map descriptors=0x...` line, and `kernel terminal state`. The
     pre-exit loader marker `\\BOOTED.TXT` remains required. `RC.TXT` is
     expected only for a deliberate pre-exit failure fixture, not success.
-    **Currently not passed** — the VZ serial gate stays open (post-MMU
-    access to the virtio-pci console transport hangs on VZ — the MMU switch
-    destroys access, claim 0020; see `docs/status.md`).
+    **Passing since 2026-08-08 (claim 1517)** — the post-MMU virtio TX
+    blocker (translation start-level mismatch, claims 6460/7896) is fixed
+    in production (T0SZ=16 + `tlbi vmalle1` at the switch); see
+    `docs/status.md` for gate state.
 11. Run the pre-exit failure-path gate:
     `bash tools/verify-bad-handoff.sh` (also `just verify-bad-handoff`) —
     boots a bad-magic fixture and asserts the loader's `RC.TXT` reads
@@ -121,6 +122,14 @@ Every verification command belongs to exactly one class (canonical inventory:
     tools/status/test-coordination.sh` (also `just test-coordination` and
     CI) — positive/negative cases for cell escaping, structural table
     validation, and deterministic claim IDs, run in a throwaway sandbox.
+19. Run the live RX / transcript gate (class B, claim 6684):
+    `bash tools/verify-live-transcript.sh` (also `just
+    verify-live-transcript`) — boots the production image, forwards
+    scripted keystrokes (`help`/`version`/`mem`/`echo`) into the guest's
+    virtio receive queue after the takeover, and asserts the live
+    `dipshit>` transcript (banner, echoed commands, command output, echo
+    reply) in `vm-serial.log`. **Passing 2026-08-08** (3/3 boots,
+    byte-identical transcripts; evidence `artifacts/live-transcript-*`).
 
 > The full class-A (portable, no-VM) gate set runs as `just verify-portable`
 > (legacy alias `just verify`) and in CI (`.github/workflows/ci.yml`): fmt →
@@ -128,11 +137,11 @@ Every verification command belongs to exactly one class (canonical inventory:
 > runner build → context → coordination → coordination tooling tests.
 > **CI proves only this class** — a green badge says nothing about the
 > Apple-silicon VZ hardware gates (class B). Those run as `just verify-vz`
-> (bad-handoff, marker, NVRAM console, host-console — Apple silicon only)
-> plus the blocked `zig build run` serial takeover gate and the deferred
-> live transcript/RX gate; the class-D diagnostics (preexit-tx, tx-diag,
-> tx-transition, fw-mmu-capture, t0sz16, tlbi-after-switch, walk-probe,
-> t0sz16-walkprobe) run individually per claim. See
+> (serial takeover `zig build run`, bad-handoff, marker, NVRAM console,
+> host-console, live transcript/RX `verify-live-transcript.sh` — Apple
+> silicon only); the class-D diagnostics (preexit-tx, tx-diag,
+> tx-transition, fw-mmu-capture, t0sz25, walk-probe, t0sz16-walkprobe)
+> run individually per claim. See
 > [`docs/gate-inventory.md`](gate-inventory.md).
 
 ## Evidence artifacts
@@ -177,9 +186,13 @@ Every verification command belongs to exactly one class (canonical inventory:
       `\BOOTED.TXT` on the ESP)
 - [x] Milestone one remains covered by the historical evidence in
       `artifacts/m1-fix-run{1,2,3}.txt`.
-- [ ] Milestone two VZ serial/MMU takeover gate: **not passed** — and the
-      blocker is now isolated. Every directly observed Apple M4 / macOS 27
-      run still produces no banner, map print, probe log, or terminal
+- [x] Milestone two VZ serial/MMU takeover gate: **PASS 2026-08-08 (claim
+      1517)** — `zig build run` puts the banner, memory-map print, and
+      `kernel terminal state` in `vm-serial.log` (post-MMU virtio TX
+      fixed: T0SZ=16 + TLBI at the switch). Historical path (pre-fix):
+      the gate was **not passed** and the blocker was isolated. Every
+      directly observed Apple M4 / macOS 27
+      run produced no banner, map print, probe log, or terminal
       marker in `vm-serial.log`; no `RC.TXT` is produced (good path,
       expected). The early-post-exit-crash hypothesis is **closed**: claim
       0009's NVRAM ladder showed the death was in the MMU-takeover window
@@ -188,13 +201,16 @@ Every verification command belongs to exactly one class (canonical inventory:
       and the serial probe runs to completion, selecting no device in the
       declared windows (`M2_SERIA`; claim 0013 later decoded those windows
       as Apple's efivars store + an internal debug UART and found the real
-      console is a virtio-pci device outside them).
-      The remaining blocker is post-MMU access to that virtio-pci console
-      transport (claims 0018/0020), not a crash.
+      console is a virtio-pci device outside them). The post-MMU access
+      blocker (claims 0018/0020) was root-caused by claims 6460/7896
+      (translation start-level mismatch + stale-TLB crutch) and fixed in
+      production by claim 1517 (T0SZ=16 + TLBI at the switch); the serial
+      gate now passes.
       Evidence: `artifacts/m2-mmu-takeover-gate.txt`, `artifacts/m2-firmware-regs.txt`,
       `artifacts/m2-table-walk.txt`, `artifacts/m2-mmu-bisect-tlbi.txt`.
-      The console device itself is now observed (claim 0013); its register
-      layout stays `[inferred]` until a real console is driven.
+      The console device itself is observed (claim 0013); its register
+      layout stays `[inferred]` where RX is concerned until the RX path is
+      driven.
 - [x] Milestone two marker fallback gate (gate work item 3, claims
       0009/0010): **passing** (2026-08-07). Claim 0009's ladder
       discriminated the serial gate: every run ended at `M2_MAPD!` — the
@@ -208,9 +224,10 @@ Every verification command belongs to exactly one class (canonical inventory:
       found the real console is a virtio-pci device outside them;
       evidence: `artifacts/m2-mmu-takeover-gate.txt`,
       `artifacts/m2-firmware-regs.txt`, `artifacts/m2-table-walk.txt`,
-      `artifacts/m2-mmu-bisect-tlbi.txt`). The VZ serial gate's remaining
-      blocker is post-MMU access to the virtio-pci console transport,
-      not a crash.
+      `artifacts/m2-mmu-bisect-tlbi.txt`). The VZ serial gate's historical
+      blocker (post-MMU access to the virtio-pci console transport) is
+      resolved by claim 1517 (T0SZ=16 + TLBI at the switch); the gate now
+      passes.
 - [x] Milestone two bad-handoff failure gate: **passing** (fixed 2026-08-06,
       `agent/buffy/m2-badhandoff-fix`). Root cause was the naked `_start`
       shim's `bl kernel_main` overwriting the link register without
@@ -219,3 +236,14 @@ Every verification command belongs to exactly one class (canonical inventory:
       `verify-bad-handoff.sh` exits 0 and `RC.TXT` shows
       `kernel_rc=0x0000000000000002`. Evidence:
       `artifacts/m2-badhandoff-fix-{before,after,gates,goodpath}.txt`.
+- [x] M1.5 live RX / transcript gate (class B, claim 6684): **passing
+      (2026-08-08)** — `bash tools/verify-live-transcript.sh` boots the
+      production image, forwards scripted keystrokes (`help`/`version`/
+      `mem`/`echo rx-live-ok`) into the guest's polled virtio receive
+      queue after the takeover terminal state, and asserts the live
+      `dipshit>` transcript in `vm-serial.log` — banner, echoed keystrokes,
+      `available commands:`, `dipshit-kernel` version output, `mem:` map
+      summary, and the `rx-live-ok` echo reply. 3/3 boots, byte-identical
+      4421-byte transcripts. Evidence: `artifacts/live-transcript-*`
+      (`live-transcript-gate.txt`, `live-transcript-report.txt`,
+      `live-transcript-run-<NN>.txt`, `live-transcript-serial-<NN>.log`).

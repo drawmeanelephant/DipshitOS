@@ -1,21 +1,20 @@
 //! Claim 7896 (claim-6460 follow-up) class-D diagnostic: post-switch
-//! walk-validity probe battery. After `install_identity_map()` — and, in
-//! `-Dtlbi-after-switch` builds, after a full TLB invalidation — read a
+//! walk-validity probe battery. After `install_identity_map()` (which since
+//! claim 1517 always ends with the full `tlbi vmalle1` invalidation) read a
 //! battery of sentinel addresses with volatile loads, each bracketed by an
 //! NVRAM marker, to test whether the installed translation tables actually
 //! resolve under the programmed T0SZ and to NAME the first address whose
 //! walk (or MMIO read) does not return.
 //!
 //! Why this separates the start-level mismatch from the residual hang: at
-//! T0SZ=25 (W=39) the 4 KiB stage-1 walk starts at level 1, but the built
-//! tables are L0-rooted, so ANY fresh walk faults (ROOT[1..3] = 0 for
-//! VAs >= 1 GiB; misparsed descriptors below 1 GiB). The no-TLBI crutch
-//! (ADR 0006) hides this by riding stale firmware TLB entries.
-//! `-Dtlbi-after-switch` removes the crutch: the first post-switch access
-//! must re-walk, so a T0SZ=25 build faults deterministically right after
-//! the switch, while a T0SZ=16 build (walk starts at level 0, matching the
-//! tables) passes the whole battery. Any hang that survives `-Dt0sz16` with
-//! an empty TLB is provably device/emulator-level, not translation.
+//! the legacy T0SZ=25 (W=39) the 4 KiB stage-1 walk starts at level 1, but
+//! the built tables are L0-rooted, so ANY fresh walk faults (ROOT[1..3] = 0
+//! for VAs >= 1 GiB; misparsed descriptors below 1 GiB). The old no-TLBI
+//! crutch (ADR 0006) hid this by riding stale firmware TLB entries; the
+//! production fix (claim 1517) executes the TLBI with the corrected start
+//! level T0SZ=16 (walk starts at level 0, matching the tables), so the
+//! battery passes. A `-Dt0sz25` build faults deterministically right after
+//! the switch (wp-depth 0).
 //!
 //! The battery is RAM-only plus the virtio BAR (a real device), so a read
 //! can never hang on an unbacked Device window: P1 is the kernel's own BSS

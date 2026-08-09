@@ -1,6 +1,21 @@
 # ADR 0006: The MMU debt boundary — the no-TLBI takeover is a contract, not a completed VM subsystem
 
-Status: **accepted** · Date: 2026-08-07 · Milestone: two (debt carried forward)
+Status: **accepted (superseded in part 2026-08-08, claim 1517)** · Date: 2026-08-07 · Milestone: two
+
+> **Claim-1517 supersession (2026-08-08): the no-TLBI crutch is PAID.** Claims
+> 6460 + 7896 proved on real VZ hardware that the no-TLBI survival was only
+> stale-firmware-TLB interference masking a real translation defect (the
+> L0-rooted tables were walked with a start-level mismatch: T0SZ=25/W=39
+> starts the 4 KiB stage-1 walk at level 1). Claim 1517 lands the production
+> fix: T0SZ=16 (correct start level, walk starts at level 0 matching the
+> built hierarchy) and `tlbi vmalle1; dsb ish; isb` at the switch — the
+> first post-switch access now deterministically re-walks correct tables
+> (cell B, claim 7896: 9/9 boots complete the whole post-MMU console path;
+> claim 1517: the `zig build run` serial gate passes). The **invalidation
+> list below remains binding** (descriptors still never change post-switch,
+> and any re-mapping milestone must revisit it); the no-TLBI *mechanism* and
+> its validity window are superseded — see the
+> [claim-1517 contract](#claim-1517-supersession-the-debt-is-paid).
 
 ## Context
 
@@ -156,3 +171,30 @@ management correctly (a dedicated claim; see the boundary statement):
 - "MMU takeover fixed" now means exactly: the identity map installs and the
   current milestone's accesses work — **not** that TLB invalidation,
   remapping, unmapping, or any general VM capability is proven.
+
+## Claim-1517 supersession — the debt is paid
+
+**2026-08-08 (claim 1517).** The no-TLBI validity window above is closed by
+landing the fix it was protecting against:
+
+- **Corrected start level.** Production `install_identity_map()` programs
+  T0SZ=16 (W=48) so the 4 KiB stage-1 walk starts at level 0, matching the
+  built L0-rooted hierarchy. (The old T0SZ=25/W=39 started at level 1 over
+  the same tables — the claim-6460/7896 start-level mismatch; `-Dt0sz25`
+  keeps reproducing it for class-D regression.)
+- **Full invalidation at the switch.** `tlbi vmalle1; dsb ish; isb` now
+  ends the switch, so the first post-switch access deterministically
+  re-walks the (correct, D-cache-cleaned) tables instead of riding stale
+  firmware TLB entries. This is what the old S1 condition forbade; it is
+  now safe because S2's "same effective attributes" half holds for real
+  (the walk resolves), not by luck.
+- **What is unchanged.** The tables are still built once, cleaned before the
+  switch, and never modified post-switch. The invalidation list in
+  [What invalidates the safety argument](#what-invalidates-the-safety-argument-binding-list)
+  remains binding for later milestones: re-mapping, unmapping, permission
+  changes, non-identity mappings, ASID work, and TCR/MAIR changes after the
+  switch must come with their own TLBI design and a regression gate.
+- **Evidence.** Claims 6460/7896 (class-D A/B + 4-cell matrix on real VZ
+  hardware) and claim 1517 (`zig build run` serial gate, `verify-marker`,
+  `verify-bad-handoff`, `verify-nvram-console` re-run green; artifacts
+  cited in the claim).

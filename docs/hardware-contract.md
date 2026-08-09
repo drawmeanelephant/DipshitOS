@@ -103,10 +103,10 @@ no QEMU path.
   byte-perfect and byte-identical across repeated boots (ADR 0002,
   `artifacts/m1-fix-run{1,2,3}.txt`).
 
-## Milestone two: the kernel proper (implemented, ADR 0004 — MMU/serial findings are **[observed]** per claims 0010/0013/0020/0021; the remaining items below stay **[inferred]**)
+## Milestone two: the kernel proper (implemented, ADR 0004 — MMU/serial findings are **[observed]** per claims 0010/0013/0020/0021/1517/6684; the remaining items below stay **[inferred]**)
 
 Milestone two is implemented in the guest; the MMU and serial findings
-below are **[observed]** (claims 0010/0013/0020/0021 on a real Apple M4 /
+below are **[observed]** (claims 0010/0013/0020/0021/1517/6684 on a real Apple M4 /
 macOS 27 VZ host), and the remaining items stay **[inferred]** until a
 console is actually driven and serial output proves them. Code/build
 success alone is not hardware evidence. The concrete numbers are
@@ -138,21 +138,31 @@ redesign.
   — see the TLBI bullets below. The D-cache over the 512 KiB table
   carve-out is cleaned before the switch (architectural hardening;
   independently verified not the fix).
-- **A TLBI-forced re-walk faults on VZ; omitting the TLBI survives.
-  **[observed]** (claim 0010, bisect)** — with `tlbi vmalle1` at the switch
-  the ladder stops at `M2_TTBR!` (post-TTBR write, post-TLBI) on every run;
-  without it the takeover completes (`M2_MMUP!` and beyond, every run since
-  claim 0010). The mechanism is uncharacterized; the no-TLBI safety
-  argument and its validity window are the controlling contract in **ADR
-  0006**. "MMU takeover fixed" (claim 0010) means the identity map installs
-  and this milestone's accesses work — it does **not** mean TLB
-  invalidation, remapping, or unmapping is proven.
+- **The TLBI at the switch is now executed with a corrected start level.
+  **[observed]** (claims 6460/7896/1517, supersedes claim 0010)** — the
+  claim-0010 finding (a TLBI-forced re-walk faults; omitting it survives)
+  was the start-level mismatch in disguise: production T0SZ=25/W=39 started
+  the 4 KiB stage-1 walk at level 1 over the L0-rooted tables, so every
+  fresh walk faulted, and the no-TLBI crutch only survived by riding stale
+  firmware TLB entries (ADR 0006). Claims 6460/7896 separated the two on
+  real VZ hardware (4-cell matrix: empty-TLB T0SZ=25 dies deterministically
+  at the first re-walk; empty-TLB T0SZ=16 completes the whole console path
+  9/9), and  claim 1517 landed the production fix: T0SZ=16 + `tlbi vmalle1`
+  at the switch. The ADR-0006 no-TLBI validity window is closed; the
+  invalidation list for later re-mapping milestones remains binding (see
+  **ADR 0006**).
 - **Post-switch MMIO access to the virtio-pci BAR window hangs on VZ.
-  **[observed]** (claim 0020, transition matrix)** — the same flush works
-  pre-EBS (phase A) and post-EBS on the firmware translation (phase B),
-  and hangs at the first common-cfg read immediately after the DipshitOS
-  identity-map install (phases C/D); `vm-serial.log` stays 0 B. The
-  transition that destroys access is the MMU switch, not ExitBootServices.
+  **[observed, superseded by claim 1517]** (claim 0020, transition matrix)**
+  — under the legacy start level (T0SZ=25) the same flush works pre-EBS
+  (phase A) and post-EBS on the firmware translation (phase B), and hangs
+  at the first common-cfg read immediately after the DipshitOS identity-map
+  install (phases C/D); `vm-serial.log` stayed 0 B. The transition that
+  destroyed access was the MMU switch — because the first post-switch read
+  of the BAR window was the first access whose firmware TLB entry was
+  evicted, and its fresh walk faulted (claims 0018/0020/6460/7896).  With the claim-1517 production fix (T0SZ=16 + TLBI at the switch) the
+  post-MMU virtio TX completes: the exact banner + memory-map print +
+  terminal state land in `vm-serial.log` (`zig build run` gate passes;
+  claim 1517).
 - **Firmware translation state at the switch. **[observed]** (claim 0021,
   `artifacts/fw-mmu-capture-lines.txt`)** — `SCTLR_EL1.M=1` (MMU on),
   `TCR_EL1=0x18080351c` (T0SZ=28 → 2^36 VA space, TG0 bits [15:14]=0b00 =
@@ -198,20 +208,30 @@ redesign.
   garbage for byte reads of config space; unaligned reads alignment-fault):
   common cfg @ BAR0+`0x0000` (len 0x38), ISR @ `+0x1000`, notify @ `+0x4000`
   (multiplier 4), device cfg @ `+0x8000`. Pre-exit the transport arms fully
-  (features `0x30000000`/`0x5`, queue 1 configured, DRIVER_OK).
-- **Post-exit access to the transport hangs on VZ.** **[observed, claim
-  0013; refined by claims 0018/0020]** — the first banner TX dies somewhere
-  in the first flush (death site boot-variable); `vm-serial.log` stays
-  0 B. Claim 0018 bisected the death to the first post-switch
-  BAR/common-config read (`M2_TXBR!` written, `M2_TXAR!` absent, 10/12
-  boots), and claim 0020 attributed it to the MMU switch: post-exit access
-  on the firmware translation works (phase B) — see the next bullet. Rebasing the BAR
-  below the blanket was tried and abandoned: the BAR write *does* move the
-  transport, but to an address the firmware never mapped pre-exit, and
-  post-exit config writes aren't reliable — so the firmware-assigned base
-  is mapped in place (stays armed, but unreachable for TX). The only proven
-  post-exit device channel is runtime `SetVariable` (NVRAM marker ladder,
-  ADR 0004 D4).
+  (features `0x30000000`/`0x5`, queues 0 + 1 configured, DRIVER_OK).
+- **Both virtio-console queues are driven and observed (claim 6684):**
+  queue 1 (transmit) and **queue 0 (receive)**. The receive queue's
+  register path (queue_select/size/enable/notify_off, the ring GPA
+  registers written as 32-bit halves, the 16-bit notify with the queue
+  index as the value) is **[observed]** — host input bytes written into the
+  guest's 256-byte RX buffer arrive at the kernel's polled `readByte` end
+  to end, and the shell's echo proves the exact bytes (`vm-serial.log`,
+  claim 6684, 3/3 boots).
+- **Post-exit access to the transport hangs on VZ. **[observed, superseded
+  by claim 1517]** (claim 0013; refined by claims 0018/0020)** — under the
+  legacy start level the first banner TX died somewhere in the first flush;
+  `vm-serial.log` stayed 0 B. Claim 0018 bisected the death to the first
+  post-switch BAR/common-config read (`M2_TXBR!` written, `M2_TXAR!`
+  absent, 10/12 boots), and claim 0020 attributed it to the MMU switch
+  (the start-level mismatch making the first fresh walk fault, claims
+  6460/7896). Rebasing the BAR below the blanket was tried and abandoned:
+  the BAR write *does* move the transport, but to an address the firmware
+  never mapped pre-exit, and post-exit config writes aren't reliable — so
+  the firmware-assigned base is mapped in place. **With the claim-1517 fix
+  (T0SZ=16 + TLBI at the switch) post-exit TX works end-to-end on real VZ
+  hardware**: banner + memory-map + `dipshit>` prompt observed in
+  `vm-serial.log` (claim 1517). The NVRAM channel (runtime `SetVariable`,
+  claim 0015) remains the fallback channel for nvram-console builds.
 - ACPI names no console: no SPCR/DBG2 in the XSDT (FACP/GTDT/APIC/MCFG
   only); DSDT (Apple's own, `Apple Vz`) declares only `PCI0` + `efivars`.
   **[observed]**

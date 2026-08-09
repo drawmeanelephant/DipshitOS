@@ -34,13 +34,14 @@ pub fn table_root() u64 {
     return @intFromPtr(&table_storage[0]);
 }
 
-/// TCR_EL1.T0SZ that install_identity_map() programs: 25 in production
-/// (W=39, 4 KiB stage-1 walk starts at level 1); 16 under the claim-6460
-/// diagnostic option -Dt0sz16 (W=48, walk starts at level 0 — matching the
-/// built L0-rooted hierarchy). The kernel-plan capture (evidence.zig) prints
-/// this same value so a -Dfw-mmu-capture + -Dt0sz16 build reports the true
-/// planned TCR.
-pub const plan_t0sz: u64 = if (build_options.t0sz16) 16 else 25;
+/// TCR_EL1.T0SZ that install_identity_map() programs: 16 in production
+/// (W=48, the 4 KiB stage-1 walk starts at level 0 — matching the built
+/// L0-rooted hierarchy, claim 1517). The legacy 25 (W=39, walk starts at
+/// level 1 — the claim-6460/7896 start-level mismatch) is selectable with
+/// the class-D option -Dt0sz25 for A/B regression. The kernel-plan capture
+/// (evidence.zig) prints this same value so a -Dfw-mmu-capture build
+/// reports the true planned TCR.
+pub const plan_t0sz: u64 = if (build_options.t0sz25) 25 else 16;
 
 /// Clean the D-cache over [start, start+len) to the point of coherence so a
 /// subsequent translation walk (which may read memory directly, bypassing a
@@ -214,8 +215,9 @@ fn map_low_identity(end: u64, map: MemoryMapSlice) bool {
     return true;
 }
 
-/// Walk VA through the built 4 KB-granule tables (T0SZ=25) and report whether
-/// it resolves to a Normal mapping (MAIR AttrIndex = 0b01, descriptor bit 2).
+/// Walk VA through the built 4 KB-granule tables (T0SZ=16, L0-rooted) and
+/// report whether it resolves to a Normal mapping (MAIR AttrIndex = 0b01,
+/// descriptor bit 2).
 fn mapped_normal(va: u64) bool {
     const ix = indices(va);
     const root = &table_storage[0];
@@ -367,14 +369,15 @@ pub fn install_identity_map() void {
     // walker always reads the real tables.
     clean_dcache_range(@intFromPtr(&table_storage), table_page_count * 4096);
     // T0SZ selects the TTBR0 VA space size and therefore the initial lookup
-    // level of the walk. Production T0SZ=25 (W=39, 2^39 space) starts the 4
-    // KiB stage-1 walk at LEVEL 1; the claim-6460 diagnostic (-Dt0sz16)
-    // programs T0SZ=16 (W=48), which starts the walk at LEVEL 0 — the level
-    // the built L0-rooted hierarchy (root -> L1 -> L2 -> optional L3)
-    // actually targets. The built tables are byte-identical in both
-    // variants; only the programmed T0SZ differs. The map builder's
-    // va_limit (1 << 39) still bounds every mapped VA (blanket + extra
-    // device window sit far below it) under either T0SZ. TG0 (the TTBR0
+    // level of the walk. Production T0SZ=16 (W=48, 2^48 space) starts the 4
+    // KiB stage-1 walk at LEVEL 0 — the level the built L0-rooted hierarchy
+    // (root -> L1 -> L2 -> optional L3) actually targets, so every fresh
+    // walk resolves (claim 1517). The legacy 25 (W=39) starts the walk at
+    // LEVEL 1 over the same L0-rooted tables — the claim-6460/7896
+    // start-level mismatch: a fresh walk misparses below 1 GiB and faults
+    // at ROOT[1..3]=0 for VAs >= 1 GiB (-Dt0sz25 reproduces it). The map
+    // builder's va_limit (1 << 39) still bounds every mapped VA (blanket +
+    // extra device window sit far below it) under either T0SZ. TG0 (the TTBR0
     // walker's granule) is left 0b00 = 4 KB in
     // BOTH architectural field positions: ARMv8.0 puts TG0 at bits [9:8]
     // (0b01 = 64 KB), ARMv8.1+ with 16 KB granule support puts it at bits
@@ -403,19 +406,23 @@ pub fn install_identity_map() void {
         : [value] "r" (root),
     );
     asm volatile ("isb");
-    // Claim 0010: NO `tlbi vmalle1` at the switch. Bisect markers proved the
-    // switch and the first post-switch runtime call succeed, but any re-walk
-    // FORCED by a TLBI then faults on VZ (ladder ended at M2_TTBR!; claim
-    // 0010). The stale firmware TLB entries are identity-compatible with our
-    // map below the blanket boundary — the blanket maps every VA < 4 GiB with
-    // the same VA==PA translations the firmware had (RAM Normal WB, MMIO
-    // Device), so any stale entry still in the TLB resolves identically. The
-    // safety argument stops at 4 GiB: above it only EFI-declared regions are
-    // mapped, so this milestone must not touch VAs the firmware previously
-    // translated above the blanket (none observed on VZ). Skipping the
-    // invalidate is safe because the map never changes descriptors
-    // post-switch; a later milestone that re-maps regions must revisit this
-    // and characterise the VZ re-walk fault.
+    asm volatile ("dsb ish" ::: .{ .memory = true });
+    asm volatile ("isb");
+    // Claim 1517 (pays the ADR-0006 debt): execute a FULL TLB invalidation
+    // at the switch. The old no-TLBI crutch (claim 0010, ADR 0006) survived
+    // only by riding stale firmware TLB entries that were identity-compatible
+    // below the blanket — but the first post-MMU read of the virtio-pci BAR
+    // window (above the blanket, claim 0013) hit an evicted entry, re-walked
+    // the L0-rooted tables under the claim-6460 start-level mismatch
+    // (T0SZ=25) and faulted (claims 0018/0020). Claims 6460/7896 proved on
+    // real VZ hardware that with the corrected start level (T0SZ=16) a
+    // forced re-walk RESOLVES and an empty TLB makes the first post-switch
+    // access deterministic (cell B: 9/9 boots complete the whole console
+    // path vs ~1/3 with the stale entries). The tables are D-cache-cleaned
+    // before the switch and the map never changes descriptors post-switch,
+    // so the walk after this invalidation is stable; a later milestone that
+    // re-maps regions must revisit the ADR-0006 invalidation list.
+    asm volatile ("tlbi vmalle1" ::: .{ .memory = true });
     asm volatile ("dsb ish" ::: .{ .memory = true });
     asm volatile ("isb");
 }

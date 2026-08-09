@@ -1,37 +1,33 @@
 #!/usr/bin/env bash
 #
-# verify-t0sz16-walkprobe.sh -- claim 7896 (claim-6460 follow-up) class-D
-# diagnostic: SEPARATE the T0SZ start-level mismatch from the residual
-# post-MMU virtio TX hang, deterministically.
-#
-# Mechanism: the no-TLBI crutch (ADR 0006) leaves stale firmware TLB entries
-# in play, which is what makes the post-switch behavior boot-varying.
-# -Dtlbi-after-switch removes the crutch: immediately after the identity-map
-# install the kernel executes `tlbi vmalle1; dsb ish; isb`, so the FIRST
-# post-switch access MUST re-walk the installed tables. At T0SZ=25 (W=39)
-# the 4 KiB walk starts at level 1 over the L0-rooted tables -> every fresh
-# walk faults -> the kernel dies right after the switch, EVERY boot. At
-# T0SZ=16 (W=48, start level 0) the walk resolves. -Dwalk-probe then runs a
-# cold-address probe battery (each probe bracketed by an NVRAM marker) so
-# the ladder NAMES the first address that does not resolve.
+# verify-t0sz16-walkprobe.sh -- claim 1517 (claims 6460/7896 follow-up)
+# class-D regression matrix. Production now programs T0SZ=16 (correct start
+# level for the L0-rooted tables) and ALWAYS executes `tlbi vmalle1; dsb
+# ish; isb` at the identity-map install (claim 1517 pays the ADR-0006
+# no-TLBI debt), so the FIRST post-switch access MUST re-walk the installed
+# tables. -Dt0sz25 selects the legacy start level 25 (W=39, walk starts at
+# level 1 over the L0-rooted tables -> every fresh walk faults).
+# -Dwalk-probe runs a cold-address probe battery (each probe bracketed by
+# an NVRAM marker) so the ladder NAMES the first address that does not
+# resolve.
 #
 # Four cells (each also runs the claim-0020 phase-C TX experiment as the
 # observation point, like verify-t0sz16.sh):
-#   A  -Dtlbi-after-switch=true                              T0SZ=25 + TLBI
-#   B  -Dtlbi-after-switch=true -Dt0sz16=true -Dwalk-probe=true   T0SZ=16 + TLBI + probe
-#   C  -Dwalk-probe=true                                     T0SZ=25, no TLBI
-#   D  -Dwalk-probe=true -Dt0sz16=true                       T0SZ=16, no TLBI
+#   A  -Dtx-transition-c=true -Dt0sz25=true                     T0SZ=25 + TLBI
+#   B  -Dtx-transition-c=true -Dwalk-probe=true                 T0SZ=16 + TLBI + probe
+#   C  -Dtx-transition-c=true -Dt0sz25=true -Dwalk-probe=true   T0SZ=25 + TLBI + probe
+#   D  -Dtx-transition-c=true                                   T0SZ=16 + TLBI, phase-C only
 #
-# Predicted signatures (deterministic separation):
+# Predicted signatures:
 #   A: ladder ends at M2_MMUP! (switch completed) with NO M2_WP_* markers —
-#      the first post-TLBI access faults. EVERY boot.
-#   B: full probe ladder M2_WP_00..M2_WP_05, then phase-C TX outcome. With
-#      an empty TLB the tables resolve cleanly under T0SZ=16, so phase C
-#      should complete EVERY boot (claim 6460's ~1/3 rate without TLBI is
-#      the stale-firmware-TLB crutch interfering, not a device hang).
-#   C: dies at the first TLB-cold probe (survey of which addresses the
-#      stale-TLB crutch actually covers).
-#   D: full probe ladder, then phase-C residual reproduction (~1/3).
+#      the first post-switch re-walk faults under the legacy start level.
+#      EVERY boot (the claim-6460/7896 defect, deterministic).
+#   B: full probe ladder M2_WP_00..M2_WP_05, then phase-C TX completes —
+#      the corrected start level + empty TLB resolve every boot.
+#   C: dies at the first probe (the first post-switch re-walk faults).
+#   D: phase C completes — the production configuration with minimal
+#      instrumentation (same configuration the class-B `zig build run` gate
+#      boots).
 #
 # Usage:
 #   bash tools/verify-t0sz16-walkprobe.sh            # all cells, BOOTS each
@@ -43,8 +39,10 @@
 # (cell table + interpretation), walkprobe-<cell>-{run,marker,serial}-<NN>.*
 # per boot. Fresh EFI variable store per boot, --timeout 25.
 #
-# Diagnostic only (class D): a payload hit does NOT pass claim 0002. Default
-# builds stay byte-identical (KERNEL.BIN sha 55325752...).
+# Diagnostic only (class D): a payload hit does NOT pass claim 0002 by
+# itself (the gate is `zig build run`). Since claim 1517 the default build
+# IS the production kernel (T0SZ=16 + TLBI); the KERNEL.BIN sha changes with
+# this claim (previously 55325752...).
 
 set -euo pipefail
 
@@ -67,10 +65,10 @@ DIRTY="$(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
 # bash 3.2 on macOS: no associative arrays — a function instead.
 flags_for() {
     case "$1" in
-        A) echo "-Dtx-transition-c=true -Dtlbi-after-switch=true" ;;
-        B) echo "-Dtx-transition-c=true -Dtlbi-after-switch=true -Dt0sz16=true -Dwalk-probe=true" ;;
-        C) echo "-Dtx-transition-c=true -Dwalk-probe=true" ;;
-        D) echo "-Dtx-transition-c=true -Dwalk-probe=true -Dt0sz16=true" ;;
+        A) echo "-Dtx-transition-c=true -Dt0sz25=true" ;;
+        B) echo "-Dtx-transition-c=true -Dwalk-probe=true" ;;
+        C) echo "-Dtx-transition-c=true -Dt0sz25=true -Dwalk-probe=true" ;;
+        D) echo "-Dtx-transition-c=true" ;;
     esac
 }
 echo "revision: $REVISION branch=$BRANCH boots-per-cell=$BOOTS dirty-files=$DIRTY"
@@ -80,7 +78,7 @@ for c in A B C D; do echo "  cell $c: $(flags_for "$c")"; done
 zig fmt --check boot/src/*.zig kernel/src/*.zig build.zig
 zig build
 DEFAULT_SHA=$(shasum -a 256 zig-out/bin/KERNEL.BIN | cut -d' ' -f1)
-echo "default KERNEL.BIN sha256: $DEFAULT_SHA (expect 55325752...)"
+echo "default KERNEL.BIN sha256: $DEFAULT_SHA (production T0SZ=16 + TLBI since claim 1517)"
 for c in ${CELLS//,/ }; do
     echo "--- compile cell $c ---"
     # shellcheck disable=SC2086
@@ -201,23 +199,22 @@ done
 for c in ${CELLS//,/ }; do
     N=$(grep -c '^cell-' "$(report_for "$c")" || true)
     case "$c" in
-            A) echo "cell A totals (n=$N): wp-markers=$A_WP  (expect 0 -> deterministic fault right after the switch)";;
-            B) echo "cell B totals (n=$N): wp-markers=$B_WP (expect 6n — empty-TLB walk resolves)  phaseC-returned=$B_RET used=$B_USED payload=$B_PAY  (expect ~n; claim 6460's ~1/3 no-TLBI rate is stale-TLB interference)";;
-            C) echo "cell C totals (n=$N): wp-markers=$C_WP  (expect partial: first TLB-cold address faults)";;
-            D) echo "cell D totals (n=$N): wp-markers=$D_WP  phaseC-returned=$D_RET used=$D_USED payload=$D_PAY  (expect wp=6n, ~1/3 phaseC)";;
+            A) echo "cell A totals (n=$N): wp-markers=$A_WP  (expect 0 -> deterministic fault right after the switch under legacy T0SZ=25)";;
+            B) echo "cell B totals (n=$N): wp-markers=$B_WP (expect 6n — corrected start level + empty TLB resolves)  phaseC-returned=$B_RET used=$B_USED payload=$B_PAY  (expect n)";;
+            C) echo "cell C totals (n=$N): wp-markers=$C_WP  (expect 0 — first post-switch re-walk faults under legacy T0SZ=25)";;
+            D) echo "cell D totals (n=$N): wp-markers=$D_WP  phaseC-returned=$D_RET used=$D_USED payload=$D_PAY  (production, phase-C only; expect n)";;
         esac
 done
 
 echo
-echo "=== interpretation (claim 7896) ==="
-echo "  A (T0SZ=25 + TLBI): no WP markers + ladder ending at M2_MMUP! => the start-level"
-echo "      mismatch is confirmed: with an empty TLB the FIRST re-walk faults (every boot)."
-echo "  B (T0SZ=16 + TLBI): full probe ladder + phase-C outcome. With an empty TLB the tables"
-echo "      resolve under T0SZ=16 and phase C should complete EVERY boot — proving claim 6460's"
-echo "      ~1/3 residual was the stale-firmware-TLB crutch, not a device/emulator hang."
-echo "  C (T0SZ=25, no TLBI): partial probe ladder => names the first address the stale-TLB"
-echo "      crutch does NOT cover (TLB-coverage survey)."
-echo "  D (T0SZ=16, no TLBI): full probe ladder + ~1/3 phase-C => reproduces claim 6460."
+echo "=== interpretation (claim 1517, regression) ==="
+echo "  A (T0SZ=25 + TLBI): no WP markers + ladder ending at M2_MMUP! => the legacy start-level"
+echo "      defect is reproduced deterministically (with an empty TLB the FIRST re-walk faults)."
+echo "  B (T0SZ=16 + TLBI): full probe ladder + phase-C completion => the production fix"
+echo "      resolves every boot (the claim-6460/7896 finding, now production)."
+echo "  C (T0SZ=25 + TLBI + probe): dies at the first probe => same defect, site named."
+echo "  D (T0SZ=16 + TLBI, phase-C only): phase C completes => the production configuration"
+echo "      (what the class-B `zig build run` gate boots)."
 echo
 echo "Evidence saved under artifacts/ (walkprobe-gate.txt, walkprobe-report-{A,B,C,D}.txt,"
 echo "walkprobe-compare.txt, walkprobe-cell-*-{run,marker,serial}-*)."

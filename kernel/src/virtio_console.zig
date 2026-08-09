@@ -133,6 +133,22 @@ pub var vp_bar0: u64 = 0; // console BAR0 base (the SEL record)
 pub var vp_tx_len: usize = 0; // bytes buffered in virtio_tx
 pub var st_tx: ?*const SystemTable = null; // for post-exit flush stage markers
 
+// Claim 6684: virtio-console receive queue (queue 0) + polled RX. The
+// console device delivers host input by writing into driver-supplied
+// buffers on queue 0 (virtio-console spec: queue 0 = receive, queue 1 =
+// transmit). One 256-byte WRITE descriptor; the used ring names returned
+// buffers, which are drained into a bounded FIFO for readByte.
+pub var virtio_rx_desc: [1]VirtqDesc align(16) = undefined;
+pub var virtio_rx_avail: VirtqAvail align(2) = undefined;
+pub var virtio_rx_used: VirtqUsed align(4) = undefined;
+pub var virtio_rx_buf: [256]u8 align(16) = undefined;
+var virtio_rx_last_used: u16 = 0;
+var virtio_rx_queue_notify_off: u16 = 0;
+var virtio_rx_fifo: [512]u8 = undefined;
+var virtio_rx_fifo_head: usize = 0;
+var virtio_rx_fifo_len: usize = 0;
+var virtio_rx_armed: bool = false;
+
 fn vp_read8(off: u32) u8 {
     return mmio.mmio_read8(vp_common + off);
 }
@@ -361,10 +377,65 @@ pub fn virtio_pci_init(st: *const SystemTable) bool {
     mmio.mmio_write32(vp_common + 0x34, @truncate(qu >> 32));
     vp_write16(0x1c, 1); // queue_enable
     vp_queue_notify_off = vp_read16(0x1e);
+    // Claim 6684: queue 0 = console receive. Same split-ring shape as TX
+    // (size 1, one WRITE descriptor pointing at the fixed BSS buffer). The
+    // device fills this buffer with host input bytes and names the return
+    // in the used ring. Configured pre-exit alongside queue 1 and the
+    // initial avail entry is supplied BEFORE DRIVER_OK (the driver may
+    // populate the avail ring; it must only NOT notify until DRIVER_OK);
+    // the kick happens right after DRIVER_OK below so the device can accept
+    // host bytes as soon as the runner forwards them.
+    vp_write16(0x16, 0); // queue_select = 0 (receive)
+    const qsz_rx = vp_read16(0x18);
+    if (qsz_rx == 0) {
+        evidence.dump_str("VP: queue 0 (RX) absent — console output-only\n");
+        virtio_rx_armed = false;
+    } else {
+        vp_write16(0x18, virtio_queue_size); // queue_size = 1 (power of 2)
+        virtio_rx_desc[0] = .{ .addr = @intFromPtr(&virtio_rx_buf), .len = virtio_rx_buf.len, .flags = 2, .next = 0 }; // VIRTQ_DESC_F_WRITE
+        virtio_rx_avail = .{ .flags = 0, .idx = 0, .ring = .{0} };
+        virtio_rx_used = .{ .flags = 0, .idx = 0, .ring = .{.{ .id = 0, .len = 0 }} };
+        mmu.clean_dcache_range(@intFromPtr(&virtio_rx_used), @sizeOf(VirtqUsed));
+        virtio_rx_last_used = 0;
+        virtio_rx_fifo_head = 0;
+        virtio_rx_fifo_len = 0;
+        // Queue GPA registers: same 32-bit-half pattern as queue 1 (claim
+        // 0013 access-size quirk).
+        const qdr = @intFromPtr(&virtio_rx_desc);
+        mmio.mmio_write32(vp_common + 0x20, @truncate(qdr));
+        mmio.mmio_write32(vp_common + 0x24, @truncate(qdr >> 32));
+        const qar = @intFromPtr(&virtio_rx_avail);
+        mmio.mmio_write32(vp_common + 0x28, @truncate(qar));
+        mmio.mmio_write32(vp_common + 0x2c, @truncate(qar >> 32));
+        const qur = @intFromPtr(&virtio_rx_used);
+        mmio.mmio_write32(vp_common + 0x30, @truncate(qur));
+        mmio.mmio_write32(vp_common + 0x34, @truncate(qur >> 32));
+        vp_write16(0x1c, 1); // queue_enable
+        virtio_rx_queue_notify_off = vp_read16(0x1e);
+        virtio_rx_avail.ring[0] = 0;
+        virtio_rx_avail.idx +%= 1;
+        mmu.clean_dcache_range(@intFromPtr(&virtio_rx_desc), @sizeOf(VirtqDesc));
+        mmu.clean_dcache_range(@intFromPtr(&virtio_rx_avail), @sizeOf(VirtqAvail));
+        virtio_rx_armed = true;
+        evidence.dump_str("VP RX qsz=");
+        evidence.dump_hex(vp_read16(0x18));
+        evidence.dump_str(" qen=");
+        evidence.dump_hex(vp_read16(0x1c));
+        evidence.dump_str(" qoff=");
+        evidence.dump_hex(virtio_rx_queue_notify_off);
+        evidence.dump_str("\n");
+    }
     vp_write8(0x14, 1 | 2 | 8 | 4); // DRIVER_OK
     if ((vp_read8(0x14) & 4) == 0) {
         evidence.dump_str("VP: DRIVER_OK failed\n");
         return false;
+    }
+    // Claim 6684: kick queue 0 so the device knows the first RX buffer is
+    // available. The notification value is the queue index (0) —
+    // VIRTIO_F_NOTIFICATION_DATA is not negotiated, so a 16-bit store per
+    // §4.1.5.2.1.
+    if (virtio_rx_armed) {
+        mmio.mmio_write16(vp_notify + @as(u64, virtio_rx_queue_notify_off) * vp_notify_mult, 0);
     }
     // Stage marker: transport armed. If the ladder stops here, a queue-setup
     // write (mmio_write64 at vp_common+0x20..0x30) is the death site.
@@ -502,6 +573,60 @@ pub fn virtio_pci_flush() void {
         if (st_tx != null) evidence.write_marker_var(st_tx.?, marker_txpl);
     }
     vp_tx_len = 0;
+}
+
+// ---------------------------------------------------------------------------
+// Claim 6684: polled receive path (virtio-console queue 0).
+// ---------------------------------------------------------------------------
+
+/// Pop one byte from the drained-input FIFO (caller guarantees non-empty).
+fn rx_fifo_pop() u8 {
+    const b = virtio_rx_fifo[virtio_rx_fifo_head];
+    virtio_rx_fifo_head +%= 1;
+    if (virtio_rx_fifo_head >= virtio_rx_fifo.len) virtio_rx_fifo_head = 0;
+    virtio_rx_fifo_len -= 1;
+    return b;
+}
+
+/// Polled receive: one host-input byte, or null when no input is available
+/// right now. Polls queue 0's used ring; when the device returns the buffer
+/// (used.idx advanced) the bytes are drained into the bounded FIFO, the
+/// buffer is re-supplied (clean + kick), and the first FIFO byte is
+/// returned. Never blocks, never allocates. Runs post-MMU on the
+/// pre-exit-captured VAs — the transport is reachable since claim 1517.
+pub fn virtio_read_byte() ?u8 {
+    if (!virtio_rx_armed) return null;
+    // Drain bytes already received on an earlier poll first.
+    if (virtio_rx_fifo_len > 0) return rx_fifo_pop();
+    // Poll the used ring (device-written RAM; invalidate its line first).
+    mmu.invalidate_dcache_range(@intFromPtr(&virtio_rx_used), @sizeOf(VirtqUsed));
+    if (virtio_rx_used.idx == virtio_rx_last_used) return null;
+    // The device returned the buffer: read what it wrote, cache-correct.
+    const elem = virtio_rx_used.ring[0];
+    const n = @min(elem.len, virtio_rx_buf.len);
+    mmu.invalidate_dcache_range(@intFromPtr(&virtio_rx_buf), n);
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        if (virtio_rx_fifo_len >= virtio_rx_fifo.len) break; // FIFO full: drop the rest, honestly
+        virtio_rx_fifo[(virtio_rx_fifo_head + virtio_rx_fifo_len) % virtio_rx_fifo.len] = virtio_rx_buf[i];
+        virtio_rx_fifo_len += 1;
+    }
+    virtio_rx_last_used = virtio_rx_used.idx;
+    // Re-supply the buffer: the descriptor is unchanged, but the avail ring
+    // gained an entry — clean the rings, then kick queue 0 again.
+    virtio_rx_avail.ring[0] = 0;
+    virtio_rx_avail.idx +%= 1;
+    mmu.clean_dcache_range(@intFromPtr(&virtio_rx_desc), @sizeOf(VirtqDesc));
+    mmu.clean_dcache_range(@intFromPtr(&virtio_rx_avail), @sizeOf(VirtqAvail));
+    mmio.mmio_write16(vp_notify + @as(u64, virtio_rx_queue_notify_off) * vp_notify_mult, 0);
+    return rx_fifo_pop();
+}
+
+/// True when the receive queue is configured and the initial buffer was
+/// supplied (main.zig's `rx_wired` uses this to run the live shell loop
+/// instead of parking).
+pub fn rx_armed() bool {
+    return virtio_rx_armed;
 }
 
 // ---------------------------------------------------------------------------

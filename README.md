@@ -14,16 +14,17 @@ for the project rules.
 
 - **Done:** milestone zero (boot pipeline), milestone one (kernel
   handoff).
-- **Implemented, gate open:** milestone two (kernel proper:
-  `ExitBootServices`, identity-map MMU, polled serial console) — the
-  MMU-takeover death is root-caused and **fixed** (claim 0010: the
-  identity-map switch now completes on VZ; marker ladder reaches
-  `M2_SERIA`); claim 0013 found the real console is a virtio-pci device
-  outside the declared MMIO windows, but post-MMU access to its
-  transport hangs on VZ (the MMU switch destroys access, claims
-  0018/0020), so the VZ serial gate remains blocked. The
-  bad-handoff, marker-fallback, and NVRAM-console gates pass. Current VZ
-  gate state: see [`docs/status.md`](docs/status.md).
+- **Done (all milestone-two gates pass 2026-08-08):** milestone two
+  (kernel proper: `ExitBootServices`, identity-map MMU, polled serial
+  console) — the MMU-takeover death is root-caused and **fixed** (claim
+  0010); claim 0013 found the real console is a virtio-pci device outside
+  the declared MMIO windows; claims 6460/7896 root-caused the post-MMU
+  transport hang (translation start-level mismatch + stale-TLB crutch)
+  and **claim 1517 fixed it in production** (T0SZ=16 + `tlbi vmalle1` at
+  the switch) — the VZ serial gate now passes (banner + memory-map +
+  terminal state in `vm-serial.log`). The bad-handoff, marker-fallback,
+  and NVRAM-console gates pass. Current VZ gate state: see
+  [`docs/status.md`](docs/status.md).
 - **Current:** milestone 1.5 — the interactive `dipshit>` kernel monitor.
 - The milestone-one `KERNEL.TXT` corruption is fixed (ADR 0002).
 
@@ -46,13 +47,13 @@ machine controls. The host plumbing (duplex serial, terminal handling,
 `zig build console`), console & shell core (RX abstraction, line editor,
 tokenizer, prompt loop), and command registry (14 commands, mock-tested)
 are built; the transcript test gate passes (`zig build test-console`).
-The **VZ serial gate remains blocked** (zero bytes in `vm-serial.log`)
-so live guest keystrokes are not yet proven; the NVRAM fallback console
-(claim 0015) does carry post-exit console bytes from a real VZ run (shell
-banner + real command output), and the newest transport diagnostic
-(claim 6460, class D: T0SZ 25→16) restored post-MMU TX in 6/18 boots —
-hypothesis strengthened, not reproducible. Canonical blocker:
-[`docs/status.md`](docs/status.md).
+The **VZ serial gate passes** (claim 1517, 2026-08-08 — post-MMU virtio TX
+fixed with T0SZ=16 + `tlbi vmalle1` at the switch) **and the RX path is
+live** (claim 6684, 2026-08-08): the polled virtio receive queue delivers
+host keystrokes end to end — `bash tools/verify-live-transcript.sh`
+drives `help`/`version`/`mem`/`echo` into a real session and asserts the
+live `dipshit>` transcript in `vm-serial.log` (3/3 boots). Canonical
+state: [`docs/status.md`](docs/status.md).
 The goal, hard gates, and per-step progress live in
 **`docs/status.md`** (the living status & goals tracker).
 
@@ -71,9 +72,9 @@ D/I-cache maintenance, and jumps to the kernel entry. It writes
 `kernel/src/main.zig` is the milestone-two freestanding kernel proper. It
 validates handoff v2, captures the map, exits Boot Services, builds and
 installs identity TTBR0_EL1 tables, probes PL011/16550/virtio-MMIO candidates,
-and is designed to print the takeover banner and enter a terminal WFE loop
-(**not yet observed on VZ** — post-MMU access to the virtio-pci console
-transport hangs; see `docs/status.md`). Its fixed page tables and virtio queue storage are BSS
+and prints the takeover banner and enters a terminal WFE loop (**observed
+on VZ since claim 1517** — post-MMU virtio TX fixed with T0SZ=16 + TLBI
+at the switch; see `docs/status.md`). Its fixed page tables and virtio queue storage are BSS
 carve-outs; there is no general allocator or libc/POSIX. Milestone 1.5 adds
 the interactive monitor (`kernel/src/{console,lineedit,tokenizer,shell,monitor}.zig`).
 
@@ -173,8 +174,10 @@ configuration.
 
 ## Verification results (observed on this development host)
 
-The milestone-two VZ takeover gate is **not passed**: the saved run has an
-empty `artifacts/vm-serial.log`. The bad-handoff failure gate **is passed**
+The milestone-two VZ takeover gate **passes (2026-08-08, claim 1517)**:
+`zig build run` puts the banner, memory-map print, and `kernel terminal
+state` in `artifacts/vm-serial.log` (post-MMU virtio TX fixed — T0SZ=16 +
+TLBI at the switch). The bad-handoff failure gate **is passed**
 (as of 2026-08-06: `RC.TXT` → `kernel_rc=0x2`, root cause was the naked
 `_start` shim clobbering the link register). The **ADR 0004 D4 marker
 fallback gate is passed** (2026-08-07): the kernel persists each takeover
@@ -184,10 +187,11 @@ fixed** (claim 0010) — the ladder now runs `M2_MAPD! → M2_MMUP! →
 M2_SERIA`, the switch completes, and the declared-window probe runs to
 completion without a hit (claim 0013 later decoded those windows as Apple's
 efivars store + an internal debug UART, and found the real console is a
-virtio-pci device outside them). The VZ serial gate remains blocked on
-post-MMU access to that transport (claims 0018/0020). Current gate state:
-[`docs/status.md`](docs/status.md). The implementation and build checks
-below must not be read as hardware evidence.
+virtio-pci device outside them). The post-MMU transport hang was
+root-caused (claims 6460/7896) and fixed in production (claim 1517:
+T0SZ=16 + TLBI at the switch) — the VZ serial gate passes. Current gate
+state: [`docs/status.md`](docs/status.md). The implementation and build
+checks below must not be read as hardware evidence.
 
 Host: Apple M4, macOS 27.0 (arm64), Zig 0.16.0, Swift 6.2.3 (arm64).
 
@@ -198,7 +202,7 @@ Host: Apple M4, macOS 27.0 (arm64), Zig 0.16.0, Swift 6.2.3 (arm64).
 | Build image | `zig build image` | **Observed**: 64 MiB GPT+FAT32 image; `EFI/BOOT/BOOTAA64.EFI` (139264 B) present; volume label `DIPSHITOS` |
 | Inspect image | `zig build inspect` | **Observed**: `DOS/MBR boot sector` (protective), GPT header crc valid, ESP `LBA 2048..131038` |
 | Build Swift runner | `swift build --package-path host/vm-runner` | **Observed**: SwiftPM build succeeds |
-| Boot via Virtualization.framework | `zig build run` | **Observed**: VM boots; loader writes `\BOOTED.TXT` + `\LOADER.TXT` byte-perfect. M2 serial gate **blocked** — no serial bytes (post-MMU access to the virtio-pci console transport hangs, claims 0018/0020) |
+| Boot via Virtualization.framework | `zig build run` | **Observed (2026-08-08, claim 1517)**: VM boots; loader writes `\BOOTED.TXT` + `\LOADER.TXT` byte-perfect; **M2 serial gate PASSES** — banner + `memory-map descriptors=0x…` + `kernel terminal state` in `vm-serial.log` (post-MMU virtio TX fixed: T0SZ=16 + TLBI at the switch) |
 | Kernel image | `zig build` + `elf2bin.py` | **Observed**: `KERNEL.BIN` (format v1: magic `DSK1`, `entry_offset=0x18`, ~2 KiB) |
 | Kernel marker `\KERNEL.TXT` | M1 regression only | **Observed**: byte-perfect and byte-identical across runs (ADR 0002 corruption fixed); not written post-`ExitBootServices` |
 | Marker fallback gate | `bash tools/verify-marker.sh` | **Observed** (2026-08-07): NVRAM ladder `M2_ENTRY → M2_CMAP! → M2_PREX! → M2_EXIT! → M2_MAPD!` (claim 0009); **fixed 2026-08-07 (claim 0010)**: ladder now reaches `M2_MMUP! → M2_SERIA → M2_READY` — MMU takeover completes; declared-window probe finds no device (windows later decoded as efivars store + debug UART, claim 0013) (`artifacts/m2-mmu-takeover-gate.txt`) |
@@ -211,19 +215,18 @@ All command output and logs are saved under `artifacts/` (`inspect.txt`,
 
 ### Observed behavior
 
-- `zig build`, `image`, and `inspect` complete on this host. The milestone-two
-  `run` gate remains blocked on serial evidence, but the gates around it
-  now pass: `bash tools/verify-bad-handoff.sh` (failure path,
-  `kernel_rc=0x2`), `bash tools/verify-marker.sh` (NVRAM marker ladder —
-  the MMU-takeover death was root-caused and fixed, claim 0010, so the
-  ladder reaches `M2_SERIA`), `zig build test-console` (M1.5 transcript
-  gate, mock console), `bash tools/verify-host-console.sh` (M1.5 host
-  plumbing), and `bash tools/verify-nvram-console.sh` (M1.5 NVRAM
-  fallback console — post-exit console bytes from a real VZ run, claim
-  0015). The M1.5 monitor (14 commands) is implemented and
-  host-tested; the VZ serial gate's remaining blocker is post-MMU access
-  to the virtio-pci console transport (claims 0018/0020; see
-  `docs/status.md`).
+- `zig build`, `image`, and `inspect` complete on this host. The
+  milestone-two `run` gate **passes** (claim 1517, 2026-08-08 — post-MMU
+  virtio TX fixed with T0SZ=16 + `tlbi vmalle1` at the switch), and the
+  gates around it pass: `bash tools/verify-bad-handoff.sh` (failure path,
+  `kernel_rc=0x2`), `bash tools/verify-marker.sh` (NVRAM marker ladder),
+  `zig build test-console` (M1.5 transcript gate, mock console),
+  `bash tools/verify-host-console.sh` (M1.5 host plumbing), and
+  `bash tools/verify-nvram-console.sh` (M1.5 NVRAM fallback console), and
+  `bash tools/verify-live-transcript.sh` (M1.5 live RX — host keystrokes
+  reach the kernel end to end, claim 6684). The M1.5 monitor (14
+  commands) is implemented and host-tested; the remaining live-gate gap is
+  a live reboot/shutdown observation (see `docs/status.md`).
 - The Virtualization.framework VM boots the GPT+FAT image: configuration
   validates, the EFI variable store is created, the VM starts and runs, and
   after boot the guest-written marker file `\BOOTED.TXT` exists on the ESP
@@ -251,23 +254,20 @@ The gate-by-gate plan and active work claims live in
    line editor, tokenizer, 14 commands, `zig build test-console`
    transcript gate at the mock level; the host-side `--console` plumbing
    is gated by `bash tools/verify-host-console.sh`). The console device
-   is found (a virtio-pci console, claim 0013) and the NVRAM channel
-   carries post-exit console bytes (claim 0015), but post-MMU access to
-   the virtio transport itself hangs on VZ, so the kernel's `readByte`
-   is still a no-RX stub and keystrokes cannot reach a live VM. Newest
-   diagnostic on this exact layer (claim 6460, class D): correcting the
-   T0SZ start-level mismatch (25→16) restored end-to-end post-MMU TX in
-   6/18 boots across three runs — hypothesis strengthened, not
-   reproducible; production T0SZ stays 25. Next: reliable post-MMU
-   console transport access and the RX path, end to end. Tracked
-   step-by-step in `docs/status.md` / `docs/march-m15.md`.
-2. Resolve the milestone-two VZ serial gate itself: with the MMU-takeover
-   death fixed and the console identified, the remaining blocker is
-   post-MMU access to the virtio transport — run the complete Apple M4 /
-   macOS 27 gate once reliable post-MMU transport access exists and save
-   output under `artifacts/`. Only then may the matching MMIO/serial
-   assumptions change from `[inferred]` to `[observed]` in
-   `docs/hardware-contract.md`. (The bad-handoff failure gate — formerly
-   the other unpassed gate — is closed since 2026-08-06.)
+   is found (a virtio-pci console, claim 0013), the NVRAM channel
+   carries post-exit console bytes (claim 0015), the post-MMU transport
+   layer is **fixed** (claim 1517: T0SZ=16 + TLBI at the switch), and
+   **live RX is wired** (claim 6684: the polled virtio receive queue
+   delivers host keystrokes end to end — `verify-live-transcript.sh`
+   asserts the live `dipshit>` transcript in `vm-serial.log`). Next: a
+   live reboot/shutdown observation, then the milestone close-out.
+   Tracked step-by-step in `docs/status.md` / `docs/march-m15.md`.
+2. ~~Resolve the milestone-two VZ serial gate itself.~~ **DONE 2026-08-08
+   (claim 1517):** the post-MMU transport blocker (start-level mismatch +
+   stale-TLB crutch, claims 6460/7896) is fixed in production (T0SZ=16 +
+   `tlbi vmalle1` at the switch); `zig build run` passes with evidence
+   saved under `artifacts/`, and the matching MMIO/serial assumptions are
+   flipped in `docs/hardware-contract.md`. (The bad-handoff failure gate
+   — formerly the other unpassed gate — is closed since 2026-08-06.)
 3. Keep later interrupt/GIC, timer, allocator, and process work out of
    scope; those remain future milestones (roadmap).

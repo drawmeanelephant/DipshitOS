@@ -1,22 +1,24 @@
 #!/usr/bin/env bash
 #
-# verify-t0sz16.sh -- claim 6460 class-D diagnostic: does changing ONLY
-# TCR_EL1.T0SZ from 25 to 16 (which moves the 4 KiB stage-1 walk's initial
-# lookup level from 1 to 0, matching the built L0-rooted hierarchy) restore
-# the first post-MMU virtio-pci console TX?
+# verify-t0sz16.sh -- claim 1517 (claims 6460/7896 follow-up) class-D
+# regression: the production kernel now programs TCR_EL1.T0SZ=16 (W=48, the
+# 4 KiB stage-1 walk starts at level 0 — matching the built L0-rooted
+# hierarchy) and executes the full TLBI at the switch; -Dt0sz25 selects the
+# legacy start level 25 (W=39, walk starts at level 1 — the claim-6460/7896
+# mismatch that made every fresh post-switch walk fault on VZ).
 #
 # Controlled A/B on real Apple-silicon VZ hardware, using the existing
 # claim-0020 phase-C TX experiment (-Dtx-transition-c=true) as the payload
 # and observation point:
 #
-#   A. baseline:  -Dtx-transition-c=true            (T0SZ=25, production)
-#   B. candidate: -Dtx-transition-c=true -Dt0sz16=true  (T0SZ=16, diagnostic)
+#   A. baseline:  -Dtx-transition-c=true -Dt0sz25=true  (T0SZ=25, legacy)
+#   B. candidate: -Dtx-transition-c=true                 (T0SZ=16, production)
 #
-# SAME page tables, SAME TTBR0 root, SAME MAIR/attributes, SAME no-TLBI
-# behavior, SAME phase-C TX experiment; the built kernels differ in exactly
-# one instruction (verified: the T0SZ immediate in install_identity_map).
-# Fresh EFI variable store per boot. Per-boot evidence: runner output,
-# complete NVRAM marker ladder, vm-serial.log, revision/flags.
+# SAME page tables, SAME TTBR0 root, SAME MAIR/attributes, SAME phase-C TX
+# experiment; the kernels differ in the T0SZ immediate (+ the TLBI is
+# unconditional production behavior, claim 1517). Fresh EFI variable store
+# per boot. Per-boot evidence: runner output, complete NVRAM marker ladder,
+# vm-serial.log, revision/flags.
 #
 # Per boot this reports:
 #   entered        M2_TRC1! present (phase C entered)
@@ -31,7 +33,9 @@
 # boot, marker advance, or returning MMIO read alone is NOT "fixed".
 #
 # Diagnostic only (class D): a payload hit does NOT pass the claim-0002
-# serial gate. Does not flip the production default (T0SZ stays 25).
+# serial gate by itself (the gate is `zig build run`). Since claim 1517 the
+# production default IS T0SZ=16 + TLBI; -Dt0sz25 reproduces the old
+# production start level for regression.
 #
 # Usage:
 #   bash tools/verify-t0sz16.sh                     # both variants, BOOTS each
@@ -64,8 +68,8 @@ zig version; swift --version 2>&1 | head -1; sw_vers
 REVISION="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
 BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
 DIRTY="$(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
-BASELINE_FLAGS="-Dtx-transition-c=true"
-CANDIDATE_FLAGS="-Dtx-transition-c=true -Dt0sz16=true"
+BASELINE_FLAGS="-Dtx-transition-c=true -Dt0sz25=true"
+CANDIDATE_FLAGS="-Dtx-transition-c=true"
 echo "revision: $REVISION branch=$BRANCH baseline-flags=$BASELINE_FLAGS candidate-flags=$CANDIDATE_FLAGS boots-per-variant=$BOOTS dirty-files=$DIRTY"
 
 REPORT_BASE="artifacts/t0sz16-report-baseline.txt"
@@ -169,7 +173,7 @@ if [ "$VARIANT" = "baseline" ] || [ "$VARIANT" = "both" ]; then
     {
         echo "DIPSHITOS T0SZ start-level A/B (baseline) — claim 6460"
         echo "revision: $REVISION branch=$BRANCH boots=$BOOTS dirty-files=$DIRTY"
-        echo "flags: $BASELINE_FLAGS   (T0SZ=25, production)"
+        echo "flags: $BASELINE_FLAGS   (T0SZ=25, legacy start level)"
         echo "date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
         echo
     } >> "$REPORT_BASE"
@@ -177,7 +181,7 @@ if [ "$VARIANT" = "baseline" ] || [ "$VARIANT" = "both" ]; then
     while [ "$n" -lt "$BOOTS" ]; do
         n=$((n + 1))
         echo
-        echo "=== baseline boot $n (T0SZ=25) ==="
+        echo "=== baseline boot $n (T0SZ=25, legacy) ==="
         run_one "$REPORT_BASE" "baseline-$(printf "%02d" "$n")" "$BASELINE_FLAGS"
     done
 fi
@@ -187,7 +191,7 @@ if [ "$VARIANT" = "candidate" ] || [ "$VARIANT" = "both" ]; then
     {
         echo "DIPSHITOS T0SZ start-level A/B (candidate) — claim 6460"
         echo "revision: $REVISION branch=$BRANCH boots=$BOOTS dirty-files=$DIRTY"
-        echo "flags: $CANDIDATE_FLAGS   (T0SZ=16, diagnostic)"
+        echo "flags: $CANDIDATE_FLAGS   (T0SZ=16, production)"
         echo "date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
         echo
     } >> "$REPORT_CAND"
@@ -195,7 +199,7 @@ if [ "$VARIANT" = "candidate" ] || [ "$VARIANT" = "both" ]; then
     while [ "$n" -lt "$BOOTS" ]; do
         n=$((n + 1))
         echo
-        echo "=== candidate boot $n (T0SZ=16) ==="
+        echo "=== candidate boot $n (T0SZ=16, production) ==="
         run_one "$REPORT_CAND" "candidate-$(printf "%02d" "$n")" "$CANDIDATE_FLAGS"
     done
 fi
@@ -250,21 +254,18 @@ if [ -s "$REPORT_BASE" ] && [ -s "$REPORT_CAND" ]; then
     echo
     echo "=== interpretation ==="
     if [ "$B_RET" -eq 0 ] && [ "$C_RET" -ge 1 ] && [ "$C_USED" -ge 1 ] && [ "$C_PAY" -ge 1 ]; then
-        echo "  SUPPORT FOR THE HYPOTHESIS (candidate): baseline T0SZ=25 reproduces the post-MMU"
-        echo "  failure (phase C never returns); candidate T0SZ=16 lets phase C return, used.idx"
-        echo "  advances, and the exact TX payload reaches vm-serial.log. Start-level correction"
-        echo "  (T0SZ 25->16) restores post-MMU virtio-pci console TX on VZ (observe per-boot table)."
-        echo "  Default T0SZ is NOT flipped; the smallest production follow-up is a separate claim."
+        echo "  CONFIRMED (claim 1517): legacy T0SZ=25 reproduces the post-MMU failure (phase C"
+        echo "  never returns); production T0SZ=16 lets phase C return, used.idx advances, and the"
+        echo "  exact TX payload reaches vm-serial.log. The corrected start level restores"
+        echo "  post-MMU virtio-pci console TX on VZ (the class-B gate is `zig build run`)."
     elif [ "$C_RET" -eq 0 ]; then
-        echo "  FALSIFIED: candidate T0SZ=16 fails at the same boundary (phase C never returns)."
-        echo "  The source-level hierarchy/TCR start-level mismatch remains an architecture defect,"
-        echo "  but correcting the start level alone does NOT restore virtio access. STOP (no second"
-        echo "  speculative MMU variable)."
+        echo "  REGRESSION: production T0SZ=16 fails at the same boundary (phase C never returns)."
+        echo "  The start-level fix is not sufficient on this host/run; investigate before merging."
     elif [ "$C_RET" -ge 1 ] && [ "$C_PAY" -eq 0 ]; then
-        echo "  PARTIAL: T0SZ=16 moves the failure later (phase C returns / used advances at least once)"
-        echo "  but TX does not complete. Record the new smallest confirmed interval and STOP."
+        echo "  PARTIAL: production T0SZ=16 moves the failure later (phase C returns / used advances at"
+        echo "  least once) but TX does not complete. Record the new smallest confirmed interval."
     else
-        echo "  See the per-boot table; neither clear support nor clear falsification at this sample."
+        echo "  See the per-boot table; neither clear confirmation nor clear regression at this sample."
         echo "  Check whether baseline reproduced the historical failure (premise check)."
     fi
 else

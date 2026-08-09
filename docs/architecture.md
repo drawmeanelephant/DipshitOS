@@ -14,21 +14,24 @@ separate freestanding kernel image with a versioned handoff — see
 ADR 0004) is implemented: the stub allocates handoff v2, the kernel calls
 `ExitBootServices`, installs identity-map TTBR0_EL1 tables, probes declared
 MMIO windows, and drives a polled serial console before a terminal WFE loop.
-Its VZ serial gate is **not passed**, but the gates around it are: the
+Its VZ serial gate **passes since 2026-08-08** (claim 1517): the
 bad-handoff failure gate passes since 2026-08-06 (root cause: the naked
 `_start` shim clobbered the link register, so a pre-exit failure never
-returned to the loader), the ADR 0004 D4 marker-fallback gate passes, and
-the MMU-takeover death the marker ladder exposed (claim 0009) was
-root-caused and fixed (claim 0010, 2026-08-07) — the identity-map switch
-now completes on VZ; claim 0013 found the real console (a virtio-pci
-device outside the declared windows) and the VZ serial gate's remaining
-blocker is post-MMU access to its transport (claims 0018/0020), not a
-crash. Milestone 1.5
+returned to the loader), the ADR 0004 D4 marker-fallback gate passes, the
+MMU-takeover death the marker ladder exposed (claim 0009) was root-caused
+and fixed (claim 0010, 2026-08-07), claim 0013 found the real console (a
+virtio-pci device outside the declared windows), and claims 6460/7896
+root-caused the post-MMU transport hang (translation start-level mismatch
++ stale-TLB crutch) which claim 1517 fixed in production (T0SZ=16 +
+`tlbi vmalle1` at the switch) — `zig build run` puts the banner +
+memory-map + terminal state in `vm-serial.log`. Milestone 1.5
 adds the interactive monitor on top of this kernel:
 console abstraction, line editor, tokenizer, a 14-command registry
 (`kernel/src/{console,lineedit,tokenizer,shell,monitor,handoff,memmap}.zig`),
 host-tested with a mock console and a byte-exact transcript gate; its live
-serial channel is still blocked on post-MMU console transport access / RX.
+serial channel is up for TX (claim 1517) and **RX** (claim 6684: the
+polled virtio receive queue delivers host keystrokes end to end, asserted
+in `vm-serial.log` by `verify-live-transcript.sh`).
 The canonical, always-current status lives in
 [`docs/status.md`](status.md); this file documents the architecture that
 status refers to. The project targets Apple silicon /
@@ -60,8 +63,8 @@ VZEFIBootLoader (macOS VZ)
         └── loader loads \\KERNEL.BIN ──▶ kernel entry
              │  milestone two: ExitBootServices, identity-map MMU
              │  post-exit evidence channel: NVRAM ladder (EFI var DipshitM2) ──▶ artifacts/efi-vars.bin  [observed: ladder reaches M2_READY; NVRAM console channel (claim 0015) carries post-exit console bytes — shell + commands observed]
-             └── serial probe ──▶ declared windows decoded (efivars store + debug UART, claim 0013); real console = virtio-pci @ BAR 0x100010000 ──▶ post-MMU transport access hangs ──▶ vm-serial.log empty (claim 6460: T0SZ 25→16 restored TX in 6/18 boots — not reproducible; production T0SZ stays 25)
-             └── M1.5 monitor loop (console/lineedit/tokenizer/shell) ──▶ exists, host-tested via MockConsole; parks in WFE on the real kernel (RX not wired — readByte is a no-RX stub)
+             └── serial probe ──▶ declared windows decoded (efivars store + debug UART, claim 0013); real console = virtio-pci @ BAR 0x100010000 ──▶ post-MMU TX fixed (claim 1517: T0SZ=16 + TLBI at the switch) ──▶ vm-serial.log has banner + memory-map + terminal state
+             └── M1.5 monitor loop (console/lineedit/tokenizer/shell) ──▶ live on VZ: TX post-MMU (claim 1517) + RX via the polled virtio receive queue (claim 6684) — host keystrokes reach the dipshit> shell
 ```
 
 ## Interfaces
@@ -85,15 +88,15 @@ VZEFIBootLoader (macOS VZ)
   ADR 0004 D4). The declared windows are not the console — claim 0013
   decoded them as Apple's efivars store + an internal debug UART and
   found the real console is a modern virtio-pci device (BAR
-  `0x100010000`) whose post-MMU transport access hangs on VZ (claims
-  0018/0020), so no console is driven on VZ yet and the register layout
-  stays `[inferred]` (see `docs/hardware-contract.md`). The M1.5 monitor
-  therefore runs against a mock console in tests; the live channel awaits
-  reliable post-MMU console transport access + RX. Newest diagnostic on
-  the transport layer (claim 6460, class D): correcting the T0SZ
-  start-level mismatch (25→16) restored end-to-end post-MMU TX in 6/18
-  boots — hypothesis strengthened, not reproducible; production T0SZ
-  stays 25 (canonical blocker: `docs/status.md`).
+  `0x100010000`). Post-MMU transport access hung on VZ (claims
+  0018/0020) until claim 1517 fixed it in production (T0SZ=16 + TLBI at
+  the switch); the console is now driven post-MMU — TX is observed
+  (banner + `dipshit>` prompt in `vm-serial.log`) and **RX is live**
+  (claim 6684: the polled virtio receive queue delivers host keystrokes;
+  the RX register layout is `[observed]` for the receive queue — see
+  `docs/hardware-contract.md`). The M1.5 monitor runs against a mock
+  console in tests and live on VZ; the remaining live-gate gap is a live
+  reboot/shutdown observation (`docs/status.md`).
 - **Guest → host evidence:** because the VZ firmware exposes no visible
   text channel, the guest also writes its two lines to `\BOOTED.TXT` on the
   ESP via the UEFI Simple File System protocol. The host reads that file
