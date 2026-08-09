@@ -302,9 +302,9 @@ The command layer above is portable; `docs/march-m15.md` step 15's filesystem-co
   to that transport was blocked (claims 0018/0020) until claim 1517 fixed
   the underlying start-level mismatch; post-MMU TX is now **observed**
   (banner + memory-map + terminal state in `vm-serial.log`, claim 1517).
-  The virtio console's register layout stays [inferred] where RX is
-  concerned until the RX path is actually driven (see
-  `docs/hardware-contract.md`).
+  The virtio console's register layout is **[observed]** for the driven
+  queues — queue 1 TX (claim 1517) and queue 0 RX (claim 6684, live
+  keystrokes end to end) — see `docs/hardware-contract.md`.
 - **Runner serial input was `nil`; it is now a real handle in `--console`
   mode.** The evidence path (`zig build run`) still uses
   `VZFileHandleSerialPortAttachment(fileHandleForReading: nil, ...)`
@@ -328,12 +328,14 @@ The command layer above is portable; `docs/march-m15.md` step 15's filesystem-co
   serial port or framebuffer, but the kernel drives the virtio console
   itself — post-MMU virtio TX is now reliable (claim 1517, `zig build run`
   passes; MMU-takeover, device identity, and post-MMU TX are [observed]
-  per claims 0010/0013/0020/0021/1517; the RX-side register layout stays
-  [inferred]; see `hardware-contract.md`). Transcript tests: `zig build
+  per claims 0010/0013/0020/0021/1517, and the RX-side register layout is
+  [observed] for the receive queue (claim 6684); see
+  `hardware-contract.md`). Transcript tests: `zig build
   test-console` (class A mock) gates on bytes the shell actually emitted;
   the live `vm-serial.log` assertion is the separate class-B gate
-  (`live-transcript-rx`, deferred to claim 0002) and is not proven by
-  mock or NVRAM bytes.
+  (`live-transcript-rx`, claim 6684 — `bash tools/verify-live-transcript.sh`
+  passes: live RX observed end to end, re-verified at `4ca9fb4` by claim
+  7392) and is not proven by mock or NVRAM bytes.
 
 ## Multiagent coordination
 

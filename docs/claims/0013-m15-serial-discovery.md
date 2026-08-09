@@ -4,7 +4,7 @@
 - **Prompt / plan:** inline in this file; the discovery proceeds on a live Apple M4 host (VZ guest boots + NVRAM marker channel are the evidence path)
 - **Scope:** M1.5 march step 8 remaining work — find the VZ virtio-console register file (or document why it is unfindable), so the serial probe can select a console and the VZ serial gate can pass
 - **Depends on:** claim 0010 (MMU takeover fixed — the probe now runs to completion; ladder reaches `M2_SERIA`)
-- **Status:** ⛔ blocked (closed honestly — discovery complete, gate not passed)
+- **Status:** ✅ done 2026-08-07 — discovery complete (the VZ console is a virtio-pci device, decoded + transport armed pre-exit); the remaining post-MMU TX gate this claim could not pass was **resolved by claim 1517** (T0SZ=16 + TLBI — the VZ serial gate now passes; this claim's ⛔ is historical)
 - **Closed:** 2026-08-07 — evidence in `artifacts/efi-vars.bin` (this branch's runs), claim text below; ladder reaches `M2_READY` (console discovered + armed) then TX hangs post-exit
 
 ## Notes
