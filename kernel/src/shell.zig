@@ -21,6 +21,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const alloc = @import("alloc.zig");
 const console = @import("console.zig");
+const esp = @import("esp.zig"); // claim 3475: ESP file window (ls/cat/write)
 const lineedit = @import("lineedit.zig");
 const tokenizer = @import("tokenizer.zig");
 const monitor = @import("monitor.zig");
@@ -190,6 +191,7 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "available commands:\n" ++
         "  about     explain this questionable system\n" ++
         "  beans     count beans, probably\n" ++
+        "  cat       print a file from the ESP or NVRAM window\n" ++
         "  clear     clean up the crime scene\n" ++
         "  echo      repeat your regrettable decisions\n" ++
         "  elephant  operational mascot diagnostics\n" ++
@@ -197,6 +199,7 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "  handoff   display boot-to-kernel ABI data\n" ++
         "  help      list commands and their help text\n" ++
         "  hex       format an integer in hexadecimal\n" ++
+        "  ls        list files on the ESP (and NVRAM-backed files)\n" ++
         "  mem       summarize the EFI memory map\n" ++
         "  pages     physical page allocator pool\n" ++
         "  reboot    restart the machine\n" ++
@@ -205,6 +208,7 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "  timer     interrupt controller + timer status\n" ++
         "  uname     compact system identity\n" ++
         "  version   display build information\n" ++
+        "  write     write text to a file (persisted to EFI NVRAM)\n" ++
         "type 'help <command>' for details on a single command.\n" ++
         "dipshit> version\r\n" ++
         "dipshit-kernel\n" ++
@@ -237,6 +241,18 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "pages selftest: ok free=0x00000000000003c0\n" ++
         "dipshit> echo \"elephant business\"\r\n" ++
         "elephant business\n" ++
+        "dipshit> ls\r\n" ++
+        "ls: esp=0x0000000000000003 nvram=0x0000000000000000\n" ++
+        "  KERNEL.BIN  0x0000000000088b38  [esp]\n" ++
+        "  EFI         0x0000000000000000  [dir]\n" ++
+        "  BOOTED.TXT  0x0000000000000029  [esp]\n" ++
+        "dipshit> cat BOOTED.TXT\r\n" ++
+        "DIPSHITOS BOOTLOADER\n" ++
+        "firmware has agreed to cooperate\n" ++
+        "dipshit> write hello.txt hello world\r\n" ++
+        "write: hello.txt: not persisted - no EFI runtime services captured\n" ++
+        "dipshit> cat hello.txt\r\n" ++
+        "cat: hello.txt: not found (no such file in the ESP snapshot or NVRAM window)\n" ++
         "dipshit> " ++ long ++ "\r\n" ++
         "unknown command: " ++ long ++ "\n" ++
         "type 'help' for a list of commands\n" ++
@@ -254,7 +270,16 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
     // exactly as kernel_main does — the `pages` command reports/exercises
     // that pool.
     _ = alloc.init(make_view());
-    mock.feed("help\nversion\nmem\npages\npages selftest\necho \"elephant business\"\n");
+    // Claim 3475: populate the ESP file window the way kernel_main's
+    // pre-exit snapshot does (KERNEL.BIN listed-but-unloaded, an EFI
+    // directory, BOOTED.TXT content-loaded). A test process has no EFI
+    // runtime services, so `write` honestly reports it cannot persist.
+    esp.reset();
+    _ = esp.add_esp_entry("KERNEL.BIN", 0x88b38, "");
+    _ = esp.add_dir_entry("EFI");
+    _ = esp.add_esp_entry("BOOTED.TXT", 0x29, "DIPSHITOS BOOTLOADER\nfirmware has agreed to cooperate\n");
+    esp.set_runtime(null);
+    mock.feed("help\nversion\nmem\npages\npages selftest\necho \"elephant business\"\nls\ncat BOOTED.TXT\nwrite hello.txt hello world\ncat hello.txt\n");
     mock.feed(long);
     mock.feed("\n\x03\n");
     while (shell.poll() != .idle) {}

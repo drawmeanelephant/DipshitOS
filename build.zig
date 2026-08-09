@@ -89,6 +89,14 @@ pub fn build(b: *std.Build) void {
     // ASCII variable `DipshitMmu` for a host-side firmware-vs-kernel diff.
     // Default off: the default build is byte-identical.
     const fw_mmu_capture = b.option(bool, "fw-mmu-capture", "Capture firmware MMU registers + a virtio BAR-window table walk pre-exit, persisted to NVRAM (claim 0021 diagnostic)") orelse false;
+    // Claim 3475: `-Dprobe-var` persists the claim-0013 probe dump (the raw
+    // declared-MMIO-window / config-table / ACPI evidence) as the chunked
+    // `DipshitP0..N` variables. Default OFF: the serial log carries the
+    // probe records, and VZ's variable store is append-per-write, so the
+    // ~32 KiB persist per boot starved the store and left no room for the
+    // ESP file window's `write` (claim 3475; claim 0015 already gated the
+    // persist off in nvram-console builds for the same starvation).
+    const probe_var = b.option(bool, "probe-var", "Persist the claim-0013 probe dump as DipshitP* NVRAM variables (diagnostic; default off — the serial log carries the probe records, and the persist starves the variable store)") orelse false;
     // Claim 1517: production T0SZ is 16 (correct start level for the built
     // L0-rooted hierarchy). `-Dt0sz25` selects the legacy 25 (W=39, walk
     // starts at level 1 — the claim-6460/7896 start-level mismatch that
@@ -108,6 +116,7 @@ pub fn build(b: *std.Build) void {
     const walk_probe = b.option(bool, "walk-probe", "Diagnostic: post-switch walk-validity probe battery with per-probe NVRAM markers (claim 7896; default off)") orelse false;
     const kernel_options = b.addOptions();
     kernel_options.addOption(bool, "nvram_console", nvram_console);
+    kernel_options.addOption(bool, "probe_var", probe_var);
     kernel_options.addOption(bool, "preexit_tx", preexit_tx);
     kernel_options.addOption(bool, "tx_diag", tx_diag);
     kernel_options.addOption(bool, "tx_transition_a", tx_transition_a);

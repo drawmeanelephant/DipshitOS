@@ -49,7 +49,8 @@
 | `live-exceptions` | B | gate | yes | no | yes | `bash tools/verify-live-exceptions.sh` — **PASS 2026-08-08** (claim 9746): VBAR_EL1 vectors installed; `dipshit> fault` triggers a real synchronous `udf` reported and resumed live (shell continues) |
 | `live-timer` | B | gate | yes | no | yes | `bash tools/verify-live-timer.sh` — **PASS 2026-08-08** (claim 7948): GIC + CNTP programmed and read-back verified live; `timer` shows `armed=1` and the poll-driven heartbeat grows (VZ delivers no IRQs — see claim); 3/3 boots |
 | `live-reboot-shutdown` | B | gate | yes | no | yes | `bash tools/verify-live-reboot.sh` — **PASS 2026-08-08** (claim 0527): hard gate 6 — a real EFI `ResetSystem` from a live `dipshit>` shell; `reboot` resets the machine (second full takeover, fresh map key), `shutdown` powers it off (VM state → stopped), 4/4 boots |
-| `verify-vz` | B | aggregate | no | no | yes | `just verify-vz` — serial takeover + bad-handoff + marker + nvram-console + host-console + live-transcript + live-exceptions + live-timer + live-reboot-shutdown (Apple silicon only) |
+| `live-fs` | B | gate | yes | no | yes | `bash tools/verify-live-fs.sh` — **PASS 2026-08-09** (claim 3475): hard gate 5 — `ls`/`cat`/`write` persist through reboot via the pre-exit ESP snapshot + NVRAM-persisted writes (run A persists `hello world`, run B — same store — still lists/cats it), 1/1 pair |
+| `verify-vz` | B | aggregate | no | no | yes | `just verify-vz` — serial takeover + bad-handoff + marker + nvram-console + host-console + live-transcript + live-fs + live-exceptions + live-timer + live-reboot-shutdown (Apple silicon only) |
 | `console` | C | interactive | yes | no | yes | `zig build console` — interactive host serial console; needs a human at the keyboard |
 | `preexit-tx` | D | diagnostic | no | no | yes | `bash tools/verify-preexit-tx.sh` (mechanism: `zig build preexit-tx`) — claim 0017 |
 | `tx-diag` | D | diagnostic | no | no | yes | `bash tools/verify-tx-diag.sh` (mechanism: `zig build tx-diag`) — claim 0018 |
@@ -102,6 +103,7 @@ GATE id=live-transcript-rx class=B kind=gate ci=no apple=yes gate=yes status=pas
 GATE id=live-exceptions class=B kind=gate ci=no apple=yes gate=yes status=pass cmd=bash tools/verify-live-exceptions.sh
 GATE id=live-timer class=B kind=gate ci=no apple=yes gate=yes status=pass cmd=bash tools/verify-live-timer.sh
 GATE id=live-reboot-shutdown class=B kind=gate ci=no apple=yes gate=yes status=pass cmd=bash tools/verify-live-reboot.sh
+GATE id=live-fs class=B kind=gate ci=no apple=yes gate=yes status=pass cmd=bash tools/verify-live-fs.sh
 GATE id=verify-vz class=B kind=aggregate ci=no apple=yes gate=no cmd=just verify-vz
 GATE id=console class=C kind=interactive ci=no apple=yes gate=yes cmd=zig build console
 GATE id=preexit-tx class=D kind=diagnostic ci=no apple=yes gate=no cmd=bash tools/verify-preexit-tx.sh

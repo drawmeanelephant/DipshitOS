@@ -22,6 +22,8 @@ const alloc = @import("alloc.zig");
 const memmap = @import("memmap.zig");
 const monitor = @import("monitor.zig");
 const shell = @import("shell.zig");
+// Claim 3475: ESP file window (pre-exit snapshot + NVRAM-persisted write).
+const esp = @import("esp.zig");
 
 // Claim 0023: the handoff-v2 contract, the identity-map MMU, and the
 // evidence channel (takeover markers + probe dumps) live in their own
@@ -192,21 +194,20 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
     evidence.dump_mmio_descriptors(map_buffer.map);
     evidence.dump_config_table(st);
     pci.dump_acpi(st);
-    // Claim 0015: in nvram-console builds the console stream itself carries
-    // the map/probe evidence through the NVRAM channel, so persisting the
-    // separate ~40 KB DipshitProbe variable is redundant AND starves the
-    // chunk channel (the store is only ~61 KB writable on VZ, observed:
-    // both gate runs died at 0xf061 with the session cut off mid-help).
-    if (comptime !build_options.nvram_console) evidence.write_probe_var(st);
-
-    // Claim 0013: the serial probe runs PRE-EXIT — post-exit reads of the
-    // declared MMIO windows hang on VZ (observed every run). The selection
-    // is remembered in the console_* globals and used post-exit for TX only.
+    // Claim 3475: the probe dump is persisted ONCE, after the serial
+    // selection is known, and only in `-Dprobe-var` diagnostic builds. The
+    // serial log carries the probe records (base/layout/records below), and
+    // VZ's append-per-write variable store fills up fast: the ~32 KiB
+    // persist per boot (16 chunks × 2 KiB) left ~64 B free by the time the
+    // shell ran, so the ESP file window's `write` always failed with
+    // EFI_OUT_OF_RESOURCES (observed, claim 3475). Claim 0015 already
+    // gated the persist off in nvram-console builds for the same
+    // starvation; `-Dprobe-var` restores it for diagnostics.
     const pre = probe_serial_pre(map_buffer.map, st);
     console_kind = pre.kind;
     console_base = pre.base;
     evidence.dump_sel(pre.kind, pre.base);
-    if (comptime !build_options.nvram_console) evidence.write_probe_var(st);
+    if (comptime build_options.probe_var) evidence.write_probe_var(st);
 
     // Claim 0017 diagnostic (build-gated `-Dpreexit-tx`): transmit a fixed
     // line through the SAME virtio-pci transport the post-exit path uses
@@ -235,6 +236,21 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
     // and reached the exit call. The persisted NVRAM marker being M2_ENTRY
     // instead means the kernel died in that window.
     evidence.write_marker_var(st, marker_prex);
+
+    // Claim 3475: the ESP file window. Boot Services are still alive here,
+    // so the kernel snapshots the ESP root (names/sizes/content for small
+    // files) via the Simple File System protocol — the loader's proven
+    // pattern — and scans the runtime-variable store for files persisted by
+    // a PREVIOUS boot (`write` stores content as `DipshitF:*` variables;
+    // the runner's VZEFIVariableStore keeps them across boots, so files
+    // survive reboot). Both are best effort; a failure leaves the window
+    // empty and the monitor reports it honestly. The scan runs PRE-exit so
+    // a hang would stop the marker ladder at M2_PREX! (distinguishable),
+    // and post-exit `write` still works: SetVariable is a runtime service
+    // (proven post-exit on VZ, claims 0009/0015), not a boot service.
+    esp.set_runtime(st.runtime_services);
+    esp.snapshot_esp(st, handoff_rec.image_handle);
+    esp.scan_nvram();
 
     var exited = false;
     var attempt: usize = 0;
@@ -414,6 +430,18 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
     uart_hex(timer.ppi);
     uart_puts(" freq=");
     uart_hex(timer.freq);
+    uart_puts("\n");
+
+    // Claim 3475: the ESP file window summary (names/sizes/content
+    // snapshotted pre-exit, plus NVRAM-backed files from previous boots).
+    // A second boot's line showing the file `write` stored in boot one is
+    // the persistence-through-reboot evidence in the serial log.
+    uart_puts("esp window: esp=");
+    uart_hex(@intCast(esp.esp_count()));
+    uart_puts(" nvram=");
+    uart_hex(@intCast(esp.nvram_count()));
+    uart_puts(" store-free=");
+    uart_hex(esp.remaining_bytes());
     uart_puts("\n");
 
     uart_puts("kernel terminal state\n");

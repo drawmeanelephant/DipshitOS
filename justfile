@@ -43,6 +43,7 @@ verify-vz:
     bash tools/verify-nvram-console.sh
     bash tools/verify-host-console.sh
     bash tools/verify-live-transcript.sh
+    bash tools/verify-live-fs.sh
     bash tools/verify-live-timer.sh
     bash tools/verify-live-reboot.sh
 
@@ -149,6 +150,10 @@ verify-live-exceptions:
 # Verify the live GIC + generic timer gate (class B — boots a VZ VM; GIC + CNTP programmed, drives `timer`, asserts armed=1 + ≥5 consumed/re-armed comparator heartbeats in vm-serial.log; claim 7948; Apple silicon only)
 verify-live-timer:
     bash tools/verify-live-timer.sh
+
+# Verify the live ESP file window (class B — boots VZ VMs; ls/cat from the pre-exit ESP snapshot + write persisted to EFI NVRAM and read back across a reboot; claim 3475, hard gate 5; Apple silicon only)
+verify-live-fs:
+    bash tools/verify-live-fs.sh
 
 # Verify the live reboot/shutdown observation (class B — boots VZ VMs; a real EFI ResetSystem from a live dipshit> shell: reboot resets the machine, shutdown powers it off; claim 0527, hard gate 6; Apple silicon only)
 verify-live-reboot:

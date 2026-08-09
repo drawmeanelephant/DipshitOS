@@ -25,7 +25,9 @@ for the project rules.
   terminal state in `vm-serial.log`). The bad-handoff, marker-fallback,
   and NVRAM-console gates pass. Current VZ gate state: see
   [`docs/status.md`](docs/status.md).
-- **Current:** milestone 1.5 — the interactive `dipshit>` kernel monitor.
+- **Done 2026-08-09 (all 7 M1.5 hard gates pass; tagged
+  `m1.5-interactive-monitor`):** milestone 1.5 — the interactive `dipshit>`
+  kernel monitor (live shell, RX, reboot/shutdown, ESP file window).
 - The milestone-one `KERNEL.TXT` corruption is fixed (ADR 0002).
 
 Milestone two adds the kernel proper: the stub allocates handoff contract v2,
@@ -40,19 +42,22 @@ shifted slices of the kernel image's `.rodata` on Apple VZ firmware) is
 0002), and `\KERNEL.TXT` is byte-perfect and gated by `zig build run`
 alongside `\BOOTED.TXT`, `\LOADER.TXT`, and `\RC.TXT`.
 
-**Current: milestone 1.5, the interactive kernel monitor** — a live
-command monitor (`dipshit>` prompt) served by the kernel's polled serial
-console: identity commands, memory-map inspection, shell utilities, and
-machine controls. The host plumbing (duplex serial, terminal handling,
-`zig build console`), console & shell core (RX abstraction, line editor,
-tokenizer, prompt loop), and command registry (14 commands, mock-tested)
-are built; the transcript test gate passes (`zig build test-console`).
-The **VZ serial gate passes** (claim 1517, 2026-08-08 — post-MMU virtio TX
-fixed with T0SZ=16 + `tlbi vmalle1` at the switch) **and the RX path is
-live** (claim 6684, 2026-08-08): the polled virtio receive queue delivers
-host keystrokes end to end — `bash tools/verify-live-transcript.sh`
-drives `help`/`version`/`mem`/`echo` into a real session and asserts the
-live `dipshit>` transcript in `vm-serial.log` (3/3 boots). Canonical
+**Milestone 1.5, the interactive kernel monitor, is done (2026-08-09).**
+A live command monitor (`dipshit>` prompt) served by the kernel's polled
+serial console: identity commands, memory-map inspection, shell utilities,
+machine controls, and an ESP file window. The host plumbing (duplex
+serial, terminal handling, `zig build console`), console & shell core (RX
+abstraction, line editor, tokenizer, prompt loop), and command registry
+(20 commands, mock-tested) are built; the transcript test gate passes
+(`zig build test-console`, byte-identical fixture). The **VZ serial gate
+passes** (claim 1517 — post-MMU virtio TX fixed with T0SZ=16 + `tlbi
+vmalle1` at the switch), **live RX** delivers host keystrokes end to end
+(claim 6684 — `verify-live-transcript.sh` asserts the live transcript),
+**live reboot/shutdown** is observed (claim 0527 — `verify-live-reboot.sh`:
+`reboot` resets the machine, `shutdown` powers it off), and **`ls`/`cat`/
+`write` persist through reboot** via the pre-exit ESP snapshot +
+NVRAM-persisted writes (claim 3475 — `verify-live-fs.sh`). **All 7 hard
+gates pass; the milestone is tagged `m1.5-interactive-monitor`.** Canonical
 state: [`docs/status.md`](docs/status.md).
 The goal, hard gates, and per-step progress live in
 **`docs/status.md`** (the living status & goals tracker).
@@ -127,8 +132,9 @@ dipshitos/
 │   ├── src/handoff.zig        Handoff v2 struct validation
 │   ├── src/lineedit.zig       Fixed-buffer line editor (no allocator)
 │   ├── src/tokenizer.zig      Command-line tokenizer (no allocator)
-│   ├── src/monitor.zig        Comptime command registry (14 commands)
+│   ├── src/monitor.zig        Comptime command registry (20 commands)
 │   ├── src/shell.zig          Prompt loop: banner → lineedit → tokenize → exec
+│   ├── src/esp.zig            Pre-exit ESP snapshot + NVRAM file window (ls/cat/write)
 │   └── linker.ld              dense layout (avoids 64 KiB lld padding)
 ├── tools/elf2bin.py           ELF → flat KERNEL.BIN (format v1) converter
 ├── host/vm-runner/            Swift Virtualization.framework launcher
@@ -252,23 +258,25 @@ The gate-by-gate plan and active work claims live in
 [`docs/status.md`](docs/status.md); the milestone plan is in
 [`docs/roadmap.md`](docs/roadmap.md).
 
-1. **Close the M1.5 serial gap: post-MMU console transport + RX.** The
-   monitor itself is implemented and host-tested (console abstraction,
-   line editor, tokenizer, 14 commands, `zig build test-console`
-   transcript gate at the mock level; the host-side `--console` plumbing
-   is gated by `bash tools/verify-host-console.sh`). The console device
-   is found (a virtio-pci console, claim 0013), the NVRAM channel
-   carries post-exit console bytes (claim 0015), the post-MMU transport
-   layer is **fixed** (claim 1517: T0SZ=16 + TLBI at the switch), and
-   **live RX is wired** (claim 6684: the polled virtio receive queue
-   delivers host keystrokes end to end — `verify-live-transcript.sh`
-   asserts the live `dipshit>` transcript in `vm-serial.log`). Done
-   2026-08-08 (claim 0527): the live reboot/shutdown observation —
-   `reboot` resets the machine (second full takeover, fresh map key),
-   `shutdown` powers it off (VM state → stopped), 4/4 boots via
-   `verify-live-reboot.sh`. Every M1.5 hard gate passes; the remaining
-   close-out is the milestone tag. Tracked step-by-step in
-   `docs/status.md` / `docs/march-m15.md`.
+1. ~~**Close the M1.5 serial gap: post-MMU console transport + RX.**~~
+   **DONE 2026-08-09 — milestone 1.5 closed (tag
+   `m1.5-interactive-monitor`).** The monitor itself is implemented and
+   host-tested (console abstraction, line editor, tokenizer, 20 commands,
+   `zig build test-console` transcript gate at the mock level; the
+   host-side `--console` plumbing is gated by `bash tools/verify-host-console.sh`).
+   The console device is found (a virtio-pci console, claim 0013), the
+   NVRAM channel carries post-exit console bytes (claim 0015), the
+   post-MMU transport layer is **fixed** (claim 1517: T0SZ=16 + TLBI at
+   the switch), **live RX is wired** (claim 6684: the polled virtio
+   receive queue delivers host keystrokes end to end —
+   `verify-live-transcript.sh` asserts the live `dipshit>` transcript in
+   `vm-serial.log`), the **live reboot/shutdown observation** is done
+   (claim 0527 — `reboot` resets the machine, `shutdown` powers it off,
+   4/4 boots via `verify-live-reboot.sh`), and the **filesystem gate is
+   closed** (claim 3475 — `ls`/`cat`/`write` persist through reboot via
+   the pre-exit ESP snapshot + NVRAM-persisted writes,
+   `verify-live-fs.sh`). **All 7 M1.5 hard gates pass; milestone tagged.**
+   Tracked step-by-step in `docs/status.md` / `docs/march-m15.md`.
 2. ~~Resolve the milestone-two VZ serial gate itself.~~ **DONE 2026-08-08
    (claim 1517):** the post-MMU transport blocker (start-level mismatch +
    stale-TLB crutch, claims 6460/7896) is fixed in production (T0SZ=16 +

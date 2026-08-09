@@ -299,9 +299,14 @@ pub fn virtio_pci_init(st: *const SystemTable) bool {
     // stops here, a config-space read in the walk is the death site.
     evidence.write_marker_var(st, marker_vpdev);
     // Persist the walk results now: if a transport write below stalls, the
-    // host still sees the resolved common/notify addresses. Claim 0015: not
-    // in nvram-console builds — the chunk channel needs the store space.
-    if (comptime !build_options.nvram_console) evidence.write_probe_var(st);
+    // host still sees the resolved common/notify addresses. Claim 3475: only
+    // in `-Dprobe-var` diagnostic builds — VZ's append-per-write variable
+    // store fills fast, and the ~32 KiB persist per boot (16 chunks × 2 KiB)
+    // starved the store so the ESP file window's `write` always failed with
+    // EFI_OUT_OF_RESOURCES (observed, claim 3475). The serial log carries
+    // the probe records; claim 0015 gated the persist off in nvram-console
+    // builds for the same starvation.
+    if (comptime build_options.probe_var) evidence.write_probe_var(st);
 
     // Modern transport init: reset, ACKNOWLEDGE|DRIVER, accept
     // VIRTIO_F_VERSION_1, FEATURES_OK.
@@ -471,6 +476,18 @@ pub fn virtio_pci_init(st: *const SystemTable) bool {
 /// Runs POST-EXIT on the pre-exit-captured VAs. A stuck device times out
 /// and drops the line instead of hanging the kernel (TX remains honest: the
 /// serial log is the gate, and M2_TXOK! records that the path returned).
+/// Claim 3475: the coarse TXST!/TXNT!/TXPL! stage markers (and the post-exit
+/// probe tail) are written only for the FIRST flush. They exist to name the
+/// hang site of the historically fatal first post-exit TX (claim 0013/0018
+/// era) — every later flush was writing 3 more ~88-byte variables into VZ's
+/// append-only variable store: ~113 flushes/boot ≈ 30 KiB of pure marker
+/// traffic that exhausted the store and broke `write` (EFI_OUT_OF_RESOURCES,
+/// claim 3475). Diagnostic builds (`-Dtx-diag`) keep their own full
+/// per-operation bracketing; the first-flush markers preserve the original
+/// hang-site evidence path for every gate that reads the ladder (preexit-tx,
+/// tx-transition, t0sz16 all analyze only the first/transition flush).
+var vp_first_flush: bool = true;
+
 pub fn virtio_pci_flush() void {
     if (!vp_ready or vp_tx_len == 0) return;
     const st = st_tx;
@@ -519,9 +536,10 @@ pub fn virtio_pci_flush() void {
         _ = vp_read8(0x14);
         if (st != null) evidence.write_marker_var(st.?, marker_txar);
     } else {
-        // Claim 0013 evidence path (default build, unchanged): coarse
-        // markers + post-exit status probe + probe tail.
-        if (st_tx != null) evidence.write_marker_var(st_tx.?, marker_txst);
+        // Claim 0013 evidence path (default build): coarse markers + post-exit
+        // status probe + probe tail — markers/tail on the FIRST flush only
+        // (claim 3475; see vp_first_flush above).
+        if (st_tx != null and vp_first_flush) evidence.write_marker_var(st_tx.?, marker_txst);
         evidence.dump_str("VP pst=");
         evidence.dump_hex(vp_read8(0x14));
         evidence.dump_str("\n");
@@ -533,7 +551,7 @@ pub fn virtio_pci_flush() void {
         // claim 0018 removed it in diag builds for the same reason), leaving
         // only MMIO accesses + marker writes in the window.
         if (comptime (!build_options.nvram_console and !tx_transition_enabled)) {
-            if (st_tx != null) evidence.write_probe_tail(st_tx.?);
+            if (st_tx != null and vp_first_flush) evidence.write_probe_tail(st_tx.?);
         }
     }
     if (comptime build_options.tx_diag) {
@@ -551,7 +569,7 @@ pub fn virtio_pci_flush() void {
     if (comptime build_options.tx_diag) {
         if (st != null) evidence.write_marker_var(st.?, marker_txan); // 7 after notify
     } else {
-        if (st_tx != null) evidence.write_marker_var(st_tx.?, marker_txnt);
+        if (st_tx != null and vp_first_flush) evidence.write_marker_var(st_tx.?, marker_txnt);
     }
     if (comptime build_options.tx_diag) {
         if (st != null) evidence.write_marker_var(st.?, marker_txup); // 8 entered used-ring poll
@@ -570,8 +588,9 @@ pub fn virtio_pci_flush() void {
     if (comptime build_options.tx_diag) {
         if (st != null) evidence.write_marker_var(st.?, marker_txfr); // 10 flush returned
     } else {
-        if (st_tx != null) evidence.write_marker_var(st_tx.?, marker_txpl);
+        if (st_tx != null and vp_first_flush) evidence.write_marker_var(st_tx.?, marker_txpl);
     }
+    vp_first_flush = false;
     vp_tx_len = 0;
 }
 

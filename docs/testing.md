@@ -138,8 +138,10 @@ Every verification command belongs to exactly one class (canonical inventory:
 > **CI proves only this class** — a green badge says nothing about the
 > Apple-silicon VZ hardware gates (class B). Those run as `just verify-vz`
 > (serial takeover `zig build run`, bad-handoff, marker, NVRAM console,
-> host-console, live transcript/RX `verify-live-transcript.sh` — Apple
-> silicon only); the class-D diagnostics (preexit-tx, tx-diag,
+> host-console, live transcript/RX `verify-live-transcript.sh`, live fs
+> `verify-live-fs.sh`, live exceptions, live timer, live reboot/shutdown
+> `verify-live-reboot.sh` — Apple silicon only); the class-D diagnostics
+> (preexit-tx, tx-diag,
 > tx-transition, fw-mmu-capture, t0sz25, walk-probe, t0sz16-walkprobe)
 > run individually per claim. See
 > [`docs/gate-inventory.md`](gate-inventory.md).
@@ -247,3 +249,15 @@ Every verification command belongs to exactly one class (canonical inventory:
       4421-byte transcripts. Evidence: `artifacts/live-transcript-*`
       (`live-transcript-gate.txt`, `live-transcript-report.txt`,
       `live-transcript-run-<NN>.txt`, `live-transcript-serial-<NN>.log`).
+
+- [x] M1.5 live ESP file-window gate (class B, claim 3475): **passing
+      (2026-08-09)** — `bash tools/verify-live-fs.sh` boots two VMs
+      against the SAME runner variable store: run A (fresh store) drives
+      `write hello.txt hello world` + `ls` + `cat hello.txt` and asserts
+      the write-ok reply, the real ESP snapshot listing (`EFI/`,
+      `KERNEL.BIN`, `BOOTED.TXT`, `MEMMAP.TXT`, `LOADER.TXT`), `hello.txt`
+      listed `[nvram]`, and the cat reply; run B (fresh boot, same store)
+      still lists `hello.txt [nvram]` and prints the content — the file
+      persisted through reboot. 1/1 pair. Evidence:
+      `artifacts/live-fs-*` (`live-fs-gate.txt`, `live-fs-report.txt`,
+      `live-fs-run-<A|B>-<NN>.txt`, `live-fs-serial-<A|B>-<NN>.log`).

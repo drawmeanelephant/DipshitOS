@@ -24,14 +24,18 @@ virtio-pci device outside the declared windows), and claims 6460/7896
 root-caused the post-MMU transport hang (translation start-level mismatch
 + stale-TLB crutch) which claim 1517 fixed in production (T0SZ=16 +
 `tlbi vmalle1` at the switch) — `zig build run` puts the banner +
-memory-map + terminal state in `vm-serial.log`. Milestone 1.5
-adds the interactive monitor on top of this kernel:
-console abstraction, line editor, tokenizer, a 14-command registry
-(`kernel/src/{console,lineedit,tokenizer,shell,monitor,handoff,memmap}.zig`),
+memory-map + terminal state in `vm-serial.log`. **Milestone 1.5
+(implemented 2026-08-09) adds the interactive monitor on top of this
+kernel:** console abstraction, line editor, tokenizer, a 20-command
+registry (`kernel/src/{console,lineedit,tokenizer,shell,monitor,handoff,memmap,esp}.zig`),
 host-tested with a mock console and a byte-exact transcript gate; its live
 serial channel is up for TX (claim 1517) and **RX** (claim 6684: the
 polled virtio receive queue delivers host keystrokes end to end, asserted
-in `vm-serial.log` by `verify-live-transcript.sh`).
+in `vm-serial.log` by `verify-live-transcript.sh`), **live
+reboot/shutdown** is observed (claim 0527), and the **ESP file window**
+(claim 3475) gives `ls`/`cat`/`write` with persistence through reboot via
+a pre-exit EFI Simple File System snapshot + NVRAM-persisted writes. All
+7 M1.5 hard gates pass; milestone tagged `m1.5-interactive-monitor`.
 The canonical, always-current status lives in
 [`docs/status.md`](status.md); this file documents the architecture that
 status refers to. The project targets Apple silicon /

@@ -19,6 +19,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const alloc = @import("alloc.zig");
 const console = @import("console.zig");
+const esp = @import("esp.zig");
 const exceptions = @import("exceptions.zig");
 const gic = @import("gic.zig");
 const handoff = @import("handoff.zig");
@@ -193,7 +194,7 @@ pub const Command = struct {
 
 /// Number of commands. The registry is built at runtime (not a const
 /// table): see `ensure_registry`.
-pub const registry_count: usize = 17;
+pub const registry_count: usize = 20;
 
 /// Command registry, built at runtime into BSS. A `const` table would hold
 /// link-time absolute addresses for BOTH the string slices and the handler
@@ -211,6 +212,7 @@ fn ensure_registry() []const Command {
         registry_storage = .{
             .{ .name = "about", .help = "explain this questionable system", .usage = "about", .handler = cmd_about },
             .{ .name = "beans", .help = "count beans, probably", .usage = "beans [count]", .max_args = 1, .handler = cmd_beans },
+            .{ .name = "cat", .help = "print a file from the ESP or NVRAM window", .usage = "cat <file>", .min_args = 1, .max_args = 1, .handler = cmd_cat },
             .{ .name = "clear", .help = "clean up the crime scene", .usage = "clear", .handler = cmd_clear },
             .{ .name = "echo", .help = "repeat your regrettable decisions", .usage = "echo <text...>", .handler = cmd_echo },
             .{ .name = "elephant", .help = "operational mascot diagnostics", .usage = "elephant", .handler = cmd_elephant },
@@ -218,6 +220,7 @@ fn ensure_registry() []const Command {
             .{ .name = "handoff", .help = "display boot-to-kernel ABI data", .usage = "handoff", .handler = cmd_handoff },
             .{ .name = "help", .help = "list commands and their help text", .usage = "help [command]", .max_args = 1, .handler = cmd_help },
             .{ .name = "hex", .help = "format an integer in hexadecimal", .usage = "hex <number>...", .min_args = 1, .handler = cmd_hex },
+            .{ .name = "ls", .help = "list files on the ESP (and NVRAM-backed files)", .usage = "ls", .handler = cmd_ls },
             .{ .name = "mem", .help = "summarize the EFI memory map", .usage = "mem", .handler = cmd_mem },
             .{ .name = "pages", .help = "physical page allocator pool", .usage = "pages [selftest]", .max_args = 1, .handler = cmd_pages },
             .{ .name = "reboot", .help = "restart the machine", .usage = "reboot", .handler = cmd_reboot },
@@ -226,6 +229,7 @@ fn ensure_registry() []const Command {
             .{ .name = "timer", .help = "interrupt controller + timer status", .usage = "timer", .handler = cmd_timer },
             .{ .name = "uname", .help = "compact system identity", .usage = "uname", .handler = cmd_uname },
             .{ .name = "version", .help = "display build information", .usage = "version", .handler = cmd_version },
+            .{ .name = "write", .help = "write text to a file (persisted to EFI NVRAM)", .usage = "write <file> <text...>", .min_args = 1, .handler = cmd_write },
         };
         registry_ready = true;
     }
@@ -476,6 +480,165 @@ fn cmd_mem(m: *Monitor, args: []const []const u8) ExecError {
     m.console.print_hex(h.kernel_size);
     m.console.puts(" bytes)\n");
     return .none;
+}
+
+// ---------------------------------------------------------------------------
+// ESP file-window commands (claim 3475 — M1.5 hard gate 5)
+// ---------------------------------------------------------------------------
+
+/// List the pre-exit ESP snapshot plus any NVRAM-backed files: name, size,
+/// and origin marker ([esp] snapshot, [dir], [nvram] persisted via EFI
+/// runtime variables). Deterministic and grep-able.
+fn cmd_ls(m: *Monitor, args: []const []const u8) ExecError {
+    _ = args;
+    m.console.puts("ls: esp=");
+    m.console.print_hex(@intCast(esp.esp_count()));
+    m.console.puts(" nvram=");
+    m.console.print_hex(@intCast(esp.nvram_count()));
+    m.console.puts("\n");
+    const list = esp.entries();
+    if (list.len == 0) {
+        m.console.print_line("ls: no files in the window (ESP snapshot empty or unavailable)");
+        return .none;
+    }
+    var width: usize = 0;
+    for (list) |e| width = @max(width, e.name_len);
+    for (list) |e| {
+        m.console.puts("  ");
+        m.console.puts(e.name[0..e.name_len]);
+        var pad: usize = e.name_len;
+        while (pad < width) : (pad += 1) m.console.putc(' ');
+        m.console.puts("  ");
+        m.console.print_hex(e.size);
+        m.console.puts("  [");
+        m.console.puts(switch (e.kind) {
+            .esp_dir => "dir",
+            .nvram_file => "nvram",
+            .esp_file => "esp",
+        });
+        m.console.puts("]\n");
+    }
+    return .none;
+}
+
+/// Print a file's content: from the ESP snapshot (pre-exit) or the NVRAM
+/// window (persisted by `write`). Honest diagnostics for directories,
+/// unloaded large files, and unknown names.
+fn cmd_cat(m: *Monitor, args: []const []const u8) ExecError {
+    const name = args[0];
+    const e = esp.lookup(name) orelse {
+        m.console.puts("cat: ");
+        m.console.puts(name);
+        m.console.print_line(": not found (no such file in the ESP snapshot or NVRAM window)");
+        return .invalid_argument;
+    };
+    switch (e.kind) {
+        .esp_dir => {
+            m.console.puts("cat: ");
+            m.console.puts(name);
+            m.console.print_line(": is a directory");
+            return .invalid_argument;
+        },
+        .nvram_file => {},
+        .esp_file => {
+            if (e.len == 0 and e.size > 0) {
+                m.console.puts("cat: ");
+                m.console.puts(name);
+                m.console.puts(": content not snapshotted (file is ");
+                m.console.print_hex(e.size);
+                m.console.puts(" bytes; the pre-exit window keeps files up to ");
+                m.console.print_hex(esp.esp_content_max);
+                m.console.print_line(" bytes)");
+                return .invalid_argument;
+            }
+        },
+    }
+    const content = esp.content_of(e);
+    m.console.puts(content);
+    // A trailing newline keeps the shell prompt on its own line; a file
+    // that already ends with one is printed verbatim (no double blank).
+    if (content.len == 0 or content[content.len - 1] != '\n') m.console.puts("\n");
+    return .none;
+}
+
+/// Persist text as an EFI runtime variable (`DipshitF:<name>`) and add it
+/// to the window — the milestone's pre-exit-file-window `write`: the file
+/// survives reboot because the runner's variable store persists across
+/// boots (claim 3475). Capacity is checked before the write; a failed
+/// SetVariable is reported honestly, never faked.
+fn cmd_write(m: *Monitor, args: []const []const u8) ExecError {
+    const name = args[0];
+    const parts = args[1..];
+    var len: usize = 0;
+    for (parts, 0..) |p, i| len += p.len + (if (i > 0) @as(usize, 1) else 0);
+    if (len > esp.nvram_content_max) {
+        m.console.puts("write: content too long (max ");
+        m.console.print_hex(esp.nvram_content_max);
+        m.console.puts(" bytes, got ");
+        m.console.print_hex(@intCast(len));
+        m.console.print_line(")");
+        return .invalid_argument;
+    }
+    var buf: [esp.nvram_content_max]u8 = undefined;
+    var n: usize = 0;
+    for (parts, 0..) |p, i| {
+        if (i > 0) {
+            buf[n] = ' ';
+            n += 1;
+        }
+        @memcpy(buf[n..][0..p.len], p);
+        n += p.len;
+    }
+    switch (esp.write_file(name, buf[0..n])) {
+        .ok => {
+            m.console.puts("write: ok (persisted ");
+            m.console.print_u64(n);
+            m.console.puts(" bytes to EFI variable DipshitF:");
+            m.console.puts(name);
+            m.console.puts(")\n");
+            return .none;
+        },
+        .no_runtime => {
+            m.console.puts("write: ");
+            m.console.puts(name);
+            m.console.print_line(": not persisted - no EFI runtime services captured");
+            return .not_implemented;
+        },
+        .name_invalid => {
+            m.console.puts("write: invalid file name: ");
+            m.console.puts(name);
+            m.console.puts(" (max ");
+            m.console.print_u64(esp.name_max);
+            m.console.puts(" printable ASCII chars, no '/' or '\\')\n");
+            return .invalid_argument;
+        },
+        .content_too_long => {
+            m.console.puts("write: content too long (max ");
+            m.console.print_hex(esp.nvram_content_max);
+            m.console.puts(" bytes, got ");
+            m.console.print_hex(@intCast(n));
+            m.console.print_line(")");
+            return .invalid_argument;
+        },
+        .window_full => {
+            m.console.puts("write: ");
+            m.console.puts(name);
+            m.console.print_line(": not persisted - NVRAM file window full (max 8 files)");
+            return .invalid_argument;
+        },
+        .persist_failed => {
+            m.console.puts("write: ");
+            m.console.puts(name);
+            m.console.puts(": SetVariable failed (status=");
+            m.console.print_hex_min(@intFromEnum(esp.last_setvar_status));
+            m.console.puts(" store-free=");
+            m.console.print_hex_min(esp.last_query_remaining);
+            m.console.puts(" max-var=");
+            m.console.print_hex_min(esp.last_query_max_var);
+            m.console.print_line(") - file NOT persisted");
+            return .machine_failed;
+        },
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1273,4 +1436,76 @@ test "monitor: banner is deterministic and avoids invented claims" {
     try std.testing.expect(std.mem.indexOf(u8, out, "Type 'help' before touching anything expensive.") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "0.1") == null);
     try std.testing.expect(std.mem.indexOf(u8, out, "256 MiB") == null);
+}
+
+test "monitor: ls lists the ESP snapshot and NVRAM files deterministically" {
+    esp.reset();
+    try std.testing.expect(esp.add_esp_entry("KERNEL.BIN", 0x88b38, ""));
+    try std.testing.expect(esp.add_dir_entry("EFI"));
+    try std.testing.expect(esp.add_esp_entry("BOOTED.TXT", 0x29, "DIPSHITOS BOOTLOADER\nfirmware has agreed to cooperate\n"));
+    try std.testing.expect(esp.add_nvram_entry("HELLO.TXT", "hello world"));
+
+    var env = TestEnv.init();
+    var mon = env.monitor();
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"ls"}));
+    // Entries are listed in the window's order (ESP snapshot order from the
+    // EFI directory walk, then NVRAM files) — deterministic per boot. The
+    // name column pads to the widest entry; sizes are 0x + 16 hex digits.
+    try std.testing.expectEqualStrings(
+        "ls: esp=0x0000000000000003 nvram=0x0000000000000001\n" ++
+            "  KERNEL.BIN  0x0000000000088b38  [esp]\n" ++
+            "  EFI         0x0000000000000000  [dir]\n" ++
+            "  BOOTED.TXT  0x0000000000000029  [esp]\n" ++
+            "  HELLO.TXT   0x000000000000000b  [nvram]\n",
+        env.mock.contents(),
+    );
+}
+
+test "monitor: cat prints snapshotted and NVRAM content with honest errors" {
+    esp.reset();
+    try std.testing.expect(esp.add_esp_entry("BOOTED.TXT", 0x29, "DIPSHITOS BOOTLOADER\nfirmware has agreed to cooperate\n"));
+    try std.testing.expect(esp.add_esp_entry("KERNEL.BIN", 0x88b38, ""));
+    try std.testing.expect(esp.add_dir_entry("EFI"));
+    try std.testing.expect(esp.add_nvram_entry("hello.txt", "hello world"));
+
+    var env = TestEnv.init();
+    var mon = env.monitor();
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "cat", "BOOTED.TXT" }));
+    // The file already ends with a newline — cat prints it verbatim.
+    try std.testing.expectEqualStrings("DIPSHITOS BOOTLOADER\nfirmware has agreed to cooperate\n", env.mock.contents());
+    env.mock.reset();
+    // Case-insensitive lookup; the NVRAM copy wins over the ESP snapshot.
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "cat", "HELLO.TXT" }));
+    try std.testing.expectEqualStrings("hello world\n", env.mock.contents());
+    env.mock.reset();
+    try std.testing.expectEqual(ExecError.invalid_argument, exec(&mon, &.{ "cat", "KERNEL.BIN" }));
+    try std.testing.expect(std.mem.indexOf(u8, env.mock.contents(), "content not snapshotted") != null);
+    env.mock.reset();
+    try std.testing.expectEqual(ExecError.invalid_argument, exec(&mon, &.{ "cat", "EFI" }));
+    try std.testing.expectEqualStrings("cat: EFI: is a directory\n", env.mock.contents());
+    env.mock.reset();
+    try std.testing.expectEqual(ExecError.invalid_argument, exec(&mon, &.{ "cat", "NOPE.TXT" }));
+    try std.testing.expect(std.mem.indexOf(u8, env.mock.contents(), "not found") != null);
+}
+
+test "monitor: write joins arguments and honestly reports no runtime services in a test process" {
+    esp.reset();
+    esp.set_runtime(null);
+    var env = TestEnv.init();
+    var mon = env.monitor();
+    // In a host test process there is no EFI runtime services table; the
+    // write must be refused honestly, never faked.
+    try std.testing.expectEqual(ExecError.not_implemented, exec(&mon, &.{ "write", "hello.txt", "hello", "world" }));
+    try std.testing.expectEqualStrings(
+        "write: hello.txt: not persisted - no EFI runtime services captured\n",
+        env.mock.contents(),
+    );
+    // Bounds are validated before any persistence attempt.
+    env.mock.reset();
+    try std.testing.expectEqual(ExecError.invalid_argument, exec(&mon, &.{ "write", "bad/name.txt", "x" }));
+    try std.testing.expect(std.mem.indexOf(u8, env.mock.contents(), "invalid file name") != null);
+    env.mock.reset();
+    // Empty content is allowed (a zero-length file); still refused honestly.
+    try std.testing.expectEqual(ExecError.not_implemented, exec(&mon, &.{ "write", "n.txt" }));
+    try std.testing.expect(std.mem.indexOf(u8, env.mock.contents(), "content too long") == null);
 }
