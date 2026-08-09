@@ -4,7 +4,7 @@
 - **Prompt / plan:** `docs/m2-vz-serial-gate-prompt.md` (refreshed 2026-08-06)
 - **Scope:** M1.5 step 8 — confirm the serial console on a real VZ run
 - **Depends on:** bad-handoff fix (landed 2026-08-06)
-- **Status:** ⛔ blocked — gate re-run 2026-08-06 21:19, still zero serial bytes (blocker logged; no observed without a log)
+- **Status:** ⛔ superseded (historical block) — the VZ serial gate now **PASSES**: claim 1517 (T0SZ=16 + TLBI at the switch) put the exact banner + `memory-map descriptors=0x…` + `kernel terminal state` + the `dipshit>` prompt in `vm-serial.log`, re-verified at `4ca9fb4` by claim 7392. This claim's own 2026-08-06 block is the historical record; keep this file as history and track the live gate in `docs/status.md`.
 
 ## Notes
 

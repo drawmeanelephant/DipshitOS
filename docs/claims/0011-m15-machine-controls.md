@@ -19,12 +19,7 @@
   (landed). Live observation additionally depends on the VZ serial gate
   (claim 0002, ⛔ blocked — no usable MMIO serial device, kernel halts at
   `M2_SERIA`).
-- **Status:** ⛔ live gate blocked 2026-08-07 — real `ResetSystem`
-  mechanism shipped + unit-proven and wired; live observation impossible
-  this cycle (claim 0002: no usable serial device, kernel halts at
-  `M2_SERIA` before the monitor runs, so `ResetSystem` is never invoked).
-  No `M2_RST!` / no VM reset observed (evidence `artifacts/m15-machine-*.txt`);
-  hard gate 6 stays open.
+- **Status:** ⛔ superseded — the live `ResetSystem` observation this claim could not make was **achieved by claim 0527** (real EFI `ResetSystem` from a live `dipshit>` shell observed end to end on VZ: `reboot` resets the machine, `shutdown` powers it off, 4/4 boots; hard gate 6 closed 2026-08-08). The mechanism shipped + unit-proven here stays in production; this claim's 2026-08-07 live block is the historical record.
 
 ## Notes
 
