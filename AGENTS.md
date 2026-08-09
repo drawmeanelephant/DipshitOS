@@ -19,8 +19,8 @@ kernel monitor — closed and tagged `m1.5-interactive-monitor` on
 2026-08-09; milestone two's VZ serial gate passes since 2026-08-08, claim
 1517). The current stream is **milestone three's first cards**: the
 physical page allocator is done (claims 3972/5162), GIC + timer interrupts
-are programmed but IRQ delivery is blocked on VZ (claim 7948), and tasks
-come after interrupts.
+now deliver a real periodic PPI into the EL1 IRQ vector on VZ (claim 9187,
+3/3 strict live gate), and tasks are next.
 `docs/status.md` is the canonical, always-current answer to "where are we,
 and what's next".
 

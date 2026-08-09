@@ -1,5 +1,5 @@
-//! DipshitOS ARM generic timer (claim 7948 — roadmap item 5's remaining
-//! half; delivers into the claim-9746 EL1 IRQ vector via the GIC).
+//! DipshitOS ARM generic timer (claims 7948/9187 — roadmap item 5's
+//! remaining half; delivers into claim 9746's EL1 IRQ vector via the GIC).
 //!
 //! The EL1 *physical* timer (CNTP_*): the comparator CNTP_CVAL_EL0 is
 //! armed to CNTPCT_EL0 + one second of ticks (CNTFRQ_EL0 gives the
@@ -10,13 +10,13 @@
 //! `handle()`: increment the tick counter, re-arm for the next period,
 //! and every 5 ticks mark a heartbeat pending.
 //!
-//! The heartbeat is NOT printed from IRQ context (printing would re-enter
-//! the polled virtio TX path mid-flush, and IRQ-context console writes are
-//! not reentrancy-safe). Instead the shell idle loop calls `poll()` (to
-//! consume a fired comparator when the GIC never signals — Apple VZ's
-//! GICR is a RAZ/WI stub, claim 7948 evidence) and `maybe_heartbeat` in
-//! the main context, where a print is safe. The IRQ handler itself is
-//! console-free: ack -> handle -> eoi.
+//! Output is NOT written from IRQ context (printing would re-enter the
+//! polled virtio TX path mid-flush, and IRQ-context console writes are not
+//! reentrancy-safe). Instead the shell idle loop calls `maybe_heartbeat`
+//! in main context. Claim 9187 removed the old production `poll()` call
+//! after observing it race working IRQ delivery. Separate IRQ/poll counters
+//! make the delivery source observable and prevent a diagnostic poll from
+//! being mistaken for an interrupt.
 //!
 //! Discovery (the GTDT's GSIV) runs PRE-EXIT (ACPI reads hang post-exit on
 //! VZ, claim 0013); the GSIV lands in a global. Programming (init/arm)
@@ -44,11 +44,18 @@ pub const period_ns: u64 = 1_000_000_000;
 pub var freq: u64 = 0;
 /// The EL1 physical-timer PPI/GSIV (GTDT, pre-exit).
 pub var ppi: u32 = ppi_default;
+/// GTDT trigger mode for the Non-Secure EL1 timer: false=level, true=edge.
+pub var interrupt_edge: bool = false;
 /// Ticks delivered since the timer was armed.
 pub var ticks: u64 = 0;
+/// Ticks that entered through the EL1 IRQ vector.
+pub var irq_ticks: u64 = 0;
+/// Ticks consumed by an explicit diagnostic comparator poll.
+pub var poll_ticks: u64 = 0;
 var period_ticks: u64 = 0;
 var armed_flag: bool = false;
 var pending_heartbeat: bool = false;
+var pending_irq_report: bool = false;
 
 /// True once `init` armed the timer on real hardware.
 pub fn armed() bool {
@@ -59,12 +66,14 @@ pub fn armed() bool {
 // Discovery (PRE-EXIT; called from the pci.zig ACPI walk on the GTDT)
 // ---------------------------------------------------------------------------
 
-/// Read the Non-Secure EL1 timer GSIV from the GTDT at offset 56; a zero
-/// GSIV (or absent table) leaves the conventional PPI 30 in place.
+/// Read the Non-Secure EL1 timer GSIV and flags from the GTDT at offsets
+/// 56 and 60. ACPI GTDT flags bit 0 is the trigger mode (0=level, 1=edge).
+/// A zero GSIV (or absent table) leaves the conventional PPI 30 in place.
 pub fn discover(gtdt_addr: u64) void {
     if (gtdt_addr == 0) return;
     const gsiv = mmio.mmio_read32(gtdt_addr + 56);
     if (gsiv != 0 and gsiv < 1024) ppi = gsiv;
+    interrupt_edge = (mmio.mmio_read32(gtdt_addr + 60) & 1) != 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -115,18 +124,35 @@ pub fn init() void {
     armed_flag = true;
 }
 
-/// The tick that actually fired. Host-safe: increments the counter and
-/// marks the heartbeat; the asm (`arm`) stays out of host test processes.
-pub fn on_tick() void {
+const TickSource = enum { test_only, irq, poll };
+
+/// Record a fired comparator and where it was consumed. Host tests use
+/// `.test_only`; only the real IRQ and polling paths alter their source
+/// counters.
+fn record_tick(source: TickSource) void {
     ticks += 1;
+    switch (source) {
+        .test_only => {},
+        .irq => {
+            irq_ticks += 1;
+            if (irq_ticks == 1) pending_irq_report = true;
+        },
+        .poll => poll_ticks += 1,
+    }
     if (ticks % heartbeat_every == 0) pending_heartbeat = true;
+}
+
+/// Host-safe test hook: advances the cadence without claiming an IRQ or
+/// poll delivery source.
+pub fn on_tick() void {
+    record_tick(.test_only);
 }
 
 /// IRQ-context tick handler (called by the kernel's irq_dispatch when the
 /// acknowledged INTID matches `ppi`). Console-free by design.
 pub fn handle() void {
     if (comptime builtin.cpu.arch != .aarch64) return;
-    on_tick();
+    record_tick(.irq);
     arm();
 }
 
@@ -135,13 +161,10 @@ pub fn is_ppi(intid: u32) bool {
     return intid == ppi;
 }
 
-/// Consume a fired comparator in the MAIN context (the shell idle loop).
-/// With a working GIC the IRQ handler re-arms before this runs, so the
-/// comparator is always in the future and this is a no-op. On Apple VZ the
-/// GICR is a RAZ/WI stub — no interrupt is ever presented to the CPU, for
-/// PPIs, SGIs, or SPIs (claim 7948 live evidence) — so this poll is what
-/// consumes the tick (one per period) and keeps the heartbeat cadence
-/// honest. Never called from IRQ context; host-testable as a no-op on
+/// Diagnostic-only comparator poll. Production does not call this: polling
+/// a level-signalled comparator can race a pending IRQ and double-consume a
+/// period. The separate `poll_ticks` counter makes any deliberate use
+/// explicit. Never call from IRQ context; host-testable as a no-op on
 /// non-aarch64.
 pub fn poll() void {
     if (comptime builtin.cpu.arch != .aarch64) return;
@@ -151,7 +174,7 @@ pub fn poll() void {
         : [v] "=r" (cval),
     );
     if (cntpct() >= cval) {
-        on_tick();
+        record_tick(.poll);
         arm();
     }
 }
@@ -163,11 +186,24 @@ pub fn poll() void {
 /// Print the periodic heartbeat line if one is pending. Safe to call from
 /// the main context; never from an IRQ handler.
 pub fn maybe_heartbeat(con: *console.Console) void {
-    if (!pending_heartbeat) return;
-    pending_heartbeat = false;
-    con.puts("timer heartbeat ticks=");
-    con.print_u64(ticks);
-    con.puts("\n");
+    if (pending_irq_report) {
+        pending_irq_report = false;
+        con.puts("timer irq delivered ppi=");
+        con.print_hex_min(ppi);
+        con.puts(" irq_ticks=");
+        con.print_u64(irq_ticks);
+        con.puts("\n");
+    }
+    if (pending_heartbeat) {
+        pending_heartbeat = false;
+        con.puts("timer heartbeat ticks=");
+        con.print_u64(ticks);
+        con.puts(" irq=");
+        con.print_u64(irq_ticks);
+        con.puts(" poll=");
+        con.print_u64(poll_ticks);
+        con.puts("\n");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -178,17 +214,22 @@ test "timer: GTDT fixture yields the EL1 physical timer GSIV" {
     var buf: [96]u8 align(16) = undefined;
     @memset(&buf, 0);
     std.mem.writeInt(u32, buf[56..60], 30, .little);
+    std.mem.writeInt(u32, buf[60..64], 1, .little);
     ppi = 0;
+    interrupt_edge = false;
     discover(@intFromPtr(&buf));
     try std.testing.expectEqual(@as(u32, 30), ppi);
+    try std.testing.expect(interrupt_edge);
 }
 
 test "timer: GTDT with zero GSIV keeps the conventional PPI" {
     var buf: [96]u8 align(16) = undefined;
     @memset(&buf, 0);
     ppi = ppi_default;
+    interrupt_edge = true;
     discover(@intFromPtr(&buf));
     try std.testing.expectEqual(ppi_default, ppi);
+    try std.testing.expect(!interrupt_edge);
     discover(0);
     try std.testing.expectEqual(ppi_default, ppi);
 }
@@ -196,6 +237,11 @@ test "timer: GTDT with zero GSIV keeps the conventional PPI" {
 test "timer: heartbeat cadence is every 5 ticks and prints once" {
     var mock = console.MockConsole(1024){};
     var con = mock.console();
+    ticks = 0;
+    irq_ticks = 0;
+    poll_ticks = 0;
+    pending_heartbeat = false;
+    pending_irq_report = false;
     var tick: u64 = 0;
     while (tick < 11) : (tick += 1) {
         on_tick();
@@ -204,12 +250,29 @@ test "timer: heartbeat cadence is every 5 ticks and prints once" {
     const out = mock.contents();
     // 11 ticks -> heartbeats at 5 and 10 -> two lines.
     try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, out, "timer heartbeat ticks="));
-    try std.testing.expect(std.mem.indexOf(u8, out, "timer heartbeat ticks=5\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "timer heartbeat ticks=10\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "timer heartbeat ticks=5 irq=0 poll=0\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "timer heartbeat ticks=10 irq=0 poll=0\n") != null);
     // The pending flag is consumed: another call prints nothing.
     mock.reset();
     maybe_heartbeat(&con);
     try std.testing.expectEqual(@as(usize, 0), mock.contents().len);
+}
+
+test "timer: first IRQ is reported separately from heartbeat cadence" {
+    var mock = console.MockConsole(1024){};
+    var con = mock.console();
+    ticks = 0;
+    irq_ticks = 0;
+    poll_ticks = 0;
+    ppi = 30;
+    pending_heartbeat = false;
+    pending_irq_report = false;
+    record_tick(.irq);
+    maybe_heartbeat(&con);
+    try std.testing.expectEqualStrings(
+        "timer irq delivered ppi=0x1e irq_ticks=1\n",
+        mock.contents(),
+    );
 }
 
 test "timer: ppi matching is exact" {

@@ -47,11 +47,12 @@
 | `serial-takeover` | B | gate | yes | no | yes | `zig build run` — **PASS 2026-08-08** (claim 1517); in `verify-vz` |
 | `live-transcript-rx` | B | gate | yes | no | yes | `bash tools/verify-live-transcript.sh` — **PASS 2026-08-08** (claim 6684): live RX, host scripted keystrokes reach the kernel end to end and the `dipshit>` transcript is asserted in `vm-serial.log` |
 | `live-exceptions` | B | gate | yes | no | yes | `bash tools/verify-live-exceptions.sh` — **PASS 2026-08-08** (claim 9746): VBAR_EL1 vectors installed; `dipshit> fault` triggers a real synchronous `udf` reported and resumed live (shell continues) |
-| `live-timer` | B | gate | yes | no | yes | `bash tools/verify-live-timer.sh` — **PASS 2026-08-08** (claim 7948): GIC + CNTP programmed and read-back verified live; `timer` shows `armed=1` and the poll-driven heartbeat grows (VZ delivers no IRQs — see claim); 3/3 boots |
+| `live-timer` | B | gate | yes | no | yes | `bash tools/verify-live-timer.sh` — **PASS 2026-08-09** (claim 9187): a real CNTP PPI enters the EL1 IRQ vector; requires first-IRQ evidence plus `ticks=5 irq=5 poll=0` and a responsive shell; 3/3 boots |
 | `live-reboot-shutdown` | B | gate | yes | no | yes | `bash tools/verify-live-reboot.sh` — **PASS 2026-08-08** (claim 0527): hard gate 6 — a real EFI `ResetSystem` from a live `dipshit>` shell; `reboot` resets the machine (second full takeover, fresh map key), `shutdown` powers it off (VM state → stopped), 4/4 boots |
 | `live-fs` | B | gate | yes | no | yes | `bash tools/verify-live-fs.sh` — **PASS 2026-08-09** (claims 3475/6420): hard gate 5 — `ls`/`cat`/`write` persist through reboot **on the disk** via the FAT32 storage driver (claim 6420: `fat.zig` over the virtio-blk transport, run A writes to the live FAT volume, run B — same disk image — still lists/cats it; NVRAM persistence replaced), 1/1 pair |
 | `verify-vz` | B | aggregate | no | no | yes | `just verify-vz` — serial takeover + bad-handoff + marker + nvram-console + host-console + live-transcript + live-fs + live-exceptions + live-timer + live-reboot-shutdown (Apple silicon only) |
 | `console` | C | interactive | yes | no | yes | `zig build console` — interactive host serial console; needs a human at the keyboard |
+| `vz-irq-api-audit` | D | diagnostic | no | no | yes | `bash tools/audit-vz-irq-api.sh` — read-only selected-Xcode SDK audit of Virtualization.framework and Hypervisor.framework GIC surfaces; claim 9187; no VM boot |
 | `preexit-tx` | D | diagnostic | no | no | yes | `bash tools/verify-preexit-tx.sh` (mechanism: `zig build preexit-tx`) — claim 0017 |
 | `tx-diag` | D | diagnostic | no | no | yes | `bash tools/verify-tx-diag.sh` (mechanism: `zig build tx-diag`) — claim 0018 |
 | `tx-transition` | D | diagnostic | no | no | yes | `bash tools/verify-tx-transition.sh` — claim 0020 |
@@ -106,6 +107,7 @@ GATE id=live-reboot-shutdown class=B kind=gate ci=no apple=yes gate=yes status=p
 GATE id=live-fs class=B kind=gate ci=no apple=yes gate=yes status=pass cmd=bash tools/verify-live-fs.sh  # claim 6420: FAT32 storage driver (persistence on the disk, not NVRAM)
 GATE id=verify-vz class=B kind=aggregate ci=no apple=yes gate=no cmd=just verify-vz
 GATE id=console class=C kind=interactive ci=no apple=yes gate=yes cmd=zig build console
+GATE id=vz-irq-api-audit class=D kind=diagnostic ci=no apple=yes gate=no cmd=bash tools/audit-vz-irq-api.sh
 GATE id=preexit-tx class=D kind=diagnostic ci=no apple=yes gate=no cmd=bash tools/verify-preexit-tx.sh
 GATE id=tx-diag class=D kind=diagnostic ci=no apple=yes gate=no cmd=bash tools/verify-tx-diag.sh
 GATE id=tx-transition class=D kind=diagnostic ci=no apple=yes gate=no cmd=bash tools/verify-tx-transition.sh

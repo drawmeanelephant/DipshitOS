@@ -1,12 +1,12 @@
-//! DipshitOS Generic Interrupt Controller (claim 7948 — roadmap item 5's
-//! remaining half; the claim-9746 IRQ vector is the delivery point).
+//! DipshitOS Generic Interrupt Controller (claims 7948/9187 — roadmap
+//! item 5's remaining half; claim 9746 supplied the IRQ vector).
 //!
 //! Two phases, split by the ExitBootServices boundary:
 //!
 //! 1. DISCOVERY (PRE-EXIT, `discover`): parse the ACPI MADT (signature
-//!    "APIC") for the GIC distributor (type 0x0B, physical base @+8, GIC
-//!    version @+20), the GICv3 redistributor (type 0x0D, discovery base
-//!    @+4), and the GICv2 CPU interface (type 0x0C, base @+32). The bases
+//!    "APIC") for the GIC CPU interface (GICC, type 0x0B, base @+32),
+//!    distributor (GICD, type 0x0C, base @+8, version @+20), and GICv3
+//!    redistributor range (GICR, type 0x0E, discovery base @+4). The bases
 //!    and version land in module globals so the kernel can program the
 //!    controller AFTER the identity-map switch, when it owns EL1. ACPI
 //!    reads are pre-exit only on VZ (claim 0013: post-exit window reads
@@ -25,14 +25,13 @@
 //! so printing there would re-enter the polled virtio TX path mid-flush.
 //! The timer heartbeat is printed from the shell idle loop instead.
 //!
-//! Platform wall (measured, documented in the claim): Apple VZ's GIC
-//! accepts distributor + CPU-interface configuration (read-back proven) but
-//! NEVER presents an interrupt to the guest — the GICR is a RAZ/WI stub
-//! (PPIs/SGIs), SPI config sticks in the distributor yet nothing is ever
-//! delivered, and even a fully-cleared DAIF + explicit IROUTER changes
-//! nothing. The kernel therefore keeps the spec-correct ack/EOI path for
-//! real hardware AND consumes the fired timer comparator in the shell idle
-//! loop (`timer.poll`) — honest on both platforms.
+//! Claim 7948's negative result programmed SGI/PPI registers at the
+//! redistributor RD-frame offsets (for example GICR+0x80). In GICv3 those
+//! registers live in the SGI frame at GICR+0x10000 (IGROUPR0=0x10080,
+//! ISENABLER0=0x10100, ICFGR1=0x10c04). Reading the RD-frame holes naturally
+//! returned zero and writes were ignored, so that evidence did not prove a
+//! VZ GIC stub. Claim 9187 corrects the frame and the ACPI entry types; a
+//! real timer PPI is now observed end to end through the EL1 IRQ vector.
 //!
 //! No libc, no POSIX, no allocation.
 
@@ -56,10 +55,17 @@ pub var dist_base: u64 = 0;
 pub var redist_base: u64 = 0;
 /// GICv2 CPU interface (GICC) physical base.
 pub var cpu_base: u64 = 0;
-/// The MADT GICD "GIC Version" byte (0x10 v2 / 0x20 v3 / 0x30 v4 / 0xFF
-/// unversioned). Used with the presence of GICR/GICC entries to pick the
+/// True when firmware discovery did not yield a usable controller and the
+/// Apple VZ fixed-layout fallback supplied the bases.
+pub var used_fallback: bool = false;
+/// The MADT GICD "GIC Version" byte (0 = unspecified, 1 = v1, 2 = v2,
+/// 3 = v3, 4 = v4). Used with the presence of GICR/GICC entries to pick the
 /// programming path.
 var version_byte: u8 = 0;
+
+/// Redistributor frame selected for the boot CPU. This is the RD-frame
+/// base; SGI/PPI registers are at `active_redist_base + 0x10000`.
+pub var active_redist_base: u64 = 0;
 
 pub fn kind_name() []const u8 {
     return switch (kind) {
@@ -72,14 +78,34 @@ pub fn kind_name() []const u8 {
 /// Apple VZ platform layout (fallback when the MADT is non-conformant).
 /// Evidence: the VZ guest device tree (`arm,gic-v3`, reg GICD 0x10000000 /
 /// GICR 0x10010000 — observed in the wild) and live register probes on
-/// this codebase's VZ runs: GICD_CTLR=0x50 (ARE_NS set → GICv3 affinity
-/// routing), GICD_TYPER=0x0478001f (ITLines=31), GICR_CTLR/WAKER sane at
-/// 0x10010000. The VZ MADT's GIC structures do NOT follow the ACPI
-/// GICD/GICC/GICR layouts (its 0x0B/0x0C/0x0D entries are malformed — the
-/// strict parse below finds nothing), so this fallback is what makes the
-/// controller programmble here.
+/// this codebase's VZ runs: GICD_CTLR=0x50 and GICD_TYPER=0x0478001f.
+/// This remains only a fallback for absent/malformed firmware data. VZ's
+/// current MADT still requires it (`fallback=1`, claim 9187 live evidence).
 const vz_dist_base: u64 = 0x10000000;
 const vz_redist_base: u64 = 0x10010000;
+
+// ACPI 6.5 MADT ARM structure types. Claim 7948 used 0x0B as GICD and
+// shifted every later type down by one; 0x0B is actually the per-CPU GICC.
+const madt_gicc: u8 = 0x0b;
+const madt_gicd: u8 = 0x0c;
+const madt_gic_msi_frame: u8 = 0x0d;
+const madt_gicr: u8 = 0x0e;
+const madt_gic_its: u8 = 0x0f;
+
+// GICv3 redistributor frame layout. Apple's public Hypervisor.framework
+// headers expose the same architectural offsets (hv_gic_types.h).
+const gicr_sgi_frame_offset: u64 = 0x10000;
+const gicr_frame_stride: u64 = 0x20000;
+const gicr_vlpi_frame_stride: u64 = 0x40000;
+const gicr_typer: u64 = 0x0008;
+const gicr_waker: u64 = 0x0014;
+const gicr_igroup0: u64 = 0x10080;
+const gicr_isenabler0: u64 = 0x10100;
+const gicr_icenabler0: u64 = 0x10180;
+const gicr_icpendr0: u64 = 0x10280;
+const gicr_icactiver0: u64 = 0x10380;
+const gicr_ipriority0: u64 = 0x10400;
+const gicr_icfgr0: u64 = 0x10c00;
 
 // ---------------------------------------------------------------------------
 // Discovery (PRE-EXIT; called from the pci.zig ACPI walk on the APIC table)
@@ -101,6 +127,8 @@ pub fn discover(madt_addr: u64, madt_len: u32) void {
     redist_base = 0;
     cpu_base = 0;
     version_byte = 0;
+    used_fallback = false;
+    active_redist_base = 0;
     kind = .none;
     if (madt_addr != 0 and madt_len > 36) {
         var off: u32 = 36;
@@ -109,17 +137,24 @@ pub fn discover(madt_addr: u64, madt_len: u32) void {
             const entry_len = mmio.mmio_read8(madt_addr + off + 1);
             if (entry_len < 2) break;
             switch (entry_type) {
-                0x0B => { // GIC Distributor: base @+8, version @+20
-                    dist_base = read64(madt_addr + off + 8);
-                    version_byte = mmio.mmio_read8(madt_addr + off + 20);
+                madt_gicc => { // GICC: v2 CPU interface @+32; optional per-CPU GICR @+60
+                    if (entry_len >= 40 and cpu_base == 0)
+                        cpu_base = read64(madt_addr + off + 32);
+                    if (entry_len >= 68 and redist_base == 0)
+                        redist_base = read64(madt_addr + off + 60);
                 },
-                0x0C => { // GIC CPU Interface (v2): base @+32
-                    cpu_base = read64(madt_addr + off + 32);
+                madt_gicd => { // GICD: distributor @+8, version @+20
+                    if (entry_len >= 21) {
+                        dist_base = read64(madt_addr + off + 8);
+                        version_byte = mmio.mmio_read8(madt_addr + off + 20);
+                    }
                 },
-                0x0D => { // GIC Redistributor (v3): discovery base @+4
-                    redist_base = read64(madt_addr + off + 4);
+                madt_gicr => { // GICR: redistributor discovery range @+4
+                    if (entry_len >= 16)
+                        redist_base = read64(madt_addr + off + 4);
                 },
-                else => {}, // ITS (0x0E), reserved types, and everything else: ignored
+                madt_gic_msi_frame, madt_gic_its => {},
+                else => {},
             }
             off += entry_len;
         }
@@ -129,22 +164,22 @@ pub fn discover(madt_addr: u64, madt_len: u32) void {
         // interface is the system registers — so GICR presence wins over
         // GICC).
         kind = switch (version_byte) {
-            0x10 => .v2,
-            0x20, 0x30 => .v3,
+            0x01, 0x02 => .v2,
+            0x03, 0x04 => .v3,
             else => if (redist_base != 0) .v3 else if (cpu_base != 0) .v2 else .none,
         };
     }
-    // Apple VZ fallback, UNCONDITIONAL when no conformant controller was
-    // found: VZ's MADT is non-conformant (its GIC structures do not follow
-    // the ACPI GICD/GICC/GICR layouts — measured), so the device-tree /
-    // live-probed layout (GICv3 at 0x10000000/0x10010000) is the ground
-    // truth on this platform.
-    if (kind == .none) {
+    // Apple VZ fallback when firmware did not describe a usable controller.
+    if (kind == .none or dist_base == 0 or
+        (kind == .v3 and redist_base == 0) or
+        (kind == .v2 and cpu_base == 0))
+    {
+        used_fallback = true;
         kind = .v3;
         dist_base = vz_dist_base;
         redist_base = vz_redist_base;
         cpu_base = 0;
-        version_byte = 0x20;
+        version_byte = 0x03;
     }
 }
 
@@ -163,51 +198,97 @@ pub fn armed() bool {
 /// the EL1 physical-timer PPI (its number comes from timer.zig's GTDT
 /// discovery). Does NOT unmask IRQs — the kernel does that after everything
 /// (including the timer) is armed.
-pub fn init() void {
+pub fn init(private_intid: u32, edge_triggered: bool) void {
     if (comptime builtin.cpu.arch != .aarch64) return;
     if (kind == .none) return;
+    if (private_intid < 16 or private_intid > 31) return;
     switch (kind) {
-        .v3 => init_v3(),
-        .v2 => init_v2(),
+        .v3 => init_v3(private_intid, edge_triggered),
+        .v2 => init_v2(private_intid, edge_triggered),
         .none => {},
     }
     programmed = true;
 }
 
-fn init_v3() void {
+fn current_affinity() u32 {
+    var mpidr: u64 = 0;
+    asm volatile ("mrs %[v], mpidr_el1"
+        : [v] "=r" (mpidr),
+    );
+    return @as(u32, @intCast((mpidr & 0x00ffffff) | ((mpidr >> 8) & 0xff000000)));
+}
+
+/// Select the redistributor RD frame whose GICR_TYPER affinity matches the
+/// boot CPU. VZ boots on affinity 0, so a RAZ TYPER still selects frame 0;
+/// the bounded scan keeps the path safe on a multi-frame implementation.
+fn select_redist_frame() u64 {
+    const target = current_affinity();
+    var base = redist_base;
+    var frame: usize = 0;
+    while (frame < 256) : (frame += 1) {
+        const typer = read64(base + gicr_typer);
+        const affinity: u32 = @truncate(typer >> 32);
+        if (affinity == target) return base;
+        if ((typer & (@as(u64, 1) << 4)) != 0) break; // Last
+        base += if ((typer & (@as(u64, 1) << 1)) != 0)
+            gicr_vlpi_frame_stride
+        else
+            gicr_frame_stride;
+    }
+    return redist_base;
+}
+
+fn private_icfgr(value: u32, intid: u32, edge_triggered: bool) u32 {
+    const shift: u5 = @intCast((intid % 16) * 2);
+    var configured = value & ~(@as(u32, 0b11) << shift);
+    // ICFGR field bit[1] is the trigger bit: 0=level, 1=edge. Bit[0] is
+    // RES0. Claim 7948 set bit[0], which cannot request edge mode.
+    if (edge_triggered) configured |= @as(u32, 0b10) << shift;
+    return configured;
+}
+
+fn init_v3(private_intid: u32, edge_triggered: bool) void {
     // Distributor: enable Group 1 (bit 1) + Group 0 non-secure (bit 0).
     var ctlr = mmio.mmio_read32(dist_base + 0x0000);
     ctlr |= 0b11;
     mmio.mmio_write32(dist_base + 0x0000, ctlr);
 
-    // Redistributor, CPU0's frame (base + 0x0000; VZ runs 2 vCPUs and our
-    // kernel is the boot CPU; the other CPU is parked by firmware and never
-    // takes Group 1 interrupts on its own).
-    const rbase = redist_base;
+    const rbase = select_redist_frame();
+    active_redist_base = rbase;
     // GICR_WAKER: wake the redistributor (clear ProcessorSleep) and wait
     // for ChildrenAsleep to clear. Bounded: a stuck bit must not hang boot.
-    var waker = mmio.mmio_read32(rbase + 0x0014);
+    var waker = mmio.mmio_read32(rbase + gicr_waker);
     waker &= ~@as(u32, 1);
-    mmio.mmio_write32(rbase + 0x0014, waker);
+    mmio.mmio_write32(rbase + gicr_waker, waker);
     var spins: usize = 0;
-    while ((mmio.mmio_read32(rbase + 0x0014) & 2) != 0 and spins < 100_000) : (spins += 1) {}
-    // PPI 30 -> Group 1 (IGROUPR0 bit 30).
-    var igroup = mmio.mmio_read32(rbase + 0x0080);
-    igroup |= @as(u32, 1) << 30;
-    mmio.mmio_write32(rbase + 0x0080, igroup);
+    while ((mmio.mmio_read32(rbase + gicr_waker) & 2) != 0 and spins < 100_000) : (spins += 1) {}
+
+    const bit: u32 = @as(u32, 1) << @as(u5, @intCast(private_intid));
+    // SGI/PPI registers are in the SGI frame at RD_base+0x10000.
+    mmio.mmio_write32(rbase + gicr_icenabler0, bit);
+    mmio.mmio_write32(rbase + gicr_icpendr0, bit);
+    mmio.mmio_write32(rbase + gicr_icactiver0, bit);
+    var igroup = mmio.mmio_read32(rbase + gicr_igroup0);
+    igroup |= bit;
+    mmio.mmio_write32(rbase + gicr_igroup0, igroup);
     wait_rwp(rbase);
-    // Priority 0x80 (mid, below PMR=0xff so it always passes).
-    mmio.mmio_write8(rbase + 0x0400 + 30, 0x80);
+
+    // Priority 0x80 (mid, below PMR=0xff so it passes). Use an aligned
+    // word RMW rather than relying on byte MMIO behavior.
+    const priority_word = private_intid / 4;
+    const priority_shift: u5 = @intCast((private_intid % 4) * 8);
+    const priority_addr = rbase + gicr_ipriority0 + @as(u64, priority_word) * 4;
+    var priority = mmio.mmio_read32(priority_addr);
+    priority &= ~(@as(u32, 0xff) << priority_shift);
+    priority |= @as(u32, 0x80) << priority_shift;
+    mmio.mmio_write32(priority_addr, priority);
     wait_rwp(rbase);
-    // Edge-triggered (ICFGR1 field for PPI 30 = bits [29:28] = 0b01); the
-    // generic timer comparator is an edge.
-    var icfg = mmio.mmio_read32(rbase + 0x0c04);
-    icfg &= ~@as(u32, 0b11 << 28);
-    icfg |= @as(u32, 1) << 28;
-    mmio.mmio_write32(rbase + 0x0c04, icfg);
+
+    const icfgr_addr = rbase + gicr_icfgr0 + @as(u64, private_intid / 16) * 4;
+    const icfg = private_icfgr(mmio.mmio_read32(icfgr_addr), private_intid, edge_triggered);
+    mmio.mmio_write32(icfgr_addr, icfg);
     wait_rwp(rbase);
-    // Enable PPI 30 (ISENABLER0 bit 30).
-    mmio.mmio_write32(rbase + 0x0100, @as(u32, 1) << 30);
+    mmio.mmio_write32(rbase + gicr_isenabler0, bit);
     wait_rwp(rbase);
 
     // CPU interface via the system registers (GICv3).
@@ -228,27 +309,30 @@ fn init_v3() void {
         :
         : [v] "r" (@as(u64, 1)),
     );
+    asm volatile ("dsb sy");
     asm volatile ("isb");
 }
 
-fn init_v2() void {
+fn init_v2(private_intid: u32, edge_triggered: bool) void {
     // Distributor: EnableGrp0 | EnableGrp1.
     var ctlr = mmio.mmio_read32(dist_base + 0x0000);
     ctlr |= 0b11;
     mmio.mmio_write32(dist_base + 0x0000, ctlr);
-    // PPI 30 -> Group 1 (IGROUPR0 bit 30).
+    const bit: u32 = @as(u32, 1) << @as(u5, @intCast(private_intid));
     var igroup = mmio.mmio_read32(dist_base + 0x0080);
-    igroup |= @as(u32, 1) << 30;
+    igroup |= bit;
     mmio.mmio_write32(dist_base + 0x0080, igroup);
-    // Priority byte for PPI 30 (IPRIORITYR0 + 30).
-    mmio.mmio_write8(dist_base + 0x0400 + 30, 0x80);
-    // Edge-triggered (ICFGR1 field for PPI 30 = bits [29:28] = 0b01).
-    var icfg = mmio.mmio_read32(dist_base + 0x0c04);
-    icfg &= ~@as(u32, 0b11 << 28);
-    icfg |= @as(u32, 1) << 28;
-    mmio.mmio_write32(dist_base + 0x0c04, icfg);
-    // Enable PPI 30 (ISENABLER0 bit 30).
-    mmio.mmio_write32(dist_base + 0x0100, @as(u32, 1) << 30);
+    const priority_word = private_intid / 4;
+    const priority_shift: u5 = @intCast((private_intid % 4) * 8);
+    const priority_addr = dist_base + 0x0400 + @as(u64, priority_word) * 4;
+    var priority = mmio.mmio_read32(priority_addr);
+    priority &= ~(@as(u32, 0xff) << priority_shift);
+    priority |= @as(u32, 0x80) << priority_shift;
+    mmio.mmio_write32(priority_addr, priority);
+    const icfgr_addr = dist_base + 0x0c00 + @as(u64, private_intid / 16) * 4;
+    const icfg = private_icfgr(mmio.mmio_read32(icfgr_addr), private_intid, edge_triggered);
+    mmio.mmio_write32(icfgr_addr, icfg);
+    mmio.mmio_write32(dist_base + 0x0100, bit);
     // CPU interface (GICC): enable + priority mask.
     var ctlr2 = mmio.mmio_read32(cpu_base + 0x0000);
     ctlr2 |= 0b11;
@@ -354,47 +438,49 @@ fn put32(buf: []u8, off: usize, value: u32) void {
 
 test "gic: MADT v3 fixture parses distributor + redistributor + gicc" {
     var buf: [512]u8 align(16) = undefined;
-    // GICD: base @+8, version @+20 (0x20 = GICv3). GICR: base @+4.
+    // GICD: base @+8, version @+20 (3 = GICv3). GICR: base @+4.
     // GICC: base @+32 (0 for v3 — the interface is the system registers).
     const h = fixture_madt(&.{
-        .{ .type = 0x0b, .len = 24, .bytes = &.{} },
-        .{ .type = 0x0d, .len = 20, .bytes = &.{} },
-        .{ .type = 0x0c, .len = 80, .bytes = &.{} },
-    }, 36 + 24 + 20 + 80, &buf);
+        .{ .type = madt_gicd, .len = 24, .bytes = &.{} },
+        .{ .type = madt_gicr, .len = 16, .bytes = &.{} },
+        .{ .type = madt_gicc, .len = 80, .bytes = &.{} },
+    }, 36 + 24 + 16 + 80, &buf);
     put64(&buf, 36 + 8, 0x2f000000);
-    buf[36 + 20] = 0x20;
+    buf[36 + 20] = 3;
     put64(&buf, 36 + 24 + 4, 0x2f100000);
-    put64(&buf, 36 + 24 + 20 + 32, 0);
+    put64(&buf, 36 + 24 + 16 + 32, 0);
     discover(@intFromPtr(&buf), h.len);
     try std.testing.expectEqual(GicKind.v3, kind);
     try std.testing.expectEqual(@as(u64, 0x2f000000), dist_base);
     try std.testing.expectEqual(@as(u64, 0x2f100000), redist_base);
     try std.testing.expectEqual(@as(u64, 0), cpu_base);
+    try std.testing.expect(!used_fallback);
     try std.testing.expectEqualStrings("v3", kind_name());
 }
 
 test "gic: MADT v2 fixture parses GICC and picks the MMIO path" {
     var buf: [512]u8 align(16) = undefined;
     const h = fixture_madt(&.{
-        .{ .type = 0x0b, .len = 24, .bytes = &.{} },
-        .{ .type = 0x0c, .len = 80, .bytes = &.{} },
+        .{ .type = madt_gicd, .len = 24, .bytes = &.{} },
+        .{ .type = madt_gicc, .len = 80, .bytes = &.{} },
     }, 36 + 24 + 80, &buf);
     put64(&buf, 36 + 8, 0x2f000000);
-    buf[36 + 20] = 0x10;
+    buf[36 + 20] = 2;
     put64(&buf, 36 + 24 + 32, 0x2f020000);
     discover(@intFromPtr(&buf), h.len);
     try std.testing.expectEqual(GicKind.v2, kind);
     try std.testing.expectEqual(@as(u64, 0x2f000000), dist_base);
     try std.testing.expectEqual(@as(u64, 0x2f020000), cpu_base);
     try std.testing.expectEqual(@as(u64, 0), redist_base);
+    try std.testing.expect(!used_fallback);
 }
 
 test "gic: unversioned MADT infers v3 from GICR presence" {
     var buf: [512]u8 align(16) = undefined;
     const h = fixture_madt(&.{
-        .{ .type = 0x0b, .len = 24, .bytes = &.{} },
-        .{ .type = 0x0d, .len = 20, .bytes = &.{} },
-    }, 36 + 24 + 20, &buf);
+        .{ .type = madt_gicd, .len = 24, .bytes = &.{} },
+        .{ .type = madt_gicr, .len = 16, .bytes = &.{} },
+    }, 36 + 24 + 16, &buf);
     put64(&buf, 36 + 8, 0x2f000000);
     buf[36 + 20] = 0xff; // "GIC version not identified"
     put64(&buf, 36 + 24 + 4, 0x2f100000);
@@ -405,22 +491,25 @@ test "gic: unversioned MADT infers v3 from GICR presence" {
 
 test "gic: unknown entry types are skipped; malformed lengths stop the walk" {
     var buf: [512]u8 align(16) = undefined;
-    // An ITS (0x0E) entry before the GICD, then a GICD, then a broken
-    // entry (length 1 < 2) that must stop the walk.
+    // An ITS (0x0F) entry before the GICD/GICR, then a broken entry
+    // (length 1 < 2) that must stop the walk.
     const h = fixture_madt(&.{
-        .{ .type = 0x0e, .len = 16, .bytes = &.{} },
-        .{ .type = 0x0b, .len = 24, .bytes = &.{} },
-    }, 36 + 16 + 24, &buf);
+        .{ .type = madt_gic_its, .len = 16, .bytes = &.{} },
+        .{ .type = madt_gicd, .len = 24, .bytes = &.{} },
+        .{ .type = madt_gicr, .len = 16, .bytes = &.{} },
+    }, 36 + 16 + 24 + 16, &buf);
     // GICD starts after the 16-byte ITS entry: base at 36+16+8, version
     // byte at 36+16+20.
     put64(&buf, 36 + 16 + 8, 0x2f000000);
-    buf[36 + 16 + 20] = 0x20;
-    // Append a length-1 entry right after the GICD: walk must stop there.
-    buf[36 + 16 + 24] = 0x0c;
-    buf[36 + 16 + 24 + 1] = 1;
+    buf[36 + 16 + 20] = 3;
+    put64(&buf, 36 + 16 + 24 + 4, 0x2f100000);
+    // Append a length-1 entry right after the GICR: walk must stop there.
+    buf[36 + 16 + 24 + 16] = madt_gicc;
+    buf[36 + 16 + 24 + 16 + 1] = 1;
     discover(@intFromPtr(&buf), h.len + 2);
     try std.testing.expectEqual(GicKind.v3, kind);
     try std.testing.expectEqual(@as(u64, 0x2f000000), dist_base);
+    try std.testing.expectEqual(@as(u64, 0x2f100000), redist_base);
 }
 
 test "gic: absent/non-conformant MADT falls back to the VZ layout" {
@@ -428,6 +517,7 @@ test "gic: absent/non-conformant MADT falls back to the VZ layout" {
     try std.testing.expectEqual(GicKind.v3, kind);
     try std.testing.expectEqual(@as(u64, 0x10000000), dist_base);
     try std.testing.expectEqual(@as(u64, 0x10010000), redist_base);
+    try std.testing.expect(used_fallback);
     var buf: [36]u8 align(16) = undefined;
     @memset(&buf, 0);
     std.mem.writeInt(u32, buf[4..8], 36, .little); // header only, no entries
@@ -435,8 +525,35 @@ test "gic: absent/non-conformant MADT falls back to the VZ layout" {
     try std.testing.expectEqual(GicKind.v3, kind);
 }
 
+test "gic: incomplete v2 MADT without a CPU interface falls back" {
+    var buf: [128]u8 align(16) = undefined;
+    const h = fixture_madt(&.{
+        .{ .type = madt_gicd, .len = 24, .bytes = &.{} },
+    }, 36 + 24, &buf);
+    put64(&buf, 36 + 8, 0x2f000000);
+    buf[36 + 20] = 2;
+    discover(@intFromPtr(&buf), h.len);
+    try std.testing.expectEqual(GicKind.v3, kind);
+    try std.testing.expect(used_fallback);
+}
+
 test "gic: spurious sentinel is 1023 on both paths" {
     try std.testing.expect(is_spurious(1023));
     try std.testing.expect(!is_spurious(30));
     try std.testing.expect(!is_spurious(0));
+}
+
+test "gic: redistributor private-interrupt offsets include the SGI frame" {
+    try std.testing.expectEqual(@as(u64, 0x10000), gicr_sgi_frame_offset);
+    try std.testing.expectEqual(@as(u64, 0x10080), gicr_igroup0);
+    try std.testing.expectEqual(@as(u64, 0x10100), gicr_isenabler0);
+    try std.testing.expectEqual(@as(u64, 0x10400), gicr_ipriority0);
+    try std.testing.expectEqual(@as(u64, 0x10c04), gicr_icfgr0 + 4);
+}
+
+test "gic: private interrupt trigger fields use ICFGR bit one" {
+    // PPI 30 occupies ICFGR1 bits 29:28. Level clears both bits; edge sets
+    // bit 29 and leaves the RES0 bit 28 clear.
+    try std.testing.expectEqual(@as(u32, 0xcfffffff), private_icfgr(0xffffffff, 30, false));
+    try std.testing.expectEqual(@as(u32, 0xefffffff), private_icfgr(0xffffffff, 30, true));
 }

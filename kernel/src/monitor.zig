@@ -873,6 +873,10 @@ fn cmd_timer(m: *Monitor, args: []const []const u8) ExecError {
     m.console.print_hex_min(timer.freq);
     m.console.puts(" ticks=");
     m.console.print_u64(timer.ticks);
+    m.console.puts(" irq=");
+    m.console.print_u64(timer.irq_ticks);
+    m.console.puts(" poll=");
+    m.console.print_u64(timer.poll_ticks);
     m.console.puts(" acked=");
     m.console.print_u64(gic.irqs_acked);
     m.console.puts(" first=");
@@ -1395,7 +1399,7 @@ test "monitor: timer is registered and reports the unarmed host state" {
     // with the conventional PPI default.
     try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"timer"}));
     try std.testing.expectEqualStrings(
-        "timer: armed=0 gic=none dist=0x0 ppi=0x1e freq=0x0 ticks=0 acked=0 first=0xffffffff\n",
+        "timer: armed=0 gic=none dist=0x0 ppi=0x1e freq=0x0 ticks=0 irq=0 poll=0 acked=0 first=0xffffffff\n",
         env.mock.contents(),
     );
 }

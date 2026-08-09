@@ -273,14 +273,13 @@ gates pass; tagged `m1.5-interactive-monitor`** (see
   handlers installed post-MMU; `dipshit> fault` triggers a synchronous
   exception that is reported and resumed live on VZ (class B gate
   `tools/verify-live-exceptions.sh`).
-- Interrupt setup (GIC) and a timer — **attempted 2026-08-08 (claim
-  7948):** the GICv3 (GICD @ `0x10000000` / GICR @ `0x10010000`, live-
-  probed) and the generic timer (CNTP, 24 MHz, GTDT PPI 30) are
-  programmed and read-back verified on VZ, and a poll-driven heartbeat is
-  live-gate-tested — but **VZ never delivers an interrupt to the guest**
-  (GICR is RAZ/WI; PPI/SGI/SPI all inert; full evidence in the claim), so
-  IRQ delivery into the claim-9746 vectors stays open for a platform that
-  actually signals. The GIC is now `[observed]` in the hardware contract.
+- ~~Interrupt setup (GIC) and a timer.~~ **DONE 2026-08-09 (claim 9187,
+  superseding claim 7948's blocker conclusion):** corrected ACPI MADT GIC
+  type IDs, GICv3 redistributor SGI-frame offsets, and ICFGR trigger-bit
+  programming. A real periodic CNTP PPI 30 now enters the claim-9746 EL1
+  IRQ vector on VZ, is acknowledged/EOI’d and re-armed; the strict live
+  gate requires `ticks=5 irq=5 poll=0` and passes 3/3 boots. Tasks are the
+  next milestone-three card.
 - A guest-side filesystem — **the ESP FAT32 driver landed 2026-08-09
   (claim 6420):** `kernel/src/fat.zig` (GPT + FAT32 mount/list/read/write
   with injected sector I/O) over `kernel/src/virtio_blk.zig` (the

@@ -290,12 +290,10 @@ The gate-by-gate plan and active work claims live in
    saved under `artifacts/`, and the matching MMIO/serial assumptions are
    flipped in `docs/hardware-contract.md`. (The bad-handoff failure gate
    — formerly the other unpassed gate — is closed since 2026-08-06.)
-3. **Next milestone: exception vectors, then GIC + timer.** The physical
-   page allocator over the captured EFI map is **done 2026-08-08 (claim
-   3972)** — first-fit bitmap allocator over ConventionalMemory (fixed
-   128 KiB BSS bitmap over the 4 GiB identity-map span), wired post-exit;
-   `pages`/`pages selftest` monitor commands; 18 unit tests; live-observed
-   on VZ. The next card is exception vectors, then GIC + timer interrupts
-   (canonical ordering: `docs/status.md`).
-4. Keep later interrupt/GIC, timer, allocator, and process work out of
-   scope; those remain future milestones (roadmap).
+3. **Milestone three is active; tasks are next.** The physical allocator
+   is done (claims 3972/5162), exception vectors are live (claim 9746), and
+   a real periodic CNTP PPI now reaches the guest's EL1 IRQ vector on VZ
+   (claim 9187; strict `irq=5 poll=0` gate passes 3/3). Canonical ordering
+   and evidence live in `docs/status.md`.
+4. Keep later task/process work and graphics/networking/SMP out of scope;
+   those remain future roadmap cards.
