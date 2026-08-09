@@ -5,6 +5,7 @@ dipshit> help
 available commands:
   about     explain this questionable system
   beans     count beans, probably
+  cat       print a file from the ESP or NVRAM window
   clear     clean up the crime scene
   echo      repeat your regrettable decisions
   elephant  operational mascot diagnostics
@@ -12,6 +13,7 @@ available commands:
   handoff   display boot-to-kernel ABI data
   help      list commands and their help text
   hex       format an integer in hexadecimal
+  ls        list files on the ESP (and NVRAM-backed files)
   mem       summarize the EFI memory map
   pages     physical page allocator pool
   reboot    restart the machine
@@ -20,6 +22,7 @@ available commands:
   timer     interrupt controller + timer status
   uname     compact system identity
   version   display build information
+  write     write text to a file (persisted to EFI NVRAM)
 type 'help <command>' for details on a single command.
 dipshit> version
 dipshit-kernel
@@ -52,6 +55,18 @@ pages selftest: alloc 961 -> none (out of memory)
 pages selftest: ok free=0x00000000000003c0
 dipshit> echo "elephant business"
 elephant business
+dipshit> ls
+ls: esp=0x0000000000000003 nvram=0x0000000000000000
+  KERNEL.BIN  0x0000000000088b38  [esp]
+  EFI         0x0000000000000000  [dir]
+  BOOTED.TXT  0x0000000000000029  [esp]
+dipshit> cat BOOTED.TXT
+DIPSHITOS BOOTLOADER
+firmware has agreed to cooperate
+dipshit> write hello.txt hello world
+write: hello.txt: not persisted - no EFI runtime services captured
+dipshit> cat hello.txt
+cat: hello.txt: not found (no such file in the ESP snapshot or NVRAM window)
 dipshit> aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 unknown command: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 type 'help' for a list of commands

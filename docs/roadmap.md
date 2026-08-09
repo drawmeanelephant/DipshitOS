@@ -175,7 +175,7 @@ for nvram-console builds. The declared-window and virtio-pci findings are
 `[observed]` in `docs/hardware-contract.md`; the device register layout
 stays `[inferred]` where RX is concerned until the RX path is driven.
 
-## Milestone 1.5 — interactive kernel monitor (current)
+## Milestone 1.5 — interactive kernel monitor (implemented 2026-08-09)
 
 > **Scope frozen 2026-08-06.** The next deliverable is an interactive
 > command monitor served by the kernel's own polled serial console — not
@@ -191,7 +191,7 @@ storage drivers.
 
 **Progress as of 2026-08-08:** the host plumbing (duplex serial attachment,
 terminal handling, `zig build console`), console & shell core (RX abstraction,
-line editor, tokenizer, `dipshit>` prompt loop), command registry (14 commands,
+line editor, tokenizer, `dipshit>` prompt loop), command registry (20 commands,
 mock-tested), and transcript test gate (`zig build test-console`) are all
 ✅ done and gate-passing in CI. The MMU-takeover death is fixed (claim 0010),
 the console is identified (virtio-pci, claim 0013), the NVRAM console
@@ -202,39 +202,50 @@ banner + `dipshit>` prompt in `vm-serial.log`), and **live RX is wired**
 to end — `verify-live-transcript.sh` asserts the live `dipshit>`
 transcript in `vm-serial.log`), and the **live reboot/shutdown
 observation is done** (claim 0527: `reboot` resets the machine, `shutdown`
-powers it off — 4/4 boots via `verify-live-reboot.sh`). Current gate
+powers it off — 4/4 boots via `verify-live-reboot.sh`), and the
+**filesystem gate is closed** (claim 3475, 2026-08-09: `ls`/`cat`/`write`
+persist through reboot via the pre-exit ESP snapshot + NVRAM-persisted
+writes, `verify-live-fs.sh` — the ESP file window, registry now 20
+commands). **Closed 2026-08-09: all 7 hard gates pass; the milestone is
+tagged `m1.5-interactive-monitor`.** Current gate
 state: [`docs/status.md`](status.md).
 
 The M1.5 hard gates, target screen, and milestone status live in
 **`docs/status.md`** (the living status document); the twenty-step plan,
 agent split, and per-step progress tracker live in **`docs/march-m15.md`**
 (update it as work lands). The monitor itself is implemented and
-host-tested (console abstraction, line editor, tokenizer, 14 commands,
+host-tested (console abstraction, line editor, tokenizer, 20 commands,
 banner, mock-level transcript gate), and the host-side `--console`
-plumbing landed (steps 4–7); the milestone is **not** closed yet: the VZ
-serial gate **passes** (claim 1517 — post-MMU virtio TX fixed with
-T0SZ=16 + TLBI at the switch) and the **RX path is live** (claim 6684 —
-the polled virtio receive queue delivers host keystrokes; the live
-`dipshit>` transcript is asserted in `vm-serial.log` by
-`verify-live-transcript.sh`), and a **live reboot/shutdown is observed
-end to end** (claim 0527: `verify-live-reboot.sh` — `reboot` resets the
-machine, `shutdown` powers it off). Every M1.5 hard gate now passes; the
-remaining close-out is the milestone tag (see
+plumbing landed (steps 4–7); the VZ serial gate **passes** (claim 1517 —
+post-MMU virtio TX fixed with T0SZ=16 + TLBI at the switch), the **RX
+path is live** (claim 6684 — the polled virtio receive queue delivers
+host keystrokes; the live `dipshit>` transcript is asserted in
+`vm-serial.log` by `verify-live-transcript.sh`), a **live
+reboot/shutdown is observed end to end** (claim 0527:
+`verify-live-reboot.sh` — `reboot` resets the machine, `shutdown` powers
+it off), and the **filesystem gate is closed** (claim 3475, 2026-08-09:
+`ls`/`cat`/`write` persist through reboot via the pre-exit ESP snapshot +
+NVRAM-persisted writes, `verify-live-fs.sh`, 1/1 pair). **The milestone
+is closed 2026-08-09: all 7 M1.5 hard gates pass; tagged
+`m1.5-interactive-monitor`** (see
 [`docs/status.md`](status.md)).
 
 ## Later milestones (sketches only, not commitments)
 
-- **M1.5 close-out: milestone tag (all hard gates now pass).** The
-  transport layer is **done**: post-MMU TX (claim 1517: T0SZ=16 + TLBI at
-  the switch), **live RX** (claim 6684: the polled virtio receive queue
-  delivers host keystrokes end to end — `verify-live-transcript.sh`
-  asserts the live `dipshit>` transcript in `vm-serial.log`), and the
-  **live reboot/shutdown observation** (claim 0527: `verify-live-reboot.sh`
-  — `reboot` resets the machine, `shutdown` powers it off, 4/4 boots;
-  `ResetSystem` unit-proven in claim 0011). All hard gates pass; what
-  remains before the milestone is tagged is the tag itself and any final
-  doc sweep. Then the next milestone is a physical page allocator over
-  the captured EFI map (canonical ordering: `docs/status.md`).
+- ~~**M1.5 close-out: milestone tag (all hard gates now pass).**~~ **DONE
+  2026-08-09 (tag `m1.5-interactive-monitor`)** — the transport layer is
+  **done**: post-MMU TX (claim 1517: T0SZ=16 + TLBI at the switch),
+  **live RX** (claim 6684: the polled virtio receive queue delivers host
+  keystrokes end to end — `verify-live-transcript.sh` asserts the live
+  `dipshit>` transcript in `vm-serial.log`), the **live reboot/shutdown
+  observation** (claim 0527: `verify-live-reboot.sh` — `reboot` resets
+  the machine, `shutdown` powers it off, 4/4 boots; `ResetSystem`
+  unit-proven in claim 0011), and the **filesystem gate** (claim 3475:
+  `ls`/`cat`/`write` persist through reboot via the pre-exit ESP snapshot
+  + NVRAM-persisted writes, `verify-live-fs.sh`, 1/1 pair — the last
+  previously-deferred hard gate). **All 7 hard gates pass; milestone
+  closed.** The next milestone is a physical page allocator over the
+  captured EFI map (canonical ordering: `docs/status.md`).
 - ~~A physical page allocator over the captured EFI map.~~ **First step
   DONE 2026-08-08 (claim 3972):** first-fit bitmap allocator over the
   captured map's ConventionalMemory (fixed 128 KiB BSS bitmap over the
