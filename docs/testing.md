@@ -19,7 +19,7 @@ Every verification command belongs to exactly one class (canonical inventory:
 - **C — interactive / manual hardware gate.** Requires a human at the
   keyboard (`zig build console`).
 - **D — diagnostic experiment.** Answers a question (claims
-  0017/0018/0020/0021); **not an acceptance gate**.
+  0017/0018/0020/0021/6460); **not an acceptance gate**.
 
 ## Evidence policy
 
@@ -74,18 +74,26 @@ Every verification command belongs to exactly one class (canonical inventory:
     instance is present; the final stage names the death/crash site. Claim
     0009 observed the ladder ending at `M2_MAPD!` (MMU-takeover window);
     claim 0010 root-caused and fixed it — the ladder now runs
-    `M2_MAPD! → M2_MMUP! → M2_SERIA`, i.e. the switch completes and the
-    serial probe runs to completion finding no device in the declared
-    windows (decoded later, claim 0013 — the real console is a virtio-pci
-    device outside them). The
+    `M2_MAPD! → M2_MMUP! → M2_SERIA → M2_READY`, i.e. the switch completes
+    and the probe/transport are reached (decoded later, claim 0013 — the
+    real console is a virtio-pci device outside the declared windows). The
     memory-dump form is impossible on VZ (guest RAM is not host-mapped —
     observed, claim 0009).
-13. Run the M1.5 host-side console plumbing gate (march steps 4–7):
+13. Run the claim-0015 NVRAM console gate:
+    `bash tools/verify-nvram-console.sh` (also `just verify-nvram-console`;
+    mechanism `zig build nvram-console`; Apple silicon only) —
+    reconstructs the kernel's post-exit console stream from `efi-vars.bin`
+    (takeover banner, memory map, probe record, shell banner, and real
+    `version`/`mem`/`echo`/`help` output — 69–70 chunks); **passing since
+    2026-08-07** (`artifacts/nvram-console-gate.txt`). The gate also found
+    and fixed the ADR 0005 flat-loader relocation bug (const
+    function-pointer tables are not relocated by the flat loader).
+14. Run the M1.5 host-side console plumbing gate (march steps 4–7):
     `bash tools/verify-host-console.sh` (also `just verify-host-console`;
     Apple silicon only) — wires a stdin-backed serial attachment, tees
     guest output to terminal + `vm-serial.log`, and restores the terminal
     on exit/signals.
-14. Save command output and logs under `artifacts/m2-*.txt`, including the
+15. Save command output and logs under `artifacts/m2-*.txt`, including the
     probe output and the complete serial log. State blocked VZ capabilities
     precisely rather than inferring success.
 
@@ -96,9 +104,9 @@ Every verification command belongs to exactly one class (canonical inventory:
 > header loaded into RAM) makes the kernel's `adrp`+`add` references read
 > 24 bytes early, so `KERNEL.TXT` is not byte-perfect and the run gate —
 > and therefore CI — fails immediately.
-15. Generate the project snapshot: `zig build context` →
+16. Generate the project snapshot: `zig build context` →
     `artifacts/context.md`.
-16. Verify the multiagent coordination surface:
+17. Verify the multiagent coordination surface:
     `bash tools/verify-coordination.sh` (also `just verify-coordination`
     and CI). Fails if a claim/log file is malformed, if a claim numbered
     `0024+` does not carry its deterministic ID (computed from the owner
@@ -109,7 +117,7 @@ Every verification command belongs to exactly one class (canonical inventory:
     column count, so an unescaped `|` in a claim status cannot corrupt a
     table). Fix by running `bash tools/status/refresh-indexes.sh` after
     creating a claim file or branch log.
-17. Test the coordination tooling itself: `bash
+18. Test the coordination tooling itself: `bash
     tools/status/test-coordination.sh` (also `just test-coordination` and
     CI) — positive/negative cases for cell escaping, structural table
     validation, and deterministic claim IDs, run in a throwaway sandbox.
@@ -123,7 +131,8 @@ Every verification command belongs to exactly one class (canonical inventory:
 > (bad-handoff, marker, NVRAM console, host-console — Apple silicon only)
 > plus the blocked `zig build run` serial takeover gate and the deferred
 > live transcript/RX gate; the class-D diagnostics (preexit-tx, tx-diag,
-> tx-transition, fw-mmu-capture) run individually per claim. See
+> tx-transition, fw-mmu-capture, t0sz16, tlbi-after-switch, walk-probe,
+> t0sz16-walkprobe) run individually per claim. See
 > [`docs/gate-inventory.md`](gate-inventory.md).
 
 ## Evidence artifacts

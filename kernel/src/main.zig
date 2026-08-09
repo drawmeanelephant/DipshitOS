@@ -32,6 +32,7 @@ const mmio = @import("mmio.zig");
 const pci = @import("pci.zig");
 const evidence = @import("evidence.zig");
 const virtio_console = @import("virtio_console.zig");
+const walkprobe = @import("walkprobe.zig"); // claim 7896 diagnostic (linker-eliminated from default builds)
 const HandoffV2 = handoff.HandoffV2;
 
 // Claim 0020 phase selectors live with the transport (the exact-one-phase
@@ -294,6 +295,21 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
     mmu.install_identity_map();
     evidence.set_marker(marker_mmu);
     evidence.write_marker_var(st, marker_mmu);
+    // Claim 7896 (6460 follow-up, class D, build-gated): with
+    // -Dtlbi-after-switch, drop the no-TLBI crutch immediately after the
+    // switch — the next access must re-walk the installed tables. At
+    // T0SZ=25 (walk starts at level 1 over the L0-rooted tables) that first
+    // re-walk faults deterministically (claim-0010's M2_TTBR! death); at
+    // T0SZ=16 it resolves. Then, with -Dwalk-probe, run the cold-address
+    // probe battery so the ladder names the first address that does not
+    // resolve. Both default off; default builds are byte-identical (the
+    // ADR 0006 no-TLBI contract is unchanged).
+    if (comptime build_options.tlbi_after_switch) {
+        asm volatile ("tlbi vmalle1" ::: .{ .memory = true });
+        asm volatile ("dsb ish" ::: .{ .memory = true });
+        asm volatile ("isb");
+    }
+    if (comptime build_options.walk_probe) walkprobe.run(st);
     // Claim 0020 phase C: the FIRST MMIO access to the transport after the
     // identity-map switch, before the post-switch probe (M2_RAW!) or any
     // other runtime-service/diagnostic work. Tests whether installing the

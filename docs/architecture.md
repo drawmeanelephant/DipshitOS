@@ -39,7 +39,7 @@ Virtualization.framework only; there is no QEMU path.
 | Component | Where | Role |
 |-----------|-------|------|
 | Guest boot loader | `boot/src/main.zig` | AArch64 UEFI application; prints via Simple Text Output, loads `\KERNEL.BIN` from the ESP, jumps to the kernel entry, writes host-readable evidence (`\BOOTED.TXT`, `\LOADER.TXT`, `\RC.TXT`) |
-| Guest kernel | `kernel/src/*.zig` | Freestanding kernel proper: `ExitBootServices`, identity-map MMU, polled serial console; M1.5 adds the interactive monitor (console, lineedit, tokenizer, shell, monitor modules) |
+| Guest kernel | `kernel/src/*.zig` | Freestanding kernel proper: `ExitBootServices`, identity-map MMU (mmu.zig, ADR 0006), PCI/ACPI discovery (pci.zig), virtio-pci console transport (virtio_console.zig), NVRAM evidence + fallback console (evidence.zig / nvram_console.zig), machine controls (machine.zig); M1.5 adds the interactive monitor (console, lineedit, tokenizer, shell, monitor modules) |
 | Boot medium | `image/mkfat32.py` + `image/make-image.sh` | GPT disk with a FAT32 EFI System Partition containing `EFI/BOOT/BOOTAA64.EFI` |
 | macOS host launcher | `host/vm-runner/` (Swift + Virtualization.framework) | Boots the image under UEFI on Apple silicon, captures the guest serial console and framebuffer |
 | Build system | `build.zig`, `build.zig.zon`, `justfile` | Compile, kernel, image, run, inspect, context |
@@ -59,8 +59,8 @@ VZEFIBootLoader (macOS VZ)
         └── ConOut ──▶ virtio console ──▶ artifacts/vm-serial.log  (empty: firmware doesn't route ConOut here)
         └── loader loads \\KERNEL.BIN ──▶ kernel entry
              │  milestone two: ExitBootServices, identity-map MMU
-             │  post-exit evidence channel: NVRAM ladder (EFI var DipshitM2) ──▶ artifacts/efi-vars.bin  [observed: reaches M2_MMUP! → M2_SERIA]
-             └── serial probe ──▶ declared windows decoded (efivars store + debug UART, claim 0013); real console = virtio-pci @ BAR 0x100010000 ──▶ post-MMU transport access hangs ──▶ vm-serial.log empty
+             │  post-exit evidence channel: NVRAM ladder (EFI var DipshitM2) ──▶ artifacts/efi-vars.bin  [observed: ladder reaches M2_READY; NVRAM console channel (claim 0015) carries post-exit console bytes — shell + commands observed]
+             └── serial probe ──▶ declared windows decoded (efivars store + debug UART, claim 0013); real console = virtio-pci @ BAR 0x100010000 ──▶ post-MMU transport access hangs ──▶ vm-serial.log empty (claim 6460: T0SZ 25→16 restored TX in 6/18 boots — not reproducible; production T0SZ stays 25)
              └── M1.5 monitor loop (console/lineedit/tokenizer/shell) ──▶ exists, host-tested via MockConsole; parks in WFE on the real kernel (RX not wired — readByte is a no-RX stub)
 ```
 
@@ -89,7 +89,11 @@ VZEFIBootLoader (macOS VZ)
   0018/0020), so no console is driven on VZ yet and the register layout
   stays `[inferred]` (see `docs/hardware-contract.md`). The M1.5 monitor
   therefore runs against a mock console in tests; the live channel awaits
-  reliable post-MMU console transport access + RX.
+  reliable post-MMU console transport access + RX. Newest diagnostic on
+  the transport layer (claim 6460, class D): correcting the T0SZ
+  start-level mismatch (25→16) restored end-to-end post-MMU TX in 6/18
+  boots — hypothesis strengthened, not reproducible; production T0SZ
+  stays 25 (canonical blocker: `docs/status.md`).
 - **Guest → host evidence:** because the VZ firmware exposes no visible
   text channel, the guest also writes its two lines to `\BOOTED.TXT` on the
   ESP via the UEFI Simple File System protocol. The host reads that file

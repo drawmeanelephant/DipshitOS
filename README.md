@@ -47,7 +47,12 @@ machine controls. The host plumbing (duplex serial, terminal handling,
 tokenizer, prompt loop), and command registry (14 commands, mock-tested)
 are built; the transcript test gate passes (`zig build test-console`).
 The **VZ serial gate remains blocked** (zero bytes in `vm-serial.log`)
-so live guest keystrokes are not yet proven.
+so live guest keystrokes are not yet proven; the NVRAM fallback console
+(claim 0015) does carry post-exit console bytes from a real VZ run (shell
+banner + real command output), and the newest transport diagnostic
+(claim 6460, class D: T0SZ 25→16) restored post-MMU TX in 6/18 boots —
+hypothesis strengthened, not reproducible. Canonical blocker:
+[`docs/status.md`](docs/status.md).
 The goal, hard gates, and per-step progress live in
 **`docs/status.md`** (the living status & goals tracker).
 
@@ -89,6 +94,7 @@ zig build run      # boot it with Swift + Virtualization.framework (Apple silico
 zig build console  # boot an interactive dipshit> console (Apple silicon)
 zig build test-console  # M1.5 transcript test (mock console, no VM)
 zig build marker    # boot and save the NVRAM marker ladder (ADR 0004 D4)
+zig build nvram-console  # boot and reconstruct the NVRAM fallback console stream (claim 0015)
 zig build inspect  # inspect the EFI binary and the disk image
 zig build context  # regenerate artifacts/context.md (deterministic project snapshot)
 ```
@@ -107,7 +113,14 @@ dipshitos/
 ├── .zigversion                pinned Zig version (0.16.0)
 ├── boot/src/main.zig          the AArch64 UEFI boot loader (handoff v2)
 ├── kernel/                    freestanding AArch64 kernel proper + M1.5 shell
-│   ├── src/main.zig           ExitBootServices, MMU, probe, uart, shell seam
+│   ├── src/main.zig           kernel entry: handoff, capture map, EBS, probe, shell seam
+│   ├── src/mmio.zig           volatile MMIO accessors (shared by all drivers)
+│   ├── src/mmu.zig            identity-map TTBR0_EL1 tables + install (ADR 0006)
+│   ├── src/pci.zig            PCI ECAM config-space + bus-0 discovery + ACPI/MCFG walk
+│   ├── src/evidence.zig       NVRAM marker ladder + probe dumps (post-exit evidence)
+│   ├── src/virtio_console.zig virtio-pci console transport (TX; RX is a stub)
+│   ├── src/nvram_console.zig  NVRAM fallback console channel (claim 0015)
+│   ├── src/machine.zig        machine controls (ResetSystem, claim 0011)
 │   ├── src/console.zig        Console abstraction + mock (write/flush/readByte)
 │   ├── src/memmap.zig         Dense-stride EFI memory-map view
 │   ├── src/handoff.zig        Handoff v2 struct validation
@@ -134,7 +147,7 @@ dipshitos/
 │                              hub), claims/ (per-claim files), logs/ (per-branch
 │                              append-only changelogs), architecture, branch
 │                              protection, hardware contract, roadmap, testing,
-│                              decisions (ADRs 0001–0004)
+│                              decisions (ADRs 0001–0006)
 └── artifacts/                 build evidence (gitignored)
 ```
 
@@ -188,7 +201,9 @@ Host: Apple M4, macOS 27.0 (arm64), Zig 0.16.0, Swift 6.2.3 (arm64).
 | Boot via Virtualization.framework | `zig build run` | **Observed**: VM boots; loader writes `\BOOTED.TXT` + `\LOADER.TXT` byte-perfect. M2 serial gate **blocked** — no serial bytes (post-MMU access to the virtio-pci console transport hangs, claims 0018/0020) |
 | Kernel image | `zig build` + `elf2bin.py` | **Observed**: `KERNEL.BIN` (format v1: magic `DSK1`, `entry_offset=0x18`, ~2 KiB) |
 | Kernel marker `\KERNEL.TXT` | M1 regression only | **Observed**: byte-perfect and byte-identical across runs (ADR 0002 corruption fixed); not written post-`ExitBootServices` |
-| Marker fallback gate | `bash tools/verify-marker.sh` | **Observed** (2026-08-07): NVRAM ladder `M2_ENTRY → M2_CMAP! → M2_PREX! → M2_EXIT! → M2_MAPD!` (claim 0009); **fixed 2026-08-07 (claim 0010)**: ladder now reaches `M2_MMUP! → M2_SERIA` — MMU takeover completes; declared-window probe finds no device (windows later decoded as efivars store + debug UART, claim 0013) (`artifacts/m2-mmu-takeover-gate.txt`) |
+| Marker fallback gate | `bash tools/verify-marker.sh` | **Observed** (2026-08-07): NVRAM ladder `M2_ENTRY → M2_CMAP! → M2_PREX! → M2_EXIT! → M2_MAPD!` (claim 0009); **fixed 2026-08-07 (claim 0010)**: ladder now reaches `M2_MMUP! → M2_SERIA → M2_READY` — MMU takeover completes; declared-window probe finds no device (windows later decoded as efivars store + debug UART, claim 0013) (`artifacts/m2-mmu-takeover-gate.txt`) |
+| NVRAM console gate | `bash tools/verify-nvram-console.sh` | **Observed** (2026-08-07): **first post-exit console bytes from a real VZ run** — 69–70 chunks reconstructed from `efi-vars.bin` (takeover banner, memory map, probe record, shell banner, real `version`/`mem`/`echo`/`help` output); found + fixed the ADR 0005 flat-loader relocation bug (claim 0015, `artifacts/nvram-console-gate.txt`) |
+| Host console gate | `bash tools/verify-host-console.sh` | **Observed** (2026-08-06/07): stdin-backed serial attachment, live tee to terminal + log, termios restore (claim 0003, `artifacts/m15-host-console-gate.txt`) |
 | Bad-handoff failure gate | `bash tools/verify-bad-handoff.sh` | **Observed** (2026-08-06): `RC.TXT` → `kernel_rc=0x2`; gate passes (shim LR clobber fixed) |
 
 All command output and logs are saved under `artifacts/` (`inspect.txt`,
@@ -202,8 +217,10 @@ All command output and logs are saved under `artifacts/` (`inspect.txt`,
   `kernel_rc=0x2`), `bash tools/verify-marker.sh` (NVRAM marker ladder —
   the MMU-takeover death was root-caused and fixed, claim 0010, so the
   ladder reaches `M2_SERIA`), `zig build test-console` (M1.5 transcript
-  gate, mock console), and `bash tools/verify-host-console.sh` (M1.5 host
-  plumbing). The M1.5 monitor (14 commands) is implemented and
+  gate, mock console), `bash tools/verify-host-console.sh` (M1.5 host
+  plumbing), and `bash tools/verify-nvram-console.sh` (M1.5 NVRAM
+  fallback console — post-exit console bytes from a real VZ run, claim
+  0015). The M1.5 monitor (14 commands) is implemented and
   host-tested; the VZ serial gate's remaining blocker is post-MMU access
   to the virtio-pci console transport (claims 0018/0020; see
   `docs/status.md`).
@@ -237,9 +254,13 @@ The gate-by-gate plan and active work claims live in
    is found (a virtio-pci console, claim 0013) and the NVRAM channel
    carries post-exit console bytes (claim 0015), but post-MMU access to
    the virtio transport itself hangs on VZ, so the kernel's `readByte`
-   is still a no-RX stub and keystrokes cannot reach a live VM. Next:
-   reliable post-MMU console transport access and the RX path, end to
-   end. Tracked step-by-step in `docs/status.md` / `docs/march-m15.md`.
+   is still a no-RX stub and keystrokes cannot reach a live VM. Newest
+   diagnostic on this exact layer (claim 6460, class D): correcting the
+   T0SZ start-level mismatch (25→16) restored end-to-end post-MMU TX in
+   6/18 boots across three runs — hypothesis strengthened, not
+   reproducible; production T0SZ stays 25. Next: reliable post-MMU
+   console transport access and the RX path, end to end. Tracked
+   step-by-step in `docs/status.md` / `docs/march-m15.md`.
 2. Resolve the milestone-two VZ serial gate itself: with the MMU-takeover
    death fixed and the console identified, the remaining blocker is
    post-MMU access to the virtio transport — run the complete Apple M4 /
