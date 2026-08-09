@@ -110,13 +110,11 @@ pub fn boot_and_park(mon: *monitor.Monitor, rx_wired: bool) void {
     var shell = Shell.init(mon.console, mon.state, mon.machine);
     while (true) {
         if (shell.poll() == .idle) {
-            // Claim 7948: consume a fired timer comparator in the MAIN
-            // context. With a working GIC the IRQ handler re-arms before
-            // this runs (no-op); on Apple VZ no interrupt is ever delivered
-            // (the GICR is a RAZ/WI stub — claim evidence), so this poll is
-            // what keeps the cadence honest. Never from the IRQ handler:
-            // the polled virtio TX path is not reentrancy-safe.
-            timer.poll();
+            // Claim 9187: the timer is serviced only through the IRQ path.
+            // Claim 7948's main-loop comparator poll raced real delivery
+            // after the GICR frame fix, double-consuming some periods.
+            // Output remains here because the polled virtio TX path is not
+            // reentrancy-safe in IRQ context.
             timer.maybe_heartbeat(&mon.console);
             idle_wait_rx();
         }

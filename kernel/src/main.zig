@@ -345,7 +345,7 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
     // misstep reports instead of hanging. Only then register the IRQ chain
     // and unmask IRQs, so no interrupt can arrive before the whole path
     // (GIC -> vector -> dispatcher -> timer) is armed.
-    gic.init();
+    gic.init(timer.ppi, timer.interrupt_edge);
     timer.init();
     exceptions.set_irq_dispatcher(irq_dispatch);
     exceptions.irq_unmask();
@@ -430,15 +430,25 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
         uart_puts("\n");
     }
 
-    // Claim 7948: the interrupt-controller/timer state lands in the serial
+    // Claim 9187: the interrupt-controller/timer state lands in the serial
     // log at every boot — the live gate's first assertion (before the
     // scripted `timer` command runs).
     uart_puts("interrupts: gic=");
     uart_puts(gic.kind_name());
     uart_puts(" armed=");
     uart_puts(if (gic.armed() and timer.armed()) "1" else "0");
+    uart_puts(" dist=");
+    uart_hex(gic.dist_base);
+    uart_puts(" redist=");
+    uart_hex(gic.redist_base);
+    uart_puts(" active=");
+    uart_hex(gic.active_redist_base);
+    uart_puts(" fallback=");
+    uart_puts(if (gic.used_fallback) "1" else "0");
     uart_puts(" ppi=");
     uart_hex(timer.ppi);
+    uart_puts(" edge=");
+    uart_puts(if (timer.interrupt_edge) "1" else "0");
     uart_puts(" freq=");
     uart_hex(timer.freq);
     uart_puts("\n");
@@ -729,7 +739,7 @@ fn exception_report_writer(text: []const u8) void {
     uart_puts(text);
 }
 
-/// Claim 7948 IRQ chain, registered as the exception module's dispatcher:
+/// Claim 9187 IRQ chain, registered as the exception module's dispatcher:
 /// ack from the GIC, handle the timer tick if the INTID is the timer's
 /// PPI, then EOI. Runs in IRQ context with a register frame on the stack —
 /// NO console access (the heartbeat prints from the shell idle loop, where

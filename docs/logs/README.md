@@ -53,6 +53,7 @@ verify-coordination`, and CI) fails if it drifts from the files.
 | `agent/buffy/m2-badhandoff-fix` (PR #11) | [`agent-buffy-m2-badhandoff-fix.md`](agent-buffy-m2-badhandoff-fix.md) |
 | `agent/buffy/m2-kernel-proper` (PR #10) | [`agent-buffy-m2-kernel-proper.md`](agent-buffy-m2-kernel-proper.md) |
 | M2 fixed-memory-marker fallback (ADR 0004 D4, gate work item 3) | [`agent-buffy-m2-marker-fallback.md`](agent-buffy-m2-marker-fallback.md) |
+| `codex/vz-real-irq-delivery` | [`codex-vz-real-irq-delivery.md`](codex-vz-real-irq-delivery.md) |
 | freebuff/docs-reconciliation-m15-status-20260808 | [`freebuff-docs-reconciliation-m15-status-20260808.md`](freebuff-docs-reconciliation-m15-status-20260808.md) |
 | freebuff/get-newest-github-files-and-let-s-get-some-shit-do-1e1cbf84-86fb-4605-a843-32fc0593fea0 | [`freebuff-get-newest-github-files-and-let-s-get-some-shit-do-1e1cbf84-86fb-4605-a843-32fc0593fea0.md`](freebuff-get-newest-github-files-and-let-s-get-some-shit-do-1e1cbf84-86fb-4605-a843-32fc0593fea0.md) |
 | `freebuff/grab-latest-git-and-check-out-status-and-let-s-get-15800f9b-d72c-4035-ac26-ae778c52b296` | [`freebuff-grab-latest-git-and-check-out-status-and-let-s-get-15800f9b-d72c-4035-ac26-ae778c52b296.md`](freebuff-grab-latest-git-and-check-out-status-and-let-s-get-15800f9b-d72c-4035-ac26-ae778c52b296.md) |

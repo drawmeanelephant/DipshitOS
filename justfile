@@ -33,7 +33,7 @@ verify-portable:
 # Run the Apple-silicon VZ hardware gates (class B): serial takeover
 # (zig build run, claim 1517), bad-handoff, marker, NVRAM console,
 # host-console PTY, the live-transcript RX gate (claim 6684), the
-# live GIC + generic timer gate (claim 7948), and the live
+# live timer IRQ-delivery gate (claim 9187), and the live
 # reboot/shutdown gate (claim 0527).
 # Apple silicon only — each boots VZ VMs.
 verify-vz:
@@ -147,7 +147,7 @@ verify-live-transcript:
 verify-live-exceptions:
     bash tools/verify-live-exceptions.sh
 
-# Verify the live GIC + generic timer gate (class B — boots a VZ VM; GIC + CNTP programmed, drives `timer`, asserts armed=1 + ≥5 consumed/re-armed comparator heartbeats in vm-serial.log; claim 7948; Apple silicon only)
+# Verify real timer IRQ delivery (class B — boots a VZ VM; drives `timer`, then requires five CNTP PPIs through the EL1 IRQ vector with irq=5/poll=0; claim 9187; Apple silicon only)
 verify-live-timer:
     bash tools/verify-live-timer.sh
 

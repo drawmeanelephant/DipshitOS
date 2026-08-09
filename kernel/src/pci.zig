@@ -125,7 +125,7 @@ pub fn dump_acpi(st: *const SystemTable) void {
             evidence.dump_str("\n");
             dump_pci(ecam);
         }
-        // Claim 7948: the interrupt controller + generic timer live in ACPI
+        // Claims 7948/9187: the interrupt controller + timer live in ACPI
         // too. Parse the MADT (sig "APIC") for the GIC distributor /
         // redistributor / CPU-interface bases and the GTDT for the EL1
         // physical-timer PPI — PRE-EXIT (post-exit ACPI reads hang on VZ,

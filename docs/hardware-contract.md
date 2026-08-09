@@ -243,33 +243,52 @@ redesign.
   only); DSDT (Apple's own, `Apple Vz`) declares only `PCI0` + `efivars`.
   **[observed]**
 
-### Interrupts (probed 2026-08-08, claim 7948 — delivery blocked)
+### Interrupts (delivered 2026-08-09, claim 9187)
 
 - A **GICv3** (Generic Interrupt Controller, ARM GIC architecture) is
   present: distributor `GICD` @ `0x10000000` and redistributor `GICR` @
-  `0x10010000`, with `GICD_CTLR=0x50` (ARE_NS set → v3) and sane
-  `GICD_TYPER`. **[observed]** — live MMIO read-backs on VZ (claim 7948).
-  ACPI MADT discovery: VZ's MADT is **non-conformant** (two 80-byte
-  type-0x0B entries with no usable distributor base — an Apple quirk);
-  discovery parses it per spec and falls back to the live-probed v3
-  layout. The GTDT is standard: EL1 physical-timer GSIV **30** (PPI 30).
-  **[observed]**
-- **The GIC never delivers an interrupt to the guest on VZ.** The
-  distributor and CPU interface accept and read back config (SPI
-  isen/igrp/prio, ICC_SRE=7, PMR, IGRPEN1 all verified), but the
-  redistributor is **RAZ/WI** (GICR_TYPER/WAKER/IGROUPR0/ISENABLER0 all
-  read 0) and no interrupt — PPI 30, SGI, SPI 32–39, explicit IROUTER,
-  DAIF fully cleared — is ever presented (HPPIR0/1 stay 1023, zero
-  exceptions taken even though the CNTP comparator provably fires).
-  **[observed, claim 7948]** — VZ's GIC is a config-accepting stub; the
-  runner's `VZGICConfiguration` API is not exposed on this macOS SDK.
-- The ARM generic timer (CNTP) exists and runs: `CNTFRQ_EL0=24 MHz`,
-  `CNTP_CVAL_EL0`/`CNTP_CTL_EL0` arm correctly and `ISTATUS=1` when the
-  comparator passes. **[observed]** — the tick fires at the timer but is
-  never routed to the CPU (see previous bullet).
-- Interrupts are masked at kernel entry (firmware boots with them
-  masked). **[inferred]** — standard firmware behavior; the kernel keeps
-  them masked (IRQ unmasking is harmless but no IRQ ever arrives on VZ).
+  `0x10010000`; the boot CPU's selected active frame is also
+  `0x10010000`. `GICD_CTLR=0x50` (ARE_NS set → v3) and `GICD_TYPER` is
+  sane. **[observed]** — live MMIO read-backs (claim 7948), plus the
+  claim-9187 serial state line on each of three boots. VZ's MADT does not
+  yield a usable distributor/redistributor tuple, so the driver uses the
+  live-probed fixed-layout fallback (`fallback=1`, observed 3/3). The GTDT
+  supplies EL1 physical-timer GSIV **30** with level-triggered flags
+  (`edge=0`).
+- **A real timer interrupt is delivered into the guest on VZ.** Periodic
+  CNTP PPI 30 enters the EL1 IRQ vector, returns INTID 30 from
+  `ICC_IAR1_EL1`, increments the IRQ-only counter, is EOI’d through
+  `ICC_EOIR1_EL1`, and re-arms. **[observed]** — `tools/verify-live-timer.sh`
+  passes 3/3; every saved serial log contains
+  `timer irq delivered ppi=0x1e irq_ticks=1` followed by
+  `timer heartbeat ticks=5 irq=5 poll=0`, and the scripted shell reply is
+  present. The production idle loop no longer polls the comparator.
+- Claim 7948's negative delivery result was a guest-driver artifact, not a
+  VZ platform wall. The delivery-blocking bug was that SGI/PPI accesses
+  used RD-frame offsets
+  such as `GICR+0x80` instead of SGI-frame offsets such as
+  `GICR+0x10080`, so PPI 30 was never enabled. The audit also found a
+  shifted MADT type mapping (`0x0B` is GICC, `0x0C` GICD, `0x0E` GICR)
+  and an ICFGR write to the RES0 bit; those were specification errors, but
+  VZ's fixed-layout fallback and the timer's level-triggered mode kept them
+  from being the observed delivery blocker. Apple's Xcode 27
+  Hypervisor.framework header independently
+  names `GICR_IGROUPR0=0x10080`, `ISENABLER0=0x10100`, and
+  `ICFGR1=0x10c04`. **[observed from the installed public SDK and corrected
+  live guest, claim 9187]**
+- Xcode 27's public **Virtualization.framework** SDK still exposes no
+  `VZGICConfiguration` or host interrupt-injection API; the separate
+  **Hypervisor.framework** exposes `hv_gic_create`, `hv_gic_set_spi`, and
+  `hv_gic_send_msi`. **[observed]** — read-only SDK audit saved as
+  `artifacts/vz-irq-api-audit.txt`. No host injection or runner change is
+  needed for the working timer PPI path.
+- The ARM generic timer (CNTP) runs at `CNTFRQ_EL0=24 MHz`; the kernel
+  programs `CNTP_CVAL_EL0`/`CNTP_CTL_EL0` for a one-second period.
+  **[observed]** — five consecutive IRQ-serviced periods in each live gate
+  boot.
+- Interrupts are masked at kernel entry (firmware behavior) and explicitly
+  unmasked only after vectors, GIC, dispatcher, and timer are armed.
+  **[inferred at entry; observed working after the explicit unmask].**
 
 ## What milestone zero does NOT assume (and does not touch)
 
