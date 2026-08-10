@@ -42,6 +42,7 @@
 //! program issued the call. No libc, no POSIX, no heap allocation.
 
 const std = @import("std");
+const console = @import("console.zig"); // card 3c (claim 7786): the shell-side report drain in host tests
 const mmu = @import("mmu.zig");
 const esp = @import("esp.zig");
 const fat = @import("fat.zig");
@@ -641,6 +642,81 @@ test "exec: permanent occupant + recycle — one spare slot, pool_full, then the
     try std.testing.expect(!scheduler.has_free_slot());
     try std.testing.expectEqual(ExecResult.pool_full, exec_file("USER.BIN"));
     try std.testing.expectEqual(process.State.running, process.info(1).?.state);
+}
+
+test "exec: kill reaps a permanent occupant — pages return, the slot is re-exec'd" {
+    // Card 3c (claim 7786): the OS, not the program, owns process
+    // lifetime. The never-exiting COUNTER.BIN is force-terminated through
+    // the EXISTING exit → zombie → idle-reap path with the reserved
+    // status 137; its 5 allocator pages return at the reap (exact +5
+    // free-count recovery), the slot frees, and a subsequent exec lands
+    // in it.
+    try build_image(test_allocator);
+    defer test_allocator.free(saved_image);
+    esp.reset();
+    try std.testing.expectEqual(fat.MountResult.ok, esp.set_disk(.{ .read = &fake_read, .write = &fake_write }));
+    arm_allocator();
+    _ = mmu.build_user_root(userspace.text_va, 0x1000, 64, userspace.stack_va, 0x2000, 8192) orelse return error.TestUnexpectedResult;
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0);
+    scheduler.start();
+    // Retire the boot payload: shell + idle + worker leave two free slots.
+    try std.testing.expect(scheduler.yield_current());
+    try std.testing.expect(scheduler.yield_current());
+    try std.testing.expectEqual(@as(usize, 2), scheduler.current_id());
+    try std.testing.expect(scheduler.exit_current(7));
+    try std.testing.expect(scheduler.reap(2));
+    // Drain the boot payload's exit/reap reports into a throwaway so the
+    // kill's report below is the ONLY pending one (single-slot flags).
+    var drain_mock = console.MockConsole(256){};
+    var drain_con = drain_mock.console();
+    scheduler.maybe_report(&drain_con);
+
+    const counter_img = dsk1("counter: alive\n", 24, 24 + 15);
+    try std.testing.expectEqual(esp.WriteResult.ok, esp.write_file("COUNTER.BIN", counter_img[0 .. 24 + 15]));
+    const user_img = dsk1("user: hello from the ESP\n", 24, 24 + 25);
+    try std.testing.expectEqual(esp.WriteResult.ok, esp.write_file("USER.BIN", user_img[0 .. 24 + 25]));
+
+    // The permanent occupant takes a slot and 5 pages (1 text + 2 stack +
+    // 2 EL1 exception stack).
+    try std.testing.expectEqual(ExecResult.ok, exec_file("COUNTER.BIN")); // slot 2
+    const free_after_counter = alloc.stats().free_pages;
+    const counter_proc = process.info(1).?;
+    try std.testing.expectEqualStrings("COUNTER.BIN", counter_proc.name);
+    try std.testing.expectEqual(process.State.running, counter_proc.state);
+    // Kill by id (the `procs` id): the kernel arms the counter's executor.
+    try std.testing.expectEqual(scheduler.KillResult.ok, scheduler.request_kill(counter_proc.task_id.?));
+    // The ring's next selection of the counter converts it to the exit
+    // path with the RESERVED status 137 (not a cooperative sys_exit).
+    try std.testing.expect(scheduler.yield_current()); // idle -> shell
+    try std.testing.expect(scheduler.yield_current()); // shell -> worker
+    try std.testing.expect(scheduler.yield_current()); // worker -> counter -> killed -> idle
+    try std.testing.expectEqual(@as(usize, scheduler.idle_id), scheduler.current_id());
+    try std.testing.expect(scheduler.is_terminated(2));
+    try std.testing.expectEqual(@as(?u64, scheduler.reserved_kill_status), scheduler.terminated_status(2));
+    // The process exit report carries 137 (the killed-status report).
+    var mock = console.MockConsole(128){};
+    var con = mock.console();
+    scheduler.maybe_report(&con);
+    try std.testing.expectEqualStrings("tasks user-exec exited status=137\nprocs COUNTER.BIN exited status=137\n", mock.contents());
+    const killed = process.info(1).?;
+    try std.testing.expectEqual(process.State.exited, killed.state);
+    try std.testing.expectEqual(@as(u64, 137), killed.exit_status);
+    // The exited process holds its 5 pages until the reap (the free
+    // count is unchanged from right after the exec — 5 still out)...
+    try std.testing.expectEqual(free_after_counter, alloc.stats().free_pages);
+    // ...then the scheduler reap returns them (exact +5 recovery).
+    try std.testing.expect(scheduler.reap(2));
+    try std.testing.expectEqual(free_after_counter + 5, alloc.stats().free_pages);
+    try std.testing.expect(scheduler.has_free_slot());
+    // A subsequent exec lands in the freed slot.
+    try std.testing.expectEqual(ExecResult.ok, exec_file("USER.BIN"));
+    try std.testing.expectEqual(process.State.running, process.info(2).?.state);
+    try std.testing.expectEqual(@as(?usize, 2), process.info(2).?.task_id); // slot 2 reused
+    // The counter's exited descriptor stays in the procs table.
+    try std.testing.expectEqual(process.State.exited, process.info(1).?.state);
+    try std.testing.expectEqual(@as(u64, 137), process.info(1).?.exit_status);
 }
 
 fn build_image(alloc_arg: std.mem.Allocator) !void {

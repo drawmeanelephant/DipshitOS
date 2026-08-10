@@ -62,6 +62,7 @@ verify-coordination`, and CI) fails if it drifts from the files.
 | milestone-four follow-on: concurrent processes (two live user address spaces) | [`agent-buffy-m4-concurrent-processes.md`](agent-buffy-m4-concurrent-processes.md) |
 | milestone four card 1: virtio entropy driver + CSPRNG (claim 2665) | [`agent-buffy-m4-entropy-csprng.md`](agent-buffy-m4-entropy-csprng.md) |
 | milestone four card 2: general (non-ESP) filesystem (claim 3678) | [`agent-buffy-m4-general-fs.md`](agent-buffy-m4-general-fs.md) |
+| milestone-four follow-on 3, card 3c: kill (the kernel owns process lifetime) | [`agent-buffy-m4-kill.md`](agent-buffy-m4-kill.md) |
 | milestone-four follow-on 2: a long-lived process among live peers | [`agent-buffy-m4-long-lived-process.md`](agent-buffy-m4-long-lived-process.md) |
 | milestone four card 3: process abstraction (claim 3848) | [`agent-buffy-m4-process-abstraction.md`](agent-buffy-m4-process-abstraction.md) |
 | `agent/buffy/macos27-custom-virtio-spike` | [`agent-buffy-macos27-custom-virtio-spike.md`](agent-buffy-macos27-custom-virtio-spike.md) |
