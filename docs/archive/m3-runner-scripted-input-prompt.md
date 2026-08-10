@@ -1,3 +1,8 @@
+> ARCHIVED — the runner scripted-input card is complete: the `--script` /
+> `--script-expect` fixture mode landed inside claim 6684's runner work
+> (live-RX/transcript gate, 2026-08-08; see `host/vm-runner/Sources/VMRunner/main.swift`).
+> Do not treat as an active plan.
+
 # Milestone three — host runner scripted-input mode (OPTIONAL / deferrable)
 
 Planning-first agent prompt for DipshitOS. Feed this file to the

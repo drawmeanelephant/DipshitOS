@@ -66,7 +66,7 @@ byte-identical across runs, and `zig build run` **gates** on its content
 > serial console. No firmware services remain in use.
 
 Design: `docs/decisions/0004-kernel-proper.md` (ADR 0004), with the
-implementation design and review in `docs/m2-kernel-proper-design.md`.
+implementation design and review in `docs/archive/m2-kernel-proper-design.md`.
 Apple Virtualization.framework is the only supported host (Apple silicon,
 macOS 27+); there is no QEMU path. The guest stays freestanding Zig — no
 libc, no POSIX.
@@ -219,8 +219,10 @@ state: [`docs/status.md`](status.md).
 
 The M1.5 hard gates, target screen, and milestone status live in
 **`docs/status.md`** (the living status document); the twenty-step plan,
-agent split, and per-step progress tracker live in **`docs/march-m15.md`**
-(update it as work lands). The monitor itself is implemented and
+agent split, and per-step progress tracker lived in
+**`docs/archive/march-m15.md`** (M1.5 closed 2026-08-09, tagged
+`m1.5-interactive-monitor`; the active per-milestone tracker is
+**`docs/march-m3.md`**). The monitor itself is implemented and
 host-tested (console abstraction, line editor, tokenizer, 20 commands,
 banner, mock-level transcript gate), and the host-side `--console`
 plumbing landed (steps 4–7); the VZ serial gate **passes** (claim 1517 —
@@ -239,16 +241,18 @@ disk itself). **The milestone is closed 2026-08-09: all 7 M1.5 hard
 gates pass; tagged `m1.5-interactive-monitor`** (see
 [`docs/status.md`](status.md)).
 
-## Milestone three — allocator, interrupts, tasks, EL0/SVC, syscalls, and uaccess (implemented through the uaccess card)
+## Milestone three — allocator, interrupts, tasks, EL0/SVC, syscalls, uaccess, and userspace (**CLOSED 2026-08-10, tagged `m3-userspace`**)
 
 > The milestone-three plan, in canonical order (mirroring
 > `docs/status.md`'s "What comes immediately afterward" and the per-card
 > tracker [`docs/march-m3.md`](march-m3.md)): physical allocator →
 > exception vectors → GIC + timer → kernel tasks → EL0/SVC boundary →
 > syscall ABI → uaccess → per-task address spaces → user lifecycle → ESP
-> exec → blocking syscalls. Every card through the user task lifecycle
-> card is **done** (claims 6120/5804/6729); **loading and execing a user
-> program from the ESP is the next milestone-three card**.
+> exec → blocking syscalls. **All cards are done** (claims 3972/5162/9746/
+> 9187/5275/8215/3594/6120/5804/6729/6783/3200; see the tracker for
+> per-card evidence), the full class A + class B gate set re-ran green at
+> the candidate (claim 0707), and the milestone is **tagged
+> `m3-userspace`** (2026-08-10).
 
 - ~~A physical page allocator over the captured EFI map.~~ **First step
   DONE 2026-08-08 (claim 3972):** first-fit bitmap allocator over the
@@ -294,7 +298,7 @@ gates pass; tagged `m1.5-interactive-monitor`** (see
   ([`docs/decisions/0007-syscall-abi.md`](decisions/0007-syscall-abi.md))
   freezes x8 number, x0–x5 arguments, x0 result; the runtime-built
   64-slot table implements slots 0–4 (`ping`/`write`/`yield`/`exit`/`sleep`) and
-  returns `ENOSYS` for reserved 4–63; `sys_write` is bounded to the
+  returns `ENOSYS` for reserved 5–63; `sys_write` is bounded to the
   kernel-known EL0 apertures and the low-4-GiB identity blanket;
   scheduler yield/exit/sleep hooks and deterministic `syscalls` counters land
   with the live gate `tools/verify-live-svc.sh` passing 1/1 (evidence:

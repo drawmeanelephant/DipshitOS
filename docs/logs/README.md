@@ -55,6 +55,7 @@ verify-coordination`, and CI) fails if it drifts from the files.
 | `agent/buffy/m2-kernel-proper` (PR #10) | [`agent-buffy-m2-kernel-proper.md`](agent-buffy-m2-kernel-proper.md) |
 | M2 fixed-memory-marker fallback (ADR 0004 D4, gate work item 3) | [`agent-buffy-m2-marker-fallback.md`](agent-buffy-m2-marker-fallback.md) |
 | per-task user address spaces (claim 5804) | [`agent-buffy-m3-addrspaces.md`](agent-buffy-m3-addrspaces.md) |
+| milestone-three close-out (lane E, `agent/buffy/m3-closeout`) | [`agent-buffy-m3-closeout.md`](agent-buffy-m3-closeout.md) |
 | `agent/buffy/m3-docs-reconcile-syscall-abi` | [`agent-buffy-m3-docs-reconcile-syscall-abi.md`](agent-buffy-m3-docs-reconcile-syscall-abi.md) |
 | user task lifecycle (claim 6729) | [`agent-buffy-m3-lifecycle.md`](agent-buffy-m3-lifecycle.md) |
 | `agent/buffy/m3-uaccess` | [`agent-buffy-m3-uaccess.md`](agent-buffy-m3-uaccess.md) |

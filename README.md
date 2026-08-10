@@ -35,7 +35,7 @@ Milestone two adds the kernel proper: the stub allocates handoff contract v2,
 the kernel captures the EFI map, calls `ExitBootServices` with the required
 retry bound, installs identity-map TTBR0_EL1 tables, probes declared MMIO
 windows, and drives a polled serial console before entering a terminal WFE
-loop. Design: `docs/m2-kernel-proper-design.md` and ADR 0004.
+loop. Design: `docs/archive/m2-kernel-proper-design.md` and ADR 0004.
 
 The milestone-one `KERNEL.TXT` corruption (kernel writes landing as
 shifted slices of the kernel image's `.rodata` on Apple VZ firmware) is
@@ -283,7 +283,8 @@ The gate-by-gate plan and active work claims live in
    `verify-live-fs.sh` — **upgraded the same day to a real FAT32 storage
    driver, claim 6420**, so files persist on the disk itself). **All 7
    M1.5 hard gates pass; milestone tagged.**
-   Tracked step-by-step in `docs/status.md` / `docs/march-m15.md`.
+   Tracked step-by-step in `docs/status.md` / `docs/march-m3.md` (M1.5's
+   tracker is archived at `docs/archive/march-m15.md`).
 2. ~~Resolve the milestone-two VZ serial gate itself.~~ **DONE 2026-08-08
    (claim 1517):** the post-MMU transport blocker (start-level mismatch +
    stale-TLB crutch, claims 6460/7896) is fixed in production (T0SZ=16 +

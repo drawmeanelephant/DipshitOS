@@ -34,7 +34,7 @@
 | One — kernel handoff | Separate freestanding `KERNEL.BIN` loaded, cache-maintained, jumped to, and returned (`\RC.TXT` = `kernel_rc=0x0`); ADR 0002 | ✅ done |
 | Two — kernel proper | ExitBootServices, captured EFI map, identity TTBR0_EL1 tables, MMIO serial probe + polled TX console (ADR 0004) | ✅ **gates passed 2026-08-08** (claim 1517): bad-handoff failure gate passing since 2026-08-06, VZ serial gate now **passing** (post-MMU virtio TX fixed) |
 | **1.5 — Interactive Kernel Monitor ("Dipshit Monitor")** | A live, interactive command monitor served by the kernel's serial console (the milestone-two terminal loop becomes its payload) | ✅ **done 2026-08-09** — all 7 hard gates pass; the last (filesystem, claim 3475) closed 2026-08-09 and upgraded to a real FAT32 storage driver (claim 6420); tagged `m1.5-interactive-monitor` |
-| Three — allocator, interrupts, tasks | Physical allocator, GIC + timer, tasks, EL0, and syscalls | 🚧 **active** — allocator, IRQ/timer, and round-robin tasks are done (claims 3972/5162/9187/5275); the first EL0t task + SVC boundary landed in claim 8215; the frozen 64-slot syscall ABI and slots 0–3 (`ping`/`write`/`yield`/`exit`) pass their live VZ gate (claim 3594); the fault-safe uaccess layer (claim 6120), the per-task address spaces card (claim 5804 — per-task TTBR0 with an EL1-only kernel overlay, VZ TTBR1 fallback), the user task lifecycle card (claim 6729 — explicit states, bounded spawn, exit→zombie, idle-task reaper, plus the callee-saved vector-frame fix that made preemption of compiled tasks safe), and the **ESP exec card (claim 6783 — a real user program, `USER.BIN`, is loaded from the ESP through the claim-6420 FAT path by the `exec` monitor command, the EL0 user root is rebuilt around its page, and the program runs at EL0, writing via sys_write, round-tripping pings, and exiting through the lifecycle)** all landed and pass their live VZ gates. Next: march-m3 step 8 (milestone-three close-out). |
+| Three — allocator, interrupts, tasks | Physical allocator, GIC + timer, tasks, EL0, and syscalls | 🚧 **active** — allocator, IRQ/timer, and round-robin tasks are done (claims 3972/5162/9187/5275); the first EL0t task + SVC boundary landed in claim 8215; the frozen 64-slot syscall ABI and slots 0–3 (`ping`/`write`/`yield`/`exit`) pass their live VZ gate (claim 3594); the fault-safe uaccess layer (claim 6120), the per-task address spaces card (claim 5804 — per-task TTBR0 with an EL1-only kernel overlay, VZ TTBR1 fallback), the user task lifecycle card (claim 6729 — explicit states, bounded spawn, exit→zombie, idle-task reaper, plus the callee-saved vector-frame fix that made preemption of compiled tasks safe), and the **ESP exec card (claim 6783 — a real user program, `USER.BIN`, is loaded from the ESP through the claim-6420 FAT path by the `exec` monitor command, the EL0 user root is rebuilt around its page, and the program runs at EL0, writing via sys_write, round-tripping pings, and exiting through the lifecycle)**, and the **blocking-syscalls card (claim 3200 — `sys_sleep` slot 4 blocks the caller for N scheduler ticks with timer-driven wakeup, the ESP program sleeps 2 ticks and wakes, and the worker keeps advancing during the sleep window)** all landed and pass their live VZ gates. **Milestone three is CLOSED 2026-08-10 (claim 0707): the full class A + class B gate set re-ran green at the candidate and the milestone is tagged `m3-userspace`** (see the march tracker [`docs/march-m3.md`](march-m3.md) row 8). |
 
 Resolved loose end: the milestone-one `KERNEL.TXT` corruption is **fixed**
 (ADR 0002 — the loader now places image content at `base+0`; the write is
@@ -72,7 +72,16 @@ milestone-three uaccess card (claim 6120) re-ran its affected gates at
 (`artifacts/m3-uaccess-live.txt`), live-svc 1/1 with the payload's three
 writes (`write=3`), live-exceptions 1/1, live-userspace 1/1, live-timer
 1/1, live-tasks 1/1, live-transcript 1/1, and `zig build run` (serial
-takeover) all green; class A re-run green in full.**
+takeover) all green; class A re-run green in full** **— and re-run in
+full at the milestone-three candidate HEAD `0c119d8` on 2026-08-10
+(claim 0707, `artifacts/gates-reverify-20260810-m3-closeout.txt` +
+`artifacts/classB-chunk{1,2,3,4}-m3-closeout.log` — class A 11/11,
+class B 17/17: serial takeover, bad-handoff, marker, nvram-console,
+host-console, live-transcript, live-fs, live-timer, live-tasks,
+live-userspace, live-svc, live-uaccess, live-addrspaces, live-lifecycle,
+live-exec, live-sleep, live-reboot; all green)**. The milestone-three
+close-out archived the completed M1.5/M3 prompt + design docs into
+`docs/archive/` (see the [Related docs](#related-docs) section).
 
 | Gate | Command | Result | Last evidence |
 |------|---------|--------|---------------|
@@ -299,9 +308,10 @@ dipshit>
 > **Moved 2026-08-06:** the per-step tracker and the best-agent-split
 > tables used to live in this file; agents marking steps collided here
 > with gate and milestone-status edits. They now live in the per-milestone
-> tracker [`docs/march-m15.md`](march-m15.md) — update a step's row there,
-> never here. This file holds milestone-level facts only (position, gates,
-> hard gates) plus pointers.
+> trackers — the active [`docs/march-m3.md`](march-m3.md) and the archived
+> [`docs/march-m15.md`](archive/march-m15.md) (M1.5, closed 2026-08-09) —
+> update a step's row there, never here. This file holds milestone-level
+> facts only (position, gates, hard gates) plus pointers.
 
 ## What comes immediately afterward
 
@@ -322,7 +332,7 @@ dipshit>
 13. ~~**Load and exec a real user program from the ESP.**~~ **DONE 2026-08-10 (claim 6783)** — a separate EL0 program (`user/src/main.zig`, naked asm on the fixed syscall ABI) is built into a flat `USER.BIN` (elf2bin DSK1) and embedded on the ESP by the image builder (`mkfat32.py` + `make-image.sh` + `zig build user`). The new `exec [<file>]` monitor command reads it through the claim-6420 FAT path into a fixed 4 KiB BSS page, strips the 24-byte header, rebuilds the EL0 user root around the loaded page with claim 5804's `build_user_root` (proven to work **post-install** because the kernel stays identity-mapped — `@intFromPtr` is still physical), and spawns it as an EL0t task — **gated on the previous user task being gone** (one user program at a time; the lifecycle's closed loop). The loaded program executes at EL0 from the ESP-loaded page: its `sys_write` markers land in the serial log directly, two sequenced pings prove SVC round-trips from a loaded image, and `sys_exit` (status 42) + the idle reap close the lifecycle. Two live-measured fixes: the user linker script must **discard `.eh_frame`** (the orphan sections landed at VMA 0, so the flat image's entry pointed at CFI bytes), and exec must **strip the DSK1 header in place** (the user-root leaf masks phys to page granularity, so mapping `program+24` mapped the header page — the EL0 task fetched "DSK1" and faulted on the zero pad). New class-B gate `bash tools/verify-live-exec.sh` **PASS 1/1**; all shared-seam regressions green (lifecycle/addrspaces/uaccess/svc/userspace/tasks/timer).
 14. ~~**Blocking syscalls: sleep/yield/wakeup in the tick scheduler.**~~ **DONE 2026-08-10 (claim 3200)** — a new `sys_sleep(ticks)` row (slot 4, ADR 0007 amendment) blocks the calling task for N scheduler ticks; the scheduler gains an explicit `blocked` state with per-task wakeup deadline, a tick counter advancing on every timer PPI, and a timer-driven `wake_expired` (IRQ context, console-free) that moves expired sleepers back to `ready` — the same resume path as `sys_yield`. The ESP-loaded user program is extended with a cooperative yield, a 2-tick sleep (asserting the 0 return), and a post-wake marker before exiting with status 43. The worker's advance lines during the sleep window prove other runnable tasks keep progressing. `user_root_in_use` now counts `blocked` tasks too — a sleeping user program still owns the user root. New class-B gate `bash tools/verify-live-sleep.sh`; all shared-seam regressions green.
 
-The command layer above is portable; `docs/march-m15.md` step 15's filesystem-command **deferral is superseded 2026-08-09** — first by the pre-exit ESP file window (claim 3475) and then, **on the same day, by the real FAT32 storage driver (claim 6420)**: `ls`/`cat`/`write` now read and write the live ESP's FAT volume through a virtio-blk transport, so files persist on the disk itself and **no storage driver remains deferred**. The allocator, interrupts, first tasks, EL0 boundary, and syscall ABI prerequisites are complete; milestone-three continues with uaccess.
+The command layer above is portable; `docs/archive/march-m15.md` step 15's filesystem-command **deferral is superseded 2026-08-09** — first by the pre-exit ESP file window (claim 3475) and then, **on the same day, by the real FAT32 storage driver (claim 6420)**: `ls`/`cat`/`write` now read and write the live ESP's FAT volume through a virtio-blk transport, so files persist on the disk itself and **no storage driver remains deferred**. The allocator, interrupts, first tasks, EL0 boundary, syscall ABI, uaccess, per-task address spaces, lifecycle, ESP exec, and blocking syscalls are all complete; **milestone three is closed 2026-08-10 (tag `m3-userspace`, claim 0707)**.
 
 ## Assumptions & gaps in this plan (checked against the merged `main`)
 
@@ -451,7 +461,7 @@ here.
    claim and `docs/logs/agent-buffy-m2-badhandoff-fix.md`). The serial gate
    (item 2) no longer shares that suspect.
 2. **Run the VZ serial/MMU gate** — `docs/m2-vz-serial-gate-prompt.md`
-   (M1.5 march step 8's "confirm the serial console", `docs/march-m15.md`).
+   (M1.5 march step 8's "confirm the serial console", `docs/archive/march-m15.md`).
    **Gate:** exact banner `DipshitOS kernel has seized control.`,
    `memory-map descriptors=0x...`, and `kernel terminal state` in
    `vm-serial.log`; then flip matching `[inferred] → [observed]` entries in
@@ -496,7 +506,7 @@ here.
 ## Related docs
 
 - [`roadmap.md`](roadmap.md) — milestone planning (the "where we're going").
-- [`march-m15.md`](march-m15.md) — the M1.5 per-step tracker and best-agent split (one file per milestone).
+- [`archive/march-m15.md`](archive/march-m15.md) — archived M1.5 per-step tracker and best-agent split (milestone closed 2026-08-09; the active tracker is [`march-m3.md`](march-m3.md)).
 - [`testing.md`](testing.md) — the verification sequence and evidence policy.
 - [`logs/README.md`](logs/README.md) — per-branch append-only changelog index (the sharded changelog).
 - [`claims/README.md`](claims/README.md) — per-claim files index (the sharded claims table, generated).
@@ -507,5 +517,6 @@ here.
 - [`archive/m2-vz-serial-gate-prompt.md`](archive/m2-vz-serial-gate-prompt.md) — archived prompt: run the VZ serial/MMU gate.
 - [`archive/m15-host-plumbing-prompt.md`](archive/m15-host-plumbing-prompt.md) — archived prompt (agent A): duplex serial attachment, teeing, terminal safety, `zig build console`.
 - [`archive/m15-commands-prompt.md`](archive/m15-commands-prompt.md) — archived prompt (agent C): command registry, identity/memory/utility/control commands, personality (mock-console based).
-- [`decisions/`](decisions/) — ADRs 0001–0006 (binding: 0004 kernel proper, 0005 runtime-built function tables, 0006 MMU debt boundary).
+- [`decisions/`](decisions/) — ADRs 0001–0007 (binding: 0004 kernel proper, 0005 runtime-built function tables, 0006 MMU debt boundary, 0007 syscall ABI).
+- [`archive/`](archive/) — archived one-shot prompts and frozen designs from completed milestones (M2 kernel proper, M1.5 shell/commands + T0SZ experiment + tracker, M3 syscall ABI / march tracker / ragshit dogfood / runner scripted input).
 - [`../AGENTS.md`](../AGENTS.md) — project rules (now including the multiagent coordination rules).

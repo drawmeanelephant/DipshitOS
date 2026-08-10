@@ -38,7 +38,7 @@ cp "$ROOT/tools/status/claim-id.sh"         "$TMP/tools/status/"
 cp "$ROOT/tools/verify-coordination.sh"     "$TMP/tools/"
 # verify-coordination.sh requires these files to exist
 : > "$TMP/docs/status.md"
-: > "$TMP/docs/march-m15.md"
+: > "$TMP/docs/march-m3.md"
 
 cat > "$TMP/docs/claims/README.md" <<'EOF'
 # Active claims (sandbox fixture)
