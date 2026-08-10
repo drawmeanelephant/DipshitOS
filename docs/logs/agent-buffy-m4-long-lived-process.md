@@ -95,6 +95,7 @@
   B. Claim 4613 flipped ✅ done (Stage A + B + C complete; PR pending).
   Indexes refreshed; coordination + test-coordination checks green.
 
-- **PR** (2026-08-10): branch pushed, PR opened — body per the repo
-  template (summary + AGENTS compliance checklist + observed class A/B
-  evidence + commands).
+- **PR** (2026-08-10): branch pushed, PR opened
+  ([#75](https://github.com/drawmeanelephant/DipshitOS/pull/75), commit
+  `3bac6b9`) — body per the repo template (summary + AGENTS compliance
+  checklist + observed class A/B evidence + commands).

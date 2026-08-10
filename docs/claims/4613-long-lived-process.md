@@ -32,8 +32,9 @@
   reap page-return) and Stage B (the live long-lived gate + full
   shared-seam sweep) landed 2026-08-10; Stage C (docs reconciliation,
   this flip) complete.
-- **PR:** opening 2026-08-10 on `agent/buffy/m4-long-lived-process` (to be
-  filled in with the real number once opened).
+- **PR:** [drawmeanelephant/DipshitOS#75](https://github.com/drawmeanelephant/DipshitOS/pull/75)
+  — opened 2026-08-10, commit `3bac6b9` on
+  `agent/buffy/m4-long-lived-process`.
 
 ## Notes
 
