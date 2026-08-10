@@ -1052,6 +1052,10 @@ fn cmd_exec(m: *Monitor, args: []const []const u8) ExecError {
             m.console.print_line("exec: page-table carve-out exhausted (too many user-root rebuilds)");
             return .machine_failed;
         },
+        .process_full => {
+            m.console.print_line("exec: process registry exhausted (all processes live; wait for one to exit)");
+            return .machine_failed;
+        },
     }
 }
 

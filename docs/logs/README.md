@@ -60,6 +60,7 @@ verify-coordination`, and CI) fails if it drifts from the files.
 | user task lifecycle (claim 6729) | [`agent-buffy-m3-lifecycle.md`](agent-buffy-m3-lifecycle.md) |
 | `agent/buffy/m3-uaccess` | [`agent-buffy-m3-uaccess.md`](agent-buffy-m3-uaccess.md) |
 | milestone four card 1: virtio entropy driver + CSPRNG (claim 2665) | [`agent-buffy-m4-entropy-csprng.md`](agent-buffy-m4-entropy-csprng.md) |
+| milestone four card 3: process abstraction (claim 3848) | [`agent-buffy-m4-process-abstraction.md`](agent-buffy-m4-process-abstraction.md) |
 | `agent/buffy/macos27-custom-virtio-spike` | [`agent-buffy-macos27-custom-virtio-spike.md`](agent-buffy-macos27-custom-virtio-spike.md) |
 | `agent/codex/m3-march-tracker` | [`agent-codex-m3-march-tracker.md`](agent-codex-m3-march-tracker.md) |
 | `agent/codex/m3-ragshit-dogfood` | [`agent-codex-m3-ragshit-dogfood.md`](agent-codex-m3-ragshit-dogfood.md) |

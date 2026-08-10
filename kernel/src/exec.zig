@@ -43,6 +43,10 @@ const userspace = @import("userspace.zig");
 // user stack VA (the seed's real ASLR consumer).
 const csprng = @import("csprng.zig");
 const syscall = @import("syscall.zig");
+// Milestone four (claim 3848): the loaded program is a PROCESS — the
+// image + address space + lifecycle live in the bounded process registry,
+// not in this module's globals.
+const process = @import("process.zig");
 
 /// Fixed load buffer: one page, the claim-8215 text aperture's size. A
 /// program larger than this is rejected honestly (`too_large`).
@@ -72,16 +76,14 @@ pub const ExecResult = enum {
     pool_full,
     /// The fixed page-table carve-out cannot hold another user-root clone.
     table_full,
+    /// The process registry holds only live (created/running) processes —
+    /// no free slot and no exited descriptor to recycle.
+    process_full,
 };
 
 /// The loaded program image (BSS, page-aligned so the user root can map the
 /// whole page at `userspace.text_va`).
 var program: [exec_program_max]u8 align(4096) = undefined;
-var loaded_flag: bool = false;
-var loaded_name_buf: [esp.name_max]u8 = undefined;
-var loaded_name_len: usize = 0;
-var loaded_content_len: usize = 0;
-var loaded_entry_va: u64 = 0;
 
 pub const LoadedInfo = struct {
     name: []const u8,
@@ -91,13 +93,18 @@ pub const LoadedInfo = struct {
     entry_va: u64,
 };
 
-/// What `exec` most recently loaded (null before the first successful exec).
+/// What the current process's image is (claim 3848): the descriptor lives
+/// in the process registry, so this reads the most recently created
+/// process instead of a module-global copy — a later exec never leaves
+/// stale "last program" state behind.
 pub fn loaded() ?LoadedInfo {
-    if (!loaded_flag) return null;
+    const id = process.current() orelse return null;
+    const info = process.info(id) orelse return null;
+    if (info.state == .free) return null;
     return .{
-        .name = loaded_name_buf[0..loaded_name_len],
-        .content_len = loaded_content_len,
-        .entry_va = loaded_entry_va,
+        .name = info.name,
+        .content_len = info.content_len,
+        .entry_va = info.entry_va,
     };
 }
 
@@ -113,7 +120,6 @@ pub fn head() [8]u8 {
 /// Load `name` from the ESP, rebuild the user root around it, and spawn it
 /// as an EL0t task. See the module doc for the ordered steps.
 pub fn exec_file(name: []const u8) ExecResult {
-    loaded_flag = false;
     if (name.len == 0 or name.len > esp.name_max) return .not_found;
     if (!esp.disk_ready()) return .no_disk;
     const e = esp.lookup(name) orelse return .not_found;
@@ -150,13 +156,30 @@ pub fn exec_file(name: []const u8) ExecResult {
     const stack_va = rebuild_user_root(text_phys, content_len, scheduler.task_stack_size) orelse return .table_full;
 
     const entry_va = userspace.text_va + (entry_off - dsk1_header_size);
-    if (scheduler.register_exec_user(entry_va, stack_va) == null) return .pool_full;
-    const take = @min(name.len, esp.name_max);
-    @memcpy(loaded_name_buf[0..take], name[0..take]);
-    loaded_name_len = take;
-    loaded_content_len = content_len;
-    loaded_entry_va = entry_va;
-    loaded_flag = true;
+    // Milestone four (claim 3848): the loaded program is a PROCESS. The
+    // descriptor owns the image + the rebuilt address space; a later exec
+    // creates a NEW process (per-process identity) instead of overwriting
+    // module globals. The process registry is exhausted only when every
+    // slot holds a live process (no exited descriptor to recycle) — an
+    // honest, distinct failure from the pool being full.
+    const proc_id = process.create(
+        name,
+        .{ .entry_va = entry_va, .content_len = content_len },
+        .{
+            .root_phys = mmu.user_root_phys(),
+            .text_va = userspace.text_va,
+            .text_len = content_len,
+            .stack_va = stack_va,
+            .stack_len = scheduler.task_stack_size,
+        },
+    ) orelse return .process_full;
+    if (scheduler.register_exec_user(entry_va, stack_va)) |task_id| {
+        _ = process.bind(proc_id, task_id);
+    } else {
+        // Spawn failed (pool full): roll the created process back.
+        _ = process.reap(proc_id);
+        return .pool_full;
+    }
     return .ok;
 }
 
@@ -301,6 +324,22 @@ test "exec: ok path loads, validates, rebuilds the root, and spawns the task" {
     try std.testing.expectEqualStrings("user-exec", t.name);
     try std.testing.expectEqual(@as(u64, 0), t.saves);
     try std.testing.expectEqual(@as(u64, 0), t.resumes);
+    // Claim 3848: the exec'd program is a PROCESS — the boot payload's
+    // process (exited, status 7) and the new USER.BIN process (bound to
+    // the spawned task, carrying the rebuilt address space) both exist.
+    try std.testing.expectEqual(@as(usize, 2), process.count());
+    const boot_proc = process.info(0).?;
+    try std.testing.expectEqualStrings("user-el0", boot_proc.name);
+    try std.testing.expectEqual(process.State.exited, boot_proc.state);
+    try std.testing.expectEqual(@as(u64, 7), boot_proc.exit_status);
+    const exec_proc = process.info(1).?;
+    try std.testing.expectEqualStrings("USER.BIN", exec_proc.name);
+    try std.testing.expectEqual(process.State.running, exec_proc.state);
+    try std.testing.expectEqual(@as(?usize, 2), exec_proc.task_id);
+    try std.testing.expectEqual(@as(u64, 25), exec_proc.content_len);
+    try std.testing.expectEqual(userspace.text_va, exec_proc.entry_va);
+    try std.testing.expectEqual(mmu.user_root_phys(), exec_proc.root_phys);
+    try std.testing.expectEqual(@as(u64, 8192), exec_proc.stack_len);
 }
 
 test "exec: a live user task blocks exec (one user program at a time)" {

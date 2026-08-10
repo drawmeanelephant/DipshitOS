@@ -58,6 +58,11 @@ const console = @import("console.zig");
 const exceptions = @import("exceptions.zig");
 const mmu = @import("mmu.zig"); // claim 5804: per-task TTBR0 roots
 const userspace = @import("userspace.zig"); // claim 5804: user-VA layout
+// Milestone four (claim 3848): the process registry — the task pool is the
+// executor, the process owns the program (image + address space + lifecycle
+// + exit status). One-way import: process.zig knows nothing about this
+// module.
+const process = @import("process.zig");
 
 const user_stack_section = if (builtin.object_format == .elf) ".userbss" else "__DATA,__userbss";
 
@@ -231,6 +236,9 @@ pub fn init() usize {
     user_timer_preemptions = 0;
     tick_count = 0;
     for (&tasks) |*task| task.* = .{};
+    // Claim 3848: every pool reset also clears the process layer (the
+    // boot path initializes both here; host tests get isolation).
+    process.init();
     tasks[0] = .{ .name = "shell", .state = .ready, .ttbr0 = mmu.kernel_root_phys() };
     tasks[idle_id] = .{
         .name = "idle",
@@ -326,6 +334,22 @@ pub fn register_user(entry: u64, image_base: u64) ?usize {
     const sp_el0 = userspace.bss_user_va(image_base, mmu.to_phys(@intFromPtr(&user_stack))) + user_stack.len;
     const witness_va = userspace.bss_user_va(image_base, mmu.to_phys(@intFromPtr(&user_timer_preemptions)));
     const id = spawn("user-el0", entry_va, spsr_el0t_irqs, &user_kernel_stack, mmu.user_root_phys(), sp_el0) orelse return null;
+    // Claim 3848: the boot-time static EL0 payload is a PROCESS too — the
+    // one table shows both its lifecycle and the exec'd programs'. Its
+    // image is the static payload (no file name) and its address space is
+    // the current user root at the fixed stack placement. Best effort: a
+    // full registry (impossible at boot) must not fail the payload.
+    const text = userspace.text_va_region();
+    const stack = userspace.stack_va_region();
+    if (process.create("user-el0", .{ .entry_va = entry_va, .content_len = text.len }, .{
+        .root_phys = mmu.user_root_phys(),
+        .text_va = text.base,
+        .text_len = text.len,
+        .stack_va = stack.base,
+        .stack_len = stack.len,
+    })) |proc_id| {
+        _ = process.bind(proc_id, id);
+    }
     const frame: *exceptions.VectorFrame = @ptrFromInt(tasks[id].sp);
     _ = exceptions.frame_write(frame, 9, witness_va);
     return id;
@@ -547,6 +571,11 @@ pub fn exit_current(status: u64) bool {
     const name = tasks[exiting].name;
     tasks[exiting].state = .zombie;
     tasks[exiting].exit_status = status;
+    // Claim 3848: the exiting task's PROCESS (if any) becomes exited and
+    // snapshots the status — the process-level exit report and `procs`
+    // keep it after the slot is reaped. Pure registry writes, safe in the
+    // exception context this runs in (no console, no allocation).
+    process.on_task_exit(exiting, status);
     const next = next_runnable(exiting) orelse {
         // No successor: roll back (the always-ready idle task makes this
         // unreachable in a normal boot; kept as a defensive bound).
@@ -709,6 +738,16 @@ pub fn maybe_report(con: *console.Console) void {
         con.puts(exit_report_name);
         con.puts(" exited status=");
         con.print_u64(exit_report_status);
+        con.puts("\n");
+    }
+    // Claim 3848: the process-level exit report — printed from the same
+    // shell idle loop, once per process exit, so the host sees the
+    // program's exit status even after the task slot is reaped.
+    if (process.take_exit_report()) |r| {
+        con.puts("procs ");
+        con.puts(r.name);
+        con.puts(" exited status=");
+        con.print_u64(r.status);
         con.puts("\n");
     }
     // Claim 6729: the idle task reaped a zombie; the name was snapshotted
@@ -1057,7 +1096,9 @@ test "scheduler: cooperative exit is non-runnable and reports from shell" {
     var mock = console.MockConsole(128){};
     var con = mock.console();
     maybe_report(&con);
-    try std.testing.expectEqualStrings("tasks user-el0 exited status=7\n", mock.contents());
+    // Claim 3848: the same exit also produced the PROCESS-level report
+    // (the exited user-el0 process keeps its status past the task reap).
+    try std.testing.expectEqualStrings("tasks user-el0 exited status=7\nprocs user-el0 exited status=7\n", mock.contents());
 }
 
 test "scheduler: sleep_current blocks, wakes on the deadline tick, and rolls back" {
@@ -1181,9 +1222,11 @@ test "scheduler: lifecycle — spawn, exit to zombie, idle reaps back to free" {
     // The freed slot is spawnable again (the lifecycle is a closed loop).
     try std.testing.expectEqual(@as(usize, 2), spawn("revived", 0x5000, spsr_el1h_irqs, &worker_stack, 0, 0).?);
     try std.testing.expectEqual(@as(usize, 5), stats().count);
-    // The shell loop prints the exit and the reap, in order.
+    // The shell loop prints the exit, the process-level exit report
+    // (claim 3848: the exited process keeps its status past the reap) and
+    // the reap, in order.
     var mock = console.MockConsole(256){};
     var con = mock.console();
     maybe_report(&con);
-    try std.testing.expectEqualStrings("tasks user-el0 exited status=7\ntasks user-el0 reaped\n", mock.contents());
+    try std.testing.expectEqualStrings("tasks user-el0 exited status=7\nprocs user-el0 exited status=7\ntasks user-el0 reaped\n", mock.contents());
 }
