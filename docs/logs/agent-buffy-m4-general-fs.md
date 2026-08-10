@@ -141,3 +141,16 @@
   (two-partition layout `[observed]`); README (29 commands, card-2
   paragraph); gate-inventory `live-gfs` row + `verify-vz` aggregate;
   indexes refreshed. Committed + PR #71 updated.
+
+- **Merge reconciliation** (2026-08-10): PR #72 (card 3, process
+  abstraction) merged first; this branch was rebased onto the new main
+  and the overlapping surfaces reconciled — both cards bumped the
+  registry count (28→29 each), so the merged registry is **30** (mount +
+  procs; the silent three-way merge left 29 — caught by the array-size
+  check at build); both help rows land in shell.zig and the transcript
+  fixture (byte-exact); march-m4 rows 2 + 3 both ✅; status milestone-four
+  row + command chain 20→30; README 30 commands; gate-inventory has both
+  `live-gfs` and `live-procs` + the merged `verify-vz` aggregate. Full
+  class A re-ran green on the merged tree; class B re-ran green
+  (live-gfs 1/1, live-procs 1/1, live-fs 1/1, live-entropy 2/2,
+  live-exec 1/1).
