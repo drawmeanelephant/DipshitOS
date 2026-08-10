@@ -1,0 +1,17 @@
+Command: ./tools/ragshit/ragshit index .
+Repository HEAD: 6b1b8cd2195fc543da149536074e9088542a7d57
+
+indexed /private/tmp/dipshitos-ragshit-019fe9b9
+  files scanned:   311
+  files added:     227
+  files updated:   0
+  files unchanged: 0
+  files removed:   0
+  files skipped:   84
+  chunks added:    2080
+  elapsed:         2697 ms
+
+The repository configuration has include_untracked=false. The active claim
+and branch log were therefore coordination inputs to the working tree but not
+indexed source candidates. `ragshit doctor` independently confirmed that HEAD
+and the tracked discovery candidate set match this index.
