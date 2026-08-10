@@ -52,6 +52,7 @@ verify-vz:
     bash tools/verify-live-svc.sh
     bash tools/verify-live-uaccess.sh
     bash tools/verify-live-addrspaces.sh
+    bash tools/verify-live-lifecycle.sh
     bash tools/verify-live-reboot.sh
 
 # Compile the AArch64 UEFI application and kernel image (class A — zig build)
@@ -161,6 +162,10 @@ verify-live-timer:
 # Verify the live tick-driven task scheduler (class B — boots a VZ VM; proves the shell + worker both advance across real timer-tick context switches; claim 5275; Apple silicon only)
 verify-live-tasks:
     bash tools/verify-live-tasks.sh
+
+# Verify the user task lifecycle (class B — boots a VZ VM; spawn / exit / reap with explicit task states and the idle task; claim 6729; Apple silicon only)
+verify-live-lifecycle:
+    bash tools/verify-live-lifecycle.sh
 
 # Verify the first real EL0 task and SVC boundary (class B — two sequenced SVC entries prove return to EL0; timer preemption returns to the EL1h shell; claim 8215)
 verify-live-userspace:

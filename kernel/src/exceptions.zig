@@ -53,13 +53,17 @@ pub const kind_serror: u64 = 3;
 /// Saved by every vector stub, in reverse pair order because each `stp`
 /// pre-decrements the stack. Keeping the layout helpers here prevents SVC
 /// handlers from repeating the easy-to-get-wrong slot arithmetic.
-pub const vector_frame_slots: usize = 20;
+pub const vector_frame_slots: usize = 32;
 pub const vector_frame_bytes: u64 = vector_frame_slots * @sizeOf(u64);
 pub const VectorFrame = [vector_frame_slots]u64;
 
 fn frame_index(reg: u5) ?usize {
     if (reg <= 17) return 18 - 2 * (@as(usize, reg) / 2) + (@as(usize, reg) & 1);
     if (reg == 30) return 0;
+    // Claim 6729: the callee-saved extension (x19..x28 + x29) appended at
+    // the TOP of the frame ([20..31]) by the vector stubs' first pushes.
+    if (reg == 29) return 20;
+    if (reg >= 19 and reg <= 28) return @as(usize, if (reg % 2 == 0) 51 else 49) - reg;
     return null;
 }
 
@@ -81,10 +85,6 @@ pub fn frame_write(frame: *VectorFrame, reg: u5, value: u64) bool {
 
 var report_writer: ?*const fn ([]const u8) void = null;
 
-/// [DIAG 5804-bisect] fault probe (REMOVE after bisect): called with
-/// (esr, far, elr) for every unhandled synchronous exception before the
-/// report/park path, so a pre-console fault can persist its registers to
-/// the NVRAM probe channel.
 /// Set the console writer the `[EXC]` report is emitted through. The
 /// kernel passes a wrapper over its polled uart; host tests may leave it
 /// null and assert on `format_report` directly.
@@ -513,8 +513,15 @@ export fn exc_dispatch(
 /// solely from `install`'s comptime-aarch64 branch, so x86 host tests
 /// never codegen the AArch64 assembly. `.balign 2048` at the start plus
 /// the fn's `align(2048)` guarantee slot i sits at VBAR + i*128; each stub
-/// body is 31 instructions (124 bytes), padded to the 128-byte slot
-/// boundary by the trailing `.balign 128`.
+/// body is 28 instructions (112 bytes; the claim-6729 callee-saved save
+/// adds 6 pushes, and the inline restore shrank to a 3-instruction setup +
+/// branch to the shared `exc_restore_tail`), padded to the 128-byte slot
+/// boundary by the trailing `.balign 128`. The tail pops the full frame
+/// (x0..x17 + x30 + x19..x28 + x29) and `eret`s — the callee-saved half is
+/// what makes the scheduler's per-task context switch safe for compiled
+/// tasks (claim 6729 bisect: the shell's live `mon` in x19 was clobbered
+/// by the preempting task's value because the old 20-slot frame never
+/// saved x19..x28).
 fn exception_vectors() align(2048) callconv(.naked) void {
     asm volatile (
         \\.balign 2048
@@ -522,19 +529,15 @@ fn exception_vectors() align(2048) callconv(.naked) void {
         \\msr spsel, #1
         \\mov sp, x0
         \\msr sp_el0, x1
-        \\ldp x30, xzr, [sp], #16
-        \\ldp x16, x17, [sp], #16
-        \\ldp x14, x15, [sp], #16
-        \\ldp x12, x13, [sp], #16
-        \\ldp x10, x11, [sp], #16
-        \\ldp x8, x9, [sp], #16
-        \\ldp x6, x7, [sp], #16
-        \\ldp x4, x5, [sp], #16
-        \\ldp x2, x3, [sp], #16
-        \\ldp x0, x1, [sp], #16
-        \\eret
+        \\b exc_restore_tail
         \\.endm
         \\// Entry 0x000: EL1t synchronous (kind 0)
+        \\stp x19, x20, [sp, #-16]!
+        \\stp x21, x22, [sp, #-16]!
+        \\stp x23, x24, [sp, #-16]!
+        \\stp x25, x26, [sp, #-16]!
+        \\stp x27, x28, [sp, #-16]!
+        \\stp x29, xzr, [sp, #-16]!
         \\stp x0, x1, [sp, #-16]!
         \\stp x2, x3, [sp, #-16]!
         \\stp x4, x5, [sp, #-16]!
@@ -556,6 +559,12 @@ fn exception_vectors() align(2048) callconv(.naked) void {
         \\exc_restore
         \\.balign 128
         \\// Entry 0x080: EL1t IRQ (kind 1)
+        \\stp x19, x20, [sp, #-16]!
+        \\stp x21, x22, [sp, #-16]!
+        \\stp x23, x24, [sp, #-16]!
+        \\stp x25, x26, [sp, #-16]!
+        \\stp x27, x28, [sp, #-16]!
+        \\stp x29, xzr, [sp, #-16]!
         \\stp x0, x1, [sp, #-16]!
         \\stp x2, x3, [sp, #-16]!
         \\stp x4, x5, [sp, #-16]!
@@ -577,6 +586,12 @@ fn exception_vectors() align(2048) callconv(.naked) void {
         \\exc_restore
         \\.balign 128
         \\// Entry 0x100: EL1t FIQ (kind 2)
+        \\stp x19, x20, [sp, #-16]!
+        \\stp x21, x22, [sp, #-16]!
+        \\stp x23, x24, [sp, #-16]!
+        \\stp x25, x26, [sp, #-16]!
+        \\stp x27, x28, [sp, #-16]!
+        \\stp x29, xzr, [sp, #-16]!
         \\stp x0, x1, [sp, #-16]!
         \\stp x2, x3, [sp, #-16]!
         \\stp x4, x5, [sp, #-16]!
@@ -598,6 +613,12 @@ fn exception_vectors() align(2048) callconv(.naked) void {
         \\exc_restore
         \\.balign 128
         \\// Entry 0x180: EL1t SError (kind 3)
+        \\stp x19, x20, [sp, #-16]!
+        \\stp x21, x22, [sp, #-16]!
+        \\stp x23, x24, [sp, #-16]!
+        \\stp x25, x26, [sp, #-16]!
+        \\stp x27, x28, [sp, #-16]!
+        \\stp x29, xzr, [sp, #-16]!
         \\stp x0, x1, [sp, #-16]!
         \\stp x2, x3, [sp, #-16]!
         \\stp x4, x5, [sp, #-16]!
@@ -619,6 +640,12 @@ fn exception_vectors() align(2048) callconv(.naked) void {
         \\exc_restore
         \\.balign 128
         \\// Entry 0x200: EL1h synchronous (kind 0)
+        \\stp x19, x20, [sp, #-16]!
+        \\stp x21, x22, [sp, #-16]!
+        \\stp x23, x24, [sp, #-16]!
+        \\stp x25, x26, [sp, #-16]!
+        \\stp x27, x28, [sp, #-16]!
+        \\stp x29, xzr, [sp, #-16]!
         \\stp x0, x1, [sp, #-16]!
         \\stp x2, x3, [sp, #-16]!
         \\stp x4, x5, [sp, #-16]!
@@ -640,6 +667,12 @@ fn exception_vectors() align(2048) callconv(.naked) void {
         \\exc_restore
         \\.balign 128
         \\// Entry 0x280: EL1h IRQ (kind 1)
+        \\stp x19, x20, [sp, #-16]!
+        \\stp x21, x22, [sp, #-16]!
+        \\stp x23, x24, [sp, #-16]!
+        \\stp x25, x26, [sp, #-16]!
+        \\stp x27, x28, [sp, #-16]!
+        \\stp x29, xzr, [sp, #-16]!
         \\stp x0, x1, [sp, #-16]!
         \\stp x2, x3, [sp, #-16]!
         \\stp x4, x5, [sp, #-16]!
@@ -661,6 +694,12 @@ fn exception_vectors() align(2048) callconv(.naked) void {
         \\exc_restore
         \\.balign 128
         \\// Entry 0x300: EL1h FIQ (kind 2)
+        \\stp x19, x20, [sp, #-16]!
+        \\stp x21, x22, [sp, #-16]!
+        \\stp x23, x24, [sp, #-16]!
+        \\stp x25, x26, [sp, #-16]!
+        \\stp x27, x28, [sp, #-16]!
+        \\stp x29, xzr, [sp, #-16]!
         \\stp x0, x1, [sp, #-16]!
         \\stp x2, x3, [sp, #-16]!
         \\stp x4, x5, [sp, #-16]!
@@ -682,6 +721,12 @@ fn exception_vectors() align(2048) callconv(.naked) void {
         \\exc_restore
         \\.balign 128
         \\// Entry 0x380: EL1h SError (kind 3)
+        \\stp x19, x20, [sp, #-16]!
+        \\stp x21, x22, [sp, #-16]!
+        \\stp x23, x24, [sp, #-16]!
+        \\stp x25, x26, [sp, #-16]!
+        \\stp x27, x28, [sp, #-16]!
+        \\stp x29, xzr, [sp, #-16]!
         \\stp x0, x1, [sp, #-16]!
         \\stp x2, x3, [sp, #-16]!
         \\stp x4, x5, [sp, #-16]!
@@ -703,6 +748,12 @@ fn exception_vectors() align(2048) callconv(.naked) void {
         \\exc_restore
         \\.balign 128
         \\// Entry 0x400: lower EL AArch64 synchronous (kind 0)
+        \\stp x19, x20, [sp, #-16]!
+        \\stp x21, x22, [sp, #-16]!
+        \\stp x23, x24, [sp, #-16]!
+        \\stp x25, x26, [sp, #-16]!
+        \\stp x27, x28, [sp, #-16]!
+        \\stp x29, xzr, [sp, #-16]!
         \\stp x0, x1, [sp, #-16]!
         \\stp x2, x3, [sp, #-16]!
         \\stp x4, x5, [sp, #-16]!
@@ -724,6 +775,12 @@ fn exception_vectors() align(2048) callconv(.naked) void {
         \\exc_restore
         \\.balign 128
         \\// Entry 0x480: lower EL AArch64 IRQ (kind 1)
+        \\stp x19, x20, [sp, #-16]!
+        \\stp x21, x22, [sp, #-16]!
+        \\stp x23, x24, [sp, #-16]!
+        \\stp x25, x26, [sp, #-16]!
+        \\stp x27, x28, [sp, #-16]!
+        \\stp x29, xzr, [sp, #-16]!
         \\stp x0, x1, [sp, #-16]!
         \\stp x2, x3, [sp, #-16]!
         \\stp x4, x5, [sp, #-16]!
@@ -745,6 +802,12 @@ fn exception_vectors() align(2048) callconv(.naked) void {
         \\exc_restore
         \\.balign 128
         \\// Entry 0x500: lower EL AArch64 FIQ (kind 2)
+        \\stp x19, x20, [sp, #-16]!
+        \\stp x21, x22, [sp, #-16]!
+        \\stp x23, x24, [sp, #-16]!
+        \\stp x25, x26, [sp, #-16]!
+        \\stp x27, x28, [sp, #-16]!
+        \\stp x29, xzr, [sp, #-16]!
         \\stp x0, x1, [sp, #-16]!
         \\stp x2, x3, [sp, #-16]!
         \\stp x4, x5, [sp, #-16]!
@@ -766,6 +829,12 @@ fn exception_vectors() align(2048) callconv(.naked) void {
         \\exc_restore
         \\.balign 128
         \\// Entry 0x580: lower EL AArch64 SError (kind 3)
+        \\stp x19, x20, [sp, #-16]!
+        \\stp x21, x22, [sp, #-16]!
+        \\stp x23, x24, [sp, #-16]!
+        \\stp x25, x26, [sp, #-16]!
+        \\stp x27, x28, [sp, #-16]!
+        \\stp x29, xzr, [sp, #-16]!
         \\stp x0, x1, [sp, #-16]!
         \\stp x2, x3, [sp, #-16]!
         \\stp x4, x5, [sp, #-16]!
@@ -787,6 +856,12 @@ fn exception_vectors() align(2048) callconv(.naked) void {
         \\exc_restore
         \\.balign 128
         \\// Entry 0x600: lower EL AArch32 synchronous (kind 0)
+        \\stp x19, x20, [sp, #-16]!
+        \\stp x21, x22, [sp, #-16]!
+        \\stp x23, x24, [sp, #-16]!
+        \\stp x25, x26, [sp, #-16]!
+        \\stp x27, x28, [sp, #-16]!
+        \\stp x29, xzr, [sp, #-16]!
         \\stp x0, x1, [sp, #-16]!
         \\stp x2, x3, [sp, #-16]!
         \\stp x4, x5, [sp, #-16]!
@@ -808,6 +883,12 @@ fn exception_vectors() align(2048) callconv(.naked) void {
         \\exc_restore
         \\.balign 128
         \\// Entry 0x680: lower EL AArch32 IRQ (kind 1)
+        \\stp x19, x20, [sp, #-16]!
+        \\stp x21, x22, [sp, #-16]!
+        \\stp x23, x24, [sp, #-16]!
+        \\stp x25, x26, [sp, #-16]!
+        \\stp x27, x28, [sp, #-16]!
+        \\stp x29, xzr, [sp, #-16]!
         \\stp x0, x1, [sp, #-16]!
         \\stp x2, x3, [sp, #-16]!
         \\stp x4, x5, [sp, #-16]!
@@ -829,6 +910,12 @@ fn exception_vectors() align(2048) callconv(.naked) void {
         \\exc_restore
         \\.balign 128
         \\// Entry 0x700: lower EL AArch32 FIQ (kind 2)
+        \\stp x19, x20, [sp, #-16]!
+        \\stp x21, x22, [sp, #-16]!
+        \\stp x23, x24, [sp, #-16]!
+        \\stp x25, x26, [sp, #-16]!
+        \\stp x27, x28, [sp, #-16]!
+        \\stp x29, xzr, [sp, #-16]!
         \\stp x0, x1, [sp, #-16]!
         \\stp x2, x3, [sp, #-16]!
         \\stp x4, x5, [sp, #-16]!
@@ -850,6 +937,12 @@ fn exception_vectors() align(2048) callconv(.naked) void {
         \\exc_restore
         \\.balign 128
         \\// Entry 0x780: lower EL AArch32 SError (kind 3)
+        \\stp x19, x20, [sp, #-16]!
+        \\stp x21, x22, [sp, #-16]!
+        \\stp x23, x24, [sp, #-16]!
+        \\stp x25, x26, [sp, #-16]!
+        \\stp x27, x28, [sp, #-16]!
+        \\stp x29, xzr, [sp, #-16]!
         \\stp x0, x1, [sp, #-16]!
         \\stp x2, x3, [sp, #-16]!
         \\stp x4, x5, [sp, #-16]!
@@ -870,6 +963,24 @@ fn exception_vectors() align(2048) callconv(.naked) void {
         \\cbz x0, exc_park
         \\exc_restore
         \\.balign 128
+        \\exc_restore_tail:
+        \\ldp x30, xzr, [sp], #16
+        \\ldp x16, x17, [sp], #16
+        \\ldp x14, x15, [sp], #16
+        \\ldp x12, x13, [sp], #16
+        \\ldp x10, x11, [sp], #16
+        \\ldp x8, x9, [sp], #16
+        \\ldp x6, x7, [sp], #16
+        \\ldp x4, x5, [sp], #16
+        \\ldp x2, x3, [sp], #16
+        \\ldp x0, x1, [sp], #16
+        \\ldp x29, xzr, [sp], #16
+        \\ldp x27, x28, [sp], #16
+        \\ldp x25, x26, [sp], #16
+        \\ldp x23, x24, [sp], #16
+        \\ldp x21, x22, [sp], #16
+        \\ldp x19, x20, [sp], #16
+        \\eret
         \\exc_park:
         \\wfe
         \\b exc_park
@@ -925,7 +1036,17 @@ test "exceptions: vector-frame helpers match the reverse stp layout" {
     try std.testing.expectEqual(@as(u64, 0x21), frame[3]);
     try std.testing.expectEqual(@as(u64, 0x30), frame[0]);
     try std.testing.expectEqual(@as(u64, 0x18), frame_read(&frame, 8));
-    try std.testing.expect(!frame_write(&frame, 29, 1));
+    // Claim 6729: the callee-saved extension is writable and lands at the
+    // frame top ([20] = x29, [30] = x19, [31] = x20).
+    try std.testing.expect(frame_write(&frame, 29, 0x29));
+    try std.testing.expect(frame_write(&frame, 19, 0x19));
+    try std.testing.expect(frame_write(&frame, 20, 0x20));
+    try std.testing.expectEqual(@as(u64, 0x29), frame[20]);
+    try std.testing.expectEqual(@as(u64, 0x19), frame[30]);
+    try std.testing.expectEqual(@as(u64, 0x20), frame[31]);
+    try std.testing.expectEqual(@as(u64, 0x29), frame_read(&frame, 29));
+    try std.testing.expect(!frame_write(&frame, 18, 1)); // x18 is not part of the frame
+    try std.testing.expect(!frame_write(&frame, 31, 1)); // x31 (SP) is not saved
 }
 
 test "exceptions: only AArch64 SVC from EL0t reaches the SVC seam" {

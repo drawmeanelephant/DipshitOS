@@ -201,7 +201,7 @@ pub const Command = struct {
 
 /// Number of commands. The registry is built at runtime (not a const
 /// table): see `ensure_registry`.
-pub const registry_count: usize = 25;
+pub const registry_count: usize = 26;
 
 /// Command registry, built at runtime into BSS. A `const` table would hold
 /// link-time absolute addresses for BOTH the string slices and the handler
@@ -235,6 +235,7 @@ fn ensure_registry() []const Command {
             .{ .name = "reboot", .help = "restart the machine", .usage = "reboot", .handler = cmd_reboot },
             .{ .name = "repeat", .help = "repeat text, safely bounded", .usage = "repeat <count> <text...>", .min_args = 1, .handler = cmd_repeat },
             .{ .name = "shutdown", .help = "request power-off", .usage = "shutdown", .handler = cmd_shutdown },
+            .{ .name = "spawn", .help = "spawn the lifecycle demo task", .usage = "spawn", .handler = cmd_spawn },
             .{ .name = "syscalls", .help = "numbered syscall table and counters", .usage = "syscalls", .handler = cmd_syscalls },
             .{ .name = "tasks", .help = "tick-driven task scheduler status", .usage = "tasks", .handler = cmd_tasks },
             .{ .name = "timer", .help = "interrupt controller + timer status", .usage = "timer", .handler = cmd_timer },
@@ -913,14 +914,24 @@ fn cmd_tasks(m: *Monitor, args: []const []const u8) ExecError {
     m.console.print_u64(@intCast(s.current));
     m.console.puts(" switches=");
     m.console.print_u64(s.switches);
+    // Claim 6729: the lifecycle's pool/zombie counts (registered slots vs
+    // the fixed pool; zombies awaiting the idle task's reap).
+    m.console.puts(" pool=");
+    m.console.print_u64(@intCast(s.count));
+    m.console.puts("/");
+    m.console.print_u64(@intCast(scheduler.max_tasks));
+    m.console.puts(" zombies=");
+    m.console.print_u64(@intCast(s.zombies));
     m.console.puts("\n");
+    // Scan the full pool: reaped (free) slots are skipped, so a freed mid
+    // slot never hides later-registered tasks.
     var width: usize = 0;
     var i: usize = 0;
-    while (i < s.count) : (i += 1) {
+    while (i < scheduler.max_tasks) : (i += 1) {
         if (scheduler.task_info(i)) |t| width = @max(width, t.name.len);
     }
     i = 0;
-    while (i < s.count) : (i += 1) {
+    while (i < scheduler.max_tasks) : (i += 1) {
         const info = scheduler.task_info(i) orelse continue;
         m.console.puts("  ");
         m.console.puts(info.name);
@@ -932,7 +943,30 @@ fn cmd_tasks(m: *Monitor, args: []const []const u8) ExecError {
         m.console.print_u64(info.resumes);
         m.console.puts(" advances=");
         m.console.print_u64(info.advances);
+        m.console.puts(" state=");
+        m.console.puts(scheduler.state_name(info.state));
         m.console.puts("\n");
+    }
+    return .none;
+}
+
+// ---------------------------------------------------------------------------
+// Task lifecycle command (claim 6729)
+// ---------------------------------------------------------------------------
+
+/// Spawn the lifecycle demo task (the scheduler owns the demo stack and
+/// refuses a second spawn). Proves a runtime spawn enters the ring: the
+/// demo task's `tasks spawn-demo advances=N` report lines follow. The
+/// EL0 task's own exit + the idle task's reap prove the rest of the
+/// lifecycle.
+fn cmd_spawn(m: *Monitor, args: []const []const u8) ExecError {
+    _ = args;
+    if (scheduler.spawn_demo()) |id| {
+        m.console.puts("spawn: spawn-demo id=");
+        m.console.print_u64(@intCast(id));
+        m.console.puts("\n");
+    } else {
+        m.console.puts("spawn: pool full or demo already running\n");
     }
     return .none;
 }
@@ -968,9 +1002,8 @@ fn cmd_addrspaces(m: *Monitor, args: []const []const u8) ExecError {
     m.console.puts(" tcr=");
     m.console.print_hex(mmu.read_tcr());
     m.console.puts(" t0sz=16\n");
-    const s = scheduler.stats();
     var i: usize = 0;
-    while (i < s.count) : (i += 1) {
+    while (i < scheduler.max_tasks) : (i += 1) {
         const info = scheduler.task_info(i) orelse continue;
         m.console.puts("addrspaces: task ");
         m.console.puts(info.name);
@@ -978,6 +1011,14 @@ fn cmd_addrspaces(m: *Monitor, args: []const []const u8) ExecError {
         m.console.print_hex(scheduler.task_ttbr0(i));
         m.console.puts("\n");
     }
+    // Claim 6729: the user task's root is a fixed MMU fact (built at boot),
+    // not a task-table fact — the lifecycle's idle task reaps the exited
+    // user task, so the `task user-el0` row above may legitimately be gone
+    // by the time this command runs. Report the root directly so the
+    // ownership assertion (user root != kernel root) survives the reap.
+    m.console.puts("addrspaces: user root=");
+    m.console.print_hex(mmu.user_root_phys());
+    m.console.puts("\n");
     const leaves = mmu.walk_leaves(mmu.user_root_phys());
     m.console.puts("addrspaces: user text=");
     m.console.print_hex(userspace.text_va);
@@ -1620,20 +1661,38 @@ test "monitor: tasks is registered and reports the deterministic host state" {
     var mon = env.monitor();
     try std.testing.expect(lookup("tasks") != null);
     try std.testing.expectEqualStrings("tick-driven task scheduler status", lookup("tasks").?.help);
-    // Register the three tasks exactly as kernel_main does; without `start`
-    // the scheduler never preempts, so every counter reads 0 — the same
-    // shape a live boot reports once ticks begin.
+    // Register the tasks exactly as kernel_main does (the idle task is
+    // scheduler-owned and auto-registered by init); without `start` the
+    // scheduler never preempts, so every counter reads 0 — the same shape
+    // a live boot reports once ticks begin.
     _ = scheduler.init();
     _ = scheduler.register_worker(0);
     _ = scheduler.register_user(0, 0);
     try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"tasks"}));
     try std.testing.expectEqualStrings(
-        "tasks: enabled=0 current=0 switches=0\n" ++
-            "  shell    saves=0 resumes=0 advances=0\n" ++
-            "  worker   saves=0 resumes=0 advances=0\n" ++
-            "  user-el0 saves=0 resumes=0 advances=0\n",
+        "tasks: enabled=0 current=0 switches=0 pool=4/5 zombies=0\n" ++
+            "  shell    saves=0 resumes=0 advances=0 state=ready\n" ++
+            "  worker   saves=0 resumes=0 advances=0 state=ready\n" ++
+            "  user-el0 saves=0 resumes=0 advances=0 state=ready\n" ++
+            "  idle     saves=0 resumes=0 advances=0 state=ready\n",
         env.mock.contents(),
     );
+}
+
+test "monitor: spawn is registered and reports the demo spawn or the bound" {
+    var env = TestEnv.init();
+    var mon = env.monitor();
+    try std.testing.expect(lookup("spawn") != null);
+    try std.testing.expectEqualStrings("spawn the lifecycle demo task", lookup("spawn").?.help);
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0);
+    _ = scheduler.register_user(0, 0);
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"spawn"}));
+    try std.testing.expectEqualStrings("spawn: spawn-demo id=3\n", env.mock.contents());
+    // One demo spawn per boot: the second reports the bound.
+    env.mock.reset();
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"spawn"}));
+    try std.testing.expectEqualStrings("spawn: pool full or demo already running\n", env.mock.contents());
 }
 
 test "monitor: syscalls is registered and reports deterministic rows" {

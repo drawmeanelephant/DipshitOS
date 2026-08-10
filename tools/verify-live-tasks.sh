@@ -112,7 +112,7 @@ run_one() {
         grep -qE -- "tasks worker advances=[1-9][0-9]*" artifacts/vm-serial.log && WORKER_REPORT=1
         grep -qF -- "rx-tasks-ok" artifacts/vm-serial.log && ECHO=1
         grep -qF -- "timer heartbeat ticks=5 irq=5 poll=0" artifacts/vm-serial.log && HEARTBEAT=1
-        grep -qE -- "tasks: enabled=1 current=[012] switches=[1-9][0-9]*" artifacts/vm-serial.log && SWITCHES=1
+        grep -qE -- "tasks: enabled=1 current=[0-4] switches=[1-9][0-9]*" artifacts/vm-serial.log && SWITCHES=1
     fi
     {
         echo "$tag: rc=$RC serial-bytes=$SERIAL_BYTES banner=$BANNER interrupts=$INTERRUPTS cmd=$CMD shell-row=$SHELL_ROW worker-row=$WORKER_ROW worker-adv=$WORKER_ADV worker-report=$WORKER_REPORT echo=$ECHO heartbeat=$HEARTBEAT switches=$SWITCHES"

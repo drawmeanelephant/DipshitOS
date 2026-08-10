@@ -246,9 +246,9 @@ gates pass; tagged `m1.5-interactive-monitor`** (see
 > tracker [`docs/march-m3.md`](march-m3.md)): physical allocator →
 > exception vectors → GIC + timer → kernel tasks → EL0/SVC boundary →
 > syscall ABI → uaccess → per-task address spaces → user lifecycle → ESP
-> exec → blocking syscalls. Every card through the per-task address-spaces
-> card is **done**; **user task lifecycle is the next milestone-three
-> card**.
+> exec → blocking syscalls. Every card through the user task lifecycle
+> card is **done** (claims 6120/5804/6729); **loading and execing a user
+> program from the ESP is the next milestone-three card**.
 
 - ~~A physical page allocator over the captured EFI map.~~ **First step
   DONE 2026-08-08 (claim 3972):** first-fit bitmap allocator over the

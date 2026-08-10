@@ -211,6 +211,7 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "  reboot      restart the machine\n" ++
         "  repeat      repeat text, safely bounded\n" ++
         "  shutdown    request power-off\n" ++
+        "  spawn       spawn the lifecycle demo task\n" ++
         "  syscalls    numbered syscall table and counters\n" ++
         "  tasks       tick-driven task scheduler status\n" ++
         "  timer       interrupt controller + timer status\n" ++
@@ -249,10 +250,11 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "pages selftest: alloc 1153 -> none (out of memory)\n" ++
         "pages selftest: ok free=0x0000000000000480\n" ++
         "dipshit> tasks\r\n" ++
-        "tasks: enabled=0 current=0 switches=0\n" ++
-        "  shell    saves=0 resumes=0 advances=0\n" ++
-        "  worker   saves=0 resumes=0 advances=0\n" ++
-        "  user-el0 saves=0 resumes=0 advances=0\n" ++
+        "tasks: enabled=0 current=0 switches=0 pool=4/5 zombies=0\n" ++
+        "  shell    saves=0 resumes=0 advances=0 state=ready\n" ++
+        "  worker   saves=0 resumes=0 advances=0 state=ready\n" ++
+        "  user-el0 saves=0 resumes=0 advances=0 state=ready\n" ++
+        "  idle     saves=0 resumes=0 advances=0 state=ready\n" ++
         "dipshit> echo \"elephant business\"\r\n" ++
         "elephant business\n" ++
         "dipshit> ls\r\n" ++

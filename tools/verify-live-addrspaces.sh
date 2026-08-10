@@ -101,7 +101,11 @@ run_one() {
         root_hex="$(grep -a 'addrspaces: ttbr1=' artifacts/vm-serial.log | sed -E 's/.*root=0x([0-9a-f]{16}).*/\1/' | head -1)"
         shell_ttbr0="$(grep -a 'addrspaces: task shell ' artifacts/vm-serial.log | sed -E 's/.*ttbr0=0x([0-9a-f]{16}).*/\1/' | head -1)"
         worker_ttbr0="$(grep -a 'addrspaces: task worker ' artifacts/vm-serial.log | sed -E 's/.*ttbr0=0x([0-9a-f]{16}).*/\1/' | head -1)"
-        user_ttbr0="$(grep -a 'addrspaces: task user-el0 ' artifacts/vm-serial.log | sed -E 's/.*ttbr0=0x([0-9a-f]{16}).*/\1/' | head -1)"
+        # Claim 6729: the user task's root is reported directly (`addrspaces:
+        # user root=`) because the lifecycle's idle task reaps the exited
+        # user task, so the `task user-el0` row is gone by the time this
+        # command runs (the gate forwards the script after the exit line).
+        user_ttbr0="$(grep -a 'addrspaces: user root=' artifacts/vm-serial.log | sed -E 's/.*root=0x([0-9a-f]{16}).*/\1/' | head -1)"
         [ -n "$root_hex" ] && [ "$shell_ttbr0" = "$root_hex" ] && shell_root=1
         [ -n "$root_hex" ] && [ "$worker_ttbr0" = "$root_hex" ] && worker_root=1
         [ -n "$user_ttbr0" ] && [ -n "$root_hex" ] && [ "$user_ttbr0" != "$root_hex" ] && user_own=1
