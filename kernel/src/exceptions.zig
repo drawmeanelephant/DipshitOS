@@ -10,8 +10,8 @@
 //!
 //! Vector layout: a single contiguous 2048-byte region, one self-contained
 //! stub per 128-byte architectural vector slot (4 exception types x 4
-//! source modes; the kernel runs at EL1t — SPSel=0, observed SPSR.M=0x5 on
-//! VZ — so the EL1t synchronous vector at 0x000 is the one that fires).
+//! source modes; the kernel runs at EL1h — SPSel=1, observed SPSR.M=0x5 on
+//! VZ — so the EL1h vectors at 0x200..0x380 are the current-EL entries).
 //! Each stub saves a register frame on the current SP,
 //! passes (frame, esr, far, elr, spsr, kind) to the shared C dispatch,
 //! then either restores the frame and `eret`s (resume) or parks in WFE.
@@ -49,6 +49,30 @@ pub const kind_irq: u64 = 1;
 pub const kind_fiq: u64 = 2;
 pub const kind_serror: u64 = 3;
 
+/// Saved by every vector stub, in reverse pair order because each `stp`
+/// pre-decrements the stack. Keeping the layout helpers here prevents SVC
+/// handlers from repeating the easy-to-get-wrong slot arithmetic.
+pub const vector_frame_slots: usize = 20;
+pub const vector_frame_bytes: u64 = vector_frame_slots * @sizeOf(u64);
+pub const VectorFrame = [vector_frame_slots]u64;
+
+fn frame_index(reg: u5) ?usize {
+    if (reg <= 17) return 18 - 2 * (@as(usize, reg) / 2) + (@as(usize, reg) & 1);
+    if (reg == 30) return 0;
+    return null;
+}
+
+pub fn frame_read(frame: *const VectorFrame, reg: u5) u64 {
+    const index = frame_index(reg) orelse return 0;
+    return frame[index];
+}
+
+pub fn frame_write(frame: *VectorFrame, reg: u5, value: u64) bool {
+    const index = frame_index(reg) orelse return false;
+    frame[index] = value;
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 // Report writer (set by the kernel seam so this module stays transport-
 // agnostic and host-testable).
@@ -81,6 +105,18 @@ pub fn set_irq_dispatcher(d: IrqDispatcher) void {
     irq_dispatcher = d;
 }
 
+/// Minimal synchronous lower-EL seam. The registered handler owns only
+/// recognized AArch64 SVC exceptions from EL0t; returning false leaves the
+/// exception on the normal report-and-park path. The mutable vector frame is
+/// the syscall ABI: arguments arrive in saved GPRs and x0 carries the result.
+pub const SvcDispatcher = *const fn (*VectorFrame, u16) bool;
+
+var svc_dispatcher: ?SvcDispatcher = null;
+
+pub fn set_svc_dispatcher(d: SvcDispatcher) void {
+    svc_dispatcher = d;
+}
+
 /// The vector-frame pointer the IRQ stub must restore from when the
 /// dispatcher chain returns (claim 5275). Set to the interrupted task's
 /// frame at IRQ entry; the scheduler may rewrite it to the next task's
@@ -88,6 +124,11 @@ pub fn set_irq_dispatcher(d: IrqDispatcher) void {
 /// lands in that task as if IT had been interrupted. Meaningful only in
 /// IRQ context.
 pub var resume_frame: u64 = 0;
+
+/// SP_EL0 to install before the vector stub restores registers and `eret`s.
+/// EL1h tasks do not consume it, but an EL0t task must regain its separate
+/// userspace stack when scheduled after an EL1 task.
+pub var resume_sp_el0: u64 = 0;
 
 /// Unmask IRQs (clear DAIF.I). The caller arms the GIC + timer first so no
 /// interrupt can arrive before the chain is ready. No-op on non-aarch64
@@ -171,19 +212,24 @@ pub fn ec_name(esr: u64) []const u8 {
     };
 }
 
-/// Decode the source mode from SPSR_EL1.M (bits [4:0]; EL3 modes use bit
-/// 4, so a 4-bit mask would misread 0x11 as EL1t).
+/// Decode the AArch64 source mode from SPSR_EL1.M[3:0]. The old decoder
+/// shifted every mode up by one exception level and called the observed
+/// 0x5 EL1t; architecturally it is EL1h.
 pub fn mode_name(spsr: u64) []const u8 {
-    return switch (spsr & 0x1f) {
-        0x4 => "EL0t",
-        0x5 => "EL1t",
-        0x9 => "EL1h",
-        0xd => "EL2t",
-        0xf => "EL2h",
-        0x11 => "EL3t",
-        0x13 => "EL3h",
+    return switch (spsr & 0xf) {
+        0x0 => "EL0t",
+        0x4 => "EL1t",
+        0x5 => "EL1h",
+        0x8 => "EL2t",
+        0x9 => "EL2h",
+        0xc => "EL3t",
+        0xd => "EL3h",
         else => "mode-unknown",
     };
+}
+
+pub fn is_svc64_from_el0(kind: u64, esr: u64, spsr: u64) bool {
+    return kind == kind_sync and ((esr >> 26) & 0x3f) == 0x15 and (spsr & 0xf) == 0;
 }
 
 /// Decode the exception kind (the stub's x5) to a report name.
@@ -333,24 +379,50 @@ var resume_armed: bool = false;
 // ---------------------------------------------------------------------------
 
 /// Shared handler for every vector. `frame` is the saved register frame
-/// pushed by the stub ([0..17] = x0..x17, [18] = x30, [19] = pad); the
+/// pushed by the stub ([0] = x30, [1] = pad, [2..19] = x16..x17 through
+/// x0..x1 in descending register-pair order); the
 /// system registers are passed in from the stub's `mrs` reads. Returns the
 /// vector-frame pointer the stub should restore from (then `eret`), or 0
 /// to park. For the plain IRQ/sync paths that is the entry frame itself
-/// (the stub's `mov sp, x0` is then a no-op); a context-switching
+/// (the restore macro selects that frame); a context-switching
 /// dispatcher chain may return another task's frame (claim 5275).
 ///
 /// Must be callable from the naked asm with exactly this signature and
 /// symbol name (`bl exc_dispatch`), hence `export` + `callconv(.c)`.
+pub const Resume = extern struct {
+    frame: u64,
+    sp_el0: u64,
+};
+
+fn read_sp_el0() u64 {
+    if (comptime builtin.is_test or builtin.cpu.arch != .aarch64) return 0;
+    var value: u64 = 0;
+    asm volatile ("mrs %[v], sp_el0"
+        : [v] "=r" (value),
+    );
+    return value;
+}
+
+fn source_sp_el0(frame: *const VectorFrame, spsr: u64) u64 {
+    // An EL1t source used SP_EL0 for the vector frame itself; once the 160
+    // saved bytes are popped, that task's logical stack is frame+160.
+    if ((spsr & 0xf) == 0x4) return @intFromPtr(frame) + vector_frame_bytes;
+    // EL1h and EL0t sources preserve SP_EL0 independently while the vector
+    // and C dispatcher run on SP_EL1.
+    return read_sp_el0();
+}
+
 export fn exc_dispatch(
-    frame: *const [20]u64,
+    frame: *VectorFrame,
     esr: u64,
     far: u64,
     elr: u64,
     spsr: u64,
     kind: u64,
-) callconv(.c) u64 {
+) callconv(.c) Resume {
     handled_count_value += 1;
+    resume_frame = @intFromPtr(frame);
+    resume_sp_el0 = source_sp_el0(frame, spsr);
     // Claim 7948: taken IRQs route to the registered dispatcher (GIC ack
     // -> timer handle -> scheduler tick -> GIC eoi); the stub restores the
     // frame and erets. IRQs were masked until the whole chain was armed,
@@ -361,9 +433,16 @@ export fn exc_dispatch(
     // the stub's `mov sp, x0` restores from whatever frame is left staged.
     if (kind == kind_irq) {
         if (irq_dispatcher) |d| {
-            resume_frame = @intFromPtr(frame);
             d();
-            return resume_frame;
+            return .{ .frame = resume_frame, .sp_el0 = resume_sp_el0 };
+        }
+    }
+    if (is_svc64_from_el0(kind, esr, spsr)) {
+        if (svc_dispatcher) |d| {
+            const immediate: u16 = @truncate(esr & 0xffff);
+            if (d(frame, immediate)) {
+                return .{ .frame = @intFromPtr(frame), .sp_el0 = resume_sp_el0 };
+            }
         }
     }
     const will_resume = should_resume(kind, resume_armed);
@@ -376,8 +455,8 @@ export fn exc_dispatch(
         elr,
         spsr,
         handled_count_value,
-        frame[0],
-        frame[18],
+        frame_read(frame, 0),
+        frame_read(frame, 30),
         will_resume,
     );
     if (report_writer) |w| w(report);
@@ -392,9 +471,9 @@ export fn exc_dispatch(
             : [v] "r" (elr + 4),
         );
         asm volatile ("isb");
-        return @intFromPtr(frame);
+        return .{ .frame = @intFromPtr(frame), .sp_el0 = resume_sp_el0 };
     }
-    return 0;
+    return .{ .frame = 0, .sp_el0 = resume_sp_el0 };
 }
 
 // ---------------------------------------------------------------------------
@@ -406,17 +485,37 @@ export fn exc_dispatch(
 /// stub saves x0..x17 + x30 (+ pad) = 20 slots on the current SP, loads
 /// (esr, far, elr, spsr) from the EL1 system registers, passes kind in x5
 /// (0 sync / 1 irq / 2 fiq / 3 serror), calls `exc_dispatch`, then either
-/// restores the frame and `eret`s (x0 != 0) or parks in WFE.
+/// restores the frame and `eret`s (x0 != 0) or parks in WFE. `exc_dispatch`
+/// returns a two-register C aggregate: x0 is the vector-frame pointer and x1
+/// is the SP_EL0 belonging to the selected task. The restore macro switches
+/// to SP_EL1 before installing SP_EL0, so the same exit path safely targets
+/// EL1h and EL0t contexts.
 ///
 /// The region is emitted only on aarch64: this function is referenced
 /// solely from `install`'s comptime-aarch64 branch, so x86 host tests
 /// never codegen the AArch64 assembly. `.balign 2048` at the start plus
 /// the fn's `align(2048)` guarantee slot i sits at VBAR + i*128; each stub
-/// body is 29 instructions (116 bytes), padded to the 128-byte slot
+/// body is 31 instructions (124 bytes), padded to the 128-byte slot
 /// boundary by the trailing `.balign 128`.
 fn exception_vectors() align(2048) callconv(.naked) void {
     asm volatile (
         \\.balign 2048
+        \\.macro exc_restore
+        \\msr spsel, #1
+        \\mov sp, x0
+        \\msr sp_el0, x1
+        \\ldp x30, xzr, [sp], #16
+        \\ldp x16, x17, [sp], #16
+        \\ldp x14, x15, [sp], #16
+        \\ldp x12, x13, [sp], #16
+        \\ldp x10, x11, [sp], #16
+        \\ldp x8, x9, [sp], #16
+        \\ldp x6, x7, [sp], #16
+        \\ldp x4, x5, [sp], #16
+        \\ldp x2, x3, [sp], #16
+        \\ldp x0, x1, [sp], #16
+        \\eret
+        \\.endm
         \\// Entry 0x000: EL1t synchronous (kind 0)
         \\stp x0, x1, [sp, #-16]!
         \\stp x2, x3, [sp, #-16]!
@@ -436,18 +535,7 @@ fn exception_vectors() align(2048) callconv(.naked) void {
         \\movz x5, #0
         \\bl exc_dispatch
         \\cbz x0, exc_park
-        \\mov sp, x0
-        \\ldp x30, xzr, [sp], #16
-        \\ldp x16, x17, [sp], #16
-        \\ldp x14, x15, [sp], #16
-        \\ldp x12, x13, [sp], #16
-        \\ldp x10, x11, [sp], #16
-        \\ldp x8, x9, [sp], #16
-        \\ldp x6, x7, [sp], #16
-        \\ldp x4, x5, [sp], #16
-        \\ldp x2, x3, [sp], #16
-        \\ldp x0, x1, [sp], #16
-        \\eret
+        \\exc_restore
         \\.balign 128
         \\// Entry 0x080: EL1t IRQ (kind 1)
         \\stp x0, x1, [sp, #-16]!
@@ -468,18 +556,7 @@ fn exception_vectors() align(2048) callconv(.naked) void {
         \\movz x5, #1
         \\bl exc_dispatch
         \\cbz x0, exc_park
-        \\mov sp, x0
-        \\ldp x30, xzr, [sp], #16
-        \\ldp x16, x17, [sp], #16
-        \\ldp x14, x15, [sp], #16
-        \\ldp x12, x13, [sp], #16
-        \\ldp x10, x11, [sp], #16
-        \\ldp x8, x9, [sp], #16
-        \\ldp x6, x7, [sp], #16
-        \\ldp x4, x5, [sp], #16
-        \\ldp x2, x3, [sp], #16
-        \\ldp x0, x1, [sp], #16
-        \\eret
+        \\exc_restore
         \\.balign 128
         \\// Entry 0x100: EL1t FIQ (kind 2)
         \\stp x0, x1, [sp, #-16]!
@@ -500,18 +577,7 @@ fn exception_vectors() align(2048) callconv(.naked) void {
         \\movz x5, #2
         \\bl exc_dispatch
         \\cbz x0, exc_park
-        \\mov sp, x0
-        \\ldp x30, xzr, [sp], #16
-        \\ldp x16, x17, [sp], #16
-        \\ldp x14, x15, [sp], #16
-        \\ldp x12, x13, [sp], #16
-        \\ldp x10, x11, [sp], #16
-        \\ldp x8, x9, [sp], #16
-        \\ldp x6, x7, [sp], #16
-        \\ldp x4, x5, [sp], #16
-        \\ldp x2, x3, [sp], #16
-        \\ldp x0, x1, [sp], #16
-        \\eret
+        \\exc_restore
         \\.balign 128
         \\// Entry 0x180: EL1t SError (kind 3)
         \\stp x0, x1, [sp, #-16]!
@@ -532,18 +598,7 @@ fn exception_vectors() align(2048) callconv(.naked) void {
         \\movz x5, #3
         \\bl exc_dispatch
         \\cbz x0, exc_park
-        \\mov sp, x0
-        \\ldp x30, xzr, [sp], #16
-        \\ldp x16, x17, [sp], #16
-        \\ldp x14, x15, [sp], #16
-        \\ldp x12, x13, [sp], #16
-        \\ldp x10, x11, [sp], #16
-        \\ldp x8, x9, [sp], #16
-        \\ldp x6, x7, [sp], #16
-        \\ldp x4, x5, [sp], #16
-        \\ldp x2, x3, [sp], #16
-        \\ldp x0, x1, [sp], #16
-        \\eret
+        \\exc_restore
         \\.balign 128
         \\// Entry 0x200: EL1h synchronous (kind 0)
         \\stp x0, x1, [sp, #-16]!
@@ -564,18 +619,7 @@ fn exception_vectors() align(2048) callconv(.naked) void {
         \\movz x5, #0
         \\bl exc_dispatch
         \\cbz x0, exc_park
-        \\mov sp, x0
-        \\ldp x30, xzr, [sp], #16
-        \\ldp x16, x17, [sp], #16
-        \\ldp x14, x15, [sp], #16
-        \\ldp x12, x13, [sp], #16
-        \\ldp x10, x11, [sp], #16
-        \\ldp x8, x9, [sp], #16
-        \\ldp x6, x7, [sp], #16
-        \\ldp x4, x5, [sp], #16
-        \\ldp x2, x3, [sp], #16
-        \\ldp x0, x1, [sp], #16
-        \\eret
+        \\exc_restore
         \\.balign 128
         \\// Entry 0x280: EL1h IRQ (kind 1)
         \\stp x0, x1, [sp, #-16]!
@@ -596,18 +640,7 @@ fn exception_vectors() align(2048) callconv(.naked) void {
         \\movz x5, #1
         \\bl exc_dispatch
         \\cbz x0, exc_park
-        \\mov sp, x0
-        \\ldp x30, xzr, [sp], #16
-        \\ldp x16, x17, [sp], #16
-        \\ldp x14, x15, [sp], #16
-        \\ldp x12, x13, [sp], #16
-        \\ldp x10, x11, [sp], #16
-        \\ldp x8, x9, [sp], #16
-        \\ldp x6, x7, [sp], #16
-        \\ldp x4, x5, [sp], #16
-        \\ldp x2, x3, [sp], #16
-        \\ldp x0, x1, [sp], #16
-        \\eret
+        \\exc_restore
         \\.balign 128
         \\// Entry 0x300: EL1h FIQ (kind 2)
         \\stp x0, x1, [sp, #-16]!
@@ -628,18 +661,7 @@ fn exception_vectors() align(2048) callconv(.naked) void {
         \\movz x5, #2
         \\bl exc_dispatch
         \\cbz x0, exc_park
-        \\mov sp, x0
-        \\ldp x30, xzr, [sp], #16
-        \\ldp x16, x17, [sp], #16
-        \\ldp x14, x15, [sp], #16
-        \\ldp x12, x13, [sp], #16
-        \\ldp x10, x11, [sp], #16
-        \\ldp x8, x9, [sp], #16
-        \\ldp x6, x7, [sp], #16
-        \\ldp x4, x5, [sp], #16
-        \\ldp x2, x3, [sp], #16
-        \\ldp x0, x1, [sp], #16
-        \\eret
+        \\exc_restore
         \\.balign 128
         \\// Entry 0x380: EL1h SError (kind 3)
         \\stp x0, x1, [sp, #-16]!
@@ -660,18 +682,7 @@ fn exception_vectors() align(2048) callconv(.naked) void {
         \\movz x5, #3
         \\bl exc_dispatch
         \\cbz x0, exc_park
-        \\mov sp, x0
-        \\ldp x30, xzr, [sp], #16
-        \\ldp x16, x17, [sp], #16
-        \\ldp x14, x15, [sp], #16
-        \\ldp x12, x13, [sp], #16
-        \\ldp x10, x11, [sp], #16
-        \\ldp x8, x9, [sp], #16
-        \\ldp x6, x7, [sp], #16
-        \\ldp x4, x5, [sp], #16
-        \\ldp x2, x3, [sp], #16
-        \\ldp x0, x1, [sp], #16
-        \\eret
+        \\exc_restore
         \\.balign 128
         \\// Entry 0x400: lower EL AArch64 synchronous (kind 0)
         \\stp x0, x1, [sp, #-16]!
@@ -692,18 +703,7 @@ fn exception_vectors() align(2048) callconv(.naked) void {
         \\movz x5, #0
         \\bl exc_dispatch
         \\cbz x0, exc_park
-        \\mov sp, x0
-        \\ldp x30, xzr, [sp], #16
-        \\ldp x16, x17, [sp], #16
-        \\ldp x14, x15, [sp], #16
-        \\ldp x12, x13, [sp], #16
-        \\ldp x10, x11, [sp], #16
-        \\ldp x8, x9, [sp], #16
-        \\ldp x6, x7, [sp], #16
-        \\ldp x4, x5, [sp], #16
-        \\ldp x2, x3, [sp], #16
-        \\ldp x0, x1, [sp], #16
-        \\eret
+        \\exc_restore
         \\.balign 128
         \\// Entry 0x480: lower EL AArch64 IRQ (kind 1)
         \\stp x0, x1, [sp, #-16]!
@@ -724,18 +724,7 @@ fn exception_vectors() align(2048) callconv(.naked) void {
         \\movz x5, #1
         \\bl exc_dispatch
         \\cbz x0, exc_park
-        \\mov sp, x0
-        \\ldp x30, xzr, [sp], #16
-        \\ldp x16, x17, [sp], #16
-        \\ldp x14, x15, [sp], #16
-        \\ldp x12, x13, [sp], #16
-        \\ldp x10, x11, [sp], #16
-        \\ldp x8, x9, [sp], #16
-        \\ldp x6, x7, [sp], #16
-        \\ldp x4, x5, [sp], #16
-        \\ldp x2, x3, [sp], #16
-        \\ldp x0, x1, [sp], #16
-        \\eret
+        \\exc_restore
         \\.balign 128
         \\// Entry 0x500: lower EL AArch64 FIQ (kind 2)
         \\stp x0, x1, [sp, #-16]!
@@ -756,18 +745,7 @@ fn exception_vectors() align(2048) callconv(.naked) void {
         \\movz x5, #2
         \\bl exc_dispatch
         \\cbz x0, exc_park
-        \\mov sp, x0
-        \\ldp x30, xzr, [sp], #16
-        \\ldp x16, x17, [sp], #16
-        \\ldp x14, x15, [sp], #16
-        \\ldp x12, x13, [sp], #16
-        \\ldp x10, x11, [sp], #16
-        \\ldp x8, x9, [sp], #16
-        \\ldp x6, x7, [sp], #16
-        \\ldp x4, x5, [sp], #16
-        \\ldp x2, x3, [sp], #16
-        \\ldp x0, x1, [sp], #16
-        \\eret
+        \\exc_restore
         \\.balign 128
         \\// Entry 0x580: lower EL AArch64 SError (kind 3)
         \\stp x0, x1, [sp, #-16]!
@@ -788,18 +766,7 @@ fn exception_vectors() align(2048) callconv(.naked) void {
         \\movz x5, #3
         \\bl exc_dispatch
         \\cbz x0, exc_park
-        \\mov sp, x0
-        \\ldp x30, xzr, [sp], #16
-        \\ldp x16, x17, [sp], #16
-        \\ldp x14, x15, [sp], #16
-        \\ldp x12, x13, [sp], #16
-        \\ldp x10, x11, [sp], #16
-        \\ldp x8, x9, [sp], #16
-        \\ldp x6, x7, [sp], #16
-        \\ldp x4, x5, [sp], #16
-        \\ldp x2, x3, [sp], #16
-        \\ldp x0, x1, [sp], #16
-        \\eret
+        \\exc_restore
         \\.balign 128
         \\// Entry 0x600: lower EL AArch32 synchronous (kind 0)
         \\stp x0, x1, [sp, #-16]!
@@ -820,18 +787,7 @@ fn exception_vectors() align(2048) callconv(.naked) void {
         \\movz x5, #0
         \\bl exc_dispatch
         \\cbz x0, exc_park
-        \\mov sp, x0
-        \\ldp x30, xzr, [sp], #16
-        \\ldp x16, x17, [sp], #16
-        \\ldp x14, x15, [sp], #16
-        \\ldp x12, x13, [sp], #16
-        \\ldp x10, x11, [sp], #16
-        \\ldp x8, x9, [sp], #16
-        \\ldp x6, x7, [sp], #16
-        \\ldp x4, x5, [sp], #16
-        \\ldp x2, x3, [sp], #16
-        \\ldp x0, x1, [sp], #16
-        \\eret
+        \\exc_restore
         \\.balign 128
         \\// Entry 0x680: lower EL AArch32 IRQ (kind 1)
         \\stp x0, x1, [sp, #-16]!
@@ -852,18 +808,7 @@ fn exception_vectors() align(2048) callconv(.naked) void {
         \\movz x5, #1
         \\bl exc_dispatch
         \\cbz x0, exc_park
-        \\mov sp, x0
-        \\ldp x30, xzr, [sp], #16
-        \\ldp x16, x17, [sp], #16
-        \\ldp x14, x15, [sp], #16
-        \\ldp x12, x13, [sp], #16
-        \\ldp x10, x11, [sp], #16
-        \\ldp x8, x9, [sp], #16
-        \\ldp x6, x7, [sp], #16
-        \\ldp x4, x5, [sp], #16
-        \\ldp x2, x3, [sp], #16
-        \\ldp x0, x1, [sp], #16
-        \\eret
+        \\exc_restore
         \\.balign 128
         \\// Entry 0x700: lower EL AArch32 FIQ (kind 2)
         \\stp x0, x1, [sp, #-16]!
@@ -884,18 +829,7 @@ fn exception_vectors() align(2048) callconv(.naked) void {
         \\movz x5, #2
         \\bl exc_dispatch
         \\cbz x0, exc_park
-        \\mov sp, x0
-        \\ldp x30, xzr, [sp], #16
-        \\ldp x16, x17, [sp], #16
-        \\ldp x14, x15, [sp], #16
-        \\ldp x12, x13, [sp], #16
-        \\ldp x10, x11, [sp], #16
-        \\ldp x8, x9, [sp], #16
-        \\ldp x6, x7, [sp], #16
-        \\ldp x4, x5, [sp], #16
-        \\ldp x2, x3, [sp], #16
-        \\ldp x0, x1, [sp], #16
-        \\eret
+        \\exc_restore
         \\.balign 128
         \\// Entry 0x780: lower EL AArch32 SError (kind 3)
         \\stp x0, x1, [sp, #-16]!
@@ -916,18 +850,7 @@ fn exception_vectors() align(2048) callconv(.naked) void {
         \\movz x5, #3
         \\bl exc_dispatch
         \\cbz x0, exc_park
-        \\mov sp, x0
-        \\ldp x30, xzr, [sp], #16
-        \\ldp x16, x17, [sp], #16
-        \\ldp x14, x15, [sp], #16
-        \\ldp x12, x13, [sp], #16
-        \\ldp x10, x11, [sp], #16
-        \\ldp x8, x9, [sp], #16
-        \\ldp x6, x7, [sp], #16
-        \\ldp x4, x5, [sp], #16
-        \\ldp x2, x3, [sp], #16
-        \\ldp x0, x1, [sp], #16
-        \\eret
+        \\exc_restore
         \\.balign 128
         \\exc_park:
         \\wfe
@@ -940,6 +863,14 @@ fn exception_vectors() align(2048) callconv(.naked) void {
 // class B gate, tools/verify-live-exceptions.sh)
 // ---------------------------------------------------------------------------
 
+var test_svc_immediate: u16 = 0;
+
+fn test_svc_handler(frame: *VectorFrame, immediate: u16) bool {
+    test_svc_immediate = immediate;
+    _ = frame_write(frame, 0, frame_read(frame, 0) + 1);
+    return true;
+}
+
 test "exceptions: ec_name decodes known and unknown classes" {
     try std.testing.expectEqualStrings("unknown-reason", ec_name(0x00000000));
     try std.testing.expectEqualStrings("unknown-reason", ec_name(0x00000000)); // udf
@@ -951,14 +882,51 @@ test "exceptions: ec_name decodes known and unknown classes" {
 }
 
 test "exceptions: mode_name decodes SPSR M field" {
-    try std.testing.expectEqualStrings("EL0t", mode_name(0x4));
-    try std.testing.expectEqualStrings("EL1t", mode_name(0x5));
-    try std.testing.expectEqualStrings("EL1h", mode_name(0x9));
-    try std.testing.expectEqualStrings("EL2t", mode_name(0xd));
-    try std.testing.expectEqualStrings("EL2h", mode_name(0xf));
-    try std.testing.expectEqualStrings("EL3t", mode_name(0x11));
-    try std.testing.expectEqualStrings("EL3h", mode_name(0x13));
+    try std.testing.expectEqualStrings("EL0t", mode_name(0x0));
+    try std.testing.expectEqualStrings("EL1t", mode_name(0x4));
+    try std.testing.expectEqualStrings("EL1h", mode_name(0x5));
+    try std.testing.expectEqualStrings("EL2t", mode_name(0x8));
+    try std.testing.expectEqualStrings("EL2h", mode_name(0x9));
+    try std.testing.expectEqualStrings("EL3t", mode_name(0xc));
+    try std.testing.expectEqualStrings("EL3h", mode_name(0xd));
     try std.testing.expectEqualStrings("mode-unknown", mode_name(0x1));
+}
+
+test "exceptions: vector-frame helpers match the reverse stp layout" {
+    var frame: VectorFrame = [_]u64{0} ** vector_frame_slots;
+    try std.testing.expect(frame_write(&frame, 0, 0x10));
+    try std.testing.expect(frame_write(&frame, 1, 0x11));
+    try std.testing.expect(frame_write(&frame, 8, 0x18));
+    try std.testing.expect(frame_write(&frame, 17, 0x21));
+    try std.testing.expect(frame_write(&frame, 30, 0x30));
+    try std.testing.expectEqual(@as(u64, 0x10), frame[18]);
+    try std.testing.expectEqual(@as(u64, 0x11), frame[19]);
+    try std.testing.expectEqual(@as(u64, 0x18), frame[10]);
+    try std.testing.expectEqual(@as(u64, 0x21), frame[3]);
+    try std.testing.expectEqual(@as(u64, 0x30), frame[0]);
+    try std.testing.expectEqual(@as(u64, 0x18), frame_read(&frame, 8));
+    try std.testing.expect(!frame_write(&frame, 29, 1));
+}
+
+test "exceptions: only AArch64 SVC from EL0t reaches the SVC seam" {
+    const svc_esr: u64 = (0x15 << 26) | 0x42;
+    try std.testing.expect(is_svc64_from_el0(kind_sync, svc_esr, 0x0));
+    try std.testing.expect(!is_svc64_from_el0(kind_irq, svc_esr, 0x0));
+    try std.testing.expect(!is_svc64_from_el0(kind_sync, svc_esr, 0x5));
+    try std.testing.expect(!is_svc64_from_el0(kind_sync, 0, 0x0));
+}
+
+test "exceptions: SVC dispatcher mutates x0 and resumes the same EL0 frame" {
+    var frame: VectorFrame = [_]u64{0} ** vector_frame_slots;
+    try std.testing.expect(frame_write(&frame, 0, 41));
+    test_svc_immediate = 0;
+    set_svc_dispatcher(test_svc_handler);
+    const esr: u64 = (0x15 << 26) | 0x1234;
+    const dispatch_result = exc_dispatch(&frame, esr, 0, 0x4000, 0, kind_sync);
+    try std.testing.expectEqual(@intFromPtr(&frame), dispatch_result.frame);
+    try std.testing.expectEqual(@as(u64, 0), dispatch_result.sp_el0); // host has no SP_EL0
+    try std.testing.expectEqual(@as(u16, 0x1234), test_svc_immediate);
+    try std.testing.expectEqual(@as(u64, 42), frame_read(&frame, 0));
 }
 
 test "exceptions: kind_name is stable" {
@@ -979,14 +947,14 @@ test "exceptions: resume decision is sync-and-armed only" {
 
 test "exceptions: format_report is deterministic (resume path)" {
     var buf: [512]u8 = undefined;
-    // A udf at EL1h: ESR EC=0x00 (unknown reason), SPSR.M=0x9 (EL1h).
+    // A udf at EL1h: ESR EC=0x00 (unknown reason), SPSR.M=0x5 (EL1h).
     const esr: u64 = 0;
-    const report = format_report(&buf, kind_sync, esr, 0, 0x7e4dfabc, 0x9, 1, 0x2a, 0x7e4df000, true);
+    const report = format_report(&buf, kind_sync, esr, 0, 0x7e4dfabc, 0x5, 1, 0x2a, 0x7e4df000, true);
     try std.testing.expectEqualStrings(
         "[EXC] sync from EL1h count=1\n" ++
             "[EXC] esr=0x0000000000000000 ec=0x00 unknown-reason iss=0x000000\n" ++
             "[EXC] far=0x0000000000000000\n" ++
-            "[EXC] elr=0x000000007e4dfabc spsr=0x0000000000000009\n" ++
+            "[EXC] elr=0x000000007e4dfabc spsr=0x0000000000000005\n" ++
             "[EXC] x0=0x000000000000002a x30=0x000000007e4df000\n" ++
             "[EXC] resume-armed: skipping faulting instruction\n",
         report,
@@ -996,12 +964,12 @@ test "exceptions: format_report is deterministic (resume path)" {
 test "exceptions: format_report is deterministic (park path, irq)" {
     var buf: [512]u8 = undefined;
     const esr: u64 = 0x80000000; // EC=0x20 (instruction abort, lower EL)
-    const report = format_report(&buf, kind_irq, esr, 0xdead0000, 0x1234, 0x4, 7, 0, 0, false);
+    const report = format_report(&buf, kind_irq, esr, 0xdead0000, 0x1234, 0x0, 7, 0, 0, false);
     try std.testing.expectEqualStrings(
         "[EXC] irq from EL0t count=7\n" ++
             "[EXC] esr=0x0000000080000000 ec=0x20 instruction-abort-lower iss=0x000000\n" ++
             "[EXC] far=0x00000000dead0000\n" ++
-            "[EXC] elr=0x0000000000001234 spsr=0x0000000000000004\n" ++
+            "[EXC] elr=0x0000000000001234 spsr=0x0000000000000000\n" ++
             "[EXC] x0=0x0000000000000000 x30=0x0000000000000000\n" ++
             "[EXC] parking: no recovery path for this exception\n",
         report,

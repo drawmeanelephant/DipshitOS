@@ -8,7 +8,10 @@
 //! pass: declared RAM as Normal Write-Back (2 MiB blocks where aligned,
 //! 4 KiB pages at region edges), declared MMIO windows and every
 //! *undeclared* region as Device nGnRnE, so no post-switch access can
-//! fault on an unmapped address and device semantics are preserved. The
+//! fault on an unmapped address and device semantics are preserved. Claim
+//! 8215 then overlays EL0 permissions on two dedicated page-aligned ranges:
+//! read/execute user text and read/write/non-executable user stack. All
+//! neighboring kernel RAM and all Device mappings remain EL1-only. The
 //! virtio-pci console transport window above the blanket is passed in by
 //! the caller (`extra_device`), so this module does not depend on the
 //! virtio transport module.
@@ -17,11 +20,14 @@
 //! exit boundary. The table storage is a fixed BSS carve-out.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const uefi = std.os.uefi;
 const MemoryMapSlice = uefi.tables.MemoryMapSlice;
 const MemoryType = uefi.tables.MemoryType;
 const handoff = @import("handoff.zig");
-const build_options = @import("build_options");
+const build_options = if (builtin.is_test) struct {
+    pub const t0sz25 = false;
+} else @import("build_options");
 
 const table_page_count = 128; // 512 KiB fixed BSS carve-out, no allocator.
 var table_storage: [table_page_count][512]u64 align(4096) = undefined;
@@ -83,6 +89,16 @@ pub const DeviceWindow = struct {
     len: u64,
 };
 
+/// A page-isolated Normal-RAM range that EL0 may access. Executable regions
+/// are user-read-only and PXN; writable regions are UXN+PXN. There is no
+/// representation for user-accessible Device memory.
+pub const UserRegion = struct {
+    base: u64,
+    len: u64,
+    writable: bool,
+    executable: bool,
+};
+
 pub fn build_identity_map(
     map: MemoryMapSlice,
     map_buffer: []align(8) u8,
@@ -90,6 +106,7 @@ pub fn build_identity_map(
     size: u64,
     handoff_rec: *const handoff.HandoffV2,
     extra_device: []const DeviceWindow,
+    user_regions: []const UserRegion,
 ) bool {
     table_count = 0;
     _ = new_table() orelse return false; // root table at index zero
@@ -134,6 +151,14 @@ pub fn build_identity_map(
         if (window.base >= blanket_end) {
             if (!map_range(window.base, window.base + window.len, Attr.device)) return false;
         }
+    }
+
+    // Claim 8215: apply narrow EL0 permissions only after the complete
+    // identity map exists. A 2 MiB Normal block is split when necessary;
+    // only the requested 4 KiB leaves change. This happens before TTBR0 is
+    // installed, so the existing post-install no-remap/TLBI contract holds.
+    for (user_regions) |region| {
+        if (!apply_user_region(region)) return false;
     }
 
     // All adopted fixed regions sit inside declared RAM below the blanket;
@@ -344,6 +369,70 @@ fn map_page(va: u64, attr: Attr) bool {
         return true;
     }
     return false;
+}
+
+fn apply_user_region(region: UserRegion) bool {
+    if (region.len == 0 or region.base % page_size != 0 or region.len % page_size != 0) return false;
+    if (region.writable and region.executable) return false;
+    if (region.base > std.math.maxInt(u64) - region.len) return false;
+    var va = region.base;
+    const end = region.base + region.len;
+    while (va < end) : (va += page_size) {
+        if (!apply_user_page(va, region.writable, region.executable)) return false;
+    }
+    return true;
+}
+
+fn apply_user_page(va: u64, writable: bool, executable: bool) bool {
+    const ix = indices(va);
+    const root = &table_storage[0];
+    const l1 = table_entry(&root[ix.l0]) orelse return false;
+    const l2 = table_entry(&l1[ix.l1]) orelse return false;
+    if ((l2[ix.l2] & 3) == 1 and !split_block(&l2[ix.l2])) return false;
+    const l3 = table_entry(&l2[ix.l2]) orelse return false;
+    const entry = user_leaf(l3[ix.l3], writable, executable) orelse return false;
+    l3[ix.l3] = entry;
+    return true;
+}
+
+/// Pure permission transform pinned by host tests. Existing leaf, AttrIndex
+/// 1 (Normal WB) only: Device pages can never be promoted into the user
+/// aperture by a bad caller.
+fn user_leaf(original: u64, writable: bool, executable: bool) ?u64 {
+    if (writable and executable) return null;
+    if ((original & 3) != 3 or ((original >> 2) & 7) != 1) return null;
+    var entry = original;
+    const ap_mask: u64 = 3 << 6;
+    const pxn: u64 = 1 << 53;
+    const uxn: u64 = 1 << 54;
+    entry &= ~(ap_mask | pxn | uxn);
+    entry |= if (writable) @as(u64, 1 << 6) else @as(u64, 3 << 6);
+    if (executable) {
+        entry |= pxn; // EL0 executable, EL1 execute-never.
+    } else {
+        entry |= pxn | uxn;
+    }
+    return entry;
+}
+
+test "mmu: user leaves are page-local W^X and reject Device mappings" {
+    const pa: u64 = 0x1234_5000;
+    const normal = pa | attr_bits(.normal, true);
+    const text = user_leaf(normal, false, true).?;
+    try std.testing.expectEqual(@as(u64, 3), (text >> 6) & 3); // EL0 RO
+    try std.testing.expectEqual(@as(u64, 1), (text >> 53) & 1); // PXN
+    try std.testing.expectEqual(@as(u64, 0), (text >> 54) & 1); // EL0 executable
+    try std.testing.expectEqual(pa, text & 0x0000_ffff_ffff_f000);
+
+    const stack = user_leaf(normal, true, false).?;
+    try std.testing.expectEqual(@as(u64, 1), (stack >> 6) & 3); // EL0 RW
+    try std.testing.expectEqual(@as(u64, 1), (stack >> 53) & 1); // PXN
+    try std.testing.expectEqual(@as(u64, 1), (stack >> 54) & 1); // UXN
+    try std.testing.expectEqual(pa, stack & 0x0000_ffff_ffff_f000);
+
+    const device = pa | attr_bits(.device, true);
+    try std.testing.expect(user_leaf(device, false, true) == null);
+    try std.testing.expect(user_leaf(normal, true, true) == null);
 }
 
 pub fn read_mmfr0() u64 {

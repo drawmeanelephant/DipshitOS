@@ -1525,16 +1525,18 @@ test "monitor: tasks is registered and reports the deterministic host state" {
     var mon = env.monitor();
     try std.testing.expect(lookup("tasks") != null);
     try std.testing.expectEqualStrings("tick-driven task scheduler status", lookup("tasks").?.help);
-    // Register the two tasks exactly as kernel_main does; without `start`
+    // Register the three tasks exactly as kernel_main does; without `start`
     // the scheduler never preempts, so every counter reads 0 — the same
     // shape a live boot reports once ticks begin.
     _ = scheduler.init();
     _ = scheduler.register_worker(0);
+    _ = scheduler.register_user(0);
     try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"tasks"}));
     try std.testing.expectEqualStrings(
         "tasks: enabled=0 current=0 switches=0\n" ++
-            "  shell  saves=0 resumes=0 advances=0\n" ++
-            "  worker saves=0 resumes=0 advances=0\n",
+            "  shell    saves=0 resumes=0 advances=0\n" ++
+            "  worker   saves=0 resumes=0 advances=0\n" ++
+            "  user-el0 saves=0 resumes=0 advances=0\n",
         env.mock.contents(),
     );
 }

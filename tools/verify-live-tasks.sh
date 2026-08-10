@@ -4,16 +4,16 @@
 # round-robin kernel task scheduler on real VZ hardware. The production
 # image boots with the claim-9746 vectors, the claim-9187 GIC + CNTP timer
 # (a real periodic PPI entering the EL1 IRQ vector), and the scheduler
-# armed with two tasks: the shell/main task and a demo worker on its own
-# static stack. Every timer PPI preempts the current task for the other
-# one (round-robin, one 1 s quantum each).
+# armed with three tasks: the EL1h shell/main task, an EL1h demo worker,
+# and the claim-8215 EL0t task. This regression gate keeps proving its
+# original shell+worker contract inside that larger round-robin pool.
 #
 # The gate proves BOTH tasks advance across ticks:
 #   * the worker runs and bumps its advance counter — reported from the
 #     shell idle loop as `tasks worker advances=N` (main-context console,
 #     claim 9187 discipline; N >= 1 proves a worker quantum completed, and
-#     the line only exists after a full worker quantum AND a shell idle
-#     loop, i.e. >= 2 real context switches);
+#     the line only exists after a full worker quantum, the EL0 quantum,
+#     and a shell idle loop, i.e. >= 3 real context switches);
 #   * the shell survives repeated preemptions — it still executes the
 #     scripted `tasks` + `echo` commands (echo reply `rx-tasks-ok`), so its
 #     saved/restored context is intact. (The `tasks` command output is
@@ -25,9 +25,9 @@
 # --script / --script-expect) forwards keystrokes into the serial
 # attachment; guest output is teed to vm-serial.log; the runner exits 0
 # iff the expected transcript appears. The success signal is the worker
-# report line — it only appears after a full worker quantum AND a shell
-# idle loop, i.e. after at least two real context switches (~3 s), so the
-# runner cannot exit before both tasks have demonstrably run.
+# report line — it only appears after a full worker quantum, the EL0 quantum,
+# and a shell idle loop, i.e. after at least three real context switches,
+# so the runner cannot exit before both tasks have demonstrably run.
 #
 # Per boot this reports:
 #   rc              the runner's exit code (0 iff the worker report appeared)
@@ -88,8 +88,8 @@ run_one() {
     rm -f artifacts/efi-vars.bin artifacts/vm-serial.log
     set +e
     # --script-expect waits for the worker's first report line, written
-    # only after a full worker quantum and a shell idle loop (>= 2 real
-    # context switches, ~3 s after scheduling starts); the runner exits 0
+    # only after a full worker quantum, the EL0 quantum, and a shell idle
+    # loop (>= 3 real context switches); the runner exits 0
     # as soon as it appears in the serial log.
     host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log \
         --script "$SCRIPT" --script-expect "tasks worker advances=" --timeout 60 \
@@ -112,7 +112,7 @@ run_one() {
         grep -qE -- "tasks worker advances=[1-9][0-9]*" artifacts/vm-serial.log && WORKER_REPORT=1
         grep -qF -- "rx-tasks-ok" artifacts/vm-serial.log && ECHO=1
         grep -qF -- "timer heartbeat ticks=5 irq=5 poll=0" artifacts/vm-serial.log && HEARTBEAT=1
-        grep -qE -- "tasks: enabled=1 current=[01] switches=[1-9][0-9]*" artifacts/vm-serial.log && SWITCHES=1
+        grep -qE -- "tasks: enabled=1 current=[012] switches=[1-9][0-9]*" artifacts/vm-serial.log && SWITCHES=1
     fi
     {
         echo "$tag: rc=$RC serial-bytes=$SERIAL_BYTES banner=$BANNER interrupts=$INTERRUPTS cmd=$CMD shell-row=$SHELL_ROW worker-row=$WORKER_ROW worker-adv=$WORKER_ADV worker-report=$WORKER_REPORT echo=$ECHO heartbeat=$HEARTBEAT switches=$SWITCHES"
@@ -120,8 +120,9 @@ run_one() {
     echo "$tag rc=$RC serial-bytes=$SERIAL_BYTES banner=$BANNER interrupts=$INTERRUPTS cmd=$CMD shell-row=$SHELL_ROW worker-row=$WORKER_ROW worker-adv=$WORKER_ADV worker-report=$WORKER_REPORT echo=$ECHO heartbeat=$HEARTBEAT switches=$SWITCHES"
     # The gate passes iff the worker demonstrably advanced across ticks —
     # the runner's rc=0 requires its report line, which only appears after
-    # a full worker quantum AND a shell idle loop (>= 2 real context
-    # switches), so rc + worker-report already imply both tasks ran; the
+    # a full worker quantum, the EL0 quantum, and a shell idle loop (>= 3
+    # real context switches), so rc + worker-report already imply both tasks
+    # ran; the
     # shell row + echo prove the shell's saved/restored context kept it
     # responsive. The `tasks` command output is captured before the first
     # switch (the runner forwards keystrokes ~0.5 s after the terminal
