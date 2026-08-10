@@ -20,7 +20,9 @@ kernel monitor — closed and tagged `m1.5-interactive-monitor` on
 1517). The current stream is **milestone three's first cards**: the
 physical page allocator is done (claims 3972/5162), GIC + timer interrupts
 now deliver a real periodic PPI into the EL1 IRQ vector on VZ (claim 9187,
-3/3 strict live gate), and tasks are next.
+3/3 strict live gate), and the first tasks card — a tick-driven
+round-robin scheduler between two kernel tasks (claim 5275, live gate
+`tools/verify-live-tasks.sh`) — is done; userspace is a later card.
 `docs/status.md` is the canonical, always-current answer to "where are we,
 and what's next".
 

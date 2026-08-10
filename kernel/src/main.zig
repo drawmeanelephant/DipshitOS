@@ -41,6 +41,7 @@ const walkprobe = @import("walkprobe.zig"); // claim 7896 diagnostic (linker-eli
 const exceptions = @import("exceptions.zig"); // claim 9746: VBAR_EL1 vector table + basic sync/IRQ handlers
 const gic = @import("gic.zig"); // claim 7948: GIC distributor + CPU interface
 const timer = @import("timer.zig"); // claim 7948: ARM generic timer (CNTP)
+const scheduler = @import("scheduler.zig"); // claim 5275: tick-driven round-robin tasks
 const virtio_custom = @import("virtio_custom.zig"); // claim 0828: custom-virtio spike driver (DID 0x1082)
 const HandoffV2 = handoff.HandoffV2;
 
@@ -560,6 +561,17 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
         const probe_con = m15.to_console();
         probe_con.print_line("[seam] direct dispatch");
     }
+    // Claim 5275: the first milestone-three tasks card — a tick-driven
+    // round-robin scheduler. Task 0 is the shell/main task itself (its
+    // context is captured on the first preemption); task 1 is the demo
+    // worker on its own static stack. Scheduling starts only HERE, once
+    // the shell loop is the running context, so boot-time printing (banner,
+    // map, spike) is never preempted. The first tick then preempts the
+    // shell, the worker runs for one quantum, the next tick returns to the
+    // shell, and so on — every timer PPI (claim 9187) is a context switch.
+    _ = scheduler.init();
+    _ = scheduler.register_worker(@intFromPtr(&worker_entry));
+    scheduler.start();
     shell.boot_and_park(&mon, m15.rx_wired());
     // No return after takeover. WFE is a terminal state, not a firmware call.
     // Note: with RX wired (nvram builds) boot_and_park loops forever, so
@@ -568,6 +580,23 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
     // the no-RX path, where boot_and_park returns after the prompt.
     if (comptime build_options.nvram_console) nvram_console.flush();
     halt_forever();
+}
+
+/// Claim 5275: the demo worker task. Runs in its own task context (one
+/// quantum per tick): increments its advance counter, asks the shell idle
+/// loop to report it (main-context console discipline — the worker itself
+/// never prints), and spins a bounded delay so a 1 s quantum holds several
+/// advances. Preempted by the next timer tick; never returns.
+const worker_report_every: u64 = 64;
+fn worker_entry() void {
+    var local: u64 = 0;
+    while (true) {
+        local += 1;
+        scheduler.note_advance();
+        if (local % worker_report_every == 0) scheduler.request_report();
+        var spins: usize = 0;
+        while (spins < 2_000_000) : (spins += 1) asm volatile ("nop");
+    }
 }
 
 const CapturedMap = struct {
@@ -1097,18 +1126,26 @@ fn exception_report_writer(text: []const u8) void {
 
 /// Claim 9187 IRQ chain, registered as the exception module's dispatcher:
 /// ack from the GIC, handle the timer tick if the INTID is the timer's
-/// PPI, then EOI. Runs in IRQ context with a register frame on the stack —
-/// NO console access (the heartbeat prints from the shell idle loop, where
-/// a print cannot re-enter the polled virtio TX path mid-flush). Claim
-/// 0828: every non-timer INTID is recorded into the custom-virtio spike's
-/// observation window (an increment + first-INTID store, console-free); in
-/// default builds no SPI is armed so the branch never fires.
+/// PPI (re-arming the comparator), then EOI. Runs in IRQ context with a
+/// register frame on the stack — NO console access (the heartbeat prints
+/// from the shell idle loop, where a print cannot re-enter the polled
+/// virtio TX path mid-flush). Claim 5275: on a timer PPI the scheduler
+/// tick runs before the EOI; it stages the next task's restore frame
+/// (exceptions.resume_frame) and programs ELR/SPSR, but the actual SP
+/// switch happens in the vector stub (`mov sp, x0`) only after this
+/// function returns — so the EOI is still issued on the interrupted
+/// task's stack, which is harmless (the CPU interface is task-agnostic).
+/// Claim 0828: every non-timer INTID is recorded into the custom-virtio
+/// spike's observation window (an increment + first-INTID store,
+/// console-free); in default builds no SPI is armed so the branch never
+/// fires.
 fn irq_dispatch() void {
     const intid = gic.ack();
     if (gic.is_spurious(intid)) return;
     gic.note_irq(intid);
     if (timer.is_ppi(intid)) {
         timer.handle();
+        scheduler.tick();
     } else {
         virtio_custom.note_irq(intid);
     }

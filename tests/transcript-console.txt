@@ -20,6 +20,7 @@ available commands:
   reboot    restart the machine
   repeat    repeat text, safely bounded
   shutdown  request power-off
+  tasks     tick-driven task scheduler status
   timer     interrupt controller + timer status
   uname     compact system identity
   version   display build information
@@ -54,6 +55,10 @@ pages selftest: alloc 960 -> 0x0000000000100000
 pages selftest: free ok
 pages selftest: alloc 1153 -> none (out of memory)
 pages selftest: ok free=0x0000000000000480
+dipshit> tasks
+tasks: enabled=0 current=0 switches=0
+  shell  saves=0 resumes=0 advances=0
+  worker saves=0 resumes=0 advances=0
 dipshit> echo "elephant business"
 elephant business
 dipshit> ls

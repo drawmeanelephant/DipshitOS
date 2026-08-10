@@ -56,6 +56,15 @@ var period_ticks: u64 = 0;
 var armed_flag: bool = false;
 var pending_heartbeat: bool = false;
 var pending_irq_report: bool = false;
+// Snapshots taken when the flags are set (claim 5275): with the scheduler
+// preempting the shell between ticks, the shell prints these lines from a
+// later idle loop, so the live counters at print time would overstate the
+// event. The snapshot describes the event itself (tick 5, irq 5), which is
+// also what the live gates assert.
+var heartbeat_ticks: u64 = 0;
+var heartbeat_irq: u64 = 0;
+var heartbeat_poll: u64 = 0;
+var irq_report_irq: u64 = 0;
 
 /// True once `init` armed the timer on real hardware.
 pub fn armed() bool {
@@ -135,11 +144,19 @@ fn record_tick(source: TickSource) void {
         .test_only => {},
         .irq => {
             irq_ticks += 1;
-            if (irq_ticks == 1) pending_irq_report = true;
+            if (irq_ticks == 1) {
+                pending_irq_report = true;
+                irq_report_irq = irq_ticks;
+            }
         },
         .poll => poll_ticks += 1,
     }
-    if (ticks % heartbeat_every == 0) pending_heartbeat = true;
+    if (ticks % heartbeat_every == 0) {
+        pending_heartbeat = true;
+        heartbeat_ticks = ticks;
+        heartbeat_irq = irq_ticks;
+        heartbeat_poll = poll_ticks;
+    }
 }
 
 /// Host-safe test hook: advances the cadence without claiming an IRQ or
@@ -191,17 +208,17 @@ pub fn maybe_heartbeat(con: *console.Console) void {
         con.puts("timer irq delivered ppi=");
         con.print_hex_min(ppi);
         con.puts(" irq_ticks=");
-        con.print_u64(irq_ticks);
+        con.print_u64(irq_report_irq);
         con.puts("\n");
     }
     if (pending_heartbeat) {
         pending_heartbeat = false;
         con.puts("timer heartbeat ticks=");
-        con.print_u64(ticks);
+        con.print_u64(heartbeat_ticks);
         con.puts(" irq=");
-        con.print_u64(irq_ticks);
+        con.print_u64(heartbeat_irq);
         con.puts(" poll=");
-        con.print_u64(poll_ticks);
+        con.print_u64(heartbeat_poll);
         con.puts("\n");
     }
 }

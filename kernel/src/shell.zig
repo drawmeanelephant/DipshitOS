@@ -27,6 +27,7 @@ const tokenizer = @import("tokenizer.zig");
 const monitor = @import("monitor.zig");
 const handoff = @import("handoff.zig");
 const memmap = @import("memmap.zig");
+const scheduler = @import("scheduler.zig"); // claim 5275: worker progress printing (main context only)
 const timer = @import("timer.zig"); // claim 7948: heartbeat printing (main context only)
 
 pub const PollResult = enum {
@@ -114,8 +115,11 @@ pub fn boot_and_park(mon: *monitor.Monitor, rx_wired: bool) void {
             // Claim 7948's main-loop comparator poll raced real delivery
             // after the GICR frame fix, double-consuming some periods.
             // Output remains here because the polled virtio TX path is not
-            // reentrancy-safe in IRQ context.
+            // reentrancy-safe in IRQ context. Claim 5275: the worker task's
+            // progress report prints the same way (the worker never touches
+            // the console itself).
             timer.maybe_heartbeat(&mon.console);
+            scheduler.maybe_report(&mon.console);
             idle_wait_rx();
         }
     }
@@ -204,6 +208,7 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "  reboot    restart the machine\n" ++
         "  repeat    repeat text, safely bounded\n" ++
         "  shutdown  request power-off\n" ++
+        "  tasks     tick-driven task scheduler status\n" ++
         "  timer     interrupt controller + timer status\n" ++
         "  uname     compact system identity\n" ++
         "  version   display build information\n" ++
@@ -238,6 +243,10 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "pages selftest: free ok\n" ++
         "pages selftest: alloc 1153 -> none (out of memory)\n" ++
         "pages selftest: ok free=0x0000000000000480\n" ++
+        "dipshit> tasks\r\n" ++
+        "tasks: enabled=0 current=0 switches=0\n" ++
+        "  shell  saves=0 resumes=0 advances=0\n" ++
+        "  worker saves=0 resumes=0 advances=0\n" ++
         "dipshit> echo \"elephant business\"\r\n" ++
         "elephant business\n" ++
         "dipshit> ls\r\n" ++
@@ -269,6 +278,11 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
     // exactly as kernel_main does — the `pages` command reports/exercises
     // that pool.
     _ = alloc.init(make_view(), &.{});
+    // Claim 5275: register the two scheduler tasks exactly as kernel_main
+    // does (without `start`, so no preemption happens in the test process)
+    // — the `tasks` command then reports the real two-task shape.
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0);
     // Claim 3475/6420: populate the ESP file window the way kernel_main's
     // FAT snapshot does (KERNEL.BIN listed-but-unloaded, an EFI directory,
     // BOOTED.TXT content-loaded). A test process has no disk (no FAT
@@ -277,7 +291,7 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
     _ = esp.add_esp_entry("KERNEL.BIN", 0x88b38, "");
     _ = esp.add_dir_entry("EFI");
     _ = esp.add_esp_entry("BOOTED.TXT", 0x29, "DIPSHITOS BOOTLOADER\nfirmware has agreed to cooperate\n");
-    mock.feed("help\nversion\nmem\npages\npages selftest\necho \"elephant business\"\nls\ncat BOOTED.TXT\nwrite hello.txt hello world\ncat hello.txt\n");
+    mock.feed("help\nversion\nmem\npages\npages selftest\ntasks\necho \"elephant business\"\nls\ncat BOOTED.TXT\nwrite hello.txt hello world\ncat hello.txt\n");
     mock.feed(long);
     mock.feed("\n\x03\n");
     while (shell.poll() != .idle) {}

@@ -33,8 +33,8 @@ verify-portable:
 # Run the Apple-silicon VZ hardware gates (class B): serial takeover
 # (zig build run, claim 1517), bad-handoff, marker, NVRAM console,
 # host-console PTY, the live-transcript RX gate (claim 6684), the
-# live timer IRQ-delivery gate (claim 9187), and the live
-# reboot/shutdown gate (claim 0527).
+# live timer IRQ-delivery gate (claim 9187), the live tasks scheduler
+# gate (claim 5275), and the live reboot/shutdown gate (claim 0527).
 # Apple silicon only — each boots VZ VMs.
 verify-vz:
     zig build run
@@ -45,6 +45,7 @@ verify-vz:
     bash tools/verify-live-transcript.sh
     bash tools/verify-live-fs.sh
     bash tools/verify-live-timer.sh
+    bash tools/verify-live-tasks.sh
     bash tools/verify-live-reboot.sh
 
 # Compile the AArch64 UEFI application and kernel image (class A — zig build)
@@ -150,6 +151,10 @@ verify-live-exceptions:
 # Verify real timer IRQ delivery (class B — boots a VZ VM; drives `timer`, then requires five CNTP PPIs through the EL1 IRQ vector with irq=5/poll=0; claim 9187; Apple silicon only)
 verify-live-timer:
     bash tools/verify-live-timer.sh
+
+# Verify the live tick-driven task scheduler (class B — boots a VZ VM; proves the shell + worker both advance across real timer-tick context switches; claim 5275; Apple silicon only)
+verify-live-tasks:
+    bash tools/verify-live-tasks.sh
 
 # Verify the live ESP file window (class B — boots VZ VMs; ls/cat from the pre-exit ESP snapshot + write persisted to EFI NVRAM and read back across a reboot; claim 3475, hard gate 5; Apple silicon only)
 verify-live-fs:

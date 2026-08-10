@@ -288,6 +288,13 @@ redesign.
   boot.
 - Interrupts are masked at kernel entry (firmware behavior) and explicitly
   unmasked only after vectors, GIC, dispatcher, and timer are armed.
+- The one-second timer PPI is now also the kernel's preemption clock: the
+  tick-driven round-robin scheduler (claim 5275) switches the shell task
+  and a worker task on every PPI, using the claim-9746 IRQ stub's existing
+  register save/restore plus a saved frame pointer / ELR / SPSR per task.
+  **[observed]** — `tools/verify-live-tasks.sh` PASS: the worker reports
+  `tasks worker advances=N` after ≥ 2 real context switches and the shell
+  stays responsive (`rx-tasks-ok`).
   **[inferred at entry; observed working after the explicit unmask].**
 
 ## What milestone zero does NOT assume (and does not touch)
