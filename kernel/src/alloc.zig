@@ -707,3 +707,212 @@ test "alloc: init with exclusions is resettable" {
     try std.testing.expectEqual(@as(u64, 8), s.excluded_pages);
     try std.testing.expectEqual(@as(u64, 1144), s.free_pages);
 }
+
+test "alloc: boundary first-fit policy pins first-fit order over best-fit" {
+    var st = State{};
+    try std.testing.expect(st.init(make_view(), &.{}));
+
+    // Largest run in make_view() is 960 pages at 0x100000.
+    const big = st.alloc_pages(960) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 0x100000), big);
+
+    // Next 1-page alloc wraps into the fragmented remainder (loader_code region at 0x7000000).
+    const wrap1 = st.alloc_pages(1) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 0x7000000), wrap1);
+
+    // Free the big run mid-way.
+    try std.testing.expect(st.free_pages(big, 960));
+
+    // Next 1-page alloc lands at 0x100000 (first-fit scans from lower index, picking 0x100000
+    // even though loader_code has a 63-page hole at 0x7001000).
+    const wrap2 = st.alloc_pages(1) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 0x100000), wrap2);
+
+    // Explicit first-fit vs best-fit check using custom regions:
+    // Hole A at 0x100000 (size 10 pages), Hole B at 0x200000 (size 2 pages).
+    const custom_descriptors = [_]memmap.MemoryDescriptor{
+        .{ .type = .conventional_memory, .physical_start = 0x100000, .virtual_start = 0, .number_of_pages = 10, .attribute = 0 },
+        .{ .type = .conventional_memory, .physical_start = 0x200000, .virtual_start = 0, .number_of_pages = 2, .attribute = 0 },
+    };
+    const c_view = memmap.MapView.init(std.mem.asBytes(&custom_descriptors), @sizeOf(memmap.MemoryDescriptor), custom_descriptors.len);
+    var st_fit = State{};
+    try std.testing.expect(st_fit.init(c_view, &.{}));
+
+    // Allocating 2 pages: first-fit scans from low address, finding Hole A (10 pages) first,
+    // so it allocates 2 pages at 0x100000 (not Hole B at 0x200000, which best-fit would choose).
+    const fit2 = st_fit.alloc_pages(2) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 0x100000), fit2);
+}
+
+test "alloc: span edges, max_span_pages bounds, and untracked tail bits" {
+    const full_span = [_]memmap.MemoryDescriptor{
+        .{ .type = .conventional_memory, .physical_start = 0x100000, .virtual_start = 0, .number_of_pages = max_span_pages, .attribute = 0 },
+    };
+    const view = memmap.MapView.init(std.mem.asBytes(&full_span), @sizeOf(memmap.MemoryDescriptor), full_span.len);
+    var st = State{};
+    try std.testing.expect(st.init(view, &.{}));
+
+    // Reserve 1 page: max_span_pages alloc must now fail.
+    try std.testing.expect(st.reserve(0x100000, 1));
+    try std.testing.expect(st.alloc_pages(max_span_pages) == null);
+
+    // Unreserve (free) the reserved page.
+    try std.testing.expect(st.free_pages(0x100000, 1));
+
+    // Now alloc max_span_pages succeeds (returns base 0x100000).
+    const all = st.alloc_pages(max_span_pages) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 0x100000), all);
+    try std.testing.expectEqual(@as(u64, 0), st.free_count);
+
+    // Tail bits past span_pages are never addressable:
+    const small_span = [_]memmap.MemoryDescriptor{
+        .{ .type = .conventional_memory, .physical_start = 0x100000, .virtual_start = 0, .number_of_pages = 10, .attribute = 0 },
+    };
+    const s_view = memmap.MapView.init(std.mem.asBytes(&small_span), @sizeOf(memmap.MemoryDescriptor), small_span.len);
+    var st_tail = State{};
+    try std.testing.expect(st_tail.init(s_view, &.{}));
+
+    // Allocating the last pooled page (index 9, address 0x109000) works.
+    const last = st_tail.alloc_pages(10) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 0x100000), last);
+
+    // Address past span (0x10a000 = index 10) is not allocatable or freeable.
+    try std.testing.expect(st_tail.alloc_pages(1) == null);
+    try std.testing.expect(!st_tail.free_pages(0x10a000, 1));
+}
+
+test "alloc: free-path guards (boundary cross, re-alloc double free, unaligned, zero)" {
+    var st = State{};
+    try std.testing.expect(st.init(make_view(), &.{}));
+
+    // free_pages(base, 0) returns false.
+    try std.testing.expect(!st.free_pages(0x100000, 0));
+
+    // free_pages on unaligned bases returns false.
+    try std.testing.expect(!st.free_pages(0x100001, 1));
+    try std.testing.expect(!st.free_pages(0x100800, 1));
+
+    // Double free after re-alloc:
+    const p1 = st.alloc_pages(1) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 0x100000), p1);
+    try std.testing.expect(st.free_pages(p1, 1));
+
+    // Re-alloc gets p1 again.
+    const p2 = st.alloc_pages(1) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 0x100000), p2);
+
+    // First free of p2 succeeds.
+    try std.testing.expect(st.free_pages(p2, 1));
+    const free_after_first = st.free_count;
+
+    // Second free of p2 (double free) is rejected and does not inflate free_count.
+    try std.testing.expect(!st.free_pages(p2, 1));
+    try std.testing.expectEqual(free_after_first, st.free_count);
+
+    // Free crossing region boundary:
+    // Region 1: conventional (4 pages at 0x100000), Region 2: loader_code (4 pages at 0x104000).
+    const multi_reg = [_]memmap.MemoryDescriptor{
+        .{ .type = .conventional_memory, .physical_start = 0x100000, .virtual_start = 0, .number_of_pages = 4, .attribute = 0 },
+        .{ .type = .loader_code, .physical_start = 0x104000, .virtual_start = 0, .number_of_pages = 4, .attribute = 0 },
+    };
+    const m_view = memmap.MapView.init(std.mem.asBytes(&multi_reg), @sizeOf(memmap.MemoryDescriptor), multi_reg.len);
+    var st_multi = State{};
+    try std.testing.expect(st_multi.init(m_view, &.{}));
+
+    // Alloc 8 pages spanning across the conventional + loader_code region boundary.
+    const cross_alloc = st_multi.alloc_pages(8) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 0x100000), cross_alloc);
+    try std.testing.expectEqual(@as(u64, 0), st_multi.free_count);
+
+    // Free with n crossing from Region 1 into Region 2.
+    try std.testing.expect(st_multi.free_pages(cross_alloc, 8));
+    try std.testing.expectEqual(@as(u64, 8), st_multi.free_count);
+}
+
+test "alloc: middle exclusion leaves both ends allocatable and protects excluded span" {
+    // Region: 10 pages at 0x100000 (0x100000..0x109fff).
+    const region = [_]memmap.MemoryDescriptor{
+        .{ .type = .conventional_memory, .physical_start = 0x100000, .virtual_start = 0, .number_of_pages = 10, .attribute = 0 },
+    };
+    const view = memmap.MapView.init(std.mem.asBytes(&region), @sizeOf(memmap.MemoryDescriptor), region.len);
+
+    // Exclusion in middle: 2 pages at 0x104000 (pages index 4 and 5).
+    const exclusions = [_]Exclusion{.{ .base = 0x104000, .pages = 2 }};
+
+    var st = State{};
+    try std.testing.expect(st.init(view, &exclusions));
+    try std.testing.expectEqual(@as(u64, 10), st.total_pages);
+    try std.testing.expectEqual(@as(u64, 2), st.excluded_pages);
+    try std.testing.expectEqual(@as(u64, 8), st.free_count);
+
+    // Head end (0x100000, 4 pages) is allocatable.
+    const head = st.alloc_pages(4) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 0x100000), head);
+
+    // Tail end (0x106000, 4 pages) is allocatable.
+    const tail = st.alloc_pages(4) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 0x106000), tail);
+
+    // Middle (excluded span 0x104000..0x105fff) is never allocated.
+    try std.testing.expect(st.alloc_pages(1) == null);
+
+    // Alloc/free around exclusion does not disturb protected bits or stats.
+    try std.testing.expect(st.free_pages(head, 4));
+    try std.testing.expect(st.free_pages(tail, 4));
+
+    try std.testing.expectEqual(@as(u64, 8), st.free_count);
+    try std.testing.expectEqual(@as(u64, 2), st.excluded_pages);
+
+    // Confirm excluded span was not freed by freeing adjacent spans.
+    const new_head = st.alloc_pages(4) orelse return error.TestUnexpectedResult;
+    const new_tail = st.alloc_pages(4) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 0x100000), new_head);
+    try std.testing.expectEqual(@as(u64, 0x106000), new_tail);
+    try std.testing.expect(st.alloc_pages(1) == null);
+}
+
+test "alloc: reset isolation and uninited state contract" {
+    // Uninited state: unarmed, alloc returns null, free returns false.
+    var raw = State{};
+    try std.testing.expect(!raw.armed);
+    try std.testing.expect(raw.alloc_pages(1) == null);
+    try std.testing.expect(!raw.free_pages(0x100000, 1));
+    try std.testing.expect(!raw.reserve(0x100000, 1));
+    try std.testing.expectEqual(@as(u64, 0), raw.largest_free_run());
+    try std.testing.expect(!raw.stats().armed);
+
+    // Two init calls back to back:
+    const map1_desc = [_]memmap.MemoryDescriptor{
+        .{ .type = .conventional_memory, .physical_start = 0x100000, .virtual_start = 0, .number_of_pages = 20, .attribute = 0 },
+    };
+    const view1 = memmap.MapView.init(std.mem.asBytes(&map1_desc), @sizeOf(memmap.MemoryDescriptor), map1_desc.len);
+    const ex1 = [_]Exclusion{.{ .base = 0x100000, .pages = 4 }};
+
+    var st = State{};
+    try std.testing.expect(st.init(view1, &ex1));
+    const alloc1 = st.alloc_pages(5) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 0x104000), alloc1);
+    try std.testing.expect(st.reserve(0x10a000, 2));
+
+    // Immediately re-init with map2: 4 pages at 0x500000, no exclusions.
+    const map2_desc = [_]memmap.MemoryDescriptor{
+        .{ .type = .conventional_memory, .physical_start = 0x500000, .virtual_start = 0, .number_of_pages = 4, .attribute = 0 },
+    };
+    const view2 = memmap.MapView.init(std.mem.asBytes(&map2_desc), @sizeOf(memmap.MemoryDescriptor), map2_desc.len);
+
+    try std.testing.expect(st.init(view2, &.{}));
+
+    const s = st.stats();
+    try std.testing.expect(s.armed);
+    try std.testing.expectEqual(@as(u64, 4), s.total_pages);
+    try std.testing.expectEqual(@as(u64, 4), s.free_pages);
+    try std.testing.expectEqual(@as(u64, 0), s.excluded_pages);
+    try std.testing.expectEqual(@as(usize, 1), s.region_count);
+
+    // Alloc lands in map2 space.
+    const alloc2 = st.alloc_pages(4) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 0x500000), alloc2);
+
+    // Old address from map1 is rejected by free.
+    try std.testing.expect(!st.free_pages(0x104000, 5));
+}
