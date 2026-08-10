@@ -78,3 +78,52 @@
   README command count + new modules + entropy-gate bullet; gate inventory
   `live-entropy` row + record + verify-vz; indexes refreshed;
   `verify-coordination.sh` green.
+
+## Claim 3693 — extend ASLR to the boot-time static EL0 payload
+
+- **Claimed** (2026-08-10): follow-on card — rebuild the user root
+  post-seed with a randomized stack VA so the BOOT-time static EL0 payload
+  (not just exec'd programs) gets per-boot stack ASLR. Claim file
+  `docs/claims/3693-m4-aslr-boot-stack.md`; same branch, PR #69 absorbs it.
+
+- **Survey** (2026-08-10): confirmed the seams — `register_user` derives
+  sp_el0 + the timer-preemption witness via `userspace.bss_user_va`
+  (the one place the boot stack base is consumed); `uaccess.diag` reads
+  the registered TEXT region (re-setting regions post-rebuild is hygiene
+  for sys_write, not required by the diag); the table carve-out is 1 MiB
+  (256 tables) so one extra post-seed clone at boot is trivially safe;
+  the `.userbss` witness/stack offsets are base-relative, so changing only
+  the base preserves every relationship. The `live-addrspaces` gate's
+  exact-stack-VA assertion (`stack=0x0000000080000000`) is the one gate
+  that must change.
+
+- **Implemented** (2026-08-10): `userspace.bss_user_va` now uses
+  `current_stack_va` (the randomized base) instead of the const
+  `stack_va`; main.zig, right after the claim-2665 seed, rebuilds the user
+  root with `csprng.random_stack_va()` when the CSPRNG is genuinely seeded
+  (`mmu.build_user_root` with the static text pages + `scheduler
+  .user_stack_phys()` + `clean_table_storage`, then re-arm
+  `syscall.set_user_regions`), printing `aslr: boot user stack=0x…`; an
+  unseeded (fallback) boot skips the rebuild and keeps the fixed stack.
+  `tools/verify-live-addrspaces.sh` updated: text VA stays fixed, the
+  stack VA is extracted and validated in-band/aligned/≠ text instead of an
+  exact match. `tools/verify-live-entropy.sh` extended: per-boot capture of
+  the `aslr:` boot stack VA, asserted to differ across the two boots.
+
+- **Verification** (2026-08-10): class A green (fmt, unit tests, transcript
+  byte-identical, build/image/inspect, swift build, context, coordination,
+  mmu-debt). Class B on VZ: updated live-addrspaces 1/1 (randomized stack
+  in band), extended live-entropy 2/2 (different boot stack VAs + random
+  hex), and boot-payload regressions 1/1: userspace, svc, uaccess, exec,
+  sleep, lifecycle.
+
+- **Docs reconciled** (2026-08-10): claim 3693 + this log; march-m4 row 1
+  note extended (boot-time ASLR); status milestone-four row; indexes
+  refreshed; `verify-coordination.sh` green.
+
+- **Closed** (2026-08-10): claim 3693 flipped ✅. Note: PR #69 (claim
+  2665) had already been merged into `main` before this follow-on landed,
+  so the claim-3693 commit is carried on the same branch and opened as a
+  fresh follow-on PR (only the new commit, since `main` already contains
+  `f905ac4`). Full class A rerun green; live gates + boot-payload
+  regressions all green (see Verification above).

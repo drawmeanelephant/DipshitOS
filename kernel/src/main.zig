@@ -587,6 +587,51 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
         csprng.seed_fallback();
         uart_puts("entropy: seed failed n=0 (deterministic fallback)\n");
     }
+    // Claim 3693 (milestone-four follow-on): ASLR for the BOOT-time static
+    // EL0 payload too. The pre-install user root (built inside
+    // build_identity_map) maps the stack at the fixed userspace.stack_va;
+    // now that the CSPRNG is seeded with REAL entropy, rebuild the root
+    // with a randomized stack placement so the static payload — not just
+    // exec'd programs (claim 2665) — runs with per-boot stack ASLR.
+    // Rebuilding POST-install is proven safe by the exec path (claim 6783:
+    // the kernel stays identity-mapped, so @intFromPtr is still physical).
+    // The .userbss witness/stack offsets are base-relative, so only the
+    // base changes; scheduler.register_user picks the new base up through
+    // userspace.bss_user_va. An unseeded (fallback) boot skips the rebuild
+    // and keeps the fixed stack — behavior unchanged there.
+    if (csprng.seeded()) {
+        const aslr_stack_va = csprng.random_stack_va();
+        userspace.set_stack_va(aslr_stack_va);
+        // stack_len is the FULL .userbss section length (the timer-
+        // preemption witness sits just past the 8 KiB stack), exactly what
+        // build_identity_map's initial root maps — the witness VA is
+        // base-relative, so the rebuild must cover the same section.
+        if (mmu.build_user_root(
+            userspace.text_va,
+            user_text.base,
+            user_text.len,
+            aslr_stack_va,
+            scheduler.user_stack_phys(),
+            user_stack.len,
+        )) {
+            // The fresh clone tables are dirty in the D-cache; clean the
+            // whole carve-out before the scheduler's first TTBR0 switch
+            // (the walker must see the real tables), exactly like exec.
+            mmu.clean_table_storage();
+            mmu.clean_dcache_range(user_text.base, user_text.len);
+            // The user stack aperture moved: re-arm the syscall/uaccess
+            // regions so sys_write bounds follow the randomized base.
+            syscall.set_user_regions(userspace.text_va_region(), userspace.stack_va_region());
+            uart_puts("aslr: boot user stack=");
+            uart_hex(aslr_stack_va);
+            uart_puts("\n");
+        } else {
+            // Honest fallback: keep the fixed stack (the initial root still
+            // maps it) and report the failed rebuild.
+            userspace.set_stack_va(userspace.stack_va);
+            uart_puts("aslr: boot user root rebuild failed (fixed stack)\n");
+        }
+    }
     const console_name = layout_name(console_kind);
     var mon = monitor.Monitor.init(
         m15.to_console(),
