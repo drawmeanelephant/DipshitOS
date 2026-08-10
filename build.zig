@@ -313,17 +313,36 @@ const spike_virtio_vm_command =
     \\swift build --package-path host/vm-runner --configuration release -Xswiftc -DSPIKE
     \\# Recent macOS requires the com.apple.security.virtualization entitlement;
     \\# ad-hoc codesign the binary with it before running.
+    \\# Claims 0828/4374/9492/9737/4837: the guest's custom-virtio driver
+    \\# (DID 0x1082) probes, negotiates features, arms both queues, runs the
+    \\# transport experiment (concurrent in-flight exchanges + ring recycling,
+    \\# the 12,340-byte multi-descriptor payload, the queue-1 log transport,
+    \\# the negotiated kick/layout behavior), and reports the used-ring IRQ as
+    \\# the "cvspike:" block in the serial log. Script mode forwards `pci` + an
+    \\# echo once the terminal state appears and exits 0 iff the scripted echo
+    \\# is observed. The host-side CUSTOM-VIRTIO lines (DRIVER_OK,
+    \\# notifications, dequeued payloads, log lines, returnToQueue) print to
+    \\# stdout.
     \\codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
-    \\# macOS 27 spike: same evidence path as `run` but with the custom virtio
-    \\# device attached (DID 0x1082). The host-side CUSTOM-VIRTIO logs (device
-    \\# created / DRIVER_OK / queue notifications) print to stdout; the serial
-    \\# gate asserts the kernel still reaches terminal state with the device
-    \\# present.
-    \\host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-spike.log --custom-virtio --expect "DipshitOS kernel has seized control." --terminal-marker "kernel terminal state"
-    \\echo
-    \\echo "=== spike serial log ==="
-    \\cat artifacts/vm-spike.log 2>/dev/null || echo "(no serial output)"
-    \\echo "spike-virtio: boot with the custom virtio device attached (host evidence above; guest PCI discovery evidence needs a kernel-side dump)"
+    \\echo 'pci' > artifacts/cvspike-script.txt
+    \\echo 'echo cvspike-shell-ok' >> artifacts/cvspike-script.txt
+    \\# --script-expect waits for the scripted echo output (which appears
+    \\# only after the script is forwarded) — expecting the cvspike IRQ line
+    \\# would exit the runner before pci/echo are sent (claim 0828).
+    \\host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-spike.log --custom-virtio --script artifacts/cvspike-script.txt --script-expect "cvspike-shell-ok" --timeout 60
+    \\    echo
+    \\    echo "=== spike serial log ==="
+    \\    cat artifacts/vm-spike.log 2>/dev/null || echo "(no serial output)"
+    \\    echo
+    \\    echo "=== spike guest evidence (vm-spike.log) ==="
+    \\    grep -F -- "cvspike: irq=" artifacts/vm-spike.log || { echo "cvspike IRQ report missing from vm-spike.log"; exit 1; }
+    \\    grep -F -- 'cvspike: init ok' artifacts/vm-spike.log || { echo "cvspike init did not arm the transport"; exit 1; }
+    \\    grep -F -- 'cvspike: feat=0x' artifacts/vm-spike.log || { echo "cvspike feature report missing from vm-spike.log"; exit 1; }
+    \\    grep -F -- 'cvspike: q0 heads=0x0000000000000000,0x0000000000000002,0x0000000000000004,0x0000000000000006 recycle=1' artifacts/vm-spike.log || { echo "cvspike ring-allocator recycle proof missing from vm-spike.log"; exit 1; }
+    \\    grep -F -- 'cvspike: q0 big n=0x3034 echo=ok' artifacts/vm-spike.log || { echo "cvspike multi-descriptor payload echo missing from vm-spike.log"; exit 1; }
+    \\    grep -F -- 'cvspike: q0 ok=1' artifacts/vm-spike.log || { echo "cvspike queue-0 exchanges did not all pass (q0 ok=1 missing from vm-spike.log)"; exit 1; }
+    \\    grep -F -- 'cvspike: q1 ok=3' artifacts/vm-spike.log || { echo "cvspike log transport did not echo all lines (q1 ok=3 missing from vm-spike.log)"; exit 1; }
+    \\    echo "spike-virtio: custom-virtio transport observed (queue transport + used-ring IRQ, ring allocator + multi-queue, multi-descriptor payloads, feature negotiation, guest log transport — host evidence in the runner stdout above)"
 ;
 
 // M1.5 host plumbing: `zig build console` boots the image and opens an

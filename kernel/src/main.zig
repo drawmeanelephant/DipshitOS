@@ -41,6 +41,7 @@ const walkprobe = @import("walkprobe.zig"); // claim 7896 diagnostic (linker-eli
 const exceptions = @import("exceptions.zig"); // claim 9746: VBAR_EL1 vector table + basic sync/IRQ handlers
 const gic = @import("gic.zig"); // claim 7948: GIC distributor + CPU interface
 const timer = @import("timer.zig"); // claim 7948: ARM generic timer (CNTP)
+const virtio_custom = @import("virtio_custom.zig"); // claim 0828: custom-virtio spike driver (DID 0x1082)
 const HandoffV2 = handoff.HandoffV2;
 
 // Claim 0020 phase selectors live with the transport (the exact-one-phase
@@ -247,6 +248,13 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
     // (claim 1517's transport reliability applies).
     const blk_ready = virtio_blk.virtio_blk_init();
 
+    // Claim 0828: the custom-virtio spike device (DID 0x1082) — PRE-EXIT
+    // discovery only (config-space reads, the claim-0013 discipline). VZ's
+    // firmware BAR assignment moves between boots (0x50001000 in the claim-
+    // 5844 run; ABOVE the 4 GiB blanket on a later boot), so the transport
+    // BAR is handed to the identity map below like the console/blk windows.
+    const cv_probed = virtio_custom.probe();
+
     // Claim 6420: the ESP file window. The FAT32 volume on the ESP is
     // mounted through the virtio-blk transport and the root directory
     // snapshotted into the window (names/sizes/content for small files) —
@@ -301,7 +309,7 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
     // (discovered pre-exit) are handed to mmu.build_identity_map as the
     // extra Device windows above the blanket; mmu.zig stays
     // transport-agnostic.
-    var extra_windows: [2]mmu.DeviceWindow = undefined;
+    var extra_windows: [3]mmu.DeviceWindow = undefined;
     var extra_count: usize = 0;
     if (virtio_console.vp_ready and virtio_console.vp_bar0 != 0) {
         extra_windows[extra_count] = .{ .base = virtio_console.vp_bar0, .len = 0x10000 };
@@ -309,6 +317,13 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
     }
     if (virtio_blk.blk_ready and virtio_blk.blk_bar0 != 0) {
         extra_windows[extra_count] = .{ .base = virtio_blk.blk_bar0, .len = 0x10000 };
+        extra_count += 1;
+    }
+    // Claim 0828: the custom-virtio transport BAR (pre-exit resolved).
+    // mmu.zig maps windows above the blanket; below it the 4 GiB blanket
+    // already covers the BAR, so the entry is a harmless no-op there.
+    if (cv_probed and virtio_custom.cv_bar != 0) {
+        extra_windows[extra_count] = virtio_custom.device_window();
         extra_count += 1;
     }
     if (!mmu.build_identity_map(map_after_exit, map_buffer.buffer, base, size, handoff_rec, extra_windows[0..extra_count])) {
@@ -472,6 +487,19 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
     if (virtio_blk.blk_common != 0) _ = virtio_blk.blk_rearm();
 
     uart_puts("kernel terminal state\n");
+
+    // macOS 27 custom-virtio spike (claim 0828): the smallest guest driver
+    // for the spike device (`zig build spike-virtio`, DID 0x1082, claim
+    // 5844). Probing, negotiation, DRIVER_OK, the queue-0 kick, and the
+    // used-ring IRQ experiment all run POST-exit — post-MMU ECAM reads
+    // work (claims 1517/6684) and the device's BAR2 window (0x50001000)
+    // sits below the 4 GiB blanket. Silent no-op when the device is absent
+    // (default builds are unchanged). Evidence: host runner stdout
+    // (DRIVER_OK / notification / dequeued payload / returnToQueue) + this
+    // serial report. The SPI window is disarmed after the report so the
+    // shell runs without interrupt noise; the claim-9187 timer PPI stays
+    // armed and the polled console paths are untouched.
+    custom_virtio_spike();
 
     // ------------------------------------------------------------------
     // M1.5 console & shell core seam (agent B). The takeover path above
@@ -720,6 +748,18 @@ fn uart_hex(value: u64) void {
     }
 }
 
+/// Two lowercase hex digits for one byte (no "0x", no separator) — the
+/// claim-0828 reply readback prints each byte this way so arbitrary reply
+/// contents (including non-printables) are represented faithfully.
+fn uart_hex8(value: u8) void {
+    uart_putc(hex_digit(value >> 4));
+    uart_putc(hex_digit(value & 0xf));
+}
+
+fn hex_digit(v: u8) u8 {
+    return if (v < 10) '0' + v else 'a' + v - 10;
+}
+
 fn layout_name(kind: Kind) []const u8 {
     return switch (kind) {
         .pl011 => "PL011\n",
@@ -733,6 +773,322 @@ fn halt_forever() noreturn {
     while (true) asm volatile ("wfe");
 }
 
+/// Walk the installed TTBR0 tables for `va` (4 K pages, L0-rooted) and
+/// print the descriptor chain — diagnostic for the claim-0828 BAR window.
+fn walk_print(tag: []const u8, va: u64) void {
+    var ttbr0: u64 = undefined;
+    asm volatile ("mrs %[v], ttbr0_el1"
+        : [v] "=r" (ttbr0),
+    );
+    var addr = ttbr0 & ~@as(u64, 0xfff);
+    var level: u8 = 0;
+    var desc: u64 = 0;
+    var ok = true;
+    while (level <= 3) {
+        const shift: u6 = switch (level) {
+            0 => 39,
+            1 => 30,
+            2 => 21,
+            else => 12,
+        };
+        const index = (va >> shift) & 0x1ff;
+        desc = @as(*const volatile u64, @ptrFromInt(addr + index * 8)).*;
+        if ((desc & 3) == 0) {
+            ok = false;
+            break;
+        }
+        if ((desc & 3) == 1 or level == 3) break; // block or page
+        addr = desc & ~@as(u64, 0xfff);
+        level += 1;
+    }
+    uart_puts("cvspike: walk ");
+    uart_puts(tag);
+    uart_puts(" va=");
+    uart_hex(va);
+    uart_puts(" l");
+    uart_puts(&.{'0' + level});
+    uart_puts("=");
+    uart_hex(desc);
+    uart_puts(" ");
+    uart_puts(if (ok) "ok" else "INVALID");
+    uart_puts("\n");
+}
+
+// ---------------------------------------------------------------------------
+// Claims 0828/4374/9492/9737/4837: custom-virtio transport experiment
+// ---------------------------------------------------------------------------
+
+/// SPI window armed for the spike device's used-ring notification (INTID
+/// unknown in advance — 32..191 covers VZ's virtio SPIs; the report names
+/// whatever actually fires).
+const cv_spi_first: u32 = 32;
+const cv_spi_count: u32 = 160;
+/// Bounded wait budget per exchange: kick -> host notification -> dequeue
+/// -> reply write -> returnToQueue -> used ring + SPI assert -> vector,
+/// all sub-millisecond on the host.
+const cv_wait_budget: usize = 16_000_000;
+/// The small-exchange reply buffer (the write descriptor; the host echoes
+/// the 16-byte payload back into it — claims 0828/4374).
+var cv_reply_buf: [virtio_custom.reply_cap]u8 align(16) = undefined;
+/// The claim-9492 big payload + reply buffers: 12,340 bytes across three
+/// device-read descriptors; the host reassembles the spans and echoes the
+/// full payload back, which this guest verifies byte-for-byte.
+var cv_big_payload: [virtio_custom.big_payload_len]u8 align(16) = undefined;
+var cv_big_reply: [virtio_custom.big_payload_len]u8 align(16) = undefined;
+/// Guest log lines sent over queue 1 (claim 4837). Stored as raw BYTE
+/// arrays (no slice pointers): the kernel is a flat image loaded at a
+/// runtime-chosen base, so any .rodata table of baked slice pointers (as
+/// an array of string literals would be) holds unrelocated image-relative
+/// addresses and faults when dereferenced (observed: q1 data abort at the
+/// "cvlog-1" string address). Raw [N:0]u8 arrays contain only bytes —
+/// every reference goes through a runtime-computed PC-relative address.
+const cv_log_lines = [_][7:0]u8{ "cvlog-1".*, "cvlog-2".*, "cvlog-3".* };
+
+/// Drive the spike device: init (probe + negotiate + DRIVER_OK + both
+/// queues armed), arm the SPI window, then run the transport experiment:
+/// (1) claim 4374 — two batches of four CONCURRENT in-flight exchanges on
+/// queue 0 with descriptor recycling (the second batch must reallocate the
+/// same head indices); (2) claim 9492 — a 12,340-byte payload across
+/// three read descriptors with host reassembly + full byte-for-byte reply
+/// verification; (3) claim 4837 — guest log lines over queue 1 with host
+/// echo; (4) claim 9737's feature report (what VZ offers, what was
+/// accepted, the negotiated kick width) with the negotiated
+/// notification/layout behavior exercised. Then report the accumulated
+/// used-ring IRQ observation and disarm the window.
+fn custom_virtio_spike() void {
+    // Cap decode FIRST, one short line per cap (a line longer than the
+    // 128-byte TX buffer flushes mid-line and the follow-up flush can drop
+    // on a still-full ring, claim 0016).
+    for (virtio_custom.cv_caps[0..virtio_custom.cv_cap_count]) |cap| {
+        uart_puts("cvspike: cap @");
+        uart_hex(cap.base);
+        uart_puts(" head=");
+        uart_hex(cap.head);
+        uart_puts(" t=");
+        uart_hex(cap.cfg_type);
+        uart_puts(" bar=");
+        uart_hex(cap.bar);
+        uart_puts(" off=");
+        uart_hex(cap.off);
+        uart_puts("\n");
+    }
+    uart_puts("cvspike: probe dev=");
+    uart_hex(virtio_custom.cv_dev);
+    uart_puts(" common=");
+    uart_hex(virtio_custom.cv_common);
+    uart_puts(" notify=");
+    uart_hex(virtio_custom.cv_notify);
+    uart_puts(" bar=");
+    uart_hex(virtio_custom.cv_bar);
+    uart_puts(" b0=");
+    uart_hex(virtio_custom.cv_bars[0]);
+    uart_puts(" b2=");
+    uart_hex(virtio_custom.cv_bars[2]);
+    uart_puts(" cp=");
+    uart_hex(virtio_custom.cv_cap_ptr);
+    uart_puts(" nc=");
+    uart_hex(virtio_custom.cv_cap_count);
+    uart_puts("\n");
+    // Verify the identity map actually resolves the transport BARs (the
+    // console's 0x100010000 vs the custom's 0x100020000): walk TTBR0.
+    walk_print("console-bar", virtio_console.vp_common & ~@as(u64, 0xfff));
+    walk_print("cv-bar", virtio_custom.cv_common & ~@as(u64, 0xfff));
+    if (!virtio_custom.init()) {
+        uart_puts("cvspike: init failed (transport not armed)\n");
+        return;
+    }
+    uart_puts("cvspike: init ok\n");
+    gic.arm_spi_window(cv_spi_first, cv_spi_count);
+    virtio_custom.reset_irq_observation();
+
+    uart_puts("cvspike: dev=");
+    uart_hex(virtio_custom.cv_dev);
+    uart_puts(" did=0x1082 common=");
+    uart_hex(virtio_custom.cv_common);
+    uart_puts(" notify=");
+    uart_hex(virtio_custom.cv_notify);
+    uart_puts(" qoff=");
+    uart_hex(virtio_custom.cv_rings[0].notify_off);
+    uart_puts(" qoff1=");
+    uart_hex(virtio_custom.cv_rings[1].notify_off);
+    uart_puts(" ready=1\n");
+
+    // Claim 9737: the feature report — what VZ offers (64-bit device
+    // features), what the driver accepted, and the kick format the
+    // negotiation produced (honest either way).
+    uart_puts("cvspike: feat="); // uart_hex emits the 0x prefix itself
+    uart_hex(virtio_custom.device_features);
+    uart_puts(" acc=");
+    uart_hex(virtio_custom.guest_features);
+    uart_puts(" nd=");
+    uart_puts(if (virtio_custom.has_notification_data) "1" else "0");
+    uart_puts(" al=");
+    uart_puts(if (virtio_custom.has_any_layout) "1" else "0");
+    uart_puts(" notify=");
+    uart_puts(if (virtio_custom.has_notification_data) "32bit" else "16bit");
+    uart_puts("\n");
+
+    virtio_custom.init_payload(); // BSS copy — .rodata pointers are image-relative
+    uart_puts("cvspike: payload=\"");
+    uart_puts(virtio_custom.payload[0..virtio_custom.payload_len]);
+    uart_puts("\" len=");
+    uart_hex(virtio_custom.payload_len);
+    uart_puts("\n");
+
+    // ---- Claim 4374: concurrent in-flight exchanges + recycling --------
+    // Batch 1: four elements submitted back-to-back WITHOUT waiting — the
+    // ring allocator hands out four 2-descriptor chains (heads 0,2,4,6 on
+    // the reversed-LIFO free list; low indices, the claim-0828-proven
+    // pattern). The host drains them per notification and echoes each
+    // payload. Batch 2 runs after batch 1 is freed and MUST reallocate the
+    // exact same head indices (the recycle proof).
+    var ok_q0 = true;
+    var batch1: [4]u16 = undefined;
+    var batch2: [4]u16 = undefined;
+    // Scatter via the BSS staging array (an anonymous `&.{...}` slice
+    // array folds into .rodata with baked image-relative pointers).
+    virtio_custom.cv_scatter[0] = virtio_custom.payload[0..virtio_custom.payload_len];
+    for (0..4) |i| {
+        const h = virtio_custom.submit_ex(0, virtio_custom.cv_scatter[0..1], cv_reply_buf[0..virtio_custom.payload_len], false) orelse {
+            ok_q0 = false;
+            break;
+        };
+        batch1[i] = h;
+    }
+    for (0..4) |i| {
+        const n = virtio_custom.wait(0, batch1[i], cv_wait_budget, cv_reply_buf[0..virtio_custom.payload_len]) orelse {
+            ok_q0 = false;
+            continue;
+        };
+        const echo_ok = @as(usize, n) == virtio_custom.payload_len and std.mem.eql(u8, cv_reply_buf[0..virtio_custom.payload_len], virtio_custom.payload[0..virtio_custom.payload_len]);
+        if (!echo_ok) ok_q0 = false;
+        uart_puts("cvspike: q0 xchg=");
+        uart_putc('0' + @as(u8, @intCast(i + 1)));
+        uart_puts(" n=0x10 echo=");
+        uart_puts(if (echo_ok) "ok" else "bad");
+        uart_puts("\n");
+    }
+    // Free in REVERSE order: the LIFO free list returns the last-freed
+    // chain's head first, so reversing the frees makes batch 2's heads
+    // come back in the same order as batch 1's (the recycle comparison).
+    var fi: usize = 4;
+    while (fi > 0) {
+        fi -= 1;
+        virtio_custom.free_chain_q(0, batch1[fi]);
+    }
+    for (0..4) |i| {
+        const h = virtio_custom.submit_ex(0, virtio_custom.cv_scatter[0..1], cv_reply_buf[0..virtio_custom.payload_len], false) orelse {
+            ok_q0 = false;
+            break;
+        };
+        batch2[i] = h;
+    }
+    var recycle = true;
+    for (0..4) |i| {
+        const n = virtio_custom.wait(0, batch2[i], cv_wait_budget, cv_reply_buf[0..virtio_custom.payload_len]) orelse {
+            ok_q0 = false;
+            recycle = false;
+            continue;
+        };
+        if (!(@as(usize, n) == virtio_custom.payload_len and std.mem.eql(u8, cv_reply_buf[0..virtio_custom.payload_len], virtio_custom.payload[0..virtio_custom.payload_len]))) ok_q0 = false;
+        if (batch2[i] != batch1[i]) recycle = false;
+    }
+    for (batch2) |h| virtio_custom.free_chain_q(0, h);
+    uart_puts("cvspike: q0 heads=");
+    uart_hex(batch1[0]);
+    uart_puts(",");
+    uart_hex(batch1[1]);
+    uart_puts(",");
+    uart_hex(batch1[2]);
+    uart_puts(",");
+    uart_hex(batch1[3]);
+    uart_puts(" recycle=");
+    uart_puts(if (recycle) "1" else "0");
+    uart_puts("\n");
+
+    // ---- Claim 9492: multi-descriptor >4 KiB payload --------------------
+    // 12,340 bytes (0x3034) of a deterministic non-printable pattern across
+    // three device-read descriptors (4 KiB + 4 KiB + 4148 B) + one
+    // device-write reply descriptor of the same size. With ANY_LAYOUT
+    // negotiated (claim 9737) the reply descriptor is posted FIRST in the
+    // chain (any layout, Virtio 1.3 §2.7.6); otherwise classic order. The
+    // host reassembles the three read spans and echoes the full payload;
+    // this guest compares it byte-for-byte.
+    for (&cv_big_payload, 0..) |*b, i| b.* = @truncate((i % 251) + 1);
+    // Build the 3-part scatter in BSS (anonymous slice arrays are
+    // .rodata-folded with baked pointers — see cv_scatter).
+    virtio_custom.cv_scatter[0] = cv_big_payload[0..4096];
+    virtio_custom.cv_scatter[1] = cv_big_payload[4096..8192];
+    virtio_custom.cv_scatter[2] = cv_big_payload[8192..virtio_custom.big_payload_len];
+    var big_ok = false;
+    if (virtio_custom.submit_ex(0, virtio_custom.cv_scatter[0..3], cv_big_reply[0..], virtio_custom.has_any_layout)) |big_head| {
+        if (virtio_custom.wait(0, big_head, cv_wait_budget, cv_big_reply[0..])) |n| {
+            big_ok = @as(usize, n) == virtio_custom.big_payload_len and std.mem.eql(u8, cv_big_reply[0..], cv_big_payload[0..]);
+        } else {
+            ok_q0 = false;
+        }
+        virtio_custom.free_chain_q(0, big_head);
+    } else {
+        ok_q0 = false;
+    }
+    if (!big_ok) ok_q0 = false;
+    uart_puts("cvspike: q0 big n=0x3034 echo=");
+    uart_puts(if (big_ok) "ok" else "bad");
+    uart_puts("\n");
+    uart_puts("cvspike: q0 ok=");
+    uart_puts(if (ok_q0) "1" else "0");
+    uart_puts("\n");
+
+    // ---- Claim 4837: guest log transport over queue 1 -------------------
+    // Each line rides one queue-1 element; the host prints it verbatim to
+    // its stdout and replies ACK:<len>, which cvlog_puts verifies. The
+    // transport is polled (no IRQ dependency), so it is robust against
+    // VZ's per-burst used-buffer IRQ coalescing (claim 0828).
+    var log_count: usize = 0;
+    for (cv_log_lines) |line| {
+        // `line` is a stack copy of the raw bytes; its slice is valid for
+        // the synchronous cvlog_puts call (which copies it into BSS).
+        if (!virtio_custom.cvlog_puts(line[0..])) continue;
+        log_count += 1;
+        uart_puts("cvspike: q1 log=\"");
+        uart_puts(virtio_custom.cv_log_line[0..virtio_custom.cv_log_line_len]);
+        uart_puts("\" ack=\"");
+        uart_puts(virtio_custom.cv_log_ack_buf[0..virtio_custom.cv_log_ack_len]);
+        uart_puts("\" n=");
+        uart_hex(virtio_custom.used_len);
+        uart_puts("\n");
+    }
+    uart_puts("cvspike: q1 ok=");
+    uart_putc('0' + @as(u8, @intCast(log_count)));
+    uart_puts("\n");
+
+    // The used-ring advances are observed by poll (fast); the device IRQs
+    // travel through the GIC + vector and can trail them. Give the
+    // notifications a bounded window to assert, so the report names how
+    // many IRQs the whole experiment actually delivered (VZ coalesces per
+    // burst — claim 0828 — so expect a small count, honest either way).
+    var drain: usize = 0;
+    while (drain < cv_wait_budget and virtio_custom.irq_count < 1) : (drain += 1) {}
+
+    uart_puts("cvspike: irq=");
+    uart_hex(virtio_custom.irq_count);
+    if (virtio_custom.irq_count > 0) {
+        uart_puts(" first="); // uart_hex emits the 0x prefix itself
+        uart_hex(virtio_custom.irq_first);
+        uart_puts(" spi=");
+        uart_hex(virtio_custom.irq_first);
+    } else {
+        uart_puts(" first=none");
+    }
+    uart_puts(" armed=");
+    uart_hex(cv_spi_first);
+    uart_puts("..");
+    uart_hex(cv_spi_first + cv_spi_count - 1);
+    uart_puts("\n");
+
+    gic.disarm_spi_window(cv_spi_first, cv_spi_count);
+}
+
 /// Console writer for the claim-9746 exception report. Wraps the polled
 /// uart; a no-op until the console is probed (console_kind == .none).
 fn exception_report_writer(text: []const u8) void {
@@ -743,12 +1099,19 @@ fn exception_report_writer(text: []const u8) void {
 /// ack from the GIC, handle the timer tick if the INTID is the timer's
 /// PPI, then EOI. Runs in IRQ context with a register frame on the stack —
 /// NO console access (the heartbeat prints from the shell idle loop, where
-/// a print cannot re-enter the polled virtio TX path mid-flush).
+/// a print cannot re-enter the polled virtio TX path mid-flush). Claim
+/// 0828: every non-timer INTID is recorded into the custom-virtio spike's
+/// observation window (an increment + first-INTID store, console-free); in
+/// default builds no SPI is armed so the branch never fires.
 fn irq_dispatch() void {
     const intid = gic.ack();
     if (gic.is_spurious(intid)) return;
     gic.note_irq(intid);
-    if (timer.is_ppi(intid)) timer.handle();
+    if (timer.is_ppi(intid)) {
+        timer.handle();
+    } else {
+        virtio_custom.note_irq(intid);
+    }
     gic.eoi(intid);
 }
 

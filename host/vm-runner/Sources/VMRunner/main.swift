@@ -8,10 +8,11 @@
 // * --custom-virtio (macOS 27 spike, audit step 3): attaches one
 //   default-off VZCustomVirtioDeviceConfiguration so the guest's PCI
 //   discovery can observe it on a real VZ boot (VID 0x1af4, DID 0x1082,
-//   class 0x00/0x00, 1 queue). Without the flag the VM configuration is
+//   class 0x00/0x00, 2 queues). Without the flag the VM configuration is
 //   byte-identical to before — all existing gates are unchanged. NOTE:
-//   Xcode 27 beta 4 exposes no host-triggered guest-interrupt API; this
-//   spike proves discovery + queue transport only.
+//   Xcode 27 beta 4 exposes no host-triggered guest-interrupt API; the
+//   spike proves discovery + queue transport (audit step 4) and the
+//   used-ring IRQ via returnToQueue (audit step 5, claim 0828).
 //
 // * --nvram-console <file> (M1.5 VZ serial-gate successor, claim 0015):
 //   before exiting, reconstruct the kernel's post-exit console stream from
@@ -955,7 +956,9 @@ enum CustomVirtioSpike {
     static let deviceID: UInt16 = 0x42
     static let pciClass: UInt8 = 0x00
     static let pciSubclass: UInt8 = 0x00
-    static let queueCount: UInt16 = 1
+    // Two queues (claims 4374/4837): queue 0 = the exchange/transport
+    // queue, queue 1 = the guest log transport.
+    static let queueCount: UInt16 = 2
 
     // The provider holds the configuration delegate *weakly* and the created
     // VZCustomVirtioDevice holds the device delegate *weakly* too, so both
@@ -999,6 +1002,14 @@ final class CustomVirtioSpikeConfigDelegate: NSObject, VZCustomVirtioDeviceConfi
 
 /// Device lifecycle + guest-driver evidence. Every method here is optional in
 /// the protocol; only the ones the spike needs are implemented.
+///
+/// Audit step 4/5 (claim 0828): on a queue notification the delegate
+/// dequeues every available element (the guest's known-payload descriptor),
+/// logs the exact bytes, and returns the element via `returnToQueue` — the
+/// framework then advances the used ring AND asserts the device's
+/// interrupt (the framework-internal used-buffer notification, the only
+/// host→guest signaling the macOS 27 SDK exposes). The callback runs on the
+/// provider's deviceQueue (serial), so element access is single-threaded.
 @available(macOS 27.0, *)
 final class CustomVirtioSpikeDeviceDelegate: NSObject, VZCustomVirtioDeviceDelegate {
     func customVirtioDeviceDidAcceptDriverOk(_ device: VZCustomVirtioDevice) {
@@ -1007,6 +1018,79 @@ final class CustomVirtioSpikeDeviceDelegate: NSObject, VZCustomVirtioDeviceDeleg
 
     func customVirtioDevice(_ device: VZCustomVirtioDevice, didReceiveNotificationFor queue: VZVirtioQueue) {
         print("CUSTOM-VIRTIO: guest notified queue \(queue.queueIndex) (size \(queue.queueSize))")
+        // Drain every available element (many may be in flight — claim
+        // 4374's concurrency): queue 0 exchanges get the payload echoed
+        // back verbatim; queue 1 log lines are printed to stdout and
+        // answered with ACK:<len> (claim 4837). Then return each element
+        // so the used ring advances (its length reflects writtenByteCount)
+        // and the device IRQ asserts.
+        while let element = queue.nextElement() {
+            process(element: element, queueIndex: Int(queue.queueIndex))
+        }
+    }
+
+    private func process(element: VZVirtioQueueElement, queueIndex: Int) {
+        // Reassemble the guest's device-read spans (claim 9492: a
+        // >4 KiB payload arrives as several readBuffers()).
+        var bytes: [UInt8] = []
+        for buffer in element.readBuffers() {
+            bytes.append(contentsOf: [UInt8](buffer))
+        }
+        if queueIndex == 1 {
+            // Guest log transport (claim 4837): print the line verbatim to
+            // the runner stdout and write ACK:<len> back into the element's
+            // write buffers — the guest verifies the ack.
+            let line = String(bytes: bytes, encoding: .utf8) ?? "<non-utf8>"
+            print("CUSTOM-VIRTIO-LOG: \(line)")
+            let ack = Data("ACK:\(bytes.count)".utf8)
+            do {
+                try element.write(ack)
+                print("CUSTOM-VIRTIO: log ack written (\(element.writtenByteCount) byte(s) into \(element.writeBuffersByteCount) byte(s) of write buffers)")
+            } catch {
+                print("CUSTOM-VIRTIO: log ack write FAILED: \(error)")
+            }
+        } else {
+            // Queue-0 exchange: echo the exact reassembled payload back
+            // (claim 0828's bidirectional flow, now length-agnostic). The
+            // hex summary is bounded so a 12,340-byte payload does not
+            // flood the runner log; the byte count + the guest's
+            // byte-for-byte echo comparison carry the assertion.
+            print("CUSTOM-VIRTIO: dequeued \(bytes.count) byte(s) (read \(element.readBuffersByteCount)): hex=[\(hexSummary(bytes))] ascii=\"\(printableAscii(bytes))\"")
+            if element.writeBuffersByteCount >= bytes.count {
+                do {
+                    try element.write(Data(bytes))
+                    print("CUSTOM-VIRTIO: echoed \(element.writtenByteCount) byte(s) into \(element.writeBuffersByteCount) byte(s) of write buffers")
+                } catch {
+                    print("CUSTOM-VIRTIO: reply write FAILED: \(error)")
+                }
+            } else {
+                print("CUSTOM-VIRTIO: reply write skipped (write buffers \(element.writeBuffersByteCount) < \(bytes.count))")
+            }
+        }
+        element.returnToQueue()
+        print("CUSTOM-VIRTIO: returned element to queue \(queueIndex) — used ring advanced, device interrupt asserted")
+    }
+
+    /// Bounded hex rendering: full hex up to 64 bytes, otherwise the first
+    /// and last 16 bytes + a 32-bit running sum (the claim-9492 big
+    /// payload is 12,340 bytes of non-printable pattern).
+    private func hexSummary(_ bytes: [UInt8]) -> String {
+        let hex = { (slice: ArraySlice<UInt8>) in
+            slice.map { String(format: "%02x", $0) }.joined(separator: " ")
+        }
+        if bytes.count <= 64 {
+            return hex(bytes[0...])
+        }
+        var sum: UInt32 = 0
+        for b in bytes { sum = sum &+ UInt32(b) }
+        return "\(hex(bytes[0..<16]))..\(hex(bytes[(bytes.count - 16)...])) sum=0x\(String(format: "%08x", sum))"
+    }
+
+    /// The payload's ASCII form, or <binary> when any byte is non-printable
+    /// (the big-payload pattern is binary by design).
+    private func printableAscii(_ bytes: [UInt8]) -> String {
+        guard bytes.allSatisfy({ $0 >= 0x20 && $0 <= 0x7e }) else { return "<binary>" }
+        return String(bytes: bytes, encoding: .utf8) ?? "<non-utf8>"
     }
 
     func customVirtioDeviceWillReset(_ device: VZCustomVirtioDevice) {

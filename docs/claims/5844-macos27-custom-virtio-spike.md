@@ -41,13 +41,20 @@ the device attached. The scripted `pci` run
 (`artifacts/vm-spike-pci.log`) lists five devices: Apple bridge
 (0x106b/0x1a05), virtio console (0x1043), virtio-blk (0x1042), virtio
 entropy (0x1044), and the custom spike device **VID 0x1af4 / DID 0x1082**
-with a real BAR (`0x50001000`).
+with a real BAR (`0x50001000`). **Correction (claim 0828):** `0x50001000`
+is BAR2; the custom device's transport BAR0 is the 64-bit window
+`0x100020000` (above the 4 GiB blanket), same layout as the console's
+`0x100010000` — and it is inert until the guest enables the PCI command
+register (claim 0828's root cause).
 
 **Class A:** monitor 105/105, shell 129/129, transcript byte-identical,
 unit-test set green, `zig build` green, `swift build` green (macOS 27
 floor), fmt clean, coordination indexes in sync.
 
-Notes for the audit's next steps: the host side is ready for queue
-transport (delegate logs `DRIVER_OK` + notifications); the custom device's
+Notes for the audit's next steps: **completed by claim 0828** — the
+smallest custom-virtio guest driver now proves queue transport (the host
+delegate dequeues the exact 16-byte payload) AND used-ring IRQ delivery
+(a real SPI 69 enters the claim-9746 vector) on the live VZ boot; see
+`docs/claims/0828-custom-virtio-queue-irq.md`. The custom device's
 virtio device ID 0x42 → PCI DID 0x1082 (0x1040 + device_id, addition not
 OR — a wrong OR collides with virtio-blk's 0x1042).
