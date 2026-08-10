@@ -1187,8 +1187,10 @@ fn cmd_exec(m: *Monitor, args: []const []const u8) ExecError {
             m.console.print_hex(@intCast(info.content_len));
             m.console.puts(" entry=");
             m.console.print_hex(info.entry_va);
+            // Claim 0826: the process's OWN stack placement, not the
+            // static boot stack's.
             m.console.puts(" stack=");
-            m.console.print_hex(userspace.user_stack_va());
+            m.console.print_hex(info.stack_va);
             const head = esp_exec.head();
             var head_value: u64 = 0;
             for (head, 0..) |byte, i| head_value |= @as(u64, byte) << @intCast(56 - i * 8);
@@ -1227,10 +1229,9 @@ fn cmd_exec(m: *Monitor, args: []const []const u8) ExecError {
             m.console.print_line(": bad entry offset (outside the loaded content)");
             return .invalid_argument;
         },
-        .user_busy => {
-            m.console.puts("exec: a user task is still running under the user root ");
-            m.console.print_line("(wait for it to exit and be reaped, then retry)");
-            return .none;
+        .out_of_memory => {
+            m.console.print_line("exec: out of physical pages (text/stack/exception stack)");
+            return .machine_failed;
         },
         .pool_full => {
             m.console.print_line("exec: no free scheduler pool slot");
@@ -1294,6 +1295,14 @@ fn cmd_addrspaces(m: *Monitor, args: []const []const u8) ExecError {
     // ownership assertion (user root != kernel root) survives the reap.
     m.console.puts("addrspaces: user root=");
     m.console.print_hex(mmu.user_root_phys());
+    m.console.puts("\n");
+    // Claim 0826: the per-process-root budget — table pages consumed out of
+    // the fixed 256-page carve-out. Two live user roots (~15 each + leaf
+    // tables) stay well inside it; the live gate reads this line.
+    m.console.puts("addrspaces: tables=");
+    m.console.print_u64(@intCast(mmu.tables_used()));
+    m.console.puts("/");
+    m.console.print_u64(@intCast(mmu.tables_capacity()));
     m.console.puts("\n");
     const leaves = mmu.walk_leaves(mmu.user_root_phys());
     m.console.puts("addrspaces: user text=");
@@ -2039,11 +2048,11 @@ test "monitor: procs reports the process table with lifecycle and exit status" {
     // executor reaped) and a RUNNING exec'd program bound to task 2 — the
     // exact two-process table a live boot shows right after `exec`.
     process.init();
-    const p0 = process.create("user-el0", .{ .entry_va = 0x400000, .content_len = 0x100 }, .{ .stack_va = 0x80000000, .stack_len = 8192 }).?;
+    const p0 = process.create("user-el0", .{ .entry_va = 0x400000, .content_len = 0x100 }, .{ .stack_va = 0x80000000, .stack_len = 8192 }, .{}).?;
     _ = process.bind(p0, 2);
     process.on_task_exit(2, 7);
     _ = process.take_exit_report();
-    const p1 = process.create("USER.BIN", .{ .entry_va = 0x400000, .content_len = 0xea }, .{ .stack_va = 0x1a400000, .stack_len = 8192 }).?;
+    const p1 = process.create("USER.BIN", .{ .entry_va = 0x400000, .content_len = 0xea }, .{ .stack_va = 0x1a400000, .stack_len = 8192 }, .{}).?;
     _ = process.bind(p1, 2);
     try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"procs"}));
     // The exited process keeps its status past the executor's reap; the

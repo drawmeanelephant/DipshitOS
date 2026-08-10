@@ -119,7 +119,18 @@ pub fn dispatch(number: u64, args: Args, frame: *exceptions.VectorFrame) u64 {
 }
 
 /// Adapter registered through claim 8215's `set_svc_dispatcher` seam.
+///
+/// Claim 0826 (concurrent processes): arm the uaccess regions from the
+/// CURRENT task's TCB at every SVC entry, so `sys_write` bounds always
+/// follow the task that actually issued the call — with two live user
+/// processes, the module-global regions set by the last root rebuild would
+/// otherwise validate one process's stack against another's. EL1h tasks
+/// never SVC, so their zero regions are inert. The ABI is untouched.
 pub fn handle_svc(frame: *exceptions.VectorFrame, immediate: u16) bool {
+    const regions = scheduler.current_user_regions();
+    if (regions.text.len != 0 or regions.stack.len != 0) {
+        set_user_regions(regions.text, regions.stack);
+    }
     var args: Args = undefined;
     for (&args, 0..) |*arg, reg| arg.* = exceptions.frame_read(frame, @intCast(reg));
     const number = exceptions.frame_read(frame, 8);

@@ -31,6 +31,8 @@
 //! is one-way: scheduler -> process).
 
 const std = @import("std");
+const alloc = @import("alloc.zig"); // claim 0826: the process owns its pages (text/stack/kernel-stack) from the physical allocator
+const memmap = @import("memmap.zig"); // host-test fixture view (page-ownership tests arm the allocator)
 
 /// Bounded process registry size (fixed BSS array). Room for the boot
 /// payload's process plus several exec'd programs' history before the
@@ -71,15 +73,37 @@ pub const Image = struct {
 };
 
 /// The address space a process runs in (what its TTBR0 user root maps).
+/// Claim 0826: the process OWNS the backing pages for exec'd programs —
+/// the allocator-backed text/user-stack phys + page counts (0 counts = the
+/// backing is static, e.g. the boot payload's `.usertext`/`.userbss`,
+/// which is never freed).
 pub const AddrSpace = struct {
     /// Physical root of the task's user TTBR0 tables.
     root_phys: u64 = 0,
     /// User VA + length of the mapped text (W^X, EL0-executable).
     text_va: u64 = 0,
     text_len: u64 = 0,
+    /// Physical text pages the process owns (allocator-backed; 0 = static).
+    text_phys: u64 = 0,
+    text_pages: u64 = 0,
     /// User VA + length of the mapped stack (EL0 RW, non-executable).
     stack_va: u64 = 0,
     stack_len: u64 = 0,
+    /// Physical user-stack pages the process owns (allocator-backed;
+    /// 0 = static `.userbss`).
+    stack_phys: u64 = 0,
+    stack_pages: u64 = 0,
+};
+
+/// Kernel-side resources the process owns with its program (freed at
+/// reap/recycle like the address-space pages): the executor task's EL1
+/// exception stack. Claim 0826: two live EL0t tasks cannot share ONE
+/// static `user_kernel_stack` — a second task's exception frame would
+/// clobber the first task's saved vector frame — so every exec'd process
+/// allocates its own 8 KiB EL1 stack. 0 pages = the static boot stack.
+pub const KernelStack = struct {
+    phys: u64 = 0,
+    pages: u64 = 0,
 };
 
 const Process = struct {
@@ -91,6 +115,9 @@ const Process = struct {
     state: State = .free,
     image: Image = .{},
     addr_space: AddrSpace = .{},
+    /// Claim 0826: the executor's EL1 exception stack (allocator-backed
+    /// for exec'd programs, the static boot stack for the payload).
+    kernel_stack: KernelStack = .{},
     /// The pool slot currently executing this process; null once exited
     /// (the slot may already be reused by another task).
     task_id: ?usize = null,
@@ -122,12 +149,30 @@ pub fn init() void {
     exit_report_status = 0;
 }
 
+/// Free the allocator-backed pages a process's address space + kernel
+/// stack own (no-op for the static boot payload's pages and when the
+/// allocator is unarmed — host tests). Only ever called for a non-live
+/// process (reap / recycle of `exited`/`created`), so a running program's
+/// pages are never freed under it.
+fn release_resources(p: *Process) void {
+    if (p.addr_space.text_pages > 0) _ = alloc.free_pages(p.addr_space.text_phys, p.addr_space.text_pages);
+    if (p.addr_space.stack_pages > 0) _ = alloc.free_pages(p.addr_space.stack_phys, p.addr_space.stack_pages);
+    if (p.kernel_stack.pages > 0) _ = alloc.free_pages(p.kernel_stack.phys, p.kernel_stack.pages);
+}
+
 /// Create a process for a loaded program: `name` is copied into the
-/// descriptor (the caller's slice need not outlive the call). Takes the
-/// first free slot; when the registry is full, recycles the OLDEST exited
-/// process (never a created/running one). Returns null only when every
-/// slot holds a live (created/running) process.
-pub fn create(name: []const u8, image: Image, addr_space: AddrSpace) ?usize {
+/// descriptor (the caller's slice need not outlive the call); `addr_space`
+/// and `kernel_stack` record the pages the process owns. Takes the first
+/// free slot; when the registry is full, recycles the OLDEST exited
+/// process (never a created/running one) and frees its owned pages.
+/// Returns null only when every slot holds a live (created/running)
+/// process.
+pub fn create(
+    name: []const u8,
+    image: Image,
+    addr_space: AddrSpace,
+    kernel_stack: KernelStack,
+) ?usize {
     var id: usize = 0;
     var oldest_exited: ?usize = null;
     while (id < max_processes) : (id += 1) {
@@ -136,8 +181,10 @@ pub fn create(name: []const u8, image: Image, addr_space: AddrSpace) ?usize {
     }
     if (id >= max_processes) {
         // Registry full: recycle the oldest exited descriptor (never a
-        // live process — a live one still owns its program).
+        // live process — a live one still owns its program). Its
+        // allocator-backed pages are freed with it.
         const recycled = oldest_exited orelse return null;
+        release_resources(&processes[recycled]);
         processes[recycled] = .{};
         registry_count -%= 1;
         id = recycled;
@@ -147,6 +194,7 @@ pub fn create(name: []const u8, image: Image, addr_space: AddrSpace) ?usize {
     processes[id].name_len = take;
     processes[id].image = image;
     processes[id].addr_space = addr_space;
+    processes[id].kernel_stack = kernel_stack;
     processes[id].state = .created;
     registry_count +%= 1;
     current_id = id;
@@ -165,11 +213,13 @@ pub fn bind(id: usize, task_id: usize) bool {
 /// Free a process descriptor. Only a non-running process may be reaped:
 /// `created` (the exec rollback path — spawn failed after create) or
 /// `exited` (the lifecycle reap / registry recycle). Returns false for an
-/// invalid id or a live (running) process.
+/// invalid id or a live (running) process. The process's allocator-backed
+/// pages (text/stack/kernel-stack) are freed with it.
 pub fn reap(id: usize) bool {
     if (id >= max_processes) return false;
     if (processes[id].state == .free or processes[id].state == .running) return false;
     if (current_id == id) current_id = null;
+    release_resources(&processes[id]);
     processes[id] = .{};
     registry_count -%= 1;
     return true;
@@ -233,8 +283,14 @@ pub const ProcessInfo = struct {
     entry_va: u64,
     content_len: u64,
     root_phys: u64,
+    text_phys: u64,
+    text_pages: u64,
     stack_va: u64,
     stack_len: u64,
+    stack_phys: u64,
+    stack_pages: u64,
+    kernel_stack_phys: u64,
+    kernel_stack_pages: u64,
     exit_status: u64,
 };
 
@@ -249,8 +305,14 @@ pub fn info(id: usize) ?ProcessInfo {
         .entry_va = p.image.entry_va,
         .content_len = p.image.content_len,
         .root_phys = p.addr_space.root_phys,
+        .text_phys = p.addr_space.text_phys,
+        .text_pages = p.addr_space.text_pages,
         .stack_va = p.addr_space.stack_va,
         .stack_len = p.addr_space.stack_len,
+        .stack_phys = p.addr_space.stack_phys,
+        .stack_pages = p.addr_space.stack_pages,
+        .kernel_stack_phys = p.kernel_stack.phys,
+        .kernel_stack_pages = p.kernel_stack.pages,
         .exit_status = p.exit_status,
     };
 }
@@ -287,7 +349,7 @@ test "process: init starts empty and create binds a full descriptor" {
         .text_len = 0xea,
         .stack_va = 0x1a400000,
         .stack_len = 8192,
-    }).?;
+    }, .{}).?;
     try std.testing.expectEqual(@as(usize, 0), id);
     try std.testing.expectEqual(@as(usize, 1), count());
     try std.testing.expectEqual(@as(?usize, 0), current());
@@ -302,13 +364,13 @@ test "process: init starts empty and create binds a full descriptor" {
     try std.testing.expectEqual(@as(u64, 0), info0.exit_status);
     // The name is OWNED: a caller slice does not outlive the call.
     const short = "A";
-    _ = create(short, .{}, .{});
+    _ = create(short, .{}, .{}, .{});
     try std.testing.expectEqualStrings("A", info(1).?.name);
 }
 
 test "process: lifecycle created -> running -> exited -> reaped" {
     init();
-    const id = create("USER.BIN", .{ .entry_va = 0x400000, .content_len = 0xea }, .{}).?;
+    const id = create("USER.BIN", .{ .entry_va = 0x400000, .content_len = 0xea }, .{}, .{}).?;
     // A created process cannot be reaped from running (no binding yet)...
     // bind it to executor slot 2 and run.
     try std.testing.expect(bind(id, 2));
@@ -336,7 +398,7 @@ test "process: lifecycle created -> running -> exited -> reaped" {
 
 test "process: exit status survives the executor task's reuse" {
     init();
-    const p0 = create("BOOTED", .{ .entry_va = 0x400000, .content_len = 1 }, .{}).?;
+    const p0 = create("BOOTED", .{ .entry_va = 0x400000, .content_len = 1 }, .{}, .{}).?;
     _ = bind(p0, 2);
     // The executor exits (status 7) and its slot is REUSED by another
     // task — but the process keeps the status.
@@ -346,7 +408,7 @@ test "process: exit status survives the executor task's reuse" {
     try std.testing.expectEqual(State.exited, info(p0).?.state);
     // A second exec creates a NEW process (per-process identity), not a
     // mutated "last program".
-    const p1 = create("USER.BIN", .{ .entry_va = 0x400000, .content_len = 0xea }, .{}).?;
+    const p1 = create("USER.BIN", .{ .entry_va = 0x400000, .content_len = 0xea }, .{}, .{}).?;
     try std.testing.expectEqual(@as(usize, 1), p1);
     try std.testing.expectEqualStrings("USER.BIN", info(p1).?.name);
     // The old process still reports its own exit status.
@@ -360,22 +422,22 @@ test "process: bounded registry recycles the oldest exited, never a live one" {
     var ids: [max_processes]usize = undefined;
     var i: usize = 0;
     while (i < max_processes) : (i += 1) {
-        ids[i] = create("P", .{ .entry_va = @intCast(i), .content_len = 1 }, .{}).?;
+        ids[i] = create("P", .{ .entry_va = @intCast(i), .content_len = 1 }, .{}, .{}).?;
     }
     try std.testing.expectEqual(@as(usize, max_processes), count());
     // All live (created) -> the 9th create fails.
-    try std.testing.expect(create("FULL", .{}, .{}) == null);
+    try std.testing.expect(create("FULL", .{}, .{}, .{}) == null);
     // Exit the OLDEST (id 0): now the next create recycles it.
     _ = bind(ids[0], 9);
     on_task_exit(9, 1);
     _ = take_exit_report();
-    const recycled = create("NEW", .{}, .{}).?;
+    const recycled = create("NEW", .{}, .{}, .{}).?;
     try std.testing.expectEqual(@as(usize, 0), recycled); // the oldest exited
     try std.testing.expectEqualStrings("NEW", info(0).?.name);
     try std.testing.expectEqual(@as(usize, max_processes), count());
     // A running process is never recycled.
     _ = bind(ids[1], 10);
-    _ = create("RUNNING-KEPT", .{}, .{});
+    _ = create("RUNNING-KEPT", .{}, .{}, .{});
     try std.testing.expectEqualStrings("P", info(ids[1]).?.name);
 }
 
@@ -384,7 +446,7 @@ test "process: on_task_exit is a no-op for unbound slots and find_by_task" {
     try std.testing.expect(find_by_task(2) == null);
     on_task_exit(2, 9); // no process bound -> no report, no crash
     try std.testing.expect(take_exit_report() == null);
-    const id = create("USER.BIN", .{}, .{}).?;
+    const id = create("USER.BIN", .{}, .{}, .{}).?;
     try std.testing.expect(find_by_task(2) == null); // not yet bound
     _ = bind(id, 5);
     try std.testing.expectEqual(@as(?usize, id), find_by_task(5));
@@ -398,15 +460,92 @@ test "process: on_task_exit is a no-op for unbound slots and find_by_task" {
 test "process: reap guards and name truncation" {
     init();
     // Over-long names are truncated to the owned buffer.
-    const id = create("A VERY LONG PROGRAM NAME", .{}, .{}).?;
+    const id = create("A VERY LONG PROGRAM NAME", .{}, .{}, .{}).?;
     try std.testing.expect(info(id).?.name.len <= name_max);
     // reaping an invalid id / a running process fails.
     try std.testing.expect(!reap(max_processes));
     _ = bind(id, 1);
     try std.testing.expect(!reap(id));
     // reaping a created (unbound) process is allowed (exec's rollback).
-    const id2 = create("ROLLBACK", .{}, .{}).?;
+    const id2 = create("ROLLBACK", .{}, .{}, .{}).?;
     try std.testing.expectEqual(State.created, info(id2).?.state);
     try std.testing.expect(reap(id2));
     try std.testing.expect(info(id2) == null);
+}
+
+test "process: allocator-backed resources are freed at reap and recycle" {
+    // Arm the module allocator with a small fixture map so page ownership
+    // is real on the host (the exec path arms it the same way).
+    const descriptors = [_]memmap.MemoryDescriptor{
+        .{ .type = .conventional_memory, .physical_start = 0x100000, .virtual_start = 0, .number_of_pages = 512, .attribute = 0 },
+    };
+    const view = memmap.MapView.init(std.mem.asBytes(&descriptors), @sizeOf(memmap.MemoryDescriptor), descriptors.len);
+    try std.testing.expect(alloc.init(view, &.{}));
+    const free_before = alloc.stats().free_pages;
+    init();
+    // An exec'd process owns its text + user-stack + kernel-stack pages.
+    const text_phys = alloc.alloc_pages(1).?;
+    const stack_phys = alloc.alloc_pages(2).?;
+    const kstack_phys = alloc.alloc_pages(2).?;
+    const id = create("USER.BIN", .{ .entry_va = 0x400000, .content_len = 64 }, .{
+        .root_phys = 0x1234_0000,
+        .text_va = 0x400000,
+        .text_len = 64,
+        .text_phys = text_phys,
+        .text_pages = 1,
+        .stack_va = 0x1a400000,
+        .stack_len = 8192,
+        .stack_phys = stack_phys,
+        .stack_pages = 2,
+    }, .{ .phys = kstack_phys, .pages = 2 }).?;
+    const pinfo = info(id).?;
+    try std.testing.expectEqual(text_phys, pinfo.text_phys);
+    try std.testing.expectEqual(@as(u64, 1), pinfo.text_pages);
+    try std.testing.expectEqual(stack_phys, pinfo.stack_phys);
+    try std.testing.expectEqual(@as(u64, 2), pinfo.stack_pages);
+    try std.testing.expectEqual(kstack_phys, pinfo.kernel_stack_phys);
+    try std.testing.expectEqual(@as(u64, 2), pinfo.kernel_stack_pages);
+    // Exit then reap: the owned pages return to the pool.
+    _ = bind(id, 1);
+    on_task_exit(1, 3);
+    _ = take_exit_report();
+    try std.testing.expect(reap(id));
+    try std.testing.expectEqual(free_before, alloc.stats().free_pages);
+    // The create-recycle path frees the recycled process's pages too. The
+    // registry must be FULL (only then does create recycle the oldest
+    // exited), so fill all 8 slots with page-owning processes.
+    init();
+    var ids: [max_processes]usize = undefined;
+    for (0..max_processes) |i| {
+        ids[i] = create("P", .{}, .{ .text_phys = alloc.alloc_pages(1).?, .text_pages = 1 }, .{}).?;
+    }
+    // All live (created) -> no free slot and nothing exited: create fails.
+    try std.testing.expect(create("FULL", .{}, .{}, .{}) == null);
+    // Exit the OLDEST (id 0): its page stays allocated (exited, not yet
+    // recycled). The next create recycles it and frees the page.
+    _ = bind(ids[0], 9);
+    on_task_exit(9, 1);
+    _ = take_exit_report();
+    const free_after_exit = alloc.stats().free_pages;
+    const recycled = create("NEW", .{}, .{}, .{}).?;
+    try std.testing.expectEqual(@as(usize, 0), recycled); // the oldest exited
+    try std.testing.expectEqual(free_after_exit + 1, alloc.stats().free_pages); // its page came back
+    // A live (created) slot is never recycled.
+    _ = bind(ids[1], 10);
+    try std.testing.expectEqualStrings("P", info(ids[1]).?.name);
+}
+
+test "process: the static boot payload owns no allocator pages" {
+    init();
+    const id = create("user-el0", .{ .entry_va = 0x400000, .content_len = 64 }, .{
+        .root_phys = 0x1234_0000,
+        .text_va = 0x400000,
+        .text_len = 64,
+        .stack_va = 0x80000000,
+        .stack_len = 8192,
+    }, .{}).?; // zero pages everywhere: static backing, never freed
+    const pinfo = info(id).?;
+    try std.testing.expectEqual(@as(u64, 0), pinfo.text_pages);
+    try std.testing.expectEqual(@as(u64, 0), pinfo.stack_pages);
+    try std.testing.expectEqual(@as(u64, 0), pinfo.kernel_stack_pages);
 }

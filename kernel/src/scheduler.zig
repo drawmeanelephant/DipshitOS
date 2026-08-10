@@ -119,6 +119,14 @@ pub fn state_name(state: State) []const u8 {
     };
 }
 
+/// Claim 0826: the uaccess/syscall apertures a user task's syscalls
+/// validate against (its OWN text + stack VAs — every live user task has
+/// its own root + stack now). Zero for EL1h tasks (they never SVC).
+pub const UserRegions = struct {
+    text: userspace.Region = .{ .base = 0, .len = 0 },
+    stack: userspace.Region = .{ .base = 0, .len = 0 },
+};
+
 const Task = struct {
     name: []const u8 = "",
     state: State = .free,
@@ -137,6 +145,10 @@ const Task = struct {
     /// EL1h tasks point at the EL1-only kernel root; the EL0 task points at
     /// its text+stack-only user root. Written to TTBR0 on every switch.
     ttbr0: u64 = 0,
+    /// Claim 0826: the user text/stack apertures this task's syscalls
+    /// validate against (armed into the syscall layer at SVC entry). Each
+    /// live user task carries its own regions; EL1h tasks leave them zero.
+    regions: UserRegions = .{},
     /// How many times this task's context was saved by a tick.
     saves: u64 = 0,
     /// How many times this task's context was restored by a tick.
@@ -290,35 +302,56 @@ pub fn register_worker(entry: u64) ?usize {
 /// under the task's own TTBR0 user root, with a separate SP_EL0 user stack
 /// and the timer-preemption witness at its user VA (the payload dereferences
 /// it through x9 at EL0).
-/// Claim 6783: register the ESP-loaded user program (exec) as an EL0t task
-/// on the shared EL1 exception stack. The caller (`exec.zig`) has already
-/// rebuilt the user root around the loaded page, so `entry_va` and the
-/// stack are USER VAs and the root is the current user root
-/// (`mmu.user_root_phys()`). One user program at a time is enforced by
-/// `user_root_in_use` — the exec gate. The task reuses the static user
-/// stack pages as SP_EL0 (the previous user task is gone by the gate).
-pub fn register_exec_user(entry_va: u64, stack_va: u64) ?usize {
-    const sp_el0 = stack_va + user_stack.len;
-    return spawn("user-exec", entry_va, spsr_el0t_irqs, &user_kernel_stack, mmu.user_root_phys(), sp_el0);
+///
+/// Claim 6783 + claim 0826: register the ESP-loaded user program (exec) as
+/// an EL0t task. The caller (`exec.zig`) has already built the process's
+/// OWN user root and allocated its OWN user stack + EL1 exception stack, so
+/// every parameter is per-process: `entry_va` (user VA), `root_phys` (the
+/// process's TTBR0 root — NOT the shared global), `text_len`/`stack_va`/
+/// `stack_len` (the process's apertures, recorded in the TCB so the syscall
+/// layer arms the right bounds at SVC entry), and `kstack` (the process's
+/// EL1 exception stack — two live user tasks cannot share the static one:
+/// a second task's exception frame would clobber the first's saved vector
+/// frame). The pool's spare slot (the claim-6729 `spawn_demo` pattern) is
+/// the second live user slot; `spawn` returning null is the capacity gate.
+pub fn register_exec_user(
+    entry_va: u64,
+    root_phys: u64,
+    text_len: u64,
+    stack_va: u64,
+    stack_len: u64,
+    kstack: []u8,
+) ?usize {
+    const sp_el0 = stack_va + stack_len;
+    const id = spawn("user-exec", entry_va, spsr_el0t_irqs, kstack, root_phys, sp_el0) orelse return null;
+    tasks[id].regions = .{
+        .text = .{ .base = userspace.text_va, .len = text_len },
+        .stack = .{ .base = stack_va, .len = stack_len },
+    };
+    return id;
 }
 
-/// Claim 6783: true when a live task still runs under the current user
-/// root. Exec refuses while that is the case — rebuilding the root would
-/// strand the running program (one user program at a time). A zombie is
-/// not live (it never runs again) and may be reaped, so exec can reuse its
-/// slot. Claim 0635: a BLOCKED task is also live — it wakes and resumes,
-/// so a sleeping user program still owns the user root.
-pub fn user_root_in_use() bool {
-    const root = mmu.user_root_phys();
+/// Claim 0826: the pool has at least one free slot (the exec gate — a new
+/// program may load and run while another is alive; only the fixed pool
+/// bounds how many). The exec path checks this BEFORE allocating pages or
+/// tables, so a full pool fails cheaply with `pool_full` and never leaks.
+pub fn has_free_slot() bool {
     for (tasks[0..max_tasks]) |task| {
-        if ((task.state == .ready or task.state == .running or task.state == .blocked) and task.ttbr0 == root) return true;
+        if (task.state == .free) return true;
     }
     return false;
 }
 
-/// Physical address of the static user stack pages (claim 6783: exec maps
-/// them at `userspace.stack_va` in the rebuilt user root). Identity on host
-/// tests.
+/// The user apertures of the CURRENT task (the EL0t task about to SVC —
+/// zero for EL1h tasks). The syscall layer arms these into uaccess at SVC
+/// entry so `sys_write` bounds always follow the task that issued the call.
+pub fn current_user_regions() UserRegions {
+    return tasks[current].regions;
+}
+
+/// Physical address of the static user stack pages (claim 6783: the boot
+/// payload's stack — exec'd programs now own allocator-backed stack pages
+/// instead, claim 0826). Identity on host tests.
 pub fn user_stack_phys() u64 {
     return mmu.to_phys(@intFromPtr(&user_stack));
 }
@@ -333,21 +366,24 @@ pub fn register_user(entry: u64, image_base: u64) ?usize {
     const entry_va = userspace.image_user_va(image_base, mmu.to_phys(entry));
     const sp_el0 = userspace.bss_user_va(image_base, mmu.to_phys(@intFromPtr(&user_stack))) + user_stack.len;
     const witness_va = userspace.bss_user_va(image_base, mmu.to_phys(@intFromPtr(&user_timer_preemptions)));
+    const text = userspace.text_va_region();
+    const stack = userspace.stack_va_region();
     const id = spawn("user-el0", entry_va, spsr_el0t_irqs, &user_kernel_stack, mmu.user_root_phys(), sp_el0) orelse return null;
+    // Claim 0826: the boot payload carries its static apertures in the TCB
+    // so the syscall layer can arm them at SVC entry like any user task.
+    tasks[id].regions = .{ .text = text, .stack = stack };
     // Claim 3848: the boot-time static EL0 payload is a PROCESS too — the
     // one table shows both its lifecycle and the exec'd programs'. Its
     // image is the static payload (no file name) and its address space is
     // the current user root at the fixed stack placement. Best effort: a
     // full registry (impossible at boot) must not fail the payload.
-    const text = userspace.text_va_region();
-    const stack = userspace.stack_va_region();
     if (process.create("user-el0", .{ .entry_va = entry_va, .content_len = text.len }, .{
         .root_phys = mmu.user_root_phys(),
         .text_va = text.base,
         .text_len = text.len,
         .stack_va = stack.base,
         .stack_len = stack.len,
-    })) |proc_id| {
+    }, .{})) |proc_id| {
         _ = process.bind(proc_id, id);
     }
     const frame: *exceptions.VectorFrame = @ptrFromInt(tasks[id].sp);
@@ -871,6 +907,8 @@ test "scheduler: init registers the shell and idle tasks; start flips enabled" {
     try std.testing.expect(enabled());
     // Two runnable tasks (shell + idle) are enough for the tick to switch.
     try std.testing.expect(scheduling_active());
+    // Claim 0826: shell + idle leave three free slots (the capacity gate).
+    try std.testing.expect(has_free_slot());
 }
 
 test "scheduler: register_worker builds a valid synthetic frame" {
@@ -897,6 +935,8 @@ test "scheduler: register_worker builds a valid synthetic frame" {
     try std.testing.expectEqual(@as(usize, 3), register_worker(0).?);
     try std.testing.expectEqual(@as(usize, 5), task_count);
     try std.testing.expect(register_worker(0) == null);
+    // Claim 0826: capacity is observable — the full pool has no free slot.
+    try std.testing.expect(!has_free_slot());
 }
 
 test "scheduler: register_user separates EL1 exception and EL0 stacks" {
@@ -1155,40 +1195,53 @@ test "scheduler: sleep guards — zero clamps to one tick, idle and inactive fai
     try std.testing.expect(!sleep_current(1));
 }
 
-test "scheduler: a blocked user task still owns the user root (exec gate)" {
-    // Give the user root a real (non-zero) value so the gate is unambiguous
-    // on the host: the EL1h tasks carry the kernel root (0), the user task
-    // carries the built root (same pattern as the exec.zig tests).
-    try std.testing.expect(mmu.build_user_root(userspace.text_va, 0x1000, 64, userspace.stack_va, 0x2000, 8192));
+test "scheduler: two live user tasks coexist with their own roots and regions" {
+    // Claim 0826: the exec gate is gone — a second user program loads and
+    // runs while the first is alive. Give each a DISTINCT user root and
+    // user stack (per-process address spaces), and pin the per-task
+    // syscall regions that follow the TCB at SVC entry.
     _ = init();
     _ = register_worker(0x2000).?;
-    _ = register_user(0x3000, 0).?;
+    // Build A's root FIRST (the boot payload registers against the current
+    // global root, like the real boot), then B's own root for the second
+    // live program.
+    const root_a = (mmu.build_user_root(userspace.text_va, 0x1000, 64, userspace.stack_va, 0x2000, 8192) orelse return error.TestUnexpectedResult);
+    const user_a = register_user(0x3000, 0).?;
+    try std.testing.expectEqual(@as(usize, 2), user_a);
+    const root_b = (mmu.build_user_root(userspace.text_va, 0x1000, 64, 0x1a400000, 0x3000, 8192) orelse return error.TestUnexpectedResult);
+    var kstack_b_bytes: [task_stack_size]u8 align(16) = undefined;
+    const kstack_b = kstack_b_bytes[0..];
+    const user_b = register_exec_user(0x4000, root_b, 64, 0x1a400000, 8192, kstack_b).?;
+    try std.testing.expectEqual(@as(usize, 3), user_b);
+    try std.testing.expectEqual(@as(usize, 5), task_count); // shell + worker + A + B + idle
+    try std.testing.expect(!has_free_slot());
+    // Each task carries ITS OWN root and apertures.
+    try std.testing.expect(task_ttbr0(user_a) != task_ttbr0(user_b));
+    try std.testing.expectEqual(root_a, task_ttbr0(user_a));
+    try std.testing.expectEqual(root_b, task_ttbr0(user_b));
+    // The current-task regions follow the ring: put A current and read its
+    // regions, then B.
+    current = user_a;
+    const ra = current_user_regions();
+    try std.testing.expectEqual(userspace.text_va, ra.text.base);
+    try std.testing.expectEqual(userspace.stack_va, ra.stack.base);
+    current = user_b;
+    const rb = current_user_regions();
+    try std.testing.expectEqual(userspace.text_va, rb.text.base);
+    try std.testing.expectEqual(@as(u64, 0x1a400000), rb.stack.base);
+    try std.testing.expectEqual(@as(u64, 8192), rb.stack.len);
+    // Restore the ring position before the round-robin exercise (the region
+    // checks above moved `current` for readability).
+    current = 0;
+    // Both run in the ring (round-robin reaches each).
     start();
-    // The ready user task already owns the user root.
     try std.testing.expect(yield_current()); // shell -> worker
-    try std.testing.expect(yield_current()); // worker -> user
-    try std.testing.expectEqual(@as(usize, 2), current_id());
-    try std.testing.expect(user_root_in_use());
-    // Claim 0635: a SLEEPING user program still owns the root — the old
-    // ready/running-only check would have let exec rebuild it underneath
-    // the blocked task.
-    try std.testing.expect(sleep_current(2)); // user -> idle
-    try std.testing.expect(is_blocked(2));
-    try std.testing.expect(user_root_in_use());
-    // After the deadline passes the task is ready again (still live).
-    on_tick();
-    on_tick();
-    try std.testing.expect(!is_blocked(2));
-    try std.testing.expect(user_root_in_use());
-    // Only after exit + reap does the gate release. The ring order from
-    // idle (4) wraps through shell (0) -> worker (1) -> user (2).
-    try std.testing.expect(yield_current()); // idle -> shell
-    try std.testing.expect(yield_current()); // shell -> worker
-    try std.testing.expect(yield_current()); // worker -> user
-    try std.testing.expectEqual(@as(usize, 2), current_id());
-    try std.testing.expect(exit_current(7)); // user -> idle
-    try std.testing.expect(reap(2));
-    try std.testing.expect(!user_root_in_use());
+    try std.testing.expect(yield_current()); // worker -> user A
+    try std.testing.expectEqual(@as(usize, user_a), current_id());
+    try std.testing.expect(yield_current()); // A -> B
+    try std.testing.expectEqual(@as(usize, user_b), current_id());
+    // A third user program cannot load: the pool is the capacity gate.
+    try std.testing.expect(register_exec_user(0x5000, root_a, 64, 0x2a400000, 8192, kstack_b) == null);
 }
 
 test "scheduler: lifecycle — spawn, exit to zombie, idle reaps back to free" {
