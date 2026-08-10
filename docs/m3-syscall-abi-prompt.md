@@ -9,16 +9,22 @@ that card lands; it must not fight it.
 - Branch: `agent/.../m3-syscall-abi` (claim first via a claim file in
   `docs/claims/` + a log entry in `docs/logs/`; merge per ADR 0003)
 - Date: 2026-08-09
-- Depends on: **the EL0/SVC card** (the smallest real EL0 task + SVC kernel
-  boundary — in flight). Do not start until its claim flips ✅ or you have
-  based your branch on its open PR.
+- Depends on: **the EL0/SVC card** (PR #60 — draft, branch
+  `codex/el0-svc-task`, claim 8215 ✅ — smallest real EL0 task + SVC
+  kernel boundary). Do not start the implementation until PR #60 MERGES
+  to main: it rewrites `exceptions.zig`'s dispatch surface (~400 lines),
+  `scheduler.zig`, `mmu.zig`, `monitor.zig`, `shell.zig`, and
+  `main.zig`, and adds `kernel/src/userspace.zig` +
+  `tools/verify-live-userspace.sh` — work against current main would be
+  rebased away.
 - Inputs (read first; they are binding): `AGENTS.md`, `docs/status.md`,
   `docs/roadmap.md` (Milestone three section), `docs/testing.md`,
   `docs/gate-inventory.md`, `docs/hardware-contract.md`,
   `docs/decisions/0004-kernel-proper.md`,
   `docs/decisions/0005-runtime-built-function-tables.md`,
-  the EL0/SVC card's claim file + branch log, `kernel/src/exceptions.zig`
-  (the `exc_dispatch` seam and the claim-9746 vector frame),
+  claim 8215 + branch log + PR #60's diff (the landed SVC conventions),
+  `kernel/src/exceptions.zig` (the `exc_dispatch` seam, the claim-9746
+  vector frame, and the landed `set_svc_dispatcher`/`is_svc64_from_el0`),
   `kernel/src/scheduler.zig` (claim 5275), `kernel/src/monitor.zig` (the
   runtime-built command registry pattern), `kernel/src/console.zig`
   (the writer abstraction), `kernel/src/main.zig` (wiring seam).
@@ -54,23 +60,28 @@ Constraints that are non-negotiable:
 
 ### Numbering and dispatch
 
-- Syscall number in **x8** at `svc` time; the instruction is `svc #0`.
-  x8 survives into the claim-9746 vector frame (`frame[8]`), args stay in
-  x0–x5 like the Zig/C calling convention, and user code compiles with
-  familiar conventions. The SVC immediate (ESR_EL1 ISS bits [24:0]) stays
-  0 and is reserved.
-- The number space is **0..63** (64 slots). Slots 3–63 are reserved and
-  return `-ENOSYS`; adding a syscall later = one table row + one handler +
-  one unit test, never a renumber.
+- The EL0/SVC card (PR #60, claim 8215) has already fixed the SVC
+  convention and it is binding: **syscall number in x0**, instruction
+  `svc #0` (`svc_immediate = 0` in `kernel/src/userspace.zig`), result
+  returned in **x0** (its `syscall_ping` round-trips exactly this).
+  Extend it, don't replace it: args arrive in **x1–x5** (the saved GPRs of
+  the vector frame), the number in x0, the result written back to x0. The
+  SVC immediate (ESR_EL1 ISS bits [24:0]) stays 0 and is reserved.
+- The number space is **0..63** (64 slots). Slot 0 is the EL0 card's
+  `syscall_ping` — keep it untouched (it is the class-B live-gate
+  evidence). Slots 4–63 are reserved and return `-ENOSYS`; adding a
+  syscall later = one table row + one handler + one unit test, never a
+  renumber.
 
 ### Numbered syscall list
 
 | # | Name | Signature | Behavior |
 |---|------|-----------|----------|
-| 0 | `sys_write` | `write(fd, buf, len) -> i64` | Only fd 1 (console). Writes `len` bytes from user address `buf` through the registered console writer. Returns bytes written (0..len) or a negative error. |
-| 1 | `sys_yield` | `yield() -> i64` | Round-robin yield: hands the current user task to the scheduler (claim 5275). Returns 0. |
-| 2 | `sys_exit` | `exit(status) -> noreturn` | Terminates the calling user task; the scheduler reaps it and the shell reports. Never returns. |
-| 3–63 | reserved | — | Dispatch returns `-ENOSYS`. |
+| 0 | `sys_ping` | `ping(value) -> value` | The EL0 card's proof syscall (PR #60, claim 8215): round-trips x0 through `svc #0` and returns it. Keep as-is — the class-B gate asserts its two-call sequence. |
+| 1 | `sys_write` | `write(fd, buf, len) -> i64` | Only fd 1 (console). Writes `len` bytes from user address `buf` through the registered console writer. Returns bytes written (0..len) or a negative error. |
+| 2 | `sys_yield` | `yield() -> i64` | Round-robin yield: hands the current user task to the scheduler (claim 5275). Returns 0. |
+| 3 | `sys_exit` | `exit(status) -> noreturn` | Terminates the calling user task; the scheduler reaps it and the shell reports. Never returns. |
+| 4–63 | reserved | — | Dispatch returns `-ENOSYS`. |
 
 ### Error codes (returned in x0, negative)
 
@@ -87,28 +98,28 @@ Constraints that are non-negotiable:
 
 ### Return plumbing
 
-- The dispatch result must land in **`frame[0]`** (x0 of the saved vector
-  frame) so the stub's register restore pops it into x0 on `eret`, and the
-  handler must advance **ELR_EL1 by 4** past the 32-bit `svc` (the same
-  mechanism the claim-9746 resume path uses: `msr elr_el1, elr + 4`).
-  *If the EL0/SVC card already owns entry routing, ELR advance, and
-  frame-return plumbing, the syscall module supplies only the table +
-  argument marshalling — read that card first and reuse its path.*
+- The dispatch result lands in **x0 of the saved vector frame** so the
+  stub's register restore pops it into x0 on `eret`. The EL0/SVC card
+  (PR #60) already owns entry routing, ELR advance past the 32-bit `svc`,
+  and the SP_EL0 save/restore (`exc_dispatch` returns `.{ frame, sp_el0
+  }`; `resume_sp_el0`). The syscall module supplies only the table +
+  argument marshalling: read x0 = number and x1–x5 = args out of the
+  frame, dispatch, write the result into x0. Do not re-implement the
+  entry path.
 
 ## Scope
 
 1. **`kernel/src/syscall.zig` (new file):** the runtime-built dispatch
-   table (64 slots, 3 implemented), argument marshalling from the vector
-   frame (x0–x5), the error-code enum, per-number call counters, and a
-   `dispatch(number, args, frame) -> u64` entry point the exception layer
-   calls for EC 0x15 from EL0t.
-2. **Seam in `kernel/src/exceptions.zig`:** a
-   `set_syscall_dispatcher(...)` registration mirroring
-   `set_irq_dispatcher` (claim 7948 pattern). In `exc_dispatch`'s sync
-   path, route `ec == 0x15 (svc64)` **from EL0t** to the dispatcher before
-   the report+park fallback; SVC from EL1t/EL1h still reports + parks.
-   Coordinate the exact seam with the EL0/SVC card's PR — if that card
-   already routes EC 0x15, extend its handler instead of adding a parallel
+   table (64 slots, 4 implemented), argument marshalling from the vector
+   frame (x1–x5; number in x0), the error-code enum, per-number call
+   counters, and a `dispatch(number, args, frame) -> u64` entry point
+   registered through the EL0 card's landed `set_svc_dispatcher` seam.
+2. **Seam (already landed by the EL0/SVC card, PR #60):**
+   `exceptions.set_svc_dispatcher(...)` registers the dispatcher and the
+   `is_svc64_from_el0(kind, esr, spsr)` predicate routes EC 0x15 from EL0t
+   to it before the report+park fallback; SVC from EL1t/EL1h still reports
+   + parks. Do **not** add a parallel seam — this card implements the
+   dispatcher (table + marshalling) and registers it through the landed
    one.
 3. **Writer seam:** `syscall.init(writer)` where writer is
    `*const fn ([]const u8) void` — the same shape as `exceptions.init`.
@@ -206,7 +217,13 @@ Constraints that are non-negotiable:
    `just verify-vz` aggregate if the justfile lists gates explicitly.
 2. **Live regressions still green:** `verify-live-timer` (strict
    `irq=5 poll=0`), `verify-live-tasks`, `verify-live-exceptions`,
-   `verify-live-transcript`. Save the run under `artifacts/`.
+   `verify-live-transcript`, and claim 8215's `verify-live-userspace`
+   (the EL0 boundary gate). Save the run under `artifacts/`.
+
+Note: claim 8215's `verify-live-userspace.sh` already proves the raw
+EL0→`svc`→EL1→EL0 round trip on VZ. The new gate's job is the syscall
+**table** (write/yield/exit + per-number counters) — reuse that harness
+where possible instead of re-proving the boundary.
 
 ## Definition of done
 
