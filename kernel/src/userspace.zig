@@ -74,10 +74,13 @@ pub fn image_user_va(image_base: u64, kernel_addr: u64) u64 {
 
 /// User-space VA of a kernel address inside the .userbss section (the user
 /// stack or the scheduler's timer-preemption witness). Kernel-only,
-/// pre-jump (see `image_user_va`); identity on host test builds.
+/// pre-jump (see `image_user_va`); identity on host test builds. The base
+/// is the CURRENT stack VA (claim 3693): after the boot-time ASLR rebuild
+/// the whole .userbss section moves to the randomized placement, so sp_el0
+/// and the witness follow it with the same relative offsets.
 pub fn bss_user_va(image_base: u64, kernel_addr: u64) u64 {
     if (comptime builtin.is_test) return kernel_addr;
-    return stack_va + (kernel_addr - image_base) - @intFromPtr(&__user_stack_start);
+    return current_stack_va + (kernel_addr - image_base) - @intFromPtr(&__user_stack_start);
 }
 
 /// The user-VA region descriptors the syscall/uaccess layers validate

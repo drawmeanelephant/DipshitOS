@@ -145,28 +145,12 @@ pub fn exec_file(name: []const u8) ExecResult {
     // region follows via set_stack_va so a later program may write from
     // the stack through sys_write. Unseeded (host test / fallback) returns
     // the fixed default, so nothing below ever sees an out-of-band VA.
-    const stack_va = csprng.random_stack_va();
-    userspace.set_stack_va(stack_va);
-    if (!mmu.build_user_root(
-        userspace.text_va,
-        text_phys,
-        content_len,
-        stack_va,
-        scheduler.user_stack_phys(),
-        scheduler.task_stack_size,
-    )) return .table_full;
-    // The fresh clone tables and the loaded program are dirty in the
-    // D-cache; clean both before the scheduler's next TTBR0 switch (the
-    // walker + EL0 instruction fetch must see the real bytes).
-    mmu.clean_table_storage();
-    mmu.clean_dcache_range(text_phys, 4096);
+    // rebuild_user_root runs the whole sequence (randomize → map → clean →
+    // re-arm) — shared with the boot-time static payload (claim 3693).
+    const stack_va = rebuild_user_root(text_phys, content_len, scheduler.task_stack_size) orelse return .table_full;
 
     const entry_va = userspace.text_va + (entry_off - dsk1_header_size);
     if (scheduler.register_exec_user(entry_va, stack_va) == null) return .pool_full;
-    // The user stack aperture moved: re-arm the syscall/uaccess regions so
-    // sys_write bounds follow the randomized placement (one user program
-    // at a time — the previous task is gone by the exec gate).
-    syscall.set_user_regions(userspace.text_va_region(), userspace.stack_va_region());
     const take = @min(name.len, esp.name_max);
     @memcpy(loaded_name_buf[0..take], name[0..take]);
     loaded_name_len = take;
@@ -174,6 +158,47 @@ pub fn exec_file(name: []const u8) ExecResult {
     loaded_entry_va = entry_va;
     loaded_flag = true;
     return .ok;
+}
+
+/// Rebuild the EL0 user root around a fresh randomized stack placement
+/// (milestone-four ASLR, claims 2665 + 3693): draw a per-boot stack VA
+/// from the seeded CSPRNG, map `text_len` bytes of `text_phys` at
+/// `userspace.text_va` plus the static user stack at the new base
+/// (`scheduler.user_stack_phys()`, `stack_len` bytes), clean the fresh
+/// clone tables + mapped text (the walker and EL0 instruction fetch must
+/// see the real bytes), and re-arm the syscall/uaccess regions so
+/// `sys_write` bounds follow the new base. The single shared sequence for
+/// the exec path (the loaded program's page, claim 2665) and the
+/// boot-time rebuild of the static EL0 payload (claim 3693).
+///
+/// `stack_len` must cover the FULL `.userbss` section for the static boot
+/// payload: the scheduler's timer-preemption witness sits just past the
+/// 8 KiB stack, and its VA is base-relative to the stack, so the rebuilt
+/// root must map it too. Exec passes the task stack size (no witness).
+///
+/// Returns the new stack VA on success, or null when the fixed table
+/// carve-out cannot hold another user-root clone (the caller's root is
+/// then unchanged).
+pub fn rebuild_user_root(text_phys: u64, text_len: u64, stack_len: u64) ?u64 {
+    const stack_va = csprng.random_stack_va();
+    userspace.set_stack_va(stack_va);
+    if (!mmu.build_user_root(
+        userspace.text_va,
+        text_phys,
+        text_len,
+        stack_va,
+        scheduler.user_stack_phys(),
+        stack_len,
+    )) return null;
+    // The fresh clone tables and the mapped text are dirty in the D-cache;
+    // clean both before the scheduler's next TTBR0 switch (the walker +
+    // EL0 instruction fetch must see the real bytes).
+    mmu.clean_table_storage();
+    mmu.clean_dcache_range(text_phys, text_len);
+    // The user stack aperture moved: re-arm the syscall/uaccess regions so
+    // sys_write bounds follow the randomized base.
+    syscall.set_user_regions(userspace.text_va_region(), userspace.stack_va_region());
+    return stack_va;
 }
 
 // ---------------------------------------------------------------------------

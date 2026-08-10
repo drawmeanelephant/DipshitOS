@@ -49,6 +49,7 @@ const timer = @import("timer.zig"); // claim 7948: ARM generic timer (CNTP)
 const scheduler = @import("scheduler.zig"); // claim 5275: tick-driven round-robin tasks
 const userspace = @import("userspace.zig"); // claim 8215: first EL0t task + SVC boundary
 const syscall = @import("syscall.zig"); // claim 3594: fixed syscall ABI + runtime dispatch table
+const exec = @import("exec.zig"); // milestone-three card 6: ESP exec — owns the shared rebuild_user_root (claims 2665/3693)
 const virtio_custom = @import("virtio_custom.zig"); // claim 0828: custom-virtio spike driver (DID 0x1082)
 const HandoffV2 = handoff.HandoffV2;
 
@@ -586,6 +587,31 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
     } else {
         csprng.seed_fallback();
         uart_puts("entropy: seed failed n=0 (deterministic fallback)\n");
+    }
+    // Claim 3693 (milestone-four follow-on): ASLR for the BOOT-time static
+    // EL0 payload too. The pre-install user root (built inside
+    // build_identity_map) maps the stack at the fixed userspace.stack_va;
+    // now that the CSPRNG is seeded with REAL entropy, rebuild the root
+    // with a randomized stack placement so the static payload — not just
+    // exec'd programs (claim 2665) — runs with per-boot stack ASLR.
+    // exec.rebuild_user_root is the single shared sequence (randomize →
+    // map → clean → re-arm; see claims 6783/2665 for why it works
+    // post-install). stack_len is the FULL .userbss section length (the
+    // timer-preemption witness sits just past the 8 KiB stack, and its VA
+    // is base-relative, so the rebuilt root must map it too). An unseeded
+    // (fallback) boot skips the rebuild and keeps the fixed stack —
+    // behavior unchanged there.
+    if (csprng.seeded()) {
+        if (exec.rebuild_user_root(user_text.base, user_text.len, user_stack.len)) |aslr_stack_va| {
+            uart_puts("aslr: boot user stack=");
+            uart_hex(aslr_stack_va);
+            uart_puts("\n");
+        } else {
+            // Honest fallback: keep the fixed stack (the initial root still
+            // maps it) and report the failed rebuild.
+            userspace.set_stack_va(userspace.stack_va);
+            uart_puts("aslr: boot user root rebuild failed (fixed stack)\n");
+        }
     }
     const console_name = layout_name(console_kind);
     var mon = monitor.Monitor.init(

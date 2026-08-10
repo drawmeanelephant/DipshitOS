@@ -76,13 +76,21 @@ run_one() {
     set -e
     [ -f artifacts/vm-serial.log ] && cp artifacts/vm-serial.log "$serial_copy" || true
 
-    local bytes=0 banner=0 seed=0 did1044=0 random_ok=0 hex_len=0 exec_ok=0 stack=0 echo_ok=0 fatal=0
-    local hex="" stack_hex=""
+    local bytes=0 banner=0 seed=0 did1044=0 random_ok=0 hex_len=0 exec_ok=0 stack=0 aslr_ok=0 echo_ok=0 fatal=0
+    local hex="" stack_hex="" boot_stack=""
     if [ -f artifacts/vm-serial.log ]; then
         bytes="$(wc -c < artifacts/vm-serial.log | tr -d ' ')"
         [ "$(grep -aFxc -- "DipshitOS kernel has seized control." artifacts/vm-serial.log || true)" = 1 ] && banner=1
         [ "$(grep -aFxc -- "entropy: seeded n=64" artifacts/vm-serial.log || true)" = 1 ] && seed=1
         [ "$(grep -aFc -- "DID=0x0000000000001044" artifacts/vm-serial.log || true)" -ge 1 ] && did1044=1
+        # Boot-time ASLR (claim 3693): the static EL0 payload's stack is
+        # rebuilt at a CSPRNG-randomized VA — `aslr: boot user stack=0x…`
+        # must be present and in the ASLR band.
+        boot_stack="$(grep -a 'aslr: boot user stack=' artifacts/vm-serial.log | sed -E 's/.*stack=0x([0-9a-f]{16}).*/\1/' | head -1 || true)"
+        if [ -n "$boot_stack" ]; then
+            bdec=$((16#$boot_stack))
+            [ "$bdec" -ge $((16#10000000)) ] && [ "$bdec" -lt $((16#80000000)) ] && aslr_ok=1
+        fi
         # `random 32` line: exactly 64 lowercase hex chars after "hex=".
         local rline
         rline="$(grep -a 'random: n=32 hex=' artifacts/vm-serial.log | head -1 || true)"
@@ -101,11 +109,12 @@ run_one() {
         [ "$(grep -aFxc -- "rx-entropy-ok" artifacts/vm-serial.log || true)" = 1 ] && echo_ok=1
         grep -qF -- "[EXC] parking:" artifacts/vm-serial.log && fatal=1 || true
     fi
-    echo "$tag: runner-rc=$rc serial-bytes=$bytes banner=$banner seed=$seed did1044=$did1044 random=$random_ok hex-len=$hex_len exec=$exec_ok stack=$stack echo=$echo_ok fatal=$fatal" | tee -a "$REPORT"
+    echo "$tag: runner-rc=$rc serial-bytes=$bytes banner=$banner seed=$seed did1044=$did1044 random=$random_ok hex-len=$hex_len exec=$exec_ok stack=$stack aslr=$aslr_ok echo=$echo_ok fatal=$fatal" | tee -a "$REPORT"
     echo "$tag: random-hex=$hex" | tee -a "$REPORT"
     echo "$tag: exec-stack-va=0x$stack_hex" | tee -a "$REPORT"
+    echo "$tag: boot-stack-va=0x$boot_stack" | tee -a "$REPORT"
     [ "$rc" = 0 ] && [ "$banner" = 1 ] && [ "$seed" = 1 ] && [ "$did1044" = 1 ] && \
-        [ "$random_ok" = 1 ] && [ "$exec_ok" = 1 ] && [ "$stack" = 1 ] && \
+        [ "$random_ok" = 1 ] && [ "$exec_ok" = 1 ] && [ "$stack" = 1 ] && [ "$aslr_ok" = 1 ] && \
         [ "$echo_ok" = 1 ] && [ "$fatal" = 0 ]
 }
 
@@ -122,19 +131,22 @@ pass=0
 n=0
 random_hexes=""
 stack_vas=""
+boot_stacks=""
 while [ "$n" -lt "$BOOTS" ]; do
     n=$((n + 1))
     echo
     echo "=== live-entropy boot $n ==="
     if run_one "$(printf '%02d' "$n")"; then
         pass=$((pass + 1))
-        # run_one wrote the two detail lines; re-derive them for the
+        # run_one wrote the detail lines; re-derive them for the
         # cross-boot non-determinism proof.
         tag2="$(printf '%02d' "$n")"
         h="$(sed -n "s/^$tag2: random-hex=\([0-9a-f]*\)$/\1/p" "$REPORT" | head -1)"
         s="$(sed -n "s/^$tag2: exec-stack-va=0x\([0-9a-f]*\)$/\1/p" "$REPORT" | head -1)"
+        b="$(sed -n "s/^$tag2: boot-stack-va=0x\([0-9a-f]*\)$/\1/p" "$REPORT" | head -1)"
         [ -n "$h" ] && random_hexes="$random_hexes $h"
         [ -n "$s" ] && stack_vas="$stack_vas $s"
+        [ -n "$b" ] && boot_stacks="$boot_stacks $b"
     fi
 done
 
@@ -142,20 +154,23 @@ echo
 echo "=== result ==="
 nondet_random=0
 nondet_stack=0
+nondet_boot=0
 if [ "$pass" = "$BOOTS" ]; then
     # The non-determinism proof: every boot's random hex must differ from
-    # every other's, and every exec stack VA must differ (two distinct
-    # values with 2 boots).
+    # every other's, and every exec + boot stack VA must differ (two
+    # distinct values with 2 boots).
     first_hex="$(echo "$random_hexes" | tr ' ' '\n' | sed '/^$/d' | sort -u | wc -l | tr -d ' ')"
     first_stack="$(echo "$stack_vas" | tr ' ' '\n' | sed '/^$/d' | sort -u | wc -l | tr -d ' ')"
+    first_boot="$(echo "$boot_stacks" | tr ' ' '\n' | sed '/^$/d' | sort -u | wc -l | tr -d ' ')"
     [ "$first_hex" = "$BOOTS" ] && nondet_random=1
     [ "$first_stack" = "$BOOTS" ] && nondet_stack=1
-    if [ "$nondet_random" = 1 ] && [ "$nondet_stack" = 1 ]; then
-        echo "verify-live-entropy: PASS — entropy: seeded n=64 from the REAL virtio device, random 32 emits 64 hex chars, the shell stays responsive, and $BOOTS boots produced DIFFERENT random sequences AND different exec stack placements (the CSPRNG + ASLR consumer are non-deterministic across boots)."
-        echo "PASS: $pass/$BOOTS (non-deterministic random + ASLR stack)" >> "$REPORT"
+    [ "$first_boot" = "$BOOTS" ] && nondet_boot=1
+    if [ "$nondet_random" = 1 ] && [ "$nondet_stack" = 1 ] && [ "$nondet_boot" = 1 ]; then
+        echo "verify-live-entropy: PASS — entropy: seeded n=64 from the REAL virtio device, random 32 emits 64 hex chars, the shell stays responsive, and $BOOTS boots produced DIFFERENT random sequences, DIFFERENT exec stack placements, AND DIFFERENT boot-time user stack placements (the CSPRNG + both ASLR consumers are non-deterministic across boots)."
+        echo "PASS: $pass/$BOOTS (non-deterministic random + exec ASLR + boot ASLR)" >> "$REPORT"
         exit 0
     fi
-    echo "verify-live-entropy: FAILED — all $BOOTS boots passed individually but the non-determinism proof failed (random-hexes:'$random_hexes' stack-vas:'$stack_vas')."
+    echo "verify-live-entropy: FAILED — all $BOOTS boots passed individually but the non-determinism proof failed (random-hexes:'$random_hexes' exec-stack-vas:'$stack_vas' boot-stack-vas:'$boot_stacks')."
     echo "FAIL: non-determinism ($pass/$BOOTS boots passed)" >> "$REPORT"
     exit 1
 fi
