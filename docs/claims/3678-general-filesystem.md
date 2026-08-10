@@ -24,10 +24,10 @@
 - **Depends on:** milestone-four card 1 (merged PRs #69/#70), claim 6420
   (FAT32 storage driver + virtio-blk), claim 3475 (the file window being
   generalized).
-- **Status:** 🔄 in progress 2026-08-10 — **Stages A + B + C landed**
-  (volume generalization, directories/paths, monitor path arguments —
-  class A green + live-fs 1/1 on VZ; see Notes); Stage D remains on this
-  claim.
+- **Status:** ✅ done 2026-08-10 — all four stages landed (volume
+  generalization, directories/paths, monitor path arguments, and the
+  second on-disk partition with a live gate); class A green + the new
+  `tools/verify-live-gfs.sh` class-B gate PASS 1/1 on VZ (see Notes).
 
 ## Notes
 
@@ -75,12 +75,38 @@ with `ls EFI/BOOT` + `cat EFI/BOOT/BOOTAA64.EFI`, PASS 1/1 on VZ: the
 loader's directory lists and cat reports `file is 0x29600 bytes; direct
 read caps at 0x800 bytes` (`artifacts/live-fs-serial-A-1.log`).
 
+**Stage D (a second FAT32 partition on the disk + live gate):**
+`image/mkfat32.py` grew to a 128 MiB default disk (two FAT32 volumes need
+>65,525 clusters each) with the ESP at LBA 2048 (186335 sectors) and a
+36 MiB **DATA partition** (Linux-FS type GUID `0FC63DAF-…`) at LBA
+188383 built by `build_data_volume` (volume label `DIPSHITOS`, README.TXT
++ DATA.TXT) — `--list` reports both partitions. Kernel: the GPT walk was
+refactored into a shared `find_partition_by_type`; `fat.mount_data(ops)`
+mounts the data volume by GUID and `esp` gained `set_volume`/`resnapshot`
+so the window re-snapshots the active volume's root with an honest label.
+New monitor command `mount <esp|data>` (registry 28→29) switches the
+active FAT volume; `cmd_write`'s success reply now names the actual
+volume (`persisted N bytes to FAT on the <volume>`) instead of always
+claiming the ESP. Host tests: fat 15 (mount_data over a two-partition
+fixture, bad-GUID rejection), esp 20, monitor 168. Live gate
+`tools/verify-live-gfs.sh` (registered in gate-inventory + `just
+verify-vz`) — **PASS 1/1 on VZ**: run A mounts the DATA volume by GUID
+(`mount: data vol_lba=0x2dfdf`), lists README.TXT/DATA.TXT `[data]`,
+cats DATA.TXT, writes `hello.txt`; run B (same disk, fresh boot) still
+lists `HELLO.TXT [data]` and prints `hello world` — the general volume
+persisted ON THE DISK across reboot, independent of the ESP. Evidence:
+`artifacts/live-gfs-*` + `artifacts/gates-gfs-3678.txt`.
+
 ## Verification
 
-- **Class A (Stage A):** fmt, unit tests (fat incl. new volume tests, esp,
-  all monitor modules), transcript byte-identical, build/image/inspect,
-  swift build, context, coordination ×2, mmu-debt — green 2026-08-10.
-- **Class B:** Stages B/D — new `tools/verify-live-gfs.sh` (or extended
-  live-fs) on VZ: second partition mounted, list/read/write, persistence
-  across boots; regressions live-fs/exec/entropy re-run.
-- **Evidence:** `artifacts/live-gfs-*` (Stage D).
+- **Class A (all stages):** fmt, unit tests (fat 15 incl. new volume tests,
+  esp 20, all monitor modules 168), transcript byte-identical,
+  build/image/inspect, swift build, context, coordination ×2,
+  mmu-debt — green 2026-08-10.
+- **Class B:** Stages B/C — `verify-live-fs.sh` 1/1 on VZ (refactored ESP
+  path + `ls EFI/BOOT` / `cat EFI/BOOT/BOOTAA64.EFI`); Stage D — new
+  `tools/verify-live-gfs.sh` **PASS 1/1** (data volume mounted by GUID,
+  listed, read, written, persistent across reboot); regressions
+  live-fs/exec/entropy re-run.
+- **Evidence:** `artifacts/live-gfs-*`, `artifacts/live-fs-*`,
+  `artifacts/gates-gfs-3678.txt`.

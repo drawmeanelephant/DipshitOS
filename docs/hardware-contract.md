@@ -38,6 +38,13 @@ assumption comes from documentation or reasoning only.
   register reads 0 post-exit and the queue is dead, so the driver re-arms
   the queue post-MMU (common-config MMIO writes to the BAR window work
   post-exit; PCI config-space reads must stay pre-exit, claim 0013).
+  **Disk layout (claim 3678, milestone four card 2):** the image
+  (`image/mkfat32.py`) is 128 MiB with TWO FAT32 partitions — the ESP
+  (type GUID `C12A7328-…`, LBA 2048, 186335 sectors) and a 36 MiB DATA
+  partition (Linux-FS type GUID `0FC63DAF-…`, LBA 188383, 73728 sectors)
+  — both discovered by scanning the GPT entries for the type GUID
+  (`fat.mount` / `fat.mount_data`); nothing outside the GPT constrains a
+  volume's offset.
 - Console: virtio console serial port
   (`VZVirtioConsoleDeviceSerialPortConfiguration`). **Observed**: on
   macOS 27 / Apple silicon, Apple's EFI firmware does NOT route UEFI

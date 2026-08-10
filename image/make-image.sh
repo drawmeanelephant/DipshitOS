@@ -24,7 +24,7 @@ EFI_BIN="${1:-$ROOT_DIR/zig-out/bin/BOOTAA64.EFI}"
 IMAGE="${2:-$ROOT_DIR/artifacts/disk.img}"
 KERNEL_BIN="${3:-$ROOT_DIR/zig-out/bin/KERNEL.BIN}"
 USER_BIN="${4:-$ROOT_DIR/zig-out/bin/USER.BIN}"
-SIZE_MB="${DIPSHITOS_IMAGE_SIZE_MB:-64}"
+SIZE_MB="${DIPSHITOS_IMAGE_SIZE_MB:-128}"
 
 cd "$ROOT_DIR"
 

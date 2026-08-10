@@ -138,6 +138,12 @@ const State = struct {
     }
 };
 
+/// Label of the ACTIVE volume the window snapshots: "esp" at boot, "data"
+/// after `mount data` switches to the second FAT32 partition (milestone
+/// four card 2). Drives the `ls` header/kind text so a switched volume is
+/// never mislabeled.
+var volume_label: [8]u8 = .{ 'e', 's', 'p', 0, 0, 0, 0, 0 };
+
 var state: State = .{};
 
 // ---------------------------------------------------------------------------
@@ -159,10 +165,34 @@ pub fn set_disk(ops: ?fat.DiskOps) fat.MountResult {
     state.clear();
     const r = fat.mount(ops);
     if (r == .ok) {
+        set_volume("esp");
         snapshot_window();
         state.disk_ready = true;
     }
     return r;
+}
+
+/// Set the active volume label ("esp" or "data").
+pub fn set_volume(label: []const u8) void {
+    @memset(&volume_label, 0);
+    const take = @min(label.len, volume_label.len);
+    @memcpy(volume_label[0..take], label[0..take]);
+}
+
+/// The active volume label ("esp" at boot; "data" after `mount data`).
+pub fn volume() []const u8 {
+    var len: usize = 0;
+    while (len < volume_label.len and volume_label[len] != 0) : (len += 1) {}
+    return volume_label[0..len];
+}
+
+/// Re-snapshot the window from the CURRENT fat mount — after `mount data`
+/// switches the active volume, the window reflects the switched volume's
+/// root, labeled by `set_volume` (milestone four card 2).
+pub fn resnapshot() void {
+    state.clear();
+    snapshot_window();
+    state.disk_ready = true;
 }
 
 pub fn disk_ready() bool {

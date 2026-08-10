@@ -97,5 +97,47 @@
   EFI/BOOT tree is reachable from the shell on real hardware
   (`artifacts/live-fs-serial-A-1.log`).
 
-- **Remaining on this claim:** Stage D (second FAT partition on the image
-  + live gate + docs reconciliation + PR).
+- **Implemented — Stage D (a second FAT32 partition on the disk + live
+  gate)** (2026-08-10): `image/mkfat32.py` — the default image grew to
+  128 MiB (two FAT32 volumes each need >65,525 clusters for FAT32
+  geometry) with the ESP at LBA 2048 (186335 sectors) and a 36 MiB DATA
+  partition (Linux-FS type GUID `0FC63DAF-8483-4772-8E79-3D69D8477DE4`)
+  at LBA 188383, built by `build_data_volume` (volume label DIPSHITOS;
+  README.TXT + DATA.TXT); `--list` reports both partitions; the cat-file
+  reader's partition-offset math was fixed (entries are 128 B, 4 per
+  sector — the old code read entry 4 as if it were entry 1, which only
+  ever matched the ESP by luck). `make-image.sh` passes the new 128 MiB
+  default through. Kernel: the GPT walk was refactored into a shared
+  `find_partition_by_type`; `fat.mount_data(ops)` mounts the DATA volume
+  by GUID; `esp` gained `set_volume`/`resnapshot` so the window
+  re-snapshots the active volume's root; new monitor command `mount
+  <esp|data>` (registry 28→29, registered in shell.zig help + the
+  transcript fixture byte-exactly via perl); `cmd_write`'s success reply
+  now names the REAL volume (`persisted N bytes to FAT on the <volume>`)
+  instead of always claiming the ESP. virtio_blk's host test gained an
+  explicit `fat.mount(null)` unmount (monitor now imports virtio_blk, so
+  the test runs inside the monitor binary where an earlier test leaves
+  FAT mounted against a freed fixture).
+
+- **Verification — Stage D** (2026-08-10): class A all green — fmt, unit
+  tests (fat 15, esp 20, monitor 168 incl. the new `mount` no-disk test),
+  transcript byte-identical, build/image/inspect, swift build, context,
+  coordination, test-coordination, mmu-debt. Class B: new
+  `tools/verify-live-gfs.sh` (registered in gate-inventory + `just
+  verify-vz`) **PASS 1/1 on VZ** — run A: `mount data` →
+  `mount: data vol_lba=0x2dfdf files=2`, `ls` lists README.TXT/DATA.TXT
+  `[data]`, `cat DATA.TXT` prints the data-volume content, `write
+  hello.txt hello world` → `write: ok (persisted 11 bytes to FAT on the
+  data)`; run B (SAME disk image, fresh boot): `mount data` lists
+  `HELLO.TXT [data]` and `cat hello.txt` prints `hello world` — the
+  general volume persisted the write ON THE DISK across reboot,
+  independent of the ESP. Evidence: `artifacts/live-gfs-*`
+  (`live-gfs-serial-A-1.log` / `-B-1.log`). live-fs regression 1/1.
+
+- **Docs reconciled — claim closed** (2026-08-10): claim 3678 → ✅;
+  march-m4 row 2 ✅ (process abstraction / network remain ⬜); status.md
+  milestone-four row + related-docs pointer + 28→29 command count;
+  roadmap general-filesystem sketch → done; hardware-contract disk bullet
+  (two-partition layout `[observed]`); README (29 commands, card-2
+  paragraph); gate-inventory `live-gfs` row + `verify-vz` aggregate;
+  indexes refreshed. Committed + PR #71 updated.

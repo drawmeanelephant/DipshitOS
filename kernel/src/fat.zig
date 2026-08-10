@@ -58,6 +58,12 @@ const fat_eoc_min: u32 = 0x0ffffff8;
 /// GPT type GUID of the EFI System Partition (the bytes mkfat32.py writes).
 const esp_type_guid = [16]u8{ 0x28, 0x73, 0x2a, 0xc1, 0x1f, 0xf8, 0xd2, 0x11, 0xba, 0x4b, 0x00, 0xa0, 0xc9, 0x3e, 0xc9, 0x3b };
 
+/// GPT type GUID of the DATA partition — the Linux filesystem GUID
+/// 0FC63DAF-8483-4772-8E79-3D69D8477DE4 (the bytes mkfat32.py writes). A
+/// second FAT32 volume on the same disk, mounted by `mount_data`
+/// (milestone four card 2: the general, non-ESP filesystem).
+const data_type_guid = [16]u8{ 0xaf, 0x3d, 0xc6, 0x0f, 0x83, 0x84, 0x72, 0x47, 0x8e, 0x79, 0x3d, 0x69, 0xd8, 0x47, 0x7d, 0xe4 };
+
 /// The injected sector interface. Each call transfers exactly one 512-byte
 /// sector; `true` on success. `virtio_blk.zig` implements these over the
 /// virtio-blk queue; tests implement them over an in-memory image.
@@ -185,11 +191,11 @@ pub fn mount_partition(ops: ?DiskOps, base_lba: u64) MountResult {
     return .ok;
 }
 
-/// Install the sector interface and mount the ESP: read the GPT (LBA 1 +
-/// partition entries), locate the EFI System Partition by type GUID, and
-/// mount its volume (`mount_partition`). The ESP stays the boot default
-/// (claim 6420); `mount_partition` is the general entry point (milestone
-/// four card 2).
+/// Install the sector interface and mount the ESP: locate the EFI System
+/// Partition by type GUID in the GPT and mount its volume
+/// (`mount_partition`). The ESP stays the boot default (claim 6420);
+/// `mount_partition` is the general entry point and `mount_data` mounts
+/// the second FAT32 volume (milestone four card 2).
 pub fn mount(ops: ?DiskOps) MountResult {
     if (ops == null) {
         state.ops = null;
@@ -199,33 +205,60 @@ pub fn mount(ops: ?DiskOps) MountResult {
     state.ops = ops;
     state.mounted = false;
     state.last_fail_lba = 0;
+    switch (gpt_partition_lba(esp_type_guid)) {
+        .found => |lba| return mount_partition(ops, lba),
+        .not_found => return .bad_gpt,
+        .io_failed => return .io_failed,
+    }
+}
 
+/// Mount the DATA partition — the second FAT32 volume on the disk
+/// (Linux-filesystem type GUID, the bytes mkfat32.py writes) — the general,
+/// non-ESP filesystem (milestone four card 2). GPT discovery then
+/// `mount_partition`.
+pub fn mount_data(ops: ?DiskOps) MountResult {
+    if (ops == null) {
+        state.ops = null;
+        state.mounted = false;
+        return .no_disk;
+    }
+    state.ops = ops;
+    state.mounted = false;
+    state.last_fail_lba = 0;
+    switch (gpt_partition_lba(data_type_guid)) {
+        .found => |lba| return mount_partition(ops, lba),
+        .not_found => return .bad_gpt,
+        .io_failed => return .io_failed,
+    }
+}
+
+/// Walk the GPT partition entries (header at LBA 1, entries table after)
+/// for the first partition whose type GUID matches `type_guid` — the shared
+/// discovery behind `mount` (ESP) and `mount_data` (data partition).
+const GptLookup = union(enum) { found: u64, not_found, io_failed };
+
+fn gpt_partition_lba(type_guid: [16]u8) GptLookup {
     // GPT header at LBA 1 (mkfat32.py layout; the protective MBR at LBA 0
     // is not parsed — the GPT is the identity).
     var hdr: [sector_size]u8 = undefined;
     if (!read_sector(1, &hdr)) return .io_failed;
-    if (!std.mem.eql(u8, hdr[0..8], "EFI PART")) return .bad_gpt;
+    if (!std.mem.eql(u8, hdr[0..8], "EFI PART")) return .not_found;
     const entries_lba = read_le(u64, hdr[72..80]);
     const num_entries = read_le(u32, hdr[80..84]);
     const entry_size = read_le(u32, hdr[84..88]);
-    if (entries_lba == 0 or num_entries == 0 or num_entries > 128 or entry_size < 128 or entry_size > sector_size) return .bad_gpt;
+    if (entries_lba == 0 or num_entries == 0 or num_entries > 128 or entry_size < 128 or entry_size > sector_size) return .not_found;
 
-    // Walk the partition entries for the ESP type GUID.
-    var esp_lba: u64 = 0;
     var ei: u32 = 0;
     while (ei < num_entries) : (ei += 1) {
         const slot = entries_lba + @as(u64, ei) * entry_size / sector_size;
         const off = @as(usize, ei) * entry_size % sector_size;
         if (!read_sector(slot, &hdr)) return .io_failed;
         if (off + 128 > sector_size) continue;
-        if (std.mem.eql(u8, hdr[off .. off + 16], &esp_type_guid)) {
-            esp_lba = read_le(u64, hdr[off + 32 .. off + 40]);
-            break;
+        if (std.mem.eql(u8, hdr[off .. off + 16], &type_guid)) {
+            return .{ .found = read_le(u64, hdr[off + 32 .. off + 40]) };
         }
     }
-    if (esp_lba == 0) return .bad_gpt;
-
-    return mount_partition(ops, esp_lba);
+    return .not_found;
 }
 
 pub fn mounted() bool {
@@ -1370,6 +1403,46 @@ test "fat: write_file resolves into an existing subdirectory by path" {
     try std.testing.expectEqual(WriteResult.bad_path, write_file("EFI/NOPE/x.txt", "x"));
     try std.testing.expectEqual(WriteResult.bad_path, write_file("KERNEL.BIN/x.txt", "x")); // file, not a dir
     try std.testing.expectEqual(WriteResult.name_too_long, write_file("EFI/BOOT/", "x")); // trailing '/'
+}
+
+/// Add a DATA partition (Linux-FS type GUID) at `base_lba` to the fixture's
+/// GPT entries and lay a minimal data volume there — mirrors the real
+/// image's two-partition layout so `mount_data` has a second partition to
+/// discover by GUID.
+fn add_data_partition(img: []u8, base_lba: u64) void {
+    const ent_off: usize = 2 * sector_size + 128; // GPT entry index 1
+    @memcpy(img[ent_off .. ent_off + 16], &data_type_guid);
+    std.mem.writeInt(u64, img[ent_off + 32 ..][0..8], base_lba, .little);
+    std.mem.writeInt(u64, img[ent_off + 40 ..][0..8], base_lba + 100, .little);
+    write_min_volume(img, base_lba);
+}
+
+test "fat: mount_data mounts the second FAT32 partition by type GUID" {
+    var fxt = try build_fixture(test_allocator, false);
+    defer test_allocator.free(fxt.buf);
+    add_data_partition(fxt.buf, 100000);
+    make_state_fixture(&fxt);
+    // The ESP wrapper is unchanged: still finds the ESP by GUID.
+    try std.testing.expectEqual(MountResult.ok, mount(test_ops()));
+    try std.testing.expectEqual(@as(u64, 2048), geometry().vol_lba);
+    // mount_data discovers the DATA partition by its type GUID.
+    try std.testing.expectEqual(MountResult.ok, mount_data(test_ops()));
+    try std.testing.expectEqual(@as(u64, 100000), geometry().vol_lba);
+    var out: [8]DirEntry = undefined;
+    try std.testing.expectEqual(@as(usize, 1), list_root(&out));
+    try std.testing.expectEqualStrings("DATA.TXT", out[0].name[0..out[0].name_len]);
+    var buf: [64]u8 = undefined;
+    const got = (read_file("DATA.TXT", &buf) orelse return error.TestUnexpectedResult);
+    try std.testing.expectEqualStrings("hello disk", buf[0..got]);
+
+    // A disk without a data partition reports bad_gpt honestly, and the ESP
+    // path still works after the failed lookup.
+    var fxt2 = try build_fixture(test_allocator, false);
+    defer test_allocator.free(fxt2.buf);
+    make_state_fixture(&fxt2);
+    try std.testing.expectEqual(MountResult.bad_gpt, mount_data(test_ops()));
+    try std.testing.expectEqual(MountResult.ok, mount(test_ops()));
+    try std.testing.expectEqual(@as(u64, 2048), geometry().vol_lba);
 }
 
 test "fat: file_size reports sizes by name and /-path, null for dirs" {

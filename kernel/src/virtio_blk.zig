@@ -460,7 +460,11 @@ test "virtio_blk: request layout is the spec shape" {
     try std.testing.expectEqual(@as(usize, 512), @sizeOf(@TypeOf(blk_req.data)));
     try std.testing.expectEqual(@as(usize, 1), @sizeOf(@TypeOf(blk_req.status)));
     try std.testing.expect(@intFromPtr(&blk_req) % 512 == 0);
-    // A fresh transport reports no-disk honestly.
+    // A fresh transport reports no-disk honestly. The FAT module is
+    // explicitly unmounted first: this test runs inside the monitor test
+    // binary too (monitor imports virtio_blk for `mount`), where earlier
+    // tests leave it mounted against a fixture that is already freed.
     blk_ready = false;
+    _ = fat.mount(null);
     try std.testing.expectEqual(fat.WriteResult.no_disk, fat.write_file("x.txt", "x"));
 }

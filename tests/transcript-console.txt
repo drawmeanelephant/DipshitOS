@@ -17,6 +17,7 @@ available commands:
   hex         format an integer in hexadecimal
   ls          list files on the ESP (or a directory by path)
   mem         summarize the EFI memory map
+  mount       switch the active FAT volume (esp or data)
   pages       physical page allocator pool
   pci         enumerate PCI devices on the bus
   procs       process registry: image, address space, lifecycle, exit status

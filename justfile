@@ -47,6 +47,7 @@ verify-vz:
     bash tools/verify-host-console.sh
     bash tools/verify-live-transcript.sh
     bash tools/verify-live-fs.sh
+    bash tools/verify-live-gfs.sh
     bash tools/verify-live-timer.sh
     bash tools/verify-live-tasks.sh
     bash tools/verify-live-userspace.sh
@@ -187,6 +188,10 @@ verify-live-uaccess:
 # Verify the live ESP file window (class B — boots VZ VMs; ls/cat from the pre-exit ESP snapshot + write persisted to EFI NVRAM and read back across a reboot; claim 3475, hard gate 5; Apple silicon only)
 verify-live-fs:
     bash tools/verify-live-fs.sh
+
+# Verify the live general (non-ESP) filesystem (class B — boots VZ VMs; the DATA partition on the same disk is mounted by GUID, listed/read/written, and persists across a reboot; claim 3678; Apple silicon only)
+verify-live-gfs:
+    bash tools/verify-live-gfs.sh
 
 # Verify the live reboot/shutdown observation (class B — boots VZ VMs; a real EFI ResetSystem from a live dipshit> shell: reboot resets the machine, shutdown powers it off; claim 0527, hard gate 6; Apple silicon only)
 verify-live-reboot:

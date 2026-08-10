@@ -207,6 +207,7 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "  hex         format an integer in hexadecimal\n" ++
         "  ls          list files on the ESP (or a directory by path)\n" ++
         "  mem         summarize the EFI memory map\n" ++
+        "  mount       switch the active FAT volume (esp or data)\n" ++
         "  pages       physical page allocator pool\n" ++
         "  pci         enumerate PCI devices on the bus\n" ++
         "  procs       process registry: image, address space, lifecycle, exit status\n" ++
