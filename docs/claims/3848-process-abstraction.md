@@ -18,10 +18,11 @@
 - **Depends on:** milestone-three close-out (tag `m3-userspace`), claims
   6729 (task lifecycle), 6783 (ESP exec), 5804 (per-task address spaces),
   8215 (boot static EL0 payload), 3594/6120 (syscall ABI + uaccess).
-- **Status:** 🔄 in progress 2026-08-10 — Stages A + B landed: the
-  process object + registry + exec/scheduler integration (Stage A) and
-  the `procs` monitor command + live gate (Stage B); Stage C (docs
-  reconciliation + claim flip) remains.
+- **Status:** ✅ done 2026-08-10 — all three stages landed (the process
+  object + registry + exec/scheduler integration, the `procs` monitor
+  command + live gate, and the docs reconciliation); class A green +
+  the new `tools/verify-live-procs.sh` class-B gate PASS 1/1 on VZ (see
+  Notes).
 
 ## Notes
 
@@ -57,3 +58,10 @@ task exit report. Scheduler → process is a one-way import (no cycle).
   regressions (exec/tasks/lifecycle/addrspaces/userspace) green.
 - **Evidence:** `artifacts/live-procs-*`, `artifacts/live-exec-*`
   (evidence `artifacts/live-procs-serial-01.log` shows the full table).
+
+**Docs reconciled 2026-08-10:** march-m4 row 3 → ✅ (process abstraction /
+network remain ⬜ on this branch; card 2's row lands with PR #71),
+roadmap "Eventually: a process abstraction" → done, status milestone-four
+row + related-docs pointer + command count 28→29, README (29 commands +
+card-3 paragraph), gate-inventory `live-procs` row + `verify-vz` aggregate;
+indexes refreshed; claim closed; PR #72 finalized.

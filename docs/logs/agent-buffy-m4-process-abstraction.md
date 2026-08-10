@@ -93,3 +93,11 @@
   partial line) and the `user: hello from the ESP` marker (it carries a
   `dipshit> ` prompt prefix on the serial line) — both now substring
   matches like live-exec's proven assertions.
+
+- **Docs reconciled — claim closed** (2026-08-10): claim 3848 → ✅;
+  march-m4 row 3 ✅ (network remains ⬜; card 2's row lands with PR
+  #71); roadmap process-abstraction sketch → done; status.md
+  milestone-four row + related-docs pointer + 28→29 command count;
+  README (29 commands, card-3 paragraph); gate-inventory `live-procs`
+  row + `verify-vz` aggregate (Stage B); indexes refreshed. Committed +
+  PR #72 finalized.

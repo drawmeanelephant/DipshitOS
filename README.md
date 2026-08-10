@@ -49,7 +49,7 @@ serial console: identity commands, memory-map inspection, shell utilities,
 machine controls, and an ESP file window. The host plumbing (duplex
 serial, terminal handling, `zig build console`), console & shell core (RX
 abstraction, line editor, tokenizer, prompt loop), and command registry
-(28 commands, mock-tested) are built; the transcript test gate passes
+(29 commands, mock-tested) are built; the transcript test gate passes
 (`zig build test-console`, byte-identical fixture). The **VZ serial gate
 passes** (claim 1517 — post-MMU virtio TX fixed with T0SZ=16 + `tlbi
 vmalle1` at the switch), **live RX** delivers host keystrokes end to end
@@ -135,7 +135,7 @@ dipshitos/
 │   ├── src/handoff.zig        Handoff v2 struct validation
 │   ├── src/lineedit.zig       Fixed-buffer line editor (no allocator)
 │   ├── src/tokenizer.zig      Command-line tokenizer (no allocator)
-│   ├── src/monitor.zig        Comptime command registry (28 commands)
+│   ├── src/monitor.zig        Comptime command registry (29 commands)
 │   ├── src/shell.zig          Prompt loop: banner → lineedit → tokenize → exec
 │   ├── src/esp.zig            ESP file window over the live FAT32 volume (ls/cat/write)
 │   ├── src/fat.zig            GPT + FAT32 mount/list/read/write (injected sector I/O)
@@ -247,7 +247,15 @@ All command output and logs are saved under `artifacts/` (`inspect.txt`,
   twice and proves the virtio entropy device (DID 0x1044) seeds the
   ChaCha20 CSPRNG (`entropy: seeded n=64`), `random 32` emits 64 hex
   chars, and two boots produce DIFFERENT sequences and exec stack
-  placements (the exec-path ASLR consumer).
+  placements (the exec-path ASLR consumer). Milestone-four card 3
+  (2026-08-10, claim 3848) adds the **process abstraction**: a bounded
+  registry (`kernel/src/process.zig`) where each Process owns the loaded
+  image, the address space, the lifecycle, and the exit status (which now
+  survives the executor task's reap); exec and the boot-time static EL0
+  payload are real processes, and `bash tools/verify-live-procs.sh` proves
+  it live — `procs` shows the exec'd USER.BIN running with its stack and
+  the boot payload exited (status 7 kept past the reap), plus the process
+  exit report `procs USER.BIN exited status=43`.
 - The Virtualization.framework VM boots the GPT+FAT image: configuration
   validates, the EFI variable store is created, the VM starts and runs, and
   after boot the guest-written marker file `\BOOTED.TXT` exists on the ESP

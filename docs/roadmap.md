@@ -356,8 +356,17 @@ gates pass; tagged `m1.5-interactive-monitor`** (see
   `tools/verify-live-entropy.sh` PASS 2/2 — two boots produce different
   `random` sequences and stack placements; see
   `docs/hardware-contract.md` (entropy bullet now `[observed]`).
-- Eventually: a process abstraction, a network stack — each only when the
-  ones below it are demonstrably working.
+- **A process abstraction is DONE 2026-08-10 (claim 3848, milestone four
+  card 3)** — a bounded process registry (`kernel/src/process.zig`) where
+  each Process owns the loaded image, the address space, the lifecycle
+  state, and the exit status (which now survives the executor task's
+  reap); exec and the boot-time static EL0 payload register as real
+  processes, `exit_current` feeds the registry, the `procs` monitor
+  command (registry 28→29) prints the table, and the new class-B gate
+  `tools/verify-live-procs.sh` PASS 1/1 shows the exec'd program running
+  as a process with the boot payload's exited status kept past the reap.
+- Eventually: a network stack — only when the ones below it are
+  demonstrably working.
 
 Each milestone must state what was **observed** versus **inferred** and must
 record new hardware assumptions in `docs/hardware-contract.md`.
