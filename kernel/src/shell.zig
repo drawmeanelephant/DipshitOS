@@ -209,6 +209,7 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "  mem         summarize the EFI memory map\n" ++
         "  pages       physical page allocator pool\n" ++
         "  pci         enumerate PCI devices on the bus\n" ++
+        "  random      print n random bytes from the seeded CSPRNG (hex)\n" ++
         "  reboot      restart the machine\n" ++
         "  repeat      repeat text, safely bounded\n" ++
         "  shutdown    request power-off\n" ++

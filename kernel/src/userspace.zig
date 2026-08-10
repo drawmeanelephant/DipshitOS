@@ -42,6 +42,24 @@ extern var __user_stack_end: u8;
 pub const text_va: u64 = 0x0040_0000; // 4 MiB
 pub const stack_va: u64 = 0x8000_0000; // 2 GiB
 
+/// Current EL0 user stack VA. Defaults to the fixed `stack_va`; the exec
+/// path (milestone four, claim 2665) randomizes it from the seeded CSPRNG
+/// before rebuilding the user root, so the loaded program's stack lands at
+/// a per-boot random placement (the seed's real ASLR consumer). The
+/// boot-time static payload's root is built pre-seed, so it always uses
+/// the fixed default.
+var current_stack_va: u64 = stack_va;
+
+/// Set the current EL0 user stack VA (the exec rebuild, claim 2665).
+pub fn set_stack_va(va: u64) void {
+    current_stack_va = va;
+}
+
+/// The current EL0 user stack VA (fixed default until exec randomizes it).
+pub fn user_stack_va() u64 {
+    return current_stack_va;
+}
+
 /// User-space VA of a kernel address inside the .usertext image section.
 /// KERNEL-ONLY, pre-jump: `kernel_addr` is a runtime (identity) address of
 /// an image symbol; `image_base` is the loader base; the linker-script
@@ -66,11 +84,15 @@ pub fn bss_user_va(image_base: u64, kernel_addr: u64) u64 {
 /// against (text read-only, stack read-write). Lengths come from the
 /// linker-script externs (image offsets — consistent in any world).
 pub fn text_va_region() Region {
+    // Host test builds have no linker-script externs (same guard as
+    // `image_user_va`): return the fixed VA with a nominal length.
+    if (comptime builtin.is_test) return .{ .base = text_va, .len = 0x1000 };
     return .{ .base = text_va, .len = @intFromPtr(&__user_text_end) - @intFromPtr(&__user_text_start) };
 }
 
 pub fn stack_va_region() Region {
-    return .{ .base = stack_va, .len = @intFromPtr(&__user_stack_end) - @intFromPtr(&__user_stack_start) };
+    if (comptime builtin.is_test) return .{ .base = current_stack_va, .len = 0x2000 };
+    return .{ .base = current_stack_va, .len = @intFromPtr(&__user_stack_end) - @intFromPtr(&__user_stack_start) };
 }
 
 pub fn text_region(image_base: u64) Region {

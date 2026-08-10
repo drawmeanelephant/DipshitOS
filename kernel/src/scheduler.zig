@@ -289,8 +289,8 @@ pub fn register_worker(entry: u64) ?usize {
 /// (`mmu.user_root_phys()`). One user program at a time is enforced by
 /// `user_root_in_use` — the exec gate. The task reuses the static user
 /// stack pages as SP_EL0 (the previous user task is gone by the gate).
-pub fn register_exec_user(entry_va: u64) ?usize {
-    const sp_el0 = userspace.stack_va + user_stack.len;
+pub fn register_exec_user(entry_va: u64, stack_va: u64) ?usize {
+    const sp_el0 = stack_va + user_stack.len;
     return spawn("user-exec", entry_va, spsr_el0t_irqs, &user_kernel_stack, mmu.user_root_phys(), sp_el0);
 }
 

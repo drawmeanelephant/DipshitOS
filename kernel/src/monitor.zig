@@ -33,6 +33,7 @@ const syscall = @import("syscall.zig"); // claim 3594: syscall table + counters
 const timer = @import("timer.zig");
 const uaccess = @import("uaccess.zig"); // claim 6120: fault-safe copy-in/copy-out
 const userspace = @import("userspace.zig"); // claim 5804: user-VA layout
+const csprng = @import("csprng.zig"); // milestone four (claim 2665): the seeded CSPRNG behind `random`
 
 // ---------------------------------------------------------------------------
 // Limits (fixed-size, explicit bounds)
@@ -46,6 +47,9 @@ pub const repeat_max_count: u64 = 64;
 pub const repeat_max_bytes: usize = 4096;
 /// `beans` refuses counts outside 1..beans_max_count.
 pub const beans_max_count: u64 = 100;
+/// `random` refuses counts outside 1..random_max_bytes (milestone four,
+/// claim 2665).
+pub const random_max_bytes: usize = 256;
 
 // ---------------------------------------------------------------------------
 // Execution result
@@ -202,7 +206,7 @@ pub const Command = struct {
 
 /// Number of commands. The registry is built at runtime (not a const
 /// table): see `ensure_registry`.
-pub const registry_count: usize = 27;
+pub const registry_count: usize = 28;
 
 /// Command registry, built at runtime into BSS. A `const` table would hold
 /// link-time absolute addresses for BOTH the string slices and the handler
@@ -234,6 +238,7 @@ fn ensure_registry() []const Command {
             .{ .name = "mem", .help = "summarize the EFI memory map", .usage = "mem", .handler = cmd_mem },
             .{ .name = "pages", .help = "physical page allocator pool", .usage = "pages [selftest]", .max_args = 1, .handler = cmd_pages },
             .{ .name = "pci", .help = "enumerate PCI devices on the bus", .usage = "pci", .handler = cmd_pci },
+            .{ .name = "random", .help = "print n random bytes from the seeded CSPRNG (hex)", .usage = "random [n]", .max_args = 1, .handler = cmd_random },
             .{ .name = "reboot", .help = "restart the machine", .usage = "reboot", .handler = cmd_reboot },
             .{ .name = "repeat", .help = "repeat text, safely bounded", .usage = "repeat <count> <text...>", .min_args = 1, .handler = cmd_repeat },
             .{ .name = "shutdown", .help = "request power-off", .usage = "shutdown", .handler = cmd_shutdown },
@@ -994,6 +999,8 @@ fn cmd_exec(m: *Monitor, args: []const []const u8) ExecError {
             m.console.print_hex(@intCast(info.content_len));
             m.console.puts(" entry=");
             m.console.print_hex(info.entry_va);
+            m.console.puts(" stack=");
+            m.console.print_hex(userspace.user_stack_va());
             const head = esp_exec.head();
             var head_value: u64 = 0;
             for (head, 0..) |byte, i| head_value |= @as(u64, byte) << @intCast(56 - i * 8);
@@ -1100,7 +1107,7 @@ fn cmd_addrspaces(m: *Monitor, args: []const []const u8) ExecError {
     m.console.puts("addrspaces: user text=");
     m.console.print_hex(userspace.text_va);
     m.console.puts(" stack=");
-    m.console.print_hex(userspace.stack_va);
+    m.console.print_hex(userspace.user_stack_va());
     m.console.puts(" leaves=");
     m.console.print_u64(leaves.leaves);
     m.console.puts(" device=");
@@ -1137,6 +1144,46 @@ fn cmd_uaccess(m: *Monitor, args: []const []const u8) ExecError {
     m.console.print_u64(d.copies);
     m.console.puts(" validation_faults=");
     m.console.print_u64(d.validation_faults);
+    m.console.puts("\n");
+    return .none;
+}
+
+// ---------------------------------------------------------------------------
+// Randomness command (milestone four, claim 2665)
+// ---------------------------------------------------------------------------
+
+/// Print `n` (1..256, default 16) random bytes from the seeded CSPRNG as
+/// lowercase hex on one grep-able line: `random: n=<count> hex=<2n hex>`.
+/// The CSPRNG is seeded at boot from the REAL virtio entropy device; the
+/// class-B gate proves the real path by requiring two boots to produce
+/// different output.
+fn cmd_random(m: *Monitor, args: []const []const u8) ExecError {
+    var count: usize = 16; // fixed-size sample when no argument
+    if (args.len == 1) {
+        count = @intCast(parseInt(args[0]) catch {
+            m.console.puts("random: invalid count: ");
+            m.console.puts(args[0]);
+            m.console.puts("\n");
+            return .invalid_argument;
+        });
+        if (count < 1 or count > random_max_bytes) {
+            m.console.puts("random: count must be between 1 and ");
+            m.console.print_u64(random_max_bytes);
+            m.console.puts("\n");
+            return .invalid_argument;
+        }
+    }
+    var buf: [random_max_bytes]u8 = undefined;
+    csprng.random_bytes(buf[0..count]);
+    m.console.puts("random: n=");
+    m.console.print_u64(count);
+    m.console.puts(" hex=");
+    const hex = "0123456789abcdef";
+    var i: usize = 0;
+    while (i < count) : (i += 1) {
+        m.console.putc(hex[@as(usize, buf[i] >> 4)]);
+        m.console.putc(hex[@as(usize, buf[i] & 0xf)]);
+    }
     m.console.puts("\n");
     return .none;
 }
@@ -1701,6 +1748,41 @@ test "monitor: beans is deterministic and bounded" {
     env.mock.reset();
     try std.testing.expectEqual(ExecError.invalid_argument, exec(&mon, &.{ "beans", "101" }));
     try std.testing.expectEqualStrings("beans: count must be between 1 and 100\n", env.mock.contents());
+}
+
+test "monitor: random prints a deterministic hex line from the seeded CSPRNG and bounds count" {
+    var env = TestEnv.init();
+    var mon = env.monitor();
+    try std.testing.expect(lookup("random") != null);
+    try std.testing.expectEqualStrings("print n random bytes from the seeded CSPRNG (hex)", lookup("random").?.help);
+    // Seed with a fixed value so the output is deterministic in the test.
+    csprng.seed(&[_]u8{0x5a} ** csprng.seed_len);
+    env.mock.reset();
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "random", "32" }));
+    const out = env.mock.contents();
+    try std.testing.expect(std.mem.startsWith(u8, out, "random: n=32 hex="));
+    const hex = out["random: n=32 hex=".len..];
+    // 64 hex chars then the line terminator.
+    try std.testing.expectEqual(@as(usize, 65), hex.len);
+    try std.testing.expectEqual(@as(u8, '\n'), hex[64]);
+    for (hex[0..64]) |c| {
+        const ok = (c >= '0' and c <= '9') or (c >= 'a' and c <= 'f');
+        try std.testing.expect(ok);
+    }
+    // No-arg prints the fixed 16-byte sample (32 hex chars).
+    env.mock.reset();
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"random"}));
+    try std.testing.expect(std.mem.startsWith(u8, env.mock.contents(), "random: n=16 hex="));
+    // Bounds: 1..256.
+    env.mock.reset();
+    try std.testing.expectEqual(ExecError.invalid_argument, exec(&mon, &.{ "random", "0" }));
+    try std.testing.expectEqualStrings("random: count must be between 1 and 256\n", env.mock.contents());
+    env.mock.reset();
+    try std.testing.expectEqual(ExecError.invalid_argument, exec(&mon, &.{ "random", "257" }));
+    try std.testing.expectEqualStrings("random: count must be between 1 and 256\n", env.mock.contents());
+    env.mock.reset();
+    try std.testing.expectEqual(ExecError.invalid_argument, exec(&mon, &.{ "random", "zz" }));
+    try std.testing.expect(std.mem.startsWith(u8, env.mock.contents(), "random: invalid count: "));
 }
 
 test "monitor: fault is registered and honestly reports no vectors in a test process" {
