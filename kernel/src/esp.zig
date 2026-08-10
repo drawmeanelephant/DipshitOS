@@ -55,6 +55,10 @@ pub const WriteResult = enum {
     /// The name does not fit FAT 8.3 (stem > 8 chars or extension > 3).
     name_too_long,
     content_too_long,
+    /// A `/`-path parent component is absent or is not a directory (only
+    /// reachable if a future caller passes a path through the window; the
+    /// window's `valid_name` rejects '/' today).
+    bad_path,
     /// No free cluster / no free root-directory slot on the volume.
     disk_full,
     /// A sector read/write failed — the file was NOT written.
@@ -225,6 +229,7 @@ pub fn write_file(name: []const u8, content: []const u8) WriteResult {
         .no_disk => return .no_disk,
         .name_too_long => return .name_too_long,
         .content_too_long => return .content_too_long,
+        .bad_path => return .bad_path,
         .disk_full => return .disk_full,
         .io_failed => return .write_failed,
     }

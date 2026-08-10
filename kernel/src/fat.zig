@@ -5,6 +5,10 @@
 //! writes (cluster allocation + FAT + directory-entry updates). It replaces
 //! claim 3475's NVRAM persistence medium: `ls`/`cat`/`write` now serve the
 //! live ESP through this module (driven on VZ by `virtio_blk.zig`).
+//! Milestone four card 2 generalizes it: `mount_partition` mounts ANY
+//! volume at any LBA, and the directory machinery walks ANY cluster chain
+//! with `/`-path resolution (`read_file`/`write_file`/`list_path` reach
+//! subdirectories like `EFI/BOOT/BOOTAA64.EFI`).
 //!
 //! The module is pure filesystem logic over an injected sector interface —
 //! no hardware, no libc, no allocation, no interrupts. Host tests run it
@@ -43,6 +47,9 @@ const max_alloc_clusters: usize = 64;
 /// Bound on LFN parts kept in memory (a 255-char name needs 20; the root
 /// cluster holds 16 slots, so 16 parts is already generous).
 const max_lfn_parts: usize = 16;
+/// Maximum path depth (components) — bounds the directory walk (each
+/// component is additionally bounded by `name_max`).
+const max_path_parts: usize = 8;
 
 /// FAT end-of-chain markers (FAT32 spec §7.4): 0x0FFFFFF8+.
 const fat_eoc: u32 = 0x0fffffff;
@@ -61,7 +68,16 @@ pub const DiskOps = struct {
 
 pub const MountResult = enum { ok, no_disk, bad_gpt, bad_bpb, io_failed };
 
-pub const WriteResult = enum { ok, no_disk, name_too_long, content_too_long, disk_full, io_failed };
+pub const WriteResult = enum {
+    ok,
+    no_disk,
+    name_too_long,
+    content_too_long,
+    /// A `/`-path parent component is absent or is not a directory.
+    bad_path,
+    disk_full,
+    io_failed,
+};
 
 /// One decoded root-directory entry (as `ls` reports it).
 pub const DirEntry = struct {
@@ -237,14 +253,16 @@ pub fn free_clusters() u32 {
     return free;
 }
 
-/// List the root directory (skipping the volume label, `.`/`..`, and
-/// deleted slots). Returns the number of entries written to `out` (≤
-/// out.len). Long-name entries are decoded into the display name when their
-/// checksum matches the following short entry.
-pub fn list_root(out: []DirEntry) usize {
+/// List a DIRECTORY's entries (any cluster chain — milestone four card 2):
+/// skipping the volume label, `.`/`..`, and deleted slots. Returns the
+/// number of entries written to `out` (≤ out.len). Long-name entries are
+/// decoded into the display name when their checksum matches the following
+/// short entry. The root directory is the special case
+/// `cluster == state.geo.root_cluster`.
+pub fn list_dir(cluster: u32, out: []DirEntry) usize {
     if (!state.mounted) return 0;
     var slots: [max_root_slots]SlotRef = undefined;
-    const n = collect_root_slots(&slots);
+    const n = collect_dir_slots(cluster, &slots);
     var count: usize = 0;
     var lfn: LfnAccum = .{};
     var i: usize = 0;
@@ -279,12 +297,28 @@ pub fn list_root(out: []DirEntry) usize {
     return count;
 }
 
-/// Read a file's content into `out`. Returns the number of bytes copied
-/// (min(file size, out.len)), or null when the file is absent or is a
-/// directory. Case-insensitive on the 8.3 name (FAT semantics) and on the
-/// display name.
+/// List the root directory (unchanged behavior — the root is the special
+/// case of `list_dir`; the ESP window's snapshot source).
+pub fn list_root(out: []DirEntry) usize {
+    return list_dir(state.geo.root_cluster, out);
+}
+
+/// List a directory by `/`-path (every component must be a directory; a
+/// bare name or empty path lists the root). 0 when a component is absent
+/// or not a directory, or the volume is unmounted.
+pub fn list_path(path: []const u8, out: []DirEntry) usize {
+    if (!state.mounted) return 0;
+    const cluster = dir_cluster_of_path(path) orelse return 0;
+    return list_dir(cluster, out);
+}
+
+/// Read a file's content into `out` — by bare name (against the root, as
+/// before) or by `/`-path (milestone four card 2). Returns the number of
+/// bytes copied (min(file size, out.len)), or null when the file is absent
+/// or is a directory. Case-insensitive on the 8.3 name (FAT semantics) and
+/// on the display name.
 pub fn read_file(name: []const u8, out: []u8) ?usize {
-    const found = find_slot(name) orelse return null;
+    const found = find_slot_path(name) orelse return null;
     if (found.entry.is_dir) return null;
     var remaining: u32 = @min(found.entry.size, @as(u32, @intCast(out.len)));
     var cur = found.entry.cluster;
@@ -305,23 +339,36 @@ pub fn read_file(name: []const u8, out: []u8) ?usize {
     return wrote;
 }
 
-/// Write `content` to `name` on the ESP: allocate clusters from the free
-/// chain, write the data, update the FAT (all copies), and create/replace
-/// the root directory entry. `name` must fit FAT 8.3 (stem ≤ 8, ext ≤ 3);
-/// content ≤ `write_content_max`. A failed write reports `.io_failed` /
-/// `.disk_full` honestly — never a partial success.
-pub fn write_file(name: []const u8, content: []const u8) WriteResult {
+/// Write `content` to `name` — a bare name writes into the root (as
+/// before); a `/`-path writes into an EXISTING subdirectory (milestone
+/// four card 2; the parent components must resolve to directories, else
+/// `.bad_path`). Allocate clusters from the free chain, write the data,
+/// update the FAT (all copies), and create/replace the directory entry.
+/// The name must fit FAT 8.3 (stem ≤ 8, ext ≤ 3); content ≤
+/// `write_content_max`. A failed write reports `.io_failed` / `.disk_full`
+/// honestly — never a partial success.
+pub fn write_file(path: []const u8, content: []const u8) WriteResult {
     // Bounds are validated before any persistence attempt (a name that can
     // never be written is reported as such even without a disk).
     if (content.len > write_content_max) return .content_too_long;
+    // The last `/`-component is the 8.3 file name; everything before it is
+    // the parent directory path (empty = the root).
+    var name: []const u8 = path;
+    var parent: []const u8 = "";
+    if (std.mem.lastIndexOfScalar(u8, path, '/')) |idx| {
+        parent = path[0..idx];
+        name = path[idx + 1 ..];
+    }
+    if (name.len == 0) return .name_too_long; // trailing '/' — nothing to write
     var short: [11]u8 = undefined;
     if (!encode_83(name, &short)) return .name_too_long;
     if (!state.mounted) return .no_disk;
+    const dir_cluster = dir_cluster_of_path(parent) orelse return .bad_path;
 
     // Locate the directory slot: the existing same-name entry (freed first)
     // or the first free slot (0x00 / 0xE5).
     var slots: [max_root_slots]SlotRef = undefined;
-    const n = collect_root_slots(&slots);
+    const n = collect_dir_slots(dir_cluster, &slots);
     var target: ?SlotRef = null;
     var i: usize = 0;
     while (i < n) : (i += 1) {
@@ -479,12 +526,14 @@ fn is_eoc(v: u32) bool {
 
 const SlotRef = struct { lba: u64, byte_off: usize };
 
-/// Collect the 32-byte slot references of every root-directory entry,
-/// following the root cluster chain (bounded). Stops at the first 0x00 slot
-/// (end of directory marker) or when the slot window fills.
-fn collect_root_slots(out: []SlotRef) usize {
+/// Collect the 32-byte slot references of a DIRECTORY's entries, following
+/// its cluster chain (bounded). Stops at the first 0x00 slot (end of
+/// directory marker) or when the slot window fills. The root directory is
+/// the special case `cluster == state.geo.root_cluster` (milestone four
+/// card 2: any directory chain, not just the root).
+fn collect_dir_slots(cluster: u32, out: []SlotRef) usize {
     var count: usize = 0;
-    var cur = state.geo.root_cluster;
+    var cur = cluster;
     var hops: usize = 0;
     while (!is_eoc(cur) and hops < max_chain_clusters) : (hops += 1) {
         if (cur < 2 or cur >= state.geo.total_clusters) break;
@@ -500,6 +549,10 @@ fn collect_root_slots(out: []SlotRef) usize {
         cur = fat_entry(cur);
     }
     return count;
+}
+
+fn collect_root_slots(out: []SlotRef) usize {
+    return collect_dir_slots(state.geo.root_cluster, out);
 }
 
 fn read_dir_slot(ref: SlotRef, out: *[32]u8) bool {
@@ -524,14 +577,15 @@ fn cluster_of_raw(raw: [32]u8) u32 {
 
 const Found = struct { slot: SlotRef, entry: DirEntry };
 
-/// Find a root entry by name: matches the 8.3-encoded short name OR the
-/// display name, case-insensitively. Returns its slot (the caller can then
-/// read or overwrite the entry) plus the decoded entry.
-fn find_slot(name: []const u8) ?Found {
+/// Find an entry in a DIRECTORY (any cluster chain) by name: matches the
+/// 8.3-encoded short name OR the display name, case-insensitively. Returns
+/// its slot (the caller can then read or overwrite the entry) plus the
+/// decoded entry. The root directory is the special case.
+fn find_slot_in(cluster: u32, name: []const u8) ?Found {
     var short: [11]u8 = undefined;
     const has_short = encode_83(name, &short);
     var slots: [max_root_slots]SlotRef = undefined;
-    const n = collect_root_slots(&slots);
+    const n = collect_dir_slots(cluster, &slots);
     var lfn: LfnAccum = .{};
     var i: usize = 0;
     while (i < n) : (i += 1) {
@@ -563,6 +617,72 @@ fn find_slot(name: []const u8) ?Found {
         }
     }
     return null;
+}
+
+/// Find a root entry by name (the root is the special case of
+/// `find_slot_in`).
+fn find_slot(name: []const u8) ?Found {
+    return find_slot_in(state.geo.root_cluster, name);
+}
+
+/// Find an entry by `/`-path (milestone four card 2): the components
+/// before the last must be directories (walked from the root); the LAST
+/// component is the entry itself (file or directory). A bare name resolves
+/// against the root — identical to `find_slot`. Returns null when the path
+/// ends in '/' (a directory, not an entry), any component is absent, or an
+/// intermediate component is not a directory.
+fn find_slot_path(path: []const u8) ?Found {
+    if (std.mem.lastIndexOfScalar(u8, path, '/')) |idx| {
+        const parent = path[0..idx];
+        const name = path[idx + 1 ..];
+        if (name.len == 0) return null; // trailing '/' — a directory
+        const cluster = dir_cluster_of_path(parent) orelse return null;
+        return find_slot_in(cluster, name);
+    }
+    return find_slot(path);
+}
+
+// ---------------------------------------------------------------------------
+// Path resolution (milestone four card 2)
+// ---------------------------------------------------------------------------
+
+/// Resolve a `/`-separated path to the cluster of its LAST DIRECTORY
+/// component (every component must exist and be a directory). `.` is a
+/// no-op; `..` pops to the parent (the root's parent is itself). A bare
+/// name or empty path resolves to the root cluster. Each component is
+/// bounded by `name_max` and the depth by `max_path_parts` (over-deep
+/// paths return null). The FAT layer no longer speaks only root-relative
+/// names — the "arbitrary disk layout" companion to `mount_partition`.
+fn dir_cluster_of_path(path: []const u8) ?u32 {
+    // Split into bounded components (tokenizeScalar skips empty runs, so
+    // leading/trailing '/' and "//" are tolerated).
+    var parts: [max_path_parts][]const u8 = undefined;
+    var n: usize = 0;
+    var it = std.mem.tokenizeScalar(u8, path, '/');
+    while (it.next()) |part| {
+        if (part.len > name_max) return null;
+        if (n >= max_path_parts) return null;
+        parts[n] = part;
+        n += 1;
+    }
+    // Walk with an explicit parent stack so ".." pops correctly.
+    var stack: [max_path_parts + 1]u32 = undefined;
+    var depth: usize = 1;
+    stack[0] = state.geo.root_cluster;
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        if (std.mem.eql(u8, parts[i], ".")) continue;
+        if (std.mem.eql(u8, parts[i], "..")) {
+            if (depth > 1) depth -= 1;
+            continue;
+        }
+        const found = find_slot_in(stack[depth - 1], parts[i]) orelse return null;
+        if (!found.entry.is_dir) return null;
+        if (depth > max_path_parts) return null;
+        stack[depth] = found.entry.cluster;
+        depth += 1;
+    }
+    return stack[depth - 1];
 }
 
 fn decode_entry(raw: [32]u8, long: ?[]const u8) DirEntry {
@@ -1179,4 +1299,65 @@ test "fat: mount_partition mounts ANY FAT32 volume at an arbitrary LBA" {
     // And the ESP path still works after a failed mount attempt.
     try std.testing.expectEqual(MountResult.ok, mount(test_ops()));
     try std.testing.expectEqual(@as(u64, 2048), geometry().vol_lba);
+}
+
+test "fat: paths reach subdirectories (EFI/BOOT/BOOTAA64.EFI)" {
+    var fxt = try build_fixture(test_allocator, false);
+    defer test_allocator.free(fxt.buf);
+    make_state_fixture(&fxt);
+    try std.testing.expectEqual(MountResult.ok, mount(test_ops()));
+
+    // Root listing is unchanged (bare names still resolve to the root).
+    var out: [32]DirEntry = undefined;
+    try std.testing.expectEqual(@as(usize, 3), list_root(&out));
+
+    // The image's EFI and EFI/BOOT trees are reachable by path.
+    try std.testing.expectEqual(@as(usize, 1), list_path("EFI", &out));
+    try std.testing.expectEqualStrings("BOOT", out[0].name[0..out[0].name_len]);
+    try std.testing.expectEqual(@as(usize, 1), list_path("EFI/BOOT", &out));
+    try std.testing.expectEqualStrings("BOOTAA64.EFI", out[0].name[0..out[0].name_len]);
+    try std.testing.expectEqual(@as(usize, 0), list_path("EFI/NOPE", &out));
+    try std.testing.expectEqual(@as(usize, 0), list_path("NOPE/DEEP", &out));
+    try std.testing.expectEqual(@as(usize, 3), list_path("", &out)); // empty = root
+
+    // Read a file three levels deep. BOOTAA64.EFI's entry size is 0x200 but
+    // the fixture stores 37 content bytes (zero-padded) — read into a small
+    // buffer and compare the real prefix.
+    var buf: [64]u8 = undefined;
+    const got = (read_file("EFI/BOOT/BOOTAA64.EFI", &buf) orelse return error.TestUnexpectedResult);
+    try std.testing.expectEqual(@as(usize, 64), got);
+    try std.testing.expectEqualStrings("BOOTAA64.EFI payload, padded to 0x200", buf[0..37]);
+
+    // Leading '/' and ".." (walking back to the root) both resolve.
+    _ = (read_file("/EFI/BOOT/BOOTAA64.EFI", &buf) orelse return error.TestUnexpectedResult);
+    try std.testing.expectEqualStrings("BOOTAA64.EFI payload, padded to 0x200", buf[0..37]);
+    const got3 = (read_file("EFI/BOOT/../../BOOTED.TXT", &buf) orelse return error.TestUnexpectedResult);
+    try std.testing.expectEqualStrings("DIPSHITOS BOOTLOADER\nfirmware has agreed to cooperate\n", buf[0..got3]);
+
+    // Directories, absent paths, and trailing '/' stay null.
+    try std.testing.expect(read_file("EFI/BOOT", &buf) == null); // a directory
+    try std.testing.expect(read_file("EFI/BOOT/", &buf) == null); // trailing '/'
+    try std.testing.expect(read_file("EFI/BOOT/NOPE.BIN", &buf) == null);
+    try std.testing.expect(read_file("NOPE/DEEP/X.TXT", &buf) == null);
+}
+
+test "fat: write_file resolves into an existing subdirectory by path" {
+    var fxt = try build_fixture(test_allocator, false);
+    defer test_allocator.free(fxt.buf);
+    make_state_fixture(&fxt);
+    try std.testing.expectEqual(MountResult.ok, mount(test_ops()));
+    try std.testing.expectEqual(WriteResult.ok, write_file("EFI/BOOT/hello.txt", "hi from boot dir"));
+    // Visible through the path listing and readable back.
+    var out: [8]DirEntry = undefined;
+    try std.testing.expectEqual(@as(usize, 2), list_path("EFI/BOOT", &out));
+    var buf: [64]u8 = undefined;
+    const got = (read_file("EFI/BOOT/hello.txt", &buf) orelse return error.TestUnexpectedResult);
+    try std.testing.expectEqualStrings("hi from boot dir", buf[0..got]);
+    // The root listing is untouched (the write went into /EFI/BOOT).
+    try std.testing.expectEqual(@as(usize, 3), list_root(&out));
+    // A missing / non-directory parent is reported honestly (bad_path).
+    try std.testing.expectEqual(WriteResult.bad_path, write_file("NOPE/x.txt", "x"));
+    try std.testing.expectEqual(WriteResult.bad_path, write_file("EFI/NOPE/x.txt", "x"));
+    try std.testing.expectEqual(WriteResult.bad_path, write_file("KERNEL.BIN/x.txt", "x")); // file, not a dir
+    try std.testing.expectEqual(WriteResult.name_too_long, write_file("EFI/BOOT/", "x")); // trailing '/'
 }

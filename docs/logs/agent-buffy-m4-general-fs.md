@@ -47,7 +47,32 @@
   mounts the real volume, and `write`/`ls`/`cat` persist through reboot
   (run A `hello world` to the FAT volume; run B still lists/cats it).
 
-- **Remaining on this claim:** Stage B (directories: arbitrary cluster
-  chains + `/` paths — the image's EFI/BOOT tree), Stage C (direct path
-  reads beyond the esp window + monitor path args), Stage D (second FAT
-  partition on the image + live gate + docs reconciliation + PR).
+- **Implemented — Stage B (directories + paths)** (2026-08-10):
+  `kernel/src/fat.zig` generalizes the directory machinery from the root to
+  ANY cluster chain — `collect_dir_slots(cluster)` (the slot walk),
+  `list_dir(cluster)` (the listing decode; `list_root` delegates),
+  `find_slot_in(cluster, name)` (`find_slot` delegates) — plus `/`-path
+  resolution: `dir_cluster_of_path` (bounded components, `.`/`..` with an
+  explicit parent stack), `find_slot_path`, `list_path`, and path-aware
+  `read_file`/`write_file` (the last `/`-component is the 8.3 name; the
+  parent must resolve to an existing directory, else the new
+  `WriteResult.bad_path`). `esp`/`monitor` gain the `bad_path` variant
+  (esp's `valid_name` still rejects '/' today, so it is dead code until
+  Stage C's monitor path args — added for exhaustive switches). Bare names
+  still resolve against the root: every existing test passes unchanged.
+  New tests: `/EFI` and `/EFI/BOOT` list by path, `EFI/BOOT/BOOTAA64.EFI`
+  reads three levels deep (leading '/', `..`-back-to-root, trailing '/',
+  absent components), and `write_file` writes into `/EFI/BOOT` and reports
+  `bad_path` for missing / non-directory parents.
+
+- **Verification — Stage B** (2026-08-10): class A all green — fmt, unit
+  tests (fat 13/13, esp 18/18, monitor 163), transcript byte-identical,
+  build/image/inspect, swift build, context, coordination, test-
+  coordination, mmu-debt. Class B sanity: `live-fs` 1/1 on VZ — the ESP
+  mount + list/read/write paths (now routed through the generalized
+  directory machinery) persist through reboot unchanged.
+
+- **Remaining on this claim:** Stage C (direct path reads beyond the esp
+  window + monitor path args — `ls [<dir>]` / `cat <path>`), Stage D
+  (second FAT partition on the image + live gate + docs reconciliation +
+  PR).

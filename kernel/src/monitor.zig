@@ -642,6 +642,12 @@ fn cmd_write(m: *Monitor, args: []const []const u8) ExecError {
             m.console.print_line(")");
             return .invalid_argument;
         },
+        .bad_path => {
+            m.console.puts("write: ");
+            m.console.puts(name);
+            m.console.print_line(": parent directory not found");
+            return .invalid_argument;
+        },
         .disk_full => {
             m.console.puts("write: ");
             m.console.puts(name);
