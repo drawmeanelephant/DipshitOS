@@ -53,6 +53,7 @@ verify-coordination`, and CI) fails if it drifts from the files.
 | `agent/buffy/m2-badhandoff-fix` (PR #11) | [`agent-buffy-m2-badhandoff-fix.md`](agent-buffy-m2-badhandoff-fix.md) |
 | `agent/buffy/m2-kernel-proper` (PR #10) | [`agent-buffy-m2-kernel-proper.md`](agent-buffy-m2-kernel-proper.md) |
 | M2 fixed-memory-marker fallback (ADR 0004 D4, gate work item 3) | [`agent-buffy-m2-marker-fallback.md`](agent-buffy-m2-marker-fallback.md) |
+| `agent/buffy/m3-docs-reconcile-syscall-abi` | [`agent-buffy-m3-docs-reconcile-syscall-abi.md`](agent-buffy-m3-docs-reconcile-syscall-abi.md) |
 | `agent/buffy/macos27-custom-virtio-spike` | [`agent-buffy-macos27-custom-virtio-spike.md`](agent-buffy-macos27-custom-virtio-spike.md) |
 | `agent/codex/m3-march-tracker` | [`agent-codex-m3-march-tracker.md`](agent-codex-m3-march-tracker.md) |
 | `agent/codex/m3-ragshit-dogfood` | [`agent-codex-m3-ragshit-dogfood.md`](agent-codex-m3-ragshit-dogfood.md) |
