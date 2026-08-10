@@ -602,9 +602,9 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
     // (fallback) boot skips the rebuild and keeps the fixed stack —
     // behavior unchanged there.
     if (csprng.seeded()) {
-        if (exec.rebuild_user_root(user_text.base, user_text.len, user_stack.len)) |aslr_stack_va| {
+        if (exec.rebuild_user_root(user_text.base, user_text.len, scheduler.user_stack_phys(), user_stack.len)) |aslr| {
             uart_puts("aslr: boot user stack=");
-            uart_hex(aslr_stack_va);
+            uart_hex(aslr.stack_va);
             uart_puts("\n");
         } else {
             // Honest fallback: keep the fixed stack (the initial root still

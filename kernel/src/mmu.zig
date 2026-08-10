@@ -115,12 +115,42 @@ pub fn kernel_root_phys() u64 {
     return kernel_root_value;
 }
 
-/// Physical address of the EL0 task's user root (the identity-tree clone +
-/// user leaves). Set by `build_user_root` (pre-install, so `@intFromPtr` is
-/// identity).
+/// Physical address of the MOST RECENTLY BUILT user root (the identity-tree
+/// clone + user leaves). Claim 0826 (concurrent processes): every
+/// `build_user_root` call creates a FRESH per-process root and returns its
+/// phys; this global tracks the latest one so the `addrspaces`/`uaccess`
+/// diagnostics and the boot-time static payload keep a stable target (every
+/// user root maps text at the same `userspace.text_va`, so the diagnostics
+/// are valid under any of them).
 var user_root_value: u64 = 0;
 pub fn user_root_phys() u64 {
     return user_root_value;
+}
+
+/// Reset the table allocator + root tracking (boot path and host tests; the
+/// boot path's `build_identity_map` calls this instead of duplicating the
+/// reset). Clears the allocation cursor, so a fresh build starts from table
+/// index zero, and forgets both roots.
+pub fn reset() void {
+    table_count = 0;
+    user_root_value = 0;
+    roots_ready = false;
+}
+
+/// Table pages consumed so far out of the fixed carve-out (`table_page_count`
+/// pages, 1 MiB BSS). The `addrspaces` command prints `tables=<used>/<cap>`
+/// so the per-process-root budget is observable on a live boot: the identity
+/// map uses ~10-15 and each user-root clone ~10-15 + leaf tables, so two
+/// concurrent user roots stay well inside the 256-page carve-out (claim
+/// 0826's budget survey).
+pub fn tables_used() usize {
+    return table_count;
+}
+
+/// Total table pages in the fixed carve-out (1 MiB BSS — see
+/// `table_page_count`).
+pub fn tables_capacity() usize {
+    return table_page_count;
 }
 
 /// True once both roots are built (kernel + user). Host tests never build
@@ -201,7 +231,7 @@ pub fn build_identity_map(
     extra_device: []const DeviceWindow,
     user_regions: []const UserRegion,
 ) bool {
-    table_count = 0;
+    reset();
     _ = new_table() orelse return false; // root table at index zero
     // Claim 5804: capture the root's PHYSICAL address (pre-jump, so
     // @intFromPtr is the identity). TTBR1 + the EL1h tasks' TTBR0 use it.
@@ -280,14 +310,18 @@ pub fn build_identity_map(
     }
     const text = text_region orelse return false;
     const stack = stack_region orelse return false;
-    if (!build_user_root(
+    // Claim 0826: the boot-time user root is the FIRST per-process root.
+    // The returned phys is the boot payload's root (the current global);
+    // later exec'd processes build (and own) their own roots.
+    const root = build_user_root(
         userspace.text_va,
         text.base,
         text.len,
         userspace.stack_va,
         stack.base,
         stack.len,
-    )) return false;
+    ) orelse return false;
+    _ = root;
     return true;
 }
 
@@ -576,14 +610,22 @@ fn clone_into_user_root(
     return dst;
 }
 
-/// Build the EL0 task's TTBR0 user root: a clone of the kernel identity
+/// Build an EL0 task's TTBR0 user root: a clone of the kernel identity
 /// tree (the EL1-only overlay that keeps the kernel reachable under this
 /// root) with user text (EL0 RO + PXN) at `text_va` and user stack (EL0
 /// RW + UXN + PXN) at `stack_va`, backed by the physical ranges passed in.
 /// EL0 can reach ONLY those leaves — every kernel/firmware/MMIO leaf is
 /// EL1-only. Call BEFORE `install_identity_map` (the table allocator
 /// stores physical addresses; pre-install `@intFromPtr` is identity).
-/// Stores the root's physical address for the scheduler.
+///
+/// Claim 0826 (concurrent processes): every call builds a FRESH root and
+/// RETURNS its physical address — the caller (the process) owns it. The
+/// previous single-root design stored only the global
+/// `user_root_value`, which is why the exec gate had to forbid a second
+/// live task (rebuilding the root under it would strand it). The global
+/// still tracks the most recently built root for the diagnostics. Returns
+/// null when the fixed table carve-out cannot hold another clone (the
+/// `table_full` bound).
 pub fn build_user_root(
     text_va: u64,
     text_phys: u64,
@@ -591,7 +633,7 @@ pub fn build_user_root(
     stack_va: u64,
     stack_phys: u64,
     stack_len: u64,
-) bool {
+) ?u64 {
     const text_ap = UserAperture{
         .va_start = text_va,
         .va_end = text_va + text_len,
@@ -606,10 +648,11 @@ pub fn build_user_root(
         .writable = true,
         .executable = false,
     };
-    const root = clone_into_user_root(&table_storage[0], 0, 0, text_ap, stack_ap) orelse return false;
-    user_root_value = @intFromPtr(root);
+    const root = clone_into_user_root(&table_storage[0], 0, 0, text_ap, stack_ap) orelse return null;
+    const root_phys = @intFromPtr(root);
+    user_root_value = root_phys;
     roots_ready = true;
-    return true;
+    return root_phys;
 }
 
 /// Pure permission transform pinned by host tests. Existing leaf, AttrIndex
@@ -630,6 +673,23 @@ fn user_leaf(original: u64, writable: bool, executable: bool) ?u64 {
         entry |= pxn | uxn;
     }
     return entry;
+}
+
+test "mmu: build_user_root returns a fresh root per call (per-process roots)" {
+    reset();
+    // Host roots clone the (empty) identity tree — the clone machinery
+    // still runs, consumes tables, and returns per-call physical roots, so
+    // the multi-root API + budget accounting is pinned without hardware.
+    const root1 = build_user_root(userspace.text_va, 0x1000, 64, userspace.stack_va, 0x2000, 8192).?;
+    try std.testing.expect(root1 != 0);
+    const root2 = build_user_root(userspace.text_va, 0x1000, 64, 0x1a400000, 0x3000, 8192).?;
+    try std.testing.expect(root2 != 0);
+    // Distinct per-process roots, and the global tracks the latest.
+    try std.testing.expect(root1 != root2);
+    try std.testing.expectEqual(root2, user_root_phys());
+    // The budget line is observable and bounded by the carve-out.
+    try std.testing.expect(tables_used() > 0);
+    try std.testing.expect(tables_used() <= tables_capacity());
 }
 
 test "mmu: user leaves are page-local W^X and reject Device mappings" {

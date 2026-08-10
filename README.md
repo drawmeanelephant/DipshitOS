@@ -261,7 +261,12 @@ All command output and logs are saved under `artifacts/` (`inspect.txt`,
    real processes, and `bash tools/verify-live-procs.sh` proves it live —
    `procs` shows the exec'd USER.BIN running with its stack and the boot
    payload exited (status 7 kept past the reap), plus the process exit
-   report `procs USER.BIN exited status=43`.
+   report `procs USER.BIN exited status=43`. The milestone-four follow-on
+   (claim 0826) relaxes the last single-program constraint: every process
+   owns its own TTBR0 root + allocator-backed text/stack/EL1-stack pages,
+   so `exec USER.BIN` runs twice with BOTH programs live at once
+   (`tools/verify-live-concurrent.sh` — two `state=running` rows with
+   distinct task ids + stack VAs).
 - The Virtualization.framework VM boots the GPT+FAT image: configuration
   validates, the EFI variable store is created, the VM starts and runs, and
   after boot the guest-written marker file `\BOOTED.TXT` exists on the ESP

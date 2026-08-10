@@ -1,37 +1,45 @@
-//! DipshitOS ESP exec (milestone-three card 6, claim 6783).
+//! DipshitOS ESP exec (milestone-three card 6, claim 6783; extended by the
+//! milestone-four follow-on claim 0826 — concurrent processes).
 //!
-//! Loads a real user program from the ESP and enters it at EL0 — the last
-//! big milestone-three userspace card. The claim-8215 static EL0 payload is
-//! boot-registered; this module REPLACES it at runtime with a program read
-//! through the claim-6420 FAT path (`fat.read_file` over virtio-blk): the
-//! file is a flat AArch64 image in the same DSK1 format as KERNEL.BIN
-//! (`tools/elf2bin.py`, 24-byte header, content at offset 24), built by
-//! `zig build user` and embedded on the ESP by the image builder.
+//! Loads a real user program from the ESP and enters it at EL0. The
+//! claim-8215 static EL0 payload is boot-registered; this module loads
+//! programs read through the claim-6420 FAT path (`fat.read_file` over
+//! virtio-blk): the file is a flat AArch64 image in the same DSK1 format
+//! as KERNEL.BIN (`tools/elf2bin.py`, 24-byte header, content at offset
+//! 24), built by `zig build user` and embedded on the ESP by the image
+//! builder.
 //!
 //! Exec is the monitor command `exec [<file>]` (default `USER.BIN`):
 //!
-//!   1. Read the file into a fixed 4 KiB BSS buffer (bounded — the claim-\n
-//!      8215 text aperture is one page).
+//!   1. Read the file into a fixed 4 KiB BSS staging buffer (bounded).
 //!   2. Validate the DSK1 header (magic, entry offset, image size).
-//!   3. Gate on `scheduler.user_root_in_use()` — one user program at a
-//!      time. Rebuilding the user root while a live task runs under it
-//!      would strand that task, so exec refuses until the previous user
-//!      task exited (to a zombie) and was reaped by the claim-6729 idle
-//!      task.
-//!   4. Rebuild the EL0 task's TTBR0 user root around the loaded page with
+//!   3. Gate on CAPACITY (claim 0826 — the old `user_root_in_use` gate is
+//!      gone: a second program loads and runs while the first is alive):
+//!      the pool's free slot (checked FIRST, so a full pool never leaks
+//!      pages or tables), the page-table carve-out (`table_full`), the
+//!      process registry (`process_full`), and the physical allocator
+//!      (`out_of_memory`).
+//!   4. Allocate the program's OWN pages — 1 text page + 2 user-stack
+//!      pages + 2 EL1 exception-stack pages from the physical allocator
+//!      (claims 3972/5162) — copy the stripped content into the text page,
+//!      and build the process's OWN TTBR0 user root with
 //!      `mmu.build_user_root` (claim 5804: identity-tree clone + EL1-only
-//!      kernel overlay + the loaded text page at `userspace.text_va` + the
-//!      static user stack at `userspace.stack_va`). This works POST-install
-//!      because the kernel stays identity-mapped (the VZ TTBR1 fallback),
-//!      so `@intFromPtr` is still physical; the fresh clone tables are
-//!      D-cache-cleaned before the scheduler's next TTBR0 switch.
-//!   5. Spawn the program as an EL0t task (`scheduler.register_exec_user`)
-//!      and let it run under the fixed syscall ABI.
+//!      kernel overlay + the text page at `userspace.text_va` + the user
+//!      stack at the randomized `stack_va`). Works POST-install because the
+//!      kernel stays identity-mapped (the VZ TTBR1 fallback), so
+//!      `@intFromPtr` is still physical; the fresh clone tables are
+//!      D-cache-cleaned before the scheduler's next TTBR0 switch. The
+//!      process owns every page (freed at reap/recycle), and the boot-time
+//!      static payload keeps its linked `.usertext`/`.userbss` pages.
+//!   5. Create + bind the process (`process.zig`, claim 3848) and spawn it
+//!      as an EL0t task (`scheduler.register_exec_user`) under the fixed
+//!      syscall ABI — with its own EL1 exception stack, because two live
+//!      user tasks cannot share the static one (a second task's vector
+//!      frame would clobber the first's saved context).
 //!
-//! The syscall/uaccess apertures stay the claim-8215 static regions: the
-//! loaded program maps within them (≤ 1 page at `text_va`, the 8 KiB user
-//! stack), so `sys_write` bounds hold unchanged. No libc, no POSIX, no
-//! allocation, no process abstraction.
+//! The syscall/uaccess apertures are per process (armed at SVC entry from
+//! the task's TCB, claim 0826), so `sys_write` bounds follow whichever
+//! program issued the call. No libc, no POSIX, no heap allocation.
 
 const std = @import("std");
 const mmu = @import("mmu.zig");
@@ -47,6 +55,10 @@ const syscall = @import("syscall.zig");
 // image + address space + lifecycle live in the bounded process registry,
 // not in this module's globals.
 const process = @import("process.zig");
+// Claim 0826: the per-process text/stack/kernel-stack pages come from the
+// physical page allocator (claims 3972/5162).
+const alloc = @import("alloc.zig");
+const memmap = @import("memmap.zig"); // host-test fixture view (page_size + the arming view)
 
 /// Fixed load buffer: one page, the claim-8215 text aperture's size. A
 /// program larger than this is rejected honestly (`too_large`).
@@ -69,11 +81,11 @@ pub const ExecResult = enum {
     bad_magic,
     /// entry_offset outside the loaded content.
     bad_entry,
-    /// A live (ready/running) task still runs under the user root — the
-    /// previous user program has not exited and been reaped yet.
-    user_busy,
-    /// No free scheduler pool slot.
+    /// No free scheduler pool slot — the capacity gate (claim 0826).
     pool_full,
+    /// The physical page allocator could not supply the program's own
+    /// text/stack/exception-stack pages (claim 0826).
+    out_of_memory,
     /// The fixed page-table carve-out cannot hold another user-root clone.
     table_full,
     /// The process registry holds only live (created/running) processes —
@@ -91,6 +103,9 @@ pub const LoadedInfo = struct {
     content_len: usize,
     /// User VA the task enters at.
     entry_va: u64,
+    /// The process's OWN randomized user stack VA (claim 0826 — per-process
+    /// stacks, so the reply prints this program's placement, not a global).
+    stack_va: u64,
 };
 
 /// What the current process's image is (claim 3848): the descriptor lives
@@ -105,6 +120,7 @@ pub fn loaded() ?LoadedInfo {
         .name = info.name,
         .content_len = info.content_len,
         .entry_va = info.entry_va,
+        .stack_va = info.stack_va,
     };
 }
 
@@ -134,49 +150,95 @@ pub fn exec_file(name: []const u8) ExecResult {
     if (image_size > program.len) return .too_large;
     if (image_size > got) return .too_large; // truncated read — file bigger than the buffer
     if (entry_off < dsk1_header_size or entry_off >= image_size) return .bad_entry;
-    if (scheduler.user_root_in_use()) return .user_busy;
+    // Claim 0826: the exec gate is GONE — a second program loads and runs
+    // while the first is alive (every process owns its own root + pages, so
+    // nothing shared is rebuilt under a live task). The gates are capacity:
+    // the pool slot FIRST (a full pool fails cheaply and never leaks pages
+    // or tables), then the allocator, the table carve-out, the registry.
+    if (!scheduler.has_free_slot()) return .pool_full;
 
     const content_len: usize = @intCast(image_size - dsk1_header_size);
-    // Strip the 24-byte DSK1 header IN PLACE: the user root maps whole
-    // pages at `text_va` (the clone masks the phys to page granularity),
-    // so the loadable content must start at a page boundary. The entry
-    // offset is file-relative, so the entry VA is unchanged:
+    // Strip the 24-byte DSK1 header IN PLACE (staging): the user root maps
+    // whole pages at `text_va` (the clone masks the phys to page
+    // granularity), so the loadable content must start at a page boundary.
+    // The entry offset is file-relative, so the entry VA is unchanged:
     // `text_va + (entry_offset - header)`.
     std.mem.copyForwards(u8, program[0..content_len], program[dsk1_header_size..][0..content_len]);
-    @memset(program[content_len..], 0); // the rest of the page is BSS padding
-    const text_phys = mmu.to_phys(@intFromPtr(&program));
+    @memset(program[content_len..], 0); // the rest of the staging page is padding
+    // Claim 0826: per-process pages from the physical allocator — the
+    // program's OWN text (1 page), user stack (8 KiB = 2 pages) and EL1
+    // exception stack (8 KiB = 2 pages). The process owns them and frees
+    // them at reap/recycle; the staging `program` buffer is only a read
+    // buffer now, so a later exec of a DIFFERENT file can never overwrite
+    // a live program's text. The boot-time static payload keeps its linked
+    // `.usertext`/`.userbss` pages instead.
+    const text_phys = alloc.alloc_pages(1) orelse return .out_of_memory;
+    const stack_pages: u64 = (scheduler.task_stack_size + alloc.page_size - 1) / alloc.page_size;
+    const stack_phys = alloc.alloc_pages(stack_pages) orelse {
+        _ = alloc.free_pages(text_phys, 1);
+        return .out_of_memory;
+    };
+    const kstack_pages: u64 = stack_pages;
+    const kstack_phys = alloc.alloc_pages(kstack_pages) orelse {
+        _ = alloc.free_pages(text_phys, 1);
+        _ = alloc.free_pages(stack_phys, stack_pages);
+        return .out_of_memory;
+    };
+    // Copy the stripped content into the process's OWN text page (the
+    // identity map keeps the physical address a valid kernel pointer).
+    const text_dst: [*]u8 = @ptrFromInt(text_phys);
+    @memcpy(text_dst[0..content_len], program[0..content_len]);
+    const kstack: []u8 = @as(*[scheduler.task_stack_size]u8, @ptrFromInt(kstack_phys))[0..];
     // Milestone four (claim 2665): ASLR — the loaded program's EL0 stack
     // lands at a per-boot random VA from the seeded CSPRNG (page-aligned,
-    // 64 KiB placement granularity, clear of text_va). The uaccess stack
-    // region follows via set_stack_va so a later program may write from
-    // the stack through sys_write. Unseeded (host test / fallback) returns
-    // the fixed default, so nothing below ever sees an out-of-band VA.
-    // rebuild_user_root runs the whole sequence (randomize → map → clean →
-    // re-arm) — shared with the boot-time static payload (claim 3693).
-    const stack_va = rebuild_user_root(text_phys, content_len, scheduler.task_stack_size) orelse return .table_full;
+    // 64 KiB placement granularity, clear of text_va); the per-process
+    // uaccess stack region follows via set_stack_va so the program may
+    // write from its stack through sys_write. Unseeded (host test /
+    // fallback) returns the fixed default, so nothing below ever sees an
+    // out-of-band VA. rebuild_user_root runs the whole sequence (randomize
+    // → map → clean → re-arm) — shared with the boot-time static payload
+    // (claim 3693), which passes the static stack phys instead.
+    const rebuild = rebuild_user_root(text_phys, content_len, stack_phys, scheduler.task_stack_size) orelse {
+        _ = alloc.free_pages(text_phys, 1);
+        _ = alloc.free_pages(stack_phys, stack_pages);
+        _ = alloc.free_pages(kstack_phys, kstack_pages);
+        return .table_full;
+    };
 
     const entry_va = userspace.text_va + (entry_off - dsk1_header_size);
     // Milestone four (claim 3848): the loaded program is a PROCESS. The
-    // descriptor owns the image + the rebuilt address space; a later exec
-    // creates a NEW process (per-process identity) instead of overwriting
-    // module globals. The process registry is exhausted only when every
-    // slot holds a live process (no exited descriptor to recycle) — an
-    // honest, distinct failure from the pool being full.
+    // descriptor owns the image + the rebuilt address space + the owned
+    // pages; a later exec creates a NEW process (per-process identity)
+    // instead of overwriting module globals. The process registry is
+    // exhausted only when every slot holds a live process (no exited
+    // descriptor to recycle) — an honest, distinct failure from the pool
+    // being full.
     const proc_id = process.create(
         name,
         .{ .entry_va = entry_va, .content_len = content_len },
         .{
-            .root_phys = mmu.user_root_phys(),
+            .root_phys = rebuild.root_phys,
             .text_va = userspace.text_va,
             .text_len = content_len,
-            .stack_va = stack_va,
+            .text_phys = text_phys,
+            .text_pages = 1,
+            .stack_va = rebuild.stack_va,
             .stack_len = scheduler.task_stack_size,
+            .stack_phys = stack_phys,
+            .stack_pages = stack_pages,
         },
-    ) orelse return .process_full;
-    if (scheduler.register_exec_user(entry_va, stack_va)) |task_id| {
+        .{ .phys = kstack_phys, .pages = kstack_pages },
+    ) orelse {
+        _ = alloc.free_pages(text_phys, 1);
+        _ = alloc.free_pages(stack_phys, stack_pages);
+        _ = alloc.free_pages(kstack_phys, kstack_pages);
+        return .process_full;
+    };
+    if (scheduler.register_exec_user(entry_va, rebuild.root_phys, content_len, rebuild.stack_va, scheduler.task_stack_size, kstack)) |task_id| {
         _ = process.bind(proc_id, task_id);
     } else {
-        // Spawn failed (pool full): roll the created process back.
+        // Defensive rollback (the upfront slot check makes this
+        // unreachable): the process reap frees its owned pages.
         _ = process.reap(proc_id);
         return .pool_full;
     }
@@ -186,42 +248,53 @@ pub fn exec_file(name: []const u8) ExecResult {
 /// Rebuild the EL0 user root around a fresh randomized stack placement
 /// (milestone-four ASLR, claims 2665 + 3693): draw a per-boot stack VA
 /// from the seeded CSPRNG, map `text_len` bytes of `text_phys` at
-/// `userspace.text_va` plus the static user stack at the new base
-/// (`scheduler.user_stack_phys()`, `stack_len` bytes), clean the fresh
-/// clone tables + mapped text (the walker and EL0 instruction fetch must
-/// see the real bytes), and re-arm the syscall/uaccess regions so
-/// `sys_write` bounds follow the new base. The single shared sequence for
-/// the exec path (the loaded program's page, claim 2665) and the
-/// boot-time rebuild of the static EL0 payload (claim 3693).
+/// `userspace.text_va` plus the user stack at the new base (`stack_phys`,
+/// `stack_len` bytes), clean the fresh clone tables + mapped text (the
+/// walker and EL0 instruction fetch must see the real bytes), and re-arm
+/// the syscall/uaccess regions so `sys_write` bounds follow the new base.
+/// The single shared sequence for the exec path (the loaded program's own
+/// pages, claim 0826) and the boot-time rebuild of the static EL0 payload
+/// (claim 3693, which passes the static `.userbss` stack phys).
 ///
 /// `stack_len` must cover the FULL `.userbss` section for the static boot
 /// payload: the scheduler's timer-preemption witness sits just past the
 /// 8 KiB stack, and its VA is base-relative to the stack, so the rebuilt
 /// root must map it too. Exec passes the task stack size (no witness).
 ///
-/// Returns the new stack VA on success, or null when the fixed table
+/// Claim 0826: the rebuilt root is the process's OWN root — `build_user_root`
+/// returns its phys, and the caller records it in the process descriptor
+/// (and hands it to `register_exec_user`), so a second exec never touches
+/// the first process's live root. Returns null when the fixed table
 /// carve-out cannot hold another user-root clone (the caller's root is
 /// then unchanged).
-pub fn rebuild_user_root(text_phys: u64, text_len: u64, stack_len: u64) ?u64 {
+pub const RootInfo = struct {
+    /// Physical root of the freshly built per-process TTBR0 user root.
+    root_phys: u64,
+    /// The randomized user stack VA mapped in that root.
+    stack_va: u64,
+};
+
+pub fn rebuild_user_root(text_phys: u64, text_len: u64, stack_phys: u64, stack_len: u64) ?RootInfo {
     const stack_va = csprng.random_stack_va();
     userspace.set_stack_va(stack_va);
-    if (!mmu.build_user_root(
+    const root_phys = mmu.build_user_root(
         userspace.text_va,
         text_phys,
         text_len,
         stack_va,
-        scheduler.user_stack_phys(),
+        stack_phys,
         stack_len,
-    )) return null;
+    ) orelse return null;
     // The fresh clone tables and the mapped text are dirty in the D-cache;
     // clean both before the scheduler's next TTBR0 switch (the walker +
     // EL0 instruction fetch must see the real bytes).
     mmu.clean_table_storage();
     mmu.clean_dcache_range(text_phys, text_len);
     // The user stack aperture moved: re-arm the syscall/uaccess regions so
-    // sys_write bounds follow the randomized base.
+    // sys_write bounds follow the randomized base (per-task re-arming at
+    // SVC entry keeps every process's bounds correct, claim 0826).
     syscall.set_user_regions(userspace.text_va_region(), userspace.stack_va_region());
-    return stack_va;
+    return .{ .root_phys = root_phys, .stack_va = stack_va };
 }
 
 // ---------------------------------------------------------------------------
@@ -259,6 +332,22 @@ fn fake_write(lba: u64, data: *const [fat.sector_size]u8) bool {
     return true;
 }
 
+/// Arm the module physical allocator with a small fixture map, the way the
+/// kernel arms it post-boot (claim 0826: exec allocates the program's own
+/// pages, so the successful-path tests need a real pool). The pool backs a
+/// HOST buffer: exec dereferences the program's text page to load its
+/// bytes (`@ptrFromInt(text_phys)` is valid on the identity-mapped kernel,
+/// but a fake 0x100000 base would segfault the host tests).
+var fixture_pool: [64 * 4096]u8 align(4096) = undefined;
+
+fn arm_allocator() void {
+    const descriptors = [_]memmap.MemoryDescriptor{
+        .{ .type = .conventional_memory, .physical_start = @intFromPtr(&fixture_pool), .virtual_start = 0, .number_of_pages = 64, .attribute = 0 },
+    };
+    const view = memmap.MapView.init(std.mem.asBytes(&descriptors), @sizeOf(memmap.MemoryDescriptor), descriptors.len);
+    _ = alloc.init(view, &.{});
+}
+
 test "exec: DSK1 header parse rejects bad magic, entry, and oversize images" {
     try build_image(test_allocator);
     defer test_allocator.free(saved_image);
@@ -289,19 +378,21 @@ test "exec: no disk is reported honestly" {
     try std.testing.expectEqual(ExecResult.no_disk, exec_file("USER.BIN"));
 }
 
-test "exec: ok path loads, validates, rebuilds the root, and spawns the task" {
+test "exec: ok path loads, validates, builds the root, and spawns the task" {
     try build_image(test_allocator);
     defer test_allocator.free(saved_image);
     esp.reset();
     try std.testing.expectEqual(fat.MountResult.ok, esp.set_disk(.{ .read = &fake_read, .write = &fake_write }));
-    // Give the user root a real (non-zero) value so the live-user gate is
-    // unambiguous on the host: the EL1h tasks carry the kernel root (0).
-    try std.testing.expect(mmu.build_user_root(userspace.text_va, 0x1000, 64, userspace.stack_va, 0x2000, 8192));
+    arm_allocator();
+    // Give the boot user root a real (non-zero) value so the payload's
+    // task carries it: the EL1h tasks keep the kernel root (0).
+    _ = mmu.build_user_root(userspace.text_va, 0x1000, 64, userspace.stack_va, 0x2000, 8192) orelse return error.TestUnexpectedResult;
     _ = scheduler.init();
     _ = scheduler.register_worker(0x2000);
     _ = scheduler.register_user(0x3000, 0);
     scheduler.start();
-    // Retire the static user task first (exec requires the user root free).
+    // Retire the static user task (a normal boot's payload exits early),
+    // freeing its pool slot for the exec'd program.
     try std.testing.expect(scheduler.yield_current()); // shell -> worker
     try std.testing.expect(scheduler.yield_current()); // worker -> user
     try std.testing.expectEqual(@as(usize, 2), scheduler.current_id());
@@ -315,8 +406,9 @@ test "exec: ok path loads, validates, rebuilds the root, and spawns the task" {
     try std.testing.expectEqualStrings("USER.BIN", info.name);
     try std.testing.expectEqual(@as(usize, 25), info.content_len);
     try std.testing.expectEqual(userspace.text_va, info.entry_va); // entry at content start
-    // The 24-byte DSK1 header is stripped in place: the loaded page starts
-    // with the content, not "DSK1".
+    try std.testing.expect(info.stack_va != 0);
+    // The 24-byte DSK1 header is stripped in the staging buffer: the
+    // loaded content starts with the program bytes, not "DSK1".
     try std.testing.expectEqualStrings("user: hello from the ESP\n", program[0..25]);
     const h = head();
     try std.testing.expectEqualStrings("user: he", h[0..8]);
@@ -340,36 +432,99 @@ test "exec: ok path loads, validates, rebuilds the root, and spawns the task" {
     try std.testing.expectEqual(userspace.text_va, exec_proc.entry_va);
     try std.testing.expectEqual(mmu.user_root_phys(), exec_proc.root_phys);
     try std.testing.expectEqual(@as(u64, 8192), exec_proc.stack_len);
+    // Claim 0826: the process owns its own text/stack/kernel-stack pages
+    // from the physical allocator (the boot payload owns none of these).
+    try std.testing.expect(exec_proc.text_phys != 0);
+    try std.testing.expectEqual(@as(u64, 1), exec_proc.text_pages);
+    try std.testing.expect(exec_proc.stack_phys != 0);
+    try std.testing.expectEqual(@as(u64, 2), exec_proc.stack_pages);
+    try std.testing.expect(exec_proc.kernel_stack_phys != 0);
+    try std.testing.expectEqual(@as(u64, 2), exec_proc.kernel_stack_pages);
+    // The loaded bytes landed in the process's OWN text page.
+    const text_dst: [*]const u8 = @ptrFromInt(exec_proc.text_phys);
+    try std.testing.expectEqualStrings("user: hello from the ESP\n", text_dst[0..25]);
 }
 
-test "exec: a live user task blocks exec (one user program at a time)" {
+test "exec: a second program loads and runs while the first is alive" {
     try build_image(test_allocator);
     defer test_allocator.free(saved_image);
     esp.reset();
     try std.testing.expectEqual(fat.MountResult.ok, esp.set_disk(.{ .read = &fake_read, .write = &fake_write }));
-    // Give the user root a real value FIRST so register_user's task carries
-    // it (see the ok-path test); the EL1h tasks keep the kernel root (0).
-    try std.testing.expect(mmu.build_user_root(userspace.text_va, 0x1000, 64, userspace.stack_va, 0x2000, 8192));
+    arm_allocator();
+    _ = mmu.build_user_root(userspace.text_va, 0x1000, 64, userspace.stack_va, 0x2000, 8192) orelse return error.TestUnexpectedResult;
     _ = scheduler.init();
     _ = scheduler.register_worker(0x2000);
     _ = scheduler.register_user(0x3000, 0);
     scheduler.start();
-    const img = dsk1("x", 24, 25);
-    try std.testing.expectEqual(esp.WriteResult.ok, esp.write_file("USER.BIN", img[0..25]));
-    // The static user task is alive under the user root -> busy.
-    try std.testing.expectEqual(ExecResult.user_busy, exec_file("USER.BIN"));
-    // Once it exits to a zombie and is reaped, exec proceeds (the zombie is
-    // not live; the freed slot becomes the exec'd task's).
+    // Retire the boot payload (exit + reap) so BOTH exec'd programs fit
+    // the fixed pool (shell + worker + exec A + exec B + idle).
     try std.testing.expect(scheduler.yield_current());
     try std.testing.expect(scheduler.yield_current());
     try std.testing.expectEqual(@as(usize, 2), scheduler.current_id());
     try std.testing.expect(scheduler.exit_current(7));
     try std.testing.expect(scheduler.reap(2));
+
+    const img = dsk1("user: hello from the ESP\n", 24, 24 + 25);
+    try std.testing.expectEqual(esp.WriteResult.ok, esp.write_file("USER.BIN", img[0 .. 24 + 25]));
+    // Claim 0826: the exec gate is gone — the FIRST exec succeeds with the
+    // pool slot free, and the SECOND exec succeeds WITHOUT waiting for the
+    // first program to exit (the old `user_busy` refusal is gone).
     try std.testing.expectEqual(ExecResult.ok, exec_file("USER.BIN"));
-    try std.testing.expectEqualStrings("user-exec", scheduler.task_info(2).?.name);
+    try std.testing.expectEqual(ExecResult.ok, exec_file("USER.BIN"));
+    // Both programs are live: two RUNNING USER.BIN processes with their
+    // OWN roots, stacks, and executor tasks (the procs-table shape the
+    // live gate asserts).
+    try std.testing.expectEqual(@as(usize, 3), process.count()); // boot exited + A + B
+    const proc_a = process.info(1).?;
+    const proc_b = process.info(2).?;
+    try std.testing.expectEqualStrings("USER.BIN", proc_a.name);
+    try std.testing.expectEqualStrings("USER.BIN", proc_b.name);
+    try std.testing.expectEqual(process.State.running, proc_a.state);
+    try std.testing.expectEqual(process.State.running, proc_b.state);
+    try std.testing.expect(proc_a.task_id != proc_b.task_id);
+    try std.testing.expect(proc_a.root_phys != proc_b.root_phys);
+    // Per-process ASLR (claim 0826): each process owns its stack PLACEMENT
+    // (distinct when the CSPRNG is seeded, identical fixed VA when not) —
+    // the ownership claim is the PHYSICAL pages + roots, which must differ.
+    try std.testing.expect(proc_a.stack_va != 0);
+    try std.testing.expect(proc_b.stack_va != 0);
+    try std.testing.expect(proc_a.text_phys != proc_b.text_phys);
+    try std.testing.expect(proc_a.stack_phys != proc_b.stack_phys);
+    try std.testing.expectEqualStrings("user-exec", scheduler.task_info(proc_a.task_id.?).?.name);
+    try std.testing.expectEqualStrings("user-exec", scheduler.task_info(proc_b.task_id.?).?.name);
+    // The pool is the capacity gate: a THIRD program cannot load.
+    try std.testing.expectEqual(ExecResult.pool_full, exec_file("USER.BIN"));
+    try std.testing.expectEqual(@as(usize, 3), process.count()); // pool_full allocates nothing
 }
 
-fn build_image(alloc: std.mem.Allocator) !void {
+test "exec: a live user task does not block a second exec (gate is gone)" {
+    try build_image(test_allocator);
+    defer test_allocator.free(saved_image);
+    esp.reset();
+    try std.testing.expectEqual(fat.MountResult.ok, esp.set_disk(.{ .read = &fake_read, .write = &fake_write }));
+    arm_allocator();
+    _ = mmu.build_user_root(userspace.text_va, 0x1000, 64, userspace.stack_va, 0x2000, 8192) orelse return error.TestUnexpectedResult;
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0);
+    scheduler.start();
+    const img = dsk1("user: hello from the ESP\n", 24, 24 + 25);
+    try std.testing.expectEqual(esp.WriteResult.ok, esp.write_file("USER.BIN", img[0 .. 24 + 25]));
+    // The boot payload's user task (slot 2) is STILL ALIVE — the old
+    // `user_busy` gate is gone. The exec'd program gets its OWN root,
+    // stack, and task, so it loads and runs alongside the payload.
+    try std.testing.expectEqual(ExecResult.ok, exec_file("USER.BIN"));
+    // Slot 2 stays the boot payload's; the exec'd program takes the spare
+    // slot 3 and runs alongside it.
+    try std.testing.expectEqualStrings("user-el0", scheduler.task_info(2).?.name);
+    try std.testing.expectEqualStrings("user-exec", scheduler.task_info(3).?.name);
+    // Both live processes now exist: boot payload + exec'd program.
+    try std.testing.expectEqual(@as(usize, 2), process.count());
+    try std.testing.expectEqual(process.State.running, process.info(1).?.state);
+    try std.testing.expect(process.info(1).?.root_phys != process.info(0).?.root_phys);
+}
+
+fn build_image(alloc_arg: std.mem.Allocator) !void {
     // Reuse the esp.zig fixture builder by importing its module-scope test
     // image? No — esp.zig's fixture is private. Build a minimal GPT+FAT32
     // image here with mkfat32's layout: 64 MiB, ESP at LBA 2048, root
@@ -387,7 +542,7 @@ fn build_image(alloc: std.mem.Allocator) !void {
     }
     const data_start: u32 = 32 + 2 * fat_sectors;
 
-    saved_image = try alloc.alloc(u8, @intCast(total_sectors * 512));
+    saved_image = try alloc_arg.alloc(u8, @intCast(total_sectors * 512));
     @memset(saved_image, 0);
     saved_image[510] = 0x55;
     saved_image[511] = 0xaa;
@@ -423,13 +578,13 @@ fn build_image(alloc: std.mem.Allocator) !void {
 
     const fat_off: usize = @intCast((esp_offset + 32) * 512);
     const fat_bytes = fat_sectors * 512;
-    const fat_buf = try alloc.alloc(u8, fat_bytes);
+    const fat_buf = try alloc_arg.alloc(u8, fat_bytes);
     @memset(fat_buf, 0);
     std.mem.writeInt(u32, fat_buf[0..4], 0x0ffffff8, .little);
     std.mem.writeInt(u32, fat_buf[4..8], 0x0fffffff, .little);
     for ([_]u32{ 2, 3, 4, 5 }) |c| std.mem.writeInt(u32, fat_buf[@as(usize, c) * 4 ..][0..4], 0x0fffffff, .little);
     for (0..2) |f| @memcpy(saved_image[fat_off + f * fat_bytes ..][0..fat_bytes], fat_buf);
-    alloc.free(fat_buf);
+    alloc_arg.free(fat_buf);
 
     const root_off: usize = @intCast((esp_offset + data_start) * 512);
     var root = [_]u8{0} ** 512;

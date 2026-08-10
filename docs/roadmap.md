@@ -375,6 +375,18 @@ gates pass; tagged `m1.5-interactive-monitor`** (see
   command (registry 29→30) prints the table, and the new class-B gate
   `tools/verify-live-procs.sh` PASS 1/1 shows the exec'd program running
   as a process with the boot payload's exited status kept past the reap.
+- **Concurrent processes is DONE 2026-08-10 (claim 0826, milestone four
+  follow-on)** — the exec gate (`scheduler.user_root_in_use`, one user
+  program at a time) is gone: every process owns its own TTBR0 user root
+  and allocator-backed text/user-stack/EL1-exception-stack pages, the
+  syscall/uaccess regions arm per task at SVC entry, and exec gates on
+  capacity (pool slot, table carve-out, registry) instead. Two programs
+  now load and run CONCURRENTLY — the class-B gate
+  `tools/verify-live-concurrent.sh` PASS 1/1 on VZ shows a `procs` table
+  with TWO `state=running` USER.BIN rows (distinct task ids + stack VAs)
+  and both programs' markers interleaving; the full shared-seam live
+  sweep (exec/procs/addrspaces/tasks/userspace/svc/uaccess/lifecycle/
+  sleep/entropy) is green against the relaxed gate.
 - Eventually: a network stack — only when the ones below it are
   demonstrably working.
 
