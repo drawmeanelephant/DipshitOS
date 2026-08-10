@@ -226,7 +226,7 @@ fn ensure_registry() []const Command {
             .{ .name = "addrspaces", .help = "per-task user address spaces: per-task TTBR0, EL1-only kernel overlay, user-root contents", .usage = "addrspaces", .handler = cmd_addrspaces },
             .{ .name = "about", .help = "explain this questionable system", .usage = "about", .handler = cmd_about },
             .{ .name = "beans", .help = "count beans, probably", .usage = "beans [count]", .max_args = 1, .handler = cmd_beans },
-            .{ .name = "cat", .help = "print a file from the ESP", .usage = "cat <file>", .min_args = 1, .max_args = 1, .handler = cmd_cat },
+            .{ .name = "cat", .help = "print a file from the ESP (by name or /path)", .usage = "cat <file|path>", .min_args = 1, .max_args = 1, .handler = cmd_cat },
             .{ .name = "clear", .help = "clean up the crime scene", .usage = "clear", .handler = cmd_clear },
             .{ .name = "echo", .help = "repeat your regrettable decisions", .usage = "echo <text...>", .handler = cmd_echo },
             .{ .name = "elephant", .help = "operational mascot diagnostics", .usage = "elephant", .handler = cmd_elephant },
@@ -235,7 +235,7 @@ fn ensure_registry() []const Command {
             .{ .name = "handoff", .help = "display boot-to-kernel ABI data", .usage = "handoff", .handler = cmd_handoff },
             .{ .name = "help", .help = "list commands and their help text", .usage = "help [command]", .max_args = 1, .handler = cmd_help },
             .{ .name = "hex", .help = "format an integer in hexadecimal", .usage = "hex <number>...", .min_args = 1, .handler = cmd_hex },
-            .{ .name = "ls", .help = "list files on the ESP", .usage = "ls", .handler = cmd_ls },
+            .{ .name = "ls", .help = "list files on the ESP (or a directory by path)", .usage = "ls [<dir>]", .max_args = 1, .handler = cmd_ls },
             .{ .name = "mem", .help = "summarize the EFI memory map", .usage = "mem", .handler = cmd_mem },
             .{ .name = "pages", .help = "physical page allocator pool", .usage = "pages [selftest]", .max_args = 1, .handler = cmd_pages },
             .{ .name = "pci", .help = "enumerate PCI devices on the bus", .usage = "pci", .handler = cmd_pci },
@@ -509,11 +509,11 @@ fn cmd_mem(m: *Monitor, args: []const []const u8) ExecError {
 // claim 6420)
 // ---------------------------------------------------------------------------
 
-/// List the ESP root: name, size, and kind ([esp] file, [dir]). The window
-/// is populated from the live FAT32 volume (claim 6420). Deterministic and
-/// grep-able.
+/// List files: no argument lists the ESP root window (unchanged behavior);
+/// a `/`-path lists a subdirectory straight from the FAT volume (milestone
+/// four card 2 Stage C). Deterministic and grep-able.
 fn cmd_ls(m: *Monitor, args: []const []const u8) ExecError {
-    _ = args;
+    if (args.len > 0) return cmd_ls_path(m, args[0]);
     m.console.puts("ls: esp=");
     m.console.print_hex(@intCast(esp.esp_count()));
     m.console.puts("\n");
@@ -541,11 +541,51 @@ fn cmd_ls(m: *Monitor, args: []const []const u8) ExecError {
     return .none;
 }
 
-/// Print a file's content from the ESP window (FAT-backed since claim
-/// 6420). Honest diagnostics for directories, unloaded large files, and
-/// unknown names.
+/// List a directory by `/`-path, straight from the FAT volume (the window
+/// only snapshots the root). Same row format as the root listing, with a
+/// path-aware header. Honest diagnostics distinguish a file ("is a file")
+/// from an absent/non-directory path ("not found").
+fn cmd_ls_path(m: *Monitor, path: []const u8) ExecError {
+    var list: [esp.entries_max]fat.DirEntry = undefined;
+    const n = fat.list_path(path, &list);
+    if (n == 0) {
+        m.console.puts("ls: ");
+        m.console.puts(path);
+        if (fat.file_size(path) != null) {
+            m.console.print_line(": is a file, not a directory");
+        } else {
+            m.console.print_line(": not found (no such directory on the FAT volume)");
+        }
+        return .invalid_argument;
+    }
+    m.console.puts("ls: ");
+    m.console.puts(path);
+    m.console.puts(" entries=");
+    m.console.print_hex(@intCast(n));
+    m.console.puts("\n");
+    var width: usize = 0;
+    for (list[0..n]) |e| width = @max(width, e.name_len);
+    for (list[0..n]) |e| {
+        m.console.puts("  ");
+        m.console.puts(e.name[0..e.name_len]);
+        var pad: usize = e.name_len;
+        while (pad < width) : (pad += 1) m.console.putc(' ');
+        m.console.puts("  ");
+        m.console.print_hex(e.size);
+        m.console.puts("  [");
+        m.console.puts(if (e.is_dir) "dir" else "esp");
+        m.console.puts("]\n");
+    }
+    return .none;
+}
+
+/// Print a file's content — a bare name serves the ESP window (unchanged
+/// behavior); a `/`-path reads the FAT volume directly (milestone four
+/// card 2 Stage C). Honest diagnostics for directories, files larger than
+/// the bounded read buffer, and unknown paths.
 fn cmd_cat(m: *Monitor, args: []const []const u8) ExecError {
     const name = args[0];
+    if (std.mem.indexOfScalar(u8, name, '/') != null) return cmd_cat_path(m, name);
     const e = esp.lookup(name) orelse {
         m.console.puts("cat: ");
         m.console.puts(name);
@@ -577,6 +617,38 @@ fn cmd_cat(m: *Monitor, args: []const []const u8) ExecError {
     // A trailing newline keeps the shell prompt on its own line; a file
     // that already ends with one is printed verbatim (no double blank).
     if (content.len == 0 or content[content.len - 1] != '\n') m.console.puts("\n");
+    return .none;
+}
+
+/// Print a file by `/`-path, read straight from the FAT volume. The file's
+/// size is checked first: a file larger than the bounded read buffer is
+/// reported honestly (never silently truncated).
+fn cmd_cat_path(m: *Monitor, path: []const u8) ExecError {
+    const size = fat.file_size(path) orelse {
+        m.console.puts("cat: ");
+        m.console.puts(path);
+        m.console.print_line(": not found (no such file on the FAT volume)");
+        return .invalid_argument;
+    };
+    var buf: [esp.write_content_max]u8 = undefined;
+    if (size > @as(u32, @intCast(buf.len))) {
+        m.console.puts("cat: ");
+        m.console.puts(path);
+        m.console.puts(": file is ");
+        m.console.print_hex(size);
+        m.console.puts(" bytes; direct read caps at ");
+        m.console.print_hex(esp.write_content_max);
+        m.console.print_line(" bytes");
+        return .invalid_argument;
+    }
+    const got = fat.read_file(path, &buf) orelse {
+        m.console.puts("cat: ");
+        m.console.puts(path);
+        m.console.print_line(": not found (no such file on the FAT volume)");
+        return .invalid_argument;
+    };
+    m.console.puts(buf[0..got]);
+    if (got == 0 or buf[got - 1] != '\n') m.console.puts("\n");
     return .none;
 }
 
@@ -2059,6 +2131,24 @@ test "monitor: cat prints ESP content with honest errors" {
     env.mock.reset();
     try std.testing.expectEqual(ExecError.invalid_argument, exec(&mon, &.{ "cat", "NOPE.TXT" }));
     try std.testing.expect(std.mem.indexOf(u8, env.mock.contents(), "not found") != null);
+}
+
+test "monitor: ls/cat accept /-paths (honest no-volume errors in a test process)" {
+    esp.reset();
+    var env = TestEnv.init();
+    var mon = env.monitor();
+    // No FAT volume in a host test process: the path branches resolve
+    // nothing and report it honestly (the success path is exercised live
+    // by verify-live-fs.sh — `ls EFI/BOOT` + `cat EFI/BOOT/BOOTAA64.EFI`).
+    try std.testing.expectEqual(ExecError.invalid_argument, exec(&mon, &.{ "ls", "EFI/BOOT" }));
+    try std.testing.expectEqualStrings("ls: EFI/BOOT: not found (no such directory on the FAT volume)\n", env.mock.contents());
+    env.mock.reset();
+    try std.testing.expectEqual(ExecError.invalid_argument, exec(&mon, &.{ "cat", "EFI/BOOT/BOOTAA64.EFI" }));
+    try std.testing.expectEqualStrings("cat: EFI/BOOT/BOOTAA64.EFI: not found (no such file on the FAT volume)\n", env.mock.contents());
+    env.mock.reset();
+    // The no-arg ls still lists the (empty) window.
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"ls"}));
+    try std.testing.expectEqualStrings("ls: esp=0x0000000000000000\nls: no files on the ESP (FAT volume unavailable or empty)\n", env.mock.contents());
 }
 
 test "monitor: write joins arguments and honestly reports no disk in a test process" {

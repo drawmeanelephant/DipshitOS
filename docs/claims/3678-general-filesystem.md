@@ -24,9 +24,10 @@
 - **Depends on:** milestone-four card 1 (merged PRs #69/#70), claim 6420
   (FAT32 storage driver + virtio-blk), claim 3475 (the file window being
   generalized).
-- **Status:** 🔄 in progress 2026-08-10 — **Stages A + B landed**
-  (volume generalization + directories/paths, class A green + live-fs
-  1/1; see Notes); Stages C–D remain on this claim.
+- **Status:** 🔄 in progress 2026-08-10 — **Stages A + B + C landed**
+  (volume generalization, directories/paths, monitor path arguments —
+  class A green + live-fs 1/1 on VZ; see Notes); Stage D remains on this
+  claim.
 
 ## Notes
 
@@ -61,6 +62,18 @@ parents; `esp`/`monitor` mirror the variant for exhaustive switches — dead
 until Stage C's monitor path args). Bare names still resolve against the
 root. Host tests cover the fixture's EFI/BOOT tree (list, read 3 levels
 deep, `..`, write into a subdir, `bad_path`); live-fs 1/1 on VZ unchanged.
+
+**Stage C (monitor path arguments):** `ls [<dir>]` lists a subdirectory
+straight from the FAT volume and `cat <file|path>` reads a `/`-path
+directly — both with honest diagnostics (`file_size` gates cat's
+2048-byte bounded read: bigger files are reported, never silently
+truncated); bare names keep the proven window paths. Registry help/usage
+updated; transcript fixture + shell.zig expected string updated
+byte-exactly for the two help rows. Class A green (fat 14/14, monitor
+165, transcript byte-identical); class B — `verify-live-fs.sh` extended
+with `ls EFI/BOOT` + `cat EFI/BOOT/BOOTAA64.EFI`, PASS 1/1 on VZ: the
+loader's directory lists and cat reports `file is 0x29600 bytes; direct
+read caps at 0x800 bytes` (`artifacts/live-fs-serial-A-1.log`).
 
 ## Verification
 

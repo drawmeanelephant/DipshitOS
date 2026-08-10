@@ -339,6 +339,16 @@ pub fn read_file(name: []const u8, out: []u8) ?usize {
     return wrote;
 }
 
+/// The on-disk size of a file (by bare name or `/`-path), or null when it
+/// is absent or is a directory. Milestone four card 2 Stage C: lets the
+/// monitor check a file's size before printing it (honest truncation
+/// reporting).
+pub fn file_size(path: []const u8) ?u32 {
+    const found = find_slot_path(path) orelse return null;
+    if (found.entry.is_dir) return null;
+    return found.entry.size;
+}
+
 /// Write `content` to `name` — a bare name writes into the root (as
 /// before); a `/`-path writes into an EXISTING subdirectory (milestone
 /// four card 2; the parent components must resolve to directories, else
@@ -1360,4 +1370,16 @@ test "fat: write_file resolves into an existing subdirectory by path" {
     try std.testing.expectEqual(WriteResult.bad_path, write_file("EFI/NOPE/x.txt", "x"));
     try std.testing.expectEqual(WriteResult.bad_path, write_file("KERNEL.BIN/x.txt", "x")); // file, not a dir
     try std.testing.expectEqual(WriteResult.name_too_long, write_file("EFI/BOOT/", "x")); // trailing '/'
+}
+
+test "fat: file_size reports sizes by name and /-path, null for dirs" {
+    var fxt = try build_fixture(test_allocator, false);
+    defer test_allocator.free(fxt.buf);
+    make_state_fixture(&fxt);
+    try std.testing.expectEqual(MountResult.ok, mount(test_ops()));
+    try std.testing.expectEqual(@as(u32, 54), (file_size("BOOTED.TXT") orelse return error.TestUnexpectedResult));
+    try std.testing.expectEqual(@as(u32, 0x200), (file_size("EFI/BOOT/BOOTAA64.EFI") orelse return error.TestUnexpectedResult));
+    try std.testing.expect(file_size("EFI") == null); // a directory
+    try std.testing.expect(file_size("EFI/BOOT") == null); // a directory
+    try std.testing.expect(file_size("NOPE.TXT") == null);
 }

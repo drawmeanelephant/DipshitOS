@@ -6,7 +6,7 @@ available commands:
   addrspaces  per-task user address spaces: per-task TTBR0, EL1-only kernel overlay, user-root contents
   about       explain this questionable system
   beans       count beans, probably
-  cat         print a file from the ESP
+  cat         print a file from the ESP (by name or /path)
   clear       clean up the crime scene
   echo        repeat your regrettable decisions
   elephant    operational mascot diagnostics
@@ -15,7 +15,7 @@ available commands:
   handoff     display boot-to-kernel ABI data
   help        list commands and their help text
   hex         format an integer in hexadecimal
-  ls          list files on the ESP
+  ls          list files on the ESP (or a directory by path)
   mem         summarize the EFI memory map
   pages       physical page allocator pool
   pci         enumerate PCI devices on the bus

@@ -72,7 +72,30 @@
   mount + list/read/write paths (now routed through the generalized
   directory machinery) persist through reboot unchanged.
 
-- **Remaining on this claim:** Stage C (direct path reads beyond the esp
-  window + monitor path args — `ls [<dir>]` / `cat <path>`), Stage D
-  (second FAT partition on the image + live gate + docs reconciliation +
-  PR).
+- **Implemented — Stage C (monitor path arguments)** (2026-08-10):
+  `kernel/src/fat.zig` gains `file_size` (a file's on-disk size by name or
+  `/`-path — the monitor's truncation-honesty check); `kernel/src/
+  monitor.zig` — `ls [<dir>]` lists a subdirectory straight from the FAT
+  volume (`ls: <path> entries=N` + the same row format; honest "is a file"
+  vs "not found" diagnostics), `cat <file|path>` reads a `/`-path
+  directly (size checked first: files larger than the bounded 2048-byte
+  buffer are reported honestly, never silently truncated); bare names keep
+  the proven window paths. Registry help/usage updated for `ls` and `cat`;
+  the transcript fixture + shell.zig expected string updated deliberately
+  for the two help rows (byte-exact — the fixture's mixed CRLF/LF
+  preserved). New monitor test: the path branches report honest no-volume
+  errors in a host test process (success is the live gate).
+
+- **Verification — Stage C** (2026-08-10): class A all green — fmt, unit
+  tests (fat 14/14, monitor 165), transcript byte-identical, build/image/
+  inspect, swift build, context, coordination, test-coordination,
+  mmu-debt. Class B: `verify-live-fs.sh` extended (run A adds `ls
+  EFI/BOOT` + `cat EFI/BOOT/BOOTAA64.EFI`) — **PASS 1/1 on VZ**: the
+  path listing shows the loader's dir (`ls: EFI/BOOT entries=1`,
+  `BOOTAA64.EFI 0x29600 [esp]`) and cat reports the honest direct-read cap
+  (`file is 0x29600 bytes; direct read caps at 0x800 bytes`) — the
+  EFI/BOOT tree is reachable from the shell on real hardware
+  (`artifacts/live-fs-serial-A-1.log`).
+
+- **Remaining on this claim:** Stage D (second FAT partition on the image
+  + live gate + docs reconciliation + PR).
