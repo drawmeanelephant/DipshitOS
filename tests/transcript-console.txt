@@ -19,6 +19,7 @@ available commands:
   mem         summarize the EFI memory map
   pages       physical page allocator pool
   pci         enumerate PCI devices on the bus
+  procs       process registry: image, address space, lifecycle, exit status
   random      print n random bytes from the seeded CSPRNG (hex)
   reboot      restart the machine
   repeat      repeat text, safely bounded
