@@ -49,7 +49,7 @@ serial console: identity commands, memory-map inspection, shell utilities,
 machine controls, and an ESP file window. The host plumbing (duplex
 serial, terminal handling, `zig build console`), console & shell core (RX
 abstraction, line editor, tokenizer, prompt loop), and command registry
-(26 commands, mock-tested) are built; the transcript test gate passes
+(27 commands, mock-tested) are built; the transcript test gate passes
 (`zig build test-console`, byte-identical fixture). The **VZ serial gate
 passes** (claim 1517 — post-MMU virtio TX fixed with T0SZ=16 + `tlbi
 vmalle1` at the switch), **live RX** delivers host keystrokes end to end
@@ -298,11 +298,15 @@ The gate-by-gate plan and active work claims live in
    (claim 9187; strict `irq=5 poll=0` gate passes 3/3), round-robin kernel
    tasks are done (claim 5275), the EL0/SVC boundary (claim 8215) and the
    frozen syscall ABI (claim 3594) pass their live gates, and fault-safe
-   uaccess (claim 6120), per-task user address spaces (claim 5804), and the
+   uaccess (claim 6120), per-task user address spaces (claim 5804), the
    user task lifecycle (claim 6729 — explicit states, bounded spawn,
    exit→zombie, idle-task reaper, plus the callee-saved vector-frame fix
-   that made preemption of compiled tasks safe) are done. **Loading and
-   execing a user program from the ESP is the next milestone-three card.**
-   Canonical ordering and evidence live in `docs/status.md`.
+   that made preemption of compiled tasks safe), and **loading and execing
+   a real user program from the ESP (claim 6783 — `exec USER.BIN` reads a
+   DSK1 flat image through the FAT path, rebuilds the EL0 user root around
+   its page, and the loaded program runs at EL0, writes via sys_write,
+   round-trips pings, and exits through the lifecycle) are done.**
+   **Blocking syscalls (sleep/yield/wakeup) is the next milestone-three
+   card.** Canonical ordering and evidence live in `docs/status.md`.
 4. Keep later task/process work and graphics/networking/SMP out of scope;
    those remain future roadmap cards.

@@ -152,6 +152,32 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_kernel.step);
 
     // ------------------------------------------------------------------
+    // Guest: ESP user program (milestone-three card 6, claim 6783) — a
+    // small freestanding AArch64 flat image (USER.BIN, same DSK1 format as
+    // KERNEL.BIN) that the kernel's `exec` monitor command loads from the
+    // ESP and enters at EL0. Built into the same freestanding target and
+    // embedded on the ESP by the image builder.
+    // ------------------------------------------------------------------
+    const user = b.addExecutable(.{
+        .name = "user-hello",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/main.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    user.linker_script = b.path("user/linker.ld");
+    const user_step = b.step("user", "Build the ESP user program (zig-out/bin/USER.BIN; class A tooling, no VM)");
+    const user_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    user_elf2bin.addFileArg(user.getEmittedBin());
+    const user_bin = user_elf2bin.addOutputFileArg("USER.BIN");
+    user_elf2bin.has_side_effects = true;
+    user_elf2bin.stdio = .inherit;
+    user_step.dependOn(&user_elf2bin.step);
+    const install_user = b.addInstallFileWithDir(user_bin, .bin, "USER.BIN");
+    b.getInstallStep().dependOn(&install_user.step);
+
+    // ------------------------------------------------------------------
     // Top-level steps. System-command steps are marked as having side
     // effects (and inherit stdio) so they always execute instead of being
     // skipped by the build cache. (No QEMU path: this project targets Apple
@@ -162,6 +188,7 @@ pub fn build(b: *std.Build) void {
     image.addFileArg(efi.getEmittedBin());
     image.addArg("artifacts/disk.img");
     image.addFileArg(kernel_bin); // make-image.sh: [EFI_BIN] [IMAGE] [KERNEL_BIN]
+    image.addFileArg(user_bin); // ... [USER_BIN] (claim 6783: ESP user program)
     image.has_side_effects = true;
     image.stdio = .inherit;
     image_step.dependOn(&image.step);
@@ -179,6 +206,7 @@ pub fn build(b: *std.Build) void {
     failure_image.addFileArg(efi.getEmittedBin());
     failure_image.addArg("artifacts/bad-handoff.img");
     failure_image.addFileArg(kernel_bin);
+    failure_image.addFileArg(user_bin); // USER.BIN rides the same image builder
     failure_image.has_side_effects = true;
     failure_image.stdio = .inherit;
     failure_step.dependOn(&failure_image.step);

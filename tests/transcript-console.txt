@@ -10,6 +10,7 @@ available commands:
   clear       clean up the crime scene
   echo        repeat your regrettable decisions
   elephant    operational mascot diagnostics
+  exec        load a user program from the ESP and enter it at EL0
   fault       trigger a synchronous exception (diagnostic)
   handoff     display boot-to-kernel ABI data
   help        list commands and their help text

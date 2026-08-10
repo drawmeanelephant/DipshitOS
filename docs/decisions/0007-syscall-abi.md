@@ -182,3 +182,17 @@ instead of the shared identity map, and the design landed on the VZ fallback
 The syscall ABI (x8 number, x0–x5 args, x0 result) and the EFAULT contract
 are unchanged by the address-space move; the EL0 payload + uaccess recovery
 prove the boundary under the user root.
+
+## Amendment (2026-08-10, claim 3200 — the blocking syscalls card)
+
+Slot 4 (`sys_sleep`) is frozen in the dispatch table:
+
+| 4 | `sys_sleep` | `sleep(ticks) -> i64` | Blocks the calling task for at least `ticks` scheduler ticks (1 tick ≈ 1 s timer period on VZ). Returns 0 on wake; `EINVAL` for a zero-ticks deadline clamp or overflow. The scheduler's `blocked` state + per-task `wakeup_tick` deadline + timer-driven `wake_expired` on every tick move the sleeper back to `ready`; the round-robin ring resumes it from its saved SVC frame, exactly like `sys_yield`. |
+
+`implemented_count` is now 5; the `syscalls` report prints rows 0–4.
+`scheduler.sleep_current` clamps `ticks=0` to 1 (minimum sleep is one tick).
+The `blocked` task is counted as live by `user_root_in_use` (the exec gate),
+so a sleeping user program still owns the user root until it exits.
+
+The ABI — x8 number, x0–x5 arguments, x0 result, reserved 5–63, error
+codes — is unchanged.

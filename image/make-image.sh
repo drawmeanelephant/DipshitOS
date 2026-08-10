@@ -2,9 +2,13 @@
 #
 # make-image.sh -- build the bootable FAT32+GPT boot disk image for DipshitOS.
 #
-# Usage: make-image.sh [EFI_BINARY] [IMAGE_PATH] [KERNEL_BINARY]
+# Usage: make-image.sh [EFI_BINARY] [IMAGE_PATH] [KERNEL_BINARY] [USER_BINARY]
 # Defaults: zig-out/bin/BOOTAA64.EFI   artifacts/disk.img
-#           zig-out/bin/KERNEL.BIN
+#           zig-out/bin/KERNEL.BIN     zig-out/bin/USER.BIN
+#
+# USER.BIN (the milestone-three ESP user program, claim 6783) is embedded at
+# the volume root when present; the kernel's `exec` monitor command loads it
+# from the ESP and enters it at EL0.
 #
 # Uses image/mkfat32.py (pure Python 3, stdlib only), so it needs no root,
 # no mtools, and no loopback devices. Safe to rerun: the image is rebuilt
@@ -19,6 +23,7 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 EFI_BIN="${1:-$ROOT_DIR/zig-out/bin/BOOTAA64.EFI}"
 IMAGE="${2:-$ROOT_DIR/artifacts/disk.img}"
 KERNEL_BIN="${3:-$ROOT_DIR/zig-out/bin/KERNEL.BIN}"
+USER_BIN="${4:-$ROOT_DIR/zig-out/bin/USER.BIN}"
 SIZE_MB="${DIPSHITOS_IMAGE_SIZE_MB:-64}"
 
 cd "$ROOT_DIR"
@@ -40,6 +45,13 @@ if [ -f "$KERNEL_BIN" ]; then
 else
     fail "kernel image not found at '$KERNEL_BIN' -- run 'zig build' first (it produces zig-out/bin/KERNEL.BIN)."
 fi
+USER_ARGS=()
+if [ -f "$USER_BIN" ]; then
+    if [ "$(head -c 4 "$USER_BIN")" != "DSK1" ]; then
+        fail "'$USER_BIN' does not start with the 'DSK1' image magic -- run 'zig build' first (it produces zig-out/bin/USER.BIN)."
+    fi
+    USER_ARGS+=("$USER_BIN")
+fi
 
 # 3. Builder script.
 [ -f "$SCRIPT_DIR/mkfat32.py" ] || fail "missing $SCRIPT_DIR/mkfat32.py."
@@ -48,7 +60,7 @@ fi
 mkdir -p "$(dirname "$IMAGE")"
 rm -f "$IMAGE"
 echo "make-image: building FAT32+GPT image '$IMAGE' (${SIZE_MB} MiB)..."
-python3 "$SCRIPT_DIR/mkfat32.py" --size-mb "$SIZE_MB" "$IMAGE" "$EFI_BIN" "$KERNEL_BIN" \
+python3 "$SCRIPT_DIR/mkfat32.py" --size-mb "$SIZE_MB" "$IMAGE" "$EFI_BIN" "$KERNEL_BIN" "${USER_ARGS[@]}" \
     || fail "image creation failed (see output above)."
 
 # 5. Self-verify by listing the image we just wrote.

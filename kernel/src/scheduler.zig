@@ -95,6 +95,11 @@ pub const State = enum {
     free,
     ready,
     running,
+    /// Claim 0635: a task parked by `sys_sleep` until `wakeup_tick` ticks
+    /// have passed. Blocked tasks drop out of the round-robin ring
+    /// (`next_runnable` scans `ready` only) and the tick's `wake_expired`
+    /// moves them back to `ready` when their deadline passes.
+    blocked,
     zombie,
 };
 
@@ -104,6 +109,7 @@ pub fn state_name(state: State) []const u8 {
         .free => "free",
         .ready => "ready",
         .running => "running",
+        .blocked => "blocked",
         .zombie => "zombie",
     };
 }
@@ -134,6 +140,9 @@ const Task = struct {
     advances: u64 = 0,
     /// Exit status preserved while the task is a zombie (until reaped).
     exit_status: u64 = 0,
+    /// Claim 0635: scheduler tick count at/after which a `blocked` task
+    /// wakes (`tick_count >= wakeup_tick`). Meaningful only while blocked.
+    wakeup_tick: u64 = 0,
 };
 
 var tasks: [max_tasks]Task = .{ .{}, .{}, .{}, .{}, .{} };
@@ -143,6 +152,12 @@ var enabled_flag: bool = false;
 var switches: u64 = 0;
 var cooperative_yields: u64 = 0;
 var exits: u64 = 0;
+/// Claim 0635: scheduler tick counter — advanced once per timer tick by
+/// `tick`/`on_tick`; the clock `sys_sleep` deadlines are measured against.
+/// Distinct from `timer.ticks` (timer deliveries, including polls) because
+/// the scheduler may be inactive or the timer path may change; the sleep
+/// contract is in SCHEDULER ticks.
+var tick_count: u64 = 0;
 
 /// Restored-context staging: written by `switch_context` (the pure core),
 /// applied by `tick` (the aarch64 wrapper: msr ELR/SPSR + resume_frame).
@@ -166,6 +181,12 @@ var exit_report_status: u64 = 0;
 /// name is zeroed by the reset.
 var reap_report_pending: bool = false;
 var reap_report_name: []const u8 = "";
+/// Sleep report (claim 0635): `sys_sleep` marks it (exception context, like
+/// exit); the shell idle loop prints it — the deterministic "this task is
+/// now blocked for N ticks" transition line the live gate asserts.
+var sleep_report_pending: bool = false;
+var sleep_report_name: []const u8 = "";
+var sleep_report_ticks: u64 = 0;
 
 /// The demo worker's static stack.
 var worker_stack: [task_stack_size]u8 align(16) = undefined;
@@ -205,8 +226,10 @@ pub fn init() usize {
     @memset(&report_pending, false);
     exit_report_pending = false;
     reap_report_pending = false;
+    sleep_report_pending = false;
     spawn_demo_armed = false;
     user_timer_preemptions = 0;
+    tick_count = 0;
     for (&tasks) |*task| task.* = .{};
     tasks[0] = .{ .name = "shell", .state = .ready, .ttbr0 = mmu.kernel_root_phys() };
     tasks[idle_id] = .{
@@ -259,6 +282,39 @@ pub fn register_worker(entry: u64) ?usize {
 /// under the task's own TTBR0 user root, with a separate SP_EL0 user stack
 /// and the timer-preemption witness at its user VA (the payload dereferences
 /// it through x9 at EL0).
+/// Claim 6783: register the ESP-loaded user program (exec) as an EL0t task
+/// on the shared EL1 exception stack. The caller (`exec.zig`) has already
+/// rebuilt the user root around the loaded page, so `entry_va` and the
+/// stack are USER VAs and the root is the current user root
+/// (`mmu.user_root_phys()`). One user program at a time is enforced by
+/// `user_root_in_use` — the exec gate. The task reuses the static user
+/// stack pages as SP_EL0 (the previous user task is gone by the gate).
+pub fn register_exec_user(entry_va: u64) ?usize {
+    const sp_el0 = userspace.stack_va + user_stack.len;
+    return spawn("user-exec", entry_va, spsr_el0t_irqs, &user_kernel_stack, mmu.user_root_phys(), sp_el0);
+}
+
+/// Claim 6783: true when a live task still runs under the current user
+/// root. Exec refuses while that is the case — rebuilding the root would
+/// strand the running program (one user program at a time). A zombie is
+/// not live (it never runs again) and may be reaped, so exec can reuse its
+/// slot. Claim 0635: a BLOCKED task is also live — it wakes and resumes,
+/// so a sleeping user program still owns the user root.
+pub fn user_root_in_use() bool {
+    const root = mmu.user_root_phys();
+    for (tasks[0..max_tasks]) |task| {
+        if ((task.state == .ready or task.state == .running or task.state == .blocked) and task.ttbr0 == root) return true;
+    }
+    return false;
+}
+
+/// Physical address of the static user stack pages (claim 6783: exec maps
+/// them at `userspace.stack_va` in the rebuilt user root). Identity on host
+/// tests.
+pub fn user_stack_phys() u64 {
+    return mmu.to_phys(@intFromPtr(&user_stack));
+}
+
 pub fn register_user(entry: u64, image_base: u64) ?usize {
     // Claim 5804: this runs POST-jump, so the incoming `entry` and these
     // `@intFromPtr` values are KVA addresses — the user-VA conversion
@@ -413,6 +469,72 @@ pub fn yield_current() bool {
     return true;
 }
 
+/// Claim 0635: block the calling task until `ticks` scheduler ticks have
+/// passed, then stage its successor. The saved SVC frame stays on the
+/// task's kernel stack while blocked; `wake_expired` flips the task back to
+/// `ready` and the round-robin resumes it from that same frame, so the
+/// syscall return (x0 = 0) lands when it wakes — the identical resume path
+/// as `sys_yield`. `ticks == 0` is clamped to 1 (the minimum sleep is one
+/// tick, matching the 1 s timer period). Returns false (EINVAL) for the
+/// idle task or an inactive/rolled-back pool.
+pub fn sleep_current(ticks: u64) bool {
+    if (!scheduling_active() or task_count == 0 or current == idle_id) return false;
+    if (tasks[current].state != .ready and tasks[current].state != .running) return false;
+    const duration = if (ticks == 0) 1 else ticks;
+    const deadline = std.math.add(u64, tick_count, duration) catch return false;
+    const sleeping = current;
+    const name = tasks[sleeping].name;
+    // Save the calling task's context (frame SP + ELR/SPSR + SP_EL0), the
+    // same seam yield_current uses — the task MUST find its saved SVC frame
+    // intact when wake_expired flips it back to ready and the ring resumes
+    // it. Unlike exit_current, which never resumes the saved context.
+    const pc = current_exception_pc();
+    tasks[sleeping].sp = exceptions.resume_frame;
+    tasks[sleeping].elr = pc.elr;
+    tasks[sleeping].spsr = pc.spsr;
+    tasks[sleeping].sp_el0 = exceptions.resume_sp_el0;
+    tasks[sleeping].saves += 1;
+    tasks[sleeping].state = .blocked;
+    tasks[sleeping].wakeup_tick = deadline;
+    const next = next_runnable(sleeping) orelse {
+        // No successor: roll back (the always-ready idle task makes this
+        // unreachable in a normal boot; kept as a defensive bound).
+        tasks[sleeping].state = .ready;
+        tasks[sleeping].wakeup_tick = 0;
+        tasks[sleeping].saves -%= 1;
+        return false;
+    };
+    sleep_report_pending = true;
+    sleep_report_name = name;
+    sleep_report_ticks = duration;
+    current = next;
+    stage_current();
+    apply_pending();
+    return true;
+}
+
+/// Claim 0635: timer-driven wakeups. Called once per tick (IRQ context,
+/// console-free — claim 9187) AFTER the tick counter advanced: every
+/// `blocked` task whose deadline has passed returns to `ready` and is
+/// picked up by the ring on the next round. A no-op when nothing sleeps.
+fn wake_expired() void {
+    var i: usize = 0;
+    while (i < max_tasks) : (i += 1) {
+        if (tasks[i].state != .blocked) continue;
+        if (tick_count < tasks[i].wakeup_tick) continue;
+        tasks[i].state = .ready;
+        tasks[i].wakeup_tick = 0;
+    }
+}
+
+/// Host-testable tick seam (mirrors `timer.on_tick`): advance the tick
+/// counter and run the timer-driven wakeups. Called by the real `tick`
+/// before preemption; host tests call it directly to drive sleepers.
+pub fn on_tick() void {
+    tick_count +%= 1;
+    wake_expired();
+}
+
 /// Remove the calling task from the runnable ring and stage its successor.
 /// The SVC exception return consumes the staged frame, so the terminated task
 /// never resumes after `sys_exit`. Claim 6729: the exiting task becomes a
@@ -528,6 +650,7 @@ pub fn tick() void {
     asm volatile ("mrs %[v], spsr_el1"
         : [v] "=r" (spsr),
     );
+    on_tick();
     timer_switch_context(exceptions.resume_frame, elr, spsr, exceptions.resume_sp_el0);
     apply_pending();
 }
@@ -595,6 +718,17 @@ pub fn maybe_report(con: *console.Console) void {
         con.puts("tasks ");
         con.puts(reap_report_name);
         con.puts(" reaped\n");
+    }
+    // Claim 0635: a task blocked itself with sys_sleep; the name + duration
+    // were snapshotted at block time (the task is not running now, but the
+    // report is the shell's window into the transition).
+    if (sleep_report_pending) {
+        sleep_report_pending = false;
+        con.puts("tasks ");
+        con.puts(sleep_report_name);
+        con.puts(" sleeping ");
+        con.print_u64(sleep_report_ticks);
+        con.puts(" ticks\n");
     }
 }
 
@@ -666,6 +800,11 @@ pub fn exit_count() u64 {
 
 pub fn is_terminated(id: usize) bool {
     return id < max_tasks and tasks[id].state == .zombie;
+}
+
+/// Claim 0635: true when the slot holds a task blocked by `sys_sleep`.
+pub fn is_blocked(id: usize) bool {
+    return id < max_tasks and tasks[id].state == .blocked;
 }
 
 pub fn terminated_status(id: usize) ?u64 {
@@ -919,6 +1058,96 @@ test "scheduler: cooperative exit is non-runnable and reports from shell" {
     var con = mock.console();
     maybe_report(&con);
     try std.testing.expectEqualStrings("tasks user-el0 exited status=7\n", mock.contents());
+}
+
+test "scheduler: sleep_current blocks, wakes on the deadline tick, and rolls back" {
+    _ = init();
+    _ = register_worker(0x2000).?;
+    _ = register_user(0x3000, 0).?;
+    start();
+    // current is shell (0). Sleep 2 ticks: shell -> blocked, worker next.
+    try std.testing.expect(sleep_current(2));
+    try std.testing.expect(is_blocked(0));
+    try std.testing.expectEqual(@as(u64, 2), tasks[0].wakeup_tick);
+    try std.testing.expectEqual(@as(usize, 1), current);
+    // The blocked task drops out of the ring: worker -> user -> idle -> worker.
+    try std.testing.expect(yield_current());
+    try std.testing.expectEqual(@as(usize, 2), current);
+    try std.testing.expect(yield_current());
+    try std.testing.expectEqual(@as(usize, idle_id), current);
+    try std.testing.expect(yield_current());
+    try std.testing.expectEqual(@as(usize, 1), current);
+    // Tick 1: deadline (tick_count 0 + 2) not reached yet.
+    on_tick();
+    try std.testing.expect(is_blocked(0));
+    try std.testing.expectEqual(@as(u64, 1), tick_count);
+    // Tick 2: the timer-driven wakeup flips the sleeper back to ready.
+    on_tick();
+    try std.testing.expect(!is_blocked(0));
+    try std.testing.expectEqual(State.ready, tasks[0].state);
+    try std.testing.expectEqual(@as(u64, 0), tasks[0].wakeup_tick);
+    // The ring reaches the woken shell again.
+    try std.testing.expect(yield_current()); // worker -> user
+    try std.testing.expectEqual(@as(usize, 2), current);
+    try std.testing.expect(yield_current()); // user -> idle
+    try std.testing.expect(yield_current()); // idle -> shell
+    try std.testing.expectEqual(@as(usize, 0), current);
+}
+
+test "scheduler: sleep guards — zero clamps to one tick, idle and inactive fail" {
+    _ = init();
+    _ = register_worker(0x2000).?;
+    _ = register_user(0x3000, 0).?;
+    // Inactive pool: no switching.
+    try std.testing.expect(!sleep_current(1));
+    start();
+    // sleep(0) clamps to one tick and still blocks.
+    try std.testing.expect(sleep_current(0));
+    try std.testing.expectEqual(@as(u64, 1), tasks[0].wakeup_tick);
+    // The idle task cannot sleep (it is the ring's fallback).
+    current = idle_id;
+    try std.testing.expect(!sleep_current(1));
+    try std.testing.expect(!is_blocked(idle_id));
+    // A zombie cannot sleep either.
+    tasks[1].state = .zombie;
+    current = 1;
+    try std.testing.expect(!sleep_current(1));
+}
+
+test "scheduler: a blocked user task still owns the user root (exec gate)" {
+    // Give the user root a real (non-zero) value so the gate is unambiguous
+    // on the host: the EL1h tasks carry the kernel root (0), the user task
+    // carries the built root (same pattern as the exec.zig tests).
+    try std.testing.expect(mmu.build_user_root(userspace.text_va, 0x1000, 64, userspace.stack_va, 0x2000, 8192));
+    _ = init();
+    _ = register_worker(0x2000).?;
+    _ = register_user(0x3000, 0).?;
+    start();
+    // The ready user task already owns the user root.
+    try std.testing.expect(yield_current()); // shell -> worker
+    try std.testing.expect(yield_current()); // worker -> user
+    try std.testing.expectEqual(@as(usize, 2), current_id());
+    try std.testing.expect(user_root_in_use());
+    // Claim 0635: a SLEEPING user program still owns the root — the old
+    // ready/running-only check would have let exec rebuild it underneath
+    // the blocked task.
+    try std.testing.expect(sleep_current(2)); // user -> idle
+    try std.testing.expect(is_blocked(2));
+    try std.testing.expect(user_root_in_use());
+    // After the deadline passes the task is ready again (still live).
+    on_tick();
+    on_tick();
+    try std.testing.expect(!is_blocked(2));
+    try std.testing.expect(user_root_in_use());
+    // Only after exit + reap does the gate release. The ring order from
+    // idle (4) wraps through shell (0) -> worker (1) -> user (2).
+    try std.testing.expect(yield_current()); // idle -> shell
+    try std.testing.expect(yield_current()); // shell -> worker
+    try std.testing.expect(yield_current()); // worker -> user
+    try std.testing.expectEqual(@as(usize, 2), current_id());
+    try std.testing.expect(exit_current(7)); // user -> idle
+    try std.testing.expect(reap(2));
+    try std.testing.expect(!user_root_in_use());
 }
 
 test "scheduler: lifecycle — spawn, exit to zombie, idle reaps back to free" {

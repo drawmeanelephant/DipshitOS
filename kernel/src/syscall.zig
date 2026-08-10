@@ -21,7 +21,7 @@ const uaccess = @import("uaccess.zig"); // claim 6120: fault-safe copy-in
 const userspace = @import("userspace.zig");
 
 pub const slot_count: usize = 64;
-pub const implemented_count: usize = 4;
+pub const implemented_count: usize = 5;
 pub const write_cap: u64 = 256;
 pub const svc_immediate: u16 = 0;
 
@@ -29,6 +29,7 @@ pub const sys_ping: u64 = 0;
 pub const sys_write: u64 = 1;
 pub const sys_yield: u64 = 2;
 pub const sys_exit: u64 = 3;
+pub const sys_sleep: u64 = 4;
 
 pub const ErrorCode = enum(i64) {
     einval = -1,
@@ -89,6 +90,7 @@ fn ensure_table() *const [slot_count]Entry {
         table_storage[sys_write] = .{ .name = "sys_write", .handler = handle_write };
         table_storage[sys_yield] = .{ .name = "sys_yield", .handler = handle_yield };
         table_storage[sys_exit] = .{ .name = "sys_exit", .handler = handle_exit };
+        table_storage[sys_sleep] = .{ .name = "sys_sleep", .handler = handle_sleep };
         table_ready = true;
     }
     return &table_storage;
@@ -155,6 +157,17 @@ fn handle_yield(_: Args, _: *exceptions.VectorFrame) u64 {
     return 0;
 }
 
+fn handle_sleep(args: Args, _: *exceptions.VectorFrame) u64 {
+    // Claim 0635: block the calling task for `args[0]` scheduler ticks. On
+    // success the scheduler has parked this task (state=blocked) and staged
+    // another task's frame, so the SVC exception return resumes the NEXT
+    // task; the caller's own frame stays on its kernel stack and the
+    // syscall return (0) lands when `wake_expired` moves it back to ready
+    // and the ring resumes it — the same resume path as sys_yield.
+    if (!scheduler.sleep_current(args[0])) return error_result(.einval);
+    return 0;
+}
+
 fn handle_exit(args: Args, _: *exceptions.VectorFrame) u64 {
     // Returning from this Zig function is only kernel control flow. On
     // success the scheduler has removed the caller from the runnable set and
@@ -166,7 +179,7 @@ fn handle_exit(args: Args, _: *exceptions.VectorFrame) u64 {
 
 /// Deterministic monitor output for the four frozen rows and their counters.
 pub fn report(con: *console.Console) void {
-    con.puts("syscalls: slots=64 implemented=4\n");
+    con.puts("syscalls: slots=64 implemented=5\n");
     var number: u64 = 0;
     while (number < implemented_count) : (number += 1) {
         const info = entry_info(number).?;
@@ -211,10 +224,11 @@ test "syscall: runtime table has 64 slots and four unique implemented rows" {
             implemented += 1;
         }
     }
-    try std.testing.expectEqual(@as(usize, 4), implemented);
+    try std.testing.expectEqual(@as(usize, 5), implemented);
     try std.testing.expectEqualStrings("sys_ping", entry_info(0).?.name);
     try std.testing.expectEqualStrings("sys_exit", entry_info(3).?.name);
-    try std.testing.expect(entry_info(4) == null);
+    try std.testing.expectEqualStrings("sys_sleep", entry_info(4).?.name);
+    try std.testing.expect(entry_info(5) == null);
     try std.testing.expect(entry_info(63) == null);
 }
 
@@ -322,6 +336,38 @@ test "syscall: yield returns zero and exit removes the current task" {
     try std.testing.expect(exceptions.resume_frame != @intFromPtr(&frame));
 }
 
+test "syscall: sleep blocks the current task and returns zero on wake" {
+    init(test_writer);
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0);
+    scheduler.start();
+    var frame = fresh_frame();
+    // The shell (slot 0) sleeps 2 ticks: it is blocked and the worker is
+    // staged; the SVC frame is untouched (the caller's x0 stays 0xdead until
+    // it resumes — then the handler's 0 is written, as handle_svc does).
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_sleep, .{ 2, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(usize, 1), scheduler.current_id());
+    try std.testing.expect(scheduler.is_blocked(0));
+    // A blocked task is skipped by the round-robin ring.
+    try std.testing.expect(scheduler.yield_current()); // worker -> user
+    try std.testing.expectEqual(@as(usize, 2), scheduler.current_id());
+    try std.testing.expect(scheduler.yield_current()); // user -> idle
+    try std.testing.expectEqual(@as(usize, scheduler.idle_id), scheduler.current_id());
+    try std.testing.expect(scheduler.yield_current()); // idle -> worker (shell still blocked)
+    try std.testing.expectEqual(@as(usize, 1), scheduler.current_id());
+    // One tick is not enough for a 2-tick sleep; the second tick wakes it.
+    scheduler.on_tick();
+    try std.testing.expect(scheduler.is_blocked(0));
+    scheduler.on_tick();
+    try std.testing.expect(!scheduler.is_blocked(0));
+    // The ring reaches the woken shell again.
+    try std.testing.expect(scheduler.yield_current()); // worker -> user
+    try std.testing.expect(scheduler.yield_current()); // user -> idle
+    try std.testing.expect(scheduler.yield_current()); // idle -> shell
+    try std.testing.expectEqual(@as(usize, 0), scheduler.current_id());
+}
+
 test "syscall: handle_svc writes yield result into the suspended caller frame" {
     init(test_writer);
     _ = scheduler.init();
@@ -349,11 +395,12 @@ test "syscall: counters are monotonic and report is deterministic" {
     var con = mock.console();
     report(&con);
     try std.testing.expectEqualStrings(
-        "syscalls: slots=64 implemented=4\n" ++
+        "syscalls: slots=64 implemented=5\n" ++
             "  0 sys_ping calls=2\n" ++
             "  1 sys_write calls=0\n" ++
             "  2 sys_yield calls=0\n" ++
-            "  3 sys_exit calls=0\n",
+            "  3 sys_exit calls=0\n" ++
+            "  4 sys_sleep calls=0\n",
         mock.contents(),
     );
 }

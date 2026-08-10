@@ -131,6 +131,17 @@ pub fn roots_built() bool {
     return roots_ready;
 }
 
+/// Claim 6783: exec rebuilt the user root POST-install (the kernel stays
+/// identity-mapped, so `@intFromPtr` is still physical and the table
+/// allocator keeps working). The freshly allocated clone tables were
+/// written as normal stores and are dirty in the D-cache only; the walker
+/// reads memory directly, so the whole carve-out is cleaned before the
+/// scheduler's next TTBR0 switch (which ends in a TLBI + fresh walk).
+/// Cheap: 1 MiB of cache lines, once per exec.
+pub fn clean_table_storage() void {
+    clean_dcache_range(@intFromPtr(&table_storage), table_page_count * 4096);
+}
+
 /// Clean the D-cache over [start, start+len) to the point of coherence so a
 /// subsequent translation walk (which may read memory directly, bypassing a
 /// dirty cache) sees the real contents. 64-byte lines (Apple silicon
