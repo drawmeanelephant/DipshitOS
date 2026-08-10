@@ -5,6 +5,8 @@
 //         [--console] [--debug-input] [--dump-marker <file>]
 //         [--nvram-console <file>] [--script <file>]
 //         [--script-after <text>] [--script-expect <text>] [--custom-virtio]
+//         [--script2 <file> --script2-after <text>] (claim 4613: a second
+//          scripted phase, forwarded once after its own serial marker)
 //
 // * --custom-virtio (macOS 27 spike, audit step 3): attaches one
 //   default-off VZCustomVirtioDeviceConfiguration so the guest's PCI
@@ -98,6 +100,13 @@ var nvramConsolePath: String?
 var scriptPath: String?
 var scriptAfter: String?
 var scriptExpect: String?
+// Claim 4613: a second scripted phase. The primary --script is forwarded
+// in ONE burst (claim 6684), so a scripted command that must land AFTER a
+// background program exits and is reaped (the long-lived gate's re-exec
+// into the freed pool slot) cannot be in the same burst: --script2 is
+// forwarded once after its own serial marker (the reap line) instead.
+var script2Path: String?
+var script2After: String?
 var customVirtioEnabled = false
 
 var idx = 2
@@ -136,6 +145,12 @@ while idx < arguments.count {
         idx += 2
     } else if arg == "--script-expect", idx + 1 < arguments.count {
         scriptExpect = arguments[idx + 1]
+        idx += 2
+    } else if arg == "--script2", idx + 1 < arguments.count {
+        script2Path = arguments[idx + 1]
+        idx += 2
+    } else if arg == "--script2-after", idx + 1 < arguments.count {
+        script2After = arguments[idx + 1]
         idx += 2
     } else if arg == "--custom-virtio" {
         customVirtioEnabled = true
@@ -370,6 +385,8 @@ if consoleMode {
     print("  serial log: \(serialLogPath)  (guest output teed to log)")
     print("  script: \(scriptPath!)  (forwarded once after the configured serial marker appears)")
     if let scriptAfter { print("  script-after: \"\(scriptAfter)\"  (forward once after this serial text appears)") }
+    if let script2Path { print("  script2: \(script2Path)  (claim 4613: forwarded once after script2-after appears)") }
+    if let script2After { print("  script2-after: \"\(script2After)\"  (forward script2 once after this serial text appears)") }
     if let scriptExpect { print("  script-expect: \"\(scriptExpect)\"  (exit 0 iff observed in the serial log)") }
 } else {
     print("  serial log: \(serialLogPath)  (timeout: \(Int(timeout))s)")
@@ -799,21 +816,39 @@ func startConsoleStreams() {
 // delay only avoids racing the shell's very first poll.
 func startScriptInput() {
     guard let scriptPath else { return }
-    let q = DispatchQueue(label: "dipshitos.script")
+    forwardScriptOnce(path: scriptPath, after: scriptAfter, label: "script")
+}
+
+// Claim 4613: the SECOND scripted phase. The primary --script is forwarded
+// in ONE burst, so a command that must land AFTER a background program
+// exits and is reaped (the long-lived gate re-execs USER.BIN into the
+// freed pool slot) cannot be in the same burst. --script2 is forwarded
+// once, after its own serial marker (the first USER.BIN's reap line),
+// using the identical settle-then-forward machinery.
+func startScript2Input() {
+    guard let path = script2Path, let after = script2After else { return }
+    forwardScriptOnce(path: path, after: after, label: "script2")
+}
+
+/// Forward `path` into the serial attachment exactly once, after `after`
+/// appears in the serial log (default: the kernel terminal state). Shared
+/// by the primary script (claim 6684) and the second phase (claim 4613).
+func forwardScriptOnce(path: String, after: String?, label: String) {
+    let q = DispatchQueue(label: "dipshitos.\(label)")
     q.async {
         let scriptData: Data
         do {
-            scriptData = try Data(contentsOf: URL(fileURLWithPath: scriptPath))
+            scriptData = try Data(contentsOf: URL(fileURLWithPath: path))
         } catch {
-            FileHandle.standardError.write(Data("ERROR: could not read script file '\(scriptPath)': \(error)\n".utf8))
+            FileHandle.standardError.write(Data("ERROR: could not read script file '\(path)': \(error)\n".utf8))
             exit(1)
         }
-        let after = scriptAfter ?? "kernel terminal state"
+        let marker = after ?? "kernel terminal state"
         let waitDeadline = Date().addingTimeInterval(40)
         var sent = false
         while Date() < waitDeadline {
             if let text = try? String(contentsOf: serialURL, encoding: .utf8),
-               text.contains(after) {
+               text.contains(marker) {
                 Thread.sleep(forTimeInterval: 0.5)
                 do { try consoleInputPipe.fileHandleForWriting.write(contentsOf: scriptData) }
                 catch {
@@ -825,7 +860,7 @@ func startScriptInput() {
             Thread.sleep(forTimeInterval: 0.5)
         }
         if !sent {
-            FileHandle.standardError.write(Data("ERROR: guest did not emit script-after marker '\(after)' within 40s; script input not sent\n".utf8))
+            FileHandle.standardError.write(Data("ERROR: guest did not emit \(label)-after marker '\(marker)' within 40s; script input not sent\n".utf8))
         }
     }
 }
@@ -914,6 +949,7 @@ if consoleMode {
     // expected transcript.
     startGuestOutputTee()
     startScriptInput()
+    startScript2Input()
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { scriptPoll() }
 } else {
     if screenshotPath != nil {

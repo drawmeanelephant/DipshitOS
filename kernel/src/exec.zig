@@ -524,6 +524,125 @@ test "exec: a live user task does not block a second exec (gate is gone)" {
     try std.testing.expect(process.info(1).?.root_phys != process.info(0).?.root_phys);
 }
 
+test "exec: COUNTER.BIN loads by name with its own marker and process" {
+    try build_image(test_allocator);
+    defer test_allocator.free(saved_image);
+    esp.reset();
+    try std.testing.expectEqual(fat.MountResult.ok, esp.set_disk(.{ .read = &fake_read, .write = &fake_write }));
+    arm_allocator();
+    _ = mmu.build_user_root(userspace.text_va, 0x1000, 64, userspace.stack_va, 0x2000, 8192) orelse return error.TestUnexpectedResult;
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0);
+    scheduler.start();
+    // Retire the boot payload so its slot is free for the counter.
+    try std.testing.expect(scheduler.yield_current());
+    try std.testing.expect(scheduler.yield_current());
+    try std.testing.expectEqual(@as(usize, 2), scheduler.current_id());
+    try std.testing.expect(scheduler.exit_current(7));
+    try std.testing.expect(scheduler.reap(2));
+
+    // The counter's DSK1 image carries its DISTINCT marker (claim 4613 —
+    // the `counter: alive` line the live gate greps for; deliberately
+    // different from every USER.BIN marker so the serial log can tell the
+    // two programs apart).
+    const img = dsk1("counter: alive\n", 24, 24 + 15);
+    try std.testing.expectEqual(esp.WriteResult.ok, esp.write_file("COUNTER.BIN", img[0 .. 24 + 15]));
+    try std.testing.expectEqual(ExecResult.ok, exec_file("COUNTER.BIN"));
+    const info = loaded().?;
+    try std.testing.expectEqualStrings("COUNTER.BIN", info.name);
+    try std.testing.expectEqual(@as(usize, 15), info.content_len);
+    // The marker landed in the process's OWN text page (this program's
+    // content, not USER.BIN's).
+    const proc = process.info(1).?;
+    try std.testing.expectEqualStrings("COUNTER.BIN", proc.name);
+    try std.testing.expectEqual(process.State.running, proc.state);
+    try std.testing.expect(proc.text_phys != 0);
+    const text_dst: [*]const u8 = @ptrFromInt(proc.text_phys);
+    try std.testing.expectEqualStrings("counter: alive\n", text_dst[0..15]);
+    // USER.BIN is a DIFFERENT program: exec it too — the two live
+    // processes are DISTINCT programs now (the claim-0826 gate ran two
+    // copies of the same image).
+    const img2 = dsk1("user: hello from the ESP\n", 24, 24 + 25);
+    try std.testing.expectEqual(esp.WriteResult.ok, esp.write_file("USER.BIN", img2[0 .. 24 + 25]));
+    try std.testing.expectEqual(ExecResult.ok, exec_file("USER.BIN"));
+    try std.testing.expectEqualStrings("USER.BIN", loaded().?.name);
+    try std.testing.expectEqual(@as(usize, 3), process.count()); // boot exited + COUNTER + USER
+    try std.testing.expectEqual(process.State.running, process.info(1).?.state);
+    try std.testing.expectEqual(process.State.running, process.info(2).?.state);
+    try std.testing.expect(process.info(1).?.text_phys != process.info(2).?.text_phys);
+}
+
+test "exec: permanent occupant + recycle — one spare slot, pool_full, then the re-exec lands" {
+    try build_image(test_allocator);
+    defer test_allocator.free(saved_image);
+    esp.reset();
+    try std.testing.expectEqual(fat.MountResult.ok, esp.set_disk(.{ .read = &fake_read, .write = &fake_write }));
+    arm_allocator();
+    _ = mmu.build_user_root(userspace.text_va, 0x1000, 64, userspace.stack_va, 0x2000, 8192) orelse return error.TestUnexpectedResult;
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0);
+    scheduler.start();
+    // Retire the boot payload: shell + idle + worker leave TWO free slots.
+    try std.testing.expect(scheduler.yield_current());
+    try std.testing.expect(scheduler.yield_current());
+    try std.testing.expectEqual(@as(usize, 2), scheduler.current_id());
+    try std.testing.expect(scheduler.exit_current(7));
+    try std.testing.expect(scheduler.reap(2));
+
+    const counter_img = dsk1("counter: alive\n", 24, 24 + 15);
+    try std.testing.expectEqual(esp.WriteResult.ok, esp.write_file("COUNTER.BIN", counter_img[0 .. 24 + 15]));
+    const user_img = dsk1("user: hello from the ESP\n", 24, 24 + 25);
+    try std.testing.expectEqual(esp.WriteResult.ok, esp.write_file("USER.BIN", user_img[0 .. 24 + 25]));
+
+    // The counter is the permanent occupant: it takes one slot and never
+    // exits (this test never drives it to exit).
+    try std.testing.expectEqual(ExecResult.ok, exec_file("COUNTER.BIN")); // slot 2
+    const free_after_counter = alloc.stats().free_pages;
+    // The short program takes the LAST free slot (the one spare — shell +
+    // idle + worker + counter + user = the full fixed 5-slot pool).
+    try std.testing.expectEqual(ExecResult.ok, exec_file("USER.BIN")); // slot 3
+    try std.testing.expect(!scheduler.has_free_slot());
+    // The capacity gate: a third exec while both programs are live is
+    // pool_full, checked BEFORE any allocation — nothing leaks.
+    try std.testing.expectEqual(ExecResult.pool_full, exec_file("USER.BIN"));
+    try std.testing.expectEqual(free_after_counter - 5, alloc.stats().free_pages);
+
+    // Drive the short program's exit + reap (the idle task's lifecycle
+    // reap): its 5 pages return to the allocator and its executor slot
+    // becomes spawnable again — while the counter stays running.
+    try std.testing.expect(scheduler.yield_current()); // idle -> shell
+    try std.testing.expect(scheduler.yield_current()); // shell -> worker
+    try std.testing.expect(scheduler.yield_current()); // worker -> counter
+    try std.testing.expect(scheduler.yield_current()); // counter -> user
+    try std.testing.expectEqual(@as(usize, 3), scheduler.current_id());
+    try std.testing.expect(scheduler.exit_current(43)); // user -> idle
+    try std.testing.expectEqual(process.State.exited, process.info(2).?.state);
+    // The exited process holds its pages until the reap...
+    try std.testing.expectEqual(free_after_counter - 5, alloc.stats().free_pages);
+    // ...the scheduler reap returns them (claim 4613) while the exited
+    // descriptor stays in the procs table with its status.
+    try std.testing.expect(scheduler.reap(3));
+    try std.testing.expectEqual(free_after_counter, alloc.stats().free_pages);
+    try std.testing.expectEqual(process.State.exited, process.info(2).?.state);
+    try std.testing.expectEqual(@as(u64, 43), process.info(2).?.exit_status);
+    try std.testing.expectEqual(@as(u64, 0), process.info(2).?.text_pages);
+    try std.testing.expect(scheduler.has_free_slot());
+    try std.testing.expectEqual(process.State.running, process.info(1).?.state); // counter still live
+
+    // The THIRD exec lands in the freed slot (recycle under a permanent
+    // occupant — the claim-0826 gate could never show this, because both
+    // its programs exited)...
+    try std.testing.expectEqual(ExecResult.ok, exec_file("USER.BIN"));
+    try std.testing.expectEqual(process.State.running, process.info(3).?.state);
+    // ...and with the counter + the re-exec'd program both live the pool
+    // is full again: a subsequent exec is pool_full, still leak-free.
+    try std.testing.expect(!scheduler.has_free_slot());
+    try std.testing.expectEqual(ExecResult.pool_full, exec_file("USER.BIN"));
+    try std.testing.expectEqual(process.State.running, process.info(1).?.state);
+}
+
 fn build_image(alloc_arg: std.mem.Allocator) !void {
     // Reuse the esp.zig fixture builder by importing its module-scope test
     // image? No — esp.zig's fixture is private. Build a minimal GPT+FAT32

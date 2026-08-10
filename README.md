@@ -266,7 +266,16 @@ All command output and logs are saved under `artifacts/` (`inspect.txt`,
    owns its own TTBR0 root + allocator-backed text/stack/EL1-stack pages,
    so `exec USER.BIN` runs twice with BOTH programs live at once
    (`tools/verify-live-concurrent.sh` — two `state=running` rows with
-   distinct task ids + stack VAs).
+   distinct task ids + stack VAs). The follow-on 2 (claim 4613) proves
+   the machinery against DISTINCT programs and a permanent occupant: a
+   second image COUNTER.BIN (`user/src/counter.zig`) never exits — it
+   loops writing its own `counter: alive` marker (sys_write + sys_yield
+   only, no sys_exit) while USER.BIN is exec'd, runs, exits, is reaped
+   (its pages return to the allocator), and is re-exec'd into the freed
+   slot, and a further exec with both live hits the capacity gate
+   (`pool_full`) — `tools/verify-live-long-lived.sh`, which drives the
+   re-exec via the runner's new `--script2`/`--script2-after` second
+   scripted phase after the first reap.
 - The Virtualization.framework VM boots the GPT+FAT image: configuration
   validates, the EFI variable store is created, the VM starts and runs, and
   after boot the guest-written marker file `\BOOTED.TXT` exists on the ESP

@@ -1127,10 +1127,15 @@ fn cmd_procs(m: *Monitor, args: []const []const u8) ExecError {
         m.console.puts(" state=");
         m.console.puts(process.state_name(info.state));
         m.console.puts(" task=");
-        if (info.task_id) |task_id| {
+        // Claim 4613: an exited process keeps its executor slot until the
+        // lifecycle reap frees its pages — the row still reads `reaped`
+        // (the slot is a zombie, no longer executing the program).
+        if (info.state == .exited) {
+            m.console.puts("reaped");
+        } else if (info.task_id) |task_id| {
             m.console.print_u64(@intCast(task_id));
         } else {
-            m.console.puts(if (info.state == .exited) "reaped" else "-");
+            m.console.puts("-");
         }
         m.console.puts(" stack=");
         m.console.print_hex(info.stack_va);

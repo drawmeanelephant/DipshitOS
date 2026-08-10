@@ -58,6 +58,7 @@ verify-vz:
     bash tools/verify-live-exec.sh
     bash tools/verify-live-procs.sh
     bash tools/verify-live-concurrent.sh
+    bash tools/verify-live-long-lived.sh
     bash tools/verify-live-sleep.sh
     bash tools/verify-live-entropy.sh
     bash tools/verify-live-reboot.sh

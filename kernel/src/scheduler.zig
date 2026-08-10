@@ -631,9 +631,14 @@ pub fn exit_current(status: u64) bool {
 
 /// Claim 6729: reap a zombie — free its pool slot. Only a zombie may be
 /// reaped, and the reaped slot becomes spawnable again. Returns false for a
-/// non-zombie slot.
+/// non-zombie slot. Claim 4613: the exited process that last ran on this
+/// slot has its allocator-backed pages (text/user-stack/EL1-exception-
+/// stack) returned to the physical allocator at the same reap — the
+/// exited descriptor (name, status, stack VA) stays in the `procs` table
+/// for the claim-3848 exit record, but the memory is recycled immediately.
 pub fn reap(id: usize) bool {
     if (id >= max_tasks or tasks[id].state != .zombie) return false;
+    _ = process.release_pages_on_reap(id);
     tasks[id] = .{};
     task_count -%= 1;
     return true;
@@ -641,7 +646,10 @@ pub fn reap(id: usize) bool {
 
 /// The idle task's reaper: free ONE zombie per iteration so the pool drains
 /// without starving other tasks, and snapshot the reap report (the freed
-/// slot's name is zeroed by the reset).
+/// slot's name is zeroed by the reset). Claim 4613: `reap` also frees the
+/// exited process's allocator-backed pages, so a permanent occupant
+/// (COUNTER.BIN) coexists with a steady exec → exit → reap → re-exec
+/// cycle without leaking.
 fn reap_one_zombie() void {
     var i: usize = 0;
     while (i < max_tasks) : (i += 1) {

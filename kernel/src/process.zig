@@ -119,7 +119,10 @@ const Process = struct {
     /// for exec'd programs, the static boot stack for the payload).
     kernel_stack: KernelStack = .{},
     /// The pool slot currently executing this process; null once exited
-    /// (the slot may already be reused by another task).
+    /// AND the executor slot has been reaped (the lifecycle reap reads it
+    /// to free the exited process's owned pages, claim 4613). Before the
+    /// reap, an exited process still names its last executor slot — the
+    /// `procs` command prints `task=reaped` for exited rows regardless.
     task_id: ?usize = null,
     /// Exit status, snapshotted at exit so it survives the task reap.
     exit_status: u64 = 0,
@@ -153,7 +156,9 @@ pub fn init() void {
 /// stack own (no-op for the static boot payload's pages and when the
 /// allocator is unarmed — host tests). Only ever called for a non-live
 /// process (reap / recycle of `exited`/`created`), so a running program's
-/// pages are never freed under it.
+/// pages are never freed under it. Claim 4613: also called at the task-
+/// level reap (`release_pages_on_reap`) — the freed page fields are
+/// zeroed there so a later `release_resources` is a no-op.
 fn release_resources(p: *Process) void {
     if (p.addr_space.text_pages > 0) _ = alloc.free_pages(p.addr_space.text_phys, p.addr_space.text_pages);
     if (p.addr_space.stack_pages > 0) _ = alloc.free_pages(p.addr_space.stack_phys, p.addr_space.stack_pages);
@@ -228,9 +233,12 @@ pub fn reap(id: usize) bool {
 /// Notify the registry that the task in slot `task_id` exited with
 /// `status` (called from the scheduler's `exit_current` — exception
 /// context, so this must stay console-free and allocation-free): the bound
-/// process becomes `exited`, snapshots its status, dissolves the binding,
-/// and marks the exit report pending (first one wins while undrained). A
-/// no-op when no process is bound to that slot (kernel demo tasks never
+/// process becomes `exited`, snapshots its status, and marks the exit
+/// report pending (first one wins while undrained). Claim 4613: the
+/// binding to the executor slot is KEPT until the lifecycle reap frees the
+/// exited process's pages (`release_pages_on_reap`), so a `procs` read
+/// between exit and reap still shows the executor slot as `task=reaped`.
+/// A no-op when no process is bound to that slot (kernel demo tasks never
 /// exit; user programs do).
 pub fn on_task_exit(task_id: usize, status: u64) void {
     var id: usize = 0;
@@ -239,7 +247,10 @@ pub fn on_task_exit(task_id: usize, status: u64) void {
         if (processes[id].task_id != task_id) continue;
         processes[id].state = .exited;
         processes[id].exit_status = status;
-        processes[id].task_id = null;
+        // Claim 4613: keep the executor slot on the exited process so the
+        // lifecycle reap can find it and free its owned pages (the slot
+        // itself is a zombie until the idle task reaps it). Cleared by
+        // `release_pages_on_reap`.
         if (!exit_report_pending) {
             const take = @min(processes[id].name_len, name_max);
             @memcpy(exit_report_name_buf[0..take], processes[id].name_buf[0..take]);
@@ -249,6 +260,33 @@ pub fn on_task_exit(task_id: usize, status: u64) void {
         }
         return;
     }
+}
+
+/// Free the allocator-backed pages of the exited process that last ran on
+/// executor slot `task_id` — called by the scheduler's idle-task reap
+/// (claim 4613): the program is dead and its executor slot is being
+/// recycled, so its text/stack/exception-stack pages return to the
+/// physical allocator NOW, while the exited descriptor (name, status,
+/// stack VA) STAYS in the `procs` table for the claim-3848 exit record.
+/// The page fields are zeroed so a later registry recycle's
+/// `release_resources` is a no-op. Returns false when no exited process
+/// is bound to that slot (already reaped, or the descriptor was recycled
+/// by `create`).
+pub fn release_pages_on_reap(task_id: usize) bool {
+    var id: usize = 0;
+    while (id < max_processes) : (id += 1) {
+        if (processes[id].state != .exited) continue;
+        if (processes[id].task_id != task_id) continue;
+        release_resources(&processes[id]);
+        processes[id].addr_space.text_phys = 0;
+        processes[id].addr_space.text_pages = 0;
+        processes[id].addr_space.stack_phys = 0;
+        processes[id].addr_space.stack_pages = 0;
+        processes[id].kernel_stack = .{};
+        processes[id].task_id = null;
+        return true;
+    }
+    return false;
 }
 
 /// The most recently created process id (what `exec.loaded()` reports);
@@ -384,7 +422,9 @@ test "process: lifecycle created -> running -> exited -> reaped" {
     on_task_exit(2, 43);
     try std.testing.expectEqual(State.exited, info(id).?.state);
     try std.testing.expectEqual(@as(u64, 43), info(id).?.exit_status);
-    try std.testing.expect(info(id).?.task_id == null);
+    // Claim 4613: the exited process keeps its executor slot until the
+    // lifecycle reap frees its pages (the procs row prints task=reaped).
+    try std.testing.expectEqual(@as(?usize, 2), info(id).?.task_id);
     // The report is pending and drains exactly once.
     const r = take_exit_report().?;
     try std.testing.expectEqualStrings("USER.BIN", r.name);
@@ -533,6 +573,57 @@ test "process: allocator-backed resources are freed at reap and recycle" {
     // A live (created) slot is never recycled.
     _ = bind(ids[1], 10);
     try std.testing.expectEqualStrings("P", info(ids[1]).?.name);
+}
+
+test "process: exited pages return at the lifecycle reap; the procs row stays" {
+    // Arm the module allocator with a small fixture map so page ownership
+    // is real on the host (the exec path arms it the same way).
+    const descriptors = [_]memmap.MemoryDescriptor{
+        .{ .type = .conventional_memory, .physical_start = 0x100000, .virtual_start = 0, .number_of_pages = 512, .attribute = 0 },
+    };
+    const view = memmap.MapView.init(std.mem.asBytes(&descriptors), @sizeOf(memmap.MemoryDescriptor), descriptors.len);
+    try std.testing.expect(alloc.init(view, &.{}));
+    const free_before = alloc.stats().free_pages;
+    init();
+    // An exec'd program owns 5 pages (1 text + 2 user stack + 2 EL1 stack).
+    const id = create("USER.BIN", .{ .entry_va = 0x400000, .content_len = 64 }, .{
+        .root_phys = 0x1234_0000,
+        .text_va = 0x400000,
+        .text_len = 64,
+        .text_phys = alloc.alloc_pages(1).?,
+        .text_pages = 1,
+        .stack_va = 0x1a400000,
+        .stack_len = 8192,
+        .stack_phys = alloc.alloc_pages(2).?,
+        .stack_pages = 2,
+    }, .{ .phys = alloc.alloc_pages(2).?, .pages = 2 }).?;
+    _ = bind(id, 3);
+    // The task exits (status 43): the process becomes exited and STILL
+    // names its executor slot (claim 4613 — the lifecycle reap must be
+    // able to find it to free the pages).
+    on_task_exit(3, 43);
+    _ = take_exit_report();
+    try std.testing.expectEqual(State.exited, info(id).?.state);
+    try std.testing.expectEqual(@as(?usize, 3), info(id).?.task_id);
+    // No page is freed yet: the exited process holds its memory until the
+    // scheduler's reap releases it (the procs row keeps the exit record).
+    try std.testing.expectEqual(free_before - 5, alloc.stats().free_pages);
+    // The lifecycle reap (scheduler.reap -> release_pages_on_reap) frees
+    // the exited process's pages NOW, while the descriptor stays.
+    try std.testing.expect(release_pages_on_reap(3));
+    try std.testing.expectEqual(free_before, alloc.stats().free_pages);
+    const pinfo = info(id).?;
+    try std.testing.expectEqual(State.exited, pinfo.state);
+    try std.testing.expectEqual(@as(u64, 43), pinfo.exit_status);
+    try std.testing.expectEqual(@as(u64, 0x1a400000), pinfo.stack_va); // kept
+    try std.testing.expectEqual(@as(u64, 0), pinfo.text_pages);
+    try std.testing.expectEqual(@as(u64, 0), pinfo.stack_pages);
+    try std.testing.expectEqual(@as(u64, 0), pinfo.kernel_stack_pages);
+    try std.testing.expect(pinfo.task_id == null);
+    // A second release is a no-op (the slot was already reaped): no
+    // double free can inflate the free count.
+    try std.testing.expect(!release_pages_on_reap(3));
+    try std.testing.expectEqual(free_before, alloc.stats().free_pages);
 }
 
 test "process: the static boot payload owns no allocator pages" {

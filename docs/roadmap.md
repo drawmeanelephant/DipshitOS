@@ -387,6 +387,22 @@ gates pass; tagged `m1.5-interactive-monitor`** (see
   and both programs' markers interleaving; the full shared-seam live
   sweep (exec/procs/addrspaces/tasks/userspace/svc/uaccess/lifecycle/
   sleep/entropy) is green against the relaxed gate.
+- **A long-lived process among live peers is DONE 2026-08-10 (claim 4613,
+  milestone-four follow-on 2)** — claim 0826's two processes were copies
+  of the SAME program that both exited; this card adds a SECOND DSK1
+  image (COUNTER.BIN from `user/src/counter.zig`, embedded by the same
+  build/image pipeline) that NEVER exits (sys_write + sys_yield only, no
+  sys_exit) with DISTINCT `counter: alive` markers, and returns an exited
+  program's allocator pages at the same reap that frees its executor slot
+  (the exited descriptor stays in `procs`). The class-B gate
+  `tools/verify-live-long-lived.sh` PASS 1/1 on VZ — the counter stays
+  `state=running` across the whole session while USER.BIN exits, is
+  reaped, and is re-exec'd into the freed slot (the runner's new
+  `--script2`/`--script2-after` second phase forwards the re-exec after
+  the first reap), the `pages` free count recovers, and a further exec
+  with both live reports `pool_full` — the capacity gate with one spare
+  slot; the full shared-seam live sweep is green against the second
+  program.
 - Eventually: a network stack — only when the ones below it are
   demonstrably working.
 
