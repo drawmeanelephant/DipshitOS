@@ -75,9 +75,11 @@ pub const DirEntry = struct {
     short: [11]u8,
 };
 
-/// The parsed geometry, exposed for diagnostics (`disk` boot line).
+/// The parsed geometry, exposed for diagnostics. `vol_lba` is the first
+/// sector of the MOUNTED volume (the ESP at boot; any partition via
+/// `mount_partition` — milestone four card 2).
 pub const Geo = struct {
-    esp_lba: u64,
+    vol_lba: u64,
     bps: u16,
     spc: u8,
     reserved: u16,
@@ -97,7 +99,7 @@ const State = struct {
     ops: ?DiskOps = null,
     mounted: bool = false,
     geo: Geo = .{
-        .esp_lba = 0,
+        .vol_lba = 0,
         .bps = sector_size,
         .spc = 1,
         .reserved = 0,
@@ -118,10 +120,60 @@ var state: State = .{};
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Install the sector interface and mount the ESP. Reads the GPT (LBA 1 +
-/// partition entries), locates the EFI System Partition, parses its FAT32
-/// BPB, and computes the geometry. `ops == null` mounts nothing (honest
-/// no-disk state; `write`/`read` report it).
+/// Install the sector interface and mount the FAT32 volume at `base_lba`
+/// (the partition's first sector, holding its BPB) — the general volume
+/// entry point (milestone four card 2): ANY FAT32 volume at ANY disk
+/// offset, not just the ESP. Parses the BPB and computes the geometry;
+/// `ops == null` mounts nothing (honest no-disk state; `write`/`read`
+/// report it).
+pub fn mount_partition(ops: ?DiskOps, base_lba: u64) MountResult {
+    if (ops == null) {
+        state.ops = null;
+        state.mounted = false;
+        return .no_disk;
+    }
+    state.ops = ops;
+    state.mounted = false;
+    state.last_fail_lba = 0;
+
+    // FAT32 BPB at the volume start.
+    var hdr: [sector_size]u8 = undefined;
+    if (!read_sector(base_lba, &hdr)) return .io_failed;
+    if (hdr[510] != 0x55 or hdr[511] != 0xaa) return .bad_bpb;
+    const bps = read_le(u16, hdr[11..13]);
+    const spc = hdr[13];
+    const reserved = read_le(u16, hdr[14..16]);
+    const nfats = hdr[16];
+    const total_sectors = read_le(u32, hdr[32..36]);
+    const fat_sectors = read_le(u32, hdr[36..40]);
+    const root_cluster = read_le(u32, hdr[44..48]);
+    if (bps != sector_size or spc == 0 or reserved == 0 or nfats == 0 or fat_sectors == 0) return .bad_bpb;
+    if (root_cluster < 2) return .bad_bpb;
+    const data_start: u64 = @as(u64, reserved) + @as(u64, nfats) * fat_sectors;
+    if (data_start >= total_sectors) return .bad_bpb;
+    const total_clusters: u32 = @intCast((@as(u64, total_sectors) - data_start) / spc);
+
+    state.geo = .{
+        .vol_lba = base_lba,
+        .bps = bps,
+        .spc = spc,
+        .reserved = reserved,
+        .nfats = nfats,
+        .fat_sectors = fat_sectors,
+        .root_cluster = root_cluster,
+        .data_start = data_start,
+        .total_sectors = total_sectors,
+        .total_clusters = total_clusters,
+    };
+    state.mounted = true;
+    return .ok;
+}
+
+/// Install the sector interface and mount the ESP: read the GPT (LBA 1 +
+/// partition entries), locate the EFI System Partition by type GUID, and
+/// mount its volume (`mount_partition`). The ESP stays the boot default
+/// (claim 6420); `mount_partition` is the general entry point (milestone
+/// four card 2).
 pub fn mount(ops: ?DiskOps) MountResult {
     if (ops == null) {
         state.ops = null;
@@ -157,36 +209,7 @@ pub fn mount(ops: ?DiskOps) MountResult {
     }
     if (esp_lba == 0) return .bad_gpt;
 
-    // FAT32 BPB at the ESP start.
-    if (!read_sector(esp_lba, &hdr)) return .io_failed;
-    if (hdr[510] != 0x55 or hdr[511] != 0xaa) return .bad_bpb;
-    const bps = read_le(u16, hdr[11..13]);
-    const spc = hdr[13];
-    const reserved = read_le(u16, hdr[14..16]);
-    const nfats = hdr[16];
-    const total_sectors = read_le(u32, hdr[32..36]);
-    const fat_sectors = read_le(u32, hdr[36..40]);
-    const root_cluster = read_le(u32, hdr[44..48]);
-    if (bps != sector_size or spc == 0 or reserved == 0 or nfats == 0 or fat_sectors == 0) return .bad_bpb;
-    if (root_cluster < 2) return .bad_bpb;
-    const data_start: u64 = @as(u64, reserved) + @as(u64, nfats) * fat_sectors;
-    if (data_start >= total_sectors) return .bad_bpb;
-    const total_clusters: u32 = @intCast((@as(u64, total_sectors) - data_start) / spc);
-
-    state.geo = .{
-        .esp_lba = esp_lba,
-        .bps = bps,
-        .spc = spc,
-        .reserved = reserved,
-        .nfats = nfats,
-        .fat_sectors = fat_sectors,
-        .root_cluster = root_cluster,
-        .data_start = data_start,
-        .total_sectors = total_sectors,
-        .total_clusters = total_clusters,
-    };
-    state.mounted = true;
-    return .ok;
+    return mount_partition(ops, esp_lba);
 }
 
 pub fn mounted() bool {
@@ -397,11 +420,11 @@ fn write_sector(lba: u64, buf: *const [sector_size]u8) bool {
 }
 
 fn cluster_lba(cluster: u32) u64 {
-    return state.geo.esp_lba + state.geo.data_start + (@as(u64, cluster) - state.geo.root_cluster) * state.geo.spc;
+    return state.geo.vol_lba + state.geo.data_start + (@as(u64, cluster) - state.geo.root_cluster) * state.geo.spc;
 }
 
 fn fat_lba() u64 {
-    return state.geo.esp_lba + state.geo.reserved;
+    return state.geo.vol_lba + state.geo.reserved;
 }
 
 /// FAT entry for a cluster (FAT copy 0; the copies mirror by construction).
@@ -936,7 +959,7 @@ test "fat: mount parses the GPT + BPB geometry" {
     try std.testing.expectEqual(MountResult.ok, mount(test_ops()));
     try std.testing.expect(mounted());
     const g = geometry();
-    try std.testing.expectEqual(@as(u64, 2048), g.esp_lba);
+    try std.testing.expectEqual(@as(u64, 2048), g.vol_lba);
     try std.testing.expectEqual(@as(u16, 512), g.bps);
     try std.testing.expectEqual(@as(u8, 1), g.spc);
     try std.testing.expectEqual(@as(u16, 32), g.reserved);
@@ -1085,4 +1108,75 @@ test "fat: io failures are reported honestly" {
     try std.testing.expectEqual(MountResult.ok, mount(failing));
     try std.testing.expectEqual(WriteResult.io_failed, write_file("x.txt", "x"));
     try std.testing.expect(last_fail_lba() != 0);
+}
+
+/// Lay a minimal, INDEPENDENT FAT32 volume at `base_lba` (not in the GPT):
+/// BPB + both FAT copies + a root holding one file "DATA.TXT" (cluster 3,
+/// content "hello disk"). Proves `mount_partition` mounts ANY volume at
+/// ANY LBA — the "arbitrary disk layout" half of milestone-four card 2.
+fn write_min_volume(img: []u8, base_lba: u64) void {
+    const base: usize = @intCast(base_lba * sector_size);
+    const bs = img[base .. base + sector_size];
+    const jmp_boot = [_]u8{ 0xeb, 0x58, 0x90 };
+    @memcpy(bs[0..3], &jmp_boot);
+    @memcpy(bs[3..11], "MSDOS5.0");
+    std.mem.writeInt(u16, bs[11..13], sector_size, .little);
+    bs[13] = 1; // sectors per cluster
+    std.mem.writeInt(u16, bs[14..16], 32, .little); // reserved
+    bs[16] = 2; // number of FATs
+    bs[21] = 0xf8;
+    std.mem.writeInt(u32, bs[32..36], 100, .little); // total sectors
+    std.mem.writeInt(u32, bs[36..40], 1, .little); // FAT sectors (tiny volume)
+    std.mem.writeInt(u32, bs[44..48], 2, .little); // root cluster
+    bs[510] = 0x55;
+    bs[511] = 0xaa;
+
+    // FAT copies: cluster 2 (root) and cluster 3 (DATA.TXT) both EOC.
+    const fat_off: usize = @intCast((base_lba + 32) * sector_size);
+    var fat_buf = [_]u8{0} ** sector_size;
+    std.mem.writeInt(u32, fat_buf[0..4], 0x0ffffff8, .little);
+    std.mem.writeInt(u32, fat_buf[4..8], 0x0fffffff, .little);
+    std.mem.writeInt(u32, fat_buf[8..12], 0x0fffffff, .little);
+    @memcpy(img[fat_off .. fat_off + sector_size], &fat_buf);
+    @memcpy(img[fat_off + sector_size ..][0..sector_size], &fat_buf);
+
+    // Root (cluster 2 → LBA base+34) and DATA.TXT (cluster 3 → LBA base+35).
+    const root_off: usize = @intCast((base_lba + 34) * sector_size);
+    var root = [_]u8{0} ** sector_size;
+    write_entry(&root, 0, "DATA    TXT", 0x20, 3, 10);
+    @memcpy(img[root_off .. root_off + sector_size], &root);
+    const data_off: usize = @intCast((base_lba + 35) * sector_size);
+    @memcpy(img[data_off .. data_off + 10], "hello disk");
+}
+
+test "fat: mount_partition mounts ANY FAT32 volume at an arbitrary LBA" {
+    var fxt = try build_fixture(test_allocator, false);
+    defer test_allocator.free(fxt.buf);
+    // A second, independent volume at LBA 100000 — not in the GPT.
+    write_min_volume(fxt.buf, 100000);
+
+    // The ESP wrapper is unchanged: still finds the ESP by GUID.
+    make_state_fixture(&fxt);
+    try std.testing.expectEqual(MountResult.ok, mount(test_ops()));
+    try std.testing.expectEqual(@as(u64, 2048), geometry().vol_lba);
+
+    // The general entry point mounts the second volume and serves it.
+    try std.testing.expectEqual(MountResult.ok, mount_partition(test_ops(), 100000));
+    try std.testing.expectEqual(@as(u64, 100000), geometry().vol_lba);
+    var out: [8]DirEntry = undefined;
+    try std.testing.expectEqual(@as(usize, 1), list_root(&out));
+    try std.testing.expectEqualStrings("DATA.TXT", out[0].name[0..out[0].name_len]);
+    var buf: [64]u8 = undefined;
+    const got = (read_file("DATA.TXT", &buf) orelse return error.TestUnexpectedResult);
+    try std.testing.expectEqualStrings("hello disk", buf[0..got]);
+    try std.testing.expectEqual(WriteResult.ok, write_file("written.txt", "from volume 2"));
+    var buf2: [64]u8 = undefined;
+    const got2 = (read_file("written.txt", &buf2) orelse return error.TestUnexpectedResult);
+    try std.testing.expectEqualStrings("from volume 2", buf2[0..got2]);
+
+    // A non-FAT LBA is rejected honestly (the GPT header sector is not a BPB).
+    try std.testing.expectEqual(MountResult.bad_bpb, mount_partition(test_ops(), 1));
+    // And the ESP path still works after a failed mount attempt.
+    try std.testing.expectEqual(MountResult.ok, mount(test_ops()));
+    try std.testing.expectEqual(@as(u64, 2048), geometry().vol_lba);
 }
