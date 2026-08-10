@@ -1,3 +1,5 @@
+> ARCHIVED (claim 8149 done)
+
 # Milestone three — march tracker (`docs/march-m3.md`) and agent-split plan
 
 Planning-first agent prompt for DipshitOS. Feed this file to the

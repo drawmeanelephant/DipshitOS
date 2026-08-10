@@ -32,6 +32,7 @@
 
 const std = @import("std");
 const uefi = std.os.uefi;
+const mmu = @import("mmu.zig");
 
 const RuntimeServices = uefi.tables.RuntimeServices;
 const Status = uefi.Status;
@@ -183,6 +184,15 @@ const State = struct {
         }
         name[i] = 0;
 
+        // Claim 5804: firmware runtime services execute at their PHYSICAL
+        // addresses, which only the kernel root (identity) maps — the EL0
+        // task's text+stack TTBR0 root does not contain them, so a
+        // SetVariable fired from the user task's syscall context would
+        // fault. Run the call with TTBR0 = kernel root and restore the
+        // caller's root after (no-op on host test processes).
+        const prev_ttbr0 = mmu.current_ttbr0();
+        mmu.set_ttbr0(mmu.kernel_root_phys());
+        defer mmu.set_ttbr0(prev_ttbr0);
         _ = set_var(&name, &vendor_guid, variable_attributes, total, &value);
         self.chunks += 1;
         self.len = 0;
@@ -234,6 +244,12 @@ pub fn debug_mark(byte: u8) void {
     for (prefix, 0..) |ch, i| name[i] = ch;
     name[prefix.len] = 0;
     const value = [1]u8{byte};
+    // Claim 5804: same kernel-root TTBR0 wrap as `emit` — the runtime
+    // services code lives at identity addresses that the user root does
+    // not map.
+    const prev_ttbr0 = mmu.current_ttbr0();
+    mmu.set_ttbr0(mmu.kernel_root_phys());
+    defer mmu.set_ttbr0(prev_ttbr0);
     _ = set_var(&name, &vendor_guid, variable_attributes, value.len, &value);
 }
 

@@ -1,3 +1,5 @@
+> ARCHIVED — frozen historical record; do not treat as an active plan.
+
 # Milestone two implementation design and review
 
 Status: design complete and self-reviewed; implementation attempted, with build gates passing and VZ hardware gates blocked.

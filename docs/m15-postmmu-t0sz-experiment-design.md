@@ -1,3 +1,5 @@
+> ARCHIVED — frozen historical record; do not treat as an active plan.
+
 # M1.5 — post-MMU T0SZ experiment: start-level mismatch vs. residual hang (design + pilot)
 
 Status: piloted on real VZ hardware ✅ (claim 7896) · Date: 2026-08-08 ·

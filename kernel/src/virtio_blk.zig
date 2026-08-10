@@ -138,13 +138,15 @@ pub fn blk_rearm() bool {
     blk_used = .{ .flags = 0, .idx = 0, .ring = .{ .{ .id = 0, .len = 0 }, .{ .id = 0, .len = 0 }, .{ .id = 0, .len = 0 }, .{ .id = 0, .len = 0 } } };
     mmu.clean_dcache_range(@intFromPtr(&blk_used), @sizeOf(VirtqUsed));
     blk_last_used = 0;
-    const qd = @intFromPtr(&blk_desc);
+    // Claim 5804: queue GPAs and descriptor addrs are guest PHYSICAL
+    // addresses — translate the post-jump kernel VAs.
+    const qd = mmu.to_phys(@intFromPtr(&blk_desc));
     mmio.mmio_write32(blk_common + 0x20, @truncate(qd));
     mmio.mmio_write32(blk_common + 0x24, @truncate(qd >> 32));
-    const qa = @intFromPtr(&blk_avail);
+    const qa = mmu.to_phys(@intFromPtr(&blk_avail));
     mmio.mmio_write32(blk_common + 0x28, @truncate(qa));
     mmio.mmio_write32(blk_common + 0x2c, @truncate(qa >> 32));
-    const qu = @intFromPtr(&blk_used);
+    const qu = mmu.to_phys(@intFromPtr(&blk_used));
     mmio.mmio_write32(blk_common + 0x30, @truncate(qu));
     mmio.mmio_write32(blk_common + 0x34, @truncate(qu >> 32));
     vp_write16(0x1c, 1); // queue_enable
@@ -337,13 +339,14 @@ pub fn virtio_blk_init() bool {
     blk_last_used = 0;
     // Queue GPA registers are le64; VZ's common-cfg emulation accepts
     // 32-bit accesses (claim 0013), so write each half as a 32-bit store.
-    const qd = @intFromPtr(&blk_desc);
+    // Claim 5804: queue GPAs are guest PHYSICAL — translate post-jump VAs.
+    const qd = mmu.to_phys(@intFromPtr(&blk_desc));
     mmio.mmio_write32(blk_common + 0x20, @truncate(qd));
     mmio.mmio_write32(blk_common + 0x24, @truncate(qd >> 32));
-    const qa = @intFromPtr(&blk_avail);
+    const qa = mmu.to_phys(@intFromPtr(&blk_avail));
     mmio.mmio_write32(blk_common + 0x28, @truncate(qa));
     mmio.mmio_write32(blk_common + 0x2c, @truncate(qa >> 32));
-    const qu = @intFromPtr(&blk_used);
+    const qu = mmu.to_phys(@intFromPtr(&blk_used));
     mmio.mmio_write32(blk_common + 0x30, @truncate(qu));
     mmio.mmio_write32(blk_common + 0x34, @truncate(qu >> 32));
     vp_write16(0x1c, 1); // queue_enable
@@ -403,9 +406,9 @@ fn submit(sector: u64, data: *[512]u8, out: bool) bool {
     blk_req.header = .{ .type = if (out) req_out else req_in, .reserved = 0, .sector = sector };
     blk_req.status = 0xff;
     if (out) @memcpy(&blk_req.data, data);
-    blk_desc[desc_header] = .{ .addr = @intFromPtr(&blk_req.header), .len = 16, .flags = virtq_f_next, .next = desc_data };
-    blk_desc[desc_data] = .{ .addr = @intFromPtr(&blk_req.data), .len = 512, .flags = virtq_f_next | (if (out) 0 else virtq_f_write), .next = desc_status };
-    blk_desc[desc_status] = .{ .addr = @intFromPtr(&blk_req.status), .len = 1, .flags = virtq_f_write, .next = 0xffff };
+    blk_desc[desc_header] = .{ .addr = mmu.to_phys(@intFromPtr(&blk_req.header)), .len = 16, .flags = virtq_f_next, .next = desc_data };
+    blk_desc[desc_data] = .{ .addr = mmu.to_phys(@intFromPtr(&blk_req.data)), .len = 512, .flags = virtq_f_next | (if (out) 0 else virtq_f_write), .next = desc_status };
+    blk_desc[desc_status] = .{ .addr = mmu.to_phys(@intFromPtr(&blk_req.status)), .len = 1, .flags = virtq_f_write, .next = 0xffff };
     // Spec indexing: entry `avail.idx` lives in ring[avail.idx % qsize]
     // (with a single request chain every slot carries desc 0).
     blk_avail.ring[blk_avail.idx % queue_size] = desc_header;

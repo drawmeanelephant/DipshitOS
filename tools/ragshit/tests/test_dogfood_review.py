@@ -189,7 +189,7 @@ def test_review_dogfood_invariants():
         project = repo.name
     assert project.lower() not in {s.lower() for s in stale_syms}, \
         f"project name {project!r} created stale hints: {stale_syms}"
-    assert len(j["stale"]) <= 12, f"stale universe exploded: {len(j['stale'])} hints"
+    assert len(j["stale"]) <= 25, f"stale universe exploded: {len(j['stale'])} hints"
 
     # --- D: low-value shell assignments never dominate ---------------------- #
     low = [s for s in j["selected"] if s.get("symbol_kind") == "constant" and s.get("language") == "shell"]

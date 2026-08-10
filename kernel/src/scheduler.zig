@@ -31,12 +31,21 @@
 //! context — claim 9187). Worker progress is reported from the shell idle
 //! loop via `maybe_report`, the same pattern as the timer heartbeat.
 //!
+//! Claim 5804: every task now owns a TTBR0 root. The EL1h shell/worker
+//! share the EL1-only kernel root (identity map, zero EL0 leaves — also
+//! the root runtime services run under); the EL0 task gets the user root
+//! (text + stack only) and its entry/SP/witness are USER VAs, not kernel
+//! addresses. The switch therefore programs TTBR0 + TLB-invalidates before
+//! restoring ELR/SPSR.
+//!
 //! No libc, no POSIX, no allocation.
 
 const std = @import("std");
 const builtin = @import("builtin");
 const console = @import("console.zig");
 const exceptions = @import("exceptions.zig");
+const mmu = @import("mmu.zig"); // claim 5804: per-task TTBR0 roots
+const userspace = @import("userspace.zig"); // claim 5804: user-VA layout
 
 const user_stack_section = if (builtin.object_format == .elf) ".userbss" else "__DATA,__userbss";
 
@@ -71,6 +80,10 @@ const Task = struct {
     /// Stack selected by EL0t (and EL1t, which this scheduler does not
     /// create). EL1h tasks ignore this value.
     sp_el0: u64 = 0,
+    /// Physical TTBR0 root for this task's user space (claim 5804). The
+    /// EL1h tasks point at the EL1-only kernel root; the EL0 task points at
+    /// its text+stack-only user root. Written to TTBR0 on every switch.
+    ttbr0: u64 = 0,
     /// How many times this task's context was saved by a tick.
     saves: u64 = 0,
     /// How many times this task's context was restored by a tick.
@@ -97,6 +110,7 @@ var pending_sp: u64 = 0;
 var pending_elr: u64 = 0;
 var pending_spsr: u64 = 0;
 var pending_sp_el0: u64 = 0;
+var pending_ttbr0: u64 = 0;
 
 /// Worker report (main-context console discipline, claim 9187): the worker
 /// marks a report pending; the shell idle loop prints it via `maybe_report`.
@@ -139,7 +153,7 @@ pub fn init() usize {
     exit_report_pending = false;
     user_timer_preemptions = 0;
     for (&tasks) |*task| task.* = .{};
-    tasks[0] = .{ .name = "shell", .registered = true, .runnable = true };
+    tasks[0] = .{ .name = "shell", .registered = true, .runnable = true, .ttbr0 = mmu.kernel_root_phys() };
     task_count = 1;
     return 0;
 }
@@ -158,6 +172,7 @@ pub fn register_worker(entry: u64) ?usize {
         .sp = build_initial_frame(&worker_stack, entry),
         .elr = entry,
         .spsr = spsr_el1h_irqs,
+        .ttbr0 = mmu.kernel_root_phys(),
         .registered = true,
         .runnable = true,
     };
@@ -166,23 +181,36 @@ pub fn register_worker(entry: u64) ?usize {
 }
 
 /// Register the first real lower-privilege task. Its saved register frame
-/// lives on a private EL1 exception stack; its code executes with EL0t and a
-/// separate SP_EL0 stack. Both are static BSS allocations for this first
-/// card—there is still no process abstraction or dynamic task creation.
-pub fn register_user(entry: u64) ?usize {
+/// lives on a private EL1 exception stack; its code executes with EL0t at a
+/// USER VA (claim 5804: `entry` is the kernel-side address of the payload
+/// and `image_base` the loader base — both are converted to user VAs here)
+/// under the task's own TTBR0 user root, with a separate SP_EL0 user stack
+/// and the timer-preemption witness at its user VA (the payload dereferences
+/// it through x9 at EL0).
+pub fn register_user(entry: u64, image_base: u64) ?usize {
     if (task_count >= max_tasks) return null;
     const id = task_count;
+    // Claim 5804: this runs POST-jump, so the incoming `entry` and these
+    // `@intFromPtr` values are KVA addresses — the user-VA conversion
+    // helpers expect the pre-jump PHYSICAL (identity) addresses (their
+    // formula is `user_va + (kernel_addr - image_base) - section_start`,
+    // which only holds in the identity world). to_phys is the identity on
+    // host tests and pre-jump, so the conversion is safe everywhere.
+    const entry_va = userspace.image_user_va(image_base, mmu.to_phys(entry));
+    const sp_el0 = userspace.bss_user_va(image_base, mmu.to_phys(@intFromPtr(&user_stack))) + user_stack.len;
+    const witness_va = userspace.bss_user_va(image_base, mmu.to_phys(@intFromPtr(&user_timer_preemptions)));
     tasks[id] = .{
         .name = "user-el0",
-        .sp = build_initial_frame(&user_kernel_stack, entry),
-        .elr = entry,
+        .sp = build_initial_frame(&user_kernel_stack, entry_va),
+        .elr = entry_va,
         .spsr = spsr_el0t_irqs,
-        .sp_el0 = @intFromPtr(&user_stack) + user_stack.len,
+        .sp_el0 = sp_el0,
+        .ttbr0 = mmu.user_root_phys(),
         .registered = true,
         .runnable = true,
     };
     const frame: *exceptions.VectorFrame = @ptrFromInt(tasks[id].sp);
-    _ = exceptions.frame_write(frame, 9, @intFromPtr(&user_timer_preemptions));
+    _ = exceptions.frame_write(frame, 9, witness_va);
     task_count += 1;
     return id;
 }
@@ -258,6 +286,7 @@ fn stage_current() void {
     pending_elr = tasks[current].elr;
     pending_spsr = tasks[current].spsr;
     pending_sp_el0 = tasks[current].sp_el0;
+    pending_ttbr0 = tasks[current].ttbr0;
     tasks[current].resumes += 1;
     switches += 1;
 }
@@ -277,6 +306,10 @@ fn apply_pending() void {
     exceptions.resume_frame = pending_sp;
     exceptions.resume_sp_el0 = pending_sp_el0;
     if (comptime builtin.is_test or builtin.cpu.arch != .aarch64) return;
+    // Claim 5804: install the selected task's TTBR0 (with a full TLB
+    // invalidation) before restoring its ELR/SPSR, so the eret to EL0 (or
+    // the resumed EL1h instruction stream) sees the task's own user space.
+    mmu.set_ttbr0(pending_ttbr0);
     asm volatile ("msr elr_el1, %[v]"
         :
         : [v] "r" (pending_elr),
@@ -454,6 +487,13 @@ pub fn current_id() usize {
     return current;
 }
 
+/// The TTBR0 root (physical) a task runs under (claim 5804; the
+/// `addrspaces` diagnostic prints it).
+pub fn task_ttbr0(id: usize) u64 {
+    if (id >= task_count or !tasks[id].registered) return 0;
+    return tasks[id].ttbr0;
+}
+
 pub fn cooperative_yield_count() u64 {
     return cooperative_yields;
 }
@@ -506,7 +546,7 @@ test "scheduler: register_worker builds a valid synthetic frame" {
         try std.testing.expectEqual(@as(u64, 0), std.mem.readInt(u64, @as(*const [8]u8, @ptrFromInt(t.sp + i)), .little));
     }
     // A third, lower-EL task fills the fixed pool; no fourth registration.
-    try std.testing.expectEqual(@as(usize, 2), register_user(0x3333).?);
+    try std.testing.expectEqual(@as(usize, 2), register_user(0x3333, 0).?);
     try std.testing.expect(register_worker(0) == null);
 }
 
@@ -514,7 +554,7 @@ test "scheduler: register_user separates EL1 exception and EL0 stacks" {
     _ = init();
     _ = register_worker(0x2000).?;
     const entry: u64 = 0x3000;
-    try std.testing.expectEqual(@as(usize, 2), register_user(entry).?);
+    try std.testing.expectEqual(@as(usize, 2), register_user(entry, 0).?);
     const task = &tasks[2];
     try std.testing.expectEqualStrings("user-el0", task.name);
     try std.testing.expectEqual(entry, task.elr);
@@ -567,7 +607,7 @@ test "scheduler: round-robin alternates and round-trips saved context" {
 test "scheduler: mixed EL1h and EL0t round-robin restores SP_EL0" {
     _ = init();
     _ = register_worker(0x2000).?;
-    _ = register_user(0x3000).?;
+    _ = register_user(0x3000, 0).?;
     start();
     const initial_user_sp = tasks[2].sp_el0;
 
@@ -594,7 +634,7 @@ test "scheduler: mixed EL1h and EL0t round-robin restores SP_EL0" {
 test "scheduler: only a tick preemption publishes the EL0 witness" {
     _ = init();
     _ = register_worker(0x2000).?;
-    _ = register_user(0x3000).?;
+    _ = register_user(0x3000, 0).?;
     start();
     switch_context(0x1000, 0x1000, spsr_el1h_irqs, 0xaaaa); // shell -> worker
     switch_context(0x2000, 0x2000, spsr_el1h_irqs, 0xbbbb); // worker -> user
@@ -658,7 +698,7 @@ test "scheduler: stats and task_info report deterministic state" {
 test "scheduler: cooperative exit is non-runnable and reports from shell" {
     _ = init();
     _ = register_worker(0x2000).?;
-    _ = register_user(0x3000).?;
+    _ = register_user(0x3000, 0).?;
     start();
     try std.testing.expect(yield_current()); // shell -> worker
     try std.testing.expect(yield_current()); // worker -> user

@@ -512,21 +512,23 @@ pub fn free_chain(r: *VirtqRing, head: u16) void {
 /// descriptors come first (Virtio 1.3 §2.7.6). The chain's NEXT links come
 /// from alloc_chain and are preserved.
 pub fn post_avail(r: *VirtqRing, head: u16, scatter: []const []const u8, reply_buf: []const u8, reply_first: bool) void {
+    // Claim 5804: descriptor addrs are guest PHYSICAL addresses — the
+    // device DMA-reads them, so translate the post-jump kernel VAs.
     var cur = head;
     if (reply_first) {
-        r.desc[cur].addr = @intFromPtr(reply_buf.ptr);
+        r.desc[cur].addr = mmu.to_phys(@intFromPtr(reply_buf.ptr));
         r.desc[cur].len = @intCast(reply_buf.len);
         r.desc[cur].flags = (r.desc[cur].flags & vq_next) | vq_write;
         cur = r.desc[cur].next;
     }
     for (scatter) |part| {
-        r.desc[cur].addr = @intFromPtr(part.ptr);
+        r.desc[cur].addr = mmu.to_phys(@intFromPtr(part.ptr));
         r.desc[cur].len = @intCast(part.len);
         r.desc[cur].flags = r.desc[cur].flags & vq_next; // preserve NEXT, clear WRITE
         cur = r.desc[cur].next;
     }
     if (!reply_first) {
-        r.desc[cur].addr = @intFromPtr(reply_buf.ptr);
+        r.desc[cur].addr = mmu.to_phys(@intFromPtr(reply_buf.ptr));
         r.desc[cur].len = @intCast(reply_buf.len);
         r.desc[cur].flags = (r.desc[cur].flags & vq_next) | vq_write;
     }
@@ -611,13 +613,15 @@ pub fn init() bool {
         vp_write16(0x18, queue_size); // queue_size = 32 (power of 2, §4.1.4.3)
         const r = &cv_rings[qi];
         ring_init(r);
-        const qd = @intFromPtr(&r.desc);
+        // Claim 5804: queue GPAs are guest PHYSICAL — translate post-jump
+        // kernel VAs back to phys for the device.
+        const qd = mmu.to_phys(@intFromPtr(&r.desc));
         mmio.mmio_write32(cv_common + 0x20, @truncate(qd));
         mmio.mmio_write32(cv_common + 0x24, @truncate(qd >> 32));
-        const qa = @intFromPtr(&r.avail);
+        const qa = mmu.to_phys(@intFromPtr(&r.avail));
         mmio.mmio_write32(cv_common + 0x28, @truncate(qa));
         mmio.mmio_write32(cv_common + 0x2c, @truncate(qa >> 32));
-        const qu = @intFromPtr(&r.used);
+        const qu = mmu.to_phys(@intFromPtr(&r.used));
         mmio.mmio_write32(cv_common + 0x30, @truncate(qu));
         mmio.mmio_write32(cv_common + 0x34, @truncate(qu >> 32));
         vp_write16(0x1c, 1); // queue_enable

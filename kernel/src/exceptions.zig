@@ -37,6 +37,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const uaccess = @import("uaccess.zig"); // claim 6120: fault-safe copy-in/copy-out window
 
 // ---------------------------------------------------------------------------
 // Exception kinds (the x5 value each stub passes; also the vector offset's
@@ -80,6 +81,10 @@ pub fn frame_write(frame: *VectorFrame, reg: u5, value: u64) bool {
 
 var report_writer: ?*const fn ([]const u8) void = null;
 
+/// [DIAG 5804-bisect] fault probe (REMOVE after bisect): called with
+/// (esr, far, elr) for every unhandled synchronous exception before the
+/// report/park path, so a pre-console fault can persist its registers to
+/// the NVRAM probe channel.
 /// Set the console writer the `[EXC]` report is emitted through. The
 /// kernel passes a wrapper over its polled uart; host tests may leave it
 /// null and assert on `format_report` directly.
@@ -448,6 +453,15 @@ export fn exc_dispatch(
                 return .{ .frame = resume_frame, .sp_el0 = resume_sp_el0 };
             }
         }
+    }
+    // Claim 6120: a synchronous data abort while a uaccess window is active
+    // is a bad user pointer inside a bounded copy, not a kernel bug. The
+    // uaccess module latches the fault and advances ELR past the 4-byte
+    // faulting instruction; the copy loop observes the latch and returns
+    // EFAULT, so the shell/user task survives. Any other synchronous
+    // exception falls through to the normal report/park path.
+    if (kind == kind_sync and uaccess.try_recover(esr, elr)) {
+        return .{ .frame = @intFromPtr(frame), .sp_el0 = resume_sp_el0 };
     }
     const will_resume = should_resume(kind, resume_armed);
     var buf: [512]u8 = undefined;

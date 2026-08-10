@@ -239,15 +239,16 @@ disk itself). **The milestone is closed 2026-08-09: all 7 M1.5 hard
 gates pass; tagged `m1.5-interactive-monitor`** (see
 [`docs/status.md`](status.md)).
 
-## Milestone three — allocator, interrupts, tasks, EL0/SVC, and syscalls (implemented through the syscall ABI card)
+## Milestone three — allocator, interrupts, tasks, EL0/SVC, syscalls, and uaccess (implemented through the uaccess card)
 
 > The milestone-three plan, in canonical order (mirroring
 > `docs/status.md`'s "What comes immediately afterward" and the per-card
 > tracker [`docs/march-m3.md`](march-m3.md)): physical allocator →
 > exception vectors → GIC + timer → kernel tasks → EL0/SVC boundary →
 > syscall ABI → uaccess → per-task address spaces → user lifecycle → ESP
-> exec → blocking syscalls. Every card through the syscall ABI card is
-> **done**; **uaccess is the next milestone-three card**.
+> exec → blocking syscalls. Every card through the per-task address-spaces
+> card is **done**; **user task lifecycle is the next milestone-three
+> card**.
 
 - ~~A physical page allocator over the captured EFI map.~~ **First step
   DONE 2026-08-08 (claim 3972):** first-fit bitmap allocator over the
@@ -298,6 +299,19 @@ gates pass; tagged `m1.5-interactive-monitor`** (see
   scheduler yield/exit hooks and deterministic `syscalls` counters land
   with the live gate `tools/verify-live-svc.sh` passing 1/1 (evidence:
   `artifacts/syscall-abi-3594/verification-summary.txt`).
+- ~~**uaccess: fault-safe copy-in/copy-out.**~~ **DONE 2026-08-10 (claim
+  6120)** — `kernel/src/uaccess.zig` adds bounded `copy_in`/`copy_out`
+  over the EL0 text (read) + stack (read/write) apertures with the
+  ADR-0007 `EFAULT` (`-3`) contract (out-of-region, overflow, unmapped,
+  permission), and a masked fault-recovery window: a real EL1 data abort
+  during a copy is latched and ELR advanced past the faulting instruction,
+  so the copy returns EFAULT instead of crashing EL1 (an
+  optimizer-reordering hazard that parked on the first live run was
+  root-caused and fixed with volatile window state). `sys_write` migrates
+  onto uaccess; the `uaccess` monitor command and the EL0 payload prove
+  the contract and the recovery live on VZ (gate
+  `tools/verify-live-uaccess.sh`, 1/1: `valid=1 fault=1 recovered=1`,
+  `uaccess: efault ok n=8`, no `[EXC] parking`).
 
 ## Later milestones (sketches only, not commitments)
 
@@ -325,6 +339,10 @@ gates pass; tagged `m1.5-interactive-monitor`** (see
   re-armed post-exit after VZ resets the device at ExitBootServices).
   `ls`/`cat`/`write` serve the live ESP volume; files persist on the
   disk itself. A general (non-ESP) filesystem remains future work.
+- Entropy/CSPRNG (sketch): seed the kernel's CSPRNG from the virtio
+  entropy device (`DID 0x1044` on VZ — already present on the bus,
+  `[observed]`, no driver yet) for boot-time ASLR and secure randomness;
+  see `docs/hardware-contract.md`.
 - Eventually: a process abstraction, a network stack — each only when the
   ones below it are demonstrably working.
 

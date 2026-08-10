@@ -59,7 +59,9 @@ run_one() {
         [ "$(grep -aFxc -- "DipshitOS kernel has seized control." artifacts/vm-serial.log || true)" = 1 ] && banner=1
         [ "$(grep -aFxc -- "dipshit> syscall: write ok n=23" artifacts/vm-serial.log || true)" = 1 ] && write_ok=1
         [ "$(grep -aFxc -- "  0 sys_ping calls=2" artifacts/vm-serial.log || true)" = 1 ] && ping=1
-        [ "$(grep -aFxc -- "  1 sys_write calls=1" artifacts/vm-serial.log || true)" = 1 ] && write_count=1
+        # Claim 6120: the EL0 payload now performs three writes (good line,
+        # bad-pointer EFAULT exercise, marker line), so the counter is 3.
+        [ "$(grep -aFxc -- "  1 sys_write calls=3" artifacts/vm-serial.log || true)" = 1 ] && write_count=1
         [ "$(grep -aFxc -- "  2 sys_yield calls=1" artifacts/vm-serial.log || true)" = 1 ] && yield_ok=1
         [ "$(grep -aFxc -- "$EXIT_LINE" artifacts/vm-serial.log || true)" = 1 ] && exit_count=1
         [ "$(grep -aFxc -- "  3 sys_exit calls=1" artifacts/vm-serial.log || true)" = 1 ] && table=1

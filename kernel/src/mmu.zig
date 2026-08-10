@@ -1,20 +1,52 @@
-//! DipshitOS identity-map MMU (extracted verbatim from the former
-//! kernel/src/main.zig junk drawer; claim 0023 mechanical split — no
-//! behavior change).
+//! DipshitOS MMU (claim 0023 split, extended by claim 5804 — per-task
+//! user address spaces).
 //!
 //! Page-table construction, attributes, table allocation, D-cache
-//! maintenance for the walk, and the identity-map install
-//! (`install_identity_map`). The builder maps the low physical space one
-//! pass: declared RAM as Normal Write-Back (2 MiB blocks where aligned,
-//! 4 KiB pages at region edges), declared MMIO windows and every
+//! maintenance for the walk, and the address-space install
+//! (`install_identity_map`). The kernel root maps the low physical space
+//! one pass: declared RAM as Normal Write-Back (2 MiB blocks where
+//! aligned, 4 KiB pages at region edges), declared MMIO windows and every
 //! *undeclared* region as Device nGnRnE, so no post-switch access can
-//! fault on an unmapped address and device semantics are preserved. Claim
-//! 8215 then overlays EL0 permissions on two dedicated page-aligned ranges:
-//! read/execute user text and read/write/non-executable user stack. All
-//! neighboring kernel RAM and all Device mappings remain EL1-only. The
-//! virtio-pci console transport window above the blanket is passed in by
-//! the caller (`extra_device`), so this module does not depend on the
-//! virtio transport module.
+//! fault on an unmapped address and device semantics are preserved. ALL
+//! kernel-root leaves are EL1-only: no EL0 permissions anywhere (claim
+//! 5804 removed the old claim-8215 overlay — EL0 permission now lives only
+//! in each task's own TTBR0 user root). The virtio-pci console transport
+//! window above the blanket is passed in by the caller (`extra_device`),
+//! so this module does not depend on the virtio transport module.
+//!
+//! Claim 5804: **per-task TTBR0 user address spaces.** The kernel stays
+//! identity-mapped in TTBR0 (the low 4 GiB blanket + device windows, all
+//! leaves EL1-only) and TTBR1 is NOT used. The original design put the
+//! kernel at a TTBR1 KVA shadow so TTBR0 could be swapped freely per task;
+//! live VZ measurements proved TTBR1 translation incompatible with this
+//! kernel's tables (documented for the ADR): with 4 KiB-aligned tables the
+//! TTBR1 walker faults at the FIRST descent level in every configuration —
+//! shared L0 root (level-1 fault), dedicated 48-bit L0 root (level-1),
+//! dedicated 39-bit L1-rooted mirror with T1SZ=25 (level-2) — despite
+//! provably-valid descriptor chains, the signature of a walker masking
+//! table addresses to 64 KiB. With 64 KiB-aligned tables the walk finally
+//! resolves (block and page leaves), but a Normal-WB DATA access through
+//! TTBR1 then aborts (a TLB conflict abort, then a synchronous external
+//! abort DFSC=0x21 after extra invalidations) while Device leaves were
+//! readable — so a kernel executing from a KVA shadow cannot work on VZ.
+//!
+//! The card therefore delivers per-task isolation the other way: every
+//! task's TTBR0 root carries an EL1-only overlay of the kernel identity
+//! map plus that task's own EL0 leaves, so the kernel stays reachable
+//! under EVERY root and TTBR0 can be switched per task without breaking
+//! kernel execution. `build_user_root` clones the identity tree into a
+//! fresh root and overlays the EL0 task's text+stack leaves at their user
+//! VAs; the EL1h shell/worker keep the plain kernel root. Isolation is
+//! preserved: EL0 has access ONLY to the text+stack leaves — every other
+//! leaf (kernel RAM, firmware, MMIO) is EL1-only (AP=0b00), so an EL0
+//! access takes a permission fault, UXN/PXN are enforced on every user
+//! leaf (W^X), and MMIO is excluded from EL0 by the same EL1-only AP bits
+//! (an EL0 access to any Device window is a permission fault, never a
+//! device access). The scheduler switches TTBR0 on every context switch;
+//! `with_ttbr0` swaps it around firmware/runtime-services calls and the
+//! uaccess diagnostic. `to_kva`/`to_phys` are the identity here (no TTBR1
+//! alias exists); they remain so the device-facing conversions the
+//! transports call stay correct under either design.
 //!
 //! No libc, no POSIX, allocator, or firmware service is used after the
 //! exit boundary. The table storage is a fixed BSS carve-out.
@@ -25,11 +57,16 @@ const uefi = std.os.uefi;
 const MemoryMapSlice = uefi.tables.MemoryMapSlice;
 const MemoryType = uefi.tables.MemoryType;
 const handoff = @import("handoff.zig");
+const userspace = @import("userspace.zig"); // claim 5804: user VA layout (text_va/stack_va)
 const build_options = if (builtin.is_test) struct {
     pub const t0sz25 = false;
 } else @import("build_options");
 
-const table_page_count = 128; // 512 KiB fixed BSS carve-out, no allocator.
+// Claim 5804: the user root CLONES the identity tree (per-task overlay),
+// so the carve-out must hold the identity map AND its clone. 256 pages =
+// 64 tables at 4 KiB: the identity map uses ~15, the clone ~15, and the
+// user leaf tables a couple more — ample headroom.
+const table_page_count = 256; // 1 MiB fixed BSS carve-out, no allocator.
 var table_storage: [table_page_count][512]u64 align(4096) = undefined;
 var table_count: usize = 0;
 
@@ -51,6 +88,48 @@ pub const plan_t0sz: u64 = if (build_options.t0sz25) 25 else 16;
 /// The builder always maps this low physical range identity. Higher mappings
 /// are explicit device/user windows and are not a general syscall aperture.
 pub const identity_blanket_end: u64 = 4 * 1024 * 1024 * 1024;
+
+/// Translate a PHYSICAL address to its kernel VA. Claim 5804 (VZ fallback):
+/// the kernel has NO TTBR1 KVA alias — it runs identity-mapped in TTBR0 —
+/// so this is the identity. Kept so the mmio accessors and the device-
+/// facing conversions (virtio DMA GPAs etc.) stay correct under either
+/// design.
+pub fn to_kva(x: u64) u64 {
+    return x;
+}
+
+/// Translate a kernel VA back to PHYSICAL — the inverse of `to_kva` (the
+/// identity here, since no TTBR1 alias exists). Used for every address the
+/// hardware interprets as a guest physical address (virtio descriptor/ring
+/// GPAs, allocator exclusions).
+pub fn to_phys(x: u64) u64 {
+    return x;
+}
+
+/// Physical address of the kernel root (the EL1-only identity map). Set by
+/// `build_identity_map` (pre-install, so the value is the physical address
+/// of the BSS root). TTBR0 points here for the kernel, the EL1h tasks, and
+/// around firmware/runtime-services calls.
+var kernel_root_value: u64 = 0;
+pub fn kernel_root_phys() u64 {
+    return kernel_root_value;
+}
+
+/// Physical address of the EL0 task's user root (the identity-tree clone +
+/// user leaves). Set by `build_user_root` (pre-install, so `@intFromPtr` is
+/// identity).
+var user_root_value: u64 = 0;
+pub fn user_root_phys() u64 {
+    return user_root_value;
+}
+
+/// True once both roots are built (kernel + user). Host tests never build
+/// them, so diagnostics can report honestly instead of dereferencing
+/// garbage.
+var roots_ready: bool = false;
+pub fn roots_built() bool {
+    return roots_ready;
+}
 
 /// Clean the D-cache over [start, start+len) to the point of coherence so a
 /// subsequent translation walk (which may read memory directly, bypassing a
@@ -113,7 +192,10 @@ pub fn build_identity_map(
 ) bool {
     table_count = 0;
     _ = new_table() orelse return false; // root table at index zero
-
+    // Claim 5804: capture the root's PHYSICAL address (pre-jump, so
+    // @intFromPtr is the identity). TTBR1 + the EL1h tasks' TTBR0 use it.
+    kernel_root_value = @intFromPtr(&table_storage[0]);
+    roots_ready = false; // rebuilt below; user root comes after
     // One-pass identity map of the low physical space. Declared RAM maps
     // Normal Write-Back (2 MiB blocks where aligned, 4 KiB pages at region
     // edges); declared MMIO windows and every *undeclared* region map Device
@@ -156,13 +238,10 @@ pub fn build_identity_map(
         }
     }
 
-    // Claim 8215: apply narrow EL0 permissions only after the complete
-    // identity map exists. A 2 MiB Normal block is split when necessary;
-    // only the requested 4 KiB leaves change. This happens before TTBR0 is
-    // installed, so the existing post-install no-remap/TLBI contract holds.
-    for (user_regions) |region| {
-        if (!apply_user_region(region)) return false;
-    }
+    // Claim 5804: the kernel root carries NO EL0 leaves — user permissions
+    // live only in the per-task TTBR0 user root built by `build_user_root`,
+    // which clones THIS tree and overlays the user leaves at their user
+    // VAs.
 
     // All adopted fixed regions sit inside declared RAM below the blanket;
     // verify they resolve to Normal mappings as a consistency check.
@@ -173,6 +252,31 @@ pub fn build_identity_map(
     if (!mapped_normal(@intFromPtr(handoff_rec))) return false;
     if (!mapped_normal(@intFromPtr(map_buffer.ptr))) return false;
     if (!mapped_normal(@intFromPtr(&table_storage))) return false;
+
+    // Claim 5804: build the EL0 task's per-task TTBR0 user root — a clone
+    // of this identity tree (the EL1-only kernel overlay) with the user
+    // text+stack leaves overlaid at their user VAs. EL0 can reach ONLY
+    // those leaves; everything else (kernel RAM, firmware, MMIO) is
+    // EL1-only and takes a permission fault. Must run pre-install (the
+    // table allocator stores physical addresses, and `@intFromPtr` is
+    // identity here).
+    var text_region: ?UserRegion = null;
+    var stack_region: ?UserRegion = null;
+    for (user_regions) |r| {
+        if (r.writable and r.executable) return false; // W^X
+        if (r.executable) text_region = r;
+        if (r.writable) stack_region = r;
+    }
+    const text = text_region orelse return false;
+    const stack = stack_region orelse return false;
+    if (!build_user_root(
+        userspace.text_va,
+        text.base,
+        text.len,
+        userspace.stack_va,
+        stack.base,
+        stack.len,
+    )) return false;
     return true;
 }
 
@@ -292,7 +396,7 @@ fn new_table() ?*align(4096) [512]u64 {
     return table;
 }
 
-fn table_entry(entry: *u64) ?*align(4096) [512]u64 {
+fn table_entry(entry: *const u64) ?*align(4096) [512]u64 {
     if ((entry.* & 3) != 3) return null;
     return @ptrFromInt(entry.* & ~@as(u64, 0xfff));
 }
@@ -374,27 +478,126 @@ fn map_page(va: u64, attr: Attr) bool {
     return false;
 }
 
-fn apply_user_region(region: UserRegion) bool {
-    if (region.len == 0 or region.base % page_size != 0 or region.len % page_size != 0) return false;
-    if (region.writable and region.executable) return false;
-    if (region.base > std.math.maxInt(u64) - region.len) return false;
-    var va = region.base;
-    const end = region.base + region.len;
-    while (va < end) : (va += page_size) {
-        if (!apply_user_page(va, region.writable, region.executable)) return false;
-    }
-    return true;
+/// One EL0 aperture in the user root: a VA range backed by a physical
+/// range, W^X enforced (executable regions are EL0 RO + PXN; writable
+/// regions are EL0 RW + UXN + PXN).
+const UserAperture = struct {
+    va_start: u64,
+    va_end: u64,
+    phys: u64,
+    writable: bool,
+    executable: bool,
+};
+
+fn slot_shift(level: u8) u6 {
+    return switch (level) {
+        0 => 39,
+        1 => 30,
+        2 => 21,
+        else => 12,
+    };
 }
 
-fn apply_user_page(va: u64, writable: bool, executable: bool) bool {
-    const ix = indices(va);
-    const root = &table_storage[0];
-    const l1 = table_entry(&root[ix.l0]) orelse return false;
-    const l2 = table_entry(&l1[ix.l1]) orelse return false;
-    if ((l2[ix.l2] & 3) == 1 and !split_block(&l2[ix.l2])) return false;
-    const l3 = table_entry(&l2[ix.l2]) orelse return false;
-    const entry = user_leaf(l3[ix.l3], writable, executable) orelse return false;
-    l3[ix.l3] = entry;
+/// Synthesize a fresh page table from a 2 MiB block leaf (the block's
+/// attributes on every page) so a clone can override individual pages
+/// inside a block that straddles a user aperture.
+fn split_block_view(desc: u64) ?*align(4096) [512]u64 {
+    if ((desc & 3) != 1) return null; // must be a block leaf
+    const base = desc & ~@as(u64, block_size - 1);
+    const attrs = desc & 0xfff;
+    const pages = new_table() orelse return null;
+    var i: usize = 0;
+    while (i < 512) : (i += 1) pages[i] = (base + @as(u64, i) * page_size) | attrs | 3;
+    return pages;
+}
+
+/// Recursively clone the identity tree (rooted at `src`, covering
+/// [va_base, va_base + 512 << shift(level))) into a fresh per-task root,
+/// overriding the user apertures' pages with EL0 leaves. Every other leaf
+/// is copied verbatim — the identity leaves are EL1-only (AP=0b00), so the
+/// cloned kernel overlay keeps the kernel reachable under the user root
+/// while denying EL0 any access to kernel RAM, firmware, or MMIO. Blocks
+/// that straddle a user aperture are split so the override reaches the
+/// page level. Must run BEFORE `install_identity_map` (the table allocator
+/// stores physical addresses; pre-install `@intFromPtr` is identity).
+fn clone_into_user_root(
+    src: *const [512]u64,
+    level: u8,
+    va_base: u64,
+    text: ?UserAperture,
+    stack: ?UserAperture,
+) ?*align(4096) [512]u64 {
+    const dst = new_table() orelse return null;
+    const shift = slot_shift(level);
+    const slot_bytes: u64 = @as(u64, 1) << shift;
+    var i: usize = 0;
+    while (i < 512) : (i += 1) {
+        const desc = src[i];
+        if (desc == 0) continue;
+        const slot_va = va_base + @as(u64, i) * slot_bytes;
+        const slot_end = slot_va + slot_bytes;
+        const in_text = text != null and slot_va < text.?.va_end and slot_end > text.?.va_start;
+        const in_stack = stack != null and slot_va < stack.?.va_end and slot_end > stack.?.va_start;
+        const hits_user = in_text or in_stack;
+        if (hits_user and level < 3) {
+            // The slot intersects a user aperture: the clone must descend
+            // to the page level, splitting a covering block if needed.
+            const child_src: *const [512]u64 = if ((desc & 3) == 3)
+                table_entry(&src[i]) orelse return null
+            else
+                split_block_view(desc) orelse return null;
+            const child = clone_into_user_root(child_src, level + 1, slot_va, text, stack) orelse return null;
+            dst[i] = @intFromPtr(child) | 3;
+        } else if (hits_user and level == 3) {
+            // Page leaf inside a user aperture: the ONLY place EL0
+            // permission is granted in the whole root.
+            const ap = if (in_text) text.? else stack.?;
+            const pa = ap.phys + (slot_va - ap.va_start);
+            const normal = (pa & ~@as(u64, 0xfff)) | attr_bits(.normal, true);
+            dst[i] = user_leaf(normal, ap.writable, ap.executable) orelse return null;
+        } else if ((desc & 3) == 3 and level < 3) {
+            const child = clone_into_user_root(table_entry(&src[i]) orelse return null, level + 1, slot_va, text, stack) orelse return null;
+            dst[i] = @intFromPtr(child) | 3;
+        } else {
+            dst[i] = desc; // block or page leaf — EL1-only AP=0b00, copy verbatim
+        }
+    }
+    return dst;
+}
+
+/// Build the EL0 task's TTBR0 user root: a clone of the kernel identity
+/// tree (the EL1-only overlay that keeps the kernel reachable under this
+/// root) with user text (EL0 RO + PXN) at `text_va` and user stack (EL0
+/// RW + UXN + PXN) at `stack_va`, backed by the physical ranges passed in.
+/// EL0 can reach ONLY those leaves — every kernel/firmware/MMIO leaf is
+/// EL1-only. Call BEFORE `install_identity_map` (the table allocator
+/// stores physical addresses; pre-install `@intFromPtr` is identity).
+/// Stores the root's physical address for the scheduler.
+pub fn build_user_root(
+    text_va: u64,
+    text_phys: u64,
+    text_len: u64,
+    stack_va: u64,
+    stack_phys: u64,
+    stack_len: u64,
+) bool {
+    const text_ap = UserAperture{
+        .va_start = text_va,
+        .va_end = text_va + text_len,
+        .phys = text_phys,
+        .writable = false,
+        .executable = true,
+    };
+    const stack_ap = UserAperture{
+        .va_start = stack_va,
+        .va_end = stack_va + stack_len,
+        .phys = stack_phys,
+        .writable = true,
+        .executable = false,
+    };
+    const root = clone_into_user_root(&table_storage[0], 0, 0, text_ap, stack_ap) orelse return false;
+    user_root_value = @intFromPtr(root);
+    roots_ready = true;
     return true;
 }
 
@@ -446,8 +649,15 @@ pub fn read_mmfr0() u64 {
     return value;
 }
 
-/// Install the built identity map: program MAIR/TCR/TTBR0 and switch. See
-/// the no-TLBI safety argument below (ADR 0006 / claim 0010).
+/// Install the address-space split (claim 5804, VZ fallback): program
+/// MAIR/TCR/TTBR0 and switch. The kernel stays identity-mapped in TTBR0
+/// (no TTBR1 KVA shadow — VZ's TTBR1 translation is incompatible, see the
+/// module doc); TTBR1 is programmed to 0 with T1SZ=25 so no TTBR1 region
+/// exists. Per-task isolation comes from switching TTBR0 between the
+/// kernel root (EL1h tasks) and the user root (EL0 task — the identity
+/// clone + user leaves), which the scheduler does on every switch.
+/// See the no-TLBI safety argument below (ADR 0006 / claim 0010) — the
+/// TLBI stays unconditional (claim 1517).
 pub fn install_identity_map() void {
     const mmfr0 = read_mmfr0();
     var ips: u64 = mmfr0 & 0xf;
@@ -482,9 +692,11 @@ pub fn install_identity_map() void {
     // with a 4K-correct value, so the granule is defensive rather than the
     // root cause.) IPS is bits [34:32] in both layouts and is taken from
     // ID_AA64MMFR0_EL1 per ADR 0004 D3.
-    const tcr: u64 = plan_t0sz | (ips << 32);
+    // T1SZ=25 (no TTBR1 region — TTBR1 is programmed to 0), TG1 stays 0b00
+    // (4 KB granule), EPD1=0.
+    const tcr: u64 = plan_t0sz | (25 << 16) | (ips << 32);
     const mair: u64 = 0x000000000000ff00; // Attr0 Device-nGnRnE, Attr1 Normal WB.
-    const root = @intFromPtr(&table_storage[0]);
+    const root0 = kernel_root_phys(); // identity root — TTBR0 for the kernel + EL1h tasks
     asm volatile ("dsb ishst" ::: .{ .memory = true });
     asm volatile ("msr mair_el1, %[value]"
         :
@@ -494,9 +706,13 @@ pub fn install_identity_map() void {
         :
         : [value] "r" (tcr),
     );
+    asm volatile ("msr ttbr1_el1, %[value]"
+        :
+        : [value] "r" (0),
+    );
     asm volatile ("msr ttbr0_el1, %[value]"
         :
-        : [value] "r" (root),
+        : [value] "r" (root0),
     );
     asm volatile ("isb");
     asm volatile ("dsb ish" ::: .{ .memory = true });
@@ -518,4 +734,147 @@ pub fn install_identity_map() void {
     asm volatile ("tlbi vmalle1" ::: .{ .memory = true });
     asm volatile ("dsb ish" ::: .{ .memory = true });
     asm volatile ("isb");
+    // Claim 5804 fallback: NO KVA jump — the kernel continues at its
+    // identity addresses under TTBR0. TTBR0 belongs to whichever task is
+    // current (the scheduler switches it); the identity root stays
+    // reachable as `kernel_root_phys()` for the EL1h tasks, and every
+    // per-task root carries the EL1-only kernel overlay so the kernel is
+    // reachable even under the user root.
+}
+
+// ---------------------------------------------------------------------------
+// Claim 5804: TTBR0 switching (scheduler + firmware/runtime-services calls)
+// ---------------------------------------------------------------------------
+
+/// Program TTBR0 (a PHYSICAL root address) and invalidate the TLB so the
+/// next access re-walks. The kernel root never changes, so the full
+/// invalidation is conservative but correct. No-op on host test processes.
+pub fn set_ttbr0(root_phys: u64) void {
+    if (comptime builtin.is_test or builtin.cpu.arch != .aarch64) return;
+    asm volatile ("msr ttbr0_el1, %[v]"
+        :
+        : [v] "r" (root_phys),
+    );
+    asm volatile ("isb");
+    asm volatile ("tlbi vmalle1" ::: .{ .memory = true });
+    asm volatile ("dsb ish" ::: .{ .memory = true });
+    asm volatile ("isb");
+}
+
+/// The currently programmed TTBR0 (physical root). 0 on host tests.
+pub fn current_ttbr0() u64 {
+    if (comptime builtin.is_test or builtin.cpu.arch != .aarch64) return 0;
+    var v: u64 = 0;
+    asm volatile ("mrs %[v], ttbr0_el1"
+        : [v] "=r" (v),
+    );
+    return v;
+}
+
+/// The currently programmed TTBR1. The install programs it to 0 (no TTBR1
+/// region — claim 5804 VZ fallback); the `addrspaces` diagnostic prints it
+/// to prove TTBR1 is unused. 0 on host tests.
+pub fn read_ttbr1() u64 {
+    if (comptime builtin.is_test or builtin.cpu.arch != .aarch64) return 0;
+    var v: u64 = 0;
+    asm volatile ("mrs %[v], ttbr1_el1"
+        : [v] "=r" (v),
+    );
+    return v;
+}
+
+/// The currently programmed TCR_EL1 (for the `addrspaces` diagnostic).
+pub fn read_tcr() u64 {
+    if (comptime builtin.is_test or builtin.cpu.arch != .aarch64) return 0;
+    var v: u64 = 0;
+    asm volatile ("mrs %[v], tcr_el1"
+        : [v] "=r" (v),
+    );
+    return v;
+}
+
+/// Run `f` with TTBR0 = `root_phys`, restoring the caller's TTBR0 after.
+/// Used by runtime services (which run against identity pointers — the
+/// kernel root) from user-task context, and by the uaccess diagnostic
+/// (which must read the user root). No-op passthrough on host tests and
+/// before the roots are built.
+pub fn with_ttbr0(root_phys: u64, comptime f: fn () void) void {
+    if (comptime builtin.is_test or builtin.cpu.arch != .aarch64) {
+        f();
+        return;
+    }
+    if (!roots_ready) {
+        f();
+        return;
+    }
+    const current = current_ttbr0();
+    if (current != root_phys) set_ttbr0(root_phys);
+    f();
+    if (current != root_phys) set_ttbr0(current);
+}
+
+/// Run `f` under the kernel (identity) root — the world runtime services
+/// run in.
+pub fn with_kernel_root(comptime f: fn () void) void {
+    with_ttbr0(kernel_root_phys(), f);
+}
+
+/// Run `f` under the EL0 task's user root.
+pub fn with_user_root(comptime f: fn () void) void {
+    with_ttbr0(user_root_phys(), f);
+}
+
+// ---------------------------------------------------------------------------
+// Claim 5804: user-root leaf inventory (the `addrspaces` diagnostic)
+// ---------------------------------------------------------------------------
+
+pub const LeafStats = struct {
+    /// Total valid leaves mapped in the root (blocks at L2 + pages at L3).
+    leaves: usize = 0,
+    /// Leaves with AttrIndex 0 (Device nGnRnE). For the user root these
+    /// are the EL1-only MMIO overlay leaves — allowed, since EL0 cannot
+    /// reach them.
+    device_leaves: usize = 0,
+    /// Leaves whose AP bits [7:6] grant EL0 some access (AP != 0b00). For
+    /// the user root this must be EXACTLY the text+stack leaves.
+    el0_leaves: usize = 0,
+    /// EL0-accessible leaves with AttrIndex 0 (Device) — MUST be 0: MMIO
+    /// is excluded from EL0 by the EL1-only AP bits on the overlay's
+    /// Device leaves.
+    el0_device_leaves: usize = 0,
+};
+
+/// Count the leaves reachable from a root's PHYSICAL address by recursing
+/// only through present table descriptors (bounded by construction: the
+/// user root is a clone of the identity tree, ~30 tables). A leaf's
+/// AttrIndex is bits [4:2]; 0 is Device (MAIR Attr0) and 1 is Normal WB
+/// (MAIR Attr1). AP bits [7:6] = 0b00 is EL1-only (the kernel overlay);
+/// anything else grants EL0 some access (the user leaves). Intended for
+/// the user root: el0_leaves must be exactly the text+stack leaves and
+/// el0_device_leaves must be 0 (MMIO excluded from EL0). Returns zeros
+/// before the roots are built / on host tests.
+pub fn walk_leaves(root_phys: u64) LeafStats {
+    var stats = LeafStats{};
+    if (!roots_ready) return stats;
+    walk_level(root_phys, 0, &stats);
+    return stats;
+}
+
+fn walk_level(table_phys: u64, level: u8, stats: *LeafStats) void {
+    const table: *const [512]u64 = @ptrFromInt(to_kva(table_phys));
+    for (table.*) |desc| {
+        if (desc == 0) continue;
+        if ((desc & 3) == 3 and level < 3) {
+            walk_level(desc & ~@as(u64, 0xfff), level + 1, stats);
+        } else if ((desc & 3) == 1 or level == 3) {
+            stats.leaves += 1;
+            const attr_idx = (desc >> 2) & 7;
+            const ap = (desc >> 6) & 3;
+            if (attr_idx == 0) stats.device_leaves += 1;
+            if (ap != 0) {
+                stats.el0_leaves += 1;
+                if (attr_idx == 0) stats.el0_device_leaves += 1;
+            }
+        }
+    }
 }

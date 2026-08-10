@@ -193,29 +193,31 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "Type 'help' before touching anything expensive.\n" ++
         "dipshit> help\r\n" ++
         "available commands:\n" ++
-        "  about     explain this questionable system\n" ++
-        "  beans     count beans, probably\n" ++
-        "  cat       print a file from the ESP\n" ++
-        "  clear     clean up the crime scene\n" ++
-        "  echo      repeat your regrettable decisions\n" ++
-        "  elephant  operational mascot diagnostics\n" ++
-        "  fault     trigger a synchronous exception (diagnostic)\n" ++
-        "  handoff   display boot-to-kernel ABI data\n" ++
-        "  help      list commands and their help text\n" ++
-        "  hex       format an integer in hexadecimal\n" ++
-        "  ls        list files on the ESP\n" ++
-        "  mem       summarize the EFI memory map\n" ++
-        "  pages     physical page allocator pool\n" ++
-        "  pci       enumerate PCI devices on the bus\n" ++
-        "  reboot    restart the machine\n" ++
-        "  repeat    repeat text, safely bounded\n" ++
-        "  shutdown  request power-off\n" ++
-        "  syscalls  numbered syscall table and counters\n" ++
-        "  tasks     tick-driven task scheduler status\n" ++
-        "  timer     interrupt controller + timer status\n" ++
-        "  uname     compact system identity\n" ++
-        "  version   display build information\n" ++
-        "  write     write text to a file on the ESP\n" ++
+        "  addrspaces  per-task user address spaces: per-task TTBR0, EL1-only kernel overlay, user-root contents\n" ++
+        "  about       explain this questionable system\n" ++
+        "  beans       count beans, probably\n" ++
+        "  cat         print a file from the ESP\n" ++
+        "  clear       clean up the crime scene\n" ++
+        "  echo        repeat your regrettable decisions\n" ++
+        "  elephant    operational mascot diagnostics\n" ++
+        "  fault       trigger a synchronous exception (diagnostic)\n" ++
+        "  handoff     display boot-to-kernel ABI data\n" ++
+        "  help        list commands and their help text\n" ++
+        "  hex         format an integer in hexadecimal\n" ++
+        "  ls          list files on the ESP\n" ++
+        "  mem         summarize the EFI memory map\n" ++
+        "  pages       physical page allocator pool\n" ++
+        "  pci         enumerate PCI devices on the bus\n" ++
+        "  reboot      restart the machine\n" ++
+        "  repeat      repeat text, safely bounded\n" ++
+        "  shutdown    request power-off\n" ++
+        "  syscalls    numbered syscall table and counters\n" ++
+        "  tasks       tick-driven task scheduler status\n" ++
+        "  timer       interrupt controller + timer status\n" ++
+        "  uaccess     user-memory copy diagnostics (valid, fault, recovery)\n" ++
+        "  uname       compact system identity\n" ++
+        "  version     display build information\n" ++
+        "  write       write text to a file on the ESP\n" ++
         "type 'help <command>' for details on a single command.\n" ++
         "dipshit> version\r\n" ++
         "dipshit-kernel\n" ++
@@ -287,7 +289,7 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
     // — the `tasks` command then reports the real mixed-EL shape.
     _ = scheduler.init();
     _ = scheduler.register_worker(0);
-    _ = scheduler.register_user(0);
+    _ = scheduler.register_user(0, 0);
     userspace.init();
     // Claim 3475/6420: populate the ESP file window the way kernel_main's
     // FAT snapshot does (KERNEL.BIN listed-but-unloaded, an EFI directory,

@@ -27,6 +27,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const uefi = std.os.uefi;
 const monitor = @import("monitor.zig");
+const mmu = @import("mmu.zig");
 
 const RuntimeServices = uefi.tables.RuntimeServices;
 const ResetType = uefi.tables.ResetType;
@@ -75,6 +76,13 @@ const State = struct {
     fn do_reset(self: *State, reset_type: ResetType) MachineResult {
         const reset = self.reset_fn orelse return .not_implemented;
         const set_var = self.set_var_fn orelse return .not_implemented;
+        // Claim 5804: firmware runtime services execute at their PHYSICAL
+        // addresses, which only the kernel root (identity) maps — run the
+        // marker write AND the reset call with TTBR0 = kernel root and
+        // restore the caller's root after (no-op on host test processes).
+        const prev_ttbr0 = mmu.current_ttbr0();
+        mmu.set_ttbr0(mmu.kernel_root_phys());
+        defer mmu.set_ttbr0(prev_ttbr0);
         write_rst_marker(set_var);
         reset(reset_type, .success, 0, null);
         return .ok;

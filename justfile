@@ -35,8 +35,9 @@ verify-portable:
 # host-console PTY, the live-transcript RX gate (claim 6684), the
 # live timer IRQ-delivery gate (claim 9187), the live tasks scheduler
 # gate (claim 5275), the EL0/SVC gate (claim 8215), the numbered syscall
-# gate (claim 3594), and the live reboot/shutdown gate (claim 0527).
-# Apple silicon only — each boots VZ VMs.
+# gate (claim 3594), the fault-safe uaccess gate (claim 6120), the
+# per-task address-space gate (claim 5804), and the live reboot/shutdown
+# gate (claim 0527). Apple silicon only — each boots VZ VMs.
 verify-vz:
     zig build run
     bash tools/verify-bad-handoff.sh
@@ -49,6 +50,8 @@ verify-vz:
     bash tools/verify-live-tasks.sh
     bash tools/verify-live-userspace.sh
     bash tools/verify-live-svc.sh
+    bash tools/verify-live-uaccess.sh
+    bash tools/verify-live-addrspaces.sh
     bash tools/verify-live-reboot.sh
 
 # Compile the AArch64 UEFI application and kernel image (class A — zig build)
@@ -166,6 +169,10 @@ verify-live-userspace:
 # Verify the frozen syscall ABI and runtime dispatch table (class B — staged input waits for EL0 write/yield/exit, then asserts counters + a responsive shell; claim 3594)
 verify-live-svc:
     bash tools/verify-live-svc.sh
+
+# Verify the fault-safe uaccess layer (class B — EL0 observes EFAULT for a bad pointer and survives; the monitor command recovers a real data abort; claim 6120)
+verify-live-uaccess:
+    bash tools/verify-live-uaccess.sh
 
 # Verify the live ESP file window (class B — boots VZ VMs; ls/cat from the pre-exit ESP snapshot + write persisted to EFI NVRAM and read back across a reboot; claim 3475, hard gate 5; Apple silicon only)
 verify-live-fs:

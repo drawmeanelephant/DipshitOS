@@ -25,10 +25,13 @@ const exceptions = @import("exceptions.zig");
 const gic = @import("gic.zig");
 const handoff = @import("handoff.zig");
 const memmap = @import("memmap.zig");
+const mmu = @import("mmu.zig"); // claim 5804: per-task TTBR0 roots + user-root inventory
 const pci = @import("pci.zig");
 const scheduler = @import("scheduler.zig"); // claim 5275: tick-driven round-robin tasks
 const syscall = @import("syscall.zig"); // claim 3594: syscall table + counters
 const timer = @import("timer.zig");
+const uaccess = @import("uaccess.zig"); // claim 6120: fault-safe copy-in/copy-out
+const userspace = @import("userspace.zig"); // claim 5804: user-VA layout
 
 // ---------------------------------------------------------------------------
 // Limits (fixed-size, explicit bounds)
@@ -198,7 +201,7 @@ pub const Command = struct {
 
 /// Number of commands. The registry is built at runtime (not a const
 /// table): see `ensure_registry`.
-pub const registry_count: usize = 23;
+pub const registry_count: usize = 25;
 
 /// Command registry, built at runtime into BSS. A `const` table would hold
 /// link-time absolute addresses for BOTH the string slices and the handler
@@ -214,6 +217,7 @@ var registry_ready = false;
 fn ensure_registry() []const Command {
     if (!registry_ready) {
         registry_storage = .{
+            .{ .name = "addrspaces", .help = "per-task user address spaces: per-task TTBR0, EL1-only kernel overlay, user-root contents", .usage = "addrspaces", .handler = cmd_addrspaces },
             .{ .name = "about", .help = "explain this questionable system", .usage = "about", .handler = cmd_about },
             .{ .name = "beans", .help = "count beans, probably", .usage = "beans [count]", .max_args = 1, .handler = cmd_beans },
             .{ .name = "cat", .help = "print a file from the ESP", .usage = "cat <file>", .min_args = 1, .max_args = 1, .handler = cmd_cat },
@@ -234,6 +238,7 @@ fn ensure_registry() []const Command {
             .{ .name = "syscalls", .help = "numbered syscall table and counters", .usage = "syscalls", .handler = cmd_syscalls },
             .{ .name = "tasks", .help = "tick-driven task scheduler status", .usage = "tasks", .handler = cmd_tasks },
             .{ .name = "timer", .help = "interrupt controller + timer status", .usage = "timer", .handler = cmd_timer },
+            .{ .name = "uaccess", .help = "user-memory copy diagnostics (valid, fault, recovery)", .usage = "uaccess", .handler = cmd_uaccess },
             .{ .name = "uname", .help = "compact system identity", .usage = "uname", .handler = cmd_uname },
             .{ .name = "version", .help = "display build information", .usage = "version", .handler = cmd_version },
             .{ .name = "write", .help = "write text to a file on the ESP", .usage = "write <file> <text...>", .min_args = 1, .handler = cmd_write },
@@ -943,6 +948,82 @@ fn cmd_syscalls(m: *Monitor, args: []const []const u8) ExecError {
 }
 
 // ---------------------------------------------------------------------------
+// Per-task address-space command (claim 5804)
+// ---------------------------------------------------------------------------
+
+/// Report the address-space split (claim 5804, VZ fallback): TTBR1 must
+/// be 0 (unused — the kernel is identity-mapped in TTBR0), every task's
+/// TTBR0 root, and the user root's leaf inventory. The user root is the
+/// identity clone + user leaves: `el0` leaves must be EXACTLY the
+/// text+stack leaves, and `el0_device` must be 0 (MMIO excluded from EL0
+/// by the EL1-only AP bits on the overlay's Device leaves). Deterministic
+/// and grep-able; on host test processes the roots are never built, so it
+/// honestly prints zeros for the register/root values and 0 leaves.
+fn cmd_addrspaces(m: *Monitor, args: []const []const u8) ExecError {
+    _ = args;
+    m.console.puts("addrspaces: ttbr1=");
+    m.console.print_hex(mmu.read_ttbr1());
+    m.console.puts(" root=");
+    m.console.print_hex(mmu.kernel_root_phys());
+    m.console.puts(" tcr=");
+    m.console.print_hex(mmu.read_tcr());
+    m.console.puts(" t0sz=16\n");
+    const s = scheduler.stats();
+    var i: usize = 0;
+    while (i < s.count) : (i += 1) {
+        const info = scheduler.task_info(i) orelse continue;
+        m.console.puts("addrspaces: task ");
+        m.console.puts(info.name);
+        m.console.puts(" ttbr0=");
+        m.console.print_hex(scheduler.task_ttbr0(i));
+        m.console.puts("\n");
+    }
+    const leaves = mmu.walk_leaves(mmu.user_root_phys());
+    m.console.puts("addrspaces: user text=");
+    m.console.print_hex(userspace.text_va);
+    m.console.puts(" stack=");
+    m.console.print_hex(userspace.stack_va);
+    m.console.puts(" leaves=");
+    m.console.print_u64(leaves.leaves);
+    m.console.puts(" device=");
+    m.console.print_u64(leaves.device_leaves);
+    m.console.puts(" el0=");
+    m.console.print_u64(leaves.el0_leaves);
+    m.console.puts(" el0_device=");
+    m.console.print_u64(leaves.el0_device_leaves);
+    m.console.puts("\n");
+    return .none;
+}
+
+// ---------------------------------------------------------------------------
+// Uaccess diagnostic command (claim 6120)
+// ---------------------------------------------------------------------------
+
+/// Prove both uaccess paths on live hardware: the validated copy from the
+/// user text aperture succeeds, and a raw copy from an unmapped address
+/// above the identity blanket takes a REAL EL1 data abort that the
+/// exception path recovers into EFAULT (recoveries >= 1). Honest on host
+/// test processes (no vectors): `recovered=0` there. Gates on the real
+/// recovery count, so the class-B gate can assert `recovered=1` exactly
+/// when it drives this command once.
+fn cmd_uaccess(m: *Monitor, args: []const []const u8) ExecError {
+    _ = args;
+    const d = uaccess.diag();
+    m.console.puts("uaccess: valid=");
+    m.console.print_u64(if (d.valid_copy) 1 else 0);
+    m.console.puts(" fault=");
+    m.console.print_u64(if (d.fault_copy) 1 else 0);
+    m.console.puts(" recovered=");
+    m.console.print_u64(d.recoveries);
+    m.console.puts(" copies=");
+    m.console.print_u64(d.copies);
+    m.console.puts(" validation_faults=");
+    m.console.print_u64(d.validation_faults);
+    m.console.puts("\n");
+    return .none;
+}
+
+// ---------------------------------------------------------------------------
 // PCI enumeration command (macOS 27 custom-virtio spike, audit step 3)
 // ---------------------------------------------------------------------------
 
@@ -1544,7 +1625,7 @@ test "monitor: tasks is registered and reports the deterministic host state" {
     // shape a live boot reports once ticks begin.
     _ = scheduler.init();
     _ = scheduler.register_worker(0);
-    _ = scheduler.register_user(0);
+    _ = scheduler.register_user(0, 0);
     try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"tasks"}));
     try std.testing.expectEqualStrings(
         "tasks: enabled=0 current=0 switches=0\n" ++
@@ -1568,6 +1649,22 @@ test "monitor: syscalls is registered and reports deterministic rows" {
             "  1 sys_write calls=0\n" ++
             "  2 sys_yield calls=0\n" ++
             "  3 sys_exit calls=0\n",
+        env.mock.contents(),
+    );
+}
+
+test "monitor: uaccess command is honest on a host process (no vectors)" {
+    var env = TestEnv.init();
+    var mon = env.monitor();
+    try std.testing.expect(lookup("uaccess") != null);
+    try std.testing.expectEqualStrings("user-memory copy diagnostics (valid, fault, recovery)", lookup("uaccess").?.help);
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"uaccess"}));
+    // Host process: no regions configured and no exception vectors, so the
+    // validated copy is rejected at range check and the raw probe returns
+    // fault without dereferencing (recovered=0). On VZ the class-B gate
+    // asserts the real recovery line instead.
+    try std.testing.expectEqualStrings(
+        "uaccess: valid=0 fault=1 recovered=0 copies=0 validation_faults=1\n",
         env.mock.contents(),
     );
 }

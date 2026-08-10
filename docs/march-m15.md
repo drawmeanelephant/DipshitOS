@@ -1,3 +1,5 @@
+> ARCHIVED — frozen historical record; do not treat as an active plan.
+
 # M1.5 march — Interactive Kernel Monitor (living tracker)
 
 > **Why this file exists:** the per-step tracker and the best-agent-split
