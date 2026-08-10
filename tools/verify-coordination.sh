@@ -18,7 +18,8 @@
 #      unescaped '|' cannot corrupt a table).
 #   5. docs/status.md stays an edit-free coordination surface: no changelog
 #      entries, no claims table, no march/agent-split tables (those live in
-#      docs/logs/, docs/claims/README.md, and docs/march-m15.md).
+#      docs/logs/, docs/claims/README.md, and docs/march-m3.md; the
+#      completed M1.5 tracker is archived at docs/archive/march-m15.md).
 #
 # Run before opening a PR (`just verify-coordination`; also runs in CI).
 # If it fails, fix the file(s) it names and/or run:
@@ -100,12 +101,12 @@ if grep -qE '^\| \[[0-9]{4}-' docs/status.md; then
     bad "docs/status.md must not contain a claims table — see docs/claims/README.md"
 fi
 if grep -qE 'Legend: ⬜ not started|^\| # \| Step \|' docs/status.md; then
-    bad "docs/status.md must not contain the march table — update docs/march-m15.md"
+    bad "docs/status.md must not contain the march table — update docs/march-m3.md"
 fi
 if grep -qE '^## Best agent split|^\| Agent \| Owns \|' docs/status.md; then
-    bad "docs/status.md must not contain the agent-split table — see docs/march-m15.md"
+    bad "docs/status.md must not contain the agent-split table — see docs/march-m3.md"
 fi
-[ -f docs/march-m15.md ] || bad "docs/march-m15.md missing (docs/status.md points to it)"
+[ -f docs/march-m3.md ] || bad "docs/march-m3.md missing (docs/status.md points to it)"
 
 # --- generated index sync ---------------------------------------------------
 

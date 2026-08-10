@@ -266,16 +266,21 @@ Every verification command belongs to exactly one class (canonical inventory:
       `artifacts/live-fs-*` (`live-fs-gate.txt`, `live-fs-report.txt`,
       `live-fs-run-<A|B>-<NN>.txt`, `live-fs-serial-<A|B>-<NN>.log`).
 
-- [x] Milestone-three live gates (class B, claims 9187/5275/8215/3594/6120):
-      **passing 2026-08-09/10** — live timer IRQ (claim 9187, 3/3, real
-      periodic CNTP PPI 30 into the claim-9746 EL1 IRQ vector), live tasks
-      (claim 5275, tick-driven round-robin across real context switches),
-      live EL0/SVC boundary (claim 8215, 1/1 — two sequenced pings prove
-      return to EL0), live syscall-table gate (claim 3594, 1/1, exact
-      snapshot `ping=2 write=3 yield=1 exit=1`), and live uaccess (claim
-      6120, 1/1 — `valid=1 fault=1 recovered=1`: a real EL1 data abort
-      during copy-in is recovered to EFAULT without crashing EL1). Full
-      gate table: `docs/status.md`.
+- [x] Milestone-three live gates (class B, claims 9187/5275/8215/3594/6120/
+      5804/6729/6783/3200): **passing 2026-08-09/10** — live timer IRQ
+      (claim 9187, 3/3, real periodic CNTP PPI 30 into the claim-9746 EL1
+      IRQ vector), live tasks (claim 5275, tick-driven round-robin across
+      real context switches), live EL0/SVC boundary (claim 8215, 1/1 —
+      two sequenced pings prove return to EL0), live syscall-table gate
+      (claim 3594, 1/1, exact snapshot `ping=2 write=3 yield=1 exit=1`),
+      live uaccess (claim 6120, 1/1 — `valid=1 fault=1 recovered=1`: a
+      real EL1 data abort during copy-in is recovered to EFAULT without
+      crashing EL1), live address spaces (claim 5804, per-task TTBR0 with
+      EL1-only kernel overlay), live lifecycle (claim 6729, spawn/exit/
+      reap + idle reaper), live ESP exec (claim 6783, `USER.BIN` runs at
+      EL0 from the ESP), and live blocking syscalls (claim 3200,
+      sleep/wakeup in the tick scheduler). Full gate table:
+      `docs/status.md`.
 
 **Post-tag reverify (claim 7873, 2026-08-09):** the complete class A set
 (just verify-portable: fmt, 95 + 110 unit tests, transcript gate, build,
@@ -286,3 +291,16 @@ live-transcript, live-fs, live-timer, live-reboot, live-exceptions) were
 re-run at the **`m1.5-interactive-monitor` tag (`74a51f3`, clean tree)**
 — **all green**. Summary evidence:
 `artifacts/gates-reverify-20260809-m15-tag.txt`.
+
+**Milestone-three close-out reverify (claim 0707, 2026-08-10):** the
+complete class A set (just verify-portable: fmt, unit tests,
+test-console, build, image, inspect, swift runner build, context,
+coordination, coordination tooling, mmu-debt — 11/11) and the complete
+class B VZ set (serial takeover `zig build run`, bad-handoff, marker,
+nvram-console, host-console, live-transcript, live-fs, live-timer,
+live-tasks, live-userspace, live-svc, live-uaccess, live-addrspaces,
+live-lifecycle, live-exec, live-sleep, live-reboot — 17/17) were re-run
+at the milestone-three candidate HEAD `0c119d8` — **all green**; the
+milestone is tagged **`m3-userspace`**. Evidence:
+`artifacts/gates-reverify-20260810-m3-closeout.txt` +
+`artifacts/classB-chunk{1,2,3,4}-m3-closeout.log`.
