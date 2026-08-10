@@ -23,7 +23,10 @@
   + the runner's `--script2` second phase — PR #75, the branch this card
   branches off), claim 0826 (per-process roots/pages), claim 3848
   (`procs`).
-- **Status:** 🔄 agent/buffy/m4-kill
+- **Status:** ✅ done — Stage A (the scheduler kill seam + the `kill`
+  command + host tests + the runner `--script3`), Stage B (the live kill
+  gate + the full 12-gate shared-seam sweep), and Stage C (docs
+  reconciliation, this flip) complete.
 
 ## Notes
 

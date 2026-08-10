@@ -59,6 +59,7 @@ verify-vz:
     bash tools/verify-live-procs.sh
     bash tools/verify-live-concurrent.sh
     bash tools/verify-live-long-lived.sh
+    bash tools/verify-live-kill.sh
     bash tools/verify-live-sleep.sh
     bash tools/verify-live-entropy.sh
     bash tools/verify-live-reboot.sh
@@ -202,6 +203,10 @@ verify-live-reboot:
 # Verify the REAL virtio entropy -> CSPRNG seed -> random command path (class B — boots VZ VMs; asserts `entropy: seeded n=64`, `random 32` hex, a responsive shell, and DIFFERENT output across two boots; claim 2665)
 verify-live-entropy:
     bash tools/verify-live-entropy.sh
+
+# Verify the live kill gate (class B — boots VZ VMs; the kernel force-terminates a never-exiting COUNTER.BIN with the reserved status 137, pages return, the slot is re-exec'd; claim 7786; Apple silicon only)
+verify-live-kill:
+    bash tools/verify-live-kill.sh
 
 # Verify the M1.5 host-side interactive serial plumbing (class B — boots VZ VMs; Apple silicon only)
 verify-host-console:

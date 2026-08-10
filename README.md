@@ -275,7 +275,14 @@ All command output and logs are saved under `artifacts/` (`inspect.txt`,
    slot, and a further exec with both live hits the capacity gate
    (`pool_full`) — `tools/verify-live-long-lived.sh`, which drives the
    re-exec via the runner's new `--script2`/`--script2-after` second
-   scripted phase after the first reap.
+   scripted phase after the first reap. The follow-on 3 card 3c (claim
+   7786) proves the OS, not the program, owns process lifetime: the
+   `kill <pid|name>` monitor command force-terminates a never-exiting
+   program with the reserved status 137 — no `counter: alive` marker
+   lands after the kill line, the pages return at the reap (exact +5
+   free-count recovery), and a re-exec lands in the freed slot
+   (`tools/verify-live-kill.sh`, with the runner's `--script3` third
+   phase for the post-reap snapshot).
 - The Virtualization.framework VM boots the GPT+FAT image: configuration
   validates, the EFI variable store is created, the VM starts and runs, and
   after boot the guest-written marker file `\BOOTED.TXT` exists on the ESP

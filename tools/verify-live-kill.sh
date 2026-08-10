@@ -206,7 +206,7 @@ done
 echo
 echo "=== result ==="
 if [ "$pass" = "$BOOTS" ]; then
-    echo "verify-live-kill: PASS — the never-exiting COUNTER.BIN was force-terminated by `kill` (status 137), its 5 pages returned, and the freed slot was re-exec'd ($pass/$BOOTS boot(s))."
+    echo "verify-live-kill: PASS — the never-exiting COUNTER.BIN was force-terminated by the kill command (status 137), its 5 pages returned, and the freed slot was re-exec'd ($pass/$BOOTS boot(s))."
     echo "PASS: $pass/$BOOTS" >> "$REPORT"
     exit 0
 fi

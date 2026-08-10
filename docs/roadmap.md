@@ -403,6 +403,22 @@ gates pass; tagged `m1.5-interactive-monitor`** (see
   with both live reports `pool_full` — the capacity gate with one spare
   slot; the full shared-seam live sweep is green against the second
   program.
+- **Kill — the kernel owns process lifetime — is DONE 2026-08-10 (claim
+  7786, milestone-four follow-on 3, card 3c)** — claim 4613 proved a
+  process can REFUSE to exit (COUNTER.BIN loops forever) but nothing
+  could END it; the new `kill <pid|name>` monitor command (registry
+  30→31) arms the target's TCB (`scheduler.request_kill`) and the ring
+  converts its NEXT selection into the existing exit path with the
+  reserved status 137 (no syscall, ADR 0007 frozen; the switching core
+  is untouched). The killed process flows through the REAL lifecycle —
+  exit → zombie → idle-reap → page return (`procs` shows
+  `state=exited task=reaped exit=137`) — and the class-B gate
+  `tools/verify-live-kill.sh` PASS 1/1 on VZ: NO `counter: alive` marker
+  lands after the `kill:` line (only one task runs at a time, so the
+  killed task never executes again), the `pages` free count recovers by
+  EXACTLY 5 at the reap, and a phase-3 re-exec lands in the freed slot
+  (the runner gains the `--script3`/`--script3-after` third phase); the
+  full 12-gate shared-seam live sweep is green.
 - Eventually: a network stack — only when the ones below it are
   demonstrably working.
 
