@@ -49,6 +49,7 @@ const timer = @import("timer.zig"); // claim 7948: ARM generic timer (CNTP)
 const scheduler = @import("scheduler.zig"); // claim 5275: tick-driven round-robin tasks
 const userspace = @import("userspace.zig"); // claim 8215: first EL0t task + SVC boundary
 const syscall = @import("syscall.zig"); // claim 3594: fixed syscall ABI + runtime dispatch table
+const exec = @import("exec.zig"); // milestone-three card 6: ESP exec — owns the shared rebuild_user_root (claims 2665/3693)
 const virtio_custom = @import("virtio_custom.zig"); // claim 0828: custom-virtio spike driver (DID 0x1082)
 const HandoffV2 = handoff.HandoffV2;
 
@@ -593,35 +594,15 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
     // now that the CSPRNG is seeded with REAL entropy, rebuild the root
     // with a randomized stack placement so the static payload — not just
     // exec'd programs (claim 2665) — runs with per-boot stack ASLR.
-    // Rebuilding POST-install is proven safe by the exec path (claim 6783:
-    // the kernel stays identity-mapped, so @intFromPtr is still physical).
-    // The .userbss witness/stack offsets are base-relative, so only the
-    // base changes; scheduler.register_user picks the new base up through
-    // userspace.bss_user_va. An unseeded (fallback) boot skips the rebuild
-    // and keeps the fixed stack — behavior unchanged there.
+    // exec.rebuild_user_root is the single shared sequence (randomize →
+    // map → clean → re-arm; see claims 6783/2665 for why it works
+    // post-install). stack_len is the FULL .userbss section length (the
+    // timer-preemption witness sits just past the 8 KiB stack, and its VA
+    // is base-relative, so the rebuilt root must map it too). An unseeded
+    // (fallback) boot skips the rebuild and keeps the fixed stack —
+    // behavior unchanged there.
     if (csprng.seeded()) {
-        const aslr_stack_va = csprng.random_stack_va();
-        userspace.set_stack_va(aslr_stack_va);
-        // stack_len is the FULL .userbss section length (the timer-
-        // preemption witness sits just past the 8 KiB stack), exactly what
-        // build_identity_map's initial root maps — the witness VA is
-        // base-relative, so the rebuild must cover the same section.
-        if (mmu.build_user_root(
-            userspace.text_va,
-            user_text.base,
-            user_text.len,
-            aslr_stack_va,
-            scheduler.user_stack_phys(),
-            user_stack.len,
-        )) {
-            // The fresh clone tables are dirty in the D-cache; clean the
-            // whole carve-out before the scheduler's first TTBR0 switch
-            // (the walker must see the real tables), exactly like exec.
-            mmu.clean_table_storage();
-            mmu.clean_dcache_range(user_text.base, user_text.len);
-            // The user stack aperture moved: re-arm the syscall/uaccess
-            // regions so sys_write bounds follow the randomized base.
-            syscall.set_user_regions(userspace.text_va_region(), userspace.stack_va_region());
+        if (exec.rebuild_user_root(user_text.base, user_text.len, user_stack.len)) |aslr_stack_va| {
             uart_puts("aslr: boot user stack=");
             uart_hex(aslr_stack_va);
             uart_puts("\n");

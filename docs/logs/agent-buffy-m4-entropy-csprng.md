@@ -127,3 +127,19 @@
   fresh follow-on PR (only the new commit, since `main` already contains
   `f905ac4`). Full class A rerun green; live gates + boot-payload
   regressions all green (see Verification above).
+
+- **Refactor — single `rebuild_user_root`** (2026-08-10, same PR): the
+  user-root rebuild sequence (randomize stack VA → `set_stack_va` →
+  `mmu.build_user_root` → `clean_table_storage` + `clean_dcache_range` →
+  re-arm `syscall.set_user_regions`) was duplicated between the exec path
+  (claim 2665) and the boot-time ASLR rebuild (claim 3693). Extracted as
+  `exec.rebuild_user_root(text_phys, text_len, stack_len) ?u64` — the one
+  shared place; both callers keep their own `stack_len` (exec: task stack
+  size; boot: full `.userbss` so the witness stays mapped). main.zig's
+  boot block now just gates on `csprng.seeded()`, calls the helper, and
+  logs/falls back. One behavior nuance preserved exactly: exec's
+  D-cache clean now covers `content_len` (was the whole 4096 page) —
+  sufficient, since EL0 instruction bytes live within the content.
+  Verified: class A all green; live-entropy 2/2 (different random hex +
+  exec stack + boot stack), live-addrspaces 1/1 (randomized stack in
+  band), boot-payload regressions userspace/svc/uaccess 1/1.
