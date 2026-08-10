@@ -239,25 +239,14 @@ disk itself). **The milestone is closed 2026-08-09: all 7 M1.5 hard
 gates pass; tagged `m1.5-interactive-monitor`** (see
 [`docs/status.md`](status.md)).
 
-## Later milestones (sketches only, not commitments)
+## Milestone three — allocator, interrupts, tasks (implemented through the first tasks card)
 
-- ~~**M1.5 close-out: milestone tag (all hard gates now pass).**~~ **DONE
-  2026-08-09 (tag `m1.5-interactive-monitor`)** — the transport layer is
-  **done**: post-MMU TX (claim 1517: T0SZ=16 + TLBI at the switch),
-  **live RX** (claim 6684: the polled virtio receive queue delivers host
-  keystrokes end to end — `verify-live-transcript.sh` asserts the live
-  `dipshit>` transcript in `vm-serial.log`), the **live reboot/shutdown
-  observation** (claim 0527: `verify-live-reboot.sh` — `reboot` resets
-  the machine, `shutdown` powers it off, 4/4 boots; `ResetSystem`
-  unit-proven in claim 0011), and the **filesystem gate** (claim 3475:
-  `ls`/`cat`/`write` persist through reboot via the pre-exit ESP snapshot
-  + NVRAM-persisted writes, `verify-live-fs.sh`, 1/1 pair — the last
-  previously-deferred hard gate) **upgraded to a real FAT32 storage
-  driver** (claim 6420: the ESP's FAT volume is mounted + written through
-  a virtio-blk transport; files persist on the disk; NVRAM is no longer
-  the persistence medium). **All 7 hard gates pass; milestone closed.**
-  The next milestone is a physical page allocator over the captured EFI
-  map (canonical ordering: `docs/status.md`).
+> The milestone-three plan, in canonical order (mirroring
+> `docs/status.md`'s "What comes immediately afterward"): physical
+> allocator → exception vectors → GIC + timer → kernel tasks → userspace.
+> Every card through the first tasks card is **done**; **userspace is the
+> next milestone-three card**.
+
 - ~~A physical page allocator over the captured EFI map.~~ **First step
   DONE 2026-08-08 (claim 3972):** first-fit bitmap allocator over the
   captured map's ConventionalMemory (fixed 128 KiB BSS bitmap over the
@@ -292,6 +281,26 @@ gates pass; tagged `m1.5-interactive-monitor`** (see
   context switches + a responsive shell), and the strict live-timer gate
   still passes under preemption. No userspace, no MMU changes — a later
   card adds userspace.
+
+## Later milestones (sketches only, not commitments)
+
+- ~~**M1.5 close-out: milestone tag (all hard gates now pass).**~~ **DONE
+  2026-08-09 (tag `m1.5-interactive-monitor`)** — the transport layer is
+  **done**: post-MMU TX (claim 1517: T0SZ=16 + TLBI at the switch),
+  **live RX** (claim 6684: the polled virtio receive queue delivers host
+  keystrokes end to end — `verify-live-transcript.sh` asserts the live
+  `dipshit>` transcript in `vm-serial.log`), the **live reboot/shutdown
+  observation** (claim 0527: `verify-live-reboot.sh` — `reboot` resets
+  the machine, `shutdown` powers it off, 4/4 boots; `ResetSystem`
+  unit-proven in claim 0011), and the **filesystem gate** (claim 3475:
+  `ls`/`cat`/`write` persist through reboot via the pre-exit ESP snapshot
+  + NVRAM-persisted writes, `verify-live-fs.sh`, 1/1 pair — the last
+  previously-deferred hard gate) **upgraded to a real FAT32 storage
+  driver** (claim 6420: the ESP's FAT volume is mounted + written through
+  a virtio-blk transport; files persist on the disk; NVRAM is no longer
+  the persistence medium). **All 7 hard gates pass; milestone closed.**
+  *(The milestone-three cards continue in the Milestone three section
+  above; canonical ordering: `docs/status.md`.)*
 - A guest-side filesystem — **the ESP FAT32 driver landed 2026-08-09
   (claim 6420):** `kernel/src/fat.zig` (GPT + FAT32 mount/list/read/write
   with injected sector I/O) over `kernel/src/virtio_blk.zig` (the
