@@ -28,6 +28,7 @@ const handoff = @import("handoff.zig");
 const memmap = @import("memmap.zig");
 const mmu = @import("mmu.zig"); // claim 5804: per-task TTBR0 roots + user-root inventory
 const pci = @import("pci.zig");
+const process = @import("process.zig"); // milestone four (claim 3848): the process registry behind `procs`
 const scheduler = @import("scheduler.zig"); // claim 5275: tick-driven round-robin tasks
 const syscall = @import("syscall.zig"); // claim 3594: syscall table + counters
 const timer = @import("timer.zig");
@@ -206,7 +207,7 @@ pub const Command = struct {
 
 /// Number of commands. The registry is built at runtime (not a const
 /// table): see `ensure_registry`.
-pub const registry_count: usize = 28;
+pub const registry_count: usize = 29;
 
 /// Command registry, built at runtime into BSS. A `const` table would hold
 /// link-time absolute addresses for BOTH the string slices and the handler
@@ -238,6 +239,7 @@ fn ensure_registry() []const Command {
             .{ .name = "mem", .help = "summarize the EFI memory map", .usage = "mem", .handler = cmd_mem },
             .{ .name = "pages", .help = "physical page allocator pool", .usage = "pages [selftest]", .max_args = 1, .handler = cmd_pages },
             .{ .name = "pci", .help = "enumerate PCI devices on the bus", .usage = "pci", .handler = cmd_pci },
+            .{ .name = "procs", .help = "process registry: image, address space, lifecycle, exit status", .usage = "procs", .handler = cmd_procs },
             .{ .name = "random", .help = "print n random bytes from the seeded CSPRNG (hex)", .usage = "random [n]", .max_args = 1, .handler = cmd_random },
             .{ .name = "reboot", .help = "restart the machine", .usage = "reboot", .handler = cmd_reboot },
             .{ .name = "repeat", .help = "repeat text, safely bounded", .usage = "repeat <count> <text...>", .min_args = 1, .handler = cmd_repeat },
@@ -952,6 +954,51 @@ fn cmd_tasks(m: *Monitor, args: []const []const u8) ExecError {
         m.console.print_u64(info.advances);
         m.console.puts(" state=");
         m.console.puts(scheduler.state_name(info.state));
+        m.console.puts("\n");
+    }
+    return .none;
+}
+
+// ---------------------------------------------------------------------------
+// Process command (claim 3848)
+// ---------------------------------------------------------------------------
+
+/// Report the process table (claim 3848): one line per non-free process
+/// descriptor — id, name, lifecycle state, the bound executor task ("reaped"
+/// once exited), the user stack VA, and the exit status (only for exited
+/// processes). The process owns the PROGRAM (image + address space + state
+/// + exit status) above the task pool: after the idle task reaps the
+/// executor slot, `procs` still shows the program's exit status — the
+/// information the task lifecycle alone throws away. Deterministic and
+/// grep-able.
+fn cmd_procs(m: *Monitor, args: []const []const u8) ExecError {
+    _ = args;
+    m.console.puts("procs: count=");
+    m.console.print_u64(@intCast(process.count()));
+    m.console.puts("\n");
+    var id: usize = 0;
+    while (id < process.max_processes) : (id += 1) {
+        const info = process.info(id) orelse continue;
+        m.console.puts("procs: id=");
+        m.console.print_u64(@intCast(info.id));
+        m.console.puts(" name=");
+        m.console.puts(info.name);
+        m.console.puts(" state=");
+        m.console.puts(process.state_name(info.state));
+        m.console.puts(" task=");
+        if (info.task_id) |task_id| {
+            m.console.print_u64(@intCast(task_id));
+        } else {
+            m.console.puts(if (info.state == .exited) "reaped" else "-");
+        }
+        m.console.puts(" stack=");
+        m.console.print_hex(info.stack_va);
+        m.console.puts(" exit=");
+        if (info.state == .exited) {
+            m.console.print_u64(info.exit_status);
+        } else {
+            m.console.puts("-");
+        }
         m.console.puts("\n");
     }
     return .none;
@@ -1838,6 +1885,32 @@ test "monitor: tasks is registered and reports the deterministic host state" {
             "  worker   saves=0 resumes=0 advances=0 state=ready\n" ++
             "  user-el0 saves=0 resumes=0 advances=0 state=ready\n" ++
             "  idle     saves=0 resumes=0 advances=0 state=ready\n",
+        env.mock.contents(),
+    );
+}
+
+test "monitor: procs reports the process table with lifecycle and exit status" {
+    var env = TestEnv.init();
+    var mon = env.monitor();
+    try std.testing.expect(lookup("procs") != null);
+    try std.testing.expectEqualStrings("process registry: image, address space, lifecycle, exit status", lookup("procs").?.help);
+    // Seed the registry deterministically: an EXITED boot payload (status 7,
+    // executor reaped) and a RUNNING exec'd program bound to task 2 — the
+    // exact two-process table a live boot shows right after `exec`.
+    process.init();
+    const p0 = process.create("user-el0", .{ .entry_va = 0x400000, .content_len = 0x100 }, .{ .stack_va = 0x80000000, .stack_len = 8192 }).?;
+    _ = process.bind(p0, 2);
+    process.on_task_exit(2, 7);
+    _ = process.take_exit_report();
+    const p1 = process.create("USER.BIN", .{ .entry_va = 0x400000, .content_len = 0xea }, .{ .stack_va = 0x1a400000, .stack_len = 8192 }).?;
+    _ = process.bind(p1, 2);
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"procs"}));
+    // The exited process keeps its status past the executor's reap; the
+    // running one shows its bound task and stack VA.
+    try std.testing.expectEqualStrings(
+        "procs: count=2\n" ++
+            "procs: id=0 name=user-el0 state=exited task=reaped stack=0x0000000080000000 exit=7\n" ++
+            "procs: id=1 name=USER.BIN state=running task=2 stack=0x000000001a400000 exit=-\n",
         env.mock.contents(),
     );
 }

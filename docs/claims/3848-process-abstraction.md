@@ -18,8 +18,10 @@
 - **Depends on:** milestone-three close-out (tag `m3-userspace`), claims
   6729 (task lifecycle), 6783 (ESP exec), 5804 (per-task address spaces),
   8215 (boot static EL0 payload), 3594/6120 (syscall ABI + uaccess).
-- **Status:** 🔄 in progress 2026-08-10 — plan written first; Stage A
-  (process object + registry + exec/scheduler integration) landing.
+- **Status:** 🔄 in progress 2026-08-10 — Stages A + B landed: the
+  process object + registry + exec/scheduler integration (Stage A) and
+  the `procs` monitor command + live gate (Stage B); Stage C (docs
+  reconciliation + claim flip) remains.
 
 ## Notes
 
@@ -46,10 +48,12 @@ task exit report. Scheduler → process is a one-way import (no cycle).
   `tools/verify-unit-tests.sh`, plus exec/scheduler/monitor updates),
   transcript byte-identical, build/image/inspect, swift build, context,
   coordination ×2, mmu-debt.
-- **Class B:** new `tools/verify-live-procs.sh` on VZ (the process table
-  shows the exec'd program `running` with its image/stack; the static
-  payload's process `exited status=7`; the process exit report
-  `procs user-exec exited status=43`; the task lifecycle lines unchanged;
-  shell responsive) + shared-seam regressions (exec/tasks/lifecycle/
-  addrspaces/userspace/entropy/gfs/fs).
-- **Evidence:** `artifacts/live-procs-*` (Stage B).
+- **Class B:** new `tools/verify-live-procs.sh` **PASS 1/1 on VZ** — the
+  live table shows the exec'd program `name=USER.BIN state=running` (with
+  its ASLR stack VA) alongside the boot payload's process
+  `name=user-el0 state=exited task=reaped exit=7`, the process exit
+  report `procs USER.BIN exited status=43` prints, the task lifecycle
+  lines are unchanged, and the shell stays responsive; shared-seam
+  regressions (exec/tasks/lifecycle/addrspaces/userspace) green.
+- **Evidence:** `artifacts/live-procs-*`, `artifacts/live-exec-*`
+  (evidence `artifacts/live-procs-serial-01.log` shows the full table).

@@ -63,3 +63,33 @@
   `procs USER.BIN exited status=43` (the status surviving the task reap)
   alongside the unchanged task lifecycle; boot-path regressions
   tasks/userspace/lifecycle/svc all 1/1.
+
+- **Implemented — Stage B (the `procs` command + the live gate)**
+  (2026-08-10): `kernel/src/monitor.zig` — the `procs` registry row
+  (help "process registry: image, address space, lifecycle, exit status")
+  and `cmd_procs`, which prints the process table one line per descriptor:
+  `procs: id=<n> name=<name> state=<s> task=<id|reaped|-> stack=0x…
+  exit=<status|->` (counts decimal, addresses hex — the `tasks`/`addrspaces`
+  style). The exited process reports its status with `task=reaped` (the
+  binding dissolved at exit); created/running show `-`. Registry count
+  28→29 on this branch (card 2's `mount` — also 28→29 — is not merged
+  yet; the merge will reconcile). shell.zig help row + the transcript
+  fixture updated DELIBERATELY (byte-exact single-line perl insertion —
+  the fixture's mixed CRLF/LF preserved). New monitor host test pins the
+  exact two-process table (exited boot payload `exit=7` + running
+  USER.BIN bound to task 2). New class-B gate `tools/verify-live-procs.sh`
+  (registered in gate-inventory + `just verify-vz`).
+
+- **Verification — Stage B** (2026-08-10): class A all green — fmt, unit
+  tests (monitor 167), transcript byte-identical, build/image/inspect,
+  swift build, context, coordination, test-coordination, mmu-debt. Class
+  B on VZ: new `verify-live-procs.sh` **PASS 1/1** — the live table is
+  `procs: id=0 name=user-el0 state=exited task=reaped stack=0x… exit=7`
+  and `procs: id=1 name=USER.BIN state=running task=2 stack=0x… exit=-`
+  (the ASLR-randomized stack), plus the process report `procs USER.BIN
+  exited status=43` and the unchanged task lifecycle; live-exec
+  regression 1/1 (evidence `artifacts/live-procs-*`). Two gate-script
+  bugs fixed en route: `grep -x` on the `exec: loaded` line (it is a
+  partial line) and the `user: hello from the ESP` marker (it carries a
+  `dipshit> ` prompt prefix on the serial line) — both now substring
+  matches like live-exec's proven assertions.
