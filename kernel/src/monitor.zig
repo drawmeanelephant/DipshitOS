@@ -20,6 +20,7 @@ const builtin = @import("builtin");
 const alloc = @import("alloc.zig");
 const console = @import("console.zig");
 const esp = @import("esp.zig");
+const esp_exec = @import("exec.zig"); // claim 6783: load a user program from the ESP and enter it at EL0
 const fat = @import("fat.zig"); // claim 6420: FAT write diagnostics (last failing LBA)
 const exceptions = @import("exceptions.zig");
 const gic = @import("gic.zig");
@@ -201,7 +202,7 @@ pub const Command = struct {
 
 /// Number of commands. The registry is built at runtime (not a const
 /// table): see `ensure_registry`.
-pub const registry_count: usize = 26;
+pub const registry_count: usize = 27;
 
 /// Command registry, built at runtime into BSS. A `const` table would hold
 /// link-time absolute addresses for BOTH the string slices and the handler
@@ -224,6 +225,7 @@ fn ensure_registry() []const Command {
             .{ .name = "clear", .help = "clean up the crime scene", .usage = "clear", .handler = cmd_clear },
             .{ .name = "echo", .help = "repeat your regrettable decisions", .usage = "echo <text...>", .handler = cmd_echo },
             .{ .name = "elephant", .help = "operational mascot diagnostics", .usage = "elephant", .handler = cmd_elephant },
+            .{ .name = "exec", .help = "load a user program from the ESP and enter it at EL0", .usage = "exec [<file>]", .max_args = 1, .handler = cmd_exec },
             .{ .name = "fault", .help = "trigger a synchronous exception (diagnostic)", .usage = "fault", .handler = cmd_fault },
             .{ .name = "handoff", .help = "display boot-to-kernel ABI data", .usage = "handoff", .handler = cmd_handoff },
             .{ .name = "help", .help = "list commands and their help text", .usage = "help [command]", .max_args = 1, .handler = cmd_help },
@@ -969,6 +971,81 @@ fn cmd_spawn(m: *Monitor, args: []const []const u8) ExecError {
         m.console.puts("spawn: pool full or demo already running\n");
     }
     return .none;
+}
+
+// ---------------------------------------------------------------------------
+// ESP exec command (claim 6783 — milestone-three card 6)
+// ---------------------------------------------------------------------------
+
+/// Load a user program from the ESP and enter it at EL0. `exec [<file>]`
+/// defaults to `USER.BIN` (the image builder embeds it at the volume root;
+/// it can also be written at runtime through the FAT `write` path). The
+/// program must be a DSK1 flat image; the kernel reads it through the
+/// claim-6420 FAT path, rebuilds the EL0 user root around its page, and
+/// spawns it as an EL0t task. Every failure mode is reported honestly.
+fn cmd_exec(m: *Monitor, args: []const []const u8) ExecError {
+    const name = if (args.len == 1) args[0] else esp_exec.default_name;
+    switch (esp_exec.exec_file(name)) {
+        .ok => {
+            const info = esp_exec.loaded().?;
+            m.console.puts("exec: loaded ");
+            m.console.puts(info.name);
+            m.console.puts(" size=");
+            m.console.print_hex(@intCast(info.content_len));
+            m.console.puts(" entry=");
+            m.console.print_hex(info.entry_va);
+            const head = esp_exec.head();
+            var head_value: u64 = 0;
+            for (head, 0..) |byte, i| head_value |= @as(u64, byte) << @intCast(56 - i * 8);
+            m.console.puts(" head=");
+            m.console.print_hex(head_value);
+            m.console.puts("\n");
+            return .none;
+        },
+        .no_disk => {
+            m.console.print_line("exec: no disk (ESP FAT volume unavailable)");
+            return .not_implemented;
+        },
+        .not_found => {
+            m.console.puts("exec: ");
+            m.console.puts(name);
+            m.console.print_line(": not found on the ESP (must be a DSK1 flat image)");
+            return .invalid_argument;
+        },
+        .too_large => {
+            m.console.puts("exec: ");
+            m.console.puts(name);
+            m.console.puts(": image larger than the ");
+            m.console.print_hex(esp_exec.exec_program_max);
+            m.console.print_line("-byte load buffer");
+            return .invalid_argument;
+        },
+        .bad_magic => {
+            m.console.puts("exec: ");
+            m.console.puts(name);
+            m.console.print_line(": not a DSK1 program image (bad magic)");
+            return .invalid_argument;
+        },
+        .bad_entry => {
+            m.console.puts("exec: ");
+            m.console.puts(name);
+            m.console.print_line(": bad entry offset (outside the loaded content)");
+            return .invalid_argument;
+        },
+        .user_busy => {
+            m.console.puts("exec: a user task is still running under the user root ");
+            m.console.print_line("(wait for it to exit and be reaped, then retry)");
+            return .none;
+        },
+        .pool_full => {
+            m.console.print_line("exec: no free scheduler pool slot");
+            return .machine_failed;
+        },
+        .table_full => {
+            m.console.print_line("exec: page-table carve-out exhausted (too many user-root rebuilds)");
+            return .machine_failed;
+        },
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1840,4 +1917,17 @@ test "monitor: write joins arguments and honestly reports no disk in a test proc
     // Empty content is allowed (a zero-length file); still refused honestly.
     try std.testing.expectEqual(ExecError.not_implemented, exec(&mon, &.{ "write", "n.txt" }));
     try std.testing.expect(std.mem.indexOf(u8, env.mock.contents(), "content too long") == null);
+}
+
+test "monitor: exec is registered and refuses honestly without a disk" {
+    esp.reset();
+    var env = TestEnv.init();
+    var mon = env.monitor();
+    try std.testing.expect(lookup("exec") != null);
+    try std.testing.expectEqualStrings("load a user program from the ESP and enter it at EL0", lookup("exec").?.help);
+    // No FAT volume in a host test process: refused honestly, never faked.
+    // (The full load+spawn path is covered by exec.zig's own tests, which
+    // mount the in-memory FAT fixture and retire the static user task.)
+    try std.testing.expectEqual(ExecError.not_implemented, exec(&mon, &.{"exec"}));
+    try std.testing.expectEqualStrings("exec: no disk (ESP FAT volume unavailable)\n", env.mock.contents());
 }

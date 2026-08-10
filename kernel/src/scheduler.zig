@@ -259,6 +259,38 @@ pub fn register_worker(entry: u64) ?usize {
 /// under the task's own TTBR0 user root, with a separate SP_EL0 user stack
 /// and the timer-preemption witness at its user VA (the payload dereferences
 /// it through x9 at EL0).
+/// Claim 6783: register the ESP-loaded user program (exec) as an EL0t task
+/// on the shared EL1 exception stack. The caller (`exec.zig`) has already
+/// rebuilt the user root around the loaded page, so `entry_va` and the
+/// stack are USER VAs and the root is the current user root
+/// (`mmu.user_root_phys()`). One user program at a time is enforced by
+/// `user_root_in_use` — the exec gate. The task reuses the static user
+/// stack pages as SP_EL0 (the previous user task is gone by the gate).
+pub fn register_exec_user(entry_va: u64) ?usize {
+    const sp_el0 = userspace.stack_va + user_stack.len;
+    return spawn("user-exec", entry_va, spsr_el0t_irqs, &user_kernel_stack, mmu.user_root_phys(), sp_el0);
+}
+
+/// Claim 6783: true when a live (ready/running) task still runs under the
+/// current user root. Exec refuses while that is the case — rebuilding the
+/// root would strand the running program (one user program at a time). A
+/// zombie is not live (it never runs again) and may be reaped, so exec can
+/// reuse its slot.
+pub fn user_root_in_use() bool {
+    const root = mmu.user_root_phys();
+    for (tasks[0..max_tasks]) |task| {
+        if ((task.state == .ready or task.state == .running) and task.ttbr0 == root) return true;
+    }
+    return false;
+}
+
+/// Physical address of the static user stack pages (claim 6783: exec maps
+/// them at `userspace.stack_va` in the rebuilt user root). Identity on host
+/// tests.
+pub fn user_stack_phys() u64 {
+    return mmu.to_phys(@intFromPtr(&user_stack));
+}
+
 pub fn register_user(entry: u64, image_base: u64) ?usize {
     // Claim 5804: this runs POST-jump, so the incoming `entry` and these
     // `@intFromPtr` values are KVA addresses — the user-VA conversion

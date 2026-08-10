@@ -40,7 +40,7 @@ jobs:
       # --- Class A: portable/build gates (see docs/gate-inventory.md) ---
 
       - name: Check Zig formatting (class A)
-        run: zig fmt --check boot/src/*.zig kernel/src/*.zig build.zig
+        run: zig fmt --check boot/src/*.zig kernel/src/*.zig user/src/*.zig build.zig
 
       - name: Test kernel monitor modules (class A)
         run: bash tools/verify-unit-tests.sh

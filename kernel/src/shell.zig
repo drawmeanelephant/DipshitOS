@@ -200,6 +200,7 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "  clear       clean up the crime scene\n" ++
         "  echo        repeat your regrettable decisions\n" ++
         "  elephant    operational mascot diagnostics\n" ++
+        "  exec        load a user program from the ESP and enter it at EL0\n" ++
         "  fault       trigger a synchronous exception (diagnostic)\n" ++
         "  handoff     display boot-to-kernel ABI data\n" ++
         "  help        list commands and their help text\n" ++
