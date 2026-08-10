@@ -2,13 +2,15 @@
 #
 # make-image.sh -- build the bootable FAT32+GPT boot disk image for DipshitOS.
 #
-# Usage: make-image.sh [EFI_BINARY] [IMAGE_PATH] [KERNEL_BINARY] [USER_BINARY]
+# Usage: make-image.sh [EFI_BINARY] [IMAGE_PATH] [KERNEL_BINARY] [USER_BINARY] [COUNTER_BINARY]
 # Defaults: zig-out/bin/BOOTAA64.EFI   artifacts/disk.img
 #           zig-out/bin/KERNEL.BIN     zig-out/bin/USER.BIN
+#           zig-out/bin/COUNTER.BIN
 #
-# USER.BIN (the milestone-three ESP user program, claim 6783) is embedded at
-# the volume root when present; the kernel's `exec` monitor command loads it
-# from the ESP and enters it at EL0.
+# USER.BIN (the milestone-three ESP user program, claim 6783) and COUNTER.BIN
+# (the milestone-four follow-on 2 never-exiting user program, claim 4613) are
+# embedded at the volume root when present; the kernel's `exec` monitor
+# command loads either by name from the ESP and enters it at EL0.
 #
 # Uses image/mkfat32.py (pure Python 3, stdlib only), so it needs no root,
 # no mtools, and no loopback devices. Safe to rerun: the image is rebuilt
@@ -24,6 +26,7 @@ EFI_BIN="${1:-$ROOT_DIR/zig-out/bin/BOOTAA64.EFI}"
 IMAGE="${2:-$ROOT_DIR/artifacts/disk.img}"
 KERNEL_BIN="${3:-$ROOT_DIR/zig-out/bin/KERNEL.BIN}"
 USER_BIN="${4:-$ROOT_DIR/zig-out/bin/USER.BIN}"
+COUNTER_BIN="${5:-$ROOT_DIR/zig-out/bin/COUNTER.BIN}"
 SIZE_MB="${DIPSHITOS_IMAGE_SIZE_MB:-128}"
 
 cd "$ROOT_DIR"
@@ -52,6 +55,13 @@ if [ -f "$USER_BIN" ]; then
     fi
     USER_ARGS+=("$USER_BIN")
 fi
+COUNTER_ARGS=()
+if [ -f "$COUNTER_BIN" ]; then
+    if [ "$(head -c 4 "$COUNTER_BIN")" != "DSK1" ]; then
+        fail "'$COUNTER_BIN' does not start with the 'DSK1' image magic -- run 'zig build' first (it produces zig-out/bin/COUNTER.BIN)."
+    fi
+    COUNTER_ARGS+=("$COUNTER_BIN")
+fi
 
 # 3. Builder script.
 [ -f "$SCRIPT_DIR/mkfat32.py" ] || fail "missing $SCRIPT_DIR/mkfat32.py."
@@ -60,12 +70,17 @@ fi
 mkdir -p "$(dirname "$IMAGE")"
 rm -f "$IMAGE"
 echo "make-image: building FAT32+GPT image '$IMAGE' (${SIZE_MB} MiB)..."
-python3 "$SCRIPT_DIR/mkfat32.py" --size-mb "$SIZE_MB" "$IMAGE" "$EFI_BIN" "$KERNEL_BIN" "${USER_ARGS[@]}" \
+python3 "$SCRIPT_DIR/mkfat32.py" --size-mb "$SIZE_MB" "$IMAGE" "$EFI_BIN" "$KERNEL_BIN" "${USER_ARGS[@]}" "${COUNTER_ARGS[@]}" \
     || fail "image creation failed (see output above)."
 
-# 5. Self-verify by listing the image we just wrote.
+# 5. Self-verify by listing the image we just wrote. The embed is asserted:
+# the ESP must carry KERNEL.BIN, USER.BIN, and COUNTER.BIN (claim 4613).
 echo "make-image: verifying image contents..."
-python3 "$SCRIPT_DIR/mkfat32.py" --list "$IMAGE" \
+LISTING="$(python3 "$SCRIPT_DIR/mkfat32.py" --list "$IMAGE")" \
     || fail "image verification failed."
+printf '%s\n' "$LISTING"
+printf '%s\n' "$LISTING" | grep -q 'KERNEL.BIN' || fail "KERNEL.BIN missing from the image listing"
+printf '%s\n' "$LISTING" | grep -q 'USER.BIN' || fail "USER.BIN missing from the image listing"
+printf '%s\n' "$LISTING" | grep -q 'COUNTER.BIN' || fail "COUNTER.BIN missing from the image listing"
 
 echo "make-image: done."

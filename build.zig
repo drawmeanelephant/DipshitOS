@@ -178,6 +178,35 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_user.step);
 
     // ------------------------------------------------------------------
+    // Guest: second ESP user program (milestone-four follow-on 2, claim
+    // 4613) — the never-exiting COUNTER.BIN. Same freestanding target,
+    // linker script, elf2bin conversion, and ESP embedding as USER.BIN;
+    // the kernel's `exec COUNTER.BIN` monitor command loads it by name.
+    // It loops forever writing a DISTINCT marker (sys_write + sys_yield
+    // only, no sys_exit), so the live long-lived gate can tell the two
+    // programs apart in the serial log while one occupies its pool slot
+    // permanently.
+    // ------------------------------------------------------------------
+    const counter = b.addExecutable(.{
+        .name = "user-counter",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/counter.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    counter.linker_script = b.path("user/linker.ld");
+    const counter_step = b.step("counter", "Build the second ESP user program (zig-out/bin/COUNTER.BIN; class A tooling, no VM)");
+    const counter_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    counter_elf2bin.addFileArg(counter.getEmittedBin());
+    const counter_bin = counter_elf2bin.addOutputFileArg("COUNTER.BIN");
+    counter_elf2bin.has_side_effects = true;
+    counter_elf2bin.stdio = .inherit;
+    counter_step.dependOn(&counter_elf2bin.step);
+    const install_counter = b.addInstallFileWithDir(counter_bin, .bin, "COUNTER.BIN");
+    b.getInstallStep().dependOn(&install_counter.step);
+
+    // ------------------------------------------------------------------
     // Top-level steps. System-command steps are marked as having side
     // effects (and inherit stdio) so they always execute instead of being
     // skipped by the build cache. (No QEMU path: this project targets Apple
@@ -189,6 +218,7 @@ pub fn build(b: *std.Build) void {
     image.addArg("artifacts/disk.img");
     image.addFileArg(kernel_bin); // make-image.sh: [EFI_BIN] [IMAGE] [KERNEL_BIN]
     image.addFileArg(user_bin); // ... [USER_BIN] (claim 6783: ESP user program)
+    image.addFileArg(counter_bin); // ... [COUNTER_BIN] (claim 4613: second, never-exiting user program)
     image.has_side_effects = true;
     image.stdio = .inherit;
     image_step.dependOn(&image.step);
@@ -207,6 +237,7 @@ pub fn build(b: *std.Build) void {
     failure_image.addArg("artifacts/bad-handoff.img");
     failure_image.addFileArg(kernel_bin);
     failure_image.addFileArg(user_bin); // USER.BIN rides the same image builder
+    failure_image.addFileArg(counter_bin); // COUNTER.BIN too (claim 4613)
     failure_image.has_side_effects = true;
     failure_image.stdio = .inherit;
     failure_step.dependOn(&failure_image.step);
