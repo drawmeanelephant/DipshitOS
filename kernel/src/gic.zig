@@ -348,6 +348,99 @@ fn wait_rwp(rbase: u64) void {
 }
 
 // ---------------------------------------------------------------------------
+// Shared-peripheral-interrupt (SPI) window (claim 0828 — the custom virtio
+// device's used-ring notification asserts an unknown SPI; arming the whole
+// window lets the spike report whatever INTID actually fires)
+// ---------------------------------------------------------------------------
+
+/// SPIs start at INTID 32 (0-15 SGIs, 16-31 PPIs).
+pub const spi_min: u32 = 32;
+/// Distributor register word index holding SPI `intid`'s enable/group bit.
+pub fn spi_word(intid: u32) u32 {
+    return intid / 32;
+}
+
+/// GICD_IPRIORITYR word index for `intid` (one byte per interrupt).
+pub fn spi_priority_word(intid: u32) u32 {
+    return intid / 4;
+}
+
+/// GICD_ICFGR word index for `intid` (2 bits per interrupt).
+pub fn spi_icfgr_word(intid: u32) u32 {
+    return intid / 16;
+}
+
+/// GICD_IROUTER byte offset for `intid` (64-bit register per SPI).
+pub fn spi_router_offset(intid: u32) u64 {
+    return 0x6100 + @as(u64, intid) * 8;
+}
+
+/// Poll GICD_CTLR.RWP (bit 3) until the distributor finished processing
+/// register writes. Bounded: a stuck bit must not hang boot.
+fn wait_dist_rwp() void {
+    var spins: usize = 0;
+    while ((mmio.mmio_read32(dist_base + 0x0000) & (1 << 3)) != 0 and spins < 100_000) : (spins += 1) {}
+}
+
+/// Program a window of SPIs for delivery to the boot CPU: Group 1, level
+/// trigger (both ICFGR bits clear), priority 0x80 (below PMR 0xff so it
+/// passes), IROUTER = PE 0, then enabled. GICv3 distributor only (VZ is
+/// v3 — claim 9187); no-op in a host test process.
+pub fn arm_spi_window(first: u32, count: u32) void {
+    if (comptime builtin.cpu.arch != .aarch64) return;
+    if (kind != .v3 or dist_base == 0) return;
+    if (first < spi_min) return;
+    const last = @min(first +| count, 1020); // SPI space is 32..1019
+    var intid = first;
+    while (intid < last) : (intid += 1) {
+        const word = spi_word(intid);
+        const bit: u32 = @as(u32, 1) << @as(u5, @intCast(intid % 32));
+        // Group 1.
+        var igroup = mmio.mmio_read32(dist_base + 0x0080 + word * 4);
+        igroup |= bit;
+        mmio.mmio_write32(dist_base + 0x0080 + word * 4, igroup);
+        // Priority 0x80 (aligned word RMW, like the PPI path).
+        const paddr = dist_base + 0x0400 + spi_priority_word(intid) * 4;
+        const pshift: u5 = @intCast((intid % 4) * 8);
+        var prio = mmio.mmio_read32(paddr);
+        prio &= ~(@as(u32, 0xff) << pshift);
+        prio |= @as(u32, 0x80) << pshift;
+        mmio.mmio_write32(paddr, prio);
+        // ICFGR: level-triggered (clear both field bits; bit 1 is the
+        // trigger bit, bit 0 is RES0 — the claim-9187 lesson).
+        const iaddr = dist_base + 0x0c00 + spi_icfgr_word(intid) * 4;
+        const ishift: u5 = @intCast((intid % 16) * 2);
+        var icfg = mmio.mmio_read32(iaddr);
+        icfg &= ~(@as(u32, 0b11) << ishift);
+        mmio.mmio_write32(iaddr, icfg);
+        // Route to PE 0 (two 32-bit halves; IROUTER is 64-bit).
+        const raddr = dist_base + spi_router_offset(intid);
+        mmio.mmio_write32(raddr, 0);
+        mmio.mmio_write32(raddr + 4, 0);
+        // Enable.
+        mmio.mmio_write32(dist_base + 0x0100 + word * 4, bit);
+    }
+    wait_dist_rwp();
+}
+
+/// Disable a window of SPIs (GICD_ICENABLER). Claim 0828: after the spike
+/// experiment the window is disarmed so the shell runs without interrupt
+/// noise (a level-stuck device IRQ cannot storm the kernel).
+pub fn disarm_spi_window(first: u32, count: u32) void {
+    if (comptime builtin.cpu.arch != .aarch64) return;
+    if (kind != .v3 or dist_base == 0) return;
+    if (first < spi_min) return;
+    const last = @min(first +| count, 1020);
+    var intid = first;
+    while (intid < last) : (intid += 1) {
+        const word = spi_word(intid);
+        const bit: u32 = @as(u32, 1) << @as(u5, @intCast(intid % 32));
+        mmio.mmio_write32(dist_base + 0x0180 + word * 4, bit);
+    }
+    wait_dist_rwp();
+}
+
+// ---------------------------------------------------------------------------
 // IRQ-handler primitives (called by the kernel's irq_dispatch, in IRQ
 // context — never touch the console here)
 // ---------------------------------------------------------------------------
@@ -556,4 +649,19 @@ test "gic: private interrupt trigger fields use ICFGR bit one" {
     // bit 29 and leaves the RES0 bit 28 clear.
     try std.testing.expectEqual(@as(u32, 0xcfffffff), private_icfgr(0xffffffff, 30, false));
     try std.testing.expectEqual(@as(u32, 0xefffffff), private_icfgr(0xffffffff, 30, true));
+}
+
+test "gic: SPI window register offsets match the distributor layout" {
+    // SPI 69 (the Linux-style virtio SPI): enable word 2, priority word
+    // 17, ICFGR word 4, IROUTER at 0x6100 + 69*8. SPIs start at 32, so
+    // INTID 32 is word 1 (word 0 covers SGIs + PPIs 0..31).
+    try std.testing.expectEqual(@as(u32, 2), spi_word(69));
+    try std.testing.expectEqual(@as(u32, 17), spi_priority_word(69));
+    try std.testing.expectEqual(@as(u32, 4), spi_icfgr_word(69));
+    try std.testing.expectEqual(@as(u64, 0x6328), spi_router_offset(69));
+    try std.testing.expectEqual(@as(u32, 1), spi_word(32));
+    try std.testing.expectEqual(@as(u32, 2), spi_word(95));
+    try std.testing.expectEqual(@as(u32, 2), spi_icfgr_word(32));
+    try std.testing.expectEqual(@as(u32, 3), spi_icfgr_word(48));
+    try std.testing.expectEqual(@as(u32, spi_min), 32);
 }
