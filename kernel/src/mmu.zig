@@ -48,6 +48,9 @@ pub fn table_root() u64 {
 /// (evidence.zig) prints this same value so a -Dfw-mmu-capture build
 /// reports the true planned TCR.
 pub const plan_t0sz: u64 = if (build_options.t0sz25) 25 else 16;
+/// The builder always maps this low physical range identity. Higher mappings
+/// are explicit device/user windows and are not a general syscall aperture.
+pub const identity_blanket_end: u64 = 4 * 1024 * 1024 * 1024;
 
 /// Clean the D-cache over [start, start+len) to the point of coherence so a
 /// subsequent translation walk (which may read memory directly, bypassing a
@@ -123,7 +126,7 @@ pub fn build_identity_map(
     // present as the observed claim-0009 ladder (M2_MAPD! then nothing).
     // Bounded: 4 GiB at 2 MiB = 2048 blocks = 4 L2 tables + L1 + root
     // (~24 KiB of the 512 KiB carve-out).
-    const blanket_end = 4 * 1024 * 1024 * 1024;
+    const blanket_end = identity_blanket_end;
     if (!map_low_identity(blanket_end, map)) return false;
 
     // Regions above the blanket (none observed on VZ) still get mapped.

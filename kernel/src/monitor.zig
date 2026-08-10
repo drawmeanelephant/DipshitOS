@@ -27,6 +27,7 @@ const handoff = @import("handoff.zig");
 const memmap = @import("memmap.zig");
 const pci = @import("pci.zig");
 const scheduler = @import("scheduler.zig"); // claim 5275: tick-driven round-robin tasks
+const syscall = @import("syscall.zig"); // claim 3594: syscall table + counters
 const timer = @import("timer.zig");
 
 // ---------------------------------------------------------------------------
@@ -197,7 +198,7 @@ pub const Command = struct {
 
 /// Number of commands. The registry is built at runtime (not a const
 /// table): see `ensure_registry`.
-pub const registry_count: usize = 22;
+pub const registry_count: usize = 23;
 
 /// Command registry, built at runtime into BSS. A `const` table would hold
 /// link-time absolute addresses for BOTH the string slices and the handler
@@ -230,6 +231,7 @@ fn ensure_registry() []const Command {
             .{ .name = "reboot", .help = "restart the machine", .usage = "reboot", .handler = cmd_reboot },
             .{ .name = "repeat", .help = "repeat text, safely bounded", .usage = "repeat <count> <text...>", .min_args = 1, .handler = cmd_repeat },
             .{ .name = "shutdown", .help = "request power-off", .usage = "shutdown", .handler = cmd_shutdown },
+            .{ .name = "syscalls", .help = "numbered syscall table and counters", .usage = "syscalls", .handler = cmd_syscalls },
             .{ .name = "tasks", .help = "tick-driven task scheduler status", .usage = "tasks", .handler = cmd_tasks },
             .{ .name = "timer", .help = "interrupt controller + timer status", .usage = "timer", .handler = cmd_timer },
             .{ .name = "uname", .help = "compact system identity", .usage = "uname", .handler = cmd_uname },
@@ -931,6 +933,16 @@ fn cmd_tasks(m: *Monitor, args: []const []const u8) ExecError {
 }
 
 // ---------------------------------------------------------------------------
+// Syscall ABI command (claim 3594)
+// ---------------------------------------------------------------------------
+
+fn cmd_syscalls(m: *Monitor, args: []const []const u8) ExecError {
+    _ = args;
+    syscall.report(&m.console);
+    return .none;
+}
+
+// ---------------------------------------------------------------------------
 // PCI enumeration command (macOS 27 custom-virtio spike, audit step 3)
 // ---------------------------------------------------------------------------
 
@@ -1164,6 +1176,8 @@ const TestEnv = struct {
         );
     }
 };
+
+fn test_syscall_writer(_: []const u8) void {}
 
 test "monitor: command lookup" {
     try std.testing.expect(lookup("echo") != null);
@@ -1537,6 +1551,23 @@ test "monitor: tasks is registered and reports the deterministic host state" {
             "  shell    saves=0 resumes=0 advances=0\n" ++
             "  worker   saves=0 resumes=0 advances=0\n" ++
             "  user-el0 saves=0 resumes=0 advances=0\n",
+        env.mock.contents(),
+    );
+}
+
+test "monitor: syscalls is registered and reports deterministic rows" {
+    var env = TestEnv.init();
+    var mon = env.monitor();
+    syscall.init(test_syscall_writer);
+    try std.testing.expect(lookup("syscalls") != null);
+    try std.testing.expectEqualStrings("numbered syscall table and counters", lookup("syscalls").?.help);
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"syscalls"}));
+    try std.testing.expectEqualStrings(
+        "syscalls: slots=64 implemented=4\n" ++
+            "  0 sys_ping calls=0\n" ++
+            "  1 sys_write calls=0\n" ++
+            "  2 sys_yield calls=0\n" ++
+            "  3 sys_exit calls=0\n",
         env.mock.contents(),
     );
 }

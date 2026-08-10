@@ -78,6 +78,9 @@ const Task = struct {
     /// Task-side progress counter (the worker bumps it; `tasks` reports).
     advances: u64 = 0,
     registered: bool = false,
+    runnable: bool = false,
+    terminated: bool = false,
+    exit_status: u64 = 0,
 };
 
 var tasks: [max_tasks]Task = .{ .{}, .{}, .{} };
@@ -85,6 +88,8 @@ var task_count: usize = 0;
 var current: usize = 0;
 var enabled_flag: bool = false;
 var switches: u64 = 0;
+var cooperative_yields: u64 = 0;
+var exits: u64 = 0;
 
 /// Restored-context staging: written by `switch_context` (the pure core),
 /// applied by `tick` (the aarch64 wrapper: msr ELR/SPSR + resume_frame).
@@ -98,6 +103,9 @@ var pending_sp_el0: u64 = 0;
 var report_pending: bool = false;
 var report_task: usize = 0;
 var report_advances: u64 = 0;
+var exit_report_pending: bool = false;
+var exit_report_task: usize = 0;
+var exit_report_status: u64 = 0;
 
 /// The demo worker's static stack.
 var worker_stack: [task_stack_size]u8 align(16) = undefined;
@@ -107,6 +115,11 @@ var user_kernel_stack: [task_stack_size]u8 align(16) = undefined;
 /// section is page-aligned so the MMU can grant this page range EL0 RW+XN
 /// without exposing adjacent kernel BSS.
 var user_stack: [task_stack_size]u8 align(4096) linksection(user_stack_section) = undefined;
+/// EL0-visible, scheduler-written witness. The initial user frame receives its
+/// address in x9; the payload waits for a non-zero value before invoking
+/// sys_yield. It lives in the already-mapped user BSS aperture and exposes no
+/// privileged state beyond the fact that this task was preempted by a tick.
+var user_timer_preemptions: u64 align(8) linksection(user_stack_section) = 0;
 
 // ---------------------------------------------------------------------------
 // Registration (kernel seam, before the shell loop starts)
@@ -119,10 +132,14 @@ pub fn init() usize {
     task_count = 0;
     current = 0;
     switches = 0;
+    cooperative_yields = 0;
+    exits = 0;
     enabled_flag = false;
     report_pending = false;
+    exit_report_pending = false;
+    user_timer_preemptions = 0;
     for (&tasks) |*task| task.* = .{};
-    tasks[0] = .{ .name = "shell", .registered = true };
+    tasks[0] = .{ .name = "shell", .registered = true, .runnable = true };
     task_count = 1;
     return 0;
 }
@@ -142,6 +159,7 @@ pub fn register_worker(entry: u64) ?usize {
         .elr = entry,
         .spsr = spsr_el1h_irqs,
         .registered = true,
+        .runnable = true,
     };
     task_count += 1;
     return id;
@@ -161,7 +179,10 @@ pub fn register_user(entry: u64) ?usize {
         .spsr = spsr_el0t_irqs,
         .sp_el0 = @intFromPtr(&user_stack) + user_stack.len,
         .registered = true,
+        .runnable = true,
     };
+    const frame: *exceptions.VectorFrame = @ptrFromInt(tasks[id].sp);
+    _ = exceptions.frame_write(frame, 9, @intFromPtr(&user_timer_preemptions));
     task_count += 1;
     return id;
 }
@@ -179,7 +200,12 @@ pub fn enabled() bool {
 /// True once the scheduler would actually switch on a tick (enabled AND at
 /// least two tasks). The tick() guard; hoisted so host tests can pin it.
 pub fn scheduling_active() bool {
-    return enabled_flag and task_count >= 2;
+    if (!enabled_flag) return false;
+    var runnable: usize = 0;
+    for (tasks[0..task_count]) |task| {
+        if (task.runnable) runnable += 1;
+    }
+    return runnable >= 2;
 }
 
 /// Build the synthetic claim-9746 vector frame at the top of `stack` and
@@ -217,6 +243,25 @@ fn park() noreturn {
 /// the next task's frame pointer + ELR/SPSR for `tick` to apply. No asm,
 /// no SP manipulation: the actual register restore happens in the
 /// claim-9746 stub (`mov sp, x0` + pop + `eret`) using the staged frame.
+fn next_runnable(after: usize) ?usize {
+    if (task_count == 0) return null;
+    var offset: usize = 1;
+    while (offset <= task_count) : (offset += 1) {
+        const candidate = (after + offset) % task_count;
+        if (tasks[candidate].registered and tasks[candidate].runnable) return candidate;
+    }
+    return null;
+}
+
+fn stage_current() void {
+    pending_sp = tasks[current].sp;
+    pending_elr = tasks[current].elr;
+    pending_spsr = tasks[current].spsr;
+    pending_sp_el0 = tasks[current].sp_el0;
+    tasks[current].resumes += 1;
+    switches += 1;
+}
+
 pub fn switch_context(frame_sp: u64, elr: u64, spsr: u64, sp_el0: u64) void {
     if (task_count == 0) return;
     tasks[current].sp = frame_sp;
@@ -224,13 +269,73 @@ pub fn switch_context(frame_sp: u64, elr: u64, spsr: u64, sp_el0: u64) void {
     tasks[current].spsr = spsr;
     tasks[current].sp_el0 = sp_el0;
     tasks[current].saves += 1;
-    current = (current + 1) % task_count;
-    pending_sp = tasks[current].sp;
-    pending_elr = tasks[current].elr;
-    pending_spsr = tasks[current].spsr;
-    pending_sp_el0 = tasks[current].sp_el0;
-    tasks[current].resumes += 1;
-    switches += 1;
+    current = next_runnable(current) orelse return;
+    stage_current();
+}
+
+fn apply_pending() void {
+    exceptions.resume_frame = pending_sp;
+    exceptions.resume_sp_el0 = pending_sp_el0;
+    if (comptime builtin.is_test or builtin.cpu.arch != .aarch64) return;
+    asm volatile ("msr elr_el1, %[v]"
+        :
+        : [v] "r" (pending_elr),
+    );
+    asm volatile ("msr spsr_el1, %[v]"
+        :
+        : [v] "r" (pending_spsr),
+    );
+    asm volatile ("isb");
+}
+
+fn current_exception_pc() struct { elr: u64, spsr: u64 } {
+    if (comptime builtin.is_test or builtin.cpu.arch != .aarch64) {
+        return .{ .elr = tasks[current].elr, .spsr = tasks[current].spsr };
+    }
+    var elr: u64 = 0;
+    var spsr: u64 = 0;
+    asm volatile ("mrs %[v], elr_el1"
+        : [v] "=r" (elr),
+    );
+    asm volatile ("mrs %[v], spsr_el1"
+        : [v] "=r" (spsr),
+    );
+    return .{ .elr = elr, .spsr = spsr };
+}
+
+/// Cooperative syscall yield. The interrupted SVC frame is saved exactly as
+/// an IRQ frame would be, then another runnable task is staged for `eret`.
+pub fn yield_current() bool {
+    if (!scheduling_active()) return false;
+    const pc = current_exception_pc();
+    switch_context(exceptions.resume_frame, pc.elr, pc.spsr, exceptions.resume_sp_el0);
+    cooperative_yields +%= 1;
+    apply_pending();
+    return true;
+}
+
+/// Remove the calling task from the runnable ring and stage its successor.
+/// The SVC exception return consumes the staged frame, so the terminated task
+/// never resumes after `sys_exit`.
+pub fn exit_current(status: u64) bool {
+    if (task_count == 0 or !tasks[current].registered or !tasks[current].runnable) return false;
+    const exiting = current;
+    tasks[exiting].runnable = false;
+    tasks[exiting].terminated = true;
+    tasks[exiting].exit_status = status;
+    const next = next_runnable(exiting) orelse {
+        tasks[exiting].runnable = true;
+        tasks[exiting].terminated = false;
+        return false;
+    };
+    exit_report_pending = true;
+    exit_report_task = exiting;
+    exit_report_status = status;
+    exits +%= 1;
+    current = next;
+    stage_current();
+    apply_pending();
+    return true;
 }
 
 /// IRQ-context tick (called from the kernel's irq_dispatch right after
@@ -250,18 +355,20 @@ pub fn tick() void {
     asm volatile ("mrs %[v], spsr_el1"
         : [v] "=r" (spsr),
     );
-    switch_context(exceptions.resume_frame, elr, spsr, exceptions.resume_sp_el0);
-    exceptions.resume_frame = pending_sp;
-    exceptions.resume_sp_el0 = pending_sp_el0;
-    asm volatile ("msr elr_el1, %[v]"
-        :
-        : [v] "r" (pending_elr),
-    );
-    asm volatile ("msr spsr_el1, %[v]"
-        :
-        : [v] "r" (pending_spsr),
-    );
-    asm volatile ("isb");
+    timer_switch_context(exceptions.resume_frame, elr, spsr, exceptions.resume_sp_el0);
+    apply_pending();
+}
+
+/// Tick-only wrapper around the pure switch core. Keeping the source of the
+/// switch explicit prevents a cooperative yield from masquerading as the
+/// timer-preemption witness inherited from claim 8215.
+fn timer_switch_context(frame_sp: u64, elr: u64, spsr: u64, sp_el0: u64) void {
+    if ((spsr & 0xf) == spsr_el0t_irqs) user_timer_preemptions +%= 1;
+    switch_context(frame_sp, elr, spsr, sp_el0);
+}
+
+pub fn user_timer_preemption_count() u64 {
+    return user_timer_preemptions;
 }
 
 // ---------------------------------------------------------------------------
@@ -288,13 +395,22 @@ pub fn request_report() void {
 /// Shell-side (main context, next to timer.maybe_heartbeat): print one
 /// pending report line, if any.
 pub fn maybe_report(con: *console.Console) void {
-    if (!report_pending) return;
-    report_pending = false;
-    con.puts("tasks ");
-    con.puts(tasks[report_task].name);
-    con.puts(" advances=");
-    con.print_u64(report_advances);
-    con.puts("\n");
+    if (report_pending) {
+        report_pending = false;
+        con.puts("tasks ");
+        con.puts(tasks[report_task].name);
+        con.puts(" advances=");
+        con.print_u64(report_advances);
+        con.puts("\n");
+    }
+    if (exit_report_pending) {
+        exit_report_pending = false;
+        con.puts("tasks ");
+        con.puts(tasks[exit_report_task].name);
+        con.puts(" exited status=");
+        con.print_u64(exit_report_status);
+        con.puts("\n");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -332,6 +448,27 @@ pub fn task_info(id: usize) ?TaskInfo {
         .resumes = tasks[id].resumes,
         .advances = tasks[id].advances,
     };
+}
+
+pub fn current_id() usize {
+    return current;
+}
+
+pub fn cooperative_yield_count() u64 {
+    return cooperative_yields;
+}
+
+pub fn exit_count() u64 {
+    return exits;
+}
+
+pub fn is_terminated(id: usize) bool {
+    return id < task_count and tasks[id].terminated;
+}
+
+pub fn terminated_status(id: usize) ?u64 {
+    if (!is_terminated(id)) return null;
+    return tasks[id].exit_status;
 }
 
 // ---------------------------------------------------------------------------
@@ -385,6 +522,8 @@ test "scheduler: register_user separates EL1 exception and EL0 stacks" {
     try std.testing.expectEqual(@intFromPtr(&user_kernel_stack) + user_kernel_stack.len - frame_bytes, task.sp);
     try std.testing.expectEqual(@intFromPtr(&user_stack) + user_stack.len, task.sp_el0);
     try std.testing.expect(task.sp + frame_bytes != task.sp_el0);
+    const frame: *exceptions.VectorFrame = @ptrFromInt(task.sp);
+    try std.testing.expectEqual(@intFromPtr(&user_timer_preemptions), exceptions.frame_read(frame, 9));
 }
 
 test "scheduler: round-robin alternates and round-trips saved context" {
@@ -452,6 +591,23 @@ test "scheduler: mixed EL1h and EL0t round-robin restores SP_EL0" {
     try std.testing.expectEqual(@as(u64, 0x3004), pending_elr);
 }
 
+test "scheduler: only a tick preemption publishes the EL0 witness" {
+    _ = init();
+    _ = register_worker(0x2000).?;
+    _ = register_user(0x3000).?;
+    start();
+    switch_context(0x1000, 0x1000, spsr_el1h_irqs, 0xaaaa); // shell -> worker
+    switch_context(0x2000, 0x2000, spsr_el1h_irqs, 0xbbbb); // worker -> user
+    try std.testing.expectEqual(@as(u64, 0), user_timer_preemption_count());
+    // Cooperative switching cannot satisfy the claim-8215 witness.
+    try std.testing.expect(yield_current()); // user -> shell
+    try std.testing.expectEqual(@as(u64, 0), user_timer_preemption_count());
+    switch_context(0x1004, 0x1004, spsr_el1h_irqs, 0xaaaa); // shell -> worker
+    switch_context(0x2004, 0x2004, spsr_el1h_irqs, 0xbbbb); // worker -> user
+    timer_switch_context(0x3000, 0x3004, spsr_el0t_irqs, tasks[2].sp_el0);
+    try std.testing.expectEqual(@as(u64, 1), user_timer_preemption_count());
+}
+
 test "scheduler: the worker's advance counter belongs to its own task" {
     _ = init();
     _ = register_worker(0x2000).?;
@@ -497,4 +653,27 @@ test "scheduler: stats and task_info report deterministic state" {
     const worker = task_info(1).?;
     try std.testing.expectEqualStrings("worker", worker.name);
     try std.testing.expect(task_info(2) == null);
+}
+
+test "scheduler: cooperative exit is non-runnable and reports from shell" {
+    _ = init();
+    _ = register_worker(0x2000).?;
+    _ = register_user(0x3000).?;
+    start();
+    try std.testing.expect(yield_current()); // shell -> worker
+    try std.testing.expect(yield_current()); // worker -> user
+    try std.testing.expectEqual(@as(usize, 2), current_id());
+    try std.testing.expect(exit_current(7)); // user -> shell
+    try std.testing.expectEqual(@as(usize, 0), current_id());
+    try std.testing.expect(is_terminated(2));
+    try std.testing.expectEqual(@as(?u64, 7), terminated_status(2));
+    // The next switch skips the terminated user: shell -> worker -> shell.
+    try std.testing.expect(yield_current());
+    try std.testing.expectEqual(@as(usize, 1), current_id());
+    try std.testing.expect(yield_current());
+    try std.testing.expectEqual(@as(usize, 0), current_id());
+    var mock = console.MockConsole(128){};
+    var con = mock.console();
+    maybe_report(&con);
+    try std.testing.expectEqualStrings("tasks user-el0 exited status=7\n", mock.contents());
 }

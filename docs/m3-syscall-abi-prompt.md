@@ -50,8 +50,8 @@ Constraints that are non-negotiable:
   base. Same pattern as the command registry in `monitor.zig`
   (`registry_storage` + `ensure_registry`).
 - **SVC is EL0-only.** Kernel code calls functions directly and never
-  executes `svc`. An SVC taken from EL1 (SPSR.M == 0x4 is EL0t; M == 0x5 is
-  EL1t) is a kernel bug: report + park, exactly as today.
+  executes `svc`. SPSR.M 0x0 is EL0t, 0x4 is EL1t, and 0x5 is EL1h. An SVC
+  taken from either EL1 mode is a kernel bug: report + park, exactly as today.
 - **Console discipline:** an SVC handler runs in *synchronous* exception
   context, not IRQ context (claim 7948's no-console rule does not apply to
   it), but keep prints minimal, deterministic, and grep-able.
@@ -61,12 +61,17 @@ Constraints that are non-negotiable:
 ### Numbering and dispatch
 
 - The EL0/SVC card (PR #60, claim 8215) has already fixed the SVC
-  convention and it is binding: **syscall number in x0**, instruction
-  `svc #0` (`svc_immediate = 0` in `kernel/src/userspace.zig`), result
-  returned in **x0** (its `syscall_ping` round-trips exactly this).
-  Extend it, don't replace it: args arrive in **x1–x5** (the saved GPRs of
-  the vector frame), the number in x0, the result written back to x0. The
-  SVC immediate (ESR_EL1 ISS bits [24:0]) stays 0 and is reserved.
+  convention and it is binding: **syscall number in x8**, instruction
+  `svc #0` (`svc_immediate = 0` in `kernel/src/userspace.zig`), arguments
+  in **x0–x5**, and result returned in **x0**. Its `syscall_ping` uses x8=0
+  while round-tripping x0. Extend it, don't replace it. The SVC immediate
+  (ESR_EL1 ISS bits [24:0]) stays 0 and is reserved.
+
+  **Correction note:** docs-only commit `6b1b8cd` transcribed both number
+  and result as x0. That is impossible for `ping(value) -> value` and
+  contradicts merged `userspace.zig`, claim 8215, its log, and its VZ
+  evidence. ADR 0007 and the implementation preserve the landed x8/x0
+  contract.
 - The number space is **0..63** (64 slots). Slot 0 is the EL0 card's
   `syscall_ping` — keep it untouched (it is the class-B live-gate
   evidence). Slots 4–63 are reserved and return `-ENOSYS`; adding a
@@ -91,27 +96,30 @@ Constraints that are non-negotiable:
 - `-2` — `EBADF`: fd is not 1
 - `-3` — `EFAULT`: reserved for the follow-on uaccess card (bad user
   pointer). Do **not** claim uaccess here — the write handler validates
-  ranges with plain bounded arithmetic against the identity map and
-  returns `EINVAL` for now. Record in the ADR that `-3` is allocated but
-  unimplemented.
+  ranges with plain bounded arithmetic against the kernel-known EL0 text
+  and stack apertures inside the guaranteed identity map, rejects
+  privileged/MMIO ranges, and returns `EINVAL` for now. Record in the ADR
+  that `-3` is allocated but unimplemented.
 - `-4` — `ENOSYS`: unknown syscall number
 
 ### Return plumbing
 
 - The dispatch result lands in **x0 of the saved vector frame** so the
   stub's register restore pops it into x0 on `eret`. The EL0/SVC card
-  (PR #60) already owns entry routing, ELR advance past the 32-bit `svc`,
-  and the SP_EL0 save/restore (`exc_dispatch` returns `.{ frame, sp_el0
-  }`; `resume_sp_el0`). The syscall module supplies only the table +
-  argument marshalling: read x0 = number and x1–x5 = args out of the
-  frame, dispatch, write the result into x0. Do not re-implement the
-  entry path.
+  (PR #60) already owns entry routing and SP_EL0 save/restore
+  (`exc_dispatch` returns `.{ frame, sp_el0 }`; `resume_sp_el0`). A handled
+  AArch64 SVC needs no manual ELR advance: architectural ELR already points
+  after the `svc`. The syscall module supplies the table + argument
+  marshalling: read x8 = number and x0–x5 = args out of the frame,
+  dispatch, write the result into x0. Yield/exit may minimally select a
+  different existing scheduler frame through the same return seam; do not
+  add a parallel entry path.
 
 ## Scope
 
 1. **`kernel/src/syscall.zig` (new file):** the runtime-built dispatch
    table (64 slots, 4 implemented), argument marshalling from the vector
-   frame (x1–x5; number in x0), the error-code enum, per-number call
+   frame (x0–x5; number in x8), the error-code enum, per-number call
    counters, and a `dispatch(number, args, frame) -> u64` entry point
    registered through the EL0 card's landed `set_svc_dispatcher` seam.
 2. **Seam (already landed by the EL0/SVC card, PR #60):**
@@ -124,7 +132,7 @@ Constraints that are non-negotiable:
 3. **Writer seam:** `syscall.init(writer)` where writer is
    `*const fn ([]const u8) void` — the same shape as `exceptions.init`.
    `sys_write` validates, then emits through this writer.
-4. **`syscalls` monitor command (optional but recommended):** prints the
+4. **`syscalls` monitor command (required by the live gate):** prints the
    implemented table (number + name) and per-number call counts —
    deterministic and grep-able, in the style of `tasks`/`timer`.
    Adding it bumps `registry_count` 22 → 23; see the transcript note in
@@ -155,7 +163,7 @@ Constraints that are non-negotiable:
 ## Process (hard gate)
 
 1. **Read the EL0/SVC card first.** List in your written plan exactly what
-   it provides (SVC entry routing, ELR advance, frame return, the user
+   it provides (SVC entry routing, architectural post-SVC ELR, frame return, the user
    task / any `user` or `exec` command, scheduler lifecycle hooks) and
    what this card adds on top.
 2. **Claim before you start.** Create `docs/claims/<NNNN>-<slug>.md` from
@@ -181,7 +189,7 @@ Constraints that are non-negotiable:
 1. `zig fmt --check boot/src/*.zig kernel/src/*.zig build.zig`
 2. `bash tools/verify-unit-tests.sh` — new `zig test` coverage in
    `syscall.zig` (and the touched parts of `exceptions.zig`):
-   - table is 64 slots, numbers 0–2 implemented, 3–63 reserved
+   - table is 64 slots, numbers 0–3 implemented, 4–63 reserved
    - no duplicate numbers; table well-formed (runtime build, ADR 0005)
    - `dispatch` decodes each implemented number; unknown → `-ENOSYS`
    - argument validation: `write` with fd≠1 → `-EBADF`; `len` over the
@@ -212,7 +220,11 @@ Constraints that are non-negotiable:
    - the round trip completed: after the SVC the user task kept running
      and the shell answered a follow-up command (e.g., an
      `rx-svc-ok` echo reply), and
-   - `syscalls` reports a count ≥ 1 for the exercised number(s).
+   - `syscalls` reports exactly one table snapshot with `ping=2` and
+     `write=1`, `yield=1`, `exit=1`; match complete lines so `calls=10`
+     cannot satisfy `calls=1`, and
+   - the bounded write is one complete LF-terminated line, and a real timer
+     preemption is observed before cooperative yield/exit.
    Register it in `docs/gate-inventory.md` (class B, gate) and in the
    `just verify-vz` aggregate if the justfile lists gates explicitly.
 2. **Live regressions still green:** `verify-live-timer` (strict

@@ -3,7 +3,8 @@
 // Usage: VMRunner <disk-image> [serial-log] [--screen <png>]
 //         [--timeout <s>] [--expect <line>] [--terminal-marker <line>]
 //         [--console] [--debug-input] [--dump-marker <file>]
-//         [--nvram-console <file>] [--custom-virtio]
+//         [--nvram-console <file>] [--script <file>]
+//         [--script-after <text>] [--script-expect <text>] [--custom-virtio]
 //
 // * --custom-virtio (macOS 27 spike, audit step 3): attaches one
 //   default-off VZCustomVirtioDeviceConfiguration so the guest's PCI
@@ -95,6 +96,7 @@ var debugInput = false
 var markerDumpPath: String?
 var nvramConsolePath: String?
 var scriptPath: String?
+var scriptAfter: String?
 var scriptExpect: String?
 var customVirtioEnabled = false
 
@@ -128,6 +130,9 @@ while idx < arguments.count {
         idx += 2
     } else if arg == "--script", idx + 1 < arguments.count {
         scriptPath = arguments[idx + 1]
+        idx += 2
+    } else if arg == "--script-after", idx + 1 < arguments.count {
+        scriptAfter = arguments[idx + 1]
         idx += 2
     } else if arg == "--script-expect", idx + 1 < arguments.count {
         scriptExpect = arguments[idx + 1]
@@ -363,7 +368,8 @@ if consoleMode {
 } else if scriptMode {
     print("  mode: scripted input (non-interactive; claim 6684)")
     print("  serial log: \(serialLogPath)  (guest output teed to log)")
-    print("  script: \(scriptPath!)  (forwarded to the guest serial attachment after the terminal state appears)")
+    print("  script: \(scriptPath!)  (forwarded once after the configured serial marker appears)")
+    if let scriptAfter { print("  script-after: \"\(scriptAfter)\"  (forward once after this serial text appears)") }
     if let scriptExpect { print("  script-expect: \"\(scriptExpect)\"  (exit 0 iff observed in the serial log)") }
 } else {
     print("  serial log: \(serialLogPath)  (timeout: \(Int(timeout))s)")
@@ -786,8 +792,9 @@ func startConsoleStreams() {
 }
 
 // Claim 6684: scripted-input mode. Waits until the guest has reached the
-// takeover terminal state (its marker in the serial log), then forwards the
-// script file's bytes into the serial attachment. The guest supplied its
+// configured serial marker (the takeover terminal state by default), then
+// forwards the script file's bytes exactly once into the serial attachment.
+// The guest supplied its
 // virtio RX buffer pre-exit, so nothing is lost while we wait; the settle
 // delay only avoids racing the shell's very first poll.
 func startScriptInput() {
@@ -801,11 +808,12 @@ func startScriptInput() {
             FileHandle.standardError.write(Data("ERROR: could not read script file '\(scriptPath)': \(error)\n".utf8))
             exit(1)
         }
+        let after = scriptAfter ?? "kernel terminal state"
         let waitDeadline = Date().addingTimeInterval(40)
         var sent = false
         while Date() < waitDeadline {
             if let text = try? String(contentsOf: serialURL, encoding: .utf8),
-               text.contains("kernel terminal state") {
+               text.contains(after) {
                 Thread.sleep(forTimeInterval: 0.5)
                 do { try consoleInputPipe.fileHandleForWriting.write(contentsOf: scriptData) }
                 catch {
@@ -817,7 +825,7 @@ func startScriptInput() {
             Thread.sleep(forTimeInterval: 0.5)
         }
         if !sent {
-            FileHandle.standardError.write(Data("ERROR: guest did not reach the terminal state within 40s; script input not sent\n".utf8))
+            FileHandle.standardError.write(Data("ERROR: guest did not emit script-after marker '\(after)' within 40s; script input not sent\n".utf8))
         }
     }
 }

@@ -43,6 +43,7 @@ const gic = @import("gic.zig"); // claim 7948: GIC distributor + CPU interface
 const timer = @import("timer.zig"); // claim 7948: ARM generic timer (CNTP)
 const scheduler = @import("scheduler.zig"); // claim 5275: tick-driven round-robin tasks
 const userspace = @import("userspace.zig"); // claim 8215: first EL0t task + SVC boundary
+const syscall = @import("syscall.zig"); // claim 3594: fixed syscall ABI + runtime dispatch table
 const virtio_custom = @import("virtio_custom.zig"); // claim 0828: custom-virtio spike driver (DID 0x1082)
 const HandoffV2 = handoff.HandoffV2;
 
@@ -360,7 +361,9 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
     // here — that is the next card.
     userspace.init();
     exceptions.init(exception_report_writer);
-    exceptions.set_svc_dispatcher(userspace.handle_svc);
+    syscall.init(exception_report_writer);
+    syscall.set_user_regions(user_text, user_stack);
+    exceptions.set_svc_dispatcher(syscall.handle_svc);
     exceptions.install();
     // Claim 7948 (roadmap item 5, second half): GIC + generic timer. The
     // MADT/GTDT discovery ran PRE-EXIT inside pci.dump_acpi (post-exit ACPI

@@ -56,6 +56,7 @@ verify-coordination`, and CI) fails if it drifts from the files.
 | `agent/buffy/macos27-custom-virtio-spike` | [`agent-buffy-macos27-custom-virtio-spike.md`](agent-buffy-macos27-custom-virtio-spike.md) |
 | `agent/codex/m3-march-tracker` | [`agent-codex-m3-march-tracker.md`](agent-codex-m3-march-tracker.md) |
 | `agent/codex/m3-ragshit-dogfood` | [`agent-codex-m3-ragshit-dogfood.md`](agent-codex-m3-ragshit-dogfood.md) |
+| `agent/codex/m3-syscall-abi` | [`agent-codex-m3-syscall-abi.md`](agent-codex-m3-syscall-abi.md) |
 | `codex/el0-svc-task` | [`codex-el0-svc-task.md`](codex-el0-svc-task.md) |
 | `codex/vz-real-irq-delivery` | [`codex-vz-real-irq-delivery.md`](codex-vz-real-irq-delivery.md) |
 | freebuff/docs-reconciliation-m15-status-20260808 | [`freebuff-docs-reconciliation-m15-status-20260808.md`](freebuff-docs-reconciliation-m15-status-20260808.md) |
