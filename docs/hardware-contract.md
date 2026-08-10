@@ -47,11 +47,24 @@ assumption comes from documentation or reasoning only.
   captured PNGs are blank/gray. UEFI text is therefore NOT visible on the
   VZ framebuffer either.
 - Entropy: virtio entropy device (`VZVirtioEntropyDeviceConfiguration`).
-  **[observed: present on bus, no driver yet]** — the guest sees it on bus
-  0 as `VID=0x1af4 DID=0x1044` (listed by the `pci` command beside the
-  console 0x1043 / block 0x1042 devices), but no driver exists yet and no
-  CSPRNG seed path is wired; a future card may use it for boot-time
-  randomness (ASLR etc.).
+  **Driven + seeded 2026-08-10 (claim 2665, milestone four card 1):** the
+  guest sees it on bus 0 as `VID=0x1af4 DID=0x1044` (virtio device ID 4;
+  `pci` lists it beside the console 0x1043 / block 0x1042 devices), and a
+  driver now reads REAL random bytes from it: `kernel/src/virtio_entropy.zig`
+  discovers the modern virtio-pci transport pre-exit (BAR + common/notify
+  caps, VIRTIO_F_VERSION_1, queue 0, DRIVER_OK) and re-arms it post-MMU
+  before the first read. **The claim-6420 lesson is confirmed for entropy
+  too: VZ resets the device at ExitBootServices — its device_status reads
+  0 post-exit (`entropy: pre-rearm st=00` observed in `vm-serial.log`)
+  and the re-arm restores DRIVER_OK before the 64-byte boot seed is
+  read (`entropy: seeded n=64`).** **[observed]** — every live-entropy
+  gate boot's serial log (`artifacts/live-entropy-*`) shows the pre-rearm
+  status, the seed line, `random: n=32 hex=` (64 hex chars), and an exec
+  reply with a CSPRNG-randomized `stack=0x…`; two boots produce different
+  `random` sequences and different stack placements, proving the device
+  delivers genuine non-deterministic entropy to the CSPRNG (the seed path
+  is `[observed]`; the driver's transport behavior follows the same
+  claim-6420/0013 rules as the block/console devices).
 - Custom virtio device (`VZCustomVirtioDeviceConfiguration`, the
   `--custom-virtio` runner flag / `zig build spike-virtio`): the guest sees
   a vendor-defined device on bus 0 as `VID=0x1af4 DID=0x1082`.

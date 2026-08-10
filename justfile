@@ -36,8 +36,9 @@ verify-portable:
 # live timer IRQ-delivery gate (claim 9187), the live tasks scheduler
 # gate (claim 5275), the EL0/SVC gate (claim 8215), the numbered syscall
 # gate (claim 3594), the fault-safe uaccess gate (claim 6120), the
-# per-task address-space gate (claim 5804), and the live reboot/shutdown
-# gate (claim 0527). Apple silicon only — each boots VZ VMs.
+# per-task address-space gate (claim 5804), the live entropy gate
+# (claim 2665), and the live reboot/shutdown gate (claim 0527). Apple
+# silicon only — each boots VZ VMs.
 verify-vz:
     zig build run
     bash tools/verify-bad-handoff.sh
@@ -55,6 +56,7 @@ verify-vz:
     bash tools/verify-live-lifecycle.sh
     bash tools/verify-live-exec.sh
     bash tools/verify-live-sleep.sh
+    bash tools/verify-live-entropy.sh
     bash tools/verify-live-reboot.sh
 
 # Compile the AArch64 UEFI application and kernel image (class A — zig build)
@@ -188,6 +190,10 @@ verify-live-fs:
 # Verify the live reboot/shutdown observation (class B — boots VZ VMs; a real EFI ResetSystem from a live dipshit> shell: reboot resets the machine, shutdown powers it off; claim 0527, hard gate 6; Apple silicon only)
 verify-live-reboot:
     bash tools/verify-live-reboot.sh
+
+# Verify the REAL virtio entropy -> CSPRNG seed -> random command path (class B — boots VZ VMs; asserts `entropy: seeded n=64`, `random 32` hex, a responsive shell, and DIFFERENT output across two boots; claim 2665)
+verify-live-entropy:
+    bash tools/verify-live-entropy.sh
 
 # Verify the M1.5 host-side interactive serial plumbing (class B — boots VZ VMs; Apple silicon only)
 verify-host-console:

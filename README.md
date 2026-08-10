@@ -49,7 +49,7 @@ serial console: identity commands, memory-map inspection, shell utilities,
 machine controls, and an ESP file window. The host plumbing (duplex
 serial, terminal handling, `zig build console`), console & shell core (RX
 abstraction, line editor, tokenizer, prompt loop), and command registry
-(27 commands, mock-tested) are built; the transcript test gate passes
+(28 commands, mock-tested) are built; the transcript test gate passes
 (`zig build test-console`, byte-identical fixture). The **VZ serial gate
 passes** (claim 1517 — post-MMU virtio TX fixed with T0SZ=16 + `tlbi
 vmalle1` at the switch), **live RX** delivers host keystrokes end to end
@@ -135,11 +135,13 @@ dipshitos/
 │   ├── src/handoff.zig        Handoff v2 struct validation
 │   ├── src/lineedit.zig       Fixed-buffer line editor (no allocator)
 │   ├── src/tokenizer.zig      Command-line tokenizer (no allocator)
-│   ├── src/monitor.zig        Comptime command registry (20 commands)
+│   ├── src/monitor.zig        Comptime command registry (28 commands)
 │   ├── src/shell.zig          Prompt loop: banner → lineedit → tokenize → exec
 │   ├── src/esp.zig            ESP file window over the live FAT32 volume (ls/cat/write)
 │   ├── src/fat.zig            GPT + FAT32 mount/list/read/write (injected sector I/O)
 │   ├── src/virtio_blk.zig     virtio-blk transport (DID 0x1042 on VZ, post-exit re-arm)
+│   ├── src/virtio_entropy.zig virtio entropy transport (DID 0x1044, post-exit re-arm; claim 2665)
+│   ├── src/csprng.zig         ChaCha20 CSPRNG (RFC 7539, KAT-pinned; claim 2665)
 │   └── linker.ld              dense layout (avoids 64 KiB lld padding)
 ├── tools/elf2bin.py           ELF → flat KERNEL.BIN (format v1) converter
 ├── host/vm-runner/            Swift Virtualization.framework launcher
@@ -240,7 +242,12 @@ All command output and logs are saved under `artifacts/` (`inspect.txt`,
   EFI `ResetSystem` from a live `dipshit>` shell: `reboot` resets the
   machine, `shutdown` powers it off, claim 0527). The M1.5 monitor (14
   commands) is implemented, host-tested, and gate-complete (see
-  `docs/status.md`).
+  `docs/status.md`). Milestone-four card 1 (2026-08-10, claim 2665) adds a
+  REAL randomness source: `bash tools/verify-live-entropy.sh` boots the VM
+  twice and proves the virtio entropy device (DID 0x1044) seeds the
+  ChaCha20 CSPRNG (`entropy: seeded n=64`), `random 32` emits 64 hex
+  chars, and two boots produce DIFFERENT sequences and exec stack
+  placements (the exec-path ASLR consumer).
 - The Virtualization.framework VM boots the GPT+FAT image: configuration
   validates, the EFI variable store is created, the VM starts and runs, and
   after boot the guest-written marker file `\BOOTED.TXT` exists on the ESP

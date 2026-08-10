@@ -26,6 +26,11 @@ const shell = @import("shell.zig");
 // the virtio-blk transport), replacing the NVRAM persistence medium.
 const esp = @import("esp.zig");
 const virtio_blk = @import("virtio_blk.zig");
+// Milestone four (claim 2665): virtio entropy driver + ChaCha20 CSPRNG.
+// The entropy device (DID 0x1044) seeds the CSPRNG post-MMU; `random` and
+// the exec-path ASLR consumer live off that seed.
+const virtio_entropy = @import("virtio_entropy.zig");
+const csprng = @import("csprng.zig");
 
 // Claim 0023: the handoff-v2 contract, the identity-map MMU, and the
 // evidence channel (takeover markers + probe dumps) live in their own
@@ -251,6 +256,15 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
     // (claim 1517's transport reliability applies).
     const blk_ready = virtio_blk.virtio_blk_init();
 
+    // Milestone four (claim 2665): the virtio-pci entropy transport
+    // (DID 0x1044 — the runner's VZVirtioEntropyDeviceConfiguration, seen
+    // on the bus since the claim-5844-era `pci` listing). Armed PRE-EXIT
+    // like the console/blk devices (config-space + BAR reads must stay
+    // pre-exit, claim 0013); its BAR0 window is handed to the identity map
+    // below, and the transport is RE-ARMED post-MMU (the claim-6420 lesson:
+    // VZ resets virtio devices at ExitBootServices) right before the seed.
+    const entropy_ready = virtio_entropy.virtio_entropy_init();
+
     // Claim 0828: the custom-virtio spike device (DID 0x1082) — PRE-EXIT
     // discovery only (config-space reads, the claim-0013 discipline). VZ's
     // firmware BAR assignment moves between boots (0x50001000 in the claim-
@@ -312,7 +326,7 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
     // (discovered pre-exit) are handed to mmu.build_identity_map as the
     // extra Device windows above the blanket; mmu.zig stays
     // transport-agnostic.
-    var extra_windows: [3]mmu.DeviceWindow = undefined;
+    var extra_windows: [4]mmu.DeviceWindow = undefined;
     var extra_count: usize = 0;
     if (virtio_console.vp_ready and virtio_console.vp_bar0 != 0) {
         extra_windows[extra_count] = .{ .base = virtio_console.vp_bar0, .len = 0x10000 };
@@ -327,6 +341,13 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
     // already covers the BAR, so the entry is a harmless no-op there.
     if (cv_probed and virtio_custom.cv_bar != 0) {
         extra_windows[extra_count] = virtio_custom.device_window();
+        extra_count += 1;
+    }
+    // Milestone four (claim 2665): the entropy transport BAR (pre-exit
+    // resolved) — same Device-window treatment as the console/blk/custom
+    // transports so post-MMU common-config reads reach the device.
+    if (entropy_ready and virtio_entropy.ent_bar0 != 0) {
+        extra_windows[extra_count] = .{ .base = virtio_entropy.ent_bar0, .len = 0x10000 };
         extra_count += 1;
     }
     const user_text = userspace.text_region(base);
@@ -543,6 +564,29 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
         alloc.exclusion_from_bytes(@intFromPtr(map_buffer.buffer.ptr), map_buffer.buffer.len),
     };
     _ = alloc.init(map_view, &exclusions);
+    // Milestone four (claim 2665): boot-time seed — post-MMU (after the
+    // allocator arms), pull a fixed 64-byte seed from the REAL virtio
+    // entropy device and key the CSPRNG. VZ resets virtio devices at
+    // ExitBootServices (claim 6420), so the transport is re-armed here
+    // first (the claim-6420 lesson applied to the entropy device; the live
+    // gate's `entropy: seeded n=64` line is the proof the re-armed path
+    // works). A failed read falls back to a deterministic key and reports
+    // honestly — the live gate requires the real path.
+    var seed_buf: [csprng.seed_len]u8 align(16) = undefined;
+    // Claim 6420's lesson, verified live: VZ resets virtio devices at
+    // ExitBootServices — the pre-re-arm status is printed so the host sees
+    // the reset (0) before the re-arm restores DRIVER_OK and the seed read
+    // delivers 64 real bytes.
+    uart_puts("entropy: pre-rearm st=");
+    uart_hex8(virtio_entropy.ent_status());
+    uart_puts("\n");
+    if (virtio_entropy.entropy_rearm() and virtio_entropy.entropy_read(&seed_buf)) {
+        csprng.seed(&seed_buf);
+        uart_puts("entropy: seeded n=64\n");
+    } else {
+        csprng.seed_fallback();
+        uart_puts("entropy: seed failed n=0 (deterministic fallback)\n");
+    }
     const console_name = layout_name(console_kind);
     var mon = monitor.Monitor.init(
         m15.to_console(),

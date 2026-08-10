@@ -343,10 +343,19 @@ gates pass; tagged `m1.5-interactive-monitor`** (see
   re-armed post-exit after VZ resets the device at ExitBootServices).
   `ls`/`cat`/`write` serve the live ESP volume; files persist on the
   disk itself. A general (non-ESP) filesystem remains future work.
-- Entropy/CSPRNG (sketch): seed the kernel's CSPRNG from the virtio
-  entropy device (`DID 0x1044` on VZ — already present on the bus,
-  `[observed]`, no driver yet) for boot-time ASLR and secure randomness;
-  see `docs/hardware-contract.md`.
+- ~~**Entropy/CSPRNG (sketch).**~~ **DONE 2026-08-10 (claim 2665, milestone
+  four card 1)** — the kernel has a REAL randomness source: a modern
+  virtio-pci entropy driver (`kernel/src/virtio_entropy.zig`, DID 0x1044)
+  with the claim-6420 post-MMU re-arm lesson (**observed: VZ resets the
+  device at ExitBootServices — `entropy: pre-rearm st=00`**), a
+  freestanding ChaCha20 CSPRNG (`kernel/src/csprng.zig`, RFC 7539,
+  KAT-pinned in `zig test`) seeded from a 64-byte boot-time device read
+  (`entropy: seeded n=64`), the `random [n]` monitor command (registry
+  27→28), and a real ASLR consumer (the exec path randomizes the loaded
+  EL0 program's user stack VA per boot). Live gate
+  `tools/verify-live-entropy.sh` PASS 2/2 — two boots produce different
+  `random` sequences and stack placements; see
+  `docs/hardware-contract.md` (entropy bullet now `[observed]`).
 - Eventually: a process abstraction, a network stack — each only when the
   ones below it are demonstrably working.
 

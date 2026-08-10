@@ -39,6 +39,10 @@ const esp = @import("esp.zig");
 const fat = @import("fat.zig");
 const scheduler = @import("scheduler.zig");
 const userspace = @import("userspace.zig");
+// Milestone four (claim 2665): the seeded CSPRNG supplies the randomized
+// user stack VA (the seed's real ASLR consumer).
+const csprng = @import("csprng.zig");
+const syscall = @import("syscall.zig");
 
 /// Fixed load buffer: one page, the claim-8215 text aperture's size. A
 /// program larger than this is rejected honestly (`too_large`).
@@ -135,11 +139,19 @@ pub fn exec_file(name: []const u8) ExecResult {
     std.mem.copyForwards(u8, program[0..content_len], program[dsk1_header_size..][0..content_len]);
     @memset(program[content_len..], 0); // the rest of the page is BSS padding
     const text_phys = mmu.to_phys(@intFromPtr(&program));
+    // Milestone four (claim 2665): ASLR — the loaded program's EL0 stack
+    // lands at a per-boot random VA from the seeded CSPRNG (page-aligned,
+    // 64 KiB placement granularity, clear of text_va). The uaccess stack
+    // region follows via set_stack_va so a later program may write from
+    // the stack through sys_write. Unseeded (host test / fallback) returns
+    // the fixed default, so nothing below ever sees an out-of-band VA.
+    const stack_va = csprng.random_stack_va();
+    userspace.set_stack_va(stack_va);
     if (!mmu.build_user_root(
         userspace.text_va,
         text_phys,
         content_len,
-        userspace.stack_va,
+        stack_va,
         scheduler.user_stack_phys(),
         scheduler.task_stack_size,
     )) return .table_full;
@@ -150,7 +162,11 @@ pub fn exec_file(name: []const u8) ExecResult {
     mmu.clean_dcache_range(text_phys, 4096);
 
     const entry_va = userspace.text_va + (entry_off - dsk1_header_size);
-    if (scheduler.register_exec_user(entry_va) == null) return .pool_full;
+    if (scheduler.register_exec_user(entry_va, stack_va) == null) return .pool_full;
+    // The user stack aperture moved: re-arm the syscall/uaccess regions so
+    // sys_write bounds follow the randomized placement (one user program
+    // at a time — the previous task is gone by the exec gate).
+    syscall.set_user_regions(userspace.text_va_region(), userspace.stack_va_region());
     const take = @min(name.len, esp.name_max);
     @memcpy(loaded_name_buf[0..take], name[0..take]);
     loaded_name_len = take;
