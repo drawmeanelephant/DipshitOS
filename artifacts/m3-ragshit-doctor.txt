@@ -1,0 +1,14 @@
+Command: ./tools/ragshit/ragshit doctor .
+
+ragshit doctor: /private/tmp/dipshitos-ragshit-019fe9b9
+  [OK]   git repository: root: /private/tmp/dipshitos-ragshit-019fe9b9
+  [OK]   git available: git version 2.54.0 (Apple Git-157)
+  [OK]   configuration: /private/tmp/dipshitos-ragshit-019fe9b9/.ragshit.toml parses
+  [OK]   database: readable (227 files, 2080 chunks)
+  [OK]   sqlite FTS5: available; lexical search uses BM25
+  [OK]   ignore behavior: .git/ and .ragshit/ paths are never eligible
+  [OK]   index freshness: HEAD and the discovery candidate set match the index
+  [OK]   referenced files: all indexed files exist on disk
+  [OK]   chunk identifiers: no duplicate chunk ids
+  [OK]   orphaned records: no orphaned chunk records
+doctor: all required checks passed
