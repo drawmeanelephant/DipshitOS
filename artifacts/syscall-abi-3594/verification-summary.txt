@@ -1,0 +1,33 @@
+Claim 3594 verification summary — 2026-08-10
+
+Corrected acceptance evidence (supersedes the earlier live-SVC FIFO runs):
+
+- Class A affected checks: PASS
+  zig fmt --check boot/src/*.zig kernel/src/*.zig build.zig
+  bash tools/verify-unit-tests.sh
+  zig build
+  swift build --package-path host/vm-runner
+  Result: every present module passed; syscall module 41/41; scheduler witness,
+  x0-x5 marshalling, suspended-yield x0/frame, range, and table tests passed.
+
+- BOOTS=1 bash tools/verify-live-svc.sh: PASS 1/1
+  runner-rc=0 serial-bytes=3987 banner=1 write=1 ping=1 write-count=1
+  yield=1 exit=1 table=1 echo=1 userspace=1 ordered=1 fatal=0
+  Exact serial observations, each once:
+    dipshit> syscall: write ok n=23
+    timer irq delivered ppi=0x1e irq_ticks=1
+    tasks user-el0 exited status=7
+      0 sys_ping calls=2
+      1 sys_write calls=1
+      2 sys_yield calls=1
+      3 sys_exit calls=1
+    rx-svc-ok
+
+- BOOTS=1 bash tools/verify-live-userspace.sh: PASS 1/1
+- BOOTS=1 bash tools/verify-live-timer.sh: PASS 1/1 (irq=5, poll=0)
+- BOOTS=1 bash tools/verify-live-tasks.sh: PASS 1/1
+
+Environment note: `just verify-vz` was not runnable because `just` is not
+installed on this host. The justfile's explicit command list was run manually
+before final review; its original live-SVC portion is not acceptance evidence
+and is superseded by the corrected one-shot run above.

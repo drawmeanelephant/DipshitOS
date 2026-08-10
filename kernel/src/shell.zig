@@ -210,6 +210,7 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "  reboot    restart the machine\n" ++
         "  repeat    repeat text, safely bounded\n" ++
         "  shutdown  request power-off\n" ++
+        "  syscalls  numbered syscall table and counters\n" ++
         "  tasks     tick-driven task scheduler status\n" ++
         "  timer     interrupt controller + timer status\n" ++
         "  uname     compact system identity\n" ++

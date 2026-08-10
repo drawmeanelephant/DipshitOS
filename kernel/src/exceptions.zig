@@ -441,7 +441,11 @@ export fn exc_dispatch(
         if (svc_dispatcher) |d| {
             const immediate: u16 = @truncate(esr & 0xffff);
             if (d(frame, immediate)) {
-                return .{ .frame = @intFromPtr(frame), .sp_el0 = resume_sp_el0 };
+                // A normal syscall leaves resume_frame pointing at `frame`.
+                // Cooperative yield/exit may instead stage another runnable
+                // task through the scheduler; honor the same return-frame
+                // seam the IRQ path already uses.
+                return .{ .frame = resume_frame, .sp_el0 = resume_sp_el0 };
             }
         }
     }
@@ -864,10 +868,12 @@ fn exception_vectors() align(2048) callconv(.naked) void {
 // ---------------------------------------------------------------------------
 
 var test_svc_immediate: u16 = 0;
+var test_svc_resume_frame: ?*VectorFrame = null;
 
 fn test_svc_handler(frame: *VectorFrame, immediate: u16) bool {
     test_svc_immediate = immediate;
     _ = frame_write(frame, 0, frame_read(frame, 0) + 1);
+    if (test_svc_resume_frame) |selected| resume_frame = @intFromPtr(selected);
     return true;
 }
 
@@ -920,6 +926,7 @@ test "exceptions: SVC dispatcher mutates x0 and resumes the same EL0 frame" {
     var frame: VectorFrame = [_]u64{0} ** vector_frame_slots;
     try std.testing.expect(frame_write(&frame, 0, 41));
     test_svc_immediate = 0;
+    test_svc_resume_frame = null;
     set_svc_dispatcher(test_svc_handler);
     const esr: u64 = (0x15 << 26) | 0x1234;
     const dispatch_result = exc_dispatch(&frame, esr, 0, 0x4000, 0, kind_sync);
@@ -927,6 +934,16 @@ test "exceptions: SVC dispatcher mutates x0 and resumes the same EL0 frame" {
     try std.testing.expectEqual(@as(u64, 0), dispatch_result.sp_el0); // host has no SP_EL0
     try std.testing.expectEqual(@as(u16, 0x1234), test_svc_immediate);
     try std.testing.expectEqual(@as(u64, 42), frame_read(&frame, 0));
+}
+
+test "exceptions: handled SVC may select another existing scheduler frame" {
+    var frame: VectorFrame = [_]u64{0} ** vector_frame_slots;
+    var selected: VectorFrame = [_]u64{0} ** vector_frame_slots;
+    test_svc_resume_frame = &selected;
+    set_svc_dispatcher(test_svc_handler);
+    const result = exc_dispatch(&frame, 0x15 << 26, 0, 0x4000, 0, kind_sync);
+    try std.testing.expectEqual(@intFromPtr(&selected), result.frame);
+    test_svc_resume_frame = null;
 }
 
 test "exceptions: kind_name is stable" {

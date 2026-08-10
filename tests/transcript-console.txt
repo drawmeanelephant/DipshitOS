@@ -20,6 +20,7 @@ available commands:
   reboot    restart the machine
   repeat    repeat text, safely bounded
   shutdown  request power-off
+  syscalls  numbered syscall table and counters
   tasks     tick-driven task scheduler status
   timer     interrupt controller + timer status
   uname     compact system identity
