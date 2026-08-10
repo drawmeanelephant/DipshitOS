@@ -26,8 +26,9 @@
   relaxed gate, per-task syscall regions + host tests) and Stage B (the
   live concurrent gate + full shared-seam regression sweep) landed
   2026-08-10; Stage C (docs reconciliation, this flip) complete.
-- **PR:** pending — the branch `agent/buffy/m4-concurrent-processes` is
-  ready to open against `main`.
+- **PR:** [drawmeanelephant/DipshitOS#73](https://github.com/drawmeanelephant/DipshitOS/pull/73)
+  — opened 2026-08-10, commit `c077592` on
+  `agent/buffy/m4-concurrent-processes`.
 
 ## Notes
 

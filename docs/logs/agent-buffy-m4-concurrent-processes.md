@@ -126,4 +126,9 @@
   1 + 2 + 3 + 3a); README + `docs/gate-inventory.md` (`live-concurrent`
   gate) were updated during Stage B. Claim 0826 flipped ✅ done (Stage A +
   B + C complete; PR pending). Indexes refreshed; coordination + test-
-  coordination checks green. Remaining: the PR itself.
+  coordination checks  green.
+
+- **PR** (2026-08-10): branch pushed, PR opened —
+  [drawmeanelephant/DipshitOS#73](https://github.com/drawmeanelephant/DipshitOS/pull/73)
+  (commit `c077592`), body per the repo template (summary + AGENTS
+  compliance checklist + observed class A/B evidence + commands).
