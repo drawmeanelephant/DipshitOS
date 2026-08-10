@@ -239,13 +239,15 @@ disk itself). **The milestone is closed 2026-08-09: all 7 M1.5 hard
 gates pass; tagged `m1.5-interactive-monitor`** (see
 [`docs/status.md`](status.md)).
 
-## Milestone three — allocator, interrupts, tasks (implemented through the first tasks card)
+## Milestone three — allocator, interrupts, tasks, EL0/SVC, and syscalls (implemented through the syscall ABI card)
 
 > The milestone-three plan, in canonical order (mirroring
-> `docs/status.md`'s "What comes immediately afterward"): physical
-> allocator → exception vectors → GIC + timer → kernel tasks → userspace.
-> Every card through the first tasks card is **done**; **userspace is the
-> next milestone-three card**.
+> `docs/status.md`'s "What comes immediately afterward" and the per-card
+> tracker [`docs/march-m3.md`](march-m3.md)): physical allocator →
+> exception vectors → GIC + timer → kernel tasks → EL0/SVC boundary →
+> syscall ABI → uaccess → per-task address spaces → user lifecycle → ESP
+> exec → blocking syscalls. Every card through the syscall ABI card is
+> **done**; **uaccess is the next milestone-three card**.
 
 - ~~A physical page allocator over the captured EFI map.~~ **First step
   DONE 2026-08-08 (claim 3972):** first-fit bitmap allocator over the
@@ -281,6 +283,21 @@ gates pass; tagged `m1.5-interactive-monitor`** (see
   context switches + a responsive shell), and the strict live-timer gate
   still passes under preemption. No userspace, no MMU changes — a later
   card adds userspace.
+- ~~First EL0t task + SVC kernel boundary.~~ **DONE 2026-08-09 (claim
+  8215, PR #60)** — a statically linked EL0 task with page-local user
+  text/stack apertures, x8-selected `svc #0`, SP_EL0-preserving
+  scheduling, and the strict live gate `tools/verify-live-userspace.sh`
+  (two sequenced pings prove return to EL0 under timer preemption).
+- ~~Frozen syscall ABI + runtime dispatch table.~~ **DONE 2026-08-10
+  (claim 3594, PR #64)** — ADR 0007
+  ([`docs/decisions/0007-syscall-abi.md`](decisions/0007-syscall-abi.md))
+  freezes x8 number, x0–x5 arguments, x0 result; the runtime-built
+  64-slot table implements slots 0–3 (`ping`/`write`/`yield`/`exit`) and
+  returns `ENOSYS` for reserved 4–63; `sys_write` is bounded to the
+  kernel-known EL0 apertures and the low-4-GiB identity blanket;
+  scheduler yield/exit hooks and deterministic `syscalls` counters land
+  with the live gate `tools/verify-live-svc.sh` passing 1/1 (evidence:
+  `artifacts/syscall-abi-3594/verification-summary.txt`).
 
 ## Later milestones (sketches only, not commitments)
 

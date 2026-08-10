@@ -9,9 +9,10 @@ that card lands; it must not fight it.
 - Branch: `agent/.../m3-syscall-abi` (claim first via a claim file in
   `docs/claims/` + a log entry in `docs/logs/`; merge per ADR 0003)
 - Date: 2026-08-09
-- Depends on: **the EL0/SVC card** (PR #60 — draft, branch
-  `codex/el0-svc-task`, claim 8215 ✅ — smallest real EL0 task + SVC
-  kernel boundary). Do not start the implementation until PR #60 MERGES
+- Depends on: **the EL0/SVC card** (PR #60 — merged as `65ad6af`,
+  branch `codex/el0-svc-task`, claim 8215 ✅ — smallest real EL0 task
+  + SVC kernel boundary). Do not start the implementation until PR #60
+  MERGES
   to main: it rewrites `exceptions.zig`'s dispatch surface (~400 lines),
   `scheduler.zig`, `mmu.zig`, `monitor.zig`, `shell.zig`, and
   `main.zig`, and adds `kernel/src/userspace.zig` +
