@@ -46,6 +46,13 @@ assumption comes from documentation or reasoning only.
   `VZVirtualMachineView`. **Observed**: the firmware renders nothing to it;
   captured PNGs are blank/gray. UEFI text is therefore NOT visible on the
   VZ framebuffer either.
+- Custom virtio device (`VZCustomVirtioDeviceConfiguration`, the
+  `--custom-virtio` runner flag / `zig build spike-virtio`): the guest sees
+  a vendor-defined device on bus 0 as `VID=0x1af4 DID=0x1082`.
+  **Discovered by claims 5844/0828** — the device is enumerable, its
+  transport BAR0 sits at `0x100020000`, a real SPI 69 IRQ fires on
+  used-ring advances, and the firmware boots it with the PCI command
+  register disabled (see the dedicated section below). **[observed]**
 - Execution evidence: the guest also writes its message to `\BOOTED.TXT` on
   the ESP via the UEFI Simple File System protocol. **Observed**: after a
   VZ boot, the file exists on the image with the exact expected content.
@@ -296,6 +303,54 @@ redesign.
   `tasks worker advances=N` after ≥ 2 real context switches and the shell
   stays responsive (`rx-tasks-ok`).
   **[inferred at entry; observed working after the explicit unmask].**
+
+## Custom virtio device (macOS 27+ spike, claims 5844/0828/4374/9492/9737/4837)
+
+A `VZCustomVirtioDeviceConfiguration` attaches an arbitrary virtio-class
+function to the VM; the guest sees a vendor-defined device rather than one
+of the standard virtio DID assignments. All findings below are
+**[observed]** from `zig build spike-virtio` boots on a real Apple M4 /
+macOS 27 VZ host (claims 5844/0828, then the one-boot quad
+4374/9492/9737/4837; live gate `tools/verify-custom-virtio.sh`; serial and
+host-runner evidence under `artifacts/live-cvspike-*` / `artifacts/vm-spike-*`).
+
+- **Identity: bus 0, `VID=0x1af4 DID=0x1082`, class 0x00/0x00, one
+  queue.** **[observed]** — the live `pci` command lists it beside the
+  standard VZ devices (console 0x1043, block 0x1042, entropy 0x1044, Apple
+  bridge). 0x1082 is **not** in the standard virtio DID table; VZ assigns
+  it to the custom configuration.
+- **Transport BAR: BAR0 (64-bit) at `0x100020000`** — above the 4 GiB
+  identity-map blanket, like the console's BAR0 `0x100010000`. Claim 5844's
+  earlier "0x50001000 BAR" note was BAR2; the transport is BAR0. **[observed]**
+- **VZ's firmware never enables the PCI command register for the custom
+  device** — it boots at `0x10` (memory space off), so BAR0 is inert and
+  every access external-aborts until the guest driver writes
+  `command=0x16` (the console's exact value) in `init()`. The standard VZ
+  virtio devices do not need this. **[observed]** (claim 0828)
+- **Config-space access follows the same rules as the console** —
+  aligned-u32 reads only (VZ returns garbage for byte reads; unaligned
+  reads alignment-fault); the split-ring transport's common cfg, ISR,
+  notify, and device cfg live in BAR0. **[observed]**
+- **Feature negotiation (claim 9737):** VZ offers `feat=0x530000000` —
+  `VIRTIO_F_VERSION_1` plus `RING_PACKED`/`RING_EVENT_IDX`/
+  `RING_INDIRECT_DESC` — but **not** `ANY_LAYOUT` or `NOTIFICATION_DATA`;
+  the driver accepts only `VERSION_1` (`acc=0x100000000`, `nd=0 al=0`,
+  notify is 16-bit), so classic kicks carry everything. **[observed]**
+- **Used-buffer IRQ: a real SPI — INTID 0x45 (SPI 69)** enters the
+  claim-9746 EL1 IRQ vector, the same SPI Linux's virtio1 uses on this VZ
+  surface. **[observed]** — the driver drains the used ring on IRQ and
+  re-kicks.
+- **VZ coalesces used-buffer IRQs per burst:** four exchanges in one boot
+  produced exactly **1 IRQ** (`irq=1`); the IRQ is a notification, not a
+  per-element ack — the driver must drain the whole used ring, and all
+  replies still arrived reliably. **[observed]** (claim 0828)
+- **Two armed split-ring queues (claims 4374/4837):** queue 0 carries
+  bidirectional data exchanges (descriptor chains pairing a device-read
+  payload with a device-write reply buffer; the used-ring length drives
+  reply reads) and queue 1 carries a guest log transport (`cvlog_puts`,
+  host echo per line). Multi-descriptor scatter payloads well over 4 KiB
+  work end to end — a 12,340-byte three-descriptor payload is reassembled
+  and echoed by the host (claim 9492). **[observed]**
 
 ## What milestone zero does NOT assume (and does not touch)
 
