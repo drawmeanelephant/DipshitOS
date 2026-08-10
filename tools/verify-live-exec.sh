@@ -39,7 +39,7 @@ STATIC_EXIT_LINE="tasks user-el0 exited status=7"
 # The exec'd program's exit line (asserted) and its reap line (asserted
 # AND the script-expect — the reap prints a quantum after the exit, so it
 # is the last line in the log).
-EXEC_EXIT_LINE="tasks user-exec exited status=42"
+EXEC_EXIT_LINE="tasks user-exec exited status=43"
 EXEC_REAP_LINE="tasks user-exec reaped"
 
 echo "=== verify-live-exec: claim 6783 — load + exec a user program from the ESP at EL0, $BOOTS boot(s) ==="

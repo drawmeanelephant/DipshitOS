@@ -1,5 +1,5 @@
 //! DipshitOS user program loaded from the ESP (milestone-three card 6,
-//! claim 6783).
+//! claim 6783; extended by card 7, claim 0635 — blocking syscalls).
 //!
 //! Built as a freestanding AArch64 flat image (USER.BIN, DSK1 format via
 //! tools/elf2bin.py — the same tooling as KERNEL.BIN), embedded on the ESP
@@ -10,13 +10,17 @@
 //! The payload is deliberately identical in shape to the claim-8215 static
 //! payload (naked asm, fixed register ABI only — no Zig-generated memory
 //! references or calls): it proves the loaded image actually executes at
-//! EL0 by (1) writing a marker line through sys_write (fd 1, slot 1), which
-//! lands directly in the serial log, (2) round-tripping two sequenced
+//! EL0 by (1) writing marker lines through sys_write (fd 1, slot 1), which
+//! land directly in the serial log, (2) round-tripping two sequenced
 //! sys_ping calls (slot 0) — the second valid call proves the first SVC
-//! returned to EL0 — and (3) exiting with a distinct status (0x2a = 42)
-//! through the non-returning sys_exit (slot 3), closing the claim-6729
-//! lifecycle. The terminal branch is only a fail-safe park if a ping
-//! round-trip comes back wrong.
+//! returned to EL0 — (3) cooperatively yielding once (sys_yield, slot 2),
+//! (4) sleeping for 2 scheduler ticks (sys_sleep, slot 4) and asserting the
+//! 0 return — the claim-0635 blocking proof: the payload is parked
+//! (state=blocked), the tick's timer-driven wakeup resumes it from the same
+//! SVC frame, and execution continues — and (5) exiting with a distinct
+//! status (0x2b = 43) through the non-returning sys_exit (slot 3), closing
+//! the claim-6729 lifecycle. The terminal branch is only a fail-safe park
+//! if a ping round-trip or the sleep return comes back wrong.
 
 export fn _start() callconv(.naked) noreturn {
     asm volatile (
@@ -43,7 +47,29 @@ export fn _start() callconv(.naked) noreturn {
         \\mov x2, #14
         \\mov x8, #1
         \\svc #0
-        \\mov x0, #0x2a
+        \\// Claim 0635: one cooperative yield before sleeping — the caller
+        \\// is staged and resumed by the ring like any other quantum.
+        \\mov x8, #2
+        \\svc #0
+        \\mov x0, #1
+        \\adr x1, 5f
+        \\mov x2, #23
+        \\mov x8, #1
+        \\svc #0
+        \\// Sleep 2 scheduler ticks (slot 4): the task blocks, other tasks
+        \\// run, and the tick wakes it. The return MUST be 0 — a wrong
+        \\// value parks in the fail-safe branch.
+        \\mov x0, #2
+        \\mov x8, #4
+        \\svc #0
+        \\cmp x0, #0
+        \\b.ne 3f
+        \\mov x0, #1
+        \\adr x1, 6f
+        \\mov x2, #12
+        \\mov x8, #1
+        \\svc #0
+        \\mov x0, #0x2b
         \\mov x8, #3
         \\svc #0
         \\3:
@@ -53,6 +79,12 @@ export fn _start() callconv(.naked) noreturn {
         \\.byte 10
         \\4:
         \\.ascii "user: exec ok"
+        \\.byte 10
+        \\5:
+        \\.ascii "user: sleeping 2 ticks"
+        \\.byte 10
+        \\6:
+        \\.ascii "user: awake"
         \\.byte 10
     );
 }

@@ -293,10 +293,10 @@ gates pass; tagged `m1.5-interactive-monitor`** (see
   (claim 3594, PR #64)** — ADR 0007
   ([`docs/decisions/0007-syscall-abi.md`](decisions/0007-syscall-abi.md))
   freezes x8 number, x0–x5 arguments, x0 result; the runtime-built
-  64-slot table implements slots 0–3 (`ping`/`write`/`yield`/`exit`) and
+  64-slot table implements slots 0–4 (`ping`/`write`/`yield`/`exit`/`sleep`) and
   returns `ENOSYS` for reserved 4–63; `sys_write` is bounded to the
   kernel-known EL0 apertures and the low-4-GiB identity blanket;
-  scheduler yield/exit hooks and deterministic `syscalls` counters land
+  scheduler yield/exit/sleep hooks and deterministic `syscalls` counters land
   with the live gate `tools/verify-live-svc.sh` passing 1/1 (evidence:
   `artifacts/syscall-abi-3594/verification-summary.txt`).
 - ~~**uaccess: fault-safe copy-in/copy-out.**~~ **DONE 2026-08-10 (claim

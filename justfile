@@ -54,6 +54,7 @@ verify-vz:
     bash tools/verify-live-addrspaces.sh
     bash tools/verify-live-lifecycle.sh
     bash tools/verify-live-exec.sh
+    bash tools/verify-live-sleep.sh
     bash tools/verify-live-reboot.sh
 
 # Compile the AArch64 UEFI application and kernel image (class A — zig build)

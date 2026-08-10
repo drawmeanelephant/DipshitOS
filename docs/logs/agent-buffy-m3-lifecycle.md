@@ -123,3 +123,39 @@
   done + lane D text; status milestone-three row, gate table `live-exec`
   row, tracker item 13, command count 26→27; README milestone-three blurb;
   gate inventory; indexes refreshed; `verify-coordination.sh` green.
+
+## 2026-08-10 — card 7: blocking syscalls (claim 3200)
+
+- Claimed milestone-three march card 7 (blocking syscalls: sleep/yield/wakeup
+  in the tick scheduler). Claim file: `docs/claims/3200-blocking-syscalls.md`.
+- Plan: new `sys_sleep(ticks)` row (slot 4, ADR 0007 amendment) blocking the
+  caller for N ticks; scheduler `blocked` state + per-task wakeup deadline +
+  tick counter with IRQ-context `wake_expired`; extended user program
+  (yield, sleep 2, assert 0 return, exit 43); new live gate
+  `tools/verify-live-sleep.sh` proving worker/shell progress during the sleep.
+
+- **Implemented** (2026-08-10): `sys_sleep(ticks)` row (slot 4) + ADR 0007
+  amendment; scheduler `blocked` state, per-task wakeup deadline, tick
+  counter with IRQ-context `wake_expired` (console-free), `sleep_current`
+  saving the SVC frame exactly like `yield_current`; `user_root_in_use`
+  now counts blocked tasks; user program extended (yield, sleep 2, assert
+  0 return, exit 43); monitor syscalls report; live gate
+  `tools/verify-live-sleep.sh`; justfile + gate-inventory + CI entries.
+
+- **Live fix found by the gate (2026-08-10):** `sleep_current` initially
+  set the task to blocked and switched away WITHOUT saving its SVC frame —
+  the resumed task ran garbage and never printed `awake`. Root-caused from
+  the serial log and fixed by capturing the frame like `yield_current`.
+
+- **Verification** (2026-08-10): class A green (fmt incl. user/src, unit
+  tests, transcript byte-identical, build/image/inspect with USER.BIN on
+  the ESP, coordination). Class B all 1/1 on VZ: the new live-sleep gate +
+  exec (expects status 43), lifecycle, addrspaces, uaccess, svc,
+  userspace, tasks, timer, fs, exceptions, cvspike, transcript, reboot
+  2/2 regressions.
+
+- **Docs reconciled** (2026-08-10): claim 3200 + this log; ADR 0007
+  slot-4 amendment; march-m3 row 7 → done + lane D text; status
+  milestone-three row, gate table `live-sleep` row, tracker item 14;
+  roadmap; gate inventory; indexes refreshed; `verify-coordination.sh`
+  green.
