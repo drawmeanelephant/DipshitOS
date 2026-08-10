@@ -1,0 +1,24 @@
+Milestone-three ragshit dogfood verification
+Repository HEAD: 6b1b8cd2195fc543da149536074e9088542a7d57
+
+PASS  ./tools/ragshit/ragshit index .
+      311 scanned; 227 eligible files; 2,080 chunks; 84 skipped
+PASS  ./tools/ragshit/ragshit doctor .
+      all required checks passed; FTS5 active; index fresh; no duplicate or
+      orphaned chunks
+PASS  targeted ragshit bundle
+      artifacts/m3-ragshit-bundle.md contains every required review surface;
+      68 included sources; four omitted sources are unrelated score < 0.6
+PASS  deterministic bundle comparison
+      two independent renders were byte-identical
+      122,750 bytes each
+      sha256 13c0062045f7fb71811b19f03b55b5c9f953086ecf3fab2373a5c4f30bb5476e
+
+NOT RUN  full pytest suite
+      `python3 -m pytest` failed before collection because the available
+      Python 3.14 runtime has no pytest module. No ragshit source or tests
+      changed on this branch; doctor, index completeness, bundle surface, and
+      determinism are the applicable executable gates. This is a missing
+      optional test dependency, not a product-test failure.
+
+No VZ command was run and no hardware behavior is claimed.
