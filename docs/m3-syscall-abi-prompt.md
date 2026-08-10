@@ -1,3 +1,5 @@
+> ARCHIVED (claim 3594 done)
+
 # Milestone three — syscall ABI + dispatch table (the SVC contract)
 
 Planning-first agent prompt for DipshitOS. Feed this file to the

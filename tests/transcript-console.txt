@@ -3,29 +3,32 @@ DipshitOS: memory is a map, not a territory.
 Type 'help' before touching anything expensive.
 dipshit> help
 available commands:
-  about     explain this questionable system
-  beans     count beans, probably
-  cat       print a file from the ESP
-  clear     clean up the crime scene
-  echo      repeat your regrettable decisions
-  elephant  operational mascot diagnostics
-  fault     trigger a synchronous exception (diagnostic)
-  handoff   display boot-to-kernel ABI data
-  help      list commands and their help text
-  hex       format an integer in hexadecimal
-  ls        list files on the ESP
-  mem       summarize the EFI memory map
-  pages     physical page allocator pool
-  pci       enumerate PCI devices on the bus
-  reboot    restart the machine
-  repeat    repeat text, safely bounded
-  shutdown  request power-off
-  syscalls  numbered syscall table and counters
-  tasks     tick-driven task scheduler status
-  timer     interrupt controller + timer status
-  uname     compact system identity
-  version   display build information
-  write     write text to a file on the ESP
+  addrspaces  per-task user address spaces: per-task TTBR0, EL1-only kernel overlay, user-root contents
+  about       explain this questionable system
+  beans       count beans, probably
+  cat         print a file from the ESP
+  clear       clean up the crime scene
+  echo        repeat your regrettable decisions
+  elephant    operational mascot diagnostics
+  fault       trigger a synchronous exception (diagnostic)
+  handoff     display boot-to-kernel ABI data
+  help        list commands and their help text
+  hex         format an integer in hexadecimal
+  ls          list files on the ESP
+  mem         summarize the EFI memory map
+  pages       physical page allocator pool
+  pci         enumerate PCI devices on the bus
+  reboot      restart the machine
+  repeat      repeat text, safely bounded
+  shutdown    request power-off
+  spawn       spawn the lifecycle demo task
+  syscalls    numbered syscall table and counters
+  tasks       tick-driven task scheduler status
+  timer       interrupt controller + timer status
+  uaccess     user-memory copy diagnostics (valid, fault, recovery)
+  uname       compact system identity
+  version     display build information
+  write       write text to a file on the ESP
 type 'help <command>' for details on a single command.
 dipshit> version
 dipshit-kernel
@@ -57,10 +60,11 @@ pages selftest: free ok
 pages selftest: alloc 1153 -> none (out of memory)
 pages selftest: ok free=0x0000000000000480
 dipshit> tasks
-tasks: enabled=0 current=0 switches=0
-  shell    saves=0 resumes=0 advances=0
-  worker   saves=0 resumes=0 advances=0
-  user-el0 saves=0 resumes=0 advances=0
+tasks: enabled=0 current=0 switches=0 pool=4/5 zombies=0
+  shell    saves=0 resumes=0 advances=0 state=ready
+  worker   saves=0 resumes=0 advances=0 state=ready
+  user-el0 saves=0 resumes=0 advances=0 state=ready
+  idle     saves=0 resumes=0 advances=0 state=ready
 dipshit> echo "elephant business"
 elephant business
 dipshit> ls

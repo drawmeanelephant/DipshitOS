@@ -43,6 +43,7 @@ verify-coordination`, and CI) fails if it drifts from the files.
 <!-- LOGS_INDEX:START -->
 | Branch | Log file |
 |--------|----------|
+| agent/buffy/doc-sync-m3 | [`agent-buffy-doc-sync-m3.md`](agent-buffy-doc-sync-m3.md) |
 | `agent/buffy/m15-commands` (PR #12) | [`agent-buffy-m15-commands.md`](agent-buffy-m15-commands.md) |
 | `agent/buffy/m15-host-plumbing` (PR #13) | [`agent-buffy-m15-host-plumbing.md`](agent-buffy-m15-host-plumbing.md) |
 | `agent/buffy/m15-machine-controls` | [`agent-buffy-m15-machine-controls.md`](agent-buffy-m15-machine-controls.md) |
@@ -53,7 +54,10 @@ verify-coordination`, and CI) fails if it drifts from the files.
 | `agent/buffy/m2-badhandoff-fix` (PR #11) | [`agent-buffy-m2-badhandoff-fix.md`](agent-buffy-m2-badhandoff-fix.md) |
 | `agent/buffy/m2-kernel-proper` (PR #10) | [`agent-buffy-m2-kernel-proper.md`](agent-buffy-m2-kernel-proper.md) |
 | M2 fixed-memory-marker fallback (ADR 0004 D4, gate work item 3) | [`agent-buffy-m2-marker-fallback.md`](agent-buffy-m2-marker-fallback.md) |
+| per-task user address spaces (claim 5804) | [`agent-buffy-m3-addrspaces.md`](agent-buffy-m3-addrspaces.md) |
 | `agent/buffy/m3-docs-reconcile-syscall-abi` | [`agent-buffy-m3-docs-reconcile-syscall-abi.md`](agent-buffy-m3-docs-reconcile-syscall-abi.md) |
+| user task lifecycle (claim 6729) | [`agent-buffy-m3-lifecycle.md`](agent-buffy-m3-lifecycle.md) |
+| `agent/buffy/m3-uaccess` | [`agent-buffy-m3-uaccess.md`](agent-buffy-m3-uaccess.md) |
 | `agent/buffy/macos27-custom-virtio-spike` | [`agent-buffy-macos27-custom-virtio-spike.md`](agent-buffy-macos27-custom-virtio-spike.md) |
 | `agent/codex/m3-march-tracker` | [`agent-codex-m3-march-tracker.md`](agent-codex-m3-march-tracker.md) |
 | `agent/codex/m3-ragshit-dogfood` | [`agent-codex-m3-ragshit-dogfood.md`](agent-codex-m3-ragshit-dogfood.md) |

@@ -17,12 +17,17 @@ These rules bind any AI agent or human contributor working in this project.
 Milestones zero, one, two, and 1.5 are implemented (1.5 — the interactive
 kernel monitor — closed and tagged `m1.5-interactive-monitor` on
 2026-08-09; milestone two's VZ serial gate passes since 2026-08-08, claim
-1517). The current stream is **milestone three's first cards**: the
-physical page allocator is done (claims 3972/5162), GIC + timer interrupts
-now deliver a real periodic PPI into the EL1 IRQ vector on VZ (claim 9187,
-3/3 strict live gate), and the first tasks card — a tick-driven
-round-robin scheduler between two kernel tasks (claim 5275, live gate
-`tools/verify-live-tasks.sh`) — is done; userspace is a later card.
+1517). The current stream is **milestone three**: the physical page
+allocator is done (claims 3972/5162), GIC + timer interrupts deliver a
+real periodic PPI into the EL1 IRQ vector on VZ (claim 9187, 3/3 strict
+live gate), the tick-driven round-robin kernel task scheduler is done
+(claim 5275, live gate `tools/verify-live-tasks.sh`), the first EL0t task
++ SVC boundary is done (claim 8215, live gate
+`tools/verify-live-userspace.sh`), the frozen 64-slot syscall ABI is done
+(claim 3594, live gate `tools/verify-live-svc.sh`), and the fault-safe
+uaccess copy-in/copy-out layer is done (claim 6120, live gate
+`tools/verify-live-uaccess.sh`). **uaccess is complete; per-task user
+address spaces is the next milestone-three card.**
 `docs/status.md` is the canonical, always-current answer to "where are we,
 and what's next".
 

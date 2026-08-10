@@ -29,6 +29,7 @@
 const std = @import("std");
 const SystemTable = std.os.uefi.tables.SystemTable;
 const mmio = @import("mmio.zig");
+const mmu = @import("mmu.zig");
 const evidence = @import("evidence.zig");
 
 /// Fold target: written by every probe so the loads are observable and
@@ -61,8 +62,10 @@ const wp_markers = [_]u64{
 pub fn run(st: *const SystemTable) void {
     evidence.write_marker_var(st, evidence.marker_wp00);
     // P1: the kernel's own BSS word (~2 GiB RAM) — proves the walk serves
-    // RAM at the kernel's own VA before any other address is touched.
-    probe_sum ^= @as(u64, mmio.mmio_read32(@intCast(@intFromPtr(&probe_sum))));
+    // RAM at the kernel's own VA before any other address is touched. The
+    // mmio accessor translates phys -> KVA (claim 5804), so pass the
+    // PHYSICAL address of probe_sum here.
+    probe_sum ^= @as(u64, mmio.mmio_read32(@intCast(mmu.to_phys(@intFromPtr(&probe_sum)))));
     evidence.write_marker_var(st, evidence.marker_wp01);
     for (probes, 0..) |addr, i| {
         probe_sum ^= @as(u64, mmio.mmio_read32(addr));

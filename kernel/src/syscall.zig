@@ -7,16 +7,17 @@
 //! the flat kernel loader applies no relocations, so a const table would hold
 //! invalid link-time function addresses at the runtime-selected image base.
 //!
-//! No allocation, libc, POSIX, uaccess, process abstraction, or address-space
-//! work lives here. `sys_write` uses bounded arithmetic under the current
-//! shared identity map; EFAULT is reserved for the follow-on uaccess card.
+//! No allocation, libc, POSIX, process abstraction, or address-space work
+//! lives here. `sys_write` copies user bytes through the claim-6120 uaccess
+//! layer (`uaccess.copy_in`), which enforces the ADR 0007 `EFAULT` (-3)
+//! contract for bad user pointers (out-of-region, overflow, unmapped,
+//! permission) without letting them crash EL1.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const console = @import("console.zig");
 const exceptions = @import("exceptions.zig");
-const mmu = @import("mmu.zig");
 const scheduler = @import("scheduler.zig");
+const uaccess = @import("uaccess.zig"); // claim 6120: fault-safe copy-in
 const userspace = @import("userspace.zig");
 
 pub const slot_count: usize = 64;
@@ -59,29 +60,26 @@ var table_storage: [slot_count]Entry = undefined;
 var table_ready = false;
 var call_counts: [slot_count]u64 = [_]u64{0} ** slot_count;
 var write_fn: ?Writer = null;
-var allowed_user_regions: [2]userspace.Region = .{
-    .{ .base = 0, .len = 0 },
-    .{ .base = 0, .len = 0 },
-};
 
-/// Initialize the writer seam and reset counters. The table remains a
-/// runtime-built BSS object; rebuilding is unnecessary once its PC-relative
-/// addresses have been materialized at the current image base.
+/// Initialize the writer seam, reset counters and the uaccess regions. The
+/// table remains a runtime-built BSS object; rebuilding is unnecessary once
+/// its PC-relative addresses have been materialized at the current image
+/// base.
 pub fn init(writer: Writer) void {
     write_fn = writer;
     @memset(&call_counts, 0);
-    allowed_user_regions = .{
-        .{ .base = 0, .len = 0 },
-        .{ .base = 0, .len = 0 },
-    };
+    uaccess.init();
     _ = ensure_table();
 }
 
-/// Configure the two claim-8215 apertures already mapped for EL0. This is
-/// plain range arithmetic over kernel-known mappings, not uaccess or fault
-/// recovery. The follow-on uaccess card will replace it.
+/// Configure the two claim-8215 apertures already mapped for EL0 (user text
+/// read-only, user stack read-write). Delegated to the claim-6120 uaccess
+/// layer, which owns the EFAULT contract and the fault-recovery window.
 pub fn set_user_regions(text: userspace.Region, stack: userspace.Region) void {
-    allowed_user_regions = .{ text, stack };
+    uaccess.set_regions(
+        .{ .base = text.base, .len = text.len },
+        .{ .base = stack.base, .len = stack.len },
+    );
 }
 
 fn ensure_table() *const [slot_count]Entry {
@@ -140,37 +138,16 @@ fn handle_write(args: Args, _: *exceptions.VectorFrame) u64 {
     const address = args[1];
     const len = args[2];
     if (len > write_cap) return error_result(.einval);
-    const end = address +% len;
-    if (end < address) return error_result(.einval);
     if (len == 0) return 0;
-    if (!allowed_user_range(address, len)) return error_result(.einval);
-    // The live kernel's user apertures lie inside the guaranteed low identity
-    // blanket. Host test images are conventionally loaded above 4 GiB, so the
-    // architectural ceiling is pinned separately by pure range tests.
-    if (comptime !builtin.is_test) {
-        if (end > mmu.identity_blanket_end) return error_result(.einval);
-    }
+    // Claim 6120: copy the user bytes into a kernel staging buffer through
+    // the uaccess layer. A bad user pointer (out-of-region, overflow,
+    // unmapped, permission) returns EFAULT without crashing EL1; the writer
+    // never touches user memory directly.
+    var buf: [write_cap]u8 = undefined;
+    if (uaccess.copy_in(&buf, address, @intCast(len)) != .ok) return error_result(.efault);
     const writer = write_fn orelse return error_result(.einval);
-    const bytes: [*]const u8 = @ptrFromInt(address);
-    writer(bytes[0..@intCast(len)]);
+    writer(buf[0..@intCast(len)]);
     return len;
-}
-
-fn allowed_user_range(address: u64, len: u64) bool {
-    if (len == 0) return true;
-    const end = address +% len;
-    if (end < address) return false;
-    for (allowed_user_regions) |region| {
-        const region_end = region.base +% region.len;
-        if (region_end < region.base) continue;
-        if (address >= region.base and end <= region_end) return true;
-    }
-    return false;
-}
-
-fn range_within_identity(address: u64, len: u64) bool {
-    const end = address +% len;
-    return end >= address and end <= mmu.identity_blanket_end;
 }
 
 fn handle_yield(_: Args, _: *exceptions.VectorFrame) u64 {
@@ -283,7 +260,7 @@ test "syscall: handle_svc marshals every x0-x5 argument before replacing x0" {
     try std.testing.expectEqual(@as(u64, 0xcafe), exceptions.frame_read(&frame, 0));
 }
 
-test "syscall: write validates fd cap overflow and zero length" {
+test "syscall: write validates fd, cap, and the uaccess EFAULT contract" {
     init(test_writer);
     test_write_len = 0;
     var frame = fresh_frame();
@@ -301,21 +278,25 @@ test "syscall: write validates fd cap overflow and zero length" {
     args[0] = 1;
     args[2] = write_cap + 1;
     try std.testing.expectEqual(error_result(.einval), dispatch(sys_write, args, &frame));
+    // Bad user pointers now return the reserved EFAULT (-3), never EINVAL:
+    // arithmetic overflow, one byte before the region, one byte past it,
+    // and an unmapped address above the identity blanket.
     args[1] = std.math.maxInt(u64) - 1;
     args[2] = 4;
-    try std.testing.expectEqual(error_result(.einval), dispatch(sys_write, args, &frame));
+    try std.testing.expectEqual(error_result(.efault), dispatch(sys_write, args, &frame));
     args[1] = @intFromPtr(bytes.ptr) - 1;
     args[2] = 1;
-    try std.testing.expectEqual(error_result(.einval), dispatch(sys_write, args, &frame));
+    try std.testing.expectEqual(error_result(.efault), dispatch(sys_write, args, &frame));
     args[1] = @intFromPtr(bytes.ptr) + bytes.len - 1;
     args[2] = 2;
-    try std.testing.expectEqual(error_result(.einval), dispatch(sys_write, args, &frame));
-    try std.testing.expect(range_within_identity(mmu.identity_blanket_end - 1, 1));
-    try std.testing.expect(!range_within_identity(mmu.identity_blanket_end, 1));
-    try std.testing.expect(!range_within_identity(mmu.identity_blanket_end - 1, 2));
+    try std.testing.expectEqual(error_result(.efault), dispatch(sys_write, args, &frame));
+    args[1] = uaccess.diagnostic_unmapped;
+    args[2] = 8;
+    try std.testing.expectEqual(error_result(.efault), dispatch(sys_write, args, &frame));
 
+    // Zero length is legal even at a wild address: nothing is copied.
     test_write_len = 0;
-    args[1] = mmu.identity_blanket_end;
+    args[1] = uaccess.diagnostic_unmapped;
     args[2] = 0;
     try std.testing.expectEqual(@as(u64, 0), dispatch(sys_write, args, &frame));
     try std.testing.expectEqual(@as(usize, 0), test_write_len);
@@ -325,7 +306,7 @@ test "syscall: yield returns zero and exit removes the current task" {
     init(test_writer);
     _ = scheduler.init();
     _ = scheduler.register_worker(0x2000);
-    _ = scheduler.register_user(0x3000);
+    _ = scheduler.register_user(0x3000, 0);
     scheduler.start();
     var frame = fresh_frame();
     try std.testing.expectEqual(@as(u64, 0), dispatch(sys_yield, .{ 0, 0, 0, 0, 0, 0 }, &frame));
@@ -345,7 +326,7 @@ test "syscall: handle_svc writes yield result into the suspended caller frame" {
     init(test_writer);
     _ = scheduler.init();
     _ = scheduler.register_worker(0x2000);
-    _ = scheduler.register_user(0x3000);
+    _ = scheduler.register_user(0x3000, 0);
     scheduler.start();
     var caller = fresh_frame();
     try std.testing.expect(exceptions.frame_write(&caller, 0, 0xdead));

@@ -49,7 +49,7 @@ serial console: identity commands, memory-map inspection, shell utilities,
 machine controls, and an ESP file window. The host plumbing (duplex
 serial, terminal handling, `zig build console`), console & shell core (RX
 abstraction, line editor, tokenizer, prompt loop), and command registry
-(21 commands, mock-tested) are built; the transcript test gate passes
+(26 commands, mock-tested) are built; the transcript test gate passes
 (`zig build test-console`, byte-identical fixture). The **VZ serial gate
 passes** (claim 1517 — post-MMU virtio TX fixed with T0SZ=16 + `tlbi
 vmalle1` at the switch), **live RX** delivers host keystrokes end to end
@@ -291,10 +291,18 @@ The gate-by-gate plan and active work claims live in
    saved under `artifacts/`, and the matching MMIO/serial assumptions are
    flipped in `docs/hardware-contract.md`. (The bad-handoff failure gate
    — formerly the other unpassed gate — is closed since 2026-08-06.)
-3. **Milestone three is active; tasks are next.** The physical allocator
-   is done (claims 3972/5162), exception vectors are live (claim 9746), and
-   a real periodic CNTP PPI now reaches the guest's EL1 IRQ vector on VZ
-   (claim 9187; strict `irq=5 poll=0` gate passes 3/3). Canonical ordering
-   and evidence live in `docs/status.md`.
+3. **Milestone three is active; tasks, EL0/SVC, and the syscall ABI are
+   complete, and so is the fault-safe uaccess layer.** The physical
+   allocator is done (claims 3972/5162), exception vectors are live (claim
+   9746), a real periodic CNTP PPI reaches the guest's EL1 IRQ vector on VZ
+   (claim 9187; strict `irq=5 poll=0` gate passes 3/3), round-robin kernel
+   tasks are done (claim 5275), the EL0/SVC boundary (claim 8215) and the
+   frozen syscall ABI (claim 3594) pass their live gates, and fault-safe
+   uaccess (claim 6120), per-task user address spaces (claim 5804), and the
+   user task lifecycle (claim 6729 — explicit states, bounded spawn,
+   exit→zombie, idle-task reaper, plus the callee-saved vector-frame fix
+   that made preemption of compiled tasks safe) are done. **Loading and
+   execing a user program from the ESP is the next milestone-three card.**
+   Canonical ordering and evidence live in `docs/status.md`.
 4. Keep later task/process work and graphics/networking/SMP out of scope;
    those remain future roadmap cards.

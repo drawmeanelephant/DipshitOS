@@ -1,3 +1,5 @@
+> ARCHIVED — frozen historical record; do not treat as an active plan.
+
 # Milestone 1.5 — commands & personality: design and self-review
 
 Status: design complete and self-reviewed · Branch: `agent/buffy/m15-commands`

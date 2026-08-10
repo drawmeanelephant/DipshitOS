@@ -10,9 +10,10 @@
 //! static EL1 exception and EL0 execution stacks.
 //!
 //! Why the switch is tiny:
-//!   * The claim-9746 IRQ stubs already push the full caller-saved
-//!     register file (x0..x17 + x30) as a 160-byte "vector frame" on the
-//!     interrupted task's stack, and pop it back before `eret`.
+//!   * The claim-9746 IRQ stubs already push the full register file (x0..
+//!     x17 + x30, plus the claim-6729 callee-saved extension x19..x28 +
+//!     x29) as a 256-byte "vector frame" on the interrupted task's stack,
+//!     and pop it back before `eret`.
 //!   * The scheduler therefore only saves/restores per task: the
 //!     vector-frame pointer (sp), ELR_EL1 (interrupted PC) and SPSR_EL1
 //!     (interrupted PSTATE). The frame pointer reaches the tick through
@@ -31,18 +32,42 @@
 //! context — claim 9187). Worker progress is reported from the shell idle
 //! loop via `maybe_report`, the same pattern as the timer heartbeat.
 //!
+//! Claim 5804: every task now owns a TTBR0 root. The EL1h shell/worker
+//! share the EL1-only kernel root (identity map, zero EL0 leaves — also
+//! the root runtime services run under); the EL0 task gets the user root
+//! (text + stack only) and its entry/SP/witness are USER VAs, not kernel
+//! addresses. The switch therefore programs TTBR0 + TLB-invalidates before
+//! restoring ELR/SPSR.
+//!
+//! Claim 6729: the task lifecycle. Each pool slot carries an EXPLICIT
+//! state: free -> ready -> running -> ready (preempted) -> zombie (exited)
+//! -> free (reaped). `spawn` allocates the first free slot (bounded, no
+//! dynamic allocation); `exit_current` (the sys_exit path) turns the
+//! current task into a zombie; the scheduler-owned IDLE task (registered
+//! at the last slot by `init`, always ready, WFE-parked) reaps one zombie
+//! per iteration and the shell loop prints the reap. The idle task is the
+//! ring's fallback, so an exit always has a successor and the pool drains
+//! without a parent/child relationship. The monitor's `spawn` command
+//! exercises runtime spawn with one dedicated demo stack.
+//!
 //! No libc, no POSIX, no allocation.
 
 const std = @import("std");
 const builtin = @import("builtin");
 const console = @import("console.zig");
 const exceptions = @import("exceptions.zig");
+const mmu = @import("mmu.zig"); // claim 5804: per-task TTBR0 roots
+const userspace = @import("userspace.zig"); // claim 5804: user-VA layout
 
 const user_stack_section = if (builtin.object_format == .elf) ".userbss" else "__DATA,__userbss";
 
-/// Round-robin pool: shell + EL1h demo worker + one EL0t task. Fixed at
-/// comptime — no allocation, no dynamic registration or processes.
-pub const max_tasks: usize = 3;
+/// Round-robin pool: shell + EL1h demo worker + one EL0t task + one
+/// spawnable demo slot + the scheduler-owned idle task. Fixed at comptime
+/// — no allocation, no dynamic registration or processes; the lifecycle's
+/// spawn/reap only recycle these slots.
+pub const max_tasks: usize = 5;
+/// The idle task's fixed slot (registered by `init`, never recycled).
+pub const idle_id: usize = max_tasks - 1;
 /// The worker's static stack (BSS, like every other kernel global). The
 /// shell task continues to run on the handoff stack.
 pub const task_stack_size: usize = 8 * 1024;
@@ -53,13 +78,39 @@ pub const task_stack_size: usize = 8 * 1024;
 pub const spsr_el1h_irqs: u64 = 0x5;
 pub const spsr_el0t_irqs: u64 = 0x0;
 
-/// The claim-9746 vector frame: 20 slots holding x0..x17, x30, and a pad,
-/// pushed in reverse pair order by the IRQ stub on the interrupted task's
-/// stack; the "sp" a task saves/restores.
-const frame_bytes: usize = 20 * 8;
+/// The claim-9746 vector frame: 32 slots holding x0..x17, x30, a pad, and
+/// the claim-6729 callee-saved extension (x19..x28 + x29), pushed in
+/// reverse pair order by the IRQ stub on the interrupted task's stack; the
+/// "sp" a task saves/restores. The callee-saved half is what makes a
+/// context switch safe for compiled tasks (a preempted task's live
+/// x19..x28 survive the tick and are restored on resume — claim 6729
+/// bisect).
+const frame_bytes: usize = 32 * 8;
+
+/// Explicit task lifecycle state (claim 6729). A slot's state is the ONLY
+/// ownership signal: `free` slots are spawnable, `zombie` slots hold an
+/// exited task's status until the idle task reaps them, and the idle task
+/// itself never leaves `ready` (the scheduler refuses to exit it).
+pub const State = enum {
+    free,
+    ready,
+    running,
+    zombie,
+};
+
+/// Human-readable state label for the `tasks` monitor command.
+pub fn state_name(state: State) []const u8 {
+    return switch (state) {
+        .free => "free",
+        .ready => "ready",
+        .running => "running",
+        .zombie => "zombie",
+    };
+}
 
 const Task = struct {
     name: []const u8 = "",
+    state: State = .free,
     /// Saved vector-frame pointer (the SP to restore); 0 until the task
     /// has been preempted once (the shell task's context is captured on
     /// its first preemption; the worker's frame is built at registration).
@@ -71,19 +122,21 @@ const Task = struct {
     /// Stack selected by EL0t (and EL1t, which this scheduler does not
     /// create). EL1h tasks ignore this value.
     sp_el0: u64 = 0,
+    /// Physical TTBR0 root for this task's user space (claim 5804). The
+    /// EL1h tasks point at the EL1-only kernel root; the EL0 task points at
+    /// its text+stack-only user root. Written to TTBR0 on every switch.
+    ttbr0: u64 = 0,
     /// How many times this task's context was saved by a tick.
     saves: u64 = 0,
     /// How many times this task's context was restored by a tick.
     resumes: u64 = 0,
     /// Task-side progress counter (the worker bumps it; `tasks` reports).
     advances: u64 = 0,
-    registered: bool = false,
-    runnable: bool = false,
-    terminated: bool = false,
+    /// Exit status preserved while the task is a zombie (until reaped).
     exit_status: u64 = 0,
 };
 
-var tasks: [max_tasks]Task = .{ .{}, .{}, .{} };
+var tasks: [max_tasks]Task = .{ .{}, .{}, .{}, .{}, .{} };
 var task_count: usize = 0;
 var current: usize = 0;
 var enabled_flag: bool = false;
@@ -97,15 +150,22 @@ var pending_sp: u64 = 0;
 var pending_elr: u64 = 0;
 var pending_spsr: u64 = 0;
 var pending_sp_el0: u64 = 0;
+var pending_ttbr0: u64 = 0;
 
-/// Worker report (main-context console discipline, claim 9187): the worker
-/// marks a report pending; the shell idle loop prints it via `maybe_report`.
-var report_pending: bool = false;
-var report_task: usize = 0;
-var report_advances: u64 = 0;
+/// Task reports (main-context console discipline, claim 9187): a task
+/// marks ITS OWN report slot pending (claim 6729: one slot per pool entry,
+/// so the worker's constant requests cannot starve another task's report);
+/// the shell idle loop prints every pending slot via `maybe_report`.
+var report_pending: [max_tasks]bool = [_]bool{false} ** max_tasks;
+var report_advances: [max_tasks]u64 = [_]u64{0} ** max_tasks;
 var exit_report_pending: bool = false;
-var exit_report_task: usize = 0;
+var exit_report_name: []const u8 = "";
 var exit_report_status: u64 = 0;
+/// Reap report (claim 6729): the idle task marks a reap; the shell loop
+/// prints it. The name is snapshotted at reap time — the freed slot's own
+/// name is zeroed by the reset.
+var reap_report_pending: bool = false;
+var reap_report_name: []const u8 = "";
 
 /// The demo worker's static stack.
 var worker_stack: [task_stack_size]u8 align(16) = undefined;
@@ -120,13 +180,20 @@ var user_stack: [task_stack_size]u8 align(4096) linksection(user_stack_section) 
 /// sys_yield. It lives in the already-mapped user BSS aperture and exposes no
 /// privileged state beyond the fact that this task was preempted by a tick.
 var user_timer_preemptions: u64 align(8) linksection(user_stack_section) = 0;
+/// The idle task's static stack (BSS, like every other kernel global).
+var idle_stack: [task_stack_size]u8 align(16) = undefined;
+/// The monitor `spawn` command's dedicated demo stack; one spawn only, so
+/// the demo task never shares a stack with another live task.
+var spawn_demo_stack: [task_stack_size]u8 align(16) = undefined;
+var spawn_demo_armed: bool = false;
 
 // ---------------------------------------------------------------------------
 // Registration (kernel seam, before the shell loop starts)
 // ---------------------------------------------------------------------------
 
 /// Register the boot/main task (the shell). Its context is empty until the
-/// first tick preempts it. Resets the module so tests are deterministic.
+/// first tick preempts it. Also registers the scheduler-owned idle task at
+/// the LAST slot (claim 6729). Resets the module so tests are deterministic.
 /// Returns the task id (0).
 pub fn init() usize {
     task_count = 0;
@@ -135,55 +202,76 @@ pub fn init() usize {
     cooperative_yields = 0;
     exits = 0;
     enabled_flag = false;
-    report_pending = false;
+    @memset(&report_pending, false);
     exit_report_pending = false;
+    reap_report_pending = false;
+    spawn_demo_armed = false;
     user_timer_preemptions = 0;
     for (&tasks) |*task| task.* = .{};
-    tasks[0] = .{ .name = "shell", .registered = true, .runnable = true };
-    task_count = 1;
+    tasks[0] = .{ .name = "shell", .state = .ready, .ttbr0 = mmu.kernel_root_phys() };
+    tasks[idle_id] = .{
+        .name = "idle",
+        .state = .ready,
+        .sp = build_initial_frame(&idle_stack, @intFromPtr(&idle_entry)),
+        .elr = @intFromPtr(&idle_entry),
+        .spsr = spsr_el1h_irqs,
+        .ttbr0 = mmu.kernel_root_phys(),
+    };
+    task_count = 2;
     return 0;
 }
 
-/// Register a second task that starts at `entry` (a runtime-computed
-/// function address — the caller takes `@intFromPtr(&task_fn)`, resolved
-/// PC-relatively at the kernel's runtime load base). Builds the synthetic
-/// vector frame the first switch restores: x30 = the park address (the
-/// task returns there if its entry ever returns), every other register 0,
-/// ELR = entry, SPSR = EL1h with IRQs unmasked.
-pub fn register_worker(entry: u64) ?usize {
-    if (task_count >= max_tasks) return null;
-    const id = task_count;
+/// Claim 6729: allocate the first free pool slot for a new task and build
+/// its synthetic initial frame on `stack`. Explicit, bounded allocation:
+/// returns null when the fixed pool is full (every slot registered). The
+/// caller supplies the name, runtime entry address, SPSR mode, TTBR0 root,
+/// and SP_EL0 (0 for EL1h tasks). The new task starts `ready`.
+pub fn spawn(name: []const u8, entry: u64, spsr: u64, stack: []u8, ttbr0: u64, sp_el0: u64) ?usize {
+    var id: usize = 0;
+    while (id < max_tasks) : (id += 1) {
+        if (tasks[id].state == .free) break;
+    }
+    if (id >= max_tasks) return null;
     tasks[id] = .{
-        .name = "worker",
-        .sp = build_initial_frame(&worker_stack, entry),
+        .name = name,
+        .sp = build_initial_frame(stack, entry),
         .elr = entry,
-        .spsr = spsr_el1h_irqs,
-        .registered = true,
-        .runnable = true,
+        .spsr = spsr,
+        .sp_el0 = sp_el0,
+        .ttbr0 = ttbr0,
+        .state = .ready,
     };
     task_count += 1;
     return id;
 }
 
+/// Register the claim-5275 demo worker (an EL1h task that bumps its advance
+/// counter each quantum). `entry` is a runtime-computed function address
+/// (the caller takes `@intFromPtr(&task_fn)`).
+pub fn register_worker(entry: u64) ?usize {
+    return spawn("worker", entry, spsr_el1h_irqs, &worker_stack, mmu.kernel_root_phys(), 0);
+}
+
 /// Register the first real lower-privilege task. Its saved register frame
-/// lives on a private EL1 exception stack; its code executes with EL0t and a
-/// separate SP_EL0 stack. Both are static BSS allocations for this first
-/// card—there is still no process abstraction or dynamic task creation.
-pub fn register_user(entry: u64) ?usize {
-    if (task_count >= max_tasks) return null;
-    const id = task_count;
-    tasks[id] = .{
-        .name = "user-el0",
-        .sp = build_initial_frame(&user_kernel_stack, entry),
-        .elr = entry,
-        .spsr = spsr_el0t_irqs,
-        .sp_el0 = @intFromPtr(&user_stack) + user_stack.len,
-        .registered = true,
-        .runnable = true,
-    };
+/// lives on a private EL1 exception stack; its code executes with EL0t at a
+/// USER VA (claim 5804: `entry` is the kernel-side address of the payload
+/// and `image_base` the loader base — both are converted to user VAs here)
+/// under the task's own TTBR0 user root, with a separate SP_EL0 user stack
+/// and the timer-preemption witness at its user VA (the payload dereferences
+/// it through x9 at EL0).
+pub fn register_user(entry: u64, image_base: u64) ?usize {
+    // Claim 5804: this runs POST-jump, so the incoming `entry` and these
+    // `@intFromPtr` values are KVA addresses — the user-VA conversion
+    // helpers expect the pre-jump PHYSICAL (identity) addresses (their
+    // formula is `user_va + (kernel_addr - image_base) - section_start`,
+    // which only holds in the identity world). to_phys is the identity on
+    // host tests and pre-jump, so the conversion is safe everywhere.
+    const entry_va = userspace.image_user_va(image_base, mmu.to_phys(entry));
+    const sp_el0 = userspace.bss_user_va(image_base, mmu.to_phys(@intFromPtr(&user_stack))) + user_stack.len;
+    const witness_va = userspace.bss_user_va(image_base, mmu.to_phys(@intFromPtr(&user_timer_preemptions)));
+    const id = spawn("user-el0", entry_va, spsr_el0t_irqs, &user_kernel_stack, mmu.user_root_phys(), sp_el0) orelse return null;
     const frame: *exceptions.VectorFrame = @ptrFromInt(tasks[id].sp);
-    _ = exceptions.frame_write(frame, 9, @intFromPtr(&user_timer_preemptions));
-    task_count += 1;
+    _ = exceptions.frame_write(frame, 9, witness_va);
     return id;
 }
 
@@ -198,12 +286,13 @@ pub fn enabled() bool {
 }
 
 /// True once the scheduler would actually switch on a tick (enabled AND at
-/// least two tasks). The tick() guard; hoisted so host tests can pin it.
+/// least two runnable tasks). The tick() guard; hoisted so host tests can pin
+/// it. The idle task counts, so a booted pool is always active.
 pub fn scheduling_active() bool {
     if (!enabled_flag) return false;
     var runnable: usize = 0;
-    for (tasks[0..task_count]) |task| {
-        if (task.runnable) runnable += 1;
+    for (tasks[0..max_tasks]) |task| {
+        if (task.state == .ready or task.state == .running) runnable += 1;
     }
     return runnable >= 2;
 }
@@ -246,9 +335,9 @@ fn park() noreturn {
 fn next_runnable(after: usize) ?usize {
     if (task_count == 0) return null;
     var offset: usize = 1;
-    while (offset <= task_count) : (offset += 1) {
-        const candidate = (after + offset) % task_count;
-        if (tasks[candidate].registered and tasks[candidate].runnable) return candidate;
+    while (offset <= max_tasks) : (offset += 1) {
+        const candidate = (after + offset) % max_tasks;
+        if (tasks[candidate].state == .ready) return candidate;
     }
     return null;
 }
@@ -258,6 +347,9 @@ fn stage_current() void {
     pending_elr = tasks[current].elr;
     pending_spsr = tasks[current].spsr;
     pending_sp_el0 = tasks[current].sp_el0;
+    pending_ttbr0 = tasks[current].ttbr0;
+    // Claim 6729: the selected task is now the one that will execute.
+    tasks[current].state = .running;
     tasks[current].resumes += 1;
     switches += 1;
 }
@@ -269,6 +361,9 @@ pub fn switch_context(frame_sp: u64, elr: u64, spsr: u64, sp_el0: u64) void {
     tasks[current].spsr = spsr;
     tasks[current].sp_el0 = sp_el0;
     tasks[current].saves += 1;
+    // The preempted task is runnable again; only a zombie is removed from
+    // the ring (claim 6729).
+    if (tasks[current].state == .running) tasks[current].state = .ready;
     current = next_runnable(current) orelse return;
     stage_current();
 }
@@ -277,6 +372,10 @@ fn apply_pending() void {
     exceptions.resume_frame = pending_sp;
     exceptions.resume_sp_el0 = pending_sp_el0;
     if (comptime builtin.is_test or builtin.cpu.arch != .aarch64) return;
+    // Claim 5804: install the selected task's TTBR0 (with a full TLB
+    // invalidation) before restoring its ELR/SPSR, so the eret to EL0 (or
+    // the resumed EL1h instruction stream) sees the task's own user space.
+    mmu.set_ttbr0(pending_ttbr0);
     asm volatile ("msr elr_el1, %[v]"
         :
         : [v] "r" (pending_elr),
@@ -316,26 +415,100 @@ pub fn yield_current() bool {
 
 /// Remove the calling task from the runnable ring and stage its successor.
 /// The SVC exception return consumes the staged frame, so the terminated task
-/// never resumes after `sys_exit`.
+/// never resumes after `sys_exit`. Claim 6729: the exiting task becomes a
+/// ZOMBIE (its status is preserved for `terminated_status`); the idle task
+/// reaps it later. The idle task itself can never be exited.
 pub fn exit_current(status: u64) bool {
-    if (task_count == 0 or !tasks[current].registered or !tasks[current].runnable) return false;
+    if (task_count == 0 or current == idle_id) return false;
+    if (tasks[current].state != .ready and tasks[current].state != .running) return false;
     const exiting = current;
-    tasks[exiting].runnable = false;
-    tasks[exiting].terminated = true;
+    const name = tasks[exiting].name;
+    tasks[exiting].state = .zombie;
     tasks[exiting].exit_status = status;
     const next = next_runnable(exiting) orelse {
-        tasks[exiting].runnable = true;
-        tasks[exiting].terminated = false;
+        // No successor: roll back (the always-ready idle task makes this
+        // unreachable in a normal boot; kept as a defensive bound).
+        tasks[exiting].state = .ready;
+        tasks[exiting].exit_status = 0;
         return false;
     };
     exit_report_pending = true;
-    exit_report_task = exiting;
+    exit_report_name = name;
     exit_report_status = status;
     exits +%= 1;
     current = next;
     stage_current();
     apply_pending();
     return true;
+}
+
+/// Claim 6729: reap a zombie — free its pool slot. Only a zombie may be
+/// reaped, and the reaped slot becomes spawnable again. Returns false for a
+/// non-zombie slot.
+pub fn reap(id: usize) bool {
+    if (id >= max_tasks or tasks[id].state != .zombie) return false;
+    tasks[id] = .{};
+    task_count -%= 1;
+    return true;
+}
+
+/// The idle task's reaper: free ONE zombie per iteration so the pool drains
+/// without starving other tasks, and snapshot the reap report (the freed
+/// slot's name is zeroed by the reset).
+fn reap_one_zombie() void {
+    var i: usize = 0;
+    while (i < max_tasks) : (i += 1) {
+        if (tasks[i].state != .zombie) continue;
+        const name = tasks[i].name;
+        if (!reap(i)) return;
+        if (!reap_report_pending) {
+            reap_report_pending = true;
+            reap_report_name = name;
+        }
+        return;
+    }
+}
+
+/// The scheduler-owned idle task (claim 6729): always ready and the
+/// lifecycle reaper — it reaps one zombie per iteration. It parks with a
+/// BOUNDED nop delay (not WFE): the shell's idle wait documents that a WFE
+/// in a main-context loop sleeps until the next interrupt and can stall the
+/// polled-RX loop on VZ (claim 6684), so the idle task uses the same
+/// proven bounded delay between reap passes.
+fn idle_entry() void {
+    while (true) {
+        reap_one_zombie();
+        if (comptime builtin.cpu.arch == .aarch64) {
+            var spins: usize = 0;
+            while (spins < 100_000) : (spins += 1) asm volatile ("nop");
+        } else {
+            asm volatile ("nop");
+        }
+    }
+}
+
+/// The monitor `spawn` command (claim 6729): spawn the lifecycle demo task
+/// on its dedicated stack. Explicitly bounded — one demo spawn per boot
+/// (the pool has exactly one spare slot while the EL0 task is alive).
+pub fn spawn_demo() ?usize {
+    if (spawn_demo_armed) return null;
+    spawn_demo_armed = true;
+    return spawn("spawn-demo", @intFromPtr(&spawn_demo_entry), spsr_el1h_irqs, &spawn_demo_stack, mmu.kernel_root_phys(), 0);
+}
+
+/// The lifecycle demo task: bumps its advance counter and asks the shell
+/// loop to report it, proving a runtime-spawned task entered the ring and
+/// receives quanta. Never exits; the EL0 task exercises the exit/reap half
+/// of the lifecycle.
+fn spawn_demo_entry() void {
+    var local: u64 = 0;
+    while (true) {
+        local += 1;
+        note_advance();
+        if (local % 16 == 0) request_report();
+        var spins: usize = 0;
+        while (spins < 2_000_000) : (spins += 1) asm volatile ("nop");
+    }
 }
 
 /// IRQ-context tick (called from the kernel's irq_dispatch right after
@@ -383,33 +556,45 @@ pub fn note_advance() void {
 }
 
 /// Task-side: ask the shell idle loop to print the current task's advance
-/// counter. Keeps the FIRST snapshot while pending (no backlog). Console
-/// output stays in main context (claim 9187 — never print from IRQ).
+/// counter. Keeps the FIRST snapshot per task while that task's slot is
+/// pending (no backlog). Console output stays in main context (claim 9187
+/// — never print from IRQ). Claim 6729: per-task slots, so one task's
+/// reports cannot starve another's (the worker requests every 64
+/// iterations; the spawn-demo task every 16).
 pub fn request_report() void {
-    if (task_count == 0 or report_pending) return;
-    report_pending = true;
-    report_task = current;
-    report_advances = tasks[current].advances;
+    if (task_count == 0 or report_pending[current]) return;
+    report_pending[current] = true;
+    report_advances[current] = tasks[current].advances;
 }
 
-/// Shell-side (main context, next to timer.maybe_heartbeat): print one
-/// pending report line, if any.
+/// Shell-side (main context, next to timer.maybe_heartbeat): print every
+/// pending report line, then the exit/reap reports.
 pub fn maybe_report(con: *console.Console) void {
-    if (report_pending) {
-        report_pending = false;
+    var i: usize = 0;
+    while (i < max_tasks) : (i += 1) {
+        if (!report_pending[i]) continue;
+        report_pending[i] = false;
         con.puts("tasks ");
-        con.puts(tasks[report_task].name);
+        con.puts(tasks[i].name);
         con.puts(" advances=");
-        con.print_u64(report_advances);
+        con.print_u64(report_advances[i]);
         con.puts("\n");
     }
     if (exit_report_pending) {
         exit_report_pending = false;
         con.puts("tasks ");
-        con.puts(tasks[exit_report_task].name);
+        con.puts(exit_report_name);
         con.puts(" exited status=");
         con.print_u64(exit_report_status);
         con.puts("\n");
+    }
+    // Claim 6729: the idle task reaped a zombie; the name was snapshotted
+    // at reap time because the freed slot's own name is zeroed.
+    if (reap_report_pending) {
+        reap_report_pending = false;
+        con.puts("tasks ");
+        con.puts(reap_report_name);
+        con.puts(" reaped\n");
     }
 }
 
@@ -419,6 +604,7 @@ pub fn maybe_report(con: *console.Console) void {
 
 pub const TaskInfo = struct {
     name: []const u8,
+    state: State,
     saves: u64,
     resumes: u64,
     advances: u64,
@@ -428,22 +614,31 @@ pub const Stats = struct {
     enabled: bool,
     current: usize,
     switches: u64,
+    /// Registered (non-free) slots — the lifecycle's live pool count.
     count: usize,
+    /// Zombie slots awaiting the idle task's reap.
+    zombies: usize,
 };
 
 pub fn stats() Stats {
+    var zombies: usize = 0;
+    for (tasks[0..max_tasks]) |task| {
+        if (task.state == .zombie) zombies += 1;
+    }
     return .{
         .enabled = enabled_flag,
         .current = current,
         .switches = switches,
         .count = task_count,
+        .zombies = zombies,
     };
 }
 
 pub fn task_info(id: usize) ?TaskInfo {
-    if (id >= task_count or !tasks[id].registered) return null;
+    if (id >= max_tasks or tasks[id].state == .free) return null;
     return .{
         .name = tasks[id].name,
+        .state = tasks[id].state,
         .saves = tasks[id].saves,
         .resumes = tasks[id].resumes,
         .advances = tasks[id].advances,
@@ -452,6 +647,13 @@ pub fn task_info(id: usize) ?TaskInfo {
 
 pub fn current_id() usize {
     return current;
+}
+
+/// The TTBR0 root (physical) a task runs under (claim 5804; the
+/// `addrspaces` diagnostic prints it).
+pub fn task_ttbr0(id: usize) u64 {
+    if (id >= max_tasks or tasks[id].state == .free) return 0;
+    return tasks[id].ttbr0;
 }
 
 pub fn cooperative_yield_count() u64 {
@@ -463,7 +665,7 @@ pub fn exit_count() u64 {
 }
 
 pub fn is_terminated(id: usize) bool {
-    return id < task_count and tasks[id].terminated;
+    return id < max_tasks and tasks[id].state == .zombie;
 }
 
 pub fn terminated_status(id: usize) ?u64 {
@@ -476,26 +678,32 @@ pub fn terminated_status(id: usize) ?u64 {
 // class B gate tools/verify-live-tasks.sh)
 // ---------------------------------------------------------------------------
 
-test "scheduler: init registers the shell task; start flips enabled" {
+test "scheduler: init registers the shell and idle tasks; start flips enabled" {
     try std.testing.expectEqual(@as(usize, 0), init());
-    try std.testing.expectEqual(@as(usize, 1), task_count);
+    // Claim 6729: the pool starts as shell + the scheduler-owned idle task
+    // (the idle task's synthetic frame targets `idle_entry`).
+    try std.testing.expectEqual(@as(usize, 2), task_count);
     try std.testing.expectEqualStrings("shell", tasks[0].name);
+    try std.testing.expectEqualStrings("idle", tasks[idle_id].name);
+    try std.testing.expectEqual(State.ready, tasks[idle_id].state);
+    try std.testing.expectEqual(@intFromPtr(&idle_entry), tasks[idle_id].elr);
     try std.testing.expect(!enabled());
     try std.testing.expect(!scheduling_active());
     start();
     try std.testing.expect(enabled());
-    // Two tasks are required before a tick may switch.
-    try std.testing.expect(!scheduling_active());
+    // Two runnable tasks (shell + idle) are enough for the tick to switch.
+    try std.testing.expect(scheduling_active());
 }
 
 test "scheduler: register_worker builds a valid synthetic frame" {
     _ = init();
     const entry: u64 = 0x1234_5678_9abc_def0;
     try std.testing.expectEqual(@as(usize, 1), register_worker(entry).?);
-    try std.testing.expectEqual(@as(usize, 2), task_count);
+    try std.testing.expectEqual(@as(usize, 3), task_count); // shell + idle + worker
     const t = &tasks[1];
     try std.testing.expectEqual(entry, t.elr);
     try std.testing.expectEqual(spsr_el1h_irqs, t.spsr);
+    try std.testing.expectEqual(State.ready, t.state);
     // Frame: 160 bytes below the stack top; the x30 slot holds the park
     // address; every other slot is zeroed (the stub pops them as x0..x17).
     const stack_top = @intFromPtr(&worker_stack) + worker_stack.len;
@@ -505,8 +713,11 @@ test "scheduler: register_worker builds a valid synthetic frame" {
     while (i < frame_bytes) : (i += 8) {
         try std.testing.expectEqual(@as(u64, 0), std.mem.readInt(u64, @as(*const [8]u8, @ptrFromInt(t.sp + i)), .little));
     }
-    // A third, lower-EL task fills the fixed pool; no fourth registration.
-    try std.testing.expectEqual(@as(usize, 2), register_user(0x3333).?);
+    // Claim 6729: the pool is shell + idle + worker + user + one spare
+    // spawnable slot; a sixth registration fails (bounded).
+    try std.testing.expectEqual(@as(usize, 2), register_user(0x3333, 0).?);
+    try std.testing.expectEqual(@as(usize, 3), register_worker(0).?);
+    try std.testing.expectEqual(@as(usize, 5), task_count);
     try std.testing.expect(register_worker(0) == null);
 }
 
@@ -514,7 +725,7 @@ test "scheduler: register_user separates EL1 exception and EL0 stacks" {
     _ = init();
     _ = register_worker(0x2000).?;
     const entry: u64 = 0x3000;
-    try std.testing.expectEqual(@as(usize, 2), register_user(entry).?);
+    try std.testing.expectEqual(@as(usize, 2), register_user(entry, 0).?);
     const task = &tasks[2];
     try std.testing.expectEqualStrings("user-el0", task.name);
     try std.testing.expectEqual(entry, task.elr);
@@ -530,6 +741,7 @@ test "scheduler: round-robin alternates and round-trips saved context" {
     _ = init();
     const worker_entry: u64 = 0x2000;
     _ = register_worker(worker_entry).?;
+    _ = register_user(0x3000, 0).?;
     start();
     // First switch: the shell is preempted at pc 0x1000; the worker is
     // restored to its synthetic frame.
@@ -543,21 +755,38 @@ test "scheduler: round-robin alternates and round-trips saved context" {
     try std.testing.expectEqual(tasks[1].sp, pending_sp);
     try std.testing.expectEqual(worker_entry, pending_elr);
     try std.testing.expectEqual(spsr_el1h_irqs, pending_spsr);
-    // Second switch: the worker is preempted; the shell is restored to its
-    // exact saved context.
+    // Second switch: the worker is preempted; the user task is restored to
+    // its synthetic EL0t frame.
     switch_context(0x2000, 0x2000, 0x5, 0xbbbb);
-    try std.testing.expectEqual(@as(usize, 0), current);
+    try std.testing.expectEqual(@as(usize, 2), current);
     try std.testing.expectEqual(@as(u64, 2), switches);
     try std.testing.expectEqual(@as(u64, 1), tasks[1].saves);
+    try std.testing.expectEqual(@as(u64, 1), tasks[1].resumes);
+    try std.testing.expectEqual(tasks[2].sp, pending_sp);
+    try std.testing.expectEqual(@as(u64, 0x3000), pending_elr);
+    try std.testing.expectEqual(spsr_el0t_irqs, pending_spsr);
+    // Third switch: the user is preempted; the idle task is restored.
+    switch_context(0x3000, 0x3000, 0x0, 0xcccc);
+    try std.testing.expectEqual(@as(usize, idle_id), current);
+    try std.testing.expectEqual(@as(u64, 3), switches);
+    try std.testing.expectEqual(@as(u64, 1), tasks[2].saves);
+    try std.testing.expectEqual(@as(u64, 1), tasks[idle_id].resumes);
+    try std.testing.expectEqual(tasks[idle_id].sp, pending_sp);
+    // Fourth switch: the idle task is preempted; the shell is restored to
+    // its exact saved context (the round-trip).
+    switch_context(0x4000, 0x4000, 0x5, 0xdddd);
+    try std.testing.expectEqual(@as(usize, 0), current);
+    try std.testing.expectEqual(@as(u64, 4), switches);
+    try std.testing.expectEqual(@as(u64, 1), tasks[idle_id].saves);
     try std.testing.expectEqual(@as(u64, 1), tasks[0].resumes);
     try std.testing.expectEqual(@as(u64, 0x1000), pending_sp);
     try std.testing.expectEqual(@as(u64, 0x1000), pending_elr);
     try std.testing.expectEqual(@as(u64, 0x5), pending_spsr);
     try std.testing.expectEqual(@as(u64, 0xaaaa), pending_sp_el0);
-    // Third switch returns to the worker's saved context (the round-trip).
+    // Fifth switch returns to the worker's saved context (the round-trip).
     switch_context(0x1000, 0x1001, 0x5, 0xaaaa);
     try std.testing.expectEqual(@as(usize, 1), current);
-    try std.testing.expectEqual(@as(u64, 3), switches);
+    try std.testing.expectEqual(@as(u64, 5), switches);
     try std.testing.expectEqual(@as(u64, 2), tasks[0].saves);
     try std.testing.expectEqual(@as(u64, 1), tasks[0].resumes);
     try std.testing.expectEqual(@as(u64, 1), tasks[1].saves);
@@ -567,7 +796,7 @@ test "scheduler: round-robin alternates and round-trips saved context" {
 test "scheduler: mixed EL1h and EL0t round-robin restores SP_EL0" {
     _ = init();
     _ = register_worker(0x2000).?;
-    _ = register_user(0x3000).?;
+    _ = register_user(0x3000, 0).?;
     start();
     const initial_user_sp = tasks[2].sp_el0;
 
@@ -579,10 +808,15 @@ test "scheduler: mixed EL1h and EL0t round-robin restores SP_EL0" {
     try std.testing.expectEqual(initial_user_sp, pending_sp_el0);
 
     const preempted_user_sp: u64 = initial_user_sp - 16;
-    switch_context(0x3000, 0x3004, spsr_el0t_irqs, preempted_user_sp); // user -> shell
+    // Claim 6729: the preempted EL0 task's successor is the idle task
+    // (sp_el0 = 0 for an EL1h task), then the shell on the next switch.
+    switch_context(0x3000, 0x3004, spsr_el0t_irqs, preempted_user_sp); // user -> idle
+    try std.testing.expectEqual(@as(usize, idle_id), current);
+    try std.testing.expectEqual(@as(u64, 0), pending_sp_el0);
+    try std.testing.expectEqual(preempted_user_sp, tasks[2].sp_el0);
+    switch_context(0x4000, 0x4000, spsr_el1h_irqs, 0xcccc); // idle -> shell
     try std.testing.expectEqual(@as(usize, 0), current);
     try std.testing.expectEqual(@as(u64, 0xaaaa), pending_sp_el0);
-    try std.testing.expectEqual(preempted_user_sp, tasks[2].sp_el0);
 
     switch_context(0x1000, 0x1004, spsr_el1h_irqs, 0xaaaa);
     switch_context(0x2000, 0x2004, spsr_el1h_irqs, 0xbbbb);
@@ -594,14 +828,16 @@ test "scheduler: mixed EL1h and EL0t round-robin restores SP_EL0" {
 test "scheduler: only a tick preemption publishes the EL0 witness" {
     _ = init();
     _ = register_worker(0x2000).?;
-    _ = register_user(0x3000).?;
+    _ = register_user(0x3000, 0).?;
     start();
     switch_context(0x1000, 0x1000, spsr_el1h_irqs, 0xaaaa); // shell -> worker
     switch_context(0x2000, 0x2000, spsr_el1h_irqs, 0xbbbb); // worker -> user
     try std.testing.expectEqual(@as(u64, 0), user_timer_preemption_count());
-    // Cooperative switching cannot satisfy the claim-8215 witness.
-    try std.testing.expect(yield_current()); // user -> shell
+    // Cooperative switching cannot satisfy the claim-8215 witness. The
+    // user's successor is the idle task (claim 6729), then the shell.
+    try std.testing.expect(yield_current()); // user -> idle
     try std.testing.expectEqual(@as(u64, 0), user_timer_preemption_count());
+    switch_context(0x4000, 0x4000, spsr_el1h_irqs, 0xcccc); // idle -> shell
     switch_context(0x1004, 0x1004, spsr_el1h_irqs, 0xaaaa); // shell -> worker
     switch_context(0x2004, 0x2004, spsr_el1h_irqs, 0xbbbb); // worker -> user
     timer_switch_context(0x3000, 0x3004, spsr_el0t_irqs, tasks[2].sp_el0);
@@ -643,37 +879,82 @@ test "scheduler: stats and task_info report deterministic state" {
     start();
     const s = stats();
     try std.testing.expect(s.enabled);
-    try std.testing.expectEqual(@as(usize, 2), s.count);
+    try std.testing.expectEqual(@as(usize, 3), s.count); // shell + idle + worker
+    try std.testing.expectEqual(@as(usize, 0), s.zombies);
     try std.testing.expectEqual(@as(usize, 0), s.current);
     try std.testing.expectEqual(@as(u64, 0), s.switches);
     const shell = task_info(0).?;
     try std.testing.expectEqualStrings("shell", shell.name);
+    try std.testing.expectEqual(State.ready, shell.state);
     try std.testing.expectEqual(@as(u64, 0), shell.saves);
     try std.testing.expectEqual(@as(u64, 0), shell.advances);
     const worker = task_info(1).?;
     try std.testing.expectEqualStrings("worker", worker.name);
     try std.testing.expect(task_info(2) == null);
+    const idle = task_info(idle_id).?;
+    try std.testing.expectEqualStrings("idle", idle.name);
+    try std.testing.expectEqual(State.ready, idle.state);
 }
 
 test "scheduler: cooperative exit is non-runnable and reports from shell" {
     _ = init();
     _ = register_worker(0x2000).?;
-    _ = register_user(0x3000).?;
+    _ = register_user(0x3000, 0).?;
     start();
     try std.testing.expect(yield_current()); // shell -> worker
     try std.testing.expect(yield_current()); // worker -> user
     try std.testing.expectEqual(@as(usize, 2), current_id());
-    try std.testing.expect(exit_current(7)); // user -> shell
-    try std.testing.expectEqual(@as(usize, 0), current_id());
+    try std.testing.expect(exit_current(7)); // user -> idle (the ring's fallback)
+    try std.testing.expectEqual(@as(usize, idle_id), current_id());
     try std.testing.expect(is_terminated(2));
     try std.testing.expectEqual(@as(?u64, 7), terminated_status(2));
-    // The next switch skips the terminated user: shell -> worker -> shell.
+    // The next switches skip the zombie user: idle -> shell -> worker -> idle.
+    try std.testing.expect(yield_current());
+    try std.testing.expectEqual(@as(usize, 0), current_id());
     try std.testing.expect(yield_current());
     try std.testing.expectEqual(@as(usize, 1), current_id());
     try std.testing.expect(yield_current());
-    try std.testing.expectEqual(@as(usize, 0), current_id());
+    try std.testing.expectEqual(@as(usize, idle_id), current_id());
     var mock = console.MockConsole(128){};
     var con = mock.console();
     maybe_report(&con);
     try std.testing.expectEqualStrings("tasks user-el0 exited status=7\n", mock.contents());
+}
+
+test "scheduler: lifecycle — spawn, exit to zombie, idle reaps back to free" {
+    _ = init();
+    _ = register_worker(0x2000).?;
+    _ = register_user(0x3000, 0).?;
+    start();
+    // The pool is shell + worker + user + idle; the spare slot is the
+    // monitor demo spawn (claim 6729). One spawn per boot, bounded.
+    try std.testing.expectEqual(@as(usize, 3), spawn_demo().?);
+    try std.testing.expect(spawn_demo() == null);
+    try std.testing.expectEqual(@as(usize, 5), stats().count);
+    try std.testing.expectEqualStrings("spawn-demo", task_info(3).?.name);
+    try std.testing.expectEqual(State.ready, task_info(3).?.state);
+    // user exits -> zombie at slot 2; the ring's next ready task is the
+    // spawn-demo task (slot 3).
+    try std.testing.expect(yield_current()); // shell -> worker
+    try std.testing.expect(yield_current()); // worker -> user
+    try std.testing.expectEqual(@as(usize, 2), current_id());
+    try std.testing.expect(exit_current(7)); // user -> spawn-demo
+    try std.testing.expectEqual(@as(usize, 3), current_id());
+    try std.testing.expectEqual(@as(usize, 1), stats().zombies);
+    try std.testing.expect(is_terminated(2));
+    try std.testing.expectEqual(@as(?u64, 7), terminated_status(2));
+    // The idle task reaps one zombie per iteration; the slot returns free.
+    reap_one_zombie();
+    try std.testing.expect(!is_terminated(2));
+    try std.testing.expectEqual(@as(usize, 0), stats().zombies);
+    try std.testing.expectEqual(@as(usize, 4), stats().count);
+    try std.testing.expect(task_info(2) == null);
+    // The freed slot is spawnable again (the lifecycle is a closed loop).
+    try std.testing.expectEqual(@as(usize, 2), spawn("revived", 0x5000, spsr_el1h_irqs, &worker_stack, 0, 0).?);
+    try std.testing.expectEqual(@as(usize, 5), stats().count);
+    // The shell loop prints the exit and the reap, in order.
+    var mock = console.MockConsole(256){};
+    var con = mock.console();
+    maybe_report(&con);
+    try std.testing.expectEqualStrings("tasks user-el0 exited status=7\ntasks user-el0 reaped\n", mock.contents());
 }

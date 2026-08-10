@@ -371,13 +371,15 @@ pub fn virtio_pci_init(st: *const SystemTable) bool {
     // accesses (claim 0013: byte reads of config space return garbage — the
     // emulation has access-size quirks), so write each half as a 32-bit store
     // rather than a single 64-bit one that may be dropped.
-    const qd = @intFromPtr(&virtio_desc);
+    // Claim 5804: the device reads these queue GPAs as guest PHYSICAL
+    // addresses, so translate the post-jump kernel VAs back to phys.
+    const qd = mmu.to_phys(@intFromPtr(&virtio_desc));
     mmio.mmio_write32(vp_common + 0x20, @truncate(qd));
     mmio.mmio_write32(vp_common + 0x24, @truncate(qd >> 32));
-    const qa = @intFromPtr(&virtio_avail);
+    const qa = mmu.to_phys(@intFromPtr(&virtio_avail));
     mmio.mmio_write32(vp_common + 0x28, @truncate(qa));
     mmio.mmio_write32(vp_common + 0x2c, @truncate(qa >> 32));
-    const qu = @intFromPtr(&virtio_used);
+    const qu = mmu.to_phys(@intFromPtr(&virtio_used));
     mmio.mmio_write32(vp_common + 0x30, @truncate(qu));
     mmio.mmio_write32(vp_common + 0x34, @truncate(qu >> 32));
     vp_write16(0x1c, 1); // queue_enable
@@ -397,7 +399,7 @@ pub fn virtio_pci_init(st: *const SystemTable) bool {
         virtio_rx_armed = false;
     } else {
         vp_write16(0x18, virtio_queue_size); // queue_size = 1 (power of 2)
-        virtio_rx_desc[0] = .{ .addr = @intFromPtr(&virtio_rx_buf), .len = virtio_rx_buf.len, .flags = 2, .next = 0 }; // VIRTQ_DESC_F_WRITE
+        virtio_rx_desc[0] = .{ .addr = mmu.to_phys(@intFromPtr(&virtio_rx_buf)), .len = virtio_rx_buf.len, .flags = 2, .next = 0 }; // VIRTQ_DESC_F_WRITE
         virtio_rx_avail = .{ .flags = 0, .idx = 0, .ring = .{0} };
         virtio_rx_used = .{ .flags = 0, .idx = 0, .ring = .{.{ .id = 0, .len = 0 }} };
         mmu.clean_dcache_range(@intFromPtr(&virtio_rx_used), @sizeOf(VirtqUsed));
@@ -406,13 +408,13 @@ pub fn virtio_pci_init(st: *const SystemTable) bool {
         virtio_rx_fifo_len = 0;
         // Queue GPA registers: same 32-bit-half pattern as queue 1 (claim
         // 0013 access-size quirk).
-        const qdr = @intFromPtr(&virtio_rx_desc);
+        const qdr = mmu.to_phys(@intFromPtr(&virtio_rx_desc));
         mmio.mmio_write32(vp_common + 0x20, @truncate(qdr));
         mmio.mmio_write32(vp_common + 0x24, @truncate(qdr >> 32));
-        const qar = @intFromPtr(&virtio_rx_avail);
+        const qar = mmu.to_phys(@intFromPtr(&virtio_rx_avail));
         mmio.mmio_write32(vp_common + 0x28, @truncate(qar));
         mmio.mmio_write32(vp_common + 0x2c, @truncate(qar >> 32));
-        const qur = @intFromPtr(&virtio_rx_used);
+        const qur = mmu.to_phys(@intFromPtr(&virtio_rx_used));
         mmio.mmio_write32(vp_common + 0x30, @truncate(qur));
         mmio.mmio_write32(vp_common + 0x34, @truncate(qur >> 32));
         vp_write16(0x1c, 1); // queue_enable
@@ -516,7 +518,7 @@ pub fn virtio_pci_flush() void {
         vp_tx_len = 0;
         return;
     }
-    virtio_desc[0] = .{ .addr = @intFromPtr(&virtio_tx), .len = @intCast(vp_tx_len), .flags = 0, .next = 0 };
+    virtio_desc[0] = .{ .addr = mmu.to_phys(@intFromPtr(&virtio_tx)), .len = @intCast(vp_tx_len), .flags = 0, .next = 0 };
     virtio_avail.ring[0] = 0; // descriptor index 0
     virtio_avail.idx +%= 1;
     if (comptime build_options.tx_diag) {
@@ -766,12 +768,12 @@ fn virtio_init(base: u64) bool {
     const max = mmio.mmio_read32(base + 0x34);
     if (max == 0) return false;
     mmio.mmio_write32(base + 0x38, 1);
-    mmio.mmio_write32(base + 0x80, @truncate(@intFromPtr(&virtio_desc)));
-    mmio.mmio_write32(base + 0x84, @truncate(@intFromPtr(&virtio_desc) >> 32));
-    mmio.mmio_write32(base + 0x90, @truncate(@intFromPtr(&virtio_avail)));
-    mmio.mmio_write32(base + 0x94, @truncate(@intFromPtr(&virtio_avail) >> 32));
-    mmio.mmio_write32(base + 0xa0, @truncate(@intFromPtr(&virtio_used)));
-    mmio.mmio_write32(base + 0xa4, @truncate(@intFromPtr(&virtio_used) >> 32));
+    mmio.mmio_write32(base + 0x80, @truncate(mmu.to_phys(@intFromPtr(&virtio_desc))));
+    mmio.mmio_write32(base + 0x84, @truncate(mmu.to_phys(@intFromPtr(&virtio_desc)) >> 32));
+    mmio.mmio_write32(base + 0x90, @truncate(mmu.to_phys(@intFromPtr(&virtio_avail))));
+    mmio.mmio_write32(base + 0x94, @truncate(mmu.to_phys(@intFromPtr(&virtio_avail)) >> 32));
+    mmio.mmio_write32(base + 0xa0, @truncate(mmu.to_phys(@intFromPtr(&virtio_used))));
+    mmio.mmio_write32(base + 0xa4, @truncate(mmu.to_phys(@intFromPtr(&virtio_used)) >> 32));
     mmio.mmio_write32(base + 0x44, 1);
     mmio.mmio_write32(base + 0x70, 1 | 2 | 8 | 4); // DRIVER_OK
     return (mmio.mmio_read32(base + 0x70) & 4) != 0;

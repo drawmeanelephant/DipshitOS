@@ -46,6 +46,12 @@ assumption comes from documentation or reasoning only.
   `VZVirtualMachineView`. **Observed**: the firmware renders nothing to it;
   captured PNGs are blank/gray. UEFI text is therefore NOT visible on the
   VZ framebuffer either.
+- Entropy: virtio entropy device (`VZVirtioEntropyDeviceConfiguration`).
+  **[observed: present on bus, no driver yet]** — the guest sees it on bus
+  0 as `VID=0x1af4 DID=0x1044` (listed by the `pci` command beside the
+  console 0x1043 / block 0x1042 devices), but no driver exists yet and no
+  CSPRNG seed path is wired; a future card may use it for boot-time
+  randomness (ASLR etc.).
 - Custom virtio device (`VZCustomVirtioDeviceConfiguration`, the
   `--custom-virtio` runner flag / `zig build spike-virtio`): the guest sees
   a vendor-defined device on bus 0 as `VID=0x1af4 DID=0x1082`.
@@ -194,6 +200,26 @@ redesign.
   image, and the MMIO windows the drivers need. **[inferred]** — this is a
   design choice, not a hardware fact; it is recorded here because later
   milestones depend on the address space being under kernel control.
+- **TTBR1 translation is incompatible with this kernel's tables on VZ
+  [measured, claim 5804].** The kernel therefore stays identity-mapped in
+  TTBR0 (T0SZ=16, TTBR1=0) and every task gets a per-task TTBR0 root that
+  carries an EL1-only overlay of the kernel identity map plus its own EL0
+  leaves (the EL0 task's root = a clone of the identity tree with
+  text+stack leaves overlaid). Measured failure modes in order: (1) with
+  4 KiB-aligned tables the TTBR1 walker faults at the FIRST descent level
+  in every configuration — shared L0 root (level-1 fault), dedicated 48-bit
+  L0 root (level-1), dedicated 39-bit L1-rooted mirror with T1SZ=25
+  (level-2) — despite provably-valid descriptor chains, the signature of a
+  walker masking table addresses to 64 KiB; (2) with 64 KiB-aligned tables
+  the walk resolves (block and page leaves) but a Normal-WB data access
+  through TTBR1 aborts (TLB conflict abort, then synchronous external
+  abort DFSC=0x21 after extra invalidations) while Device leaves were
+  readable — so a kernel executing from a KVA shadow cannot work on VZ.
+  EL0 isolation is enforced by AP bits: every non-user leaf is EL1-only
+  (AP=0b00), so an EL0 access to kernel RAM, firmware, or MMIO takes a
+  permission fault; UXN/PXN enforce W^X on the user leaves. Recorded so
+  later milestones never re-adopt a TTBR1 KVA shadow without re-validating
+  it live.
 - MAIR_EL1 uses two attributes: Device `nGnRnE` for MMIO and Normal
   Write-Back for RAM. **[inferred]** — standard ARMv8 attribute set.
 - IPS (physical address size) is read from `ID_AA64MMFR0_EL1` at runtime.

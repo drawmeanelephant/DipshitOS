@@ -1,3 +1,5 @@
+> ARCHIVED — frozen historical record; do not treat as an active plan.
+
 # Milestone 1.5 — console & shell core (agent B): design and self-review
 
 Status: implemented, mock-tested, claim closed ✅ · Branch:

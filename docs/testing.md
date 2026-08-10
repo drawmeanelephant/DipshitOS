@@ -266,6 +266,17 @@ Every verification command belongs to exactly one class (canonical inventory:
       `artifacts/live-fs-*` (`live-fs-gate.txt`, `live-fs-report.txt`,
       `live-fs-run-<A|B>-<NN>.txt`, `live-fs-serial-<A|B>-<NN>.log`).
 
+- [x] Milestone-three live gates (class B, claims 9187/5275/8215/3594/6120):
+      **passing 2026-08-09/10** — live timer IRQ (claim 9187, 3/3, real
+      periodic CNTP PPI 30 into the claim-9746 EL1 IRQ vector), live tasks
+      (claim 5275, tick-driven round-robin across real context switches),
+      live EL0/SVC boundary (claim 8215, 1/1 — two sequenced pings prove
+      return to EL0), live syscall-table gate (claim 3594, 1/1, exact
+      snapshot `ping=2 write=3 yield=1 exit=1`), and live uaccess (claim
+      6120, 1/1 — `valid=1 fault=1 recovered=1`: a real EL1 data abort
+      during copy-in is recovered to EFAULT without crashing EL1). Full
+      gate table: `docs/status.md`.
+
 **Post-tag reverify (claim 7873, 2026-08-09):** the complete class A set
 (just verify-portable: fmt, 95 + 110 unit tests, transcript gate, build,
 image, inspect, swift runner build, context, coordination, coordination

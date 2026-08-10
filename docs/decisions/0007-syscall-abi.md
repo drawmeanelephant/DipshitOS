@@ -118,3 +118,67 @@ contract rather than widening this card.
 - Host tests cover table shape, marshalling, errors, counters, writer output,
   scheduling hooks, and deterministic reporting; VZ evidence remains required
   for the real EL0 exception round trip.
+
+## Amendment (2026-08-10, claim 6120 — the uaccess card)
+
+D3's `-3`/`EFAULT` row is no longer reserved: the uaccess card implements it.
+`sys_write` now copies user bytes through the uaccess layer
+(`kernel/src/uaccess.zig`, `uaccess.copy_in`) instead of validating ranges
+inline, so a bad user pointer returns `-3` rather than `-1`:
+
+- `EFAULT` (`-3`) — the user pointer is bad: `buf + len` wraps, the range is
+  not fully inside one of the two kernel-known EL0 apertures (user text
+  read-only, user stack read-write), the range targets an unmapped address
+  (above the identity blanket), or the operation lacks permission (e.g.
+  `copy_out` into the read-only text aperture). Rejected before any memory
+  access; a data abort taken while a copy is running is recovered into
+  `EFAULT` instead of crashing EL1 (a masked uaccess window + the
+  claim-9746 synchronous path advancing ELR past the faulting instruction).
+- `EINVAL` (`-1`) — the bounded write cap is exceeded (`len > 256`);
+  pointer-arithmetic and range errors are `EFAULT` now.
+- `EBADF` (`-2`) — unchanged (fd is not 1).
+
+The pointer-taking syscall (`sys_write`) is migrated; the EFAULT contract is
+proven end to end by the EL0 payload (a bad-pointer write returns `-3` and
+EL0 survives) and by the `uaccess` monitor diagnostic (a real data abort at
+EL1 recovered into EFAULT on VZ), gated by `tools/verify-live-uaccess.sh`.
+The ABI itself — x8 number, x0–x5 arguments, x0 result, slots 0–3,
+reserved 4–63 — is unchanged.
+
+## Amendment (2026-08-10, claim 5804 — the per-task address-space card)
+
+The user pointer's translation now comes from the EL0 task's OWN TTBR0 root
+instead of the shared identity map, and the design landed on the VZ fallback
+(measured — see `kernel/src/mmu.zig`'s module doc):
+
+- **TTBR1 is NOT used.** The original design put the kernel at a TTBR1 KVA
+  shadow (`KVA_BASE + phys`) so TTBR0 could be swapped freely per task.
+  Live VZ measurement proved TTBR1 translation incompatible with this
+  kernel's tables: with 4 KiB-aligned tables the TTBR1 walker faults at the
+  FIRST descent level in every configuration (shared L0 root, dedicated
+  48-bit L0 root, dedicated 39-bit L1-rooted mirror with T1SZ=25) despite
+  provably-valid descriptor chains — the signature of a walker masking
+  table addresses to 64 KiB. With 64 KiB-aligned tables the walk resolves
+  (block and page leaves) but a Normal-WB data access through TTBR1 then
+  aborts (TLB conflict abort, then synchronous external abort DFSC=0x21
+  after extra invalidations) while Device leaves were readable — so a
+  kernel executing from a KVA shadow cannot work on VZ.
+- **Fallback: per-task TTBR0 with an EL1-only kernel overlay.** The kernel
+  stays identity-mapped in TTBR0 (T0SZ=16, TTBR1=0). Every task's TTBR0
+  root carries the kernel identity map as EL1-only leaves (AP=0b00); the
+  EL0 task's root (`build_user_root`) is a clone of the identity tree with
+  its text+stack leaves overlaid at the user VAs. The kernel is therefore
+  reachable under EVERY root, so the scheduler can switch TTBR0 per task.
+- **EL0 reach is exactly the text+stack leaves.** Every other leaf — kernel
+  RAM, firmware, MMIO Device windows — is EL1-only, so an EL0 access takes
+  a permission fault, never a device access. UXN/PXN are enforced on every
+  user leaf (W^X). MMIO is excluded from EL0 by the same EL1-only AP bits:
+  the user root's Device leaves are EL1-only (`el0_device = 0` measured on
+  VZ).
+- The `addrspaces` monitor diagnostic reports TTBR1=0, T0SZ=16, each task's
+  TTBR0 root, and the user root's leaf inventory (`el0`, `el0_device`),
+  gated by `tools/verify-live-addrspaces.sh`.
+
+The syscall ABI (x8 number, x0–x5 args, x0 result) and the EFAULT contract
+are unchanged by the address-space move; the EL0 payload + uaccess recovery
+prove the boundary under the user root.

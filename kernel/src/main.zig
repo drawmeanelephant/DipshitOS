@@ -347,6 +347,8 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
     // at M2_MAPD!, so the MMU takeover window is the death site; the kernel
     // never reaches the serial probe).
     evidence.write_marker_var(st, marker_mapd);
+    exceptions.init(exception_report_writer);
+    exceptions.install();
     mmu.install_identity_map();
     // Claim 9746 (roadmap item 5, first half): install the VBAR_EL1
     // exception vectors + basic synchronous/IRQ handlers NOW — after
@@ -360,11 +362,13 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
     // is probed below (console_kind == .none); the GIC is NOT programmed
     // here — that is the next card.
     userspace.init();
-    exceptions.init(exception_report_writer);
     syscall.init(exception_report_writer);
-    syscall.set_user_regions(user_text, user_stack);
+    // Claim 5804: the EL0 task runs in its own address space, so the
+    // uaccess regions are USER VAs (what the user root maps and what the
+    // task's syscall pointers refer to) — not the physical image ranges
+    // `build_identity_map` consumed above.
+    syscall.set_user_regions(userspace.text_va_region(), userspace.stack_va_region());
     exceptions.set_svc_dispatcher(syscall.handle_svc);
-    exceptions.install();
     // Claim 7948 (roadmap item 5, second half): GIC + generic timer. The
     // MADT/GTDT discovery ran PRE-EXIT inside pci.dump_acpi (post-exit ACPI
     // reads hang on VZ, claim 0013); program the controller + timer NOW —
@@ -585,7 +589,7 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
     // (claim 9187) is a context switch.
     _ = scheduler.init();
     _ = scheduler.register_worker(@intFromPtr(&worker_entry));
-    _ = scheduler.register_user(@intFromPtr(&userspace.entry));
+    _ = scheduler.register_user(@intFromPtr(&userspace.entry), base);
     scheduler.start();
     shell.boot_and_park(&mon, m15.rx_wired());
     // No return after takeover. WFE is a terminal state, not a firmware call.

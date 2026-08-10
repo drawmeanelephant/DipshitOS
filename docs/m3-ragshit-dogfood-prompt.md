@@ -1,3 +1,5 @@
+> ARCHIVED (claim 1594 done)
+
 # Milestone three — ragshit dogfood pass (index, bundle, review)
 
 Planning-first agent prompt for DipshitOS. Feed this file to the
