@@ -29,6 +29,7 @@ const handoff = @import("handoff.zig");
 const memmap = @import("memmap.zig");
 const scheduler = @import("scheduler.zig"); // claim 5275: worker progress printing (main context only)
 const timer = @import("timer.zig"); // claim 7948: heartbeat printing (main context only)
+const userspace = @import("userspace.zig"); // claim 8215: deferred EL0/SVC evidence line
 
 pub const PollResult = enum {
     /// No input byte is available right now; the caller should wait before
@@ -120,6 +121,7 @@ pub fn boot_and_park(mon: *monitor.Monitor, rx_wired: bool) void {
             // the console itself).
             timer.maybe_heartbeat(&mon.console);
             scheduler.maybe_report(&mon.console);
+            userspace.maybe_report(&mon.console);
             idle_wait_rx();
         }
     }
@@ -245,8 +247,9 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "pages selftest: ok free=0x0000000000000480\n" ++
         "dipshit> tasks\r\n" ++
         "tasks: enabled=0 current=0 switches=0\n" ++
-        "  shell  saves=0 resumes=0 advances=0\n" ++
-        "  worker saves=0 resumes=0 advances=0\n" ++
+        "  shell    saves=0 resumes=0 advances=0\n" ++
+        "  worker   saves=0 resumes=0 advances=0\n" ++
+        "  user-el0 saves=0 resumes=0 advances=0\n" ++
         "dipshit> echo \"elephant business\"\r\n" ++
         "elephant business\n" ++
         "dipshit> ls\r\n" ++
@@ -278,11 +281,13 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
     // exactly as kernel_main does — the `pages` command reports/exercises
     // that pool.
     _ = alloc.init(make_view(), &.{});
-    // Claim 5275: register the two scheduler tasks exactly as kernel_main
+    // Claims 5275/8215: register all scheduler tasks exactly as kernel_main
     // does (without `start`, so no preemption happens in the test process)
-    // — the `tasks` command then reports the real two-task shape.
+    // — the `tasks` command then reports the real mixed-EL shape.
     _ = scheduler.init();
     _ = scheduler.register_worker(0);
+    _ = scheduler.register_user(0);
+    userspace.init();
     // Claim 3475/6420: populate the ESP file window the way kernel_main's
     // FAT snapshot does (KERNEL.BIN listed-but-unloaded, an EFI directory,
     // BOOTED.TXT content-loaded). A test process has no disk (no FAT

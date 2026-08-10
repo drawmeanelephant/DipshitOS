@@ -42,6 +42,7 @@ const exceptions = @import("exceptions.zig"); // claim 9746: VBAR_EL1 vector tab
 const gic = @import("gic.zig"); // claim 7948: GIC distributor + CPU interface
 const timer = @import("timer.zig"); // claim 7948: ARM generic timer (CNTP)
 const scheduler = @import("scheduler.zig"); // claim 5275: tick-driven round-robin tasks
+const userspace = @import("userspace.zig"); // claim 8215: first EL0t task + SVC boundary
 const virtio_custom = @import("virtio_custom.zig"); // claim 0828: custom-virtio spike driver (DID 0x1082)
 const HandoffV2 = handoff.HandoffV2;
 
@@ -327,7 +328,13 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
         extra_windows[extra_count] = virtio_custom.device_window();
         extra_count += 1;
     }
-    if (!mmu.build_identity_map(map_after_exit, map_buffer.buffer, base, size, handoff_rec, extra_windows[0..extra_count])) {
+    const user_text = userspace.text_region(base);
+    const user_stack = userspace.stack_region(base);
+    const user_regions = [_]mmu.UserRegion{
+        .{ .base = user_text.base, .len = user_text.len, .writable = false, .executable = true },
+        .{ .base = user_stack.base, .len = user_stack.len, .writable = true, .executable = false },
+    };
+    if (!mmu.build_identity_map(map_after_exit, map_buffer.buffer, base, size, handoff_rec, extra_windows[0..extra_count], &user_regions)) {
         evidence.set_marker(marker_table);
         evidence.write_marker_var(st, marker_table);
         halt_forever();
@@ -351,7 +358,9 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
     // hang. The report writer degrades to a no-op until the serial console
     // is probed below (console_kind == .none); the GIC is NOT programmed
     // here — that is the next card.
+    userspace.init();
     exceptions.init(exception_report_writer);
+    exceptions.set_svc_dispatcher(userspace.handle_svc);
     exceptions.install();
     // Claim 7948 (roadmap item 5, second half): GIC + generic timer. The
     // MADT/GTDT discovery ran PRE-EXIT inside pci.dump_acpi (post-exit ACPI
@@ -562,15 +571,18 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
         probe_con.print_line("[seam] direct dispatch");
     }
     // Claim 5275: the first milestone-three tasks card — a tick-driven
-    // round-robin scheduler. Task 0 is the shell/main task itself (its
-    // context is captured on the first preemption); task 1 is the demo
-    // worker on its own static stack. Scheduling starts only HERE, once
-    // the shell loop is the running context, so boot-time printing (banner,
+    // round-robin scheduler. Task 0 is the EL1h shell/main task itself (its
+    // context is captured on the first preemption); task 1 is the EL1h demo
+    // worker on its own static stack; task 2 is the claim-8215 EL0t payload
+    // with separate EL1 exception and EL0 execution stacks. Scheduling starts
+    // only HERE, once the shell loop is the running context, so boot-time
+    // printing (banner,
     // map, spike) is never preempted. The first tick then preempts the
-    // shell, the worker runs for one quantum, the next tick returns to the
-    // shell, and so on — every timer PPI (claim 9187) is a context switch.
+    // shell, worker, and EL0 task run one quantum each — every timer PPI
+    // (claim 9187) is a context switch.
     _ = scheduler.init();
     _ = scheduler.register_worker(@intFromPtr(&worker_entry));
+    _ = scheduler.register_user(@intFromPtr(&userspace.entry));
     scheduler.start();
     shell.boot_and_park(&mon, m15.rx_wired());
     // No return after takeover. WFE is a terminal state, not a firmware call.

@@ -15,10 +15,26 @@ ENTRY(_start)
 SECTIONS {
     . = 0x0;
     .text : ALIGN(16) { *(.text .text.*) }
+    /* Claim 8215: page-isolated EL0 code. The MMU grants only this range
+     * EL0 read/execute permission; padding prevents neighboring kernel text
+     * from sharing a user-accessible page. */
+    .usertext : ALIGN(4096) {
+        __user_text_start = .;
+        KEEP(*(.usertext))
+        . = ALIGN(4096);
+        __user_text_end = .;
+    }
     .rodata : ALIGN(16) { *(.rodata .rodata.*) }
     .data.rel.ro : ALIGN(16) { *(.data.rel.ro .data.rel.ro.*) }
     .eh_frame : ALIGN(16) { *(.eh_frame .eh_frame_hdr) }
     .data : ALIGN(16) { *(.data .data.*) }
+    /* Dedicated EL0 RW stack pages; kept separate from privileged BSS. */
+    .userbss (NOLOAD) : ALIGN(4096) {
+        __user_stack_start = .;
+        KEEP(*(.userbss))
+        . = ALIGN(4096);
+        __user_stack_end = .;
+    }
     .bss : ALIGN(16) { *(.bss .bss.*) }
     .ARM.exidx : ALIGN(16) { *(.ARM.exidx*) }
     /DISCARD/ : { *(.note.*) }
