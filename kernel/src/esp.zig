@@ -55,6 +55,10 @@ pub const WriteResult = enum {
     /// The name does not fit FAT 8.3 (stem > 8 chars or extension > 3).
     name_too_long,
     content_too_long,
+    /// A `/`-path parent component is absent or is not a directory (only
+    /// reachable if a future caller passes a path through the window; the
+    /// window's `valid_name` rejects '/' today).
+    bad_path,
     /// No free cluster / no free root-directory slot on the volume.
     disk_full,
     /// A sector read/write failed — the file was NOT written.
@@ -134,6 +138,12 @@ const State = struct {
     }
 };
 
+/// Label of the ACTIVE volume the window snapshots: "esp" at boot, "data"
+/// after `mount data` switches to the second FAT32 partition (milestone
+/// four card 2). Drives the `ls` header/kind text so a switched volume is
+/// never mislabeled.
+var volume_label: [8]u8 = .{ 'e', 's', 'p', 0, 0, 0, 0, 0 };
+
 var state: State = .{};
 
 // ---------------------------------------------------------------------------
@@ -155,10 +165,34 @@ pub fn set_disk(ops: ?fat.DiskOps) fat.MountResult {
     state.clear();
     const r = fat.mount(ops);
     if (r == .ok) {
+        set_volume("esp");
         snapshot_window();
         state.disk_ready = true;
     }
     return r;
+}
+
+/// Set the active volume label ("esp" or "data").
+pub fn set_volume(label: []const u8) void {
+    @memset(&volume_label, 0);
+    const take = @min(label.len, volume_label.len);
+    @memcpy(volume_label[0..take], label[0..take]);
+}
+
+/// The active volume label ("esp" at boot; "data" after `mount data`).
+pub fn volume() []const u8 {
+    var len: usize = 0;
+    while (len < volume_label.len and volume_label[len] != 0) : (len += 1) {}
+    return volume_label[0..len];
+}
+
+/// Re-snapshot the window from the CURRENT fat mount — after `mount data`
+/// switches the active volume, the window reflects the switched volume's
+/// root, labeled by `set_volume` (milestone four card 2).
+pub fn resnapshot() void {
+    state.clear();
+    snapshot_window();
+    state.disk_ready = true;
 }
 
 pub fn disk_ready() bool {
@@ -225,6 +259,7 @@ pub fn write_file(name: []const u8, content: []const u8) WriteResult {
         .no_disk => return .no_disk,
         .name_too_long => return .name_too_long,
         .content_too_long => return .content_too_long,
+        .bad_path => return .bad_path,
         .disk_full => return .disk_full,
         .io_failed => return .write_failed,
     }

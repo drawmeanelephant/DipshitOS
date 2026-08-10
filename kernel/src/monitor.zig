@@ -34,6 +34,7 @@ const syscall = @import("syscall.zig"); // claim 3594: syscall table + counters
 const timer = @import("timer.zig");
 const uaccess = @import("uaccess.zig"); // claim 6120: fault-safe copy-in/copy-out
 const userspace = @import("userspace.zig"); // claim 5804: user-VA layout
+const virtio_blk = @import("virtio_blk.zig"); // claim 6420: the sector interface behind `mount` (milestone four card 2)
 const csprng = @import("csprng.zig"); // milestone four (claim 2665): the seeded CSPRNG behind `random`
 
 // ---------------------------------------------------------------------------
@@ -207,7 +208,7 @@ pub const Command = struct {
 
 /// Number of commands. The registry is built at runtime (not a const
 /// table): see `ensure_registry`.
-pub const registry_count: usize = 29;
+pub const registry_count: usize = 30;
 
 /// Command registry, built at runtime into BSS. A `const` table would hold
 /// link-time absolute addresses for BOTH the string slices and the handler
@@ -226,7 +227,7 @@ fn ensure_registry() []const Command {
             .{ .name = "addrspaces", .help = "per-task user address spaces: per-task TTBR0, EL1-only kernel overlay, user-root contents", .usage = "addrspaces", .handler = cmd_addrspaces },
             .{ .name = "about", .help = "explain this questionable system", .usage = "about", .handler = cmd_about },
             .{ .name = "beans", .help = "count beans, probably", .usage = "beans [count]", .max_args = 1, .handler = cmd_beans },
-            .{ .name = "cat", .help = "print a file from the ESP", .usage = "cat <file>", .min_args = 1, .max_args = 1, .handler = cmd_cat },
+            .{ .name = "cat", .help = "print a file from the ESP (by name or /path)", .usage = "cat <file|path>", .min_args = 1, .max_args = 1, .handler = cmd_cat },
             .{ .name = "clear", .help = "clean up the crime scene", .usage = "clear", .handler = cmd_clear },
             .{ .name = "echo", .help = "repeat your regrettable decisions", .usage = "echo <text...>", .handler = cmd_echo },
             .{ .name = "elephant", .help = "operational mascot diagnostics", .usage = "elephant", .handler = cmd_elephant },
@@ -235,8 +236,9 @@ fn ensure_registry() []const Command {
             .{ .name = "handoff", .help = "display boot-to-kernel ABI data", .usage = "handoff", .handler = cmd_handoff },
             .{ .name = "help", .help = "list commands and their help text", .usage = "help [command]", .max_args = 1, .handler = cmd_help },
             .{ .name = "hex", .help = "format an integer in hexadecimal", .usage = "hex <number>...", .min_args = 1, .handler = cmd_hex },
-            .{ .name = "ls", .help = "list files on the ESP", .usage = "ls", .handler = cmd_ls },
+            .{ .name = "ls", .help = "list files on the ESP (or a directory by path)", .usage = "ls [<dir>]", .max_args = 1, .handler = cmd_ls },
             .{ .name = "mem", .help = "summarize the EFI memory map", .usage = "mem", .handler = cmd_mem },
+            .{ .name = "mount", .help = "switch the active FAT volume (esp or data)", .usage = "mount <esp|data>", .min_args = 1, .max_args = 1, .handler = cmd_mount },
             .{ .name = "pages", .help = "physical page allocator pool", .usage = "pages [selftest]", .max_args = 1, .handler = cmd_pages },
             .{ .name = "pci", .help = "enumerate PCI devices on the bus", .usage = "pci", .handler = cmd_pci },
             .{ .name = "procs", .help = "process registry: image, address space, lifecycle, exit status", .usage = "procs", .handler = cmd_procs },
@@ -509,12 +511,14 @@ fn cmd_mem(m: *Monitor, args: []const []const u8) ExecError {
 // claim 6420)
 // ---------------------------------------------------------------------------
 
-/// List the ESP root: name, size, and kind ([esp] file, [dir]). The window
-/// is populated from the live FAT32 volume (claim 6420). Deterministic and
-/// grep-able.
+/// List files: no argument lists the ESP root window (unchanged behavior);
+/// a `/`-path lists a subdirectory straight from the FAT volume (milestone
+/// four card 2 Stage C). Deterministic and grep-able.
 fn cmd_ls(m: *Monitor, args: []const []const u8) ExecError {
-    _ = args;
-    m.console.puts("ls: esp=");
+    if (args.len > 0) return cmd_ls_path(m, args[0]);
+    m.console.puts("ls: ");
+    m.console.puts(esp.volume());
+    m.console.puts("=");
     m.console.print_hex(@intCast(esp.esp_count()));
     m.console.puts("\n");
     const list = esp.entries();
@@ -534,18 +538,115 @@ fn cmd_ls(m: *Monitor, args: []const []const u8) ExecError {
         m.console.puts("  [");
         m.console.puts(switch (e.kind) {
             .esp_dir => "dir",
-            .esp_file => "esp",
+            .esp_file => esp.volume(),
         });
         m.console.puts("]\n");
     }
     return .none;
 }
 
-/// Print a file's content from the ESP window (FAT-backed since claim
-/// 6420). Honest diagnostics for directories, unloaded large files, and
-/// unknown names.
+/// List a directory by `/`-path, straight from the FAT volume (the window
+/// only snapshots the root). Same row format as the root listing, with a
+/// path-aware header. Honest diagnostics distinguish a file ("is a file")
+/// from an absent/non-directory path ("not found").
+fn cmd_ls_path(m: *Monitor, path: []const u8) ExecError {
+    var list: [esp.entries_max]fat.DirEntry = undefined;
+    const n = fat.list_path(path, &list);
+    if (n == 0) {
+        m.console.puts("ls: ");
+        m.console.puts(path);
+        if (fat.file_size(path) != null) {
+            m.console.print_line(": is a file, not a directory");
+        } else {
+            m.console.print_line(": not found (no such directory on the FAT volume)");
+        }
+        return .invalid_argument;
+    }
+    m.console.puts("ls: ");
+    m.console.puts(path);
+    m.console.puts(" entries=");
+    m.console.print_hex(@intCast(n));
+    m.console.puts("\n");
+    var width: usize = 0;
+    for (list[0..n]) |e| width = @max(width, e.name_len);
+    for (list[0..n]) |e| {
+        m.console.puts("  ");
+        m.console.puts(e.name[0..e.name_len]);
+        var pad: usize = e.name_len;
+        while (pad < width) : (pad += 1) m.console.putc(' ');
+        m.console.puts("  ");
+        m.console.print_hex(e.size);
+        m.console.puts("  [");
+        m.console.puts(if (e.is_dir) "dir" else esp.volume());
+        m.console.puts("]\n");
+    }
+    return .none;
+}
+
+/// Switch the active FAT volume (milestone four card 2): `mount esp`
+/// re-mounts the EFI System Partition by its GPT type GUID; `mount data`
+/// mounts the second FAT32 partition (the general-filesystem volume) by
+/// its GUID. The window re-snapshots the newly active volume's root,
+/// labeled honestly (`ls: <volume>=..`, `[<volume>]`).
+fn cmd_mount(m: *Monitor, args: []const []const u8) ExecError {
+    const name = args[0];
+    const is_data = std.mem.eql(u8, name, "data");
+    if (!is_data and !std.mem.eql(u8, name, "esp")) {
+        m.console.puts("mount: unknown volume: ");
+        m.console.puts(name);
+        m.console.print_line(" (expected esp or data)");
+        return .invalid_argument;
+    }
+    const r = if (is_data) fat.mount_data(virtio_blk.disk_ops()) else fat.mount(virtio_blk.disk_ops());
+    switch (r) {
+        .ok => {
+            esp.set_volume(if (is_data) "data" else "esp");
+            esp.resnapshot();
+            m.console.puts("mount: ");
+            m.console.puts(name);
+            m.console.puts(" vol_lba=");
+            m.console.print_hex(fat.geometry().vol_lba);
+            m.console.puts(" files=");
+            m.console.print_hex(@intCast(esp.entry_count()));
+            m.console.puts("\n");
+            return .none;
+        },
+        .no_disk => {
+            m.console.puts("mount: ");
+            m.console.puts(name);
+            m.console.print_line(": no disk (FAT volume unavailable)");
+            return .not_implemented;
+        },
+        .bad_gpt => {
+            m.console.puts("mount: ");
+            m.console.puts(name);
+            m.console.print_line(": partition not found (bad GPT or no such type GUID)");
+            return .machine_failed;
+        },
+        .bad_bpb => {
+            m.console.puts("mount: ");
+            m.console.puts(name);
+            m.console.print_line(": not a FAT32 volume (bad BPB)");
+            return .machine_failed;
+        },
+        .io_failed => {
+            m.console.puts("mount: ");
+            m.console.puts(name);
+            m.console.puts(": sector I/O failed (last lba=");
+            m.console.print_hex_min(fat.last_fail_lba());
+            m.console.print_line(")");
+            return .machine_failed;
+        },
+    }
+}
+
+/// Print a file's content — a bare name serves the ESP window (unchanged
+/// behavior); a `/`-path reads the FAT volume directly (milestone four
+/// card 2 Stage C). Honest diagnostics for directories, files larger than
+/// the bounded read buffer, and unknown paths.
 fn cmd_cat(m: *Monitor, args: []const []const u8) ExecError {
     const name = args[0];
+    if (std.mem.indexOfScalar(u8, name, '/') != null) return cmd_cat_path(m, name);
     const e = esp.lookup(name) orelse {
         m.console.puts("cat: ");
         m.console.puts(name);
@@ -580,6 +681,38 @@ fn cmd_cat(m: *Monitor, args: []const []const u8) ExecError {
     return .none;
 }
 
+/// Print a file by `/`-path, read straight from the FAT volume. The file's
+/// size is checked first: a file larger than the bounded read buffer is
+/// reported honestly (never silently truncated).
+fn cmd_cat_path(m: *Monitor, path: []const u8) ExecError {
+    const size = fat.file_size(path) orelse {
+        m.console.puts("cat: ");
+        m.console.puts(path);
+        m.console.print_line(": not found (no such file on the FAT volume)");
+        return .invalid_argument;
+    };
+    var buf: [esp.write_content_max]u8 = undefined;
+    if (size > @as(u32, @intCast(buf.len))) {
+        m.console.puts("cat: ");
+        m.console.puts(path);
+        m.console.puts(": file is ");
+        m.console.print_hex(size);
+        m.console.puts(" bytes; direct read caps at ");
+        m.console.print_hex(esp.write_content_max);
+        m.console.print_line(" bytes");
+        return .invalid_argument;
+    }
+    const got = fat.read_file(path, &buf) orelse {
+        m.console.puts("cat: ");
+        m.console.puts(path);
+        m.console.print_line(": not found (no such file on the FAT volume)");
+        return .invalid_argument;
+    };
+    m.console.puts(buf[0..got]);
+    if (got == 0 or buf[got - 1] != '\n') m.console.puts("\n");
+    return .none;
+}
+
 /// Write text to the ESP's FAT32 volume (claim 6420 — the real storage
 /// driver replacing claim 3475's NVRAM variables): the file survives
 /// reboot because it is on the disk itself. Capacity is checked before the
@@ -611,7 +744,9 @@ fn cmd_write(m: *Monitor, args: []const []const u8) ExecError {
         .ok => {
             m.console.puts("write: ok (persisted ");
             m.console.print_u64(n);
-            m.console.puts(" bytes to FAT on the ESP)\n");
+            m.console.puts(" bytes to FAT on the ");
+            m.console.puts(esp.volume());
+            m.console.puts(")\n");
             return .none;
         },
         .no_disk => {
@@ -640,6 +775,12 @@ fn cmd_write(m: *Monitor, args: []const []const u8) ExecError {
             m.console.puts(" bytes, got ");
             m.console.print_hex(@intCast(n));
             m.console.print_line(")");
+            return .invalid_argument;
+        },
+        .bad_path => {
+            m.console.puts("write: ");
+            m.console.puts(name);
+            m.console.print_line(": parent directory not found");
             return .invalid_argument;
         },
         .disk_full => {
@@ -2053,6 +2194,41 @@ test "monitor: cat prints ESP content with honest errors" {
     env.mock.reset();
     try std.testing.expectEqual(ExecError.invalid_argument, exec(&mon, &.{ "cat", "NOPE.TXT" }));
     try std.testing.expect(std.mem.indexOf(u8, env.mock.contents(), "not found") != null);
+}
+
+test "monitor: ls/cat accept /-paths (honest no-volume errors in a test process)" {
+    esp.reset();
+    var env = TestEnv.init();
+    var mon = env.monitor();
+    // No FAT volume in a host test process: the path branches resolve
+    // nothing and report it honestly (the success path is exercised live
+    // by verify-live-fs.sh — `ls EFI/BOOT` + `cat EFI/BOOT/BOOTAA64.EFI`).
+    try std.testing.expectEqual(ExecError.invalid_argument, exec(&mon, &.{ "ls", "EFI/BOOT" }));
+    try std.testing.expectEqualStrings("ls: EFI/BOOT: not found (no such directory on the FAT volume)\n", env.mock.contents());
+    env.mock.reset();
+    try std.testing.expectEqual(ExecError.invalid_argument, exec(&mon, &.{ "cat", "EFI/BOOT/BOOTAA64.EFI" }));
+    try std.testing.expectEqualStrings("cat: EFI/BOOT/BOOTAA64.EFI: not found (no such file on the FAT volume)\n", env.mock.contents());
+    env.mock.reset();
+    // The no-arg ls still lists the (empty) window.
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"ls"}));
+    try std.testing.expectEqualStrings("ls: esp=0x0000000000000000\nls: no files on the ESP (FAT volume unavailable or empty)\n", env.mock.contents());
+}
+
+test "monitor: mount is registered and reports honest transport errors in a test process" {
+    esp.reset();
+    var env = TestEnv.init();
+    var mon = env.monitor();
+    // No virtio-blk transport in a host test process (blk_ready=false): the
+    // sector ops fail, so both volumes report the I/O result honestly (the
+    // success path is the live gate).
+    try std.testing.expectEqual(ExecError.machine_failed, exec(&mon, &.{ "mount", "data" }));
+    try std.testing.expect(std.mem.indexOf(u8, env.mock.contents(), "mount: data: sector I/O failed") != null);
+    env.mock.reset();
+    try std.testing.expectEqual(ExecError.invalid_argument, exec(&mon, &.{ "mount", "nvme0" }));
+    try std.testing.expect(std.mem.indexOf(u8, env.mock.contents(), "unknown volume") != null);
+    env.mock.reset();
+    // The registry documents the command.
+    try std.testing.expectEqualStrings("switch the active FAT volume (esp or data)", lookup("mount").?.help);
 }
 
 test "monitor: write joins arguments and honestly reports no disk in a test process" {

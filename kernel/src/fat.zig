@@ -5,6 +5,10 @@
 //! writes (cluster allocation + FAT + directory-entry updates). It replaces
 //! claim 3475's NVRAM persistence medium: `ls`/`cat`/`write` now serve the
 //! live ESP through this module (driven on VZ by `virtio_blk.zig`).
+//! Milestone four card 2 generalizes it: `mount_partition` mounts ANY
+//! volume at any LBA, and the directory machinery walks ANY cluster chain
+//! with `/`-path resolution (`read_file`/`write_file`/`list_path` reach
+//! subdirectories like `EFI/BOOT/BOOTAA64.EFI`).
 //!
 //! The module is pure filesystem logic over an injected sector interface —
 //! no hardware, no libc, no allocation, no interrupts. Host tests run it
@@ -43,6 +47,9 @@ const max_alloc_clusters: usize = 64;
 /// Bound on LFN parts kept in memory (a 255-char name needs 20; the root
 /// cluster holds 16 slots, so 16 parts is already generous).
 const max_lfn_parts: usize = 16;
+/// Maximum path depth (components) — bounds the directory walk (each
+/// component is additionally bounded by `name_max`).
+const max_path_parts: usize = 8;
 
 /// FAT end-of-chain markers (FAT32 spec §7.4): 0x0FFFFFF8+.
 const fat_eoc: u32 = 0x0fffffff;
@@ -50,6 +57,12 @@ const fat_eoc_min: u32 = 0x0ffffff8;
 
 /// GPT type GUID of the EFI System Partition (the bytes mkfat32.py writes).
 const esp_type_guid = [16]u8{ 0x28, 0x73, 0x2a, 0xc1, 0x1f, 0xf8, 0xd2, 0x11, 0xba, 0x4b, 0x00, 0xa0, 0xc9, 0x3e, 0xc9, 0x3b };
+
+/// GPT type GUID of the DATA partition — the Linux filesystem GUID
+/// 0FC63DAF-8483-4772-8E79-3D69D8477DE4 (the bytes mkfat32.py writes). A
+/// second FAT32 volume on the same disk, mounted by `mount_data`
+/// (milestone four card 2: the general, non-ESP filesystem).
+const data_type_guid = [16]u8{ 0xaf, 0x3d, 0xc6, 0x0f, 0x83, 0x84, 0x72, 0x47, 0x8e, 0x79, 0x3d, 0x69, 0xd8, 0x47, 0x7d, 0xe4 };
 
 /// The injected sector interface. Each call transfers exactly one 512-byte
 /// sector; `true` on success. `virtio_blk.zig` implements these over the
@@ -61,7 +74,16 @@ pub const DiskOps = struct {
 
 pub const MountResult = enum { ok, no_disk, bad_gpt, bad_bpb, io_failed };
 
-pub const WriteResult = enum { ok, no_disk, name_too_long, content_too_long, disk_full, io_failed };
+pub const WriteResult = enum {
+    ok,
+    no_disk,
+    name_too_long,
+    content_too_long,
+    /// A `/`-path parent component is absent or is not a directory.
+    bad_path,
+    disk_full,
+    io_failed,
+};
 
 /// One decoded root-directory entry (as `ls` reports it).
 pub const DirEntry = struct {
@@ -75,9 +97,11 @@ pub const DirEntry = struct {
     short: [11]u8,
 };
 
-/// The parsed geometry, exposed for diagnostics (`disk` boot line).
+/// The parsed geometry, exposed for diagnostics. `vol_lba` is the first
+/// sector of the MOUNTED volume (the ESP at boot; any partition via
+/// `mount_partition` — milestone four card 2).
 pub const Geo = struct {
-    esp_lba: u64,
+    vol_lba: u64,
     bps: u16,
     spc: u8,
     reserved: u16,
@@ -97,7 +121,7 @@ const State = struct {
     ops: ?DiskOps = null,
     mounted: bool = false,
     geo: Geo = .{
-        .esp_lba = 0,
+        .vol_lba = 0,
         .bps = sector_size,
         .spc = 1,
         .reserved = 0,
@@ -118,11 +142,13 @@ var state: State = .{};
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Install the sector interface and mount the ESP. Reads the GPT (LBA 1 +
-/// partition entries), locates the EFI System Partition, parses its FAT32
-/// BPB, and computes the geometry. `ops == null` mounts nothing (honest
-/// no-disk state; `write`/`read` report it).
-pub fn mount(ops: ?DiskOps) MountResult {
+/// Install the sector interface and mount the FAT32 volume at `base_lba`
+/// (the partition's first sector, holding its BPB) — the general volume
+/// entry point (milestone four card 2): ANY FAT32 volume at ANY disk
+/// offset, not just the ESP. Parses the BPB and computes the geometry;
+/// `ops == null` mounts nothing (honest no-disk state; `write`/`read`
+/// report it).
+pub fn mount_partition(ops: ?DiskOps, base_lba: u64) MountResult {
     if (ops == null) {
         state.ops = null;
         state.mounted = false;
@@ -132,33 +158,9 @@ pub fn mount(ops: ?DiskOps) MountResult {
     state.mounted = false;
     state.last_fail_lba = 0;
 
-    // GPT header at LBA 1 (mkfat32.py layout; the protective MBR at LBA 0
-    // is not parsed — the GPT is the identity).
+    // FAT32 BPB at the volume start.
     var hdr: [sector_size]u8 = undefined;
-    if (!read_sector(1, &hdr)) return .io_failed;
-    if (!std.mem.eql(u8, hdr[0..8], "EFI PART")) return .bad_gpt;
-    const entries_lba = read_le(u64, hdr[72..80]);
-    const num_entries = read_le(u32, hdr[80..84]);
-    const entry_size = read_le(u32, hdr[84..88]);
-    if (entries_lba == 0 or num_entries == 0 or num_entries > 128 or entry_size < 128 or entry_size > sector_size) return .bad_gpt;
-
-    // Walk the partition entries for the ESP type GUID.
-    var esp_lba: u64 = 0;
-    var ei: u32 = 0;
-    while (ei < num_entries) : (ei += 1) {
-        const slot = entries_lba + @as(u64, ei) * entry_size / sector_size;
-        const off = @as(usize, ei) * entry_size % sector_size;
-        if (!read_sector(slot, &hdr)) return .io_failed;
-        if (off + 128 > sector_size) continue;
-        if (std.mem.eql(u8, hdr[off .. off + 16], &esp_type_guid)) {
-            esp_lba = read_le(u64, hdr[off + 32 .. off + 40]);
-            break;
-        }
-    }
-    if (esp_lba == 0) return .bad_gpt;
-
-    // FAT32 BPB at the ESP start.
-    if (!read_sector(esp_lba, &hdr)) return .io_failed;
+    if (!read_sector(base_lba, &hdr)) return .io_failed;
     if (hdr[510] != 0x55 or hdr[511] != 0xaa) return .bad_bpb;
     const bps = read_le(u16, hdr[11..13]);
     const spc = hdr[13];
@@ -174,7 +176,7 @@ pub fn mount(ops: ?DiskOps) MountResult {
     const total_clusters: u32 = @intCast((@as(u64, total_sectors) - data_start) / spc);
 
     state.geo = .{
-        .esp_lba = esp_lba,
+        .vol_lba = base_lba,
         .bps = bps,
         .spc = spc,
         .reserved = reserved,
@@ -187,6 +189,76 @@ pub fn mount(ops: ?DiskOps) MountResult {
     };
     state.mounted = true;
     return .ok;
+}
+
+/// Install the sector interface and mount the ESP: locate the EFI System
+/// Partition by type GUID in the GPT and mount its volume
+/// (`mount_partition`). The ESP stays the boot default (claim 6420);
+/// `mount_partition` is the general entry point and `mount_data` mounts
+/// the second FAT32 volume (milestone four card 2).
+pub fn mount(ops: ?DiskOps) MountResult {
+    if (ops == null) {
+        state.ops = null;
+        state.mounted = false;
+        return .no_disk;
+    }
+    state.ops = ops;
+    state.mounted = false;
+    state.last_fail_lba = 0;
+    switch (gpt_partition_lba(esp_type_guid)) {
+        .found => |lba| return mount_partition(ops, lba),
+        .not_found => return .bad_gpt,
+        .io_failed => return .io_failed,
+    }
+}
+
+/// Mount the DATA partition — the second FAT32 volume on the disk
+/// (Linux-filesystem type GUID, the bytes mkfat32.py writes) — the general,
+/// non-ESP filesystem (milestone four card 2). GPT discovery then
+/// `mount_partition`.
+pub fn mount_data(ops: ?DiskOps) MountResult {
+    if (ops == null) {
+        state.ops = null;
+        state.mounted = false;
+        return .no_disk;
+    }
+    state.ops = ops;
+    state.mounted = false;
+    state.last_fail_lba = 0;
+    switch (gpt_partition_lba(data_type_guid)) {
+        .found => |lba| return mount_partition(ops, lba),
+        .not_found => return .bad_gpt,
+        .io_failed => return .io_failed,
+    }
+}
+
+/// Walk the GPT partition entries (header at LBA 1, entries table after)
+/// for the first partition whose type GUID matches `type_guid` — the shared
+/// discovery behind `mount` (ESP) and `mount_data` (data partition).
+const GptLookup = union(enum) { found: u64, not_found, io_failed };
+
+fn gpt_partition_lba(type_guid: [16]u8) GptLookup {
+    // GPT header at LBA 1 (mkfat32.py layout; the protective MBR at LBA 0
+    // is not parsed — the GPT is the identity).
+    var hdr: [sector_size]u8 = undefined;
+    if (!read_sector(1, &hdr)) return .io_failed;
+    if (!std.mem.eql(u8, hdr[0..8], "EFI PART")) return .not_found;
+    const entries_lba = read_le(u64, hdr[72..80]);
+    const num_entries = read_le(u32, hdr[80..84]);
+    const entry_size = read_le(u32, hdr[84..88]);
+    if (entries_lba == 0 or num_entries == 0 or num_entries > 128 or entry_size < 128 or entry_size > sector_size) return .not_found;
+
+    var ei: u32 = 0;
+    while (ei < num_entries) : (ei += 1) {
+        const slot = entries_lba + @as(u64, ei) * entry_size / sector_size;
+        const off = @as(usize, ei) * entry_size % sector_size;
+        if (!read_sector(slot, &hdr)) return .io_failed;
+        if (off + 128 > sector_size) continue;
+        if (std.mem.eql(u8, hdr[off .. off + 16], &type_guid)) {
+            return .{ .found = read_le(u64, hdr[off + 32 .. off + 40]) };
+        }
+    }
+    return .not_found;
 }
 
 pub fn mounted() bool {
@@ -214,14 +286,16 @@ pub fn free_clusters() u32 {
     return free;
 }
 
-/// List the root directory (skipping the volume label, `.`/`..`, and
-/// deleted slots). Returns the number of entries written to `out` (≤
-/// out.len). Long-name entries are decoded into the display name when their
-/// checksum matches the following short entry.
-pub fn list_root(out: []DirEntry) usize {
+/// List a DIRECTORY's entries (any cluster chain — milestone four card 2):
+/// skipping the volume label, `.`/`..`, and deleted slots. Returns the
+/// number of entries written to `out` (≤ out.len). Long-name entries are
+/// decoded into the display name when their checksum matches the following
+/// short entry. The root directory is the special case
+/// `cluster == state.geo.root_cluster`.
+pub fn list_dir(cluster: u32, out: []DirEntry) usize {
     if (!state.mounted) return 0;
     var slots: [max_root_slots]SlotRef = undefined;
-    const n = collect_root_slots(&slots);
+    const n = collect_dir_slots(cluster, &slots);
     var count: usize = 0;
     var lfn: LfnAccum = .{};
     var i: usize = 0;
@@ -256,12 +330,28 @@ pub fn list_root(out: []DirEntry) usize {
     return count;
 }
 
-/// Read a file's content into `out`. Returns the number of bytes copied
-/// (min(file size, out.len)), or null when the file is absent or is a
-/// directory. Case-insensitive on the 8.3 name (FAT semantics) and on the
-/// display name.
+/// List the root directory (unchanged behavior — the root is the special
+/// case of `list_dir`; the ESP window's snapshot source).
+pub fn list_root(out: []DirEntry) usize {
+    return list_dir(state.geo.root_cluster, out);
+}
+
+/// List a directory by `/`-path (every component must be a directory; a
+/// bare name or empty path lists the root). 0 when a component is absent
+/// or not a directory, or the volume is unmounted.
+pub fn list_path(path: []const u8, out: []DirEntry) usize {
+    if (!state.mounted) return 0;
+    const cluster = dir_cluster_of_path(path) orelse return 0;
+    return list_dir(cluster, out);
+}
+
+/// Read a file's content into `out` — by bare name (against the root, as
+/// before) or by `/`-path (milestone four card 2). Returns the number of
+/// bytes copied (min(file size, out.len)), or null when the file is absent
+/// or is a directory. Case-insensitive on the 8.3 name (FAT semantics) and
+/// on the display name.
 pub fn read_file(name: []const u8, out: []u8) ?usize {
-    const found = find_slot(name) orelse return null;
+    const found = find_slot_path(name) orelse return null;
     if (found.entry.is_dir) return null;
     var remaining: u32 = @min(found.entry.size, @as(u32, @intCast(out.len)));
     var cur = found.entry.cluster;
@@ -282,23 +372,46 @@ pub fn read_file(name: []const u8, out: []u8) ?usize {
     return wrote;
 }
 
-/// Write `content` to `name` on the ESP: allocate clusters from the free
-/// chain, write the data, update the FAT (all copies), and create/replace
-/// the root directory entry. `name` must fit FAT 8.3 (stem ≤ 8, ext ≤ 3);
-/// content ≤ `write_content_max`. A failed write reports `.io_failed` /
-/// `.disk_full` honestly — never a partial success.
-pub fn write_file(name: []const u8, content: []const u8) WriteResult {
+/// The on-disk size of a file (by bare name or `/`-path), or null when it
+/// is absent or is a directory. Milestone four card 2 Stage C: lets the
+/// monitor check a file's size before printing it (honest truncation
+/// reporting).
+pub fn file_size(path: []const u8) ?u32 {
+    const found = find_slot_path(path) orelse return null;
+    if (found.entry.is_dir) return null;
+    return found.entry.size;
+}
+
+/// Write `content` to `name` — a bare name writes into the root (as
+/// before); a `/`-path writes into an EXISTING subdirectory (milestone
+/// four card 2; the parent components must resolve to directories, else
+/// `.bad_path`). Allocate clusters from the free chain, write the data,
+/// update the FAT (all copies), and create/replace the directory entry.
+/// The name must fit FAT 8.3 (stem ≤ 8, ext ≤ 3); content ≤
+/// `write_content_max`. A failed write reports `.io_failed` / `.disk_full`
+/// honestly — never a partial success.
+pub fn write_file(path: []const u8, content: []const u8) WriteResult {
     // Bounds are validated before any persistence attempt (a name that can
     // never be written is reported as such even without a disk).
     if (content.len > write_content_max) return .content_too_long;
+    // The last `/`-component is the 8.3 file name; everything before it is
+    // the parent directory path (empty = the root).
+    var name: []const u8 = path;
+    var parent: []const u8 = "";
+    if (std.mem.lastIndexOfScalar(u8, path, '/')) |idx| {
+        parent = path[0..idx];
+        name = path[idx + 1 ..];
+    }
+    if (name.len == 0) return .name_too_long; // trailing '/' — nothing to write
     var short: [11]u8 = undefined;
     if (!encode_83(name, &short)) return .name_too_long;
     if (!state.mounted) return .no_disk;
+    const dir_cluster = dir_cluster_of_path(parent) orelse return .bad_path;
 
     // Locate the directory slot: the existing same-name entry (freed first)
     // or the first free slot (0x00 / 0xE5).
     var slots: [max_root_slots]SlotRef = undefined;
-    const n = collect_root_slots(&slots);
+    const n = collect_dir_slots(dir_cluster, &slots);
     var target: ?SlotRef = null;
     var i: usize = 0;
     while (i < n) : (i += 1) {
@@ -397,11 +510,11 @@ fn write_sector(lba: u64, buf: *const [sector_size]u8) bool {
 }
 
 fn cluster_lba(cluster: u32) u64 {
-    return state.geo.esp_lba + state.geo.data_start + (@as(u64, cluster) - state.geo.root_cluster) * state.geo.spc;
+    return state.geo.vol_lba + state.geo.data_start + (@as(u64, cluster) - state.geo.root_cluster) * state.geo.spc;
 }
 
 fn fat_lba() u64 {
-    return state.geo.esp_lba + state.geo.reserved;
+    return state.geo.vol_lba + state.geo.reserved;
 }
 
 /// FAT entry for a cluster (FAT copy 0; the copies mirror by construction).
@@ -456,12 +569,14 @@ fn is_eoc(v: u32) bool {
 
 const SlotRef = struct { lba: u64, byte_off: usize };
 
-/// Collect the 32-byte slot references of every root-directory entry,
-/// following the root cluster chain (bounded). Stops at the first 0x00 slot
-/// (end of directory marker) or when the slot window fills.
-fn collect_root_slots(out: []SlotRef) usize {
+/// Collect the 32-byte slot references of a DIRECTORY's entries, following
+/// its cluster chain (bounded). Stops at the first 0x00 slot (end of
+/// directory marker) or when the slot window fills. The root directory is
+/// the special case `cluster == state.geo.root_cluster` (milestone four
+/// card 2: any directory chain, not just the root).
+fn collect_dir_slots(cluster: u32, out: []SlotRef) usize {
     var count: usize = 0;
-    var cur = state.geo.root_cluster;
+    var cur = cluster;
     var hops: usize = 0;
     while (!is_eoc(cur) and hops < max_chain_clusters) : (hops += 1) {
         if (cur < 2 or cur >= state.geo.total_clusters) break;
@@ -477,6 +592,10 @@ fn collect_root_slots(out: []SlotRef) usize {
         cur = fat_entry(cur);
     }
     return count;
+}
+
+fn collect_root_slots(out: []SlotRef) usize {
+    return collect_dir_slots(state.geo.root_cluster, out);
 }
 
 fn read_dir_slot(ref: SlotRef, out: *[32]u8) bool {
@@ -501,14 +620,15 @@ fn cluster_of_raw(raw: [32]u8) u32 {
 
 const Found = struct { slot: SlotRef, entry: DirEntry };
 
-/// Find a root entry by name: matches the 8.3-encoded short name OR the
-/// display name, case-insensitively. Returns its slot (the caller can then
-/// read or overwrite the entry) plus the decoded entry.
-fn find_slot(name: []const u8) ?Found {
+/// Find an entry in a DIRECTORY (any cluster chain) by name: matches the
+/// 8.3-encoded short name OR the display name, case-insensitively. Returns
+/// its slot (the caller can then read or overwrite the entry) plus the
+/// decoded entry. The root directory is the special case.
+fn find_slot_in(cluster: u32, name: []const u8) ?Found {
     var short: [11]u8 = undefined;
     const has_short = encode_83(name, &short);
     var slots: [max_root_slots]SlotRef = undefined;
-    const n = collect_root_slots(&slots);
+    const n = collect_dir_slots(cluster, &slots);
     var lfn: LfnAccum = .{};
     var i: usize = 0;
     while (i < n) : (i += 1) {
@@ -540,6 +660,72 @@ fn find_slot(name: []const u8) ?Found {
         }
     }
     return null;
+}
+
+/// Find a root entry by name (the root is the special case of
+/// `find_slot_in`).
+fn find_slot(name: []const u8) ?Found {
+    return find_slot_in(state.geo.root_cluster, name);
+}
+
+/// Find an entry by `/`-path (milestone four card 2): the components
+/// before the last must be directories (walked from the root); the LAST
+/// component is the entry itself (file or directory). A bare name resolves
+/// against the root — identical to `find_slot`. Returns null when the path
+/// ends in '/' (a directory, not an entry), any component is absent, or an
+/// intermediate component is not a directory.
+fn find_slot_path(path: []const u8) ?Found {
+    if (std.mem.lastIndexOfScalar(u8, path, '/')) |idx| {
+        const parent = path[0..idx];
+        const name = path[idx + 1 ..];
+        if (name.len == 0) return null; // trailing '/' — a directory
+        const cluster = dir_cluster_of_path(parent) orelse return null;
+        return find_slot_in(cluster, name);
+    }
+    return find_slot(path);
+}
+
+// ---------------------------------------------------------------------------
+// Path resolution (milestone four card 2)
+// ---------------------------------------------------------------------------
+
+/// Resolve a `/`-separated path to the cluster of its LAST DIRECTORY
+/// component (every component must exist and be a directory). `.` is a
+/// no-op; `..` pops to the parent (the root's parent is itself). A bare
+/// name or empty path resolves to the root cluster. Each component is
+/// bounded by `name_max` and the depth by `max_path_parts` (over-deep
+/// paths return null). The FAT layer no longer speaks only root-relative
+/// names — the "arbitrary disk layout" companion to `mount_partition`.
+fn dir_cluster_of_path(path: []const u8) ?u32 {
+    // Split into bounded components (tokenizeScalar skips empty runs, so
+    // leading/trailing '/' and "//" are tolerated).
+    var parts: [max_path_parts][]const u8 = undefined;
+    var n: usize = 0;
+    var it = std.mem.tokenizeScalar(u8, path, '/');
+    while (it.next()) |part| {
+        if (part.len > name_max) return null;
+        if (n >= max_path_parts) return null;
+        parts[n] = part;
+        n += 1;
+    }
+    // Walk with an explicit parent stack so ".." pops correctly.
+    var stack: [max_path_parts + 1]u32 = undefined;
+    var depth: usize = 1;
+    stack[0] = state.geo.root_cluster;
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        if (std.mem.eql(u8, parts[i], ".")) continue;
+        if (std.mem.eql(u8, parts[i], "..")) {
+            if (depth > 1) depth -= 1;
+            continue;
+        }
+        const found = find_slot_in(stack[depth - 1], parts[i]) orelse return null;
+        if (!found.entry.is_dir) return null;
+        if (depth > max_path_parts) return null;
+        stack[depth] = found.entry.cluster;
+        depth += 1;
+    }
+    return stack[depth - 1];
 }
 
 fn decode_entry(raw: [32]u8, long: ?[]const u8) DirEntry {
@@ -936,7 +1122,7 @@ test "fat: mount parses the GPT + BPB geometry" {
     try std.testing.expectEqual(MountResult.ok, mount(test_ops()));
     try std.testing.expect(mounted());
     const g = geometry();
-    try std.testing.expectEqual(@as(u64, 2048), g.esp_lba);
+    try std.testing.expectEqual(@as(u64, 2048), g.vol_lba);
     try std.testing.expectEqual(@as(u16, 512), g.bps);
     try std.testing.expectEqual(@as(u8, 1), g.spc);
     try std.testing.expectEqual(@as(u16, 32), g.reserved);
@@ -1085,4 +1271,188 @@ test "fat: io failures are reported honestly" {
     try std.testing.expectEqual(MountResult.ok, mount(failing));
     try std.testing.expectEqual(WriteResult.io_failed, write_file("x.txt", "x"));
     try std.testing.expect(last_fail_lba() != 0);
+}
+
+/// Lay a minimal, INDEPENDENT FAT32 volume at `base_lba` (not in the GPT):
+/// BPB + both FAT copies + a root holding one file "DATA.TXT" (cluster 3,
+/// content "hello disk"). Proves `mount_partition` mounts ANY volume at
+/// ANY LBA — the "arbitrary disk layout" half of milestone-four card 2.
+fn write_min_volume(img: []u8, base_lba: u64) void {
+    const base: usize = @intCast(base_lba * sector_size);
+    const bs = img[base .. base + sector_size];
+    const jmp_boot = [_]u8{ 0xeb, 0x58, 0x90 };
+    @memcpy(bs[0..3], &jmp_boot);
+    @memcpy(bs[3..11], "MSDOS5.0");
+    std.mem.writeInt(u16, bs[11..13], sector_size, .little);
+    bs[13] = 1; // sectors per cluster
+    std.mem.writeInt(u16, bs[14..16], 32, .little); // reserved
+    bs[16] = 2; // number of FATs
+    bs[21] = 0xf8;
+    std.mem.writeInt(u32, bs[32..36], 100, .little); // total sectors
+    std.mem.writeInt(u32, bs[36..40], 1, .little); // FAT sectors (tiny volume)
+    std.mem.writeInt(u32, bs[44..48], 2, .little); // root cluster
+    bs[510] = 0x55;
+    bs[511] = 0xaa;
+
+    // FAT copies: cluster 2 (root) and cluster 3 (DATA.TXT) both EOC.
+    const fat_off: usize = @intCast((base_lba + 32) * sector_size);
+    var fat_buf = [_]u8{0} ** sector_size;
+    std.mem.writeInt(u32, fat_buf[0..4], 0x0ffffff8, .little);
+    std.mem.writeInt(u32, fat_buf[4..8], 0x0fffffff, .little);
+    std.mem.writeInt(u32, fat_buf[8..12], 0x0fffffff, .little);
+    @memcpy(img[fat_off .. fat_off + sector_size], &fat_buf);
+    @memcpy(img[fat_off + sector_size ..][0..sector_size], &fat_buf);
+
+    // Root (cluster 2 → LBA base+34) and DATA.TXT (cluster 3 → LBA base+35).
+    const root_off: usize = @intCast((base_lba + 34) * sector_size);
+    var root = [_]u8{0} ** sector_size;
+    write_entry(&root, 0, "DATA    TXT", 0x20, 3, 10);
+    @memcpy(img[root_off .. root_off + sector_size], &root);
+    const data_off: usize = @intCast((base_lba + 35) * sector_size);
+    @memcpy(img[data_off .. data_off + 10], "hello disk");
+}
+
+test "fat: mount_partition mounts ANY FAT32 volume at an arbitrary LBA" {
+    var fxt = try build_fixture(test_allocator, false);
+    defer test_allocator.free(fxt.buf);
+    // A second, independent volume at LBA 100000 — not in the GPT.
+    write_min_volume(fxt.buf, 100000);
+
+    // The ESP wrapper is unchanged: still finds the ESP by GUID.
+    make_state_fixture(&fxt);
+    try std.testing.expectEqual(MountResult.ok, mount(test_ops()));
+    try std.testing.expectEqual(@as(u64, 2048), geometry().vol_lba);
+
+    // The general entry point mounts the second volume and serves it.
+    try std.testing.expectEqual(MountResult.ok, mount_partition(test_ops(), 100000));
+    try std.testing.expectEqual(@as(u64, 100000), geometry().vol_lba);
+    var out: [8]DirEntry = undefined;
+    try std.testing.expectEqual(@as(usize, 1), list_root(&out));
+    try std.testing.expectEqualStrings("DATA.TXT", out[0].name[0..out[0].name_len]);
+    var buf: [64]u8 = undefined;
+    const got = (read_file("DATA.TXT", &buf) orelse return error.TestUnexpectedResult);
+    try std.testing.expectEqualStrings("hello disk", buf[0..got]);
+    try std.testing.expectEqual(WriteResult.ok, write_file("written.txt", "from volume 2"));
+    var buf2: [64]u8 = undefined;
+    const got2 = (read_file("written.txt", &buf2) orelse return error.TestUnexpectedResult);
+    try std.testing.expectEqualStrings("from volume 2", buf2[0..got2]);
+
+    // A non-FAT LBA is rejected honestly (the GPT header sector is not a BPB).
+    try std.testing.expectEqual(MountResult.bad_bpb, mount_partition(test_ops(), 1));
+    // And the ESP path still works after a failed mount attempt.
+    try std.testing.expectEqual(MountResult.ok, mount(test_ops()));
+    try std.testing.expectEqual(@as(u64, 2048), geometry().vol_lba);
+}
+
+test "fat: paths reach subdirectories (EFI/BOOT/BOOTAA64.EFI)" {
+    var fxt = try build_fixture(test_allocator, false);
+    defer test_allocator.free(fxt.buf);
+    make_state_fixture(&fxt);
+    try std.testing.expectEqual(MountResult.ok, mount(test_ops()));
+
+    // Root listing is unchanged (bare names still resolve to the root).
+    var out: [32]DirEntry = undefined;
+    try std.testing.expectEqual(@as(usize, 3), list_root(&out));
+
+    // The image's EFI and EFI/BOOT trees are reachable by path.
+    try std.testing.expectEqual(@as(usize, 1), list_path("EFI", &out));
+    try std.testing.expectEqualStrings("BOOT", out[0].name[0..out[0].name_len]);
+    try std.testing.expectEqual(@as(usize, 1), list_path("EFI/BOOT", &out));
+    try std.testing.expectEqualStrings("BOOTAA64.EFI", out[0].name[0..out[0].name_len]);
+    try std.testing.expectEqual(@as(usize, 0), list_path("EFI/NOPE", &out));
+    try std.testing.expectEqual(@as(usize, 0), list_path("NOPE/DEEP", &out));
+    try std.testing.expectEqual(@as(usize, 3), list_path("", &out)); // empty = root
+
+    // Read a file three levels deep. BOOTAA64.EFI's entry size is 0x200 but
+    // the fixture stores 37 content bytes (zero-padded) — read into a small
+    // buffer and compare the real prefix.
+    var buf: [64]u8 = undefined;
+    const got = (read_file("EFI/BOOT/BOOTAA64.EFI", &buf) orelse return error.TestUnexpectedResult);
+    try std.testing.expectEqual(@as(usize, 64), got);
+    try std.testing.expectEqualStrings("BOOTAA64.EFI payload, padded to 0x200", buf[0..37]);
+
+    // Leading '/' and ".." (walking back to the root) both resolve.
+    _ = (read_file("/EFI/BOOT/BOOTAA64.EFI", &buf) orelse return error.TestUnexpectedResult);
+    try std.testing.expectEqualStrings("BOOTAA64.EFI payload, padded to 0x200", buf[0..37]);
+    const got3 = (read_file("EFI/BOOT/../../BOOTED.TXT", &buf) orelse return error.TestUnexpectedResult);
+    try std.testing.expectEqualStrings("DIPSHITOS BOOTLOADER\nfirmware has agreed to cooperate\n", buf[0..got3]);
+
+    // Directories, absent paths, and trailing '/' stay null.
+    try std.testing.expect(read_file("EFI/BOOT", &buf) == null); // a directory
+    try std.testing.expect(read_file("EFI/BOOT/", &buf) == null); // trailing '/'
+    try std.testing.expect(read_file("EFI/BOOT/NOPE.BIN", &buf) == null);
+    try std.testing.expect(read_file("NOPE/DEEP/X.TXT", &buf) == null);
+}
+
+test "fat: write_file resolves into an existing subdirectory by path" {
+    var fxt = try build_fixture(test_allocator, false);
+    defer test_allocator.free(fxt.buf);
+    make_state_fixture(&fxt);
+    try std.testing.expectEqual(MountResult.ok, mount(test_ops()));
+    try std.testing.expectEqual(WriteResult.ok, write_file("EFI/BOOT/hello.txt", "hi from boot dir"));
+    // Visible through the path listing and readable back.
+    var out: [8]DirEntry = undefined;
+    try std.testing.expectEqual(@as(usize, 2), list_path("EFI/BOOT", &out));
+    var buf: [64]u8 = undefined;
+    const got = (read_file("EFI/BOOT/hello.txt", &buf) orelse return error.TestUnexpectedResult);
+    try std.testing.expectEqualStrings("hi from boot dir", buf[0..got]);
+    // The root listing is untouched (the write went into /EFI/BOOT).
+    try std.testing.expectEqual(@as(usize, 3), list_root(&out));
+    // A missing / non-directory parent is reported honestly (bad_path).
+    try std.testing.expectEqual(WriteResult.bad_path, write_file("NOPE/x.txt", "x"));
+    try std.testing.expectEqual(WriteResult.bad_path, write_file("EFI/NOPE/x.txt", "x"));
+    try std.testing.expectEqual(WriteResult.bad_path, write_file("KERNEL.BIN/x.txt", "x")); // file, not a dir
+    try std.testing.expectEqual(WriteResult.name_too_long, write_file("EFI/BOOT/", "x")); // trailing '/'
+}
+
+/// Add a DATA partition (Linux-FS type GUID) at `base_lba` to the fixture's
+/// GPT entries and lay a minimal data volume there — mirrors the real
+/// image's two-partition layout so `mount_data` has a second partition to
+/// discover by GUID.
+fn add_data_partition(img: []u8, base_lba: u64) void {
+    const ent_off: usize = 2 * sector_size + 128; // GPT entry index 1
+    @memcpy(img[ent_off .. ent_off + 16], &data_type_guid);
+    std.mem.writeInt(u64, img[ent_off + 32 ..][0..8], base_lba, .little);
+    std.mem.writeInt(u64, img[ent_off + 40 ..][0..8], base_lba + 100, .little);
+    write_min_volume(img, base_lba);
+}
+
+test "fat: mount_data mounts the second FAT32 partition by type GUID" {
+    var fxt = try build_fixture(test_allocator, false);
+    defer test_allocator.free(fxt.buf);
+    add_data_partition(fxt.buf, 100000);
+    make_state_fixture(&fxt);
+    // The ESP wrapper is unchanged: still finds the ESP by GUID.
+    try std.testing.expectEqual(MountResult.ok, mount(test_ops()));
+    try std.testing.expectEqual(@as(u64, 2048), geometry().vol_lba);
+    // mount_data discovers the DATA partition by its type GUID.
+    try std.testing.expectEqual(MountResult.ok, mount_data(test_ops()));
+    try std.testing.expectEqual(@as(u64, 100000), geometry().vol_lba);
+    var out: [8]DirEntry = undefined;
+    try std.testing.expectEqual(@as(usize, 1), list_root(&out));
+    try std.testing.expectEqualStrings("DATA.TXT", out[0].name[0..out[0].name_len]);
+    var buf: [64]u8 = undefined;
+    const got = (read_file("DATA.TXT", &buf) orelse return error.TestUnexpectedResult);
+    try std.testing.expectEqualStrings("hello disk", buf[0..got]);
+
+    // A disk without a data partition reports bad_gpt honestly, and the ESP
+    // path still works after the failed lookup.
+    var fxt2 = try build_fixture(test_allocator, false);
+    defer test_allocator.free(fxt2.buf);
+    make_state_fixture(&fxt2);
+    try std.testing.expectEqual(MountResult.bad_gpt, mount_data(test_ops()));
+    try std.testing.expectEqual(MountResult.ok, mount(test_ops()));
+    try std.testing.expectEqual(@as(u64, 2048), geometry().vol_lba);
+}
+
+test "fat: file_size reports sizes by name and /-path, null for dirs" {
+    var fxt = try build_fixture(test_allocator, false);
+    defer test_allocator.free(fxt.buf);
+    make_state_fixture(&fxt);
+    try std.testing.expectEqual(MountResult.ok, mount(test_ops()));
+    try std.testing.expectEqual(@as(u32, 54), (file_size("BOOTED.TXT") orelse return error.TestUnexpectedResult));
+    try std.testing.expectEqual(@as(u32, 0x200), (file_size("EFI/BOOT/BOOTAA64.EFI") orelse return error.TestUnexpectedResult));
+    try std.testing.expect(file_size("EFI") == null); // a directory
+    try std.testing.expect(file_size("EFI/BOOT") == null); // a directory
+    try std.testing.expect(file_size("NOPE.TXT") == null);
 }

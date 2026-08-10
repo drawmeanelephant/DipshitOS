@@ -5,18 +5,22 @@ Pure Python 3 standard library only -- no mtools, no root, no loopback
 devices. Used by image/make-image.sh and tools/inspect.sh.
 
 Modes:
-  create:  mkfat32.py [--size-mb 64] [--esp-offset 2048] IMAGE EFI_FILE [KERNEL_FILE] [USER_FILE]
+  create:  mkfat32.py [--size-mb 128] [--esp-offset 2048] IMAGE EFI_FILE [KERNEL_FILE] [USER_FILE]
   list:    mkfat32.py --list IMAGE
 
 Layout produced:
   LBA 0        protective MBR
   LBA 1        GPT header (partition entries at LBA 2..33, backup at end)
-  LBA 2048..   FAT32 volume (hidden_sectors = 2048) containing
+  LBA 2048..   ESP FAT32 volume (hidden_sectors = 2048) containing
                EFI/BOOT/BOOTAA64.EFI, KERNEL.BIN when a KERNEL_FILE is
                given (the milestone-one kernel image), and USER.BIN when a
                USER_FILE is given (the milestone-three ESP user program,
-               claim 6783). Deterministic: the same inputs always produce
-               byte-identical images.
+               claim 6783).
+  tail         DATA FAT32 partition (Linux-FS type GUID, 36 MiB) — a second
+               volume on the same disk for the general (non-ESP) filesystem
+               (milestone-four card 2, claim 3678); the kernel's `mount`
+               command switches to it.
+Deterministic: the same inputs always produce byte-identical images.
 """
 
 import argparse
@@ -26,17 +30,29 @@ import zlib
 
 BYTES_PER_SECTOR = 512
 ESP_OFFSET_DEFAULT = 2048  # 1 MiB
-SIZE_MB_DEFAULT = 64
+# 128 MiB so TWO FAT32 volumes fit: FAT32 needs > 65525 clusters per volume
+# (spc=1, 512-byte sectors -> ~32 MiB each), and the image also holds the
+# ESP plus a second "data" partition (milestone-four card 2, claim 3678).
+SIZE_MB_DEFAULT = 128
+# Size of the second (data) partition, in MiB. 36 MiB > the FAT32 minimum.
+DATA_MB = 36
 FAT_EOC = 0x0FFFFFFF  # end-of-chain marker for FAT32
 FAT_BAD = 0x0FFFFFF7
 # GPT type GUID for the EFI System Partition (mixed-endian byte layout).
 ESP_GUID = bytes([0x28, 0x73, 0x2A, 0xC1, 0x1F, 0xF8, 0xD2, 0x11,
                   0xBA, 0x4B, 0x00, 0xA0, 0xC9, 0x3E, 0xC9, 0x3B])
+# GPT type GUID for the data partition: the Linux filesystem GUID
+# (0FC63DAF-8483-4772-8E79-3D69D8477DE4, mixed-endian byte layout) — a
+# standard "general data" partition type, not the ESP.
+DATA_GUID = bytes([0xAF, 0x3D, 0xC6, 0x0F, 0x83, 0x84, 0x72, 0x47,
+                   0x8E, 0x79, 0x3D, 0x69, 0xD8, 0x47, 0x7D, 0xE4])
 # Fixed GUIDs so `zig build image` produces byte-identical images every run.
 DISK_GUID = bytes([0x44, 0x49, 0x50, 0x53, 0x48, 0x49, 0x54, 0x4F,
                    0x53, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x31])
 PART_GUID = bytes([0x44, 0x49, 0x50, 0x53, 0x48, 0x49, 0x54, 0x4F,
                    0x53, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x32])
+DATA_PART_GUID = bytes([0x44, 0x49, 0x50, 0x53, 0x48, 0x49, 0x54, 0x4F,
+                        0x53, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x33])
 
 
 # --------------------------------------------------------------------------
@@ -96,12 +112,12 @@ def partition_entry(type_guid, first_lba, last_lba, name, unique_guid=PART_GUID)
 class Fat32Geometry:
     """FAT32 layout for one volume, computed from its sector count."""
 
-    def __init__(self, volume_sectors, esp_offset):
+    def __init__(self, volume_sectors, base_lba):
         self.bps = BYTES_PER_SECTOR
         self.spc = 1
         self.reserved = 32
         self.nfats = 2
-        self.esp_offset = esp_offset
+        self.base_lba = base_lba
         self.total_sectors = volume_sectors
         # Fixed-point iteration for sectors-per-FAT (FAT32: 4 bytes/entry).
         fat_sectors = 1
@@ -118,10 +134,10 @@ class Fat32Geometry:
 
     def cluster_sector(self, cluster):
         """Absolute sector of a data cluster (cluster >= 2)."""
-        return self.esp_offset + self.data_start + (cluster - self.root_cluster) * self.spc
+        return self.base_lba + self.data_start + (cluster - self.root_cluster) * self.spc
 
     def fat_sector(self, fat_index):
-        return self.esp_offset + self.reserved + fat_index * self.fat_sectors
+        return self.base_lba + self.reserved + fat_index * self.fat_sectors
 
     def checks(self):
         if self.clusters <= 65525:
@@ -146,7 +162,7 @@ def boot_sector(geo):
     struct.pack_into("<H", b, 22, 0)          # FAT size 16-bit
     struct.pack_into("<H", b, 24, 32)         # sectors per track
     struct.pack_into("<H", b, 26, 64)         # number of heads
-    struct.pack_into("<I", b, 28, geo.esp_offset)   # hidden sectors
+    struct.pack_into("<I", b, 28, geo.base_lba)     # hidden sectors (volume base)
     struct.pack_into("<I", b, 32, geo.total_sectors)
     struct.pack_into("<I", b, 36, geo.fat_sectors)
     struct.pack_into("<H", b, 40, 0)          # extended flags
@@ -235,10 +251,10 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None):
 
     # --- boot sector / FSInfo / backups --------------------------------
     bs = boot_sector(geo)
-    wsec(geo.esp_offset + 0, bs)
-    wsec(geo.esp_offset + 1, fs_info_sector())
-    wsec(geo.esp_offset + 6, bs)          # backup boot sector
-    wsec(geo.esp_offset + 7, fs_info_sector())
+    wsec(geo.base_lba + 0, bs)
+    wsec(geo.base_lba + 1, fs_info_sector())
+    wsec(geo.base_lba + 6, bs)          # backup boot sector
+    wsec(geo.base_lba + 7, fs_info_sector())
 
     # --- FATs (two copies) ----------------------------------------------
     fat_bytes = b"".join(struct.pack("<I", e) for e in fat)
@@ -279,28 +295,82 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None):
         wsec(geo.cluster_sector(efi_start + i), chunk.ljust(bps, b"\x00"))
 
 
+def build_data_volume(img, geo):
+    """Write the second (data) FAT32 volume — the milestone-four card 2
+    general-filesystem partition (arbitrary disk layout, not the ESP).
+
+    Directory layout: / DIPSHITOS volume label, README.TXT (cluster 3),
+    DATA.TXT (cluster 4). Deterministic, like the ESP volume.
+    """
+    geo.checks()
+    bps = geo.bps
+    readme = (b"DipshitOS general filesystem: a second FAT32 volume on the "
+              b"same disk (claim 3678, milestone four card 2)\n")
+    data = b"general data volume contents: 1234567890\n"
+
+    fat = [0] * (geo.clusters + 2)
+    fat[0] = 0x0FFFFFF8
+    fat[1] = 0x0FFFFFFF
+    fat[2] = FAT_EOC  # root directory
+    fat[3] = FAT_EOC  # README.TXT
+    fat[4] = FAT_EOC  # DATA.TXT
+
+    def wsec(sector, blob):
+        off = sector * bps
+        img[off:off + len(blob)] = blob
+
+    bs = boot_sector(geo)
+    wsec(geo.base_lba + 0, bs)
+    wsec(geo.base_lba + 1, fs_info_sector())
+    wsec(geo.base_lba + 6, bs)
+    wsec(geo.base_lba + 7, fs_info_sector())
+    fat_bytes = b"".join(struct.pack("<I", e) for e in fat)
+    fat_bytes = fat_bytes.ljust(geo.fat_sectors * bps, b"\x00")
+    for i in range(geo.nfats):
+        wsec(geo.fat_sector(i), fat_bytes)
+
+    root_entries = (dir_entry(b"DIPSHITOS  ", 0x08, 0, 0) +
+                    dir_entry(b"README  TXT", 0x20, 3, len(readme)) +
+                    dir_entry(b"DATA    TXT", 0x20, 4, len(data)))
+    wsec(geo.cluster_sector(2), root_entries.ljust(bps, b"\x00"))
+    wsec(geo.cluster_sector(3), readme.ljust(bps, b"\x00"))
+    wsec(geo.cluster_sector(4), data.ljust(bps, b"\x00"))
+
+
 # --------------------------------------------------------------------------
 # Shared FAT/GPT parsing for --list and --cat-file
 # --------------------------------------------------------------------------
 
-def find_esp_offset(data):
-    """Return the start LBA of the EFI System Partition (0 if absent)."""
+def find_partition_offset(data, type_guid):
+    """Return the start LBA of the first partition with `type_guid` (0 if
+    absent). Shared by the ESP lookup and the data-partition lookup. Entries
+    are 128 bytes, four per sector: entry i lives at
+    `entries_lba * sector + i * 128`."""
     if data[512:520] != b"EFI PART":
         return 0
     entries_lba = struct.unpack_from("<Q", data, 512 + 72)[0]
     num = struct.unpack_from("<I", data, 512 + 80)[0]
     for i in range(min(num, 16)):
-        e = data[(entries_lba + i) * BYTES_PER_SECTOR:][:128]
-        if e[0:16] == ESP_GUID:
+        off = entries_lba * BYTES_PER_SECTOR + i * 128
+        e = data[off:off + 128]
+        if e[0:16] == type_guid:
             return struct.unpack_from("<Q", e, 32)[0]
     return 0
 
 
-def read_fat_geometry(data, esp_offset):
-    """Parse the FAT32 BPB at the ESP offset into a lightweight geo object."""
-    base = esp_offset * BYTES_PER_SECTOR
+def find_esp_offset(data):
+    return find_partition_offset(data, ESP_GUID)
+
+
+def find_data_offset(data):
+    return find_partition_offset(data, DATA_GUID)
+
+
+def read_fat_geometry(data, base_lba):
+    """Parse the FAT32 BPB at `base_lba` into a lightweight geo object."""
+    base = base_lba * BYTES_PER_SECTOR
     if data[base + 510] != 0x55 or data[base + 511] != 0xAA:
-        raise ValueError("no FAT boot signature at LBA %d" % esp_offset)
+        raise ValueError("no FAT boot signature at LBA %d" % base_lba)
     geo = Fat32Geometry.__new__(Fat32Geometry)
     geo.bps = struct.unpack_from("<H", data, base + 11)[0]
     geo.spc = data[base + 13]
@@ -308,7 +378,7 @@ def read_fat_geometry(data, esp_offset):
     geo.nfats = data[base + 16]
     geo.fat_sectors = struct.unpack_from("<I", data, base + 36)[0]
     geo.root_cluster = struct.unpack_from("<I", data, base + 44)[0]
-    geo.esp_offset = esp_offset
+    geo.base_lba = base_lba
     geo.data_start = geo.reserved + geo.nfats * geo.fat_sectors
     geo.total_sectors = struct.unpack_from("<I", data, base + 32)[0]
     geo.clusters = 0
@@ -432,6 +502,11 @@ def list_image(path):
     vol_label = data[base + 71:base + 82].decode("latin-1", "replace").rstrip(" ")
     print("GPT: ESP partition at LBA %d, %d sectors" %
           (esp_offset, geo.total_sectors))
+    data_offset = find_data_offset(data)
+    if data_offset:
+        dgeo = read_fat_geometry(data, data_offset)
+        print("GPT: DATA partition at LBA %d, %d sectors" %
+              (data_offset, dgeo.total_sectors))
     print("FAT: boot sig ok, label=%r, %d-byte sectors, %d sector/cluster, "
           "%d reserved, %d FATs x %d sectors, root cluster %d" %
           (vol_label, geo.bps, geo.spc, geo.reserved, geo.nfats,
@@ -476,10 +551,16 @@ def build_image(total_sectors, esp_offset, efi_bytes, kernel_bytes=None, user_by
     first_usable = 34
     disk_guid = DISK_GUID
 
-    # Partition table.
+    # Partition table: the ESP (LBA esp_offset..) plus a second "data"
+    # FAT32 partition at the tail of the disk (milestone-four card 2). The
+    # data partition must be > 65525 clusters (FAT32) — 36 MiB at spc=1.
+    data_sectors = DATA_MB * 1024 * 1024 // BYTES_PER_SECTOR
+    data_start = last_usable - data_sectors + 1
+    esp_last = data_start - 1
     entries = bytearray(128 * 128)
-    esp_last = last_usable
     entries[0:128] = partition_entry(ESP_GUID, esp_offset, esp_last, "EFI SYSTEM")
+    entries[128:256] = partition_entry(DATA_GUID, data_start, last_usable,
+                                       "DIPSHITOS DATA", unique_guid=DATA_PART_GUID)
     entries_crc = zlib.crc32(bytes(entries)) & 0xFFFFFFFF
     backup_entries_lba = last_usable + 1  # == total_sectors - 33
 
@@ -499,10 +580,12 @@ def build_image(total_sectors, esp_offset, efi_bytes, kernel_bytes=None, user_by
     img[backup_entries_lba * BYTES_PER_SECTOR:
         backup_entries_lba * BYTES_PER_SECTOR + len(entries)] = entries
 
-    # FAT32 volume.
+    # FAT32 volumes: the ESP and the data partition.
     volume_sectors = esp_last - esp_offset + 1
     geo = Fat32Geometry(volume_sectors, esp_offset)
     build_fat32_image(img, geo, efi_bytes, kernel_bytes, user_bytes)
+    geo_data = Fat32Geometry(data_sectors, data_start)
+    build_data_volume(img, geo_data)
     return bytes(img)
 
 

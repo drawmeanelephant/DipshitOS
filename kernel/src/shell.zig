@@ -196,7 +196,7 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "  addrspaces  per-task user address spaces: per-task TTBR0, EL1-only kernel overlay, user-root contents\n" ++
         "  about       explain this questionable system\n" ++
         "  beans       count beans, probably\n" ++
-        "  cat         print a file from the ESP\n" ++
+        "  cat         print a file from the ESP (by name or /path)\n" ++
         "  clear       clean up the crime scene\n" ++
         "  echo        repeat your regrettable decisions\n" ++
         "  elephant    operational mascot diagnostics\n" ++
@@ -205,8 +205,9 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "  handoff     display boot-to-kernel ABI data\n" ++
         "  help        list commands and their help text\n" ++
         "  hex         format an integer in hexadecimal\n" ++
-        "  ls          list files on the ESP\n" ++
+        "  ls          list files on the ESP (or a directory by path)\n" ++
         "  mem         summarize the EFI memory map\n" ++
+        "  mount       switch the active FAT volume (esp or data)\n" ++
         "  pages       physical page allocator pool\n" ++
         "  pci         enumerate PCI devices on the bus\n" ++
         "  procs       process registry: image, address space, lifecycle, exit status\n" ++

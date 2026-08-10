@@ -21,7 +21,11 @@
 #   run A (fresh image, rebuilt at gate start): script `write hello.txt
 #         hello world` + `ls` + `cat hello.txt`; asserts the write-ok
 #         reply, the volume listing (KERNEL.BIN / BOOTED.TXT), hello.txt
-#         listed as a real [esp] file, and the cat reply.
+#         listed as a real [esp] file, and the cat reply. Run A also
+#         exercises the milestone-four card 2 /-path surface: `ls
+#         EFI/BOOT` lists the loader's subdirectory and `cat
+#         EFI/BOOT/BOOTAA64.EFI` reports the honest direct-read cap (the
+#         loader is ~165 KiB > the 2048-byte bounded buffer).
 #   run B (same image): script `ls` + `cat hello.txt`; asserts hello.txt
 #         still listed from the disk and cat still prints the content —
 #         the file persisted across the reboot ON THE DISK.
@@ -82,6 +86,8 @@ cat > artifacts/live-fs-script-A.txt <<'EOF'
 write hello.txt hello world
 ls
 cat hello.txt
+ls EFI/BOOT
+cat EFI/BOOT/BOOTAA64.EFI
 EOF
 cat > artifacts/live-fs-script-B.txt <<'EOF'
 ls
@@ -111,11 +117,17 @@ run_one() {
     [ -f artifacts/vm-serial.log ] && cp artifacts/vm-serial.log "artifacts/live-fs-serial-$tag.log" || true
 
     local SERIAL_BYTES=0
-    local WRITEOK=0 FILELISTED=0 ESPFILES=0 CATREPLY=0 WINDOW=0 LSHEAD=0
+    local WRITEOK=0 FILELISTED=0 ESPFILES=0 CATREPLY=0 WINDOW=0 LSHEAD=0 SUBDIRLS=0 SUBDIRCAT=0
     if [ -f artifacts/vm-serial.log ]; then
         SERIAL_BYTES=$(wc -c < artifacts/vm-serial.log | tr -d ' ')
         # The write-ok reply: "write: ok (persisted 11 bytes to FAT on the ESP)".
         grep -a -qF -- "write: ok (persisted" artifacts/vm-serial.log && WRITEOK=1
+        # Milestone four card 2: the /-path surface. `ls EFI/BOOT` lists the
+        # loader's directory (its listing row, two-space indented); `cat
+        # EFI/BOOT/BOOTAA64.EFI` reports the honest direct-read cap (the
+        # ~165 KiB loader exceeds the 2048-byte bounded read buffer).
+        grep -a -qF -- "ls: EFI/BOOT entries=" artifacts/vm-serial.log && grep -a -qF -- "  BOOTAA64.EFI" artifacts/vm-serial.log && SUBDIRLS=1
+        grep -a -qF -- "cat: EFI/BOOT/BOOTAA64.EFI: file is" artifacts/vm-serial.log && grep -a -qF -- "direct read caps" artifacts/vm-serial.log && SUBDIRCAT=1
         # The persistence proof: hello.txt LISTED in the ls output as a
         # real [esp] disk file (the FAT volume, not an NVRAM variable).
         # The listing shows the FAT 8.3 short name — the write-time window
@@ -139,13 +151,13 @@ run_one() {
     if [ "$RC" = 0 ] && [ "$WINDOW" = 1 ] && [ "$LSHEAD" = 1 ] && [ "$ESPFILES" = 1 ] && [ "$FILELISTED" = 1 ] && [ "$CATREPLY" = 1 ]; then
         PASS=1
     fi
-    if [ "$tag" = "A" ] && [ "$WRITEOK" != 1 ]; then
+    if [ "$tag" = "A" ] && { [ "$WRITEOK" != 1 ] || [ "$SUBDIRLS" != 1 ] || [ "$SUBDIRCAT" != 1 ]; }; then
         PASS=0
     fi
     {
-        echo "$tag: rc=$RC serial-bytes=$SERIAL_BYTES write-ok=$WRITEOK file-listed=$FILELISTED volume-files=$ESPFILES cat-reply=$CATREPLY window-line=$WINDOW ls-header=$LSHEAD pass=$PASS"
+        echo "$tag: rc=$RC serial-bytes=$SERIAL_BYTES write-ok=$WRITEOK file-listed=$FILELISTED volume-files=$ESPFILES cat-reply=$CATREPLY window-line=$WINDOW ls-header=$LSHEAD subdir-ls=$SUBDIRLS subdir-cat=$SUBDIRCAT pass=$PASS"
     } >> "$REPORT"
-    echo "$tag rc=$RC serial-bytes=$SERIAL_BYTES write-ok=$WRITEOK file-listed=$FILELISTED volume-files=$ESPFILES cat-reply=$CATREPLY window-line=$WINDOW ls-header=$LSHEAD pass=$PASS"
+    echo "$tag rc=$RC serial-bytes=$SERIAL_BYTES write-ok=$WRITEOK file-listed=$FILELISTED volume-files=$ESPFILES cat-reply=$CATREPLY window-line=$WINDOW ls-header=$LSHEAD subdir-ls=$SUBDIRLS subdir-cat=$SUBDIRCAT pass=$PASS"
     [ "$PASS" = 1 ]
 }
 
@@ -153,7 +165,7 @@ run_one() {
 {
     echo "DIPSHITOS live FAT32 storage gate (claim 6420) — ls/cat/write persist through reboot on the real disk (VZ hardware)"
     echo "revision: $REVISION branch=$BRANCH pairs=$PAIRS dirty-files=$DIRTY"
-    echo "run A: write hello.txt 'hello world' + ls + cat (fresh disk image)"
+    echo "run A: write hello.txt 'hello world' + ls + cat + ls EFI/BOOT + cat EFI/BOOT/BOOTAA64.EFI (fresh disk image)"
     echo "run B: ls + cat hello.txt (SAME image — persistence through reboot on the disk)"
     echo "date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     echo
@@ -166,10 +178,11 @@ while [ "$n" -lt "$PAIRS" ]; do
     echo
     echo "=== live-fs pair $n, run A (write/ls/cat, fresh disk) ==="
     AOK=0
-    # The expect is the cat reply followed by the next prompt — it appears
-    # only after the whole script ran (the write line's echo contains
-    # "hello world" too, so it must not be the exit trigger).
-    run_one "A-$n" "artifacts/live-fs-script-A.txt" $'hello world\ndipshit> ' 1 && AOK=1 || true
+    # The expect is the LAST reply followed by the next prompt — the
+    # runner exits when it appears, so it must be the final script line's
+    # reply (the subdir cat's honest cap message; the write line's echo
+    # contains "hello world" too, so that must not be the exit trigger).
+    run_one "A-$n" "artifacts/live-fs-script-A.txt" $'direct read caps at 0x0000000000000800 bytes\ndipshit> ' 1 && AOK=1 || true
     echo "=== live-fs pair $n, run B (persistence through reboot, same disk) ==="
     BOK=0
     run_one "B-$n" "artifacts/live-fs-script-B.txt" $'hello world\ndipshit> ' 0 && BOK=1 || true
@@ -181,7 +194,7 @@ done
 echo
 echo "=== result ==="
 if [ "$PASS" = "$PAIRS" ]; then
-    echo "verify-live-fs: PASS — ls/cat/write persist through reboot on real VZ hardware via the FAT32 driver: run A persisted 'hello world' to the ESP's FAT volume (write-ok, hello.txt [esp] in ls, cat reply) and run B — a fresh boot against the same disk image — still lists and prints the file from the disk ($PASS/$PAIRS pair(s))."
+    echo "verify-live-fs: PASS — ls/cat/write persist through reboot on real VZ hardware via the FAT32 driver: run A persisted 'hello world' to the ESP's FAT volume (write-ok, hello.txt [esp] in ls, cat reply) and listed/read the EFI/BOOT subdirectory by /-path (milestone-four card 2); run B — a fresh boot against the same disk image — still lists and prints the file from the disk ($PASS/$PAIRS pair(s))."
     echo "PASS: $PASS/$PAIRS" >> "$REPORT"
     sleep 0.5
     exit 0

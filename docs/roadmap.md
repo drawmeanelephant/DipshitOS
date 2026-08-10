@@ -342,7 +342,17 @@ gates pass; tagged `m1.5-interactive-monitor`** (see
   runner's disk as a modern virtio-blk transport, DID 0x1042 on VZ,
   re-armed post-exit after VZ resets the device at ExitBootServices).
   `ls`/`cat`/`write` serve the live ESP volume; files persist on the
-  disk itself. A general (non-ESP) filesystem remains future work.
+  disk itself. **A general (non-ESP) filesystem is DONE 2026-08-10
+  (claim 3678, milestone four card 2)** — the driver now mounts ANY FAT32
+  volume at ANY disk offset (`fat.mount_partition`), walks arbitrary
+  directory cluster chains with `/`-path resolution (the image's
+  EFI/BOOT tree is reachable: `ls [<dir>]`, `cat <file|path>`), and the
+  disk image carries a second 36 MiB DATA FAT32 partition (Linux-FS type
+  GUID) mounted by the new `mount <esp|data>` command with a re-
+  snapshotted, honestly-labeled window. Live gate
+  `tools/verify-live-gfs.sh` PASS 1/1 — the DATA volume is mounted by
+  GUID, listed, read, written, and the file persists across a reboot on
+  the disk itself.
 - ~~**Entropy/CSPRNG (sketch).**~~ **DONE 2026-08-10 (claim 2665, milestone
   four card 1)** — the kernel has a REAL randomness source: a modern
   virtio-pci entropy driver (`kernel/src/virtio_entropy.zig`, DID 0x1044)
@@ -362,7 +372,7 @@ gates pass; tagged `m1.5-interactive-monitor`** (see
   state, and the exit status (which now survives the executor task's
   reap); exec and the boot-time static EL0 payload register as real
   processes, `exit_current` feeds the registry, the `procs` monitor
-  command (registry 28→29) prints the table, and the new class-B gate
+  command (registry 29→30) prints the table, and the new class-B gate
   `tools/verify-live-procs.sh` PASS 1/1 shows the exec'd program running
   as a process with the boot payload's exited status kept past the reap.
 - Eventually: a network stack — only when the ones below it are
