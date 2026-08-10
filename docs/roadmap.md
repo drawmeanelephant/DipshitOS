@@ -279,8 +279,19 @@ gates pass; tagged `m1.5-interactive-monitor`** (see
   type IDs, GICv3 redistributor SGI-frame offsets, and ICFGR trigger-bit
   programming. A real periodic CNTP PPI 30 now enters the claim-9746 EL1
   IRQ vector on VZ, is acknowledged/EOI’d and re-armed; the strict live
-  gate requires `ticks=5 irq=5 poll=0` and passes 3/3 boots. Tasks are the
-  next milestone-three card.
+  gate requires `ticks=5 irq=5 poll=0` and passes 3/3 boots.
+- ~~Tasks (kernel tasks first).~~ **DONE 2026-08-09 (claim 5275)** — a
+  tick-driven round-robin scheduler between two kernel tasks: the
+  shell/main task and a demo worker on its own static BSS stack preempt
+  at every timer PPI, with a minimal save/restore (the claim-9746 stubs
+  already keep the register file on the stack, so the scheduler only
+  saves the vector-frame pointer + ELR/SPSR per task). `dipshit> tasks`
+  reports per-task saves/resumes/advances; host tests cover the switch
+  logic; the class-B live gate `tools/verify-live-tasks.sh` proves both
+  tasks advance across ticks on VZ (worker report line after ≥ 2 real
+  context switches + a responsive shell), and the strict live-timer gate
+  still passes under preemption. No userspace, no MMU changes — a later
+  card adds userspace.
 - A guest-side filesystem — **the ESP FAT32 driver landed 2026-08-09
   (claim 6420):** `kernel/src/fat.zig` (GPT + FAT32 mount/list/read/write
   with injected sector I/O) over `kernel/src/virtio_blk.zig` (the

@@ -26,6 +26,7 @@ const gic = @import("gic.zig");
 const handoff = @import("handoff.zig");
 const memmap = @import("memmap.zig");
 const pci = @import("pci.zig");
+const scheduler = @import("scheduler.zig"); // claim 5275: tick-driven round-robin tasks
 const timer = @import("timer.zig");
 
 // ---------------------------------------------------------------------------
@@ -196,7 +197,7 @@ pub const Command = struct {
 
 /// Number of commands. The registry is built at runtime (not a const
 /// table): see `ensure_registry`.
-pub const registry_count: usize = 21;
+pub const registry_count: usize = 22;
 
 /// Command registry, built at runtime into BSS. A `const` table would hold
 /// link-time absolute addresses for BOTH the string slices and the handler
@@ -229,6 +230,7 @@ fn ensure_registry() []const Command {
             .{ .name = "reboot", .help = "restart the machine", .usage = "reboot", .handler = cmd_reboot },
             .{ .name = "repeat", .help = "repeat text, safely bounded", .usage = "repeat <count> <text...>", .min_args = 1, .handler = cmd_repeat },
             .{ .name = "shutdown", .help = "request power-off", .usage = "shutdown", .handler = cmd_shutdown },
+            .{ .name = "tasks", .help = "tick-driven task scheduler status", .usage = "tasks", .handler = cmd_tasks },
             .{ .name = "timer", .help = "interrupt controller + timer status", .usage = "timer", .handler = cmd_timer },
             .{ .name = "uname", .help = "compact system identity", .usage = "uname", .handler = cmd_uname },
             .{ .name = "version", .help = "display build information", .usage = "version", .handler = cmd_version },
@@ -888,6 +890,47 @@ fn cmd_timer(m: *Monitor, args: []const []const u8) ExecError {
 }
 
 // ---------------------------------------------------------------------------
+// Tick-driven task scheduler command (claim 5275)
+// ---------------------------------------------------------------------------
+
+/// Report the round-robin scheduler state: enabled/current/switches plus
+/// per-task saves/resumes/advances. Deterministic and grep-able; runs
+/// unchanged in a host test process (tasks may be registered but never
+/// started there, so the counters read 0).
+fn cmd_tasks(m: *Monitor, args: []const []const u8) ExecError {
+    _ = args;
+    const s = scheduler.stats();
+    m.console.puts("tasks: enabled=");
+    m.console.print_u64(if (s.enabled) 1 else 0);
+    m.console.puts(" current=");
+    m.console.print_u64(@intCast(s.current));
+    m.console.puts(" switches=");
+    m.console.print_u64(s.switches);
+    m.console.puts("\n");
+    var width: usize = 0;
+    var i: usize = 0;
+    while (i < s.count) : (i += 1) {
+        if (scheduler.task_info(i)) |t| width = @max(width, t.name.len);
+    }
+    i = 0;
+    while (i < s.count) : (i += 1) {
+        const info = scheduler.task_info(i) orelse continue;
+        m.console.puts("  ");
+        m.console.puts(info.name);
+        var pad: usize = info.name.len;
+        while (pad <= width) : (pad += 1) m.console.putc(' ');
+        m.console.puts("saves=");
+        m.console.print_u64(info.saves);
+        m.console.puts(" resumes=");
+        m.console.print_u64(info.resumes);
+        m.console.puts(" advances=");
+        m.console.print_u64(info.advances);
+        m.console.puts("\n");
+    }
+    return .none;
+}
+
+// ---------------------------------------------------------------------------
 // PCI enumeration command (macOS 27 custom-virtio spike, audit step 3)
 // ---------------------------------------------------------------------------
 
@@ -1473,6 +1516,25 @@ test "monitor: timer is registered and reports the unarmed host state" {
     try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"timer"}));
     try std.testing.expectEqualStrings(
         "timer: armed=0 gic=none dist=0x0 ppi=0x1e freq=0x0 ticks=0 irq=0 poll=0 acked=0 first=0xffffffff\n",
+        env.mock.contents(),
+    );
+}
+
+test "monitor: tasks is registered and reports the deterministic host state" {
+    var env = TestEnv.init();
+    var mon = env.monitor();
+    try std.testing.expect(lookup("tasks") != null);
+    try std.testing.expectEqualStrings("tick-driven task scheduler status", lookup("tasks").?.help);
+    // Register the two tasks exactly as kernel_main does; without `start`
+    // the scheduler never preempts, so every counter reads 0 — the same
+    // shape a live boot reports once ticks begin.
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0);
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"tasks"}));
+    try std.testing.expectEqualStrings(
+        "tasks: enabled=0 current=0 switches=0\n" ++
+            "  shell  saves=0 resumes=0 advances=0\n" ++
+            "  worker saves=0 resumes=0 advances=0\n",
         env.mock.contents(),
     );
 }

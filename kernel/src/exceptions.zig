@@ -74,12 +74,20 @@ pub const IrqDispatcher = *const fn () void;
 
 var irq_dispatcher: ?IrqDispatcher = null;
 
-/// Register the IRQ chain (kernel seam: gic.ack -> timer.handle -> gic.eoi
-/// composed in main.zig). Host tests can register a plain function and
-/// assert dispatch behavior.
+/// Register the IRQ chain (kernel seam: gic.ack -> timer.handle ->
+/// scheduler.tick -> gic.eoi composed in main.zig). Host tests can
+/// register a plain function and assert dispatch behavior.
 pub fn set_irq_dispatcher(d: IrqDispatcher) void {
     irq_dispatcher = d;
 }
+
+/// The vector-frame pointer the IRQ stub must restore from when the
+/// dispatcher chain returns (claim 5275). Set to the interrupted task's
+/// frame at IRQ entry; the scheduler may rewrite it to the next task's
+/// frame, and the stub's `mov sp, x0` + register restore + `eret` then
+/// lands in that task as if IT had been interrupted. Meaningful only in
+/// IRQ context.
+pub var resume_frame: u64 = 0;
 
 /// Unmask IRQs (clear DAIF.I). The caller arms the GIC + timer first so no
 /// interrupt can arrive before the chain is ready. No-op on non-aarch64
@@ -326,8 +334,11 @@ var resume_armed: bool = false;
 
 /// Shared handler for every vector. `frame` is the saved register frame
 /// pushed by the stub ([0..17] = x0..x17, [18] = x30, [19] = pad); the
-/// system registers are passed in from the stub's `mrs` reads. Returns 1
-/// when the stub should restore the frame and `eret`, 0 to park.
+/// system registers are passed in from the stub's `mrs` reads. Returns the
+/// vector-frame pointer the stub should restore from (then `eret`), or 0
+/// to park. For the plain IRQ/sync paths that is the entry frame itself
+/// (the stub's `mov sp, x0` is then a no-op); a context-switching
+/// dispatcher chain may return another task's frame (claim 5275).
 ///
 /// Must be callable from the naked asm with exactly this signature and
 /// symbol name (`bl exc_dispatch`), hence `export` + `callconv(.c)`.
@@ -341,14 +352,18 @@ export fn exc_dispatch(
 ) callconv(.c) u64 {
     handled_count_value += 1;
     // Claim 7948: taken IRQs route to the registered dispatcher (GIC ack
-    // -> timer handle -> GIC eoi); the stub restores the frame and erets.
-    // IRQs were masked until the whole chain was armed, so a dispatcher
-    // that is present is always ready. Without one (host tests, or the
-    // pre-GIC milestone), IRQs fall through to the report + park path.
+    // -> timer handle -> scheduler tick -> GIC eoi); the stub restores the
+    // frame and erets. IRQs were masked until the whole chain was armed,
+    // so a dispatcher that is present is always ready. Without one (host
+    // tests, or the pre-GIC milestone), IRQs fall through to the report +
+    // park path. Claim 5275: stage the interrupted task's frame pointer so
+    // the scheduler can save it (and rewrite it to the next task's frame);
+    // the stub's `mov sp, x0` restores from whatever frame is left staged.
     if (kind == kind_irq) {
         if (irq_dispatcher) |d| {
+            resume_frame = @intFromPtr(frame);
             d();
-            return 1;
+            return resume_frame;
         }
     }
     const will_resume = should_resume(kind, resume_armed);
@@ -377,7 +392,7 @@ export fn exc_dispatch(
             : [v] "r" (elr + 4),
         );
         asm volatile ("isb");
-        return 1;
+        return @intFromPtr(frame);
     }
     return 0;
 }
@@ -421,6 +436,7 @@ fn exception_vectors() align(2048) callconv(.naked) void {
         \\movz x5, #0
         \\bl exc_dispatch
         \\cbz x0, exc_park
+        \\mov sp, x0
         \\ldp x30, xzr, [sp], #16
         \\ldp x16, x17, [sp], #16
         \\ldp x14, x15, [sp], #16
@@ -452,6 +468,7 @@ fn exception_vectors() align(2048) callconv(.naked) void {
         \\movz x5, #1
         \\bl exc_dispatch
         \\cbz x0, exc_park
+        \\mov sp, x0
         \\ldp x30, xzr, [sp], #16
         \\ldp x16, x17, [sp], #16
         \\ldp x14, x15, [sp], #16
@@ -483,6 +500,7 @@ fn exception_vectors() align(2048) callconv(.naked) void {
         \\movz x5, #2
         \\bl exc_dispatch
         \\cbz x0, exc_park
+        \\mov sp, x0
         \\ldp x30, xzr, [sp], #16
         \\ldp x16, x17, [sp], #16
         \\ldp x14, x15, [sp], #16
@@ -514,6 +532,7 @@ fn exception_vectors() align(2048) callconv(.naked) void {
         \\movz x5, #3
         \\bl exc_dispatch
         \\cbz x0, exc_park
+        \\mov sp, x0
         \\ldp x30, xzr, [sp], #16
         \\ldp x16, x17, [sp], #16
         \\ldp x14, x15, [sp], #16
@@ -545,6 +564,7 @@ fn exception_vectors() align(2048) callconv(.naked) void {
         \\movz x5, #0
         \\bl exc_dispatch
         \\cbz x0, exc_park
+        \\mov sp, x0
         \\ldp x30, xzr, [sp], #16
         \\ldp x16, x17, [sp], #16
         \\ldp x14, x15, [sp], #16
@@ -576,6 +596,7 @@ fn exception_vectors() align(2048) callconv(.naked) void {
         \\movz x5, #1
         \\bl exc_dispatch
         \\cbz x0, exc_park
+        \\mov sp, x0
         \\ldp x30, xzr, [sp], #16
         \\ldp x16, x17, [sp], #16
         \\ldp x14, x15, [sp], #16
@@ -607,6 +628,7 @@ fn exception_vectors() align(2048) callconv(.naked) void {
         \\movz x5, #2
         \\bl exc_dispatch
         \\cbz x0, exc_park
+        \\mov sp, x0
         \\ldp x30, xzr, [sp], #16
         \\ldp x16, x17, [sp], #16
         \\ldp x14, x15, [sp], #16
@@ -638,6 +660,7 @@ fn exception_vectors() align(2048) callconv(.naked) void {
         \\movz x5, #3
         \\bl exc_dispatch
         \\cbz x0, exc_park
+        \\mov sp, x0
         \\ldp x30, xzr, [sp], #16
         \\ldp x16, x17, [sp], #16
         \\ldp x14, x15, [sp], #16
@@ -669,6 +692,7 @@ fn exception_vectors() align(2048) callconv(.naked) void {
         \\movz x5, #0
         \\bl exc_dispatch
         \\cbz x0, exc_park
+        \\mov sp, x0
         \\ldp x30, xzr, [sp], #16
         \\ldp x16, x17, [sp], #16
         \\ldp x14, x15, [sp], #16
@@ -700,6 +724,7 @@ fn exception_vectors() align(2048) callconv(.naked) void {
         \\movz x5, #1
         \\bl exc_dispatch
         \\cbz x0, exc_park
+        \\mov sp, x0
         \\ldp x30, xzr, [sp], #16
         \\ldp x16, x17, [sp], #16
         \\ldp x14, x15, [sp], #16
@@ -731,6 +756,7 @@ fn exception_vectors() align(2048) callconv(.naked) void {
         \\movz x5, #2
         \\bl exc_dispatch
         \\cbz x0, exc_park
+        \\mov sp, x0
         \\ldp x30, xzr, [sp], #16
         \\ldp x16, x17, [sp], #16
         \\ldp x14, x15, [sp], #16
@@ -762,6 +788,7 @@ fn exception_vectors() align(2048) callconv(.naked) void {
         \\movz x5, #3
         \\bl exc_dispatch
         \\cbz x0, exc_park
+        \\mov sp, x0
         \\ldp x30, xzr, [sp], #16
         \\ldp x16, x17, [sp], #16
         \\ldp x14, x15, [sp], #16
@@ -793,6 +820,7 @@ fn exception_vectors() align(2048) callconv(.naked) void {
         \\movz x5, #0
         \\bl exc_dispatch
         \\cbz x0, exc_park
+        \\mov sp, x0
         \\ldp x30, xzr, [sp], #16
         \\ldp x16, x17, [sp], #16
         \\ldp x14, x15, [sp], #16
@@ -824,6 +852,7 @@ fn exception_vectors() align(2048) callconv(.naked) void {
         \\movz x5, #1
         \\bl exc_dispatch
         \\cbz x0, exc_park
+        \\mov sp, x0
         \\ldp x30, xzr, [sp], #16
         \\ldp x16, x17, [sp], #16
         \\ldp x14, x15, [sp], #16
@@ -855,6 +884,7 @@ fn exception_vectors() align(2048) callconv(.naked) void {
         \\movz x5, #2
         \\bl exc_dispatch
         \\cbz x0, exc_park
+        \\mov sp, x0
         \\ldp x30, xzr, [sp], #16
         \\ldp x16, x17, [sp], #16
         \\ldp x14, x15, [sp], #16
@@ -886,6 +916,7 @@ fn exception_vectors() align(2048) callconv(.naked) void {
         \\movz x5, #3
         \\bl exc_dispatch
         \\cbz x0, exc_park
+        \\mov sp, x0
         \\ldp x30, xzr, [sp], #16
         \\ldp x16, x17, [sp], #16
         \\ldp x14, x15, [sp], #16
