@@ -5,7 +5,7 @@ Pure Python 3 standard library only -- no mtools, no root, no loopback
 devices. Used by image/make-image.sh and tools/inspect.sh.
 
 Modes:
-  create:  mkfat32.py [--size-mb 128] [--esp-offset 2048] IMAGE EFI_FILE [KERNEL_FILE] [USER_FILE] [COUNTER_FILE] [PEER_FILE]
+  create:  mkfat32.py [--size-mb 128] [--esp-offset 2048] IMAGE EFI_FILE [KERNEL_FILE] [USER_FILE] [COUNTER_FILE] [PEER_FILE] [STATUS43_FILE]
   list:    mkfat32.py --list IMAGE
 
 Layout produced:
@@ -204,19 +204,19 @@ def dir_entry(name11, attr, cluster, size):
 
 
 def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
-                      counter_bytes=None, peer_bytes=None):
+                      counter_bytes=None, peer_bytes=None, status43_bytes=None):
     """Write a FAT32 volume (boot sector, FSInfo, FATs, directories, files)
     into `img` at the volume's offset.
 
     Directory layout:
       /              DIPSHITOS volume label, EFI/, KERNEL.BIN (when given),
                      USER.BIN (when given), COUNTER.BIN (when given),
-                     PEER.BIN (when given)
+                     PEER.BIN (when given), STATUS43.BIN (when given)
       /EFI/          ., .., BOOT/
       /EFI/BOOT/     ., .., BOOTAA64.EFI
     Cluster layout: 2=root, 3=EFI, 4=BOOT, then file data in order
     (KERNEL.BIN first when present, then USER.BIN, then COUNTER.BIN, then
-    PEER.BIN, then BOOTAA64.EFI). Deterministic.
+    PEER.BIN, then STATUS43.BIN, then BOOTAA64.EFI). Deterministic.
     """
     geo.checks()
     bps = geo.bps
@@ -224,12 +224,14 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
     user_clusters = (len(user_bytes) + bps - 1) // bps if user_bytes else 0
     counter_clusters = (len(counter_bytes) + bps - 1) // bps if counter_bytes else 0
     peer_clusters = (len(peer_bytes) + bps - 1) // bps if peer_bytes else 0
+    status43_clusters = (len(status43_bytes) + bps - 1) // bps if status43_bytes else 0
     file_clusters = (len(efi_bytes) + bps - 1) // bps
     kernel_start = 5
     user_start = kernel_start + kernel_clusters
     counter_start = user_start + user_clusters
     peer_start = counter_start + counter_clusters
-    efi_start = peer_start + peer_clusters
+    status43_start = peer_start + peer_clusters
+    efi_start = status43_start + status43_clusters
     allocated = efi_start + file_clusters - 2  # clusters used beyond root(2)
     if allocated > geo.clusters:
         raise ValueError(
@@ -256,6 +258,8 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
         chain(counter_start, counter_clusters)  # COUNTER.BIN data
     if peer_bytes:
         chain(peer_start, peer_clusters)        # PEER.BIN data
+    if status43_bytes:
+        chain(status43_start, status43_clusters)  # STATUS43.BIN data
     chain(efi_start, file_clusters)            # BOOTAA64.EFI data
 
     def wsec(sector, data):
@@ -294,6 +298,8 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
         root_entries += dir_entry(b"COUNTER BIN", 0x20, counter_start, len(counter_bytes))
     if peer_bytes:
         root_entries += dir_entry(b"PEER    BIN", 0x20, peer_start, len(peer_bytes))
+    if status43_bytes:
+        root_entries += dir_entry(b"STATUS43BIN", 0x20, status43_start, len(status43_bytes))
     wsec(geo.cluster_sector(2), root_entries.ljust(bps, b"\x00"))
     wsec(geo.cluster_sector(3), (dot_efi + dotdot_efi + boot_entry).ljust(bps, b"\x00"))
     wsec(geo.cluster_sector(4), (dot_boot + dotdot_boot + file_entry).ljust(bps, b"\x00"))
@@ -315,6 +321,10 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
         for i in range(peer_clusters):
             chunk = peer_bytes[i * bps:(i + 1) * bps]
             wsec(geo.cluster_sector(peer_start + i), chunk.ljust(bps, b"\x00"))
+    if status43_bytes:
+        for i in range(status43_clusters):
+            chunk = status43_bytes[i * bps:(i + 1) * bps]
+            wsec(geo.cluster_sector(status43_start + i), chunk.ljust(bps, b"\x00"))
     for i in range(file_clusters):
         chunk = efi_bytes[i * bps:(i + 1) * bps]
         wsec(geo.cluster_sector(efi_start + i), chunk.ljust(bps, b"\x00"))
@@ -571,7 +581,8 @@ def list_image(path):
 # --------------------------------------------------------------------------
 
 def build_image(total_sectors, esp_offset, efi_bytes, kernel_bytes=None,
-                user_bytes=None, counter_bytes=None, peer_bytes=None):
+                user_bytes=None, counter_bytes=None, peer_bytes=None,
+                status43_bytes=None):
     img = bytearray(total_sectors * BYTES_PER_SECTOR)
     last_usable = total_sectors - 34
     first_usable = 34
@@ -609,7 +620,8 @@ def build_image(total_sectors, esp_offset, efi_bytes, kernel_bytes=None,
     # FAT32 volumes: the ESP and the data partition.
     volume_sectors = esp_last - esp_offset + 1
     geo = Fat32Geometry(volume_sectors, esp_offset)
-    build_fat32_image(img, geo, efi_bytes, kernel_bytes, user_bytes, counter_bytes, peer_bytes)
+    build_fat32_image(img, geo, efi_bytes, kernel_bytes, user_bytes,
+                      counter_bytes, peer_bytes, status43_bytes)
     geo_data = Fat32Geometry(data_sectors, data_start)
     build_data_volume(img, geo_data)
     return bytes(img)
@@ -635,6 +647,8 @@ def main(argv):
                     help="optional flat user program (COUNTER.BIN) to embed at the volume root (claim 4613)")
     ap.add_argument("peer_file", nargs="?",
                     help="optional flat user program (PEER.BIN) to embed at the volume root (claim 5965)")
+    ap.add_argument("status43_file", nargs="?",
+                    help="optional flat user program (STATUS43.BIN) to embed at the volume root (claim 9946)")
     args = ap.parse_args(argv)
 
     if args.list:
@@ -687,15 +701,25 @@ def main(argv):
                   "not be a DipshitOS user program image" % args.peer_file,
                   file=sys.stderr)
 
+    status43_bytes = None
+    if args.status43_file:
+        with open(args.status43_file, "rb") as f:
+            status43_bytes = f.read()
+        if status43_bytes[:4] != b"DSK1":
+            print("WARNING: %s does not start with the 'DSK1' magic; it may "
+                  "not be a DipshitOS user program image" % args.status43_file,
+                  file=sys.stderr)
+
     total_sectors = args.size_mb * 1024 * 1024 // BYTES_PER_SECTOR
     img = build_image(total_sectors, args.esp_offset, efi_bytes, kernel_bytes,
-                      user_bytes, counter_bytes, peer_bytes)
+                      user_bytes, counter_bytes, peer_bytes, status43_bytes)
     with open(args.image, "wb") as f:
         f.write(img)
     extra = ", %d-byte kernel image embedded" % len(kernel_bytes) if kernel_bytes else ""
     extra += ", %d-byte user program embedded" % len(user_bytes) if user_bytes else ""
     extra += ", %d-byte counter program embedded" % len(counter_bytes) if counter_bytes else ""
     extra += ", %d-byte peer program embedded" % len(peer_bytes) if peer_bytes else ""
+    extra += ", %d-byte status43 program embedded" % len(status43_bytes) if status43_bytes else ""
     print("wrote %s: %d MiB, ESP at LBA %d, %d-byte EFI application embedded%s" %
           (args.image, args.size_mb, args.esp_offset, len(efi_bytes), extra))
     return 0

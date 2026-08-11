@@ -237,6 +237,35 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_peer.step);
 
     // ------------------------------------------------------------------
+    // Guest: fourth ESP user program (milestone-four follow-on 4, card
+    // 4c — claim 9946) — the short third program STATUS43.BIN. Same
+    // freestanding target, linker script, elf2bin conversion, and ESP
+    // embedding as USER.BIN / COUNTER.BIN / PEER.BIN; the kernel's
+    // `exec STATUS43.BIN` monitor command loads it by name. It prints its
+    // alive marker, sleeps `sleep_ticks` scheduler ticks (slot 4) so the
+    // observer deterministically blocks on it, then exits with status 43
+    // (slot 3) — the target in the exit-status-propagation live gate.
+    // ------------------------------------------------------------------
+    const status43 = b.addExecutable(.{
+        .name = "user-status43",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/status43.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    status43.linker_script = b.path("user/linker.ld");
+    const status43_step = b.step("status43", "Build the fourth ESP user program (zig-out/bin/STATUS43.BIN; class A tooling, no VM)");
+    const status43_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    status43_elf2bin.addFileArg(status43.getEmittedBin());
+    const status43_bin = status43_elf2bin.addOutputFileArg("STATUS43.BIN");
+    status43_elf2bin.has_side_effects = true;
+    status43_elf2bin.stdio = .inherit;
+    status43_step.dependOn(&status43_elf2bin.step);
+    const install_status43 = b.addInstallFileWithDir(status43_bin, .bin, "STATUS43.BIN");
+    b.getInstallStep().dependOn(&install_status43.step);
+
+    // ------------------------------------------------------------------
     // Top-level steps. System-command steps are marked as having side
     // effects (and inherit stdio) so they always execute instead of being
     // skipped by the build cache. (No QEMU path: this project targets Apple
@@ -250,6 +279,7 @@ pub fn build(b: *std.Build) void {
     image.addFileArg(user_bin); // ... [USER_BIN] (claim 6783: ESP user program)
     image.addFileArg(counter_bin); // ... [COUNTER_BIN] (claim 4613: second, never-exiting user program)
     image.addFileArg(peer_bin); // ... [PEER.BIN] (claim 5965: third user program, the IPC peer)
+    image.addFileArg(status43_bin); // ... [STATUS43.BIN] (claim 9946: fourth user program, the wait gate's short target)
     image.has_side_effects = true;
     image.stdio = .inherit;
     image_step.dependOn(&image.step);
@@ -270,6 +300,7 @@ pub fn build(b: *std.Build) void {
     failure_image.addFileArg(user_bin); // USER.BIN rides the same image builder
     failure_image.addFileArg(counter_bin); // COUNTER.BIN too (claim 4613)
     failure_image.addFileArg(peer_bin); // PEER.BIN too (claim 5965)
+    failure_image.addFileArg(status43_bin); // STATUS43.BIN too (claim 9946)
     failure_image.has_side_effects = true;
     failure_image.stdio = .inherit;
     failure_step.dependOn(&failure_image.step);

@@ -242,9 +242,11 @@ pub fn reap(id: usize) bool {
 /// binding to the executor slot is KEPT until the lifecycle reap frees the
 /// exited process's pages (`release_pages_on_reap`), so a `procs` read
 /// between exit and reap still shows the executor slot as `task=reaped`.
-/// A no-op when no process is bound to that slot (kernel demo tasks never
-/// exit; user programs do).
-pub fn on_task_exit(task_id: usize, status: u64) void {
+/// A no-op (returns null) when no process is bound to that slot (kernel
+/// demo tasks never exit; user programs do). Card 4c (claim 9946): the
+/// returned pid lets the scheduler's exit path wake every task blocked in
+/// `sys_wait` on this process.
+pub fn on_task_exit(task_id: usize, status: u64) ?usize {
     var id: usize = 0;
     while (id < max_processes) : (id += 1) {
         if (processes[id].state != .running) continue;
@@ -260,8 +262,9 @@ pub fn on_task_exit(task_id: usize, status: u64) void {
         // first-wins-while-undrained flag collapsed them). A full ring
         // drops the oldest to admit the newest.
         push_exit_report(processes[id].name_buf[0..processes[id].name_len], status);
-        return;
+        return id;
     }
+    return null;
 }
 
 /// Free the allocator-backed pages of the exited process that last ran on
@@ -477,7 +480,7 @@ test "process: lifecycle created -> running -> exited -> reaped" {
     // A running process cannot be reaped.
     try std.testing.expect(!reap(id));
     // The executor task exits with status 43: the process snapshots it.
-    on_task_exit(2, 43);
+    _ = on_task_exit(2, 43);
     try std.testing.expectEqual(State.exited, info(id).?.state);
     try std.testing.expectEqual(@as(u64, 43), info(id).?.exit_status);
     // Claim 4613: the exited process keeps its executor slot until the
@@ -500,7 +503,7 @@ test "process: exit status survives the executor task's reuse" {
     _ = bind(p0, 2);
     // The executor exits (status 7) and its slot is REUSED by another
     // task — but the process keeps the status.
-    on_task_exit(2, 7);
+    _ = on_task_exit(2, 7);
     _ = take_exit_report();
     try std.testing.expectEqual(@as(u64, 7), info(p0).?.exit_status);
     try std.testing.expectEqual(State.exited, info(p0).?.state);
@@ -527,7 +530,7 @@ test "process: bounded registry recycles the oldest exited, never a live one" {
     try std.testing.expect(create("FULL", .{}, .{}, .{}) == null);
     // Exit the OLDEST (id 0): now the next create recycles it.
     _ = bind(ids[0], 9);
-    on_task_exit(9, 1);
+    _ = on_task_exit(9, 1);
     _ = take_exit_report();
     const recycled = create("NEW", .{}, .{}, .{}).?;
     try std.testing.expectEqual(@as(usize, 0), recycled); // the oldest exited
@@ -542,16 +545,16 @@ test "process: bounded registry recycles the oldest exited, never a live one" {
 test "process: on_task_exit is a no-op for unbound slots and find_by_task" {
     init();
     try std.testing.expect(find_by_task(2) == null);
-    on_task_exit(2, 9); // no process bound -> no report, no crash
+    _ = on_task_exit(2, 9); // no process bound -> no report, no crash
     try std.testing.expect(take_exit_report() == null);
     const id = create("USER.BIN", .{}, .{}, .{}).?;
     try std.testing.expect(find_by_task(2) == null); // not yet bound
     _ = bind(id, 5);
     try std.testing.expectEqual(@as(?usize, id), find_by_task(5));
     try std.testing.expect(find_by_task(6) == null);
-    on_task_exit(6, 1); // wrong slot -> no-op
+    _ = on_task_exit(6, 1); // wrong slot -> no-op
     try std.testing.expectEqual(State.running, info(id).?.state);
-    on_task_exit(5, 42);
+    _ = on_task_exit(5, 42);
     try std.testing.expectEqual(State.exited, info(id).?.state);
 }
 
@@ -605,7 +608,7 @@ test "process: allocator-backed resources are freed at reap and recycle" {
     try std.testing.expectEqual(@as(u64, 2), pinfo.kernel_stack_pages);
     // Exit then reap: the owned pages return to the pool.
     _ = bind(id, 1);
-    on_task_exit(1, 3);
+    _ = on_task_exit(1, 3);
     _ = take_exit_report();
     try std.testing.expect(reap(id));
     try std.testing.expectEqual(free_before, alloc.stats().free_pages);
@@ -622,7 +625,7 @@ test "process: allocator-backed resources are freed at reap and recycle" {
     // Exit the OLDEST (id 0): its page stays allocated (exited, not yet
     // recycled). The next create recycles it and frees the page.
     _ = bind(ids[0], 9);
-    on_task_exit(9, 1);
+    _ = on_task_exit(9, 1);
     _ = take_exit_report();
     const free_after_exit = alloc.stats().free_pages;
     const recycled = create("NEW", .{}, .{}, .{}).?;
@@ -659,7 +662,7 @@ test "process: exited pages return at the lifecycle reap; the procs row stays" {
     // The task exits (status 43): the process becomes exited and STILL
     // names its executor slot (claim 4613 — the lifecycle reap must be
     // able to find it to free the pages).
-    on_task_exit(3, 43);
+    _ = on_task_exit(3, 43);
     _ = take_exit_report();
     try std.testing.expectEqual(State.exited, info(id).?.state);
     try std.testing.expectEqual(@as(?usize, 3), info(id).?.task_id);
@@ -694,8 +697,8 @@ test "process: exit reports are a FIFO — two exits print two lines in order" {
     _ = bind(a, 2);
     _ = bind(b, 3);
     // Two exits in one window, never drained in between.
-    on_task_exit(2, 43);
-    on_task_exit(3, 137);
+    _ = on_task_exit(2, 43);
+    _ = on_task_exit(3, 137);
     const r1 = take_exit_report().?;
     try std.testing.expectEqualStrings("USER.BIN", r1.name);
     try std.testing.expectEqual(@as(u64, 43), r1.status);
@@ -715,7 +718,7 @@ test "process: exit report FIFO overflow drops the OLDEST" {
         const s = try std.fmt.bufPrint(&name, "P{d}", .{i});
         ids[i] = create(s, .{}, .{}, .{}).?;
         _ = bind(ids[i], i + 1);
-        on_task_exit(i + 1, @intCast(i));
+        _ = on_task_exit(i + 1, @intCast(i));
     }
     // The oldest (P0, status 0) was dropped; the four newest drain in order.
     for (1..exit_report_max + 1) |i| {
@@ -754,7 +757,7 @@ test "process: snapshot marshals non-free rows in id order with the fixed 40-byt
 
     const boot = create("user-el0", .{ .entry_va = 0x400000, .content_len = 64 }, .{}, .{}).?;
     _ = bind(boot, 2);
-    on_task_exit(2, 7); // exited with status 7
+    _ = on_task_exit(2, 7); // exited with status 7
     _ = take_exit_report();
     const peer = create("PEER.BIN", .{ .entry_va = 0x400000, .content_len = 64 }, .{}, .{}).?;
     _ = bind(peer, 3);
