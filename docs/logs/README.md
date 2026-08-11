@@ -61,6 +61,7 @@ verify-coordination`, and CI) fails if it drifts from the files.
 | `agent/buffy/m3-uaccess` | [`agent-buffy-m3-uaccess.md`](agent-buffy-m3-uaccess.md) |
 | milestone-four follow-on: concurrent processes (two live user address spaces) | [`agent-buffy-m4-concurrent-processes.md`](agent-buffy-m4-concurrent-processes.md) |
 | milestone four card 1: virtio entropy driver + CSPRNG (claim 2665) | [`agent-buffy-m4-entropy-csprng.md`](agent-buffy-m4-entropy-csprng.md) |
+| milestone-four follow-on 3, card 3e: exec context block (args to EL0) | [`agent-buffy-m4-exec-args.md`](agent-buffy-m4-exec-args.md) |
 | milestone-four follow-on 3, card 3d: per-process exit reports (exact) | [`agent-buffy-m4-exit-report-fifo.md`](agent-buffy-m4-exit-report-fifo.md) |
 | milestone four card 2: general (non-ESP) filesystem (claim 3678) | [`agent-buffy-m4-general-fs.md`](agent-buffy-m4-general-fs.md) |
 | milestone-four follow-on 3, card 3c: kill (the kernel owns process lifetime) | [`agent-buffy-m4-kill.md`](agent-buffy-m4-kill.md) |

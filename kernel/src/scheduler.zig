@@ -341,6 +341,8 @@ pub fn register_exec_user(
     stack_va: u64,
     stack_len: u64,
     kstack: []u8,
+    argc: u64,
+    argv_va: u64,
 ) ?usize {
     const sp_el0 = stack_va + stack_len;
     const id = spawn("user-exec", entry_va, spsr_el0t_irqs, kstack, root_phys, sp_el0) orelse return null;
@@ -348,6 +350,16 @@ pub fn register_exec_user(
         .text = .{ .base = userspace.text_va, .len = text_len },
         .stack = .{ .base = stack_va, .len = stack_len },
     };
+    // Card 3e (claim 4636): the entry-contract extension — the exec'd
+    // program's `_start` receives argc in x0 and the argv block VA in x1.
+    // `build_initial_frame` zeroes the whole frame (x0/x1 are 0 at the
+    // boot payload's entry), so write the two slots here — the same seam
+    // `register_user` uses for the timer-witness VA in slot x9. A no-args
+    // exec passes argc=0/argv_va=0: identical to the zeroed frame, so
+    // earlier cards' no-args behavior is byte-for-byte unchanged.
+    const frame: *exceptions.VectorFrame = @ptrFromInt(tasks[id].sp);
+    _ = exceptions.frame_write(frame, 0, argc);
+    _ = exceptions.frame_write(frame, 1, argv_va);
     return id;
 }
 
@@ -1052,6 +1064,26 @@ test "scheduler: register_user separates EL1 exception and EL0 stacks" {
     try std.testing.expectEqual(@intFromPtr(&user_timer_preemptions), exceptions.frame_read(frame, 9));
 }
 
+test "scheduler: register_exec_user passes argc and argv VA through the x0/x1 frame slots" {
+    // Card 3e (claim 4636): the entry-contract extension — the exec'd
+    // program's `_start` receives argc in x0 and the argv block VA in x1.
+    // `build_initial_frame` zeroes the frame, so `register_exec_user`
+    // writes the two slots (the same seam `register_user` uses for the
+    // timer-witness VA in slot x9). A no-args exec passes 0/0: identical
+    // to the zeroed frame, so earlier cards' no-args behavior is unchanged.
+    _ = init();
+    _ = register_worker(0x2000).?;
+    var kstack: [task_stack_size]u8 align(16) = undefined;
+    const id = register_exec_user(userspace.text_va, 0x4000_0000, 100, 0x8000_0000, 8192, &kstack, 2, 0x4000_0064).?;
+    const frame: *exceptions.VectorFrame = @ptrFromInt(tasks[id].sp);
+    try std.testing.expectEqual(@as(u64, 2), exceptions.frame_read(frame, 0));
+    try std.testing.expectEqual(@as(u64, 0x4000_0064), exceptions.frame_read(frame, 1));
+    const id2 = register_exec_user(userspace.text_va, 0x4000_0000, 100, 0x8000_0000, 8192, &kstack, 0, 0).?;
+    const frame2: *exceptions.VectorFrame = @ptrFromInt(tasks[id2].sp);
+    try std.testing.expectEqual(@as(u64, 0), exceptions.frame_read(frame2, 0));
+    try std.testing.expectEqual(@as(u64, 0), exceptions.frame_read(frame2, 1));
+}
+
 test "scheduler: round-robin alternates and round-trips saved context" {
     _ = init();
     const worker_entry: u64 = 0x2000;
@@ -1303,12 +1335,18 @@ test "scheduler: two live user tasks coexist with their own roots and regions" {
     // global root, like the real boot), then B's own root for the second
     // live program.
     const root_a = (mmu.build_user_root(userspace.text_va, 0x1000, 64, userspace.stack_va, 0x2000, 8192) orelse return error.TestUnexpectedResult);
+    // Pin the boot payload's stack placement explicitly: the module-global
+    // current_stack_va can be left at a rebuilt (ASLR) placement by earlier
+    // exec-path tests in the same process, and register_user derives the
+    // payload's stack region from it. This test pins the per-task regions
+    // mechanism, not the ASLR default.
+    userspace.set_stack_va(userspace.stack_va);
     const user_a = register_user(0x3000, 0).?;
     try std.testing.expectEqual(@as(usize, 2), user_a);
     const root_b = (mmu.build_user_root(userspace.text_va, 0x1000, 64, 0x1a400000, 0x3000, 8192) orelse return error.TestUnexpectedResult);
     var kstack_b_bytes: [task_stack_size]u8 align(16) = undefined;
     const kstack_b = kstack_b_bytes[0..];
-    const user_b = register_exec_user(0x4000, root_b, 64, 0x1a400000, 8192, kstack_b).?;
+    const user_b = register_exec_user(0x4000, root_b, 64, 0x1a400000, 8192, kstack_b, 0, 0).?;
     try std.testing.expectEqual(@as(usize, 3), user_b);
     try std.testing.expectEqual(@as(usize, 5), task_count); // shell + worker + A + B + idle
     try std.testing.expect(!has_free_slot());
@@ -1338,7 +1376,7 @@ test "scheduler: two live user tasks coexist with their own roots and regions" {
     try std.testing.expect(yield_current()); // A -> B
     try std.testing.expectEqual(@as(usize, user_b), current_id());
     // A third user program cannot load: the pool is the capacity gate.
-    try std.testing.expect(register_exec_user(0x5000, root_a, 64, 0x2a400000, 8192, kstack_b) == null);
+    try std.testing.expect(register_exec_user(0x5000, root_a, 64, 0x2a400000, 8192, kstack_b, 0, 0) == null);
 }
 
 test "scheduler: lifecycle — spawn, exit to zombie, idle reaps back to free" {

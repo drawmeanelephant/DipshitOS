@@ -1,5 +1,6 @@
 //! DipshitOS user program loaded from the ESP (milestone-three card 6,
-//! claim 6783; extended by card 7, claim 0635 — blocking syscalls).
+//! claim 6783; extended by card 7, claim 0635 — blocking syscalls; card
+//! 3e, claim 4636 — exec args).
 //!
 //! Built as a freestanding AArch64 flat image (USER.BIN, DSK1 format via
 //! tools/elf2bin.py — the same tooling as KERNEL.BIN), embedded on the ESP
@@ -21,9 +22,52 @@
 //! status (0x2b = 43) through the non-returning sys_exit (slot 3), closing
 //! the claim-6729 lifecycle. The terminal branch is only a fail-safe park
 //! if a ping round-trip or the sleep return comes back wrong.
+//!
+//! Card 3e (claim 4636): the kernel extends the ENTRY contract (not a
+//! syscall) — `_start` receives argc in x0 and the argv block VA in x1.
+//! When argc > 0 the payload prints one `user: arg=<n>` line per argument
+//! (the block is 8 slots of 32 bytes, NUL-terminated, inside this
+//! program's READ-ONLY text page) BEFORE the existing markers. A no-args
+//! exec (argc=0) prints exactly the markers earlier cards assert, so every
+//! existing live gate stays byte-identical.
 
 export fn _start() callconv(.naked) noreturn {
     asm volatile (
+        \\mov x10, x0 // argc (card 3e: entry contract — x0 argc, x1 argv VA; both 0 for no args)
+        \\mov x11, x1 // argv block VA
+        \\cbz x10, 9f
+        \\mov x9, xzr
+        \\10:
+        \\cmp x9, x10
+        \\b.hs 9f
+        \\mov x0, #1
+        \\adr x1, 11f
+        \\mov x2, #10 // "user: arg=" prefix (10 chars; the arg and its newline follow)
+        \\mov x8, #1
+        \\svc #0
+        \\lsl x12, x9, #5 // slot = argv_va + i*32
+        \\add x12, x11, x12
+        \\mov x13, xzr // len = strlen(slot), bounded by the 32-byte slot
+        \\12:
+        \\ldrb w14, [x12, x13]
+        \\cbz x14, 13f
+        \\add x13, x13, #1
+        \\cmp x13, #31
+        \\b.lo 12b
+        \\13:
+        \\mov x0, #1
+        \\mov x1, x12
+        \\mov x2, x13
+        \\mov x8, #1
+        \\svc #0
+        \\mov x0, #1
+        \\adr x1, 14f
+        \\mov x2, #1 // terminating newline
+        \\mov x8, #1
+        \\svc #0
+        \\add x9, x9, #1
+        \\b 10b
+        \\9:
         \\mov x0, #1
         \\adr x1, 1f
         \\mov x2, #25
@@ -85,6 +129,10 @@ export fn _start() callconv(.naked) noreturn {
         \\.byte 10
         \\6:
         \\.ascii "user: awake"
+        \\.byte 10
+        \\11:
+        \\.ascii "user: arg="
+        \\14:
         \\.byte 10
     );
 }

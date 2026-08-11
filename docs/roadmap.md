@@ -435,6 +435,28 @@ gates pass; tagged `m1.5-interactive-monitor`** (see
   status=43` / two `tasks user-exec reaped` lines, in order, with the
   boot payload's `tasks user-el0 exited status=7` staying its own
   distinct line; the full 12-gate shared-seam live sweep is green.
+- **Exec context block — arguments to EL0 — is DONE 2026-08-10 (claim
+  4636, milestone-four follow-on 3, card 3e)** — the tokenizer already
+  split `exec <file> [arg...]` but `monitor.exec` ignored the extras, so
+  a program's identity was its image only and the SAME binary could not
+  distinguish itself per exec. Card 3e packs a bounded argv block (8
+  args × 32 B, NUL-terminated, per-arg 31-byte truncation; >8 args is an
+  honest refusal) into the process's OWN text page right after the
+  loaded content — the text leaf is already EL0 read-only (W^X, AP=
+  read-only), so the block is a READ-ONLY leaf with ZERO extra pages
+  (the per-program 5-page budget and every exact-count page gate stay
+  untouched) — and extends the ENTRY contract (NOT a syscall; ADR 0007
+  frozen): `_start` receives `argc` in x0 and the block VA in x1 via the
+  claim-9746 frame slots. The text aperture extends over the block, so
+  uaccess copy_in reads it and copy_out faults (host-tested both
+  directions). The class-B gate `tools/verify-live-args.sh` PASS 1/1 on
+  VZ — `exec USER.BIN alpha` + `exec USER.BIN beta`: the SAME binary
+  loads twice, the procs snapshot shows two `state=running` rows with
+  distinct task ids + stack VAs, the DISTINCT markers (`user:
+  arg=alpha` / `user: arg=beta`) prove which invocation is which, both
+  programs complete (status 43 — EXACT FIFO counts), and a third exec is
+  `pool_full` (5/5, no spare); the full 12-gate shared-seam live sweep
+  is green.
 - Eventually: a network stack — only when the ones below it are
   demonstrably working.
 
