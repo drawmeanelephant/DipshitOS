@@ -161,6 +161,17 @@ var netInjectAfter: String?
 // Driven by the guest's actual request bytes, not a sleep. nil = the
 // guest's ARP requests go unanswered (the default VM is unchanged).
 var netArpRespondHostIP: [UInt8]?
+// Milestone five card N4 (claim 0148): `--net-icmp-respond <host-ip>`
+// answers the guest's ICMP ECHO REQUESTS from the HOST side — a tiny
+// deterministic host-side ICMP responder inside the capture thread: when
+// a captured datagram is an ICMP echo request for the given IP (ethertype
+// 0x0800, protocol 1, type 8, dst IP match, non-fragment), the
+// synthesized echo reply (type 0, id/seq/payload echoed byte-exact, both
+// checksums recomputed) is written into the SAME attachment socket end
+// the ARP responder writes (VZ reads fds[0], so the guest receives it).
+// Driven by the guest's actual request bytes, not a sleep. nil = the
+// guest's echo requests go unanswered (the default VM is unchanged).
+var netIcmpRespondHostIP: [UInt8]?
 
 var idx = 2
 while idx < arguments.count {
@@ -230,6 +241,14 @@ while idx < arguments.count {
             fail("--net-arp-respond requires a dotted-quad IPv4 address, got '\(arguments[idx + 1])'.")
         }
         netArpRespondHostIP = parts
+        idx += 2
+    } else if arg == "--net-icmp-respond", idx + 1 < arguments.count {
+        // Parse the dotted-quad host IP now (fail early, like --timeout).
+        let parts = arguments[idx + 1].split(separator: ".").compactMap { UInt8($0) }
+        guard parts.count == 4 else {
+            fail("--net-icmp-respond requires a dotted-quad IPv4 address, got '\(arguments[idx + 1])'.")
+        }
+        netIcmpRespondHostIP = parts
         idx += 2
     } else {
         serialLogPath = arg
@@ -430,6 +449,9 @@ if netInjectPath != nil, netCapturePath == nil {
 if netArpRespondHostIP != nil, netCapturePath == nil {
     fail("--net-arp-respond requires --net (the ARP reply is written into the SAME attachment's socket).")
 }
+if netIcmpRespondHostIP != nil, netCapturePath == nil {
+    fail("--net-icmp-respond requires --net (the ICMP reply is written into the SAME attachment's socket).")
+}
 
 if let netCapturePath {
     let netURL = URL(fileURLWithPath: netCapturePath)
@@ -469,6 +491,15 @@ if let netCapturePath {
                 buildArpReply(&reply, buf, n, arpHostMAC, hostIP)
                 try? netCaptureReadSocket!.write(contentsOf: Data(reply))
                 print("NET-ARP: answered the guest's ARP request for \(buf[28]).\(buf[29]).\(buf[30]).\(buf[31]) with host MAC 02:00:00:00:00:02")
+            }
+            // Card N4: if the guest pinged our address, echo it back from
+            // the host (same socket direction; the capture file above
+            // keeps only guest TX, byte-exact, unchanged).
+            if let hostIP = netIcmpRespondHostIP, isIcmpEchoRequest(buf, n, hostIP) {
+                var reply = [UInt8](repeating: 0, count: n)
+                buildIcmpEchoReply(&reply, buf, n, arpHostMAC, hostIP)
+                try? netCaptureReadSocket!.write(contentsOf: Data(reply))
+                print("NET-ICMP: answered the guest's echo request for \(hostIP[0]).\(hostIP[1]).\(hostIP[2]).\(hostIP[3]) (id \(reply[38] << 8 | reply[39]), seq \(reply[40] << 8 | reply[41]))")
             }
         }
         try? netCaptureFile.synchronize()
@@ -564,6 +595,10 @@ if let netInjectPath {
 if let hostIP = netArpRespondHostIP {
     let ipText = hostIP.map(String.init).joined(separator: ".")
     print("  net-arp-respond: ENABLED (milestone five card N3, claim 7293) — the host answers the guest's ARP requests for \(ipText) (host MAC 02:00:00:00:00:02) via the capture thread (deterministic, request-driven)")
+}
+if let hostIP = netIcmpRespondHostIP {
+    let ipText = hostIP.map(String.init).joined(separator: ".")
+    print("  net-icmp-respond: ENABLED (milestone five card N4, claim 0148) — the host answers the guest's ICMP echo requests for \(ipText) (host MAC 02:00:00:00:00:02) via the capture thread (deterministic, request-driven)")
 }
 
 runner.queue.async {
@@ -1148,6 +1183,66 @@ func buildArpReply(_ reply: inout [UInt8], _ req: [UInt8], _ n: Int, _ hostMAC: 
     reply[28...31] = hostIP[0...3] // spa
     reply[32...37] = req[22...27] // tha = the requester's MAC
     reply[38...41] = req[28...31] // tpa = the requester's IP
+}
+
+// Card N4 (claim 0148): RFC 1071 one's-complement checksum over
+// `bytes[start..<end]` (big-endian 16-bit words, folded; the checksummed
+// field must be zero by the caller).
+@Sendable func ipChecksum(_ bytes: [UInt8], _ start: Int, _ end: Int) -> UInt16 {
+    var sum: UInt32 = 0
+    var i = start
+    while i + 1 < end {
+        sum += (UInt32(bytes[i]) << 8) | UInt32(bytes[i + 1])
+        i += 2
+    }
+    if i < end { sum += UInt32(bytes[i]) << 8 } // trailing odd byte
+    while sum >> 16 != 0 { sum = (sum & 0xffff) + (sum >> 16) }
+    return UInt16(~sum & 0xffff)
+}
+
+// Card N4 (claim 0148): is the datagram an ICMP ECHO REQUEST for our
+// address? Ethernet II ethertype 0x0800, version 4 / IHL 5 (0x45),
+// protocol ICMP (1), dst IP == `hostIP`, ICMP type 8. The guest's
+// `net ping` frames are raw Ethernet — header at 14..34, ICMP at 34.
+func isIcmpEchoRequest(_ buf: [UInt8], _ n: Int, _ hostIP: [UInt8]) -> Bool {
+    guard n >= 46 else { return false }
+    guard buf[12] == 0x08 && buf[13] == 0x00 else { return false } // ethertype IPv4
+    guard buf[14] == 0x45 else { return false } // version 4, IHL 5
+    guard (buf[20] & 0x1f) == 0 && buf[21] == 0 else { return false } // NOT a fragment (the ICMP header would not be at 34)
+    guard buf[23] == 0x01 else { return false } // protocol ICMP
+    guard buf[30] == hostIP[0] && buf[31] == hostIP[1] && buf[32] == hostIP[2] && buf[33] == hostIP[3] else { return false }
+    guard buf[34] == 0x08 else { return false } // ICMP echo request
+    return true
+}
+
+// Card N4 (claim 0148): synthesize the ICMP ECHO REPLY to the echo
+// request in `req` (the guest's bytes) into `reply` (same length):
+// Ethernet dst/src swapped, ethertype 0x0800, IPv4 src/dst swapped, the
+// identification ECHOED (deterministic — the gate asserts it), TTL 64,
+// protocol 1, ICMP type 0 with the id/seq/payload echoed byte-exact;
+// both checksums recomputed (RFC 1071).
+func buildIcmpEchoReply(_ reply: inout [UInt8], _ req: [UInt8], _ n: Int, _ hostMAC: [UInt8], _ hostIP: [UInt8]) {
+    reply = [UInt8](repeating: 0, count: n)
+    reply[0...5] = req[6...11] // dst = the requester's MAC
+    reply[6...11] = hostMAC[0...5] // src
+    reply[12] = 0x08
+    reply[13] = 0x00 // ethertype IPv4
+    reply[14] = 0x45 // version 4, IHL 5
+    reply[16...17] = req[16...17] // total length (unchanged)
+    reply[18...19] = req[18...19] // identification ECHOED
+    reply[22] = 64 // TTL
+    reply[23] = 0x01 // protocol ICMP
+    reply[26...29] = hostIP[0...3] // src = our address
+    reply[30...33] = req[26...29] // dst = the requester's address
+    let hdrChk = ipChecksum(reply, 14, 34)
+    reply[24] = UInt8(hdrChk >> 8)
+    reply[25] = UInt8(hdrChk & 0xff)
+    reply[34] = 0x00 // ICMP echo reply
+    reply[35] = 0x00 // code
+    reply[38...n - 1] = req[38...n - 1] // id + seq + payload echoed
+    let icmpChk = ipChecksum(reply, 34, n)
+    reply[36] = UInt8(icmpChk >> 8)
+    reply[37] = UInt8(icmpChk & 0xff)
 }
 
 // Claim 6684: script-mode lifecycle. Polls the serial log for the expected

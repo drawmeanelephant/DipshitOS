@@ -246,7 +246,7 @@ fn ensure_registry() []const Command {
             .{ .name = "mem", .help = "summarize the EFI memory map", .usage = "mem", .handler = cmd_mem },
             .{ .name = "mbox", .help = "per-process IPC mailbox: pending messages and drain counters", .usage = "mbox [<pid>]", .max_args = 1, .handler = cmd_mbox },
             .{ .name = "mount", .help = "switch the active FAT volume (esp or data)", .usage = "mount <esp|data>", .min_args = 1, .max_args = 1, .handler = cmd_mount },
-            .{ .name = "net", .help = "virtio-net transport + RX + ARP: device DID, MAC, queues, feature bits, RX counters ('net recv' prints received frames; 'net ip <a.b.c.d>' sets the static IP; 'net arp [<a.b.c.d>]' shows/resolves the ARP table)", .usage = "net [recv|ip <addr>|arp [<addr>]]", .max_args = 2, .handler = cmd_net },
+            .{ .name = "net", .help = "virtio-net transport + RX + ARP + ICMP: device DID, MAC, queues, feature bits, RX counters ('net recv' prints received frames; 'net ip <a.b.c.d>' sets the static IP; 'net arp [<a.b.c.d>]' shows/resolves the ARP table; 'net ping <a.b.c.d>' sends an ICMP echo request)", .usage = "net [recv|ip <addr>|arp [<addr>]|ping <addr>]", .max_args = 2, .handler = cmd_net },
             .{ .name = "netsend", .help = "send a known Ethernet frame (bounded staging, TX + used-ring drain)", .usage = "netsend <bytes>", .min_args = 1, .max_args = 1, .handler = cmd_netsend },
             .{ .name = "pages", .help = "physical page allocator pool", .usage = "pages [selftest]", .max_args = 1, .handler = cmd_pages },
             .{ .name = "pci", .help = "enumerate PCI devices on the bus", .usage = "pci", .handler = cmd_pci },
@@ -1311,7 +1311,8 @@ fn cmd_net(m: *Monitor, args: []const []const u8) ExecError {
         if (std.mem.eql(u8, args[0], "recv")) return cmd_net_recv(m, args[1..]);
         if (std.mem.eql(u8, args[0], "ip")) return cmd_net_ip(m, args[1..]);
         if (std.mem.eql(u8, args[0], "arp")) return cmd_net_arp(m, args[1..]);
-        m.console.print_line("net: unknown subcommand (try 'net', 'net recv', 'net ip <a.b.c.d>' or 'net arp [<a.b.c.d>]')");
+        if (std.mem.eql(u8, args[0], "ping")) return cmd_net_ping(m, args[1..]);
+        m.console.print_line("net: unknown subcommand (try 'net', 'net recv', 'net ip <a.b.c.d>', 'net arp [<a.b.c.d>]' or 'net ping <a.b.c.d>')");
         return .invalid_argument;
     }
     if (!virtio_net.net_ready) {
@@ -1457,6 +1458,23 @@ fn cmd_net(m: *Monitor, args: []const []const u8) ExecError {
     m.console.print_u64(virtio_net.arp.dropped);
     m.console.puts(",fail=");
     m.console.print_u64(virtio_net.arp.reply_tx_fail);
+    m.console.puts("\n");
+    // Card N4 (claim 0148): the IPv4/ICMP layer — echo requests sent
+    // (`net ping`), echo replies answered, pongs observed (an echo
+    // reply's id/seq echoed back — the ping proof), drops by cause, and
+    // the last observed sequence. Grep-able and deterministic.
+    m.console.puts(" icmp=req=");
+    m.console.print_u64(virtio_net.ipv4.requests_sent);
+    m.console.puts(",repl=");
+    m.console.print_u64(virtio_net.ipv4.replies_sent);
+    m.console.puts(",pong=");
+    m.console.print_u64(virtio_net.ipv4.pongs_observed);
+    m.console.puts(",drop=");
+    m.console.print_u64(virtio_net.ipv4.dropped_short + virtio_net.ipv4.dropped_frag + virtio_net.ipv4.dropped_checksum + virtio_net.ipv4.dropped_proto + virtio_net.ipv4.dropped_other);
+    m.console.puts(",fail=");
+    m.console.print_u64(virtio_net.ipv4.reply_tx_fail);
+    m.console.puts(",seq=");
+    m.console.print_u64(virtio_net.ipv4.last_seq);
     m.console.puts("\n");
     return .none;
 }
@@ -1621,6 +1639,50 @@ fn cmd_net_arp(m: *Monitor, args: []const []const u8) ExecError {
         },
         .not_ready => m.console.print_line("net arp: no IP set (net ip <a.b.c.d> first) or transport unready"),
         .timeout => m.console.print_line("net arp: request TX timeout (device did not complete within the poll budget)"),
+        .no_peer => unreachable,
+    }
+    return .none;
+}
+
+/// `net ping <a.b.c.d>` — card N4 (claim 0148): transmit an ICMP echo
+/// request to a peer already in the ARP table (the table is drained
+/// first — a reply may have landed while the shell idled). The peer's
+/// MAC must be known (`net arp <ip>` resolves it first — an echo needs a
+/// unicast dst; refused honestly otherwise). The reply is observed
+/// asynchronously by the RX drain (`pongs_observed` + the `net` report's
+/// `seq=`).
+fn cmd_net_ping(m: *Monitor, args: []const []const u8) ExecError {
+    if (args.len != 1) {
+        m.console.print_line("net ping: usage: net ping <a.b.c.d>");
+        return .invalid_argument;
+    }
+    const ip = virtio_net.arp.parse_ip(args[0]) orelse {
+        m.console.puts("net ping: invalid address: ");
+        m.console.puts(args[0]);
+        m.console.puts("\n");
+        return .invalid_argument;
+    };
+    if (!virtio_net.net_ready) {
+        m.console.print_line("net ping: no virtio-net device");
+        return .none;
+    }
+    virtio_net.net_rx_drain();
+    var frame_len: usize = 0;
+    switch (virtio_net.net_ping_request(ip, &frame_len)) {
+        .ok => {
+            virtio_net.ipv4.requests_sent += 1;
+            virtio_net.ipv4.ping_seq +%= 1;
+            m.console.puts("net ping: echo request to ");
+            var ipbuf: [15]u8 = undefined;
+            const in = virtio_net.arp.format_ip(ip, &ipbuf);
+            m.console.puts(ipbuf[0..in]);
+            m.console.puts(" sent (");
+            m.console.print_u64(@intCast(frame_len));
+            m.console.puts(" bytes)\n");
+        },
+        .not_ready => m.console.print_line("net ping: no IP set (net ip <a.b.c.d> first) or transport unready"),
+        .timeout => m.console.print_line("net ping: echo request TX timeout (device did not complete within the poll budget)"),
+        .no_peer => m.console.print_line("net ping: peer not in ARP table (net arp <a.b.c.d> first)"),
     }
     return .none;
 }
@@ -1666,6 +1728,7 @@ fn cmd_netsend(m: *Monitor, args: []const []const u8) ExecError {
         },
         .not_ready => m.console.print_line("netsend: transport not ready (no virtio-net device)"),
         .timeout => m.console.print_line("netsend: tx timeout (device did not complete within the poll budget)"),
+        .no_peer => unreachable,
     }
     return .none;
 }
@@ -2359,7 +2422,7 @@ test "monitor: net reports no device honestly when the transport is absent" {
     );
     // `net` is registered (the prompt's registry-row shape).
     try std.testing.expect(lookup("net") != null);
-    try std.testing.expectEqualStrings("virtio-net transport + RX + ARP: device DID, MAC, queues, feature bits, RX counters ('net recv' prints received frames; 'net ip <a.b.c.d>' sets the static IP; 'net arp [<a.b.c.d>]' shows/resolves the ARP table)", lookup("net").?.help);
+    try std.testing.expectEqualStrings("virtio-net transport + RX + ARP + ICMP: device DID, MAC, queues, feature bits, RX counters ('net recv' prints received frames; 'net ip <a.b.c.d>' sets the static IP; 'net arp [<a.b.c.d>]' shows/resolves the ARP table; 'net ping <a.b.c.d>' sends an ICMP echo request)", lookup("net").?.help);
     try std.testing.expect(lookup("netsend") != null);
 }
 
@@ -2487,6 +2550,44 @@ test "monitor: net arp resolve — miss sends the request, no-IP refuses honestl
     virtio_net.net_ready = false;
 }
 
+test "monitor: net ping sends an echo request to a resolved peer" {
+    var env = TestEnv.init();
+    var mon = env.monitor();
+    const saved_ops = virtio_net.net_ops;
+    virtio_net.net_ops = mnet_ops();
+    virtio_net.net_ready = true;
+    virtio_net.net_mac = .{ 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 };
+    virtio_net.arp.own_ip = .{ 10, 0, 0, 1 };
+    virtio_net.arp.table = [_]virtio_net.arp.ArpEntry{.{}} ** virtio_net.arp.table_slots;
+    virtio_net.arp.upsert(.{ 10, 0, 0, 2 }, .{ 0x02, 0x00, 0x00, 0x00, 0x00, 0x02 });
+    virtio_net.ipv4.requests_sent = 0;
+    virtio_net.ipv4.ping_seq = 1;
+    virtio_net.net_dev = .{};
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "net", "ping", "10.0.0.2" }));
+    try std.testing.expectEqualStrings("net ping: echo request to 10.0.0.2 sent (46 bytes)\n", env.mock.contents());
+    try std.testing.expectEqual(@as(u64, 1), virtio_net.ipv4.requests_sent);
+    try std.testing.expectEqual(@as(u16, 2), virtio_net.ipv4.ping_seq);
+    // A peer NOT in the ARP table refuses honestly (an echo needs a
+    // unicast dst — `net arp <ip>` resolves first).
+    env.mock.reset();
+    virtio_net.arp.table = [_]virtio_net.arp.ArpEntry{.{}} ** virtio_net.arp.table_slots;
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "net", "ping", "10.0.0.3" }));
+    try std.testing.expectEqualStrings("net ping: peer not in ARP table (net arp <a.b.c.d> first)\n", env.mock.contents());
+    // Without a static IP the ping is refused honestly.
+    env.mock.reset();
+    virtio_net.arp.own_ip = .{ 0, 0, 0, 0 };
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "net", "ping", "10.0.0.2" }));
+    try std.testing.expectEqualStrings("net ping: no IP set (net ip <a.b.c.d> first) or transport unready\n", env.mock.contents());
+    // Malformed addresses refuse exactly.
+    env.mock.reset();
+    try std.testing.expectEqual(ExecError.invalid_argument, exec(&mon, &.{ "net", "ping", "nope" }));
+    try std.testing.expectEqualStrings("net ping: invalid address: nope\n", env.mock.contents());
+    virtio_net.arp.own_ip = .{ 0, 0, 0, 0 };
+    virtio_net.arp.table = [_]virtio_net.arp.ArpEntry{.{}} ** virtio_net.arp.table_slots;
+    virtio_net.net_ops = saved_ops;
+    virtio_net.net_ready = false;
+}
+
 test "monitor: netsend refuses cleanly without a transport" {
     var env = TestEnv.init();
     var mon = env.monitor();
@@ -2562,7 +2663,7 @@ test "monitor: net recv prints the received frame byte-exact and drains the FIFO
     // Unknown subcommand: documented refusal.
     env.mock.reset();
     try std.testing.expectEqual(ExecError.invalid_argument, exec(&mon, &.{ "net", "bogus" }));
-    try std.testing.expect(std.mem.indexOf(u8, env.mock.contents(), "net: unknown subcommand (try 'net', 'net recv', 'net ip <a.b.c.d>' or 'net arp [<a.b.c.d>]')\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, env.mock.contents(), "net: unknown subcommand (try 'net', 'net recv', 'net ip <a.b.c.d>', 'net arp [<a.b.c.d>]' or 'net ping <a.b.c.d>')\n") != null);
     virtio_net.net_ready = false;
     virtio_net.rx_fifo_head = 0;
     virtio_net.rx_fifo_count = 0;

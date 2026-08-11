@@ -69,6 +69,11 @@ const evidence = @import("evidence.zig");
 /// `net ip`/`net arp` subcommands drive the static address + resolution).
 /// `pub` so monitor.zig can print the IP + counters and issue requests.
 pub const arp = @import("arp.zig");
+/// Milestone five card N4 (claim 0148): the IPv4/ICMP layer (pure logic;
+/// the RX drain dispatches frames here and the monitor's `net ping`
+/// subcommand drives echo requests). Reuses `arp.own_ip` as the ONE copy
+/// of our static address.
+pub const ipv4 = @import("ipv4.zig");
 
 // ---------------------------------------------------------------------------
 // Split-ring structures (the blk/entropy/console shared layout)
@@ -916,6 +921,10 @@ pub const SendResult = enum {
     ok,
     not_ready,
     timeout,
+    /// Card N4 (claim 0148): the peer's MAC is not in the ARP table —
+    /// `net arp <ip>` resolves it first (an ICMP echo needs a unicast
+    /// dst; unlike ARP it cannot broadcast).
+    no_peer,
 };
 
 /// Wait for the device to consume the outstanding TX request (used.idx to
@@ -1139,6 +1148,13 @@ pub fn net_rx_drain() void {
         // table. The raw frame ALSO stays in the FIFO for `net recv`
         // observation — the N2 seam is unchanged.
         rx_arp(rx_buf[rx_hdr_len..dev_len]);
+        // Card N4 (claim 0148): IPv4/ICMP dispatch — an echo request
+        // for our static IP is answered byte-exact; an echo reply is
+        // observed (`pongs_observed`); fragments / bad checksums /
+        // foreign addresses are counted and dropped (N4 does NOT
+        // reassemble — honest bound). The raw frame stays in the FIFO
+        // for `net recv` observation, same seam.
+        rx_ipv4(rx_buf[rx_hdr_len..dev_len]);
     }
     _ = net_rx_arm();
 }
@@ -1164,6 +1180,26 @@ fn rx_arp(frame: []const u8) void {
     }
 }
 
+/// Card N4 (claim 0148): dispatch one accepted Ethernet frame to the
+/// IPv4/ICMP layer. `frame` starts at the Ethernet header. An echo
+/// request for our static IP is answered byte-exact: the reply is built
+/// into `tx_staging` (after the zeroed virtio_net_hdr) and transmitted
+/// on the N1 TX path; an echo reply is observed (`pongs_observed`,
+/// `last_seq`); fragments / bad checksums / foreign addresses are
+/// counted and dropped by the IPv4 layer. A send failure is counted
+/// honestly (`ipv4.reply_tx_fail`), same as the ARP path.
+fn rx_ipv4(frame: []const u8) void {
+    const reply_len = ipv4.handle_rx(frame, &net_mac, tx_staging[tx_hdr_len .. tx_hdr_len + ipv4.ipv4_frame_min + 64]) orelse return;
+    // The zeroed virtio_net_hdr prefix — the observed claim-1373 TX
+    // contract (a stale header's flags/gso fields would corrupt the
+    // delivered reply).
+    @memset(tx_staging[0..tx_hdr_len], 0);
+    switch (net_send(&net_ops, &net_dev, tx_staging[0 .. tx_hdr_len + reply_len])) {
+        .ok => ipv4.replies_sent += 1,
+        else => ipv4.reply_tx_fail += 1,
+    }
+}
+
 /// Card N3 (claim 7293): transmit an ARP REQUEST for `target_ip`
 /// (broadcast dst, our MAC + static IP as sender, zeroed target HW) in
 /// the fixed staging buffer, on the N1 TX path. Refuses honestly when the
@@ -1175,6 +1211,23 @@ pub fn net_arp_request(target_ip: [4]u8, out_len: *usize) SendResult {
     if (!arp.ip_set()) return .not_ready;
     @memset(tx_staging[0..tx_hdr_len], 0);
     const n = arp.build_request(tx_staging[tx_hdr_len .. tx_hdr_len + arp.arp_frame_len], &net_mac, arp.own_ip, target_ip);
+    out_len.* = n;
+    return net_send(&net_ops, &net_dev, tx_staging[0 .. tx_hdr_len + n]);
+}
+
+/// Card N4 (claim 0148): transmit an ICMP ECHO REQUEST to `target_ip` in
+/// the fixed staging buffer, on the N1 TX path. Refuses honestly when the
+/// transport is unready, no static IP is set (`net ip <a.b.c.d>` first),
+/// or the peer's MAC is not in the ARP table (`net arp <ip>` resolves it
+/// first — an echo needs a unicast dst). The frame length lands in
+/// `out_len` (46). The reply is observed asynchronously by the RX drain
+/// (`pongs_observed` + `last_seq`).
+pub fn net_ping_request(target_ip: [4]u8, out_len: *usize) SendResult {
+    if (!net_ready) return .not_ready;
+    if (!arp.ip_set()) return .not_ready;
+    const peer_mac = arp.lookup(target_ip) orelse return .no_peer;
+    @memset(tx_staging[0..tx_hdr_len], 0);
+    const n = ipv4.build_echo_request(tx_staging[tx_hdr_len .. tx_hdr_len + ipv4.ipv4_frame_min + 4], &net_mac, arp.own_ip, peer_mac, target_ip);
     out_len.* = n;
     return net_send(&net_ops, &net_dev, tx_staging[0 .. tx_hdr_len + n]);
 }

@@ -73,6 +73,7 @@ verify-vz:
     bash tools/verify-live-net-tx.sh
     bash tools/verify-live-net-rx.sh
     bash tools/verify-live-net-arp.sh
+    bash tools/verify-live-net-icmp.sh
 
 # Compile the AArch64 UEFI application and kernel image (class A — zig build)
 build:

@@ -123,8 +123,26 @@ VZEFIBootLoader (macOS VZ)
   requests from the host side (deterministic, request-driven, OFF by
   default). Gate `tools/verify-live-net-arp.sh` PASS 3/3 (answer for
   our address, resolve a peer, foreign-address scope check); the
-  42-byte frames are delivered/transmitted unpadded (observed). IPv4
-  (N4) builds on it.
+  42-byte frames are delivered/transmitted unpadded (observed). **IPv4
+  landed 2026-08-11 (claim 0148, card N4):** a pure protocol layer
+  `kernel/src/ipv4.zig` (RFC 791/792 — RFC 1071 one's-complement
+  checksums, byte-exact ICMP echo request/reply builders, fragments
+  dropped COUNTED — no reassembly, honest bound) wired into the RX
+  drain BESIDE the ARP dispatch: an echo request whose destination
+  equals our static IP (the ONE copy stays `arp.own_ip`) is answered
+  byte-exact (the reply built in `tx_staging` with the zeroed header
+  prefix on the N1 TX path), an echo reply is observed
+  (`pongs_observed` + the echoed sequence), everything else dropped
+  with a counter; `net ping <a.b.c.d>` is a `net` subcommand (an echo
+  needs a unicast dst — the peer must be in the ARP table first,
+  refused honestly otherwise; `SendResult` gains `.no_peer`) and the
+  runner's `--net-icmp-respond <host-ip>` answers the guest's echo
+  requests from the host side (id/seq/payload echoed byte-exact, both
+  checksums recomputed; deterministic, request-driven, OFF by
+  default). Gate `tools/verify-live-net-icmp.sh` PASS 3/3 (answer an
+  echo for our address, ping a resolved peer, foreign-address scope
+  check); the 46-byte frames are delivered/transmitted unpadded,
+  consistent with the N3 observation.
 - **Guest ↔ host storage:** the disk is presented as a virtio block device.
   The guest never touches the storage device directly in milestones zero
   and one; the  firmware reads `EFI/BOOT/BOOTAA64.EFI` from it, and the boot stub writes
