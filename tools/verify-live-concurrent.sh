@@ -7,7 +7,7 @@
 # program: a second `exec` was refused until the first exited AND its task
 # slot was reaped. Claim 0826 gives every process its OWN TTBR0 root +
 # allocator-backed text/user-stack/EL1-stack pages + per-task syscall
-# regions, so the gate is capacity (the fixed 5-slot pool), not exclusivity.
+# regions, so the gate is capacity (the fixed pool), not exclusivity.
 # The chain, all asserted in vm-serial.log:
 #
 #   1. `exec USER.BIN` runs TWICE back to back — no exit in between —

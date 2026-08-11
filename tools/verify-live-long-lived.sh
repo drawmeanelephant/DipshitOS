@@ -46,14 +46,16 @@
 #   5. The re-exec LANDS in the freed slot (the recycle-under-a-permanent-
 #      occupant proof — the claim-0826 gate could never show this, because
 #      both its programs exited).
-#   6. With the counter + the re-exec'd program both live, the pool is
-#      full: a subsequent exec reports `exec: no free scheduler pool slot`
-#      (the capacity gate — `has_free_slot` still works, and the refused
-#      path allocates nothing).
-#   7. `pages` prints in BOTH phases; the phase-2 `free=` is >= the
-#      phase-1 `free=` (the recycled USER.BIN's 5 pages returned to the
-#      allocator; the re-exec re-allocated 5 — a leak would make the late
-#      count lower).
+#   6. Card 3g (claim 5795): with the counter + TWO USER.BINs live the
+#      pool is 6/7 (shell + worker + 2 users + idle + ONE spare) — the
+#      one-spare scenario re-derived at the new budget; the capacity
+#      gate's pool_full refusal now lives in the args/ipc/scale gates
+#      (the FIFTH exec at 7/7).
+#   7. `pages` prints in BOTH phases; the exact-count relationship holds:
+#      phase-2 free == phase-1 free - 5 (phase 2 has ONE more live
+#      USER.BIN than phase 1 — counter + 2 users vs counter + 1 — so the
+#      second program's 5 pages are the exact difference; a leak would
+#      make the late count lower than that).
 #   8. The counter is STILL `state=running` at the FINAL procs read; the
 #      shell stays responsive (both echo replies); no exception park.
 #
@@ -103,8 +105,8 @@ codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/
 # snapshot the two-live-processes table + the allocator free count.
 printf 'ls\nexec COUNTER.BIN\nexec USER.BIN\nprocs\npages\necho rx-long-lived-phase1\n' > "$SCRIPT1"
 # Phase 2: after the first USER.BIN is reaped — re-exec into the freed
-# slot, snapshot again, then hit the capacity gate with both live, and
-# re-read the free count.
+# slot, snapshot again, then a SECOND USER.BIN (counter + two users =
+# 6/7 with one spare at the new budget), and re-read the free count.
 printf 'exec USER.BIN\nprocs\nexec USER.BIN\npages\necho rx-long-lived-ok\n' > "$SCRIPT2"
 
 run_one() {
@@ -126,7 +128,7 @@ run_one() {
 
     local bytes=0 banner=0 listed=0 loaded_counter=0 loaded_user=0 markers=0 \
         never_exits=0 two_running=0 distinct_tasks=0 user_exited=0 \
-        exited_row=0 user_reaped=0 procs_user_exited=0 reexec_landed=0 pool_full=0 \
+        exited_row=0 user_reaped=0 procs_user_exited=0 reexec_landed=0 \
         pages_reads=0 free_recovered=0 final_counter_running=0 \
         phase1_echo=0 echo_ok=0 fatal=0
     if [ -f artifacts/vm-serial.log ]; then
@@ -170,17 +172,22 @@ run_one() {
         [ "$boot_exits" = 1 ] && boot_exited=1 || boot_exited=0
         # 5. The re-exec landed: exactly TWO successful USER.BIN loads
         # (phase 1 + the phase-2 re-exec into the freed slot).
-        [ "$loaded_user" = 2 ] && reexec_landed=1
-        # 6. The capacity gate: a third exec with both live is pool_full.
-        [ "$(grep -aFc -- "exec: no free scheduler pool slot" artifacts/vm-serial.log || true)" -ge 1 ] && pool_full=1
-        # 7. Both pages reads present; the late free count recovered.
+        [ "$loaded_user" = 3 ] && reexec_landed=1
+        # 6. Card 3g: the second phase-2 exec SUCCEEDS (counter + two
+        # users = 6/7, one spare) — no pool_full refusal here (that proof
+        # moved to the args/ipc/scale gates).
+        # 7. Both pages reads present; the exact-count relationship holds:
+        # phase-2 free == phase-1 free - 5 (one more live USER.BIN's
+        # pages). A leak would show a bigger drop than 5.
         local pages_lines p1 p2
         pages_lines="$(grep -aF -- "pages: armed=1 total=" artifacts/vm-serial.log || true)"
         pages_reads="$(printf '%s\n' "$pages_lines" | grep -cF -- "pages: armed=1 total=" || true)"
         p1="$(printf '%s\n' "$pages_lines" | sed -n '1p' | sed -E 's/.*free=0x([0-9a-f]+).*/\1/' || true)"
         p2="$(printf '%s\n' "$pages_lines" | sed -n '2p' | sed -E 's/.*free=0x([0-9a-f]+).*/\1/' || true)"
         if [ -n "$p1" ] && [ -n "$p2" ]; then
-            [ $((16#$p2)) -ge $((16#$p1)) ] && free_recovered=1 || free_recovered=0
+            local diff
+            diff=$((16#$p1 - 16#$p2))
+            [ "$diff" -eq 5 ] && free_recovered=1 || free_recovered=0
         fi
         # 8. The counter is running at the FINAL procs read.
         local last_counter_row
@@ -192,13 +199,13 @@ run_one() {
         [ "$(grep -aFxc -- "rx-long-lived-ok" artifacts/vm-serial.log || true)" = 1 ] && echo_ok=1
         grep -qF -- "[EXC] parking:" artifacts/vm-serial.log && fatal=1 || true
     fi
-    echo "$tag: runner-rc=$rc serial-bytes=$bytes banner=$banner listed=$listed loaded-counter=$loaded_counter loaded-user=$loaded_user markers=$markers never-exits=$never_exits two-running=$two_running tasks-distinct=$distinct_tasks user-exited=$user_exited exited-row=$exited_row procs-user-exited=$procs_user_exited user-reaped=$user_reaped reexec-landed=$reexec_landed pool-full=$pool_full pages-reads=$pages_reads free-recovered=$free_recovered final-counter-running=$final_counter_running phase1-echo=$phase1_echo echo=$echo_ok fatal=$fatal" | tee -a "$REPORT"
+    echo "$tag: runner-rc=$rc serial-bytes=$bytes banner=$banner listed=$listed loaded-counter=$loaded_counter loaded-user=$loaded_user markers=$markers never-exits=$never_exits two-running=$two_running tasks-distinct=$distinct_tasks user-exited=$user_exited exited-row=$exited_row procs-user-exited=$procs_user_exited user-reaped=$user_reaped reexec-landed=$reexec_landed pages-reads=$pages_reads free-recovered=$free_recovered final-counter-running=$final_counter_running phase1-echo=$phase1_echo echo=$echo_ok fatal=$fatal" | tee -a "$REPORT"
     [ "$rc" = 0 ] && [ "$banner" = 1 ] && [ "$listed" = 1 ] && \
-        [ "$loaded_counter" = 1 ] && [ "$loaded_user" = 2 ] && \
+        [ "$loaded_counter" = 1 ] && [ "$loaded_user" = 3 ] && \
         [ "$markers" -ge 3 ] && [ "$never_exits" = 1 ] && \
         [ "$two_running" = 1 ] && [ "$distinct_tasks" = 1 ] && \
-        [ "$user_exited" = 2 ] && [ "$exited_row" = 1 ] && [ "$procs_user_exited" = 2 ] && [ "$user_reaped" = 2 ] && [ "$boot_exited" = 1 ] && \
-        [ "$reexec_landed" = 1 ] && [ "$pool_full" = 1 ] && \
+        [ "$user_exited" = 3 ] && [ "$exited_row" = 1 ] && [ "$procs_user_exited" = 3 ] && [ "$user_reaped" = 3 ] && [ "$boot_exited" = 1 ] && \
+        [ "$reexec_landed" = 1 ] && \
         [ "$pages_reads" -ge 2 ] && [ "$free_recovered" = 1 ] && \
         [ "$final_counter_running" = 1 ] && [ "$phase1_echo" = 1 ] && \
         [ "$echo_ok" = 1 ] && [ "$fatal" = 0 ]
@@ -215,8 +222,9 @@ run_one() {
     echo "COUNTER.BIN (distinct markers, sys_write + sys_yield only, no sys_exit)"
     echo "occupies its pool slot permanently while USER.BIN is exec'd, runs,"
     echo "exits, is reaped (pages returned), and re-exec'd into the freed slot;"
-    echo "with both live a further exec is pool_full. The second scripted phase"
-    echo "(--script2/--script2-after) forwards the re-exec after the first reap."
+    echo "at the 7-slot budget counter + two users leave one spare. The second"
+    echo "scripted phase (--script2/--script2-after) forwards the re-exec after"
+    echo "the first reap."
     echo
 } | tee -a "$REPORT"
 
@@ -232,7 +240,7 @@ done
 echo
 echo "=== result ==="
 if [ "$pass" = "$BOOTS" ]; then
-    echo "verify-live-long-lived: PASS — COUNTER.BIN ran forever (distinct markers across the whole log) while USER.BIN exited, was reaped (pages returned), and re-exec'd into the freed slot; with both live a further exec was pool_full ($pass/$BOOTS boot(s))."
+    echo "verify-live-long-lived: PASS — COUNTER.BIN ran forever (distinct markers across the whole log) while USER.BIN exited, was reaped (pages returned), and re-exec'd into the freed slot; at the 7-slot budget counter + two users leave one spare, and the page counts differ by exactly the second program's 5 pages ($pass/$BOOTS boot(s))."
     echo "PASS: $pass/$BOOTS" >> "$REPORT"
     exit 0
 fi

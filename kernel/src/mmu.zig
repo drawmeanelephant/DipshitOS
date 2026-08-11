@@ -684,12 +684,22 @@ test "mmu: build_user_root returns a fresh root per call (per-process roots)" {
     try std.testing.expect(root1 != 0);
     const root2 = build_user_root(userspace.text_va, 0x1000, 64, 0x1a400000, 0x3000, 8192).?;
     try std.testing.expect(root2 != 0);
+    // Claim 5795 (pool scale): the 7-slot budget holds FOUR concurrent user
+    // programs (the capstone's headline), so the kernel root + 3 user roots
+    // must fit the carve-out with headroom. Build the third user root and
+    // pin the budget: every root is distinct, the global tracks the latest,
+    // and the 256-page carve-out bounds the whole multi-root set.
+    const root3 = build_user_root(userspace.text_va, 0x1000, 64, 0x1a500000, 0x3000, 8192).?;
+    try std.testing.expect(root3 != 0);
     // Distinct per-process roots, and the global tracks the latest.
     try std.testing.expect(root1 != root2);
-    try std.testing.expectEqual(root2, user_root_phys());
-    // The budget line is observable and bounded by the carve-out.
+    try std.testing.expect(root2 != root3);
+    try std.testing.expectEqual(root3, user_root_phys());
+    // The budget line is observable and bounded by the carve-out: kernel
+    // root + 3 user roots stay well inside the 256-page budget.
     try std.testing.expect(tables_used() > 0);
     try std.testing.expect(tables_used() <= tables_capacity());
+    try std.testing.expect(tables_used() < tables_capacity() / 2); // headroom for the boot-time static payload
 }
 
 test "mmu: user leaves are page-local W^X and reject Device mappings" {

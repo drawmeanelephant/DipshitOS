@@ -312,8 +312,18 @@ All command output and logs are saved under `artifacts/` (`inspect.txt`,
    programs exchanging bytes, byte-exact in the serial log
    (`tools/verify-live-ipc.sh` — the sends and echoes interleave across
    the whole log, `mbox` shows the peer's bounded ring drained, both
-   processes are still running at the final `procs`, and a third exec is
-   `pool_full` at the 5/5 pool).
+   processes are still running at the final `procs`, and a fifth exec is
+   `pool_full` at the 7/7 pool). The follow-on 3 card 3g (claim 5795) is
+   the pool-scale CAPSTONE: the scheduler pool grows `max_tasks` 5 → 7
+   (shell + worker + FOUR EL0t user slots + idle — a budget change only,
+   ADR 0007 and the switching core untouched), and every capacity
+   assertion re-derives: the transcript fixture's `tasks: pool=4/5`
+   becomes `pool=4/7`, the args/ipc gates' `pool_full` moves to the
+   FIFTH exec, and the new `tools/verify-live-scale.sh` gate shows FOUR
+   live user programs at once (COUNTER.BIN + three USER.BINs with
+   distinct tasks + stacks, markers interleaving with the worker, a
+   fifth exec refused at 7/7, and `addrspaces: tables=150/256` inside
+   the carve-out).
 - The Virtualization.framework VM boots the GPT+FAT image: configuration
   validates, the EFI variable store is created, the VM starts and runs, and
   after boot the guest-written marker file `\BOOTED.TXT` exists on the ESP
