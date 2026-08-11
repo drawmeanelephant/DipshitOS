@@ -1,0 +1,3 @@
+# Log — agent/buffy/m5-net-tx
+
+- **2026-08-11** — *buffy (agent/buffy/m5-net-tx)*: claim 1373 (milestone five, card N1 — virtio-net transport + TX, `docs/m5-net-tx-prompt.md`) → branched `net-tx` from merged main `bc310ef` (m4-processes tag verified at `9d7e4d5`, an ancestor) → completed the 2026-08-11 DID-correction doc propagation that was left uncommitted on `agent/buffy/m4-closeout` (hardware-contract disk bullet + claim-6420 log entry, commit 7606d00; the status.md copy was already in main) so the tree is clean → claim file `docs/claims/1373-net-tx.md` + this log → 🟡 claimed, class A implementation next (runner `--net` flag, `kernel/src/virtio_net.zig`, `net`/`netsend` monitor commands, host tests).
