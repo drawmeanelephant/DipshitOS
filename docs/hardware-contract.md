@@ -131,7 +131,28 @@ assumption comes from documentation or reasoning only.
   serial log (`artifacts/live-net-rx-serial-*.log`) shows `net: rx-armed`
   + `net: rx-obs len=…` + the rx counters, and the phase-1 capture
   (`artifacts/live-net-rx-cap-1.bin`) is byte-exactly the injected
-  fixture (the guest re-sent it).
+  fixture (the guest re-sent it). **ARP frames are delivered and
+  transmitted UNPADDED:** a 42-byte ARP frame (below the Ethernet
+  60-byte minimum) arrives as exactly 42 bytes (device-written length 54
+  = 12-byte header + 42) and the guest's 42-byte reply is captured
+  byte-exact — the file-handle attachment does not pad either direction.
+  **[observed]** — every `verify-live-net-arp` boot's serial log
+  (`artifacts/live-net-arp-serial-*.log`) shows the byte-exact `net recv`
+  hex of the injected 42-byte request (device len 54) and the captures
+  (`artifacts/live-net-arp-cap-*.bin`) hold the exact 42-byte frames
+  (the phase-1 reply byte-identical to the fixture; the phase-2 request
+  byte-identical). **The same holds for the 46-byte IPv4/ICMP frames
+  (claim 0148):** the injected 46-byte echo request arrives as exactly 46
+  bytes (device-written length 58 = 12-byte header + 46) and the guest's
+  46-byte reply is captured byte-exact — the file-handle attachment does
+  not pad sub-60-byte frames on either direction. **[observed]** — every
+  `verify-live-net-icmp` boot's serial log
+  (`artifacts/live-net-icmp-serial-*.log`) shows the byte-exact `net recv`
+  hex of the injected 46-byte request (device len 58) and the captures
+  (`artifacts/live-net-icmp-cap-*.bin`) hold the exact 46-byte frames
+  (the phase-1 reply and the phase-2 request both byte-identical to the
+  fixtures). No new device behavior was otherwise observed on the
+  ARP/ICMP exchanges — the N1/N2 contract above is unchanged.
 - Custom virtio device (`VZCustomVirtioDeviceConfiguration`, the
   `--custom-virtio` runner flag / `zig build spike-virtio`): the guest sees
   a vendor-defined device on bus 0 as `VID=0x1af4 DID=0x1082`.

@@ -591,7 +591,7 @@ gates pass; tagged `m1.5-interactive-monitor`** (see
   `tasks user-exec exited status=43` / `procs STATUS43.BIN exited
   status=43` records; the full 12-gate shared-seam sweep + the
   args/kill/ipc/scale/procs-syscall gates all PASS 1/1.
-- **Network stack (in progress — N1 + N2 landed 2026-08-11, claims 1373/6076).** The
+- **Network stack (in progress — N1 + N2 + N3 + N4 landed 2026-08-11, claims 1373/6076/7293/0148).** The
   last "Eventually" item, and the one the virtio surface table below maps
   to. The transport it needs was already proven (virtio
   console/blk/entropy/custom drivers: discovery, queues, IRQ delivery,
@@ -647,13 +647,39 @@ gates pass; tagged `m1.5-interactive-monitor`** (see
     requests for our protocol address. Static IP first (`net ip
     <a.b.c.d>`, bounded, no config heap); DHCP is a later card. Live
     gate: the host ARPs for the guest IP and the reply carries the right
-    MAC; the guest resolves the host's MAC from a crafted reply.
+    MAC; the guest resolves the host's MAC from a crafted reply. **LIVE
+    2026-08-11 (claim 7293)** — `kernel/src/arp.zig` (pure RFC 826 logic:
+    static IP, build request/reply, bounded 4-slot table, counters) wired
+    into the RX drain (answer requests for our IP, learn replies, drop
+    the rest) + `net ip`/`net arp` subcommands + the runner's
+    `--net-arp-respond <host-ip>` (deterministic host-side answer, OFF by
+    default). Live gate `tools/verify-live-net-arp.sh` PASS 3/3 (answer
+    a request for our IP — 42-byte reply byte-exact in the capture;
+    resolve a peer — request byte-exact in the capture + the host answer
+    lands in the table; a foreign-address request is dropped with a
+    counter while still observable via `net recv`). Observed: the device
+    delivers/transmits the 42-byte ARP frames unpadded (below the
+    Ethernet 60-byte minimum).
   - **N4 — IPv4.** Minimal IPv4 TX/RX with ones-complement checksums
     (host-testable); ICMP echo as the proof — the guest answers echo
     requests and can send its own; honest bounds: no fragmentation, no
     reassembly (drop fragments, documented). Live gate: the file-handle
     host sends an ICMP echo request to the guest IP and the reply is
     byte-exact; with NAT attached, the guest pings an outbound address.
+    **LIVE 2026-08-11 (claim 0148)** — `kernel/src/ipv4.zig` (pure RFC
+    791/792 logic: RFC 1071 checksums, parse/build, ICMP echo
+    request/reply byte-exact, fragments dropped counted — no
+    reassembly) wired into the RX drain BESIDE the ARP dispatch (answer
+    an echo for our static IP, observe echo replies — pong + seq, drop
+    the rest counted) + `net ping <a.b.c.d>` subcommand + the runner's
+    `--net-icmp-respond <host-ip>` (deterministic host-side echo
+    answer, OFF by default). Live gate
+    `tools/verify-live-net-icmp.sh` PASS 3/3 (answer an injected echo
+    request — the 46-byte reply is byte-exact in the capture with the
+    identification + id/seq/payload echoed; ping a peer — resolve +
+    echo request byte-exact in the capture and the host's answer lands
+    as pong=1 with seq=1; a foreign-address echo request is dropped
+    with a counter while still observable via `net recv`).
   - **Later, sketched only:** UDP datagrams behind a bounded syscall seam
     (an ADR 0007 amendment), DHCP, loopback, then TCP — far future, and
     the "only when the ones below it are demonstrably working" rule
@@ -672,7 +698,7 @@ remaining two (graphics, balloon) are the open milestones.
 | Block (0x1042) | `VZVirtioBlockDeviceConfiguration` (disk image attachment) | `virtio_blk.zig` — modern virtio-blk, post-exit re-arm | ✅ done | 6420 (FAT32 storage driver), 3678 (general non-ESP FS on top) |
 | Entropy (0x1044) | `VZVirtioEntropyDeviceConfiguration` | `virtio_entropy.zig` (boot-time 64-byte seed) + `csprng.zig` (ChaCha20, RFC 7539) | ✅ done | 2665 (driver + CSPRNG + `random`), 3693 (EL0 stack ASLR consumer) |
 | Custom virtio (0x1082, macOS 27) | `VZCustomVirtioDeviceConfiguration` (`--custom-virtio` / `zig build spike-virtio`) | `virtio_custom.zig` — queue transport + used-ring IRQ | ✅ done | 5844 (host spike + `pci` command), 0828 (bidirectional queue + SPI IRQ), 4374 (ring allocator / multi-queue), 9492 (multi-descriptor payloads), 9737 (feature negotiation), 4837 (log transport) |
-| Network (0x1041) | `VZVirtioNetworkDeviceConfiguration` + `VZFileHandleNetworkDeviceAttachment` (`--net <capture-file>`, `--net-inject <file>`, flag-gated; fixed host MAC) | `virtio_net.zig` — TX + RX (N1 + N2) | ✅ TX + RX (claims 1373/6076) | 1373 (transport + TX live — DID 0x1041, VER1\|MTU\|MAC, feature-path MAC, queues 0/1, 12-byte TX-hdr contract, byte-exact host capture; `verify-live-net-tx.sh` PASS 2/2); 6076 (RX live — queue-0 buffer supply, polled used-ring drain, bounded FIFO, MAC filter, `net recv`; host→guest injection + the round trip; 12-byte RX-hdr observed, min RX buffer 1530 observed; `verify-live-net-rx.sh` PASS 3/3 + 29-gate aggregate green) |
+| Network (0x1041) | `VZVirtioNetworkDeviceConfiguration` + `VZFileHandleNetworkDeviceAttachment` (`--net <capture-file>`, `--net-inject <file>`, `--net-arp-respond <host-ip>`, `--net-icmp-respond <host-ip>`, flag-gated; fixed host MAC) | `virtio_net.zig` — TX + RX + ARP + ICMP (N1 + N2 + N3 + N4); `arp.zig`; `ipv4.zig` | ✅ TX + RX + ARP + ICMP (claims 1373/6076/7293/0148) | 1373 (transport + TX live — DID 0x1041, VER1\|MTU\|MAC, feature-path MAC, queues 0/1, 12-byte TX-hdr contract, byte-exact host capture; `verify-live-net-tx.sh` PASS 2/2); 6076 (RX live — queue-0 buffer supply, polled used-ring drain, bounded FIFO, MAC filter, `net recv`; host→guest injection + the round trip; 12-byte RX-hdr observed, min RX buffer 1530 observed; `verify-live-net-rx.sh` PASS 3/3 + 29-gate aggregate green); 7293 (ARP live — static IP, answer/resolve over the RX seam, bounded table, `--net-arp-respond`; 42-byte frames unpadded observed; `verify-live-net-arp.sh` PASS 3/3 + 31-gate aggregate green); 0148 (IPv4/ICMP live — RFC 1071 checksums, echo answer/observe over the RX seam, `net ping`, `--net-icmp-respond`; the 46-byte frames travel unpadded, consistent with the N3 observation; `verify-live-net-icmp.sh` PASS 3/3 + 32-gate aggregate green) |
 | Graphics | `VZVirtioGraphicsDeviceConfiguration` — attached only for screenshots (`--screenshot`) | none | ⬜ not started — the future GUI milestone | — |
 | Balloon | `VZMemoryBalloonDeviceConfiguration` — nothing attached | none | ⬜ not started — low priority (fixed 256 MiB guest, no demand paging) | — |
 
