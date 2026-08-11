@@ -489,6 +489,31 @@ gates pass; tagged `m1.5-interactive-monitor`** (see
   exec is `exec: no free scheduler pool slot`, and the shell stays
   responsive; the full 12-gate shared-seam live sweep + the args + kill
   gates are green.
+- **[Claim 5795, milestone-four follow-on 3, card 3g — the pool-scale
+  capstone]** — every prior card documented the 5-slot budget (3b/3c/3f:
+  "5/5, NO spare"; 3a/3e: one spare). This card DELIBERATELY raises the
+  scheduler pool `max_tasks` 5 → 7 (`idle_id` stays `max_tasks - 1`) and
+  re-derives the gates: shell + worker + FOUR EL0t user slots + idle
+  (the 4th user slot is the "spare" while only three are live). A BUDGET
+  change only — ADR 0007, the switching core, the lifecycle states, and
+  the ring mechanics untouched; the pool is a BSS array (no allocation).
+  The page-table carve-out survey (kernel root + 4 user roots,
+  `addrspaces: tables=NN/256`) keeps the roots well inside the 256-page
+  budget (observed 150/256). Every capacity assertion re-derives: the
+  exec/scheduler host tests (`pool_full` at the new budget, exact
+  free-counts on the refused path), the transcript fixture (`tasks:
+  pool=4/5` → `pool=4/7`), and the live gates (args/ipc's `pool_full`
+  moves to the FIFTH exec at 7/7; long-lived's ending becomes the
+  one-spare scenario — counter + two users + spare — with the page
+  counts differing by exactly the second program's 5 pages). The new
+  class-B gate `tools/verify-live-scale.sh` PASS 1/1 on VZ: `exec
+  COUNTER.BIN` + `exec USER.BIN` ×3 back to back — FOUR `state=running`
+  user rows with distinct task ids + stack VAs, the programs' markers
+  interleaving with the worker's advances across the whole log, a FIFTH
+  exec `pool_full` (7/7 — shell + worker + 4 users + idle),
+  `addrspaces: tables=150/256`, the counter still running at the final
+  procs; the full shared-seam sweep re-derived against the 7-slot pool:
+  12-gate sweep + args + kill + ipc all PASS 1/1.
 - Eventually: a network stack — only when the ones below it are
   demonstrably working.
 

@@ -69,11 +69,15 @@ const mailbox = @import("mailbox.zig");
 
 const user_stack_section = if (builtin.object_format == .elf) ".userbss" else "__DATA,__userbss";
 
-/// Round-robin pool: shell + EL1h demo worker + one EL0t task + one
-/// spawnable demo slot + the scheduler-owned idle task. Fixed at comptime
-/// — no allocation, no dynamic registration or processes; the lifecycle's
-/// spawn/reap only recycle these slots.
-pub const max_tasks: usize = 5;
+/// Round-robin pool (card 3g, claim 5795 — the pool-scale capstone):
+/// shell + EL1h demo worker + FOUR EL0t user slots + the scheduler-owned
+/// idle task — FOUR live user programs at once (shell + worker + 4 users +
+/// idle = 7/7; the 4th user slot is the "spare" while only three are
+/// live). Fixed at comptime — no allocation, no dynamic registration or
+/// processes; the lifecycle's spawn/reap only recycle these slots. Every
+/// prior card documented the 5-slot budget (3b/3c/3f: "5/5, NO spare");
+/// the capstone deliberately raises it and re-derives the gates.
+pub const max_tasks: usize = 7;
 /// The idle task's fixed slot (registered by `init`, never recycled).
 pub const idle_id: usize = max_tasks - 1;
 /// The worker's static stack (BSS, like every other kernel global). The
@@ -177,7 +181,7 @@ const Task = struct {
     kill_pending: bool = false,
 };
 
-var tasks: [max_tasks]Task = .{ .{}, .{}, .{}, .{}, .{} };
+var tasks: [max_tasks]Task = .{ .{}, .{}, .{}, .{}, .{}, .{}, .{} };
 var task_count: usize = 0;
 var current: usize = 0;
 var enabled_flag: bool = false;
@@ -1046,11 +1050,14 @@ test "scheduler: register_worker builds a valid synthetic frame" {
     while (i < frame_bytes) : (i += 8) {
         try std.testing.expectEqual(@as(u64, 0), std.mem.readInt(u64, @as(*const [8]u8, @ptrFromInt(t.sp + i)), .little));
     }
-    // Claim 6729: the pool is shell + idle + worker + user + one spare
-    // spawnable slot; a sixth registration fails (bounded).
+    // Card 3g (claim 5795): the pool is shell + idle + worker + FOUR user
+    // slots (four live programs at the 7/7 budget); a registration beyond
+    // the 7-slot budget fails (bounded).
     try std.testing.expectEqual(@as(usize, 2), register_user(0x3333, 0).?);
     try std.testing.expectEqual(@as(usize, 3), register_worker(0).?);
-    try std.testing.expectEqual(@as(usize, 5), task_count);
+    try std.testing.expectEqual(@as(usize, 4), register_worker(0).?);
+    try std.testing.expectEqual(@as(usize, 5), register_worker(0).?);
+    try std.testing.expectEqual(@as(usize, 7), task_count);
     try std.testing.expect(register_worker(0) == null);
     // Claim 0826: capacity is observable — the full pool has no free slot.
     try std.testing.expect(!has_free_slot());
@@ -1356,7 +1363,18 @@ test "scheduler: two live user tasks coexist with their own roots and regions" {
     const kstack_b = kstack_b_bytes[0..];
     const user_b = register_exec_user(0x4000, root_b, 64, 0x1a400000, 8192, kstack_b, 0, 0).?;
     try std.testing.expectEqual(@as(usize, 3), user_b);
-    try std.testing.expectEqual(@as(usize, 5), task_count); // shell + worker + A + B + idle
+    // Card 3g (claim 5795): the 7-slot pool holds FOUR user tasks. Fill
+    // the remaining two slots so the capacity gate is observable at the
+    // new budget.
+    var kstack_c_bytes: [task_stack_size]u8 align(16) = undefined;
+    const kstack_c = kstack_c_bytes[0..];
+    const user_c = register_exec_user(0x5000, root_b, 64, 0x1b400000, 8192, kstack_c, 0, 0).?;
+    try std.testing.expectEqual(@as(usize, 4), user_c);
+    var kstack_d_bytes: [task_stack_size]u8 align(16) = undefined;
+    const kstack_d = kstack_d_bytes[0..];
+    const user_d = register_exec_user(0x6000, root_b, 64, 0x1c400000, 8192, kstack_d, 0, 0).?;
+    try std.testing.expectEqual(@as(usize, 5), user_d);
+    try std.testing.expectEqual(@as(usize, 7), task_count); // shell + worker + A + B + C + D + idle
     try std.testing.expect(!has_free_slot());
     // Each task carries ITS OWN root and apertures.
     try std.testing.expect(task_ttbr0(user_a) != task_ttbr0(user_b));

@@ -1450,8 +1450,9 @@ fn cmd_addrspaces(m: *Monitor, args: []const []const u8) ExecError {
     m.console.print_hex(mmu.user_root_phys());
     m.console.puts("\n");
     // Claim 0826: the per-process-root budget — table pages consumed out of
-    // the fixed 256-page carve-out. Two live user roots (~15 each + leaf
-    // tables) stay well inside it; the live gate reads this line.
+    // the fixed 256-page carve-out. Card 3g (claim 5795): FOUR live user
+    // roots (~15 each + leaf tables) stay well inside it; the scale live
+    // gate reads this line for the headroom assertion.
     m.console.puts("addrspaces: tables=");
     m.console.print_u64(@intCast(mmu.tables_used()));
     m.console.puts("/");
@@ -2232,7 +2233,7 @@ test "monitor: tasks is registered and reports the deterministic host state" {
     _ = scheduler.register_user(0, 0);
     try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"tasks"}));
     try std.testing.expectEqualStrings(
-        "tasks: enabled=0 current=0 switches=0 pool=4/5 zombies=0\n" ++
+        "tasks: enabled=0 current=0 switches=0 pool=4/7 zombies=0\n" ++
             "  shell    saves=0 resumes=0 advances=0 state=ready\n" ++
             "  worker   saves=0 resumes=0 advances=0 state=ready\n" ++
             "  user-el0 saves=0 resumes=0 advances=0 state=ready\n" ++

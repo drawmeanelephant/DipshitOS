@@ -22,9 +22,11 @@
 #      (hello/pings/yield/sleep/awake), interleaving with the worker.
 #   4. Both complete: `user: awake` x2 and the exit/reap reports EXACTLY
 #      twice each (card 3d, claim 1014 FIFOs).
-#   5. With both live the pool is 5/5 (shell + worker + 2 users + idle, no
-#      spare — documented): a THIRD exec is `pool_full` ("exec: no free
-#      scheduler pool slot"), checked before any allocation (leak-free).
+#   5. Card 3g (claim 5795): with FOUR programs live the pool is 7/7
+#      (shell + worker + 4 users + idle) — a FIFTH exec is `pool_full`
+#      ("exec: no free scheduler pool slot"), checked before any
+#      allocation (leak-free). The scale gate proves the full budget; this
+#      gate re-derives its capacity ending to the new budget.
 #   6. The shell stays responsive (echo reply), no exception park.
 #
 # The runner runs WITHOUT --script-expect: the 1 s tick makes a USER.BIN
@@ -65,9 +67,9 @@ zig build image
 swift build --package-path host/vm-runner --configuration release
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
-# Two execs with DISTINCT args back to back, the procs snapshot, the
-# pool_full third exec, then the shell check.
-printf 'ls\nexec USER.BIN alpha\nexec USER.BIN beta\nexec USER.BIN gamma\nprocs\necho rx-args-ok\n' > "$SCRIPT"
+# Four execs with DISTINCT args back to back, the procs snapshot, the
+# pool_full fifth exec (card 3g's 7/7 budget), then the shell check.
+printf 'ls\nexec USER.BIN alpha\nexec USER.BIN beta\nexec USER.BIN gamma\nexec USER.BIN delta\nprocs\nexec USER.BIN epsilon\necho rx-args-ok\n' > "$SCRIPT"
 
 run_one() {
     local tag="$1"
@@ -83,31 +85,41 @@ run_one() {
     set -e
     [ -f artifacts/vm-serial.log ] && cp artifacts/vm-serial.log "$serial_copy" || true
 
-    local bytes=0 banner=0 listed=0 loaded=0 two_running=0 distinct_tasks=0 \
-        distinct_stacks=0 arg_alpha=0 arg_beta=0 hello=0 awake=0 \
-        interleave=0 pool_full=0 exited=0 procs_exited=0 reaped=0 echo_ok=0 fatal=0
+    local bytes=0 banner=0 listed=0 loaded=0 four_running=0 distinct_tasks=0 \
+        distinct_stacks=0 arg_alpha=0 arg_beta=0 arg_gamma=0 arg_delta=0 \
+        hello=0 awake=0 interleave=0 pool_full=0 exited=0 procs_exited=0 \
+        reaped=0 echo_ok=0 fatal=0
     if [ -f artifacts/vm-serial.log ]; then
         bytes="$(wc -c < artifacts/vm-serial.log | tr -d ' ')"
         [ "$(grep -aFxc -- "DipshitOS kernel has seized control." artifacts/vm-serial.log || true)" = 1 ] && banner=1
         [ "$(grep -aFc -- "USER.BIN" artifacts/vm-serial.log || true)" -ge 3 ] && listed=1
         # Both execs loaded.
         loaded="$(grep -aFc -- "exec: loaded USER.BIN size=" artifacts/vm-serial.log || true)"
-        # The procs snapshot: exactly TWO running USER.BIN rows with
-        # distinct executor task ids + stack VAs.
+        # The procs snapshot: exactly FOUR running USER.BIN rows with
+        # distinct executor task ids + stack VAs (card 3g's 7-slot budget:
+        # shell + worker + 4 users + idle).
         local rows=""
         rows="$(grep -aE -- "procs: id=[0-9]+ name=USER.BIN state=running" artifacts/vm-serial.log || true)"
         if [ -n "$rows" ]; then
             local running_rows
             running_rows="$(printf '%s\n' "$rows" | wc -l | tr -d ' ')"
-            [ "$running_rows" = 2 ] && two_running=1 || two_running=0
-            local t1 t2
+            [ "$running_rows" = 4 ] && four_running=1 || four_running=0
+            local t1 t2 t3 t4
             t1="$(printf '%s\n' "$rows" | sed -n '1p' | sed -E 's/.*task=([0-9]+).*/\1/')"
             t2="$(printf '%s\n' "$rows" | sed -n '2p' | sed -E 's/.*task=([0-9]+).*/\1/')"
-            [ -n "$t1" ] && [ -n "$t2" ] && [ "$t1" != "$t2" ] && distinct_tasks=1 || distinct_tasks=0
-            local s1 s2
+            t3="$(printf '%s\n' "$rows" | sed -n '3p' | sed -E 's/.*task=([0-9]+).*/\1/')"
+            t4="$(printf '%s\n' "$rows" | sed -n '4p' | sed -E 's/.*task=([0-9]+).*/\1/')"
+            [ -n "$t1" ] && [ -n "$t2" ] && [ -n "$t3" ] && [ -n "$t4" ] && \
+                [ "$t1" != "$t2" ] && [ "$t1" != "$t3" ] && [ "$t1" != "$t4" ] && \
+                [ "$t2" != "$t3" ] && [ "$t2" != "$t4" ] && [ "$t3" != "$t4" ] && distinct_tasks=1 || distinct_tasks=0
+            local s1 s2 s3 s4
             s1="$(printf '%s\n' "$rows" | sed -n '1p' | sed -E 's/.*stack=0x([0-9a-f]{16}).*/\1/')"
             s2="$(printf '%s\n' "$rows" | sed -n '2p' | sed -E 's/.*stack=0x([0-9a-f]{16}).*/\1/')"
-            [ -n "$s1" ] && [ -n "$s2" ] && [ "$s1" != "$s2" ] && distinct_stacks=1 || distinct_stacks=0
+            s3="$(printf '%s\n' "$rows" | sed -n '3p' | sed -E 's/.*stack=0x([0-9a-f]{16}).*/\1/')"
+            s4="$(printf '%s\n' "$rows" | sed -n '4p' | sed -E 's/.*stack=0x([0-9a-f]{16}).*/\1/')"
+            [ -n "$s1" ] && [ -n "$s2" ] && [ -n "$s3" ] && [ -n "$s4" ] && \
+                [ "$s1" != "$s2" ] && [ "$s1" != "$s3" ] && [ "$s1" != "$s4" ] && \
+                [ "$s2" != "$s3" ] && [ "$s2" != "$s4" ] && [ "$s3" != "$s4" ] && distinct_stacks=1 || distinct_stacks=0
         fi
         # The DISTINCT markers: the SAME binary, distinguished by its argv.
         # Substring match (not exact line): the first program's marker can
@@ -116,7 +128,9 @@ run_one() {
         # tolerate. Each marker still appears EXACTLY once.
         [ "$(grep -aFc -- "user: arg=alpha" artifacts/vm-serial.log || true)" = 1 ] && arg_alpha=1
         [ "$(grep -aFc -- "user: arg=beta" artifacts/vm-serial.log || true)" = 1 ] && arg_beta=1
-        # Both programs ran their usual EL0 flow and completed.
+        [ "$(grep -aFc -- "user: arg=gamma" artifacts/vm-serial.log || true)" = 1 ] && arg_gamma=1
+        [ "$(grep -aFc -- "user: arg=delta" artifacts/vm-serial.log || true)" = 1 ] && arg_delta=1
+        # All four programs ran their usual EL0 flow and completed.
         hello="$(grep -aFc -- "user: hello from the ESP" artifacts/vm-serial.log || true)"
         awake="$(grep -aFc -- "user: awake" artifacts/vm-serial.log || true)"
         # Interleaving: other tasks (worker) ran between the last sleep
@@ -128,22 +142,24 @@ run_one() {
             mid="$(sed -n "$((last_sleep + 1)),$((first_awake - 1))p" artifacts/vm-serial.log)"
             [ "$(echo "$mid" | grep -cF -- "tasks worker advances=" || true)" -ge 1 ] && interleave=1 || interleave=0
         fi
-        # The third exec with both programs live is the capacity gate.
+        # The fifth exec with four programs live is the capacity gate
+        # (card 3g's 7/7 budget).
         [ "$(grep -aFxc -- "exec: no free scheduler pool slot" artifacts/vm-serial.log || true)" = 1 ] && pool_full=1
-        # Both programs exited + were reaped: the FIFO reports print EXACTLY
-        # twice each (card 3d, claim 1014).
+        # All four programs exited + were reaped: the FIFO reports print
+        # EXACTLY four times each (card 3d, claim 1014).
         exited="$(grep -aFc -- "tasks user-exec exited status=43" artifacts/vm-serial.log || true)"
         procs_exited="$(grep -aFc -- "procs USER.BIN exited status=43" artifacts/vm-serial.log || true)"
         reaped="$(grep -aFc -- "tasks user-exec reaped" artifacts/vm-serial.log || true)"
         [ "$(grep -aFxc -- "rx-args-ok" artifacts/vm-serial.log || true)" = 1 ] && echo_ok=1
         grep -qF -- "[EXC] parking:" artifacts/vm-serial.log && fatal=1 || true
     fi
-    echo "$tag: runner-rc=$rc serial-bytes=$bytes banner=$banner listed=$listed loaded=$loaded two-running=$two_running tasks-distinct=$distinct_tasks stacks-distinct=$distinct_stacks arg-alpha=$arg_alpha arg-beta=$arg_beta hello=$hello awake=$awake interleave=$interleave pool-full=$pool_full exited=$exited procs-exited=$procs_exited reaped=$reaped echo=$echo_ok fatal=$fatal" | tee -a "$REPORT"
-    [ "$rc" = 0 ] && [ "$banner" = 1 ] && [ "$listed" = 1 ] && [ "$loaded" = 2 ] && \
-        [ "$two_running" = 1 ] && [ "$distinct_tasks" = 1 ] && [ "$distinct_stacks" = 1 ] && \
-        [ "$arg_alpha" = 1 ] && [ "$arg_beta" = 1 ] && [ "$hello" = 2 ] && [ "$awake" = 2 ] && \
-        [ "$interleave" = 1 ] && [ "$pool_full" = 1 ] && [ "$exited" = 2 ] && [ "$procs_exited" = 2 ] && \
-        [ "$reaped" = 2 ] && [ "$echo_ok" = 1 ] && [ "$fatal" = 0 ]
+    echo "$tag: runner-rc=$rc serial-bytes=$bytes banner=$banner listed=$listed loaded=$loaded four-running=$four_running tasks-distinct=$distinct_tasks stacks-distinct=$distinct_stacks arg-alpha=$arg_alpha arg-beta=$arg_beta arg-gamma=$arg_gamma arg-delta=$arg_delta hello=$hello awake=$awake interleave=$interleave pool-full=$pool_full exited=$exited procs-exited=$procs_exited reaped=$reaped echo=$echo_ok fatal=$fatal" | tee -a "$REPORT"
+    [ "$rc" = 0 ] && [ "$banner" = 1 ] && [ "$listed" = 1 ] && [ "$loaded" = 4 ] && \
+        [ "$four_running" = 1 ] && [ "$distinct_tasks" = 1 ] && [ "$distinct_stacks" = 1 ] && \
+        [ "$arg_alpha" = 1 ] && [ "$arg_beta" = 1 ] && [ "$arg_gamma" = 1 ] && [ "$arg_delta" = 1 ] && \
+        [ "$hello" = 4 ] && [ "$awake" = 4 ] && \
+        [ "$interleave" = 1 ] && [ "$pool_full" = 1 ] && [ "$exited" = 4 ] && [ "$procs_exited" = 4 ] && \
+        [ "$reaped" = 4 ] && [ "$echo_ok" = 1 ] && [ "$fatal" = 0 ]
 }
 
 : > "$REPORT"
@@ -153,9 +169,10 @@ run_one() {
     echo "script: $(cat "$SCRIPT" | tr '\n' '|')"
     echo "date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     echo
-    echo "exec USER.BIN alpha / exec USER.BIN beta: both load, both run live, and each"
-    echo "prints its OWN marker (user: arg=alpha / user: arg=beta) — the argv block is"
-    echo "a read-only leaf in the process's text page (no extra page, W^X preserved)."
+    echo "exec USER.BIN alpha / beta / gamma / delta: all four load and run live, and"
+    echo "each prints its OWN marker (user: arg=<name>) — the argv block is a read-only"
+    echo "leaf in the process's text page (no extra page, W^X preserved). Card 3g's"
+    echo "7/7 budget: a fifth exec is pool_full."
     echo
 } >> "$REPORT"
 
@@ -171,7 +188,7 @@ done
 echo
 echo "=== result ==="
 if [ "$pass" = "$BOOTS" ]; then
-    echo "verify-live-args: PASS — the same USER.BIN distinguished itself per exec (arg=alpha / arg=beta), both programs ran live to completion, and a third exec was pool_full ($pass/$BOOTS boot(s))."
+    echo "verify-live-args: PASS — the same USER.BIN distinguished itself per exec (arg=alpha / arg=beta / arg=gamma / arg=delta), FOUR programs ran live to completion, and a fifth exec was pool_full at the 7/7 budget ($pass/$BOOTS boot(s))."
     echo "PASS: $pass/$BOOTS" >> "$REPORT"
     exit 0
 fi

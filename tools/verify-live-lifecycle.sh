@@ -117,7 +117,7 @@ run_one() {
         grep -qF -- "tasks user-el0 exited status=7" artifacts/vm-serial.log && EXITED=1
         grep -qF -- "tasks user-el0 reaped" artifacts/vm-serial.log && REAPED=1
         grep -qE -- "saves=[0-9]+ resumes=[0-9]+ advances=[0-9]+ state=(ready|running|zombie)" artifacts/vm-serial.log && STATE_COL=1
-        grep -qE -- "tasks: enabled=1 current=[0-9]+ switches=[0-9]+ pool=[0-9]+/5 zombies=[0-9]+" artifacts/vm-serial.log && POOL=1
+        grep -qE -- "tasks: enabled=1 current=[0-9]+ switches=[0-9]+ pool=[0-9]+/7 zombies=[0-9]+" artifacts/vm-serial.log && POOL=1
         grep -qE -- "idle +saves=[0-9]+ resumes=[0-9]+ advances=0 state=ready" artifacts/vm-serial.log && IDLE_ROW=1
         grep -qF -- "rx-lifecycle-ok" artifacts/vm-serial.log && ECHO=1
     fi

@@ -67,6 +67,7 @@ verify-coordination`, and CI) fails if it drifts from the files.
 | milestone-four follow-on 3, card 3f: IPC — distinct processes exchange data | [`agent-buffy-m4-ipc.md`](agent-buffy-m4-ipc.md) |
 | milestone-four follow-on 3, card 3c: kill (the kernel owns process lifetime) | [`agent-buffy-m4-kill.md`](agent-buffy-m4-kill.md) |
 | milestone-four follow-on 2: a long-lived process among live peers | [`agent-buffy-m4-long-lived-process.md`](agent-buffy-m4-long-lived-process.md) |
+| milestone-four follow-on 3, card 3g: pool scale — a third live user process | [`agent-buffy-m4-pool-scale.md`](agent-buffy-m4-pool-scale.md) |
 | milestone four card 3: process abstraction (claim 3848) | [`agent-buffy-m4-process-abstraction.md`](agent-buffy-m4-process-abstraction.md) |
 | `agent/buffy/macos27-custom-virtio-spike` | [`agent-buffy-macos27-custom-virtio-spike.md`](agent-buffy-macos27-custom-virtio-spike.md) |
 | `agent/codex/m3-march-tracker` | [`agent-codex-m3-march-tracker.md`](agent-codex-m3-march-tracker.md) |
