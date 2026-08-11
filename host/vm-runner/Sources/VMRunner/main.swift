@@ -7,6 +7,8 @@
 //         [--script-after <text>] [--script-expect <text>] [--custom-virtio]
 //         [--script2 <file> --script2-after <text>] (claim 4613: a second
 //          scripted phase, forwarded once after its own serial marker)
+//         [--script3 <file> --script3-after <text>] (claim 7786: a third
+//          scripted phase, forwarded once after its own serial marker)
 //
 // * --custom-virtio (macOS 27 spike, audit step 3): attaches one
 //   default-off VZCustomVirtioDeviceConfiguration so the guest's PCI
@@ -107,6 +109,14 @@ var scriptExpect: String?
 // forwarded once after its own serial marker (the reap line) instead.
 var script2Path: String?
 var script2After: String?
+// Card 3c (claim 7786): a THIRD scripted phase. The primary --script is
+// forwarded in ONE burst (claim 6684) and --script2 handles the next
+// phase (claim 4613); --script3 covers the post-reap snapshot that must
+// land after a background process is killed AND reaped (the kill gate's
+// procs/pages/re-exec read) — forwarded once after its own serial marker
+// via the identical machinery.
+var script3Path: String?
+var script3After: String?
 var customVirtioEnabled = false
 
 var idx = 2
@@ -151,6 +161,12 @@ while idx < arguments.count {
         idx += 2
     } else if arg == "--script2-after", idx + 1 < arguments.count {
         script2After = arguments[idx + 1]
+        idx += 2
+    } else if arg == "--script3", idx + 1 < arguments.count {
+        script3Path = arguments[idx + 1]
+        idx += 2
+    } else if arg == "--script3-after", idx + 1 < arguments.count {
+        script3After = arguments[idx + 1]
         idx += 2
     } else if arg == "--custom-virtio" {
         customVirtioEnabled = true
@@ -387,6 +403,8 @@ if consoleMode {
     if let scriptAfter { print("  script-after: \"\(scriptAfter)\"  (forward once after this serial text appears)") }
     if let script2Path { print("  script2: \(script2Path)  (claim 4613: forwarded once after script2-after appears)") }
     if let script2After { print("  script2-after: \"\(script2After)\"  (forward script2 once after this serial text appears)") }
+    if let script3Path { print("  script3: \(script3Path)  (claim 7786: forwarded once after script3-after appears)") }
+    if let script3After { print("  script3-after: \"\(script3After)\"  (forward script3 once after this serial text appears)") }
     if let scriptExpect { print("  script-expect: \"\(scriptExpect)\"  (exit 0 iff observed in the serial log)") }
 } else {
     print("  serial log: \(serialLogPath)  (timeout: \(Int(timeout))s)")
@@ -830,6 +848,18 @@ func startScript2Input() {
     forwardScriptOnce(path: path, after: after, label: "script2")
 }
 
+// Card 3c (claim 7786): the THIRD scripted phase. The kill gate needs a
+// post-reap snapshot — the `procs | pages | exec USER.BIN | procs` read
+// that proves the killed process's pages returned and its slot was
+// re-used — which must land AFTER the kill's reap line, so it cannot be
+// in the one-burst primary script (claim 6684) or the claim-4613 second
+// phase. --script3 is forwarded once after its own serial marker using
+// the same settle-then-forward machinery.
+func startScript3Input() {
+    guard let path = script3Path, let after = script3After else { return }
+    forwardScriptOnce(path: path, after: after, label: "script3")
+}
+
 /// Forward `path` into the serial attachment exactly once, after `after`
 /// appears in the serial log (default: the kernel terminal state). Shared
 /// by the primary script (claim 6684) and the second phase (claim 4613).
@@ -950,6 +980,7 @@ if consoleMode {
     startGuestOutputTee()
     startScriptInput()
     startScript2Input()
+    startScript3Input()
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { scriptPoll() }
 } else {
     if screenshotPath != nil {

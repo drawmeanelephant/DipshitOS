@@ -208,7 +208,7 @@ pub const Command = struct {
 
 /// Number of commands. The registry is built at runtime (not a const
 /// table): see `ensure_registry`.
-pub const registry_count: usize = 30;
+pub const registry_count: usize = 31;
 
 /// Command registry, built at runtime into BSS. A `const` table would hold
 /// link-time absolute addresses for BOTH the string slices and the handler
@@ -236,6 +236,7 @@ fn ensure_registry() []const Command {
             .{ .name = "handoff", .help = "display boot-to-kernel ABI data", .usage = "handoff", .handler = cmd_handoff },
             .{ .name = "help", .help = "list commands and their help text", .usage = "help [command]", .max_args = 1, .handler = cmd_help },
             .{ .name = "hex", .help = "format an integer in hexadecimal", .usage = "hex <number>...", .min_args = 1, .handler = cmd_hex },
+            .{ .name = "kill", .help = "terminate a running process (kernel-owned lifetime)", .usage = "kill <pid|name>", .min_args = 1, .max_args = 1, .handler = cmd_kill },
             .{ .name = "ls", .help = "list files on the ESP (or a directory by path)", .usage = "ls [<dir>]", .max_args = 1, .handler = cmd_ls },
             .{ .name = "mem", .help = "summarize the EFI memory map", .usage = "mem", .handler = cmd_mem },
             .{ .name = "mount", .help = "switch the active FAT volume (esp or data)", .usage = "mount <esp|data>", .min_args = 1, .max_args = 1, .handler = cmd_mount },
@@ -1148,6 +1149,81 @@ fn cmd_procs(m: *Monitor, args: []const []const u8) ExecError {
         m.console.puts("\n");
     }
     return .none;
+}
+
+// ---------------------------------------------------------------------------
+// Kill command (milestone-four follow-on 3, card 3c — claim 7786)
+// ---------------------------------------------------------------------------
+
+/// `kill <pid|name>` — the kernel, not the program, owns process lifetime.
+/// The target is looked up in the process registry (by `procs` id or by
+/// process name), then ARMED for termination: `scheduler.request_kill`
+/// marks its TCB, and the ring converts the target's NEXT selection into
+/// the existing exit path with the reserved status 137 (the counter's
+/// `exit=137` in `procs` / `tasks user-exec exited status=137`). No new
+/// syscall — ADR 0007 stays frozen. Every refusal is clean and exact
+/// (host-tested strings).
+fn cmd_kill(m: *Monitor, args: []const []const u8) ExecError {
+    const arg = args[0];
+    // Resolve the target process: by numeric `procs` id, else by name.
+    const pid: ?usize = if (parseInt(arg)) |value| blk: {
+        if (value < process.max_processes and process.info(@as(usize, @intCast(value))) != null) {
+            break :blk @as(usize, @intCast(value));
+        }
+        break :blk null;
+    } else |_| blk: {
+        var id: usize = 0;
+        while (id < process.max_processes) : (id += 1) {
+            const info = process.info(id) orelse continue;
+            if (std.mem.eql(u8, info.name, arg)) break :blk id;
+        }
+        break :blk null;
+    };
+    const pid_value = pid orelse {
+        m.console.puts("kill: no such process: ");
+        m.console.puts(arg);
+        m.console.puts("\n");
+        return .invalid_argument;
+    };
+    const info = process.info(pid_value).?;
+    if (info.state == .exited) {
+        m.console.puts("kill: ");
+        m.console.puts(info.name);
+        m.console.puts(" already exited\n");
+        return .invalid_argument;
+    }
+    // A created-but-unbound process (exec's pre-spawn window) has no
+    // executor to terminate; a running process names its executor slot.
+    const task_id = info.task_id orelse {
+        m.console.puts("kill: ");
+        m.console.puts(info.name);
+        m.console.puts(" not running\n");
+        return .invalid_argument;
+    };
+    switch (scheduler.request_kill(task_id)) {
+        .ok => {
+            m.console.puts("kill: ");
+            m.console.puts(info.name);
+            m.console.puts(" armed\n");
+            return .none;
+        },
+        .not_found => {
+            m.console.puts("kill: ");
+            m.console.puts(info.name);
+            m.console.puts(" not found\n");
+            return .invalid_argument;
+        },
+        .already_exited => {
+            m.console.puts("kill: ");
+            m.console.puts(info.name);
+            m.console.puts(" already exited\n");
+            return .invalid_argument;
+        },
+        .refused => {
+            m.console.print_line("kill: cannot kill the shell or scheduler-owned idle task");
+            return .invalid_argument;
+        },
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2068,6 +2144,66 @@ test "monitor: procs reports the process table with lifecycle and exit status" {
             "procs: id=1 name=USER.BIN state=running task=2 stack=0x000000001a400000 exit=-\n",
         env.mock.contents(),
     );
+}
+
+test "monitor: kill is registered and arms a running process by id and by name" {
+    // Card 3c (claim 7786): `kill <pid|name>` resolves the process and
+    // ARMS its executor task; the ring converts the next selection into
+    // the existing exit path with the reserved status 137.
+    var env = TestEnv.init();
+    var mon = env.monitor();
+    try std.testing.expect(lookup("kill") != null);
+    try std.testing.expectEqualStrings("terminate a running process (kernel-owned lifetime)", lookup("kill").?.help);
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0);
+    _ = scheduler.register_user(0, 0);
+    // The boot payload's process (id 0) is RUNNING on task 2; the demo
+    // spawn fills slot 3 so a second process can bind a real executor.
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"spawn"}));
+    env.mock.reset();
+    const p1 = process.create("USER.BIN", .{ .entry_va = 0x400000, .content_len = 0xea }, .{}, .{}).?;
+    try std.testing.expectEqual(@as(usize, 1), p1);
+    _ = process.bind(p1, 3);
+    // By id (the `procs` id).
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "kill", "0" }));
+    try std.testing.expectEqualStrings("kill: user-el0 armed\n", env.mock.contents());
+    // By name (the FAT file name).
+    env.mock.reset();
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "kill", "USER.BIN" }));
+    try std.testing.expectEqualStrings("kill: USER.BIN armed\n", env.mock.contents());
+    // The armed kill flows through the REAL lifecycle at the next ring
+    // selection: user-el0 (task 2) exits with the reserved status 137.
+    scheduler.start();
+    try std.testing.expect(scheduler.yield_current()); // shell -> worker
+    try std.testing.expect(scheduler.yield_current()); // worker -> user -> killed -> spawn-demo
+    try std.testing.expectEqual(@as(?u64, scheduler.reserved_kill_status), scheduler.terminated_status(2));
+}
+
+test "monitor: kill refuses unknown, already-exited, and not-running targets exactly" {
+    var env = TestEnv.init();
+    var mon = env.monitor();
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0);
+    _ = scheduler.register_user(0, 0);
+    // An EXITED process (the exited state's exact refusal).
+    const exited_p = process.create("BOOTED", .{ .entry_va = 0x400000, .content_len = 1 }, .{}, .{}).?;
+    _ = process.bind(exited_p, 4);
+    process.on_task_exit(4, 7);
+    _ = process.take_exit_report();
+    try std.testing.expectEqual(ExecError.invalid_argument, exec(&mon, &.{ "kill", "BOOTED" }));
+    try std.testing.expectEqualStrings("kill: BOOTED already exited\n", env.mock.contents());
+    // A CREATED (loaded, not yet bound) process: no executor to terminate.
+    env.mock.reset();
+    _ = process.create("ROLLBACK.BIN", .{ .entry_va = 0x400000, .content_len = 1 }, .{}, .{});
+    try std.testing.expectEqual(ExecError.invalid_argument, exec(&mon, &.{ "kill", "ROLLBACK.BIN" }));
+    try std.testing.expectEqualStrings("kill: ROLLBACK.BIN not running\n", env.mock.contents());
+    // Unknown name and unknown numeric id.
+    env.mock.reset();
+    try std.testing.expectEqual(ExecError.invalid_argument, exec(&mon, &.{ "kill", "NOPE.BIN" }));
+    try std.testing.expectEqualStrings("kill: no such process: NOPE.BIN\n", env.mock.contents());
+    env.mock.reset();
+    try std.testing.expectEqual(ExecError.invalid_argument, exec(&mon, &.{ "kill", "9" }));
+    try std.testing.expectEqualStrings("kill: no such process: 9\n", env.mock.contents());
 }
 
 test "monitor: spawn is registered and reports the demo spawn or the bound" {
