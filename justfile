@@ -37,8 +37,8 @@ verify-portable:
 # gate (claim 5275), the EL0/SVC gate (claim 8215), the numbered syscall
 # gate (claim 3594), the fault-safe uaccess gate (claim 6120), the
 # per-task address-space gate (claim 5804), the live entropy gate
-# (claim 2665), and the live reboot/shutdown gate (claim 0527). Apple
-# silicon only — each boots VZ VMs.
+# (claim 2665), the live reboot/shutdown gate (claim 0527), and the live
+# IPC mailbox gate (claim 5965). Apple silicon only — each boots VZ VMs.
 verify-vz:
     zig build run
     bash tools/verify-bad-handoff.sh
@@ -56,6 +56,7 @@ verify-vz:
     bash tools/verify-live-addrspaces.sh
     bash tools/verify-live-lifecycle.sh
     bash tools/verify-live-exec.sh
+    bash tools/verify-live-args.sh
     bash tools/verify-live-procs.sh
     bash tools/verify-live-concurrent.sh
     bash tools/verify-live-long-lived.sh
@@ -63,6 +64,7 @@ verify-vz:
     bash tools/verify-live-sleep.sh
     bash tools/verify-live-entropy.sh
     bash tools/verify-live-reboot.sh
+    bash tools/verify-live-ipc.sh
 
 # Compile the AArch64 UEFI application and kernel image (class A — zig build)
 build:

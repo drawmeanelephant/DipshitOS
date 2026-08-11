@@ -196,3 +196,24 @@ so a sleeping user program still owns the user root until it exits.
 
 The ABI — x8 number, x0–x5 arguments, x0 result, reserved 5–63, error
 codes — is unchanged.
+
+## Amendment (2026-08-10, claim 5965 — the IPC mailbox card)
+
+Follow-on 3 card 3f freezes slots 5 and 6 in the dispatch table (the ONE
+ABI change in the follow-on 3 card set; everything else stays frozen):
+
+| 5 | `sys_ipc_send` | `ipc_send(target, buf, len) -> i64` | Copy `len` bytes (≤ 64; longer is truncated to the slot bound) from the caller's region through uaccess into process `target`'s bounded per-process mailbox (`kernel/src/mailbox.zig`: 4 × 64 B BSS ring per process id, FIFO). Returns the sent length; `EINVAL` for an out-of-range/free/exited target, `EFAULT` for a bad user pointer, `ENOSPC` when the target's ring is full (checked before any bytes are copied). |
+| 6 | `sys_ipc_recv` | `ipc_recv(buf, max) -> i64` | Copy the caller's OWN oldest message out through uaccess (`max` > 64 clamps to it; `max` shorter than the message truncates the copy — both documented), consuming it. Returns the copied length; 0 when the mailbox is empty; `EINVAL` when the calling task is not a process; `EFAULT` leaves the message queued (peek → copy_out → drop). |
+
+`ENOSPC` (`-5`) joins the D3 error table: the target process's bounded
+mailbox is full — the send is refused, never unbounded and never silently
+dropped.
+
+`implemented_count` is now 7; the `syscalls` report prints rows 0–6.
+Every byte crosses the claim-6120 uaccess window in both directions, and a
+process can only reach its own mailbox (recv) and a live target's (send) —
+cross-process isolation at the mailbox level, with the ring reset whenever a
+process id is created/recycled (exec path + boot-payload registration).
+
+No POSIX pipes/fds/signals, no unbounded mailboxes, no scheduler/lifecycle
+changes: this is the ONLY ABI amendment in the follow-on 3 card set.

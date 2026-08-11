@@ -18,6 +18,7 @@ available commands:
   kill        terminate a running process (kernel-owned lifetime)
   ls          list files on the ESP (or a directory by path)
   mem         summarize the EFI memory map
+  mbox        per-process IPC mailbox: pending messages and drain counters
   mount       switch the active FAT volume (esp or data)
   pages       physical page allocator pool
   pci         enumerate PCI devices on the bus

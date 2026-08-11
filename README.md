@@ -299,6 +299,21 @@ All command output and logs are saved under `artifacts/` (`inspect.txt`,
    SAME binary can distinguish itself per exec
    (`tools/verify-live-args.sh` — `exec USER.BIN alpha` + `exec
    USER.BIN beta` produce distinct markers with both programs live).
+   The follow-on 3 card 3f (claim 5965) is the first inter-process DATA
+   path: a bounded per-process kernel mailbox (4 × 64 B BSS rings, no
+   allocation) behind the card's ONE ABI change — ADR 0007 slots 5/6,
+   `sys_ipc_send` (copy_in into the TARGET's ring; full → `ENOSPC` -5)
+   and `sys_ipc_recv` (copy_out the caller's OWN ring; empty → 0) — with
+   the `mbox [<pid>]` monitor command (registry 31→32) dumping
+   per-process pending/sent/recv. COUNTER.BIN gains a periodic send
+   (`ipc: ping <d>`, target pid parsed from its argv) and a THIRD image
+   PEER.BIN (`user/src/peer.zig`, through the same build pipeline)
+   recv-loops forever echoing `peer: got ping <d>` — TWO never-exiting
+   programs exchanging bytes, byte-exact in the serial log
+   (`tools/verify-live-ipc.sh` — the sends and echoes interleave across
+   the whole log, `mbox` shows the peer's bounded ring drained, both
+   processes are still running at the final `procs`, and a third exec is
+   `pool_full` at the 5/5 pool).
 - The Virtualization.framework VM boots the GPT+FAT image: configuration
   validates, the EFI variable store is created, the VM starts and runs, and
   after boot the guest-written marker file `\BOOTED.TXT` exists on the ESP

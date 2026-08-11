@@ -208,6 +208,7 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "  kill        terminate a running process (kernel-owned lifetime)\n" ++
         "  ls          list files on the ESP (or a directory by path)\n" ++
         "  mem         summarize the EFI memory map\n" ++
+        "  mbox        per-process IPC mailbox: pending messages and drain counters\n" ++
         "  mount       switch the active FAT volume (esp or data)\n" ++
         "  pages       physical page allocator pool\n" ++
         "  pci         enumerate PCI devices on the bus\n" ++

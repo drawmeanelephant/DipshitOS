@@ -63,6 +63,9 @@ const userspace = @import("userspace.zig"); // claim 5804: user-VA layout
 // + exit status). One-way import: process.zig knows nothing about this
 // module.
 const process = @import("process.zig");
+// Card 3f (claim 5965): the per-process IPC mailbox — the pool reset
+// clears it and the boot payload's process registration resets its ring.
+const mailbox = @import("mailbox.zig");
 
 const user_stack_section = if (builtin.object_format == .elf) ".userbss" else "__DATA,__userbss";
 
@@ -269,8 +272,10 @@ pub fn init() usize {
     tick_count = 0;
     for (&tasks) |*task| task.* = .{};
     // Claim 3848: every pool reset also clears the process layer (the
-    // boot path initializes both here; host tests get isolation).
+    // boot path initializes both here; host tests get isolation). Card 3f
+    // (claim 5965): the IPC mailbox rings reset with it.
     process.init();
+    mailbox.init();
     tasks[0] = .{ .name = "shell", .state = .ready, .ttbr0 = mmu.kernel_root_phys() };
     tasks[idle_id] = .{
         .name = "idle",
@@ -452,6 +457,9 @@ pub fn register_user(entry: u64, image_base: u64) ?usize {
         .stack_va = stack.base,
         .stack_len = stack.len,
     }, .{})) |proc_id| {
+        // Card 3f (claim 5965): the payload's process id starts with a
+        // clean IPC ring (same reset the exec path applies).
+        mailbox.reset(proc_id);
         _ = process.bind(proc_id, id);
     }
     const frame: *exceptions.VectorFrame = @ptrFromInt(tasks[id].sp);

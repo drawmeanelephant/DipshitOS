@@ -457,6 +457,38 @@ gates pass; tagged `m1.5-interactive-monitor`** (see
   programs complete (status 43 — EXACT FIFO counts), and a third exec is
   `pool_full` (5/5, no spare); the full 12-gate shared-seam live sweep
   is green.
+- **IPC — distinct processes exchange data (claim 5965, milestone-four
+  follow-on 3, card 3f)** — coexistence is proven (claims 0826/4613) but
+  two live processes cannot COMMUNICATE; the strongest proof of "real
+  processes" is end-to-end data flow between them. The card lands the
+  FIRST inter-process data path: a bounded per-process kernel mailbox
+  (4 × 64 B BSS ring per process id, no allocation —
+  `kernel/src/mailbox.zig`) behind TWO new syscalls (the card's ONE ABI
+  change, following the `sys_sleep` slot-4 precedent): `sys_ipc_send`
+  (slot 5) copies the caller's bytes through uaccess into the TARGET's
+  ring (full → `ENOSPC` -5), `sys_ipc_recv` (slot 6) copies the caller's
+  OWN ring out (empty → 0; peek → copy_out → drop, so an EFAULT never
+  loses a message) — cross-process isolation (a process reaches only its
+  own mailbox via recv and a live target's via send), the ring reset on
+  process create/recycle. `mbox [<pid>]` monitor command (registry
+  31→32) dumps per-process pending/sent/recv + the queued bytes.
+  COUNTER.BIN gains a periodic send (`ipc: ping <d>` every 3 iterations,
+  target pid parsed from its argv — card 3e's entry contract) and a
+  THIRD image PEER.BIN (`user/src/peer.zig` through the parameterized
+  build pipeline) recv-loops forever and echoes `peer: got ping <d>` —
+  TWO never-exiting programs exchanging bytes, byte-exact in the serial
+  log. Pool math at 5 slots: counter + peer + shell + worker + idle =
+  5/5, NO spare (a third exec is `pool_full`; the 3g capstone raises the
+  budget). The class-B gate `tools/verify-live-ipc.sh` PASS 1/1 on VZ:
+  `exec PEER.BIN` + `exec COUNTER.BIN 1` back to back, the counter's
+  `ipc: ping N` sends and the peer's `peer: got ping N` echoes
+  interleaved across the whole log (every send echoed byte-for-byte),
+  `mbox` shows the peer's ring drained (pending ≤ 1, sent − recv ==
+  pending) and the counter's ring empty, both processes still
+  `state=running` at the final `procs` and neither ever exits, a third
+  exec is `exec: no free scheduler pool slot`, and the shell stays
+  responsive; the full 12-gate shared-seam live sweep + the args + kill
+  gates are green.
 - Eventually: a network stack — only when the ones below it are
   demonstrably working.
 
