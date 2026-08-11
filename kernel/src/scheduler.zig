@@ -190,14 +190,20 @@ var pending_ttbr0: u64 = 0;
 /// the shell idle loop prints every pending slot via `maybe_report`.
 var report_pending: [max_tasks]bool = [_]bool{false} ** max_tasks;
 var report_advances: [max_tasks]u64 = [_]u64{0} ** max_tasks;
-var exit_report_pending: bool = false;
-var exit_report_name: []const u8 = "";
-var exit_report_status: u64 = 0;
-/// Reap report (claim 6729): the idle task marks a reap; the shell loop
-/// prints it. The name is snapshotted at reap time — the freed slot's own
-/// name is zeroed by the reset.
-var reap_report_pending: bool = false;
-var reap_report_name: []const u8 = "";
+/// Card 3d (claim 1014): the task exit + reap reports are bounded FIFOs,
+/// not single first-wins flags — N exits (or reaps) in one idle-loop
+/// window print N lines IN ORDER instead of collapsing to one. Task names
+/// are static string literals, so the name POINTER is a safe snapshot.
+/// Overflow (a full ring) drops the OLDEST entry (documented + host-tested).
+pub const exit_report_max: usize = 4;
+const ExitEntry = struct { name: []const u8, status: u64 };
+const ReapEntry = struct { name: []const u8 };
+var exit_reports: [exit_report_max]ExitEntry = [_]ExitEntry{.{ .name = "", .status = 0 }} ** exit_report_max;
+var exit_report_head: usize = 0;
+var exit_report_count: usize = 0;
+var reap_reports: [exit_report_max]ReapEntry = [_]ReapEntry{.{ .name = "" }} ** exit_report_max;
+var reap_report_head: usize = 0;
+var reap_report_count: usize = 0;
 /// Sleep report (claim 0635): `sys_sleep` marks it (exception context, like
 /// exit); the shell idle loop prints it — the deterministic "this task is
 /// now blocked for N ticks" transition line the live gate asserts.
@@ -241,8 +247,10 @@ pub fn init() usize {
     exits = 0;
     enabled_flag = false;
     @memset(&report_pending, false);
-    exit_report_pending = false;
-    reap_report_pending = false;
+    exit_report_head = 0;
+    exit_report_count = 0;
+    reap_report_head = 0;
+    reap_report_count = 0;
     sleep_report_pending = false;
     spawn_demo_armed = false;
     user_timer_preemptions = 0;
@@ -619,9 +627,15 @@ pub fn exit_current(status: u64) bool {
         tasks[exiting].exit_status = 0;
         return false;
     };
-    exit_report_pending = true;
-    exit_report_name = name;
-    exit_report_status = status;
+    // Card 3d (claim 1014): EVERY exit is queued (a full ring drops the
+    // oldest) — N exits in one window print N lines in order.
+    if (exit_report_count == exit_report_max) {
+        exit_report_head = (exit_report_head + 1) % exit_report_max;
+        exit_report_count -= 1;
+    }
+    const report_index = (exit_report_head + exit_report_count) % exit_report_max;
+    exit_reports[report_index] = .{ .name = name, .status = status };
+    exit_report_count += 1;
     exits +%= 1;
     current = next;
     stage_current();
@@ -656,10 +670,16 @@ fn reap_one_zombie() void {
         if (tasks[i].state != .zombie) continue;
         const name = tasks[i].name;
         if (!reap(i)) return;
-        if (!reap_report_pending) {
-            reap_report_pending = true;
-            reap_report_name = name;
+        // Card 3d (claim 1014): EVERY reap is queued (a full ring drops
+        // the oldest) — two reaps in one idle-loop window print two lines
+        // in order instead of collapsing.
+        if (reap_report_count == exit_report_max) {
+            reap_report_head = (reap_report_head + 1) % exit_report_max;
+            reap_report_count -= 1;
         }
+        const report_index = (reap_report_head + reap_report_count) % exit_report_max;
+        reap_reports[report_index] = .{ .name = name };
+        reap_report_count += 1;
         return;
     }
 }
@@ -776,30 +796,37 @@ pub fn maybe_report(con: *console.Console) void {
         con.print_u64(report_advances[i]);
         con.puts("\n");
     }
-    if (exit_report_pending) {
-        exit_report_pending = false;
+    // Card 3d (claim 1014): drain the task exit report FIFO IN ORDER — N
+    // exits in one window print N `tasks <name> exited status=<n>` lines.
+    while (exit_report_count > 0) {
+        const entry = exit_reports[exit_report_head];
+        exit_report_head = (exit_report_head + 1) % exit_report_max;
+        exit_report_count -= 1;
         con.puts("tasks ");
-        con.puts(exit_report_name);
+        con.puts(entry.name);
         con.puts(" exited status=");
-        con.print_u64(exit_report_status);
+        con.print_u64(entry.status);
         con.puts("\n");
     }
-    // Claim 3848: the process-level exit report — printed from the same
-    // shell idle loop, once per process exit, so the host sees the
-    // program's exit status even after the task slot is reaped.
-    if (process.take_exit_report()) |r| {
+    // Claim 3848: the process-level exit reports — printed from the same
+    // shell idle loop, one per process exit IN ORDER, so the host sees
+    // every program's exit status even after the task slots are reaped.
+    while (process.take_exit_report()) |r| {
         con.puts("procs ");
         con.puts(r.name);
         con.puts(" exited status=");
         con.print_u64(r.status);
         con.puts("\n");
     }
-    // Claim 6729: the idle task reaped a zombie; the name was snapshotted
-    // at reap time because the freed slot's own name is zeroed.
-    if (reap_report_pending) {
-        reap_report_pending = false;
+    // Claim 6729: the idle task reaped zombies; the names were snapshotted
+    // at reap time because the freed slots' own names are zeroed. Card 3d:
+    // drained IN ORDER (every reap prints).
+    while (reap_report_count > 0) {
+        const entry = reap_reports[reap_report_head];
+        reap_report_head = (reap_report_head + 1) % exit_report_max;
+        reap_report_count -= 1;
         con.puts("tasks ");
-        con.puts(reap_report_name);
+        con.puts(entry.name);
         con.puts(" reaped\n");
     }
     // Claim 0635: a task blocked itself with sys_sleep; the name + duration
@@ -1290,4 +1317,75 @@ test "scheduler: lifecycle — spawn, exit to zombie, idle reaps back to free" {
     var con = mock.console();
     maybe_report(&con);
     try std.testing.expectEqualStrings("tasks user-el0 exited status=7\nprocs user-el0 exited status=7\ntasks user-el0 reaped\n", mock.contents());
+}
+
+test "scheduler: two exits in one window report BOTH lines in order" {
+    // Card 3d (claim 1014): the exit/reap reports are FIFOs, not single
+    // first-wins flags — two exits in one idle-loop window print two
+    // `tasks <name> exited status=` lines (and two process reports) in
+    // exit order, and a second drain prints nothing (no double-print).
+    _ = init();
+    _ = register_worker(0x2000).?;
+    _ = register_user(0x3000, 0).?;
+    start();
+    // Exit the user (slot 2, status 43), then the worker (slot 1, status
+    // 9), WITHOUT draining between them.
+    try std.testing.expect(yield_current()); // shell -> worker
+    try std.testing.expect(yield_current()); // worker -> user
+    try std.testing.expectEqual(@as(usize, 2), current_id());
+    try std.testing.expect(exit_current(43)); // user -> idle
+    try std.testing.expectEqual(@as(usize, idle_id), current_id());
+    try std.testing.expect(yield_current()); // idle -> shell
+    try std.testing.expect(yield_current()); // shell -> worker
+    try std.testing.expectEqual(@as(usize, 1), current_id());
+    try std.testing.expect(exit_current(9)); // worker -> idle
+    try std.testing.expectEqual(@as(usize, idle_id), current_id());
+    // One drain prints BOTH exits in order, then nothing more.
+    var mock = console.MockConsole(256){};
+    var con = mock.console();
+    maybe_report(&con);
+    // The task-exit FIFO drains first (both lines, in exit order), then
+    // the process FIFO (the user-el0 process's report), then the reap
+    // FIFO. Every exit printed exactly once, in order, no collapse.
+    try std.testing.expectEqualStrings(
+        "tasks user-el0 exited status=43\n" ++
+            "tasks worker exited status=9\n" ++
+            "procs user-el0 exited status=43\n",
+        mock.contents(),
+    );
+    mock.reset();
+    maybe_report(&con);
+    try std.testing.expectEqual(@as(usize, 0), mock.contents().len);
+}
+
+test "scheduler: two reaps in one window report BOTH reap lines in order" {
+    // Card 3d: the reap report is a FIFO too — two zombies reaped before
+    // the shell drains print two `tasks <name> reaped` lines.
+    _ = init();
+    _ = register_worker(0x2000).?;
+    _ = register_user(0x3000, 0).?;
+    start();
+    try std.testing.expect(yield_current()); // shell -> worker
+    try std.testing.expect(yield_current()); // worker -> user
+    try std.testing.expect(exit_current(43)); // user -> idle
+    try std.testing.expect(yield_current()); // idle -> shell
+    try std.testing.expect(yield_current()); // shell -> worker
+    try std.testing.expect(exit_current(9)); // worker -> idle
+    // Reap BOTH zombies before the shell drains (the idle task's
+    // one-per-iteration reaper makes this the normal window).
+    reap_one_zombie();
+    reap_one_zombie();
+    var mock = console.MockConsole(256){};
+    var con = mock.console();
+    maybe_report(&con);
+    // Reaps scan slots lowest-first, so the worker (slot 1) is reaped
+    // before the user (slot 2) — the FIFO preserves THAT order.
+    try std.testing.expectEqualStrings(
+        "tasks user-el0 exited status=43\n" ++
+            "tasks worker exited status=9\n" ++
+            "procs user-el0 exited status=43\n" ++
+            "tasks worker reaped\n" ++
+            "tasks user-el0 reaped\n",
+        mock.contents(),
+    );
 }

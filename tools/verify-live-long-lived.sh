@@ -35,11 +35,14 @@
 #      COUNTER.BIN exited` line anywhere).
 #   3. A procs read shows COUNTER.BIN `state=running` AND USER.BIN
 #      `state=running` with DISTINCT executor task ids (two live user
-#      processes, distinct programs).
-#   4. USER.BIN's lifecycle under the permanent occupant: exit + reap +
-#      the exited process row (`tasks user-exec exited status=43`, `procs
-#      USER.BIN exited status=43`, `tasks user-exec reaped`,
-#      `name=USER.BIN state=exited`).
+#      processes, distinct programs).    #   4. USER.BIN's lifecycle under the permanent occupant: exit + reap +
+    #      the exited process row (`tasks user-exec exited status=43`, `procs
+    #      USER.BIN exited status=43`, `tasks user-exec reaped`,
+    #      `name=USER.BIN state=exited`). Card 3d (claim 1014): the exit/
+    #      reap reports are bounded FIFOs, so the counts are EXACT — the
+    #      phase-1 USER.BIN AND the phase-2 re-exec both exit, printing
+    #      exactly TWO of each line, while the boot payload's own exit
+    #      (`tasks user-el0 exited status=7`) stays its own distinct line.
 #   5. The re-exec LANDS in the freed slot (the recycle-under-a-permanent-
 #      occupant proof — the claim-0826 gate could never show this, because
 #      both its programs exited).
@@ -123,7 +126,7 @@ run_one() {
 
     local bytes=0 banner=0 listed=0 loaded_counter=0 loaded_user=0 markers=0 \
         never_exits=0 two_running=0 distinct_tasks=0 user_exited=0 \
-        user_reaped=0 procs_user_exited=0 reexec_landed=0 pool_full=0 \
+        exited_row=0 user_reaped=0 procs_user_exited=0 reexec_landed=0 pool_full=0 \
         pages_reads=0 free_recovered=0 final_counter_running=0 \
         phase1_echo=0 echo_ok=0 fatal=0
     if [ -f artifacts/vm-serial.log ]; then
@@ -155,11 +158,16 @@ run_one() {
             t2="$(printf '%s\n' "$user_rows" | head -1 | sed -E 's/.*task=([0-9]+).*/\1/' || true)"
             [ -n "$t1" ] && [ -n "$t2" ] && [ "$t1" != "$t2" ] && distinct_tasks=1 || distinct_tasks=0
         fi
-        # 4. USER.BIN's lifecycle under the permanent occupant.
-        [ "$(grep -aFc -- "tasks user-exec exited status=43" artifacts/vm-serial.log || true)" -ge 1 ] && user_exited=1
-        [ "$(grep -aFc -- "procs USER.BIN exited status=43" artifacts/vm-serial.log || true)" -ge 1 ] && procs_user_exited=1
-        [ "$(grep -aFc -- "tasks user-exec reaped" artifacts/vm-serial.log || true)" -ge 1 ] && user_reaped=1
-        grep -a -qF -- "name=USER.BIN state=exited" artifacts/vm-serial.log && user_exited=1
+        # 4. USER.BIN's lifecycle under the permanent occupant. Card 3d:
+        # the exit/reap reports are EXACT (both USER.BIN runs exit status
+        # 43), and the boot payload's exit stays its own distinct line.
+        local boot_exits
+        user_exited="$(grep -aFc -- "tasks user-exec exited status=43" artifacts/vm-serial.log || true)"
+        procs_user_exited="$(grep -aFc -- "procs USER.BIN exited status=43" artifacts/vm-serial.log || true)"
+        user_reaped="$(grep -aFc -- "tasks user-exec reaped" artifacts/vm-serial.log || true)"
+        grep -a -qF -- "name=USER.BIN state=exited" artifacts/vm-serial.log && exited_row=1 || exited_row=0
+        boot_exits="$(grep -aFc -- "tasks user-el0 exited status=7" artifacts/vm-serial.log || true)"
+        [ "$boot_exits" = 1 ] && boot_exited=1 || boot_exited=0
         # 5. The re-exec landed: exactly TWO successful USER.BIN loads
         # (phase 1 + the phase-2 re-exec into the freed slot).
         [ "$loaded_user" = 2 ] && reexec_landed=1
@@ -184,12 +192,12 @@ run_one() {
         [ "$(grep -aFxc -- "rx-long-lived-ok" artifacts/vm-serial.log || true)" = 1 ] && echo_ok=1
         grep -qF -- "[EXC] parking:" artifacts/vm-serial.log && fatal=1 || true
     fi
-    echo "$tag: runner-rc=$rc serial-bytes=$bytes banner=$banner listed=$listed loaded-counter=$loaded_counter loaded-user=$loaded_user markers=$markers never-exits=$never_exits two-running=$two_running tasks-distinct=$distinct_tasks user-exited=$user_exited procs-user-exited=$procs_user_exited user-reaped=$user_reaped reexec-landed=$reexec_landed pool-full=$pool_full pages-reads=$pages_reads free-recovered=$free_recovered final-counter-running=$final_counter_running phase1-echo=$phase1_echo echo=$echo_ok fatal=$fatal" | tee -a "$REPORT"
+    echo "$tag: runner-rc=$rc serial-bytes=$bytes banner=$banner listed=$listed loaded-counter=$loaded_counter loaded-user=$loaded_user markers=$markers never-exits=$never_exits two-running=$two_running tasks-distinct=$distinct_tasks user-exited=$user_exited exited-row=$exited_row procs-user-exited=$procs_user_exited user-reaped=$user_reaped reexec-landed=$reexec_landed pool-full=$pool_full pages-reads=$pages_reads free-recovered=$free_recovered final-counter-running=$final_counter_running phase1-echo=$phase1_echo echo=$echo_ok fatal=$fatal" | tee -a "$REPORT"
     [ "$rc" = 0 ] && [ "$banner" = 1 ] && [ "$listed" = 1 ] && \
         [ "$loaded_counter" = 1 ] && [ "$loaded_user" = 2 ] && \
         [ "$markers" -ge 3 ] && [ "$never_exits" = 1 ] && \
         [ "$two_running" = 1 ] && [ "$distinct_tasks" = 1 ] && \
-        [ "$user_exited" = 1 ] && [ "$procs_user_exited" = 1 ] && [ "$user_reaped" = 1 ] && \
+        [ "$user_exited" = 2 ] && [ "$exited_row" = 1 ] && [ "$procs_user_exited" = 2 ] && [ "$user_reaped" = 2 ] && [ "$boot_exited" = 1 ] && \
         [ "$reexec_landed" = 1 ] && [ "$pool_full" = 1 ] && \
         [ "$pages_reads" -ge 2 ] && [ "$free_recovered" = 1 ] && \
         [ "$final_counter_running" = 1 ] && [ "$phase1_echo" = 1 ] && \

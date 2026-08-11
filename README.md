@@ -275,7 +275,14 @@ All command output and logs are saved under `artifacts/` (`inspect.txt`,
    slot, and a further exec with both live hits the capacity gate
    (`pool_full`) — `tools/verify-live-long-lived.sh`, which drives the
    re-exec via the runner's new `--script2`/`--script2-after` second
-   scripted phase after the first reap.
+   scripted phase after the first reap. The follow-on 3 card 3d (claim
+   1014) fixes the documented report collapse: the exit/reap report was a
+   single first-wins-while-undrained flag (N exits in one idle-loop
+   window → ONE report line, so the gates asserted ≥1), now replaced by
+   bounded name+status FIFOs drained in order by the shell idle loop and
+   the monitor, so the concurrent and long-lived gates assert EXACT
+   counts — two exits print exactly two of each report line, in order
+   (`tools/verify-live-concurrent.sh` / `tools/verify-live-long-lived.sh`).
 - The Virtualization.framework VM boots the GPT+FAT image: configuration
   validates, the EFI variable store is created, the VM starts and runs, and
   after boot the guest-written marker file `\BOOTED.TXT` exists on the ESP

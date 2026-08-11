@@ -403,6 +403,22 @@ gates pass; tagged `m1.5-interactive-monitor`** (see
   with both live reports `pool_full` — the capacity gate with one spare
   slot; the full shared-seam live sweep is green against the second
   program.
+- **Per-process exit reports — exact counts — is DONE 2026-08-10 (claim
+  1014, milestone-four follow-on 3, card 3d)** — the exit/reap report
+  machinery was a single first-wins-while-undrained flag (documented
+  debt from claims 0826/4613), so N exits in one idle-loop window
+  collapsed to ONE report line and the concurrent/long-lived gates had to
+  assert ≥1. The three single-slot report flags become bounded 4-slot
+  name+status FIFOs (pushed from exception context — pure BSS writes —
+  and drained IN ORDER by the shell idle loop and the monitor, no
+  double-print; drop-oldest overflow, documented + host-tested; ADR 0007,
+  the switching core, and the lifecycle states untouched — reporting
+  machinery only). The concurrent + long-lived gates tighten to EXACT
+  counts and both PASS 1/1 on VZ: two exits in one window print exactly
+  two `tasks user-exec exited status=43` / two `procs USER.BIN exited
+  status=43` / two `tasks user-exec reaped` lines, in order, with the
+  boot payload's `tasks user-el0 exited status=7` staying its own
+  distinct line; the full 12-gate shared-seam live sweep is green.
 - Eventually: a network stack — only when the ones below it are
   demonstrably working.
 

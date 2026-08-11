@@ -26,11 +26,11 @@
 #      simultaneously mid-flight while other tasks run, not executed
 #      one-then-the-other).    #   4. Both programs reach the exit syscall and are reaped: `user:
     #      awake` (the last marker before sys_exit) lands TWICE — the
-    #      completion proof — and the exit/reap reports print at least
-    #      once each (the report flags are single-slot "first wins while
-    #      undrained", so two exits in one idle-loop window collapse to
-    #      one `tasks user-exec exited status=43` / `procs USER.BIN
-    #      exited status=43` / `tasks user-exec reaped` line).
+    #      completion proof — and the exit/reap reports print EXACTLY
+    #      TWICE each (card 3d, claim 1014: the reports are bounded FIFOs
+    #      drained in order, so two exits in one idle-loop window print
+    #      two `tasks user-exec exited status=43` / two `procs USER.BIN
+    #      exited status=43` / two `tasks user-exec reaped` lines).
     #   5. The shell stays responsive (echo reply), no exception park.
 #
 # The runner runs WITHOUT --script-expect: the 1 s tick makes a USER.BIN
@@ -139,8 +139,9 @@ run_one() {
             [ "$(echo "$mid" | grep -cF -- "tasks worker advances=" || true)" -ge 1 ] && interleave=1 || interleave=0
         fi
         # Both programs completed: `user: awake` x2 (the last marker before
-        # sys_exit) is the strong proof; the exit/reap report lines are
-        # first-wins single-slot, so at least one each (both present).
+        # sys_exit) is the strong proof; the exit/reap reports are bounded
+        # FIFOs (card 3d, claim 1014), so the counts are EXACT — two
+        # USER.BIN exits print exactly two of each line.
         exited="$(grep -aFc -- "tasks user-exec exited status=43" artifacts/vm-serial.log || true)"
         procs_exited="$(grep -aFc -- "procs USER.BIN exited status=43" artifacts/vm-serial.log || true)"
         reaped="$(grep -aFc -- "tasks user-exec reaped" artifacts/vm-serial.log || true)"
@@ -151,7 +152,7 @@ run_one() {
     [ "$rc" = 0 ] && [ "$banner" = 1 ] && [ "$listed" = 1 ] && [ "$loaded" = 2 ] && \
         [ "$two_running" = 1 ] && [ "$distinct_tasks" = 1 ] && [ "$distinct_stacks" = 1 ] && \
         [ "$boot_exited" = 1 ] && [ "$hello" = 2 ] && [ "$ok" = 2 ] && [ "$sleeping" = 2 ] && [ "$awake" = 2 ] && \
-        [ "$interleave" = 1 ] && [ "$exited" -ge 1 ] && [ "$procs_exited" -ge 1 ] && [ "$reaped" -ge 1 ] && \
+        [ "$interleave" = 1 ] && [ "$exited" = 2 ] && [ "$procs_exited" = 2 ] && [ "$reaped" = 2 ] && \
         [ "$echo_ok" = 1 ] && [ "$fatal" = 0 ]
 }
 
