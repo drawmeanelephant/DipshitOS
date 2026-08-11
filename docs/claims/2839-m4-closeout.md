@@ -27,8 +27,18 @@
 - **Depends on:** all milestone-four cards landed on `main` at `9d7e4d5`
   (claims 2665/3693/3678/3848/0826/4613/7786/1014/4636/5965/5795/5799/
   3179/9946).
-- **Status:** 🔄 in progress — claim registered; full gate re-run + docs
-  reconciliation + tag pending.
+- **Status:** ✅ done 2026-08-11 — **the full class A + class B gate set
+  re-ran green at the milestone-four candidate HEAD `9d7e4d5`** (merged
+  main after PRs #81/#82/#83; class A 11/11 + class B 28/28; evidence
+  `artifacts/gates-reverify-20260811-m4-closeout.txt` +
+  `artifacts/m4-closeout-classA-1.log` + the per-gate `vz-live-*` logs).
+  Docs reconciled (march-m4 close-out row, status.md milestone row flip +
+  gate reverify chain + what-comes-next items 15/16, roadmap
+  milestone-four-closed statement + network-row pointer, testing.md
+  close-out entry; the 15 completed M4 prompt docs archived to
+  `docs/archive/` with the march-m4 links repointed; the next-plan
+  `docs/m5-net-tx-prompt.md` stays in root). Milestone tagged
+  **`m4-processes`** at the verified commit `9d7e4d5`.
 
 ## Notes
 

@@ -595,9 +595,10 @@ gates pass; tagged `m1.5-interactive-monitor`** (see
   item, and the one the virtio surface table below maps to. The transport
   it needs is already proven (virtio console/blk/entropy/custom drivers:
   discovery, queues, IRQ delivery, post-exit re-arm), and the runner
-  change is one config line (`config.networkDevices`). Slots after
-  milestone four closes (the process/IPC foundations are the
-  dependency). Card order:
+  change is one config line (`config.networkDevices`). **Milestone four
+  CLOSED 2026-08-11 (claim 2839, tag `m4-processes`) — the process/IPC
+  foundations are landed**; N1 is the next planned card, with a
+  planning-first prompt doc at `docs/m5-net-tx-prompt.md`. Card order:
   - **N1 — virtio-net transport + TX.** Runner attaches
     `VZVirtioNetworkDeviceConfiguration`; `VZFileHandleNetworkDeviceAttachment`
     for the deterministic gates (host reads/writes exact Ethernet
@@ -645,7 +646,7 @@ remaining three (network, graphics, balloon) are the open milestones.
 | Block (0x1042) | `VZVirtioBlockDeviceConfiguration` (disk image attachment) | `virtio_blk.zig` — modern virtio-blk, post-exit re-arm | ✅ done | 6420 (FAT32 storage driver), 3678 (general non-ESP FS on top) |
 | Entropy (0x1044) | `VZVirtioEntropyDeviceConfiguration` | `virtio_entropy.zig` (boot-time 64-byte seed) + `csprng.zig` (ChaCha20, RFC 7539) | ✅ done | 2665 (driver + CSPRNG + `random`), 3693 (EL0 stack ASLR consumer) |
 | Custom virtio (0x1082, macOS 27) | `VZCustomVirtioDeviceConfiguration` (`--custom-virtio` / `zig build spike-virtio`) | `virtio_custom.zig` — queue transport + used-ring IRQ | ✅ done | 5844 (host spike + `pci` command), 0828 (bidirectional queue + SPI IRQ), 4374 (ring allocator / multi-queue), 9492 (multi-descriptor payloads), 9737 (feature negotiation), 4837 (log transport) |
-| Network | `config.networkDevices = []` — nothing attached today | none | ⬜ not started — the "Eventually" network stack above | — |
+| Network | `config.networkDevices = []` — nothing attached today | none | ⬜ not started — N1 (virtio-net TX) is the next planned card, `docs/m5-net-tx-prompt.md` | — |
 | Graphics | `VZVirtioGraphicsDeviceConfiguration` — attached only for screenshots (`--screenshot`) | none | ⬜ not started — the future GUI milestone | — |
 | Balloon | `VZMemoryBalloonDeviceConfiguration` — nothing attached | none | ⬜ not started — low priority (fixed 256 MiB guest, no demand paging) | — |
 

@@ -59,7 +59,7 @@ verify-coordination`, and CI) fails if it drifts from the files.
 | `agent/buffy/m3-docs-reconcile-syscall-abi` | [`agent-buffy-m3-docs-reconcile-syscall-abi.md`](agent-buffy-m3-docs-reconcile-syscall-abi.md) |
 | user task lifecycle (claim 6729) | [`agent-buffy-m3-lifecycle.md`](agent-buffy-m3-lifecycle.md) |
 | `agent/buffy/m3-uaccess` | [`agent-buffy-m3-uaccess.md`](agent-buffy-m3-uaccess.md) |
-| milestone-four close-out (claim 4986) | [`agent-buffy-m4-closeout.md`](agent-buffy-m4-closeout.md) |
+| milestone-four close-out (claim 2839) | [`agent-buffy-m4-closeout.md`](agent-buffy-m4-closeout.md) |
 | milestone-four follow-on: concurrent processes (two live user address spaces) | [`agent-buffy-m4-concurrent-processes.md`](agent-buffy-m4-concurrent-processes.md) |
 | milestone four card 1: virtio entropy driver + CSPRNG (claim 2665) | [`agent-buffy-m4-entropy-csprng.md`](agent-buffy-m4-entropy-csprng.md) |
 | milestone-four follow-on 3, card 3e: exec context block (args to EL0) | [`agent-buffy-m4-exec-args.md`](agent-buffy-m4-exec-args.md) |
