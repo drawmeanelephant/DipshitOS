@@ -514,8 +514,82 @@ gates pass; tagged `m1.5-interactive-monitor`** (see
   `addrspaces: tables=150/256`, the counter still running at the final
   procs; the full shared-seam sweep re-derived against the 7-slot pool:
   12-gate sweep + args + kill + ipc all PASS 1/1.
-- Eventually: a network stack — only when the ones below it are
-  demonstrably working.
+- **[Claim 5799, milestone-four follow-on 4, card 4a — process
+  observability]** — the process registry exists (claim 3848) but only
+  the EL1h monitor can read it; this card gives EL0 a READ-ONLY view:
+  `sys_procs(buf, max)` = slot 7 (ADR 0007 amendment — the card's ONE
+  ABI change, `implemented_count` 7 → 8, `syscalls` rows 0–7) copies a
+  bounded snapshot of the process table (one fixed 40-byte row per
+  non-free descriptor: u64 pid, u64 state code, u64 exit status,
+  name[16] NUL-padded) out into the caller's region through uaccess,
+  `max` truncating to whole rows (a documented truncation result like
+  the ipc recv path), marshaled into a fixed BSS scratch — no
+  allocation. PEER.BIN (reused — the pool stays 7/7) polls `sys_procs`
+  once per quantum until it sees a running peer, then prints
+  `peer: sees <pid> <name> <state>` per row (including the exited boot
+  payload's row) and falls into its existing recv loop. The new class-B
+  gate `tools/verify-live-procs-syscall.sh` PASS 1/1 on VZ: the peer's
+  `peer: sees 2 COUNTER.BIN running` row proves the counter is visible
+  FROM EL0 — distinct from the monitor's `procs` read — the IPC flow
+  still echoes, both processes never exit; the full 12-gate shared-seam
+  sweep + the args/kill/ipc/scale gates all PASS 1/1.
+- **Network stack (sketch — not a commitment).** The last "Eventually"
+  item, and the one the virtio surface table below maps to. The transport
+  it needs is already proven (virtio console/blk/entropy/custom drivers:
+  discovery, queues, IRQ delivery, post-exit re-arm), and the runner
+  change is one config line (`config.networkDevices`). Slots after
+  milestone four closes (the process/IPC foundations are the
+  dependency). Card order:
+  - **N1 — virtio-net transport + TX.** Runner attaches
+    `VZVirtioNetworkDeviceConfiguration`; `VZFileHandleNetworkDeviceAttachment`
+    for the deterministic gates (host reads/writes exact Ethernet
+    frames, like the custom-virtio spike), `VZNATNetworkDeviceAttachment`
+    for real outbound connectivity. Guest `kernel/src/virtio_net.zig`:
+    discover the device (expect the modern virtio-net DID 0x1041 — every
+    other modern device matched its spec DID on VZ; confirm at claim
+    time), post-exit re-arm (the claim-6420/2665 lesson), MAC via
+    VIRTIO_NET_F_MAC negotiation or a fixed BSS MAC, TX + RX queues,
+    bounded frame staging (no heap). `net` monitor command
+    (device/MAC/queues); a shell `netsend` proving the host receives a
+    known frame byte-exact. Live gate `tools/verify-live-net-tx.sh`.
+  - **N2 — raw Ethernet RX.** Used-ring drain into a bounded frame FIFO
+    (IRQ-context push + shell-idle drain, the card-3d pattern), MAC
+    filtering (own MAC + broadcast), `net recv` prints the frame; the
+    host injects a known frame and the guest echoes it byte-exact. Live
+    gate `tools/verify-live-net-rx.sh` — "raw Ethernet frames back and
+    forth" is the first hurdle; this is where it falls.
+  - **N3 — ARP.** Resolve peers (send requests, parse replies) and answer
+    requests for our protocol address. Static IP first (`net ip
+    <a.b.c.d>`, bounded, no config heap); DHCP is a later card. Live
+    gate: the host ARPs for the guest IP and the reply carries the right
+    MAC; the guest resolves the host's MAC from a crafted reply.
+  - **N4 — IPv4.** Minimal IPv4 TX/RX with ones-complement checksums
+    (host-testable); ICMP echo as the proof — the guest answers echo
+    requests and can send its own; honest bounds: no fragmentation, no
+    reassembly (drop fragments, documented). Live gate: the file-handle
+    host sends an ICMP echo request to the guest IP and the reply is
+    byte-exact; with NAT attached, the guest pings an outbound address.
+  - **Later, sketched only:** UDP datagrams behind a bounded syscall seam
+    (an ADR 0007 amendment), DHCP, loopback, then TCP — far future, and
+    the "only when the ones below it are demonstrably working" rule
+    applies at every rung. The driver starts single-CPU (boot CPU, the
+    claim-9187/0828 IRQ pattern); SMP is a separate future card.
+
+**The virtio device surface — where the OS meets the host.** Every virtio
+device VZ can attach maps to a host configuration class in
+`host/vm-runner/Sources/VMRunner/main.swift` and, where driven, a guest
+driver under `kernel/src/`. Four of the seven are done and live-gated; the
+remaining three (network, graphics, balloon) are the open milestones.
+
+| Device (guest-observed DID) | VZ host surface | Guest driver | Status | Claims / evidence |
+|---|---|---|---|---|
+| Console (0x1043) | `VZVirtioConsoleDeviceSerialPortConfiguration` (serial attachment) | `virtio_console.zig` — queue 1 TX + queue 0 RX | ✅ done | 0013 (device identity), 1517 (post-MMU TX), 6684 (live RX transcript) |
+| Block (0x1042) | `VZVirtioBlockDeviceConfiguration` (disk image attachment) | `virtio_blk.zig` — modern virtio-blk, post-exit re-arm | ✅ done | 6420 (FAT32 storage driver), 3678 (general non-ESP FS on top) |
+| Entropy (0x1044) | `VZVirtioEntropyDeviceConfiguration` | `virtio_entropy.zig` (boot-time 64-byte seed) + `csprng.zig` (ChaCha20, RFC 7539) | ✅ done | 2665 (driver + CSPRNG + `random`), 3693 (EL0 stack ASLR consumer) |
+| Custom virtio (0x1082, macOS 27) | `VZCustomVirtioDeviceConfiguration` (`--custom-virtio` / `zig build spike-virtio`) | `virtio_custom.zig` — queue transport + used-ring IRQ | ✅ done | 5844 (host spike + `pci` command), 0828 (bidirectional queue + SPI IRQ), 4374 (ring allocator / multi-queue), 9492 (multi-descriptor payloads), 9737 (feature negotiation), 4837 (log transport) |
+| Network | `config.networkDevices = []` — nothing attached today | none | ⬜ not started — the "Eventually" network stack above | — |
+| Graphics | `VZVirtioGraphicsDeviceConfiguration` — attached only for screenshots (`--screenshot`) | none | ⬜ not started — the future GUI milestone | — |
+| Balloon | `VZMemoryBalloonDeviceConfiguration` — nothing attached | none | ⬜ not started — low priority (fixed 256 MiB guest, no demand paging) | — |
 
 Each milestone must state what was **observed** versus **inferred** and must
 record new hardware assumptions in `docs/hardware-contract.md`.

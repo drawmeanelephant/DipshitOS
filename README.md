@@ -323,7 +323,19 @@ All command output and logs are saved under `artifacts/` (`inspect.txt`,
    live user programs at once (COUNTER.BIN + three USER.BINs with
    distinct tasks + stacks, markers interleaving with the worker, a
    fifth exec refused at 7/7, and `addrspaces: tables=150/256` inside
-   the carve-out).
+   the carve-out). The follow-on 4 card 4a (claim 5799) is process
+   OBSERVABILITY: `sys_procs(buf, max)` = slot 7 (the card's ONE ABI
+   change — ADR 0007 amendment, `implemented_count` 7→8) gives EL0 a
+   read-only view of the process table — a bounded snapshot copied out
+   through uaccess as fixed 40-byte rows (pid / state / exit status /
+   NUL-padded name), `max` truncating to whole rows, no allocation.
+   PEER.BIN polls `sys_procs` once per quantum until it sees a running
+   peer, prints `peer: sees <pid> <name> <state>` per row (including
+   the exited boot payload's row), then enters its recv loop — the
+   process table read FROM EL0, distinct from the monitor's `procs`
+   (`tools/verify-live-procs-syscall.sh` — the peer's `peer: sees 2
+   COUNTER.BIN running` row, the IPC flow still echoing, neither ever
+   exits).
 - The Virtualization.framework VM boots the GPT+FAT image: configuration
   validates, the EFI variable store is created, the VM starts and runs, and
   after boot the guest-written marker file `\BOOTED.TXT` exists on the ESP
