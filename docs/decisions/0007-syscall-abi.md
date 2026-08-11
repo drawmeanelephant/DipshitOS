@@ -251,3 +251,27 @@ process table reachable from EL0, distinct from the EL1h monitor's own
 
 The ABI — x8 number, x0–x5 arguments, x0 result, reserved 8–63, error
 codes — is unchanged.
+
+## Amendment (2026-08-11, claim 9946 — the exit-status-propagation card)
+
+Follow-on 4 card 4c freezes slot 8 in the dispatch table (the SECOND ABI
+change in the follow-on 4 set — the set's explicit slots 7/8 amendment,
+following the `sys_sleep` slot-4 and ipc slots-5/6 precedents; every
+existing syscall number 0–7 stays frozen):
+
+| 8 | `sys_wait` | `wait(target) -> i64` | Block the calling process until the process with id `target` exits, then return its exit status. NOT POSIX wait: no zombies, no fds, no children — the caller may wait on ANY registered process (the exit status is a plain kernel-recorded number, kept in the process registry after the executor reap). Errors are `EINVAL`: the caller is not a process (an EL1h task), the target is out of range or free, the target is `created` (loaded but not yet running — it may never run, and the kernel refuses a waiter that could never wake), or the caller waits on ITSELF (it would never exit while blocked — the deadlock is refused). An ALREADY-EXITED target returns its stored status immediately (no block); a RUNNING target parks the caller (`scheduler.wait_current` — the claim-0635 sleep seam: the caller's SVC frame stays on its kernel stack, and the exit path's `wake_waiters` flips it back to `ready` and patches the status into the saved frame's x0, so the syscall return lands when the ring resumes it). |
+
+`implemented_count` is now 9; the `syscalls` report prints rows 0–8.
+The block is event-driven, not time-driven: `wake_expired` (the tick
+clock) never touches a task whose `wait_pid` is set, and the wake happens
+in `exit_current` right after the registry records the exit — pure TCB +
+saved-frame writes, safe in the exception context. Multiple waiters on
+one pid all wake with the same status; a waiter can never outlive its
+target (a process is only reaped AFTER it exits, which wakes the waiter
+first). The EL0 proof rides COUNTER.BIN (exec'd with the wait target in
+its argv): it prints `ipc: waiting pid=<n>`, blocks, and prints `ipc: saw
+pid=<n> status=<s>` when the target (STATUS43.BIN, exiting 43) wakes it.
+
+As with slot 7, this is the follow-on-4 set's final ABI change; the ABI —
+x8 number, x0–x5 arguments, x0 result, reserved 9–63, error codes — is
+otherwise unchanged.

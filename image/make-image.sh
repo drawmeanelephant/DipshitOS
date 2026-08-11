@@ -2,14 +2,16 @@
 #
 # make-image.sh -- build the bootable FAT32+GPT boot disk image for DipshitOS.
 #
-# Usage: make-image.sh [EFI_BINARY] [IMAGE_PATH] [KERNEL_BINARY] [USER_BINARY] [COUNTER_BINARY] [PEER_BINARY]
+# Usage: make-image.sh [EFI_BINARY] [IMAGE_PATH] [KERNEL_BINARY] [USER_BINARY] [COUNTER_BINARY] [PEER_BINARY] [STATUS43_BINARY]
 # Defaults: zig-out/bin/BOOTAA64.EFI   artifacts/disk.img
 #           zig-out/bin/KERNEL.BIN     zig-out/bin/USER.BIN
 #           zig-out/bin/COUNTER.BIN    zig-out/bin/PEER.BIN
+#           zig-out/bin/STATUS43.BIN
 #
 # USER.BIN (the milestone-three ESP user program, claim 6783), COUNTER.BIN
-# (the milestone-four follow-on 2 never-exiting user program, claim 4613) and
-# PEER.BIN (the follow-on 3 card 3f IPC peer, claim 5965) are embedded at the
+# (the milestone-four follow-on 2 never-exiting user program, claim 4613),
+# PEER.BIN (the follow-on 3 card 3f IPC peer, claim 5965) and STATUS43.BIN
+# (the follow-on 4 card 4c wait-gate target, claim 9946) are embedded at the
 # volume root when present; the kernel's `exec` monitor command loads them by
 # name from the ESP and enters them at EL0.
 #
@@ -29,6 +31,7 @@ KERNEL_BIN="${3:-$ROOT_DIR/zig-out/bin/KERNEL.BIN}"
 USER_BIN="${4:-$ROOT_DIR/zig-out/bin/USER.BIN}"
 COUNTER_BIN="${5:-$ROOT_DIR/zig-out/bin/COUNTER.BIN}"
 PEER_BIN="${6:-$ROOT_DIR/zig-out/bin/PEER.BIN}"
+STATUS43_BIN="${7:-$ROOT_DIR/zig-out/bin/STATUS43.BIN}"
 SIZE_MB="${DIPSHITOS_IMAGE_SIZE_MB:-128}"
 
 cd "$ROOT_DIR"
@@ -71,6 +74,13 @@ if [ -f "$PEER_BIN" ]; then
     fi
     PEER_ARGS+=("$PEER_BIN")
 fi
+STATUS43_ARGS=()
+if [ -f "$STATUS43_BIN" ]; then
+    if [ "$(head -c 4 "$STATUS43_BIN")" != "DSK1" ]; then
+        fail "'$STATUS43_BIN' does not start with the 'DSK1' image magic -- run 'zig build' first (it produces zig-out/bin/STATUS43.BIN)."
+    fi
+    STATUS43_ARGS+=("$STATUS43_BIN")
+fi
 
 # 3. Builder script.
 [ -f "$SCRIPT_DIR/mkfat32.py" ] || fail "missing $SCRIPT_DIR/mkfat32.py."
@@ -79,12 +89,12 @@ fi
 mkdir -p "$(dirname "$IMAGE")"
 rm -f "$IMAGE"
 echo "make-image: building FAT32+GPT image '$IMAGE' (${SIZE_MB} MiB)..."
-python3 "$SCRIPT_DIR/mkfat32.py" --size-mb "$SIZE_MB" "$IMAGE" "$EFI_BIN" "$KERNEL_BIN" "${USER_ARGS[@]}" "${COUNTER_ARGS[@]}" "${PEER_ARGS[@]}" \
+python3 "$SCRIPT_DIR/mkfat32.py" --size-mb "$SIZE_MB" "$IMAGE" "$EFI_BIN" "$KERNEL_BIN" "${USER_ARGS[@]}" "${COUNTER_ARGS[@]}" "${PEER_ARGS[@]}" "${STATUS43_ARGS[@]}" \
     || fail "image creation failed (see output above)."
 
 # 5. Self-verify by listing the image we just wrote. The embed is asserted:
-# the ESP must carry KERNEL.BIN, USER.BIN, COUNTER.BIN (claim 4613), and
-# PEER.BIN (claim 5965).
+# the ESP must carry KERNEL.BIN, USER.BIN, COUNTER.BIN (claim 4613),
+# PEER.BIN (claim 5965), and STATUS43.BIN (claim 9946).
 echo "make-image: verifying image contents..."
 LISTING="$(python3 "$SCRIPT_DIR/mkfat32.py" --list "$IMAGE")" \
     || fail "image verification failed."
@@ -93,5 +103,6 @@ printf '%s\n' "$LISTING" | grep -q 'KERNEL.BIN' || fail "KERNEL.BIN missing from
 printf '%s\n' "$LISTING" | grep -q 'USER.BIN' || fail "USER.BIN missing from the image listing"
 printf '%s\n' "$LISTING" | grep -q 'COUNTER.BIN' || fail "COUNTER.BIN missing from the image listing"
 printf '%s\n' "$LISTING" | grep -q 'PEER.BIN' || fail "PEER.BIN missing from the image listing"
+printf '%s\n' "$LISTING" | grep -q 'STATUS43.BIN' || fail "STATUS43.BIN missing from the image listing"
 
 echo "make-image: done."

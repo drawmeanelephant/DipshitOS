@@ -67,6 +67,7 @@ verify-vz:
     bash tools/verify-live-ipc.sh
     bash tools/verify-live-procs-syscall.sh
     bash tools/verify-live-scale.sh
+    bash tools/verify-live-wait.sh
 
 # Compile the AArch64 UEFI application and kernel image (class A — zig build)
 build:
@@ -211,6 +212,10 @@ verify-live-scale:
 # Verify the live procs-syscall gate (class B — boots VZ VMs; PEER.BIN reads the process table FROM EL0 via sys_procs (slot 7) and prints peer: sees rows, distinct from the monitor's procs read; claim 5799; Apple silicon only)
 verify-live-procs-syscall:
     bash tools/verify-live-procs-syscall.sh
+
+# Verify the live wait gate (class B — boots VZ VMs; STATUS43.BIN exits status 43 and COUNTER.BIN, blocked in sys_wait (slot 8) while the target was still running, wakes and reads the propagated status back from EL0; claim 9946; Apple silicon only)
+verify-live-wait:
+    bash tools/verify-live-wait.sh
 
 # Verify the REAL virtio entropy -> CSPRNG seed -> random command path (class B — boots VZ VMs; asserts `entropy: seeded n=64`, `random 32` hex, a responsive shell, and DIFFERENT output across two boots; claim 2665)
 verify-live-entropy:

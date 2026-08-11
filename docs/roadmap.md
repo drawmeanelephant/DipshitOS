@@ -559,6 +559,38 @@ gates pass; tagged `m1.5-interactive-monitor`** (see
   never exit, a fifth exec is `pool_full` at 7/7; the full 12-gate
   shared-seam sweep + the args/kill/scale/procs-syscall gates all PASS
   1/1.
+- **[Claim 9946, milestone-four follow-on 4, card 4c — exit-status
+  propagation]** — the process table is observable FROM EL0 (4a) and
+  the mailbox flows deeper (4b), but a process still cannot WAIT on a
+  peer: the exit status of another process is visible only through the
+  EL1h monitor. This card lands `sys_wait(target)` = slot 8 (ADR 0007
+  amendment — the follow-on-4 set's explicit slots 7/8 change,
+  `implemented_count` 8 → 9, `syscalls` rows 0–8): the caller blocks
+  until the target process exits and returns its status — bounded,
+  kernel-owned, NOT POSIX wait (no zombies, no fds). A running target
+  parks the caller through the claim-0635 sleep seam
+  (`scheduler.wait_current` — the SVC frame stays on the caller's
+  kernel stack), and the exit path's `wake_waiters` flips the task back
+  to `ready` while patching the observed status into the saved frame's
+  x0, so the syscall return lands when the ring resumes it; an
+  already-exited target returns its stored status immediately; EINVAL
+  for a non-process caller, a free/out-of-range target, a `created`
+  (loaded, not yet running) target, or a self-wait (the refused
+  deadlock). The block is event-driven — the tick clock never wakes a
+  waiter. A THIRD program STATUS43.BIN (`user/src/status43.zig`, a
+  fourth ESP image through the same build pipeline) prints its alive
+  marker, sleeps 6 scheduler ticks (a deterministic window), then exits
+  43; COUNTER.BIN exec'd with the wait target in its argv (slot 8)
+  prints `ipc: waiting pid=<n>`, blocks, and prints `ipc: saw pid=<n>
+  status=<s>` on wake — the EL0-side proof of the propagation. The new
+  class-B gate `tools/verify-live-wait.sh` PASS 1/1 on VZ: the
+  phase-2 `tasks` snapshot shows TWO `state=blocked` user-exec rows
+  (the sleeping STATUS43 + the waiting counter) while `procs` still
+  shows STATUS43 `state=running` — the target ALIVE while the waiter is
+  blocked — then `ipc: saw pid=1 status=43` agreeing with the kernel's
+  `tasks user-exec exited status=43` / `procs STATUS43.BIN exited
+  status=43` records; the full 12-gate shared-seam sweep + the
+  args/kill/ipc/scale/procs-syscall gates all PASS 1/1.
 - **Network stack (sketch — not a commitment).** The last "Eventually"
   item, and the one the virtio surface table below maps to. The transport
   it needs is already proven (virtio console/blk/entropy/custom drivers:

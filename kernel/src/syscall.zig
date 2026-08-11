@@ -34,7 +34,7 @@ const uaccess = @import("uaccess.zig"); // claim 6120: fault-safe copy-in
 const userspace = @import("userspace.zig");
 
 pub const slot_count: usize = 64;
-pub const implemented_count: usize = 8;
+pub const implemented_count: usize = 9;
 pub const write_cap: u64 = 256;
 pub const svc_immediate: u16 = 0;
 
@@ -51,6 +51,12 @@ pub const sys_ipc_recv: u64 = 6;
 /// change in the follow-on 4 card set's first card (ADR 0007 amendment;
 /// every existing syscall number 0–6 stays frozen).
 pub const sys_procs: u64 = 7;
+/// Card 4c (claim 9946): exit-status propagation to a peer — slot 8, the
+/// follow-on 4 card set's second ABI change (ADR 0007 slots 7/8 amendment;
+/// every existing syscall number 0–7 stays frozen). `sys_wait(target)`
+/// blocks the caller until the target process exits and returns its
+/// status — bounded, kernel-owned; NOT POSIX wait (no zombies, no fds).
+pub const sys_wait: u64 = 8;
 
 pub const ErrorCode = enum(i64) {
     einval = -1,
@@ -123,6 +129,7 @@ fn ensure_table() *const [slot_count]Entry {
         table_storage[sys_ipc_send] = .{ .name = "sys_ipc_send", .handler = handle_ipc_send };
         table_storage[sys_ipc_recv] = .{ .name = "sys_ipc_recv", .handler = handle_ipc_recv };
         table_storage[sys_procs] = .{ .name = "sys_procs", .handler = handle_procs };
+        table_storage[sys_wait] = .{ .name = "sys_wait", .handler = handle_wait };
         table_ready = true;
     }
     return &table_storage;
@@ -306,9 +313,42 @@ fn handle_procs(args: Args, _: *exceptions.VectorFrame) u64 {
     return take_bytes / process.snapshot_row_bytes;
 }
 
-/// Deterministic monitor output for the eight implemented rows and their counters.
+// ---------------------------------------------------------------------------
+// Card 4c (claim 9946): exit-status propagation — slot 8
+// ---------------------------------------------------------------------------
+
+/// `sys_wait(target)`: block the calling process until the process with id
+/// `target` exits, then return its exit status. The caller must itself be
+/// a process (an EL1h task is `EINVAL`); the target must exist and must
+/// not be the caller (`EINVAL` — a process waiting on itself would never
+/// exit while blocked; the kernel refuses the deadlock). A target that is
+/// ALREADY exited returns its stored status immediately (no block); a
+/// RUNNING target parks the caller via `scheduler.wait_current`, and the
+/// exit path (`wake_waiters`) patches the observed status into the
+/// caller's saved frame, so the syscall return lands with the status when
+/// the ring resumes it — the same resume path as `sys_sleep`. A `created`
+/// (loaded, not yet running) target is `EINVAL`: it has not started and
+/// may never run (the exec rollback would leave a waiter blocked
+/// forever), so the wait contract is live-or-already-exited only — never
+/// a hang. Bounded, kernel-owned: no zombies, no fds, no POSIX wait
+/// semantics; the status is a plain kernel-recorded number.
+fn handle_wait(args: Args, _: *exceptions.VectorFrame) u64 {
+    const target = args[0];
+    if (target >= process.max_processes) return error_result(.einval);
+    const target_info = process.info(@intCast(target)) orelse return error_result(.einval);
+    const caller = process.find_by_task(scheduler.current_id()) orelse return error_result(.einval);
+    if (caller == target) return error_result(.einval);
+    if (target_info.state == .exited) return target_info.exit_status;
+    if (target_info.state == .created) return error_result(.einval);
+    if (!scheduler.wait_current(@intCast(target))) return error_result(.einval);
+    // Placeholder: the caller's frame is saved and the next task staged;
+    // `wake_waiters` overwrites this slot with the real status at exit.
+    return 0;
+}
+
+/// Deterministic monitor output for the nine implemented rows and their counters.
 pub fn report(con: *console.Console) void {
-    con.puts("syscalls: slots=64 implemented=8\n");
+    con.puts("syscalls: slots=64 implemented=9\n");
     var number: u64 = 0;
     while (number < implemented_count) : (number += 1) {
         const info = entry_info(number).?;
@@ -340,7 +380,7 @@ fn capture_marshaled_args(args: Args, _: *exceptions.VectorFrame) u64 {
     return 0xcafe;
 }
 
-test "syscall: runtime table has 64 slots and eight unique implemented rows" {
+test "syscall: runtime table has 64 slots and nine unique implemented rows" {
     init(test_writer);
     const table = ensure_table();
     try std.testing.expectEqual(@as(usize, 64), table.len);
@@ -353,14 +393,15 @@ test "syscall: runtime table has 64 slots and eight unique implemented rows" {
             implemented += 1;
         }
     }
-    try std.testing.expectEqual(@as(usize, 8), implemented);
+    try std.testing.expectEqual(@as(usize, 9), implemented);
     try std.testing.expectEqualStrings("sys_ping", entry_info(0).?.name);
     try std.testing.expectEqualStrings("sys_exit", entry_info(3).?.name);
     try std.testing.expectEqualStrings("sys_sleep", entry_info(4).?.name);
     try std.testing.expectEqualStrings("sys_ipc_send", entry_info(5).?.name);
     try std.testing.expectEqualStrings("sys_ipc_recv", entry_info(6).?.name);
     try std.testing.expectEqualStrings("sys_procs", entry_info(7).?.name);
-    try std.testing.expect(entry_info(8) == null);
+    try std.testing.expectEqualStrings("sys_wait", entry_info(8).?.name);
+    try std.testing.expect(entry_info(9) == null);
     try std.testing.expect(entry_info(63) == null);
 }
 
@@ -593,7 +634,7 @@ test "syscall: ipc send refuses full, empty, and isolated targets exactly" {
     try std.testing.expectEqual(error_result(.einval), dispatch(sys_ipc_send, .{ process.max_processes, @intFromPtr(bytes.ptr), 1, 0, 0, 0 }, &frame));
     const gone = process.create("GONE", .{ .entry_va = 0x400000, .content_len = 1 }, .{}, .{}).?;
     _ = process.bind(gone, 99);
-    process.on_task_exit(99, 7);
+    _ = process.on_task_exit(99, 7);
     _ = process.take_exit_report();
     try std.testing.expectEqual(error_result(.einval), dispatch(sys_ipc_send, .{ gone, @intFromPtr(bytes.ptr), 1, 0, 0, 0 }, &frame));
     // Error precedence: the full-ring check runs BEFORE the uaccess check,
@@ -790,6 +831,113 @@ test "syscall: handle_svc decodes and dispatches slot 7 via the frame" {
     try std.testing.expectEqualStrings("user-el0", buf[24 .. 24 + 8]);
 }
 
+test "syscall: wait returns an already-exited target's status and refuses invalid/self/EL1h targets exactly" {
+    init(test_writer);
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0); // task 2 = process 0 (boot payload)
+    var kstack: [scheduler.task_stack_size]u8 align(16) = undefined;
+    const target_pid = process.create("TARGET.BIN", .{ .entry_va = 0x400000, .content_len = 64 }, .{}, .{}).?;
+    const target_task = scheduler.register_exec_user(userspace.text_va, 0x4000_0000, 100, 0x8000_0000, 8192, &kstack, 0, 0).?;
+    _ = process.bind(target_pid, target_task);
+    scheduler.start();
+    var frame = fresh_frame();
+    // An EL1h task (the shell here) is never a process: EINVAL.
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_wait, .{ target_pid, 0, 0, 0, 0, 0 }, &frame));
+    // Out-of-range and free pids are EINVAL.
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_wait, .{ process.max_processes, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_wait, .{ 7, 0, 0, 0, 0, 0 }, &frame));
+    // Drive to the boot payload (process 0, task 2): it may not wait on
+    // itself (the deadlock the kernel refuses).
+    try std.testing.expect(scheduler.yield_current()); // shell -> worker
+    try std.testing.expect(scheduler.yield_current()); // worker -> user
+    try std.testing.expectEqual(@as(usize, 2), scheduler.current_id());
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_wait, .{ 0, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expect(!scheduler.is_blocked(2));
+    // Drive to the target and exit it with status 43.
+    try std.testing.expect(scheduler.yield_current()); // user -> target
+    try std.testing.expectEqual(@as(usize, 3), scheduler.current_id());
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_exit, .{ 43, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expect(scheduler.is_terminated(3));
+    // Drive back to the caller: its wait on the now-exited target returns
+    // the stored status IMMEDIATELY (no block — the already-exited path).
+    try std.testing.expect(scheduler.yield_current()); // idle
+    try std.testing.expect(scheduler.yield_current()); // shell
+    try std.testing.expect(scheduler.yield_current()); // worker -> user
+    try std.testing.expectEqual(@as(usize, 2), scheduler.current_id());
+    try std.testing.expectEqual(@as(u64, 43), dispatch(sys_wait, .{ target_pid, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expect(!scheduler.is_blocked(2));
+    // The kernel's exit record agrees (process-level, survives the reap).
+    try std.testing.expectEqual(process.State.exited, process.info(target_pid).?.state);
+    try std.testing.expectEqual(@as(u64, 43), process.info(target_pid).?.exit_status);
+}
+
+test "syscall: wait blocks the caller and the target's exit wakes it with the status in its saved frame" {
+    init(test_writer);
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0); // task 2 = process 0 (boot payload)
+    var kstack: [scheduler.task_stack_size]u8 align(16) = undefined;
+    const target_pid = process.create("TARGET.BIN", .{ .entry_va = 0x400000, .content_len = 64 }, .{}, .{}).?;
+    const target_task = scheduler.register_exec_user(userspace.text_va, 0x4000_0000, 100, 0x8000_0000, 8192, &kstack, 0, 0).?;
+    _ = process.bind(target_pid, target_task);
+    scheduler.start();
+    // Drive to the caller (process 0, task 2).
+    try std.testing.expect(scheduler.yield_current()); // shell -> worker
+    try std.testing.expect(scheduler.yield_current()); // worker -> user
+    try std.testing.expectEqual(@as(usize, 2), scheduler.current_id());
+    var frame = fresh_frame();
+    // Stand in for the caller's SVC frame (the yield-test seam): the
+    // adapter saves it, blocks the caller, and stages the target's task.
+    var caller = fresh_frame();
+    try std.testing.expect(exceptions.frame_write(&caller, 8, sys_wait));
+    try std.testing.expect(exceptions.frame_write(&caller, 0, target_pid));
+    exceptions.resume_frame = @intFromPtr(&caller);
+    try std.testing.expect(handle_svc(&caller, svc_immediate));
+    try std.testing.expectEqual(@as(u64, 1), call_count(sys_wait));
+    try std.testing.expect(scheduler.is_blocked(2));
+    try std.testing.expectEqual(@as(usize, 3), scheduler.current_id());
+    // The target (task 3) exits with status 43: the exit path wakes the
+    // waiter and patches the status into its SAVED frame's x0 — the value
+    // the caller's sys_wait return will carry when the ring resumes it.
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_exit, .{ 43, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expect(!scheduler.is_blocked(2));
+    try std.testing.expectEqual(@as(u64, 43), exceptions.frame_read(&caller, 0));
+    try std.testing.expectEqual(process.State.exited, process.info(target_pid).?.state);
+    try std.testing.expectEqual(@as(u64, 43), process.info(target_pid).?.exit_status);
+    // The ring can reach the woken caller again (3 is a zombie, skipped).
+    try std.testing.expect(scheduler.yield_current()); // idle
+    try std.testing.expect(scheduler.yield_current()); // shell
+    try std.testing.expect(scheduler.yield_current()); // worker -> user
+    try std.testing.expectEqual(@as(usize, 2), scheduler.current_id());
+    // The process-level exit report carries the status (TARGET.BIN, 43).
+    const r = process.take_exit_report().?;
+    try std.testing.expectEqualStrings("TARGET.BIN", r.name);
+    try std.testing.expectEqual(@as(u64, 43), r.status);
+}
+
+test "syscall: handle_svc decodes and dispatches slot 8 via the frame" {
+    init(test_writer);
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0); // task 2 = process 0 (boot payload)
+    var kstack: [scheduler.task_stack_size]u8 align(16) = undefined;
+    const target_pid = process.create("TARGET.BIN", .{ .entry_va = 0x400000, .content_len = 64 }, .{}, .{}).?;
+    const target_task = scheduler.register_exec_user(userspace.text_va, 0x4000_0000, 100, 0x8000_0000, 8192, &kstack, 0, 0).?;
+    _ = process.bind(target_pid, target_task);
+    scheduler.start();
+    // The marshaling seam (claim 3594): x8 carries the number (8), x0 the
+    // target pid, x0 receives the status. Run from the EL1h shell: its
+    // zero TCB regions mean the wait is refused exactly (EINVAL — the
+    // shell is never a process), written back through the frame.
+    var frame = fresh_frame();
+    try std.testing.expect(exceptions.frame_write(&frame, 8, sys_wait));
+    try std.testing.expect(exceptions.frame_write(&frame, 0, target_pid));
+    try std.testing.expect(handle_svc(&frame, svc_immediate));
+    try std.testing.expectEqual(error_result(.einval), exceptions.frame_read(&frame, 0));
+    try std.testing.expectEqual(@as(u64, 1), call_count(sys_wait));
+}
+
 test "syscall: counters are monotonic and report is deterministic" {
     userspace.init();
     init(test_writer);
@@ -801,7 +949,7 @@ test "syscall: counters are monotonic and report is deterministic" {
     var con = mock.console();
     report(&con);
     try std.testing.expectEqualStrings(
-        "syscalls: slots=64 implemented=8\n" ++
+        "syscalls: slots=64 implemented=9\n" ++
             "  0 sys_ping calls=2\n" ++
             "  1 sys_write calls=0\n" ++
             "  2 sys_yield calls=0\n" ++
@@ -809,7 +957,8 @@ test "syscall: counters are monotonic and report is deterministic" {
             "  4 sys_sleep calls=0\n" ++
             "  5 sys_ipc_send calls=0\n" ++
             "  6 sys_ipc_recv calls=0\n" ++
-            "  7 sys_procs calls=0\n",
+            "  7 sys_procs calls=0\n" ++
+            "  8 sys_wait calls=0\n",
         mock.contents(),
     );
 }

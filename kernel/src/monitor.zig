@@ -2253,7 +2253,7 @@ test "monitor: procs reports the process table with lifecycle and exit status" {
     process.init();
     const p0 = process.create("user-el0", .{ .entry_va = 0x400000, .content_len = 0x100 }, .{ .stack_va = 0x80000000, .stack_len = 8192 }, .{}).?;
     _ = process.bind(p0, 2);
-    process.on_task_exit(2, 7);
+    _ = process.on_task_exit(2, 7);
     _ = process.take_exit_report();
     const p1 = process.create("USER.BIN", .{ .entry_va = 0x400000, .content_len = 0xea }, .{ .stack_va = 0x1a400000, .stack_len = 8192 }, .{}).?;
     _ = process.bind(p1, 2);
@@ -2310,7 +2310,7 @@ test "monitor: kill refuses unknown, already-exited, and not-running targets exa
     // An EXITED process (the exited state's exact refusal).
     const exited_p = process.create("BOOTED", .{ .entry_va = 0x400000, .content_len = 1 }, .{}, .{}).?;
     _ = process.bind(exited_p, 4);
-    process.on_task_exit(4, 7);
+    _ = process.on_task_exit(4, 7);
     _ = process.take_exit_report();
     try std.testing.expectEqual(ExecError.invalid_argument, exec(&mon, &.{ "kill", "BOOTED" }));
     try std.testing.expectEqualStrings("kill: BOOTED already exited\n", env.mock.contents());
@@ -2352,7 +2352,7 @@ test "monitor: syscalls is registered and reports deterministic rows" {
     try std.testing.expectEqualStrings("numbered syscall table and counters", lookup("syscalls").?.help);
     try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"syscalls"}));
     try std.testing.expectEqualStrings(
-        "syscalls: slots=64 implemented=8\n" ++
+        "syscalls: slots=64 implemented=9\n" ++
             "  0 sys_ping calls=0\n" ++
             "  1 sys_write calls=0\n" ++
             "  2 sys_yield calls=0\n" ++
@@ -2360,7 +2360,8 @@ test "monitor: syscalls is registered and reports deterministic rows" {
             "  4 sys_sleep calls=0\n" ++
             "  5 sys_ipc_send calls=0\n" ++
             "  6 sys_ipc_recv calls=0\n" ++
-            "  7 sys_procs calls=0\n",
+            "  7 sys_procs calls=0\n" ++
+            "  8 sys_wait calls=0\n",
         env.mock.contents(),
     );
 }

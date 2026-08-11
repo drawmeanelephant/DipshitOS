@@ -350,7 +350,24 @@ All command output and logs are saved under `artifacts/` (`inspect.txt`,
    `ipc: enospc` refusal markers, a log peak of 6 sends-minus-echoes
    (> 4 messages queued at once, never over the 8-slot bound), and the
    peer's `mbox` row drained at the new capacity (sent − recv ==
-   pending ≤ 8).
+   pending ≤ 8). The follow-on 4 card 4c (claim 9946) is EXIT-STATUS
+   PROPAGATION: `sys_wait(target)` = slot 8 (the follow-on-4 set's
+   explicit slots 7/8 ABI amendment — `implemented_count` 8→9) blocks
+   the caller until the target process exits and returns its status —
+   bounded, kernel-owned, NOT POSIX wait (no zombies, no fds). The
+   event-driven block rides the claim-0635 sleep seam: the caller's SVC
+   frame stays parked on its kernel stack, and the exit path's
+   `wake_waiters` flips the task back to `ready` and patches the status
+   into the saved frame's x0; an already-exited target returns
+   immediately; self/free/created/non-process targets are EINVAL. A
+   THIRD program STATUS43.BIN (a fourth ESP image through the same
+   pipeline) sleeps 6 ticks then exits 43, and COUNTER.BIN exec'd with
+   the wait target in its argv prints `ipc: waiting pid=<n>`, blocks,
+   and prints `ipc: saw pid=<n> status=<s>` on wake
+   (`tools/verify-live-wait.sh` — the phase-2 `tasks` snapshot shows
+   TWO blocked user-exec rows while STATUS43's `procs` row still reads
+   `state=running`, then the saw line agrees with the kernel's exit
+   records).
 - The Virtualization.framework VM boots the GPT+FAT image: configuration
   validates, the EFI variable store is created, the VM starts and runs, and
   after boot the guest-written marker file `\BOOTED.TXT` exists on the ESP

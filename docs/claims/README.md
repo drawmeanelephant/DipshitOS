@@ -148,4 +148,5 @@ CI) fails if the table drifts from the claim files.
 | [9492-multi-descriptor-payloads](9492-multi-descriptor-payloads.md) | buffy (`agent/buffy/macos27-custom-virtio-spike`) | ✅ done 2026-08-10 on `agent/buffy/macos27-custom-virtio-spike` |
 | [9737-feature-negotiation-depth](9737-feature-negotiation-depth.md) | buffy (`agent/buffy/macos27-custom-virtio-spike`) | ✅ done 2026-08-10 on `agent/buffy/macos27-custom-virtio-spike` |
 | [9746-exception-vectors](9746-exception-vectors.md) | buffy (`freebuff/grab-newest-git-and-check-status-if-there-s-any-im-b9d5c028-9379-48e0-8ddb-ebfbf45ef2df`) | ✅ done 2026-08-08 — implementation, host tests, and the live class B gate all pass. |
+| [9946-wait-exit](9946-wait-exit.md) | Buffy (`agent/buffy/m4-wait-exit`) | ✅ done 2026-08-11 on `agent/buffy/m4-wait-exit` (PR #83) |
 <!-- CLAIMS_INDEX:END -->

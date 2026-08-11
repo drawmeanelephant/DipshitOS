@@ -173,6 +173,13 @@ const Task = struct {
     /// Claim 0635: scheduler tick count at/after which a `blocked` task
     /// wakes (`tick_count >= wakeup_tick`). Meaningful only while blocked.
     wakeup_tick: u64 = 0,
+    /// Card 4c (claim 9946): the process id this blocked task waits on via
+    /// `sys_wait` (slot 8). Set by `wait_current`; cleared when
+    /// `wake_waiters` returns the task to `ready` on the target's exit. An
+    /// EVENT block (no deadline) — distinct from the claim-0635 time block
+    /// that uses `wakeup_tick`; the tick's `wake_expired` never touches a
+    /// task with this field set.
+    wait_pid: ?usize = null,
     /// Card 3c (claim 7786): armed-kill flag. `kill` sets it from main
     /// context; the ring converts the task's NEXT selection into the
     /// existing exit path (status 137) instead of resuming it — the OS,
@@ -667,6 +674,65 @@ pub fn sleep_current(ticks: u64) bool {
     return true;
 }
 
+/// Card 4c (claim 9946): block the calling task until the PROCESS with id
+/// `target_pid` exits, then stage its successor. The same seam as
+/// `sleep_current` — the caller's saved SVC frame stays on its kernel
+/// stack while blocked, and `wake_waiters` flips the task back to `ready`
+/// the moment the target exits (the round-robin then resumes it from that
+/// same frame). The exit status is unknowable at block time, so the wake
+/// patches it into the saved frame's x0; the syscall return lands with the
+/// status when the caller resumes. Returns false (EINVAL) for the idle
+/// task or an inactive/rolled-back pool.
+pub fn wait_current(target_pid: usize) bool {
+    if (!scheduling_active() or task_count == 0 or current == idle_id) return false;
+    if (tasks[current].state != .ready and tasks[current].state != .running) return false;
+    const waiting = current;
+    const pc = current_exception_pc();
+    // Save the calling task's context (frame SP + ELR/SPSR + SP_EL0), the
+    // same seam yield_current/sleep_current use — the task MUST find its
+    // saved SVC frame intact when the target exits and the ring resumes it.
+    tasks[waiting].sp = exceptions.resume_frame;
+    tasks[waiting].elr = pc.elr;
+    tasks[waiting].spsr = pc.spsr;
+    tasks[waiting].sp_el0 = exceptions.resume_sp_el0;
+    tasks[waiting].saves += 1;
+    tasks[waiting].state = .blocked;
+    tasks[waiting].wait_pid = target_pid;
+    const next = next_runnable(waiting) orelse {
+        // No successor: roll back (the always-ready idle task makes this
+        // unreachable in a normal boot; kept as a defensive bound).
+        tasks[waiting].state = .ready;
+        tasks[waiting].wait_pid = null;
+        tasks[waiting].saves -%= 1;
+        return false;
+    };
+    current = next;
+    stage_current();
+    apply_pending();
+    return true;
+}
+
+/// Card 4c (claim 9946): the target process just exited with `status` —
+/// every task blocked in `sys_wait` on pid `pid` returns to `ready` and
+/// its saved SVC frame's x0 is patched with the observed status (the
+/// syscall result `handle_wait` could not know at block time). Called from
+/// the EXIT path (`exit_current`, right after the registry records the
+/// exit) — pure TCB + saved-frame writes, safe in the exception context
+/// (no console, no allocation). Multiple waiters on one pid all wake with
+/// the same status; a blocked waiter can never outlive its target (a
+/// process is only reaped AFTER it exits, which wakes the waiter first).
+fn wake_waiters(pid: usize, status: u64) void {
+    var i: usize = 0;
+    while (i < max_tasks) : (i += 1) {
+        if (tasks[i].state != .blocked) continue;
+        if (tasks[i].wait_pid != pid) continue;
+        tasks[i].state = .ready;
+        tasks[i].wait_pid = null;
+        const frame: *exceptions.VectorFrame = @ptrFromInt(tasks[i].sp);
+        _ = exceptions.frame_write(frame, 0, status);
+    }
+}
+
 /// Claim 0635: timer-driven wakeups. Called once per tick (IRQ context,
 /// console-free — claim 9187) AFTER the tick counter advanced: every
 /// `blocked` task whose deadline has passed returns to `ready` and is
@@ -675,6 +741,9 @@ fn wake_expired() void {
     var i: usize = 0;
     while (i < max_tasks) : (i += 1) {
         if (tasks[i].state != .blocked) continue;
+        // Card 4c (claim 9946): an event-blocked task (`sys_wait` — no
+        // deadline) is woken by `wake_waiters`, never by the tick clock.
+        if (tasks[i].wait_pid != null) continue;
         if (tick_count < tasks[i].wakeup_tick) continue;
         tasks[i].state = .ready;
         tasks[i].wakeup_tick = 0;
@@ -704,8 +773,11 @@ pub fn exit_current(status: u64) bool {
     // Claim 3848: the exiting task's PROCESS (if any) becomes exited and
     // snapshots the status — the process-level exit report and `procs`
     // keep it after the slot is reaped. Pure registry writes, safe in the
-    // exception context this runs in (no console, no allocation).
-    process.on_task_exit(exiting, status);
+    // exception context this runs in (no console, no allocation). Card 4c
+    // (claim 9946): the returned pid wakes every task blocked in `sys_wait`
+    // on this process — their saved frames get the observed status patched
+    // into x0, so the syscall return lands when the ring resumes them.
+    if (process.on_task_exit(exiting, status)) |pid| wake_waiters(pid, status);
     const next = next_runnable(exiting) orelse {
         // No successor: roll back (the always-ready idle task makes this
         // unreachable in a normal boot; kept as a defensive bound).
