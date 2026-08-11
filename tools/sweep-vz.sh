@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # verify-vz aggregate sweep (the justfile recipe, since `just` may not be
-# installed): serial takeover + the 28 live gates + the net-tx gate.
+# installed): serial takeover + the live gates + the net-tx/net-rx gates.
 # Usage: sweep-vz.sh <log> <start> <end>   (1-based gate index; the default
-# start=1 end=28 runs everything). Gates are logged with G<n>-PASS/FAIL.
+# start=1 end=30 runs everything). Gates are logged with G<n>-PASS/FAIL.
 set -u
 LOG="${1:-artifacts/live-net-tx-vz-sweep.log}"
 START="${2:-1}"
@@ -24,7 +24,7 @@ run_gate() {
         echo "G$n-FAIL $name (rc=$rc)" >> "$LOG"
     fi
 }
-GATES="zig-build-run verify-bad-handoff verify-marker verify-nvram-console verify-host-console verify-live-transcript verify-live-fs verify-live-gfs verify-live-timer verify-live-tasks verify-live-userspace verify-live-svc verify-live-uaccess verify-live-addrspaces verify-live-lifecycle verify-live-exec verify-live-args verify-live-procs verify-live-concurrent verify-live-long-lived verify-live-kill verify-live-sleep verify-live-entropy verify-live-reboot verify-live-ipc verify-live-procs-syscall verify-live-scale verify-live-wait verify-live-net-tx"
+GATES="zig-build-run verify-bad-handoff verify-marker verify-nvram-console verify-host-console verify-live-transcript verify-live-fs verify-live-gfs verify-live-timer verify-live-tasks verify-live-userspace verify-live-svc verify-live-uaccess verify-live-addrspaces verify-live-lifecycle verify-live-exec verify-live-args verify-live-procs verify-live-concurrent verify-live-long-lived verify-live-kill verify-live-sleep verify-live-entropy verify-live-reboot verify-live-ipc verify-live-procs-syscall verify-live-scale verify-live-wait verify-live-net-tx verify-live-net-rx"
 i=0
 for g in $GATES; do
     i=$((i + 1))

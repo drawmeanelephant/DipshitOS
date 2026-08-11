@@ -591,7 +591,7 @@ gates pass; tagged `m1.5-interactive-monitor`** (see
   `tasks user-exec exited status=43` / `procs STATUS43.BIN exited
   status=43` records; the full 12-gate shared-seam sweep + the
   args/kill/ipc/scale/procs-syscall gates all PASS 1/1.
-- **Network stack (in progress — N1 landed 2026-08-11, claim 1373).** The
+- **Network stack (in progress — N1 + N2 landed 2026-08-11, claims 1373/6076).** The
   last "Eventually" item, and the one the virtio surface table below maps
   to. The transport it needs was already proven (virtio
   console/blk/entropy/custom drivers: discovery, queues, IRQ delivery,
@@ -629,12 +629,20 @@ gates pass; tagged `m1.5-interactive-monitor`** (see
     monitor command (device/DID/MAC/queues/features); `netsend` proving
     the host receives known frames byte-exact. Live gate
     `tools/verify-live-net-tx.sh` PASS 2/2.
-  - **N2 — raw Ethernet RX.** Used-ring drain into a bounded frame FIFO
-    (IRQ-context push + shell-idle drain, the card-3d pattern), MAC
-    filtering (own MAC + broadcast), `net recv` prints the frame; the
-    host injects a known frame and the guest echoes it byte-exact. Live
-    gate `tools/verify-live-net-rx.sh` — "raw Ethernet frames back and
-    forth" is the first hurdle; this is where it falls.
+  - ~~**N2 — raw Ethernet RX.**~~ **DONE 2026-08-11 (claim 6076).**
+    Queue 0 supplied with one fixed BSS buffer, used-ring drain into a
+    bounded 4-slot frame FIFO (card-3d push/drain pattern), MAC filtering
+    (own MAC + broadcast, drop the rest with a counter), `net recv`
+    prints the frame byte-exact. The host injects a known frame via the
+    runner's `--net-inject <file>` (a serial trigger, not a sleep) and
+    the guest receives it and re-sends the SAME bytes — raw Ethernet
+    frames back and forth. Live gate `tools/verify-live-net-rx.sh` PASS
+    3/3 (broadcast round trip + byte-exact capture, own-MAC receive,
+    foreign-MAC drop); claim-time observations pinned in the hardware
+    contract: the device writes a 12-byte virtio_net_hdr into RX buffers
+    (num_buffers=1, the RX-header question answered) and REFUSES an RX
+    buffer under 1530 bytes; the used-buffer IRQ line is not yet
+    observed — drain is polled.
   - **N3 — ARP.** Resolve peers (send requests, parse replies) and answer
     requests for our protocol address. Static IP first (`net ip
     <a.b.c.d>`, bounded, no config heap); DHCP is a later card. Live
@@ -655,8 +663,8 @@ gates pass; tagged `m1.5-interactive-monitor`** (see
 **The virtio device surface — where the OS meets the host.** Every virtio
 device VZ can attach maps to a host configuration class in
 `host/vm-runner/Sources/VMRunner/main.swift` and, where driven, a guest
-driver under `kernel/src/`. Four of the seven are done and live-gated; the
-remaining three (network, graphics, balloon) are the open milestones.
+driver under `kernel/src/`. Five of the seven are done and live-gated; the
+remaining two (graphics, balloon) are the open milestones.
 
 | Device (guest-observed DID) | VZ host surface | Guest driver | Status | Claims / evidence |
 |---|---|---|---|---|
@@ -664,7 +672,7 @@ remaining three (network, graphics, balloon) are the open milestones.
 | Block (0x1042) | `VZVirtioBlockDeviceConfiguration` (disk image attachment) | `virtio_blk.zig` — modern virtio-blk, post-exit re-arm | ✅ done | 6420 (FAT32 storage driver), 3678 (general non-ESP FS on top) |
 | Entropy (0x1044) | `VZVirtioEntropyDeviceConfiguration` | `virtio_entropy.zig` (boot-time 64-byte seed) + `csprng.zig` (ChaCha20, RFC 7539) | ✅ done | 2665 (driver + CSPRNG + `random`), 3693 (EL0 stack ASLR consumer) |
 | Custom virtio (0x1082, macOS 27) | `VZCustomVirtioDeviceConfiguration` (`--custom-virtio` / `zig build spike-virtio`) | `virtio_custom.zig` — queue transport + used-ring IRQ | ✅ done | 5844 (host spike + `pci` command), 0828 (bidirectional queue + SPI IRQ), 4374 (ring allocator / multi-queue), 9492 (multi-descriptor payloads), 9737 (feature negotiation), 4837 (log transport) |
-| Network (0x1041) | `VZVirtioNetworkDeviceConfiguration` + `VZFileHandleNetworkDeviceAttachment` (`--net <capture-file>`, flag-gated; fixed host MAC) | `virtio_net.zig` — TX end to end (N1); RX is N2 | 🔄 TX done (N1) | 1373 (claim: transport + TX live — DID 0x1041, VER1\|MTU\|MAC, feature-path MAC, queues 0/1, 12-byte hdr contract, byte-exact host capture; `verify-live-net-tx.sh` PASS 2/2 + 29-gate aggregate green) |
+| Network (0x1041) | `VZVirtioNetworkDeviceConfiguration` + `VZFileHandleNetworkDeviceAttachment` (`--net <capture-file>`, `--net-inject <file>`, flag-gated; fixed host MAC) | `virtio_net.zig` — TX + RX (N1 + N2) | ✅ TX + RX (claims 1373/6076) | 1373 (transport + TX live — DID 0x1041, VER1\|MTU\|MAC, feature-path MAC, queues 0/1, 12-byte TX-hdr contract, byte-exact host capture; `verify-live-net-tx.sh` PASS 2/2); 6076 (RX live — queue-0 buffer supply, polled used-ring drain, bounded FIFO, MAC filter, `net recv`; host→guest injection + the round trip; 12-byte RX-hdr observed, min RX buffer 1530 observed; `verify-live-net-rx.sh` PASS 3/3 + 29-gate aggregate green) |
 | Graphics | `VZVirtioGraphicsDeviceConfiguration` — attached only for screenshots (`--screenshot`) | none | ⬜ not started — the future GUI milestone | — |
 | Balloon | `VZMemoryBalloonDeviceConfiguration` — nothing attached | none | ⬜ not started — low priority (fixed 256 MiB guest, no demand paging) | — |
 
