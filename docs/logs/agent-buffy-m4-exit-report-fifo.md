@@ -49,4 +49,16 @@
 
 ## Stage C — docs reconciliation + PR (2026-08-10)
 
-- [tbd]
+- Docs reconciled (march-m4 row 3d + lane, roadmap, status, README,
+  gate-inventory), claim flipped ✅. PR #77 opened against `main`.
+- The PR went CONFLICTING when card 3c (claim 7786, PR #76) merged into
+  `main` after 3d branched. Resolved 2026-08-10 by merging `origin/main`
+  into this branch: `kernel/src/scheduler.zig` conflicted only in the
+  test section (both cards added independent lifecycle/kill tests —
+  merged to keep all five), and the docs (README, gate-inventory,
+  march-m4, roadmap, status) conflicted only where 3c's kill paragraph
+  and 3d's FIFO paragraph both landed in the same section — merged so
+  both cards' prose stays. Full class-A set re-run green on the merged
+  tree (fmt, 221 unit tests, transcript byte-identical, build, image,
+  inspect, swift build, context, coordination ×2, mmu-debt); PR #77 is
+  mergeable again.

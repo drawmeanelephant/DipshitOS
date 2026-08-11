@@ -15,6 +15,7 @@ available commands:
   handoff     display boot-to-kernel ABI data
   help        list commands and their help text
   hex         format an integer in hexadecimal
+  kill        terminate a running process (kernel-owned lifetime)
   ls          list files on the ESP (or a directory by path)
   mem         summarize the EFI memory map
   mount       switch the active FAT volume (esp or data)

@@ -205,6 +205,7 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "  handoff     display boot-to-kernel ABI data\n" ++
         "  help        list commands and their help text\n" ++
         "  hex         format an integer in hexadecimal\n" ++
+        "  kill        terminate a running process (kernel-owned lifetime)\n" ++
         "  ls          list files on the ESP (or a directory by path)\n" ++
         "  mem         summarize the EFI memory map\n" ++
         "  mount       switch the active FAT volume (esp or data)\n" ++

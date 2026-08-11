@@ -83,6 +83,12 @@ pub const task_stack_size: usize = 8 * 1024;
 pub const spsr_el1h_irqs: u64 = 0x5;
 pub const spsr_el0t_irqs: u64 = 0x0;
 
+/// Card 3c (claim 7786): the reserved exit status a force-terminated
+/// process reports. A plain number (128 + 9) — no POSIX semantics; it is
+/// the counter's `exit=137` / `tasks user-exec exited status=137` in the
+/// serial log and the `procs` table.
+pub const reserved_kill_status: u64 = 137;
+
 /// The claim-9746 vector frame: 32 slots holding x0..x17, x30, a pad, and
 /// the claim-6729 callee-saved extension (x19..x28 + x29), pushed in
 /// reverse pair order by the IRQ stub on the interrupted task's stack; the
@@ -160,6 +166,12 @@ const Task = struct {
     /// Claim 0635: scheduler tick count at/after which a `blocked` task
     /// wakes (`tick_count >= wakeup_tick`). Meaningful only while blocked.
     wakeup_tick: u64 = 0,
+    /// Card 3c (claim 7786): armed-kill flag. `kill` sets it from main
+    /// context; the ring converts the task's NEXT selection into the
+    /// existing exit path (status 137) instead of resuming it — the OS,
+    /// not the program, owns process lifetime. Reset by the slot's reap
+    /// (`.{ }` clears it).
+    kill_pending: bool = false,
 };
 
 var tasks: [max_tasks]Task = .{ .{}, .{}, .{}, .{}, .{} };
@@ -350,6 +362,42 @@ pub fn has_free_slot() bool {
     return false;
 }
 
+/// Card 3c (claim 7786): the result of arming a task for termination.
+/// `request_kill` only ARMS — the actual exit happens at the task's next
+/// ring selection (`stage_current` converts the selection into the
+/// existing exit path). The refusals are clean and exact (the `kill`
+/// monitor command host-tests every string).
+pub const KillResult = enum {
+    /// The target is armed; it will exit with `reserved_kill_status` at
+    /// its next scheduled quantum (or yield/sleep wake).
+    ok,
+    /// No task occupies that slot (never registered or already reaped).
+    not_found,
+    /// The target is already a zombie (it exited and awaits the reap).
+    already_exited,
+    /// The shell or the scheduler-owned idle task: the console must
+    /// survive (killing the shell would end the session).
+    refused,
+};
+
+/// Arm pool slot `id` for termination (card 3c). The kill takes effect
+/// at the target's next ring selection: `stage_current` sees
+/// `kill_pending` and calls the existing `exit_current(reserved_kill_status)`
+/// instead of resuming the task — the full exit → zombie → idle-reap →
+/// page-return lifecycle runs, with the reserved status reported. Pure
+/// TCB write, safe from the monitor's main context. Returns the exact
+/// refusal for unknown/already-exited/scheduler-owned targets.
+pub fn request_kill(id: usize) KillResult {
+    if (id >= max_tasks or tasks[id].state == .free) return .not_found;
+    if (tasks[id].state == .zombie) return .already_exited;
+    // The shell (id 0) owns the console and the idle task is
+    // scheduler-owned (never exits — exit_current refuses it anyway);
+    // neither may be force-terminated.
+    if (id == idle_id or id == 0) return .refused;
+    tasks[id].kill_pending = true;
+    return .ok;
+}
+
 /// The user apertures of the CURRENT task (the EL0t task about to SVC —
 /// zero for EL1h tasks). The syscall layer arms these into uaccess at SVC
 /// entry so `sys_write` bounds always follow the task that issued the call.
@@ -467,6 +515,20 @@ fn next_runnable(after: usize) ?usize {
 }
 
 fn stage_current() void {
+    // Card 3c (claim 7786): a selected task with a pending kill is NOT
+    // resumed — the ring converts its selection into the existing exit
+    // path with the reserved status (the OS owns process lifetime). The
+    // task's saved frame is abandoned; `exit_current` stages the next
+    // task, so the killed task never executes again. `current` is the
+    // selected task and its state is `ready` (exactly what exit_current
+    // accepts), so this is the real exit/reap/pages-return lifecycle, not
+    // a special teardown. No switching-core change: the same frame/ELR/
+    // SPSR/TTBR0 machinery that follows any exit is used.
+    if (tasks[current].kill_pending) {
+        tasks[current].kill_pending = false;
+        _ = exit_current(reserved_kill_status);
+        return;
+    }
     pending_sp = tasks[current].sp;
     pending_elr = tasks[current].elr;
     pending_spsr = tasks[current].spsr;
@@ -1388,4 +1450,93 @@ test "scheduler: two reaps in one window report BOTH reap lines in order" {
             "tasks user-el0 reaped\n",
         mock.contents(),
     );
+}
+
+test "scheduler: request_kill refuses unknown, exited, and scheduler-owned targets" {
+    // Card 3c (claim 7786): the kill ARMS a target; the refusals are the
+    // monitor command's exact error strings.
+    _ = init();
+    _ = register_worker(0x2000).?;
+    _ = register_user(0x3000, 0).?;
+    // The shell (0) owns the console and the idle task is scheduler-owned:
+    // neither may be force-terminated.
+    try std.testing.expectEqual(KillResult.refused, request_kill(0));
+    try std.testing.expectEqual(KillResult.refused, request_kill(idle_id));
+    // A free slot and an out-of-range id are not_found.
+    try std.testing.expectEqual(KillResult.not_found, request_kill(3)); // free spare slot
+    try std.testing.expectEqual(KillResult.not_found, request_kill(max_tasks));
+    // Drive the user to a zombie: an exited task is already_exited.
+    start();
+    try std.testing.expect(yield_current()); // shell -> worker
+    try std.testing.expect(yield_current()); // worker -> user
+    try std.testing.expectEqual(@as(usize, 2), current_id());
+    try std.testing.expect(exit_current(43)); // user -> idle
+    try std.testing.expectEqual(KillResult.already_exited, request_kill(2));
+}
+
+test "scheduler: a killed task exits with the reserved status at its next selection" {
+    // Card 3c: `kill` arms the target's TCB (main context); the ring's
+    // next selection of that task converts the selection into the EXISTING
+    // exit path with the reserved status 137 — the killed task never
+    // resumes, and the exit report + reap carry the reserved status.
+    _ = init();
+    _ = register_worker(0x2000).?;
+    _ = register_user(0x3000, 0).?;
+    start();
+    // The shell arms the kill on the user task (slot 2).
+    try std.testing.expectEqual(KillResult.ok, request_kill(2));
+    // The next switches walk the ring; when the ring SELECTS the user, the
+    // kill branch converts the selection into exit_current(137).
+    try std.testing.expect(yield_current()); // shell -> worker
+    try std.testing.expectEqual(@as(usize, 1), current_id());
+    try std.testing.expect(yield_current()); // worker -> user -> killed -> idle
+    try std.testing.expectEqual(@as(usize, idle_id), current_id());
+    try std.testing.expect(is_terminated(2));
+    try std.testing.expectEqual(@as(?u64, reserved_kill_status), terminated_status(2));
+    try std.testing.expectEqual(@as(u64, 1), exit_count());
+    // The process bound to the killed task reports the reserved status.
+    const pinfo = process.info(0).?;
+    try std.testing.expectEqual(process.State.exited, pinfo.state);
+    try std.testing.expectEqual(@as(u64, reserved_kill_status), pinfo.exit_status);
+    // The exit report carries 137, drained in order by the shell loop.
+    var mock = console.MockConsole(128){};
+    var con = mock.console();
+    maybe_report(&con);
+    try std.testing.expectEqualStrings("tasks user-el0 exited status=137\nprocs user-el0 exited status=137\n", mock.contents());
+    // The slot reaps back to free and is spawnable again (the kill flows
+    // through the real lifecycle, not a special teardown).
+    try std.testing.expect(reap(2));
+    try std.testing.expect(task_info(2) == null);
+    try std.testing.expect(has_free_slot());
+    try std.testing.expectEqual(KillResult.not_found, request_kill(2)); // the freed slot is not_found
+}
+
+test "scheduler: a killed sleeping task is terminated at its wake-selection" {
+    // Card 3c: a task parked by sys_sleep has NO scheduled quantum while
+    // blocked; the kill takes effect when its wake flips it to ready and
+    // the ring selects it — the same stage_current kill branch.
+    _ = init();
+    _ = register_worker(0x2000).?;
+    _ = register_user(0x3000, 0).?;
+    start();
+    // The worker sleeps 4 ticks (current = worker, slot 1).
+    try std.testing.expect(yield_current()); // shell -> worker
+    try std.testing.expect(sleep_current(4)); // worker -> user
+    try std.testing.expectEqual(@as(usize, 2), current_id());
+    // Arm the kill on the sleeping worker.
+    try std.testing.expectEqual(KillResult.ok, request_kill(1));
+    // Walk the ring (user -> idle -> shell -> ...); the blocked worker is
+    // skipped until its wake. Wake it, then the next selection kills it.
+    try std.testing.expect(yield_current()); // user -> idle
+    on_tick();
+    on_tick();
+    on_tick();
+    on_tick(); // tick 4: the worker's deadline passes -> ready
+    try std.testing.expect(!is_blocked(1));
+    // The ring reaches the woken worker's selection: killed -> 137.
+    try std.testing.expect(yield_current()); // idle -> shell
+    try std.testing.expect(yield_current()); // shell -> worker -> killed -> user
+    try std.testing.expectEqual(@as(usize, 2), current_id());
+    try std.testing.expect(is_terminated(1));
+    try std.testing.expectEqual(@as(?u64, reserved_kill_status), terminated_status(1));
 }
