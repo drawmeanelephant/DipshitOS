@@ -150,6 +150,17 @@ var netCapturePath: String?
 // no injection (the default VM is unchanged).
 var netInjectPath: String?
 var netInjectAfter: String?
+// Milestone five card N3 (claim 7293): `--net-arp-respond <host-ip>`
+// answers the guest's ARP requests from the HOST side — a tiny
+// deterministic host-side ARP responder inside the capture thread: when a
+// captured datagram is an ARP request (ethertype 0x0806, op 1, htype 1,
+// ptype 0x0800, hlen 6, plen 4), the synthesized reply (host MAC
+// 02:00:00:00:00:02 at the given IP — the same fixed address as the
+// guest's fallback_mac) is written into the SAME attachment socket end
+// `--net-inject` writes (VZ reads fds[0], so the guest receives it).
+// Driven by the guest's actual request bytes, not a sleep. nil = the
+// guest's ARP requests go unanswered (the default VM is unchanged).
+var netArpRespondHostIP: [UInt8]?
 
 var idx = 2
 while idx < arguments.count {
@@ -211,6 +222,14 @@ while idx < arguments.count {
         idx += 2
     } else if arg == "--net-inject-after", idx + 1 < arguments.count {
         netInjectAfter = arguments[idx + 1]
+        idx += 2
+    } else if arg == "--net-arp-respond", idx + 1 < arguments.count {
+        // Parse the dotted-quad host IP now (fail early, like --timeout).
+        let parts = arguments[idx + 1].split(separator: ".").compactMap { UInt8($0) }
+        guard parts.count == 4 else {
+            fail("--net-arp-respond requires a dotted-quad IPv4 address, got '\(arguments[idx + 1])'.")
+        }
+        netArpRespondHostIP = parts
         idx += 2
     } else {
         serialLogPath = arg
@@ -408,6 +427,9 @@ var netCaptureDone = DispatchSemaphore(value: 0)
 if netInjectPath != nil, netCapturePath == nil {
     fail("--net-inject requires --net (the injection writes into the SAME attachment's socket).")
 }
+if netArpRespondHostIP != nil, netCapturePath == nil {
+    fail("--net-arp-respond requires --net (the ARP reply is written into the SAME attachment's socket).")
+}
 
 if let netCapturePath {
     let netURL = URL(fileURLWithPath: netCapturePath)
@@ -426,12 +448,28 @@ if let netCapturePath {
     // One datagram per read (SOCK_DGRAM); a 4096-byte buffer covers the
     // largest N1 frame (1514 B) with headroom.
     netCaptureThread = Thread {
+        // Card N3 (claim 7293): the host-side ARP responder's fixed MAC —
+        // the same locally-administered address as the guest's
+        // fallback_mac, so the reply the guest learns is deterministic and
+        // gate-assertable.
+        let arpHostMAC: [UInt8] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x02]
         var buf = [UInt8](repeating: 0, count: 4096)
         while !netCaptureStop {
             let n = read(netCaptureReadSocket!.fileDescriptor, &buf, buf.count)
             if n < 0 && errno == EINTR { continue }
             if n <= 0 { break }
             try? netCaptureFile.write(contentsOf: Data(bytes: buf, count: n))
+            // Card N3: if the guest asked an ARP request, answer it from
+            // the host. The reply is written into the runner's socket end
+            // (fds[1]) — the card-N2 host→guest direction (VZ reads
+            // fds[0]), so the guest receives it; the capture file above
+            // keeps only guest TX (byte-exact, unchanged).
+            if let hostIP = netArpRespondHostIP, isArpRequest(buf, n) {
+                var reply = [UInt8](repeating: 0, count: 42)
+                buildArpReply(&reply, buf, n, arpHostMAC, hostIP)
+                try? netCaptureReadSocket!.write(contentsOf: Data(reply))
+                print("NET-ARP: answered the guest's ARP request for \(buf[28]).\(buf[29]).\(buf[30]).\(buf[31]) with host MAC 02:00:00:00:00:02")
+            }
         }
         try? netCaptureFile.synchronize()
         netCaptureDone.signal()
@@ -522,6 +560,10 @@ if let netCapturePath {
 }
 if let netInjectPath {
     print("  net-inject: ENABLED (milestone five card N2, claim 6076) — \(netInjectPath) written into the attachment's socket once after \"\(netInjectAfter ?? "net: rx-armed")\" appears in the serial log (host→guest RX)")
+}
+if let hostIP = netArpRespondHostIP {
+    let ipText = hostIP.map(String.init).joined(separator: ".")
+    print("  net-arp-respond: ENABLED (milestone five card N3, claim 7293) — the host answers the guest's ARP requests for \(ipText) (host MAC 02:00:00:00:00:02) via the capture thread (deterministic, request-driven)")
 }
 
 runner.queue.async {
@@ -1042,6 +1084,12 @@ func startNetInject() {
         let marker = netInjectAfter ?? "net: rx-armed"
         let waitDeadline = Date().addingTimeInterval(40)
         var sent = false
+        // Poll every 20 ms (claim 7293): a scripted gate that injects at a
+        // MID-SCRIPT marker (the guest's `net ip: ip=...` echo, not a
+        // boot-time marker) must not race the commands that follow the
+        // marker — the guest executes the script burst in tens of ms, so a
+        // 0.5 s poll would land the datagram AFTER the observation
+        // commands already ran.
         while Date() < waitDeadline {
             if let text = try? String(contentsOf: serialURL, encoding: .utf8),
                text.contains(marker) {
@@ -1056,12 +1104,50 @@ func startNetInject() {
                 sent = true
                 break
             }
-            Thread.sleep(forTimeInterval: 0.5)
+            Thread.sleep(forTimeInterval: 0.02)
         }
         if !sent {
             FileHandle.standardError.write(Data("ERROR: guest did not emit net-inject marker '\(marker)' within 40s; injection not sent\n".utf8))
         }
     }
+}
+
+// Card N3 (claim 7293): is the datagram an ARP request (Ethernet II
+// ethertype 0x0806, ARP htype 1 / ptype 0x0800 / hlen 6 / plen 4, op 1)?
+// The guest's request frames are raw Ethernet — dst ff*6 (broadcast),
+// src own MAC, ethertype at bytes 12-13, the ARP payload at 14..42.
+func isArpRequest(_ buf: [UInt8], _ n: Int) -> Bool {
+    guard n >= 42 else { return false }
+    guard buf[12] == 0x08 && buf[13] == 0x06 else { return false }
+    guard buf[14] == 0x00 && buf[15] == 0x01 else { return false } // htype ethernet
+    guard buf[16] == 0x08 && buf[17] == 0x00 else { return false } // ptype IPv4
+    guard buf[18] == 0x06 && buf[19] == 0x04 else { return false } // hlen/plen
+    guard buf[20] == 0x00 && buf[21] == 0x01 else { return false } // op request
+    return true
+}
+
+// Card N3 (claim 7293): synthesize the 42-byte ARP REPLY to the request in
+// `req` (the guest's bytes): dst = the requester's MAC, src = host MAC,
+// ethertype 0x0806, op 2, sha/spa = host MAC/IP, tha/tpa = the requester's
+// MAC/IP (copied from the request's sha/spa — the standard answer shape).
+func buildArpReply(_ reply: inout [UInt8], _ req: [UInt8], _ n: Int, _ hostMAC: [UInt8], _ hostIP: [UInt8]) {
+    _ = n
+    reply[0...5] = req[22...27] // dst = the requester's MAC (its sha)
+    reply[6...11] = hostMAC[0...5] // src
+    reply[12] = 0x08
+    reply[13] = 0x06
+    reply[14] = 0x00
+    reply[15] = 0x01
+    reply[16] = 0x08
+    reply[17] = 0x00
+    reply[18] = 0x06
+    reply[19] = 0x04
+    reply[20] = 0x00
+    reply[21] = 0x02 // op reply
+    reply[22...27] = hostMAC[0...5] // sha
+    reply[28...31] = hostIP[0...3] // spa
+    reply[32...37] = req[22...27] // tha = the requester's MAC
+    reply[38...41] = req[28...31] // tpa = the requester's IP
 }
 
 // Claim 6684: script-mode lifecycle. Polls the serial log for the expected

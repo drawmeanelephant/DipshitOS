@@ -647,7 +647,19 @@ gates pass; tagged `m1.5-interactive-monitor`** (see
     requests for our protocol address. Static IP first (`net ip
     <a.b.c.d>`, bounded, no config heap); DHCP is a later card. Live
     gate: the host ARPs for the guest IP and the reply carries the right
-    MAC; the guest resolves the host's MAC from a crafted reply.
+    MAC; the guest resolves the host's MAC from a crafted reply. **LIVE
+    2026-08-11 (claim 7293)** — `kernel/src/arp.zig` (pure RFC 826 logic:
+    static IP, build request/reply, bounded 4-slot table, counters) wired
+    into the RX drain (answer requests for our IP, learn replies, drop
+    the rest) + `net ip`/`net arp` subcommands + the runner's
+    `--net-arp-respond <host-ip>` (deterministic host-side answer, OFF by
+    default). Live gate `tools/verify-live-net-arp.sh` PASS 3/3 (answer
+    a request for our IP — 42-byte reply byte-exact in the capture;
+    resolve a peer — request byte-exact in the capture + the host answer
+    lands in the table; a foreign-address request is dropped with a
+    counter while still observable via `net recv`). Observed: the device
+    delivers/transmits the 42-byte ARP frames unpadded (below the
+    Ethernet 60-byte minimum).
   - **N4 — IPv4.** Minimal IPv4 TX/RX with ones-complement checksums
     (host-testable); ICMP echo as the proof — the guest answers echo
     requests and can send its own; honest bounds: no fragmentation, no
@@ -672,7 +684,7 @@ remaining two (graphics, balloon) are the open milestones.
 | Block (0x1042) | `VZVirtioBlockDeviceConfiguration` (disk image attachment) | `virtio_blk.zig` — modern virtio-blk, post-exit re-arm | ✅ done | 6420 (FAT32 storage driver), 3678 (general non-ESP FS on top) |
 | Entropy (0x1044) | `VZVirtioEntropyDeviceConfiguration` | `virtio_entropy.zig` (boot-time 64-byte seed) + `csprng.zig` (ChaCha20, RFC 7539) | ✅ done | 2665 (driver + CSPRNG + `random`), 3693 (EL0 stack ASLR consumer) |
 | Custom virtio (0x1082, macOS 27) | `VZCustomVirtioDeviceConfiguration` (`--custom-virtio` / `zig build spike-virtio`) | `virtio_custom.zig` — queue transport + used-ring IRQ | ✅ done | 5844 (host spike + `pci` command), 0828 (bidirectional queue + SPI IRQ), 4374 (ring allocator / multi-queue), 9492 (multi-descriptor payloads), 9737 (feature negotiation), 4837 (log transport) |
-| Network (0x1041) | `VZVirtioNetworkDeviceConfiguration` + `VZFileHandleNetworkDeviceAttachment` (`--net <capture-file>`, `--net-inject <file>`, flag-gated; fixed host MAC) | `virtio_net.zig` — TX + RX (N1 + N2) | ✅ TX + RX (claims 1373/6076) | 1373 (transport + TX live — DID 0x1041, VER1\|MTU\|MAC, feature-path MAC, queues 0/1, 12-byte TX-hdr contract, byte-exact host capture; `verify-live-net-tx.sh` PASS 2/2); 6076 (RX live — queue-0 buffer supply, polled used-ring drain, bounded FIFO, MAC filter, `net recv`; host→guest injection + the round trip; 12-byte RX-hdr observed, min RX buffer 1530 observed; `verify-live-net-rx.sh` PASS 3/3 + 29-gate aggregate green) |
+| Network (0x1041) | `VZVirtioNetworkDeviceConfiguration` + `VZFileHandleNetworkDeviceAttachment` (`--net <capture-file>`, `--net-inject <file>`, `--net-arp-respond <host-ip>`, flag-gated; fixed host MAC) | `virtio_net.zig` — TX + RX + ARP (N1 + N2 + N3); `arp.zig` | ✅ TX + RX + ARP (claims 1373/6076/7293) | 1373 (transport + TX live — DID 0x1041, VER1\|MTU\|MAC, feature-path MAC, queues 0/1, 12-byte TX-hdr contract, byte-exact host capture; `verify-live-net-tx.sh` PASS 2/2); 6076 (RX live — queue-0 buffer supply, polled used-ring drain, bounded FIFO, MAC filter, `net recv`; host→guest injection + the round trip; 12-byte RX-hdr observed, min RX buffer 1530 observed; `verify-live-net-rx.sh` PASS 3/3 + 29-gate aggregate green); 7293 (ARP live — static IP, answer/resolve over the RX seam, bounded table, `--net-arp-respond`; 42-byte frames unpadded observed; `verify-live-net-arp.sh` PASS 3/3 + 31-gate aggregate green) |
 | Graphics | `VZVirtioGraphicsDeviceConfiguration` — attached only for screenshots (`--screenshot`) | none | ⬜ not started — the future GUI milestone | — |
 | Balloon | `VZMemoryBalloonDeviceConfiguration` — nothing attached | none | ⬜ not started — low priority (fixed 256 MiB guest, no demand paging) | — |
 

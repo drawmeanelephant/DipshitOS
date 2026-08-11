@@ -217,7 +217,7 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "  mem         summarize the EFI memory map\n" ++
         "  mbox        per-process IPC mailbox: pending messages and drain counters\n" ++
         "  mount       switch the active FAT volume (esp or data)\n" ++
-        "  net         virtio-net transport + RX: device DID, MAC, queues, feature bits, RX counters ('net recv' prints received frames)\n" ++
+        "  net         virtio-net transport + RX + ARP: device DID, MAC, queues, feature bits, RX counters ('net recv' prints received frames; 'net ip <a.b.c.d>' sets the static IP; 'net arp [<a.b.c.d>]' shows/resolves the ARP table)\n" ++
         "  netsend     send a known Ethernet frame (bounded staging, TX + used-ring drain)\n" ++
         "  pages       physical page allocator pool\n" ++
         "  pci         enumerate PCI devices on the bus\n" ++

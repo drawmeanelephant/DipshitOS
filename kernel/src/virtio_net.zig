@@ -43,7 +43,13 @@
 //! pinned from observation at claim time — `net: rx-obs` records the
 //! first frame's device-written length + first bytes, and `rx_hdr_len`
 //! is corrected like `tx_hdr_len` was (0→12) if the observation
-//! differs).
+//! differs). Card N3 (claim 7293) adds the ARP protocol layer
+//! (`kernel/src/arp.zig`, pure logic): the RX drain dispatches ARP
+//! frames — a request for our static IP is answered (the reply is built
+//! in `tx_staging` and transmitted on the N1 TX path), a reply is
+//! learned into the bounded table, and `net ip`/`net arp` drive the
+//! static address + resolution. Honest bounds: IPv4-only ARP, no DHCP,
+//! no IP stack (N4).
 //!
 //! The logic is host-testable through injectable transport ops (the
 //! fat.zig injected-sector-I/O pattern): feature selection, MAC read,
@@ -58,6 +64,11 @@ const mmio = @import("mmio.zig");
 const mmu = @import("mmu.zig");
 const pci = @import("pci.zig");
 const evidence = @import("evidence.zig");
+/// Milestone five card N3 (claim 7293): the ARP protocol layer (pure
+/// logic; the RX drain dispatches frames here and the monitor's
+/// `net ip`/`net arp` subcommands drive the static address + resolution).
+/// `pub` so monitor.zig can print the IP + counters and issue requests.
+pub const arp = @import("arp.zig");
 
 // ---------------------------------------------------------------------------
 // Split-ring structures (the blk/entropy/console shared layout)
@@ -1120,8 +1131,52 @@ pub fn net_rx_drain() void {
         _ = fifo_push(rx_buf[0..dev_len]);
         rx_frames +%= 1;
         rx_bytes +%= dev_len;
+        // Card N3 (claim 7293): ARP dispatch — the frame's Ethernet
+        // header starts at `rx_hdr_len` (the observed RX-header
+        // contract). A request for our static IP is answered (the reply
+        // is built in tx_staging and transmitted on the N1 TX path,
+        // one-request-at-a-time); a reply is learned into the bounded
+        // table. The raw frame ALSO stays in the FIFO for `net recv`
+        // observation — the N2 seam is unchanged.
+        rx_arp(rx_buf[rx_hdr_len..dev_len]);
     }
     _ = net_rx_arm();
+}
+
+/// Card N3 (claim 7293): dispatch one accepted Ethernet frame to the ARP
+/// layer. `frame` starts at the Ethernet header (the RX virtio_net_hdr
+/// already skipped — the caller passed `rx_buf[rx_hdr_len..]`). A request
+/// for our protocol address is answered: the reply is built into
+/// `tx_staging` (after the zeroed virtio_net_hdr) and transmitted on the
+/// N1 TX path; a reply is learned by `arp.handle_rx`; malformed /
+/// not-for-us frames are counted and dropped by the ARP layer. A send
+/// failure is counted honestly (`arp.reply_tx_fail`) — the polled TX
+/// path can time out, and that is recorded, never assumed away.
+fn rx_arp(frame: []const u8) void {
+    const reply_len = arp.handle_rx(frame, &net_mac, tx_staging[tx_hdr_len .. tx_hdr_len + arp.arp_frame_len]) orelse return;
+    // The zeroed virtio_net_hdr prefix (the observed claim-1373 TX
+    // contract — a stale header's flags/gso fields would corrupt the
+    // delivered reply).
+    @memset(tx_staging[0..tx_hdr_len], 0);
+    switch (net_send(&net_ops, &net_dev, tx_staging[0 .. tx_hdr_len + reply_len])) {
+        .ok => arp.replies_sent += 1,
+        else => arp.reply_tx_fail += 1,
+    }
+}
+
+/// Card N3 (claim 7293): transmit an ARP REQUEST for `target_ip`
+/// (broadcast dst, our MAC + static IP as sender, zeroed target HW) in
+/// the fixed staging buffer, on the N1 TX path. Refuses honestly when the
+/// transport is unready or no static IP is set (`net ip <a.b.c.d>`
+/// first). The reply is learned asynchronously by the RX drain. The frame
+/// length lands in `out_len` (42).
+pub fn net_arp_request(target_ip: [4]u8, out_len: *usize) SendResult {
+    if (!net_ready) return .not_ready;
+    if (!arp.ip_set()) return .not_ready;
+    @memset(tx_staging[0..tx_hdr_len], 0);
+    const n = arp.build_request(tx_staging[tx_hdr_len .. tx_hdr_len + arp.arp_frame_len], &net_mac, arp.own_ip, target_ip);
+    out_len.* = n;
+    return net_send(&net_ops, &net_dev, tx_staging[0 .. tx_hdr_len + n]);
 }
 
 // ---------------------------------------------------------------------------
@@ -1233,6 +1288,7 @@ test "virtio_net: full TX submit + drain over a mock transport" {
     // on the kick, and the drain accounts the completion.
     net_ready = true;
     mock_used_idx = 0;
+    mock_tx_used_idx = 0;
     mock_kicks = 0;
     try std.testing.expectEqual(SendResult.ok, net_send(&ops, &dev, frame[0..len]));
     try std.testing.expectEqual(@as(u16, 1), dev.tx_avail.idx);
@@ -1334,6 +1390,7 @@ test "virtio_net: RX supply + used-ring drain + filter + FIFO over a mock" {
     rx_overflow = 0;
     rx_armed = false;
     mock_used_idx = 0;
+    mock_tx_used_idx = 0;
     mock_used_len = 0;
     mock_kicks = 0;
 
@@ -1407,6 +1464,7 @@ test "virtio_net: RX MAC filter drops a foreign frame (counter, not FIFO)" {
     rx_overflow = 0;
     rx_armed = false;
     mock_used_idx = 0;
+    mock_tx_used_idx = 0;
     mock_used_len = 0;
     mock_kicks = 0;
 
@@ -1435,6 +1493,125 @@ test "virtio_net: RX MAC filter drops a foreign frame (counter, not FIFO)" {
     try std.testing.expectEqualSlices(u8, dst[0..4], rx_first16[12..16]);
 }
 
+test "virtio_net: RX ARP request is answered — byte-exact reply on TX over a mock" {
+    const saved_ops = net_ops;
+    net_ops = mock_ops();
+    net_ready = true;
+    defer {
+        net_ops = saved_ops;
+        net_ready = false;
+    }
+    net_dev = .{};
+    net_mac = [6]u8{ 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 }; // the host-set guest MAC
+    arp.own_ip = .{ 10, 0, 0, 1 };
+    arp.table = [_]arp.ArpEntry{.{}} ** arp.table_slots;
+    arp.table_cursor = 0;
+    arp.replies_sent = 0;
+    arp.replies_learned = 0;
+    arp.dropped = 0;
+    arp.reply_tx_fail = 0;
+    defer arp.own_ip = .{ 0, 0, 0, 0 };
+    rx_fifo_head = 0;
+    rx_fifo_count = 0;
+    rx_frames = 0;
+    rx_bytes = 0;
+    rx_filtered = 0;
+    rx_overflow = 0;
+    rx_armed = false;
+    mock_used_idx = 0;
+    mock_tx_used_idx = 0;
+    mock_used_len = 0;
+    mock_kicks = 0;
+
+    // The delivered frame: the OBSERVED 12-byte virtio_net_hdr
+    // (num_buffers=1 at bytes 10-11) + an ARP REQUEST from the host
+    // (02:00:00:00:00:02 / 10.0.0.2) asking who has 10.0.0.1 — broadcast
+    // dst, so the MAC filter admits it.
+    var request: [arp.arp_frame_len]u8 = undefined;
+    const host_mac = [6]u8{ 0x02, 0x00, 0x00, 0x00, 0x00, 0x02 };
+    const host_ip = [4]u8{ 10, 0, 0, 2 };
+    _ = arp.build_request(&request, &host_mac, host_ip, arp.own_ip);
+    var delivered: [rx_buf_len]u8 = .{0} ** rx_buf_len;
+    delivered[10] = 0x01; // virtio_net_hdr num_buffers = 1 (observed)
+    @memcpy(delivered[rx_hdr_len .. rx_hdr_len + request.len], &request);
+    mock_rx_frame = delivered[0 .. rx_hdr_len + request.len];
+    // Dirty the TX staging header so the reply path's ZEROING is proven
+    // (a stale virtio_net_hdr would corrupt the delivered reply).
+    @memset(tx_staging[0..tx_hdr_len], 0xab);
+
+    try std.testing.expect(net_rx_arm());
+    net_rx_drain();
+
+    // The request was accepted (FIFO holds the raw observed frame) AND
+    // answered: the reply went out on the TX queue byte-exact, with a
+    // ZEROED virtio_net_hdr prefix (the claim-1373 TX contract).
+    try std.testing.expectEqualSlices(u8, &[_]u8{0} ** tx_hdr_len, tx_staging[0..tx_hdr_len]);
+    try std.testing.expectEqual(@as(u64, 1), rx_frames);
+    try std.testing.expectEqual(@as(usize, 1), fifo_occupancy());
+    try std.testing.expectEqual(@as(u64, 1), arp.replies_sent);
+    try std.testing.expectEqual(@as(u64, 0), arp.reply_tx_fail);
+    try std.testing.expectEqual(@as(u64, 1), net_dev.tx_frames);
+    // tx_staging still holds the submitted buffer (header + frame): the
+    // reply is byte-exact against arp.build_reply's own fixture.
+    var expected: [arp.arp_frame_len]u8 = undefined;
+    _ = arp.build_reply(&expected, &net_mac, arp.own_ip, host_mac, host_ip);
+    try std.testing.expectEqualSlices(u8, &expected, tx_staging[tx_hdr_len .. tx_hdr_len + arp.arp_frame_len]);
+    try std.testing.expectEqualSlices(u8, &host_mac, tx_staging[tx_hdr_len .. tx_hdr_len + 6]); // dst = requester
+}
+
+test "virtio_net: RX ARP reply is learned into the bounded table" {
+    const saved_ops = net_ops;
+    net_ops = mock_ops();
+    net_ready = true;
+    defer {
+        net_ops = saved_ops;
+        net_ready = false;
+    }
+    net_dev = .{};
+    net_mac = [6]u8{ 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 };
+    arp.own_ip = .{ 10, 0, 0, 1 };
+    arp.table = [_]arp.ArpEntry{.{}} ** arp.table_slots;
+    arp.table_cursor = 0;
+    arp.replies_sent = 0;
+    arp.replies_learned = 0;
+    arp.dropped = 0;
+    arp.reply_tx_fail = 0;
+    defer arp.own_ip = .{ 0, 0, 0, 0 };
+    rx_fifo_head = 0;
+    rx_fifo_count = 0;
+    rx_frames = 0;
+    rx_bytes = 0;
+    rx_filtered = 0;
+    rx_overflow = 0;
+    rx_armed = false;
+    mock_used_idx = 0;
+    mock_tx_used_idx = 0;
+    mock_used_len = 0;
+    mock_kicks = 0;
+
+    // An ARP REPLY addressed TO us (unicast dst = our MAC, sender
+    // 02:00:00:00:00:02 / 10.0.0.2): the MAC filter admits it (own dst),
+    // and the ARP layer learns the sender — no reply is sent.
+    const host_mac = [6]u8{ 0x02, 0x00, 0x00, 0x00, 0x00, 0x02 };
+    const host_ip = [4]u8{ 10, 0, 0, 2 };
+    var reply: [arp.arp_frame_len]u8 = undefined;
+    _ = arp.build_reply(&reply, &host_mac, host_ip, net_mac, arp.own_ip);
+    var delivered: [rx_buf_len]u8 = .{0} ** rx_buf_len;
+    delivered[10] = 0x01;
+    @memcpy(delivered[rx_hdr_len .. rx_hdr_len + reply.len], &reply);
+    mock_rx_frame = delivered[0 .. rx_hdr_len + reply.len];
+
+    try std.testing.expect(net_rx_arm());
+    net_rx_drain();
+
+    try std.testing.expectEqual(@as(u64, 1), rx_frames);
+    try std.testing.expectEqual(@as(u64, 0), arp.replies_sent); // no reply to a reply
+    try std.testing.expectEqual(@as(u64, 1), arp.replies_learned);
+    try std.testing.expectEqual(@as(u64, 0), arp.dropped);
+    try std.testing.expectEqual(@as(u64, 0), net_dev.tx_frames);
+    try std.testing.expectEqualSlices(u8, &host_mac, &arp.lookup(host_ip).?);
+}
+
 /// Test helper: pop the oldest FIFO frame into `out` (the real path peeks
 /// + advances to avoid a stack copy; the tests want a copy to compare).
 fn fifo_pop_for_test(out: []u8) usize {
@@ -1458,8 +1635,13 @@ fn fake_dev_read32(off: u32) u32 {
 // pointers close over these; one mock per test binary).
 var mock_cfg: [0x40]u8 = .{0} ** 0x40;
 var mock_kicks: u16 = 0;
+/// RX used-ring index (the queue-0 completions — the RX side of the mock
+/// is per-queue, like the real device; the ARP reply path transmits on
+/// queue 1 while the RX ring holds its own index).
 var mock_used_idx: u16 = 0;
-/// Device-written length of the last completion (RX: the frame length —
+/// TX used-ring index (queue 1 — the N1 TX completions).
+var mock_tx_used_idx: u16 = 0;
+/// Device-written length of the last RX completion (RX: the frame length —
 /// the TX used-element len was ~0 on VZ; the RX one is the real one).
 var mock_used_len: u32 = 0;
 /// The pending RX frame the fake device "delivers" into `rx_buf` on the
@@ -1507,12 +1689,23 @@ fn mock_invalidate(ptr: usize, len: usize) void {
     // frame in) — and must NOT treat the buffer's bytes as a used ring.
     if (ptr == @intFromPtr(&rx_buf)) return;
     const used = @as(*VirtqUsed, @ptrFromInt(ptr));
-    if (used.idx != mock_used_idx) {
-        used.idx = mock_used_idx;
-        if (mock_used_idx != 0) {
-            used.ring[(used.idx -% 1) % queue_size].len = mock_used_len;
+    // Per-queue used rings, like the real device. The RX ring (the module
+    // global — the RX path only ever drains net_dev.rx_used) replays the
+    // RX index + written length; every other used ring (net_dev.tx_used,
+    // or a LOCAL Device in the pure TX test) replays the TX index — the
+    // mock's TX side only ever advances its own index (the ARP reply path
+    // transmits while the RX ring holds a completion, so the two rings
+    // must not share an index).
+    if (ptr == @intFromPtr(&net_dev.rx_used)) {
+        if (used.idx != mock_used_idx) {
+            used.idx = mock_used_idx;
+            if (mock_used_idx != 0) {
+                used.ring[(used.idx -% 1) % queue_size].len = mock_used_len;
+            }
         }
+        return;
     }
+    if (used.idx != mock_tx_used_idx) used.idx = mock_tx_used_idx;
 }
 fn mock_notify(q: u16) void {
     mock_kicks +%= 1;
@@ -1522,10 +1715,12 @@ fn mock_notify(q: u16) void {
         // the WRITTEN length).
         @memcpy(rx_buf[0..mock_rx_frame.len], mock_rx_frame);
         mock_used_len = @intCast(mock_rx_frame.len);
+        mock_used_idx +%= 1;
     } else {
-        mock_used_len = 0; // TX: the device writes nothing (the N1 observation)
+        // TX: the device writes nothing (the N1 observation); the TX used
+        // index advances on the kick (the device consumed the request).
+        mock_tx_used_idx +%= 1;
     }
-    mock_used_idx +%= 1; // the device consumes the request
 }
 
 fn mock_ops() Ops {

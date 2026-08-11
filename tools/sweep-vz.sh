@@ -6,7 +6,7 @@
 set -u
 LOG="${1:-artifacts/live-net-tx-vz-sweep.log}"
 START="${2:-1}"
-END="${3:-28}"
+END="${3:-30}"
 n=0
 run_gate() {
     n=$((n + 1))
@@ -24,7 +24,7 @@ run_gate() {
         echo "G$n-FAIL $name (rc=$rc)" >> "$LOG"
     fi
 }
-GATES="zig-build-run verify-bad-handoff verify-marker verify-nvram-console verify-host-console verify-live-transcript verify-live-fs verify-live-gfs verify-live-timer verify-live-tasks verify-live-userspace verify-live-svc verify-live-uaccess verify-live-addrspaces verify-live-lifecycle verify-live-exec verify-live-args verify-live-procs verify-live-concurrent verify-live-long-lived verify-live-kill verify-live-sleep verify-live-entropy verify-live-reboot verify-live-ipc verify-live-procs-syscall verify-live-scale verify-live-wait verify-live-net-tx verify-live-net-rx"
+GATES="zig-build-run verify-bad-handoff verify-marker verify-nvram-console verify-host-console verify-live-transcript verify-live-fs verify-live-gfs verify-live-timer verify-live-tasks verify-live-userspace verify-live-svc verify-live-uaccess verify-live-addrspaces verify-live-lifecycle verify-live-exec verify-live-args verify-live-procs verify-live-concurrent verify-live-long-lived verify-live-kill verify-live-sleep verify-live-entropy verify-live-reboot verify-live-ipc verify-live-procs-syscall verify-live-scale verify-live-wait verify-live-net-tx verify-live-net-rx verify-live-net-arp"
 i=0
 for g in $GATES; do
     i=$((i + 1))
