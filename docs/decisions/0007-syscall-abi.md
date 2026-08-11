@@ -217,3 +217,24 @@ process id is created/recycled (exec path + boot-payload registration).
 
 No POSIX pipes/fds/signals, no unbounded mailboxes, no scheduler/lifecycle
 changes: this is the ONLY ABI amendment in the follow-on 3 card set.
+
+## Amendment (2026-08-11, claim 5799 — the process-observability card)
+
+Follow-on 4 card 4a freezes slot 7 in the dispatch table (the ONE ABI
+change in the first card of the follow-on 4 set; everything else stays
+frozen):
+
+| 7 | `sys_procs` | `procs(buf, max) -> i64` | Copy a bounded snapshot of the process table OUT into the caller's region through uaccess — a read-only view (no write path). One fixed 40-byte row per NON-FREE descriptor, in id order: `u64 pid` (LE), `u64` state code (the `process.State` enum: 1=created, 2=running, 3=exited), `u64 exit_status` (0 unless exited — the status survives the reap), `name[16]` NUL-padded. `max` truncates to WHOLE rows (`floor(max / 40)` — a partial row is never copied); `max == 0` → 0 rows. Returns the row count written; `EFAULT` for a bad buffer. |
+
+`implemented_count` is now 8; the `syscalls` report prints rows 0–7.
+The snapshot is marshaled into a fixed BSS scratch (`max_processes` × 40 =
+320 B, no allocation) then copy_out'd through the claim-6120 uaccess
+window; no caller-identity requirement (any EL0 task may read the table).
+The EL0 proof rides PEER.BIN: it polls `sys_procs` once per quantum until
+the snapshot shows a running peer, prints `peer: sees <pid> <name>
+<state>` per row, then enters its recv loop — a process-level view of the
+process table reachable from EL0, distinct from the EL1h monitor's own
+`procs` read.
+
+The ABI — x8 number, x0–x5 arguments, x0 result, reserved 8–63, error
+codes — is unchanged.

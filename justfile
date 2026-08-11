@@ -65,6 +65,7 @@ verify-vz:
     bash tools/verify-live-entropy.sh
     bash tools/verify-live-reboot.sh
     bash tools/verify-live-ipc.sh
+    bash tools/verify-live-procs-syscall.sh
     bash tools/verify-live-scale.sh
 
 # Compile the AArch64 UEFI application and kernel image (class A — zig build)
@@ -206,6 +207,10 @@ verify-live-reboot:
 # Verify the live pool-scale capstone (class B — boots VZ VMs; FOUR live user programs at the 7-slot budget: counter + 3 USER.BINs with distinct tasks/stacks, a FIFTH exec pool_full, and the tables=NN/256 headroom; claim 5795; Apple silicon only)
 verify-live-scale:
     bash tools/verify-live-scale.sh
+
+# Verify the live procs-syscall gate (class B — boots VZ VMs; PEER.BIN reads the process table FROM EL0 via sys_procs (slot 7) and prints peer: sees rows, distinct from the monitor's procs read; claim 5799; Apple silicon only)
+verify-live-procs-syscall:
+    bash tools/verify-live-procs-syscall.sh
 
 # Verify the REAL virtio entropy -> CSPRNG seed -> random command path (class B — boots VZ VMs; asserts `entropy: seeded n=64`, `random 32` hex, a responsive shell, and DIFFERENT output across two boots; claim 2665)
 verify-live-entropy:

@@ -34,7 +34,7 @@ const uaccess = @import("uaccess.zig"); // claim 6120: fault-safe copy-in
 const userspace = @import("userspace.zig");
 
 pub const slot_count: usize = 64;
-pub const implemented_count: usize = 7;
+pub const implemented_count: usize = 8;
 pub const write_cap: u64 = 256;
 pub const svc_immediate: u16 = 0;
 
@@ -47,6 +47,10 @@ pub const sys_sleep: u64 = 4;
 /// in the follow-on 3 card set (ADR 0007 stays otherwise frozen).
 pub const sys_ipc_send: u64 = 5;
 pub const sys_ipc_recv: u64 = 6;
+/// Card 4a (claim 5799): process introspection — slot 7, the ONE ABI
+/// change in the follow-on 4 card set's first card (ADR 0007 amendment;
+/// every existing syscall number 0–6 stays frozen).
+pub const sys_procs: u64 = 7;
 
 pub const ErrorCode = enum(i64) {
     einval = -1,
@@ -82,6 +86,9 @@ var table_storage: [slot_count]Entry = undefined;
 var table_ready = false;
 var call_counts: [slot_count]u64 = [_]u64{0} ** slot_count;
 var write_fn: ?Writer = null;
+/// Card 4a (claim 5799): fixed BSS scratch for the process snapshot —
+/// `max_processes` rows × 40 bytes, marshaled per call, no allocation.
+var procs_scratch: [process.max_processes * process.snapshot_row_bytes]u8 = undefined;
 
 /// Initialize the writer seam, reset counters and the uaccess regions. The
 /// table remains a runtime-built BSS object; rebuilding is unnecessary once
@@ -114,6 +121,7 @@ fn ensure_table() *const [slot_count]Entry {
         table_storage[sys_sleep] = .{ .name = "sys_sleep", .handler = handle_sleep };
         table_storage[sys_ipc_send] = .{ .name = "sys_ipc_send", .handler = handle_ipc_send };
         table_storage[sys_ipc_recv] = .{ .name = "sys_ipc_recv", .handler = handle_ipc_recv };
+        table_storage[sys_procs] = .{ .name = "sys_procs", .handler = handle_procs };
         table_ready = true;
     }
     return &table_storage;
@@ -268,9 +276,38 @@ fn handle_ipc_recv(args: Args, _: *exceptions.VectorFrame) u64 {
     return got;
 }
 
-/// Deterministic monitor output for the seven implemented rows and their counters.
+// ---------------------------------------------------------------------------
+// Card 4a (claim 5799): process introspection — slot 7
+// ---------------------------------------------------------------------------
+
+/// `sys_procs(buf, max)`: copy a bounded snapshot of the process table
+/// (id, name, state, exit status where set — one fixed 40-byte row per
+/// NON-FREE descriptor, in id order) OUT into the caller's region through
+/// uaccess. A read-only view — there is no write path. `max` truncates to
+/// WHOLE rows (`floor(max / 40)`, the documented truncation result like
+/// the ipc recv path): a partial row is never copied. `max == 0` → 0
+/// rows. Returns the row count written; `EFAULT` for a bad `buf` (the
+/// claim-6120 contract — the copy is validated before any state is
+/// touched). The snapshot is marshaled into a fixed BSS scratch, so no
+/// allocation and no caller-identity requirement (any EL0 task may read
+/// the table).
+fn handle_procs(args: Args, _: *exceptions.VectorFrame) u64 {
+    const address = args[0];
+    const max = args[1];
+    if (max == 0) return 0;
+    const rows = process.snapshot(&procs_scratch);
+    if (rows == 0) return 0;
+    const full_bytes = rows * process.snapshot_row_bytes;
+    // Floor the requested byte count to whole rows (honest truncation).
+    const take_bytes = @min(full_bytes, @as(usize, @intCast(max))) / process.snapshot_row_bytes * process.snapshot_row_bytes;
+    if (take_bytes == 0) return 0;
+    if (uaccess.copy_out(address, procs_scratch[0..take_bytes], take_bytes) != .ok) return error_result(.efault);
+    return take_bytes / process.snapshot_row_bytes;
+}
+
+/// Deterministic monitor output for the eight implemented rows and their counters.
 pub fn report(con: *console.Console) void {
-    con.puts("syscalls: slots=64 implemented=7\n");
+    con.puts("syscalls: slots=64 implemented=8\n");
     var number: u64 = 0;
     while (number < implemented_count) : (number += 1) {
         const info = entry_info(number).?;
@@ -302,7 +339,7 @@ fn capture_marshaled_args(args: Args, _: *exceptions.VectorFrame) u64 {
     return 0xcafe;
 }
 
-test "syscall: runtime table has 64 slots and seven unique implemented rows" {
+test "syscall: runtime table has 64 slots and eight unique implemented rows" {
     init(test_writer);
     const table = ensure_table();
     try std.testing.expectEqual(@as(usize, 64), table.len);
@@ -315,13 +352,14 @@ test "syscall: runtime table has 64 slots and seven unique implemented rows" {
             implemented += 1;
         }
     }
-    try std.testing.expectEqual(@as(usize, 7), implemented);
+    try std.testing.expectEqual(@as(usize, 8), implemented);
     try std.testing.expectEqualStrings("sys_ping", entry_info(0).?.name);
     try std.testing.expectEqualStrings("sys_exit", entry_info(3).?.name);
     try std.testing.expectEqualStrings("sys_sleep", entry_info(4).?.name);
     try std.testing.expectEqualStrings("sys_ipc_send", entry_info(5).?.name);
     try std.testing.expectEqualStrings("sys_ipc_recv", entry_info(6).?.name);
-    try std.testing.expect(entry_info(7) == null);
+    try std.testing.expectEqualStrings("sys_procs", entry_info(7).?.name);
+    try std.testing.expect(entry_info(8) == null);
     try std.testing.expect(entry_info(63) == null);
 }
 
@@ -655,6 +693,102 @@ test "syscall: handle_svc decodes and dispatches slots 5 and 6 via the frame" {
     try std.testing.expectEqual(@as(usize, 1), mailbox.pending(0));
 }
 
+test "syscall: procs snapshot reflects live registry state and marshals fixed rows" {
+    init(test_writer);
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0); // task 2 = process 0 (boot payload)
+    scheduler.start();
+    var frame = fresh_frame();
+    var buf: [process.max_processes * process.snapshot_row_bytes]u8 = undefined;
+    set_user_regions(
+        .{ .base = 0, .len = 0 },
+        .{ .base = @intFromPtr(&buf), .len = buf.len },
+    );
+    // The boot payload is process 0, RUNNING, named "user-el0".
+    try std.testing.expectEqual(@as(u64, 1), dispatch(sys_procs, .{ @intFromPtr(&buf), buf.len, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u64, 0), std.mem.readInt(u64, buf[0..8], .little)); // pid 0
+    try std.testing.expectEqual(@as(u64, @intFromEnum(process.State.running)), std.mem.readInt(u64, buf[8..16], .little));
+    try std.testing.expectEqual(@as(u64, 0), std.mem.readInt(u64, buf[16..24], .little)); // no status while running
+    try std.testing.expectEqualStrings("user-el0", buf[24 .. 24 + 8]);
+    // The name field is NUL-padded to the full 16-byte slot.
+    for (buf[24 + 8 .. 40]) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
+    // Exit the payload: process 0 becomes exited with the status kept.
+    try std.testing.expect(scheduler.yield_current()); // shell -> worker
+    try std.testing.expect(scheduler.yield_current()); // worker -> user
+    try std.testing.expectEqual(@as(usize, 2), scheduler.current_id());
+    try std.testing.expect(scheduler.exit_current(7));
+    try std.testing.expectEqual(@as(u64, 1), dispatch(sys_procs, .{ @intFromPtr(&buf), buf.len, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u64, @intFromEnum(process.State.exited)), std.mem.readInt(u64, buf[8..16], .little));
+    try std.testing.expectEqual(@as(u64, 7), std.mem.readInt(u64, buf[16..24], .little)); // the snapshotted status
+    // A created (loaded, not yet bound) process joins the snapshot: two
+    // rows, in id order, with the free rows skipped.
+    _ = process.create("PEER.BIN", .{ .entry_va = 0x400000, .content_len = 64 }, .{}, .{}).?;
+    try std.testing.expectEqual(@as(u64, 2), dispatch(sys_procs, .{ @intFromPtr(&buf), buf.len, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u64, 0), std.mem.readInt(u64, buf[0..8], .little));
+    try std.testing.expectEqualStrings("user-el0", buf[24 .. 24 + 8]);
+    try std.testing.expectEqual(@as(u64, 1), std.mem.readInt(u64, buf[40..48], .little)); // row 2's pid
+    try std.testing.expectEqual(@as(u64, @intFromEnum(process.State.created)), std.mem.readInt(u64, buf[48..56], .little));
+    try std.testing.expectEqualStrings("PEER.BIN", buf[64 .. 64 + 8]);
+}
+
+test "syscall: procs truncates to whole rows, clamps max, and EFAULTs on a bad buf" {
+    init(test_writer);
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0); // process 0
+    scheduler.start();
+    var frame = fresh_frame();
+    var buf: [process.max_processes * process.snapshot_row_bytes]u8 = undefined;
+    set_user_regions(
+        .{ .base = 0, .len = 0 },
+        .{ .base = @intFromPtr(&buf), .len = buf.len },
+    );
+    // max == 0 copies nothing (0 rows, even with a wild address).
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_procs, .{ uaccess.diagnostic_unmapped, 0, 0, 0, 0, 0 }, &frame));
+    // max below one whole row truncates to 0 rows (a partial row is never
+    // copied — the documented truncation result).
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_procs, .{ @intFromPtr(&buf), process.snapshot_row_bytes - 1, 0, 0, 0, 0 }, &frame));
+    // max of exactly one row copies one row.
+    try std.testing.expectEqual(@as(u64, 1), dispatch(sys_procs, .{ @intFromPtr(&buf), process.snapshot_row_bytes, 0, 0, 0, 0 }, &frame));
+    // max larger than the full snapshot clamps to it.
+    try std.testing.expectEqual(@as(u64, 1), dispatch(sys_procs, .{ @intFromPtr(&buf), 1_000_000, 0, 0, 0, 0 }, &frame));
+    // A bad user pointer is EFAULT (the claim-6120 contract), never a
+    // crash and never a partial write.
+    try std.testing.expectEqual(error_result(.efault), dispatch(sys_procs, .{ uaccess.diagnostic_unmapped, process.snapshot_row_bytes, 0, 0, 0, 0 }, &frame));
+    // A read-only target (the user TEXT aperture) is EFAULT too — the
+    // snapshot is a copy_out, so the caller's region must be writable.
+    const text = "read-only";
+    set_user_regions(
+        .{ .base = @intFromPtr(text.ptr), .len = text.len },
+        .{ .base = 0, .len = 0 },
+    );
+    try std.testing.expectEqual(error_result(.efault), dispatch(sys_procs, .{ @intFromPtr(text.ptr), process.snapshot_row_bytes, 0, 0, 0, 0 }, &frame));
+}
+
+test "syscall: handle_svc decodes and dispatches slot 7 via the frame" {
+    init(test_writer);
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0); // process 0
+    scheduler.start();
+    var frame = fresh_frame();
+    var buf: [process.snapshot_row_bytes]u8 = undefined;
+    set_user_regions(
+        .{ .base = 0, .len = 0 },
+        .{ .base = @intFromPtr(&buf), .len = buf.len },
+    );
+    // The marshaling seam (claim 3594): x8 carries the number (7), x0 the
+    // buf, x1 the max, x0 receives the row count.
+    try std.testing.expect(exceptions.frame_write(&frame, 8, sys_procs));
+    try std.testing.expect(exceptions.frame_write(&frame, 0, @intFromPtr(&buf)));
+    try std.testing.expect(exceptions.frame_write(&frame, 1, buf.len));
+    try std.testing.expect(handle_svc(&frame, svc_immediate));
+    try std.testing.expectEqual(@as(u64, 1), exceptions.frame_read(&frame, 0));
+    try std.testing.expectEqual(@as(u64, 1), call_count(sys_procs));
+    try std.testing.expectEqualStrings("user-el0", buf[24 .. 24 + 8]);
+}
+
 test "syscall: counters are monotonic and report is deterministic" {
     userspace.init();
     init(test_writer);
@@ -666,14 +800,15 @@ test "syscall: counters are monotonic and report is deterministic" {
     var con = mock.console();
     report(&con);
     try std.testing.expectEqualStrings(
-        "syscalls: slots=64 implemented=7\n" ++
+        "syscalls: slots=64 implemented=8\n" ++
             "  0 sys_ping calls=2\n" ++
             "  1 sys_write calls=0\n" ++
             "  2 sys_yield calls=0\n" ++
             "  3 sys_exit calls=0\n" ++
             "  4 sys_sleep calls=0\n" ++
             "  5 sys_ipc_send calls=0\n" ++
-            "  6 sys_ipc_recv calls=0\n",
+            "  6 sys_ipc_recv calls=0\n" ++
+            "  7 sys_procs calls=0\n",
         mock.contents(),
     );
 }

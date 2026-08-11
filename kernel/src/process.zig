@@ -334,6 +334,45 @@ pub const ProcessInfo = struct {
     exit_status: u64,
 };
 
+// ---------------------------------------------------------------------------
+// Card 4a (claim 5799): the bounded EL0-readable process snapshot
+// ---------------------------------------------------------------------------
+
+/// Fixed width of one snapshot row (40 bytes): `u64 pid` (LE) at 0, `u64`
+/// state code at 8 (the `State` enum value: 1=created, 2=running,
+/// 3=exited), `u64 exit_status` at 16 (0 unless exited), `name` (16 bytes,
+/// NUL-padded — the `name_max` bound) at 24. Fixed width is what makes
+/// `sys_procs`'s `max`-byte truncation honest: `max` floors to WHOLE rows.
+pub const snapshot_row_bytes: usize = 40;
+/// The name field's width inside a row (the registry's `name_max`).
+pub const snapshot_name_bytes: usize = name_max;
+
+/// Marshal every NON-FREE descriptor (created/running/exited — free rows
+/// are skipped) into `dst` as fixed-width rows, in id order. Returns the
+/// row count. The caller (the syscall layer) passes a fixed BSS scratch of
+/// at least `max_processes * snapshot_row_bytes` bytes — no allocation
+/// anywhere. The exit status column is only meaningful for exited rows
+/// (the status is snapshotted at exit and survives the reap — claim
+/// 3848), so an EL0 reader can tell a live peer from a dead one.
+pub fn snapshot(dst: []u8) usize {
+    var rows: usize = 0;
+    var id: usize = 0;
+    while (id < max_processes) : (id += 1) {
+        if (processes[id].state == .free) continue;
+        const row = dst[rows * snapshot_row_bytes ..][0..snapshot_row_bytes];
+        std.mem.writeInt(u64, row[0..8], id, .little);
+        std.mem.writeInt(u64, row[8..16], @intFromEnum(processes[id].state), .little);
+        std.mem.writeInt(u64, row[16..24], processes[id].exit_status, .little);
+        @memset(row[24..snapshot_row_bytes], 0);
+        const take = @min(processes[id].name_len, snapshot_name_bytes);
+        const name_start: usize = 24;
+        const name_end: usize = name_start + take;
+        @memcpy(row[name_start..name_end], processes[id].name_buf[0..take]);
+        rows += 1;
+    }
+    return rows;
+}
+
 pub fn info(id: usize) ?ProcessInfo {
     if (id >= max_processes or processes[id].state == .free) return null;
     const p = &processes[id];
@@ -702,4 +741,48 @@ test "process: the static boot payload owns no allocator pages" {
     try std.testing.expectEqual(@as(u64, 0), pinfo.text_pages);
     try std.testing.expectEqual(@as(u64, 0), pinfo.stack_pages);
     try std.testing.expectEqual(@as(u64, 0), pinfo.kernel_stack_pages);
+}
+
+test "process: snapshot marshals non-free rows in id order with the fixed 40-byte shape" {
+    // Card 4a (claim 5799): the `sys_procs` snapshot — free descriptors
+    // are skipped, every other row carries pid / state code / exit status
+    // / NUL-padded name at the documented offsets.
+    init();
+    var scratch: [max_processes * snapshot_row_bytes]u8 = [_]u8{0xaa} ** (max_processes * snapshot_row_bytes);
+    // Empty registry: zero rows.
+    try std.testing.expectEqual(@as(usize, 0), snapshot(&scratch));
+
+    const boot = create("user-el0", .{ .entry_va = 0x400000, .content_len = 64 }, .{}, .{}).?;
+    _ = bind(boot, 2);
+    on_task_exit(2, 7); // exited with status 7
+    _ = take_exit_report();
+    const peer = create("PEER.BIN", .{ .entry_va = 0x400000, .content_len = 64 }, .{}, .{}).?;
+    _ = bind(peer, 3);
+
+    try std.testing.expectEqual(@as(usize, 2), snapshot(&scratch));
+    // Row 0 (pid 0, user-el0, exited): pid at 0, state code at 8, the
+    // snapshotted status at 16, the NUL-padded name at 24.
+    try std.testing.expectEqual(@as(u64, 0), std.mem.readInt(u64, scratch[0..8], .little));
+    try std.testing.expectEqual(@as(u64, @intFromEnum(State.exited)), std.mem.readInt(u64, scratch[8..16], .little));
+    try std.testing.expectEqual(@as(u64, 7), std.mem.readInt(u64, scratch[16..24], .little));
+    try std.testing.expectEqualStrings("user-el0", scratch[24 .. 24 + 8]);
+    for (scratch[24 + 8 .. 40]) |byte| try std.testing.expectEqual(@as(u8, 0), byte); // NUL-padded
+    // Row 1 (pid 1, PEER.BIN, running): a full row is exactly 40 bytes.
+    try std.testing.expectEqual(@as(u64, 1), std.mem.readInt(u64, scratch[40..48], .little));
+    try std.testing.expectEqual(@as(u64, @intFromEnum(State.running)), std.mem.readInt(u64, scratch[48..56], .little));
+    try std.testing.expectEqual(@as(u64, 0), std.mem.readInt(u64, scratch[56..64], .little)); // running: no status
+    try std.testing.expectEqualStrings("PEER.BIN", scratch[64 .. 64 + 8]);
+
+    // A recycled (reaped) descriptor leaves the snapshot (the row count
+    // drops) and a NEW process takes the freed slot — the snapshot always
+    // reflects the live registry.
+    try std.testing.expect(reap(boot));
+    try std.testing.expectEqual(@as(usize, 1), snapshot(&scratch));
+    const third = create("COUNTER.BIN", .{}, .{}, .{}).?;
+    try std.testing.expectEqual(@as(usize, 2), snapshot(&scratch));
+    try std.testing.expectEqual(@as(u64, 0), std.mem.readInt(u64, scratch[0..8], .little)); // COUNTER reuses pid 0
+    try std.testing.expectEqualStrings("COUNTER.BIN", scratch[24 .. 24 + 11]);
+    // The recycled slot is pid 0 again (the freed descriptor's id is
+    // reused), so `third` is 0 — the snapshot reflects the live registry.
+    try std.testing.expectEqual(@as(usize, 0), third);
 }

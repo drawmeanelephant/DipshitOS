@@ -120,6 +120,7 @@ CI) fails if the table drifts from the claim files.
 | [5275-tick-driven-task-scheduler](5275-tick-driven-task-scheduler.md) | buffy (`agent/buffy/macos27-custom-virtio-spike`) | ✅ done |
 | [5725-m3-docs-reconcile-syscall-abi](5725-m3-docs-reconcile-syscall-abi.md) | Buffy (`agent/buffy/m3-docs-reconcile-syscall-abi`) | ✅ done 2026-08-10 |
 | [5795-pool-scale-seven](5795-pool-scale-seven.md) | Buffy (`agent/buffy/m4-pool-scale`) | ✅ done — landed 2026-08-11 (claim flipped after class-A |
+| [5799-procs-syscall](5799-procs-syscall.md) | Buffy (`agent/buffy/m4-procs-syscall`) | ✅ done 2026-08-11 (claim flipped after class-A green + the new live gate + the full shared-seam sweep) |
 | [5804-per-task-address-spaces](5804-per-task-address-spaces.md) | Buffy (`agent/buffy/m3-addrspaces`) | ✅ done 2026-08-10 |
 | [5844-macos27-custom-virtio-spike](5844-macos27-custom-virtio-spike.md) | buffy (`agent/buffy/macos27-custom-virtio-spike`) | ✅ done 2026-08-09 on `agent/buffy/macos27-custom-virtio-spike` |
 | [5965-ipc-mailbox](5965-ipc-mailbox.md) | Buffy (`agent/buffy/m4-ipc`) | ✅ done 2026-08-10 (PR #79, staged after PR #78 card 3e) |
