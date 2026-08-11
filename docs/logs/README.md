@@ -73,6 +73,7 @@ verify-coordination`, and CI) fails if it drifts from the files.
 | milestone four card 3: process abstraction (claim 3848) | [`agent-buffy-m4-process-abstraction.md`](agent-buffy-m4-process-abstraction.md) |
 | milestone-four follow-on 4, card 4a: process observability — sys_procs introspection syscall | [`agent-buffy-m4-procs-syscall.md`](agent-buffy-m4-procs-syscall.md) |
 | milestone-four follow-on 4, card 4c: exit-status propagation — a bounded `sys_wait` block | [`agent-buffy-m4-wait-exit.md`](agent-buffy-m4-wait-exit.md) |
+| agent/buffy/m5-net-rx | [`agent-buffy-m5-net-rx.md`](agent-buffy-m5-net-rx.md) |
 | agent/buffy/m5-net-tx | [`agent-buffy-m5-net-tx.md`](agent-buffy-m5-net-tx.md) |
 | `agent/buffy/macos27-custom-virtio-spike` | [`agent-buffy-macos27-custom-virtio-spike.md`](agent-buffy-macos27-custom-virtio-spike.md) |
 | `agent/codex/m3-march-tracker` | [`agent-codex-m3-march-tracker.md`](agent-codex-m3-march-tracker.md) |

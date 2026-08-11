@@ -27,12 +27,23 @@
 //! ETHERNET FRAME with no virtio_net_hdr prefix (the transitional reading:
 //! QEMU's reference device strips a 12-byte header only when checksum
 //! offload is negotiated — see `tx_hdr_len`, a confirm-at-claim-time
-//! constant). Queue 0 = RX, queue 1 = TX per the virtio-net spec §5.2;
-//! RX buffer supply + used-ring drain + MAC filtering + `net recv` are
-//! card N2 (queue 0 is set up but supplied with ZERO buffers — honest
-//! bounds). TX completion is drained from the used ring POLLED (the
-//! claim-6420 one-request-at-a-time blk shape); IRQ delivery is already
-//! proven (claims 9187/0828) and lands with RX in N2.
+//! constant). Queue 0 = RX, queue 1 = TX per the virtio-net spec §5.2.
+//! N1 (claim 1373) proved the transport + TX; card N2 (claim 6076)
+//! adds the RX path: queue 0 is supplied with a fixed BSS buffer
+//! (one-request-at-a-time like TX), the used ring is drained POLLED
+//! (the proven N1/blk shape — the net device's used-buffer IRQ line is
+//! NOT yet observed on this platform; whether the device delivers one,
+//! and via what INTID, is a claim-time finding recorded in `net`/the
+//! claim, not assumed), accepted frames land in a bounded FIFO (no
+//! heap, the card-3d push/drain pattern, drop-oldest overflow), and
+//! `net recv` prints them. MAC filtering accepts own + broadcast and
+//! drops the rest (a counter in the `net` report). The RX buffer is
+//! sized with a 12-byte virtio_net_hdr headroom (N1 observed the device
+//! CONSUMES one on TX; whether the device WRITES one into RX buffers is
+//! pinned from observation at claim time — `net: rx-obs` records the
+//! first frame's device-written length + first bytes, and `rx_hdr_len`
+//! is corrected like `tx_hdr_len` was (0→12) if the observation
+//! differs).
 //!
 //! The logic is host-testable through injectable transport ops (the
 //! fat.zig injected-sector-I/O pattern): feature selection, MAC read,
@@ -178,6 +189,8 @@ pub const Device = struct {
     tx_used: VirtqUsed align(4) = undefined,
     /// Drain point on the TX used ring (the last consumed index).
     tx_last_used: u16 = 0,
+    /// Drain point on the RX used ring (the last consumed index).
+    rx_last_used: u16 = 0,
     /// TX counters: completions drained from the used ring and the bytes
     /// submitted (the `net` report's tx=frames,bytes).
     tx_frames: u64 = 0,
@@ -195,6 +208,67 @@ pub const Device = struct {
 /// used ring, and reports byte counts. No heap — bounded by
 /// `tx_hdr_len + frame_max` (1526 B).
 pub var tx_staging: [tx_hdr_len + frame_max]u8 = undefined;
+
+// ---------------------------------------------------------------------------
+// RX path (milestone five, card N2 — claim 6076)
+// ---------------------------------------------------------------------------
+
+/// Whether the device writes a 12-byte virtio_net_hdr into RX buffers
+/// (the claim-time question). N1 OBSERVED the device CONSUMES one on
+/// every TX buffer; the RX descriptor is device-WRITE, so the device
+/// writes the frame — and possibly its own header — into the buffer.
+/// OBSERVED at claim time (2026-08-11, the live VZ gate): the device
+/// DOES write one — the first received frame's device-written length was
+/// 72 for a 60-byte frame, and the first 16 bytes were
+/// `00 00 00 00 00 00 00 00 00 00 01 00 ff ff ff ff` — a proper
+/// virtio_net_hdr (flags/gso fields zero = no offloads, `num_buffers=1`
+/// in bytes 10-11) followed by the raw Ethernet frame. `rx_hdr_len=12`
+/// (the same 12 the device consumes on TX) is pinned; the MAC filter's
+/// dst read and `net recv`'s frame offset both use it.
+pub const rx_hdr_len: usize = 12;
+
+/// Largest single device-written RX buffer: header headroom + the largest
+/// Ethernet frame (14 + 1500). OBSERVED at claim time (2026-08-11, the
+/// live VZ gate): VZ's device REFUSES an RX buffer smaller than 1530
+/// bytes — with `rx_buf_len=1526/1528/1529` the delivery attempt wedged
+/// the whole device (no frame written, used ring never advanced, and
+/// subsequent TX completions stalled until the buffer was enlarged;
+/// 1530 works). The production size is 4096 (page-rounded headroom, far
+/// above the observed 1530 minimum).
+pub const rx_buf_len: usize = 4096;
+
+/// Fixed BSS RX buffer (ONE buffer, one-request-at-a-time like N1's TX).
+/// The device DMA-writes the frame into it; the driver invalidates before
+/// reading and re-arms after every drain.
+pub var rx_buf: [rx_buf_len]u8 align(16) = undefined;
+
+/// Bounded frame FIFO capacity (fixed slots, no heap — the card-3d
+/// push-from-context + shell-idle-drain pattern). Each slot holds one RAW
+/// device-written buffer (header headroom included — the header question
+/// is pinned by observation, not stripped blindly).
+pub const fifo_slots: usize = 4;
+
+pub const FrameSlot = struct {
+    len: usize = 0,
+    data: [rx_buf_len]u8 = undefined,
+};
+
+pub var rx_fifo: [fifo_slots]FrameSlot = [_]FrameSlot{.{}} ** fifo_slots;
+pub var rx_fifo_head: usize = 0; // oldest slot (next to pop)
+pub var rx_fifo_count: usize = 0;
+
+/// RX counters (the `net` report): frames accepted into the FIFO, bytes
+/// accepted (device-written length), frames dropped by the MAC filter,
+/// FIFO overflows (drop-oldest), and the last device-written length +
+/// first 16 bytes (the claim-time rx-obs record — the header question).
+pub var rx_frames: u64 = 0;
+pub var rx_bytes: u64 = 0;
+pub var rx_filtered: u64 = 0;
+pub var rx_overflow: u64 = 0;
+pub var rx_last_len: u32 = 0;
+pub var rx_first16: [16]u8 = .{0} ** 16;
+/// Whether the queue-0 buffer is currently supplied (armed + kicked).
+pub var rx_armed: bool = false;
 
 pub var net_dev: Device = .{};
 pub var net_ops: Ops = .{
@@ -219,7 +293,12 @@ pub var net_rearmed: bool = false; // post-exit re-arm succeeded
 pub var net_common: u64 = 0; // common-config struct address (BAR + cap offset)
 pub var net_notify: u64 = 0; // notify region base (BAR + cap offset)
 pub var net_notify_mult: u32 = 0; // notify_off_multiplier
-pub var net_queue_notify_off: u16 = 0; // queue notify offset (read per queue)
+pub var net_queue_notify_off: u16 = 0; // queue 1's notify offset (N1's TX kick)
+/// Per-queue notify offsets (common cfg 0x1e, read after queue_select —
+/// Virtio 1.3 §4.1.5.2.1: the 16-bit kick is a QUEUE-INDEX write at
+/// notify_base + queue_notify_off * multiplier, and each queue has its
+/// OWN offset). queue 0 (RX) is card N2's kick; queue 1 (TX) is N1's.
+pub var net_notify_off: [2]u16 = .{ 0, 0 };
 pub var net_devcfg: u64 = 0; // device-config region (MAC read)
 pub var net_bar0: u64 = 0; // net BAR0 base (the identity-map window)
 pub var net_did: u32 = 0; // OBSERVED device ID (0x1041 expected)
@@ -392,8 +471,11 @@ fn real_cfg_write32(off: u32, value: u32) void {
 }
 fn real_notify(q: u16) void {
     // Virtio 1.3 §4.1.5.2.1: without VIRTIO_F_NOTIFICATION_DATA the
-    // notification is a 16-bit write of the queue index.
-    mmio.mmio_write16(net_notify + @as(u64, net_queue_notify_off) * net_notify_mult, q);
+    // notification is a 16-bit write of the queue index at
+    // notify_base + queue_notify_off(q) * multiplier — each queue has
+    // its OWN offset (read from common cfg 0x1e after queue_select).
+    const off = if (q < 2) net_notify_off[q] else net_queue_notify_off;
+    mmio.mmio_write16(net_notify + @as(u64, off) * net_notify_mult, q);
 }
 fn real_to_phys(va: usize) u64 {
     return mmu.to_phys(va);
@@ -624,6 +706,16 @@ fn transport_init(ops: *const Ops, dev: *Device, rearm: bool) bool {
     ops.clean(@intFromPtr(&dev.rx_used), @sizeOf(VirtqUsed));
     ops.clean(@intFromPtr(&dev.tx_used), @sizeOf(VirtqUsed));
     dev.tx_last_used = 0;
+    dev.rx_last_used = 0;
+    // Card N2: fresh RX state per init/re-arm (BSS is not trusted zeroed).
+    rx_armed = false;
+    rx_frames = 0;
+    rx_bytes = 0;
+    rx_filtered = 0;
+    rx_overflow = 0;
+    rx_last_len = 0;
+    rx_fifo_head = 0;
+    rx_fifo_count = 0;
 
     // Queue 0 = RX (set up per spec; ZERO buffers supplied — RX is N2).
     if (!setup_queue(ops, 0, &dev.rx_desc, &dev.rx_avail, &dev.rx_used)) {
@@ -631,13 +723,15 @@ fn transport_init(ops: *const Ops, dev: *Device, rearm: bool) bool {
         return false;
     }
     dev.q0_enabled = true;
+    net_notify_off[0] = ops.cfg_read16(0x1e); // queue 0's notify offset (card N2's RX kick)
     // Queue 1 = TX (N1's queue — the used ring drains here).
     if (!setup_queue(ops, 1, &dev.tx_desc, &dev.tx_avail, &dev.tx_used)) {
         net_fail = if (rearm) "re-arm: queue 1 (TX) setup failed" else "queue 1 (TX) setup failed";
         return false;
     }
     dev.q1_enabled = true;
-    net_queue_notify_off = ops.cfg_read16(0x1e); // queue 1's notify offset
+    net_notify_off[1] = ops.cfg_read16(0x1e); // queue 1's notify offset (N1's TX kick)
+    net_queue_notify_off = net_notify_off[1];
 
     ops.cfg_write8(0x14, 1 | 2 | 8 | 4); // DRIVER_OK
     if ((ops.cfg_read8(0x14) & 4) == 0) {
@@ -894,6 +988,143 @@ pub fn net_send_frame(requested: usize, out_len: *usize) SendResult {
 }
 
 // ---------------------------------------------------------------------------
+// RX path (queue 0, POLLED used-ring drain — the N1/blk shape)
+// ---------------------------------------------------------------------------
+
+/// Supply the queue-0 RX buffer (descriptor 0, device-WRITE) and kick so
+/// the device knows a buffer is available. ONE request outstanding at a
+/// time keeps the ring invariant trivial (mirror N1's TX). Called after
+/// the post-exit re-arm and again after every drain. Returns false when
+/// the transport is unarmed.
+pub fn net_rx_arm() bool {
+    if (!net_ready) return false;
+    const ops = &net_ops;
+    const dev = &net_dev;
+    dev.rx_desc[0] = .{
+        .addr = ops.to_phys(@intFromPtr(&rx_buf)),
+        .len = rx_buf_len,
+        .flags = virtq_f_write,
+        .next = 0xffff,
+    };
+    dev.rx_avail.ring[dev.rx_avail.idx % queue_size] = 0; // descriptor 0
+    dev.rx_avail.idx +%= 1;
+    ops.clean(@intFromPtr(&dev.rx_desc), @sizeOf([queue_size]VirtqDesc));
+    ops.clean(@intFromPtr(&dev.rx_avail), @sizeOf(VirtqAvail));
+    ops.notify(0);
+    rx_armed = true;
+    return true;
+}
+
+/// MAC filter: accept own MAC + broadcast (`ff:ff:ff:ff:ff:ff`), drop the
+/// rest. `off` is the frame start in the buffer (the `rx_hdr_len`
+/// constant — pinned from observation at claim time). Pure and
+/// host-testable.
+pub fn mac_accept(off: usize, buf: []const u8, own: *const [6]u8) bool {
+    if (off + 6 > buf.len) return false;
+    const dst = buf[off .. off + 6];
+    var own_match = true;
+    var bcast = true;
+    var i: usize = 0;
+    while (i < 6) : (i += 1) {
+        if (dst[i] != own[i]) own_match = false;
+        if (dst[i] != 0xff) bcast = false;
+    }
+    return own_match or bcast;
+}
+
+/// Push `frame` (the RAW device-written buffer bytes) into the bounded
+/// FIFO. Drop-oldest on overflow (the newest frame wins — the card-3d
+/// contract; `rx_overflow` counts the drops). Returns false only when the
+/// frame exceeds a slot (should never happen — buffers are bounded).
+pub fn fifo_push(frame: []const u8) bool {
+    if (frame.len > rx_buf_len) return false;
+    if (rx_fifo_count == fifo_slots) {
+        rx_fifo_head = (rx_fifo_head + 1) % fifo_slots; // drop the oldest
+        rx_fifo_count -= 1;
+        rx_overflow +%= 1;
+    }
+    const slot = (rx_fifo_head + rx_fifo_count) % fifo_slots;
+    @memcpy(rx_fifo[slot].data[0..frame.len], frame);
+    rx_fifo[slot].len = frame.len;
+    rx_fifo_count += 1;
+    return true;
+}
+
+/// Peek the oldest FIFO frame (a pointer into the FIFO — valid until the
+/// next push/pop). Returns null when empty. `net recv` prints via this
+/// (no stack copy of a 1526-byte slot on the kernel stack), then advances
+/// with `fifo_pop_advance`.
+pub fn fifo_peek() ?[]const u8 {
+    if (rx_fifo_count == 0) return null;
+    const slot = rx_fifo_head;
+    return rx_fifo[slot].data[0..rx_fifo[slot].len];
+}
+
+/// Advance past the oldest FIFO frame after it was reported (consume).
+pub fn fifo_pop_advance() void {
+    if (rx_fifo_count == 0) return;
+    rx_fifo_head = (rx_fifo_head + 1) % fifo_slots;
+    rx_fifo_count -= 1;
+}
+
+/// Current FIFO occupancy (the `net` report's fifo=).
+pub fn fifo_occupancy() usize {
+    return rx_fifo_count;
+}
+
+/// Drain the RX used ring (POLLED — the proven N1/blk shape; the net
+/// device's used-buffer IRQ is not yet observed on this platform, so
+/// there is no IRQ-context push in N2 — recorded honestly in the claim).
+/// On a completion: read the device-written frame out of `rx_buf`
+/// (invalidating the cache line first — the device DMA-wrote it), MAC-
+/// filter it (own + broadcast), push accepted frames into the bounded
+/// FIFO, re-arm the buffer. Idempotent; called from the shell idle loop
+/// and before the `net`/`net recv` reports.
+pub fn net_rx_drain() void {
+    if (!net_ready or !rx_armed) return;
+    const ops = &net_ops;
+    const dev = &net_dev;
+    ops.invalidate(@intFromPtr(&dev.rx_used), @sizeOf(VirtqUsed));
+    if (dev.rx_used.idx == dev.rx_last_used) return;
+    const report = drain_delta(dev.rx_last_used, dev.rx_used.idx, &dev.rx_used.ring);
+    dev.rx_last_used = dev.rx_used.idx;
+    if (report.completed == 0) return;
+
+    // The device wrote into rx_buf — invalidate before reading. The RX
+    // used-element `len` is the DEVICE-WRITTEN length (N1's TX `len` was
+    // ~0); one request outstanding means one completion per drain.
+    ops.invalidate(@intFromPtr(&rx_buf), rx_buf_len);
+    const dev_len: usize = @intCast(report.bytes);
+    if (dev_len > rx_buf_len) {
+        // Device overran the bound — honest record, drop, re-arm.
+        rx_filtered +%= 1;
+        rx_last_len = rx_buf_len;
+        _ = net_rx_arm();
+        return;
+    }
+    rx_last_len = @intCast(dev_len);
+    // The claim-time rx-obs record: the first 16 device-written bytes pin
+    // the RX-header question (12 zero bytes + dst MAC = header present;
+    // dst MAC at 0 = none). Recorded even when the filter drops, so a
+    // drop is distinguishable from a failed delivery.
+    const n16 = @min(dev_len, 16);
+    var i: usize = 0;
+    while (i < n16) : (i += 1) rx_first16[i] = rx_buf[i];
+
+    // MAC filter: the frame starts at `rx_hdr_len` (the claim-time
+    // constant — a wrong guess shows as filtered=1 + a distinctive
+    // rx-obs, and is corrected like tx_hdr_len was).
+    if (!mac_accept(rx_hdr_len, rx_buf[0..dev_len], &net_mac)) {
+        rx_filtered +%= 1;
+    } else {
+        _ = fifo_push(rx_buf[0..dev_len]);
+        rx_frames +%= 1;
+        rx_bytes +%= dev_len;
+    }
+    _ = net_rx_arm();
+}
+
+// ---------------------------------------------------------------------------
 // Host tests — pure logic + the full submit/drain path over mock ops
 // ---------------------------------------------------------------------------
 
@@ -1026,6 +1257,193 @@ test "virtio_net: full TX submit + drain over a mock transport" {
     net_ready = false; // restore for other modules' tests
 }
 
+test "virtio_net: MAC filter — own MAC + broadcast accepted, other dropped" {
+    const own = [6]u8{ 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 };
+    const bcast = [6]u8{ 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
+    const other = [6]u8{ 0x02, 0x00, 0x00, 0x00, 0x00, 0x03 };
+    // A bare 6-byte dst at offset 0.
+    try std.testing.expect(mac_accept(0, &own, &own));
+    try std.testing.expect(mac_accept(0, &bcast, &own));
+    try std.testing.expect(!mac_accept(0, &other, &own));
+    // With a 12-byte virtio_net_hdr prefix (the RX-header contract): the
+    // dst sits at offset 12.
+    var buf: [rx_hdr_len + 14]u8 = .{0} ** (rx_hdr_len + 14);
+    @memcpy(buf[rx_hdr_len .. rx_hdr_len + 6], &own);
+    try std.testing.expect(mac_accept(rx_hdr_len, &buf, &own));
+    @memcpy(buf[rx_hdr_len .. rx_hdr_len + 6], &other);
+    try std.testing.expect(!mac_accept(rx_hdr_len, &buf, &own));
+    // A buffer too short for the dst read refuses.
+    try std.testing.expect(!mac_accept(rx_hdr_len, buf[0..rx_hdr_len], &own));
+}
+
+test "virtio_net: bounded frame FIFO — push, pop, occupancy, drop-oldest" {
+    // Reset the module FIFO state (BSS is not trusted zeroed).
+    rx_fifo_head = 0;
+    rx_fifo_count = 0;
+    rx_overflow = 0;
+    const a = [_]u8{0xaa} ** 10;
+    const b = [_]u8{0xbb} ** 20;
+    const c = [_]u8{0xcc} ** 30;
+    const d = [_]u8{0xdd} ** 40;
+    const e = [_]u8{0xee} ** 50; // the overflow frame (drops `a`)
+    try std.testing.expect(fifo_push(&a));
+    try std.testing.expect(fifo_push(&b));
+    try std.testing.expect(fifo_push(&c));
+    try std.testing.expect(fifo_push(&d));
+    try std.testing.expectEqual(@as(usize, 4), fifo_occupancy());
+    // The 5th push overflows: drop-oldest (`a`), newest wins.
+    try std.testing.expect(fifo_push(&e));
+    try std.testing.expectEqual(@as(usize, 4), fifo_occupancy());
+    try std.testing.expectEqual(@as(u64, 1), rx_overflow);
+    // Drain order: b, c, d, e (a was dropped).
+    var out: [rx_buf_len]u8 = undefined;
+    const lb = fifo_pop_for_test(&out);
+    try std.testing.expectEqual(@as(usize, 20), lb);
+    try std.testing.expectEqualSlices(u8, &b, out[0..lb]);
+    const lc = fifo_pop_for_test(&out);
+    try std.testing.expectEqual(@as(usize, 30), lc);
+    try std.testing.expectEqualSlices(u8, &c, out[0..lc]);
+    const ld = fifo_pop_for_test(&out);
+    try std.testing.expectEqual(@as(usize, 40), ld);
+    try std.testing.expectEqualSlices(u8, &d, out[0..ld]);
+    const le = fifo_pop_for_test(&out);
+    try std.testing.expectEqual(@as(usize, 50), le);
+    try std.testing.expectEqualSlices(u8, &e, out[0..le]);
+    try std.testing.expectEqual(@as(usize, 0), fifo_occupancy());
+    // An over-size frame is refused (never stored).
+    var big: [rx_buf_len + 1]u8 = undefined;
+    try std.testing.expect(!fifo_push(&big));
+    try std.testing.expectEqual(@as(usize, 0), fifo_occupancy());
+}
+
+test "virtio_net: RX supply + used-ring drain + filter + FIFO over a mock" {
+    const saved_ops = net_ops;
+    net_ops = mock_ops();
+    net_ready = true;
+    defer {
+        net_ops = saved_ops;
+        net_ready = false;
+    }
+    net_dev = .{}; // fresh rings (the module global the RX path uses)
+    net_mac = fallback_mac; // own MAC 02:00:00:00:00:02
+    rx_fifo_head = 0;
+    rx_fifo_count = 0;
+    rx_frames = 0;
+    rx_bytes = 0;
+    rx_filtered = 0;
+    rx_overflow = 0;
+    rx_armed = false;
+    mock_used_idx = 0;
+    mock_used_len = 0;
+    mock_kicks = 0;
+
+    // A delivered frame: the OBSERVED 12-byte virtio_net_hdr (all zero
+    // except num_buffers=1 at bytes 10-11 — the claim-time live-gate
+    // observation) + a BROADCAST Ethernet frame (dst ff*6, src
+    // 02:00:00:00:00:03, ethertype 0x0800, payload bytes 00..1f) — the
+    // RX-header + filter contract the class-B gate pins from observation.
+    var delivered: [rx_buf_len]u8 = .{0} ** rx_buf_len;
+    delivered[10] = 0x01; // virtio_net_hdr num_buffers = 1 (observed)
+    const dst = [6]u8{ 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
+    const src = [6]u8{ 0x02, 0x00, 0x00, 0x00, 0x00, 0x03 };
+    @memcpy(delivered[rx_hdr_len .. rx_hdr_len + 6], &dst);
+    @memcpy(delivered[rx_hdr_len + 6 .. rx_hdr_len + 12], &src);
+    delivered[rx_hdr_len + 12] = 0x08;
+    delivered[rx_hdr_len + 13] = 0x00;
+    var i: usize = 0;
+    while (i < 32) : (i += 1) delivered[rx_hdr_len + 14 + i] = @truncate(i);
+    mock_rx_frame = delivered[0 .. rx_hdr_len + 46]; // header + 46-byte frame
+
+    // Arm: the kick delivers the pending frame into rx_buf and advances
+    // the used ring (device-written len = 58).
+    try std.testing.expect(net_rx_arm());
+    try std.testing.expect(rx_armed);
+    try std.testing.expectEqual(@as(u16, 1), mock_kicks);
+    try std.testing.expectEqual(@as(u16, 1), net_dev.rx_avail.idx);
+
+    // Drain: the completion is accounted, the frame passes the broadcast
+    // filter, and lands in the FIFO (raw device-written bytes — header
+    // included). The drain's re-arm re-delivers the same mock frame, so
+    // the FIFO holds one frame and the buffer is re-supplied.
+    net_rx_drain();
+    try std.testing.expectEqual(@as(u64, 1), rx_frames);
+    try std.testing.expectEqual(@as(u64, 58), rx_bytes);
+    try std.testing.expectEqual(@as(u64, 0), rx_filtered);
+    try std.testing.expectEqual(@as(u64, 0), rx_overflow);
+    try std.testing.expectEqual(@as(u32, 58), rx_last_len);
+    try std.testing.expectEqual(@as(usize, 1), fifo_occupancy());
+    try std.testing.expectEqual(@as(u16, 2), net_dev.rx_avail.idx); // re-armed
+
+    // net recv consumes the FIFO frame: the exact device-written bytes.
+    const frame = fifo_peek().?;
+    try std.testing.expectEqual(@as(usize, 58), frame.len);
+    try std.testing.expectEqualSlices(u8, mock_rx_frame, frame);
+    fifo_pop_advance();
+    try std.testing.expectEqual(@as(usize, 0), fifo_occupancy());
+
+    // The rx-obs record captured the first 16 device-written bytes — the
+    // OBSERVED virtio_net_hdr (12 bytes: all zero except num_buffers=1 at
+    // bytes 10-11) + the first 4 broadcast-dst bytes: the claim-time
+    // header pin.
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01, 0x00 }, rx_first16[0..12]);
+    try std.testing.expectEqualSlices(u8, dst[0..4], rx_first16[12..16]);
+}
+
+test "virtio_net: RX MAC filter drops a foreign frame (counter, not FIFO)" {
+    const saved_ops = net_ops;
+    net_ops = mock_ops();
+    net_ready = true;
+    defer {
+        net_ops = saved_ops;
+        net_ready = false;
+    }
+    net_dev = .{};
+    net_mac = fallback_mac;
+    rx_fifo_head = 0;
+    rx_fifo_count = 0;
+    rx_frames = 0;
+    rx_bytes = 0;
+    rx_filtered = 0;
+    rx_overflow = 0;
+    rx_armed = false;
+    mock_used_idx = 0;
+    mock_used_len = 0;
+    mock_kicks = 0;
+
+    // A frame addressed to ANOTHER host (dst 02:00:00:00:00:04): the
+    // filter must drop it — the counter moves, the FIFO stays empty, and
+    // the rx-obs record still captures the delivered bytes (so a drop is
+    // distinguishable from a failed delivery).
+    var delivered: [rx_buf_len]u8 = .{0} ** rx_buf_len;
+    delivered[10] = 0x01; // the OBSERVED virtio_net_hdr num_buffers=1
+    const dst = [6]u8{ 0x02, 0x00, 0x00, 0x00, 0x00, 0x04 };
+    const src = [6]u8{ 0x02, 0x00, 0x00, 0x00, 0x00, 0x05 };
+    @memcpy(delivered[rx_hdr_len .. rx_hdr_len + 6], &dst);
+    @memcpy(delivered[rx_hdr_len + 6 .. rx_hdr_len + 12], &src);
+    delivered[rx_hdr_len + 12] = 0x08;
+    delivered[rx_hdr_len + 13] = 0x00;
+    var i: usize = 0;
+    while (i < 32) : (i += 1) delivered[rx_hdr_len + 14 + i] = @truncate(i);
+    mock_rx_frame = delivered[0 .. rx_hdr_len + 46];
+
+    try std.testing.expect(net_rx_arm());
+    net_rx_drain();
+    try std.testing.expectEqual(@as(u64, 0), rx_frames);
+    try std.testing.expectEqual(@as(u64, 1), rx_filtered);
+    try std.testing.expectEqual(@as(usize, 0), fifo_occupancy());
+    try std.testing.expectEqual(@as(u32, 58), rx_last_len);
+    try std.testing.expectEqualSlices(u8, dst[0..4], rx_first16[12..16]);
+}
+
+/// Test helper: pop the oldest FIFO frame into `out` (the real path peeks
+/// + advances to avoid a stack copy; the tests want a copy to compare).
+fn fifo_pop_for_test(out: []u8) usize {
+    const frame = fifo_peek() orelse return 0;
+    @memcpy(out[0..frame.len], frame);
+    fifo_pop_advance();
+    return frame.len;
+}
+
 // --- test fixtures ----------------------------------------------------------
 
 /// Fake device-config reads: the runner's fixed MAC 02:00:00:00:00:01 sits
@@ -1041,6 +1459,12 @@ fn fake_dev_read32(off: u32) u32 {
 var mock_cfg: [0x40]u8 = .{0} ** 0x40;
 var mock_kicks: u16 = 0;
 var mock_used_idx: u16 = 0;
+/// Device-written length of the last completion (RX: the frame length —
+/// the TX used-element len was ~0 on VZ; the RX one is the real one).
+var mock_used_len: u32 = 0;
+/// The pending RX frame the fake device "delivers" into `rx_buf` on the
+/// queue-0 kick (host→guest injection over the mock transport).
+var mock_rx_frame: []const u8 = &.{};
 
 fn mock_dev_read32(off: u32) u32 {
     _ = off;
@@ -1074,18 +1498,33 @@ fn mock_to_phys(va: usize) u64 {
 fn mock_clean(_: usize, _: usize) void {}
 /// The fake device's "completion": before every used-ring poll the driver
 /// invalidates the used ring; the mock replays the fake device state (used
-/// index advanced on the kick) into the driver's real BSS ring.
+/// index advanced on the kick, device-written length) into the driver's
+/// real BSS ring.
 fn mock_invalidate(ptr: usize, len: usize) void {
     _ = len;
+    // The driver also invalidates the RX buffer after a device write; the
+    // mock has nothing to replay there (mock_notify already copied the
+    // frame in) — and must NOT treat the buffer's bytes as a used ring.
+    if (ptr == @intFromPtr(&rx_buf)) return;
     const used = @as(*VirtqUsed, @ptrFromInt(ptr));
     if (used.idx != mock_used_idx) {
         used.idx = mock_used_idx;
-        used.ring[(used.idx -% 1) % queue_size].len = 0; // TX: device writes nothing
+        if (mock_used_idx != 0) {
+            used.ring[(used.idx -% 1) % queue_size].len = mock_used_len;
+        }
     }
 }
 fn mock_notify(q: u16) void {
-    _ = q;
     mock_kicks +%= 1;
+    if (q == 0) {
+        // RX (card N2): the fake device writes the pending frame into the
+        // real `rx_buf` and completes the buffer (used.idx advances with
+        // the WRITTEN length).
+        @memcpy(rx_buf[0..mock_rx_frame.len], mock_rx_frame);
+        mock_used_len = @intCast(mock_rx_frame.len);
+    } else {
+        mock_used_len = 0; // TX: the device writes nothing (the N1 observation)
+    }
     mock_used_idx +%= 1; // the device consumes the request
 }
 

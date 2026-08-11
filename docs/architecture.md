@@ -96,8 +96,21 @@ VZEFIBootLoader (macOS VZ)
   buffer — observed) + the raw Ethernet frame, built in fixed BSS staging
   (no heap), submitted on queue 1, and drained from the used ring polled;
   the host capture holds the exact frames byte-for-byte (gate
-  `tools/verify-live-net-tx.sh` PASS 2/2). RX buffer supply + used-ring
-  drain + MAC filtering + `net recv` are card N2.
+  `tools/verify-live-net-tx.sh` PASS 2/2). **RX landed 2026-08-11 (claim
+  6076, card N2):** the runner's `--net-inject <file>` writes the
+  attachment's socket end ONCE on the guest's rx-armed serial trigger;
+  queue 0 is supplied with one fixed BSS buffer, the used ring is drained
+  POLLED (the N1/blk shape — the net device's used-buffer IRQ is not yet
+  observed), each delivered buffer is MAC-filtered (own + broadcast,
+  drop the rest) and pushed into a bounded 4-slot frame FIFO (pure BSS,
+  drop-oldest, drained by the shell idle loop and the `net recv`
+  subcommand — the card-3d pattern); `net recv` prints the received
+  frame(s) byte-exact with the observed 12-byte virtio_net_hdr headroom
+  (the RX-header question answered at claim time: the device writes a
+  virtio_net_hdr — `num_buffers=1` — before every raw frame; the device
+  also REFUSES an RX buffer under 1530 bytes). Gate
+  `tools/verify-live-net-rx.sh` PASS 3/3 (broadcast round trip,
+  own-MAC, foreign-MAC drop); ARP (N3) and IPv4 (N4) build on it.
 - **Guest ↔ host storage:** the disk is presented as a virtio block device.
   The guest never touches the storage device directly in milestones zero
   and one; the  firmware reads `EFI/BOOT/BOOTAA64.EFI` from it, and the boot stub writes

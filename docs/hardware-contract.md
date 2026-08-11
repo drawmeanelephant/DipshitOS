@@ -105,7 +105,33 @@ assumption comes from documentation or reasoning only.
   boot's serial log (`artifacts/live-net-tx-serial-*.log`) shows the
   did/class/mac/feat/queues/status lines above, and the runner's capture
   files (`artifacts/live-net-tx-cap-*.bin`) hold the exact frames the
-  guest submitted.
+  guest submitted. **RX proven 2026-08-11 (claim 6076, milestone five
+  card N2):** queue 0 is supplied with ONE fixed BSS buffer (post-re-arm,
+  `net: rx-armed`) and the host injects a datagram into the SAME
+  attachment's socket end via the runner's `--net-inject <file>` flag (a
+  serial trigger — the guest's rx-armed marker — not a sleep), VZ
+  delivers it into the buffer, the guest drains the used ring POLLED (the
+  N1/blk shape; **the net device's used-buffer IRQ line is NOT yet
+  observed on this platform — recorded in claim 6076, not assumed**), and
+  `net recv` prints the frame. **The device WRITES a 12-byte
+  virtio_net_hdr into RX buffers** (the claim-time RX-header question —
+  answered by observation): the first received frame's device-written
+  length was 72 for a 60-byte frame and the first 16 bytes were
+  `00 00 00 00 00 00 00 00 00 00 01 00 ff ff ff ff` — flags/gso fields
+  zero (no offloads) and `num_buffers=1` at bytes 10-11, so `rx_hdr_len
+  = 12` (the same 12 the device consumes on TX). **The device REFUSES an
+  RX buffer smaller than 1530 bytes:** with `rx_buf_len=1526/1528/1529`
+  the delivery attempt wedged the whole device (no frame written, used
+  ring never advanced, and subsequent TX completions stalled until the
+  buffer was enlarged; 1530 works) — the production buffer is 4096
+  (page-rounded headroom). The MAC filter accepts own + broadcast and
+  drops the rest with a counter (`net: rx=… filtered=N`), and a dropped
+  frame still leaves the rx-obs record (a drop is distinguishable from a
+  failed delivery). **[observed]** — every `verify-live-net-rx` boot's
+  serial log (`artifacts/live-net-rx-serial-*.log`) shows `net: rx-armed`
+  + `net: rx-obs len=…` + the rx counters, and the phase-1 capture
+  (`artifacts/live-net-rx-cap-1.bin`) is byte-exactly the injected
+  fixture (the guest re-sent it).
 - Custom virtio device (`VZCustomVirtioDeviceConfiguration`, the
   `--custom-virtio` runner flag / `zig build spike-virtio`): the guest sees
   a vendor-defined device on bus 0 as `VID=0x1af4 DID=0x1082`.

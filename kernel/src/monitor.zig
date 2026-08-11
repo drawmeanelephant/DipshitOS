@@ -246,7 +246,7 @@ fn ensure_registry() []const Command {
             .{ .name = "mem", .help = "summarize the EFI memory map", .usage = "mem", .handler = cmd_mem },
             .{ .name = "mbox", .help = "per-process IPC mailbox: pending messages and drain counters", .usage = "mbox [<pid>]", .max_args = 1, .handler = cmd_mbox },
             .{ .name = "mount", .help = "switch the active FAT volume (esp or data)", .usage = "mount <esp|data>", .min_args = 1, .max_args = 1, .handler = cmd_mount },
-            .{ .name = "net", .help = "virtio-net transport: device DID, MAC, queues, feature bits", .usage = "net", .handler = cmd_net },
+            .{ .name = "net", .help = "virtio-net transport + RX: device DID, MAC, queues, feature bits, RX counters ('net recv' prints received frames)", .usage = "net [recv]", .max_args = 1, .handler = cmd_net },
             .{ .name = "netsend", .help = "send a known Ethernet frame (bounded staging, TX + used-ring drain)", .usage = "netsend <bytes>", .min_args = 1, .max_args = 1, .handler = cmd_netsend },
             .{ .name = "pages", .help = "physical page allocator pool", .usage = "pages [selftest]", .max_args = 1, .handler = cmd_pages },
             .{ .name = "pci", .help = "enumerate PCI devices on the bus", .usage = "pci", .handler = cmd_pci },
@@ -1298,12 +1298,20 @@ fn cmd_mbox(m: *Monitor, args: []const []const u8) ExecError {
 /// class + bus slot, the MAC (with its source: the VIRTIO_NET_F_MAC
 /// feature read or the fixed BSS fallback), the negotiated feature bits
 /// (low/high), the two queues (q0 RX / q1 TX) with their sizes, the
-/// device status + post-exit re-arm state, and the TX counters (frames
-/// drained from the used ring + bytes submitted). Grep-able and
-/// deterministic (the mbox/procs observability shape). Honest when the
-/// device is absent: the default runner attaches no network device.
+/// device status + post-exit re-arm state, the TX counters, and (card
+/// N2, claim 6076) the RX counters (frames received into the FIFO,
+/// filtered/dropped, FIFO overflow + occupancy) + the rx-obs record
+/// (last device-written length + first 16 bytes — the claim-time header
+/// question). Grep-able and deterministic (the mbox/procs observability
+/// shape). Honest when the device is absent: the default runner attaches
+/// no network device. `net recv` is the card-N2 subcommand: drain the RX
+/// used ring and print the received frame(s) byte-exact.
 fn cmd_net(m: *Monitor, args: []const []const u8) ExecError {
-    _ = args;
+    if (args.len > 0) {
+        if (std.mem.eql(u8, args[0], "recv")) return cmd_net_recv(m, args[1..]);
+        m.console.print_line("net: unknown subcommand (try 'net' or 'net recv')");
+        return .invalid_argument;
+    }
     if (!virtio_net.net_ready) {
         m.console.puts("net: no virtio-net device (");
         m.console.puts(if (virtio_net.net_fail.len > 0) virtio_net.net_fail else "DID 0x1041 not found on bus 0");
@@ -1388,6 +1396,95 @@ fn cmd_net(m: *Monitor, args: []const []const u8) ExecError {
     m.console.puts(",bytes=");
     m.console.print_u64(virtio_net.net_dev.tx_bytes);
     m.console.puts("\n");
+    // Card N2 (claim 6076): RX counters + the rx-obs record. The drain is
+    // idempotent (also run from the shell idle loop) so the report is
+    // current when the frame has already landed.
+    virtio_net.net_rx_drain();
+    m.console.puts("net: rx=frames=");
+    m.console.print_u64(virtio_net.rx_frames);
+    m.console.puts(",bytes=");
+    m.console.print_u64(virtio_net.rx_bytes);
+    m.console.puts(",filtered=");
+    m.console.print_u64(virtio_net.rx_filtered);
+    m.console.puts(",overflow=");
+    m.console.print_u64(virtio_net.rx_overflow);
+    m.console.puts(",fifo=");
+    m.console.print_u64(@intCast(virtio_net.fifo_occupancy()));
+    m.console.puts("\n");
+    // The raw ring state (the claim-time record): the guest's avail.idx
+    // vs the device's used.idx tell whether a delivery ever completed.
+    m.console.puts("net: rx-rings avail=");
+    m.console.print_u64(@intCast(virtio_net.net_dev.rx_avail.idx));
+    m.console.puts(" used=");
+    m.console.print_u64(@intCast(virtio_net.net_dev.rx_used.idx));
+    m.console.puts(" armed=");
+    m.console.print_u64(if (virtio_net.rx_armed) 1 else 0);
+    m.console.puts("\n");
+    // The claim-time observation record: the last device-written length +
+    // the first 16 bytes pin the RX-header question (12 zero bytes + dst
+    // MAC = header present; dst MAC at 0 = none). Recorded even when the
+    // filter dropped the frame, so a drop is distinguishable from a
+    // failed delivery.
+    m.console.puts("net: rx-obs len=");
+    m.console.print_u64(virtio_net.rx_last_len);
+    m.console.puts(" first16=");
+    var oi: usize = 0;
+    while (oi < 16) : (oi += 1) {
+        if (oi > 0) m.console.puts(" ");
+        const b = virtio_net.rx_first16[oi];
+        const hex = "0123456789abcdef";
+        var two: [2]u8 = .{ hex[b >> 4], hex[b & 0xf] };
+        m.console.puts(&two);
+    }
+    m.console.puts("\n");
+    return .none;
+}
+
+/// `net recv` — the card-N2 receive path: drain the RX used ring (polled
+/// — the frame may have landed while the shell idled), then print every
+/// frame currently in the bounded FIFO byte-exact (hex, the
+/// netsend-style report) and consume it. The frames are the RAW
+/// device-written buffer bytes (the 12-byte virtio_net_hdr headroom
+/// included — the claim-time header question is pinned by `rx-obs`, not
+/// stripped blindly). Honest when empty: a filtered frame shows as `net
+/// recv: no frames` + the `net` report's filtered= counter.
+fn cmd_net_recv(m: *Monitor, args: []const []const u8) ExecError {
+    _ = args;
+    if (!virtio_net.net_ready) {
+        m.console.puts("net recv: no virtio-net device (");
+        m.console.puts(if (virtio_net.net_fail.len > 0) virtio_net.net_fail else "DID 0x1041 not found on bus 0");
+        m.console.puts(")\n");
+        return .none;
+    }
+    virtio_net.net_rx_drain();
+    const count = virtio_net.fifo_occupancy();
+    m.console.puts("net recv: frames=");
+    m.console.print_u64(@intCast(count));
+    m.console.puts("\n");
+    if (count == 0) {
+        m.console.puts("net recv: no frames (filtered or nothing injected)\n");
+        return .none;
+    }
+    var idx: usize = 0;
+    while (virtio_net.fifo_peek()) |frame| {
+        m.console.puts("net recv: [");
+        m.console.print_u64(@intCast(idx));
+        m.console.puts("] len=");
+        m.console.print_u64(@intCast(frame.len));
+        m.console.puts("\n");
+        m.console.puts("net recv: ");
+        var bi: usize = 0;
+        while (bi < frame.len) : (bi += 1) {
+            if (bi > 0) m.console.puts(" ");
+            const b = frame[bi];
+            const hex = "0123456789abcdef";
+            var two: [2]u8 = .{ hex[b >> 4], hex[b & 0xf] };
+            m.console.puts(&two);
+        }
+        m.console.puts("\n");
+        virtio_net.fifo_pop_advance();
+        idx += 1;
+    }
     return .none;
 }
 
@@ -2125,7 +2222,7 @@ test "monitor: net reports no device honestly when the transport is absent" {
     );
     // `net` is registered (the prompt's registry-row shape).
     try std.testing.expect(lookup("net") != null);
-    try std.testing.expectEqualStrings("virtio-net transport: device DID, MAC, queues, feature bits", lookup("net").?.help);
+    try std.testing.expectEqualStrings("virtio-net transport + RX: device DID, MAC, queues, feature bits, RX counters ('net recv' prints received frames)", lookup("net").?.help);
     try std.testing.expect(lookup("netsend") != null);
 }
 
@@ -2202,6 +2299,50 @@ test "monitor: netsend builds + submits a known frame (armed, mock transport)" {
     try std.testing.expect(std.mem.indexOf(u8, out2, "netsend: sent 1514 bytes\n") != null);
     virtio_net.net_ops = saved_ops;
     virtio_net.net_ready = false;
+}
+
+test "monitor: net recv prints the received frame byte-exact and drains the FIFO" {
+    var env = TestEnv.init();
+    var mon = env.monitor();
+    virtio_net.net_ready = true;
+    virtio_net.net_fail = "";
+    virtio_net.rx_fifo_head = 0;
+    virtio_net.rx_fifo_count = 0;
+    // The claim-time RX contract: the OBSERVED 12-byte virtio_net_hdr
+    // (all zero except num_buffers=1 at bytes 10-11) + a 46-byte
+    // broadcast frame (dst ff*6, src 02:00:00:00:00:01, ethertype 0x0800,
+    // payload 00..1f) — the exact layout the class-B gate pins from
+    // observation (net recv prints the RAW device-written bytes).
+    var frame: [virtio_net.rx_buf_len]u8 = .{0} ** virtio_net.rx_buf_len;
+    frame[10] = 0x01; // virtio_net_hdr num_buffers = 1 (observed)
+    const dst = [6]u8{ 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
+    const src = [6]u8{ 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 };
+    @memcpy(frame[virtio_net.rx_hdr_len .. virtio_net.rx_hdr_len + 6], &dst);
+    @memcpy(frame[virtio_net.rx_hdr_len + 6 .. virtio_net.rx_hdr_len + 12], &src);
+    frame[virtio_net.rx_hdr_len + 12] = 0x08;
+    frame[virtio_net.rx_hdr_len + 13] = 0x00;
+    var i: usize = 0;
+    while (i < 32) : (i += 1) frame[virtio_net.rx_hdr_len + 14 + i] = @truncate(i);
+    try std.testing.expect(virtio_net.fifo_push(frame[0 .. virtio_net.rx_hdr_len + 46]));
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "net", "recv" }));
+    const out = env.mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "net recv: frames=1\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "net recv: [0] len=58\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "net recv: 00 00 00 00 00 00 00 00 00 00 01 00 ff ff ff ff ff ff 02 00 00 00 00 01 08 00 00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f 10 11 12 13 14 15 16 17 18 19 1a 1b 1c 1d 1e 1f\n") != null);
+    // Consumed: the FIFO is empty again (recv drains it).
+    try std.testing.expectEqual(@as(usize, 0), virtio_net.fifo_occupancy());
+    // Empty case: honest report.
+    env.mock.reset();
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "net", "recv" }));
+    try std.testing.expect(std.mem.indexOf(u8, env.mock.contents(), "net recv: frames=0\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, env.mock.contents(), "net recv: no frames (filtered or nothing injected)\n") != null);
+    // Unknown subcommand: documented refusal.
+    env.mock.reset();
+    try std.testing.expectEqual(ExecError.invalid_argument, exec(&mon, &.{ "net", "bogus" }));
+    try std.testing.expect(std.mem.indexOf(u8, env.mock.contents(), "net: unknown subcommand (try 'net' or 'net recv')\n") != null);
+    virtio_net.net_ready = false;
+    virtio_net.rx_fifo_head = 0;
+    virtio_net.rx_fifo_count = 0;
 }
 
 test "monitor: identity commands produce fixed output" {

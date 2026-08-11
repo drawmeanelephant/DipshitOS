@@ -628,6 +628,13 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
         uart_hex8(virtio_net.net_status());
         uart_puts("\n");
         _ = virtio_net.net_rearm();
+        // Card N2 (claim 6076): supply the queue-0 RX buffer and kick so
+        // the device can deliver host-injected frames. The `net: rx-armed`
+        // serial line is the runner's `--net-inject` trigger (deterministic
+        // — the host injects only once the buffer is guaranteed supplied,
+        // not after a sleep).
+        _ = virtio_net.net_rx_arm();
+        uart_puts("net: rx-armed\n");
     }
     // Claim 3693 (milestone-four follow-on): ASLR for the BOOT-time static
     // EL0 payload too. The pre-install user root (built inside

@@ -30,6 +30,7 @@ const memmap = @import("memmap.zig");
 const scheduler = @import("scheduler.zig"); // claim 5275: worker progress printing (main context only)
 const timer = @import("timer.zig"); // claim 7948: heartbeat printing (main context only)
 const userspace = @import("userspace.zig"); // claim 8215: deferred EL0/SVC evidence line
+const virtio_net = @import("virtio_net.zig"); // claim 6076 (card N2): polled RX drain in the idle loop
 
 pub const PollResult = enum {
     /// No input byte is available right now; the caller should wait before
@@ -122,6 +123,12 @@ pub fn boot_and_park(mon: *monitor.Monitor, rx_wired: bool) void {
             timer.maybe_heartbeat(&mon.console);
             scheduler.maybe_report(&mon.console);
             userspace.maybe_report(&mon.console);
+            // Claim 6076 (card N2): the polled RX drain — the net device's
+            // used-buffer IRQ is not yet observed on this platform, so the
+            // shell idle loop is the drain point (the card-3d shell-idle-
+            // drain pattern). Idempotent; a no-op when the transport is
+            // unarmed or the buffer is empty.
+            virtio_net.net_rx_drain();
             idle_wait_rx();
         }
     }
@@ -210,7 +217,7 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "  mem         summarize the EFI memory map\n" ++
         "  mbox        per-process IPC mailbox: pending messages and drain counters\n" ++
         "  mount       switch the active FAT volume (esp or data)\n" ++
-        "  net         virtio-net transport: device DID, MAC, queues, feature bits\n" ++
+        "  net         virtio-net transport + RX: device DID, MAC, queues, feature bits, RX counters ('net recv' prints received frames)\n" ++
         "  netsend     send a known Ethernet frame (bounded staging, TX + used-ring drain)\n" ++
         "  pages       physical page allocator pool\n" ++
         "  pci         enumerate PCI devices on the bus\n" ++

@@ -141,7 +141,7 @@ dipshitos/
 │   ├── src/fat.zig            GPT + FAT32 mount/list/read/write (injected sector I/O)
 │   ├── src/virtio_blk.zig     virtio-blk transport (DID 0x1042 on VZ, post-exit re-arm)
 │   ├── src/virtio_entropy.zig virtio entropy transport (DID 0x1044, post-exit re-arm; claim 2665)
-│   ├── src/virtio_net.zig     virtio-net transport + TX (DID 0x1041, claim 1373 — the network keystone; RX is card N2)
+│   ├── src/virtio_net.zig     virtio-net transport + TX + RX (DID 0x1041, claims 1373/6076 — the network keystone)
 │   ├── src/csprng.zig         ChaCha20 CSPRNG (RFC 7539, KAT-pinned; claim 2665)
 │   └── linker.ld              dense layout (avoids 64 KiB lld padding)
 ├── tools/elf2bin.py           ELF → flat KERNEL.BIN (format v1) converter

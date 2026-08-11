@@ -20,7 +20,7 @@ available commands:
   mem         summarize the EFI memory map
   mbox        per-process IPC mailbox: pending messages and drain counters
   mount       switch the active FAT volume (esp or data)
-  net         virtio-net transport: device DID, MAC, queues, feature bits
+  net         virtio-net transport + RX: device DID, MAC, queues, feature bits, RX counters ('net recv' prints received frames)
   netsend     send a known Ethernet frame (bounded staging, TX + used-ring drain)
   pages       physical page allocator pool
   pci         enumerate PCI devices on the bus

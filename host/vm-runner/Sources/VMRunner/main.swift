@@ -17,8 +17,17 @@
 //          (02:00:00:00:00:01) so the guest-side VIRTIO_NET_F_MAC read is
 //          deterministic and gate-assertable. OFF by default: without the
 //          flag config.networkDevices stays [] — every existing gate is
-//          byte-identical. No host->guest frames (fileHandleForReading nil)
-//          in N1 — RX is the N2 card; VZNAT is a later card's option.)
+//          byte-identical. VZNAT is a later card's option.)
+//         [--net-inject <file>] [--net-inject-after <text>] (milestone five
+//          card N2, claim 6076: the host->guest RX direction of the SAME
+//          --net attachment — the file's bytes are written into the socket
+//          end VZ delivers from, exactly ONCE, when <text> appears in the
+//          serial log (default "net: rx-armed" — the guest's queue-0 RX
+//          buffer is guaranteed supplied by then; deterministic, not a
+//          sleep). Requires --net. OFF by default: the default VM — and the
+//          29-gate aggregate — stays byte-identical. The injected bytes are
+//          the KNOWN raw Ethernet frame the guest's net recv must print
+//          byte-exact; the guest's netsend echo proves the round trip.)
 //
 // * --custom-virtio (macOS 27 spike, audit step 3): attaches one
 //   default-off VZCustomVirtioDeviceConfiguration so the guest's PCI
@@ -133,6 +142,14 @@ var customVirtioEnabled = false
 // file. nil = default (no network device attached, config.networkDevices
 // stays [] — the default VM is unchanged).
 var netCapturePath: String?
+// Milestone five card N2 (claim 6076): `--net-inject <file>` writes the
+// file's bytes into the runner's end of the SAME datagram socketpair VZ
+// delivers guest-bound frames from, exactly ONCE, when the trigger marker
+// appears in the serial log (default: the guest's `net: rx-armed` line —
+// the RX buffer is guaranteed supplied; deterministic, not a sleep). nil =
+// no injection (the default VM is unchanged).
+var netInjectPath: String?
+var netInjectAfter: String?
 
 var idx = 2
 while idx < arguments.count {
@@ -188,6 +205,12 @@ while idx < arguments.count {
         idx += 1
     } else if arg == "--net", idx + 1 < arguments.count {
         netCapturePath = arguments[idx + 1]
+        idx += 2
+    } else if arg == "--net-inject", idx + 1 < arguments.count {
+        netInjectPath = arguments[idx + 1]
+        idx += 2
+    } else if arg == "--net-inject-after", idx + 1 < arguments.count {
+        netInjectAfter = arguments[idx + 1]
         idx += 2
     } else {
         serialLogPath = arg
@@ -382,6 +405,10 @@ var netCaptureReadSocket: FileHandle? // the runner's read end
 var netCaptureStop = false
 var netCaptureThread: Thread?
 var netCaptureDone = DispatchSemaphore(value: 0)
+if netInjectPath != nil, netCapturePath == nil {
+    fail("--net-inject requires --net (the injection writes into the SAME attachment's socket).")
+}
+
 if let netCapturePath {
     let netURL = URL(fileURLWithPath: netCapturePath)
     FileManager.default.createFile(atPath: netURL.path, contents: nil)
@@ -492,6 +519,9 @@ if consoleMode {
 }
 if let netCapturePath {
     print("  net: ENABLED (milestone five card N1, claim 1373) — virtio-net device attached, guest TX frames captured byte-exactly to \(netCapturePath), fixed MAC 02:00:00:00:00:01")
+}
+if let netInjectPath {
+    print("  net-inject: ENABLED (milestone five card N2, claim 6076) — \(netInjectPath) written into the attachment's socket once after \"\(netInjectAfter ?? "net: rx-armed")\" appears in the serial log (host→guest RX)")
 }
 
 runner.queue.async {
@@ -982,6 +1012,58 @@ func forwardScriptOnce(path: String, after: String?, label: String) {
     }
 }
 
+// Claim 6076 (milestone five card N2): the host→guest RX injection. Waits
+// until the trigger marker appears in the serial log (default: the guest's
+// `net: rx-armed` line — the queue-0 RX buffer is guaranteed supplied and
+// kicked, so the datagram cannot race an unarmed ring), then writes the
+// --net-inject file's bytes into the runner's OTHER end of the attachment
+// socketpair EXACTLY ONCE. Direction (observed in the claim-6076 probe):
+// the attachment socket is fds[0], the reader's end is fds[1] — VZ READS
+// fds[0] for host→guest packets and WRITES fds[0] for guest→host packets,
+// so on a socketpair a datagram written to fds[1] is exactly what VZ's
+// read on fds[0] consumes (a write to fds[0] instead would be captured by
+// the runner's own reader and never reach the guest — the probe's capture
+// held the injected bytes). The reader thread reads fds[1] for datagrams
+// written to fds[0] (guest TX), so the two directions never race. The
+// injected bytes are the raw Ethernet frame the guest's net recv must
+// print byte-exact. Deterministic — a serial trigger, not a sleep.
+// Requires --net (validated at parse time); a no-op without it.
+func startNetInject() {
+    guard let path = netInjectPath, let socket = netCaptureReadSocket else { return }
+    let q = DispatchQueue(label: "dipshitos.netinject")
+    q.async {
+        let injectData: Data
+        do {
+            injectData = try Data(contentsOf: URL(fileURLWithPath: path))
+        } catch {
+            FileHandle.standardError.write(Data("ERROR: could not read net-inject file '\(path)': \(error)\n".utf8))
+            exit(1)
+        }
+        let marker = netInjectAfter ?? "net: rx-armed"
+        let waitDeadline = Date().addingTimeInterval(40)
+        var sent = false
+        while Date() < waitDeadline {
+            if let text = try? String(contentsOf: serialURL, encoding: .utf8),
+               text.contains(marker) {
+                // One datagram per write (SOCK_DGRAM); the injected bytes
+                // are the raw Ethernet frame the guest must receive.
+                do {
+                    try socket.write(contentsOf: injectData)
+                    FileHandle.standardOutput.write(Data("NET-INJECT: sent \(injectData.count) byte(s) into the attachment socketpair (VZ reads fds[0]) after \"\(marker)\"\n".utf8))
+                } catch {
+                    FileHandle.standardError.write(Data("ERROR: net-inject write failed: \(error)\n".utf8))
+                }
+                sent = true
+                break
+            }
+            Thread.sleep(forTimeInterval: 0.5)
+        }
+        if !sent {
+            FileHandle.standardError.write(Data("ERROR: guest did not emit net-inject marker '\(marker)' within 40s; injection not sent\n".utf8))
+        }
+    }
+}
+
 // Claim 6684: script-mode lifecycle. Polls the serial log for the expected
 // transcript; success (exit 0) as soon as it appears, failure on timeout or
 // an early VM stop.
@@ -1068,6 +1150,7 @@ if consoleMode {
     startScriptInput()
     startScript2Input()
     startScript3Input()
+    startNetInject()
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { scriptPoll() }
 } else {
     if screenshotPath != nil {
