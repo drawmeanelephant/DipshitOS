@@ -32,10 +32,13 @@ assumption comes from documentation or reasoning only.
 - Disk: virtio block device (`VZVirtioBlockDeviceConfiguration`), attached
   read-write so the guest can write its evidence file. **Discovered by
   claim 6420**: the guest sees the disk on bus 0 as `VID=0x1af4
-  DID=0x1042 class=0x018000` — **not** the virtio-blk spec DID 0x1041
-  (the standard DID table does not apply to VZ; 0x1042 is block, 0x1043
-  console). The device also **resets at ExitBootServices**: its status
-  register reads 0 post-exit and the queue is dead, so the driver re-arms
+  DID=0x1042 class=0x018000` — **the spec's modern virtio-blk DID** (the
+  transitional PCI scheme maps Virtio Device IDs to DIDs as `ID + 0x1040`:
+  net 0x1041, blk 0x1042, console 0x1043, entropy 0x1044 — so VZ's
+  standard devices all match the standard table; only the custom device's
+  0x1082 is vendor-assigned, claim 5844). The device also **resets at
+  ExitBootServices**: its status register reads 0 post-exit and the queue
+  is dead, so the driver re-arms
   the queue post-MMU (common-config MMIO writes to the BAR window work
   post-exit; PCI config-space reads must stay pre-exit, claim 0013).
   **Disk layout (claim 3678, milestone four card 2):** the image
