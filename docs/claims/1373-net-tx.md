@@ -49,7 +49,22 @@
   proven on this platform (claims 0013/6420/2665/0828/9737). The
   2026-08-11 DID correction (net = spec's modern 0x1041) is established;
   its doc propagation is completed on this branch (commit 7606d00).
-- **Status:** 🔄 in progress (`agent/buffy/m5-net-tx`)
+- **Status:** ✅ done 2026-08-11 — the virtio-net TRANSPORT + TX is live
+  on VZ, byte-exact on the host: `tools/verify-live-net-tx.sh` **PASS
+  2/2** (phase 1: the full `net` report + the host capture byte-exactly
+  the 46-byte known frame; phase 2: ring reuse + honest truncation — 46 +
+  46 + 1514 bytes, frames=3), the full class-A set is green, and the
+  **29-gate `verify-vz` aggregate re-ran green** (proof the `--net` mode
+  left the default VM byte-identical). Claim-time findings recorded:
+  the device DID is 0x1041 as predicted (class 0x020000, D1); the device
+  REQUIRES `VIRTIO_NET_F_MTU` accepted (VER1-only and VER1|MAC masks are
+  rejected — status readback 0x03); the host-set MAC is readable via the
+  feature path (`mac=02:00:00:00:00:01 source=feature`); the net device
+  does NOT reset at ExitBootServices (pre-rearm st=0f, unlike blk/entropy);
+  and every TX buffer must carry a 12-byte virtio_net_hdr (the device
+  consumes one even with no offload feature — `tx_hdr_len` corrected
+  0→12). Hardware-contract flips are `[observed]` with the saved serial
+  logs + captures under `artifacts/live-net-tx-*`.
 
 ## Notes
 

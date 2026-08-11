@@ -135,12 +135,13 @@ dipshitos/
 │   ├── src/handoff.zig        Handoff v2 struct validation
 │   ├── src/lineedit.zig       Fixed-buffer line editor (no allocator)
 │   ├── src/tokenizer.zig      Command-line tokenizer (no allocator)
-│   ├── src/monitor.zig        Comptime command registry (30 commands)
+│   ├── src/monitor.zig        Comptime command registry (34 commands; `net`/`netsend` = claim 1373)
 │   ├── src/shell.zig          Prompt loop: banner → lineedit → tokenize → exec
 │   ├── src/esp.zig            ESP file window over the live FAT32 volume (ls/cat/write)
 │   ├── src/fat.zig            GPT + FAT32 mount/list/read/write (injected sector I/O)
 │   ├── src/virtio_blk.zig     virtio-blk transport (DID 0x1042 on VZ, post-exit re-arm)
 │   ├── src/virtio_entropy.zig virtio entropy transport (DID 0x1044, post-exit re-arm; claim 2665)
+│   ├── src/virtio_net.zig     virtio-net transport + TX (DID 0x1041, claim 1373 — the network keystone; RX is card N2)
 │   ├── src/csprng.zig         ChaCha20 CSPRNG (RFC 7539, KAT-pinned; claim 2665)
 │   └── linker.ld              dense layout (avoids 64 KiB lld padding)
 ├── tools/elf2bin.py           ELF → flat KERNEL.BIN (format v1) converter

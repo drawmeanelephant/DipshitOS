@@ -68,6 +68,7 @@ verify-vz:
     bash tools/verify-live-procs-syscall.sh
     bash tools/verify-live-scale.sh
     bash tools/verify-live-wait.sh
+    bash tools/verify-live-net-tx.sh
 
 # Compile the AArch64 UEFI application and kernel image (class A — zig build)
 build:

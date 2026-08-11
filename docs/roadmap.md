@@ -591,26 +591,44 @@ gates pass; tagged `m1.5-interactive-monitor`** (see
   `tasks user-exec exited status=43` / `procs STATUS43.BIN exited
   status=43` records; the full 12-gate shared-seam sweep + the
   args/kill/ipc/scale/procs-syscall gates all PASS 1/1.
-- **Network stack (sketch — not a commitment).** The last "Eventually"
-  item, and the one the virtio surface table below maps to. The transport
-  it needs is already proven (virtio console/blk/entropy/custom drivers:
-  discovery, queues, IRQ delivery, post-exit re-arm), and the runner
-  change is one config line (`config.networkDevices`). **Milestone four
-  CLOSED 2026-08-11 (claim 2839, tag `m4-processes`) — the process/IPC
-  foundations are landed**; N1 is the next planned card, with a
-  planning-first prompt doc at `docs/m5-net-tx-prompt.md`. Card order:
-  - **N1 — virtio-net transport + TX.** Runner attaches
-    `VZVirtioNetworkDeviceConfiguration`; `VZFileHandleNetworkDeviceAttachment`
-    for the deterministic gates (host reads/writes exact Ethernet
-    frames, like the custom-virtio spike), `VZNATNetworkDeviceAttachment`
-    for real outbound connectivity. Guest `kernel/src/virtio_net.zig`:
-    discover the device (expect the modern virtio-net DID 0x1041 — every
-    other modern device matched its spec DID on VZ; confirm at claim
-    time), post-exit re-arm (the claim-6420/2665 lesson), MAC via
-    VIRTIO_NET_F_MAC negotiation or a fixed BSS MAC, TX + RX queues,
-    bounded frame staging (no heap). `net` monitor command
-    (device/MAC/queues); a shell `netsend` proving the host receives a
-    known frame byte-exact. Live gate `tools/verify-live-net-tx.sh`.
+- **Network stack (in progress — N1 landed 2026-08-11, claim 1373).** The
+  last "Eventually" item, and the one the virtio surface table below maps
+  to. The transport it needs was already proven (virtio
+  console/blk/entropy/custom drivers: discovery, queues, IRQ delivery,
+  post-exit re-arm), the runner change was one config line
+  (`config.networkDevices`, now flag-gated behind `--net <capture>`),
+  and **N1 — the virtio-net TRANSPORT + TX — is DONE** (claim 1373,
+  branch `agent/buffy/m5-net-tx`): the guest's `kernel/src/virtio_net.zig`
+  discovers the device (DID 0x1041 — the modern spec DID confirmed on
+  VZ), negotiates features (claim-time finding: the device NEEDS
+  `VIRTIO_NET_F_MTU` accepted — VER1-only and VER1\|MAC masks are
+  rejected with FEATURES_OK cleared), reads the host-set MAC via the
+  feature path, arms queues 0 (RX) + 1 (TX), re-arms post-exit
+  (claim-time finding: the net device does NOT reset at
+  ExitBootServices, unlike blk/entropy), prepends the 12-byte
+  virtio_net_hdr the device consumes on every TX buffer (observed
+  contract), and `netsend` drives TX end to end with bounded BSS staging
+  and polled used-ring drain. `net`/`netsend` monitor commands; live
+  gate `tools/verify-live-net-tx.sh` PASS 2/2 (byte-exact host
+  captures: 46-byte known frame, ring reuse, honest truncation). Card
+  order:
+  - ~~**N1 — virtio-net transport + TX.**~~ **DONE 2026-08-11 (claim
+    1373).** Runner attaches `VZVirtioNetworkDeviceConfiguration` under
+    the flag-gated `--net <capture-file>` mode;
+    `VZFileHandleNetworkDeviceAttachment` gives the deterministic gates
+    (host reads exact Ethernet frames, like the custom-virtio spike),
+    with a FIXED host MAC (02:00:00:00:00:01) the guest reads via the
+    feature path; `VZNATNetworkDeviceAttachment` for real outbound
+    connectivity stays a later card's option. Guest
+    `kernel/src/virtio_net.zig`: discover the device (modern virtio-net
+    DID 0x1041 — confirmed at claim time), post-exit re-arm (the
+    claim-6420/2665 lesson; the net device does not reset — observed
+    st=0f), MAC via VIRTIO_NET_F_MAC negotiation (worked — the fallback
+    is the fixed BSS MAC), TX + RX queues, bounded frame staging (no
+    heap), 12-byte virtio_net_hdr prepended (observed contract). `net`
+    monitor command (device/DID/MAC/queues/features); `netsend` proving
+    the host receives known frames byte-exact. Live gate
+    `tools/verify-live-net-tx.sh` PASS 2/2.
   - **N2 — raw Ethernet RX.** Used-ring drain into a bounded frame FIFO
     (IRQ-context push + shell-idle drain, the card-3d pattern), MAC
     filtering (own MAC + broadcast), `net recv` prints the frame; the
@@ -646,7 +664,7 @@ remaining three (network, graphics, balloon) are the open milestones.
 | Block (0x1042) | `VZVirtioBlockDeviceConfiguration` (disk image attachment) | `virtio_blk.zig` — modern virtio-blk, post-exit re-arm | ✅ done | 6420 (FAT32 storage driver), 3678 (general non-ESP FS on top) |
 | Entropy (0x1044) | `VZVirtioEntropyDeviceConfiguration` | `virtio_entropy.zig` (boot-time 64-byte seed) + `csprng.zig` (ChaCha20, RFC 7539) | ✅ done | 2665 (driver + CSPRNG + `random`), 3693 (EL0 stack ASLR consumer) |
 | Custom virtio (0x1082, macOS 27) | `VZCustomVirtioDeviceConfiguration` (`--custom-virtio` / `zig build spike-virtio`) | `virtio_custom.zig` — queue transport + used-ring IRQ | ✅ done | 5844 (host spike + `pci` command), 0828 (bidirectional queue + SPI IRQ), 4374 (ring allocator / multi-queue), 9492 (multi-descriptor payloads), 9737 (feature negotiation), 4837 (log transport) |
-| Network | `config.networkDevices = []` — nothing attached today | none | ⬜ not started — N1 (virtio-net TX) is the next planned card, `docs/m5-net-tx-prompt.md` | — |
+| Network (0x1041) | `VZVirtioNetworkDeviceConfiguration` + `VZFileHandleNetworkDeviceAttachment` (`--net <capture-file>`, flag-gated; fixed host MAC) | `virtio_net.zig` — TX end to end (N1); RX is N2 | 🔄 TX done (N1) | 1373 (claim: transport + TX live — DID 0x1041, VER1\|MTU\|MAC, feature-path MAC, queues 0/1, 12-byte hdr contract, byte-exact host capture; `verify-live-net-tx.sh` PASS 2/2 + 29-gate aggregate green) |
 | Graphics | `VZVirtioGraphicsDeviceConfiguration` — attached only for screenshots (`--screenshot`) | none | ⬜ not started — the future GUI milestone | — |
 | Balloon | `VZMemoryBalloonDeviceConfiguration` — nothing attached | none | ⬜ not started — low priority (fixed 256 MiB guest, no demand paging) | — |
 

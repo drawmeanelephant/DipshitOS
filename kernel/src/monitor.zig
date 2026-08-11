@@ -37,6 +37,7 @@ const uaccess = @import("uaccess.zig"); // claim 6120: fault-safe copy-in/copy-o
 const userspace = @import("userspace.zig"); // claim 5804: user-VA layout
 const virtio_blk = @import("virtio_blk.zig"); // claim 6420: the sector interface behind `mount` (milestone four card 2)
 const csprng = @import("csprng.zig"); // milestone four (claim 2665): the seeded CSPRNG behind `random`
+const virtio_net = @import("virtio_net.zig"); // milestone five card N1 (claim 1373): the net transport behind `net`/`netsend`
 
 // ---------------------------------------------------------------------------
 // Limits (fixed-size, explicit bounds)
@@ -209,7 +210,10 @@ pub const Command = struct {
 
 /// Number of commands. The registry is built at runtime (not a const
 /// table): see `ensure_registry`.
-pub const registry_count: usize = 32;
+/// Number of commands. The registry is built at runtime (not a const
+/// table): see `ensure_registry`. Milestone five card N1 (claim 1373)
+/// grows it 32 -> 34 (`net` + `netsend`).
+pub const registry_count: usize = 34;
 
 /// Command registry, built at runtime into BSS. A `const` table would hold
 /// link-time absolute addresses for BOTH the string slices and the handler
@@ -242,6 +246,8 @@ fn ensure_registry() []const Command {
             .{ .name = "mem", .help = "summarize the EFI memory map", .usage = "mem", .handler = cmd_mem },
             .{ .name = "mbox", .help = "per-process IPC mailbox: pending messages and drain counters", .usage = "mbox [<pid>]", .max_args = 1, .handler = cmd_mbox },
             .{ .name = "mount", .help = "switch the active FAT volume (esp or data)", .usage = "mount <esp|data>", .min_args = 1, .max_args = 1, .handler = cmd_mount },
+            .{ .name = "net", .help = "virtio-net transport: device DID, MAC, queues, feature bits", .usage = "net", .handler = cmd_net },
+            .{ .name = "netsend", .help = "send a known Ethernet frame (bounded staging, TX + used-ring drain)", .usage = "netsend <bytes>", .min_args = 1, .max_args = 1, .handler = cmd_netsend },
             .{ .name = "pages", .help = "physical page allocator pool", .usage = "pages [selftest]", .max_args = 1, .handler = cmd_pages },
             .{ .name = "pci", .help = "enumerate PCI devices on the bus", .usage = "pci", .handler = cmd_pci },
             .{ .name = "procs", .help = "process registry: image, address space, lifecycle, exit status", .usage = "procs", .handler = cmd_procs },
@@ -1285,6 +1291,152 @@ fn cmd_mbox(m: *Monitor, args: []const []const u8) ExecError {
 }
 
 // ---------------------------------------------------------------------------
+// Net commands (milestone five card N1 — claim 1373)
+// ---------------------------------------------------------------------------
+
+/// `net` — report the virtio-net transport: the OBSERVED device DID +
+/// class + bus slot, the MAC (with its source: the VIRTIO_NET_F_MAC
+/// feature read or the fixed BSS fallback), the negotiated feature bits
+/// (low/high), the two queues (q0 RX / q1 TX) with their sizes, the
+/// device status + post-exit re-arm state, and the TX counters (frames
+/// drained from the used ring + bytes submitted). Grep-able and
+/// deterministic (the mbox/procs observability shape). Honest when the
+/// device is absent: the default runner attaches no network device.
+fn cmd_net(m: *Monitor, args: []const []const u8) ExecError {
+    _ = args;
+    if (!virtio_net.net_ready) {
+        m.console.puts("net: no virtio-net device (");
+        m.console.puts(if (virtio_net.net_fail.len > 0) virtio_net.net_fail else "DID 0x1041 not found on bus 0");
+        m.console.puts(")\n");
+        // The offered features as observed (the honest claim-time record
+        // when negotiation fails).
+        m.console.puts("net: device-features=");
+        m.console.print_hex(virtio_net.net_dev_feats_lo);
+        m.console.puts("/");
+        m.console.print_hex(virtio_net.net_dev_feats_hi);
+        m.console.puts("\n");
+        // The honest claim-time record when negotiation fails: the status
+        // the device returned after the FEATURES_OK write (0x03 = it
+        // rejected the accepted features; 0x00 = the status writes never
+        // landed), what we actually accepted, and where the regions
+        // resolved (so a BAR/capability walk mistake is visible).
+        m.console.puts("net: status=");
+        m.console.print_hex(virtio_net.net_status_last);
+        m.console.puts(" accepted=");
+        m.console.print_hex(virtio_net.net_dev.feats_lo);
+        m.console.puts("/");
+        m.console.print_hex(virtio_net.net_dev.feats_hi);
+        m.console.puts("\n");
+        m.console.puts("net: common=");
+        m.console.print_hex(virtio_net.net_common);
+        m.console.puts(" notify=");
+        m.console.print_hex(virtio_net.net_notify);
+        m.console.puts(" devcfg=");
+        m.console.print_hex(virtio_net.net_devcfg);
+        m.console.puts(" bar0=");
+        m.console.print_hex(virtio_net.net_bar0);
+        m.console.puts("\n");
+        return .none;
+    }
+    // print_hex already emits "0x" + full 16 hex digits (the mbox/procs
+    // observability shape) — no manual prefix.
+    m.console.puts("net: did=");
+    m.console.print_hex(virtio_net.net_did);
+    m.console.puts(" class=");
+    m.console.print_hex(virtio_net.net_class);
+    m.console.puts(" dev=");
+    m.console.print_u64(@intCast(virtio_net.net_dev_no));
+    m.console.puts("\n");
+    m.console.puts("net: mac=");
+    m.console.puts(&virtio_net.net_mac_text);
+    m.console.puts(" source=");
+    m.console.puts(switch (virtio_net.net_mac_source) {
+        .feature => "feature",
+        .fallback => "fallback",
+    });
+    m.console.puts("\n");
+    // The raw device-config MAC bytes captured pre-exit (the claim-1373
+    // record: whether the host-set address is exposed at config offset 0
+    // even without the MAC feature).
+    if (virtio_net.net_devcfg_mac_seen) {
+        m.console.puts("net: cfgmac=");
+        var ci: usize = 0;
+        while (ci < 6) : (ci += 1) {
+            if (ci > 0) m.console.puts(":");
+            const b = virtio_net.net_devcfg_mac_obs[ci];
+            const hex = "0123456789abcdef";
+            var two: [2]u8 = .{ hex[b >> 4], hex[b & 0xf] };
+            m.console.puts(&two);
+        }
+        m.console.puts("\n");
+    }
+    m.console.puts("net: feat=");
+    m.console.print_hex(virtio_net.net_dev.feats_lo);
+    m.console.puts("/");
+    m.console.print_hex(virtio_net.net_dev.feats_hi);
+    m.console.puts(" q0=rx:size=");
+    m.console.print_u64(@intCast(virtio_net.queue_size));
+    m.console.puts(" q1=tx:size=");
+    m.console.print_u64(@intCast(virtio_net.queue_size));
+    m.console.puts("\n");
+    m.console.puts("net: status=");
+    m.console.print_hex(virtio_net.net_status_last);
+    m.console.puts(" rearm=");
+    m.console.print_u64(if (virtio_net.net_rearmed) 1 else 0);
+    m.console.puts(" tx=frames=");
+    m.console.print_u64(virtio_net.net_dev.tx_frames);
+    m.console.puts(",bytes=");
+    m.console.print_u64(virtio_net.net_dev.tx_bytes);
+    m.console.puts("\n");
+    return .none;
+}
+
+/// `netsend <bytes>` — build the N1 known frame in the fixed staging
+/// buffer (broadcast dst, own MAC src, ethertype 0x0800, a deterministic
+/// byte-index payload), submit it on the TX queue, drain the used ring
+/// (polled), and report exact byte counts. Over-limit requests truncate
+/// honestly at the 1500-byte payload bound (the reply names the drop);
+/// an absent/unarmed transport is refused honestly. This is the live
+/// gate's byte-exact TX proof: the host's file-handle attachment captures
+/// exactly the frame bytes reported here.
+fn cmd_netsend(m: *Monitor, args: []const []const u8) ExecError {
+    const requested = parseInt(args[0]) catch {
+        m.console.puts("netsend: invalid byte count: ");
+        m.console.puts(args[0]);
+        m.console.puts("\n");
+        return .invalid_argument;
+    };
+    if (!virtio_net.net_ready) {
+        m.console.print_line("netsend: transport not ready (no virtio-net device)");
+        return .none;
+    }
+    m.console.puts("netsend: n=");
+    m.console.print_u64(requested);
+    if (requested > virtio_net.payload_max) {
+        m.console.puts(" truncated to ");
+        m.console.print_u64(virtio_net.payload_max);
+        m.console.puts(" (payload bound)");
+    }
+    m.console.puts("\n");
+    var frame_len: usize = 0;
+    switch (virtio_net.net_send_frame(requested, &frame_len)) {
+        .ok => {
+            m.console.puts("netsend: tx ok frames=");
+            m.console.print_u64(virtio_net.net_dev.tx_frames);
+            m.console.puts(" bytes=");
+            m.console.print_u64(@intCast(frame_len));
+            m.console.puts("\n");
+            m.console.puts("netsend: sent ");
+            m.console.print_u64(@intCast(frame_len));
+            m.console.puts(" bytes\n");
+        },
+        .not_ready => m.console.print_line("netsend: transport not ready (no virtio-net device)"),
+        .timeout => m.console.print_line("netsend: tx timeout (device did not complete within the poll budget)"),
+    }
+    return .none;
+}
+
+// ---------------------------------------------------------------------------
 // Task lifecycle command (claim 6729)
 // ---------------------------------------------------------------------------
 
@@ -1909,6 +2061,147 @@ test "monitor: argument-count validation" {
     env.mock.reset();
     try std.testing.expectEqual(ExecError.usage, exec(&mon, &.{ "beans", "1", "2" }));
     try std.testing.expectEqualStrings("usage: beans [count]\n", env.mock.contents());
+}
+
+// Monitor-test mock transport for the armed netsend path (the virtio_net
+// module's own tests cover the same path with their fuller mock; here the
+// fake device completes every TX by advancing the driver's real used ring
+// on the kick, so the full build -> submit -> drain -> report shape runs on
+// the host).
+fn mnet_dev_read32(_: u32) u32 {
+    return 0;
+}
+fn mnet_cfg_read8(_: u32) u8 {
+    return 0;
+}
+fn mnet_cfg_read16(_: u32) u16 {
+    return 0;
+}
+fn mnet_cfg_read32(_: u32) u32 {
+    return 0;
+}
+fn mnet_cfg_write8(_: u32, _: u8) void {}
+fn mnet_cfg_write16(_: u32, _: u16) void {}
+fn mnet_cfg_write32(_: u32, _: u32) void {}
+fn mnet_notify(_: u16) void {
+    // The fake device completes the TX: advance the driver's real used
+    // ring so the drain poll sees the completion.
+    virtio_net.net_dev.tx_used.idx +%= 1;
+}
+fn mnet_to_phys(va: usize) u64 {
+    return va; // host test: identity
+}
+fn mnet_clean(_: usize, _: usize) void {}
+fn mnet_invalidate(_: usize, _: usize) void {}
+
+fn mnet_ops() virtio_net.Ops {
+    return .{
+        .dev_read32 = mnet_dev_read32,
+        .cfg_read8 = mnet_cfg_read8,
+        .cfg_read16 = mnet_cfg_read16,
+        .cfg_read32 = mnet_cfg_read32,
+        .cfg_write8 = mnet_cfg_write8,
+        .cfg_write16 = mnet_cfg_write16,
+        .cfg_write32 = mnet_cfg_write32,
+        .notify = mnet_notify,
+        .to_phys = mnet_to_phys,
+        .clean = mnet_clean,
+        .invalidate = mnet_invalidate,
+    };
+}
+
+test "monitor: net reports no device honestly when the transport is absent" {
+    var env = TestEnv.init();
+    var mon = env.monitor();
+    virtio_net.net_ready = false;
+    virtio_net.net_devcfg_mac_seen = false;
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"net"}));
+    try std.testing.expectEqualStrings(
+        "net: no virtio-net device (DID 0x1041 not found on bus 0)\n" ++
+            "net: device-features=0x0000000000000000/0x0000000000000000\n" ++
+            "net: status=0x00000000000000ff accepted=0x0000000000000000/0x0000000000000000\n" ++
+            "net: common=0x0000000000000000 notify=0x0000000000000000 devcfg=0x0000000000000000 bar0=0x0000000000000000\n",
+        env.mock.contents(),
+    );
+    // `net` is registered (the prompt's registry-row shape).
+    try std.testing.expect(lookup("net") != null);
+    try std.testing.expectEqualStrings("virtio-net transport: device DID, MAC, queues, feature bits", lookup("net").?.help);
+    try std.testing.expect(lookup("netsend") != null);
+}
+
+test "monitor: net report shape with an armed transport" {
+    var env = TestEnv.init();
+    var mon = env.monitor();
+    // Populate the driver state as the live init + re-arm would: observed
+    // DID 0x1041, class 0x020000, dev 6, the host-set MAC from the feature
+    // path, VER1|MAC negotiated, both queues armed, DRIVER_OK (0xf) after
+    // the re-arm, one drained TX of 46 bytes.
+    virtio_net.net_ready = true;
+    virtio_net.net_rearmed = true;
+    virtio_net.net_did = 0x1041;
+    virtio_net.net_class = 0x020000;
+    virtio_net.net_dev_no = 6;
+    virtio_net.net_mac = .{ 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 };
+    virtio_net.net_mac_source = .feature;
+    virtio_net.format_mac(&virtio_net.net_mac, &virtio_net.net_mac_text);
+    virtio_net.net_dev.feats_lo = 0x20;
+    virtio_net.net_dev.feats_hi = 0x1;
+    virtio_net.net_dev.q0_enabled = true;
+    virtio_net.net_dev.q1_enabled = true;
+    virtio_net.net_status_last = 0xf;
+    virtio_net.net_dev.tx_frames = 1;
+    virtio_net.net_dev.tx_bytes = 46;
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"net"}));
+    const out = env.mock.contents();
+    // The grep-able shape the live gate asserts (full 16-digit hex, the
+    // mbox/procs observability shape).
+    try std.testing.expect(std.mem.indexOf(u8, out, "net: did=0x0000000000001041 class=0x0000000000020000 dev=6\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "net: mac=02:00:00:00:00:01 source=feature\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "net: feat=0x0000000000000020/0x0000000000000001 q0=rx:size=4 q1=tx:size=4\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "net: status=0x000000000000000f rearm=1 tx=frames=1,bytes=46\n") != null);
+    // The fallback source is reported honestly too.
+    env.mock.reset();
+    virtio_net.net_mac_source = .fallback;
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"net"}));
+    try std.testing.expect(std.mem.indexOf(u8, env.mock.contents(), "source=fallback") != null);
+    virtio_net.net_ready = false;
+}
+
+test "monitor: netsend refuses cleanly without a transport" {
+    var env = TestEnv.init();
+    var mon = env.monitor();
+    virtio_net.net_ready = false;
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "netsend", "32" }));
+    try std.testing.expectEqualStrings("netsend: transport not ready (no virtio-net device)\n", env.mock.contents());
+    env.mock.reset();
+    try std.testing.expectEqual(ExecError.invalid_argument, exec(&mon, &.{ "netsend", "abc" }));
+    try std.testing.expectEqualStrings("netsend: invalid byte count: abc\n", env.mock.contents());
+}
+
+test "monitor: netsend builds + submits a known frame (armed, mock transport)" {
+    var env = TestEnv.init();
+    var mon = env.monitor();
+    const saved_ops = virtio_net.net_ops;
+    virtio_net.net_ops = mnet_ops();
+    virtio_net.net_ready = true;
+    virtio_net.net_mac = .{ 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 };
+    // Reset the driver's TX counters/rings so earlier tests' state cannot
+    // leak into the exact assertions.
+    virtio_net.net_dev = .{};
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "netsend", "32" }));
+    const out = env.mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "netsend: n=32\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "netsend: tx ok frames=1 bytes=46\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "netsend: sent 46 bytes\n") != null);
+    // Over-limit requests truncate honestly at the 1500-byte payload bound.
+    env.mock.reset();
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "netsend", "5000" }));
+    const out2 = env.mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out2, "netsend: n=5000 truncated to 1500 (payload bound)\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out2, "netsend: tx ok frames=2 bytes=1514\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out2, "netsend: sent 1514 bytes\n") != null);
+    virtio_net.net_ops = saved_ops;
+    virtio_net.net_ready = false;
 }
 
 test "monitor: identity commands produce fixed output" {
