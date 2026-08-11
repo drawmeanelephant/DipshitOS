@@ -304,3 +304,18 @@ at the milestone-three candidate HEAD `0c119d8` — **all green**; the
 milestone is tagged **`m3-userspace`**. Evidence:
 `artifacts/gates-reverify-20260810-m3-closeout.txt` +
 `artifacts/classB-chunk{1,2,3,4}-m3-closeout.log`.
+
+**Milestone-four close-out reverify (claim 2839, 2026-08-11):** the
+complete class A set (fmt, unit tests, test-console, build, image,
+inspect, swift runner build, context, coordination, coordination tooling,
+mmu-debt — 11/11) and the complete class B VZ set (the full 28-gate
+`verify-vz` aggregate: serial takeover `zig build run`, bad-handoff,
+marker, nvram-console, host-console, live-transcript, live-fs, live-gfs,
+live-timer, live-tasks, live-userspace, live-svc, live-uaccess,
+live-addrspaces, live-lifecycle, live-exec, live-args, live-procs,
+live-concurrent, live-long-lived, live-kill, live-sleep, live-entropy,
+live-reboot, live-ipc, live-procs-syscall, live-scale, live-wait —
+28/28) were re-run at the milestone-four candidate HEAD `9d7e4d5` on a
+clean tree — **all green**; the milestone is tagged **`m4-processes`**.
+Evidence: `artifacts/gates-reverify-20260811-m4-closeout.txt` +
+`artifacts/m4-closeout-classA-1.log` + the per-gate `vz-live-*` logs.

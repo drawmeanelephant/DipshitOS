@@ -1,7 +1,7 @@
 # Milestone-four follow-on 4, card 4c — exit-status propagation: a bounded `sys_wait` block
 
 > **PLANNING-FIRST — this is the per-card split of
-> [`docs/m4-followon4-prompt.md`](m4-followon4-prompt.md) (the proposal for
+> [`m4-followon4-prompt.md`](m4-followon4-prompt.md) (the proposal for
 > the whole 4a/4b/4c set). The follow-on-4 set's ABI amendments are slots
 > 7 AND 8 (cards 4a/4c) — this card's ONE change is slot 8. No
 > libc/POSIX/heap anywhere. New branch `agent/buffy/m4-wait-exit` stacked

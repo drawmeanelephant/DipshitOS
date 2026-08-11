@@ -1,7 +1,7 @@
 # Milestone-four follow-on 4, card 4a — process observability: a `sys_procs` introspection syscall
 
 > **PLANNING-FIRST — this is the per-card split of
-> [`docs/m4-followon4-prompt.md`](m4-followon4-prompt.md) (the proposal for
+> [`m4-followon4-prompt.md`](m4-followon4-prompt.md) (the proposal for
 > the whole 4a/4b/4c set). ADR 0007 stays frozen EXCEPT this card's slot 7
 > (following the `sys_sleep` slot-4 and ipc slots-5/6 precedents). No
 > libc/POSIX/heap anywhere. New branch `agent/buffy/m4-procs-syscall` on

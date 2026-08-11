@@ -1,7 +1,7 @@
 # Milestone-four follow-on 4, card 4b — IPC depth: bigger or more messages
 
 > **PLANNING-FIRST — this is the per-card split of
-> [`docs/m4-followon4-prompt.md`](m4-followon4-prompt.md) (the proposal for
+> [`m4-followon4-prompt.md`](m4-followon4-prompt.md) (the proposal for
 > the whole 4a/4b/4c set). ADR 0007 stays frozen — this card is a
 > DATA-PATH CONSTANT change, not a syscall number (the follow-on 4 set's
 > ABI changes are ONLY slots 7/8, on cards 4a/4c). No libc/POSIX/heap
