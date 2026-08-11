@@ -202,7 +202,7 @@ codes — is unchanged.
 Follow-on 3 card 3f freezes slots 5 and 6 in the dispatch table (the ONE
 ABI change in the follow-on 3 card set; everything else stays frozen):
 
-| 5 | `sys_ipc_send` | `ipc_send(target, buf, len) -> i64` | Copy `len` bytes (≤ 64; longer is truncated to the slot bound) from the caller's region through uaccess into process `target`'s bounded per-process mailbox (`kernel/src/mailbox.zig`: 4 × 64 B BSS ring per process id, FIFO). Returns the sent length; `EINVAL` for an out-of-range/free/exited target, `EFAULT` for a bad user pointer, `ENOSPC` when the target's ring is full (checked before any bytes are copied). |
+| 5 | `sys_ipc_send` | `ipc_send(target, buf, len) -> i64` | Copy `len` bytes (≤ 64; longer is truncated to the slot bound) from the caller's region through uaccess into process `target`'s bounded per-process mailbox (`kernel/src/mailbox.zig`: 8 × 64 B BSS ring per process id, FIFO — the capacity is a DATA-PATH CONSTANT, raised 4 → 8 by claim 3179 on card 4b; NOT a syscall number, this ABI row is unchanged). Returns the sent length; `EINVAL` for an out-of-range/free/exited target, `EFAULT` for a bad user pointer, `ENOSPC` when the target's ring is full (checked before any bytes are copied). |
 | 6 | `sys_ipc_recv` | `ipc_recv(buf, max) -> i64` | Copy the caller's OWN oldest message out through uaccess (`max` > 64 clamps to it; `max` shorter than the message truncates the copy — both documented), consuming it. Returns the copied length; 0 when the mailbox is empty; `EINVAL` when the calling task is not a process; `EFAULT` leaves the message queued (peek → copy_out → drop). |
 
 `ENOSPC` (`-5`) joins the D3 error table: the target process's bounded
@@ -217,6 +217,19 @@ process id is created/recycled (exec path + boot-payload registration).
 
 No POSIX pipes/fds/signals, no unbounded mailboxes, no scheduler/lifecycle
 changes: this is the ONLY ABI amendment in the follow-on 3 card set.
+
+## Data-path note (2026-08-11, claim 3179 — the IPC-depth card)
+
+Follow-on 4 card 4b raises the mailbox capacity `mailbox.max_messages`
+4 → 8 (the per-process ring grows 256 → 512 B of fixed BSS — still no
+allocation) as a DATA-PATH CONSTANT, NOT a syscall number: the ABI stays
+frozen (the follow-on-4 set's ABI amendments are ONLY slots 7/8, on cards
+4a/4c). The truncation contract is unchanged: a message longer than 64 B
+still truncates at the slot bound, a full ring still refuses with the
+same `ENOSPC` (-5) — now at the 9th send — the same empty → 0 recv
+result, the same drain invariant `sent − recv == pending ≤ capacity`,
+and the same cross-process isolation (a process reaches only its own
+mailbox and a live target's).
 
 ## Amendment (2026-08-11, claim 5799 — the process-observability card)
 

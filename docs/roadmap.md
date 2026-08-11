@@ -533,6 +533,32 @@ gates pass; tagged `m1.5-interactive-monitor`** (see
   FROM EL0 — distinct from the monitor's `procs` read — the IPC flow
   still echoes, both processes never exit; the full 12-gate shared-seam
   sweep + the args/kill/ipc/scale gates all PASS 1/1.
+- **[Claim 3179, milestone-four follow-on 4, card 4b — IPC depth]** —
+  the card-3f mailbox is 4 × 64 B per process, so a bursty flow (more
+  than 4 sends before the peer drains) would refuse with ENOSPC. This
+  card raises `mailbox.max_messages` 4 → 8 (the per-process ring grows
+  256 → 512 B of fixed BSS) as a DATA-PATH CONSTANT — NOT a syscall
+  number (ADR 0007 documents the choice; the follow-on-4 set's ABI
+  amendments are ONLY slots 7/8, on cards 4a/4c). The truncation
+  contract is unchanged: a message > 64 B still truncates at the slot
+  bound, a full ring still refuses with the same `ENOSPC` -5 (now at the
+  9th send), the same empty → 0 recv, the same drain invariant
+  `sent − recv == pending ≤ capacity`, the same cross-process isolation.
+  COUNTER.BIN's send cadence becomes a BURST: every 6th iteration it
+  sends 6 messages back-to-back in ONE quantum, then 5 quiet iterations
+  (the peer drains 1 per round — the ring peaks at 6 of the 8 slots and
+  drains to 0 before the next burst: NO ENOSPC, deterministically); each
+  send checks its return and prints a distinct `ipc: enospc` marker on
+  failure. The re-derived class-B gate `tools/verify-live-ipc.sh` PASS
+  1/1 on VZ: the counter's 6-message bursts (`ipc: ping N` … `ipc: ping
+  N+5` back-to-back) interleave with the peer's byte-exact echoes, ZERO
+  `ipc: enospc` lines, the log's peak (sends − echoes) = 6 (> 4
+  messages queued at once, never over the re-derived 8-slot bound), the
+  `mbox` snapshot shows the peer's ring drained at the new capacity
+  (pending ≤ 8, sent − recv == pending) and the counter's empty, both
+  never exit, a fifth exec is `pool_full` at 7/7; the full 12-gate
+  shared-seam sweep + the args/kill/scale/procs-syscall gates all PASS
+  1/1.
 - **Network stack (sketch — not a commitment).** The last "Eventually"
   item, and the one the virtio surface table below maps to. The transport
   it needs is already proven (virtio console/blk/entropy/custom drivers:

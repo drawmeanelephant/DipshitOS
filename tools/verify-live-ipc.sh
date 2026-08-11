@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
-# verify-live-ipc.sh -- claim 5965 (milestone-four follow-on 3, card 3f)
-# class-B gate: TWO live processes EXCHANGE DATA on real VZ hardware.
+# verify-live-ipc.sh -- claim 5965 / claim 3179 (milestone-four follow-on
+# 3 card 3f + follow-on 4 card 4b) class-B gate: TWO live processes
+# EXCHANGE DATA on real VZ hardware.
 #
 # Coexistence is proven (claims 0826/4613), but two live processes could
 # not COMMUNICATE. This gate proves end-to-end data flow through the
@@ -27,18 +28,22 @@
 #      COUNTER.BIN size=").
 #   2. The phase-1 procs read shows `name=PEER.BIN state=running` AND
 #      `name=COUNTER.BIN state=running` with DISTINCT executor task ids
-#      and DISTINCT per-process stack VAs (two live user processes).
-#   3. Data flow: >= 3 "ipc: ping <d>" sends AND >= 3 "peer: got ping
+#      and DISTINCT per-process stack VAs (two live user processes).#     3. Data flow: >= 3 "ipc: ping <d>" sends AND >= 3 "peer: got ping
 #      <d>" echoes; every echoed number was actually sent (echoes track
-#      sends), every send except possibly the LAST in the window has its
-#      echo (the peer drains each message within a round; only the final
-#      in-flight send can miss the window), and the FIRST echo lands after
-#      the FIRST send (no echo without a send).
+#      sends), every send except the LAST in-flight burst window (<= 6 —
+#      card 4b: the counter sends bursts of 6 back-to-back in one quantum,
+#      so up to 6 messages can still be in the ring at teardown) has its
+#      byte-exact echo, the FIRST echo lands after the FIRST send (no echo
+#      without a send), and the BURST is proven: the log's max
+#      (sends - echoes) at any point — the peak ring depth — is >= 5
+#      (> 4 messages queued at once) and <= 8 (never over the re-derived
+#      capacity), with ZERO "ipc: enospc" refusal markers.
 #   4. The phase-2 `mbox` snapshot is the bounded-ring drain proof: the
-#      peer's row shows pending <= 1 (the ring is DRAINED, never
-#      accumulating) and sent - recv == pending (the mailbox invariant —
-#      every sent message is either still in flight or received); the
-#      counter's row shows pending=0 sent=0 recv=0 (nobody sends to it).
+#      peer's row shows pending <= 8 (the ring is DRAINED, never
+#      overflowing the re-derived capacity) and sent - recv == pending
+#      (the mailbox invariant — every sent message is either still in
+#      flight or received); the counter's row shows pending=0 sent=0
+#      recv=0 (nobody sends to it).
 #   5. The final procs read shows BOTH processes still running, and
 #      neither ever exits (no "name=PEER.BIN state=exited" /
 #      "name=COUNTER.BIN state=exited" anywhere in the log).
@@ -119,9 +124,9 @@ run_one() {
 
     local bytes=0 banner=0 peer_listed=0 peer_loaded=0 counter_loaded=0 \
         peer_running=0 counter_running=0 distinct_tasks=0 distinct_stacks=0 \
-        sends=0 echoes=0 echo_tracks=0 sends_echoed=0 order=0 \
-        mbox_peer=0 mbox_counter=0 final_running=0 never_exited=0 \
-        pool_full=0 echo1=0 echo2=0 fatal=0
+        sends=0 echoes=0 echo_tracks=0 sends_echoed=0 order=0 peak=0 \
+        peak_ok=0 enospc=0 mbox_peer=0 mbox_counter=0 final_running=0 \
+        never_exited=0 pool_full=0 echo1=0 echo2=0 fatal=0
     if [ -f artifacts/vm-serial.log ]; then
         bytes="$(wc -c < artifacts/vm-serial.log | tr -d ' ')"
         [ "$(grep -aFxc -- "DipshitOS kernel has seized control." artifacts/vm-serial.log || true)" = 1 ] && banner=1
@@ -157,14 +162,33 @@ run_one() {
             if [ -z "$(comm -23 <(printf '%s\n' "$echoes") <(printf '%s\n' "$sends") || true)" ]; then
                 echo_tracks=1
             fi
-            # Every send except possibly the LAST in the window has its
-            # echo (only the final in-flight send can miss the teardown).
+            # Every send except the LAST in-flight burst window (<= 6 —
+            # card 4b: the counter's bursts of 6 mean up to 6 messages can
+            # still be in the ring at teardown) has its byte-exact echo.
+            # The sequence numbers are consecutive, so the tail window is
+            # exactly {last_send-5 .. last_send}.
             local last_send rest
             last_send="$(printf '%s\n' "$sends" | tail -1)"
-            rest="$(printf '%s\n' "$sends" | grep -vx "$last_send" || true)"
+            rest="$(printf '%s\n' "$sends" | awk -v ls="$last_send" '$1 <= ls - 6')"
             if [ -z "$(comm -23 <(printf '%s\n' "$rest") <(printf '%s\n' "$echoes") || true)" ]; then
                 sends_echoed=1
             fi
+            # The burst proof (card 4b): walk the whole log and track the
+            # peak of (sends - echoes) — the ring depth at its deepest. The
+            # counter bursts 6 messages in ONE quantum (the peer is not
+            # scheduled mid-burst), so the peak is >= 5 (> 4 messages
+            # queued at once — the new capacity proof) and <= 8 (never
+            # over the re-derived ring bound).
+            peak="$(awk '
+                /^ipc: ping / { sent++; if (sent - echoed > max) max = sent - echoed; next }
+                /^peer: got ping / { echoed++ }
+                END { print max + 0 }
+            ' artifacts/vm-serial.log || true)"
+            peak="${peak:-0}"
+            [ "$peak" -ge 5 ] && [ "$peak" -le 8 ] && peak_ok=1 || true
+            # ZERO refusals: any send that hit ENOSPC prints the distinct
+            # marker (the bursts never overflow the 8-slot ring).
+            [ "$(grep -aFc -- "ipc: enospc" artifacts/vm-serial.log || true)" = 0 ] && enospc=1 || true
             # The first echo lands AFTER the first send (no echo without a
             # send first).
             local first_send_ln first_echo_ln
@@ -185,7 +209,9 @@ run_one() {
             pp="$(printf '%s\n' "$mbox_peer" | sed -E 's/.*pending=([0-9]+) .*/\1/')"
             ps="$(printf '%s\n' "$mbox_peer" | sed -E 's/.*sent=([0-9]+) .*/\1/')"
             pr="$(printf '%s\n' "$mbox_peer" | sed -E 's/.*recv=([0-9]+).*/\1/')"
-            [ "$pp" -le 1 ] && [ $((ps - pr)) -eq "$pp" ] && mbox_peer=1 || true
+            # pending <= 8 is the re-derived capacity bound (card 4b); the
+            # invariant sent - recv == pending holds at every instant.
+            [ "$pp" -le 8 ] && [ $((ps - pr)) -eq "$pp" ] && mbox_peer=1 || true
         fi
         if [ -n "$mbox_counter" ]; then
             local cp cs cr
@@ -210,19 +236,20 @@ run_one() {
         [ "$(grep -aFxc -- "rx-ipc-ok" artifacts/vm-serial.log || true)" = 1 ] && echo2=1 || true
         grep -qF -- "[EXC] parking:" artifacts/vm-serial.log && fatal=1 || true
     fi
-    echo "$tag: runner-rc=$rc serial-bytes=$bytes banner=$banner peer_listed=$peer_listed peer_loaded=$peer_loaded counter_loaded=$counter_loaded peer_running=$peer_running counter_running=$counter_running tasks=$distinct_tasks stacks=$distinct_stacks sends=$nsends echoes=$nechoes echo_tracks=$echo_tracks sends_echoed=$sends_echoed order=$order mbox_peer=$mbox_peer mbox_counter=$mbox_counter final_running=$final_running never_exited=$never_exited pool_full=$pool_full echo1=$echo1 echo2=$echo2 fatal=$fatal" | tee -a "$REPORT"
+    echo "$tag: runner-rc=$rc serial-bytes=$bytes banner=$banner peer_listed=$peer_listed peer_loaded=$peer_loaded counter_loaded=$counter_loaded peer_running=$peer_running counter_running=$counter_running tasks=$distinct_tasks stacks=$distinct_stacks sends=$nsends echoes=$nechoes echo_tracks=$echo_tracks sends_echoed=$sends_echoed order=$order peak=$peak peak_ok=$peak_ok enospc=$enospc mbox_peer=$mbox_peer mbox_counter=$mbox_counter final_running=$final_running never_exited=$never_exited pool_full=$pool_full echo1=$echo1 echo2=$echo2 fatal=$fatal" | tee -a "$REPORT"
     [ "$rc" = 0 ] && [ "$banner" = 1 ] && [ "$peer_listed" = 1 ] && [ "$peer_loaded" = 1 ] && \
         [ "$counter_loaded" = 1 ] && [ "$peer_running" = 1 ] && [ "$counter_running" = 1 ] && \
         [ "$distinct_tasks" = 1 ] && [ "$distinct_stacks" = 1 ] && [ "$nsends" -ge 3 ] && \
         [ "$nechoes" -ge 3 ] && [ "$echo_tracks" = 1 ] && [ "$sends_echoed" = 1 ] && \
-        [ "$order" = 1 ] && [ "$mbox_peer" = 1 ] && [ "$mbox_counter" = 1 ] && \
+        [ "$order" = 1 ] && [ "$peak_ok" = 1 ] && [ "$enospc" = 1 ] && \
+        [ "$mbox_peer" = 1 ] && [ "$mbox_counter" = 1 ] && \
         [ "$final_running" = 1 ] && [ "$never_exited" = 1 ] && [ "$pool_full" = 1 ] && \
         [ "$echo1" = 1 ] && [ "$echo2" = 1 ] && [ "$fatal" = 0 ]
 }
 
 : > "$REPORT"
 {
-    echo "DIPSHITOS live IPC gate (claim 5965) — two live processes exchange data through the kernel mailbox"
+    echo "DIPSHITOS live IPC gate (claims 5965/3179) — two live processes exchange bursty data through the 8-slot kernel mailbox"
     echo "revision: $REVISION branch=$BRANCH boots=$BOOTS dirty-files=$DIRTY"
     echo "script1: $(cat "$SCRIPT1" | tr '\n' '|')"
     echo "script2: $(cat "$SCRIPT2" | tr '\n' '|')"
@@ -242,7 +269,7 @@ done
 echo
 echo "=== result ==="
 if [ "$pass" = "$BOOTS" ]; then
-    echo "verify-live-ipc: PASS — COUNTER.BIN's sys_ipc_send bytes flowed through the kernel mailbox into PEER.BIN's sys_ipc_recv and came back byte-exact in the serial log; a fifth exec was pool_full at the 7/7 budget ($pass/$BOOTS boot(s))."
+    echo "verify-live-ipc: PASS — COUNTER.BIN's 6-message bursts flowed through the 8-slot kernel mailbox into PEER.BIN's sys_ipc_recv and came back byte-exact in the serial log, the peak ring depth stayed within 5..8 with ZERO enospc, and a fifth exec was pool_full at the 7/7 budget ($pass/$BOOTS boot(s))."
     echo "PASS: $pass/$BOOTS" >> "$REPORT"
     exit 0
 fi
