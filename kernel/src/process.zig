@@ -133,13 +133,18 @@ var registry_count: usize = 0;
 /// The most recently created process (the "current" program — what
 /// `exec.loaded()` reports).
 var current_id: ?usize = null;
-/// Process exit report (drained by the shell idle loop, the same pattern
-/// as the scheduler's task exit report). The name is snapshotted at exit —
-/// the descriptor may be recycled before the shell prints it.
-var exit_report_pending: bool = false;
-var exit_report_name_buf: [name_max]u8 = [_]u8{0} ** name_max;
-var exit_report_name_len: usize = 0;
-var exit_report_status: u64 = 0;
+/// Card 3d (claim 1014): the process exit reports are a bounded FIFO, not
+/// a single first-wins flag — N exits in one idle-loop window produce N
+/// `procs <name> exited status=N` lines IN ORDER instead of collapsing to
+/// one. The name is snapshotted at exit (the descriptor may be recycled
+/// before the shell prints it). Overflow (a full ring) drops the OLDEST
+/// entry to admit the newest — documented and host-tested.
+pub const exit_report_max: usize = 4;
+var exit_report_names: [exit_report_max][name_max]u8 = [_][name_max]u8{[_]u8{0} ** name_max} ** exit_report_max;
+var exit_report_lens: [exit_report_max]usize = [_]usize{0} ** exit_report_max;
+var exit_report_statuses: [exit_report_max]u64 = [_]u64{0} ** exit_report_max;
+var exit_report_head: usize = 0;
+var exit_report_count: usize = 0;
 
 /// Reset the registry (boot + host tests; called by `scheduler.init` so
 /// every pool reset also clears the process layer).
@@ -147,9 +152,8 @@ pub fn init() void {
     for (&processes) |*p| p.* = .{};
     registry_count = 0;
     current_id = null;
-    exit_report_pending = false;
-    exit_report_name_len = 0;
-    exit_report_status = 0;
+    exit_report_head = 0;
+    exit_report_count = 0;
 }
 
 /// Free the allocator-backed pages a process's address space + kernel
@@ -251,13 +255,11 @@ pub fn on_task_exit(task_id: usize, status: u64) void {
         // lifecycle reap can find it and free its owned pages (the slot
         // itself is a zombie until the idle task reaps it). Cleared by
         // `release_pages_on_reap`.
-        if (!exit_report_pending) {
-            const take = @min(processes[id].name_len, name_max);
-            @memcpy(exit_report_name_buf[0..take], processes[id].name_buf[0..take]);
-            exit_report_name_len = take;
-            exit_report_status = status;
-            exit_report_pending = true;
-        }
+        // Card 3d (claim 1014): EVERY exit is queued — two exits in one
+        // idle-loop window print as two lines in order (the old
+        // first-wins-while-undrained flag collapsed them). A full ring
+        // drops the oldest to admit the newest.
+        push_exit_report(processes[id].name_buf[0..processes[id].name_len], status);
         return;
     }
 }
@@ -355,20 +357,37 @@ pub fn info(id: usize) ?ProcessInfo {
     };
 }
 
-/// The pending process exit report (drained once by the shell idle loop,
-/// which prints `procs <name> exited status=<n>`). Returns null when
-/// nothing is pending.
+/// The pending process exit reports, drained IN ORDER by the shell idle
+/// loop (which prints `procs <name> exited status=<n>` per entry). Returns
+/// null when nothing is pending.
 pub const ExitReport = struct {
     name: []const u8,
     status: u64,
 };
 
+/// Queue one exit report (exception/idle context — pure BSS writes).
+/// Overflow drops the OLDEST entry (documented + host-tested).
+fn push_exit_report(name: []const u8, status: u64) void {
+    if (exit_report_count == exit_report_max) {
+        exit_report_head = (exit_report_head + 1) % exit_report_max;
+        exit_report_count -= 1;
+    }
+    const index = (exit_report_head + exit_report_count) % exit_report_max;
+    const take = @min(name.len, name_max);
+    @memcpy(exit_report_names[index][0..take], name[0..take]);
+    exit_report_lens[index] = take;
+    exit_report_statuses[index] = status;
+    exit_report_count += 1;
+}
+
 pub fn take_exit_report() ?ExitReport {
-    if (!exit_report_pending) return null;
-    exit_report_pending = false;
+    if (exit_report_count == 0) return null;
+    const index = exit_report_head;
+    exit_report_head = (exit_report_head + 1) % exit_report_max;
+    exit_report_count -= 1;
     return .{
-        .name = exit_report_name_buf[0..exit_report_name_len],
-        .status = exit_report_status,
+        .name = exit_report_names[index][0..exit_report_lens[index]],
+        .status = exit_report_statuses[index],
     };
 }
 
@@ -624,6 +643,50 @@ test "process: exited pages return at the lifecycle reap; the procs row stays" {
     // double free can inflate the free count.
     try std.testing.expect(!release_pages_on_reap(3));
     try std.testing.expectEqual(free_before, alloc.stats().free_pages);
+}
+
+test "process: exit reports are a FIFO — two exits print two lines in order" {
+    // Card 3d (claim 1014): N exits in one idle-loop window produce N
+    // `procs <name> exited status=<n>` reports IN ORDER (the old single
+    // first-wins flag collapsed them).
+    init();
+    const a = create("USER.BIN", .{}, .{}, .{}).?;
+    const b = create("COUNTER.BIN", .{}, .{}, .{}).?;
+    _ = bind(a, 2);
+    _ = bind(b, 3);
+    // Two exits in one window, never drained in between.
+    on_task_exit(2, 43);
+    on_task_exit(3, 137);
+    const r1 = take_exit_report().?;
+    try std.testing.expectEqualStrings("USER.BIN", r1.name);
+    try std.testing.expectEqual(@as(u64, 43), r1.status);
+    const r2 = take_exit_report().?;
+    try std.testing.expectEqualStrings("COUNTER.BIN", r2.name);
+    try std.testing.expectEqual(@as(u64, 137), r2.status);
+    try std.testing.expect(take_exit_report() == null);
+}
+
+test "process: exit report FIFO overflow drops the OLDEST" {
+    // Card 3d: a full 4-slot ring evicts the oldest entry (honestly
+    // reported) — the four newest exits drain, in order.
+    init();
+    var ids: [exit_report_max + 1]usize = undefined;
+    for (0..exit_report_max + 1) |i| {
+        var name: [16]u8 = undefined;
+        const s = try std.fmt.bufPrint(&name, "P{d}", .{i});
+        ids[i] = create(s, .{}, .{}, .{}).?;
+        _ = bind(ids[i], i + 1);
+        on_task_exit(i + 1, @intCast(i));
+    }
+    // The oldest (P0, status 0) was dropped; the four newest drain in order.
+    for (1..exit_report_max + 1) |i| {
+        const r = take_exit_report().?;
+        var name: [16]u8 = undefined;
+        const s = try std.fmt.bufPrint(&name, "P{d}", .{i});
+        try std.testing.expectEqualStrings(s, r.name);
+        try std.testing.expectEqual(@as(u64, @intCast(i)), r.status);
+    }
+    try std.testing.expect(take_exit_report() == null);
 }
 
 test "process: the static boot payload owns no allocator pages" {

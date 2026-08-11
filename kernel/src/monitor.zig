@@ -231,7 +231,7 @@ fn ensure_registry() []const Command {
             .{ .name = "clear", .help = "clean up the crime scene", .usage = "clear", .handler = cmd_clear },
             .{ .name = "echo", .help = "repeat your regrettable decisions", .usage = "echo <text...>", .handler = cmd_echo },
             .{ .name = "elephant", .help = "operational mascot diagnostics", .usage = "elephant", .handler = cmd_elephant },
-            .{ .name = "exec", .help = "load a user program from the ESP and enter it at EL0", .usage = "exec [<file>]", .max_args = 1, .handler = cmd_exec },
+            .{ .name = "exec", .help = "load a user program from the ESP and enter it at EL0", .usage = "exec [<file> [arg...]]", .max_args = 1 + esp_exec.max_exec_args, .handler = cmd_exec },
             .{ .name = "fault", .help = "trigger a synchronous exception (diagnostic)", .usage = "fault", .handler = cmd_fault },
             .{ .name = "handoff", .help = "display boot-to-kernel ABI data", .usage = "handoff", .handler = cmd_handoff },
             .{ .name = "help", .help = "list commands and their help text", .usage = "help [command]", .max_args = 1, .handler = cmd_help },
@@ -1251,15 +1251,19 @@ fn cmd_spawn(m: *Monitor, args: []const []const u8) ExecError {
 // ESP exec command (claim 6783 — milestone-three card 6)
 // ---------------------------------------------------------------------------
 
-/// Load a user program from the ESP and enter it at EL0. `exec [<file>]`
-/// defaults to `USER.BIN` (the image builder embeds it at the volume root;
-/// it can also be written at runtime through the FAT `write` path). The
-/// program must be a DSK1 flat image; the kernel reads it through the
-/// claim-6420 FAT path, rebuilds the EL0 user root around its page, and
-/// spawns it as an EL0t task. Every failure mode is reported honestly.
+/// Load a user program from the ESP and enter it at EL0. `exec [<file>
+/// [arg...]]` defaults to `USER.BIN` (the image builder embeds it at the
+/// volume root; it can also be written at runtime through the FAT `write`
+/// path). The program must be a DSK1 flat image; the kernel reads it
+/// through the claim-6420 FAT path, rebuilds the EL0 user root around its
+/// page, and spawns it as an EL0t task. Arguments (card 3e, claim 4636)
+/// are packed into the program's text page and passed at entry (argc in
+/// x0, argv block VA in x1) — bounded to `max_exec_args`; more than that
+/// is refused honestly. Every failure mode is reported honestly.
 fn cmd_exec(m: *Monitor, args: []const []const u8) ExecError {
-    const name = if (args.len == 1) args[0] else esp_exec.default_name;
-    switch (esp_exec.exec_file(name)) {
+    const name = if (args.len >= 1) args[0] else esp_exec.default_name;
+    const prog_args = if (args.len >= 2) args[1..] else &.{};
+    switch (esp_exec.exec_file(name, prog_args)) {
         .ok => {
             const info = esp_exec.loaded().?;
             m.console.puts("exec: loaded ");
@@ -1325,6 +1329,16 @@ fn cmd_exec(m: *Monitor, args: []const []const u8) ExecError {
         .process_full => {
             m.console.print_line("exec: process registry exhausted (all processes live; wait for one to exit)");
             return .machine_failed;
+        },
+        .too_many_args => {
+            m.console.puts("exec: too many arguments (max ");
+            m.console.print_u64(esp_exec.max_exec_args);
+            m.console.print_line(")");
+            return .invalid_argument;
+        },
+        .no_args_room => {
+            m.console.print_line("exec: image leaves no room for the argv block (256 bytes)");
+            return .invalid_argument;
         },
     }
 }

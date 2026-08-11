@@ -282,7 +282,23 @@ All command output and logs are saved under `artifacts/` (`inspect.txt`,
    lands after the kill line, the pages return at the reap (exact +5
    free-count recovery), and a re-exec lands in the freed slot
    (`tools/verify-live-kill.sh`, with the runner's `--script3` third
-   phase for the post-reap snapshot).
+   phase for the post-reap snapshot). The follow-on 3 card 3d (claim
+   1014) fixes the documented report collapse: the exit/reap report was a
+   single first-wins-while-undrained flag (N exits in one idle-loop
+   window → ONE report line, so the gates asserted ≥1), now replaced by
+   bounded name+status FIFOs drained in order by the shell idle loop and
+   the monitor, so the concurrent and long-lived gates assert EXACT
+   counts — two exits print exactly two of each report line, in order
+   (`tools/verify-live-concurrent.sh` / `tools/verify-live-long-lived.sh`).
+   The follow-on 3 card 3e (claim 4636) gives a program per-exec
+   identity: `exec <file> [arg...]` packs a bounded argv block (8 args ×
+   32 B) into the process's OWN text page (a read-only leaf — zero extra
+   pages, W^X preserved) and extends the ENTRY contract (not a syscall,
+   ADR 0007 frozen) so `_start` receives `argc` in x0 and the block VA
+   in x1; USER.BIN prints one `user: arg=<n>` line per argument, so the
+   SAME binary can distinguish itself per exec
+   (`tools/verify-live-args.sh` — `exec USER.BIN alpha` + `exec
+   USER.BIN beta` produce distinct markers with both programs live).
 - The Virtualization.framework VM boots the GPT+FAT image: configuration
   validates, the EFI variable store is created, the VM starts and runs, and
   after boot the guest-written marker file `\BOOTED.TXT` exists on the ESP
