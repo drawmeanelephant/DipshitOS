@@ -69,6 +69,9 @@ const syscall = @import("syscall.zig");
 // image + address space + lifecycle live in the bounded process registry,
 // not in this module's globals.
 const process = @import("process.zig");
+// Card 3f (claim 5965): the per-process IPC mailbox — each exec'd
+// process's ring is reset the moment its process id is created.
+const mailbox = @import("mailbox.zig");
 // Claim 0826: the per-process text/stack/kernel-stack pages come from the
 // physical page allocator (claims 3972/5162).
 const alloc = @import("alloc.zig");
@@ -309,6 +312,10 @@ pub fn exec_file(name: []const u8, args: []const []const u8) ExecResult {
         _ = alloc.free_pages(kstack_phys, kstack_pages);
         return .process_full;
     };
+    // Card 3f (claim 5965): the new process's IPC ring starts clean — a
+    // recycled process id must never inherit an earlier occupant's queued
+    // messages (cross-process isolation at the mailbox level).
+    mailbox.reset(proc_id);
     if (scheduler.register_exec_user(entry_va, rebuild.root_phys, @intCast(text_len), rebuild.stack_va, scheduler.task_stack_size, kstack, @intCast(argc), argv_va)) |task_id| {
         _ = process.bind(proc_id, task_id);
     } else {
@@ -646,6 +653,58 @@ test "exec: COUNTER.BIN loads by name with its own marker and process" {
     try std.testing.expectEqual(process.State.running, process.info(1).?.state);
     try std.testing.expectEqual(process.State.running, process.info(2).?.state);
     try std.testing.expect(process.info(1).?.text_phys != process.info(2).?.text_phys);
+}
+
+test "exec: PEER.BIN loads by name — counter + peer fill the 5-slot pool" {
+    // Card 3f (claim 5965): the THIRD ESP program loads by name exactly
+    // like USER.BIN/COUNTER.BIN (same DSK1 pipeline), and with the
+    // counter it fills the fixed pool — shell + worker + counter + peer +
+    // idle = 5/5, NO spare, so a THIRD exec is pool_full (the 3b
+    // capacity proof reused under IPC).
+    try build_image(test_allocator);
+    defer test_allocator.free(saved_image);
+    esp.reset();
+    try std.testing.expectEqual(fat.MountResult.ok, esp.set_disk(.{ .read = &fake_read, .write = &fake_write }));
+    arm_allocator();
+    _ = mmu.build_user_root(userspace.text_va, 0x1000, 64, userspace.stack_va, 0x2000, 8192) orelse return error.TestUnexpectedResult;
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0);
+    scheduler.start();
+    // Retire the boot payload so BOTH exec'd programs fit the pool.
+    try std.testing.expect(scheduler.yield_current());
+    try std.testing.expect(scheduler.yield_current());
+    try std.testing.expectEqual(@as(usize, 2), scheduler.current_id());
+    try std.testing.expect(scheduler.exit_current(7));
+    try std.testing.expect(scheduler.reap(2));
+
+    const counter_img = dsk1("counter: alive\n", 24, 24 + 15);
+    try std.testing.expectEqual(esp.WriteResult.ok, esp.write_file("COUNTER.BIN", counter_img[0 .. 24 + 15]));
+    const peer_img = dsk1("peer: got \n", 24, 24 + 11);
+    try std.testing.expectEqual(esp.WriteResult.ok, esp.write_file("PEER.BIN", peer_img[0 .. 24 + 11]));
+    // Both load by name, each with its OWN process and executor slot.
+    try std.testing.expectEqual(ExecResult.ok, exec_file("COUNTER.BIN", &.{})); // pid 1, slot 2
+    try std.testing.expectEqual(ExecResult.ok, exec_file("PEER.BIN", &.{})); // pid 2, slot 3
+    const counter = process.info(1).?;
+    const peer = process.info(2).?;
+    try std.testing.expectEqualStrings("COUNTER.BIN", counter.name);
+    try std.testing.expectEqualStrings("PEER.BIN", peer.name);
+    try std.testing.expectEqual(process.State.running, counter.state);
+    try std.testing.expectEqual(process.State.running, peer.state);
+    try std.testing.expect(counter.task_id != peer.task_id);
+    try std.testing.expect(counter.text_phys != peer.text_phys);
+    try std.testing.expect(counter.stack_phys != peer.stack_phys);
+    // The peer's payload is in ITS OWN text page (its marker, not the
+    // counter's — the serial log can tell the two programs apart).
+    const peer_text: [*]const u8 = @ptrFromInt(peer.text_phys);
+    try std.testing.expectEqualStrings("peer: got \n", peer_text[0..11]);
+    // The pool is now 5/5: a third exec is pool_full, checked BEFORE any
+    // allocation (nothing leaks).
+    const user_img = dsk1("user: hello from the ESP\n", 24, 24 + 25);
+    try std.testing.expectEqual(esp.WriteResult.ok, esp.write_file("USER.BIN", user_img[0 .. 24 + 25]));
+    try std.testing.expect(!scheduler.has_free_slot());
+    try std.testing.expectEqual(ExecResult.pool_full, exec_file("USER.BIN", &.{}));
+    try std.testing.expectEqual(@as(usize, 3), process.count()); // boot exited + counter + peer
 }
 
 test "exec: permanent occupant + recycle — one spare slot, pool_full, then the re-exec lands" {

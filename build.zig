@@ -207,6 +207,36 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_counter.step);
 
     // ------------------------------------------------------------------
+    // Guest: third ESP user program (milestone-four follow-on 3, card
+    // 3f — claim 5965) — the IPC peer PEER.BIN. Same freestanding target,
+    // linker script, elf2bin conversion, and ESP embedding as USER.BIN /
+    // COUNTER.BIN; the kernel's `exec PEER.BIN` monitor command loads it
+    // by name. It never exits: it recv-loops through sys_ipc_recv (slot
+    // 6) and echoes each received message verbatim ("peer: got N"), so
+    // the live IPC gate can show COUNTER.BIN's sends and PEER.BIN's
+    // echoes interleaving across the whole serial log — the strongest
+    // proof of two live processes communicating.
+    // ------------------------------------------------------------------
+    const peer = b.addExecutable(.{
+        .name = "user-peer",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/peer.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    peer.linker_script = b.path("user/linker.ld");
+    const peer_step = b.step("peer", "Build the third ESP user program (zig-out/bin/PEER.BIN; class A tooling, no VM)");
+    const peer_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    peer_elf2bin.addFileArg(peer.getEmittedBin());
+    const peer_bin = peer_elf2bin.addOutputFileArg("PEER.BIN");
+    peer_elf2bin.has_side_effects = true;
+    peer_elf2bin.stdio = .inherit;
+    peer_step.dependOn(&peer_elf2bin.step);
+    const install_peer = b.addInstallFileWithDir(peer_bin, .bin, "PEER.BIN");
+    b.getInstallStep().dependOn(&install_peer.step);
+
+    // ------------------------------------------------------------------
     // Top-level steps. System-command steps are marked as having side
     // effects (and inherit stdio) so they always execute instead of being
     // skipped by the build cache. (No QEMU path: this project targets Apple
@@ -219,6 +249,7 @@ pub fn build(b: *std.Build) void {
     image.addFileArg(kernel_bin); // make-image.sh: [EFI_BIN] [IMAGE] [KERNEL_BIN]
     image.addFileArg(user_bin); // ... [USER_BIN] (claim 6783: ESP user program)
     image.addFileArg(counter_bin); // ... [COUNTER_BIN] (claim 4613: second, never-exiting user program)
+    image.addFileArg(peer_bin); // ... [PEER.BIN] (claim 5965: third user program, the IPC peer)
     image.has_side_effects = true;
     image.stdio = .inherit;
     image_step.dependOn(&image.step);
@@ -238,6 +269,7 @@ pub fn build(b: *std.Build) void {
     failure_image.addFileArg(kernel_bin);
     failure_image.addFileArg(user_bin); // USER.BIN rides the same image builder
     failure_image.addFileArg(counter_bin); // COUNTER.BIN too (claim 4613)
+    failure_image.addFileArg(peer_bin); // PEER.BIN too (claim 5965)
     failure_image.has_side_effects = true;
     failure_image.stdio = .inherit;
     failure_step.dependOn(&failure_image.step);

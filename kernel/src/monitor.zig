@@ -25,6 +25,7 @@ const fat = @import("fat.zig"); // claim 6420: FAT write diagnostics (last faili
 const exceptions = @import("exceptions.zig");
 const gic = @import("gic.zig");
 const handoff = @import("handoff.zig");
+const mailbox = @import("mailbox.zig"); // claim 5965: per-process IPC rings behind `mbox`
 const memmap = @import("memmap.zig");
 const mmu = @import("mmu.zig"); // claim 5804: per-task TTBR0 roots + user-root inventory
 const pci = @import("pci.zig");
@@ -208,7 +209,7 @@ pub const Command = struct {
 
 /// Number of commands. The registry is built at runtime (not a const
 /// table): see `ensure_registry`.
-pub const registry_count: usize = 31;
+pub const registry_count: usize = 32;
 
 /// Command registry, built at runtime into BSS. A `const` table would hold
 /// link-time absolute addresses for BOTH the string slices and the handler
@@ -239,6 +240,7 @@ fn ensure_registry() []const Command {
             .{ .name = "kill", .help = "terminate a running process (kernel-owned lifetime)", .usage = "kill <pid|name>", .min_args = 1, .max_args = 1, .handler = cmd_kill },
             .{ .name = "ls", .help = "list files on the ESP (or a directory by path)", .usage = "ls [<dir>]", .max_args = 1, .handler = cmd_ls },
             .{ .name = "mem", .help = "summarize the EFI memory map", .usage = "mem", .handler = cmd_mem },
+            .{ .name = "mbox", .help = "per-process IPC mailbox: pending messages and drain counters", .usage = "mbox [<pid>]", .max_args = 1, .handler = cmd_mbox },
             .{ .name = "mount", .help = "switch the active FAT volume (esp or data)", .usage = "mount <esp|data>", .min_args = 1, .max_args = 1, .handler = cmd_mount },
             .{ .name = "pages", .help = "physical page allocator pool", .usage = "pages [selftest]", .max_args = 1, .handler = cmd_pages },
             .{ .name = "pci", .help = "enumerate PCI devices on the bus", .usage = "pci", .handler = cmd_pci },
@@ -1227,6 +1229,62 @@ fn cmd_kill(m: *Monitor, args: []const []const u8) ExecError {
 }
 
 // ---------------------------------------------------------------------------
+// IPC mailbox command (milestone-four follow-on 3, card 3f — claim 5965)
+// ---------------------------------------------------------------------------
+
+/// `mbox [<pid>]` — dump the per-process IPC mailboxes: for every live
+/// process (or just the one named by `pid`), the pending message count
+/// and the enqueue/dequeue counters, then the queued bytes themselves.
+/// The counters are the draining proof: a process whose ring is drained
+/// has `recv` tracking `sent` and `pending` back at 0. Deterministic and
+/// grep-able (the live IPC gate greps `mbox: id=` and `pending=` rows).
+fn cmd_mbox(m: *Monitor, args: []const []const u8) ExecError {
+    const wanted: ?usize = if (args.len > 0) blk: {
+        const value = parseInt(args[0]) catch {
+            m.console.puts("mbox: invalid pid: ");
+            m.console.puts(args[0]);
+            m.console.puts("\n");
+            return .invalid_argument;
+        };
+        if (value >= process.max_processes or process.info(@as(usize, @intCast(value))) == null) {
+            m.console.puts("mbox: no such process: ");
+            m.console.puts(args[0]);
+            m.console.puts("\n");
+            return .invalid_argument;
+        }
+        break :blk @as(usize, @intCast(value));
+    } else null;
+    var id: usize = 0;
+    while (id < process.max_processes) : (id += 1) {
+        const info = process.info(id) orelse continue;
+        if (wanted) |w| if (w != id) continue;
+        const mbox_info = mailbox.info(id);
+        m.console.puts("mbox: id=");
+        m.console.print_u64(@intCast(id));
+        m.console.puts(" name=");
+        m.console.puts(info.name);
+        m.console.puts(" pending=");
+        m.console.print_u64(@intCast(mbox_info.pending));
+        m.console.puts(" sent=");
+        m.console.print_u64(mbox_info.sent);
+        m.console.puts(" recv=");
+        m.console.print_u64(mbox_info.recv);
+        m.console.puts("\n");
+        // Raw dump of the queued bytes (messages are text here; the ring
+        // bound caps the total at 4 × 64 B per process).
+        var index: usize = 0;
+        while (mailbox.message(id, index)) |bytes| : (index += 1) {
+            m.console.puts("mbox:   ");
+            m.console.print_u64(@intCast(index));
+            m.console.puts(": ");
+            m.console.puts(bytes);
+            m.console.puts("\n");
+        }
+    }
+    return .none;
+}
+
+// ---------------------------------------------------------------------------
 // Task lifecycle command (claim 6729)
 // ---------------------------------------------------------------------------
 
@@ -1727,6 +1785,55 @@ test "monitor: command lookup" {
     try std.testing.expect(lookup("beans") != null);
     try std.testing.expect(lookup("help") != null);
     try std.testing.expect(lookup("frobnicate") == null);
+}
+
+test "monitor: mbox dumps pending messages and drain counters" {
+    // Card 3f (claim 5965): the `mbox [<pid>]` monitor view. Rings are
+    // seeded directly here (the live send/recv flow is the class-B gate);
+    // the dump proves pending depth, the sent/recv drain counters, the
+    // single-pid view, and the exact refusals.
+    mailbox.init();
+    var env = TestEnv.init();
+    var mon = env.monitor();
+    try std.testing.expect(lookup("mbox") != null);
+    try std.testing.expectEqualStrings("per-process IPC mailbox: pending messages and drain counters", lookup("mbox").?.help);
+    // The pids are whatever `process.create` returns (earlier tests may
+    // already occupy low ids — never assume a fixed pid).
+    const counter_pid = process.create("COUNTER.BIN", .{ .entry_va = 0x400000, .content_len = 64 }, .{}, .{}).?;
+    const peer_pid = process.create("PEER.BIN", .{ .entry_va = 0x400000, .content_len = 64 }, .{}, .{}).?;
+    _ = mailbox.send(counter_pid, "ipc: ping 1\n");
+    _ = mailbox.send(counter_pid, "ipc: ping 2\n");
+    _ = mailbox.send(peer_pid, "ipc: ping 3\n");
+    mailbox.drop(peer_pid); // the peer consumed one: recv=1
+    _ = mailbox.send(peer_pid, "ipc: ping 4\n"); // then a fresh send: sent=2, pending=1
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"mbox"}));
+    const out = env.mock.contents();
+    const counter_row = std.fmt.allocPrint(std.testing.allocator, "mbox: id={d} name=COUNTER.BIN pending=2 sent=2 recv=0\n", .{counter_pid}) catch unreachable;
+    defer std.testing.allocator.free(counter_row);
+    const peer_row = std.fmt.allocPrint(std.testing.allocator, "mbox: id={d} name=PEER.BIN pending=1 sent=2 recv=1\n", .{peer_pid}) catch unreachable;
+    defer std.testing.allocator.free(peer_row);
+    try std.testing.expect(std.mem.indexOf(u8, out, counter_row) != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "mbox:   0: ipc: ping 1\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "mbox:   1: ipc: ping 2\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, peer_row) != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "mbox:   0: ipc: ping 4\n") != null);
+    // Single-pid view.
+    env.mock.reset();
+    const single_arg = std.fmt.allocPrint(std.testing.allocator, "{d}", .{counter_pid}) catch unreachable;
+    defer std.testing.allocator.free(single_arg);
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "mbox", single_arg }));
+    const single = env.mock.contents();
+    // The single-pid view prints exactly the counter's row (the same
+    // formatted row asserted above) and nothing for the peer.
+    try std.testing.expect(std.mem.indexOf(u8, single, counter_row) != null);
+    try std.testing.expect(std.mem.indexOf(u8, single, "name=PEER.BIN") == null);
+    // Unknown and malformed pids refuse exactly.
+    env.mock.reset();
+    try std.testing.expectEqual(ExecError.invalid_argument, exec(&mon, &.{ "mbox", "7" }));
+    try std.testing.expectEqualStrings("mbox: no such process: 7\n", env.mock.contents());
+    env.mock.reset();
+    try std.testing.expectEqual(ExecError.invalid_argument, exec(&mon, &.{ "mbox", "nope" }));
+    try std.testing.expectEqualStrings("mbox: invalid pid: nope\n", env.mock.contents());
 }
 
 test "monitor: registry is well-formed" {
@@ -2244,12 +2351,14 @@ test "monitor: syscalls is registered and reports deterministic rows" {
     try std.testing.expectEqualStrings("numbered syscall table and counters", lookup("syscalls").?.help);
     try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"syscalls"}));
     try std.testing.expectEqualStrings(
-        "syscalls: slots=64 implemented=5\n" ++
+        "syscalls: slots=64 implemented=7\n" ++
             "  0 sys_ping calls=0\n" ++
             "  1 sys_write calls=0\n" ++
             "  2 sys_yield calls=0\n" ++
             "  3 sys_exit calls=0\n" ++
-            "  4 sys_sleep calls=0\n",
+            "  4 sys_sleep calls=0\n" ++
+            "  5 sys_ipc_send calls=0\n" ++
+            "  6 sys_ipc_recv calls=0\n",
         env.mock.contents(),
     );
 }
