@@ -82,6 +82,22 @@ VZEFIBootLoader (macOS VZ)
   UEFI-defined way to give control back to firmware. In milestone two the
   kernel calls `ExitBootServices` itself (per ADR 0004) and no UEFI
   protocol is usable afterwards.
+- **Guest ↔ host network (milestone five, card N1 — claim 1373):** under
+  the runner's flag-gated `--net <capture-file>` mode the VM gains a
+  virtio-net device (`VZVirtioNetworkDeviceConfiguration` +
+  `VZFileHandleNetworkDeviceAttachment`, fixed host MAC). The guest's
+  `kernel/src/virtio_net.zig` (injectable transport ops — the fat.zig
+  pattern) discovers the modern virtio-net device (DID 0x1041) pre-exit,
+  negotiates features (the device needs `VIRTIO_NET_F_MTU` accepted),
+  reads the host-set MAC via the feature path, arms queue 0 (RX) +
+  queue 1 (TX), re-arms post-exit (the net device does not reset at
+  ExitBootServices — observed st=0f), and `netsend` drives TX end to end:
+  a zeroed 12-byte virtio_net_hdr (the device consumes one on every TX
+  buffer — observed) + the raw Ethernet frame, built in fixed BSS staging
+  (no heap), submitted on queue 1, and drained from the used ring polled;
+  the host capture holds the exact frames byte-for-byte (gate
+  `tools/verify-live-net-tx.sh` PASS 2/2). RX buffer supply + used-ring
+  drain + MAC filtering + `net recv` are card N2.
 - **Guest ↔ host storage:** the disk is presented as a virtio block device.
   The guest never touches the storage device directly in milestones zero
   and one; the  firmware reads `EFI/BOOT/BOOTAA64.EFI` from it, and the boot stub writes

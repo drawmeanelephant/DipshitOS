@@ -9,6 +9,16 @@
 //          scripted phase, forwarded once after its own serial marker)
 //         [--script3 <file> --script3-after <text>] (claim 7786: a third
 //          scripted phase, forwarded once after its own serial marker)
+//         [--net <capture-file>] (milestone five card N1, claim 1373: attach
+//          one VZVirtioNetworkDeviceConfiguration with a
+//          VZFileHandleNetworkDeviceAttachment so the guest's virtio-net TX
+//          frames are captured byte-exactly to <capture-file> (raw Ethernet
+//          bytes, host writes them as they arrive). The guest MAC is FIXED
+//          (02:00:00:00:00:01) so the guest-side VIRTIO_NET_F_MAC read is
+//          deterministic and gate-assertable. OFF by default: without the
+//          flag config.networkDevices stays [] — every existing gate is
+//          byte-identical. No host->guest frames (fileHandleForReading nil)
+//          in N1 — RX is the N2 card; VZNAT is a later card's option.)
 //
 // * --custom-virtio (macOS 27 spike, audit step 3): attaches one
 //   default-off VZCustomVirtioDeviceConfiguration so the guest's PCI
@@ -118,6 +128,11 @@ var script2After: String?
 var script3Path: String?
 var script3After: String?
 var customVirtioEnabled = false
+// Milestone five card N1 (claim 1373): `--net <capture-file>` attaches the
+// virtio-net device; the guest's TX frames are captured byte-exactly to the
+// file. nil = default (no network device attached, config.networkDevices
+// stays [] — the default VM is unchanged).
+var netCapturePath: String?
 
 var idx = 2
 while idx < arguments.count {
@@ -171,6 +186,9 @@ while idx < arguments.count {
     } else if arg == "--custom-virtio" {
         customVirtioEnabled = true
         idx += 1
+    } else if arg == "--net", idx + 1 < arguments.count {
+        netCapturePath = arguments[idx + 1]
+        idx += 2
     } else {
         serialLogPath = arg
         idx += 1
@@ -347,7 +365,62 @@ if screenshotPath != nil {
 } else {
     config.graphicsDevices = []
 }
-config.networkDevices = []
+// Milestone five card N1 (claim 1373): the virtio-net device, attached only
+// under `--net <capture-file>`. VZFileHandleNetworkDeviceAttachment transmits
+// raw data-link frames over ONE connected datagram socket: VZ holds one end
+// (every guest-transmitted frame arrives as a datagram; host->guest frames
+// would be written into the same socket — that is card N2's RX direction),
+// and the runner reads the other end and appends each datagram to the
+// capture file byte-exactly. The guest MAC is FIXED on the host config
+// (VZMACAddress "02:00:00:00:00:01", locally administered) so the guest's
+// VIRTIO_NET_F_MAC read is deterministic and gate-assertable. Without the
+// flag the config is exactly as before: networkDevices = [] — every existing
+// gate stays byte-identical.
+var netCaptureHandle: FileHandle? // capture file (append)
+var netCaptureSocket: FileHandle? // the socket end VZ transmits to
+var netCaptureReadSocket: FileHandle? // the runner's read end
+var netCaptureStop = false
+var netCaptureThread: Thread?
+var netCaptureDone = DispatchSemaphore(value: 0)
+if let netCapturePath {
+    let netURL = URL(fileURLWithPath: netCapturePath)
+    FileManager.default.createFile(atPath: netURL.path, contents: nil)
+    guard let netCaptureFile = try? FileHandle(forWritingTo: netURL) else {
+        fail("Could not open net capture file at '\(netCapturePath)'.")
+    }
+    netCaptureHandle = netCaptureFile
+    var fds: [Int32] = [0, 0]
+    guard socketpair(AF_UNIX, SOCK_DGRAM, 0, &fds) == 0 else {
+        fail("Could not create the net attachment datagram socketpair (errno \(errno)).")
+    }
+    netCaptureSocket = FileHandle(fileDescriptor: fds[0], closeOnDealloc: true)
+    netCaptureReadSocket = FileHandle(fileDescriptor: fds[1], closeOnDealloc: true)
+    // Reader thread: drain the runner's socket end into the capture file.
+    // One datagram per read (SOCK_DGRAM); a 4096-byte buffer covers the
+    // largest N1 frame (1514 B) with headroom.
+    netCaptureThread = Thread {
+        var buf = [UInt8](repeating: 0, count: 4096)
+        while !netCaptureStop {
+            let n = read(netCaptureReadSocket!.fileDescriptor, &buf, buf.count)
+            if n < 0 && errno == EINTR { continue }
+            if n <= 0 { break }
+            try? netCaptureFile.write(contentsOf: Data(bytes: buf, count: n))
+        }
+        try? netCaptureFile.synchronize()
+        netCaptureDone.signal()
+    }
+    netCaptureThread?.start()
+    let netAttachment = VZFileHandleNetworkDeviceAttachment(fileHandle: netCaptureSocket!)
+    let netConfig = VZVirtioNetworkDeviceConfiguration()
+    netConfig.attachment = netAttachment
+    guard let fixedMAC = VZMACAddress(string: "02:00:00:00:00:01") else {
+        fail("Could not parse the fixed net MAC address.")
+    }
+    netConfig.macAddress = fixedMAC
+    config.networkDevices = [netConfig]
+} else {
+    config.networkDevices = []
+}
 #if SPIKE
 if customVirtioEnabled, #available(macOS 27.0, *) {
     // The runtime guard above already requires macOS 27+; the availability
@@ -416,6 +489,9 @@ if consoleMode {
     if let nvramConsolePath {
         print("  nvram console: \(nvramConsolePath)  (claim 0015 — post-exit console stream from the NVRAM channel; exit 0 iff bytes were found)")
     }
+}
+if let netCapturePath {
+    print("  net: ENABLED (milestone five card N1, claim 1373) — virtio-net device attached, guest TX frames captured byte-exactly to \(netCapturePath), fixed MAC 02:00:00:00:00:01")
 }
 
 runner.queue.async {
@@ -493,6 +569,17 @@ func finish(success: Bool) {
                     finalSuccess = true
                     print("NVRAM-CONSOLE: \(result.chunks) chunk(s) reconstructed\(result.complete ? "" : " (INCOMPLETE — missing chunk index \(result.missing!))"), \(result.text.count) bytes")
                 }
+            }
+            // Milestone five card N1 (claim 1373): the VM is stopped, so the
+            // net attachment is quiescent — stop the reader (closing the
+            // runner's socket end unblocks its read), join it, and close the
+            // capture file so the gate can assert the guest's frames
+            // byte-exactly.
+            if netCaptureSocket != nil {
+                netCaptureStop = true
+                try? netCaptureReadSocket?.close()
+                _ = netCaptureDone.wait(timeout: .now() + 2)
+                try? netCaptureHandle?.close()
             }
             exit(finalSuccess ? 0 : 1)
         }

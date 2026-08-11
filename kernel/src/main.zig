@@ -31,6 +31,11 @@ const virtio_blk = @import("virtio_blk.zig");
 // the exec-path ASLR consumer live off that seed.
 const virtio_entropy = @import("virtio_entropy.zig");
 const csprng = @import("csprng.zig");
+// Milestone five (claim 1373): virtio-net transport (the runner's
+// VZVirtioNetworkDeviceConfiguration under `--net`) — the network keystone.
+// Pre-exit discovery, post-MMU re-arm, MAC via VIRTIO_NET_F_MAC, TX on
+// queue 1 with a polled used-ring drain; RX is card N2.
+const virtio_net = @import("virtio_net.zig");
 
 // Claim 0023: the handoff-v2 contract, the identity-map MMU, and the
 // evidence channel (takeover markers + probe dumps) live in their own
@@ -266,6 +271,18 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
     // VZ resets virtio devices at ExitBootServices) right before the seed.
     const entropy_ready = virtio_entropy.virtio_entropy_init();
 
+    // Milestone five card N1 (claim 1373): the virtio-pci network transport
+    // (the runner's `--net` attachment — modern virtio-net, DID 0x1041 per
+    // the 2026-08-11 DID correction; confirm-at-claim-time, whatever is
+    // observed is recorded). Armed PRE-EXIT like the console/blk/entropy
+    // devices (config-space + BAR reads must stay pre-exit, claim 0013);
+    // its BAR0 window is handed to the identity map below, and the
+    // transport is RE-ARMED post-MMU (the claim-6420 lesson: VZ resets
+    // virtio devices at ExitBootServices) right after the MMU switch. The
+    // default runner attaches no network device, so `net_ready` is false
+    // on every existing gate — the default VM is unchanged.
+    const net_ready = virtio_net.virtio_net_init();
+
     // Claim 0828: the custom-virtio spike device (DID 0x1082) — PRE-EXIT
     // discovery only (config-space reads, the claim-0013 discipline). VZ's
     // firmware BAR assignment moves between boots (0x50001000 in the claim-
@@ -327,7 +344,7 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
     // (discovered pre-exit) are handed to mmu.build_identity_map as the
     // extra Device windows above the blanket; mmu.zig stays
     // transport-agnostic.
-    var extra_windows: [4]mmu.DeviceWindow = undefined;
+    var extra_windows: [5]mmu.DeviceWindow = undefined;
     var extra_count: usize = 0;
     if (virtio_console.vp_ready and virtio_console.vp_bar0 != 0) {
         extra_windows[extra_count] = .{ .base = virtio_console.vp_bar0, .len = 0x10000 };
@@ -349,6 +366,15 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
     // transports so post-MMU common-config reads reach the device.
     if (entropy_ready and virtio_entropy.ent_bar0 != 0) {
         extra_windows[extra_count] = .{ .base = virtio_entropy.ent_bar0, .len = 0x10000 };
+        extra_count += 1;
+    }
+    // Milestone five card N1 (claim 1373): the net transport BAR (pre-exit
+    // resolved) — same Device-window treatment as the console/blk/custom/
+    // entropy transports so post-MMU common-config reads + TX notify reach
+    // the device. Only present under the runner's `--net` flag (default VM:
+    // no net device, no window).
+    if (net_ready and virtio_net.net_bar0 != 0) {
+        extra_windows[extra_count] = .{ .base = virtio_net.net_bar0, .len = 0x10000 };
         extra_count += 1;
     }
     const user_text = userspace.text_region(base);
@@ -587,6 +613,21 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
     } else {
         csprng.seed_fallback();
         uart_puts("entropy: seed failed n=0 (deterministic fallback)\n");
+    }
+    // Milestone five card N1 (claim 1373): re-arm the virtio-net transport
+    // post-MMU (the claim-6420/2665 lesson — VZ resets virtio devices at
+    // ExitBootServices, so the net device's status reads 0 and its queues
+    // are dead until the re-arm). The pre-re-arm status is printed so the
+    // host sees the reset (0) before the re-arm restores DRIVER_OK and TX
+    // arms; the `net` monitor command then reports the observed DID/MAC/
+    // queues/features. The default runner attaches NO network device, so
+    // on every existing gate this whole block is skipped and the boot
+    // output stays byte-identical.
+    if (net_ready) {
+        uart_puts("net: pre-rearm st=");
+        uart_hex8(virtio_net.net_status());
+        uart_puts("\n");
+        _ = virtio_net.net_rearm();
     }
     // Claim 3693 (milestone-four follow-on): ASLR for the BOOT-time static
     // EL0 payload too. The pre-install user root (built inside

@@ -210,6 +210,8 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "  mem         summarize the EFI memory map\n" ++
         "  mbox        per-process IPC mailbox: pending messages and drain counters\n" ++
         "  mount       switch the active FAT volume (esp or data)\n" ++
+        "  net         virtio-net transport: device DID, MAC, queues, feature bits\n" ++
+        "  netsend     send a known Ethernet frame (bounded staging, TX + used-ring drain)\n" ++
         "  pages       physical page allocator pool\n" ++
         "  pci         enumerate PCI devices on the bus\n" ++
         "  procs       process registry: image, address space, lifecycle, exit status\n" ++

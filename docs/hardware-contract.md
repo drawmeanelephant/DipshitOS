@@ -32,10 +32,13 @@ assumption comes from documentation or reasoning only.
 - Disk: virtio block device (`VZVirtioBlockDeviceConfiguration`), attached
   read-write so the guest can write its evidence file. **Discovered by
   claim 6420**: the guest sees the disk on bus 0 as `VID=0x1af4
-  DID=0x1042 class=0x018000` — **not** the virtio-blk spec DID 0x1041
-  (the standard DID table does not apply to VZ; 0x1042 is block, 0x1043
-  console). The device also **resets at ExitBootServices**: its status
-  register reads 0 post-exit and the queue is dead, so the driver re-arms
+  DID=0x1042 class=0x018000` — **the spec's modern virtio-blk DID** (the
+  transitional PCI scheme maps Virtio Device IDs to DIDs as `ID + 0x1040`:
+  net 0x1041, blk 0x1042, console 0x1043, entropy 0x1044 — so VZ's
+  standard devices all match the standard table; only the custom device's
+  0x1082 is vendor-assigned, claim 5844). The device also **resets at
+  ExitBootServices**: its status register reads 0 post-exit and the queue
+  is dead, so the driver re-arms
   the queue post-MMU (common-config MMIO writes to the BAR window work
   post-exit; PCI config-space reads must stay pre-exit, claim 0013).
   **Disk layout (claim 3678, milestone four card 2):** the image
@@ -72,6 +75,37 @@ assumption comes from documentation or reasoning only.
   delivers genuine non-deterministic entropy to the CSPRNG (the seed path
   is `[observed]`; the driver's transport behavior follows the same
   claim-6420/0013 rules as the block/console devices).
+- Network: virtio net device (`VZVirtioNetworkDeviceConfiguration` under
+  the runner's flag-gated `--net <capture-file>` mode; `config.networkDevices
+  = []` without the flag — the default VM is untouched). **Driven +
+  TX-proven 2026-08-11 (claim 1373, milestone five card N1):** the guest
+  sees it on bus 0 at device 1 as `VID=0x1af4 DID=0x1041 class=0x020000`
+  (network controller — **the spec's modern virtio-net DID, confirming the
+  2026-08-11 DID correction**), with a 64-bit BAR0 at `0x100020000` and a
+  32-bit BAR2 at `0x50003000`. The driver (`kernel/src/virtio_net.zig`)
+  negotiates features with a candidate ladder because the device REJECTS
+  VER1-only and VER1|MAC masks (status readback 0x03 — FEATURES_OK
+  cleared) and **requires `VIRTIO_NET_F_MTU` to be accepted**: the landed
+  mask is `feat=0x28/0x1` (VER1|MTU|MAC, observed in every live-net-tx
+  serial log). **The host-set MAC is exposed via the feature path:** the
+  runner fixes `macAddress` 02:00:00:00:00:01 on the host config and the
+  guest reads exactly that from device-config offset 0 with the
+  `VIRTIO_NET_F_MAC` feature negotiated (`net: mac=02:00:00:00:00:01
+  source=feature`, matching the raw `net: cfgmac=02:00:00:00:00:01`
+  bytes). Queues 0 (RX) + 1 (TX) arm at size 4 (split rings), DRIVER_OK
+  holds through the post-exit re-arm, and — **differing from blk/entropy —
+  the net device does NOT reset at ExitBootServices**: `net: pre-rearm
+  st=0f` (status 0xf = DRIVER_OK intact) observed on every net-tx boot
+  (the blk/entropy devices read `st=00` post-exit). **TX consumes a
+  12-byte virtio_net_hdr on EVERY buffer, even with no offload feature
+  negotiated:** the first live gate stripped exactly 12 bytes (our
+  dst+src MACs became the "header", ethertype+payload arrived), so the
+  driver prepends a ZEROED virtio_net_hdr and the host capture carries the
+  RAW Ethernet frame byte-exactly. **[observed]** — every `verify-live-net-tx`
+  boot's serial log (`artifacts/live-net-tx-serial-*.log`) shows the
+  did/class/mac/feat/queues/status lines above, and the runner's capture
+  files (`artifacts/live-net-tx-cap-*.bin`) hold the exact frames the
+  guest submitted.
 - Custom virtio device (`VZCustomVirtioDeviceConfiguration`, the
   `--custom-virtio` runner flag / `zig build spike-virtio`): the guest sees
   a vendor-defined device on bus 0 as `VID=0x1af4 DID=0x1082`.
