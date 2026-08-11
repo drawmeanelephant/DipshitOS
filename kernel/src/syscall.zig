@@ -58,8 +58,9 @@ pub const ErrorCode = enum(i64) {
     efault = -3,
     enosys = -4,
     /// Card 3f (claim 5965): the target process's mailbox is full — the
-    /// bounded 4 × 64 B ring refused the send (never unbounded, never
-    /// silently dropped).
+    /// bounded 8 × 64 B ring refused the send (card 4b, claim 3179: the
+    /// capacity is a data-path constant, raised 4 → 8; never unbounded,
+    /// never silently dropped).
     enospc = -5,
 };
 
@@ -577,14 +578,14 @@ test "syscall: ipc send refuses full, empty, and isolated targets exactly" {
     try std.testing.expectEqual(@as(usize, 1), mailbox.pending(peer_pid));
     try std.testing.expectEqual(@as(usize, mailbox.message_max), mailbox.message(peer_pid, 0).?.len);
     // Re-arm the window on `bytes` (the truncation block moved it to `long`),
-    // then fill the ring: 3 more sends fill the 4 slots; the 5th is ENOSPC.
+    // then fill the ring: 7 more sends fill the 8 slots (card 4b, claim
+    // 3179: the capacity is a data-path constant, re-derived 4 → 8); the
+    // 9th is ENOSPC.
     set_user_regions(
         .{ .base = @intFromPtr(bytes.ptr), .len = bytes.len },
         .{ .base = 0, .len = 0 },
     );
-    try std.testing.expectEqual(@as(u64, 1), dispatch(sys_ipc_send, .{ peer_pid, @intFromPtr(bytes.ptr), 1, 0, 0, 0 }, &frame));
-    try std.testing.expectEqual(@as(u64, 1), dispatch(sys_ipc_send, .{ peer_pid, @intFromPtr(bytes.ptr), 1, 0, 0, 0 }, &frame));
-    try std.testing.expectEqual(@as(u64, 1), dispatch(sys_ipc_send, .{ peer_pid, @intFromPtr(bytes.ptr), 1, 0, 0, 0 }, &frame));
+    for (1..mailbox.max_messages) |_| try std.testing.expectEqual(@as(u64, 1), dispatch(sys_ipc_send, .{ peer_pid, @intFromPtr(bytes.ptr), 1, 0, 0, 0 }, &frame));
     try std.testing.expectEqual(error_result(.enospc), dispatch(sys_ipc_send, .{ peer_pid, @intFromPtr(bytes.ptr), 1, 0, 0, 0 }, &frame));
     try std.testing.expectEqual(@as(usize, mailbox.max_messages), mailbox.pending(peer_pid));
     // Isolation: a free pid, an out-of-range pid, and an exited pid are EINVAL.

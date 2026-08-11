@@ -300,8 +300,10 @@ All command output and logs are saved under `artifacts/` (`inspect.txt`,
    (`tools/verify-live-args.sh` — `exec USER.BIN alpha` + `exec
    USER.BIN beta` produce distinct markers with both programs live).
    The follow-on 3 card 3f (claim 5965) is the first inter-process DATA
-   path: a bounded per-process kernel mailbox (4 × 64 B BSS rings, no
-   allocation) behind the card's ONE ABI change — ADR 0007 slots 5/6,
+   path: a bounded per-process kernel mailbox (8 × 64 B BSS rings — the
+   card-4b/claim-3179 follow-on raised the capacity 4 → 8 as a data-path
+   constant, still no allocation) behind the card's ONE ABI change —
+   ADR 0007 slots 5/6,
    `sys_ipc_send` (copy_in into the TARGET's ring; full → `ENOSPC` -5)
    and `sys_ipc_recv` (copy_out the caller's OWN ring; empty → 0) — with
    the `mbox [<pid>]` monitor command (registry 31→32) dumping
@@ -335,7 +337,20 @@ All command output and logs are saved under `artifacts/` (`inspect.txt`,
    process table read FROM EL0, distinct from the monitor's `procs`
    (`tools/verify-live-procs-syscall.sh` — the peer's `peer: sees 2
    COUNTER.BIN running` row, the IPC flow still echoing, neither ever
-   exits).
+   exits). The follow-on 4 card 4b (claim 3179) is IPC DEPTH: the
+   mailbox capacity is a data-path constant raised 4 → 8 (ADR 0007
+   documents the choice — no syscall-number change; the follow-on-4
+   set's ABI amendments are ONLY slots 7/8, on cards 4a/4c), and
+   COUNTER.BIN's send cadence becomes a BURST — every 6th iteration it
+   queues 6 messages back-to-back in one quantum (the peer cannot drain
+   mid-burst), then 5 quiet iterations drain the 8-slot ring to 0
+   before the next burst. The re-derived `tools/verify-live-ipc.sh`
+   gate shows the 6-ping bursts (`ipc: ping N` … `ipc: ping N+5`
+   back-to-back) interleaved with the peer's byte-exact echoes, ZERO
+   `ipc: enospc` refusal markers, a log peak of 6 sends-minus-echoes
+   (> 4 messages queued at once, never over the 8-slot bound), and the
+   peer's `mbox` row drained at the new capacity (sent − recv ==
+   pending ≤ 8).
 - The Virtualization.framework VM boots the GPT+FAT image: configuration
   validates, the EFI variable store is created, the VM starts and runs, and
   after boot the guest-written marker file `\BOOTED.TXT` exists on the ESP

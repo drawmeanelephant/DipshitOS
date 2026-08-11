@@ -1271,7 +1271,7 @@ fn cmd_mbox(m: *Monitor, args: []const []const u8) ExecError {
         m.console.print_u64(mbox_info.recv);
         m.console.puts("\n");
         // Raw dump of the queued bytes (messages are text here; the ring
-        // bound caps the total at 4 × 64 B per process).
+        // bound caps the total at 8 × 64 B per process).
         var index: usize = 0;
         while (mailbox.message(id, index)) |bytes| : (index += 1) {
             m.console.puts("mbox:   ");

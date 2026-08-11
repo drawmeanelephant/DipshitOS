@@ -1,6 +1,7 @@
 //! DipshitOS second ESP user program — COUNTER.BIN (milestone-four
 //! follow-on 2, claim 4613; extended by follow-on 3 card 3f, claim 5965 —
-//! the IPC sender).
+//! the IPC sender; extended by follow-on 4 card 4b, claim 3179 — the
+//! burst cadence).
 //!
 //! The strong liveness proof the claim-0826 concurrent gate lacks: claim
 //! 0826 ran TWO live processes, but both were copies of the SAME program
@@ -16,19 +17,24 @@
 //! gate reaps + re-execs the short USER.BIN into a freed slot while the
 //! counter's markers keep landing.
 //!
-//! Card 3f (claim 5965): COUNTER.BIN is also the IPC SENDER. When exec'd
-//! with a target process id argument (`exec COUNTER.BIN <pid>`, claim-4636
-//! argv), it parses argv[0] as the peer's pid and, every 8th iteration,
-//! formats its sequence number into a stack buffer as "ping <d>\n" and (1)
-//! prints "ipc: ping <d>" (sys_write, slot 1 — the live gate's send
-//! marker) and (2) sends the same bytes through sys_ipc_send (slot 5, the
-//! card's ABI amendment) to the peer's per-process mailbox. The peer
-//! echoes them back ("peer: got ping <d>", byte-exact). Exec'd WITHOUT an
-//! argument (argc == 0 — how the earlier long-lived gates run it), the
-//! counter's behavior is byte-identical to claim 4613: marker + spin +
-//! yield, no IPC. The sequence number starts at 1 and the cadence is
-//! bounded (one send per 8 iterations, a drain between sends) so the
-//! peer's 4-slot ring never accumulates.
+//! Card 3f (claim 5965) + card 4b (claim 3179): COUNTER.BIN is also the
+//! IPC SENDER. When exec'd with a target process id argument
+//! (`exec COUNTER.BIN <pid>`, claim-4636 argv), it parses argv[0] as the
+//! peer's pid and — every 6th iteration — sends a BURST of 6 messages
+//! back-to-back in ONE quantum: each message is formatted as "ping <d>\n"
+//! into a 64-byte stack scratch buffer, printed as "ipc: ping <d>"
+//! (sys_write, slot 1 — the live gate's send marker), and sent through
+//! sys_ipc_send (slot 5, the card-3f ABI amendment) to the peer's
+//! per-process mailbox. A negative send result (ENOSPC -5 or an error)
+//! prints the distinct "ipc: enospc\n" marker — the live gate asserts
+//! ZERO of them. The 5 quiet iterations between bursts let the peer drain
+//! one message per round (the peer is not scheduled mid-burst — one
+//! quantum is one task — so the 8-slot ring peaks at 6 of 8 and drains to
+//! 0 before the next burst: NEVER refused, deterministically). The peer
+//! echoes each message back ("peer: got ping <d>", byte-exact). Exec'd
+//! WITHOUT an argument (argc == 0 — how the earlier long-lived gates run
+//! it), the counter's behavior is byte-identical to claim 4613: marker +
+//! spin + yield, no IPC.
 //!
 //! The payload is the same shape as USER.BIN's (naked asm, fixed register
 //! ABI only — no Zig-generated memory references or calls): registers
@@ -52,19 +58,26 @@ pub const marker: []const u8 = "counter: alive\n";
 pub const ipc_prefix: []const u8 = "ipc: ping ";
 /// The "ping " prefix of the SENT payload (the peer echoes it back).
 pub const ping_prefix: []const u8 = "ping ";
+/// The distinct marker printed when a send is refused (ENOSPC -5 or any
+/// negative result). The live gate asserts ZERO of these — the burst
+/// never overflows the 8-slot ring (card 4b).
+pub const enospc_marker: []const u8 = "ipc: enospc\n";
+/// The burst length (card 4b): 6 messages back-to-back in ONE quantum.
+/// The peer cannot drain mid-burst, so the ring peaks at 6 of the 8
+/// slots; 5 quiet iterations drain it to 0 before the next burst.
+pub const burst_len: u32 = 6;
 /// The bounded spin between the write and the yield (nops). Bounded so a
 /// misprogrammed tick cannot starve the round-robin ring; a 16-bit
 /// immediate so the payload stays a single `movz` (no movk chains).
 pub const spin_limit: u32 = 50_000;
-/// Send cadence: one IPC send every 3 iterations (the peer drains each
-/// iteration, so the bounded ring never accumulates).
+
 export fn _start() callconv(.naked) noreturn {
     asm volatile (
         \\// Claim 4636 entry contract: x0 = argc, x1 = argv block VA.
         \\mov x20, x0
         \\mov x21, x1
         \\mov x22, #1 // send sequence number (starts at 1)
-        \\mov x23, #0 // iteration counter (send cadence)
+        \\mov x23, #0 // iteration counter (burst cadence)
         \\mov x24, xzr // target pid (default: none)
         \\cbz x20, 6f // no args: never sends (claim-4613 behavior)
         \\// Parse argv[0] (the first 32-byte slot) as a decimal pid.
@@ -94,13 +107,18 @@ export fn _start() callconv(.naked) noreturn {
         \\2:
         \\sub x9, x9, #1
         \\cbnz x9, 2b
-        \\// Card 3f: every 3rd iteration, send to the peer (the peer
-        \\// drains every iteration, so the bounded ring never accumulates).
+        \\// Card 4b: every 6th iteration, a BURST of 6 messages sent
+        \\// back-to-back in ONE quantum (the peer is not scheduled
+        \\// mid-burst), then 5 quiet iterations (the peer drains 1 per
+        \\// round, so the ring peaks at 6 of the 8 slots and drains to
+        \\// 0 before the next burst — NO ENOSPC, deterministically).
         \\add x23, x23, #1
-        \\cmp x23, #3
+        \\cmp x23, #6
         \\b.lo 3f
         \\mov x23, xzr // reset the cadence counter
         \\cbz x24, 3f // no target (argc == 0): claim-4613 behavior
+        \\mov x26, #6 // burst length
+        \\7:
         \\// Build the payload "ping <d>\n" on a 64-byte stack scratch:
         \\// digits written from the end, then the newline, then the
         \\// "ping " prefix immediately before them.
@@ -148,15 +166,28 @@ export fn _start() callconv(.naked) noreturn {
         \\mov x8, #1
         \\svc #0
         \\// Send the payload "ping <d>\n": sys_ipc_send(pid, buf, len) —
-        \\// slot 5 (the card's ABI amendment).
+        \\// slot 5 (the card-3f ABI amendment).
         \\mov x0, x24
         \\mov x1, x15
         \\mov x2, x16
         \\add x2, x2, #5
         \\mov x8, #5
         \\svc #0
+        \\// Check the result: a negative return (ENOSPC -5 or an error)
+        \\// prints the distinct "ipc: enospc\n" marker — the live gate
+        \\// asserts ZERO of them (the burst never overflows the ring).
+        \\cmp x0, #0
+        \\b.ge 9f
+        \\mov x0, #1
+        \\adr x1, 8f
+        \\mov x2, #12
+        \\mov x8, #1
+        \\svc #0
+        \\9:
         \\add sp, sp, #64
         \\add x22, x22, #1 // next sequence number
+        \\subs x26, x26, #1
+        \\b.ne 7b
         \\3:
         \\// Yield cooperatively: sys_yield (slot 2) — the frozen ABI, no
         \\// sys_exit anywhere in this program.
@@ -167,6 +198,8 @@ export fn _start() callconv(.naked) noreturn {
         \\.ascii "counter: alive\n"
         \\5:
         \\.ascii "ipc: ping "
+        \\8:
+        \\.ascii "ipc: enospc\n"
     );
 }
 
@@ -188,6 +221,13 @@ test "user counter: the marker shape is pinned (live-gate grep target)" {
     // must spell this exact string).
     try std.testing.expectEqualStrings("ping ", ping_prefix);
     try std.testing.expectEqual(@as(usize, 5), ping_prefix.len);
+    // The refusal marker (the `#12` length in the asm and the `8:`
+    // `.ascii` must match this const — the live gate asserts ZERO).
+    try std.testing.expectEqualStrings("ipc: enospc\n", enospc_marker);
+    try std.testing.expectEqual(@as(usize, 12), enospc_marker.len);
+    // The burst length (the `#6` immediate in the asm must match this
+    // const — 6 messages per burst quantum, 6 of the 8 slots at the peak).
+    try std.testing.expectEqual(@as(u32, 6), burst_len);
     // The payload is naked asm — no Zig-generated memory references or
     // calls; the module still type-checks the export on the host.
     try std.testing.expectEqual(@as(u32, 50_000), spin_limit);

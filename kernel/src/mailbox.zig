@@ -17,7 +17,8 @@
 //! scheduling.
 //!
 //! Ring shape: per process id, up to `max_messages` slots of `message_max`
-//! bytes each (4 × 64 B). FIFO discipline (head = oldest). `send` enqueues
+//! bytes each (8 × 64 B — card 4b, claim 3179, raised 4 → 8). FIFO
+//! discipline (head = oldest). `send` enqueues
 //! (a full ring refuses); `peek` copies the oldest message out WITHOUT
 //! consuming it; `drop` consumes it. The recv syscall does peek → uaccess
 //! copy_out → drop, so a bad user buffer (EFAULT) never loses a message.
@@ -29,8 +30,11 @@
 const std = @import("std");
 const process = @import("process.zig"); // the registry bound (max_processes)
 
-/// Slots per process ring (4 messages outstanding per process).
-pub const max_messages: usize = 4;
+/// Slots per process ring (8 messages outstanding per process — card 4b,
+/// claim 3179: a data-path constant raised 4 → 8, 256 → 512 B of BSS; NOT
+/// a syscall number — the ABI stays frozen, the follow-on-4 set's ABI
+/// changes are ONLY slots 7/8 on cards 4a/4c).
+pub const max_messages: usize = 8;
 /// Bytes per message slot (a message longer than this is truncated at the
 /// send syscall; a recv buffer cap larger than this is clamped).
 pub const message_max: usize = 64;
@@ -173,25 +177,26 @@ test "mailbox: send/peek/drop round-trips a message FIFO" {
 
 test "mailbox: ring wraps and a full ring refuses without losing bytes" {
     init();
-    // Fill all 4 slots (the ring then wraps on the next cycle).
+    // Fill all 8 slots (the ring then wraps on the next cycle).
     for (1..max_messages + 1) |_| try std.testing.expectEqual(SendResult.ok, send(0, "m"));
     try std.testing.expectEqual(@as(usize, max_messages), pending(0));
-    // The 5th send refuses: ENOSPC at the syscall layer.
+    // The 9th send refuses: ENOSPC at the syscall layer.
     try std.testing.expectEqual(SendResult.full, send(0, "n"));
     try std.testing.expectEqual(@as(usize, max_messages), pending(0));
-    // Drain one, then a new send lands at the wrapped slot (index 0 = the
-    // second-oldest message now).
+    // Drain one, then a new send lands at the wrapped slot 0 (the slot
+    // freed by the drop — head was 1, count 7, so the new message goes to
+    // (1 + 7) % 8 = 0). Index 0 is the second-oldest message now; the new
+    // "z" is the LAST pending index (max_messages - 1 = 7).
     drop(0);
     try std.testing.expectEqual(SendResult.ok, send(0, "z"));
-    try std.testing.expectEqualStrings("m", message(0, 0).?);
-    try std.testing.expectEqualStrings("m", message(0, 1).?);
-    try std.testing.expectEqualStrings("m", message(0, 2).?);
-    try std.testing.expectEqualStrings("z", message(0, 3).?);
-    // Drain everything: the ring is empty and the counters track exactly.
+    for (0..max_messages - 1) |i| try std.testing.expectEqualStrings("m", message(0, i).?);
+    try std.testing.expectEqualStrings("z", message(0, max_messages - 1).?);
+    // Drain everything: the ring is empty and the counters track exactly
+    // (max_messages + 1 = 9 sends, 9 drops).
     while (pending(0) > 0) drop(0);
     const info0 = info(0);
-    try std.testing.expectEqual(@as(u64, 5), info0.sent);
-    try std.testing.expectEqual(@as(u64, 5), info0.recv);
+    try std.testing.expectEqual(@as(u64, max_messages + 1), info0.sent);
+    try std.testing.expectEqual(@as(u64, max_messages + 1), info0.recv);
     try std.testing.expectEqual(@as(usize, 0), info0.pending);
 }
 
