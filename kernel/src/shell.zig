@@ -128,6 +128,11 @@ pub fn boot_and_park(mon: *monitor.Monitor, rx_wired: bool) void {
             // shell idle loop is the drain point (the card-3d shell-idle-
             // drain pattern). Idempotent; a no-op when the transport is
             // unarmed or the buffer is empty.
+            // Card N9 (claim 9489): stamp the DHCP lease clock from the 1
+            // Hz generic timer before the drain — a renewal ACK processed
+            // below restarts the lease from the CURRENT instant (honest
+            // wall-clock seconds, the same clock `net dhcp` uses).
+            virtio_net.dhcp.now_ticks = timer.ticks;
             virtio_net.net_rx_drain();
             idle_wait_rx();
         }

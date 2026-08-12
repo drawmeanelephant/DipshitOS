@@ -214,6 +214,32 @@ assumption comes from documentation or reasoning only.
   (`artifacts/live-net-dhcp-p2-serial.log`) shows the honest
   offer=0/mal=0 report + the gateway ping; the exploratory evidence is
   saved under `artifacts/live-net-dhcp-nat-explore/`.
+  **Lease lifecycle observed 2026-08-12 (claim 9489, milestone five
+  card N9):** the client ENFORCES the lease it recorded — the RFC 2131
+  §4.4.5 rungs, driven by the monitor on the 1 Hz generic timer
+  (`timer.ticks` — integer seconds): at **T1 = lease/2** the client
+  RENEWs with a UNICAST REQUEST to the server's IP + the MAC the guest
+  resolved (`net arp <server>` — the seam resolves nothing; an
+  unresolvable server keeps the client BOUND until T2, RFC-compliant
+  degradation); at **T2 = lease*7/8** it REBINDs with a BROADCAST
+  REQUEST; at **expiry** it releases the address (arp.own_ip cleared —
+  the report shows ip=0.0.0.0 — and the lease record zeroed) and
+  re-DISCOVERs. The renewal ACK restarts the lease (bound_ticks
+  re-stamped). The renewal REQUESTs carry `ciaddr` = the leased IP
+  (RFC 2131 §4.4.5). **[observed]** — every `verify-live-net-dhcp-renew`
+  Run-A boot's serial log (`artifacts/live-net-dhcp-renew-a-serial.log`)
+  shows the renewing (T1) + rebinding (T2) lines and the counters
+  `renew=1,rebind=1,renewed=2,expired=0`, and the capture
+  (`live-net-dhcp-renew-a-cap.bin`, 1222 B) holds the RENEWING REQUEST
+  byte-exact UNICAST (dst 02:00:00:00:00:02, src/dst IP 10.0.0.2,
+  ciaddr 10.0.0.2) vs the REBINDING REQUEST broadcast; the Run-B boot
+  (`live-net-dhcp-renew-b-serial.log`) shows the lease-expired line,
+  the released report (`dhcp=idle,ip=0.0.0.0,…,expired=1`) and the
+  recovery (a second DISCOVER → BOUND again); the exploratory evidence
+  is saved under `artifacts/live-net-dhcp-renew-explore/`. The runner's
+  lease knob (`--net-dhcp-respond <ip>:<lease-secs>`, default 3600) and
+  the script delays (`--script2-delay` / `--script3-delay`, default
+  0.5) are flag-gated — every pre-N9 gate is byte-identical.
 - Custom virtio device (`VZCustomVirtioDeviceConfiguration`, the
   `--custom-virtio` runner flag / `zig build spike-virtio`): the guest sees
   a vendor-defined device on bus 0 as `VID=0x1af4 DID=0x1082`.

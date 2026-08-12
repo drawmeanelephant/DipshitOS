@@ -1271,6 +1271,44 @@ pub fn net_dhcp_send(msg: []const u8, out_len: *usize) SendResult {
     return net_send(&net_ops, &net_dev, tx_staging[0 .. tx_hdr_len + n]);
 }
 
+/// Card N9 (claim 9489): transmit the REBINDING REQUEST — the SAME
+/// broadcast shape as `net_dhcp_send`, but the client now HOLDS the
+/// lease, so the src IP is `dhcp.lease_ip` (RFC 2131 §4.4.5 — a bound
+/// client's REQUEST carries its address; the frame's ciaddr is set by
+/// `dhcp.enter_rebinding`). Refuses honestly when the transport is
+/// unready or no lease is held.
+pub fn net_dhcp_send_bound(msg: []const u8, out_len: *usize) SendResult {
+    if (!net_ready) return .not_ready;
+    if (!dhcp_bound()) return .not_ready;
+    @memset(tx_staging[0..tx_hdr_len], 0);
+    const bcast_mac = [6]u8{ 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
+    const bcast_ip = [4]u8{ 255, 255, 255, 255 };
+    const n = udp.build_frame_ex(tx_staging[tx_hdr_len .. tx_hdr_len + dhcp.frame_max], bcast_mac, &net_mac, dhcp.lease_ip, bcast_ip, dhcp.client_port, dhcp.server_port, msg);
+    out_len.* = n;
+    return net_send(&net_ops, &net_dev, tx_staging[0 .. tx_hdr_len + n]);
+}
+
+/// Card N9 (claim 9489): transmit the RENEWING REQUEST UNICAST to the
+/// server — dst = the server's IP + the MAC the caller RESOLVED (the
+/// seam resolves nothing; `.no_peer` when the caller has no MAC), src =
+/// the leased IP (the bound client). The frame's ciaddr is set by
+/// `dhcp.enter_renewing`. Refuses honestly when the transport is
+/// unready or no lease is held.
+pub fn net_dhcp_send_unicast(dst_ip: [4]u8, dst_mac: [6]u8, msg: []const u8, out_len: *usize) SendResult {
+    if (!net_ready) return .not_ready;
+    if (!dhcp_bound()) return .not_ready;
+    @memset(tx_staging[0..tx_hdr_len], 0);
+    const n = udp.build_frame_ex(tx_staging[tx_hdr_len .. tx_hdr_len + dhcp.frame_max], dst_mac, &net_mac, dhcp.lease_ip, dst_ip, dhcp.client_port, dhcp.server_port, msg);
+    out_len.* = n;
+    return net_send(&net_ops, &net_dev, tx_staging[0 .. tx_hdr_len + n]);
+}
+
+/// Card N9 (claim 9489): the client holds a live lease (its address is
+/// usable for a renewal).
+fn dhcp_bound() bool {
+    return dhcp.state == .bound or dhcp.state == .renewing or dhcp.state == .rebinding;
+}
+
 /// Card N4 (claim 0148): transmit an ICMP ECHO REQUEST to `target_ip` in
 /// the fixed staging buffer, on the N1 TX path. Refuses honestly when the
 /// transport is unready, no static IP is set (`net ip <a.b.c.d>` first),

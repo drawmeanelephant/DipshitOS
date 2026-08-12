@@ -152,6 +152,12 @@ var scriptExpect: String?
 // forwarded once after its own serial marker (the reap line) instead.
 var script2Path: String?
 var script2After: String?
+// Card N9 (claim 9489): the claim-6684 settle before forwarding script2
+// / script3 becomes configurable (default 0.5 — every existing gate is
+// unchanged), so a lease-lifecycle gate can wait past T1/T2/expiry
+// deterministically.
+var script2Delay: Double = 0.5
+var script3Delay: Double = 0.5
 // Card 3c (claim 7786): a THIRD scripted phase. The primary --script is
 // forwarded in ONE burst (claim 6684) and --script2 handles the next
 // phase (claim 4613); --script3 covers the post-reap snapshot that must
@@ -223,8 +229,12 @@ var netUdpRespondHostPort: UInt16?
 // sleep. nil = the guest's DHCP messages go unanswered (the default VM
 // is unchanged). The fixed lease is gate-assertable — the `net dhcp`
 // bound report must show ip=<lease-ip> mask=255.255.255.0 gw=10.0.0.1
-// server=<lease-ip> lease=3600.
+// server=<lease-ip> lease=<lease-secs>.
 var netDhcpRespondLeaseIP: [UInt8]?
+// Card N9 (claim 9489): the OFFER/ACK lease option 51, in seconds
+// (default 3600 — backward compatible; the `:N` suffix sets it, so the
+// lease lifecycle is testable in seconds).
+var netDhcpRespondLeaseSecs: UInt32 = 3600
 // Milestone five card N7 (claim 4678): `--net-nat` attaches one
 // VZVirtioNetworkDeviceConfiguration with a VZNATNetworkDeviceAttachment
 // instead of the file-handle attachment — the host is the guest's router
@@ -325,12 +335,40 @@ while idx < arguments.count {
         netUdpRespondHostPort = port
         idx += 2
     } else if arg == "--net-dhcp-respond", idx + 1 < arguments.count {
-        // Parse the lease IP now (fail early, like --timeout).
-        let parts = arguments[idx + 1].split(separator: ".").compactMap { UInt8($0) }
+        // Card N9 (claim 9489): the optional ":<lease-seconds>" suffix
+        // (default 3600 — backward compatible) makes the OFFER/ACK's
+        // lease option 51 configurable, so a live gate can test the
+        // lease lifecycle (renewal/rebind/expiry) in seconds. Parse now
+        // (fail early, like --timeout).
+        let token = arguments[idx + 1]
+        let halves = token.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
+        let ipPart = String(halves[0])
+        let parts = ipPart.split(separator: ".").compactMap { UInt8($0) }
         guard parts.count == 4 else {
-            fail("--net-dhcp-respond requires a dotted-quad IPv4 lease address, got '\(arguments[idx + 1])'.")
+            fail("--net-dhcp-respond requires a dotted-quad IPv4 lease address, got '\(token)'.")
         }
         netDhcpRespondLeaseIP = parts
+        if halves.count == 2, let lease = UInt32(halves[1]), lease >= 1, lease <= 86400 {
+            netDhcpRespondLeaseSecs = lease
+        } else if halves.count == 2 {
+            fail("--net-dhcp-respond lease must be 1..86400 seconds, got '\(halves[1])'.")
+        }
+        idx += 2
+    } else if arg == "--script2-delay", idx + 1 < arguments.count {
+        // Card N9 (claim 9489): the claim-6684 settle before forwarding
+        // script2 becomes configurable (flag-gated, default 0.5 — every
+        // existing gate is unchanged), so a lease-lifecycle gate can wait
+        // past T1/T2/expiry deterministically.
+        guard let d = Double(arguments[idx + 1]), d >= 0 else {
+            fail("--script2-delay requires a non-negative number of seconds, got '\(arguments[idx + 1])'.")
+        }
+        script2Delay = d
+        idx += 2
+    } else if arg == "--script3-delay", idx + 1 < arguments.count {
+        guard let d = Double(arguments[idx + 1]), d >= 0 else {
+            fail("--script3-delay requires a non-negative number of seconds, got '\(arguments[idx + 1])'.")
+        }
+        script3Delay = d
         idx += 2
     } else if arg == "--net-nat" {
         netNatEnabled = true
@@ -621,7 +659,7 @@ if let netCapturePath {
             if let leaseIP = netDhcpRespondLeaseIP, isDhcpDatagram(buf, n),
                let mtype = dhcpMessageType(buf, n), mtype == 1 || mtype == 3 {
                 var reply = [UInt8](repeating: 0, count: 4096)
-                let replyLen = buildDhcpReply(&reply, buf, n, arpHostMAC, leaseIP, mtype)
+                let replyLen = buildDhcpReply(&reply, buf, n, arpHostMAC, leaseIP, netDhcpRespondLeaseSecs, mtype)
                 try? netCaptureReadSocket!.write(contentsOf: Data(reply[0..<replyLen]))
                 // The xid hex built manually (Swift's String(format:) vararg
                 // bridge mismatches %x with UInt8/UInt32 — the same reason
@@ -631,7 +669,7 @@ if let netCapturePath {
                               hexT[Int(buf[47] >> 4)], hexT[Int(buf[47] & 0xf)],
                               hexT[Int(buf[48] >> 4)], hexT[Int(buf[48] & 0xf)],
                               hexT[Int(buf[49] >> 4)], hexT[Int(buf[49] & 0xf)]]
-                print("NET-DHCP: answered the guest's DHCP \(mtype == 1 ? "DISCOVER" : "REQUEST") (xid 0x\(String(xidHex))) with a \(mtype == 1 ? "OFFER" : "ACK") for \(leaseIP[0]).\(leaseIP[1]).\(leaseIP[2]).\(leaseIP[3]) (lease 3600s)")
+                print("NET-DHCP: answered the guest's DHCP \(mtype == 1 ? "DISCOVER" : "REQUEST") (xid 0x\(String(xidHex))) with a \(mtype == 1 ? "OFFER" : "ACK") for \(leaseIP[0]).\(leaseIP[1]).\(leaseIP[2]).\(leaseIP[3]) (lease \(netDhcpRespondLeaseSecs)s)")
             }
         }
         try? netCaptureFile.synchronize()
@@ -755,7 +793,9 @@ if let hostIP = netUdpRespondHostIP, let hostPort = netUdpRespondHostPort {
 }
 if let leaseIP = netDhcpRespondLeaseIP {
     let ipText = leaseIP.map(String.init).joined(separator: ".")
-    print("  net-dhcp-respond: ENABLED (milestone five card N8, claim 0351) — the host answers the guest's DHCP handshake with the fixed lease ip=\(ipText) mask=255.255.255.0 gw=10.0.0.1 server=\(ipText) lease=3600 via the capture thread (deterministic, request-driven)")
+    // The prefix stays byte-identical to card N8's gate assertion; card
+    // N9's lease knob is noted after it.
+    print("  net-dhcp-respond: ENABLED (milestone five card N8, claim 0351) + card N9 (claim 9489) — the host answers the guest's DHCP handshake with the fixed lease ip=\(ipText) mask=255.255.255.0 gw=10.0.0.1 server=\(ipText) lease=\(netDhcpRespondLeaseSecs) via the capture thread (deterministic, request-driven)")
 }
 if netNatEnabled {
     print("  net-nat: ENABLED (milestone five card N7, claim 4678) — VZNATNetworkDeviceAttachment attached (host router + NAT; no capture file — guest-observed counters are the gate's evidence)")
@@ -1188,7 +1228,7 @@ func startConsoleStreams() {
 // delay only avoids racing the shell's very first poll.
 func startScriptInput() {
     guard let scriptPath else { return }
-    forwardScriptOnce(path: scriptPath, after: scriptAfter, label: "script")
+    forwardScriptOnce(path: scriptPath, after: scriptAfter, label: "script", settle: 0.5)
 }
 
 // Claim 4613: the SECOND scripted phase. The primary --script is forwarded
@@ -1199,7 +1239,7 @@ func startScriptInput() {
 // using the identical settle-then-forward machinery.
 func startScript2Input() {
     guard let path = script2Path, let after = script2After else { return }
-    forwardScriptOnce(path: path, after: after, label: "script2")
+    forwardScriptOnce(path: path, after: after, label: "script2", settle: script2Delay)
 }
 
 // Card 3c (claim 7786): the THIRD scripted phase. The kill gate needs a
@@ -1211,13 +1251,13 @@ func startScript2Input() {
 // the same settle-then-forward machinery.
 func startScript3Input() {
     guard let path = script3Path, let after = script3After else { return }
-    forwardScriptOnce(path: path, after: after, label: "script3")
+    forwardScriptOnce(path: path, after: after, label: "script3", settle: script3Delay)
 }
 
 /// Forward `path` into the serial attachment exactly once, after `after`
 /// appears in the serial log (default: the kernel terminal state). Shared
 /// by the primary script (claim 6684) and the second phase (claim 4613).
-func forwardScriptOnce(path: String, after: String?, label: String) {
+func forwardScriptOnce(path: String, after: String?, label: String, settle: Double) {
     let q = DispatchQueue(label: "dipshitos.\(label)")
     q.async {
         let scriptData: Data
@@ -1228,12 +1268,17 @@ func forwardScriptOnce(path: String, after: String?, label: String) {
             exit(1)
         }
         let marker = after ?? "kernel terminal state"
-        let waitDeadline = Date().addingTimeInterval(40)
+        // Card N9 (claim 9489): a configured settle (--script2-delay /
+        // --script3-delay) is a wall-clock wait the gate WANTS, so the
+        // marker-wait extends with it — the marker of a later phase
+        // legitimately appears only after the earlier phases' delays have
+        // elapsed. The default 40 s is unchanged for every existing gate.
+        let waitDeadline = Date().addingTimeInterval(max(40, settle + 60))
         var sent = false
         while Date() < waitDeadline {
             if let text = try? String(contentsOf: serialURL, encoding: .utf8),
                text.contains(marker) {
-                Thread.sleep(forTimeInterval: 0.5)
+                Thread.sleep(forTimeInterval: settle)
                 do { try consoleInputPipe.fileHandleForWriting.write(contentsOf: scriptData) }
                 catch {
                     FileHandle.standardError.write(Data("ERROR: could not forward script to the guest serial attachment: \(error)\n".utf8))
@@ -1501,7 +1546,7 @@ func dhcpMessageType(_ buf: [UInt8], _ n: Int) -> UInt8? {
 // (gateway 10.0.0.1), 54 (server id = the lease IP), 51 (lease 3600),
 // 255. Both checksums recomputed (RFC 1071). Returns the frame length
 // (310 bytes — the reply message is 268 bytes).
-func buildDhcpReply(_ reply: inout [UInt8], _ req: [UInt8], _ n: Int, _ hostMAC: [UInt8], _ leaseIP: [UInt8], _ mtype: UInt8) -> Int {
+func buildDhcpReply(_ reply: inout [UInt8], _ req: [UInt8], _ n: Int, _ hostMAC: [UInt8], _ leaseIP: [UInt8], _ leaseSecs: UInt32, _ mtype: UInt8) -> Int {
     _ = n
     // The reply message: 236 header + 4 cookie + 53,1,type(3) +
     // 1,4,mask(6) + 3,4,gw(6) + 54,4,server(6) + 51,4,lease(6) + 255(1)
@@ -1554,7 +1599,7 @@ func buildDhcpReply(_ reply: inout [UInt8], _ req: [UInt8], _ n: Int, _ hostMAC:
     reply[o] = 1; reply[o + 1] = 4; reply[o + 2] = 255; reply[o + 3] = 255; reply[o + 4] = 255; reply[o + 5] = 0; o += 6 // subnet mask
     reply[o] = 3; reply[o + 1] = 4; reply[o + 2] = 10; reply[o + 3] = 0; reply[o + 4] = 0; reply[o + 5] = 1; o += 6 // gateway
     reply[o] = 54; reply[o + 1] = 4; reply[o + 2...o + 5] = leaseIP[0...3]; o += 6 // server id
-    reply[o] = 51; reply[o + 1] = 4; reply[o + 2] = 0; reply[o + 3] = 0; reply[o + 4] = 0x0e; reply[o + 5] = 0x10; o += 6 // lease 3600
+    reply[o] = 51; reply[o + 1] = 4; reply[o + 2] = UInt8(leaseSecs >> 24); reply[o + 3] = UInt8((leaseSecs >> 16) & 0xff); reply[o + 4] = UInt8((leaseSecs >> 8) & 0xff); reply[o + 5] = UInt8(leaseSecs & 0xff); o += 6 // lease option 51
     reply[o] = 255; o += 1 // end
     // o must be exactly frameLen (282 + 28 = 310).
     assert(o == frameLen)

@@ -1491,16 +1491,22 @@ fn cmd_net(m: *Monitor, args: []const []const u8) ExecError {
     m.console.puts(",drop=");
     m.console.print_u64(virtio_net.udp.dropped_badsum + virtio_net.udp.dropped_closed + virtio_net.udp.dropped_len);
     m.console.puts("\n");
-    // Card N8 (claim 0351): the DHCP client — the state (bound/unbound),
-    // the lease (ip/mask/gw/server/lease — zeros when unbound), and the
-    // handshake counters (discover sent, offer recv, request sent, ack
-    // recv, nack, timeout, malformed). Grep-able and deterministic.
+    // Card N8 (claim 0351) + card N9 (claim 9489): the DHCP client — the
+    // state (bound/unbound/renewing/rebinding), the lease
+    // (ip/mask/gw/server/lease — zeros when unbound), the handshake
+    // counters (discover sent, offer recv, request sent, ack recv, nack,
+    // timeout, malformed), and the lease-lifecycle counters (renewing
+    // REQUESTs sent, rebinding REQUESTs sent, renewals ACKed, expiries
+    // enforced). Grep-able and deterministic. The lifecycle counters
+    // APPEND at the end — the N8 gate's substring assertions stay green.
     m.console.puts(" dhcp=");
     m.console.puts(switch (virtio_net.dhcp.state) {
         .idle => "idle",
         .selecting => "selecting",
         .requesting => "requesting",
         .bound => "bound",
+        .renewing => "renewing",
+        .rebinding => "rebinding",
     });
     m.console.puts(",ip=");
     var dibuf: [15]u8 = undefined;
@@ -1531,17 +1537,29 @@ fn cmd_net(m: *Monitor, args: []const []const u8) ExecError {
     m.console.print_u64(virtio_net.dhcp.timed_out);
     m.console.puts(",mal=");
     m.console.print_u64(virtio_net.dhcp.dropped_malformed);
+    // Card N9 (claim 9489): the lease lifecycle counters (append-only).
+    m.console.puts(",renew=");
+    m.console.print_u64(virtio_net.dhcp.renew_sent);
+    m.console.puts(",rebind=");
+    m.console.print_u64(virtio_net.dhcp.rebind_sent);
+    m.console.puts(",renewed=");
+    m.console.print_u64(virtio_net.dhcp.renewed);
+    m.console.puts(",expired=");
+    m.console.print_u64(virtio_net.dhcp.expired);
     m.console.puts("\n");
     return .none;
 }
 
-/// `net dhcp` — card N8 (claim 0351): drive the bounded RFC 2131 client
-/// ONE STEP per invocation. INIT (idle): build + transmit the DISCOVER
-/// (a CSPRNG transaction id), print it; SELECTING: wait for the OFFER
-/// (already processed by a drain if it landed); REQUESTING: transmit the
-/// built REQUEST exactly once, then wait for the ACK; BOUND: print the
-/// lease (the ACK's drain processing already set `arp.own_ip` — THE one
-/// copy). The RX drain processes OFFER/ACK/NAK replies on port 68 (the
+/// `net dhcp` — card N8 (claim 0351) + card N9 (claim 9489): drive the
+/// bounded RFC 2131 client ONE STEP per invocation. INIT (idle): build
+/// + transmit the DISCOVER (a CSPRNG transaction id), print it;
+/// SELECTING: wait for the OFFER (already processed by a drain if it
+/// landed); REQUESTING: transmit the built REQUEST exactly once, then
+/// wait for the ACK; BOUND (N9): check the lease timer each invocation
+/// — expiry -> release the address (INIT), T2 -> REBINDING (broadcast
+/// REQUEST), T1 -> RENEWING (unicast REQUEST to the server), else print
+/// the lease (the ACK's drain processing already set `arp.own_ip` — THE
+/// one copy). The RX drain processes OFFER/ACK/NAK replies on port 68 (the
 /// udp dispatch), so the handshake advances between invocations; each
 /// command drains first (the claim-6076 polled-drain contract). Bounded
 /// retry: `max_attempts` DISCOVERs without an OFFER -> an honest refuse
@@ -1557,6 +1575,10 @@ fn cmd_net_dhcp(m: *Monitor, args: []const []const u8) ExecError {
         m.console.puts(")\n");
         return .none;
     }
+    // Card N9 (claim 9489): stamp the lease clock BEFORE the drain — a
+    // pending renewal ACK processed below restarts the lease from THIS
+    // instant (the shell idle loop keeps it current between commands).
+    virtio_net.dhcp.now_ticks = timer.ticks;
     // Deliver any pending OFFER/ACK before deciding (polled-drain
     // contract — the frame may have landed while the shell idled).
     virtio_net.net_rx_drain();
@@ -1620,7 +1642,121 @@ fn cmd_net_dhcp(m: *Monitor, args: []const []const u8) ExecError {
             }
             return .none;
         },
+        .renewing, .rebinding => {
+            // Card N9 (claim 9489): the renewal REQUEST went out (or the
+            // initial transmit failed — retry once). A pending renewal
+            // never outlives its lease: if the ACK has not landed and the
+            // lease expired meanwhile, release the address honestly.
+            const lease = virtio_net.dhcp.lease_time;
+            if (lease > 0 and virtio_net.dhcp.elapsed() >= lease) {
+                virtio_net.dhcp.expire();
+                m.console.puts("net dhcp: lease expired while waiting for the renewal ACK (elapsed=");
+                m.console.print_u64(virtio_net.dhcp.elapsed());
+                m.console.puts(" >= lease=");
+                m.console.print_u64(lease);
+                m.console.puts(") — address released\n");
+                return .none;
+            }
+            if (!virtio_net.dhcp.request_transmitted) {
+                var out_len: usize = 0;
+                const r = if (virtio_net.dhcp.state == .renewing) blk: {
+                    const srv_mac = virtio_net.arp.lookup(virtio_net.dhcp.lease_server) orelse {
+                        m.console.print_line("net dhcp: renewing needs the server MAC (net arp <server> first)");
+                        break :blk .no_peer;
+                    };
+                    break :blk virtio_net.net_dhcp_send_unicast(virtio_net.dhcp.lease_server, srv_mac, virtio_net.dhcp.msg[0..virtio_net.dhcp.msg_len], &out_len);
+                } else virtio_net.net_dhcp_send_bound(virtio_net.dhcp.msg[0..virtio_net.dhcp.msg_len], &out_len);
+                if (r == .ok) {
+                    virtio_net.dhcp.request_transmitted = true;
+                    if (virtio_net.dhcp.state == .renewing) virtio_net.dhcp.renew_sent += 1 else virtio_net.dhcp.rebind_sent += 1;
+                    m.console.puts("net dhcp: ");
+                    m.console.puts(if (virtio_net.dhcp.state == .renewing) "renewing" else "rebinding");
+                    m.console.puts(" request sent (");
+                    m.console.print_u64(@intCast(out_len));
+                    m.console.puts(" bytes)\n");
+                } else {
+                    m.console.puts("net dhcp: ");
+                    m.console.puts(if (virtio_net.dhcp.state == .renewing) "RENEWING" else "REBINDING");
+                    m.console.print_line(" TX failed (transport unready)");
+                }
+            } else {
+                m.console.puts("net dhcp: waiting for the renewal ACK (xid=");
+                m.console.print_hex_min(virtio_net.dhcp.xid);
+                m.console.puts(")\n");
+            }
+            return .none;
+        },
         .bound => {
+            // Card N9 (claim 9489): the lease lifecycle (RFC 2131
+            // §4.4.5). Each invocation checks the elapsed lease time and
+            // advances ONE step: expiry -> release the address (INIT);
+            // T2 -> REBINDING (broadcast REQUEST); T1 -> RENEWING
+            // (unicast REQUEST to the server — its MAC must be resolved;
+            // the seam resolves nothing). The transition + transmit
+            // happen in the SAME invocation (the polled-drain contract).
+            const lease = virtio_net.dhcp.lease_time;
+            const el = virtio_net.dhcp.elapsed();
+            if (lease > 0 and el >= lease) {
+                virtio_net.dhcp.expire();
+                m.console.puts("net dhcp: lease expired (elapsed=");
+                m.console.print_u64(el);
+                m.console.puts(" >= lease=");
+                m.console.print_u64(lease);
+                m.console.puts(") — address released, re-DISCOVER with `net dhcp`\n");
+                return .none;
+            }
+            if (lease > 0 and el >= virtio_net.dhcp.t2(lease)) {
+                // REBINDING: the broadcast REQUEST (any server on the
+                // link can answer — the lease is almost over).
+                virtio_net.dhcp.enter_rebinding();
+                var out_len: usize = 0;
+                switch (virtio_net.net_dhcp_send_bound(virtio_net.dhcp.msg[0..virtio_net.dhcp.msg_len], &out_len)) {
+                    .ok => {
+                        virtio_net.dhcp.request_transmitted = true;
+                        virtio_net.dhcp.rebind_sent += 1;
+                        m.console.puts("net dhcp: rebinding (T2, elapsed=");
+                        m.console.print_u64(el);
+                        m.console.puts(") request sent (");
+                        m.console.print_u64(@intCast(out_len));
+                        m.console.puts(" bytes)\n");
+                    },
+                    else => m.console.print_line("net dhcp: REBINDING TX failed (transport unready)"),
+                }
+                return .none;
+            }
+            if (lease > 0 and el >= virtio_net.dhcp.t1(lease)) {
+                // RENEWING: the unicast REQUEST to the server (RFC 2131
+                // §4.4.5). The server MAC must be in the ARP table — the
+                // guest resolves it with `net arp <server>` (the host's
+                // --net-arp-respond answers); without it the client
+                // honestly stays BOUND until T2 (RFC-compliant
+                // degradation, never faked).
+                const srv_mac = virtio_net.arp.lookup(virtio_net.dhcp.lease_server) orelse {
+                    m.console.puts("net dhcp: renewing needs the server MAC (net arp ");
+                    var srvbuf: [15]u8 = undefined;
+                    const sn = virtio_net.arp.format_ip(virtio_net.dhcp.lease_server, &srvbuf);
+                    m.console.puts(srvbuf[0..sn]);
+                    m.console.puts(" first) — the client stays BOUND until T2\n");
+                    return .none;
+                };
+                virtio_net.dhcp.enter_renewing();
+                var out_len: usize = 0;
+                switch (virtio_net.net_dhcp_send_unicast(virtio_net.dhcp.lease_server, srv_mac, virtio_net.dhcp.msg[0..virtio_net.dhcp.msg_len], &out_len)) {
+                    .ok => {
+                        virtio_net.dhcp.request_transmitted = true;
+                        virtio_net.dhcp.renew_sent += 1;
+                        m.console.puts("net dhcp: renewing (T1, elapsed=");
+                        m.console.print_u64(el);
+                        m.console.puts(") request sent to the server (");
+                        m.console.print_u64(@intCast(out_len));
+                        m.console.puts(" bytes)\n");
+                    },
+                    else => m.console.print_line("net dhcp: RENEWING TX failed (transport unready)"),
+                }
+                return .none;
+            }
+            // The lease is still young — the existing bound print
+            // (unchanged; the N8 gate asserts it byte-exact).
             m.console.puts("net: dhcp bound ip=");
             var ibuf: [15]u8 = undefined;
             const in = virtio_net.arp.format_ip(virtio_net.dhcp.lease_ip, &ibuf);
