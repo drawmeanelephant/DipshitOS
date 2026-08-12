@@ -18,6 +18,16 @@
 //          deterministic and gate-assertable. OFF by default: without the
 //          flag config.networkDevices stays [] — every existing gate is
 //          byte-identical.)
+//         [--net-dhcp-respond <lease-ip>] (milestone five card N8, claim
+//          0351: a tiny deterministic host-side DHCP server inside the
+//          capture thread — the guest's DHCPDISCOVER is answered with an
+//          OFFER and its REQUEST with an ACK, both carrying the FIXED
+//          gate-assertable lease {ip=<lease-ip>, mask 255.255.255.0,
+//          gateway 10.0.0.1, server id=<lease-ip>, lease 3600}, the
+//          guest's xid echoed byte-exact, written into the SAME
+//          attachment socket end (VZ reads fds[0], so the guest receives
+//          it). Requires --net. OFF by default: the default VM is
+//          unchanged.)
 //         [--net-nat] (milestone five card N7, claim 4678: attach one
 //          VZVirtioNetworkDeviceConfiguration with a
 //          VZNATNetworkDeviceAttachment instead of the file-handle
@@ -199,6 +209,22 @@ var netIcmpRespondHostIP: [UInt8]?
 // unchanged).
 var netUdpRespondHostIP: [UInt8]?
 var netUdpRespondHostPort: UInt16?
+// Milestone five card N8 (claim 0351): `--net-dhcp-respond <lease-ip>`
+// answers the guest's DHCP handshake from the HOST side — a tiny
+// deterministic host-side DHCP server inside the capture thread: when a
+// captured datagram is a DHCPDISCOVER (ethertype 0x0800, protocol 17,
+// src port 68 -> dst port 67, dst broadcast), the synthesized OFFER
+// (BOOTREPLY, the guest's xid ECHOED, yiaddr = <lease-ip>, mask
+// 255.255.255.0, gateway 10.0.0.1, server id = <lease-ip>, lease 3600)
+// is written into the SAME attachment socket end the other responders
+// write (VZ reads fds[0], so the guest receives it); on the guest's
+// DHCPREQUEST (message type 3) the ACK (message type 5, the SAME fixed
+// lease) is written. Driven by the guest's actual handshake bytes, not a
+// sleep. nil = the guest's DHCP messages go unanswered (the default VM
+// is unchanged). The fixed lease is gate-assertable — the `net dhcp`
+// bound report must show ip=<lease-ip> mask=255.255.255.0 gw=10.0.0.1
+// server=<lease-ip> lease=3600.
+var netDhcpRespondLeaseIP: [UInt8]?
 // Milestone five card N7 (claim 4678): `--net-nat` attaches one
 // VZVirtioNetworkDeviceConfiguration with a VZNATNetworkDeviceAttachment
 // instead of the file-handle attachment — the host is the guest's router
@@ -297,6 +323,14 @@ while idx < arguments.count {
         }
         netUdpRespondHostIP = parts
         netUdpRespondHostPort = port
+        idx += 2
+    } else if arg == "--net-dhcp-respond", idx + 1 < arguments.count {
+        // Parse the lease IP now (fail early, like --timeout).
+        let parts = arguments[idx + 1].split(separator: ".").compactMap { UInt8($0) }
+        guard parts.count == 4 else {
+            fail("--net-dhcp-respond requires a dotted-quad IPv4 lease address, got '\(arguments[idx + 1])'.")
+        }
+        netDhcpRespondLeaseIP = parts
         idx += 2
     } else if arg == "--net-nat" {
         netNatEnabled = true
@@ -506,6 +540,9 @@ if netIcmpRespondHostIP != nil, netCapturePath == nil {
 if netUdpRespondHostIP != nil, netCapturePath == nil {
     fail("--net-udp-respond requires --net (the UDP reply is written into the SAME attachment's socket).")
 }
+if netDhcpRespondLeaseIP != nil, netCapturePath == nil {
+    fail("--net-dhcp-respond requires --net (the DHCP reply is written into the SAME attachment's socket).")
+}
 // Milestone five card N7 (claim 4678): `--net-nat` is mutually exclusive
 // with `--net` — one network device per guest for now (the flag
 // validation shape: a clear fail, like the responder requirements above).
@@ -572,6 +609,29 @@ if let netCapturePath {
                 try? netCaptureReadSocket!.write(contentsOf: Data(reply))
                 let srcPort = (UInt16(buf[34]) << 8) | UInt16(buf[35])
                 print("NET-UDP: answered the guest's datagram for \(hostIP[0]).\(hostIP[1]).\(hostIP[2]).\(hostIP[3]):\(hostPort) (reply to guest src port \(srcPort), \(n - 42) payload bytes)")
+            }
+            // Card N8 (claim 0351): if the guest ran the DHCP client,
+            // answer the handshake from the host — a tiny deterministic
+            // DHCP server: DISCOVER (type 1) -> OFFER, REQUEST (type 3)
+            // -> ACK, both with the FIXED gate-assertable lease (the
+            // guest's xid echoed byte-exact, yiaddr = the lease IP, mask
+            // 255.255.255.0, gateway 10.0.0.1, server id = the lease IP,
+            // lease 3600). The reply goes broadcast (the client's flag)
+            // so the guest's N2 MAC filter admits it.
+            if let leaseIP = netDhcpRespondLeaseIP, isDhcpDatagram(buf, n),
+               let mtype = dhcpMessageType(buf, n), mtype == 1 || mtype == 3 {
+                var reply = [UInt8](repeating: 0, count: 4096)
+                let replyLen = buildDhcpReply(&reply, buf, n, arpHostMAC, leaseIP, mtype)
+                try? netCaptureReadSocket!.write(contentsOf: Data(reply[0..<replyLen]))
+                // The xid hex built manually (Swift's String(format:) vararg
+                // bridge mismatches %x with UInt8/UInt32 — the same reason
+                // the N5 responder prints ports as arithmetic).
+                let hexT = Array("0123456789abcdef")
+                let xidHex = [hexT[Int(buf[46] >> 4)], hexT[Int(buf[46] & 0xf)],
+                              hexT[Int(buf[47] >> 4)], hexT[Int(buf[47] & 0xf)],
+                              hexT[Int(buf[48] >> 4)], hexT[Int(buf[48] & 0xf)],
+                              hexT[Int(buf[49] >> 4)], hexT[Int(buf[49] & 0xf)]]
+                print("NET-DHCP: answered the guest's DHCP \(mtype == 1 ? "DISCOVER" : "REQUEST") (xid 0x\(String(xidHex))) with a \(mtype == 1 ? "OFFER" : "ACK") for \(leaseIP[0]).\(leaseIP[1]).\(leaseIP[2]).\(leaseIP[3]) (lease 3600s)")
             }
         }
         try? netCaptureFile.synchronize()
@@ -692,6 +752,10 @@ if let hostIP = netIcmpRespondHostIP {
 if let hostIP = netUdpRespondHostIP, let hostPort = netUdpRespondHostPort {
     let ipText = hostIP.map(String.init).joined(separator: ".")
     print("  net-udp-respond: ENABLED (milestone five card N5, claim 8552) — the host answers the guest's UDP datagrams for \(ipText):\(hostPort) (host MAC 02:00:00:00:00:02) via the capture thread (deterministic, request-driven)")
+}
+if let leaseIP = netDhcpRespondLeaseIP {
+    let ipText = leaseIP.map(String.init).joined(separator: ".")
+    print("  net-dhcp-respond: ENABLED (milestone five card N8, claim 0351) — the host answers the guest's DHCP handshake with the fixed lease ip=\(ipText) mask=255.255.255.0 gw=10.0.0.1 server=\(ipText) lease=3600 via the capture thread (deterministic, request-driven)")
 }
 if netNatEnabled {
     print("  net-nat: ENABLED (milestone five card N7, claim 4678) — VZNATNetworkDeviceAttachment attached (host router + NAT; no capture file — guest-observed counters are the gate's evidence)")
@@ -1392,6 +1456,116 @@ func buildUdpReply(_ reply: inout [UInt8], _ req: [UInt8], _ n: Int, _ hostMAC: 
     let udpChk = udpChecksum(hostIP, senderIP, datagram, udpLen)
     reply[40] = UInt8(udpChk >> 8)
     reply[41] = UInt8(udpChk & 0xff)
+}
+
+// Card N8 (claim 0351): is the datagram a DHCP client message (Ethernet
+// II ethertype 0x0800, version 4 / IHL 5, NOT a fragment, protocol UDP,
+// src port 68 -> dst port 67)? The guest's DISCOVER/REQUEST frames are
+// raw Ethernet — header at 14..34, UDP at 34..42, the DHCP message at 42.
+func isDhcpDatagram(_ buf: [UInt8], _ n: Int) -> Bool {
+    guard n >= 46 else { return false }
+    guard buf[12] == 0x08 && buf[13] == 0x00 else { return false } // ethertype IPv4
+    guard buf[14] == 0x45 else { return false } // version 4, IHL 5
+    guard (buf[20] & 0x1f) == 0 && buf[21] == 0 else { return false } // NOT a fragment
+    guard buf[23] == 17 else { return false } // protocol UDP
+    let srcPort = (UInt16(buf[34]) << 8) | UInt16(buf[35])
+    let dstPort = (UInt16(buf[36]) << 8) | UInt16(buf[37])
+    return srcPort == 68 && dstPort == 67
+}
+
+// Card N8 (claim 0351): the DHCP message type (option 53) of a client
+// message, or nil when absent/malformed. Options start at frame 282 (42 +
+// the 236-byte BOOTP header + the 4-byte magic cookie).
+func dhcpMessageType(_ buf: [UInt8], _ n: Int) -> UInt8? {
+    guard n >= 284 else { return nil }
+    var i = 282
+    while i + 2 <= n {
+        let code = buf[i]
+        if code == 255 { break }
+        if code == 0 { i += 1; continue }
+        let len = Int(buf[i + 1])
+        if i + 2 + len > n { break }
+        if code == 53 && len == 1 { return buf[i + 2] }
+        i += 2 + len
+    }
+    return nil
+}
+
+// Card N8 (claim 0351): synthesize the DHCP OFFER (mtype 1 -> 2) or ACK
+// (mtype 3 -> 5) to the client message in `req` into `reply` (a fresh
+// broadcast frame): Ethernet dst ff*6 / src host MAC, ethertype 0x0800,
+// IPv4 src = the lease IP / dst 255.255.255.255 (the client's broadcast
+// flag), protocol 17, then the BOOTREPLY (op 2, the guest's xid ECHOED,
+// yiaddr = the lease IP, the client's chaddr echoed) with the FIXED
+// gate-assertable lease options: 53 (type), 1 (mask 255.255.255.0), 3
+// (gateway 10.0.0.1), 54 (server id = the lease IP), 51 (lease 3600),
+// 255. Both checksums recomputed (RFC 1071). Returns the frame length
+// (310 bytes — the reply message is 268 bytes).
+func buildDhcpReply(_ reply: inout [UInt8], _ req: [UInt8], _ n: Int, _ hostMAC: [UInt8], _ leaseIP: [UInt8], _ mtype: UInt8) -> Int {
+    _ = n
+    // The reply message: 236 header + 4 cookie + 53,1,type(3) +
+    // 1,4,mask(6) + 3,4,gw(6) + 54,4,server(6) + 51,4,lease(6) + 255(1)
+    // = 268 bytes; the frame = 42 + 268 = 310.
+    let msgLen = 268
+    let frameLen = 42 + msgLen // 310
+    reply = [UInt8](repeating: 0, count: frameLen)
+    // Ethernet: dst broadcast, src host MAC.
+    reply[0...5] = [UInt8](repeating: 0xff, count: 6)[0...5]
+    reply[6...11] = hostMAC[0...5]
+    reply[12] = 0x08
+    reply[13] = 0x00 // ethertype IPv4
+    // IPv4: src = the lease IP, dst = 255.255.255.255, proto 17.
+    reply[14] = 0x45 // version 4, IHL 5
+    reply[16] = UInt8((20 + 8 + msgLen) >> 8)
+    reply[17] = UInt8((20 + 8 + msgLen) & 0xff) // total length 296
+    reply[22] = 64 // TTL
+    reply[23] = 17 // protocol UDP
+    reply[26...29] = leaseIP[0...3] // src
+    reply[30...33] = [UInt8](repeating: 0xff, count: 4)[0...3] // dst broadcast
+    let hdrChk = ipChecksum(reply, 14, 34)
+    reply[24] = UInt8(hdrChk >> 8)
+    reply[25] = UInt8(hdrChk & 0xff)
+    // UDP: src 67, dst 68, length 8 + msgLen.
+    reply[34] = 0x00
+    reply[35] = 67 // src port 67
+    reply[36] = 0x00
+    reply[37] = 68 // dst port 68
+    reply[38] = UInt8((8 + msgLen) >> 8)
+    reply[39] = UInt8((8 + msgLen) & 0xff) // UDP length 276
+    // The DHCP message at 42: op BOOTREPLY, htype/hlen, the guest's xid
+    // echoed, yiaddr = the lease IP, the client's chaddr echoed.
+    reply[42] = 2 // BOOTREPLY
+    reply[43] = 1 // htype ethernet
+    reply[44] = 6 // hlen
+    reply[46...49] = req[46...49] // xid echoed byte-exact
+    reply[58...61] = leaseIP[0...3] // yiaddr
+    reply[70...85] = req[70...85] // chaddr echoed (the client's MAC)
+    // The magic cookie + the fixed lease options.
+    reply[278] = 0x63
+    reply[279] = 0x82
+    reply[280] = 0x53
+    reply[281] = 0x63
+    var o = 282
+    // The reply's message type is the SERVER's answer to the client's
+    // message (option 53 must be 2 OFFER for a DISCOVER, 5 ACK for a
+    // REQUEST — never the echoed client type).
+    let replyType: UInt8 = mtype == 1 ? 2 : 5
+    reply[o] = 53; reply[o + 1] = 1; reply[o + 2] = replyType; o += 3 // message type
+    reply[o] = 1; reply[o + 1] = 4; reply[o + 2] = 255; reply[o + 3] = 255; reply[o + 4] = 255; reply[o + 5] = 0; o += 6 // subnet mask
+    reply[o] = 3; reply[o + 1] = 4; reply[o + 2] = 10; reply[o + 3] = 0; reply[o + 4] = 0; reply[o + 5] = 1; o += 6 // gateway
+    reply[o] = 54; reply[o + 1] = 4; reply[o + 2...o + 5] = leaseIP[0...3]; o += 6 // server id
+    reply[o] = 51; reply[o + 1] = 4; reply[o + 2] = 0; reply[o + 3] = 0; reply[o + 4] = 0x0e; reply[o + 5] = 0x10; o += 6 // lease 3600
+    reply[o] = 255; o += 1 // end
+    // o must be exactly frameLen (282 + 28 = 310).
+    assert(o == frameLen)
+    // The UDP checksum over the pseudo-header (lease IP -> broadcast).
+    var datagram = [UInt8](reply[34..<frameLen])
+    datagram[6] = 0
+    datagram[7] = 0 // zero the checksum field during the computation
+    let udpChk = udpChecksum(leaseIP, [UInt8](repeating: 0xff, count: 4), datagram, UInt16(8 + msgLen))
+    reply[40] = UInt8(udpChk >> 8)
+    reply[41] = UInt8(udpChk & 0xff)
+    return frameLen
 }
 
 // Card N4 (claim 0148): synthesize the ICMP ECHO REPLY to the echo
