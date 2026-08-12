@@ -81,6 +81,7 @@ verify-vz:
     bash tools/verify-live-net-dhcp.sh
     bash tools/verify-live-net-dhcp-renew.sh
     bash tools/verify-live-net-tcp.sh
+    bash tools/verify-live-net-tcp-rto.sh
 
 # Compile the AArch64 UEFI application and kernel image (class A — zig build)
 build:
