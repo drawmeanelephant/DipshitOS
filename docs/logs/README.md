@@ -79,6 +79,7 @@ verify-coordination`, and CI) fails if it drifts from the files.
 | agent/buffy/m5-net-dhcp | [`agent-buffy-m5-net-dhcp.md`](agent-buffy-m5-net-dhcp.md) |
 | agent/buffy/m5-net-nat | [`agent-buffy-m5-net-nat.md`](agent-buffy-m5-net-nat.md) |
 | agent/buffy/m5-net-rx | [`agent-buffy-m5-net-rx.md`](agent-buffy-m5-net-rx.md) |
+| agent/buffy/m5-net-tcp | [`agent-buffy-m5-net-tcp.md`](agent-buffy-m5-net-tcp.md) |
 | agent/buffy/m5-net-tx | [`agent-buffy-m5-net-tx.md`](agent-buffy-m5-net-tx.md) |
 | agent/buffy/m5-udp-syscall | [`agent-buffy-m5-udp-syscall.md`](agent-buffy-m5-udp-syscall.md) |
 | agent/buffy/m5-udp | [`agent-buffy-m5-udp.md`](agent-buffy-m5-udp.md) |

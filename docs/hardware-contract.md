@@ -240,6 +240,42 @@ assumption comes from documentation or reasoning only.
   lease knob (`--net-dhcp-respond <ip>:<lease-secs>`, default 3600) and
   the script delays (`--script2-delay` / `--script3-delay`, default
   0.5) are flag-gated — every pre-N9 gate is byte-identical.
+  **TCP observed 2026-08-12 (claim 7026, milestone five card N10):**
+  the guest's bounded RFC 793 client (the `net tcp` monitor subcommand,
+  src port 8000, a bare 20-byte header — NO options, window 4096)
+  completes the full lifecycle against the runner's deterministic
+  `--net-tcp-respond <host-ip>:<host-port>` server on the file-handle
+  attachment: SYN (54 B, byte-exact in the capture) → SYN-ACK (the
+  FIXED server ISN 0x12345678) → ACK → ESTABLISHED → data (5 B) → the
+  payload ECHOED byte-exact (the RX buffer prints `01 02 03 04 05`) →
+  FIN → FIN-ACK → final ACK → CLOSED, then a second connect + `net tcp
+  reset` (a real RST) — the report shows `syn=2,synack=2,ack=4,
+  data_s=1,data_r=1,fin=1,finack=1,rst_s=1,rst_r=0,timedout=0,mal=0`.
+  The client's ACK numbers are DETERMINISTIC (0x12345679 / 0x1234567e
+  / 0x1234567f — the fixed server ISN). **The bounded connect timeout
+  observed** (file-handle, ARP-responder-only — the host never answers
+  TCP, a deterministic black hole): after 30 guest seconds the client
+  refuses honestly — `connect refused (no SYN-ACK after 30s)`,
+  `timedout=1`, the connection state released (peer 0.0.0.0:0).
+  **CLAIM-TIME OBSERVATION — the VZ NAT gateway answers a TCP SYN with
+  a RST** (macOS 27 arm64, `--net-nat`, connect to 192.168.64.1:9999):
+  the gateway (MAC ae:07:75:20:da:64, learned via the N7-proven ARP
+  path) actively refuses the connection — no TCP listener on the test
+  port — so the client's RST-RX path fires (`rst_r=1`, `tcp=closed`,
+  the drive returns it to idle). The VZ NAT does not silently drop; it
+  refuses closed ports with a real RST. If a future host's NAT gateway
+  instead drops the SYN silently, the honest timeout path fires
+  (`timedout=1` — proven by Run B; the Run-C assertion set documents
+  where to flip). **[observed]** — every `verify-live-net-tcp` Run-A
+  boot's serial log (`artifacts/live-net-tcp-a-serial.log`) shows the
+  lifecycle lines + counters, the capture (`live-net-tcp-a-cap.bin`, 533
+  B) holds the NINE guest-TX frames byte-exact (the gate's python walk
+  verifies the seq/ack chain + every TCP checksum); the Run-B serial log
+  (`live-net-tcp-b-serial.log`) shows the timeout refusal, the Run-C
+  serial log (`live-net-tcp-c-serial.log`) shows the NAT RST; the
+  exploratory evidence is saved under
+  `artifacts/live-net-tcp-explore/`. The runner's `--net-tcp-respond`
+  is flag-gated — every pre-N10 gate is byte-identical.
 - Custom virtio device (`VZCustomVirtioDeviceConfiguration`, the
   `--custom-virtio` runner flag / `zig build spike-virtio`): the guest sees
   a vendor-defined device on bus 0 as `VID=0x1af4 DID=0x1082`.
