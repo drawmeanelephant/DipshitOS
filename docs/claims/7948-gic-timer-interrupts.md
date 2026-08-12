@@ -1,5 +1,19 @@
 # Claim: GIC + generic timer interrupts (delivering into the claim-9746 IRQ vector)
 
+> **SUPERSEDED (2026-08-11, issue #95):** this claim's blocking conclusion —
+> "VZ never delivers any interrupt to the guest" — was **wrong as a platform
+> wall**. Claim 9187 (done 2026-08-09) proved real level-triggered CNTP PPI
+> 30 enters the EL1 IRQ vector (gate 3/3), and claim 0828 proved a real SPI
+> (INTID 0x45) enters it too. Root cause was a guest-driver bug: wrong GICR
+> SGI-frame offsets (GICR+0x80 vs GICR+0x10080), MADT structure-type shift,
+> and ICFGR writing the RES0 bit. The macOS 27.0 SDK re-audit
+> (`artifacts/audit-2026/vz-sdk-audit.txt`) keeps only the narrower fact:
+> Virtualization.framework exposes no guest-interrupt **injection** API and
+> `VZVirtioQueue` has no `signalUsedBuffers`; Hypervisor.framework exposes
+> `hv_gic_create`/`hv_gic_set_spi`/`hv_gic_send_msi`. History below
+> preserved unchanged.
+
+
 - **Owner:** buffy (`freebuff/grab-newest-git-and-check-status-if-there-s-any-im-b9d5c028-9379-48e0-8ddb-ebfbf45ef2df`)
 - **Prompt / plan:** roadmap item 5's remaining half (claim 9746 landed the exception vectors; status.md item 5: "Remaining: GIC + timer interrupts"). Program the interrupt controller (GIC, distributor + CPU interface) and the ARM generic timer (CNTP), deliver the timer tick into the claim-9746 EL1 IRQ vector, and prove it live with a class B gate.
 - **Scope:** new `kernel/src/gic.zig` (ACPI MADT discovery pre-exit; distributor + redistributor/CPU-interface programming post-MMU; ack/EOI for the IRQ handler; GICv3 system-register and GICv2 MMIO paths) and `kernel/src/timer.zig` (GTDT PPI discovery; CNTP arm/re-arm; tick counter; periodic heartbeat). `exceptions.zig` gains an IRQ-handler hook (kind==irq with a registered handler → dispatch and `eret`, else the claim-9746 report+park). Kernel seam: discover pre-exit, program post-MMU, unmask IRQs (`daifclr #2`), `irq_dispatch` = gic.ack → timer.handle → gic.eoi. New `dipshit>` command `timer` (registry 16→17). Class B gate `tools/verify-live-timer.sh`. Docs: hardware-contract GIC `[inferred] → [observed]`, status/roadmap item 5 done.
