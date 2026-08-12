@@ -139,6 +139,43 @@ pub fn boot_and_park(mon: *monitor.Monitor, rx_wired: bool) void {
             // wall-clock seconds).
             virtio_net.tcp.now_ticks = timer.ticks;
             virtio_net.net_rx_drain();
+            // Card N11 (claim 5357): the bounded retransmission timer —
+            // polled here (the idle loop is the time engine — the
+            // card-N9 clock pattern). AFTER the drain, so an ACK the
+            // drain just processed has cleared the pending state — a
+            // retransmission never follows an acknowledged segment. The
+            // poll advances ONE step: an expired RTO (3 s) retransmits
+            // the pending SYN/data/FIN byte-exact (counted, printed); the
+            // exhausted bound (10) aborts the connection honestly
+            // (counted, printed). Bare ACKs are never pending.
+            switch (virtio_net.tcp.poll_rto()) {
+                .none => {},
+                .retransmit => {
+                    var out_len: usize = 0;
+                    switch (virtio_net.net_tcp_send(virtio_net.tcp.msg[0..virtio_net.tcp.msg_len], &out_len)) {
+                        .ok => {
+                            mon.console.puts("net tcp: ");
+                            mon.console.puts(switch (virtio_net.tcp.state) {
+                                .syn_sent => "syn",
+                                .established => "data",
+                                .fin_sent => "fin",
+                                else => "segment",
+                            });
+                            mon.console.puts(" retransmitted (");
+                            mon.console.print_u64(virtio_net.tcp.retx_count);
+                            mon.console.puts("/");
+                            mon.console.print_u64(virtio_net.tcp.retx_max);
+                            mon.console.puts(")\n");
+                        },
+                        else => mon.console.print_line("net tcp: retransmit TX failed (transport unready)"),
+                    }
+                },
+                .abort => {
+                    mon.console.puts("net tcp: retransmission limit reached (");
+                    mon.console.print_u64(virtio_net.tcp.retx_max);
+                    mon.console.puts(") — connection aborted\n");
+                },
+            }
             idle_wait_rx();
         }
     }

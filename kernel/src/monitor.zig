@@ -1590,6 +1590,14 @@ fn cmd_net(m: *Monitor, args: []const []const u8) ExecError {
     m.console.print_u64(virtio_net.tcp.timed_out);
     m.console.puts(",mal=");
     m.console.print_u64(virtio_net.tcp.dropped_badsum + virtio_net.tcp.dropped_malformed);
+    // Card N11 (claim 5357): the retransmission counters APPENDED at the
+    // end (the N9 append-never-change convention — the N10 gate's
+    // substring assertions stay green). retx = segment retransmissions,
+    // abort = the retransmission-bound aborts.
+    m.console.puts(",retx=");
+    m.console.print_u64(virtio_net.tcp.retransmitted);
+    m.console.puts(",abort=");
+    m.console.print_u64(virtio_net.tcp.retx_aborted);
     m.console.puts("\n");
     return .none;
 }
@@ -2008,6 +2016,7 @@ fn cmd_net_tcp_connect(m: *Monitor, args: []const []const u8) ExecError {
         .ok => {
             virtio_net.tcp.syn_sent += 1;
             virtio_net.tcp.advance_snd(1); // the SYN consumes one sequence number
+            virtio_net.tcp.record_pending(); // card N11: the unacked SYN is retransmittable
             m.console.puts("net tcp: syn sent (peer=");
             print_tcp_peer(m);
             m.console.puts(", seq=");
@@ -2059,6 +2068,7 @@ fn cmd_net_tcp_send(m: *Monitor, args: []const []const u8) ExecError {
         .ok => {
             virtio_net.tcp.data_sent += 1;
             virtio_net.tcp.advance_snd(@intCast(len));
+            virtio_net.tcp.record_pending(); // card N11: the unacked data is retransmittable
             m.console.puts("net tcp: data sent (seq=");
             m.console.print_hex_min(seq);
             m.console.puts(", ");
@@ -2121,6 +2131,7 @@ fn cmd_net_tcp_close(m: *Monitor, args: []const []const u8) ExecError {
         .ok => {
             virtio_net.tcp.fin_sent += 1;
             virtio_net.tcp.advance_snd(1); // the FIN consumes one sequence number
+            virtio_net.tcp.record_pending(); // card N11: the unacked FIN is retransmittable
             virtio_net.tcp.state = .fin_sent;
             m.console.puts("net tcp: fin sent (seq=");
             m.console.print_hex_min(seq);
@@ -2150,6 +2161,7 @@ fn cmd_net_tcp_reset(m: *Monitor, args: []const []const u8) ExecError {
     switch (virtio_net.net_tcp_send(virtio_net.tcp.msg[0..virtio_net.tcp.msg_len], &out_len)) {
         .ok => {
             virtio_net.tcp.rst_sent += 1;
+            virtio_net.tcp.clear_pending(); // card N11: the connection died — the timer stops
             virtio_net.tcp.state = .closed; // the connection died
             m.console.puts("net tcp: reset sent (seq=");
             m.console.print_hex_min(seq);

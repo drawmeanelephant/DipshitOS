@@ -276,6 +276,33 @@ assumption comes from documentation or reasoning only.
   exploratory evidence is saved under
   `artifacts/live-net-tcp-explore/`. The runner's `--net-tcp-respond`
   is flag-gated — every pre-N10 gate is byte-identical.
+  **TCP retransmission observed 2026-08-12 (claim 5357, milestone five
+  card N11):** the client's bounded retransmission machinery works live
+  on the file-handle attachment — the fixed 3 s RTO (guest seconds, the
+  1 Hz generic timer) retransmits a pending unacknowledged segment
+  AUTONOMOUSLY (the shell idle loop polls it — `net tcp: syn
+  retransmitted (n/10)`), byte-IDENTICAL in the capture (the same seq,
+  flags, payload, checksum); an ACK covering `snd_una` clears the
+  pending state (no retransmission — `retx=0` despite a wait past the
+  RTO); and at the bound (10 retransmissions, 33 s) the connection
+  ABORTS honestly (`retransmission limit reached (10) — connection
+  aborted`, the state released — no RST, no TX, `retx=10,abort=1`).
+  The 30 s connect timeout remains the SYN's outer bound (the abort at
+  33 s never beats it — the N10 refusal is unchanged). The runner's
+  `--net-tcp-respond` gained the optional `:handshake` mode (claim
+  5357) — SYN-ACK yes, data/FIN silent, the gate's deterministic data
+  black hole; flag-gated — every pre-N11 gate is byte-identical.
+  **[observed]** — every `verify-live-net-tcp-rto` Run-A serial log
+  (`artifacts/live-net-tcp-rto-a-serial.log`) shows the autonomous
+  `syn retransmitted (n/10)` lines + the capture
+  (`live-net-tcp-rto-a-cap.bin`) holds the byte-identical SYN frames;
+  the Run-B serial log (`live-net-tcp-rto-b-serial.log`) shows `retx=0`
+  with the handshake completing (the capture has exactly ONE SYN); the
+  Run-C serial log (`live-net-tcp-rto-c-serial.log`) shows the ten
+  `data retransmitted (n/10)` lines + the abort + the released report,
+  and the capture (`live-net-tcp-rto-c-cap.bin`) holds the ELEVEN
+  byte-identical data frames; the exploratory evidence is saved under
+  `artifacts/live-net-tcp-rto-explore/`.
 - Custom virtio device (`VZCustomVirtioDeviceConfiguration`, the
   `--custom-virtio` runner flag / `zig build spike-virtio`): the guest sees
   a vendor-defined device on bus 0 as `VID=0x1af4 DID=0x1082`.

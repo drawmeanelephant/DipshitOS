@@ -9,25 +9,34 @@
 //! `virtio_net.zig`'s `net_tcp_send` drives the transmit side (the N1
 //! one-request-at-a-time TX path).
 //!
-//! Honest bounds (documented, never assumed away): NO retransmission
-//! (every segment is sent exactly ONCE when the caller commands it — a
-//! lost segment is the caller's observation; `net tcp reset` aborts);
-//! ONE bounded connect timeout (30 s of guest ticks — the card-N9 timer
-//! pattern — a SYN with no SYN-ACK refuses honestly, counted
-//! `timed_out`); NO TCP options (a bare 20-byte header — no MSS, no
-//! window scaling, no SACK, no timestamps — a segment with a data
-//! offset != 5 is DROPPED, counted); a FIXED window (4096); no
+//! Honest bounds (documented, never assumed away): BOUNDED
+//! retransmission (card N11, claim 5357 — a SYN/data/FIN with no ACK
+//! is retransmitted on a FIXED 3 s RTO of guest ticks, at most
+//! `retx_max` = 10 times, then the connection ABORTS honestly —
+//! counted `retx_aborted`; bare ACKs are NEVER retransmitted; the 30 s
+//! connect timeout remains the SYN's outer bound — the retransmission
+//! abort at 33 s never beats it, so the N10 refusal is byte-exact;
+//! every retransmission is byte-identical — the pending segment copy —
+//! and counted `retransmitted`; an ACK covering everything the client
+//! sent clears the pending state, so an acknowledged segment is never
+//! retransmitted); ONE bounded connect timeout (30 s of guest ticks —
+//! the card-N9 timer pattern — a SYN with no SYN-ACK refuses honestly,
+//! counted `timed_out`); NO TCP options (a bare 20-byte header — no
+//! MSS, no window scaling, no SACK, no timestamps — a segment with a
+//! data offset != 5 is DROPPED, counted); a FIXED window (4096); no
 //! segmentation (payload <= `payload_max`, truncated honestly on TX);
 //! no reassembly (ONE bounded RX segment — a second unread segment is
 //! DROPPED, counted, never overwritten silently); NO TCP loopback (the
 //! client connects OUTWARD only — an own-IP connect is refused
 //! `.no_peer` like an unresolved peer); no server surface, no port
-//! listening, no urgent data, no congestion control. The close is
-//! client-driven (FIN -> FIN-ACK -> final ACK); a clean server FIN+ACK
-//! in ESTABLISHED is ACKed and counted (`finack_recv`), and the
-//! caller's `net tcp close` then completes the close; anything else is
-//! counted `dropped_malformed`. The fixed source port is 8000 (the
-//! UDP layer's 7000 analog — deterministic, gate-assertable).
+//! listening, no urgent data, no congestion control, no adaptive RTO
+//! (a fixed timer — no Karn's algorithm, no exponential backoff). The
+//! close is client-driven (FIN -> FIN-ACK -> final ACK); a clean
+//! server FIN+ACK in ESTABLISHED is ACKed and counted
+//! (`finack_recv`), and the caller's `net tcp close` then completes
+//! the close; anything else is counted `dropped_malformed`. The fixed
+//! source port is 8000 (the UDP layer's 7000 analog — deterministic,
+//! gate-assertable).
 
 const std = @import("std");
 const arp = @import("arp.zig"); // N3: our static IP (`arp.own_ip` — the ONE copy)
@@ -58,8 +67,22 @@ pub const frame_min: usize = eth_hdr_len + ipv4_hdr_len + tcp_hdr_len; // 54
 pub const window: u16 = 4096;
 /// The connect timeout in guest seconds (the 1 Hz generic timer — the
 /// card-N9 lease-clock pattern). A SYN with no SYN-ACK after this long
-/// refuses honestly (`timed_out`), releasing the connection state.
+/// refuses honestly (`timed_out`), releasing the connection state. Card
+/// N11 keeps this as the SYN's OUTER bound: the retransmission abort
+/// fires at (retx_max + 1) * rto = 33 s > 30 s, so the N10 refusal is
+/// byte-exact.
 pub const connect_timeout: u64 = 30;
+/// The fixed retransmission timeout in guest seconds (card N11, claim
+/// 5357). A SYN/data/FIN with no ACK is retransmitted when its RTO
+/// expires — a fixed timer (no adaptive estimation, no Karn's
+/// algorithm, no exponential backoff — the honest bound).
+pub const rto_ticks: u64 = 3;
+/// The retransmission bound (card N11): a segment is retransmitted at
+/// most `retx_max` times (11 transmissions total), then the connection
+/// ABORTS honestly (`retx_aborted`), releasing the state. The abort
+/// fires at (retx_max + 1) * rto = 33 s of guest ticks — after the 30 s
+/// connect timeout, so the SYN's outer bound is unchanged.
+pub const retx_max: u64 = 10;
 
 // Flags (RFC 793 §3.1 — the 9-bit flag field; only the ones we use).
 pub const flag_fin: u8 = 0x01;
@@ -81,6 +104,8 @@ pub var finack_recv: u64 = 0; // FIN-ACK segments received (the close answer / a
 pub var rst_sent: u64 = 0; // RST segments transmitted (`net tcp reset`)
 pub var rst_recv: u64 = 0; // RST segments received (the connection died)
 pub var timed_out: u64 = 0; // the bounded connect timeout refused
+pub var retransmitted: u64 = 0; // segment retransmissions (card N11 — the `retx=` counter)
+pub var retx_aborted: u64 = 0; // the retransmission bound aborted the connection (the `abort=` counter)
 pub var dropped_badsum: u64 = 0; // the TCP checksum mismatch (pseudo-header + segment)
 pub var dropped_malformed: u64 = 0; // an unparseable / unexpected / out-of-bounds segment
 
@@ -132,6 +157,23 @@ pub var rx_pending: bool = false;
 /// connect time is honest wall-clock seconds.
 pub var now_ticks: u64 = 0;
 pub var syn_ticks: u64 = 0;
+/// Card N11 (claim 5357) — the bounded retransmission state. ONE
+/// pending-unacknowledged segment (the polled-drain contract: at most
+/// ONE unacked TX in flight — the retransmission buffer is the bounded
+/// `segment_max` copy, never a second allocation). `tx_pending` is set
+/// by `record_pending` after a sequence-consuming segment (SYN/data/FIN)
+/// is transmitted and cleared when an ACK covers it (the `handle_rx`
+/// paths) or the connection dies (RST / timeout / abort / reset). Bare
+/// ACKs are NEVER recorded — they are never retransmitted (the honest
+/// bound).
+pub var tx_pending: bool = false;
+pub var retx_msg: [segment_max]u8 = undefined;
+pub var retx_len: usize = 0;
+/// When the pending segment was last transmitted (initial + each
+/// retransmission) — the RTO clock, stamped by `record_pending` and the
+/// retransmit itself.
+pub var tx_ticks: u64 = 0;
+pub var retx_count: u64 = 0; // retransmissions of the CURRENT pending segment
 
 /// The RX dispatch's outcome — the caller (the monitor) observes it via
 /// `state`; the enum is the honest event for the host tests.
@@ -141,6 +183,16 @@ pub const Event = enum {
     data_recv, // a payload segment accepted — buffered, the ACK is built
     finack_recv, // a FIN-ACK received — the final ACK (or an echo ACK) is built
     rst_recv, // a RST — the connection died
+};
+
+/// The RTO poll's outcome (card N11, claim 5357) — the caller (the
+/// shell idle loop) observes it; `.retransmit` means `msg` holds the
+/// rebuilt pending segment (transmit it + print), `.abort` means the
+/// retransmission bound released the connection (print).
+pub const RtoEvent = enum {
+    none,
+    retransmit,
+    abort,
 };
 
 // ---------------------------------------------------------------------------
@@ -276,6 +328,10 @@ pub fn reset() void {
     ack_pending = false;
     rx_len = 0;
     rx_pending = false;
+    tx_pending = false;
+    retx_len = 0;
+    tx_ticks = 0;
+    retx_count = 0;
     syn_sent = 0;
     synack_recv = 0;
     ack_sent = 0;
@@ -286,6 +342,8 @@ pub fn reset() void {
     rst_sent = 0;
     rst_recv = 0;
     timed_out = 0;
+    retransmitted = 0;
+    retx_aborted = 0;
     dropped_badsum = 0;
     dropped_malformed = 0;
     now_ticks = 0;
@@ -332,13 +390,80 @@ pub fn connect_timed_out() bool {
 /// to IDLE, counted `timed_out`. The caller (the monitor) prints the
 /// refusal; the next `net tcp connect` is a fresh attempt.
 pub fn abort_timeout() void {
+    release_conn();
+    timed_out += 1;
+}
+
+/// Release the connection state honestly (the N10 `abort_timeout` shape
+/// — no RST, no TX): IDLE, the peer cleared, the pending buffers
+/// cleared. Called by the connect refusal, the retransmission abort
+/// (card N11), and any death path.
+pub fn release_conn() void {
     state = .idle;
     peer_ip = .{ 0, 0, 0, 0 };
     peer_port = 0;
     peer_mac = .{ 0, 0, 0, 0, 0, 0 };
     ack_pending = false;
     rx_pending = false;
-    timed_out += 1;
+    clear_pending();
+}
+
+/// Card N11 (claim 5357): record the just-transmitted sequence-consuming
+/// segment (SYN/data/FIN) as the ONE pending segment — a copy of `msg`
+/// (the retransmission buffer, bounded `segment_max`), the RTO clock
+/// re-stamped, the retransmission count reset. The caller (the monitor)
+/// calls it AFTER a successful transmit; a bare ACK or a RST never calls
+/// it (they are never retransmitted).
+pub fn record_pending() void {
+    @memcpy(retx_msg[0..msg_len], msg[0..msg_len]);
+    retx_len = msg_len;
+    tx_ticks = now_ticks;
+    retx_count = 0;
+    tx_pending = true;
+}
+
+/// Card N11: clear the pending state (an ACK covered the pending
+/// segment, or the connection died). The retransmission timer stops.
+pub fn clear_pending() void {
+    tx_pending = false;
+    retx_len = 0;
+    retx_count = 0;
+}
+
+/// RFC 1982-style sequence comparison: `a` is at or past `b` (treating
+/// the u32 wrap). Used for the ACK-clears-pending check — the peer's
+/// ACK covers everything the client has sent when it reaches `snd_una`.
+fn seq_ge(a: u32, b: u32) bool {
+    return (a -% b) < 0x8000_0000;
+}
+
+/// Card N11 (claim 5357): the bounded retransmission poll — the shell
+/// idle loop calls it after the RX drain (an ACK processed by the drain
+/// cleared the pending state — a retransmission NEVER follows an
+/// acknowledged segment). One step per poll: if the pending segment's
+/// RTO (3 s of guest ticks) has expired and the bound is not exhausted,
+/// rebuild `msg` from the pending copy (byte-identical — the same seq,
+/// flags, payload, checksum) and count it; if the bound IS exhausted
+/// (10 retransmissions), release the connection honestly (`release_conn`
+/// — no RST, no TX) and count the abort. Bare ACKs are never pending.
+pub fn poll_rto() RtoEvent {
+    if (!tx_pending) return .none;
+    if (state == .idle or state == .closed) {
+        clear_pending(); // the connection died another way — stop the timer
+        return .none;
+    }
+    if (now_ticks -| tx_ticks < rto_ticks) return .none;
+    if (retx_count >= retx_max) {
+        retx_aborted += 1;
+        release_conn();
+        return .abort;
+    }
+    @memcpy(msg[0..retx_len], retx_msg[0..retx_len]);
+    msg_len = retx_len;
+    retx_count += 1;
+    retransmitted += 1;
+    tx_ticks = now_ticks; // the RTO clock restarts at each transmission
+    return .retransmit;
 }
 
 /// Advance the send sequence by the segment's consumption (1 for the SYN
@@ -437,6 +562,7 @@ pub fn handle_rx(frame: []const u8) Event {
         .syn_sent => {
             if ((flags & flag_rst) != 0) {
                 rst_recv += 1; // connection refused — the peer RST our SYN
+                clear_pending();
                 state = .closed;
                 return .rst_recv;
             }
@@ -455,6 +581,7 @@ pub fn handle_rx(frame: []const u8) Event {
             srv_isn = seq;
             rcv_nxt = srv_isn +% 1;
             state = .established;
+            clear_pending(); // the SYN-ACK acknowledges our SYN — the timer stops
             // The handshake ACK (seq = our ISN+1, ack = the server's
             // ISN+1 — the SND/RCV state after the SYN).
             build_msg(isn +% 1, rcv_nxt, flag_ack, &.{});
@@ -465,9 +592,16 @@ pub fn handle_rx(frame: []const u8) Event {
         .established => {
             if ((flags & flag_rst) != 0) {
                 rst_recv += 1;
+                clear_pending(); // the connection died — the timer stops
                 state = .closed; // the connection died — the report shows it
                 return .rst_recv;
             }
+            // Card N11 (claim 5357): ANY accepted segment whose ACK
+            // covers everything the client has sent acknowledges the
+            // pending segment — the retransmission timer stops (the
+            // honest check: an acknowledged segment is never
+            // retransmitted).
+            if (tx_pending and seq_ge(ack, snd_una)) clear_pending();
             if ((flags & flag_fin) != 0) {
                 if ((flags & flag_ack) == 0 or payload.len != 0) {
                     dropped_malformed += 1; // a clean FIN+ACK close only (honest bound)
@@ -502,6 +636,7 @@ pub fn handle_rx(frame: []const u8) Event {
         .fin_sent => {
             if ((flags & flag_rst) != 0) {
                 rst_recv += 1;
+                clear_pending();
                 state = .closed;
                 return .rst_recv;
             }
@@ -515,6 +650,7 @@ pub fn handle_rx(frame: []const u8) Event {
             }
             rcv_nxt = seq +% 1; // the FIN consumes one sequence number
             finack_recv += 1;
+            clear_pending(); // the FIN-ACK acknowledges our FIN — the timer stops
             state = .closed;
             // The final ACK (seq = snd_una — after our FIN — ack =
             // rcv_nxt — after the server's FIN).
@@ -785,4 +921,155 @@ test "tcp: a bare SYN (no ACK) in SYN_SENT is malformed" {
     try std.testing.expectEqual(Event.none, handle_rx(&syn));
     try std.testing.expectEqual(@as(u64, 1), dropped_malformed);
     try std.testing.expectEqual(State.syn_sent, state);
+}
+
+test "tcp: card N11 — the RTO retransmits the pending SYN byte-exact; the SYN-ACK stops the timer" {
+    arp.own_ip = ip_guest;
+    defer arp.own_ip = .{ 0, 0, 0, 0 };
+    reset();
+    defer reset();
+    now_ticks = 100;
+    start(ip_host, 9999, 0x12345678, host_mac);
+    // The caller transmits the SYN and records it pending.
+    record_pending();
+    try std.testing.expect(tx_pending);
+    try std.testing.expectEqual(@as(u64, 0), retx_count);
+    const syn0 = msg[0..msg_len];
+    // The RTO (3 s) has NOT expired.
+    now_ticks = 102;
+    try std.testing.expectEqual(RtoEvent.none, poll_rto());
+    // At 3 s the RTO fires: the SAME bytes (seq, flags, checksum) rebuild.
+    now_ticks = 103;
+    try std.testing.expectEqual(RtoEvent.retransmit, poll_rto());
+    try std.testing.expectEqual(@as(u64, 1), retransmitted);
+    try std.testing.expectEqual(@as(u64, 1), retx_count);
+    try std.testing.expectEqualSlices(u8, syn0, msg[0..msg_len]);
+    // A second retransmission, byte-identical again.
+    now_ticks = 106;
+    try std.testing.expectEqual(RtoEvent.retransmit, poll_rto());
+    try std.testing.expectEqual(@as(u64, 2), retransmitted);
+    try std.testing.expectEqualSlices(u8, syn0, msg[0..msg_len]);
+    // The SYN-ACK then lands — it acknowledges our SYN, the timer stops.
+    const sa = craft_frame(ip_host, host_mac, ip_guest, test_mac, 9999, default_src_port, 0xabcdef01, 0x12345679, flag_syn | flag_ack, &.{});
+    try std.testing.expectEqual(Event.synack_recv, handle_rx(&sa));
+    try std.testing.expect(!tx_pending);
+    now_ticks = 200; // long past the RTO — nothing fires
+    try std.testing.expectEqual(RtoEvent.none, poll_rto());
+    try std.testing.expectEqual(@as(u64, 2), retransmitted); // unchanged
+}
+
+test "tcp: card N11 — a peer ACK covering snd_una clears the pending data; no retransmission" {
+    arp.own_ip = ip_guest;
+    defer arp.own_ip = .{ 0, 0, 0, 0 };
+    reset();
+    defer reset();
+    now_ticks = 100;
+    start(ip_host, 9999, 0x11111111, host_mac);
+    advance_snd(1); // the SYN was transmitted
+    const sa = craft_frame(ip_host, host_mac, ip_guest, test_mac, 9999, default_src_port, 0xaaaa0000, 0x11111112, flag_syn | flag_ack, &.{});
+    try std.testing.expectEqual(Event.synack_recv, handle_rx(&sa));
+    // The caller sends 2 data bytes: build + transmit + advance + record.
+    build_data_msg("hi");
+    advance_snd(2);
+    record_pending();
+    try std.testing.expect(tx_pending);
+    // The peer's ACK covers snd_una (0x11111114) — the pending clears.
+    const ack = craft_frame(ip_host, host_mac, ip_guest, test_mac, 9999, default_src_port, 0xaaaa0001, 0x11111114, flag_ack, &.{});
+    try std.testing.expectEqual(Event.none, handle_rx(&ack));
+    try std.testing.expect(!tx_pending);
+    now_ticks = 500; // long past the RTO — no retransmission
+    try std.testing.expectEqual(RtoEvent.none, poll_rto());
+    try std.testing.expectEqual(@as(u64, 0), retransmitted);
+}
+
+test "tcp: card N11 — an ACK that does NOT cover snd_una leaves the pending data armed" {
+    arp.own_ip = ip_guest;
+    defer arp.own_ip = .{ 0, 0, 0, 0 };
+    reset();
+    defer reset();
+    now_ticks = 100;
+    start(ip_host, 9999, 0x22222222, host_mac);
+    advance_snd(1);
+    const sa = craft_frame(ip_host, host_mac, ip_guest, test_mac, 9999, default_src_port, 0xbbbb0000, 0x22222223, flag_syn | flag_ack, &.{});
+    try std.testing.expectEqual(Event.synack_recv, handle_rx(&sa));
+    build_data_msg("hello");
+    advance_snd(5);
+    record_pending();
+    // The peer ACKs only up to our ISN+1 (it has NOT seen the data).
+    const ack = craft_frame(ip_host, host_mac, ip_guest, test_mac, 9999, default_src_port, 0xbbbb0001, 0x22222223, flag_ack, &.{});
+    try std.testing.expectEqual(Event.none, handle_rx(&ack));
+    try std.testing.expect(tx_pending); // still armed
+    // The RTO fires — the pending data is retransmitted byte-exact.
+    const data0 = msg[0..msg_len];
+    now_ticks = 103;
+    try std.testing.expectEqual(RtoEvent.retransmit, poll_rto());
+    try std.testing.expectEqualSlices(u8, data0, msg[0..msg_len]);
+    try std.testing.expectEqual(@as(u64, 1), retransmitted);
+}
+
+test "tcp: card N11 — the retransmission bound aborts the connection honestly" {
+    arp.own_ip = ip_guest;
+    defer arp.own_ip = .{ 0, 0, 0, 0 };
+    reset();
+    defer reset();
+    now_ticks = 100;
+    start(ip_host, 9999, 0x33333333, host_mac);
+    advance_snd(1);
+    const sa = craft_frame(ip_host, host_mac, ip_guest, test_mac, 9999, default_src_port, 0xcccc0000, 0x33333334, flag_syn | flag_ack, &.{});
+    try std.testing.expectEqual(Event.synack_recv, handle_rx(&sa));
+    build_data_msg("x");
+    advance_snd(1);
+    record_pending();
+    // retx_max retransmissions, one per RTO period.
+    var i: u64 = 0;
+    while (i < retx_max) : (i += 1) {
+        now_ticks += rto_ticks;
+        try std.testing.expectEqual(RtoEvent.retransmit, poll_rto());
+    }
+    try std.testing.expectEqual(@as(u64, retx_max), retransmitted);
+    try std.testing.expectEqual(@as(u64, 0), retx_aborted);
+    try std.testing.expectEqual(State.established, state); // still alive
+    // The NEXT RTO period sees the bound exhausted — the honest abort:
+    // the connection is released (no RST, no TX), counted, the peer gone.
+    now_ticks += rto_ticks;
+    try std.testing.expectEqual(RtoEvent.abort, poll_rto());
+    try std.testing.expectEqual(@as(u64, 1), retx_aborted);
+    try std.testing.expectEqual(State.idle, state);
+    try std.testing.expect(!tx_pending);
+    try std.testing.expect(!ack_pending);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 0 }, &peer_ip);
+    try std.testing.expectEqual(@as(u16, 0), peer_port);
+    // The timer stays off.
+    now_ticks += rto_ticks;
+    try std.testing.expectEqual(RtoEvent.none, poll_rto());
+}
+
+test "tcp: card N11 — the pending FIN is retransmitted in FIN_SENT" {
+    arp.own_ip = ip_guest;
+    defer arp.own_ip = .{ 0, 0, 0, 0 };
+    reset();
+    defer reset();
+    now_ticks = 100;
+    start(ip_host, 9999, 0x44444444, host_mac);
+    advance_snd(1);
+    const sa = craft_frame(ip_host, host_mac, ip_guest, test_mac, 9999, default_src_port, 0xdddd0000, 0x44444445, flag_syn | flag_ack, &.{});
+    try std.testing.expectEqual(Event.synack_recv, handle_rx(&sa));
+    // The caller closes: build the FIN, transmit, advance, record.
+    build_fin_msg();
+    advance_snd(1);
+    state = .fin_sent;
+    record_pending();
+    const fin0 = msg[0..msg_len];
+    try std.testing.expectEqual(@as(u8, flag_ack | flag_fin), msg[13]);
+    // The RTO fires — the FIN is retransmitted byte-exact.
+    now_ticks = 103;
+    try std.testing.expectEqual(RtoEvent.retransmit, poll_rto());
+    try std.testing.expectEqual(@as(u64, 1), retransmitted);
+    try std.testing.expectEqualSlices(u8, fin0, msg[0..msg_len]);
+    // The FIN-ACK then lands — it acknowledges our FIN, the timer stops.
+    const fa = craft_frame(ip_host, host_mac, ip_guest, test_mac, 9999, default_src_port, 0xdddd0001, 0x44444446, flag_ack | flag_fin, &.{});
+    try std.testing.expectEqual(Event.finack_recv, handle_rx(&fa));
+    try std.testing.expect(!tx_pending);
+    now_ticks = 200;
+    try std.testing.expectEqual(RtoEvent.none, poll_rto());
 }

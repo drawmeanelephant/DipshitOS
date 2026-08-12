@@ -34,8 +34,11 @@
 //          SYN-ACK (the FIXED gate-assertable server ISN 0x12345678, ack
 //          = the guest's ISN+1), its data segment with an ACK + the SAME
 //          payload echoed byte-exact, and its FIN with a FIN-ACK, all
-//          written into the SAME attachment socket end. Requires --net.
-//          OFF by default: the default VM is unchanged.)
+//          written into the SAME attachment socket end. An optional
+//          `:handshake` suffix (card N11, claim 5357) answers the SYN
+//          with a SYN-ACK then goes SILENT on data/FIN — the
+//          deterministic black hole for the retransmission-bound run.
+//          Requires --net. OFF by default: the default VM is unchanged.)
 //         [--net-nat] (milestone five card N7, claim 4678: attach one
 //          VZVirtioNetworkDeviceConfiguration with a
 //          VZNATNetworkDeviceAttachment instead of the file-handle
@@ -257,6 +260,11 @@ var netDhcpRespondLeaseSecs: UInt32 = 3600
 // walk pins the full seq/ack chain.
 var netTcpRespondHostIP: [UInt8]?
 var netTcpRespondHostPort: UInt16?
+// Card N11 (claim 5357): the optional `:handshake` responder mode —
+// answer the SYN with a SYN-ACK, then go SILENT on data/FIN (a
+// deterministic data black hole for the gate's retransmission-bound
+// run). Default (no suffix) = the full N10 responder.
+var netTcpRespondHandshakeOnly = false
 // The responder's per-connection state: the server's next sequence
 // number. The FIXED server ISN (gate-assertable); a new SYN resets the
 // state — ONE connection at a time (the guest's ONE client state
@@ -384,11 +392,20 @@ while idx < arguments.count {
         idx += 2
     } else if arg == "--net-tcp-respond", idx + 1 < arguments.count {
         // Card N10 (claim 7026): the same shape as --net-udp-respond
-        // (host-ip:host-port). Parse now (fail early, like --timeout).
+        // (host-ip:host-port). Card N11 (claim 5357): an optional
+        // `:handshake` suffix selects the handshake-only responder (SYN
+        // -> SYN-ACK, then silent on data/FIN — the gate's deterministic
+        // black hole). Parse now (fail early, like --timeout).
         let token = arguments[idx + 1]
-        let halves = token.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
-        guard halves.count == 2, let port = UInt16(halves[1]) else {
-            fail("--net-tcp-respond requires <host-ip>:<host-port>, got '\(token)'.")
+        let halves = token.split(separator: ":", maxSplits: 2, omittingEmptySubsequences: false)
+        guard halves.count >= 2, let port = UInt16(halves[1]) else {
+            fail("--net-tcp-respond requires <host-ip>:<host-port>[:handshake], got '\(token)'.")
+        }
+        if halves.count == 3 {
+            guard halves[2] == "handshake" else {
+                fail("--net-tcp-respond mode must be 'handshake', got '\(halves[2])'.")
+            }
+            netTcpRespondHandshakeOnly = true
         }
         let parts = halves[0].split(separator: ".").compactMap { UInt8($0) }
         guard parts.count == 4 else {
@@ -745,15 +762,27 @@ if let netCapturePath {
                     try? netCaptureReadSocket!.write(contentsOf: Data(reply[0..<replyLen]))
                     print("NET-TCP: answered the guest's SYN (seq 0x\(hex32(seq))) with a SYN-ACK (seq 0x\(hex32(netTcpSrvIsn)), ack 0x\(hex32(seq &+ 1)))")
                 } else if isFin {
-                    let replyLen = buildTcpReply(&reply, buf, n, arpHostMAC, hostPort, netTcpSrvNxt, seq &+ 1, 0x11, payload)
-                    try? netCaptureReadSocket!.write(contentsOf: Data(reply[0..<replyLen]))
-                    print("NET-TCP: answered the guest's FIN (seq 0x\(hex32(seq))) with a FIN-ACK (seq 0x\(hex32(netTcpSrvNxt)), ack 0x\(hex32(seq &+ 1)))")
+                    if netTcpRespondHandshakeOnly {
+                        // Card N11 (claim 5357): the handshake-only mode
+                        // goes SILENT on data/FIN — the deterministic
+                        // black hole that forces the guest's bounded
+                        // retransmission machinery to fire.
+                        print("NET-TCP: handshake-only — ignoring the guest's FIN (black hole)")
+                    } else {
+                        let replyLen = buildTcpReply(&reply, buf, n, arpHostMAC, hostPort, netTcpSrvNxt, seq &+ 1, 0x11, payload)
+                        try? netCaptureReadSocket!.write(contentsOf: Data(reply[0..<replyLen]))
+                        print("NET-TCP: answered the guest's FIN (seq 0x\(hex32(seq))) with a FIN-ACK (seq 0x\(hex32(netTcpSrvNxt)), ack 0x\(hex32(seq &+ 1)))")
+                    }
                 } else if !payload.isEmpty {
                     // A data segment: ACK + the payload echoed byte-exact.
-                    let replyLen = buildTcpReply(&reply, buf, n, arpHostMAC, hostPort, netTcpSrvNxt, seq &+ UInt32(payload.count), 0x10, payload)
-                    try? netCaptureReadSocket!.write(contentsOf: Data(reply[0..<replyLen]))
-                    print("NET-TCP: echoed the guest's \(payload.count)-byte data (ack 0x\(hex32(seq &+ UInt32(payload.count))), \(payload.count) payload bytes)")
-                    netTcpSrvNxt = netTcpSrvNxt &+ UInt32(payload.count)
+                    if netTcpRespondHandshakeOnly {
+                        print("NET-TCP: handshake-only — ignoring the guest's \(payload.count)-byte data (black hole)")
+                    } else {
+                        let replyLen = buildTcpReply(&reply, buf, n, arpHostMAC, hostPort, netTcpSrvNxt, seq &+ UInt32(payload.count), 0x10, payload)
+                        try? netCaptureReadSocket!.write(contentsOf: Data(reply[0..<replyLen]))
+                        print("NET-TCP: echoed the guest's \(payload.count)-byte data (ack 0x\(hex32(seq &+ UInt32(payload.count))), \(payload.count) payload bytes)")
+                        netTcpSrvNxt = netTcpSrvNxt &+ UInt32(payload.count)
+                    }
                 } else {
                     // A pure ACK (the handshake / the echo / the final
                     // ACK) — observed.
@@ -888,7 +917,10 @@ if let leaseIP = netDhcpRespondLeaseIP {
 }
 if let hostIP = netTcpRespondHostIP, let hostPort = netTcpRespondHostPort {
     let ipText = hostIP.map(String.init).joined(separator: ".")
-    print("  net-tcp-respond: ENABLED (milestone five card N10, claim 7026) — the host answers the guest's bounded TCP client on \(ipText):\(hostPort) (host MAC 02:00:00:00:00:02, server ISN 0x\(hex32(netTcpSrvIsn))) via the capture thread (deterministic, request-driven)")
+    print("  net-tcp-respond: ENABLED (milestone five card N10, claim 7026) + card N11 (claim 5357) — the host answers the guest's bounded TCP client on \(ipText):\(hostPort) (host MAC 02:00:00:00:00:02, server ISN 0x\(hex32(netTcpSrvIsn))) via the capture thread (deterministic, request-driven)")
+    if netTcpRespondHandshakeOnly {
+        print("  net-tcp-respond mode: handshake-only (card N11) — the SYN is answered with a SYN-ACK, then data/FIN go unanswered (the deterministic black hole for the retransmission-bound run)")
+    }
 }
 if netNatEnabled {
     print("  net-nat: ENABLED (milestone five card N7, claim 4678) — VZNATNetworkDeviceAttachment attached (host router + NAT; no capture file — guest-observed counters are the gate's evidence)")
