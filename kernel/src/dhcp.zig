@@ -71,6 +71,11 @@ pub var ack_recv: u64 = 0;
 pub var nack_recv: u64 = 0;
 pub var timed_out: u64 = 0; // the bounded-retry refuse (max_attempts exhausted)
 pub var dropped_malformed: u64 = 0; // an unparseable / unexpected reply
+// Card N9 (claim 9489): the lease lifecycle (RFC 2131 §4.4.5).
+pub var renew_sent: u64 = 0; // RENEWING unicast REQUESTs transmitted
+pub var rebind_sent: u64 = 0; // REBINDING broadcast REQUESTs transmitted
+pub var renewed: u64 = 0; // ACKs accepted in RENEWING/REBINDING (the lease restarted)
+pub var expired: u64 = 0; // lease expiries enforced (address released, back to INIT)
 
 // ---------------------------------------------------------------------------
 // State (pure BSS — ONE client state machine)
@@ -81,6 +86,8 @@ pub const State = enum {
     selecting, // DISCOVER sent — waiting for an OFFER
     requesting, // OFFER accepted — the REQUEST is built; awaiting the ACK
     bound, // ACK received — the lease is live (arp.own_ip set)
+    renewing, // T1 reached — the REQUEST is built (ciaddr = the lease); unicast to the server, awaiting the renewal ACK
+    rebinding, // T2 reached — the REQUEST is built; broadcast, awaiting the renewal ACK
 };
 
 pub var state: State = .idle;
@@ -108,6 +115,13 @@ pub var lease_mask: [4]u8 = .{ 0, 0, 0, 0 };
 pub var lease_gw: [4]u8 = .{ 0, 0, 0, 0 };
 pub var lease_server: [4]u8 = .{ 0, 0, 0, 0 };
 pub var lease_time: u32 = 0;
+// Card N9 (claim 9489): the lease timer. The caller (the shell idle
+// loop + `net dhcp`) stamps `now_ticks` from the 1 Hz generic timer
+// (`timer.ticks` — seconds) each poll; the ACK processing stamps
+// `bound_ticks` from it, so the elapsed lease time is honest wall-clock
+// seconds.
+pub var now_ticks: u64 = 0;
+pub var bound_ticks: u64 = 0;
 
 /// The RX dispatch's outcome — the caller (the monitor) observes it via
 /// `state`; the enum is the honest event for the host tests.
@@ -115,6 +129,7 @@ pub const Event = enum {
     none,
     request_ready, // an OFFER was accepted — the REQUEST is built in `msg`
     bound, // the ACK was accepted — the lease is live
+    renewed, // a renewal ACK was accepted in RENEWING/REBINDING — the lease restarted
     nacked, // a NACK — the client falls back to idle
 };
 
@@ -284,6 +299,12 @@ pub fn reset() void {
     nack_recv = 0;
     timed_out = 0;
     dropped_malformed = 0;
+    renew_sent = 0;
+    rebind_sent = 0;
+    renewed = 0;
+    expired = 0;
+    now_ticks = 0;
+    bound_ticks = 0;
 }
 
 /// INIT -> SELECTING: build the DISCOVER into `msg` with the given
@@ -298,13 +319,76 @@ pub fn start(chaddr_in: *const [6]u8, txn_id: u32) void {
     msg_len = build_discover(&msg, chaddr_in, txn_id);
 }
 
+// ---------------------------------------------------------------------------
+// Card N9 (claim 9489): the lease lifecycle (RFC 2131 §4.4.5)
+// ---------------------------------------------------------------------------
+
+/// The RENEWING threshold T1 = 0.5 × lease (integer seconds).
+pub fn t1(lease: u32) u64 {
+    return lease / 2;
+}
+
+/// The REBINDING threshold T2 = 0.875 × lease (integer seconds).
+pub fn t2(lease: u32) u64 {
+    return (lease * 7) / 8;
+}
+
+/// Seconds since the last (re)bind, per the caller-stamped clock.
+pub fn elapsed() u64 {
+    return now_ticks -| bound_ticks;
+}
+
+/// BOUND -> RENEWING: build the REQUEST for the SAME lease (options 50 +
+/// 54, the transaction id unchanged) with `ciaddr` = the leased IP (RFC
+/// 2131 §4.4.5 — the renewal REQUEST identifies the address the client
+/// already holds). The monitor transmits it UNICAST to the server (the
+/// MAC the caller resolved) exactly once, then waits for the renewal
+/// ACK. The lease keeps ticking during the wait; at T2 / expiry the
+/// monitor advances regardless (honest — a pending renewal never
+/// outlives its lease).
+pub fn enter_renewing() void {
+    msg_len = build_request(&msg, &client_mac, xid, lease_ip, lease_server);
+    @memcpy(msg[12..16], &lease_ip); // ciaddr = the leased address
+    request_transmitted = false;
+    state = .renewing;
+}
+
+/// BOUND -> REBINDING: the SAME built REQUEST (ciaddr = the lease), to
+/// be transmitted BROADCAST (any server on the link can answer).
+pub fn enter_rebinding() void {
+    msg_len = build_request(&msg, &client_mac, xid, lease_ip, lease_server);
+    @memcpy(msg[12..16], &lease_ip); // ciaddr = the leased address
+    request_transmitted = false;
+    state = .rebinding;
+}
+
+/// The lease expired: release the address honestly (arp.own_ip cleared
+/// — the client no longer owns it), zero the lease record (the report
+/// shows zeros when unbound), fall back to INIT, and reset the
+/// bounded-retry attempts (a fresh lease attempt). The next `net dhcp`
+/// re-DISCOVERs.
+pub fn expire() void {
+    arp.own_ip = .{ 0, 0, 0, 0 };
+    lease_ip = .{ 0, 0, 0, 0 };
+    lease_mask = .{ 0, 0, 0, 0 };
+    lease_gw = .{ 0, 0, 0, 0 };
+    lease_server = .{ 0, 0, 0, 0 };
+    lease_time = 0;
+    state = .idle;
+    attempts = 0;
+    request_transmitted = false;
+    expired += 1;
+}
+
 /// Process one server reply (the UDP payload of a port-68 datagram —
 /// the 8-byte UDP header already skipped by the caller). Runs in the RX
 /// drain context: OFFER (SELECTING) accepts the offer, builds the REQUEST
 /// into `msg`, and moves to REQUESTING; ACK (REQUESTING) records the
 /// lease, sets `arp.own_ip` (THE one copy — DHCP overwrites the static
-/// address honestly) and moves to BOUND; NACK falls back to IDLE (the
-/// caller may retry — bounded). Anything unexpected is counted
+/// address honestly) and moves to BOUND; ACK in RENEWING/REBINDING
+/// (card N9, claim 9489) restarts the lease — `bound_ticks = now_ticks`
+/// and `renewed` counts it; NACK falls back to IDLE (the caller may
+/// retry — bounded). Anything unexpected is counted
 /// `dropped_malformed`. The REQUEST transmission itself is MONITOR-driven
 /// (the state machine only builds it — `request_transmitted` gates the
 /// one-shot transmit), so the handshake is deterministic and never
@@ -334,8 +418,9 @@ pub fn handle_rx(datagram: []const u8) Event {
             return .request_ready;
         },
         msg_type_ack => {
-            if (state != .requesting) {
-                dropped_malformed += 1; // an ACK outside REQUESTING
+            const was_renewal = state == .renewing or state == .rebinding;
+            if (state != .requesting and !was_renewal) {
+                dropped_malformed += 1; // an ACK outside REQUESTING/REnewal
                 return .none;
             }
             lease_ip = p.yiaddr;
@@ -347,6 +432,11 @@ pub fn handle_rx(datagram: []const u8) Event {
             // (the report shows the old -> new).
             arp.own_ip = lease_ip;
             state = .bound;
+            bound_ticks = now_ticks; // the lease (re)started now
+            if (was_renewal) {
+                renewed += 1;
+                return .renewed;
+            }
             ack_recv += 1;
             return .bound;
         },
@@ -603,4 +693,157 @@ test "dhcp: bounded retry — max_attempts then an honest refuse (the caller's c
     // The caller's refuse: timed_out counts the refused attempt.
     timed_out += 1;
     try std.testing.expectEqual(@as(u64, 1), timed_out);
+}
+
+// ---------------------------------------------------------------------------
+// Card N9 (claim 9489): the lease lifecycle — T1/T2 math, the
+// RENEWING/REBINDING transitions, expiry, and the renewal ACK
+// ---------------------------------------------------------------------------
+
+test "dhcp: lease-lifecycle timing — T1 = lease/2, T2 = lease*7/8, elapsed" {
+    reset();
+    defer reset();
+    // RFC 2131 §4.4.5 with integer seconds (the 1 Hz guest timer).
+    try std.testing.expectEqual(@as(u64, 30), t1(60));
+    try std.testing.expectEqual(@as(u64, 52), t2(60)); // 52.5 floors to 52
+    try std.testing.expectEqual(@as(u64, 40), t1(80));
+    try std.testing.expectEqual(@as(u64, 70), t2(80)); // 70 exactly
+    // Elapsed is wall-clock seconds since the last (re)bind, saturating
+    // at zero before the bind.
+    bound_ticks = 100;
+    now_ticks = 106;
+    try std.testing.expectEqual(@as(u64, 6), elapsed());
+    now_ticks = 92;
+    try std.testing.expectEqual(@as(u64, 0), elapsed()); // -| saturates
+}
+
+test "dhcp: BOUND -> RENEWING builds the REQUEST with ciaddr = the lease" {
+    reset();
+    defer reset();
+    const chaddr = [6]u8{ 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 };
+    start(&chaddr, 0x11223344);
+    // Fast-forward the handshake to BOUND with a known lease.
+    lease_ip = .{ 10, 0, 0, 2 };
+    lease_mask = .{ 255, 255, 255, 0 };
+    lease_gw = .{ 10, 0, 0, 1 };
+    lease_server = .{ 10, 0, 0, 2 };
+    lease_time = 80;
+    state = .bound;
+
+    enter_renewing();
+    try std.testing.expectEqual(State.renewing, state);
+    try std.testing.expect(!request_transmitted);
+    try std.testing.expectEqual(@as(usize, 256), msg_len);
+    try std.testing.expectEqual(@as(u8, msg_type_request), msg[242]);
+    // option 50 = the leased IP (245..249), option 54 = the server id
+    // (251..255) — the REQUEST option layout from the N8 fixtures.
+    try std.testing.expectEqualSlices(u8, &.{ 10, 0, 0, 2 }, msg[245..249]);
+    try std.testing.expectEqualSlices(u8, &.{ 10, 0, 0, 2 }, msg[251..255]);
+    // ciaddr (12..16) = the leased IP — RFC 2131 §4.4.5.
+    try std.testing.expectEqualSlices(u8, &.{ 10, 0, 0, 2 }, msg[12..16]);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 0 }, msg[16..20]); // yiaddr stays 0
+}
+
+test "dhcp: BOUND -> REBINDING builds the same REQUEST (ciaddr = the lease)" {
+    reset();
+    defer reset();
+    const chaddr = [6]u8{ 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 };
+    start(&chaddr, 9);
+    lease_ip = .{ 10, 0, 0, 2 };
+    lease_server = .{ 10, 0, 0, 2 };
+    lease_time = 80;
+    state = .bound;
+
+    enter_rebinding();
+    try std.testing.expectEqual(State.rebinding, state);
+    try std.testing.expectEqual(@as(u8, msg_type_request), msg[242]);
+    try std.testing.expectEqualSlices(u8, &.{ 10, 0, 0, 2 }, msg[12..16]); // ciaddr
+    try std.testing.expectEqualSlices(u8, &.{ 10, 0, 0, 2 }, msg[245..249]); // option 50
+}
+
+test "dhcp: expire releases the address and falls back to INIT (attempts reset)" {
+    reset();
+    defer reset();
+    const chaddr = [6]u8{ 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 };
+    start(&chaddr, 3);
+    lease_ip = .{ 10, 0, 0, 2 };
+    state = .bound;
+    arp.own_ip = lease_ip;
+    attempts = 2;
+
+    expire();
+    try std.testing.expectEqual(State.idle, state);
+    try std.testing.expectEqual(@as(u64, 1), expired);
+    // The address is released honestly — the client no longer owns it.
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 0 }, &arp.own_ip);
+    try std.testing.expectEqual(@as(usize, 0), attempts); // a fresh INIT
+    try std.testing.expect(!request_transmitted);
+}
+
+test "dhcp: a renewal ACK in RENEWING restarts the lease (renewed, bound_ticks stamped)" {
+    reset();
+    defer reset();
+    const chaddr = [6]u8{ 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 };
+    start(&chaddr, 0x55667788);
+    // BOUND with a known lease, then RENEWING at T1.
+    lease_ip = .{ 10, 0, 0, 2 };
+    lease_mask = .{ 255, 255, 255, 0 };
+    lease_gw = .{ 10, 0, 0, 1 };
+    lease_server = .{ 10, 0, 0, 2 };
+    lease_time = 80;
+    state = .bound;
+    bound_ticks = 100;
+    enter_renewing();
+
+    // The server's renewal ACK (option 53 = 5, the same fixed lease).
+    var m: [msg_max]u8 = undefined;
+    _ = build_request(&m, &chaddr, xid, lease_ip, lease_server);
+    m[0] = 2;
+    @memcpy(m[16..20], &lease_ip); // yiaddr = the confirmed address (the real server does this)
+    m[240] = opt_msg_type;
+    m[242] = msg_type_ack;
+    // Replace the tail options with the renewal shape: 53,1,5 (240..242)
+    // + 51,4,0,0,0,80 (243..248, the renewed 80 s lease) + 255 (249).
+    const o: usize = 243;
+    m[o] = opt_lease_time;
+    m[o + 1] = 4;
+    m[o + 2] = 0;
+    m[o + 3] = 0;
+    m[o + 4] = 0;
+    m[o + 5] = 80;
+    m[o + 6] = opt_end;
+    const ack_len = o + 7;
+
+    now_ticks = 133; // the ACK lands 33 s after the original bind
+    var dg: [8 + 300]u8 = undefined;
+    @memset(&dg, 0);
+    @memcpy(dg[8 .. 8 + ack_len], m[0..ack_len]);
+    try std.testing.expectEqual(Event.renewed, handle_rx(&dg));
+    try std.testing.expectEqual(State.bound, state);
+    try std.testing.expectEqual(@as(u64, 1), renewed);
+    try std.testing.expectEqual(@as(u64, 0), ack_recv); // NOT the initial-handshake counter
+    // The lease restarted: bound_ticks stamped at the ACK processing.
+    try std.testing.expectEqual(@as(u64, 133), bound_ticks);
+    try std.testing.expectEqual(@as(u32, 80), lease_time);
+    try std.testing.expectEqualSlices(u8, &.{ 10, 0, 0, 2 }, &arp.own_ip);
+}
+
+test "dhcp: an ACK outside REQUESTING/renewal is still malformed" {
+    reset();
+    defer reset();
+    const chaddr = [6]u8{ 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 };
+    start(&chaddr, 4);
+    // We are SELECTING — a stray ACK is unexpected, counted malformed.
+    var m: [msg_max]u8 = undefined;
+    const n = build_discover(&m, &chaddr, 4);
+    m[0] = 2;
+    m[240] = opt_msg_type;
+    m[242] = msg_type_ack;
+    m[243] = opt_end;
+    var dg: [8 + 256]u8 = undefined;
+    @memset(&dg, 0);
+    @memcpy(dg[8 .. 8 + n], m[0..n]);
+    try std.testing.expectEqual(Event.none, handle_rx(&dg));
+    try std.testing.expectEqual(@as(u64, 1), dropped_malformed);
+    try std.testing.expectEqual(State.selecting, state);
 }
