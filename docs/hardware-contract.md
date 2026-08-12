@@ -153,6 +153,40 @@ assumption comes from documentation or reasoning only.
   (the phase-1 reply and the phase-2 request both byte-identical to the
   fixtures). No new device behavior was otherwise observed on the
   ARP/ICMP exchanges — the N1/N2 contract above is unchanged.
+  **NAT attachment observed 2026-08-12 (claim 4678, milestone five card
+  N7):** the runner's `--net-nat` flag attaches the SAME
+  `VZVirtioNetworkDeviceConfiguration` shape with a
+  `VZNATNetworkDeviceAttachment` instead of the file-handle attachment.
+  (1) **The NAT attachment HONORS the configured locally-administered
+  MAC** — the guest's `VIRTIO_NET_F_MAC` read reports
+  `net: mac=02:00:00:00:00:01 source=feature` (identical to the
+  file-handle path). (2) **VZ exposes no NAT prefix API** — the subnet
+  was observed on the first live run: 192.168.64.0/24 with gateway
+  192.168.64.1 (the guest was statically addressed 192.168.64.5).
+  (3) **The NAT gateway answers ARP for its gateway IP** (the guest
+  learns the gateway MAC — `net arp: 192.168.64.1 is at …`, `learn=1`)
+  **and answers ICMP echo** (`net ping 192.168.64.1` → `pong=1` with
+  `seq=1`) — the deterministic gateway round trip needs NO internet.
+  (4) **The NAT router's MAC is NOT the host bridge interface MAC and
+  VARIES per boot** (observed `ae:07:75:20:da:64` vs the host bridge0
+  interface's `36:27:ce:a2:21:40`) — gates must assert the learned-line
+  prefix, never a hardcoded MAC. (5) **The NAT router SENDS IPv6
+  multicast to the guest at boot** (router-advertisement-shaped frames:
+  the guest's first rx-obs shows dst `33:33:00:00…`); the N2 MAC filter
+  (own + broadcast only) drops them (`filtered=3`) and the ARP-layer
+  drop counter moves once (`drop=1`) — recorded, not a regression.
+  (6) **The NAT attachment does NOT proxy-ARP off-subnet addresses:** a
+  guest `net arp 8.8.8.8` broadcast goes unanswered (`learn=0`) and the
+  guest's `net ping 8.8.8.8` honestly refuses (`peer not in ARP table`
+  — the guest has no routing rung; outbound proof stays at the
+  gateway). (7) **No capture file under NAT** — the host translates the
+  frames (that is the point), so NAT-path evidence is GUEST-OBSERVED
+  COUNTERS, never capture bytes. **[observed]** — every
+  `verify-live-net-nat` boot's serial log (`artifacts/live-net-nat-serial-*.log`)
+  shows the ip-set / arp-learn / pong lines above, the report's `mac=`
+  line, and the runner output shows `net-nat: ENABLED`; the exploratory
+  evidence is saved under `artifacts/live-net-nat-explore/` (including
+  the off-subnet 8.8.8.8 refusal and the host bridge capture).
 - Custom virtio device (`VZCustomVirtioDeviceConfiguration`, the
   `--custom-virtio` runner flag / `zig build spike-virtio`): the guest sees
   a vendor-defined device on bus 0 as `VID=0x1af4 DID=0x1082`.

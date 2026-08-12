@@ -17,7 +17,21 @@
 //          (02:00:00:00:00:01) so the guest-side VIRTIO_NET_F_MAC read is
 //          deterministic and gate-assertable. OFF by default: without the
 //          flag config.networkDevices stays [] — every existing gate is
-//          byte-identical. VZNAT is a later card's option.)
+//          byte-identical.)
+//         [--net-nat] (milestone five card N7, claim 4678: attach one
+//          VZVirtioNetworkDeviceConfiguration with a
+//          VZNATNetworkDeviceAttachment instead of the file-handle
+//          attachment — the host serves as router + NAT for the guest's
+//          accesses to outside networks. No capture file (the host
+//          translates the frames — that is the point), so the N7 gate
+//          asserts GUEST-OBSERVED COUNTERS, not capture bytes.
+//          Mutually exclusive with --net (one network device per guest for
+//          now); the fixed locally-administered MAC 02:00:00:00:00:01 is
+//          set on the device config and what the guest actually observes
+//          under NAT is a claim-time observation, pinned in the hardware
+//          contract. OFF by default: without the flag
+//          config.networkDevices stays [] — every existing gate is
+//          byte-identical.)
 //         [--net-inject <file>] [--net-inject-after <text>] (milestone five
 //          card N2, claim 6076: the host->guest RX direction of the SAME
 //          --net attachment — the file's bytes are written into the socket
@@ -185,6 +199,14 @@ var netIcmpRespondHostIP: [UInt8]?
 // unchanged).
 var netUdpRespondHostIP: [UInt8]?
 var netUdpRespondHostPort: UInt16?
+// Milestone five card N7 (claim 4678): `--net-nat` attaches one
+// VZVirtioNetworkDeviceConfiguration with a VZNATNetworkDeviceAttachment
+// instead of the file-handle attachment — the host is the guest's router
+// and performs NAT for accesses to outside networks. Boolean, OFF by
+// default: without the flag config.networkDevices stays [] (the default
+// VM is unchanged). Mutually exclusive with `--net` (one network device
+// per guest for now).
+var netNatEnabled = false
 
 var idx = 2
 while idx < arguments.count {
@@ -276,6 +298,9 @@ while idx < arguments.count {
         netUdpRespondHostIP = parts
         netUdpRespondHostPort = port
         idx += 2
+    } else if arg == "--net-nat" {
+        netNatEnabled = true
+        idx += 1
     } else {
         serialLogPath = arg
         idx += 1
@@ -481,6 +506,12 @@ if netIcmpRespondHostIP != nil, netCapturePath == nil {
 if netUdpRespondHostIP != nil, netCapturePath == nil {
     fail("--net-udp-respond requires --net (the UDP reply is written into the SAME attachment's socket).")
 }
+// Milestone five card N7 (claim 4678): `--net-nat` is mutually exclusive
+// with `--net` — one network device per guest for now (the flag
+// validation shape: a clear fail, like the responder requirements above).
+if netNatEnabled, netCapturePath != nil {
+    fail("--net-nat is mutually exclusive with --net (one network device per guest for now).")
+}
 
 if let netCapturePath {
     let netURL = URL(fileURLWithPath: netCapturePath)
@@ -555,6 +586,23 @@ if let netCapturePath {
     }
     netConfig.macAddress = fixedMAC
     config.networkDevices = [netConfig]
+} else if netNatEnabled {
+    // Milestone five card N7 (claim 4678): the NAT attachment — the host
+    // serves as the guest's router and performs NAT for accesses to
+    // outside networks. The device config carries the SAME fixed
+    // locally-administered MAC as the file-handle path; what the guest's
+    // VIRTIO_NET_F_MAC read actually observes under NAT is a claim-time
+    // observation (the NAT gateway may honor or override it — pinned in
+    // the hardware contract, never assumed). No capture file: the host
+    // translates the frames, so there are no guest TX bytes to capture.
+    let natAttachment = VZNATNetworkDeviceAttachment()
+    let natConfig = VZVirtioNetworkDeviceConfiguration()
+    natConfig.attachment = natAttachment
+    guard let fixedMAC = VZMACAddress(string: "02:00:00:00:00:01") else {
+        fail("Could not parse the fixed net MAC address.")
+    }
+    natConfig.macAddress = fixedMAC
+    config.networkDevices = [natConfig]
 } else {
     config.networkDevices = []
 }
@@ -644,6 +692,9 @@ if let hostIP = netIcmpRespondHostIP {
 if let hostIP = netUdpRespondHostIP, let hostPort = netUdpRespondHostPort {
     let ipText = hostIP.map(String.init).joined(separator: ".")
     print("  net-udp-respond: ENABLED (milestone five card N5, claim 8552) — the host answers the guest's UDP datagrams for \(ipText):\(hostPort) (host MAC 02:00:00:00:00:02) via the capture thread (deterministic, request-driven)")
+}
+if netNatEnabled {
+    print("  net-nat: ENABLED (milestone five card N7, claim 4678) — VZNATNetworkDeviceAttachment attached (host router + NAT; no capture file — guest-observed counters are the gate's evidence)")
 }
 
 runner.queue.async {
