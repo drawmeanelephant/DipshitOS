@@ -187,6 +187,33 @@ assumption comes from documentation or reasoning only.
   line, and the runner output shows `net-nat: ENABLED`; the exploratory
   evidence is saved under `artifacts/live-net-nat-explore/` (including
   the off-subnet 8.8.8.8 refusal and the host bridge capture).
+  **DHCP observed 2026-08-12 (claim 0351, milestone five card N8):**
+  the guest's RFC 2131 client (the `net dhcp` monitor subcommand, src
+  68 → dst 67, broadcast dst) completes the full four-message handshake
+  against the runner's deterministic `--net-dhcp-respond <lease-ip>`
+  server on the file-handle attachment: DISCOVER (286 B, byte-exact in
+  the capture) → OFFER → REQUEST (298 B, the same xid, byte-exact) →
+  ACK → BOUND with the fixed lease {ip 10.0.0.2, mask 255.255.255.0,
+  gateway 10.0.0.1, server id = the lease IP, lease 3600s}, and the
+  report shows `discover=1,offer=1,request=1,ack=1,nack=0,timeout=0,
+  mal=0`. **CLAIM-TIME OBSERVATION — the VZ NAT attachment serves NO
+  DHCP server** (macOS 27 arm64, the whole phase-2 observation window):
+  under `--net-nat` the guest's DISCOVER broadcast goes out
+  (`discover=1`) and NO OFFER ever arrives (`offer=0, mal=0`) — the
+  NAT router answers ARP for its gateway (N7) but not DHCP, so the
+  NAT-path lease never materializes and phase 2 is honestly BLOCKED
+  with the observation recorded (never faked): the guest falls back to
+  the static address and still reaches the gateway (`pong=1 seq=1`).
+  If a future host's NAT DOES serve DHCP, the phase-2 gate flips to
+  the BOUND path (this observation updated with the new saved log).
+  **[observed]** — every `verify-live-net-dhcp` phase-1 boot's serial
+  log (`artifacts/live-net-dhcp-p1-serial.log`) shows the bound lease
+  + counters, the capture (`live-net-dhcp-p1-cap.bin`) holds the two
+  client frames byte-exact, and the runner output shows the NET-DHCP
+  OFFER/ACK lines; the phase-2 boot's serial log
+  (`artifacts/live-net-dhcp-p2-serial.log`) shows the honest
+  offer=0/mal=0 report + the gateway ping; the exploratory evidence is
+  saved under `artifacts/live-net-dhcp-nat-explore/`.
 - Custom virtio device (`VZCustomVirtioDeviceConfiguration`, the
   `--custom-virtio` runner flag / `zig build spike-virtio`): the guest sees
   a vendor-defined device on bus 0 as `VID=0x1af4 DID=0x1082`.

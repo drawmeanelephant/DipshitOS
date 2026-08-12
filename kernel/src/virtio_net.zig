@@ -78,6 +78,7 @@ pub const ipv4 = @import("ipv4.zig");
 /// ipv4 protocol dispatch delivers validated datagrams here and the
 /// monitor's `net udp` subcommands drive listen/close/send/recv).
 pub const udp = @import("udp.zig");
+pub const dhcp = @import("dhcp.zig"); // N8 (claim 0351): the bounded RFC 2131 client (port 68)
 
 // ---------------------------------------------------------------------------
 // Split-ring structures (the blk/entropy/console shared layout)
@@ -1247,6 +1248,27 @@ pub fn net_udp_send(target_ip: [4]u8, dst_port: u16, payload: []const u8, out_le
     const r = net_send(&net_ops, &net_dev, tx_staging[0 .. tx_hdr_len + n]);
     if (r == .ok) udp.sent += 1;
     return r;
+}
+
+/// Card N8 (claim 0351): transmit the DHCP client's current message (a
+/// DISCOVER or a REQUEST — built by `dhcp` into `dhcp.msg`) on the N1 TX
+/// path. The card's ONE N5-layer seam change: a DHCP frame goes out with
+/// dst MAC ff:ff:ff:ff:ff:ff + dst IP 255.255.255.255 DIRECTLY — no ARP
+/// lookup (the N2 MAC filter accepts broadcast on the way back) — and the
+/// src IP is 0.0.0.0 (the client in INIT/SELECTING has NO address yet),
+/// so this path deliberately does NOT require `arp.ip_set()`. Refuses
+/// honestly when the transport is unready. The frame length lands in
+/// `out_len` (286 DISCOVER / 298 REQUEST). The reply is processed
+/// asynchronously by the RX drain (the udp port-68 dispatch -> dhcp).
+pub fn net_dhcp_send(msg: []const u8, out_len: *usize) SendResult {
+    if (!net_ready) return .not_ready;
+    @memset(tx_staging[0..tx_hdr_len], 0);
+    const bcast_mac = [6]u8{ 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
+    const bcast_ip = [4]u8{ 255, 255, 255, 255 };
+    const src_ip = [4]u8{ 0, 0, 0, 0 }; // the client pre-lease address
+    const n = udp.build_frame_ex(tx_staging[tx_hdr_len .. tx_hdr_len + dhcp.frame_max], bcast_mac, &net_mac, src_ip, bcast_ip, dhcp.client_port, dhcp.server_port, msg);
+    out_len.* = n;
+    return net_send(&net_ops, &net_dev, tx_staging[0 .. tx_hdr_len + n]);
 }
 
 /// Card N4 (claim 0148): transmit an ICMP ECHO REQUEST to `target_ip` in

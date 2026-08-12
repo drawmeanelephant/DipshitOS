@@ -246,7 +246,7 @@ fn ensure_registry() []const Command {
             .{ .name = "mem", .help = "summarize the EFI memory map", .usage = "mem", .handler = cmd_mem },
             .{ .name = "mbox", .help = "per-process IPC mailbox: pending messages and drain counters", .usage = "mbox [<pid>]", .max_args = 1, .handler = cmd_mbox },
             .{ .name = "mount", .help = "switch the active FAT volume (esp or data)", .usage = "mount <esp|data>", .min_args = 1, .max_args = 1, .handler = cmd_mount },
-            .{ .name = "net", .help = "virtio-net transport + RX + ARP + ICMP + UDP: device DID, MAC, queues, feature bits, RX counters ('net recv' prints received frames; 'net ip <a.b.c.d>' sets the static IP; 'net arp [<a.b.c.d>]' shows/resolves the ARP table; 'net ping <a.b.c.d>' sends an ICMP echo request; 'net udp [listen <port>|close <port>|send <addr> <port> <len>|recv [<port>]]' drives UDP)", .usage = "net [recv|ip <addr>|arp [<addr>]|ping <addr>|udp [listen <port>|close <port>|send <addr> <port> <len>|recv [<port>]]]", .max_args = 5, .handler = cmd_net },
+            .{ .name = "net", .help = "virtio-net transport + RX + ARP + ICMP + UDP + DHCP: device DID, MAC, queues, feature bits, RX counters ('net recv' prints received frames; 'net ip <a.b.c.d>' sets the static IP; 'net arp [<a.b.c.d>]' shows/resolves the ARP table; 'net ping <a.b.c.d>' sends an ICMP echo request; 'net udp [listen <port>|close <port>|send <addr> <port> <len>|recv [<port>]]' drives UDP; 'net dhcp' runs the bounded DHCP client one step per invocation)", .usage = "net [recv|ip <addr>|arp [<addr>]|ping <addr>|udp [listen <port>|close <port>|send <addr> <port> <len>|recv [<port>]]|dhcp]", .max_args = 5, .handler = cmd_net },
             .{ .name = "netsend", .help = "send a known Ethernet frame (bounded staging, TX + used-ring drain)", .usage = "netsend <bytes>", .min_args = 1, .max_args = 1, .handler = cmd_netsend },
             .{ .name = "pages", .help = "physical page allocator pool", .usage = "pages [selftest]", .max_args = 1, .handler = cmd_pages },
             .{ .name = "pci", .help = "enumerate PCI devices on the bus", .usage = "pci", .handler = cmd_pci },
@@ -1313,7 +1313,8 @@ fn cmd_net(m: *Monitor, args: []const []const u8) ExecError {
         if (std.mem.eql(u8, args[0], "arp")) return cmd_net_arp(m, args[1..]);
         if (std.mem.eql(u8, args[0], "ping")) return cmd_net_ping(m, args[1..]);
         if (std.mem.eql(u8, args[0], "udp")) return cmd_net_udp(m, args[1..]);
-        m.console.print_line("net: unknown subcommand (try 'net', 'net recv', 'net ip <a.b.c.d>', 'net arp [<a.b.c.d>]', 'net ping <a.b.c.d>' or 'net udp [listen|close|send|recv]')");
+        if (std.mem.eql(u8, args[0], "dhcp")) return cmd_net_dhcp(m, args[1..]);
+        m.console.print_line("net: unknown subcommand (try 'net', 'net recv', 'net ip <a.b.c.d>', 'net arp [<a.b.c.d>]', 'net ping <a.b.c.d>', 'net udp [listen|close|send|recv]' or 'net dhcp')");
         return .invalid_argument;
     }
     if (!virtio_net.net_ready) {
@@ -1490,7 +1491,155 @@ fn cmd_net(m: *Monitor, args: []const []const u8) ExecError {
     m.console.puts(",drop=");
     m.console.print_u64(virtio_net.udp.dropped_badsum + virtio_net.udp.dropped_closed + virtio_net.udp.dropped_len);
     m.console.puts("\n");
+    // Card N8 (claim 0351): the DHCP client — the state (bound/unbound),
+    // the lease (ip/mask/gw/server/lease — zeros when unbound), and the
+    // handshake counters (discover sent, offer recv, request sent, ack
+    // recv, nack, timeout, malformed). Grep-able and deterministic.
+    m.console.puts(" dhcp=");
+    m.console.puts(switch (virtio_net.dhcp.state) {
+        .idle => "idle",
+        .selecting => "selecting",
+        .requesting => "requesting",
+        .bound => "bound",
+    });
+    m.console.puts(",ip=");
+    var dibuf: [15]u8 = undefined;
+    const din = virtio_net.arp.format_ip(virtio_net.dhcp.lease_ip, &dibuf);
+    m.console.puts(dibuf[0..din]);
+    m.console.puts(",mask=");
+    const dmn = virtio_net.arp.format_ip(virtio_net.dhcp.lease_mask, &dibuf);
+    m.console.puts(dibuf[0..dmn]);
+    m.console.puts(",gw=");
+    const dgn = virtio_net.arp.format_ip(virtio_net.dhcp.lease_gw, &dibuf);
+    m.console.puts(dibuf[0..dgn]);
+    m.console.puts(",server=");
+    const dsn = virtio_net.arp.format_ip(virtio_net.dhcp.lease_server, &dibuf);
+    m.console.puts(dibuf[0..dsn]);
+    m.console.puts(",lease=");
+    m.console.print_u64(virtio_net.dhcp.lease_time);
+    m.console.puts(",discover=");
+    m.console.print_u64(virtio_net.dhcp.discover_sent);
+    m.console.puts(",offer=");
+    m.console.print_u64(virtio_net.dhcp.offer_recv);
+    m.console.puts(",request=");
+    m.console.print_u64(virtio_net.dhcp.request_sent);
+    m.console.puts(",ack=");
+    m.console.print_u64(virtio_net.dhcp.ack_recv);
+    m.console.puts(",nack=");
+    m.console.print_u64(virtio_net.dhcp.nack_recv);
+    m.console.puts(",timeout=");
+    m.console.print_u64(virtio_net.dhcp.timed_out);
+    m.console.puts(",mal=");
+    m.console.print_u64(virtio_net.dhcp.dropped_malformed);
+    m.console.puts("\n");
     return .none;
+}
+
+/// `net dhcp` — card N8 (claim 0351): drive the bounded RFC 2131 client
+/// ONE STEP per invocation. INIT (idle): build + transmit the DISCOVER
+/// (a CSPRNG transaction id), print it; SELECTING: wait for the OFFER
+/// (already processed by a drain if it landed); REQUESTING: transmit the
+/// built REQUEST exactly once, then wait for the ACK; BOUND: print the
+/// lease (the ACK's drain processing already set `arp.own_ip` — THE one
+/// copy). The RX drain processes OFFER/ACK/NAK replies on port 68 (the
+/// udp dispatch), so the handshake advances between invocations; each
+/// command drains first (the claim-6076 polled-drain contract). Bounded
+/// retry: `max_attempts` DISCOVERs without an OFFER -> an honest refuse
+/// (the `timeout` counter). Deterministic, monitor-driven, no interrupts.
+fn cmd_net_dhcp(m: *Monitor, args: []const []const u8) ExecError {
+    if (args.len != 0) {
+        m.console.print_line("net dhcp: usage: net dhcp");
+        return .invalid_argument;
+    }
+    if (!virtio_net.net_ready) {
+        m.console.puts("net dhcp: no virtio-net device (");
+        m.console.puts(if (virtio_net.net_fail.len > 0) virtio_net.net_fail else "DID 0x1041 not found on bus 0");
+        m.console.puts(")\n");
+        return .none;
+    }
+    // Deliver any pending OFFER/ACK before deciding (polled-drain
+    // contract — the frame may have landed while the shell idled).
+    virtio_net.net_rx_drain();
+    switch (virtio_net.dhcp.state) {
+        .idle => {
+            if (virtio_net.dhcp.attempts >= virtio_net.dhcp.max_attempts) {
+                virtio_net.dhcp.timed_out += 1;
+                m.console.puts("net dhcp: refused (no OFFER after ");
+                m.console.print_u64(@intCast(virtio_net.dhcp.max_attempts));
+                m.console.puts(" DISCOVER attempts)\n");
+                return .none;
+            }
+            // A fresh transaction id from the seeded CSPRNG (claim 2665).
+            const xid: u32 = @truncate(csprng.random_u64());
+            virtio_net.dhcp.start(&virtio_net.net_mac, xid);
+            var out_len: usize = 0;
+            switch (virtio_net.net_dhcp_send(virtio_net.dhcp.msg[0..virtio_net.dhcp.msg_len], &out_len)) {
+                .ok => {
+                    virtio_net.dhcp.discover_sent += 1;
+                    virtio_net.dhcp.attempts += 1;
+                    m.console.puts("net dhcp: discover sent xid=");
+                    m.console.print_hex_min(xid);
+                    m.console.puts(" (");
+                    m.console.print_u64(@intCast(out_len));
+                    m.console.puts(" bytes)\n");
+                },
+                else => {
+                    virtio_net.dhcp.state = .idle; // the DISCOVER never went out
+                    m.console.print_line("net dhcp: DISCOVER TX failed (transport unready)");
+                },
+            }
+            return .none;
+        },
+        .selecting => {
+            m.console.puts("net dhcp: waiting for OFFER (xid=");
+            m.console.print_hex_min(virtio_net.dhcp.xid);
+            m.console.puts(")\n");
+            return .none;
+        },
+        .requesting => {
+            if (!virtio_net.dhcp.request_transmitted) {
+                // The OFFER was accepted (the drain built the REQUEST into
+                // dhcp.msg) — transmit it exactly once.
+                var out_len: usize = 0;
+                switch (virtio_net.net_dhcp_send(virtio_net.dhcp.msg[0..virtio_net.dhcp.msg_len], &out_len)) {
+                    .ok => {
+                        virtio_net.dhcp.request_transmitted = true;
+                        virtio_net.dhcp.request_sent += 1;
+                        m.console.puts("net dhcp: request sent xid=");
+                        m.console.print_hex_min(virtio_net.dhcp.xid);
+                        m.console.puts(" (");
+                        m.console.print_u64(@intCast(out_len));
+                        m.console.puts(" bytes)\n");
+                    },
+                    else => m.console.print_line("net dhcp: REQUEST TX failed (transport unready)"),
+                }
+            } else {
+                m.console.puts("net dhcp: waiting for ACK (xid=");
+                m.console.print_hex_min(virtio_net.dhcp.xid);
+                m.console.puts(")\n");
+            }
+            return .none;
+        },
+        .bound => {
+            m.console.puts("net: dhcp bound ip=");
+            var ibuf: [15]u8 = undefined;
+            const in = virtio_net.arp.format_ip(virtio_net.dhcp.lease_ip, &ibuf);
+            m.console.puts(ibuf[0..in]);
+            m.console.puts(" mask=");
+            const mn = virtio_net.arp.format_ip(virtio_net.dhcp.lease_mask, &ibuf);
+            m.console.puts(ibuf[0..mn]);
+            m.console.puts(" gw=");
+            const gn = virtio_net.arp.format_ip(virtio_net.dhcp.lease_gw, &ibuf);
+            m.console.puts(ibuf[0..gn]);
+            m.console.puts(" server=");
+            const sn = virtio_net.arp.format_ip(virtio_net.dhcp.lease_server, &ibuf);
+            m.console.puts(ibuf[0..sn]);
+            m.console.puts(" lease=");
+            m.console.print_u64(virtio_net.dhcp.lease_time);
+            m.console.puts("\n");
+            return .none;
+        },
+    }
 }
 
 /// `net recv` — the card-N2 receive path: drain the RX used ring (polled
@@ -2644,7 +2793,7 @@ test "monitor: net reports no device honestly when the transport is absent" {
     );
     // `net` is registered (the prompt's registry-row shape).
     try std.testing.expect(lookup("net") != null);
-    try std.testing.expectEqualStrings("virtio-net transport + RX + ARP + ICMP + UDP: device DID, MAC, queues, feature bits, RX counters ('net recv' prints received frames; 'net ip <a.b.c.d>' sets the static IP; 'net arp [<a.b.c.d>]' shows/resolves the ARP table; 'net ping <a.b.c.d>' sends an ICMP echo request; 'net udp [listen <port>|close <port>|send <addr> <port> <len>|recv [<port>]]' drives UDP)", lookup("net").?.help);
+    try std.testing.expectEqualStrings("virtio-net transport + RX + ARP + ICMP + UDP + DHCP: device DID, MAC, queues, feature bits, RX counters ('net recv' prints received frames; 'net ip <a.b.c.d>' sets the static IP; 'net arp [<a.b.c.d>]' shows/resolves the ARP table; 'net ping <a.b.c.d>' sends an ICMP echo request; 'net udp [listen <port>|close <port>|send <addr> <port> <len>|recv [<port>]]' drives UDP; 'net dhcp' runs the bounded DHCP client one step per invocation)", lookup("net").?.help);
     try std.testing.expect(lookup("netsend") != null);
 }
 
@@ -2981,7 +3130,7 @@ test "monitor: net recv prints the received frame byte-exact and drains the FIFO
     // Unknown subcommand: documented refusal.
     env.mock.reset();
     try std.testing.expectEqual(ExecError.invalid_argument, exec(&mon, &.{ "net", "bogus" }));
-    try std.testing.expect(std.mem.indexOf(u8, env.mock.contents(), "net: unknown subcommand (try 'net', 'net recv', 'net ip <a.b.c.d>', 'net arp [<a.b.c.d>]', 'net ping <a.b.c.d>' or 'net udp [listen|close|send|recv]')\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, env.mock.contents(), "net: unknown subcommand (try 'net', 'net recv', 'net ip <a.b.c.d>', 'net arp [<a.b.c.d>]', 'net ping <a.b.c.d>', 'net udp [listen|close|send|recv]' or 'net dhcp')\n") != null);
     virtio_net.net_ready = false;
     virtio_net.rx_fifo_head = 0;
     virtio_net.rx_fifo_count = 0;

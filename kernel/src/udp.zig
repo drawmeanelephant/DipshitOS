@@ -17,6 +17,7 @@
 
 const std = @import("std");
 const arp = @import("arp.zig"); // N3: our static IP (`arp.own_ip` — the ONE copy)
+const dhcp = @import("dhcp.zig"); // N8 (claim 0351): the DHCP client owns port 68
 
 pub const eth_hdr_len: usize = 14; // the same values as ipv4.zig (constants only — no circular import)
 pub const ipv4_hdr_len: usize = 20;
@@ -282,23 +283,35 @@ pub fn handle_rx(frame: []const u8) void {
         return;
     }
     const dst_port = (@as(u16, frame[36]) << 8) | frame[37];
+    if (dst_port == dhcp.client_port) {
+        // Card N8 (claim 0351): the DHCP client owns port 68 by
+        // construction — a reply to the client is handed to the DHCP
+        // state machine (the OFFER/ACK/NAK handling), NOT the `net udp
+        // listen` table (invisible to `net udp recv`; no listener slot
+        // consumed). The datagram was ALREADY checksum-validated above.
+        _ = dhcp.handle_rx(datagram);
+        return;
+    }
     deliver(dst_port, datagram);
 }
 
-/// Build the FULL Ethernet + IPv4 + UDP frame to `peer_ip:dst_port` (the
-/// N1 shape): dst = the peer's MAC, src = our MAC, ethertype 0x0800, a
-/// 20-byte IPv4 header (version 4 / IHL 5, total length, TTL 64, protocol
-/// 17, header checksum), then the UDP datagram (src port
-/// `default_src_port`, dst port, length, checksum over the pseudo-header
-/// src/dst = own_ip/peer_ip). `buf` must hold >= `frame_max`. The payload
-/// is truncated honestly at `payload_max`. Returns the frame length
-/// (46 + the written payload).
-pub fn build_frame(buf: []u8, own_mac: *const [6]u8, own_ip: [4]u8, peer_mac: [6]u8, peer_ip: [4]u8, dst_port: u16, payload: []const u8) usize {
-    const plen = @min(payload.len, payload_max);
-    const total = ipv4_hdr_len + udp_hdr_len + plen;
+/// Build a FULL Ethernet + IPv4 + UDP frame with EXPLICIT dst/src
+/// addresses and ports into `buf` (must hold >= `eth_hdr_len +
+/// ipv4_hdr_len + udp_hdr_len + payload.len` — the caller's payload is
+/// ALREADY bounded, no truncation here): dst MAC, src MAC, ethertype
+/// 0x0800, a 20-byte IPv4 header (version 4 / IHL 5, total length, TTL
+/// 64, protocol 17, header checksum), then the UDP datagram (src port,
+/// dst port, length, checksum over the pseudo-header src/dst). This is
+/// the general builder behind the N5 `build_frame` AND the N8 DHCP
+/// broadcast-dst send seam (card N8 — the ONE N5-layer change: a DHCP
+/// frame goes out with dst MAC ff:ff:ff:ff:ff:ff + dst IP
+/// 255.255.255.255 directly, no ARP, src IP 0.0.0.0). Returns the frame
+/// length (42 + the written payload).
+pub fn build_frame_ex(buf: []u8, dst_mac: [6]u8, own_mac: *const [6]u8, src_ip: [4]u8, dst_ip: [4]u8, src_port: u16, dst_port: u16, payload: []const u8) usize {
+    const total = ipv4_hdr_len + udp_hdr_len + payload.len;
     const frame_len = eth_hdr_len + total;
     @memset(buf[0..frame_len], 0);
-    @memcpy(buf[0..6], &peer_mac); // dst
+    @memcpy(buf[0..6], &dst_mac); // dst
     @memcpy(buf[6..12], own_mac); // src
     buf[12] = 0x08;
     buf[13] = 0x00; // ethertype IPv4
@@ -307,27 +320,37 @@ pub fn build_frame(buf: []u8, own_mac: *const [6]u8, own_ip: [4]u8, peer_mac: [6
     buf[17] = @truncate(total); // total length
     buf[22] = 64; // TTL
     buf[23] = protocol_udp;
-    @memcpy(buf[26..30], &own_ip); // src
-    @memcpy(buf[30..34], &peer_ip); // dst
+    @memcpy(buf[26..30], &src_ip); // src
+    @memcpy(buf[30..34], &dst_ip); // dst
     // IPv4 header checksum (the field at 24..26 is zeroed by the memset).
     const hc = fold(sum_words(buf[14..34]));
     buf[24] = @truncate(hc >> 8);
     buf[25] = @truncate(hc);
-    // The UDP datagram (the checksum field is zeroed by the memset; the
-    // pseudo-header uses own_ip/peer_ip — src == dst == own_ip for a
-    // loopback send is handled by the loopback path, not here).
-    const dg = buf[34 .. 34 + udp_hdr_len + plen];
-    dg[0] = @truncate(default_src_port >> 8);
-    dg[1] = @truncate(default_src_port);
+    // The UDP datagram (the checksum field is zeroed by the memset).
+    const dg = buf[34 .. 34 + udp_hdr_len + payload.len];
+    dg[0] = @truncate(src_port >> 8);
+    dg[1] = @truncate(src_port);
     dg[2] = @truncate(dst_port >> 8);
     dg[3] = @truncate(dst_port);
-    dg[4] = @truncate((udp_hdr_len + plen) >> 8);
-    dg[5] = @truncate(udp_hdr_len + plen);
-    @memcpy(dg[8 .. 8 + plen], payload[0..plen]);
-    const c = checksum_udp(own_ip, peer_ip, dg);
+    dg[4] = @truncate((udp_hdr_len + payload.len) >> 8);
+    dg[5] = @truncate(udp_hdr_len + payload.len);
+    @memcpy(dg[8 .. 8 + payload.len], payload);
+    const c = checksum_udp(src_ip, dst_ip, dg);
     dg[6] = @truncate(c >> 8);
     dg[7] = @truncate(c);
     return frame_len;
+}
+
+/// Build the FULL Ethernet + IPv4 + UDP frame to `peer_ip:dst_port` (the
+/// N1/N5 shape): dst = the peer's MAC, src = our MAC, the fixed src port
+/// `default_src_port`, the pseudo-header src/dst = own_ip/peer_ip. `buf`
+/// must hold >= `frame_max`. The payload is truncated honestly at
+/// `payload_max` (the N5 seam's honest bound). Returns the frame length
+/// (46 + the written payload). A thin wrapper over `build_frame_ex` — the
+/// byte-exact N5 fixtures pin the unchanged output.
+pub fn build_frame(buf: []u8, own_mac: *const [6]u8, own_ip: [4]u8, peer_mac: [6]u8, peer_ip: [4]u8, dst_port: u16, payload: []const u8) usize {
+    const plen = @min(payload.len, payload_max);
+    return build_frame_ex(buf, peer_mac, own_mac, own_ip, peer_ip, default_src_port, dst_port, payload[0..plen]);
 }
 
 /// Loopback: deliver a datagram to OUR OWN address — built here (src port
