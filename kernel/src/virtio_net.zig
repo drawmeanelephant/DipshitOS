@@ -79,6 +79,7 @@ pub const ipv4 = @import("ipv4.zig");
 /// monitor's `net udp` subcommands drive listen/close/send/recv).
 pub const udp = @import("udp.zig");
 pub const dhcp = @import("dhcp.zig"); // N8 (claim 0351): the bounded RFC 2131 client (port 68)
+pub const tcp = @import("tcp.zig"); // N10 (claim 7026): the bounded RFC 793 client
 
 // ---------------------------------------------------------------------------
 // Split-ring structures (the blk/entropy/console shared layout)
@@ -1299,6 +1300,25 @@ pub fn net_dhcp_send_unicast(dst_ip: [4]u8, dst_mac: [6]u8, msg: []const u8, out
     if (!dhcp_bound()) return .not_ready;
     @memset(tx_staging[0..tx_hdr_len], 0);
     const n = udp.build_frame_ex(tx_staging[tx_hdr_len .. tx_hdr_len + dhcp.frame_max], dst_mac, &net_mac, dhcp.lease_ip, dst_ip, dhcp.client_port, dhcp.server_port, msg);
+    out_len.* = n;
+    return net_send(&net_ops, &net_dev, tx_staging[0 .. tx_hdr_len + n]);
+}
+
+/// Card N10 (claim 7026): transmit the TCP client's current segment
+/// (built by `tcp` into `tcp.msg` — a SYN, an ACK, a data segment, the
+/// FIN, a RST, or the final ACK) to THE connection's peer on the N1 TX
+/// path. The peer's MAC was resolved at connect time (`tcp.peer_mac` —
+/// the seam resolves nothing; the bounded client connects OUTWARD only —
+/// an own-IP connect was refused by the caller, no TCP loopback).
+/// Refuses honestly when the transport is unready or no static IP is set
+/// (`net ip <a.b.c.d>` first). The frame length lands in `out_len` (54 +
+/// the segment payload). The peer's segments are processed asynchronously
+/// by the RX drain (the ipv4 protocol-6 dispatch -> tcp).
+pub fn net_tcp_send(segment: []const u8, out_len: *usize) SendResult {
+    if (!net_ready) return .not_ready;
+    if (!arp.ip_set()) return .not_ready;
+    @memset(tx_staging[0..tx_hdr_len], 0);
+    const n = tcp.build_frame(tx_staging[tx_hdr_len .. tx_hdr_len + tcp.frame_max], &net_mac, arp.own_ip, tcp.peer_mac, tcp.peer_ip, segment);
     out_len.* = n;
     return net_send(&net_ops, &net_dev, tx_staging[0 .. tx_hdr_len + n]);
 }

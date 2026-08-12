@@ -16,6 +16,7 @@
 const std = @import("std");
 const arp = @import("arp.zig"); // N3: our static IP (`arp.own_ip` — the ONE copy) + the peer table
 const udp = @import("udp.zig"); // N5 (claim 8552): UDP datagrams over the validated IPv4 seam
+const tcp = @import("tcp.zig"); // N10 (claim 7026): the bounded TCP client over the validated IPv4 seam
 
 pub const ethertype_ipv4: u16 = 0x0800; // Ethernet II ethertype
 pub const eth_hdr_len: usize = 14; // dst MAC (6) + src MAC (6) + ethertype (2)
@@ -262,8 +263,17 @@ pub fn handle_rx(frame: []const u8, own_mac: *const [6]u8, reply_buf: []u8) ?usi
         udp.handle_rx(frame);
         return null;
     }
+    if (protocol(frame) == tcp.protocol_tcp) {
+        // Card N10 (claim 7026): TCP segments are handed to the bounded
+        // TCP client ALREADY VALIDATED (checksum/fragment/dst checks
+        // stayed above — never duplicated). The client's RX processing
+        // builds its ACKs into its own buffer; nothing is transmitted
+        // from the drain context.
+        _ = tcp.handle_rx(frame);
+        return null;
+    }
     if (protocol(frame) != protocol_icmp) {
-        dropped_proto += 1; // TCP/other — later cards
+        dropped_proto += 1; // other protocols — later cards
         return null;
     }
     if (icmp_type(frame) == icmp_type_reply) {
@@ -455,16 +465,16 @@ test "ipv4: handle_rx — answer an echo for us, observe a reply, drop the rest"
     try std.testing.expect(handle_rx(&bad, &test_mac, &reply_buf) == null);
     try std.testing.expectEqual(@as(u64, 1), dropped_checksum);
 
-    // A non-ICMP protocol: dropped with its own counter.
-    var tcp = req;
-    tcp[23] = 6; // TCP
+    // A non-ICMP/UDP/TCP protocol (GRE 47): dropped with its own counter.
+    var tcpf = req;
+    tcpf[23] = 47; // GRE — not ICMP/UDP/TCP
     // Fix the checksum so it lands in the protocol counter, not chk.
-    tcp[24] = 0;
-    tcp[25] = 0;
-    const tc = checksum(tcp[14..34]);
-    tcp[24] = @truncate(tc >> 8);
-    tcp[25] = @truncate(tc);
-    try std.testing.expect(handle_rx(&tcp, &test_mac, &reply_buf) == null);
+    tcpf[24] = 0;
+    tcpf[25] = 0;
+    const tc = checksum(tcpf[14..34]);
+    tcpf[24] = @truncate(tc >> 8);
+    tcpf[25] = @truncate(tc);
+    try std.testing.expect(handle_rx(&tcpf, &test_mac, &reply_buf) == null);
     try std.testing.expectEqual(@as(u64, 1), dropped_proto);
 
     // A non-IPv4 frame: untouched, not counted.
@@ -475,7 +485,7 @@ test "ipv4: handle_rx — answer an echo for us, observe a reply, drop the rest"
     try std.testing.expectEqual(@as(u64, 1), dropped_other); // still 1 — non-IPv4 is not counted
 }
 
-test "ipv4: protocol dispatch — UDP (17) is handed to udp, TCP (6) stays dropped_proto" {
+test "ipv4: protocol dispatch — UDP (17) is handed to udp, TCP (6) to the tcp client" {
     udp.reset();
     udp.received = 0;
     arp.own_ip = ip_guest;
@@ -507,21 +517,27 @@ test "ipv4: protocol dispatch — UDP (17) is handed to udp, TCP (6) stays dropp
     try std.testing.expectEqual(@as(u64, 1), udp.received); // delivered to the listener
     try std.testing.expect(udp.pop(7000) != null);
 
-    // A TCP frame (protocol 6) still counts dropped_proto.
-    var tcp: [46]u8 = .{0} ** 46;
-    tcp[12] = 0x08;
-    tcp[13] = 0x00;
-    tcp[14] = 0x45;
-    tcp[16] = 0x00;
-    tcp[17] = 40;
-    tcp[22] = 64;
-    tcp[23] = 6; // TCP
-    @memcpy(tcp[26..30], &[_]u8{ 10, 0, 0, 2 });
-    @memcpy(tcp[30..34], &[_]u8{ 10, 0, 0, 1 });
-    const tc = checksum(tcp[14..34]);
-    tcp[24] = @truncate(tc >> 8);
-    tcp[25] = @truncate(tc);
-    try std.testing.expect(handle_rx(&tcp, &test_mac, &reply_buf) == null);
-    try std.testing.expectEqual(@as(u64, 1), dropped_proto);
+    // A TCP frame (protocol 6): card N10 — handed to the bounded TCP
+    // client (NOT a protocol drop). The client has no connection (idle)
+    // and the 46-byte frame is too short for a TCP header (54 min) — it
+    // is counted malformed inside tcp, proving the dispatch happened.
+    tcp.reset();
+    tcp.dropped_malformed = 0;
+    var tcpf: [46]u8 = .{0} ** 46;
+    tcpf[12] = 0x08;
+    tcpf[13] = 0x00;
+    tcpf[14] = 0x45;
+    tcpf[16] = 0x00;
+    tcpf[17] = 40;
+    tcpf[22] = 64;
+    tcpf[23] = 6; // TCP
+    @memcpy(tcpf[26..30], &[_]u8{ 10, 0, 0, 2 });
+    @memcpy(tcpf[30..34], &[_]u8{ 10, 0, 0, 1 });
+    const tc2 = checksum(tcpf[14..34]);
+    tcpf[24] = @truncate(tc2 >> 8);
+    tcpf[25] = @truncate(tc2);
+    try std.testing.expect(handle_rx(&tcpf, &test_mac, &reply_buf) == null);
+    try std.testing.expectEqual(@as(u64, 0), dropped_proto); // dispatched, not dropped
+    try std.testing.expectEqual(@as(u64, 1), tcp.dropped_malformed); // the client saw it
     udp.reset();
 }
