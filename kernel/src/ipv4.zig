@@ -15,6 +15,7 @@
 
 const std = @import("std");
 const arp = @import("arp.zig"); // N3: our static IP (`arp.own_ip` — the ONE copy) + the peer table
+const udp = @import("udp.zig"); // N5 (claim 8552): UDP datagrams over the validated IPv4 seam
 
 pub const ethertype_ipv4: u16 = 0x0800; // Ethernet II ethertype
 pub const eth_hdr_len: usize = 14; // dst MAC (6) + src MAC (6) + ethertype (2)
@@ -253,8 +254,16 @@ pub fn handle_rx(frame: []const u8, own_mac: *const [6]u8, reply_buf: []u8) ?usi
         dropped_checksum += 1;
         return null;
     }
+    if (protocol(frame) == udp.protocol_udp) {
+        // Card N5 (claim 8552): UDP datagrams are handed to the UDP layer
+        // ALREADY VALIDATED (checksum/fragment/dst checks stayed above —
+        // never duplicated). The N5 guest receives + sends; it does not
+        // answer UDP (the host answers, --net-udp-respond).
+        udp.handle_rx(frame);
+        return null;
+    }
     if (protocol(frame) != protocol_icmp) {
-        dropped_proto += 1; // TCP/UDP/other — later cards
+        dropped_proto += 1; // TCP/other — later cards
         return null;
     }
     if (icmp_type(frame) == icmp_type_reply) {
@@ -464,4 +473,55 @@ test "ipv4: handle_rx — answer an echo for us, observe a reply, drop the rest"
     arp_frame[13] = 0x06;
     try std.testing.expect(handle_rx(&arp_frame, &test_mac, &reply_buf) == null);
     try std.testing.expectEqual(@as(u64, 1), dropped_other); // still 1 — non-IPv4 is not counted
+}
+
+test "ipv4: protocol dispatch — UDP (17) is handed to udp, TCP (6) stays dropped_proto" {
+    udp.reset();
+    udp.received = 0;
+    arp.own_ip = ip_guest;
+    defer arp.own_ip = .{ 0, 0, 0, 0 };
+    dropped_proto = 0;
+    try std.testing.expect(udp.listen_port(7000));
+
+    // A valid UDP datagram 10.0.0.2:9999 -> 10.0.0.1:7000 is delivered to
+    // the UDP layer (not counted as dropped_proto) — the IPv4 validation
+    // (checksum, fragment, dst) stays in ipv4.
+    var frame: [46]u8 = .{0} ** 46;
+    frame[12] = 0x08;
+    frame[13] = 0x00;
+    frame[14] = 0x45;
+    frame[16] = 0x00;
+    frame[17] = 32;
+    frame[22] = 64;
+    frame[23] = 17; // protocol UDP
+    @memcpy(frame[26..30], &[_]u8{ 10, 0, 0, 2 });
+    @memcpy(frame[30..34], &[_]u8{ 10, 0, 0, 1 });
+    // The IPv4 header checksum (the field is zeroed by the memset).
+    const hc = checksum(frame[14..34]);
+    frame[24] = @truncate(hc >> 8);
+    frame[25] = @truncate(hc);
+    _ = udp.build_datagram(frame[34..46], .{ 10, 0, 0, 2 }, .{ 10, 0, 0, 1 }, 9999, 7000, &.{ 1, 2, 3, 4 });
+    var reply_buf: [ipv4_frame_min + 64]u8 = undefined;
+    try std.testing.expect(handle_rx(&frame, &test_mac, &reply_buf) == null);
+    try std.testing.expectEqual(@as(u64, 0), dropped_proto); // NOT counted as a drop
+    try std.testing.expectEqual(@as(u64, 1), udp.received); // delivered to the listener
+    try std.testing.expect(udp.pop(7000) != null);
+
+    // A TCP frame (protocol 6) still counts dropped_proto.
+    var tcp: [46]u8 = .{0} ** 46;
+    tcp[12] = 0x08;
+    tcp[13] = 0x00;
+    tcp[14] = 0x45;
+    tcp[16] = 0x00;
+    tcp[17] = 40;
+    tcp[22] = 64;
+    tcp[23] = 6; // TCP
+    @memcpy(tcp[26..30], &[_]u8{ 10, 0, 0, 2 });
+    @memcpy(tcp[30..34], &[_]u8{ 10, 0, 0, 1 });
+    const tc = checksum(tcp[14..34]);
+    tcp[24] = @truncate(tc >> 8);
+    tcp[25] = @truncate(tc);
+    try std.testing.expect(handle_rx(&tcp, &test_mac, &reply_buf) == null);
+    try std.testing.expectEqual(@as(u64, 1), dropped_proto);
+    udp.reset();
 }

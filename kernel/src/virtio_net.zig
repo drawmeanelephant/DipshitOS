@@ -74,6 +74,10 @@ pub const arp = @import("arp.zig");
 /// subcommand drives echo requests). Reuses `arp.own_ip` as the ONE copy
 /// of our static address.
 pub const ipv4 = @import("ipv4.zig");
+/// Milestone five card N5 (claim 8552): the UDP layer (pure logic; the
+/// ipv4 protocol dispatch delivers validated datagrams here and the
+/// monitor's `net udp` subcommands drive listen/close/send/recv).
+pub const udp = @import("udp.zig");
 
 // ---------------------------------------------------------------------------
 // Split-ring structures (the blk/entropy/console shared layout)
@@ -1213,6 +1217,36 @@ pub fn net_arp_request(target_ip: [4]u8, out_len: *usize) SendResult {
     const n = arp.build_request(tx_staging[tx_hdr_len .. tx_hdr_len + arp.arp_frame_len], &net_mac, arp.own_ip, target_ip);
     out_len.* = n;
     return net_send(&net_ops, &net_dev, tx_staging[0 .. tx_hdr_len + n]);
+}
+
+/// Card N5 (claim 8552): transmit a UDP DATAGRAM to
+/// `target_ip:dst_port` in the fixed staging buffer, on the N1 TX path.
+/// Refuses honestly when the transport is unready, no static IP is set
+/// (`net ip <a.b.c.d>` first), or the peer's MAC is not in the ARP table
+/// (`net arp <ip>` resolves it first — an echo/udp needs a unicast dst).
+/// A send to OUR OWN IP takes the LOOPBACK path (delivered directly into
+/// the local receive path — no device round trip). `payload` is the
+/// deterministic byte pattern 01 02 03 04… (bounded ≤ 64 — honest
+/// truncation). The datagram length lands in `out_len` (8 + payload).
+pub fn net_udp_send(target_ip: [4]u8, dst_port: u16, payload: []const u8, out_len: *usize) SendResult {
+    if (!arp.ip_set()) return .not_ready;
+    if (std.mem.eql(u8, &target_ip, &arp.own_ip)) {
+        // Loopback: no device round trip — `udp.loopback` builds the
+        // datagram (src port 7000) and delivers it locally; the delivery
+        // counts `received` (or `dropped_closed` — no listener).
+        out_len.* = udp.loopback(arp.own_ip, dst_port, payload);
+        udp.sent += 1;
+        udp.loopbacked += 1;
+        return .ok;
+    }
+    if (!net_ready) return .not_ready;
+    const peer_mac = arp.lookup(target_ip) orelse return .no_peer;
+    @memset(tx_staging[0..tx_hdr_len], 0);
+    const n = udp.build_frame(tx_staging[tx_hdr_len .. tx_hdr_len + udp.frame_max], &net_mac, arp.own_ip, peer_mac, target_ip, dst_port, payload);
+    out_len.* = n;
+    const r = net_send(&net_ops, &net_dev, tx_staging[0 .. tx_hdr_len + n]);
+    if (r == .ok) udp.sent += 1;
+    return r;
 }
 
 /// Card N4 (claim 0148): transmit an ICMP ECHO REQUEST to `target_ip` in

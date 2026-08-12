@@ -172,6 +172,19 @@ var netArpRespondHostIP: [UInt8]?
 // Driven by the guest's actual request bytes, not a sleep. nil = the
 // guest's echo requests go unanswered (the default VM is unchanged).
 var netIcmpRespondHostIP: [UInt8]?
+// Milestone five card N5 (claim 8552): `--net-udp-respond <host-ip>:<host-port>`
+// answers the guest's UDP datagrams from the HOST side — a tiny
+// deterministic host-side UDP responder inside the capture thread: when
+// a captured datagram is a UDP datagram for the given ip:port (ethertype
+// 0x0800, version 4/IHL 5, non-fragment, protocol 17, dst IP + dst port
+// match), the synthesized reply (FROM host-ip:host-port TO the sender's
+// ip:src-port, the SAME payload byte-exact, both checksums recomputed)
+// is written into the SAME attachment socket end (VZ reads fds[0], so the
+// guest receives it). Driven by the guest's actual datagram bytes, not a
+// sleep. nil = the guest's datagrams go unanswered (the default VM is
+// unchanged).
+var netUdpRespondHostIP: [UInt8]?
+var netUdpRespondHostPort: UInt16?
 
 var idx = 2
 while idx < arguments.count {
@@ -249,6 +262,19 @@ while idx < arguments.count {
             fail("--net-icmp-respond requires a dotted-quad IPv4 address, got '\(arguments[idx + 1])'.")
         }
         netIcmpRespondHostIP = parts
+        idx += 2
+    } else if arg == "--net-udp-respond", idx + 1 < arguments.count {
+        // Parse the host ip:port now (fail early, like --timeout).
+        let halves = arguments[idx + 1].split(separator: ":")
+        guard halves.count == 2, let port = UInt16(halves[1]) else {
+            fail("--net-udp-respond requires '<host-ip>:<host-port>', got '\(arguments[idx + 1])'.")
+        }
+        let parts = halves[0].split(separator: ".").compactMap { UInt8($0) }
+        guard parts.count == 4 else {
+            fail("--net-udp-respond requires a dotted-quad IPv4 address, got '\(arguments[idx + 1])'.")
+        }
+        netUdpRespondHostIP = parts
+        netUdpRespondHostPort = port
         idx += 2
     } else {
         serialLogPath = arg
@@ -452,6 +478,9 @@ if netArpRespondHostIP != nil, netCapturePath == nil {
 if netIcmpRespondHostIP != nil, netCapturePath == nil {
     fail("--net-icmp-respond requires --net (the ICMP reply is written into the SAME attachment's socket).")
 }
+if netUdpRespondHostIP != nil, netCapturePath == nil {
+    fail("--net-udp-respond requires --net (the UDP reply is written into the SAME attachment's socket).")
+}
 
 if let netCapturePath {
     let netURL = URL(fileURLWithPath: netCapturePath)
@@ -500,6 +529,18 @@ if let netCapturePath {
                 buildIcmpEchoReply(&reply, buf, n, arpHostMAC, hostIP)
                 try? netCaptureReadSocket!.write(contentsOf: Data(reply))
                 print("NET-ICMP: answered the guest's echo request for \(hostIP[0]).\(hostIP[1]).\(hostIP[2]).\(hostIP[3]) (id \(reply[38] << 8 | reply[39]), seq \(reply[40] << 8 | reply[41]))")
+            }
+            // Card N5: if the guest sent a UDP datagram to our ip:port,
+            // echo it back from the host (same socket direction; the
+            // capture file above keeps only guest TX, byte-exact,
+            // unchanged).
+            if let hostIP = netUdpRespondHostIP, let hostPort = netUdpRespondHostPort,
+               isUdpDatagram(buf, n, hostIP, hostPort) {
+                var reply = [UInt8](repeating: 0, count: n)
+                buildUdpReply(&reply, buf, n, arpHostMAC, hostIP, hostPort)
+                try? netCaptureReadSocket!.write(contentsOf: Data(reply))
+                let srcPort = (UInt16(buf[34]) << 8) | UInt16(buf[35])
+                print("NET-UDP: answered the guest's datagram for \(hostIP[0]).\(hostIP[1]).\(hostIP[2]).\(hostIP[3]):\(hostPort) (reply to guest src port \(srcPort), \(n - 42) payload bytes)")
             }
         }
         try? netCaptureFile.synchronize()
@@ -599,6 +640,10 @@ if let hostIP = netArpRespondHostIP {
 if let hostIP = netIcmpRespondHostIP {
     let ipText = hostIP.map(String.init).joined(separator: ".")
     print("  net-icmp-respond: ENABLED (milestone five card N4, claim 0148) — the host answers the guest's ICMP echo requests for \(ipText) (host MAC 02:00:00:00:00:02) via the capture thread (deterministic, request-driven)")
+}
+if let hostIP = netUdpRespondHostIP, let hostPort = netUdpRespondHostPort {
+    let ipText = hostIP.map(String.init).joined(separator: ".")
+    print("  net-udp-respond: ENABLED (milestone five card N5, claim 8552) — the host answers the guest's UDP datagrams for \(ipText):\(hostPort) (host MAC 02:00:00:00:00:02) via the capture thread (deterministic, request-driven)")
 }
 
 runner.queue.async {
@@ -1213,6 +1258,89 @@ func isIcmpEchoRequest(_ buf: [UInt8], _ n: Int, _ hostIP: [UInt8]) -> Bool {
     guard buf[30] == hostIP[0] && buf[31] == hostIP[1] && buf[32] == hostIP[2] && buf[33] == hostIP[3] else { return false }
     guard buf[34] == 0x08 else { return false } // ICMP echo request
     return true
+}
+
+// Card N5 (claim 8552): the UDP checksum over the IPv4 pseudo-header
+// (src IP, dst IP, zero, protocol 17, UDP length) + the datagram (RFC
+// 768 §2 / RFC 1071; the checksum field must be zero during the build).
+@Sendable func udpChecksum(_ srcIP: [UInt8], _ dstIP: [UInt8], _ datagram: [UInt8], _ udpLen: UInt16) -> UInt16 {
+    var words: [UInt16] = []
+    func push(_ hi: UInt8, _ lo: UInt8) {
+        words.append((UInt16(hi) << 8) | UInt16(lo))
+    }
+    push(srcIP[0], srcIP[1])
+    push(srcIP[2], srcIP[3])
+    push(dstIP[0], dstIP[1])
+    push(dstIP[2], dstIP[3])
+    words.append(UInt16(17)) // zero + protocol UDP
+    words.append(udpLen)
+    var i = 0
+    while i + 1 < datagram.count {
+        push(datagram[i], datagram[i + 1])
+        i += 2
+    }
+    if i < datagram.count { push(datagram[i], 0) }
+    var sum: UInt32 = 0
+    for w in words { sum += UInt32(w) }
+    while sum >> 16 != 0 { sum = (sum & 0xffff) + (sum >> 16) }
+    return UInt16(~sum & 0xffff)
+}
+
+// Card N5 (claim 8552): is the datagram a UDP datagram addressed to
+// `hostIP:hostPort`? Ethernet II ethertype 0x0800, version 4 / IHL 5,
+// NOT a fragment, protocol UDP (17), dst IP match, dst port match.
+func isUdpDatagram(_ buf: [UInt8], _ n: Int, _ hostIP: [UInt8], _ hostPort: UInt16) -> Bool {
+    guard n >= 46 else { return false }
+    guard buf[12] == 0x08 && buf[13] == 0x00 else { return false } // ethertype IPv4
+    guard buf[14] == 0x45 else { return false } // version 4, IHL 5
+    guard (buf[20] & 0x1f) == 0 && buf[21] == 0 else { return false } // NOT a fragment
+    guard buf[23] == 17 else { return false } // protocol UDP
+    guard buf[30] == hostIP[0] && buf[31] == hostIP[1] && buf[32] == hostIP[2] && buf[33] == hostIP[3] else { return false }
+    let dstPort = (UInt16(buf[36]) << 8) | UInt16(buf[37])
+    return dstPort == hostPort
+}
+
+// Card N5 (claim 8552): synthesize the UDP REPLY to the datagram in `req`
+// (the guest's bytes) into `reply` (same length): Ethernet dst/src
+// swapped, ethertype 0x0800, IPv4 src/dst swapped (identification
+// ECHOED — deterministic), TTL 64, protocol 17, UDP src port = the host
+// port, dst port = the sender's src port, the payload ECHOED byte-exact;
+// the IPv4 header checksum + the UDP pseudo-header checksum recomputed.
+func buildUdpReply(_ reply: inout [UInt8], _ req: [UInt8], _ n: Int, _ hostMAC: [UInt8], _ hostIP: [UInt8], _ hostPort: UInt16) {
+    reply = [UInt8](repeating: 0, count: n)
+    reply[0...5] = req[6...11] // dst = the sender's MAC
+    reply[6...11] = hostMAC[0...5] // src
+    reply[12] = 0x08
+    reply[13] = 0x00 // ethertype IPv4
+    reply[14] = 0x45 // version 4, IHL 5
+    reply[16...17] = req[16...17] // total length (unchanged)
+    reply[18...19] = req[18...19] // identification ECHOED
+    reply[22] = 64 // TTL
+    reply[23] = 17 // protocol UDP
+    reply[26...29] = hostIP[0...3] // src = our address
+    reply[30...33] = req[26...29] // dst = the sender's address
+    let hdrChk = ipChecksum(reply, 14, 34)
+    reply[24] = UInt8(hdrChk >> 8)
+    reply[25] = UInt8(hdrChk & 0xff)
+    // UDP: src = the host port, dst = the sender's src port, length
+    // echoed, the payload echoed byte-exact; checksum recomputed.
+    reply[34] = UInt8(hostPort >> 8)
+    reply[35] = UInt8(hostPort & 0xff)
+    reply[36] = req[34] // the sender's src port
+    reply[37] = req[35]
+    reply[38...39] = req[38...39] // UDP length (unchanged)
+    let udpLen = (UInt16(req[38]) << 8) | UInt16(req[39])
+    let payloadStart = 42
+    if n > payloadStart {
+        reply[payloadStart...n - 1] = req[payloadStart...n - 1] // payload echoed
+    }
+    let senderIP = [UInt8](req[26...29])
+    var datagram = [UInt8](reply[34..<n])
+    datagram[6] = 0
+    datagram[7] = 0 // zero the checksum field during the computation
+    let udpChk = udpChecksum(hostIP, senderIP, datagram, udpLen)
+    reply[40] = UInt8(udpChk >> 8)
+    reply[41] = UInt8(udpChk & 0xff)
 }
 
 // Card N4 (claim 0148): synthesize the ICMP ECHO REPLY to the echo
