@@ -266,6 +266,36 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_status43.step);
 
     // ------------------------------------------------------------------
+    // Guest: fifth ESP user program (milestone five, card N6 — claim
+    // 1384) — the UDP syscall proof UDP.BIN. Same freestanding target,
+    // linker script, elf2bin conversion, and ESP embedding as USER.BIN /
+    // COUNTER.BIN / PEER.BIN / STATUS43.BIN; the kernel's `exec UDP.BIN`
+    // monitor command loads it by name. It binds port 7000 through the
+    // new sys_udp_listen (slot 9), loopback-sends and round-trips to the
+    // host through sys_udp_send (slot 10) + sys_udp_recv (slot 11),
+    // prints its markers, and exits with status 17 — the live gate's
+    // first network-syscall proof from EL0.
+    // ------------------------------------------------------------------
+    const udp = b.addExecutable(.{
+        .name = "user-udp",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/udp.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    udp.linker_script = b.path("user/linker.ld");
+    const udp_step = b.step("udp", "Build the fifth ESP user program (zig-out/bin/UDP.BIN; class A tooling, no VM)");
+    const udp_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    udp_elf2bin.addFileArg(udp.getEmittedBin());
+    const udp_bin = udp_elf2bin.addOutputFileArg("UDP.BIN");
+    udp_elf2bin.has_side_effects = true;
+    udp_elf2bin.stdio = .inherit;
+    udp_step.dependOn(&udp_elf2bin.step);
+    const install_udp = b.addInstallFileWithDir(udp_bin, .bin, "UDP.BIN");
+    b.getInstallStep().dependOn(&install_udp.step);
+
+    // ------------------------------------------------------------------
     // Top-level steps. System-command steps are marked as having side
     // effects (and inherit stdio) so they always execute instead of being
     // skipped by the build cache. (No QEMU path: this project targets Apple
@@ -280,6 +310,7 @@ pub fn build(b: *std.Build) void {
     image.addFileArg(counter_bin); // ... [COUNTER_BIN] (claim 4613: second, never-exiting user program)
     image.addFileArg(peer_bin); // ... [PEER.BIN] (claim 5965: third user program, the IPC peer)
     image.addFileArg(status43_bin); // ... [STATUS43.BIN] (claim 9946: fourth user program, the wait gate's short target)
+    image.addFileArg(udp_bin); // ... [UDP.BIN] (claim 1384: fifth user program, the UDP-syscall proof)
     image.has_side_effects = true;
     image.stdio = .inherit;
     image_step.dependOn(&image.step);
@@ -301,6 +332,7 @@ pub fn build(b: *std.Build) void {
     failure_image.addFileArg(counter_bin); // COUNTER.BIN too (claim 4613)
     failure_image.addFileArg(peer_bin); // PEER.BIN too (claim 5965)
     failure_image.addFileArg(status43_bin); // STATUS43.BIN too (claim 9946)
+    failure_image.addFileArg(udp_bin); // UDP.BIN too (claim 1384)
     failure_image.has_side_effects = true;
     failure_image.stdio = .inherit;
     failure_step.dependOn(&failure_image.step);

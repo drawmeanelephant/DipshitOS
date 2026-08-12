@@ -275,3 +275,31 @@ pid=<n> status=<s>` when the target (STATUS43.BIN, exiting 43) wakes it.
 As with slot 7, this is the follow-on-4 set's final ABI change; the ABI —
 x8 number, x0–x5 arguments, x0 result, reserved 9–63, error codes — is
 otherwise unchanged.
+
+## Amendment (2026-08-12, claim 1384 — the UDP syscall seam card)
+
+Milestone-five card N6 freezes slots 9/10/11 in the dispatch table (the
+card's ONE ABI change, following the `sys_sleep` slot-4, ipc slots-5/6,
+and wait slot-8 precedents; every existing syscall number 0–8 stays
+frozen):
+
+| 9 | `sys_udp_listen` | `udp_listen(port) -> i64` | Bind the bounded kernel listen table (`udp.zig`'s 4-slot table — the SAME table the monitor's `net udp listen` uses) to `port`. Kernel-global: any EL0 task may bind any port (no per-process ownership — the honest bound). Returns 0; `EINVAL` for port 0/> 65535 or a duplicate/full table. |
+| 10 | `sys_udp_send` | `udp_send(ip, port, buf, len) -> i64` | Send ONE UDP datagram to `ip:port` from the FIXED source port 7000 (`udp.default_src_port`). `ip` is the 4 octets in network byte order in x0's low 32 bits (extracted byte-explicitly — AArch64 is little-endian, never a bitcast). `len` (≤ `udp.payload_max` 64, truncated honestly) is copied through uaccess into fixed BSS staging, then `net_udp_send` runs the N5 path: an own-IP send takes the LOOPBACK path (no device round trip); a peer send needs its MAC in the ARP table (`EINVAL` — `.no_peer`/`.not_ready`/`.timeout`; the seam does NOT resolve ARP — the caller resolves via the monitor's `net arp` and may retry). Returns the payload length; `EFAULT` for a bad `buf`; 0 for a zero-length no-op. |
+| 11 | `sys_udp_recv` | `udp_recv(port, buf, max) -> i64` | Copy the oldest datagram for the listener on `port` OUT through uaccess — the full 8-byte UDP header + payload (the caller parses the header; the src IP is not kept — honest bound). Returns the copied length (max clamps to `udp.datagram_max` 72; shorter truncates and CONSUMES); 0 when the ring is empty; `EINVAL` when not listening on `port`. The datagram is PEEKED, copied out, and only then popped — a bad recv buffer (`EFAULT`) leaves it queued (the claim-5965 contract). The device is DRAINED FIRST (`virtio_net.net_rx_drain`, the claim-6076 polled-drain contract — the used-buffer IRQ is unobserved): a recv pulls any waiting frame device → ring synchronously, so an EL0 polling loop is self-sufficient without the shell idle loop (observed live: without the drain the answer sat in the device queue until a `net` command drained it). |
+
+`implemented_count` is now 12; the `syscalls` report prints rows 0–11.
+The EL0 proof rides UDP.BIN (a new `user/src/udp.zig` program, loaded by
+`exec`): it binds 7000, loopback-sends to its own IP, polls `sys_udp_recv`
+for the host's `--net-udp-respond 10.0.0.2:9999` answer (the cooperative
+`sys_yield` between polls — the ring must return to the program, so the
+live gate keys its observation phase on the program's OWN `udp: got ping`
+marker and its exit on the reap line; an early expect would kill the VM
+before the round trip and the gate would fail on a healthy kernel),
+observes the `EINVAL` mapping from EL0 (unbound-port recv, unresolved-
+peer send), and exits 17.
+
+As with slots 7/8, this is the milestone-five set's ABI amendment; the
+ABI — x8 number, x0–x5 arguments, x0 result, reserved 12–63, error
+codes — is otherwise unchanged. The UDP protocol layer itself stays in
+the N5 card (`kernel/src/udp.zig`); these handlers only marshal args,
+copy bytes through the claim-6120 uaccess window, and call through.

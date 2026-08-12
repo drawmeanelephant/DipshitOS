@@ -166,6 +166,36 @@ VZEFIBootLoader (macOS VZ)
   N3/N4 observation. Claim-time fix recorded: the pseudo-header's
   zero/protocol word was initially reversed (0x1100 vs 0x0011) — the
   byte-exact fixtures caught it, fixed, re-run green.
+- **The UDP syscall seam landed 2026-08-12 (claim 1384, card N6):**
+  the ADR 0007 amendment slots 9/10/11 — `sys_udp_listen(port)`
+  (`handle_udp_listen`: binds the SAME bounded kernel table the
+  monitor's `net udp listen` uses — kernel-global, no per-process
+  ownership, the honest bound), `sys_udp_send(ip, port, buf, len)`
+  (`handle_udp_send`: ONE datagram from the fixed src port 7000,
+  network-byte-order IP extracted byte-explicitly, uaccess staging
+  into fixed BSS, own-IP → the N5 LOOPBACK path, a peer → the
+  ARP-resolved TX path with `.no_peer`/`.not_ready`/`.timeout` →
+  `EINVAL` — the seam does NOT resolve ARP, the caller resolves via
+  `net arp` and retries, bounded), and `sys_udp_recv(port, buf, max)`
+  (`handle_udp_recv`: the oldest datagram copied OUT through uaccess —
+  PEEK → copy_out → pop, so a bad recv buffer (`EFAULT`) never loses
+  the datagram (the claim-5965 contract); the device is DRAINED FIRST
+  (`virtio_net.net_rx_drain`, the claim-6076 polled-drain contract) so
+  an EL0 polling loop is self-sufficient without the shell idle loop —
+  observed live: without the drain the answer sat in the device queue
+  until a `net` command drained it). `implemented_count` 9 → 12.
+  UDP.BIN (`user/src/udp.zig` — the first network-syscall user
+  program, naked-asm EL0) drives the whole surface: `sys_udp_listen(7000)`,
+  the LOOPBACK send+recv to its own IP (the 12-byte datagram
+  byte-exact), the peer send to 10.0.0.2:9999 + poll `sys_udp_recv`
+  for the host's `--net-udp-respond` answer (`udp: got ping` — the
+  cooperative `sys_yield` between polls), the `EINVAL` mapping from
+  EL0 (unbound-port recv + unresolved-peer send), and `sys_exit(17)`.
+  Gate `tools/verify-live-net-udp-syscall.sh` PASS 4/4. One
+  schedule-truth this gate first proves live: a user task RESUMES
+  after `sys_yield` (the ring returns to it; no earlier gate observed
+  the boot payload's post-yield resume because it yields as its LAST
+  act before exiting).
 - **Guest ↔ host storage:** the disk is presented as a virtio block device.
   The guest never touches the storage device directly in milestones zero
   and one; the  firmware reads `EFI/BOOT/BOOTAA64.EFI` from it, and the boot stub writes

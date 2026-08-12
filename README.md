@@ -141,7 +141,7 @@ dipshitos/
 │   ├── src/fat.zig            GPT + FAT32 mount/list/read/write (injected sector I/O)
 │   ├── src/virtio_blk.zig     virtio-blk transport (DID 0x1042 on VZ, post-exit re-arm)
 │   ├── src/virtio_entropy.zig virtio entropy transport (DID 0x1044, post-exit re-arm; claim 2665)
-│   ├── src/virtio_net.zig     virtio-net transport + TX + RX + ARP + ICMP + UDP (DID 0x1041, claims 1373/6076/7293/0148/8552 — the network keystone)
+│   ├── src/virtio_net.zig     virtio-net transport + TX + RX + ARP + ICMP + UDP (DID 0x1041, claims 1373/6076/7293/0148/8552/1384 — the network keystone)
 │   ├── src/arp.zig            ARP protocol layer (RFC 826, claim 7293 — static IP, bounded table, request/reply)
 │   ├── src/ipv4.zig           IPv4/ICMP echo layer (RFC 791/792, claim 0148 — RFC 1071 checksums, net ping, no reassembly)
 │   ├── src/udp.zig            UDP layer (RFC 768, claim 8552 — pseudo-header checksum, bounded listen table, loopback)
@@ -372,6 +372,26 @@ All command output and logs are saved under `artifacts/` (`inspect.txt`,
    TWO blocked user-exec rows while STATUS43's `procs` row still reads
    `state=running`, then the saw line agrees with the kernel's exit
    records).
+- **Milestone five card N6 (claim 1384) is the UDP SYSCALL SEAM: the
+  milestone-five UDP layer exposed to EL0 user programs.** The ADR
+  0007 amendment slots 9/10/11 — `sys_udp_listen(port)` (binds the
+  same bounded kernel table the monitor's `net udp listen` uses),
+  `sys_udp_send(ip, port, buf, len)` (ONE datagram from the fixed src
+  port 7000 — own-IP takes the N5 LOOPBACK path, a peer needs its MAC
+  in the ARP table or the send is `EINVAL`; the seam does NOT resolve
+  ARP), and `sys_udp_recv(port, buf, max)` (the oldest datagram copied
+  out through uaccess — peek → copy_out → pop, so a bad buffer
+  (`EFAULT`) never loses it, and the device is DRAINED FIRST so an
+  EL0 polling loop is self-sufficient without the shell idle loop).
+  `implemented_count` is 12. UDP.BIN (a NEW `user/src/udp.zig` EL0
+  program) drives the whole surface: listen, the loopback round trip,
+  the peer datagram + poll for the host's `--net-udp-respond` answer
+  (cooperative `sys_yield` between polls — this gate is the first
+  live proof that a user task RESUMES after a cooperative yield, since
+  the boot payload yields as its last act), the `EINVAL` error
+  mapping from EL0, and `sys_exit(17)`
+  (`tools/verify-live-net-udp-syscall.sh` PASS 4/4; the 34-gate
+  `verify-vz` aggregate re-ran green 34/34).
 - The Virtualization.framework VM boots the GPT+FAT image: configuration
   validates, the EFI variable store is created, the VM starts and runs, and
   after boot the guest-written marker file `\BOOTED.TXT` exists on the ESP
