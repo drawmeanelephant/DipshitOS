@@ -75,6 +75,7 @@ verify-vz:
     bash tools/verify-live-net-arp.sh
     bash tools/verify-live-net-icmp.sh
     bash tools/verify-live-net-udp.sh
+    bash tools/verify-live-net-udp-syscall.sh
 
 # Compile the AArch64 UEFI application and kernel image (class A — zig build)
 build:

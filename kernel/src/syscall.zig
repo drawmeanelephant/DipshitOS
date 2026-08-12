@@ -23,6 +23,19 @@
 //! the uaccess window in both directions. The recv path peeks → uaccess
 //! copy_out → drops, so a bad recv buffer (`EFAULT`) never loses the
 //! message.
+//!
+//! Card N6 (claim 1384): slots 9/10/11 — `sys_udp_listen(port)`,
+//! `sys_udp_send(ip, port, buf, len)` and `sys_udp_recv(port, buf, max)`
+//! — expose the milestone-five UDP layer (`udp.zig` / `net_udp_send`) to
+//! EL0 through the claim-6120 uaccess window: bind a port on the bounded
+//! kernel listen table, send ONE datagram (own-IP → the N5 LOOPBACK
+//! path, a peer → the ARP-resolved TX path; fixed source port 7000), and
+//! receive the oldest datagram (peek → copy_out → pop — the ipc recv
+//! EFAULT-preservation contract). The table is kernel-global: any EL0
+//! task may bind or receive on any port (no per-process ownership —
+//! honest bound, the ADR 0007 amendment). No protocol logic lives here
+//! (the N5 layer owns UDP); these handlers marshal args, copy bytes, and
+//! call through.
 
 const std = @import("std");
 const console = @import("console.zig");
@@ -30,11 +43,13 @@ const exceptions = @import("exceptions.zig");
 const mailbox = @import("mailbox.zig"); // claim 5965: per-process rings
 const process = @import("process.zig"); // claim 5965: target/current-process lookup
 const scheduler = @import("scheduler.zig");
+const udp = @import("udp.zig"); // claim 1384 (card N6): the milestone-five UDP layer
+const virtio_net = @import("virtio_net.zig"); // claim 1384 (card N6): net_udp_send (TX + loopback)
 const uaccess = @import("uaccess.zig"); // claim 6120: fault-safe copy-in
 const userspace = @import("userspace.zig");
 
 pub const slot_count: usize = 64;
-pub const implemented_count: usize = 9;
+pub const implemented_count: usize = 12;
 pub const write_cap: u64 = 256;
 pub const svc_immediate: u16 = 0;
 
@@ -57,6 +72,15 @@ pub const sys_procs: u64 = 7;
 /// blocks the caller until the target process exits and returns its
 /// status — bounded, kernel-owned; NOT POSIX wait (no zombies, no fds).
 pub const sys_wait: u64 = 8;
+/// Card N6 (claim 1384): the UDP syscall seam — slots 9/10/11, the card's
+/// ONE ABI change (the ipc slots-5/6 precedent; every existing syscall
+/// number 0–8 stays frozen). `sys_udp_listen(port)` binds the bounded
+/// kernel listen table; `sys_udp_send(ip, port, buf, len)` transmits ONE
+/// datagram (fixed src port 7000, own-IP loopback or the ARP-resolved TX
+/// path); `sys_udp_recv(port, buf, max)` copies the oldest datagram out.
+pub const sys_udp_listen: u64 = 9;
+pub const sys_udp_send: u64 = 10;
+pub const sys_udp_recv: u64 = 11;
 
 pub const ErrorCode = enum(i64) {
     einval = -1,
@@ -96,6 +120,11 @@ var write_fn: ?Writer = null;
 /// Card 4a (claim 5799): fixed BSS scratch for the process snapshot —
 /// `max_processes` rows × 40 bytes, marshaled per call, no allocation.
 var procs_scratch: [process.max_processes * process.snapshot_row_bytes]u8 = undefined;
+/// Card N6 (claim 1384): fixed BSS scratch for the UDP send payload and
+/// the recv peek — `payload_max` / `datagram_max` bytes, marshaled per
+/// call, no allocation (the ipc staging pattern).
+var udp_send_staging: [udp.payload_max]u8 = undefined;
+var udp_recv_scratch: [udp.datagram_max]u8 = undefined;
 
 /// Initialize the writer seam, reset counters and the uaccess regions. The
 /// table remains a runtime-built BSS object; rebuilding is unnecessary once
@@ -130,6 +159,9 @@ fn ensure_table() *const [slot_count]Entry {
         table_storage[sys_ipc_recv] = .{ .name = "sys_ipc_recv", .handler = handle_ipc_recv };
         table_storage[sys_procs] = .{ .name = "sys_procs", .handler = handle_procs };
         table_storage[sys_wait] = .{ .name = "sys_wait", .handler = handle_wait };
+        table_storage[sys_udp_listen] = .{ .name = "sys_udp_listen", .handler = handle_udp_listen };
+        table_storage[sys_udp_send] = .{ .name = "sys_udp_send", .handler = handle_udp_send };
+        table_storage[sys_udp_recv] = .{ .name = "sys_udp_recv", .handler = handle_udp_recv };
         table_ready = true;
     }
     return &table_storage;
@@ -346,9 +378,93 @@ fn handle_wait(args: Args, _: *exceptions.VectorFrame) u64 {
     return 0;
 }
 
-/// Deterministic monitor output for the nine implemented rows and their counters.
+// ---------------------------------------------------------------------------
+// Card N6 (claim 1384): the UDP syscall seam — slots 9/10/11
+// ---------------------------------------------------------------------------
+
+/// `sys_udp_listen(port)`: bind the bounded kernel listen table
+/// (`udp.listen_port` — the SAME table the monitor's `net udp listen`
+/// uses) to `port`. Port 0 or > 65535 → EINVAL; a duplicate or full
+/// table → EINVAL (the N5 layer's honest bool). Returns 0 on success.
+/// No uaccess. Kernel-global: any EL0 task may bind any port (honest
+/// bound, documented in the ADR 0007 amendment).
+fn handle_udp_listen(args: Args, _: *exceptions.VectorFrame) u64 {
+    const port = args[0];
+    if (port == 0 or port > 0xffff) return error_result(.einval);
+    if (!udp.listen_port(@truncate(port))) return error_result(.einval);
+    return 0;
+}
+
+/// `sys_udp_send(ip, port, buf, len)`: send ONE UDP datagram to
+/// `ip:port` from the FIXED source port 7000 (`udp.default_src_port` —
+/// deterministic, the N5 shape). `ip` is the 4 octets in NETWORK byte
+/// order in the low 32 bits of x0 (e.g. 10.0.0.2 = 0x0a000002 — the
+/// kernel extracts the bytes explicitly, never a bitcast: AArch64 is
+/// little-endian). `len` bytes (≤ `udp.payload_max`, truncated honestly
+/// at the bound — the ipc send shape) are copied from `buf` through
+/// uaccess into a fixed BSS staging buffer, then `net_udp_send` runs the
+/// N5 path: an own-IP send takes the LOOPBACK path (no device round
+/// trip), a peer send needs its MAC in the ARP table (`.no_peer` /
+/// `.not_ready` / `.timeout` → EINVAL — the caller resolves the peer
+/// first via `net arp <ip>` and may retry; the seam does NOT resolve
+/// ARP). Port 0 → EINVAL. Bad `buf` → EFAULT. Zero length is a no-op
+/// returning 0 (the ipc send shape). Returns the payload length sent.
+fn handle_udp_send(args: Args, _: *exceptions.VectorFrame) u64 {
+    const ip_raw = args[0];
+    const dst_port = args[1];
+    const address = args[2];
+    var len = args[3];
+    if (dst_port == 0 or dst_port > 0xffff) return error_result(.einval);
+    if (len == 0) return 0;
+    if (len > udp.payload_max) len = udp.payload_max; // documented truncation
+    const ip: [4]u8 = .{
+        @truncate(ip_raw >> 24),
+        @truncate(ip_raw >> 16),
+        @truncate(ip_raw >> 8),
+        @truncate(ip_raw),
+    };
+    if (uaccess.copy_in(&udp_send_staging, address, @intCast(len)) != .ok) return error_result(.efault);
+    var out_len: usize = 0;
+    switch (virtio_net.net_udp_send(ip, @truncate(dst_port), udp_send_staging[0..@intCast(len)], &out_len)) {
+        .ok => return len,
+        .not_ready, .no_peer, .timeout => return error_result(.einval),
+    }
+}
+
+/// `sys_udp_recv(port, buf, max)`: copy the oldest datagram for the
+/// listener on `port` OUT through uaccess — the full 8-byte UDP header
+/// + payload (the caller parses the header for the src port; the src IP
+/// is not kept — honest bound, documented). Returns the copied length;
+/// 0 when the ring is empty; EINVAL when not listening on `port`. `max`
+/// clamps to `udp.datagram_max` (72); shorter copies truncate and
+/// CONSUME (the ipc recv shape). The datagram is PEEKED, copied out, and
+/// only then popped — a bad recv buffer (`EFAULT`) leaves it queued
+/// (the claim-5965 contract). The device is DRAINED FIRST (the
+/// claim-6076 polled-drain contract — the net device's used-buffer IRQ
+/// is unobserved): a recv pulls any waiting frame device → ring
+/// synchronously, so an EL0 polling loop is self-sufficient without the
+/// shell idle loop (the monitor's drain-before-read pattern — observed
+/// live: without the drain the answer sat in the device queue until a
+/// `net` command drained it, and the program's poll starved).
+fn handle_udp_recv(args: Args, _: *exceptions.VectorFrame) u64 {
+    const port = args[0];
+    const address = args[1];
+    var max = args[2];
+    if (max == 0) return 0;
+    if (max > udp.datagram_max) max = udp.datagram_max; // documented clamp
+    if (port == 0 or port > 0xffff) return error_result(.einval);
+    virtio_net.net_rx_drain(); // the polled-drain contract (no-op unarmed)
+    if (!udp.is_listening(@truncate(port))) return error_result(.einval);
+    const d = udp.peek(@truncate(port)) orelse return 0; // empty ring
+    const take = @min(@as(usize, @intCast(max)), d.len);
+    if (uaccess.copy_out(address, d.bytes[0..take], take) != .ok) return error_result(.efault);
+    _ = udp.pop(@truncate(port)); // consume (the EFAULT path preserved it)
+    return @intCast(take);
+}
+
+/// Deterministic monitor output for the twelve implemented rows and their counters.
 pub fn report(con: *console.Console) void {
-    con.puts("syscalls: slots=64 implemented=9\n");
+    con.puts("syscalls: slots=64 implemented=12\n");
     var number: u64 = 0;
     while (number < implemented_count) : (number += 1) {
         const info = entry_info(number).?;
@@ -380,7 +496,7 @@ fn capture_marshaled_args(args: Args, _: *exceptions.VectorFrame) u64 {
     return 0xcafe;
 }
 
-test "syscall: runtime table has 64 slots and nine unique implemented rows" {
+test "syscall: runtime table has 64 slots and twelve unique implemented rows" {
     init(test_writer);
     const table = ensure_table();
     try std.testing.expectEqual(@as(usize, 64), table.len);
@@ -393,7 +509,7 @@ test "syscall: runtime table has 64 slots and nine unique implemented rows" {
             implemented += 1;
         }
     }
-    try std.testing.expectEqual(@as(usize, 9), implemented);
+    try std.testing.expectEqual(@as(usize, 12), implemented);
     try std.testing.expectEqualStrings("sys_ping", entry_info(0).?.name);
     try std.testing.expectEqualStrings("sys_exit", entry_info(3).?.name);
     try std.testing.expectEqualStrings("sys_sleep", entry_info(4).?.name);
@@ -401,7 +517,10 @@ test "syscall: runtime table has 64 slots and nine unique implemented rows" {
     try std.testing.expectEqualStrings("sys_ipc_recv", entry_info(6).?.name);
     try std.testing.expectEqualStrings("sys_procs", entry_info(7).?.name);
     try std.testing.expectEqualStrings("sys_wait", entry_info(8).?.name);
-    try std.testing.expect(entry_info(9) == null);
+    try std.testing.expectEqualStrings("sys_udp_listen", entry_info(9).?.name);
+    try std.testing.expectEqualStrings("sys_udp_send", entry_info(10).?.name);
+    try std.testing.expectEqualStrings("sys_udp_recv", entry_info(11).?.name);
+    try std.testing.expect(entry_info(12) == null);
     try std.testing.expect(entry_info(63) == null);
 }
 
@@ -938,6 +1057,147 @@ test "syscall: handle_svc decodes and dispatches slot 8 via the frame" {
     try std.testing.expectEqual(@as(u64, 1), call_count(sys_wait));
 }
 
+test "syscall: udp listen — ok, duplicate, full, and port-zero refusal" {
+    init(test_writer);
+    virtio_net.udp.reset();
+    defer virtio_net.udp.reset();
+    var frame = fresh_frame();
+    // Port 0 is never bindable (and > 65535 is refused): EINVAL.
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_udp_listen, .{ 0, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_udp_listen, .{ 0x10000, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_udp_listen, .{ 7000, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expect(virtio_net.udp.is_listening(7000));
+    // Duplicate: EINVAL (the N5 layer's honest bool, mapped).
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_udp_listen, .{ 7000, 0, 0, 0, 0, 0 }, &frame));
+    // Fill the 4-slot table: the fifth bind is EINVAL.
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_udp_listen, .{ 7001, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_udp_listen, .{ 7002, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_udp_listen, .{ 7003, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_udp_listen, .{ 7004, 0, 0, 0, 0, 0 }, &frame));
+}
+
+test "syscall: udp send/recv — loopback round trip through the handlers" {
+    init(test_writer);
+    virtio_net.udp.reset();
+    defer virtio_net.udp.reset();
+    virtio_net.arp.own_ip = .{ 10, 0, 0, 1 };
+    defer virtio_net.arp.own_ip = .{ 0, 0, 0, 0 };
+    virtio_net.net_ready = false; // the loopback path must NOT need a device
+    const payload = "ping";
+    var recv_buf: [udp.datagram_max]u8 = undefined;
+    set_user_regions(
+        .{ .base = @intFromPtr(payload.ptr), .len = payload.len },
+        .{ .base = @intFromPtr(&recv_buf), .len = recv_buf.len },
+    );
+    var frame = fresh_frame();
+    // Bind 7000 through the seam, then loopback-send to OUR OWN IP
+    // (10.0.0.1 = 0x0a000001 in network byte order) with the payload.
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_udp_listen, .{ 7000, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u64, payload.len), dispatch(sys_udp_send, .{ 0x0a000001, 7000, @intFromPtr(payload.ptr), payload.len, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u64, 1), virtio_net.udp.sent);
+    try std.testing.expectEqual(@as(u64, 1), virtio_net.udp.loopbacked);
+    try std.testing.expectEqual(@as(u64, 1), virtio_net.udp.received);
+    // Recv the loopbacked datagram: the full 12-byte shape (src 7000,
+    // dst 7000, len 12, checksum, payload) — the caller parses the header.
+    try std.testing.expectEqual(@as(u64, 12), dispatch(sys_udp_recv, .{ 7000, @intFromPtr(&recv_buf), udp.datagram_max, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u16, 7000), (@as(u16, recv_buf[0]) << 8) | recv_buf[1]);
+    try std.testing.expectEqual(@as(u16, 7000), (@as(u16, recv_buf[2]) << 8) | recv_buf[3]);
+    try std.testing.expectEqual(@as(u16, 12), (@as(u16, recv_buf[4]) << 8) | recv_buf[5]);
+    try std.testing.expectEqualSlices(u8, payload, recv_buf[8..12]);
+    // The ring is now empty: recv returns 0 (not EINVAL — the port IS bound).
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_udp_recv, .{ 7000, @intFromPtr(&recv_buf), udp.datagram_max, 0, 0, 0 }, &frame));
+    // Recv on an UNBOUND port: EINVAL (distinct from the empty result).
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_udp_recv, .{ 9998, @intFromPtr(&recv_buf), udp.datagram_max, 0, 0, 0 }, &frame));
+    // A bad recv buffer: EFAULT and the datagram stays QUEUED (peek ->
+    // copy_out -> pop).
+    try std.testing.expectEqual(@as(u64, 4), dispatch(sys_udp_send, .{ 0x0a000001, 7000, @intFromPtr(payload.ptr), payload.len, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.efault), dispatch(sys_udp_recv, .{ 7000, uaccess.diagnostic_unmapped, udp.datagram_max, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u64, 12), dispatch(sys_udp_recv, .{ 7000, @intFromPtr(&recv_buf), udp.datagram_max, 0, 0, 0 }, &frame));
+    try std.testing.expectEqualSlices(u8, payload, recv_buf[8..12]);
+}
+
+test "syscall: udp send — EINVAL mapping, EFAULT, and the honest truncation" {
+    init(test_writer);
+    virtio_net.udp.reset();
+    defer virtio_net.udp.reset();
+    virtio_net.arp.own_ip = .{ 10, 0, 0, 1 };
+    defer virtio_net.arp.own_ip = .{ 0, 0, 0, 0 };
+    var big: [100]u8 = undefined;
+    for (&big, 0..) |*b, i| b.* = @intCast(i & 0xff);
+    set_user_regions(
+        .{ .base = @intFromPtr(&big), .len = big.len },
+        .{ .base = 0, .len = 0 },
+    );
+    var frame = fresh_frame();
+    // Port 0 is refused before anything is copied.
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_udp_send, .{ 0x0a000001, 0, @intFromPtr(&big), 4, 0, 0 }, &frame));
+    // A bad payload pointer: EFAULT (the uaccess contract).
+    try std.testing.expectEqual(error_result(.efault), dispatch(sys_udp_send, .{ 0x0a000001, 7000, uaccess.diagnostic_unmapped, 4, 0, 0 }, &frame));
+    // No static IP (0.0.0.0): the send is refused honestly (not_ready).
+    virtio_net.arp.own_ip = .{ 0, 0, 0, 0 };
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_udp_send, .{ 0x0a000001, 7000, @intFromPtr(&big), 4, 0, 0 }, &frame));
+    // Transport down, IP set: a PEER send is not_ready -> EINVAL.
+    virtio_net.arp.own_ip = .{ 10, 0, 0, 1 };
+    virtio_net.net_ready = false;
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_udp_send, .{ 0x0a000002, 9999, @intFromPtr(&big), 4, 0, 0 }, &frame));
+    // Transport up, peer NOT in the ARP table: .no_peer -> EINVAL (the
+    // seam does not resolve ARP — `net arp <ip>` first, then retry).
+    virtio_net.net_ready = true;
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_udp_send, .{ 0x0a000002, 9999, @intFromPtr(&big), 4, 0, 0 }, &frame));
+    virtio_net.net_ready = false;
+    // len > 64 truncates honestly at payload_max (the ipc send shape) and
+    // the send returns the WRITTEN length: 64. The loopbacked datagram is
+    // 72 bytes with the first 64 payload bytes.
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_udp_listen, .{ 7000, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u64, udp.payload_max), dispatch(sys_udp_send, .{ 0x0a000001, 7000, @intFromPtr(&big), big.len, 0, 0 }, &frame));
+    var recv_buf: [udp.datagram_max]u8 = undefined;
+    set_user_regions(
+        .{ .base = @intFromPtr(&big), .len = big.len },
+        .{ .base = @intFromPtr(&recv_buf), .len = recv_buf.len },
+    );
+    try std.testing.expectEqual(@as(u64, udp.datagram_max), dispatch(sys_udp_recv, .{ 7000, @intFromPtr(&recv_buf), 100, 0, 0, 0 }, &frame));
+    try std.testing.expectEqualSlices(u8, big[0..udp.payload_max], recv_buf[8..72]);
+}
+
+test "syscall: handle_svc decodes and dispatches slots 9/10/11 via the frame" {
+    init(test_writer);
+    virtio_net.udp.reset();
+    defer virtio_net.udp.reset();
+    virtio_net.arp.own_ip = .{ 10, 0, 0, 1 };
+    defer virtio_net.arp.own_ip = .{ 0, 0, 0, 0 };
+    const payload = "ping";
+    var recv_buf: [udp.datagram_max]u8 = undefined;
+    set_user_regions(
+        .{ .base = @intFromPtr(payload.ptr), .len = payload.len },
+        .{ .base = @intFromPtr(&recv_buf), .len = recv_buf.len },
+    );
+    // The marshaling seam (claim 3594): x8 carries the number, x0-x5 the
+    // arguments, x0 receives the result — driven through handle_svc like
+    // real EL0 SVC entries.
+    var frame = fresh_frame();
+    try std.testing.expect(exceptions.frame_write(&frame, 8, sys_udp_listen));
+    try std.testing.expect(exceptions.frame_write(&frame, 0, 7000));
+    try std.testing.expect(handle_svc(&frame, svc_immediate));
+    try std.testing.expectEqual(@as(u64, 0), exceptions.frame_read(&frame, 0));
+    try std.testing.expectEqual(@as(u64, 1), call_count(sys_udp_listen));
+    try std.testing.expect(exceptions.frame_write(&frame, 8, sys_udp_send));
+    try std.testing.expect(exceptions.frame_write(&frame, 0, 0x0a000001));
+    try std.testing.expect(exceptions.frame_write(&frame, 1, 7000));
+    try std.testing.expect(exceptions.frame_write(&frame, 2, @intFromPtr(payload.ptr)));
+    try std.testing.expect(exceptions.frame_write(&frame, 3, payload.len));
+    try std.testing.expect(handle_svc(&frame, svc_immediate));
+    try std.testing.expectEqual(@as(u64, payload.len), exceptions.frame_read(&frame, 0));
+    try std.testing.expectEqual(@as(u64, 1), call_count(sys_udp_send));
+    try std.testing.expect(exceptions.frame_write(&frame, 8, sys_udp_recv));
+    try std.testing.expect(exceptions.frame_write(&frame, 0, 7000));
+    try std.testing.expect(exceptions.frame_write(&frame, 1, @intFromPtr(&recv_buf)));
+    try std.testing.expect(exceptions.frame_write(&frame, 2, udp.datagram_max));
+    try std.testing.expect(handle_svc(&frame, svc_immediate));
+    try std.testing.expectEqual(@as(u64, 12), exceptions.frame_read(&frame, 0));
+    try std.testing.expectEqual(@as(u64, 1), call_count(sys_udp_recv));
+    try std.testing.expectEqualSlices(u8, payload, recv_buf[8..12]);
+}
+
 test "syscall: counters are monotonic and report is deterministic" {
     userspace.init();
     init(test_writer);
@@ -949,7 +1209,7 @@ test "syscall: counters are monotonic and report is deterministic" {
     var con = mock.console();
     report(&con);
     try std.testing.expectEqualStrings(
-        "syscalls: slots=64 implemented=9\n" ++
+        "syscalls: slots=64 implemented=12\n" ++
             "  0 sys_ping calls=2\n" ++
             "  1 sys_write calls=0\n" ++
             "  2 sys_yield calls=0\n" ++
@@ -958,7 +1218,10 @@ test "syscall: counters are monotonic and report is deterministic" {
             "  5 sys_ipc_send calls=0\n" ++
             "  6 sys_ipc_recv calls=0\n" ++
             "  7 sys_procs calls=0\n" ++
-            "  8 sys_wait calls=0\n",
+            "  8 sys_wait calls=0\n" ++
+            "  9 sys_udp_listen calls=0\n" ++
+            "  10 sys_udp_send calls=0\n" ++
+            "  11 sys_udp_recv calls=0\n",
         mock.contents(),
     );
 }

@@ -591,7 +591,7 @@ gates pass; tagged `m1.5-interactive-monitor`** (see
   `tasks user-exec exited status=43` / `procs STATUS43.BIN exited
   status=43` records; the full 12-gate shared-seam sweep + the
   args/kill/ipc/scale/procs-syscall gates all PASS 1/1.
-- **Network stack (in progress — N1 + N2 + N3 + N4 + N5 landed 2026-08-11, claims 1373/6076/7293/0148/8552).** The
+- **Network stack (in progress — N1 + N2 + N3 + N4 + N5 + N6 landed 2026-08-12, claims 1373/6076/7293/0148/8552/1384).** The
   last "Eventually" item, and the one the virtio surface table below maps
   to. The transport it needs was already proven (virtio
   console/blk/entropy/custom drivers: discovery, queues, IRQ delivery,
@@ -700,10 +700,20 @@ gates pass; tagged `m1.5-interactive-monitor`** (see
     and the host answer lands in the listener buffer; a datagram to a
     closed port is dropped with a counter while still observable via
     `net recv`).
-  - **Later, sketched only:** UDP behind a bounded syscall seam (an ADR
-    0007 amendment — N5 delivered UDP over the monitor `net` surface;
-    the seam is the separate NEXT step), DHCP, loopback-as-a-device,
-    then TCP — far future, and
+  - **N6 — UDP behind a bounded syscall seam.** **LIVE 2026-08-12
+    (claim 1384)** — the ADR 0007 amendment slots 9/10/11
+    (`sys_udp_listen` / `sys_udp_send` / `sys_udp_recv`): the N5 UDP
+    layer exposed to EL0 user programs through the claim-6120 uaccess
+    window (implemented 9 → 12), driven end to end by UDP.BIN (a new
+    EL0 program: listen on 7000, LOOPBACK send+recv, peer round trip
+    with the host's `--net-udp-respond` answer, the `EINVAL` error
+    mapping from EL0 for an unbound-port recv + an unresolved-peer
+    send, `sys_exit(17)`). The recv drains the device FIRST (the
+    claim-6076 polled-drain contract) so an EL0 polling loop is
+    self-sufficient. Live gate `tools/verify-live-net-udp-syscall.sh`
+    PASS 4/4; the 34-gate `verify-vz` aggregate re-ran green 34/34.
+  - **Later, sketched only:** DHCP, loopback-as-a-device, then TCP —
+    far future, and
     the "only when the ones below it are demonstrably working" rule
     applies at every rung. The driver starts single-CPU (boot CPU, the
     claim-9187/0828 IRQ pattern); SMP is a separate future card.
@@ -720,7 +730,7 @@ remaining two (graphics, balloon) are the open milestones.
 | Block (0x1042) | `VZVirtioBlockDeviceConfiguration` (disk image attachment) | `virtio_blk.zig` — modern virtio-blk, post-exit re-arm | ✅ done | 6420 (FAT32 storage driver), 3678 (general non-ESP FS on top) |
 | Entropy (0x1044) | `VZVirtioEntropyDeviceConfiguration` | `virtio_entropy.zig` (boot-time 64-byte seed) + `csprng.zig` (ChaCha20, RFC 7539) | ✅ done | 2665 (driver + CSPRNG + `random`), 3693 (EL0 stack ASLR consumer) |
 | Custom virtio (0x1082, macOS 27) | `VZCustomVirtioDeviceConfiguration` (`--custom-virtio` / `zig build spike-virtio`) | `virtio_custom.zig` — queue transport + used-ring IRQ | ✅ done | 5844 (host spike + `pci` command), 0828 (bidirectional queue + SPI IRQ), 4374 (ring allocator / multi-queue), 9492 (multi-descriptor payloads), 9737 (feature negotiation), 4837 (log transport) |
-| Network (0x1041) | `VZVirtioNetworkDeviceConfiguration` + `VZFileHandleNetworkDeviceAttachment` (`--net <capture-file>`, `--net-inject <file>`, `--net-arp-respond <host-ip>`, `--net-icmp-respond <host-ip>`, `--net-udp-respond <host-ip>:<host-port>`, flag-gated; fixed host MAC) | `virtio_net.zig` — TX + RX + ARP + ICMP + UDP (N1 + N2 + N3 + N4 + N5); `arp.zig`; `ipv4.zig`; `udp.zig` | ✅ TX + RX + ARP + ICMP + UDP (claims 1373/6076/7293/0148/8552) | 1373 (transport + TX live — DID 0x1041, VER1\|MTU\|MAC, feature-path MAC, queues 0/1, 12-byte TX-hdr contract, byte-exact host capture; `verify-live-net-tx.sh` PASS 2/2); 6076 (RX live — queue-0 buffer supply, polled used-ring drain, bounded FIFO, MAC filter, `net recv`; host→guest injection + the round trip; 12-byte RX-hdr observed, min RX buffer 1530 observed; `verify-live-net-rx.sh` PASS 3/3 + 29-gate aggregate green); 7293 (ARP live — static IP, answer/resolve over the RX seam, bounded table, `--net-arp-respond`; 42-byte frames unpadded observed; `verify-live-net-arp.sh` PASS 3/3 + 31-gate aggregate green); 0148 (IPv4/ICMP live — RFC 1071 checksums, echo answer/observe over the RX seam, `net ping`, `--net-icmp-respond`; the 46-byte frames travel unpadded, consistent with the N3 observation; `verify-live-net-icmp.sh` PASS 3/3 + 32-gate aggregate green); 8552 (UDP live — RFC 768 + the pseudo-header checksum over the N4 seam, bounded listen table + datagram buffers, the LOOPBACK path, `net udp`, `--net-udp-respond`; the 46-byte datagrams travel unpadded, consistent with the N3/N4 observation; `verify-live-net-udp.sh` PASS 4/4 + 33-gate aggregate green) |
+| Network (0x1041) | `VZVirtioNetworkDeviceConfiguration` + `VZFileHandleNetworkDeviceAttachment` (`--net <capture-file>`, `--net-inject <file>`, `--net-arp-respond <host-ip>`, `--net-icmp-respond <host-ip>`, `--net-udp-respond <host-ip>:<host-port>`, flag-gated; fixed host MAC) | `virtio_net.zig` — TX + RX + ARP + ICMP + UDP (N1 + N2 + N3 + N4 + N5); `arp.zig`; `ipv4.zig`; `udp.zig`; `syscall.zig` slots 9/10/11 (N6 — the UDP syscall seam) | ✅ TX + RX + ARP + ICMP + UDP + the UDP syscall seam (claims 1373/6076/7293/0148/8552/1384) | 1373 (transport + TX live — DID 0x1041, VER1\|MTU\|MAC, feature-path MAC, queues 0/1, 12-byte TX-hdr contract, byte-exact host capture; `verify-live-net-tx.sh` PASS 2/2); 6076 (RX live — queue-0 buffer supply, polled used-ring drain, bounded FIFO, MAC filter, `net recv`; host→guest injection + the round trip; 12-byte RX-hdr observed, min RX buffer 1530 observed; `verify-live-net-rx.sh` PASS 3/3 + 29-gate aggregate green); 7293 (ARP live — static IP, answer/resolve over the RX seam, bounded table, `--net-arp-respond`; 42-byte frames unpadded observed; `verify-live-net-arp.sh` PASS 3/3 + 31-gate aggregate green); 0148 (IPv4/ICMP live — RFC 1071 checksums, echo answer/observe over the RX seam, `net ping`, `--net-icmp-respond`; the 46-byte frames travel unpadded, consistent with the N3 observation; `verify-live-net-icmp.sh` PASS 3/3 + 32-gate aggregate green); 8552 (UDP live — RFC 768 + the pseudo-header checksum over the N4 seam, bounded listen table + datagram buffers, the LOOPBACK path, `net udp`, `--net-udp-respond`; the 46-byte datagrams travel unpadded, consistent with the N3/N4 observation; `verify-live-net-udp.sh` PASS 4/4 + 33-gate aggregate green); 1384 (UDP syscall seam live — ADR 0007 slots 9/10/11 from EL0 via UDP.BIN: listen, loopback, the peer round trip, the EINVAL error mapping, exit 17; the polled-drain recv contract; `verify-live-net-udp-syscall.sh` PASS 4/4 + 34-gate aggregate green) |
 | Graphics | `VZVirtioGraphicsDeviceConfiguration` — attached only for screenshots (`--screenshot`) | none | ⬜ not started — the future GUI milestone | — |
 | Balloon | `VZMemoryBalloonDeviceConfiguration` — nothing attached | none | ⬜ not started — low priority (fixed 256 MiB guest, no demand paging) | — |
 

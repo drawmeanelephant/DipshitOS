@@ -214,6 +214,23 @@ pub fn deliver(dst_port: u16, datagram: []const u8) void {
     received += 1;
 }
 
+/// True when the listen table has an entry for `port` (the syscall recv
+/// distinguishes "not listening" (EINVAL) from "empty ring" (0) —
+/// claim 1384, card N6).
+pub fn is_listening(port: u16) bool {
+    return find_listener(port) != null;
+}
+
+/// Copy the oldest datagram for the listener on `port` WITHOUT consuming
+/// it (null when empty or not listening). The syscall recv path uses
+/// peek → copy_out → pop so a bad recv buffer (`EFAULT`) leaves the
+/// datagram queued — the claim-5965 ipc contract (claim 1384, card N6).
+pub fn peek(port: u16) ?Datagram {
+    const slot = find_listener(port) orelse return null;
+    if (buf_count[slot] == 0) return null;
+    return buffers[slot][buf_head[slot]];
+}
+
 /// Pop the oldest datagram for the listener on `port` (null when empty).
 pub fn pop(port: u16) ?Datagram {
     const slot = find_listener(port) orelse return null;
@@ -408,6 +425,27 @@ test "udp: listen table — add, duplicate, full, close" {
     try std.testing.expect(close_port(7001));
     try std.testing.expect(!close_port(7001)); // already closed
     try std.testing.expect(listen_port(7004)); // the freed slot is reusable
+}
+
+test "udp: peek — copies without consuming, is_listening distinguishes" {
+    reset();
+    defer reset();
+    try std.testing.expect(!is_listening(7000));
+    try std.testing.expect(listen_port(7000));
+    try std.testing.expect(is_listening(7000));
+    try std.testing.expect(is_listening(7001) == false);
+    // An empty listener peeks null.
+    try std.testing.expect(peek(7000) == null);
+    // Deliver one datagram (loopback shape, src 7000 -> dst 7000).
+    _ = loopback(.{ 10, 0, 0, 1 }, 7000, "ping");
+    const d = peek(7000).?;
+    try std.testing.expectEqual(@as(usize, 12), d.len);
+    // peek does NOT consume: a second peek sees the SAME datagram, and
+    // pop then drains it (the claim-1384 syscall recv ordering).
+    try std.testing.expectEqual(@as(usize, 12), peek(7000).?.len);
+    _ = pop(7000).?;
+    try std.testing.expect(peek(7000) == null);
+    try std.testing.expectEqual(@as(u64, 1), received);
 }
 
 test "udp: handle_rx — deliver to a listener, drop badsum / closed / short" {
