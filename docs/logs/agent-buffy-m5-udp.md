@@ -60,4 +60,4 @@ Prompt: [m5-udp-prompt](m5-udp-prompt.md) (PR #92) · Branched from merged main 
   UDP/IP field (no offload). The used-buffer IRQ line remains
   unobserved — drain stays polled. The 33-gate aggregate re-ran green
   33/33 with the `--net-udp-respond` mode; the default VM is
-  byte-identical. → ✅ done, PR #93.
+  byte-identical. → ✅ done, PR #99.
