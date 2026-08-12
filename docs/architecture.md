@@ -142,7 +142,30 @@ VZEFIBootLoader (macOS VZ)
   default). Gate `tools/verify-live-net-icmp.sh` PASS 3/3 (answer an
   echo for our address, ping a resolved peer, foreign-address scope
   check); the 46-byte frames are delivered/transmitted unpadded,
-  consistent with the N3 observation.
+  consistent with the N3 observation. **UDP landed 2026-08-11 (claim
+  8552, card N5):** a pure protocol layer `kernel/src/udp.zig` (RFC 768
+  — the 8-byte header, the checksum over the IPv4 PSEUDO-HEADER (src/dst
+  IP, zero, protocol 17, UDP length) computed ALWAYS, a bounded 4-slot
+  LISTEN table, bounded per-listener datagram rings (drop-oldest), and
+  LOOPBACK — a send to OUR OWN IP builds the datagram with src == dst ==
+  own_ip and delivers DIRECTLY into the local receive path, no device
+  round trip) wired into ipv4.zig's protocol dispatch: protocol 17 is
+  handed to `udp.handle_rx` on ALREADY-VALIDATED frames (the IPv4
+  checksum/fragment/dst checks stay in ipv4, never duplicated; TCP and
+  other protocols still count `dropped_proto`). `net udp
+  [listen <port>|close <port>|send <addr> <port> <len>|recv [<port>]]`
+  are `net` subcommands (fixed src port 7000, the deterministic payload
+  01 02 03 04…, honest refusals — `.no_peer` on an unresolved MAC, `net
+  arp <ip>` first) and the runner's `--net-udp-respond
+  <host-ip>:<host-port>` answers the guest's datagrams from the host
+  side (same payload byte-exact, both checksums recomputed;
+  deterministic, request-driven, OFF by default). Gate
+  `tools/verify-live-net-udp.sh` PASS 4/4 (loopback with an empty
+  capture, host→guest delivery, guest→host round trip, closed-port
+  drop); the 46-byte datagrams travel unpadded, consistent with the
+  N3/N4 observation. Claim-time fix recorded: the pseudo-header's
+  zero/protocol word was initially reversed (0x1100 vs 0x0011) — the
+  byte-exact fixtures caught it, fixed, re-run green.
 - **Guest ↔ host storage:** the disk is presented as a virtio block device.
   The guest never touches the storage device directly in milestones zero
   and one; the  firmware reads `EFI/BOOT/BOOTAA64.EFI` from it, and the boot stub writes

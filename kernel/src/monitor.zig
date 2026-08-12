@@ -246,7 +246,7 @@ fn ensure_registry() []const Command {
             .{ .name = "mem", .help = "summarize the EFI memory map", .usage = "mem", .handler = cmd_mem },
             .{ .name = "mbox", .help = "per-process IPC mailbox: pending messages and drain counters", .usage = "mbox [<pid>]", .max_args = 1, .handler = cmd_mbox },
             .{ .name = "mount", .help = "switch the active FAT volume (esp or data)", .usage = "mount <esp|data>", .min_args = 1, .max_args = 1, .handler = cmd_mount },
-            .{ .name = "net", .help = "virtio-net transport + RX + ARP + ICMP: device DID, MAC, queues, feature bits, RX counters ('net recv' prints received frames; 'net ip <a.b.c.d>' sets the static IP; 'net arp [<a.b.c.d>]' shows/resolves the ARP table; 'net ping <a.b.c.d>' sends an ICMP echo request)", .usage = "net [recv|ip <addr>|arp [<addr>]|ping <addr>]", .max_args = 2, .handler = cmd_net },
+            .{ .name = "net", .help = "virtio-net transport + RX + ARP + ICMP + UDP: device DID, MAC, queues, feature bits, RX counters ('net recv' prints received frames; 'net ip <a.b.c.d>' sets the static IP; 'net arp [<a.b.c.d>]' shows/resolves the ARP table; 'net ping <a.b.c.d>' sends an ICMP echo request; 'net udp [listen <port>|close <port>|send <addr> <port> <len>|recv [<port>]]' drives UDP)", .usage = "net [recv|ip <addr>|arp [<addr>]|ping <addr>|udp [listen <port>|close <port>|send <addr> <port> <len>|recv [<port>]]]", .max_args = 5, .handler = cmd_net },
             .{ .name = "netsend", .help = "send a known Ethernet frame (bounded staging, TX + used-ring drain)", .usage = "netsend <bytes>", .min_args = 1, .max_args = 1, .handler = cmd_netsend },
             .{ .name = "pages", .help = "physical page allocator pool", .usage = "pages [selftest]", .max_args = 1, .handler = cmd_pages },
             .{ .name = "pci", .help = "enumerate PCI devices on the bus", .usage = "pci", .handler = cmd_pci },
@@ -1312,7 +1312,8 @@ fn cmd_net(m: *Monitor, args: []const []const u8) ExecError {
         if (std.mem.eql(u8, args[0], "ip")) return cmd_net_ip(m, args[1..]);
         if (std.mem.eql(u8, args[0], "arp")) return cmd_net_arp(m, args[1..]);
         if (std.mem.eql(u8, args[0], "ping")) return cmd_net_ping(m, args[1..]);
-        m.console.print_line("net: unknown subcommand (try 'net', 'net recv', 'net ip <a.b.c.d>', 'net arp [<a.b.c.d>]' or 'net ping <a.b.c.d>')");
+        if (std.mem.eql(u8, args[0], "udp")) return cmd_net_udp(m, args[1..]);
+        m.console.print_line("net: unknown subcommand (try 'net', 'net recv', 'net ip <a.b.c.d>', 'net arp [<a.b.c.d>]', 'net ping <a.b.c.d>' or 'net udp [listen|close|send|recv]')");
         return .invalid_argument;
     }
     if (!virtio_net.net_ready) {
@@ -1475,6 +1476,19 @@ fn cmd_net(m: *Monitor, args: []const []const u8) ExecError {
     m.console.print_u64(virtio_net.ipv4.reply_tx_fail);
     m.console.puts(",seq=");
     m.console.print_u64(virtio_net.ipv4.last_seq);
+    m.console.puts("\n");
+    // Card N5 (claim 8552): the UDP layer — datagrams received (into a
+    // listener's buffer, incl. loopback), sent (device TX + loopback),
+    // loopbacked (the no-device path), and dropped (the sum of the three
+    // counted causes). Grep-able and deterministic.
+    m.console.puts(" udp=rx=");
+    m.console.print_u64(virtio_net.udp.received);
+    m.console.puts(",tx=");
+    m.console.print_u64(virtio_net.udp.sent);
+    m.console.puts(",loop=");
+    m.console.print_u64(virtio_net.udp.loopbacked);
+    m.console.puts(",drop=");
+    m.console.print_u64(virtio_net.udp.dropped_badsum + virtio_net.udp.dropped_closed + virtio_net.udp.dropped_len);
     m.console.puts("\n");
     return .none;
 }
@@ -1685,6 +1699,214 @@ fn cmd_net_ping(m: *Monitor, args: []const []const u8) ExecError {
         .no_peer => m.console.print_line("net ping: peer not in ARP table (net arp <a.b.c.d> first)"),
     }
     return .none;
+}
+
+/// `net udp [...]` — card N5 (claim 8552). No argument: the bounded
+/// listen table + the counters. `listen <port>` / `close <port>`: add /
+/// remove a listener (a full or duplicate table is refused honestly).
+/// `send <ip> <port> <len>`: transmit ONE UDP datagram to the peer (peer
+/// MAC from the ARP table; `.no_peer` refused — `net arp <ip>` resolves
+/// first) from the fixed source port 7000, the byte-index payload (≤ 64,
+/// honest truncation); a send to OUR OWN IP takes the LOOPBACK path (no
+/// device round trip). `recv [<port>]`: drain the RX ring (a datagram
+/// may have landed while the shell idled) and print + consume the
+/// datagram(s) in the listener's bounded buffer byte-exact (hex, the
+/// net-recv style).
+fn cmd_net_udp(m: *Monitor, args: []const []const u8) ExecError {
+    if (args.len == 0) {
+        var count: usize = 0;
+        for (&virtio_net.udp.listen) |e| {
+            if (e.valid) count += 1;
+        }
+        m.console.puts("net udp: entries=");
+        m.console.print_u64(@intCast(count));
+        m.console.puts("\n");
+        for (&virtio_net.udp.listen) |e| {
+            if (!e.valid) continue;
+            m.console.puts("net udp: port=");
+            m.console.print_u64(e.port);
+            m.console.puts("\n");
+        }
+        m.console.puts("net udp: rx=");
+        m.console.print_u64(virtio_net.udp.received);
+        m.console.puts(",tx=");
+        m.console.print_u64(virtio_net.udp.sent);
+        m.console.puts(",loop=");
+        m.console.print_u64(virtio_net.udp.loopbacked);
+        m.console.puts(",drop=");
+        m.console.print_u64(virtio_net.udp.dropped_badsum + virtio_net.udp.dropped_closed + virtio_net.udp.dropped_len);
+        m.console.puts("\n");
+        return .none;
+    }
+    if (std.mem.eql(u8, args[0], "listen")) {
+        if (args.len != 2) {
+            m.console.print_line("net udp: usage: net udp listen <port>");
+            return .invalid_argument;
+        }
+        const port = parse_port(args[1]) orelse {
+            m.console.puts("net udp: invalid port: ");
+            m.console.puts(args[1]);
+            m.console.puts("\n");
+            return .invalid_argument;
+        };
+        if (!virtio_net.udp.listen_port(port)) {
+            m.console.print_line("net udp: listen failed (table full or duplicate)");
+            return .none;
+        }
+        m.console.puts("net udp: listening on ");
+        m.console.print_u64(port);
+        m.console.puts("\n");
+        return .none;
+    }
+    if (std.mem.eql(u8, args[0], "close")) {
+        if (args.len != 2) {
+            m.console.print_line("net udp: usage: net udp close <port>");
+            return .invalid_argument;
+        }
+        const port = parse_port(args[1]) orelse {
+            m.console.puts("net udp: invalid port: ");
+            m.console.puts(args[1]);
+            m.console.puts("\n");
+            return .invalid_argument;
+        };
+        if (!virtio_net.udp.close_port(port)) {
+            m.console.puts("net udp: not listening on ");
+            m.console.print_u64(port);
+            m.console.puts("\n");
+            return .none;
+        }
+        m.console.puts("net udp: closed ");
+        m.console.print_u64(port);
+        m.console.puts("\n");
+        return .none;
+    }
+    if (std.mem.eql(u8, args[0], "send")) {
+        if (args.len != 4) {
+            m.console.print_line("net udp: usage: net udp send <a.b.c.d> <port> <len>");
+            return .invalid_argument;
+        }
+        const ip = virtio_net.arp.parse_ip(args[1]) orelse {
+            m.console.puts("net udp: invalid address: ");
+            m.console.puts(args[1]);
+            m.console.puts("\n");
+            return .invalid_argument;
+        };
+        const port = parse_port(args[2]) orelse {
+            m.console.puts("net udp: invalid port: ");
+            m.console.puts(args[2]);
+            m.console.puts("\n");
+            return .invalid_argument;
+        };
+        const len = parseInt(args[3]) catch {
+            m.console.puts("net udp: invalid length: ");
+            m.console.puts(args[3]);
+            m.console.puts("\n");
+            return .invalid_argument;
+        };
+        if (len < 1 or len > virtio_net.udp.payload_max) {
+            m.console.puts("net udp: length must be between 1 and ");
+            m.console.print_u64(virtio_net.udp.payload_max);
+            m.console.puts("\n");
+            return .invalid_argument;
+        }
+        // The deterministic payload — bytes 01 02 03 04… (byte i + 1,
+        // bounded ≤ 64) — the live gate's byte-exact fixtures pin it.
+        var payload: [virtio_net.udp.payload_max]u8 = undefined;
+        var pi: usize = 0;
+        while (pi < len) : (pi += 1) payload[pi] = @as(u8, @truncate(pi)) +% 1;
+        var frame_len: usize = 0;
+        switch (virtio_net.net_udp_send(ip, port, payload[0..@intCast(len)], &frame_len)) {
+            .ok => {
+                m.console.puts("net udp: sent ");
+                m.console.print_u64(len);
+                m.console.puts(" bytes to ");
+                var ipbuf: [15]u8 = undefined;
+                const in = virtio_net.arp.format_ip(ip, &ipbuf);
+                m.console.puts(ipbuf[0..in]);
+                m.console.puts(":");
+                m.console.print_u64(port);
+                m.console.puts(" (");
+                m.console.print_u64(@intCast(frame_len));
+                m.console.puts(" bytes)\n");
+            },
+            .not_ready => m.console.print_line("net udp: no IP set (net ip <a.b.c.d> first) or transport unready"),
+            .timeout => m.console.print_line("net udp: datagram TX timeout (device did not complete within the poll budget)"),
+            .no_peer => m.console.print_line("net udp: peer not in ARP table (net arp <a.b.c.d> first)"),
+        }
+        return .none;
+    }
+    if (std.mem.eql(u8, args[0], "recv")) {
+        if (args.len > 2) {
+            m.console.print_line("net udp: usage: net udp recv [<port>]");
+            return .invalid_argument;
+        }
+        // A datagram may have landed while the shell idled — drain first.
+        virtio_net.net_rx_drain();
+        if (args.len == 2) {
+            const port = parse_port(args[1]) orelse {
+                m.console.puts("net udp: invalid port: ");
+                m.console.puts(args[1]);
+                m.console.puts("\n");
+                return .invalid_argument;
+            };
+            _ = cmd_net_udp_recv_port(m, port);
+            return .none;
+        }
+        var total: usize = 0;
+        for (&virtio_net.udp.listen) |e| {
+            if (!e.valid) continue;
+            total += cmd_net_udp_recv_port(m, e.port);
+        }
+        m.console.puts("net udp recv: total=");
+        m.console.print_u64(@intCast(total));
+        m.console.puts("\n");
+        return .none;
+    }
+    m.console.print_line("net udp: unknown subcommand (try 'net udp', 'net udp listen <port>', 'net udp close <port>', 'net udp send <a.b.c.d> <port> <len>' or 'net udp recv [<port>]')");
+    return .invalid_argument;
+}
+
+/// Drain + print the datagrams buffered for ONE listener, byte-exact
+/// (hex, the net-recv style). Returns how many were printed.
+fn cmd_net_udp_recv_port(m: *Monitor, port: u16) usize {
+    var count: usize = 0;
+    while (virtio_net.udp.pop(port)) |d| {
+        if (count == 0) {
+            m.console.puts("net udp recv: port=");
+            m.console.print_u64(port);
+            m.console.puts("\n");
+        }
+        m.console.puts("net udp recv: [");
+        m.console.print_u64(@intCast(count));
+        m.console.puts("] len=");
+        m.console.print_u64(@intCast(d.len));
+        m.console.puts("\n");
+        m.console.puts("net udp recv: ");
+        var bi: usize = 0;
+        while (bi < d.len) : (bi += 1) {
+            if (bi > 0) m.console.puts(" ");
+            const b = d.bytes[bi];
+            const hex = "0123456789abcdef";
+            var two: [2]u8 = .{ hex[b >> 4], hex[b & 0xf] };
+            m.console.puts(&two);
+        }
+        m.console.puts("\n");
+        count += 1;
+    }
+    if (count == 0) {
+        m.console.puts("net udp recv: no datagrams for port ");
+        m.console.print_u64(port);
+        m.console.puts("\n");
+    }
+    return count;
+}
+
+/// Parse a decimal (or 0x-prefixed hex) port in 0..65535, the `net udp`
+/// subcommands' bound.
+fn parse_port(text: []const u8) ?u16 {
+    const v = parseInt(text) catch return null;
+    if (v > 0xffff) return null;
+    return @intCast(v);
 }
 
 /// `netsend <bytes>` — build the N1 known frame in the fixed staging
@@ -2422,7 +2644,7 @@ test "monitor: net reports no device honestly when the transport is absent" {
     );
     // `net` is registered (the prompt's registry-row shape).
     try std.testing.expect(lookup("net") != null);
-    try std.testing.expectEqualStrings("virtio-net transport + RX + ARP + ICMP: device DID, MAC, queues, feature bits, RX counters ('net recv' prints received frames; 'net ip <a.b.c.d>' sets the static IP; 'net arp [<a.b.c.d>]' shows/resolves the ARP table; 'net ping <a.b.c.d>' sends an ICMP echo request)", lookup("net").?.help);
+    try std.testing.expectEqualStrings("virtio-net transport + RX + ARP + ICMP + UDP: device DID, MAC, queues, feature bits, RX counters ('net recv' prints received frames; 'net ip <a.b.c.d>' sets the static IP; 'net arp [<a.b.c.d>]' shows/resolves the ARP table; 'net ping <a.b.c.d>' sends an ICMP echo request; 'net udp [listen <port>|close <port>|send <addr> <port> <len>|recv [<port>]]' drives UDP)", lookup("net").?.help);
     try std.testing.expect(lookup("netsend") != null);
 }
 
@@ -2588,6 +2810,102 @@ test "monitor: net ping sends an echo request to a resolved peer" {
     virtio_net.net_ready = false;
 }
 
+test "monitor: net udp — listen, close, and the report" {
+    var env = TestEnv.init();
+    var mon = env.monitor();
+    virtio_net.udp.reset();
+    defer virtio_net.udp.reset();
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "net", "udp", "listen", "7000" }));
+    try std.testing.expectEqualStrings("net udp: listening on 7000\n", env.mock.contents());
+    env.mock.reset();
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "net", "udp" }));
+    const out = env.mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "net udp: entries=1\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "net udp: port=7000\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "net udp: rx=0,tx=0,loop=0,drop=0\n") != null);
+    env.mock.reset();
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "net", "udp", "close", "7000" }));
+    try std.testing.expectEqualStrings("net udp: closed 7000\n", env.mock.contents());
+    env.mock.reset();
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "net", "udp", "close", "7000" }));
+    try std.testing.expectEqualStrings("net udp: not listening on 7000\n", env.mock.contents());
+    // A duplicate listen and a malformed port refuse exactly.
+    env.mock.reset();
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "net", "udp", "listen", "7000" }));
+    env.mock.reset();
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "net", "udp", "listen", "7000" }));
+    try std.testing.expectEqualStrings("net udp: listen failed (table full or duplicate)\n", env.mock.contents());
+    env.mock.reset();
+    try std.testing.expectEqual(ExecError.invalid_argument, exec(&mon, &.{ "net", "udp", "listen", "nope" }));
+    try std.testing.expectEqualStrings("net udp: invalid port: nope\n", env.mock.contents());
+    try std.testing.expectEqual(ExecError.invalid_argument, exec(&mon, &.{ "net", "udp", "listen", "70000" }));
+}
+
+test "monitor: net udp send — loopback to our own IP, no device" {
+    var env = TestEnv.init();
+    var mon = env.monitor();
+    virtio_net.udp.reset();
+    defer virtio_net.udp.reset();
+    virtio_net.arp.own_ip = .{ 10, 0, 0, 1 };
+    virtio_net.net_ready = false; // the loopback path must NOT need a device
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "net", "udp", "listen", "7000" }));
+    env.mock.reset();
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "net", "udp", "send", "10.0.0.1", "7000", "4" }));
+    try std.testing.expectEqualStrings("net udp: sent 4 bytes to 10.0.0.1:7000 (12 bytes)\n", env.mock.contents());
+    try std.testing.expectEqual(@as(u64, 1), virtio_net.udp.sent);
+    try std.testing.expectEqual(@as(u64, 1), virtio_net.udp.loopbacked);
+    try std.testing.expectEqual(@as(u64, 1), virtio_net.udp.received);
+    // The loopbacked datagram is observable via net udp recv.
+    env.mock.reset();
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "net", "udp", "recv", "7000" }));
+    const out = env.mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "net udp recv: port=7000\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "net udp recv: [0] len=12\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "1b 58 1b 58 00 0c ") != null); // src 7000, dst 7000, len 12
+    // A loopback to a CLOSED port is dropped (counted), never assumed away.
+    env.mock.reset();
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "net", "udp", "send", "10.0.0.1", "9998", "1" }));
+    try std.testing.expectEqual(@as(u64, 1), virtio_net.udp.dropped_closed);
+    // Without a static IP the send is refused honestly.
+    env.mock.reset();
+    virtio_net.arp.own_ip = .{ 0, 0, 0, 0 };
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "net", "udp", "send", "10.0.0.2", "9999", "4" }));
+    try std.testing.expectEqualStrings("net udp: no IP set (net ip <a.b.c.d> first) or transport unready\n", env.mock.contents());
+    virtio_net.arp.own_ip = .{ 0, 0, 0, 0 };
+}
+
+test "monitor: net udp send — to a resolved peer on the mock transport" {
+    var env = TestEnv.init();
+    var mon = env.monitor();
+    const saved_ops = virtio_net.net_ops;
+    virtio_net.net_ops = mnet_ops();
+    virtio_net.net_ready = true;
+    virtio_net.net_mac = .{ 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 };
+    virtio_net.arp.own_ip = .{ 10, 0, 0, 1 };
+    virtio_net.arp.table = [_]virtio_net.arp.ArpEntry{.{}} ** virtio_net.arp.table_slots;
+    virtio_net.arp.upsert(.{ 10, 0, 0, 2 }, .{ 0x02, 0x00, 0x00, 0x00, 0x00, 0x02 });
+    virtio_net.udp.reset();
+    defer virtio_net.udp.reset();
+    virtio_net.net_dev = .{};
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "net", "udp", "send", "10.0.0.2", "9999", "4" }));
+    try std.testing.expectEqualStrings("net udp: sent 4 bytes to 10.0.0.2:9999 (46 bytes)\n", env.mock.contents());
+    try std.testing.expectEqual(@as(u64, 1), virtio_net.udp.sent);
+    try std.testing.expectEqual(@as(u64, 0), virtio_net.udp.loopbacked);
+    // An unresolved peer refuses honestly (an echo/udp needs a unicast dst).
+    env.mock.reset();
+    virtio_net.arp.table = [_]virtio_net.arp.ArpEntry{.{}} ** virtio_net.arp.table_slots;
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "net", "udp", "send", "10.0.0.3", "9999", "4" }));
+    try std.testing.expectEqualStrings("net udp: peer not in ARP table (net arp <a.b.c.d> first)\n", env.mock.contents());
+    // Length bounds refuse exactly.
+    env.mock.reset();
+    try std.testing.expectEqual(ExecError.invalid_argument, exec(&mon, &.{ "net", "udp", "send", "10.0.0.2", "9999", "0" }));
+    try std.testing.expectEqual(ExecError.invalid_argument, exec(&mon, &.{ "net", "udp", "send", "10.0.0.2", "9999", "65" }));
+    virtio_net.arp.own_ip = .{ 0, 0, 0, 0 };
+    virtio_net.arp.table = [_]virtio_net.arp.ArpEntry{.{}} ** virtio_net.arp.table_slots;
+    virtio_net.net_ops = saved_ops;
+    virtio_net.net_ready = false;
+}
+
 test "monitor: netsend refuses cleanly without a transport" {
     var env = TestEnv.init();
     var mon = env.monitor();
@@ -2663,7 +2981,7 @@ test "monitor: net recv prints the received frame byte-exact and drains the FIFO
     // Unknown subcommand: documented refusal.
     env.mock.reset();
     try std.testing.expectEqual(ExecError.invalid_argument, exec(&mon, &.{ "net", "bogus" }));
-    try std.testing.expect(std.mem.indexOf(u8, env.mock.contents(), "net: unknown subcommand (try 'net', 'net recv', 'net ip <a.b.c.d>', 'net arp [<a.b.c.d>]' or 'net ping <a.b.c.d>')\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, env.mock.contents(), "net: unknown subcommand (try 'net', 'net recv', 'net ip <a.b.c.d>', 'net arp [<a.b.c.d>]', 'net ping <a.b.c.d>' or 'net udp [listen|close|send|recv]')\n") != null);
     virtio_net.net_ready = false;
     virtio_net.rx_fifo_head = 0;
     virtio_net.rx_fifo_count = 0;
