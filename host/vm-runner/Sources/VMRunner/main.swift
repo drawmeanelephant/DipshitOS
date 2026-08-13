@@ -17,7 +17,42 @@
 //          (02:00:00:00:00:01) so the guest-side VIRTIO_NET_F_MAC read is
 //          deterministic and gate-assertable. OFF by default: without the
 //          flag config.networkDevices stays [] — every existing gate is
-//          byte-identical. VZNAT is a later card's option.)
+//          byte-identical.)
+//         [--net-dhcp-respond <lease-ip>] (milestone five card N8, claim
+//          0351: a tiny deterministic host-side DHCP server inside the
+//          capture thread — the guest's DHCPDISCOVER is answered with an
+//          OFFER and its REQUEST with an ACK, both carrying the FIXED
+//          gate-assertable lease {ip=<lease-ip>, mask 255.255.255.0,
+//          gateway 10.0.0.1, server id=<lease-ip>, lease 3600}, the
+//          guest's xid echoed byte-exact, written into the SAME
+//          attachment socket end (VZ reads fds[0], so the guest receives
+//          it). Requires --net. OFF by default: the default VM is
+//          unchanged.)
+//         [--net-tcp-respond <host-ip>:<host-port>] (milestone five card
+//          N10, claim 7026: a tiny deterministic host-side TCP server
+//          inside the capture thread — the guest's SYN is answered with a
+//          SYN-ACK (the FIXED gate-assertable server ISN 0x12345678, ack
+//          = the guest's ISN+1), its data segment with an ACK + the SAME
+//          payload echoed byte-exact, and its FIN with a FIN-ACK, all
+//          written into the SAME attachment socket end. An optional
+//          `:handshake` suffix (card N11, claim 5357) answers the SYN
+//          with a SYN-ACK then goes SILENT on data/FIN — the
+//          deterministic black hole for the retransmission-bound run.
+//          Requires --net. OFF by default: the default VM is unchanged.)
+//         [--net-nat] (milestone five card N7, claim 4678: attach one
+//          VZVirtioNetworkDeviceConfiguration with a
+//          VZNATNetworkDeviceAttachment instead of the file-handle
+//          attachment — the host serves as router + NAT for the guest's
+//          accesses to outside networks. No capture file (the host
+//          translates the frames — that is the point), so the N7 gate
+//          asserts GUEST-OBSERVED COUNTERS, not capture bytes.
+//          Mutually exclusive with --net (one network device per guest for
+//          now); the fixed locally-administered MAC 02:00:00:00:00:01 is
+//          set on the device config and what the guest actually observes
+//          under NAT is a claim-time observation, pinned in the hardware
+//          contract. OFF by default: without the flag
+//          config.networkDevices stays [] — every existing gate is
+//          byte-identical.)
 //         [--net-inject <file>] [--net-inject-after <text>] (milestone five
 //          card N2, claim 6076: the host->guest RX direction of the SAME
 //          --net attachment — the file's bytes are written into the socket
@@ -136,6 +171,12 @@ var scriptExpect: String?
 // forwarded once after its own serial marker (the reap line) instead.
 var script2Path: String?
 var script2After: String?
+// Card N9 (claim 9489): the claim-6684 settle before forwarding script2
+// / script3 becomes configurable (default 0.5 — every existing gate is
+// unchanged), so a lease-lifecycle gate can wait past T1/T2/expiry
+// deterministically.
+var script2Delay: Double = 0.5
+var script3Delay: Double = 0.5
 // Card 3c (claim 7786): a THIRD scripted phase. The primary --script is
 // forwarded in ONE burst (claim 6684) and --script2 handles the next
 // phase (claim 4613); --script3 covers the post-reap snapshot that must
@@ -193,6 +234,59 @@ var netIcmpRespondHostIP: [UInt8]?
 // unchanged).
 var netUdpRespondHostIP: [UInt8]?
 var netUdpRespondHostPort: UInt16?
+// Milestone five card N8 (claim 0351): `--net-dhcp-respond <lease-ip>`
+// answers the guest's DHCP handshake from the HOST side — a tiny
+// deterministic host-side DHCP server inside the capture thread: when a
+// captured datagram is a DHCPDISCOVER (ethertype 0x0800, protocol 17,
+// src port 68 -> dst port 67, dst broadcast), the synthesized OFFER
+// (BOOTREPLY, the guest's xid ECHOED, yiaddr = <lease-ip>, mask
+// 255.255.255.0, gateway 10.0.0.1, server id = <lease-ip>, lease 3600)
+// is written into the SAME attachment socket end the other responders
+// write (VZ reads fds[0], so the guest receives it); on the guest's
+// DHCPREQUEST (message type 3) the ACK (message type 5, the SAME fixed
+// lease) is written. Driven by the guest's actual handshake bytes, not a
+// sleep. nil = the guest's DHCP messages go unanswered (the default VM
+// is unchanged). The fixed lease is gate-assertable — the `net dhcp`
+// bound report must show ip=<lease-ip> mask=255.255.255.0 gw=10.0.0.1
+// server=<lease-ip> lease=<lease-secs>.
+var netDhcpRespondLeaseIP: [UInt8]?
+// Card N9 (claim 9489): the OFFER/ACK lease option 51, in seconds
+// (default 3600 — backward compatible; the `:N` suffix sets it, so the
+// lease lifecycle is testable in seconds).
+var netDhcpRespondLeaseSecs: UInt32 = 3600
+// Milestone five card N10 (claim 7026): `--net-tcp-respond
+// <host-ip>:<host-port>` answers the guest's bounded TCP client from the
+// HOST side — a tiny deterministic TCP server inside the capture thread:
+// the guest's SYN (src 8000 -> host-ip:host-port, protocol 6) is
+// answered with a SYN-ACK (the FIXED gate-assertable server ISN
+// 0x12345678, ack = the guest's ISN+1); the handshake ACK is observed;
+// a data segment is answered with an ACK + the SAME payload byte-exact
+// (the echo); the FIN is answered with a FIN-ACK; the final ACK is
+// observed. Driven by the guest's actual segment bytes, not a sleep.
+// nil = the guest's TCP segments go unanswered (the default VM is
+// unchanged). The fixed ISN is gate-assertable — the live gate's python
+// walk pins the full seq/ack chain.
+var netTcpRespondHostIP: [UInt8]?
+var netTcpRespondHostPort: UInt16?
+// Card N11 (claim 5357): the optional `:handshake` responder mode —
+// answer the SYN with a SYN-ACK, then go SILENT on data/FIN (a
+// deterministic data black hole for the gate's retransmission-bound
+// run). Default (no suffix) = the full N10 responder.
+var netTcpRespondHandshakeOnly = false
+// The responder's per-connection state: the server's next sequence
+// number. The FIXED server ISN (gate-assertable); a new SYN resets the
+// state — ONE connection at a time (the guest's ONE client state
+// machine).
+let netTcpSrvIsn: UInt32 = 0x12345678
+var netTcpSrvNxt: UInt32 = 0x12345679 // after the SYN
+// Milestone five card N7 (claim 4678): `--net-nat` attaches one
+// VZVirtioNetworkDeviceConfiguration with a VZNATNetworkDeviceAttachment
+// instead of the file-handle attachment — the host is the guest's router
+// and performs NAT for accesses to outside networks. Boolean, OFF by
+// default: without the flag config.networkDevices stays [] (the default
+// VM is unchanged). Mutually exclusive with `--net` (one network device
+// per guest for now).
+var netNatEnabled = false
 
 var idx = 2
 while idx < arguments.count {
@@ -287,6 +381,69 @@ while idx < arguments.count {
         netUdpRespondHostIP = parts
         netUdpRespondHostPort = port
         idx += 2
+    } else if arg == "--net-dhcp-respond", idx + 1 < arguments.count {
+        // Card N9 (claim 9489): the optional ":<lease-seconds>" suffix
+        // (default 3600 — backward compatible) makes the OFFER/ACK's
+        // lease option 51 configurable, so a live gate can test the
+        // lease lifecycle (renewal/rebind/expiry) in seconds. Parse now
+        // (fail early, like --timeout).
+        let token = arguments[idx + 1]
+        let halves = token.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
+        let ipPart = String(halves[0])
+        let parts = ipPart.split(separator: ".").compactMap { UInt8($0) }
+        guard parts.count == 4 else {
+            fail("--net-dhcp-respond requires a dotted-quad IPv4 lease address, got '\(token)'.")
+        }
+        netDhcpRespondLeaseIP = parts
+        if halves.count == 2, let lease = UInt32(halves[1]), lease >= 1, lease <= 86400 {
+            netDhcpRespondLeaseSecs = lease
+        } else if halves.count == 2 {
+            fail("--net-dhcp-respond lease must be 1..86400 seconds, got '\(halves[1])'.")
+        }
+        idx += 2
+    } else if arg == "--net-tcp-respond", idx + 1 < arguments.count {
+        // Card N10 (claim 7026): the same shape as --net-udp-respond
+        // (host-ip:host-port). Card N11 (claim 5357): an optional
+        // `:handshake` suffix selects the handshake-only responder (SYN
+        // -> SYN-ACK, then silent on data/FIN — the gate's deterministic
+        // black hole). Parse now (fail early, like --timeout).
+        let token = arguments[idx + 1]
+        let halves = token.split(separator: ":", maxSplits: 2, omittingEmptySubsequences: false)
+        guard halves.count >= 2, let port = UInt16(halves[1]) else {
+            fail("--net-tcp-respond requires <host-ip>:<host-port>[:handshake], got '\(token)'.")
+        }
+        if halves.count == 3 {
+            guard halves[2] == "handshake" else {
+                fail("--net-tcp-respond mode must be 'handshake', got '\(halves[2])'.")
+            }
+            netTcpRespondHandshakeOnly = true
+        }
+        let parts = halves[0].split(separator: ".").compactMap { UInt8($0) }
+        guard parts.count == 4 else {
+            fail("--net-tcp-respond requires a dotted-quad IPv4 address, got '\(token)'.")
+        }
+        netTcpRespondHostIP = parts
+        netTcpRespondHostPort = port
+        idx += 2
+    } else if arg == "--script2-delay", idx + 1 < arguments.count {
+        // Card N9 (claim 9489): the claim-6684 settle before forwarding
+        // script2 becomes configurable (flag-gated, default 0.5 — every
+        // existing gate is unchanged), so a lease-lifecycle gate can wait
+        // past T1/T2/expiry deterministically.
+        guard let d = Double(arguments[idx + 1]), d >= 0 else {
+            fail("--script2-delay requires a non-negative number of seconds, got '\(arguments[idx + 1])'.")
+        }
+        script2Delay = d
+        idx += 2
+    } else if arg == "--script3-delay", idx + 1 < arguments.count {
+        guard let d = Double(arguments[idx + 1]), d >= 0 else {
+            fail("--script3-delay requires a non-negative number of seconds, got '\(arguments[idx + 1])'.")
+        }
+        script3Delay = d
+        idx += 2
+    } else if arg == "--net-nat" {
+        netNatEnabled = true
+        idx += 1
     } else {
         serialLogPath = arg
         idx += 1
@@ -498,6 +655,18 @@ if netIcmpRespondHostIP != nil, netCapturePath == nil {
 if netUdpRespondHostIP != nil, netCapturePath == nil {
     fail("--net-udp-respond requires --net (the UDP reply is written into the SAME attachment's socket).")
 }
+if netDhcpRespondLeaseIP != nil, netCapturePath == nil {
+    fail("--net-dhcp-respond requires --net (the DHCP reply is written into the SAME attachment's socket).")
+}
+if netTcpRespondHostIP != nil, netCapturePath == nil {
+    fail("--net-tcp-respond requires --net (the TCP reply is written into the SAME attachment's socket).")
+}
+// Milestone five card N7 (claim 4678): `--net-nat` is mutually exclusive
+// with `--net` — one network device per guest for now (the flag
+// validation shape: a clear fail, like the responder requirements above).
+if netNatEnabled, netCapturePath != nil {
+    fail("--net-nat is mutually exclusive with --net (one network device per guest for now).")
+}
 
 if let netCapturePath {
     let netURL = URL(fileURLWithPath: netCapturePath)
@@ -559,6 +728,84 @@ if let netCapturePath {
                 let srcPort = (UInt16(buf[34]) << 8) | UInt16(buf[35])
                 print("NET-UDP: answered the guest's datagram for \(hostIP[0]).\(hostIP[1]).\(hostIP[2]).\(hostIP[3]):\(hostPort) (reply to guest src port \(srcPort), \(n - 42) payload bytes)")
             }
+            // Card N8 (claim 0351): if the guest ran the DHCP client,
+            // answer the handshake from the host — a tiny deterministic
+            // DHCP server: DISCOVER (type 1) -> OFFER, REQUEST (type 3)
+            // -> ACK, both with the FIXED gate-assertable lease (the
+            // guest's xid echoed byte-exact, yiaddr = the lease IP, mask
+            // 255.255.255.0, gateway 10.0.0.1, server id = the lease IP,
+            // lease 3600). The reply goes broadcast (the client's flag)
+            // so the guest's N2 MAC filter admits it.
+            if let leaseIP = netDhcpRespondLeaseIP, isDhcpDatagram(buf, n),
+               let mtype = dhcpMessageType(buf, n), mtype == 1 || mtype == 3 {
+                var reply = [UInt8](repeating: 0, count: 4096)
+                let replyLen = buildDhcpReply(&reply, buf, n, arpHostMAC, leaseIP, netDhcpRespondLeaseSecs, mtype)
+                try? netCaptureReadSocket!.write(contentsOf: Data(reply[0..<replyLen]))
+                // The xid hex built manually (Swift's String(format:) vararg
+                // bridge mismatches %x with UInt8/UInt32 — the same reason
+                // the N5 responder prints ports as arithmetic).
+                let hexT = Array("0123456789abcdef")
+                let xidHex = [hexT[Int(buf[46] >> 4)], hexT[Int(buf[46] & 0xf)],
+                              hexT[Int(buf[47] >> 4)], hexT[Int(buf[47] & 0xf)],
+                              hexT[Int(buf[48] >> 4)], hexT[Int(buf[48] & 0xf)],
+                              hexT[Int(buf[49] >> 4)], hexT[Int(buf[49] & 0xf)]]
+                print("NET-DHCP: answered the guest's DHCP \(mtype == 1 ? "DISCOVER" : "REQUEST") (xid 0x\(String(xidHex))) with a \(mtype == 1 ? "OFFER" : "ACK") for \(leaseIP[0]).\(leaseIP[1]).\(leaseIP[2]).\(leaseIP[3]) (lease \(netDhcpRespondLeaseSecs)s)")
+            }
+            // Card N10 (claim 7026): if the guest's bounded TCP client
+            // connected to our ip:port, answer the handshake + echo from
+            // the host — a tiny deterministic TCP server: SYN -> SYN-ACK
+            // (the FIXED gate-assertable server ISN, ack = the guest's
+            // ISN+1), the handshake ACK -> observed, a data segment ->
+            // ACK + the payload ECHOED byte-exact, FIN -> FIN-ACK, the
+            // final ACK -> observed. The reply is a fresh frame in the
+            // same socket direction as the other responders.
+            if let hostIP = netTcpRespondHostIP, let hostPort = netTcpRespondHostPort,
+               isTcpSegment(buf, n, hostIP, hostPort) {
+                let flags = tcpFlags(buf)
+                let seq = tcpSeq(buf)
+                let ack = tcpAck(buf)
+                var reply = [UInt8](repeating: 0, count: 4096)
+                var payload = [UInt8]()
+                if n > 54 { payload = [UInt8](buf[54..<n]) }
+                let isSyn = (flags & 0x02) != 0 && (flags & 0x10) == 0
+                let isFin = (flags & 0x01) != 0
+                let isRst = (flags & 0x04) != 0
+                if isRst {
+                    // The guest aborted — the connection is dead; observe.
+                    print("NET-TCP: observed the guest's RST (seq 0x\(hex32(seq)))")
+                } else if isSyn {
+                    netTcpSrvNxt = netTcpSrvIsn &+ 1
+                    let replyLen = buildTcpReply(&reply, buf, n, arpHostMAC, hostPort, netTcpSrvIsn, seq &+ 1, 0x12, payload)
+                    try? netCaptureReadSocket!.write(contentsOf: Data(reply[0..<replyLen]))
+                    print("NET-TCP: answered the guest's SYN (seq 0x\(hex32(seq))) with a SYN-ACK (seq 0x\(hex32(netTcpSrvIsn)), ack 0x\(hex32(seq &+ 1)))")
+                } else if isFin {
+                    if netTcpRespondHandshakeOnly {
+                        // Card N11 (claim 5357): the handshake-only mode
+                        // goes SILENT on data/FIN — the deterministic
+                        // black hole that forces the guest's bounded
+                        // retransmission machinery to fire.
+                        print("NET-TCP: handshake-only — ignoring the guest's FIN (black hole)")
+                    } else {
+                        let replyLen = buildTcpReply(&reply, buf, n, arpHostMAC, hostPort, netTcpSrvNxt, seq &+ 1, 0x11, payload)
+                        try? netCaptureReadSocket!.write(contentsOf: Data(reply[0..<replyLen]))
+                        print("NET-TCP: answered the guest's FIN (seq 0x\(hex32(seq))) with a FIN-ACK (seq 0x\(hex32(netTcpSrvNxt)), ack 0x\(hex32(seq &+ 1)))")
+                    }
+                } else if !payload.isEmpty {
+                    // A data segment: ACK + the payload echoed byte-exact.
+                    if netTcpRespondHandshakeOnly {
+                        print("NET-TCP: handshake-only — ignoring the guest's \(payload.count)-byte data (black hole)")
+                    } else {
+                        let replyLen = buildTcpReply(&reply, buf, n, arpHostMAC, hostPort, netTcpSrvNxt, seq &+ UInt32(payload.count), 0x10, payload)
+                        try? netCaptureReadSocket!.write(contentsOf: Data(reply[0..<replyLen]))
+                        print("NET-TCP: echoed the guest's \(payload.count)-byte data (ack 0x\(hex32(seq &+ UInt32(payload.count))), \(payload.count) payload bytes)")
+                        netTcpSrvNxt = netTcpSrvNxt &+ UInt32(payload.count)
+                    }
+                } else {
+                    // A pure ACK (the handshake / the echo / the final
+                    // ACK) — observed.
+                    print("NET-TCP: observed the guest's ACK (ack 0x\(hex32(ack)))")
+                }
+            }
         }
         try? netCaptureFile.synchronize()
         netCaptureDone.signal()
@@ -572,6 +819,23 @@ if let netCapturePath {
     }
     netConfig.macAddress = fixedMAC
     config.networkDevices = [netConfig]
+} else if netNatEnabled {
+    // Milestone five card N7 (claim 4678): the NAT attachment — the host
+    // serves as the guest's router and performs NAT for accesses to
+    // outside networks. The device config carries the SAME fixed
+    // locally-administered MAC as the file-handle path; what the guest's
+    // VIRTIO_NET_F_MAC read actually observes under NAT is a claim-time
+    // observation (the NAT gateway may honor or override it — pinned in
+    // the hardware contract, never assumed). No capture file: the host
+    // translates the frames, so there are no guest TX bytes to capture.
+    let natAttachment = VZNATNetworkDeviceAttachment()
+    let natConfig = VZVirtioNetworkDeviceConfiguration()
+    natConfig.attachment = natAttachment
+    guard let fixedMAC = VZMACAddress(string: "02:00:00:00:00:01") else {
+        fail("Could not parse the fixed net MAC address.")
+    }
+    natConfig.macAddress = fixedMAC
+    config.networkDevices = [natConfig]
 } else {
     config.networkDevices = []
 }
@@ -664,6 +928,22 @@ if let hostIP = netIcmpRespondHostIP {
 if let hostIP = netUdpRespondHostIP, let hostPort = netUdpRespondHostPort {
     let ipText = hostIP.map(String.init).joined(separator: ".")
     print("  net-udp-respond: ENABLED (milestone five card N5, claim 8552) — the host answers the guest's UDP datagrams for \(ipText):\(hostPort) (host MAC 02:00:00:00:00:02) via the capture thread (deterministic, request-driven)")
+}
+if let leaseIP = netDhcpRespondLeaseIP {
+    let ipText = leaseIP.map(String.init).joined(separator: ".")
+    // The prefix stays byte-identical to card N8's gate assertion; card
+    // N9's lease knob is noted after it.
+    print("  net-dhcp-respond: ENABLED (milestone five card N8, claim 0351) + card N9 (claim 9489) — the host answers the guest's DHCP handshake with the fixed lease ip=\(ipText) mask=255.255.255.0 gw=10.0.0.1 server=\(ipText) lease=\(netDhcpRespondLeaseSecs) via the capture thread (deterministic, request-driven)")
+}
+if let hostIP = netTcpRespondHostIP, let hostPort = netTcpRespondHostPort {
+    let ipText = hostIP.map(String.init).joined(separator: ".")
+    print("  net-tcp-respond: ENABLED (milestone five card N10, claim 7026) + card N11 (claim 5357) — the host answers the guest's bounded TCP client on \(ipText):\(hostPort) (host MAC 02:00:00:00:00:02, server ISN 0x\(hex32(netTcpSrvIsn))) via the capture thread (deterministic, request-driven)")
+    if netTcpRespondHandshakeOnly {
+        print("  net-tcp-respond mode: handshake-only (card N11) — the SYN is answered with a SYN-ACK, then data/FIN go unanswered (the deterministic black hole for the retransmission-bound run)")
+    }
+}
+if netNatEnabled {
+    print("  net-nat: ENABLED (milestone five card N7, claim 4678) — VZNATNetworkDeviceAttachment attached (host router + NAT; no capture file — guest-observed counters are the gate's evidence)")
 }
 
 runner.queue.async {
@@ -1220,7 +1500,7 @@ func startConsoleStreams() {
 // delay only avoids racing the shell's very first poll.
 func startScriptInput() {
     guard let scriptPath else { return }
-    forwardScriptOnce(path: scriptPath, after: scriptAfter, label: "script")
+    forwardScriptOnce(path: scriptPath, after: scriptAfter, label: "script", settle: 0.5)
 }
 
 // Claim 4613: the SECOND scripted phase. The primary --script is forwarded
@@ -1231,7 +1511,7 @@ func startScriptInput() {
 // using the identical settle-then-forward machinery.
 func startScript2Input() {
     guard let path = script2Path, let after = script2After else { return }
-    forwardScriptOnce(path: path, after: after, label: "script2")
+    forwardScriptOnce(path: path, after: after, label: "script2", settle: script2Delay)
 }
 
 // Card 3c (claim 7786): the THIRD scripted phase. The kill gate needs a
@@ -1243,13 +1523,13 @@ func startScript2Input() {
 // the same settle-then-forward machinery.
 func startScript3Input() {
     guard let path = script3Path, let after = script3After else { return }
-    forwardScriptOnce(path: path, after: after, label: "script3")
+    forwardScriptOnce(path: path, after: after, label: "script3", settle: script3Delay)
 }
 
 /// Forward `path` into the serial attachment exactly once, after `after`
 /// appears in the serial log (default: the kernel terminal state). Shared
 /// by the primary script (claim 6684) and the second phase (claim 4613).
-func forwardScriptOnce(path: String, after: String?, label: String) {
+func forwardScriptOnce(path: String, after: String?, label: String, settle: Double) {
     let q = DispatchQueue(label: "dipshitos.\(label)")
     q.async {
         let scriptData: Data
@@ -1260,12 +1540,17 @@ func forwardScriptOnce(path: String, after: String?, label: String) {
             exit(1)
         }
         let marker = after ?? "kernel terminal state"
-        let waitDeadline = Date().addingTimeInterval(40)
+        // Card N9 (claim 9489): a configured settle (--script2-delay /
+        // --script3-delay) is a wall-clock wait the gate WANTS, so the
+        // marker-wait extends with it — the marker of a later phase
+        // legitimately appears only after the earlier phases' delays have
+        // elapsed. The default 40 s is unchanged for every existing gate.
+        let waitDeadline = Date().addingTimeInterval(max(40, settle + 60))
         var sent = false
         while Date() < waitDeadline {
             if let text = try? String(contentsOf: serialURL, encoding: .utf8),
                text.contains(marker) {
-                Thread.sleep(forTimeInterval: 0.5)
+                Thread.sleep(forTimeInterval: settle)
                 do { try consoleInputPipe.fileHandleForWriting.write(contentsOf: scriptData) }
                 catch {
                     FileHandle.standardError.write(Data("ERROR: could not forward script to the guest serial attachment: \(error)\n".utf8))
@@ -1488,6 +1773,247 @@ func buildUdpReply(_ reply: inout [UInt8], _ req: [UInt8], _ n: Int, _ hostMAC: 
     let udpChk = udpChecksum(hostIP, senderIP, datagram, udpLen)
     reply[40] = UInt8(udpChk >> 8)
     reply[41] = UInt8(udpChk & 0xff)
+}
+
+// Card N8 (claim 0351): is the datagram a DHCP client message (Ethernet
+// II ethertype 0x0800, version 4 / IHL 5, NOT a fragment, protocol UDP,
+// src port 68 -> dst port 67)? The guest's DISCOVER/REQUEST frames are
+// raw Ethernet — header at 14..34, UDP at 34..42, the DHCP message at 42.
+func isDhcpDatagram(_ buf: [UInt8], _ n: Int) -> Bool {
+    guard n >= 46 else { return false }
+    guard buf[12] == 0x08 && buf[13] == 0x00 else { return false } // ethertype IPv4
+    guard buf[14] == 0x45 else { return false } // version 4, IHL 5
+    guard (buf[20] & 0x1f) == 0 && buf[21] == 0 else { return false } // NOT a fragment
+    guard buf[23] == 17 else { return false } // protocol UDP
+    let srcPort = (UInt16(buf[34]) << 8) | UInt16(buf[35])
+    let dstPort = (UInt16(buf[36]) << 8) | UInt16(buf[37])
+    return srcPort == 68 && dstPort == 67
+}
+
+// Card N8 (claim 0351): the DHCP message type (option 53) of a client
+// message, or nil when absent/malformed. Options start at frame 282 (42 +
+// the 236-byte BOOTP header + the 4-byte magic cookie).
+func dhcpMessageType(_ buf: [UInt8], _ n: Int) -> UInt8? {
+    guard n >= 284 else { return nil }
+    var i = 282
+    while i + 2 <= n {
+        let code = buf[i]
+        if code == 255 { break }
+        if code == 0 { i += 1; continue }
+        let len = Int(buf[i + 1])
+        if i + 2 + len > n { break }
+        if code == 53 && len == 1 { return buf[i + 2] }
+        i += 2 + len
+    }
+    return nil
+}
+
+// Card N8 (claim 0351): synthesize the DHCP OFFER (mtype 1 -> 2) or ACK
+// (mtype 3 -> 5) to the client message in `req` into `reply` (a fresh
+// broadcast frame): Ethernet dst ff*6 / src host MAC, ethertype 0x0800,
+// IPv4 src = the lease IP / dst 255.255.255.255 (the client's broadcast
+// flag), protocol 17, then the BOOTREPLY (op 2, the guest's xid ECHOED,
+// yiaddr = the lease IP, the client's chaddr echoed) with the FIXED
+// gate-assertable lease options: 53 (type), 1 (mask 255.255.255.0), 3
+// (gateway 10.0.0.1), 54 (server id = the lease IP), 51 (lease 3600),
+// 255. Both checksums recomputed (RFC 1071). Returns the frame length
+// (310 bytes — the reply message is 268 bytes).
+func buildDhcpReply(_ reply: inout [UInt8], _ req: [UInt8], _ n: Int, _ hostMAC: [UInt8], _ leaseIP: [UInt8], _ leaseSecs: UInt32, _ mtype: UInt8) -> Int {
+    _ = n
+    // The reply message: 236 header + 4 cookie + 53,1,type(3) +
+    // 1,4,mask(6) + 3,4,gw(6) + 54,4,server(6) + 51,4,lease(6) + 255(1)
+    // = 268 bytes; the frame = 42 + 268 = 310.
+    let msgLen = 268
+    let frameLen = 42 + msgLen // 310
+    reply = [UInt8](repeating: 0, count: frameLen)
+    // Ethernet: dst broadcast, src host MAC.
+    reply[0...5] = [UInt8](repeating: 0xff, count: 6)[0...5]
+    reply[6...11] = hostMAC[0...5]
+    reply[12] = 0x08
+    reply[13] = 0x00 // ethertype IPv4
+    // IPv4: src = the lease IP, dst = 255.255.255.255, proto 17.
+    reply[14] = 0x45 // version 4, IHL 5
+    reply[16] = UInt8((20 + 8 + msgLen) >> 8)
+    reply[17] = UInt8((20 + 8 + msgLen) & 0xff) // total length 296
+    reply[22] = 64 // TTL
+    reply[23] = 17 // protocol UDP
+    reply[26...29] = leaseIP[0...3] // src
+    reply[30...33] = [UInt8](repeating: 0xff, count: 4)[0...3] // dst broadcast
+    let hdrChk = ipChecksum(reply, 14, 34)
+    reply[24] = UInt8(hdrChk >> 8)
+    reply[25] = UInt8(hdrChk & 0xff)
+    // UDP: src 67, dst 68, length 8 + msgLen.
+    reply[34] = 0x00
+    reply[35] = 67 // src port 67
+    reply[36] = 0x00
+    reply[37] = 68 // dst port 68
+    reply[38] = UInt8((8 + msgLen) >> 8)
+    reply[39] = UInt8((8 + msgLen) & 0xff) // UDP length 276
+    // The DHCP message at 42: op BOOTREPLY, htype/hlen, the guest's xid
+    // echoed, yiaddr = the lease IP, the client's chaddr echoed.
+    reply[42] = 2 // BOOTREPLY
+    reply[43] = 1 // htype ethernet
+    reply[44] = 6 // hlen
+    reply[46...49] = req[46...49] // xid echoed byte-exact
+    reply[58...61] = leaseIP[0...3] // yiaddr
+    reply[70...85] = req[70...85] // chaddr echoed (the client's MAC)
+    // The magic cookie + the fixed lease options.
+    reply[278] = 0x63
+    reply[279] = 0x82
+    reply[280] = 0x53
+    reply[281] = 0x63
+    var o = 282
+    // The reply's message type is the SERVER's answer to the client's
+    // message (option 53 must be 2 OFFER for a DISCOVER, 5 ACK for a
+    // REQUEST — never the echoed client type).
+    let replyType: UInt8 = mtype == 1 ? 2 : 5
+    reply[o] = 53; reply[o + 1] = 1; reply[o + 2] = replyType; o += 3 // message type
+    reply[o] = 1; reply[o + 1] = 4; reply[o + 2] = 255; reply[o + 3] = 255; reply[o + 4] = 255; reply[o + 5] = 0; o += 6 // subnet mask
+    reply[o] = 3; reply[o + 1] = 4; reply[o + 2] = 10; reply[o + 3] = 0; reply[o + 4] = 0; reply[o + 5] = 1; o += 6 // gateway
+    reply[o] = 54; reply[o + 1] = 4; reply[o + 2...o + 5] = leaseIP[0...3]; o += 6 // server id
+    reply[o] = 51; reply[o + 1] = 4; reply[o + 2] = UInt8(leaseSecs >> 24); reply[o + 3] = UInt8((leaseSecs >> 16) & 0xff); reply[o + 4] = UInt8((leaseSecs >> 8) & 0xff); reply[o + 5] = UInt8(leaseSecs & 0xff); o += 6 // lease option 51
+    reply[o] = 255; o += 1 // end
+    // o must be exactly frameLen (282 + 28 = 310).
+    assert(o == frameLen)
+    // The UDP checksum over the pseudo-header (lease IP -> broadcast).
+    var datagram = [UInt8](reply[34..<frameLen])
+    datagram[6] = 0
+    datagram[7] = 0 // zero the checksum field during the computation
+    let udpChk = udpChecksum(leaseIP, [UInt8](repeating: 0xff, count: 4), datagram, UInt16(8 + msgLen))
+    reply[40] = UInt8(udpChk >> 8)
+    reply[41] = UInt8(udpChk & 0xff)
+    return frameLen
+}
+
+// Card N10 (claim 7026): is the captured frame a TCP segment for our
+// ip:port from the guest's bounded client (Ethernet II ethertype 0x0800,
+// version 4 / IHL 5, NOT a fragment, protocol TCP, dst IP = the host IP,
+// dst port = the host port)? The guest's segments are raw Ethernet —
+// header at 14..34, the TCP header at 34.
+func isTcpSegment(_ buf: [UInt8], _ n: Int, _ hostIP: [UInt8], _ hostPort: UInt16) -> Bool {
+    guard n >= 54 else { return false }
+    guard buf[12] == 0x08 && buf[13] == 0x00 else { return false } // ethertype IPv4
+    guard buf[14] == 0x45 else { return false } // version 4, IHL 5
+    guard (buf[20] & 0x1f) == 0 && buf[21] == 0 else { return false } // NOT a fragment
+    guard buf[23] == 6 else { return false } // protocol TCP
+    guard buf[30] == hostIP[0] && buf[31] == hostIP[1] && buf[32] == hostIP[2] && buf[33] == hostIP[3] else { return false }
+    let dstPort = (UInt16(buf[36]) << 8) | UInt16(buf[37])
+    return dstPort == hostPort
+}
+
+// Card N10: the TCP flags byte (frame offset 34 + 13 = 47).
+func tcpFlags(_ buf: [UInt8]) -> UInt8 {
+    return buf[47]
+}
+
+// Card N10: the TCP sequence number (big-endian u32 at frame 38..42).
+func tcpSeq(_ buf: [UInt8]) -> UInt32 {
+    return (UInt32(buf[38]) << 24) | (UInt32(buf[39]) << 16) | (UInt32(buf[40]) << 8) | UInt32(buf[41])
+}
+
+// Card N10: the TCP acknowledgment number (big-endian u32 at frame
+// 42..46).
+func tcpAck(_ buf: [UInt8]) -> UInt32 {
+    return (UInt32(buf[42]) << 24) | (UInt32(buf[43]) << 16) | (UInt32(buf[44]) << 8) | UInt32(buf[45])
+}
+
+// Card N10: a 32-bit value as zero-padded 8-hex-digit text, built by
+// hand (Swift's String(format:) vararg bridge mismatches %x with UInt32
+// — the same reason the N5/N8 responders print values as arithmetic).
+func hex32(_ v: UInt32) -> String {
+    let hexT = Array("0123456789abcdef")
+    var out = ""
+    var shift: UInt32 = 28
+    while true {
+        let nib = Int((v >> shift) & 0xf)
+        out.append(hexT[nib])
+        if shift == 0 { break }
+        shift &-= 4
+    }
+    return out
+}
+
+// Card N10: the TCP checksum over the IPv4 pseudo-header (src IP, dst
+// IP, zero, protocol 6, TCP length) + the segment (RFC 793 §3.1 — the
+// checksum field must be zeroed by the caller during the computation).
+@Sendable func tcpChecksum(_ src: [UInt8], _ dst: [UInt8], _ segment: [UInt8], _ tcpLen: UInt16) -> UInt16 {
+    var sum: UInt32 = 0
+    sum += (UInt32(src[0]) << 8) | UInt32(src[1])
+    sum += (UInt32(src[2]) << 8) | UInt32(src[3])
+    sum += (UInt32(dst[0]) << 8) | UInt32(dst[1])
+    sum += (UInt32(dst[2]) << 8) | UInt32(dst[3])
+    sum += 6 // protocol TCP
+    sum += UInt32(tcpLen)
+    var i = 0
+    while i + 1 < segment.count {
+        sum += (UInt32(segment[i]) << 8) | UInt32(segment[i + 1])
+        i += 2
+    }
+    if i < segment.count { sum += UInt32(segment[i]) << 8 } // trailing odd byte
+    while sum >> 16 != 0 { sum = (sum & 0xffff) + (sum >> 16) }
+    return UInt16((~sum) & 0xffff)
+}
+
+// Card N10 (claim 7026): synthesize a TCP reply to the guest's segment
+// in `req` into `reply`: Ethernet dst/src swapped, ethertype 0x0800,
+// IPv4 src/dst swapped, protocol 6, the TCP header (src = the host port,
+// dst = the guest's src port, seq = the given server seq, ack = the
+// given ack, the given flags, the FIXED window 4096, no options — the
+// guest's honest bound), the echoed payload when present; both checksums
+// recomputed (RFC 1071). Returns the frame length (54 + the payload).
+func buildTcpReply(_ reply: inout [UInt8], _ req: [UInt8], _ n: Int, _ hostMAC: [UInt8], _ hostPort: UInt16, _ srvSeq: UInt32, _ ack: UInt32, _ flags: UInt8, _ payload: [UInt8]) -> Int {
+    _ = n
+    let frameLen = 54 + payload.count
+    reply = [UInt8](repeating: 0, count: frameLen)
+    // Ethernet: dst = the guest's MAC, src = the host MAC.
+    reply[0...5] = req[6...11]
+    reply[6...11] = hostMAC[0...5]
+    reply[12] = 0x08
+    reply[13] = 0x00 // ethertype IPv4
+    // IPv4: src = the guest's dst IP, dst = the guest's src IP, proto 6.
+    reply[14] = 0x45 // version 4, IHL 5
+    reply[16] = UInt8((20 + 20 + payload.count) >> 8)
+    reply[17] = UInt8((20 + 20 + payload.count) & 0xff) // total length
+    reply[22] = 64 // TTL
+    reply[23] = 6 // protocol TCP
+    reply[26...29] = req[30...33] // src
+    reply[30...33] = req[26...29] // dst
+    let hdrChk = ipChecksum(reply, 14, 34)
+    reply[24] = UInt8(hdrChk >> 8)
+    reply[25] = UInt8(hdrChk & 0xff)
+    // TCP: src = the host port, dst = the guest's src port, seq/ack,
+    // data offset 5, the flags, window 4096, urgent 0.
+    reply[34] = UInt8(hostPort >> 8)
+    reply[35] = UInt8(hostPort & 0xff)
+    reply[36] = req[34]
+    reply[37] = req[35]
+    reply[38] = UInt8(srvSeq >> 24)
+    reply[39] = UInt8((srvSeq >> 16) & 0xff)
+    reply[40] = UInt8((srvSeq >> 8) & 0xff)
+    reply[41] = UInt8(srvSeq & 0xff)
+    reply[42] = UInt8(ack >> 24)
+    reply[43] = UInt8((ack >> 16) & 0xff)
+    reply[44] = UInt8((ack >> 8) & 0xff)
+    reply[45] = UInt8(ack & 0xff)
+    reply[46] = 0x50 // data offset 5 (no options)
+    reply[47] = flags
+    reply[48] = 0x10 // window 4096
+    reply[49] = 0x00
+    // Checksum field at 50..52 (zeroed by the memset), urgent 52..54 (0).
+    if !payload.isEmpty {
+        reply[54...54 + payload.count - 1] = payload[0...payload.count - 1]
+    }
+    // The TCP checksum over the pseudo-header (the guest's src IP -> the
+    // guest's dst IP), the checksum field zeroed during the computation.
+    let srcIP = [UInt8](req[26...29])
+    let dstIP = [UInt8](req[30...33])
+    var seg = [UInt8](reply[34..<frameLen])
+    seg[16] = 0
+    seg[17] = 0
+    let tcpChk = tcpChecksum(srcIP, dstIP, seg, UInt16(20 + payload.count))
+    reply[50] = UInt8(tcpChk >> 8)
+    reply[51] = UInt8(tcpChk & 0xff)
+    return frameLen
 }
 
 // Card N4 (claim 0148): synthesize the ICMP ECHO REPLY to the echo

@@ -75,7 +75,12 @@ verify-coordination`, and CI) fails if it drifts from the files.
 | milestone-four follow-on 4, card 4c: exit-status propagation — a bounded `sys_wait` block | [`agent-buffy-m4-wait-exit.md`](agent-buffy-m4-wait-exit.md) |
 | agent/buffy/m5-arp | [`agent-buffy-m5-arp.md`](agent-buffy-m5-arp.md) |
 | agent/buffy/m5-ipv4 | [`agent-buffy-m5-ipv4.md`](agent-buffy-m5-ipv4.md) |
+| agent/buffy/m5-net-dhcp-renew | [`agent-buffy-m5-net-dhcp-renew.md`](agent-buffy-m5-net-dhcp-renew.md) |
+| agent/buffy/m5-net-dhcp | [`agent-buffy-m5-net-dhcp.md`](agent-buffy-m5-net-dhcp.md) |
+| agent/buffy/m5-net-nat | [`agent-buffy-m5-net-nat.md`](agent-buffy-m5-net-nat.md) |
 | agent/buffy/m5-net-rx | [`agent-buffy-m5-net-rx.md`](agent-buffy-m5-net-rx.md) |
+| agent/buffy/m5-net-tcp-rto | [`agent-buffy-m5-net-tcp-rto.md`](agent-buffy-m5-net-tcp-rto.md) |
+| agent/buffy/m5-net-tcp | [`agent-buffy-m5-net-tcp.md`](agent-buffy-m5-net-tcp.md) |
 | agent/buffy/m5-net-tx | [`agent-buffy-m5-net-tx.md`](agent-buffy-m5-net-tx.md) |
 | agent/buffy/m5-udp-syscall | [`agent-buffy-m5-udp-syscall.md`](agent-buffy-m5-udp-syscall.md) |
 | agent/buffy/m5-udp | [`agent-buffy-m5-udp.md`](agent-buffy-m5-udp.md) |

@@ -78,6 +78,8 @@ pub const ipv4 = @import("ipv4.zig");
 /// ipv4 protocol dispatch delivers validated datagrams here and the
 /// monitor's `net udp` subcommands drive listen/close/send/recv).
 pub const udp = @import("udp.zig");
+pub const dhcp = @import("dhcp.zig"); // N8 (claim 0351): the bounded RFC 2131 client (port 68)
+pub const tcp = @import("tcp.zig"); // N10 (claim 7026): the bounded RFC 793 client
 
 // ---------------------------------------------------------------------------
 // Split-ring structures (the blk/entropy/console shared layout)
@@ -1247,6 +1249,84 @@ pub fn net_udp_send(target_ip: [4]u8, dst_port: u16, payload: []const u8, out_le
     const r = net_send(&net_ops, &net_dev, tx_staging[0 .. tx_hdr_len + n]);
     if (r == .ok) udp.sent += 1;
     return r;
+}
+
+/// Card N8 (claim 0351): transmit the DHCP client's current message (a
+/// DISCOVER or a REQUEST — built by `dhcp` into `dhcp.msg`) on the N1 TX
+/// path. The card's ONE N5-layer seam change: a DHCP frame goes out with
+/// dst MAC ff:ff:ff:ff:ff:ff + dst IP 255.255.255.255 DIRECTLY — no ARP
+/// lookup (the N2 MAC filter accepts broadcast on the way back) — and the
+/// src IP is 0.0.0.0 (the client in INIT/SELECTING has NO address yet),
+/// so this path deliberately does NOT require `arp.ip_set()`. Refuses
+/// honestly when the transport is unready. The frame length lands in
+/// `out_len` (286 DISCOVER / 298 REQUEST). The reply is processed
+/// asynchronously by the RX drain (the udp port-68 dispatch -> dhcp).
+pub fn net_dhcp_send(msg: []const u8, out_len: *usize) SendResult {
+    if (!net_ready) return .not_ready;
+    @memset(tx_staging[0..tx_hdr_len], 0);
+    const bcast_mac = [6]u8{ 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
+    const bcast_ip = [4]u8{ 255, 255, 255, 255 };
+    const src_ip = [4]u8{ 0, 0, 0, 0 }; // the client pre-lease address
+    const n = udp.build_frame_ex(tx_staging[tx_hdr_len .. tx_hdr_len + dhcp.frame_max], bcast_mac, &net_mac, src_ip, bcast_ip, dhcp.client_port, dhcp.server_port, msg);
+    out_len.* = n;
+    return net_send(&net_ops, &net_dev, tx_staging[0 .. tx_hdr_len + n]);
+}
+
+/// Card N9 (claim 9489): transmit the REBINDING REQUEST — the SAME
+/// broadcast shape as `net_dhcp_send`, but the client now HOLDS the
+/// lease, so the src IP is `dhcp.lease_ip` (RFC 2131 §4.4.5 — a bound
+/// client's REQUEST carries its address; the frame's ciaddr is set by
+/// `dhcp.enter_rebinding`). Refuses honestly when the transport is
+/// unready or no lease is held.
+pub fn net_dhcp_send_bound(msg: []const u8, out_len: *usize) SendResult {
+    if (!net_ready) return .not_ready;
+    if (!dhcp_bound()) return .not_ready;
+    @memset(tx_staging[0..tx_hdr_len], 0);
+    const bcast_mac = [6]u8{ 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
+    const bcast_ip = [4]u8{ 255, 255, 255, 255 };
+    const n = udp.build_frame_ex(tx_staging[tx_hdr_len .. tx_hdr_len + dhcp.frame_max], bcast_mac, &net_mac, dhcp.lease_ip, bcast_ip, dhcp.client_port, dhcp.server_port, msg);
+    out_len.* = n;
+    return net_send(&net_ops, &net_dev, tx_staging[0 .. tx_hdr_len + n]);
+}
+
+/// Card N9 (claim 9489): transmit the RENEWING REQUEST UNICAST to the
+/// server — dst = the server's IP + the MAC the caller RESOLVED (the
+/// seam resolves nothing; `.no_peer` when the caller has no MAC), src =
+/// the leased IP (the bound client). The frame's ciaddr is set by
+/// `dhcp.enter_renewing`. Refuses honestly when the transport is
+/// unready or no lease is held.
+pub fn net_dhcp_send_unicast(dst_ip: [4]u8, dst_mac: [6]u8, msg: []const u8, out_len: *usize) SendResult {
+    if (!net_ready) return .not_ready;
+    if (!dhcp_bound()) return .not_ready;
+    @memset(tx_staging[0..tx_hdr_len], 0);
+    const n = udp.build_frame_ex(tx_staging[tx_hdr_len .. tx_hdr_len + dhcp.frame_max], dst_mac, &net_mac, dhcp.lease_ip, dst_ip, dhcp.client_port, dhcp.server_port, msg);
+    out_len.* = n;
+    return net_send(&net_ops, &net_dev, tx_staging[0 .. tx_hdr_len + n]);
+}
+
+/// Card N10 (claim 7026): transmit the TCP client's current segment
+/// (built by `tcp` into `tcp.msg` — a SYN, an ACK, a data segment, the
+/// FIN, a RST, or the final ACK) to THE connection's peer on the N1 TX
+/// path. The peer's MAC was resolved at connect time (`tcp.peer_mac` —
+/// the seam resolves nothing; the bounded client connects OUTWARD only —
+/// an own-IP connect was refused by the caller, no TCP loopback).
+/// Refuses honestly when the transport is unready or no static IP is set
+/// (`net ip <a.b.c.d>` first). The frame length lands in `out_len` (54 +
+/// the segment payload). The peer's segments are processed asynchronously
+/// by the RX drain (the ipv4 protocol-6 dispatch -> tcp).
+pub fn net_tcp_send(segment: []const u8, out_len: *usize) SendResult {
+    if (!net_ready) return .not_ready;
+    if (!arp.ip_set()) return .not_ready;
+    @memset(tx_staging[0..tx_hdr_len], 0);
+    const n = tcp.build_frame(tx_staging[tx_hdr_len .. tx_hdr_len + tcp.frame_max], &net_mac, arp.own_ip, tcp.peer_mac, tcp.peer_ip, segment);
+    out_len.* = n;
+    return net_send(&net_ops, &net_dev, tx_staging[0 .. tx_hdr_len + n]);
+}
+
+/// Card N9 (claim 9489): the client holds a live lease (its address is
+/// usable for a renewal).
+fn dhcp_bound() bool {
+    return dhcp.state == .bound or dhcp.state == .renewing or dhcp.state == .rebinding;
 }
 
 /// Card N4 (claim 0148): transmit an ICMP ECHO REQUEST to `target_ip` in

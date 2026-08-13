@@ -181,6 +181,156 @@ assumption comes from documentation or reasoning only.
   (the phase-1 reply and the phase-2 request both byte-identical to the
   fixtures). No new device behavior was otherwise observed on the
   ARP/ICMP exchanges — the N1/N2 contract above is unchanged.
+  **NAT attachment observed 2026-08-12 (claim 4678, milestone five card
+  N7):** the runner's `--net-nat` flag attaches the SAME
+  `VZVirtioNetworkDeviceConfiguration` shape with a
+  `VZNATNetworkDeviceAttachment` instead of the file-handle attachment.
+  (1) **The NAT attachment HONORS the configured locally-administered
+  MAC** — the guest's `VIRTIO_NET_F_MAC` read reports
+  `net: mac=02:00:00:00:00:01 source=feature` (identical to the
+  file-handle path). (2) **VZ exposes no NAT prefix API** — the subnet
+  was observed on the first live run: 192.168.64.0/24 with gateway
+  192.168.64.1 (the guest was statically addressed 192.168.64.5).
+  (3) **The NAT gateway answers ARP for its gateway IP** (the guest
+  learns the gateway MAC — `net arp: 192.168.64.1 is at …`, `learn=1`)
+  **and answers ICMP echo** (`net ping 192.168.64.1` → `pong=1` with
+  `seq=1`) — the deterministic gateway round trip needs NO internet.
+  (4) **The NAT router's MAC is NOT the host bridge interface MAC and
+  VARIES per boot** (observed `ae:07:75:20:da:64` vs the host bridge0
+  interface's `36:27:ce:a2:21:40`) — gates must assert the learned-line
+  prefix, never a hardcoded MAC. (5) **The NAT router SENDS IPv6
+  multicast to the guest at boot** (router-advertisement-shaped frames:
+  the guest's first rx-obs shows dst `33:33:00:00…`); the N2 MAC filter
+  (own + broadcast only) drops them (`filtered=3`) and the ARP-layer
+  drop counter moves once (`drop=1`) — recorded, not a regression.
+  (6) **The NAT attachment does NOT proxy-ARP off-subnet addresses:** a
+  guest `net arp 8.8.8.8` broadcast goes unanswered (`learn=0`) and the
+  guest's `net ping 8.8.8.8` honestly refuses (`peer not in ARP table`
+  — the guest has no routing rung; outbound proof stays at the
+  gateway). (7) **No capture file under NAT** — the host translates the
+  frames (that is the point), so NAT-path evidence is GUEST-OBSERVED
+  COUNTERS, never capture bytes. **[observed]** — every
+  `verify-live-net-nat` boot's serial log (`artifacts/live-net-nat-serial-*.log`)
+  shows the ip-set / arp-learn / pong lines above, the report's `mac=`
+  line, and the runner output shows `net-nat: ENABLED`; the exploratory
+  evidence is saved under `artifacts/live-net-nat-explore/` (including
+  the off-subnet 8.8.8.8 refusal and the host bridge capture).
+  **DHCP observed 2026-08-12 (claim 0351, milestone five card N8):**
+  the guest's RFC 2131 client (the `net dhcp` monitor subcommand, src
+  68 → dst 67, broadcast dst) completes the full four-message handshake
+  against the runner's deterministic `--net-dhcp-respond <lease-ip>`
+  server on the file-handle attachment: DISCOVER (286 B, byte-exact in
+  the capture) → OFFER → REQUEST (298 B, the same xid, byte-exact) →
+  ACK → BOUND with the fixed lease {ip 10.0.0.2, mask 255.255.255.0,
+  gateway 10.0.0.1, server id = the lease IP, lease 3600s}, and the
+  report shows `discover=1,offer=1,request=1,ack=1,nack=0,timeout=0,
+  mal=0`. **CLAIM-TIME OBSERVATION — the VZ NAT attachment serves NO
+  DHCP server** (macOS 27 arm64, the whole phase-2 observation window):
+  under `--net-nat` the guest's DISCOVER broadcast goes out
+  (`discover=1`) and NO OFFER ever arrives (`offer=0, mal=0`) — the
+  NAT router answers ARP for its gateway (N7) but not DHCP, so the
+  NAT-path lease never materializes and phase 2 is honestly BLOCKED
+  with the observation recorded (never faked): the guest falls back to
+  the static address and still reaches the gateway (`pong=1 seq=1`).
+  If a future host's NAT DOES serve DHCP, the phase-2 gate flips to
+  the BOUND path (this observation updated with the new saved log).
+  **[observed]** — every `verify-live-net-dhcp` phase-1 boot's serial
+  log (`artifacts/live-net-dhcp-p1-serial.log`) shows the bound lease
+  + counters, the capture (`live-net-dhcp-p1-cap.bin`) holds the two
+  client frames byte-exact, and the runner output shows the NET-DHCP
+  OFFER/ACK lines; the phase-2 boot's serial log
+  (`artifacts/live-net-dhcp-p2-serial.log`) shows the honest
+  offer=0/mal=0 report + the gateway ping; the exploratory evidence is
+  saved under `artifacts/live-net-dhcp-nat-explore/`.
+  **Lease lifecycle observed 2026-08-12 (claim 9489, milestone five
+  card N9):** the client ENFORCES the lease it recorded — the RFC 2131
+  §4.4.5 rungs, driven by the monitor on the 1 Hz generic timer
+  (`timer.ticks` — integer seconds): at **T1 = lease/2** the client
+  RENEWs with a UNICAST REQUEST to the server's IP + the MAC the guest
+  resolved (`net arp <server>` — the seam resolves nothing; an
+  unresolvable server keeps the client BOUND until T2, RFC-compliant
+  degradation); at **T2 = lease*7/8** it REBINDs with a BROADCAST
+  REQUEST; at **expiry** it releases the address (arp.own_ip cleared —
+  the report shows ip=0.0.0.0 — and the lease record zeroed) and
+  re-DISCOVERs. The renewal ACK restarts the lease (bound_ticks
+  re-stamped). The renewal REQUESTs carry `ciaddr` = the leased IP
+  (RFC 2131 §4.4.5). **[observed]** — every `verify-live-net-dhcp-renew`
+  Run-A boot's serial log (`artifacts/live-net-dhcp-renew-a-serial.log`)
+  shows the renewing (T1) + rebinding (T2) lines and the counters
+  `renew=1,rebind=1,renewed=2,expired=0`, and the capture
+  (`live-net-dhcp-renew-a-cap.bin`, 1222 B) holds the RENEWING REQUEST
+  byte-exact UNICAST (dst 02:00:00:00:00:02, src/dst IP 10.0.0.2,
+  ciaddr 10.0.0.2) vs the REBINDING REQUEST broadcast; the Run-B boot
+  (`live-net-dhcp-renew-b-serial.log`) shows the lease-expired line,
+  the released report (`dhcp=idle,ip=0.0.0.0,…,expired=1`) and the
+  recovery (a second DISCOVER → BOUND again); the exploratory evidence
+  is saved under `artifacts/live-net-dhcp-renew-explore/`. The runner's
+  lease knob (`--net-dhcp-respond <ip>:<lease-secs>`, default 3600) and
+  the script delays (`--script2-delay` / `--script3-delay`, default
+  0.5) are flag-gated — every pre-N9 gate is byte-identical.
+  **TCP observed 2026-08-12 (claim 7026, milestone five card N10):**
+  the guest's bounded RFC 793 client (the `net tcp` monitor subcommand,
+  src port 8000, a bare 20-byte header — NO options, window 4096)
+  completes the full lifecycle against the runner's deterministic
+  `--net-tcp-respond <host-ip>:<host-port>` server on the file-handle
+  attachment: SYN (54 B, byte-exact in the capture) → SYN-ACK (the
+  FIXED server ISN 0x12345678) → ACK → ESTABLISHED → data (5 B) → the
+  payload ECHOED byte-exact (the RX buffer prints `01 02 03 04 05`) →
+  FIN → FIN-ACK → final ACK → CLOSED, then a second connect + `net tcp
+  reset` (a real RST) — the report shows `syn=2,synack=2,ack=4,
+  data_s=1,data_r=1,fin=1,finack=1,rst_s=1,rst_r=0,timedout=0,mal=0`.
+  The client's ACK numbers are DETERMINISTIC (0x12345679 / 0x1234567e
+  / 0x1234567f — the fixed server ISN). **The bounded connect timeout
+  observed** (file-handle, ARP-responder-only — the host never answers
+  TCP, a deterministic black hole): after 30 guest seconds the client
+  refuses honestly — `connect refused (no SYN-ACK after 30s)`,
+  `timedout=1`, the connection state released (peer 0.0.0.0:0).
+  **CLAIM-TIME OBSERVATION — the VZ NAT gateway answers a TCP SYN with
+  a RST** (macOS 27 arm64, `--net-nat`, connect to 192.168.64.1:9999):
+  the gateway (MAC ae:07:75:20:da:64, learned via the N7-proven ARP
+  path) actively refuses the connection — no TCP listener on the test
+  port — so the client's RST-RX path fires (`rst_r=1`, `tcp=closed`,
+  the drive returns it to idle). The VZ NAT does not silently drop; it
+  refuses closed ports with a real RST. If a future host's NAT gateway
+  instead drops the SYN silently, the honest timeout path fires
+  (`timedout=1` — proven by Run B; the Run-C assertion set documents
+  where to flip). **[observed]** — every `verify-live-net-tcp` Run-A
+  boot's serial log (`artifacts/live-net-tcp-a-serial.log`) shows the
+  lifecycle lines + counters, the capture (`live-net-tcp-a-cap.bin`, 533
+  B) holds the NINE guest-TX frames byte-exact (the gate's python walk
+  verifies the seq/ack chain + every TCP checksum); the Run-B serial log
+  (`live-net-tcp-b-serial.log`) shows the timeout refusal, the Run-C
+  serial log (`live-net-tcp-c-serial.log`) shows the NAT RST; the
+  exploratory evidence is saved under
+  `artifacts/live-net-tcp-explore/`. The runner's `--net-tcp-respond`
+  is flag-gated — every pre-N10 gate is byte-identical.
+  **TCP retransmission observed 2026-08-12 (claim 5357, milestone five
+  card N11):** the client's bounded retransmission machinery works live
+  on the file-handle attachment — the fixed 3 s RTO (guest seconds, the
+  1 Hz generic timer) retransmits a pending unacknowledged segment
+  AUTONOMOUSLY (the shell idle loop polls it — `net tcp: syn
+  retransmitted (n/10)`), byte-IDENTICAL in the capture (the same seq,
+  flags, payload, checksum); an ACK covering `snd_una` clears the
+  pending state (no retransmission — `retx=0` despite a wait past the
+  RTO); and at the bound (10 retransmissions, 33 s) the connection
+  ABORTS honestly (`retransmission limit reached (10) — connection
+  aborted`, the state released — no RST, no TX, `retx=10,abort=1`).
+  The 30 s connect timeout remains the SYN's outer bound (the abort at
+  33 s never beats it — the N10 refusal is unchanged). The runner's
+  `--net-tcp-respond` gained the optional `:handshake` mode (claim
+  5357) — SYN-ACK yes, data/FIN silent, the gate's deterministic data
+  black hole; flag-gated — every pre-N11 gate is byte-identical.
+  **[observed]** — every `verify-live-net-tcp-rto` Run-A serial log
+  (`artifacts/live-net-tcp-rto-a-serial.log`) shows the autonomous
+  `syn retransmitted (n/10)` lines + the capture
+  (`live-net-tcp-rto-a-cap.bin`) holds the byte-identical SYN frames;
+  the Run-B serial log (`live-net-tcp-rto-b-serial.log`) shows `retx=0`
+  with the handshake completing (the capture has exactly ONE SYN); the
+  Run-C serial log (`live-net-tcp-rto-c-serial.log`) shows the ten
+  `data retransmitted (n/10)` lines + the abort + the released report,
+  and the capture (`live-net-tcp-rto-c-cap.bin`) holds the ELEVEN
+  byte-identical data frames; the exploratory evidence is saved under
+  `artifacts/live-net-tcp-rto-explore/`.
 - Custom virtio device (`VZCustomVirtioDeviceConfiguration`, the
   `--custom-virtio` runner flag / `zig build spike-virtio`): the guest sees
   a vendor-defined device on bus 0 as `VID=0x1af4 DID=0x1082`.

@@ -129,11 +129,58 @@ pub fn boot_and_park(mon: *monitor.Monitor, rx_wired: bool) void {
             // shell idle loop is the drain point (the card-3d shell-idle-
             // drain pattern). Idempotent; a no-op when the transport is
             // unarmed or the buffer is empty.
+            // Card N9 (claim 9489): stamp the DHCP lease clock from the 1
+            // Hz generic timer before the drain — a renewal ACK processed
+            // below restarts the lease from the CURRENT instant (honest
+            // wall-clock seconds, the same clock `net dhcp` uses).
+            virtio_net.dhcp.now_ticks = timer.ticks;
+            // Card N10 (claim 7026): stamp the TCP connect clock the same
+            // way — a SYN-ACK processed below starts the connection from
+            // the CURRENT instant (the bounded connect timeout is honest
+            // wall-clock seconds).
+            virtio_net.tcp.now_ticks = timer.ticks;
             virtio_net.net_rx_drain();
             // Claim 1574 (milestone six G3): Road Pops — one full-frame
             // present per dirty output batch (the card-3d drain pattern).
             // No-op when the tee is unarmed (default VM) or clean.
             road_pops.drain();
+            // Card N11 (claim 5357): the bounded retransmission timer —
+            // polled here (the idle loop is the time engine — the
+            // card-N9 clock pattern). AFTER the drain, so an ACK the
+            // drain just processed has cleared the pending state — a
+            // retransmission never follows an acknowledged segment. The
+            // poll advances ONE step: an expired RTO (3 s) retransmits
+            // the pending SYN/data/FIN byte-exact (counted, printed); the
+            // exhausted bound (10) aborts the connection honestly
+            // (counted, printed). Bare ACKs are never pending.
+            switch (virtio_net.tcp.poll_rto()) {
+                .none => {},
+                .retransmit => {
+                    var out_len: usize = 0;
+                    switch (virtio_net.net_tcp_send(virtio_net.tcp.msg[0..virtio_net.tcp.msg_len], &out_len)) {
+                        .ok => {
+                            mon.console.puts("net tcp: ");
+                            mon.console.puts(switch (virtio_net.tcp.state) {
+                                .syn_sent => "syn",
+                                .established => "data",
+                                .fin_sent => "fin",
+                                else => "segment",
+                            });
+                            mon.console.puts(" retransmitted (");
+                            mon.console.print_u64(virtio_net.tcp.retx_count);
+                            mon.console.puts("/");
+                            mon.console.print_u64(virtio_net.tcp.retx_max);
+                            mon.console.puts(")\n");
+                        },
+                        else => mon.console.print_line("net tcp: retransmit TX failed (transport unready)"),
+                    }
+                },
+                .abort => {
+                    mon.console.puts("net tcp: retransmission limit reached (");
+                    mon.console.print_u64(virtio_net.tcp.retx_max);
+                    mon.console.puts(") — connection aborted\n");
+                },
+            }
             idle_wait_rx();
         }
     }
@@ -222,7 +269,7 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "  mem         summarize the EFI memory map\n" ++
         "  mbox        per-process IPC mailbox: pending messages and drain counters\n" ++
         "  mount       switch the active FAT volume (esp or data)\n" ++
-        "  net         virtio-net transport + RX + ARP + ICMP + UDP: device DID, MAC, queues, feature bits, RX counters ('net recv' prints received frames; 'net ip <a.b.c.d>' sets the static IP; 'net arp [<a.b.c.d>]' shows/resolves the ARP table; 'net ping <a.b.c.d>' sends an ICMP echo request; 'net udp [listen <port>|close <port>|send <addr> <port> <len>|recv [<port>]]' drives UDP)\n" ++
+        "  net         virtio-net transport + RX + ARP + ICMP + UDP + DHCP + TCP: device DID, MAC, queues, feature bits, RX counters ('net recv' prints received frames; 'net ip <a.b.c.d>' sets the static IP; 'net arp [<a.b.c.d>]' shows/resolves the ARP table; 'net ping <a.b.c.d>' sends an ICMP echo request; 'net udp [listen <port>|close <port>|send <addr> <port> <len>|recv [<port>]]' drives UDP; 'net dhcp' runs the bounded DHCP client one step per invocation; 'net tcp [connect <addr> <port>|send <len>|recv|close|reset]' drives the bounded TCP client)\n" ++
         "  netsend     send a known Ethernet frame (bounded staging, TX + used-ring drain)\n" ++
         "  pages       physical page allocator pool\n" ++
         "  pci         enumerate PCI devices on the bus\n" ++
