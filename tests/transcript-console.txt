@@ -28,6 +28,9 @@ available commands:
   random      print n random bytes from the seeded CSPRNG (hex)
   reboot      restart the machine
   repeat      repeat text, safely bounded
+  roadpops    Road Pops framebuffer console: armed/dirty/present counters (the boot terminal on the screen)
+  screen      virtio-gpu transport + framebuffer: device DID, features, scanout, status, re-arm ('screen fill <rrggbb>' fills the framebuffer and flushes it to the scanout)
+  text        framebuffer text: text region, cursor, scrollback ('text put <string...>' renders + flushes to the scanout; 'text clear' clears)
   shutdown    request power-off
   spawn       spawn the lifecycle demo task
   syscalls    numbered syscall table and counters

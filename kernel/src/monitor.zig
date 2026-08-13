@@ -38,6 +38,9 @@ const userspace = @import("userspace.zig"); // claim 5804: user-VA layout
 const virtio_blk = @import("virtio_blk.zig"); // claim 6420: the sector interface behind `mount` (milestone four card 2)
 const csprng = @import("csprng.zig"); // milestone four (claim 2665): the seeded CSPRNG behind `random`
 const virtio_net = @import("virtio_net.zig"); // milestone five card N1 (claim 1373): the net transport behind `net`/`netsend`
+const virtio_gpu = @import("virtio_gpu.zig"); // milestone six card G1 (claim 6053): the gpu transport + framebuffer behind `screen`
+const road_pops = @import("road_pops.zig"); // milestone six card G3 (claim 1574): the Road Pops tee console behind `roadpops`
+const fbtext = @import("text.zig"); // milestone six card G2 (claim 3194): framebuffer text rendering behind `text`
 
 // ---------------------------------------------------------------------------
 // Limits (fixed-size, explicit bounds)
@@ -213,7 +216,7 @@ pub const Command = struct {
 /// Number of commands. The registry is built at runtime (not a const
 /// table): see `ensure_registry`. Milestone five card N1 (claim 1373)
 /// grows it 32 -> 34 (`net` + `netsend`).
-pub const registry_count: usize = 34;
+pub const registry_count: usize = 37;
 
 /// Command registry, built at runtime into BSS. A `const` table would hold
 /// link-time absolute addresses for BOTH the string slices and the handler
@@ -254,6 +257,9 @@ fn ensure_registry() []const Command {
             .{ .name = "random", .help = "print n random bytes from the seeded CSPRNG (hex)", .usage = "random [n]", .max_args = 1, .handler = cmd_random },
             .{ .name = "reboot", .help = "restart the machine", .usage = "reboot", .handler = cmd_reboot },
             .{ .name = "repeat", .help = "repeat text, safely bounded", .usage = "repeat <count> <text...>", .min_args = 1, .handler = cmd_repeat },
+            .{ .name = "roadpops", .help = "Road Pops framebuffer console: armed/dirty/present counters (the boot terminal on the screen)", .usage = "roadpops", .handler = cmd_roadpops },
+            .{ .name = "screen", .help = "virtio-gpu transport + framebuffer: device DID, features, scanout, status, re-arm ('screen fill <rrggbb>' fills the framebuffer and flushes it to the scanout)", .usage = "screen [fill <rrggbb>]", .max_args = 2, .handler = cmd_screen },
+            .{ .name = "text", .help = "framebuffer text: text region, cursor, scrollback ('text put <string...>' renders + flushes to the scanout; 'text clear' clears)", .usage = "text [put <string...>|clear]", .min_args = 0, .max_args = 9, .handler = cmd_text },
             .{ .name = "shutdown", .help = "request power-off", .usage = "shutdown", .handler = cmd_shutdown },
             .{ .name = "spawn", .help = "spawn the lifecycle demo task", .usage = "spawn", .handler = cmd_spawn },
             .{ .name = "syscalls", .help = "numbered syscall table and counters", .usage = "syscalls", .handler = cmd_syscalls },
@@ -330,6 +336,27 @@ pub fn parseInt(text: []const u8) error{ Empty, InvalidDigit, Overflow }!u64 {
         };
         if (radix == 10 and digit >= 10) return error.InvalidDigit;
         value = std.math.mul(u64, value, radix) catch return error.Overflow;
+        value = std.math.add(u64, value, digit) catch return error.Overflow;
+    }
+    return value;
+}
+
+/// Hex-only parse (an optional 0x/0X prefix is accepted; the documented
+/// `screen fill <rrggbb>` form is bare hex) — used for the color argument.
+pub fn parseHex(text: []const u8) error{ Empty, InvalidDigit, Overflow }!u64 {
+    if (text.len == 0) return error.Empty;
+    var start: usize = 0;
+    if (text.len > 2 and text[0] == '0' and (text[1] == 'x' or text[1] == 'X')) start = 2;
+    if (start >= text.len) return error.Empty;
+    var value: u64 = 0;
+    for (text[start..]) |c| {
+        const digit: u64 = switch (c) {
+            '0'...'9' => c - '0',
+            'a'...'f' => c - 'a' + 10,
+            'A'...'F' => c - 'A' + 10,
+            else => return error.InvalidDigit,
+        };
+        value = std.math.mul(u64, value, 16) catch return error.Overflow;
         value = std.math.add(u64, value, digit) catch return error.Overflow;
     }
     return value;
@@ -939,6 +966,23 @@ fn cmd_hex(m: *Monitor, args: []const []const u8) ExecError {
         m.console.print_hex_min(value);
         m.console.puts("\n");
     }
+    return .none;
+}
+
+/// `roadpops` — report the Road Pops tee console (claim 1574, milestone
+/// six G3): armed (the framebuffer target is wired — the boot terminal is
+/// on the screen), dirty (a console write batch is waiting for the idle
+/// loop's drain-present), and the presents pushed since arm.
+fn cmd_roadpops(m: *Monitor, args: []const []const u8) ExecError {
+    _ = args;
+    const r = road_pops.report();
+    m.console.puts("roadpops: armed=");
+    m.console.puts(if (r.armed) "1" else "0");
+    m.console.puts(" dirty=");
+    m.console.puts(if (r.dirty) "1" else "0");
+    m.console.puts(" presents=");
+    m.console.print_u64(r.presents);
+    m.console.puts("\n");
     return .none;
 }
 
@@ -1956,6 +2000,276 @@ fn cmd_netsend(m: *Monitor, args: []const []const u8) ExecError {
 }
 
 // ---------------------------------------------------------------------------
+// Milestone six card G1 (claim 6053) — `screen` / `screen fill`
+// ---------------------------------------------------------------------------
+
+fn print_cmd_result(m: *Monitor, r: virtio_gpu.CmdResult) void {
+    m.console.puts(switch (r) {
+        .ok => "ok",
+        .not_ready => "not-ready",
+        .timeout => "timeout",
+        .bad_response => "bad-response",
+    });
+}
+
+/// `screen` — report the virtio-gpu transport: the OBSERVED device DID +
+/// class + bus slot, the negotiated feature bits (low/high), the device's
+/// num_scanouts, the scanout mode GET_DISPLAY_INFO reported (width x
+/// height, enabled), the device status + post-exit re-arm state, the 2D
+/// setup state, and the command counters. Grep-able and deterministic
+/// (the net/mbox/procs observability shape). Honest when the device is
+/// absent: the default runner attaches no graphics device. `screen fill
+/// <rrggbb>` is the card-G1 subcommand: fill the framebuffer with the
+/// 0xRRGGBB color, then TRANSFER_TO_HOST_2D + RESOURCE_FLUSH — the first
+/// non-blank framebuffer the host `--screenshot` captures.
+fn cmd_screen(m: *Monitor, args: []const []const u8) ExecError {
+    if (args.len > 0) {
+        if (std.mem.eql(u8, args[0], "fill")) return cmd_screen_fill(m, args[1..]);
+        if (std.mem.eql(u8, args[0], "peek")) return cmd_screen_peek(m);
+        m.console.print_line("screen: unknown subcommand (try 'screen' or 'screen fill <rrggbb>')");
+        return .invalid_argument;
+    }
+    if (!virtio_gpu.gpu_ready) {
+        m.console.puts("screen: no virtio-gpu device (");
+        m.console.puts(if (virtio_gpu.gpu_fail.len > 0) virtio_gpu.gpu_fail else "DID 0x1050 not found on bus 0");
+        m.console.puts(")\n");
+        m.console.puts("screen: device-features=");
+        m.console.print_hex(virtio_gpu.gpu_dev_feats_lo);
+        m.console.puts("/");
+        m.console.print_hex(virtio_gpu.gpu_dev_feats_hi);
+        m.console.puts("\n");
+        m.console.puts("screen: status=");
+        m.console.print_hex(virtio_gpu.gpu_status_last);
+        m.console.puts(" accepted=");
+        m.console.print_hex(virtio_gpu.gpu_feats_lo);
+        m.console.puts("/");
+        m.console.print_hex(virtio_gpu.gpu_feats_hi);
+        m.console.puts("\n");
+        m.console.puts("screen: common=");
+        m.console.print_hex(virtio_gpu.gpu_common);
+        m.console.puts(" notify=");
+        m.console.print_hex(virtio_gpu.gpu_notify);
+        m.console.puts(" devcfg=");
+        m.console.print_hex(virtio_gpu.gpu_devcfg);
+        m.console.puts(" bar0=");
+        m.console.print_hex(virtio_gpu.gpu_bar0);
+        m.console.puts("\n");
+        return .none;
+    }
+    m.console.puts("screen: did=");
+    m.console.print_hex(virtio_gpu.gpu_did);
+    m.console.puts(" class=");
+    m.console.print_hex(virtio_gpu.gpu_class);
+    m.console.puts(" dev=");
+    m.console.print_u64(virtio_gpu.gpu_dev);
+    m.console.puts("\n");
+    m.console.puts("screen: devfeat=");
+    m.console.print_hex(virtio_gpu.gpu_dev_feats_lo);
+    m.console.puts("/");
+    m.console.print_hex(virtio_gpu.gpu_dev_feats_hi);
+    m.console.puts("\n");
+    m.console.puts("screen: feat=");
+    m.console.print_hex(virtio_gpu.gpu_feats_lo);
+    m.console.puts("/");
+    m.console.print_hex(virtio_gpu.gpu_feats_hi);
+    m.console.puts(" scanouts=");
+    m.console.print_hex(virtio_gpu.gpu_num_scanouts);
+    m.console.puts("\n");
+    m.console.puts("screen: scanout=");
+    m.console.print_hex(virtio_gpu.gpu_scanout_w);
+    m.console.puts("x");
+    m.console.print_hex(virtio_gpu.gpu_scanout_h);
+    m.console.puts(" enabled=");
+    m.console.print_hex(virtio_gpu.gpu_scanout_enabled);
+    m.console.puts("\n");
+    m.console.puts("screen: status=");
+    m.console.print_hex(virtio_gpu.gpu_status_last);
+    m.console.puts(" rearm=");
+    m.console.print_u64(if (virtio_gpu.gpu_rearmed) 1 else 0);
+    m.console.puts(" setup=");
+    m.console.print_u64(if (virtio_gpu.gpu_setup_ok) 1 else 0);
+    m.console.puts(" cmds=");
+    m.console.print_u64(virtio_gpu.gpu_cmds);
+    m.console.puts(" errors=");
+    m.console.print_u64(virtio_gpu.gpu_errors);
+    m.console.puts(" timeouts=");
+    m.console.print_u64(virtio_gpu.gpu_timeouts);
+    m.console.puts("\n");
+    // The timeout diagnostics (the claim-time record of a stuck queue).
+    m.console.puts("screen: diag avail=");
+    m.console.print_u64(virtio_gpu.gpu_diag_avail);
+    m.console.puts(" used=");
+    m.console.print_u64(virtio_gpu.gpu_diag_used);
+    m.console.puts(" st=");
+    m.console.print_hex(virtio_gpu.gpu_diag_st);
+    m.console.puts(" qen=");
+    m.console.print_u64(virtio_gpu.gpu_diag_qen);
+    m.console.puts(" qoff=");
+    m.console.print_u64(virtio_gpu.gpu_diag_qoff);
+    m.console.puts(" mult=");
+    m.console.print_u64(virtio_gpu.gpu_diag_mult);
+    m.console.puts(" notify=");
+    m.console.print_hex(virtio_gpu.gpu_diag_notify);
+    m.console.puts("\n");
+    m.console.puts("screen: rings desc=");
+    m.console.print_hex(virtio_gpu.gpu_diag_desc_phys);
+    m.console.puts(" avail=");
+    m.console.print_hex(virtio_gpu.gpu_diag_avail_phys);
+    m.console.puts(" used=");
+    m.console.print_hex(virtio_gpu.gpu_diag_used_phys);
+    m.console.puts("\n");
+    m.console.puts("screen: diag cmd0=");
+    m.console.print_hex(virtio_gpu.gpu_diag_cmd0);
+    m.console.puts(" cmd1=");
+    m.console.print_hex(virtio_gpu.gpu_diag_cmd1);
+    m.console.puts(" isr=");
+    m.console.print_hex(virtio_gpu.gpu_diag_isr);
+    m.console.puts(" qsz=");
+    m.console.print_u64(virtio_gpu.gpu_diag_qsz);
+    m.console.puts(" bar0=");
+    m.console.print_hex(virtio_gpu.gpu_bar0);
+    m.console.puts(" common=");
+    m.console.print_hex(virtio_gpu.gpu_common);
+    m.console.puts(" devcfg=");
+    m.console.print_hex(virtio_gpu.gpu_devcfg);
+    m.console.puts(" fb=");
+    m.console.print_hex(virtio_gpu.gpu_fb_phys);
+    m.console.puts("\n");
+    return .none;
+}
+
+/// `screen fill <rrggbb>` — fill the framebuffer with the 0xRRGGBB color
+/// (out-of-range colors are refused honestly), then TRANSFER_TO_HOST_2D +
+/// RESOURCE_FLUSH so the host scanout shows it. The live gate's marker:
+/// the `--screenshot` pixels then match the fill.
+fn cmd_screen_fill(m: *Monitor, args: []const []const u8) ExecError {
+    if (args.len != 1) {
+        m.console.print_line("usage: screen fill <rrggbb>");
+        return .usage;
+    }
+    const rgb = parseHex(args[0]) catch {
+        m.console.puts("screen fill: invalid color: ");
+        m.console.puts(args[0]);
+        m.console.puts("\n");
+        return .invalid_argument;
+    };
+    if (rgb > 0xffffff) {
+        m.console.print_line("screen fill: color out of range (max 0xffffff)");
+        return .invalid_argument;
+    }
+    if (!virtio_gpu.gpu_ready) {
+        m.console.print_line("screen fill: transport not ready (no virtio-gpu device)");
+        return .none;
+    }
+    virtio_gpu.fill_framebuffer(@truncate(rgb));
+    const tx = virtio_gpu.gpu_transfer();
+    const fl = virtio_gpu.gpu_flush();
+    m.console.puts("screen fill: fill=");
+    m.console.print_hex(rgb);
+    m.console.puts(" transfer=");
+    print_cmd_result(m, tx);
+    m.console.puts(" flush=");
+    print_cmd_result(m, fl);
+    m.console.puts("\n");
+    return .none;
+}
+
+/// `screen peek` — dump the first 8 bytes of the framebuffer (B,G,R,X for
+/// the first pixel) + a checksum of the first 4096 bytes, so the gate can
+/// prove the GUEST-side fill landed before blaming the host display.
+fn cmd_screen_peek(m: *Monitor) ExecError {
+    if (!virtio_gpu.gpu_ready) {
+        m.console.print_line("screen peek: transport not ready (no virtio-gpu device)");
+        return .none;
+    }
+    m.console.puts("screen peek: fb=");
+    m.console.print_hex(virtio_gpu.gpu_fb_phys);
+    m.console.puts(" bytes=");
+    var sum: u32 = 0;
+    var i: usize = 0;
+    while (i < 4096 and i < virtio_gpu.fb_size) : (i += 1) {
+        sum +%= virtio_gpu.gpu_fb[i];
+    }
+    m.console.print_hex(sum);
+    m.console.puts(" p0=");
+    m.console.print_hex(virtio_gpu.gpu_fb[0]);
+    m.console.puts(" p1=");
+    m.console.print_hex(virtio_gpu.gpu_fb[1]);
+    m.console.puts(" p2=");
+    m.console.print_hex(virtio_gpu.gpu_fb[2]);
+    m.console.puts(" p3=");
+    m.console.print_hex(virtio_gpu.gpu_fb[3]);
+    m.console.puts("\n");
+    return .none;
+}
+
+/// `text` — report the framebuffer text layer: the region (rows/cols at
+/// the cell size), the cursor (row/col), the scrollback depth, and the
+/// colors. `text put <string...>` renders the string and pushes it to
+/// the scanout (transfer + flush — the live gate's driver); `text clear`
+/// clears + pushes. Honest without the gpu: the report works with no
+/// device, `put`/`clear` refuse.
+fn cmd_text(m: *Monitor, args: []const []const u8) ExecError {
+    if (args.len == 0) {
+        m.console.puts("text: rows=");
+        m.console.print_u64(fbtext.rows);
+        m.console.puts(" cols=");
+        m.console.print_u64(fbtext.cols);
+        m.console.puts(" cell=");
+        m.console.print_u64(fbtext.cell_w);
+        m.console.puts("x");
+        m.console.print_u64(fbtext.cell_h);
+        m.console.puts(" cur=");
+        m.console.print_u64(fbtext.cursor_row());
+        m.console.puts(",");
+        m.console.print_u64(fbtext.cursor_col());
+        m.console.puts(" lines=");
+        m.console.print_u64(fbtext.line_count());
+        m.console.puts(" fg=");
+        m.console.print_hex(fbtext.fg_rgb);
+        m.console.puts(" bg=");
+        m.console.print_hex(fbtext.bg_rgb);
+        m.console.puts("\n");
+        return .none;
+    }
+    if (std.mem.eql(u8, args[0], "put")) {
+        if (args.len < 2) {
+            m.console.print_line("usage: text put <string...>");
+            return .usage;
+        }
+        if (!virtio_gpu.gpu_ready) {
+            m.console.print_line("text put: transport not ready (no virtio-gpu device)");
+            return .none;
+        }
+        var i: usize = 1;
+        while (i < args.len) : (i += 1) {
+            if (i > 1) fbtext.putc(' ');
+            fbtext.puts(args[i]);
+        }
+        fbtext.putc('\n');
+        const r = fbtext.present();
+        m.console.puts("text put: ");
+        print_cmd_result(m, r);
+        m.console.puts("\n");
+        return .none;
+    }
+    if (std.mem.eql(u8, args[0], "clear")) {
+        if (!virtio_gpu.gpu_ready) {
+            m.console.print_line("text clear: transport not ready (no virtio-gpu device)");
+            return .none;
+        }
+        fbtext.clear();
+        const r = fbtext.present();
+        m.console.puts("text clear: ");
+        print_cmd_result(m, r);
+        m.console.puts("\n");
+        return .none;
+    }
+    m.console.print_line("text: unknown subcommand (try 'text', 'text put <string...>', or 'text clear')");
+    return .invalid_argument;
+}
+
+// ---------------------------------------------------------------------------
 // Task lifecycle command (claim 6729)
 // ---------------------------------------------------------------------------
 
@@ -2646,6 +2960,71 @@ test "monitor: net reports no device honestly when the transport is absent" {
     try std.testing.expect(lookup("net") != null);
     try std.testing.expectEqualStrings("virtio-net transport + RX + ARP + ICMP + UDP: device DID, MAC, queues, feature bits, RX counters ('net recv' prints received frames; 'net ip <a.b.c.d>' sets the static IP; 'net arp [<a.b.c.d>]' shows/resolves the ARP table; 'net ping <a.b.c.d>' sends an ICMP echo request; 'net udp [listen <port>|close <port>|send <addr> <port> <len>|recv [<port>]]' drives UDP)", lookup("net").?.help);
     try std.testing.expect(lookup("netsend") != null);
+}
+
+test "monitor: screen reports no device honestly when the transport is absent" {
+    var env = TestEnv.init();
+    var mon = env.monitor();
+    virtio_gpu.gpu_ready = false;
+    virtio_gpu.gpu_fail = "";
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"screen"}));
+    try std.testing.expectEqualStrings(
+        "screen: no virtio-gpu device (DID 0x1050 not found on bus 0)\n" ++
+            "screen: device-features=0x0000000000000000/0x0000000000000000\n" ++
+            "screen: status=0x00000000000000ff accepted=0x0000000000000000/0x0000000000000000\n" ++
+            "screen: common=0x0000000000000000 notify=0x0000000000000000 devcfg=0x0000000000000000 bar0=0x0000000000000000\n",
+        env.mock.contents(),
+    );
+    // `screen fill` is refused honestly with no transport.
+    env.mock.reset();
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "screen", "fill", "0x112233" }));
+    try std.testing.expectEqualStrings("screen fill: transport not ready (no virtio-gpu device)\n", env.mock.contents());
+    // An out-of-range color is refused honestly even before the transport
+    // check.
+    env.mock.reset();
+    try std.testing.expectEqual(ExecError.invalid_argument, exec(&mon, &.{ "screen", "fill", "0x1000000" }));
+    try std.testing.expectEqualStrings("screen fill: color out of range (max 0xffffff)\n", env.mock.contents());
+    // `screen` is registered (the registry-row shape).
+    try std.testing.expect(lookup("screen") != null);
+    try std.testing.expectEqualStrings("virtio-gpu transport + framebuffer: device DID, features, scanout, status, re-arm ('screen fill <rrggbb>' fills the framebuffer and flushes it to the scanout)", lookup("screen").?.help);
+}
+
+test "monitor: text reports the region and refuses put/clear without the transport" {
+    var env = TestEnv.init();
+    var mon = env.monitor();
+    virtio_gpu.gpu_ready = false;
+    // The report is device-independent: it names the region + cursor.
+    fbtext.init();
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"text"}));
+    try std.testing.expectEqualStrings(
+        "text: rows=90 cols=160 cell=8x8 cur=0,0 lines=0 fg=0x000000000000ff00 bg=0x0000000000101418\n",
+        env.mock.contents(),
+    );
+    // `text put` / `text clear` are refused honestly with no transport.
+    env.mock.reset();
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "text", "put", "hello" }));
+    try std.testing.expectEqualStrings("text put: transport not ready (no virtio-gpu device)\n", env.mock.contents());
+    env.mock.reset();
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "text", "clear" }));
+    try std.testing.expectEqualStrings("text clear: transport not ready (no virtio-gpu device)\n", env.mock.contents());
+    // An unknown subcommand is refused honestly.
+    env.mock.reset();
+    try std.testing.expectEqual(ExecError.invalid_argument, exec(&mon, &.{ "text", "bogus" }));
+    // `text` is registered (the registry-row shape).
+    try std.testing.expect(lookup("text") != null);
+    try std.testing.expectEqualStrings("framebuffer text: text region, cursor, scrollback ('text put <string...>' renders + flushes to the scanout; 'text clear' clears)", lookup("text").?.help);
+}
+
+test "monitor: roadpops reports the tee state honestly" {
+    var env = TestEnv.init();
+    var mon = env.monitor();
+    // The global tee is unarmed in host tests → serial-only degradation
+    // (the default VM's behavior).
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"roadpops"}));
+    try std.testing.expectEqualStrings("roadpops: armed=0 dirty=0 presents=0\n", env.mock.contents());
+    // `roadpops` is registered (the registry-row shape).
+    try std.testing.expect(lookup("roadpops") != null);
+    try std.testing.expectEqualStrings("Road Pops framebuffer console: armed/dirty/present counters (the boot terminal on the screen)", lookup("roadpops").?.help);
 }
 
 test "monitor: net report shape with an armed transport" {

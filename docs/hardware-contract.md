@@ -55,7 +55,35 @@ assumption comes from documentation or reasoning only.
 - Framebuffer: virtio-gpu with a 1280x720 scanout shown in a
   `VZVirtualMachineView`. **Observed**: the firmware renders nothing to it;
   captured PNGs are blank/gray. UEFI text is therefore NOT visible on the
-  VZ framebuffer either.
+  VZ framebuffer either. **G1 driven + first pixels 2026-08-12 (claim
+  6053, milestone six card 1) — the driver's assumptions are now
+  [observed] with saved VZ logs (`artifacts/m6-gpu-*`, `live-screen-*`):**
+  the device is the modern virtio-pci gpu **`VID=0x1af4 DID=0x1050`
+  (class 0x038000, bus 0 dev 7)** — the spec DID confirmed, found via
+  the ECAM walk like every virtio device before it; its virtio-pci
+  capability layout is claim-0013's decoded shape (common cfg @ BAR0+
+  `0x0000`, ISR @ `+0x1000`, notify @ `+0x4000` multiplier 4, device cfg
+  @ `+0x8000`); it **offers** `RING_PACKED|RING_EVENT_IDX|
+  RING_INDIRECT_DESC|VERSION_1` (`devfeat=0x30000000/0x5` — the same
+  word as the console) and accepts **VIRTIO_F_VERSION_1 alone**
+  (`feat=0x0/0x1`; split rings, classic 16-bit notify with the queue
+  index as the value); the framebuffer exposure is the **spec 2D command
+  path** (GET_DISPLAY_INFO → RESOURCE_CREATE_2D →
+  RESOURCE_ATTACH_BACKING → SET_SCANOUT → TRANSFER_TO_HOST_2D →
+  RESOURCE_FLUSH — no resource mapping / BAR window needed); the scanout
+  resource is **B8G8R8X8_UNORM (format 2)** with an OPAQUE alpha byte
+  (an X/A of 0 renders fully transparent — the final black-screen bug);
+  the device is **virtio-gpu 1.2** (the 24-byte `display_one` — the
+  pre-1.2 20-byte shape made GET_DISPLAY_INFO's response 344 vs the 408
+  the device writes and wedged the queue with DEVICE_NEEDS_RESET 0x40);
+  the tail descriptor's `next` must be 0 (VZ walks it without the NEXT
+  flag — 0xffff wedged the queue); and **VZ RESETS the gpu device at
+  ExitBootServices — `gpu: pre-rearm st=00` observed** (like
+  blk/entropy's `st=00`, unlike net's `st=0f`; the post-exit re-arm is
+  required). Both queues are armed (controlq 0 + cursorq 1, size 4 — the
+  Linux driver configures both). The input devices for G4 stay
+  [inferred]: virtio-input (spec DID 0x1052) behind VZ's
+  `VZUSBKeyboardConfiguration` + `VZUSBScreenCoordinatePointingDeviceConfiguration`.
 - Entropy: virtio entropy device (`VZVirtioEntropyDeviceConfiguration`).
   **Driven + seeded 2026-08-10 (claim 2665, milestone four card 1):** the
   guest sees it on bus 0 as `VID=0x1af4 DID=0x1044` (virtio device ID 4;

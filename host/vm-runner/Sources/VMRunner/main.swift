@@ -100,6 +100,7 @@
 import AppKit
 import Darwin
 import Foundation
+import ScreenCaptureKit
 import Virtualization
 
 // Diagnostics and the console tee must survive signal exits (SIGINT/SIGTERM),
@@ -110,6 +111,13 @@ let arguments = CommandLine.arguments
 let diskImagePath = arguments.count > 1 ? arguments[1] : "artifacts/disk.img"
 var serialLogPath = "artifacts/vm-serial.log"
 var screenshotPath: String?
+// Milestone six card G1 (claim 6053): `--display` attaches the virtio-gpu
+// device and shows the VM window for the whole session (the machine boots
+// to a screen). OFF by default — without the flag config.graphicsDevices
+// stays [] exactly as before, so every existing gate stays byte-identical.
+// `--screenshot <path>` remains the evidence capture (the two combine:
+// `--display --screenshot`).
+var displayMode = false
 var timeout: TimeInterval = 30
 var timeoutExplicit = false
 var expectLine = "firmware has agreed to cooperate"
@@ -192,6 +200,9 @@ while idx < arguments.count {
     if arg == "--screen", idx + 1 < arguments.count {
         screenshotPath = arguments[idx + 1]
         idx += 2
+    } else if arg == "--display" {
+        displayMode = true
+        idx += 1
     } else if arg == "--timeout", idx + 1 < arguments.count {
         timeout = TimeInterval(arguments[idx + 1]) ?? 30
         timeoutExplicit = true
@@ -445,7 +456,13 @@ config.serialPorts = [serialConfig]
 config.entropyDevices = [VZVirtioEntropyDeviceConfiguration()]
 
 var machineView: VZVirtualMachineView?
-if screenshotPath != nil {
+var machineWindow: NSWindow?
+// Milestone six card G1 (claim 6053): the virtio-gpu device is attached
+// under `--display` (the milestone's mode — the machine boots to a
+// screen) as well as under `--screenshot` (the evidence capture). The
+// default VM attaches NO graphics device — config.graphicsDevices stays
+// [] and every existing gate stays byte-identical.
+if screenshotPath != nil || displayMode {
     let graphics = VZVirtioGraphicsDeviceConfiguration()
     graphics.scanouts = [VZVirtioGraphicsScanoutConfiguration(widthInPixels: 1280, heightInPixels: 720)]
     config.graphicsDevices = [graphics]
@@ -630,6 +647,9 @@ if consoleMode {
 if let netCapturePath {
     print("  net: ENABLED (milestone five card N1, claim 1373) — virtio-net device attached, guest TX frames captured byte-exactly to \(netCapturePath), fixed MAC 02:00:00:00:00:01")
 }
+if displayMode {
+    print("  display: ENABLED (milestone six card G1, claim 6053) — virtio-gpu device attached, 1280x720 scanout window shown for the session")
+}
 if let netInjectPath {
     print("  net-inject: ENABLED (milestone five card N2, claim 6076) — \(netInjectPath) written into the attachment's socket once after \"\(netInjectAfter ?? "net: rx-armed")\" appears in the serial log (host→guest RX)")
 }
@@ -658,11 +678,40 @@ runner.queue.async {
 }
 
 var captureTimes: [TimeInterval] = [5, 10, 15]
+
+// Milestone six card G1 (claim 6053): create the AppKit window + the
+// VZVirtualMachineView the virtio-gpu scanout renders into, whenever the
+// gpu device is attached (`--display` and/or `--screenshot`). Shared by
+// the evidence path and script mode so a gated run can screenshot the
+// guest framebuffer mid-script.
+func setupDisplayWindow() {
+    guard screenshotPath != nil || displayMode else { return }
+    let app = NSApplication.shared
+    app.setActivationPolicy(.accessory)
+    let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 480), styleMask: [.titled], backing: .buffered, defer: false)
+    let view = VZVirtualMachineView(frame: NSRect(x: 0, y: 0, width: 1280, height: 720))
+    view.virtualMachine = runner.vm
+    window.setContentSize(NSSize(width: 1280, height: 720))
+    window.contentView = view
+    window.center()
+    window.orderFrontRegardless()
+    window.makeKeyAndOrderFront(nil)
+    app.activate(ignoringOtherApps: true)
+    machineView = view
+    machineWindow = window
+}
+
+// Milestone six card G1 (claim 6053): the 5/10/15 s screenshot capture,
+// shared by the evidence poll and scriptPoll so a gated scripted run can
+// capture the guest framebuffer. The evidence now comes from
+// ScreenCaptureKit — the runner's own window captured by ID and cropped
+// to the content area, i.e. the composited pixels exactly as the operator
+// sees them in `--display` (title bar excluded via the window's own frame
+// geometry). The offscreen `cacheDisplay` render remains as the honest
+// fallback when Screen Recording permission is unavailable (TCC not
+// granted, headless CI, ...); the printed capture path says which one
+// produced the PNG.
 func captureScreenshot(at t: TimeInterval) {
-    guard let view = machineView,
-          let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return }
-    view.cacheDisplay(in: view.bounds, to: rep)
-    guard let data = rep.representation(using: .png, properties: [:]) else { return }
     let path: String
     if let base = screenshotPath {
         let dot = (base as NSString).deletingPathExtension
@@ -671,11 +720,102 @@ func captureScreenshot(at t: TimeInterval) {
     } else {
         path = "artifacts/vm-screen-\(Int(t))s.png"
     }
+
+    var png: Data?
+    if let img = screenCaptureKitScreenshot() {
+        let rep = NSBitmapImageRep(cgImage: img)
+        if let data = rep.representation(using: .png, properties: [:]) {
+            png = data
+            print("  capture path: ScreenCaptureKit (composited window, \(img.width)x\(img.height) px)")
+        }
+    }
+    if png == nil, let view = machineView,
+       let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
+        view.cacheDisplay(in: view.bounds, to: rep)
+        png = rep.representation(using: .png, properties: [:]) ?? png
+        print("  capture path: cacheDisplay fallback (Screen Recording permission unavailable)")
+    }
+    guard let data = png else { return }
     do {
         try data.write(to: URL(fileURLWithPath: path))
         print("SUCCESS: framebuffer screenshot saved to \(path) (\(data.count) bytes).")
         screenshotSaved = true
     } catch { print("WARNING: could not write screenshot: \(error)") }
+}
+
+// ScreenCaptureKit path: capture OUR window by ID via a window content
+// filter (SCShareableContent -> SCContentFilter(display:includingWindows:))
+// and crop the title bar off, so the evidence is the composited content
+// area exactly as the operator sees it in `--display`. No display-space
+// coordinate math is involved — the filter captures the window and the
+// title bar height comes from the window's own frame geometry. Screen
+// Recording permission is required; the caller falls back to cacheDisplay
+// when the capture fails.
+func screenCaptureKitScreenshot() -> CGImage? {
+    guard let window = machineWindow else { return nil }
+    let windowID = CGWindowID(window.windowNumber)
+    guard windowID > 0 else { return nil }
+
+    let sem = DispatchSemaphore(value: 0)
+    var scWindow: SCWindow?
+    var display: SCDisplay?
+    SCShareableContent.getExcludingDesktopWindows(false, onScreenWindowsOnly: true) { content, error in
+        if let error {
+            print("WARNING: SCShareableContent failed: \(error)")
+        } else if let content {
+            scWindow = content.windows.first { $0.windowID == windowID }
+            display = content.displays.first
+            if scWindow == nil {
+                print("WARNING: window \(windowID) not in SCK shareable content (off-screen?)")
+            }
+        }
+        sem.signal()
+    }
+    if sem.wait(timeout: .now() + 5) == .timedOut {
+        print("WARNING: SCShareableContent timed out")
+        return nil
+    }
+    guard let scWindow, let display else { return nil }
+
+    let filter = SCContentFilter(display: display, including: [scWindow])
+    let config = SCScreenshotConfiguration()
+    config.showsCursor = false
+    config.ignoreShadows = true
+
+    var image: CGImage?
+    let sem2 = DispatchSemaphore(value: 0)
+    SCScreenshotManager.captureScreenshot(contentFilter: filter, configuration: config) { output, error in
+        if let error {
+            print("WARNING: ScreenCaptureKit capture failed: \(error)")
+        } else {
+            image = output?.sdrImage
+        }
+        sem2.signal()
+    }
+    if sem2.wait(timeout: .now() + 5) == .timedOut {
+        print("WARNING: ScreenCaptureKit capture timed out")
+        return nil
+    }
+    guard let full = image else { return nil }
+
+    // The window capture includes the title bar (the frame above the
+    // content view). Crop it off using the window's own geometry so the
+    // evidence is exactly the view's content area (what cacheDisplay
+    // produced before, so the gate pixel math is unchanged).
+    let titleBar = window.frame.height - window.contentLayoutRect.height
+    let scale = filter.pointPixelScale > 0 ? CGFloat(filter.pointPixelScale) : (window.screen?.backingScaleFactor ?? 2.0)
+    let crop = CGRect(x: 0,
+                      y: titleBar * scale,
+                      width: window.contentLayoutRect.width * scale,
+                      height: window.contentLayoutRect.height * scale)
+    print("  sck debug: window=\(windowID) raw=\(full.width)x\(full.height) scale=\(scale) titleBar=\(titleBar) crop=\(NSStringFromRect(crop))")
+    guard crop.width > 0, crop.height > 0,
+          crop.minX >= 0, crop.minY >= 0,
+          crop.maxX <= Double(full.width), crop.maxY <= Double(full.height),
+          let cropped = full.cropping(to: crop) else {
+        return full
+    }
+    return cropped
 }
 
 func finish(success: Bool) {
@@ -986,13 +1126,7 @@ func poll() {
         }
     }
 
-    if screenshotPath != nil {
-        let elapsed = Date().timeIntervalSince(startTime)
-        if let next = captureTimes.first(where: { $0 <= elapsed }) {
-            captureTimes.removeAll { $0 == next }
-            captureScreenshot(at: next)
-        }
-    }
+    captureScreenshotIfDue()
 
     if Date() > deadline {
         if screenshotSaved && terminalMarker == nil {
@@ -1006,6 +1140,19 @@ func poll() {
         return
     }
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { poll() }
+}
+
+// Milestone six card G1 (claim 6053): the 5/10/15 s screenshot capture,
+// shared by the evidence poll and scriptPoll so a gated scripted run can
+// capture the guest framebuffer.
+func captureScreenshotIfDue() {
+    if screenshotPath != nil {
+        let elapsed = Date().timeIntervalSince(startTime)
+        if let next = captureTimes.first(where: { $0 <= elapsed }) {
+            captureTimes.removeAll { $0 == next }
+            captureScreenshot(at: next)
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1393,6 +1540,7 @@ func scriptPoll() {
             return
         }
     }
+    captureScreenshotIfDue()
     if Date() > deadline {
         print("FAILURE: expected transcript '\(scriptExpect ?? "<none>")' not observed within \(Int(timeout))s.")
         if !lastText.isEmpty {
@@ -1454,7 +1602,10 @@ if consoleMode {
 } else if scriptMode {
     // Claim 6684: non-interactive scripted input — tee guest output to the
     // log, forward the script after the terminal state, poll for the
-    // expected transcript.
+    // expected transcript. Milestone six card G1 (claim 6053): when the
+    // gpu device is attached (`--display`/`--screenshot`), the window is
+    // created here too so the scripted run can capture the framebuffer.
+    setupDisplayWindow()
     startGuestOutputTee()
     startScriptInput()
     startScript2Input()
@@ -1462,20 +1613,7 @@ if consoleMode {
     startNetInject()
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { scriptPoll() }
 } else {
-    if screenshotPath != nil {
-        let app = NSApplication.shared
-        app.setActivationPolicy(.accessory)
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 480), styleMask: [.titled], backing: .buffered, defer: false)
-        let view = VZVirtualMachineView(frame: NSRect(x: 0, y: 0, width: 1280, height: 720))
-        view.virtualMachine = runner.vm
-        window.setContentSize(NSSize(width: 1280, height: 720))
-        window.contentView = view
-        window.center()
-        window.orderFrontRegardless()
-        window.makeKeyAndOrderFront(nil)
-        app.activate(ignoringOtherApps: true)
-        machineView = view
-    }
+    setupDisplayWindow()
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { poll() }
 }
 RunLoop.main.run()

@@ -135,12 +135,15 @@ dipshitos/
 │   ├── src/handoff.zig        Handoff v2 struct validation
 │   ├── src/lineedit.zig       Fixed-buffer line editor (no allocator)
 │   ├── src/tokenizer.zig      Command-line tokenizer (no allocator)
-│   ├── src/monitor.zig        Comptime command registry (34 commands; `net`/`netsend` = claim 1373)
+│   ├── src/monitor.zig        Comptime command registry (37 commands; `screen`/`screen fill` = claim 6053; `text`/`text put` = claim 3194; `roadpops` = claim 1574; `net`/`netsend` = claim 1373)
 │   ├── src/shell.zig          Prompt loop: banner → lineedit → tokenize → exec
 │   ├── src/esp.zig            ESP file window over the live FAT32 volume (ls/cat/write)
 │   ├── src/fat.zig            GPT + FAT32 mount/list/read/write (injected sector I/O)
 │   ├── src/virtio_blk.zig     virtio-blk transport (DID 0x1042 on VZ, post-exit re-arm)
 │   ├── src/virtio_entropy.zig virtio entropy transport (DID 0x1044, post-exit re-arm; claim 2665)
+│   ├── src/virtio_gpu.zig     virtio-gpu transport + framebuffer (DID 0x1050, post-exit re-arm, spec 2D path; claim 6053 — milestone six G1, the first non-blank framebuffer)
+│   ├── src/text.zig           framebuffer text: 8×8 bitmap font + raster (putc/puts, cursor, wrap, scrollback; claim 3194 — milestone six G2, the boot banner painted on the screen)
+│   ├── src/road_pops.zig      Road Pops tee console: serial shared seam + framebuffer text, drained by the shell idle loop (claim 1574 — milestone six G3, the boot terminal on the screen)
 │   ├── src/virtio_net.zig     virtio-net transport + TX + RX + ARP + ICMP + UDP (DID 0x1041, claims 1373/6076/7293/0148/8552/1384 — the network keystone)
 │   ├── src/arp.zig            ARP protocol layer (RFC 826, claim 7293 — static IP, bounded table, request/reply)
 │   ├── src/ipv4.zig           IPv4/ICMP echo layer (RFC 791/792, claim 0148 — RFC 1071 checksums, net ping, no reassembly)

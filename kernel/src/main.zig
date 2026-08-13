@@ -36,6 +36,27 @@ const csprng = @import("csprng.zig");
 // Pre-exit discovery, post-MMU re-arm, MAC via VIRTIO_NET_F_MAC, TX on
 // queue 1 with a polled used-ring drain; RX is card N2.
 const virtio_net = @import("virtio_net.zig");
+// Milestone six card G1 (claim 6053): virtio-gpu transport + framebuffer
+// (the runner's VZVirtioGraphicsDeviceConfiguration under `--display` /
+// `--screenshot`) — the graphics keystone. Pre-exit discovery, post-MMU
+// re-arm, the control-queue 2D command path to a fixed BSS framebuffer.
+const virtio_gpu = @import("virtio_gpu.zig");
+const fbtext = @import("text.zig"); // milestone six card G2 (claim 3194): framebuffer text
+const road_pops = @import("road_pops.zig"); // milestone six card G3 (claim 1574): the Road Pops tee — the boot terminal on the screen
+
+// Road Pops (claim 1574) framebuffer-text target: G2's text layer through
+// the tee's injectable Target. The text layer is a fixed BSS singleton, so
+// the wrappers ignore ctx (a file-scope dummy keeps the pointer well-typed).
+var rp_target_dummy: u8 = 0;
+fn rp_text_put_bytes(_: *anyopaque, bytes: []const u8) void {
+    fbtext.puts(bytes);
+}
+fn rp_text_present(_: *anyopaque) void {
+    _ = fbtext.present();
+}
+fn rp_text_clear(_: *anyopaque) void {
+    fbtext.clear();
+}
 
 // Claim 0023: the handoff-v2 contract, the identity-map MMU, and the
 // evidence channel (takeover markers + probe dumps) live in their own
@@ -283,6 +304,20 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
     // on every existing gate — the default VM is unchanged.
     const net_ready = virtio_net.virtio_net_init();
 
+    // Milestone six card G1 (claim 6053): the virtio-pci graphics transport
+    // (the runner's `--display` / `--screenshot` attachment — modern
+    // virtio-gpu, DID 0x1050 expected per the 0x1040 + device-id scheme;
+    // confirm-at-claim-time, whatever is observed is recorded). Armed
+    // PRE-EXIT like the console/blk/entropy/net devices (config-space +
+    // BAR reads must stay pre-exit, claim 0013); its BAR0 window is handed
+    // to the identity map below, and the transport is RE-ARMED post-MMU
+    // (the claim-6420 lesson: VZ resets some virtio devices at
+    // ExitBootServices — blk/entropy do, the net device does NOT; the gpu
+    // answer is observed, not assumed) right after the MMU switch. The
+    // default runner attaches no graphics device, so `gpu_ready` is false
+    // on every existing gate — the default VM is unchanged.
+    const gpu_ready = virtio_gpu.virtio_gpu_init();
+
     // Claim 0828: the custom-virtio spike device (DID 0x1082) — PRE-EXIT
     // discovery only (config-space reads, the claim-0013 discipline). VZ's
     // firmware BAR assignment moves between boots (0x50001000 in the claim-
@@ -344,7 +379,7 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
     // (discovered pre-exit) are handed to mmu.build_identity_map as the
     // extra Device windows above the blanket; mmu.zig stays
     // transport-agnostic.
-    var extra_windows: [5]mmu.DeviceWindow = undefined;
+    var extra_windows: [6]mmu.DeviceWindow = undefined;
     var extra_count: usize = 0;
     if (virtio_console.vp_ready and virtio_console.vp_bar0 != 0) {
         extra_windows[extra_count] = .{ .base = virtio_console.vp_bar0, .len = 0x10000 };
@@ -375,6 +410,16 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
     // no net device, no window).
     if (net_ready and virtio_net.net_bar0 != 0) {
         extra_windows[extra_count] = .{ .base = virtio_net.net_bar0, .len = 0x10000 };
+        extra_count += 1;
+    }
+    // Milestone six card G1 (claim 6053): the gpu transport BAR (pre-exit
+    // resolved) — same Device-window treatment as the console/blk/custom/
+    // entropy/net transports so post-MMU common-config reads + control-
+    // queue notify reach the device. Only present under the runner's
+    // `--display`/`--screenshot` flags (default VM: no gpu device, no
+    // window).
+    if (gpu_ready and virtio_gpu.gpu_bar0 != 0) {
+        extra_windows[extra_count] = .{ .base = virtio_gpu.gpu_bar0, .len = 0x10000 };
         extra_count += 1;
     }
     const user_text = userspace.text_region(base);
@@ -636,6 +681,61 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
         _ = virtio_net.net_rx_arm();
         uart_puts("net: rx-armed\n");
     }
+    // Milestone six card G1 (claim 6053): re-arm the virtio-gpu transport
+    // post-MMU (the claim-6420/2665 lesson — VZ resets some virtio devices
+    // at ExitBootServices; blk/entropy reset to st=00, the net device does
+    // NOT (st=0f observed) — the gpu answer is observed, not assumed: the
+    // pre-rearm status is printed so the host sees it either way), then run
+    // the spec 2D path to a flushed scanout (display info → resource →
+    // backing → scanout → boot fill → transfer → flush). The `screen`
+    // monitor command then re-fills. The default runner attaches NO
+    // graphics device, so on every existing gate this whole block is
+    // skipped and the boot output stays byte-identical.
+    if (gpu_ready) {
+        uart_puts("gpu: pre-rearm st=");
+        uart_hex8(virtio_gpu.gpu_status());
+        uart_puts("\n");
+        if (virtio_gpu.gpu_rearm()) {
+            if (virtio_gpu.gpu_setup()) {
+                uart_puts("gpu: setup ok scanout=");
+                uart_hex(virtio_gpu.gpu_scanout_w);
+                uart_puts("x");
+                uart_hex(virtio_gpu.gpu_scanout_h);
+                uart_puts(" fmt=");
+                uart_hex(virtio_gpu.format_b8g8r8x8);
+                uart_puts("\n");
+                // Milestone six card G3 (claim 1574): Road Pops — the
+                // boot terminal goes graphical. The G2 one-shot boot
+                // paint is replaced by a TEE console: the shell's OWN
+                // banner + prompt + every reply now render on the
+                // framebuffer through G2's text layer (the shell idle
+                // loop drains one present per output batch; the tee's
+                // FIRST present emits the G2 `text: boot banner
+                // presented` evidence on serial, honestly — the boot
+                // banner IS presented at that moment).
+                fbtext.init();
+                // Claim 0015, Road Pops edition: a Target struct literal
+                // with all-constant fields (ctx + &fn entries) is folded
+                // into .rodata, whose &fn entries hold LINK-TIME absolute
+                // addresses — wrong at the kernel's runtime load base
+                // (observed live: the tee's first write jumped to the
+                // link-time address of rp_text_put_bytes and faulted).
+                // Build the Target in RAM, like ensure_vtable, so every
+                // &fn resolves PC-relatively (ADRP) at any load base.
+                var rp_target_storage: road_pops.Target = undefined;
+                rp_target_storage.ctx = &rp_target_dummy;
+                rp_target_storage.put_bytes = rp_text_put_bytes;
+                rp_target_storage.present = rp_text_present;
+                rp_target_storage.clear = rp_text_clear;
+                road_pops.arm(m15.to_console(), rp_target_storage);
+                uart_puts("roadpops: armed target=fbtext\n");
+            } else {
+                uart_puts("gpu: setup failed (");
+                uart_puts(virtio_gpu.gpu_fail);
+                uart_puts(")\n");
+            }
+        }
+    }
     // Claim 3693 (milestone-four follow-on): ASLR for the BOOT-time static
     // EL0 payload too. The pre-install user root (built inside
     // build_identity_map) maps the stack at the fixed userspace.stack_va;
@@ -662,8 +762,13 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
         }
     }
     const console_name = layout_name(console_kind);
+    // Milestone six card G3 (claim 1574): the shell + monitor always run
+    // on the Road Pops tee console. With the gpu transport ready (armed
+    // above), output renders to serial AND the framebuffer; without it
+    // (the default VM) the tee degrades to serial-only — byte-identical.
+    if (!road_pops.is_armed()) road_pops.arm(m15.to_console(), null);
     var mon = monitor.Monitor.init(
-        m15.to_console(),
+        road_pops.tee_console(),
         .{
             // Claim 0023: the shared handoff.zig type is used directly.
             .handoff = handoff_rec.*,

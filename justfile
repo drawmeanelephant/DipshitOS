@@ -76,6 +76,10 @@ verify-vz:
     bash tools/verify-live-net-icmp.sh
     bash tools/verify-live-net-udp.sh
     bash tools/verify-live-net-udp-syscall.sh
+    bash tools/verify-live-screen.sh
+    bash tools/verify-live-text.sh
+    bash tools/verify-live-roadpops.sh
+    bash tools/verify-live-glyphs.sh
 
 # Compile the AArch64 UEFI application and kernel image (class A — zig build)
 build:
