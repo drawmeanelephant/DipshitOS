@@ -718,6 +718,91 @@ gates pass; tagged `m1.5-interactive-monitor`** (see
     applies at every rung. The driver starts single-CPU (boot CPU, the
     claim-9187/0828 IRQ pattern); SMP is a separate future card.
 
+## Milestone six — graphics: Driving Award + Road Pops (sketched, not committed)
+
+> **Scope sketch (2026-08-12).** The last open virtio surface row (Graphics)
+> becomes a real milestone: the machine boots to a **graphical interface**.
+> The boot terminal you see today — the M1.5 "Dipshit Monitor" over the
+> virtio serial console — becomes **Road Pops**, a graphical terminal
+> window, running under **Driving Award**, the window manager. The cards
+> below are the "in between": they fill the gap from "boots to a serial
+> terminal" to "a composited desktop with windows". Nothing here is
+> committed; every card keeps the project's honest bounds (fixed BSS, no
+> heap, one-request-at-a-time device access, gates with real observed
+> evidence) and records new hardware assumptions in
+> `docs/hardware-contract.md`. The runner's `--screenshot` channel already
+> attaches the device (`VZVirtioGraphicsDeviceConfiguration`, 1280×720
+> scanout); the milestone's evidence path is that channel's raw pixels,
+> byte-asserted like the net captures.
+
+Card ladder (canonical order; per-card tracker
+[`docs/march-m6.md`](march-m6.md)):
+
+- **G1 — virtio-gpu transport + framebuffer** (`kernel/src/virtio_gpu.zig`).
+  ~~Discover the virtio-gpu device (spec DID 0x1050 — **[inferred]** until
+  observed on VZ, like every DID before it), negotiate features, set up
+  the scanout + resources, and give the kernel a writable framebuffer
+  (virtio-gpu 2D command path / resource mapping — the exact exposure
+  mode is a claim-time observation). Post-exit re-arm per the claim-6420
+  lesson (whether VZ resets the gpu device at ExitBootServices is
+  observed, not assumed). `screen` monitor command (scanout/framebuffer
+  report) + a solid-fill test. **Gate:** the host `--screenshot` capture
+  shows real guest pixels (a known color marker) — the first non-blank
+  framebuffer.~~ **✅ DONE 2026-08-12 (claim 6053)** — DID 0x1050
+  observed (class 0x038000), VER1-only accepted, the spec 2D command
+  path to a writable BSS framebuffer (B8G8R8X8, opaque alpha), the
+  post-exit re-arm (VZ resets the gpu at ExitBootServices — `st=00`),
+  `screen`/`screen fill`/`screen peek` (registry 34→35), and
+  `tools/verify-live-screen.sh` PASS 1/1: the decoded capture is the
+  fill green (first non-blank framebuffer; evidence
+  `artifacts/live-screen-*`, `artifacts/gpu-screen-*s`).
+- **G2 — framebuffer text rendering** ✅ **done 2026-08-12 (claim 3194, branch `agent/buffy/m6-text`)** — `kernel/src/text.zig` (a built-in 8x8 bitmap font, fixed BSS glyph data, putc/puts, cursor, line wrap, a bounded 128-line scrollback ring, `clear`; pure logic host-tested against an injectable mock canvas — 21 tests including golden glyphs); the kernel paints its banner + `dipshit>` prompt on G1's framebuffer (fg 0x00ff00 / bg 0x101418) and pushes it through G1's transfer/flush unchanged; `text`/`text put`/`text clear` monitor commands (registry 35→36). **Live gate `tools/verify-live-text.sh` PASS 1/1**: the decoded capture shows real glyphs (green fg over the dark bg in the banner region — fg=0.255/bg=0.745 sampled; the G1-gate precedent: live pixels are color-managed, byte-exact glyphs live in the class A mock); the 36-gate `verify-vz` aggregate re-ran **36/36 PASS** (`artifacts/m6-text-vz-sweep.log`).
+- **G3 — Road Pops: the boot terminal goes graphical** ✅ **done
+  2026-08-12 (claim 1574, branch `agent/buffy/m6-roadpops`)** —
+  `kernel/src/road_pops.zig`: a TEE console (serial shared seam FIRST +
+  G2's text layer), drained one full-frame present per output batch by
+  the shell idle loop; the G2 one-shot boot paint is replaced by the tee
+  rendering the shell's OWN banner. Claim-time fix: the `Target` struct
+  literal was folded into `.rodata` with link-time `&fn` addresses
+  (claim-0015 redux, faulted live) — built in RAM now. `roadpops`
+  command (registry 36→37). **Live gate `tools/verify-live-roadpops.sh`
+  PASS 1/1**: the decoded capture shows the banner AND the live session
+  glyphs below it (echoed commands + replies rendered — a working
+  terminal on screen; serial shared seam intact). G1/G2 gates updated
+  honestly (the terminal renders over the raw fill; the `text` report's
+  cur/lines are session-dynamic); the **37-gate `verify-vz` aggregate
+  re-ran 37/37 PASS** (`artifacts/m6-roadpops-vz-sweep.log`). Post-G3
+  hardening (the SCK switch): the pixel gates enforce the composited-
+  window evidence, and the mirror-tripwire gate
+  `tools/verify-live-glyphs.sh` (PASS 1/1) decodes the captured frame
+  against the kernel's own font8x8 table — forward 0 unknown cells /
+  604 ink, mirrored 549/595 — so a mirrored-text regression fails
+  mechanically; with it registered the **38-gate `verify-vz` aggregate
+  re-ran 38/38 PASS** (`artifacts/m6-glyphs-vz-sweep.log`).
+- **G4 — input: virtio keyboard + pointer.** virtio-input transport (spec
+  DID 0x1052; VZ exposes it via `VZUSBKeyboardConfiguration` +
+  `VZUSBScreenCoordinatePointingDeviceConfiguration` — **[inferred]**
+  until observed), a bounded event FIFO (pure BSS, the card-3d pattern),
+  keycode decode into the terminal's line editor, pointer motion/buttons.
+  `input` monitor command. **Gate:** live keystrokes drive Road Pops end
+  to end (scripted host key events, asserted replies).
+- **G5 — Driving Award: the window manager.** A bounded window registry
+  (fixed BSS), z-order, focus, hit-testing, dirty-rect redraw, and a
+  compositor blitting window buffers into the framebuffer. Road Pops is
+  the FIRST window under Driving Award; a second demo window (mascot /
+  memory-map viewer / clock) proves multiple windows with distinct
+  contents + focus. `win` monitor command; host tests pin the hit-test
+  and redraw contracts. **Gate:** screenshots show two overlapping
+  windows with the right z-order; input lands in the focused window.
+- **G6 (sketched only) — a draw/window syscall seam for user programs.**
+  The N6 pattern: bounded `sys_*` slots (ADR 0007 amendment) so an EL0
+  user program can open a window and render into it; a user demo program
+  proves EL0 graphics. Depends on G5.
+
+**Non-goals (for now):** the balloon device stays unattached; no
+accelerated / 3D paths (virtio-gpu 2D blits only); no SMP; the window
+manager is single-display (one 1280×720 scanout).
+
 **The virtio device surface — where the OS meets the host.** Every virtio
 device VZ can attach maps to a host configuration class in
 `host/vm-runner/Sources/VMRunner/main.swift` and, where driven, a guest
@@ -731,7 +816,7 @@ remaining two (graphics, balloon) are the open milestones.
 | Entropy (0x1044) | `VZVirtioEntropyDeviceConfiguration` | `virtio_entropy.zig` (boot-time 64-byte seed) + `csprng.zig` (ChaCha20, RFC 7539) | ✅ done | 2665 (driver + CSPRNG + `random`), 3693 (EL0 stack ASLR consumer) |
 | Custom virtio (0x1082, macOS 27) | `VZCustomVirtioDeviceConfiguration` (`--custom-virtio` / `zig build spike-virtio`) | `virtio_custom.zig` — queue transport + used-ring IRQ | ✅ done | 5844 (host spike + `pci` command), 0828 (bidirectional queue + SPI IRQ), 4374 (ring allocator / multi-queue), 9492 (multi-descriptor payloads), 9737 (feature negotiation), 4837 (log transport) |
 | Network (0x1041) | `VZVirtioNetworkDeviceConfiguration` + `VZFileHandleNetworkDeviceAttachment` (`--net <capture-file>`, `--net-inject <file>`, `--net-arp-respond <host-ip>`, `--net-icmp-respond <host-ip>`, `--net-udp-respond <host-ip>:<host-port>`, flag-gated; fixed host MAC) | `virtio_net.zig` — TX + RX + ARP + ICMP + UDP (N1 + N2 + N3 + N4 + N5); `arp.zig`; `ipv4.zig`; `udp.zig`; `syscall.zig` slots 9/10/11 (N6 — the UDP syscall seam) | ✅ TX + RX + ARP + ICMP + UDP + the UDP syscall seam (claims 1373/6076/7293/0148/8552/1384) | 1373 (transport + TX live — DID 0x1041, VER1\|MTU\|MAC, feature-path MAC, queues 0/1, 12-byte TX-hdr contract, byte-exact host capture; `verify-live-net-tx.sh` PASS 2/2); 6076 (RX live — queue-0 buffer supply, polled used-ring drain, bounded FIFO, MAC filter, `net recv`; host→guest injection + the round trip; 12-byte RX-hdr observed, min RX buffer 1530 observed; `verify-live-net-rx.sh` PASS 3/3 + 29-gate aggregate green); 7293 (ARP live — static IP, answer/resolve over the RX seam, bounded table, `--net-arp-respond`; 42-byte frames unpadded observed; `verify-live-net-arp.sh` PASS 3/3 + 31-gate aggregate green); 0148 (IPv4/ICMP live — RFC 1071 checksums, echo answer/observe over the RX seam, `net ping`, `--net-icmp-respond`; the 46-byte frames travel unpadded, consistent with the N3 observation; `verify-live-net-icmp.sh` PASS 3/3 + 32-gate aggregate green); 8552 (UDP live — RFC 768 + the pseudo-header checksum over the N4 seam, bounded listen table + datagram buffers, the LOOPBACK path, `net udp`, `--net-udp-respond`; the 46-byte datagrams travel unpadded, consistent with the N3/N4 observation; `verify-live-net-udp.sh` PASS 4/4 + 33-gate aggregate green); 1384 (UDP syscall seam live — ADR 0007 slots 9/10/11 from EL0 via UDP.BIN: listen, loopback, the peer round trip, the EINVAL error mapping, exit 17; the polled-drain recv contract; `verify-live-net-udp-syscall.sh` PASS 4/4 + 34-gate aggregate green) |
-| Graphics | `VZVirtioGraphicsDeviceConfiguration` — attached only for screenshots (`--screenshot`) | none | ⬜ not started — the future GUI milestone | — |
+| Graphics | `VZVirtioGraphicsDeviceConfiguration` — attached only for screenshots (`--screenshot`); milestone six's `--display` mode always attaches it | `kernel/src/virtio_gpu.zig` (G1 — claim 6053); `kernel/src/text.zig` (G2 — claim 3194); `kernel/src/road_pops.zig` (G3 — claim 1574); `driving_award.zig` planned (G4/G5) | 🚧 G1 live 2026-08-12 (claim 6053) — first non-blank framebuffer; **G2 live 2026-08-12 (claim 3194) — the machine boots to words on the screen**; **G3 live 2026-08-12 (claim 1574) — Road Pops, the boot terminal is ON the screen** (`verify-live-screen.sh` + `verify-live-text.sh` + `verify-live-roadpops.sh` PASS 1/1 each; 37-gate aggregate green; the SCK switch then enforced the composited-window evidence in the pixel gates and added the mirror-tripwire gate `verify-live-glyphs.sh` PASS 1/1 — the 38-gate aggregate re-ran 38/38 PASS); G4/G5 next ([`docs/march-m6.md`](march-m6.md)) | — |
 | Balloon | `VZMemoryBalloonDeviceConfiguration` — nothing attached | none | ⬜ not started — low priority (fixed 256 MiB guest, no demand paging) | — |
 
 Each milestone must state what was **observed** versus **inferred** and must

@@ -218,6 +218,58 @@ VZEFIBootLoader (macOS VZ)
   `docs/hardware-contract.md`). The M1.5 monitor runs against a mock
   console in tests and live on VZ; the remaining live-gate gap is a live
   reboot/shutdown observation (`docs/status.md`).
+- **Guest → host display (milestone six, card G1 — claim 6053):** under
+  the runner's flag-gated `--display`/`--screenshot` mode the VM gains a
+  virtio-gpu device (`VZVirtioGraphicsDeviceConfiguration`, 1280×720
+  scanout) rendered into a `VZVirtualMachineView`. The guest's
+  `kernel/src/virtio_gpu.zig` discovers the modern virtio-pci gpu (DID
+  0x1050 — the spec DID observed), negotiates VIRTIO_F_VERSION_1 only,
+  arms the control queue (+ the cursor queue for device compatibility),
+  re-arms post-exit (VZ resets the gpu at ExitBootServices — observed
+  `st=00`), and drives the spec 2D path to a writable BSS framebuffer
+  (GET_DISPLAY_INFO → RESOURCE_CREATE_2D (B8G8R8X8) →
+  RESOURCE_ATTACH_BACKING → SET_SCANOUT → TRANSFER_TO_HOST_2D →
+  RESOURCE_FLUSH; one command outstanding at a time, polled used-ring
+  drain, cache cleans before every device-read). The `screen` /
+  `screen fill <rrggbb>` / `screen peek` monitor commands report the
+  transport and push a solid fill; the host's `--screenshot` captures
+  are decoded and asserted by `tools/verify-live-screen.sh` — **the
+  first non-blank guest framebuffer** (0x00ff00 renders ~(117,251,76)
+  through the color-managed pipeline).
+- **Framebuffer text (milestone six, card G2 — claim 3194):**
+  `kernel/src/text.zig` — a public-domain 8×8 bitmap font (ASCII
+  0x20–0x7e, fixed BSS glyph table) plus a pure raster layer (putc/puts,
+  cursor, line wrap, a bounded 128-line scrollback ring, `clear`)
+  host-tested against an injectable mock canvas (golden glyphs). At boot
+  the kernel paints the SAME banner + `dipshit>` prompt the serial log
+  carries onto G1's framebuffer (fg 0x00ff00 on bg 0x101418) and pushes
+  it through G1's transfer/flush unchanged (`text: boot banner
+  presented`); the `text` / `text put <string>` / `text clear` monitor
+  commands (registry 35→36) render + flush on demand. The host's
+  captures are decoded and asserted by `tools/verify-live-text.sh` — the
+  banner region shows green-family glyphs over the dark background (the
+  screen is no longer monochrome; byte-exact glyphs are the class A
+  mock's domain, the live pixels are color-managed + retina-scaled).
+- **Road Pops — the boot terminal goes graphical (milestone six, card
+  G3 — claim 1574):** `kernel/src/road_pops.zig` is a TEE console. The
+  M1.5 console (line editor, tokenizer, command registry, shell idle
+  loop) is untouched: its `console.Console` is the Road Pops tee, whose
+  `write` forwards every byte to the serial console FIRST (the shared
+  seam — the transcript gates stay byte-identical) and, when the
+  virtio-gpu transport is ready, to G2's text layer (cheap ring writes)
+  with a dirty flag; the shell idle loop drains ONE full-frame present
+  per output batch (`road_pops.drain()`, the card-3d pattern). The G2
+  one-shot boot paint is replaced by the tee rendering the shell's OWN
+  banner + prompt + every reply — the boot terminal IS the screen — and
+  the tee's first present emits the G2 `text: boot banner presented`
+  evidence on serial. No target armed (default VM) → serial-only,
+  byte-identical. `roadpops` command (registry 36→37: armed/dirty/
+  presents). Claim-time fix (claim-0015 redux): the injectable `Target`
+  struct literal was folded into `.rodata` with link-time `&fn`
+  addresses and faulted on the tee's first write — it is built in RAM
+  like the console vtable. `tools/verify-live-roadpops.sh` decodes the
+  captures: the boot banner AND the live session glyphs below it (a
+  working terminal).
 - **Guest → host evidence:** because the VZ firmware exposes no visible
   text channel, the guest also writes its two lines to `\BOOTED.TXT` on the
   ESP via the UEFI Simple File System protocol. The host reads that file

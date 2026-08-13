@@ -27,7 +27,13 @@ the next card is N3 (ARP). As of the audit-2026 maintenance pass
 claims 3972/5162, GIC + timer PPI claim 9187, scheduler claim 5275,
 EL0t + SVC claims 8215/3594, uaccess claim 6120) is all done and remains
 accurate as history — but for the canonical, always-current answer to
-"where are we, and what's next", read `docs/status.md`.
+"where are we, and what's next", read `docs/status.md`. **Milestone six — graphics (the Driving Award
+window manager + Road Pops terminal) — cards G1 (virtio-gpu transport +
+framebuffer, claim 6053), G2 (framebuffer text, claim 3194), and G3
+(Road Pops — the boot terminal on the screen, claim 1574) are DONE
+2026-08-12; cards G4–G6 are sketched in
+`docs/roadmap.md` / `docs/march-m6.md` but are NOT committed work; do not
+implement them.**
 
 ## Milestone scope rules
 

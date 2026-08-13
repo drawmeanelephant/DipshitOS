@@ -84,6 +84,9 @@ verify-coordination`, and CI) fails if it drifts from the files.
 | agent/buffy/m5-net-tx | [`agent-buffy-m5-net-tx.md`](agent-buffy-m5-net-tx.md) |
 | agent/buffy/m5-udp-syscall | [`agent-buffy-m5-udp-syscall.md`](agent-buffy-m5-udp-syscall.md) |
 | agent/buffy/m5-udp | [`agent-buffy-m5-udp.md`](agent-buffy-m5-udp.md) |
+| agent/buffy/m6-gpu | [`agent-buffy-m6-gpu.md`](agent-buffy-m6-gpu.md) |
+| agent/buffy/m6-roadpops | [`agent-buffy-m6-roadpops.md`](agent-buffy-m6-roadpops.md) |
+| agent/buffy/m6-text | [`agent-buffy-m6-text.md`](agent-buffy-m6-text.md) |
 | `agent/buffy/macos27-custom-virtio-spike` | [`agent-buffy-macos27-custom-virtio-spike.md`](agent-buffy-macos27-custom-virtio-spike.md) |
 | `agent/codex/m3-march-tracker` | [`agent-codex-m3-march-tracker.md`](agent-codex-m3-march-tracker.md) |
 | `agent/codex/m3-ragshit-dogfood` | [`agent-codex-m3-ragshit-dogfood.md`](agent-codex-m3-ragshit-dogfood.md) |

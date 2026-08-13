@@ -31,6 +31,7 @@ const scheduler = @import("scheduler.zig"); // claim 5275: worker progress print
 const timer = @import("timer.zig"); // claim 7948: heartbeat printing (main context only)
 const userspace = @import("userspace.zig"); // claim 8215: deferred EL0/SVC evidence line
 const virtio_net = @import("virtio_net.zig"); // claim 6076 (card N2): polled RX drain in the idle loop
+const road_pops = @import("road_pops.zig"); // claim 1574 (milestone six G3): Road Pops framebuffer drain in the idle loop
 
 pub const PollResult = enum {
     /// No input byte is available right now; the caller should wait before
@@ -139,6 +140,10 @@ pub fn boot_and_park(mon: *monitor.Monitor, rx_wired: bool) void {
             // wall-clock seconds).
             virtio_net.tcp.now_ticks = timer.ticks;
             virtio_net.net_rx_drain();
+            // Claim 1574 (milestone six G3): Road Pops — one full-frame
+            // present per dirty output batch (the card-3d drain pattern).
+            // No-op when the tee is unarmed (default VM) or clean.
+            road_pops.drain();
             // Card N11 (claim 5357): the bounded retransmission timer —
             // polled here (the idle loop is the time engine — the
             // card-N9 clock pattern). AFTER the drain, so an ACK the
@@ -272,6 +277,9 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "  random      print n random bytes from the seeded CSPRNG (hex)\n" ++
         "  reboot      restart the machine\n" ++
         "  repeat      repeat text, safely bounded\n" ++
+        "  roadpops    Road Pops framebuffer console: armed/dirty/present counters (the boot terminal on the screen)\n" ++
+        "  screen      virtio-gpu transport + framebuffer: device DID, features, scanout, status, re-arm ('screen fill <rrggbb>' fills the framebuffer and flushes it to the scanout)\n" ++
+        "  text        framebuffer text: text region, cursor, scrollback ('text put <string...>' renders + flushes to the scanout; 'text clear' clears)\n" ++
         "  shutdown    request power-off\n" ++
         "  spawn       spawn the lifecycle demo task\n" ++
         "  syscalls    numbered syscall table and counters\n" ++

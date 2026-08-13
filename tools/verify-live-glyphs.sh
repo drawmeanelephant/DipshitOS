@@ -1,0 +1,178 @@
+#!/usr/bin/env bash
+#
+# verify-live-glyphs.sh -- the MIRROR-REGRESSION TRIPWIRE (follow-on to the
+# ScreenCaptureKit switch, 2026-08-12): the captured framebuffer is decoded
+# against the kernel's OWN font8x8.zig glyph table (kernel/src/font8x8.zig)
+# and the text must read FORWARD.
+#
+# Why: the milestone-six pixel gates (live-screen/live-text/live-roadpops)
+# assert the evidence shows green-family glyphs over the dark background —
+# they prove TEXT IS THERE but not that it reads the RIGHT WAY. The user
+# reported "backwards text" while the decode said forward; the honest
+# resolution is a gate that fails MECHANICALLY if the screen ever mirrors.
+# The matcher (tools/decode-screen-glyphs.py) finds the green glyph grid
+# (pitch + origin via a scored phase search), decodes the visible session
+# in BOTH orientations, and reports the unknown-glyph counts:
+#   - FORWARD decode of a correct screen: ~zero unknowns (measured 0/604);
+#   - MIRRORED decode of the same screen: ~everything unknown (549/595) —
+#     the mirror of 8x8 glyphs matches almost nothing in the table.
+# So "forward unknowns ≈ 0 AND mirrored unknowns ≫ forward" is a
+# mechanical mirror test. The decoded session text is also asserted to
+# contain the boot banner's first word and the prompt — the semantic proof
+# that the text is not just glyph-shaped but reads as words.
+#
+# Calibration (the matcher's header comment): the ScreenCaptureKit
+# composited-window captures render the guest framebuffer with display
+# smoothing; the matcher thresholds at the bright stroke core (g > 140,
+# green-dominant), where the strokes sit at their exact ideal 2x positions
+# (verified cell-by-cell on the 'D'), excluding the anti-aliased smear.
+# The Phase-0 assertion below additionally REQUIRES the capture to be the
+# ScreenCaptureKit composited window (not the cacheDisplay fallback), so
+# the glyph decode is performed on the same pixels the operator sees.
+#
+# Honest bounds: (a) the decode is scored per-cell against the 95-glyph
+# ASCII 0x20-0x7e table — the cursor block and a mid-present partial cell
+# are legitimately "unknown", so the forward allowance is <= 2 cells; (b)
+# byte-exact glyph shapes are the class A mock's job (the golden-glyph
+# canvas tests in text.zig); this gate proves the LIVE pixels read
+# forward, mechanically and reproducibly.
+#
+# Class B — Apple silicon + VZ only; boots real VMs.
+#
+# Usage:
+#   bash tools/verify-live-glyphs.sh
+#
+# Evidence: artifacts/live-glyphs-gate.txt (full output),
+# artifacts/live-glyphs-report.txt, artifacts/live-glyphs-run.txt (runner),
+# artifacts/gpu-screen-*s (the captures).
+#
+# Dependencies: python3 (stdlib only — zlib/struct, no PIL), the runner +
+# disk image (built below), and Screen Recording permission for the SCK
+# capture path.
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+GATE_LOG="artifacts/live-glyphs-gate.txt"
+exec > >(tee "$GATE_LOG") 2>&1
+trap 'sleep 0.5' EXIT
+
+REPORT="artifacts/live-glyphs-report.txt"
+RUNNER="host/vm-runner/.build/release/VMRunner"
+
+echo "=== verify-live-glyphs: the mirror tripwire — the captured framebuffer decodes FORWARD against the kernel's own font8x8 table ==="
+
+# 1. Build the runner + the disk image (the kernel carries text.zig + the
+# Road Pops tee that renders the session on screen).
+echo
+echo "[1/3] building the runner + disk image"
+swift build --package-path host/vm-runner --configuration release >/dev/null 2>&1
+# The other live gates' convention: the fresh binary needs the
+# com.apple.security.virtualization entitlement before it can boot a VM.
+codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
+zig build >/dev/null 2>&1
+zig build image >/dev/null 2>&1
+
+# 2. The scripted boot: a real terminal SESSION so the captured frame is
+# full of words (banner + echo + uname + the tee report).
+SCRIPT="artifacts/live-glyphs-script.txt"
+printf 'echo ROADPOPS\nuname\nroadpops\n' > "$SCRIPT"
+rm -f artifacts/vm-serial.log artifacts/gpu-screen-*.png "$REPORT"
+
+echo
+echo "[2/3] live VZ run (scripted)"
+set +e
+"$RUNNER" artifacts/disk.img artifacts/vm-serial.log \
+    --screen artifacts/gpu-screen --script "$SCRIPT" \
+    --expect "roadpops: armed target=fbtext" --timeout 30 \
+    > artifacts/live-glyphs-run.txt 2>&1
+RC=$?
+set -e
+echo "runner exit: $RC"
+echo "--- runner output (roadpops/text lines) ---"
+grep -E "roadpops:|text:|SUCCESS|FAILURE" artifacts/live-glyphs-run.txt | head -20
+if [ "$RC" -ne 0 ]; then
+    echo "FAIL: runner did not complete successfully (exit $RC)"
+    exit 1
+fi
+
+# 3. Assertions.
+echo
+echo "[3/3] asserting the serial seam + the glyph-level decode"
+
+fail() { echo "FAIL: $1"; exit 1; }
+
+# Phase 0 — the evidence path (the SCK enforcement shared with the other
+# pixel gates): the decode must run on the COMPOSITED WINDOW pixels, not
+# the cacheDisplay offscreen render.
+grep -q "capture path: ScreenCaptureKit" artifacts/live-glyphs-run.txt \
+    || fail "pixel evidence did not come from ScreenCaptureKit (composited window) — Screen Recording permission missing or the SCK path broke"
+if grep -q "capture path: cacheDisplay fallback" artifacts/live-glyphs-run.txt; then
+    fail "some captures fell back to cacheDisplay (offscreen render) — every capture must be the composited window"
+fi
+
+# Phase 1 — the shared-seam serial evidence (the session IS on screen).
+grep -q "roadpops: armed target=fbtext" artifacts/vm-serial.log || fail "the Road Pops tee was not armed with the framebuffer target"
+grep -q "text: boot banner presented" artifacts/vm-serial.log || fail "boot banner not presented (the tee's first present)"
+grep -q "DipshitOS - AArch64 firmware-assisted kernel monitor" artifacts/vm-serial.log || fail "serial transcript lost the banner (shared-seam regression)"
+
+# Phase 2 — THE MIRROR TRIPWIRE: decode the captured PNG against the
+# kernel's own font table in both orientations and assert the text reads
+# FORWARD.
+LATEST="$(ls -t artifacts/gpu-screen-*s 2>/dev/null | head -1 || true)"
+if [ -z "$LATEST" ]; then
+    fail "no gpu-screen PNG captured"
+fi
+echo "decoding $LATEST with tools/decode-screen-glyphs.py"
+DECODE="$(python3 tools/decode-screen-glyphs.py "$LATEST")"
+echo "$DECODE"
+
+STATS="$(printf '%s\n' "$DECODE" | grep '^STATS ' || true)"
+if [ -z "$STATS" ]; then
+    fail "the decoder did not produce a STATS line — no glyph grid found in the capture"
+fi
+# STATS fwd_unknowns=N fwd_ink=M mir_unknowns=K mir_ink=L
+fwd_u="$(printf '%s\n' "$STATS" | sed -n 's/.*fwd_unknowns=\([0-9-][0-9-]*\).*/\1/p')"
+fwd_i="$(printf '%s\n' "$STATS" | sed -n 's/.*fwd_ink=\([0-9-][0-9-]*\).*/\1/p')"
+mir_u="$(printf '%s\n' "$STATS" | sed -n 's/.*mir_unknowns=\([0-9-][0-9-]*\).*/\1/p')"
+mir_i="$(printf '%s\n' "$STATS" | sed -n 's/.*mir_ink=\([0-9-][0-9-]*\).*/\1/p')"
+
+# 2a. The forward decode must be essentially CLEAN: <= 2 unknown cells
+# (the allowance is the cursor block + at most one mid-present partial
+# cell — the measured clean session decodes 0/604). A mirrored screen
+# pushes this into the hundreds.
+if [ "$fwd_u" = "-1" ]; then
+    fail "decoder could not find the glyph grid — blank or non-terminal frame"
+fi
+if [ "$fwd_u" -gt 2 ]; then
+    fail "forward decode has $fwd_u unknown cells of $fwd_i ink — the text does not match the font8x8 table (mirrored? broken rendering?)"
+fi
+echo "forward decode: $fwd_u unknown cells of $fwd_i ink (allowance 2) — CLEAN"
+
+# 2b. The mirrored decode must be MUCH worse — the whole point of the
+# tripwire: if the screen were mirrored, the forward decode would be the
+# garbage one and the mirrored decode would read clean. A mirrored screen
+# makes mir_unknowns small and fwd_unknowns huge, which 2a already fails;
+# this second leg proves the matcher can TELL the difference (the two
+# orientations are distinguishable), so a "both-garbage" regression also
+# fails.
+if [ "$mir_u" -le $((fwd_u * 3 + 8)) ]; then
+    fail "mirrored decode ($mir_u unknowns of $mir_i ink) is not decisively worse than forward ($fwd_u) — the matcher cannot discriminate orientation"
+fi
+echo "mirrored decode: $mir_u unknown cells of $mir_i ink — decisively worse (forward reads, mirror is garbage)"
+
+# 2c. The semantic proof: the decoded session contains the boot banner's
+# first word and the prompt — the text is not just glyph-shaped, it reads.
+if ! printf '%s\n' "$DECODE" | grep -q "DipshitOS - AArch64"; then
+    fail "the decoded session does not contain the boot banner line — the text does not read forward"
+fi
+if ! printf '%s\n' "$DECODE" | grep -q "dipshit>"; then
+    fail "the decoded session does not contain the prompt — the terminal session did not render"
+fi
+echo "decoded session reads forward (banner + prompt present)"
+
+echo
+echo "=== verify-live-glyphs: PASS (the captured framebuffer decodes FORWARD against the kernel's font8x8 table — mirror regression impossible to miss) ==="
+echo "evidence: artifacts/live-glyphs-run.txt, artifacts/vm-serial.log, artifacts/gpu-screen-*s, tools/decode-screen-glyphs.py" | tee "$REPORT"
