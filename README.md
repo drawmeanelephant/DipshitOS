@@ -74,4 +74,8 @@ for how the pieces fit.
 
 ## License
 
-Source-available; see [`LICENSE`](LICENSE).
+DipshitOS is **source-available, not open source** — the code is publicly
+visible so it can be reviewed and learned from, but you may not use, modify,
+redistribute, or incorporate it without written permission. Forks are not
+freedom. The binding terms are [`LICENSE`](LICENSE); a plain-language summary
+is on the [documentation site](https://drawmeanelephant.github.io/DipshitOS/license.html).

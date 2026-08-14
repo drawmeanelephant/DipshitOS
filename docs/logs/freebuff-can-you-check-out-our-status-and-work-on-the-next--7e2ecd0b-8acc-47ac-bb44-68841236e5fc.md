@@ -422,3 +422,14 @@ extended, not added).
   binary: plan → project-site `/DipshitOS`; validate → 1 target ok; compile →
   25 pages + sitemap + assets; prepare → 28 files, `proof_paths_excluded:
   true`, no `_boris/proof` in the public tree. Kernel/tests untouched. ✅ done
+
+- **2026-08-14** — *buffy*: claim 8938 complete — milestone-eight card U0, the
+  human interface guidelines (docs only). Wrote `docs/decisions/0008-human-interface-guidelines.md`
+  (D1 command grammar + grouped help, D2 prompt/editing model, D3 error/usage
+  contract, D4 Driving Award visible focus + click/raise/cycling, D5 support
+  surface, D6 gate-enforceability) and `docs/march-m8.md` (the U0–U8 card
+  ladder — help/catalog, editing/history, error contract, pointer focus,
+  window HIG, first-boot, sysinfo, persistent settings — each with its gate,
+  plus the collision-free agent split). Explicitly NOT an ADR 0007 change and
+  NOT a POSIX/readline promise. Also recorded a docs follow-on: post the
+  source-available-not-open-source license clearly on the public site. ✅ done
