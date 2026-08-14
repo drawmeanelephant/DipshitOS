@@ -34,10 +34,14 @@ gates' inline PNG decoders).
 
 Usage:
   python3 tools/decode-screen-glyphs.py <capture.png|capture> [--mirror-lines N]
+  python3 tools/decode-screen-glyphs.py --self-test
 
-Exit 0 when the grid is found and decoded; 1 when no text grid is present
-(blank/garbage frame). The STATS line is always printed; the gate asserts
-on it.
+The `--self-test` mode is the offline in-cell mirror simulation (class A —
+no capture, no VZ boot): it renders the clock window forward with the
+kernel's own glyph blit, decodes it, mirrors each glyph in-cell, and
+confirms the tripwire fires. Exit 0 when the grid is found and decoded
+(the capture mode) or the self-test passes; 1 on failure. The STATS line
+is always printed; the gate asserts on it.
 """
 
 import re
@@ -111,8 +115,148 @@ def load_png(path):
         prev = line
     return w, h, bpp, out
 
+# ------------------------------------------------ clock-window decode (G5)
+# Shared by main() (the live decode) and self_test() (the offline in-cell
+# mirror simulation): decode a fixed run of 8x8 glyphs at (ox, oy) with the
+# given ink predicate, matched against the normal or reversed (mirrored)
+# font. The clock window is at fixed framebuffer coordinates (960,16,
+# 304x192): title "clock" at (968,22), body "DRIVING AWARD" at (968,42).
+
+def clock_ink_dark(pr, pg, pb):
+    return pr + pg + pb < 250  # dark title text on the amber bar
+
+def clock_ink_amber(pr, pg, pb):
+    return pr > pg > pb and pr > 120  # amber accent on navy (hue-specific)
+
+def decode_clock_string(px, w, h, font, pitch, ox, oy, nchars, mirror, ink_fn):
+    s = []
+    for c in range(nchars):
+        cell = []
+        for rr in range(8):
+            row = 0
+            for bb in range(8):
+                cx = ox + c * pitch + bb * pitch // 8
+                cy = oy + rr * pitch // 8
+                if 0 <= cx < w and 0 <= cy < h:
+                    pr, pg, pb = px(cx, cy)
+                    if ink_fn(pr, pg, pb):
+                        row |= 1 << (7 - bb)
+            cell.append(row)
+        ink = sum(bin(rw).count("1") for rw in cell)
+        if ink == 0:
+            s.append(" ")
+            continue
+        best_sc, best_c = 8 * 8 + 1, None
+        for idx, g in enumerate(font):
+            sc = 0
+            for ri in range(8):
+                a = cell[ri]
+                b = (int(format(g[ri], "08b")[::-1], 2) if mirror else g[ri])
+                sc += bin(a ^ b).count("1")
+            if sc < best_sc:
+                best_sc, best_c = sc, idx
+        s.append(chr(0x20 + best_c) if best_sc <= 10 else "?")
+    return "".join(s)
+
+def count_unknowns(s):
+    return sum(1 for ch in s if ch == "?")
+
+def self_test():
+    """Offline in-cell mirror simulation (class A — no VZ boot needed).
+
+    Renders the clock window's static strings forward with the kernel's own
+    glyph blit, decodes them (must read 'clock' / 'DRIVING AWARD'), mirrors
+    each glyph in-cell (the draw_glyph bit-order regression), re-decodes,
+    and confirms the forward decode now reads garbage while the mirrored
+    decode reads clean — the tripwire fires without a live VZ boot.
+    """
+    font = load_font()
+    w, h = 1280, 720
+    buf = bytearray(w * h * 4)
+
+    def put(x, y, r, g, b):
+        if 0 <= x < w and 0 <= y < h:
+            k = (y * w + x) * 4
+            buf[k] = r
+            buf[k + 1] = g
+            buf[k + 2] = b
+            buf[k + 3] = 0xff
+
+    def px(x, y):
+        if 0 <= x < w and 0 <= y < h:
+            k = (y * w + x) * 4
+            return buf[k], buf[k + 1], buf[k + 2]
+        return 0, 0, 0
+
+    # The clock window: navy body + amber title bar (the G5 palette).
+    for y in range(16, 208):
+        for x in range(960, 1264):
+            put(x, y, 0x0a, 0x1a, 0x2e)          # navy body
+    for y in range(18, 34):
+        for x in range(962, 1262):
+            put(x, y, 0xb5, 0x89, 0x00)          # amber title bar
+
+    # The kernel's draw_glyph: MSB-first, top-to-bottom.
+    def draw_string(s, x0, y0, rgb):
+        for i, ch in enumerate(s):
+            g = font[ord(ch) - 0x20]
+            for gy in range(8):
+                bits = g[gy]
+                for gx in range(8):
+                    if bits & 0x80:
+                        put(x0 + i * 8 + gx, y0 + gy, *rgb)
+                    bits <<= 1
+
+    draw_string("clock", 968, 22, (0x14, 0x14, 0x14))          # dark title
+    draw_string("DRIVING AWARD", 968, 42, (0xff, 0xaa, 0x00))  # amber body
+
+    def decode(mirror):
+        t = decode_clock_string(px, w, h, font, 8, 968, 22, 5, mirror, clock_ink_dark)
+        b = decode_clock_string(px, w, h, font, 8, 968, 42, 13, mirror, clock_ink_amber)
+        return t, b
+
+    t, b = decode(False)
+    print("self-test: forward title=%r body=%r" % (t, b))
+    if t != "clock" or b != "DRIVING AWARD":
+        print("SELF-TEST FAIL: the synthetic clock window does not decode forward (title=%r body=%r)" % (t, b))
+        sys.exit(1)
+
+    # In-cell mirror: reverse each glyph's pixels within its 8x8 cell —
+    # exactly what a draw_glyph bit-order regression produces (the text
+    # stays in place, each glyph flips).
+    for s, x0, y0 in (("clock", 968, 22), ("DRIVING AWARD", 968, 42)):
+        for i in range(len(s)):
+            for gy in range(8):
+                row = [px(x0 + i * 8 + gx, y0 + gy) for gx in range(8)]
+                for gx in range(8):
+                    put(x0 + i * 8 + gx, y0 + gy, *row[7 - gx])
+
+    t2, b2 = decode(False)
+    tu = count_unknowns(t2)
+    bu = count_unknowns(b2)
+    print("self-test: after in-cell mirror, forward title=%r (%d unknowns) body=%r (%d unknowns)" % (t2, tu, b2, bu))
+    # The gate's Phase 2d thresholds: a mirrored clock must fail the
+    # semantic proof (no longer 'clock' / 'DRIVING AWARD') AND explode the
+    # unknown counts (>= 3 of 5 title, >= 7 of 13 body).
+    if t2 == "clock" or b2 == "DRIVING AWARD" or tu < 3 or bu < 7:
+        print("SELF-TEST FAIL: the in-cell mirror was not detected (title=%r body=%r)" % (t2, b2))
+        sys.exit(1)
+
+    # The mirrored-DECODE leg must now read clean (the matcher can tell the
+    # two orientations apart — a both-garbage regression would fail here).
+    mt2, mb2 = decode(True)
+    print("self-test: after in-cell mirror, mirrored decode title=%r body=%r" % (mt2, mb2))
+    if mt2 != "clock" or mb2 != "DRIVING AWARD":
+        print("SELF-TEST FAIL: mirrored decode after in-cell mirror did not read clean (title=%r body=%r)" % (mt2, mb2))
+        sys.exit(1)
+
+    print("SELF-TEST PASS: the clock title/body tripwire reads forward and detects an in-cell mirror")
+
 # ------------------------------------------------------------------- main
 def main():
+    if "--self-test" in sys.argv:
+        self_test()
+        return
     path = sys.argv[1]
     mirror_lines = 3
     for i, a in enumerate(sys.argv[2:]):
@@ -242,60 +386,18 @@ def main():
     # so a mirror in the window-manager path (G5's draw_string + blit_rect)
     # would NOT trip the green matcher above. Decode the clock's STATIC
     # strings (title "clock" + body "DRIVING AWARD") in both orientations
-    # too, so a flip anywhere fails mechanically.
-    def ink_dark(pr, pg, pb):
-        return pr + pg + pb < 250  # dark title text on the amber bar
-
-    def ink_amber(pr, pg, pb):
-        return pr > pg > pb and pr > 120  # amber accent on navy (hue-specific)
-
-    def decode_clock(ox, oy, nchars, mirror, ink_fn):
-        s = []
-        for c in range(nchars):
-            cell = []
-            for rr in range(8):
-                row = 0
-                for bb in range(8):
-                    cx = ox + c * pitch + bb * pitch // 8
-                    cy = oy + rr * pitch // 8
-                    if cx < w and cy < h:
-                        pr, pg, pb = px(cx, cy)
-                        if ink_fn(pr, pg, pb):
-                            row |= 1 << (7 - bb)
-                cell.append(row)
-            ink = sum(bin(rw).count("1") for rw in cell)
-            if ink == 0:
-                s.append(" ")
-                continue
-            best_sc, best_c = 8 * 8 + 1, None
-            for idx, g in enumerate(font):
-                sc = 0
-                for ri in range(8):
-                    a = cell[ri]
-                    b = (int(format(g[ri], "08b")[::-1], 2) if mirror else g[ri])
-                    sc += bin(a ^ b).count("1")
-                if sc < best_sc:
-                    best_sc, best_c = sc, idx
-            s.append(chr(0x20 + best_c) if best_sc <= 10 else "?")
-        return "".join(s)
-
-    # The clock window is at fixed framebuffer coordinates (960,16,304x192);
-    # the title text sits at (968,22) and the body line at (968,42). The
-    # capture scale follows the terminal's detected pitch (16 = 2x retina,
-    # 8 = 1x).
+    # too, so a flip anywhere fails mechanically (shared decode:
+    # decode_clock_string + clock_ink_* above).
     cscale = pitch // 8
-    clock_title = decode_clock(968 * cscale, 22 * cscale, 5, False, ink_dark)
-    clock_title_m = decode_clock(968 * cscale, 22 * cscale, 5, True, ink_dark)
-    clock_body = decode_clock(968 * cscale, 42 * cscale, 13, False, ink_amber)
-    clock_body_m = decode_clock(968 * cscale, 42 * cscale, 13, True, ink_amber)
+    clock_title = decode_clock_string(px, w, h, font, pitch, 968 * cscale, 22 * cscale, 5, False, clock_ink_dark)
+    clock_title_m = decode_clock_string(px, w, h, font, pitch, 968 * cscale, 22 * cscale, 5, True, clock_ink_dark)
+    clock_body = decode_clock_string(px, w, h, font, pitch, 968 * cscale, 42 * cscale, 13, False, clock_ink_amber)
+    clock_body_m = decode_clock_string(px, w, h, font, pitch, 968 * cscale, 42 * cscale, 13, True, clock_ink_amber)
 
-    def unknowns(s):
-        return sum(1 for ch in s if ch == "?")
-
-    ct_fwd_u = unknowns(clock_title)
-    ct_mir_u = unknowns(clock_title_m)
-    cb_fwd_u = unknowns(clock_body)
-    cb_mir_u = unknowns(clock_body_m)
+    ct_fwd_u = count_unknowns(clock_title)
+    ct_mir_u = count_unknowns(clock_title_m)
+    cb_fwd_u = count_unknowns(clock_body)
+    cb_mir_u = count_unknowns(clock_body_m)
 
     print("glyph grid: pitch=%d origin=(%d,%d)" % (pitch, ox, oy))
     print("--- decoded session (forward) ---")

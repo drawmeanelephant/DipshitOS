@@ -72,6 +72,9 @@ jobs:
       - name: Verify MMU takeover contract (class A — ADR 0006 supersession, T0SZ=16 + TLBI comments)
         run: bash tools/verify-mmu-debt.sh
 
+      - name: Verify the glyph mirror tripwire self-test (class A — offline in-cell mirror simulation)
+        run: python3 tools/decode-screen-glyphs.py --self-test
+
       # --- Class B: Apple-silicon VZ hardware gates are NOT run here ---
 
       - name: State which gates this CI does NOT prove
