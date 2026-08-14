@@ -406,3 +406,19 @@ swift build); the default VM is byte-identical. Docs: ADR 0007 slot 20,
 claim 0487, march-m6 G6 row, roadmap, status, gate-inventory, justfile,
 claims README. verify-vz count unchanged (45 — the move gate was
 extended, not added).
+
+- **2026-08-14** — *buffy*: claim 4755 complete — the public documentation
+  site + Boris GitHub Pages publication. New `site/` corpus (8 trunks + 17
+  satellites, wiki-linked; home, getting started, architecture, capabilities,
+  roadmap, names/lore, evidence/testing, development), `themes/dipshitos/`
+  (dark "technical manual" theme, phosphor-green accent, system fonts, no JS,
+  a11y), `.github/boris-pin.json` (revision 30805ab, Boris v0.8.1, the same
+  revision Oliver pins), `.github/workflows/docs-gate.yml` +
+  `.github/workflows/github-pages.yml` (shared pin, `configure-pages`
+  project-site resolution, `prepare-github-pages-artifact.sh` public/proof
+  boundary, pinned actions, optional post-deploy audit), and a rewritten
+  concise README. `site/index.assets/screenshot.png` is a fresh live capture
+  (Road Pops + Driving Award clock). Verified locally against the pinned Boris
+  binary: plan → project-site `/DipshitOS`; validate → 1 target ok; compile →
+  25 pages + sitemap + assets; prepare → 28 files, `proof_paths_excluded:
+  true`, no `_boris/proof` in the public tree. Kernel/tests untouched. ✅ done

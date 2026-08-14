@@ -12,6 +12,12 @@ zig-out/
 artifacts/*
 !artifacts/.gitkeep
 
+# --- Boris documentation build outputs (never commit) ---
+dist/
+public-site/
+evidence/
+.boris-pages-profile.json
+
 # --- Local context engine (tools/ragshit) index ---
 .ragshit/
 
