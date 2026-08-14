@@ -43,19 +43,36 @@ const virtio_net = @import("virtio_net.zig");
 const virtio_gpu = @import("virtio_gpu.zig");
 const fbtext = @import("text.zig"); // milestone six card G2 (claim 3194): framebuffer text
 const road_pops = @import("road_pops.zig"); // milestone six card G3 (claim 1574): the Road Pops tee — the boot terminal on the screen
+const xhci = @import("xhci.zig"); // milestone seven card I1 (claim 4272): the XHCI host-controller transport (keyboard/pointer live behind it)
+const input = @import("input.zig"); // milestone seven card I3 (claim 6050): the keyboard/pointer event FIFO + keycode decode feeding Road Pops
+const driving_award = @import("driving_award.zig"); // milestone six card G5 (claim 1543): Driving Award, the window manager (Road Pops is window 0; a clock overlay is window 1)
 
 // Road Pops (claim 1574) framebuffer-text target: G2's text layer through
 // the tee's injectable Target. The text layer is a fixed BSS singleton, so
 // the wrappers ignore ctx (a file-scope dummy keeps the pointer well-typed).
+// Card G5 (claim 1543): the present is now the Driving Award compositor —
+// the tee's write path marks the terminal window dirty, and the compositor
+// repaints the terminal (window 0) and blits the clock (window 1) over it,
+// then pushes one transfer + flush per dirty batch.
 var rp_target_dummy: u8 = 0;
 fn rp_text_put_bytes(_: *anyopaque, bytes: []const u8) void {
     fbtext.puts(bytes);
+    driving_award.mark_terminal_dirty();
 }
 fn rp_text_present(_: *anyopaque) void {
-    _ = fbtext.present();
+    _ = driving_award.composite();
 }
 fn rp_text_clear(_: *anyopaque) void {
     fbtext.clear();
+    driving_award.mark_terminal_dirty();
+}
+
+// Card G5 (claim 1543): the keyboard read source is gated on window focus —
+// keyboard bytes reach the Road Pops line editor only while the terminal
+// window is focused; otherwise they stay queued in the input FIFO. Serial
+// (the scripted evidence channel) remains the always-wired fallback.
+fn rp_read_source() ?u8 {
+    return if (driving_award.terminal_focused()) input.pop_byte() else null;
 }
 
 // Claim 0023: the handoff-v2 contract, the identity-map MMU, and the
@@ -317,6 +334,17 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
     // default runner attaches no graphics device, so `gpu_ready` is false
     // on every existing gate — the default VM is unchanged.
     const gpu_ready = virtio_gpu.virtio_gpu_init();
+
+    // Milestone seven card I1 (claim 4272): the XHCI host-controller
+    // transport — the device VZ's `--input` attaches
+    // (VZUSBKeyboardConfiguration + VZUSBScreenCoordinatePointingDeviceConfiguration,
+    // observed as an Apple XHCI USB controller DID 0x1a06, claim 3868).
+    // Discovery runs PRE-EXIT like every other device (config-space reads
+    // must stay pre-exit, claim 0013); the MMIO init (register map + rings +
+    // NO-OP + port status) runs post-MMU below. The default runner attaches
+    // no input devices, so `xhci_probed` is false on every existing gate —
+    // the default VM is unchanged.
+    const xhci_probed = xhci.xhci_probe();
 
     // Claim 0828: the custom-virtio spike device (DID 0x1082) — PRE-EXIT
     // discovery only (config-space reads, the claim-0013 discipline). VZ's
@@ -714,6 +742,13 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
                 // presented` evidence on serial, honestly — the boot
                 // banner IS presented at that moment).
                 fbtext.init();
+                // Card G5 (claim 1543): arm Driving Award — the window
+                // manager. Road Pops (the terminal) registers as window 0
+                // and a 1 Hz clock overlay as window 1; the compositor
+                // repaints from the lowest dirty window up and pushes one
+                // transfer + flush per batch. The Road Pops tee's present
+                // target (rp_text_present) routes through the compositor.
+                driving_award.arm();
                 // Claim 0015, Road Pops edition: a Target struct literal
                 // with all-constant fields (ctx + &fn entries) is folded
                 // into .rodata, whose &fn entries hold LINK-TIME absolute
@@ -734,6 +769,60 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
                 uart_puts(virtio_gpu.gpu_fail);
                 uart_puts(")\n");
             }
+        }
+    }
+    // Milestone seven card I1 (claim 4272): initialize the XHCI host
+    // controller post-MMU (register map + command/event rings + NO-OP + port
+    // status). The pre-reset USBSTS is printed so the host sees whether VZ
+    // reset the controller at ExitBootServices (observed, not assumed — the
+    // gpu/blk/entropy `st=00` vs net `st=0f` question's XHCI answer). The
+    // default runner attaches no input devices, so on every existing gate
+    // this block is skipped and the boot output stays byte-identical.
+    if (xhci_probed) {
+        xhci.debug = uart_puts;
+        xhci.debug_hex = uart_hex;
+        if (xhci.xhci_init()) {
+            xhci.debug = null;
+            uart_puts("xhci: init ok base=");
+            uart_hex(xhci.xhci_base);
+            uart_puts(" caplen=");
+            uart_hex(xhci.xhci_caplen);
+            uart_puts(" ports=");
+            uart_hex(xhci.hcsparams1_max_ports(xhci.xhci_hcsparams1));
+            uart_puts(" pre-reset sts=");
+            uart_hex(xhci.xhci_pre_reset_usbsts);
+            uart_puts(" cmd=");
+            uart_hex(xhci.xhci_pre_reset_usbcmd);
+            uart_puts(" noop=");
+            uart_puts(if (xhci.xhci_noop_done) "ok" else "fail");
+            uart_puts("\n");
+            // I2: the enumeration result (the gate's key-on marker + the
+            // honest failure record).
+            uart_puts("usb: enumerated=");
+            uart_hex(xhci.enum_count);
+            uart_puts(if (xhci.enum_done) " ok" else " fail");
+            if (!xhci.enum_done and xhci.enum_fail.len > 0) {
+                uart_puts(" (");
+                uart_puts(xhci.enum_fail);
+                uart_puts(")");
+            }
+            uart_puts("\n");
+            // Card I3 (claim 6050): arm the keyboard/pointer event FIFO
+            // once the interrupt-IN endpoints are up (the enumeration just
+            // armed them). The `input: armed` line is the runner's
+            // key-injection marker; until it prints the FIFO drain is a
+            // no-op, so no key event can be lost.
+            if (xhci.enum_done) {
+                input.arm();
+                input.debug = uart_puts;
+                input.debug_hex = uart_hex;
+                uart_puts("input: armed\n");
+            }
+        } else {
+            xhci.debug = null;
+            uart_puts("xhci: init failed (");
+            uart_puts(xhci.xhci_fail);
+            uart_puts(")\n");
         }
     }
     // Claim 3693 (milestone-four follow-on): ASLR for the BOOT-time static
@@ -767,6 +856,12 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
     // above), output renders to serial AND the framebuffer; without it
     // (the default VM) the tee degrades to serial-only — byte-identical.
     if (!road_pops.is_armed()) road_pops.arm(m15.to_console(), null);
+    // Card I3 (claim 6050) + G5 (claim 1543): feed the Road Pops tee's
+    // read path from the keyboard event FIFO, gated on window focus (the
+    // terminal must be focused for keyboard bytes to reach the line
+    // editor). Serial stays the fallback. No-op without `--input` (the
+    // default VM's read path is serial-only).
+    if (input.armed()) road_pops.set_read_source(rp_read_source);
     var mon = monitor.Monitor.init(
         road_pops.tee_console(),
         .{

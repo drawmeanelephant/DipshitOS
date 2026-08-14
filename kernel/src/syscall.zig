@@ -36,6 +36,22 @@
 //! honest bound, the ADR 0007 amendment). No protocol logic lives here
 //! (the N5 layer owns UDP); these handlers marshal args, copy bytes, and
 //! call through.
+//!
+//! Card G6 (claim 0487): slots 12/13/14 — `sys_win_open` / `sys_win_fill` /
+//! `sys_win_present` — expose the G5 window manager's user-window surface
+//! to EL0: open a bounded kernel-owned window (id 2..3, fixed BSS
+//! back-buffer), fill rects in its back-buffer, and present it (mark dirty
+//! for the shell idle loop's compositor). Follow-ons add slot 15
+//! `sys_win_close` (teardown), per-process ownership (auto-close on exit +
+//! owner-restricted fill/present/close), and slots 16/17 `sys_win_move` /
+//! `sys_win_raise` (reposition + restack the caller's window), slot 18
+//! `sys_win_get` (copy the caller's window rect out through uaccess — the
+//! read-back seam after a clamped move), slot 19 `sys_win_query` (copy the
+//! FULL window state — rect + z-order rank + focus/visible/dirty flags), and
+//! slot 20 `sys_win_set_visible` (hide/show the caller's window). Those two
+//! pointer-taking win slots are the only uaccess users; everything else is
+//! plain numbers — the kernel owns the buffers; an EL0 program never touches
+//! them directly — no allocation.
 
 const std = @import("std");
 const console = @import("console.zig");
@@ -47,9 +63,15 @@ const udp = @import("udp.zig"); // claim 1384 (card N6): the milestone-five UDP 
 const virtio_net = @import("virtio_net.zig"); // claim 1384 (card N6): net_udp_send (TX + loopback)
 const uaccess = @import("uaccess.zig"); // claim 6120: fault-safe copy-in
 const userspace = @import("userspace.zig");
+const driving_award = @import("driving_award.zig"); // claim 1543/0487 (cards G5/G6): the window manager this seam renders into
 
 pub const slot_count: usize = 64;
-pub const implemented_count: usize = 12;
+pub const implemented_count: usize = 21;
+/// Card G6 (claim 0487) follow-on (slot 18): the fixed `sys_win_get` shape —
+/// four u32 LE words (x, y, w, h), 16 bytes, marshaled per call and copy_out'd
+/// through uaccess (the procs snapshot pattern).
+/// Card G6 (claim 0487) follow-on (slot 19): the fixed `sys_win_query` shape —
+/// eight u32 LE words (x, y, w, h, z, focused, visible, dirty), 32 bytes.
 pub const write_cap: u64 = 256;
 pub const svc_immediate: u16 = 0;
 
@@ -81,6 +103,45 @@ pub const sys_wait: u64 = 8;
 pub const sys_udp_listen: u64 = 9;
 pub const sys_udp_send: u64 = 10;
 pub const sys_udp_recv: u64 = 11;
+/// Card G6 (claim 0487): the draw/window syscall seam — slots 12/13/14, the
+/// card's ONE ABI change (the ipc slots-5/6, slots-7/8, and udp slots-9/10/11
+/// precedents; every existing syscall number 0–11 stays frozen).
+/// `sys_win_open(x, y, w, h)` opens a kernel-owned user window (id 2..3) in
+/// the G5 window registry; `sys_win_fill(id, x, y, w, h, rgb)` fills a rect
+/// in its back-buffer; `sys_win_present(id)` marks it dirty for the
+/// compositor. Plain numbers only — no uaccess; the kernel owns the buffers.
+pub const sys_win_open: u64 = 12;
+pub const sys_win_fill: u64 = 13;
+pub const sys_win_present: u64 = 14;
+/// Card G6 (claim 0487) follow-on: `sys_win_close(id)` releases a user
+/// window (the EL0 half of the teardown seam — the monitor's `win close`
+/// is the EL1h half; both call `driving_award.user_close`).
+pub const sys_win_close: u64 = 15;
+/// Card G6 (claim 0487) follow-on: `sys_win_move(id, x, y)` repositions the
+/// caller's window (clamped on-scanout) and `sys_win_raise(id)` raises it to
+/// the top — the window manager's move/restack surface from EL0, owner-
+/// restricted like fill/present/close.
+pub const sys_win_move: u64 = 16;
+pub const sys_win_raise: u64 = 17;
+/// Card G6 (claim 0487) follow-on: `sys_win_get(id, buf)` copies the CALLER'S
+/// user window's geometry (x, y, w, h as four u32 LE words — 16 bytes) OUT
+/// through uaccess, so an EL0 program can read its window's rect back after a
+/// CLAMPED move (`sys_win_move` clamps silently; this is the read-back seam).
+/// The ONE pointer-taking win slot.
+pub const sys_win_get: u64 = 18;
+pub const win_rect_bytes: usize = 16;
+/// Card G6 (claim 0487) follow-on: `sys_win_query(id, buf)` copies the
+/// CALLER'S user window's FULL state (x, y, w, h, z, focused, visible, dirty
+/// as eight u32 LE words — 32 bytes) OUT through uaccess, so an EL0 program
+/// can introspect its window end to end (z-order rank + focus + flags), not
+/// just the rect.
+pub const sys_win_query: u64 = 19;
+pub const win_query_bytes: usize = 32;
+/// Card G6 (claim 0487) follow-on: `sys_win_set_visible(id, visible)` hides
+/// (0) or shows (1) the CALLER'S user window — the window manager's
+/// visibility surface from EL0, owner-restricted like fill/present/close.
+/// Plain numbers, no uaccess.
+pub const sys_win_set_visible: u64 = 20;
 
 pub const ErrorCode = enum(i64) {
     einval = -1,
@@ -162,6 +223,15 @@ fn ensure_table() *const [slot_count]Entry {
         table_storage[sys_udp_listen] = .{ .name = "sys_udp_listen", .handler = handle_udp_listen };
         table_storage[sys_udp_send] = .{ .name = "sys_udp_send", .handler = handle_udp_send };
         table_storage[sys_udp_recv] = .{ .name = "sys_udp_recv", .handler = handle_udp_recv };
+        table_storage[sys_win_open] = .{ .name = "sys_win_open", .handler = handle_win_open };
+        table_storage[sys_win_fill] = .{ .name = "sys_win_fill", .handler = handle_win_fill };
+        table_storage[sys_win_present] = .{ .name = "sys_win_present", .handler = handle_win_present };
+        table_storage[sys_win_close] = .{ .name = "sys_win_close", .handler = handle_win_close };
+        table_storage[sys_win_move] = .{ .name = "sys_win_move", .handler = handle_win_move };
+        table_storage[sys_win_raise] = .{ .name = "sys_win_raise", .handler = handle_win_raise };
+        table_storage[sys_win_get] = .{ .name = "sys_win_get", .handler = handle_win_get };
+        table_storage[sys_win_query] = .{ .name = "sys_win_query", .handler = handle_win_query };
+        table_storage[sys_win_set_visible] = .{ .name = "sys_win_set_visible", .handler = handle_win_set_visible };
         table_ready = true;
     }
     return &table_storage;
@@ -462,9 +532,177 @@ fn handle_udp_recv(args: Args, _: *exceptions.VectorFrame) u64 {
     return @intCast(take);
 }
 
-/// Deterministic monitor output for the twelve implemented rows and their counters.
+// ---------------------------------------------------------------------------
+// Card G6 (claim 0487): the draw/window syscall seam — slots 12/13/14
+// ---------------------------------------------------------------------------
+
+/// `sys_win_open(x, y, w, h)`: open a user window (the G5 window registry)
+/// at screen position (x, y) with a back-buffer w×h (≤
+/// `driving_award.user_buf_w` × `user_buf_h`), OWNED by the calling
+/// process. Returns the window id (2..3); `EINVAL` for a coordinate/word-
+/// size outside u32, geometry outside the back-buffer/scanout bounds, an
+/// unarmed manager (no gpu — the default VM), or a non-process caller (the
+/// syscall is only reachable from an EL0 program); `ENOSPC` (-5) when both
+/// user slots are already open. The window auto-closes when the owning
+/// process exits (the scheduler's exit path calls `driving_award.close_owner`).
+/// No uaccess: plain numbers.
+fn handle_win_open(args: Args, _: *exceptions.VectorFrame) u64 {
+    if (args[0] > std.math.maxInt(u32) or args[1] > std.math.maxInt(u32) or args[2] > std.math.maxInt(u32) or args[3] > std.math.maxInt(u32)) {
+        return error_result(.einval);
+    }
+    const owner = process.find_by_task(scheduler.current_id()) orelse return error_result(.einval);
+    return switch (driving_award.user_open(@truncate(args[0]), @truncate(args[1]), @truncate(args[2]), @truncate(args[3]), owner)) {
+        .opened => |id| id,
+        .invalid => error_result(.einval),
+        .full => error_result(.enospc),
+    };
+}
+
+/// `sys_win_fill(id, x, y, w, h, rgb)`: fill a rect (local coordinates) in
+/// the CALLER'S user window's back-buffer with the 24-bit 0xRRGGBB color,
+/// marking it dirty. Returns 0 on success; `EINVAL` for an unknown id, a
+/// window the caller does NOT own (per-process ownership — a process can
+/// only render into its own window), an out-of-range word, or a rect
+/// outside the window bounds. No uaccess (the kernel owns the buffer; the
+/// program never touches it directly).
+fn handle_win_fill(args: Args, _: *exceptions.VectorFrame) u64 {
+    if (args[0] > std.math.maxInt(u8) or args[1] > std.math.maxInt(u32) or args[2] > std.math.maxInt(u32) or args[3] > std.math.maxInt(u32) or args[4] > std.math.maxInt(u32) or args[5] > 0xffffff) {
+        return error_result(.einval);
+    }
+    if (!win_owned_by_caller(@truncate(args[0]))) return error_result(.einval);
+    if (!driving_award.user_fill(@truncate(args[0]), @truncate(args[1]), @truncate(args[2]), @truncate(args[3]), @truncate(args[4]), @truncate(args[5]))) {
+        return error_result(.einval);
+    }
+    return 0;
+}
+
+/// `sys_win_present(id)`: mark the CALLER'S user window dirty so the
+/// compositor blits its back-buffer on the next idle-loop pass (the
+/// deferred-present discipline — the syscall never touches the gpu
+/// directly; the shell idle loop's `driving_award.drain` composites).
+/// Returns 0 on success; `EINVAL` for an unknown id or a window the caller
+/// does NOT own.
+fn handle_win_present(args: Args, _: *exceptions.VectorFrame) u64 {
+    if (args[0] > std.math.maxInt(u8)) return error_result(.einval);
+    if (!win_owned_by_caller(@truncate(args[0]))) return error_result(.einval);
+    if (!driving_award.user_present(@truncate(args[0]))) return error_result(.einval);
+    return 0;
+}
+
+/// `sys_win_close(id)`: release a user window OWNED BY THE CALLER (the EL0
+/// teardown seam — the monitor's `win close` is the EL1h PRIVILEGED
+/// equivalent that closes any user window; the EL0 syscall is
+/// owner-restricted). Returns 0 on success; `EINVAL` for an unknown id, a
+/// non-user window (the terminal + clock are fixed), or a window the
+/// caller does NOT own.
+fn handle_win_close(args: Args, _: *exceptions.VectorFrame) u64 {
+    if (args[0] > std.math.maxInt(u8)) return error_result(.einval);
+    if (!win_owned_by_caller(@truncate(args[0]))) return error_result(.einval);
+    if (!driving_award.user_close(@truncate(args[0]))) return error_result(.einval);
+    return 0;
+}
+
+/// `sys_win_move(id, x, y)`: move the CALLER'S user window's top-left corner
+/// to (x, y), CLAMPED inside the scanout (`driving_award.user_move` — a
+/// window never moves off-screen). Returns 0 on success; `EINVAL` for an
+/// unknown id, a window the caller does NOT own, an out-of-range word, or
+/// an unarmed manager. No uaccess (plain numbers).
+fn handle_win_move(args: Args, _: *exceptions.VectorFrame) u64 {
+    if (args[0] > std.math.maxInt(u8) or args[1] > std.math.maxInt(u32) or args[2] > std.math.maxInt(u32)) {
+        return error_result(.einval);
+    }
+    if (!win_owned_by_caller(@truncate(args[0]))) return error_result(.einval);
+    if (!driving_award.user_move(@truncate(args[0]), @truncate(args[1]), @truncate(args[2]))) {
+        return error_result(.einval);
+    }
+    return 0;
+}
+
+/// `sys_win_raise(id)`: raise the CALLER'S user window to the top of the
+/// z-order (focus unchanged — tracked by id, the G5 discipline). Returns 0
+/// on success; `EINVAL` for an unknown id or a window the caller does NOT
+/// own.
+fn handle_win_raise(args: Args, _: *exceptions.VectorFrame) u64 {
+    if (args[0] > std.math.maxInt(u8)) return error_result(.einval);
+    if (!win_owned_by_caller(@truncate(args[0]))) return error_result(.einval);
+    if (!driving_award.user_raise(@truncate(args[0]))) return error_result(.einval);
+    return 0;
+}
+
+/// `sys_win_get(id, buf)`: copy the CALLER'S user window's geometry
+/// (x, y, w, h as four u32 LE words — `win_rect_bytes` 16) OUT through
+/// uaccess, so an EL0 program can read its window's rect back after a
+/// CLAMPED move (`sys_win_move` clamps silently; this is the read-back
+/// seam). Returns 0; `EINVAL` for an unknown id, a non-user window (the
+/// terminal + clock are fixed), or a window the caller does NOT own;
+/// `EFAULT` for a bad `buf` (the claim-6120 contract — validated before
+/// any bytes are written). The first pointer-taking win slot.
+fn handle_win_get(args: Args, _: *exceptions.VectorFrame) u64 {
+    if (args[0] > std.math.maxInt(u8)) return error_result(.einval);
+    if (!win_owned_by_caller(@truncate(args[0]))) return error_result(.einval);
+    const rect = driving_award.user_rect(@truncate(args[0])) orelse return error_result(.einval);
+    var buf: [win_rect_bytes]u8 = undefined;
+    std.mem.writeInt(u32, buf[0..4], rect.x, .little);
+    std.mem.writeInt(u32, buf[4..8], rect.y, .little);
+    std.mem.writeInt(u32, buf[8..12], rect.w, .little);
+    std.mem.writeInt(u32, buf[12..16], rect.h, .little);
+    if (uaccess.copy_out(args[1], buf[0..win_rect_bytes], win_rect_bytes) != .ok) return error_result(.efault);
+    return 0;
+}
+
+/// `sys_win_query(id, buf)`: copy the CALLER'S user window's FULL state
+/// (x, y, w, h, z, focused, visible, dirty as eight u32 LE words —
+/// `win_query_bytes` 32) OUT through uaccess, so an EL0 program can
+/// introspect its window end to end (z-order rank + focus + flags), not
+/// just the rect. Returns 0; `EINVAL` for an unknown id, a non-user window
+/// (the terminal + clock are fixed), or a window the caller does NOT own;
+/// `EFAULT` for a bad `buf`. The second pointer-taking win slot.
+fn handle_win_query(args: Args, _: *exceptions.VectorFrame) u64 {
+    if (args[0] > std.math.maxInt(u8)) return error_result(.einval);
+    if (!win_owned_by_caller(@truncate(args[0]))) return error_result(.einval);
+    const q = driving_award.user_query(@truncate(args[0])) orelse return error_result(.einval);
+    var buf: [win_query_bytes]u8 = undefined;
+    std.mem.writeInt(u32, buf[0..4], q.x, .little);
+    std.mem.writeInt(u32, buf[4..8], q.y, .little);
+    std.mem.writeInt(u32, buf[8..12], q.w, .little);
+    std.mem.writeInt(u32, buf[12..16], q.h, .little);
+    std.mem.writeInt(u32, buf[16..20], q.z, .little);
+    std.mem.writeInt(u32, buf[20..24], q.focused, .little);
+    std.mem.writeInt(u32, buf[24..28], q.visible, .little);
+    std.mem.writeInt(u32, buf[28..32], q.dirty, .little);
+    if (uaccess.copy_out(args[1], buf[0..win_query_bytes], win_query_bytes) != .ok) return error_result(.efault);
+    return 0;
+}
+
+/// `sys_win_set_visible(id, visible)`: hide (`visible` 0) or show (`visible`
+/// 1) the CALLER'S user window — the window manager's visibility surface
+/// from EL0 (`driving_award.user_set_visible`, owner-restricted like
+/// fill/present/close). Hiding marks the terminal dirty so the next
+/// composite repaints over the hidden window; showing marks the window
+/// dirty so it reappears. Returns 0; `EINVAL` for an unknown id, a non-user
+/// window (the terminal + clock are fixed), a window the caller does NOT
+/// own, or a `visible` flag that is not 0/1. Plain numbers, no uaccess.
+fn handle_win_set_visible(args: Args, _: *exceptions.VectorFrame) u64 {
+    if (args[0] > std.math.maxInt(u8)) return error_result(.einval);
+    if (args[1] > 1) return error_result(.einval);
+    if (!win_owned_by_caller(@truncate(args[0]))) return error_result(.einval);
+    if (!driving_award.user_set_visible(@truncate(args[0]), args[1] != 0)) return error_result(.einval);
+    return 0;
+}
+
+/// True when the window `id` exists AND is owned by the process currently
+/// making the syscall (the per-process ownership check behind fill/present/
+/// close). False for an unknown id, a fixed (terminal/clock) window, or a
+/// non-process caller.
+fn win_owned_by_caller(id: u8) bool {
+    const owner = process.find_by_task(scheduler.current_id()) orelse return false;
+    const wowner = driving_award.user_owner(id) orelse return false;
+    return owner == wowner;
+}
+
+/// Deterministic monitor output for the twenty-one implemented rows and their counters.
 pub fn report(con: *console.Console) void {
-    con.puts("syscalls: slots=64 implemented=12\n");
+    con.puts("syscalls: slots=64 implemented=21\n");
     var number: u64 = 0;
     while (number < implemented_count) : (number += 1) {
         const info = entry_info(number).?;
@@ -496,7 +734,7 @@ fn capture_marshaled_args(args: Args, _: *exceptions.VectorFrame) u64 {
     return 0xcafe;
 }
 
-test "syscall: runtime table has 64 slots and twelve unique implemented rows" {
+test "syscall: runtime table has 64 slots and twenty-one unique implemented rows" {
     init(test_writer);
     const table = ensure_table();
     try std.testing.expectEqual(@as(usize, 64), table.len);
@@ -509,7 +747,7 @@ test "syscall: runtime table has 64 slots and twelve unique implemented rows" {
             implemented += 1;
         }
     }
-    try std.testing.expectEqual(@as(usize, 12), implemented);
+    try std.testing.expectEqual(@as(usize, 21), implemented);
     try std.testing.expectEqualStrings("sys_ping", entry_info(0).?.name);
     try std.testing.expectEqualStrings("sys_exit", entry_info(3).?.name);
     try std.testing.expectEqualStrings("sys_sleep", entry_info(4).?.name);
@@ -520,7 +758,16 @@ test "syscall: runtime table has 64 slots and twelve unique implemented rows" {
     try std.testing.expectEqualStrings("sys_udp_listen", entry_info(9).?.name);
     try std.testing.expectEqualStrings("sys_udp_send", entry_info(10).?.name);
     try std.testing.expectEqualStrings("sys_udp_recv", entry_info(11).?.name);
-    try std.testing.expect(entry_info(12) == null);
+    try std.testing.expectEqualStrings("sys_win_open", entry_info(12).?.name);
+    try std.testing.expectEqualStrings("sys_win_fill", entry_info(13).?.name);
+    try std.testing.expectEqualStrings("sys_win_present", entry_info(14).?.name);
+    try std.testing.expectEqualStrings("sys_win_close", entry_info(15).?.name);
+    try std.testing.expectEqualStrings("sys_win_move", entry_info(16).?.name);
+    try std.testing.expectEqualStrings("sys_win_raise", entry_info(17).?.name);
+    try std.testing.expectEqualStrings("sys_win_get", entry_info(18).?.name);
+    try std.testing.expectEqualStrings("sys_win_query", entry_info(19).?.name);
+    try std.testing.expectEqualStrings("sys_win_set_visible", entry_info(20).?.name);
+    try std.testing.expect(entry_info(21) == null);
     try std.testing.expect(entry_info(63) == null);
 }
 
@@ -1198,6 +1445,229 @@ test "syscall: handle_svc decodes and dispatches slots 9/10/11 via the frame" {
     try std.testing.expectEqualSlices(u8, payload, recv_buf[8..12]);
 }
 
+test "syscall: win open/fill/present/close round-trips with per-process ownership + auto-close" {
+    init(test_writer);
+    driving_award.arm();
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0); // task 2 = process 0 (boot payload)
+    var kstack: [scheduler.task_stack_size]u8 align(16) = undefined;
+    const win_pid = process.create("WIN.BIN", .{ .entry_va = 0x400000, .content_len = 64 }, .{}, .{}).?;
+    const win_task = scheduler.register_exec_user(userspace.text_va, 0x4000_0000, 100, 0x8000_0000, 8192, &kstack, 0, 0).?;
+    _ = process.bind(win_pid, win_task);
+    scheduler.start();
+    var frame = fresh_frame();
+    // Drive to the exec'd WIN.BIN (task 3).
+    try std.testing.expect(scheduler.yield_current()); // shell -> worker
+    try std.testing.expect(scheduler.yield_current()); // worker -> user (boot payload, 2)
+    try std.testing.expect(scheduler.yield_current()); // user -> WIN.BIN (3)
+    try std.testing.expectEqual(@as(usize, 3), scheduler.current_id());
+    // Open window 2 as WIN.BIN: the caller's pid is recorded as the owner.
+    try std.testing.expectEqual(@as(u64, 2), dispatch(sys_win_open, .{ 64, 64, 256, 192, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u64, 1), call_count(sys_win_open));
+    try std.testing.expectEqual(@as(?usize, win_pid), driving_award.user_owner(2));
+    // Fill + present the OWN window: both return 0.
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_win_fill, .{ 2, 8, 8, 48, 48, 0xff0000 }, &frame));
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_win_present, .{ 2, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u64, 1), call_count(sys_win_fill));
+    try std.testing.expectEqual(@as(u64, 1), call_count(sys_win_present));
+    // Move (slot 16) + raise (slot 17) the OWN window: both return 0.
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_win_move, .{ 2, 600, 100, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_win_raise, .{ 2, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u64, 1), call_count(sys_win_move));
+    try std.testing.expectEqual(@as(u64, 1), call_count(sys_win_raise));
+    // Close the OWN window: slot 15 releases it (0 on success).
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_win_close, .{ 2, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u64, 1), call_count(sys_win_close));
+    try std.testing.expectEqual(@as(usize, 2), driving_award.count());
+    // A second close of the freed id is EINVAL (no such user window).
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_win_close, .{ 2, 0, 0, 0, 0, 0 }, &frame));
+    // Re-open (id 2 reused), then open the second slot (id 3): the
+    // full-registry ENOSPC split still holds, and the caller owns both.
+    try std.testing.expectEqual(@as(u64, 2), dispatch(sys_win_open, .{ 64, 64, 256, 192, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u64, 3), dispatch(sys_win_open, .{ 320, 64, 256, 192, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.enospc), dispatch(sys_win_open, .{ 0, 0, 10, 10, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(?usize, win_pid), driving_award.user_owner(2));
+    try std.testing.expectEqual(@as(?usize, win_pid), driving_award.user_owner(3));
+    // Error mapping in the OWNING context: invalid geometry, out-of-bounds
+    // rects, unknown ids, and the fixed windows are all EINVAL.
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_win_open, .{ 0, 0, 0, 10, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_win_open, .{ 0, 0, 10, 193, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_win_fill, .{ 99, 0, 0, 10, 10, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_win_fill, .{ 2, 255, 191, 2, 2, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_win_present, .{ 99, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_win_present, .{ 1, 0, 0, 0, 0, 0 }, &frame)); // the clock is not a user window
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_win_move, .{ 99, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_win_raise, .{ 99, 0, 0, 0, 0, 0 }, &frame));
+    // Drive to the boot payload (process 0, task 2): it does NOT own
+    // WIN.BIN's windows, so fill/present/close are EINVAL.
+    try std.testing.expect(scheduler.yield_current()); // WIN.BIN -> idle
+    try std.testing.expect(scheduler.yield_current()); // idle -> shell
+    try std.testing.expect(scheduler.yield_current()); // shell -> worker
+    try std.testing.expect(scheduler.yield_current()); // worker -> user (2)
+    try std.testing.expectEqual(@as(usize, 2), scheduler.current_id());
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_win_fill, .{ 2, 0, 0, 10, 10, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_win_present, .{ 2, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_win_close, .{ 2, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_win_move, .{ 2, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_win_raise, .{ 2, 0, 0, 0, 0, 0 }, &frame));
+    // AUTO-CLOSE on exit: drive back to WIN.BIN (task 3) and exit it —
+    // both its windows (2 and 3) are released with NO sys_win_close call.
+    try std.testing.expect(scheduler.yield_current()); // user -> WIN.BIN (3)
+    try std.testing.expectEqual(@as(usize, 3), scheduler.current_id());
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_exit, .{ 87, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expect(driving_award.user_owner(2) == null);
+    try std.testing.expect(driving_award.user_owner(3) == null);
+    try std.testing.expectEqual(@as(usize, 2), driving_award.count());
+    // The close counter only ever saw the THREE explicit dispatches (one
+    // success + the two refusals above): the exit-path teardown is NOT a
+    // syscall (it rides close_owner, never handle_win_close).
+    try std.testing.expectEqual(@as(u64, 3), call_count(sys_win_close));
+}
+
+test "syscall: win get copies the clamped rect back through uaccess and enforces ownership" {
+    init(test_writer);
+    driving_award.arm();
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0); // task 2 = process 0 (boot payload)
+    var kstack: [scheduler.task_stack_size]u8 align(16) = undefined;
+    const win_pid = process.create("WIN.BIN", .{ .entry_va = 0x400000, .content_len = 64 }, .{}, .{}).?;
+    const win_task = scheduler.register_exec_user(userspace.text_va, 0x4000_0000, 100, 0x8000_0000, 8192, &kstack, 0, 0).?;
+    _ = process.bind(win_pid, win_task);
+    scheduler.start();
+    var frame = fresh_frame();
+    var rect_buf: [win_rect_bytes]u8 = undefined;
+    set_user_regions(
+        .{ .base = 0, .len = 0 },
+        .{ .base = @intFromPtr(&rect_buf), .len = rect_buf.len },
+    );
+    // Drive to WIN.BIN (task 3).
+    try std.testing.expect(scheduler.yield_current()); // shell -> worker
+    try std.testing.expect(scheduler.yield_current()); // worker -> user (2)
+    try std.testing.expect(scheduler.yield_current()); // user -> WIN.BIN (3)
+    try std.testing.expectEqual(@as(usize, 3), scheduler.current_id());
+    try std.testing.expectEqual(@as(u64, 2), dispatch(sys_win_open, .{ 64, 64, 256, 192, 0, 0 }, &frame));
+    // Read back the open rect (four u32 LE words).
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_win_get, .{ 2, @intFromPtr(&rect_buf), 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u32, 64), std.mem.readInt(u32, rect_buf[0..4], .little));
+    try std.testing.expectEqual(@as(u32, 64), std.mem.readInt(u32, rect_buf[4..8], .little));
+    try std.testing.expectEqual(@as(u32, 256), std.mem.readInt(u32, rect_buf[8..12], .little));
+    try std.testing.expectEqual(@as(u32, 192), std.mem.readInt(u32, rect_buf[12..16], .little));
+    // After a CLAMPED move the read-back reports the CLAMPED position (the
+    // gate constants: 1280x720 scanout, 256-wide window -> 1024,528).
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_win_move, .{ 2, 1200, 700, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_win_get, .{ 2, @intFromPtr(&rect_buf), 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u32, 1024), std.mem.readInt(u32, rect_buf[0..4], .little));
+    try std.testing.expectEqual(@as(u32, 528), std.mem.readInt(u32, rect_buf[4..8], .little));
+    try std.testing.expectEqual(@as(u32, 256), std.mem.readInt(u32, rect_buf[8..12], .little));
+    try std.testing.expectEqual(@as(u32, 192), std.mem.readInt(u32, rect_buf[12..16], .little));
+    // A bad buf is EFAULT (the claim-6120 contract), never a crash.
+    try std.testing.expectEqual(error_result(.efault), dispatch(sys_win_get, .{ 2, uaccess.diagnostic_unmapped, 0, 0, 0, 0 }, &frame));
+    // Unknown + fixed ids are EINVAL (never a user window).
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_win_get, .{ 99, @intFromPtr(&rect_buf), 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_win_get, .{ 1, @intFromPtr(&rect_buf), 0, 0, 0, 0 }, &frame));
+    // Drive to the boot payload (process 0, task 2): it does NOT own
+    // WIN.BIN's window, so win_get is EINVAL.
+    try std.testing.expect(scheduler.yield_current()); // WIN.BIN -> idle
+    try std.testing.expect(scheduler.yield_current()); // idle -> shell
+    try std.testing.expect(scheduler.yield_current()); // shell -> worker
+    try std.testing.expect(scheduler.yield_current()); // worker -> user (2)
+    try std.testing.expectEqual(@as(usize, 2), scheduler.current_id());
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_win_get, .{ 2, @intFromPtr(&rect_buf), 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u64, 6), call_count(sys_win_get));
+}
+
+test "syscall: win query copies the full window state back and enforces ownership" {
+    init(test_writer);
+    driving_award.arm();
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0); // task 2 = process 0 (boot payload)
+    var kstack: [scheduler.task_stack_size]u8 align(16) = undefined;
+    const win_pid = process.create("WIN.BIN", .{ .entry_va = 0x400000, .content_len = 64 }, .{}, .{}).?;
+    const win_task = scheduler.register_exec_user(userspace.text_va, 0x4000_0000, 100, 0x8000_0000, 8192, &kstack, 0, 0).?;
+    _ = process.bind(win_pid, win_task);
+    scheduler.start();
+    var frame = fresh_frame();
+    var qbuf: [win_query_bytes]u8 = undefined;
+    set_user_regions(
+        .{ .base = 0, .len = 0 },
+        .{ .base = @intFromPtr(&qbuf), .len = qbuf.len },
+    );
+    // Drive to WIN.BIN (task 3).
+    try std.testing.expect(scheduler.yield_current()); // shell -> worker
+    try std.testing.expect(scheduler.yield_current()); // worker -> user (2)
+    try std.testing.expect(scheduler.yield_current()); // user -> WIN.BIN (3)
+    try std.testing.expectEqual(@as(usize, 3), scheduler.current_id());
+    try std.testing.expectEqual(@as(u64, 2), dispatch(sys_win_open, .{ 64, 64, 256, 192, 0, 0 }, &frame));
+    // The full state right after open: top of the z-order (index 2), focused,
+    // visible, dirty (the compositor never runs in a host test).
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_win_query, .{ 2, @intFromPtr(&qbuf), 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u32, 64), std.mem.readInt(u32, qbuf[0..4], .little));
+    try std.testing.expectEqual(@as(u32, 64), std.mem.readInt(u32, qbuf[4..8], .little));
+    try std.testing.expectEqual(@as(u32, 256), std.mem.readInt(u32, qbuf[8..12], .little));
+    try std.testing.expectEqual(@as(u32, 192), std.mem.readInt(u32, qbuf[12..16], .little));
+    try std.testing.expectEqual(@as(u32, 2), std.mem.readInt(u32, qbuf[16..20], .little)); // z
+    try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, qbuf[20..24], .little)); // focused
+    try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, qbuf[24..28], .little)); // visible
+    try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, qbuf[28..32], .little)); // dirty
+    // A bad buf is EFAULT, never a crash.
+    try std.testing.expectEqual(error_result(.efault), dispatch(sys_win_query, .{ 2, uaccess.diagnostic_unmapped, 0, 0, 0, 0 }, &frame));
+    // Unknown + fixed ids are EINVAL.
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_win_query, .{ 99, @intFromPtr(&qbuf), 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_win_query, .{ 1, @intFromPtr(&qbuf), 0, 0, 0, 0 }, &frame));
+    // Drive to the boot payload (process 0, task 2): it does NOT own
+    // WIN.BIN's window, so win_query is EINVAL.
+    try std.testing.expect(scheduler.yield_current()); // WIN.BIN -> idle
+    try std.testing.expect(scheduler.yield_current()); // idle -> shell
+    try std.testing.expect(scheduler.yield_current()); // shell -> worker
+    try std.testing.expect(scheduler.yield_current()); // worker -> user (2)
+    try std.testing.expectEqual(@as(usize, 2), scheduler.current_id());
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_win_query, .{ 2, @intFromPtr(&qbuf), 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u64, 5), call_count(sys_win_query));
+}
+
+test "syscall: win set_visible hides/shows the caller's window and enforces ownership" {
+    init(test_writer);
+    driving_award.arm();
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0); // task 2 = process 0 (boot payload)
+    var kstack: [scheduler.task_stack_size]u8 align(16) = undefined;
+    const win_pid = process.create("WIN.BIN", .{ .entry_va = 0x400000, .content_len = 64 }, .{}, .{}).?;
+    const win_task = scheduler.register_exec_user(userspace.text_va, 0x4000_0000, 100, 0x8000_0000, 8192, &kstack, 0, 0).?;
+    _ = process.bind(win_pid, win_task);
+    scheduler.start();
+    var frame = fresh_frame();
+    // Drive to WIN.BIN (task 3).
+    try std.testing.expect(scheduler.yield_current()); // shell -> worker
+    try std.testing.expect(scheduler.yield_current()); // worker -> user (2)
+    try std.testing.expect(scheduler.yield_current()); // user -> WIN.BIN (3)
+    try std.testing.expectEqual(@as(usize, 3), scheduler.current_id());
+    try std.testing.expectEqual(@as(u64, 2), dispatch(sys_win_open, .{ 64, 64, 256, 192, 0, 0 }, &frame));
+    // Hide the OWN window: 0 on success, visible flips to 0.
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_win_set_visible, .{ 2, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u32, 0), driving_award.user_query(2).?.visible);
+    // Show it again: 0 on success, visible flips back to 1.
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_win_set_visible, .{ 2, 1, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u32, 1), driving_award.user_query(2).?.visible);
+    // A visible flag outside 0/1 is EINVAL (no ambiguity).
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_win_set_visible, .{ 2, 2, 0, 0, 0, 0 }, &frame));
+    // Unknown + fixed ids are EINVAL.
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_win_set_visible, .{ 99, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_win_set_visible, .{ 1, 0, 0, 0, 0, 0 }, &frame));
+    // Drive to the boot payload (process 0, task 2): it does NOT own
+    // WIN.BIN's window, so set_visible is EINVAL.
+    try std.testing.expect(scheduler.yield_current()); // WIN.BIN -> idle
+    try std.testing.expect(scheduler.yield_current()); // idle -> shell
+    try std.testing.expect(scheduler.yield_current()); // shell -> worker
+    try std.testing.expect(scheduler.yield_current()); // worker -> user (2)
+    try std.testing.expectEqual(@as(usize, 2), scheduler.current_id());
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_win_set_visible, .{ 2, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u64, 6), call_count(sys_win_set_visible));
+}
+
 test "syscall: counters are monotonic and report is deterministic" {
     userspace.init();
     init(test_writer);
@@ -1205,11 +1675,11 @@ test "syscall: counters are monotonic and report is deterministic" {
     _ = dispatch(sys_ping, .{ 9, 0, 0, 0, 0, 0 }, &frame);
     _ = dispatch(sys_ping, .{ 10, 0, 0, 0, 0, 0 }, &frame);
     try std.testing.expectEqual(@as(u64, 2), call_count(sys_ping));
-    var mock = console.MockConsole(512){};
+    var mock = console.MockConsole(1024){};
     var con = mock.console();
     report(&con);
     try std.testing.expectEqualStrings(
-        "syscalls: slots=64 implemented=12\n" ++
+        "syscalls: slots=64 implemented=21\n" ++
             "  0 sys_ping calls=2\n" ++
             "  1 sys_write calls=0\n" ++
             "  2 sys_yield calls=0\n" ++
@@ -1221,7 +1691,16 @@ test "syscall: counters are monotonic and report is deterministic" {
             "  8 sys_wait calls=0\n" ++
             "  9 sys_udp_listen calls=0\n" ++
             "  10 sys_udp_send calls=0\n" ++
-            "  11 sys_udp_recv calls=0\n",
+            "  11 sys_udp_recv calls=0\n" ++
+            "  12 sys_win_open calls=0\n" ++
+            "  13 sys_win_fill calls=0\n" ++
+            "  14 sys_win_present calls=0\n" ++
+            "  15 sys_win_close calls=0\n" ++
+            "  16 sys_win_move calls=0\n" ++
+            "  17 sys_win_raise calls=0\n" ++
+            "  18 sys_win_get calls=0\n" ++
+            "  19 sys_win_query calls=0\n" ++
+            "  20 sys_win_set_visible calls=0\n",
         mock.contents(),
     );
 }

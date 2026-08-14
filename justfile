@@ -86,6 +86,13 @@ verify-vz:
     bash tools/verify-live-text.sh
     bash tools/verify-live-roadpops.sh
     bash tools/verify-live-glyphs.sh
+    bash tools/verify-live-xhci.sh
+    bash tools/verify-live-usb.sh
+    bash tools/verify-live-input.sh
+    bash tools/verify-live-win.sh
+    bash tools/verify-live-win-syscall.sh
+    bash tools/verify-live-win-close.sh
+    bash tools/verify-live-win-move.sh
 
 # Compile the AArch64 UEFI application and kernel image (class A — zig build)
 build:
@@ -222,6 +229,35 @@ verify-live-gfs:
 # Verify the live reboot/shutdown observation (class B — boots VZ VMs; a real EFI ResetSystem from a live dipshit> shell: reboot resets the machine, shutdown powers it off; claim 0527, hard gate 6; Apple silicon only)
 verify-live-reboot:
     bash tools/verify-live-reboot.sh
+
+# Verify the live XHCI host-controller transport (class B — boots a VZ VM; the runner's --input attaches the keyboard/pointer; the guest drives the Apple XHCI controller DID 0x1a06 — MMIO + command/event rings + NO-OP + port status; claim 4272; Apple silicon only)
+verify-live-xhci:
+    bash tools/verify-live-xhci.sh
+
+# Verify live USB enumeration + HID over the XHCI transport (class B — boots a VZ VM; the guest enumerates the keyboard + pointing device (port reset -> Enable Slot -> Address Device -> descriptors -> Set Configuration -> interrupt-IN armed) and a synthesized host keyDown produces the observed HID boot report; claim 4116; Apple silicon only)
+verify-live-usb:
+    bash tools/verify-live-usb.sh
+
+# Verify scripted keystrokes drive Road Pops (class B — boots a VZ VM; the runner's --input-string synthesizes one NSEvent per keyDown/keyUp (2 s spacing) into the VZVirtualMachineView, the guest's input FIFO + keycode decode feeds the line editor, and the typed `input` command reports events=6 dropped=0; claim 6050; Apple silicon only)
+verify-live-input:
+    bash tools/verify-live-input.sh
+
+# Verify the Driving Award window manager (class B — boots a VZ VM; Road Pops is window 0, a 1 Hz clock overlay is window 1; `win`/`win focus`/`win hit` exercise the registry + focus + hit-test, a keyboard-typed uname lands in the focused terminal, and the decoded capture shows two overlapping windows with the right z-order; claim 1543; Apple silicon only)
+verify-live-win:
+    bash tools/verify-live-win.sh
+
+# Verify the draw/window syscall seam (class B — boots a VZ VM; WIN.BIN opens a user window, fills it, and presents it through the ADR 0007 slots 12/13/14 entirely from EL0; `win`/`syscalls` observe the window + implemented=21 on the same kernel state, and the decoded capture shows the window's red/cyan/white blocks + dark-blue background over the terminal; claim 0487; Apple silicon only)
+verify-live-win-syscall:
+    bash tools/verify-live-win-syscall.sh
+
+# Verify the draw/window RELEASE proof (class B — boots a VZ VM; WINCLOSE.BIN opens/fills/presents/CLOSES a user window through ADR 0007 slot 15 entirely from EL0, twice; `win` shows windows=2 after the close (window gone, no win[2]: row) and the re-exec re-opens id 2 (the freed slot reused, never id 3); claim 0487 teardown follow-on; Apple silicon only)
+verify-live-win-close:
+    bash tools/verify-live-win-close.sh
+
+# Verify the draw/window MOVE/RESTACK + HIDE/SHOW proof (class B — boots a VZ VM; WINMOVE.BIN opens/fills/presents/moves (the second move clamps to the scanout corner)/raises/reads-back (sys_win_get, slot 18, printing winmove: get 1024,528,256,192)/queries (sys_win_query, slot 19, printing winmove: query 1024,528,256,192 z=2 focused=1 visible=1 dirty=1)/hides-then-shows (sys_win_set_visible, slot 20, printing winmove: hide ok + winmove: show ok) through ADR 0007 slots 16/17/18/19/20 entirely from EL0, then yield-loops forever; `win` shows win[2] at the clamped rect visible=1, `syscalls` reports implemented=21 with move=2/raise=1/get=1/query=1/set_visible=2, the marker-driven capture (--screenshot-after "winmove: hide ok") shows the pixel GONE, and the LATEST decoded capture shows the window's colors BACK at the NEW position with the terminal where it used to be; claim 0487 move/raise read-back/query/visibility follow-on; Apple silicon only)
+verify-live-win-move:
+    bash tools/verify-live-win-move.sh
+    bash tools/verify-live-win-move.sh
 
 # Verify the live pool-scale capstone (class B — boots VZ VMs; FOUR live user programs at the 7-slot budget: counter + 3 USER.BINs with distinct tasks/stacks, a FIFTH exec pool_full, and the tables=NN/256 headroom; claim 5795; Apple silicon only)
 verify-live-scale:

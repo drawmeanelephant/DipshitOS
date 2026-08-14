@@ -81,9 +81,90 @@ assumption comes from documentation or reasoning only.
   ExitBootServices — `gpu: pre-rearm st=00` observed** (like
   blk/entropy's `st=00`, unlike net's `st=0f`; the post-exit re-arm is
   required). Both queues are armed (controlq 0 + cursorq 1, size 4 — the
-  Linux driver configures both). The input devices for G4 stay
-  [inferred]: virtio-input (spec DID 0x1052) behind VZ's
-  `VZUSBKeyboardConfiguration` + `VZUSBScreenCoordinatePointingDeviceConfiguration`.
+  Linux driver configures both). The input devices for G4 were **[observed]
+  2026-08-13 (claim 3868)**: they are NOT virtio-input. VZ's
+  `VZUSBKeyboardConfiguration` + `VZUSBScreenCoordinatePointingDeviceConfiguration`
+  present as an **Apple XHCI USB host controller**
+  (`VID=0x106b DID=0x1a06 CLS=0x0c0330`, two MMIO BARs `0x50001000` +
+  `0x50000000`) with the keyboard/pointer as USB HID devices behind it — no
+  0x1052 device exists on the bus. Screen-side input therefore needs a USB
+  XHCI + HID stack, not a virtio-input transport (evidence under
+  `artifacts/g4-discovery/`). **G5 (claim 1543, 2026-08-13):** the
+  guest-side compositor (Driving Award) blits two windows into the ONE
+  scanout resource — the terminal (window 0) and a clock overlay (window
+  1) — so the host's color-managed pipeline carries the clock's amber
+  title bar (0xb58900 → ~(174,139,45)) and navy body (0x0a1a2e →
+  ~(14,26,44)) through the SAME transform as the G1 fill green; the
+  decoded capture proves the overlay sits on top (no terminal foreground
+  inside the clock rect). **G6 (claim 0487, 2026-08-13):** a THIRD window
+  — a kernel-owned user window (256×192) rendered entirely from EL0 via
+  the draw/window syscall seam — carries its own colors (dark-blue
+  0x1a2b3c → ~(30,43,59), red 0xff0000 → ~(234,51,35), cyan 0x00ffff →
+  ~(117,251,253), white 0xffffff → ~(255,255,255)) through the SAME
+  color-managed pipeline, blitted over the terminal (no terminal
+  foreground shows through its rect).
+- USB/XHCI: Apple XHCI USB host controller (the device VZ's `--input`
+  attaches — `VZUSBKeyboardConfiguration` +
+  `VZUSBScreenCoordinatePointingDeviceConfiguration`, milestone seven).
+  **Transport driven 2026-08-13 (claim 4272, milestone seven card I1):**
+  the guest discovers it pre-exit on bus 0 **dev 8** as `VID=0x106b
+  DID=0x1a06 CLS=0x0c0330` with two MMIO BARs — **BAR0 `0x50001000` holds
+  the capability registers, BAR1 is `0x50000000`** (both below the 4 GiB
+  identity-map blanket). The register map: CAPLENGTH=0x20, HCIVERSION=0x110,
+  DBOFF=0x940, RTSOFF=0x520, HCSPARAMS1=0x10002010 (MaxSlots=16,
+  MaxIntrs=32, MaxPorts=16). **The interrupter register set i lives at
+  RTSOFF+0x20+(0x20×i)** — the MFINDEX register occupies RTSOFF+0x00, and
+  writing ERSTSZ into that reserved region wedges the emulation (the I1
+  fix, recorded for I2). **VZ does NOT reset/run the controller at
+  ExitBootServices** — pre-reset USBSTS=0x9 (HCHalted + Port Change Detect)
+  and USBCMD=0x0 read post-EBS before HCRST (the XHCI answer to the
+  gpu/blk/entropy `st=00` vs net `st=0f` question). After HCRST + RS the
+  controller runs (USBSTS=0x0) and a NO-OP command completes with CC=1
+  (Success) — the command/event-ring transport proven end to end.
+  **Ports 9 and 10 report CCS=1 (connected)** — exactly the two attached
+  HID devices (keyboard + pointer); ports 1-8 and 11-16 report CCS=0.
+  All **[observed]** — every `verify-live-xhci` boot's `usb` report and
+  the saved discovery logs under `artifacts/xhci-discovery-*`.
+- USB HID devices (behind the XHCI controller): **enumerated 2026-08-13
+  (claim 4116, milestone seven card I2).** Port reset → Enable Slot →
+  Address Device → device + config descriptors over the control endpoint →
+  Set Configuration 1 → interrupt-IN endpoint armed. Both devices are FULL
+  speed (PORTSC PS=1):
+  - **Keyboard — port 9, slot 1:** VID `0x05ac` (Apple) PID `0x8105`,
+    `bDeviceClass` 0 (class lives in the interface descriptor), HID
+    boot-protocol KEYBOARD (`bInterfaceProtocol` 1), interrupt-IN EP1
+    `maxpkt=8`, `bInterval=8`, `Set_Protocol(boot)` ACCEPTED (`boot=1`).
+  - **Pointing device — port 10, slot 2:** VID `0x05ac` PID `0x8106`,
+    `bInterfaceProtocol` 0 (NOT a boot-protocol mouse — the absolute
+    screen-coordinate pointer), interrupt-IN EP1 `maxpkt=10`,
+    `bInterval=8`, `Set_Protocol(boot)` **REFUSED** (`boot=0` — recorded
+    honestly; the raw report is the ground truth).
+  - **Report shape (observed byte-exact):** a synthesized host keyDown
+    (macOS keyCode 0 = 'a') produces the 8-byte keyboard boot report
+    `00 00 04 00 00 00 00 00` — modifier byte 0, HID usage `0x04` in byte
+    2. **VZ has NO programmatic keyboard API** — `VZUSBKeyboardConfiguration`
+    is driven only by a `VZVirtualMachineView` forwarding host key events,
+    so the runner dispatches one synthesized `NSEvent` keyDown into the
+    view (its `--input-key <mac-keycode>` + `--input-key-after <marker>`
+    seam, OFF without `--input`).
+  - **Report delivery cadence (observed 2026-08-13, claim 6050, card I3):**
+    VZ's keyboard delivers roughly ONE interrupt-IN report per Road Pops
+    present cadence — a full-frame virtio-gpu present per output batch is
+    the slow step, and typing faster than ~2 s per keyDown/keyUp drops
+    reports (the endpoint holds a single pending report). **Single-TRB
+    arming is the correct shape** (arm one report TRB, re-arm on every
+    completion); a multi-TRB depth experiment wrapped the transfer ring at
+    the 8th report and dropped everything after. The input drain must run
+    BEFORE the Road Pops present in the shell idle loop so a report is
+    never starved behind a slow full-frame present. The runner's scripted
+    surface (`--input-string <text>` + `--input-string-after <marker>`)
+    therefore types at 2 s per keystroke. **[observed]** —
+    `tools/verify-live-input.sh` (PASS 8/8): the keyboard typed `input\n`
+    and the guest's own `input` report showed `events=6` (i,n,p,u,t,Enter)
+    with `dropped=0`, `kb-usage=0x28 kb-byte=0xa` (Enter); evidence under
+    `artifacts/live-input-*`.
+  All **[observed]** — `tools/verify-live-usb.sh` (PASS 11/11) and the saved
+  logs under `artifacts/usb-discovery-*` + `artifacts/live-usb-*`.
 - Entropy: virtio entropy device (`VZVirtioEntropyDeviceConfiguration`).
   **Driven + seeded 2026-08-10 (claim 2665, milestone four card 1):** the
   guest sees it on bus 0 as `VID=0x1af4 DID=0x1044` (virtio device ID 4;
