@@ -67,6 +67,7 @@ Legend: ⬜ not started · 🔄 in progress · ✅ done · ⛔ blocked (note why
 
 ## Docs follow-ons (outside the card ladder)
 
-- Post the license clearly on the public site + README: **source-available,
-  not open source** — "source viewable" stated plainly, not implied by
-  proximity to an open-source badge.
+- ✅ **DONE 2026-08-14** — the license is posted clearly on the public site +
+  README: **source-available, not open source**, stated plainly (a dedicated
+  `site/license.md` page + the primary-nav "License" link + an unambiguous
+  README license section), not implied by proximity to an open-source badge.
