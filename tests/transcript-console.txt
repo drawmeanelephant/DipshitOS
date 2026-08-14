@@ -3,47 +3,55 @@ DipshitOS: memory is a map, not a territory.
 Type 'help' before touching anything expensive.
 dipshit> help
 available commands:
-  addrspaces  per-task user address spaces: per-task TTBR0, EL1-only kernel overlay, user-root contents
+machine / identity
   about       explain this questionable system
   beans       count beans, probably
-  cat         print a file from the ESP (by name or /path)
-  clear       clean up the crime scene
-  echo        repeat your regrettable decisions
   elephant    operational mascot diagnostics
-  exec        load a user program from the ESP and enter it at EL0
+  uname       compact system identity
+  version     display build information
+memory / machine state
+  addrspaces  per-task user address spaces: per-task TTBR0, EL1-only kernel overlay, user-root contents
   fault       trigger a synchronous exception (diagnostic)
   handoff     display boot-to-kernel ABI data
-  help        list commands and their help text
   hex         format an integer in hexadecimal
-  input       keyboard/pointer event FIFO: armed state, occupancy, drop count, last keyboard + pointer events
-  kill        terminate a running process (kernel-owned lifetime)
-  ls          list files on the ESP (or a directory by path)
   mem         summarize the EFI memory map
-  mbox        per-process IPC mailbox: pending messages and drain counters
-  mount       switch the active FAT volume (esp or data)
-  net         virtio-net transport + RX + ARP + ICMP + UDP + DHCP + TCP: device DID, MAC, queues, feature bits, RX counters ('net recv' prints received frames; 'net ip <a.b.c.d>' sets the static IP; 'net arp [<a.b.c.d>]' shows/resolves the ARP table; 'net ping <a.b.c.d>' sends an ICMP echo request; 'net udp [listen <port>|close <port>|send <addr> <port> <len>|recv [<port>]]' drives UDP; 'net dhcp' runs the bounded DHCP client one step per invocation; 'net tcp [connect <addr> <port>|send <len>|recv|close|reset]' drives the bounded TCP client)
-  netsend     send a known Ethernet frame (bounded staging, TX + used-ring drain)
   pages       physical page allocator pool
   pci         enumerate PCI devices on the bus
+  timer       interrupt controller + timer status
+  uaccess     user-memory copy diagnostics (valid, fault, recovery)
+tasks / processes
+  exec        load a user program from the ESP and enter it at EL0
+  kill        terminate a running process (kernel-owned lifetime)
+  mbox        per-process IPC mailbox: pending messages and drain counters
   procs       process registry: image, address space, lifecycle, exit status
-  random      print n random bytes from the seeded CSPRNG (hex)
-  reboot      restart the machine
-  repeat      repeat text, safely bounded
-  roadpops    Road Pops framebuffer console: armed/dirty/present counters (the boot terminal on the screen)
-  screen      virtio-gpu transport + framebuffer: device DID, features, scanout, status, re-arm ('screen fill <rrggbb>' fills the framebuffer and flushes it to the scanout)
-  text        framebuffer text: text region, cursor, scrollback ('text put <string...>' renders + flushes to the scanout; 'text clear' clears)
-  shutdown    request power-off
   spawn       spawn the lifecycle demo task
   syscalls    numbered syscall table and counters
   tasks       tick-driven task scheduler status
-  timer       interrupt controller + timer status
-  uaccess     user-memory copy diagnostics (valid, fault, recovery)
-  usb         XHCI host controller: `usb` transport report, `usb devices` enumerated HID devices, `usb report` last HID report
-  uname       compact system identity
-  version     display build information
-  win         Driving Award window manager: registry (with owner pids), z-order, focus, hit-testing ('win focus <n>' focuses; 'win raise <n>' raises; 'win move <n> <x> <y>' moves a user window; 'win close <n>' releases a user window; 'win list <pid>' filters by owner; 'win hit <x> <y>' hit-tests)
+storage
+  cat         print a file from the ESP (by name or /path)
+  ls          list files on the ESP (or a directory by path)
+  mount       switch the active FAT volume (esp or data)
   write       write text to a file on the ESP
+networking
+  net         virtio-net transport + RX + ARP + ICMP + UDP + DHCP + TCP: device DID, MAC, queues, feature bits, RX counters ('net recv' prints received frames; 'net ip <a.b.c.d>' sets the static IP; 'net arp [<a.b.c.d>]' shows/resolves the ARP table; 'net ping <a.b.c.d>' sends an ICMP echo request; 'net udp [listen <port>|close <port>|send <addr> <port> <len>|recv [<port>]]' drives UDP; 'net dhcp' runs the bounded DHCP client one step per invocation; 'net tcp [connect <addr> <port>|send <len>|recv|close|reset]' drives the bounded TCP client)
+  netsend     send a known Ethernet frame (bounded staging, TX + used-ring drain)
+graphics / input
+  input       keyboard/pointer event FIFO: armed state, occupancy, drop count, last keyboard + pointer events
+  roadpops    Road Pops framebuffer console: armed/dirty/present counters (the boot terminal on the screen)
+  screen      virtio-gpu transport + framebuffer: device DID, features, scanout, status, re-arm ('screen fill <rrggbb>' fills the framebuffer and flushes it to the scanout)
+  text        framebuffer text: text region, cursor, scrollback ('text put <string...>' renders + flushes to the scanout; 'text clear' clears)
+  usb         XHCI host controller: `usb` transport report, `usb devices` enumerated HID devices, `usb report` last HID report
+  win         Driving Award window manager: registry (with owner pids), z-order, focus, hit-testing ('win focus <n>' focuses; 'win raise <n>' raises; 'win move <n> <x> <y>' moves a user window; 'win close <n>' releases a user window; 'win list <pid>' filters by owner; 'win hit <x> <y>' hit-tests)
+system
+  clear       clean up the crime scene
+  echo        repeat your regrettable decisions
+  help        grouped command catalog and per-command/per-topic help
+  random      print n random bytes from the seeded CSPRNG (hex)
+  reboot      restart the machine
+  repeat      repeat text, safely bounded
+  shutdown    request power-off
 type 'help <command>' for details on a single command.
+type 'help <topic>' for a topic page (networking, windows, storage, graphics).
 dipshit> version
 dipshit-kernel
 milestone-two kernel proper (ADR 0004)

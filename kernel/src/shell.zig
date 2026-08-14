@@ -268,47 +268,55 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "Type 'help' before touching anything expensive.\n" ++
         "dipshit> help\r\n" ++
         "available commands:\n" ++
-        "  addrspaces  per-task user address spaces: per-task TTBR0, EL1-only kernel overlay, user-root contents\n" ++
+        "machine / identity\n" ++
         "  about       explain this questionable system\n" ++
         "  beans       count beans, probably\n" ++
-        "  cat         print a file from the ESP (by name or /path)\n" ++
-        "  clear       clean up the crime scene\n" ++
-        "  echo        repeat your regrettable decisions\n" ++
         "  elephant    operational mascot diagnostics\n" ++
-        "  exec        load a user program from the ESP and enter it at EL0\n" ++
+        "  uname       compact system identity\n" ++
+        "  version     display build information\n" ++
+        "memory / machine state\n" ++
+        "  addrspaces  per-task user address spaces: per-task TTBR0, EL1-only kernel overlay, user-root contents\n" ++
         "  fault       trigger a synchronous exception (diagnostic)\n" ++
         "  handoff     display boot-to-kernel ABI data\n" ++
-        "  help        list commands and their help text\n" ++
         "  hex         format an integer in hexadecimal\n" ++
-        "  input       keyboard/pointer event FIFO: armed state, occupancy, drop count, last keyboard + pointer events\n" ++
-        "  kill        terminate a running process (kernel-owned lifetime)\n" ++
-        "  ls          list files on the ESP (or a directory by path)\n" ++
         "  mem         summarize the EFI memory map\n" ++
-        "  mbox        per-process IPC mailbox: pending messages and drain counters\n" ++
-        "  mount       switch the active FAT volume (esp or data)\n" ++
-        "  net         virtio-net transport + RX + ARP + ICMP + UDP + DHCP + TCP: device DID, MAC, queues, feature bits, RX counters ('net recv' prints received frames; 'net ip <a.b.c.d>' sets the static IP; 'net arp [<a.b.c.d>]' shows/resolves the ARP table; 'net ping <a.b.c.d>' sends an ICMP echo request; 'net udp [listen <port>|close <port>|send <addr> <port> <len>|recv [<port>]]' drives UDP; 'net dhcp' runs the bounded DHCP client one step per invocation; 'net tcp [connect <addr> <port>|send <len>|recv|close|reset]' drives the bounded TCP client)\n" ++
-        "  netsend     send a known Ethernet frame (bounded staging, TX + used-ring drain)\n" ++
         "  pages       physical page allocator pool\n" ++
         "  pci         enumerate PCI devices on the bus\n" ++
+        "  timer       interrupt controller + timer status\n" ++
+        "  uaccess     user-memory copy diagnostics (valid, fault, recovery)\n" ++
+        "tasks / processes\n" ++
+        "  exec        load a user program from the ESP and enter it at EL0\n" ++
+        "  kill        terminate a running process (kernel-owned lifetime)\n" ++
+        "  mbox        per-process IPC mailbox: pending messages and drain counters\n" ++
         "  procs       process registry: image, address space, lifecycle, exit status\n" ++
-        "  random      print n random bytes from the seeded CSPRNG (hex)\n" ++
-        "  reboot      restart the machine\n" ++
-        "  repeat      repeat text, safely bounded\n" ++
-        "  roadpops    Road Pops framebuffer console: armed/dirty/present counters (the boot terminal on the screen)\n" ++
-        "  screen      virtio-gpu transport + framebuffer: device DID, features, scanout, status, re-arm ('screen fill <rrggbb>' fills the framebuffer and flushes it to the scanout)\n" ++
-        "  text        framebuffer text: text region, cursor, scrollback ('text put <string...>' renders + flushes to the scanout; 'text clear' clears)\n" ++
-        "  shutdown    request power-off\n" ++
         "  spawn       spawn the lifecycle demo task\n" ++
         "  syscalls    numbered syscall table and counters\n" ++
         "  tasks       tick-driven task scheduler status\n" ++
-        "  timer       interrupt controller + timer status\n" ++
-        "  uaccess     user-memory copy diagnostics (valid, fault, recovery)\n" ++
-        "  usb         XHCI host controller: `usb` transport report, `usb devices` enumerated HID devices, `usb report` last HID report\n" ++
-        "  uname       compact system identity\n" ++
-        "  version     display build information\n" ++
-        "  win         Driving Award window manager: registry (with owner pids), z-order, focus, hit-testing ('win focus <n>' focuses; 'win raise <n>' raises; 'win move <n> <x> <y>' moves a user window; 'win close <n>' releases a user window; 'win list <pid>' filters by owner; 'win hit <x> <y>' hit-tests)\n" ++
+        "storage\n" ++
+        "  cat         print a file from the ESP (by name or /path)\n" ++
+        "  ls          list files on the ESP (or a directory by path)\n" ++
+        "  mount       switch the active FAT volume (esp or data)\n" ++
         "  write       write text to a file on the ESP\n" ++
+        "networking\n" ++
+        "  net         virtio-net transport + RX + ARP + ICMP + UDP + DHCP + TCP: device DID, MAC, queues, feature bits, RX counters ('net recv' prints received frames; 'net ip <a.b.c.d>' sets the static IP; 'net arp [<a.b.c.d>]' shows/resolves the ARP table; 'net ping <a.b.c.d>' sends an ICMP echo request; 'net udp [listen <port>|close <port>|send <addr> <port> <len>|recv [<port>]]' drives UDP; 'net dhcp' runs the bounded DHCP client one step per invocation; 'net tcp [connect <addr> <port>|send <len>|recv|close|reset]' drives the bounded TCP client)\n" ++
+        "  netsend     send a known Ethernet frame (bounded staging, TX + used-ring drain)\n" ++
+        "graphics / input\n" ++
+        "  input       keyboard/pointer event FIFO: armed state, occupancy, drop count, last keyboard + pointer events\n" ++
+        "  roadpops    Road Pops framebuffer console: armed/dirty/present counters (the boot terminal on the screen)\n" ++
+        "  screen      virtio-gpu transport + framebuffer: device DID, features, scanout, status, re-arm ('screen fill <rrggbb>' fills the framebuffer and flushes it to the scanout)\n" ++
+        "  text        framebuffer text: text region, cursor, scrollback ('text put <string...>' renders + flushes to the scanout; 'text clear' clears)\n" ++
+        "  usb         XHCI host controller: `usb` transport report, `usb devices` enumerated HID devices, `usb report` last HID report\n" ++
+        "  win         Driving Award window manager: registry (with owner pids), z-order, focus, hit-testing ('win focus <n>' focuses; 'win raise <n>' raises; 'win move <n> <x> <y>' moves a user window; 'win close <n>' releases a user window; 'win list <pid>' filters by owner; 'win hit <x> <y>' hit-tests)\n" ++
+        "system\n" ++
+        "  clear       clean up the crime scene\n" ++
+        "  echo        repeat your regrettable decisions\n" ++
+        "  help        grouped command catalog and per-command/per-topic help\n" ++
+        "  random      print n random bytes from the seeded CSPRNG (hex)\n" ++
+        "  reboot      restart the machine\n" ++
+        "  repeat      repeat text, safely bounded\n" ++
+        "  shutdown    request power-off\n" ++
         "type 'help <command>' for details on a single command.\n" ++
+        "type 'help <topic>' for a topic page (networking, windows, storage, graphics).\n" ++
         "dipshit> version\r\n" ++
         "dipshit-kernel\n" ++
         "milestone-two kernel proper (ADR 0004)\n" ++

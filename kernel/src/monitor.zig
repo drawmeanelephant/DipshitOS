@@ -205,10 +205,48 @@ pub const Monitor = struct {
 // Command registry
 // ---------------------------------------------------------------------------
 
+/// Command category (ADR 0008 D1): the seven groups `help` lists.
+pub const Category = enum {
+    machine_identity,
+    memory_state,
+    tasks_processes,
+    storage,
+    networking,
+    graphics_input,
+    system,
+};
+
+/// The fixed group order `help` lists (ADR 0008 D1). Enum values only — no
+/// string-literal pointers in a const table, because the kernel's flat loader
+/// applies no relocations (the claim-0015 lesson): `category_name` returns the
+/// display strings PC-relatively at the call site instead.
+const category_order = [_]Category{
+    .machine_identity,
+    .memory_state,
+    .tasks_processes,
+    .storage,
+    .networking,
+    .graphics_input,
+    .system,
+};
+
+fn category_name(cat: Category) []const u8 {
+    return switch (cat) {
+        .machine_identity => "machine / identity",
+        .memory_state => "memory / machine state",
+        .tasks_processes => "tasks / processes",
+        .storage => "storage",
+        .networking => "networking",
+        .graphics_input => "graphics / input",
+        .system => "system",
+    };
+}
+
 pub const Command = struct {
     name: []const u8,
     help: []const u8,
     usage: []const u8,
+    category: Category,
     min_args: u8 = 0,
     max_args: u8 = max_args_limit,
     handler: *const fn (m: *Monitor, args: []const []const u8) ExecError,
@@ -238,46 +276,46 @@ var registry_ready = false;
 fn ensure_registry() []const Command {
     if (!registry_ready) {
         registry_storage = .{
-            .{ .name = "addrspaces", .help = "per-task user address spaces: per-task TTBR0, EL1-only kernel overlay, user-root contents", .usage = "addrspaces", .handler = cmd_addrspaces },
-            .{ .name = "about", .help = "explain this questionable system", .usage = "about", .handler = cmd_about },
-            .{ .name = "beans", .help = "count beans, probably", .usage = "beans [count]", .max_args = 1, .handler = cmd_beans },
-            .{ .name = "cat", .help = "print a file from the ESP (by name or /path)", .usage = "cat <file|path>", .min_args = 1, .max_args = 1, .handler = cmd_cat },
-            .{ .name = "clear", .help = "clean up the crime scene", .usage = "clear", .handler = cmd_clear },
-            .{ .name = "echo", .help = "repeat your regrettable decisions", .usage = "echo <text...>", .handler = cmd_echo },
-            .{ .name = "elephant", .help = "operational mascot diagnostics", .usage = "elephant", .handler = cmd_elephant },
-            .{ .name = "exec", .help = "load a user program from the ESP and enter it at EL0", .usage = "exec [<file> [arg...]]", .max_args = 1 + esp_exec.max_exec_args, .handler = cmd_exec },
-            .{ .name = "fault", .help = "trigger a synchronous exception (diagnostic)", .usage = "fault", .handler = cmd_fault },
-            .{ .name = "handoff", .help = "display boot-to-kernel ABI data", .usage = "handoff", .handler = cmd_handoff },
-            .{ .name = "help", .help = "list commands and their help text", .usage = "help [command]", .max_args = 1, .handler = cmd_help },
-            .{ .name = "hex", .help = "format an integer in hexadecimal", .usage = "hex <number>...", .min_args = 1, .handler = cmd_hex },
-            .{ .name = "input", .help = "keyboard/pointer event FIFO: armed state, occupancy, drop count, last keyboard + pointer events", .usage = "input", .handler = cmd_input },
-            .{ .name = "kill", .help = "terminate a running process (kernel-owned lifetime)", .usage = "kill <pid|name>", .min_args = 1, .max_args = 1, .handler = cmd_kill },
-            .{ .name = "ls", .help = "list files on the ESP (or a directory by path)", .usage = "ls [<dir>]", .max_args = 1, .handler = cmd_ls },
-            .{ .name = "mem", .help = "summarize the EFI memory map", .usage = "mem", .handler = cmd_mem },
-            .{ .name = "mbox", .help = "per-process IPC mailbox: pending messages and drain counters", .usage = "mbox [<pid>]", .max_args = 1, .handler = cmd_mbox },
-            .{ .name = "mount", .help = "switch the active FAT volume (esp or data)", .usage = "mount <esp|data>", .min_args = 1, .max_args = 1, .handler = cmd_mount },
-            .{ .name = "net", .help = "virtio-net transport + RX + ARP + ICMP + UDP + DHCP + TCP: device DID, MAC, queues, feature bits, RX counters ('net recv' prints received frames; 'net ip <a.b.c.d>' sets the static IP; 'net arp [<a.b.c.d>]' shows/resolves the ARP table; 'net ping <a.b.c.d>' sends an ICMP echo request; 'net udp [listen <port>|close <port>|send <addr> <port> <len>|recv [<port>]]' drives UDP; 'net dhcp' runs the bounded DHCP client one step per invocation; 'net tcp [connect <addr> <port>|send <len>|recv|close|reset]' drives the bounded TCP client)", .usage = "net [recv|ip <addr>|arp [<addr>]|ping <addr>|udp [listen <port>|close <port>|send <addr> <port> <len>|recv [<port>]]|dhcp|tcp [connect <addr> <port>|send <len>|recv|close|reset]]", .max_args = 5, .handler = cmd_net },
-            .{ .name = "netsend", .help = "send a known Ethernet frame (bounded staging, TX + used-ring drain)", .usage = "netsend <bytes>", .min_args = 1, .max_args = 1, .handler = cmd_netsend },
-            .{ .name = "pages", .help = "physical page allocator pool", .usage = "pages [selftest]", .max_args = 1, .handler = cmd_pages },
-            .{ .name = "pci", .help = "enumerate PCI devices on the bus", .usage = "pci", .handler = cmd_pci },
-            .{ .name = "procs", .help = "process registry: image, address space, lifecycle, exit status", .usage = "procs", .handler = cmd_procs },
-            .{ .name = "random", .help = "print n random bytes from the seeded CSPRNG (hex)", .usage = "random [n]", .max_args = 1, .handler = cmd_random },
-            .{ .name = "reboot", .help = "restart the machine", .usage = "reboot", .handler = cmd_reboot },
-            .{ .name = "repeat", .help = "repeat text, safely bounded", .usage = "repeat <count> <text...>", .min_args = 1, .handler = cmd_repeat },
-            .{ .name = "roadpops", .help = "Road Pops framebuffer console: armed/dirty/present counters (the boot terminal on the screen)", .usage = "roadpops", .handler = cmd_roadpops },
-            .{ .name = "screen", .help = "virtio-gpu transport + framebuffer: device DID, features, scanout, status, re-arm ('screen fill <rrggbb>' fills the framebuffer and flushes it to the scanout)", .usage = "screen [fill <rrggbb>]", .max_args = 2, .handler = cmd_screen },
-            .{ .name = "text", .help = "framebuffer text: text region, cursor, scrollback ('text put <string...>' renders + flushes to the scanout; 'text clear' clears)", .usage = "text [put <string...>|clear]", .min_args = 0, .max_args = 9, .handler = cmd_text },
-            .{ .name = "shutdown", .help = "request power-off", .usage = "shutdown", .handler = cmd_shutdown },
-            .{ .name = "spawn", .help = "spawn the lifecycle demo task", .usage = "spawn", .handler = cmd_spawn },
-            .{ .name = "syscalls", .help = "numbered syscall table and counters", .usage = "syscalls", .handler = cmd_syscalls },
-            .{ .name = "tasks", .help = "tick-driven task scheduler status", .usage = "tasks", .handler = cmd_tasks },
-            .{ .name = "timer", .help = "interrupt controller + timer status", .usage = "timer", .handler = cmd_timer },
-            .{ .name = "uaccess", .help = "user-memory copy diagnostics (valid, fault, recovery)", .usage = "uaccess", .handler = cmd_uaccess },
-            .{ .name = "usb", .help = "XHCI host controller: `usb` transport report, `usb devices` enumerated HID devices, `usb report` last HID report", .usage = "usb [devices|report]", .handler = cmd_usb },
-            .{ .name = "uname", .help = "compact system identity", .usage = "uname", .handler = cmd_uname },
-            .{ .name = "version", .help = "display build information", .usage = "version", .handler = cmd_version },
-            .{ .name = "win", .help = "Driving Award window manager: registry (with owner pids), z-order, focus, hit-testing ('win focus <n>' focuses; 'win raise <n>' raises; 'win move <n> <x> <y>' moves a user window; 'win close <n>' releases a user window; 'win list <pid>' filters by owner; 'win hit <x> <y>' hit-tests)", .usage = "win [focus <n>|raise <n>|move <n> <x> <y>|close <n>|list <pid>|hit <x> <y>]", .max_args = 4, .handler = cmd_win },
-            .{ .name = "write", .help = "write text to a file on the ESP", .usage = "write <file> <text...>", .min_args = 1, .handler = cmd_write },
+            .{ .name = "addrspaces", .help = "per-task user address spaces: per-task TTBR0, EL1-only kernel overlay, user-root contents", .usage = "addrspaces", .category = .memory_state, .handler = cmd_addrspaces },
+            .{ .name = "about", .help = "explain this questionable system", .usage = "about", .category = .machine_identity, .handler = cmd_about },
+            .{ .name = "beans", .help = "count beans, probably", .usage = "beans [count]", .category = .machine_identity, .max_args = 1, .handler = cmd_beans },
+            .{ .name = "cat", .help = "print a file from the ESP (by name or /path)", .usage = "cat <file|path>", .category = .storage, .min_args = 1, .max_args = 1, .handler = cmd_cat },
+            .{ .name = "clear", .help = "clean up the crime scene", .usage = "clear", .category = .system, .handler = cmd_clear },
+            .{ .name = "echo", .help = "repeat your regrettable decisions", .usage = "echo <text...>", .category = .system, .handler = cmd_echo },
+            .{ .name = "elephant", .help = "operational mascot diagnostics", .usage = "elephant", .category = .machine_identity, .handler = cmd_elephant },
+            .{ .name = "exec", .help = "load a user program from the ESP and enter it at EL0", .usage = "exec [<file> [arg...]]", .category = .tasks_processes, .max_args = 1 + esp_exec.max_exec_args, .handler = cmd_exec },
+            .{ .name = "fault", .help = "trigger a synchronous exception (diagnostic)", .usage = "fault", .category = .memory_state, .handler = cmd_fault },
+            .{ .name = "handoff", .help = "display boot-to-kernel ABI data", .usage = "handoff", .category = .memory_state, .handler = cmd_handoff },
+            .{ .name = "help", .help = "grouped command catalog and per-command/per-topic help", .usage = "help [<command>|<topic>]", .category = .system, .max_args = 1, .handler = cmd_help },
+            .{ .name = "hex", .help = "format an integer in hexadecimal", .usage = "hex <number>...", .category = .memory_state, .min_args = 1, .handler = cmd_hex },
+            .{ .name = "input", .help = "keyboard/pointer event FIFO: armed state, occupancy, drop count, last keyboard + pointer events", .usage = "input", .category = .graphics_input, .handler = cmd_input },
+            .{ .name = "kill", .help = "terminate a running process (kernel-owned lifetime)", .usage = "kill <pid|name>", .category = .tasks_processes, .min_args = 1, .max_args = 1, .handler = cmd_kill },
+            .{ .name = "ls", .help = "list files on the ESP (or a directory by path)", .usage = "ls [<dir>]", .category = .storage, .max_args = 1, .handler = cmd_ls },
+            .{ .name = "mem", .help = "summarize the EFI memory map", .usage = "mem", .category = .memory_state, .handler = cmd_mem },
+            .{ .name = "mbox", .help = "per-process IPC mailbox: pending messages and drain counters", .usage = "mbox [<pid>]", .category = .tasks_processes, .max_args = 1, .handler = cmd_mbox },
+            .{ .name = "mount", .help = "switch the active FAT volume (esp or data)", .usage = "mount <esp|data>", .category = .storage, .min_args = 1, .max_args = 1, .handler = cmd_mount },
+            .{ .name = "net", .help = "virtio-net transport + RX + ARP + ICMP + UDP + DHCP + TCP: device DID, MAC, queues, feature bits, RX counters ('net recv' prints received frames; 'net ip <a.b.c.d>' sets the static IP; 'net arp [<a.b.c.d>]' shows/resolves the ARP table; 'net ping <a.b.c.d>' sends an ICMP echo request; 'net udp [listen <port>|close <port>|send <addr> <port> <len>|recv [<port>]]' drives UDP; 'net dhcp' runs the bounded DHCP client one step per invocation; 'net tcp [connect <addr> <port>|send <len>|recv|close|reset]' drives the bounded TCP client)", .usage = "net [recv|ip <addr>|arp [<addr>]|ping <addr>|udp [listen <port>|close <port>|send <addr> <port> <len>|recv [<port>]]|dhcp|tcp [connect <addr> <port>|send <len>|recv|close|reset]]", .category = .networking, .max_args = 5, .handler = cmd_net },
+            .{ .name = "netsend", .help = "send a known Ethernet frame (bounded staging, TX + used-ring drain)", .usage = "netsend <bytes>", .category = .networking, .min_args = 1, .max_args = 1, .handler = cmd_netsend },
+            .{ .name = "pages", .help = "physical page allocator pool", .usage = "pages [selftest]", .category = .memory_state, .max_args = 1, .handler = cmd_pages },
+            .{ .name = "pci", .help = "enumerate PCI devices on the bus", .usage = "pci", .category = .memory_state, .handler = cmd_pci },
+            .{ .name = "procs", .help = "process registry: image, address space, lifecycle, exit status", .usage = "procs", .category = .tasks_processes, .handler = cmd_procs },
+            .{ .name = "random", .help = "print n random bytes from the seeded CSPRNG (hex)", .usage = "random [n]", .category = .system, .max_args = 1, .handler = cmd_random },
+            .{ .name = "reboot", .help = "restart the machine", .usage = "reboot", .category = .system, .handler = cmd_reboot },
+            .{ .name = "repeat", .help = "repeat text, safely bounded", .usage = "repeat <count> <text...>", .category = .system, .min_args = 1, .handler = cmd_repeat },
+            .{ .name = "roadpops", .help = "Road Pops framebuffer console: armed/dirty/present counters (the boot terminal on the screen)", .usage = "roadpops", .category = .graphics_input, .handler = cmd_roadpops },
+            .{ .name = "screen", .help = "virtio-gpu transport + framebuffer: device DID, features, scanout, status, re-arm ('screen fill <rrggbb>' fills the framebuffer and flushes it to the scanout)", .usage = "screen [fill <rrggbb>]", .category = .graphics_input, .max_args = 2, .handler = cmd_screen },
+            .{ .name = "text", .help = "framebuffer text: text region, cursor, scrollback ('text put <string...>' renders + flushes to the scanout; 'text clear' clears)", .usage = "text [put <string...>|clear]", .category = .graphics_input, .min_args = 0, .max_args = 9, .handler = cmd_text },
+            .{ .name = "shutdown", .help = "request power-off", .usage = "shutdown", .category = .system, .handler = cmd_shutdown },
+            .{ .name = "spawn", .help = "spawn the lifecycle demo task", .usage = "spawn", .category = .tasks_processes, .handler = cmd_spawn },
+            .{ .name = "syscalls", .help = "numbered syscall table and counters", .usage = "syscalls", .category = .tasks_processes, .handler = cmd_syscalls },
+            .{ .name = "tasks", .help = "tick-driven task scheduler status", .usage = "tasks", .category = .tasks_processes, .handler = cmd_tasks },
+            .{ .name = "timer", .help = "interrupt controller + timer status", .usage = "timer", .category = .memory_state, .handler = cmd_timer },
+            .{ .name = "uaccess", .help = "user-memory copy diagnostics (valid, fault, recovery)", .usage = "uaccess", .category = .memory_state, .handler = cmd_uaccess },
+            .{ .name = "usb", .help = "XHCI host controller: `usb` transport report, `usb devices` enumerated HID devices, `usb report` last HID report", .usage = "usb [devices|report]", .category = .graphics_input, .handler = cmd_usb },
+            .{ .name = "uname", .help = "compact system identity", .usage = "uname", .category = .machine_identity, .handler = cmd_uname },
+            .{ .name = "version", .help = "display build information", .usage = "version", .category = .machine_identity, .handler = cmd_version },
+            .{ .name = "win", .help = "Driving Award window manager: registry (with owner pids), z-order, focus, hit-testing ('win focus <n>' focuses; 'win raise <n>' raises; 'win move <n> <x> <y>' moves a user window; 'win close <n>' releases a user window; 'win list <pid>' filters by owner; 'win hit <x> <y>' hit-tests)", .usage = "win [focus <n>|raise <n>|move <n> <x> <y>|close <n>|list <pid>|hit <x> <y>]", .category = .graphics_input, .max_args = 4, .handler = cmd_win },
+            .{ .name = "write", .help = "write text to a file on the ESP", .usage = "write <file> <text...>", .category = .storage, .min_args = 1, .handler = cmd_write },
         };
         registry_ready = true;
     }
@@ -414,36 +452,83 @@ fn report_machine(m: *Monitor, verb: []const u8, result: MachineResult) ExecErro
 // Identity and inspection commands
 // ---------------------------------------------------------------------------
 
+/// `help <topic>` pages (ADR 0008 D1). Bodies are returned as string
+/// literals from code (PC-relative at any load base — the claim-0015
+/// lesson), never stored in a const table of pointers. Topics are
+/// non-command keywords; `syscalls` is a command, so its `help <cmd>` detail
+/// is the syscall page rather than a shadowed topic.
+fn topic_body(name: []const u8) ?[]const u8 {
+    if (std.mem.eql(u8, name, "networking")) {
+        return "networking\n" ++
+            "  virtio-net (DID 0x1041), flag-gated by the runner's --net mode: TX + RX,\n" ++
+            "  ARP, IPv4/ICMP, UDP, a bounded DHCP client, and an outward-only bounded TCP\n" ++
+            "  client with NAT. `net` drives it (recv/ip/arp/ping/udp/dhcp/tcp); `netsend`\n" ++
+            "  sends a known frame. EL0 reaches UDP through ADR 0007 slots 9-11.\n" ++
+            "  Bounds: static IP, no DNS, TCP is client-only (no listen or loopback).\n";
+    }
+    if (std.mem.eql(u8, name, "windows")) {
+        return "windows\n" ++
+            "  Driving Award (G5) owns the window registry: z-order, focus, hit-testing,\n" ++
+            "  dirty-rect compositing. Road Pops is window 0; a 1 Hz clock is window 1.\n" ++
+            "  `win` inspects/focuses/raises/moves/closes; EL0 opens windows through ADR 0007\n" ++
+            "  slots 12-20 (open/fill/present/close/move/raise/get/query/set_visible). Windows\n" ++
+            "  are process-owned and auto-close when their process exits.\n";
+    }
+    if (std.mem.eql(u8, name, "storage")) {
+        return "storage\n" ++
+            "  GPT + FAT32 over virtio-blk (DID 0x1042): the ESP boot volume and a second\n" ++
+            "  DATA partition. `mount <esp|data>` switches volumes; `ls`/`cat`/`write` read\n" ++
+            "  and write files, and writes persist on the disk across reboot.\n";
+    }
+    if (std.mem.eql(u8, name, "graphics")) {
+        return "graphics\n" ++
+            "  virtio-gpu (DID 0x1050) framebuffer: `screen` reports/fills the scanout,\n" ++
+            "  `text` renders the 8x8 font, Road Pops is the on-screen terminal, and Driving\n" ++
+            "  Award composites windows over it. 1280x720 B8G8R8X8, 2D blits only.\n";
+    }
+    return null;
+}
+
 fn cmd_help(m: *Monitor, args: []const []const u8) ExecError {
     if (args.len == 1) {
-        const cmd = lookup(args[0]) orelse {
-            m.console.puts("help: no such command: ");
-            m.console.puts(args[0]);
+        if (lookup(args[0])) |cmd| {
+            m.console.puts(cmd.name);
+            m.console.puts(" - ");
+            m.console.puts(cmd.help);
+            m.console.puts("\nusage: ");
+            m.console.puts(cmd.usage);
             m.console.puts("\n");
-            return .invalid_argument;
-        };
-        m.console.puts(cmd.name);
-        m.console.puts(" - ");
-        m.console.puts(cmd.help);
-        m.console.puts("\nusage: ");
-        m.console.puts(cmd.usage);
+            return .none;
+        }
+        if (topic_body(args[0])) |body| {
+            m.console.puts(body);
+            return .none;
+        }
+        m.console.puts("help: no such command: ");
+        m.console.puts(args[0]);
         m.console.puts("\n");
-        return .none;
+        return .invalid_argument;
     }
     m.console.print_line("available commands:");
     const reg = ensure_registry();
     var width: usize = 0;
     for (reg) |cmd| width = @max(width, cmd.name.len);
-    for (reg) |cmd| {
-        m.console.puts("  ");
-        m.console.puts(cmd.name);
-        var pad: usize = cmd.name.len;
-        while (pad < width) : (pad += 1) m.console.putc(' ');
-        m.console.puts("  ");
-        m.console.puts(cmd.help);
+    for (category_order) |cat| {
+        m.console.puts(category_name(cat));
         m.console.puts("\n");
+        for (reg) |cmd| {
+            if (cmd.category != cat) continue;
+            m.console.puts("  ");
+            m.console.puts(cmd.name);
+            var pad: usize = cmd.name.len;
+            while (pad < width) : (pad += 1) m.console.putc(' ');
+            m.console.puts("  ");
+            m.console.puts(cmd.help);
+            m.console.puts("\n");
+        }
     }
     m.console.print_line("type 'help <command>' for details on a single command.");
+    m.console.print_line("type 'help <topic>' for a topic page (networking, windows, storage, graphics).");
     return .none;
 }
 
@@ -4039,6 +4124,53 @@ test "monitor: help for a specific command" {
     env.mock.reset();
     try std.testing.expectEqual(ExecError.invalid_argument, exec(&mon, &.{ "help", "bogus" }));
     try std.testing.expectEqualStrings("help: no such command: bogus\n", env.mock.contents());
+}
+
+test "monitor: help opens topic pages (and commands win over topics)" {
+    var env = TestEnv.init();
+    var mon = env.monitor();
+    // Each documented topic opens its page, headered by the topic name.
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "help", "networking" }));
+    try std.testing.expect(std.mem.startsWith(u8, env.mock.contents(), "networking\n"));
+    try std.testing.expect(std.mem.indexOf(u8, env.mock.contents(), "virtio-net (DID 0x1041)") != null);
+    env.mock.reset();
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "help", "windows" }));
+    try std.testing.expect(std.mem.startsWith(u8, env.mock.contents(), "windows\n"));
+    env.mock.reset();
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "help", "storage" }));
+    try std.testing.expect(std.mem.startsWith(u8, env.mock.contents(), "storage\n"));
+    env.mock.reset();
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "help", "graphics" }));
+    try std.testing.expect(std.mem.startsWith(u8, env.mock.contents(), "graphics\n"));
+    // `syscalls` and `input` are commands, not topics: their detail wins.
+    env.mock.reset();
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "help", "syscalls" }));
+    try std.testing.expect(std.mem.startsWith(u8, env.mock.contents(), "syscalls - "));
+    env.mock.reset();
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "help", "input" }));
+    try std.testing.expect(std.mem.startsWith(u8, env.mock.contents(), "input - "));
+}
+
+test "monitor: help listing is grouped by category in the ADR 0008 order" {
+    var env = TestEnv.init();
+    var mon = env.monitor();
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"help"}));
+    const out = env.mock.contents();
+    // Group headers appear in the fixed D1 order.
+    var prev: usize = 0;
+    for (category_order) |cat| {
+        // Headers sit at the start of a line; a bare substring search would
+        // collide with help text (e.g. "system" inside `about`), so anchor on
+        // the newline before and after the header.
+        var buf: [32]u8 = undefined;
+        const needle = std.fmt.bufPrint(&buf, "\n{s}\n", .{category_name(cat)}) catch unreachable;
+        const idx = std.mem.indexOf(u8, out, needle) orelse
+            return error.TestExpectedEqual;
+        try std.testing.expect(idx >= prev);
+        prev = idx;
+    }
+    // The footer still names the topic surface.
+    try std.testing.expect(std.mem.indexOf(u8, out, "type 'help <topic>' for a topic page") != null);
 }
 
 test "monitor: pci command reports no-ECAM honestly" {
