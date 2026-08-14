@@ -977,3 +977,42 @@ remaining two (graphics, balloon) are the open milestones.
 
 Each milestone must state what was **observed** versus **inferred** and must
 record new hardware assumptions in `docs/hardware-contract.md`.
+
+## Milestone eight — usability: human interface (HIG + shell/window/support)
+
+> **Scope (2026-08-14).** Milestones zero through seven shipped a complete
+> machine; milestone eight turns it into a *usable* one. The normative
+> contract is **ADR 0008**
+> ([`docs/decisions/0008-human-interface-guidelines.md`](decisions/0008-human-interface-guidelines.md)):
+> one command grammar + grouped `help`, a real line editor (history, cursor
+> movement, Ctrl chords, tab completion), one `error:`/`usage:` shape, a
+> visible-focus window model with click-to-focus, and an `about`/`welcome`/
+> `sysinfo` support surface — all enforced by gates, not prose. Per-card
+> tracker + collision-free agent split:
+> [`docs/march-m8.md`](march-m8.md). The cards, in order:
+
+- **U0 — Human interface guidelines (ADR 0008).** ✅ **DONE 2026-08-14
+  (claim 8938).** The normative shell/window/support contract (D1 command
+  grammar + grouped help, D2 prompt/editing, D3 error/usage shapes, D4 window
+  interface, D5 support surface, D6 gate-enforceability). Docs only — no code,
+  no ADR 0007 change, no POSIX/readline promise.
+- **U1 — Help & catalog.** ⬜ grouped `help` + `help <cmd>` + topic pages,
+  usage strings wired to handlers.
+- **U2 — Shell editing & history.** ⬜ history ring, cursor movement,
+  Ctrl-A/E/K/U/L, Delete, tab completion over the I3 input path.
+- **U3 — Error/usage contract.** ⬜ the mechanical enforcement of D3 (misuse
+  transcript + handler fuzz).
+- **U4 — Pointer focus + cursor.** ⬜ consume the absolute-pointer reports
+  into Driving Award hit-test focus + cursor rendering (needs a runner
+  pointer-synthesis seam, the I3 keyboard seam's analogue).
+- **U5 — Window HIG.** ⬜ title bars, focus ring, click = focus + raise,
+  keyboard focus cycling.
+- **U6 — First-boot experience.** ⬜ `welcome`/`about` refresh + boot motd.
+- **U7 — `sysinfo`.** ⬜ the one-command support snapshot.
+- **U8 — Persistent settings.** ⬜ `settings get/set` backed by a DATA-partition
+  config file, read at boot.
+
+**Non-goals (for now):** POSIX/readline/coreutils compatibility, shell
+scripting/pipes/job control, any syscall-number addition (a focus syscall, if
+ever, lands as its own ADR 0007 amendment), and a visual-design pixel spec
+(colors/spacing stay implementation detail).

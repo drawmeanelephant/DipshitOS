@@ -480,6 +480,16 @@ dipshit>
     `tools/verify-live-net-tx.sh` PASS 2/2 — the host receives known
     frames byte-exact (46-byte fixture, ring reuse, honest 1500-byte
     truncation). **RX (N2), ARP (N3), IPv4 (N4) are the later cards.**
+18. **Milestone eight, card U0 — human interface guidelines (ADR 0008).**
+    ✅ **DONE 2026-08-14 (claim 8938).** The normative interface contract
+    (`docs/decisions/0008-human-interface-guidelines.md`: D1 command grammar
+    + grouped `help`, D2 prompt/editing, D3 error/usage shapes, D4 window
+    interface, D5 support surface, D6 gate-enforceability) plus the
+    milestone-eight per-card tracker + agent split
+    ([`docs/march-m8.md`](march-m8.md): U0–U8 — help/catalog, editing/history,
+    error contract, pointer focus, window HIG, first-boot, sysinfo, persistent
+    settings). Docs only; explicitly NOT an ADR 0007 change and NOT a
+    POSIX/readline promise. U1–U8 are the next cards.
 
 The command layer above is portable; `docs/archive/march-m15.md` step 15's filesystem-command **deferral is superseded 2026-08-09** — first by the pre-exit ESP file window (claim 3475) and then, **on the same day, by the real FAT32 storage driver (claim 6420)**: `ls`/`cat`/`write` now read and write the live ESP's FAT volume through a virtio-blk transport, so files persist on the disk itself and **no storage driver remains deferred**. The allocator, interrupts, first tasks, EL0 boundary, syscall ABI, uaccess, per-task address spaces, lifecycle, ESP exec, and blocking syscalls are all complete; **milestone three is closed 2026-08-10 (tag `m3-userspace`, claim 0707)**.
 
@@ -658,6 +668,8 @@ here.
 - [`archive/march-m15.md`](archive/march-m15.md) — archived M1.5 per-step tracker and best-agent split (milestone closed 2026-08-09; the active tracker is [`march-m3.md`](march-m3.md)).
 - [`march-m4.md`](march-m4.md) — milestone-four per-card tracker and best-agent split (cards 1 + 2 + 3 + 3a + 3b landed 2026-08-10 — entropy/CSPRNG + ASLR (claims 2665/3693), the general non-ESP filesystem (claim 3678), the process abstraction (claim 3848, `procs`), the concurrent-processes follow-on (claim 0826, two live user processes), and the long-lived-process follow-on 2 (claim 4613, a never-exiting COUNTER.BIN among live peers); network sketched as ⬜).
 - [`march-m6.md`](march-m6.md) — milestone-six per-card tracker (graphics: the **Driving Award** window manager + **Road Pops** terminal, sketched 2026-08-12; not committed).
+- [`march-m7.md`](march-m7.md) — milestone-seven per-card tracker (input: XHCI + USB HID + keycode decode).
+- [`march-m8.md`](march-m8.md) — milestone-eight per-card tracker (usability: ADR 0008 + the U0–U8 ladder).
 - [`testing.md`](testing.md) — the verification sequence and evidence policy.
 - [`logs/README.md`](logs/README.md) — per-branch append-only changelog index (the sharded changelog).
 - [`claims/README.md`](claims/README.md) — per-claim files index (the sharded claims table, generated).
@@ -668,6 +680,6 @@ here.
 - [`archive/m2-vz-serial-gate-prompt.md`](archive/m2-vz-serial-gate-prompt.md) — archived prompt: run the VZ serial/MMU gate.
 - [`archive/m15-host-plumbing-prompt.md`](archive/m15-host-plumbing-prompt.md) — archived prompt (agent A): duplex serial attachment, teeing, terminal safety, `zig build console`.
 - [`archive/m15-commands-prompt.md`](archive/m15-commands-prompt.md) — archived prompt (agent C): command registry, identity/memory/utility/control commands, personality (mock-console based).
-- [`decisions/`](decisions/) — ADRs 0001–0007 (binding: 0004 kernel proper, 0005 runtime-built function tables, 0006 MMU debt boundary, 0007 syscall ABI).
+- [`decisions/`](decisions/) — ADRs 0001–0008 (binding: 0004 kernel proper, 0005 runtime-built function tables, 0006 MMU debt boundary, 0007 syscall ABI, 0008 human interface guidelines).
 - [`archive/`](archive/) — archived one-shot prompts and frozen designs from completed milestones (M2 kernel proper, M1.5 shell/commands + T0SZ experiment + tracker, M3 syscall ABI / march tracker / ragshit dogfood / runner scripted input).
 - [`../AGENTS.md`](../AGENTS.md) — project rules (now including the multiagent coordination rules).
