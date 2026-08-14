@@ -192,6 +192,14 @@ var inputKeyAfter: String?
 // Road Pops.
 var inputString: String?
 var inputStringAfter: String?
+// Milestone eight card U2 (claim 1809): the scripted CHORD surface for the
+// line-editor live gate. `--input-chords <csv>` types a comma-separated list
+// of keystrokes — a printable char, or a named chord (return/up/down/left/
+// right/home/end/delete/tab, or ctrl-a..ctrl-z) — keyDown + keyUp per chord
+// after `--input-chords-after <marker>` (default: the boot self-test line),
+// so arrows and Ctrl chords reach the I3 keymap over a real VZ keyboard.
+var inputChords: String?
+var inputChordsAfter: String?
 var timeout: TimeInterval = 30
 var timeoutExplicit = false
 var expectLine = "firmware has agreed to cooperate"
@@ -356,6 +364,12 @@ while idx < arguments.count {
         idx += 2
     } else if arg == "--input-string-after", idx + 1 < arguments.count {
         inputStringAfter = arguments[idx + 1]
+        idx += 2
+    } else if arg == "--input-chords", idx + 1 < arguments.count {
+        inputChords = arguments[idx + 1]
+        idx += 2
+    } else if arg == "--input-chords-after", idx + 1 < arguments.count {
+        inputChordsAfter = arguments[idx + 1]
         idx += 2
     } else if arg == "--timeout", idx + 1 < arguments.count {
         timeout = TimeInterval(arguments[idx + 1]) ?? 30
@@ -1001,6 +1015,9 @@ if let kc = inputKeyCode {
 }
 if let s = inputString {
     print("  input-string: ENABLED (milestone seven card I3, claim 6050) — typing \(s.debugDescription) into the view after \"\(inputStringAfter ?? "dipshit> ")\" (keyDown + keyUp per char, shift for uppercase)")
+}
+if let s = inputChords {
+    print("  input-chords: ENABLED (milestone eight card U2, claim 1809) — typing \(s.debugDescription) into the view after \"\(inputChordsAfter ?? "userspace: el0=1")\" (keyDown + keyUp per chord: printable chars, return/up/down/left/right/home/end/delete/tab, ctrl-a..ctrl-z)")
 }
 if let netInjectPath {
     print("  net-inject: ENABLED (milestone five card N2, claim 6076) — \(netInjectPath) written into the attachment's socket once after \"\(netInjectAfter ?? "net: rx-armed")\" appears in the serial log (host→guest RX)")
@@ -1741,6 +1758,111 @@ func macKey(for ch: Character) -> (UInt16, Bool)? {
     }
 }
 
+// Milestone eight card U2 (claim 1809): map one `--input-chords` token to a
+// (keyCode, modifiers, characters) triple. A single printable char uses
+// macKey (shift for uppercase); the named chords map to the macOS virtual
+// keycodes for the nav cluster (function-key characters so VZ translates the
+// keyCode to the guest HID usage), and ctrl-x maps to the letter's keycode
+// with the .control modifier. nil = unknown chord (the caller fails honestly).
+func macChord(_ token: String) -> (UInt16, NSEvent.ModifierFlags, String)? {
+    switch token {
+    case "return": return (0x24, [], "\r")
+    case "space": return (0x31, [], " ")
+    case "tab": return (0x30, [], "\t")
+    case "up": return (0x7E, [], "\u{F700}")
+    case "down": return (0x7D, [], "\u{F701}")
+    case "left": return (0x7B, [], "\u{F702}")
+    case "right": return (0x7C, [], "\u{F703}")
+    case "home": return (0x73, [], "\u{F729}")
+    case "end": return (0x77, [], "\u{F72B}")
+    case "delete": return (0x75, [], "\u{F728}")
+    default:
+        if token.hasPrefix("ctrl-"), token.count == 6 {
+            let letter = token[token.index(token.startIndex, offsetBy: 5)]
+            if let (code, _) = macKey(for: letter) {
+                return (code, .control, String(letter))
+            }
+        }
+        if token.count == 1, let (code, shift) = macKey(for: token[token.startIndex]) {
+            return (code, shift ? .shift : [], token)
+        }
+        return nil
+    }
+}
+
+// Milestone eight card U2 (claim 1809): type the `--input-chords` sequence
+// into the VZVirtualMachineView once the marker appears — keyDown + keyUp
+// per chord, mirroring the --input-string timing (one report per Road Pops
+// present cadence). This is how arrows/Ctrl chords reach the I3 keymap on
+// real hardware.
+func startChordInject() {
+    guard let csv = inputChords else { return }
+    let q = DispatchQueue(label: "dipshitos.chords")
+    q.async {
+        let marker = inputChordsAfter ?? "userspace: el0=1"
+        let waitDeadline = Date().addingTimeInterval(60)
+        var sent = false
+        while Date() < waitDeadline {
+            if let log = try? String(contentsOf: serialURL, encoding: .utf8), log.contains(marker) {
+                Thread.sleep(forTimeInterval: 1.0) // let the armed ring settle
+                guard let view = machineView else {
+                    FileHandle.standardError.write(Data("ERROR: --input-chords needs --display/--screenshot (no VZVirtualMachineView)\n".utf8))
+                    return
+                }
+                let windowNumber = view.window?.windowNumber ?? 0
+                var events: [(type: NSEvent.EventType, code: UInt16, mods: NSEvent.ModifierFlags, chars: String)] = []
+                var allOk = true
+                for token in csv.split(separator: ",").map(String.init) {
+                    guard let (code, mods, chars) = macChord(token) else {
+                        FileHandle.standardError.write(Data("ERROR: --input-chords: no mapping for chord '\(token)'\n".utf8))
+                        allOk = false
+                        break
+                    }
+                    events.append((.keyDown, code, mods, chars))
+                    events.append((.keyUp, code, mods, chars))
+                }
+                if allOk {
+                    // Chain the events: each keyDown/keyUp is scheduled only
+                    // AFTER the previous one fires, so the 3 s gaps are real
+                    // wall-clock gaps. Scheduling every event up front with
+                    // increasing asyncAfter deadlines lets a busy main queue
+                    // (VM display updates) fire several in a burst, which
+                    // drops/reorders reports at the guest's single-pending-
+                    // report interrupt-IN endpoint (observed claim-time).
+                    var remaining = events
+                    func fireNext(after delay: Double) {
+                        if remaining.isEmpty {
+                            FileHandle.standardOutput.write(Data("CHORD-SEQ: typed \(csv.debugDescription) into the VZVirtualMachineView after \"\(marker)\" ok=true\n".utf8))
+                            return
+                        }
+                        let evt = remaining.removeFirst()
+                        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                            let t = ProcessInfo.processInfo.systemUptime
+                            if let e = NSEvent.keyEvent(with: evt.type, location: .zero, modifierFlags: evt.mods, timestamp: t, windowNumber: windowNumber, context: nil, characters: evt.chars, charactersIgnoringModifiers: evt.chars, isARepeat: false, keyCode: evt.code) {
+                                if evt.type == .keyDown {
+                                    view.keyDown(with: e)
+                                } else {
+                                    view.keyUp(with: e)
+                                }
+                            }
+                            fireNext(after: 3.0)
+                        }
+                    }
+                    fireNext(after: 0.0)
+                } else {
+                    FileHandle.standardOutput.write(Data("CHORD-SEQ: aborted (unknown chord) ok=false\n".utf8))
+                }
+                sent = true
+                break
+            }
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+        if !sent {
+            FileHandle.standardError.write(Data("ERROR: guest did not emit chord-seq marker '\(marker)' within 60s; chords not typed\n".utf8))
+        }
+    }
+}
+
 // Milestone seven card I3 (claim 6050): type the `--input-string` text into
 // the VZVirtualMachineView once the marker appears — keyDown + keyUp per
 // char (shift for uppercase, `\n` = Enter). VZ has no programmatic keyboard
@@ -2431,6 +2553,7 @@ if consoleMode {
     startNetInject()
     startKeyInject()
     startKeyStringInject()
+    startChordInject()
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { scriptPoll() }
 } else {
     setupDisplayWindow()

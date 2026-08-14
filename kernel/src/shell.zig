@@ -52,7 +52,10 @@ pub const Shell = struct {
     prompt_shown: bool = false,
 
     pub fn init(con: console.Console, state: monitor.SystemState, machine: monitor.MachineControl) Shell {
-        return .{ .mon = monitor.Monitor.init(con, state, machine) };
+        var shell = Shell{ .mon = monitor.Monitor.init(con, state, machine) };
+        // ADR 0008 D2: tab completion over the command registry + sub-verbs.
+        shell.editor.completion = monitor.complete;
+        return shell;
     }
 
     /// Print the boot banner once (`monitor.banner`).
@@ -71,6 +74,13 @@ pub const Shell = struct {
         const byte = self.mon.console.readByte() orelse return .idle;
         switch (self.editor.feed(self.mon.console, byte)) {
             .none => return .pending,
+            .repaint => {
+                // Ctrl-L: the editor cleared the screen; restore the prompt
+                // + the in-progress line (the editor does not own the prompt).
+                self.mon.console.puts("dipshit> ");
+                self.editor.reprint(self.mon.console);
+                return .pending;
+            },
             .cancelled => {
                 self.editor.reset();
                 self.prompt_shown = false;
@@ -103,6 +113,15 @@ fn handle_line(mon: *monitor.Monitor, line: []const u8) void {
     _ = monitor.exec(mon, tokens.argv[0..tokens.count]);
 }
 
+/// The kernel's ONE shell instance lives in BSS, not on the kernel stack:
+/// the LineEditor's bounded history ring (hist_capacity × max_line bytes,
+/// ADR 0008 D2) would crowd the 16 KiB kernel stack (ADR 0004 D5) once
+/// kernel_main's boot frame is also live — observed as silently dropped
+/// keyboard input when the shell was stack-allocated (milestone eight card
+/// U2, claim 1809). Host tests still build their own stack `Shell` values;
+/// only the kernel seam touches this storage.
+var boot_shell_storage: Shell = undefined;
+
 /// Boot presentation for the kernel seam. Prints the banner; with an RX
 /// source wired it runs the interactive loop forever (never returns);
 /// without RX it prints the prompt and returns so the caller parks in WFE.
@@ -113,7 +132,8 @@ pub fn boot_and_park(mon: *monitor.Monitor, rx_wired: bool) void {
         mon.console.puts("dipshit> ");
         return;
     }
-    var shell = Shell.init(mon.console, mon.state, mon.machine);
+    const shell: *Shell = &boot_shell_storage;
+    shell.* = Shell.init(mon.console, mon.state, mon.machine);
     while (true) {
         if (shell.poll() == .idle) {
             // Claim 9187: the timer is serviced only through the IRQ path.
@@ -463,6 +483,33 @@ test "shell: empty line reports no command via the registry" {
     while (shell.poll() != .idle) {}
     const out = mock.contents();
     try std.testing.expect(std.mem.indexOf(u8, out, "no command given; type 'help' for a list of commands\n") != null);
+}
+
+test "shell: tab completion completes a command name (ADR 0008 D2)" {
+    var mock = console.MockConsole(2048){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    // "ver" + Tab completes to "version" (Tab inserts "sion"), then Enter
+    // runs the completed command.
+    mock.feed("ver\t\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "version\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "dipshit-kernel\n") != null);
+}
+
+test "shell: ctrl-l clears the screen and repaints the prompt + line" {
+    var mock = console.MockConsole(1024){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("echo hi\x0c\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    // Ctrl-L emitted the ANSI clear; the shell restored the prompt + line,
+    // then Enter ran the echo.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[2J\x1b[H") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "dipshit> echo hi") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "hi\n") != null);
 }
 
 test "shell: ctrl-c on an empty line cancels without executing" {

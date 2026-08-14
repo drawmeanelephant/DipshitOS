@@ -1003,8 +1003,15 @@ record new hardware assumptions in `docs/hardware-contract.md`.
   command-named topics (`syscalls`, `input`) resolve to their command detail.
   Gate: the byte-identical transcript (regenerated) + the live `help` walk
   `tools/verify-live-help.sh` PASS 1/1 on VZ.
-- **U2 — Shell editing & history.** ⬜ history ring, cursor movement,
-  Ctrl-A/E/K/U/L, Delete, tab completion over the I3 input path.
+- **U2 — Shell editing & history.** ✅ **DONE 2026-08-14 (claim 1809).**
+  bounded history ring, cursor left/right + Home/End, Ctrl-A/E/K/U/L/C,
+  Delete, and tab completion over the I3 input path; the arrow/Home/End/
+  Delete usages + Ctrl-chord modifier decoding landed in `input.zig`; the
+  runner gained `--input-chords` (one NSEvent per keyDown/keyUp). Gate:
+  `tools/verify-live-editing.sh` PASS 1/1 on VZ (mid-line insert + Up recall
+  typed by a real keyboard); the unchanged paths stay byte-identical. Also
+  fixed a latent I3 interrupt-ring wrap OOB (`xhci.zig`) the longer sequence
+  exposed (phantom-key re-read).
 - **U3 — Error/usage contract.** ⬜ the mechanical enforcement of D3 (misuse
   transcript + handler fuzz).
 - **U4 — Pointer focus + cursor.** ⬜ consume the absolute-pointer reports

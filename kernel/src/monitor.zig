@@ -358,6 +358,79 @@ pub fn exec(m: *Monitor, argv: []const []const u8) ExecError {
 }
 
 // ---------------------------------------------------------------------------
+// Tab completion (ADR 0008 D2)
+// ---------------------------------------------------------------------------
+
+/// Given the line being edited and the cursor, return the suffix to insert
+/// (a long-lived slice of a string literal), or null when there is no unique
+/// completion. The first token completes against command names; a later
+/// token completes against the leading command's fixed sub-verb vocabulary.
+pub fn complete(line: []const u8, cursor: usize) ?[]const u8 {
+    if (cursor > line.len) return null;
+    var start = cursor;
+    while (start > 0 and line[start - 1] != ' ' and line[start - 1] != '\t') start -= 1;
+    const prefix = line[start..cursor];
+    if (prefix.len == 0) return null;
+    // The first token (the command name) has only whitespace before it.
+    var first = true;
+    var i: usize = 0;
+    while (i < start) : (i += 1) {
+        if (line[i] != ' ' and line[i] != '\t') {
+            first = false;
+            break;
+        }
+    }
+    if (first) return complete_command(prefix);
+    // Sub-verb completion: find the leading command (the first token).
+    var cmd_start: usize = 0;
+    while (cmd_start < line.len and (line[cmd_start] == ' ' or line[cmd_start] == '\t')) cmd_start += 1;
+    var cmd_end = cmd_start;
+    while (cmd_end < line.len and line[cmd_end] != ' ' and line[cmd_end] != '\t') cmd_end += 1;
+    if (cmd_end <= cmd_start) return null;
+    return sub_verb_complete(line[cmd_start..cmd_end], prefix);
+}
+
+fn complete_command(prefix: []const u8) ?[]const u8 {
+    var found: ?[]const u8 = null;
+    for (ensure_registry()) |*cmd| {
+        if (std.mem.startsWith(u8, cmd.name, prefix)) {
+            if (found != null) return null; // ambiguous
+            found = cmd.name;
+        }
+    }
+    return if (found) |name| name[prefix.len..] else null;
+}
+
+fn match_one(prefix: []const u8, verbs: []const []const u8) ?[]const u8 {
+    var found: ?[]const u8 = null;
+    for (verbs) |v| {
+        if (std.mem.startsWith(u8, v, prefix)) {
+            if (found != null) return null; // ambiguous
+            found = v;
+        }
+    }
+    return if (found) |v| v[prefix.len..] else null;
+}
+
+fn sub_verb_complete(cmd: []const u8, prefix: []const u8) ?[]const u8 {
+    if (std.mem.eql(u8, cmd, "net"))
+        return match_one(prefix, &.{ "recv", "ip", "arp", "ping", "udp", "dhcp", "tcp" });
+    if (std.mem.eql(u8, cmd, "win"))
+        return match_one(prefix, &.{ "focus", "raise", "move", "close", "list", "hit" });
+    if (std.mem.eql(u8, cmd, "usb"))
+        return match_one(prefix, &.{ "devices", "report" });
+    if (std.mem.eql(u8, cmd, "screen"))
+        return match_one(prefix, &.{"fill"});
+    if (std.mem.eql(u8, cmd, "text"))
+        return match_one(prefix, &.{ "put", "clear" });
+    if (std.mem.eql(u8, cmd, "mount"))
+        return match_one(prefix, &.{ "esp", "data" });
+    if (std.mem.eql(u8, cmd, "help"))
+        return match_one(prefix, &.{ "networking", "windows", "storage", "graphics" });
+    return null;
+}
+
+// ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
 
@@ -4037,6 +4110,24 @@ test "monitor: command lookup" {
     try std.testing.expect(lookup("beans") != null);
     try std.testing.expect(lookup("help") != null);
     try std.testing.expect(lookup("frobnicate") == null);
+}
+
+test "monitor: tab completion completes command names and sub-verbs (ADR 0008 D2)" {
+    // Unique command-name completion: "ver" -> "sion".
+    try std.testing.expectEqualStrings("sion", complete("ver", 3).?);
+    // Ambiguous command prefix: "s" matches several commands -> null.
+    try std.testing.expect(complete("s", 1) == null);
+    // No match -> null.
+    try std.testing.expect(complete("zz", 2) == null);
+    // Sub-verb completion on the second token: "net t" -> "cp".
+    try std.testing.expectEqualStrings("cp", complete("net t", 5).?);
+    // "text c" -> "lear" (clear); a sub-verb with no match -> null.
+    try std.testing.expectEqualStrings("lear", complete("text c", 6).?);
+    try std.testing.expect(complete("win z", 5) == null);
+    // `help <topic>` completes against the topic pages.
+    try std.testing.expectEqualStrings("etworking", complete("help n", 6).?);
+    // Empty token -> null.
+    try std.testing.expect(complete("", 0) == null);
 }
 
 test "monitor: mbox dumps pending messages and drain counters" {
