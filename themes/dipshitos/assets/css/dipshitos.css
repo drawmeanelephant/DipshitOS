@@ -1,0 +1,638 @@
+/* ==========================================================================
+   dipshitos.css — DipshitOS documentation theme
+   "Modern OS documentation crossed with an old technical manual."
+
+   Dark-first · phosphor-green accent · restrained test-lab / Apple-hardware
+   cues · no remote webfonts · no JavaScript requirement · responsive.
+
+   Slots this stylesheet targets are emitted by the Boris theme contract:
+   site-nav, breadcrumb, page-toc, page-children, page-metadata, admonition,
+   details. See docs/contracts/templating-and-themes.md in the Boris repo.
+   ========================================================================== */
+
+:root {
+  /* Surfaces — anchored to the kernel's own terminal palette (0x101418). */
+  --bg: #0d1117;
+  --bg-elevated: #12171d;
+  --bg-header: #0a0d11;
+  --surface: #161b22;
+  --surface-hover: #1c222b;
+  --border: #2a313c;
+  --border-strong: #3a4350;
+
+  /* Text */
+  --text: #d8dee6;
+  --text-bright: #f0f3f6;
+  --text-muted: #8b98a6;
+  --text-faint: #5c6875;
+
+  /* Accents — diagnostic phosphor green + Driving Award amber + lab red/blue. */
+  --green: #57e08a;
+  --green-dim: #2c7a4a;
+  --green-ink: #0b1f13;
+  --amber: #e0a93e;
+  --amber-dim: #7a5a1e;
+  --blue: #5aa7f0;
+  --blue-dim: #1f4a70;
+  --red: #f26d62;
+  --red-dim: #7a2f2a;
+
+  /* Typography — local system fonts only. */
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, "SFMono-Regular", "Menlo", "Consolas", "Liberation Mono", "Courier New", monospace;
+
+  --maxw: 76rem;
+  --radius: 4px;
+}
+
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+html {
+  font-size: 16px;
+  line-height: 1.6;
+  -webkit-text-size-adjust: 100%;
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+  background-color: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 1rem;
+  text-rendering: optimizeLegibility;
+}
+
+/* ------------------------------------------------------------------ links */
+a {
+  color: var(--green);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+a:focus-visible,
+summary:focus-visible {
+  outline: 2px solid var(--green);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+.skip-link {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  z-index: 100;
+  padding: 0.6rem 1rem;
+  background: var(--green);
+  color: var(--green-ink);
+  font-weight: 600;
+}
+
+.skip-link:focus {
+  left: 0;
+  text-decoration: none;
+}
+
+/* ----------------------------------------------------------------- header */
+.site-header {
+  background: var(--bg-header);
+  border-bottom: 1px solid var(--border);
+}
+
+.site-header__inner {
+  max-width: var(--maxw);
+  margin: 0 auto;
+  padding: 1.4rem 1.25rem 0;
+}
+
+.brand__kicker {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--green);
+}
+
+.brand__name {
+  margin: 0.15rem 0 0;
+  font-family: var(--font-mono);
+  font-size: 2.1rem;
+  line-height: 1.1;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.brand__name a {
+  color: var(--text-bright);
+}
+
+.brand__name a:hover {
+  text-decoration: none;
+  color: var(--green);
+}
+
+.brand__tagline {
+  margin: 0.35rem 0 0;
+  max-width: 46rem;
+  color: var(--text-muted);
+  font-size: 0.92rem;
+}
+
+.primary-nav {
+  margin-top: 1rem;
+  overflow-x: auto;
+}
+
+.primary-nav ul {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 0.25rem;
+  margin: 0;
+  padding: 0 0 0.75rem;
+  list-style: none;
+}
+
+.primary-nav a {
+  display: block;
+  padding: 0.45rem 0.7rem;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  color: var(--text-muted);
+  font-size: 0.9rem;
+  white-space: nowrap;
+}
+
+.primary-nav a:hover {
+  color: var(--text-bright);
+  border-color: var(--border-strong);
+  text-decoration: none;
+}
+
+/* ----------------------------------------------------------------- layout */
+.layout {
+  max-width: var(--maxw);
+  margin: 0 auto;
+  padding: 1.5rem 1.25rem 3rem;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 17rem;
+  gap: 2rem;
+  align-items: start;
+}
+
+.content {
+  min-width: 0;
+}
+
+.article > :first-child {
+  margin-top: 0.4rem;
+}
+
+/* ------------------------------------------------------------ typography */
+h1, h2, h3, h4 {
+  color: var(--text-bright);
+  line-height: 1.25;
+  font-weight: 650;
+}
+
+h1 {
+  font-size: 1.9rem;
+  margin: 0.3rem 0 1rem;
+  letter-spacing: -0.01em;
+}
+
+h2 {
+  font-size: 1.35rem;
+  margin: 2.2rem 0 0.7rem;
+  padding-bottom: 0.35rem;
+  border-bottom: 1px solid var(--border);
+}
+
+h3 {
+  font-size: 1.08rem;
+  margin: 1.6rem 0 0.5rem;
+}
+
+h4 {
+  font-size: 0.98rem;
+  margin: 1.2rem 0 0.4rem;
+}
+
+p {
+  margin: 0.7rem 0;
+}
+
+strong {
+  color: var(--text-bright);
+}
+
+hr {
+  border: 0;
+  border-top: 1px solid var(--border);
+  margin: 2rem 0;
+}
+
+/* -------------------------------------------------------------- code */
+code {
+  font-family: var(--font-mono);
+  font-size: 0.86em;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 0.12em 0.35em;
+  color: var(--green);
+}
+
+pre {
+  background: var(--bg-header);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.9rem 1rem;
+  overflow-x: auto;
+  font-size: 0.85rem;
+  line-height: 1.5;
+}
+
+pre code {
+  background: none;
+  border: 0;
+  padding: 0;
+  color: var(--text);
+}
+
+/* ------------------------------------------------------------- tables */
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1rem 0;
+  font-size: 0.92rem;
+  display: block;
+  overflow-x: auto;
+}
+
+thead {
+  border-bottom: 2px solid var(--border-strong);
+}
+
+th, td {
+  text-align: left;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+
+th {
+  color: var(--text-bright);
+  font-weight: 650;
+}
+
+tbody tr:hover {
+  background: var(--surface);
+}
+
+/* -------------------------------------------------------------- images */
+img {
+  max-width: 100%;
+  height: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+figure {
+  margin: 1.4rem 0;
+}
+
+figure img {
+  display: block;
+}
+
+figcaption {
+  margin-top: 0.5rem;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+
+/* -------------------------------------------------------- admonitions */
+.admonition {
+  margin: 1.2rem 0;
+  border: 1px solid var(--border-strong);
+  border-left: 4px solid var(--text-muted);
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+  padding: 0.15rem 0.9rem 0.4rem;
+}
+
+.admonition__title {
+  margin: 0.55rem 0 0.2rem;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.admonition__body > :first-child {
+  margin-top: 0.35rem;
+}
+
+.admonition__body > :last-child {
+  margin-bottom: 0.6rem;
+}
+
+.admonition--note {
+  border-left-color: var(--text-muted);
+}
+
+.admonition--tip {
+  border-left-color: var(--green);
+}
+
+.admonition--tip .admonition__title {
+  color: var(--green);
+}
+
+.admonition--info {
+  border-left-color: var(--blue);
+}
+
+.admonition--info .admonition__title {
+  color: var(--blue);
+}
+
+.admonition--warning {
+  border-left-color: var(--amber);
+}
+
+.admonition--warning .admonition__title {
+  color: var(--amber);
+}
+
+.admonition--danger {
+  border-left-color: var(--red);
+}
+
+.admonition--danger .admonition__title {
+  color: var(--red);
+}
+
+/* ------------------------------------------------------------ details */
+.details {
+  margin: 1.1rem 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+}
+
+.details summary {
+  padding: 0.6rem 0.9rem;
+  cursor: pointer;
+  color: var(--text-bright);
+  font-weight: 600;
+}
+
+.details summary:hover {
+  background: var(--surface-hover);
+}
+
+.details__body {
+  padding: 0.1rem 0.9rem 0.6rem;
+  border-top: 1px solid var(--border);
+}
+
+/* ------------------------------------------------------- breadcrumb */
+.breadcrumb ol {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+}
+
+.breadcrumb li + li::before {
+  content: "/";
+  margin-right: 0.3rem;
+  color: var(--text-faint);
+}
+
+.breadcrumb a {
+  color: var(--text-muted);
+}
+
+.breadcrumb a:hover {
+  color: var(--green);
+}
+
+/* ---------------------------------------------------------- children */
+.children {
+  margin-top: 1.5rem;
+}
+
+.page-children {
+  border-top: 1px solid var(--border);
+  padding-top: 0.75rem;
+}
+
+.page-children ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.page-children li {
+  margin: 0.3rem 0;
+}
+
+/* --------------------------------------------------------- metadata */
+.page-metadata {
+  margin: 1.4rem 0 0;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+}
+
+.page-metadata > div {
+  margin: 0.2rem 0;
+}
+
+.page-metadata dt {
+  display: inline;
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 0.7rem;
+  color: var(--text-faint);
+}
+
+.page-metadata dd {
+  display: inline;
+  margin: 0 0 0 0.6rem;
+}
+
+/* ----------------------------------------------------------- sidebar */
+.sidebar {
+  position: sticky;
+  top: 1rem;
+  font-size: 0.88rem;
+}
+
+.sidebar__block {
+  margin-bottom: 1.6rem;
+  padding: 0.9rem 1rem;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.sidebar__title {
+  margin: 0 0 0.6rem;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+/* site-nav (Boris forest) */
+.site-nav ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.site-nav > ul > li {
+  margin: 0.35rem 0;
+}
+
+.site-nav__trunk > a {
+  color: var(--text-bright);
+  font-weight: 600;
+}
+
+.site-nav__satellite {
+  margin: 0.15rem 0 0.15rem 0.8rem;
+}
+
+.site-nav__satellite a {
+  color: var(--text-muted);
+}
+
+.site-nav a:hover {
+  color: var(--green);
+}
+
+.site-nav .is-current > a {
+  color: var(--green);
+}
+
+.site-nav .is-ancestor > a {
+  color: var(--text);
+}
+
+.site-nav ul ul {
+  margin: 0.1rem 0 0.3rem 0.9rem;
+  border-left: 1px solid var(--border);
+  padding-left: 0.6rem;
+}
+
+/* page-toc */
+.page-toc ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.page-toc li {
+  margin: 0.25rem 0;
+}
+
+.page-toc a {
+  color: var(--text-muted);
+}
+
+.page-toc a:hover {
+  color: var(--green);
+}
+
+.page-toc__l2 {
+  padding-left: 0.8rem;
+}
+
+.page-toc__l3 {
+  padding-left: 1.6rem;
+  font-size: 0.84rem;
+}
+
+/* ------------------------------------------------------------ footer */
+.site-footer {
+  border-top: 1px solid var(--border);
+  background: var(--bg-header);
+}
+
+.site-footer {
+  padding: 1.6rem 1.25rem 2rem;
+}
+
+.site-footer > * {
+  max-width: var(--maxw);
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.site-footer__line {
+  margin: 0;
+  color: var(--text);
+  font-size: 0.9rem;
+}
+
+.site-footer__meta {
+  margin: 0.4rem 0 0;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+}
+
+/* --------------------------------------------------------- responsive */
+@media (max-width: 62rem) {
+  .layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .sidebar {
+    position: static;
+    order: 2;
+  }
+}
+
+@media (max-width: 40rem) {
+  .brand__name {
+    font-size: 1.7rem;
+  }
+
+  h1 {
+    font-size: 1.6rem;
+  }
+
+  .layout {
+    padding: 1.1rem 1rem 2.5rem;
+  }
+
+  table {
+    font-size: 0.84rem;
+  }
+}
+
+/* Respect users who prefer reduced motion. */
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+}

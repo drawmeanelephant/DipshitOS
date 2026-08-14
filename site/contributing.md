@@ -1,0 +1,59 @@
+---
+title: Contributing & toolchain
+parent: development
+status: published
+tags: [development, contributing]
+---
+
+# Contributing & toolchain
+
+The project's rulebook is `AGENTS.md` — read it first. This page is the
+short version.
+
+## Toolchain pins
+
+| Tool | Pin |
+|------|-----|
+| Zig | 0.16.0 (`.zigversion`) |
+| Host Swift | macOS 27 SDK (Virtualization.framework) |
+| Python | 3 (disk-image tooling, stdlib only) |
+| Shell | bash (gate scripts) |
+| Boris (site compiler) | one revision, pinned in `.github/boris-pin.json` |
+
+## The claims ceremony
+
+Work lands as a **claim**:
+
+1. Create a claim file in `docs/claims/` with an id and a scope.
+2. Implement on a branch, with host tests.
+3. Where hardware is involved, add a class B gate and save evidence under
+   `artifacts/`.
+4. Refresh the indexes (`bash tools/status/refresh-indexes.sh`) and run
+   `bash tools/verify-coordination.sh` before opening a PR.
+
+The ceremony is not optional — it is how the project keeps "observed" honest.
+
+## What a PR must pass
+
+- **Class A** on CI (deterministic — the `verify-portable` set).
+- **Class B** on Apple silicon, for anything touching hardware behavior
+  (CI cannot run these; the PR documents the run).
+- The docs-coordination gate (indexes in sync).
+- For site changes: the **docs gate** (`boris validate`) — broken links,
+  escaping URLs, or a failing theme contract block the merge.
+
+## One-way toolchain boundary
+
+Boris compiles this site; DipshitOS does not own Boris. The revision is pinned
+once (`.github/boris-pin.json`) and shared by the docs gate and the Pages
+workflow. Updating it is a ritual: bump the pin → build → validate → compile
+with the project-site flags → run the gates → commit the bump with evidence.
+
+<Aside kind="info">
+
+**CLAIM / EVIDENCE.** If Boris itself misbehaves while this site is a
+consumer, the project files a narrowly-scoped upstream issue with
+reproduction evidence — it does not crawl into Boris source to fix it from
+the consumer side.
+
+</Aside>
