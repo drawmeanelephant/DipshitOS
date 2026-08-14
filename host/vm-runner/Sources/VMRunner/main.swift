@@ -146,6 +146,13 @@ let arguments = CommandLine.arguments
 let diskImagePath = arguments.count > 1 ? arguments[1] : "artifacts/disk.img"
 var serialLogPath = "artifacts/vm-serial.log"
 var screenshotPath: String?
+// Card G6 set_visible follow-on (claim 0487): `--screenshot-after <marker>`
+// captures the framebuffer ONCE when the marker appears in the serial log
+// (deterministic, marker-driven — the fixed 5/10/15 s captures cannot
+// guarantee a capture lands inside an EL0 hide/show window). OFF by default;
+// a no-op without `--screen` (validated at parse time).
+var screenshotAfter: String?
+var screenshotAfterCaptured = false
 // Milestone six card G1 (claim 6053): `--display` attaches the virtio-gpu
 // device and shows the VM window for the whole session (the machine boots
 // to a screen). OFF by default — without the flag config.graphicsDevices
@@ -153,6 +160,38 @@ var screenshotPath: String?
 // `--screenshot <path>` remains the evidence capture (the two combine:
 // `--display --screenshot`).
 var displayMode = false
+// Milestone seven card I1 (claim 4272; premise corrected by claim 3868):
+// `--input` attaches the keyboard + pointing devices
+// (VZUSBKeyboardConfiguration +
+// VZUSBScreenCoordinatePointingDeviceConfiguration). OFF by default —
+// without the flag config.keyboards/pointingDevices stay [] exactly as
+// before, so every existing gate stays byte-identical.
+//
+// CLAIM-TIME OBSERVATION (2026-08-13): these configs do NOT present a
+// virtio-input device (DID 0x1052). VZ exposes them as an Apple XHCI USB
+// host controller — PCI VID=0x106b DID=0x1a06 CLS=0x0c0330, two MMIO
+// BARs (0x50001000 + 0x50000000) — with the keyboard/pointer as USB HID
+// devices behind it. So screen-side input needs a USB XHCI + HID stack,
+// not a virtio-input transport. See docs/claims/3868-virtio-input.md.
+var inputMode = false
+// Milestone seven card I2 (claim 4116): the minimal synthesized-key seam.
+// `--input-key <mac-keycode>` posts one keyDown (no keyUp) into the
+// VZVirtualMachineView after `--input-key-after <marker>` (default: the
+// guest's `usb: enumerated` line), producing ONE deterministic HID report.
+// VZ has no programmatic keyboard API — VZUSBKeyboardConfiguration is driven
+// only by a view forwarding host key events — so the runner dispatches a
+// synthesized NSEvent. The full scripted key-sequence surface is I3.
+var inputKeyCode: UInt16?
+var inputKeyAfter: String?
+// Milestone seven card I3 (claim 6050): the scripted key-SEQUENCE surface.
+// `--input-string <ascii>` types the literal string (keyDown + keyUp per
+// char, shift for uppercase, `\n` = Enter) into the VZVirtualMachineView
+// after `--input-string-after <marker>` (default: the shell's first
+// `dipshit> ` prompt — typing before the idle loop starts drops keystrokes,
+// the interrupt-IN ring buffers one report). This types a real command into
+// Road Pops.
+var inputString: String?
+var inputStringAfter: String?
 var timeout: TimeInterval = 30
 var timeoutExplicit = false
 var expectLine = "firmware has agreed to cooperate"
@@ -294,9 +333,30 @@ while idx < arguments.count {
     if arg == "--screen", idx + 1 < arguments.count {
         screenshotPath = arguments[idx + 1]
         idx += 2
+    } else if arg == "--screenshot-after", idx + 1 < arguments.count {
+        screenshotAfter = arguments[idx + 1]
+        idx += 2
     } else if arg == "--display" {
         displayMode = true
         idx += 1
+    } else if arg == "--input" {
+        inputMode = true
+        idx += 1
+    } else if arg == "--input-key", idx + 1 < arguments.count {
+        guard let kc = UInt16(arguments[idx + 1]) else {
+            fail("--input-key requires a numeric macOS virtual keycode, got '\(arguments[idx + 1])'.")
+        }
+        inputKeyCode = kc
+        idx += 2
+    } else if arg == "--input-key-after", idx + 1 < arguments.count {
+        inputKeyAfter = arguments[idx + 1]
+        idx += 2
+    } else if arg == "--input-string", idx + 1 < arguments.count {
+        inputString = arguments[idx + 1]
+        idx += 2
+    } else if arg == "--input-string-after", idx + 1 < arguments.count {
+        inputStringAfter = arguments[idx + 1]
+        idx += 2
     } else if arg == "--timeout", idx + 1 < arguments.count {
         timeout = TimeInterval(arguments[idx + 1]) ?? 30
         timeoutExplicit = true
@@ -626,6 +686,19 @@ if screenshotPath != nil || displayMode {
 } else {
     config.graphicsDevices = []
 }
+// Milestone seven card I1 (claim 4272; premise corrected by claim 3868):
+// the keyboard + pointing devices are attached only under `--input`. The
+// default VM attaches none — config.keyboards/pointingDevices stay [] and
+// every existing gate stays byte-identical. The guest observes an Apple
+// XHCI USB controller (VID=0x106b DID=0x1a06), NOT virtio-input — the
+// claim-3868 finding.
+if inputMode {
+    config.keyboards = [VZUSBKeyboardConfiguration()]
+    config.pointingDevices = [VZUSBScreenCoordinatePointingDeviceConfiguration()]
+} else {
+    config.keyboards = []
+    config.pointingDevices = []
+}
 // Milestone five card N1 (claim 1373): the virtio-net device, attached only
 // under `--net <capture-file>`. VZFileHandleNetworkDeviceAttachment transmits
 // raw data-link frames over ONE connected datagram socket: VZ holds one end
@@ -666,6 +739,11 @@ if netTcpRespondHostIP != nil, netCapturePath == nil {
 // validation shape: a clear fail, like the responder requirements above).
 if netNatEnabled, netCapturePath != nil {
     fail("--net-nat is mutually exclusive with --net (one network device per guest for now).")
+}
+// Card G6 set_visible follow-on (claim 0487): the marker-driven capture
+// writes into the `--screen <base>` filename, so it requires the flag.
+if screenshotAfter != nil, screenshotPath == nil {
+    fail("--screenshot-after requires --screen (the marker capture writes into the --screen base filename).")
 }
 
 if let netCapturePath {
@@ -896,6 +974,7 @@ if consoleMode {
     if let script2After { print("  script2-after: \"\(script2After)\"  (forward script2 once after this serial text appears)") }
     if let script3Path { print("  script3: \(script3Path)  (claim 7786: forwarded once after script3-after appears)") }
     if let script3After { print("  script3-after: \"\(script3After)\"  (forward script3 once after this serial text appears)") }
+    if let screenshotAfter { print("  screenshot-after: \"\(screenshotAfter)\"  (capture the framebuffer once after this serial text appears)") }
     if let scriptExpect { print("  script-expect: \"\(scriptExpect)\"  (exit 0 iff observed in the serial log)") }
 } else {
     print("  serial log: \(serialLogPath)  (timeout: \(Int(timeout))s)")
@@ -913,6 +992,15 @@ if let netCapturePath {
 }
 if displayMode {
     print("  display: ENABLED (milestone six card G1, claim 6053) — virtio-gpu device attached, 1280x720 scanout window shown for the session")
+}
+if inputMode {
+    print("  input: ENABLED (milestone seven card I1, claim 4272) — keyboard + pointing devices attached (VZUSBKeyboardConfiguration + VZUSBScreenCoordinatePointingDeviceConfiguration); the guest-side device is the Apple XHCI USB controller (DID 0x1a06) with the HID devices behind it")
+}
+if let kc = inputKeyCode {
+    print("  input-key: ENABLED (milestone seven card I2, claim 4116) — synthesized keyDown keyCode \(kc) dispatched to the view after \"\(inputKeyAfter ?? "usb: enumerated")\" (the minimal I2 report seam; the full scripted surface is I3)")
+}
+if let s = inputString {
+    print("  input-string: ENABLED (milestone seven card I3, claim 6050) — typing \(s.debugDescription) into the view after \"\(inputStringAfter ?? "dipshit> ")\" (keyDown + keyUp per char, shift for uppercase)")
 }
 if let netInjectPath {
     print("  net-inject: ENABLED (milestone five card N2, claim 6076) — \(netInjectPath) written into the attachment's socket once after \"\(netInjectAfter ?? "net: rx-armed")\" appears in the serial log (host→guest RX)")
@@ -1000,7 +1088,29 @@ func captureScreenshot(at t: TimeInterval) {
     } else {
         path = "artifacts/vm-screen-\(Int(t))s.png"
     }
+    writeScreenshot(to: path)
+}
 
+// Card G6 set_visible follow-on (claim 0487): a MARKER-driven capture.
+// When `--screenshot-after <marker>` is set, the framebuffer is captured
+// ONCE the moment the marker appears in the serial log, under a stable
+// `-<label>` name (deterministic — the fixed 5/10/15 s captures cannot
+// guarantee a capture lands inside an EL0 hide/show window).
+func captureScreenshotMarker(_ label: String) {
+    let path: String
+    if let base = screenshotPath {
+        let dot = (base as NSString).deletingPathExtension
+        let ext = (base as NSString).pathExtension
+        path = ext.isEmpty ? "\(dot)-\(label)" : "\(dot)-\(label).\(ext)"
+    } else {
+        path = "artifacts/vm-screen-\(label).png"
+    }
+    writeScreenshot(to: path)
+}
+
+// Shared capture body (ScreenCaptureKit first, cacheDisplay fallback):
+// render the composited content area to a PNG and write it to `path`.
+func writeScreenshot(to path: String) {
     var png: Data?
     if let img = screenCaptureKitScreenshot() {
         let rep = NSBitmapImageRep(cgImage: img)
@@ -1435,6 +1545,18 @@ func captureScreenshotIfDue() {
     }
 }
 
+// Card G6 set_visible follow-on (claim 0487): marker-driven capture. Once
+// the `--screenshot-after` marker appears in the serial log, capture the
+// framebuffer under the stable `-after` name (once only). Deterministic
+// where the fixed 5/10/15 s captures are not: the marker appears exactly
+// when an EL0 hide/show transition has landed.
+func captureScreenshotIfMarker(_ text: String) {
+    if let marker = screenshotAfter, !screenshotAfterCaptured, text.contains(marker) {
+        screenshotAfterCaptured = true
+        captureScreenshotMarker("after")
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Console mode: streaming tee, stdin forwarding, signal-safe exit.
 // ---------------------------------------------------------------------------
@@ -1524,6 +1646,175 @@ func startScript2Input() {
 func startScript3Input() {
     guard let path = script3Path, let after = script3After else { return }
     forwardScriptOnce(path: path, after: after, label: "script3", settle: script3Delay)
+}
+
+// Milestone seven card I2 (claim 4116): synthesize ONE host key event into
+// the VZVirtualMachineView after the marker appears. VZ has no programmatic
+// keyboard-injection API — VZUSBKeyboardConfiguration is driven only by a
+// VZVirtualMachineView forwarding host key events — so the runner builds an
+// NSEvent keyDown and dispatches it straight into the view (the host keycode
+// maps to the guest HID usage inside VZ). This is the MINIMAL seam the I2
+// gate needs to produce one deterministic HID report; the full scripted
+// key-sequence surface that types into Road Pops is I3.
+func startKeyInject() {
+    guard let keyCode = inputKeyCode else { return }
+    let q = DispatchQueue(label: "dipshitos.keyinject")
+    q.async {
+        let marker = inputKeyAfter ?? "usb: enumerated"
+        let waitDeadline = Date().addingTimeInterval(40)
+        var sent = false
+        while Date() < waitDeadline {
+            if let text = try? String(contentsOf: serialURL, encoding: .utf8),
+               text.contains(marker) {
+                Thread.sleep(forTimeInterval: 0.5) // let the armed ring settle
+                DispatchQueue.main.async {
+                    guard let view = machineView else {
+                        FileHandle.standardError.write(Data("ERROR: --input-key needs --display/--screenshot (no VZVirtualMachineView)\n".utf8))
+                        return
+                    }
+                    let windowNumber = view.window?.windowNumber ?? 0
+                    let now = ProcessInfo.processInfo.systemUptime
+                    // KeyDown only (no keyUp): a single deterministic
+                    // "key pressed" HID report, no up/down timing race.
+                    if let down = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: now, windowNumber: windowNumber, context: nil, characters: "a", charactersIgnoringModifiers: "a", isARepeat: false, keyCode: keyCode) {
+                        view.keyDown(with: down)
+                    }
+                    FileHandle.standardOutput.write(Data("KEY-INJECT: keyCode \(keyCode) keyDown dispatched to the VZVirtualMachineView after \"\(marker)\"\n".utf8))
+                }
+                sent = true
+                break
+            }
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+        if !sent {
+            FileHandle.standardError.write(Data("ERROR: guest did not emit key-inject marker '\(marker)' within 40s; key not injected\n".utf8))
+        }
+    }
+}
+
+// Milestone seven card I3 (claim 6050): map an ASCII character to its macOS
+// virtual keycode + whether shift is required. Only the usable subset the
+// guest keymap accepts is covered; anything else returns nil (the caller
+// fails honestly rather than inventing a keystroke). Enter is `\n`.
+func macKey(for ch: Character) -> (UInt16, Bool)? {
+    switch ch {
+    case "a": return (0x00, false); case "b": return (0x0B, false)
+    case "c": return (0x08, false); case "d": return (0x02, false)
+    case "e": return (0x0E, false); case "f": return (0x03, false)
+    case "g": return (0x05, false); case "h": return (0x04, false)
+    case "i": return (0x22, false); case "j": return (0x26, false)
+    case "k": return (0x28, false); case "l": return (0x25, false)
+    case "m": return (0x2E, false); case "n": return (0x2D, false)
+    case "o": return (0x1F, false); case "p": return (0x23, false)
+    case "q": return (0x0C, false); case "r": return (0x0F, false)
+    case "s": return (0x01, false); case "t": return (0x11, false)
+    case "u": return (0x20, false); case "v": return (0x09, false)
+    case "w": return (0x0D, false); case "x": return (0x07, false)
+    case "y": return (0x10, false); case "z": return (0x06, false)
+    case "A": return (0x00, true);  case "B": return (0x0B, true)
+    case "C": return (0x08, true);  case "D": return (0x02, true)
+    case "E": return (0x0E, true);  case "F": return (0x03, true)
+    case "G": return (0x05, true);  case "H": return (0x04, true)
+    case "I": return (0x22, true);  case "J": return (0x26, true)
+    case "K": return (0x28, true);  case "L": return (0x25, true)
+    case "M": return (0x2E, true);  case "N": return (0x2D, true)
+    case "O": return (0x1F, true);  case "P": return (0x23, true)
+    case "Q": return (0x0C, true);  case "R": return (0x0F, true)
+    case "S": return (0x01, true);  case "T": return (0x11, true)
+    case "U": return (0x20, true);  case "V": return (0x09, true)
+    case "W": return (0x0D, true);  case "X": return (0x07, true)
+    case "Y": return (0x10, true);  case "Z": return (0x06, true)
+    case "0": return (0x1D, false); case "1": return (0x12, false)
+    case "2": return (0x13, false); case "3": return (0x14, false)
+    case "4": return (0x15, false); case "5": return (0x17, false)
+    case "6": return (0x16, false); case "7": return (0x1A, false)
+    case "8": return (0x1C, false); case "9": return (0x19, false)
+    case " ": return (0x31, false)
+    case ".": return (0x2F, false); case ",": return (0x2B, false)
+    case "/": return (0x2C, false); case "-": return (0x1B, false)
+    case "=": return (0x18, false); case "[": return (0x21, false)
+    case "]": return (0x1E, false); case "\\": return (0x2A, false)
+    case ";": return (0x29, false); case "'": return (0x27, false)
+    case "`": return (0x32, false)
+    case "\n": return (0x24, false) // Enter / Return
+    default: return nil
+    }
+}
+
+// Milestone seven card I3 (claim 6050): type the `--input-string` text into
+// the VZVirtualMachineView once the marker appears — keyDown + keyUp per
+// char (shift for uppercase, `\n` = Enter). VZ has no programmatic keyboard
+// API, so each keystroke is a synthesized NSEvent dispatched to the view.
+func startKeyStringInject() {
+    guard let text = inputString else { return }
+    let q = DispatchQueue(label: "dipshitos.keyseq")
+    q.async {
+        let marker = inputStringAfter ?? "dipshit> "
+        let waitDeadline = Date().addingTimeInterval(40)
+        var sent = false
+        while Date() < waitDeadline {
+            if let log = try? String(contentsOf: serialURL, encoding: .utf8), log.contains(marker) {
+                Thread.sleep(forTimeInterval: 0.5) // let the armed ring settle
+                guard let view = machineView else {
+                    FileHandle.standardError.write(Data("ERROR: --input-string needs --display/--screenshot (no VZVirtualMachineView)\n".utf8))
+                    return
+                }
+                let windowNumber = view.window?.windowNumber ?? 0
+                var allOk = true
+                // Resolve every char up front (so a missing keycode aborts
+                // before any event fires), then schedule the keyDown/keyUp
+                // pairs on the MAIN queue with strictly increasing delays.
+                // Each event is delivered via the view on the main thread;
+                // the timing lives in asyncAfter, not in a background
+                // Thread.sleep, so the run loop pumps normally between
+                // events and no event is coalesced or dropped. The 2 s
+                // spacing is deliberate: VZ's keyboard delivers reports at
+                // roughly one per full-frame Road Pops present, so typing
+                // faster drops reports (observed claim-time).
+                var events: [(type: NSEvent.EventType, code: UInt16, mods: NSEvent.ModifierFlags, chars: String)] = []
+                for ch in text {
+                    guard let (code, shift) = macKey(for: ch) else {
+                        FileHandle.standardError.write(Data("ERROR: --input-string: no macOS keycode for '\(ch)'\n".utf8))
+                        allOk = false
+                        break
+                    }
+                    let mods: NSEvent.ModifierFlags = shift ? .shift : []
+                    let chars = String(ch)
+                    events.append((.keyDown, code, mods, chars))
+                    events.append((.keyUp, code, mods, chars))
+                }
+                if allOk {
+                    var delay: Double = 0.0
+                    for ev in events {
+                        let evt = ev
+                        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                            let t = ProcessInfo.processInfo.systemUptime
+                            // VZ maps keyDown/keyUp by keyCode; keep the
+                            // characters on both so the pair is symmetric.
+                            let chars = evt.chars
+                            if let e = NSEvent.keyEvent(with: evt.type, location: .zero, modifierFlags: evt.mods, timestamp: t, windowNumber: windowNumber, context: nil, characters: chars, charactersIgnoringModifiers: chars, isARepeat: false, keyCode: evt.code) {
+                                if evt.type == .keyDown {
+                                    view.keyDown(with: e)
+                                } else {
+                                    view.keyUp(with: e)
+                                }
+                            }
+                        }
+                        delay += 2.0
+                    }
+                    FileHandle.standardOutput.write(Data("KEY-SEQ: typed \(text.debugDescription) into the VZVirtualMachineView after \"\(marker)\" ok=true\n".utf8))
+                } else {
+                    FileHandle.standardOutput.write(Data("KEY-SEQ: aborted (missing keycode) ok=false\n".utf8))
+                }
+                sent = true
+                break
+            }
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+        if !sent {
+            FileHandle.standardError.write(Data("ERROR: guest did not emit key-seq marker '\(marker)' within 40s; string not typed\n".utf8))
+        }
+    }
 }
 
 /// Forward `path` into the serial attachment exactly once, after `after`
@@ -2067,6 +2358,7 @@ func scriptPoll() {
         }
     }
     captureScreenshotIfDue()
+    captureScreenshotIfMarker(lastText)
     if Date() > deadline {
         print("FAILURE: expected transcript '\(scriptExpect ?? "<none>")' not observed within \(Int(timeout))s.")
         if !lastText.isEmpty {
@@ -2137,6 +2429,8 @@ if consoleMode {
     startScript2Input()
     startScript3Input()
     startNetInject()
+    startKeyInject()
+    startKeyStringInject()
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { scriptPoll() }
 } else {
     setupDisplayWindow()

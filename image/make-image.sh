@@ -2,19 +2,25 @@
 #
 # make-image.sh -- build the bootable FAT32+GPT boot disk image for DipshitOS.
 #
-# Usage: make-image.sh [EFI_BINARY] [IMAGE_PATH] [KERNEL_BINARY] [USER_BINARY] [COUNTER_BINARY] [PEER_BINARY] [STATUS43_BINARY] [UDP_BINARY]
+# Usage: make-image.sh [EFI_BINARY] [IMAGE_PATH] [KERNEL_BINARY] [USER_BINARY] [COUNTER_BINARY] [PEER_BINARY] [STATUS43_BINARY] [UDP_BINARY] [WIN_BINARY] [WINCLOSE_BINARY] [WINLOOP_BINARY] [WINMOVE_BINARY]
 # Defaults: zig-out/bin/BOOTAA64.EFI   artifacts/disk.img
 #           zig-out/bin/KERNEL.BIN     zig-out/bin/USER.BIN
 #           zig-out/bin/COUNTER.BIN    zig-out/bin/PEER.BIN
 #           zig-out/bin/STATUS43.BIN   zig-out/bin/UDP.BIN
+#           zig-out/bin/WIN.BIN        zig-out/bin/WINCLOSE.BIN
+#           zig-out/bin/WINLOOP.BIN    zig-out/bin/WINMOVE.BIN
 #
 # USER.BIN (the milestone-three ESP user program, claim 6783), COUNTER.BIN
 # (the milestone-four follow-on 2 never-exiting user program, claim 4613),
 # PEER.BIN (the follow-on 3 card 3f IPC peer, claim 5965), STATUS43.BIN
-# (the follow-on 4 card 4c wait-gate target, claim 9946) and UDP.BIN
-# (the milestone-five card N6 UDP-syscall proof, claim 1384) are embedded at
-# the volume root when present; the kernel's `exec` monitor command loads
-# them by name from the ESP and enters them at EL0.
+# (the follow-on 4 card 4c wait-gate target, claim 9946), UDP.BIN
+# (the milestone-five card N6 UDP-syscall proof, claim 1384) and WIN.BIN
+# (the milestone-six card G6 draw/window-syscall proof, claim 0487),
+# WINCLOSE.BIN (the claim-0487 teardown follow-on release proof),
+# WINLOOP.BIN (the claim-0487 ownership follow-on persistent-window proof),
+# and WINMOVE.BIN (the claim-0487 move/raise follow-on) are
+# embedded at the volume root when present; the kernel's `exec` monitor
+# command loads them by name from the ESP and enters them at EL0.
 #
 # Uses image/mkfat32.py (pure Python 3, stdlib only), so it needs no root,
 # no mtools, and no loopback devices. Safe to rerun: the image is rebuilt
@@ -34,6 +40,10 @@ COUNTER_BIN="${5:-$ROOT_DIR/zig-out/bin/COUNTER.BIN}"
 PEER_BIN="${6:-$ROOT_DIR/zig-out/bin/PEER.BIN}"
 STATUS43_BIN="${7:-$ROOT_DIR/zig-out/bin/STATUS43.BIN}"
 UDP_BIN="${8:-$ROOT_DIR/zig-out/bin/UDP.BIN}"
+WIN_BIN="${9:-$ROOT_DIR/zig-out/bin/WIN.BIN}"
+WINCLOSE_BIN="${10:-$ROOT_DIR/zig-out/bin/WINCLOSE.BIN}"
+WINLOOP_BIN="${11:-$ROOT_DIR/zig-out/bin/WINLOOP.BIN}"
+WINMOVE_BIN="${12:-$ROOT_DIR/zig-out/bin/WINMOVE.BIN}"
 SIZE_MB="${DIPSHITOS_IMAGE_SIZE_MB:-128}"
 
 cd "$ROOT_DIR"
@@ -90,6 +100,34 @@ if [ -f "$UDP_BIN" ]; then
     fi
     UDP_ARGS+=("$UDP_BIN")
 fi
+WIN_ARGS=()
+if [ -f "$WIN_BIN" ]; then
+    if [ "$(head -c 4 "$WIN_BIN")" != "DSK1" ]; then
+        fail "'$WIN_BIN' does not start with the 'DSK1' image magic -- run 'zig build' first (it produces zig-out/bin/WIN.BIN)."
+    fi
+    WIN_ARGS+=("$WIN_BIN")
+fi
+WINCLOSE_ARGS=()
+if [ -f "$WINCLOSE_BIN" ]; then
+    if [ "$(head -c 4 "$WINCLOSE_BIN")" != "DSK1" ]; then
+        fail "'$WINCLOSE_BIN' does not start with the 'DSK1' image magic -- run 'zig build' first (it produces zig-out/bin/WINCLOSE.BIN)."
+    fi
+    WINCLOSE_ARGS+=("$WINCLOSE_BIN")
+fi
+WINLOOP_ARGS=()
+if [ -f "$WINLOOP_BIN" ]; then
+    if [ "$(head -c 4 "$WINLOOP_BIN")" != "DSK1" ]; then
+        fail "'$WINLOOP_BIN' does not start with the 'DSK1' image magic -- run 'zig build' first (it produces zig-out/bin/WINLOOP.BIN)."
+    fi
+    WINLOOP_ARGS+=("$WINLOOP_BIN")
+fi
+WINMOVE_ARGS=()
+if [ -f "$WINMOVE_BIN" ]; then
+    if [ "$(head -c 4 "$WINMOVE_BIN")" != "DSK1" ]; then
+        fail "'$WINMOVE_BIN' does not start with the 'DSK1' image magic -- run 'zig build' first (it produces zig-out/bin/WINMOVE.BIN)."
+    fi
+    WINMOVE_ARGS+=("$WINMOVE_BIN")
+fi
 
 # 3. Builder script.
 [ -f "$SCRIPT_DIR/mkfat32.py" ] || fail "missing $SCRIPT_DIR/mkfat32.py."
@@ -98,13 +136,13 @@ fi
 mkdir -p "$(dirname "$IMAGE")"
 rm -f "$IMAGE"
 echo "make-image: building FAT32+GPT image '$IMAGE' (${SIZE_MB} MiB)..."
-python3 "$SCRIPT_DIR/mkfat32.py" --size-mb "$SIZE_MB" "$IMAGE" "$EFI_BIN" "$KERNEL_BIN" "${USER_ARGS[@]}" "${COUNTER_ARGS[@]}" "${PEER_ARGS[@]}" "${STATUS43_ARGS[@]}" "${UDP_ARGS[@]}" \
+python3 "$SCRIPT_DIR/mkfat32.py" --size-mb "$SIZE_MB" "$IMAGE" "$EFI_BIN" "$KERNEL_BIN" "${USER_ARGS[@]}" "${COUNTER_ARGS[@]}" "${PEER_ARGS[@]}" "${STATUS43_ARGS[@]}" "${UDP_ARGS[@]}" "${WIN_ARGS[@]}" "${WINCLOSE_ARGS[@]}" "${WINLOOP_ARGS[@]}" "${WINMOVE_ARGS[@]}" \
     || fail "image creation failed (see output above)."
 
 # 5. Self-verify by listing the image we just wrote. The embed is asserted:
 # the ESP must carry KERNEL.BIN, USER.BIN, COUNTER.BIN (claim 4613),
-# PEER.BIN (claim 5965), STATUS43.BIN (claim 9946), and UDP.BIN
-# (claim 1384).
+# PEER.BIN (claim 5965), STATUS43.BIN (claim 9946), UDP.BIN
+# (claim 1384), and WIN.BIN (claim 0487).
 echo "make-image: verifying image contents..."
 LISTING="$(python3 "$SCRIPT_DIR/mkfat32.py" --list "$IMAGE")" \
     || fail "image verification failed."
@@ -115,5 +153,9 @@ printf '%s\n' "$LISTING" | grep -q 'COUNTER.BIN' || fail "COUNTER.BIN missing fr
 printf '%s\n' "$LISTING" | grep -q 'PEER.BIN' || fail "PEER.BIN missing from the image listing"
 printf '%s\n' "$LISTING" | grep -q 'STATUS43.BIN' || fail "STATUS43.BIN missing from the image listing"
 printf '%s\n' "$LISTING" | grep -q 'UDP.BIN' || fail "UDP.BIN missing from the image listing"
+printf '%s\n' "$LISTING" | grep -q 'WIN.BIN' || fail "WIN.BIN missing from the image listing"
+printf '%s\n' "$LISTING" | grep -q 'WINCLOSE.BIN' || fail "WINCLOSE.BIN missing from the image listing"
+printf '%s\n' "$LISTING" | grep -q 'WINLOOP.BIN' || fail "WINLOOP.BIN missing from the image listing"
+printf '%s\n' "$LISTING" | grep -q 'WINMOVE.BIN' || fail "WINMOVE.BIN missing from the image listing"
 
 echo "make-image: done."

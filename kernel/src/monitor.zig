@@ -41,6 +41,9 @@ const virtio_net = @import("virtio_net.zig"); // milestone five card N1 (claim 1
 const virtio_gpu = @import("virtio_gpu.zig"); // milestone six card G1 (claim 6053): the gpu transport + framebuffer behind `screen`
 const road_pops = @import("road_pops.zig"); // milestone six card G3 (claim 1574): the Road Pops tee console behind `roadpops`
 const fbtext = @import("text.zig"); // milestone six card G2 (claim 3194): framebuffer text rendering behind `text`
+const xhci = @import("xhci.zig"); // milestone seven card I1 (claim 4272): the XHCI host-controller transport behind `usb`
+const input = @import("input.zig"); // milestone seven card I3 (claim 6050): the keyboard/pointer event FIFO behind `input`
+const driving_award = @import("driving_award.zig"); // milestone six card G5 (claim 1543): Driving Award, the window manager behind `win`
 
 // ---------------------------------------------------------------------------
 // Limits (fixed-size, explicit bounds)
@@ -215,8 +218,11 @@ pub const Command = struct {
 /// table): see `ensure_registry`.
 /// Number of commands. The registry is built at runtime (not a const
 /// table): see `ensure_registry`. Milestone five card N1 (claim 1373)
-/// grows it 32 -> 34 (`net` + `netsend`).
-pub const registry_count: usize = 37;
+/// grows it 32 -> 34 (`net` + `netsend`). Milestone seven card I1
+/// (claim 4272) grows it 37 -> 38 (`usb`). Milestone seven card I3
+/// (claim 6050) grows it 38 -> 39 (`input`). Milestone six card G5
+/// (claim 1543) grows it 39 -> 40 (`win`).
+pub const registry_count: usize = 40;
 
 /// Command registry, built at runtime into BSS. A `const` table would hold
 /// link-time absolute addresses for BOTH the string slices and the handler
@@ -244,6 +250,7 @@ fn ensure_registry() []const Command {
             .{ .name = "handoff", .help = "display boot-to-kernel ABI data", .usage = "handoff", .handler = cmd_handoff },
             .{ .name = "help", .help = "list commands and their help text", .usage = "help [command]", .max_args = 1, .handler = cmd_help },
             .{ .name = "hex", .help = "format an integer in hexadecimal", .usage = "hex <number>...", .min_args = 1, .handler = cmd_hex },
+            .{ .name = "input", .help = "keyboard/pointer event FIFO: armed state, occupancy, drop count, last keyboard + pointer events", .usage = "input", .handler = cmd_input },
             .{ .name = "kill", .help = "terminate a running process (kernel-owned lifetime)", .usage = "kill <pid|name>", .min_args = 1, .max_args = 1, .handler = cmd_kill },
             .{ .name = "ls", .help = "list files on the ESP (or a directory by path)", .usage = "ls [<dir>]", .max_args = 1, .handler = cmd_ls },
             .{ .name = "mem", .help = "summarize the EFI memory map", .usage = "mem", .handler = cmd_mem },
@@ -266,8 +273,10 @@ fn ensure_registry() []const Command {
             .{ .name = "tasks", .help = "tick-driven task scheduler status", .usage = "tasks", .handler = cmd_tasks },
             .{ .name = "timer", .help = "interrupt controller + timer status", .usage = "timer", .handler = cmd_timer },
             .{ .name = "uaccess", .help = "user-memory copy diagnostics (valid, fault, recovery)", .usage = "uaccess", .handler = cmd_uaccess },
+            .{ .name = "usb", .help = "XHCI host controller: `usb` transport report, `usb devices` enumerated HID devices, `usb report` last HID report", .usage = "usb [devices|report]", .handler = cmd_usb },
             .{ .name = "uname", .help = "compact system identity", .usage = "uname", .handler = cmd_uname },
             .{ .name = "version", .help = "display build information", .usage = "version", .handler = cmd_version },
+            .{ .name = "win", .help = "Driving Award window manager: registry (with owner pids), z-order, focus, hit-testing ('win focus <n>' focuses; 'win raise <n>' raises; 'win move <n> <x> <y>' moves a user window; 'win close <n>' releases a user window; 'win list <pid>' filters by owner; 'win hit <x> <y>' hit-tests)", .usage = "win [focus <n>|raise <n>|move <n> <x> <y>|close <n>|list <pid>|hit <x> <y>]", .max_args = 4, .handler = cmd_win },
             .{ .name = "write", .help = "write text to a file on the ESP", .usage = "write <file> <text...>", .min_args = 1, .handler = cmd_write },
         };
         registry_ready = true;
@@ -983,6 +992,491 @@ fn cmd_roadpops(m: *Monitor, args: []const []const u8) ExecError {
     m.console.puts(" presents=");
     m.console.print_u64(r.presents);
     m.console.puts("\n");
+    return .none;
+}
+
+/// `win` — report the Driving Award window manager (claim 1543, milestone
+/// six G5): the registry (id/title/kind/rect/z-order/dirty/visible/owner),
+/// the focused window, and the composite presents. `win focus <n>` focuses
+/// a window, `win raise <n>` raises it to the top, `win move <n> <x> <y>`
+/// moves a user window (clamped on-scanout), `win close <n>` releases a
+/// user window, `win list <pid>` filters the registry to one process's
+/// windows, and `win hit <x> <y>` hit-tests a point (focusing the topmost
+/// window there).
+fn cmd_win(m: *Monitor, args: []const []const u8) ExecError {
+    if (args.len > 0) {
+        if (std.mem.eql(u8, args[0], "focus")) {
+            if (args.len != 2) {
+                m.console.print_line("usage: win focus <n>");
+                return .usage;
+            }
+            const id = parseInt(args[1]) catch {
+                m.console.puts("win focus: invalid id: ");
+                m.console.puts(args[1]);
+                m.console.puts("\n");
+                return .invalid_argument;
+            };
+            if (id > 255) {
+                m.console.print_line("win focus: id out of range");
+                return .invalid_argument;
+            }
+            if (!driving_award.focus(@intCast(id))) {
+                m.console.print_line("win focus: no such window");
+                return .invalid_argument;
+            }
+            // The focus change may alter the clock's focus line — repaint.
+            _ = driving_award.mark_dirty(0);
+            _ = driving_award.mark_dirty(1);
+            _ = driving_award.composite();
+            m.console.puts("win focus: focused=");
+            m.console.print_u64(id);
+            m.console.puts("\n");
+            return .none;
+        }
+        if (std.mem.eql(u8, args[0], "raise")) {
+            if (args.len != 2) {
+                m.console.print_line("usage: win raise <n>");
+                return .usage;
+            }
+            const id = parseInt(args[1]) catch {
+                m.console.puts("win raise: invalid id: ");
+                m.console.puts(args[1]);
+                m.console.puts("\n");
+                return .invalid_argument;
+            };
+            if (id > 255) {
+                m.console.print_line("win raise: id out of range");
+                return .invalid_argument;
+            }
+            if (!driving_award.raise(@intCast(id))) {
+                m.console.print_line("win raise: no such window");
+                return .invalid_argument;
+            }
+            _ = driving_award.composite();
+            m.console.puts("win raise: raised=");
+            m.console.print_u64(id);
+            m.console.puts("\n");
+            return .none;
+        }
+        if (std.mem.eql(u8, args[0], "move")) {
+            if (args.len != 4) {
+                m.console.print_line("usage: win move <n> <x> <y>");
+                return .usage;
+            }
+            const id = parseInt(args[1]) catch {
+                m.console.puts("win move: invalid id: ");
+                m.console.puts(args[1]);
+                m.console.puts("\n");
+                return .invalid_argument;
+            };
+            const x = parseInt(args[2]) catch {
+                m.console.print_line("win move: invalid x");
+                return .invalid_argument;
+            };
+            const y = parseInt(args[3]) catch {
+                m.console.print_line("win move: invalid y");
+                return .invalid_argument;
+            };
+            if (id > 255 or x > std.math.maxInt(u32) or y > std.math.maxInt(u32)) {
+                m.console.print_line("win move: coordinate out of range");
+                return .invalid_argument;
+            }
+            if (!driving_award.user_move(@intCast(id), @intCast(x), @intCast(y))) {
+                m.console.print_line("win move: no such user window (the terminal + clock are fixed)");
+                return .invalid_argument;
+            }
+            _ = driving_award.composite();
+            m.console.puts("win move: moved=");
+            m.console.print_u64(id);
+            m.console.puts(" to ");
+            m.console.print_u64(x);
+            m.console.puts(",");
+            m.console.print_u64(y);
+            m.console.puts("\n");
+            return .none;
+        }
+        if (std.mem.eql(u8, args[0], "close")) {
+            if (args.len != 2) {
+                m.console.print_line("usage: win close <n>");
+                return .usage;
+            }
+            const id = parseInt(args[1]) catch {
+                m.console.puts("win close: invalid id: ");
+                m.console.puts(args[1]);
+                m.console.puts("\n");
+                return .invalid_argument;
+            };
+            if (id > 255) {
+                m.console.print_line("win close: id out of range");
+                return .invalid_argument;
+            }
+            if (!driving_award.user_close(@intCast(id))) {
+                m.console.print_line("win close: no such user window (the terminal + clock are fixed)");
+                return .invalid_argument;
+            }
+            // The close marked the fixed windows dirty — composite now to
+            // reveal whatever sat under the released window.
+            _ = driving_award.composite();
+            m.console.puts("win close: closed=");
+            m.console.print_u64(id);
+            m.console.puts("\n");
+            return .none;
+        }
+        if (std.mem.eql(u8, args[0], "list")) {
+            if (args.len != 2) {
+                m.console.print_line("usage: win list <pid>");
+                return .usage;
+            }
+            const pid = parseInt(args[1]) catch {
+                m.console.puts("win list: invalid pid: ");
+                m.console.puts(args[1]);
+                m.console.puts("\n");
+                return .invalid_argument;
+            };
+            const want: usize = @intCast(pid); // aarch64: usize == u64, lossless
+            var matches: usize = 0;
+            var i: usize = 0;
+            while (i < driving_award.count()) : (i += 1) {
+                const w = driving_award.window_at(i).?;
+                if (w.owner == want) matches += 1;
+            }
+            m.console.puts("win list: pid=");
+            m.console.print_u64(pid);
+            m.console.puts(" matches=");
+            m.console.print_u64(matches);
+            m.console.puts("\n");
+            i = 0;
+            while (i < driving_award.count()) : (i += 1) {
+                const w = driving_award.window_at(i).?;
+                if (w.owner == want) print_win_row(m, i, w);
+            }
+            return .none;
+        }
+        if (std.mem.eql(u8, args[0], "hit")) {
+            if (args.len != 3) {
+                m.console.print_line("usage: win hit <x> <y>");
+                return .usage;
+            }
+            const x = parseInt(args[1]) catch {
+                m.console.print_line("win hit: invalid x");
+                return .invalid_argument;
+            };
+            const y = parseInt(args[2]) catch {
+                m.console.print_line("win hit: invalid y");
+                return .invalid_argument;
+            };
+            if (x > std.math.maxInt(u32) or y > std.math.maxInt(u32)) {
+                m.console.print_line("win hit: coordinate out of range");
+                return .invalid_argument;
+            }
+            const hit = driving_award.hit_test(@intCast(x), @intCast(y));
+            m.console.puts("win hit: ");
+            m.console.print_u64(x);
+            m.console.puts(",");
+            m.console.print_u64(y);
+            m.console.puts(" -> ");
+            if (hit) |hid| {
+                m.console.print_u64(hid);
+                _ = driving_award.focus(hid);
+            } else {
+                m.console.puts("none");
+            }
+            m.console.puts("\n");
+            return .none;
+        }
+        m.console.print_line("win: unknown subcommand (try 'win', 'win focus <n>', 'win raise <n>', 'win move <n> <x> <y>', 'win close <n>', 'win list <pid>', or 'win hit <x> <y>')");
+        return .invalid_argument;
+    }
+    if (!driving_award.armed()) {
+        m.console.print_line("win: window manager not armed (no gpu device — the default VM)");
+        return .none;
+    }
+    m.console.puts("win: windows=");
+    m.console.print_u64(driving_award.count());
+    m.console.puts(" focused=");
+    m.console.print_u64(driving_award.focused_window_id());
+    m.console.puts(" presents=");
+    m.console.print_u64(driving_award.presents_pushed());
+    m.console.puts("\n");
+    var i: usize = 0;
+    while (i < driving_award.count()) : (i += 1) {
+        print_win_row(m, i, driving_award.window_at(i).?);
+    }
+    return .none;
+}
+
+/// Print one registry row for the window at index `i` — the shared formatter
+/// behind the `win` report and `win list <pid>`. The trailing `owner=` column
+/// is the per-process-ownership visibility (claim 0487 follow-on): a pid for a
+/// `.user` window, `-` for the fixed kernel-owned terminal + clock.
+fn print_win_row(m: *Monitor, i: usize, w: *const driving_award.Window) void {
+    m.console.puts("win[");
+    m.console.print_u64(i);
+    m.console.puts("]: ");
+    m.console.puts(w.title);
+    m.console.puts(" ");
+    m.console.puts(driving_award.kind_name(w.kind));
+    m.console.puts(" rect=");
+    m.console.print_u64(w.x);
+    m.console.puts(",");
+    m.console.print_u64(w.y);
+    m.console.puts(",");
+    m.console.print_u64(w.w);
+    m.console.puts(",");
+    m.console.print_u64(w.h);
+    m.console.puts(" dirty=");
+    m.console.puts(if (w.dirty) "1" else "0");
+    m.console.puts(" visible=");
+    m.console.puts(if (w.visible) "1" else "0");
+    m.console.puts(" z=");
+    m.console.print_u64(i);
+    m.console.puts(" owner=");
+    if (w.owner) |pid| {
+        m.console.print_u64(@intCast(pid));
+    } else {
+        m.console.puts("-");
+    }
+    m.console.puts("\n");
+}
+
+/// `input` — report the keyboard/pointer event FIFO (claim 6050, milestone
+/// seven I3): armed state, FIFO occupancy + drop count, the last decoded
+/// keyboard event, and the last recorded pointer report.
+fn cmd_input(m: *Monitor, args: []const []const u8) ExecError {
+    _ = args;
+    const r = input.report();
+    m.console.puts("input: armed=");
+    m.console.puts(if (r.armed) "1" else "0");
+    m.console.puts(" fifo=");
+    m.console.print_u64(r.fifo_used);
+    m.console.puts("/");
+    m.console.print_u64(r.fifo_max);
+    m.console.puts(" dropped=");
+    m.console.print_u64(r.dropped);
+    m.console.puts(" events=");
+    m.console.print_u64(r.events);
+    m.console.puts(" kb-mods=");
+    m.console.print_hex_min(r.kb_mods);
+    m.console.puts(" kb-usage=");
+    m.console.print_hex_min(r.kb_last_usage);
+    m.console.puts(" kb-byte=");
+    if (r.kb_last_byte != 0 and r.kb_last_byte >= 0x20 and r.kb_last_byte <= 0x7e) {
+        m.console.putc(r.kb_last_byte);
+    } else {
+        m.console.print_hex_min(r.kb_last_byte);
+    }
+    m.console.puts(" ptr-btns=");
+    m.console.print_u64(r.ptr_buttons);
+    m.console.puts(" ptr-x=");
+    m.console.print_u64(r.ptr_x);
+    m.console.puts(" ptr-y=");
+    m.console.print_u64(r.ptr_y);
+    m.console.puts(" ptr-reports=");
+    m.console.print_u64(r.ptr_reports);
+    m.console.puts("\n");
+    return .none;
+}
+
+fn cmd_usb(m: *Monitor, args: []const []const u8) ExecError {
+    if (args.len > 0 and std.mem.eql(u8, args[0], "devices")) return cmd_usb_devices(m);
+    if (args.len > 0 and std.mem.eql(u8, args[0], "report")) return cmd_usb_report(m, args);
+    if (!xhci.xhci_ready) {
+        m.console.puts("usb: no XHCI device (");
+        m.console.puts(if (xhci.xhci_fail.len > 0) xhci.xhci_fail else "DID 0x1a06 not found on bus 0");
+        m.console.puts(")\n");
+        return .none;
+    }
+    m.console.puts("usb: did=");
+    m.console.print_hex(xhci.xhci_did);
+    m.console.puts(" class=");
+    m.console.print_hex(xhci.xhci_class);
+    m.console.puts(" dev=");
+    m.console.print_u64(xhci.xhci_dev);
+    m.console.puts("\n");
+    m.console.puts("usb: bar0=");
+    m.console.print_hex(xhci.xhci_bar0);
+    m.console.puts(" bar1=");
+    m.console.print_hex(xhci.xhci_bar1);
+    m.console.puts(" base=");
+    m.console.print_hex(xhci.xhci_base);
+    m.console.puts("\n");
+    m.console.puts("usb: caplen=");
+    m.console.print_hex(xhci.xhci_caplen);
+    m.console.puts(" hciver=");
+    m.console.print_hex(xhci.xhci_hciver);
+    m.console.puts(" dboff=");
+    m.console.print_hex(xhci.xhci_dboff);
+    m.console.puts(" rtsoff=");
+    m.console.print_hex(xhci.xhci_rtsoff);
+    m.console.puts("\n");
+    m.console.puts("usb: hcsparams1=");
+    m.console.print_hex(xhci.xhci_hcsparams1);
+    m.console.puts(" hcsparams2=");
+    m.console.print_hex(xhci.xhci_hcsparams2);
+    m.console.puts(" hcsparams3=");
+    m.console.print_hex(xhci.xhci_hcsparams3);
+    m.console.puts(" hccparams1=");
+    m.console.print_hex(xhci.xhci_hccparams1);
+    m.console.puts("\n");
+    m.console.puts("usb: maxslots=");
+    m.console.print_u64(xhci.hcsparams1_max_slots(xhci.xhci_hcsparams1));
+    m.console.puts(" maxintrs=");
+    m.console.print_u64(xhci.hcsparams1_max_intrs(xhci.xhci_hcsparams1));
+    m.console.puts(" maxports=");
+    m.console.print_u64(xhci.hcsparams1_max_ports(xhci.xhci_hcsparams1));
+    m.console.puts("\n");
+    m.console.puts("usb: pre-reset sts=");
+    m.console.print_hex(xhci.xhci_pre_reset_usbsts);
+    m.console.puts(" cmd=");
+    m.console.print_hex(xhci.xhci_pre_reset_usbcmd);
+    m.console.puts("\n");
+    m.console.puts("usb: usbsts=");
+    m.console.print_hex(xhci.xhci_usbsts());
+    m.console.puts(" noop_cc=");
+    m.console.print_hex(xhci.xhci_noop_cc);
+    m.console.puts(" noop=");
+    m.console.puts(if (xhci.xhci_noop_done) "ok" else "fail");
+    m.console.puts("\n");
+    // Live port status: one line per port, with the connect/enable/power
+    // bits decoded (the I1 report — I2 turns these into enumerated devices).
+    const max_ports = xhci.hcsparams1_max_ports(xhci.xhci_hcsparams1);
+    var port: u8 = 1;
+    while (port <= max_ports) : (port += 1) {
+        const psc = xhci.xhci_port_status(port);
+        m.console.puts("usb: port");
+        m.console.print_u64(port);
+        m.console.puts("=");
+        m.console.print_hex(psc);
+        m.console.puts(" ccs=");
+        m.console.puts(if ((psc & 0x1) != 0) "1" else "0");
+        m.console.puts(" ped=");
+        m.console.puts(if ((psc & 0x2) != 0) "1" else "0");
+        m.console.puts(" pp=");
+        m.console.puts(if ((psc & 0x200) != 0) "1" else "0");
+        m.console.puts(" ps=");
+        m.console.print_u64((psc >> 10) & 0xf);
+        m.console.puts("\n");
+    }
+    return .none;
+}
+
+/// `usb devices` — the enumerated HID device table (I2). One line per
+/// enumerated device: slot/port/speed + VID/PID/class/protocol + the
+/// interrupt-IN endpoint + the HID boot-protocol negotiation result.
+fn cmd_usb_devices(m: *Monitor) ExecError {
+    if (!xhci.xhci_ready) {
+        m.console.puts("usb devices: no XHCI device\n");
+        return .none;
+    }
+    if (!xhci.enum_done) {
+        m.console.puts("usb devices: enumeration incomplete (");
+        m.console.puts(if (xhci.enum_fail.len > 0) xhci.enum_fail else "no devices enumerated");
+        m.console.puts(")\n");
+        return .none;
+    }
+    m.console.puts("usb devices: count=");
+    m.console.print_u64(xhci.enum_count);
+    m.console.puts("\n");
+    var i: usize = 0;
+    while (i < xhci.EnumMax) : (i += 1) {
+        const d = xhci.enum_devs[i];
+        if (!d.present) continue;
+        m.console.puts("usb dev");
+        m.console.print_u64(i);
+        m.console.puts(": slot=");
+        m.console.print_u64(d.slot_id);
+        m.console.puts(" port=");
+        m.console.print_u64(d.port);
+        m.console.puts(" speed=");
+        m.console.print_u64(d.speed);
+        m.console.puts(" vid=");
+        m.console.print_hex_min(d.vid);
+        m.console.puts(" pid=");
+        m.console.print_hex_min(d.pid);
+        m.console.puts(" class=");
+        m.console.print_u64(d.class);
+        m.console.puts(" protocol=");
+        m.console.print_u64(d.protocol);
+        m.console.puts(" epin=");
+        m.console.print_u64(d.ep_in_num);
+        m.console.puts(" maxpkt=");
+        m.console.print_u64(d.ep_in_maxpkt);
+        m.console.puts(" interval=");
+        m.console.print_u64(d.ep_in_interval);
+        m.console.puts(" boot=");
+        m.console.puts(if (d.hid_boot) "1" else "0");
+        m.console.puts("\n");
+    }
+    return .none;
+}
+
+/// `usb report [<dev>]` — poll the device's interrupt-IN endpoint for the
+/// last HID report and print it raw + a boot-protocol decode (I2). Defaults
+/// to device 0 (the keyboard, if present).
+fn cmd_usb_report(m: *Monitor, args: []const []const u8) ExecError {
+    if (!xhci.xhci_ready) {
+        m.console.puts("usb report: no XHCI device\n");
+        return .none;
+    }
+    var dev_idx: usize = 0;
+    if (args.len > 1) {
+        dev_idx = parseInt(args[1]) catch 0;
+    }
+    if (dev_idx >= xhci.EnumMax or !xhci.enum_devs[dev_idx].present) {
+        m.console.puts("usb report: no device ");
+        m.console.print_u64(dev_idx);
+        m.console.puts("\n");
+        return .none;
+    }
+    const d = xhci.enum_devs[dev_idx];
+    if (d.ep_in_num == 0) {
+        m.console.puts("usb report: device has no interrupt-IN endpoint\n");
+        return .none;
+    }
+    const got = xhci.xhci_poll_intr(d.slot_id);
+    if (!got) {
+        m.console.puts("usb report: dev");
+        m.console.print_u64(dev_idx);
+        m.console.puts(" no report (timeout)\n");
+        return .none;
+    }
+    const rep = xhci.xhci_report(d.slot_id);
+    m.console.puts("usb report: dev");
+    m.console.print_u64(dev_idx);
+    m.console.puts(" seq=");
+    m.console.print_u64(d.report_seq);
+    m.console.puts(" len=");
+    m.console.print_u64(rep.len);
+    m.console.puts(" bytes=");
+    var i: usize = 0;
+    while (i < rep.len) : (i += 1) {
+        if (i > 0) m.console.puts(" ");
+        m.console.print_hex_min(rep.bytes[i]);
+    }
+    m.console.puts("\n");
+    // Boot-protocol decode: keyboard = modifier byte + up to 6 keycodes;
+    // mouse = buttons + X + Y. Raw bytes are the ground truth.
+    if (xhci.hid_kind[dev_idx] == .keyboard and rep.len >= 8) {
+        m.console.puts("usb report: kb mod=");
+        m.console.print_hex_min(rep.bytes[0]);
+        m.console.puts(" keys=");
+        var k: usize = 2;
+        while (k < 8) : (k += 1) {
+            if (rep.bytes[k] != 0) {
+                m.console.print_hex_min(rep.bytes[k]);
+                m.console.puts(" ");
+            }
+        }
+        m.console.puts("\n");
+    } else if (xhci.hid_kind[dev_idx] == .mouse and rep.len >= 3) {
+        m.console.puts("usb report: ptr btn=");
+        m.console.print_u64(rep.bytes[0]);
+        m.console.puts(" x=");
+        m.console.print_u64(rep.bytes[1]);
+        m.console.puts(" y=");
+        m.console.print_u64(rep.bytes[2]);
+        m.console.puts("\n");
+    }
     return .none;
 }
 
@@ -2928,7 +3422,11 @@ fn cmd_text(m: *Monitor, args: []const []const u8) ExecError {
             fbtext.puts(args[i]);
         }
         fbtext.putc('\n');
-        const r = fbtext.present();
+        // Card G5 (claim 1543): present through the Driving Award
+        // compositor so the clock overlay stays composited over the
+        // repainted terminal.
+        driving_award.mark_terminal_dirty();
+        const r = driving_award.composite();
         m.console.puts("text put: ");
         print_cmd_result(m, r);
         m.console.puts("\n");
@@ -2940,7 +3438,9 @@ fn cmd_text(m: *Monitor, args: []const []const u8) ExecError {
             return .none;
         }
         fbtext.clear();
-        const r = fbtext.present();
+        // Card G5 (claim 1543): present through the compositor (see put).
+        driving_award.mark_terminal_dirty();
+        const r = driving_award.composite();
         m.console.puts("text clear: ");
         print_cmd_result(m, r);
         m.console.puts("\n");
@@ -3706,6 +4206,18 @@ test "monitor: roadpops reports the tee state honestly" {
     // `roadpops` is registered (the registry-row shape).
     try std.testing.expect(lookup("roadpops") != null);
     try std.testing.expectEqualStrings("Road Pops framebuffer console: armed/dirty/present counters (the boot terminal on the screen)", lookup("roadpops").?.help);
+}
+
+test "monitor: usb reports no device honestly when the XHCI transport is absent" {
+    var env = TestEnv.init();
+    var mon = env.monitor();
+    xhci.xhci_ready = false;
+    xhci.xhci_fail = "";
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"usb"}));
+    try std.testing.expectEqualStrings("usb: no XHCI device (DID 0x1a06 not found on bus 0)\n", env.mock.contents());
+    // `usb` is registered (the registry-row shape).
+    try std.testing.expect(lookup("usb") != null);
+    try std.testing.expectEqualStrings("XHCI host controller: `usb` transport report, `usb devices` enumerated HID devices, `usb report` last HID report", lookup("usb").?.help);
 }
 
 test "monitor: net report shape with an armed transport" {
@@ -4488,7 +5000,7 @@ test "monitor: syscalls is registered and reports deterministic rows" {
     try std.testing.expectEqualStrings("numbered syscall table and counters", lookup("syscalls").?.help);
     try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"syscalls"}));
     try std.testing.expectEqualStrings(
-        "syscalls: slots=64 implemented=12\n" ++
+        "syscalls: slots=64 implemented=21\n" ++
             "  0 sys_ping calls=0\n" ++
             "  1 sys_write calls=0\n" ++
             "  2 sys_yield calls=0\n" ++
@@ -4500,7 +5012,16 @@ test "monitor: syscalls is registered and reports deterministic rows" {
             "  8 sys_wait calls=0\n" ++
             "  9 sys_udp_listen calls=0\n" ++
             "  10 sys_udp_send calls=0\n" ++
-            "  11 sys_udp_recv calls=0\n",
+            "  11 sys_udp_recv calls=0\n" ++
+            "  12 sys_win_open calls=0\n" ++
+            "  13 sys_win_fill calls=0\n" ++
+            "  14 sys_win_present calls=0\n" ++
+            "  15 sys_win_close calls=0\n" ++
+            "  16 sys_win_move calls=0\n" ++
+            "  17 sys_win_raise calls=0\n" ++
+            "  18 sys_win_get calls=0\n" ++
+            "  19 sys_win_query calls=0\n" ++
+            "  20 sys_win_set_visible calls=0\n",
         env.mock.contents(),
     );
 }

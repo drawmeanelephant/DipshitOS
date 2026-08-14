@@ -59,6 +59,10 @@ pub const State = struct {
     base: console.Console,
     /// null = serial-only degradation (no gpu device / default VM).
     target: ?Target = null,
+    /// Optional keyboard-input source (milestone seven card I3, claim
+    /// 6050): consulted before the base console in readByteFn. null = the
+    /// default VM's serial-only input (byte-identical).
+    read_source: ?*const fn () ?u8 = null,
     /// A console write reached the framebuffer side since the last
     /// present; the idle loop drains it.
     dirty: bool = false,
@@ -93,7 +97,11 @@ pub const State = struct {
 
     fn readByteFn(ctx: *anyopaque) ?u8 {
         const self: *State = @ptrCast(@alignCast(ctx));
-        // Input stays on serial until card G4 (virtio keyboard).
+        // Card I3 (claim 6050): screen-side keyboard input first, then the
+        // serial fallback (the default VM has no input source → serial-only).
+        if (self.read_source) |src| {
+            if (src()) |b| return b;
+        }
         return self.base.readByte();
     }
 
@@ -129,6 +137,12 @@ pub const State = struct {
         }
     }
 
+    /// Attach the keyboard-input source (card I3); null restores the
+    /// serial-only read path.
+    pub fn set_read_source(self: *State, src: ?*const fn () ?u8) void {
+        self.read_source = src;
+    }
+
     /// Forward a framebuffer clear to the target (the `text clear`
     /// path); the serial side is untouched.
     pub fn clear_framebuffer(self: *State) void {
@@ -161,6 +175,12 @@ pub fn arm(base: console.Console, target: ?Target) void {
 /// serial AND the screen).
 pub fn tee_console() console.Console {
     return global.to_console();
+}
+
+/// Attach the keyboard-input source to the global tee (card I3); null
+/// restores the serial-only read path (the default VM).
+pub fn set_read_source(src: ?*const fn () ?u8) void {
+    if (global_ready) global.set_read_source(src);
 }
 
 /// Shell idle-loop drain: one present per dirty output batch.
@@ -327,6 +347,34 @@ test "road_pops: readByte delegates to the base (input stays on serial)" {
     try std.testing.expectEqual(@as(u8, 'b'), con.readByte().?);
     try std.testing.expect(con.readByte() == null);
     MockTee.feed = "";
+}
+
+// File-scope scripted keyboard source for the card-I3 read-source test
+// (a file-scope function + var, so no mutable-local capture is needed).
+var test_kb_feed: []const u8 = "";
+fn testKbPop() ?u8 {
+    if (test_kb_feed.len == 0) return null;
+    const b = test_kb_feed[0];
+    test_kb_feed = test_kb_feed[1..];
+    return b;
+}
+
+test "road_pops: a keyboard read source is consulted before serial (card I3)" {
+    var mock = MockTee{};
+    var state = State.init(mock.to_console(), mock.target());
+    test_kb_feed = "XY";
+    state.set_read_source(testKbPop);
+    MockTee.feed = "ab"; // the serial fallback
+    const con = state.to_console();
+    try std.testing.expectEqual(@as(u8, 'X'), con.readByte().?);
+    try std.testing.expectEqual(@as(u8, 'Y'), con.readByte().?);
+    // Keyboard exhausted → the serial fallback resumes.
+    try std.testing.expectEqual(@as(u8, 'a'), con.readByte().?);
+    try std.testing.expectEqual(@as(u8, 'b'), con.readByte().?);
+    try std.testing.expect(con.readByte() == null);
+    MockTee.feed = "";
+    test_kb_feed = "";
+    state.set_read_source(null);
 }
 
 test "road_pops: clear_framebuffer forwards to the target only" {

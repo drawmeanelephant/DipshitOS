@@ -32,6 +32,8 @@ const timer = @import("timer.zig"); // claim 7948: heartbeat printing (main cont
 const userspace = @import("userspace.zig"); // claim 8215: deferred EL0/SVC evidence line
 const virtio_net = @import("virtio_net.zig"); // claim 6076 (card N2): polled RX drain in the idle loop
 const road_pops = @import("road_pops.zig"); // claim 1574 (milestone six G3): Road Pops framebuffer drain in the idle loop
+const input = @import("input.zig"); // claim 6050 (milestone seven I3): keyboard/pointer event FIFO drain in the idle loop
+const driving_award = @import("driving_award.zig"); // claim 1543 (milestone six G5): Driving Award window-manager drain (clock refresh + composite)
 
 pub const PollResult = enum {
     /// No input byte is available right now; the caller should wait before
@@ -140,10 +142,24 @@ pub fn boot_and_park(mon: *monitor.Monitor, rx_wired: bool) void {
             // wall-clock seconds).
             virtio_net.tcp.now_ticks = timer.ticks;
             virtio_net.net_rx_drain();
+            // Claim 6050 (milestone seven I3): drain the keyboard/pointer
+            // event FIFO — poll the XHCI interrupt-IN endpoints, decode the
+            // HID reports, and push decoded bytes for the NEXT shell poll
+            // (the same polled-drain discipline as net RX). No-op when the
+            // input path is unarmed (default VM). Drains BEFORE the Road
+            // Pops present so a report is never starved behind a slow
+            // full-frame present.
+            input.drain();
             // Claim 1574 (milestone six G3): Road Pops — one full-frame
             // present per dirty output batch (the card-3d drain pattern).
             // No-op when the tee is unarmed (default VM) or clean.
             road_pops.drain();
+            // Card G5 (claim 1543): Driving Award — refresh the clock
+            // window from the 1 Hz generic timer and composite any dirty
+            // windows. This is the clock-only present path (the tee's
+            // present above already composites terminal output); no-op
+            // when the manager is unarmed (default VM) or clean.
+            _ = driving_award.drain(timer.ticks);
             // Card N11 (claim 5357): the bounded retransmission timer —
             // polled here (the idle loop is the time engine — the
             // card-N9 clock pattern). AFTER the drain, so an ACK the
@@ -264,6 +280,7 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "  handoff     display boot-to-kernel ABI data\n" ++
         "  help        list commands and their help text\n" ++
         "  hex         format an integer in hexadecimal\n" ++
+        "  input       keyboard/pointer event FIFO: armed state, occupancy, drop count, last keyboard + pointer events\n" ++
         "  kill        terminate a running process (kernel-owned lifetime)\n" ++
         "  ls          list files on the ESP (or a directory by path)\n" ++
         "  mem         summarize the EFI memory map\n" ++
@@ -286,8 +303,10 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "  tasks       tick-driven task scheduler status\n" ++
         "  timer       interrupt controller + timer status\n" ++
         "  uaccess     user-memory copy diagnostics (valid, fault, recovery)\n" ++
+        "  usb         XHCI host controller: `usb` transport report, `usb devices` enumerated HID devices, `usb report` last HID report\n" ++
         "  uname       compact system identity\n" ++
         "  version     display build information\n" ++
+        "  win         Driving Award window manager: registry (with owner pids), z-order, focus, hit-testing ('win focus <n>' focuses; 'win raise <n>' raises; 'win move <n> <x> <y>' moves a user window; 'win close <n>' releases a user window; 'win list <pid>' filters by owner; 'win hit <x> <y>' hit-tests)\n" ++
         "  write       write text to a file on the ESP\n" ++
         "type 'help <command>' for details on a single command.\n" ++
         "dipshit> version\r\n" ++

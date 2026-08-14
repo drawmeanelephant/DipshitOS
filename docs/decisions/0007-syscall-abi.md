@@ -303,3 +303,108 @@ ABI — x8 number, x0–x5 arguments, x0 result, reserved 12–63, error
 codes — is otherwise unchanged. The UDP protocol layer itself stays in
 the N5 card (`kernel/src/udp.zig`); these handlers only marshal args,
 copy bytes through the claim-6120 uaccess window, and call through.
+
+## Amendment (2026-08-13, claim 0487 — the draw/window syscall seam card)
+
+Milestone-six card G6 freezes slots 12/13/14 in the dispatch table (the
+card's ONE ABI change, following the `sys_sleep` slot-4, ipc slots-5/6,
+slots-7/8, and udp slots-9/10/11 precedents; every existing syscall
+number 0–11 stays frozen):
+
+| 12 | `sys_win_open` | `win_open(x, y, w, h) -> i64` | Open a user window in the G5 window manager (`driving_award.zig`): a bounded registry slot (id 2..3, TWO user windows) with a fixed BSS back-buffer (≤ 256×192 B8G8R8X8), OWNED by the calling process (the syscall layer records the caller's pid via `process.find_by_task(scheduler.current_id())`). Returns the window id; `EINVAL` for geometry outside the back-buffer/scanout bounds, an unarmed manager (no gpu), or a non-process caller; `ENOSPC` (-5) when both user slots are already open. No uaccess — plain numbers. |
+| 13 | `sys_win_fill` | `win_fill(id, x, y, w, h, rgb) -> i64` | Fill a rect (window-local coordinates) in the CALLER'S window's back-buffer with a 24-bit `0xRRGGBB` color, marking it dirty. Returns 0; `EINVAL` for an unknown id, a window the caller does NOT own (per-process ownership), an out-of-range word, or a rect outside the window bounds. No uaccess — the kernel owns the buffer; the program never touches it directly. |
+| 14 | `sys_win_present` | `win_present(id) -> i64` | Mark the CALLER'S window dirty so the compositor blits its back-buffer on the next idle-loop pass (the deferred-present discipline — the syscall never touches the gpu directly; the shell idle loop's `driving_award.drain` composites). Returns 0; `EINVAL` for an unknown id or a window the caller does NOT own. |
+| 15 | `sys_win_close` | `win_close(id) -> i64` | (Follow-on to claim 0487 — the teardown half of the seam.) Release a user window OWNED BY THE CALLER so it can be re-opened. Returns 0; `EINVAL` for an unknown id, a non-user window (the terminal + clock are fixed), or a window the caller does NOT own. The monitor's `win close <n>` is the EL1h PRIVILEGED equivalent (closes any user window); both call `driving_award.user_close`. |
+| 16 | `sys_win_move` | `win_move(id, x, y) -> i64` | (Follow-on to claim 0487 — the move half of the seam.) Reposition the CALLER'S user window's top-left corner to (x, y), CLAMPED so the whole window stays inside the scanout (`driving_award.user_move` — a window never moves off-screen). Returns 0; `EINVAL` for an unknown id, a window the caller does NOT own, an out-of-range word, or an unarmed manager. No uaccess — plain numbers. |
+| 17 | `sys_win_raise` | `win_raise(id) -> i64` | (Follow-on to claim 0487 — the restack half of the seam.) Raise the CALLER'S user window to the top of the z-order (focus unchanged — tracked by id). Returns 0; `EINVAL` for an unknown id or a window the caller does NOT own. The monitor's `win move <n> <x> <y>` / `win raise <n>` are the EL1h equivalents. |
+| 18 | `sys_win_get` | `win_get(id, buf) -> i64` | (Follow-on to claim 0487 — the read-back half of the seam.) Copy the CALLER'S user window's geometry (x, y, w, h as four u32 LE words — 16 bytes) OUT through uaccess, so an EL0 program can read its window's rect back after a CLAMPED move (`sys_win_move` clamps silently; this is the read-back seam). Returns 0; `EINVAL` for an unknown id, a non-user window (the terminal + clock are fixed), or a window the caller does NOT own; `EFAULT` for a bad `buf`. The first pointer-taking win slot (the claim-6120 contract). |
+| 19 | `sys_win_query` | `win_query(id, buf) -> i64` | (Follow-on to claim 0487 — the full-state introspection half of the seam.) Copy the CALLER'S user window's FULL state (x, y, w, h, z, focused, visible, dirty as eight u32 LE words — 32 bytes) OUT through uaccess, so an EL0 program can introspect its window end to end: the z-order rank (`z` = the registry index, 0 = bottom — the SAME number the monitor's `win` report prints), plus the focus/visible/dirty flags. Returns 0; `EINVAL` for an unknown id, a non-user window, or a window the caller does NOT own; `EFAULT` for a bad `buf`. The second pointer-taking win slot. |
+| 20 | `sys_win_set_visible` | `win_set_visible(id, visible) -> i64` | (Follow-on to claim 0487 — the visibility half of the seam.) HIDE (`visible` 0) or SHOW (`visible` 1) the CALLER'S user window (`driving_award.user_set_visible`, owner-restricted like fill/present/close). Hiding marks the terminal dirty so the next composite repaints over the hidden window; showing marks the window dirty so it reappears. Returns 0; `EINVAL` for an unknown id, a non-user window (the terminal + clock are fixed), a window the caller does NOT own, or a `visible` flag that is not 0/1. Plain numbers, no uaccess. |
+
+`implemented_count` is now 21; the `syscalls` report prints rows 0–20.
+The EL0 proof rides WIN.BIN (a new `user/src/win.zig` program, loaded by
+`exec`): it opens window 2, fills a dark-blue background + three 48×48
+blocks (red/cyan/white), presents it, and exits 87 — the first EL0
+graphics. No uaccess (the seam is plain numbers + kernel-owned buffers),
+no allocation (fixed BSS back-buffers).
+
+**Per-process ownership (the follow-on that supersedes the original
+"kernel-global" bound):** a window is OWNED by the process that opened it
+and AUTO-CLOSES when that process exits — the scheduler's `exit_current`
+calls `driving_award.close_owner(pid)`, so no window leaks until reboot.
+`sys_win_fill`/`sys_win_present`/`sys_win_close` are owner-restricted (a
+process can only render into and close its own window; the EL1h monitor's
+`win close` stays privileged). The open → fill → present → exit
+auto-close and the open → fill → present → close → re-open cycles are
+host-tested end to end (`kernel/src/syscall.zig`, `kernel/src/driving_award.zig`).
+
+The close follow-on (slot 15) makes the seam releasable: `sys_win_close`
+and the monitor's `win close <n>` both call `driving_award.user_close`,
+which frees the id (2..3) for re-open and un-presents the window. The
+open → fill → present → close → re-open cycle is host-tested end to end
+(`kernel/src/syscall.zig`, `kernel/src/driving_award.zig`), and the
+EL0 release proof rides a SEVENTH image WINCLOSE.BIN
+(`user/src/winclose.zig`): it opens window 2, fills it, presents it,
+CLOSES it through slot 15, and exits 88 — the class-B gate
+`tools/verify-live-win-close.sh` shows the window gone from the registry
+(`win: windows=2`) and a re-exec re-opening id 2 (the freed slot reused,
+never id 3). The auto-close-on-exit proof rides WIN.BIN (open → exit, NO
+close): the class-B gate `tools/verify-live-win-close.sh`'s sibling
+`tools/verify-live-win-syscall.sh` shows `win: windows=2` with
+`sys_win_close calls=0` after WIN.BIN exits — the window was released by
+the exit path, not a syscall. Because WIN.BIN's window now vanishes
+before a host capture, an EIGHTH image WINLOOP.BIN
+(`user/src/winloop.zig`) opens the same window and yield-loops forever,
+keeping it on the scanout for the gate's decoded-capture phase.
+
+The move/raise follow-on (slots 16/17) makes the seam able to reposition
+and restack: `sys_win_move` clamps the window on-scanout
+(`driving_award.user_move`), `sys_win_raise` reorders the z-order
+(`driving_award.user_raise`), and both are owner-restricted like
+fill/present/close. The EL0 proof rides a NINTH image WINMOVE.BIN
+(`user/src/winmove.zig`): open → fill → present → move → move (the second
+move clamps to the scanout corner) → raise → yield-forever; the class-B
+gate `tools/verify-live-win-move.sh` shows the window's final clamped
+rect (`win[2]: user user rect=1024,528,256,192`), the counters
+(open=1/fill=4/present=3/move=2/raise=1/close=0), and the decoded
+capture with the window's colors at the NEW position and the terminal
+where it USED to be.
+
+The get follow-on (slot 18) makes the clamp observable from EL0:
+`sys_win_get(id, buf)` copies the caller's window rect (four u32 LE
+words — the first pointer-taking win slot, through the claim-6120 uaccess
+window) so a program can read its clamped position back instead of
+inferring it from the `win` report. WINMOVE.BIN now reads the rect back
+after its clamped move and prints `winmove: get 1024,528,256,192` — the
+gate's `tools/verify-live-win-move.sh` assertion (get=1), alongside the
+counters (move=2/raise=1/get=1/close=0).
+
+The query follow-on (slot 19) makes the FULL state introspectable from
+EL0: `sys_win_query(id, buf)` copies the caller's window rect PLUS the
+z-order rank (`z` = the registry index), focus, visible, and dirty flags
+(eight u32 LE words — the second pointer-taking win slot) so a program
+sees its window the same way the EL1h `win` report does. WINMOVE.BIN
+prints `winmove: query 1024,528,256,192 z=2 focused=1 visible=1 dirty=1`
+after its clamped move — the gate's `tools/verify-live-win-move.sh`
+assertion (query=1), alongside the counters (move=2/raise=1/get=1/query=1/close=0).
+
+The set_visible follow-on (slot 20) makes the window HIDEABLE/SHOWABLE
+from EL0: `sys_win_set_visible(id, visible)` toggles the caller's
+window's `visible` flag (owner-restricted; the fixed terminal + clock are
+refused). Hiding marks the terminal dirty so the next composite repaints
+over the hidden window's pixels; showing marks the window dirty so it
+reappears — the window's back-buffer and z-order rank are untouched
+(only the flag flips). WINMOVE.BIN now hides its window, sleeps 2 ticks
+(holding it hidden while the gate captures the GONE frame), shows it
+again, and prints `winmove: hide ok` / `winmove: show ok`. The class-B
+gate `tools/verify-live-win-move.sh` gained a marker-driven capture
+(`--screenshot-after "winmove: hide ok"`, a new VMRunner flag) that
+proves the PIXEL DISAPPEARS (no red/cyan/white blocks at the clamped
+spot) while the LATEST fixed capture proves it RETURNS — alongside the
+counters (move=2/raise=1/get=1/query=1/set_visible=2/close=0).
+
+As with slots 9/10/11, this is the milestone-six set's ABI amendment; the
+ABI — x8 number, x0–x5 arguments, x0 result, reserved 21–63, error
+codes — is otherwise unchanged. The window registry + compositor stay in
+the G5 card (`kernel/src/driving_award.zig`); these handlers only marshal
+args and call through to it.

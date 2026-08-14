@@ -66,6 +66,10 @@ const process = @import("process.zig");
 // Card 3f (claim 5965): the per-process IPC mailbox — the pool reset
 // clears it and the boot payload's process registration resets its ring.
 const mailbox = @import("mailbox.zig");
+// Card G6 teardown follow-on (per-process window ownership): the exit path
+// auto-closes the exiting process's user windows via `close_owner`. Pure
+// BSS writes, safe in the exception context `exit_current` runs in.
+const driving_award = @import("driving_award.zig");
 
 const user_stack_section = if (builtin.object_format == .elf) ".userbss" else "__DATA,__userbss";
 
@@ -777,7 +781,14 @@ pub fn exit_current(status: u64) bool {
     // (claim 9946): the returned pid wakes every task blocked in `sys_wait`
     // on this process — their saved frames get the observed status patched
     // into x0, so the syscall return lands when the ring resumes them.
-    if (process.on_task_exit(exiting, status)) |pid| wake_waiters(pid, status);
+    if (process.on_task_exit(exiting, status)) |pid| {
+        wake_waiters(pid, status);
+        // Per-process window ownership: the exiting process's user windows
+        // are released NOW (the real teardown semantic — no window leaks
+        // until reboot). Pure BSS writes (registry compaction + dirty
+        // marks), safe in this exception context.
+        _ = driving_award.close_owner(pid);
+    }
     const next = next_runnable(exiting) orelse {
         // No successor: roll back (the always-ready idle task makes this
         // unreachable in a normal boot; kept as a defensive bound).

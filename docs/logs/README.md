@@ -94,6 +94,7 @@ verify-coordination`, and CI) fails if it drifts from the files.
 | audit-2026 maintenance: timer-gate evidence restore + doc drift fixes (claim 6204) | [`agent-maintenance-audit-2026-issues.md`](agent-maintenance-audit-2026-issues.md) |
 | `codex/el0-svc-task` | [`codex-el0-svc-task.md`](codex-el0-svc-task.md) |
 | `codex/vz-real-irq-delivery` | [`codex-vz-real-irq-delivery.md`](codex-vz-real-irq-delivery.md) |
+| freebuff/can-you-check-out-our-status-and-work-on-the-next (milestone six, G4) | [`freebuff-can-you-check-out-our-status-and-work-on-the-next--7e2ecd0b-8acc-47ac-bb44-68841236e5fc.md`](freebuff-can-you-check-out-our-status-and-work-on-the-next--7e2ecd0b-8acc-47ac-bb44-68841236e5fc.md) |
 | freebuff/docs-reconciliation-m15-status-20260808 | [`freebuff-docs-reconciliation-m15-status-20260808.md`](freebuff-docs-reconciliation-m15-status-20260808.md) |
 | freebuff/get-newest-github-files-and-let-s-get-some-shit-do-1e1cbf84-86fb-4605-a843-32fc0593fea0 | [`freebuff-get-newest-github-files-and-let-s-get-some-shit-do-1e1cbf84-86fb-4605-a843-32fc0593fea0.md`](freebuff-get-newest-github-files-and-let-s-get-some-shit-do-1e1cbf84-86fb-4605-a843-32fc0593fea0.md) |
 | `freebuff/grab-latest-git-and-check-out-status-and-let-s-get-15800f9b-d72c-4035-ac26-ae778c52b296` | [`freebuff-grab-latest-git-and-check-out-status-and-let-s-get-15800f9b-d72c-4035-ac26-ae778c52b296.md`](freebuff-grab-latest-git-and-check-out-status-and-let-s-get-15800f9b-d72c-4035-ac26-ae778c52b296.md) |

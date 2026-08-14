@@ -296,6 +296,126 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_udp.step);
 
     // ------------------------------------------------------------------
+    // Guest: sixth ESP user program (milestone six, card G6 — claim 0487) —
+    // the draw/window syscall proof WIN.BIN. Same freestanding target,
+    // linker script, elf2bin conversion, and ESP embedding as the other
+    // user programs; the kernel's `exec WIN.BIN` monitor command loads it
+    // by name. It opens a user window through sys_win_open (slot 12),
+    // fills it through sys_win_fill (slot 13), presents it through
+    // sys_win_present (slot 14), and exits 87 — the first EL0 graphics
+    // proof.
+    // ------------------------------------------------------------------
+    const win = b.addExecutable(.{
+        .name = "user-win",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/win.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    win.linker_script = b.path("user/linker.ld");
+    const win_step = b.step("win", "Build the sixth ESP user program (zig-out/bin/WIN.BIN; class A tooling, no VM)");
+    const win_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    win_elf2bin.addFileArg(win.getEmittedBin());
+    const win_bin = win_elf2bin.addOutputFileArg("WIN.BIN");
+    win_elf2bin.has_side_effects = true;
+    win_elf2bin.stdio = .inherit;
+    win_step.dependOn(&win_elf2bin.step);
+    const install_win = b.addInstallFileWithDir(win_bin, .bin, "WIN.BIN");
+    b.getInstallStep().dependOn(&install_win.step);
+
+    // ------------------------------------------------------------------
+    // Guest: seventh ESP user program (milestone six, card G6 teardown
+    // follow-on — claim 0487) — the draw/window RELEASE proof WINCLOSE.BIN.
+    // Same freestanding target, linker script, elf2bin conversion, and ESP
+    // embedding as the other user programs; the kernel's
+    // `exec WINCLOSE.BIN` monitor command loads it by name. It opens a user
+    // window through sys_win_open (slot 12), fills it (slot 13), presents
+    // it (slot 14), then CLOSES it through sys_win_close (slot 15) and
+    // exits 88 — the EL0 release proof (the window does not persist; the
+    // freed id is re-openable).
+    // ------------------------------------------------------------------
+    const winclose = b.addExecutable(.{
+        .name = "user-winclose",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/winclose.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    winclose.linker_script = b.path("user/linker.ld");
+    const winclose_step = b.step("winclose", "Build the seventh ESP user program (zig-out/bin/WINCLOSE.BIN; class A tooling, no VM)");
+    const winclose_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    winclose_elf2bin.addFileArg(winclose.getEmittedBin());
+    const winclose_bin = winclose_elf2bin.addOutputFileArg("WINCLOSE.BIN");
+    winclose_elf2bin.has_side_effects = true;
+    winclose_elf2bin.stdio = .inherit;
+    winclose_step.dependOn(&winclose_elf2bin.step);
+    const install_winclose = b.addInstallFileWithDir(winclose_bin, .bin, "WINCLOSE.BIN");
+    b.getInstallStep().dependOn(&install_winclose.step);
+
+    // ------------------------------------------------------------------
+    // Guest: eighth ESP user program (milestone six, card G6 per-process-
+    // ownership follow-on — claim 0487) — the PERSISTENT window proof
+    // WINLOOP.BIN. Same freestanding target, linker script, elf2bin
+    // conversion, and ESP embedding as the other user programs; the kernel's
+    // `exec WINLOOP.BIN` monitor command loads it by name. It opens a user
+    // window (slot 12), fills it (slot 13), presents it (slot 14), then
+    // yield-loops FOREVER (slot 2) so the window stays on the scanout for
+    // the live gate's decoded-capture phase (WIN.BIN exits and its window
+    // auto-closes before a capture can see it).
+    // ------------------------------------------------------------------
+    const winloop = b.addExecutable(.{
+        .name = "user-winloop",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/winloop.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    winloop.linker_script = b.path("user/linker.ld");
+    const winloop_step = b.step("winloop", "Build the eighth ESP user program (zig-out/bin/WINLOOP.BIN; class A tooling, no VM)");
+    const winloop_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    winloop_elf2bin.addFileArg(winloop.getEmittedBin());
+    const winloop_bin = winloop_elf2bin.addOutputFileArg("WINLOOP.BIN");
+    winloop_elf2bin.has_side_effects = true;
+    winloop_elf2bin.stdio = .inherit;
+    winloop_step.dependOn(&winloop_elf2bin.step);
+    const install_winloop = b.addInstallFileWithDir(winloop_bin, .bin, "WINLOOP.BIN");
+    b.getInstallStep().dependOn(&install_winloop.step);
+
+    // ------------------------------------------------------------------
+    // Guest: ninth ESP user program (milestone six, card G6 move/raise
+    // follow-on — claim 0487) — the MOVE/RESTACK proof WINMOVE.BIN. Same
+    // freestanding target, linker script, elf2bin conversion, and ESP
+    // embedding as the other user programs; the kernel's
+    // `exec WINMOVE.BIN` monitor command loads it by name. It opens a user
+    // window (slot 12), fills it (slot 13), presents it (slot 14), moves it
+    // twice (slot 16 — the second move clamps to the scanout corner) and
+    // raises it (slot 17), then yield-loops FOREVER (slot 2) so the moved
+    // window stays on the scanout for the live gate's decoded-capture
+    // phase (the window's own colors at the NEW position).
+    // ------------------------------------------------------------------
+    const winmove = b.addExecutable(.{
+        .name = "user-winmove",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/winmove.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    winmove.linker_script = b.path("user/linker.ld");
+    const winmove_step = b.step("winmove", "Build the ninth ESP user program (zig-out/bin/WINMOVE.BIN; class A tooling, no VM)");
+    const winmove_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    winmove_elf2bin.addFileArg(winmove.getEmittedBin());
+    const winmove_bin = winmove_elf2bin.addOutputFileArg("WINMOVE.BIN");
+    winmove_elf2bin.has_side_effects = true;
+    winmove_elf2bin.stdio = .inherit;
+    winmove_step.dependOn(&winmove_elf2bin.step);
+    const install_winmove = b.addInstallFileWithDir(winmove_bin, .bin, "WINMOVE.BIN");
+    b.getInstallStep().dependOn(&install_winmove.step);
+
+    // ------------------------------------------------------------------
     // Top-level steps. System-command steps are marked as having side
     // effects (and inherit stdio) so they always execute instead of being
     // skipped by the build cache. (No QEMU path: this project targets Apple
@@ -311,6 +431,10 @@ pub fn build(b: *std.Build) void {
     image.addFileArg(peer_bin); // ... [PEER.BIN] (claim 5965: third user program, the IPC peer)
     image.addFileArg(status43_bin); // ... [STATUS43.BIN] (claim 9946: fourth user program, the wait gate's short target)
     image.addFileArg(udp_bin); // ... [UDP.BIN] (claim 1384: fifth user program, the UDP-syscall proof)
+    image.addFileArg(win_bin); // ... [WIN.BIN] (claim 0487: sixth user program, the draw/window-syscall proof)
+    image.addFileArg(winclose_bin); // ... [WINCLOSE.BIN] (claim 0487 follow-on: seventh user program, the draw/window-syscall RELEASE proof)
+    image.addFileArg(winloop_bin); // ... [WINLOOP.BIN] (claim 0487 follow-on: eighth user program, the PERSISTENT window proof)
+    image.addFileArg(winmove_bin); // ... [WINMOVE.BIN] (claim 0487 follow-on: ninth user program, the MOVE/RESTACK proof)
     image.has_side_effects = true;
     image.stdio = .inherit;
     image_step.dependOn(&image.step);
@@ -333,6 +457,10 @@ pub fn build(b: *std.Build) void {
     failure_image.addFileArg(peer_bin); // PEER.BIN too (claim 5965)
     failure_image.addFileArg(status43_bin); // STATUS43.BIN too (claim 9946)
     failure_image.addFileArg(udp_bin); // UDP.BIN too (claim 1384)
+    failure_image.addFileArg(win_bin); // WIN.BIN too (claim 0487)
+    failure_image.addFileArg(winclose_bin); // WINCLOSE.BIN too (claim 0487 follow-on)
+    failure_image.addFileArg(winloop_bin); // WINLOOP.BIN too (claim 0487 follow-on)
+    failure_image.addFileArg(winmove_bin); // WINMOVE.BIN too (claim 0487 follow-on)
     failure_image.has_side_effects = true;
     failure_image.stdio = .inherit;
     failure_step.dependOn(&failure_image.step);
