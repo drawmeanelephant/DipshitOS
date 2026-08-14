@@ -21,6 +21,13 @@
 # contain the boot banner's first word and the prompt — the semantic proof
 # that the text is not just glyph-shaped but reads as words.
 #
+# The decoder ALSO decodes the Driving Award clock overlay (the window
+# manager's amber title bar + "DRIVING AWARD" accent line on navy) in both
+# orientations. Phase 2d asserts the clock title + body read FORWARD —
+# covering the WINDOW-MANAGER path (G5's draw_string + blit_rect), which
+# shares the forward glyph blit but uses a different color pair, so a
+# mirror there would NOT trip the green-terminal matcher.
+#
 # Calibration (the matcher's header comment): the ScreenCaptureKit
 # composited-window captures render the guest framebuffer with display
 # smoothing; the matcher thresholds at the bright stroke core (g > 140,
@@ -173,6 +180,38 @@ if ! printf '%s\n' "$DECODE" | grep -q "dipshit>"; then
 fi
 echo "decoded session reads forward (banner + prompt present)"
 
+# 2d. The window manager's clock overlay must ALSO read forward — the
+# title ("clock", dark on amber) and the body ("DRIVING AWARD", amber on
+# navy). These share G5's forward glyph blit but a different color pair,
+# so a mirror in the WINDOW-MANAGER path (draw_string + blit_rect) would
+# pass the green-terminal tripwire above yet fail here.
+ct_fwd_u="$(printf '%s\n' "$STATS" | sed -n 's/.*clock_title_fwd_u=\([0-9-][0-9-]*\).*/\1/p')"
+ct_mir_u="$(printf '%s\n' "$STATS" | sed -n 's/.*clock_title_mir_u=\([0-9-][0-9-]*\).*/\1/p')"
+cb_fwd_u="$(printf '%s\n' "$STATS" | sed -n 's/.*clock_body_fwd_u=\([0-9-][0-9-]*\).*/\1/p')"
+cb_mir_u="$(printf '%s\n' "$STATS" | sed -n 's/.*clock_body_mir_u=\([0-9-][0-9-]*\).*/\1/p')"
+if [ -z "$ct_fwd_u" ] || [ -z "$ct_mir_u" ] || [ -z "$cb_fwd_u" ] || [ -z "$cb_mir_u" ]; then
+    fail "decoder did not produce the clock-window STATS fields (clock_title/clock_body unknown counts)"
+fi
+if [ "$ct_fwd_u" -gt 2 ]; then
+    fail "clock title forward decode has $ct_fwd_u unknown cells — the window-manager title does not read forward"
+fi
+if [ "$cb_fwd_u" -gt 2 ]; then
+    fail "clock body forward decode has $cb_fwd_u unknown cells — the window-manager body does not read forward"
+fi
+if ! printf '%s\n' "$DECODE" | grep -q '^CLOCK_TITLE=clock$'; then
+    fail "the decoded clock title is not 'clock' (got: $(printf '%s\n' "$DECODE" | grep '^CLOCK_TITLE=' || echo '<none>'))"
+fi
+if ! printf '%s\n' "$DECODE" | grep -q '^CLOCK_BODY=DRIVING AWARD$'; then
+    fail "the decoded clock body is not 'DRIVING AWARD' (got: $(printf '%s\n' "$DECODE" | grep '^CLOCK_BODY=' || echo '<none>'))"
+fi
+if [ "$ct_mir_u" -lt 3 ]; then
+    fail "clock title mirrored decode has only $ct_mir_u unknowns (of 5) — the matcher cannot tell the title is forward"
+fi
+if [ "$cb_mir_u" -lt 7 ]; then
+    fail "clock body mirrored decode has only $cb_mir_u unknowns (of 13) — the matcher cannot tell the body is forward"
+fi
+echo "clock window decodes forward (title 'clock' + body 'DRIVING AWARD'; mirrored decode decisively worse: $ct_mir_u/5 and $cb_mir_u/13 unknowns)"
+
 echo
-echo "=== verify-live-glyphs: PASS (the captured framebuffer decodes FORWARD against the kernel's font8x8 table — mirror regression impossible to miss) ==="
+echo "=== verify-live-glyphs: PASS (the captured framebuffer decodes FORWARD against the kernel's font8x8 table — mirror regression impossible to miss, terminal AND clock window) ==="
 echo "evidence: artifacts/live-glyphs-run.txt, artifacts/vm-serial.log, artifacts/gpu-screen-*s, tools/decode-screen-glyphs.py" | tee "$REPORT"
