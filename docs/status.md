@@ -664,7 +664,7 @@ here.
 
 ## Related docs
 
-- [`roadmap.md`](roadmap.md) — milestone planning (the "where we're going").
+- [`roadmap.md`](roadmap.md) — milestone planning (the "where we're going"), plus the maintainer's **wishlist / hope chest** (destinations, not commitments) at the end.
 - [`archive/march-m15.md`](archive/march-m15.md) — archived M1.5 per-step tracker and best-agent split (milestone closed 2026-08-09; the active tracker is [`march-m3.md`](march-m3.md)).
 - [`march-m4.md`](march-m4.md) — milestone-four per-card tracker and best-agent split (cards 1 + 2 + 3 + 3a + 3b landed 2026-08-10 — entropy/CSPRNG + ASLR (claims 2665/3693), the general non-ESP filesystem (claim 3678), the process abstraction (claim 3848, `procs`), the concurrent-processes follow-on (claim 0826, two live user processes), and the long-lived-process follow-on 2 (claim 4613, a never-exiting COUNTER.BIN among live peers); network sketched as ⬜).
 - [`march-m6.md`](march-m6.md) — milestone-six per-card tracker (graphics: the **Driving Award** window manager + **Road Pops** terminal, sketched 2026-08-12; not committed).

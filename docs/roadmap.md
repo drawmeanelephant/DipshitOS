@@ -1016,3 +1016,93 @@ record new hardware assumptions in `docs/hardware-contract.md`.
 scripting/pipes/job control, any syscall-number addition (a focus syscall, if
 ever, lands as its own ADR 0007 amendment), and a visual-design pixel spec
 (colors/spacing stay implementation detail).
+
+## Wishlist / hope chest (destinations, not commitments)
+
+> **Maintainer's wishlist (2026-08-14).** These are *destinations*, not a
+> milestone ladder — a hope chest, roughly in the order the maintainer would
+> like to reach them, but nothing here is a promise and the roads between them
+> stay open. If dependency discoveries reshuffle these (e.g. `M9 interactive
+> apps → M10 user files → M11 application platform`), that is the point. No
+> agent should treat an item here as a green-light to climb a mountain just
+> because it is visible on the map.
+
+The bridges the maintainer would be **most disappointed to see omitted** —
+from "very capable kernel" to "weird little computer" — are **EL0 application
+events, userland filesystem access, consumer apps, and a lightweight
+app/launcher model** (items 2, 5, 4, and 10 below).
+
+1. **Finish M8 as the usability consolidation milestone.** Help,
+   editing/history, coherent errors, pointer focus/cursor, window chrome,
+   first-boot experience, `sysinfo`, persistent settings — no giant new
+   subsystem hiding inside it. *(This is the current, real milestone — see
+   above.)*
+2. **Interactive EL0 application events** *(the biggest near-term want)*.
+   Per-process event queues: keyboard, pointer/button, focus/blur, close
+   requests, and probably a blocking/polling event syscall. This is what turns
+   graphical syscall demos into actual applications.
+3. **A tiny userland application support layer.** Not a GUI framework — just
+   enough shared Zig for app startup, event loops, windows, drawing, basic
+   strings, and syscall wrappers. Build a couple apps first and extract only
+   what they genuinely duplicate.
+4. **Several deliberately small GUI apps.** Calculator, a notepad-ish thing,
+   process viewer, network monitor, a dumb paint thing. Architectural probes
+   disguised as toys: if every one needs a kernel modification, the app
+   boundary is wrong.
+5. **Userland filesystem access.** Handles (or a Dipshit-native equivalent),
+   read/write/create, directory enumeration, metadata, paths — deliberately
+   **before** any graphical file manager.
+6. **A graphical file browser.** Read-mostly at first: browse DATA, open text
+   files; create/rename/delete later. The integration proof for events +
+   windows + filesystem APIs.
+7. **Userland TCP/network API.** UDP already crossed the boundary; eventually
+   let EL0 own connections without cloning POSIX sockets by reflex. Then make
+   a real user network client consume it.
+8. **DNS.** Once an EL0 network app exists, numeric IPs get stupid fast. Keep
+   it bounded and boring initially.
+9. **Application identity/metadata.** A tiny manifest or image-metadata
+   concept: name, executable, maybe an icon later, the file types it
+   understands — so the launcher/file manager stop hardcoding knowledge.
+10. **A launcher.** Could start hilariously simple: list installed apps, run
+    one. Alongside the file browser, this is when DipshitOS gets a recognizable
+    "desktop" shape.
+11. **Clipboard / shared user-interaction services.** Probably later; text
+    apps will make the absence obvious. Discover the right IPC/service model
+    through this rather than inventing "system services" abstractly.
+12. **Timers/events available to applications.** Apps shouldn't spin or invent
+    sleep loops to animate/update; a clean timer-event mechanism fits after the
+    event queue exists.
+13. **Resource-model cleanup when the fixed pools hurt.** Windows, processes,
+    mailboxes, and network state are wonderfully bounded now — keep them that
+    way until real apps expose actual pain, *then* introduce dynamic kernel
+    objects/allocators because the workload demands them.
+14. **Richer virtual memory only when applications force it.** More flexible
+    mappings, guard pages, larger programs, maybe mmap-ish primitives, COW much
+    later. No demand paging merely because Serious-OS bingo says so.
+15. **Executable-format evolution.** The DSK1 flat-image model has done heroic
+    work; larger programs/libraries may eventually justify ELF loading or
+    another structured native format. Consumer first.
+16. **Reusable UI toolkit, but late.** Buttons, labels, text fields, lists,
+    scrolling, layout — *after* two or three hand-built apps have shown what
+    the common pieces actually are. Otherwise someone lovingly architects
+    GTKdipshit before anyone has clicked a button.
+17. **Better filesystem semantics eventually.** Atomic-ish updates, truncation,
+    deletion, rename, free-space management, corruption handling, maybe beyond
+    FAT32 someday — but let applications create the pressure first.
+18. **Audio eventually.** Fun, and another real device/service pipeline. Not
+    remotely urgent; on the "DipshitOS becomes a computer" list.
+19. **Security/isolation hardening.** More permissions around resources,
+    stronger validation of userspace-controlled arguments, process ownership
+    everywhere, maybe capabilities — grown *alongside* userland power, not as
+    one giant Security Milestone.
+20. **Distant mountains (keep visible, do not climb yet).** SMP, 3D
+    acceleration, dynamic linking, sophisticated VM, POSIX compatibility,
+    browser-grade networking, USB-everything. Keep them on the map so nobody
+    thinks we forgot them — but no agent should see "mountain" and immediately
+    buy climbing gear.
+
+**Meta-requirement for the roadmap:**
+
+> Every major infrastructure card should name the small program or experience
+> that will consume it next. Every milestone should end with a composition test
+> that a human can see or use.
