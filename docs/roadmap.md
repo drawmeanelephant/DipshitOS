@@ -778,7 +778,11 @@ Card ladder (canonical order; per-card tracker
   against the kernel's own font8x8 table — forward 0 unknown cells /
   604 ink, mirrored 549/595 — so a mirrored-text regression fails
   mechanically; with it registered the **38-gate `verify-vz` aggregate
-  re-ran 38/38 PASS** (`artifacts/m6-glyphs-vz-sweep.log`).
+  re-ran 38/38 PASS** (`artifacts/m6-glyphs-vz-sweep.log`). Post-G5
+  hardening (2026-08-14): the tripwire also decodes the Driving Award
+  clock overlay (title `clock` + body `DRIVING AWARD`) in both
+  orientations, so a mirror in the window-manager path (G5 draw_string +
+  blit_rect) fails too.
 - **G4 — input: keyboard + pointer — MOVED to milestone seven.**
   **[observed]** 2026-08-13 (claim 3868): VZ exposes keyboard/pointer
   (`VZUSBKeyboardConfiguration` + `VZUSBScreenCoordinatePointingDeviceConfiguration`)

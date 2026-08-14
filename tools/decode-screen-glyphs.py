@@ -10,6 +10,14 @@ green glyph grid (pitch + origin), decodes the visible session in both
 orientations, prints the decoded text (the evidence) and a machine-readable
 STATS line for the gate to assert on.
 
+It ALSO decodes the Driving Award clock overlay (the window manager's
+amber title bar + "DRIVING AWARD" accent line on navy) in both
+orientations, emitting CLOCK_TITLE/CLOCK_BODY lines and clock_* unknown
+counts in the STATS line — covering the window-manager path (G5's
+draw_string + blit_rect), which shares the forward glyph blit but uses a
+different color pair, so a mirror there would NOT trip the green-terminal
+matcher.
+
 Calibration (claim-time observations, 2026-08-12): the composited-window
 captures (ScreenCaptureKit) render the guest framebuffer with display
 smoothing, so each glyph stroke carries a bright core (g ~190-251) inside a
@@ -227,6 +235,68 @@ def main():
     fwd_ink, fwd_unknown = stats(lines_f)
     mir_ink, mir_unknown = stats(lines_m)
 
+    # --- the window manager's clock overlay (milestone six G5) -----------
+    # The terminal's green text is the original tripwire; the Driving Award
+    # clock window (amber title bar + amber "DRIVING AWARD" accent on navy)
+    # shares the SAME forward glyph blit but uses a DIFFERENT color pair,
+    # so a mirror in the window-manager path (G5's draw_string + blit_rect)
+    # would NOT trip the green matcher above. Decode the clock's STATIC
+    # strings (title "clock" + body "DRIVING AWARD") in both orientations
+    # too, so a flip anywhere fails mechanically.
+    def ink_dark(pr, pg, pb):
+        return pr + pg + pb < 250  # dark title text on the amber bar
+
+    def ink_amber(pr, pg, pb):
+        return pr > pg > pb and pr > 120  # amber accent on navy (hue-specific)
+
+    def decode_clock(ox, oy, nchars, mirror, ink_fn):
+        s = []
+        for c in range(nchars):
+            cell = []
+            for rr in range(8):
+                row = 0
+                for bb in range(8):
+                    cx = ox + c * pitch + bb * pitch // 8
+                    cy = oy + rr * pitch // 8
+                    if cx < w and cy < h:
+                        pr, pg, pb = px(cx, cy)
+                        if ink_fn(pr, pg, pb):
+                            row |= 1 << (7 - bb)
+                cell.append(row)
+            ink = sum(bin(rw).count("1") for rw in cell)
+            if ink == 0:
+                s.append(" ")
+                continue
+            best_sc, best_c = 8 * 8 + 1, None
+            for idx, g in enumerate(font):
+                sc = 0
+                for ri in range(8):
+                    a = cell[ri]
+                    b = (int(format(g[ri], "08b")[::-1], 2) if mirror else g[ri])
+                    sc += bin(a ^ b).count("1")
+                if sc < best_sc:
+                    best_sc, best_c = sc, idx
+            s.append(chr(0x20 + best_c) if best_sc <= 10 else "?")
+        return "".join(s)
+
+    # The clock window is at fixed framebuffer coordinates (960,16,304x192);
+    # the title text sits at (968,22) and the body line at (968,42). The
+    # capture scale follows the terminal's detected pitch (16 = 2x retina,
+    # 8 = 1x).
+    cscale = pitch // 8
+    clock_title = decode_clock(968 * cscale, 22 * cscale, 5, False, ink_dark)
+    clock_title_m = decode_clock(968 * cscale, 22 * cscale, 5, True, ink_dark)
+    clock_body = decode_clock(968 * cscale, 42 * cscale, 13, False, ink_amber)
+    clock_body_m = decode_clock(968 * cscale, 42 * cscale, 13, True, ink_amber)
+
+    def unknowns(s):
+        return sum(1 for ch in s if ch == "?")
+
+    ct_fwd_u = unknowns(clock_title)
+    ct_mir_u = unknowns(clock_title_m)
+    cb_fwd_u = unknowns(clock_body)
+    cb_mir_u = unknowns(clock_body_m)
+
     print("glyph grid: pitch=%d origin=(%d,%d)" % (pitch, ox, oy))
     print("--- decoded session (forward) ---")
     for l in lines_f:
@@ -236,8 +306,17 @@ def main():
     for l in lines_m[:mirror_lines]:
         if l.strip():
             print(l[:160])
-    print("STATS fwd_unknowns=%d fwd_ink=%d mir_unknowns=%d mir_ink=%d"
-          % (fwd_unknown, fwd_ink, mir_unknown, mir_ink))
+    print("--- decoded clock window (forward) ---")
+    print("CLOCK_TITLE=%s" % clock_title)
+    print("CLOCK_BODY=%s" % clock_body)
+    print("--- decoded clock window (mirrored) ---")
+    print("CLOCK_TITLE_MIR=%s" % clock_title_m)
+    print("CLOCK_BODY_MIR=%s" % clock_body_m)
+    print("STATS fwd_unknowns=%d fwd_ink=%d mir_unknowns=%d mir_ink=%d "
+          "clock_title_fwd_u=%d clock_title_mir_u=%d "
+          "clock_body_fwd_u=%d clock_body_mir_u=%d"
+          % (fwd_unknown, fwd_ink, mir_unknown, mir_ink,
+             ct_fwd_u, ct_mir_u, cb_fwd_u, cb_mir_u))
 
 if __name__ == "__main__":
     main()

@@ -395,6 +395,11 @@ dipshit>
     `tools/verify-live-glyphs.sh` (PASS 1/1) decodes the captured frame
     against the kernel's own font8x8 table — forward unknowns 0/604,
     mirrored 549/595 — so a mirrored-text regression fails mechanically.
+    **Post-G5 hardening (2026-08-14):** the tripwire now ALSO decodes the
+    Driving Award clock overlay (title `clock` + body `DRIVING AWARD`) in
+    both orientations, so a mirror in the WINDOW-MANAGER path (G5's
+    draw_string + blit_rect — same forward glyph blit, different color
+    pair) fails too, not just the terminal's green text.
     With the mirror-tripwire gate registered, the **38-gate `verify-vz`
     aggregate re-ran 38/38 PASS** (`artifacts/m6-glyphs-vz-sweep.log`).
     **What's next: milestone seven — input (keyboard + pointer)** so
