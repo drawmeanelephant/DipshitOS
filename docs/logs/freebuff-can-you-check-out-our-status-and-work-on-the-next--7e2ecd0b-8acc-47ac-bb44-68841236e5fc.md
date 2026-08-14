@@ -433,3 +433,16 @@ extended, not added).
   plus the collision-free agent split). Explicitly NOT an ADR 0007 change and
   NOT a POSIX/readline promise. Also recorded a docs follow-on: post the
   source-available-not-open-source license clearly on the public site. ✅ done
+
+- **2026-08-14** — *buffy*: claim 3275 opened — milestone-eight card U1, the
+  grouped help catalog (ADR 0008 D1): category field on the 40-command
+  registry, grouped `help`, `help <command>` detail, and `help <topic>` pages.
+  🔄 in progress.
+
+- **2026-08-14** — *buffy*: claim 3275 complete — milestone-eight card U1, the
+  grouped help catalog (ADR 0008 D1). `kernel/src/monitor.zig` gains a
+  `Category` field on all 40 commands + a grouped `help` (D1 group order) +
+  `help <cmd>` detail + `help <topic>` pages (networking, windows, storage,
+  graphics; `syscalls`/`input` resolve to their command detail). The
+  byte-identical transcript fixture regenerated to the grouped listing. New
+  live gate `tools/verify-live-help.sh` PASS 1/1 on VZ. ✅ done

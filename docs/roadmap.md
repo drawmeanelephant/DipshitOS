@@ -996,8 +996,13 @@ record new hardware assumptions in `docs/hardware-contract.md`.
   grammar + grouped help, D2 prompt/editing, D3 error/usage shapes, D4 window
   interface, D5 support surface, D6 gate-enforceability). Docs only — no code,
   no ADR 0007 change, no POSIX/readline promise.
-- **U1 — Help & catalog.** ⬜ grouped `help` + `help <cmd>` + topic pages,
-  usage strings wired to handlers.
+- **U1 — Help & catalog.** ✅ **DONE 2026-08-14 (claim 3275).** grouped
+  `help` + `help <cmd>` + `help <topic>` pages, usage strings wired to
+  handlers (they already were — U1 adds the category field + the grouped
+  catalog + `topic_body`). Topics: networking, windows, storage, graphics;
+  command-named topics (`syscalls`, `input`) resolve to their command detail.
+  Gate: the byte-identical transcript (regenerated) + the live `help` walk
+  `tools/verify-live-help.sh` PASS 1/1 on VZ.
 - **U2 — Shell editing & history.** ⬜ history ring, cursor movement,
   Ctrl-A/E/K/U/L, Delete, tab completion over the I3 input path.
 - **U3 — Error/usage contract.** ⬜ the mechanical enforcement of D3 (misuse

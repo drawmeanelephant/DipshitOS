@@ -489,7 +489,16 @@ dipshit>
     ([`docs/march-m8.md`](march-m8.md): U0–U8 — help/catalog, editing/history,
     error contract, pointer focus, window HIG, first-boot, sysinfo, persistent
     settings). Docs only; explicitly NOT an ADR 0007 change and NOT a
-    POSIX/readline promise. U1–U8 are the next cards.
+    POSIX/readline promise.
+    **Card U1 (claim 3275) DONE 2026-08-14** — the ADR 0008 D1 discovery
+    surface: `kernel/src/monitor.zig` gains a `Category` field on all 40
+    commands + a grouped `help` catalog in the D1 group order + `help <cmd>`
+    detail + `help <topic>` pages (networking, windows, storage, graphics;
+    command-named `syscalls`/`input` resolve to their command detail). The
+    byte-identical transcript (shell.zig e2e + `tests/transcript-console.txt`)
+    regenerated to the grouped listing, and the new live gate
+    `tools/verify-live-help.sh` PASS 1/1 on VZ (scripted help walk).
+    U2–U8 are the next cards.
 
 The command layer above is portable; `docs/archive/march-m15.md` step 15's filesystem-command **deferral is superseded 2026-08-09** — first by the pre-exit ESP file window (claim 3475) and then, **on the same day, by the real FAT32 storage driver (claim 6420)**: `ls`/`cat`/`write` now read and write the live ESP's FAT volume through a virtio-blk transport, so files persist on the disk itself and **no storage driver remains deferred**. The allocator, interrupts, first tasks, EL0 boundary, syscall ABI, uaccess, per-task address spaces, lifecycle, ESP exec, and blocking syscalls are all complete; **milestone three is closed 2026-08-10 (tag `m3-userspace`, claim 0707)**.
 

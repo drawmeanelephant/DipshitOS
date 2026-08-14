@@ -50,6 +50,7 @@ verify-vz:
     bash tools/verify-nvram-console.sh
     bash tools/verify-host-console.sh
     bash tools/verify-live-transcript.sh
+    bash tools/verify-live-help.sh
     bash tools/verify-live-fs.sh
     bash tools/verify-live-gfs.sh
     bash tools/verify-live-timer.sh
@@ -190,6 +191,10 @@ verify-bad-handoff:
 # Verify the live RX path + live dipshit> transcript (class B — boots a VZ VM; host scripted keystrokes reach the kernel end to end; claim 6684; Apple silicon only)
 verify-live-transcript:
     bash tools/verify-live-transcript.sh
+
+# Verify the ADR 0008 help walk (class B — boots a VZ VM; scripted `help`/`help net`/`help <topic>`/`help syscalls` keystrokes assert the grouped catalog, the per-command detail, and the topic pages in vm-serial.log; milestone-eight card U1, claim 3275; Apple silicon only)
+verify-live-help:
+    bash tools/verify-live-help.sh
 
 # Verify the live exception-vector gate (class B — boots a VZ VM; drives `fault`, asserts the [EXC] sync report + resume in vm-serial.log; claim 9746; Apple silicon only)
 verify-live-exceptions:
