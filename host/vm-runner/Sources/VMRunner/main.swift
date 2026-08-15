@@ -2174,7 +2174,16 @@ func forwardScriptOnce(path: String, after: String?, label: String, settle: Doub
         // marker-wait extends with it — the marker of a later phase
         // legitimately appears only after the earlier phases' delays have
         // elapsed. The default 40 s is unchanged for every existing gate.
-        let waitDeadline = Date().addingTimeInterval(max(40, settle + 60))
+        //
+        // Card U2 (claim 0142): the bound also extends to the session
+        // timeout. A phase-2 marker can legitimately appear a long way in
+        // when phase 1 is slow — the U2 gate's `u2done` lands only after ~24
+        // synthesized keystrokes at 3 s each — and a marker can never arrive
+        // after the VM is gone, so `--timeout` is the honest ceiling. This
+        // only ever widens the wait, and only for a session that asked for a
+        // longer timeout than the old fixed floor.
+        let waitSeconds = max(max(40, settle + 60), timeout)
+        let waitDeadline = Date().addingTimeInterval(waitSeconds)
         var sent = false
         while Date() < waitDeadline {
             if let text = try? String(contentsOf: serialURL, encoding: .utf8),
@@ -2190,7 +2199,7 @@ func forwardScriptOnce(path: String, after: String?, label: String, settle: Doub
             Thread.sleep(forTimeInterval: 0.5)
         }
         if !sent {
-            FileHandle.standardError.write(Data("ERROR: guest did not emit \(label)-after marker '\(marker)' within 40s; script input not sent\n".utf8))
+            FileHandle.standardError.write(Data("ERROR: guest did not emit \(label)-after marker '\(marker)' within \(Int(waitSeconds))s; script input not sent\n".utf8))
         }
     }
 }
