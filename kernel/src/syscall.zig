@@ -39,7 +39,7 @@
 //!
 //! Card G6 (claim 0487): slots 12/13/14 — `sys_win_open` / `sys_win_fill` /
 //! `sys_win_present` — expose the G5 window manager's user-window surface
-//! to EL0: open a bounded kernel-owned window (id 2..3, fixed BSS
+//! to EL0: open a bounded kernel-owned window (id 2..5, fixed BSS
 //! back-buffer), fill rects in its back-buffer, and present it (mark dirty
 //! for the shell idle loop's compositor). Follow-ons add slot 15
 //! `sys_win_close` (teardown), per-process ownership (auto-close on exit +
@@ -108,7 +108,7 @@ pub const sys_udp_recv: u64 = 11;
 /// Card G6 (claim 0487): the draw/window syscall seam — slots 12/13/14, the
 /// card's ONE ABI change (the ipc slots-5/6, slots-7/8, and udp slots-9/10/11
 /// precedents; every existing syscall number 0–11 stays frozen).
-/// `sys_win_open(x, y, w, h)` opens a kernel-owned user window (id 2..3) in
+/// `sys_win_open(x, y, w, h)` opens a kernel-owned user window (id 2..5) in
 /// the G5 window registry; `sys_win_fill(id, x, y, w, h, rgb)` fills a rect
 /// in its back-buffer; `sys_win_present(id)` marks it dirty for the
 /// compositor. Plain numbers only — no uaccess; the kernel owns the buffers.
@@ -557,11 +557,11 @@ fn handle_udp_recv(args: Args, _: *exceptions.VectorFrame) u64 {
 /// `sys_win_open(x, y, w, h)`: open a user window (the G5 window registry)
 /// at screen position (x, y) with a back-buffer w×h (≤
 /// `driving_award.user_buf_w` × `user_buf_h`), OWNED by the calling
-/// process. Returns the window id (2..3); `EINVAL` for a coordinate/word-
+/// process. Returns the window id (2..5); `EINVAL` for a coordinate/word-
 /// size outside u32, geometry outside the back-buffer/scanout bounds, an
 /// unarmed manager (no gpu — the default VM), or a non-process caller (the
-/// syscall is only reachable from an EL0 program); `ENOSPC` (-5) when both
-/// user slots are already open. The window auto-closes when the owning
+/// syscall is only reachable from an EL0 program); `ENOSPC` (-5) when all
+/// four user slots are already open. The window auto-closes when the owning
 /// process exits (the scheduler's exit path calls `driving_award.close_owner`).
 /// No uaccess: plain numbers.
 fn handle_win_open(args: Args, _: *exceptions.VectorFrame) u64 {
@@ -1648,13 +1648,18 @@ test "syscall: win open/fill/present/close round-trips with per-process ownershi
     try std.testing.expectEqual(@as(usize, 2), driving_award.count());
     // A second close of the freed id is EINVAL (no such user window).
     try std.testing.expectEqual(error_result(.einval), dispatch(sys_win_close, .{ 2, 0, 0, 0, 0, 0 }, &frame));
-    // Re-open (id 2 reused), then open the second slot (id 3): the
-    // full-registry ENOSPC split still holds, and the caller owns both.
+    // Re-open (id 2 reused), then open the remaining slots (ids 3..5): the
+    // full-registry ENOSPC split now holds at the 4-slot bound, and the
+    // caller owns all four.
     try std.testing.expectEqual(@as(u64, 2), dispatch(sys_win_open, .{ 64, 64, 256, 192, 0, 0 }, &frame));
     try std.testing.expectEqual(@as(u64, 3), dispatch(sys_win_open, .{ 320, 64, 256, 192, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u64, 4), dispatch(sys_win_open, .{ 576, 64, 256, 192, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u64, 5), dispatch(sys_win_open, .{ 64, 288, 256, 192, 0, 0 }, &frame));
     try std.testing.expectEqual(error_result(.enospc), dispatch(sys_win_open, .{ 0, 0, 10, 10, 0, 0 }, &frame));
     try std.testing.expectEqual(@as(?usize, win_pid), driving_award.user_owner(2));
     try std.testing.expectEqual(@as(?usize, win_pid), driving_award.user_owner(3));
+    try std.testing.expectEqual(@as(?usize, win_pid), driving_award.user_owner(4));
+    try std.testing.expectEqual(@as(?usize, win_pid), driving_award.user_owner(5));
     // Error mapping in the OWNING context: invalid geometry, out-of-bounds
     // rects, unknown ids, and the fixed windows are all EINVAL.
     try std.testing.expectEqual(error_result(.einval), dispatch(sys_win_open, .{ 0, 0, 0, 10, 0, 0 }, &frame));
@@ -1678,12 +1683,15 @@ test "syscall: win open/fill/present/close round-trips with per-process ownershi
     try std.testing.expectEqual(error_result(.einval), dispatch(sys_win_move, .{ 2, 0, 0, 0, 0, 0 }, &frame));
     try std.testing.expectEqual(error_result(.einval), dispatch(sys_win_raise, .{ 2, 0, 0, 0, 0, 0 }, &frame));
     // AUTO-CLOSE on exit: drive back to WIN.BIN (task 3) and exit it —
-    // both its windows (2 and 3) are released with NO sys_win_close call.
+    // all four of its windows (ids 2..5) are released with NO sys_win_close
+    // call.
     try std.testing.expect(scheduler.yield_current()); // user -> WIN.BIN (3)
     try std.testing.expectEqual(@as(usize, 3), scheduler.current_id());
     try std.testing.expectEqual(@as(u64, 0), dispatch(sys_exit, .{ 87, 0, 0, 0, 0, 0 }, &frame));
     try std.testing.expect(driving_award.user_owner(2) == null);
     try std.testing.expect(driving_award.user_owner(3) == null);
+    try std.testing.expect(driving_award.user_owner(4) == null);
+    try std.testing.expect(driving_award.user_owner(5) == null);
     try std.testing.expectEqual(@as(usize, 2), driving_award.count());
     // The close counter only ever saw the THREE explicit dispatches (one
     // success + the two refusals above): the exit-path teardown is NOT a

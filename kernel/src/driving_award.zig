@@ -388,9 +388,9 @@ fn find_user_window_index(id: u8) ?usize {
 /// back-buffer w×h (≤ `user_buf_w` × `user_buf_h`), OWNED by the process
 /// `owner` (the syscall layer records the caller's pid here). The window
 /// is appended at the top of the z-order and focused. Returns `.opened`
-/// with the id (2..3), `.invalid` for geometry outside the
+/// with the id (2..5), `.invalid` for geometry outside the
 /// back-buffer/scanout bounds (or when the manager is unarmed — no gpu),
-/// and `.full` when both user slots are already open. The window is
+/// and `.full` when all four user slots are already open. The window is
 /// OWNED by `owner` — it auto-closes when that process exits (the
 /// scheduler's exit path calls `close_owner`).
 pub fn user_open(x: u32, y: u32, w: u32, h: u32, owner: usize) UserOpenResult {
@@ -1221,7 +1221,7 @@ test "driving_award: user_open/fill/present round-trips a bounded user window" {
     try std.testing.expect(windows[2].dirty);
 }
 
-test "driving_award: user_open bounds and the second slot fill the registry" {
+test "driving_award: user_open bounds and the four slots fill the registry" {
     arm();
     // Invalid geometry: zero size, oversize back-buffer, off-scanout.
     try std.testing.expectEqual(UserOpenResult.invalid, user_open(0, 0, 0, 10, 7));
@@ -1229,13 +1229,17 @@ test "driving_award: user_open bounds and the second slot fill the registry" {
     try std.testing.expectEqual(UserOpenResult.invalid, user_open(0, 0, 10, 193, 7));
     try std.testing.expectEqual(UserOpenResult.invalid, user_open(virtio_gpu.fb_width, 0, 10, 10, 7));
     try std.testing.expectEqual(UserOpenResult.invalid, user_open(virtio_gpu.fb_width - 4, 0, 10, 10, 7));
-    // Two opens fill both slots; the third is ENOSPC-shaped (.full).
+    // Four opens fill all slots (ids 2..5); the fifth is ENOSPC-shaped (.full).
     try std.testing.expectEqual(UserOpenResult{ .opened = 2 }, user_open(64, 64, 256, 192, 7));
     try std.testing.expectEqual(UserOpenResult{ .opened = 3 }, user_open(320, 64, 256, 192, 8));
-    try std.testing.expectEqual(UserOpenResult.full, user_open(0, 0, 10, 10, 9));
-    try std.testing.expectEqual(@as(usize, 4), win_count);
+    try std.testing.expectEqual(UserOpenResult{ .opened = 4 }, user_open(576, 64, 256, 192, 9));
+    try std.testing.expectEqual(UserOpenResult{ .opened = 5 }, user_open(64, 288, 256, 192, 10));
+    try std.testing.expectEqual(UserOpenResult.full, user_open(0, 0, 10, 10, 11));
+    try std.testing.expectEqual(@as(usize, 6), win_count);
     try std.testing.expectEqual(@as(?usize, 7), user_owner(2));
     try std.testing.expectEqual(@as(?usize, 8), user_owner(3));
+    try std.testing.expectEqual(@as(?usize, 9), user_owner(4));
+    try std.testing.expectEqual(@as(?usize, 10), user_owner(5));
 }
 
 test "driving_award: user_fill refuses unknown ids and out-of-bounds rects" {
