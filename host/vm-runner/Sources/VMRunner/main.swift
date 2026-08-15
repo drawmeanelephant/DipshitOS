@@ -200,6 +200,11 @@ var inputStringAfter: String?
 // so arrows and Ctrl chords reach the I3 keymap over a real VZ keyboard.
 var inputChords: String?
 var inputChordsAfter: String?
+// Milestone-eight audit follow-up (issue #117): the keyDown/keyUp spacing
+// for --input-chords. Default 3.0 s keeps every existing gate byte-identical;
+// the input-depth gate lowers it to ~0.3 s to stress the guest's
+// multi-TRB interrupt-IN depth. Only meaningful with --input-chords.
+var inputChordsDelay: Double = 3.0
 var timeout: TimeInterval = 30
 var timeoutExplicit = false
 var expectLine = "firmware has agreed to cooperate"
@@ -370,6 +375,12 @@ while idx < arguments.count {
         idx += 2
     } else if arg == "--input-chords-after", idx + 1 < arguments.count {
         inputChordsAfter = arguments[idx + 1]
+        idx += 2
+    } else if arg == "--input-chords-delay", idx + 1 < arguments.count {
+        guard let d = Double(arguments[idx + 1]), d > 0 else {
+            fail("--input-chords-delay requires a positive seconds value, got '\(arguments[idx + 1])'.")
+        }
+        inputChordsDelay = d
         idx += 2
     } else if arg == "--timeout", idx + 1 < arguments.count {
         timeout = TimeInterval(arguments[idx + 1]) ?? 30
@@ -1017,7 +1028,7 @@ if let s = inputString {
     print("  input-string: ENABLED (milestone seven card I3, claim 6050) — typing \(s.debugDescription) into the view after \"\(inputStringAfter ?? "dipshit> ")\" (keyDown + keyUp per char, shift for uppercase)")
 }
 if let s = inputChords {
-    print("  input-chords: ENABLED (milestone eight card U2, claim 1809) — typing \(s.debugDescription) into the view after \"\(inputChordsAfter ?? "userspace: el0=1")\" (keyDown + keyUp per chord: printable chars, return/up/down/left/right/home/end/delete/tab, ctrl-a..ctrl-z)")
+    print("  input-chords: ENABLED (milestone eight card U2, claim 1809) — typing \(s.debugDescription) into the view after \"\(inputChordsAfter ?? "userspace: el0=1")\" (keyDown + keyUp per chord: printable chars, return/up/down/left/right/home/end/delete/tab, ctrl-a..ctrl-z; \(inputChordsDelay) s per keystroke)")
 }
 if let netInjectPath {
     print("  net-inject: ENABLED (milestone five card N2, claim 6076) — \(netInjectPath) written into the attachment's socket once after \"\(netInjectAfter ?? "net: rx-armed")\" appears in the serial log (host→guest RX)")
@@ -1845,7 +1856,7 @@ func startChordInject() {
                                     view.keyUp(with: e)
                                 }
                             }
-                            fireNext(after: 3.0)
+                            fireNext(after: inputChordsDelay)
                         }
                     }
                     fireNext(after: 0.0)

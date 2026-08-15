@@ -92,6 +92,7 @@ verify-vz:
     bash tools/verify-live-xhci.sh
     bash tools/verify-live-usb.sh
     bash tools/verify-live-input.sh
+    bash tools/verify-live-input-depth.sh
     bash tools/verify-live-editing.sh
     bash tools/verify-live-win.sh
     bash tools/verify-live-win-syscall.sh
