@@ -52,7 +52,10 @@ pub const Shell = struct {
     prompt_shown: bool = false,
 
     pub fn init(con: console.Console, state: monitor.SystemState, machine: monitor.MachineControl) Shell {
-        return .{ .mon = monitor.Monitor.init(con, state, machine) };
+        var shell = Shell{ .mon = monitor.Monitor.init(con, state, machine) };
+        // ADR 0008 D2: tab completion over the command registry + sub-verbs.
+        shell.editor.completion = monitor.complete;
+        return shell;
     }
 
     /// Print the boot banner once (`monitor.banner`).
@@ -71,6 +74,13 @@ pub const Shell = struct {
         const byte = self.mon.console.readByte() orelse return .idle;
         switch (self.editor.feed(self.mon.console, byte)) {
             .none => return .pending,
+            .repaint => {
+                // Ctrl-L: the editor cleared the screen; restore the prompt
+                // + the in-progress line (the editor does not own the prompt).
+                self.mon.console.puts("dipshit> ");
+                self.editor.reprint(self.mon.console);
+                return .pending;
+            },
             .cancelled => {
                 self.editor.reset();
                 self.prompt_shown = false;
@@ -103,6 +113,15 @@ fn handle_line(mon: *monitor.Monitor, line: []const u8) void {
     _ = monitor.exec(mon, tokens.argv[0..tokens.count]);
 }
 
+/// The kernel's ONE shell instance lives in BSS, not on the kernel stack:
+/// the LineEditor's bounded history ring (hist_capacity × max_line bytes,
+/// ADR 0008 D2) would crowd the 16 KiB kernel stack (ADR 0004 D5) once
+/// kernel_main's boot frame is also live — observed as silently dropped
+/// keyboard input when the shell was stack-allocated (milestone eight card
+/// U2, claim 1809). Host tests still build their own stack `Shell` values;
+/// only the kernel seam touches this storage.
+var boot_shell_storage: Shell = undefined;
+
 /// Boot presentation for the kernel seam. Prints the banner; with an RX
 /// source wired it runs the interactive loop forever (never returns);
 /// without RX it prints the prompt and returns so the caller parks in WFE.
@@ -113,7 +132,8 @@ pub fn boot_and_park(mon: *monitor.Monitor, rx_wired: bool) void {
         mon.console.puts("dipshit> ");
         return;
     }
-    var shell = Shell.init(mon.console, mon.state, mon.machine);
+    const shell: *Shell = &boot_shell_storage;
+    shell.* = Shell.init(mon.console, mon.state, mon.machine);
     while (true) {
         if (shell.poll() == .idle) {
             // Claim 9187: the timer is serviced only through the IRQ path.
@@ -363,12 +383,13 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "DIPSHITOS BOOTLOADER\n" ++
         "firmware has agreed to cooperate\n" ++
         "dipshit> write hello.txt hello world\r\n" ++
-        "write: hello.txt: not persisted - no disk (FAT volume unavailable)\n" ++
+        "error: hello.txt: not persisted - no disk (FAT volume unavailable)\n" ++
         "dipshit> cat hello.txt\r\n" ++
-        "cat: hello.txt: not found (no such file on the ESP)\n" ++
+        "error: hello.txt: not found (no such file on the ESP)\n" ++
+        "dipshit> pages bogus\r\n" ++
+        "usage: pages [selftest]\n" ++
         "dipshit> " ++ long ++ "\r\n" ++
-        "unknown command: " ++ long ++ "\n" ++
-        "type 'help' for a list of commands\n" ++
+        "unknown command '" ++ long ++ "' -- try 'help'\n" ++
         "dipshit> ^C\r\n" ++
         // Enter pressed after the cancel submits an empty line, which the
         // registry answers with its no-command message (then a new prompt).
@@ -398,7 +419,7 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
     _ = esp.add_esp_entry("KERNEL.BIN", 0x88b38, "");
     _ = esp.add_dir_entry("EFI");
     _ = esp.add_esp_entry("BOOTED.TXT", 0x29, "DIPSHITOS BOOTLOADER\nfirmware has agreed to cooperate\n");
-    mock.feed("help\nversion\nmem\npages\npages selftest\ntasks\necho \"elephant business\"\nls\ncat BOOTED.TXT\nwrite hello.txt hello world\ncat hello.txt\n");
+    mock.feed("help\nversion\nmem\npages\npages selftest\ntasks\necho \"elephant business\"\nls\ncat BOOTED.TXT\nwrite hello.txt hello world\ncat hello.txt\npages bogus\n");
     mock.feed(long);
     mock.feed("\n\x03\n");
     while (shell.poll() != .idle) {}
@@ -428,7 +449,7 @@ test "shell: over-long line is refused with a bell and an overflow notice" {
     // 256 chars echoed, the 257th refused with a bell, then the notice.
     try std.testing.expect(std.mem.indexOf(u8, out, "b" ** 256 ++ "\x07") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "input refused: line longer than 256 bytes\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "unknown command: " ++ "b" ** 256) != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "unknown command '" ++ "b" ** 256 ++ "' -- try 'help'") != null);
 }
 
 test "shell: too many arguments refuses execution with the documented message" {
@@ -465,6 +486,33 @@ test "shell: empty line reports no command via the registry" {
     try std.testing.expect(std.mem.indexOf(u8, out, "no command given; type 'help' for a list of commands\n") != null);
 }
 
+test "shell: tab completion completes a command name (ADR 0008 D2)" {
+    var mock = console.MockConsole(2048){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    // "ver" + Tab completes to "version" (Tab inserts "sion"), then Enter
+    // runs the completed command.
+    mock.feed("ver\t\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "version\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "dipshit-kernel\n") != null);
+}
+
+test "shell: ctrl-l clears the screen and repaints the prompt + line" {
+    var mock = console.MockConsole(1024){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("echo hi\x0c\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    // Ctrl-L emitted the ANSI clear; the shell restored the prompt + line,
+    // then Enter ran the echo.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[2J\x1b[H") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "dipshit> echo hi") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "hi\n") != null);
+}
+
 test "shell: ctrl-c on an empty line cancels without executing" {
     var mock = console.MockConsole(1024){};
     var shell = make_shell(&mock, make_view());
@@ -477,4 +525,117 @@ test "shell: ctrl-c on an empty line cancels without executing" {
     // must not submit an empty line either.
     try std.testing.expect(std.mem.indexOf(u8, out, "unknown command:") == null);
     try std.testing.expect(std.mem.indexOf(u8, out, "no command given") == null);
+}
+
+test "shell: host fuzz of the tokenizer never panics and stays in bounds (card U3)" {
+    // Card U3 (claim 1809's sibling): the tokenizer must accept ANY byte
+    // stream without panicking and every returned token must be a slice
+    // of the input line (never OOB). Deterministic PRNG, fixed seed — the
+    // same corpus on every run.
+    var prng = std.Random.DefaultPrng.init(0x5543_0001);
+    const rnd = prng.random();
+    const alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 \t\"'./-_=+*&^%$#@!~`;:<>?[]{}()|\\\n\x00\x7f";
+    var line_buf: [300]u8 = undefined;
+    var iter: usize = 0;
+    while (iter < 4000) : (iter += 1) {
+        const len = rnd.uintLessThan(usize, line_buf.len);
+        for (line_buf[0..len]) |*b| b.* = alphabet[rnd.uintLessThan(usize, alphabet.len)];
+        const line = line_buf[0..len];
+        const result = tokenizer.tokenize(line);
+        // Never more than max_tokens tokens.
+        try std.testing.expect(result.count <= tokenizer.max_tokens);
+        // too_many can only be set together with a full count.
+        if (result.too_many) try std.testing.expectEqual(tokenizer.max_tokens, result.count);
+        // Every token is a slice of the line: in-bounds and non-overlapping
+        // by construction (tokenize only slices into `line`).
+        for (result.argv[0..result.count]) |token| {
+            const start = @intFromPtr(token.ptr);
+            const end = start + token.len;
+            const base = @intFromPtr(line.ptr);
+            try std.testing.expect(start >= base);
+            try std.testing.expect(end <= base + line.len);
+        }
+    }
+}
+
+test "shell: host fuzz of the command handlers never panics on arbitrary argv (card U3)" {
+    // Card U3: every handler must survive ARBITRARY argv — random command
+    // names, random arg counts up to the registry bound, random bytes
+    // (including control + high bytes) — without panicking. The mock
+    // console absorbs any output (bounded, overflow-flagged); the env is
+    // the transcript test's (allocator + scheduler + userspace + ESP
+    // window armed, no devices) so handlers take their real refusal paths.
+    var mock = console.MockConsole(8192){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    _ = alloc.init(make_view(), &.{});
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0);
+    _ = scheduler.register_user(0, 0);
+    userspace.init();
+    esp.reset();
+    _ = esp.add_esp_entry("KERNEL.BIN", 0x88b38, "");
+    _ = esp.add_dir_entry("EFI");
+    _ = esp.add_esp_entry("BOOTED.TXT", 0x29, "hello\n");
+
+    var prng = std.Random.DefaultPrng.init(0x5543_0002);
+    const rnd = prng.random();
+    const alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789./-_\"' \t\n\x00\x1b\x7f";
+    var arg_buf: [monitor.max_args_limit + 1][32]u8 = undefined;
+    var argv_storage: [monitor.max_args_limit + 1][]const u8 = undefined;
+    var iter: usize = 0;
+    while (iter < 4000) : (iter += 1) {
+        const argc = rnd.uintLessThan(usize, monitor.max_args_limit + 1);
+        for (0..argc) |i| {
+            const alen = rnd.uintLessThan(usize, arg_buf[i].len);
+            for (arg_buf[i][0..alen]) |*b| b.* = alphabet[rnd.uintLessThan(usize, alphabet.len)];
+            argv_storage[i] = arg_buf[i][0..alen];
+        }
+        _ = monitor.exec(&shell.mon, argv_storage[0..argc]);
+        // The mock console absorbs everything; reset so the next iteration
+        // starts from a clean buffer (overflow is fine — it just flags).
+        mock.reset();
+    }
+}
+
+test "shell: host fuzz of the full input path never panics (editor + tokenizer + handlers)" {
+    // The end-to-end variant: random bytes fed as scripted input through
+    // the REAL line editor + tokenizer + handler path (shell.poll), never
+    // panicking and always returning to idle. Covers the D3 shape
+    // surface — misuse, errors, unknown verbs — on random input.
+    var mock = console.MockConsole(8192){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    _ = alloc.init(make_view(), &.{});
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0);
+    _ = scheduler.register_user(0, 0);
+    userspace.init();
+    esp.reset();
+    _ = esp.add_esp_entry("KERNEL.BIN", 0x88b38, "");
+    _ = esp.add_dir_entry("EFI");
+    _ = esp.add_esp_entry("BOOTED.TXT", 0x29, "hello\n");
+
+    var prng = std.Random.DefaultPrng.init(0x5543_0003);
+    const rnd = prng.random();
+    // A hostile-but-real keyboard alphabet: letters/digits, space, tab,
+    // Enter, Ctrl-C, Ctrl-L, ESC (arrow-prefix), backspace, DEL, and a
+    // sprinkling of non-ASCII bytes the editor must refuse.
+    const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789 \t\n\x03\x0c\x1b\x08\x7f\x80\xff";
+    var iter: usize = 0;
+    while (iter < 1500) : (iter += 1) {
+        const len = rnd.uintLessThan(usize, 64);
+        var feed_buf: [64]u8 = undefined;
+        for (feed_buf[0..len]) |*b| b.* = alphabet[rnd.uintLessThan(usize, alphabet.len)];
+
+        mock.feed(feed_buf[0..len]);
+        while (shell.poll() != .idle) {}
+        mock.reset();
+    }
+    // The session never panicked and the shell is still responsive: a
+    // Ctrl-C (full editor reset, clearing any swallowed CRLF window or
+    // pending ESC state) followed by a fresh command runs end to end.
+    mock.feed("\x03echo survived\n");
+    while (shell.poll() != .idle) {}
+    try std.testing.expect(std.mem.indexOf(u8, mock.contents(), "survived\n") != null);
 }

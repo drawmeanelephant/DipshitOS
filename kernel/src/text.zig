@@ -113,13 +113,25 @@ fn cursor_slot() usize {
     return cur_line;
 }
 
-/// Emit one character. `\n` starts a new line; every other byte renders
-/// into the current line (printable chars draw the glyph, control bytes
-/// draw as blank), wrapping to a new line at the region's width.
+/// Emit one character. `\n` starts a new line; `\r` returns the cursor to
+/// column 0 of the current line; `\b` moves the cursor left one column (a
+/// no-op at column 0) so the line editor's erase/redraw byte stream renders
+/// on the framebuffer exactly as it does on a serial terminal (milestone
+/// eight card U2). Every other byte renders into the current line
+/// (printable chars draw the glyph, control bytes draw as blank), wrapping
+/// to a new line at the region's width.
 pub fn putc(c: u8) void {
     if (!initialized) init();
     if (c == '\n') {
         _ = new_line();
+        return;
+    }
+    if (c == '\r') {
+        cur_col = 0;
+        return;
+    }
+    if (c == 0x08) { // backspace
+        if (cur_col > 0) cur_col -= 1;
         return;
     }
     var slot = cursor_slot();
@@ -287,6 +299,28 @@ test "text: line wrap starts a new line at the region width" {
     try std.testing.expectEqual(@as(usize, 2), ring_count);
     try std.testing.expectEqual(@as(usize, 3), cur_col);
     try std.testing.expectEqual(@as(usize, 1), cursor_row());
+}
+
+test "text: backspace and carriage return move the cursor (U2)" {
+    init();
+    clear();
+    puts("hello");
+    try std.testing.expectEqual(@as(usize, 5), cur_col);
+    putc('\r');
+    try std.testing.expectEqual(@as(usize, 0), cur_col);
+    puts("bye"); // overwrites h,e,l -> the line reads "byelo"
+    try std.testing.expectEqual(@as(usize, 3), cur_col);
+    try std.testing.expectEqualSlices(u8, "byelo", ring[cursor_slot()][0..5]);
+    // Backspace moves left without writing; the next char overwrites.
+    putc(0x08);
+    putc(0x08);
+    try std.testing.expectEqual(@as(usize, 1), cur_col);
+    putc('x');
+    try std.testing.expectEqualSlices(u8, "bxelo", ring[cursor_slot()][0..5]);
+    // Backspace at column 0 is a no-op (never wraps negative).
+    clear();
+    putc(0x08);
+    try std.testing.expectEqual(@as(usize, 0), cur_col);
 }
 
 test "text: the scrollback ring is bounded and drops the oldest line" {

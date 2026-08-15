@@ -91,6 +91,7 @@ verify-vz:
     bash tools/verify-live-xhci.sh
     bash tools/verify-live-usb.sh
     bash tools/verify-live-input.sh
+    bash tools/verify-live-editing.sh
     bash tools/verify-live-win.sh
     bash tools/verify-live-win-syscall.sh
     bash tools/verify-live-win-close.sh
@@ -247,6 +248,10 @@ verify-live-usb:
 # Verify scripted keystrokes drive Road Pops (class B — boots a VZ VM; the runner's --input-string synthesizes one NSEvent per keyDown/keyUp (2 s spacing) into the VZVirtualMachineView, the guest's input FIFO + keycode decode feeds the line editor, and the typed `input` command reports events=6 dropped=0; claim 6050; Apple silicon only)
 verify-live-input:
     bash tools/verify-live-input.sh
+
+# Verify the line editor's history + cursor editing (class B — boots a VZ VM; the runner's --input-chords synthesizes one NSEvent per chord (printable chars + Up/Left arrows) into the VZVirtualMachineView, the I3 keymap decodes the arrows to ESC sequences, and the editor recalls + mid-line-edits them: Up re-runs 'echo u2r' and Left+'c' turns 'echo ab' into 'echo acb'; claim 1809; Apple silicon only)
+verify-live-editing:
+    bash tools/verify-live-editing.sh
 
 # Verify the Driving Award window manager (class B — boots a VZ VM; Road Pops is window 0, a 1 Hz clock overlay is window 1; `win`/`win focus`/`win hit` exercise the registry + focus + hit-test, a keyboard-typed uname lands in the focused terminal, and the decoded capture shows two overlapping windows with the right z-order; claim 1543; Apple silicon only)
 verify-live-win:

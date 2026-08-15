@@ -1042,13 +1042,24 @@ fn intr_deq_advance(dev: usize) void {
     if (deq.* == tr_usable) deq.* = 0;
 }
 
+/// The report-buffer slot a TRB enqueued at ring position `enq` occupies.
+/// `tr_enqueue_intr` writes the Link TRB at `tr_usable` and wraps the enqueue
+/// pointer to 0 BEFORE placing the Normal TRB, so the buffer slot is 0 when
+/// `enq == tr_usable` (a plain `enq` index would read one past the buffer
+/// array). Pure — host-testable.
+fn intr_slot_index(enq: usize) usize {
+    return if (enq == tr_usable) 0 else enq;
+}
+
 /// Arm slot `slot_id`'s interrupt-IN endpoint with one Normal TRB pointing
 /// at the NEXT ring slot's report buffer + ring the doorbell. Each armed
 /// TRB owns its slot's report buffer, so a completed TRB is read back from
 /// the slot it occupies (the dequeue pointer names it).
 fn xhci_arm_intr(slot_id: u8) void {
     const slot_idx = slot_id - 1;
-    const idx = intr_enq[slot_idx];
+    // The buffer slot is the POST-wrap ring index (tr_enqueue_intr places the
+    // Normal TRB at slot 0 when the enqueue pointer is at the Link TRB).
+    const idx = intr_slot_index(intr_enq[slot_idx]);
     const len: u32 = @min(@as(u32, intr_maxpkt[slot_idx]), 8);
     tr_enqueue_intr(slot_idx, .{
         .param = ring_phys(&intr_slots[slot_idx][idx]),
@@ -1334,6 +1345,16 @@ test "xhci: TRB + ERST wire layouts are the spec shapes" {
     try std.testing.expectEqual(@as(u32, 0), noop.control & trb_cycle);
     // A completion code lives in status bits 31:24.
     try std.testing.expectEqual(@as(u32, cc_success), (0x01000000 >> 24) & 0xff);
+}
+
+test "xhci: intr report-buffer slot wraps at the Link TRB boundary" {
+    // The enqueue pointer never names the Link-TRB slot as a data slot: a
+    // TRB enqueued at tr_usable lands at ring slot 0 after the wrap, so its
+    // report buffer is intr_slots[0] (the OOB intr_slots[tr_usable] read is
+    // the class-B phantom-key bug this regression guards).
+    try std.testing.expectEqual(@as(usize, 0), intr_slot_index(tr_usable));
+    try std.testing.expectEqual(@as(usize, 0), intr_slot_index(0));
+    try std.testing.expectEqual(@as(usize, 14), intr_slot_index(14));
 }
 
 test "xhci: ring geometry — the link TRB holds the wrap boundary" {

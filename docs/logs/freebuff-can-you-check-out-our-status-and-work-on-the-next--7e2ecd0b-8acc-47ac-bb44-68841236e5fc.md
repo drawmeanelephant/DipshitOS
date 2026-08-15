@@ -446,3 +446,46 @@ extended, not added).
   graphics; `syscalls`/`input` resolve to their command detail). The
   byte-identical transcript fixture regenerated to the grouped listing. New
   live gate `tools/verify-live-help.sh` PASS 1/1 on VZ. ✅ done
+
+- **2026-08-14** — *buffy*: claim 1809 opened — milestone-eight card U2, the
+  shell line editor + input keymap (ADR 0008 D2). Bounded session history
+  ring, cursor movement (arrows/Home/End), the editing chords Ctrl-A/E/K/U/L
+  (plus Ctrl-C), Delete, and tab completion over the command registry, all on
+  the I3 keyboard path. 🔄 in progress.
+
+- **2026-08-14** — *buffy*: claim 1809 complete — milestone-eight card U2, the
+  shell line editor + input keymap (ADR 0008 D2). `kernel/src/lineedit.zig`
+  (bounded history ring + draft recall, cursor left/right/Home/End, Ctrl-
+  A/E/K/U/L/C, Delete, tab completion; 14 host tests), `kernel/src/input.zig`
+  (`hid_to_bytes`: arrow/Home/End/Delete → `ESC [ <final>` + Ctrl-a..z → ASCII
+  control codes), `kernel/src/text.zig` honors `\b`/`\r`, `kernel/src/shell.zig`
+  wires the registry completer + repaint, `kernel/src/monitor.zig` gains
+  `complete`, the runner gains `--input-chords` (one NSEvent per keyDown/keyUp
+  into the VZVirtualMachineView). Live gate `tools/verify-live-editing.sh` PASS
+  1/1 on VZ (scripted chords drive mid-line insert `echo acb` + Up recall
+  `acb` x2 + `u2done`); unchanged transcript paths byte-identical. En route
+  root-caused + fixed a latent I3 interrupt-ring wrap OOB in
+  `kernel/src/xhci.zig` (the pre-wrap enqueue pointer named `intr_slots[...]`
+  one past the array after the Link-TRB boundary, so VZ wrote the next report
+  to garbage and the guest re-read the stale slot-0 `e` — the phantom key that
+  corrupted both edited lines; pure `intr_slot_index` wrap helper + unit test).
+  ✅ done
+## 2026-08-14 — milestone eight U3: error/usage contract (claim 1511)
+
+- Uniform D3 shapes across kernel/src/monitor.zig (~100 output sites):
+  `print_usage`/`err_prefix` helpers; sub-verb misuse → the command's single
+  registry usage; failures → `error: <actionable>`; bad verb → `unknown
+  command '<x>' -- try 'help'` (two hyphens = byte-safe em dash; the
+  framebuffer renders only 0x20..0x7e).
+- Byte-exact misuse transcript (shell e2e + tests/transcript-console.txt):
+  `usage: pages [selftest]`, `error: hello.txt: ...`, the long-line unknown
+  verb. All 358 monitor + 396 shell + 367 tokenizer + 28 lineedit tests
+  green; full verify-portable set green.
+- Three deterministic host fuzz tests (shell.zig): tokenizer over 4000
+  random byte streams; exec over 4000 random argv arrays; the full
+  editor+shell input path over 1500 hostile keyboards. The full-path fuzz
+  FOUND a latent U2 bug: remember_line's @min inferred u4 for the shift
+  bound, overflowing at the 16th distinct history entry — fixed with an
+  explicit usize anchor + a fill-past-capacity regression test.
+- Class B re-run: verify-live-help.sh and verify-live-transcript.sh both
+  PASS 1/1 on VZ after the shape conversion.

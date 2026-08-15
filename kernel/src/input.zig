@@ -11,11 +11,12 @@
 //! the Road Pops tee's read path (`pop_byte`) hands to the shell's line
 //! editor — the FIRST screen-side keystrokes reach the terminal.
 //!
-//! The keymap covers the usable ASCII subset: letters (shift → caps),
-//! digits (shift → the shifted symbol), Enter, Backspace, Tab, Space, and
-//! the common punctuation. Anything outside it is honestly refused (no
-//! byte is invented). Modifiers other than shift are observed (the modifier
-//! byte is recorded) but not acted on beyond shift.
+//! The keymap covers the usable ASCII subset: letters (shift → caps,
+//! ctrl → the ADR 0008 D2 editing chords 0x01..0x1a), digits (shift → the
+//! shifted symbol), Enter, Backspace, Tab, Space, the common punctuation,
+//! and the editing nav cluster (arrows, Home, End, Delete) encoded as
+//! `ESC [ <final>` sequences so the line editor stays byte-driven. Anything
+//! outside the subset is honestly refused (no byte is invented).
 //!
 //! No libc, no POSIX, no allocation. The FIFO and driver state are fixed
 //! BSS (the card-3d pattern); a full FIFO drops the newest byte and counts
@@ -28,6 +29,15 @@ const std = @import("std");
 const xhci = @import("xhci.zig"); // I1/I2: the XHCI transport + enumerated HID devices
 
 pub const max_fifo: usize = 64;
+
+/// The longest key sequence the keymap can produce (Delete's `ESC [ 3 ~`).
+pub const max_key_bytes: usize = 4;
+
+/// HID keyboard boot-protocol modifier bit masks.
+const mod_lctrl: u8 = 0x01;
+const mod_lshift: u8 = 0x02;
+const mod_rctrl: u8 = 0x10;
+const mod_rshift: u8 = 0x20;
 
 /// The `input` monitor command's report shape.
 pub const Report = struct {
@@ -129,6 +139,73 @@ pub fn hid_to_ascii(usage: u8, shift: bool) ?u8 {
     };
 }
 
+/// Decode one HID keyboard usage (with shift/ctrl modifiers) into 0-4
+/// bytes of console input, written to `out`; returns the byte count (0 =
+/// the usage is outside the usable subset — no bytes are invented). The
+/// editing nav cluster arrives as `ESC [ <final>` sequences and ctrl + a-z
+/// as the ASCII control codes, both consumed by the line editor (ADR 0008
+/// D2); everything else is the printable `hid_to_ascii` mapping.
+pub fn hid_to_bytes(usage: u8, shift: bool, ctrl: bool, out: *[max_key_bytes]u8) usize {
+    if (ctrl) {
+        if (usage >= 0x04 and usage <= 0x1d) {
+            out[0] = (usage - 0x04) + 0x01; // Ctrl-A..Ctrl-Z
+            return 1;
+        }
+        return 0;
+    }
+    switch (usage) {
+        0x4f => { // Right arrow
+            out[0] = 0x1b;
+            out[1] = '[';
+            out[2] = 'C';
+            return 3;
+        },
+        0x50 => { // Left arrow
+            out[0] = 0x1b;
+            out[1] = '[';
+            out[2] = 'D';
+            return 3;
+        },
+        0x51 => { // Down arrow
+            out[0] = 0x1b;
+            out[1] = '[';
+            out[2] = 'B';
+            return 3;
+        },
+        0x52 => { // Up arrow
+            out[0] = 0x1b;
+            out[1] = '[';
+            out[2] = 'A';
+            return 3;
+        },
+        0x4a => { // Home
+            out[0] = 0x1b;
+            out[1] = '[';
+            out[2] = 'H';
+            return 3;
+        },
+        0x4d => { // End
+            out[0] = 0x1b;
+            out[1] = '[';
+            out[2] = 'F';
+            return 3;
+        },
+        0x4c => { // Delete (forward)
+            out[0] = 0x1b;
+            out[1] = '[';
+            out[2] = '3';
+            out[3] = '~';
+            return 4;
+        },
+        else => {},
+    }
+    if (hid_to_ascii(usage, shift)) |b| {
+        out[0] = b;
+        return 1;
+    }
+    return 0;
+}
+
 // ---------------------------------------------------------------------------
 // Bounded byte FIFO (the line-editor feed)
 // ---------------------------------------------------------------------------
@@ -163,7 +240,8 @@ pub fn pop_byte() ?u8 {
 fn decode_keyboard_report(rep: []const u8) void {
     if (rep.len < 8) return;
     const mods = rep[0];
-    const shift = (mods & 0x02) != 0 or (mods & 0x20) != 0;
+    const shift = (mods & mod_lshift) != 0 or (mods & mod_rshift) != 0;
+    const ctrl = (mods & mod_lctrl) != 0 or (mods & mod_rctrl) != 0;
     kb_mods = mods;
     var keys: [6]u8 = [_]u8{0} ** 6;
     for (rep[2..8], 0..) |k, i| keys[i] = k;
@@ -178,9 +256,12 @@ fn decode_keyboard_report(rep: []const u8) void {
         }
         if (!held) {
             kb_last_usage = k;
-            if (hid_to_ascii(k, shift)) |b| {
-                kb_last_byte = b;
-                push_byte(b);
+            var out: [max_key_bytes]u8 = undefined;
+            const n = hid_to_bytes(k, shift, ctrl, &out);
+            if (n > 0) {
+                kb_last_byte = out[n - 1]; // the sequence's final byte
+                var i: usize = 0;
+                while (i < n) : (i += 1) push_byte(out[i]);
                 events += 1;
             }
         }
@@ -270,6 +351,56 @@ test "input: usages outside the usable subset are refused (no invented bytes)" {
     try std.testing.expectEqual(@as(?u8, null), hid_to_ascii(0x39, false)); // Caps Lock
     try std.testing.expectEqual(@as(?u8, null), hid_to_ascii(0x4c, false)); // Pause
     try std.testing.expectEqual(@as(?u8, null), hid_to_ascii(0xe0, false)); // Left Ctrl
+}
+
+test "input: hid_to_bytes maps the nav cluster to ESC sequences" {
+    var out: [max_key_bytes]u8 = undefined;
+    // Up arrow -> ESC [ A (3 bytes).
+    var n = hid_to_bytes(0x52, false, false, &out);
+    try std.testing.expectEqual(@as(usize, 3), n);
+    try std.testing.expectEqualSlices(u8, "\x1b[A", out[0..n]);
+    // Left arrow -> ESC [ D.
+    n = hid_to_bytes(0x50, false, false, &out);
+    try std.testing.expectEqualSlices(u8, "\x1b[D", out[0..n]);
+    // End -> ESC [ F; Delete -> ESC [ 3 ~ (4 bytes).
+    n = hid_to_bytes(0x4d, false, false, &out);
+    try std.testing.expectEqualSlices(u8, "\x1b[F", out[0..n]);
+    n = hid_to_bytes(0x4c, false, false, &out);
+    try std.testing.expectEqual(@as(usize, 4), n);
+    try std.testing.expectEqualSlices(u8, "\x1b[3~", out[0..n]);
+}
+
+test "input: hid_to_bytes maps ctrl+a-z to ASCII control codes" {
+    var out: [max_key_bytes]u8 = undefined;
+    // Ctrl-A (usage 0x04) -> 0x01; Ctrl-C (usage 0x06) -> 0x03; Ctrl-Z -> 0x1a.
+    try std.testing.expectEqual(@as(usize, 1), hid_to_bytes(0x04, false, true, &out));
+    try std.testing.expectEqual(@as(u8, 0x01), out[0]);
+    try std.testing.expectEqual(@as(usize, 1), hid_to_bytes(0x06, false, true, &out));
+    try std.testing.expectEqual(@as(u8, 0x03), out[0]);
+    try std.testing.expectEqual(@as(usize, 1), hid_to_bytes(0x1d, false, true, &out));
+    try std.testing.expectEqual(@as(u8, 0x1a), out[0]);
+    // Ctrl + non-letter is outside the usable subset (no invented bytes).
+    try std.testing.expectEqual(@as(usize, 0), hid_to_bytes(0x28, false, true, &out)); // Ctrl+Enter
+}
+
+test "input: keyboard report decode pushes a ctrl chord and an arrow sequence" {
+    fifo_count = 0;
+    fifo_head = 0;
+    events = 0;
+    kb_held = [_]u8{0} ** 6;
+    // Left Ctrl (0x01) held + 'a' (usage 0x04) pressed -> 0x01 (Ctrl-A).
+    decode_keyboard_report(&[_]u8{ 0x01, 0, 0x04, 0, 0, 0, 0, 0 });
+    try std.testing.expectEqual(@as(usize, 1), fifo_count);
+    try std.testing.expectEqual(@as(u8, 0x01), pop_byte().?);
+    // Release; then Up arrow (usage 0x52) -> ESC [ A (3 bytes).
+    decode_keyboard_report(&[_]u8{ 0, 0, 0, 0, 0, 0, 0, 0 });
+    decode_keyboard_report(&[_]u8{ 0, 0, 0x52, 0, 0, 0, 0, 0 });
+    try std.testing.expectEqual(@as(usize, 3), fifo_count);
+    try std.testing.expectEqual(@as(u8, 0x1b), pop_byte().?);
+    try std.testing.expectEqual(@as(u8, '['), pop_byte().?);
+    try std.testing.expectEqual(@as(u8, 'A'), pop_byte().?);
+    try std.testing.expectEqual(@as(?u8, null), pop_byte());
+    try std.testing.expectEqual(@as(usize, 2), events);
 }
 
 test "input: keyboard report decode pushes key-down bytes with shift" {

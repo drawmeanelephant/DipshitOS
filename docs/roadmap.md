@@ -1003,10 +1003,26 @@ record new hardware assumptions in `docs/hardware-contract.md`.
   command-named topics (`syscalls`, `input`) resolve to their command detail.
   Gate: the byte-identical transcript (regenerated) + the live `help` walk
   `tools/verify-live-help.sh` PASS 1/1 on VZ.
-- **U2 — Shell editing & history.** ⬜ history ring, cursor movement,
-  Ctrl-A/E/K/U/L, Delete, tab completion over the I3 input path.
-- **U3 — Error/usage contract.** ⬜ the mechanical enforcement of D3 (misuse
-  transcript + handler fuzz).
+- **U2 — Shell editing & history.** ✅ **DONE 2026-08-14 (claim 1809).**
+  bounded history ring, cursor left/right + Home/End, Ctrl-A/E/K/U/L/C,
+  Delete, and tab completion over the I3 input path; the arrow/Home/End/
+  Delete usages + Ctrl-chord modifier decoding landed in `input.zig`; the
+  runner gained `--input-chords` (one NSEvent per keyDown/keyUp). Gate:
+  `tools/verify-live-editing.sh` PASS 1/1 on VZ (mid-line insert + Up recall
+  typed by a real keyboard); the unchanged paths stay byte-identical. Also
+  fixed a latent I3 interrupt-ring wrap OOB (`xhci.zig`) the longer sequence
+  exposed (phantom-key re-read).
+- **U3 — Error/usage contract.** ✅ **DONE 2026-08-14 (claim 1511).** one
+  `usage: <cmd> <args>` (registry single usage string, reused for sub-verb
+  misuse via `print_usage`), one `error: <actionable>` (`err_prefix`) across
+  storage/machine/win/kill/netsend/screen/text/exec + the whole net family,
+  one `unknown command '<x>' -- try 'help'`; byte-exact misuse transcript
+  (`usage: pages [selftest]`, `error: …`, the long-line unknown verb) + three
+  deterministic host fuzz tests (tokenizer / handlers / full input path) that
+  never panic. The fuzz found and the card fixed a latent U2 width bug: the
+  history ring's `@min(hist_count, hist_capacity - 1)` inferred **u4** and
+  overflowed at the 16th distinct history entry (explicit `usize` anchor +
+  regression test). Live help + live transcript gates re-run green.
 - **U4 — Pointer focus + cursor.** ⬜ consume the absolute-pointer reports
   into Driving Award hit-test focus + cursor rendering (needs a runner
   pointer-synthesis seam, the I3 keyboard seam's analogue).
