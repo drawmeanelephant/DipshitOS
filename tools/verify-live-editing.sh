@@ -81,6 +81,28 @@ EOF
 
 CHORDS="e,c,h,o,space,a,b,left,c,return,up,return,e,c,h,o,space,u,2,d,o,n,e,return"
 
+# --- phase 2: the six D2 Ctrl chords, over the serial byte path --------------
+# ADR 0008 D2 requires Ctrl-A/E/K/U/L/C. Phase 1 cannot prove them: VZ ignores
+# `modifierFlags` on a synthesized keyDown, so a --input-chords ctrl-* token
+# reaches the guest as the bare letter (observed claim-time; the hardware
+# contract records the three synthesis routes that fail). The bytes a real
+# Ctrl chord produces are 0x01/0x05/0x0b/0x15/0x0c/0x03, and input.zig's HID
+# decode emits exactly those, so feeding them on the serial console exercises
+# the SAME LineEditor path from one byte earlier. Each chord is proven by an
+# observable RESULT, never by the keystroke itself:
+#   Ctrl-A  "cho u2chord" + home + "e"        -> runs `echo u2chord`
+#   Ctrl-E  home, then end, then "d"          -> runs `echo u2end`
+#   Ctrl-K  4x Left then kill-to-end          -> runs `echo u2kill`
+#   Ctrl-U  junk then kill-to-start           -> runs `echo u2under`
+#   Ctrl-L  clear screen mid-line             -> ESC[2J in the log, then runs
+#   Ctrl-C  cancel a line that must NOT run   -> `^C`, and NEVER never runs
+printf 'cho u2chord\001e\n' > artifacts/live-editing-chords.txt
+printf 'echo u2en\001\005d\n' >> artifacts/live-editing-chords.txt
+printf 'echo u2killXXXX\033[D\033[D\033[D\033[D\013\n' >> artifacts/live-editing-chords.txt
+printf 'JUNK\025echo u2under\n' >> artifacts/live-editing-chords.txt
+printf 'echo u2clear\014\n' >> artifacts/live-editing-chords.txt
+printf 'echo NEVER\003echo u2cancel\n' >> artifacts/live-editing-chords.txt
+
 run_one() {
     local out="$1" serial="$2"
     rm -f artifacts/efi-vars.bin artifacts/vm-serial.log
@@ -88,8 +110,9 @@ run_one() {
         --input --display \
         --script artifacts/live-editing-script.txt \
         --input-chords "$CHORDS" --input-chords-after "userspace: el0=1" \
-        --script-expect "u2done" \
-        --timeout 160 \
+        --script2 artifacts/live-editing-chords.txt --script2-after "u2done" \
+        --script-expect "u2cancel" \
+        --timeout 240 \
         > "$out" 2>&1
     local RC=$?
     [ -f artifacts/vm-serial.log ] && cp artifacts/vm-serial.log "$serial" || true
@@ -104,6 +127,7 @@ set -e
 
 SERIAL="artifacts/live-editing-serial.log"
 SERIAL_BYTES=0 ARMED=0 ACB2=0 DONE=0 SERIALOK=0 RUNNERFLAG=0
+CHORD_A=0 CHORD_E=0 CHORD_K=0 CHORD_U=0 CHORD_L=0 CHORD_C=0 NOJUNK=0
 if [ -f "$SERIAL" ]; then
     SERIAL_BYTES=$(wc -c < "$SERIAL" | tr -d ' ')
     # Boot-time input arming: the keyboard path is up after enumeration.
@@ -115,23 +139,40 @@ if [ -f "$SERIAL" ]; then
     if [ "$(grep -a -cFx 'u2done' "$SERIAL" | tr -d ' ')" = "1" ]; then DONE=1; fi
     # The serial marker (the shell stayed responsive on serial).
     grep -a -qF -- "u2-serial-ok" "$SERIAL" && SERIALOK=1
+    # Phase 2 — each of D2's six Ctrl chords, proven by its RESULT. Every
+    # marker is asserted as an exact full line, so the echoed command text
+    # (which contains the same word) is never what satisfies the check.
+    [ "$(grep -a -cFx 'u2chord' "$SERIAL" | tr -d ' ')" = "1" ] && CHORD_A=1  # Ctrl-A
+    [ "$(grep -a -cFx 'u2end' "$SERIAL" | tr -d ' ')" = "1" ] && CHORD_E=1    # Ctrl-E
+    [ "$(grep -a -cFx 'u2kill' "$SERIAL" | tr -d ' ')" = "1" ] && CHORD_K=1   # Ctrl-K
+    [ "$(grep -a -cFx 'u2under' "$SERIAL" | tr -d ' ')" = "1" ] && CHORD_U=1  # Ctrl-U
+    [ "$(grep -a -cFx 'u2cancel' "$SERIAL" | tr -d ' ')" = "1" ] && CHORD_C=1 # Ctrl-C ran the NEXT line
+    # Ctrl-L emits the erase-in-display sequence to the console.
+    grep -a -qF -- $'\033[2J' "$SERIAL" && CHORD_L=1
+    # Ctrl-C cancelled its line: the cancelled command must never have run,
+    # and the editor must have echoed the cancel marker.
+    if [ "$(grep -a -cFx 'NEVER' "$SERIAL" | tr -d ' ')" = "0" ] && grep -a -qF -- '^C' "$SERIAL"; then NOJUNK=1; fi
 fi
 # The runner attached the chord seam (its own report line).
 grep -a -qF -- "input-chords: ENABLED" artifacts/live-editing-run.txt && RUNNERFLAG=1
 
 echo "editing: rc=$RC serial-bytes=$SERIAL_BYTES armed=$ARMED acb-x2=$ACB2 done=$DONE serial-ok=$SERIALOK runner-flag=$RUNNERFLAG"
+echo "chords: ctrl-a=$CHORD_A ctrl-e=$CHORD_E ctrl-k=$CHORD_K ctrl-u=$CHORD_U ctrl-l=$CHORD_L ctrl-c=$CHORD_C cancelled-never-ran=$NOJUNK"
 
 PASS=0
 if [ "$RC" = 0 ] && [ "$ARMED" = 1 ] && [ "$ACB2" = 1 ] && [ "$DONE" = 1 ] && \
-   [ "$SERIALOK" = 1 ] && [ "$RUNNERFLAG" = 1 ]; then
+   [ "$SERIALOK" = 1 ] && [ "$RUNNERFLAG" = 1 ] && \
+   [ "$CHORD_A" = 1 ] && [ "$CHORD_E" = 1 ] && [ "$CHORD_K" = 1 ] && \
+   [ "$CHORD_U" = 1 ] && [ "$CHORD_L" = 1 ] && [ "$CHORD_C" = 1 ] && [ "$NOJUNK" = 1 ]; then
     PASS=1
 fi
 
 {
     echo "DIPSHITOS live editing gate (claim 1809, milestone eight card U2) — scripted chords drive history recall + cursor editing, on real VZ hardware"
     echo "revision: $REVISION branch=$BRANCH dirty-files=$DIRTY"
-    echo "phase: keyboard types 'echo ab <Left> c <Enter> <Up> <Enter> echo u2done <Enter>' after the boot self-test"
-    echo "assertions: input arming, the mid-line insert produced 'echo acb' and the Up recall re-ran it (acb x2), the final marker (u2done x1), the serial marker, the runner's input-chords flag line"
+    echo "phase 1 (USB keyboard): types 'echo ab <Left> c <Enter> <Up> <Enter> echo u2done <Enter>' after the boot self-test"
+    echo "phase 2 (serial bytes): the six D2 Ctrl chords — Ctrl-A/E/K/U/L/C — each proven by the command that ends up running"
+    echo "assertions: input arming, the mid-line insert produced 'echo acb' and the Up recall re-ran it (acb x2), the final marker (u2done x1), the serial marker, the runner's input-chords flag line, one exact-line result per chord (u2chord/u2end/u2kill/u2under/u2clear/u2cancel), the ESC[2J erase from Ctrl-L, and zero runs of the Ctrl-C-cancelled command"
     echo "date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     echo
 } > "$REPORT"
@@ -139,7 +180,7 @@ fi
 echo
 echo "=== result ==="
 if [ "$PASS" = 1 ]; then
-    echo "verify-live-editing: PASS — a scripted keyboard chord sequence (VZ has no keyboard API; the runner synthesizes one NSEvent per keyDown/keyUp into the VZVirtualMachineView) drove mid-line cursor editing (Left + 'c' turned 'echo ab' into 'echo acb') and history recall (Up re-ran it) over the XHCI transport end to end, and the guest's own output is the proof. The default VM is untouched: without --input, config.keyboards/pointingDevices stay []."
+    echo "verify-live-editing: PASS — phase 1: a scripted keyboard chord sequence (VZ has no keyboard API; the runner synthesizes one NSEvent per keyDown/keyUp into the VZVirtualMachineView) drove mid-line cursor editing (Left + 'c' turned 'echo ab' into 'echo acb') and history recall (Up re-ran it) over the XHCI transport end to end. Phase 2: all six ADR 0008 D2 Ctrl chords (A/E/K/U/L/C) ran over the serial byte path — the same LineEditor bytes input.zig's HID decode emits — each proven by its resulting command, with the Ctrl-C-cancelled line never executing. The guest's own output is the proof. The default VM is untouched: without --input, config.keyboards/pointingDevices stay []."
     echo "PASS: $PASS" >> "$REPORT"
     sleep 0.5
     exit 0

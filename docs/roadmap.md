@@ -1025,11 +1025,18 @@ record new hardware assumptions in `docs/hardware-contract.md`.
   history ring's `@min(hist_count, hist_capacity - 1)` inferred **u4** and
   overflowed at the 16th distinct history entry (explicit `usize` anchor +
   regression test). Live help + live transcript gates re-run green.
-- **U4 — Pointer focus + cursor.** ⬜ consume the absolute-pointer reports
-  into Driving Award hit-test focus + cursor rendering (needs a runner
-  pointer-synthesis seam, the I3 keyboard seam's analogue).
-- **U5 — Window HIG.** ⬜ title bars, focus ring, click = focus + raise,
-  keyboard focus cycling.
+- **U4 — Pointer focus + cursor.** ⛔ blocked at the live seam (claim
+  4993; kernel + runner landed and host-tested — five pointer synthesis
+  routes produced zero guest reports, hardware contract; the real-mouse
+  + Accessibility follow-ups recorded).
+- **U5 — Window HIG.** ✅ **DONE 2026-08-14 (claim 0935).** title bars
+  (name + owning pid) on user windows, a white 3-px focus ring on the
+  focused window (focus changes repaint the scene), click = focus + raise
+  (topmost hit-test), and keyboard focus cycling (`cycle_focus` + the `win
+  cycle` command; the Alt+Tab HID decode is host-tested). Gate:
+  `tools/verify-live-win-hig.sh` PASS 8/8 on VZ — scale-aware pixel proof:
+  the ring on the focused window, the terminal edge NOT ringed, the user
+  window's title-bar strip.
 - **U6 — First-boot experience.** ⬜ `welcome`/`about` refresh + boot motd.
 - **U7 — `sysinfo`.** ⬜ the one-command support snapshot.
 - **U8 — Persistent settings.** ⬜ `settings get/set` backed by a DATA-partition
