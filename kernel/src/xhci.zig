@@ -296,14 +296,44 @@ var intr_ring: [max_enumerated][tr_ring_len]Trb align(64) = undefined;
 var intr_enq: [max_enumerated]usize = [_]usize{0} ** max_enumerated;
 var intr_deq: [max_enumerated]usize = [_]usize{0} ** max_enumerated;
 var intr_cycle: [max_enumerated]u1 = [_]u1{1} ** max_enumerated;
+/// The largest interrupt-IN packet any enumerated device reports (the
+/// absolute pointer's maxpkt 10; the keyboard's 8). The report buffers and
+/// the armed TRB length are sized to the DEVICE's maxpkt — issue #118: the
+/// buffers were fixed [8]u8 with the TRB length clamped to 8, silently
+/// truncating the pointer's 10-byte reports.
+pub const max_report_bytes: usize = 10;
+
 /// The most recently completed report (the `usb report` / `input` view).
-var intr_report: [max_enumerated][8]u8 align(64) = undefined;
+var intr_report: [max_enumerated][max_report_bytes]u8 align(64) = undefined;
 /// Per-ring-slot report buffers — one per armed interrupt-IN TRB (the slot
 /// index = the ring slot that TRB occupies). Card I3 depth-buffering: with
 /// several TRBs armed the controller can complete multiple reports between
 /// guest polls (a keyDown + keyUp arriving while the shell prints), instead
 /// of dropping every report after the first when a single TRB is armed.
-var intr_slots: [max_enumerated][tr_usable][8]u8 align(64) = undefined;
+var intr_slots: [max_enumerated][tr_usable][max_report_bytes]u8 align(64) = undefined;
+
+/// Interrupt-IN depth: how many report TRBs stay armed per device. Claim
+/// 6050 (I3) concluded depth 1 was "correct" because a multi-TRB (8)
+/// experiment "wrapped the transfer ring at the 8th report and dropped
+/// everything after" — but that experiment ran against the PRE-U2
+/// `xhci_arm_intr`, which read the report-buffer slot with the PRE-wrap
+/// enqueue index (`intr_slots[slot][tr_usable]`, one past the array) and
+/// armed garbage TRBs at the wrap. The U2 fix (`intr_slot_index`) landed
+/// 2026-08-14 (claim 1809); issue #117 re-tests depth here.
+///
+/// Measured on VZ (2026-08-15, claim-time): depth 8 delivers the full
+/// typed sequence byte-exact at the VZ keyboard ceiling (~1.5-2 s per
+/// report — the host's state-based keyboard flushes roughly one report per
+/// full-frame present, and keyDown/keyUp pairs inside that window net to
+/// zero). Depth does NOT raise that steady-state rate (a host delivery
+/// limit, not a guest bug); its value is the correct XHCI shape (several
+/// interrupt-IN TRBs, each owning its own report buffer) plus buffering the
+/// bursts VZ delivers when its main queue stalls behind display updates.
+pub const intr_depth: usize = 8;
+
+/// How many TRBs are currently armed per device (the top-up loop's
+/// accounting; increments on enqueue, decrements on completion).
+var intr_armed: [max_enumerated]usize = [_]usize{0} ** max_enumerated;
 
 /// Per-slot interrupt endpoint max packet (the TRB length the arm uses).
 var intr_maxpkt: [max_enumerated]u16 = [_]u16{0} ** max_enumerated;
@@ -720,8 +750,9 @@ fn xhci_init_transfer_rings() void {
         intr_enq[i] = 0;
         intr_deq[i] = 0;
         intr_cycle[i] = 1;
-        intr_report[i] = [_]u8{0} ** 8;
-        intr_slots[i] = [_][8]u8{[_]u8{0} ** 8} ** tr_usable;
+        intr_armed[i] = 0;
+        intr_report[i] = [_]u8{0} ** max_report_bytes;
+        intr_slots[i] = [_][max_report_bytes]u8{[_]u8{0} ** max_report_bytes} ** tr_usable;
         mmu.clean_dcache_range(@intFromPtr(ring), @sizeOf(@TypeOf(ring.*)));
     }
     enum_count = 0;
@@ -1051,21 +1082,44 @@ fn intr_slot_index(enq: usize) usize {
     return if (enq == tr_usable) 0 else enq;
 }
 
-/// Arm slot `slot_id`'s interrupt-IN endpoint with one Normal TRB pointing
-/// at the NEXT ring slot's report buffer + ring the doorbell. Each armed
-/// TRB owns its slot's report buffer, so a completed TRB is read back from
-/// the slot it occupies (the dequeue pointer names it).
+/// The armed TRB length for a device's interrupt-IN endpoint: its maxpkt,
+/// bounded by the report-buffer size (issue #118 — never clamp a 10-byte
+/// pointer report to an 8-byte buffer). Pure — host-testable.
+fn intr_trb_len(maxpkt: u16) u32 {
+    return @min(@as(u32, maxpkt), max_report_bytes);
+}
+
+/// How many TRBs the top-up should enqueue to reach `intr_depth` (bounded
+/// by the ring's usable slots). Pure — host-testable.
+fn intr_topup_budget(armed: usize, depth: usize, usable: usize) usize {
+    const want = @min(depth, usable);
+    return if (armed < want) want - armed else 0;
+}
+
+/// Arm slot `slot_id`'s interrupt-IN endpoint: top up the armed TRB depth to
+/// `intr_depth` (one Normal TRB per ring slot, each pointing at ITS OWN
+/// report buffer — the slot index the TRB occupies) + ring the doorbell.
+/// Each armed TRB owns its slot's report buffer, so a completed TRB is read
+/// back from the slot it occupies (the dequeue pointer names it). The first
+/// arm enqueues the full depth; every completion consumes one and the poll
+/// re-arms (top-up) one, so the depth stays constant. Issue #117 re-tests
+/// depth after the U2 wrap fix.
 fn xhci_arm_intr(slot_id: u8) void {
     const slot_idx = slot_id - 1;
-    // The buffer slot is the POST-wrap ring index (tr_enqueue_intr places the
-    // Normal TRB at slot 0 when the enqueue pointer is at the Link TRB).
-    const idx = intr_slot_index(intr_enq[slot_idx]);
-    const len: u32 = @min(@as(u32, intr_maxpkt[slot_idx]), 8);
-    tr_enqueue_intr(slot_idx, .{
-        .param = ring_phys(&intr_slots[slot_idx][idx]),
-        .status = len,
-        .control = (trb_normal << 10) | trb_ioc,
-    });
+    const budget = intr_topup_budget(intr_armed[slot_idx], intr_depth, tr_usable);
+    var k: usize = 0;
+    while (k < budget) : (k += 1) {
+        // The buffer slot is the POST-wrap ring index (tr_enqueue_intr places
+        // the Normal TRB at slot 0 when the enqueue pointer is at the Link
+        // TRB).
+        const idx = intr_slot_index(intr_enq[slot_idx]);
+        tr_enqueue_intr(slot_idx, .{
+            .param = ring_phys(&intr_slots[slot_idx][idx]),
+            .status = intr_trb_len(intr_maxpkt[slot_idx]),
+            .control = (trb_normal << 10) | trb_ioc,
+        });
+        intr_armed[slot_idx] += 1;
+    }
     // VZ keys interrupt-IN delivery on the endpoint context's TR Dequeue
     // Pointer (it re-reads the context from memory on each doorbell, rather
     // than tracking the dequeue in internal state). Advance the context's
@@ -1084,7 +1138,7 @@ pub fn xhci_poll_intr_nb(slot_id: u8) bool {
     if (slot_id == 0 or slot_id > max_enumerated) return false;
     const slot_idx = slot_id - 1;
     if (!enum_devs[slot_idx].present or enum_devs[slot_idx].ep_in_num == 0) return false;
-    if (intr_deq[slot_idx] == intr_enq[slot_idx]) return false; // no armed TRB
+    if (intr_armed[slot_idx] == 0) return false; // no armed TRB
     const ring = &intr_ring[slot_idx];
     const trb_phys = ring_phys(&ring[intr_deq[slot_idx]]);
     // Scan only FRESH events (the cycle bit matches); a no-event poll is
@@ -1101,14 +1155,15 @@ pub fn xhci_poll_intr_nb(slot_id: u8) bool {
             evt_advance();
             if (cc != cc_success) return false;
             const dq = intr_deq[slot_idx];
-            mmu.invalidate_dcache_range(@intFromPtr(&intr_slots[slot_idx][dq]), 8);
-            const total: u32 = @min(@as(u32, intr_maxpkt[slot_idx]), 8);
+            mmu.invalidate_dcache_range(@intFromPtr(&intr_slots[slot_idx][dq]), max_report_bytes);
+            const total: u32 = intr_trb_len(intr_maxpkt[slot_idx]);
             const got = if (remaining <= total) total - remaining else 0;
             intr_report[slot_idx] = intr_slots[slot_idx][dq];
             enum_devs[slot_idx].last_report_len = @intCast(got);
             enum_devs[slot_idx].report_seq += 1;
             intr_deq_advance(slot_idx);
-            xhci_arm_intr(slot_id); // re-arm one (depth stays constant)
+            if (intr_armed[slot_idx] > 0) intr_armed[slot_idx] -= 1;
+            xhci_arm_intr(slot_id); // top up (depth stays constant)
             return true;
         }
         evt_advance(); // consume any other fresh event (port change, etc.)
@@ -1123,19 +1178,20 @@ pub fn xhci_poll_intr(slot_id: u8) bool {
     if (slot_id == 0 or slot_id > max_enumerated) return false;
     const slot_idx = slot_id - 1;
     if (!enum_devs[slot_idx].present or enum_devs[slot_idx].ep_in_num == 0) return false;
-    if (intr_deq[slot_idx] == intr_enq[slot_idx]) return false; // no armed TRB
+    if (intr_armed[slot_idx] == 0) return false; // no armed TRB
     const ring = &intr_ring[slot_idx];
     const trb_phys = ring_phys(&ring[intr_deq[slot_idx]]);
     const r = wait_transfer(trb_phys);
     if (r.cc == cc_success) {
         const dq = intr_deq[slot_idx];
-        mmu.invalidate_dcache_range(@intFromPtr(&intr_slots[slot_idx][dq]), 8);
-        const total: u32 = @min(@as(u32, intr_maxpkt[slot_idx]), 8);
+        mmu.invalidate_dcache_range(@intFromPtr(&intr_slots[slot_idx][dq]), max_report_bytes);
+        const total: u32 = intr_trb_len(intr_maxpkt[slot_idx]);
         const got = if (r.remaining <= total) total - r.remaining else 0;
         intr_report[slot_idx] = intr_slots[slot_idx][dq];
         enum_devs[slot_idx].last_report_len = @intCast(got);
         enum_devs[slot_idx].report_seq += 1;
         intr_deq_advance(slot_idx);
+        if (intr_armed[slot_idx] > 0) intr_armed[slot_idx] -= 1;
         xhci_arm_intr(slot_id);
         return true;
     }
@@ -1315,8 +1371,8 @@ fn xhci_enumerate_port(port: u8) bool {
 
 /// The last raw report bytes + length for a device slot (the `usb report`
 /// decode).
-pub fn xhci_report(slot_id: u8) struct { len: u8, bytes: [8]u8 } {
-    if (slot_id == 0 or slot_id > max_enumerated) return .{ .len = 0, .bytes = [_]u8{0} ** 8 };
+pub fn xhci_report(slot_id: u8) struct { len: u8, bytes: [max_report_bytes]u8 } {
+    if (slot_id == 0 or slot_id > max_enumerated) return .{ .len = 0, .bytes = [_]u8{0} ** max_report_bytes };
     const slot_idx = slot_id - 1;
     return .{ .len = enum_devs[slot_idx].last_report_len, .bytes = intr_report[slot_idx] };
 }
@@ -1355,6 +1411,68 @@ test "xhci: intr report-buffer slot wraps at the Link TRB boundary" {
     try std.testing.expectEqual(@as(usize, 0), intr_slot_index(tr_usable));
     try std.testing.expectEqual(@as(usize, 0), intr_slot_index(0));
     try std.testing.expectEqual(@as(usize, 14), intr_slot_index(14));
+}
+
+test "xhci: issue #118 — the armed TRB length is the device maxpkt, never clamped to 8" {
+    // The absolute pointer enumerates with maxpkt 10; the report buffers are
+    // sized to max_report_bytes (10), so a 10-byte report survives the arm/
+    // poll round trip whole.
+    try std.testing.expectEqual(@as(usize, 10), max_report_bytes);
+    try std.testing.expectEqual(@as(u32, 8), intr_trb_len(8)); // keyboard
+    try std.testing.expectEqual(@as(u32, 10), intr_trb_len(10)); // pointer — NOT 8
+    try std.testing.expectEqual(@as(u32, 0), intr_trb_len(0));
+    // The report buffer holds the pointer's full packet.
+    try std.testing.expectEqual(@as(usize, 10), @sizeOf(@TypeOf(intr_slots[0][0])));
+    try std.testing.expectEqual(@as(usize, 10), @sizeOf(@TypeOf(intr_report[0])));
+}
+
+test "xhci: issue #117 — the multi-TRB top-up keeps the armed depth constant across ring wraps" {
+    // Model the arm/consume cycle with the module's own wrap rules (the Link
+    // TRB at tr_usable wraps the enqueue pointer to 0; the dequeue pointer
+    // wraps at tr_usable too; in-order completion). Across 1000 reports the
+    // armed count must stay at intr_depth and the top-up must never enqueue
+    // onto a still-armed ring slot.
+    var enq: usize = 0;
+    var deq: usize = 0;
+    var armed: usize = 0;
+    // slot 0..14 -> the ring position a TRB occupies (0 = post-wrap slot 0).
+    var occupied = [_]bool{false} ** tr_usable;
+
+    // One arm step mirroring tr_enqueue_intr + xhci_arm_intr exactly: the
+    // enqueue pointer wraps at tr_usable (writing the Link TRB, toggling the
+    // cycle) BEFORE the Normal TRB is placed, and the report-buffer slot is
+    // intr_slot_index(enq) — which equals the post-wrap ring position.
+    const place = struct {
+        fn do(e: *usize, occ: *[tr_usable]bool, arm: *usize) void {
+            if (e.* == tr_usable) e.* = 0; // the Link-TRB wrap
+            const pos = e.*;
+            std.debug.assert(!occ[pos]); // never overwrite an armed slot
+            occ[pos] = true;
+            e.* += 1;
+            arm.* += 1;
+        }
+    }.do;
+
+    // Initial arm: the top-up budget is the full depth.
+    var budget = intr_topup_budget(armed, intr_depth, tr_usable);
+    try std.testing.expectEqual(@as(usize, intr_depth), budget);
+    while (budget > 0) : (budget -= 1) place(&enq, &occupied, &armed);
+
+    var report: usize = 0;
+    while (report < 1000) : (report += 1) {
+        // Consume the oldest armed report (the deq position), in order.
+        const pos = deq;
+        try std.testing.expect(occupied[pos]);
+        occupied[pos] = false;
+        deq += 1;
+        if (deq == tr_usable) deq = 0;
+        armed -= 1;
+        // Top up back to depth — exactly one per completion.
+        try std.testing.expectEqual(@as(usize, 1), intr_topup_budget(armed, intr_depth, tr_usable));
+        place(&enq, &occupied, &armed);
+        // Invariant: depth stays constant, no slot double-armed.
+        try std.testing.expectEqual(@as(usize, intr_depth), armed);
+    }
 }
 
 test "xhci: ring geometry — the link TRB holds the wrap boundary" {
