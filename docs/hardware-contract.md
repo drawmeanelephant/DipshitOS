@@ -189,10 +189,18 @@ assumption comes from documentation or reasoning only.
     immediately (the I2/I3 seam). Follow-ups: the REAL-mouse path is now
     wired as a CLASS-C gate (`bash tools/verify-pointer-manual.sh`, claim
     9015) — a human at the mouse proves the guest stack live and is the
-    only route that can, since every synthesized route fails; the CG
-    route under Accessibility trust remains the other open follow-up. The
-    runner keeps the seam (`--pointer`, `--pointer-after`,
-    `--pointer-route window|app|cg`) for that CG follow-up.
+    only route that can, since every synthesized route fails. The CG
+    route under Accessibility trust is now a CLASS-B gate (`bash
+    tools/verify-live-pointer-cg.sh`, claim 3692) that SELF-GATES on the
+    trust: the runner reports `PTR-TRUST: untrusted` (observed
+    2026-08-15: `AXIsProcessTrusted=false` +
+    `CGPreflightPostEventAccess=false` for the terminal) instead of
+    silently dropping, and the gate FAILs with the exact System Settings
+    grant steps until a human grants it — then the CG HID-tap route is
+    fully automatable and supersedes the class-C gate. The runner keeps
+    the seam (`--pointer`, `--pointer-after`,
+    `--pointer-route window|app|cg`, plus `--pointer-request-trust` to
+    prompt the system).
     **[observed]** — the probe runs under `artifacts/u45-probe*`; the
     guest-side consumption (click = focus + raise, cursor render,
     Alt+Tab decode) is host-tested in `driving_award.zig`/`input.zig`.
