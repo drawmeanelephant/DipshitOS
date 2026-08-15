@@ -408,3 +408,37 @@ ABI — x8 number, x0–x5 arguments, x0 result, reserved 21–63, error
 codes — is otherwise unchanged. The window registry + compositor stay in
 the G5 card (`kernel/src/driving_award.zig`); these handlers only marshal
 args and call through to it.
+
+## Amendment (2026-08-15, claim 6359 — the EL0 exec seam card)
+
+Milestone 11's A5 tracker claim called DESKTOP.BIN a "clickable application
+menu to launch EL0 programs" — but the code only selected apps; `exec` was
+an EL1h monitor command only. This card freezes slot 28 in the dispatch
+table (the card's ONE ABI change, following the file slots-23/27 precedent;
+every existing syscall number 0–27 stays frozen):
+
+| 28 | `sys_exec` | `exec(path_ptr, path_len) -> i64` | Copy the `.BIN` name through uaccess, then run the EL1h loader (`exec.exec_file`) to load the program from the ESP into a FRESH process slot and spawn it at EL0. Returns the new process's pid on success (surfaced via `exec.last_exec_pid` — an EL0 launcher can hand it to `sys_wait` or a future `sys_kill`); `EINVAL` for a non-process caller (an EL1h task), an empty/over-long path, or a loader refusal (`.no_disk`, `.bad_magic`, `.bad_entry`, `.too_large`, `.no_args_room`, `.too_many_args`); `EFAULT` for a bad path pointer; `ENOENT` when the file is absent from the volume; `ENOSPC` for a capacity refusal (scheduler pool full, page allocator exhausted, page-table carve-out full, process registry full). No args in this row — a future amendment may add an argv block (the card-3e monitor form). |
+
+`implemented_count` is now 29; the `syscalls` report prints rows 0–28.
+The path crosses the claim-6120 uaccess window exactly like slot 23; the
+loader itself is unchanged (the EL0 caller gets the SAME `exec_file` path
+as the monitor command, so any program the EL1h shell can run, an EL0
+program can run). A caller may exec a second program while its own window
+stays up — the spawned process owns its own window slot (the G5
+`user_windows_max` 4 covers up to four concurrent GUI apps).
+
+The EL0 proof rides DESKTOP.BIN: its quick-launch buttons and Enter-on-
+selection call `ui.exec_program(name)` (slot 28), and the class-B gate
+`tools/verify-live-desktop.sh` types Enter after `desktop: menu ready` and
+asserts `desktop: launch CALC.BIN`, the launched `calc: ready`, and
+`28 sys_exec calls=1` in the `syscalls` report — the launcher is real.
+
+As with slots 23–27, this is the Milestone 11/12 boundary's ABI amendment;
+the ABI — x8 number, x0–x5 arguments, x0 result, reserved 29–63, error
+codes — is otherwise unchanged. The loader stays in the milestone-three
+card (`kernel/src/exec.zig`); this handler only marshals the path through
+uaccess and calls through to it.
+
+**Slot-allocation note:** Milestone 12's TCP seam (issue #148) originally
+planned slots 28–31; slot 28 is now `sys_exec`, so the TCP plan moves to
+slots 29–32 (the issue body is updated to match).

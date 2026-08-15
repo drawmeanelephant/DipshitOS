@@ -144,6 +144,20 @@ pub const LoadedInfo = struct {
     stack_va: u64,
 };
 
+/// Claim 6359 (ADR 0007 slot 28): the pid of the most recently exec'd
+/// process, set at the loader's success point. `sys_exec` returns it so an
+/// EL0 launcher can hand the new pid to `sys_wait`/a future `sys_kill`.
+/// A later exec overwrites it (single-core, exec is synchronous — no
+/// interleaving exec can race the read at return time); the EL1h monitor
+/// ignores it.
+var last_pid: ?usize = null;
+
+/// Claim 6359: the pid the last successful `exec_file` spawned (null
+/// before any exec succeeds).
+pub fn last_exec_pid() ?usize {
+    return last_pid;
+}
+
 /// What the current process's image is (claim 3848): the descriptor lives
 /// in the process registry, so this reads the most recently created
 /// process instead of a module-global copy — a later exec never leaves
@@ -334,6 +348,9 @@ pub fn exec_file(name: []const u8, args: []const []const u8) ExecResult {
         _ = process.reap(proc_id);
         return .pool_full;
     }
+    // Claim 6359 (slot 28 `sys_exec`): record the spawned pid at the true
+    // success point so the EL0 caller can read it back.
+    last_pid = proc_id;
     return .ok;
 }
 
@@ -512,6 +529,9 @@ test "exec: ok path loads, validates, builds the root, and spawns the task" {
     // process (exited, status 7) and the new USER.BIN process (bound to
     // the spawned task, carrying the rebuilt address space) both exist.
     try std.testing.expectEqual(@as(usize, 2), process.count());
+    // Claim 6359 (slot 28 `sys_exec`): the loader records the spawned pid
+    // so an EL0 caller can read it back.
+    try std.testing.expectEqual(@as(?usize, 1), last_exec_pid());
     const boot_proc = process.info(0).?;
     try std.testing.expectEqualStrings("user-el0", boot_proc.name);
     try std.testing.expectEqual(process.State.exited, boot_proc.state);

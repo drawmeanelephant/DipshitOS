@@ -128,20 +128,16 @@ pub const AppState = struct {
 
         if (self.btn_calc.handle_event(ev)) {
             self.list_apps.selected_idx = 0;
-            ui.write_console("desktop: select CALC.BIN\n");
-            changed = true;
+            changed = launch_app(0) or changed;
         } else if (self.btn_notes.handle_event(ev)) {
             self.list_apps.selected_idx = 1;
-            ui.write_console("desktop: select NOTEPAD.BIN\n");
-            changed = true;
+            changed = launch_app(1) or changed;
         } else if (self.btn_top.handle_event(ev)) {
             self.list_apps.selected_idx = 2;
-            ui.write_console("desktop: select TOP.BIN\n");
-            changed = true;
+            changed = launch_app(2) or changed;
         } else if (self.btn_key.handle_event(ev)) {
             self.list_apps.selected_idx = 3;
-            ui.write_console("desktop: select KEYTEST.BIN\n");
-            changed = true;
+            changed = launch_app(3) or changed;
         } else if (self.list_apps.handle_event(ev)) {
             if (self.list_apps.selected_idx) |sel| {
                 if (sel < installed_apps.len) {
@@ -157,6 +153,18 @@ pub const AppState = struct {
     pub fn handle_keyboard_event(self: *AppState, ev: *const Event) bool {
         if (ev.kind != ui.KEY_DOWN) return false;
 
+        // Enter (HID usage 0x28 / '\n'): launch the selected app — the
+        // keyboard half of the launcher (claim 6359).
+        const ascii_char: u8 = @truncate(ev.arg1);
+        if (ev.arg0 == 0x28 or ascii_char == '\n') {
+            if (self.list_apps.selected_idx) |sel| {
+                if (sel < installed_apps.len) {
+                    return launch_app(sel);
+                }
+            }
+            return false;
+        }
+
         if (self.list_apps.handle_event(ev)) {
             ui.write_console("desktop: select app\n");
             return true;
@@ -165,6 +173,29 @@ pub const AppState = struct {
         return false;
     }
 };
+
+// ---------------------------------------------------------------------------
+// Launcher (Claim 6359: ADR 0007 slot 28 sys_exec)
+// ---------------------------------------------------------------------------
+
+/// Launch the installed app at `index` through the EL0 exec seam — the
+/// launcher half of the desktop. Prints a `desktop: launch <NAME> pid=<n>`
+/// marker (or the negative error) for the live gate. Never blocks: exec
+/// spawns a fresh process into a new slot and returns the pid immediately.
+pub fn launch_app(index: usize) bool {
+    if (index >= installed_apps.len) return false;
+    const app = &installed_apps[index];
+    const res = ui.exec_program(app.name);
+    var buf: [56]u8 = undefined;
+    if (res >= 0) {
+        const msg = std.fmt.bufPrint(&buf, "desktop: launch {s} pid={d}\n", .{ app.name, res }) catch "desktop: launch ?\n";
+        ui.write_console(msg);
+    } else {
+        const msg = std.fmt.bufPrint(&buf, "desktop: launch {s} err={d}\n", .{ app.name, res }) catch "desktop: launch err\n";
+        ui.write_console(msg);
+    }
+    return true;
+}
 
 // ---------------------------------------------------------------------------
 // Entry Point (EL0)
@@ -243,4 +274,30 @@ test "desktop: installed application catalog metadata" {
     try std.testing.expectEqualStrings("NOTEPAD.BIN", installed_apps[1].name);
     try std.testing.expectEqualStrings("TOP.BIN", installed_apps[2].name);
     try std.testing.expectEqualStrings("KEYTEST.BIN", installed_apps[3].name);
+}
+
+test "desktop: Enter routes the selected list item to launch (claim 6359)" {
+    var app = AppState.init();
+    // The catalog starts selected at index 0 (CALC.BIN)
+    try std.testing.expectEqual(@as(?usize, 0), app.list_apps.selected_idx);
+
+    // Enter (HID usage 0x28, ASCII '\n') with a selection -> launch
+    var ev_enter = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 1, .arg0 = 0x28, .arg1 = '\n' };
+    try std.testing.expect(app.handle_keyboard_event(&ev_enter));
+
+    // No selection -> nothing to launch
+    app.list_apps.selected_idx = null;
+    var ev_enter2 = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 2, .arg0 = 0x28, .arg1 = '\n' };
+    try std.testing.expect(!app.handle_keyboard_event(&ev_enter2));
+
+    // Out-of-range selection -> nothing to launch
+    app.list_apps.selected_idx = installed_apps.len;
+    var ev_enter3 = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 3, .arg0 = 0x28, .arg1 = '\n' };
+    try std.testing.expect(!app.handle_keyboard_event(&ev_enter3));
+
+    // Arrow navigation is untouched by the launch path
+    app.list_apps.selected_idx = 0;
+    var ev_down = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 4, .arg0 = 0x51, .arg1 = 0 };
+    try std.testing.expect(app.handle_keyboard_event(&ev_down));
+    try std.testing.expectEqual(@as(?usize, 1), app.list_apps.selected_idx);
 }

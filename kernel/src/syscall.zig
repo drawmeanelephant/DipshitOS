@@ -66,9 +66,11 @@ const userspace = @import("userspace.zig");
 const driving_award = @import("driving_award.zig"); // claim 1543/0487 (cards G5/G6): the window manager this seam renders into
 const events = @import("events.zig"); // Milestone 9 (claim 1016): application event queues
 const file_table = @import("file_table.zig"); // Milestone 10 (claim 3570): userland storage ABI
+const esp_exec = @import("exec.zig"); // Claim 6359 (ADR 0007 slot 28): the EL0 exec seam — reuse the EL1h loader
+const esp = @import("esp.zig"); // Claim 6359: the ESP name bound for the path check
 
 pub const slot_count: usize = 64;
-pub const implemented_count: usize = 28;
+pub const implemented_count: usize = 29;
 /// Card G6 (claim 0487) follow-on (slot 18): the fixed `sys_win_get` shape —
 /// four u32 LE words (x, y, w, h), 16 bytes, marshaled per call and copy_out'd
 /// through uaccess (the procs snapshot pattern).
@@ -154,6 +156,12 @@ pub const sys_file_read: u64 = 24;
 pub const sys_file_write: u64 = 25;
 pub const sys_file_close: u64 = 26;
 pub const sys_dir_list: u64 = 27;
+/// Claim 6359: `sys_exec(path_ptr, path_len)` — the EL0 exec seam. Copies
+/// the `.BIN` name through uaccess and runs the EL1h loader
+/// (`exec.exec_file`) to load the program from the ESP into a fresh
+/// process slot and spawn it at EL0 — so an EL0 launcher (DESKTOP.BIN)
+/// actually launches apps. Returns the new process's pid on success.
+pub const sys_exec: u64 = 28;
 
 pub const ErrorCode = enum(i64) {
     einval = -1,
@@ -250,6 +258,7 @@ fn ensure_table() *const [slot_count]Entry {
         table_storage[sys_file_write] = .{ .name = "sys_file_write", .handler = handle_file_write };
         table_storage[sys_file_close] = .{ .name = "sys_file_close", .handler = handle_file_close };
         table_storage[sys_dir_list] = .{ .name = "sys_dir_list", .handler = handle_dir_list };
+        table_storage[sys_exec] = .{ .name = "sys_exec", .handler = handle_exec };
         table_ready = true;
     }
     return &table_storage;
@@ -859,9 +868,44 @@ fn handle_dir_list(args: Args, _: *exceptions.VectorFrame) u64 {
     return @intCast(populated);
 }
 
-/// Deterministic monitor output for the twenty-eight implemented rows and their counters.
+/// Claim 6359 (ADR 0007 slot 28): `sys_exec(path_ptr, path_len)` — the
+/// EL0 exec seam. Marshals the path through the claim-6120 uaccess window
+/// (the `sys_file_open` pattern), requires a process caller, and reuses
+/// the EL1h loader `exec.exec_file` to load the named `.BIN` from the ESP
+/// into a fresh process slot and spawn it at EL0. Returns the new
+/// process's pid on success (via `exec.last_exec_pid`); the caller may
+/// hand it to `sys_wait` or a future `sys_kill`. Errors: `EINVAL` for a
+/// non-process caller, an empty/over-long path, or a loader refusal
+/// (no disk, bad DSK1 image, oversize, no args room); `EFAULT` for a bad
+/// path pointer; `ENOENT` when the file is absent; `ENOSPC` when a
+/// capacity gate refuses (pool, page allocator, page-table carve-out,
+/// process registry).
+fn handle_exec(args: Args, _: *exceptions.VectorFrame) u64 {
+    const path_ptr = args[0];
+    const path_len = args[1];
+    if (path_len == 0 or path_len > esp.name_max) return error_result(.einval);
+    // The caller must be a process (an EL1h task cannot exec from EL0).
+    _ = process.find_by_task(scheduler.current_id()) orelse return error_result(.einval);
+
+    var path_buf: [esp.name_max]u8 = undefined;
+    if (uaccess.copy_in(&path_buf, path_ptr, @intCast(path_len)) != .ok) return error_result(.efault);
+
+    const res = esp_exec.exec_file(path_buf[0..path_len], &.{});
+    return switch (res) {
+        .ok => blk: {
+            // The pid is set at the loader's success point; a missing
+            // value (unreachable in practice) degrades to 0.
+            break :blk @as(u64, if (esp_exec.last_exec_pid()) |new_pid| @intCast(new_pid) else 0);
+        },
+        .no_disk, .too_large, .bad_magic, .bad_entry, .no_args_room, .too_many_args => error_result(.einval),
+        .not_found => error_result(.enoent),
+        .pool_full, .out_of_memory, .table_full, .process_full => error_result(.enospc),
+    };
+}
+
+/// Deterministic monitor output for the twenty-nine implemented rows and their counters.
 pub fn report(con: *console.Console) void {
-    con.puts("syscalls: slots=64 implemented=28\n");
+    con.puts("syscalls: slots=64 implemented=29\n");
     var number: u64 = 0;
     while (number < implemented_count) : (number += 1) {
         const info = entry_info(number).?;
@@ -906,7 +950,7 @@ test "syscall: runtime table has 64 slots and twenty-one unique implemented rows
             implemented += 1;
         }
     }
-    try std.testing.expectEqual(@as(usize, 28), implemented);
+    try std.testing.expectEqual(@as(usize, 29), implemented);
     try std.testing.expectEqualStrings("sys_ping", entry_info(0).?.name);
     try std.testing.expectEqualStrings("sys_exit", entry_info(3).?.name);
     try std.testing.expectEqualStrings("sys_sleep", entry_info(4).?.name);
@@ -933,7 +977,7 @@ test "syscall: runtime table has 64 slots and twenty-one unique implemented rows
     try std.testing.expectEqualStrings("sys_file_write", entry_info(25).?.name);
     try std.testing.expectEqualStrings("sys_file_close", entry_info(26).?.name);
     try std.testing.expectEqualStrings("sys_dir_list", entry_info(27).?.name);
-    try std.testing.expect(entry_info(28) == null);
+    try std.testing.expectEqualStrings("sys_exec", entry_info(28).?.name);
     try std.testing.expect(entry_info(63) == null);
 }
 
@@ -1853,7 +1897,7 @@ test "syscall: counters are monotonic and report is deterministic" {
     var con = mock.console();
     report(&con);
     try std.testing.expectEqualStrings(
-        "syscalls: slots=64 implemented=28\n" ++
+        "syscalls: slots=64 implemented=29\n" ++
             "  0 sys_ping calls=2\n" ++
             "  1 sys_write calls=0\n" ++
             "  2 sys_yield calls=0\n" ++
@@ -1881,7 +1925,8 @@ test "syscall: counters are monotonic and report is deterministic" {
             "  24 sys_file_read calls=0\n" ++
             "  25 sys_file_write calls=0\n" ++
             "  26 sys_file_close calls=0\n" ++
-            "  27 sys_dir_list calls=0\n",
+            "  27 sys_dir_list calls=0\n" ++
+            "  28 sys_exec calls=0\n",
         mock.contents(),
     );
 }
@@ -1927,6 +1972,44 @@ test "syscall: file storage slots 23..27 dispatch and fault safety" {
     try std.testing.expectEqual(error_result(.ebadf), dispatch(sys_file_write, .{ 99, test_buf_addr, 10, 0, 0, 0 }, &frame));
     try std.testing.expectEqual(error_result(.ebadf), dispatch(sys_file_close, .{ 0, 0, 0, 0, 0, 0 }, &frame));
     try std.testing.expectEqual(error_result(.ebadf), dispatch(sys_file_close, .{ 99, 0, 0, 0, 0, 0 }, &frame));
+}
+
+test "syscall: slot 28 sys_exec marshals the path and maps loader errors" {
+    userspace.init();
+    init(test_writer);
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0); // task 2 = process 0 (boot payload)
+    scheduler.start();
+    esp.reset(); // no disk mounted — exec_file reports no_disk honestly
+    var frame = fresh_frame();
+
+    // In task 0 (shell, not a registered process), sys_exec returns EINVAL
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_exec, .{ 0x1000, 8, 0, 0, 0, 0 }, &frame));
+    // Empty path and an over-long path are EINVAL (checked before uaccess)
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_exec, .{ 0x1000, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_exec, .{ 0x1000, esp.name_max + 1, 0, 0, 0, 0 }, &frame));
+
+    // Yield to the user task (task 2, pid 0)
+    try std.testing.expect(scheduler.yield_current()); // shell -> worker
+    try std.testing.expect(scheduler.yield_current()); // worker -> user (2)
+    try std.testing.expectEqual(@as(usize, 2), scheduler.current_id());
+    try std.testing.expect(process.find_by_task(2) != null);
+
+    var path_buf: [16]u8 = undefined;
+    const path_addr = @intFromPtr(&path_buf);
+    set_user_regions(
+        .{ .base = 0, .len = 0 },
+        .{ .base = path_addr, .len = path_buf.len },
+    );
+
+    // Bad path pointer -> EFAULT
+    try std.testing.expectEqual(error_result(.efault), dispatch(sys_exec, .{ uaccess.diagnostic_unmapped, 8, 0, 0, 0, 0 }, &frame));
+    // No disk -> EINVAL (exec_file .no_disk — the loader cannot mount the ESP)
+    @memcpy(path_buf[0..8], "CALC.BIN");
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_exec, .{ path_addr, 8, 0, 0, 0, 0 }, &frame));
+    // The slot is counted like every other implemented row
+    try std.testing.expectEqual(@as(u64, 5), call_count(sys_exec));
 }
 
 test "syscall: sys_poll_event and sys_wait_event handle events, blocking, and uaccess fault safety" {
