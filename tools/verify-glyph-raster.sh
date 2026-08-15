@@ -17,11 +17,12 @@
 #      regression should have a NAMED gate so the failure is attributable).
 #   2. Run the offline in-cell mirror self-test (decode-screen-glyphs.py
 #      --self-test, the class-A mirror tripwire).
-#   3. MUTATION CHECK: temporarily reverse `font8x8.row_pixel` to
-#      MSB-first and re-run the module tests, REQUIRING them to fail.
-#      The file is restored afterwards. If the goldens do NOT fail against
-#      the reversed convention, the gate fails — a golden that cannot
-#      detect the bug it exists for is worse than no golden.
+#   3. MUTATION CHECK (delegated to the generalized
+#      tools/verify-mutations.sh, claim 3485): the glyph row_pixel
+#      reversal is one manifest entry among the kernel's bit-order seams
+#      (FAT read_le endianness, virtio chain-walk NEXT bit). Each mutation
+#      is applied, the module tests MUST fail, and the file is restored.
+#      A golden that cannot detect the bug it exists for fails the gate.
 #
 # Class A — deterministic, no Apple silicon, no VZ VM. Wired into
 # `just verify-portable` and GitHub CI (the class-A set).
@@ -37,7 +38,6 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-FONT="kernel/src/font8x8.zig"
 MODULES=(font8x8 text driving_award)
 
 fail() { echo "FAIL: $1" >&2; exit 1; }
@@ -57,39 +57,11 @@ echo "module goldens: PASS"
 echo
 echo "[2/3] offline in-cell mirror self-test (decode-screen-glyphs.py --self-test)"
 python3 tools/decode-screen-glyphs.py --self-test
-echo "offline self-test: PASS"
-
-# --- 3. Mutation check: reverse row_pixel, REQUIRE the goldens to fail ---
+echo "offline self-test: PASS"# --- 3. Mutation check: delegated to the generalized bit-order gate ---
 echo
-echo "[3/3] mutation check: reverse font8x8.row_pixel to MSB-first, goldens MUST fail"
-cp "$FONT" "$FONT.mutated"
-restore_font() { mv "$FONT.mutated" "$FONT"; }
-trap restore_font EXIT
-
-python3 - "$FONT" <<'PYEOF'
-import sys
-path = sys.argv[1]
-src = open(path).read()
-old = "    return ((row >> shift) & 1) != 0;"
-new = "    return ((row >> (7 - shift)) & 1) != 0;"
-assert old in src, "row_pixel body not found (structure changed?)"
-open(path, "w").write(src.replace(old, new))
-print("mutated row_pixel to MSB-first")
-PYEOF
-
-detected=0
-for m in "${MODULES[@]}"; do
-    if zig test "kernel/src/$m.zig" >/dev/null 2>&1; then
-        fail "module $m did NOT fail against the reversed convention — the goldens cannot detect a bit-order flip"
-    fi
-    detected=1
-done
-if [ "$detected" -eq 0 ]; then
-    fail "no module was tested in the mutation leg"
-fi
-restore_font
-trap - EXIT
-echo "mutation check: PASS (all goldens fail against a reversed row_pixel)"
+ echo "[3/3] mutation check (delegated: tools/verify-mutations.sh — row_pixel reversal + FAT endianness + virtio NEXT-bit)"
+bash tools/verify-mutations.sh
+echo "mutation check: PASS (every bit-order mutation failed its goldens)"
 
 echo
 echo "=== verify-glyph-raster: PASS (goldens green, self-test green, mutation detected) ==="

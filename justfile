@@ -30,6 +30,7 @@ verify-portable:
     bash tools/status/test-coordination.sh
     bash tools/verify-mmu-debt.sh
     bash tools/verify-glyph-raster.sh
+    bash tools/verify-mutations.sh
 
 # Run the Apple-silicon VZ hardware gates (class B): serial takeover
 # (zig build run, claim 1517), bad-handoff, marker, NVRAM console,
