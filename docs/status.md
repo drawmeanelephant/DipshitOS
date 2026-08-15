@@ -557,7 +557,17 @@ dipshit>
     registry 42 -> 43) unifying system, cpu/timer, memory, allocator,
     scheduler, processes, storage, networking, graphics, and input diagnostics;
     transcript fixture regenerated; class A gate `tools/verify-transcript.sh`,
-    unit tests, and live help gate re-run green. U8 is the next card.
+    unit tests, and live help gate re-run green.
+    **Card U8 (claim 2649) DONE 2026-08-15** — the ADR 0008 Card U8 persistent
+    settings engine: `kernel/src/settings.zig` provides in-memory key-value
+    configuration (`hostname`, `prompt`, `theme`, `scrollback`) backed by
+    `SETTINGS.TXT` on the DATA FAT32 partition; `cmd_settings` in `kernel/src/monitor.zig`
+    (growing registry 43 -> 44) implements `list`, `get`, `set`, `reset` verbs;
+    kernel boot initializes settings from the DATA partition, and `kernel/src/shell.zig`
+    dynamically renders the configured prompt. New class-B gate `tools/verify-live-settings.sh`
+    PASS 1/1 on VZ (two boots against same disk image: sets `hostname=elephant-box` and
+    custom prompt, fresh reboot confirms custom prompt and persisted hostname loaded).
+    **Milestone Eight usability cards U0–U8 are complete.**
 
 The command layer above is portable; `docs/archive/march-m15.md` step 15's filesystem-command **deferral is superseded 2026-08-09** — first by the pre-exit ESP file window (claim 3475) and then, **on the same day, by the real FAT32 storage driver (claim 6420)**: `ls`/`cat`/`write` now read and write the live ESP's FAT volume through a virtio-blk transport, so files persist on the disk itself and **no storage driver remains deferred**. The allocator, interrupts, first tasks, EL0 boundary, syscall ABI, uaccess, per-task address spaces, lifecycle, ESP exec, and blocking syscalls are all complete; **milestone three is closed 2026-08-10 (tag `m3-userspace`, claim 0707)**.
 

@@ -28,6 +28,7 @@ const monitor = @import("monitor.zig");
 const handoff = @import("handoff.zig");
 const memmap = @import("memmap.zig");
 const scheduler = @import("scheduler.zig"); // claim 5275: worker progress printing (main context only)
+const settings = @import("settings.zig"); // milestone eight card U8 (claim 2649): persistent settings
 const timer = @import("timer.zig"); // claim 7948: heartbeat printing (main context only)
 const userspace = @import("userspace.zig"); // claim 8215: deferred EL0/SVC evidence line
 const virtio_net = @import("virtio_net.zig"); // claim 6076 (card N2): polled RX drain in the idle loop
@@ -63,12 +64,12 @@ pub const Shell = struct {
         monitor.banner(&self.mon);
     }
 
-    /// Drive one byte of input. Prints the `dipshit> ` prompt exactly once
+    /// Drive one byte of input. Prints the prompt exactly once
     /// per line (on the poll that starts it). Returns `.idle` when no byte
     /// is available — callers park between polls; tests drive until idle.
     pub fn poll(self: *Shell) PollResult {
         if (!self.prompt_shown) {
-            self.mon.console.puts("dipshit> ");
+            self.mon.console.puts(settings.get_prompt());
             self.prompt_shown = true;
         }
         const byte = self.mon.console.readByte() orelse return .idle;
@@ -77,7 +78,7 @@ pub const Shell = struct {
             .repaint => {
                 // Ctrl-L: the editor cleared the screen; restore the prompt
                 // + the in-progress line (the editor does not own the prompt).
-                self.mon.console.puts("dipshit> ");
+                self.mon.console.puts(settings.get_prompt());
                 self.editor.reprint(self.mon.console);
                 return .pending;
             },
@@ -131,7 +132,7 @@ var boot_shell_storage: Shell = undefined;
 pub fn boot_and_park(mon: *monitor.Monitor, rx_wired: bool) void {
     monitor.banner(mon);
     if (!rx_wired) {
-        mon.console.puts("dipshit> ");
+        mon.console.puts(settings.get_prompt());
         return;
     }
     const shell: *Shell = &boot_shell_storage;
@@ -374,6 +375,7 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "  random      print n random bytes from the seeded CSPRNG (hex)\n" ++
         "  reboot      restart the machine\n" ++
         "  repeat      repeat text, safely bounded\n" ++
+        "  settings    persistent configuration: `settings [list]`, `settings get <key>`, `settings set <key> <val>`, `settings reset`\n" ++
         "  shutdown    request power-off\n" ++
         "type 'help <command>' for details on a single command.\n" ++
         "type 'help <topic>' for a topic page (networking, windows, storage, graphics).\n" ++

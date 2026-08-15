@@ -53,6 +53,7 @@ system
   random      print n random bytes from the seeded CSPRNG (hex)
   reboot      restart the machine
   repeat      repeat text, safely bounded
+  settings    persistent configuration: `settings [list]`, `settings get <key>`, `settings set <key> <val>`, `settings reset`
   shutdown    request power-off
 type 'help <command>' for details on a single command.
 type 'help <topic>' for a topic page (networking, windows, storage, graphics).

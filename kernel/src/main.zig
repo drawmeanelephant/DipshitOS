@@ -26,6 +26,7 @@ const shell = @import("shell.zig");
 // the virtio-blk transport), replacing the NVRAM persistence medium.
 const esp = @import("esp.zig");
 const virtio_blk = @import("virtio_blk.zig");
+const settings = @import("settings.zig"); // milestone eight card U8 (claim 2649): persistent settings on DATA partition
 // Milestone four (claim 2665): virtio entropy driver + ChaCha20 CSPRNG.
 // The entropy device (DID 0x1044) seeds the CSPRNG post-MMU; `random` and
 // the exec-path ASLR consumer live off that seed.
@@ -622,7 +623,12 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
     // now that the identity map is live, so the shell's `write` (live FAT
     // reads/writes through the transport) works. The pre-exit queue was
     // used only for the boot-time ESP mount.
-    if (virtio_blk.blk_common != 0) _ = virtio_blk.blk_rearm();
+    if (virtio_blk.blk_common != 0) {
+        _ = virtio_blk.blk_rearm();
+        settings.init_from_disk(virtio_blk.disk_ops());
+    } else {
+        settings.init();
+    }
 
     uart_puts("kernel terminal state\n");
 
