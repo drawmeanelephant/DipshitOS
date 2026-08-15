@@ -163,6 +163,37 @@ assumption comes from documentation or reasoning only.
     and the guest's own `input` report showed `events=6` (i,n,p,u,t,Enter)
     with `dropped=0`, `kb-usage=0x28 kb-byte=0xa` (Enter); evidence under
     `artifacts/live-input-*`.
+  - **Synthesized MODIFIER chords do not reach the HID report (observed
+    2026-08-14, claim 0935, card U5):** three synthesis routes were
+    observed failing — `modifierFlags` set on a synthesized keyDown (the
+    guest sees the plain letter), `NSEvent.otherEvent`/`NSEvent(cgEvent:)`
+    for `.flagsChanged` (AppKit rejects the type —
+    NSInternalInconsistencyException), and a `keyEvent`-factory
+    flagsChanged pair (accepted by AppKit, ignored by VZ's report
+    composition). What a REAL keyboard's modifiers do over this path is
+    untested here (knowingly). Consequence: card U5's Alt+Tab cycle chord
+    is decoded in `kernel/src/input.zig` and HOST-tested, and the live
+    gate drives focus cycling with the `win cycle` monitor command over
+    serial instead (`tools/verify-live-win-hig.sh`) — the chord itself is
+    not gated live.
+  - **Synthesized POINTER events do not reach the pointing device
+    (observed 2026-08-14, claim 4993, card U4):** FIVE delivery routes
+    were dispatched with the runner's own PTR-EVT evidence and every one
+    produced `ptr-reports=0` in the guest's `input` report — (1) direct
+    `view.mouseMoved/mouseDown(with:)`, (2) `window.sendEvent(e)`, (3)
+    `NSApp.postEvent` into the application queue, (4) `CGEventPost` at
+    the HID tap (silently dropped without Accessibility trust for the
+    posting process), and (5) a leading synthesized `mouseEntered`
+    (enterExitEvent) preamble. This is unlike the KEYBOARD, where
+    synthesized `view.keyDown(with:)` translates to HID reports
+    immediately (the I2/I3 seam). Open follow-ups: whether a REAL mouse
+    over the `--display` window produces reports (untested knowingly),
+    and whether the CG route works once the terminal holds Accessibility
+    trust. The runner keeps the seam (`--pointer`, `--pointer-after`,
+    `--pointer-route window|app|cg`) for that follow-up.
+    **[observed]** — the probe runs under `artifacts/u45-probe*`; the
+    guest-side consumption (click = focus + raise, cursor render,
+    Alt+Tab decode) is host-tested in `driving_award.zig`/`input.zig`.
   All **[observed]** — `tools/verify-live-usb.sh` (PASS 11/11) and the saved
   logs under `artifacts/usb-discovery-*` + `artifacts/live-usb-*`.
 - Entropy: virtio entropy device (`VZVirtioEntropyDeviceConfiguration`).
