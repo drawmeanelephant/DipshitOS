@@ -321,6 +321,7 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
     const expected =
         "DipshitOS - AArch64 firmware-assisted kernel monitor\n" ++
         "DipshitOS: memory is a map, not a territory.\n" ++
+        "motd: aarch64 el1 kernel live; scheduler, uaccess, fs, net, gfx, xhci armed.\n" ++
         "Type 'help' before touching anything expensive.\n" ++
         "dipshit> help\r\n" ++
         "available commands:\n" ++
@@ -328,8 +329,10 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "  about       explain this questionable system\n" ++
         "  beans       count beans, probably\n" ++
         "  elephant    operational mascot diagnostics\n" ++
+        "  tour        guided tour of the system for new users\n" ++
         "  uname       compact system identity\n" ++
         "  version     display build information\n" ++
+        "  welcome     guided tour of the system for new users\n" ++
         "memory / machine state\n" ++
         "  addrspaces  per-task user address spaces: per-task TTBR0, EL1-only kernel overlay, user-root contents\n" ++
         "  fault       trigger a synchronous exception (diagnostic)\n" ++

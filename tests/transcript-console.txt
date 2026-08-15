@@ -1,5 +1,6 @@
 DipshitOS - AArch64 firmware-assisted kernel monitor
 DipshitOS: memory is a map, not a territory.
+motd: aarch64 el1 kernel live; scheduler, uaccess, fs, net, gfx, xhci armed.
 Type 'help' before touching anything expensive.
 dipshit> help
 available commands:
@@ -7,8 +8,10 @@ machine / identity
   about       explain this questionable system
   beans       count beans, probably
   elephant    operational mascot diagnostics
+  tour        guided tour of the system for new users
   uname       compact system identity
   version     display build information
+  welcome     guided tour of the system for new users
 memory / machine state
   addrspaces  per-task user address spaces: per-task TTBR0, EL1-only kernel overlay, user-root contents
   fault       trigger a synchronous exception (diagnostic)

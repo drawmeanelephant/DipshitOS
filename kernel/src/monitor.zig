@@ -259,8 +259,9 @@ pub const Command = struct {
 /// grows it 32 -> 34 (`net` + `netsend`). Milestone seven card I1
 /// (claim 4272) grows it 37 -> 38 (`usb`). Milestone seven card I3
 /// (claim 6050) grows it 38 -> 39 (`input`). Milestone six card G5
-/// (claim 1543) grows it 39 -> 40 (`win`).
-pub const registry_count: usize = 40;
+/// (claim 1543) grows it 39 -> 40 (`win`). Milestone eight card U6
+/// (claim 8323) grows it 40 -> 42 (`welcome`, `tour`).
+pub const registry_count: usize = 42;
 
 /// Command registry, built at runtime into BSS. A `const` table would hold
 /// link-time absolute addresses for BOTH the string slices and the handler
@@ -310,10 +311,12 @@ fn ensure_registry() []const Command {
             .{ .name = "syscalls", .help = "numbered syscall table and counters", .usage = "syscalls", .category = .tasks_processes, .handler = cmd_syscalls },
             .{ .name = "tasks", .help = "tick-driven task scheduler status", .usage = "tasks", .category = .tasks_processes, .handler = cmd_tasks },
             .{ .name = "timer", .help = "interrupt controller + timer status", .usage = "timer", .category = .memory_state, .handler = cmd_timer },
+            .{ .name = "tour", .help = "guided tour of the system for new users", .usage = "tour", .category = .machine_identity, .handler = cmd_welcome },
             .{ .name = "uaccess", .help = "user-memory copy diagnostics (valid, fault, recovery)", .usage = "uaccess", .category = .memory_state, .handler = cmd_uaccess },
             .{ .name = "usb", .help = "XHCI host controller: `usb` transport report, `usb devices` enumerated HID devices, `usb report` last HID report", .usage = "usb [devices|report]", .category = .graphics_input, .handler = cmd_usb },
             .{ .name = "uname", .help = "compact system identity", .usage = "uname", .category = .machine_identity, .handler = cmd_uname },
             .{ .name = "version", .help = "display build information", .usage = "version", .category = .machine_identity, .handler = cmd_version },
+            .{ .name = "welcome", .help = "guided tour of the system for new users", .usage = "welcome", .category = .machine_identity, .handler = cmd_welcome },
             .{ .name = "win", .help = "Driving Award window manager: registry (with owner pids), z-order, focus, hit-testing ('win focus <n>' focuses; 'win raise <n>' raises; 'win move <n> <x> <y>' moves a user window; 'win close <n>' releases a user window; 'win list <pid>' filters by owner; 'win hit <x> <y>' hit-tests; 'win cycle' cycles focus like Alt+Tab)", .usage = "win [focus <n>|raise <n>|move <n> <x> <y>|close <n>|list <pid>|hit <x> <y>|cycle]", .category = .graphics_input, .max_args = 4, .handler = cmd_win },
             .{ .name = "write", .help = "write text to a file on the ESP", .usage = "write <file> <text...>", .category = .storage, .min_args = 1, .handler = cmd_write },
         };
@@ -647,11 +650,25 @@ fn cmd_about(m: *Monitor, args: []const []const u8) ExecError {
     m.console.print_line("DipshitOS is a from-scratch AArch64 operating system.");
     m.console.print_line("Written in freestanding Zig: no libc, no POSIX.");
     m.console.print_line("Hosted under Apple Virtualization.framework on Apple silicon.");
-    m.console.print_line("Milestone-two kernel proper: ExitBootServices, identity-map MMU,");
-    m.console.print_line("polled serial console (ADR 0004). Handoff ABI v2 (ADR 0004 D5).");
-    m.console.print_line("The interactive monitor command layer is tested against a mock");
-    m.console.print_line("console; live serial input is not wired yet.");
-    m.console.print_line("Type 'help' for a list of commands.");
+    m.console.print_line("Core subsystems: identity-map MMU, GICv3 PPI timer, round-robin");
+    m.console.print_line("scheduler, per-task TTBR0 address spaces, EL0 processes & SVC (ADR 0007),");
+    m.console.print_line("ESP/DATA FAT32 storage, virtio-net (ARP/ICMP/UDP/DHCP/TCP), Driving Award");
+    m.console.print_line("window compositor + Road Pops terminal, and Apple xHCI USB HID input.");
+    m.console.print_line("Type 'help' for the grouped command catalog, or 'welcome' for a tour.");
+    return .none;
+}
+
+fn cmd_welcome(m: *Monitor, args: []const []const u8) ExecError {
+    _ = args;
+    m.console.print_line("Welcome to DipshitOS! Here is a quick tour to get you oriented:");
+    m.console.print_line("  1. Discovery: Type 'help' to see grouped commands, or 'help <cmd>' / 'help <topic>' for details.");
+    m.console.print_line("  2. System Info: Type 'version', 'uname', or 'about' for architectural details.");
+    m.console.print_line("  3. Tasks & Procs: Type 'procs' to view active processes or 'tasks' for scheduler states.");
+    m.console.print_line("  4. Storage: Type 'ls' and 'cat <file>' to view files on the ESP; 'mount data' to switch volumes.");
+    m.console.print_line("  5. Windows & Graphics: Type 'win' to inspect window registry and z-order; 'win cycle' to cycle focus.");
+    m.console.print_line("  6. Networking: Type 'net' for device status, 'net ping <ip>' or 'net dhcp' to configure.");
+    m.console.print_line("  7. Documentation: Architecture, decisions, and hardware contracts live in docs/.");
+    m.console.print_line("Have fun and break things responsibly.");
     return .none;
 }
 
@@ -4277,6 +4294,7 @@ pub fn banner(m: *Monitor) void {
     m.console.print_line("DipshitOS - AArch64 firmware-assisted kernel monitor");
     m.console.puts(BootMessages.pick(m.state.handoff.image_handle));
     m.console.puts("\n");
+    m.console.print_line("motd: aarch64 el1 kernel live; scheduler, uaccess, fs, net, gfx, xhci armed.");
     m.console.print_line("Type 'help' before touching anything expensive.");
 }
 
@@ -5150,7 +5168,19 @@ test "monitor: identity commands produce fixed output" {
     try std.testing.expect(std.mem.indexOf(u8, out, "from-scratch AArch64 operating system") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "no libc, no POSIX") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "Apple Virtualization.framework") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "mock") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Driving Award") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Type 'help' for the grouped command catalog, or 'welcome' for a tour.") != null);
+    env.mock.reset();
+
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"welcome"}));
+    const tour_out = env.mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, tour_out, "Welcome to DipshitOS!") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tour_out, "1. Discovery: Type 'help'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tour_out, "docs/") != null);
+    env.mock.reset();
+
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"tour"}));
+    try std.testing.expectEqualStrings(tour_out, env.mock.contents());
 }
 
 test "monitor: handoff formatting is deterministic and validated" {
