@@ -29,7 +29,7 @@ verify-portable:
     bash tools/verify-coordination.sh
     bash tools/status/test-coordination.sh
     bash tools/verify-mmu-debt.sh
-    python3 tools/decode-screen-glyphs.py --self-test
+    bash tools/verify-glyph-raster.sh
 
 # Run the Apple-silicon VZ hardware gates (class B): serial takeover
 # (zig build run, claim 1517), bad-handoff, marker, NVRAM console,
