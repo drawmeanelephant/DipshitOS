@@ -75,6 +75,9 @@ jobs:
       - name: Verify the glyph raster convention (class A — full-table goldens + offline mirror self-test + mutation check)
         run: bash tools/verify-glyph-raster.sh
 
+      - name: Verify the bit-order mutation checks (class A — glyph raster + FAT endianness + virtio chain walk)
+        run: bash tools/verify-mutations.sh
+
       # --- Class B: Apple-silicon VZ hardware gates are NOT run here ---
 
       - name: State which gates this CI does NOT prove
