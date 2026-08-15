@@ -44,6 +44,7 @@ const fbtext = @import("text.zig"); // milestone six card G2 (claim 3194): frame
 const xhci = @import("xhci.zig"); // milestone seven card I1 (claim 4272): the XHCI host-controller transport behind `usb`
 const input = @import("input.zig"); // milestone seven card I3 (claim 6050): the keyboard/pointer event FIFO behind `input`
 const driving_award = @import("driving_award.zig"); // milestone six card G5 (claim 1543): Driving Award, the window manager behind `win`
+const settings = @import("settings.zig"); // milestone eight card U8 (claim 2649): persistent settings engine
 
 // ---------------------------------------------------------------------------
 // Limits (fixed-size, explicit bounds)
@@ -261,8 +262,9 @@ pub const Command = struct {
 /// (claim 6050) grows it 38 -> 39 (`input`). Milestone six card G5
 /// (claim 1543) grows it 39 -> 40 (`win`). Milestone eight card U6
 /// (claim 8323) grows it 40 -> 42 (`welcome`, `tour`). Milestone eight card U7
-/// (claim 2990) grows it 42 -> 43 (`sysinfo`).
-pub const registry_count: usize = 43;
+/// (claim 2990) grows it 42 -> 43 (`sysinfo`). Milestone eight card U8
+/// (claim 2649) grows it 43 -> 44 (`settings`).
+pub const registry_count: usize = 44;
 
 /// Command registry, built at runtime into BSS. A `const` table would hold
 /// link-time absolute addresses for BOTH the string slices and the handler
@@ -306,6 +308,7 @@ fn ensure_registry() []const Command {
             .{ .name = "repeat", .help = "repeat text, safely bounded", .usage = "repeat <count> <text...>", .category = .system, .min_args = 1, .handler = cmd_repeat },
             .{ .name = "roadpops", .help = "Road Pops framebuffer console: armed/dirty/present counters (the boot terminal on the screen)", .usage = "roadpops", .category = .graphics_input, .handler = cmd_roadpops },
             .{ .name = "screen", .help = "virtio-gpu transport + framebuffer: device DID, features, scanout, status, re-arm ('screen fill <rrggbb>' fills the framebuffer and flushes it to the scanout)", .usage = "screen [fill <rrggbb>]", .category = .graphics_input, .max_args = 2, .handler = cmd_screen },
+            .{ .name = "settings", .help = "persistent configuration: `settings [list]`, `settings get <key>`, `settings set <key> <val>`, `settings reset`", .usage = "settings [list|get <key>|set <key> <val>|reset]", .category = .system, .max_args = 3, .handler = cmd_settings },
             .{ .name = "text", .help = "framebuffer text: text region, cursor, scrollback ('text put <string...>' renders + flushes to the scanout; 'text clear' clears)", .usage = "text [put <string...>|clear]", .category = .graphics_input, .min_args = 0, .max_args = 9, .handler = cmd_text },
             .{ .name = "shutdown", .help = "request power-off", .usage = "shutdown", .category = .system, .handler = cmd_shutdown },
             .{ .name = "spawn", .help = "spawn the lifecycle demo task", .usage = "spawn", .category = .tasks_processes, .handler = cmd_spawn },
@@ -1888,6 +1891,92 @@ fn cmd_repeat(m: *Monitor, args: []const []const u8) ExecError {
         m.console.puts("\n");
     }
     return .none;
+}
+
+/// `settings` — report and modify persistent configuration (claim 2649,
+/// milestone eight card U8). Backed by `SETTINGS.TXT` on the DATA partition.
+/// `settings` / `settings list`: print all active key-value pairs.
+/// `settings get <key>`: look up a single key.
+/// `settings set <key> <val>`: update in memory and persist immediately.
+/// `settings reset`: restore default settings and persist.
+fn cmd_settings(m: *Monitor, args: []const []const u8) ExecError {
+    if (args.len == 0 or (args.len == 1 and std.mem.eql(u8, args[0], "list"))) {
+        m.console.print_line("settings:");
+        var i: usize = 0;
+        while (i < settings.count()) : (i += 1) {
+            if (settings.entry_at(i)) |e| {
+                m.console.puts("  ");
+                m.console.puts(e.key);
+                m.console.puts("=");
+                m.console.puts(e.val);
+                m.console.puts("\n");
+            }
+        }
+        return .none;
+    }
+    if (std.mem.eql(u8, args[0], "get")) {
+        if (args.len != 2) {
+            print_usage(m, lookup("settings").?);
+            return .usage;
+        }
+        if (settings.get(args[1])) |val| {
+            m.console.puts("settings: ");
+            m.console.puts(args[1]);
+            m.console.puts("=");
+            m.console.puts(val);
+            m.console.puts("\n");
+            return .none;
+        }
+        err_prefix(m);
+        m.console.puts("unknown setting: ");
+        m.console.puts(args[1]);
+        m.console.puts("\n");
+        return .invalid_argument;
+    }
+    if (std.mem.eql(u8, args[0], "set")) {
+        if (args.len != 3) {
+            print_usage(m, lookup("settings").?);
+            return .usage;
+        }
+        const key = args[1];
+        const val = args[2];
+        const res = settings.set(key, val);
+        if (res != .ok) {
+            err_prefix(m);
+            m.console.puts("invalid setting key or value: ");
+            m.console.puts(key);
+            m.console.puts("\n");
+            return .invalid_argument;
+        }
+        const saved = settings.save_to_disk(virtio_blk.disk_ops());
+        m.console.puts("settings: ");
+        m.console.puts(key);
+        m.console.puts("=");
+        m.console.puts(val);
+        if (saved) {
+            m.console.puts(" (persisted)\n");
+        } else {
+            m.console.puts(" (memory only)\n");
+        }
+        return .none;
+    }
+    if (std.mem.eql(u8, args[0], "reset")) {
+        if (args.len != 1) {
+            print_usage(m, lookup("settings").?);
+            return .usage;
+        }
+        settings.reset();
+        const saved = settings.save_to_disk(virtio_blk.disk_ops());
+        m.console.puts("settings: reset to defaults");
+        if (saved) {
+            m.console.puts(" (persisted)\n");
+        } else {
+            m.console.puts(" (memory only)\n");
+        }
+        return .none;
+    }
+    print_usage(m, lookup("settings").?);
+    return .usage;
 }
 
 // ---------------------------------------------------------------------------
@@ -5313,6 +5402,30 @@ test "monitor: identity commands produce fixed output" {
     try std.testing.expect(std.mem.indexOf(u8, sys_out, "network:") != null);
     try std.testing.expect(std.mem.indexOf(u8, sys_out, "graphics:") != null);
     try std.testing.expect(std.mem.indexOf(u8, sys_out, "input:") != null);
+    env.mock.reset();
+
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"settings"}));
+    const set_out = env.mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, set_out, "settings:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, set_out, "hostname=") != null);
+    try std.testing.expect(std.mem.indexOf(u8, set_out, "prompt=") != null);
+    env.mock.reset();
+
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "settings", "get", "hostname" }));
+    try std.testing.expectEqualStrings("settings: hostname=dipshit\n", env.mock.contents());
+    env.mock.reset();
+
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "settings", "set", "hostname", "testnode" }));
+    try std.testing.expectEqualStrings("settings: hostname=testnode (memory only)\n", env.mock.contents());
+    env.mock.reset();
+
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "settings", "get", "hostname" }));
+    try std.testing.expectEqualStrings("settings: hostname=testnode\n", env.mock.contents());
+    env.mock.reset();
+
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "settings", "reset" }));
+    try std.testing.expectEqualStrings("settings: reset to defaults (memory only)\n", env.mock.contents());
+    env.mock.reset();
 }
 
 test "monitor: handoff formatting is deterministic and validated" {
