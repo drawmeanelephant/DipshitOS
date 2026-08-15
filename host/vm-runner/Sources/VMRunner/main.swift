@@ -133,6 +133,7 @@
 // No guest filesystem or POSIX dependency is added; the guest is untouched.
 
 import AppKit
+import ApplicationServices
 import Darwin
 import Foundation
 import ScreenCaptureKit
@@ -222,6 +223,13 @@ var pointerAfter: String?
 // requires Accessibility permission for the terminal). Probes pick the
 // route; the gate pins the observed-working one.
 var pointerRoute: String = "window"
+// Card U4 CG follow-on (claim 3692): `--pointer-request-trust` prompts the
+// system to grant Accessibility to the responsible process (the terminal)
+// via AXIsProcessTrustedWithOptions. OFF by default — the default VM and
+// every existing gate stay byte-identical. The cg route checks trust
+// first and reports `PTR-TRUST: untrusted` instead of silently dropping
+// the post (the claim-4993 observation).
+var pointerRequestTrust = false
 var timeout: TimeInterval = 30
 var timeoutExplicit = false
 var expectLine = "firmware has agreed to cooperate"
@@ -423,6 +431,9 @@ while idx < arguments.count {
     } else if arg == "--pointer-route", idx + 1 < arguments.count {
         pointerRoute = arguments[idx + 1]
         idx += 2
+    } else if arg == "--pointer-request-trust" {
+        pointerRequestTrust = true
+        idx += 1
     } else if arg == "--timeout", idx + 1 < arguments.count {
         timeout = TimeInterval(arguments[idx + 1]) ?? 30
         timeoutExplicit = true
@@ -1101,6 +1112,9 @@ if let s = inputString {
 }
 if let s = inputChords {
     print("  input-chords: ENABLED (milestone eight card U2, claim 1809) — typing \(s.debugDescription) into the view after \"\(inputChordsAfter ?? "userspace: el0=1")\" (keyDown + keyUp per chord: printable chars, return/up/down/left/right/home/end/delete/tab, ctrl-a..ctrl-z; \(inputChordsDelay) s per keystroke)")
+}
+if let script = pointerScript {
+    print("  pointer: ENABLED (milestone eight card U4, claim 4993) — \(script.debugDescription) after \"\(pointerAfter ?? "tasks user-el0 reaped")\" via route \"\(pointerRoute)\"; trust=post:\(CGPreflightPostEventAccess()) ax:\(AXIsProcessTrusted()) (request-trust=\(pointerRequestTrust ? "on" : "off"))")
 }
 if let netInjectPath {
     print("  net-inject: ENABLED (milestone five card N2, claim 6076) — \(netInjectPath) written into the attachment's socket once after \"\(netInjectAfter ?? "net: rx-armed")\" appears in the serial log (host→guest RX)")
@@ -1970,6 +1984,15 @@ func deliverPointerEvent(_ view: VZVirtualMachineView, _ e: NSEvent) {
         NSApp.postEvent(e, atStart: true)
     case "cg":
         if let w = view.window {
+            // Accessibility trust is the gating permission: without it the
+            // HID-tap post is silently dropped (the claim-4993 observation).
+            // Report the truth once so a gate can distinguish "untrusted"
+            // from "trusted but no report".
+            let trusted = CGPreflightPostEventAccess()
+            if !trusted {
+                FileHandle.standardOutput.write(Data("PTR-TRUST: untrusted (cg route needs Accessibility for the terminal) skipped-post\n".utf8))
+                return
+            }
             // Window-local (bottom-left) -> global AppKit -> CG (top-left).
             let local = e.locationInWindow
             let glob = w.convertToScreen(NSRect(x: local.x, y: local.y, width: 1, height: 1)).origin
@@ -1991,6 +2014,15 @@ func deliverPointerEvent(_ view: VZVirtualMachineView, _ e: NSEvent) {
 
 func startPointerInject() {
     guard let script = pointerScript else { return }
+    if pointerRequestTrust && !AXIsProcessTrusted() {
+        // Prompt the system to grant Accessibility to the responsible
+        // process (the terminal). Returns immediately; the user grants in
+        // System Settings and re-runs. The cg route checks trust per post
+        // and reports PTR-TRUST honestly either way.
+        let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+        let nowTrusted = AXIsProcessTrustedWithOptions(opts)
+        FileHandle.standardOutput.write(Data("PTR-TRUST: requested accessibility prompt, now-trusted=\(nowTrusted ? 1 : 0)\n".utf8))
+    }
     let q = DispatchQueue(label: "dipshitos.ptrseq")
     q.async {
         let marker = pointerAfter ?? "tasks user-el0 reaped"

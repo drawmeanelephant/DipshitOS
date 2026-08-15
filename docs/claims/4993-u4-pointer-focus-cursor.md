@@ -44,5 +44,9 @@ answers it; the hardware contract records the observation either way.
   clock → WINLOOP → terminal, and the gate asserts ≥2 distinct
   `win: pointer focus=` lines + `ptr-reports>0` + the magenta cursor
   pixel, calibrated live at 0xff00ff → ~(234,51,247)); (b) re-try the CG
-  route with Accessibility granted to the terminal (still open).
+  route with Accessibility granted to the terminal — **now a class-B gate,
+  claim 3692** (`tools/verify-live-pointer-cg.sh`): the runner reports
+  `PTR-TRUST: untrusted` honestly (the terminal holds no Accessibility
+  trust today) and the gate FAILs with the grant steps until a human
+  grants it, then the CG HID-tap route is fully automatable.
 - ✅ `bash tools/verify-coordination.sh`

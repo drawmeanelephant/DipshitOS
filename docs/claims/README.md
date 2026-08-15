@@ -127,6 +127,7 @@ CI) fails if the table drifts from the claim files.
 | [3552-d3-conformance-and-chord-gate](3552-d3-conformance-and-chord-gate.md) | zcode (`agent/zcode/m8-u4-u5-on-main`) | ✅ done (2026-08-15) |
 | [3594-syscall-abi-dispatch](3594-syscall-abi-dispatch.md) | Codex (`agent/codex/m3-syscall-abi`) | ✅ done |
 | [3678-general-filesystem](3678-general-filesystem.md) | Buffy (`agent/buffy/m4-general-fs`) | ✅ done 2026-08-10 — all four stages landed (volume |
+| [3692-pointer-cg-gate](3692-pointer-cg-gate.md) | buffy (`agent/buffy/u4-pointer-cg`) | ✅ done (2026-08-15) — trust detection + honest reporting + |
 | [3693-m4-aslr-boot-stack](3693-m4-aslr-boot-stack.md) | Buffy (`agent/buffy/m4-entropy-csprng`) | ✅ done 2026-08-10 (closed; branch `agent/buffy/m4-entropy-csprng`, follow-on PR) |
 | [3848-process-abstraction](3848-process-abstraction.md) | Buffy (`agent/buffy/m4-process-abstraction`) | ✅ done 2026-08-10 — all three stages landed (the process |
 | [3868-virtio-input](3868-virtio-input.md) | buffy (`freebuff/can-you-check-out-our-status-and-work-on-the-next--7e2ecd0b-8acc-47ac-bb44-68841236e5fc`) | ⛔ **finding recorded — card premise corrected (see Notes), scope handed back for re-scoping** |
