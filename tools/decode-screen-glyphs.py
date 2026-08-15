@@ -5,10 +5,13 @@ kernel's font8x8.zig glyph table and score FORWARD vs MIRRORED orientation.
 The gate tools/verify-live-glyphs.sh is the mirror-regression tripwire: a
 captured frame whose text reads FORWARD matches the font table with ~zero
 unknown cells, while a mirrored frame explodes with unknowns (the matcher
-can tell the difference). This tool is the mechanical part — it finds the
-green glyph grid (pitch + origin), decodes the visible session in both
-orientations, prints the decoded text (the evidence) and a machine-readable
-STATS line for the gate to assert on.
+can tell the difference). The source table is LSB-first (bit 0 is the
+leftmost pixel), while sampled screen rows use bit 7 for the leftmost
+pixel; the decoder normalizes that boundary explicitly before matching.
+This tool is the mechanical part — it finds the green glyph grid (pitch +
+origin), decodes the visible session in both orientations, prints the
+decoded text (the evidence) and a machine-readable STATS line for the gate
+to assert on.
 
 It ALSO decodes the Driving Award clock overlay (the window manager's
 amber title bar + "DRIVING AWARD" accent line on navy) in both
@@ -58,6 +61,27 @@ def load_font():
     rows = [int(h, 16) for h in hexes]
     n = len(rows) // 8
     return [rows[i * 8:(i + 1) * 8] for i in range(n)]
+
+def source_row_to_screen(row):
+    """Convert one LSB-left source row to the decoder's MSB-left row."""
+    screen = 0
+    for x in range(8):
+        if row & (1 << x):
+            screen |= 1 << (7 - x)
+    return screen
+
+def assert_orientation_golden(font):
+    """Independent asymmetric oracle for the source/decoder boundary."""
+    c_source = (0x3c, 0x66, 0x03, 0x03, 0x03, 0x66, 0x3c, 0x00)
+    c_screen = (0x3c, 0x66, 0xc0, 0xc0, 0xc0, 0x66, 0x3c, 0x00)
+    actual_source = tuple(font[ord("C") - 0x20])
+    actual_screen = tuple(source_row_to_screen(row) for row in actual_source)
+    if actual_source != c_source:
+        raise AssertionError("font8x8 C source rows changed: %r" % (actual_source,))
+    if actual_screen != c_screen:
+        raise AssertionError(
+            "LSB-left to MSB-left normalization mirrored C: %r" % (actual_screen,)
+        )
 
 # ------------------------------------------------------- dependency-free png
 def load_png(path):
@@ -118,7 +142,7 @@ def load_png(path):
 # ------------------------------------------------ clock-window decode (G5)
 # Shared by main() (the live decode) and self_test() (the offline in-cell
 # mirror simulation): decode a fixed run of 8x8 glyphs at (ox, oy) with the
-# given ink predicate, matched against the normal or reversed (mirrored)
+# given ink predicate, matched against the normalized forward or mirrored
 # font. The clock window is at fixed framebuffer coordinates (960,16,
 # 304x192): title "clock" at (968,22), body "DRIVING AWARD" at (968,42).
 
@@ -151,7 +175,10 @@ def decode_clock_string(px, w, h, font, pitch, ox, oy, nchars, mirror, ink_fn):
             sc = 0
             for ri in range(8):
                 a = cell[ri]
-                b = (int(format(g[ri], "08b")[::-1], 2) if mirror else g[ri])
+                # Captured rows are MSB-left; source rows are LSB-left.
+                # A correct screen therefore matches the normalized row,
+                # while an in-cell mirror matches the raw source byte.
+                b = g[ri] if mirror else source_row_to_screen(g[ri])
                 sc += bin(a ^ b).count("1")
             if sc < best_sc:
                 best_sc, best_c = sc, idx
@@ -164,13 +191,17 @@ def count_unknowns(s):
 def self_test():
     """Offline in-cell mirror simulation (class A — no VZ boot needed).
 
-    Renders the clock window's static strings forward with the kernel's own
-    glyph blit, decodes them (must read 'clock' / 'DRIVING AWARD'), mirrors
-    each glyph in-cell (the draw_glyph bit-order regression), re-decodes,
-    and confirms the forward decode now reads garbage while the mirrored
-    decode reads clean — the tripwire fires without a live VZ boot.
+    First pins the LSB-first source convention against an asymmetric C
+    golden. Then renders the clock window's static strings with the kernel's
+    intended LSB-first glyph walk, decodes them (must read 'clock' /
+    'DRIVING AWARD'), mirrors each glyph in-cell (the old draw_glyph
+    regression), re-decodes, and confirms the forward decode now reads
+    garbage while the mirrored decode reads clean — the tripwire fires
+    without a live VZ boot.
     """
     font = load_font()
+    assert_orientation_golden(font)
+    print("self-test: asymmetric C golden confirms source LSB-left orientation")
     w, h = 1280, 720
     buf = bytearray(w * h * 4)
 
@@ -196,16 +227,16 @@ def self_test():
         for x in range(962, 1262):
             put(x, y, 0xb5, 0x89, 0x00)          # amber title bar
 
-    # The kernel's draw_glyph: MSB-first, top-to-bottom.
+    # The kernel's intended draw_glyph: source LSB-first, top-to-bottom.
     def draw_string(s, x0, y0, rgb):
         for i, ch in enumerate(s):
             g = font[ord(ch) - 0x20]
             for gy in range(8):
                 bits = g[gy]
                 for gx in range(8):
-                    if bits & 0x80:
+                    if bits & 0x01:
                         put(x0 + i * 8 + gx, y0 + gy, *rgb)
-                    bits <<= 1
+                    bits >>= 1
 
     draw_string("clock", 968, 22, (0x14, 0x14, 0x14))          # dark title
     draw_string("DRIVING AWARD", 968, 42, (0xff, 0xaa, 0x00))  # amber body
@@ -264,6 +295,7 @@ def main():
             mirror_lines = int(sys.argv[i + 3])
 
     font = load_font()
+    assert_orientation_golden(font)
     w, h, bpp, out = load_png(path)
 
     def px(x, y):
@@ -322,8 +354,8 @@ def main():
                     sc = 0
                     for r in range(8):
                         a = cell[r]
-                        b = (int(format(g[r], "08b")[::-1], 2)
-                             if mirror else g[r])
+                        b = (g[r] if mirror
+                             else source_row_to_screen(g[r]))
                         sc += bin(a ^ b).count("1")
                     if sc < best:
                         best, bestc = sc, idx

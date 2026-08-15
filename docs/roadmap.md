@@ -772,16 +772,18 @@ Card ladder (canonical order; per-card tracker
   cur/lines are session-dynamic); the **37-gate `verify-vz` aggregate
   re-ran 37/37 PASS** (`artifacts/m6-roadpops-vz-sweep.log`). Post-G3
   hardening (the SCK switch): the pixel gates enforce the composited-
-  window evidence, and the mirror-tripwire gate
-  `tools/verify-live-glyphs.sh` (PASS 1/1) decodes the captured frame
-  against the kernel's own font8x8 table — forward 0 unknown cells /
-  604 ink, mirrored 549/595 — so a mirrored-text regression fails
-  mechanically; with it registered the **38-gate `verify-vz` aggregate
-  re-ran 38/38 PASS** (`artifacts/m6-glyphs-vz-sweep.log`). Post-G5
-  hardening (2026-08-14): the tripwire also decodes the Driving Award
-  clock overlay (title `clock` + body `DRIVING AWARD`) in both
-  orientations, so a mirror in the window-manager path (G5 draw_string +
-  blit_rect) fails too.
+  window evidence, and introduced the `tools/verify-live-glyphs.sh`
+  mirror-tripwire gate. **Issue #125 / claim 8742 corrected that first
+  gate's false oracle on 2026-08-14:** the font source is LSB-left, while
+  both renderers and the decoder had repeated an MSB-left interpretation.
+  The terminal and Driving Award clock now share the corrected source-bit
+  helper; an independent asymmetric `C` golden pins the decoder's
+  normalization. The targeted VZ rerun passed: terminal forward 0/604
+  unknown glyphs versus 549/595 mirrored; clock title `clock` and body
+  `DRIVING AWARD` exact versus 4/5 and 10/13 unknowns mirrored. The
+  historical 38/38 aggregate predates this correction; see
+  `docs/status.md` and `artifacts/live-glyphs-gate.txt` for the superseding
+  evidence.
 - **G4 — input: keyboard + pointer — MOVED to milestone seven.**
   **[observed]** 2026-08-13 (claim 3868): VZ exposes keyboard/pointer
   (`VZUSBKeyboardConfiguration` + `VZUSBScreenCoordinatePointingDeviceConfiguration`)
