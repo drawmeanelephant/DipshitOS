@@ -294,6 +294,40 @@ test "text: asymmetric C raster is LSB-first in B8G8R8X8" {
     try std.testing.expectEqual(@as(u8, 0xff), test_buf[(2 * W) * 4 + 3]);
 }
 
+test "text: the full 95-glyph table rasters LSB-first — every pixel matches the raw source bits (issue 125)" {
+    // Render EVERY printable glyph into the test canvas and assert all 64
+    // pixels against the RAW table byte read LSB-first inline — `(row >>
+    // x) & 1`, NOT font.row_pixel. Deriving the expectation from the
+    // helper under test would be self-consistent with a reversed helper
+    // (the exact trap issue 125 documented in the old decoder); reading
+    // the source bits directly pins the CONVENTION. 90 of 95 glyphs are
+    // horizontally asymmetric, so a bit-order flip in the terminal raster
+    // OR the row_pixel helper breaks 90/95 glyphs immediately.
+    init();
+    const fg = rgbBytes(fg_rgb);
+    const bg = rgbBytes(bg_rgb);
+    var i: usize = 0;
+    while (i < font.glyphs.len) : (i += 1) {
+        clear();
+        const ch: u8 = @intCast(0x20 + i);
+        const one = [1]u8{ch};
+        puts(&one);
+        const canvas = testCanvas();
+        render(canvas);
+        const glyph = font.glyphs[i];
+        var gy: usize = 0;
+        while (gy < 8) : (gy += 1) {
+            var gx: usize = 0;
+            while (gx < 8) : (gx += 1) {
+                const row = glyph[gy];
+                const bit_set = ((row >> @as(u3, @intCast(gx))) & 1) != 0;
+                const want: [3]u8 = if (bit_set) fg else bg;
+                try std.testing.expectEqualSlices(u8, &want, &pixel(canvas, gx, gy));
+            }
+        }
+    }
+}
+
 test "text: line wrap starts a new line at the region width" {
     init();
     clear();

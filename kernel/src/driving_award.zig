@@ -862,6 +862,38 @@ test "driving_award: asymmetric C glyph is LSB-first" {
     try std.testing.expectEqual(@as(u8, 0x00), buf[(2 * W + 7) * 4]);
 }
 
+test "driving_award: the full 95-glyph table rasters LSB-first through draw_glyph (issue 125)" {
+    // Render EVERY printable glyph through the window-manager raster into
+    // an 8x8 buffer and assert all 64 pixels against the RAW table byte
+    // read LSB-first inline — `(row >> x) & 1`, NOT font.row_pixel (see
+    // the text.zig full-table golden: deriving the expectation from the
+    // helper under test would be self-consistent with a reversed helper).
+    // 90 of 95 glyphs are horizontally asymmetric, so a bit-order flip in
+    // draw_glyph OR row_pixel breaks 90/95 glyphs immediately — the
+    // window-manager path cannot drift from the terminal path without
+    // this failing.
+    const W = 8;
+    const H = 8;
+    var buf: [W * H * 4]u8 = undefined;
+    var i: usize = 0;
+    while (i < font.glyphs.len) : (i += 1) {
+        @memset(&buf, 0);
+        const ch: u8 = @intCast(0x20 + i);
+        draw_glyph(&buf, W * 4, 0, 0, ch, 0xffffff);
+        const glyph = font.glyphs[i];
+        var gy: usize = 0;
+        while (gy < 8) : (gy += 1) {
+            var gx: usize = 0;
+            while (gx < 8) : (gx += 1) {
+                const row = glyph[gy];
+                const bit_set = ((row >> @as(u3, @intCast(gx))) & 1) != 0;
+                const want: u8 = if (bit_set) 0xff else 0x00;
+                try std.testing.expectEqual(want, buf[(gy * W + gx) * 4]);
+            }
+        }
+    }
+}
+
 test "driving_award: render_clock_content paints the title bar and body colors" {
     const W = 304;
     const H = 192;
