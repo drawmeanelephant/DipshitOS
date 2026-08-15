@@ -99,6 +99,7 @@ verify-coordination`, and CI) fails if it drifts from the files.
 | U4 CG-pointer route follow-on (claim 3692) | [`agent-buffy-u4-pointer-cg.md`](agent-buffy-u4-pointer-cg.md) |
 | U4 real-mouse pointer follow-on (claim 9015) | [`agent-buffy-u4-pointer-classc.md`](agent-buffy-u4-pointer-classc.md) |
 | First-boot experience (claim 8323) | [`agent-buffy-u6-first-boot.md`](agent-buffy-u6-first-boot.md) |
+| sysinfo support snapshot (claim 2990) | [`agent-buffy-u7-sysinfo.md`](agent-buffy-u7-sysinfo.md) |
 | `agent/codex/m3-march-tracker` | [`agent-codex-m3-march-tracker.md`](agent-codex-m3-march-tracker.md) |
 | `agent/codex/m3-ragshit-dogfood` | [`agent-codex-m3-ragshit-dogfood.md`](agent-codex-m3-ragshit-dogfood.md) |
 | `agent/codex/m3-syscall-abi` | [`agent-codex-m3-syscall-abi.md`](agent-codex-m3-syscall-abi.md) |

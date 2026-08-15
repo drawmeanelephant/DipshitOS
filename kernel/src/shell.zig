@@ -329,6 +329,7 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "  about       explain this questionable system\n" ++
         "  beans       count beans, probably\n" ++
         "  elephant    operational mascot diagnostics\n" ++
+        "  sysinfo     comprehensive system and subsystem diagnostic snapshot\n" ++
         "  tour        guided tour of the system for new users\n" ++
         "  uname       compact system identity\n" ++
         "  version     display build information\n" ++
