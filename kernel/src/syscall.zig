@@ -65,9 +65,10 @@ const uaccess = @import("uaccess.zig"); // claim 6120: fault-safe copy-in
 const userspace = @import("userspace.zig");
 const driving_award = @import("driving_award.zig"); // claim 1543/0487 (cards G5/G6): the window manager this seam renders into
 const events = @import("events.zig"); // Milestone 9 (claim 1016): application event queues
+const file_table = @import("file_table.zig"); // Milestone 10 (claim 3570): userland storage ABI
 
 pub const slot_count: usize = 64;
-pub const implemented_count: usize = 23;
+pub const implemented_count: usize = 28;
 /// Card G6 (claim 0487) follow-on (slot 18): the fixed `sys_win_get` shape —
 /// four u32 LE words (x, y, w, h), 16 bytes, marshaled per call and copy_out'd
 /// through uaccess (the procs snapshot pattern).
@@ -147,17 +148,22 @@ pub const sys_win_set_visible: u64 = 20;
 pub const sys_poll_event: u64 = 21;
 /// Milestone 9 (claim 1016): `sys_wait_event(buf)` blocking event wait.
 pub const sys_wait_event: u64 = 22;
+/// Milestone 10 (claim 3570): userland storage ABI slots 23–27.
+pub const sys_file_open: u64 = 23;
+pub const sys_file_read: u64 = 24;
+pub const sys_file_write: u64 = 25;
+pub const sys_file_close: u64 = 26;
+pub const sys_dir_list: u64 = 27;
 
 pub const ErrorCode = enum(i64) {
     einval = -1,
     ebadf = -2,
     efault = -3,
     enosys = -4,
-    /// Card 3f (claim 5965): the target process's mailbox is full — the
-    /// bounded 8 × 64 B ring refused the send (card 4b, claim 3179: the
-    /// capacity is a data-path constant, raised 4 → 8; never unbounded,
-    /// never silently dropped).
     enospc = -5,
+    enoent = -6,
+    eacces = -7,
+    enametoolong = -8,
 };
 
 pub fn error_result(code: ErrorCode) u64 {
@@ -239,6 +245,11 @@ fn ensure_table() *const [slot_count]Entry {
         table_storage[sys_win_set_visible] = .{ .name = "sys_win_set_visible", .handler = handle_win_set_visible };
         table_storage[sys_poll_event] = .{ .name = "sys_poll_event", .handler = handle_poll_event };
         table_storage[sys_wait_event] = .{ .name = "sys_wait_event", .handler = handle_wait_event };
+        table_storage[sys_file_open] = .{ .name = "sys_file_open", .handler = handle_file_open };
+        table_storage[sys_file_read] = .{ .name = "sys_file_read", .handler = handle_file_read };
+        table_storage[sys_file_write] = .{ .name = "sys_file_write", .handler = handle_file_write };
+        table_storage[sys_file_close] = .{ .name = "sys_file_close", .handler = handle_file_close };
+        table_storage[sys_dir_list] = .{ .name = "sys_dir_list", .handler = handle_dir_list };
         table_ready = true;
     }
     return &table_storage;
@@ -746,9 +757,111 @@ fn handle_wait_event(args: Args, _: *exceptions.VectorFrame) u64 {
     return 1;
 }
 
-/// Deterministic monitor output for the twenty-three implemented rows and their counters.
+/// Milestone 10 (claim 3570): slot 23 — sys_file_open(path_ptr, path_len, flags)
+fn handle_file_open(args: Args, _: *exceptions.VectorFrame) u64 {
+    const path_ptr = args[0];
+    const path_len = args[1];
+    const flags: u32 = @truncate(args[2]);
+    if (path_len == 0 or path_len > file_table.max_path_len) return error_result(.einval);
+    const pid = process.find_by_task(scheduler.current_id()) orelse return error_result(.einval);
+
+    var path_buf: [file_table.max_path_len]u8 = undefined;
+    if (uaccess.copy_in(&path_buf, path_ptr, @intCast(path_len)) != .ok) return error_result(.efault);
+
+    const res = file_table.open(pid, path_buf[0..path_len], flags);
+    if (res < 0) {
+        return @bitCast(res);
+    }
+    return @intCast(res);
+}
+
+/// Milestone 10 (claim 3570): slot 24 — sys_file_read(fd, buf_ptr, count)
+fn handle_file_read(args: Args, _: *exceptions.VectorFrame) u64 {
+    const fd = args[0];
+    const buf_ptr = args[1];
+    const count = args[2];
+    if (fd >= file_table.max_handles_per_process) return error_result(.ebadf);
+    const pid = process.find_by_task(scheduler.current_id()) orelse return error_result(.einval);
+    if (count == 0) return 0;
+
+    const take_count = @min(count, 2048);
+    var read_staging: [2048]u8 = undefined;
+    const res = file_table.read(pid, fd, read_staging[0..take_count]);
+    if (res < 0) {
+        return @bitCast(res);
+    }
+    const bytes_read: usize = @intCast(res);
+    if (bytes_read > 0) {
+        if (uaccess.copy_out(buf_ptr, read_staging[0..bytes_read], bytes_read) != .ok) return error_result(.efault);
+    }
+    return @intCast(bytes_read);
+}
+
+/// Milestone 10 (claim 3570): slot 25 — sys_file_write(fd, buf_ptr, count)
+fn handle_file_write(args: Args, _: *exceptions.VectorFrame) u64 {
+    const fd = args[0];
+    const buf_ptr = args[1];
+    const count = args[2];
+    if (fd >= file_table.max_handles_per_process) return error_result(.ebadf);
+    if (count > 2048) return error_result(.enospc);
+    const pid = process.find_by_task(scheduler.current_id()) orelse return error_result(.einval);
+    if (count == 0) return 0;
+
+    var write_staging: [2048]u8 = undefined;
+    if (uaccess.copy_in(&write_staging, buf_ptr, @intCast(count)) != .ok) return error_result(.efault);
+
+    const res = file_table.write(pid, fd, write_staging[0..count]);
+    if (res < 0) {
+        return @bitCast(res);
+    }
+    return @intCast(res);
+}
+
+/// Milestone 10 (claim 3570): slot 26 — sys_file_close(fd)
+fn handle_file_close(args: Args, _: *exceptions.VectorFrame) u64 {
+    const fd = args[0];
+    if (fd >= file_table.max_handles_per_process) return error_result(.ebadf);
+    const pid = process.find_by_task(scheduler.current_id()) orelse return error_result(.einval);
+    const res = file_table.close(pid, fd);
+    if (res < 0) {
+        return @bitCast(res);
+    }
+    return 0;
+}
+
+/// Milestone 10 (claim 3570): slot 27 — sys_dir_list(path_ptr, path_len, buf_ptr, max_entries)
+fn handle_dir_list(args: Args, _: *exceptions.VectorFrame) u64 {
+    const path_ptr = args[0];
+    const path_len = args[1];
+    const buf_ptr = args[2];
+    const max_entries = args[3];
+    const pid = process.find_by_task(scheduler.current_id()) orelse return error_result(.einval);
+    if (max_entries == 0) return 0;
+
+    var path_buf: [file_table.max_path_len]u8 = undefined;
+    if (path_len > 0) {
+        if (path_len > file_table.max_path_len) return error_result(.enametoolong);
+        if (uaccess.copy_in(&path_buf, path_ptr, @intCast(path_len)) != .ok) return error_result(.efault);
+    }
+
+    const take_entries = @min(max_entries, 16);
+    var entries_staging: [16]file_table.DirEntry = undefined;
+    const res = file_table.dir_list(pid, if (path_len == 0) "" else path_buf[0..path_len], entries_staging[0..take_entries]);
+    if (res < 0) {
+        return @bitCast(res);
+    }
+    const populated: usize = @intCast(res);
+    if (populated > 0) {
+        const bytes_to_copy = populated * @sizeOf(file_table.DirEntry);
+        const raw_bytes: [*]const u8 = @ptrCast(&entries_staging);
+        if (uaccess.copy_out(buf_ptr, raw_bytes[0..bytes_to_copy], bytes_to_copy) != .ok) return error_result(.efault);
+    }
+    return @intCast(populated);
+}
+
+/// Deterministic monitor output for the twenty-eight implemented rows and their counters.
 pub fn report(con: *console.Console) void {
-    con.puts("syscalls: slots=64 implemented=23\n");
+    con.puts("syscalls: slots=64 implemented=28\n");
     var number: u64 = 0;
     while (number < implemented_count) : (number += 1) {
         const info = entry_info(number).?;
@@ -793,7 +906,7 @@ test "syscall: runtime table has 64 slots and twenty-one unique implemented rows
             implemented += 1;
         }
     }
-    try std.testing.expectEqual(@as(usize, 23), implemented);
+    try std.testing.expectEqual(@as(usize, 28), implemented);
     try std.testing.expectEqualStrings("sys_ping", entry_info(0).?.name);
     try std.testing.expectEqualStrings("sys_exit", entry_info(3).?.name);
     try std.testing.expectEqualStrings("sys_sleep", entry_info(4).?.name);
@@ -815,7 +928,12 @@ test "syscall: runtime table has 64 slots and twenty-one unique implemented rows
     try std.testing.expectEqualStrings("sys_win_set_visible", entry_info(20).?.name);
     try std.testing.expectEqualStrings("sys_poll_event", entry_info(21).?.name);
     try std.testing.expectEqualStrings("sys_wait_event", entry_info(22).?.name);
-    try std.testing.expect(entry_info(23) == null);
+    try std.testing.expectEqualStrings("sys_file_open", entry_info(23).?.name);
+    try std.testing.expectEqualStrings("sys_file_read", entry_info(24).?.name);
+    try std.testing.expectEqualStrings("sys_file_write", entry_info(25).?.name);
+    try std.testing.expectEqualStrings("sys_file_close", entry_info(26).?.name);
+    try std.testing.expectEqualStrings("sys_dir_list", entry_info(27).?.name);
+    try std.testing.expect(entry_info(28) == null);
     try std.testing.expect(entry_info(63) == null);
 }
 
@@ -1727,7 +1845,7 @@ test "syscall: counters are monotonic and report is deterministic" {
     var con = mock.console();
     report(&con);
     try std.testing.expectEqualStrings(
-        "syscalls: slots=64 implemented=23\n" ++
+        "syscalls: slots=64 implemented=28\n" ++
             "  0 sys_ping calls=2\n" ++
             "  1 sys_write calls=0\n" ++
             "  2 sys_yield calls=0\n" ++
@@ -1750,9 +1868,57 @@ test "syscall: counters are monotonic and report is deterministic" {
             "  19 sys_win_query calls=0\n" ++
             "  20 sys_win_set_visible calls=0\n" ++
             "  21 sys_poll_event calls=0\n" ++
-            "  22 sys_wait_event calls=0\n",
+            "  22 sys_wait_event calls=0\n" ++
+            "  23 sys_file_open calls=0\n" ++
+            "  24 sys_file_read calls=0\n" ++
+            "  25 sys_file_write calls=0\n" ++
+            "  26 sys_file_close calls=0\n" ++
+            "  27 sys_dir_list calls=0\n",
         mock.contents(),
     );
+}
+
+test "syscall: file storage slots 23..27 dispatch and fault safety" {
+    userspace.init();
+    init(test_writer);
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0); // task 2 = process 0 (boot payload)
+    scheduler.start();
+    file_table.init();
+    var frame = fresh_frame();
+
+    // In task 0 (shell, not a registered process), calls return EINVAL
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_file_open, .{ 0x1000, 10, file_table.MODE_READ, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_file_read, .{ 0, 0x1000, 10, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_file_write, .{ 0, 0x1000, 10, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_file_close, .{ 0, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_dir_list, .{ 0x1000, 0, 0x2000, 10, 0, 0 }, &frame));
+
+    // Yield to user task (task 2, pid 0)
+    try std.testing.expect(scheduler.yield_current()); // shell -> worker
+    try std.testing.expect(scheduler.yield_current()); // worker -> user (2)
+    try std.testing.expectEqual(@as(usize, 2), scheduler.current_id());
+
+    var test_buf: [64]u8 = undefined;
+    const test_buf_addr = @intFromPtr(&test_buf);
+    set_user_regions(
+        .{ .base = 0, .len = 0 },
+        .{ .base = test_buf_addr, .len = test_buf.len },
+    );
+
+    // Bad user pointer on path / buffer -> EFAULT
+    try std.testing.expectEqual(error_result(.efault), dispatch(sys_file_open, .{ uaccess.diagnostic_unmapped, 8, file_table.MODE_READ, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.efault), dispatch(sys_dir_list, .{ uaccess.diagnostic_unmapped, 5, test_buf_addr, 1, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.efault), dispatch(sys_file_write, .{ 0, uaccess.diagnostic_unmapped, 10, 0, 0, 0 }, &frame));
+
+    // Bad / unallocated file descriptors -> EBADF
+    try std.testing.expectEqual(error_result(.ebadf), dispatch(sys_file_read, .{ 0, test_buf_addr, 10, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.ebadf), dispatch(sys_file_read, .{ 99, test_buf_addr, 10, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.ebadf), dispatch(sys_file_write, .{ 0, test_buf_addr, 10, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.ebadf), dispatch(sys_file_write, .{ 99, test_buf_addr, 10, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.ebadf), dispatch(sys_file_close, .{ 0, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.ebadf), dispatch(sys_file_close, .{ 99, 0, 0, 0, 0, 0 }, &frame));
 }
 
 test "syscall: sys_poll_event and sys_wait_event handle events, blocking, and uaccess fault safety" {

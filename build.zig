@@ -442,6 +442,75 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_keytest.step);
 
     // ------------------------------------------------------------------
+    // Guest: eleventh ESP user program (milestone ten, card F4 — claim 0510)
+    // SAVETEXT.BIN. Writes data to /data/hello.txt via file syscalls.
+    // ------------------------------------------------------------------
+    const savetext = b.addExecutable(.{
+        .name = "user-savetext",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/savetext.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    savetext.linker_script = b.path("user/linker.ld");
+    const savetext_step = b.step("savetext", "Build the eleventh ESP user program (zig-out/bin/SAVETEXT.BIN)");
+    const savetext_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    savetext_elf2bin.addFileArg(savetext.getEmittedBin());
+    const savetext_bin = savetext_elf2bin.addOutputFileArg("SAVETEXT.BIN");
+    savetext_elf2bin.has_side_effects = true;
+    savetext_elf2bin.stdio = .inherit;
+    savetext_step.dependOn(&savetext_elf2bin.step);
+    const install_savetext = b.addInstallFileWithDir(savetext_bin, .bin, "SAVETEXT.BIN");
+    b.getInstallStep().dependOn(&install_savetext.step);
+
+    // ------------------------------------------------------------------
+    // Guest: twelfth ESP user program (milestone ten, card F4 — claim 0510)
+    // TYPE.BIN. Reads data from /data/hello.txt via file syscalls.
+    // ------------------------------------------------------------------
+    const type_prog = b.addExecutable(.{
+        .name = "user-type",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/type.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    type_prog.linker_script = b.path("user/linker.ld");
+    const type_step = b.step("type", "Build the twelfth ESP user program (zig-out/bin/TYPE.BIN)");
+    const type_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    type_elf2bin.addFileArg(type_prog.getEmittedBin());
+    const type_bin = type_elf2bin.addOutputFileArg("TYPE.BIN");
+    type_elf2bin.has_side_effects = true;
+    type_elf2bin.stdio = .inherit;
+    type_step.dependOn(&type_elf2bin.step);
+    const install_type = b.addInstallFileWithDir(type_bin, .bin, "TYPE.BIN");
+    b.getInstallStep().dependOn(&install_type.step);
+
+    // ------------------------------------------------------------------
+    // Guest: thirteenth ESP user program (milestone ten, card F4 — claim 0510)
+    // DIR.BIN. Enumerates directory entries via sys_dir_list.
+    // ------------------------------------------------------------------
+    const dir_prog = b.addExecutable(.{
+        .name = "user-dir",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/dir.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    dir_prog.linker_script = b.path("user/linker.ld");
+    const dir_step = b.step("dir", "Build the thirteenth ESP user program (zig-out/bin/DIR.BIN)");
+    const dir_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    dir_elf2bin.addFileArg(dir_prog.getEmittedBin());
+    const dir_bin = dir_elf2bin.addOutputFileArg("DIR.BIN");
+    dir_elf2bin.has_side_effects = true;
+    dir_elf2bin.stdio = .inherit;
+    dir_step.dependOn(&dir_elf2bin.step);
+    const install_dir = b.addInstallFileWithDir(dir_bin, .bin, "DIR.BIN");
+    b.getInstallStep().dependOn(&install_dir.step);
+
+    // ------------------------------------------------------------------
     // Top-level steps. System-command steps are marked as having side
     // effects (and inherit stdio) so they always execute instead of being
     // skipped by the build cache. (No QEMU path: this project targets Apple
