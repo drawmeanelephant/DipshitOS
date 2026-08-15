@@ -43,6 +43,7 @@ const font = @import("font8x8.zig");
 const input = @import("input.zig"); // card U4 (claim 4993): the pointer reports
 const virtio_gpu = @import("virtio_gpu.zig");
 const fbtext = @import("text.zig");
+const events = @import("events.zig"); // Milestone 9 (claim 9228): application events
 
 // ---------------------------------------------------------------------------
 // Geometry + colors (fixed constants — the live record lives in the claim)
@@ -148,6 +149,7 @@ var clock_has_tick: bool = false;
 var cursor_x: u32 = 0;
 var cursor_y: u32 = 0;
 var cursor_shown: bool = false;
+var prev_ptr_buttons: u8 = 0;
 
 // ---------------------------------------------------------------------------
 // Arm / query
@@ -187,6 +189,8 @@ pub fn arm() void {
     presents = 0;
     clock_shown_tick = 0;
     clock_has_tick = false;
+    cursor_shown = false;
+    prev_ptr_buttons = 0;
 }
 
 pub fn armed() bool {
@@ -239,7 +243,22 @@ pub fn terminal_focused() bool {
     return windows[fi].kind == .terminal;
 }
 
+/// The focused window, or null when none.
+pub fn focused_window() ?*const Window {
+    const fi = focused_index() orelse return null;
+    return &windows[fi];
+}
+
+/// The owning process ID of the focused user window, or null if terminal/clock/none.
+pub fn focused_owner() ?usize {
+    const fi = focused_index() orelse return null;
+    if (windows[fi].kind == .user) return windows[fi].owner;
+    return null;
+}
+
 /// Focus a window by id. Returns false for an unknown id.
+/// Card E4 (claim 0293): emits WIN_BLUR to previous focused user window
+/// and WIN_FOCUS to newly focused user window.
 pub fn focus(id: u8) bool {
     if (!armed_global) return false;
     var i: usize = 0;
@@ -247,7 +266,32 @@ pub fn focus(id: u8) bool {
         if (windows[i].id == id) {
             // Card U5 (ADR 0008 D4): focus is ALWAYS VISIBLE — a focus
             // change must repaint so the ring moves.
-            if (focused_id != id) _ = mark_dirty(0);
+            if (focused_id != id) {
+                const old_id = focused_id;
+                // Deliver WIN_BLUR to previously focused user window owner
+                if (find_user_window(old_id)) |old_win| {
+                    if (old_win.owner) |old_owner| {
+                        events.push(old_owner, .{
+                            .kind = events.WIN_BLUR,
+                            .flags = 0,
+                            .seq = 0,
+                            .arg0 = old_id,
+                            .arg1 = id,
+                        });
+                    }
+                }
+                // Deliver WIN_FOCUS to newly focused user window owner
+                if (windows[i].kind == .user and windows[i].owner != null) {
+                    events.push(windows[i].owner.?, .{
+                        .kind = events.WIN_FOCUS,
+                        .flags = 0,
+                        .seq = 0,
+                        .arg0 = id,
+                        .arg1 = old_id,
+                    });
+                }
+                _ = mark_dirty(0);
+            }
             focused_id = id;
             return true;
         }
@@ -380,7 +424,7 @@ pub fn user_open(x: u32, y: u32, w: u32, h: u32, owner: usize) UserOpenResult {
             .owner = owner,
         };
         win_count += 1;
-        focused_id = id;
+        _ = focus(id);
         return .{ .opened = id };
     }
     return .full;
@@ -558,12 +602,25 @@ pub fn close_owner(owner: usize) usize {
 /// fall the focus back to the terminal when the removed window held it,
 /// and mark the fixed windows dirty so the next composite repaints over
 /// the released window's pixels.
+/// Card E4 (claim 0293): emits WIN_CLOSE to the user window owner.
 fn remove_user_at(idx: usize) void {
-    const removed_id = windows[idx].id;
+    const removed_win = windows[idx];
+    const removed_id = removed_win.id;
+    if (removed_win.kind == .user and removed_win.owner != null) {
+        events.push(removed_win.owner.?, .{
+            .kind = events.WIN_CLOSE,
+            .flags = 0,
+            .seq = 0,
+            .arg0 = removed_id,
+            .arg1 = 0,
+        });
+    }
     var j = idx;
     while (j + 1 < win_count) : (j += 1) windows[j] = windows[j + 1];
     win_count -= 1;
-    if (focused_id == removed_id) focused_id = 0; // fall back to the terminal
+    if (focused_id == removed_id) {
+        focused_id = 0; // fall back to the terminal
+    }
     // Reveal whatever sat under the released window.
     _ = mark_dirty(0);
     _ = mark_dirty(1);
@@ -581,11 +638,20 @@ pub fn cycle_focus() ?u8 {
     while (i <= win_count) : (i += 1) {
         const idx = (start + i) % win_count;
         if (!windows[idx].visible) continue;
-        focused_id = windows[idx].id;
-        _ = mark_dirty(0);
+        const target_id = windows[idx].id;
+        _ = focus(target_id);
         return focused_id;
     }
     return null;
+}
+
+/// Map raw pointer buttons bitmask to ADR 0009 button flags.
+pub fn mouse_buttons_to_flags(buttons: u8) u16 {
+    var flags: u16 = 0;
+    if ((buttons & 0x01) != 0) flags |= events.BTN_LEFT;
+    if ((buttons & 0x02) != 0) flags |= events.BTN_RIGHT;
+    if ((buttons & 0x04) != 0) flags |= events.BTN_MIDDLE;
+    return flags;
 }
 
 /// Card U4 (claim 4993): the pointer tick — consume the pointer state from
@@ -593,27 +659,80 @@ pub fn cycle_focus() ?u8 {
 /// id when a CLICK landed on a window (D4: click = focus + raise), null
 /// otherwise. Called from the shell idle loop; a no-op when the input path
 /// is unarmed (the default VM).
+/// Card E3 (claim 9228): converts absolute pointer motion and button clicks
+/// within a user window to window-local coordinates and queues MOUSE_DOWN,
+/// MOUSE_UP, and MOUSE_MOVE events to the hit user window's owning process.
 pub fn pointer_tick(st: input.PointerState, click: ?input.Click) ?u8 {
     if (!armed_global) return null;
+    var focused_changed: ?u8 = null;
     if (st.valid) {
         const nx = map_pointer_axis(st.x, virtio_gpu.fb_width);
         const ny = map_pointer_axis(st.y, virtio_gpu.fb_height);
-        if (!cursor_shown or nx != cursor_x or ny != cursor_y) {
+        const moved = (!cursor_shown or nx != cursor_x or ny != cursor_y);
+        if (moved) {
             cursor_x = nx;
             cursor_y = ny;
             cursor_shown = true;
             _ = mark_dirty(0); // the cursor moves over a full repaint
         }
-    }
-    if (click != null) {
-        if (focus_at(cursor_x, cursor_y)) {
-            const id = focused_id;
-            _ = raise(id);
-            _ = mark_dirty(0);
-            return id;
+
+        const kb_flags = input.hid_modifiers_to_flags(input.report().kb_mods);
+        const btn_flags = mouse_buttons_to_flags(st.buttons);
+        const all_flags = btn_flags | kb_flags;
+
+        const btn_pressed = (prev_ptr_buttons == 0 and st.buttons != 0) or (click != null);
+        const btn_released = (prev_ptr_buttons != 0 and st.buttons == 0);
+
+        if (btn_pressed) {
+            if (focus_at(cursor_x, cursor_y)) {
+                const id = focused_id;
+                _ = raise(id);
+                _ = mark_dirty(0);
+                focused_changed = id;
+            }
         }
+
+        // Deliver pointer events to hit user window
+        if (hit_test(cursor_x, cursor_y)) |hit_id| {
+            if (find_user_window(hit_id)) |w| {
+                if (w.owner) |owner_pid| {
+                    const local_x: u32 = if (cursor_x >= w.x) @min(cursor_x - w.x, w.w - 1) else 0;
+                    const local_y: u32 = if (cursor_y >= w.y) @min(cursor_y - w.y, w.h - 1) else 0;
+
+                    if (moved) {
+                        events.push(owner_pid, .{
+                            .kind = events.MOUSE_MOVE,
+                            .flags = all_flags,
+                            .seq = 0,
+                            .arg0 = local_x,
+                            .arg1 = local_y,
+                        });
+                    }
+                    if (btn_pressed) {
+                        events.push(owner_pid, .{
+                            .kind = events.MOUSE_DOWN,
+                            .flags = all_flags,
+                            .seq = 0,
+                            .arg0 = local_x,
+                            .arg1 = local_y,
+                        });
+                    }
+                    if (btn_released) {
+                        events.push(owner_pid, .{
+                            .kind = events.MOUSE_UP,
+                            .flags = all_flags,
+                            .seq = 0,
+                            .arg0 = local_x,
+                            .arg1 = local_y,
+                        });
+                    }
+                }
+            }
+        }
+
+        prev_ptr_buttons = st.buttons;
     }
-    return null;
+    return focused_changed;
 }
 
 /// HID absolute pointers report 0..32767 logical; map onto the framebuffer
@@ -1364,4 +1483,111 @@ test "driving_award: card U4 — pointer motion moves the cursor; a click focuse
     try std.testing.expectEqual(@as(u8, 0xff), fb[off + 2]); // R (0xff00ff)
     try std.testing.expectEqual(@as(u8, 0x00), fb[off + 1]); // G
     try std.testing.expectEqual(@as(u8, 0xff), fb[off]); // B
+}
+
+test "driving_award: card E3 — mouse_buttons_to_flags maps button bits" {
+    try std.testing.expectEqual(@as(u16, 0), mouse_buttons_to_flags(0));
+    try std.testing.expectEqual(events.BTN_LEFT, mouse_buttons_to_flags(0x01));
+    try std.testing.expectEqual(events.BTN_RIGHT, mouse_buttons_to_flags(0x02));
+    try std.testing.expectEqual(events.BTN_MIDDLE, mouse_buttons_to_flags(0x04));
+    try std.testing.expectEqual(events.BTN_LEFT | events.BTN_RIGHT | events.BTN_MIDDLE, mouse_buttons_to_flags(0x07));
+}
+
+test "driving_award: card E3 — pointer motion and clicks queue window-local events to owner" {
+    events.init();
+    arm();
+    // Open a user window at (100, 50, 200, 100) owned by pid 3 (receives WIN_FOCUS)
+    const res = user_open(100, 50, 200, 100, 3);
+    try std.testing.expect(res == .opened);
+    const win_id = res.opened;
+    _ = events.pop(3); // Consume WIN_FOCUS
+
+    // Move pointer to (150, 80) scanout coordinates (inside the user window)
+    // 150 / 1280 * 32768 = 3840; 80 / 720 * 32768 = 3641
+    const st_motion: input.PointerState = .{ .x = 3840, .y = 3641, .buttons = 0, .valid = true };
+    _ = pointer_tick(st_motion, null);
+
+    // MOUSE_MOVE event should be queued for pid 3
+    try std.testing.expect(events.pending(3) >= 1);
+    const ev_move = events.pop(3).?;
+    try std.testing.expectEqual(events.MOUSE_MOVE, ev_move.kind);
+    // Scanout (150, 80) mapped to window-local coordinates: x = 150 - 100 = 50, y = 80 - 50 = 30
+    try std.testing.expectEqual(@as(u32, 50), ev_move.arg0);
+    try std.testing.expectEqual(@as(u32, 30), ev_move.arg1);
+
+    // Press left mouse button
+    const st_down: input.PointerState = .{ .x = 3840, .y = 3641, .buttons = 0x01, .valid = true };
+    _ = pointer_tick(st_down, null);
+
+    // MOUSE_DOWN event queued with BTN_LEFT flag
+    try std.testing.expect(events.pending(3) >= 1);
+    const ev_down = events.pop(3).?;
+    try std.testing.expectEqual(events.MOUSE_DOWN, ev_down.kind);
+    try std.testing.expect((ev_down.flags & events.BTN_LEFT) != 0);
+    try std.testing.expectEqual(@as(u32, 50), ev_down.arg0);
+    try std.testing.expectEqual(@as(u32, 30), ev_down.arg1);
+
+    // Release mouse button
+    const st_up: input.PointerState = .{ .x = 3840, .y = 3641, .buttons = 0, .valid = true };
+    _ = pointer_tick(st_up, null);
+
+    // MOUSE_UP event queued
+    try std.testing.expect(events.pending(3) >= 1);
+    const ev_up = events.pop(3).?;
+    try std.testing.expectEqual(events.MOUSE_UP, ev_up.kind);
+    try std.testing.expectEqual(@as(u32, 50), ev_up.arg0);
+    try std.testing.expectEqual(@as(u32, 30), ev_up.arg1);
+
+    // Clean up
+    _ = user_close(win_id);
+}
+
+test "driving_award: card E4 — window lifecycle emits WIN_FOCUS, WIN_BLUR, and WIN_CLOSE" {
+    events.init();
+    arm();
+
+    // 1. Open user window 2 owned by pid 4 -> receives WIN_FOCUS
+    const res1 = user_open(10, 10, 100, 100, 4);
+    try std.testing.expect(res1 == .opened);
+    const win2 = res1.opened;
+    try std.testing.expectEqual(@as(usize, 1), events.pending(4));
+    const ev_f1 = events.pop(4).?;
+    try std.testing.expectEqual(events.WIN_FOCUS, ev_f1.kind);
+    try std.testing.expectEqual(@as(u32, win2), ev_f1.arg0);
+
+    // 2. Open user window 3 owned by pid 5 -> pid 4 gets WIN_BLUR, pid 5 gets WIN_FOCUS
+    const res2 = user_open(120, 10, 100, 100, 5);
+    try std.testing.expect(res2 == .opened);
+    const win3 = res2.opened;
+
+    // Check pid 4 received WIN_BLUR
+    try std.testing.expectEqual(@as(usize, 1), events.pending(4));
+    const ev_b1 = events.pop(4).?;
+    try std.testing.expectEqual(events.WIN_BLUR, ev_b1.kind);
+    try std.testing.expectEqual(@as(u32, win2), ev_b1.arg0);
+    try std.testing.expectEqual(@as(u32, win3), ev_b1.arg1);
+
+    // Check pid 5 received WIN_FOCUS
+    try std.testing.expectEqual(@as(usize, 1), events.pending(5));
+    const ev_f2 = events.pop(5).?;
+    try std.testing.expectEqual(events.WIN_FOCUS, ev_f2.kind);
+    try std.testing.expectEqual(@as(u32, win3), ev_f2.arg0);
+
+    // 3. Focus back to window 0 (terminal) -> pid 5 gets WIN_BLUR
+    try std.testing.expect(focus(0));
+    try std.testing.expectEqual(@as(usize, 1), events.pending(5));
+    const ev_b2 = events.pop(5).?;
+    try std.testing.expectEqual(events.WIN_BLUR, ev_b2.kind);
+    try std.testing.expectEqual(@as(u32, win3), ev_b2.arg0);
+    try std.testing.expectEqual(@as(u32, 0), ev_b2.arg1);
+
+    // 4. Close window 2 -> pid 4 receives WIN_CLOSE
+    try std.testing.expect(user_close(win2));
+    try std.testing.expectEqual(@as(usize, 1), events.pending(4));
+    const ev_c1 = events.pop(4).?;
+    try std.testing.expectEqual(events.WIN_CLOSE, ev_c1.kind);
+    try std.testing.expectEqual(@as(u32, win2), ev_c1.arg0);
+
+    // Clean up window 3
+    _ = user_close(win3);
 }

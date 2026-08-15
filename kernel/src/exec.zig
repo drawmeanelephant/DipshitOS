@@ -72,6 +72,8 @@ const process = @import("process.zig");
 // Card 3f (claim 5965): the per-process IPC mailbox — each exec'd
 // process's ring is reset the moment its process id is created.
 const mailbox = @import("mailbox.zig");
+// Milestone 9 (claim 7670): per-process event queue
+const events = @import("events.zig");
 // Claim 0826: the per-process text/stack/kernel-stack pages come from the
 // physical page allocator (claims 3972/5162).
 const alloc = @import("alloc.zig");
@@ -314,8 +316,10 @@ pub fn exec_file(name: []const u8, args: []const []const u8) ExecResult {
     };
     // Card 3f (claim 5965): the new process's IPC ring starts clean — a
     // recycled process id must never inherit an earlier occupant's queued
-    // messages (cross-process isolation at the mailbox level).
+    // messages (cross-process isolation at the mailbox level). Card E1: same
+    // for event queue.
     mailbox.reset(proc_id);
+    events.reset(proc_id);
     if (scheduler.register_exec_user(entry_va, rebuild.root_phys, @intCast(text_len), rebuild.stack_va, scheduler.task_stack_size, kstack, @intCast(argc), argv_va)) |task_id| {
         _ = process.bind(proc_id, task_id);
     } else {

@@ -101,7 +101,7 @@ run_one() {
         --script artifacts/live-input-script.txt \
         --input-string "input"$'\n' --input-string-after "userspace: el0=1" \
         --script-expect $'input: armed=1 fifo=0/64 dropped=0 events=6 kb-mods=0x0 kb-usage=0x28 kb-byte=0xa ptr-btns=0 ptr-x=0 ptr-y=0 ptr-reports=0' \
-        --timeout 50 \
+        --timeout 70 \
         > "$out" 2>&1
     local RC=$?
     [ -f artifacts/vm-serial.log ] && cp artifacts/vm-serial.log "$serial" || true

@@ -27,6 +27,8 @@
 
 const std = @import("std");
 const xhci = @import("xhci.zig"); // I1/I2: the XHCI transport + enumerated HID devices
+const app_events = @import("events.zig"); // Milestone 9 (claim 7206): application event queues
+const driving_award = @import("driving_award.zig"); // Milestone six G5: window focus query for event routing
 
 pub const max_fifo: usize = 64;
 
@@ -242,43 +244,120 @@ pub fn pop_byte() ?u8 {
 // Report decode (keyboard boot report + best-effort absolute pointer)
 // ---------------------------------------------------------------------------
 
+/// Map raw HID keyboard boot report modifier byte to ADR 0009 modifier flags.
+pub fn hid_modifiers_to_flags(mods: u8) u16 {
+    var flags: u16 = 0;
+    if ((mods & mod_lshift) != 0 or (mods & mod_rshift) != 0) flags |= app_events.MOD_SHIFT;
+    if ((mods & mod_lctrl) != 0 or (mods & mod_rctrl) != 0) flags |= app_events.MOD_CTRL;
+    if ((mods & 0x04) != 0 or (mods & 0x40) != 0) flags |= app_events.MOD_ALT;
+    if ((mods & 0x08) != 0 or (mods & 0x80) != 0) flags |= app_events.MOD_CMD;
+    return flags;
+}
+
 /// Decode an 8-byte HID keyboard boot report: byte 0 = modifier, bytes 2-7
 /// = up to six held keycodes (the boot protocol's rollover limit). A keycode
 /// present now but not in the previously-held set is a key-DOWN; its ASCII
 /// byte (shift applied) is pushed. The held set is then updated.
-fn decode_keyboard_report(rep: []const u8) void {
+/// Card E2 (claim 7206): when a user window is focused, KEY_DOWN / KEY_UP
+/// events are pushed to the owning process's event queue.
+pub fn decode_keyboard_report(rep: []const u8) void {
     if (rep.len < 8) return;
     const mods = rep[0];
-    const shift = (mods & mod_lshift) != 0 or (mods & mod_rshift) != 0;
-    const ctrl = (mods & mod_lctrl) != 0 or (mods & mod_rctrl) != 0;
+    const flags = hid_modifiers_to_flags(mods);
+    const shift = (flags & app_events.MOD_SHIFT) != 0;
+    const ctrl = (flags & app_events.MOD_CTRL) != 0;
+    const alt = (flags & app_events.MOD_ALT) != 0;
     kb_mods = mods;
     var keys: [6]u8 = [_]u8{0} ** 6;
     for (rep[2..8], 0..) |k, i| keys[i] = k;
-    const alt = (mods & 0x04) != 0 or (mods & 0x40) != 0; // left/right Alt
+
+    // Card U5 (ADR 0008 D4): Alt+Tab cycles window focus — the
+    // chord is consumed as a window-manager signal across all windows.
     for (keys) |k| {
-        if (k == 0) continue;
-        var held = false;
-        for (kb_held) |h| {
-            if (h == k) {
-                held = true;
-                break;
+        if (k == 0x2b and alt) {
+            var held = false;
+            for (kb_held) |h| {
+                if (h == k) {
+                    held = true;
+                    break;
+                }
+            }
+            if (!held) {
+                alt_tab_pending = true;
             }
         }
-        if (!held) {
-            kb_last_usage = k;
-            // Card U5 (ADR 0008 D4): Alt+Tab cycles window focus — the
-            // chord is consumed as a window-manager signal, never a byte.
-            if (alt and k == 0x2b) {
-                alt_tab_pending = true;
-                continue;
+    }
+
+    if (driving_award.focused_owner()) |owner_pid| {
+        // Milestone 9 Card E2: Route keyboard events to focused user window process!
+        // 1. Key DOWN: keys present now but not in kb_held
+        for (keys) |k| {
+            if (k == 0) continue;
+            var held = false;
+            for (kb_held) |h| {
+                if (h == k) {
+                    held = true;
+                    break;
+                }
             }
-            var out: [max_key_bytes]u8 = undefined;
-            const n = hid_to_bytes(k, shift, ctrl, &out);
-            if (n > 0) {
-                kb_last_byte = out[n - 1]; // the sequence's final byte
-                var i: usize = 0;
-                while (i < n) : (i += 1) push_byte(out[i]);
+            if (!held) {
+                kb_last_usage = k;
+                const ascii_char: u32 = if (hid_to_ascii(k, shift)) |ch| ch else 0;
+                app_events.push(owner_pid, .{
+                    .kind = app_events.KEY_DOWN,
+                    .flags = flags,
+                    .seq = 0,
+                    .arg0 = k,
+                    .arg1 = ascii_char,
+                });
                 events += 1;
+            }
+        }
+        // 2. Key UP: keys in kb_held but not in keys now
+        for (kb_held) |h| {
+            if (h == 0) continue;
+            var still_held = false;
+            for (keys) |k| {
+                if (k == h) {
+                    still_held = true;
+                    break;
+                }
+            }
+            if (!still_held) {
+                const ascii_char: u32 = if (hid_to_ascii(h, shift)) |ch| ch else 0;
+                app_events.push(owner_pid, .{
+                    .kind = app_events.KEY_UP,
+                    .flags = flags,
+                    .seq = 0,
+                    .arg0 = h,
+                    .arg1 = ascii_char,
+                });
+            }
+        }
+    } else {
+        // Terminal / console route (existing behavior)
+        for (keys) |k| {
+            if (k == 0) continue;
+            var held = false;
+            for (kb_held) |h| {
+                if (h == k) {
+                    held = true;
+                    break;
+                }
+            }
+            if (!held) {
+                kb_last_usage = k;
+                if (alt and k == 0x2b) {
+                    continue;
+                }
+                var out: [max_key_bytes]u8 = undefined;
+                const n = hid_to_bytes(k, shift, ctrl, &out);
+                if (n > 0) {
+                    kb_last_byte = out[n - 1]; // the sequence's final byte
+                    var i: usize = 0;
+                    while (i < n) : (i += 1) push_byte(out[i]);
+                    events += 1;
+                }
             }
         }
     }
@@ -427,6 +506,7 @@ test "input: hid_to_bytes maps ctrl+a-z to ASCII control codes" {
 }
 
 test "input: keyboard report decode pushes a ctrl chord and an arrow sequence" {
+    _ = driving_award.focus(0);
     fifo_count = 0;
     fifo_head = 0;
     events = 0;
@@ -448,6 +528,7 @@ test "input: keyboard report decode pushes a ctrl chord and an arrow sequence" {
 
 test "input: keyboard report decode pushes key-down bytes with shift" {
     // Reset the module state (host tests share the globals).
+    _ = driving_award.focus(0);
     fifo_count = 0;
     fifo_head = 0;
     events = 0;
@@ -466,6 +547,7 @@ test "input: keyboard report decode pushes key-down bytes with shift" {
 }
 
 test "input: a held key does not re-fire (no repeat on unchanged report)" {
+    _ = driving_award.focus(0);
     fifo_count = 0;
     fifo_head = 0;
     events = 0;
@@ -517,4 +599,58 @@ test "input: drain is a no-op when unarmed" {
     armed_global = true;
     try std.testing.expect(report().armed);
     armed_global = false;
+}
+
+test "input: hid_modifiers_to_flags maps modifiers to ADR 0009 bitmasks" {
+    try std.testing.expectEqual(@as(u16, 0), hid_modifiers_to_flags(0));
+    try std.testing.expectEqual(app_events.MOD_SHIFT, hid_modifiers_to_flags(0x02)); // left shift
+    try std.testing.expectEqual(app_events.MOD_SHIFT, hid_modifiers_to_flags(0x20)); // right shift
+    try std.testing.expectEqual(app_events.MOD_CTRL, hid_modifiers_to_flags(0x01)); // left ctrl
+    try std.testing.expectEqual(app_events.MOD_CTRL, hid_modifiers_to_flags(0x10)); // right ctrl
+    try std.testing.expectEqual(app_events.MOD_ALT, hid_modifiers_to_flags(0x04)); // left alt
+    try std.testing.expectEqual(app_events.MOD_ALT, hid_modifiers_to_flags(0x40)); // right alt
+    try std.testing.expectEqual(app_events.MOD_CMD, hid_modifiers_to_flags(0x08)); // left cmd
+    try std.testing.expectEqual(app_events.MOD_CMD, hid_modifiers_to_flags(0x80)); // right cmd
+    try std.testing.expectEqual(app_events.MOD_SHIFT | app_events.MOD_CTRL | app_events.MOD_ALT | app_events.MOD_CMD, hid_modifiers_to_flags(0x02 | 0x01 | 0x04 | 0x08));
+}
+
+test "input: keyboard routing delivers KEY_DOWN and KEY_UP events to focused user window" {
+    app_events.init();
+    driving_award.arm();
+    // Open a user window owned by pid 2 (delivers WIN_FOCUS)
+    const res = driving_award.user_open(10, 10, 100, 100, 2);
+    try std.testing.expect(res == .opened);
+    const win_id = res.opened;
+    try std.testing.expectEqual(@as(?usize, 2), driving_award.focused_owner());
+    _ = app_events.pop(2); // Consume WIN_FOCUS
+
+    fifo_count = 0;
+    fifo_head = 0;
+    kb_held = [_]u8{0} ** 6;
+
+    // Press 'a' (usage 0x04) with left shift (0x02)
+    decode_keyboard_report(&[_]u8{ 0x02, 0, 0x04, 0, 0, 0, 0, 0 });
+    // Terminal FIFO is untouched
+    try std.testing.expectEqual(@as(usize, 0), fifo_count);
+
+    // Event queue for pid 2 receives KEY_DOWN
+    try std.testing.expectEqual(@as(usize, 1), app_events.pending(2));
+    const ev1 = app_events.pop(2).?;
+    try std.testing.expectEqual(app_events.KEY_DOWN, ev1.kind);
+    try std.testing.expectEqual(app_events.MOD_SHIFT, ev1.flags);
+    try std.testing.expectEqual(@as(u32, 0x04), ev1.arg0);
+    try std.testing.expectEqual(@as(u32, 'A'), ev1.arg1);
+
+    // Release 'a'
+    decode_keyboard_report(&[_]u8{ 0x02, 0, 0, 0, 0, 0, 0, 0 });
+    // Event queue for pid 2 receives KEY_UP
+    try std.testing.expectEqual(@as(usize, 1), app_events.pending(2));
+    const ev2 = app_events.pop(2).?;
+    try std.testing.expectEqual(app_events.KEY_UP, ev2.kind);
+    try std.testing.expectEqual(app_events.MOD_SHIFT, ev2.flags);
+    try std.testing.expectEqual(@as(u32, 0x04), ev2.arg0);
+    try std.testing.expectEqual(@as(u32, 'A'), ev2.arg1);
+
+    // Clean up window
+    _ = driving_award.user_close(win_id);
 }

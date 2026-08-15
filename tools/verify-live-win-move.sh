@@ -139,7 +139,7 @@ if [ -f "$SERIAL" ]; then
     # The syscall counters: open=1, fill=4, present=3, move=2, raise=1,
     # get=1, query=1, set_visible=2, close=0 (the window persists — WINMOVE
     # yield-loops forever).
-    grep -a -q -F -- "syscalls: slots=64 implemented=21" "$SERIAL" && IMPL=1
+    grep -a -q -F -- "syscalls: slots=64 implemented=23" "$SERIAL" && IMPL=1
     grep -a -q -F -- "  16 sys_win_move calls=2" "$SERIAL" && \
         grep -a -q -F -- "  17 sys_win_raise calls=1" "$SERIAL" && \
         grep -a -q -F -- "  18 sys_win_get calls=1" "$SERIAL" && \

@@ -130,7 +130,7 @@ if [ -f "$SERIAL" ]; then
     grep -a -q -F -- "winloop: loop ok" "$SERIAL" && LOOP=1
     grep -a -q -F -- "win: windows=3" "$SERIAL" && WIN3=1
     grep -a -q -F -- "win[2]: user user rect=64,64,256,192" "$SERIAL" && ROW2=1
-    grep -a -q -F -- "syscalls: slots=64 implemented=21" "$SERIAL" && IMPL=1
+    grep -a -q -F -- "syscalls: slots=64 implemented=23" "$SERIAL" && IMPL=1
     # The owner column (runtime visibility of per-process ownership): the
     # user window shows its owning pid (2), the fixed windows show `-`.
     grep -a -E -q 'win\[2\]: user user rect=64,64,256,192 .* owner=2' "$SERIAL" && OWNERU=1

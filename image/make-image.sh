@@ -2,23 +2,25 @@
 #
 # make-image.sh -- build the bootable FAT32+GPT boot disk image for DipshitOS.
 #
-# Usage: make-image.sh [EFI_BINARY] [IMAGE_PATH] [KERNEL_BINARY] [USER_BINARY] [COUNTER_BINARY] [PEER_BINARY] [STATUS43_BINARY] [UDP_BINARY] [WIN_BINARY] [WINCLOSE_BINARY] [WINLOOP_BINARY] [WINMOVE_BINARY]
+# Usage: make-image.sh [EFI_BINARY] [IMAGE_PATH] [KERNEL_BINARY] [USER_BINARY] [COUNTER_BINARY] [PEER_BINARY] [STATUS43_BINARY] [UDP_BINARY] [WIN_BINARY] [WINCLOSE_BINARY] [WINLOOP_BINARY] [WINMOVE_BINARY] [KEYTEST_BINARY]
 # Defaults: zig-out/bin/BOOTAA64.EFI   artifacts/disk.img
 #           zig-out/bin/KERNEL.BIN     zig-out/bin/USER.BIN
 #           zig-out/bin/COUNTER.BIN    zig-out/bin/PEER.BIN
 #           zig-out/bin/STATUS43.BIN   zig-out/bin/UDP.BIN
 #           zig-out/bin/WIN.BIN        zig-out/bin/WINCLOSE.BIN
 #           zig-out/bin/WINLOOP.BIN    zig-out/bin/WINMOVE.BIN
+#           zig-out/bin/KEYTEST.BIN
 #
 # USER.BIN (the milestone-three ESP user program, claim 6783), COUNTER.BIN
 # (the milestone-four follow-on 2 never-exiting user program, claim 4613),
 # PEER.BIN (the follow-on 3 card 3f IPC peer, claim 5965), STATUS43.BIN
 # (the follow-on 4 card 4c wait-gate target, claim 9946), UDP.BIN
-# (the milestone-five card N6 UDP-syscall proof, claim 1384) and WIN.BIN
+# (the milestone-five card N6 UDP-syscall proof, claim 1384), WIN.BIN
 # (the milestone-six card G6 draw/window-syscall proof, claim 0487),
 # WINCLOSE.BIN (the claim-0487 teardown follow-on release proof),
 # WINLOOP.BIN (the claim-0487 ownership follow-on persistent-window proof),
-# and WINMOVE.BIN (the claim-0487 move/raise follow-on) are
+# WINMOVE.BIN (the claim-0487 move/raise follow-on), and KEYTEST.BIN
+# (the milestone-nine card E6 interactive event user program, claim 9328) are
 # embedded at the volume root when present; the kernel's `exec` monitor
 # command loads them by name from the ESP and enters them at EL0.
 #
@@ -44,6 +46,7 @@ WIN_BIN="${9:-$ROOT_DIR/zig-out/bin/WIN.BIN}"
 WINCLOSE_BIN="${10:-$ROOT_DIR/zig-out/bin/WINCLOSE.BIN}"
 WINLOOP_BIN="${11:-$ROOT_DIR/zig-out/bin/WINLOOP.BIN}"
 WINMOVE_BIN="${12:-$ROOT_DIR/zig-out/bin/WINMOVE.BIN}"
+KEYTEST_BIN="${13:-$ROOT_DIR/zig-out/bin/KEYTEST.BIN}"
 SIZE_MB="${DIPSHITOS_IMAGE_SIZE_MB:-128}"
 
 cd "$ROOT_DIR"
@@ -128,6 +131,13 @@ if [ -f "$WINMOVE_BIN" ]; then
     fi
     WINMOVE_ARGS+=("$WINMOVE_BIN")
 fi
+KEYTEST_ARGS=()
+if [ -f "$KEYTEST_BIN" ]; then
+    if [ "$(head -c 4 "$KEYTEST_BIN")" != "DSK1" ]; then
+        fail "'$KEYTEST_BIN' does not start with the 'DSK1' image magic -- run 'zig build' first (it produces zig-out/bin/KEYTEST.BIN)."
+    fi
+    KEYTEST_ARGS+=("$KEYTEST_BIN")
+fi
 
 # 3. Builder script.
 [ -f "$SCRIPT_DIR/mkfat32.py" ] || fail "missing $SCRIPT_DIR/mkfat32.py."
@@ -136,13 +146,13 @@ fi
 mkdir -p "$(dirname "$IMAGE")"
 rm -f "$IMAGE"
 echo "make-image: building FAT32+GPT image '$IMAGE' (${SIZE_MB} MiB)..."
-python3 "$SCRIPT_DIR/mkfat32.py" --size-mb "$SIZE_MB" "$IMAGE" "$EFI_BIN" "$KERNEL_BIN" "${USER_ARGS[@]}" "${COUNTER_ARGS[@]}" "${PEER_ARGS[@]}" "${STATUS43_ARGS[@]}" "${UDP_ARGS[@]}" "${WIN_ARGS[@]}" "${WINCLOSE_ARGS[@]}" "${WINLOOP_ARGS[@]}" "${WINMOVE_ARGS[@]}" \
+python3 "$SCRIPT_DIR/mkfat32.py" --size-mb "$SIZE_MB" "$IMAGE" "$EFI_BIN" "$KERNEL_BIN" "${USER_ARGS[@]}" "${COUNTER_ARGS[@]}" "${PEER_ARGS[@]}" "${STATUS43_ARGS[@]}" "${UDP_ARGS[@]}" "${WIN_ARGS[@]}" "${WINCLOSE_ARGS[@]}" "${WINLOOP_ARGS[@]}" "${WINMOVE_ARGS[@]}" "${KEYTEST_ARGS[@]}" \
     || fail "image creation failed (see output above)."
 
 # 5. Self-verify by listing the image we just wrote. The embed is asserted:
 # the ESP must carry KERNEL.BIN, USER.BIN, COUNTER.BIN (claim 4613),
 # PEER.BIN (claim 5965), STATUS43.BIN (claim 9946), UDP.BIN
-# (claim 1384), and WIN.BIN (claim 0487).
+# (claim 1384), WIN.BIN (claim 0487), and KEYTEST.BIN (claim 9328).
 echo "make-image: verifying image contents..."
 LISTING="$(python3 "$SCRIPT_DIR/mkfat32.py" --list "$IMAGE")" \
     || fail "image verification failed."
@@ -157,5 +167,8 @@ printf '%s\n' "$LISTING" | grep -q 'WIN.BIN' || fail "WIN.BIN missing from the i
 printf '%s\n' "$LISTING" | grep -q 'WINCLOSE.BIN' || fail "WINCLOSE.BIN missing from the image listing"
 printf '%s\n' "$LISTING" | grep -q 'WINLOOP.BIN' || fail "WINLOOP.BIN missing from the image listing"
 printf '%s\n' "$LISTING" | grep -q 'WINMOVE.BIN' || fail "WINMOVE.BIN missing from the image listing"
+if [ -f "$KEYTEST_BIN" ]; then
+    printf '%s\n' "$LISTING" | grep -q 'KEYTEST.BIN' || fail "KEYTEST.BIN missing from the image listing"
+fi
 
 echo "make-image: done."

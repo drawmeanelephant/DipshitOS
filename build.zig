@@ -416,6 +416,32 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_winmove.step);
 
     // ------------------------------------------------------------------
+    // Guest: tenth ESP user program (milestone nine, card E6 capstone gate —
+    // claim 9328) — the interactive event user application KEYTEST.BIN.
+    // Opens a window, waits for application events via sys_wait_event
+    // (slot 22), updates window contents in response to keyboard and pointer
+    // events, and exits with status 99.
+    // ------------------------------------------------------------------
+    const keytest = b.addExecutable(.{
+        .name = "user-keytest",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/keytest.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    keytest.linker_script = b.path("user/linker.ld");
+    const keytest_step = b.step("keytest", "Build the tenth ESP user program (zig-out/bin/KEYTEST.BIN; class A tooling, no VM)");
+    const keytest_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    keytest_elf2bin.addFileArg(keytest.getEmittedBin());
+    const keytest_bin = keytest_elf2bin.addOutputFileArg("KEYTEST.BIN");
+    keytest_elf2bin.has_side_effects = true;
+    keytest_elf2bin.stdio = .inherit;
+    keytest_step.dependOn(&keytest_elf2bin.step);
+    const install_keytest = b.addInstallFileWithDir(keytest_bin, .bin, "KEYTEST.BIN");
+    b.getInstallStep().dependOn(&install_keytest.step);
+
+    // ------------------------------------------------------------------
     // Top-level steps. System-command steps are marked as having side
     // effects (and inherit stdio) so they always execute instead of being
     // skipped by the build cache. (No QEMU path: this project targets Apple
@@ -435,6 +461,7 @@ pub fn build(b: *std.Build) void {
     image.addFileArg(winclose_bin); // ... [WINCLOSE.BIN] (claim 0487 follow-on: seventh user program, the draw/window-syscall RELEASE proof)
     image.addFileArg(winloop_bin); // ... [WINLOOP.BIN] (claim 0487 follow-on: eighth user program, the PERSISTENT window proof)
     image.addFileArg(winmove_bin); // ... [WINMOVE.BIN] (claim 0487 follow-on: ninth user program, the MOVE/RESTACK proof)
+    image.addFileArg(keytest_bin); // ... [KEYTEST.BIN] (claim 9328: tenth user program, interactive event app)
     image.has_side_effects = true;
     image.stdio = .inherit;
     image_step.dependOn(&image.step);

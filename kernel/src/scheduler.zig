@@ -66,6 +66,8 @@ const process = @import("process.zig");
 // Card 3f (claim 5965): the per-process IPC mailbox — the pool reset
 // clears it and the boot payload's process registration resets its ring.
 const mailbox = @import("mailbox.zig");
+// Milestone 9 (claim 7670): per-process event queue
+const events = @import("events.zig");
 // Card G6 teardown follow-on (per-process window ownership): the exit path
 // auto-closes the exiting process's user windows via `close_owner`. Pure
 // BSS writes, safe in the exception context `exit_current` runs in.
@@ -184,6 +186,11 @@ const Task = struct {
     /// that uses `wakeup_tick`; the tick's `wake_expired` never touches a
     /// task with this field set.
     wait_pid: ?usize = null,
+    /// Milestone 9 (claim 1016): the process id this blocked task waits on
+    /// for application events via `sys_wait_event` (slot 22). Set by
+    /// `wait_event_current`; cleared when `wake_event_waiters` returns the
+    /// task to `ready` upon event enqueue.
+    wait_event_pid: ?usize = null,
     /// Card 3c (claim 7786): armed-kill flag. `kill` sets it from main
     /// context; the ring converts the task's NEXT selection into the
     /// existing exit path (status 137) instead of resuming it — the OS,
@@ -288,9 +295,12 @@ pub fn init() usize {
     for (&tasks) |*task| task.* = .{};
     // Claim 3848: every pool reset also clears the process layer (the
     // boot path initializes both here; host tests get isolation). Card 3f
-    // (claim 5965): the IPC mailbox rings reset with it.
+    // (claim 5965): the IPC mailbox rings reset with it. Card E1 (claim 7670):
+    // event queues reset with it.
     process.init();
     mailbox.init();
+    events.init();
+    events.on_event_pushed = wake_event_waiters;
     tasks[0] = .{ .name = "shell", .state = .ready, .ttbr0 = mmu.kernel_root_phys() };
     tasks[idle_id] = .{
         .name = "idle",
@@ -475,6 +485,7 @@ pub fn register_user(entry: u64, image_base: u64) ?usize {
         // Card 3f (claim 5965): the payload's process id starts with a
         // clean IPC ring (same reset the exec path applies).
         mailbox.reset(proc_id);
+        events.reset(proc_id);
         _ = process.bind(proc_id, id);
     }
     const frame: *exceptions.VectorFrame = @ptrFromInt(tasks[id].sp);
@@ -716,6 +727,44 @@ pub fn wait_current(target_pid: usize) bool {
     return true;
 }
 
+/// Milestone 9 (claim 1016): block the calling task until an application event
+/// arrives for process `pid`, then stage its successor. Rewinds ELR by 4
+/// so when the task wakes up, it re-executes `svc #0` under its own context.
+pub fn wait_event_current(pid: usize) bool {
+    if (!scheduling_active() or task_count == 0 or current == idle_id) return false;
+    if (tasks[current].state != .ready and tasks[current].state != .running) return false;
+    const waiting = current;
+    const pc = current_exception_pc();
+    tasks[waiting].sp = exceptions.resume_frame;
+    tasks[waiting].elr = if (pc.elr >= 4) pc.elr - 4 else pc.elr;
+    tasks[waiting].spsr = pc.spsr;
+    tasks[waiting].sp_el0 = exceptions.resume_sp_el0;
+    tasks[waiting].saves += 1;
+    tasks[waiting].state = .blocked;
+    tasks[waiting].wait_event_pid = pid;
+    const next = next_runnable(waiting) orelse {
+        tasks[waiting].state = .ready;
+        tasks[waiting].wait_event_pid = null;
+        tasks[waiting].saves -%= 1;
+        return false;
+    };
+    current = next;
+    stage_current();
+    apply_pending();
+    return true;
+}
+
+/// Milestone 9 (claim 1016): wake any task blocked in `sys_wait_event` for `pid`.
+pub fn wake_event_waiters(pid: usize) void {
+    var i: usize = 0;
+    while (i < max_tasks) : (i += 1) {
+        if (tasks[i].state != .blocked) continue;
+        if (tasks[i].wait_event_pid != pid) continue;
+        tasks[i].state = .ready;
+        tasks[i].wait_event_pid = null;
+    }
+}
+
 /// Card 4c (claim 9946): the target process just exited with `status` —
 /// every task blocked in `sys_wait` on pid `pid` returns to `ready` and
 /// its saved SVC frame's x0 is patched with the observed status (the
@@ -745,9 +794,9 @@ fn wake_expired() void {
     var i: usize = 0;
     while (i < max_tasks) : (i += 1) {
         if (tasks[i].state != .blocked) continue;
-        // Card 4c (claim 9946): an event-blocked task (`sys_wait` — no
-        // deadline) is woken by `wake_waiters`, never by the tick clock.
-        if (tasks[i].wait_pid != null) continue;
+        // Card 4c / Card E5: event-blocked tasks (`sys_wait` / `sys_wait_event` —
+        // no deadline) are woken by their event hooks, never by the tick clock.
+        if (tasks[i].wait_pid != null or tasks[i].wait_event_pid != null) continue;
         if (tick_count < tasks[i].wakeup_tick) continue;
         tasks[i].state = .ready;
         tasks[i].wakeup_tick = 0;
