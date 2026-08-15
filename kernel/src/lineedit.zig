@@ -85,9 +85,15 @@ pub const LineEditor = struct {
     hist_draft: [max_line]u8 = undefined,
     hist_draft_len: usize = 0,
 
-    /// `ESC [ <final>` sequence state (input.zig's encoding of the special
-    /// keys). 0 = normal, 1 = ESC, 2 = ESC [, 3 = ESC [ 3 (Delete's `~`).
+    /// CSI (`ESC [ <params> <final>`) decode state: 0 = normal, 1 = ESC,
+    /// 2 = ESC [, 3 = collecting parameter bytes before the final. A
+    /// sequence whose final is not one we act on is swallowed WHOLE — the
+    /// tilde of an `ESC [ <n> ~` key must never reach the line as text.
     esc_state: u8 = 0,
+    /// The first numeric parameter of the sequence being collected (the
+    /// `3` of Delete's `ESC [ 3 ~`). Saturates: a longer parameter can
+    /// only fail to match a key we handle, never wrap into one.
+    esc_param: u8 = 0,
 
     /// Tab-completion source (ADR 0008 D2), wired by the shell to the
     /// command registry. Given the line + cursor it returns the suffix to
@@ -143,26 +149,61 @@ pub const LineEditor = struct {
             else => {},
             1 => {
                 self.esc_state = 0;
-                if (byte == '[') self.esc_state = 2;
-                return .none;
+                if (byte == '[') {
+                    self.esc_state = 2;
+                    return .none;
+                }
+                // A lone ESC followed by anything else is not a sequence:
+                // the byte is a real keystroke and is processed normally
+                // (dropping it silently loses the character).
+                return self.feed(con, byte);
             },
             2 => {
-                self.esc_state = 0;
                 switch (byte) {
-                    'A' => return self.recall_older(con),
-                    'B' => return self.recall_newer(con),
-                    'C' => return self.cursor_right(con),
-                    'D' => return self.cursor_left(con),
-                    'H' => return self.cursor_home(con),
-                    'F' => return self.cursor_end(con),
-                    '3' => self.esc_state = 3,
-                    else => {},
+                    'A' => {
+                        self.esc_state = 0;
+                        return self.recall_older(con);
+                    },
+                    'B' => {
+                        self.esc_state = 0;
+                        return self.recall_newer(con);
+                    },
+                    'C' => {
+                        self.esc_state = 0;
+                        return self.cursor_right(con);
+                    },
+                    'D' => {
+                        self.esc_state = 0;
+                        return self.cursor_left(con);
+                    },
+                    'H' => {
+                        self.esc_state = 0;
+                        return self.cursor_home(con);
+                    },
+                    'F' => {
+                        self.esc_state = 0;
+                        return self.cursor_end(con);
+                    },
+                    '0'...'9' => {
+                        self.esc_param = byte - '0';
+                        self.esc_state = 3;
+                    },
+                    else => self.esc_state = 0, // unhandled final: whole sequence swallowed
                 }
                 return .none;
             },
             3 => {
+                // Parameter bytes (0x30-0x3f) continue the sequence; the
+                // final byte (0x40-0x7e) ends it. Only Delete's `3 ~` acts.
+                if (byte >= '0' and byte <= '9') {
+                    const scaled = @mulWithOverflow(self.esc_param, 10);
+                    const added = @addWithOverflow(scaled[0], byte - '0');
+                    self.esc_param = if (scaled[1] == 1 or added[1] == 1) 255 else added[0];
+                    return .none;
+                }
+                if (byte >= 0x3a and byte <= 0x3f) return .none; // ';' and friends
                 self.esc_state = 0;
-                if (byte == '~') return self.delete_forward(con);
+                if (byte == '~' and self.esc_param == 3) return self.delete_forward(con);
                 return .none;
             },
         }
@@ -637,6 +678,41 @@ test "lineedit: mid-line backspace and forward delete redraw" {
     try std.testing.expectEqualStrings("c", editor.buffer[0..editor.len]);
     try std.testing.expectEqual(@as(usize, 0), editor.cursor);
     try std.testing.expectEqualStrings("c \x08\x08", mock.contents());
+}
+
+test "lineedit: an unhandled CSI key is swallowed whole, tilde and all" {
+    var mock = console.MockConsole(64){};
+    var editor = LineEditor{};
+    for ("ab") |c| _ = editor.feed(mock.console(), c);
+    mock.reset();
+    // PageUp (ESC [ 5 ~) and F5 (ESC [ 1 5 ~) are not editing keys. The
+    // final `~` is a printable byte: swallowing only the prefix inserted a
+    // literal '~' into the line.
+    for ("\x1b[5~") |c| _ = editor.feed(mock.console(), c);
+    for ("\x1b[15~") |c| _ = editor.feed(mock.console(), c);
+    // A multi-parameter sequence (ESC [ 1 ; 2 D) is swallowed too.
+    for ("\x1b[1;2D") |c| _ = editor.feed(mock.console(), c);
+    try std.testing.expectEqualStrings("ab", editor.buffer[0..editor.len]);
+    try std.testing.expectEqual(@as(usize, 2), editor.cursor);
+    try std.testing.expectEqualStrings("", mock.contents());
+    // Delete still works after the swallowed sequences (state is clean).
+    _ = editor.feed(mock.console(), 0x01); // home
+    mock.reset();
+    for ("\x1b[3~") |c| _ = editor.feed(mock.console(), c);
+    try std.testing.expectEqualStrings("b", editor.buffer[0..editor.len]);
+}
+
+test "lineedit: a lone ESC does not eat the next keystroke" {
+    var mock = console.MockConsole(64){};
+    var editor = LineEditor{};
+    _ = editor.feed(mock.console(), 0x1b); // ESC alone: no sequence follows
+    _ = editor.feed(mock.console(), 'x'); // a real keystroke, not a final
+    try std.testing.expectEqualStrings("x", editor.buffer[0..editor.len]);
+    try std.testing.expectEqual(@as(usize, 1), editor.cursor);
+    try std.testing.expectEqualStrings("x", mock.contents());
+    // ESC then Enter still submits (the CR reaches the normal path).
+    _ = editor.feed(mock.console(), 0x1b);
+    try std.testing.expectEqual(LineResult.submitted, editor.feed(mock.console(), '\r'));
 }
 
 test "lineedit: kill chords truncate toward the cursor" {
