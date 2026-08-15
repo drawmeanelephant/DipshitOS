@@ -186,11 +186,13 @@ assumption comes from documentation or reasoning only.
     posting process), and (5) a leading synthesized `mouseEntered`
     (enterExitEvent) preamble. This is unlike the KEYBOARD, where
     synthesized `view.keyDown(with:)` translates to HID reports
-    immediately (the I2/I3 seam). Open follow-ups: whether a REAL mouse
-    over the `--display` window produces reports (untested knowingly),
-    and whether the CG route works once the terminal holds Accessibility
-    trust. The runner keeps the seam (`--pointer`, `--pointer-after`,
-    `--pointer-route window|app|cg`) for that follow-up.
+    immediately (the I2/I3 seam). Follow-ups: the REAL-mouse path is now
+    wired as a CLASS-C gate (`bash tools/verify-pointer-manual.sh`, claim
+    9015) — a human at the mouse proves the guest stack live and is the
+    only route that can, since every synthesized route fails; the CG
+    route under Accessibility trust remains the other open follow-up. The
+    runner keeps the seam (`--pointer`, `--pointer-after`,
+    `--pointer-route window|app|cg`) for that CG follow-up.
     **[observed]** — the probe runs under `artifacts/u45-probe*`; the
     guest-side consumption (click = focus + raise, cursor render,
     Alt+Tab decode) is host-tested in `driving_award.zig`/`input.zig`.
