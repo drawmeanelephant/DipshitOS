@@ -92,7 +92,8 @@ pub const Shell = struct {
                 self.editor.next_line();
                 self.prompt_shown = false;
                 if (rejected) {
-                    self.mon.console.print_line("input refused: line longer than 256 bytes");
+                    // ADR 0008 D3 shape 2 (a refusal is a failure).
+                    monitor.err_line(&self.mon, "input refused: line longer than 256 bytes");
                 }
                 handle_line(&self.mon, line);
                 return .processed;
@@ -104,7 +105,8 @@ pub const Shell = struct {
 fn handle_line(mon: *monitor.Monitor, line: []const u8) void {
     const tokens = tokenizer.tokenize(line);
     if (tokens.too_many) {
-        mon.console.print_line("too many arguments; type 'help' for a list of commands");
+        // ADR 0008 D3 shape 2, sharing exec's one message.
+        monitor.err_line(mon, monitor.too_many_arguments_message);
         return;
     }
     if (tokens.unbalanced_quote) {
@@ -313,6 +315,9 @@ fn make_shell(mock: anytype, view: memmap.MapView) Shell {
 
 test "shell: mock-fed end-to-end session produces the exact transcript" {
     const long = "a" ** 256;
+    // 18 tokens: one past the 17-token limit (verb + 16 args), so the
+    // tokenizer refuses the line before any handler sees it.
+    const too_many_tokens = "echo t t t t t t t t t t t t t t t t t";
     const expected =
         "DipshitOS - AArch64 firmware-assisted kernel monitor\n" ++
         "DipshitOS: memory is a map, not a territory.\n" ++
@@ -417,15 +422,23 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "error: hello.txt: not persisted - no disk (FAT volume unavailable)\n" ++
         "dipshit> cat hello.txt\r\n" ++
         "error: hello.txt: not found (no such file on the ESP)\n" ++
+        // ADR 0008 D3: the three shapes are gate-tested here byte-exactly,
+        // so a command that invents a fourth shape fails CI.
+        // Shape 1 (misuse): the usage line PLUS the registry's one-line hint.
         "dipshit> pages bogus\r\n" ++
         "usage: pages [selftest]\n" ++
+        "physical page allocator pool\n" ++
+        // Shape 3 (unknown verb).
         "dipshit> " ++ long ++ "\r\n" ++
         "unknown command '" ++ long ++ "' -- try 'help'\n" ++
+        // Shape 2 (failure), from the dispatch layer: an over-long argv.
+        "dipshit> " ++ too_many_tokens ++ "\r\n" ++
+        "error: too many arguments (max 17 tokens)\n" ++
         "dipshit> ^C\r\n" ++
         // Enter pressed after the cancel submits an empty line, which the
-        // registry answers with its no-command message (then a new prompt).
+        // registry answers in shape 2 (then a new prompt).
         "dipshit> \r\n" ++
-        "no command given; type 'help' for a list of commands\n" ++
+        "error: no command given; type 'help' for a list of commands\n" ++
         "dipshit> ";
 
     var mock = console.MockConsole(8192){};
@@ -452,6 +465,8 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
     _ = esp.add_esp_entry("BOOTED.TXT", 0x29, "DIPSHITOS BOOTLOADER\nfirmware has agreed to cooperate\n");
     mock.feed("help\nversion\nmem\npages\npages selftest\ntasks\necho \"elephant business\"\nls\ncat BOOTED.TXT\nwrite hello.txt hello world\ncat hello.txt\npages bogus\n");
     mock.feed(long);
+    mock.feed("\n");
+    mock.feed(too_many_tokens);
     mock.feed("\n\x03\n");
     while (shell.poll() != .idle) {}
     try std.testing.expectEqualStrings(expected, mock.contents());
@@ -491,7 +506,7 @@ test "shell: too many arguments refuses execution with the documented message" {
     mock.feed("a b c d e f g h i j k l m n o p q r\n");
     while (shell.poll() != .idle) {}
     const out = mock.contents();
-    try std.testing.expect(std.mem.indexOf(u8, out, "too many arguments; type 'help' for a list of commands\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "error: too many arguments (max 17 tokens)\n") != null);
     // And it must not have executed anything.
     try std.testing.expect(std.mem.indexOf(u8, out, "unknown command:") == null);
 }
@@ -542,6 +557,36 @@ test "shell: ctrl-l clears the screen and repaints the prompt + line" {
     try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[2J\x1b[H") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "dipshit> echo hi") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "hi\n") != null);
+}
+
+test "shell: the live gate's exact chord byte stream drives all six D2 chords" {
+    // The class-A counterpart of tools/verify-live-editing.sh phase 2: the
+    // byte stream below is character-for-character the file that gate feeds
+    // over the serial console, so a change to one without the other shows up
+    // here rather than after a four-minute VM boot. Each chord is proven by
+    // its RESULT (the command that ends up running), never by the keystroke.
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("cho u2chord\x01e\n"); // Ctrl-A: home, then insert the 'e'
+    mock.feed("echo u2en\x01\x05d\n"); // Ctrl-A then Ctrl-E: back to the end
+    mock.feed("echo u2killXXXX\x1b[D\x1b[D\x1b[D\x1b[D\x0b\n"); // Ctrl-K
+    mock.feed("JUNK\x15echo u2under\n"); // Ctrl-U: kill back to the start
+    mock.feed("echo u2clear\x0c\n"); // Ctrl-L: clear, keep the line
+    mock.feed("echo NEVER\x03echo u2cancel\n"); // Ctrl-C: cancel, do not run
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    for ([_][]const u8{ "\nu2chord\n", "\nu2end\n", "\nu2kill\n", "\nu2under\n", "\nu2clear\n", "\nu2cancel\n" }) |want| {
+        if (std.mem.indexOf(u8, out, want) == null) {
+            std.debug.print("missing chord result {s} in:\n{s}\n", .{ want, out });
+            return error.ChordResultMissing;
+        }
+    }
+    // Ctrl-L emitted the erase-in-display; Ctrl-C echoed and cancelled, so
+    // the abandoned command never ran (its output line never appears).
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[2J\x1b[H") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "^C") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\nNEVER\n") == null);
 }
 
 test "shell: ctrl-c on an empty line cancels without executing" {

@@ -334,11 +334,14 @@ pub fn lookup(name: []const u8) ?*const Command {
 /// to the later Console & Shell Core stream.
 pub fn exec(m: *Monitor, argv: []const []const u8) ExecError {
     if (argv.len == 0) {
-        m.console.print_line("no command given; type 'help' for a list of commands");
+        // ADR 0008 D3 shape 2: a dispatch-level refusal wears the `error:`
+        // prefix like any other. An empty line is not an unknown VERB (there
+        // is no verb to quote), so shape 3 would be a lie.
+        err_line(m, "no command given; type 'help' for a list of commands");
         return .usage;
     }
     if (argv.len > max_args_limit + 1) {
-        m.console.print_line("too many arguments; type 'help' for a list of commands");
+        err_line(m, too_many_arguments_message);
         return .usage;
     }
     const cmd = lookup(argv[0]) orelse {
@@ -436,12 +439,20 @@ fn sub_verb_complete(cmd: []const u8, prefix: []const u8) ?[]const u8 {
 // Shared helpers
 // ---------------------------------------------------------------------------
 
-/// ADR 0008 D3 shape 1: misuse -> `usage: <cmd> <args>` (the registry's
-/// ONE usage string per command). Sub-verb misuse reuses the command's
-/// full usage, so a fourth shape can never slip in on a bad invocation.
+/// The one dispatch-level too-many-tokens message, shared by the shell's
+/// tokenizer refusal and `exec`'s own guard so the two can never drift.
+pub const too_many_arguments_message = "too many arguments (max 17 tokens)";
+
+/// ADR 0008 D3 shape 1: misuse -> `usage: <cmd> <args>` PLUS a one-line
+/// hint. The hint is the registry's own blurb for the command, so there is
+/// exactly one source for it and no per-handler copy can drift. Sub-verb
+/// misuse reuses the command's full usage, so a fourth shape can never slip
+/// in on a bad invocation.
 fn print_usage(m: *Monitor, cmd: *const Command) void {
     m.console.puts("usage: ");
     m.console.puts(cmd.usage);
+    m.console.puts("\n");
+    m.console.puts(cmd.help);
     m.console.puts("\n");
 }
 
@@ -449,6 +460,12 @@ fn print_usage(m: *Monitor, cmd: *const Command) void {
 /// prefix only; the caller appends the actionable text.
 fn err_prefix(m: *Monitor) void {
     m.console.puts("error: ");
+}
+
+/// ADR 0008 D3 shape 2 for a fixed message: `error: <text>` on one line.
+pub fn err_line(m: *Monitor, text: []const u8) void {
+    err_prefix(m);
+    m.console.print_line(text);
 }
 
 /// Parse a u64 from an optional "0x"/"0X"-prefixed hexadecimal string or a
@@ -2007,12 +2024,14 @@ fn cmd_kill(m: *Monitor, args: []const []const u8) ExecError {
 fn cmd_mbox(m: *Monitor, args: []const []const u8) ExecError {
     const wanted: ?usize = if (args.len > 0) blk: {
         const value = parseInt(args[0]) catch {
+            err_prefix(m);
             m.console.puts("mbox: invalid pid: ");
             m.console.puts(args[0]);
             m.console.puts("\n");
             return .invalid_argument;
         };
         if (value >= process.max_processes or process.info(@as(usize, @intCast(value))) == null) {
+            err_prefix(m);
             m.console.puts("mbox: no such process: ");
             m.console.puts(args[0]);
             m.console.puts("\n");
@@ -4196,12 +4215,14 @@ fn cmd_beans(m: *Monitor, args: []const []const u8) ExecError {
     var count: u64 = 42;
     if (args.len == 1) {
         count = parseInt(args[0]) catch {
+            err_prefix(m);
             m.console.puts("beans: invalid count: ");
             m.console.puts(args[0]);
             m.console.puts("\n");
             return .invalid_argument;
         };
         if (count < 1 or count > beans_max_count) {
+            err_prefix(m);
             m.console.puts("beans: count must be between 1 and ");
             m.console.print_u64(beans_max_count);
             m.console.puts("\n");
@@ -4389,10 +4410,10 @@ test "monitor: mbox dumps pending messages and drain counters" {
     // Unknown and malformed pids refuse exactly.
     env.mock.reset();
     try std.testing.expectEqual(ExecError.invalid_argument, exec(&mon, &.{ "mbox", "7" }));
-    try std.testing.expectEqualStrings("mbox: no such process: 7\n", env.mock.contents());
+    try std.testing.expectEqualStrings("error: mbox: no such process: 7\n", env.mock.contents());
     env.mock.reset();
     try std.testing.expectEqual(ExecError.invalid_argument, exec(&mon, &.{ "mbox", "nope" }));
-    try std.testing.expectEqualStrings("mbox: invalid pid: nope\n", env.mock.contents());
+    try std.testing.expectEqualStrings("error: mbox: invalid pid: nope\n", env.mock.contents());
 }
 
 test "monitor: registry is well-formed" {
@@ -4408,6 +4429,117 @@ test "monitor: registry is well-formed" {
             try std.testing.expect(!std.mem.eql(u8, cmd.name, other.name));
         }
     }
+}
+
+test "monitor: every misusable command prints exactly the D3 misuse shape (registry walk)" {
+    // ADR 0008 D3: misuse is `usage: <cmd> <args>` PLUS a one-line hint,
+    // and "a new command that prints a fourth shape fails CI". A curated
+    // list of commands cannot enforce that — a command added later would
+    // simply not be on it. This walks the registry instead, so the
+    // enforcement covers every present and future command.
+    //
+    // Only INVALID arities are fed: `exec` checks arity before dispatch, so
+    // no handler body runs and the walk has no side effects.
+    var env = TestEnv.init();
+    var mon = env.monitor();
+    const filler = [_][]const u8{ "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0" };
+    var argv_buf: [max_args_limit + 2][]const u8 = undefined;
+    var checked: usize = 0;
+    for (ensure_registry()) |*cmd| {
+        // Too FEW arguments (only possible when the command requires some).
+        if (cmd.min_args > 0) {
+            env.mock.reset();
+            argv_buf[0] = cmd.name;
+            try std.testing.expectEqual(ExecError.usage, exec(&mon, argv_buf[0..1]));
+            try expectMisuseShape(env.mock.contents(), cmd);
+            checked += 1;
+        }
+        // Too MANY arguments (only possible below the global token limit).
+        if (cmd.max_args < max_args_limit) {
+            env.mock.reset();
+            argv_buf[0] = cmd.name;
+            const extra = @as(usize, cmd.max_args) + 1;
+            for (0..extra) |i| argv_buf[1 + i] = filler[i];
+            try std.testing.expectEqual(ExecError.usage, exec(&mon, argv_buf[0 .. 1 + extra]));
+            try expectMisuseShape(env.mock.contents(), cmd);
+            checked += 1;
+        }
+    }
+    // The walk is only evidence if it actually exercised commands.
+    try std.testing.expect(checked >= 20);
+}
+
+/// Assert one misuse transcript is EXACTLY shape 1: the registry's usage
+/// line, then the registry's blurb as the hint, and nothing else.
+fn expectMisuseShape(out: []const u8, cmd: *const Command) !void {
+    var buf: [1024]u8 = undefined;
+    const expected = try std.fmt.bufPrint(&buf, "usage: {s}\n{s}\n", .{ cmd.usage, cmd.help });
+    try std.testing.expectEqualStrings(expected, out);
+}
+
+test "monitor: every REFUSAL wears a D3 shape (registry x garbage argv)" {
+    // ADR 0008 D3's CI clause: "a new command that prints a fourth shape
+    // fails CI". A no-panic fuzz cannot enforce that, and a curated list of
+    // commands silently exempts whatever is added next -- which is how
+    // `mbox` (claim 5965, added after U3's sweep) came to print a bare
+    // `mbox: invalid pid: ...` line. This walks the registry with garbage
+    // argv and shape-checks EVERY line of output from any invocation that
+    // actually refused. Invocations that succeed are skipped: an honest
+    // STATUS report is not a D3 shape and is not meant to be.
+    var env = TestEnv.init();
+    var mon = env.monitor();
+    // Side-effecting commands are excluded by name: they reboot, spawn,
+    // write, or consume entropy rather than refuse.
+    const skip = [_][]const u8{
+        "reboot", "shutdown", "spawn",  "kill", "exec", "write",
+        "mount",  "fault",    "random",
+    };
+    const garbage = [_][]const u8{ "zzz", "-1", "0x", "99999999999999999999", "" };
+    var refusals: usize = 0;
+    for (ensure_registry()) |*cmd| {
+        var skipped = false;
+        for (skip) |s| {
+            if (std.mem.eql(u8, s, cmd.name)) skipped = true;
+        }
+        if (skipped) continue;
+        for (garbage) |g| {
+            var argv: [3][]const u8 = .{ cmd.name, g, g };
+            const n: usize = if (cmd.max_args >= 2) 3 else if (cmd.max_args >= 1) 2 else 1;
+            env.mock.reset();
+            const rc = exec(&mon, argv[0..n]);
+            if (rc == .none) continue;
+            refusals += 1;
+            var it = std.mem.splitScalar(u8, env.mock.contents(), '\n');
+            while (it.next()) |line| {
+                if (line.len == 0) continue;
+                const ok = std.mem.startsWith(u8, line, "usage: ") or
+                    std.mem.startsWith(u8, line, "error: ") or
+                    std.mem.startsWith(u8, line, "unknown command '") or
+                    std.mem.eql(u8, line, cmd.help); // the shape-1 hint line
+                if (!ok) {
+                    std.debug.print("non-D3 line from `{s} {s}`: {s}\n", .{ cmd.name, g, line });
+                    return error.FourthShape;
+                }
+            }
+        }
+    }
+    try std.testing.expect(refusals >= 10);
+}
+
+test "monitor: dispatch-level refusals wear a sanctioned D3 prefix" {
+    // The shell's own diagnostics are not exempt from D3: an empty line and
+    // an over-long argv are failures, so they take shape 2 rather than a
+    // bare sentence (which is what a fourth shape looks like in practice).
+    var env = TestEnv.init();
+    var mon = env.monitor();
+    env.mock.reset();
+    try std.testing.expectEqual(ExecError.usage, exec(&mon, &.{}));
+    try std.testing.expectEqualStrings("error: no command given; type 'help' for a list of commands\n", env.mock.contents());
+    env.mock.reset();
+    var many: [max_args_limit + 2][]const u8 = undefined;
+    for (&many) |*slot| slot.* = "x";
+    try std.testing.expectEqual(ExecError.usage, exec(&mon, many[0..]));
+    try std.testing.expectEqualStrings("error: too many arguments (max 17 tokens)\n", env.mock.contents());
 }
 
 test "monitor: help listing is generated from the registry" {
@@ -4507,13 +4639,13 @@ test "monitor: argument-count validation" {
     var env = TestEnv.init();
     var mon = env.monitor();
     try std.testing.expectEqual(ExecError.usage, exec(&mon, &.{"hex"}));
-    try std.testing.expectEqualStrings("usage: hex <number>...\n", env.mock.contents());
+    try std.testing.expectEqualStrings("usage: hex <number>...\nformat an integer in hexadecimal\n", env.mock.contents());
     env.mock.reset();
     try std.testing.expectEqual(ExecError.usage, exec(&mon, &.{"repeat"}));
-    try std.testing.expectEqualStrings("usage: repeat <count> <text...>\n", env.mock.contents());
+    try std.testing.expectEqualStrings("usage: repeat <count> <text...>\nrepeat text, safely bounded\n", env.mock.contents());
     env.mock.reset();
     try std.testing.expectEqual(ExecError.usage, exec(&mon, &.{ "beans", "1", "2" }));
-    try std.testing.expectEqualStrings("usage: beans [count]\n", env.mock.contents());
+    try std.testing.expectEqualStrings("usage: beans [count]\ncount beans, probably\n", env.mock.contents());
 }
 
 // Monitor-test mock transport for the armed netsend path (the virtio_net
@@ -4721,7 +4853,7 @@ test "monitor: net ip sets the static address and echoes the marker" {
     try std.testing.expectEqualStrings("error: invalid address: 999.0.0.1\n", env.mock.contents());
     env.mock.reset();
     try std.testing.expectEqual(ExecError.usage, exec(&mon, &.{ "net", "ip" }));
-    try std.testing.expectEqualStrings("usage: net [recv|ip <addr>|arp [<addr>]|ping <addr>|udp [listen <port>|close <port>|send <addr> <port> <len>|recv [<port>]]|dhcp|tcp [connect <addr> <port>|send <len>|recv|close|reset]]\n", env.mock.contents());
+    try std.testing.expectEqualStrings("usage: net [recv|ip <addr>|arp [<addr>]|ping <addr>|udp [listen <port>|close <port>|send <addr> <port> <len>|recv [<port>]]|dhcp|tcp [connect <addr> <port>|send <len>|recv|close|reset]]\nvirtio-net transport + RX + ARP + ICMP + UDP + DHCP + TCP: device DID, MAC, queues, feature bits, RX counters ('net recv' prints received frames; 'net ip <a.b.c.d>' sets the static IP; 'net arp [<a.b.c.d>]' shows/resolves the ARP table; 'net ping <a.b.c.d>' sends an ICMP echo request; 'net udp [listen <port>|close <port>|send <addr> <port> <len>|recv [<port>]]' drives UDP; 'net dhcp' runs the bounded DHCP client one step per invocation; 'net tcp [connect <addr> <port>|send <len>|recv|close|reset]' drives the bounded TCP client)\n", env.mock.contents());
     // The echo line is the live gate's injection trigger marker.
     try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "net", "ip", "10.0.0.2" }));
     try std.testing.expect(std.mem.indexOf(u8, env.mock.contents(), "net ip: ip=10.0.0.2\n") != null);
@@ -4992,7 +5124,7 @@ test "monitor: net recv prints the received frame byte-exact and drains the FIFO
     // Unknown subcommand: documented refusal.
     env.mock.reset();
     try std.testing.expectEqual(ExecError.usage, exec(&mon, &.{ "net", "bogus" }));
-    try std.testing.expect(std.mem.indexOf(u8, env.mock.contents(), "usage: net [recv|ip <addr>|arp [<addr>]|ping <addr>|udp [listen <port>|close <port>|send <addr> <port> <len>|recv [<port>]]|dhcp|tcp [connect <addr> <port>|send <len>|recv|close|reset]]\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, env.mock.contents(), "usage: net [recv|ip <addr>|arp [<addr>]|ping <addr>|udp [listen <port>|close <port>|send <addr> <port> <len>|recv [<port>]]|dhcp|tcp [connect <addr> <port>|send <len>|recv|close|reset]]\nvirtio-net transport + RX + ARP + ICMP + UDP + DHCP + TCP: device DID, MAC, queues, feature bits, RX counters ('net recv' prints received frames; 'net ip <a.b.c.d>' sets the static IP; 'net arp [<a.b.c.d>]' shows/resolves the ARP table; 'net ping <a.b.c.d>' sends an ICMP echo request; 'net udp [listen <port>|close <port>|send <addr> <port> <len>|recv [<port>]]' drives UDP; 'net dhcp' runs the bounded DHCP client one step per invocation; 'net tcp [connect <addr> <port>|send <len>|recv|close|reset]' drives the bounded TCP client)\n") != null);
     virtio_net.net_ready = false;
     virtio_net.rx_fifo_head = 0;
     virtio_net.rx_fifo_count = 0;
@@ -5235,10 +5367,10 @@ test "monitor: beans is deterministic and bounded" {
     );
     env.mock.reset();
     try std.testing.expectEqual(ExecError.invalid_argument, exec(&mon, &.{ "beans", "0" }));
-    try std.testing.expectEqualStrings("beans: count must be between 1 and 100\n", env.mock.contents());
+    try std.testing.expectEqualStrings("error: beans: count must be between 1 and 100\n", env.mock.contents());
     env.mock.reset();
     try std.testing.expectEqual(ExecError.invalid_argument, exec(&mon, &.{ "beans", "101" }));
-    try std.testing.expectEqualStrings("beans: count must be between 1 and 100\n", env.mock.contents());
+    try std.testing.expectEqualStrings("error: beans: count must be between 1 and 100\n", env.mock.contents());
 }
 
 test "monitor: random prints a deterministic hex line from the seeded CSPRNG and bounds count" {

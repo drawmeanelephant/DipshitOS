@@ -45,3 +45,30 @@ Append-only. See [`README.md`](README.md) for the convention.
   clearing it), each with a positive control against pristine main. The
   rest of the dropped work (history ring shape, redraw strategy, two-level
   completion, the D3 helper set) is deliberately NOT carried over.
+- **2026-08-15** — **carried the better half of the duplicated U2/U3 over
+  (zcode, `agent/zcode/m8-u4-u5-on-main`):** cards U2/U3 exist twice —
+  PR #114's merged version and this branch's unpushed one. Instead of
+  discarding the unmerged work, both were scored against ADR 0008 and the
+  measurable wins carried over (claim 3552, after claim 0142's three
+  input-path defects). D3: shape 1 now carries the required one-line hint
+  at all 29 misuse sites (registry blurb — one source, no drift); the four
+  dispatch/line-level refusals (`exec` empty argv + over-long argv, the
+  shell's tokenizer refusal and over-long-line refusal) moved onto shape 2
+  with ONE shared too-many message; the canonical transcript gained a D3
+  section so all three shapes are gate-tested byte-exactly. Enforcement is
+  now mechanical: two registry-walk tests (exact misuse shape; garbage-argv
+  refusals shape-checked line by line) replace convention, and they
+  immediately caught two real leaks main's no-panic fuzz could not see —
+  `mbox` (claim 5965, added after U3's sweep) and `beans`. D2: the live gate
+  drove ZERO of the six required Ctrl chords; a second serial-byte phase
+  now proves Ctrl-A/E/K/U/L/C end to end (the bytes input.zig's HID decode
+  emits; synthesized USB modifiers never reach VZ), each by the command it
+  causes to run, with the Ctrl-C-cancelled line asserted never to execute.
+  That needed one runner fix: `forwardScriptOnce`'s marker wait was capped
+  at 40 s and phase 2's marker lands ~100 s in, so the bound now extends to
+  the session `--timeout`. First gate run failed honestly (chords all 0)
+  from that cap; re-run PASS. Deliberately NOT carried over: main's history
+  ring, redraw strategy, completion depth and helper set are style, not
+  contract. Open question left for review in claim 3552: D3's text spells
+  shape 3 with an em dash the framebuffer cannot render — code keeps ASCII
+  `--`, the ADR text probably wants amending.
