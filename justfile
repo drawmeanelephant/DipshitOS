@@ -95,6 +95,7 @@ verify-vz:
     bash tools/verify-live-input.sh
     bash tools/verify-live-input-depth.sh
     bash tools/verify-live-editing.sh
+    bash tools/verify-live-win-hig.sh
     bash tools/verify-live-win.sh
     bash tools/verify-live-win-syscall.sh
     bash tools/verify-live-win-close.sh
@@ -255,6 +256,10 @@ verify-live-input:
 # Verify the line editor's history + cursor editing (class B — boots a VZ VM; the runner's --input-chords synthesizes one NSEvent per chord (printable chars + Up/Left arrows) into the VZVirtualMachineView, the I3 keymap decodes the arrows to ESC sequences, and the editor recalls + mid-line-edits them: Up re-runs 'echo u2r' and Left+'c' turns 'echo ab' into 'echo acb'; claim 1809; Apple silicon only)
 verify-live-editing:
     bash tools/verify-live-editing.sh
+
+# Milestone eight card U5 (claim 0935): the focus ring + title bars, live + pixel
+verify-live-win-hig:
+    bash tools/verify-live-win-hig.sh
 
 # Verify the Driving Award window manager (class B — boots a VZ VM; Road Pops is window 0, a 1 Hz clock overlay is window 1; `win`/`win focus`/`win hit` exercise the registry + focus + hit-test, a keyboard-typed uname lands in the focused terminal, and the decoded capture shows two overlapping windows with the right z-order; claim 1543; Apple silicon only)
 verify-live-win:

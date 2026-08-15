@@ -314,7 +314,7 @@ fn ensure_registry() []const Command {
             .{ .name = "usb", .help = "XHCI host controller: `usb` transport report, `usb devices` enumerated HID devices, `usb report` last HID report", .usage = "usb [devices|report]", .category = .graphics_input, .handler = cmd_usb },
             .{ .name = "uname", .help = "compact system identity", .usage = "uname", .category = .machine_identity, .handler = cmd_uname },
             .{ .name = "version", .help = "display build information", .usage = "version", .category = .machine_identity, .handler = cmd_version },
-            .{ .name = "win", .help = "Driving Award window manager: registry (with owner pids), z-order, focus, hit-testing ('win focus <n>' focuses; 'win raise <n>' raises; 'win move <n> <x> <y>' moves a user window; 'win close <n>' releases a user window; 'win list <pid>' filters by owner; 'win hit <x> <y>' hit-tests)", .usage = "win [focus <n>|raise <n>|move <n> <x> <y>|close <n>|list <pid>|hit <x> <y>]", .category = .graphics_input, .max_args = 4, .handler = cmd_win },
+            .{ .name = "win", .help = "Driving Award window manager: registry (with owner pids), z-order, focus, hit-testing ('win focus <n>' focuses; 'win raise <n>' raises; 'win move <n> <x> <y>' moves a user window; 'win close <n>' releases a user window; 'win list <pid>' filters by owner; 'win hit <x> <y>' hit-tests; 'win cycle' cycles focus like Alt+Tab)", .usage = "win [focus <n>|raise <n>|move <n> <x> <y>|close <n>|list <pid>|hit <x> <y>|cycle]", .category = .graphics_input, .max_args = 4, .handler = cmd_win },
             .{ .name = "write", .help = "write text to a file on the ESP", .usage = "write <file> <text...>", .category = .storage, .min_args = 1, .handler = cmd_write },
         };
         registry_ready = true;
@@ -418,7 +418,7 @@ fn sub_verb_complete(cmd: []const u8, prefix: []const u8) ?[]const u8 {
     if (std.mem.eql(u8, cmd, "net"))
         return match_one(prefix, &.{ "recv", "ip", "arp", "ping", "udp", "dhcp", "tcp" });
     if (std.mem.eql(u8, cmd, "win"))
-        return match_one(prefix, &.{ "focus", "raise", "move", "close", "list", "hit" });
+        return match_one(prefix, &.{ "focus", "raise", "move", "close", "list", "hit", "cycle" });
     if (std.mem.eql(u8, cmd, "usb"))
         return match_one(prefix, &.{ "devices", "report" });
     if (std.mem.eql(u8, cmd, "screen"))
@@ -1350,6 +1350,21 @@ fn cmd_win(m: *Monitor, args: []const []const u8) ExecError {
                 if (w.owner == want) print_win_row(m, i, w);
             }
             return .none;
+        }
+        if (std.mem.eql(u8, args[0], "cycle")) {
+            if (args.len != 1) {
+                print_usage(m, lookup("win").?);
+                return .usage;
+            }
+            if (driving_award.cycle_focus()) |id| {
+                m.console.puts("win: cycle focused=");
+                m.console.print_u64(id);
+                m.console.puts("\n");
+                return .none;
+            }
+            err_prefix(m);
+            m.console.print_line("no window to cycle");
+            return .invalid_argument;
         }
         if (std.mem.eql(u8, args[0], "hit")) {
             if (args.len != 3) {
