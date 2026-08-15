@@ -145,11 +145,13 @@ check_mode() {
         echo "error: docs/logs/README.md log index is structurally malformed (a cell contains an unescaped '|'?)" >&2
         rc=1
     fi
-    if ! diff -u <(extract_region docs/claims/README.md CLAIMS_INDEX) "$tmp/claims.table"; then
+    extract_region docs/claims/README.md CLAIMS_INDEX > "$tmp/claims.actual"
+    if ! diff -u "$tmp/claims.actual" "$tmp/claims.table"; then
         echo "error: docs/claims/README.md claim index is out of sync" >&2
         rc=1
     fi
-    if ! diff -u <(extract_region docs/logs/README.md LOGS_INDEX) "$tmp/logs.table"; then
+    extract_region docs/logs/README.md LOGS_INDEX > "$tmp/logs.actual"
+    if ! diff -u "$tmp/logs.actual" "$tmp/logs.table"; then
         echo "error: docs/logs/README.md log index is out of sync" >&2
         rc=1
     fi

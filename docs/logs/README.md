@@ -53,6 +53,13 @@ verify-coordination`, and CI) fails if it drifts from the files.
 | glyph raster convention gate (claim 9100) | [`agent-buffy-glyph-raster-gate.md`](agent-buffy-glyph-raster-gate.md) |
 | milestone ten userland filesystem & storage ABI (claim 0662) | [`agent-buffy-m10-fs.md`](agent-buffy-m10-fs.md) |
 | milestone ten tracker (claim 2412) | [`agent-buffy-m10-tracker.md`](agent-buffy-m10-tracker.md) |
+| Architecture & UI contract (ADR 0011) | [`agent-buffy-m11-a0-adr.md`](agent-buffy-m11-a0-adr.md) |
+| Micro-widget toolkit & runtime | [`agent-buffy-m11-a1-ui-toolkit.md`](agent-buffy-m11-a1-ui-toolkit.md) |
+| `CALC.BIN` (Interactive Graphical Calculator) | [`agent-buffy-m11-a2-calc.md`](agent-buffy-m11-a2-calc.md) |
+| `NOTEPAD.BIN` (Graphical Text Editor) | [`agent-buffy-m11-a3-notepad.md`](agent-buffy-m11-a3-notepad.md) |
+| `TOP.BIN` (Graphical Task Manager & Process Monitor) | [`agent-buffy-m11-a4-top.md`](agent-buffy-m11-a4-top.md) |
+| `DESKTOP.BIN` (Desktop Launcher & Environment) & Capstone Gate | [`agent-buffy-m11-a5-desktop.md`](agent-buffy-m11-a5-desktop.md) |
+| Milestone eleven march tracker | [`agent-buffy-m11-tracker.md`](agent-buffy-m11-tracker.md) |
 | `agent/buffy/m15-commands` (PR #12) | [`agent-buffy-m15-commands.md`](agent-buffy-m15-commands.md) |
 | `agent/buffy/m15-host-plumbing` (PR #13) | [`agent-buffy-m15-host-plumbing.md`](agent-buffy-m15-host-plumbing.md) |
 | `agent/buffy/m15-machine-controls` | [`agent-buffy-m15-machine-controls.md`](agent-buffy-m15-machine-controls.md) |
