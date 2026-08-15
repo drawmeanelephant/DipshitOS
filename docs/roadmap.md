@@ -1047,6 +1047,89 @@ scripting/pipes/job control, any syscall-number addition (a focus syscall, if
 ever, lands as its own ADR 0007 amendment), and a visual-design pixel spec
 (colors/spacing stay implementation detail).
 
+## Candidate milestone ladders (post-milestone-eight)
+
+> **Architectural bridge (claim 4951):** The transition from "capable kernel"
+> to "weird little computer" requires four structured, sequential milestones
+> that translate the maintainer's wishlist into gated card ladders. Each card
+> is grounded in the project's invariants (freestanding Zig, no libc, no POSIX,
+> bounded BSS/table resource allocations, and deterministic Class A/B gates).
+
+### Milestone nine — interactive EL0 application event system
+
+> Give EL0 applications eyes and ears: turn static window presentation into
+> interactive, event-driven user programs.
+
+- **E1 — Per-process kernel event queues.** Bounded pure-BSS event FIFO
+  per process (e.g. 16 events: key down/up with modifiers, pointer motion
+  relative to window bounds, mouse button down/up, focus gained/lost, and
+  close-requested). Driving Award routes keyboard and pointer events to the
+  *focused* window's process queue.
+- **E2 — Event syscall ABI (ADR 0007 slots 21 & 22).**
+  - `sys_event_poll(buf, max) -> count`: non-blocking drain of pending events
+    through the uaccess window.
+  - `sys_event_wait(buf, max, timeout_ticks) -> count`: parks the caller on the
+    scheduler sleep/event seam until an event arrives or timeout expires.
+- **E3 — Minimal EL0 application runtime (`user/src/lib/app.zig`).**
+  Freestanding Zig event loop helper (`App.run(handlers)`), window setup,
+  2D blit helpers, and basic glyph rendering. Zero heap allocation.
+- **E4 — First interactive consumer app (`CLICKME.BIN` / `PAINT.BIN`).**
+  **[Capstone Gate]** A userland application where clicking buttons changes colors,
+  typing updates text inside the window, and clicking close requests a clean exit.
+  Live gate: `verify-live-app-events.sh`.
+
+### Milestone ten — userland filesystem & storage ABI
+
+> Expose the kernel's FAT32 ESP and DATA volumes to EL0 user programs through
+> a bounded, safe handle table (no POSIX file descriptor baggage).
+
+- **F1 — Process file handle table.** Bounded per-process handle table (e.g.
+  8 open files per process) tracking partition (ESP or DATA), current cluster,
+  byte offset, and access mode (read/write).
+- **F2 — File syscall ABI (ADR 0007 slots 23–27).**
+  - `sys_file_open(path_ptr, path_len, flags) -> handle`
+  - `sys_file_read(handle, buf_ptr, count) -> bytes_read`
+  - `sys_file_write(handle, buf_ptr, count) -> bytes_written`
+  - `sys_file_close(handle) -> status`
+  - `sys_dir_list(path_ptr, path_len, buf_ptr, max_entries) -> count`
+- **F3 — Safe path canonicalization & bounds.** Path validation
+  (`/data/...`, `/esp/...`), bounds checking, and directory traversal
+  guarantees.
+- **F4 — Userland file utilities (`TYPE.BIN`, `TOUCH.BIN`, `SAVETEXT.BIN`).**
+  **[Capstone Gate]** Userland applications reading and writing persistent files
+  on the DATA partition, verified across reboot. Live gate: `verify-live-user-fs.sh`.
+
+### Milestone eleven — desktop platform & first real GUI apps
+
+> Combine windows, events, and storage into a recognizable graphical desktop
+> with dedicated consumer applications and a desktop launcher.
+
+- **A1 — Micro-widget toolkit (`user/src/lib/ui.zig`).** Reusable, lightweight
+  GUI primitives: buttons (with hover/pressed states), text labels, single-line
+  text entry, and list views. Extracted from actual app usage.
+- **A2 — `CALC.BIN` (Calculator).** The classic GUI proof: clickable button
+  grid, keyboard numeric entry, and 64-bit arithmetic display.
+- **A3 — `NOTEPAD.BIN` (Graphical Text Editor).** Multi-line text editor opening,
+  editing, and saving files on `/data/notes.txt`.
+- **A4 — `TOP.BIN` (Graphical Task Manager).** Polls `sys_procs`, renders live
+  CPU/memory bar graphs, and provides a clickable "Kill" button.
+- **A5 — `DESKTOP.BIN` / Launcher.** **[Capstone Gate]** Top status bar with
+  clock and system stats + clickable application menu to launch EL0 programs.
+  Live gate: `verify-live-desktop.sh`.
+
+### Milestone twelve — userland network applications
+
+> Connect userland applications to the network with a clean TCP syscall seam
+> and DNS resolution.
+
+- **N12 — Userland TCP syscall seam (ADR 0007 slots 28–31).**
+  `sys_tcp_connect`, `sys_tcp_send`, `sys_tcp_recv`, `sys_tcp_close`.
+- **N13 — Bounded DNS client.** RFC 1035 UDP query client on port 53 to
+  resolve domain names.
+- **N14 — `FETCH.BIN` & `CHAT.BIN`.** **[Capstone Gate]** An EL0 HTTP/1.0
+  client fetching web text over NAT, and a peer-to-peer graphical chat app.
+  Live gate: `verify-live-fetch.sh`.
+
 ## Wishlist / hope chest (destinations, not commitments)
 
 > **Maintainer's wishlist (2026-08-14).** These are *destinations*, not a

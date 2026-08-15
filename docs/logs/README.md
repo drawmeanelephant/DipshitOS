@@ -95,6 +95,7 @@ verify-coordination`, and CI) fails if it drifts from the files.
 | agent/buffy/m6-roadpops | [`agent-buffy-m6-roadpops.md`](agent-buffy-m6-roadpops.md) |
 | agent/buffy/m6-text | [`agent-buffy-m6-text.md`](agent-buffy-m6-text.md) |
 | `agent/buffy/macos27-custom-virtio-spike` | [`agent-buffy-macos27-custom-virtio-spike.md`](agent-buffy-macos27-custom-virtio-spike.md) |
+| Roadmap refinement (claim 4951) | [`agent-buffy-roadmap-refinement.md`](agent-buffy-roadmap-refinement.md) |
 | U4 CG-pointer route follow-on (claim 3692) | [`agent-buffy-u4-pointer-cg.md`](agent-buffy-u4-pointer-cg.md) |
 | U4 real-mouse pointer follow-on (claim 9015) | [`agent-buffy-u4-pointer-classc.md`](agent-buffy-u4-pointer-classc.md) |
 | `agent/codex/m3-march-tracker` | [`agent-codex-m3-march-tracker.md`](agent-codex-m3-march-tracker.md) |

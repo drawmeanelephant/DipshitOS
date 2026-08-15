@@ -542,7 +542,10 @@ dipshit>
     Accessibility-granted CG route are the recorded follow-ups. A latent
     out-of-bounds write in `text.zig`'s render (the tiny-canvas host
     test) was found and fixed (render is now canvas-bounded). U6–U8 are
-    the next cards.
+    the next cards. The post-M8 candidate roadmap (Milestone 9: Interactive
+    EL0 Events, Milestone 10: Userland Filesystem ABI, Milestone 11: Desktop
+    Platform & GUI Apps, Milestone 12: Network Apps) is structured in
+    `docs/roadmap.md` (claim 4951).
 
 The command layer above is portable; `docs/archive/march-m15.md` step 15's filesystem-command **deferral is superseded 2026-08-09** — first by the pre-exit ESP file window (claim 3475) and then, **on the same day, by the real FAT32 storage driver (claim 6420)**: `ls`/`cat`/`write` now read and write the live ESP's FAT volume through a virtio-blk transport, so files persist on the disk itself and **no storage driver remains deferred**. The allocator, interrupts, first tasks, EL0 boundary, syscall ABI, uaccess, per-task address spaces, lifecycle, ESP exec, and blocking syscalls are all complete; **milestone three is closed 2026-08-10 (tag `m3-userspace`, claim 0707)**.
 
