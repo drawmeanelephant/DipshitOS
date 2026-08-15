@@ -548,10 +548,16 @@ dipshit>
     `tour`) guided walkthrough of the system, and a deterministic boot MOTD
     status line (`motd: aarch64 el1 kernel live; scheduler, uaccess, fs, net, gfx, xhci armed.`);
     class A transcript gate `tools/verify-transcript.sh` and live help gate
-    re-run green. U7–U8 are the next cards. The post-M8 candidate roadmap
+    re-run green. The post-M8 candidate roadmap
     (Milestone 9: Interactive EL0 Events, Milestone 10: Userland Filesystem ABI,
     Milestone 11: Desktop Platform & GUI Apps, Milestone 12: Network Apps) is
     structured in `docs/roadmap.md` (claim 4951).
+    **Card U7 (claim 2990) DONE 2026-08-15** — the ADR 0008 D5 `sysinfo` support
+    snapshot: canonical `sysinfo` command in `kernel/src/monitor.zig` (growing
+    registry 42 -> 43) unifying system, cpu/timer, memory, allocator,
+    scheduler, processes, storage, networking, graphics, and input diagnostics;
+    transcript fixture regenerated; class A gate `tools/verify-transcript.sh`,
+    unit tests, and live help gate re-run green. U8 is the next card.
 
 The command layer above is portable; `docs/archive/march-m15.md` step 15's filesystem-command **deferral is superseded 2026-08-09** — first by the pre-exit ESP file window (claim 3475) and then, **on the same day, by the real FAT32 storage driver (claim 6420)**: `ls`/`cat`/`write` now read and write the live ESP's FAT volume through a virtio-blk transport, so files persist on the disk itself and **no storage driver remains deferred**. The allocator, interrupts, first tasks, EL0 boundary, syscall ABI, uaccess, per-task address spaces, lifecycle, ESP exec, and blocking syscalls are all complete; **milestone three is closed 2026-08-10 (tag `m3-userspace`, claim 0707)**.
 

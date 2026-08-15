@@ -117,6 +117,7 @@ CI) fails if the table drifts from the claim files.
 | [2616-dhcp-lifecycle-autonomous](2616-dhcp-lifecycle-autonomous.md) | buffy (`agent/buffy/audit-followup-3-dhcp-autonomy`) | 🔄 agent/buffy/audit-followup-3-dhcp-autonomy |
 | [2665-m4-entropy-csprng](2665-m4-entropy-csprng.md) | Buffy (`agent/buffy/m4-entropy-csprng`) | ✅ done 2026-08-10 |
 | [2839-m4-closeout](2839-m4-closeout.md) | buffy (`agent/buffy/m4-closeout`) | ✅ done 2026-08-11 — **the full class A + class B gate set |
+| [2990-u7-sysinfo-snapshot](2990-u7-sysinfo-snapshot.md) | buffy (`agent/buffy/u7-sysinfo`) | ✅ done |
 | [3109-stale-doc-cleanup](3109-stale-doc-cleanup.md) | buffy (`freebuff/stale-doc-cleanup`) | ✅ done 2026-08-08 — stale blocker snapshots removed/corrected across README, roadmap, architecture, testing, hardware-contract, march-m15; before/after stale-phrase report in `artifacts/stale-doc-report.txt` (26 → 0 hits); link check clean; `docs/status.md` untouched |
 | [3179-ipc-depth](3179-ipc-depth.md) | Buffy (`agent/buffy/m4-ipc-depth`) | ✅ done 2026-08-11 (PR #82, stacked after PR #81 card 4a) |
 | [3194-text](3194-text.md) | buffy (`agent/buffy/m6-text`) | ✅ **done 2026-08-12** — `agent/buffy/m6-text` |

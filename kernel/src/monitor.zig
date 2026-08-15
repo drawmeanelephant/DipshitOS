@@ -260,8 +260,9 @@ pub const Command = struct {
 /// (claim 4272) grows it 37 -> 38 (`usb`). Milestone seven card I3
 /// (claim 6050) grows it 38 -> 39 (`input`). Milestone six card G5
 /// (claim 1543) grows it 39 -> 40 (`win`). Milestone eight card U6
-/// (claim 8323) grows it 40 -> 42 (`welcome`, `tour`).
-pub const registry_count: usize = 42;
+/// (claim 8323) grows it 40 -> 42 (`welcome`, `tour`). Milestone eight card U7
+/// (claim 2990) grows it 42 -> 43 (`sysinfo`).
+pub const registry_count: usize = 43;
 
 /// Command registry, built at runtime into BSS. A `const` table would hold
 /// link-time absolute addresses for BOTH the string slices and the handler
@@ -308,6 +309,7 @@ fn ensure_registry() []const Command {
             .{ .name = "text", .help = "framebuffer text: text region, cursor, scrollback ('text put <string...>' renders + flushes to the scanout; 'text clear' clears)", .usage = "text [put <string...>|clear]", .category = .graphics_input, .min_args = 0, .max_args = 9, .handler = cmd_text },
             .{ .name = "shutdown", .help = "request power-off", .usage = "shutdown", .category = .system, .handler = cmd_shutdown },
             .{ .name = "spawn", .help = "spawn the lifecycle demo task", .usage = "spawn", .category = .tasks_processes, .handler = cmd_spawn },
+            .{ .name = "sysinfo", .help = "comprehensive system and subsystem diagnostic snapshot", .usage = "sysinfo", .category = .machine_identity, .handler = cmd_sysinfo },
             .{ .name = "syscalls", .help = "numbered syscall table and counters", .usage = "syscalls", .category = .tasks_processes, .handler = cmd_syscalls },
             .{ .name = "tasks", .help = "tick-driven task scheduler status", .usage = "tasks", .category = .tasks_processes, .handler = cmd_tasks },
             .{ .name = "timer", .help = "interrupt controller + timer status", .usage = "timer", .category = .memory_state, .handler = cmd_timer },
@@ -669,6 +671,122 @@ fn cmd_welcome(m: *Monitor, args: []const []const u8) ExecError {
     m.console.print_line("  6. Networking: Type 'net' for device status, 'net ping <ip>' or 'net dhcp' to configure.");
     m.console.print_line("  7. Documentation: Architecture, decisions, and hardware contracts live in docs/.");
     m.console.print_line("Have fun and break things responsibly.");
+    return .none;
+}
+
+fn cmd_sysinfo(m: *Monitor, args: []const []const u8) ExecError {
+    _ = args;
+    const h = &m.state.handoff;
+    const map_summary = memmap.summarize(m.state.map);
+    const p_stats = alloc.stats();
+    const sched_rep = scheduler.stats();
+    const win_armed = driving_award.armed();
+    const rp_rep = road_pops.report();
+    const in_rep = input.report();
+
+    m.console.print_line("sysinfo: DipshitOS AArch64 support snapshot");
+
+    // System & Handoff
+    m.console.puts("  system:     kernel=dipshit-kernel handoff=v2 status=");
+    if (handoff.validate(h) == .none) {
+        m.console.print_line("valid");
+    } else {
+        m.console.print_line("invalid");
+    }
+
+    // CPU & Timer
+    m.console.puts("  cpu:        arch=aarch64 timer_armed=");
+    m.console.puts(if (timer.armed()) "1" else "0");
+    m.console.puts(" gic=");
+    m.console.puts(gic.kind_name());
+    m.console.puts(" ticks=");
+    m.console.print_u64(timer.ticks);
+    m.console.puts(" irq=");
+    m.console.print_u64(timer.irq_ticks);
+    m.console.puts("\n");
+
+    // Memory & Allocator
+    m.console.puts("  memory:     descriptors=");
+    m.console.print_u64(m.state.map.count);
+    m.console.puts(" usable=");
+    m.console.print_hex(map_summary.usable_pages * memmap.page_size);
+    m.console.puts(" (");
+    m.console.print_hex(map_summary.usable_pages);
+    m.console.puts(" pages)\n");
+
+    m.console.puts("  allocator:  armed=");
+    m.console.puts(if (p_stats.armed) "1" else "0");
+    m.console.puts(" total=");
+    m.console.print_hex(p_stats.total_pages);
+    m.console.puts(" free=");
+    m.console.print_hex(p_stats.free_pages);
+    m.console.puts(" excluded=");
+    m.console.print_hex(p_stats.excluded_pages);
+    m.console.puts(" regions=");
+    m.console.print_hex(@intCast(p_stats.region_count));
+    m.console.puts("\n");
+
+    // Tasks & Processes
+    m.console.puts("  scheduler:  enabled=");
+    m.console.puts(if (sched_rep.enabled) "1" else "0");
+    m.console.puts(" tasks=");
+    m.console.print_u64(sched_rep.count);
+    m.console.puts("/");
+    m.console.print_u64(scheduler.max_tasks);
+    m.console.puts(" switches=");
+    m.console.print_u64(sched_rep.switches);
+    m.console.puts("\n");
+
+    m.console.puts("  processes:  active=");
+    m.console.print_u64(@intCast(process.count()));
+    m.console.puts("/");
+    m.console.print_u64(process.max_processes);
+    m.console.puts("\n");
+
+    // Storage
+    m.console.puts("  storage:    fat_volume=");
+    m.console.puts(esp.volume());
+    m.console.puts(" files=");
+    m.console.print_u64(@intCast(esp.esp_count()));
+    m.console.puts("\n");
+
+    // Network
+    m.console.puts("  network:    virtio-net=");
+    m.console.puts(if (virtio_net.net_ready) "armed" else "unarmed");
+    if (virtio_net.net_ready) {
+        m.console.puts(" mac=");
+        m.console.puts(&virtio_net.net_mac_text);
+        m.console.puts(" ip=");
+        var ipbuf: [15]u8 = undefined;
+        const n = virtio_net.arp.format_ip(virtio_net.arp.own_ip, &ipbuf);
+        m.console.puts(ipbuf[0..n]);
+    }
+    m.console.puts("\n");
+
+    // Graphics & Windows
+    m.console.puts("  graphics:   gpu=");
+    m.console.puts(if (virtio_gpu.gpu_ready) "armed" else "unarmed");
+    m.console.puts(" roadpops=");
+    m.console.puts(if (rp_rep.armed) "armed" else "unarmed");
+    m.console.puts(" windows=");
+    if (win_armed) {
+        m.console.print_u64(driving_award.count());
+        m.console.puts(" focused=");
+        m.console.print_u64(driving_award.focused_window_id());
+    } else {
+        m.console.puts("unarmed");
+    }
+    m.console.puts("\n");
+
+    // Input
+    m.console.puts("  input:      xhci=");
+    m.console.puts(if (xhci.xhci_ready) "armed" else "unarmed");
+    m.console.puts(" devices=");
+    m.console.print_u64(xhci.enum_count);
+    m.console.puts(" fifo=");
+    m.console.puts(if (in_rep.armed) "armed" else "unarmed");
+    m.console.puts("\n");
+
     return .none;
 }
 
@@ -5181,6 +5299,20 @@ test "monitor: identity commands produce fixed output" {
 
     try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"tour"}));
     try std.testing.expectEqualStrings(tour_out, env.mock.contents());
+    env.mock.reset();
+
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"sysinfo"}));
+    const sys_out = env.mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, sys_out, "sysinfo: DipshitOS AArch64 support snapshot") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sys_out, "kernel=dipshit-kernel handoff=v2 status=valid") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sys_out, "arch=aarch64") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sys_out, "descriptors=") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sys_out, "scheduler:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sys_out, "processes:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sys_out, "storage:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sys_out, "network:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sys_out, "graphics:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sys_out, "input:") != null);
 }
 
 test "monitor: handoff formatting is deterministic and validated" {
