@@ -1329,6 +1329,71 @@ fn dhcp_bound() bool {
     return dhcp.state == .bound or dhcp.state == .renewing or dhcp.state == .rebinding;
 }
 
+/// Issue #119 (audit follow-up 3): the result of one autonomous DHCP
+/// lifecycle poll — the step applied plus the elapsed/lease captured at
+/// decision time (expire() zeroes the lease record, so the print needs
+/// the pre-transition values) and the REQUEST transmit outcome. `none`
+/// = no transition demanded; `renew_no_arp` = T1 reached but the server
+/// MAC is unresolved (the client honestly stays BOUND, RFC-compliant
+/// degradation — the `net dhcp` command surfaces the diagnostic).
+pub const DhcpPollStep = enum { none, expired, rebinding, renewing, renew_no_arp };
+
+pub const DhcpPoll = struct {
+    step: DhcpPollStep,
+    elapsed: u64,
+    lease: u32,
+    out_len: usize,
+    tx_ok: bool,
+};
+
+/// Issue #119 (audit follow-up 3): the autonomous DHCP lease lifecycle —
+/// advance the RFC 2131 §4.4.5 state machine ONE step as the elapsed
+/// lease time demands (T1 -> RENEWING, T2 -> REBINDING, expiry ->
+/// release), applying the transition + transmitting the REQUEST exactly
+/// as `net dhcp` would. Called from the shell idle loop each iteration
+/// (the polled-drain time engine — the same seam as `tcp.poll_rto`)
+/// AFTER the RX drain, so a pending renewal ACK has restarted the lease
+/// clock first. The re-DISCOVER after expiry stays command-triggered
+/// (the bounded handshake; the client honestly drops to idle at expiry
+/// and `net dhcp` re-binds). The RENEWING unicast needs the server MAC
+/// (`arp.lookup`) — without it the client honestly stays BOUND until T2
+/// (RFC-compliant degradation, `.renew_no_arp`). A TX failure leaves
+/// `request_transmitted` false for the next `net dhcp` (no per-second
+/// spam).
+pub fn net_dhcp_poll() DhcpPoll {
+    if (!net_ready) return .{ .step = .none, .elapsed = dhcp.elapsed(), .lease = dhcp.lease_time, .out_len = 0, .tx_ok = true };
+    const el = dhcp.elapsed();
+    const lease = dhcp.lease_time;
+    var out_len: usize = 0;
+    switch (dhcp.step_lifecycle()) {
+        .none => return .{ .step = .none, .elapsed = el, .lease = lease, .out_len = 0, .tx_ok = true },
+        .expire => {
+            dhcp.expire();
+            return .{ .step = .expired, .elapsed = el, .lease = lease, .out_len = 0, .tx_ok = true };
+        },
+        .rebind => {
+            dhcp.enter_rebinding();
+            const ok = net_dhcp_send_bound(dhcp.msg[0..dhcp.msg_len], &out_len) == .ok;
+            if (ok) {
+                dhcp.request_transmitted = true;
+                dhcp.rebind_sent += 1;
+            }
+            return .{ .step = .rebinding, .elapsed = el, .lease = lease, .out_len = out_len, .tx_ok = ok };
+        },
+        .renew => {
+            const srv_mac = arp.lookup(dhcp.lease_server) orelse
+                return .{ .step = .renew_no_arp, .elapsed = el, .lease = lease, .out_len = 0, .tx_ok = true };
+            dhcp.enter_renewing();
+            const ok = net_dhcp_send_unicast(dhcp.lease_server, srv_mac, dhcp.msg[0..dhcp.msg_len], &out_len) == .ok;
+            if (ok) {
+                dhcp.request_transmitted = true;
+                dhcp.renew_sent += 1;
+            }
+            return .{ .step = .renewing, .elapsed = el, .lease = lease, .out_len = out_len, .tx_ok = ok };
+        },
+    }
+}
+
 /// Card N4 (claim 0148): transmit an ICMP ECHO REQUEST to `target_ip` in
 /// the fixed staging buffer, on the N1 TX path. Refuses honestly when the
 /// transport is unready, no static IP is set (`net ip <a.b.c.d>` first),

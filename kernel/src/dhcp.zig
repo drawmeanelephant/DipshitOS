@@ -362,6 +362,47 @@ pub fn enter_rebinding() void {
     state = .rebinding;
 }
 
+/// Issue #119 (audit follow-up 3): the pure RFC 2131 §4.4.5 lifecycle
+/// decision — what ONE step the CURRENT state + elapsed lease time
+/// demand. Pure (reads `state` + `lease_time` + `elapsed`; mutates
+/// nothing), so the decision is host-testable and the apply/transmit
+/// glue (virtio_net's `net_dhcp_poll`) stays transport-side. The order
+/// matters: expiry beats T2 beats T1, and RENEWING/REBINDING only ever
+/// expire (a pending renewal never outlives its lease).
+pub const Step = enum { none, expire, rebind, renew };
+
+pub fn step_lifecycle() Step {
+    const lease = lease_time;
+    const el = elapsed();
+    switch (state) {
+        .renewing => {
+            // RFC 2131 §4.4.5: at T2 a client STILL in RENEWING (the
+            // unicast renewal REQUEST went unanswered) ESCALATES to
+            // REBINDING — the broadcast REQUEST any server on the link
+            // can answer. Audit follow-up 3 (issue #119): with the
+            // autonomous poll this is the ONLY way the client ever
+            // reaches REBINDING when the server answers renewals — the
+            // old BOUND-only T2 path required a command to land between
+            // T1 and T2 (the command-gated behavior the issue flagged).
+            if (lease > 0 and el >= t2(lease)) return .rebind;
+            if (lease > 0 and el >= lease) return .expire;
+            return .none;
+        },
+        .rebinding => {
+            // A pending rebinding never outlives its lease.
+            if (lease > 0 and el >= lease) return .expire;
+            return .none;
+        },
+        .bound => {
+            if (lease > 0 and el >= lease) return .expire;
+            if (lease > 0 and el >= t2(lease)) return .rebind;
+            if (lease > 0 and el >= t1(lease)) return .renew;
+            return .none;
+        },
+        else => return .none, // idle/selecting/requesting: the handshake stays command-driven
+    }
+}
+
 /// The lease expired: release the address honestly (arp.own_ip cleared
 /// — the client no longer owns it), zero the lease record (the report
 /// shows zeros when unbound), fall back to INIT, and reset the
@@ -715,6 +756,61 @@ test "dhcp: lease-lifecycle timing — T1 = lease/2, T2 = lease*7/8, elapsed" {
     try std.testing.expectEqual(@as(u64, 6), elapsed());
     now_ticks = 92;
     try std.testing.expectEqual(@as(u64, 0), elapsed()); // -| saturates
+}
+
+test "dhcp: step_lifecycle — the pure RFC 2131 §4.4.5 decision (issue #119)" {
+    reset();
+    defer reset();
+    lease_time = 100;
+    bound_ticks = 100;
+    state = .bound;
+    // Below T1: stay BOUND.
+    now_ticks = 110;
+    try std.testing.expectEqual(Step.none, step_lifecycle());
+    // At T1 (lease/2 = 50): RENEWING.
+    now_ticks = 150;
+    try std.testing.expectEqual(Step.renew, step_lifecycle());
+    // At T2 (lease*7/8 = 87): REBINDING (T2 checked before T1).
+    now_ticks = 187;
+    try std.testing.expectEqual(Step.rebind, step_lifecycle());
+    // At expiry: release.
+    now_ticks = 200;
+    try std.testing.expectEqual(Step.expire, step_lifecycle());
+    // RENEWING: below T2 the renewal waits (a pending renewal never
+    // outlives its lease — expiry beats the wait); at T2 the client
+    // ESCALATES to REBINDING (RFC 2131 §4.4.5 — the unicast renewal
+    // went unanswered, so the broadcast REQUEST takes over).
+    state = .renewing;
+    now_ticks = 150;
+    try std.testing.expectEqual(Step.none, step_lifecycle());
+    now_ticks = 186;
+    try std.testing.expectEqual(Step.none, step_lifecycle()); // < T2 (87)
+    now_ticks = 187;
+    try std.testing.expectEqual(Step.rebind, step_lifecycle()); // T2 escalation
+    // Even past the lease, RENEWING escalates first (T2 < lease always;
+    // the REBINDING arm expires on the next poll).
+    now_ticks = 200;
+    try std.testing.expectEqual(Step.rebind, step_lifecycle());
+    // REBINDING only expires (nothing left to escalate to).
+    state = .rebinding;
+    now_ticks = 199;
+    try std.testing.expectEqual(Step.none, step_lifecycle());
+    now_ticks = 200;
+    try std.testing.expectEqual(Step.expire, step_lifecycle()); // the pending rebinding never outlives its lease
+    // The decision mutates nothing.
+    try std.testing.expectEqual(State.rebinding, state);
+    // Handshake states never auto-advance (the re-DISCOVER stays
+    // command-triggered).
+    state = .idle;
+    try std.testing.expectEqual(Step.none, step_lifecycle());
+    state = .selecting;
+    try std.testing.expectEqual(Step.none, step_lifecycle());
+    state = .requesting;
+    try std.testing.expectEqual(Step.none, step_lifecycle());
+    // No lease (zero): never fires.
+    lease_time = 0;
+    state = .bound;
+    try std.testing.expectEqual(Step.none, step_lifecycle());
 }
 
 test "dhcp: BOUND -> RENEWING builds the REQUEST with ciaddr = the lease" {

@@ -83,6 +83,7 @@ verify-vz:
     bash tools/verify-live-net-nat.sh
     bash tools/verify-live-net-dhcp.sh
     bash tools/verify-live-net-dhcp-renew.sh
+    bash tools/verify-live-net-dhcp-autonomous.sh
     bash tools/verify-live-net-tcp.sh
     bash tools/verify-live-net-tcp-rto.sh
     bash tools/verify-live-screen.sh
