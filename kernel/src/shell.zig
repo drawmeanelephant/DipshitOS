@@ -162,6 +162,17 @@ pub fn boot_and_park(mon: *monitor.Monitor, rx_wired: bool) void {
             // wall-clock seconds).
             virtio_net.tcp.now_ticks = timer.ticks;
             virtio_net.net_rx_drain();
+            // Issue #119 (audit follow-up 3): the autonomous DHCP lease
+            // lifecycle — advance T1/T2/expiry from the idle loop (the
+            // polled-drain time engine, the same seam as tcp.poll_rto)
+            // instead of requiring a human to type `net dhcp`. AFTER the
+            // drain: a renewal ACK just processed restarts the lease
+            // clock first. Prints the SAME transition lines the command
+            // prints; silent otherwise (and on the no-ARP renew path —
+            // the client stays BOUND per RFC 2131 §4.4.5; `net dhcp`
+            // surfaces the diagnostic). The re-DISCOVER after expiry
+            // stays command-triggered.
+            monitor.net_dhcp_autonomous(mon);
             // Claim 6050 (milestone seven I3): drain the keyboard/pointer
             // event FIFO — poll the XHCI interrupt-IN endpoints, decode the
             // HID reports, and push decoded bytes for the NEXT shell poll

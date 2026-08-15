@@ -2361,6 +2361,55 @@ fn cmd_net(m: *Monitor, args: []const []const u8) ExecError {
 /// command drains first (the claim-6076 polled-drain contract). Bounded
 /// retry: `max_attempts` DISCOVERs without an OFFER -> an honest refuse
 /// (the `timeout` counter). Deterministic, monitor-driven, no interrupts.
+/// Issue #119 (audit follow-up 3): the autonomous DHCP lease lifecycle —
+/// called from the shell idle loop each iteration (AFTER the RX drain,
+/// so a pending renewal ACK has restarted the lease clock first):
+/// advances T1/T2/expiry WITHOUT a human typing `net dhcp`, printing the
+/// SAME transition lines `net dhcp` prints (identical text — the N9
+/// gates' regexes/counters/captures are the evidence). Silent on the
+/// no-ARP renew path (the client stays BOUND per RFC 2131 §4.4.5;
+/// typing `net dhcp` surfaces the diagnostic) and on TX failures (the
+/// next `net dhcp` retries — no per-second spam). The re-DISCOVER after
+/// expiry stays command-triggered.
+pub fn net_dhcp_autonomous(m: *Monitor) void {
+    if (!virtio_net.net_ready) return;
+    const p = virtio_net.net_dhcp_poll();
+    switch (p.step) {
+        .none, .renew_no_arp => {},
+        .expired => {
+            m.console.puts("net dhcp: lease expired (elapsed=");
+            m.console.print_u64(p.elapsed);
+            m.console.puts(" >= lease=");
+            m.console.print_u64(p.lease);
+            m.console.puts(") — address released, re-DISCOVER with `net dhcp`\n");
+        },
+        .rebinding => {
+            if (!p.tx_ok) {
+                err_prefix(m);
+                m.console.print_line("REBINDING TX failed (transport unready)");
+                return;
+            }
+            m.console.puts("net dhcp: rebinding (T2, elapsed=");
+            m.console.print_u64(p.elapsed);
+            m.console.puts(") request sent (");
+            m.console.print_u64(@intCast(p.out_len));
+            m.console.puts(" bytes)\n");
+        },
+        .renewing => {
+            if (!p.tx_ok) {
+                err_prefix(m);
+                m.console.print_line("RENEWING TX failed (transport unready)");
+                return;
+            }
+            m.console.puts("net dhcp: renewing (T1, elapsed=");
+            m.console.print_u64(p.elapsed);
+            m.console.puts(") request sent to the server (");
+            m.console.print_u64(@intCast(p.out_len));
+            m.console.puts(" bytes)\n");
+        },
+    }
+}
+
 fn cmd_net_dhcp(m: *Monitor, args: []const []const u8) ExecError {
     if (args.len != 0) {
         print_usage(m, lookup("net").?);

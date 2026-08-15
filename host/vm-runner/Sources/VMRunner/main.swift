@@ -306,6 +306,21 @@ var netDhcpRespondLeaseIP: [UInt8]?
 // (default 3600 — backward compatible; the `:N` suffix sets it, so the
 // lease lifecycle is testable in seconds).
 var netDhcpRespondLeaseSecs: UInt32 = 3600
+// Audit follow-up 3 (issue #119): `--net-dhcp-respond-norenew` refuses
+// the guest's UNICAST renewal REQUESTs (mtype 3 with a unicast dst MAC
+// — the RENEWING REQUEST from RFC 2131 §4.4.5), so the client's T1
+// renewal fails and it must ESCALATE to REBINDING at T2 (the broadcast
+// REQUEST, which this knob still answers — it only refuses the unicast
+// renew).
+var netDhcpRespondNoRenew = false
+// Audit follow-up 3 (issue #119): `--net-dhcp-respond-norebind` refuses
+// the guest's BROADCAST renewal REQUESTs (mtype 3, broadcast dst, with
+// ciaddr != 0 — the REBINDING REQUEST; the INITIAL REQUEST carries
+// ciaddr == 0 and is still answered, so the bind + a post-expiry
+// re-DISCOVER recovery keep working). With both refusal knobs (or with
+// norebind + no resolved server ARP) the client's renewals all fail
+// and the lease runs out — the autonomous-expiry evidence.
+var netDhcpRespondNoRebind = false
 // Milestone five card N10 (claim 7026): `--net-tcp-respond
 // <host-ip>:<host-port>` answers the guest's bounded TCP client from the
 // HOST side — a tiny deterministic TCP server inside the capture thread:
@@ -486,6 +501,18 @@ while idx < arguments.count {
             fail("--net-dhcp-respond lease must be 1..86400 seconds, got '\(halves[1])'.")
         }
         idx += 2
+    } else if arg == "--net-dhcp-respond-norenew" {
+        // Audit follow-up 3 (issue #119): refuse the guest's unicast
+        // RENEWING REQUESTs (the host keeps answering DISCOVERs + the
+        // initial/rebinding broadcast REQUESTs).
+        netDhcpRespondNoRenew = true
+        idx += 1
+    } else if arg == "--net-dhcp-respond-norebind" {
+        // Audit follow-up 3 (issue #119): refuse the guest's broadcast
+        // REBINDING REQUESTs (ciaddr != 0). The initial REQUEST
+        // (ciaddr == 0) is still answered, so binds/recovery work.
+        netDhcpRespondNoRebind = true
+        idx += 1
     } else if arg == "--net-tcp-respond", idx + 1 < arguments.count {
         // Card N10 (claim 7026): the same shape as --net-udp-respond
         // (host-ip:host-port). Card N11 (claim 5357): an optional
@@ -841,6 +868,24 @@ if let netCapturePath {
             // so the guest's N2 MAC filter admits it.
             if let leaseIP = netDhcpRespondLeaseIP, isDhcpDatagram(buf, n),
                let mtype = dhcpMessageType(buf, n), mtype == 1 || mtype == 3 {
+                // Audit follow-up 3 (issue #119): the refusal knobs. The
+                // frame's dst MAC tells the REQUEST shape: the RENEWING
+                // REQUEST is UNICAST to the server (02:00:00:00:00:02),
+                // the INITIAL + REBINDING REQUESTs are BROADCAST. The
+                // ciaddr (frame byte 54 = DHCP message byte 12) tells
+                // INITIAL (0.0.0.0) from REBINDING (the lease). Refused
+                // REQUESTs go unanswered — the guest's renewal stalls,
+                // and with the autonomous idle-loop poll it escalates to
+                // REBINDING at T2 / releases at expiry (the issue's
+                // evidence).
+                let dstBroadcast = buf[0] == 0xff && buf[1] == 0xff && buf[2] == 0xff &&
+                                   buf[3] == 0xff && buf[4] == 0xff && buf[5] == 0xff
+                let ciaddrSet = n > 58 && (buf[54] != 0 || buf[55] != 0 || buf[56] != 0 || buf[57] != 0)
+                let refused = mtype == 3 && ((netDhcpRespondNoRenew && !dstBroadcast) ||
+                                             (netDhcpRespondNoRebind && dstBroadcast && ciaddrSet))
+                if refused {
+                    print("NET-DHCP: refused the guest's \(!dstBroadcast ? "unicast RENEWING" : "broadcast REBINDING") REQUEST (xid 0x\(String(format: "%08x", (UInt32(buf[46]) << 24) | (UInt32(buf[47]) << 16) | (UInt32(buf[48]) << 8) | UInt32(buf[49])))) — the client must advance on its own")
+                } else {
                 var reply = [UInt8](repeating: 0, count: 4096)
                 let replyLen = buildDhcpReply(&reply, buf, n, arpHostMAC, leaseIP, netDhcpRespondLeaseSecs, mtype)
                 try? netCaptureReadSocket!.write(contentsOf: Data(reply[0..<replyLen]))
@@ -853,6 +898,7 @@ if let netCapturePath {
                               hexT[Int(buf[48] >> 4)], hexT[Int(buf[48] & 0xf)],
                               hexT[Int(buf[49] >> 4)], hexT[Int(buf[49] & 0xf)]]
                 print("NET-DHCP: answered the guest's DHCP \(mtype == 1 ? "DISCOVER" : "REQUEST") (xid 0x\(String(xidHex))) with a \(mtype == 1 ? "OFFER" : "ACK") for \(leaseIP[0]).\(leaseIP[1]).\(leaseIP[2]).\(leaseIP[3]) (lease \(netDhcpRespondLeaseSecs)s)")
+                }
             }
             // Card N10 (claim 7026): if the guest's bounded TCP client
             // connected to our ip:port, answer the handshake + echo from
@@ -1050,6 +1096,12 @@ if let leaseIP = netDhcpRespondLeaseIP {
     // The prefix stays byte-identical to card N8's gate assertion; card
     // N9's lease knob is noted after it.
     print("  net-dhcp-respond: ENABLED (milestone five card N8, claim 0351) + card N9 (claim 9489) — the host answers the guest's DHCP handshake with the fixed lease ip=\(ipText) mask=255.255.255.0 gw=10.0.0.1 server=\(ipText) lease=\(netDhcpRespondLeaseSecs) via the capture thread (deterministic, request-driven)")
+    if netDhcpRespondNoRenew {
+        print("  net-dhcp-respond-norenew: ENABLED (audit follow-up 3, issue #119) — the host REFUSES the guest's unicast RENEWING REQUESTs; the client must escalate to REBINDING at T2 on its own")
+    }
+    if netDhcpRespondNoRebind {
+        print("  net-dhcp-respond-norebind: ENABLED (audit follow-up 3, issue #119) — the host REFUSES the guest's broadcast REBINDING REQUESTs (ciaddr != 0); the client's lease runs out")
+    }
 }
 if let hostIP = netTcpRespondHostIP, let hostPort = netTcpRespondHostPort {
     let ipText = hostIP.map(String.init).joined(separator: ".")
