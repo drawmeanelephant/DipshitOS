@@ -43,6 +43,7 @@ verify-coordination`, and CI) fails if it drifts from the files.
 <!-- LOGS_INDEX:START -->
 | Branch | Log file |
 |--------|----------|
+| agent/buffy/audit-followup-1-gates-docs | [`agent-buffy-audit-followup-1-gates-docs.md`](agent-buffy-audit-followup-1-gates-docs.md) |
 | agent/buffy/doc-sync-m3 | [`agent-buffy-doc-sync-m3.md`](agent-buffy-doc-sync-m3.md) |
 | `agent/buffy/m15-commands` (PR #12) | [`agent-buffy-m15-commands.md`](agent-buffy-m15-commands.md) |
 | `agent/buffy/m15-host-plumbing` (PR #13) | [`agent-buffy-m15-host-plumbing.md`](agent-buffy-m15-host-plumbing.md) |

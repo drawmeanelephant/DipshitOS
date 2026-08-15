@@ -210,3 +210,19 @@ GATE id=t0sz25 class=D kind=diagnostic ci=no apple=yes gate=no cmd=bash tools/ve
 GATE id=walk-probe class=D kind=diagnostic ci=no apple=yes gate=no cmd=zig build kernel -Dwalk-probe
 GATE id=t0sz16-walkprobe class=D kind=diagnostic ci=no apple=yes gate=no cmd=bash tools/verify-t0sz16-walkprobe.sh
 <!-- GATE_INVENTORY:END -->
+
+## Known flakes (evidence registry)
+
+`artifacts/` is gitignored, so per-run evidence is regenerable by re-running
+its gate — EXCEPT timing-dependent flakes, whose captures cannot be
+regenerated on demand. Record every known flake here (append-only; a fix
+closes the row with a pointer). A future agent hitting the same symptom can
+then tell "documented pre-existing flake" from "new regression".
+
+| Flake | Gate(s) | Symptom | First seen / record | Status |
+|-------|---------|---------|---------------------|--------|
+| NAT ARP-learn latency | `live-net-tcp` run C (also affects `live-net-nat` runs) | the guest's ARP request for the NAT gateway occasionally times out under live-NAT latency (`learn=0` / an ARP-learn assertion fails) | 2026-08-12, claim 5357 (N11): reproduced on clean main, recorded as not-an-N11-regression; the original capture dir `artifacts/live-net-tcp-arp-flake-baseline/` was local-only and LOST to `.gitignore` — this row is the surviving record (issue #123) | open — see issue #123; re-record evidence under a tracked path when next hit |
+
+A machine-readable prefix (`FLAKE id=... gate=... status=...`) may be added
+here alongside the table if a preflight ever needs to parse it; today the
+table is the record (docs only, no tooling depends on it).

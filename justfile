@@ -51,6 +51,7 @@ verify-vz:
     bash tools/verify-host-console.sh
     bash tools/verify-live-transcript.sh
     bash tools/verify-live-help.sh
+    bash tools/verify-live-exceptions.sh
     bash tools/verify-live-fs.sh
     bash tools/verify-live-gfs.sh
     bash tools/verify-live-timer.sh
@@ -267,7 +268,6 @@ verify-live-win-close:
 
 # Verify the draw/window MOVE/RESTACK + HIDE/SHOW proof (class B — boots a VZ VM; WINMOVE.BIN opens/fills/presents/moves (the second move clamps to the scanout corner)/raises/reads-back (sys_win_get, slot 18, printing winmove: get 1024,528,256,192)/queries (sys_win_query, slot 19, printing winmove: query 1024,528,256,192 z=2 focused=1 visible=1 dirty=1)/hides-then-shows (sys_win_set_visible, slot 20, printing winmove: hide ok + winmove: show ok) through ADR 0007 slots 16/17/18/19/20 entirely from EL0, then yield-loops forever; `win` shows win[2] at the clamped rect visible=1, `syscalls` reports implemented=21 with move=2/raise=1/get=1/query=1/set_visible=2, the marker-driven capture (--screenshot-after "winmove: hide ok") shows the pixel GONE, and the LATEST decoded capture shows the window's colors BACK at the NEW position with the terminal where it used to be; claim 0487 move/raise read-back/query/visibility follow-on; Apple silicon only)
 verify-live-win-move:
-    bash tools/verify-live-win-move.sh
     bash tools/verify-live-win-move.sh
 
 # Verify the live pool-scale capstone (class B — boots VZ VMs; FOUR live user programs at the 7-slot budget: counter + 3 USER.BINs with distinct tasks/stacks, a FIFTH exec pool_full, and the tables=NN/256 headroom; claim 5795; Apple silicon only)
