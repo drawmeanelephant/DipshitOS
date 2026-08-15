@@ -509,7 +509,19 @@ dipshit>
     byte-identical). En route it root-caused + fixed a latent I3 interrupt-
     ring wrap OOB in `kernel/src/xhci.zig` (a phantom stale-report read after
     the Link-TRB boundary).
-    U3–U8 are the next cards.
+    **Card U3 (claim 1511) DONE 2026-08-14** — the ADR 0008 D3 error/usage
+    contract, mechanically enforced: one `usage: <cmd> <args>` (registry
+    single usage string via `print_usage`, reused for sub-verb misuse), one
+    `error: <actionable>` (`err_prefix`) across every refusal/failure site,
+    one `unknown command '<x>' -- try 'help'`. The byte-exact misuse
+    transcript now asserts all three shapes, and three deterministic host
+    fuzz tests (tokenizer / arbitrary argv / full editor+shell input path)
+    prove no handler panics. The full-path fuzz found + this card fixed a
+    latent U2 width bug: `remember_line`'s `@min(hist_count, hist_capacity
+    - 1)` inferred **u4** and overflowed at the 16th distinct history entry
+    (explicit `usize` anchor + a fill-past-capacity regression test). Live
+    help + live transcript gates re-run green.
+    U4–U8 are the next cards.
 
 The command layer above is portable; `docs/archive/march-m15.md` step 15's filesystem-command **deferral is superseded 2026-08-09** — first by the pre-exit ESP file window (claim 3475) and then, **on the same day, by the real FAT32 storage driver (claim 6420)**: `ls`/`cat`/`write` now read and write the live ESP's FAT volume through a virtio-blk transport, so files persist on the disk itself and **no storage driver remains deferred**. The allocator, interrupts, first tasks, EL0 boundary, syscall ABI, uaccess, per-task address spaces, lifecycle, ESP exec, and blocking syscalls are all complete; **milestone three is closed 2026-08-10 (tag `m3-userspace`, claim 0707)**.
 

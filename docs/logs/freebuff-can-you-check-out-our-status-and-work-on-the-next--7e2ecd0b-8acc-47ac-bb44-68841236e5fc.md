@@ -470,3 +470,22 @@ extended, not added).
   to garbage and the guest re-read the stale slot-0 `e` — the phantom key that
   corrupted both edited lines; pure `intr_slot_index` wrap helper + unit test).
   ✅ done
+## 2026-08-14 — milestone eight U3: error/usage contract (claim 1511)
+
+- Uniform D3 shapes across kernel/src/monitor.zig (~100 output sites):
+  `print_usage`/`err_prefix` helpers; sub-verb misuse → the command's single
+  registry usage; failures → `error: <actionable>`; bad verb → `unknown
+  command '<x>' -- try 'help'` (two hyphens = byte-safe em dash; the
+  framebuffer renders only 0x20..0x7e).
+- Byte-exact misuse transcript (shell e2e + tests/transcript-console.txt):
+  `usage: pages [selftest]`, `error: hello.txt: ...`, the long-line unknown
+  verb. All 358 monitor + 396 shell + 367 tokenizer + 28 lineedit tests
+  green; full verify-portable set green.
+- Three deterministic host fuzz tests (shell.zig): tokenizer over 4000
+  random byte streams; exec over 4000 random argv arrays; the full
+  editor+shell input path over 1500 hostile keyboards. The full-path fuzz
+  FOUND a latent U2 bug: remember_line's @min inferred u4 for the shift
+  bound, overflowing at the 16th distinct history entry — fixed with an
+  explicit usize anchor + a fill-past-capacity regression test.
+- Class B re-run: verify-live-help.sh and verify-live-transcript.sh both
+  PASS 1/1 on VZ after the shape conversion.

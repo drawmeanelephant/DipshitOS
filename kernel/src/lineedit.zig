@@ -371,7 +371,11 @@ pub const LineEditor = struct {
         const line = self.buffer[0..self.len];
         if (line.len == 0) return;
         if (self.hist_count > 0 and std.mem.eql(u8, line, self.history[0][0..self.hist_len[0]])) return;
-        const keep = @min(self.hist_count, hist_capacity - 1);
+        // The fuzz (card U3) caught a latent width bug here: `@min` with the
+        // comptime `hist_capacity - 1` (= 15) inferred a u4 for `keep`, so
+        // `keep + 1` overflowed at the 16th distinct history entry. The
+        // explicit usize anchor keeps the arithmetic at the field's width.
+        const keep: usize = @min(self.hist_count, hist_capacity - 1);
         var i = keep;
         while (i > 0) : (i -= 1) {
             @memcpy(self.history[i][0..self.hist_len[i - 1]], self.history[i - 1][0..self.hist_len[i - 1]]);
@@ -710,6 +714,37 @@ test "lineedit: consecutive duplicate submissions are collapsed in history" {
     _ = editor.feed(mock.console(), '\n');
     editor.next_line();
     try std.testing.expectEqual(@as(usize, 1), editor.hist_count);
+}
+
+test "lineedit: history ring never overflows past capacity (card U3 regression)" {
+    // Card U3's fuzz found a latent U2 width bug: `@min(hist_count,
+    // hist_capacity - 1)` inferred a u4 for the bound (= 15 fits 4 bits),
+    // so `keep + 1` overflowed at the 16th distinct entry. Submit more
+    // distinct lines than the ring holds; the ring must stay full, never
+    // overflow, and every entry stays in bounds.
+    var mock = console.MockConsole(64){};
+    var editor = LineEditor{};
+    var i: usize = 0;
+    while (i < hist_capacity + 8) : (i += 1) {
+        var line_buf: [16]u8 = undefined;
+        const n = std.fmt.bufPrint(&line_buf, "line{d}", .{i}) catch unreachable;
+        for (n) |c| _ = editor.feed(mock.console(), c);
+        _ = editor.feed(mock.console(), '\n');
+        editor.next_line();
+    }
+    try std.testing.expectEqual(hist_capacity, editor.hist_count);
+    // The newest entry is the last line submitted (line23); the oldest
+    // survivor is line8 (24 submitted, 16 kept) — earlier ones fell off.
+    try std.testing.expectEqualStrings("line23", editor.history[0][0..editor.hist_len[0]]);
+    try std.testing.expectEqualStrings("line8", editor.history[hist_capacity - 1][0..editor.hist_len[hist_capacity - 1]]);
+    // Recall walks the whole ring without touching garbage lengths.
+    var steps: usize = 0;
+    while (steps < hist_capacity) : (steps += 1) {
+        _ = editor.feed(mock.console(), 0x1b);
+        _ = editor.feed(mock.console(), '[');
+        _ = editor.feed(mock.console(), 'A');
+    }
+    try std.testing.expectEqual(@as(usize, hist_capacity), editor.hist_cursor);
 }
 
 fn testComplete(line: []const u8, cursor: usize) ?[]const u8 {
