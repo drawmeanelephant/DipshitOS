@@ -393,17 +393,22 @@ dipshit>
     `verify-vz` aggregate re-ran green 37/37. **Post-G3 hardening (the
     SCK switch, 2026-08-12)**: the pixel gates now REQUIRE the
     ScreenCaptureKit composited-window evidence (any cacheDisplay
-    fallback fails), and the new mirror-tripwire gate
-    `tools/verify-live-glyphs.sh` (PASS 1/1) decodes the captured frame
-    against the kernel's own font8x8 table — forward unknowns 0/604,
-    mirrored 549/595 — so a mirrored-text regression fails mechanically.
-    **Post-G5 hardening (2026-08-14):** the tripwire now ALSO decodes the
-    Driving Award clock overlay (title `clock` + body `DRIVING AWARD`) in
-    both orientations, so a mirror in the WINDOW-MANAGER path (G5's
-    draw_string + blit_rect — same forward glyph blit, different color
-    pair) fails too, not just the terminal's green text.
-    With the mirror-tripwire gate registered, the **38-gate `verify-vz`
-    aggregate re-ran 38/38 PASS** (`artifacts/m6-glyphs-vz-sweep.log`).
+    fallback fails), and introduced the `tools/verify-live-glyphs.sh`
+    mirror-tripwire gate. **Issue #125 correction (claim 8742,
+    2026-08-14):** the imported font rows are LSB-left, but BOTH kernel
+    rasters read bit 7 as the left pixel; the first decoder repeated that
+    same wrong convention, so its historical PASS was self-consistent,
+    not independent proof of orientation. `font8x8.row_pixel` now owns
+    the LSB-left contract for the terminal and Driving Award renderers,
+    while the decoder normalizes source rows to screen order and pins the
+    convention with a hard-coded asymmetric `C` golden. **[observed]** The
+    repaired gate passed on VZ/ScreenCaptureKit: the terminal decoded
+    forward with 0 unknowns / 604 ink versus 549/595 mirrored; the clock
+    decoded exactly as title `clock` and body `DRIVING AWARD`, versus 4/5
+    and 10/13 unknown glyphs mirrored. The earlier 38/38 aggregate remains
+    historical; its glyph-orientation result is superseded by this claim's
+    targeted live rerun (`artifacts/live-glyphs-gate.txt`,
+    `artifacts/gpu-screen-15s`).
     **What's next: milestone seven — input (keyboard + pointer)** so
     keystrokes come from the screen side. **[observed]** 2026-08-13
     (claim 3868): VZ exposes keyboard/pointer as an **Apple XHCI USB

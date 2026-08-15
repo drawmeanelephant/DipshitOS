@@ -572,11 +572,10 @@ fn draw_glyph(buf: [*]u8, stride: usize, x0: usize, y0: usize, c: u8, rgb: u32) 
     const glyph = font.glyphs[c - 0x20];
     var gy: usize = 0;
     while (gy < 8) : (gy += 1) {
-        var bits = glyph[gy];
+        const bits = glyph[gy];
         var gx: usize = 0;
         while (gx < 8) : (gx += 1) {
-            if ((bits & 0x80) != 0) put_px(buf, stride, x0 + gx, y0 + gy, rgb);
-            bits <<= 1;
+            if (font.row_pixel(bits, gx)) put_px(buf, stride, x0 + gx, y0 + gy, rgb);
         }
     }
 }
@@ -846,6 +845,21 @@ test "driving_award: fmt_decimal formats unsigned values without leading zeros" 
     try std.testing.expectEqualStrings("1", fmt_decimal(&buf, 1));
     try std.testing.expectEqualStrings("42", fmt_decimal(&buf, 42));
     try std.testing.expectEqualStrings("123456789", fmt_decimal(&buf, 123456789));
+}
+
+test "driving_award: asymmetric C glyph is LSB-first" {
+    const W = 8;
+    const H = 8;
+    var buf: [W * H * 4]u8 = undefined;
+    @memset(&buf, 0);
+    draw_glyph(&buf, W * 4, 0, 0, 'C', 0xffffff);
+
+    // The C's source row 2 is 0x03, so x=0,1 are foreground and x=6,7
+    // remain untouched. An MSB-first regression reverses these assertions.
+    try std.testing.expectEqual(@as(u8, 0xff), buf[(2 * W + 0) * 4]);
+    try std.testing.expectEqual(@as(u8, 0xff), buf[(2 * W + 1) * 4]);
+    try std.testing.expectEqual(@as(u8, 0x00), buf[(2 * W + 6) * 4]);
+    try std.testing.expectEqual(@as(u8, 0x00), buf[(2 * W + 7) * 4]);
 }
 
 test "driving_award: render_clock_content paints the title bar and body colors" {
