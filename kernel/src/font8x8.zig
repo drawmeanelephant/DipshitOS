@@ -129,3 +129,56 @@ test "font8x8: source rows are LSB-first with bit zero at the left" {
     try std.testing.expect(!row_pixel(c[2], 7));
     try std.testing.expect(!row_pixel(c[2], 8));
 }
+
+test "font8x8: the 760-byte table is pinned — no row bits ever reverse (issue 125)" {
+    // FNV-1a 64 over every glyph row in table order. ANY edit to the
+    // table — a bit-reversal of the whole data set, a single row flipped,
+    // a stray byte — changes the fingerprint, so a regression in the
+    // TABLE itself fails here even when both renderers still agree with
+    // each other (the round-trip goldens in text.zig / driving_award.zig
+    // catch a RENDERER flip; this pins the SOURCE data).
+    const std = @import("std");
+    var h: u64 = 14695981039346656037; // FNV offset basis
+    for (glyphs) |g| {
+        for (g) |row| {
+            h ^= row;
+            h *%= 1099511628211; // FNV prime
+        }
+    }
+    try std.testing.expectEqual(@as(u64, 0x177af966bd854d6d), h);
+}
+
+test "font8x8: the table is overwhelmingly horizontally asymmetric" {
+    // 90 of 95 glyphs differ from their horizontal mirror — the reason
+    // the full-table raster round-trips (text.zig / driving_award.zig)
+    // are decisive: a bit-order flip in either renderer breaks 90/95
+    // cells, not just the handful of hand-written goldens. The only
+    // horizontally symmetric glyphs are ' ', '!', '*', '_', '|'.
+    const std = @import("std");
+    var asymmetric: usize = 0;
+    var symmetric_chars: [95]u8 = undefined;
+    var n_sym: usize = 0;
+    var i: usize = 0;
+    while (i < glyphs.len) : (i += 1) {
+        var any_row_asymmetric = false;
+        for (glyphs[i]) |row| {
+            var rev: u8 = 0;
+            var b: usize = 0;
+            var r = row;
+            while (b < 8) : (b += 1) {
+                rev = (rev << 1) | (r & 1);
+                r >>= 1;
+            }
+            if (row != rev) any_row_asymmetric = true;
+        }
+        if (any_row_asymmetric) {
+            asymmetric += 1;
+        } else {
+            symmetric_chars[n_sym] = @as(u8, @intCast(0x20 + i));
+            n_sym += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 90), asymmetric);
+    try std.testing.expectEqual(@as(usize, 5), n_sym);
+    try std.testing.expectEqualStrings(" !*_|", symmetric_chars[0..n_sym]);
+}
