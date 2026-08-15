@@ -67,6 +67,15 @@ var cur_col: usize = 0;
 /// Whether the text layer has been initialized (the ring reset).
 var initialized: bool = false;
 
+/// CSI (`ESC [ <params> <final>`) decode state for the byte stream the
+/// line editor and monitor write here: 0 = normal, 1 = ESC, 2 = ESC [.
+/// Ctrl-L and `clear` emit `ESC [ 2 J` + `ESC [ H`; without this the
+/// escape bytes were STORED and drawn as the glyphs `[2J[H` instead of
+/// clearing the screen (the serial console never saw it — its terminal
+/// consumes them).
+var esc_state: u8 = 0;
+var esc_param: u8 = 0;
+
 /// A B8G8R8X8 canvas the renderer writes into (injectable for tests).
 pub const Canvas = struct {
     base: [*]u8,
@@ -90,6 +99,8 @@ pub fn init() void {
     ring_count = 0;
     cur_line = 0;
     cur_col = 0;
+    esc_state = 0;
+    esc_param = 0;
     initialized = true;
 }
 
@@ -117,11 +128,44 @@ fn cursor_slot() usize {
 /// column 0 of the current line; `\b` moves the cursor left one column (a
 /// no-op at column 0) so the line editor's erase/redraw byte stream renders
 /// on the framebuffer exactly as it does on a serial terminal (milestone
-/// eight card U2). Every other byte renders into the current line
-/// (printable chars draw the glyph, control bytes draw as blank), wrapping
-/// to a new line at the region's width.
+/// eight card U2). `ESC [ 2 J` clears the layer and `ESC [ H` homes the
+/// cursor; any other CSI sequence is swallowed whole rather than drawn.
+/// Every other byte renders into the current line (printable chars draw
+/// the glyph, control bytes draw as blank), wrapping to a new line at the
+/// region's width.
 pub fn putc(c: u8) void {
     if (!initialized) init();
+    switch (esc_state) {
+        0 => {},
+        else => esc_state = 0,
+        1 => {
+            esc_state = 0;
+            if (c == 0x5b) { // '['
+                esc_state = 2;
+                esc_param = 0;
+                return;
+            }
+            // A lone ESC introduces nothing we render: drop the ESC and
+            // handle this byte as ordinary text (falls through below).
+        },
+        2 => {
+            if (c >= 0x30 and c <= 0x39) { // parameter digits
+                const scaled = @mulWithOverflow(esc_param, 10);
+                const added = @addWithOverflow(scaled[0], c - 0x30);
+                esc_param = if (scaled[1] == 1 or added[1] == 1) 255 else added[0];
+                return;
+            }
+            if (c >= 0x3a and c <= 0x3f) return; // ';' and friends
+            esc_state = 0;
+            if (c == 0x4a and esc_param == 2) init(); // ESC [ 2 J: erase all
+            if (c == 0x48) cur_col = 0; // ESC [ H: home the cursor
+            return;
+        },
+    }
+    if (c == 0x1b) {
+        esc_state = 1;
+        return;
+    }
     if (c == '\n') {
         _ = new_line();
         return;
@@ -389,6 +433,26 @@ test "text: clear resets the ring and cursor" {
     try std.testing.expectEqual(@as(usize, 0), ring_count);
     try std.testing.expectEqual(@as(usize, 0), cur_col);
     try std.testing.expectEqual(@as(usize, 0), cursor_row());
+}
+
+test "text: Ctrl-L's erase-in-display clears the layer instead of drawing '[2J'" {
+    init();
+    puts("junk on the screen");
+    try std.testing.expect(ring_count >= 1);
+    // The exact byte stream lineedit/monitor emit for Ctrl-L and `clear`.
+    puts("\x1b[2J\x1b[H");
+    try std.testing.expectEqual(@as(usize, 0), ring_count);
+    try std.testing.expectEqual(@as(usize, 0), cur_col);
+    // Storing the escape bytes would have drawn the glyphs '[2J[H' — the
+    // ring must hold no such text afterwards.
+    puts("ok");
+    try std.testing.expectEqual(@as(u8, 'o'), ring[cur_line][0]);
+    try std.testing.expectEqual(@as(u8, 'k'), ring[cur_line][1]);
+    try std.testing.expectEqual(@as(usize, 2), cur_col);
+    // An unhandled CSI sequence is swallowed whole, not rendered.
+    puts("\x1b[1;31m!");
+    try std.testing.expectEqual(@as(u8, '!'), ring[cur_line][2]);
+    try std.testing.expectEqual(@as(usize, 3), cur_col);
 }
 
 test "text: render never writes outside the canvas" {
