@@ -47,6 +47,9 @@ WINCLOSE_BIN="${10:-$ROOT_DIR/zig-out/bin/WINCLOSE.BIN}"
 WINLOOP_BIN="${11:-$ROOT_DIR/zig-out/bin/WINLOOP.BIN}"
 WINMOVE_BIN="${12:-$ROOT_DIR/zig-out/bin/WINMOVE.BIN}"
 KEYTEST_BIN="${13:-$ROOT_DIR/zig-out/bin/KEYTEST.BIN}"
+SAVETEXT_BIN="${14:-$ROOT_DIR/zig-out/bin/SAVETEXT.BIN}"
+TYPE_BIN="${15:-$ROOT_DIR/zig-out/bin/TYPE.BIN}"
+DIR_BIN="${16:-$ROOT_DIR/zig-out/bin/DIR.BIN}"
 SIZE_MB="${DIPSHITOS_IMAGE_SIZE_MB:-128}"
 
 cd "$ROOT_DIR"
@@ -138,6 +141,27 @@ if [ -f "$KEYTEST_BIN" ]; then
     fi
     KEYTEST_ARGS+=("$KEYTEST_BIN")
 fi
+SAVETEXT_ARGS=()
+if [ -f "$SAVETEXT_BIN" ]; then
+    if [ "$(head -c 4 "$SAVETEXT_BIN")" != "DSK1" ]; then
+        fail "'$SAVETEXT_BIN' does not start with the 'DSK1' image magic -- run 'zig build' first (it produces zig-out/bin/SAVETEXT.BIN)."
+    fi
+    SAVETEXT_ARGS+=("$SAVETEXT_BIN")
+fi
+TYPE_ARGS=()
+if [ -f "$TYPE_BIN" ]; then
+    if [ "$(head -c 4 "$TYPE_BIN")" != "DSK1" ]; then
+        fail "'$TYPE_BIN' does not start with the 'DSK1' image magic -- run 'zig build' first (it produces zig-out/bin/TYPE.BIN)."
+    fi
+    TYPE_ARGS+=("$TYPE_BIN")
+fi
+DIR_ARGS=()
+if [ -f "$DIR_BIN" ]; then
+    if [ "$(head -c 4 "$DIR_BIN")" != "DSK1" ]; then
+        fail "'$DIR_BIN' does not start with the 'DSK1' image magic -- run 'zig build' first (it produces zig-out/bin/DIR.BIN)."
+    fi
+    DIR_ARGS+=("$DIR_BIN")
+fi
 
 # 3. Builder script.
 [ -f "$SCRIPT_DIR/mkfat32.py" ] || fail "missing $SCRIPT_DIR/mkfat32.py."
@@ -146,13 +170,10 @@ fi
 mkdir -p "$(dirname "$IMAGE")"
 rm -f "$IMAGE"
 echo "make-image: building FAT32+GPT image '$IMAGE' (${SIZE_MB} MiB)..."
-python3 "$SCRIPT_DIR/mkfat32.py" --size-mb "$SIZE_MB" "$IMAGE" "$EFI_BIN" "$KERNEL_BIN" "${USER_ARGS[@]}" "${COUNTER_ARGS[@]}" "${PEER_ARGS[@]}" "${STATUS43_ARGS[@]}" "${UDP_ARGS[@]}" "${WIN_ARGS[@]}" "${WINCLOSE_ARGS[@]}" "${WINLOOP_ARGS[@]}" "${WINMOVE_ARGS[@]}" "${KEYTEST_ARGS[@]}" \
+python3 "$SCRIPT_DIR/mkfat32.py" --size-mb "$SIZE_MB" "$IMAGE" "$EFI_BIN" "$KERNEL_BIN" "${USER_ARGS[@]}" "${COUNTER_ARGS[@]}" "${PEER_ARGS[@]}" "${STATUS43_ARGS[@]}" "${UDP_ARGS[@]}" "${WIN_ARGS[@]}" "${WINCLOSE_ARGS[@]}" "${WINLOOP_ARGS[@]}" "${WINMOVE_ARGS[@]}" "${KEYTEST_ARGS[@]}" "${SAVETEXT_ARGS[@]}" "${TYPE_ARGS[@]}" "${DIR_ARGS[@]}" \
     || fail "image creation failed (see output above)."
 
-# 5. Self-verify by listing the image we just wrote. The embed is asserted:
-# the ESP must carry KERNEL.BIN, USER.BIN, COUNTER.BIN (claim 4613),
-# PEER.BIN (claim 5965), STATUS43.BIN (claim 9946), UDP.BIN
-# (claim 1384), WIN.BIN (claim 0487), and KEYTEST.BIN (claim 9328).
+# 5. Self-verify by listing the image we just wrote.
 echo "make-image: verifying image contents..."
 LISTING="$(python3 "$SCRIPT_DIR/mkfat32.py" --list "$IMAGE")" \
     || fail "image verification failed."
@@ -169,6 +190,15 @@ printf '%s\n' "$LISTING" | grep -q 'WINLOOP.BIN' || fail "WINLOOP.BIN missing fr
 printf '%s\n' "$LISTING" | grep -q 'WINMOVE.BIN' || fail "WINMOVE.BIN missing from the image listing"
 if [ -f "$KEYTEST_BIN" ]; then
     printf '%s\n' "$LISTING" | grep -q 'KEYTEST.BIN' || fail "KEYTEST.BIN missing from the image listing"
+fi
+if [ -f "$SAVETEXT_BIN" ]; then
+    printf '%s\n' "$LISTING" | grep -q 'SAVETEXT.BIN' || fail "SAVETEXT.BIN missing from the image listing"
+fi
+if [ -f "$TYPE_BIN" ]; then
+    printf '%s\n' "$LISTING" | grep -q 'TYPE.BIN' || fail "TYPE.BIN missing from the image listing"
+fi
+if [ -f "$DIR_BIN" ]; then
+    printf '%s\n' "$LISTING" | grep -q 'DIR.BIN' || fail "DIR.BIN missing from the image listing"
 fi
 
 echo "make-image: done."

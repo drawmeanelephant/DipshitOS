@@ -68,6 +68,8 @@ const process = @import("process.zig");
 const mailbox = @import("mailbox.zig");
 // Milestone 9 (claim 7670): per-process event queue
 const events = @import("events.zig");
+// Milestone 10 (claim 9948): per-process file handle table
+const file_table = @import("file_table.zig");
 // Card G6 teardown follow-on (per-process window ownership): the exit path
 // auto-closes the exiting process's user windows via `close_owner`. Pure
 // BSS writes, safe in the exception context `exit_current` runs in.
@@ -486,6 +488,7 @@ pub fn register_user(entry: u64, image_base: u64) ?usize {
         // clean IPC ring (same reset the exec path applies).
         mailbox.reset(proc_id);
         events.reset(proc_id);
+        file_table.reset_process(proc_id);
         _ = process.bind(proc_id, id);
     }
     const frame: *exceptions.VectorFrame = @ptrFromInt(tasks[id].sp);
@@ -837,6 +840,7 @@ pub fn exit_current(status: u64) bool {
         // until reboot). Pure BSS writes (registry compaction + dirty
         // marks), safe in this exception context.
         _ = driving_award.close_owner(pid);
+        file_table.reset_process(pid);
     }
     const next = next_runnable(exiting) orelse {
         // No successor: roll back (the always-ready idle task makes this

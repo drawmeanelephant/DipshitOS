@@ -216,7 +216,8 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
                       counter_bytes=None, peer_bytes=None, status43_bytes=None,
                       udp_bytes=None, win_bytes=None, winclose_bytes=None,
                       winloop_bytes=None, winmove_bytes=None,
-                      keytest_bytes=None):
+                      keytest_bytes=None, savetext_bytes=None,
+                      type_bytes=None, dir_bytes=None):
     """Write a FAT32 volume (boot sector, FSInfo, FATs, directories, files)
     into `img` at the volume's offset.
 
@@ -226,13 +227,12 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
                      PEER.BIN (when given), STATUS43.BIN (when given),
                      UDP.BIN (when given), WIN.BIN (when given),
                      WINCLOSE.BIN (when given), WINLOOP.BIN (when given),
-                     WINMOVE.BIN (when given), KEYTEST.BIN (when given)
+                     WINMOVE.BIN (when given), KEYTEST.BIN (when given),
+                     SAVETEXT.BIN (when given), TYPE.BIN (when given),
+                     DIR.BIN (when given)
       /EFI/          ., .., BOOT/
       /EFI/BOOT/     ., .., BOOTAA64.EFI
-    Cluster layout: 2=root, 3=EFI, 4=BOOT, then file data in order
-    (KERNEL.BIN first when present, then USER.BIN, then COUNTER.BIN, then
-    PEER.BIN, then STATUS43.BIN, then UDP.BIN, then WIN.BIN, then
-    WINCLOSE.BIN, then WINLOOP.BIN, then WINMOVE.BIN, then KEYTEST.BIN, then BOOTAA64.EFI).
+    Cluster layout: 2=root, 3=EFI, 4=BOOT, then file data in order.
     Deterministic.
     """
     geo.checks()
@@ -248,6 +248,9 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
     winloop_clusters = (len(winloop_bytes) + bps - 1) // bps if winloop_bytes else 0
     winmove_clusters = (len(winmove_bytes) + bps - 1) // bps if winmove_bytes else 0
     keytest_clusters = (len(keytest_bytes) + bps - 1) // bps if keytest_bytes else 0
+    savetext_clusters = (len(savetext_bytes) + bps - 1) // bps if savetext_bytes else 0
+    type_clusters = (len(type_bytes) + bps - 1) // bps if type_bytes else 0
+    dir_clusters = (len(dir_bytes) + bps - 1) // bps if dir_bytes else 0
     file_clusters = (len(efi_bytes) + bps - 1) // bps
     kernel_start = 5
     user_start = kernel_start + kernel_clusters
@@ -260,7 +263,10 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
     winloop_start = winclose_start + winclose_clusters
     winmove_start = winloop_start + winloop_clusters
     keytest_start = winmove_start + winmove_clusters
-    efi_start = keytest_start + keytest_clusters
+    savetext_start = keytest_start + keytest_clusters
+    type_start = savetext_start + savetext_clusters
+    dir_start = type_start + type_clusters
+    efi_start = dir_start + dir_clusters
     allocated = efi_start + file_clusters - 2  # clusters used beyond root(2)
     if allocated > geo.clusters:
         raise ValueError(
@@ -301,6 +307,12 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
         chain(winmove_start, winmove_clusters)    # WINMOVE.BIN data
     if keytest_bytes:
         chain(keytest_start, keytest_clusters)    # KEYTEST.BIN data
+    if savetext_bytes:
+        chain(savetext_start, savetext_clusters)  # SAVETEXT.BIN data
+    if type_bytes:
+        chain(type_start, type_clusters)          # TYPE.BIN data
+    if dir_bytes:
+        chain(dir_start, dir_clusters)            # DIR.BIN data
     chain(efi_start, file_clusters)            # BOOTAA64.EFI data
 
     def wsec(sector, data):
@@ -353,6 +365,12 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
         root_entries += dir_entry(b"WINMOVE BIN", 0x20, winmove_start, len(winmove_bytes))
     if keytest_bytes:
         root_entries += dir_entry(b"KEYTEST BIN", 0x20, keytest_start, len(keytest_bytes))
+    if savetext_bytes:
+        root_entries += dir_entry(b"SAVETEXTBIN", 0x20, savetext_start, len(savetext_bytes))
+    if type_bytes:
+        root_entries += dir_entry(b"TYPE    BIN", 0x20, type_start, len(type_bytes))
+    if dir_bytes:
+        root_entries += dir_entry(b"DIR     BIN", 0x20, dir_start, len(dir_bytes))
     wsec(geo.cluster_sector(2), root_entries.ljust(bps, b"\x00"))
     wsec(geo.cluster_sector(3), (dot_efi + dotdot_efi + boot_entry).ljust(bps, b"\x00"))
     wsec(geo.cluster_sector(4), (dot_boot + dotdot_boot + file_entry).ljust(bps, b"\x00"))
@@ -402,6 +420,18 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
         for i in range(keytest_clusters):
             chunk = keytest_bytes[i * bps:(i + 1) * bps]
             wsec(geo.cluster_sector(keytest_start + i), chunk.ljust(bps, b"\x00"))
+    if savetext_bytes:
+        for i in range(savetext_clusters):
+            chunk = savetext_bytes[i * bps:(i + 1) * bps]
+            wsec(geo.cluster_sector(savetext_start + i), chunk.ljust(bps, b"\x00"))
+    if type_bytes:
+        for i in range(type_clusters):
+            chunk = type_bytes[i * bps:(i + 1) * bps]
+            wsec(geo.cluster_sector(type_start + i), chunk.ljust(bps, b"\x00"))
+    if dir_bytes:
+        for i in range(dir_clusters):
+            chunk = dir_bytes[i * bps:(i + 1) * bps]
+            wsec(geo.cluster_sector(dir_start + i), chunk.ljust(bps, b"\x00"))
     for i in range(file_clusters):
         chunk = efi_bytes[i * bps:(i + 1) * bps]
         wsec(geo.cluster_sector(efi_start + i), chunk.ljust(bps, b"\x00"))
@@ -661,7 +691,8 @@ def build_image(total_sectors, esp_offset, efi_bytes, kernel_bytes=None,
                 user_bytes=None, counter_bytes=None, peer_bytes=None,
                 status43_bytes=None, udp_bytes=None, win_bytes=None,
                 winclose_bytes=None, winloop_bytes=None, winmove_bytes=None,
-                keytest_bytes=None):
+                keytest_bytes=None, savetext_bytes=None, type_bytes=None,
+                dir_bytes=None):
     img = bytearray(total_sectors * BYTES_PER_SECTOR)
     last_usable = total_sectors - 34
     first_usable = 34
@@ -702,7 +733,7 @@ def build_image(total_sectors, esp_offset, efi_bytes, kernel_bytes=None,
     build_fat32_image(img, geo, efi_bytes, kernel_bytes, user_bytes,
                       counter_bytes, peer_bytes, status43_bytes, udp_bytes,
                       win_bytes, winclose_bytes, winloop_bytes, winmove_bytes,
-                      keytest_bytes)
+                      keytest_bytes, savetext_bytes, type_bytes, dir_bytes)
     geo_data = Fat32Geometry(data_sectors, data_start)
     build_data_volume(img, geo_data)
     return bytes(img)
@@ -742,6 +773,12 @@ def main(argv):
                     help="optional flat user program (WINMOVE.BIN) to embed at the volume root (claim 0487 move/raise follow-on)")
     ap.add_argument("keytest_file", nargs="?",
                     help="optional flat user program (KEYTEST.BIN) to embed at the volume root (claim 9328)")
+    ap.add_argument("savetext_file", nargs="?",
+                    help="optional flat user program (SAVETEXT.BIN) to embed at the volume root (claim 0510)")
+    ap.add_argument("type_file", nargs="?",
+                    help="optional flat user program (TYPE.BIN) to embed at the volume root (claim 0510)")
+    ap.add_argument("dir_file", nargs="?",
+                    help="optional flat user program (DIR.BIN) to embed at the volume root (claim 0510)")
     args = ap.parse_args(argv)
 
     if args.list:
@@ -857,11 +894,39 @@ def main(argv):
                   "not be a DipshitOS user program image" % args.keytest_file,
                   file=sys.stderr)
 
+    savetext_bytes = None
+    if args.savetext_file:
+        with open(args.savetext_file, "rb") as f:
+            savetext_bytes = f.read()
+        if savetext_bytes[:4] != b"DSK1":
+            print("WARNING: %s does not start with the 'DSK1' magic; it may "
+                  "not be a DipshitOS user program image" % args.savetext_file,
+                  file=sys.stderr)
+
+    type_bytes = None
+    if args.type_file:
+        with open(args.type_file, "rb") as f:
+            type_bytes = f.read()
+        if type_bytes[:4] != b"DSK1":
+            print("WARNING: %s does not start with the 'DSK1' magic; it may "
+                  "not be a DipshitOS user program image" % args.type_file,
+                  file=sys.stderr)
+
+    dir_bytes = None
+    if args.dir_file:
+        with open(args.dir_file, "rb") as f:
+            dir_bytes = f.read()
+        if dir_bytes[:4] != b"DSK1":
+            print("WARNING: %s does not start with the 'DSK1' magic; it may "
+                  "not be a DipshitOS user program image" % args.dir_file,
+                  file=sys.stderr)
+
     total_sectors = args.size_mb * 1024 * 1024 // BYTES_PER_SECTOR
     img = build_image(total_sectors, args.esp_offset, efi_bytes, kernel_bytes,
                       user_bytes, counter_bytes, peer_bytes, status43_bytes,
                       udp_bytes, win_bytes, winclose_bytes, winloop_bytes,
-                      winmove_bytes, keytest_bytes)
+                      winmove_bytes, keytest_bytes, savetext_bytes, type_bytes,
+                      dir_bytes)
     with open(args.image, "wb") as f:
         f.write(img)
     extra = ", %d-byte kernel image embedded" % len(kernel_bytes) if kernel_bytes else ""
@@ -875,6 +940,9 @@ def main(argv):
     extra += ", %d-byte winloop program embedded" % len(winloop_bytes) if winloop_bytes else ""
     extra += ", %d-byte winmove program embedded" % len(winmove_bytes) if winmove_bytes else ""
     extra += ", %d-byte keytest program embedded" % len(keytest_bytes) if keytest_bytes else ""
+    extra += ", %d-byte savetext program embedded" % len(savetext_bytes) if savetext_bytes else ""
+    extra += ", %d-byte type program embedded" % len(type_bytes) if type_bytes else ""
+    extra += ", %d-byte dir program embedded" % len(dir_bytes) if dir_bytes else ""
     print("wrote %s: %d MiB, ESP at LBA %d, %d-byte EFI application embedded%s" %
           (args.image, args.size_mb, args.esp_offset, len(efi_bytes), extra))
     return 0

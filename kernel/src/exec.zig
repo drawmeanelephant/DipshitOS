@@ -74,6 +74,8 @@ const process = @import("process.zig");
 const mailbox = @import("mailbox.zig");
 // Milestone 9 (claim 7670): per-process event queue
 const events = @import("events.zig");
+// Milestone 10 (claim 9948): per-process file handle table
+const file_table = @import("file_table.zig");
 // Claim 0826: the per-process text/stack/kernel-stack pages come from the
 // physical page allocator (claims 3972/5162).
 const alloc = @import("alloc.zig");
@@ -320,6 +322,7 @@ pub fn exec_file(name: []const u8, args: []const []const u8) ExecResult {
     // for event queue.
     mailbox.reset(proc_id);
     events.reset(proc_id);
+    file_table.reset_process(proc_id);
     if (scheduler.register_exec_user(entry_va, rebuild.root_phys, @intCast(text_len), rebuild.stack_va, scheduler.task_stack_size, kstack, @intCast(argc), argv_va)) |task_id| {
         _ = process.bind(proc_id, task_id);
     } else {
