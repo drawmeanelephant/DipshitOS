@@ -14,26 +14,19 @@ These rules bind any AI agent or human contributor working in this project.
 
 ## Current milestone
 
-Milestones zero, one, two, 1.5, three, and four are implemented (1.5 — the
-interactive kernel monitor — closed and tagged `m1.5-interactive-monitor`
-on 2026-08-09; milestone two's VZ serial gate passes since 2026-08-08,
-claim 1517; milestone three closed with the per-task address spaces and
-the frozen 64-slot syscall ABI; milestone four — processes with full
-lifecycle — closed and tagged `m4-processes`). The current stream is
-**milestone five — networking**: card N1 (virtio-net raw Ethernet TX,
-claim 1373) and card N2 (raw Ethernet RX, claim 6076) are live on VZ;
-the next card is N3 (ARP). As of the audit-2026 maintenance pass
-(2026-08-11), the historical milestone-three claim list (allocator
-claims 3972/5162, GIC + timer PPI claim 9187, scheduler claim 5275,
-EL0t + SVC claims 8215/3594, uaccess claim 6120) is all done and remains
-accurate as history — but for the canonical, always-current answer to
-"where are we, and what's next", read `docs/status.md`. **Milestone six — graphics (the Driving Award
-window manager + Road Pops terminal) — cards G1 (virtio-gpu transport +
-framebuffer, claim 6053), G2 (framebuffer text, claim 3194), and G3
-(Road Pops — the boot terminal on the screen, claim 1574) are DONE
-2026-08-12; cards G4–G6 are sketched in
-`docs/roadmap.md` / `docs/march-m6.md` but are NOT committed work; do not
-implement them.**
+Milestones zero through seven are implemented and closed (boot pipeline;
+kernel handoff; kernel proper — VZ serial gate since claim 1517;
+`m1.5-interactive-monitor`; `m3-userspace` — allocator, GIC + timer PPI
+(claim 9187), scheduler, EL0 + SVC, syscalls, uaccess; `m4-processes`;
+milestone five networking — virtio-net through DHCP + TCP (claims 1373…
+5357); milestone six graphics — Road Pops + the Driving Award window
+manager (claims 6053…0487); milestone seven input — USB XHCI + HID
+(claims 4272…6050)). The current stream is **milestone eight — usability:
+human interface (ADR 0008)** — cards U0–U3 (help catalog, shell editing,
+error/usage contract) are DONE 2026-08-14 (claims 8938/3275/1809/1511);
+U4–U8 (pointer focus, window HIG, first-boot, sysinfo, settings) are the
+next cards per `docs/march-m8.md`. For the canonical, always-current
+answer to "where are we, and what's next", read `docs/status.md`.
 
 ## Milestone scope rules
 

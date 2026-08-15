@@ -223,11 +223,15 @@ pub fn boot_and_park(mon: *monitor.Monitor, rx_wired: bool) void {
 }
 
 /// Idle between input polls in RX-wired mode: a bounded nop delay, not WFE.
-/// The device delivers input with no interrupt (ADR 0004: no GIC
-/// programming this milestone), so a WFE would sleep forever and the kernel
-/// would never re-poll (claim 6684). The bounded delay keeps the loop
-/// responsive without a timer. Elided entirely on non-aarch64 hosts so the
-/// module stays host-testable on x86_64 CI.
+/// The GIC/timer path IS live since claim 9187 (a real CNTP PPI preempts
+/// this very loop every second), but the console RX, net RX, and XHCI input
+/// are polled devices with no interrupt of their own, and a WFE would only
+/// wake on the 1 s tick — capping input/net polling at 1 s granularity.
+/// The bounded delay keeps the loop responsive without a timer (claim
+/// 6684's original rationale), at the cost of a hot spin while idle (see
+/// issue #122 — a WFE-with-tick-wake experiment is the recorded option).
+/// Elided entirely on non-aarch64 hosts so the module stays host-testable
+/// on x86_64 CI.
 fn idle_wait_rx() void {
     if (comptime builtin.cpu.arch == .aarch64) {
         var spins: usize = 0;

@@ -718,22 +718,21 @@ gates pass; tagged `m1.5-interactive-monitor`** (see
     applies at every rung. The driver starts single-CPU (boot CPU, the
     claim-9187/0828 IRQ pattern); SMP is a separate future card.
 
-## Milestone six — graphics: Driving Award + Road Pops (sketched, not committed)
+## Milestone six — graphics: Driving Award + Road Pops (**IMPLEMENTED 2026-08-13 — G1–G6 all live, milestone closed**)
 
-> **Scope sketch (2026-08-12).** The last open virtio surface row (Graphics)
-> becomes a real milestone: the machine boots to a **graphical interface**.
-> The boot terminal you see today — the M1.5 "Dipshit Monitor" over the
-> virtio serial console — becomes **Road Pops**, a graphical terminal
-> window, running under **Driving Award**, the window manager. The cards
-> below are the "in between": they fill the gap from "boots to a serial
-> terminal" to "a composited desktop with windows". Nothing here is
-> committed; every card keeps the project's honest bounds (fixed BSS, no
-> heap, one-request-at-a-time device access, gates with real observed
-> evidence) and records new hardware assumptions in
+> **Scope sketch (2026-08-12) — implemented below.** The last open virtio
+> surface row (Graphics) became a real milestone: the machine boots to a
+> **graphical interface**. The boot terminal that had been the M1.5
+> "Dipshit Monitor" over the virtio serial console became **Road Pops**, a
+> graphical terminal window, running under **Driving Award**, the window
+> manager. Every card below kept the project's honest bounds (fixed BSS,
+> no heap, one-request-at-a-time device access, gates with real observed
+> evidence) and recorded new hardware assumptions in
 > `docs/hardware-contract.md`. The runner's `--screenshot` channel already
 > attaches the device (`VZVirtioGraphicsDeviceConfiguration`, 1280×720
-> scanout); the milestone's evidence path is that channel's raw pixels,
-> byte-asserted like the net captures.
+> scanout); the milestone's evidence path was that channel's raw pixels,
+> byte-asserted like the net captures. All cards landed — see the ladder
+> below and `docs/status.md`.
 
 Card ladder (canonical order; per-card tracker
 [`docs/march-m6.md`](march-m6.md)):
@@ -883,9 +882,10 @@ Card ladder (canonical order; per-card tracker
 accelerated / 3D paths (virtio-gpu 2D blits only); no SMP; the window
 manager is single-display (one 1280×720 scanout).
 
-## Milestone seven — input: USB XHCI + HID (keyboard + pointer)
+## Milestone seven — input: USB XHCI + HID (keyboard + pointer) (**IMPLEMENTED 2026-08-13 — I1–I3 all live, milestone closed**)
 
-> **Scope sketch (2026-08-13).** Milestone six's G4 input card was split
+> **Scope sketch (2026-08-13) — implemented below.** Milestone six's G4
+> input card was split
 > into its own milestone after the claim-3868 observation: VZ's only
 > keyboard/pointer surface is a USB HID stack behind an **Apple XHCI USB
 > host controller** (`VID=0x106b DID=0x1a06 CLS=0x0c0330`, two MMIO BARs

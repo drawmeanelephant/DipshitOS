@@ -26,22 +26,33 @@ Every milestone through seven is **done** and live-gated.
 
 ## Current
 
-There is no milestone eight defined yet. The open work is the honest-bound
-list at the edges of what shipped:
+**Milestone eight — usability & human interface (ADR 0008)** is active. Its
+normative contract pins one command grammar + grouped `help`, one prompt and
+editing model, one `error:`/`usage:` shape, a visible-focus window model, and
+an `about`/`welcome`/`sysinfo`/settings support surface. Landed so far:
 
-- **Pointer-driven focus** — pointer reports are parsed, but nothing clicks a
-  window; focus is keyboard/monitor-driven.
-- **A focus syscall** — windows can hide/show, but focus is not settable from
-  EL0.
+- **U0** — the human-interface guidelines themselves (ADR 0008).
+- **U1** — grouped `help`, `help <cmd>`, and `help <topic>`.
+- **U2** — shell line editing & history (cursor movement, Ctrl chords, tab
+  completion) over the USB keyboard path.
+- **U3** — the one `usage:`/`error:`/`unknown command` error contract,
+  byte-exact in the transcript and fuzzed for panics.
+
+Defined next (the U4–U8 ladder, per `docs/march-m8.md`): pointer-driven focus
++ cursor, window title bars/focus rings, the first-boot tour, `sysinfo`, and
+persistent settings on the DATA partition.
+
+Honest-bound edges that remain planned regardless of milestone:
+
 - **The balloon device** — the last unattached virtio surface (low priority
   while the guest is a fixed 256 MiB).
 - **Networking edges** — TCP server/listen, DNS, adaptive RTO.
 
 <Aside kind="note">
 
-**PLANNED.** The next milestone is expected to complete the window manager:
-pointer-driven focus, a focus syscall, and a clickable desktop. That is a
-direction, not a commitment — nothing here is shipped until it has a gate.
+**PLANNED.** U4–U8 are defined with gates in `docs/march-m8.md`; nothing is
+shipped until it has a gate. The tracker, not this page, is the live
+per-card status.
 
 </Aside>
 
