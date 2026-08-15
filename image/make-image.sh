@@ -50,6 +50,10 @@ KEYTEST_BIN="${13:-$ROOT_DIR/zig-out/bin/KEYTEST.BIN}"
 SAVETEXT_BIN="${14:-$ROOT_DIR/zig-out/bin/SAVETEXT.BIN}"
 TYPE_BIN="${15:-$ROOT_DIR/zig-out/bin/TYPE.BIN}"
 DIR_BIN="${16:-$ROOT_DIR/zig-out/bin/DIR.BIN}"
+CALC_BIN="${17:-$ROOT_DIR/zig-out/bin/CALC.BIN}"
+NOTEPAD_BIN="${18:-$ROOT_DIR/zig-out/bin/NOTEPAD.BIN}"
+TOP_BIN="${19:-$ROOT_DIR/zig-out/bin/TOP.BIN}"
+DESKTOP_BIN="${20:-$ROOT_DIR/zig-out/bin/DESKTOP.BIN}"
 SIZE_MB="${DIPSHITOS_IMAGE_SIZE_MB:-128}"
 
 cd "$ROOT_DIR"
@@ -162,6 +166,34 @@ if [ -f "$DIR_BIN" ]; then
     fi
     DIR_ARGS+=("$DIR_BIN")
 fi
+CALC_ARGS=()
+if [ -f "$CALC_BIN" ]; then
+    if [ "$(head -c 4 "$CALC_BIN")" != "DSK1" ]; then
+        fail "'$CALC_BIN' does not start with the 'DSK1' image magic -- run 'zig build' first (it produces zig-out/bin/CALC.BIN)."
+    fi
+    CALC_ARGS+=("$CALC_BIN")
+fi
+NOTEPAD_ARGS=()
+if [ -f "$NOTEPAD_BIN" ]; then
+    if [ "$(head -c 4 "$NOTEPAD_BIN")" != "DSK1" ]; then
+        fail "'$NOTEPAD_BIN' does not start with the 'DSK1' image magic -- run 'zig build' first (it produces zig-out/bin/NOTEPAD.BIN)."
+    fi
+    NOTEPAD_ARGS+=("$NOTEPAD_BIN")
+fi
+TOP_ARGS=()
+if [ -f "$TOP_BIN" ]; then
+    if [ "$(head -c 4 "$TOP_BIN")" != "DSK1" ]; then
+        fail "'$TOP_BIN' does not start with the 'DSK1' image magic -- run 'zig build' first (it produces zig-out/bin/TOP.BIN)."
+    fi
+    TOP_ARGS+=("$TOP_BIN")
+fi
+DESKTOP_ARGS=()
+if [ -f "$DESKTOP_BIN" ]; then
+    if [ "$(head -c 4 "$DESKTOP_BIN")" != "DSK1" ]; then
+        fail "'$DESKTOP_BIN' does not start with the 'DSK1' image magic -- run 'zig build' first (it produces zig-out/bin/DESKTOP.BIN)."
+    fi
+    DESKTOP_ARGS+=("$DESKTOP_BIN")
+fi
 
 # 3. Builder script.
 [ -f "$SCRIPT_DIR/mkfat32.py" ] || fail "missing $SCRIPT_DIR/mkfat32.py."
@@ -170,7 +202,7 @@ fi
 mkdir -p "$(dirname "$IMAGE")"
 rm -f "$IMAGE"
 echo "make-image: building FAT32+GPT image '$IMAGE' (${SIZE_MB} MiB)..."
-python3 "$SCRIPT_DIR/mkfat32.py" --size-mb "$SIZE_MB" "$IMAGE" "$EFI_BIN" "$KERNEL_BIN" "${USER_ARGS[@]}" "${COUNTER_ARGS[@]}" "${PEER_ARGS[@]}" "${STATUS43_ARGS[@]}" "${UDP_ARGS[@]}" "${WIN_ARGS[@]}" "${WINCLOSE_ARGS[@]}" "${WINLOOP_ARGS[@]}" "${WINMOVE_ARGS[@]}" "${KEYTEST_ARGS[@]}" "${SAVETEXT_ARGS[@]}" "${TYPE_ARGS[@]}" "${DIR_ARGS[@]}" \
+python3 "$SCRIPT_DIR/mkfat32.py" --size-mb "$SIZE_MB" "$IMAGE" "$EFI_BIN" "$KERNEL_BIN" "${USER_ARGS[@]}" "${COUNTER_ARGS[@]}" "${PEER_ARGS[@]}" "${STATUS43_ARGS[@]}" "${UDP_ARGS[@]}" "${WIN_ARGS[@]}" "${WINCLOSE_ARGS[@]}" "${WINLOOP_ARGS[@]}" "${WINMOVE_ARGS[@]}" "${KEYTEST_ARGS[@]}" "${SAVETEXT_ARGS[@]}" "${TYPE_ARGS[@]}" "${DIR_ARGS[@]}" "${CALC_ARGS[@]}" "${NOTEPAD_ARGS[@]}" "${TOP_ARGS[@]}" "${DESKTOP_ARGS[@]}" \
     || fail "image creation failed (see output above)."
 
 # 5. Self-verify by listing the image we just wrote.
@@ -199,6 +231,18 @@ if [ -f "$TYPE_BIN" ]; then
 fi
 if [ -f "$DIR_BIN" ]; then
     printf '%s\n' "$LISTING" | grep -q 'DIR.BIN' || fail "DIR.BIN missing from the image listing"
+fi
+if [ -f "$CALC_BIN" ]; then
+    printf '%s\n' "$LISTING" | grep -q 'CALC.BIN' || fail "CALC.BIN missing from the image listing"
+fi
+if [ -f "$NOTEPAD_BIN" ]; then
+    printf '%s\n' "$LISTING" | grep -q 'NOTEPAD.BIN' || fail "NOTEPAD.BIN missing from the image listing"
+fi
+if [ -f "$TOP_BIN" ]; then
+    printf '%s\n' "$LISTING" | grep -q 'TOP.BIN' || fail "TOP.BIN missing from the image listing"
+fi
+if [ -f "$DESKTOP_BIN" ]; then
+    printf '%s\n' "$LISTING" | grep -q 'DESKTOP.BIN' || fail "DESKTOP.BIN missing from the image listing"
 fi
 
 echo "make-image: done."

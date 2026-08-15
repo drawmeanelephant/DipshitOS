@@ -9,7 +9,7 @@
  */
 ENTRY(_start)
 SECTIONS {
-    . = 0x0;
+    . = 0x00400000;
     .text : ALIGN(16) { *(.text .text.*) }
     .rodata : ALIGN(16) { *(.rodata .rodata.*) }
     .data : ALIGN(16) { *(.data .data.*) }

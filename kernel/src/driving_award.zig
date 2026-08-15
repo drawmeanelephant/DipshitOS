@@ -89,7 +89,7 @@ pub const cursor_h: usize = 8;
 /// `sys_win_fill` / `sys_win_present`. The buffers never outgrow this
 /// bound (no heap, no allocation).
 pub const user_window_id_base: u8 = 2;
-pub const user_windows_max: usize = 2;
+pub const user_windows_max: usize = 4;
 pub const user_buf_w: u32 = 256;
 pub const user_buf_h: u32 = 192;
 

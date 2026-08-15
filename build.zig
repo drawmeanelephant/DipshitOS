@@ -511,6 +511,98 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_dir.step);
 
     // ------------------------------------------------------------------
+    // Guest: fourteenth ESP user program (milestone eleven, card A2 — claim 8401)
+    // CALC.BIN. Interactive graphical calculator with 64-bit engine.
+    // ------------------------------------------------------------------
+    const calc_prog = b.addExecutable(.{
+        .name = "user-calc",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/calc.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    calc_prog.linker_script = b.path("user/linker.ld");
+    const calc_step = b.step("calc", "Build the fourteenth ESP user program (zig-out/bin/CALC.BIN)");
+    const calc_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    calc_elf2bin.addFileArg(calc_prog.getEmittedBin());
+    const calc_bin = calc_elf2bin.addOutputFileArg("CALC.BIN");
+    calc_elf2bin.has_side_effects = true;
+    calc_elf2bin.stdio = .inherit;
+    calc_step.dependOn(&calc_elf2bin.step);
+    const install_calc = b.addInstallFileWithDir(calc_bin, .bin, "CALC.BIN");
+    b.getInstallStep().dependOn(&install_calc.step);
+
+    // ------------------------------------------------------------------
+    // Guest: fifteenth ESP user program (milestone eleven, card A3 — claim 3234)
+    // NOTEPAD.BIN. Interactive graphical text editor with /data persistence.
+    // ------------------------------------------------------------------
+    const notepad_prog = b.addExecutable(.{
+        .name = "user-notepad",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/notepad.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    notepad_prog.linker_script = b.path("user/linker.ld");
+    const notepad_step = b.step("notepad", "Build the fifteenth ESP user program (zig-out/bin/NOTEPAD.BIN)");
+    const notepad_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    notepad_elf2bin.addFileArg(notepad_prog.getEmittedBin());
+    const notepad_bin = notepad_elf2bin.addOutputFileArg("NOTEPAD.BIN");
+    notepad_elf2bin.has_side_effects = true;
+    notepad_elf2bin.stdio = .inherit;
+    notepad_step.dependOn(&notepad_elf2bin.step);
+    const install_notepad = b.addInstallFileWithDir(notepad_bin, .bin, "NOTEPAD.BIN");
+    b.getInstallStep().dependOn(&install_notepad.step);
+
+    // ------------------------------------------------------------------
+    // Guest: sixteenth ESP user program (milestone eleven, card A4 — claim 0680)
+    // TOP.BIN. Graphical task manager & process monitor.
+    // ------------------------------------------------------------------
+    const top_prog = b.addExecutable(.{
+        .name = "user-top",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/top.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    top_prog.linker_script = b.path("user/linker.ld");
+    const top_step = b.step("top", "Build the sixteenth ESP user program (zig-out/bin/TOP.BIN)");
+    const top_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    top_elf2bin.addFileArg(top_prog.getEmittedBin());
+    const top_bin = top_elf2bin.addOutputFileArg("TOP.BIN");
+    top_elf2bin.has_side_effects = true;
+    top_elf2bin.stdio = .inherit;
+    top_step.dependOn(&top_elf2bin.step);
+    const install_top = b.addInstallFileWithDir(top_bin, .bin, "TOP.BIN");
+    b.getInstallStep().dependOn(&install_top.step);
+
+    // ------------------------------------------------------------------
+    // Guest: seventeenth ESP user program (milestone eleven, card A5 — claim 2427)
+    // DESKTOP.BIN. Desktop launcher & environment panel.
+    // ------------------------------------------------------------------
+    const desktop_prog = b.addExecutable(.{
+        .name = "user-desktop",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/desktop.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    desktop_prog.linker_script = b.path("user/linker.ld");
+    const desktop_step = b.step("desktop", "Build the seventeenth ESP user program (zig-out/bin/DESKTOP.BIN)");
+    const desktop_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    desktop_elf2bin.addFileArg(desktop_prog.getEmittedBin());
+    const desktop_bin = desktop_elf2bin.addOutputFileArg("DESKTOP.BIN");
+    desktop_elf2bin.has_side_effects = true;
+    desktop_elf2bin.stdio = .inherit;
+    desktop_step.dependOn(&desktop_elf2bin.step);
+    const install_desktop = b.addInstallFileWithDir(desktop_bin, .bin, "DESKTOP.BIN");
+    b.getInstallStep().dependOn(&install_desktop.step);
+
+    // ------------------------------------------------------------------
     // Top-level steps. System-command steps are marked as having side
     // effects (and inherit stdio) so they always execute instead of being
     // skipped by the build cache. (No QEMU path: this project targets Apple
@@ -531,6 +623,13 @@ pub fn build(b: *std.Build) void {
     image.addFileArg(winloop_bin); // ... [WINLOOP.BIN] (claim 0487 follow-on: eighth user program, the PERSISTENT window proof)
     image.addFileArg(winmove_bin); // ... [WINMOVE.BIN] (claim 0487 follow-on: ninth user program, the MOVE/RESTACK proof)
     image.addFileArg(keytest_bin); // ... [KEYTEST.BIN] (claim 9328: tenth user program, interactive event app)
+    image.addFileArg(savetext_bin); // ... [SAVETEXT.BIN] (claim 0510: eleventh user program, write to /data)
+    image.addFileArg(type_bin); // ... [TYPE.BIN] (claim 0510: twelfth user program, read from /data)
+    image.addFileArg(dir_bin); // ... [DIR.BIN] (claim 0510: thirteenth user program, directory listing)
+    image.addFileArg(calc_bin); // ... [CALC.BIN] (claim 8401: fourteenth user program, GUI calculator)
+    image.addFileArg(notepad_bin); // ... [NOTEPAD.BIN] (claim 3234: fifteenth user program, GUI text editor)
+    image.addFileArg(top_bin); // ... [TOP.BIN] (claim 0680: sixteenth user program, GUI task manager)
+    image.addFileArg(desktop_bin); // ... [DESKTOP.BIN] (claim 2427: seventeenth user program, GUI desktop launcher)
     image.has_side_effects = true;
     image.stdio = .inherit;
     image_step.dependOn(&image.step);

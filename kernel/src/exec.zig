@@ -81,9 +81,9 @@ const file_table = @import("file_table.zig");
 const alloc = @import("alloc.zig");
 const memmap = @import("memmap.zig"); // host-test fixture view (page_size + the arming view)
 
-/// Fixed load buffer: one page, the claim-8215 text aperture's size. A
-/// program larger than this is rejected honestly (`too_large`).
-pub const exec_program_max: usize = 4096;
+/// Fixed load buffer: 16 KiB (4 pages). A program larger than this is
+/// rejected honestly (`too_large`).
+pub const exec_program_max: usize = 16384;
 /// Card 3e (claim 4636): the bounded argv block — at most 8 args, each in
 /// a 32-byte slot (31 chars + NUL terminator), 256 bytes total. Packed into
 /// the process's OWN text page right after the loaded content (the text
@@ -189,7 +189,8 @@ pub fn pack_args(args: []const []const u8, block: []u8) usize {
 /// the program's OWN text page). 0 when the block does not fit.
 pub fn argv_va_for(content_len: usize) u64 {
     const block_off = (content_len + 7) & ~@as(usize, 7);
-    if (block_off + arg_block_bytes > exec_program_max) return 0;
+    const page_limit = if (content_len == 0) alloc.page_size else ((content_len + alloc.page_size - 1) / alloc.page_size) * alloc.page_size;
+    if (block_off + arg_block_bytes > page_limit or block_off + arg_block_bytes > exec_program_max) return 0;
     return userspace.text_va + block_off;
 }
 
@@ -241,7 +242,8 @@ pub fn exec_file(name: []const u8, args: []const []const u8) ExecResult {
     var text_len: usize = content_len;
     if (argc > 0) {
         const block_off = (content_len + 7) & ~@as(usize, 7);
-        if (block_off + arg_block_bytes > exec_program_max) return .no_args_room;
+        const page_limit = if (content_len == 0) alloc.page_size else ((content_len + alloc.page_size - 1) / alloc.page_size) * alloc.page_size;
+        if (block_off + arg_block_bytes > page_limit or block_off + arg_block_bytes > exec_program_max) return .no_args_room;
         _ = pack_args(args, program[block_off..][0..arg_block_bytes]);
         text_len = block_off + arg_block_bytes;
         argv_va = userspace.text_va + block_off;
@@ -253,15 +255,16 @@ pub fn exec_file(name: []const u8, args: []const []const u8) ExecResult {
     // buffer now, so a later exec of a DIFFERENT file can never overwrite
     // a live program's text. The boot-time static payload keeps its linked
     // `.usertext`/`.userbss` pages instead.
-    const text_phys = alloc.alloc_pages(1) orelse return .out_of_memory;
+    const text_pages: u64 = (text_len + alloc.page_size - 1) / alloc.page_size;
+    const text_phys = alloc.alloc_pages(text_pages) orelse return .out_of_memory;
     const stack_pages: u64 = (scheduler.task_stack_size + alloc.page_size - 1) / alloc.page_size;
     const stack_phys = alloc.alloc_pages(stack_pages) orelse {
-        _ = alloc.free_pages(text_phys, 1);
+        _ = alloc.free_pages(text_phys, text_pages);
         return .out_of_memory;
     };
     const kstack_pages: u64 = stack_pages;
     const kstack_phys = alloc.alloc_pages(kstack_pages) orelse {
-        _ = alloc.free_pages(text_phys, 1);
+        _ = alloc.free_pages(text_phys, text_pages);
         _ = alloc.free_pages(stack_phys, stack_pages);
         return .out_of_memory;
     };
@@ -281,7 +284,7 @@ pub fn exec_file(name: []const u8, args: []const []const u8) ExecResult {
     // → map → clean → re-arm) — shared with the boot-time static payload
     // (claim 3693), which passes the static stack phys instead.
     const rebuild = rebuild_user_root(text_phys, @intCast(text_len), stack_phys, scheduler.task_stack_size) orelse {
-        _ = alloc.free_pages(text_phys, 1);
+        _ = alloc.free_pages(text_phys, text_pages);
         _ = alloc.free_pages(stack_phys, stack_pages);
         _ = alloc.free_pages(kstack_phys, kstack_pages);
         return .table_full;
@@ -303,7 +306,7 @@ pub fn exec_file(name: []const u8, args: []const []const u8) ExecResult {
             .text_va = userspace.text_va,
             .text_len = @intCast(text_len),
             .text_phys = text_phys,
-            .text_pages = 1,
+            .text_pages = text_pages,
             .stack_va = rebuild.stack_va,
             .stack_len = scheduler.task_stack_size,
             .stack_phys = stack_phys,
@@ -311,7 +314,7 @@ pub fn exec_file(name: []const u8, args: []const []const u8) ExecResult {
         },
         .{ .phys = kstack_phys, .pages = kstack_pages },
     ) orelse {
-        _ = alloc.free_pages(text_phys, 1);
+        _ = alloc.free_pages(text_phys, text_pages);
         _ = alloc.free_pages(stack_phys, stack_pages);
         _ = alloc.free_pages(kstack_phys, kstack_pages);
         return .process_full;
