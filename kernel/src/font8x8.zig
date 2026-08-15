@@ -2,8 +2,20 @@
 //!
 //! Source: Daniel Hepper's font8x8 (font8x8_basic.h), public domain,
 //! based on Marcel Sondaar / IBM public-domain VGA fonts.
-//! Each glyph is 8 rows of one byte; bit 7 (MSB) is the leftmost pixel,
+//! Each glyph is 8 rows of one byte; bit 0 (LSB) is the leftmost pixel,
 //! a set bit is foreground. Index = ASCII - 0x20 (95 printable glyphs).
+//! This is the source table's documented convention: pixel `x` is
+//! `(row >> x) & 1`, not an MSB-first framebuffer encoding.
+
+/// Whether source-font row `row` paints horizontal pixel `x`. Daniel
+/// Hepper's font8x8 rows are LSB-first, so x=0 reads bit 0. Keeping this
+/// conversion here gives every renderer one convention instead of copying
+/// bit-walk loops that can silently disagree.
+pub inline fn row_pixel(row: u8, x: usize) bool {
+    if (x >= 8) return false;
+    const shift: u3 = @intCast(x);
+    return ((row >> shift) & 1) != 0;
+}
 
 /// The 95 printable ASCII glyphs (0x20–0x7e), 8×8 each.
 pub const glyphs: [95][8]u8 = .{
@@ -103,3 +115,17 @@ pub const glyphs: [95][8]u8 = .{
     .{ 0x07, 0x0c, 0x0c, 0x38, 0x0c, 0x0c, 0x07, 0x00 }, // '}'
     .{ 0x6e, 0x3b, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }, // '~'
 };
+
+test "font8x8: source rows are LSB-first with bit zero at the left" {
+    const std = @import("std");
+    const c = glyphs['C' - 0x20];
+
+    // The middle row is 0x03: the two LEFT pixels are on. Reading it
+    // MSB-first would instead paint x=6,7 and mirror the C.
+    try std.testing.expectEqual(@as(u8, 0x03), c[2]);
+    try std.testing.expect(row_pixel(c[2], 0));
+    try std.testing.expect(row_pixel(c[2], 1));
+    try std.testing.expect(!row_pixel(c[2], 6));
+    try std.testing.expect(!row_pixel(c[2], 7));
+    try std.testing.expect(!row_pixel(c[2], 8));
+}

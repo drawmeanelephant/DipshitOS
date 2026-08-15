@@ -217,13 +217,12 @@ pub fn render(canvas: Canvas) void {
             const col_pix = col * cell_w;
             var gy: usize = 0;
             while (gy < cell_h) : (gy += 1) {
-                var row_bits = glyph[gy];
+                const row_bits = glyph[gy];
                 var gx: usize = 0;
                 while (gx < cell_w) : (gx += 1) {
-                    if ((row_bits & 0x80) != 0) {
+                    if (font.row_pixel(row_bits, gx)) {
                         put_pixel(canvas, col_pix + gx, row_pix + gy, fg_rgb);
                     }
-                    row_bits <<= 1;
                 }
             }
         }
@@ -267,25 +266,32 @@ fn rgbBytes(rgb: u32) [3]u8 {
     return .{ @truncate(rgb & 0xff), @truncate((rgb >> 8) & 0xff), @truncate((rgb >> 16) & 0xff) };
 }
 
-test "text: glyph raster is the golden '!' bits in B8G8R8X8" {
+test "text: asymmetric C raster is LSB-first in B8G8R8X8" {
     init();
     clear();
-    puts("!");
+    puts("C");
     const canvas = testCanvas();
     render(canvas);
-    // '!' = glyph index 1: row 0 = 0x18 (bits 00011000 → x = 3,4); the
-    // rows are 0x18,0x3c,0x3c,0x18,0x18,0x00,0x18,0x00 (public-domain
-    // font8x8). Assert the exact foreground cells of the golden rows.
+    // Independent human-facing golden for C:
+    //   ..####..
+    //   .##..##.
+    //   ##......  <- source row 0x03, bit 0 is LEFT
+    //   ##......
+    //   ##......
+    //   .##..##.
+    //   ..####..
+    //   ........
+    // The old symmetric '!' golden could not detect horizontal reversal.
     const fg = rgbBytes(fg_rgb);
     const bg = rgbBytes(bg_rgb);
-    try std.testing.expectEqualSlices(u8, &fg, &pixel(canvas, 3, 0));
-    try std.testing.expectEqualSlices(u8, &fg, &pixel(canvas, 4, 0));
-    try std.testing.expectEqualSlices(u8, &fg, &pixel(canvas, 2, 1));
-    try std.testing.expectEqualSlices(u8, &fg, &pixel(canvas, 5, 1));
-    try std.testing.expectEqualSlices(u8, &bg, &pixel(canvas, 0, 0));
-    try std.testing.expectEqualSlices(u8, &bg, &pixel(canvas, 7, 0));
+    try std.testing.expectEqualSlices(u8, &fg, &pixel(canvas, 2, 0));
+    try std.testing.expectEqualSlices(u8, &fg, &pixel(canvas, 5, 0));
+    try std.testing.expectEqualSlices(u8, &fg, &pixel(canvas, 0, 2));
+    try std.testing.expectEqualSlices(u8, &fg, &pixel(canvas, 1, 2));
+    try std.testing.expectEqualSlices(u8, &bg, &pixel(canvas, 6, 2));
+    try std.testing.expectEqualSlices(u8, &bg, &pixel(canvas, 7, 2));
     // The alpha byte is opaque (the claim-6053 lesson).
-    try std.testing.expectEqual(@as(u8, 0xff), test_buf[3]);
+    try std.testing.expectEqual(@as(u8, 0xff), test_buf[(2 * W) * 4 + 3]);
 }
 
 test "text: line wrap starts a new line at the region width" {

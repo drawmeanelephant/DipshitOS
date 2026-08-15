@@ -2,8 +2,9 @@
 #
 # verify-live-glyphs.sh -- the MIRROR-REGRESSION TRIPWIRE (follow-on to the
 # ScreenCaptureKit switch, 2026-08-12): the captured framebuffer is decoded
-# against the kernel's OWN font8x8.zig glyph table (kernel/src/font8x8.zig)
-# and the text must read FORWARD.
+# against the kernel's OWN font8x8.zig glyph table (kernel/src/font8x8.zig),
+# normalized from its documented LSB-left source rows, and the text must read
+# FORWARD.
 #
 # Why: the milestone-six pixel gates (live-screen/live-text/live-roadpops)
 # assert the evidence shows green-family glyphs over the dark background —
@@ -40,9 +41,9 @@
 # Honest bounds: (a) the decode is scored per-cell against the 95-glyph
 # ASCII 0x20-0x7e table — the cursor block and a mid-present partial cell
 # are legitimately "unknown", so the forward allowance is <= 2 cells; (b)
-# byte-exact glyph shapes are the class A mock's job (the golden-glyph
-# canvas tests in text.zig); this gate proves the LIVE pixels read
-# forward, mechanically and reproducibly.
+# byte-exact glyph shapes are the class A mocks' job (independent asymmetric
+# C goldens in font8x8.zig, text.zig, and driving_award.zig); this gate proves
+# the LIVE pixels read forward, mechanically and reproducibly.
 #
 # Class B — Apple silicon + VZ only; boots real VMs.
 #
@@ -69,7 +70,7 @@ trap 'sleep 0.5' EXIT
 REPORT="artifacts/live-glyphs-report.txt"
 RUNNER="host/vm-runner/.build/release/VMRunner"
 
-echo "=== verify-live-glyphs: the mirror tripwire — the captured framebuffer decodes FORWARD against the kernel's own font8x8 table ==="
+echo "=== verify-live-glyphs: the mirror tripwire — the captured framebuffer decodes FORWARD against the font8x8 LSB-left source convention ==="
 
 # 1. Build the runner + the disk image (the kernel carries text.zig + the
 # Road Pops tee that renders the session on screen).
@@ -126,8 +127,8 @@ grep -q "text: boot banner presented" artifacts/vm-serial.log || fail "boot bann
 grep -q "DipshitOS - AArch64 firmware-assisted kernel monitor" artifacts/vm-serial.log || fail "serial transcript lost the banner (shared-seam regression)"
 
 # Phase 2 — THE MIRROR TRIPWIRE: decode the captured PNG against the
-# kernel's own font table in both orientations and assert the text reads
-# FORWARD.
+# kernel's own LSB-left font table in both orientations and assert the text
+# reads FORWARD after explicit source-to-screen normalization.
 LATEST="$(ls -t artifacts/gpu-screen-*s 2>/dev/null | head -1 || true)"
 if [ -z "$LATEST" ]; then
     fail "no gpu-screen PNG captured"
@@ -213,5 +214,5 @@ fi
 echo "clock window decodes forward (title 'clock' + body 'DRIVING AWARD'; mirrored decode decisively worse: $ct_mir_u/5 and $cb_mir_u/13 unknowns)"
 
 echo
-echo "=== verify-live-glyphs: PASS (the captured framebuffer decodes FORWARD against the kernel's font8x8 table — mirror regression impossible to miss, terminal AND clock window) ==="
+echo "=== verify-live-glyphs: PASS (the captured framebuffer decodes FORWARD against the font8x8 LSB-left convention — mirror regression impossible to miss, terminal AND clock window) ==="
 echo "evidence: artifacts/live-glyphs-run.txt, artifacts/vm-serial.log, artifacts/gpu-screen-*s, tools/decode-screen-glyphs.py" | tee "$REPORT"
