@@ -14,7 +14,7 @@
   seam's analogue; VZ has no programmatic pointer API).
 - **Depends on:** U0 (✅), U5's indicator work (claim 0935, same branch),
   I2/I3 input (✅).
-- **Status:** ⛔ blocked at the LIVE seam (2026-08-14) — kernel + runner landed and host-tested; the live pointer proof is blocked (see Notes)
+- **Status:** ⛔ blocked at the LIVE seam (2026-08-14) — kernel + runner landed and host-tested; the live pointer proof is blocked (see Notes). **Follow-on (claim 9015, 2026-08-15): the real-mouse path is wired as a class-C gate** `bash tools/verify-pointer-manual.sh` — a human at the mouse is the only delivery route that can produce reports (every synthesized route fails), so the observation is manual, not automatable.
 
 ## Notes
 
@@ -39,6 +39,10 @@ answers it; the hardware contract records the observation either way.
   (`artifacts/u45-probe*`; hardware contract). Unlike the keyboard
   seam, VZ's view does not translate synthesized mouse events.
   Follow-ups recorded: (a) observe a REAL mouse over a --display window
-  (proves the guest stack live), (b) re-try the CG route with
-  Accessibility granted to the terminal.
+  (proves the guest stack live) — **now a class-C gate, claim 9015**
+  (`tools/verify-pointer-manual.sh`: a human moves the real mouse, clicks
+  clock → WINLOOP → terminal, and the gate asserts ≥2 distinct
+  `win: pointer focus=` lines + `ptr-reports>0` + the magenta cursor
+  pixel, calibrated live at 0xff00ff → ~(234,51,247)); (b) re-try the CG
+  route with Accessibility granted to the terminal (still open).
 - ✅ `bash tools/verify-coordination.sh`
