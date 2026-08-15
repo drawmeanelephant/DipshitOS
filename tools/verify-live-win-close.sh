@@ -112,7 +112,7 @@ if [ -f "$SERIAL" ]; then
     [ "$(grep -a -c -F -- "win[2]:" "$SERIAL")" = 0 ] && NOROW2=1
     # The script2 `syscalls` snapshot (after the first close, before the
     # re-exec) shows the new slot 15 implemented and exactly one open+close.
-    grep -a -q -F -- "syscalls: slots=64 implemented=21" "$SERIAL" && IMPL=1
+    grep -a -q -F -- "syscalls: slots=64 implemented=23" "$SERIAL" && IMPL=1
     grep -a -q -F -- "  12 sys_win_open calls=1" "$SERIAL" && \
         grep -a -q -F -- "  15 sys_win_close calls=1" "$SERIAL" && CALLS1=1
 fi

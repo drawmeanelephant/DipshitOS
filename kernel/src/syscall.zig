@@ -64,9 +64,10 @@ const virtio_net = @import("virtio_net.zig"); // claim 1384 (card N6): net_udp_s
 const uaccess = @import("uaccess.zig"); // claim 6120: fault-safe copy-in
 const userspace = @import("userspace.zig");
 const driving_award = @import("driving_award.zig"); // claim 1543/0487 (cards G5/G6): the window manager this seam renders into
+const events = @import("events.zig"); // Milestone 9 (claim 1016): application event queues
 
 pub const slot_count: usize = 64;
-pub const implemented_count: usize = 21;
+pub const implemented_count: usize = 23;
 /// Card G6 (claim 0487) follow-on (slot 18): the fixed `sys_win_get` shape —
 /// four u32 LE words (x, y, w, h), 16 bytes, marshaled per call and copy_out'd
 /// through uaccess (the procs snapshot pattern).
@@ -142,6 +143,10 @@ pub const win_query_bytes: usize = 32;
 /// visibility surface from EL0, owner-restricted like fill/present/close.
 /// Plain numbers, no uaccess.
 pub const sys_win_set_visible: u64 = 20;
+/// Milestone 9 (claim 1016): `sys_poll_event(buf)` non-blocking event poll.
+pub const sys_poll_event: u64 = 21;
+/// Milestone 9 (claim 1016): `sys_wait_event(buf)` blocking event wait.
+pub const sys_wait_event: u64 = 22;
 
 pub const ErrorCode = enum(i64) {
     einval = -1,
@@ -232,6 +237,8 @@ fn ensure_table() *const [slot_count]Entry {
         table_storage[sys_win_get] = .{ .name = "sys_win_get", .handler = handle_win_get };
         table_storage[sys_win_query] = .{ .name = "sys_win_query", .handler = handle_win_query };
         table_storage[sys_win_set_visible] = .{ .name = "sys_win_set_visible", .handler = handle_win_set_visible };
+        table_storage[sys_poll_event] = .{ .name = "sys_poll_event", .handler = handle_poll_event };
+        table_storage[sys_wait_event] = .{ .name = "sys_wait_event", .handler = handle_wait_event };
         table_ready = true;
     }
     return &table_storage;
@@ -700,9 +707,48 @@ fn win_owned_by_caller(id: u8) bool {
     return owner == wowner;
 }
 
-/// Deterministic monitor output for the twenty-one implemented rows and their counters.
+/// `sys_poll_event(buf)`: non-blocking event poll. If an event is queued for
+/// the calling process, pops it, copies the 16-byte `Event` structure to `buf`
+/// via `uaccess.copy_out`, and returns `1`. If the queue is empty, returns `0`.
+/// Returns `EFAULT` (-3) for an invalid user buffer, `EINVAL` (-1) if the
+/// calling task is not a registered process.
+fn handle_poll_event(args: Args, _: *exceptions.VectorFrame) u64 {
+    const address = args[0];
+    const pid = process.find_by_task(scheduler.current_id()) orelse return error_result(.einval);
+    if (events.pending(pid) == 0) return 0;
+    const ev = events.peek(pid) orelse return 0;
+    const ev_bytes: *const [events.event_bytes]u8 = @ptrCast(&ev);
+    if (uaccess.copy_out(address, ev_bytes, events.event_bytes) != .ok) {
+        return error_result(.efault);
+    }
+    events.drop(pid);
+    return 1;
+}
+
+/// `sys_wait_event(buf)`: blocking event wait. If an event is queued for the
+/// calling process, pops it, copies 16 bytes to `buf` via `uaccess.copy_out`,
+/// and returns `1`. If the queue is empty, blocks the calling task in the
+/// scheduler via `scheduler.wait_event_current` (rewinding PC so SVC re-runs on
+/// wakeup). Returns `EFAULT` (-3) or `EINVAL` (-1).
+fn handle_wait_event(args: Args, _: *exceptions.VectorFrame) u64 {
+    const address = args[0];
+    const pid = process.find_by_task(scheduler.current_id()) orelse return error_result(.einval);
+    if (events.pending(pid) == 0) {
+        if (!scheduler.wait_event_current(pid)) return error_result(.einval);
+        return 0; // Staged next task; will restart upon wakeup
+    }
+    const ev = events.peek(pid) orelse return 0;
+    const ev_bytes: *const [events.event_bytes]u8 = @ptrCast(&ev);
+    if (uaccess.copy_out(address, ev_bytes, events.event_bytes) != .ok) {
+        return error_result(.efault);
+    }
+    events.drop(pid);
+    return 1;
+}
+
+/// Deterministic monitor output for the twenty-three implemented rows and their counters.
 pub fn report(con: *console.Console) void {
-    con.puts("syscalls: slots=64 implemented=21\n");
+    con.puts("syscalls: slots=64 implemented=23\n");
     var number: u64 = 0;
     while (number < implemented_count) : (number += 1) {
         const info = entry_info(number).?;
@@ -747,7 +793,7 @@ test "syscall: runtime table has 64 slots and twenty-one unique implemented rows
             implemented += 1;
         }
     }
-    try std.testing.expectEqual(@as(usize, 21), implemented);
+    try std.testing.expectEqual(@as(usize, 23), implemented);
     try std.testing.expectEqualStrings("sys_ping", entry_info(0).?.name);
     try std.testing.expectEqualStrings("sys_exit", entry_info(3).?.name);
     try std.testing.expectEqualStrings("sys_sleep", entry_info(4).?.name);
@@ -767,7 +813,9 @@ test "syscall: runtime table has 64 slots and twenty-one unique implemented rows
     try std.testing.expectEqualStrings("sys_win_get", entry_info(18).?.name);
     try std.testing.expectEqualStrings("sys_win_query", entry_info(19).?.name);
     try std.testing.expectEqualStrings("sys_win_set_visible", entry_info(20).?.name);
-    try std.testing.expect(entry_info(21) == null);
+    try std.testing.expectEqualStrings("sys_poll_event", entry_info(21).?.name);
+    try std.testing.expectEqualStrings("sys_wait_event", entry_info(22).?.name);
+    try std.testing.expect(entry_info(23) == null);
     try std.testing.expect(entry_info(63) == null);
 }
 
@@ -1679,7 +1727,7 @@ test "syscall: counters are monotonic and report is deterministic" {
     var con = mock.console();
     report(&con);
     try std.testing.expectEqualStrings(
-        "syscalls: slots=64 implemented=21\n" ++
+        "syscalls: slots=64 implemented=23\n" ++
             "  0 sys_ping calls=2\n" ++
             "  1 sys_write calls=0\n" ++
             "  2 sys_yield calls=0\n" ++
@@ -1700,7 +1748,96 @@ test "syscall: counters are monotonic and report is deterministic" {
             "  17 sys_win_raise calls=0\n" ++
             "  18 sys_win_get calls=0\n" ++
             "  19 sys_win_query calls=0\n" ++
-            "  20 sys_win_set_visible calls=0\n",
+            "  20 sys_win_set_visible calls=0\n" ++
+            "  21 sys_poll_event calls=0\n" ++
+            "  22 sys_wait_event calls=0\n",
         mock.contents(),
     );
+}
+
+test "syscall: sys_poll_event and sys_wait_event handle events, blocking, and uaccess fault safety" {
+    userspace.init();
+    init(test_writer);
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0); // task 2 = process 0 (boot payload)
+    scheduler.start();
+    events.init();
+    events.on_event_pushed = scheduler.wake_event_waiters;
+    var frame = fresh_frame();
+
+    // In task 0 (shell, not a registered process), syscalls return EINVAL
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_poll_event, .{ 0x1000, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_wait_event, .{ 0x1000, 0, 0, 0, 0, 0 }, &frame));
+
+    // Yield to user task (task 2, pid 0)
+    try std.testing.expect(scheduler.yield_current()); // shell -> worker
+    try std.testing.expect(scheduler.yield_current()); // worker -> user (2)
+    try std.testing.expectEqual(@as(usize, 2), scheduler.current_id());
+    const pid = process.find_by_task(2).?;
+    try std.testing.expectEqual(@as(usize, 0), pid);
+
+    var ev_buf: [16]u8 align(16) = undefined;
+    const buf_addr = @intFromPtr(&ev_buf);
+    set_user_regions(
+        .{ .base = 0, .len = 0 },
+        .{ .base = buf_addr, .len = ev_buf.len },
+    );
+
+    // 1. Poll on empty queue -> returns 0
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_poll_event, .{ buf_addr, 0, 0, 0, 0, 0 }, &frame));
+
+    // 2. Push an event to pid 0
+    events.push(0, .{
+        .kind = events.KEY_DOWN,
+        .flags = events.MOD_SHIFT,
+        .seq = 0,
+        .arg0 = 0x04,
+        .arg1 = 'A',
+    });
+
+    // 3. Poll with bad buffer address -> EFAULT (event is preserved in queue)
+    try std.testing.expectEqual(error_result(.efault), dispatch(sys_poll_event, .{ uaccess.diagnostic_unmapped, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(usize, 1), events.pending(0));
+
+    // 4. Poll with valid buffer -> 1 (event copied and dropped)
+    try std.testing.expectEqual(@as(u64, 1), dispatch(sys_poll_event, .{ buf_addr, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(usize, 0), events.pending(0));
+    const got_kind = std.mem.readInt(u16, ev_buf[0..2], .little);
+    const got_flags = std.mem.readInt(u16, ev_buf[2..4], .little);
+    const got_arg0 = std.mem.readInt(u32, ev_buf[8..12], .little);
+    const got_arg1 = std.mem.readInt(u32, ev_buf[12..16], .little);
+    try std.testing.expectEqual(events.KEY_DOWN, got_kind);
+    try std.testing.expectEqual(events.MOD_SHIFT, got_flags);
+    try std.testing.expectEqual(@as(u32, 0x04), got_arg0);
+    try std.testing.expectEqual(@as(u32, 'A'), got_arg1);
+
+    // 5. sys_wait_event with queued event -> returns 1 immediately
+    events.push(0, .{
+        .kind = events.MOUSE_MOVE,
+        .flags = 0,
+        .seq = 0,
+        .arg0 = 120,
+        .arg1 = 80,
+    });
+    try std.testing.expectEqual(@as(u64, 1), dispatch(sys_wait_event, .{ buf_addr, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(usize, 0), events.pending(0));
+
+    // 6. sys_wait_event with empty queue -> blocks task in scheduler!
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_wait_event, .{ buf_addr, 0, 0, 0, 0, 0 }, &frame));
+    // Task 2 is now blocked waiting for events on pid 0
+    // Current task switched to idle/next
+    try std.testing.expect(scheduler.current_id() != 2);
+
+    // 7. Pushing an event to pid 0 wakes task 2!
+    events.push(0, .{
+        .kind = events.WIN_FOCUS,
+        .flags = 0,
+        .seq = 0,
+        .arg0 = 2,
+        .arg1 = 0,
+    });
+
+    // Task 2 should now be ready
+    try std.testing.expectEqual(@as(usize, 1), events.pending(0));
 }

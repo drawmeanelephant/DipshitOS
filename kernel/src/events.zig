@@ -1,0 +1,308 @@
+//! DipshitOS bounded per-process event queue (Milestone 9, card E1 — claim 7670).
+//!
+//! Provides fixed-capacity in-memory event FIFOs for EL0 processes (ADR 0009):
+//! - 16 events per process slot (`max_events = 16`).
+//! - Statically allocated in kernel BSS (pure BSS, no heap, no allocation).
+//! - Drop-oldest discipline when full (tracks monotonic dropped count).
+//! - Monotonic sequence numbering per process slot.
+//! - Process lifecycle reset hooks (`init`, `reset`).
+//!
+//! Event wire layout (16 bytes, C ABI):
+//!   kind: u16       - event category (1..8)
+//!   flags: u16      - modifiers / button bitmask
+//!   seq: u32        - monotonic sequence counter
+//!   arg0: u32       - event argument 0 (keycode, local X, win ID)
+//!   arg1: u32       - event argument 1 (ASCII byte, local Y, old focus)
+//!
+//! No allocation, no libc, no POSIX.
+
+const std = @import("std");
+const process = @import("process.zig"); // the registry bound (max_processes)
+
+/// Event category discriminator constants (ADR 0009 D2).
+pub const KEY_DOWN: u16 = 1;
+pub const KEY_UP: u16 = 2;
+pub const MOUSE_DOWN: u16 = 3;
+pub const MOUSE_UP: u16 = 4;
+pub const MOUSE_MOVE: u16 = 5;
+pub const WIN_FOCUS: u16 = 6;
+pub const WIN_BLUR: u16 = 7;
+pub const WIN_CLOSE: u16 = 8;
+
+/// Modifier bitmasks (flags bits 0..7).
+pub const MOD_SHIFT: u16 = 0x0001;
+pub const MOD_CTRL: u16 = 0x0002;
+pub const MOD_ALT: u16 = 0x0004;
+pub const MOD_CMD: u16 = 0x0008;
+
+/// Mouse button bitmasks (flags bits 8..11).
+pub const BTN_LEFT: u16 = 0x0100;
+pub const BTN_RIGHT: u16 = 0x0200;
+pub const BTN_MIDDLE: u16 = 0x0400;
+
+/// Low-byte mouse button bit aliases for raw report handling.
+pub const BTN_LEFT_BIT: u8 = 0x01;
+pub const BTN_RIGHT_BIT: u8 = 0x02;
+pub const BTN_MIDDLE_BIT: u8 = 0x04;
+
+/// The normative 16-byte event wire format (ADR 0009 D1).
+pub const Event = extern struct {
+    kind: u16,
+    flags: u16,
+    seq: u32,
+    arg0: u32,
+    arg1: u32,
+};
+
+pub const max_events: usize = 16;
+pub const event_bytes: usize = @sizeOf(Event);
+
+// ---------------------------------------------------------------------------
+// Queue storage (pure BSS)
+// ---------------------------------------------------------------------------
+
+var storage: [process.max_processes][max_events]Event =
+    [_][max_events]Event{[_]Event{.{ .kind = 0, .flags = 0, .seq = 0, .arg0 = 0, .arg1 = 0 }} ** max_events} ** process.max_processes;
+var head: [process.max_processes]usize = [_]usize{0} ** process.max_processes;
+var count: [process.max_processes]usize = [_]usize{0} ** process.max_processes;
+var next_seq: [process.max_processes]u32 = [_]u32{1} ** process.max_processes;
+var pushed_counts: [process.max_processes]u64 = [_]u64{0} ** process.max_processes;
+var popped_counts: [process.max_processes]u64 = [_]u64{0} ** process.max_processes;
+var dropped_counts: [process.max_processes]u64 = [_]u64{0} ** process.max_processes;
+
+/// Hook for scheduler wakeup (notified whenever an event is pushed).
+pub var on_event_pushed: ?*const fn (usize) void = null;
+
+fn in_range(pid: usize) bool {
+    return pid < process.max_processes;
+}
+
+/// Reset every event queue (called on kernel boot and test setups).
+pub fn init() void {
+    for (&storage) |*ring| {
+        for (ring) |*slot| {
+            slot.* = .{ .kind = 0, .flags = 0, .seq = 0, .arg0 = 0, .arg1 = 0 };
+        }
+    }
+    for (&head) |*h| h.* = 0;
+    for (&count) |*c| c.* = 0;
+    for (&next_seq) |*s| s.* = 1;
+    for (&pushed_counts) |*p| p.* = 0;
+    for (&popped_counts) |*p| p.* = 0;
+    for (&dropped_counts) |*d| d.* = 0;
+}
+
+/// Clear ONE process's event queue and reset sequence counter.
+/// Called on process creation/exec/reap.
+pub fn reset(pid: usize) void {
+    if (!in_range(pid)) return;
+    for (&storage[pid]) |*slot| {
+        slot.* = .{ .kind = 0, .flags = 0, .seq = 0, .arg0 = 0, .arg1 = 0 };
+    }
+    head[pid] = 0;
+    count[pid] = 0;
+    next_seq[pid] = 1;
+    pushed_counts[pid] = 0;
+    popped_counts[pid] = 0;
+    dropped_counts[pid] = 0;
+}
+
+/// Push an event into process `pid`'s event FIFO.
+/// If `event.seq` is 0, stamps with the process's monotonic `next_seq`.
+/// If full, applies drop-oldest discipline and increments dropped counter.
+pub fn push(pid: usize, ev_in: Event) void {
+    if (!in_range(pid) or ev_in.kind == 0) return;
+
+    var ev = ev_in;
+    if (ev.seq == 0) {
+        ev.seq = next_seq[pid];
+        next_seq[pid] +%= 1;
+    }
+
+    if (count[pid] == max_events) {
+        // Drop oldest
+        head[pid] = (head[pid] + 1) % max_events;
+        count[pid] -= 1;
+        dropped_counts[pid] +%= 1;
+    }
+
+    const slot = (head[pid] + count[pid]) % max_events;
+    storage[pid][slot] = ev;
+    count[pid] += 1;
+    pushed_counts[pid] +%= 1;
+
+    if (on_event_pushed) |hook| {
+        hook(pid);
+    }
+}
+
+/// Peek at the OLDEST event in process `pid`'s queue without consuming it.
+pub fn peek(pid: usize) ?Event {
+    if (!in_range(pid) or count[pid] == 0) return null;
+    return storage[pid][head[pid]];
+}
+
+/// Drop (consume) the OLDEST event in process `pid`'s queue.
+pub fn drop(pid: usize) void {
+    if (!in_range(pid) or count[pid] == 0) return;
+    storage[pid][head[pid]] = .{ .kind = 0, .flags = 0, .seq = 0, .arg0 = 0, .arg1 = 0 };
+    head[pid] = (head[pid] + 1) % max_events;
+    count[pid] -= 1;
+    popped_counts[pid] +%= 1;
+}
+
+/// Pop and consume the OLDEST event from process `pid`'s queue.
+pub fn pop(pid: usize) ?Event {
+    if (!in_range(pid) or count[pid] == 0) return null;
+    const ev = storage[pid][head[pid]];
+    storage[pid][head[pid]] = .{ .kind = 0, .flags = 0, .seq = 0, .arg0 = 0, .arg1 = 0 };
+    head[pid] = (head[pid] + 1) % max_events;
+    count[pid] -= 1;
+    popped_counts[pid] +%= 1;
+    return ev;
+}
+
+/// Number of pending events in process `pid`'s queue.
+pub fn pending(pid: usize) usize {
+    if (!in_range(pid)) return 0;
+    return count[pid];
+}
+
+/// Number of dropped events for process `pid`.
+pub fn dropped(pid: usize) u64 {
+    if (!in_range(pid)) return 0;
+    return dropped_counts[pid];
+}
+
+pub const EventQueueInfo = struct {
+    pending: usize,
+    pushed: u64,
+    popped: u64,
+    dropped: u64,
+};
+
+pub fn info(pid: usize) EventQueueInfo {
+    return .{
+        .pending = pending(pid),
+        .pushed = if (in_range(pid)) pushed_counts[pid] else 0,
+        .popped = if (in_range(pid)) popped_counts[pid] else 0,
+        .dropped = if (in_range(pid)) dropped_counts[pid] else 0,
+    };
+}
+
+// ---------------------------------------------------------------------------
+// Tests (Class A unit tests)
+// ---------------------------------------------------------------------------
+
+test "events: wire format layout and size is exactly 16 bytes" {
+    try std.testing.expectEqual(@as(usize, 16), @sizeOf(Event));
+    try std.testing.expectEqual(@as(usize, 4), @alignOf(Event));
+
+    const ev = Event{
+        .kind = KEY_DOWN,
+        .flags = MOD_SHIFT | MOD_CTRL,
+        .seq = 42,
+        .arg0 = 0x04,
+        .arg1 = 'a',
+    };
+    try std.testing.expectEqual(KEY_DOWN, ev.kind);
+    try std.testing.expectEqual(MOD_SHIFT | MOD_CTRL, ev.flags);
+    try std.testing.expectEqual(@as(u32, 42), ev.seq);
+    try std.testing.expectEqual(@as(u32, 0x04), ev.arg0);
+    try std.testing.expectEqual(@as(u32, 'a'), ev.arg1);
+}
+
+test "events: push/peek/pop/drop FIFO sequence and monotonicity" {
+    init();
+    try std.testing.expectEqual(@as(usize, 0), pending(0));
+
+    push(0, .{ .kind = KEY_DOWN, .flags = 0, .seq = 0, .arg0 = 0x04, .arg1 = 'a' });
+    push(0, .{ .kind = KEY_UP, .flags = 0, .seq = 0, .arg0 = 0x04, .arg1 = 'a' });
+    try std.testing.expectEqual(@as(usize, 2), pending(0));
+
+    // Peek does not consume
+    const p1 = peek(0).?;
+    try std.testing.expectEqual(KEY_DOWN, p1.kind);
+    try std.testing.expectEqual(@as(u32, 1), p1.seq);
+    try std.testing.expectEqual(@as(usize, 2), pending(0));
+
+    // Pop consumes
+    const e1 = pop(0).?;
+    try std.testing.expectEqual(KEY_DOWN, e1.kind);
+    try std.testing.expectEqual(@as(u32, 1), e1.seq);
+    try std.testing.expectEqual(@as(usize, 1), pending(0));
+
+    const e2 = pop(0).?;
+    try std.testing.expectEqual(KEY_UP, e2.kind);
+    try std.testing.expectEqual(@as(u32, 2), e2.seq);
+    try std.testing.expectEqual(@as(usize, 0), pending(0));
+
+    try std.testing.expect(pop(0) == null);
+}
+
+test "events: drop-oldest overflow discipline and wrap" {
+    init();
+
+    // Fill to capacity
+    var i: u32 = 0;
+    while (i < max_events) : (i += 1) {
+        push(0, .{ .kind = MOUSE_MOVE, .flags = 0, .seq = 0, .arg0 = i, .arg1 = i * 2 });
+    }
+    try std.testing.expectEqual(@as(usize, max_events), pending(0));
+    try std.testing.expectEqual(@as(u64, 0), dropped(0));
+
+    // 17th event causes drop-oldest
+    push(0, .{ .kind = MOUSE_DOWN, .flags = BTN_LEFT, .seq = 0, .arg0 = 100, .arg1 = 200 });
+    try std.testing.expectEqual(@as(usize, max_events), pending(0));
+    try std.testing.expectEqual(@as(u64, 1), dropped(0));
+
+    // Oldest event should now be seq=2 (seq=1 was dropped)
+    const oldest = peek(0).?;
+    try std.testing.expectEqual(@as(u32, 2), oldest.seq);
+    try std.testing.expectEqual(@as(u32, 1), oldest.arg0);
+
+    // Drain all events
+    var drained: usize = 0;
+    while (pop(0)) |_| {
+        drained += 1;
+    }
+    try std.testing.expectEqual(@as(usize, max_events), drained);
+    try std.testing.expectEqual(@as(usize, 0), pending(0));
+}
+
+test "events: process isolation and lifecycle reset" {
+    init();
+
+    push(0, .{ .kind = WIN_FOCUS, .flags = 0, .seq = 0, .arg0 = 2, .arg1 = 0 });
+    push(1, .{ .kind = WIN_FOCUS, .flags = 0, .seq = 0, .arg0 = 3, .arg1 = 0 });
+
+    try std.testing.expectEqual(@as(usize, 1), pending(0));
+    try std.testing.expectEqual(@as(usize, 1), pending(1));
+
+    reset(0);
+    try std.testing.expectEqual(@as(usize, 0), pending(0));
+    try std.testing.expectEqual(@as(usize, 1), pending(1));
+
+    const e1 = pop(1).?;
+    try std.testing.expectEqual(WIN_FOCUS, e1.kind);
+    try std.testing.expectEqual(@as(u32, 3), e1.arg0);
+
+    // Next push to pid 0 starts at seq 1 again
+    push(0, .{ .kind = KEY_DOWN, .flags = 0, .seq = 0, .arg0 = 0x05, .arg1 = 'b' });
+    const e0 = pop(0).?;
+    try std.testing.expectEqual(@as(u32, 1), e0.seq);
+}
+
+test "events: out-of-range PIDs and invalid kinds are defensive no-ops" {
+    init();
+    push(process.max_processes, .{ .kind = KEY_DOWN, .flags = 0, .seq = 0, .arg0 = 1, .arg1 = 1 });
+    try std.testing.expect(pop(process.max_processes) == null);
+    try std.testing.expect(peek(process.max_processes) == null);
+    drop(process.max_processes);
+    reset(process.max_processes);
+    try std.testing.expectEqual(@as(usize, 0), pending(process.max_processes));
+
+    // Kind 0 is invalid / no-op
+    push(0, .{ .kind = 0, .flags = 0, .seq = 0, .arg0 = 0, .arg1 = 0 });
+    try std.testing.expectEqual(@as(usize, 0), pending(0));
+}
