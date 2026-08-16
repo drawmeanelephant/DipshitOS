@@ -23,8 +23,7 @@
 #   4. Both complete: `user: awake` x2 and the exit/reap reports EXACTLY
 #      twice each (card 3d, claim 1014 FIFOs).
 #   5. Card 3g (claim 5795): with FOUR programs live the pool is 7/7
-#      (shell + worker + 4 users + idle) — a FIFTH exec is `pool_full`
-#      ("exec: no free scheduler pool slot"), checked before any
+#      (shell + worker + 4 users + idle) — a FIFTH exec is `pool_full`    #      ("error: no free scheduler pool slot"), checked before any
 #      allocation (leak-free). The scale gate proves the full budget; this
 #      gate re-derives its capacity ending to the new budget.
 #   6. The shell stays responsive (echo reply), no exception park.
@@ -144,7 +143,7 @@ run_one() {
         fi
         # The fifth exec with four programs live is the capacity gate
         # (card 3g's 7/7 budget).
-        [ "$(grep -aFxc -- "exec: no free scheduler pool slot" artifacts/vm-serial.log || true)" = 1 ] && pool_full=1
+        [ "$(grep -aFxc -- "error: no free scheduler pool slot" artifacts/vm-serial.log || true)" = 1 ] && pool_full=1
         # All four programs exited + were reaped: the FIFO reports print
         # EXACTLY four times each (card 3d, claim 1014).
         exited="$(grep -aFc -- "tasks user-exec exited status=43" artifacts/vm-serial.log || true)"

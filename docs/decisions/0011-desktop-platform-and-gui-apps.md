@@ -179,6 +179,43 @@ pub const ListView = struct {
 
 ---
 
+## Amendment 2026-08-16 — application identity manifest (M13 card B2, claim 8877)
+
+### Context
+
+`DESKTOP.BIN` originally hardcoded its application catalog (`installed_apps`
+in `user/src/desktop.zig`). Adding an app meant recompiling the launcher.
+This amendment gives the desktop a manifest to read instead, so application
+identity lives in the image, not the binary.
+
+### Contract
+
+- **Location:** `/APPS.TXT` at the ESP volume root, embedded by the image
+  build (`image/apps.txt` → `image/mkfat32.py --apps-txt`).
+- **Format:** one app per line, `NAME.BIN | Display Name | icon-char`;
+  `#` comments and blank lines ignored; fields are trimmed; the icon is a
+  single ASCII glyph (an index into the `font8x8` glyph table).
+- **Reader:** `DESKTOP.BIN` opens `/esp/APPS.TXT` via `sys_file_open`
+  (slot 23, ADR 0010), reads it into a stack-owned bounded buffer
+  (640 B — W^X safe, zero heap), and parses it with `parse_manifest`
+  (pure, host-tested). The entry count is bounded at 16.
+- **Fallback:** if the manifest is missing, unreadable, or empty,
+  `DESKTOP.BIN` renders its built-in catalog — honest degradation; the
+  desktop always has a launcher list.
+- **Marker:** the launcher prints `desktop: manifest apps=N` on the serial
+  console (N = parsed count) for the live gate.
+- **DSK1 compatibility:** the manifest is a separate text file — the DSK1
+  flat-image header (ADR 0002) and the `.BIN` files are untouched.
+
+### Consequences
+
+- Adding a `.BIN` to the system = one `APPS.TXT` line, no launcher
+  recompile.
+- The gate `tools/verify-live-desktop.sh` asserts `desktop: manifest
+  apps=8` (the current catalog) alongside the launch markers.
+
+---
+
 ## What this is not
 
 - It is not a heavy web runtime or HTML/DOM engine.

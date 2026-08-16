@@ -52,10 +52,11 @@
 #      gate's pool_full refusal now lives in the args/ipc/scale gates
 #      (the FIFTH exec at 7/7).
 #   7. `pages` prints in BOTH phases; the exact-count relationship holds:
-#      phase-2 free == phase-1 free - 5 (phase 2 has ONE more live
+#      phase-2 free == phase-1 free - 9 (phase 2 has ONE more live
 #      USER.BIN than phase 1 — counter + 2 users vs counter + 1 — so the
-#      second program's 5 pages are the exact difference; a leak would
-#      make the late count lower than that).
+#      second program's 9 pages (1 text + 4 user-stack + 4 EL1-stack) are
+#      the exact difference; a leak would make the late count lower than
+#      that).
 #   8. The counter is STILL `state=running` at the FINAL procs read; the
 #      shell stays responsive (both echo replies); no exception park.
 #
@@ -178,7 +179,7 @@ run_one() {
         # moved to the args/ipc/scale gates).
         # 7. Both pages reads present; the exact-count relationship holds:
         # phase-2 free == phase-1 free - 5 (one more live USER.BIN's
-        # pages). A leak would show a bigger drop than 5.
+        # pages). A leak would show a bigger drop than 9.
         local pages_lines p1 p2
         pages_lines="$(grep -aF -- "pages: armed=1 total=" artifacts/vm-serial.log || true)"
         pages_reads="$(printf '%s\n' "$pages_lines" | grep -cF -- "pages: armed=1 total=" || true)"
@@ -187,7 +188,7 @@ run_one() {
         if [ -n "$p1" ] && [ -n "$p2" ]; then
             local diff
             diff=$((16#$p1 - 16#$p2))
-            [ "$diff" -eq 5 ] && free_recovered=1 || free_recovered=0
+            [ "$diff" -eq 9 ] && free_recovered=1 || free_recovered=0
         fi
         # 8. The counter is running at the FINAL procs read.
         local last_counter_row

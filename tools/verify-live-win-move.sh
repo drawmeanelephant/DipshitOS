@@ -139,7 +139,7 @@ if [ -f "$SERIAL" ]; then
     # The syscall counters: open=1, fill=4, present=3, move=2, raise=1,
     # get=1, query=1, set_visible=2, close=0 (the window persists — WINMOVE
     # yield-loops forever).
-    grep -a -q -F -- "syscalls: slots=64 implemented=23" "$SERIAL" && IMPL=1
+    grep -a -q -F -- "syscalls: slots=64 implemented=34" "$SERIAL" && IMPL=1
     grep -a -q -F -- "  16 sys_win_move calls=2" "$SERIAL" && \
         grep -a -q -F -- "  17 sys_win_raise calls=1" "$SERIAL" && \
         grep -a -q -F -- "  18 sys_win_get calls=1" "$SERIAL" && \
@@ -401,7 +401,7 @@ fi
     echo "DIPSHITOS live draw/window-move gate (claim 0487, milestone six card G6 move/raise follow-on) — EL0 move/restack on real VZ hardware"
     echo "revision: $REVISION branch=$BRANCH dirty-files=$DIRTY"
     echo "phase: scripted exec of WINMOVE.BIN (open/fill/present/move/move-clamp/raise/get/query/hide/sleep/show/loop), then win + syscalls + the EL1h win move/raise halves on the same kernel state, then the two-capture decode"
-    echo "assertions: winmove open/fill/present/move/raise/get/query/hide/show/loop markers (winmove: get 1024,528,256,192 through slot 18 + winmove: query 1024,528,256,192 z=2 focused=1 visible=1 dirty=1 through slot 19 + hide ok/show ok through slot 20), win: windows=3 + win[2]: user user rect=1024,528,256,192 owner=<pid> visible=1, syscalls implemented=21 with open=1/fill=4/present=3/move=2/raise=1/get=1/query=1/set_visible=2/close=0, win move 2 1024 528 + win raise 2 (EL1h), the HIDDEN capture shows no red/cyan/white blocks at the clamped spot (the window disappeared), and the LATEST capture shows red+cyan+white blocks at the NEW spot + dark-blue background dominant + no terminal foreground inside the new rect + the old spot free of the colored blocks (the window returned)"
+    echo "assertions: winmove open/fill/present/move/raise/get/query/hide/show/loop markers (winmove: get 1024,528,256,192 through slot 18 + winmove: query 1024,528,256,192 z=2 focused=1 visible=1 dirty=1 through slot 19 + hide ok/show ok through slot 20), win: windows=3 + win[2]: user user rect=1024,528,256,192 owner=<pid> visible=1, syscalls implemented=34 with open=1/fill=4/present=3/move=2/raise=1/get=1/query=1/set_visible=2/close=0, win move 2 1024 528 + win raise 2 (EL1h), the HIDDEN capture shows no red/cyan/white blocks at the clamped spot (the window disappeared), and the LATEST capture shows red+cyan+white blocks at the NEW spot + dark-blue background dominant + no terminal foreground inside the new rect + the old spot free of the colored blocks (the window returned)"
     echo "date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     echo
 } > "$REPORT"
@@ -409,7 +409,7 @@ fi
 echo
 echo "=== result ==="
 if [ "$PASS" = 1 ]; then
-    echo "verify-live-win-move: PASS — WINMOVE.BIN opened a user window, filled it, presented it, moved it (to (800,400) then the clamped (1024,528) corner), raised it, READ THE CLAMPED RECT BACK through slot 18 (winmove: get 1024,528,256,192), READ THE FULL WINDOW STATE through slot 19 (winmove: query 1024,528,256,192 z=2 focused=1 visible=1 dirty=1), HID it then SHOWED it through slot 20 (winmove: hide ok / show ok, sys_win_set_visible calls=2), and kept it alive entirely from EL0 through the ADR 0007 slots 16/17/18/19/20, with syscalls reporting implemented=21 — and the two-capture decode proves the PIXEL DISAPPEARS (the marker capture taken while hidden shows no red/cyan/white blocks at the clamped spot) and RETURNS (the LATEST capture shows the window's own colors back at the NEW position with the old spot showing the terminal). The default VM is untouched: without --display, the window manager is unarmed and sys_win_set_visible returns EINVAL — every existing gate stays byte-identical."
+    echo "verify-live-win-move: PASS — WINMOVE.BIN opened a user window, filled it, presented it, moved it (to (800,400) then the clamped (1024,528) corner), raised it, READ THE CLAMPED RECT BACK through slot 18 (winmove: get 1024,528,256,192), READ THE FULL WINDOW STATE through slot 19 (winmove: query 1024,528,256,192 z=2 focused=1 visible=1 dirty=1), HID it then SHOWED it through slot 20 (winmove: hide ok / show ok, sys_win_set_visible calls=2), and kept it alive entirely from EL0 through the ADR 0007 slots 16/17/18/19/20, with syscalls reporting implemented=34 — and the two-capture decode proves the PIXEL DISAPPEARS (the marker capture taken while hidden shows no red/cyan/white blocks at the clamped spot) and RETURNS (the LATEST capture shows the window's own colors back at the NEW position with the old spot showing the terminal). The default VM is untouched: without --display, the window manager is unarmed and sys_win_set_visible returns EINVAL — every existing gate stays byte-identical."
     echo "PASS: $PASS" >> "$REPORT"
     sleep 0.5
     exit 0

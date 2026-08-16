@@ -128,6 +128,16 @@ grep -q "desktop: menu ready" artifacts/live-desktop-serial.log || {
 }
 echo "DESKTOP.BIN: OK"
 
+# 4b. Verify the launcher reads the APPS.TXT manifest (claim 8877, card
+# B2): the manifest marker names the count read from /esp/APPS.TXT, and
+# the manifest content is embedded in the image (verified above by the
+# image list).
+grep -q "desktop: manifest apps=8" artifacts/live-desktop-serial.log || {
+    echo "ERROR: DESKTOP.BIN manifest marker (apps=8) missing from serial log"
+    exit 1
+}
+echo "DESKTOP.MANIFEST: OK"
+
 # 5. Verify the launcher is REAL (claim 6359, slot 28 sys_exec): the
 # injected Enter made DESKTOP exec CALC.BIN from EL0 — the launch marker
 # and the syscall counter prove the seam, not a monitor exec.
