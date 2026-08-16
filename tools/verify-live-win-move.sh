@@ -21,7 +21,7 @@
 #   * script1:  `exec WINMOVE.BIN` (open/fill/present/move/move/raise/get/
 #               query/hide/sleep/show/loop).
 #   * script2:  (after `winmove: loop ok`) `win` + `syscalls` + the EL1h
-#               monitor halves `win move 2 1024 528` + `win raise 2` on the
+#               monitor halves `dui move 2 1024 528` + `dui raise 2` on the
 #               SAME kernel state (the window still at its clamped spot).
 #   * pixel proof (two captures): the marker-driven capture
 #     (`--screenshot-after "winmove: hide ok"`) shows the window GONE from
@@ -77,10 +77,10 @@ cat > artifacts/live-win-move-script.txt <<'EOF'
 exec WINMOVE.BIN
 EOF
 cat > artifacts/live-win-move-script2.txt <<'EOF'
-win
+dui
 syscalls
-win move 2 1024 528
-win raise 2
+dui move 2 1024 528
+dui raise 2
 EOF
 
 # --- per-run gate -------------------------------------------------------------
@@ -131,11 +131,11 @@ if [ -f "$SERIAL" ]; then
     # The window persists at its CLAMPED position (the second move to
     # (1200,700) fell off the 1280x720 scanout -> (1024,528)), owned by a
     # numeric pid (per-process ownership visible at runtime).
-    grep -a -q -F -- "win: windows=3" "$SERIAL" && WIN3=1
-    grep -a -q -F -- "win[2]: user user rect=1024,528,256,192" "$SERIAL" && RECT=1
-    grep -a -E -q 'win\[2\]: user user rect=1024,528,256,192 .* owner=[0-9]+' "$SERIAL" && OWNER=1
+    grep -a -q -F -- "dui: windows=3" "$SERIAL" && WIN3=1
+    grep -a -q -F -- "dui[2]: user user rect=1024,528,256,192" "$SERIAL" && RECT=1
+    grep -a -E -q 'dui\[2\]: user user rect=1024,528,256,192 .* owner=[0-9]+' "$SERIAL" && OWNER=1
     # The final registry state: the window is VISIBLE again (the show landed).
-    grep -a -E -q 'win\[2\]: user user rect=1024,528,256,192 dirty=[01] visible=1' "$SERIAL" && VIS=1
+    grep -a -E -q 'dui\[2\]: user user rect=1024,528,256,192 dirty=[01] visible=1' "$SERIAL" && VIS=1
     # The syscall counters: open=1, fill=4, present=3, move=2, raise=1,
     # get=1, query=1, set_visible=2, close=0 (the window persists — WINMOVE
     # yield-loops forever).
@@ -149,8 +149,8 @@ if [ -f "$SERIAL" ]; then
         grep -a -q -F -- "  15 sys_win_close calls=0" "$SERIAL" && CNT=1
     # The EL1h monitor halves (the same primitives, privileged): a no-op
     # move to the SAME clamped spot + a raise.
-    grep -a -q -F -- "win move: moved=2 to 1024,528" "$SERIAL" && MMOVE=1
-    grep -a -q -F -- "win raise: raised=2" "$SERIAL" && MRAISE=1
+    grep -a -q -F -- "dui move: moved=2 to 1024,528" "$SERIAL" && MMOVE=1
+    grep -a -q -F -- "dui raise: raised=2" "$SERIAL" && MRAISE=1
 fi
 
 echo "win-move: rc=$RC open=$OPEN fill=$FILL present=$PRESENT move=$MOVE raise=$RAISE loop=$LOOP get=$GET query=$QUERY hide=$HIDE show=$SHOW vis=$VIS win3=$WIN3 rect=$RECT owner=$OWNER impl21=$IMPL cnt=$CNT mmove=$MMOVE mraise=$MRAISE"
@@ -400,8 +400,8 @@ fi
 {
     echo "DIPSHITOS live draw/window-move gate (claim 0487, milestone six card G6 move/raise follow-on) — EL0 move/restack on real VZ hardware"
     echo "revision: $REVISION branch=$BRANCH dirty-files=$DIRTY"
-    echo "phase: scripted exec of WINMOVE.BIN (open/fill/present/move/move-clamp/raise/get/query/hide/sleep/show/loop), then win + syscalls + the EL1h win move/raise halves on the same kernel state, then the two-capture decode"
-    echo "assertions: winmove open/fill/present/move/raise/get/query/hide/show/loop markers (winmove: get 1024,528,256,192 through slot 18 + winmove: query 1024,528,256,192 z=2 focused=1 visible=1 dirty=1 through slot 19 + hide ok/show ok through slot 20), win: windows=3 + win[2]: user user rect=1024,528,256,192 owner=<pid> visible=1, syscalls implemented=38 with open=1/fill=4/present=3/move=2/raise=1/get=1/query=1/set_visible=2/close=0, win move 2 1024 528 + win raise 2 (EL1h), the HIDDEN capture shows no red/cyan/white blocks at the clamped spot (the window disappeared), and the LATEST capture shows red+cyan+white blocks at the NEW spot + dark-blue background dominant + no terminal foreground inside the new rect + the old spot free of the colored blocks (the window returned)"
+    echo "phase: scripted exec of WINMOVE.BIN (open/fill/present/move/move-clamp/raise/get/query/hide/sleep/show/loop), then dui + syscalls + the EL1h dui move/raise halves on the same kernel state, then the two-capture decode"
+    echo "assertions: winmove open/fill/present/move/raise/get/query/hide/show/loop markers (winmove: get 1024,528,256,192 through slot 18 + winmove: query 1024,528,256,192 z=2 focused=1 visible=1 dirty=1 through slot 19 + hide ok/show ok through slot 20), dui: windows=3 + dui[2]: user user rect=1024,528,256,192 owner=<pid> visible=1, syscalls implemented=38 with open=1/fill=4/present=3/move=2/raise=1/get=1/query=1/set_visible=2/close=0, dui move 2 1024 528 + dui raise 2 (EL1h), the HIDDEN capture shows no red/cyan/white blocks at the clamped spot (the window disappeared), and the LATEST capture shows red+cyan+white blocks at the NEW spot + dark-blue background dominant + no terminal foreground inside the new rect + the old spot free of the colored blocks (the window returned)"
     echo "date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     echo
 } > "$REPORT"

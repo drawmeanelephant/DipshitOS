@@ -653,7 +653,7 @@ fn handle_win_present(args: Args, _: *exceptions.VectorFrame) u64 {
 }
 
 /// `sys_win_close(id)`: release a user window OWNED BY THE CALLER (the EL0
-/// teardown seam — the monitor's `win close` is the EL1h PRIVILEGED
+/// teardown seam — the monitor's `dui close` is the EL1h PRIVILEGED
 /// equivalent that closes any user window; the EL0 syscall is
 /// owner-restricted). Returns 0 on success; `EINVAL` for an unknown id, a
 /// non-user window (the terminal + clock are fixed), or a window the

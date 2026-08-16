@@ -8,16 +8,16 @@
 # (top-right, overlapping the terminal). The compositor
 # (kernel/src/driving_award.zig) repaints from the lowest dirty window up and
 # pushes one transfer + flush per dirty batch, so the clock always sits ON
-# TOP of a freshly repainted terminal. `win` is the monitor command.
+# TOP of a freshly repainted terminal. `dui` is the monitor command.
 #
 # Phase 1 (serial evidence): the scripted session exercises the registry —
-#   * `win`                  -> windows=2, focused=0 (terminal by default),
-#                              the two win[] rows (roadpops terminal +
+#   * `dui`                  -> windows=2, focused=0 (terminal by default),
+#                              the two dui[] rows (roadpops terminal +
 #                              clock), the rects + z-order;
-#   * `win hit 1000 100`     -> hit-tests the clock overlay (z-order: the
+#   * `dui hit 1000 100`     -> hit-tests the clock overlay (z-order: the
 #                              clock is on top at that point) and FOCUSES it;
-#   * `win`                  -> focused=1 (hit-testing switched focus);
-#   * `win hit 100 400`      -> hit-tests the terminal (below the clock) and
+#   * `dui`                  -> focused=1 (hit-testing switched focus);
+#   * `dui hit 100 400`      -> hit-tests the terminal (below the clock) and
 #                              re-focuses it.
 #   Then the KEYBOARD (--input-string, the I3 seam) types `uname\n` into the
 #   focused terminal — the `DipshitOS aarch64` reply is the proof that
@@ -77,12 +77,12 @@ codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/
 
 # --- scripted session + keyboard typing --------------------------------------
 # The serial script drives the registry; the KEYBOARD types `uname\n` after
-# `win hit 100 400` re-focuses the terminal (the trigger marker).
+# `dui hit 100 400` re-focuses the terminal (the trigger marker).
 cat > artifacts/live-win-script.txt <<'EOF'
-win
-win hit 1000 100
-win
-win hit 100 400
+dui
+dui hit 1000 100
+dui
+dui hit 100 400
 EOF
 
 # --- per-run gate -------------------------------------------------------------
@@ -92,7 +92,7 @@ run_one() {
     host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log \
         --display --input --screen artifacts/gpu-screen \
         --script artifacts/live-win-script.txt \
-        --input-string "uname"$'\n' --input-string-after "win hit: 100,400 -> 0" \
+        --input-string "uname"$'\n' --input-string-after "dui hit: 100,400 -> 0" \
         --script-expect "DipshitOS aarch64" \
         --timeout 60 \
         > "$out" 2>&1
@@ -111,19 +111,19 @@ set -e
 SERIAL="artifacts/live-win-serial.log"
 TWO_WIN=0 ROW0=0 ROW1=0 HIT1=0 FOCUS1=0 HIT0=0 KB_UNAME=0 RUNNERFLAG=0
 if [ -f "$SERIAL" ]; then
-    grep -a -qF -- "win: windows=2 focused=0" "$SERIAL" && TWO_WIN=1
-    grep -a -qF -- "win[0]: roadpops terminal rect=0,0,1280,720" "$SERIAL" && ROW0=1
-    grep -a -qF -- "win[1]: clock clock rect=960,16,304,192" "$SERIAL" && ROW1=1
-    grep -a -qF -- "win hit: 1000,100 -> 1" "$SERIAL" && HIT1=1
-    grep -a -qF -- "win: windows=2 focused=1" "$SERIAL" && FOCUS1=1
-    grep -a -qF -- "win hit: 100,400 -> 0" "$SERIAL" && HIT0=1
+    grep -a -qF -- "dui: windows=2 focused=0" "$SERIAL" && TWO_WIN=1
+    grep -a -qF -- "dui[0]: roadpops terminal rect=0,0,1280,720" "$SERIAL" && ROW0=1
+    grep -a -qF -- "dui[1]: clock clock rect=960,16,304,192" "$SERIAL" && ROW1=1
+    grep -a -qF -- "dui hit: 1000,100 -> 1" "$SERIAL" && HIT1=1
+    grep -a -qF -- "dui: windows=2 focused=1" "$SERIAL" && FOCUS1=1
+    grep -a -qF -- "dui hit: 100,400 -> 0" "$SERIAL" && HIT0=1
     # The keyboard-typed `uname` reply (the script never runs uname — this
     # is the proof that screen-side input landed in the focused terminal).
     grep -a -qF -- "DipshitOS aarch64" "$SERIAL" && KB_UNAME=1
 fi
 grep -a -qF -- "input-string: ENABLED" artifacts/live-win-run.txt && RUNNERFLAG=1
 
-echo "win: rc=$RC two-win=$TWO_WIN row0=$ROW0 row1=$ROW1 hit-clock=$HIT1 focus-clock=$FOCUS1 hit-terminal=$HIT0 kb-uname=$KB_UNAME runner-flag=$RUNNERFLAG"
+echo "dui: rc=$RC two-win=$TWO_WIN row0=$ROW0 row1=$ROW1 hit-clock=$HIT1 focus-clock=$FOCUS1 hit-terminal=$HIT0 kb-uname=$KB_UNAME runner-flag=$RUNNERFLAG"
 
 PASS=0
 if [ "$RC" = 0 ] && [ "$TWO_WIN" = 1 ] && [ "$ROW0" = 1 ] && [ "$ROW1" = 1 ] && \

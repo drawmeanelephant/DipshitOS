@@ -190,13 +190,13 @@ pub fn boot_and_park(mon: *monitor.Monitor, rx_wired: bool) void {
             // evidence the live gate asserts.
             if (input.take_alt_tab()) {
                 if (driving_award.cycle_focus()) |id| {
-                    mon.console.puts("win: cycle focused=");
+                    mon.console.puts("dui: cycle focused=");
                     mon.console.print_u64(id);
                     mon.console.puts("\n");
                 }
             }
             if (driving_award.pointer_tick(input.pointer_state(), input.take_click())) |id| {
-                mon.console.puts("win: pointer focus=");
+                mon.console.puts("dui: pointer focus=");
                 mon.console.print_u64(id);
                 mon.console.puts("\n");
             }
@@ -367,7 +367,7 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "  screen      virtio-gpu transport + framebuffer: device DID, features, scanout, status, re-arm ('screen fill <rrggbb>' fills the framebuffer and flushes it to the scanout)\n" ++
         "  text        framebuffer text: text region, cursor, scrollback ('text put <string...>' renders + flushes to the scanout; 'text clear' clears)\n" ++
         "  usb         XHCI host controller: `usb` transport report, `usb devices` enumerated HID devices, `usb report` last HID report\n" ++
-        "  win         Driving Award window manager: registry (with owner pids), z-order, focus, hit-testing ('win focus <n>' focuses; 'win raise <n>' raises; 'win move <n> <x> <y>' moves a user window; 'win close <n>' releases a user window; 'win list <pid>' filters by owner; 'win hit <x> <y>' hit-tests; 'win cycle' cycles focus like Alt+Tab)\n" ++
+        "  dui         Driving Award window manager: registry (with owner pids), z-order, focus, hit-testing ('dui focus <n>' focuses; 'dui raise <n>' raises; 'dui move <n> <x> <y>' moves a user window; 'dui close <n>' releases a user window; 'dui list <pid>' filters by owner; 'dui hit <x> <y>' hit-tests; 'dui cycle' cycles focus like Alt+Tab)\n" ++
         "system\n" ++
         "  clear       clean up the crime scene\n" ++
         "  echo        repeat your regrettable decisions\n" ++

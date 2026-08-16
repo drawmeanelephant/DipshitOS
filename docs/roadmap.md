@@ -805,11 +805,11 @@ Card ladder (canonical order; per-card tracker
   present now routes through the compositor, `text put`/`clear`
   composite too, and the I3 keyboard read source is gated on
   `terminal_focused()` — screen-side input lands in the focused window.
-  `win`/`win focus <n>`/`win raise <n>`/`win hit <x> <y>` (registry
+  `dui`/`dui focus <n>`/`dui raise <n>`/`dui hit <x> <y>` (registry
   39→40); 9 host tests pin the hit-test/raise/focus/repaint/blit
   contracts. **Live gate `tools/verify-live-win.sh` PASS 1/1**: the
-  serial session (`win: windows=2 focused=0`, `win[]` rows,
-  `win hit 1000,100 -> 1` focusing the clock, `win hit 100,400 -> 0`
+  serial session (`dui: windows=2 focused=0`, `dui[]` rows,
+  `dui hit 1000,100 -> 1` focusing the clock, `dui hit 100,400 -> 0`
   re-focusing the terminal) + a KEYBOARD-typed `uname` landing in the
   focused terminal, and the decoded capture shows two overlapping
   windows with the right z-order (the clock's amber title bar + navy
@@ -818,7 +818,7 @@ Card ladder (canonical order; per-card tracker
 - **G6 — a draw/window syscall seam for user programs.** ✅ **DONE
   2026-08-13 (claim 0487)** — the ADR 0007 amendment slots 12/13/14
   (`sys_win_open` / `sys_win_fill` / `sys_win_present`, implemented 12 →
-  15; a teardown follow-on adds slot 15 `sys_win_close` + the `win close`
+  15; a teardown follow-on adds slot 15 `sys_win_close` + the `dui close`
   command → 16) expose the G5 user-window surface to EL0: open a bounded
   kernel-owned window (id 2..3, fixed BSS back-buffer ≤ 256×192
   B8G8R8X8), fill rects in its back-buffer, and present it (mark dirty
@@ -827,11 +827,11 @@ Card ladder (canonical order; per-card tracker
   `user/src/win.zig` program) proves EL0 graphics end to end: open → fill
   (dark-blue background + red/cyan/white blocks) → present → exit 87.
   **Live gate `tools/verify-live-win-syscall.sh` PASS 1/1**: the program's
-  markers + `win: windows=3 focused=2` / `win[2]: user user
+  markers + `dui: windows=3 focused=2` / `dui[2]: user user
   rect=64,64,256,192` + `syscalls` implemented=16 (open=1/fill=4/
   present=1, slot 15 `sys_win_close` registered), and the decoded capture
   shows the window's own content over the terminal. **Teardown follow-on:**
-  `win close <n>` + `sys_win_close` (slot 15) release a user window so the
+  `dui close <n>` + `sys_win_close` (slot 15) release a user window so the
   id can be re-opened instead of leaking until reboot (open → close →
   re-open host-tested in `driving_award` + `syscall`, and proven LIVE by
   the seventh image WINCLOSE.BIN — the class-B gate
@@ -846,11 +846,11 @@ Card ladder (canonical order; per-card tracker
   pixel proof. **Move/raise follow-on:** slots 16/17 (`sys_win_move`/
   `sys_win_raise`, implemented 16 → 18) reposition and restack the
   caller's window from EL0 — move clamps on-scanout, raise reorders the
-  z-order, both owner-restricted; the monitor's `win move <n> <x> <y>` is
+  z-order, both owner-restricted; the monitor's `dui move <n> <x> <y>` is
   the EL1h half. A ninth image WINMOVE.BIN drives it live (open → fill →
   present → move → move-clamp → raise → yield-forever), and the class-B
   gate `tools/verify-live-win-move.sh` PASS 1/1 shows the clamped rect
-  (`win[2]: user user rect=1024,528,256,192`) + the counters (move=2/
+  (`dui[2]: user user rect=1024,528,256,192`) + the counters (move=2/
   raise=1) + the decoded capture with the window's colors at the NEW
   position. **Read-back follow-on:** slot 18 (`sys_win_get`, implemented
   18 → 19) copies the caller's window rect (four u32 LE words) OUT through
@@ -1032,7 +1032,7 @@ record new hardware assumptions in `docs/hardware-contract.md`.
 - **U5 — Window HIG.** ✅ **DONE 2026-08-14 (claim 0935).** title bars
   (name + owning pid) on user windows, a white 3-px focus ring on the
   focused window (focus changes repaint the scene), click = focus + raise
-  (topmost hit-test), and keyboard focus cycling (`cycle_focus` + the `win
+  (topmost hit-test), and keyboard focus cycling (`cycle_focus` + the `dui
   cycle` command; the Alt+Tab HID decode is host-tested). Gate:
   `tools/verify-live-win-hig.sh` PASS 8/8 on VZ — scale-aware pixel proof:
   the ring on the focused window, the terminal edge NOT ringed, the user
@@ -1183,8 +1183,9 @@ See [`march-m12.md`](march-m12.md) for the per-card tracker.
   `sys_exec` → browse → open a file end to end on VZ.
 
 Housekeeping folded into this milestone: the `win` → `dui` command rename
-(issue #159), and closing out M8's U4 pointer-focus evidence with the
-class-B CG gate (issue #151, self-gating on Accessibility trust).
+(issue #159, done 2026-08-16 claim 2223), and closing out M8's U4
+pointer-focus evidence with the class-B CG gate (issue #151, self-gating
+on Accessibility trust).
 
 See [`march-m13.md`](march-m13.md) for the per-card tracker.
 

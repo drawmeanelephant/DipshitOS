@@ -23,7 +23,7 @@
 # opens WINLOOP.BIN (three windows); the runner's --pointer seam posts the
 # click sequence over route "cg" at the HID tap in GLOBAL screen coords,
 # exactly like a physical mouse. The gate asserts the guest's own serial
-# evidence: >=2 distinct `win: pointer focus=<id>` lines (a synthesized
+# evidence: >=2 distinct `dui: pointer focus=<id>` lines (a synthesized
 # click moved focus between windows), `ptr-reports>0`, the magenta cursor
 # pixel in the marker capture, and the done marker + exit 0.
 #
@@ -119,9 +119,9 @@ fi
 
 # --- the session ------------------------------------------------------------
 cat > artifacts/pointer-cg-script.txt <<'EOF'
-win
+dui
 exec WINLOOP.BIN
-win
+dui
 echo pointer-cg-ready
 EOF
 
@@ -152,8 +152,8 @@ SERIAL="artifacts/vm-serial.log"
 READY=0 FOCUS_LINES=0 DISTINCT_FOCUS=0 PTR_REPORTS=0 PTR_GT0=0 DONE=0 UNTRUSTED=0
 if [ -f "$SERIAL" ]; then
     grep -a -qF -- "pointer-cg-ready" "$SERIAL" && READY=1
-    FOCUS_LINES=$(grep -a -c "win: pointer focus=" "$SERIAL" || true)
-    DISTINCT_FOCUS=$(grep -a -o "win: pointer focus=[0-9]*" "$SERIAL" | sort -u | wc -l | tr -d ' ')
+    FOCUS_LINES=$(grep -a -c "dui: pointer focus=" "$SERIAL" || true)
+    DISTINCT_FOCUS=$(grep -a -o "dui: pointer focus=[0-9]*" "$SERIAL" | sort -u | wc -l | tr -d ' ')
     PTR_REPORTS=$(grep -a -o "ptr-reports=[0-9]*" "$SERIAL" | tail -1 | cut -d= -f2 || true)
     PTR_REPORTS=${PTR_REPORTS:-0}
     if [ "$PTR_REPORTS" -gt 0 ] 2>/dev/null; then PTR_GT0=1; fi

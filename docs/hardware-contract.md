@@ -173,7 +173,7 @@ assumption comes from documentation or reasoning only.
     composition). What a REAL keyboard's modifiers do over this path is
     untested here (knowingly). Consequence: card U5's Alt+Tab cycle chord
     is decoded in `kernel/src/input.zig` and HOST-tested, and the live
-    gate drives focus cycling with the `win cycle` monitor command over
+    gate drives focus cycling with the `dui cycle` monitor command over
     serial instead (`tools/verify-live-win-hig.sh`) — the chord itself is
     not gated live.
   - **Synthesized POINTER events do not reach the pointing device

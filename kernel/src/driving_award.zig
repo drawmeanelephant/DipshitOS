@@ -490,7 +490,7 @@ pub fn user_raise(id: u8) bool {
 /// released window's pixels. Returns false for an unknown id or a non-user
 /// window (the terminal + clock are fixed and never closable). The
 /// back-buffer slot is freed for the next `user_open` (which re-clears it).
-/// This is the PRIVILEGED release path (the monitor's `win close <n>`); the
+/// This is the PRIVILEGED release path (the monitor's `dui close <n>`); the
 /// EL0 `sys_win_close` enforces ownership on top of it.
 pub fn user_close(id: u8) bool {
     const idx = find_user_window_index(id) orelse return false;
@@ -527,7 +527,7 @@ pub fn user_rect(id: u8) ?WinRect {
 /// Card G6 (claim 0487) follow-on (slot 19): the FULL state of a user
 /// window — the `sys_win_query` result. The rect (like `user_rect`) plus the
 /// z-order rank (`z` = the registry index, 0 = bottom — the SAME number the
-/// monitor's `win` report prints), and the focus/visible/dirty flags (1/0).
+/// monitor's `dui` report prints), and the focus/visible/dirty flags (1/0).
 /// The syscall layer marshals this into the caller's buffer (eight u32 LE
 /// words) so an EL0 program can introspect its window end to end.
 pub const WinQuery = struct {
@@ -955,11 +955,11 @@ fn draw_chrome() void {
     while (i < win_count) : (i += 1) {
         const w = &windows[i];
         if (w.kind != .user or !w.visible) continue;
-        // Title bar: "win<id> pid=<pid>" (the owning pid when known).
+        // Title bar: "dui<id> pid=<pid>" (the owning pid when known).
         fill_rect(fb, stride, w.x, w.y, w.w, user_title_h, user_title_bg_rgb);
         var tb: [24]u8 = undefined;
         var n: usize = 0;
-        const label = "win";
+        const label = "dui";
         @memcpy(tb[0..3], label);
         n = 3;
         const idstr = fmt_decimal(tb[n..], w.id);

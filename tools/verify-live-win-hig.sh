@@ -4,11 +4,11 @@
 # D4) class-B gate: the window chrome is VISIBLE and MOVES with focus.
 #
 # Mechanism: ONE --input --display run with a marker-driven screenshot
-# capture. The serial script exercises the focus surface: `win cycle`
+# capture. The serial script exercises the focus surface: `dui cycle`
 # (the D4 keyboard-cycling analogue — the Alt+Tab HID decode is
 # host-tested; synthesized modifiers never reach VZ's HID report, the
 # claim-6233 hardware-contract observation), then `exec WINLOOP.BIN`
-# opens a USER window (the long-lived G6 program), then `win` reports
+# opens a USER window (the long-lived G6 program), then `dui` reports
 # the registry — the capture fires on that report line.
 #
 # Pixel assertions (the decoded capture, 2560x1440 = 2x the 1280x720
@@ -70,7 +70,7 @@ codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/
 
 # --- the session --------------------------------------------------------------
 cat > artifacts/win-hig-script.txt <<'EOF'
-win cycle
+dui cycle
 exec WINLOOP.BIN
 echo hig-serial-ok
 EOF
@@ -90,7 +90,7 @@ set -e
 SERIAL="artifacts/vm-serial.log"
 CYCLED=0 THREE=0 OBSDONE=0 RUNNERFLAG=0
 if [ -f "$SERIAL" ]; then
-    grep -a -qF -- "win: cycle focused=1" "$SERIAL" && CYCLED=1
+    grep -a -qF -- "dui: cycle focused=1" "$SERIAL" && CYCLED=1
     grep -a -qF -- "winloop: present ok" "$SERIAL" && THREE=1
     grep -a -qF -- "hig-serial-ok" "$SERIAL" && OBSDONE=1
 fi
@@ -188,7 +188,7 @@ fi
 {
     echo "DIPSHITOS win HIG gate (milestone eight card U5, claim 0935) — the focus ring + title bars are visible and move with focus, on real VZ"
     echo "revision: $REVISION branch=$BRANCH dirty-files=$DIRTY"
-    echo "session: win cycle (focus -> clock) + exec WINLOOP.BIN (a user window) + win report; capture on windows=3"
+    echo "session: dui cycle (focus -> clock) + exec WINLOOP.BIN (a user window) + dui report; capture on windows=3"
     echo "assertions: cycle marker, winloop present marker, serial marker, runner capture flag, ring-on-focused-window + edge-not-ringed + title-bar pixels"
     echo "date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 } > "$REPORT"
@@ -196,7 +196,7 @@ fi
 echo
 echo "=== result ==="
 if [ "$PASS" = 1 ]; then
-    echo "verify-live-win-hig: PASS — the focus ring renders on the FOCUSED window (white, on WINLOOP after its open took focus from the cycled clock), the terminal edge is not ringed, and the user window carries its title bar — decoded from the composited capture, moving with focus exactly as ADR 0008 D4 requires. Cycling is driven by win cycle (the HID Alt+Tab decode is host-tested; synthesized modifiers never reach VZ's report)."
+    echo "verify-live-win-hig: PASS — the focus ring renders on the FOCUSED window (white, on WINLOOP after its open took focus from the cycled clock), the terminal edge is not ringed, and the user window carries its title bar — decoded from the composited capture, moving with focus exactly as ADR 0008 D4 requires. Cycling is driven by dui cycle (the HID Alt+Tab decode is host-tested; synthesized modifiers never reach VZ's report)."
     echo "PASS: $PASS" >> "$REPORT"
     sleep 0.5
     exit 0

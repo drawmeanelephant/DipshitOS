@@ -18,14 +18,14 @@
 #   1. moves the REAL mouse over the VM window -- the magenta cursor
 #      (0xff00ff) appears and follows the pointer;
 #   2. clicks the clock window, then WINLOOP, then the terminal -- each
-#      click hit-tests the topmost window and prints `win: pointer focus=<id>`;
+#      click hit-tests the topmost window and prints `dui: pointer focus=<id>`;
 #   3. types `input` (real keyboard over the VZ USB HID path) so the report
 #      shows ptr-reports>0;
 #   4. types `echo pointer-gate-done` -- the runner's --expect fires and the
 #      run ends cleanly.
 #
 # Assertions (the guest's own serial evidence):
-#   * >=2 DISTINCT `win: pointer focus=<id>` lines -- a real click moved
+#   * >=2 DISTINCT `dui: pointer focus=<id>` lines -- a real click moved
 #     focus between windows (D4's headline);
 #   * `ptr-reports=<N>` with N>0 -- a REAL pointer report reached the guest
 #     (the exact evidence the synthesized routes failed to produce);
@@ -82,16 +82,16 @@ blue blocks). Do this, in order:
   1. Move your REAL mouse over the VM window. A MAGENTA cursor should
      appear under the pointer and follow it.
   2. CLICK the clock window (upper area). The terminal should print:
-         win: pointer focus=1
+         dui: pointer focus=1
   3. CLICK the WINLOOP window (the blue-blocks window). It should print:
-         win: pointer focus=2
+         dui: pointer focus=2
   4. CLICK the terminal background (anywhere below the windows):
-         win: pointer focus=0
+         dui: pointer focus=0
   5. In the VM window, TYPE:  input   then press Enter. Confirm the line
      ends in  ptr-reports=<N>  with N > 0  (a real report arrived).
   6. TYPE:  echo pointer-gate-done   then press Enter. This ends the run.
 
-If the cursor does not follow your mouse, or no `win: pointer focus=`
+If the cursor does not follow your mouse, or no `dui: pointer focus=`
 line appears on a click, that is the negative result -- let the timeout
 expire and the gate will FAIL honestly.
 
@@ -99,9 +99,9 @@ EOF
 
 # --- the session ------------------------------------------------------------
 cat > artifacts/pointer-manual-script.txt <<'EOF'
-win
+dui
 exec WINLOOP.BIN
-win
+dui
 echo pointer-manual-ready
 EOF
 
@@ -123,8 +123,8 @@ READY=0 FOCUS_LINES=0 DISTINCT_FOCUS=0 PTR_REPORTS=0 PTR_GT0=0 DONE=0
 if [ -f "$SERIAL" ]; then
     grep -a -qF -- "pointer-manual-ready" "$SERIAL" && READY=1
     # Distinct focus ids: the D4 "click moves focus BETWEEN windows" proof.
-    FOCUS_LINES=$(grep -a -c "win: pointer focus=" "$SERIAL" || true)
-    DISTINCT_FOCUS=$(grep -a -o "win: pointer focus=[0-9]*" "$SERIAL" | sort -u | wc -l | tr -d ' ')
+    FOCUS_LINES=$(grep -a -c "dui: pointer focus=" "$SERIAL" || true)
+    DISTINCT_FOCUS=$(grep -a -o "dui: pointer focus=[0-9]*" "$SERIAL" | sort -u | wc -l | tr -d ' ')
     # A real pointer report (the synthesized routes all produced 0).
     PTR_REPORTS=$(grep -a -o "ptr-reports=[0-9]*" "$SERIAL" | tail -1 | cut -d= -f2 || true)
     PTR_REPORTS=${PTR_REPORTS:-0}

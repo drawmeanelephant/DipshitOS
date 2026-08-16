@@ -10,7 +10,7 @@
 # not:
 #   * the window DISAPPEARS: after `win: close ok`, the kernel's own `win`
 #     report reads `windows=2` (terminal + clock, no user window) and NO
-#     `win[2]:` row ever appears;
+#     `dui[2]:` row ever appears;
 #   * the SLOT IS REUSABLE: a re-exec prints `win: open id=2` AGAIN (never
 #     id 3 — the first close freed the slot instead of leaking it);
 #   * the counters agree: the script2 `syscalls` snapshot (taken after the
@@ -66,7 +66,7 @@ cat > artifacts/live-win-close-script.txt <<'EOF'
 exec WINCLOSE.BIN
 EOF
 cat > artifacts/live-win-close-script2.txt <<'EOF'
-win
+dui
 syscalls
 exec WINCLOSE.BIN
 EOF
@@ -105,11 +105,11 @@ if [ -f "$SERIAL" ]; then
     [ "$(grep -a -c -F -- "win: close ok" "$SERIAL")" = 2 ] && CLOSE2=1
     # Both programs exited with the distinct 'X'=88 status.
     [ "$(grep -a -c -F -- "procs WINCLOSE.BIN exited status=88" "$SERIAL")" = 2 ] && EXIT2=1
-    # After the first close, the kernel's own `win` report shows the user
-    # window is GONE (terminal + clock only), and no `win[2]:` row ever
+    # After the first close, the kernel's own `dui` report shows the user
+    # window is GONE (terminal + clock only), and no `dui[2]:` row ever
     # appears (the window is closed before any observation).
-    [ "$(grep -a -c -F -- "win: windows=2" "$SERIAL")" -ge 1 ] && WINGONE=1
-    [ "$(grep -a -c -F -- "win[2]:" "$SERIAL")" = 0 ] && NOROW2=1
+    [ "$(grep -a -c -F -- "dui: windows=2" "$SERIAL")" -ge 1 ] && WINGONE=1
+    [ "$(grep -a -c -F -- "dui[2]:" "$SERIAL")" = 0 ] && NOROW2=1
     # The script2 `syscalls` snapshot (after the first close, before the
     # re-exec) shows the new slot 15 implemented and exactly one open+close.
     grep -a -q -F -- "syscalls: slots=64 implemented=38" "$SERIAL" && IMPL=1
@@ -130,7 +130,7 @@ fi
     echo "DIPSHITOS live draw/window-close gate (claim 0487 follow-on, milestone six card G6) — EL0 window release on real VZ hardware"
     echo "revision: $REVISION branch=$BRANCH dirty-files=$DIRTY"
     echo "phase: scripted exec of WINCLOSE.BIN (sys_win_open/fill/present/close, slots 12-15), then win + syscalls observation on the same kernel state, then a re-exec proving the freed slot is reused"
-    echo "assertions: win: close ok x2, win: open id=2 x2 (never id=3), procs WINCLOSE.BIN exited status=88 x2, win: windows=2 (window gone) + no win[2]: row, syscalls implemented=38 with open=1/close=1 in the pre-re-exec snapshot"
+    echo "assertions: win: close ok x2, win: open id=2 x2 (never id=3), procs WINCLOSE.BIN exited status=88 x2, dui: windows=2 (window gone) + no dui[2]: row, syscalls implemented=38 with open=1/close=1 in the pre-re-exec snapshot"
     echo "date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     echo
 } > "$REPORT"
@@ -138,7 +138,7 @@ fi
 echo
 echo "=== result ==="
 if [ "$PASS" = 1 ]; then
-    echo "verify-live-win-close: PASS — WINCLOSE.BIN opened a user window, filled it, presented it, and CLOSED it through the ADR 0007 slot 15 entirely from EL0, twice. The window disappeared from the registry (win: windows=2, no win[2]: row), and the freed slot was reused (win: open id=2 both times, never id 3). The default VM is untouched: without --display, sys_win_open returns EINVAL and every existing gate stays byte-identical."
+    echo "verify-live-win-close: PASS — WINCLOSE.BIN opened a user window, filled it, presented it, and CLOSED it through the ADR 0007 slot 15 entirely from EL0, twice. The window disappeared from the registry (dui: windows=2, no dui[2]: row), and the freed slot was reused (win: open id=2 both times, never id 3). The default VM is untouched: without --display, sys_win_open returns EINVAL and every existing gate stays byte-identical."
     echo "PASS: $PASS" >> "$REPORT"
     sleep 0.5
     exit 0
