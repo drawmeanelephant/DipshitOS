@@ -31,6 +31,12 @@ desktop launcher actually launches apps and the task manager can kill them.
 syscall seam (`sys_tcp_connect/send/recv/close`, ADR 0007 slots 30–33), a
 bounded DNS client, and the `FETCH.BIN` + `CHAT.BIN` capstone.
 
+**Planned next (milestone thirteen):** files & applications — filesystem
+semantics depth (`sys_file_delete/rename/truncate/free`, ADR 0007 slots
+34–37), an application identity manifest so the launcher stops hardcoding
+its app list, and the `FILE.BIN` graphical file browser capstone
+(issues #152/#153/#161/#162).
+
 The canonical, always-current accounting is
 [`docs/status.md`](docs/status.md); the readable summary is the
 [documentation site](https://drawmeanelephant.github.io/DipshitOS/).

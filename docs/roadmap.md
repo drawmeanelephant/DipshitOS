@@ -1138,6 +1138,54 @@ ever, lands as its own ADR 0007 amendment), and a visual-design pixel spec
 
 See [`march-m12.md`](march-m12.md) for the per-card tracker.
 
+### Milestone thirteen — files & applications: the file browser milestone
+
+> Give the desktop a file story: application identity that the launcher
+> reads instead of hardcodes, a graphical file browser over the DATA
+> partition, and the filesystem semantics (delete, rename, truncate, free
+> space) a real browser needs. This is wishlist items 6, 9, and the
+> filesystem half of 17 — the next "weird little computer" step after the
+> network milestone. **⬜ Planned** (tracked by issues #152/#153 + new B1/B4
+> issues); M12's TCP seam runs at ADR 0007 slots 30–33, so this milestone's
+> FS additions start at slot 34.
+
+- **B1 — Filesystem semantics depth (ADR 0007 slots 34–37).**
+  `sys_file_delete(path_ptr, path_len)`, `sys_file_rename(old_ptr,
+  old_len, new_ptr, new_len)`, `sys_file_truncate(handle, size)`, and a
+  `sys_file_free(volume) -> bytes` free-space query — the read-only M10
+  ABI becomes a mutating one, bounded like every other kernel resource.
+- **B2 — Application identity manifest.** A tiny fixed-format manifest
+  (`APPS.TXT` on the ESP, or a trailing record in each `.BIN` — the DSK1
+  header is frozen by ADR 0002): `NAME.BIN | Display Name | icon-char`.
+  `DESKTOP.BIN` reads it via `sys_file_open` instead of its hardcoded app
+  array, so adding an app means a manifest entry, not a launcher recompile.
+  (Wishlist 9; issue #152.)
+- **B3 — `FILE.BIN` graphical file browser.** **[Capstone Gate]** Browse
+  `/data/` in a scrollable `ListView` (the ui.zig toolkit), open `.TXT`
+  files in a read-only text view, delete/rename through B1's slots.
+  (Wishlist 6; issue #153.) Live gate: `verify-live-file-browser.sh`.
+- **B4 — Desktop composition.** The launcher menu comes from B2's manifest
+  (not the hardcoded array) and FILE.BIN is one of the launchable apps;
+  the capstone gate drives DESKTOP → launch FILE.BIN → browse → open a
+  file end to end on VZ.
+
+Housekeeping folded into this milestone: the `win` → `dui` command rename
+(issue #159), and closing out M8's U4 pointer-focus evidence with the
+class-B CG gate (issue #151, self-gating on Accessibility trust).
+
+See [`march-m13.md`](march-m13.md) for the per-card tracker.
+
+### Milestone fourteen+ (sketch — destinations, not commitments)
+
+After the file browser, the wishlist's shared-user-services items become the
+natural next arc, in maintainer-preference order: **clipboard** (item 11,
+"text apps will make the absence obvious"), **app timers** (item 12, so apps
+stop spinning sleep loops), **M8's remaining usability cards** — first-boot
+experience, `sysinfo`, persistent settings (U6–U8, currently open) — and
+**security/isolation hardening** (item 19, grown alongside userland power,
+not as one giant milestone). Nothing here is committed; the wishlist below
+remains the authority, and the roads between items stay open.
+
 ## Wishlist / hope chest (destinations, not commitments)
 
 > **Maintainer's wishlist (2026-08-14).** These are *destinations*, not a
