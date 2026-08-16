@@ -1,4 +1,4 @@
-# Branch log — agent/buffy/m13-b2-manifest (claim 8877)
+# Log — `m13-b2-manifest`: the desktop application manifest + FP/SIMD vector save (claim 8877)
 
 ## 2026-08-16 — branch opened
 
