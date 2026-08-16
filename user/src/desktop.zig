@@ -224,7 +224,12 @@ pub export fn _start() callconv(.c) noreturn {
     var ev: Event = undefined;
     while (true) {
         const wait_rc = ui.wait_event(&ev);
-        if (wait_rc < 0) break;
+        if (wait_rc < 0) {
+            var dbg: [40]u8 = undefined;
+            const msg = std.fmt.bufPrint(&dbg, "desktop: wait err={d}\n", .{wait_rc}) catch "desktop: wait err\n";
+            ui.write_console(msg);
+            break;
+        }
 
         var dirty = false;
 

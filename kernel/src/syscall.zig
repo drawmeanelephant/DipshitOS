@@ -2098,3 +2098,72 @@ test "syscall: sys_poll_event and sys_wait_event handle events, blocking, and ua
     // Task 2 should now be ready
     try std.testing.expectEqual(@as(usize, 1), events.pending(0));
 }
+
+test "syscall: wait_event block+wake preserves the event buffer across the svc re-execution (claim 6359)" {
+    userspace.init();
+    init(test_writer);
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0); // task 2 = boot payload (pid 0)
+    var kstack: [scheduler.task_stack_size]u8 align(16) = undefined;
+    var ev_buf: [16]u8 align(16) = undefined;
+    const buf_addr = @intFromPtr(&ev_buf);
+    // The caller: a registered process whose TCB stack region covers the
+    // host test buffer, so the re-executed svc's copy_out is both range-
+    // valid and dereferenceable (register_exec_user arms the TCB regions
+    // from its stack_va/stack_len arguments).
+    const caller_pid = process.create("CALLER.BIN", .{ .entry_va = 0x400000, .content_len = 64 }, .{}, .{}).?;
+    const caller_task = scheduler.register_exec_user(userspace.text_va, 0x4000_0000, 100, buf_addr, ev_buf.len, &kstack, 0, 0).?;
+    _ = process.bind(caller_pid, caller_task);
+    scheduler.start();
+    events.init();
+    events.on_event_pushed = scheduler.wake_event_waiters;
+    // Drive to the caller (task 3).
+    try std.testing.expect(scheduler.yield_current()); // shell -> worker
+    try std.testing.expect(scheduler.yield_current()); // worker -> boot payload
+    try std.testing.expect(scheduler.yield_current()); // boot -> caller
+    try std.testing.expectEqual(caller_task, scheduler.current_id());
+
+    // Stand in for the caller's SVC frame: x0 = the event buffer address,
+    // x8 = sys_wait_event (the svc re-execution contract).
+    var caller = fresh_frame();
+    try std.testing.expect(exceptions.frame_write(&caller, 8, sys_wait_event));
+    try std.testing.expect(exceptions.frame_write(&caller, 0, buf_addr));
+    exceptions.resume_frame = @intFromPtr(&caller);
+
+    // 1. Empty queue: handle_svc blocks the caller. The blocking result
+    // (0) is written into the SAVED frame's x0, clobbering the buffer
+    // address — the pre-fix failure mode: a re-executed svc would copy the
+    // event out to address 0 and EFAULT, killing every blocking GUI event
+    // loop (observed live: DESKTOP.BIN `desktop: wait err=-3`).
+    try std.testing.expect(handle_svc(&caller, svc_immediate));
+    try std.testing.expectEqual(@as(u64, 0), exceptions.frame_read(&caller, 0));
+    try std.testing.expect(scheduler.is_blocked(caller_task));
+
+    // 2. An event arrives: the push hook wakes the waiter and patches the
+    // saved frame's x0 back to the event-buffer address (claim 6359 fix).
+    events.push(caller_pid, .{
+        .kind = events.KEY_DOWN,
+        .flags = 0,
+        .seq = 0,
+        .arg0 = 0x04,
+        .arg1 = 'A',
+    });
+    try std.testing.expect(!scheduler.is_blocked(caller_task));
+    try std.testing.expectEqual(@as(u64, buf_addr), exceptions.frame_read(&caller, 0));
+
+    // 3. The ring resumes the caller: the svc re-executes with x0 restored
+    // and the event copies out (the re-executed handler returns 1).
+    try std.testing.expect(scheduler.yield_current()); // idle
+    try std.testing.expect(scheduler.yield_current()); // shell
+    try std.testing.expect(scheduler.yield_current()); // worker
+    try std.testing.expect(scheduler.yield_current()); // boot -> caller
+    try std.testing.expectEqual(caller_task, scheduler.current_id());
+    try std.testing.expect(handle_svc(&caller, svc_immediate));
+    try std.testing.expectEqual(@as(u64, 1), exceptions.frame_read(&caller, 0));
+    try std.testing.expectEqual(@as(usize, 0), events.pending(caller_pid));
+    const got_kind = std.mem.readInt(u16, ev_buf[0..2], .little);
+    const got_arg0 = std.mem.readInt(u32, ev_buf[8..12], .little);
+    try std.testing.expectEqual(events.KEY_DOWN, got_kind);
+    try std.testing.expectEqual(@as(u32, 0x04), got_arg0);
+}

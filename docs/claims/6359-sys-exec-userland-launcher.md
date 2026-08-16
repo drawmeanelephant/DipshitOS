@@ -42,7 +42,27 @@ TOP / DESKTOP are exec'd by the monitor, the runner types Enter after
 concurrent GUI app), and the gate asserts `desktop: launch CALC.BIN`,
 `calc: ready`, and `syscalls` showing `28 sys_exec calls=1`.
 
+**The live gate exposed and this card also fixes a pre-existing M9 bug
+(claim 1016's `sys_wait_event`):** blocking event waits died on the first
+wake. `handle_svc` writes the blocking result (0) into the saved frame's
+x0 AFTER `scheduler.wait_event_current` parked the task, clobbering the
+original event-buffer address; the wake's elr-4 svc re-execution then saw
+x0=0, so the event copy_out targeted address 0 → EFAULT → every blocking
+GUI event loop exited (observed live: `desktop: wait err=-3` and the
+apps exiting 43 ~1 tick after `menu ready` — the M11 gate had masked it
+because the session ended before the apps' first post-block wake, and
+KEYTEST.BIN masked it by re-arming `x0=sp` every loop iteration). The fix:
+`wait_event_current` stashes the frame's x0 (`wait_event_buf`) before the
+result write, and `wake_event_waiters` patches it back into the saved
+frame at wake — the re-executed svc sees the real buffer. Regression test
+drives the full handle_svc block → push → wake → resume → re-execute
+round trip. This is why the extended gate's apps STAY ALIVE now.
+
 Class A: `zig test kernel/src/syscall.zig` (dispatch/marshalling/error
-mapping for slot 28), `zig test kernel/src/exec.zig` (pid getter), and
-`zig test user/src/lib/ui.zig` / `user/src/desktop.zig` — all green;
-`zig fmt` clean. Class B: `tools/verify-live-desktop.sh` extended as above.
+mapping for slot 28 + the wait_event block/wake regression), `zig test
+kernel/src/exec.zig` (pid getter), and `zig test user/src/lib/ui.zig` /
+`user/src/desktop.zig` — all green; `zig fmt` clean. Class B:
+`tools/verify-live-desktop.sh` **PASS on VZ** — the apps stay alive,
+Enter launches CALC through slot 28 (`desktop: launch CALC.BIN pid=4`),
+`calc: ready` follows, and the `syscalls` report shows `28 sys_exec
+calls=1`.

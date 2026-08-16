@@ -37,7 +37,26 @@
   concurrent GUI app), and script2 runs after `calc: ready`. Assertions:
   all four `ready` markers, `desktop: launch CALC.BIN`, and
   `28 sys_exec calls=1` in the `syscalls` report.
+- **Pre-existing M9 bug found + fixed (claim 1016's `sys_wait_event`):**
+  the first live run of the extended gate showed all three GUI apps
+  exiting 43 ~1 tick after `menu ready` — `desktop: wait err=-3`. The
+  blocking path of `sys_wait_event` rewinds ELR to re-execute the svc on
+  wake, but `handle_svc` writes the blocking result (0) into the saved
+  frame's x0 AFTER `wait_event_current` parked the task — the re-executed
+  svc saw x0=0, so the event copy_out targeted address 0 (EFAULT) and
+  every blocking event loop died. The original M11 gate masked it (the
+  session ended before the apps' first post-block wake) and KEYTEST.BIN
+  masked it (its loop re-arms `x0=sp` each iteration). Fix: stash the
+  frame's x0 in a new `wait_event_buf` task field at block time and patch
+  it back into the saved frame in `wake_event_waiters`. Regression test
+  drives the full block → push → wake → resume → re-execute round trip
+  through `handle_svc`. After the fix the gate's apps STAY ALIVE.
 - Class A: `zig test kernel/src/syscall.zig` + `kernel/src/exec.zig` +
   `user/src/lib/ui.zig` + `user/src/desktop.zig` green; `zig fmt --check`
   clean; `zig build` green. Coordination: indexes refreshed,
   `verify-coordination.sh` ok.
+- **Class B: `bash tools/verify-live-desktop.sh` PASS on VZ** — NOTEPAD /
+  TOP / DESKTOP exec'd and stay alive, the injected Enter makes DESKTOP
+  launch CALC.BIN through slot 28 (`desktop: launch CALC.BIN pid=4`), the
+  launched `calc: ready` follows, and the `syscalls` report shows
+  `28 sys_exec calls=1` (evidence `artifacts/live-desktop-*`).
