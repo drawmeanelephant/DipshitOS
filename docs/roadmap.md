@@ -1117,7 +1117,7 @@ ever, lands as its own ADR 0007 amendment), and a visual-design pixel spec
   clock and system stats + clickable application menu to launch EL0 programs.
   Live gate: `verify-live-desktop.sh`.
 
-### Milestone twelve — userland network applications
+### Milestone twelve — userland network applications (**DONE 2026-08-16, PR #160**)
 
 > Connect userland applications to the network with a clean TCP syscall seam (ADR 0007 slots 30–33),
 > RFC 1035 DNS resolution, and standalone network applications (`TCP.BIN`, `FETCH.BIN`, `CHAT.BIN`).

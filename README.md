@@ -27,11 +27,12 @@ toolkit, and four real apps (`CALC.BIN`, `NOTEPAD.BIN`, `TOP.BIN`,
 `DESKTOP.BIN`) with an EL0 `sys_exec`/`sys_kill` process-control seam so the
 desktop launcher actually launches apps and the task manager can kill them.
 
-**Now in progress (milestone twelve):** userland network applications — a TCP
+**Milestone twelve landed 2026-08-16:** userland network applications — a TCP
 syscall seam (`sys_tcp_connect/send/recv/close`, ADR 0007 slots 30–33), a
-bounded DNS client, and the `FETCH.BIN` + `CHAT.BIN` capstone.
+bounded RFC 1035 DNS client, and the `FETCH.BIN` HTTP/1.0 client +
+`CHAT.BIN` graphical chat capstone, all live-verified on VZ.
 
-**Planned next (milestone thirteen):** files & applications — filesystem
+**Now in progress (milestone thirteen):** files & applications — filesystem
 semantics depth (`sys_file_delete/rename/truncate/free`, ADR 0007 slots
 34–37), an application identity manifest so the launcher stops hardcoding
 its app list, and the `FILE.BIN` graphical file browser capstone

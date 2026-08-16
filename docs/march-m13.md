@@ -44,9 +44,9 @@ Legend: ⬜ not started · 🔄 in progress · ✅ done · ⛔ blocked (note why
 ## Notes
 
 - The M13 plan lives in issues #152 (B2), #153 (B3), #161 (B1), and #162
-  (B4), filed 2026-08-16 while M12 is still in flight — the roadmap's
-  destination sections are seeded ahead of the closeout, per the M12
-  precedent.
+  (B4), filed 2026-08-16 ahead of M12's closeout — which landed the same
+  day (PR #160, issues #148/#149/#150 closed). The roadmap's destination
+  sections are seeded ahead of the closeout, per the M12 precedent.
 - The DSK1 image format (ADR 0002) is frozen — the manifest must not change
   the `.BIN` header.
 - Zero heap allocation stays a hard constraint for every app and every new
