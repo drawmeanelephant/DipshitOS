@@ -33,6 +33,7 @@ pub const sys_file_write_num: u64 = 25;
 pub const sys_file_close_num: u64 = 26;
 pub const sys_dir_list_num: u64 = 27;
 pub const sys_exec_num: u64 = 28;
+pub const sys_kill_num: u64 = 29;
 
 // ---------------------------------------------------------------------------
 // Event Kinds & Modifier Masks (ADR 0009)
@@ -264,6 +265,16 @@ pub const ProcState = enum(u64) {
 pub fn exec_program(name: []const u8) i64 {
     if (name.len == 0) return -1;
     return syscall2(sys_exec_num, @intFromPtr(name.ptr), name.len);
+}
+
+/// Claim 7604 (ADR 0007 slot 29): arm the target process for termination
+/// from EL0 — the kill half of the process-control seam (the EL1h
+/// monitor's `kill` is the privileged equivalent). The target exits with
+/// the reserved status 137 at its next ring selection. Returns 0 once
+/// armed; EINVAL for an out-of-range/free/exited/scheduler-owned target or
+/// a non-process caller.
+pub fn kill_process(pid: u64) i64 {
+    return syscall1(sys_kill_num, pid);
 }
 
 pub const ProcInfo = struct {

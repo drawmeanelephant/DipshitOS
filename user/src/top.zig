@@ -55,8 +55,24 @@ pub const ProcessTable = struct {
             if (sel >= self.count) {
                 self.selected_row = if (self.count > 0) self.count - 1 else null;
             }
+        } else {
+            self.select_default();
         }
         return self.count;
+    }
+
+    /// Claim 7604: the Kill button needs a sane default target — the first
+    /// RUNNING process (the live gate kills it). No-op once something is
+    /// already selected.
+    pub fn select_default(self: *ProcessTable) void {
+        if (self.selected_row != null) return;
+        var i: usize = 0;
+        while (i < self.count) : (i += 1) {
+            if (self.procs[i].state == .running) {
+                self.selected_row = i;
+                return;
+            }
+        }
     }
 
     pub fn count_running(self: *const ProcessTable) usize {
@@ -202,12 +218,8 @@ pub const AppState = struct {
             changed = true;
         } else if (self.btn_kill.handle_event(ev)) {
             if (self.table.selected_row) |sel| {
-                if (sel < self.table.count) {
-                    // Future kill syscall / notification
-                    ui.write_console("top: kill requested\n");
-                }
+                changed = self.kill_selected(sel) or changed;
             }
-            changed = true;
         } else if (ev.kind == ui.MOUSE_DOWN and (ev.flags & ui.BTN_LEFT) != 0) {
             // Row selection by clicking in table area
             const click_x = ev.arg0;
@@ -247,7 +259,35 @@ pub const AppState = struct {
             return true;
         }
 
+        // 'k' or 'K' -> kill the selected process (claim 7604)
+        if (ev.arg1 == 'k' or ev.arg1 == 'K') {
+            if (self.table.selected_row) |sel| {
+                return self.kill_selected(sel);
+            }
+            return false;
+        }
+
         return false;
+    }
+
+    /// Claim 7604 (ADR 0007 slot 29): terminate the process at `row` from
+    /// EL0 — the Kill button's real action. Prints a `top: kill pid=<n>`
+    /// marker (or the negative error) for the live gate, then refreshes so
+    /// the exited row (status 137) appears.
+    pub fn kill_selected(self: *AppState, row: usize) bool {
+        if (row >= self.table.count) return false;
+        const proc = &self.table.procs[row];
+        const res = ui.kill_process(proc.pid);
+        var buf: [48]u8 = undefined;
+        if (res == 0) {
+            const msg = std.fmt.bufPrint(&buf, "top: kill pid={d}\n", .{proc.pid}) catch "top: kill\n";
+            ui.write_console(msg);
+            _ = self.table.refresh_from_system();
+        } else {
+            const msg = std.fmt.bufPrint(&buf, "top: kill pid={d} err={d}\n", .{ proc.pid, res }) catch "top: kill err\n";
+            ui.write_console(msg);
+        }
+        return true;
     }
 };
 
@@ -343,4 +383,47 @@ test "top: ProcessTable selection navigation and stats" {
 
     pt.select_prev();
     try std.testing.expectEqual(@as(?usize, 1), pt.selected_row);
+}
+
+test "top: ProcessTable auto-selects the first running process (claim 7604)" {
+    var pt = ProcessTable.init();
+    pt.count = 3;
+    pt.procs[0] = .{ .pid = 0, .state = .exited, .exit_status = 7, .name = "user-el0\x00\x00\x00\x00\x00\x00\x00\x00".*, .name_len = 8 };
+    pt.procs[1] = .{ .pid = 1, .state = .running, .exit_status = 0, .name = "COUNTER.BIN\x00\x00\x00\x00\x00".*, .name_len = 11 };
+    pt.procs[2] = .{ .pid = 2, .state = .running, .exit_status = 0, .name = "TOP.BIN\x00\x00\x00\x00\x00\x00\x00\x00\x00".*, .name_len = 7 };
+
+    // Nothing selected -> the first RUNNING process (COUNTER, row 1).
+    pt.select_default();
+    try std.testing.expectEqual(@as(?usize, 1), pt.selected_row);
+
+    // Already selected -> untouched.
+    pt.selected_row = 2;
+    pt.select_default();
+    try std.testing.expectEqual(@as(?usize, 2), pt.selected_row);
+
+    // No running process -> stays null.
+    var pt2 = ProcessTable.init();
+    pt2.count = 1;
+    pt2.procs[0] = .{ .pid = 0, .state = .exited, .exit_status = 7, .name = "user-el0\x00\x00\x00\x00\x00\x00\x00\x00".*, .name_len = 8 };
+    pt2.select_default();
+    try std.testing.expectEqual(@as(?usize, null), pt2.selected_row);
+}
+
+test "top: kill_selected and the 'k' key route to the selected pid (claim 7604)" {
+    var app = AppState.init();
+    app.table.count = 2;
+    app.table.procs[0] = .{ .pid = 0, .state = .exited, .exit_status = 7, .name = "user-el0\x00\x00\x00\x00\x00\x00\x00\x00".*, .name_len = 8 };
+    app.table.procs[1] = .{ .pid = 1, .state = .running, .exit_status = 0, .name = "COUNTER.BIN\x00\x00\x00\x00\x00".*, .name_len = 11 };
+    app.table.selected_row = 1;
+
+    // The 'k' key kills the selected row (on host the stub returns 0).
+    var ev_k = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 1, .arg0 = 0x2e, .arg1 = 'k' };
+    try std.testing.expect(app.handle_keyboard_event(&ev_k));
+
+    // No selection -> the key is a no-op.
+    app.table.selected_row = null;
+    try std.testing.expect(!app.handle_keyboard_event(&ev_k));
+
+    // An out-of-range row -> false.
+    try std.testing.expect(!app.kill_selected(99));
 }

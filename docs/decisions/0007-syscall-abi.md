@@ -442,3 +442,35 @@ uaccess and calls through to it.
 **Slot-allocation note:** Milestone 12's TCP seam (issue #148) originally
 planned slots 28–31; slot 28 is now `sys_exec`, so the TCP plan moves to
 slots 29–32 (the issue body is updated to match).
+
+## Amendment (2026-08-15, claim 7604 — the EL0 termination seam card)
+
+M11's A4 tracker claim called TOP.BIN a "click-to-kill process termination"
+tool — but its Kill button only logged `top: kill requested` under a
+"Future kill syscall" comment (the kernel's `kill` was an EL1h monitor
+command only, claim 7786). This card freezes slot 29 in the dispatch table
+(the card's ONE ABI change, following the `sys_exec` slot-28 precedent;
+every existing syscall number 0–28 stays frozen):
+
+| 29 | `sys_kill` | `kill(target_pid) -> i64` | Arm the target process's executor for termination from EL0 (the claim-7786 kill seam: `scheduler.request_kill` is a pure TCB write — the ring converts the target's NEXT selection into the existing exit path with the reserved status 137, flowing through the real exit → zombie → idle-reap → page-return lifecycle; the OS, not the program, owns process lifetime). Returns 0 once armed; `EINVAL` for a non-process caller (an EL1h task), an out-of-range / free / exited / no-executor target, or a scheduler-owned refusal (the shell or idle). Self-kill is allowed (the monitor's `kill` is equally general); a permanently blocked target keeps the EL1h kill's documented bound — the arm applies at the target's next selection, so a task blocked forever in `sys_wait_event`/`sys_wait` stays until woken. |
+
+`implemented_count` is now 30; the `syscalls` report prints rows 0–29.
+The handler validates the target through the process registry (the
+`sys_wait` precedent for numeric targets) and calls through to the
+claim-7786 seam — no new lifecycle machinery, no ABI change beyond the
+frozen row.
+
+The EL0 proof rides TOP.BIN: the process table auto-selects the first
+RUNNING process, and the Kill button or `k`/`K` call `ui.kill_process(pid)`
+(slot 29), printing `top: kill pid=<n>`. The class-B gate
+`tools/verify-live-sys-kill.sh` execs COUNTER.BIN + TOP.BIN, types `k`
+after `top: ready`, and asserts `top: kill pid=1`, NO `counter: alive`
+after the kill, `tasks user-exec exited status=137` +
+`procs COUNTER.BIN exited status=137` (the real lifecycle), and
+`29 sys_kill calls=1` in the `syscalls` report — the EL0 kill, live.
+
+As with slot 28, this is the Milestone 11/12 boundary's ABI amendment;
+the ABI — x8 number, x0–x5 arguments, x0 result, reserved 30–63, error
+codes — is otherwise unchanged. **The M12 TCP plan (issue #148) now runs
+at slots 30–33** (28 `sys_exec`, 29 `sys_kill`, then TCP; the issue body
+is updated to match).
