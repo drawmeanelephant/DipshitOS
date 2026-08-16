@@ -67,6 +67,7 @@ verify-coordination`, and CI) fails if it drifts from the files.
 | Milestone 12 Card N1: userland TCP syscall seam | [`agent-buffy-m12-n1-tcp-seam.md`](agent-buffy-m12-n1-tcp-seam.md) |
 | Milestone 12 Card N2: bounded DNS client | [`agent-buffy-m12-n2-dns-client.md`](agent-buffy-m12-n2-dns-client.md) |
 | Milestone 12 Card N3: capstone applications FETCH.BIN & CHAT.BIN | [`agent-buffy-m12-n3-capstone-apps.md`](agent-buffy-m12-n3-capstone-apps.md) |
+| # Branch log — agent/buffy/m13-b2-manifest (claim 8877) | [`agent-buffy-m13-b2-manifest.md`](agent-buffy-m13-b2-manifest.md) |
 | `agent/buffy/m15-commands` (PR #12) | [`agent-buffy-m15-commands.md`](agent-buffy-m15-commands.md) |
 | `agent/buffy/m15-host-plumbing` (PR #13) | [`agent-buffy-m15-host-plumbing.md`](agent-buffy-m15-host-plumbing.md) |
 | `agent/buffy/m15-machine-controls` | [`agent-buffy-m15-machine-controls.md`](agent-buffy-m15-machine-controls.md) |
