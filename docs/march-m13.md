@@ -38,9 +38,12 @@ Legend: ⬜ not started · 🔄 in progress · ✅ done · ⛔ blocked (note why
   (claim 2223): Driving Award's monitor command is now `dui` (same
   subcommands), report prefixes + title-bar label renamed, and the
   re-derived gates assert `dui:` output.
-- **M8 U4 pointer-focus class-B evidence** (issue #151) — complete the
-  `verify-live-pointer-cg.sh` CG gate (self-gates on Accessibility trust;
-  skips cleanly without it).
+- **M8 U4 pointer-focus class-B evidence** (issue #151) — 🔄 gate finished
+  (claim 5776): `verify-live-pointer-cg.sh` now SKIPs cleanly (exit 0)
+  without trust and runs to an honest result with it. With trust granted,
+  the CG route still produced `ptr-reports=0` (synthesized pointer events
+  don't reach VZ's USB device) — U4 stays ⛔ at the live seam; class-C
+  (real mouse) is the honest proof.
 
 ## Notes
 

@@ -124,7 +124,7 @@ if [ -f "$SERIAL" ]; then
     grep -a -qF -- "pointer-manual-ready" "$SERIAL" && READY=1
     # Distinct focus ids: the D4 "click moves focus BETWEEN windows" proof.
     FOCUS_LINES=$(grep -a -c "dui: pointer focus=" "$SERIAL" || true)
-    DISTINCT_FOCUS=$(grep -a -o "dui: pointer focus=[0-9]*" "$SERIAL" | sort -u | wc -l | tr -d ' ')
+    DISTINCT_FOCUS=$(grep -a -o "dui: pointer focus=[0-9]*" "$SERIAL" | sort -u | wc -l | tr -d ' ' || true)
     # A real pointer report (the synthesized routes all produced 0).
     PTR_REPORTS=$(grep -a -o "ptr-reports=[0-9]*" "$SERIAL" | tail -1 | cut -d= -f2 || true)
     PTR_REPORTS=${PTR_REPORTS:-0}
