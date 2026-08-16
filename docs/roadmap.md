@@ -1120,15 +1120,19 @@ ever, lands as its own ADR 0007 amendment), and a visual-design pixel spec
 ### Milestone twelve — userland network applications
 
 > Connect userland applications to the network with a clean TCP syscall seam
-> and DNS resolution.
+> and DNS resolution. **🔄 In progress** (tracked by issue #148, worked in a
+> parallel chat); M11's `sys_exec` (slot 28) and `sys_kill` (slot 29) landed
+> first, so the TCP seam runs at ADR 0007 slots 30–33.
 
-- **N12 — Userland TCP syscall seam (ADR 0007 slots 28–31).**
+- **N12 — Userland TCP syscall seam (ADR 0007 slots 30–33).**
   `sys_tcp_connect`, `sys_tcp_send`, `sys_tcp_recv`, `sys_tcp_close`.
 - **N13 — Bounded DNS client.** RFC 1035 UDP query client on port 53 to
   resolve domain names.
 - **N14 — `FETCH.BIN` & `CHAT.BIN`.** **[Capstone Gate]** An EL0 HTTP/1.0
   client fetching web text over NAT, and a peer-to-peer graphical chat app.
   Live gate: `verify-live-fetch.sh`.
+
+See [`march-m12.md`](march-m12.md) for the per-card tracker.
 
 ## Wishlist / hope chest (destinations, not commitments)
 

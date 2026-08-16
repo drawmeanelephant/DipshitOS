@@ -21,7 +21,15 @@ Every milestone planned so far has landed: boot/kernel proper, the interactive
 `dipshit>` monitor, userspace (allocator, scheduler, EL0 + syscalls), processes
 (IPC, wait, kill), networking (virtio-net → ARP → IPv4/ICMP → UDP → DHCP →
 TCP), graphics (framebuffer → Road Pops terminal → Driving Award window
-manager), and input (USB XHCI + HID).
+manager), input (USB XHCI + HID), and — **milestone eleven (2026-08-16)** — a
+full **desktop platform**: the ADR 0011 GUI contract, a zero-heap micro-widget
+toolkit, and four real apps (`CALC.BIN`, `NOTEPAD.BIN`, `TOP.BIN`,
+`DESKTOP.BIN`) with an EL0 `sys_exec`/`sys_kill` process-control seam so the
+desktop launcher actually launches apps and the task manager can kill them.
+
+**Now in progress (milestone twelve):** userland network applications — a TCP
+syscall seam (`sys_tcp_connect/send/recv/close`, ADR 0007 slots 30–33), a
+bounded DNS client, and the `FETCH.BIN` + `CHAT.BIN` capstone.
 
 The canonical, always-current accounting is
 [`docs/status.md`](docs/status.md); the readable summary is the
