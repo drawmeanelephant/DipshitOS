@@ -37,6 +37,8 @@ pub const installed_apps = [_]AppEntry{
     .{ .name = "KEYTEST.BIN", .desc = "HID Input", .status = "USB Events" },
     .{ .name = "TYPE.BIN", .desc = "File Reader", .status = "FAT32 Data" },
     .{ .name = "DIR.BIN", .desc = "Directory List", .status = "FAT32 ESP" },
+    .{ .name = "FETCH.BIN", .desc = "HTTP/1.0 Client", .status = "TCP Syscall" },
+    .{ .name = "CHAT.BIN", .desc = "P2P Net Chat", .status = "UDP Socket" },
 };
 
 // ---------------------------------------------------------------------------

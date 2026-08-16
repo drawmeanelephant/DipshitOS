@@ -1011,14 +1011,24 @@ if let netCapturePath {
                         print("NET-TCP: answered the guest's FIN (seq 0x\(hex32(seq))) with a FIN-ACK (seq 0x\(hex32(netTcpSrvNxt)), ack 0x\(hex32(seq &+ 1)))")
                     }
                 } else if !payload.isEmpty {
-                    // A data segment: ACK + the payload echoed byte-exact.
+                    // A data segment: HTTP response if GET request, else echo payload.
                     if netTcpRespondHandshakeOnly {
                         print("NET-TCP: handshake-only — ignoring the guest's \(payload.count)-byte data (black hole)")
                     } else {
-                        let replyLen = buildTcpReply(&reply, buf, n, arpHostMAC, hostPort, netTcpSrvNxt, seq &+ UInt32(payload.count), 0x10, payload)
+                        var responsePayload = payload
+                        let isGet = payload.count >= 4 && payload[0] == 0x47 && payload[1] == 0x45 && payload[2] == 0x54 && payload[3] == 0x20
+                        if hostPort == 80 || hostPort == 8080 || isGet {
+                            let httpBody = "HTTP/1.0 200 OK\r\n\r\nHello from DipshitOS Host!\n"
+                            responsePayload = Array(httpBody.utf8)
+                        }
+                        let replyLen = buildTcpReply(&reply, buf, n, arpHostMAC, hostPort, netTcpSrvNxt, seq &+ UInt32(payload.count), 0x10, responsePayload)
                         try? netCaptureReadSocket!.write(contentsOf: Data(reply[0..<replyLen]))
-                        print("NET-TCP: echoed the guest's \(payload.count)-byte data (ack 0x\(hex32(seq &+ UInt32(payload.count))), \(payload.count) payload bytes)")
-                        netTcpSrvNxt = netTcpSrvNxt &+ UInt32(payload.count)
+                        if isGet || hostPort == 80 {
+                            print("NET-TCP: answered the guest's HTTP request with 200 OK (\(responsePayload.count) bytes)")
+                        } else {
+                            print("NET-TCP: echoed the guest's \(payload.count)-byte data (ack 0x\(hex32(seq &+ UInt32(payload.count))), \(payload.count) payload bytes)")
+                        }
+                        netTcpSrvNxt = netTcpSrvNxt &+ UInt32(responsePayload.count)
                     }
                 } else {
                     // A pure ACK (the handshake / the echo / the final

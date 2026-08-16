@@ -34,6 +34,15 @@ pub const sys_file_close_num: u64 = 26;
 pub const sys_dir_list_num: u64 = 27;
 pub const sys_exec_num: u64 = 28;
 pub const sys_kill_num: u64 = 29;
+pub const sys_tcp_connect_num: u64 = 30;
+pub const sys_tcp_send_num: u64 = 31;
+pub const sys_tcp_recv_num: u64 = 32;
+pub const sys_tcp_close_num: u64 = 33;
+pub const sys_udp_listen_num: u64 = 9;
+pub const sys_udp_send_num: u64 = 10;
+pub const sys_udp_recv_num: u64 = 11;
+pub const datagram_max: usize = 72;
+pub const payload_max: usize = 64;
 
 // ---------------------------------------------------------------------------
 // Event Kinds & Modifier Masks (ADR 0009)
@@ -247,6 +256,34 @@ pub fn file_write(handle: u32, data: []const u8) i64 {
 
 pub fn file_close(handle: u32) void {
     _ = syscall1(sys_file_close_num, handle);
+}
+
+pub fn udp_listen(port: u16) i64 {
+    return syscall1(sys_udp_listen_num, port);
+}
+
+pub fn udp_send(dst_ip: u32, dst_port: u16, payload: []const u8) i64 {
+    return syscall4(sys_udp_send_num, dst_ip, dst_port, @intFromPtr(payload.ptr), payload.len);
+}
+
+pub fn udp_recv(port: u16, buf: []u8) i64 {
+    return syscall3(sys_udp_recv_num, port, @intFromPtr(buf.ptr), buf.len);
+}
+
+pub fn tcp_connect(ip: u32, port: u16) i64 {
+    return syscall2(sys_tcp_connect_num, ip, port);
+}
+
+pub fn tcp_send(data: []const u8) i64 {
+    return syscall2(sys_tcp_send_num, @intFromPtr(data.ptr), data.len);
+}
+
+pub fn tcp_recv(buf: []u8) i64 {
+    return syscall2(sys_tcp_recv_num, @intFromPtr(buf.ptr), buf.len);
+}
+
+pub fn tcp_close() i64 {
+    return syscall0(sys_tcp_close_num);
 }
 
 pub const ProcState = enum(u64) {

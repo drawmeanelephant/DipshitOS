@@ -55,6 +55,8 @@ NOTEPAD_BIN="${18:-$ROOT_DIR/zig-out/bin/NOTEPAD.BIN}"
 TOP_BIN="${19:-$ROOT_DIR/zig-out/bin/TOP.BIN}"
 DESKTOP_BIN="${20:-$ROOT_DIR/zig-out/bin/DESKTOP.BIN}"
 TCP_BIN="${21:-$ROOT_DIR/zig-out/bin/TCP.BIN}"
+FETCH_BIN="${22:-$ROOT_DIR/zig-out/bin/FETCH.BIN}"
+CHAT_BIN="${23:-$ROOT_DIR/zig-out/bin/CHAT.BIN}"
 SIZE_MB="${DIPSHITOS_IMAGE_SIZE_MB:-128}"
 
 cd "$ROOT_DIR"
@@ -202,6 +204,20 @@ if [ -f "$TCP_BIN" ]; then
     fi
     TCP_ARGS+=("$TCP_BIN")
 fi
+FETCH_ARGS=()
+if [ -f "$FETCH_BIN" ]; then
+    if [ "$(head -c 4 "$FETCH_BIN")" != "DSK1" ]; then
+        fail "'$FETCH_BIN' does not start with the 'DSK1' image magic -- run 'zig build' first (it produces zig-out/bin/FETCH.BIN)."
+    fi
+    FETCH_ARGS+=("$FETCH_BIN")
+fi
+CHAT_ARGS=()
+if [ -f "$CHAT_BIN" ]; then
+    if [ "$(head -c 4 "$CHAT_BIN")" != "DSK1" ]; then
+        fail "'$CHAT_BIN' does not start with the 'DSK1' image magic -- run 'zig build' first (it produces zig-out/bin/CHAT.BIN)."
+    fi
+    CHAT_ARGS+=("$CHAT_BIN")
+fi
 
 # 3. Builder script.
 [ -f "$SCRIPT_DIR/mkfat32.py" ] || fail "missing $SCRIPT_DIR/mkfat32.py."
@@ -210,7 +226,7 @@ fi
 mkdir -p "$(dirname "$IMAGE")"
 rm -f "$IMAGE"
 echo "make-image: building FAT32+GPT image '$IMAGE' (${SIZE_MB} MiB)..."
-python3 "$SCRIPT_DIR/mkfat32.py" --size-mb "$SIZE_MB" "$IMAGE" "$EFI_BIN" "$KERNEL_BIN" "${USER_ARGS[@]}" "${COUNTER_ARGS[@]}" "${PEER_ARGS[@]}" "${STATUS43_ARGS[@]}" "${UDP_ARGS[@]}" "${WIN_ARGS[@]}" "${WINCLOSE_ARGS[@]}" "${WINLOOP_ARGS[@]}" "${WINMOVE_ARGS[@]}" "${KEYTEST_ARGS[@]}" "${SAVETEXT_ARGS[@]}" "${TYPE_ARGS[@]}" "${DIR_ARGS[@]}" "${CALC_ARGS[@]}" "${NOTEPAD_ARGS[@]}" "${TOP_ARGS[@]}" "${DESKTOP_ARGS[@]}" "${TCP_ARGS[@]}" \
+python3 "$SCRIPT_DIR/mkfat32.py" --size-mb "$SIZE_MB" "$IMAGE" "$EFI_BIN" "$KERNEL_BIN" "${USER_ARGS[@]}" "${COUNTER_ARGS[@]}" "${PEER_ARGS[@]}" "${STATUS43_ARGS[@]}" "${UDP_ARGS[@]}" "${WIN_ARGS[@]}" "${WINCLOSE_ARGS[@]}" "${WINLOOP_ARGS[@]}" "${WINMOVE_ARGS[@]}" "${KEYTEST_ARGS[@]}" "${SAVETEXT_ARGS[@]}" "${TYPE_ARGS[@]}" "${DIR_ARGS[@]}" "${CALC_ARGS[@]}" "${NOTEPAD_ARGS[@]}" "${TOP_ARGS[@]}" "${DESKTOP_ARGS[@]}" "${TCP_ARGS[@]}" "${FETCH_ARGS[@]}" "${CHAT_ARGS[@]}" \
     || fail "image creation failed (see output above)."
 
 # 5. Self-verify by listing the image we just wrote.
@@ -254,6 +270,12 @@ if [ -f "$DESKTOP_BIN" ]; then
 fi
 if [ -f "$TCP_BIN" ]; then
     printf '%s\n' "$LISTING" | grep -q 'TCP.BIN' || fail "TCP.BIN missing from the image listing"
+fi
+if [ -f "$FETCH_BIN" ]; then
+    printf '%s\n' "$LISTING" | grep -q 'FETCH.BIN' || fail "FETCH.BIN missing from the image listing"
+fi
+if [ -f "$CHAT_BIN" ]; then
+    printf '%s\n' "$LISTING" | grep -q 'CHAT.BIN' || fail "CHAT.BIN missing from the image listing"
 fi
 
 echo "make-image: done."
