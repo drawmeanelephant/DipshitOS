@@ -47,9 +47,10 @@ The class-C gate (claim 9015) remains the honest no-trust path.
   `ptr-reports=0` — no silent drop.
 - ✅ the gate's trust preflight (a CGPreflightPostEventAccess probe) and
   the untrusted FAIL path with the grant steps, exercised locally.
-- ⬜ the trusted PASS run needs the one-time Accessibility grant (System
-  Settings → Privacy & Security → Accessibility → the terminal), then
-  `bash tools/verify-live-pointer-cg.sh` — that is the machine-local
-  precondition, the same shape as Screen Recording for the screenshot
-  gates.
+- ✅ 2026-08-16 (claim 5776): the trusted run was finally exercised —
+  `CGPreflightPostEventAccess=true`, `AXIsProcessTrusted=true` — and the
+  CG route still produced `ptr-reports=0` / zero `dui: pointer focus=`
+  lines. Synthesized pointer events don't reach VZ's USB pointing device
+  even under trust; the class-B PASS stays unachieved and U4's live proof
+  remains class-C (claim 9015).
 - ✅ `bash tools/verify-coordination.sh`
