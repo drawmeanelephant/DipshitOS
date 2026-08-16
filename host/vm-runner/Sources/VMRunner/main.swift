@@ -311,6 +311,11 @@ var netIcmpRespondHostIP: [UInt8]?
 // unchanged).
 var netUdpRespondHostIP: [UInt8]?
 var netUdpRespondHostPort: UInt16?
+// Milestone twelve card N2 (claim 7566): `--net-dns-respond <host-ip>[:<port>]`
+// answers the guest's DNS queries from the HOST side — a tiny deterministic
+// DNS resolver inside the capture thread.
+var netDnsRespondHostIP: [UInt8]?
+var netDnsRespondHostPort: UInt16 = 53
 // Milestone five card N8 (claim 0351): `--net-dhcp-respond <lease-ip>`
 // answers the guest's DHCP handshake from the HOST side — a tiny
 // deterministic host-side DHCP server inside the capture thread: when a
@@ -517,6 +522,21 @@ while idx < arguments.count {
         }
         netUdpRespondHostIP = parts
         netUdpRespondHostPort = port
+        idx += 2
+    } else if arg == "--net-dns-respond", idx + 1 < arguments.count {
+        let token = arguments[idx + 1]
+        let halves = token.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
+        let ipPart = String(halves[0])
+        let parts = ipPart.split(separator: ".").compactMap { UInt8($0) }
+        guard parts.count == 4 else {
+            fail("--net-dns-respond requires a dotted-quad IPv4 address, got '\(token)'.")
+        }
+        netDnsRespondHostIP = parts
+        if halves.count == 2, let port = UInt16(halves[1]) {
+            netDnsRespondHostPort = port
+        } else if halves.count == 2 {
+            fail("--net-dns-respond port must be 1..65535, got '\(halves[1])'.")
+        }
         idx += 2
     } else if arg == "--net-dhcp-respond", idx + 1 < arguments.count {
         // Card N9 (claim 9489): the optional ":<lease-seconds>" suffix
@@ -817,6 +837,9 @@ if netIcmpRespondHostIP != nil, netCapturePath == nil {
 if netUdpRespondHostIP != nil, netCapturePath == nil {
     fail("--net-udp-respond requires --net (the UDP reply is written into the SAME attachment's socket).")
 }
+if netDnsRespondHostIP != nil, netCapturePath == nil {
+    fail("--net-dns-respond requires --net (the DNS reply is written into the SAME attachment's socket).")
+}
 if netDhcpRespondLeaseIP != nil, netCapturePath == nil {
     fail("--net-dhcp-respond requires --net (the DHCP reply is written into the SAME attachment's socket).")
 }
@@ -894,6 +917,17 @@ if let netCapturePath {
                 try? netCaptureReadSocket!.write(contentsOf: Data(reply))
                 let srcPort = (UInt16(buf[34]) << 8) | UInt16(buf[35])
                 print("NET-UDP: answered the guest's datagram for \(hostIP[0]).\(hostIP[1]).\(hostIP[2]).\(hostIP[3]):\(hostPort) (reply to guest src port \(srcPort), \(n - 42) payload bytes)")
+            }
+            // Card N2 (claim 7566): DNS responder
+            if let hostIP = netDnsRespondHostIP, isDnsQuery(buf, n, hostIP, netDnsRespondHostPort) {
+                var reply = [UInt8](repeating: 0, count: 512)
+                let replyLen = buildDnsReply(&reply, buf, n, arpHostMAC, hostIP, netDnsRespondHostPort)
+                if replyLen > 0 {
+                    try? netCaptureReadSocket!.write(contentsOf: Data(reply[0..<replyLen]))
+                    let qname = extractDnsQName(buf, n)
+                    let srcPort = (UInt16(buf[34]) << 8) | UInt16(buf[35])
+                    print("NET-DNS: answered the guest's DNS query for '\(qname)' (reply to guest src port \(srcPort), resolved to 93.184.216.34)")
+                }
             }
             // Card N8 (claim 0351): if the guest ran the DHCP client,
             // answer the handshake from the host — a tiny deterministic
@@ -977,14 +1011,24 @@ if let netCapturePath {
                         print("NET-TCP: answered the guest's FIN (seq 0x\(hex32(seq))) with a FIN-ACK (seq 0x\(hex32(netTcpSrvNxt)), ack 0x\(hex32(seq &+ 1)))")
                     }
                 } else if !payload.isEmpty {
-                    // A data segment: ACK + the payload echoed byte-exact.
+                    // A data segment: HTTP response if GET request, else echo payload.
                     if netTcpRespondHandshakeOnly {
                         print("NET-TCP: handshake-only — ignoring the guest's \(payload.count)-byte data (black hole)")
                     } else {
-                        let replyLen = buildTcpReply(&reply, buf, n, arpHostMAC, hostPort, netTcpSrvNxt, seq &+ UInt32(payload.count), 0x10, payload)
+                        var responsePayload = payload
+                        let isGet = payload.count >= 4 && payload[0] == 0x47 && payload[1] == 0x45 && payload[2] == 0x54 && payload[3] == 0x20
+                        if hostPort == 80 || hostPort == 8080 || isGet {
+                            let httpBody = "HTTP/1.0 200 OK\r\n\r\nHello from DipshitOS Host!\n"
+                            responsePayload = Array(httpBody.utf8)
+                        }
+                        let replyLen = buildTcpReply(&reply, buf, n, arpHostMAC, hostPort, netTcpSrvNxt, seq &+ UInt32(payload.count), 0x10, responsePayload)
                         try? netCaptureReadSocket!.write(contentsOf: Data(reply[0..<replyLen]))
-                        print("NET-TCP: echoed the guest's \(payload.count)-byte data (ack 0x\(hex32(seq &+ UInt32(payload.count))), \(payload.count) payload bytes)")
-                        netTcpSrvNxt = netTcpSrvNxt &+ UInt32(payload.count)
+                        if isGet || hostPort == 80 {
+                            print("NET-TCP: answered the guest's HTTP request with 200 OK (\(responsePayload.count) bytes)")
+                        } else {
+                            print("NET-TCP: echoed the guest's \(payload.count)-byte data (ack 0x\(hex32(seq &+ UInt32(payload.count))), \(payload.count) payload bytes)")
+                        }
+                        netTcpSrvNxt = netTcpSrvNxt &+ UInt32(responsePayload.count)
                     }
                 } else {
                     // A pure ACK (the handshake / the echo / the final
@@ -1130,6 +1174,10 @@ if let hostIP = netIcmpRespondHostIP {
 if let hostIP = netUdpRespondHostIP, let hostPort = netUdpRespondHostPort {
     let ipText = hostIP.map(String.init).joined(separator: ".")
     print("  net-udp-respond: ENABLED (milestone five card N5, claim 8552) — the host answers the guest's UDP datagrams for \(ipText):\(hostPort) (host MAC 02:00:00:00:00:02) via the capture thread (deterministic, request-driven)")
+}
+if let hostIP = netDnsRespondHostIP {
+    let ipText = hostIP.map(String.init).joined(separator: ".")
+    print("  net-dns-respond: ENABLED (milestone twelve card N2, claim 7566) — the host answers the guest's DNS queries for \(ipText):\(netDnsRespondHostPort) via the capture thread (deterministic, request-driven)")
 }
 if let leaseIP = netDhcpRespondLeaseIP {
     let ipText = leaseIP.map(String.init).joined(separator: ".")
@@ -2444,6 +2492,130 @@ func buildUdpReply(_ reply: inout [UInt8], _ req: [UInt8], _ n: Int, _ hostMAC: 
     reply[40] = UInt8(udpChk >> 8)
     reply[41] = UInt8(udpChk & 0xff)
 }
+
+// Milestone twelve card N2 (claim 7566): DNS packet matching & response synthesis
+func isDnsQuery(_ buf: [UInt8], _ n: Int, _ hostIP: [UInt8], _ hostPort: UInt16) -> Bool {
+    guard n >= 42 + 12 + 5 else { return false }
+    guard buf[12] == 0x08 && buf[13] == 0x00 else { return false } // IPv4
+    guard buf[14] == 0x45 else { return false } // IHL 5
+    guard (buf[20] & 0x1f) == 0 && buf[21] == 0 else { return false } // not a fragment
+    guard buf[23] == 17 else { return false } // UDP
+    guard buf[30] == hostIP[0] && buf[31] == hostIP[1] && buf[32] == hostIP[2] && buf[33] == hostIP[3] else { return false }
+    let dstPort = (UInt16(buf[36]) << 8) | UInt16(buf[37])
+    guard dstPort == hostPort else { return false }
+    let flags = (UInt16(buf[44]) << 8) | UInt16(buf[45])
+    return (flags & 0x8000) == 0 // QR = 0 (query)
+}
+
+func extractDnsQName(_ buf: [UInt8], _ n: Int) -> String {
+    var off = 42 + 12
+    var labels: [String] = []
+    while off < n {
+        let len = Int(buf[off])
+        if len == 0 { break }
+        if (len & 0xC0) != 0 { break }
+        off += 1
+        if off + len > n { break }
+        let s = String(decoding: buf[off..<off+len], as: UTF8.self)
+        labels.append(s)
+        off += len
+    }
+    return labels.joined(separator: ".")
+}
+
+func buildDnsReply(_ reply: inout [UInt8], _ req: [UInt8], _ n: Int, _ hostMAC: [UInt8], _ hostIP: [UInt8], _ hostPort: UInt16) -> Int {
+    let qname = extractDnsQName(req, n)
+    var resolvedIP: [UInt8] = [93, 184, 216, 34]
+    if qname == "myhost.local" || qname == "gateway.local" {
+        resolvedIP = [10, 0, 0, 2]
+    } else if qname == "dipshit.local" {
+        resolvedIP = [10, 0, 0, 1]
+    }
+
+    var off = 42 + 12
+    while off < n {
+        let len = Int(req[off])
+        if len == 0 { off += 1; break }
+        if (len & 0xC0) != 0 { off += 2; break }
+        off += 1 + len
+    }
+    off += 4
+    if off > n { return 0 }
+    let questionLen = off - (42 + 12)
+
+    var dnsPayload = [UInt8](repeating: 0, count: 12 + questionLen + 16)
+    dnsPayload[0] = req[42]
+    dnsPayload[1] = req[43]
+    dnsPayload[2] = 0x81
+    dnsPayload[3] = 0x80
+    dnsPayload[4] = 0x00
+    dnsPayload[5] = 0x01
+    dnsPayload[6] = 0x00
+    dnsPayload[7] = 0x01
+    dnsPayload[8] = 0x00
+    dnsPayload[9] = 0x00
+    dnsPayload[10] = 0x00
+    dnsPayload[11] = 0x00
+
+    dnsPayload[12..<(12 + questionLen)] = req[(42 + 12)..<off]
+
+    let aoff = 12 + questionLen
+    dnsPayload[aoff + 0] = 0xC0
+    dnsPayload[aoff + 1] = 0x0C
+    dnsPayload[aoff + 2] = 0x00
+    dnsPayload[aoff + 3] = 0x01
+    dnsPayload[aoff + 4] = 0x00
+    dnsPayload[aoff + 5] = 0x01
+    dnsPayload[aoff + 6] = 0x00
+    dnsPayload[aoff + 7] = 0x00
+    dnsPayload[aoff + 8] = 0x01
+    dnsPayload[aoff + 9] = 0x2C
+    dnsPayload[aoff + 10] = 0x00
+    dnsPayload[aoff + 11] = 0x04
+    dnsPayload[aoff + 12] = resolvedIP[0]
+    dnsPayload[aoff + 13] = resolvedIP[1]
+    dnsPayload[aoff + 14] = resolvedIP[2]
+    dnsPayload[aoff + 15] = resolvedIP[3]
+
+    let totalLen = 42 + dnsPayload.count
+    reply = [UInt8](repeating: 0, count: totalLen)
+    reply[0...5] = req[6...11]
+    reply[6...11] = hostMAC[0...5]
+    reply[12] = 0x08
+    reply[13] = 0x00
+    reply[14] = 0x45
+    let ipTotalLen = UInt16(20 + 8 + dnsPayload.count)
+    reply[16] = UInt8(ipTotalLen >> 8)
+    reply[17] = UInt8(ipTotalLen & 0xff)
+    reply[18...19] = req[18...19]
+    reply[22] = 64
+    reply[23] = 17
+    reply[26...29] = hostIP[0...3]
+    reply[30...33] = req[26...29]
+    let hdrChk = ipChecksum(reply, 14, 34)
+    reply[24] = UInt8(hdrChk >> 8)
+    reply[25] = UInt8(hdrChk & 0xff)
+
+    reply[34] = UInt8(hostPort >> 8)
+    reply[35] = UInt8(hostPort & 0xff)
+    reply[36] = req[34]
+    reply[37] = req[35]
+    let udpLen = UInt16(8 + dnsPayload.count)
+    reply[38] = UInt8(udpLen >> 8)
+    reply[39] = UInt8(udpLen & 0xff)
+    reply[42..<totalLen] = dnsPayload[0..<dnsPayload.count]
+
+    let senderIP = [UInt8](req[26...29])
+    var datagram = [UInt8](reply[34..<totalLen])
+    datagram[6] = 0
+    datagram[7] = 0
+    let udpChk = udpChecksum(hostIP, senderIP, datagram, udpLen)
+    reply[40] = UInt8(udpChk >> 8)
+    reply[41] = UInt8(udpChk & 0xff)
+
+    return totalLen
+}
+
 
 // Card N8 (claim 0351): is the datagram a DHCP client message (Ethernet
 // II ethertype 0x0800, version 4 / IHL 5, NOT a fragment, protocol UDP,

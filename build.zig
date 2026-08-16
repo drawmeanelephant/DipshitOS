@@ -603,6 +603,75 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_desktop.step);
 
     // ------------------------------------------------------------------
+    // Guest: eighteenth ESP user program (milestone twelve, card N1 — claim 7483)
+    // TCP.BIN. Userland TCP proof program.
+    // ------------------------------------------------------------------
+    const tcp_prog = b.addExecutable(.{
+        .name = "user-tcp",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/tcp_client.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    tcp_prog.linker_script = b.path("user/linker.ld");
+    const tcp_step = b.step("tcp", "Build the eighteenth ESP user program (zig-out/bin/TCP.BIN)");
+    const tcp_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    tcp_elf2bin.addFileArg(tcp_prog.getEmittedBin());
+    const tcp_bin = tcp_elf2bin.addOutputFileArg("TCP.BIN");
+    tcp_elf2bin.has_side_effects = true;
+    tcp_elf2bin.stdio = .inherit;
+    tcp_step.dependOn(&tcp_elf2bin.step);
+    const install_tcp = b.addInstallFileWithDir(tcp_bin, .bin, "TCP.BIN");
+    b.getInstallStep().dependOn(&install_tcp.step);
+
+    // ------------------------------------------------------------------
+    // Guest: nineteenth ESP user program (milestone twelve, card N3 — claim 5416)
+    // FETCH.BIN. Userland HTTP/1.0 client.
+    // ------------------------------------------------------------------
+    const fetch_prog = b.addExecutable(.{
+        .name = "user-fetch",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/fetch.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    fetch_prog.linker_script = b.path("user/linker.ld");
+    const fetch_step = b.step("fetch", "Build the nineteenth ESP user program (zig-out/bin/FETCH.BIN)");
+    const fetch_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    fetch_elf2bin.addFileArg(fetch_prog.getEmittedBin());
+    const fetch_bin = fetch_elf2bin.addOutputFileArg("FETCH.BIN");
+    fetch_elf2bin.has_side_effects = true;
+    fetch_elf2bin.stdio = .inherit;
+    fetch_step.dependOn(&fetch_elf2bin.step);
+    const install_fetch = b.addInstallFileWithDir(fetch_bin, .bin, "FETCH.BIN");
+    b.getInstallStep().dependOn(&install_fetch.step);
+
+    // ------------------------------------------------------------------
+    // Guest: twentieth ESP user program (milestone twelve, card N3 — claim 5416)
+    // CHAT.BIN. Userland graphical P2P chat application.
+    // ------------------------------------------------------------------
+    const chat_prog = b.addExecutable(.{
+        .name = "user-chat",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/chat.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    chat_prog.linker_script = b.path("user/linker.ld");
+    const chat_step = b.step("chat", "Build the twentieth ESP user program (zig-out/bin/CHAT.BIN)");
+    const chat_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    chat_elf2bin.addFileArg(chat_prog.getEmittedBin());
+    const chat_bin = chat_elf2bin.addOutputFileArg("CHAT.BIN");
+    chat_elf2bin.has_side_effects = true;
+    chat_elf2bin.stdio = .inherit;
+    chat_step.dependOn(&chat_elf2bin.step);
+    const install_chat = b.addInstallFileWithDir(chat_bin, .bin, "CHAT.BIN");
+    b.getInstallStep().dependOn(&install_chat.step);
+
+    // ------------------------------------------------------------------
     // Top-level steps. System-command steps are marked as having side
     // effects (and inherit stdio) so they always execute instead of being
     // skipped by the build cache. (No QEMU path: this project targets Apple
@@ -630,6 +699,9 @@ pub fn build(b: *std.Build) void {
     image.addFileArg(notepad_bin); // ... [NOTEPAD.BIN] (claim 3234: fifteenth user program, GUI text editor)
     image.addFileArg(top_bin); // ... [TOP.BIN] (claim 0680: sixteenth user program, GUI task manager)
     image.addFileArg(desktop_bin); // ... [DESKTOP.BIN] (claim 2427: seventeenth user program, GUI desktop launcher)
+    image.addFileArg(tcp_bin); // ... [TCP.BIN] (claim 7483: eighteenth user program, TCP client)
+    image.addFileArg(fetch_bin); // ... [FETCH.BIN] (claim 5416: nineteenth user program, HTTP client)
+    image.addFileArg(chat_bin); // ... [CHAT.BIN] (claim 5416: twentieth user program, graphical P2P chat)
     image.has_side_effects = true;
     image.stdio = .inherit;
     image_step.dependOn(&image.step);

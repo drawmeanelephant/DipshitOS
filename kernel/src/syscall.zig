@@ -68,9 +68,11 @@ const events = @import("events.zig"); // Milestone 9 (claim 1016): application e
 const file_table = @import("file_table.zig"); // Milestone 10 (claim 3570): userland storage ABI
 const esp_exec = @import("exec.zig"); // Claim 6359 (ADR 0007 slot 28): the EL0 exec seam — reuse the EL1h loader
 const esp = @import("esp.zig"); // Claim 6359: the ESP name bound for the path check
+const tcp = @import("tcp.zig"); // Milestone 12 (claim 7483): TCP client seam
+const csprng = @import("csprng.zig"); // ISN generation for TCP connect
 
 pub const slot_count: usize = 64;
-pub const implemented_count: usize = 30;
+pub const implemented_count: usize = 34;
 /// Card G6 (claim 0487) follow-on (slot 18): the fixed `sys_win_get` shape —
 /// four u32 LE words (x, y, w, h), 16 bytes, marshaled per call and copy_out'd
 /// through uaccess (the procs snapshot pattern).
@@ -169,6 +171,14 @@ pub const sys_exec: u64 = 28;
 /// the OS, not the program, owns process lifetime. Returns 0 once armed;
 /// EINVAL for every refusal.
 pub const sys_kill: u64 = 29;
+/// Milestone 12 (claim 7483): `sys_tcp_connect(ip, port)` — slot 30.
+pub const sys_tcp_connect: u64 = 30;
+/// Milestone 12 (claim 7483): `sys_tcp_send(buf, len)` — slot 31.
+pub const sys_tcp_send: u64 = 31;
+/// Milestone 12 (claim 7483): `sys_tcp_recv(buf, max)` — slot 32.
+pub const sys_tcp_recv: u64 = 32;
+/// Milestone 12 (claim 7483): `sys_tcp_close()` — slot 33.
+pub const sys_tcp_close: u64 = 33;
 
 pub const ErrorCode = enum(i64) {
     einval = -1,
@@ -212,6 +222,8 @@ var procs_scratch: [process.max_processes * process.snapshot_row_bytes]u8 = unde
 /// call, no allocation (the ipc staging pattern).
 var udp_send_staging: [udp.payload_max]u8 = undefined;
 var udp_recv_scratch: [udp.datagram_max]u8 = undefined;
+/// Milestone 12 (claim 7483): fixed BSS scratch for TCP send payload.
+var tcp_send_staging: [tcp.payload_max]u8 = undefined;
 
 /// Initialize the writer seam, reset counters and the uaccess regions. The
 /// table remains a runtime-built BSS object; rebuilding is unnecessary once
@@ -267,6 +279,10 @@ fn ensure_table() *const [slot_count]Entry {
         table_storage[sys_dir_list] = .{ .name = "sys_dir_list", .handler = handle_dir_list };
         table_storage[sys_exec] = .{ .name = "sys_exec", .handler = handle_exec };
         table_storage[sys_kill] = .{ .name = "sys_kill", .handler = handle_kill };
+        table_storage[sys_tcp_connect] = .{ .name = "sys_tcp_connect", .handler = handle_tcp_connect };
+        table_storage[sys_tcp_send] = .{ .name = "sys_tcp_send", .handler = handle_tcp_send };
+        table_storage[sys_tcp_recv] = .{ .name = "sys_tcp_recv", .handler = handle_tcp_recv };
+        table_storage[sys_tcp_close] = .{ .name = "sys_tcp_close", .handler = handle_tcp_close };
         table_ready = true;
     }
     return &table_storage;
@@ -936,9 +952,162 @@ fn handle_kill(args: Args, _: *exceptions.VectorFrame) u64 {
     };
 }
 
-/// Deterministic monitor output for the thirty implemented rows and their counters.
+/// Slot 30: `sys_tcp_connect(ip, port)`: Connect to target IPv4:port.
+fn handle_tcp_connect(args: Args, _: *exceptions.VectorFrame) u64 {
+    const ip_raw = args[0];
+    const dst_port = args[1];
+    if (dst_port == 0 or dst_port > 0xffff) return error_result(.einval);
+    if (!virtio_net.net_ready) return error_result(.einval);
+    if (!virtio_net.arp.ip_set()) return error_result(.einval);
+    const ip: [4]u8 = .{
+        @truncate(ip_raw >> 24),
+        @truncate(ip_raw >> 16),
+        @truncate(ip_raw >> 8),
+        @truncate(ip_raw),
+    };
+    if (std.mem.eql(u8, &ip, &virtio_net.arp.own_ip)) return error_result(.einval);
+
+    if (tcp.state == .closed) {
+        tcp.reset();
+    }
+    if (tcp.state != .idle) {
+        if (tcp.state == .established and std.mem.eql(u8, &ip, &tcp.peer_ip) and dst_port == tcp.peer_port) {
+            return 0;
+        }
+        return error_result(.einval);
+    }
+
+    virtio_net.net_rx_drain();
+    const peer_mac = virtio_net.arp.lookup(ip) orelse return error_result(.einval);
+    const isn: u32 = @truncate(csprng.random_u64());
+    tcp.start(ip, @truncate(dst_port), isn, peer_mac);
+    if (process.find_by_task(scheduler.current_id())) |pid| {
+        tcp.owner_pid = pid;
+    }
+
+    var out_len: usize = 0;
+    switch (virtio_net.net_tcp_send(tcp.msg[0..tcp.msg_len], &out_len)) {
+        .ok => {
+            tcp.syn_sent += 1;
+            tcp.advance_snd(1);
+            tcp.record_pending();
+        },
+        else => {
+            tcp.state = .idle;
+            return error_result(.einval);
+        },
+    }
+
+    var iterations: usize = 0;
+    while (tcp.state == .syn_sent and iterations < 1000000) : (iterations += 1) {
+        virtio_net.net_rx_drain();
+        if (tcp.ack_pending) {
+            var ack_len: usize = 0;
+            if (virtio_net.net_tcp_send(tcp.msg[0..tcp.msg_len], &ack_len) == .ok) {
+                tcp.ack_pending = false;
+                tcp.ack_sent += 1;
+            }
+        }
+        if (tcp.state == .established) return 0;
+        if (tcp.state == .closed) return error_result(.einval);
+        if (tcp.connect_timed_out()) {
+            tcp.abort_timeout();
+            return error_result(.einval);
+        }
+    }
+
+    if (tcp.state == .established) return 0;
+    return error_result(.einval);
+}
+
+/// Slot 31: `sys_tcp_send(buf, len)`: Send up to payload_max (64) bytes.
+fn handle_tcp_send(args: Args, _: *exceptions.VectorFrame) u64 {
+    const address = args[0];
+    var len = args[1];
+    if (len == 0) return 0;
+    if (len > tcp.payload_max) len = tcp.payload_max;
+    if (tcp.state != .established) return error_result(.einval);
+
+    if (uaccess.copy_in(&tcp_send_staging, address, @intCast(len)) != .ok) return error_result(.efault);
+
+    tcp.build_data_msg(tcp_send_staging[0..@intCast(len)]);
+    var out_len: usize = 0;
+    switch (virtio_net.net_tcp_send(tcp.msg[0..tcp.msg_len], &out_len)) {
+        .ok => {
+            tcp.data_sent += 1;
+            tcp.advance_snd(@intCast(len));
+            tcp.record_pending();
+            return len;
+        },
+        else => return error_result(.einval),
+    }
+}
+
+/// Slot 32: `sys_tcp_recv(buf, max)`: Receive up to max bytes into user buffer.
+fn handle_tcp_recv(args: Args, _: *exceptions.VectorFrame) u64 {
+    const address = args[0];
+    var max = args[1];
+    if (max == 0) return 0;
+    if (max > tcp.payload_max) max = tcp.payload_max;
+    if (tcp.state != .established and tcp.state != .closed and tcp.state != .fin_sent) {
+        return error_result(.einval);
+    }
+
+    virtio_net.net_rx_drain();
+
+    if (tcp.ack_pending) {
+        var out_len: usize = 0;
+        if (virtio_net.net_tcp_send(tcp.msg[0..tcp.msg_len], &out_len) == .ok) {
+            tcp.ack_pending = false;
+            tcp.ack_sent += 1;
+        }
+    }
+
+    if (!tcp.rx_pending) return 0;
+
+    const take = @min(@as(usize, @intCast(max)), tcp.rx_len);
+    if (uaccess.copy_out(address, tcp.rx_payload[0..take], take) != .ok) return error_result(.efault);
+    _ = tcp.take_rx();
+    return @intCast(take);
+}
+
+/// Slot 33: `sys_tcp_close()`: Initiate client FIN teardown.
+fn handle_tcp_close(_: Args, _: *exceptions.VectorFrame) u64 {
+    if (tcp.state == .idle) return 0;
+    if (tcp.state == .established) {
+        tcp.build_fin_msg();
+        var out_len: usize = 0;
+        if (virtio_net.net_tcp_send(tcp.msg[0..tcp.msg_len], &out_len) == .ok) {
+            tcp.fin_sent += 1;
+            tcp.advance_snd(1);
+            tcp.record_pending();
+            tcp.state = .fin_sent;
+        }
+    }
+
+    var iterations: usize = 0;
+    while (tcp.state == .fin_sent and iterations < 100000) : (iterations += 1) {
+        virtio_net.net_rx_drain();
+    }
+
+    if (tcp.ack_pending or tcp.state == .closed) {
+        if (tcp.ack_pending) {
+            var out_len: usize = 0;
+            if (virtio_net.net_tcp_send(tcp.msg[0..tcp.msg_len], &out_len) == .ok) {
+                tcp.ack_pending = false;
+                tcp.ack_sent += 1;
+            }
+        }
+        tcp.state = .idle;
+    }
+
+    tcp.owner_pid = null;
+    return 0;
+}
+
+/// Deterministic monitor output for the thirty-four implemented rows and their counters.
 pub fn report(con: *console.Console) void {
-    con.puts("syscalls: slots=64 implemented=30\n");
+    con.puts("syscalls: slots=64 implemented=34\n");
     var number: u64 = 0;
     while (number < implemented_count) : (number += 1) {
         const info = entry_info(number).?;
@@ -983,7 +1152,7 @@ test "syscall: runtime table has 64 slots and twenty-one unique implemented rows
             implemented += 1;
         }
     }
-    try std.testing.expectEqual(@as(usize, 30), implemented);
+    try std.testing.expectEqual(@as(usize, 34), implemented);
     try std.testing.expectEqualStrings("sys_ping", entry_info(0).?.name);
     try std.testing.expectEqualStrings("sys_exit", entry_info(3).?.name);
     try std.testing.expectEqualStrings("sys_sleep", entry_info(4).?.name);
@@ -1012,6 +1181,10 @@ test "syscall: runtime table has 64 slots and twenty-one unique implemented rows
     try std.testing.expectEqualStrings("sys_dir_list", entry_info(27).?.name);
     try std.testing.expectEqualStrings("sys_exec", entry_info(28).?.name);
     try std.testing.expectEqualStrings("sys_kill", entry_info(29).?.name);
+    try std.testing.expectEqualStrings("sys_tcp_connect", entry_info(30).?.name);
+    try std.testing.expectEqualStrings("sys_tcp_send", entry_info(31).?.name);
+    try std.testing.expectEqualStrings("sys_tcp_recv", entry_info(32).?.name);
+    try std.testing.expectEqualStrings("sys_tcp_close", entry_info(33).?.name);
     try std.testing.expect(entry_info(63) == null);
 }
 
@@ -1613,6 +1786,8 @@ test "syscall: udp send — EINVAL mapping, EFAULT, and the honest truncation" {
     defer virtio_net.udp.reset();
     virtio_net.arp.own_ip = .{ 10, 0, 0, 1 };
     defer virtio_net.arp.own_ip = .{ 0, 0, 0, 0 };
+    virtio_net.arp.table = [_]virtio_net.arp.ArpEntry{.{}} ** virtio_net.arp.table_slots;
+    defer virtio_net.arp.table = [_]virtio_net.arp.ArpEntry{.{}} ** virtio_net.arp.table_slots;
     var big: [100]u8 = undefined;
     for (&big, 0..) |*b, i| b.* = @intCast(i & 0xff);
     set_user_regions(
@@ -1931,7 +2106,7 @@ test "syscall: counters are monotonic and report is deterministic" {
     var con = mock.console();
     report(&con);
     try std.testing.expectEqualStrings(
-        "syscalls: slots=64 implemented=30\n" ++
+        "syscalls: slots=64 implemented=34\n" ++
             "  0 sys_ping calls=2\n" ++
             "  1 sys_write calls=0\n" ++
             "  2 sys_yield calls=0\n" ++
@@ -1961,7 +2136,11 @@ test "syscall: counters are monotonic and report is deterministic" {
             "  26 sys_file_close calls=0\n" ++
             "  27 sys_dir_list calls=0\n" ++
             "  28 sys_exec calls=0\n" ++
-            "  29 sys_kill calls=0\n",
+            "  29 sys_kill calls=0\n" ++
+            "  30 sys_tcp_connect calls=0\n" ++
+            "  31 sys_tcp_send calls=0\n" ++
+            "  32 sys_tcp_recv calls=0\n" ++
+            "  33 sys_tcp_close calls=0\n",
         mock.contents(),
     );
 }
@@ -2251,4 +2430,26 @@ test "syscall: wait_event block+wake preserves the event buffer across the svc r
     const got_arg0 = std.mem.readInt(u32, ev_buf[8..12], .little);
     try std.testing.expectEqual(events.KEY_DOWN, got_kind);
     try std.testing.expectEqual(@as(u32, 0x04), got_arg0);
+}
+
+test "syscall: tcp connect, send, recv, close slots 30..33 and sys_kill slot 29" {
+    userspace.init();
+    init(test_writer);
+    var frame = fresh_frame();
+
+    // Slot 29: sys_kill on invalid process ID returns EINVAL
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_kill, .{ 999, 0, 0, 0, 0, 0 }, &frame));
+
+    // Slot 30: sys_tcp_connect with port 0 or >0xffff returns EINVAL
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_tcp_connect, .{ 0x0a000002, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_tcp_connect, .{ 0x0a000002, 0x10000, 0, 0, 0, 0 }, &frame));
+
+    // Slot 31: sys_tcp_send when not connected returns EINVAL
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_tcp_send, .{ 0x1000, 5, 0, 0, 0, 0 }, &frame));
+
+    // Slot 32: sys_tcp_recv when not connected returns EINVAL
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_tcp_recv, .{ 0x1000, 64, 0, 0, 0, 0 }, &frame));
+
+    // Slot 33: sys_tcp_close when idle returns 0
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_tcp_close, .{ 0, 0, 0, 0, 0, 0 }, &frame));
 }

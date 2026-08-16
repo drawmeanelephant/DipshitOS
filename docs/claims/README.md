@@ -160,6 +160,7 @@ CI) fails if the table drifts from the claim files.
 | [5162-alloc-loader-boot-pooling](5162-alloc-loader-boot-pooling.md) | buffy (`freebuff/grab-most-current-git-and-let-s-continue-on-with-o-5886224b-69b6-4597-adc4-63698bac127e`) | ✅ done 2026-08-09 — pool now covers conventional + loader_code + loader_data + boot_services_code + boot_services_data minus exclusions (kernel image, stack, handoff page, map buffer); 25 alloc/memmap unit tests pass (9 new exclusion tests), transcript gate byte-identical after fixture regeneration, full class-A set green at HEAD `19ad92c` (evidence `artifacts/verify-portable-5162.txt`), and the live VZ run observes the extended pool (`artifacts/alloc-live-serial.log`: `pages: total=0xfebf free=0xfdfe excluded=0xc1 regions=0x12 span=0x10000`, selftest ok). |
 | [5275-tick-driven-task-scheduler](5275-tick-driven-task-scheduler.md) | buffy (`agent/buffy/macos27-custom-virtio-spike`) | ✅ done |
 | [5357-tcp-retransmit](5357-tcp-retransmit.md) | buffy (`agent/buffy/m5-net-tcp-rto`) | ✅ DONE 2026-08-12 on `agent/buffy/m5-net-tcp-rto` (from merged main `6a8ec41` — the N10 merge; claim PR pending) |
+| [5416-n3-capstone-apps](5416-n3-capstone-apps.md) | buffy (`agent/buffy/m12-n3-capstone-apps`) | ✅ done |
 | [5725-m3-docs-reconcile-syscall-abi](5725-m3-docs-reconcile-syscall-abi.md) | Buffy (`agent/buffy/m3-docs-reconcile-syscall-abi`) | ✅ done 2026-08-10 |
 | [5795-pool-scale-seven](5795-pool-scale-seven.md) | Buffy (`agent/buffy/m4-pool-scale`) | ✅ done — landed 2026-08-11 (claim flipped after class-A |
 | [5799-procs-syscall](5799-procs-syscall.md) | Buffy (`agent/buffy/m4-procs-syscall`) | ✅ done 2026-08-11 (claim flipped after class-A green + the new live gate + the full shared-seam sweep) |
@@ -185,6 +186,8 @@ CI) fails if the table drifts from the claim files.
 | [7302-xhci-depth-pointer-reports](7302-xhci-depth-pointer-reports.md) | buffy (`agent/buffy/audit-followup-2-input-depth`) | 🔄 agent/buffy/audit-followup-2-input-depth |
 | [7392-verify-gates-at-newest-main](7392-verify-gates-at-newest-main.md) | buffy (`freebuff/grab-most-current-git-and-let-s-continue-on-with-o-bd839138-534f-40b1-97b3-220d1b1c9a61`) | ✅ done 2026-08-09 — full class A (11/11) + class B (9/9) green at the merged |
 | [7463-e0-event-contract](7463-e0-event-contract.md) | buffy (`agent/buffy/m9-events`) | ✅ done (2026-08-15) |
+| [7483-n1-tcp-syscall-seam](7483-n1-tcp-syscall-seam.md) | buffy (`agent/buffy/m12-n1-tcp-seam`) | ✅ done |
+| [7566-n2-dns-client](7566-n2-dns-client.md) | buffy (`agent/buffy/m12-n2-dns-client`) | ✅ done |
 | [7604-sys-kill-el0-termination](7604-sys-kill-el0-termination.md) | buffy (`agent/buffy/m11-sys-kill`) | ✅ done |
 | [7670-e1-kernel-event-queue](7670-e1-kernel-event-queue.md) | buffy (`agent/buffy/m9-events`) | ✅ done (2026-08-15) |
 | [7786-kill-command](7786-kill-command.md) | Buffy (`agent/buffy/m4-kill`) | ✅ done — Stage A (the scheduler kill seam + the `kill` |
