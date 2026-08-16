@@ -43,10 +43,11 @@ pub const installed_apps = [_]AppEntry{
     .{ .name = "DIR.BIN", .desc = "Directory List", .status = "FAT32 ESP", .icon = 'd' },
     .{ .name = "FETCH.BIN", .desc = "HTTP/1.0 Client", .status = "TCP Syscall", .icon = 'w' },
     .{ .name = "CHAT.BIN", .desc = "P2P Net Chat", .status = "UDP Socket", .icon = 'm' },
+    .{ .name = "FILE.BIN", .desc = "File Browser", .status = "/data Browse", .icon = 'b' },
 };
 
 pub const manifest_max_bytes: usize = 512;
-pub const manifest_max_apps: usize = 8;
+pub const manifest_max_apps: usize = 16;
 
 /// Parse the APPS.TXT manifest text (`NAME.BIN | Display Name | icon-char`
 /// per line, `#` comments and blank lines ignored) into `out`, returning
@@ -433,13 +434,36 @@ pub export fn _start() callconv(.c) noreturn {
 // ---------------------------------------------------------------------------
 
 test "desktop: installed application catalog metadata" {
-    try std.testing.expectEqual(@as(usize, 8), installed_apps.len);
+    try std.testing.expectEqual(@as(usize, 9), installed_apps.len);
     try std.testing.expectEqualStrings("CALC.BIN", installed_apps[0].name);
     try std.testing.expectEqualStrings("NOTEPAD.BIN", installed_apps[1].name);
     try std.testing.expectEqualStrings("TOP.BIN", installed_apps[2].name);
     try std.testing.expectEqualStrings("KEYTEST.BIN", installed_apps[3].name);
     try std.testing.expectEqualStrings("FETCH.BIN", installed_apps[6].name);
     try std.testing.expectEqualStrings("CHAT.BIN", installed_apps[7].name);
+    try std.testing.expectEqualStrings("FILE.BIN", installed_apps[8].name);
+}
+
+test "desktop: manifest cap holds the full 9-app catalog incl FILE.BIN (card B4)" {
+    try std.testing.expect(manifest_max_apps >= 9);
+    // The real APPS.TXT catalog (9 entries) parses end-to-end without
+    // truncation — FILE.BIN must be the ninth entry and reachable.
+    const text =
+        "CALC.BIN | 64-bit Calc | c\n" ++
+        "NOTEPAD.BIN | Text Editor | n\n" ++
+        "TOP.BIN | Task Manager | t\n" ++
+        "KEYTEST.BIN | HID Input | k\n" ++
+        "TYPE.BIN | File Reader | f\n" ++
+        "DIR.BIN | Directory List | d\n" ++
+        "FETCH.BIN | HTTP/1.0 Client | w\n" ++
+        "CHAT.BIN | P2P Net Chat | m\n" ++
+        "FILE.BIN | File Browser | b";
+    var out: [manifest_max_apps]AppEntry = undefined;
+    const n = parse_manifest(text, &out);
+    try std.testing.expectEqual(@as(usize, 9), n);
+    try std.testing.expectEqualStrings("FILE.BIN", out[8].name);
+    try std.testing.expectEqualStrings("File Browser", out[8].desc);
+    try std.testing.expectEqual(@as(u8, 'b'), out[8].icon);
 }
 
 test "desktop: parse_manifest reads NAME | Display | icon lines (claim 8877)" {
