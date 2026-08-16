@@ -40,6 +40,16 @@ The [[userspace|syscall seam]] exposes windows to user programs through slots
 12–20: open, fill, present, close, move, raise, get, query, and set_visible —
 all owner-restricted, with per-process ownership and auto-close on exit.
 
+## A desktop on top
+
+Milestone eleven built the zero-heap `ui.zig` micro-widget toolkit (buttons,
+text inputs, list views — pure static BSS, no allocation) on top of the
+window seam, and four applications on top of that: `CALC.BIN` (calculator),
+`NOTEPAD.BIN` (editor), `TOP.BIN` (process monitor with click-to-kill), and
+the `DESKTOP.BIN` launcher — later joined by the `FILE.BIN` file browser
+(milestone thirteen). Windows and clicks reach these apps as events through
+milestone nine's per-process event queues (`sys_poll_event`/`sys_wait_event`).
+
 <Aside kind="info">
 
 **LIVE-GATED.** The pixel gates decode the actual framebuffer captures against
@@ -52,8 +62,11 @@ window's own content at its composited position.
 
 <Aside kind="warning">
 
-**LIMITATION.** Single display, 2D blits only, no accelerated/3D path, and no
-pointer-driven focus yet — motion is parsed but windows are focused by
-keyboard/monitor commands.
+**LIMITATION.** Single display, 2D blits only, no accelerated/3D path.
+Pointer events are routed to focused applications (milestone nine), and the
+window chrome — title bars + focus rings — is live-gated, but the window
+manager's own pointer-driven focus still lacks a live hardware proof: the
+guest side is complete and host-tested, and the live seam is a real-mouse
+class-C gate plus a class-B CG gate that self-gates on Accessibility trust.
 
 </Aside>

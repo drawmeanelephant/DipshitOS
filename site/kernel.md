@@ -40,13 +40,13 @@ in [[evidence]].
 ## The monitor
 
 The kernel serves a live `dipshit>` command monitor over the serial console.
-The registry is 40 commands at the current tree, spanning:
+The registry is 44 commands at the current tree, spanning:
 
-- **Identity / machine** — `about`, `version`, `uname`, `elephant`, `beans`
+- **Identity / machine** — `about`, `version`, `uname`, `elephant`, `beans`, `sysinfo`, `welcome`/`tour`
 - **Memory / machine state** — `mem`, `hex`, `pages`, `pci`, `handoff`, `mmu`-adjacent `addrspaces`
 - **Tasks / processes** — `tasks`, `spawn`, `exec`, `procs`, `kill`, `mbox`, `syscalls`
-- **Storage** — `ls`, `cat`, `write`, `mount`
-- **Networking** — `net`, `netsend`
+- **Storage** — `ls`, `cat`, `write`, `mount`, `settings`
+- **Networking** — `net` (arp/ip/ping/udp/dhcp/dns/tcp subcommands), `netsend`
 - **Graphics / input** — `screen`, `text`, `roadpops`, `win`, `input`, `usb`
 - **Misc** — `help`, `echo`, `clear`, `repeat`, `random`, `reboot`, `shutdown`, `fault`, `uaccess`, `timer`
 

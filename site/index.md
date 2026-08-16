@@ -22,7 +22,8 @@ see [[evidence]].
 
 ## Current status
 
-Every milestone planned so far has landed:
+Every milestone through twelve has landed; milestone thirteen (files &
+applications) is in progress with two of four cards shipped:
 
 | Milestone | What it is | Status |
 |-----------|-----------|--------|
@@ -33,6 +34,12 @@ Every milestone planned so far has landed:
 | Networking | virtio-net, ARP, IPv4/ICMP, UDP, DHCP, TCP, NAT | Done |
 | Graphics | virtio-gpu framebuffer, text, Road Pops terminal, Driving Award window manager | Done |
 | Input | USB XHCI, HID enumeration, keyboard events feeding the terminal | Done |
+| Usability & HIG | ADR 0008: grouped `help`, line editing + history, one error contract, window chrome, `sysinfo`, persistent settings | Done |
+| Events | Per-process event queues: keyboard/pointer/window events to focused EL0 apps (`sys_poll_event`/`sys_wait_event`) | Done |
+| User filesystem ABI | Per-process file table, `/esp/` + `/data/` routing, file syscalls (slots 23–27), storage utilities | Done |
+| Desktop platform | ADR 0011: zero-heap `ui.zig` widget toolkit + `CALC.BIN`, `NOTEPAD.BIN`, `TOP.BIN`, `DESKTOP.BIN` launcher | Done |
+| Network apps | TCP syscall seam (slots 30–33), RFC 1035 DNS, `TCP.BIN`/`FETCH.BIN`/`CHAT.BIN` | Done |
+| Files & applications | `APPS.TXT` manifest + `FILE.BIN` graphical data browser; delete/rename and desktop composition are the open cards | In progress |
 
 The full, always-current accounting lives in the repository's
 [`docs/status.md`](https://github.com/drawmeanelephant/DipshitOS/blob/main/docs/status.md).
@@ -56,11 +63,20 @@ A single boot of DipshitOS gets you, in order:
 - A window manager — **Driving Award** — compositing a terminal and a live
   clock overlay.
 - EL0 user programs, exec'd from the disk, running as real processes with a
-  21-slot syscall ABI.
+  34-slot syscall ABI (slots 0–33) covering IPC, windows, files, events,
+  process control, and TCP.
 - Networking from raw Ethernet frames up through ARP, IPv4/ICMP, UDP, DHCP,
-  and a bounded TCP client.
+  and a bounded TCP client — plus an RFC 1035 DNS resolver.
 - USB keyboard input, enumerated over a real XHCI controller, typing into the
   terminal.
+- A graphical desktop: the `DESKTOP.BIN` launcher with a working calculator
+  (`CALC.BIN`), a persistent text editor (`NOTEPAD.BIN`), a click-to-kill
+  process monitor (`TOP.BIN`), and a file browser over the DATA partition
+  (`FILE.BIN`).
+- Userland network applications: an HTTP/1.0 client (`FETCH.BIN`) and a
+  peer-to-peer graphical chat app (`CHAT.BIN`).
+- Keyboard, pointer, and window events routed to focused applications, so an
+  EL0 program runs an interactive event loop.
 
 ![A live DipshitOS boot: the Road Pops terminal showing the boot banner and an echoed session, with the Driving Award clock overlay in the top-right corner](index.assets/screenshot.png "A live DipshitOS boot")
 

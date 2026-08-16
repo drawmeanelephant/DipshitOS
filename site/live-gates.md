@@ -33,13 +33,15 @@ Each gate is a `tools/verify-live-*.sh` script that:
 - **Serial / machine** — `live-transcript`, `live-reboot`, `live-timer`, `live-tasks`, `live-exceptions`
 - **Userspace** — `live-userspace`, `live-svc`, `live-uaccess`, `live-addrspaces`, `live-lifecycle`, `live-exec`, `live-sleep`
 - **Processes** — `live-procs`, `live-concurrent`, `live-long-lived`, `live-kill`, `live-ipc`, `live-scale`, `live-wait`, `live-procs-syscall`
-- **Storage / entropy** — `live-fs`, `live-gfs`, `live-entropy`
-- **Network** — `live-net-tx`, `-rx`, `-arp`, `-icmp`, `-udp`, `-udp-syscall`, `-nat`, `-dhcp`, `-dhcp-renew`, `-tcp`, `-tcp-rto`
-- **Graphics / input** — `live-screen`, `live-text`, `live-roadpops`, `live-glyphs`, `live-win`, `live-win-syscall`, `live-win-move`, `live-win-close`, `live-xhci`, `live-usb`, `live-input`
+- **Storage / entropy / files** — `live-fs`, `live-gfs`, `live-entropy`, `live-user-fs` (the userland file ABI)
+- **Network** — `live-net-tx`, `-rx`, `-arp`, `-icmp`, `-udp`, `-udp-syscall`, `-nat`, `-dhcp`, `-dhcp-renew`, `-tcp`, `-tcp-rto`, `-tcp-syscall`, `-dns`, `-fetch`
+- **Graphics / input** — `live-screen`, `live-text`, `live-roadpops`, `live-glyphs`, `live-win`, `live-win-syscall`, `live-win-move`, `live-win-close`, `live-win-hig`, `live-xhci`, `live-usb`, `live-input`
+- **Usability / HIG** — `live-help`, `live-editing`, `live-settings`, plus the pointer seams: `pointer-manual` (class C, a human at the mouse) and `live-pointer-cg` (class B, self-gating on Accessibility trust)
+- **Events / desktop / apps** — `live-events`, `live-sys-kill`, `live-desktop`, `live-file-browser`
 
 The aggregate `verify-vz` sweep re-checks the shared seam across every
-subsystem in one run — the standing regression proof that a new subsystem did
-not break the ones before it.
+subsystem in one run (43 gates at the current tree) — the standing regression
+proof that a new subsystem did not break the ones before it.
 
 <Aside kind="tip">
 

@@ -43,7 +43,7 @@ dipshit>
 ```
 
 From there the interactive monitor serves the [[architecture|kernel]]'s
-command surface — `help` lists the registry (40 commands as of the current
+command surface — `help` lists the registry (44 commands as of the current
 tree), from `mem` and `pages` through `exec`, `net`, `screen`, and `win`.
 
 <Aside kind="info">
