@@ -14,8 +14,10 @@ map; the satellites below carry the detail.
 
 ```text
 ┌───────────────────────────────────────────────┐
-│  EL0 user programs (USER.BIN, UDP.BIN, …)     │
-│  syscalls: ping/write/yield/exit/sleep/ipc/…  │
+│  EL0 user programs + desktop apps (CALC.BIN,   │
+│  NOTEPAD.BIN, DESKTOP.BIN, FETCH.BIN, …)      │
+│  syscalls: ping/write/…/ipc/win/events/file/  │
+│             exec/kill/tcp (slots 0–33)        │
 ├───────────────────────────────────────────────┤
 │  Monitor + shell (dipshit>)                   │
 │  Road Pops terminal · Driving Award compositor │
@@ -61,10 +63,12 @@ Three rules show up everywhere:
 | Allocator | first-fit bitmap over the captured EFI map, with exclusion ranges |
 | Scheduler | tick-driven round-robin; 7 slots (shell + worker + 4 EL0 + idle) |
 | Processes | bounded registry, lifecycle states, exit-status propagation, IPC mailboxes |
-| Syscalls | ADR 0007: 64-slot table, 21 implemented, deterministic counters |
-| Networking | virtio-net → ARP → IPv4/ICMP → UDP → DHCP → TCP, plus a NAT mode |
+| Syscalls | ADR 0007: 64-slot table, 34 implemented (0–33), deterministic counters |
+| Networking | virtio-net → ARP → IPv4/ICMP → UDP → DHCP → DNS → TCP, plus a NAT mode and the EL0 TCP seam |
 | Graphics | virtio-gpu framebuffer → text → Road Pops → Driving Award compositor |
-| Input | XHCI host controller → USB enumeration → HID boot protocol → event FIFO |
+| Input | XHCI host controller → USB enumeration → HID boot protocol → event FIFO → per-process event queues |
+| Events | keyboard/pointer/window events routed to focused EL0 apps (`sys_poll_event`/`sys_wait_event`) |
+| Desktop | the zero-heap `ui.zig` widget toolkit + CALC/NOTEPAD/TOP/DESKTOP/FILE applications |
 
 <Aside kind="note">
 

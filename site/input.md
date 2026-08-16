@@ -53,7 +53,10 @@ respectively.
 <Aside kind="warning">
 
 **LIMITATION.** Boot-protocol HID only (no full report-descriptor parser), the
-two known devices only, no hubs, and no pointer *consumption* yet — pointer
-reports are parsed and recorded, but nothing clicks a window.
+two known devices only, and no hubs. Pointer *reports* are consumed —
+milestone nine routes pointer and click events to focused EL0 applications
+(`KEYTEST.BIN` proves it live) — but the window manager's own pointer-driven
+focus is guest-complete and host-tested without a live hardware proof yet
+(real-mouse class-C + CG class-B gates).
 
 </Aside>

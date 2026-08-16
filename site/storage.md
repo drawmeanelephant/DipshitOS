@@ -31,6 +31,15 @@ The disk image carries:
 A file written to the DATA volume persists across a real reboot on the disk
 itself — that is the live gate `verify-live-gfs`.
 
+## The userland file ABI
+
+Milestone ten opened storage to EL0: a per-process file-handle table
+(`kernel/src/file_table.zig`, 8 static handles, reset at process lifecycle)
+behind the `sys_file_open`/`read`/`write`/`close` and `sys_dir_list` syscalls
+(slots 23–27), with path canonicalization routing `/esp/...` and `/data/...`
+to the right volume. `SAVETEXT.BIN`, `TYPE.BIN`, and `DIR.BIN` prove the
+seam; `NOTEPAD.BIN` and `FILE.BIN` use it for real work.
+
 ## Loading programs
 
 `exec <file> [args...]` reads a flat `DSK1` image through the same FAT path,
@@ -41,15 +50,17 @@ it at EL0. The program images are embedded on the ESP by the image builder.
 
 **VERIFIED.** `verify-live-fs` (ESP file window) and `verify-live-gfs` (the
 DATA partition, written and persisted across reboot) gate the storage path;
-`verify-live-exec` gates program loading.
+`verify-live-exec` gates program loading, and `verify-live-user-fs` gates the
+userland file syscall ABI end to end.
 
 </Aside>
 
 <Aside kind="warning">
 
 **LIMITATION.** FAT32 only, no directories-with-subdirectories write
-semantics beyond what the path resolver exposes, no journaling, no block
-cache, and no general file-descriptor layer. It is a storage *driver*, not a
-filesystem API.
+semantics beyond what the path resolver exposes, no journaling, and no block
+cache. The ABI is read-only so far — delete, rename, truncate, and free are
+milestone thirteen's B1 card (slots 34–37). It is a storage *driver* with a
+bounded file API, not a POSIX filesystem.
 
 </Aside>

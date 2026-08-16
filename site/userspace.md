@@ -14,8 +14,9 @@ scheduled as processes. The syscall boundary is a frozen, numbered ABI.
 
 The syscall ABI is frozen in `docs/decisions/0007-syscall-abi.md`: the syscall
 number goes in x8, arguments in x0–x5, the result in x0, dispatched through a
-runtime-built 64-slot table. Twenty-one slots (0–20) are implemented; the rest
-return `ENOSYS`.
+runtime-built 64-slot table. Thirty-four slots (0–33) are implemented; the
+rest return `ENOSYS`. Slots 34–37 are reserved for milestone thirteen's
+filesystem-mutation syscalls.
 
 | Slot | Name | What it does |
 |-----:|------|--------------|
@@ -29,6 +30,11 @@ return `ENOSYS`.
 | 8 | `wait` | block until a peer exits, return its status |
 | 9/10/11 | `udp_listen` / `udp_send` / `udp_recv` | UDP from EL0 |
 | 12–20 | `win_*` | open/fill/present/close/move/raise/get/query/set_visible |
+| 21/22 | `poll_event` / `wait_event` | non-blocking / blocking event queue reads |
+| 23–27 | `file_open` / `file_read` / `file_write` / `file_close` / `dir_list` | the userland file ABI |
+| 28 | `exec` | launch another EL0 program (the desktop launcher's seam) |
+| 29 | `kill` | terminate a running EL0 program (TOP.BIN's Kill button) |
+| 30–33 | `tcp_connect` / `tcp_send` / `tcp_recv` / `tcp_close` | bounded TCP from EL0 |
 
 ## Fault-safe uaccess
 
@@ -65,8 +71,11 @@ cross-process access.
 <Aside kind="info">
 
 **LIVE-GATED.** Concurrent programs, exit-status propagation, the IPC round
-trip, and the UDP syscall seam are each proven by a dedicated class B gate —
-`verify-live-concurrent`, `verify-live-wait`, `verify-live-ipc`, and
-`verify-live-net-udp-syscall`.
+trip, the UDP and TCP syscall seams, the event loop, the userland file ABI,
+and the desktop apps are each proven by a dedicated class B gate —
+`verify-live-concurrent`, `verify-live-wait`, `verify-live-ipc`,
+`verify-live-net-udp-syscall`, `verify-live-net-tcp-syscall`,
+`verify-live-events`, `verify-live-user-fs`, `verify-live-desktop`, and
+`verify-live-sys-kill`.
 
 </Aside>
