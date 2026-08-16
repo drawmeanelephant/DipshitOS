@@ -1119,18 +1119,22 @@ ever, lands as its own ADR 0007 amendment), and a visual-design pixel spec
 
 ### Milestone twelve — userland network applications
 
-> Connect userland applications to the network with a clean TCP syscall seam
-> and DNS resolution. **🔄 In progress** (tracked by issue #148, worked in a
-> parallel chat); M11's `sys_exec` (slot 28) and `sys_kill` (slot 29) landed
-> first, so the TCP seam runs at ADR 0007 slots 30–33.
+> Connect userland applications to the network with a clean TCP syscall seam (ADR 0007 slots 30–33),
+> RFC 1035 DNS resolution, and standalone network applications (`TCP.BIN`, `FETCH.BIN`, `CHAT.BIN`).
+> See [`docs/march-m12.md`](march-m12.md) and [`docs/decisions/0012-userland-network-applications.md`](decisions/0012-userland-network-applications.md) (Issues #148, #149, #150).
 
-- **N12 — Userland TCP syscall seam (ADR 0007 slots 30–33).**
-  `sys_tcp_connect`, `sys_tcp_send`, `sys_tcp_recv`, `sys_tcp_close`.
-- **N13 — Bounded DNS client.** RFC 1035 UDP query client on port 53 to
-  resolve domain names.
-- **N14 — `FETCH.BIN` & `CHAT.BIN`.** **[Capstone Gate]** An EL0 HTTP/1.0
-  client fetching web text over NAT, and a peer-to-peer graphical chat app.
-  Live gate: `verify-live-fetch.sh`.
+- **N0 — Architecture & Network ABI contract (ADR 0012).** Normative specification
+  for userland networking: TCP syscall semantics (`sys_tcp_connect`, `sys_tcp_send`, `sys_tcp_recv`, `sys_tcp_close` on slots 30–33),
+  DNS RFC 1035 packet schema, and process lifecycle teardown.
+- **N1 — Userland TCP syscall seam (Issue #148).** `sys_tcp_connect` (slot 30), `sys_tcp_send` (slot 31),
+  `sys_tcp_recv` (slot 32), `sys_tcp_close` (slot 33) in `kernel/src/syscall.zig` + `kernel/src/tcp.zig`.
+  Proof program `TCP.BIN` (`user/src/tcp_client.zig`). Live gate: `verify-live-net-tcp-syscall.sh`.
+- **N2 — Bounded DNS client (Issue #149).** RFC 1035 UDP query client in `kernel/src/dns.zig` on port 53 to
+  resolve domain names. Monitor command `net dns` + runner `--net-dns-respond`. Live gate: `verify-live-net-dns.sh`.
+- **N3 — `FETCH.BIN` & `CHAT.BIN` capstone applications (Issue #150).** **[Capstone Gate]**
+  HTTP/1.0 client `FETCH.BIN` fetching web text over TCP port 80, and peer-to-peer graphical chat app `CHAT.BIN`
+  combining `ui.zig` micro-widgets with UDP messaging. Live gate: `verify-live-fetch.sh`.
+
 
 See [`march-m12.md`](march-m12.md) for the per-card tracker.
 

@@ -219,7 +219,8 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
                       keytest_bytes=None, savetext_bytes=None,
                       type_bytes=None, dir_bytes=None,
                       calc_bytes=None, notepad_bytes=None,
-                      top_bytes=None, desktop_bytes=None):
+                      top_bytes=None, desktop_bytes=None,
+                      tcp_bytes=None):
     """Write a FAT32 volume (boot sector, FSInfo, FATs, directories, files)
     into `img` at the volume's offset.
 
@@ -233,7 +234,7 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
                      SAVETEXT.BIN (when given), TYPE.BIN (when given),
                      DIR.BIN (when given), CALC.BIN (when given),
                      NOTEPAD.BIN (when given), TOP.BIN (when given),
-                     DESKTOP.BIN (when given)
+                     DESKTOP.BIN (when given), TCP.BIN (when given)
       /EFI/          ., .., BOOT/
       /EFI/BOOT/     ., .., BOOTAA64.EFI
     Cluster layout: 2=root, 3=EFI, 4=BOOT, then file data in order.
@@ -259,6 +260,7 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
     notepad_clusters = (len(notepad_bytes) + bps - 1) // bps if notepad_bytes else 0
     top_clusters = (len(top_bytes) + bps - 1) // bps if top_bytes else 0
     desktop_clusters = (len(desktop_bytes) + bps - 1) // bps if desktop_bytes else 0
+    tcp_clusters = (len(tcp_bytes) + bps - 1) // bps if tcp_bytes else 0
     file_clusters = (len(efi_bytes) + bps - 1) // bps
     root_entries_count = 2  # vol_label + efi_entry
     if kernel_bytes: root_entries_count += 1
@@ -279,6 +281,7 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
     if notepad_bytes: root_entries_count += 1
     if top_bytes: root_entries_count += 1
     if desktop_bytes: root_entries_count += 1
+    if tcp_bytes: root_entries_count += 1
 
     root_clusters = (root_entries_count * 32 + bps - 1) // bps
     efi_dir_cluster = 2 + root_clusters
@@ -301,7 +304,8 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
     notepad_start = calc_start + calc_clusters
     top_start = notepad_start + notepad_clusters
     desktop_start = top_start + top_clusters
-    efi_start = desktop_start + desktop_clusters
+    tcp_start = desktop_start + desktop_clusters
+    efi_start = tcp_start + tcp_clusters
     allocated = efi_start + file_clusters - 2  # clusters used beyond root(2)
     if allocated > geo.clusters:
         raise ValueError(
@@ -356,6 +360,8 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
         chain(top_start, top_clusters)            # TOP.BIN data
     if desktop_bytes:
         chain(desktop_start, desktop_clusters)    # DESKTOP.BIN data
+    if tcp_bytes:
+        chain(tcp_start, tcp_clusters)            # TCP.BIN data
     chain(efi_start, file_clusters)            # BOOTAA64.EFI data
 
     def wsec(sector, data):
@@ -422,6 +428,8 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
         root_entries += dir_entry(b"TOP     BIN", 0x20, top_start, len(top_bytes))
     if desktop_bytes:
         root_entries += dir_entry(b"DESKTOP BIN", 0x20, desktop_start, len(desktop_bytes))
+    if tcp_bytes:
+        root_entries += dir_entry(b"TCP     BIN", 0x20, tcp_start, len(tcp_bytes))
 
     root_entries = root_entries.ljust(root_clusters * bps, b"\x00")
     for i in range(root_clusters):
@@ -503,6 +511,10 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
         for i in range(desktop_clusters):
             chunk = desktop_bytes[i * bps:(i + 1) * bps]
             wsec(geo.cluster_sector(desktop_start + i), chunk.ljust(bps, b"\x00"))
+    if tcp_bytes:
+        for i in range(tcp_clusters):
+            chunk = tcp_bytes[i * bps:(i + 1) * bps]
+            wsec(geo.cluster_sector(tcp_start + i), chunk.ljust(bps, b"\x00"))
     for i in range(file_clusters):
         chunk = efi_bytes[i * bps:(i + 1) * bps]
         wsec(geo.cluster_sector(efi_start + i), chunk.ljust(bps, b"\x00"))
@@ -764,7 +776,7 @@ def build_image(total_sectors, esp_offset, efi_bytes, kernel_bytes=None,
                 winclose_bytes=None, winloop_bytes=None, winmove_bytes=None,
                 keytest_bytes=None, savetext_bytes=None, type_bytes=None,
                 dir_bytes=None, calc_bytes=None, notepad_bytes=None,
-                top_bytes=None, desktop_bytes=None):
+                top_bytes=None, desktop_bytes=None, tcp_bytes=None):
     img = bytearray(total_sectors * BYTES_PER_SECTOR)
     last_usable = total_sectors - 34
     first_usable = 34
@@ -806,7 +818,8 @@ def build_image(total_sectors, esp_offset, efi_bytes, kernel_bytes=None,
                       counter_bytes, peer_bytes, status43_bytes, udp_bytes,
                       win_bytes, winclose_bytes, winloop_bytes, winmove_bytes,
                       keytest_bytes, savetext_bytes, type_bytes, dir_bytes,
-                      calc_bytes, notepad_bytes, top_bytes, desktop_bytes)
+                      calc_bytes, notepad_bytes, top_bytes, desktop_bytes,
+                      tcp_bytes)
     geo_data = Fat32Geometry(data_sectors, data_start)
     build_data_volume(img, geo_data)
     return bytes(img)
@@ -860,6 +873,8 @@ def main(argv):
                     help="optional flat user program (TOP.BIN) to embed at the volume root")
     ap.add_argument("desktop_file", nargs="?",
                     help="optional flat user program (DESKTOP.BIN) to embed at the volume root")
+    ap.add_argument("tcp_file", nargs="?",
+                    help="optional flat user program (TCP.BIN) to embed at the volume root")
     args = ap.parse_args(argv)
 
     if args.list:
@@ -1038,12 +1053,22 @@ def main(argv):
                   "not be a DipshitOS user program image" % args.desktop_file,
                   file=sys.stderr)
 
+    tcp_bytes = None
+    if args.tcp_file:
+        with open(args.tcp_file, "rb") as f:
+            tcp_bytes = f.read()
+        if tcp_bytes[:4] != b"DSK1":
+            print("WARNING: %s does not start with the 'DSK1' magic; it may "
+                  "not be a DipshitOS user program image" % args.tcp_file,
+                  file=sys.stderr)
+
     total_sectors = args.size_mb * 1024 * 1024 // BYTES_PER_SECTOR
     img = build_image(total_sectors, args.esp_offset, efi_bytes, kernel_bytes,
                       user_bytes, counter_bytes, peer_bytes, status43_bytes,
                       udp_bytes, win_bytes, winclose_bytes, winloop_bytes,
                       winmove_bytes, keytest_bytes, savetext_bytes, type_bytes,
-                      dir_bytes, calc_bytes, notepad_bytes, top_bytes, desktop_bytes)
+                      dir_bytes, calc_bytes, notepad_bytes, top_bytes, desktop_bytes,
+                      tcp_bytes)
     with open(args.image, "wb") as f:
         f.write(img)
     extra = ", %d-byte kernel image embedded" % len(kernel_bytes) if kernel_bytes else ""
@@ -1064,9 +1089,11 @@ def main(argv):
     extra += ", %d-byte notepad program embedded" % len(notepad_bytes) if notepad_bytes else ""
     extra += ", %d-byte top program embedded" % len(top_bytes) if top_bytes else ""
     extra += ", %d-byte desktop program embedded" % len(desktop_bytes) if desktop_bytes else ""
+    extra += ", %d-byte tcp program embedded" % len(tcp_bytes) if tcp_bytes else ""
     print("wrote %s: %d MiB, ESP at LBA %d, %d-byte EFI application embedded%s" %
           (args.image, args.size_mb, args.esp_offset, len(efi_bytes), extra))
     return 0
+
 
 
 if __name__ == "__main__":

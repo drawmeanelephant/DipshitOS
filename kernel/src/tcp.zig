@@ -314,9 +314,24 @@ fn be32(b: []const u8) u32 {
 // The client state machine
 // ---------------------------------------------------------------------------
 
+pub var owner_pid: ?u64 = null;
+
+/// Close connection if owned by `pid` (called during process exit).
+pub fn close_owner(pid: u64) void {
+    if (owner_pid) |p| {
+        if (p == pid) {
+            if (state == .established or state == .syn_sent or state == .fin_sent) {
+                release_conn();
+            }
+            owner_pid = null;
+        }
+    }
+}
+
 /// Reset the client (tests only — the live kernel never re-initializes).
 pub fn reset() void {
     state = .idle;
+    owner_pid = null;
     peer_ip = .{ 0, 0, 0, 0 };
     peer_port = 0;
     peer_mac = .{ 0, 0, 0, 0, 0, 0 };

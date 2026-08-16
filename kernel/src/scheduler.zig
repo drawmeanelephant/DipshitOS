@@ -70,6 +70,8 @@ const mailbox = @import("mailbox.zig");
 const events = @import("events.zig");
 // Milestone 10 (claim 9948): per-process file handle table
 const file_table = @import("file_table.zig");
+// Milestone 12 (claim 7483): per-process TCP connection cleanup
+const tcp = @import("tcp.zig");
 // Card G6 teardown follow-on (per-process window ownership): the exit path
 // auto-closes the exiting process's user windows via `close_owner`. Pure
 // BSS writes, safe in the exception context `exit_current` runs in.
@@ -863,6 +865,7 @@ pub fn exit_current(status: u64) bool {
         // marks), safe in this exception context.
         _ = driving_award.close_owner(pid);
         file_table.reset_process(pid);
+        tcp.close_owner(pid);
     }
     const next = next_runnable(exiting) orelse {
         // No successor: roll back (the always-ready idle task makes this

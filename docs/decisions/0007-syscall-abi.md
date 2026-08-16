@@ -474,3 +474,19 @@ the ABI — x8 number, x0–x5 arguments, x0 result, reserved 30–63, error
 codes — is otherwise unchanged. **The M12 TCP plan (issue #148) now runs
 at slots 30–33** (28 `sys_exec`, 29 `sys_kill`, then TCP; the issue body
 is updated to match).
+
+## Amendment (2026-08-15, ADR 0012 — userland TCP socket seam)
+
+Milestone 12 exposes the kernel's Milestone 5 TCP client to EL0 applications
+through the ADR 0007 syscall seam (slots 30–33, following slot 28 `sys_exec` and slot 29 `sys_kill`):
+
+| Slot | Name | Signature | Description |
+|:---|:---|:---|:---|
+| 30 | `sys_tcp_connect` | `connect(ip: u32, port: u16) -> i64` | Resolves peer MAC via ARP, initiates 3-way handshake to target IPv4:port, and blocks the caller on the scheduler sleep/event seam until `ESTABLISHED` or timeout (30 s). Returns `0` on success, or negative error code (`ECONNREFUSED` -6, `ETIMEDOUT` -7, `EINVAL` -1, `ENOTREADY` -5). |
+| 31 | `sys_tcp_send` | `send(buf_ptr: [*]const u8, len: usize) -> i64` | Marshals payload (up to 64 bytes) via `uaccess.copy_in`, constructs TCP segment, and transmits. Returns bytes sent, or negative error code (`ENOTCONN` -5, `EFAULT` -3, `EINVAL` -1). |
+| 32 | `sys_tcp_recv` | `recv(buf_ptr: [*]u8, max_len: usize) -> i64` | Drains the RX buffer via `uaccess.copy_out` (peek $\to$ copy $\to$ pop). Drains virtio-net device first (the N6 drain contract). Returns bytes received (0 if none pending / non-blocking EOF), or negative error code (`ENOTCONN` -5, `EFAULT` -3). |
+| 33 | `sys_tcp_close` | `close() -> i64` | Initiates graceful FIN teardown (FIN $\to$ FIN-ACK $\to$ ACK) and returns connection to `closed`/`idle`. Returns 0 on success, or negative error code (`ENOTCONN` -5). |
+
+`implemented_count` is 34; reserved slots become 34–63.
+These handlers marshal arguments and user buffers through the claim-6120 `uaccess` window and invoke `kernel/src/tcp.zig`.
+Proof program: `TCP.BIN` (`user/src/tcp_client.zig`, Issue #148).
