@@ -1145,8 +1145,12 @@ See [`march-m12.md`](march-m12.md) for the per-card tracker.
 > partition, and the filesystem semantics (delete, rename, truncate, free
 > space) a real browser needs. This is wishlist items 6, 9, and the
 > filesystem half of 17 — the next "weird little computer" step after the
-> network milestone. **⬜ Planned** (tracked by issues #152/#153 + new B1/B4
-> issues); M12's TCP seam runs at ADR 0007 slots 30–33, so this milestone's
+> network milestone. **🔄 B2 done 2026-08-16** (claim 8877, PR #165 — the
+> `APPS.TXT` application identity manifest; `verify-live-desktop.sh` PASS on
+> VZ; the gate's tail also fixed two pre-existing kernel bugs: the
+> `sys_file_read` kernel-stack overflow and the FP/SIMD clobber across
+> exceptions); B1/B3/B4 remain (tracked by issues #152/#153 + new B1/B4
+> issues). M12's TCP seam runs at ADR 0007 slots 30–33, so this milestone's
 > FS additions start at slot 34.
 
 - **B1 — Filesystem semantics depth (ADR 0007 slots 34–37).**
