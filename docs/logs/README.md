@@ -60,6 +60,7 @@ verify-coordination`, and CI) fails if it drifts from the files.
 | `TOP.BIN` (Graphical Task Manager & Process Monitor) | [`agent-buffy-m11-a4-top.md`](agent-buffy-m11-a4-top.md) |
 | `DESKTOP.BIN` (Desktop Launcher & Environment) & Capstone Gate | [`agent-buffy-m11-a5-desktop.md`](agent-buffy-m11-a5-desktop.md) |
 | `CALC.BIN` polish: checked arithmetic, repeat-op, memory keys | [`agent-buffy-m11-calc-polish.md`](agent-buffy-m11-calc-polish.md) |
+| NOTEPAD.BIN scrollable viewport, visible cursor, line wrapping (claim 1771) | [`agent-buffy-m11-notepad-scroll.md`](agent-buffy-m11-notepad-scroll.md) |
 | `sys_exec`: the EL0 exec seam (ADR 0007 slot 28) | [`agent-buffy-m11-sys-exec.md`](agent-buffy-m11-sys-exec.md) |
 | Milestone eleven march tracker | [`agent-buffy-m11-tracker.md`](agent-buffy-m11-tracker.md) |
 | `agent/buffy/m15-commands` (PR #12) | [`agent-buffy-m15-commands.md`](agent-buffy-m15-commands.md) |
