@@ -1152,9 +1152,11 @@ See [`march-m12.md`](march-m12.md) for the per-card tracker.
 > exceptions); **🔄 B3 done 2026-08-16** (claim 4742 — `FILE.BIN`, the
 > graphical DATA file browser; `verify-live-file-browser.sh` PASS on VZ);
 > **🔄 B1 done 2026-08-16** (claim 5801 — the mutating FS seam, slots 34–37;
-> `verify-live-fs-mutation.sh` PASS on VZ); B4 remains (tracked by
-> issue #162). M12's TCP seam runs at ADR 0007 slots 30–33, so this
-> milestone's FS additions start at slot 34.
+> `verify-live-fs-mutation.sh` PASS on VZ); **✅ B4 done 2026-08-16**
+> (claim 4046 — desktop composition; the file-browser gate now drives
+> DESKTOP → launch FILE.BIN via `sys_exec` → open README.TXT, PASS on VZ).
+> M12's TCP seam runs at ADR 0007 slots 30–33, so this milestone's FS
+> additions start at slot 34.
 
 - **B1 — Filesystem semantics depth (ADR 0007 slots 34–37).** ✅
   done 2026-08-16 (claim 5801): `sys_file_delete(path_ptr, path_len)`,
@@ -1174,10 +1176,11 @@ See [`march-m12.md`](march-m12.md) for the per-card tracker.
   (the ui.zig toolkit), open `.TXT` files in a read-only text view;
   delete/rename still arrive through B1's slots. Live gate
   `verify-live-file-browser.sh` PASS on VZ. (Wishlist 6; issue #153.)
-- **B4 — Desktop composition.** The launcher menu comes from B2's manifest
-  (not the hardcoded array) and FILE.BIN is one of the launchable apps;
-  the capstone gate drives DESKTOP → launch FILE.BIN → browse → open a
-  file end to end on VZ.
+- **B4 — Desktop composition.** ✅ done 2026-08-16 (claim 4046): the
+  launcher menu comes from B2's manifest (not the hardcoded array) and
+  FILE.BIN is one of the launchable apps; the reworked
+  `verify-live-file-browser.sh` drives DESKTOP → launch FILE.BIN through
+  `sys_exec` → browse → open a file end to end on VZ.
 
 Housekeeping folded into this milestone: the `win` → `dui` command rename
 (issue #159), and closing out M8's U4 pointer-focus evidence with the

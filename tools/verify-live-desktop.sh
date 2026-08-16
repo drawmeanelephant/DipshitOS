@@ -132,8 +132,8 @@ echo "DESKTOP.BIN: OK"
 # B2): the manifest marker names the count read from /esp/APPS.TXT, and
 # the manifest content is embedded in the image (verified above by the
 # image list).
-grep -q "desktop: manifest apps=8" artifacts/live-desktop-serial.log || {
-    echo "ERROR: DESKTOP.BIN manifest marker (apps=8) missing from serial log"
+grep -q "desktop: manifest apps=9" artifacts/live-desktop-serial.log || {
+    echo "ERROR: DESKTOP.BIN manifest marker (apps=9) missing from serial log"
     exit 1
 }
 echo "DESKTOP.MANIFEST: OK"
