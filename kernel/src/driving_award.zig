@@ -976,12 +976,17 @@ fn draw_chrome() void {
         draw_string(fb, stride, w.x + 4, w.y + 4, tb[0..n], user_title_fg_rgb);
     }
     // The focus ring: on the focused window's rect (D4 — focus is always
-    // visible). 0xff = none (no ring).
+    // visible). 0xff = none (no ring). The full-screen TERMINAL never
+    // carries it (issue #164): it is the always-focused background, and a
+    // ring around it paints a white strip over the first/last text row
+    // and column — the live-glyphs tripwire decoded cell 0 of every line
+    // as unknown. The clock and user windows keep the ring.
     if (focused_id != 0xff) {
         var idx: usize = 0;
         while (idx < win_count) : (idx += 1) {
             if (windows[idx].id != focused_id) continue;
             const w = &windows[idx];
+            if (w.kind == .terminal) break;
             const rx: usize = w.x;
             const ry: usize = w.y;
             const rw: usize = if (w.w > wspan) wspan else w.w;
@@ -1454,10 +1459,12 @@ test "driving_award: card U5 — the chrome draws the focus ring on the focused 
     try std.testing.expectEqual(focus_ring_rgb, px.at(fb, stride, clock_x, clock_y));
     // ...and just inside the ring, the clock's own border (not white).
     try std.testing.expect(px.at(fb, stride, clock_x + focus_ring_w, clock_y + focus_ring_w) != focus_ring_rgb);
-    // Focus back to the terminal: the ring is at the screen edges now.
+    // Focus back to the terminal: the full-screen terminal never carries
+    // the ring (issue #164 — a ring around it would cover the first text
+    // row/column), so the screen corner is NOT white.
     try std.testing.expect(focus(0));
     _ = composite();
-    try std.testing.expectEqual(focus_ring_rgb, px.at(fb, stride, 0, 0));
+    try std.testing.expect(px.at(fb, stride, 0, 0) != focus_ring_rgb);
     // The clock's corner is NOT ringed anymore.
     try std.testing.expect(px.at(fb, stride, clock_x, clock_y) == clock_border_rgb);
 }

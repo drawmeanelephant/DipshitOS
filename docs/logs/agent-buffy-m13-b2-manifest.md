@@ -45,3 +45,19 @@
   (terminal window content renders one cell right of origin with stale
   residue at cell 0; gate last passed 2026-08-14 pre-M11). Filed as an
   issue; desktop gate + all other live gates PASS.
+
+## 2026-08-16 — issue #164 fixed (the glyphs tripwire)
+
+- Root cause: `driving_award.draw_chrome` drew the white focus ring (3 px)
+  around the FOCUSED window — which is the full-screen terminal (window 0)
+  at boot. The ring's left strip covered the left half of every cell-0
+  glyph, so the live-glyphs decode showed 8 unknown cells (cell 0 of 8
+  lines) — a real visual defect, not a gate bug. The ring landed in
+  U4/U5 (2026-08-15 08:04) AFTER the gate's last pass (2026-08-14), so it
+  regressed silently.
+- Fix: the ring now applies only to the clock + user windows; the
+  full-screen terminal never carries it (it is the always-focused
+  background — a ring around it is a screen border). U5 chrome test
+  updated to pin the terminal's corner as NOT ringed.
+- Live: verify-live-glyphs PASS — fwd_unknowns 8/666 → 0/669, mirrored
+  still garbage (602/652), clock title/body clean.
