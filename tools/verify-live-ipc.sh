@@ -49,7 +49,7 @@
 #      "name=COUNTER.BIN state=exited" anywhere in the log).
 #   6. Card 3g (claim 5795): with counter + peer + two USER.BINs the
 #      pool is 7/7 (shell + worker + 4 users + idle) — the FIFTH exec is
-#      refused with "exec: no free scheduler pool slot" (the capacity
+#      refused with "error: no free scheduler pool slot" (the capacity
 #      proof, re-derived at the new budget).
 #   7. The shell stays responsive (both echo replies); no exception park.
 #
@@ -79,7 +79,7 @@ STATIC_EXIT_LINE="tasks user-el0 exited status=7"
 # what the counter sent) before the mbox drain snapshot runs.
 FLOW_MARKER="peer: got ping 1"
 # The refused fifth exec (7/7 pool — card 3g's budget).
-POOL_FULL_LINE="exec: no free scheduler pool slot"
+POOL_FULL_LINE="error: no free scheduler pool slot"
 
 echo "=== verify-live-ipc: claim 5965 — two live processes exchange data through the kernel mailbox, $BOOTS boot(s) ==="
 zig version

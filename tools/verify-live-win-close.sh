@@ -112,7 +112,7 @@ if [ -f "$SERIAL" ]; then
     [ "$(grep -a -c -F -- "win[2]:" "$SERIAL")" = 0 ] && NOROW2=1
     # The script2 `syscalls` snapshot (after the first close, before the
     # re-exec) shows the new slot 15 implemented and exactly one open+close.
-    grep -a -q -F -- "syscalls: slots=64 implemented=23" "$SERIAL" && IMPL=1
+    grep -a -q -F -- "syscalls: slots=64 implemented=34" "$SERIAL" && IMPL=1
     grep -a -q -F -- "  12 sys_win_open calls=1" "$SERIAL" && \
         grep -a -q -F -- "  15 sys_win_close calls=1" "$SERIAL" && CALLS1=1
 fi
@@ -130,7 +130,7 @@ fi
     echo "DIPSHITOS live draw/window-close gate (claim 0487 follow-on, milestone six card G6) — EL0 window release on real VZ hardware"
     echo "revision: $REVISION branch=$BRANCH dirty-files=$DIRTY"
     echo "phase: scripted exec of WINCLOSE.BIN (sys_win_open/fill/present/close, slots 12-15), then win + syscalls observation on the same kernel state, then a re-exec proving the freed slot is reused"
-    echo "assertions: win: close ok x2, win: open id=2 x2 (never id=3), procs WINCLOSE.BIN exited status=88 x2, win: windows=2 (window gone) + no win[2]: row, syscalls implemented=21 with open=1/close=1 in the pre-re-exec snapshot"
+    echo "assertions: win: close ok x2, win: open id=2 x2 (never id=3), procs WINCLOSE.BIN exited status=88 x2, win: windows=2 (window gone) + no win[2]: row, syscalls implemented=34 with open=1/close=1 in the pre-re-exec snapshot"
     echo "date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     echo
 } > "$REPORT"

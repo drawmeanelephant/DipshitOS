@@ -35,7 +35,7 @@
 #      user-exec reaped`, and a procs row `name=COUNTER.BIN state=exited
 #      task=reaped exit=137`.
 #   4. Page recovery: the phase-3 `pages` free equals the phase-1 free
-#      PLUS 5 (the counter's 1 text + 2 user-stack + 2 EL1-stack pages
+#      PLUS 9 (the counter's 1 text + 4 user-stack + 4 EL1-stack pages
 #      returned at the reap; nothing allocates between the reads).
 #   5. The re-exec lands in the freed slot: `exec: loaded USER.BIN size=`
 #      in phase 3 and its procs row shows the SAME task id the counter's
@@ -142,14 +142,14 @@ run_one() {
         [ "$(grep -aFc -- "procs COUNTER.BIN exited status=137" artifacts/vm-serial.log || true)" -ge 1 ] && procs_killed_exit=1
         [ "$(grep -aFc -- "tasks user-exec reaped" artifacts/vm-serial.log || true)" -ge 1 ] && killed_reap=1
         grep -a -qE -- "name=COUNTER.BIN state=exited task=reaped .*exit=137" artifacts/vm-serial.log && killed_row=1
-        # 4. Page recovery: phase-3 free = phase-1 free + 5.
+        # 4. Page recovery: phase-3 free = phase-1 free + 9.
         local pages_lines p1 p3
         pages_lines="$(grep -aF -- "pages: armed=1 total=" artifacts/vm-serial.log || true)"
         pages_reads="$(printf '%s\n' "$pages_lines" | grep -cF -- "pages: armed=1 total=" || true)"
         p1="$(printf '%s\n' "$pages_lines" | sed -n '1p' | sed -E 's/.*free=0x([0-9a-f]+).*/\1/' || true)"
         p3="$(printf '%s\n' "$pages_lines" | sed -n '2p' | sed -E 's/.*free=0x([0-9a-f]+).*/\1/' || true)"
         if [ -n "$p1" ] && [ -n "$p3" ]; then
-            [ $((16#$p3)) -eq $((16#$p1 + 5)) ] && page_recovery=1 || page_recovery=0
+            [ $((16#$p3)) -eq $((16#$p1 + 9)) ] && page_recovery=1 || page_recovery=0
         fi
         # 5. The re-exec lands in the freed slot: the phase-1 counter row's
         # task id equals the phase-3 USER.BIN row's task id.

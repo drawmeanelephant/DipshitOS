@@ -27,7 +27,7 @@
 #      their markers + the counter's markers interleave with the worker's
 #      advances across the whole log (4 live programs + worker + shell).
 #   4. The pool is FULL at 7/7: the FIFTH exec (a 4th USER.BIN) is
-#      refused with "exec: no free scheduler pool slot" — the capacity
+#      refused with "error: no free scheduler pool slot" — the capacity
 #      gate at the new budget, checked before any allocation (leak-free).
 #   5. The addrspaces read shows tables=NN/256 with the kernel root + FOUR
 #      user roots live: NN stays well inside the 256-page carve-out
@@ -58,7 +58,7 @@ SCRIPT="artifacts/live-scale-script.txt"
 # script only after it appears, so the boot payload's slot is free.
 STATIC_EXIT_LINE="tasks user-el0 exited status=7"
 # The refused fifth exec (7/7 pool at the new budget).
-POOL_FULL_LINE="exec: no free scheduler pool slot"
+POOL_FULL_LINE="error: no free scheduler pool slot"
 
 echo "=== verify-live-scale: claim 5795 — FOUR live user programs at the 7-slot budget, $BOOTS boot(s) ==="
 zig version

@@ -28,22 +28,120 @@ pub const AppEntry = struct {
     name: []const u8,
     desc: []const u8,
     status: []const u8,
+    icon: u8 = '?',
 };
 
+/// The built-in catalog — used ONLY as a fallback when `/esp/APPS.TXT` is
+/// missing or unreadable (claim 8877). The live launcher reads the manifest
+/// from the ESP so adding an app means a manifest line, not a recompile.
 pub const installed_apps = [_]AppEntry{
-    .{ .name = "CALC.BIN", .desc = "64-bit Calc", .status = "GUI Active" },
-    .{ .name = "NOTEPAD.BIN", .desc = "Text Editor", .status = "/data Storage" },
-    .{ .name = "TOP.BIN", .desc = "Task Manager", .status = "sys_procs" },
-    .{ .name = "KEYTEST.BIN", .desc = "HID Input", .status = "USB Events" },
-    .{ .name = "TYPE.BIN", .desc = "File Reader", .status = "FAT32 Data" },
-    .{ .name = "DIR.BIN", .desc = "Directory List", .status = "FAT32 ESP" },
-    .{ .name = "FETCH.BIN", .desc = "HTTP/1.0 Client", .status = "TCP Syscall" },
-    .{ .name = "CHAT.BIN", .desc = "P2P Net Chat", .status = "UDP Socket" },
+    .{ .name = "CALC.BIN", .desc = "64-bit Calc", .status = "GUI Active", .icon = 'c' },
+    .{ .name = "NOTEPAD.BIN", .desc = "Text Editor", .status = "/data Storage", .icon = 'n' },
+    .{ .name = "TOP.BIN", .desc = "Task Manager", .status = "sys_procs", .icon = 't' },
+    .{ .name = "KEYTEST.BIN", .desc = "HID Input", .status = "USB Events", .icon = 'k' },
+    .{ .name = "TYPE.BIN", .desc = "File Reader", .status = "FAT32 Data", .icon = 'f' },
+    .{ .name = "DIR.BIN", .desc = "Directory List", .status = "FAT32 ESP", .icon = 'd' },
+    .{ .name = "FETCH.BIN", .desc = "HTTP/1.0 Client", .status = "TCP Syscall", .icon = 'w' },
+    .{ .name = "CHAT.BIN", .desc = "P2P Net Chat", .status = "UDP Socket", .icon = 'm' },
 };
 
+pub const manifest_max_bytes: usize = 512;
+pub const manifest_max_apps: usize = 8;
+
+/// Parse the APPS.TXT manifest text (`NAME.BIN | Display Name | icon-char`
+/// per line, `#` comments and blank lines ignored) into `out`, returning
+/// the entry count (capped at `out.len`). Entries are slices into `text`,
+/// so the caller must keep `text` alive for the entries' lifetime — in the
+/// app, `text` is the AppState-owned manifest buffer (stack memory, W^X
+/// safe). Pure and host-testable (claim 8877).
+pub fn parse_manifest(text: []const u8, out: []AppEntry) usize {
+    var count: usize = 0;
+    var line_start: usize = 0;
+    while (line_start <= text.len and count < out.len) {
+        // Find the end of the current line (\n or EOF).
+        var line_end = line_start;
+        while (line_end < text.len and text[line_end] != '\n') : (line_end += 1) {}
+        const line = text[line_start..line_end];
+
+        // Skip blank lines and comments.
+        var trimmed_start: usize = 0;
+        while (trimmed_start < line.len and (line[trimmed_start] == ' ' or line[trimmed_start] == '\t' or line[trimmed_start] == '\r')) : (trimmed_start += 1) {}
+        if (trimmed_start < line.len and line[trimmed_start] != '#') {
+            const content = line[trimmed_start..];
+            // Split on '|' into up to 3 fields.
+            var fields: [3][]const u8 = undefined;
+            var field_count: usize = 0;
+            var field_start: usize = 0;
+            var i: usize = 0;
+            while (i <= content.len and field_count < 3) : (i += 1) {
+                if (i == content.len or content[i] == '|') {
+                    fields[field_count] = content[field_start..i];
+                    field_count += 1;
+                    field_start = i + 1;
+                }
+            }
+            if (field_count >= 2) {
+                const name = trim(fields[0]);
+                const desc = trim(fields[1]);
+                const icon_field = if (field_count >= 3) trim(fields[2]) else "";
+                if (name.len > 0 and desc.len > 0) {
+                    out[count] = .{
+                        .name = name,
+                        .desc = desc,
+                        .status = "APPS.TXT",
+                        .icon = if (icon_field.len > 0) icon_field[0] else '?',
+                    };
+                    count += 1;
+                }
+            }
+        }
+        if (line_end == text.len) break;
+        line_start = line_end + 1;
+    }
+    return count;
+}
+
+fn trim(s: []const u8) []const u8 {
+    var start: usize = 0;
+    while (start < s.len and (s[start] == ' ' or s[start] == '\t' or s[start] == '\r')) : (start += 1) {}
+    var end = s.len;
+    while (end > start and (s[end - 1] == ' ' or s[end - 1] == '\t' or s[end - 1] == '\r')) : (end -= 1) {}
+    return s[start..end];
+}
+
 // ---------------------------------------------------------------------------
-// GUI Components & State
+// Hand-rolled string building (claim 8877)
 // ---------------------------------------------------------------------------
+// std.fmt.bufPrint's outlined runtime-format path corrupts its
+// FixedBufferStream state against the 8 KiB EL0 stack (the live gate
+// faulted twice: the manifest marker wrote the prefix at stack_top-9, and
+// the `P:{d} A:{d}` diag wrote over AppState+0 with pos≈0xE8). The desktop
+// therefore never uses bufPrint — every marker/diag string is built with
+// these helpers (pure, host-testable, W^X-safe).
+
+/// Copy `src` into `buf` at `pos`, returning the new position. The caller
+/// guarantees the slice fits.
+fn append_str(buf: []u8, pos: usize, src: []const u8) usize {
+    @memcpy(buf[pos .. pos + src.len], src);
+    return pos + src.len;
+}
+
+/// Format `value` as decimal into `buf` (caller provides >= 20 bytes),
+/// returning the written slice.
+fn fmt_u64(buf: []u8, value: u64) []const u8 {
+    var v = value;
+    var i: usize = buf.len;
+    if (v == 0) {
+        i -= 1;
+        buf[i] = '0';
+        return buf[i..];
+    }
+    while (v > 0) : (v /= 10) {
+        i -= 1;
+        buf[i] = @intCast('0' + (v % 10));
+    }
+    return buf[i..];
+}
 
 // ---------------------------------------------------------------------------
 // GUI Components & App State (Stack-Allocated AppState)
@@ -58,14 +156,27 @@ pub const AppState = struct {
     list_apps: ListView = ListView.init(Rect.make(6, 58, 118, 128), 18),
     active_procs_count: usize = 1,
 
-    pub fn init() AppState {
+    /// Manifest-owned catalog (claim 8877): `apps` slices point into
+    /// `manifest_buf` (stack memory — no writable globals, W^X safe), so the
+    /// buffer must outlive the app; it lives in the stack-allocated AppState.
+    manifest_buf: [manifest_max_bytes]u8 = undefined,
+    apps: [manifest_max_apps]AppEntry = undefined,
+    app_count: usize = 0,
+    manifest_loaded: bool = false,
+
+    pub noinline fn init() AppState {
         var s = AppState{};
         s.btn_calc.bg_color = ui.COLOR_ACCENT;
         s.btn_notes.bg_color = 0x8b5cf6; // Purple accent
         s.btn_top.bg_color = ui.COLOR_SUCCESS;
         s.btn_key.bg_color = ui.COLOR_WARNING;
 
-        s.list_apps.item_count = installed_apps.len;
+        // Default: the built-in catalog (fallback when no manifest).
+        s.app_count = installed_apps.len;
+        for (installed_apps, 0..) |entry, i| {
+            s.apps[i] = entry;
+        }
+        s.list_apps.item_count = s.app_count;
         s.list_apps.selected_idx = 0;
 
         // Refresh active procs count
@@ -75,6 +186,25 @@ pub const AppState = struct {
             s.active_procs_count = @as(usize, @intCast(res));
         }
         return s;
+    }
+
+    /// Load `/esp/APPS.TXT` into the manifest-owned catalog. On any failure
+    /// (missing file, read error, empty manifest) the built-in catalog stays
+    /// — honest degradation, the desktop always has a launcher list.
+    /// Returns the number of apps loaded, or 0 when falling back.
+    pub fn load_manifest(self: *AppState) usize {
+        const fd = ui.file_open("/esp/APPS.TXT", ui.MODE_READ);
+        if (fd < 0) return 0;
+        defer ui.file_close(@intCast(fd));
+        const n = ui.file_read(@intCast(fd), &self.manifest_buf);
+        if (n <= 0) return 0;
+        const text = self.manifest_buf[0..@intCast(n)];
+        const count = parse_manifest(text, &self.apps);
+        if (count == 0) return 0;
+        self.app_count = count;
+        self.manifest_loaded = true;
+        self.list_apps.item_count = count;
+        return count;
     }
 
     pub fn draw(self: *const AppState, win: u32) void {
@@ -88,8 +218,12 @@ pub const AppState = struct {
         ui.draw_text(win, "DipshitOS", 8, 8, ui.COLOR_TEXT_PRIMARY);
 
         var diag_buf: [32]u8 = undefined;
-        const diag_str = std.fmt.bufPrint(&diag_buf, "P:{d} A:{d}", .{ self.active_procs_count, installed_apps.len }) catch "P:?";
-        ui.draw_text(win, diag_str, 196, 8, ui.COLOR_TEXT_MUTED);
+        var diag_len: usize = 0;
+        diag_len = append_str(&diag_buf, diag_len, "P:");
+        diag_len = append_str(&diag_buf, diag_len, fmt_u64(diag_buf[diag_len..], self.active_procs_count));
+        diag_len = append_str(&diag_buf, diag_len, " A:");
+        diag_len = append_str(&diag_buf, diag_len, fmt_u64(diag_buf[diag_len..], self.app_count));
+        ui.draw_text(win, diag_buf[0..diag_len], 196, 8, ui.COLOR_TEXT_MUTED);
 
         // 3. Quick Launch Bar
         self.btn_calc.draw(win);
@@ -101,9 +235,9 @@ pub const AppState = struct {
         ui.draw_rect(win, self.list_apps.rect, ui.COLOR_SURFACE);
         ui.draw_rect_outline(win, self.list_apps.rect, 1, ui.COLOR_BORDER);
         var i: usize = 0;
-        while (i < installed_apps.len) : (i += 1) {
+        while (i < self.app_count) : (i += 1) {
             const is_sel = if (self.list_apps.selected_idx) |sel| sel == i else false;
-            self.list_apps.draw_row(win, i, installed_apps[i].name, is_sel);
+            self.list_apps.draw_row(win, i, self.apps[i].name, is_sel);
         }
 
         // 5. App Details Pane
@@ -112,8 +246,8 @@ pub const AppState = struct {
         ui.draw_rect_outline(win, details_rect, 1, ui.COLOR_BORDER);
 
         const sel_idx = self.list_apps.selected_idx orelse 0;
-        if (sel_idx < installed_apps.len) {
-            const app = &installed_apps[sel_idx];
+        if (sel_idx < self.app_count) {
+            const app = &self.apps[sel_idx];
             ui.draw_text(win, "App:", details_rect.x + 6, details_rect.y + 8, ui.COLOR_TEXT_MUTED);
             ui.draw_text(win, app.name, details_rect.x + 6, details_rect.y + 22, ui.COLOR_ACCENT);
 
@@ -128,21 +262,22 @@ pub const AppState = struct {
     pub fn handle_mouse_events(self: *AppState, ev: *const Event) bool {
         var changed = false;
 
+        const catalog = self.apps[0..self.app_count];
         if (self.btn_calc.handle_event(ev)) {
             self.list_apps.selected_idx = 0;
-            changed = launch_app(0) or changed;
+            changed = launch_app(0, catalog) or changed;
         } else if (self.btn_notes.handle_event(ev)) {
             self.list_apps.selected_idx = 1;
-            changed = launch_app(1) or changed;
+            changed = launch_app(1, catalog) or changed;
         } else if (self.btn_top.handle_event(ev)) {
             self.list_apps.selected_idx = 2;
-            changed = launch_app(2) or changed;
+            changed = launch_app(2, catalog) or changed;
         } else if (self.btn_key.handle_event(ev)) {
             self.list_apps.selected_idx = 3;
-            changed = launch_app(3) or changed;
+            changed = launch_app(3, catalog) or changed;
         } else if (self.list_apps.handle_event(ev)) {
             if (self.list_apps.selected_idx) |sel| {
-                if (sel < installed_apps.len) {
+                if (sel < self.app_count) {
                     ui.write_console("desktop: select app\n");
                 }
             }
@@ -160,8 +295,8 @@ pub const AppState = struct {
         const ascii_char: u8 = @truncate(ev.arg1);
         if (ev.arg0 == 0x28 or ascii_char == '\n') {
             if (self.list_apps.selected_idx) |sel| {
-                if (sel < installed_apps.len) {
-                    return launch_app(sel);
+                if (sel < self.app_count) {
+                    return launch_app(sel, self.apps[0..self.app_count]);
                 }
             }
             return false;
@@ -180,22 +315,27 @@ pub const AppState = struct {
 // Launcher (Claim 6359: ADR 0007 slot 28 sys_exec)
 // ---------------------------------------------------------------------------
 
-/// Launch the installed app at `index` through the EL0 exec seam — the
-/// launcher half of the desktop. Prints a `desktop: launch <NAME> pid=<n>`
-/// marker (or the negative error) for the live gate. Never blocks: exec
-/// spawns a fresh process into a new slot and returns the pid immediately.
-pub fn launch_app(index: usize) bool {
-    if (index >= installed_apps.len) return false;
-    const app = &installed_apps[index];
+/// Launch the app at `index` through the EL0 exec seam — the launcher half
+/// of the desktop. Prints a `desktop: launch <NAME> pid=<n>` marker (or the
+/// negative error) for the live gate. Never blocks: exec spawns a fresh
+/// process into a new slot and returns the pid immediately.
+pub fn launch_app(index: usize, catalog: []const AppEntry) bool {
+    if (index >= catalog.len) return false;
+    const app = &catalog[index];
     const res = ui.exec_program(app.name);
-    var buf: [56]u8 = undefined;
+    var buf: [64]u8 = undefined;
+    var pos: usize = 0;
+    pos = append_str(&buf, pos, "desktop: launch ");
+    pos = append_str(&buf, pos, app.name);
     if (res >= 0) {
-        const msg = std.fmt.bufPrint(&buf, "desktop: launch {s} pid={d}\n", .{ app.name, res }) catch "desktop: launch ?\n";
-        ui.write_console(msg);
+        pos = append_str(&buf, pos, " pid=");
+        pos = append_str(&buf, pos, fmt_u64(buf[pos..], @intCast(res)));
     } else {
-        const msg = std.fmt.bufPrint(&buf, "desktop: launch {s} err={d}\n", .{ app.name, res }) catch "desktop: launch err\n";
-        ui.write_console(msg);
+        pos = append_str(&buf, pos, " err=");
+        pos = append_str(&buf, pos, fmt_u64(buf[pos..], @intCast(-res)));
     }
+    buf[pos] = '\n';
+    ui.write_console(buf[0 .. pos + 1]);
     return true;
 }
 
@@ -206,7 +346,21 @@ pub fn launch_app(index: usize) bool {
 pub export fn _start() callconv(.c) noreturn {
     var app = AppState.init();
 
-    // 1. Open Window
+    // 1. Load the application manifest (claim 8877). The launcher menu is
+    //    built from /esp/APPS.TXT; the built-in catalog is only the fallback.
+    const manifest_count = app.load_manifest();
+    if (manifest_count > 0) {
+        var man_buf: [48]u8 = undefined;
+        var man_len: usize = 0;
+        man_len = append_str(&man_buf, man_len, "desktop: manifest apps=");
+        man_len = append_str(&man_buf, man_len, fmt_u64(man_buf[man_len..], manifest_count));
+        man_buf[man_len] = '\n';
+        ui.write_console(man_buf[0 .. man_len + 1]);
+    } else {
+        ui.write_console("desktop: manifest none (built-in catalog)\n");
+    }
+
+    // 2. Open Window
     const win_res = ui.win_open(window_x, window_y, window_w, window_h);
     if (win_res < 0) {
         ui.write_console("desktop: failed to open window\n");
@@ -228,8 +382,11 @@ pub export fn _start() callconv(.c) noreturn {
         const wait_rc = ui.wait_event(&ev);
         if (wait_rc < 0) {
             var dbg: [40]u8 = undefined;
-            const msg = std.fmt.bufPrint(&dbg, "desktop: wait err={d}\n", .{wait_rc}) catch "desktop: wait err\n";
-            ui.write_console(msg);
+            var dlen: usize = 0;
+            dlen = append_str(&dbg, dlen, "desktop: wait err=");
+            dlen = append_str(&dbg, dlen, fmt_u64(dbg[dlen..], @intCast(-wait_rc)));
+            dbg[dlen] = '\n';
+            ui.write_console(dbg[0 .. dlen + 1]);
             break;
         }
 
@@ -276,11 +433,68 @@ pub export fn _start() callconv(.c) noreturn {
 // ---------------------------------------------------------------------------
 
 test "desktop: installed application catalog metadata" {
-    try std.testing.expectEqual(@as(usize, 6), installed_apps.len);
+    try std.testing.expectEqual(@as(usize, 8), installed_apps.len);
     try std.testing.expectEqualStrings("CALC.BIN", installed_apps[0].name);
     try std.testing.expectEqualStrings("NOTEPAD.BIN", installed_apps[1].name);
     try std.testing.expectEqualStrings("TOP.BIN", installed_apps[2].name);
     try std.testing.expectEqualStrings("KEYTEST.BIN", installed_apps[3].name);
+    try std.testing.expectEqualStrings("FETCH.BIN", installed_apps[6].name);
+    try std.testing.expectEqualStrings("CHAT.BIN", installed_apps[7].name);
+}
+
+test "desktop: parse_manifest reads NAME | Display | icon lines (claim 8877)" {
+    const text =
+        "# comment line\n" ++
+        "\n" ++
+        "CALC.BIN | 64-bit Calc | c\n" ++
+        "NOTEPAD.BIN | Text Editor | n\n" ++
+        "  TOP.BIN  |  Task Manager  |  t  \n" ++
+        "# another comment\n" ++
+        "CHAT.BIN | P2P Net Chat | m";
+    var out: [manifest_max_apps]AppEntry = undefined;
+    const n = parse_manifest(text, &out);
+    try std.testing.expectEqual(@as(usize, 4), n);
+    try std.testing.expectEqualStrings("CALC.BIN", out[0].name);
+    try std.testing.expectEqualStrings("64-bit Calc", out[0].desc);
+    try std.testing.expectEqual(@as(u8, 'c'), out[0].icon);
+    try std.testing.expectEqualStrings("NOTEPAD.BIN", out[1].name);
+    try std.testing.expectEqualStrings("Text Editor", out[1].desc);
+    try std.testing.expectEqual(@as(u8, 'n'), out[1].icon);
+    // Whitespace around fields is trimmed
+    try std.testing.expectEqualStrings("TOP.BIN", out[2].name);
+    try std.testing.expectEqualStrings("Task Manager", out[2].desc);
+    try std.testing.expectEqual(@as(u8, 't'), out[2].icon);
+    // Last line has no trailing newline
+    try std.testing.expectEqualStrings("CHAT.BIN", out[3].name);
+    try std.testing.expectEqual(@as(u8, 'm'), out[3].icon);
+}
+
+test "desktop: parse_manifest rejects malformed lines and bounds the count" {
+    const text =
+        "NO_PIPE_LINE\n" ++
+        "| MissingName | x\n" ++
+        "NAME.BIN |\n" ++
+        "\n" ++
+        "OK.BIN | Fine | o\n";
+    var out: [manifest_max_apps]AppEntry = undefined;
+    const n = parse_manifest(text, &out);
+    try std.testing.expectEqual(@as(usize, 1), n);
+    try std.testing.expectEqualStrings("OK.BIN", out[0].name);
+    try std.testing.expectEqualStrings("Fine", out[0].desc);
+
+    // The entry count is capped at out.len.
+    var many: [2]AppEntry = undefined;
+    const big = "A.BIN | A | a\nB.BIN | B | b\nC.BIN | C | c\n";
+    const capped = parse_manifest(big, &many);
+    try std.testing.expectEqual(@as(usize, 2), capped);
+    try std.testing.expectEqualStrings("A.BIN", many[0].name);
+    try std.testing.expectEqualStrings("B.BIN", many[1].name);
+}
+
+test "desktop: empty or comment-only manifest yields zero apps" {
+    var out: [manifest_max_apps]AppEntry = undefined;
+    try std.testing.expectEqual(@as(usize, 0), parse_manifest("", &out));
+    try std.testing.expectEqual(@as(usize, 0), parse_manifest("# nothing here\n\n", &out));
 }
 
 test "desktop: Enter routes the selected list item to launch (claim 6359)" {
@@ -298,7 +512,7 @@ test "desktop: Enter routes the selected list item to launch (claim 6359)" {
     try std.testing.expect(!app.handle_keyboard_event(&ev_enter2));
 
     // Out-of-range selection -> nothing to launch
-    app.list_apps.selected_idx = installed_apps.len;
+    app.list_apps.selected_idx = app.app_count;
     var ev_enter3 = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 3, .arg0 = 0x28, .arg1 = '\n' };
     try std.testing.expect(!app.handle_keyboard_event(&ev_enter3));
 
@@ -307,4 +521,14 @@ test "desktop: Enter routes the selected list item to launch (claim 6359)" {
     var ev_down = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 4, .arg0 = 0x51, .arg1 = 0 };
     try std.testing.expect(app.handle_keyboard_event(&ev_down));
     try std.testing.expectEqual(@as(?usize, 1), app.list_apps.selected_idx);
+}
+
+test "desktop: AppState fits the 8 KiB EL0 stack (W^X, claim 8877)" {
+    try std.testing.expect(@sizeOf(AppState) < 4 * 1024);
+    std.debug.print("AppState size: {d}\n", .{@sizeOf(AppState)});
+    std.debug.print("manifest_buf off: {d} apps off: {d} app_count off: {d}\n", .{
+        @offsetOf(AppState, "manifest_buf"),
+        @offsetOf(AppState, "apps"),
+        @offsetOf(AppState, "app_count"),
+    });
 }

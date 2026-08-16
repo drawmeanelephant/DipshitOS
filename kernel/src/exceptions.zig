@@ -55,6 +55,16 @@ pub const kind_serror: u64 = 3;
 /// handlers from repeating the easy-to-get-wrong slot arithmetic.
 pub const vector_frame_slots: usize = 32;
 pub const vector_frame_bytes: u64 = vector_frame_slots * @sizeOf(u64);
+
+/// The FP/SIMD block every vector stub pushes below the GPR frame (q0..q31,
+/// 512 bytes) so the kernel may use NEON freely without corrupting EL0 state
+/// that was live across the exception (claim 8877 bisect: DESKTOP's marker
+/// build hoisted `ldr q0` across an `svc` and the kernel's ReleaseSmall
+/// memcpy destroyed it). The C-visible `VectorFrame` EXCLUDES this block;
+/// the restore macro pops it first via `sub sp, x0, #fp_save_bytes` + 16
+/// `ldp q` pairs. `build_initial_frame` reserves the same block (zeroed)
+/// beneath every synthetic frame.
+pub const fp_save_bytes: u64 = 32 * @sizeOf(u128);
 pub const VectorFrame = [vector_frame_slots]u64;
 
 fn frame_index(reg: u5) ?usize {
@@ -315,6 +325,10 @@ pub fn format_report(
     count: u64,
     x0: u64,
     x30: u64,
+    sp_el0: u64,
+    x1: u64,
+    x2: u64,
+    x29: u64,
     will_resume: bool,
 ) []const u8 {
     var pos: usize = 0;
@@ -351,6 +365,16 @@ pub fn format_report(
     pos += append_hex(buf[pos..], x0, 16);
     pos += append_slice(buf[pos..], " x30=0x");
     pos += append_hex(buf[pos..], x30, 16);
+    pos += append_slice(buf[pos..], "\n");
+
+    pos += append_slice(buf[pos..], "[EXC] sp=0x");
+    pos += append_hex(buf[pos..], sp_el0, 16);
+    pos += append_slice(buf[pos..], " x1=0x");
+    pos += append_hex(buf[pos..], x1, 16);
+    pos += append_slice(buf[pos..], " x2=0x");
+    pos += append_hex(buf[pos..], x2, 16);
+    pos += append_slice(buf[pos..], " x29=0x");
+    pos += append_hex(buf[pos..], x29, 16);
     pos += append_slice(buf[pos..], "\n");
 
     if (will_resume) {
@@ -475,6 +499,10 @@ export fn exc_dispatch(
         handled_count_value,
         frame_read(frame, 0),
         frame_read(frame, 30),
+        resume_sp_el0,
+        frame_read(frame, 1),
+        frame_read(frame, 2),
+        frame_read(frame, 29),
         will_resume,
     );
     if (report_writer) |w| w(report);
@@ -498,36 +526,60 @@ export fn exc_dispatch(
 // Vector region (aarch64 only)
 // ---------------------------------------------------------------------------
 
-/// The VBAR_EL1 vector region: 16 self-contained stubs, one per 128-byte
-/// slot (offsets 0x000/0x080/0x100/0x180 x EL1t/EL1h/EL0-64/EL0-32). Each
-/// stub saves x0..x17 + x30 (+ pad) = 20 slots on the current SP, loads
-/// (esr, far, elr, spsr) from the EL1 system registers, passes kind in x5
-/// (0 sync / 1 irq / 2 fiq / 3 serror), calls `exc_dispatch`, then either
-/// restores the frame and `eret`s (x0 != 0) or parks in WFE. `exc_dispatch`
-/// returns a two-register C aggregate: x0 is the vector-frame pointer and x1
-/// is the SP_EL0 belonging to the selected task. The restore macro switches
+/// The VBAR_EL1 vector region: 16 stubs, one per 128-byte slot (offsets
+/// 0x000/0x080/0x100/0x180 x EL1t/EL1h/EL0-64/EL0-32). Each stub saves the
+/// full GPR frame (x0..x17 + x30 + the claim-6729 callee set x19..x28 +
+/// x29 = 32 slots) on the current SP, passes kind in x5 (0 sync / 1 irq /
+/// 2 fiq / 3 serror), and branches to the shared `exc_fp_common`, which
+/// pushes the FP/SIMD block (q0..q31, 512 bytes) below the GPR frame,
+/// loads (esr, far, elr, spsr) from the EL1 system registers, and calls
+/// `exc_dispatch`. On return (x0 != 0) the restore macro pops the FP block
+/// first, then the GPR frame, and `eret`s; x0 == 0 parks in WFE.
+/// `exc_dispatch` returns a two-register C aggregate: x0 is the vector-frame
+/// pointer (the GPR base — `VectorFrame` excludes the FP block) and x1 is
+/// the SP_EL0 belonging to the selected task. The restore macro switches
 /// to SP_EL1 before installing SP_EL0, so the same exit path safely targets
 /// EL1h and EL0t contexts.
+///
+/// The FP block is the claim 8877 fix: the kernel uses NEON freely (e.g.
+/// ReleaseSmall memcpy), and without the save a user `ldr q0` hoisted
+/// across an `svc` was silently corrupted — DESKTOP's manifest marker lost
+/// its first 15 bytes to exactly the kernel's q0/q1 values.
 ///
 /// The region is emitted only on aarch64: this function is referenced
 /// solely from `install`'s comptime-aarch64 branch, so x86 host tests
 /// never codegen the AArch64 assembly. `.balign 2048` at the start plus
 /// the fn's `align(2048)` guarantee slot i sits at VBAR + i*128; each stub
-/// body is 28 instructions (112 bytes; the claim-6729 callee-saved save
-/// adds 6 pushes, and the inline restore shrank to a 3-instruction setup +
-/// branch to the shared `exc_restore_tail`), padded to the 128-byte slot
-/// boundary by the trailing `.balign 128`. The tail pops the full frame
-/// (x0..x17 + x30 + x19..x28 + x29) and `eret`s — the callee-saved half is
-/// what makes the scheduler's per-task context switch safe for compiled
-/// tasks (claim 6729 bisect: the shell's live `mon` in x19 was clobbered
-/// by the preempting task's value because the old 20-slot frame never
-/// saved x19..x28).
+/// body is 18 instructions (72 bytes: 16 GPR `stp` pairs + `movz` + `b
+/// exc_fp_common`), padded to the 128-byte slot boundary by the trailing
+/// `.balign 128`. `exc_fp_common` + the tail live beyond the table (the
+/// hardware only fetches the 16 slots). The tail pops the full frame and
+/// `eret`s — the callee-saved half is what makes the scheduler's per-task
+/// context switch safe for compiled tasks (claim 6729 bisect: the shell's
+/// live `mon` in x19 was clobbered by the preempting task's value because
+/// the old 20-slot frame never saved x19..x28).
 fn exception_vectors() align(2048) callconv(.naked) void {
     asm volatile (
         \\.balign 2048
         \\.macro exc_restore
         \\msr spsel, #1
-        \\mov sp, x0
+        \\sub sp, x0, #512
+        \\ldp q30, q31, [sp], #32
+        \\ldp q28, q29, [sp], #32
+        \\ldp q26, q27, [sp], #32
+        \\ldp q24, q25, [sp], #32
+        \\ldp q22, q23, [sp], #32
+        \\ldp q20, q21, [sp], #32
+        \\ldp q18, q19, [sp], #32
+        \\ldp q16, q17, [sp], #32
+        \\ldp q14, q15, [sp], #32
+        \\ldp q12, q13, [sp], #32
+        \\ldp q10, q11, [sp], #32
+        \\ldp q8, q9, [sp], #32
+        \\ldp q6, q7, [sp], #32
+        \\ldp q4, q5, [sp], #32
+        \\ldp q2, q3, [sp], #32
+        \\ldp q0, q1, [sp], #32
         \\msr sp_el0, x1
         \\b exc_restore_tail
         \\.endm
@@ -548,15 +600,8 @@ fn exception_vectors() align(2048) callconv(.naked) void {
         \\stp x14, x15, [sp, #-16]!
         \\stp x16, x17, [sp, #-16]!
         \\stp x30, xzr, [sp, #-16]!
-        \\mov x0, sp
-        \\mrs x1, esr_el1
-        \\mrs x2, far_el1
-        \\mrs x3, elr_el1
-        \\mrs x4, spsr_el1
         \\movz x5, #0
-        \\bl exc_dispatch
-        \\cbz x0, exc_park
-        \\exc_restore
+        \\b exc_fp_common
         \\.balign 128
         \\// Entry 0x080: EL1t IRQ (kind 1)
         \\stp x19, x20, [sp, #-16]!
@@ -575,15 +620,8 @@ fn exception_vectors() align(2048) callconv(.naked) void {
         \\stp x14, x15, [sp, #-16]!
         \\stp x16, x17, [sp, #-16]!
         \\stp x30, xzr, [sp, #-16]!
-        \\mov x0, sp
-        \\mrs x1, esr_el1
-        \\mrs x2, far_el1
-        \\mrs x3, elr_el1
-        \\mrs x4, spsr_el1
         \\movz x5, #1
-        \\bl exc_dispatch
-        \\cbz x0, exc_park
-        \\exc_restore
+        \\b exc_fp_common
         \\.balign 128
         \\// Entry 0x100: EL1t FIQ (kind 2)
         \\stp x19, x20, [sp, #-16]!
@@ -602,15 +640,8 @@ fn exception_vectors() align(2048) callconv(.naked) void {
         \\stp x14, x15, [sp, #-16]!
         \\stp x16, x17, [sp, #-16]!
         \\stp x30, xzr, [sp, #-16]!
-        \\mov x0, sp
-        \\mrs x1, esr_el1
-        \\mrs x2, far_el1
-        \\mrs x3, elr_el1
-        \\mrs x4, spsr_el1
         \\movz x5, #2
-        \\bl exc_dispatch
-        \\cbz x0, exc_park
-        \\exc_restore
+        \\b exc_fp_common
         \\.balign 128
         \\// Entry 0x180: EL1t SError (kind 3)
         \\stp x19, x20, [sp, #-16]!
@@ -629,15 +660,8 @@ fn exception_vectors() align(2048) callconv(.naked) void {
         \\stp x14, x15, [sp, #-16]!
         \\stp x16, x17, [sp, #-16]!
         \\stp x30, xzr, [sp, #-16]!
-        \\mov x0, sp
-        \\mrs x1, esr_el1
-        \\mrs x2, far_el1
-        \\mrs x3, elr_el1
-        \\mrs x4, spsr_el1
         \\movz x5, #3
-        \\bl exc_dispatch
-        \\cbz x0, exc_park
-        \\exc_restore
+        \\b exc_fp_common
         \\.balign 128
         \\// Entry 0x200: EL1h synchronous (kind 0)
         \\stp x19, x20, [sp, #-16]!
@@ -656,15 +680,8 @@ fn exception_vectors() align(2048) callconv(.naked) void {
         \\stp x14, x15, [sp, #-16]!
         \\stp x16, x17, [sp, #-16]!
         \\stp x30, xzr, [sp, #-16]!
-        \\mov x0, sp
-        \\mrs x1, esr_el1
-        \\mrs x2, far_el1
-        \\mrs x3, elr_el1
-        \\mrs x4, spsr_el1
         \\movz x5, #0
-        \\bl exc_dispatch
-        \\cbz x0, exc_park
-        \\exc_restore
+        \\b exc_fp_common
         \\.balign 128
         \\// Entry 0x280: EL1h IRQ (kind 1)
         \\stp x19, x20, [sp, #-16]!
@@ -683,15 +700,8 @@ fn exception_vectors() align(2048) callconv(.naked) void {
         \\stp x14, x15, [sp, #-16]!
         \\stp x16, x17, [sp, #-16]!
         \\stp x30, xzr, [sp, #-16]!
-        \\mov x0, sp
-        \\mrs x1, esr_el1
-        \\mrs x2, far_el1
-        \\mrs x3, elr_el1
-        \\mrs x4, spsr_el1
         \\movz x5, #1
-        \\bl exc_dispatch
-        \\cbz x0, exc_park
-        \\exc_restore
+        \\b exc_fp_common
         \\.balign 128
         \\// Entry 0x300: EL1h FIQ (kind 2)
         \\stp x19, x20, [sp, #-16]!
@@ -710,15 +720,8 @@ fn exception_vectors() align(2048) callconv(.naked) void {
         \\stp x14, x15, [sp, #-16]!
         \\stp x16, x17, [sp, #-16]!
         \\stp x30, xzr, [sp, #-16]!
-        \\mov x0, sp
-        \\mrs x1, esr_el1
-        \\mrs x2, far_el1
-        \\mrs x3, elr_el1
-        \\mrs x4, spsr_el1
         \\movz x5, #2
-        \\bl exc_dispatch
-        \\cbz x0, exc_park
-        \\exc_restore
+        \\b exc_fp_common
         \\.balign 128
         \\// Entry 0x380: EL1h SError (kind 3)
         \\stp x19, x20, [sp, #-16]!
@@ -737,15 +740,8 @@ fn exception_vectors() align(2048) callconv(.naked) void {
         \\stp x14, x15, [sp, #-16]!
         \\stp x16, x17, [sp, #-16]!
         \\stp x30, xzr, [sp, #-16]!
-        \\mov x0, sp
-        \\mrs x1, esr_el1
-        \\mrs x2, far_el1
-        \\mrs x3, elr_el1
-        \\mrs x4, spsr_el1
         \\movz x5, #3
-        \\bl exc_dispatch
-        \\cbz x0, exc_park
-        \\exc_restore
+        \\b exc_fp_common
         \\.balign 128
         \\// Entry 0x400: lower EL AArch64 synchronous (kind 0)
         \\stp x19, x20, [sp, #-16]!
@@ -764,15 +760,8 @@ fn exception_vectors() align(2048) callconv(.naked) void {
         \\stp x14, x15, [sp, #-16]!
         \\stp x16, x17, [sp, #-16]!
         \\stp x30, xzr, [sp, #-16]!
-        \\mov x0, sp
-        \\mrs x1, esr_el1
-        \\mrs x2, far_el1
-        \\mrs x3, elr_el1
-        \\mrs x4, spsr_el1
         \\movz x5, #0
-        \\bl exc_dispatch
-        \\cbz x0, exc_park
-        \\exc_restore
+        \\b exc_fp_common
         \\.balign 128
         \\// Entry 0x480: lower EL AArch64 IRQ (kind 1)
         \\stp x19, x20, [sp, #-16]!
@@ -791,15 +780,8 @@ fn exception_vectors() align(2048) callconv(.naked) void {
         \\stp x14, x15, [sp, #-16]!
         \\stp x16, x17, [sp, #-16]!
         \\stp x30, xzr, [sp, #-16]!
-        \\mov x0, sp
-        \\mrs x1, esr_el1
-        \\mrs x2, far_el1
-        \\mrs x3, elr_el1
-        \\mrs x4, spsr_el1
         \\movz x5, #1
-        \\bl exc_dispatch
-        \\cbz x0, exc_park
-        \\exc_restore
+        \\b exc_fp_common
         \\.balign 128
         \\// Entry 0x500: lower EL AArch64 FIQ (kind 2)
         \\stp x19, x20, [sp, #-16]!
@@ -818,15 +800,8 @@ fn exception_vectors() align(2048) callconv(.naked) void {
         \\stp x14, x15, [sp, #-16]!
         \\stp x16, x17, [sp, #-16]!
         \\stp x30, xzr, [sp, #-16]!
-        \\mov x0, sp
-        \\mrs x1, esr_el1
-        \\mrs x2, far_el1
-        \\mrs x3, elr_el1
-        \\mrs x4, spsr_el1
         \\movz x5, #2
-        \\bl exc_dispatch
-        \\cbz x0, exc_park
-        \\exc_restore
+        \\b exc_fp_common
         \\.balign 128
         \\// Entry 0x580: lower EL AArch64 SError (kind 3)
         \\stp x19, x20, [sp, #-16]!
@@ -845,15 +820,8 @@ fn exception_vectors() align(2048) callconv(.naked) void {
         \\stp x14, x15, [sp, #-16]!
         \\stp x16, x17, [sp, #-16]!
         \\stp x30, xzr, [sp, #-16]!
-        \\mov x0, sp
-        \\mrs x1, esr_el1
-        \\mrs x2, far_el1
-        \\mrs x3, elr_el1
-        \\mrs x4, spsr_el1
         \\movz x5, #3
-        \\bl exc_dispatch
-        \\cbz x0, exc_park
-        \\exc_restore
+        \\b exc_fp_common
         \\.balign 128
         \\// Entry 0x600: lower EL AArch32 synchronous (kind 0)
         \\stp x19, x20, [sp, #-16]!
@@ -872,15 +840,8 @@ fn exception_vectors() align(2048) callconv(.naked) void {
         \\stp x14, x15, [sp, #-16]!
         \\stp x16, x17, [sp, #-16]!
         \\stp x30, xzr, [sp, #-16]!
-        \\mov x0, sp
-        \\mrs x1, esr_el1
-        \\mrs x2, far_el1
-        \\mrs x3, elr_el1
-        \\mrs x4, spsr_el1
         \\movz x5, #0
-        \\bl exc_dispatch
-        \\cbz x0, exc_park
-        \\exc_restore
+        \\b exc_fp_common
         \\.balign 128
         \\// Entry 0x680: lower EL AArch32 IRQ (kind 1)
         \\stp x19, x20, [sp, #-16]!
@@ -899,15 +860,8 @@ fn exception_vectors() align(2048) callconv(.naked) void {
         \\stp x14, x15, [sp, #-16]!
         \\stp x16, x17, [sp, #-16]!
         \\stp x30, xzr, [sp, #-16]!
-        \\mov x0, sp
-        \\mrs x1, esr_el1
-        \\mrs x2, far_el1
-        \\mrs x3, elr_el1
-        \\mrs x4, spsr_el1
         \\movz x5, #1
-        \\bl exc_dispatch
-        \\cbz x0, exc_park
-        \\exc_restore
+        \\b exc_fp_common
         \\.balign 128
         \\// Entry 0x700: lower EL AArch32 FIQ (kind 2)
         \\stp x19, x20, [sp, #-16]!
@@ -926,15 +880,8 @@ fn exception_vectors() align(2048) callconv(.naked) void {
         \\stp x14, x15, [sp, #-16]!
         \\stp x16, x17, [sp, #-16]!
         \\stp x30, xzr, [sp, #-16]!
-        \\mov x0, sp
-        \\mrs x1, esr_el1
-        \\mrs x2, far_el1
-        \\mrs x3, elr_el1
-        \\mrs x4, spsr_el1
         \\movz x5, #2
-        \\bl exc_dispatch
-        \\cbz x0, exc_park
-        \\exc_restore
+        \\b exc_fp_common
         \\.balign 128
         \\// Entry 0x780: lower EL AArch32 SError (kind 3)
         \\stp x19, x20, [sp, #-16]!
@@ -953,16 +900,34 @@ fn exception_vectors() align(2048) callconv(.naked) void {
         \\stp x14, x15, [sp, #-16]!
         \\stp x16, x17, [sp, #-16]!
         \\stp x30, xzr, [sp, #-16]!
-        \\mov x0, sp
+        \\movz x5, #3
+        \\b exc_fp_common
+        \\.balign 128
+        \\exc_fp_common:
+        \\stp q0, q1, [sp, #-32]!
+        \\stp q2, q3, [sp, #-32]!
+        \\stp q4, q5, [sp, #-32]!
+        \\stp q6, q7, [sp, #-32]!
+        \\stp q8, q9, [sp, #-32]!
+        \\stp q10, q11, [sp, #-32]!
+        \\stp q12, q13, [sp, #-32]!
+        \\stp q14, q15, [sp, #-32]!
+        \\stp q16, q17, [sp, #-32]!
+        \\stp q18, q19, [sp, #-32]!
+        \\stp q20, q21, [sp, #-32]!
+        \\stp q22, q23, [sp, #-32]!
+        \\stp q24, q25, [sp, #-32]!
+        \\stp q26, q27, [sp, #-32]!
+        \\stp q28, q29, [sp, #-32]!
+        \\stp q30, q31, [sp, #-32]!
+        \\add x0, sp, #512
         \\mrs x1, esr_el1
         \\mrs x2, far_el1
         \\mrs x3, elr_el1
         \\mrs x4, spsr_el1
-        \\movz x5, #3
         \\bl exc_dispatch
         \\cbz x0, exc_park
         \\exc_restore
-        \\.balign 128
         \\exc_restore_tail:
         \\ldp x30, xzr, [sp], #16
         \\ldp x16, x17, [sp], #16
@@ -1101,13 +1066,14 @@ test "exceptions: format_report is deterministic (resume path)" {
     var buf: [512]u8 = undefined;
     // A udf at EL1h: ESR EC=0x00 (unknown reason), SPSR.M=0x5 (EL1h).
     const esr: u64 = 0;
-    const report = format_report(&buf, kind_sync, esr, 0, 0x7e4dfabc, 0x5, 1, 0x2a, 0x7e4df000, true);
+    const report = format_report(&buf, kind_sync, esr, 0, 0x7e4dfabc, 0x5, 1, 0x2a, 0x7e4df000, 0x1234, 0x2b, 0x2c, 0x29, true);
     try std.testing.expectEqualStrings(
         "[EXC] sync from EL1h count=1\n" ++
             "[EXC] esr=0x0000000000000000 ec=0x00 unknown-reason iss=0x000000\n" ++
             "[EXC] far=0x0000000000000000\n" ++
             "[EXC] elr=0x000000007e4dfabc spsr=0x0000000000000005\n" ++
             "[EXC] x0=0x000000000000002a x30=0x000000007e4df000\n" ++
+            "[EXC] sp=0x0000000000001234 x1=0x000000000000002b x2=0x000000000000002c x29=0x0000000000000029\n" ++
             "[EXC] resume-armed: skipping faulting instruction\n",
         report,
     );
@@ -1116,13 +1082,14 @@ test "exceptions: format_report is deterministic (resume path)" {
 test "exceptions: format_report is deterministic (park path, irq)" {
     var buf: [512]u8 = undefined;
     const esr: u64 = 0x80000000; // EC=0x20 (instruction abort, lower EL)
-    const report = format_report(&buf, kind_irq, esr, 0xdead0000, 0x1234, 0x0, 7, 0, 0, false);
+    const report = format_report(&buf, kind_irq, esr, 0xdead0000, 0x1234, 0x0, 7, 0, 0, 0, 0, 0, 0, false);
     try std.testing.expectEqualStrings(
         "[EXC] irq from EL0t count=7\n" ++
             "[EXC] esr=0x0000000080000000 ec=0x20 instruction-abort-lower iss=0x000000\n" ++
             "[EXC] far=0x00000000dead0000\n" ++
             "[EXC] elr=0x0000000000001234 spsr=0x0000000000000000\n" ++
             "[EXC] x0=0x0000000000000000 x30=0x0000000000000000\n" ++
+            "[EXC] sp=0x0000000000000000 x1=0x0000000000000000 x2=0x0000000000000000 x29=0x0000000000000000\n" ++
             "[EXC] parking: no recovery path for this exception\n",
         report,
     );
@@ -1145,6 +1112,10 @@ test "exceptions: report buffer is bounded (max-size fields never overflow)" {
     const report = format_report(
         &buf,
         kind_serror,
+        std.math.maxInt(u64),
+        std.math.maxInt(u64),
+        std.math.maxInt(u64),
+        std.math.maxInt(u64),
         std.math.maxInt(u64),
         std.math.maxInt(u64),
         std.math.maxInt(u64),

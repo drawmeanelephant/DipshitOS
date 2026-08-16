@@ -107,7 +107,7 @@ run_one() {
             worker_adv="$(echo "$mid" | grep -cF "tasks worker advances=" || true)"
             [ "$worker_adv" -ge 1 ] && worker_adv=1 || worker_adv=0
         fi
-        [ "$(grep -aFc -- "syscalls: slots=64 implemented=12" artifacts/vm-serial.log || true)" -ge 1 ] && syscalls=1
+        [ "$(grep -aFc -- "syscalls: slots=64 implemented=34" artifacts/vm-serial.log || true)" -ge 1 ] && syscalls=1
         [ "$(grep -aFc -- "$EXEC_EXIT_LINE" artifacts/vm-serial.log || true)" = 1 ] && exited=1
         [ "$(grep -aFxc -- "$EXEC_REAP_LINE" artifacts/vm-serial.log || true)" = 1 ] && reaped=1
         [ "$(grep -aFxc -- "rx-sleep-ok" artifacts/vm-serial.log || true)" = 1 ] && echo_ok=1

@@ -1,0 +1,9 @@
+# DipshitOS app manifest (M13 B2, claim 8877). NAME.BIN | Display Name | icon
+CALC.BIN | 64-bit Calc | c
+NOTEPAD.BIN | Text Editor | n
+TOP.BIN | Task Manager | t
+KEYTEST.BIN | HID Input | k
+TYPE.BIN | File Reader | f
+DIR.BIN | Directory List | d
+FETCH.BIN | HTTP/1.0 Client | w
+CHAT.BIN | P2P Net Chat | m

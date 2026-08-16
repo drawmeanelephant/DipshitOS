@@ -92,7 +92,13 @@ pub const max_tasks: usize = 7;
 pub const idle_id: usize = max_tasks - 1;
 /// The worker's static stack (BSS, like every other kernel global). The
 /// shell task continues to run on the handoff stack.
-pub const task_stack_size: usize = 8 * 1024;
+// 16 KiB (claim 8877): the EL0 file-read path stacks ~5 KiB of staging
+// (read_staging + file_table staging + FAT sector buffers) on the process's
+// kernel stack; at 8 KiB an overflow spilled DOWNWARD into the adjacent
+// user-stack pages (exec allocates text/stack/kstack consecutively) and
+// clobbered DESKTOP's AppState with FAT bytes. The user stack doubles too
+// — GUI apps get more headroom at no real cost.
+pub const task_stack_size: usize = 16 * 1024;
 
 /// SPSR modes for synthetic first entry. The kernel's observed M=0x5 is
 /// architecturally EL1h (SP_EL1), not EL1t; EL0t is M=0x0. DAIF bits are
@@ -531,13 +537,20 @@ pub fn scheduling_active() bool {
 /// Build the synthetic claim-9746 vector frame at the top of `stack` and
 /// return its base pointer (the SP the stub restores from). Layout matches
 /// the stub's save order exactly: x30 sits at the top (popped first), then
-/// x16/x17 ... x0/x1 at the bottom; every slot zeroed except x30.
+/// x16/x17 ... x0/x1 at the bottom; every slot zeroed except x30. The
+/// FP/SIMD block (q0..q31, `exceptions.fp_save_bytes`) that the shared
+/// `exc_fp_common` pushes below the GPR frame at every exception is
+/// reserved and zeroed beneath it, so the restore macro's `sub sp, x0,
+/// #fp_save_bytes` + FP pops land in valid zeros when a fresh task is
+/// first scheduled.
 fn build_initial_frame(stack: []u8, entry: u64) u64 {
     _ = entry; // ELR carries the entry; the frame only needs x30 = park
     const frame = stack[stack.len - frame_bytes ..];
     @memset(frame, 0);
     const park_addr = @intFromPtr(&park);
     std.mem.writeInt(u64, frame[0..8], park_addr, .little);
+    const fp_block = stack[stack.len - frame_bytes - @as(usize, exceptions.fp_save_bytes) .. stack.len - frame_bytes];
+    @memset(fp_block, 0);
     return @intFromPtr(frame.ptr);
 }
 
