@@ -221,7 +221,7 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
                       calc_bytes=None, notepad_bytes=None,
                       top_bytes=None, desktop_bytes=None,
                       tcp_bytes=None, fetch_bytes=None,
-                      chat_bytes=None, file_bytes=None, apps_txt_bytes=None):
+                      chat_bytes=None, file_bytes=None, fstest_bytes=None, apps_txt_bytes=None):
     """Write a FAT32 volume (boot sector, FSInfo, FATs, directories, files)
     into `img` at the volume's offset.
 
@@ -265,6 +265,7 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
     fetch_clusters = (len(fetch_bytes) + bps - 1) // bps if fetch_bytes else 0
     chat_clusters = (len(chat_bytes) + bps - 1) // bps if chat_bytes else 0
     filebin_clusters = (len(file_bytes) + bps - 1) // bps if file_bytes else 0
+    fstest_clusters = (len(fstest_bytes) + bps - 1) // bps if fstest_bytes else 0
     apps_txt_clusters = (len(apps_txt_bytes) + bps - 1) // bps if apps_txt_bytes else 0
     file_clusters = (len(efi_bytes) + bps - 1) // bps
     root_entries_count = 2  # vol_label + efi_entry
@@ -290,6 +291,7 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
     if fetch_bytes: root_entries_count += 1
     if chat_bytes: root_entries_count += 1
     if file_bytes: root_entries_count += 1
+    if fstest_bytes: root_entries_count += 1
     if apps_txt_bytes: root_entries_count += 1
 
     root_clusters = (root_entries_count * 32 + bps - 1) // bps
@@ -317,7 +319,8 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
     fetch_start = tcp_start + tcp_clusters
     chat_start = fetch_start + fetch_clusters
     filebin_start = chat_start + chat_clusters
-    apps_txt_start = filebin_start + filebin_clusters
+    fstest_start = filebin_start + filebin_clusters
+    apps_txt_start = fstest_start + fstest_clusters
     efi_start = apps_txt_start + apps_txt_clusters
     allocated = efi_start + file_clusters - 2  # clusters used beyond root(2)
     if allocated > geo.clusters:
@@ -381,6 +384,8 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
         chain(chat_start, chat_clusters)          # CHAT.BIN data
     if file_bytes:
         chain(filebin_start, filebin_clusters)    # FILE.BIN data
+    if fstest_bytes:
+        chain(fstest_start, fstest_clusters)      # FSTEST.BIN data
     if apps_txt_bytes:
         chain(apps_txt_start, apps_txt_clusters)  # APPS.TXT data
     chain(efi_start, file_clusters)            # BOOTAA64.EFI data
@@ -457,6 +462,8 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
         root_entries += dir_entry(b"CHAT    BIN", 0x20, chat_start, len(chat_bytes))
     if file_bytes:
         root_entries += dir_entry(b"FILE    BIN", 0x20, filebin_start, len(file_bytes))
+    if fstest_bytes:
+        root_entries += dir_entry(b"FSTEST  BIN", 0x20, fstest_start, len(fstest_bytes))
     if apps_txt_bytes:
         root_entries += dir_entry(b"APPS    TXT", 0x20, apps_txt_start, len(apps_txt_bytes))
 
@@ -556,6 +563,10 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
         for i in range(filebin_clusters):
             chunk = file_bytes[i * bps:(i + 1) * bps]
             wsec(geo.cluster_sector(filebin_start + i), chunk.ljust(bps, b"\x00"))
+    if fstest_bytes:
+        for i in range(fstest_clusters):
+            chunk = fstest_bytes[i * bps:(i + 1) * bps]
+            wsec(geo.cluster_sector(fstest_start + i), chunk.ljust(bps, b"\x00"))
     if apps_txt_bytes:
         for i in range(apps_txt_clusters):
             chunk = apps_txt_bytes[i * bps:(i + 1) * bps]
@@ -822,7 +833,7 @@ def build_image(total_sectors, esp_offset, efi_bytes, kernel_bytes=None,
                 keytest_bytes=None, savetext_bytes=None, type_bytes=None,
                 dir_bytes=None, calc_bytes=None, notepad_bytes=None,
                 top_bytes=None, desktop_bytes=None, tcp_bytes=None,
-                fetch_bytes=None, chat_bytes=None, file_bytes=None, apps_txt_bytes=None):
+                fetch_bytes=None, chat_bytes=None, file_bytes=None, fstest_bytes=None, apps_txt_bytes=None):
     img = bytearray(total_sectors * BYTES_PER_SECTOR)
     last_usable = total_sectors - 34
     first_usable = 34
@@ -865,7 +876,7 @@ def build_image(total_sectors, esp_offset, efi_bytes, kernel_bytes=None,
                       win_bytes, winclose_bytes, winloop_bytes, winmove_bytes,
                       keytest_bytes, savetext_bytes, type_bytes, dir_bytes,
                       calc_bytes, notepad_bytes, top_bytes, desktop_bytes,
-                      tcp_bytes, fetch_bytes, chat_bytes, file_bytes, apps_txt_bytes)
+                      tcp_bytes, fetch_bytes, chat_bytes, file_bytes, fstest_bytes, apps_txt_bytes)
     geo_data = Fat32Geometry(data_sectors, data_start)
     build_data_volume(img, geo_data)
     return bytes(img)
@@ -927,6 +938,8 @@ def main(argv):
                     help="optional flat user program (CHAT.BIN) to embed at the volume root")
     ap.add_argument("file_file", nargs="?",
                     help="optional flat user program (FILE.BIN) to embed at the volume root (milestone 13, card B3 -- claim 4742)")
+    ap.add_argument("fstest_file", nargs="?",
+                    help="optional flat user program (FSTEST.BIN) to embed at the volume root (milestone 13, card B1 -- claim 5801)")
     ap.add_argument("--apps-txt", metavar="FILE",
                     help="optional plain-text application manifest (APPS.TXT) to embed at the "
                          "volume root (milestone 13, card B2 -- claim 8877)")
@@ -1144,6 +1157,15 @@ def main(argv):
                   "not be a DipshitOS user program image" % args.file_file,
                   file=sys.stderr)
 
+    fstest_bytes = None
+    if args.fstest_file:
+        with open(args.fstest_file, "rb") as f:
+            fstest_bytes = f.read()
+        if fstest_bytes[:4] != b"DSK1":
+            print("WARNING: %s does not start with the 'DSK1' magic; it may "
+                  "not be a DipshitOS user program image" % args.fstest_file,
+                  file=sys.stderr)
+
     apps_txt_bytes = None
     if args.apps_txt:
         with open(args.apps_txt, "rb") as f:
@@ -1155,7 +1177,7 @@ def main(argv):
                       udp_bytes, win_bytes, winclose_bytes, winloop_bytes,
                       winmove_bytes, keytest_bytes, savetext_bytes, type_bytes,
                       dir_bytes, calc_bytes, notepad_bytes, top_bytes, desktop_bytes,
-                      tcp_bytes, fetch_bytes, chat_bytes, file_bytes, apps_txt_bytes)
+                      tcp_bytes, fetch_bytes, chat_bytes, file_bytes, fstest_bytes, apps_txt_bytes)
     with open(args.image, "wb") as f:
         f.write(img)
     extra = ", %d-byte kernel image embedded" % len(kernel_bytes) if kernel_bytes else ""
@@ -1180,6 +1202,7 @@ def main(argv):
     extra += ", %d-byte fetch program embedded" % len(fetch_bytes) if fetch_bytes else ""
     extra += ", %d-byte chat program embedded" % len(chat_bytes) if chat_bytes else ""
     extra += ", %d-byte file program embedded" % len(file_bytes) if file_bytes else ""
+    extra += ", %d-byte fstest program embedded" % len(fstest_bytes) if fstest_bytes else ""
     print("wrote %s: %d MiB, ESP at LBA %d, %d-byte EFI application embedded%s" %
           (args.image, args.size_mb, args.esp_offset, len(efi_bytes), extra))
     return 0

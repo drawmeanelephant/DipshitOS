@@ -38,6 +38,10 @@ pub const sys_tcp_connect_num: u64 = 30;
 pub const sys_tcp_send_num: u64 = 31;
 pub const sys_tcp_recv_num: u64 = 32;
 pub const sys_tcp_close_num: u64 = 33;
+pub const sys_file_delete_num: u64 = 34;
+pub const sys_file_rename_num: u64 = 35;
+pub const sys_file_truncate_num: u64 = 36;
+pub const sys_file_free_num: u64 = 37;
 pub const sys_udp_listen_num: u64 = 9;
 pub const sys_udp_send_num: u64 = 10;
 pub const sys_udp_recv_num: u64 = 11;
@@ -264,6 +268,28 @@ pub fn file_close(handle: u32) void {
 /// `DirEntry` is 40 bytes (`name[32]` NUL-padded + `size` + `is_dir`).
 pub fn dir_list(path: []const u8, buf: []DirEntry) i64 {
     return syscall4(sys_dir_list_num, @intFromPtr(path.ptr), path.len, @intFromPtr(buf.ptr), buf.len);
+}
+
+/// Claim 5801 (ADR 0007 slot 34): delete a file by path. 0 on success;
+/// negative error otherwise (EINVAL bad path, ENOENT absent).
+pub fn file_delete(path: []const u8) i64 {
+    return syscall2(sys_file_delete_num, @intFromPtr(path.ptr), path.len);
+}
+
+/// Claim 5801 (ADR 0007 slot 35): rename a file (same directory). 0 on
+/// success; negative error otherwise.
+pub fn file_rename(old_path: []const u8, new_path: []const u8) i64 {
+    return syscall4(sys_file_rename_num, @intFromPtr(old_path.ptr), old_path.len, @intFromPtr(new_path.ptr), new_path.len);
+}
+
+/// Claim 5801 (ADR 0007 slot 36): resize an OPEN handle to `size` bytes.
+pub fn file_truncate(handle: u32, size: u32) i64 {
+    return syscall2(sys_file_truncate_num, handle, size);
+}
+
+/// Claim 5801 (ADR 0007 slot 37): free bytes on a volume (0 = DATA, 1 = ESP).
+pub fn file_free(volume: u32) i64 {
+    return syscall1(sys_file_free_num, volume);
 }
 
 pub fn udp_listen(port: u16) i64 {

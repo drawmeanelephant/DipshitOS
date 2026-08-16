@@ -488,6 +488,92 @@ pub fn write_file(path: []const u8, content: []const u8) WriteResult {
 }
 
 // ---------------------------------------------------------------------------
+// Mutating operations (Milestone 13, card B1 — claim 5801)
+// ---------------------------------------------------------------------------
+
+pub const DeleteResult = enum { ok, no_disk, not_found, is_dir, io_failed };
+pub const RenameResult = enum { ok, no_disk, not_found, exists, is_dir, name_too_long, bad_path, io_failed };
+pub const TruncateResult = enum { ok, no_disk, not_found, is_dir, too_large, io_failed };
+
+/// Delete a file (bare name or `/`-path): free its cluster chain and mark
+/// the directory slot deleted (0xE5). Directories are refused (deleting a
+/// tree is out of scope); LFN companions are left as orphaned slots — the
+/// data paths this seam serves carry none.
+pub fn delete_file(path: []const u8) DeleteResult {
+    if (!state.mounted) return .no_disk;
+    const found = find_slot_path(path) orelse return .not_found;
+    if (found.entry.is_dir) return .is_dir;
+    if (found.entry.cluster >= 2) _ = free_chain(found.entry.cluster);
+    var raw: [32]u8 = undefined;
+    if (!read_dir_slot(found.slot, &raw)) return .io_failed;
+    raw[0] = 0xe5;
+    if (!write_dir_slot(found.slot, &raw)) return .io_failed;
+    return .ok;
+}
+
+/// Rename a file in place (same directory — cross-directory moves are out
+/// of scope for B1). Rewrites the 8.3 short name in the existing slot;
+/// refuses when the new name already exists.
+pub fn rename_file(old_path: []const u8, new_path: []const u8) RenameResult {
+    if (!state.mounted) return .no_disk;
+    var old_parent: []const u8 = "";
+    var old_name: []const u8 = old_path;
+    if (std.mem.lastIndexOfScalar(u8, old_path, '/')) |i| {
+        old_parent = old_path[0..i];
+        old_name = old_path[i + 1 ..];
+    }
+    var new_parent: []const u8 = "";
+    var new_name: []const u8 = new_path;
+    if (std.mem.lastIndexOfScalar(u8, new_path, '/')) |i| {
+        new_parent = new_path[0..i];
+        new_name = new_path[i + 1 ..];
+    }
+    if (old_name.len == 0 or new_name.len == 0) return .bad_path;
+
+    var short: [11]u8 = undefined;
+    if (!encode_83(new_name, &short)) return .name_too_long;
+
+    const found = find_slot_path(old_path) orelse return .not_found;
+    if (found.entry.is_dir) return .is_dir;
+    if (find_slot_path(new_path) != null) return .exists;
+
+    const old_dir = dir_cluster_of_path(old_parent) orelse return .bad_path;
+    const new_dir = dir_cluster_of_path(new_parent) orelse return .bad_path;
+    if (old_dir != new_dir) return .bad_path;
+
+    var raw: [32]u8 = undefined;
+    if (!read_dir_slot(found.slot, &raw)) return .io_failed;
+    @memcpy(raw[0..11], short[0..11]);
+    if (!write_dir_slot(found.slot, &raw)) return .io_failed;
+    return .ok;
+}
+
+/// Resize a file to `new_size` bytes (≤ write_content_max). Shrinks by
+/// truncation and grows by zero-fill; both reuse write_file's replace path.
+pub fn truncate_file(path: []const u8, new_size: u32) TruncateResult {
+    if (!state.mounted) return .no_disk;
+    if (new_size > write_content_max) return .too_large;
+    const found = find_slot_path(path) orelse return .not_found;
+    if (found.entry.is_dir) return .is_dir;
+
+    var staging: [write_content_max]u8 = [_]u8{0} ** write_content_max;
+    _ = read_file(path, &staging) orelse return .not_found;
+    const wr = write_file(path, staging[0..@as(usize, @intCast(new_size))]);
+    return switch (wr) {
+        .ok => .ok,
+        .disk_full, .content_too_long => .too_large,
+        else => .io_failed,
+    };
+}
+
+/// Free bytes on the mounted volume (free clusters × bytes-per-cluster).
+pub fn free_space() u64 {
+    if (!state.mounted) return 0;
+    const bpc: u64 = @as(u64, state.geo.spc) * sector_size;
+    return @as(u64, free_clusters()) * bpc;
+}
+
+// ---------------------------------------------------------------------------
 // Sector helpers
 // ---------------------------------------------------------------------------
 
@@ -1237,6 +1323,76 @@ test "fat: multi-cluster write spans and reads back across clusters" {
     const got = (read_file("multi.txt", &buf) orelse return error.TestUnexpectedResult);
     try std.testing.expectEqual(@as(usize, 1500), got);
     try std.testing.expectEqualStrings(content, buf[0..1500]);
+}
+
+test "fat: delete_file frees the slot and the chain (claim 5801)" {
+    var fxt = try build_fixture(test_allocator, false);
+    defer test_allocator.free(fxt.buf);
+    make_state_fixture(&fxt);
+    try std.testing.expectEqual(MountResult.ok, mount(test_ops()));
+    try std.testing.expectEqual(WriteResult.ok, write_file("gone.txt", "temporary"));
+
+    const before = free_clusters();
+    try std.testing.expectEqual(DeleteResult.ok, delete_file("gone.txt"));
+    var buf: [512]u8 = undefined;
+    try std.testing.expect(read_file("gone.txt", &buf) == null);
+    try std.testing.expectEqual(DeleteResult.not_found, delete_file("gone.txt"));
+    try std.testing.expect(free_clusters() >= before); // chain returned
+}
+
+test "fat: rename_file moves the name in place, refusing a taken name (claim 5801)" {
+    var fxt = try build_fixture(test_allocator, false);
+    defer test_allocator.free(fxt.buf);
+    make_state_fixture(&fxt);
+    try std.testing.expectEqual(MountResult.ok, mount(test_ops()));
+    try std.testing.expectEqual(WriteResult.ok, write_file("old.txt", "same content"));
+
+    try std.testing.expectEqual(RenameResult.ok, rename_file("old.txt", "new.txt"));
+    var buf: [512]u8 = undefined;
+    try std.testing.expect(read_file("old.txt", &buf) == null);
+    const got = (read_file("new.txt", &buf) orelse return error.TestUnexpectedResult);
+    try std.testing.expectEqualStrings("same content", buf[0..got]);
+
+    // Refuses a name that already exists, and a bad 8.3 name.
+    try std.testing.expectEqual(WriteResult.ok, write_file("taken.txt", "occupied"));
+    try std.testing.expectEqual(RenameResult.exists, rename_file("new.txt", "taken.txt"));
+    try std.testing.expectEqual(RenameResult.name_too_long, rename_file("new.txt", "toolongname.txt"));
+    try std.testing.expectEqual(RenameResult.not_found, rename_file("absent.txt", "x.txt"));
+}
+
+test "fat: truncate_file shrinks and grows with zero-fill (claim 5801)" {
+    var fxt = try build_fixture(test_allocator, false);
+    defer test_allocator.free(fxt.buf);
+    make_state_fixture(&fxt);
+    try std.testing.expectEqual(MountResult.ok, mount(test_ops()));
+    try std.testing.expectEqual(WriteResult.ok, write_file("trunc.txt", "hello world"));
+
+    try std.testing.expectEqual(TruncateResult.ok, truncate_file("trunc.txt", 5));
+    var buf: [512]u8 = undefined;
+    const short = (read_file("trunc.txt", &buf) orelse return error.TestUnexpectedResult);
+    try std.testing.expectEqual(@as(usize, 5), short);
+    try std.testing.expectEqualStrings("hello", buf[0..5]);
+
+    try std.testing.expectEqual(TruncateResult.ok, truncate_file("trunc.txt", 12));
+    const grown = (read_file("trunc.txt", &buf) orelse return error.TestUnexpectedResult);
+    try std.testing.expectEqual(@as(usize, 12), grown);
+    try std.testing.expectEqualStrings("hello", buf[0..5]);
+    try std.testing.expectEqual(@as(u8, 0), buf[5]); // zero-fill
+    try std.testing.expectEqual(@as(u8, 0), buf[11]);
+
+    try std.testing.expectEqual(TruncateResult.too_large, truncate_file("trunc.txt", write_content_max + 1));
+    try std.testing.expectEqual(TruncateResult.not_found, truncate_file("absent.txt", 4));
+}
+
+test "fat: free_space reports clusters × bytes-per-cluster (claim 5801)" {
+    var fxt = try build_fixture(test_allocator, false);
+    defer test_allocator.free(fxt.buf);
+    make_state_fixture(&fxt);
+    try std.testing.expectEqual(MountResult.ok, mount(test_ops()));
+    const free = free_space();
+    try std.testing.expect(free > 0);
+    try std.testing.expectEqual(@as(u64, 0), free % sector_size); // whole clusters
+    try std.testing.expectEqual(free, @as(u64, free_clusters()) * sector_size);
 }
 
 test "fat: LFN entries decode into the display name" {

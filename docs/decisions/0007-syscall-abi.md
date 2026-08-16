@@ -490,3 +490,23 @@ through the ADR 0007 syscall seam (slots 30–33, following slot 28 `sys_exec` a
 `implemented_count` is 34; reserved slots become 34–63.
 These handlers marshal arguments and user buffers through the claim-6120 `uaccess` window and invoke `kernel/src/tcp.zig`.
 Proof program: `TCP.BIN` (`user/src/tcp_client.zig`, Issue #148).
+
+## Amendment (2026-08-16, claim 5801 — the mutating filesystem seam)
+
+Milestone 13 card B1 turns the read-only M10 file ABI mutating — slots
+34–37, following slot 33 `sys_tcp_close`:
+
+| Slot | Name | Signature | Description |
+|:---|:---|:---|:---|
+| 34 | `sys_file_delete` | `delete(path_ptr, path_len) -> i64` | Delete the file at `path` (DATA by default; `/esp/` routes to the ESP). Frees the FAT cluster chain and marks the directory slot deleted. Returns 0; `EINVAL` bad path or a directory, `ENOENT` absent, `EFAULT` bad pointer. |
+| 35 | `sys_file_rename` | `rename(old_ptr, old_len, new_ptr, new_len) -> i64` | Rename a file in place (same directory — cross-directory moves and cross-volume renames are refused). Returns 0; `EINVAL` bad path / target-exists (no EEXIST row — documented) / cross-directory, `ENAMETOOLONG` bad 8.3 name, `ENOENT` absent, `EFAULT` bad pointer. |
+| 36 | `sys_file_truncate` | `truncate(handle, size) -> i64` | Resize the OPEN handle to `size` bytes (shrink truncates, grow zero-fills, ≤ 2048). Returns 0; `EBADF` bad/closed handle, `EACCES` not open for write, `ENOSPC` over-large, `ENOENT` absent. |
+| 37 | `sys_file_free` | `free(volume) -> i64` | Free bytes on a volume (0 = DATA, 1 = ESP). Returns the byte count; `EINVAL` bad volume, `ENOENT` unmounted. |
+
+`implemented_count` is 38; reserved slots become 38–63.
+The handlers marshal paths through the claim-6120 `uaccess` window and
+invoke `kernel/src/file_table.zig`'s new mutating ops, which sit on
+`kernel/src/fat.zig`'s `delete_file`/`rename_file`/`truncate_file`/`free_space`.
+Proof program: `FSTEST.BIN` (`user/src/fstest.zig`, issue #161); live gate
+`tools/verify-live-fs-mutation.sh`. `FILE.BIN` grows Delete/Rename buttons
+over slots 34/35.

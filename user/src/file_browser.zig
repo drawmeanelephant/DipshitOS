@@ -31,8 +31,10 @@ pub const data_path: []const u8 = "/data";
 pub const title_rect = Rect.make(0, 0, 256, 22);
 pub const list_area = Rect.make(6, 26, 148, 130);
 pub const details_area = Rect.make(158, 26, 92, 130);
-pub const btn_open_rect = Rect.make(6, 162, 52, 22);
-pub const btn_back_rect = Rect.make(62, 162, 52, 22);
+pub const btn_open_rect = Rect.make(6, 162, 44, 22);
+pub const btn_rename_rect = Rect.make(54, 162, 52, 22);
+pub const btn_delete_rect = Rect.make(110, 162, 52, 22);
+pub const btn_back_rect = Rect.make(6, 162, 44, 22); // overlaps Open; mode-exclusive
 
 pub const list_row_h: u32 = 16;
 pub const glyph_w: u32 = 8;
@@ -227,11 +229,15 @@ pub const AppState = struct {
     status_len: usize = 5,
 
     btn_open: Button = Button.init(btn_open_rect, "Open"),
+    btn_rename: Button = Button.init(btn_rename_rect, "Rename"),
+    btn_delete: Button = Button.init(btn_delete_rect, "Delete"),
     btn_back: Button = Button.init(btn_back_rect, "Back"),
 
     pub fn init() AppState {
         var s = AppState{};
         s.btn_open.bg_color = ui.COLOR_ACCENT;
+        s.btn_rename.bg_color = ui.COLOR_WARNING;
+        s.btn_delete.bg_color = ui.COLOR_DANGER;
         s.btn_back.bg_color = ui.COLOR_SUCCESS;
         return s;
     }
@@ -326,6 +332,86 @@ pub const AppState = struct {
         ui.write_console("file: back\n");
     }
 
+    /// Re-list `/data/`, preserving the selection when it still fits.
+    pub fn refresh(self: *AppState) void {
+        const prev = self.list.selected;
+        self.list_directory();
+        if (self.entry_count > 0) {
+            const idx = if (prev) |p| @min(p, self.entry_count - 1) else 0;
+            self.list.select(idx, self.entry_count);
+        }
+    }
+
+    /// Delete the selected entry through sys_file_delete (slot 34). Emits
+    /// `file: delete NAME` on success. Directories are refused.
+    pub fn delete_selected(self: *AppState) bool {
+        const sel = self.list.selected orelse return false;
+        if (sel >= self.entry_count) return false;
+        const entry = &self.entries[sel];
+        const name = entry_name(entry);
+        if (entry.is_dir != 0) {
+            self.set_status("Is dir");
+            return false;
+        }
+
+        var path_buf: [64]u8 = undefined;
+        const path = build_data_path(&path_buf, name);
+        const res = ui.file_delete(path);
+        if (res < 0) {
+            self.set_status("Del Err");
+            return false;
+        }
+
+        var obuf: [64]u8 = undefined;
+        var opos: usize = 0;
+        opos = append_str(&obuf, opos, "file: delete ");
+        opos = append_str(&obuf, opos, name);
+        obuf[opos] = '\n';
+        ui.write_console(obuf[0 .. opos + 1]);
+
+        self.set_status("Deleted");
+        self.refresh();
+        return true;
+    }
+
+    /// Rename the selected entry to `STEM.BAK` through sys_file_rename
+    /// (slot 35). Emits `file: rename NAME -> NEW` on success.
+    pub fn rename_selected(self: *AppState) bool {
+        const sel = self.list.selected orelse return false;
+        if (sel >= self.entry_count) return false;
+        const entry = &self.entries[sel];
+        const name = entry_name(entry);
+        if (entry.is_dir != 0) {
+            self.set_status("Is dir");
+            return false;
+        }
+
+        var bak: [32]u8 = undefined;
+        const new_name = make_bak_name(name, &bak);
+        var old_path: [64]u8 = undefined;
+        var new_path: [64]u8 = undefined;
+        const op = build_data_path(&old_path, name);
+        const np = build_data_path(&new_path, new_name);
+        const res = ui.file_rename(op, np);
+        if (res < 0) {
+            self.set_status("Ren Err");
+            return false;
+        }
+
+        var obuf: [96]u8 = undefined;
+        var opos: usize = 0;
+        opos = append_str(&obuf, opos, "file: rename ");
+        opos = append_str(&obuf, opos, name);
+        opos = append_str(&obuf, opos, " -> ");
+        opos = append_str(&obuf, opos, new_name);
+        obuf[opos] = '\n';
+        ui.write_console(obuf[0 .. opos + 1]);
+
+        self.set_status("Renamed");
+        self.refresh();
+        return true;
+    }
+
     pub fn draw(self: *const AppState, win: u32) void {
         ui.draw_rect(win, Rect.make(0, 0, window_w, window_h), ui.COLOR_BG);
 
@@ -340,6 +426,9 @@ pub const AppState = struct {
             ui.draw_text(win, "/data", 60, 8, ui.COLOR_ACCENT);
         }
 
+        // Status strip (title-bar right).
+        ui.draw_text(win, self.status_msg[0..self.status_len], 150, 8, ui.COLOR_TEXT_MUTED);
+
         if (self.view_mode) {
             self.draw_view(win);
             self.btn_back.draw(win);
@@ -347,10 +436,9 @@ pub const AppState = struct {
             self.draw_list(win);
             self.draw_details(win);
             self.btn_open.draw(win);
+            self.btn_rename.draw(win);
+            self.btn_delete.draw(win);
         }
-
-        // Status strip (bottom-right).
-        ui.draw_text(win, self.status_msg[0..self.status_len], 118, 168, ui.COLOR_TEXT_MUTED);
     }
 
     fn draw_list(self: *const AppState, win: u32) void {
@@ -439,6 +527,12 @@ pub const AppState = struct {
         if (self.btn_open.handle_event(ev)) {
             return self.open_selected();
         }
+        if (self.btn_rename.handle_event(ev)) {
+            return self.rename_selected();
+        }
+        if (self.btn_delete.handle_event(ev)) {
+            return self.delete_selected();
+        }
         if (ev.kind == ui.MOUSE_DOWN and (ev.flags & ui.BTN_LEFT) != 0) {
             return self.list.click(ev.arg0, ev.arg1, self.entry_count);
         }
@@ -462,6 +556,14 @@ pub const AppState = struct {
         // Enter opens the selected entry.
         if (keycode == 0x28 or ascii_char == '\n' or ascii_char == '\r') {
             return self.open_selected();
+        }
+
+        // 'd' deletes, 'r' renames the selected entry (claim 5801 slots 34/35).
+        if (ascii_char == 'd' or ascii_char == 'D') {
+            return self.delete_selected();
+        }
+        if (ascii_char == 'r' or ascii_char == 'R') {
+            return self.rename_selected();
         }
 
         switch (keycode) {
@@ -495,6 +597,18 @@ pub fn build_data_path(buf: []u8, name: []const u8) []const u8 {
     @memcpy(buf[0..prefix.len], prefix);
     @memcpy(buf[prefix.len .. prefix.len + name.len], name);
     return buf[0 .. prefix.len + name.len];
+}
+
+/// Build `<stem>.BAK` from `name` (an existing extension is stripped; the
+/// stem is capped at 8 chars so the result always fits FAT 8.3). Caller
+/// provides a buffer ≥ 12 bytes.
+pub fn make_bak_name(name: []const u8, buf: []u8) []const u8 {
+    const stem = if (std.mem.lastIndexOfScalar(u8, name, '.')) |i| name[0..i] else name;
+    const n = @min(@min(stem.len, 8), buf.len - 4);
+    @memcpy(buf[0..n], stem[0..n]);
+    const suffix = ".BAK";
+    @memcpy(buf[n .. n + 4], suffix);
+    return buf[0 .. n + 4];
 }
 
 // ---------------------------------------------------------------------------
@@ -666,4 +780,32 @@ test "file: view-mode Esc returns to the list (claim B3)" {
     var ev_esc = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 1, .arg0 = 0x29, .arg1 = 0 };
     try std.testing.expect(app.handle_keyboard_event(&ev_esc));
     try std.testing.expect(!app.view_mode);
+}
+
+test "file: make_bak_name strips the extension and caps the stem (claim 5801)" {
+    var b: [32]u8 = [_]u8{0} ** 32;
+    try std.testing.expectEqualStrings("README.BAK", make_bak_name("README.TXT", &b));
+    try std.testing.expectEqualStrings("DATA.BAK", make_bak_name("DATA.TXT", &b));
+    try std.testing.expectEqualStrings("noext.BAK", make_bak_name("noext", &b));
+    try std.testing.expectEqualStrings("verylong.BAK", make_bak_name("verylongname.TXT", &b));
+}
+
+test "file: 'd' and 'r' route to delete/rename (claim 5801)" {
+    var app = AppState.init();
+    app.entries[0] = .{ .name = [_]u8{0} ** 32, .size = 10, .is_dir = 0, .reserved = .{ 0, 0, 0 } };
+    @memcpy(app.entries[0].name[0..10], "README.TXT");
+    app.entry_count = 1;
+    app.list.select(0, 1);
+
+    // 'd' routes to delete (host syscall returns 0, so the success path runs).
+    var ev_d = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 1, .arg0 = 0x07, .arg1 = 'd' };
+    try std.testing.expect(app.handle_keyboard_event(&ev_d));
+
+    // 'r' routes to rename.
+    app.entries[0] = .{ .name = [_]u8{0} ** 32, .size = 10, .is_dir = 0, .reserved = .{ 0, 0, 0 } };
+    @memcpy(app.entries[0].name[0..10], "README.TXT");
+    app.entry_count = 1;
+    app.list.select(0, 1);
+    var ev_r = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 2, .arg0 = 0x15, .arg1 = 'r' };
+    try std.testing.expect(app.handle_keyboard_event(&ev_r));
 }

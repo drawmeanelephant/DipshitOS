@@ -380,6 +380,88 @@ pub fn dir_list(pid: u64, path_bytes: []const u8, out_entries: []DirEntry) i64 {
 }
 
 // ---------------------------------------------------------------------------
+// Mutating operations (Milestone 13, card B1 — claim 5801)
+// ---------------------------------------------------------------------------
+
+/// Delete the file at `path`. Returns 0 on success, or a negative error
+/// code (EINVAL bad path / directory, ENOENT absent / unmounted).
+pub fn delete(pid: u64, path_bytes: []const u8) i64 {
+    if (pid >= process.max_processes) return -1;
+    if (path_bytes.len == 0 or path_bytes.len > max_path_len) return -1;
+    const parsed = parse_path(path_bytes) orelse return -1;
+    if (!mount_partition(parsed.partition)) return -6;
+    const subpath = parsed.path[0..parsed.parsed_len()];
+    return switch (fat.delete_file(subpath)) {
+        .ok => 0,
+        .not_found => -6,
+        .is_dir => -1,
+        .no_disk => -6,
+        .io_failed => -6,
+    };
+}
+
+/// Rename `old_path` to `new_path` (same directory — cross-directory moves
+/// and cross-volume renames are refused with EINVAL). Returns 0 on success.
+pub fn rename(pid: u64, old_bytes: []const u8, new_bytes: []const u8) i64 {
+    if (pid >= process.max_processes) return -1;
+    if (old_bytes.len == 0 or old_bytes.len > max_path_len or
+        new_bytes.len == 0 or new_bytes.len > max_path_len) return -1;
+    const old = parse_path(old_bytes) orelse return -1;
+    const new = parse_path(new_bytes) orelse return -1;
+    if (old.partition != new.partition) return -1; // cross-volume unsupported
+    if (!mount_partition(old.partition)) return -6;
+    return switch (fat.rename_file(old.path[0..old.parsed_len()], new.path[0..new.parsed_len()])) {
+        .ok => 0,
+        .not_found => -6,
+        .exists => -1, // no EEXIST row in the frozen ABI — documented EINVAL
+        .is_dir => -1,
+        .name_too_long => -8,
+        .bad_path => -1,
+        .no_disk => -6,
+        .io_failed => -6,
+    };
+}
+
+/// Resize the OPEN handle `fd` to `new_size` bytes (shrink truncates, grow
+/// zero-fills). Returns 0; EBADF for a bad/closed handle, EACCES when not
+/// open for write, ENOSPC for an over-large size.
+pub fn truncate(pid: u64, fd: u64, new_size: u32) i64 {
+    if (pid >= process.max_processes or fd >= max_handles_per_process) return -2;
+    var h = &handles[pid][fd];
+    if (!h.in_use) return -2; // EBADF
+    if ((h.flags & MODE_WRITE) == 0) return -7; // EACCES
+    if (!mount_partition(h.partition)) return -6;
+
+    const subpath = h.path[0..h.path_len];
+    const res: i64 = switch (fat.truncate_file(subpath, new_size)) {
+        .ok => 0,
+        .not_found => -6,
+        .is_dir => -1,
+        .too_large => -5,
+        .no_disk => -6,
+        .io_failed => -6,
+    };
+    if (res == 0) {
+        h.size = new_size;
+        if (h.cursor > new_size) h.cursor = new_size;
+    }
+    return res;
+}
+
+/// Free bytes on a volume (0 = DATA, 1 = ESP). Returns the byte count, or a
+/// negative error (EINVAL bad volume, ENOENT unmounted).
+pub fn free_space(pid: u64, volume: u32) i64 {
+    if (pid >= process.max_processes) return -1;
+    const part: Partition = switch (volume) {
+        0 => .data,
+        1 => .esp,
+        else => return -1,
+    };
+    if (!mount_partition(part)) return -6;
+    return @intCast(fat.free_space());
+}
+
+// ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
 
@@ -426,4 +508,27 @@ test "file_table: handle allocation, bounds, and lifecycle reset" {
 
 test "file_table: wire DirEntry size is exactly 40 bytes" {
     try std.testing.expectEqual(@as(usize, 40), @sizeOf(DirEntry));
+}
+
+test "file_table: mutating ops validate pids, paths, and volumes (claim 5801)" {
+    // Bad pid for every new op.
+    try std.testing.expectEqual(@as(i64, -1), delete(process.max_processes, "x.txt"));
+    try std.testing.expectEqual(@as(i64, -1), rename(process.max_processes, "a.txt", "b.txt"));
+    try std.testing.expectEqual(@as(i64, -1), free_space(process.max_processes, 0));
+
+    // Empty / traversal paths are refused without a disk.
+    try std.testing.expectEqual(@as(i64, -1), delete(1, ""));
+    try std.testing.expectEqual(@as(i64, -1), delete(1, "../x.txt"));
+    try std.testing.expectEqual(@as(i64, -1), rename(1, "a.txt", "../b.txt"));
+
+    // Bad volume for the free-space query.
+    try std.testing.expectEqual(@as(i64, -1), free_space(1, 2));
+
+    // Truncate on an unopened handle is EBADF.
+    init();
+    try std.testing.expectEqual(@as(i64, -2), truncate(1, 0, 4));
+}
+
+test "file_table: cross-volume rename is refused with EINVAL (claim 5801)" {
+    try std.testing.expectEqual(@as(i64, -1), rename(1, "/data/a.txt", "/esp/b.txt"));
 }

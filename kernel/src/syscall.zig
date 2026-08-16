@@ -72,7 +72,7 @@ const tcp = @import("tcp.zig"); // Milestone 12 (claim 7483): TCP client seam
 const csprng = @import("csprng.zig"); // ISN generation for TCP connect
 
 pub const slot_count: usize = 64;
-pub const implemented_count: usize = 34;
+pub const implemented_count: usize = 38;
 /// Card G6 (claim 0487) follow-on (slot 18): the fixed `sys_win_get` shape —
 /// four u32 LE words (x, y, w, h), 16 bytes, marshaled per call and copy_out'd
 /// through uaccess (the procs snapshot pattern).
@@ -179,6 +179,14 @@ pub const sys_tcp_send: u64 = 31;
 pub const sys_tcp_recv: u64 = 32;
 /// Milestone 12 (claim 7483): `sys_tcp_close()` — slot 33.
 pub const sys_tcp_close: u64 = 33;
+/// Milestone 13 (claim 5801): `sys_file_delete(path_ptr, path_len)` — slot 34.
+pub const sys_file_delete: u64 = 34;
+/// Milestone 13 (claim 5801): `sys_file_rename(old_ptr, old_len, new_ptr, new_len)` — slot 35.
+pub const sys_file_rename: u64 = 35;
+/// Milestone 13 (claim 5801): `sys_file_truncate(handle, size)` — slot 36.
+pub const sys_file_truncate: u64 = 36;
+/// Milestone 13 (claim 5801): `sys_file_free(volume)` — slot 37.
+pub const sys_file_free: u64 = 37;
 
 pub const ErrorCode = enum(i64) {
     einval = -1,
@@ -283,6 +291,10 @@ fn ensure_table() *const [slot_count]Entry {
         table_storage[sys_tcp_send] = .{ .name = "sys_tcp_send", .handler = handle_tcp_send };
         table_storage[sys_tcp_recv] = .{ .name = "sys_tcp_recv", .handler = handle_tcp_recv };
         table_storage[sys_tcp_close] = .{ .name = "sys_tcp_close", .handler = handle_tcp_close };
+        table_storage[sys_file_delete] = .{ .name = "sys_file_delete", .handler = handle_file_delete };
+        table_storage[sys_file_rename] = .{ .name = "sys_file_rename", .handler = handle_file_rename };
+        table_storage[sys_file_truncate] = .{ .name = "sys_file_truncate", .handler = handle_file_truncate };
+        table_storage[sys_file_free] = .{ .name = "sys_file_free", .handler = handle_file_free };
         table_ready = true;
     }
     return &table_storage;
@@ -892,6 +904,56 @@ fn handle_dir_list(args: Args, _: *exceptions.VectorFrame) u64 {
     return @intCast(populated);
 }
 
+/// Milestone 13 (claim 5801): slot 34 — sys_file_delete(path_ptr, path_len)
+fn handle_file_delete(args: Args, _: *exceptions.VectorFrame) u64 {
+    const path_ptr = args[0];
+    const path_len = args[1];
+    if (path_len == 0 or path_len > file_table.max_path_len) return error_result(.einval);
+    const pid = process.find_by_task(scheduler.current_id()) orelse return error_result(.einval);
+    var path_buf: [file_table.max_path_len]u8 = undefined;
+    if (uaccess.copy_in(&path_buf, path_ptr, @intCast(path_len)) != .ok) return error_result(.efault);
+    const res = file_table.delete(pid, path_buf[0..path_len]);
+    if (res < 0) return @bitCast(res);
+    return 0;
+}
+
+/// Milestone 13 (claim 5801): slot 35 — sys_file_rename(old_ptr, old_len, new_ptr, new_len)
+fn handle_file_rename(args: Args, _: *exceptions.VectorFrame) u64 {
+    const old_ptr = args[0];
+    const old_len = args[1];
+    const new_ptr = args[2];
+    const new_len = args[3];
+    if (old_len == 0 or old_len > file_table.max_path_len or new_len == 0 or new_len > file_table.max_path_len) return error_result(.einval);
+    const pid = process.find_by_task(scheduler.current_id()) orelse return error_result(.einval);
+    var old_buf: [file_table.max_path_len]u8 = undefined;
+    var new_buf: [file_table.max_path_len]u8 = undefined;
+    if (uaccess.copy_in(&old_buf, old_ptr, @intCast(old_len)) != .ok) return error_result(.efault);
+    if (uaccess.copy_in(&new_buf, new_ptr, @intCast(new_len)) != .ok) return error_result(.efault);
+    const res = file_table.rename(pid, old_buf[0..old_len], new_buf[0..new_len]);
+    if (res < 0) return @bitCast(res);
+    return 0;
+}
+
+/// Milestone 13 (claim 5801): slot 36 — sys_file_truncate(handle, size)
+fn handle_file_truncate(args: Args, _: *exceptions.VectorFrame) u64 {
+    const handle = args[0];
+    const size: u32 = @truncate(args[1]);
+    if (handle >= file_table.max_handles_per_process) return error_result(.ebadf);
+    const pid = process.find_by_task(scheduler.current_id()) orelse return error_result(.einval);
+    const res = file_table.truncate(pid, handle, size);
+    if (res < 0) return @bitCast(res);
+    return 0;
+}
+
+/// Milestone 13 (claim 5801): slot 37 — sys_file_free(volume)
+fn handle_file_free(args: Args, _: *exceptions.VectorFrame) u64 {
+    const volume: u32 = @truncate(args[0]);
+    const pid = process.find_by_task(scheduler.current_id()) orelse return error_result(.einval);
+    const res = file_table.free_space(pid, volume);
+    if (res < 0) return @bitCast(res);
+    return @intCast(res);
+}
+
 /// Claim 6359 (ADR 0007 slot 28): `sys_exec(path_ptr, path_len)` — the
 /// EL0 exec seam. Marshals the path through the claim-6120 uaccess window
 /// (the `sys_file_open` pattern), requires a process caller, and reuses
@@ -1105,9 +1167,9 @@ fn handle_tcp_close(_: Args, _: *exceptions.VectorFrame) u64 {
     return 0;
 }
 
-/// Deterministic monitor output for the thirty-four implemented rows and their counters.
+/// Deterministic monitor output for the thirty-eight implemented rows and their counters.
 pub fn report(con: *console.Console) void {
-    con.puts("syscalls: slots=64 implemented=34\n");
+    con.puts("syscalls: slots=64 implemented=38\n");
     var number: u64 = 0;
     while (number < implemented_count) : (number += 1) {
         const info = entry_info(number).?;
@@ -1139,7 +1201,7 @@ fn capture_marshaled_args(args: Args, _: *exceptions.VectorFrame) u64 {
     return 0xcafe;
 }
 
-test "syscall: runtime table has 64 slots and twenty-one unique implemented rows" {
+test "syscall: runtime table has 64 slots and thirty-eight unique implemented rows" {
     init(test_writer);
     const table = ensure_table();
     try std.testing.expectEqual(@as(usize, 64), table.len);
@@ -1152,7 +1214,7 @@ test "syscall: runtime table has 64 slots and twenty-one unique implemented rows
             implemented += 1;
         }
     }
-    try std.testing.expectEqual(@as(usize, 34), implemented);
+    try std.testing.expectEqual(@as(usize, 38), implemented);
     try std.testing.expectEqualStrings("sys_ping", entry_info(0).?.name);
     try std.testing.expectEqualStrings("sys_exit", entry_info(3).?.name);
     try std.testing.expectEqualStrings("sys_sleep", entry_info(4).?.name);
@@ -2106,7 +2168,7 @@ test "syscall: counters are monotonic and report is deterministic" {
     var con = mock.console();
     report(&con);
     try std.testing.expectEqualStrings(
-        "syscalls: slots=64 implemented=34\n" ++
+        "syscalls: slots=64 implemented=38\n" ++
             "  0 sys_ping calls=2\n" ++
             "  1 sys_write calls=0\n" ++
             "  2 sys_yield calls=0\n" ++
@@ -2140,7 +2202,11 @@ test "syscall: counters are monotonic and report is deterministic" {
             "  30 sys_tcp_connect calls=0\n" ++
             "  31 sys_tcp_send calls=0\n" ++
             "  32 sys_tcp_recv calls=0\n" ++
-            "  33 sys_tcp_close calls=0\n",
+            "  33 sys_tcp_close calls=0\n" ++
+            "  34 sys_file_delete calls=0\n" ++
+            "  35 sys_file_rename calls=0\n" ++
+            "  36 sys_file_truncate calls=0\n" ++
+            "  37 sys_file_free calls=0\n",
         mock.contents(),
     );
 }
@@ -2186,6 +2252,45 @@ test "syscall: file storage slots 23..27 dispatch and fault safety" {
     try std.testing.expectEqual(error_result(.ebadf), dispatch(sys_file_write, .{ 99, test_buf_addr, 10, 0, 0, 0 }, &frame));
     try std.testing.expectEqual(error_result(.ebadf), dispatch(sys_file_close, .{ 0, 0, 0, 0, 0, 0 }, &frame));
     try std.testing.expectEqual(error_result(.ebadf), dispatch(sys_file_close, .{ 99, 0, 0, 0, 0, 0 }, &frame));
+}
+
+test "syscall: mutating file slots 34..37 dispatch and fault safety (claim 5801)" {
+    userspace.init();
+    init(test_writer);
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0); // task 2 = process 0 (boot payload)
+    scheduler.start();
+    file_table.init();
+    var frame = fresh_frame();
+
+    // In task 0 (shell, not a registered process), calls return EINVAL
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_file_delete, .{ 0x1000, 8, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_file_rename, .{ 0x1000, 4, 0x1000, 4, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_file_truncate, .{ 0, 4, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_file_free, .{ 0, 0, 0, 0, 0, 0 }, &frame));
+
+    // Yield to user task (task 2, pid 0)
+    try std.testing.expect(scheduler.yield_current()); // shell -> worker
+    try std.testing.expect(scheduler.yield_current()); // worker -> user (2)
+    try std.testing.expectEqual(@as(usize, 2), scheduler.current_id());
+
+    var test_buf: [64]u8 = undefined;
+    const test_buf_addr = @intFromPtr(&test_buf);
+    set_user_regions(
+        .{ .base = 0, .len = 0 },
+        .{ .base = test_buf_addr, .len = test_buf.len },
+    );
+
+    // Bad user pointer -> EFAULT (delete + rename path copy-in)
+    try std.testing.expectEqual(error_result(.efault), dispatch(sys_file_delete, .{ uaccess.diagnostic_unmapped, 8, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.efault), dispatch(sys_file_rename, .{ uaccess.diagnostic_unmapped, 4, test_buf_addr, 4, 0, 0 }, &frame));
+    // Over-long path -> EINVAL (checked before uaccess)
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_file_delete, .{ 0x1000, file_table.max_path_len + 1, 0, 0, 0, 0 }, &frame));
+    // truncate on an unallocated fd -> EBADF
+    try std.testing.expectEqual(error_result(.ebadf), dispatch(sys_file_truncate, .{ 0, 4, 0, 0, 0, 0 }, &frame));
+    // free with a bad volume -> EINVAL
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_file_free, .{ 2, 0, 0, 0, 0, 0 }, &frame));
 }
 
 test "syscall: slot 28 sys_exec marshals the path and maps loader errors" {
