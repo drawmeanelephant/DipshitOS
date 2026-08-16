@@ -45,6 +45,7 @@ const xhci = @import("xhci.zig"); // milestone seven card I1 (claim 4272): the X
 const input = @import("input.zig"); // milestone seven card I3 (claim 6050): the keyboard/pointer event FIFO behind `input`
 const driving_award = @import("driving_award.zig"); // milestone six card G5 (claim 1543): Driving Award, the window manager behind `win`
 const settings = @import("settings.zig"); // milestone eight card U8 (claim 2649): persistent settings engine
+const dns = @import("dns.zig"); // milestone twelve card N2 (claim 7566): DNS resolver
 
 // ---------------------------------------------------------------------------
 // Limits (fixed-size, explicit bounds)
@@ -298,7 +299,7 @@ fn ensure_registry() []const Command {
             .{ .name = "mem", .help = "summarize the EFI memory map", .usage = "mem", .category = .memory_state, .handler = cmd_mem },
             .{ .name = "mbox", .help = "per-process IPC mailbox: pending messages and drain counters", .usage = "mbox [<pid>]", .category = .tasks_processes, .max_args = 1, .handler = cmd_mbox },
             .{ .name = "mount", .help = "switch the active FAT volume (esp or data)", .usage = "mount <esp|data>", .category = .storage, .min_args = 1, .max_args = 1, .handler = cmd_mount },
-            .{ .name = "net", .help = "virtio-net transport + RX + ARP + ICMP + UDP + DHCP + TCP: device DID, MAC, queues, feature bits, RX counters ('net recv' prints received frames; 'net ip <a.b.c.d>' sets the static IP; 'net arp [<a.b.c.d>]' shows/resolves the ARP table; 'net ping <a.b.c.d>' sends an ICMP echo request; 'net udp [listen <port>|close <port>|send <addr> <port> <len>|recv [<port>]]' drives UDP; 'net dhcp' runs the bounded DHCP client one step per invocation; 'net tcp [connect <addr> <port>|send <len>|recv|close|reset]' drives the bounded TCP client)", .usage = "net [recv|ip <addr>|arp [<addr>]|ping <addr>|udp [listen <port>|close <port>|send <addr> <port> <len>|recv [<port>]]|dhcp|tcp [connect <addr> <port>|send <len>|recv|close|reset]]", .category = .networking, .max_args = 5, .handler = cmd_net },
+            .{ .name = "net", .help = "virtio-net transport + RX + ARP + ICMP + UDP + DHCP + TCP + DNS: device DID, MAC, queues, feature bits, RX counters ('net recv' prints received frames; 'net ip <a.b.c.d>' sets the static IP; 'net arp [<a.b.c.d>]' shows/resolves the ARP table; 'net ping <a.b.c.d>' sends an ICMP echo request; 'net udp [listen <port>|close <port>|send <addr> <port> <len>|recv [<port>]]' drives UDP; 'net dhcp' runs the bounded DHCP client one step per invocation; 'net tcp [connect <addr> <port>|send <len>|recv|close|reset]' drives the bounded TCP client; 'net dns <hostname> [<server>]' resolves DNS A-records)", .usage = "net [recv|ip <addr>|arp [<addr>]|ping <addr>|udp [listen <port>|close <port>|send <addr> <port> <len>|recv [<port>]]|dhcp|tcp [connect <addr> <port>|send <len>|recv|close|reset]|dns <host> [<server>]]", .category = .networking, .max_args = 5, .handler = cmd_net },
             .{ .name = "netsend", .help = "send a known Ethernet frame (bounded staging, TX + used-ring drain)", .usage = "netsend <bytes>", .category = .networking, .min_args = 1, .max_args = 1, .handler = cmd_netsend },
             .{ .name = "pages", .help = "physical page allocator pool", .usage = "pages [selftest]", .category = .memory_state, .max_args = 1, .handler = cmd_pages },
             .{ .name = "pci", .help = "enumerate PCI devices on the bus", .usage = "pci", .category = .memory_state, .handler = cmd_pci },
@@ -2318,6 +2319,7 @@ fn cmd_net(m: *Monitor, args: []const []const u8) ExecError {
         if (std.mem.eql(u8, args[0], "udp")) return cmd_net_udp(m, args[1..]);
         if (std.mem.eql(u8, args[0], "dhcp")) return cmd_net_dhcp(m, args[1..]);
         if (std.mem.eql(u8, args[0], "tcp")) return cmd_net_tcp(m, args[1..]);
+        if (std.mem.eql(u8, args[0], "dns")) return cmd_net_dns(m, args[1..]);
         print_usage(m, lookup("net").?);
         return .usage;
     }
@@ -2601,6 +2603,23 @@ fn cmd_net(m: *Monitor, args: []const []const u8) ExecError {
     m.console.print_u64(virtio_net.tcp.retransmitted);
     m.console.puts(",abort=");
     m.console.print_u64(virtio_net.tcp.retx_aborted);
+    m.console.puts("\n");
+    // Milestone 12 Card N2 (claim 7566): DNS resolver counters
+    m.console.puts(" dns=");
+    m.console.puts(switch (dns.state) {
+        .idle => "idle",
+        .query_sent => "query_sent",
+        .resolved => "resolved",
+        .failed => "failed",
+    });
+    m.console.puts(",q=");
+    m.console.print_u64(dns.queries_sent);
+    m.console.puts(",r=");
+    m.console.print_u64(dns.responses_recv);
+    m.console.puts(",err=");
+    m.console.print_u64(dns.responses_err);
+    m.console.puts(",timeout=");
+    m.console.print_u64(dns.timed_out);
     m.console.puts("\n");
     return .none;
 }
@@ -2925,6 +2944,57 @@ fn cmd_net_tcp(m: *Monitor, args: []const []const u8) ExecError {
     if (std.mem.eql(u8, args[0], "reset")) return cmd_net_tcp_reset(m, args[1..]);
     print_usage(m, lookup("net").?);
     return .usage;
+}
+
+fn cmd_net_dns(m: *Monitor, args: []const []const u8) ExecError {
+    if (args.len < 1 or args.len > 2) {
+        print_usage(m, lookup("net").?);
+        return .usage;
+    }
+    const hostname = args[0];
+    var server_ip: [4]u8 = .{ 10, 0, 0, 2 }; // default host gateway
+    if (args.len == 2) {
+        server_ip = virtio_net.arp.parse_ip(args[1]) orelse {
+            err_prefix(m);
+            m.console.puts("invalid server address: ");
+            m.console.puts(args[1]);
+            m.console.puts("\n");
+            return .invalid_argument;
+        };
+    } else {
+        if (virtio_net.dhcp.state == .bound and (virtio_net.dhcp.lease_server[0] != 0 or virtio_net.dhcp.lease_server[1] != 0 or virtio_net.dhcp.lease_server[2] != 0 or virtio_net.dhcp.lease_server[3] != 0)) {
+            server_ip = virtio_net.dhcp.lease_server;
+        }
+    }
+
+    if (!virtio_net.net_ready) {
+        err_prefix(m);
+        m.console.print_line("no virtio-net device");
+        return .none;
+    }
+    if (!virtio_net.arp.ip_set()) {
+        err_prefix(m);
+        m.console.print_line("no IP set (net ip <a.b.c.d> first)");
+        return .none;
+    }
+
+    if (dns.resolve(hostname, server_ip)) |ip| {
+        m.console.puts("net dns: ");
+        m.console.puts(hostname);
+        m.console.puts(" -> ");
+        var ipbuf: [15]u8 = undefined;
+        const in = virtio_net.arp.format_ip(ip, &ipbuf);
+        m.console.puts(ipbuf[0..in]);
+        m.console.puts("\n");
+    } else |err| {
+        err_prefix(m);
+        m.console.puts("net dns error: ");
+        m.console.puts(@errorName(err));
+        m.console.puts(" for '");
+        m.console.puts(hostname);
+        m.console.puts("'\n");
+    }
+    return .none;
 }
 
 /// Print the TCP connection's peer as `a.b.c.d:port`.
@@ -4935,7 +5005,7 @@ test "monitor: net reports no device honestly when the transport is absent" {
     );
     // `net` is registered (the prompt's registry-row shape).
     try std.testing.expect(lookup("net") != null);
-    try std.testing.expectEqualStrings("virtio-net transport + RX + ARP + ICMP + UDP + DHCP + TCP: device DID, MAC, queues, feature bits, RX counters ('net recv' prints received frames; 'net ip <a.b.c.d>' sets the static IP; 'net arp [<a.b.c.d>]' shows/resolves the ARP table; 'net ping <a.b.c.d>' sends an ICMP echo request; 'net udp [listen <port>|close <port>|send <addr> <port> <len>|recv [<port>]]' drives UDP; 'net dhcp' runs the bounded DHCP client one step per invocation; 'net tcp [connect <addr> <port>|send <len>|recv|close|reset]' drives the bounded TCP client)", lookup("net").?.help);
+    try std.testing.expectEqualStrings("virtio-net transport + RX + ARP + ICMP + UDP + DHCP + TCP + DNS: device DID, MAC, queues, feature bits, RX counters ('net recv' prints received frames; 'net ip <a.b.c.d>' sets the static IP; 'net arp [<a.b.c.d>]' shows/resolves the ARP table; 'net ping <a.b.c.d>' sends an ICMP echo request; 'net udp [listen <port>|close <port>|send <addr> <port> <len>|recv [<port>]]' drives UDP; 'net dhcp' runs the bounded DHCP client one step per invocation; 'net tcp [connect <addr> <port>|send <len>|recv|close|reset]' drives the bounded TCP client; 'net dns <hostname> [<server>]' resolves DNS A-records)", lookup("net").?.help);
     try std.testing.expect(lookup("netsend") != null);
 }
 
@@ -5078,7 +5148,7 @@ test "monitor: net ip sets the static address and echoes the marker" {
     try std.testing.expectEqualStrings("error: invalid address: 999.0.0.1\n", env.mock.contents());
     env.mock.reset();
     try std.testing.expectEqual(ExecError.usage, exec(&mon, &.{ "net", "ip" }));
-    try std.testing.expectEqualStrings("usage: net [recv|ip <addr>|arp [<addr>]|ping <addr>|udp [listen <port>|close <port>|send <addr> <port> <len>|recv [<port>]]|dhcp|tcp [connect <addr> <port>|send <len>|recv|close|reset]]\nvirtio-net transport + RX + ARP + ICMP + UDP + DHCP + TCP: device DID, MAC, queues, feature bits, RX counters ('net recv' prints received frames; 'net ip <a.b.c.d>' sets the static IP; 'net arp [<a.b.c.d>]' shows/resolves the ARP table; 'net ping <a.b.c.d>' sends an ICMP echo request; 'net udp [listen <port>|close <port>|send <addr> <port> <len>|recv [<port>]]' drives UDP; 'net dhcp' runs the bounded DHCP client one step per invocation; 'net tcp [connect <addr> <port>|send <len>|recv|close|reset]' drives the bounded TCP client)\n", env.mock.contents());
+    try std.testing.expectEqualStrings("usage: net [recv|ip <addr>|arp [<addr>]|ping <addr>|udp [listen <port>|close <port>|send <addr> <port> <len>|recv [<port>]]|dhcp|tcp [connect <addr> <port>|send <len>|recv|close|reset]|dns <host> [<server>]]\nvirtio-net transport + RX + ARP + ICMP + UDP + DHCP + TCP + DNS: device DID, MAC, queues, feature bits, RX counters ('net recv' prints received frames; 'net ip <a.b.c.d>' sets the static IP; 'net arp [<a.b.c.d>]' shows/resolves the ARP table; 'net ping <a.b.c.d>' sends an ICMP echo request; 'net udp [listen <port>|close <port>|send <addr> <port> <len>|recv [<port>]]' drives UDP; 'net dhcp' runs the bounded DHCP client one step per invocation; 'net tcp [connect <addr> <port>|send <len>|recv|close|reset]' drives the bounded TCP client; 'net dns <hostname> [<server>]' resolves DNS A-records)\n", env.mock.contents());
     // The echo line is the live gate's injection trigger marker.
     try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "net", "ip", "10.0.0.2" }));
     try std.testing.expect(std.mem.indexOf(u8, env.mock.contents(), "net ip: ip=10.0.0.2\n") != null);
@@ -5349,7 +5419,7 @@ test "monitor: net recv prints the received frame byte-exact and drains the FIFO
     // Unknown subcommand: documented refusal.
     env.mock.reset();
     try std.testing.expectEqual(ExecError.usage, exec(&mon, &.{ "net", "bogus" }));
-    try std.testing.expect(std.mem.indexOf(u8, env.mock.contents(), "usage: net [recv|ip <addr>|arp [<addr>]|ping <addr>|udp [listen <port>|close <port>|send <addr> <port> <len>|recv [<port>]]|dhcp|tcp [connect <addr> <port>|send <len>|recv|close|reset]]\nvirtio-net transport + RX + ARP + ICMP + UDP + DHCP + TCP: device DID, MAC, queues, feature bits, RX counters ('net recv' prints received frames; 'net ip <a.b.c.d>' sets the static IP; 'net arp [<a.b.c.d>]' shows/resolves the ARP table; 'net ping <a.b.c.d>' sends an ICMP echo request; 'net udp [listen <port>|close <port>|send <addr> <port> <len>|recv [<port>]]' drives UDP; 'net dhcp' runs the bounded DHCP client one step per invocation; 'net tcp [connect <addr> <port>|send <len>|recv|close|reset]' drives the bounded TCP client)\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, env.mock.contents(), "usage: net [recv|ip <addr>|arp [<addr>]|ping <addr>|udp [listen <port>|close <port>|send <addr> <port> <len>|recv [<port>]]|dhcp|tcp [connect <addr> <port>|send <len>|recv|close|reset]|dns <host> [<server>]]\nvirtio-net transport + RX + ARP + ICMP + UDP + DHCP + TCP + DNS: device DID, MAC, queues, feature bits, RX counters ('net recv' prints received frames; 'net ip <a.b.c.d>' sets the static IP; 'net arp [<a.b.c.d>]' shows/resolves the ARP table; 'net ping <a.b.c.d>' sends an ICMP echo request; 'net udp [listen <port>|close <port>|send <addr> <port> <len>|recv [<port>]]' drives UDP; 'net dhcp' runs the bounded DHCP client one step per invocation; 'net tcp [connect <addr> <port>|send <len>|recv|close|reset]' drives the bounded TCP client; 'net dns <hostname> [<server>]' resolves DNS A-records)\n") != null);
     virtio_net.net_ready = false;
     virtio_net.rx_fifo_head = 0;
     virtio_net.rx_fifo_count = 0;
@@ -6061,4 +6131,24 @@ test "monitor: exec is registered and refuses honestly without a disk" {
     // mount the in-memory FAT fixture and retire the static user task.)
     try std.testing.expectEqual(ExecError.not_implemented, exec(&mon, &.{"exec"}));
     try std.testing.expectEqualStrings("error: no disk (ESP FAT volume unavailable)\n", env.mock.contents());
+}
+
+test "monitor: net dns command validation and execution" {
+    var env = TestEnv.init();
+    var mon = env.monitor();
+    virtio_net.net_ready = false;
+    virtio_net.arp.own_ip = .{ 0, 0, 0, 0 };
+
+    // Missing arguments
+    try std.testing.expectEqual(ExecError.usage, exec(&mon, &.{ "net", "dns" }));
+
+    // No device
+    env.mock.reset();
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "net", "dns", "example.com" }));
+    try std.testing.expect(std.mem.indexOf(u8, env.mock.contents(), "error: no virtio-net device\n") != null);
+
+    // Invalid server IP
+    env.mock.reset();
+    try std.testing.expectEqual(ExecError.invalid_argument, exec(&mon, &.{ "net", "dns", "example.com", "999.0.0.1" }));
+    try std.testing.expect(std.mem.indexOf(u8, env.mock.contents(), "error: invalid server address: 999.0.0.1\n") != null);
 }

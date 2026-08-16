@@ -1786,6 +1786,8 @@ test "syscall: udp send — EINVAL mapping, EFAULT, and the honest truncation" {
     defer virtio_net.udp.reset();
     virtio_net.arp.own_ip = .{ 10, 0, 0, 1 };
     defer virtio_net.arp.own_ip = .{ 0, 0, 0, 0 };
+    virtio_net.arp.table = [_]virtio_net.arp.ArpEntry{.{}} ** virtio_net.arp.table_slots;
+    defer virtio_net.arp.table = [_]virtio_net.arp.ArpEntry{.{}} ** virtio_net.arp.table_slots;
     var big: [100]u8 = undefined;
     for (&big, 0..) |*b, i| b.* = @intCast(i & 0xff);
     set_user_regions(
