@@ -672,6 +672,29 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_chat.step);
 
     // ------------------------------------------------------------------
+    // Guest: twenty-first ESP user program (milestone thirteen, card B3 — claim 4742)
+    // FILE.BIN. Graphical file browser for the DATA partition.
+    // ------------------------------------------------------------------
+    const file_prog = b.addExecutable(.{
+        .name = "user-file-browser",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/file_browser.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    file_prog.linker_script = b.path("user/linker.ld");
+    const file_step = b.step("file", "Build the twenty-first ESP user program (zig-out/bin/FILE.BIN)");
+    const file_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    file_elf2bin.addFileArg(file_prog.getEmittedBin());
+    const file_bin = file_elf2bin.addOutputFileArg("FILE.BIN");
+    file_elf2bin.has_side_effects = true;
+    file_elf2bin.stdio = .inherit;
+    file_step.dependOn(&file_elf2bin.step);
+    const install_file = b.addInstallFileWithDir(file_bin, .bin, "FILE.BIN");
+    b.getInstallStep().dependOn(&install_file.step);
+
+    // ------------------------------------------------------------------
     // Top-level steps. System-command steps are marked as having side
     // effects (and inherit stdio) so they always execute instead of being
     // skipped by the build cache. (No QEMU path: this project targets Apple
@@ -702,6 +725,7 @@ pub fn build(b: *std.Build) void {
     image.addFileArg(tcp_bin); // ... [TCP.BIN] (claim 7483: eighteenth user program, TCP client)
     image.addFileArg(fetch_bin); // ... [FETCH.BIN] (claim 5416: nineteenth user program, HTTP client)
     image.addFileArg(chat_bin); // ... [CHAT.BIN] (claim 5416: twentieth user program, graphical P2P chat)
+    image.addFileArg(file_bin); // ... [FILE.BIN] (claim 4742: twenty-first user program, GUI file browser)
     image.has_side_effects = true;
     image.stdio = .inherit;
     image_step.dependOn(&image.step);
