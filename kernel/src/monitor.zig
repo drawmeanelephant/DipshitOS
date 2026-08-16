@@ -43,7 +43,7 @@ const road_pops = @import("road_pops.zig"); // milestone six card G3 (claim 1574
 const fbtext = @import("text.zig"); // milestone six card G2 (claim 3194): framebuffer text rendering behind `text`
 const xhci = @import("xhci.zig"); // milestone seven card I1 (claim 4272): the XHCI host-controller transport behind `usb`
 const input = @import("input.zig"); // milestone seven card I3 (claim 6050): the keyboard/pointer event FIFO behind `input`
-const driving_award = @import("driving_award.zig"); // milestone six card G5 (claim 1543): Driving Award, the window manager behind `win`
+const driving_award = @import("driving_award.zig"); // milestone six card G5 (claim 1543): Driving Award, the window manager behind `dui`
 const settings = @import("settings.zig"); // milestone eight card U8 (claim 2649): persistent settings engine
 const dns = @import("dns.zig"); // milestone twelve card N2 (claim 7566): DNS resolver
 
@@ -261,7 +261,7 @@ pub const Command = struct {
 /// grows it 32 -> 34 (`net` + `netsend`). Milestone seven card I1
 /// (claim 4272) grows it 37 -> 38 (`usb`). Milestone seven card I3
 /// (claim 6050) grows it 38 -> 39 (`input`). Milestone six card G5
-/// (claim 1543) grows it 39 -> 40 (`win`). Milestone eight card U6
+/// (claim 1543) grows it 39 -> 40 (`dui`). Milestone eight card U6
 /// (claim 8323) grows it 40 -> 42 (`welcome`, `tour`). Milestone eight card U7
 /// (claim 2990) grows it 42 -> 43 (`sysinfo`). Milestone eight card U8
 /// (claim 2649) grows it 43 -> 44 (`settings`).
@@ -323,7 +323,7 @@ fn ensure_registry() []const Command {
             .{ .name = "uname", .help = "compact system identity", .usage = "uname", .category = .machine_identity, .handler = cmd_uname },
             .{ .name = "version", .help = "display build information", .usage = "version", .category = .machine_identity, .handler = cmd_version },
             .{ .name = "welcome", .help = "guided tour of the system for new users", .usage = "welcome", .category = .machine_identity, .handler = cmd_welcome },
-            .{ .name = "win", .help = "Driving Award window manager: registry (with owner pids), z-order, focus, hit-testing ('win focus <n>' focuses; 'win raise <n>' raises; 'win move <n> <x> <y>' moves a user window; 'win close <n>' releases a user window; 'win list <pid>' filters by owner; 'win hit <x> <y>' hit-tests; 'win cycle' cycles focus like Alt+Tab)", .usage = "win [focus <n>|raise <n>|move <n> <x> <y>|close <n>|list <pid>|hit <x> <y>|cycle]", .category = .graphics_input, .max_args = 4, .handler = cmd_win },
+            .{ .name = "dui", .help = "Driving Award window manager: registry (with owner pids), z-order, focus, hit-testing ('dui focus <n>' focuses; 'dui raise <n>' raises; 'dui move <n> <x> <y>' moves a user window; 'dui close <n>' releases a user window; 'dui list <pid>' filters by owner; 'dui hit <x> <y>' hit-tests; 'dui cycle' cycles focus like Alt+Tab)", .usage = "dui [focus <n>|raise <n>|move <n> <x> <y>|close <n>|list <pid>|hit <x> <y>|cycle]", .category = .graphics_input, .max_args = 4, .handler = cmd_dui },
             .{ .name = "write", .help = "write text to a file on the ESP", .usage = "write <file> <text...>", .category = .storage, .min_args = 1, .handler = cmd_write },
         };
         registry_ready = true;
@@ -429,7 +429,7 @@ fn match_one(prefix: []const u8, verbs: []const []const u8) ?[]const u8 {
 fn sub_verb_complete(cmd: []const u8, prefix: []const u8) ?[]const u8 {
     if (std.mem.eql(u8, cmd, "net"))
         return match_one(prefix, &.{ "recv", "ip", "arp", "ping", "udp", "dhcp", "tcp" });
-    if (std.mem.eql(u8, cmd, "win"))
+    if (std.mem.eql(u8, cmd, "dui"))
         return match_one(prefix, &.{ "focus", "raise", "move", "close", "list", "hit", "cycle" });
     if (std.mem.eql(u8, cmd, "usb"))
         return match_one(prefix, &.{ "devices", "report" });
@@ -588,7 +588,7 @@ fn topic_body(name: []const u8) ?[]const u8 {
         return "windows\n" ++
             "  Driving Award (G5) owns the window registry: z-order, focus, hit-testing,\n" ++
             "  dirty-rect compositing. Road Pops is window 0; a 1 Hz clock is window 1.\n" ++
-            "  `win` inspects/focuses/raises/moves/closes; EL0 opens windows through ADR 0007\n" ++
+            "  `dui` inspects/focuses/raises/moves/closes; EL0 opens windows through ADR 0007\n" ++
             "  slots 12-20 (open/fill/present/close/move/raise/get/query/set_visible). Windows\n" ++
             "  are process-owned and auto-close when their process exits.\n";
     }
@@ -671,7 +671,7 @@ fn cmd_welcome(m: *Monitor, args: []const []const u8) ExecError {
     m.console.print_line("  2. System Info: Type 'version', 'uname', or 'about' for architectural details.");
     m.console.print_line("  3. Tasks & Procs: Type 'procs' to view active processes or 'tasks' for scheduler states.");
     m.console.print_line("  4. Storage: Type 'ls' and 'cat <file>' to view files on the ESP; 'mount data' to switch volumes.");
-    m.console.print_line("  5. Windows & Graphics: Type 'win' to inspect window registry and z-order; 'win cycle' to cycle focus.");
+    m.console.print_line("  5. Windows & Graphics: Type 'win' to inspect window registry and z-order; 'dui cycle' to cycle focus.");
     m.console.print_line("  6. Networking: Type 'net' for device status, 'net ping <ip>' or 'net dhcp' to configure.");
     m.console.print_line("  7. Documentation: Architecture, decisions, and hardware contracts live in docs/.");
     m.console.print_line("Have fun and break things responsibly.");
@@ -1335,19 +1335,19 @@ fn cmd_roadpops(m: *Monitor, args: []const []const u8) ExecError {
     return .none;
 }
 
-/// `win` — report the Driving Award window manager (claim 1543, milestone
+/// `dui` — report the Driving Award window manager (claim 1543, milestone
 /// six G5): the registry (id/title/kind/rect/z-order/dirty/visible/owner),
-/// the focused window, and the composite presents. `win focus <n>` focuses
-/// a window, `win raise <n>` raises it to the top, `win move <n> <x> <y>`
-/// moves a user window (clamped on-scanout), `win close <n>` releases a
-/// user window, `win list <pid>` filters the registry to one process's
-/// windows, and `win hit <x> <y>` hit-tests a point (focusing the topmost
+/// the focused window, and the composite presents. `dui focus <n>` focuses
+/// a window, `dui raise <n>` raises it to the top, `dui move <n> <x> <y>`
+/// moves a user window (clamped on-scanout), `dui close <n>` releases a
+/// user window, `dui list <pid>` filters the registry to one process's
+/// windows, and `dui hit <x> <y>` hit-tests a point (focusing the topmost
 /// window there).
-fn cmd_win(m: *Monitor, args: []const []const u8) ExecError {
+fn cmd_dui(m: *Monitor, args: []const []const u8) ExecError {
     if (args.len > 0) {
         if (std.mem.eql(u8, args[0], "focus")) {
             if (args.len != 2) {
-                print_usage(m, lookup("win").?);
+                print_usage(m, lookup("dui").?);
                 return .usage;
             }
             const id = parseInt(args[1]) catch {
@@ -1371,14 +1371,14 @@ fn cmd_win(m: *Monitor, args: []const []const u8) ExecError {
             _ = driving_award.mark_dirty(0);
             _ = driving_award.mark_dirty(1);
             _ = driving_award.composite();
-            m.console.puts("win focus: focused=");
+            m.console.puts("dui focus: focused=");
             m.console.print_u64(id);
             m.console.puts("\n");
             return .none;
         }
         if (std.mem.eql(u8, args[0], "raise")) {
             if (args.len != 2) {
-                print_usage(m, lookup("win").?);
+                print_usage(m, lookup("dui").?);
                 return .usage;
             }
             const id = parseInt(args[1]) catch {
@@ -1399,14 +1399,14 @@ fn cmd_win(m: *Monitor, args: []const []const u8) ExecError {
                 return .invalid_argument;
             }
             _ = driving_award.composite();
-            m.console.puts("win raise: raised=");
+            m.console.puts("dui raise: raised=");
             m.console.print_u64(id);
             m.console.puts("\n");
             return .none;
         }
         if (std.mem.eql(u8, args[0], "move")) {
             if (args.len != 4) {
-                print_usage(m, lookup("win").?);
+                print_usage(m, lookup("dui").?);
                 return .usage;
             }
             const id = parseInt(args[1]) catch {
@@ -1437,7 +1437,7 @@ fn cmd_win(m: *Monitor, args: []const []const u8) ExecError {
                 return .invalid_argument;
             }
             _ = driving_award.composite();
-            m.console.puts("win move: moved=");
+            m.console.puts("dui move: moved=");
             m.console.print_u64(id);
             m.console.puts(" to ");
             m.console.print_u64(x);
@@ -1448,7 +1448,7 @@ fn cmd_win(m: *Monitor, args: []const []const u8) ExecError {
         }
         if (std.mem.eql(u8, args[0], "close")) {
             if (args.len != 2) {
-                print_usage(m, lookup("win").?);
+                print_usage(m, lookup("dui").?);
                 return .usage;
             }
             const id = parseInt(args[1]) catch {
@@ -1471,14 +1471,14 @@ fn cmd_win(m: *Monitor, args: []const []const u8) ExecError {
             // The close marked the fixed windows dirty — composite now to
             // reveal whatever sat under the released window.
             _ = driving_award.composite();
-            m.console.puts("win close: closed=");
+            m.console.puts("dui close: closed=");
             m.console.print_u64(id);
             m.console.puts("\n");
             return .none;
         }
         if (std.mem.eql(u8, args[0], "list")) {
             if (args.len != 2) {
-                print_usage(m, lookup("win").?);
+                print_usage(m, lookup("dui").?);
                 return .usage;
             }
             const pid = parseInt(args[1]) catch {
@@ -1495,7 +1495,7 @@ fn cmd_win(m: *Monitor, args: []const []const u8) ExecError {
                 const w = driving_award.window_at(i).?;
                 if (w.owner == want) matches += 1;
             }
-            m.console.puts("win list: pid=");
+            m.console.puts("dui list: pid=");
             m.console.print_u64(pid);
             m.console.puts(" matches=");
             m.console.print_u64(matches);
@@ -1509,11 +1509,11 @@ fn cmd_win(m: *Monitor, args: []const []const u8) ExecError {
         }
         if (std.mem.eql(u8, args[0], "cycle")) {
             if (args.len != 1) {
-                print_usage(m, lookup("win").?);
+                print_usage(m, lookup("dui").?);
                 return .usage;
             }
             if (driving_award.cycle_focus()) |id| {
-                m.console.puts("win: cycle focused=");
+                m.console.puts("dui: cycle focused=");
                 m.console.print_u64(id);
                 m.console.puts("\n");
                 return .none;
@@ -1524,7 +1524,7 @@ fn cmd_win(m: *Monitor, args: []const []const u8) ExecError {
         }
         if (std.mem.eql(u8, args[0], "hit")) {
             if (args.len != 3) {
-                print_usage(m, lookup("win").?);
+                print_usage(m, lookup("dui").?);
                 return .usage;
             }
             const x = parseInt(args[1]) catch {
@@ -1543,7 +1543,7 @@ fn cmd_win(m: *Monitor, args: []const []const u8) ExecError {
                 return .invalid_argument;
             }
             const hit = driving_award.hit_test(@intCast(x), @intCast(y));
-            m.console.puts("win hit: ");
+            m.console.puts("dui hit: ");
             m.console.print_u64(x);
             m.console.puts(",");
             m.console.print_u64(y);
@@ -1557,14 +1557,14 @@ fn cmd_win(m: *Monitor, args: []const []const u8) ExecError {
             m.console.puts("\n");
             return .none;
         }
-        print_usage(m, lookup("win").?);
+        print_usage(m, lookup("dui").?);
         return .usage;
     }
     if (!driving_award.armed()) {
-        m.console.print_line("win: window manager not armed (no gpu device — the default VM)");
+        m.console.print_line("dui: window manager not armed (no gpu device — the default VM)");
         return .none;
     }
-    m.console.puts("win: windows=");
+    m.console.puts("dui: windows=");
     m.console.print_u64(driving_award.count());
     m.console.puts(" focused=");
     m.console.print_u64(driving_award.focused_window_id());
@@ -1579,11 +1579,11 @@ fn cmd_win(m: *Monitor, args: []const []const u8) ExecError {
 }
 
 /// Print one registry row for the window at index `i` — the shared formatter
-/// behind the `win` report and `win list <pid>`. The trailing `owner=` column
+/// behind the `dui` report and `dui list <pid>`. The trailing `owner=` column
 /// is the per-process-ownership visibility (claim 0487 follow-on): a pid for a
 /// `.user` window, `-` for the fixed kernel-owned terminal + clock.
 fn print_win_row(m: *Monitor, i: usize, w: *const driving_award.Window) void {
-    m.console.puts("win[");
+    m.console.puts("dui[");
     m.console.print_u64(i);
     m.console.puts("]: ");
     m.console.puts(w.title);
@@ -4655,7 +4655,7 @@ test "monitor: tab completion completes command names and sub-verbs (ADR 0008 D2
     try std.testing.expectEqualStrings("cp", complete("net t", 5).?);
     // "text c" -> "lear" (clear); a sub-verb with no match -> null.
     try std.testing.expectEqualStrings("lear", complete("text c", 6).?);
-    try std.testing.expect(complete("win z", 5) == null);
+    try std.testing.expect(complete("dui z", 5) == null);
     // `help <topic>` completes against the topic pages.
     try std.testing.expectEqualStrings("etworking", complete("help n", 6).?);
     // Empty token -> null.

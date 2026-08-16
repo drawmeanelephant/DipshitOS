@@ -30,7 +30,7 @@ normative, and it is enforced by gates (see D6), not by prose alone.
 ### D1. Command grammar and discovery
 
 - Verbs are lowercase and space-separated; sub-verbs extend a verb
-  (`net udp listen`, `win focus`, `usb devices`). The existing positional
+  (`net udp listen`, `dui focus`, `usb devices`). The existing positional
   surface stays positional; this ADR does not introduce a flag convention.
 - Every command carries two mandatory pieces of metadata:
   1. a one-line blurb (already part of the byte-identical transcript), and
@@ -46,7 +46,7 @@ normative, and it is enforced by gates (see D6), not by prose alone.
   | tasks / processes | `tasks`, `spawn`, `exec`, `procs`, `kill`, `mbox`, `syscalls` |
   | storage | `ls`, `cat`, `write`, `mount` |
   | networking | `net`, `netsend` |
-  | graphics / input | `screen`, `text`, `roadpops`, `win`, `input`, `usb` |
+  | graphics / input | `screen`, `text`, `roadpops`, `dui`, `input`, `usb` |
   | system | `help`, `echo`, `clear`, `repeat`, `random`, `reboot`, `shutdown` |
 
 - `help <cmd>` prints the usage string plus a few lines of description.
@@ -94,7 +94,7 @@ Three exact shapes, deterministic, and no handler may panic on bad input:
   Cmd modifier) cycles focus among windows.
 - The Road Pops terminal is window 0 and is never closed.
 - User windows draw a title bar carrying a name and the owning pid; closing is
-  an explicit, visible affordance (already `win close` / `sys_win_close`).
+  an explicit, visible affordance (already `dui close` / `sys_win_close`).
 
 ### D5. Support and first-boot surface
 

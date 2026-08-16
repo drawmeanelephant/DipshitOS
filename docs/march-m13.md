@@ -34,9 +34,10 @@ Legend: ⬜ not started · 🔄 in progress · ✅ done · ⛔ blocked (note why
 
 ## Housekeeping folded in
 
-- **`win` → `dui` command rename** (issue #159) — Driving Award's monitor
-  command grows a proper name; touches the command table, dispatch,
-  report prefixes, title-bar label, and the re-derived gates.
+- **`win` → `dui` command rename** (issue #159) — ✅ done 2026-08-16
+  (claim 2223): Driving Award's monitor command is now `dui` (same
+  subcommands), report prefixes + title-bar label renamed, and the
+  re-derived gates assert `dui:` output.
 - **M8 U4 pointer-focus class-B evidence** (issue #151) — complete the
   `verify-live-pointer-cg.sh` CG gate (self-gates on Accessibility trust;
   skips cleanly without it).

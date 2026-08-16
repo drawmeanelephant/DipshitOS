@@ -334,12 +334,12 @@ and AUTO-CLOSES when that process exits — the scheduler's `exit_current`
 calls `driving_award.close_owner(pid)`, so no window leaks until reboot.
 `sys_win_fill`/`sys_win_present`/`sys_win_close` are owner-restricted (a
 process can only render into and close its own window; the EL1h monitor's
-`win close` stays privileged). The open → fill → present → exit
+`dui close` stays privileged). The open → fill → present → exit
 auto-close and the open → fill → present → close → re-open cycles are
 host-tested end to end (`kernel/src/syscall.zig`, `kernel/src/driving_award.zig`).
 
 The close follow-on (slot 15) makes the seam releasable: `sys_win_close`
-and the monitor's `win close <n>` both call `driving_award.user_close`,
+and the monitor's `dui close <n>` both call `driving_award.user_close`,
 which frees the id (2..3) for re-open and un-presents the window. The
 open → fill → present → close → re-open cycle is host-tested end to end
 (`kernel/src/syscall.zig`, `kernel/src/driving_award.zig`), and the
@@ -365,7 +365,7 @@ fill/present/close. The EL0 proof rides a NINTH image WINMOVE.BIN
 (`user/src/winmove.zig`): open → fill → present → move → move (the second
 move clamps to the scanout corner) → raise → yield-forever; the class-B
 gate `tools/verify-live-win-move.sh` shows the window's final clamped
-rect (`win[2]: user user rect=1024,528,256,192`), the counters
+rect (`dui[2]: user user rect=1024,528,256,192`), the counters
 (open=1/fill=4/present=3/move=2/raise=1/close=0), and the decoded
 capture with the window's colors at the NEW position and the terminal
 where it USED to be.
