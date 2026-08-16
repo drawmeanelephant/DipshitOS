@@ -1151,14 +1151,18 @@ See [`march-m12.md`](march-m12.md) for the per-card tracker.
 > `sys_file_read` kernel-stack overflow and the FP/SIMD clobber across
 > exceptions); **🔄 B3 done 2026-08-16** (claim 4742 — `FILE.BIN`, the
 > graphical DATA file browser; `verify-live-file-browser.sh` PASS on VZ);
-> B1/B4 remain (tracked by issues #161/#162). M12's TCP seam runs at ADR
-> 0007 slots 30–33, so this milestone's FS additions start at slot 34.
+> **🔄 B1 done 2026-08-16** (claim 5801 — the mutating FS seam, slots 34–37;
+> `verify-live-fs-mutation.sh` PASS on VZ); B4 remains (tracked by
+> issue #162). M12's TCP seam runs at ADR 0007 slots 30–33, so this
+> milestone's FS additions start at slot 34.
 
-- **B1 — Filesystem semantics depth (ADR 0007 slots 34–37).**
-  `sys_file_delete(path_ptr, path_len)`, `sys_file_rename(old_ptr,
-  old_len, new_ptr, new_len)`, `sys_file_truncate(handle, size)`, and a
-  `sys_file_free(volume) -> bytes` free-space query — the read-only M10
-  ABI becomes a mutating one, bounded like every other kernel resource.
+- **B1 — Filesystem semantics depth (ADR 0007 slots 34–37).** ✅
+  done 2026-08-16 (claim 5801): `sys_file_delete(path_ptr, path_len)`,
+  `sys_file_rename(old_ptr, old_len, new_ptr, new_len)`,
+  `sys_file_truncate(handle, size)`, and a `sys_file_free(volume) -> bytes`
+  free-space query — the read-only M10 ABI becomes a mutating one, bounded
+  like every other kernel resource. `FSTEST.BIN` + the
+  `verify-live-fs-mutation.sh` live gate prove it (all four slots `calls=1`).
 - **B2 — Application identity manifest.** A tiny fixed-format manifest
   (`APPS.TXT` on the ESP, or a trailing record in each `.BIN` — the DSK1
   header is frozen by ADR 0002): `NAME.BIN | Display Name | icon-char`.

@@ -67,6 +67,7 @@ verify-coordination`, and CI) fails if it drifts from the files.
 | Milestone 12 Card N1: userland TCP syscall seam | [`agent-buffy-m12-n1-tcp-seam.md`](agent-buffy-m12-n1-tcp-seam.md) |
 | Milestone 12 Card N2: bounded DNS client | [`agent-buffy-m12-n2-dns-client.md`](agent-buffy-m12-n2-dns-client.md) |
 | Milestone 12 Card N3: capstone applications FETCH.BIN & CHAT.BIN | [`agent-buffy-m12-n3-capstone-apps.md`](agent-buffy-m12-n3-capstone-apps.md) |
+| `m13-b1-fs-semantics`: the mutating filesystem syscalls (claim 5801) | [`agent-buffy-m13-b1-fs-semantics.md`](agent-buffy-m13-b1-fs-semantics.md) |
 | `m13-b2-manifest`: the desktop application manifest + FP/SIMD vector save (claim 8877) | [`agent-buffy-m13-b2-manifest.md`](agent-buffy-m13-b2-manifest.md) |
 | `m13-b3-file-browser`: FILE.BIN, the graphical DATA-partition file browser (claim 4742) | [`agent-buffy-m13-b3-file-browser.md`](agent-buffy-m13-b3-file-browser.md) |
 | `agent/buffy/m15-commands` (PR #12) | [`agent-buffy-m15-commands.md`](agent-buffy-m15-commands.md) |
