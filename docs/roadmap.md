@@ -1149,9 +1149,10 @@ See [`march-m12.md`](march-m12.md) for the per-card tracker.
 > `APPS.TXT` application identity manifest; `verify-live-desktop.sh` PASS on
 > VZ; the gate's tail also fixed two pre-existing kernel bugs: the
 > `sys_file_read` kernel-stack overflow and the FP/SIMD clobber across
-> exceptions); B1/B3/B4 remain (tracked by issues #152/#153 + new B1/B4
-> issues). M12's TCP seam runs at ADR 0007 slots 30–33, so this milestone's
-> FS additions start at slot 34.
+> exceptions); **🔄 B3 done 2026-08-16** (claim 4742 — `FILE.BIN`, the
+> graphical DATA file browser; `verify-live-file-browser.sh` PASS on VZ);
+> B1/B4 remain (tracked by issues #161/#162). M12's TCP seam runs at ADR
+> 0007 slots 30–33, so this milestone's FS additions start at slot 34.
 
 - **B1 — Filesystem semantics depth (ADR 0007 slots 34–37).**
   `sys_file_delete(path_ptr, path_len)`, `sys_file_rename(old_ptr,
@@ -1164,10 +1165,11 @@ See [`march-m12.md`](march-m12.md) for the per-card tracker.
   `DESKTOP.BIN` reads it via `sys_file_open` instead of its hardcoded app
   array, so adding an app means a manifest entry, not a launcher recompile.
   (Wishlist 9; issue #152.)
-- **B3 — `FILE.BIN` graphical file browser.** **[Capstone Gate]** Browse
-  `/data/` in a scrollable `ListView` (the ui.zig toolkit), open `.TXT`
-  files in a read-only text view, delete/rename through B1's slots.
-  (Wishlist 6; issue #153.) Live gate: `verify-live-file-browser.sh`.
+- **B3 — `FILE.BIN` graphical file browser.** **[Capstone Gate]** ✅
+  done 2026-08-16 (claim 4742): browse `/data/` in a scrollable `ListView`
+  (the ui.zig toolkit), open `.TXT` files in a read-only text view;
+  delete/rename still arrive through B1's slots. Live gate
+  `verify-live-file-browser.sh` PASS on VZ. (Wishlist 6; issue #153.)
 - **B4 — Desktop composition.** The launcher menu comes from B2's manifest
   (not the hardcoded array) and FILE.BIN is one of the launchable apps;
   the capstone gate drives DESKTOP → launch FILE.BIN → browse → open a

@@ -258,6 +258,14 @@ pub fn file_close(handle: u32) void {
     _ = syscall1(sys_file_close_num, handle);
 }
 
+/// Claim 3570 (ADR 0010 slot 27): enumerate the entries of a directory
+/// ("" or "/data" — the DATA partition; "/esp" — the ESP) into `buf`.
+/// Returns the entry count written, or a negative ADR 0007 error. Each
+/// `DirEntry` is 40 bytes (`name[32]` NUL-padded + `size` + `is_dir`).
+pub fn dir_list(path: []const u8, buf: []DirEntry) i64 {
+    return syscall4(sys_dir_list_num, @intFromPtr(path.ptr), path.len, @intFromPtr(buf.ptr), buf.len);
+}
+
 pub fn udp_listen(port: u16) i64 {
     return syscall1(sys_udp_listen_num, port);
 }
