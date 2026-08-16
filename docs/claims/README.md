@@ -185,6 +185,7 @@ CI) fails if the table drifts from the claim files.
 | [7302-xhci-depth-pointer-reports](7302-xhci-depth-pointer-reports.md) | buffy (`agent/buffy/audit-followup-2-input-depth`) | 🔄 agent/buffy/audit-followup-2-input-depth |
 | [7392-verify-gates-at-newest-main](7392-verify-gates-at-newest-main.md) | buffy (`freebuff/grab-most-current-git-and-let-s-continue-on-with-o-bd839138-534f-40b1-97b3-220d1b1c9a61`) | ✅ done 2026-08-09 — full class A (11/11) + class B (9/9) green at the merged |
 | [7463-e0-event-contract](7463-e0-event-contract.md) | buffy (`agent/buffy/m9-events`) | ✅ done (2026-08-15) |
+| [7604-sys-kill-el0-termination](7604-sys-kill-el0-termination.md) | buffy (`agent/buffy/m11-sys-kill`) | ✅ done |
 | [7670-e1-kernel-event-queue](7670-e1-kernel-event-queue.md) | buffy (`agent/buffy/m9-events`) | ✅ done (2026-08-15) |
 | [7786-kill-command](7786-kill-command.md) | Buffy (`agent/buffy/m4-kill`) | ✅ done — Stage A (the scheduler kill seam + the `kill` |
 | [7869-calc-overflow-memory](7869-calc-overflow-memory.md) | buffy (`agent/buffy/m11-calc-polish`) | ✅ done |

@@ -70,7 +70,7 @@ const esp_exec = @import("exec.zig"); // Claim 6359 (ADR 0007 slot 28): the EL0 
 const esp = @import("esp.zig"); // Claim 6359: the ESP name bound for the path check
 
 pub const slot_count: usize = 64;
-pub const implemented_count: usize = 29;
+pub const implemented_count: usize = 30;
 /// Card G6 (claim 0487) follow-on (slot 18): the fixed `sys_win_get` shape —
 /// four u32 LE words (x, y, w, h), 16 bytes, marshaled per call and copy_out'd
 /// through uaccess (the procs snapshot pattern).
@@ -162,6 +162,13 @@ pub const sys_dir_list: u64 = 27;
 /// process slot and spawn it at EL0 — so an EL0 launcher (DESKTOP.BIN)
 /// actually launches apps. Returns the new process's pid on success.
 pub const sys_exec: u64 = 28;
+/// Claim 7604: `sys_kill(target_pid)` — the EL0 termination seam. Arms the
+/// target process's executor through the claim-7786 kill
+/// (`scheduler.request_kill`): the ring converts the target's NEXT
+/// selection into the existing exit path with the reserved status 137 —
+/// the OS, not the program, owns process lifetime. Returns 0 once armed;
+/// EINVAL for every refusal.
+pub const sys_kill: u64 = 29;
 
 pub const ErrorCode = enum(i64) {
     einval = -1,
@@ -259,6 +266,7 @@ fn ensure_table() *const [slot_count]Entry {
         table_storage[sys_file_close] = .{ .name = "sys_file_close", .handler = handle_file_close };
         table_storage[sys_dir_list] = .{ .name = "sys_dir_list", .handler = handle_dir_list };
         table_storage[sys_exec] = .{ .name = "sys_exec", .handler = handle_exec };
+        table_storage[sys_kill] = .{ .name = "sys_kill", .handler = handle_kill };
         table_ready = true;
     }
     return &table_storage;
@@ -903,9 +911,34 @@ fn handle_exec(args: Args, _: *exceptions.VectorFrame) u64 {
     };
 }
 
-/// Deterministic monitor output for the twenty-nine implemented rows and their counters.
+/// Claim 7604 (ADR 0007 slot 29): `sys_kill(target_pid)` — the EL0
+/// termination seam. Requires a process caller, validates the target
+/// through the process registry (range, free, exited, no executor), and
+/// arms the kill through the claim-7786 seam (`scheduler.request_kill` —
+/// a pure TCB write, safe from SVC context). The target exits with the
+/// reserved status 137 at its next ring selection, flowing through the
+/// real exit → zombie → idle-reap → page-return lifecycle. Returns 0 once
+/// armed; `EINVAL` for every refusal (the `sys_wait` precedent for numeric
+/// targets). Self-kill is allowed (the monitor's `kill` is equally
+/// general); a permanently blocked target keeps the EL1h kill's
+/// documented bound — the arm applies at the target's next selection.
+fn handle_kill(args: Args, _: *exceptions.VectorFrame) u64 {
+    const target = args[0];
+    // The caller must be a process (an EL1h task cannot kill from EL0).
+    _ = process.find_by_task(scheduler.current_id()) orelse return error_result(.einval);
+    if (target >= process.max_processes) return error_result(.einval);
+    const info = process.info(@as(usize, @intCast(target))) orelse return error_result(.einval);
+    if (info.state == .exited) return error_result(.einval);
+    const task_id = info.task_id orelse return error_result(.einval);
+    return switch (scheduler.request_kill(task_id)) {
+        .ok => 0,
+        .not_found, .already_exited, .refused => error_result(.einval),
+    };
+}
+
+/// Deterministic monitor output for the thirty implemented rows and their counters.
 pub fn report(con: *console.Console) void {
-    con.puts("syscalls: slots=64 implemented=29\n");
+    con.puts("syscalls: slots=64 implemented=30\n");
     var number: u64 = 0;
     while (number < implemented_count) : (number += 1) {
         const info = entry_info(number).?;
@@ -950,7 +983,7 @@ test "syscall: runtime table has 64 slots and twenty-one unique implemented rows
             implemented += 1;
         }
     }
-    try std.testing.expectEqual(@as(usize, 29), implemented);
+    try std.testing.expectEqual(@as(usize, 30), implemented);
     try std.testing.expectEqualStrings("sys_ping", entry_info(0).?.name);
     try std.testing.expectEqualStrings("sys_exit", entry_info(3).?.name);
     try std.testing.expectEqualStrings("sys_sleep", entry_info(4).?.name);
@@ -978,6 +1011,7 @@ test "syscall: runtime table has 64 slots and twenty-one unique implemented rows
     try std.testing.expectEqualStrings("sys_file_close", entry_info(26).?.name);
     try std.testing.expectEqualStrings("sys_dir_list", entry_info(27).?.name);
     try std.testing.expectEqualStrings("sys_exec", entry_info(28).?.name);
+    try std.testing.expectEqualStrings("sys_kill", entry_info(29).?.name);
     try std.testing.expect(entry_info(63) == null);
 }
 
@@ -1897,7 +1931,7 @@ test "syscall: counters are monotonic and report is deterministic" {
     var con = mock.console();
     report(&con);
     try std.testing.expectEqualStrings(
-        "syscalls: slots=64 implemented=29\n" ++
+        "syscalls: slots=64 implemented=30\n" ++
             "  0 sys_ping calls=2\n" ++
             "  1 sys_write calls=0\n" ++
             "  2 sys_yield calls=0\n" ++
@@ -1926,7 +1960,8 @@ test "syscall: counters are monotonic and report is deterministic" {
             "  25 sys_file_write calls=0\n" ++
             "  26 sys_file_close calls=0\n" ++
             "  27 sys_dir_list calls=0\n" ++
-            "  28 sys_exec calls=0\n",
+            "  28 sys_exec calls=0\n" ++
+            "  29 sys_kill calls=0\n",
         mock.contents(),
     );
 }
@@ -2010,6 +2045,56 @@ test "syscall: slot 28 sys_exec marshals the path and maps loader errors" {
     try std.testing.expectEqual(error_result(.einval), dispatch(sys_exec, .{ path_addr, 8, 0, 0, 0, 0 }, &frame));
     // The slot is counted like every other implemented row
     try std.testing.expectEqual(@as(u64, 5), call_count(sys_exec));
+}
+
+test "syscall: slot 29 sys_kill arms a process target and maps refusals" {
+    userspace.init();
+    init(test_writer);
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0); // task 2 = process 0 (boot payload)
+    var kstack: [scheduler.task_stack_size]u8 align(16) = undefined;
+    const target_pid = process.create("TARGET.BIN", .{ .entry_va = 0x400000, .content_len = 64 }, .{}, .{}).?;
+    const target_task = scheduler.register_exec_user(userspace.text_va, 0x4000_0000, 100, 0x8000_0000, 8192, &kstack, 0, 0).?;
+    _ = process.bind(target_pid, target_task);
+    scheduler.start();
+    var frame = fresh_frame();
+
+    // In task 0 (shell, not a process), sys_kill returns EINVAL.
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_kill, .{ target_pid, 0, 0, 0, 0, 0 }, &frame));
+    // Out-of-range and free pids are EINVAL (the sys_wait precedent).
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_kill, .{ process.max_processes, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_kill, .{ 7, 0, 0, 0, 0, 0 }, &frame));
+
+    // Drive to the caller (task 2, pid 0).
+    try std.testing.expect(scheduler.yield_current()); // shell -> worker
+    try std.testing.expect(scheduler.yield_current()); // worker -> user (2)
+    try std.testing.expectEqual(@as(usize, 2), scheduler.current_id());
+
+    // Arm the target: returns 0.
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_kill, .{ target_pid, 0, 0, 0, 0, 0 }, &frame));
+
+    // The kill lands at the target's NEXT selection: the ring walks to the
+    // target (task 3), the kill branch converts the selection into the
+    // existing exit path with the reserved status 137, and the ring moves
+    // on — the target never resumes.
+    try std.testing.expect(scheduler.yield_current()); // user -> target -> killed -> idle
+    try std.testing.expectEqual(@as(usize, scheduler.idle_id), scheduler.current_id());
+    try std.testing.expect(scheduler.is_terminated(target_task));
+    try std.testing.expectEqual(@as(?u64, scheduler.reserved_kill_status), scheduler.terminated_status(target_task));
+    const pinfo = process.info(target_pid).?;
+    try std.testing.expectEqual(process.State.exited, pinfo.state);
+    try std.testing.expectEqual(@as(u64, scheduler.reserved_kill_status), pinfo.exit_status);
+
+    // The exited target is refused on the next call (back in a process
+    // context — the ring returns to the caller).
+    try std.testing.expect(scheduler.yield_current()); // idle
+    try std.testing.expect(scheduler.yield_current()); // shell
+    try std.testing.expect(scheduler.yield_current()); // worker -> user
+    try std.testing.expectEqual(@as(usize, 2), scheduler.current_id());
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_kill, .{ target_pid, 0, 0, 0, 0, 0 }, &frame));
+    // The slot is counted like every other implemented row.
+    try std.testing.expectEqual(@as(u64, 5), call_count(sys_kill));
 }
 
 test "syscall: sys_poll_event and sys_wait_event handle events, blocking, and uaccess fault safety" {
