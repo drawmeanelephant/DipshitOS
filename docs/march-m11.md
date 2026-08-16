@@ -1,5 +1,14 @@
 # Milestone eleven march — desktop platform & GUI apps (living tracker)
 
+> **SHIPPED 2026-08-16** — cards A0–A5 all landed; the capstone live gate
+> `tools/verify-live-desktop.sh` PASSes on VZ (CALC/NOTEPAD/TOP/DESKTOP all
+> OK) and the milestone is closed. Post-ship polish: CALC checked
+> arithmetic/memory keys (claim 7869), the EL0 process-control seam
+> (`sys_exec` slot 28 claim 6359, `sys_kill` slot 29 claim 7604 — DESKTOP
+> launches apps and TOP's Kill button is real), and NOTEPAD's scrollable
+> viewport (claim 1771). Milestone twelve (userland network apps) is now in
+> progress — see [`march-m12.md`](march-m12.md) and issue #148.
+
 ## Where we are
 
 > [`docs/status.md`](status.md) is the canonical source for milestone-level
