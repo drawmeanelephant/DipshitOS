@@ -11,6 +11,13 @@
 #   4. TOP.BIN (graphical task manager introspecting sys_procs)
 #   5. DESKTOP.BIN (desktop launcher & environment catalog)
 #
+# Claim 6359 (ADR 0007 slot 28 `sys_exec`): the launcher half is REAL —
+# DESKTOP.BIN is no longer select-only. The monitor execs NOTEPAD/TOP/
+# DESKTOP; the runner types Enter after `desktop: menu ready`; DESKTOP
+# launches CALC.BIN through the EL0 exec seam (the fourth concurrent GUI
+# app), and the gate asserts `desktop: launch CALC.BIN` + `calc: ready` +
+# `28 sys_exec calls=1` in the syscalls report.
+#
 # Usage:
 #   bash tools/verify-live-desktop.sh
 #
@@ -44,8 +51,9 @@ swift build --package-path host/vm-runner --configuration release
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
 # Scripts for Desktop Platform test
+# Claim 6359: CALC.BIN is NOT exec'd by the monitor — the desktop launches
+# it through slot 28 sys_exec after the injected Enter (the launcher proof).
 cat > artifacts/live-desktop-script.txt <<'EOF'
-exec CALC.BIN
 exec NOTEPAD.BIN
 exec TOP.BIN
 exec DESKTOP.BIN
@@ -68,10 +76,12 @@ host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.lo
     --display --input --screen artifacts/gpu-screen \
     --script artifacts/live-desktop-script.txt \
     --script-after "$STATIC_EXIT_LINE" \
+    --input-chords "return" \
+    --input-chords-after "desktop: menu ready" \
     --script2 artifacts/live-desktop-script2.txt \
-    --script2-after "desktop: menu ready" \
+    --script2-after "calc: ready" \
     --script-expect "done-desktop-sweep" \
-    --timeout 60 > artifacts/live-desktop-run.txt 2>&1
+    --timeout 90 > artifacts/live-desktop-run.txt 2>&1
 RC=$?
 set -e
 
@@ -118,7 +128,21 @@ grep -q "desktop: menu ready" artifacts/live-desktop-serial.log || {
 }
 echo "DESKTOP.BIN: OK"
 
-# 5. Verify Clean Exits & Syscall Accounting
+# 5. Verify the launcher is REAL (claim 6359, slot 28 sys_exec): the
+# injected Enter made DESKTOP exec CALC.BIN from EL0 — the launch marker
+# and the syscall counter prove the seam, not a monitor exec.
+grep -q "desktop: launch CALC.BIN" artifacts/live-desktop-serial.log || {
+    echo "ERROR: DESKTOP.BIN launch marker missing from serial log"
+    exit 1
+}
+echo "DESKTOP.LAUNCH: OK"
+grep -q "28 sys_exec calls=1" artifacts/live-desktop-serial.log || {
+    echo "ERROR: sys_exec call count missing from syscalls report"
+    exit 1
+}
+echo "SYS_EXEC: OK"
+
+# 6. Verify Clean Exits & Syscall Accounting
 grep -q "done-desktop-sweep" artifacts/live-desktop-serial.log || {
     echo "ERROR: final sweep marker missing from serial log"
     exit 1
@@ -131,10 +155,11 @@ Status: PASS (1/1 on Apple Virtualization.framework)
 
 Verified Components:
 - Micro-Widget Toolkit & Runtime (user/src/lib/ui.zig)
-- CALC.BIN: Interactive Graphical Calculator
+- CALC.BIN: Interactive Graphical Calculator (LAUNCHED BY DESKTOP through slot 28 sys_exec)
 - NOTEPAD.BIN: Graphical Text Editor with /data Storage
 - TOP.BIN: Graphical Task Manager & Process Introspector
-- DESKTOP.BIN: Desktop Environment & Application Launcher
+- DESKTOP.BIN: Desktop Environment & Application Launcher (real EL0 exec)
+- sys_exec (ADR 0007 slot 28): calls=1 in the syscalls report
 
 Serial Output Highlights:
 $(grep -E '(calc|notepad|top|desktop):' artifacts/live-desktop-serial.log || true)

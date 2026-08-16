@@ -32,6 +32,7 @@ pub const sys_file_read_num: u64 = 24;
 pub const sys_file_write_num: u64 = 25;
 pub const sys_file_close_num: u64 = 26;
 pub const sys_dir_list_num: u64 = 27;
+pub const sys_exec_num: u64 = 28;
 
 // ---------------------------------------------------------------------------
 // Event Kinds & Modifier Masks (ADR 0009)
@@ -117,8 +118,7 @@ pub fn syscall0(num: u64) i64 {
     asm volatile ("svc #0"
         : [res] "={x0}" (res),
         : [num] "{x8}" (num),
-        : .{ .memory = true }
-    );
+        : .{ .memory = true });
     return res;
 }
 
@@ -129,8 +129,7 @@ pub fn syscall1(num: u64, arg0: u64) i64 {
         : [res] "={x0}" (res),
         : [num] "{x8}" (num),
           [arg0] "{x0}" (arg0),
-        : .{ .memory = true }
-    );
+        : .{ .memory = true });
     return res;
 }
 
@@ -142,8 +141,7 @@ pub fn syscall2(num: u64, arg0: u64, arg1: u64) i64 {
         : [num] "{x8}" (num),
           [arg0] "{x0}" (arg0),
           [arg1] "{x1}" (arg1),
-        : .{ .memory = true }
-    );
+        : .{ .memory = true });
     return res;
 }
 
@@ -156,8 +154,7 @@ pub fn syscall3(num: u64, arg0: u64, arg1: u64, arg2: u64) i64 {
           [arg0] "{x0}" (arg0),
           [arg1] "{x1}" (arg1),
           [arg2] "{x2}" (arg2),
-        : .{ .memory = true }
-    );
+        : .{ .memory = true });
     return res;
 }
 
@@ -171,8 +168,7 @@ pub fn syscall4(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64) i64 {
           [arg1] "{x1}" (arg1),
           [arg2] "{x2}" (arg2),
           [arg3] "{x3}" (arg3),
-        : .{ .memory = true }
-    );
+        : .{ .memory = true });
     return res;
 }
 
@@ -188,8 +184,7 @@ pub fn syscall6(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64,
           [arg3] "{x3}" (arg3),
           [arg4] "{x4}" (arg4),
           [arg5] "{x5}" (arg5),
-        : .{ .memory = true }
-    );
+        : .{ .memory = true });
     return res;
 }
 
@@ -259,6 +254,17 @@ pub const ProcState = enum(u64) {
     exited = 3,
     _,
 };
+
+/// Claim 6359 (ADR 0007 slot 28): load a `.BIN` from the ESP into a fresh
+/// process slot from EL0 — the launcher half of the exec seam (the EL1h
+/// monitor's `exec` is the privileged equivalent). Returns the new
+/// process's pid on success; negative ADR 0007 error otherwise (EINVAL
+/// bad path/loader refusal, EFAULT bad pointer, ENOENT not on the ESP,
+/// ENOSPC capacity).
+pub fn exec_program(name: []const u8) i64 {
+    if (name.len == 0) return -1;
+    return syscall2(sys_exec_num, @intFromPtr(name.ptr), name.len);
+}
 
 pub const ProcInfo = struct {
     pid: u64,

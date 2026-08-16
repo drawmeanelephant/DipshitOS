@@ -193,6 +193,14 @@ const Task = struct {
     /// `wait_event_current`; cleared when `wake_event_waiters` returns the
     /// task to `ready` upon event enqueue.
     wait_event_pid: ?usize = null,
+    /// Claim 6359 (wait_event fix): the event-buffer address a woken
+    /// `sys_wait_event` task's re-executed `svc` must see. The blocking
+    /// result write (x0=0) in the syscall layer clobbers the saved frame's
+    /// x0 at block time; `wait_event_current` stashes the original
+    /// argument here and `wake_event_waiters` patches it back into the
+    /// saved frame before the task resumes, so the re-executed copy_out
+    /// targets the app's buffer, not address 0.
+    wait_event_buf: u64 = 0,
     /// Card 3c (claim 7786): armed-kill flag. `kill` sets it from main
     /// context; the ring converts the task's NEXT selection into the
     /// existing exit path (status 137) instead of resuming it — the OS,
@@ -745,9 +753,17 @@ pub fn wait_event_current(pid: usize) bool {
     tasks[waiting].saves += 1;
     tasks[waiting].state = .blocked;
     tasks[waiting].wait_event_pid = pid;
+    // Claim 6359 (wait_event fix): stash the re-executed svc's first
+    // argument (the event-buffer address) BEFORE the syscall layer writes
+    // the blocking result (0) into the saved frame's x0 — the elr-4
+    // re-execution must see the original x0, or the wake's copy_out
+    // targets address 0 (EFAULT) and every blocking GUI event loop dies.
+    const saved_frame: *const exceptions.VectorFrame = @ptrFromInt(exceptions.resume_frame);
+    tasks[waiting].wait_event_buf = exceptions.frame_read(saved_frame, 0);
     const next = next_runnable(waiting) orelse {
         tasks[waiting].state = .ready;
         tasks[waiting].wait_event_pid = null;
+        tasks[waiting].wait_event_buf = 0;
         tasks[waiting].saves -%= 1;
         return false;
     };
@@ -763,6 +779,12 @@ pub fn wake_event_waiters(pid: usize) void {
     while (i < max_tasks) : (i += 1) {
         if (tasks[i].state != .blocked) continue;
         if (tasks[i].wait_event_pid != pid) continue;
+        // Claim 6359 (wait_event fix): restore the re-executed svc's x0
+        // (the event-buffer address) into the saved frame — the blocking
+        // result write clobbered it with 0 at block time.
+        const frame: *exceptions.VectorFrame = @ptrFromInt(tasks[i].sp);
+        _ = exceptions.frame_write(frame, 0, tasks[i].wait_event_buf);
+        tasks[i].wait_event_buf = 0;
         tasks[i].state = .ready;
         tasks[i].wait_event_pid = null;
     }
