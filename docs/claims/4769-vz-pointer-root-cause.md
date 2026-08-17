@@ -8,7 +8,12 @@
   3692), the class-C gate (claim 9015), the gate completion card (claim 5776)
 - **Status:** ✅ root cause identified and pinned in the hardware contract;
   no synthesized route works while the machine is busy — the class-C
-  real-mouse gate remains the working delivery route.
+  real-mouse gate remains the working delivery route. Updated 2026-08-16:
+  the idle-machine retest REFUTED the idle hypothesis (runner stayed
+  frontmost every post, cursor warped — still `key=false`,
+  `ptr-reports=0`), and the keyboard seam also now yields `events=0`
+  (worked at 17:59 same day; console session re-established 19:33) —
+  tracked as an open thread in the branch log.
 
 ## The question
 
