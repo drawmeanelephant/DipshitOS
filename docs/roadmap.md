@@ -1189,16 +1189,36 @@ on Accessibility trust).
 
 See [`march-m13.md`](march-m13.md) for the per-card tracker.
 
-### Milestone fourteen+ (sketch — destinations, not commitments)
+### Milestone fourteen — shared user services (**PLANNED 2026-08-16, issues #175–#178**)
 
-After the file browser, the wishlist's shared-user-services items become the
-natural next arc, in maintainer-preference order: **clipboard** (item 11,
-"text apps will make the absence obvious"), **app timers** (item 12, so apps
-stop spinning sleep loops), **M8's remaining usability cards** — first-boot
-experience, `sysinfo`, persistent settings (U6–U8, currently open) — and
-**security/isolation hardening** (item 19, grown alongside userland power,
-not as one giant milestone). Nothing here is committed; the wishlist below
-remains the authority, and the roads between items stay open.
+> After the file browser, the wishlist's shared-user-services items become the
+> natural next arc, in maintainer-preference order: **clipboard** (item 11,
+> "text apps will make the absence obvious"), **app timers** (item 12, so
+> apps stop spinning sleep loops), and **security/isolation hardening** (item
+> 19, grown alongside userland power, not as one giant milestone). M8's
+> remaining usability cards (U6–U8) are DONE; U4's live pointer proof is a
+> known class-C-only limitation (see issue #151).
+
+- **S1 — Clipboard / shared text service** (issue #175, wishlist 11):
+  `sys_clipboard_set`/`sys_clipboard_get` (ADR 0007 slots 38–39), a single
+  bounded kernel clipboard buffer (pure BSS, zero heap), so NOTEPAD gains
+  copy/cut/paste and the terminal can copy. Live gate:
+  `verify-live-clipboard.sh`.
+- **S2 — Application timers** (issue #176, wishlist 12): a bounded
+  per-process timer facility (slots 40–41) that posts `TIMER` events on the
+  existing ADR 0009 event queue — apps stop spinning sleep loops (NOTEPAD
+  cursor blink, a live clock, TOP periodic refresh). Live gate:
+  `verify-live-timers.sh`.
+- **S3 — Composition capstone** (issue #177): NOTEPAD copy/paste with a
+  timer-driven cursor — S1+S2 proven together in a real app a human can
+  use. Live gate: `verify-live-m14-composition.sh`.
+- **S4 — Security/isolation hardening** (issue #178, wishlist 19):
+  process-ownership audit across every EL0-named resource, a uaccess
+  validation-depth sweep, and resource limits — proven by a hostile EL0
+  program refused cross-process access. Live gate:
+  `verify-live-hardening.sh`.
+
+See [`march-m14.md`](march-m14.md) for the per-card tracker.
 
 ## Wishlist / hope chest (destinations, not commitments)
 
