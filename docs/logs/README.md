@@ -71,6 +71,7 @@ verify-coordination`, and CI) fails if it drifts from the files.
 | `m13-b2-manifest`: the desktop application manifest + FP/SIMD vector save (claim 8877) | [`agent-buffy-m13-b2-manifest.md`](agent-buffy-m13-b2-manifest.md) |
 | `m13-b3-file-browser`: FILE.BIN, the graphical DATA-partition file browser (claim 4742) | [`agent-buffy-m13-b3-file-browser.md`](agent-buffy-m13-b3-file-browser.md) |
 | `m13-b4-desktop-composition`: desktop composition (claim 4046) | [`agent-buffy-m13-b4-desktop-composition.md`](agent-buffy-m13-b4-desktop-composition.md) |
+| `m13-pointer-route`: VZ synthesized-pointer root cause (claim 4769) | [`agent-buffy-m13-pointer-route.md`](agent-buffy-m13-pointer-route.md) |
 | `m13-u4-pointer-classb`: finish the U4 class-B CG gate (claim 5776) | [`agent-buffy-m13-u4-pointer-classb.md`](agent-buffy-m13-u4-pointer-classb.md) |
 | `m13-win-dui-rename`: the `win` → `dui` monitor command rename (claim 2223) | [`agent-buffy-m13-win-dui-rename.md`](agent-buffy-m13-win-dui-rename.md) |
 | `agent/buffy/m15-commands` (PR #12) | [`agent-buffy-m15-commands.md`](agent-buffy-m15-commands.md) |
