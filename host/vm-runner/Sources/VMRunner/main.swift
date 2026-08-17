@@ -1223,17 +1223,62 @@ var captureTimes: [TimeInterval] = [5, 10, 15]
 func setupDisplayWindow() {
     guard screenshotPath != nil || displayMode else { return }
     let app = NSApplication.shared
-    app.setActivationPolicy(.accessory)
+    // Non-pointer runs must stay BYTE-IDENTICAL to the historical runner
+    // (every existing gate pins the .accessory policy + activate call).
+    // Pointer runs switch to .regular and attempt the full activation
+    // ladder — see claim 4769 for why even that cannot make the window
+    // key while the machine is busy.
+    let wantPointer = pointerScript != nil
+    if wantPointer {
+        app.setActivationPolicy(.regular)
+        // A CLI process must finishLaunching before the window server
+        // will grant it activation/key status (unbundled executables skip
+        // the normal launch sequence). Policy before finishLaunching.
+        app.finishLaunching()
+    } else {
+        app.setActivationPolicy(.accessory)
+    }
     let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 480), styleMask: [.titled], backing: .buffered, defer: false)
-    let view = VZVirtualMachineView(frame: NSRect(x: 0, y: 0, width: 1280, height: 720))
+    let view = TraceView(frame: NSRect(x: 0, y: 0, width: 1280, height: 720))
+    view.trace = ["direct", "diag", "pid", "drag", "warp", "cg"].contains(pointerRoute)
     view.virtualMachine = runner.vm
     window.setContentSize(NSSize(width: 1280, height: 720))
     window.contentView = view
     window.center()
     window.acceptsMouseMovedEvents = true
+    // AppKit only dispatches mouseMoved to views inside a tracking area;
+    // without one, moves posted to the window are dropped at the
+    // dispatch layer (a real mouse gets moves via the implicit tracking
+    // area of the window's first responder path, but synthesized posts
+    // need the explicit area).
+    let tracking = NSTrackingArea(
+        rect: view.bounds,
+        options: [.activeInKeyWindow, .mouseMoved, .mouseEnteredAndExited, .activeAlways],
+        owner: view, userInfo: nil)
+    view.addTrackingArea(tracking)
     window.orderFrontRegardless()
     window.makeKeyAndOrderFront(nil)
-    app.activate(ignoringOtherApps: true)
+    if wantPointer {
+        window.level = .normal
+        // macOS 14+: the deprecated ignoringOtherApps form is a no-op for
+        // unbundled CLI processes; the modern no-arg activate() is the
+        // one that can steal focus. Try both.
+        NSApp.activate(ignoringOtherApps: true)
+        NSApp.activate()
+        NSRunningApplication.current.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+        // Re-assert after the run loop has a chance to complete the
+        // activation (async on macOS), so the first synthesized event
+        // lands on an already-key window.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            NSApp.activate()
+            NSRunningApplication.current.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+            pmo("diag key-after-activate=\(window.isKeyWindow) main=\(window.isMainWindow) active=\(NSApp.isActive) visible=\(window.isVisible) onscreen=\(window.isOnActiveSpace)")
+        }
+    } else {
+        app.activate(ignoringOtherApps: true)
+    }
     machineView = view
     machineWindow = window
 }
@@ -2022,14 +2067,138 @@ func startChordInject() {
 // no programmatic pointer API, exactly like the I3 keyboard seam. 3 s per
 // step; the guest's pointer reports ride the same single-TRB interrupt-IN
 // arming as the keyboard.
+// Pointer-route probe (claim 4769): a VZVirtualMachineView subclass that
+// logs which NSResponder mouse methods actually fire, so a probe run can
+// tell "the event never reached the view" from "VZ dropped it internally".
+final class TraceView: VZVirtualMachineView {
+    var trace = false
+    // macOS click-through: the first click on an INACTIVE app's window is
+    // swallowed to activate the app and never reaches the view. Synthesized
+    // posts hit exactly this wall (the app can never become active from a
+    // CLI process). Accepting the first mouse makes the click deliver
+    // anyway, so the posted event reaches the VZ view's responder methods
+    // regardless of activation state.
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override func mouseMoved(with event: NSEvent) {
+        if trace { pmo("TRACE mouseMoved inW=(\(event.locationInWindow))") }
+        super.mouseMoved(with: event)
+    }
+    override func mouseDragged(with event: NSEvent) {
+        if trace { pmo("TRACE mouseDragged inW=(\(event.locationInWindow))") }
+        super.mouseDragged(with: event)
+    }
+    override func mouseDown(with event: NSEvent) {
+        if trace { pmo("TRACE mouseDown inW=(\(event.locationInWindow)) key=\(event.window?.isKeyWindow ?? false)") }
+        super.mouseDown(with: event)
+    }
+    override func mouseUp(with event: NSEvent) {
+        if trace { pmo("TRACE mouseUp inW=(\(event.locationInWindow)) key=\(event.window?.isKeyWindow ?? false)") }
+        super.mouseUp(with: event)
+    }
+    override func mouseEntered(with event: NSEvent) {
+        if trace { pmo("TRACE mouseEntered") }
+        super.mouseEntered(with: event)
+    }
+}
+
+func pmo(_ s: String) {
+    FileHandle.standardOutput.write(Data("PTR-TRACE: \(s)\n".utf8))
+}
+
 /// Deliver one synthesized pointer NSEvent to the VZ view over the
 /// configured route (see --pointer-route). The "cg" route re-posts a real
 /// CGEvent at the HID tap in GLOBAL screen coordinates — the OS delivers
-/// it to the key window exactly like a physical mouse.
+/// it to the key window exactly like a physical mouse. The "pid" route
+/// posts the SAME CGEvent straight into OUR OWN application queue
+/// (CGEventPostToPid needs no frontmost window — it is hit-tested against
+/// our key window, i.e. the VZ window). The "direct" route calls the
+/// NSResponder mouse methods VZ implements directly on the view — the
+/// exact pattern the keyboard seam uses. The claim-4769 probe also added
+/// "warp" (warp the real cursor over the view, then trusted HID-tap
+/// post), "diag" (force key + first responder, then sendEvent), and
+/// "drag" (moves as leftMouseDragged). All of them hit the same
+/// activation wall: VZ only translates for its KEY window, and macOS 14+
+/// refuses programmatic focus-stealing from a background process — see
+/// docs/claims/4769-vz-pointer-root-cause.md.
 func deliverPointerEvent(_ view: VZVirtualMachineView, _ e: NSEvent) {
     switch pointerRoute {
+    case "direct":
+        switch e.type {
+        case .leftMouseDown: view.mouseDown(with: e)
+        case .leftMouseUp: view.mouseUp(with: e)
+        default: view.mouseMoved(with: e)
+        }
+    case "pid":
+        if let w = view.window {
+            let glob = w.convertToScreen(NSRect(x: e.locationInWindow.x, y: e.locationInWindow.y, width: 1, height: 1)).origin
+            guard let screen = NSScreen.main else { return }
+            let cgPt = CGPoint(x: glob.x, y: screen.frame.maxY - glob.y)
+            let src = CGEventSource(stateID: .hidSystemState)
+            let type: CGEventType = e.type == .leftMouseDown ? .leftMouseDown : (e.type == .leftMouseUp ? .leftMouseUp : .mouseMoved)
+            if let cg = CGEvent(mouseEventSource: src, mouseType: type, mouseCursorPosition: cgPt, mouseButton: .left) {
+                pmo("pid-post \(type) at (\(Int(cgPt.x)),\(Int(cgPt.y)))")
+                cg.postToPid(pid_t(getpid()))
+            }
+        }
+    case "warp":
+        // Physical-mouse precondition: the REAL cursor must be over the
+        // view for hit-tested delivery. Warp it into the window's center
+        // (no Accessibility needed for the warp), then post the event via
+        // the HID tap (trust needed; checked per post). If VZ tracks the
+        // global cursor location rather than the event field, this is the
+        // missing piece.
+        if let w = view.window {
+            let center = w.convertToScreen(NSRect(x: w.contentView!.bounds.midX, y: w.contentView!.bounds.midY, width: 1, height: 1)).origin
+            guard let screen = NSScreen.main else { return }
+            CGWarpMouseCursorPosition(CGPoint(x: center.x, y: screen.frame.maxY - center.y))
+            pmo("warped cursor to (\(Int(center.x)),\(Int(screen.frame.maxY - center.y)))")
+            if CGPreflightPostEventAccess() {
+                let local = e.locationInWindow
+                let glob = w.convertToScreen(NSRect(x: local.x, y: local.y, width: 1, height: 1)).origin
+                let cgPt = CGPoint(x: glob.x, y: screen.frame.maxY - glob.y)
+                let src = CGEventSource(stateID: .hidSystemState)
+                let type: CGEventType = e.type == .leftMouseDown ? .leftMouseDown : (e.type == .leftMouseUp ? .leftMouseUp : .mouseMoved)
+                if let cg = CGEvent(mouseEventSource: src, mouseType: type, mouseCursorPosition: cgPt, mouseButton: .left) {
+                    cg.post(tap: .cghidEventTap)
+                }
+            } else {
+                pmo("warp skipped post (untrusted)")
+            }
+        }
     case "app":
         NSApp.postEvent(e, atStart: true)
+    case "diag":
+        // Route-minus-buried-context probe: force the VZ window to be key,
+        // frontmost, and first responder (the one thing physical-mouse
+        // users have and synthesized routes may lack), then sendEvent.
+        if let w = view.window {
+            w.makeKeyAndOrderFront(nil)
+            w.makeFirstResponder(view)
+            w.acceptsMouseMovedEvents = true
+            NSApp.activate(ignoringOtherApps: true)
+            pmo("diag key=\(w.isKeyWindow) main=\(w.isMainWindow) fr=\(w.firstResponder === view)")
+            w.sendEvent(e)
+        }
+    case "drag":
+        // VZ's pointer tracking may bind on mouseDragged (the path a real
+        // drag takes) rather than mouseMoved. Convert moves into
+        // leftMouseDragged events (button state down), delivered to the
+        // window like a real drag sequence.
+        if e.type == .mouseMoved {
+            let loc = e.locationInWindow
+            let t = ProcessInfo.processInfo.systemUptime
+            if let drag = NSEvent.mouseEvent(with: .leftMouseDragged, location: loc, modifierFlags: [], timestamp: t, windowNumber: e.windowNumber, context: nil, eventNumber: 1, clickCount: 1, pressure: 1.0) {
+                if let w = view.window {
+                    w.sendEvent(drag)
+                } else {
+                    view.mouseDragged(with: drag)
+                }
+            }
+        } else if let w = view.window {
+            w.sendEvent(e)
+        } else {
+            view.mouseMoved(with: e)
+        }
     case "cg":
         if let w = view.window {
             // Accessibility trust is the gating permission: without it the
@@ -2050,6 +2219,7 @@ func deliverPointerEvent(_ view: VZVirtualMachineView, _ e: NSEvent) {
             let type: CGEventType = e.type == .leftMouseDown ? .leftMouseDown : (e.type == .leftMouseUp ? .leftMouseUp : .mouseMoved)
             let cg = CGEvent(mouseEventSource: src, mouseType: type, mouseCursorPosition: cgPt, mouseButton: .left)
             cg?.post(tap: .cghidEventTap)
+            pmo("cg-post \(type) at (\(Int(cgPt.x)),\(Int(cgPt.y))) key=\(w.isKeyWindow) active=\(NSApp.isActive) front=\(NSWorkspace.shared.frontmostApplication?.localizedName ?? "nil") cursor=\(Int(NSEvent.mouseLocation.x)),\(Int(NSEvent.mouseLocation.y))")
         }
     default: // "window"
         if let w = view.window {

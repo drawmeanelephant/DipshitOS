@@ -201,7 +201,37 @@ assumption comes from documentation or reasoning only.
     the seam (`--pointer`, `--pointer-after`,
     `--pointer-route window|app|cg`, plus `--pointer-request-trust` to
     prompt the system).
-    **[observed]** — the probe runs under `artifacts/u45-probe*`; the
+    **[observed 2026-08-16, claim 4769 — the root cause: the activation
+    wall]** A route-by-route probe (TraceView responder tracing on the
+    runner + guest `input` accounting, `tools/probe-pointer-routes.sh`)
+    pinned WHY every synthesized route fails, even CGEventPost under
+    trust: (a) trusted CG posts DO work at the OS level — the real
+    cursor warps to the posted position and the runner becomes the
+    frontmost app; (b) but the VZ window NEVER becomes key
+    (`key=false active=false`) — macOS 14+ refuses programmatic
+    focus-stealing from a background process while any other app holds
+    focus (the frontmost app changed mid-probe: Discord/Manus/Firefox/
+    Nova — a machine in active use), and the full activation ladder
+    (`.regular` policy, `finishLaunching`, modern + deprecated
+    `NSApp.activate`, `NSRunningApplication.activate` with every option,
+    `acceptsFirstMouse`, an NSTrackingArea, and even running from inside
+    a proper signed `.app` bundle) cannot change that; (c) VZ only
+    translates input for its KEY window — direct responder calls fire
+    all 8 mouse methods on the view yet the guest ring stays
+    `events=0 ptr-reports=0`; (d) it is NOT pointer-specific: the
+    KEYBOARD seam (the same `view.keyDown` pattern that walked the B4
+    desktop menu at 17:58 that day) also yields `events=0` later that
+    evening with the byte-identical stock runner — synthesized input of
+    ANY kind only translates while the runner's window can become key,
+    i.e. when the machine is idle; (e) the first CG click is
+    click-through (consumed to activate the app, which never
+    completes), so zero clicks ever reach the view on the cg route.
+    Consequence pinned: the class-B CG gate can only pass when the
+    machine is idle; the class-C real-mouse gate (claim 9015) remains
+    the only route that works on a busy machine, because the OS itself
+    performs the activation on a real click.
+    **[observed]** — the probe runs under `artifacts/u45-probe*` and
+    `artifacts/pointer-route-*.txt` (claim 4769); the
     guest-side consumption (click = focus + raise, cursor render,
     Alt+Tab decode) is host-tested in `driving_award.zig`/`input.zig`.
   All **[observed]** — `tools/verify-live-usb.sh` (PASS 11/11) and the saved
