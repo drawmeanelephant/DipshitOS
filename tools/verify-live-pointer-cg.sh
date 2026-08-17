@@ -166,9 +166,12 @@ grep -a -qF -- "PTR-TRUST: untrusted" artifacts/pointer-cg-run.txt && UNTRUSTED=
 
 # --- pixel assertion: the magenta cursor rendered ---------------------------
 CURSOR=0
-CAP="$(ls -t "$SCREEN_BASE"-after.png 2>/dev/null | head -1 || true)"
+CAP="$(ls -t "$SCREEN_BASE"-after "$SCREEN_BASE"-after.png 2>/dev/null | head -1 || true)"
 if [ -n "$CAP" ]; then
     echo "decoding $CAP"
+    # The pixel-check exits 1 when no magenta cursor is found; guard it so
+    # `set -e` does not abort the script before the summary prints.
+    set +e
     python3 - "$CAP" <<'EOF'
 import sys, zlib, struct
 path = sys.argv[1]
@@ -223,6 +226,7 @@ print(f"CURSOR_PIXEL magenta_family_samples={found}")
 sys.exit(0 if found > 0 else 1)
 EOF
     CURSOR=$?
+    set -e
     if grep -a -q "magenta_family_samples=[1-9]" "$GATE_LOG"; then CURSOR=1; fi
 else
     echo "note: no marker capture PNG"
