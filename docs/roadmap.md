@@ -1256,6 +1256,21 @@ See [`march-m13.md`](march-m13.md) for the per-card tracker.
 
 See [`march-m14.md`](march-m14.md) for the per-card tracker.
 
+### Milestone fifteen — audio (**PLANNED 2026-08-18**; wishlist 18)
+
+> With events, files, GUI apps, the launcher, and the shared-services arc
+> shipped, the next concrete wishlist item is **audio** — "another real
+> device/service pipeline", the "DipshitOS becomes a computer" list. The
+> host side exists (`VZVirtioSoundDeviceConfiguration`, virtio-snd, macOS
+> 13+), so this is greenfield guest work: virtio-snd transport (A1) → a
+> bounded PCM playback buffer + `beep` (A2) → an EL0 audio seam (ADR 0007
+> slots 42+) + a `JINGLE.BIN` melody app (A3) → a hearable composition
+> capstone (A4, boot chime + event-triggered sound). Flag-gated `--sound`
+> keeps the default VM byte-identical. Deferred alternatives (items
+> 13/14/15/17) remain M16+ candidates.
+
+See [`march-m15.md`](march-m15.md) for the draft card tracker.
+
 ## Wishlist / hope chest (destinations, not commitments)
 
 > **Maintainer's wishlist (2026-08-14).** These are *destinations*, not a
