@@ -1189,7 +1189,7 @@ on Accessibility trust).
 
 See [`march-m13.md`](march-m13.md) for the per-card tracker.
 
-### Milestone fourteen — shared user services (**IN PROGRESS — S1 + S2 landed 2026-08-18, issues #175–#178**)
+### Milestone fourteen — shared user services (**IN PROGRESS — S1 + S2 + S3 landed 2026-08-18, issues #175–#178**)
 
 > After the file browser, the wishlist's shared-user-services items become the
 > natural next arc, in maintainer-preference order: **clipboard** (item 11,
@@ -1201,7 +1201,10 @@ See [`march-m13.md`](march-m13.md) for the per-card tracker.
 > (claim 0169 — the bounded shared kernel clipboard, slots 38–39;
 > `verify-live-clipboard.sh` PASS 1/1 on VZ); **🔄 S2 done 2026-08-18**
 > (claim 7323 — the bounded per-process app timer facility, slots 40–41;
-> `verify-live-timers.sh` PASS 1/1 on VZ).
+> `verify-live-timers.sh` PASS 1/1 on VZ); **🔄 S3 done 2026-08-18**
+> (claim 3289 — the composition capstone: NOTEPAD paste + copy + a
+> timer-driven cursor blink in one session;
+> `verify-live-m14-composition.sh` PASS 1/1 on VZ).
 
 - **S1 — Clipboard / shared text service** (issue #175, wishlist 11): ✅
   done 2026-08-18 (claim 0169): `sys_clipboard_set`/`sys_clipboard_get`
@@ -1220,9 +1223,19 @@ See [`march-m13.md`](march-m13.md) for the per-card tracker.
   gate `verify-live-timers.sh` PASS 1/1 on VZ. (Wiring the timer into
   NOTEPAD's cursor blink / a live clock / TOP refresh is card S3's
   composition scope.)
-- **S3 — Composition capstone** (issue #177): NOTEPAD copy/paste with a
-  timer-driven cursor — S1+S2 proven together in a real app a human can
-  use. Live gate: `verify-live-m14-composition.sh`.
+- **S3 — Composition capstone** (issue #177): ✅ done 2026-08-18 (claim
+  3289): NOTEPAD copy/paste with a timer-driven cursor — S1+S2 proven
+  together in a real app. The gate pre-loads the shared clipboard with
+  `clip`, execs `NOTEPAD.BIN selfdemo` (argv mode, claim 4636's entry
+  contract), and observes paste (`sys_clipboard_get`), copy
+  (`sys_clipboard_set`), and a timer-driven cursor blink (6 TIMER events,
+  arm + re-arm per fire) in ONE session, then NOTEPAD exits 43 through the
+  real lifecycle. Live gate `verify-live-m14-composition.sh` PASS 1/1 on
+  VZ (`implemented=42`, slots 38/39/40 all counted in the same boot).
+  Input-seam note (issue #179): synthesized keyboard reports `events=0` on
+  this machine, so the gate drives the composition via NOTEPAD's argv
+  selfdemo instead of scripted Ctrl+C/V chords — the chord path stays
+  host-tested and regains live coverage when the seam recovers.
 - **S4 — Security/isolation hardening** (issue #178, wishlist 19):
   process-ownership audit across every EL0-named resource, a uaccess
   validation-depth sweep, and resource limits — proven by a hostile EL0
