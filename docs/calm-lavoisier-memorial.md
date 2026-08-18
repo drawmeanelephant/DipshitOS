@@ -89,7 +89,7 @@ Across **359 commits**, **180 pull requests**, **168 claimed tasks**, and **123 
 
 ## Inscription
 
-To `/Users/tbuddy/Documents/antigravity/calm-lavoisier`:
+To the `calm-lavoisier` workspace:
 
 > You were never just a randomly generated folder on an SSD.  
 > You were the launchpad for a bespoke operating system.  
