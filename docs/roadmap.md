@@ -1189,7 +1189,7 @@ on Accessibility trust).
 
 See [`march-m13.md`](march-m13.md) for the per-card tracker.
 
-### Milestone fourteen — shared user services (**IN PROGRESS — S1 + S2 + S3 landed 2026-08-18, issues #175–#178**)
+### Milestone fourteen — shared user services (**✅ COMPLETE 2026-08-18 — S1 + S2 + S3 + S4 landed, issues #175–#178**)
 
 > After the file browser, the wishlist's shared-user-services items become the
 > natural next arc, in maintainer-preference order: **clipboard** (item 11,
@@ -1197,14 +1197,17 @@ See [`march-m13.md`](march-m13.md) for the per-card tracker.
 > apps stop spinning sleep loops), and **security/isolation hardening** (item
 > 19, grown alongside userland power, not as one giant milestone). M8's
 > remaining usability cards (U6–U8) are DONE; U4's live pointer proof is a
-> known class-C-only limitation (see issue #151). **🔄 S1 done 2026-08-18**
+> known class-C-only limitation (see issue #151). **S1 done 2026-08-18**
 > (claim 0169 — the bounded shared kernel clipboard, slots 38–39;
-> `verify-live-clipboard.sh` PASS 1/1 on VZ); **🔄 S2 done 2026-08-18**
+> `verify-live-clipboard.sh` PASS 1/1 on VZ); **S2 done 2026-08-18**
 > (claim 7323 — the bounded per-process app timer facility, slots 40–41;
-> `verify-live-timers.sh` PASS 1/1 on VZ); **🔄 S3 done 2026-08-18**
+> `verify-live-timers.sh` PASS 1/1 on VZ); **S3 done 2026-08-18**
 > (claim 3289 — the composition capstone: NOTEPAD paste + copy + a
 > timer-driven cursor blink in one session;
-> `verify-live-m14-composition.sh` PASS 1/1 on VZ).
+> `verify-live-m14-composition.sh` PASS 1/1 on VZ); **S4 done 2026-08-18**
+> (claim 4482 — the ownership/uaccess/resource-limit hardening audit with
+> a hostile-EL0-refused live proof; `verify-live-hardening.sh` PASS 1/1 on
+> VZ).
 
 - **S1 — Clipboard / shared text service** (issue #175, wishlist 11): ✅
   done 2026-08-18 (claim 0169): `sys_clipboard_set`/`sys_clipboard_get`
@@ -1236,11 +1239,20 @@ See [`march-m13.md`](march-m13.md) for the per-card tracker.
   this machine, so the gate drives the composition via NOTEPAD's argv
   selfdemo instead of scripted Ctrl+C/V chords — the chord path stays
   host-tested and regains live coverage when the seam recovers.
-- **S4 — Security/isolation hardening** (issue #178, wishlist 19):
-  process-ownership audit across every EL0-named resource, a uaccess
-  validation-depth sweep, and resource limits — proven by a hostile EL0
-  program refused cross-process access. Live gate:
-  `verify-live-hardening.sh`.
+- **S4 — Security/isolation hardening** (issue #178, wishlist 19): ✅
+  done 2026-08-18 (claim 4482): the audit covered every EL0-named
+  resource — windows (already per-process via `win_owned_by_caller`),
+  file handles, event queues, app timers (per-process by construction),
+  and the documented machine-globals (clipboard, UDP, mailbox,
+  process-control) — plus the uaccess pointer/length sweep and the
+  bounded-pool refusal audit. The ONE gap found and closed: the TCP
+  connection's `owner_pid` was recorded on connect but never enforced, so
+  a second process could send/recv/close it; a non-owner is now refused
+  EACCES on send/recv/close/connect (class-A test 341). The hostile-EL0
+  proof runs TWO concurrent processes (VICTIM.BIN owns window 2 and
+  yield-loops forever; HARDEN.BIN attacks fill/present/close/move/query
+  and is refused EINVAL every time, then exits 44 — the victim never
+  exits). Live gate `verify-live-hardening.sh` PASS 1/1 on VZ.
 
 See [`march-m14.md`](march-m14.md) for the per-card tracker.
 

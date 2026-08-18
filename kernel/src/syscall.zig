@@ -1082,6 +1082,18 @@ fn handle_kill(args: Args, _: *exceptions.VectorFrame) u64 {
     };
 }
 
+/// True when the process currently making the syscall owns the single
+/// global TCP connection (`tcp.owner_pid` matches the caller's pid). False
+/// for a non-process caller or when another process owns it. The connection
+/// is process-owned once established — a second process is refused EACCES
+/// (the M14 S4 ownership audit; the connection auto-closes on owner exit
+/// via `tcp.close_owner`).
+fn tcp_owned_by_caller() bool {
+    const owner = process.find_by_task(scheduler.current_id()) orelse return false;
+    const current = tcp.owner_pid orelse return false;
+    return owner == current;
+}
+
 /// Slot 30: `sys_tcp_connect(ip, port)`: Connect to target IPv4:port.
 fn handle_tcp_connect(args: Args, _: *exceptions.VectorFrame) u64 {
     const ip_raw = args[0];
@@ -1102,6 +1114,9 @@ fn handle_tcp_connect(args: Args, _: *exceptions.VectorFrame) u64 {
     }
     if (tcp.state != .idle) {
         if (tcp.state == .established and std.mem.eql(u8, &ip, &tcp.peer_ip) and dst_port == tcp.peer_port) {
+            // Idempotent re-connect to the SAME peer is only allowed for
+            // the connection's owner (a second process is refused EACCES).
+            if (!tcp_owned_by_caller()) return error_result(.eacces);
             return 0;
         }
         return error_result(.einval);
@@ -1157,6 +1172,7 @@ fn handle_tcp_send(args: Args, _: *exceptions.VectorFrame) u64 {
     if (len == 0) return 0;
     if (len > tcp.payload_max) len = tcp.payload_max;
     if (tcp.state != .established) return error_result(.einval);
+    if (!tcp_owned_by_caller()) return error_result(.eacces);
 
     if (uaccess.copy_in(&tcp_send_staging, address, @intCast(len)) != .ok) return error_result(.efault);
 
@@ -1182,6 +1198,7 @@ fn handle_tcp_recv(args: Args, _: *exceptions.VectorFrame) u64 {
     if (tcp.state != .established and tcp.state != .closed and tcp.state != .fin_sent) {
         return error_result(.einval);
     }
+    if (!tcp_owned_by_caller()) return error_result(.eacces);
 
     virtio_net.net_rx_drain();
 
@@ -1204,6 +1221,7 @@ fn handle_tcp_recv(args: Args, _: *exceptions.VectorFrame) u64 {
 /// Slot 33: `sys_tcp_close()`: Initiate client FIN teardown.
 fn handle_tcp_close(_: Args, _: *exceptions.VectorFrame) u64 {
     if (tcp.state == .idle) return 0;
+    if (!tcp_owned_by_caller()) return error_result(.eacces);
     if (tcp.state == .established) {
         tcp.build_fin_msg();
         var out_len: usize = 0;
@@ -2757,4 +2775,67 @@ test "syscall: tcp connect, send, recv, close slots 30..33 and sys_kill slot 29"
 
     // Slot 33: sys_tcp_close when idle returns 0
     try std.testing.expectEqual(@as(u64, 0), dispatch(sys_tcp_close, .{ 0, 0, 0, 0, 0, 0 }, &frame));
+}
+
+test "syscall: TCP connection is process-owned — non-owner send/recv/close/connect refused EACCES (claim 4482)" {
+    init(test_writer);
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0); // task 2 = process 0 (boot payload)
+    var kstack: [scheduler.task_stack_size]u8 align(16) = undefined;
+    const peer_pid = process.create("PEER.BIN", .{ .entry_va = 0x400000, .content_len = 64 }, .{}, .{}).?;
+    const peer_task = scheduler.register_exec_user(userspace.text_va, 0x4000_0000, 100, 0x8000_0000, 8192, &kstack, 0, 0).?;
+    _ = process.bind(peer_pid, peer_task);
+    scheduler.start();
+
+    var test_buf: [64]u8 = undefined;
+    const test_buf_addr = @intFromPtr(&test_buf);
+    set_user_regions(
+        .{ .base = 0, .len = 0 },
+        .{ .base = test_buf_addr, .len = test_buf.len },
+    );
+    var frame = fresh_frame();
+
+    // Simulate process 0 (task 2) owning an ESTABLISHED connection to
+    // 10.0.0.2:9999 (the net bits so the idempotent-connect path is
+    // reachable; nothing transmits on the host).
+    tcp.reset();
+    tcp.state = .established;
+    tcp.peer_ip = .{ 10, 0, 0, 2 };
+    tcp.peer_port = 9999;
+    tcp.owner_pid = 0;
+    virtio_net.net_ready = true;
+    virtio_net.arp.own_ip = .{ 10, 0, 0, 1 };
+
+    // Drive the ring to the non-owner (task 3 = process 1).
+    try std.testing.expect(scheduler.yield_current()); // shell -> worker
+    try std.testing.expect(scheduler.yield_current()); // worker -> user (task 2)
+    try std.testing.expectEqual(@as(usize, 2), scheduler.current_id());
+    try std.testing.expect(scheduler.yield_current()); // user -> peer (task 3)
+    try std.testing.expectEqual(@as(usize, 3), scheduler.current_id());
+    try std.testing.expectEqual(@as(u64, 1), peer_pid);
+
+    // Non-owner: every connection-driving syscall is refused EACCES before
+    // any state is touched (the S4 ownership audit fix).
+    try std.testing.expectEqual(error_result(.eacces), dispatch(sys_tcp_send, .{ test_buf_addr, 4, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.eacces), dispatch(sys_tcp_recv, .{ test_buf_addr, 4, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.eacces), dispatch(sys_tcp_close, .{ 0, 0, 0, 0, 0, 0 }, &frame));
+    // Idempotent re-connect to the same peer is owner-only.
+    try std.testing.expectEqual(error_result(.eacces), dispatch(sys_tcp_connect, .{ 0x0a000002, 9999, 0, 0, 0, 0 }, &frame));
+    // The refused calls never mutated the connection.
+    try std.testing.expectEqual(@as(u64, 0), tcp.owner_pid.?);
+
+    // Drive the ring back to the owner (task 2): the idempotent re-connect
+    // succeeds (returns 0, no transmit) — the ownership check passes.
+    try std.testing.expect(scheduler.yield_current()); // peer -> idle
+    try std.testing.expect(scheduler.yield_current()); // idle -> shell
+    try std.testing.expect(scheduler.yield_current()); // shell -> worker
+    try std.testing.expect(scheduler.yield_current()); // worker -> user (task 2)
+    try std.testing.expectEqual(@as(usize, 2), scheduler.current_id());
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_tcp_connect, .{ 0x0a000002, 9999, 0, 0, 0, 0 }, &frame));
+
+    // Restore the honest default (net absent).
+    tcp.reset();
+    virtio_net.net_ready = false;
+    virtio_net.arp.own_ip = .{ 0, 0, 0, 0 };
 }
