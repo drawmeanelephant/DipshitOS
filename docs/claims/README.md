@@ -224,6 +224,7 @@ CI) fails if the table drifts from the claim files.
 | [9228-e3-pointer-event-routing](9228-e3-pointer-event-routing.md) | buffy (`agent/buffy/m9-events`) | ✅ done (2026-08-15) |
 | [9263-full-table-glyph-goldens](9263-full-table-glyph-goldens.md) | buffy (`freebuff/can-you-check-out-our-status-and-work-on-the-next--7e2ecd0b-8acc-47ac-bb44-68841236e5fc`) | ✅ done 2026-08-15 |
 | [9328-e6-interactive-user-app](9328-e6-interactive-user-app.md) | Buffy (`agent/buffy/m9-events`) | ✅ done (`agent/buffy/m9-events`) |
+| [9357-calm-lavoisier-memorial](9357-calm-lavoisier-memorial.md) | Antigravity (`docs/calm-lavoisier`) | ✅ done |
 | [9489-dhcp-renew](9489-dhcp-renew.md) | buffy (`agent/buffy/m5-net-dhcp-renew`) | ✅ DONE 2026-08-12 on `agent/buffy/m5-net-dhcp-renew` (from the N8 claim head `e645fd3` — PR #104; claim PR pending) |
 | [9492-multi-descriptor-payloads](9492-multi-descriptor-payloads.md) | buffy (`agent/buffy/macos27-custom-virtio-spike`) | ✅ done 2026-08-10 on `agent/buffy/macos27-custom-virtio-spike` |
 | [9737-feature-negotiation-depth](9737-feature-negotiation-depth.md) | buffy (`agent/buffy/macos27-custom-virtio-spike`) | ✅ done 2026-08-10 on `agent/buffy/macos27-custom-virtio-spike` |

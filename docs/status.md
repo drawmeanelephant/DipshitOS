@@ -765,4 +765,5 @@ here.
 - [`archive/m15-commands-prompt.md`](archive/m15-commands-prompt.md) — archived prompt (agent C): command registry, identity/memory/utility/control commands, personality (mock-console based).
 - [`decisions/`](decisions/) — ADRs 0001–0008 (binding: 0004 kernel proper, 0005 runtime-built function tables, 0006 MMU debt boundary, 0007 syscall ABI, 0008 human interface guidelines).
 - [`archive/`](archive/) — archived one-shot prompts and frozen designs from completed milestones (M2 kernel proper, M1.5 shell/commands + T0SZ experiment + tracker, M3 syscall ABI / march tracker / ragshit dogfood / runner scripted input).
+- [`calm-lavoisier-memorial.md`](calm-lavoisier-memorial.md) — memorial to the `calm-lavoisier` workspace (Day 1 through Milestone 14).
 - [`../AGENTS.md`](../AGENTS.md) — project rules (now including the multiagent coordination rules).
