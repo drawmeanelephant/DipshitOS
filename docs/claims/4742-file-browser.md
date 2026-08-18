@@ -4,7 +4,7 @@
 - **Prompt / plan:** `docs/march-m13.md`
 - **Scope:** Milestone 13, Card B3 (Issue #153: `FILE.BIN` graphical file browser)
 - **Depends on:** Milestone 12 (merged via PR #160); B2 manifest (claim 8877, PR #165)
-- **Status:** 🔄 in progress
+- **Status:** ✅ done 2026-08-16 — FILE.BIN live: file: ready, listing 2 entries, open/view README.TXT; tools/verify-live-file-browser.sh PASS 1/1 on VZ
 
 ## Notes
 

@@ -22,8 +22,8 @@ see [[evidence]].
 
 ## Current status
 
-Every milestone through twelve has landed; milestone thirteen (files &
-applications) is in progress with two of four cards shipped:
+Every milestone through thirteen has landed; milestone fourteen (shared user
+services) is the current stream:
 
 | Milestone | What it is | Status |
 |-----------|-----------|--------|
@@ -39,7 +39,8 @@ applications) is in progress with two of four cards shipped:
 | User filesystem ABI | Per-process file table, `/esp/` + `/data/` routing, file syscalls (slots 23–27), storage utilities | Done |
 | Desktop platform | ADR 0011: zero-heap `ui.zig` widget toolkit + `CALC.BIN`, `NOTEPAD.BIN`, `TOP.BIN`, `DESKTOP.BIN` launcher | Done |
 | Network apps | TCP syscall seam (slots 30–33), RFC 1035 DNS, `TCP.BIN`/`FETCH.BIN`/`CHAT.BIN` | Done |
-| Files & applications | `APPS.TXT` manifest + `FILE.BIN` graphical data browser; delete/rename and desktop composition are the open cards | In progress |
+| Files & applications | Mutating filesystem seam (slots 34–37), `APPS.TXT` manifest, `FILE.BIN` graphical data browser, desktop composition | Done |
+| Shared services | Clipboard + app timers + composition capstone + isolation hardening (slots 38–41) | Planned |
 
 The full, always-current accounting lives in the repository's
 [`docs/status.md`](https://github.com/drawmeanelephant/DipshitOS/blob/main/docs/status.md).
@@ -63,8 +64,8 @@ A single boot of DipshitOS gets you, in order:
 - A window manager — **Driving Award** — compositing a terminal and a live
   clock overlay.
 - EL0 user programs, exec'd from the disk, running as real processes with a
-  34-slot syscall ABI (slots 0–33) covering IPC, windows, files, events,
-  process control, and TCP.
+  38-slot syscall ABI (slots 0–37) covering IPC, windows, files, events,
+  process control, TCP, and filesystem mutation.
 - Networking from raw Ethernet frames up through ARP, IPv4/ICMP, UDP, DHCP,
   and a bounded TCP client — plus an RFC 1035 DNS resolver.
 - USB keyboard input, enumerated over a real XHCI controller, typing into the

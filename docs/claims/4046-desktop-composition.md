@@ -4,7 +4,7 @@
 - **Prompt / plan:** `docs/march-m13.md`
 - **Scope:** Milestone 13, Card B4 (Issue #162: manifest-driven desktop composition)
 - **Depends on:** B1/B2/B3 (merged, PRs #165/#167/#170); M11 `sys_exec` seam (claim 6359)
-- **Status:** 🔄 in progress
+- **Status:** ✅ done 2026-08-16 — desktop composition live: DESKTOP.BIN walks the 9-entry manifest and launches FILE.BIN through sys_exec (slot 28); tools/verify-live-file-browser.sh PASS 1/1 on VZ
 
 ## Notes
 

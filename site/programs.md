@@ -32,7 +32,8 @@ runs at EL0. Each one is a small proof of a seam.
 | `TCP.BIN` | `user/src/tcp_client.zig` | the TCP syscall seam: connect, send, receive echo, close, exit 18 |
 | `FETCH.BIN` | `user/src/fetch.zig` | an HTTP/1.0 client over TCP: request, parse response, exit 42 |
 | `CHAT.BIN` | `user/src/chat.zig` | graphical UDP chat: windows + events + `sys_udp_*` |
-| `FILE.BIN` | `user/src/file_browser.zig` | the graphical DATA-partition file browser (`sys_dir_list` + read-only open) |
+| `FILE.BIN` | `user/src/file_browser.zig` | the graphical DATA-partition file browser (list, read, delete, rename) |
+| `FSTEST.BIN` | `user/src/fstest.zig` | the mutating filesystem seam: create/write → truncate → rename → free → delete |
 
 They are built by the same pipeline as the kernel: Zig → ELF → flat `DSK1`
 image, embedded on the ESP by the image builder.

@@ -4,7 +4,7 @@
 - **Prompt / plan:** `docs/march-m13.md`
 - **Scope:** Milestone 13, Card B1 (Issue #161: the read-only M10 ABI becomes mutating)
 - **Depends on:** Milestone 12 (merged); B2/B3 (merged, PRs #165/#167)
-- **Status:** 🔄 in progress
+- **Status:** ✅ done 2026-08-16 — the mutating filesystem seam (slots 34–37) is live on VZ: FSTEST.BIN create+write → truncate → read-back → rename → free → delete → prove-gone; tools/verify-live-fs-mutation.sh PASS 1/1, all four slots calls=1
 
 ## Notes
 

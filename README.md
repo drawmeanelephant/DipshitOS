@@ -32,11 +32,16 @@ syscall seam (`sys_tcp_connect/send/recv/close`, ADR 0007 slots 30–33), a
 bounded RFC 1035 DNS client, and the `FETCH.BIN` HTTP/1.0 client +
 `CHAT.BIN` graphical chat capstone, all live-verified on VZ.
 
-**Now in progress (milestone thirteen):** files & applications — filesystem
-semantics depth (`sys_file_delete/rename/truncate/free`, ADR 0007 slots
-34–37), an application identity manifest so the launcher stops hardcoding
-its app list, and the `FILE.BIN` graphical file browser capstone
-(issues #152/#153/#161/#162).
+**Milestone thirteen landed 2026-08-16:** files & applications — the
+mutating filesystem seam (`sys_file_delete/rename/truncate/free`, ADR 0007
+slots 34–37), the `APPS.TXT` application identity manifest (the launcher
+stops hardcoding its app list), the `FILE.BIN` graphical file browser, and
+manifest-driven desktop composition, all live-verified on VZ.
+
+**Now in progress (milestone fourteen):** shared user services — a clipboard
+(`sys_clipboard_set/get`, ADR 0007 slots 38–39), application timers
+(slots 40–41), a NOTEPAD copy/paste + timer composition capstone, and
+security/isolation hardening (issues #175–#178).
 
 The canonical, always-current accounting is
 [`docs/status.md`](docs/status.md); the readable summary is the
