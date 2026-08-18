@@ -72,3 +72,35 @@
 - Class B: `tools/verify-live-timers.sh` **PASS 1/1 on VZ** — TIMER.BIN
   arm/block/fire/cancel round-trips + `implemented=42` with
   `sys_timer_set calls=3` / `sys_timer_cancel calls=2`.
+
+## 2026-08-18 — S3 claimed (claim 3289, branch `freebuff/m14-s3-composition`)
+
+- Card S3 of Milestone 14 (issue #177): the composition capstone — NOTEPAD
+  copy/paste (S1) with a timer-driven cursor blink (S2) proven together in
+  one EL0 app. Branch based on `origin/main` (`750c10f`, PR #182 merged).
+- Claim file `docs/claims/3289-m14-s3-composition.md`; live gate
+  `tools/verify-live-m14-composition.sh`.
+
+## 2026-08-18 — S3 done (claim 3289, branch `freebuff/m14-s3-composition`)
+
+- The composition capstone: NOTEPAD uses S1+S2 together in ONE EL0 session.
+- `user/src/notepad.zig`: the timer-driven cursor blink — `cursor_visible`
+  toggles on every `EVENT_TIMER` (kind 9), the EL0 loop re-arms
+  `sys_timer_set` after each fire (2-tick cadence), a failed re-arm parks
+  the cursor visible (honest degradation); plus the argv `selfdemo` mode
+  (claim 4636's entry contract — argc/argv in x0/x1): paste the shared
+  clipboard → copy it back → blink 6 times → exit 43.
+- Class A: notepad module 21/21 (new blink + selfdemo-bound tests), full
+  gate set green.
+- Class B: `tools/verify-live-m14-composition.sh` **PASS 1/1 on VZ** —
+  `clip hello world` (terminal half) → `exec NOTEPAD.BIN selfdemo` →
+  `selfdemo pasted` → `selfdemo copied` → 6 `cursor blink` markers →
+  `selfdemo done` → `notepad: exiting 43` → `tasks user-exec exited
+  status=43`, and the same-boot syscalls report shows `implemented=42`
+  with `sys_clipboard_set calls=1` / `sys_clipboard_get calls=1` /
+  `sys_timer_set calls=7`.
+- Input seam (issue #179): reproduced `events=0` on a fresh boot — the
+  gate drives the composition via argv selfdemo, records the seam state in
+  the report, and notes that scripted Ctrl+C/V chords regain live coverage
+  when the seam recovers (the chord path itself is unchanged and
+  host-tested).
