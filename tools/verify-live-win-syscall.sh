@@ -130,7 +130,7 @@ if [ -f "$SERIAL" ]; then
     grep -a -q -F -- "winloop: loop ok" "$SERIAL" && LOOP=1
     grep -a -q -F -- "dui: windows=3" "$SERIAL" && WIN3=1
     grep -a -q -F -- "dui[2]: user user rect=64,64,256,192" "$SERIAL" && ROW2=1
-    grep -a -q -F -- "syscalls: slots=64 implemented=38" "$SERIAL" && IMPL=1
+    grep -a -q -F -- "syscalls: slots=64 implemented=42" "$SERIAL" && IMPL=1
     # The owner column (runtime visibility of per-process ownership): the
     # user window shows its owning pid (2), the fixed windows show `-`.
     grep -a -E -q 'dui\[2\]: user user rect=64,64,256,192 .* owner=2' "$SERIAL" && OWNERU=1
@@ -281,7 +281,7 @@ fi
     echo "DIPSHITOS live draw/window-syscall gate (claim 0487, milestone six card G6) — EL0 graphics + ownership on real VZ hardware"
     echo "revision: $REVISION branch=$BRANCH dirty-files=$DIRTY"
     echo "phase: scripted exec of WIN.BIN (open/fill/present/exit -> AUTO-CLOSE on exit), then win + syscalls on the same kernel state, then exec of WINLOOP.BIN (the persistent window) with win + syscalls observation + the decoded capture"
-    echo "assertions: win: fill ok / present ok + procs WIN.BIN exited status=87, dui: windows=2 after the exit (auto-close, close=0), winloop: loop ok, dui: windows=3 + dui[2]: user user rect=64,64,256,192 owner=2 (fixed windows owner=-), dui list 2 -> matches=1 + dui list 0 -> matches=0, syscalls implemented=38 with open=1/close=0 (pre-WINLOOP) + open=2/fill=8/present=2 (post-WINLOOP), red + cyan + white blocks at their spots, dark-blue background dominant, no terminal foreground inside the window rect"
+    echo "assertions: win: fill ok / present ok + procs WIN.BIN exited status=87, dui: windows=2 after the exit (auto-close, close=0), winloop: loop ok, dui: windows=3 + dui[2]: user user rect=64,64,256,192 owner=2 (fixed windows owner=-), dui list 2 -> matches=1 + dui list 0 -> matches=0, syscalls implemented=42 with open=1/close=0 (pre-WINLOOP) + open=2/fill=8/present=2 (post-WINLOOP), red + cyan + white blocks at their spots, dark-blue background dominant, no terminal foreground inside the window rect"
     echo "date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     echo
 } > "$REPORT"
@@ -289,7 +289,7 @@ fi
 echo
 echo "=== result ==="
 if [ "$PASS" = 1 ]; then
-    echo "verify-live-win-syscall: PASS — WIN.BIN opened a user window, filled it (dark-blue background + red/cyan/white blocks), presented it, and exited 87 — and the window AUTO-CLOSED on exit (dui: windows=2, sys_win_close calls=0). WINLOOP.BIN then kept its own window alive so the decoded capture shows an EL0-rendered window on the scanout (the window's own content over the terminal, no terminal foreground showing through), with syscalls reporting implemented=38 and open=2/fill=8/present=2 — and the dui report's owner column shows WINLOOP's pid (2, fixed windows owner=-) with 'dui list 2' -> matches=1 and a non-owner 'dui list 0' -> matches=0. The default VM is untouched: without --display, the window manager is unarmed and sys_win_open returns EINVAL — every existing gate stays byte-identical."
+    echo "verify-live-win-syscall: PASS — WIN.BIN opened a user window, filled it (dark-blue background + red/cyan/white blocks), presented it, and exited 87 — and the window AUTO-CLOSED on exit (dui: windows=2, sys_win_close calls=0). WINLOOP.BIN then kept its own window alive so the decoded capture shows an EL0-rendered window on the scanout (the window's own content over the terminal, no terminal foreground showing through), with syscalls reporting implemented=42 and open=2/fill=8/present=2 — and the dui report's owner column shows WINLOOP's pid (2, fixed windows owner=-) with 'dui list 2' -> matches=1 and a non-owner 'dui list 0' -> matches=0. The default VM is untouched: without --display, the window manager is unarmed and sys_win_open returns EINVAL — every existing gate stays byte-identical."
     echo "PASS: $PASS" >> "$REPORT"
     sleep 0.5
     exit 0

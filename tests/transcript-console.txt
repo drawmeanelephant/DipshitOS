@@ -48,6 +48,7 @@ graphics / input
   dui         Driving Award window manager: registry (with owner pids), z-order, focus, hit-testing ('dui focus <n>' focuses; 'dui raise <n>' raises; 'dui move <n> <x> <y>' moves a user window; 'dui close <n>' releases a user window; 'dui list <pid>' filters by owner; 'dui hit <x> <y>' hit-tests; 'dui cycle' cycles focus like Alt+Tab)
 system
   clear       clean up the crime scene
+  clip        copy/paste the shared kernel clipboard ('clip <text...>' sets it, 'clip' prints it)
   echo        repeat your regrettable decisions
   help        grouped command catalog and per-command/per-topic help
   random      print n random bytes from the seeded CSPRNG (hex)

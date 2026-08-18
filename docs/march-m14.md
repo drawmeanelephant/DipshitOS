@@ -25,8 +25,8 @@ Legend: ⬜ not started · 🔄 in progress · ✅ done · ⛔ blocked (note why
 
 | # | Card | Status | Evidence | Notes |
 |---:|------|--------|----------|-------|
-| S1 | **Clipboard / shared text service.** `sys_clipboard_set`/`sys_clipboard_get` (ADR 0007 slots 38–39), one bounded kernel clipboard buffer (pure BSS, zero heap); NOTEPAD copy/cut/paste + terminal copy. | ⬜ | — | Issue #175; wishlist 11. |
-| S2 | **Application timers.** Bounded per-process timer facility (slots 40–41) posting `TIMER` events on the ADR 0009 queue; apps stop spinning (NOTEPAD cursor blink, a live clock, TOP refresh). | ⬜ | — | Issue #176; wishlist 12. |
+| S1 | **Clipboard / shared text service.** `sys_clipboard_set`/`sys_clipboard_get` (ADR 0007 slots 38–39), one bounded kernel clipboard buffer (pure BSS, zero heap); NOTEPAD copy/cut/paste + terminal copy. | ✅ | claim 0169 — `verify-live-clipboard.sh` PASS 1/1 on VZ (terminal `clip` set/overwrite/get round-trip + `implemented=40` with slots 38/39 present) | Issue #175; wishlist 11. |
+| S2 | **Application timers.** Bounded per-process timer facility (slots 40–41) posting `TIMER` events on the ADR 0009 queue; apps stop spinning (NOTEPAD cursor blink, a live clock, TOP refresh). | ✅ | claim 7323 — `verify-live-timers.sh` PASS 1/1 on VZ (TIMER.BIN arm → block in wait_event → TIMER event → cancel 0/1; `implemented=42`, set calls=3 / cancel calls=2). Wiring NOTEPAD's cursor blink / a live clock / TOP refresh is S3's composition scope. | Issue #176; wishlist 12. |
 | S3 | **Composition capstone.** NOTEPAD copy/paste with a timer-driven cursor — S1+S2 proven together. Live gate: `verify-live-m14-composition.sh`. | ⬜ | — | Issue #177; depends on S1+S2. |
 | S4 | **Security/isolation hardening.** Process-ownership audit across every EL0-named resource, uaccess validation-depth sweep, resource limits; a hostile EL0 program refused cross-process access. Live gate: `verify-live-hardening.sh`. | ⬜ | — | Issue #178; wishlist 19. |
 
@@ -36,8 +36,9 @@ Legend: ⬜ not started · 🔄 in progress · ✅ done · ⛔ blocked (note why
   filed 2026-08-16 alongside the M13 closeout and the pointer-route
   investigation (PR #174) — the roadmap's destination sections are seeded
   ahead of the closeout, per the M12/M13 precedent.
-- S1/S2 add ADR 0007 slots 38–41 (implemented_count 38 → 42), following
-  slot 37 `sys_file_free`.
+- S1 adds ADR 0007 slots 38–39 (implemented_count 38 → 40, landed
+  2026-08-18); S2 adds slots 40–41 (40 → 42) — following slot 37
+  `sys_file_free`.
 - Zero heap allocation stays a hard constraint for every new kernel
   resource (fixed BSS tables only).
 - M8's U4 pointer live proof is a known class-C-only limitation (issue

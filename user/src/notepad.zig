@@ -76,6 +76,18 @@ pub const TextBuffer = struct {
         return true;
     }
 
+    /// Insert a whole slice at the cursor, byte by byte, stopping at the
+    /// buffer capacity. Returns the number of bytes actually inserted (short
+    /// when the buffer is nearly full — the paste path's honest bound).
+    pub fn insert_slice(self: *TextBuffer, text: []const u8) usize {
+        var inserted: usize = 0;
+        for (text) |ch| {
+            if (!self.insert_char(ch)) break;
+            inserted += 1;
+        }
+        return inserted;
+    }
+
     pub fn backspace(self: *TextBuffer) bool {
         if (self.cursor == 0 or self.len == 0) return false;
         var i = self.cursor - 1;
@@ -360,6 +372,23 @@ pub const AppState = struct {
         }
     }
 
+    /// Paste the shared clipboard at the cursor (claim 0169). The clipboard
+    /// read is non-destructive; the insert clamps at the editor capacity.
+    pub fn paste_clipboard(self: *AppState) bool {
+        var temp: [ui.clipboard_capacity]u8 = undefined;
+        const n = ui.clipboard_get(&temp);
+        if (n <= 0) {
+            self.set_status("No Clip");
+            return true;
+        }
+        const ulen: usize = @intCast(n);
+        _ = self.buffer.insert_slice(temp[0..ulen]);
+        _ = self.layout.ensure_visible(self.buffer.get_slice(), self.buffer.cursor);
+        self.layout.clamp_scroll(self.buffer.get_slice());
+        self.set_status("Pasted");
+        return true;
+    }
+
     pub fn draw(self: *const AppState, win: u32) void {
         // Window background
         ui.draw_rect(win, Rect.make(0, 0, window_w, window_h), ui.COLOR_BG);
@@ -566,6 +595,33 @@ pub const AppState = struct {
                 self.buffer.cursor = self.buffer.len;
                 _ = self.layout.ensure_visible(slice, self.buffer.cursor);
                 return true;
+            }
+        }
+
+        // Ctrl+C / Ctrl+X / Ctrl+V: copy / cut / paste through the SHARED
+        // clipboard (claim 0169). No selection model yet — copy and cut take
+        // the WHOLE buffer (an honest bound; selection is a later card).
+        if ((ev.flags & ui.MOD_CTRL) != 0) {
+            if (keycode == 0x06) { // 'c' -> copy
+                if (ui.clipboard_set(self.buffer.get_slice()) < 0) {
+                    self.set_status("Copy Err");
+                } else {
+                    self.set_status("Copied");
+                }
+                return true;
+            }
+            if (keycode == 0x1b) { // 'x' -> cut
+                if (ui.clipboard_set(self.buffer.get_slice()) < 0) {
+                    self.set_status("Cut Err");
+                } else {
+                    self.buffer.clear();
+                    self.layout.scroll = 0;
+                    self.set_status("Cut");
+                }
+                return true;
+            }
+            if (keycode == 0x19) { // 'v' -> paste
+                return self.paste_clipboard();
             }
         }
 
@@ -883,4 +939,49 @@ test "notepad: keyboard navigation routes through TextLayout (claim 1771)" {
     var ev2 = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 2, .arg0 = 0x4c, .arg1 = 0 };
     try std.testing.expect(app.handle_keyboard_event(&ev2));
     try std.testing.expectEqualStrings(buf[1..24], app.buffer.get_slice());
+}
+
+test "notepad: TextBuffer insert_slice pastes at the cursor and clamps at capacity (claim 0169)" {
+    var tb = TextBuffer.init();
+    tb.set_content("ab");
+    tb.cursor = 1;
+
+    const inserted = tb.insert_slice("XY");
+    try std.testing.expectEqual(@as(usize, 2), inserted);
+    try std.testing.expectEqualStrings("aXYb", tb.get_slice());
+    try std.testing.expectEqual(@as(usize, 3), tb.cursor);
+
+    // Near capacity: insert_slice stops when the buffer is full.
+    var big = TextBuffer.init();
+    const near = "a" ** 511;
+    big.set_content(near[0..511]);
+    big.cursor = big.len;
+    const n2 = big.insert_slice("xyz");
+    try std.testing.expectEqual(@as(usize, 1), n2);
+    try std.testing.expectEqual(@as(usize, 512), big.len);
+}
+
+test "notepad: copy/cut chords drive the clipboard path and cut clears (claim 0169)" {
+    var app = AppState.init();
+    app.buffer.set_content("hello");
+    app.buffer.cursor = 2;
+
+    // Ctrl+X (usage 0x1b): cut — the buffer clears, status becomes "Cut".
+    var ev_cut = Event{ .kind = ui.KEY_DOWN, .flags = ui.MOD_CTRL, .seq = 1, .arg0 = 0x1b, .arg1 = 0 };
+    try std.testing.expect(app.handle_keyboard_event(&ev_cut));
+    try std.testing.expectEqualStrings("", app.buffer.get_slice());
+    try std.testing.expectEqualStrings("Cut", app.status_msg[0..app.status_len]);
+
+    // Ctrl+C (usage 0x06): copy keeps the buffer, status becomes "Copied".
+    var ev_copy = Event{ .kind = ui.KEY_DOWN, .flags = ui.MOD_CTRL, .seq = 2, .arg0 = 0x06, .arg1 = 0 };
+    try std.testing.expect(app.handle_keyboard_event(&ev_copy));
+    try std.testing.expectEqualStrings("", app.buffer.get_slice());
+    try std.testing.expectEqualStrings("Copied", app.status_msg[0..app.status_len]);
+
+    // Ctrl+V (usage 0x19) with an empty clipboard (the host wrapper returns
+    // 0): paste reports "No Clip" and leaves the buffer empty.
+    var ev_paste = Event{ .kind = ui.KEY_DOWN, .flags = ui.MOD_CTRL, .seq = 3, .arg0 = 0x19, .arg1 = 0 };
+    try std.testing.expect(app.handle_keyboard_event(&ev_paste));
+    try std.testing.expectEqualStrings("No Clip", app.status_msg[0..app.status_len]);
+    try std.testing.expectEqualStrings("", app.buffer.get_slice());
 }

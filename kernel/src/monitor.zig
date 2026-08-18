@@ -37,6 +37,7 @@ const uaccess = @import("uaccess.zig"); // claim 6120: fault-safe copy-in/copy-o
 const userspace = @import("userspace.zig"); // claim 5804: user-VA layout
 const virtio_blk = @import("virtio_blk.zig"); // claim 6420: the sector interface behind `mount` (milestone four card 2)
 const csprng = @import("csprng.zig"); // milestone four (claim 2665): the seeded CSPRNG behind `random`
+const clipboard = @import("clipboard.zig"); // milestone fourteen (claim 0169): the shared kernel clipboard behind `clip`
 const virtio_net = @import("virtio_net.zig"); // milestone five card N1 (claim 1373): the net transport behind `net`/`netsend`
 const virtio_gpu = @import("virtio_gpu.zig"); // milestone six card G1 (claim 6053): the gpu transport + framebuffer behind `screen`
 const road_pops = @import("road_pops.zig"); // milestone six card G3 (claim 1574): the Road Pops tee console behind `roadpops`
@@ -264,8 +265,9 @@ pub const Command = struct {
 /// (claim 1543) grows it 39 -> 40 (`dui`). Milestone eight card U6
 /// (claim 8323) grows it 40 -> 42 (`welcome`, `tour`). Milestone eight card U7
 /// (claim 2990) grows it 42 -> 43 (`sysinfo`). Milestone eight card U8
-/// (claim 2649) grows it 43 -> 44 (`settings`).
-pub const registry_count: usize = 44;
+/// (claim 2649) grows it 43 -> 44 (`settings`). Milestone fourteen card S1
+/// (claim 0169) grows it 44 -> 45 (`clip`).
+pub const registry_count: usize = 45;
 
 /// Command registry, built at runtime into BSS. A `const` table would hold
 /// link-time absolute addresses for BOTH the string slices and the handler
@@ -286,6 +288,7 @@ fn ensure_registry() []const Command {
             .{ .name = "beans", .help = "count beans, probably", .usage = "beans [count]", .category = .machine_identity, .max_args = 1, .handler = cmd_beans },
             .{ .name = "cat", .help = "print a file from the ESP (by name or /path)", .usage = "cat <file|path>", .category = .storage, .min_args = 1, .max_args = 1, .handler = cmd_cat },
             .{ .name = "clear", .help = "clean up the crime scene", .usage = "clear", .category = .system, .handler = cmd_clear },
+            .{ .name = "clip", .help = "copy/paste the shared kernel clipboard ('clip <text...>' sets it, 'clip' prints it)", .usage = "clip [<text...>]", .category = .system, .handler = cmd_clip },
             .{ .name = "echo", .help = "repeat your regrettable decisions", .usage = "echo <text...>", .category = .system, .handler = cmd_echo },
             .{ .name = "elephant", .help = "operational mascot diagnostics", .usage = "elephant", .category = .machine_identity, .handler = cmd_elephant },
             .{ .name = "exec", .help = "load a user program from the ESP and enter it at EL0", .usage = "exec [<file> [arg...]]", .category = .tasks_processes, .max_args = 1 + esp_exec.max_exec_args, .handler = cmd_exec },
@@ -1291,6 +1294,48 @@ fn cmd_echo(m: *Monitor, args: []const []const u8) ExecError {
         m.console.puts(arg);
     }
     m.console.puts("\n");
+    return .none;
+}
+
+/// Milestone fourteen card S1 (claim 0169): the terminal half of the shared
+/// clipboard. With no args it pastes the current contents (the EL1h read of
+/// the SAME buffer the slots 38/39 syscalls use); with args it joins them
+/// (space-separated, the `echo` shape) and stores the result — the
+/// bounded-copy proof from the shell. Truncation is honest: the staging
+/// buffer is the clipboard capacity, so an over-long paste stores exactly
+/// `clipboard.capacity` bytes and reports it.
+fn cmd_clip(m: *Monitor, args: []const []const u8) ExecError {
+    if (args.len == 0) {
+        var buf: [clipboard.capacity]u8 = undefined;
+        const n = clipboard.get(&buf);
+        if (n == 0) {
+            m.console.puts("clip: empty\n");
+        } else {
+            m.console.puts("clip: ");
+            m.console.puts(buf[0..n]);
+            m.console.puts("\n");
+        }
+        return .none;
+    }
+    var staging: [clipboard.capacity]u8 = undefined;
+    var len: usize = 0;
+    for (args, 0..) |arg, index| {
+        if (index > 0) {
+            if (len < staging.len) {
+                staging[len] = ' ';
+                len += 1;
+            }
+        }
+        for (arg) |ch| {
+            if (len >= staging.len) break;
+            staging[len] = ch;
+            len += 1;
+        }
+    }
+    const stored = clipboard.set(staging[0..len]);
+    m.console.puts("clip: stored ");
+    m.console.print_u64(stored);
+    m.console.puts(" bytes\n");
     return .none;
 }
 
@@ -5916,7 +5961,7 @@ test "monitor: syscalls is registered and reports deterministic rows" {
     try std.testing.expectEqualStrings("numbered syscall table and counters", lookup("syscalls").?.help);
     try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"syscalls"}));
     try std.testing.expectEqualStrings(
-        "syscalls: slots=64 implemented=38\n" ++
+        "syscalls: slots=64 implemented=42\n" ++
             "  0 sys_ping calls=0\n" ++
             "  1 sys_write calls=0\n" ++
             "  2 sys_yield calls=0\n" ++
@@ -5954,9 +5999,42 @@ test "monitor: syscalls is registered and reports deterministic rows" {
             "  34 sys_file_delete calls=0\n" ++
             "  35 sys_file_rename calls=0\n" ++
             "  36 sys_file_truncate calls=0\n" ++
-            "  37 sys_file_free calls=0\n",
+            "  37 sys_file_free calls=0\n" ++
+            "  38 sys_clipboard_set calls=0\n" ++
+            "  39 sys_clipboard_get calls=0\n" ++
+            "  40 sys_timer_set calls=0\n" ++
+            "  41 sys_timer_cancel calls=0\n",
         env.mock.contents(),
     );
+}
+
+test "monitor: clip copies and pastes the shared clipboard (claim 0169)" {
+    clipboard.init();
+    var env = TestEnv.init();
+    var mon = env.monitor();
+    try std.testing.expect(lookup("clip") != null);
+    try std.testing.expectEqualStrings("copy/paste the shared kernel clipboard ('clip <text...>' sets it, 'clip' prints it)", lookup("clip").?.help);
+
+    // Empty clipboard pastes the honest empty marker.
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"clip"}));
+    try std.testing.expectEqualStrings("clip: empty\n", env.mock.contents());
+
+    // Copy joins args space-separated and stores them.
+    env.mock.reset();
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "clip", "hello", "world" }));
+    try std.testing.expectEqualStrings("clip: stored 11 bytes\n", env.mock.contents());
+
+    // Paste reads the SAME bytes back.
+    env.mock.reset();
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"clip"}));
+    try std.testing.expectEqualStrings("clip: hello world\n", env.mock.contents());
+
+    // A new copy overwrites; an empty-arg copy clears.
+    env.mock.reset();
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "clip", "second" }));
+    env.mock.reset();
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"clip"}));
+    try std.testing.expectEqualStrings("clip: second\n", env.mock.contents());
 }
 
 test "monitor: uaccess command is honest on a host process (no vectors)" {
