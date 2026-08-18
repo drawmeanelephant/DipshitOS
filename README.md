@@ -81,7 +81,7 @@ just verify-vz         # class B, Apple silicon, boots real VMs
 - `host/vm-runner/` — the Swift Virtualization.framework launcher.
 - `site/` — the public documentation corpus (compiled by Boris).
 - `docs/` — the engineering warehouse: claims, decisions (ADRs), status,
-  hardware contract, gate inventory.
+  hardware contract, gate inventory, and the [memorial to `calm-lavoisier`](docs/calm-lavoisier-memorial.md).
 
 See `AGENTS.md` for the project rules, and the
 [development guide](https://drawmeanelephant.github.io/DipshitOS/development.html)

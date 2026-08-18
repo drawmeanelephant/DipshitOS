@@ -133,6 +133,7 @@ verify-coordination`, and CI) fails if it drifts from the files.
 | milestone eight cards U4+U5: pointer focus/cursor + window HIG (zcode) | [`agent-zcode-m8-u4-u5-windows.md`](agent-zcode-m8-u4-u5-windows.md) |
 | `codex/el0-svc-task` | [`codex-el0-svc-task.md`](codex-el0-svc-task.md) |
 | `codex/vz-real-irq-delivery` | [`codex-vz-real-irq-delivery.md`](codex-vz-real-irq-delivery.md) |
+| `docs-calm-lavoisier-memorial`: Memorial to calm-lavoisier & Git Alignment (claim 9357) | [`docs-calm-lavoisier-memorial.md`](docs-calm-lavoisier-memorial.md) |
 | `site-current-state`: refresh the public GitHub Pages site to current reality (claim 1662) | [`docs-site-current-state.md`](docs-site-current-state.md) |
 | freebuff/can-you-check-out-our-status-and-work-on-the-next (milestone six, G4) | [`freebuff-can-you-check-out-our-status-and-work-on-the-next--7e2ecd0b-8acc-47ac-bb44-68841236e5fc.md`](freebuff-can-you-check-out-our-status-and-work-on-the-next--7e2ecd0b-8acc-47ac-bb44-68841236e5fc.md) |
 | freebuff/can-you-figure-out-why-the-text-is-getting-flipped (issue #125 glyph orientation) | [`freebuff-can-you-figure-out-why-the-text-is-getting-flipped-8600521b-d8d1-4667-a3e8-d2fa10b4ff03.md`](freebuff-can-you-figure-out-why-the-text-is-getting-flipped-8600521b-d8d1-4667-a3e8-d2fa10b4ff03.md) |
