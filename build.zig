@@ -741,6 +741,52 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_timertest.step);
 
     // ------------------------------------------------------------------
+    // Guest: twenty-fourth ESP user program (milestone fourteen, card S4 — claim 4482)
+    // VICTIM.BIN. The hostile-proof's VICTIM: owns a window, loops forever.
+    // ------------------------------------------------------------------
+    const victim_prog = b.addExecutable(.{
+        .name = "user-hardening-victim",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/hardening_victim.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    victim_prog.linker_script = b.path("user/linker.ld");
+    const victim_step = b.step("hardening-victim", "Build the twenty-fourth ESP user program (zig-out/bin/VICTIM.BIN)");
+    const victim_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    victim_elf2bin.addFileArg(victim_prog.getEmittedBin());
+    const victim_bin = victim_elf2bin.addOutputFileArg("VICTIM.BIN");
+    victim_elf2bin.has_side_effects = true;
+    victim_elf2bin.stdio = .inherit;
+    victim_step.dependOn(&victim_elf2bin.step);
+    const install_victim = b.addInstallFileWithDir(victim_bin, .bin, "VICTIM.BIN");
+    b.getInstallStep().dependOn(&install_victim.step);
+
+    // ------------------------------------------------------------------
+    // Guest: twenty-fifth ESP user program (milestone fourteen, card S4 — claim 4482)
+    // HARDEN.BIN. The hostile-consumer proof: cross-process window attacks refused.
+    // ------------------------------------------------------------------
+    const harden_prog = b.addExecutable(.{
+        .name = "user-harden",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/harden.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    harden_prog.linker_script = b.path("user/linker.ld");
+    const harden_step = b.step("harden", "Build the twenty-fifth ESP user program (zig-out/bin/HARDEN.BIN)");
+    const harden_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    harden_elf2bin.addFileArg(harden_prog.getEmittedBin());
+    const harden_bin = harden_elf2bin.addOutputFileArg("HARDEN.BIN");
+    harden_elf2bin.has_side_effects = true;
+    harden_elf2bin.stdio = .inherit;
+    harden_step.dependOn(&harden_elf2bin.step);
+    const install_harden = b.addInstallFileWithDir(harden_bin, .bin, "HARDEN.BIN");
+    b.getInstallStep().dependOn(&install_harden.step);
+
+    // ------------------------------------------------------------------
     // Top-level steps. System-command steps are marked as having side
     // effects (and inherit stdio) so they always execute instead of being
     // skipped by the build cache. (No QEMU path: this project targets Apple
@@ -774,6 +820,8 @@ pub fn build(b: *std.Build) void {
     image.addFileArg(file_bin); // ... [FILE.BIN] (claim 4742: twenty-first user program, GUI file browser)
     image.addFileArg(fstest_bin); // ... [FSTEST.BIN] (claim 5801: twenty-second user program, mutating-fs proof)
     image.addFileArg(timertest_bin); // ... [TIMER.BIN] (claim 7323: twenty-third user program, app-timer proof)
+    image.addFileArg(victim_bin); // ... [VICTIM.BIN] (claim 4482: twenty-fourth user program, hostile-proof victim)
+    image.addFileArg(harden_bin); // ... [HARDEN.BIN] (claim 4482: twenty-fifth user program, hostile-consumer proof)
     image.has_side_effects = true;
     image.stdio = .inherit;
     image_step.dependOn(&image.step);
