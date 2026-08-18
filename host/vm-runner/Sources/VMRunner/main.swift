@@ -1862,6 +1862,29 @@ func startScript3Input() {
     forwardScriptOnce(path: path, after: after, label: "script3", settle: script3Delay)
 }
 
+// Issue #179 follow-up (claim 8844): the activation wall (claim 4769) —
+// VZ's synthesized-input translation is session-dependent (macOS 14+
+// refuses programmatic focus-stealing while another app holds focus), so
+// a dispatch into the view reports ok=true whether or not a single
+// keystroke reaches the guest; a silent drop used to surface only as
+// guest `events=0`. Report the delivery-relevant window state on every
+// synthesized-keyboard path so a failing run is diagnosed at the host
+// instead of guessed at. Observed 2026-08-18: a not-key window at the
+// FIRST keystroke is consistent with BOTH events=0 (walled run) and a
+// full events=6 delivery (the wall lifted mid-sequence) — so this report
+// is evidence, not a prediction. Must be called on the main thread.
+func reportKeyboardKeyState(_ view: VZVirtualMachineView, label: String) {
+    let w = view.window
+    let key = w?.isKeyWindow ?? false
+    let main = w?.isMainWindow ?? false
+    let active = NSApp.isActive
+    if key {
+        FileHandle.standardOutput.write(Data("\(label): window key=\(key) main=\(main) active=\(active) — key window, input should translate\n".utf8))
+    } else {
+        FileHandle.standardOutput.write(Data("\(label): window key=\(key) main=\(main) active=\(active) — the claim-4769 activation wall may be holding (VZ synthesized-keyboard delivery is session-dependent: the guest can report events=0 OR translate normally; observed both on 2026-08-18). If this run shows guest events=0, re-run when the machine is idle or after a fresh login; no code fix exists (VZ has no programmatic keyboard API).\n".utf8))
+    }
+}
+
 // Milestone seven card I2 (claim 4116): synthesize ONE host key event into
 // the VZVirtualMachineView after the marker appears. VZ has no programmatic
 // keyboard-injection API — VZUSBKeyboardConfiguration is driven only by a
@@ -1894,6 +1917,9 @@ func startKeyInject() {
                         view.keyDown(with: down)
                     }
                     FileHandle.standardOutput.write(Data("KEY-INJECT: keyCode \(keyCode) keyDown dispatched to the VZVirtualMachineView after \"\(marker)\"\n".utf8))
+                    // Claim 8844: report the delivery-relevant window state so
+                    // a silent VZ drop (not-key window) is diagnosed here.
+                    reportKeyboardKeyState(view, label: "KEY-INJECT")
                 }
                 sent = true
                 break
@@ -2027,10 +2053,15 @@ func startChordInject() {
                     // drops/reorders reports at the guest's single-pending-
                     // report interrupt-IN endpoint (observed claim-time).
                     var remaining = events
-                    func fireNext(after delay: Double) {
+                    func fireNext(after delay: Double, first: Bool) {
                         if remaining.isEmpty {
                             FileHandle.standardOutput.write(Data("CHORD-SEQ: typed \(csv.debugDescription) into the VZVirtualMachineView after \"\(marker)\" ok=true\n".utf8))
                             return
+                        }
+                        if first, let view = machineView {
+                            // Claim 8844: same delivery-state report as
+                            // KEY-SEQ, before the first chord lands.
+                            reportKeyboardKeyState(view, label: "CHORD-SEQ")
                         }
                         let evt = remaining.removeFirst()
                         DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
@@ -2042,10 +2073,10 @@ func startChordInject() {
                                     view.keyUp(with: e)
                                 }
                             }
-                            fireNext(after: inputChordsDelay)
+                            fireNext(after: inputChordsDelay, first: false)
                         }
                     }
-                    fireNext(after: 0.0)
+                    fireNext(after: 0.0, first: true)
                 } else {
                     FileHandle.standardOutput.write(Data("CHORD-SEQ: aborted (unknown chord) ok=false\n".utf8))
                 }
@@ -2373,9 +2404,17 @@ func startKeyStringInject() {
                 }
                 if allOk {
                     var delay: Double = 0.0
-                    for ev in events {
+                    for (i, ev) in events.enumerated() {
                         let evt = ev
                         DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                            if i == 0, let view = machineView {
+                                // Claim 8844: report the delivery-relevant
+                                // window state BEFORE the first keystroke
+                                // lands (main thread) — a passing run shows
+                                // key=true; a walled run shows key=false
+                                // immediately, instead of a silent events=0.
+                                reportKeyboardKeyState(view, label: "KEY-SEQ")
+                            }
                             let t = ProcessInfo.processInfo.systemUptime
                             // VZ maps keyDown/keyUp by keyCode; keep the
                             // characters on both so the pair is symmetric.
