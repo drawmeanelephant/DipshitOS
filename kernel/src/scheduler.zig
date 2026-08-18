@@ -68,6 +68,9 @@ const process = @import("process.zig");
 const mailbox = @import("mailbox.zig");
 // Milestone 9 (claim 7670): per-process event queue
 const events = @import("events.zig");
+// Milestone 14 (claim 7323): per-process app timer facility — fired from
+// the SAME host-testable tick seam as the sleep wakeups below.
+const app_timers = @import("app_timers.zig");
 // Milestone 10 (claim 9948): per-process file handle table
 const file_table = @import("file_table.zig");
 // Milestone 12 (claim 7483): per-process TCP connection cleanup
@@ -319,6 +322,7 @@ pub fn init() usize {
     mailbox.init();
     events.init();
     events.on_event_pushed = wake_event_waiters;
+    app_timers.init();
     tasks[0] = .{ .name = "shell", .state = .ready, .ttbr0 = mmu.kernel_root_phys() };
     tasks[idle_id] = .{
         .name = "idle",
@@ -505,6 +509,7 @@ pub fn register_user(entry: u64, image_base: u64) ?usize {
         mailbox.reset(proc_id);
         events.reset(proc_id);
         file_table.reset_process(proc_id);
+        app_timers.reset(proc_id);
         _ = process.bind(proc_id, id);
     }
     const frame: *exceptions.VectorFrame = @ptrFromInt(tasks[id].sp);
@@ -849,6 +854,10 @@ fn wake_expired() void {
 pub fn on_tick() void {
     tick_count +%= 1;
     wake_expired();
+    // Milestone 14 (claim 7323): count every armed app timer down and fire
+    // the due ones (one TIMER event per process into its ADR 0009 queue,
+    // which wakes a blocked sys_wait_event caller via on_event_pushed).
+    app_timers.on_tick();
 }
 
 /// Remove the calling task from the runnable ring and stage its successor.
@@ -879,6 +888,9 @@ pub fn exit_current(status: u64) bool {
         _ = driving_award.close_owner(pid);
         file_table.reset_process(pid);
         tcp.close_owner(pid);
+        // Milestone 14 (claim 7323): a dead process's app timer is disarmed
+        // now — no stale fire can ever reach a recycled pid.
+        app_timers.reset(pid);
     }
     const next = next_runnable(exiting) orelse {
         // No successor: roll back (the always-ready idle task makes this

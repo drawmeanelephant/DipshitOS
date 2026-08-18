@@ -42,6 +42,11 @@ pub const sys_file_delete_num: u64 = 34;
 pub const sys_file_rename_num: u64 = 35;
 pub const sys_file_truncate_num: u64 = 36;
 pub const sys_file_free_num: u64 = 37;
+pub const sys_clipboard_set_num: u64 = 38;
+pub const sys_clipboard_get_num: u64 = 39;
+pub const clipboard_capacity: usize = 512;
+pub const sys_timer_set_num: u64 = 40;
+pub const sys_timer_cancel_num: u64 = 41;
 pub const sys_udp_listen_num: u64 = 9;
 pub const sys_udp_send_num: u64 = 10;
 pub const sys_udp_recv_num: u64 = 11;
@@ -60,6 +65,7 @@ pub const MOUSE_MOVE: u16 = 5;
 pub const WIN_FOCUS: u16 = 6;
 pub const WIN_BLUR: u16 = 7;
 pub const WIN_CLOSE: u16 = 8;
+pub const EVENT_TIMER: u16 = 9;
 
 pub const MOD_SHIFT: u16 = 0x0001;
 pub const MOD_CTRL: u16 = 0x0002;
@@ -290,6 +296,36 @@ pub fn file_truncate(handle: u32, size: u32) i64 {
 /// Claim 5801 (ADR 0007 slot 37): free bytes on a volume (0 = DATA, 1 = ESP).
 pub fn file_free(volume: u32) i64 {
     return syscall1(sys_file_free_num, volume);
+}
+
+/// Claim 0169 (ADR 0007 slot 38): store text in the SHARED kernel clipboard
+/// (truncated at 512 bytes). Returns the stored length; negative error
+/// otherwise (EINVAL non-process caller, EFAULT bad pointer).
+pub fn clipboard_set(data: []const u8) i64 {
+    return syscall2(sys_clipboard_set_num, @intFromPtr(data.ptr), data.len);
+}
+
+/// Claim 0169 (ADR 0007 slot 39): read the SHARED kernel clipboard into
+/// `buf` (non-destructive — the clipboard is not consumed). Returns the
+/// copied length; 0 when empty; negative error otherwise.
+pub fn clipboard_get(buf: []u8) i64 {
+    return syscall2(sys_clipboard_get_num, @intFromPtr(buf.ptr), buf.len);
+}
+
+/// Claim 7323 (ADR 0007 slot 40): arm the CALLING process's app timer to
+/// fire ONE `EVENT_TIMER` event into its ADR 0009 queue after `delay_ticks`
+/// scheduler ticks (0 clamps to 1; over-long truncates at the kernel bound;
+/// re-arming replaces a pending timer). Returns 0; negative error otherwise
+/// (EINVAL non-process caller).
+pub fn timer_set(delay_ticks: u64) i64 {
+    return syscall1(sys_timer_set_num, delay_ticks);
+}
+
+/// Claim 7323 (ADR 0007 slot 41): disarm the CALLING process's app timer.
+/// Returns 1 if a pending timer was canceled, 0 if none was armed; negative
+/// error otherwise (EINVAL non-process caller).
+pub fn timer_cancel() i64 {
+    return syscall0(sys_timer_cancel_num);
 }
 
 pub fn udp_listen(port: u16) i64 {

@@ -718,6 +718,29 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_fstest.step);
 
     // ------------------------------------------------------------------
+    // Guest: twenty-third ESP user program (milestone fourteen, card S2 — claim 7323)
+    // TIMER.BIN. Headless per-process app-timer proof (arm/wait/fire/cancel).
+    // ------------------------------------------------------------------
+    const timertest_prog = b.addExecutable(.{
+        .name = "user-timertest",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/timertest.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    timertest_prog.linker_script = b.path("user/linker.ld");
+    const timertest_step = b.step("timertest", "Build the twenty-third ESP user program (zig-out/bin/TIMER.BIN)");
+    const timertest_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    timertest_elf2bin.addFileArg(timertest_prog.getEmittedBin());
+    const timertest_bin = timertest_elf2bin.addOutputFileArg("TIMER.BIN");
+    timertest_elf2bin.has_side_effects = true;
+    timertest_elf2bin.stdio = .inherit;
+    timertest_step.dependOn(&timertest_elf2bin.step);
+    const install_timertest = b.addInstallFileWithDir(timertest_bin, .bin, "TIMER.BIN");
+    b.getInstallStep().dependOn(&install_timertest.step);
+
+    // ------------------------------------------------------------------
     // Top-level steps. System-command steps are marked as having side
     // effects (and inherit stdio) so they always execute instead of being
     // skipped by the build cache. (No QEMU path: this project targets Apple
@@ -750,6 +773,7 @@ pub fn build(b: *std.Build) void {
     image.addFileArg(chat_bin); // ... [CHAT.BIN] (claim 5416: twentieth user program, graphical P2P chat)
     image.addFileArg(file_bin); // ... [FILE.BIN] (claim 4742: twenty-first user program, GUI file browser)
     image.addFileArg(fstest_bin); // ... [FSTEST.BIN] (claim 5801: twenty-second user program, mutating-fs proof)
+    image.addFileArg(timertest_bin); // ... [TIMER.BIN] (claim 7323: twenty-third user program, app-timer proof)
     image.has_side_effects = true;
     image.stdio = .inherit;
     image_step.dependOn(&image.step);

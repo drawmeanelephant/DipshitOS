@@ -4,7 +4,7 @@
 - **Prompt / plan:** `docs/march-m13.md`
 - **Scope:** Milestone 13, Card B2 (Issue #152: application identity manifest — APPS.TXT, launcher reads it)
 - **Depends on:** Milestone 12 (TCP seam, DNS, capstone apps) — merged via PR #160
-- **Status:** 🔄 in progress
+- **Status:** ✅ done 2026-08-16 (PR #165) — APPS.TXT manifest live: desktop: manifest apps=8, DESKTOP.MANIFEST: OK, DESKTOP.LAUNCH: OK; the gate tail also fixed the sys_file_read kstack overflow and the FP/SIMD clobber across svc
 
 ## Notes
 

@@ -26,28 +26,27 @@ is the canonical, always-current source; this is the readable summary.
 | 10 | Files & storage F0–F4: ADR 0010, per-process file table, `/esp/` + `/data/` routing, file syscalls (slots 23–27), `SAVETEXT.BIN`/`TYPE.BIN`/`DIR.BIN` |
 | 11 | Desktop platform A0–A5: ADR 0011, the zero-heap `ui.zig` toolkit, `CALC.BIN`/`NOTEPAD.BIN`/`TOP.BIN`, the `DESKTOP.BIN` launcher, `sys_exec`/`sys_kill` (slots 28/29) |
 | 12 | Network apps N0–N3: TCP syscall seam (slots 30–33), RFC 1035 DNS, `TCP.BIN`/`FETCH.BIN`/`CHAT.BIN` |
-| 13 | Files & applications B1–B4: `APPS.TXT` identity manifest (B2) and the `FILE.BIN` graphical data browser (B3) are live; filesystem mutation syscalls (B1, slots 34–37) and desktop composition (B4) are open |
+| 13 | Files & applications B1–B4: mutating filesystem seam (B1, slots 34–37), `APPS.TXT` identity manifest (B2), the `FILE.BIN` graphical data browser (B3), and manifest-driven desktop composition (B4) |
 
-Every milestone through twelve is **done** and live-gated; milestone thirteen
-is in progress with two of its four cards landed.
+Every milestone through thirteen is **done** and live-gated; milestone
+fourteen is the active stream.
 
 ## Current
 
-**Milestone thirteen — files & applications** is the active milestone. Its
+**Milestone fourteen — shared user services** is the active milestone. Its
 cards:
 
-- ✅ **B2 — application identity manifest.** `DESKTOP.BIN` reads `APPS.TXT`
-  through the file seam instead of its hardcoded app list (falling back
-  honestly when the manifest is missing).
-- ✅ **B3 — `FILE.BIN`, the graphical file browser.** A scrollable list views
-  the DATA partition and opens `.TXT` files read-only through the file
-  syscalls.
-- ⬜ **B1 — filesystem semantics depth.** The read-only file ABI becomes
-  mutating: `sys_file_delete`/`sys_file_rename`/`sys_file_truncate`/
-  `sys_file_free` (ADR 0007 slots 34–37).
-- ⬜ **B4 — desktop composition.** The launcher menu drives off the B2
-  manifest and launches `FILE.BIN`; the capstone gate drives DESKTOP →
-  FILE.BIN → browse → open end to end on VZ.
+- ⬜ **S1 — clipboard.** `sys_clipboard_set`/`sys_clipboard_get` (ADR 0007
+  slots 38–39) over one bounded kernel clipboard buffer; NOTEPAD copy/cut/
+  paste plus terminal copy.
+- ⬜ **S2 — application timers.** A bounded per-process timer facility
+  (slots 40–41) posting `TIMER` events on the ADR 0009 queue, so apps stop
+  spinning sleep loops.
+- ⬜ **S3 — composition capstone.** NOTEPAD copy/paste with a timer-driven
+  cursor, proving S1 + S2 together.
+- ⬜ **S4 — security/isolation hardening.** Process-ownership audit across
+  every EL0-named resource, uaccess validation-depth sweep, resource limits,
+  and a hostile-EL0-refused live gate.
 
 Honest-bound edges that remain planned regardless of milestone:
 
@@ -62,9 +61,9 @@ Honest-bound edges that remain planned regardless of milestone:
 
 <Aside kind="note">
 
-**PLANNED.** B1 and B4 are defined with gates in `docs/march-m13.md`; nothing
-is shipped until it has a gate. The tracker, not this page, is the live
-per-card status.
+**PLANNED.** S1–S4 are defined with gates in `docs/march-m14.md`; nothing is
+shipped until it has a gate. The tracker, not this page, is the live per-card
+status.
 
 </Aside>
 

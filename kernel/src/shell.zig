@@ -370,6 +370,7 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "  dui         Driving Award window manager: registry (with owner pids), z-order, focus, hit-testing ('dui focus <n>' focuses; 'dui raise <n>' raises; 'dui move <n> <x> <y>' moves a user window; 'dui close <n>' releases a user window; 'dui list <pid>' filters by owner; 'dui hit <x> <y>' hit-tests; 'dui cycle' cycles focus like Alt+Tab)\n" ++
         "system\n" ++
         "  clear       clean up the crime scene\n" ++
+        "  clip        copy/paste the shared kernel clipboard ('clip <text...>' sets it, 'clip' prints it)\n" ++
         "  echo        repeat your regrettable decisions\n" ++
         "  help        grouped command catalog and per-command/per-topic help\n" ++
         "  random      print n random bytes from the seeded CSPRNG (hex)\n" ++

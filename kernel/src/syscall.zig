@@ -70,9 +70,11 @@ const esp_exec = @import("exec.zig"); // Claim 6359 (ADR 0007 slot 28): the EL0 
 const esp = @import("esp.zig"); // Claim 6359: the ESP name bound for the path check
 const tcp = @import("tcp.zig"); // Milestone 12 (claim 7483): TCP client seam
 const csprng = @import("csprng.zig"); // ISN generation for TCP connect
+const clipboard = @import("clipboard.zig"); // Milestone 14 (claim 0169): the shared kernel clipboard
+const app_timers = @import("app_timers.zig"); // Milestone 14 (claim 7323): the per-process app timer facility
 
 pub const slot_count: usize = 64;
-pub const implemented_count: usize = 38;
+pub const implemented_count: usize = 42;
 /// Card G6 (claim 0487) follow-on (slot 18): the fixed `sys_win_get` shape —
 /// four u32 LE words (x, y, w, h), 16 bytes, marshaled per call and copy_out'd
 /// through uaccess (the procs snapshot pattern).
@@ -187,6 +189,14 @@ pub const sys_file_rename: u64 = 35;
 pub const sys_file_truncate: u64 = 36;
 /// Milestone 13 (claim 5801): `sys_file_free(volume)` — slot 37.
 pub const sys_file_free: u64 = 37;
+/// Milestone 14 (claim 0169): `sys_clipboard_set(buf_ptr, len)` — slot 38.
+pub const sys_clipboard_set: u64 = 38;
+/// Milestone 14 (claim 0169): `sys_clipboard_get(buf_ptr, max)` — slot 39.
+pub const sys_clipboard_get: u64 = 39;
+/// Milestone 14 (claim 7323): `sys_timer_set(delay_ticks)` — slot 40.
+pub const sys_timer_set: u64 = 40;
+/// Milestone 14 (claim 7323): `sys_timer_cancel()` — slot 41.
+pub const sys_timer_cancel: u64 = 41;
 
 pub const ErrorCode = enum(i64) {
     einval = -1,
@@ -232,6 +242,9 @@ var udp_send_staging: [udp.payload_max]u8 = undefined;
 var udp_recv_scratch: [udp.datagram_max]u8 = undefined;
 /// Milestone 12 (claim 7483): fixed BSS scratch for TCP send payload.
 var tcp_send_staging: [tcp.payload_max]u8 = undefined;
+/// Milestone 14 (claim 0169): fixed BSS scratch for the clipboard (set
+/// staging + get read-back), marshaled per call, no allocation.
+var clipboard_staging: [clipboard.capacity]u8 = undefined;
 
 /// Initialize the writer seam, reset counters and the uaccess regions. The
 /// table remains a runtime-built BSS object; rebuilding is unnecessary once
@@ -241,6 +254,7 @@ pub fn init(writer: Writer) void {
     write_fn = writer;
     @memset(&call_counts, 0);
     uaccess.init();
+    clipboard.init();
     _ = ensure_table();
 }
 
@@ -295,6 +309,10 @@ fn ensure_table() *const [slot_count]Entry {
         table_storage[sys_file_rename] = .{ .name = "sys_file_rename", .handler = handle_file_rename };
         table_storage[sys_file_truncate] = .{ .name = "sys_file_truncate", .handler = handle_file_truncate };
         table_storage[sys_file_free] = .{ .name = "sys_file_free", .handler = handle_file_free };
+        table_storage[sys_clipboard_set] = .{ .name = "sys_clipboard_set", .handler = handle_clipboard_set };
+        table_storage[sys_clipboard_get] = .{ .name = "sys_clipboard_get", .handler = handle_clipboard_get };
+        table_storage[sys_timer_set] = .{ .name = "sys_timer_set", .handler = handle_timer_set };
+        table_storage[sys_timer_cancel] = .{ .name = "sys_timer_cancel", .handler = handle_timer_cancel };
         table_ready = true;
     }
     return &table_storage;
@@ -954,6 +972,56 @@ fn handle_file_free(args: Args, _: *exceptions.VectorFrame) u64 {
     return @intCast(res);
 }
 
+/// Milestone 14 (claim 0169): slot 38 — sys_clipboard_set(buf_ptr, len)
+fn handle_clipboard_set(args: Args, _: *exceptions.VectorFrame) u64 {
+    const buf_ptr = args[0];
+    const raw_len = args[1];
+    _ = process.find_by_task(scheduler.current_id()) orelse return error_result(.einval);
+    if (raw_len == 0) {
+        _ = clipboard.set("");
+        return 0;
+    }
+    const take: usize = @min(@as(usize, @intCast(raw_len)), clipboard.capacity);
+    if (uaccess.copy_in(clipboard_staging[0..take], buf_ptr, take) != .ok) return error_result(.efault);
+    return @intCast(clipboard.set(clipboard_staging[0..take]));
+}
+
+/// Milestone 14 (claim 0169): slot 39 — sys_clipboard_get(buf_ptr, max)
+fn handle_clipboard_get(args: Args, _: *exceptions.VectorFrame) u64 {
+    const buf_ptr = args[0];
+    const raw_max = args[1];
+    _ = process.find_by_task(scheduler.current_id()) orelse return error_result(.einval);
+    if (raw_max == 0) return 0;
+    const take: usize = @min(@as(usize, @intCast(raw_max)), clipboard.capacity);
+    const n = clipboard.get(clipboard_staging[0..take]);
+    if (n > 0) {
+        if (uaccess.copy_out(buf_ptr, clipboard_staging[0..n], n) != .ok) return error_result(.efault);
+    }
+    return @intCast(n);
+}
+
+/// Milestone 14 (claim 7323): slot 40 — sys_timer_set(delay_ticks)
+/// Arm the CALLING process's app timer to fire ONE TIMER event (kind 9)
+/// into its ADR 0009 queue after `delay_ticks` scheduler ticks. Zero
+/// clamps to 1 (the sys_sleep minimum) and an over-long delay truncates
+/// honestly at app_timers.max_delay_ticks — both documented. Re-arming
+/// replaces any pending timer. Returns 0; EINVAL for a non-process caller.
+fn handle_timer_set(args: Args, _: *exceptions.VectorFrame) u64 {
+    const delay = args[0];
+    const pid = process.find_by_task(scheduler.current_id()) orelse return error_result(.einval);
+    _ = app_timers.set(pid, delay);
+    return 0;
+}
+
+/// Milestone 14 (claim 7323): slot 41 — sys_timer_cancel()
+/// Disarm the calling process's app timer. Returns 1 if a pending timer
+/// was canceled, 0 if none was armed; EINVAL for a non-process caller.
+fn handle_timer_cancel(args: Args, _: *exceptions.VectorFrame) u64 {
+    _ = args;
+    const pid = process.find_by_task(scheduler.current_id()) orelse return error_result(.einval);
+    return if (app_timers.cancel(pid)) 1 else 0;
+}
+
 /// Claim 6359 (ADR 0007 slot 28): `sys_exec(path_ptr, path_len)` — the
 /// EL0 exec seam. Marshals the path through the claim-6120 uaccess window
 /// (the `sys_file_open` pattern), requires a process caller, and reuses
@@ -1167,9 +1235,9 @@ fn handle_tcp_close(_: Args, _: *exceptions.VectorFrame) u64 {
     return 0;
 }
 
-/// Deterministic monitor output for the thirty-eight implemented rows and their counters.
+/// Deterministic monitor output for the forty-two implemented rows and their counters.
 pub fn report(con: *console.Console) void {
-    con.puts("syscalls: slots=64 implemented=38\n");
+    con.puts("syscalls: slots=64 implemented=42\n");
     var number: u64 = 0;
     while (number < implemented_count) : (number += 1) {
         const info = entry_info(number).?;
@@ -1201,7 +1269,7 @@ fn capture_marshaled_args(args: Args, _: *exceptions.VectorFrame) u64 {
     return 0xcafe;
 }
 
-test "syscall: runtime table has 64 slots and thirty-eight unique implemented rows" {
+test "syscall: runtime table has 64 slots and forty-two unique implemented rows" {
     init(test_writer);
     const table = ensure_table();
     try std.testing.expectEqual(@as(usize, 64), table.len);
@@ -1214,7 +1282,7 @@ test "syscall: runtime table has 64 slots and thirty-eight unique implemented ro
             implemented += 1;
         }
     }
-    try std.testing.expectEqual(@as(usize, 38), implemented);
+    try std.testing.expectEqual(@as(usize, 42), implemented);
     try std.testing.expectEqualStrings("sys_ping", entry_info(0).?.name);
     try std.testing.expectEqualStrings("sys_exit", entry_info(3).?.name);
     try std.testing.expectEqualStrings("sys_sleep", entry_info(4).?.name);
@@ -1247,6 +1315,14 @@ test "syscall: runtime table has 64 slots and thirty-eight unique implemented ro
     try std.testing.expectEqualStrings("sys_tcp_send", entry_info(31).?.name);
     try std.testing.expectEqualStrings("sys_tcp_recv", entry_info(32).?.name);
     try std.testing.expectEqualStrings("sys_tcp_close", entry_info(33).?.name);
+    try std.testing.expectEqualStrings("sys_file_delete", entry_info(34).?.name);
+    try std.testing.expectEqualStrings("sys_file_rename", entry_info(35).?.name);
+    try std.testing.expectEqualStrings("sys_file_truncate", entry_info(36).?.name);
+    try std.testing.expectEqualStrings("sys_file_free", entry_info(37).?.name);
+    try std.testing.expectEqualStrings("sys_clipboard_set", entry_info(38).?.name);
+    try std.testing.expectEqualStrings("sys_clipboard_get", entry_info(39).?.name);
+    try std.testing.expectEqualStrings("sys_timer_set", entry_info(40).?.name);
+    try std.testing.expectEqualStrings("sys_timer_cancel", entry_info(41).?.name);
     try std.testing.expect(entry_info(63) == null);
 }
 
@@ -2164,11 +2240,11 @@ test "syscall: counters are monotonic and report is deterministic" {
     _ = dispatch(sys_ping, .{ 9, 0, 0, 0, 0, 0 }, &frame);
     _ = dispatch(sys_ping, .{ 10, 0, 0, 0, 0, 0 }, &frame);
     try std.testing.expectEqual(@as(u64, 2), call_count(sys_ping));
-    var mock = console.MockConsole(1024){};
+    var mock = console.MockConsole(4096){};
     var con = mock.console();
     report(&con);
     try std.testing.expectEqualStrings(
-        "syscalls: slots=64 implemented=38\n" ++
+        "syscalls: slots=64 implemented=42\n" ++
             "  0 sys_ping calls=2\n" ++
             "  1 sys_write calls=0\n" ++
             "  2 sys_yield calls=0\n" ++
@@ -2206,7 +2282,11 @@ test "syscall: counters are monotonic and report is deterministic" {
             "  34 sys_file_delete calls=0\n" ++
             "  35 sys_file_rename calls=0\n" ++
             "  36 sys_file_truncate calls=0\n" ++
-            "  37 sys_file_free calls=0\n",
+            "  37 sys_file_free calls=0\n" ++
+            "  38 sys_clipboard_set calls=0\n" ++
+            "  39 sys_clipboard_get calls=0\n" ++
+            "  40 sys_timer_set calls=0\n" ++
+            "  41 sys_timer_cancel calls=0\n",
         mock.contents(),
     );
 }
@@ -2291,6 +2371,126 @@ test "syscall: mutating file slots 34..37 dispatch and fault safety (claim 5801)
     try std.testing.expectEqual(error_result(.ebadf), dispatch(sys_file_truncate, .{ 0, 4, 0, 0, 0, 0 }, &frame));
     // free with a bad volume -> EINVAL
     try std.testing.expectEqual(error_result(.einval), dispatch(sys_file_free, .{ 2, 0, 0, 0, 0, 0 }, &frame));
+}
+
+test "syscall: clipboard slots 38..39 dispatch and fault safety (claim 0169)" {
+    userspace.init();
+    init(test_writer);
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0); // task 2 = process 0 (boot payload)
+    scheduler.start();
+    var frame = fresh_frame();
+
+    // In task 0 (shell, not a registered process), calls return EINVAL.
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_clipboard_set, .{ 0x1000, 4, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_clipboard_get, .{ 0x1000, 4, 0, 0, 0, 0 }, &frame));
+
+    // Yield to the user task (task 2, pid 0).
+    try std.testing.expect(scheduler.yield_current()); // shell -> worker
+    try std.testing.expect(scheduler.yield_current()); // worker -> user (2)
+    try std.testing.expectEqual(@as(usize, 2), scheduler.current_id());
+
+    var test_buf: [64]u8 = undefined;
+    const test_buf_addr = @intFromPtr(&test_buf);
+    // The same region serves as the copy-in source (readable) and the
+    // copy-out destination (writable).
+    set_user_regions(
+        .{ .base = test_buf_addr, .len = test_buf.len },
+        .{ .base = test_buf_addr, .len = test_buf.len },
+    );
+
+    // Bad pointer on a non-empty set -> EFAULT (the copy-in path validates
+    // before touching memory).
+    try std.testing.expectEqual(error_result(.efault), dispatch(sys_clipboard_set, .{ uaccess.diagnostic_unmapped, 4, 0, 0, 0, 0 }, &frame));
+
+    // An EMPTY clipboard get returns 0 without validating the pointer — the
+    // same empty -> 0 discipline as udp/ipc recv (no copy runs).
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_clipboard_get, .{ uaccess.diagnostic_unmapped, 4, 0, 0, 0, 0 }, &frame));
+
+    // Set copies bytes into the shared buffer and returns the stored length.
+    @memcpy(test_buf[0..5], "hello");
+    try std.testing.expectEqual(@as(u64, 5), dispatch(sys_clipboard_set, .{ test_buf_addr, 5, 0, 0, 0, 0 }, &frame));
+
+    // A NON-empty get validates the pointer -> EFAULT.
+    try std.testing.expectEqual(error_result(.efault), dispatch(sys_clipboard_get, .{ uaccess.diagnostic_unmapped, 4, 0, 0, 0, 0 }, &frame));
+
+    // Get copies them back out (non-destructive) and returns the length.
+    @memset(&test_buf, 0);
+    try std.testing.expectEqual(@as(u64, 5), dispatch(sys_clipboard_get, .{ test_buf_addr, 64, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqualStrings("hello", test_buf[0..5]);
+
+    // A second get returns the SAME contents (the clipboard is not consumed).
+    @memset(&test_buf, 0);
+    try std.testing.expectEqual(@as(u64, 5), dispatch(sys_clipboard_get, .{ test_buf_addr, 64, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqualStrings("hello", test_buf[0..5]);
+
+    // max == 0 -> 0 without touching the buffer.
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_clipboard_get, .{ test_buf_addr, 0, 0, 0, 0, 0 }, &frame));
+
+    // An empty set clears the shared buffer.
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_clipboard_set, .{ test_buf_addr, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_clipboard_get, .{ test_buf_addr, 64, 0, 0, 0, 0 }, &frame));
+}
+
+test "syscall: app timer slots 40..41 dispatch, fire through the tick, and clamp (claim 7323)" {
+    userspace.init();
+    init(test_writer);
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0); // task 2 = process 0 (boot payload)
+    scheduler.start();
+    var frame = fresh_frame();
+
+    // In task 0 (shell, not a registered process), both calls return EINVAL.
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_timer_set, .{ 2, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_timer_cancel, .{ 0, 0, 0, 0, 0, 0 }, &frame));
+
+    // Yield to the user task (task 2, pid 0).
+    try std.testing.expect(scheduler.yield_current()); // shell -> worker
+    try std.testing.expect(scheduler.yield_current()); // worker -> user (2)
+    try std.testing.expectEqual(@as(usize, 2), scheduler.current_id());
+
+    // Cancel with nothing armed -> 0.
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_timer_cancel, .{ 0, 0, 0, 0, 0, 0 }, &frame));
+
+    // Arm a 2-tick timer -> 0, and the module sees it armed with 2 left.
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_timer_set, .{ 2, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expect(app_timers.armed_pending(0));
+    try std.testing.expectEqual(@as(u64, 2), app_timers.info(0).remaining);
+
+    // Re-arm replaces the pending countdown (back to 3).
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_timer_set, .{ 3, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u64, 3), app_timers.info(0).remaining);
+    try std.testing.expectEqual(@as(u64, 2), app_timers.info(0).sets);
+
+    // The scheduler tick drives the countdown; the timer fires exactly one
+    // TIMER event into pid 0's queue after three ticks.
+    scheduler.on_tick();
+    scheduler.on_tick();
+    try std.testing.expectEqual(@as(u64, 1), app_timers.info(0).remaining);
+    try std.testing.expectEqual(@as(usize, 0), events.pending(0));
+    scheduler.on_tick();
+    try std.testing.expect(!app_timers.armed_pending(0));
+    try std.testing.expectEqual(@as(u64, 1), app_timers.info(0).fired);
+    try std.testing.expectEqual(@as(usize, 1), events.pending(0));
+    const ev = events.peek(0).?;
+    try std.testing.expectEqual(events.TIMER, ev.kind);
+    _ = events.drop(0);
+
+    // Zero clamps to one tick (the sys_sleep minimum); over-long truncates.
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_timer_set, .{ 0, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u64, 1), app_timers.info(0).remaining);
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_timer_set, .{ app_timers.max_delay_ticks + 1000, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(app_timers.max_delay_ticks, app_timers.info(0).remaining);
+
+    // Cancel a pending timer -> 1, and it never fires.
+    try std.testing.expectEqual(@as(u64, 1), dispatch(sys_timer_cancel, .{ 0, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expect(!app_timers.armed_pending(0));
+    try std.testing.expectEqual(@as(u64, 1), app_timers.info(0).cancels);
+    scheduler.on_tick();
+    try std.testing.expectEqual(@as(usize, 0), events.pending(0));
+    try std.testing.expectEqual(@as(u64, 1), app_timers.info(0).fired);
 }
 
 test "syscall: slot 28 sys_exec marshals the path and maps loader errors" {

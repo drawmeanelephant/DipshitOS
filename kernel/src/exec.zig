@@ -74,6 +74,7 @@ const process = @import("process.zig");
 const mailbox = @import("mailbox.zig");
 // Milestone 9 (claim 7670): per-process event queue
 const events = @import("events.zig");
+const app_timers = @import("app_timers.zig"); // claim 7323: the per-process app timer reset on exec
 // Milestone 10 (claim 9948): per-process file handle table
 const file_table = @import("file_table.zig");
 // Claim 0826: the per-process text/stack/kernel-stack pages come from the
@@ -340,6 +341,7 @@ pub fn exec_file(name: []const u8, args: []const []const u8) ExecResult {
     mailbox.reset(proc_id);
     events.reset(proc_id);
     file_table.reset_process(proc_id);
+    app_timers.reset(proc_id); // claim 7323: a recycled pid inherits no stale app timer
     if (scheduler.register_exec_user(entry_va, rebuild.root_phys, @intCast(text_len), rebuild.stack_va, scheduler.task_stack_size, kstack, @intCast(argc), argv_va)) |task_id| {
         _ = process.bind(proc_id, task_id);
     } else {

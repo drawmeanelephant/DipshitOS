@@ -17,7 +17,7 @@ map; the satellites below carry the detail.
 │  EL0 user programs + desktop apps (CALC.BIN,   │
 │  NOTEPAD.BIN, DESKTOP.BIN, FETCH.BIN, …)      │
 │  syscalls: ping/write/…/ipc/win/events/file/  │
-│             exec/kill/tcp (slots 0–33)        │
+│             exec/kill/tcp/fs (0–37)           │
 ├───────────────────────────────────────────────┤
 │  Monitor + shell (dipshit>)                   │
 │  Road Pops terminal · Driving Award compositor │
@@ -63,7 +63,7 @@ Three rules show up everywhere:
 | Allocator | first-fit bitmap over the captured EFI map, with exclusion ranges |
 | Scheduler | tick-driven round-robin; 7 slots (shell + worker + 4 EL0 + idle) |
 | Processes | bounded registry, lifecycle states, exit-status propagation, IPC mailboxes |
-| Syscalls | ADR 0007: 64-slot table, 34 implemented (0–33), deterministic counters |
+| Syscalls | ADR 0007: 64-slot table, 38 implemented (0–37), deterministic counters |
 | Networking | virtio-net → ARP → IPv4/ICMP → UDP → DHCP → DNS → TCP, plus a NAT mode and the EL0 TCP seam |
 | Graphics | virtio-gpu framebuffer → text → Road Pops → Driving Award compositor |
 | Input | XHCI host controller → USB enumeration → HID boot protocol → event FIFO → per-process event queues |

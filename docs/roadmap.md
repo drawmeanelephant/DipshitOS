@@ -1189,7 +1189,7 @@ on Accessibility trust).
 
 See [`march-m13.md`](march-m13.md) for the per-card tracker.
 
-### Milestone fourteen — shared user services (**PLANNED 2026-08-16, issues #175–#178**)
+### Milestone fourteen — shared user services (**IN PROGRESS — S1 + S2 landed 2026-08-18, issues #175–#178**)
 
 > After the file browser, the wishlist's shared-user-services items become the
 > natural next arc, in maintainer-preference order: **clipboard** (item 11,
@@ -1197,18 +1197,29 @@ See [`march-m13.md`](march-m13.md) for the per-card tracker.
 > apps stop spinning sleep loops), and **security/isolation hardening** (item
 > 19, grown alongside userland power, not as one giant milestone). M8's
 > remaining usability cards (U6–U8) are DONE; U4's live pointer proof is a
-> known class-C-only limitation (see issue #151).
+> known class-C-only limitation (see issue #151). **🔄 S1 done 2026-08-18**
+> (claim 0169 — the bounded shared kernel clipboard, slots 38–39;
+> `verify-live-clipboard.sh` PASS 1/1 on VZ); **🔄 S2 done 2026-08-18**
+> (claim 7323 — the bounded per-process app timer facility, slots 40–41;
+> `verify-live-timers.sh` PASS 1/1 on VZ).
 
-- **S1 — Clipboard / shared text service** (issue #175, wishlist 11):
-  `sys_clipboard_set`/`sys_clipboard_get` (ADR 0007 slots 38–39), a single
-  bounded kernel clipboard buffer (pure BSS, zero heap), so NOTEPAD gains
-  copy/cut/paste and the terminal can copy. Live gate:
-  `verify-live-clipboard.sh`.
-- **S2 — Application timers** (issue #176, wishlist 12): a bounded
-  per-process timer facility (slots 40–41) that posts `TIMER` events on the
-  existing ADR 0009 event queue — apps stop spinning sleep loops (NOTEPAD
-  cursor blink, a live clock, TOP periodic refresh). Live gate:
-  `verify-live-timers.sh`.
+- **S1 — Clipboard / shared text service** (issue #175, wishlist 11): ✅
+  done 2026-08-18 (claim 0169): `sys_clipboard_set`/`sys_clipboard_get`
+  (ADR 0007 slots 38–39, `implemented_count` 38→40), a single bounded
+  kernel clipboard buffer in `kernel/src/clipboard.zig` (pure BSS, zero
+  heap) — NOTEPAD gains copy/cut/paste (Ctrl+C/X/V) and the terminal gains
+  the `clip` command (`clip <text...>` sets it, `clip` pastes it). Live
+  gate: `verify-live-clipboard.sh` PASS 1/1 on VZ.
+- **S2 — Application timers** (issue #176, wishlist 12): ✅ done
+  2026-08-18 (claim 7323): a bounded per-process timer facility (ADR 0007
+  slots 40–41, `implemented_count` 40→42) — ONE countdown timer per
+  process in `kernel/src/app_timers.zig` (fixed BSS, zero heap), driven
+  from the scheduler tick, posting `TIMER` events (kind 9) on the existing
+  ADR 0009 queue, so an app BLOCKS in `sys_wait_event` instead of spinning
+  a sleep loop. `TIMER.BIN` proves arm → block → fire → cancel live; live
+  gate `verify-live-timers.sh` PASS 1/1 on VZ. (Wiring the timer into
+  NOTEPAD's cursor blink / a live clock / TOP refresh is card S3's
+  composition scope.)
 - **S3 — Composition capstone** (issue #177): NOTEPAD copy/paste with a
   timer-driven cursor — S1+S2 proven together in a real app a human can
   use. Live gate: `verify-live-m14-composition.sh`.

@@ -510,3 +510,40 @@ invoke `kernel/src/file_table.zig`'s new mutating ops, which sit on
 Proof program: `FSTEST.BIN` (`user/src/fstest.zig`, issue #161); live gate
 `tools/verify-live-fs-mutation.sh`. `FILE.BIN` grows Delete/Rename buttons
 over slots 34/35.
+
+## Amendment (2026-08-18, claim 0169 — the clipboard card)
+
+Milestone 14 card S1 freezes slots 38/39 in the dispatch table (the card's
+ONE ABI change, following slot 37 `sys_file_free`):
+
+| Slot | Name | Signature | Description |
+|:---|:---|:---|:---|
+| 38 | `sys_clipboard_set` | `clipboard_set(buf_ptr, len) -> i64` | Copy `len` bytes from the caller's region through uaccess into the ONE shared kernel clipboard (`kernel/src/clipboard.zig`, a fixed 512-byte BSS buffer — `len` > 512 is truncated honestly, the ipc/udp truncation pattern). Returns the stored length (0 clears); `EINVAL` for a non-process caller, `EFAULT` for a bad pointer. |
+| 39 | `sys_clipboard_get` | `clipboard_get(buf_ptr, max) -> i64` | Copy the current clipboard contents OUT through uaccess WITHOUT consuming them (a clipboard is a shared, non-destructive read — unlike the mailbox's recv). Returns the copied length (0 when empty, `max` > 512 clamps); `EINVAL` for a non-process caller, `EFAULT` for a bad buffer on a non-empty clipboard. |
+
+`implemented_count` is now 40; reserved slots become 40–63 (S2 later adds
+40/41). The handlers marshal bytes through the claim-6120 uaccess window;
+NOTEPAD gains Copy/Cut/Paste (Ctrl+C/X/V over the whole buffer) and the
+monitor gains the `clip` command (`clip <text...>` sets it, `clip` prints
+it) as the EL1h half of the same buffer.
+
+## Amendment (2026-08-18, claim 7323 — the application-timer card)
+
+Milestone 14 card S2 freezes slots 40/41 in the dispatch table (following
+slot 39 `sys_clipboard_get`):
+
+| Slot | Name | Signature | Description |
+|:---|:---|:---|:---|
+| 40 | `sys_timer_set` | `timer_set(delay_ticks) -> i64` | Arm the CALLING process's ONE app timer to fire a single `TIMER` event (kind 9) into its ADR 0009 event queue after `delay_ticks` SCHEDULER ticks (the `sys_sleep` clock — 1 s on VZ). `delay_ticks` 0 clamps to 1 (the `sys_sleep` minimum); an over-long delay truncates honestly at the 3600-tick kernel bound; re-arming replaces any pending timer. Returns 0; `EINVAL` for a non-process caller. |
+| 41 | `sys_timer_cancel` | `timer_cancel() -> i64` | Disarm the calling process's app timer. Returns 1 if a pending timer was canceled, 0 if none was armed; `EINVAL` for a non-process caller. |
+
+`implemented_count` is now 42; reserved slots become 42–63 (S3/S4 do not
+add slots). The facility is `kernel/src/app_timers.zig`: fixed BSS arrays
+(armed flag + countdown + counters), one slot per process, zero heap. The
+fire is driven from `scheduler.on_tick` (the same host-testable tick seam
+that wakes sleepers) — each tick counts an armed timer down and posts the
+`TIMER` event through `events.push`, which wakes a task blocked in
+`sys_wait_event` via the existing `on_event_pushed` hook. Process lifecycle
+resets the slot on create/exec/exit. Proof program: `TIMER.BIN`
+(`user/src/timertest.zig`, issue #176); live gate
+`tools/verify-live-timers.sh`.
