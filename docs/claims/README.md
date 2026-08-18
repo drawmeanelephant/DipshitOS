@@ -170,7 +170,7 @@ CI) fails if the table drifts from the claim files.
 | [5357-tcp-retransmit](5357-tcp-retransmit.md) | buffy (`agent/buffy/m5-net-tcp-rto`) | ✅ DONE 2026-08-12 on `agent/buffy/m5-net-tcp-rto` (from merged main `6a8ec41` — the N10 merge; claim PR pending) |
 | [5416-n3-capstone-apps](5416-n3-capstone-apps.md) | buffy (`agent/buffy/m12-n3-capstone-apps`) | ✅ done |
 | [5725-m3-docs-reconcile-syscall-abi](5725-m3-docs-reconcile-syscall-abi.md) | Buffy (`agent/buffy/m3-docs-reconcile-syscall-abi`) | ✅ done 2026-08-10 |
-| [5776-u4-pointer-classb](5776-u4-pointer-classb.md) | buffy (`agent/buffy/m13-u4-pointer-classb`) | 🔄 in progress |
+| [5776-u4-pointer-classb](5776-u4-pointer-classb.md) | buffy (`agent/buffy/m13-u4-pointer-classb`) | ✅ done (2026-08-16) — gate fixes landed in PR #174; exercised WITH trust (ptr-reports=0, confirming the claim-4769 activation wall); U4 stays class-C (claim 9015) |
 | [5795-pool-scale-seven](5795-pool-scale-seven.md) | Buffy (`agent/buffy/m4-pool-scale`) | ✅ done — landed 2026-08-11 (claim flipped after class-A |
 | [5799-procs-syscall](5799-procs-syscall.md) | Buffy (`agent/buffy/m4-procs-syscall`) | ✅ done 2026-08-11 (claim flipped after class-A green + the new live gate + the full shared-seam sweep) |
 | [5801-fs-semantics](5801-fs-semantics.md) | buffy (`agent/buffy/m13-b1-fs-semantics`) | ✅ done 2026-08-16 — the mutating filesystem seam (slots 34–37) is live on VZ: FSTEST.BIN create+write → truncate → read-back → rename → free → delete → prove-gone; tools/verify-live-fs-mutation.sh PASS 1/1, all four slots calls=1 |
