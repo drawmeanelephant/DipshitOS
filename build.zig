@@ -787,6 +787,53 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_harden.step);
 
     // ------------------------------------------------------------------
+    // Guest: twenty-sixth ESP user program (milestone fifteen, card A3 — claim 7636)
+    // JINGLE.BIN. The EL0 audio seam proof: a melody played via sys_audio_play.
+    // ------------------------------------------------------------------
+    const jingle_prog = b.addExecutable(.{
+        .name = "user-jingle",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/jingle.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    jingle_prog.linker_script = b.path("user/linker.ld");
+    const jingle_step = b.step("jingle", "Build the twenty-sixth ESP user program (zig-out/bin/JINGLE.BIN)");
+    const jingle_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    jingle_elf2bin.addFileArg(jingle_prog.getEmittedBin());
+    const jingle_bin = jingle_elf2bin.addOutputFileArg("JINGLE.BIN");
+    jingle_elf2bin.has_side_effects = true;
+    jingle_elf2bin.stdio = .inherit;
+    jingle_step.dependOn(&jingle_elf2bin.step);
+    const install_jingle = b.addInstallFileWithDir(jingle_bin, .bin, "JINGLE.BIN");
+    b.getInstallStep().dependOn(&install_jingle.step);
+
+    // ------------------------------------------------------------------
+    // Guest: twenty-seventh ESP user program (milestone fifteen, card A4 — claim 3206)
+    // CHIME.BIN. The composition capstone's event side: a blip played via
+    // sys_audio_play on every M14 app-timer TIMER event.
+    // ------------------------------------------------------------------
+    const chime_prog = b.addExecutable(.{
+        .name = "user-chime",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/chime.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    chime_prog.linker_script = b.path("user/linker.ld");
+    const chime_step = b.step("chime", "Build the twenty-seventh ESP user program (zig-out/bin/CHIME.BIN)");
+    const chime_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    chime_elf2bin.addFileArg(chime_prog.getEmittedBin());
+    const chime_bin = chime_elf2bin.addOutputFileArg("CHIME.BIN");
+    chime_elf2bin.has_side_effects = true;
+    chime_elf2bin.stdio = .inherit;
+    chime_step.dependOn(&chime_elf2bin.step);
+    const install_chime = b.addInstallFileWithDir(chime_bin, .bin, "CHIME.BIN");
+    b.getInstallStep().dependOn(&install_chime.step);
+
+    // ------------------------------------------------------------------
     // Top-level steps. System-command steps are marked as having side
     // effects (and inherit stdio) so they always execute instead of being
     // skipped by the build cache. (No QEMU path: this project targets Apple
@@ -822,6 +869,8 @@ pub fn build(b: *std.Build) void {
     image.addFileArg(timertest_bin); // ... [TIMER.BIN] (claim 7323: twenty-third user program, app-timer proof)
     image.addFileArg(victim_bin); // ... [VICTIM.BIN] (claim 4482: twenty-fourth user program, hostile-proof victim)
     image.addFileArg(harden_bin); // ... [HARDEN.BIN] (claim 4482: twenty-fifth user program, hostile-consumer proof)
+    image.addFileArg(jingle_bin); // ... [JINGLE.BIN] (claim 7636: twenty-sixth user program, EL0 audio-seam proof)
+    image.addFileArg(chime_bin); // ... [CHIME.BIN] (claim 3206: twenty-seventh user program, composition capstone proof)
     image.has_side_effects = true;
     image.stdio = .inherit;
     image_step.dependOn(&image.step);

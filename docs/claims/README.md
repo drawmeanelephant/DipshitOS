@@ -136,6 +136,7 @@ CI) fails if the table drifts from the claim files.
 | [3179-ipc-depth](3179-ipc-depth.md) | Buffy (`agent/buffy/m4-ipc-depth`) | ✅ done 2026-08-11 (PR #82, stacked after PR #81 card 4a) |
 | [3194-text](3194-text.md) | buffy (`agent/buffy/m6-text`) | ✅ **done 2026-08-12** — `agent/buffy/m6-text` |
 | [3200-blocking-syscalls](3200-blocking-syscalls.md) | Buffy (`agent/buffy/m3-lifecycle`) | ✅ done 2026-08-10 |
+| [3206-m15-a4-composition-sound](3206-m15-a4-composition-sound.md) | buffy (`freebuff/hey-bestie-the-chat-got-lost-so-we-re-so-back-can--53baf792-c2f8-470d-a9f1-6344aa90847a`) | ✅ done (2026-08-18) |
 | [3234-a3-notepad-editor](3234-a3-notepad-editor.md) | buffy (`agent/buffy/m11-a3-notepad`) | ✅ done |
 | [3275-help-catalog-u1](3275-help-catalog-u1.md) | buffy (`freebuff/can-you-check-out-our-status-and-work-on-the-next--7e2ecd0b-8acc-47ac-bb44-68841236e5fc`) | ✅ done (2026-08-14) |
 | [3289-m14-s3-composition](3289-m14-s3-composition.md) | buffy (`freebuff/m14-s3-composition`) | ✅ done 2026-08-18 — NOTEPAD paste + copy (S1) and the timer-driven cursor blink (S2) proven together in ONE EL0 session on VZ: `tools/verify-live-m14-composition.sh` PASS 1/1 — `selfdemo pasted` → `selfdemo copied` → 6 `cursor blink` TIMER events (arm + re-arm, `sys_timer_set calls=7`) → `selfdemo done` → exit 43, and the syscalls report shows `implemented=42` with `sys_clipboard_set calls=1` / `sys_clipboard_get calls=1` / `sys_timer_set calls=7` |
@@ -176,11 +177,13 @@ CI) fails if the table drifts from the claim files.
 | [5801-fs-semantics](5801-fs-semantics.md) | buffy (`agent/buffy/m13-b1-fs-semantics`) | ✅ done 2026-08-16 — the mutating filesystem seam (slots 34–37) is live on VZ: FSTEST.BIN create+write → truncate → read-back → rename → free → delete → prove-gone; tools/verify-live-fs-mutation.sh PASS 1/1, all four slots calls=1 |
 | [5804-per-task-address-spaces](5804-per-task-address-spaces.md) | Buffy (`agent/buffy/m3-addrspaces`) | ✅ done 2026-08-10 |
 | [5844-macos27-custom-virtio-spike](5844-macos27-custom-virtio-spike.md) | buffy (`agent/buffy/macos27-custom-virtio-spike`) | ✅ done 2026-08-09 on `agent/buffy/macos27-custom-virtio-spike` |
+| [5877-m15-a2-pcm-beep](5877-m15-a2-pcm-beep.md) | buffy (`freebuff/hey-bestie-the-chat-got-lost-so-we-re-so-back-can--53baf792-c2f8-470d-a9f1-6344aa90847a`) | ✅ done (2026-08-18) |
 | [5965-ipc-mailbox](5965-ipc-mailbox.md) | Buffy (`agent/buffy/m4-ipc`) | ✅ done 2026-08-10 (PR #79, staged after PR #78 card 3e) |
 | [6050-input-fifo-keycode](6050-input-fifo-keycode.md) | buffy (`freebuff/can-you-check-out-our-status-and-work-on-the-next--7e2ecd0b-8acc-47ac-bb44-68841236e5fc`) | ✅ done (claim 6050) — `tools/verify-live-input.sh` PASS 1/1 (8/8 |
 | [6053-gpu](6053-gpu.md) | buffy (`agent/buffy/m6-gpu`) | ✅ **done, 2026-08-12** — the first non-blank guest |
 | [6076-net-rx](6076-net-rx.md) | buffy (`agent/buffy/m5-net-rx`) | ✅ DONE 2026-08-11 on `agent/buffy/m5-net-rx` (from merged main `0a3139e` — PR #86's N2 prompt doc landed on main; merged via PR #87) |
 | [6120-uaccess-fault-safe-copy](6120-uaccess-fault-safe-copy.md) | Buffy (`agent/buffy/m3-uaccess`) | ✅ done |
+| [6140-m15-a1-sound-transport](6140-m15-a1-sound-transport.md) | buffy (`freebuff/hey-bestie-the-chat-got-lost-so-we-re-so-back-can--53baf792-c2f8-470d-a9f1-6344aa90847a`) | ✅ done (2026-08-18) |
 | [6204-audit-2026-maintenance](6204-audit-2026-maintenance.md) | maintenance (`agent/maintenance/audit-2026-issues`) | 🔄 agent/maintenance/audit-2026-issues |
 | [6359-sys-exec-userland-launcher](6359-sys-exec-userland-launcher.md) | buffy (`agent/buffy/m11-sys-exec`) | ✅ done |
 | [6420-fat32-storage-driver](6420-fat32-storage-driver.md) | buffy (`freebuff/grab-most-current-git-and-let-s-continue-on-with-o-6068d391-a734-4e7b-859d-b1e95f01f3f6`) | ✅ done 2026-08-09 — class A green (fmt, unit tests incl. fat 11/11, transcript byte-identical, coordination, test-coordination 15/15, mmu-debt) and class B green on real VZ hardware: `verify-live-fs.sh` 1/1 pair (run A writes `hello world` to the ESP FAT volume, `write: ok (persisted 11 bytes to FAT on the ESP)`; run B — same disk image — lists `HELLO.TXT [esp]` and cats it) plus live-transcript, marker (`M2_TXOK!`), host-console, live-reboot 2/2, live-timer, live-exceptions 1/1. Evidence: `artifacts/gates-fat32-6420.txt` + `artifacts/live-fs-*`. Docs/status/roadmap/march/README/architecture/testing/gate-inventory/hardware-contract/AGENTS updated. |
@@ -200,6 +203,7 @@ CI) fails if the table drifts from the claim files.
 | [7483-n1-tcp-syscall-seam](7483-n1-tcp-syscall-seam.md) | buffy (`agent/buffy/m12-n1-tcp-seam`) | ✅ done |
 | [7566-n2-dns-client](7566-n2-dns-client.md) | buffy (`agent/buffy/m12-n2-dns-client`) | ✅ done |
 | [7604-sys-kill-el0-termination](7604-sys-kill-el0-termination.md) | buffy (`agent/buffy/m11-sys-kill`) | ✅ done |
+| [7636-m15-a3-el0-audio](7636-m15-a3-el0-audio.md) | buffy (`freebuff/hey-bestie-the-chat-got-lost-so-we-re-so-back-can--53baf792-c2f8-470d-a9f1-6344aa90847a`) | ✅ done (2026-08-18) |
 | [7670-e1-kernel-event-queue](7670-e1-kernel-event-queue.md) | buffy (`agent/buffy/m9-events`) | ✅ done (2026-08-15) |
 | [7786-kill-command](7786-kill-command.md) | Buffy (`agent/buffy/m4-kill`) | ✅ done — Stage A (the scheduler kill seam + the `kill` |
 | [7869-calc-overflow-memory](7869-calc-overflow-memory.md) | buffy (`agent/buffy/m11-calc-polish`) | ✅ done |
@@ -228,6 +232,7 @@ CI) fails if the table drifts from the claim files.
 | [9187-vz-real-irq-delivery](9187-vz-real-irq-delivery.md) | Codex (`codex/vz-real-irq-delivery`) | ✅ done 2026-08-09 on `codex/vz-real-irq-delivery` — real periodic CNTP PPI delivery observed through the guest's EL1 IRQ vector; strict live gate passes 3/3 with `irq=5 poll=0` |
 | [9228-e3-pointer-event-routing](9228-e3-pointer-event-routing.md) | buffy (`agent/buffy/m9-events`) | ✅ done (2026-08-15) |
 | [9263-full-table-glyph-goldens](9263-full-table-glyph-goldens.md) | buffy (`freebuff/can-you-check-out-our-status-and-work-on-the-next--7e2ecd0b-8acc-47ac-bb44-68841236e5fc`) | ✅ done 2026-08-15 |
+| [9297-m15-sound-stream-state-control](9297-m15-sound-stream-state-control.md) | buffy (`freebuff/hey-bestie-the-chat-got-lost-so-we-re-so-back-can--53baf792-c2f8-470d-a9f1-6344aa90847a`) | ✅ done (2026-08-18) |
 | [9328-e6-interactive-user-app](9328-e6-interactive-user-app.md) | Buffy (`agent/buffy/m9-events`) | ✅ done (`agent/buffy/m9-events`) |
 | [9357-calm-lavoisier-memorial](9357-calm-lavoisier-memorial.md) | Antigravity (`docs/calm-lavoisier`) | ✅ done |
 | [9489-dhcp-renew](9489-dhcp-renew.md) | buffy (`agent/buffy/m5-net-dhcp-renew`) | ✅ DONE 2026-08-12 on `agent/buffy/m5-net-dhcp-renew` (from the N8 claim head `e645fd3` — PR #104; claim PR pending) |

@@ -31,7 +31,7 @@
 # `exec NOTEPAD.BIN selfdemo` after the boot payload exits. NOTEPAD prints
 # `selfdemo pasted` / `selfdemo copied` / `selfdemo armed blink` and one
 # `notepad: cursor blink` per TIMER event. Phase 2 (after `selfdemo done`)
-# runs `syscalls` (implemented=42, slots 38/39/40 counted in the same boot)
+# runs `syscalls` (implemented=46, slots 38/39/40 counted in the same boot)
 # and the success echo.
 #
 # Class B — Apple silicon + VZ only; boots a real VM.
@@ -160,13 +160,13 @@ grep -q "tasks user-exec exited status=43" artifacts/live-composition-serial.log
 }
 echo "LIFECYCLE: OK"
 
-# The syscalls report: implemented=42, and slots 38/39/40 all counted in
+# The syscalls report: implemented=46, and slots 38/39/40 all counted in
 # the same boot — sys_clipboard_set calls=1 (the selfdemo copy; the
 # terminal `clip` command is the EL1h half and does NOT ride the syscall
 # counter), sys_clipboard_get calls=1 (the selfdemo paste), sys_timer_set
 # calls=7 (the arm + one re-arm per TIMER event, six blinks).
-grep -q "syscalls: slots=64 implemented=42" artifacts/live-composition-serial.log || {
-    echo "ERROR: implemented=42 syscalls report missing from serial log"
+grep -q "syscalls: slots=64 implemented=46" artifacts/live-composition-serial.log || {
+    echo "ERROR: implemented=46 syscalls report missing from serial log"
     exit 1
 }
 grep -q "38 sys_clipboard_set calls=1" artifacts/live-composition-serial.log || {
@@ -209,7 +209,7 @@ Verified Components:
   (kind 9, ADR 0009 queue), re-arming after every fire; no spin loop
 - Composition: the SAME EL0 program (NOTEPAD.BIN) used both facilities,
   then exited status 43 through the real lifecycle
-- syscalls report: implemented=42 with slots 38/39/40 all counted live
+- syscalls report: implemented=46 with slots 38/39/40 all counted live
 - Input seam (issue #179): $KB_STATE — the gate drives the composition via
   NOTEPAD's argv selfdemo mode because the synthesized keyboard route
   reports events=0 on this machine; the chord path is host-tested and

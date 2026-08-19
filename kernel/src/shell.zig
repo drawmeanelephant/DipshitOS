@@ -369,6 +369,7 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "  usb         XHCI host controller: `usb` transport report, `usb devices` enumerated HID devices, `usb report` last HID report\n" ++
         "  dui         Driving Award window manager: registry (with owner pids), z-order, focus, hit-testing ('dui focus <n>' focuses; 'dui raise <n>' raises; 'dui move <n> <x> <y>' moves a user window; 'dui close <n>' releases a user window; 'dui list <pid>' filters by owner; 'dui hit <x> <y>' hit-tests; 'dui cycle' cycles focus like Alt+Tab)\n" ++
         "system\n" ++
+        "  beep        synthesize + play a sine through the virtio-snd PCM path ('beep <freq> <ms>' — reports the full control flow + submit/drain accounting)\n" ++
         "  clear       clean up the crime scene\n" ++
         "  clip        copy/paste the shared kernel clipboard ('clip <text...>' sets it, 'clip' prints it)\n" ++
         "  echo        repeat your regrettable decisions\n" ++
@@ -377,6 +378,7 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "  reboot      restart the machine\n" ++
         "  repeat      repeat text, safely bounded\n" ++
         "  settings    persistent configuration: `settings [list]`, `settings get <key>`, `settings set <key> <val>`, `settings reset`\n" ++
+        "  sound       virtio-snd transport: device DID, class, status, control-queue state, device-config counts (jacks/streams/channel-maps), re-arm; stream-state control: 'sound volume <0-100>' and 'sound mute <on|off>'\n" ++
         "  shutdown    request power-off\n" ++
         "type 'help <command>' for details on a single command.\n" ++
         "type 'help <topic>' for a topic page (networking, windows, storage, graphics).\n" ++

@@ -222,7 +222,8 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
                       top_bytes=None, desktop_bytes=None,
                       tcp_bytes=None, fetch_bytes=None,
                       chat_bytes=None, file_bytes=None, fstest_bytes=None, timertest_bytes=None,
-                      victim_bytes=None, harden_bytes=None, apps_txt_bytes=None):
+                      victim_bytes=None, harden_bytes=None,
+                      jingle_bytes=None, chime_bytes=None, apps_txt_bytes=None):
     """Write a FAT32 volume (boot sector, FSInfo, FATs, directories, files)
     into `img` at the volume's offset.
 
@@ -270,6 +271,8 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
     timertest_clusters = (len(timertest_bytes) + bps - 1) // bps if timertest_bytes else 0
     victim_clusters = (len(victim_bytes) + bps - 1) // bps if victim_bytes else 0
     harden_clusters = (len(harden_bytes) + bps - 1) // bps if harden_bytes else 0
+    jingle_clusters = (len(jingle_bytes) + bps - 1) // bps if jingle_bytes else 0
+    chime_clusters = (len(chime_bytes) + bps - 1) // bps if chime_bytes else 0
     apps_txt_clusters = (len(apps_txt_bytes) + bps - 1) // bps if apps_txt_bytes else 0
     file_clusters = (len(efi_bytes) + bps - 1) // bps
     root_entries_count = 2  # vol_label + efi_entry
@@ -299,6 +302,8 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
     if timertest_bytes: root_entries_count += 1
     if victim_bytes: root_entries_count += 1
     if harden_bytes: root_entries_count += 1
+    if jingle_bytes: root_entries_count += 1
+    if chime_bytes: root_entries_count += 1
     if apps_txt_bytes: root_entries_count += 1
 
     root_clusters = (root_entries_count * 32 + bps - 1) // bps
@@ -330,7 +335,9 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
     timertest_start = fstest_start + fstest_clusters
     victim_start = timertest_start + timertest_clusters
     harden_start = victim_start + victim_clusters
-    apps_txt_start = harden_start + harden_clusters
+    jingle_start = harden_start + harden_clusters
+    chime_start = jingle_start + jingle_clusters
+    apps_txt_start = chime_start + chime_clusters
     efi_start = apps_txt_start + apps_txt_clusters
     allocated = efi_start + file_clusters - 2  # clusters used beyond root(2)
     if allocated > geo.clusters:
@@ -402,6 +409,10 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
         chain(victim_start, victim_clusters)        # VICTIM.BIN data
     if harden_bytes:
         chain(harden_start, harden_clusters)        # HARDEN.BIN data
+    if jingle_bytes:
+        chain(jingle_start, jingle_clusters)        # JINGLE.BIN data
+    if chime_bytes:
+        chain(chime_start, chime_clusters)          # CHIME.BIN data
     if apps_txt_bytes:
         chain(apps_txt_start, apps_txt_clusters)  # APPS.TXT data
     chain(efi_start, file_clusters)            # BOOTAA64.EFI data
@@ -486,6 +497,10 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
         root_entries += dir_entry(b"VICTIM  BIN", 0x20, victim_start, len(victim_bytes))
     if harden_bytes:
         root_entries += dir_entry(b"HARDEN  BIN", 0x20, harden_start, len(harden_bytes))
+    if jingle_bytes:
+        root_entries += dir_entry(b"JINGLE  BIN", 0x20, jingle_start, len(jingle_bytes))
+    if chime_bytes:
+        root_entries += dir_entry(b"CHIME   BIN", 0x20, chime_start, len(chime_bytes))
     if apps_txt_bytes:
         root_entries += dir_entry(b"APPS    TXT", 0x20, apps_txt_start, len(apps_txt_bytes))
 
@@ -601,6 +616,14 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
         for i in range(harden_clusters):
             chunk = harden_bytes[i * bps:(i + 1) * bps]
             wsec(geo.cluster_sector(harden_start + i), chunk.ljust(bps, b"\x00"))
+    if jingle_bytes:
+        for i in range(jingle_clusters):
+            chunk = jingle_bytes[i * bps:(i + 1) * bps]
+            wsec(geo.cluster_sector(jingle_start + i), chunk.ljust(bps, b"\x00"))
+    if chime_bytes:
+        for i in range(chime_clusters):
+            chunk = chime_bytes[i * bps:(i + 1) * bps]
+            wsec(geo.cluster_sector(chime_start + i), chunk.ljust(bps, b"\x00"))
     if apps_txt_bytes:
         for i in range(apps_txt_clusters):
             chunk = apps_txt_bytes[i * bps:(i + 1) * bps]
@@ -868,7 +891,8 @@ def build_image(total_sectors, esp_offset, efi_bytes, kernel_bytes=None,
                 dir_bytes=None, calc_bytes=None, notepad_bytes=None,
                 top_bytes=None, desktop_bytes=None, tcp_bytes=None,
                 fetch_bytes=None, chat_bytes=None, file_bytes=None, fstest_bytes=None, timertest_bytes=None,
-                victim_bytes=None, harden_bytes=None, apps_txt_bytes=None):
+                victim_bytes=None, harden_bytes=None,
+                jingle_bytes=None, chime_bytes=None, apps_txt_bytes=None):
     img = bytearray(total_sectors * BYTES_PER_SECTOR)
     last_usable = total_sectors - 34
     first_usable = 34
@@ -912,7 +936,7 @@ def build_image(total_sectors, esp_offset, efi_bytes, kernel_bytes=None,
                       keytest_bytes, savetext_bytes, type_bytes, dir_bytes,
                       calc_bytes, notepad_bytes, top_bytes, desktop_bytes,
                       tcp_bytes, fetch_bytes, chat_bytes, file_bytes, fstest_bytes, timertest_bytes,
-                      victim_bytes, harden_bytes, apps_txt_bytes)
+                      victim_bytes, harden_bytes, jingle_bytes, chime_bytes, apps_txt_bytes)
     geo_data = Fat32Geometry(data_sectors, data_start)
     build_data_volume(img, geo_data)
     return bytes(img)
@@ -982,6 +1006,10 @@ def main(argv):
                     help="optional flat user program (VICTIM.BIN) to embed at the volume root (milestone 14, card S4 -- claim 4482)")
     ap.add_argument("harden_file", nargs="?",
                     help="optional flat user program (HARDEN.BIN) to embed at the volume root (milestone 14, card S4 -- claim 4482)")
+    ap.add_argument("jingle_file", nargs="?",
+                    help="optional flat user program (JINGLE.BIN) to embed at the volume root (milestone 15, card A3 -- claim 7636)")
+    ap.add_argument("chime_file", nargs="?",
+                    help="optional flat user program (CHIME.BIN) to embed at the volume root (milestone 15, card A4 -- claim 3206)")
     ap.add_argument("--apps-txt", metavar="FILE",
                     help="optional plain-text application manifest (APPS.TXT) to embed at the "
                          "volume root (milestone 13, card B2 -- claim 8877)")
@@ -1235,6 +1263,24 @@ def main(argv):
                   "not be a DipshitOS user program image" % args.harden_file,
                   file=sys.stderr)
 
+    jingle_bytes = None
+    if args.jingle_file:
+        with open(args.jingle_file, "rb") as f:
+            jingle_bytes = f.read()
+        if jingle_bytes[:4] != b"DSK1":
+            print("WARNING: %s does not start with the 'DSK1' magic; it may "
+                  "not be a DipshitOS user program image" % args.jingle_file,
+                  file=sys.stderr)
+
+    chime_bytes = None
+    if args.chime_file:
+        with open(args.chime_file, "rb") as f:
+            chime_bytes = f.read()
+        if chime_bytes[:4] != b"DSK1":
+            print("WARNING: %s does not start with the 'DSK1' magic; it may "
+                  "not be a DipshitOS user program image" % args.chime_file,
+                  file=sys.stderr)
+
     apps_txt_bytes = None
     if args.apps_txt:
         with open(args.apps_txt, "rb") as f:
@@ -1247,7 +1293,7 @@ def main(argv):
                       winmove_bytes, keytest_bytes, savetext_bytes, type_bytes,
                       dir_bytes, calc_bytes, notepad_bytes, top_bytes, desktop_bytes,
                       tcp_bytes, fetch_bytes, chat_bytes, file_bytes, fstest_bytes, timertest_bytes,
-                      victim_bytes, harden_bytes, apps_txt_bytes)
+                      victim_bytes, harden_bytes, jingle_bytes, chime_bytes, apps_txt_bytes)
     with open(args.image, "wb") as f:
         f.write(img)
     extra = ", %d-byte kernel image embedded" % len(kernel_bytes) if kernel_bytes else ""

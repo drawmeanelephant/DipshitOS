@@ -5,6 +5,14 @@
 //         [--console] [--debug-input] [--dump-marker <file>]
 //         [--nvram-console <file>] [--script <file>]
 //         [--script-after <text>] [--script-expect <text>] [--custom-virtio]
+//         [--sound] (milestone fifteen card A1, claim 6140: attach one
+//          VZVirtioSoundDeviceConfiguration with one
+//          VZVirtioSoundDeviceOutputStreamConfiguration (the PCM output
+//          stream) carrying a VZHostAudioOutputStreamSink, so the guest's
+//          virtio-snd device is discovered and its output can play on the
+//          host speakers. OFF by default: without the flag
+//          config.soundDevices stays [] — every existing gate is
+//          byte-identical.)
 //         [--script2 <file> --script2-after <text>] (claim 4613: a second
 //          scripted phase, forwarded once after its own serial marker)
 //         [--script3 <file> --script3-after <text>] (claim 7786: a third
@@ -175,6 +183,14 @@ var displayMode = false
 // devices behind it. So screen-side input needs a USB XHCI + HID stack,
 // not a virtio-input transport. See docs/claims/3868-virtio-input.md.
 var inputMode = false
+// Milestone fifteen card A1 (claim 6140): `--sound` attaches the
+// virtio-snd device (VZVirtioSoundDeviceConfiguration with one output
+// stream + a VZHostAudioOutputStreamSink). OFF by default — without the
+// flag config.soundDevices stays [] exactly as before, so every existing
+// gate stays byte-identical. A1 is the TRANSPORT: the guest discovers the
+// device, negotiates, and arms the control queue; the PCM playback path
+// (the audible beep) is card A2.
+var soundMode = false
 // Milestone seven card I2 (claim 4116): the minimal synthesized-key seam.
 // `--input-key <mac-keycode>` posts one keyDown (no keyUp) into the
 // VZVirtualMachineView after `--input-key-after <marker>` (default: the
@@ -399,6 +415,9 @@ while idx < arguments.count {
         idx += 1
     } else if arg == "--input" {
         inputMode = true
+        idx += 1
+    } else if arg == "--sound" {
+        soundMode = true
         idx += 1
     } else if arg == "--input-key", idx + 1 < arguments.count {
         guard let kc = UInt16(arguments[idx + 1]) else {
@@ -1068,6 +1087,21 @@ if let netCapturePath {
     config.networkDevices = [natConfig]
 } else {
     config.networkDevices = []
+}
+// Milestone fifteen card A1 (claim 6140): the virtio-snd device, attached
+// only under `--sound`. One output stream with a host audio sink — the
+// device the guest discovers (DID observed, not assumed: the 0x1040+type
+// scheme predicts 0x1059). Without the flag the config is exactly as
+// before: soundDevices = [] — every existing gate stays byte-identical.
+if soundMode {
+    let sound = VZVirtioSoundDeviceConfiguration()
+    let output = VZVirtioSoundDeviceOutputStreamConfiguration()
+    output.sink = VZHostAudioOutputStreamSink()
+    sound.streams = [output]
+    config.audioDevices = [sound]
+    print("SOUND: virtio-snd attached (1 output stream, host sink)")
+} else {
+    config.audioDevices = []
 }
 #if SPIKE
 if customVirtioEnabled, #available(macOS 27.0, *) {

@@ -125,8 +125,8 @@ grep -q "tasks user-exec exited status=23" artifacts/live-timers-serial.log || {
 echo "TIMER.EXIT23: OK"
 
 # The syscall counters: set called 3 times, cancel called 2 times.
-grep -q "syscalls: slots=64 implemented=42" artifacts/live-timers-serial.log || {
-    echo "ERROR: implemented=42 syscalls report missing from serial log"
+grep -q "syscalls: slots=64 implemented=46" artifacts/live-timers-serial.log || {
+    echo "ERROR: implemented=46 syscalls report missing from serial log"
     exit 1
 }
 grep -q "40 sys_timer_set calls=3" artifacts/live-timers-serial.log || {
@@ -156,7 +156,7 @@ Verified Components:
 - sys_timer_cancel (slot 41): returned 0 with nothing pending and 1 with a
   live pending timer (which then never fired)
 - The scheduler tick drove both fires; the process exited status 23
-- syscalls report: implemented=42, sys_timer_set calls=3, sys_timer_cancel calls=2
+- syscalls report: implemented=46, sys_timer_set calls=3, sys_timer_cancel calls=2
 
 Serial Output Highlights:
 $(grep -E 'timertest:|sys_timer_(set|cancel)' artifacts/live-timers-serial.log || true)
