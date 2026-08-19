@@ -1334,7 +1334,8 @@ See [`march-m15.md`](march-m15.md) for the card tracker.
 > proving all three in one session (C4). Wishlist 17 (deeper FS
 > semantics) stays deferred — M13's B1 already shipped
 > delete/rename/truncate/free and no app has produced new pressure.
-> The default VM (no flags) stays byte-identical at every card.
+> The default VM (no flags) stays byte-identical at every card. Issues
+> **#190–#193** filed 2026-08-18 (one per card, the M14 way).
 
 See [`march-m16.md`](march-m16.md) for the card tracker.
 
