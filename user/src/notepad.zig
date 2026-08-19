@@ -353,6 +353,9 @@ pub const TextLayout = struct {
 pub const AppState = struct {
     buffer: TextBuffer = .{},
     layout: TextLayout = .{},
+    /// Claim 5390: the cursor's blink phase, driven by a per-process TIMER
+    /// event (1 s toggle at the 1 Hz scheduler tick) — never a spin/sleep.
+    cursor_visible: bool = true,
     status_msg: [16]u8 = "Ready\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00".*,
     status_len: usize = 5,
 
@@ -464,9 +467,11 @@ pub const AppState = struct {
             col += 1;
         }
 
-        // Cursor: always visible (ensure_visible keeps its row in the viewport).
+        // Cursor: blinks on the TIMER event (claim 5390); the blink phase
+        // is `cursor_visible` (a keypress re-shows it). ensure_visible keeps
+        // its row in the viewport.
         const cpos = TextLayout.position_at(slice, self.buffer.cursor);
-        if (cpos.row >= self.layout.scroll and cpos.row < self.layout.scroll + TextLayout.visible_rows) {
+        if (self.cursor_visible and cpos.row >= self.layout.scroll and cpos.row < self.layout.scroll + TextLayout.visible_rows) {
             const x = text_x0 + @as(u32, @intCast(cpos.col)) * glyph_w;
             const y = text_y0 + @as(u32, @intCast(cpos.row - self.layout.scroll)) * line_h;
             if (x + 2 <= text_area.x + text_area.w) {
@@ -715,6 +720,14 @@ pub export fn _start() callconv(.c) noreturn {
     ui.win_present(win);
     ui.write_console("notepad: ready\n");
 
+    // Claim 5390: a periodic 1-tick timer drives the cursor blink — no
+    // spin/sleep loop. (The id is deliberately not cancelled: the timer is
+    // per-process and dies with NOTEPAD on exit.)
+    const blink_rc = ui.timer_set(1, 1);
+    if (blink_rc < 0) {
+        ui.write_console("notepad: timer arm failed\n");
+    }
+
     // 3. Event Loop
     var ev: Event = undefined;
     while (true) {
@@ -728,10 +741,17 @@ pub export fn _start() callconv(.c) noreturn {
             break;
         }
 
-        if (ev.kind == ui.MOUSE_DOWN or ev.kind == ui.MOUSE_UP or ev.kind == ui.MOUSE_MOVE) {
+        if (ev.kind == ui.TIMER) {
+            // Blink phase toggle; a redraw re-renders the cursor line.
+            app.cursor_visible = !app.cursor_visible;
+            dirty = true;
+        } else if (ev.kind == ui.MOUSE_DOWN or ev.kind == ui.MOUSE_UP or ev.kind == ui.MOUSE_MOVE) {
             dirty = app.handle_mouse_events(&ev) or dirty;
         } else if (ev.kind == ui.KEY_DOWN) {
-            dirty = app.handle_keyboard_event(&ev) or dirty;
+            if (app.handle_keyboard_event(&ev)) {
+                app.cursor_visible = true; // typing re-shows the cursor
+                dirty = true;
+            }
         }
 
         // Drain pending queue
@@ -741,10 +761,16 @@ pub export fn _start() callconv(.c) noreturn {
                 ui.win_close(win);
                 ui.exit_process(exit_status);
             }
-            if (ev.kind == ui.MOUSE_DOWN or ev.kind == ui.MOUSE_UP or ev.kind == ui.MOUSE_MOVE) {
+            if (ev.kind == ui.TIMER) {
+                app.cursor_visible = !app.cursor_visible;
+                dirty = true;
+            } else if (ev.kind == ui.MOUSE_DOWN or ev.kind == ui.MOUSE_UP or ev.kind == ui.MOUSE_MOVE) {
                 dirty = app.handle_mouse_events(&ev) or dirty;
             } else if (ev.kind == ui.KEY_DOWN) {
-                dirty = app.handle_keyboard_event(&ev) or dirty;
+                if (app.handle_keyboard_event(&ev)) {
+                    app.cursor_visible = true;
+                    dirty = true;
+                }
             }
         }
 

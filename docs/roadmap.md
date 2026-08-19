@@ -1209,11 +1209,18 @@ See [`march-m13.md`](march-m13.md) for the per-card tracker.
   program) drives the seam byte-exact. Live gate
   `tools/verify-live-clipboard.sh` (set/get/truncate/clear/EFAULT markers +
   `sys_clipboard_set calls=4` / `sys_clipboard_get calls=5` + exit 0).
-- **S2 — Application timers** (issue #176, wishlist 12): a bounded
-  per-process timer facility (slots 40–41) that posts `TIMER` events on the
-  existing ADR 0009 event queue — apps stop spinning sleep loops (NOTEPAD
-  cursor blink, a live clock, TOP periodic refresh). Live gate:
-  `verify-live-timers.sh`.
+- **S2 — Application timers** (issue #176, wishlist 12): ✅ done
+  2026-08-19 (claim 5390): `sys_timer_set`/`sys_timer_cancel` (ADR 0007
+  slots 40/41, `implemented_count` 40 → 42) over a fixed 8-entry BSS timer
+  table (`kernel/src/timers.zig`, pure BSS, zero heap) tied to the scheduler
+  tick, posting `TIMER` events (ADR 0009 kind 9) on the existing event
+  queue; timers are per-process owned and auto-cancel on exit. NOTEPAD's
+  cursor blinks on a 1-tick timer (no spin/sleep); TOP refreshes its
+  process table on a 2-tick timer. `TMRTEST.BIN` (twenty-fourth ESP
+  program; the 8.3-short stem — "TIMERTEST" is 9 chars) drives the seam
+  byte-exact. Live gate `tools/verify-live-timers.sh` (one-shot fire +
+  periodic x3 + cancel + stale refusal + `sys_timer_set calls=2` /
+  `sys_timer_cancel calls=2` + exit 0).
 - **S3 — Composition capstone** (issue #177): NOTEPAD copy/paste with a
   timer-driven cursor — S1+S2 proven together in a real app a human can
   use. Live gate: `verify-live-m14-composition.sh`.

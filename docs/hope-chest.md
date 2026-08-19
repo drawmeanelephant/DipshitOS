@@ -205,8 +205,8 @@ relying on the gates they touch:
 | 8 | DNS | ✅ M12 (N2) |
 | 9 | Application identity/metadata | ✅ M13 B2 (manifest) |
 | 10 | A launcher | ✅ M11 A5 (`DESKTOP.BIN`) |
-| 11 | Clipboard | 🚧 M14 S1 |
-| 12 | Timers/events for apps | 🚧 M14 S2 |
+| 11 | Clipboard | ✅ M14 S1 |
+| 12 | Timers/events for apps | ✅ M14 S2 |
 | 13 | Resource-model cleanup | 🗺️ M16 (proposed) |
 | 14 | Richer VM | 🗺️ M17 (proposed) |
 | 15 | Executable-format evolution | 🗺️ M18 (proposed) |

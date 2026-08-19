@@ -72,6 +72,9 @@ const events = @import("events.zig");
 const file_table = @import("file_table.zig");
 // Milestone 12 (claim 7483): per-process TCP connection cleanup
 const tcp = @import("tcp.zig");
+// Milestone 14 (claim 5390): per-process application timers — the tick feeds
+// them, and the exit path cancels a process's timers.
+const timers = @import("timers.zig");
 // Card G6 teardown follow-on (per-process window ownership): the exit path
 // auto-closes the exiting process's user windows via `close_owner`. Pure
 // BSS writes, safe in the exception context `exit_current` runs in.
@@ -318,6 +321,7 @@ pub fn init() usize {
     process.init();
     mailbox.init();
     events.init();
+    timers.init(); // claim 5390: the application timer table resets with it
     events.on_event_pushed = wake_event_waiters;
     tasks[0] = .{ .name = "shell", .state = .ready, .ttbr0 = mmu.kernel_root_phys() };
     tasks[idle_id] = .{
@@ -849,6 +853,10 @@ fn wake_expired() void {
 pub fn on_tick() void {
     tick_count +%= 1;
     wake_expired();
+    // Claim 5390: fire per-process application timers on the same tick the
+    // sleepers are woken on (IRQ-context, console-free — pure BSS writes + a
+    // `TIMER` event push, which runs the already-wired wait_event wakeup).
+    timers.on_tick(tick_count);
 }
 
 /// Remove the calling task from the runnable ring and stage its successor.
@@ -879,6 +887,7 @@ pub fn exit_current(status: u64) bool {
         _ = driving_award.close_owner(pid);
         file_table.reset_process(pid);
         tcp.close_owner(pid);
+        timers.cancel_owner(pid); // claim 5390: a process's timers die with it
     }
     const next = next_runnable(exiting) orelse {
         // No successor: roll back (the always-ready idle task makes this

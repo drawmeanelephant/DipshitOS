@@ -44,6 +44,8 @@ pub const sys_file_truncate_num: u64 = 36;
 pub const sys_file_free_num: u64 = 37;
 pub const sys_clipboard_set_num: u64 = 38;
 pub const sys_clipboard_get_num: u64 = 39;
+pub const sys_timer_set_num: u64 = 40;
+pub const sys_timer_cancel_num: u64 = 41;
 /// The clipboard's fixed capacity (one bounded kernel BSS buffer, no heap).
 pub const clipboard_max: usize = 512;
 pub const sys_udp_listen_num: u64 = 9;
@@ -64,6 +66,8 @@ pub const MOUSE_MOVE: u16 = 5;
 pub const WIN_FOCUS: u16 = 6;
 pub const WIN_BLUR: u16 = 7;
 pub const WIN_CLOSE: u16 = 8;
+/// Milestone 14 (claim 5390): a per-process timer fired (arg0 = timer id).
+pub const TIMER: u16 = 9;
 
 pub const MOD_SHIFT: u16 = 0x0001;
 pub const MOD_CTRL: u16 = 0x0002;
@@ -308,6 +312,21 @@ pub fn clipboard_set(data: []const u8) i64 {
 /// clipboard is empty; EFAULT for a bad buffer.
 pub fn clipboard_get(buf: []u8) i64 {
     return syscall2(sys_clipboard_get_num, @intFromPtr(buf.ptr), buf.len);
+}
+
+/// Claim 5390 (ADR 0007 slot 40): arm a per-process application timer that
+/// posts `TIMER` events on this process's event queue. `ticks >= 1` is the
+/// first-fire delay (and the period for a periodic timer) in ticks;
+/// `periodic != 0` re-arms after each fire. Returns the timer id (>= 0), or
+/// a negative ADR 0007 error (EINVAL for ticks==0 / no free slot).
+pub fn timer_set(ticks: u64, periodic: u64) i64 {
+    return syscall2(sys_timer_set_num, ticks, periodic);
+}
+
+/// Claim 5390 (ADR 0007 slot 41): cancel a timer owned by this process.
+/// Returns 0; EINVAL for an id this process does not own.
+pub fn timer_cancel(id: u32) i64 {
+    return syscall1(sys_timer_cancel_num, id);
 }
 
 pub fn udp_listen(port: u16) i64 {

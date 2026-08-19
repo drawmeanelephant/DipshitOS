@@ -741,6 +741,29 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_cliptest.step);
 
     // ------------------------------------------------------------------
+    // Guest: twenty-fourth ESP user program (milestone fourteen, card S2 — claim 5390)
+    // TMRTEST.BIN. Headless application-timer proof (one-shot/periodic/cancel).
+    // ------------------------------------------------------------------
+    const tmrtest_prog = b.addExecutable(.{
+        .name = "user-tmrtest",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/tmrtest.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    tmrtest_prog.linker_script = b.path("user/linker.ld");
+    const tmrtest_step = b.step("tmrtest", "Build the twenty-fourth ESP user program (zig-out/bin/TMRTEST.BIN)");
+    const tmrtest_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    tmrtest_elf2bin.addFileArg(tmrtest_prog.getEmittedBin());
+    const tmrtest_bin = tmrtest_elf2bin.addOutputFileArg("TMRTEST.BIN");
+    tmrtest_elf2bin.has_side_effects = true;
+    tmrtest_elf2bin.stdio = .inherit;
+    tmrtest_step.dependOn(&tmrtest_elf2bin.step);
+    const install_tmrtest = b.addInstallFileWithDir(tmrtest_bin, .bin, "TMRTEST.BIN");
+    b.getInstallStep().dependOn(&install_tmrtest.step);
+
+    // ------------------------------------------------------------------
     // Top-level steps. System-command steps are marked as having side
     // effects (and inherit stdio) so they always execute instead of being
     // skipped by the build cache. (No QEMU path: this project targets Apple
@@ -774,6 +797,7 @@ pub fn build(b: *std.Build) void {
     image.addFileArg(file_bin); // ... [FILE.BIN] (claim 4742: twenty-first user program, GUI file browser)
     image.addFileArg(fstest_bin); // ... [FSTEST.BIN] (claim 5801: twenty-second user program, mutating-fs proof)
     image.addFileArg(cliptest_bin); // ... [CLIPTEST.BIN] (claim 2611: twenty-third user program, clipboard proof)
+    image.addFileArg(tmrtest_bin); // ... [TMRTEST.BIN] (claim 5390: twenty-fourth user program, timer proof)
     image.has_side_effects = true;
     image.stdio = .inherit;
     image_step.dependOn(&image.step);

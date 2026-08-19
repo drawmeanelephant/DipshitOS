@@ -26,7 +26,7 @@ Legend: ⬜ not started · 🔄 in progress · ✅ done · ⛔ blocked (note why
 | # | Card | Status | Evidence | Notes |
 |---:|------|--------|----------|-------|
 | S1 | **Clipboard / shared text service.** `sys_clipboard_set`/`sys_clipboard_get` (ADR 0007 slots 38–39), one bounded kernel clipboard buffer (pure BSS, zero heap); NOTEPAD copy/cut/paste. | ✅ done (claim 2611) | `kernel/src/clipboard.zig`, `kernel/src/syscall.zig` slots 38/39, `user/src/lib/ui.zig`, `user/src/notepad.zig` (Ctrl+C/X/V), `user/src/cliptest.zig` → `CLIPTEST.BIN`, live gate `tools/verify-live-clipboard.sh` | Issue #175; wishlist 11. `implemented_count` 38 → 40. NOTEPAD copy/cut act on the current logical line (no selection model yet — documented); paste inserts at the cursor. |
-| S2 | **Application timers.** Bounded per-process timer facility (slots 40–41) posting `TIMER` events on the ADR 0009 queue; apps stop spinning (NOTEPAD cursor blink, a live clock, TOP refresh). | ⬜ | — | Issue #176; wishlist 12. |
+| S2 | **Application timers.** Bounded per-process timer facility (slots 40–41) posting `TIMER` events on the ADR 0009 queue; apps stop spinning (NOTEPAD cursor blink, a live clock, TOP refresh). | ✅ done (claim 5390) | `kernel/src/timers.zig`, `kernel/src/syscall.zig` slots 40/41, `events.zig` kind 9, `user/src/notepad.zig` (timer blink), `user/src/top.zig` (timer refresh), `user/src/tmrtest.zig` → `TMRTEST.BIN`, live gate `tools/verify-live-timers.sh` | Issue #176; wishlist 12. `implemented_count` 40 → 42. |
 | S3 | **Composition capstone.** NOTEPAD copy/paste with a timer-driven cursor — S1+S2 proven together. Live gate: `verify-live-m14-composition.sh`. | ⬜ | — | Issue #177; depends on S1+S2. |
 | S4 | **Security/isolation hardening.** Process-ownership audit across every EL0-named resource, uaccess validation-depth sweep, resource limits; a hostile EL0 program refused cross-process access. Live gate: `verify-live-hardening.sh`. | ⬜ | — | Issue #178; wishlist 19. |
 
@@ -38,8 +38,9 @@ Legend: ⬜ not started · 🔄 in progress · ✅ done · ⛔ blocked (note why
   ahead of the closeout, per the M12/M13 precedent.
 - S1 landed 2026-08-19 (claim 2611): ADR 0007 slots 38–39 (`sys_clipboard_set`
   /`sys_clipboard_get`, `implemented_count` 38 → 40), following slot 37
-  `sys_file_free`. S2 adds slots 40–41 (→ 42), following slot 39
-  `sys_clipboard_get`.
+  `sys_file_free`. S2 landed 2026-08-19 (claim 5390): slots 40–41
+  (`sys_timer_set`/`sys_timer_cancel`, `implemented_count` 40 → 42), following
+  slot 39 `sys_clipboard_get`. S3 adds the composition capstone; S4 hardening.
 - Zero heap allocation stays a hard constraint for every new kernel
   resource (fixed BSS tables only).
 - M8's U4 pointer live proof is a known class-C-only limitation (issue

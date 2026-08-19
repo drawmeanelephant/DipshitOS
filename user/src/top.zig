@@ -313,6 +313,13 @@ pub export fn _start() callconv(.c) noreturn {
     ui.win_present(win);
     ui.write_console("top: ready\n");
 
+    // Claim 5390: a periodic 2-tick timer refreshes the process table — no
+    // spin/sleep loop; the timer dies with TOP on exit.
+    const refresh_rc = ui.timer_set(2, 1);
+    if (refresh_rc < 0) {
+        ui.write_console("top: timer arm failed\n");
+    }
+
     // 3. Event Loop
     var ev: Event = undefined;
     while (true) {
@@ -326,7 +333,10 @@ pub export fn _start() callconv(.c) noreturn {
             break;
         }
 
-        if (ev.kind == ui.MOUSE_DOWN or ev.kind == ui.MOUSE_UP or ev.kind == ui.MOUSE_MOVE) {
+        if (ev.kind == ui.TIMER) {
+            _ = app.table.refresh_from_system();
+            dirty = true;
+        } else if (ev.kind == ui.MOUSE_DOWN or ev.kind == ui.MOUSE_UP or ev.kind == ui.MOUSE_MOVE) {
             dirty = app.handle_mouse_events(&ev) or dirty;
         } else if (ev.kind == ui.KEY_DOWN) {
             dirty = app.handle_keyboard_event(&ev) or dirty;
@@ -339,7 +349,10 @@ pub export fn _start() callconv(.c) noreturn {
                 ui.win_close(win);
                 ui.exit_process(exit_status);
             }
-            if (ev.kind == ui.MOUSE_DOWN or ev.kind == ui.MOUSE_UP or ev.kind == ui.MOUSE_MOVE) {
+            if (ev.kind == ui.TIMER) {
+                _ = app.table.refresh_from_system();
+                dirty = true;
+            } else if (ev.kind == ui.MOUSE_DOWN or ev.kind == ui.MOUSE_UP or ev.kind == ui.MOUSE_MOVE) {
                 dirty = app.handle_mouse_events(&ev) or dirty;
             } else if (ev.kind == ui.KEY_DOWN) {
                 dirty = app.handle_keyboard_event(&ev) or dirty;

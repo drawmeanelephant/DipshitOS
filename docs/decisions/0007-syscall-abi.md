@@ -533,3 +533,26 @@ truncation → clear → empty → EFAULT both directions → exit 0; live gate
 `tools/verify-live-clipboard.sh`. NOTEPAD consumes the seam: Ctrl+C (copy the
 current logical line), Ctrl+X (cut the line), Ctrl+V (paste at the cursor) —
 no selection model yet, documented in the card.
+
+## Amendment (2026-08-19, claim 5390 — the application timers card)
+
+Milestone 14 card S2 (issue #176) freezes slots 40/41 — bounded per-process
+application timers that post `TIMER` events on the ADR 0009 queue:
+
+| Slot | Name | Signature | Description |
+|:---|:---|:---|:---|
+| 40 | `sys_timer_set` | `timer_set(ticks, periodic) -> i64` | Arm a timer owned by the calling process that posts a `TIMER` event (ADR 0009 kind 9, `arg0` = timer id) to the caller's queue on each expiry. `ticks >= 1` is the first-fire delay (and the period for a periodic timer) in scheduler ticks; `periodic != 0` re-arms after each fire, 0 is one-shot. Returns the timer id (>= 0) — the stable handle `sys_timer_cancel` takes. `EINVAL` for a non-process caller, `ticks == 0`, or a full timer table. |
+| 41 | `sys_timer_cancel` | `timer_cancel(id) -> i64` | Cancel a timer owned by the CALLING process (a process may never cancel another's timer; ids are monotonic and never reused, so a stale id cannot hit a re-armed slot). Returns 0; `EINVAL` for a non-process caller or an id this process does not own. |
+
+`implemented_count` is 42; the `syscalls` report prints rows 0–41.
+
+The facility is `kernel/src/timers.zig` — a fixed 8-entry BSS table tied to
+the scheduler tick (the scheduler feeds `on_tick` with its tick counter; the
+tick fires every timer whose deadline passed). Timers are per-process owned
+and auto-cancel on exit (`scheduler.exit_current` → `timers.cancel_owner`).
+The EL0 proof rides `TMRTEST.BIN` (`user/src/tmrtest.zig`, issue #176; the
+8.3-short stem — "TIMERTEST" is 9 chars and exceeds the FAT 8.3 bound):
+one-shot (fires once) → periodic (three expiries) → cancel (no leak) → stale
+id refused → exit 0; live gate `tools/verify-live-timers.sh`. NOTEPAD consumes
+the seam (a 1-tick timer blinks the cursor); TOP refreshes its process table
+on a 2-tick timer.

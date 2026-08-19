@@ -140,3 +140,17 @@ Milestone 9 allocates slots 21 and 22 in the frozen ADR 0007 syscall table:
 - Applications can implement real-time interactive loops using `sys_wait_event` without polling or spinning.
 - The window manager gains bidirectional event flow between host input and guest user processes.
 - Syscall dispatch table grows to 23 implemented slots (0..22).
+
+## Amendment (2026-08-19, claim 5390 — the application timers card)
+
+Milestone 14 card S2 (issue #176) extends the event-kind enumeration with one
+kind, posted by the bounded per-process timer facility (`kernel/src/timers.zig`):
+
+| Value | Constant | Description | `arg0` | `arg1` | `flags` |
+|:-----:|:---------|:------------|:-------|:-------|:--------|
+| 9 | `TIMER` | A per-process application timer fired | Timer id (from `sys_timer_set`) | 0 | 0 |
+
+`TIMER` events ride the exact same bounded 16-event FIFO, sequence numbering,
+and `sys_poll_event`/`sys_wait_event` delivery as input and window-lifecycle
+events — no new blocking primitive, no new queue geometry. A process's timers
+are cancelled when it exits, so a `TIMER` event never outlives its owner.

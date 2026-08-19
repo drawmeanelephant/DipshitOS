@@ -8,7 +8,7 @@
 //! - Process lifecycle reset hooks (`init`, `reset`).
 //!
 //! Event wire layout (16 bytes, C ABI):
-//!   kind: u16       - event category (1..8)
+//!   kind: u16       - event category (1..9)
 //!   flags: u16      - modifiers / button bitmask
 //!   seq: u32        - monotonic sequence counter
 //!   arg0: u32       - event argument 0 (keycode, local X, win ID)
@@ -28,6 +28,9 @@ pub const MOUSE_MOVE: u16 = 5;
 pub const WIN_FOCUS: u16 = 6;
 pub const WIN_BLUR: u16 = 7;
 pub const WIN_CLOSE: u16 = 8;
+/// Milestone 14 (claim 5390): a per-process application timer fired.
+/// `arg0` carries the timer id returned by `sys_timer_set`; `arg1` is 0.
+pub const TIMER: u16 = 9;
 
 /// Modifier bitmasks (flags bits 0..7).
 pub const MOD_SHIFT: u16 = 0x0001;
