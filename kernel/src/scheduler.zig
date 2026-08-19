@@ -82,15 +82,18 @@ const driving_award = @import("driving_award.zig");
 
 const user_stack_section = if (builtin.object_format == .elf) ".userbss" else "__DATA,__userbss";
 
-/// Round-robin pool (card 3g, claim 5795 — the pool-scale capstone):
-/// shell + EL1h demo worker + FOUR EL0t user slots + the scheduler-owned
-/// idle task — FOUR live user programs at once (shell + worker + 4 users +
-/// idle = 7/7; the 4th user slot is the "spare" while only three are
-/// live). Fixed at comptime — no allocation, no dynamic registration or
-/// processes; the lifecycle's spawn/reap only recycle these slots. Every
-/// prior card documented the 5-slot budget (3b/3c/3f: "5/5, NO spare");
-/// the capstone deliberately raises it and re-derives the gates.
-pub const max_tasks: usize = 7;
+/// Round-robin pool (card 3g, claim 5795 — the pool-scale capstone;
+/// milestone sixteen C3, claim 0339 — the measured growth). Card 3g set
+/// the budget at 7: shell + EL1h demo worker + FOUR EL0t user slots + the
+/// scheduler-owned idle task (7/7, FOUR live user programs). C3 measures
+/// that the demo apps (launcher, file browser, chat, sound apps, desktop)
+/// exhaust those four user slots — the exec path refuses a FIFTH
+/// concurrent program with `pool_full` — and grows the pool to 11:
+/// shell + worker + EIGHT EL0t user slots + idle (11/11, EIGHT live user
+/// programs — the "8+ apps on the desktop" consuming experience). Fixed at
+/// comptime — no allocation, no dynamic registration or processes; the
+/// lifecycle's spawn/reap only recycle these slots.
+pub const max_tasks: usize = 11;
 /// The idle task's fixed slot (registered by `init`, never recycled).
 pub const idle_id: usize = max_tasks - 1;
 /// The worker's static stack (BSS, like every other kernel global). The
@@ -227,7 +230,7 @@ const Task = struct {
     kill_pending: bool = false,
 };
 
-var tasks: [max_tasks]Task = .{ .{}, .{}, .{}, .{}, .{}, .{}, .{} };
+var tasks: [max_tasks]Task = [_]Task{.{}} ** max_tasks;
 var task_count: usize = 0;
 var current: usize = 0;
 var enabled_flag: bool = false;
@@ -1298,14 +1301,18 @@ test "scheduler: register_worker builds a valid synthetic frame" {
     while (i < frame_bytes) : (i += 8) {
         try std.testing.expectEqual(@as(u64, 0), std.mem.readInt(u64, @as(*const [8]u8, @ptrFromInt(t.sp + i)), .little));
     }
-    // Card 3g (claim 5795): the pool is shell + idle + worker + FOUR user
-    // slots (four live programs at the 7/7 budget); a registration beyond
-    // the 7-slot budget fails (bounded).
+    // Milestone sixteen C3 (claim 0339): the pool is shell + idle +
+    // worker + EIGHT user slots (eight live programs at the 11/11 budget);
+    // a registration beyond the 11-slot budget fails (bounded).
     try std.testing.expectEqual(@as(usize, 2), register_user(0x3333, 0).?);
     try std.testing.expectEqual(@as(usize, 3), register_worker(0).?);
     try std.testing.expectEqual(@as(usize, 4), register_worker(0).?);
     try std.testing.expectEqual(@as(usize, 5), register_worker(0).?);
-    try std.testing.expectEqual(@as(usize, 7), task_count);
+    try std.testing.expectEqual(@as(usize, 6), register_worker(0).?);
+    try std.testing.expectEqual(@as(usize, 7), register_worker(0).?);
+    try std.testing.expectEqual(@as(usize, 8), register_worker(0).?);
+    try std.testing.expectEqual(@as(usize, 9), register_worker(0).?);
+    try std.testing.expectEqual(@as(usize, 11), task_count);
     try std.testing.expect(register_worker(0) == null);
     // Claim 0826: capacity is observable — the full pool has no free slot.
     try std.testing.expect(!has_free_slot());
@@ -1622,7 +1629,22 @@ test "scheduler: two live user tasks coexist with their own roots and regions" {
     const kstack_d = kstack_d_bytes[0..];
     const user_d = register_exec_user(0x6000, root_b, 64, 0x1c400000, 8192, kstack_d, 0, 0).?;
     try std.testing.expectEqual(@as(usize, 5), user_d);
-    try std.testing.expectEqual(@as(usize, 7), task_count); // shell + worker + A + B + C + D + idle
+    // Milestone sixteen C3 (claim 0339): the 11-slot pool holds EIGHT user
+    // tasks. Fill the remaining four slots so the capacity gate is
+    // observable at the new budget.
+    var kstack_e_bytes: [task_stack_size]u8 align(16) = undefined;
+    const kstack_e = kstack_e_bytes[0..];
+    _ = register_exec_user(0x7000, root_b, 64, 0x1d400000, 8192, kstack_e, 0, 0).?;
+    var kstack_f_bytes: [task_stack_size]u8 align(16) = undefined;
+    const kstack_f = kstack_f_bytes[0..];
+    _ = register_exec_user(0x8000, root_b, 64, 0x1e400000, 8192, kstack_f, 0, 0).?;
+    var kstack_g_bytes: [task_stack_size]u8 align(16) = undefined;
+    const kstack_g = kstack_g_bytes[0..];
+    _ = register_exec_user(0x9000, root_b, 64, 0x1f400000, 8192, kstack_g, 0, 0).?;
+    var kstack_h_bytes: [task_stack_size]u8 align(16) = undefined;
+    const kstack_h = kstack_h_bytes[0..];
+    _ = register_exec_user(0xa000, root_b, 64, 0x20400000, 8192, kstack_h, 0, 0).?;
+    try std.testing.expectEqual(@as(usize, 11), task_count); // shell + worker + A..H + idle
     try std.testing.expect(!has_free_slot());
     // Each task carries ITS OWN root and apertures.
     try std.testing.expect(task_ttbr0(user_a) != task_ttbr0(user_b));
@@ -1649,7 +1671,7 @@ test "scheduler: two live user tasks coexist with their own roots and regions" {
     try std.testing.expectEqual(@as(usize, user_a), current_id());
     try std.testing.expect(yield_current()); // A -> B
     try std.testing.expectEqual(@as(usize, user_b), current_id());
-    // A third user program cannot load: the pool is the capacity gate.
+    // A ninth user program cannot load: the pool is the capacity gate.
     try std.testing.expect(register_exec_user(0x5000, root_a, 64, 0x2a400000, 8192, kstack_b, 0, 0) == null);
 }
 

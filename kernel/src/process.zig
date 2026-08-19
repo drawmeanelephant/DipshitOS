@@ -34,10 +34,13 @@ const std = @import("std");
 const alloc = @import("alloc.zig"); // claim 0826: the process owns its pages (text/stack/kernel-stack) from the physical allocator
 const memmap = @import("memmap.zig"); // host-test fixture view (page-ownership tests arm the allocator)
 
-/// Bounded process registry size (fixed BSS array). Room for the boot
-/// payload's process plus several exec'd programs' history before the
+/// Bounded process registry size (fixed BSS array). Milestone sixteen C3
+/// (claim 0339): grew 8 -> 16 — at the new 8-program concurrency the
+/// registry saturated at 8/8 (the boot payload's exited slot recycled, no
+/// headroom), and "8+ apps on the desktop" (desktop launcher + 8 apps)
+/// needs room for nine live processes plus exited history before the
 /// oldest exited descriptor is recycled.
-pub const max_processes: usize = 8;
+pub const max_processes: usize = 16;
 /// Process-name buffer bound (the FAT 8.3 file name or a task-style name
 /// like "user-el0").
 pub const name_max: usize = 16;
@@ -136,7 +139,7 @@ const Process = struct {
     exit_status: u64 = 0,
 };
 
-var processes: [max_processes]Process = .{ .{}, .{}, .{}, .{}, .{}, .{}, .{}, .{} };
+var processes: [max_processes]Process = [_]Process{.{}} ** max_processes;
 var registry_count: usize = 0;
 /// The most recently created process (the "current" program — what
 /// `exec.loaded()` reports).

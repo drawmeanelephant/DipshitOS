@@ -343,6 +343,7 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "  mem         summarize the EFI memory map\n" ++
         "  pages       physical page allocator pool\n" ++
         "  pci         enumerate PCI devices on the bus\n" ++
+        "  resources   fixed-pool audit: scheduler tasks, process registry, windows, page-table carve-out, and per-process ring bounds\n" ++
         "  timer       interrupt controller + timer status\n" ++
         "  uaccess     user-memory copy diagnostics (valid, fault, recovery)\n" ++
         "tasks / processes\n" ++
@@ -412,7 +413,7 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "pages selftest: alloc 1153 -> none (out of memory)\n" ++
         "pages selftest: ok free=0x0000000000000480\n" ++
         "dipshit> tasks\r\n" ++
-        "tasks: enabled=0 current=0 switches=0 pool=4/7 zombies=0\n" ++
+        "tasks: enabled=0 current=0 switches=0 pool=4/11 zombies=0\n" ++
         "  shell    saves=0 resumes=0 advances=0 state=ready\n" ++
         "  worker   saves=0 resumes=0 advances=0 state=ready\n" ++
         "  user-el0 saves=0 resumes=0 advances=0 state=ready\n" ++

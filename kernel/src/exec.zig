@@ -580,11 +580,15 @@ fn fake_write(lba: u64, data: *const [fat.sector_size]u8) bool {
 /// HOST buffer: exec dereferences the program's text page to load its
 /// bytes (`@ptrFromInt(text_phys)` is valid on the identity-mapped kernel,
 /// but a fake 0x100000 base would segfault the host tests).
-var fixture_pool: [64 * 4096]u8 align(4096) = undefined;
+// Milestone sixteen C3 (claim 0339): the pool grew to EIGHT live user
+// programs, and each exec'd program owns 9 pages (text 1 + user stack 4 +
+// EL1 exception stack 4), so the fixture pool must back 8 × 9 = 72 pages
+// plus headroom.
+var fixture_pool: [128 * 4096]u8 align(4096) = undefined;
 
 fn arm_allocator() void {
     const descriptors = [_]memmap.MemoryDescriptor{
-        .{ .type = .conventional_memory, .physical_start = @intFromPtr(&fixture_pool), .virtual_start = 0, .number_of_pages = 64, .attribute = 0 },
+        .{ .type = .conventional_memory, .physical_start = @intFromPtr(&fixture_pool), .virtual_start = 0, .number_of_pages = 128, .attribute = 0 },
     };
     const view = memmap.MapView.init(std.mem.asBytes(&descriptors), @sizeOf(memmap.MemoryDescriptor), descriptors.len);
     _ = alloc.init(view, &.{});
@@ -752,32 +756,42 @@ test "exec: a second program loads and runs while the first is alive" {
     const img = dsk1("user: hello from the ESP\n", 24, 24 + 25);
     try std.testing.expectEqual(esp.WriteResult.ok, esp.write_file("USER.BIN", img[0 .. 24 + 25]));
     // Claim 0826: the exec gate is gone — the FIRST exec succeeds with the
-    // pool slot free, and the SECOND (and THIRD and FOURTH — card 3g's
-    // 7-slot budget) succeed WITHOUT waiting for the earlier program to
-    // exit (the old `user_busy` refusal is gone).
-    try std.testing.expectEqual(ExecResult.ok, exec_file("USER.BIN", &.{}));
-    try std.testing.expectEqual(ExecResult.ok, exec_file("USER.BIN", &.{}));
-    try std.testing.expectEqual(ExecResult.ok, exec_file("USER.BIN", &.{}));
-    try std.testing.expectEqual(ExecResult.ok, exec_file("USER.BIN", &.{}));
-    // All four programs are live: RUNNING USER.BIN processes with their
+    // pool slot free, and the SECOND through EIGHTH succeed WITHOUT waiting
+    // for the earlier programs to exit (the old `user_busy` refusal is
+    // gone). Milestone sixteen C3 (claim 0339): the 11-slot budget holds
+    // EIGHT live user programs.
+    var n: usize = 0;
+    while (n < 8) : (n += 1) {
+        try std.testing.expectEqual(ExecResult.ok, exec_file("USER.BIN", &.{}));
+    }
+    // All eight programs are live: RUNNING USER.BIN processes with their
     // OWN roots, stacks, and executor tasks (the procs-table shape the
-    // live gate asserts — FOUR live programs is the card-3g scale proof
-    // at the host level).
-    try std.testing.expectEqual(@as(usize, 5), process.count()); // boot exited + A + B + C + D
+    // live gate asserts — EIGHT live programs is the C3 headline at the
+    // host level).
+    try std.testing.expectEqual(@as(usize, 9), process.count()); // boot exited + A..H
     const proc_a = process.info(1).?;
     const proc_b = process.info(2).?;
     const proc_c = process.info(3).?;
     const proc_d = process.info(4).?;
+    const proc_e = process.info(5).?;
+    const proc_f = process.info(6).?;
+    const proc_g = process.info(7).?;
+    const proc_h = process.info(8).?;
     try std.testing.expectEqualStrings("USER.BIN", proc_a.name);
     try std.testing.expectEqualStrings("USER.BIN", proc_b.name);
+    try std.testing.expectEqualStrings("USER.BIN", proc_h.name);
     try std.testing.expectEqual(process.State.running, proc_a.state);
     try std.testing.expectEqual(process.State.running, proc_b.state);
     try std.testing.expectEqual(process.State.running, proc_c.state);
     try std.testing.expectEqual(process.State.running, proc_d.state);
-    // Distinct executors, roots, and pages across all four processes.
-    const tasks_set = [_]usize{ proc_a.task_id.?, proc_b.task_id.?, proc_c.task_id.?, proc_d.task_id.? };
+    try std.testing.expectEqual(process.State.running, proc_e.state);
+    try std.testing.expectEqual(process.State.running, proc_f.state);
+    try std.testing.expectEqual(process.State.running, proc_g.state);
+    try std.testing.expectEqual(process.State.running, proc_h.state);
+    // Distinct executors, roots, and pages across all eight processes.
+    const tasks_set = [_]usize{ proc_a.task_id.?, proc_b.task_id.?, proc_c.task_id.?, proc_d.task_id.?, proc_e.task_id.?, proc_f.task_id.?, proc_g.task_id.?, proc_h.task_id.? };
     for (tasks_set, 0..) |t1, i| for (tasks_set[i + 1 ..]) |t2| try std.testing.expect(t1 != t2);
-    const roots_set = [_]u64{ proc_a.root_phys, proc_b.root_phys, proc_c.root_phys, proc_d.root_phys };
+    const roots_set = [_]u64{ proc_a.root_phys, proc_b.root_phys, proc_c.root_phys, proc_d.root_phys, proc_e.root_phys, proc_f.root_phys, proc_g.root_phys, proc_h.root_phys };
     for (roots_set, 0..) |r1, i| for (roots_set[i + 1 ..]) |r2| try std.testing.expect(r1 != r2);
     // Per-process ASLR (claim 0826): each process owns its stack PLACEMENT
     // (distinct when the CSPRNG is seeded, identical fixed VA when not) —
@@ -785,11 +799,11 @@ test "exec: a second program loads and runs while the first is alive" {
     try std.testing.expect(proc_a.text_phys != proc_b.text_phys);
     try std.testing.expect(proc_a.stack_phys != proc_b.stack_phys);
     try std.testing.expectEqualStrings("user-exec", scheduler.task_info(proc_a.task_id.?).?.name);
-    try std.testing.expectEqualStrings("user-exec", scheduler.task_info(proc_d.task_id.?).?.name);
-    // The pool is the capacity gate: a FIFTH program cannot load.
+    try std.testing.expectEqualStrings("user-exec", scheduler.task_info(proc_h.task_id.?).?.name);
+    // The pool is the capacity gate: a NINTH program cannot load.
     try std.testing.expect(!scheduler.has_free_slot());
     try std.testing.expectEqual(ExecResult.pool_full, exec_file("USER.BIN", &.{}));
-    try std.testing.expectEqual(@as(usize, 5), process.count()); // pool_full allocates nothing
+    try std.testing.expectEqual(@as(usize, 9), process.count()); // pool_full allocates nothing
 
 }
 
@@ -869,13 +883,13 @@ test "exec: COUNTER.BIN loads by name with its own marker and process" {
     try std.testing.expect(process.info(1).?.text_phys != process.info(2).?.text_phys);
 }
 
-test "exec: PEER.BIN loads by name — counter + peer fill the 7-slot pool" {
+test "exec: PEER.BIN loads by name — counter + peer fill the 11-slot pool" {
     // Card 3f (claim 5965): the THIRD ESP program loads by name exactly
-    // like USER.BIN/COUNTER.BIN (same DSK1 pipeline). Card 3g (claim
-    // 5795): the 7-slot budget holds FOUR user programs — counter + peer +
-    // two USER.BINs = 7/7 (shell + worker + 4 users + idle), so a FIFTH
-    // exec is pool_full (the 3b capacity proof re-derived at the new
-    // budget).
+    // like USER.BIN/COUNTER.BIN (same DSK1 pipeline). Milestone sixteen
+    // C3 (claim 0339): the 11-slot budget holds EIGHT user programs —
+    // counter + peer + six USER.BINs = 11/11 (shell + worker + 8 users +
+    // idle), so a NINTH exec is pool_full (the 3b capacity proof
+    // re-derived at the grown budget).
     try build_image(test_allocator);
     defer test_allocator.free(saved_image);
     esp.reset();
@@ -913,17 +927,19 @@ test "exec: PEER.BIN loads by name — counter + peer fill the 7-slot pool" {
     // counter's — the serial log can tell the two programs apart).
     const peer_text: [*]const u8 = @ptrFromInt(peer.text_phys);
     try std.testing.expectEqualStrings("peer: got \n", peer_text[0..11]);
-    // Card 3g: two more USER.BINs load (three live programs + the peer =
-    // FOUR user slots — the new budget's headline), then the pool is
-    // 7/7: a FIFTH exec is pool_full, checked BEFORE any allocation
+    // C3 (claim 0339): six more USER.BINs load (counter + peer + six users
+    // = EIGHT user slots — the grown budget's headline), then the pool is
+    // 11/11: a NINTH exec is pool_full, checked BEFORE any allocation
     // (nothing leaks).
     const user_img = dsk1("user: hello from the ESP\n", 24, 24 + 25);
     try std.testing.expectEqual(esp.WriteResult.ok, esp.write_file("USER.BIN", user_img[0 .. 24 + 25]));
-    try std.testing.expectEqual(ExecResult.ok, exec_file("USER.BIN", &.{})); // pid 3, slot 4
-    try std.testing.expectEqual(ExecResult.ok, exec_file("USER.BIN", &.{})); // pid 4, slot 5
+    var n: usize = 0;
+    while (n < 6) : (n += 1) {
+        try std.testing.expectEqual(ExecResult.ok, exec_file("USER.BIN", &.{})); // pids 3..8, slots 4..9
+    }
     try std.testing.expect(!scheduler.has_free_slot());
     try std.testing.expectEqual(ExecResult.pool_full, exec_file("USER.BIN", &.{}));
-    try std.testing.expectEqual(@as(usize, 5), process.count()); // boot exited + counter + peer + 2 users
+    try std.testing.expectEqual(@as(usize, 9), process.count()); // boot exited + counter + peer + 6 users
 }
 
 test "exec: permanent occupant + recycle — one spare slot, pool_full, then the re-exec lands" {
@@ -937,7 +953,7 @@ test "exec: permanent occupant + recycle — one spare slot, pool_full, then the
     _ = scheduler.register_worker(0x2000);
     _ = scheduler.register_user(0x3000, 0);
     scheduler.start();
-    // Retire the boot payload: shell + idle + worker leave TWO free slots.
+    // Retire the boot payload: shell + idle + worker leave EIGHT free slots.
     try std.testing.expect(scheduler.yield_current());
     try std.testing.expect(scheduler.yield_current());
     try std.testing.expectEqual(@as(usize, 2), scheduler.current_id());
@@ -950,19 +966,20 @@ test "exec: permanent occupant + recycle — one spare slot, pool_full, then the
     try std.testing.expectEqual(esp.WriteResult.ok, esp.write_file("USER.BIN", user_img[0 .. 24 + 25]));
 
     // The counter is the permanent occupant: it takes one slot and never
-    // exits (this test never drives it to exit). Card 3g (claim 5795):
-    // THREE short programs fill the remaining user slots (shell + idle +
-    // worker + counter + 3 users = the full 7-slot pool).
+    // exits (this test never drives it to exit). Milestone sixteen C3
+    // (claim 0339): SEVEN short programs fill the remaining user slots
+    // (shell + idle + worker + counter + 7 users = the full 11-slot pool).
     try std.testing.expectEqual(ExecResult.ok, exec_file("COUNTER.BIN", &.{})); // slot 2
     const free_after_counter = alloc.stats().free_pages;
-    try std.testing.expectEqual(ExecResult.ok, exec_file("USER.BIN", &.{})); // slot 3
-    try std.testing.expectEqual(ExecResult.ok, exec_file("USER.BIN", &.{})); // slot 4
-    try std.testing.expectEqual(ExecResult.ok, exec_file("USER.BIN", &.{})); // slot 5
+    var n: usize = 0;
+    while (n < 7) : (n += 1) {
+        try std.testing.expectEqual(ExecResult.ok, exec_file("USER.BIN", &.{})); // slots 3..9
+    }
     try std.testing.expect(!scheduler.has_free_slot());
-    // The capacity gate: a fifth exec while all four programs are live is
+    // The capacity gate: a ninth exec while all eight programs are live is
     // pool_full, checked BEFORE any allocation — nothing leaks.
     try std.testing.expectEqual(ExecResult.pool_full, exec_file("USER.BIN", &.{}));
-    try std.testing.expectEqual(free_after_counter - 27, alloc.stats().free_pages);
+    try std.testing.expectEqual(free_after_counter - 63, alloc.stats().free_pages);
 
     // Drive the FIRST short program's exit + reap (the idle task's
     // lifecycle reap): its 9 pages return to the allocator and its
@@ -976,11 +993,11 @@ test "exec: permanent occupant + recycle — one spare slot, pool_full, then the
     try std.testing.expect(scheduler.exit_current(43)); // user -> idle
     try std.testing.expectEqual(process.State.exited, process.info(2).?.state);
     // The exited process holds its pages until the reap...
-    try std.testing.expectEqual(free_after_counter - 27, alloc.stats().free_pages);
+    try std.testing.expectEqual(free_after_counter - 63, alloc.stats().free_pages);
     // ...the scheduler reap returns them (claim 4613) while the exited
     // descriptor stays in the procs table with its status.
     try std.testing.expect(scheduler.reap(3));
-    try std.testing.expectEqual(free_after_counter - 18, alloc.stats().free_pages);
+    try std.testing.expectEqual(free_after_counter - 54, alloc.stats().free_pages);
     try std.testing.expectEqual(process.State.exited, process.info(2).?.state);
     try std.testing.expectEqual(@as(u64, 43), process.info(2).?.exit_status);
     try std.testing.expectEqual(@as(u64, 0), process.info(2).?.text_pages);
@@ -992,11 +1009,11 @@ test "exec: permanent occupant + recycle — one spare slot, pool_full, then the
     // its programs exited)...
     try std.testing.expectEqual(ExecResult.ok, exec_file("USER.BIN", &.{}));
     try std.testing.expectEqual(process.State.running, process.info(3).?.state);
-    // ...and with the counter + three live programs the pool is full
+    // ...and with the counter + seven live programs the pool is full
     // again: a subsequent exec is pool_full, still leak-free.
     try std.testing.expect(!scheduler.has_free_slot());
     try std.testing.expectEqual(ExecResult.pool_full, exec_file("USER.BIN", &.{}));
-    try std.testing.expectEqual(free_after_counter - 27, alloc.stats().free_pages);
+    try std.testing.expectEqual(free_after_counter - 63, alloc.stats().free_pages);
     try std.testing.expectEqual(process.State.running, process.info(1).?.state);
 }
 
