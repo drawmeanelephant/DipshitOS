@@ -5,7 +5,7 @@
 # keystrokes drive the terminal half (`clip <text...>` sets it, `clip` pastes
 # it) and assert the same buffer round-trips across multiple sets/gets, then
 # `syscalls` proves the ADR 0007 slots 38/39 are wired into the live dispatch
-# table (implemented=42).
+# table (implemented=46).
 #
 # Mechanism: the production image is booted with the runner's scripted-input
 # mode (--script / --script-expect, the claim-6684 seam). The scripted
@@ -17,7 +17,7 @@
 #   clip             -> "clip: hello world"      (get — non-destructive)
 #   clip second      -> "clip: stored 6 bytes"   (overwrite)
 #   clip             -> "clip: second"           (the NEW contents)
-#   syscalls         -> implemented=42 + rows 38/39 present
+#   syscalls         -> implemented=46 + rows 38/39 present
 #   echo clip-live-ok -> the runner's success signal
 #
 # The EL0 seam (sys_clipboard_set/get dispatch + fault safety) is proven at
@@ -92,7 +92,7 @@ run_one() {
         grep -qF -- "clip: hello world" artifacts/vm-serial.log && PASTE11=1
         grep -qF -- "clip: stored 6 bytes" artifacts/vm-serial.log && STORED6=1
         grep -qF -- "clip: second" artifacts/vm-serial.log && PASTE6=1
-        grep -qF -- "syscalls: slots=64 implemented=42" artifacts/vm-serial.log && IMPL=1
+        grep -qF -- "syscalls: slots=64 implemented=46" artifacts/vm-serial.log && IMPL=1
         grep -qF -- "  38 sys_clipboard_set calls=" artifacts/vm-serial.log && SLOT38=1
         grep -qF -- "  39 sys_clipboard_get calls=" artifacts/vm-serial.log && SLOT39=1
         grep -qF -- "clip-live-ok" artifacts/vm-serial.log && ECHO=1
@@ -127,7 +127,7 @@ done
 echo
 echo "=== result ==="
 if [ "$PASS" = "$BOOTS" ]; then
-    echo "verify-live-clipboard: PASS — the shared kernel clipboard round-trips live on VZ (set/overwrite/get through the terminal half) and the syscalls report shows implemented=42 with slots 38/39 present ($PASS/$BOOTS boot(s))."
+    echo "verify-live-clipboard: PASS — the shared kernel clipboard round-trips live on VZ (set/overwrite/get through the terminal half) and the syscalls report shows implemented=46 with slots 38/39 present ($PASS/$BOOTS boot(s))."
     echo "PASS: $PASS/$BOOTS" >> "$REPORT"
     sleep 0.5
     exit 0

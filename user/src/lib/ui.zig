@@ -46,6 +46,10 @@ pub const sys_clipboard_set_num: u64 = 38;
 pub const sys_clipboard_get_num: u64 = 39;
 pub const clipboard_capacity: usize = 512;
 pub const sys_timer_set_num: u64 = 40;
+pub const sys_audio_info_num: u64 = 42;
+pub const sys_audio_play_num: u64 = 43;
+pub const sys_audio_volume_num: u64 = 44;
+pub const sys_audio_mute_num: u64 = 45;
 pub const sys_timer_cancel_num: u64 = 41;
 pub const sys_udp_listen_num: u64 = 9;
 pub const sys_udp_send_num: u64 = 10;
@@ -310,6 +314,48 @@ pub fn clipboard_set(data: []const u8) i64 {
 /// copied length; 0 when empty; negative error otherwise.
 pub fn clipboard_get(buf: []u8) i64 {
     return syscall2(sys_clipboard_get_num, @intFromPtr(buf.ptr), buf.len);
+}
+
+/// The negotiated playback state `sys_audio_info` copies out (ADR 0007
+/// slot 42). 24 bytes, fixed layout.
+pub const AudioInfo = extern struct {
+    ready: u32,
+    format: u8, // negotiated FMT_* (0xff = none)
+    rate: u8, // negotiated RATE_* (0xff = none)
+    channels: u8,
+    padding: u8,
+    period_bytes: u32,
+    max_len: u32,
+};
+
+/// Claim 7636 (ADR 0007 slot 42): learn the device's negotiated playback
+/// state. Returns 0; negative error otherwise (ENXIO when no sound device
+/// is attached — the default VM).
+pub fn audio_info(out: *AudioInfo) i64 {
+    return syscall1(sys_audio_info_num, @intFromPtr(out));
+}
+
+/// Claim 7636 (ADR 0007 slot 43): play `data` bytes of PCM samples in the
+/// negotiated format (the app synthesizes what `audio_info` reported).
+/// Returns the bytes played; negative error otherwise (ENXIO no device,
+/// ENAMETOOLONG over the kernel bound, EFAULT bad pointer).
+pub fn audio_play(data: []const u8) i64 {
+    return syscall2(sys_audio_play_num, @intFromPtr(data.ptr), data.len);
+}
+
+/// Claim 9297 (ADR 0007 slot 44): set the bounded kernel-side stream
+/// volume (0..100 percent). Returns the volume on success; negative error
+/// otherwise (EINVAL for a non-process caller or an out-of-range value —
+/// no silent clamping).
+pub fn audio_volume(vol: u8) i64 {
+    return syscall1(sys_audio_volume_num, vol);
+}
+
+/// Claim 9297 (ADR 0007 slot 45): set the kernel-side mute state (1 =
+/// silent). Returns 0 on success; negative error otherwise (EINVAL for a
+/// non-process caller or a value that is not 0/1).
+pub fn audio_mute(muted: u8) i64 {
+    return syscall1(sys_audio_mute_num, muted);
 }
 
 /// Claim 7323 (ADR 0007 slot 40): arm the CALLING process's app timer to

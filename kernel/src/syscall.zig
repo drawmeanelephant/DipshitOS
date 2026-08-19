@@ -72,9 +72,10 @@ const tcp = @import("tcp.zig"); // Milestone 12 (claim 7483): TCP client seam
 const csprng = @import("csprng.zig"); // ISN generation for TCP connect
 const clipboard = @import("clipboard.zig"); // Milestone 14 (claim 0169): the shared kernel clipboard
 const app_timers = @import("app_timers.zig"); // Milestone 14 (claim 7323): the per-process app timer facility
+const virtio_snd = @import("virtio_snd.zig"); // Milestone 15 (claim 7636): the virtio-snd playback path behind sys_audio_*
 
 pub const slot_count: usize = 64;
-pub const implemented_count: usize = 42;
+pub const implemented_count: usize = 46;
 /// Card G6 (claim 0487) follow-on (slot 18): the fixed `sys_win_get` shape —
 /// four u32 LE words (x, y, w, h), 16 bytes, marshaled per call and copy_out'd
 /// through uaccess (the procs snapshot pattern).
@@ -197,6 +198,14 @@ pub const sys_clipboard_get: u64 = 39;
 pub const sys_timer_set: u64 = 40;
 /// Milestone 14 (claim 7323): `sys_timer_cancel()` — slot 41.
 pub const sys_timer_cancel: u64 = 41;
+/// Milestone 15 (claim 7636): `sys_audio_info(out_ptr)` — slot 42.
+pub const sys_audio_info: u64 = 42;
+/// Milestone 15 (claim 7636): `sys_audio_play(ptr, len)` — slot 43.
+pub const sys_audio_play: u64 = 43;
+/// M15 follow-up (claim 9297): `sys_audio_volume(vol)` — slot 44.
+pub const sys_audio_volume: u64 = 44;
+/// M15 follow-up (claim 9297): `sys_audio_mute(muted)` — slot 45.
+pub const sys_audio_mute: u64 = 45;
 
 pub const ErrorCode = enum(i64) {
     einval = -1,
@@ -207,6 +216,7 @@ pub const ErrorCode = enum(i64) {
     enoent = -6,
     eacces = -7,
     enametoolong = -8,
+    enxio = -9, // "no such device" — the sys_audio_* seam's honest no-device refusal
 };
 
 pub fn error_result(code: ErrorCode) u64 {
@@ -313,6 +323,10 @@ fn ensure_table() *const [slot_count]Entry {
         table_storage[sys_clipboard_get] = .{ .name = "sys_clipboard_get", .handler = handle_clipboard_get };
         table_storage[sys_timer_set] = .{ .name = "sys_timer_set", .handler = handle_timer_set };
         table_storage[sys_timer_cancel] = .{ .name = "sys_timer_cancel", .handler = handle_timer_cancel };
+        table_storage[sys_audio_info] = .{ .name = "sys_audio_info", .handler = handle_audio_info };
+        table_storage[sys_audio_play] = .{ .name = "sys_audio_play", .handler = handle_audio_play };
+        table_storage[sys_audio_volume] = .{ .name = "sys_audio_volume", .handler = handle_audio_volume };
+        table_storage[sys_audio_mute] = .{ .name = "sys_audio_mute", .handler = handle_audio_mute };
         table_ready = true;
     }
     return &table_storage;
@@ -1022,6 +1036,81 @@ fn handle_timer_cancel(args: Args, _: *exceptions.VectorFrame) u64 {
     return if (app_timers.cancel(pid)) 1 else 0;
 }
 
+/// Milestone 15 (claim 7636): slot 42 — sys_audio_info(out_ptr)
+/// Copy the device's negotiated playback state out through uaccess as a
+/// 24-byte `AudioInfo` struct {ready, format, rate, channels, period_bytes,
+/// max_len}. The app learns the format/rate/channels it must synthesize
+/// in (FLOAT 19 / 48000 7 / stereo 2 on the observed VZ device). Returns
+/// 0; `EINVAL` for a non-process caller, `EFAULT` for a bad buffer.
+fn handle_audio_info(args: Args, _: *exceptions.VectorFrame) u64 {
+    const out_ptr = args[0];
+    _ = process.find_by_task(scheduler.current_id()) orelse return error_result(.einval);
+    const info = virtio_snd.snd_audio_info();
+    const bytes = std.mem.asBytes(&info);
+    if (uaccess.copy_out(out_ptr, bytes, bytes.len) != .ok) return error_result(.efault);
+    return 0;
+}
+
+/// Milestone 15 (claim 7636): slot 43 — sys_audio_play(ptr, len)
+/// Copy the caller's PCM samples in through uaccess in bounded periods
+/// (4096 B — the A2 period buffer, zero heap), run the proven control
+/// flow (PCM_INFO → SET_PARAMS → PREPARE → START → submit/drain per
+/// period → STOP → RELEASE), and return the bytes played. Errors: `EINVAL`
+/// for a non-process caller or a zero length, `ENAMETOOLONG` over
+/// `audio_max_len`, `EFAULT` for a bad pointer, `ENXIO` when no sound
+/// device is attached (the default VM) or a device-level refusal.
+fn handle_audio_play(args: Args, _: *exceptions.VectorFrame) u64 {
+    const ptr = args[0];
+    const raw_len = args[1];
+    _ = process.find_by_task(scheduler.current_id()) orelse return error_result(.einval);
+    if (raw_len == 0) return error_result(.einval);
+    if (raw_len > virtio_snd.audio_max_len) return error_result(.enametoolong);
+    if (!virtio_snd.snd_ready) return error_result(.enxio);
+    const len: usize = @intCast(raw_len);
+    const st = virtio_snd.snd_audio_start();
+    if (st != virtio_snd.S_OK) return error_result(.enxio);
+    var off: usize = 0;
+    while (off < len) {
+        const chunk: usize = @min(len - off, @as(usize, virtio_snd.beep_period_bytes));
+        if (uaccess.copy_in(virtio_snd.beep_buf[4..][0..chunk], ptr + off, chunk) != .ok) {
+            _ = virtio_snd.snd_audio_stop();
+            return error_result(.efault);
+        }
+        if (virtio_snd.snd_audio_submit(@intCast(chunk)) != virtio_snd.S_OK) {
+            _ = virtio_snd.snd_audio_stop();
+            return error_result(.enxio);
+        }
+        off += chunk;
+    }
+    if (virtio_snd.snd_audio_stop() != virtio_snd.S_OK) return error_result(.enxio);
+    return @intCast(len);
+}
+
+/// M15 follow-up (claim 9297): slot 44 — sys_audio_volume(vol)
+/// Set the bounded kernel-side stream gain (0..100 percent) that
+/// `sys_audio_play` applies to every period at submit time. Pure kernel
+/// state — it works without a device (a later --sound attach inherits
+/// it). Returns the volume on success; `EINVAL` for a non-process caller
+/// or an out-of-range value (honest refusal, no silent clamping).
+fn handle_audio_volume(args: Args, _: *exceptions.VectorFrame) u64 {
+    const vol = args[0];
+    _ = process.find_by_task(scheduler.current_id()) orelse return error_result(.einval);
+    if (vol > 100) return error_result(.einval);
+    return virtio_snd.snd_set_volume(@intCast(vol));
+}
+
+/// M15 follow-up (claim 9297): slot 45 — sys_audio_mute(muted)
+/// Set the kernel-side mute state (1 = silent). Same contract as slot 44:
+/// pure kernel state, applied at the submit choke point. Returns 0 on
+/// success; `EINVAL` for a non-process caller or a value that is not 0/1.
+fn handle_audio_mute(args: Args, _: *exceptions.VectorFrame) u64 {
+    const muted = args[0];
+    _ = process.find_by_task(scheduler.current_id()) orelse return error_result(.einval);
+    if (muted > 1) return error_result(.einval);
+    _ = virtio_snd.snd_set_mute(muted == 1);
+    return 0;
+}
+
 /// Claim 6359 (ADR 0007 slot 28): `sys_exec(path_ptr, path_len)` — the
 /// EL0 exec seam. Marshals the path through the claim-6120 uaccess window
 /// (the `sys_file_open` pattern), requires a process caller, and reuses
@@ -1253,9 +1342,9 @@ fn handle_tcp_close(_: Args, _: *exceptions.VectorFrame) u64 {
     return 0;
 }
 
-/// Deterministic monitor output for the forty-two implemented rows and their counters.
+/// Deterministic monitor output for the implemented rows and their counters.
 pub fn report(con: *console.Console) void {
-    con.puts("syscalls: slots=64 implemented=42\n");
+    con.puts("syscalls: slots=64 implemented=46\n");
     var number: u64 = 0;
     while (number < implemented_count) : (number += 1) {
         const info = entry_info(number).?;
@@ -1287,7 +1376,7 @@ fn capture_marshaled_args(args: Args, _: *exceptions.VectorFrame) u64 {
     return 0xcafe;
 }
 
-test "syscall: runtime table has 64 slots and forty-two unique implemented rows" {
+test "syscall: runtime table has 64 slots and forty-four unique implemented rows" {
     init(test_writer);
     const table = ensure_table();
     try std.testing.expectEqual(@as(usize, 64), table.len);
@@ -1300,7 +1389,11 @@ test "syscall: runtime table has 64 slots and forty-two unique implemented rows"
             implemented += 1;
         }
     }
-    try std.testing.expectEqual(@as(usize, 42), implemented);
+    try std.testing.expectEqual(@as(usize, 46), implemented);
+    try std.testing.expectEqualStrings("sys_audio_info", entry_info(42).?.name);
+    try std.testing.expectEqualStrings("sys_audio_play", entry_info(43).?.name);
+    try std.testing.expectEqualStrings("sys_audio_volume", entry_info(44).?.name);
+    try std.testing.expectEqualStrings("sys_audio_mute", entry_info(45).?.name);
     try std.testing.expectEqualStrings("sys_ping", entry_info(0).?.name);
     try std.testing.expectEqualStrings("sys_exit", entry_info(3).?.name);
     try std.testing.expectEqualStrings("sys_sleep", entry_info(4).?.name);
@@ -2262,7 +2355,7 @@ test "syscall: counters are monotonic and report is deterministic" {
     var con = mock.console();
     report(&con);
     try std.testing.expectEqualStrings(
-        "syscalls: slots=64 implemented=42\n" ++
+        "syscalls: slots=64 implemented=46\n" ++
             "  0 sys_ping calls=2\n" ++
             "  1 sys_write calls=0\n" ++
             "  2 sys_yield calls=0\n" ++
@@ -2304,7 +2397,11 @@ test "syscall: counters are monotonic and report is deterministic" {
             "  38 sys_clipboard_set calls=0\n" ++
             "  39 sys_clipboard_get calls=0\n" ++
             "  40 sys_timer_set calls=0\n" ++
-            "  41 sys_timer_cancel calls=0\n",
+            "  41 sys_timer_cancel calls=0\n" ++
+            "  42 sys_audio_info calls=0\n" ++
+            "  43 sys_audio_play calls=0\n" ++
+            "  44 sys_audio_volume calls=0\n" ++
+            "  45 sys_audio_mute calls=0\n",
         mock.contents(),
     );
 }
@@ -2838,4 +2935,102 @@ test "syscall: TCP connection is process-owned — non-owner send/recv/close/con
     tcp.reset();
     virtio_net.net_ready = false;
     virtio_net.arp.own_ip = .{ 0, 0, 0, 0 };
+}
+
+test "syscall: slot 42 sys_audio_info marshals; slot 43 sys_audio_play refuses without a device" {
+    userspace.init();
+    init(test_writer);
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0); // task 2 = process 0 (boot payload)
+    scheduler.start();
+    virtio_snd.snd_ready = false; // honest default — no --sound device in a test
+    virtio_snd.ctrl_armed = false;
+    virtio_snd.tx_armed = false;
+    var frame = fresh_frame();
+
+    // In task 0 (shell, not a registered process), both audio syscalls are
+    // refused EINVAL before any state is touched.
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_audio_info, .{ 0x1000, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_audio_play, .{ 0x1000, 8, 0, 0, 0, 0 }, &frame));
+
+    // Yield to the user task (task 2, pid 0).
+    try std.testing.expect(scheduler.yield_current()); // shell -> worker
+    try std.testing.expect(scheduler.yield_current()); // worker -> user (2)
+    try std.testing.expectEqual(@as(usize, 2), scheduler.current_id());
+    try std.testing.expect(process.find_by_task(2) != null);
+
+    var info_buf: [32]u8 = @splat(0);
+    const info_addr = @intFromPtr(&info_buf);
+    set_user_regions(
+        .{ .base = 0, .len = 0 },
+        .{ .base = info_addr, .len = info_buf.len },
+    );
+
+    // Bad info buffer -> EFAULT.
+    try std.testing.expectEqual(error_result(.efault), dispatch(sys_audio_info, .{ uaccess.diagnostic_unmapped, 0, 0, 0, 0, 0 }, &frame));
+
+    // Valid buffer: the info struct is copied out with the honest no-device
+    // state (ready=0, format/rate 0xff — never guessed).
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_audio_info, .{ info_addr, 0, 0, 0, 0, 0 }, &frame));
+    const info: *const virtio_snd.AudioInfo = @ptrCast(@alignCast(&info_buf));
+    try std.testing.expectEqual(@as(u32, 0), info.ready);
+    try std.testing.expectEqual(@as(u8, 0xff), info.format);
+    try std.testing.expectEqual(@as(u8, 0xff), info.rate);
+    try std.testing.expectEqual(@as(u32, virtio_snd.audio_max_len), info.max_len);
+
+    // sys_audio_play arg validation before the device check: zero length ->
+    // EINVAL, over-long -> ENAMETOOLONG, then the honest no-device ENXIO.
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_audio_play, .{ info_addr, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.enametoolong), dispatch(sys_audio_play, .{ info_addr, virtio_snd.audio_max_len + 1, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.enxio), dispatch(sys_audio_play, .{ info_addr, 8, 0, 0, 0, 0 }, &frame));
+
+    // Restore the honest default.
+    virtio_snd.snd_ready = false;
+}
+
+test "syscall: slots 44/45 — sys_audio_volume/sys_audio_mute are bounded and process-only (claim 9297)" {
+    userspace.init();
+    init(test_writer);
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0); // task 2 = process 0 (boot payload)
+    scheduler.start();
+    var frame = fresh_frame();
+
+    // Defaults: full volume, unmuted — the honest out-of-the-box stream.
+    virtio_snd.stream_volume = 100;
+    virtio_snd.stream_muted = false;
+
+    // In task 0 (shell, not a registered process), both are refused EINVAL
+    // before any state is touched.
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_audio_volume, .{ 50, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_audio_mute, .{ 1, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u8, 100), virtio_snd.stream_volume);
+    try std.testing.expect(!virtio_snd.stream_muted);
+
+    // Yield to the user task (task 2, pid 0).
+    try std.testing.expect(scheduler.yield_current()); // shell -> worker
+    try std.testing.expect(scheduler.yield_current()); // worker -> user (2)
+    try std.testing.expectEqual(@as(usize, 2), scheduler.current_id());
+    try std.testing.expect(process.find_by_task(2) != null);
+
+    // Volume: bounded — 101 is refused EINVAL (no silent clamping), the
+    // in-range sets return the volume.
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_audio_volume, .{ 101, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u64, 30), dispatch(sys_audio_volume, .{ 30, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u8, 30), virtio_snd.stream_volume);
+    try std.testing.expectEqual(@as(u64, 100), dispatch(sys_audio_volume, .{ 100, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u8, 100), virtio_snd.stream_volume);
+
+    // Mute: only 0/1 — anything else is EINVAL.
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_audio_mute, .{ 2, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_audio_mute, .{ 1, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expect(virtio_snd.stream_muted);
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_audio_mute, .{ 0, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expect(!virtio_snd.stream_muted);
+
+    // Restore the honest default.
+    virtio_snd.stream_volume = 100;
+    virtio_snd.stream_muted = false;
 }
