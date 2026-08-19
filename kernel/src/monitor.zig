@@ -48,6 +48,8 @@ const input = @import("input.zig"); // milestone seven card I3 (claim 6050): the
 const driving_award = @import("driving_award.zig"); // milestone six card G5 (claim 1543): Driving Award, the window manager behind `dui`
 const settings = @import("settings.zig"); // milestone eight card U8 (claim 2649): persistent settings engine
 const dns = @import("dns.zig"); // milestone twelve card N2 (claim 7566): DNS resolver
+const events = @import("events.zig"); // milestone sixteen C3 (claim 0339): per-process event queue bound behind `resources`
+const file_table = @import("file_table.zig"); // milestone sixteen C3 (claim 0339): per-process handle bound behind `resources`
 
 // ---------------------------------------------------------------------------
 // Limits (fixed-size, explicit bounds)
@@ -269,8 +271,9 @@ pub const Command = struct {
 /// (claim 2649) grows it 43 -> 44 (`settings`). Milestone fourteen card S1
 /// (claim 0169) grows it 44 -> 45 (`clip`). Milestone fifteen card A1
 /// (claim 6140) grows it 45 -> 46 (`sound`). Milestone fifteen card A2
-/// (claim 5877) grows it 46 -> 47 (`beep`).
-pub const registry_count: usize = 47;
+/// (claim 5877) grows it 46 -> 47 (`beep`). Milestone sixteen card C3
+/// (claim 0339) grows it 47 -> 48 (`resources`).
+pub const registry_count: usize = 48;
 
 /// Command registry, built at runtime into BSS. A `const` table would hold
 /// link-time absolute addresses for BOTH the string slices and the handler
@@ -312,6 +315,7 @@ fn ensure_registry() []const Command {
             .{ .name = "pci", .help = "enumerate PCI devices on the bus", .usage = "pci", .category = .memory_state, .handler = cmd_pci },
             .{ .name = "procs", .help = "process registry: image, address space, lifecycle, exit status", .usage = "procs", .category = .tasks_processes, .handler = cmd_procs },
             .{ .name = "random", .help = "print n random bytes from the seeded CSPRNG (hex)", .usage = "random [n]", .category = .system, .max_args = 1, .handler = cmd_random },
+            .{ .name = "resources", .help = "fixed-pool audit: scheduler tasks, process registry, windows, page-table carve-out, and per-process ring bounds", .usage = "resources", .category = .memory_state, .handler = cmd_resources },
             .{ .name = "reboot", .help = "restart the machine", .usage = "reboot", .category = .system, .handler = cmd_reboot },
             .{ .name = "repeat", .help = "repeat text, safely bounded", .usage = "repeat <count> <text...>", .category = .system, .min_args = 1, .handler = cmd_repeat },
             .{ .name = "roadpops", .help = "Road Pops framebuffer console: armed/dirty/present counters (the boot terminal on the screen)", .usage = "roadpops", .category = .graphics_input, .handler = cmd_roadpops },
@@ -4620,6 +4624,53 @@ fn cmd_addrspaces(m: *Monitor, args: []const []const u8) ExecError {
 }
 
 // ---------------------------------------------------------------------------
+// Resources command (milestone sixteen C3, claim 0339)
+// ---------------------------------------------------------------------------
+
+/// The fixed-pool audit: one line per bounded kernel pool with its live
+/// occupancy vs its comptime bound. This is the C3 "measure, then grow
+/// only what the apps exhaust" evidence — the live gate reads these lines
+/// BEFORE filling the pool and AFTER, so the growth is pinned in the serial
+/// log rather than asserted from code alone. The pools left bounded
+/// (windows, mailbox rings, event queues, file handles, app timers, the
+/// single TCP client) are printed with their bounds so the audit records
+/// that they were checked and NOT grown (no demo app exhausts them).
+fn cmd_resources(m: *Monitor, args: []const []const u8) ExecError {
+    _ = args;
+    const s = scheduler.stats();
+    m.console.puts("resources: tasks=");
+    m.console.print_u64(@intCast(s.count));
+    m.console.puts("/");
+    m.console.print_u64(@intCast(scheduler.max_tasks));
+    m.console.puts(" zombies=");
+    m.console.print_u64(@intCast(s.zombies));
+    m.console.puts("\n");
+    m.console.puts("resources: procs=");
+    m.console.print_u64(@intCast(process.count()));
+    m.console.puts("/");
+    m.console.print_u64(@intCast(process.max_processes));
+    m.console.puts("\n");
+    m.console.puts("resources: windows=");
+    m.console.print_u64(@intCast(driving_award.count()));
+    m.console.puts("/");
+    m.console.print_u64(@intCast(driving_award.max_windows));
+    m.console.puts("\n");
+    m.console.puts("resources: tables=");
+    m.console.print_u64(@intCast(mmu.tables_used()));
+    m.console.puts("/");
+    m.console.print_u64(@intCast(mmu.tables_capacity()));
+    m.console.puts("\n");
+    m.console.puts("resources: events=");
+    m.console.print_u64(@intCast(events.max_events));
+    m.console.puts(" mbox=");
+    m.console.print_u64(@intCast(mailbox.max_messages));
+    m.console.puts(" fds=");
+    m.console.print_u64(@intCast(file_table.max_handles_per_process));
+    m.console.puts(" timers=1 tcp=1\n");
+    return .none;
+}
+
+// ---------------------------------------------------------------------------
 // Uaccess diagnostic command (claim 6120)
 // ---------------------------------------------------------------------------
 
@@ -6090,13 +6141,40 @@ test "monitor: tasks is registered and reports the deterministic host state" {
     _ = scheduler.register_user(0, 0);
     try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"tasks"}));
     try std.testing.expectEqualStrings(
-        "tasks: enabled=0 current=0 switches=0 pool=4/7 zombies=0\n" ++
+        "tasks: enabled=0 current=0 switches=0 pool=4/11 zombies=0\n" ++
             "  shell    saves=0 resumes=0 advances=0 state=ready\n" ++
             "  worker   saves=0 resumes=0 advances=0 state=ready\n" ++
             "  user-el0 saves=0 resumes=0 advances=0 state=ready\n" ++
             "  idle     saves=0 resumes=0 advances=0 state=ready\n",
         env.mock.contents(),
     );
+}
+
+test "monitor: resources audits the fixed pools at their bounds (C3 claim 0339)" {
+    var env = TestEnv.init();
+    var mon = env.monitor();
+    try std.testing.expect(lookup("resources") != null);
+    try std.testing.expectEqualStrings("fixed-pool audit: scheduler tasks, process registry, windows, page-table carve-out, and per-process ring bounds", lookup("resources").?.help);
+    // Reset the pools the way kernel_main + a fresh boot do (scheduler.init
+    // also clears the process registry; mmu.reset clears the table cursor),
+    // then register the same shell/worker/user shape the `tasks` test uses.
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0);
+    _ = scheduler.register_user(0, 0);
+    mmu.reset();
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"resources"}));
+    const out = env.mock.contents();
+    // The occupancy lines are exact (4 tasks, 0 procs, 0 tables); the
+    // windows line only asserts the shape (other tests in this binary may
+    // have armed the window manager, leaving a non-zero win_count).
+    try std.testing.expect(std.mem.indexOf(u8, out, "resources: tasks=4/11 zombies=0\n") != null);
+    // register_user also registers the boot payload as a PROCESS (claim
+    // 3848), so the registry holds exactly one descriptor here.
+    try std.testing.expect(std.mem.indexOf(u8, out, "resources: procs=1/16\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "resources: windows=") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "/8\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "resources: tables=0/256\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "resources: events=16 mbox=8 fds=8 timers=1 tcp=1\n") != null);
 }
 
 test "monitor: procs reports the process table with lifecycle and exit status" {

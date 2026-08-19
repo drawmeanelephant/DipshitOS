@@ -860,6 +860,31 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_globals.step);
 
     // ------------------------------------------------------------------
+    // Guest: twenty-ninth ESP user program (milestone sixteen, card C2 — claim 8403)
+    // GUARD.BIN. The hostile-EL0-refused proof: steps off its stack into the
+    // guard page below it, faults, and is REAPED (status 139) by the kernel's
+    // fault dispatcher instead of parking the machine. Flat DSK1.
+    // ------------------------------------------------------------------
+    const guard_prog = b.addExecutable(.{
+        .name = "user-guard",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/guard.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    guard_prog.linker_script = b.path("user/linker.ld");
+    const guard_step = b.step("guard", "Build the twenty-ninth ESP user program (zig-out/bin/GUARD.BIN) — the hostile guard-page proof");
+    const guard_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    guard_elf2bin.addFileArg(guard_prog.getEmittedBin());
+    const guard_bin = guard_elf2bin.addOutputFileArg("GUARD.BIN");
+    guard_elf2bin.has_side_effects = true;
+    guard_elf2bin.stdio = .inherit;
+    guard_step.dependOn(&guard_elf2bin.step);
+    const install_guard = b.addInstallFileWithDir(guard_bin, .bin, "GUARD.BIN");
+    b.getInstallStep().dependOn(&install_guard.step);
+
+    // ------------------------------------------------------------------
     // Top-level steps. System-command steps are marked as having side
     // effects (and inherit stdio) so they always execute instead of being
     // skipped by the build cache. (No QEMU path: this project targets Apple
@@ -898,6 +923,7 @@ pub fn build(b: *std.Build) void {
     image.addFileArg(jingle_bin); // ... [JINGLE.BIN] (claim 7636: twenty-sixth user program, EL0 audio-seam proof)
     image.addFileArg(chime_bin); // ... [CHIME.BIN] (claim 3206: twenty-seventh user program, composition capstone proof)
     image.addFileArg(globals_bin); // ... [GLOBALS.BIN] (claim 3805: twenty-eighth user program, the first SEGMENTED DSK3 image)
+    image.addFileArg(guard_bin); // ... [GUARD.BIN] (claim 8403: twenty-ninth user program, the hostile guard-page proof)
     image.has_side_effects = true;
     image.stdio = .inherit;
     image_step.dependOn(&image.step);

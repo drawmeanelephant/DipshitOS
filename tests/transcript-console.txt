@@ -21,6 +21,7 @@ memory / machine state
   mem         summarize the EFI memory map
   pages       physical page allocator pool
   pci         enumerate PCI devices on the bus
+  resources   fixed-pool audit: scheduler tasks, process registry, windows, page-table carve-out, and per-process ring bounds
   timer       interrupt controller + timer status
   uaccess     user-memory copy diagnostics (valid, fault, recovery)
 tasks / processes
@@ -90,7 +91,7 @@ pages selftest: free ok
 pages selftest: alloc 1153 -> none (out of memory)
 pages selftest: ok free=0x0000000000000480
 dipshit> tasks
-tasks: enabled=0 current=0 switches=0 pool=4/7 zombies=0
+tasks: enabled=0 current=0 switches=0 pool=4/11 zombies=0
   shell    saves=0 resumes=0 advances=0 state=ready
   worker   saves=0 resumes=0 advances=0 state=ready
   user-el0 saves=0 resumes=0 advances=0 state=ready

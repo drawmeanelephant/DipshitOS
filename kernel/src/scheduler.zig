@@ -82,15 +82,18 @@ const driving_award = @import("driving_award.zig");
 
 const user_stack_section = if (builtin.object_format == .elf) ".userbss" else "__DATA,__userbss";
 
-/// Round-robin pool (card 3g, claim 5795 — the pool-scale capstone):
-/// shell + EL1h demo worker + FOUR EL0t user slots + the scheduler-owned
-/// idle task — FOUR live user programs at once (shell + worker + 4 users +
-/// idle = 7/7; the 4th user slot is the "spare" while only three are
-/// live). Fixed at comptime — no allocation, no dynamic registration or
-/// processes; the lifecycle's spawn/reap only recycle these slots. Every
-/// prior card documented the 5-slot budget (3b/3c/3f: "5/5, NO spare");
-/// the capstone deliberately raises it and re-derives the gates.
-pub const max_tasks: usize = 7;
+/// Round-robin pool (card 3g, claim 5795 — the pool-scale capstone;
+/// milestone sixteen C3, claim 0339 — the measured growth). Card 3g set
+/// the budget at 7: shell + EL1h demo worker + FOUR EL0t user slots + the
+/// scheduler-owned idle task (7/7, FOUR live user programs). C3 measures
+/// that the demo apps (launcher, file browser, chat, sound apps, desktop)
+/// exhaust those four user slots — the exec path refuses a FIFTH
+/// concurrent program with `pool_full` — and grows the pool to 11:
+/// shell + worker + EIGHT EL0t user slots + idle (11/11, EIGHT live user
+/// programs — the "8+ apps on the desktop" consuming experience). Fixed at
+/// comptime — no allocation, no dynamic registration or processes; the
+/// lifecycle's spawn/reap only recycle these slots.
+pub const max_tasks: usize = 11;
 /// The idle task's fixed slot (registered by `init`, never recycled).
 pub const idle_id: usize = max_tasks - 1;
 /// The worker's static stack (BSS, like every other kernel global). The
@@ -114,6 +117,13 @@ pub const spsr_el0t_irqs: u64 = 0x0;
 /// the counter's `exit=137` / `tasks user-exec exited status=137` in the
 /// serial log and the `procs` table.
 pub const reserved_kill_status: u64 = 137;
+
+/// Milestone sixteen C2 (claim 8403): the reserved exit status an EL0
+/// synchronous fault (a guard-page step, an unmapped access, or a
+/// non-executable fetch) reports. A plain number (128 + 11) — no POSIX
+/// semantics; it is the `tasks GUARD.BIN exited status=139` line the live
+/// gate asserts, distinct from the kill path's 137.
+pub const reserved_fault_status: u64 = 139;
 
 /// The claim-9746 vector frame: 32 slots holding x0..x17, x30, a pad, and
 /// the claim-6729 callee-saved extension (x19..x28 + x29), pushed in
@@ -220,7 +230,7 @@ const Task = struct {
     kill_pending: bool = false,
 };
 
-var tasks: [max_tasks]Task = .{ .{}, .{}, .{}, .{}, .{}, .{}, .{} };
+var tasks: [max_tasks]Task = [_]Task{.{}} ** max_tasks;
 var task_count: usize = 0;
 var current: usize = 0;
 var enabled_flag: bool = false;
@@ -262,6 +272,16 @@ var exit_report_count: usize = 0;
 var reap_reports: [exit_report_max]ReapEntry = [_]ReapEntry{.{ .name = "" }} ** exit_report_max;
 var reap_report_head: usize = 0;
 var reap_report_count: usize = 0;
+/// Milestone sixteen C2 (claim 8403): the EL0 fault reports are a bounded
+/// FIFO like the exit reports — a faulting process's name + FAR_EL1 +
+/// ESR_EL1 EC are snapshotted in exception context, then the shell idle
+/// loop prints `fault: <name> far=0x... ec=0x...` IN ORDER. The name
+/// pointer is a safe snapshot (task names are static string literals).
+pub const fault_report_max: usize = 4;
+const FaultEntry = struct { name: []const u8, far: u64, ec: u64 };
+var fault_reports: [fault_report_max]FaultEntry = [_]FaultEntry{.{ .name = "", .far = 0, .ec = 0 }} ** fault_report_max;
+var fault_report_head: usize = 0;
+var fault_report_count: usize = 0;
 /// Sleep report (claim 0635): `sys_sleep` marks it (exception context, like
 /// exit); the shell idle loop prints it — the deterministic "this task is
 /// now blocked for N ticks" transition line the live gate asserts.
@@ -309,6 +329,8 @@ pub fn init() usize {
     exit_report_count = 0;
     reap_report_head = 0;
     reap_report_count = 0;
+    fault_report_head = 0;
+    fault_report_count = 0;
     sleep_report_pending = false;
     spawn_demo_armed = false;
     user_timer_preemptions = 0;
@@ -460,6 +482,34 @@ pub fn request_kill(id: usize) KillResult {
     if (id == idle_id or id == 0) return .refused;
     tasks[id].kill_pending = true;
     return .ok;
+}
+
+/// Milestone sixteen C2 (claim 8403): an EL0 synchronous fault reached the
+/// exception dispatcher (registered as `exceptions.set_fault_dispatcher`).
+/// Snapshot the faulting task's name + FAR_EL1 + ESR_EL1 EC into the bounded
+/// fault FIFO, then terminate the process through the existing exit path
+/// with `reserved_fault_status` — the full exit → zombie → idle-reap →
+/// page-return lifecycle runs, the ring stages the next task, and the shell
+/// survives. Pure BSS writes, safe in the exception context the dispatcher
+/// runs in (no console, no allocation).
+pub fn fault_current(esr: u64, far: u64) void {
+    if (task_count == 0) return;
+    // Prefer the PROCESS name (e.g. "GUARD.BIN") over the generic task name
+    // ("user-exec") — the process name is a stable name_buf slice, so the
+    // pointer is a safe FIFO snapshot (same rule as the exit reports).
+    const name: []const u8 = if (process.find_by_task(current)) |pid|
+        process.info(pid).?.name
+    else
+        tasks[current].name;
+    const ec = (esr >> 26) & 0x3f;
+    if (fault_report_count == fault_report_max) {
+        fault_report_head = (fault_report_head + 1) % fault_report_max;
+        fault_report_count -= 1;
+    }
+    const idx = (fault_report_head + fault_report_count) % fault_report_max;
+    fault_reports[idx] = .{ .name = name, .far = far, .ec = ec };
+    fault_report_count += 1;
+    _ = exit_current(reserved_fault_status);
 }
 
 /// The user apertures of the CURRENT task (the EL0t task about to SVC —
@@ -1068,6 +1118,21 @@ pub fn maybe_report(con: *console.Console) void {
         con.print_u64(report_advances[i]);
         con.puts("\n");
     }
+    // Milestone sixteen C2 (claim 8403): drain the EL0 fault FIFO IN ORDER
+    // before the exit reports, so a `fault:` line precedes its
+    // `exited status=139` consequence in the serial log.
+    while (fault_report_count > 0) {
+        const entry = fault_reports[fault_report_head];
+        fault_report_head = (fault_report_head + 1) % fault_report_max;
+        fault_report_count -= 1;
+        con.puts("fault: ");
+        con.puts(entry.name);
+        con.puts(" far=");
+        con.print_hex(entry.far);
+        con.puts(" ec=");
+        con.print_hex_min(entry.ec);
+        con.puts("\n");
+    }
     // Card 3d (claim 1014): drain the task exit report FIFO IN ORDER — N
     // exits in one window print N `tasks <name> exited status=<n>` lines.
     while (exit_report_count > 0) {
@@ -1236,14 +1301,18 @@ test "scheduler: register_worker builds a valid synthetic frame" {
     while (i < frame_bytes) : (i += 8) {
         try std.testing.expectEqual(@as(u64, 0), std.mem.readInt(u64, @as(*const [8]u8, @ptrFromInt(t.sp + i)), .little));
     }
-    // Card 3g (claim 5795): the pool is shell + idle + worker + FOUR user
-    // slots (four live programs at the 7/7 budget); a registration beyond
-    // the 7-slot budget fails (bounded).
+    // Milestone sixteen C3 (claim 0339): the pool is shell + idle +
+    // worker + EIGHT user slots (eight live programs at the 11/11 budget);
+    // a registration beyond the 11-slot budget fails (bounded).
     try std.testing.expectEqual(@as(usize, 2), register_user(0x3333, 0).?);
     try std.testing.expectEqual(@as(usize, 3), register_worker(0).?);
     try std.testing.expectEqual(@as(usize, 4), register_worker(0).?);
     try std.testing.expectEqual(@as(usize, 5), register_worker(0).?);
-    try std.testing.expectEqual(@as(usize, 7), task_count);
+    try std.testing.expectEqual(@as(usize, 6), register_worker(0).?);
+    try std.testing.expectEqual(@as(usize, 7), register_worker(0).?);
+    try std.testing.expectEqual(@as(usize, 8), register_worker(0).?);
+    try std.testing.expectEqual(@as(usize, 9), register_worker(0).?);
+    try std.testing.expectEqual(@as(usize, 11), task_count);
     try std.testing.expect(register_worker(0) == null);
     // Claim 0826: capacity is observable — the full pool has no free slot.
     try std.testing.expect(!has_free_slot());
@@ -1560,7 +1629,22 @@ test "scheduler: two live user tasks coexist with their own roots and regions" {
     const kstack_d = kstack_d_bytes[0..];
     const user_d = register_exec_user(0x6000, root_b, 64, 0x1c400000, 8192, kstack_d, 0, 0).?;
     try std.testing.expectEqual(@as(usize, 5), user_d);
-    try std.testing.expectEqual(@as(usize, 7), task_count); // shell + worker + A + B + C + D + idle
+    // Milestone sixteen C3 (claim 0339): the 11-slot pool holds EIGHT user
+    // tasks. Fill the remaining four slots so the capacity gate is
+    // observable at the new budget.
+    var kstack_e_bytes: [task_stack_size]u8 align(16) = undefined;
+    const kstack_e = kstack_e_bytes[0..];
+    _ = register_exec_user(0x7000, root_b, 64, 0x1d400000, 8192, kstack_e, 0, 0).?;
+    var kstack_f_bytes: [task_stack_size]u8 align(16) = undefined;
+    const kstack_f = kstack_f_bytes[0..];
+    _ = register_exec_user(0x8000, root_b, 64, 0x1e400000, 8192, kstack_f, 0, 0).?;
+    var kstack_g_bytes: [task_stack_size]u8 align(16) = undefined;
+    const kstack_g = kstack_g_bytes[0..];
+    _ = register_exec_user(0x9000, root_b, 64, 0x1f400000, 8192, kstack_g, 0, 0).?;
+    var kstack_h_bytes: [task_stack_size]u8 align(16) = undefined;
+    const kstack_h = kstack_h_bytes[0..];
+    _ = register_exec_user(0xa000, root_b, 64, 0x20400000, 8192, kstack_h, 0, 0).?;
+    try std.testing.expectEqual(@as(usize, 11), task_count); // shell + worker + A..H + idle
     try std.testing.expect(!has_free_slot());
     // Each task carries ITS OWN root and apertures.
     try std.testing.expect(task_ttbr0(user_a) != task_ttbr0(user_b));
@@ -1587,7 +1671,7 @@ test "scheduler: two live user tasks coexist with their own roots and regions" {
     try std.testing.expectEqual(@as(usize, user_a), current_id());
     try std.testing.expect(yield_current()); // A -> B
     try std.testing.expectEqual(@as(usize, user_b), current_id());
-    // A third user program cannot load: the pool is the capacity gate.
+    // A ninth user program cannot load: the pool is the capacity gate.
     try std.testing.expect(register_exec_user(0x5000, root_a, 64, 0x2a400000, 8192, kstack_b, 0, 0) == null);
 }
 
@@ -1759,6 +1843,36 @@ test "scheduler: a killed task exits with the reserved status at its next select
     try std.testing.expect(task_info(2) == null);
     try std.testing.expect(has_free_slot());
     try std.testing.expectEqual(KillResult.not_found, request_kill(2)); // the freed slot is not_found
+}
+
+test "scheduler: an EL0 fault reaps the task with status 139 and reports it" {
+    // Milestone sixteen C2 (claim 8403): a synchronous EL0 fault (here an
+    // EC-0x24 data abort at a guard-page FAR) reaches fault_current, which
+    // snapshots the fault report AND reaps the task through the existing
+    // exit path with reserved_fault_status. The shell drains `fault:` before
+    // the exit report.
+    _ = init();
+    _ = register_worker(0x2000).?;
+    _ = register_user(0x3000, 0).?;
+    start();
+    try std.testing.expect(yield_current()); // shell -> worker
+    try std.testing.expect(yield_current()); // worker -> user
+    try std.testing.expectEqual(@as(usize, 2), current_id());
+    fault_current(0x24 << 26, 0x7fff_f000); // user -> idle
+    try std.testing.expectEqual(@as(usize, idle_id), current_id());
+    try std.testing.expect(is_terminated(2));
+    try std.testing.expectEqual(@as(?u64, reserved_fault_status), terminated_status(2));
+    var mock = console.MockConsole(128){};
+    var con = mock.console();
+    maybe_report(&con);
+    try std.testing.expectEqualStrings(
+        "fault: user-el0 far=0x000000007ffff000 ec=0x24\n" ++
+            "tasks user-el0 exited status=139\n" ++
+            "procs user-el0 exited status=139\n",
+        mock.contents(),
+    );
+    try std.testing.expect(reap(2));
+    try std.testing.expect(task_info(2) == null);
 }
 
 test "scheduler: a killed sleeping task is terminated at its wake-selection" {

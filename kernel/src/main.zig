@@ -519,6 +519,11 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
     // `build_identity_map` consumed above.
     syscall.set_user_regions(userspace.text_va_region(), userspace.stack_va_region());
     exceptions.set_svc_dispatcher(syscall.handle_svc);
+    // Milestone sixteen C2 (claim 8403): an EL0 synchronous fault (a guard-
+    // page step, an unmapped access, a non-executable fetch) is process
+    // termination, not a machine hang — the scheduler reaps the faulting
+    // process (status 139) and stages the next task.
+    exceptions.set_fault_dispatcher(scheduler.fault_current);
     // Claim 7948 (roadmap item 5, second half): GIC + generic timer. The
     // MADT/GTDT discovery ran PRE-EXIT inside pci.dump_acpi (post-exit ACPI
     // reads hang on VZ, claim 0013); program the controller + timer NOW —
