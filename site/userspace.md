@@ -14,9 +14,8 @@ scheduled as processes. The syscall boundary is a frozen, numbered ABI.
 
 The syscall ABI is frozen in `docs/decisions/0007-syscall-abi.md`: the syscall
 number goes in x8, arguments in x0–x5, the result in x0, dispatched through a
-runtime-built 64-slot table. Thirty-eight slots (0–37) are implemented; the
-rest return `ENOSYS`. Slots 38–41 are planned for milestone fourteen (the
-clipboard + application timers).
+runtime-built 64-slot table. Forty-six slots (0–45) are implemented; the
+rest return `ENOSYS`.
 
 | Slot | Name | What it does |
 |-----:|------|--------------|
@@ -36,6 +35,10 @@ clipboard + application timers).
 | 29 | `kill` | terminate a running EL0 program (TOP.BIN's Kill button) |
 | 30–33 | `tcp_connect` / `tcp_send` / `tcp_recv` / `tcp_close` | bounded TCP from EL0 |
 | 34–37 | `file_delete` / `file_rename` / `file_truncate` / `file_free` | mutate the DATA filesystem from EL0 |
+| 38/39 | `clipboard_set` / `clipboard_get` | the machine-global shared clipboard (NOTEPAD copy/cut/paste) |
+| 40/41 | `timer_set` / `timer_cancel` | one countdown timer per process, posting `TIMER` events |
+| 42/43 | `audio_info` / `audio_play` | the EL0 audio seam: learn the negotiated PCM state, play bounded chunks |
+| 44/45 | `audio_volume` / `audio_mute` | bounded, process-only sound-state control |
 
 ## Fault-safe uaccess
 

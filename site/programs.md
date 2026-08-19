@@ -8,7 +8,8 @@ tags: [capabilities, userspace, demos]
 # User programs & demos
 
 The `user/` tree builds flat `.BIN` images that `exec` loads from the ESP and
-runs at EL0. Each one is a small proof of a seam.
+runs at EL0. Each one is a small proof of a seam. Twenty-seven images ship on
+the ESP at the current tree:
 
 | Image | Source | Proves |
 |-------|--------|--------|
@@ -34,6 +35,11 @@ runs at EL0. Each one is a small proof of a seam.
 | `CHAT.BIN` | `user/src/chat.zig` | graphical UDP chat: windows + events + `sys_udp_*` |
 | `FILE.BIN` | `user/src/file_browser.zig` | the graphical DATA-partition file browser (list, read, delete, rename) |
 | `FSTEST.BIN` | `user/src/fstest.zig` | the mutating filesystem seam: create/write → truncate → rename → free → delete |
+| `TIMER.BIN` | `user/src/timertest.zig` | the app-timer seam: arm → block on `TIMER` event → cancel |
+| `VICTIM.BIN` | `user/src/hardening_victim.zig` | the hostile-EL0 proof's victim: owns a window and yield-loops forever |
+| `HARDEN.BIN` | `user/src/harden.zig` | the hostile-EL0 proof's attacker: refused EINVAL on every cross-process window call |
+| `JINGLE.BIN` | `user/src/jingle.zig` | the EL0 audio seam: learns the negotiated PCM state, plays Twinkle Twinkle Little Star |
+| `CHIME.BIN` | `user/src/chime.zig` | event-triggered sound: arms an app timer, blips 880 Hz on every `TIMER` event |
 
 They are built by the same pipeline as the kernel: Zig → ELF → flat `DSK1`
 image, embedded on the ESP by the image builder.

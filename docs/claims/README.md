@@ -201,6 +201,7 @@ CI) fails if the table drifts from the claim files.
 | [7392-verify-gates-at-newest-main](7392-verify-gates-at-newest-main.md) | buffy (`freebuff/grab-most-current-git-and-let-s-continue-on-with-o-bd839138-534f-40b1-97b3-220d1b1c9a61`) | ✅ done 2026-08-09 — full class A (11/11) + class B (9/9) green at the merged |
 | [7463-e0-event-contract](7463-e0-event-contract.md) | buffy (`agent/buffy/m9-events`) | ✅ done (2026-08-15) |
 | [7483-n1-tcp-syscall-seam](7483-n1-tcp-syscall-seam.md) | buffy (`agent/buffy/m12-n1-tcp-seam`) | ✅ done |
+| [7489-site-current-state-m15](7489-site-current-state-m15.md) | opencode (`docs/site-current-state-m15`) | ✅ done 2026-08-19 — the site now reflects reality: M14 + M15 shipped, M16 the current stream, 46-slot syscall ABI (slots 0–45), 27 ESP `.BIN` programs, virtio-snd (DID 0x1059), the 71-gate live set, and the 47-command monitor registry |
 | [7566-n2-dns-client](7566-n2-dns-client.md) | buffy (`agent/buffy/m12-n2-dns-client`) | ✅ done |
 | [7604-sys-kill-el0-termination](7604-sys-kill-el0-termination.md) | buffy (`agent/buffy/m11-sys-kill`) | ✅ done |
 | [7636-m15-a3-el0-audio](7636-m15-a3-el0-audio.md) | buffy (`freebuff/hey-bestie-the-chat-got-lost-so-we-re-so-back-can--53baf792-c2f8-470d-a9f1-6344aa90847a`) | ✅ done (2026-08-18) |
