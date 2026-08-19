@@ -27,26 +27,31 @@ is the canonical, always-current source; this is the readable summary.
 | 11 | Desktop platform A0–A5: ADR 0011, the zero-heap `ui.zig` toolkit, `CALC.BIN`/`NOTEPAD.BIN`/`TOP.BIN`, the `DESKTOP.BIN` launcher, `sys_exec`/`sys_kill` (slots 28/29) |
 | 12 | Network apps N0–N3: TCP syscall seam (slots 30–33), RFC 1035 DNS, `TCP.BIN`/`FETCH.BIN`/`CHAT.BIN` |
 | 13 | Files & applications B1–B4: mutating filesystem seam (B1, slots 34–37), `APPS.TXT` identity manifest (B2), the `FILE.BIN` graphical data browser (B3), and manifest-driven desktop composition (B4) |
+| 14 | Shared user services S1–S4: the clipboard (slots 38–39), app timers (slots 40–41), the NOTEPAD composition capstone, and security/isolation hardening (the TCP owner fix + the hostile-EL0 gate) |
+| 15 | Audio A1–A4: virtio-snd transport, PCM playback + `beep`, the EL0 audio seam (slots 42–45), `JINGLE.BIN`, the boot chime, and `CHIME.BIN` |
 
-Every milestone through thirteen is **done** and live-gated; milestone
-fourteen is the active stream.
+Every milestone through fifteen is **done** and live-gated; milestone
+sixteen is the active stream.
 
 ## Current
 
-**Milestone fourteen — shared user services** is the active milestone. Its
-cards:
+**Milestone sixteen — the kernel grows up (internals consolidation)** is the
+active milestone. It is the internals-consolidation milestone the M11–M15
+apps now force — the M15-era claims recorded the pressure directly: a 33 KB
+`JINGLE.BIN` would not load (the 16 KiB exec bound), a global BSS buffer
+faulted on write from EL0 (the W^X single-segment layout), and the fixed
+pools refused a fifth concurrent user program. Its cards:
 
-- ⬜ **S1 — clipboard.** `sys_clipboard_set`/`sys_clipboard_get` (ADR 0007
-  slots 38–39) over one bounded kernel clipboard buffer; NOTEPAD copy/cut/
-  paste plus terminal copy.
-- ⬜ **S2 — application timers.** A bounded per-process timer facility
-  (slots 40–41) posting `TIMER` events on the ADR 0009 queue, so apps stop
-  spinning sleep loops.
-- ⬜ **S3 — composition capstone.** NOTEPAD copy/paste with a timer-driven
-  cursor, proving S1 + S2 together.
-- ⬜ **S4 — security/isolation hardening.** Process-ownership audit across
-  every EL0-named resource, uaccess validation-depth sweep, resource limits,
-  and a hostile-EL0-refused live gate.
+- ⬜ **C1 — multi-segment user image.** Real writable globals and a lifted
+  16 KiB load bound (wishlist 15).
+- ⬜ **C2 — guard pages + per-segment permissions.** The wishlist-14 address
+  space depth.
+- ⬜ **C3 — measured pools.** The fixed pools grown only where the demo apps
+  actually hurt (wishlist 13).
+- ⬜ **C4 — composition capstone.** All three proven in one session.
+
+Issues #190–#193 are filed (one per card, the M14 way); the march deck is
+`docs/march-m16.md`.
 
 Honest-bound edges that remain planned regardless of milestone:
 
@@ -54,6 +59,9 @@ Honest-bound edges that remain planned regardless of milestone:
   while the guest is a fixed 256 MiB).
 - **Networking edges** — TCP server/listen and any routing beyond the NAT
   gateway; RTO stays fixed (no adaptive estimation).
+- **Deeper filesystem semantics** — wishlist 17 stays deferred: M13's B1
+  already shipped delete/rename/truncate/free and no app has produced new
+  pressure.
 - **The M8 U4 pointer-focus live seam** — the window manager's pointer-driven
   focus is guest-complete and host-tested, but the live proof rides a
   real-mouse class-C gate (`verify-pointer-manual`) and a class-B CG gate
@@ -61,7 +69,7 @@ Honest-bound edges that remain planned regardless of milestone:
 
 <Aside kind="note">
 
-**PLANNED.** S1–S4 are defined with gates in `docs/march-m14.md`; nothing is
+**PLANNED.** C1–C4 are defined with gates in `docs/march-m16.md`; nothing is
 shipped until it has a gate. The tracker, not this page, is the live per-card
 status.
 

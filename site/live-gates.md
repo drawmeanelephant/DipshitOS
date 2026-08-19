@@ -38,10 +38,12 @@ Each gate is a `tools/verify-live-*.sh` script that:
 - **Graphics / input** — `live-screen`, `live-text`, `live-roadpops`, `live-glyphs`, `live-win`, `live-win-syscall`, `live-win-move`, `live-win-close`, `live-win-hig`, `live-xhci`, `live-usb`, `live-input`
 - **Usability / HIG** — `live-help`, `live-editing`, `live-settings`, plus the pointer seams: `pointer-manual` (class C, a human at the mouse) and `live-pointer-cg` (class B, self-gating on Accessibility trust)
 - **Events / desktop / apps** — `live-events`, `live-sys-kill`, `live-desktop`, `live-file-browser`
+- **Shared services** — `live-clipboard`, `live-timers`, `live-m14-composition`, `live-hardening`
+- **Sound** — `live-sound-device`, `live-sound-playback`, `live-sound-app`, `live-sound-control`, `live-m15-composition`
 
 The aggregate `verify-vz` sweep re-checks the shared seam across every
-subsystem in one run (43 gates at the current tree) — the standing regression
-proof that a new subsystem did not break the ones before it.
+subsystem in one run (71 live gates at the current tree) — the standing
+regression proof that a new subsystem did not break the ones before it.
 
 <Aside kind="tip">
 
