@@ -176,6 +176,15 @@ assumption comes from documentation or reasoning only.
     gate drives focus cycling with the `dui cycle` monitor command over
     serial instead (`tools/verify-live-win-hig.sh`) — the chord itself is
     not gated live.
+    **M14 S3 consequence (observed 2026-08-19, claim 0120):** the same wall
+    blocks the composition capstone's Ctrl-C/Ctrl-V/Ctrl-Q — the guest sees
+    the plain letters `c`/`v`/`q`. The capstone therefore drives NOTEPAD's
+    copy/paste through a new `dui key <char|copy|cut|paste|quit>` monitor
+    seam that injects the SAME `KEY_DOWN` event into the focused window's
+    queue, one layer above the HID→modifier translation VZ drops
+    (`tools/verify-live-m14-composition.sh` PASS 1/1) — the U5 `dui cycle`
+    precedent generalized; the interactive chord decode is host-tested in
+    `user/src/notepad.zig`.
   - **Synthesized POINTER events do not reach the pointing device
     (observed 2026-08-14, claim 4993, card U4):** FIVE delivery routes
     were dispatched with the runner's own PTR-EVT evidence and every one

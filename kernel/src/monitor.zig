@@ -46,6 +46,8 @@ const input = @import("input.zig"); // milestone seven card I3 (claim 6050): the
 const driving_award = @import("driving_award.zig"); // milestone six card G5 (claim 1543): Driving Award, the window manager behind `dui`
 const settings = @import("settings.zig"); // milestone eight card U8 (claim 2649): persistent settings engine
 const dns = @import("dns.zig"); // milestone twelve card N2 (claim 7566): DNS resolver
+const clipboard = @import("clipboard.zig"); // milestone 14 (claim 2611): the shared text clipboard behind `clipboard`
+const events = @import("events.zig"); // milestone 9 (claim 7670): per-process event queues behind `dui key`
 
 // ---------------------------------------------------------------------------
 // Limits (fixed-size, explicit bounds)
@@ -265,7 +267,7 @@ pub const Command = struct {
 /// (claim 8323) grows it 40 -> 42 (`welcome`, `tour`). Milestone eight card U7
 /// (claim 2990) grows it 42 -> 43 (`sysinfo`). Milestone eight card U8
 /// (claim 2649) grows it 43 -> 44 (`settings`).
-pub const registry_count: usize = 44;
+pub const registry_count: usize = 45;
 
 /// Command registry, built at runtime into BSS. A `const` table would hold
 /// link-time absolute addresses for BOTH the string slices and the handler
@@ -286,6 +288,7 @@ fn ensure_registry() []const Command {
             .{ .name = "beans", .help = "count beans, probably", .usage = "beans [count]", .category = .machine_identity, .max_args = 1, .handler = cmd_beans },
             .{ .name = "cat", .help = "print a file from the ESP (by name or /path)", .usage = "cat <file|path>", .category = .storage, .min_args = 1, .max_args = 1, .handler = cmd_cat },
             .{ .name = "clear", .help = "clean up the crime scene", .usage = "clear", .category = .system, .handler = cmd_clear },
+            .{ .name = "clipboard", .help = "shared text clipboard: stored bytes and length (milestone 14 S1/S3)", .usage = "clipboard", .category = .tasks_processes, .handler = cmd_clipboard },
             .{ .name = "echo", .help = "repeat your regrettable decisions", .usage = "echo <text...>", .category = .system, .handler = cmd_echo },
             .{ .name = "elephant", .help = "operational mascot diagnostics", .usage = "elephant", .category = .machine_identity, .handler = cmd_elephant },
             .{ .name = "exec", .help = "load a user program from the ESP and enter it at EL0", .usage = "exec [<file> [arg...]]", .category = .tasks_processes, .max_args = 1 + esp_exec.max_exec_args, .handler = cmd_exec },
@@ -323,7 +326,7 @@ fn ensure_registry() []const Command {
             .{ .name = "uname", .help = "compact system identity", .usage = "uname", .category = .machine_identity, .handler = cmd_uname },
             .{ .name = "version", .help = "display build information", .usage = "version", .category = .machine_identity, .handler = cmd_version },
             .{ .name = "welcome", .help = "guided tour of the system for new users", .usage = "welcome", .category = .machine_identity, .handler = cmd_welcome },
-            .{ .name = "dui", .help = "Driving Award window manager: registry (with owner pids), z-order, focus, hit-testing ('dui focus <n>' focuses; 'dui raise <n>' raises; 'dui move <n> <x> <y>' moves a user window; 'dui close <n>' releases a user window; 'dui list <pid>' filters by owner; 'dui hit <x> <y>' hit-tests; 'dui cycle' cycles focus like Alt+Tab)", .usage = "dui [focus <n>|raise <n>|move <n> <x> <y>|close <n>|list <pid>|hit <x> <y>|cycle]", .category = .graphics_input, .max_args = 4, .handler = cmd_dui },
+            .{ .name = "dui", .help = "Driving Award window manager: registry (with owner pids), z-order, focus, hit-testing ('dui focus <n>' focuses; 'dui raise <n>' raises; 'dui move <n> <x> <y>' moves a user window; 'dui close <n>' releases a user window; 'dui list <pid>' filters by owner; 'dui hit <x> <y>' hit-tests; 'dui cycle' cycles focus like Alt+Tab; 'dui key <char|copy|cut|paste|quit>' injects a synthetic key chord into the focused window)", .usage = "dui [focus <n>|raise <n>|move <n> <x> <y>|close <n>|list <pid>|hit <x> <y>|cycle|key <token>]", .category = .graphics_input, .max_args = 4, .handler = cmd_dui },
             .{ .name = "write", .help = "write text to a file on the ESP", .usage = "write <file> <text...>", .category = .storage, .min_args = 1, .handler = cmd_write },
         };
         registry_ready = true;
@@ -1335,6 +1338,18 @@ fn cmd_roadpops(m: *Monitor, args: []const []const u8) ExecError {
     return .none;
 }
 
+/// Claim 0120 (M14 S3): reverse of `input.hid_to_ascii` for the subset the
+/// composition gate types — letters, digits, and space. Returns the HID
+/// usage (the shift flag is derived by the caller for uppercase).
+fn ascii_to_usage(ch: u8) ?u8 {
+    if (ch >= 'a' and ch <= 'z') return 0x04 + (ch - 'a');
+    if (ch >= 'A' and ch <= 'Z') return 0x04 + (ch - 'A');
+    if (ch >= '1' and ch <= '9') return 0x1e + (ch - '1');
+    if (ch == '0') return 0x27;
+    if (ch == ' ') return 0x2c;
+    return null;
+}
+
 /// `dui` — report the Driving Award window manager (claim 1543, milestone
 /// six G5): the registry (id/title/kind/rect/z-order/dirty/visible/owner),
 /// the focused window, and the composite presents. `dui focus <n>` focuses
@@ -1554,6 +1569,79 @@ fn cmd_dui(m: *Monitor, args: []const []const u8) ExecError {
             } else {
                 m.console.puts("none");
             }
+            m.console.puts("\n");
+            return .none;
+        }
+        if (std.mem.eql(u8, args[0], "key")) {
+            // Claim 0120 (M14 S3): inject a synthetic key chord into the
+            // FOCUSED window's event queue. The synthesized Ctrl-C/Ctrl-V
+            // chords CANNOT reach VZ's HID report (claim 0935's modifier
+            // wall), so the composition gate drives NOTEPAD's copy/paste
+            // through this seam — the SAME handle_keyboard_event path a
+            // real chord drives, one layer above the HID→modifier
+            // translation that VZ drops. The U5 `dui cycle` precedent
+            // (synthesizing the Alt+Tab focus signal the keyboard cannot
+            // deliver) generalized to key chords.
+            if (args.len != 2) {
+                print_usage(m, lookup("dui").?);
+                return .usage;
+            }
+            const token = args[1];
+            var usage: u8 = 0;
+            var flags: u16 = 0;
+            var ascii: u8 = 0;
+            if (token.len == 1) {
+                const ch = token[0];
+                usage = ascii_to_usage(ch) orelse {
+                    err_prefix(m);
+                    m.console.puts("no key mapping for: ");
+                    m.console.puts(token);
+                    m.console.puts("\n");
+                    return .invalid_argument;
+                };
+                ascii = ch;
+                if (ch >= 'A' and ch <= 'Z') flags = events.MOD_SHIFT;
+            } else if (std.mem.eql(u8, token, "copy")) {
+                usage = 0x06; // HID 'c'
+                flags = events.MOD_CTRL;
+                ascii = 'c';
+            } else if (std.mem.eql(u8, token, "cut")) {
+                usage = 0x1b; // HID 'x'
+                flags = events.MOD_CTRL;
+                ascii = 'x';
+            } else if (std.mem.eql(u8, token, "paste")) {
+                usage = 0x19; // HID 'v'
+                flags = events.MOD_CTRL;
+                ascii = 'v';
+            } else if (std.mem.eql(u8, token, "quit")) {
+                usage = 0x14; // HID 'q'
+                flags = events.MOD_CTRL;
+                ascii = 'q';
+            } else {
+                err_prefix(m);
+                m.console.puts("unknown key token: ");
+                m.console.puts(token);
+                m.console.puts("\n");
+                return .invalid_argument;
+            }
+            const owner = driving_award.focused_owner() orelse {
+                err_prefix(m);
+                m.console.print_line("no focused user window");
+                return .invalid_argument;
+            };
+            events.push(owner, .{
+                .kind = events.KEY_DOWN,
+                .flags = flags,
+                .seq = 0,
+                .arg0 = usage,
+                .arg1 = ascii,
+            });
+            m.console.puts("dui key: owner=");
+            m.console.print_u64(owner);
+            m.console.puts(" usage=");
+            m.console.print_hex_min(usage);
+            m.console.puts(" flags=");
+            m.console.print_hex_min(flags);
             m.console.puts("\n");
             return .none;
         }
@@ -4264,6 +4352,24 @@ fn cmd_syscalls(m: *Monitor, args: []const []const u8) ExecError {
     return .none;
 }
 
+/// Milestone 14 (claim 0120): dump the shared clipboard — length + raw bytes
+/// — the shell-side read of the S1 shared text service. The S3 composition
+/// gate reads it after NOTEPAD's copy to observe the pasted bytes byte-exact.
+fn cmd_clipboard(m: *Monitor, args: []const []const u8) ExecError {
+    _ = args;
+    const data = clipboard.contents();
+    m.console.puts("clipboard: len=");
+    m.console.print_u64(data.len);
+    if (data.len == 0) {
+        m.console.puts(" (empty)\n");
+    } else {
+        m.console.puts(" '");
+        m.console.puts(data);
+        m.console.puts("'\n");
+    }
+    return .none;
+}
+
 // ---------------------------------------------------------------------------
 // Per-task address-space command (claim 5804)
 // ---------------------------------------------------------------------------
@@ -5906,6 +6012,66 @@ test "monitor: spawn is registered and reports the demo spawn or the bound" {
     env.mock.reset();
     try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"spawn"}));
     try std.testing.expectEqualStrings("spawn: pool full or demo already running\n", env.mock.contents());
+}
+
+test "monitor: clipboard is registered and reports the shared buffer" {
+    var env = TestEnv.init();
+    var mon = env.monitor();
+    syscall.init(test_syscall_writer); // resets the clipboard
+    try std.testing.expect(lookup("clipboard") != null);
+    try std.testing.expectEqualStrings("shared text clipboard: stored bytes and length (milestone 14 S1/S3)", lookup("clipboard").?.help);
+
+    // Empty buffer.
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"clipboard"}));
+    try std.testing.expectEqualStrings("clipboard: len=0 (empty)\n", env.mock.contents());
+
+    // With content: byte-exact length + raw bytes.
+    clipboard.set("hello");
+    env.mock.reset();
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"clipboard"}));
+    try std.testing.expectEqualStrings("clipboard: len=5 'hello'\n", env.mock.contents());
+}
+
+test "monitor: dui key injects a synthetic key chord into the focused window (claim 0120)" {
+    events.init();
+    driving_award.arm();
+    var env = TestEnv.init();
+    var mon = env.monitor();
+
+    // Open a user window owned by pid 2; it takes focus.
+    const res = driving_award.user_open(10, 10, 100, 100, 2);
+    try std.testing.expect(res == .opened);
+    try std.testing.expectEqual(@as(?usize, 2), driving_award.focused_owner());
+    _ = events.pop(2); // consume the WIN_FOCUS the open emitted
+
+    // A plain printable char injects a modifier-free KEY_DOWN.
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "dui", "key", "h" }));
+    var ev = events.pop(2).?;
+    try std.testing.expectEqual(events.KEY_DOWN, ev.kind);
+    try std.testing.expectEqual(@as(u16, 0), ev.flags);
+    try std.testing.expectEqual(@as(u32, 0x0b), ev.arg0); // HID 'h'
+    try std.testing.expectEqual(@as(u32, 'h'), ev.arg1);
+
+    // The named Ctrl chords carry MOD_CTRL + the letter's HID usage.
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "dui", "key", "copy" }));
+    ev = events.pop(2).?;
+    try std.testing.expectEqual(events.MOD_CTRL, ev.flags);
+    try std.testing.expectEqual(@as(u32, 0x06), ev.arg0); // HID 'c'
+    try std.testing.expectEqual(@as(u32, 'c'), ev.arg1);
+
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "dui", "key", "paste" }));
+    ev = events.pop(2).?;
+    try std.testing.expectEqual(events.MOD_CTRL, ev.flags);
+    try std.testing.expectEqual(@as(u32, 0x19), ev.arg0); // HID 'v'
+    try std.testing.expectEqual(@as(u32, 'v'), ev.arg1);
+
+    // An unknown token is refused honestly.
+    try std.testing.expectEqual(ExecError.invalid_argument, exec(&mon, &.{ "dui", "key", "bogus" }));
+
+    // With no focused user window (focus falls back to the terminal), the
+    // injection is refused honestly.
+    _ = driving_award.close_owner(2);
+    try std.testing.expectEqual(ExecError.invalid_argument, exec(&mon, &.{ "dui", "key", "copy" }));
 }
 
 test "monitor: syscalls is registered and reports deterministic rows" {

@@ -77,6 +77,7 @@ verify-coordination`, and CI) fails if it drifts from the files.
 | `m13-win-dui-rename`: the `win` → `dui` monitor command rename (claim 2223) | [`agent-buffy-m13-win-dui-rename.md`](agent-buffy-m13-win-dui-rename.md) |
 | `agent/buffy/m14-s1-clipboard`: shared clipboard (claim 2611) | [`agent-buffy-m14-s1-clipboard.md`](agent-buffy-m14-s1-clipboard.md) |
 | `agent/buffy/m14-s2-timers`: application timers (claim 5390) | [`agent-buffy-m14-s2-timers.md`](agent-buffy-m14-s2-timers.md) |
+| `agent/buffy/m14-s3-composition`: the composition capstone (claim 0120) | [`agent-buffy-m14-s3-composition.md`](agent-buffy-m14-s3-composition.md) |
 | `agent/buffy/m15-commands` (PR #12) | [`agent-buffy-m15-commands.md`](agent-buffy-m15-commands.md) |
 | `agent/buffy/m15-host-plumbing` (PR #13) | [`agent-buffy-m15-host-plumbing.md`](agent-buffy-m15-host-plumbing.md) |
 | `agent/buffy/m15-machine-controls` | [`agent-buffy-m15-machine-controls.md`](agent-buffy-m15-machine-controls.md) |

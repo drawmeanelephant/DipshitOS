@@ -1221,9 +1221,17 @@ See [`march-m13.md`](march-m13.md) for the per-card tracker.
   byte-exact. Live gate `tools/verify-live-timers.sh` (one-shot fire +
   periodic x3 + cancel + stale refusal + `sys_timer_set calls=2` /
   `sys_timer_cancel calls=2` + exit 0).
-- **S3 — Composition capstone** (issue #177): NOTEPAD copy/paste with a
-  timer-driven cursor — S1+S2 proven together in a real app a human can
-  use. Live gate: `verify-live-m14-composition.sh`.
+- **S3 — Composition capstone** (issue #177): ✅ done 2026-08-19 (claim
+  0120): NOTEPAD copy/paste + timer cursor proven TOGETHER live on VZ.
+  The gate drives NOTEPAD through a new `dui key <char|copy|cut|paste|quit>`
+  seam (a synthesized Ctrl chord cannot reach VZ's HID report — claim 0935's
+  modifier wall; `dui key` injects the SAME key event into the focused
+  window's queue, the U5 `dui cycle` precedent generalized), then `dui
+  close` + a new `clipboard` monitor command + `syscalls`:
+  `notepad: copy ok` → `notepad: paste ok` → `notepad: blink` (timer) →
+  `clipboard: len=5 'hello'` byte-exact → `sys_clipboard_set`/
+  `sys_clipboard_get`/`sys_timer_set` `calls=1` each → exit 43.
+  Live gate `tools/verify-live-m14-composition.sh` PASS 1/1.
 - **S4 — Security/isolation hardening** (issue #178, wishlist 19):
   process-ownership audit across every EL0-named resource, a uaccess
   validation-depth sweep, and resource limits — proven by a hostile EL0

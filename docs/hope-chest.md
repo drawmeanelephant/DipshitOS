@@ -12,9 +12,10 @@
 
 ## The metaphor
 
-- **Tucson** = right now. M8–M13 are shipped; M14 is planned but nothing is
-  claimed. The immediate miles are M14, then the first genuinely *new*
-  subsystem after it.
+- **Tucson** = right now. M8–M13 are shipped; M14 S1–S3 (clipboard, timers,
+  composition capstone) are done and only S4 hardening remains. The
+  immediate miles are M14 S4, then the first genuinely *new* subsystem
+  after it (audio).
 - **Gas stations** = the milestones between here and the peaks. Each one has
   cards, a live gate, and — per the roadmap meta-requirement — **a small
   program or experience that consumes it**. A gas station with no consuming
@@ -45,13 +46,13 @@
 
 ## Tier 1 — Tucson (immediate miles)
 
-### M14 — shared user services *(planned, issues #175–#178)*
+### M14 — shared user services *(S1–S3 done, S4 planned; issues #175–#178)*
 
-Already on the books; the cards are S1 clipboard (ADR 0007 slots 38–39),
-S2 app timers (slots 40–41 posting `TIMER` events on the ADR 0009 queue),
-S3 the composition capstone, and S4 security/isolation hardening. See
-[`march-m14.md`](march-m14.md). This is the next set of cards — nothing is
-claimed yet.
+S1 clipboard (ADR 0007 slots 38–39), S2 app timers (slots 40–41 posting
+`TIMER` events on the ADR 0009 queue), and S3 the composition capstone are
+landed (claims 2611/5390/0120) — NOTEPAD copy/paste + timer cursor proven
+TOGETHER live on VZ. S4 security/isolation hardening remains. See
+[`march-m14.md`](march-m14.md).
 
 ### M15 — audio *(proposed; wishlist 18)*
 

@@ -346,6 +346,7 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "  timer       interrupt controller + timer status\n" ++
         "  uaccess     user-memory copy diagnostics (valid, fault, recovery)\n" ++
         "tasks / processes\n" ++
+        "  clipboard   shared text clipboard: stored bytes and length (milestone 14 S1/S3)\n" ++
         "  exec        load a user program from the ESP and enter it at EL0\n" ++
         "  kill        terminate a running process (kernel-owned lifetime)\n" ++
         "  mbox        per-process IPC mailbox: pending messages and drain counters\n" ++
@@ -367,7 +368,7 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "  screen      virtio-gpu transport + framebuffer: device DID, features, scanout, status, re-arm ('screen fill <rrggbb>' fills the framebuffer and flushes it to the scanout)\n" ++
         "  text        framebuffer text: text region, cursor, scrollback ('text put <string...>' renders + flushes to the scanout; 'text clear' clears)\n" ++
         "  usb         XHCI host controller: `usb` transport report, `usb devices` enumerated HID devices, `usb report` last HID report\n" ++
-        "  dui         Driving Award window manager: registry (with owner pids), z-order, focus, hit-testing ('dui focus <n>' focuses; 'dui raise <n>' raises; 'dui move <n> <x> <y>' moves a user window; 'dui close <n>' releases a user window; 'dui list <pid>' filters by owner; 'dui hit <x> <y>' hit-tests; 'dui cycle' cycles focus like Alt+Tab)\n" ++
+        "  dui         Driving Award window manager: registry (with owner pids), z-order, focus, hit-testing ('dui focus <n>' focuses; 'dui raise <n>' raises; 'dui move <n> <x> <y>' moves a user window; 'dui close <n>' releases a user window; 'dui list <pid>' filters by owner; 'dui hit <x> <y>' hit-tests; 'dui cycle' cycles focus like Alt+Tab; 'dui key <char|copy|cut|paste|quit>' injects a synthetic key chord into the focused window)\n" ++
         "system\n" ++
         "  clear       clean up the crime scene\n" ++
         "  echo        repeat your regrettable decisions\n" ++

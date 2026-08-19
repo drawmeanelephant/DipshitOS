@@ -356,6 +356,14 @@ pub const AppState = struct {
     /// Claim 5390: the cursor's blink phase, driven by a per-process TIMER
     /// event (1 s toggle at the 1 Hz scheduler tick) — never a spin/sleep.
     cursor_visible: bool = true,
+    /// Claim 0120: the first visible->hidden blink was reported on serial
+    /// (the S3 composition gate's timer-driven-cursor evidence — bounded to
+    /// one line, not a per-tick log).
+    blink_reported: bool = false,
+    /// Claim 0120: Ctrl+Q asked the editor to close (the human-facing
+    /// keyboard quit path — host-tested; the live gate closes via `dui close`
+    /// because a synthesized Ctrl chord cannot reach VZ's HID report).
+    want_quit: bool = false,
     status_msg: [16]u8 = "Ready\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00".*,
     status_len: usize = 5,
 
@@ -634,6 +642,12 @@ pub const AppState = struct {
             if (keycode == 0x06) return self.copy_line(); // Ctrl+C
             if (keycode == 0x1b) return self.cut_line(); // Ctrl+X
             if (keycode == 0x19) return self.paste_clipboard(); // Ctrl+V
+            // Claim 0120 (M14 S3): Ctrl+Q quits (host-tested; the live
+            // composition gate closes via `dui close` instead).
+            if (keycode == 0x14) {
+                self.want_quit = true;
+                return true;
+            }
         }
 
         // Printable character
@@ -657,7 +671,19 @@ pub const AppState = struct {
             return false;
         }
         self.set_status("Copied");
+        ui.write_console("notepad: copy ok\n"); // claim 0120: S3 composition evidence
         return true;
+    }
+
+    /// Claim 5390/0120: a TIMER event toggles the blink phase; the FIRST
+    /// visible->hidden transition is reported on serial (bounded — one line)
+    /// so the S3 gate can prove the cursor is timer-driven, not a spin loop.
+    pub fn on_timer_tick(self: *AppState) void {
+        self.cursor_visible = !self.cursor_visible;
+        if (!self.cursor_visible and !self.blink_reported) {
+            self.blink_reported = true;
+            ui.write_console("notepad: blink\n");
+        }
     }
 
     /// Cut: copy the current line, then delete it (and its trailing
@@ -694,6 +720,7 @@ pub const AppState = struct {
         _ = self.layout.ensure_visible(self.buffer.get_slice(), self.buffer.cursor);
         self.layout.clamp_scroll(self.buffer.get_slice());
         self.set_status("Pasted");
+        ui.write_console("notepad: paste ok\n"); // claim 0120: S3 composition evidence
         return true;
     }
 };
@@ -742,8 +769,8 @@ pub export fn _start() callconv(.c) noreturn {
         }
 
         if (ev.kind == ui.TIMER) {
-            // Blink phase toggle; a redraw re-renders the cursor line.
-            app.cursor_visible = !app.cursor_visible;
+            // Blink phase toggle (claim 0120: the first toggle reports).
+            app.on_timer_tick();
             dirty = true;
         } else if (ev.kind == ui.MOUSE_DOWN or ev.kind == ui.MOUSE_UP or ev.kind == ui.MOUSE_MOVE) {
             dirty = app.handle_mouse_events(&ev) or dirty;
@@ -752,6 +779,10 @@ pub export fn _start() callconv(.c) noreturn {
                 app.cursor_visible = true; // typing re-shows the cursor
                 dirty = true;
             }
+        }
+        if (app.want_quit) {
+            ui.write_console("notepad: quit\n");
+            break;
         }
 
         // Drain pending queue
@@ -762,7 +793,7 @@ pub export fn _start() callconv(.c) noreturn {
                 ui.exit_process(exit_status);
             }
             if (ev.kind == ui.TIMER) {
-                app.cursor_visible = !app.cursor_visible;
+                app.on_timer_tick();
                 dirty = true;
             } else if (ev.kind == ui.MOUSE_DOWN or ev.kind == ui.MOUSE_UP or ev.kind == ui.MOUSE_MOVE) {
                 dirty = app.handle_mouse_events(&ev) or dirty;
@@ -772,6 +803,10 @@ pub export fn _start() callconv(.c) noreturn {
                     dirty = true;
                 }
             }
+        }
+        if (app.want_quit) {
+            ui.write_console("notepad: quit\n");
+            break;
         }
 
         if (dirty) {
@@ -1074,4 +1109,27 @@ test "notepad: cut_line deletes the current line (host — the syscall is a no-o
     // Paste is refused on a host (the syscall seam returns 0/empty there).
     try std.testing.expect(!app.paste_clipboard());
     try std.testing.expectEqualStrings("Empty", app.status_msg[0..5]);
+}
+
+test "notepad: Ctrl-C/Ctrl-V/Ctrl-Q chords decode to copy/paste/quit (claim 0120)" {
+    var app = AppState.init();
+    app.buffer.set_content("hello");
+    app.buffer.cursor = 5;
+
+    // Ctrl+C (HID 'c' = 0x06 + MOD_CTRL) copies the current line. On a host
+    // the clipboard syscall is a no-op stub (returns 0), so copy succeeds.
+    var ev = Event{ .kind = ui.KEY_DOWN, .flags = ui.MOD_CTRL, .seq = 1, .arg0 = 0x06, .arg1 = 'c' };
+    try std.testing.expect(app.handle_keyboard_event(&ev));
+    try std.testing.expectEqualStrings("Copied", app.status_msg[0..6]);
+
+    // Ctrl+V (HID 'v' = 0x19 + MOD_CTRL) pastes — on a host the clipboard
+    // is empty (the syscall seam returns 0), so paste is honestly refused.
+    ev = Event{ .kind = ui.KEY_DOWN, .flags = ui.MOD_CTRL, .seq = 2, .arg0 = 0x19, .arg1 = 'v' };
+    try std.testing.expect(!app.handle_keyboard_event(&ev));
+    try std.testing.expectEqualStrings("Empty", app.status_msg[0..5]);
+
+    // Ctrl+Q (HID 'q' = 0x14 + MOD_CTRL) asks the editor to close.
+    ev = Event{ .kind = ui.KEY_DOWN, .flags = ui.MOD_CTRL, .seq = 3, .arg0 = 0x14, .arg1 = 'q' };
+    try std.testing.expect(app.handle_keyboard_event(&ev));
+    try std.testing.expect(app.want_quit);
 }
