@@ -115,6 +115,13 @@ pub const spsr_el0t_irqs: u64 = 0x0;
 /// serial log and the `procs` table.
 pub const reserved_kill_status: u64 = 137;
 
+/// Milestone sixteen C2 (claim 8403): the reserved exit status an EL0
+/// synchronous fault (a guard-page step, an unmapped access, or a
+/// non-executable fetch) reports. A plain number (128 + 11) — no POSIX
+/// semantics; it is the `tasks GUARD.BIN exited status=139` line the live
+/// gate asserts, distinct from the kill path's 137.
+pub const reserved_fault_status: u64 = 139;
+
 /// The claim-9746 vector frame: 32 slots holding x0..x17, x30, a pad, and
 /// the claim-6729 callee-saved extension (x19..x28 + x29), pushed in
 /// reverse pair order by the IRQ stub on the interrupted task's stack; the
@@ -262,6 +269,16 @@ var exit_report_count: usize = 0;
 var reap_reports: [exit_report_max]ReapEntry = [_]ReapEntry{.{ .name = "" }} ** exit_report_max;
 var reap_report_head: usize = 0;
 var reap_report_count: usize = 0;
+/// Milestone sixteen C2 (claim 8403): the EL0 fault reports are a bounded
+/// FIFO like the exit reports — a faulting process's name + FAR_EL1 +
+/// ESR_EL1 EC are snapshotted in exception context, then the shell idle
+/// loop prints `fault: <name> far=0x... ec=0x...` IN ORDER. The name
+/// pointer is a safe snapshot (task names are static string literals).
+pub const fault_report_max: usize = 4;
+const FaultEntry = struct { name: []const u8, far: u64, ec: u64 };
+var fault_reports: [fault_report_max]FaultEntry = [_]FaultEntry{.{ .name = "", .far = 0, .ec = 0 }} ** fault_report_max;
+var fault_report_head: usize = 0;
+var fault_report_count: usize = 0;
 /// Sleep report (claim 0635): `sys_sleep` marks it (exception context, like
 /// exit); the shell idle loop prints it — the deterministic "this task is
 /// now blocked for N ticks" transition line the live gate asserts.
@@ -309,6 +326,8 @@ pub fn init() usize {
     exit_report_count = 0;
     reap_report_head = 0;
     reap_report_count = 0;
+    fault_report_head = 0;
+    fault_report_count = 0;
     sleep_report_pending = false;
     spawn_demo_armed = false;
     user_timer_preemptions = 0;
@@ -460,6 +479,34 @@ pub fn request_kill(id: usize) KillResult {
     if (id == idle_id or id == 0) return .refused;
     tasks[id].kill_pending = true;
     return .ok;
+}
+
+/// Milestone sixteen C2 (claim 8403): an EL0 synchronous fault reached the
+/// exception dispatcher (registered as `exceptions.set_fault_dispatcher`).
+/// Snapshot the faulting task's name + FAR_EL1 + ESR_EL1 EC into the bounded
+/// fault FIFO, then terminate the process through the existing exit path
+/// with `reserved_fault_status` — the full exit → zombie → idle-reap →
+/// page-return lifecycle runs, the ring stages the next task, and the shell
+/// survives. Pure BSS writes, safe in the exception context the dispatcher
+/// runs in (no console, no allocation).
+pub fn fault_current(esr: u64, far: u64) void {
+    if (task_count == 0) return;
+    // Prefer the PROCESS name (e.g. "GUARD.BIN") over the generic task name
+    // ("user-exec") — the process name is a stable name_buf slice, so the
+    // pointer is a safe FIFO snapshot (same rule as the exit reports).
+    const name: []const u8 = if (process.find_by_task(current)) |pid|
+        process.info(pid).?.name
+    else
+        tasks[current].name;
+    const ec = (esr >> 26) & 0x3f;
+    if (fault_report_count == fault_report_max) {
+        fault_report_head = (fault_report_head + 1) % fault_report_max;
+        fault_report_count -= 1;
+    }
+    const idx = (fault_report_head + fault_report_count) % fault_report_max;
+    fault_reports[idx] = .{ .name = name, .far = far, .ec = ec };
+    fault_report_count += 1;
+    _ = exit_current(reserved_fault_status);
 }
 
 /// The user apertures of the CURRENT task (the EL0t task about to SVC —
@@ -1066,6 +1113,21 @@ pub fn maybe_report(con: *console.Console) void {
         con.puts(tasks[i].name);
         con.puts(" advances=");
         con.print_u64(report_advances[i]);
+        con.puts("\n");
+    }
+    // Milestone sixteen C2 (claim 8403): drain the EL0 fault FIFO IN ORDER
+    // before the exit reports, so a `fault:` line precedes its
+    // `exited status=139` consequence in the serial log.
+    while (fault_report_count > 0) {
+        const entry = fault_reports[fault_report_head];
+        fault_report_head = (fault_report_head + 1) % fault_report_max;
+        fault_report_count -= 1;
+        con.puts("fault: ");
+        con.puts(entry.name);
+        con.puts(" far=");
+        con.print_hex(entry.far);
+        con.puts(" ec=");
+        con.print_hex_min(entry.ec);
         con.puts("\n");
     }
     // Card 3d (claim 1014): drain the task exit report FIFO IN ORDER — N
@@ -1759,6 +1821,36 @@ test "scheduler: a killed task exits with the reserved status at its next select
     try std.testing.expect(task_info(2) == null);
     try std.testing.expect(has_free_slot());
     try std.testing.expectEqual(KillResult.not_found, request_kill(2)); // the freed slot is not_found
+}
+
+test "scheduler: an EL0 fault reaps the task with status 139 and reports it" {
+    // Milestone sixteen C2 (claim 8403): a synchronous EL0 fault (here an
+    // EC-0x24 data abort at a guard-page FAR) reaches fault_current, which
+    // snapshots the fault report AND reaps the task through the existing
+    // exit path with reserved_fault_status. The shell drains `fault:` before
+    // the exit report.
+    _ = init();
+    _ = register_worker(0x2000).?;
+    _ = register_user(0x3000, 0).?;
+    start();
+    try std.testing.expect(yield_current()); // shell -> worker
+    try std.testing.expect(yield_current()); // worker -> user
+    try std.testing.expectEqual(@as(usize, 2), current_id());
+    fault_current(0x24 << 26, 0x7fff_f000); // user -> idle
+    try std.testing.expectEqual(@as(usize, idle_id), current_id());
+    try std.testing.expect(is_terminated(2));
+    try std.testing.expectEqual(@as(?u64, reserved_fault_status), terminated_status(2));
+    var mock = console.MockConsole(128){};
+    var con = mock.console();
+    maybe_report(&con);
+    try std.testing.expectEqualStrings(
+        "fault: user-el0 far=0x000000007ffff000 ec=0x24\n" ++
+            "tasks user-el0 exited status=139\n" ++
+            "procs user-el0 exited status=139\n",
+        mock.contents(),
+    );
+    try std.testing.expect(reap(2));
+    try std.testing.expect(task_info(2) == null);
 }
 
 test "scheduler: a killed sleeping task is terminated at its wake-selection" {

@@ -632,6 +632,14 @@ fn clone_into_user_root(
 /// `build_user_root` but with an optional writable DATA aperture (EL0 RW +
 /// UXN) mapped between text and stack — the segmented image's `.data`/`.bss`
 /// region. `data_len == 0` (or `data_phys == 0`) omits the data aperture.
+///
+/// Milestone sixteen C2 (claim 8403): the GUARD PAGES are the natural
+/// consequence of this root mapping ONLY the explicit apertures. The page
+/// below the stack bottom (`stack_va - 4 KiB`) and the page above the data
+/// region (`data_va + data_len`, rounded up to the page) are left UNMAPPED,
+/// so an EL0 store stepping off either faults (FAR lands in the guard) and
+/// the fault dispatcher reaps the process — the stack can never grow into
+/// the data/text region and the data region can never spill past its end.
 pub fn build_user_root_full(
     text_va: u64,
     text_phys: u64,

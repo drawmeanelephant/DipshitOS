@@ -1317,7 +1317,7 @@ See [`march-m14.md`](march-m14.md) for the per-card tracker.
 
 See [`march-m15.md`](march-m15.md) for the card tracker.
 
-### Milestone sixteen — the kernel grows up (**in progress — C1 done 2026-08-19**; wishlist 15/14/13)
+### Milestone sixteen — the kernel grows up (**in progress — C1 + C2 done 2026-08-19**; wishlist 15/14/13)
 
 > The M15-era claims recorded the pressure that finally activates the
 > wishlist's conditional items: the **16 KiB exec load bound** (a 33 KB
@@ -1400,7 +1400,9 @@ app/launcher model** (items 2, 5, 4, and 10 below).
     objects/allocators because the workload demands them.
 14. **Richer virtual memory only when applications force it.** More flexible
     mappings, guard pages, larger programs, maybe mmap-ish primitives, COW much
-    later. No demand paging merely because Serious-OS bingo says so.
+    later. No demand paging merely because Serious-OS bingo says so. *(Started
+    2026-08-19 — M16 C2, claim 8403: guard pages below the stack / above the
+    data segment and EL0-fault → reap, live on VZ.)*
 15. **Executable-format evolution.** The DSK1 flat-image model has done heroic
     work; larger programs/libraries may eventually justify ELF loading or
     another structured native format. Consumer first. *(Started 2026-08-19 —

@@ -82,6 +82,7 @@ verify-coordination`, and CI) fails if it drifts from the files.
 | M1.5 console & shell core (agent B) | [`agent-buffy-m15-shell-core.md`](agent-buffy-m15-shell-core.md) |
 | `agent/buffy/m15-vz-serial-gate` | [`agent-buffy-m15-vz-serial-gate.md`](agent-buffy-m15-vz-serial-gate.md) |
 | `agent/buffy/m16-c1-image-format` | [`agent-buffy-m16-c1-image-format.md`](agent-buffy-m16-c1-image-format.md) |
+| `agent/buffy/m16-c2-guards` | [`agent-buffy-m16-c2-guards.md`](agent-buffy-m16-c2-guards.md) |
 | `agent/buffy/m2-badhandoff-fix` (PR #11) | [`agent-buffy-m2-badhandoff-fix.md`](agent-buffy-m2-badhandoff-fix.md) |
 | `agent/buffy/m2-kernel-proper` (PR #10) | [`agent-buffy-m2-kernel-proper.md`](agent-buffy-m2-kernel-proper.md) |
 | M2 fixed-memory-marker fallback (ADR 0004 D4, gate work item 3) | [`agent-buffy-m2-marker-fallback.md`](agent-buffy-m2-marker-fallback.md) |

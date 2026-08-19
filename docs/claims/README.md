@@ -221,6 +221,7 @@ CI) fails if the table drifts from the claim files.
 | [8313-f2-path-routing](8313-f2-path-routing.md) | buffy (`agent/buffy/m10-fs`) | ✅ done (2026-08-15) |
 | [8323-u6-first-boot-experience](8323-u6-first-boot-experience.md) | buffy (`agent/buffy/u6-first-boot`) | ✅ done |
 | [8401-a2-calc-calculator](8401-a2-calc-calculator.md) | buffy (`agent/buffy/m11-a2-calc`) | ✅ done |
+| [8403-m16-c2-guards](8403-m16-c2-guards.md) | buffy (`agent/buffy/m16-c2-guards`) | ✅ done — `tools/verify-live-m16-guards.sh` PASS 1/1 on VZ (claim 8403) |
 | [8552-udp](8552-udp.md) | buffy (`agent/buffy/m5-udp`) | ✅ DONE 2026-08-11 on `agent/buffy/m5-udp` (from the N5 prompt commit — PR #92's prompt doc, on merged main `e685586`; merged via PR #99) |
 | [8592-status-preflight](8592-status-preflight.md) | buffy (`freebuff/pull-latest-dipshitos-main-after-all-preceding-rel-1fe779b0-133e-4303-81f1-397087634352`) | ✅ done 2026-08-08 — report at `artifacts/status-preflight.md`; all class-A + class-B gates re-run at HEAD `5160eef` (evidence `artifacts/status-preflight-*.txt`); snapshots regenerated |
 | [8623-docs-reconciliation-m15-status](8623-docs-reconciliation-m15-status.md) | buffy (`freebuff/docs-reconciliation-m15-status-20260808`) | ✅ done 2026-08-08 — docs/status.md and docs/march-m15.md reconciled against claims 0013/0015/0017/0018/0020/0021/0022 and ADRs 0004/0005/0006; verification gates pass (see artifacts/docs-reconciliation-20260808/) |
