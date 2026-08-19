@@ -31,9 +31,10 @@
 #   4. The pool is FULL at 11/11: the NINTH exec (an 8th USER.BIN) is
 #      refused with "error: no free scheduler pool slot" — the capacity
 #      gate at the grown budget, checked before any allocation (leak-free).
-#   5. The addrspaces read shows tables=NN/256 with the kernel root + EIGHT
-#      user roots live: NN stays inside the 256-page carve-out (headroom
-#      assertion — the C3 measurement records the actual NN).
+#   5. The addrspaces read shows tables=NN/512 with the kernel root + EIGHT
+#      user roots live: NN stays inside the 512-page carve-out (headroom
+#      assertion — the C3 measurement records the actual NN; the carve-out
+#      grew 256 → 512 in C4, claim 2714).
 #   6. The counter is STILL state=running at the final procs read (the
 #      permanent occupant survives the seven short programs); the shell
 #      stays responsive; no exception park.
@@ -143,15 +144,15 @@ run_one() {
         [ "$(grep -aFc -- "$POOL_FULL_LINE" artifacts/vm-serial.log || true)" -ge 1 ] && pool_full=1 || true
 
         # The tables budget with the kernel root + EIGHT user roots live:
-        # the C3 measurement records NN/256. It must stay inside the
-        # 256-page carve-out (headroom > 0), and the actual NN is echoed
+        # the C3 measurement records NN/512. It must stay inside the
+        # 512-page carve-out (headroom > 0), and the actual NN is echoed
         # in the report line for the claim's before/after record.
         local tables
-        tables="$(grep -aoE -- "addrspaces: tables=[0-9]+/256" artifacts/vm-serial.log | tail -1 || true)"
+        tables="$(grep -aoE -- "addrspaces: tables=[0-9]+/512" artifacts/vm-serial.log | tail -1 || true)"
         if [ -n "$tables" ]; then
             local used cap
-            used="$(printf '%s\n' "$tables" | sed -E 's/.*tables=([0-9]+)\/256.*/\1/')"
-            cap=256
+            used="$(printf '%s\n' "$tables" | sed -E 's/.*tables=([0-9]+)\/512.*/\1/')"
+            cap=512
             [ -n "$used" ] && [ "$used" -gt 0 ] && [ "$used" -lt "$cap" ] && tables_headroom=1 || true
         fi
 
@@ -183,7 +184,7 @@ run_one() {
     echo "COUNTER.BIN (never exits) + seven USER.BINs fill the pool to 11/11"
     echo "(shell + worker + 8 users + idle); the procs snapshot shows EIGHT"
     echo "running user processes with distinct tasks + stack VAs; a NINTH exec"
-    echo "is pool_full; addrspaces tables=NN/256 records the C3 measurement."
+    echo "is pool_full; addrspaces tables=NN/512 records the C3 measurement."
     echo
 } >> "$REPORT"
 
