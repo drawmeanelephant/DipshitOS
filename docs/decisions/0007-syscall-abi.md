@@ -510,3 +510,26 @@ invoke `kernel/src/file_table.zig`'s new mutating ops, which sit on
 Proof program: `FSTEST.BIN` (`user/src/fstest.zig`, issue #161); live gate
 `tools/verify-live-fs-mutation.sh`. `FILE.BIN` grows Delete/Rename buttons
 over slots 34/35.
+
+## Amendment (2026-08-19, claim 2611 — the shared clipboard card)
+
+Milestone 14 card S1 (issue #175) freezes slots 38/39 — the shared text
+clipboard, a userland service, not a kernel policy:
+
+| Slot | Name | Signature | Description |
+|:---|:---|:---|:---|
+| 38 | `sys_clipboard_set` | `clipboard_set(buf, len) -> i64` | Copy `len` bytes (≤ `clipboard.clip_max` 512 — longer is truncated, documented, and the return value reports the stored length) from the caller's region through uaccess into the ONE kernel-global clipboard buffer (`kernel/src/clipboard.zig`, pure BSS, zero heap). A zero-length set CLEARS the clipboard and returns 0. Returns the stored length; `EFAULT` for a bad pointer. No process requirement — the clipboard is a shared service: any EL0 task may write it (the honest bound, like the UDP listen table). |
+| 39 | `sys_clipboard_get` | `clipboard_get(buf, max) -> i64` | Copy at most `max` of the stored bytes OUT through uaccess (non-consuming — a get never clears the clipboard; documented). Returns the copied length; 0 when the clipboard is empty or `max == 0`; `EFAULT` for a bad buffer (the clipboard is left intact). No process requirement. |
+
+`implemented_count` is 40; the `syscalls` report prints rows 0–39.
+
+The buffer is `kernel/src/clipboard.zig` — a fixed 512-byte BSS array with a
+length, `set`/`clear`/`contents`/`length`, and host tests; the syscall layer
+owns validation + the uaccess copies and calls through (the `mailbox.zig`
+storage pattern — the module is pure storage and knows nothing about tasks).
+The EL0 proof rides `CLIPTEST.BIN` (`user/src/cliptest.zig`, issue #175):
+set "hello" → get byte-exact → truncated get (non-consuming) → over-long set
+truncation → clear → empty → EFAULT both directions → exit 0; live gate
+`tools/verify-live-clipboard.sh`. NOTEPAD consumes the seam: Ctrl+C (copy the
+current logical line), Ctrl+X (cut the line), Ctrl+V (paste at the cursor) —
+no selection model yet, documented in the card.

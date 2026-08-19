@@ -5916,7 +5916,7 @@ test "monitor: syscalls is registered and reports deterministic rows" {
     try std.testing.expectEqualStrings("numbered syscall table and counters", lookup("syscalls").?.help);
     try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"syscalls"}));
     try std.testing.expectEqualStrings(
-        "syscalls: slots=64 implemented=38\n" ++
+        "syscalls: slots=64 implemented=40\n" ++
             "  0 sys_ping calls=0\n" ++
             "  1 sys_write calls=0\n" ++
             "  2 sys_yield calls=0\n" ++
@@ -5954,7 +5954,9 @@ test "monitor: syscalls is registered and reports deterministic rows" {
             "  34 sys_file_delete calls=0\n" ++
             "  35 sys_file_rename calls=0\n" ++
             "  36 sys_file_truncate calls=0\n" ++
-            "  37 sys_file_free calls=0\n",
+            "  37 sys_file_free calls=0\n" ++
+            "  38 sys_clipboard_set calls=0\n" ++
+            "  39 sys_clipboard_get calls=0\n",
         env.mock.contents(),
     );
 }

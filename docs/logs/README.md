@@ -51,6 +51,7 @@ verify-coordination`, and CI) fails if it drifts from the files.
 | generalized bit-order mutation gate (claim 1027) | [`agent-buffy-generalized-mutations.md`](agent-buffy-generalized-mutations.md) |
 | issue 125 follow-on: refresh the public site screenshot | [`agent-buffy-glyph-mirror-fix.md`](agent-buffy-glyph-mirror-fix.md) |
 | glyph raster convention gate (claim 9100) | [`agent-buffy-glyph-raster-gate.md`](agent-buffy-glyph-raster-gate.md) |
+| `agent/buffy/hope-chest`: hope-chest roadmap map (claim 1028) | [`agent-buffy-hope-chest.md`](agent-buffy-hope-chest.md) |
 | milestone ten userland filesystem & storage ABI (claim 0662) | [`agent-buffy-m10-fs.md`](agent-buffy-m10-fs.md) |
 | milestone ten tracker (claim 2412) | [`agent-buffy-m10-tracker.md`](agent-buffy-m10-tracker.md) |
 | Architecture & UI contract (ADR 0011) | [`agent-buffy-m11-a0-adr.md`](agent-buffy-m11-a0-adr.md) |
@@ -74,6 +75,7 @@ verify-coordination`, and CI) fails if it drifts from the files.
 | `m13-pointer-route`: VZ synthesized-pointer root cause (claim 4769) | [`agent-buffy-m13-pointer-route.md`](agent-buffy-m13-pointer-route.md) |
 | `m13-u4-pointer-classb`: finish the U4 class-B CG gate (claim 5776) | [`agent-buffy-m13-u4-pointer-classb.md`](agent-buffy-m13-u4-pointer-classb.md) |
 | `m13-win-dui-rename`: the `win` → `dui` monitor command rename (claim 2223) | [`agent-buffy-m13-win-dui-rename.md`](agent-buffy-m13-win-dui-rename.md) |
+| `agent/buffy/m14-s1-clipboard`: shared clipboard (claim 2611) | [`agent-buffy-m14-s1-clipboard.md`](agent-buffy-m14-s1-clipboard.md) |
 | `agent/buffy/m15-commands` (PR #12) | [`agent-buffy-m15-commands.md`](agent-buffy-m15-commands.md) |
 | `agent/buffy/m15-host-plumbing` (PR #13) | [`agent-buffy-m15-host-plumbing.md`](agent-buffy-m15-host-plumbing.md) |
 | `agent/buffy/m15-machine-controls` | [`agent-buffy-m15-machine-controls.md`](agent-buffy-m15-machine-controls.md) |

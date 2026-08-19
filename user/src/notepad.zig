@@ -114,6 +114,64 @@ pub const TextBuffer = struct {
         }
         return false;
     }
+
+    /// Byte offset just past the previous '\n' — the start of the logical
+    /// line containing `offset`. (The clipboard's line copy/cut uses
+    /// logical lines, independent of the display-row wrap model.)
+    pub fn line_start(self: *const TextBuffer, offset: usize) usize {
+        var i = @min(offset, self.len);
+        while (i > 0 and self.buf[i - 1] != '\n') : (i -= 1) {}
+        return i;
+    }
+
+    /// Byte offset of the next '\n' at/after `offset` (exclusive), or
+    /// `len` at EOF — the end of the logical line containing `offset`.
+    pub fn line_end(self: *const TextBuffer, offset: usize) usize {
+        var i = @min(offset, self.len);
+        while (i < self.len and self.buf[i] != '\n') : (i += 1) {}
+        return i;
+    }
+
+    /// The logical line containing the cursor, newline excluded.
+    pub fn current_line(self: *const TextBuffer) []const u8 {
+        const s = self.buf[0..self.len];
+        const start = self.line_start(self.cursor);
+        const end = self.line_end(self.cursor);
+        return s[start..end];
+    }
+
+    /// Insert `text` at the cursor; false (nothing changed) when it would
+    /// overflow the buffer.
+    pub fn insert_text(self: *TextBuffer, text: []const u8) bool {
+        if (text.len == 0) return true;
+        if (self.len + text.len > self.buf.len) return false;
+        var src: usize = self.len;
+        while (src > self.cursor) : (src -= 1) {
+            self.buf[src - 1 + text.len] = self.buf[src - 1];
+        }
+        @memcpy(self.buf[self.cursor .. self.cursor + text.len], text);
+        self.len += text.len;
+        self.cursor += text.len;
+        return true;
+    }
+
+    /// Delete [start, end) (clamped); false when empty/out-of-range. The
+    /// cursor lands at `start` when it was inside the removed range.
+    pub fn delete_range(self: *TextBuffer, start: usize, end: usize) bool {
+        if (start >= end or end > self.len) return false;
+        const n = end - start;
+        var i = start;
+        while (i < self.len - n) : (i += 1) {
+            self.buf[i] = self.buf[i + n];
+        }
+        self.len -= n;
+        if (self.cursor >= end) {
+            self.cursor -= n;
+        } else if (self.cursor > start) {
+            self.cursor = start;
+        }
+        return true;
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -554,19 +612,23 @@ pub const AppState = struct {
             else => {},
         }
 
-        // Ctrl+A / Ctrl+E: jump to buffer start / end (modifier lives in
-        // the event flags; the usage for 'a' is 0x04, for 'e' is 0x08).
+        // Ctrl chords (modifier lives in the event flags; HID usages:
+        // 'a' = 0x04, 'c' = 0x06, 'e' = 0x08, 'v' = 0x19, 'x' = 0x1b).
         if ((ev.flags & ui.MOD_CTRL) != 0) {
-            if (keycode == 0x04) {
+            if (keycode == 0x04) { // Ctrl+A: jump to buffer start
                 self.buffer.cursor = 0;
                 self.layout.scroll = 0;
                 return true;
             }
-            if (keycode == 0x08) {
+            if (keycode == 0x08) { // Ctrl+E: jump to buffer end
                 self.buffer.cursor = self.buffer.len;
                 _ = self.layout.ensure_visible(slice, self.buffer.cursor);
                 return true;
             }
+            // Claim 2611 (M14 S1): copy/cut/paste via the shared clipboard.
+            if (keycode == 0x06) return self.copy_line(); // Ctrl+C
+            if (keycode == 0x1b) return self.cut_line(); // Ctrl+X
+            if (keycode == 0x19) return self.paste_clipboard(); // Ctrl+V
         }
 
         // Printable character
@@ -580,6 +642,54 @@ pub const AppState = struct {
         }
 
         return false;
+    }
+
+    /// Copy the current logical line into the shared clipboard (slot 38).
+    pub fn copy_line(self: *AppState) bool {
+        const line = self.buffer.current_line();
+        if (ui.clipboard_set(line) < 0) {
+            self.set_status("Copy Err");
+            return false;
+        }
+        self.set_status("Copied");
+        return true;
+    }
+
+    /// Cut: copy the current line, then delete it (and its trailing
+    /// newline, if any) from the buffer (slot 38).
+    pub fn cut_line(self: *AppState) bool {
+        const line = self.buffer.current_line();
+        if (ui.clipboard_set(line) < 0) {
+            self.set_status("Cut Err");
+            return false;
+        }
+        const start = self.buffer.line_start(self.buffer.cursor);
+        const end = self.buffer.line_end(self.buffer.cursor);
+        const del_end = if (end < self.buffer.len and self.buffer.buf[end] == '\n') end + 1 else end;
+        _ = self.buffer.delete_range(start, del_end);
+        self.layout.clamp_scroll(self.buffer.get_slice());
+        self.set_status("Cut");
+        return true;
+    }
+
+    /// Paste the clipboard at the cursor (slot 39); refuses when it would
+    /// overflow the buffer.
+    pub fn paste_clipboard(self: *AppState) bool {
+        var clip: [ui.clipboard_max]u8 = [_]u8{0} ** ui.clipboard_max;
+        const rc = ui.clipboard_get(&clip);
+        if (rc <= 0) {
+            self.set_status("Empty");
+            return false;
+        }
+        const n: usize = @intCast(rc);
+        if (!self.buffer.insert_text(clip[0..n])) {
+            self.set_status("Too Big");
+            return false;
+        }
+        _ = self.layout.ensure_visible(self.buffer.get_slice(), self.buffer.cursor);
+        self.layout.clamp_scroll(self.buffer.get_slice());
+        self.set_status("Pasted");
+        return true;
     }
 };
 
@@ -883,4 +993,59 @@ test "notepad: keyboard navigation routes through TextLayout (claim 1771)" {
     var ev2 = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 2, .arg0 = 0x4c, .arg1 = 0 };
     try std.testing.expect(app.handle_keyboard_event(&ev2));
     try std.testing.expectEqualStrings(buf[1..24], app.buffer.get_slice());
+}
+
+test "notepad: TextBuffer logical-line bounds and current_line (claim 2611)" {
+    var tb = TextBuffer.init();
+    tb.set_content("abc\ndef\n");
+
+    // Cursor mid-line "def": the line is [4, 7).
+    tb.cursor = 5;
+    try std.testing.expectEqual(@as(usize, 4), tb.line_start(tb.cursor));
+    try std.testing.expectEqual(@as(usize, 7), tb.line_end(tb.cursor));
+    try std.testing.expectEqualStrings("def", tb.current_line());
+
+    // The trailing newline opens an empty last line.
+    tb.cursor = 8;
+    try std.testing.expectEqual(@as(usize, 8), tb.line_start(tb.cursor));
+    try std.testing.expectEqual(@as(usize, 8), tb.line_end(tb.cursor));
+    try std.testing.expectEqualStrings("", tb.current_line());
+}
+
+test "notepad: TextBuffer insert_text and delete_range (claim 2611)" {
+    var tb = TextBuffer.init();
+    tb.set_content("ac");
+
+    // Insert "b" at cursor 1 -> "abc".
+    tb.cursor = 1;
+    try std.testing.expect(tb.insert_text("b"));
+    try std.testing.expectEqualStrings("abc", tb.get_slice());
+    try std.testing.expectEqual(@as(usize, 2), tb.cursor);
+
+    // Overflow is refused with nothing changed.
+    var big: [512]u8 = [_]u8{'x'} ** 512;
+    try std.testing.expect(!tb.insert_text(&big));
+    try std.testing.expectEqualStrings("abc", tb.get_slice());
+
+    // delete_range removes [1, 2) and parks the cursor at the start.
+    tb.cursor = 2;
+    try std.testing.expect(tb.delete_range(1, 2));
+    try std.testing.expectEqualStrings("ac", tb.get_slice());
+    try std.testing.expectEqual(@as(usize, 1), tb.cursor);
+}
+
+test "notepad: cut_line deletes the current line (host — the syscall is a no-op)" {
+    var app = AppState.init();
+    app.buffer.set_content("abc\ndef\n");
+
+    // Cut the second line ("def") with the cursor inside it: the line and
+    // its trailing newline vanish.
+    app.buffer.cursor = 5;
+    try std.testing.expect(app.cut_line());
+    try std.testing.expectEqualStrings("abc\n", app.buffer.get_slice());
+    try std.testing.expectEqualStrings("Cut", app.status_msg[0..3]);
+
+    // Paste is refused on a host (the syscall seam returns 0/empty there).
+    try std.testing.expect(!app.paste_clipboard());
+    try std.testing.expectEqualStrings("Empty", app.status_msg[0..5]);
 }

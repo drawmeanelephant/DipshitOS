@@ -1199,11 +1199,16 @@ See [`march-m13.md`](march-m13.md) for the per-card tracker.
 > remaining usability cards (U6–U8) are DONE; U4's live pointer proof is a
 > known class-C-only limitation (see issue #151).
 
-- **S1 — Clipboard / shared text service** (issue #175, wishlist 11):
-  `sys_clipboard_set`/`sys_clipboard_get` (ADR 0007 slots 38–39), a single
-  bounded kernel clipboard buffer (pure BSS, zero heap), so NOTEPAD gains
-  copy/cut/paste and the terminal can copy. Live gate:
-  `verify-live-clipboard.sh`.
+- **S1 — Clipboard / shared text service** (issue #175, wishlist 11): ✅
+  done 2026-08-19 (claim 2611): `sys_clipboard_set`/`sys_clipboard_get`
+  (ADR 0007 slots 38/39, `implemented_count` 38 → 40) over one bounded
+  512-B BSS clipboard buffer (`kernel/src/clipboard.zig`, pure BSS, zero
+  heap, no per-process ownership). NOTEPAD gains Ctrl+C/X/V copy/cut/paste
+  (copy/cut act on the current logical line, paste inserts at the cursor —
+  no selection model yet, documented); `CLIPTEST.BIN` (twenty-third ESP
+  program) drives the seam byte-exact. Live gate
+  `tools/verify-live-clipboard.sh` (set/get/truncate/clear/EFAULT markers +
+  `sys_clipboard_set calls=4` / `sys_clipboard_get calls=5` + exit 0).
 - **S2 — Application timers** (issue #176, wishlist 12): a bounded
   per-process timer facility (slots 40–41) that posts `TIMER` events on the
   existing ADR 0009 event queue — apps stop spinning sleep loops (NOTEPAD
@@ -1221,6 +1226,10 @@ See [`march-m13.md`](march-m13.md) for the per-card tracker.
 See [`march-m14.md`](march-m14.md) for the per-card tracker.
 
 ## Wishlist / hope chest (destinations, not commitments)
+
+> **The road map for the remaining items lives in [`docs/hope-chest.md`](hope-chest.md)** —
+> the M14→M99 gas-station map (Tucson → California → Japan). This section is
+> the source wishlist; that file is the map.
 
 > **Maintainer's wishlist (2026-08-14).** These are *destinations*, not a
 > milestone ladder — a hope chest, roughly in the order the maintainer would

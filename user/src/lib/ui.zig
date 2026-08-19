@@ -42,6 +42,10 @@ pub const sys_file_delete_num: u64 = 34;
 pub const sys_file_rename_num: u64 = 35;
 pub const sys_file_truncate_num: u64 = 36;
 pub const sys_file_free_num: u64 = 37;
+pub const sys_clipboard_set_num: u64 = 38;
+pub const sys_clipboard_get_num: u64 = 39;
+/// The clipboard's fixed capacity (one bounded kernel BSS buffer, no heap).
+pub const clipboard_max: usize = 512;
 pub const sys_udp_listen_num: u64 = 9;
 pub const sys_udp_send_num: u64 = 10;
 pub const sys_udp_recv_num: u64 = 11;
@@ -290,6 +294,20 @@ pub fn file_truncate(handle: u32, size: u32) i64 {
 /// Claim 5801 (ADR 0007 slot 37): free bytes on a volume (0 = DATA, 1 = ESP).
 pub fn file_free(volume: u32) i64 {
     return syscall1(sys_file_free_num, volume);
+}
+
+/// Claim 2611 (ADR 0007 slot 38): store `data` in the shared kernel
+/// clipboard (truncated to `clipboard_max`; a zero-length set clears).
+/// Returns the stored length; EFAULT for a bad pointer.
+pub fn clipboard_set(data: []const u8) i64 {
+    return syscall2(sys_clipboard_set_num, @intFromPtr(data.ptr), data.len);
+}
+
+/// Claim 2611 (ADR 0007 slot 39): copy at most `buf.len` stored clipboard
+/// bytes into `buf` (non-consuming). Returns the copied length; 0 when the
+/// clipboard is empty; EFAULT for a bad buffer.
+pub fn clipboard_get(buf: []u8) i64 {
+    return syscall2(sys_clipboard_get_num, @intFromPtr(buf.ptr), buf.len);
 }
 
 pub fn udp_listen(port: u16) i64 {

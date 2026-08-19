@@ -70,9 +70,10 @@ const esp_exec = @import("exec.zig"); // Claim 6359 (ADR 0007 slot 28): the EL0 
 const esp = @import("esp.zig"); // Claim 6359: the ESP name bound for the path check
 const tcp = @import("tcp.zig"); // Milestone 12 (claim 7483): TCP client seam
 const csprng = @import("csprng.zig"); // ISN generation for TCP connect
+const clipboard = @import("clipboard.zig"); // Milestone 14 (claim 2611): shared text clipboard
 
 pub const slot_count: usize = 64;
-pub const implemented_count: usize = 38;
+pub const implemented_count: usize = 40;
 /// Card G6 (claim 0487) follow-on (slot 18): the fixed `sys_win_get` shape —
 /// four u32 LE words (x, y, w, h), 16 bytes, marshaled per call and copy_out'd
 /// through uaccess (the procs snapshot pattern).
@@ -187,6 +188,12 @@ pub const sys_file_rename: u64 = 35;
 pub const sys_file_truncate: u64 = 36;
 /// Milestone 13 (claim 5801): `sys_file_free(volume)` — slot 37.
 pub const sys_file_free: u64 = 37;
+/// Milestone 14 (claim 2611): `sys_clipboard_set(buf, len)` — slot 38.
+pub const sys_clipboard_set: u64 = 38;
+/// Milestone 14 (claim 2611): `sys_clipboard_get(buf, max)` — slot 39.
+pub const sys_clipboard_get: u64 = 39;
+/// The clipboard's fixed capacity (one bounded BSS buffer, zero heap).
+pub const clipboard_max: usize = clipboard.clip_max;
 
 pub const ErrorCode = enum(i64) {
     einval = -1,
@@ -241,6 +248,7 @@ pub fn init(writer: Writer) void {
     write_fn = writer;
     @memset(&call_counts, 0);
     uaccess.init();
+    clipboard.init();
     _ = ensure_table();
 }
 
@@ -295,6 +303,8 @@ fn ensure_table() *const [slot_count]Entry {
         table_storage[sys_file_rename] = .{ .name = "sys_file_rename", .handler = handle_file_rename };
         table_storage[sys_file_truncate] = .{ .name = "sys_file_truncate", .handler = handle_file_truncate };
         table_storage[sys_file_free] = .{ .name = "sys_file_free", .handler = handle_file_free };
+        table_storage[sys_clipboard_set] = .{ .name = "sys_clipboard_set", .handler = handle_clipboard_set };
+        table_storage[sys_clipboard_get] = .{ .name = "sys_clipboard_get", .handler = handle_clipboard_get };
         table_ready = true;
     }
     return &table_storage;
@@ -954,6 +964,42 @@ fn handle_file_free(args: Args, _: *exceptions.VectorFrame) u64 {
     return @intCast(res);
 }
 
+/// Milestone 14 (claim 2611): slot 38 — sys_clipboard_set(buf, len).
+/// Copies `len` bytes (≤ `clipboard_max`; longer is truncated — documented,
+/// and the return value reports the stored length) from the caller's region
+/// through uaccess into the ONE kernel-global clipboard buffer. A
+/// zero-length set CLEARS the clipboard and returns 0. `EFAULT` for a bad
+/// user pointer (checked before any copy). No process requirement — the
+/// clipboard is a shared service (any EL0 task may write it).
+fn handle_clipboard_set(args: Args, _: *exceptions.VectorFrame) u64 {
+    const address = args[0];
+    var len: u64 = args[1];
+    if (len > clipboard.clip_max) len = clipboard.clip_max; // documented truncation
+    if (len == 0) {
+        clipboard.clear();
+        return 0;
+    }
+    var staging: [clipboard.clip_max]u8 = undefined;
+    if (uaccess.copy_in(&staging, address, @intCast(len)) != .ok) return error_result(.efault);
+    clipboard.set(staging[0..@intCast(len)]);
+    return len;
+}
+
+/// Milestone 14 (claim 2611): slot 39 — sys_clipboard_get(buf, max).
+/// Copies at most `max` of the stored bytes OUT through uaccess
+/// (non-consuming — a get never clears the clipboard; documented). Returns
+/// the copied length; 0 when the clipboard is empty or `max == 0`; `EFAULT`
+/// for a bad buffer (the clipboard is left intact). No process requirement.
+fn handle_clipboard_get(args: Args, _: *exceptions.VectorFrame) u64 {
+    const address = args[0];
+    const max: u64 = args[1];
+    const have = clipboard.contents();
+    if (have.len == 0 or max == 0) return 0;
+    const take: usize = @intCast(@min(max, have.len));
+    if (uaccess.copy_out(address, have[0..take], take) != .ok) return error_result(.efault);
+    return @intCast(take);
+}
+
 /// Claim 6359 (ADR 0007 slot 28): `sys_exec(path_ptr, path_len)` — the
 /// EL0 exec seam. Marshals the path through the claim-6120 uaccess window
 /// (the `sys_file_open` pattern), requires a process caller, and reuses
@@ -1169,7 +1215,7 @@ fn handle_tcp_close(_: Args, _: *exceptions.VectorFrame) u64 {
 
 /// Deterministic monitor output for the thirty-eight implemented rows and their counters.
 pub fn report(con: *console.Console) void {
-    con.puts("syscalls: slots=64 implemented=38\n");
+    con.puts("syscalls: slots=64 implemented=40\n");
     var number: u64 = 0;
     while (number < implemented_count) : (number += 1) {
         const info = entry_info(number).?;
@@ -1201,7 +1247,7 @@ fn capture_marshaled_args(args: Args, _: *exceptions.VectorFrame) u64 {
     return 0xcafe;
 }
 
-test "syscall: runtime table has 64 slots and thirty-eight unique implemented rows" {
+test "syscall: runtime table has 64 slots and forty unique implemented rows" {
     init(test_writer);
     const table = ensure_table();
     try std.testing.expectEqual(@as(usize, 64), table.len);
@@ -1214,7 +1260,7 @@ test "syscall: runtime table has 64 slots and thirty-eight unique implemented ro
             implemented += 1;
         }
     }
-    try std.testing.expectEqual(@as(usize, 38), implemented);
+    try std.testing.expectEqual(@as(usize, 40), implemented);
     try std.testing.expectEqualStrings("sys_ping", entry_info(0).?.name);
     try std.testing.expectEqualStrings("sys_exit", entry_info(3).?.name);
     try std.testing.expectEqualStrings("sys_sleep", entry_info(4).?.name);
@@ -1247,6 +1293,12 @@ test "syscall: runtime table has 64 slots and thirty-eight unique implemented ro
     try std.testing.expectEqualStrings("sys_tcp_send", entry_info(31).?.name);
     try std.testing.expectEqualStrings("sys_tcp_recv", entry_info(32).?.name);
     try std.testing.expectEqualStrings("sys_tcp_close", entry_info(33).?.name);
+    try std.testing.expectEqualStrings("sys_file_delete", entry_info(34).?.name);
+    try std.testing.expectEqualStrings("sys_file_rename", entry_info(35).?.name);
+    try std.testing.expectEqualStrings("sys_file_truncate", entry_info(36).?.name);
+    try std.testing.expectEqualStrings("sys_file_free", entry_info(37).?.name);
+    try std.testing.expectEqualStrings("sys_clipboard_set", entry_info(38).?.name);
+    try std.testing.expectEqualStrings("sys_clipboard_get", entry_info(39).?.name);
     try std.testing.expect(entry_info(63) == null);
 }
 
@@ -2164,11 +2216,11 @@ test "syscall: counters are monotonic and report is deterministic" {
     _ = dispatch(sys_ping, .{ 9, 0, 0, 0, 0, 0 }, &frame);
     _ = dispatch(sys_ping, .{ 10, 0, 0, 0, 0, 0 }, &frame);
     try std.testing.expectEqual(@as(u64, 2), call_count(sys_ping));
-    var mock = console.MockConsole(1024){};
+    var mock = console.MockConsole(2048){};
     var con = mock.console();
     report(&con);
     try std.testing.expectEqualStrings(
-        "syscalls: slots=64 implemented=38\n" ++
+        "syscalls: slots=64 implemented=40\n" ++
             "  0 sys_ping calls=2\n" ++
             "  1 sys_write calls=0\n" ++
             "  2 sys_yield calls=0\n" ++
@@ -2206,7 +2258,9 @@ test "syscall: counters are monotonic and report is deterministic" {
             "  34 sys_file_delete calls=0\n" ++
             "  35 sys_file_rename calls=0\n" ++
             "  36 sys_file_truncate calls=0\n" ++
-            "  37 sys_file_free calls=0\n",
+            "  37 sys_file_free calls=0\n" ++
+            "  38 sys_clipboard_set calls=0\n" ++
+            "  39 sys_clipboard_get calls=0\n",
         mock.contents(),
     );
 }
@@ -2291,6 +2345,57 @@ test "syscall: mutating file slots 34..37 dispatch and fault safety (claim 5801)
     try std.testing.expectEqual(error_result(.ebadf), dispatch(sys_file_truncate, .{ 0, 4, 0, 0, 0, 0 }, &frame));
     // free with a bad volume -> EINVAL
     try std.testing.expectEqual(error_result(.einval), dispatch(sys_file_free, .{ 2, 0, 0, 0, 0, 0 }, &frame));
+}
+
+test "syscall: clipboard slots 38..39 set/get round-trip and fault safety (claim 2611)" {
+    userspace.init();
+    init(test_writer);
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0); // task 2 = process 0 (boot payload)
+    scheduler.start();
+    var frame = fresh_frame();
+
+    var test_buf: [600]u8 = [_]u8{0} ** 600;
+    const test_buf_addr = @intFromPtr(&test_buf);
+    set_user_regions(
+        .{ .base = 0, .len = 0 },
+        .{ .base = test_buf_addr, .len = test_buf.len },
+    );
+
+    // Empty clipboard -> get returns 0 (nothing copied).
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_clipboard_get, .{ test_buf_addr, 16, 0, 0, 0, 0 }, &frame));
+
+    // Set "hello" -> returns the stored length; get reads it back byte-exact.
+    @memcpy(test_buf[0..5], "hello"[0..5]);
+    try std.testing.expectEqual(@as(u64, 5), dispatch(sys_clipboard_set, .{ test_buf_addr, 5, 0, 0, 0, 0 }, &frame));
+    @memset(test_buf[0..16], 0);
+    try std.testing.expectEqual(@as(u64, 5), dispatch(sys_clipboard_get, .{ test_buf_addr, 16, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqualStrings("hello", test_buf[0..5]);
+
+    // Get with max shorter than the content truncates, and is non-consuming.
+    @memset(test_buf[0..16], 0);
+    try std.testing.expectEqual(@as(u64, 3), dispatch(sys_clipboard_get, .{ test_buf_addr, 3, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqualStrings("hel", test_buf[0..3]);
+    @memset(test_buf[0..16], 0);
+    try std.testing.expectEqual(@as(u64, 5), dispatch(sys_clipboard_get, .{ test_buf_addr, 16, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqualStrings("hello", test_buf[0..5]);
+
+    // Over-long set truncates at clip_max and reports the stored length.
+    @memset(&test_buf, 'x');
+    try std.testing.expectEqual(@as(u64, clipboard.clip_max), dispatch(sys_clipboard_set, .{ test_buf_addr, clipboard.clip_max + 10, 0, 0, 0, 0 }, &frame));
+    @memset(test_buf[0..16], 0);
+    try std.testing.expectEqual(@as(u64, clipboard.clip_max), dispatch(sys_clipboard_get, .{ test_buf_addr, clipboard.clip_max, 0, 0, 0, 0 }, &frame));
+
+    // Bad user pointer -> EFAULT on both directions (the clipboard is
+    // non-empty here, so the get path reaches the copy_out).
+    try std.testing.expectEqual(error_result(.efault), dispatch(sys_clipboard_set, .{ uaccess.diagnostic_unmapped, 5, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.efault), dispatch(sys_clipboard_get, .{ uaccess.diagnostic_unmapped, 16, 0, 0, 0, 0 }, &frame));
+
+    // Zero-length set clears; a following get returns 0 (the empty-clipboard
+    // result, which precedes any pointer access).
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_clipboard_set, .{ test_buf_addr, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_clipboard_get, .{ test_buf_addr, 16, 0, 0, 0, 0 }, &frame));
 }
 
 test "syscall: slot 28 sys_exec marshals the path and maps loader errors" {

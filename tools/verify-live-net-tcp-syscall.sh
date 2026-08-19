@@ -97,7 +97,7 @@ if [ -f "$SERIAL" ]; then
     grep -a -qF -- "tasks user-exec exited status=18" "$SERIAL" && EXITT=1
     grep -a -qF -- "tasks user-exec reaped" "$SERIAL" && REAPED=1
 
-    grep -a -qF -- "syscalls: slots=64 implemented=38" "$SERIAL" && SYSCOUNT=1
+    grep -a -qF -- "syscalls: slots=64 implemented=40" "$SERIAL" && SYSCOUNT=1
     for row in "  30 sys_tcp_connect calls=" "  31 sys_tcp_send calls=" "  32 sys_tcp_recv calls=" "  33 sys_tcp_close calls="; do
         if grep -a -qF -- "$row" "$SERIAL" && ! grep -a -qF -- "${row}0" "$SERIAL"; then
             TCPROWS=$((TCPROWS + 1))
