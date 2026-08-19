@@ -1317,6 +1317,27 @@ See [`march-m14.md`](march-m14.md) for the per-card tracker.
 
 See [`march-m15.md`](march-m15.md) for the card tracker.
 
+### Milestone sixteen — the kernel grows up (**planned 2026-08-18**; wishlist 15/14/13)
+
+> The M15-era claims recorded the pressure that finally activates the
+> wishlist's conditional items: the **16 KiB exec load bound** (a 33 KB
+> JINGLE.BIN would not load — claim 7636), the **W^X single-segment
+> layout** (a global BSS buffer faults on write from EL0 — every app's
+> mutable data must be a stack local), and the **fixed pools under real
+> load** (7 process slots, `pool_full` on a fifth concurrent user
+> program). So milestone sixteen is the internals-consolidation
+> milestone — the kernel grows up under the weight of its own apps:
+> a multi-segment user image with real writable globals + a lifted load
+> bound (C1, wishlist 15) → guard pages + per-segment permissions (C2,
+> wishlist 14) → the resource pools measured and grown only where the
+> demo apps actually hurt (C3, wishlist 13) → a composition capstone
+> proving all three in one session (C4). Wishlist 17 (deeper FS
+> semantics) stays deferred — M13's B1 already shipped
+> delete/rename/truncate/free and no app has produced new pressure.
+> The default VM (no flags) stays byte-identical at every card.
+
+See [`march-m16.md`](march-m16.md) for the card tracker.
+
 ## Wishlist / hope chest (destinations, not commitments)
 
 > **Maintainer's wishlist (2026-08-14).** These are *destinations*, not a
