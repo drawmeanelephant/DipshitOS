@@ -1317,7 +1317,7 @@ See [`march-m14.md`](march-m14.md) for the per-card tracker.
 
 See [`march-m15.md`](march-m15.md) for the card tracker.
 
-### Milestone sixteen — the kernel grows up (**planned 2026-08-18**; wishlist 15/14/13)
+### Milestone sixteen — the kernel grows up (**in progress — C1 done 2026-08-19**; wishlist 15/14/13)
 
 > The M15-era claims recorded the pressure that finally activates the
 > wishlist's conditional items: the **16 KiB exec load bound** (a 33 KB
@@ -1403,7 +1403,9 @@ app/launcher model** (items 2, 5, 4, and 10 below).
     later. No demand paging merely because Serious-OS bingo says so.
 15. **Executable-format evolution.** The DSK1 flat-image model has done heroic
     work; larger programs/libraries may eventually justify ELF loading or
-    another structured native format. Consumer first.
+    another structured native format. Consumer first. *(Started 2026-08-19 —
+    M16 C1, claim 3805: the DSK3 segmented image with writable data + zeroed
+    BSS and a 256 KiB load bound, live on VZ.)*
 16. **Reusable UI toolkit, but late.** Buttons, labels, text fields, lists,
     scrolling, layout — *after* two or three hand-built apps have shown what
     the common pieces actually are. Otherwise someone lovingly architects

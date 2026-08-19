@@ -86,6 +86,14 @@ pub const AddrSpace = struct {
     /// Physical text pages the process owns (allocator-backed; 0 = static).
     text_phys: u64 = 0,
     text_pages: u64 = 0,
+    /// User VA + length of the mapped DATA region (EL0 RW, non-executable
+    /// — the segmented image's `.data` + zeroed `.bss`, claim 3805).
+    data_va: u64 = 0,
+    data_len: u64 = 0,
+    /// Physical data+bss pages the process owns (allocator-backed;
+    /// 0 = no data segment / static).
+    data_phys: u64 = 0,
+    data_pages: u64 = 0,
     /// User VA + length of the mapped stack (EL0 RW, non-executable).
     stack_va: u64 = 0,
     stack_len: u64 = 0,
@@ -165,6 +173,7 @@ pub fn init() void {
 /// zeroed there so a later `release_resources` is a no-op.
 fn release_resources(p: *Process) void {
     if (p.addr_space.text_pages > 0) _ = alloc.free_pages(p.addr_space.text_phys, p.addr_space.text_pages);
+    if (p.addr_space.data_pages > 0) _ = alloc.free_pages(p.addr_space.data_phys, p.addr_space.data_pages);
     if (p.addr_space.stack_pages > 0) _ = alloc.free_pages(p.addr_space.stack_phys, p.addr_space.stack_pages);
     if (p.kernel_stack.pages > 0) _ = alloc.free_pages(p.kernel_stack.phys, p.kernel_stack.pages);
 }
@@ -285,6 +294,8 @@ pub fn release_pages_on_reap(task_id: usize) bool {
         release_resources(&processes[id]);
         processes[id].addr_space.text_phys = 0;
         processes[id].addr_space.text_pages = 0;
+        processes[id].addr_space.data_phys = 0;
+        processes[id].addr_space.data_pages = 0;
         processes[id].addr_space.stack_phys = 0;
         processes[id].addr_space.stack_pages = 0;
         processes[id].kernel_stack = .{};
@@ -328,6 +339,10 @@ pub const ProcessInfo = struct {
     root_phys: u64,
     text_phys: u64,
     text_pages: u64,
+    data_va: u64,
+    data_len: u64,
+    data_phys: u64,
+    data_pages: u64,
     stack_va: u64,
     stack_len: u64,
     stack_phys: u64,
@@ -389,6 +404,10 @@ pub fn info(id: usize) ?ProcessInfo {
         .root_phys = p.addr_space.root_phys,
         .text_phys = p.addr_space.text_phys,
         .text_pages = p.addr_space.text_pages,
+        .data_va = p.addr_space.data_va,
+        .data_len = p.addr_space.data_len,
+        .data_phys = p.addr_space.data_phys,
+        .data_pages = p.addr_space.data_pages,
         .stack_va = p.addr_space.stack_va,
         .stack_len = p.addr_space.stack_len,
         .stack_phys = p.addr_space.stack_phys,

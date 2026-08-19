@@ -4467,6 +4467,15 @@ fn cmd_exec(m: *Monitor, args: []const []const u8) ExecError {
             for (head, 0..) |byte, i| head_value |= @as(u64, byte) << @intCast(56 - i * 8);
             m.console.puts(" head=");
             m.console.print_hex(head_value);
+            // Claim 3805 (milestone sixteen C1): a segmented image's data+bss
+            // region is reported so the live gate can assert the kernel's own
+            // page accounting is exact. Flat DSK1 images omit it (byte-identical).
+            if (info.data_len > 0) {
+                m.console.puts(" data=");
+                m.console.print_hex(info.data_len);
+                m.console.puts(" datapages=");
+                m.console.print_u64(info.data_pages);
+            }
             m.console.puts("\n");
             return .none;
         },

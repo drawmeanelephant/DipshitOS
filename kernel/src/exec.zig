@@ -82,9 +82,12 @@ const file_table = @import("file_table.zig");
 const alloc = @import("alloc.zig");
 const memmap = @import("memmap.zig"); // host-test fixture view (page_size + the arming view)
 
-/// Fixed load buffer: 16 KiB (4 pages). A program larger than this is
-/// rejected honestly (`too_large`).
-pub const exec_program_max: usize = 16384;
+/// Fixed load buffer: 256 KiB (64 pages). A program larger than this is
+/// rejected honestly (`too_large`). Milestone sixteen C1 (claim 3805) lifts
+/// this from the original 16 KiB bound — the M15 JINGLE draft was 33 KB and
+/// would not load (claim 7636) — so programs can grow. 256 KiB = 8× the old
+/// bound and comfortably fits the first big program (`GLOBALS.BIN`).
+pub const exec_program_max: usize = 256 * 1024;
 /// Card 3e (claim 4636): the bounded argv block — at most 8 args, each in
 /// a 32-byte slot (31 chars + NUL terminator), 256 bytes total. Packed into
 /// the process's OWN text page right after the loaded content (the text
@@ -99,6 +102,12 @@ pub const default_name: []const u8 = "USER.BIN";
 /// elf2bin.py's DSK1 header size (magic/flags/entry/image_size).
 pub const dsk1_header_size: usize = 24;
 const dsk1_magic: u32 = 0x314b5344; // "DSK1"
+/// Milestone sixteen C1 (claim 3805): the segmented user-image header —
+/// 48 bytes: magic/flags/entry/image_size + text_size/data_file_size/
+/// data_mem_size, followed by [text+rodata][data] (the BSS tail is implicit
+/// zero-fill). The loader maps text EL0-RO+PXN and data+bss EL0-RW+UXN+PXN.
+pub const dsk3_header_size: usize = 48;
+const dsk3_magic: u32 = 0x334b5344; // "DSK3" ("DSK2" 0x324b5344 is the handoff magic)
 
 pub const ExecResult = enum {
     ok,
@@ -143,6 +152,11 @@ pub const LoadedInfo = struct {
     /// The process's OWN randomized user stack VA (claim 0826 — per-process
     /// stacks, so the reply prints this program's placement, not a global).
     stack_va: u64,
+    /// Claim 3805 (milestone sixteen C1): the mapped DATA+bss region's byte
+    /// length and page count (0 for a flat DSK1 image, which has no
+    /// writable segment). The `exec` reply prints these only when non-zero.
+    data_len: u64 = 0,
+    data_pages: u64 = 0,
 };
 
 /// Claim 6359 (ADR 0007 slot 28): the pid of the most recently exec'd
@@ -172,6 +186,8 @@ pub fn loaded() ?LoadedInfo {
         .content_len = info.content_len,
         .entry_va = info.entry_va,
         .stack_va = info.stack_va,
+        .data_len = info.data_len,
+        .data_pages = info.data_pages,
     };
 }
 
@@ -224,12 +240,42 @@ pub fn exec_file(name: []const u8, args: []const []const u8) ExecResult {
     // files ≤ esp_content_max; exec reads up to its own fixed buffer).
     const got = fat.read_file(name, &program) orelse return .not_found;
     if (got < dsk1_header_size) return .bad_magic;
-    if (std.mem.readInt(u32, program[0..4], .little) != dsk1_magic) return .bad_magic;
-    const entry_off = std.mem.readInt(u64, program[8..16], .little);
-    const image_size = std.mem.readInt(u64, program[16..24], .little);
-    if (image_size > program.len) return .too_large;
-    if (image_size > got) return .too_large; // truncated read — file bigger than the buffer
-    if (entry_off < dsk1_header_size or entry_off >= image_size) return .bad_entry;
+    const magic = std.mem.readInt(u32, program[0..4], .little);
+    // Milestone sixteen C1 (claim 3805): two load paths. DSK1 (the flat
+    // single-segment shape, kept for the boot-payload-era images and the
+    // argv consumers) maps one read-only W^X text page. DSK3 (the segmented
+    // shape from `elf2bin.py --segments`) adds a writable data region with a
+    // zero-filled BSS tail — the loader maps text EL0-RO+PXN and data+bss
+    // EL0-RW+UXN+PXN, so EL0 globals are real writable memory.
+    var header_size: usize = dsk1_header_size;
+    var entry_off: u64 = 0;
+    var image_size: u64 = 0;
+    var text_size: usize = 0;
+    var data_file_size: usize = 0;
+    var data_mem_size: usize = 0;
+    switch (magic) {
+        dsk1_magic => {
+            entry_off = std.mem.readInt(u64, program[8..16], .little);
+            image_size = std.mem.readInt(u64, program[16..24], .little);
+            if (image_size > program.len) return .too_large;
+            if (image_size > got) return .too_large; // truncated read — file bigger than the buffer
+            if (entry_off < dsk1_header_size or entry_off >= image_size) return .bad_entry;
+            text_size = @intCast(image_size - dsk1_header_size);
+        },
+        dsk3_magic => {
+            header_size = dsk3_header_size;
+            switch (parse_dsk3(&program, got)) {
+                .err => |err| return err,
+                .ok => |s| {
+                    entry_off = s.entry_off;
+                    text_size = s.text_size;
+                    data_file_size = s.data_file_size;
+                    data_mem_size = s.data_mem_size;
+                },
+            }
+        },
+        else => return .bad_magic,
+    }
     // Claim 0826: the exec gate is GONE — a second program loads and runs
     // while the first is alive (every process owns its own root + pages, so
     // nothing shared is rebuilt under a live task). The gates are capacity:
@@ -237,14 +283,15 @@ pub fn exec_file(name: []const u8, args: []const []const u8) ExecResult {
     // or tables), then the allocator, the table carve-out, the registry.
     if (!scheduler.has_free_slot()) return .pool_full;
 
-    const content_len: usize = @intCast(image_size - dsk1_header_size);
-    // Strip the 24-byte DSK1 header IN PLACE (staging): the user root maps
-    // whole pages at `text_va` (the clone masks the phys to page
-    // granularity), so the loadable content must start at a page boundary.
-    // The entry offset is file-relative, so the entry VA is unchanged:
-    // `text_va + (entry_offset - header)`.
-    std.mem.copyForwards(u8, program[0..content_len], program[dsk1_header_size..][0..content_len]);
-    @memset(program[content_len..], 0); // the rest of the staging page is padding
+    const content_len: usize = text_size;
+    // Strip the header IN PLACE (staging): the user root maps whole pages
+    // at `text_va` (the clone masks the phys to page granularity), so the
+    // loadable content must start at a page boundary. The entry offset is
+    // file-relative, so the entry VA is `text_va + (entry_offset - header)`.
+    // The stripped buffer layout is [text+rodata][data] for both formats
+    // (the data portion is empty for DSK1 — `data_file_size` is 0 there).
+    std.mem.copyForwards(u8, program[0 .. text_size + data_file_size], program[header_size..][0 .. text_size + data_file_size]);
+    @memset(program[text_size + data_file_size ..], 0); // the rest of the staging page is padding
     // Card 3e (claim 4636): pack the argv block into the staging buffer
     // right after the content (it is copied into the process's OWN text
     // page below — the text leaf is already EL0 read-only, so the block is
@@ -256,6 +303,12 @@ pub fn exec_file(name: []const u8, args: []const []const u8) ExecResult {
     var argv_va: u64 = 0;
     var text_len: usize = content_len;
     if (argc > 0) {
+        // Claim 3805: the segmented path does not yet reserve argv room in
+        // its page-aligned text region — an honest refusal (the flat DSK1
+        // path keeps the claim-4636 behavior). No current DSK3 program
+        // takes arguments; a later card packs argv into a reserved data
+        // tail when a DSK3 consumer needs it.
+        if (magic == dsk3_magic) return .no_args_room;
         const block_off = (content_len + 7) & ~@as(usize, 7);
         const page_limit = if (content_len == 0) alloc.page_size else ((content_len + alloc.page_size - 1) / alloc.page_size) * alloc.page_size;
         if (block_off + arg_block_bytes > page_limit or block_off + arg_block_bytes > exec_program_max) return .no_args_room;
@@ -272,14 +325,23 @@ pub fn exec_file(name: []const u8, args: []const []const u8) ExecResult {
     // `.usertext`/`.userbss` pages instead.
     const text_pages: u64 = (text_len + alloc.page_size - 1) / alloc.page_size;
     const text_phys = alloc.alloc_pages(text_pages) orelse return .out_of_memory;
+    // Claim 3805: the segmented image's data+bss pages (0 for a flat DSK1
+    // image, which has no writable segment).
+    const data_pages: u64 = (data_mem_size + alloc.page_size - 1) / alloc.page_size;
+    const data_phys: u64 = if (data_pages > 0) (alloc.alloc_pages(data_pages) orelse {
+        _ = alloc.free_pages(text_phys, text_pages);
+        return .out_of_memory;
+    }) else 0;
     const stack_pages: u64 = (scheduler.task_stack_size + alloc.page_size - 1) / alloc.page_size;
     const stack_phys = alloc.alloc_pages(stack_pages) orelse {
         _ = alloc.free_pages(text_phys, text_pages);
+        if (data_pages > 0) _ = alloc.free_pages(data_phys, data_pages);
         return .out_of_memory;
     };
     const kstack_pages: u64 = stack_pages;
     const kstack_phys = alloc.alloc_pages(kstack_pages) orelse {
         _ = alloc.free_pages(text_phys, text_pages);
+        if (data_pages > 0) _ = alloc.free_pages(data_phys, data_pages);
         _ = alloc.free_pages(stack_phys, stack_pages);
         return .out_of_memory;
     };
@@ -288,6 +350,14 @@ pub fn exec_file(name: []const u8, args: []const []const u8) ExecResult {
     // a valid kernel pointer).
     const text_dst: [*]u8 = @ptrFromInt(text_phys);
     @memcpy(text_dst[0..text_len], program[0..text_len]);
+    // Claim 3805: copy the initialized data, then zero-fill the BSS tail
+    // (the data aperture maps `data_mem_size` bytes; the file only carried
+    // `data_file_size` of them).
+    if (data_pages > 0) {
+        const data_dst: [*]u8 = @ptrFromInt(data_phys);
+        if (data_file_size > 0) @memcpy(data_dst[0..data_file_size], program[text_size .. text_size + data_file_size]);
+        @memset(data_dst[data_file_size..data_mem_size], 0);
+    }
     const kstack: []u8 = @as(*[scheduler.task_stack_size]u8, @ptrFromInt(kstack_phys))[0..];
     // Milestone four (claim 2665): ASLR — the loaded program's EL0 stack
     // lands at a per-boot random VA from the seeded CSPRNG (page-aligned,
@@ -298,14 +368,18 @@ pub fn exec_file(name: []const u8, args: []const []const u8) ExecResult {
     // out-of-band VA. rebuild_user_root runs the whole sequence (randomize
     // → map → clean → re-arm) — shared with the boot-time static payload
     // (claim 3693), which passes the static stack phys instead.
-    const rebuild = rebuild_user_root(text_phys, @intCast(text_len), stack_phys, scheduler.task_stack_size) orelse {
+    // Claim 3805: the data aperture maps right after the (page-aligned)
+    // text region, matching the linker's `.data` placement at base + text_size.
+    const data_va = userspace.text_va + text_size;
+    const rebuild = rebuild_user_root_full(text_phys, @intCast(text_len), data_va, data_phys, @intCast(data_mem_size), stack_phys, scheduler.task_stack_size) orelse {
         _ = alloc.free_pages(text_phys, text_pages);
+        if (data_pages > 0) _ = alloc.free_pages(data_phys, data_pages);
         _ = alloc.free_pages(stack_phys, stack_pages);
         _ = alloc.free_pages(kstack_phys, kstack_pages);
         return .table_full;
     };
 
-    const entry_va = userspace.text_va + (entry_off - dsk1_header_size);
+    const entry_va = userspace.text_va + (entry_off - header_size);
     // Milestone four (claim 3848): the loaded program is a PROCESS. The
     // descriptor owns the image + the rebuilt address space + the owned
     // pages; a later exec creates a NEW process (per-process identity)
@@ -322,6 +396,10 @@ pub fn exec_file(name: []const u8, args: []const []const u8) ExecResult {
             .text_len = @intCast(text_len),
             .text_phys = text_phys,
             .text_pages = text_pages,
+            .data_va = data_va,
+            .data_len = @intCast(data_mem_size),
+            .data_phys = data_phys,
+            .data_pages = data_pages,
             .stack_va = rebuild.stack_va,
             .stack_len = scheduler.task_stack_size,
             .stack_phys = stack_phys,
@@ -330,6 +408,7 @@ pub fn exec_file(name: []const u8, args: []const []const u8) ExecResult {
         .{ .phys = kstack_phys, .pages = kstack_pages },
     ) orelse {
         _ = alloc.free_pages(text_phys, text_pages);
+        if (data_pages > 0) _ = alloc.free_pages(data_phys, data_pages);
         _ = alloc.free_pages(stack_phys, stack_pages);
         _ = alloc.free_pages(kstack_phys, kstack_pages);
         return .process_full;
@@ -386,21 +465,41 @@ pub const RootInfo = struct {
 };
 
 pub fn rebuild_user_root(text_phys: u64, text_len: u64, stack_phys: u64, stack_len: u64) ?RootInfo {
+    return rebuild_user_root_full(text_phys, text_len, 0, 0, 0, stack_phys, stack_len);
+}
+
+/// The full rebuild (milestone sixteen C1, claim 3805): like
+/// `rebuild_user_root` but with a writable DATA aperture (`data_phys`,
+/// `data_len` at `data_va`) mapped between text and stack — the segmented
+/// image's `.data` + zeroed `.bss`. `data_len == 0` omits the aperture.
+pub fn rebuild_user_root_full(
+    text_phys: u64,
+    text_len: u64,
+    data_va: u64,
+    data_phys: u64,
+    data_len: u64,
+    stack_phys: u64,
+    stack_len: u64,
+) ?RootInfo {
     const stack_va = csprng.random_stack_va();
     userspace.set_stack_va(stack_va);
-    const root_phys = mmu.build_user_root(
+    const root_phys = mmu.build_user_root_full(
         userspace.text_va,
         text_phys,
         text_len,
+        data_va,
+        data_phys,
+        data_len,
         stack_va,
         stack_phys,
         stack_len,
     ) orelse return null;
-    // The fresh clone tables and the mapped text are dirty in the D-cache;
-    // clean both before the scheduler's next TTBR0 switch (the walker +
-    // EL0 instruction fetch must see the real bytes).
+    // The fresh clone tables and the mapped text/data are dirty in the
+    // D-cache; clean both before the scheduler's next TTBR0 switch (the
+    // walker + EL0 instruction/data fetch must see the real bytes).
     mmu.clean_table_storage();
     mmu.clean_dcache_range(text_phys, text_len);
+    if (data_len > 0) mmu.clean_dcache_range(data_phys, data_len);
     // The user stack aperture moved: re-arm the syscall/uaccess regions so
     // sys_write bounds follow the randomized base (per-task re-arming at
     // SVC entry keeps every process's bounds correct, claim 0826).
@@ -414,6 +513,38 @@ pub fn rebuild_user_root(text_phys: u64, text_len: u64, stack_phys: u64, stack_l
 // ---------------------------------------------------------------------------
 
 const test_allocator = std.testing.allocator;
+
+/// The segmented DSK3 header fields (claim 3805), parsed + validated.
+pub const Segments = struct {
+    entry_off: u64,
+    text_size: usize,
+    data_file_size: usize,
+    data_mem_size: usize,
+};
+
+/// Parse + validate a DSK3 segmented header at the start of `buf` (the
+/// first `got` bytes are valid). Pure — no globals — so host tests pin the
+/// boundary checks without a FAT fixture (a valid DSK3 image is always
+/// ≥ 4 KiB of page-aligned text, above the 2 KiB test write cap).
+pub fn parse_dsk3(buf: []const u8, got: usize) union(enum) { ok: Segments, err: ExecResult } {
+    const entry_off = std.mem.readInt(u64, buf[8..16], .little);
+    const image_size = std.mem.readInt(u64, buf[16..24], .little);
+    const text_size: usize = @intCast(std.mem.readInt(u64, buf[24..32], .little));
+    const data_file_size: usize = @intCast(std.mem.readInt(u64, buf[32..40], .little));
+    const data_mem_size: usize = @intCast(std.mem.readInt(u64, buf[40..48], .little));
+    if (image_size > buf.len) return .{ .err = .too_large };
+    if (image_size > got) return .{ .err = .too_large }; // truncated read
+    if (image_size != dsk3_header_size + text_size + data_file_size) return .{ .err = .bad_magic };
+    if (text_size == 0 or text_size > exec_program_max) return .{ .err = .too_large };
+    if (data_mem_size < data_file_size or data_mem_size > exec_program_max) return .{ .err = .too_large };
+    if (entry_off < dsk3_header_size or entry_off >= dsk3_header_size + text_size) return .{ .err = .bad_entry };
+    return .{ .ok = .{
+        .entry_off = entry_off,
+        .text_size = text_size,
+        .data_file_size = data_file_size,
+        .data_mem_size = data_mem_size,
+    } };
+}
 
 /// Build a minimal DSK1 flat image: header (entry at offset 24 = content
 /// start) + `content`.
@@ -487,6 +618,47 @@ test "exec: DSK1 header parse rejects bad magic, entry, and oversize images" {
 test "exec: no disk is reported honestly" {
     esp.reset();
     try std.testing.expectEqual(ExecResult.no_disk, exec_file("USER.BIN", &.{}));
+}
+
+test "exec: DSK3 header validation pins the segment bounds (claim 3805)" {
+    var buf: [dsk3_header_size + 4096 + 16]u8 = [_]u8{0} ** (dsk3_header_size + 4096 + 16);
+    // A valid segmented header: page-aligned 4 KiB text + 8 data + 8 BSS.
+    std.mem.writeInt(u32, buf[0..4], dsk3_magic, .little);
+    std.mem.writeInt(u64, buf[8..16], dsk3_header_size, .little); // entry at content start
+    std.mem.writeInt(u64, buf[16..24], dsk3_header_size + 4096 + 8, .little);
+    std.mem.writeInt(u64, buf[24..32], 4096, .little);
+    std.mem.writeInt(u64, buf[32..40], 8, .little);
+    std.mem.writeInt(u64, buf[40..48], 16, .little);
+    const got = buf.len;
+    const ok = parse_dsk3(&buf, got).ok;
+    try std.testing.expectEqual(@as(u64, dsk3_header_size), ok.entry_off);
+    try std.testing.expectEqual(@as(usize, 4096), ok.text_size);
+    try std.testing.expectEqual(@as(usize, 8), ok.data_file_size);
+    try std.testing.expectEqual(@as(usize, 16), ok.data_mem_size);
+
+    // image_size must equal header + text + data_file (no phantom bytes).
+    var bad_image = buf;
+    std.mem.writeInt(u64, bad_image[16..24], dsk3_header_size + 4096 + 7, .little);
+    try std.testing.expectEqual(ExecResult.bad_magic, parse_dsk3(&bad_image, got).err);
+
+    // A zero text region is not a loadable program.
+    var zero_text = buf;
+    std.mem.writeInt(u64, zero_text[24..32], 0, .little);
+    std.mem.writeInt(u64, zero_text[16..24], dsk3_header_size + 0 + 8, .little);
+    try std.testing.expectEqual(ExecResult.too_large, parse_dsk3(&zero_text, got).err);
+
+    // BSS must not be smaller than the initialized data.
+    var bad_bss = buf;
+    std.mem.writeInt(u64, bad_bss[40..48], 4, .little);
+    try std.testing.expectEqual(ExecResult.too_large, parse_dsk3(&bad_bss, got).err);
+
+    // The entry must land inside the RX region.
+    var bad_entry = buf;
+    std.mem.writeInt(u64, bad_entry[8..16], dsk3_header_size + 4096, .little); // == text end
+    try std.testing.expectEqual(ExecResult.bad_entry, parse_dsk3(&bad_entry, got).err);
+
+    // A truncated read (got < image_size) is an honest too_large.
+    try std.testing.expectEqual(ExecResult.too_large, parse_dsk3(&buf, dsk3_header_size + 4096 + 4).err);
 }
 
 test "exec: ok path loads, validates, builds the root, and spawns the task" {

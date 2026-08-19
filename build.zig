@@ -834,6 +834,32 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_chime.step);
 
     // ------------------------------------------------------------------
+    // Guest: twenty-eighth ESP user program (milestone sixteen, card C1 — claim 3805)
+    // GLOBALS.BIN. The FIRST SEGMENTED user image: built with elf2bin's
+    // `--segments` mode so it carries a real writable .data + zero-filled
+    // .bss region (the M15 JINGLE finding, claim 7636, is reversed) and a
+    // 24 KiB .rodata blob that pushes it past the OLD 16 KiB load bound.
+    // ------------------------------------------------------------------
+    const globals_prog = b.addExecutable(.{
+        .name = "user-globals",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/globals.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    globals_prog.linker_script = b.path("user/linker-segmented.ld");
+    const globals_step = b.step("globals", "Build the twenty-eighth ESP user program (zig-out/bin/GLOBALS.BIN) — the first SEGMENTED DSK3 image");
+    const globals_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py", "--segments" });
+    globals_elf2bin.addFileArg(globals_prog.getEmittedBin());
+    const globals_bin = globals_elf2bin.addOutputFileArg("GLOBALS.BIN");
+    globals_elf2bin.has_side_effects = true;
+    globals_elf2bin.stdio = .inherit;
+    globals_step.dependOn(&globals_elf2bin.step);
+    const install_globals = b.addInstallFileWithDir(globals_bin, .bin, "GLOBALS.BIN");
+    b.getInstallStep().dependOn(&install_globals.step);
+
+    // ------------------------------------------------------------------
     // Top-level steps. System-command steps are marked as having side
     // effects (and inherit stdio) so they always execute instead of being
     // skipped by the build cache. (No QEMU path: this project targets Apple
@@ -871,6 +897,7 @@ pub fn build(b: *std.Build) void {
     image.addFileArg(harden_bin); // ... [HARDEN.BIN] (claim 4482: twenty-fifth user program, hostile-consumer proof)
     image.addFileArg(jingle_bin); // ... [JINGLE.BIN] (claim 7636: twenty-sixth user program, EL0 audio-seam proof)
     image.addFileArg(chime_bin); // ... [CHIME.BIN] (claim 3206: twenty-seventh user program, composition capstone proof)
+    image.addFileArg(globals_bin); // ... [GLOBALS.BIN] (claim 3805: twenty-eighth user program, the first SEGMENTED DSK3 image)
     image.has_side_effects = true;
     image.stdio = .inherit;
     image_step.dependOn(&image.step);

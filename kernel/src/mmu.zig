@@ -570,6 +570,7 @@ fn clone_into_user_root(
     level: u8,
     va_base: u64,
     text: ?UserAperture,
+    data: ?UserAperture,
     stack: ?UserAperture,
 ) ?*align(4096) [512]u64 {
     const dst = new_table() orelse return null;
@@ -582,8 +583,9 @@ fn clone_into_user_root(
         const slot_va = va_base + @as(u64, i) * slot_bytes;
         const slot_end = slot_va + slot_bytes;
         const in_text = text != null and slot_va < text.?.va_end and slot_end > text.?.va_start;
+        const in_data = data != null and slot_va < data.?.va_end and slot_end > data.?.va_start;
         const in_stack = stack != null and slot_va < stack.?.va_end and slot_end > stack.?.va_start;
-        const hits_user = in_text or in_stack;
+        const hits_user = in_text or in_data or in_stack;
         if (hits_user and level < 3) {
             // The slot intersects a user aperture: the clone must descend
             // to the page level, splitting a covering block if needed.
@@ -591,17 +593,17 @@ fn clone_into_user_root(
                 table_entry(&src[i]) orelse return null
             else
                 split_block_view(desc) orelse return null;
-            const child = clone_into_user_root(child_src, level + 1, slot_va, text, stack) orelse return null;
+            const child = clone_into_user_root(child_src, level + 1, slot_va, text, data, stack) orelse return null;
             dst[i] = @intFromPtr(child) | 3;
         } else if (hits_user and level == 3) {
             // Page leaf inside a user aperture: the ONLY place EL0
             // permission is granted in the whole root.
-            const ap = if (in_text) text.? else stack.?;
+            const ap = if (in_text) text.? else if (in_data) data.? else stack.?;
             const pa = ap.phys + (slot_va - ap.va_start);
             const normal = (pa & ~@as(u64, 0xfff)) | attr_bits(.normal, true);
             dst[i] = user_leaf(normal, ap.writable, ap.executable) orelse return null;
         } else if ((desc & 3) == 3 and level < 3) {
-            const child = clone_into_user_root(table_entry(&src[i]) orelse return null, level + 1, slot_va, text, stack) orelse return null;
+            const child = clone_into_user_root(table_entry(&src[i]) orelse return null, level + 1, slot_va, text, data, stack) orelse return null;
             dst[i] = @intFromPtr(child) | 3;
         } else {
             dst[i] = desc; // block or page leaf — EL1-only AP=0b00, copy verbatim
@@ -626,10 +628,17 @@ fn clone_into_user_root(
 /// still tracks the most recently built root for the diagnostics. Returns
 /// null when the fixed table carve-out cannot hold another clone (the
 /// `table_full` bound).
-pub fn build_user_root(
+/// Full multi-aperture user root (milestone sixteen C1, claim 3805): like
+/// `build_user_root` but with an optional writable DATA aperture (EL0 RW +
+/// UXN) mapped between text and stack — the segmented image's `.data`/`.bss`
+/// region. `data_len == 0` (or `data_phys == 0`) omits the data aperture.
+pub fn build_user_root_full(
     text_va: u64,
     text_phys: u64,
     text_len: u64,
+    data_va: u64,
+    data_phys: u64,
+    data_len: u64,
     stack_va: u64,
     stack_phys: u64,
     stack_len: u64,
@@ -641,6 +650,13 @@ pub fn build_user_root(
         .writable = false,
         .executable = true,
     };
+    const data_ap: ?UserAperture = if (data_len == 0 or data_phys == 0) null else UserAperture{
+        .va_start = data_va,
+        .va_end = data_va + data_len,
+        .phys = data_phys,
+        .writable = true,
+        .executable = false,
+    };
     const stack_ap = UserAperture{
         .va_start = stack_va,
         .va_end = stack_va + stack_len,
@@ -648,11 +664,22 @@ pub fn build_user_root(
         .writable = true,
         .executable = false,
     };
-    const root = clone_into_user_root(&table_storage[0], 0, 0, text_ap, stack_ap) orelse return null;
+    const root = clone_into_user_root(&table_storage[0], 0, 0, text_ap, data_ap, stack_ap) orelse return null;
     const root_phys = @intFromPtr(root);
     user_root_value = root_phys;
     roots_ready = true;
     return root_phys;
+}
+
+pub fn build_user_root(
+    text_va: u64,
+    text_phys: u64,
+    text_len: u64,
+    stack_va: u64,
+    stack_phys: u64,
+    stack_len: u64,
+) ?u64 {
+    return build_user_root_full(text_va, text_phys, text_len, 0, 0, 0, stack_va, stack_phys, stack_len);
 }
 
 /// Pure permission transform pinned by host tests. Existing leaf, AttrIndex
