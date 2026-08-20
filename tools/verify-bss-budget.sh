@@ -152,7 +152,7 @@ echo "  other (font, console, scheduler, virtio rings, process table, mailbox, e
 
 if [ "$STATUS" = "FAIL" ]; then
     echo
-    echo "verify-bss-budget: FAILED — kernel .bss exceeded the 7.0 MiB ceiling."
+    echo "verify-bss-budget: FAILED — kernel .bss exceeded the 11.0 MiB ceiling."
     echo "Either:"
     echo "  1. Remove the offending allocation (preferred -- amend the design)."
     echo "  2. Amend ADR 0013 D3.1 with the post-change measurement + justification,"
