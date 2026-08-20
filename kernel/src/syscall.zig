@@ -2188,7 +2188,7 @@ test "syscall: win open/fill/present/close round-trips with per-process ownershi
     // Close the OWN window: slot 15 releases it (0 on success).
     try std.testing.expectEqual(@as(u64, 0), dispatch(sys_win_close, .{ 2, 0, 0, 0, 0, 0 }, &frame));
     try std.testing.expectEqual(@as(u64, 1), call_count(sys_win_close));
-    try std.testing.expectEqual(@as(usize, 4), driving_award.count());
+    try std.testing.expectEqual(@as(usize, 5), driving_award.count());
     // A second close of the freed id is EINVAL (no such user window).
     try std.testing.expectEqual(error_result(.einval), dispatch(sys_win_close, .{ 2, 0, 0, 0, 0, 0 }, &frame));
     // Re-open (id 2 reused), then open the remaining slots (ids 3..5): the
@@ -2235,7 +2235,7 @@ test "syscall: win open/fill/present/close round-trips with per-process ownershi
     try std.testing.expect(driving_award.user_owner(3) == null);
     try std.testing.expect(driving_award.user_owner(4) == null);
     try std.testing.expect(driving_award.user_owner(5) == null);
-    try std.testing.expectEqual(@as(usize, 4), driving_award.count());
+    try std.testing.expectEqual(@as(usize, 5), driving_award.count());
     // The close counter only ever saw the THREE explicit dispatches (one
     // success + the two refusals above): the exit-path teardown is NOT a
     // syscall (it rides close_owner, never handle_win_close).
@@ -2318,14 +2318,14 @@ test "syscall: win query copies the full window state back and enforces ownershi
     try std.testing.expect(scheduler.yield_current()); // user -> WIN.BIN (3)
     try std.testing.expectEqual(@as(usize, 3), scheduler.current_id());
     try std.testing.expectEqual(@as(u64, 2), dispatch(sys_win_open, .{ 64, 64, 256, 192, 0, 0 }, &frame));
-    // The full state right after open: top of the z-order (index 2), focused,
+    // The full state right after open: top of the z-order (index 5 with dock), focused,
     // visible, dirty (the compositor never runs in a host test).
     try std.testing.expectEqual(@as(u64, 0), dispatch(sys_win_query, .{ 2, @intFromPtr(&qbuf), 0, 0, 0, 0 }, &frame));
     try std.testing.expectEqual(@as(u32, 64), std.mem.readInt(u32, qbuf[0..4], .little));
     try std.testing.expectEqual(@as(u32, 64), std.mem.readInt(u32, qbuf[4..8], .little));
     try std.testing.expectEqual(@as(u32, 256), std.mem.readInt(u32, qbuf[8..12], .little));
     try std.testing.expectEqual(@as(u32, 192), std.mem.readInt(u32, qbuf[12..16], .little));
-    try std.testing.expectEqual(@as(u32, 4), std.mem.readInt(u32, qbuf[16..20], .little)); // z
+    try std.testing.expectEqual(@as(u32, 5), std.mem.readInt(u32, qbuf[16..20], .little)); // z
     try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, qbuf[20..24], .little)); // focused
     try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, qbuf[24..28], .little)); // visible
     try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, qbuf[28..32], .little)); // dirty

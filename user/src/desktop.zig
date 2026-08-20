@@ -29,6 +29,7 @@ pub const AppEntry = struct {
     desc: []const u8,
     status: []const u8,
     icon: u8 = '?',
+    dock: bool = false,
 };
 
 /// The built-in catalog — used ONLY as a fallback when `/esp/APPS.TXT` is
@@ -69,12 +70,12 @@ pub fn parse_manifest(text: []const u8, out: []AppEntry) usize {
         while (trimmed_start < line.len and (line[trimmed_start] == ' ' or line[trimmed_start] == '\t' or line[trimmed_start] == '\r')) : (trimmed_start += 1) {}
         if (trimmed_start < line.len and line[trimmed_start] != '#') {
             const content = line[trimmed_start..];
-            // Split on '|' into up to 3 fields.
-            var fields: [3][]const u8 = undefined;
+            // Split on '|' into up to 4 fields (M15 C4 dock flag).
+            var fields: [4][]const u8 = undefined;
             var field_count: usize = 0;
             var field_start: usize = 0;
             var i: usize = 0;
-            while (i <= content.len and field_count < 3) : (i += 1) {
+            while (i <= content.len and field_count < 4) : (i += 1) {
                 if (i == content.len or content[i] == '|') {
                     fields[field_count] = content[field_start..i];
                     field_count += 1;
@@ -85,12 +86,14 @@ pub fn parse_manifest(text: []const u8, out: []AppEntry) usize {
                 const name = trim(fields[0]);
                 const desc = trim(fields[1]);
                 const icon_field = if (field_count >= 3) trim(fields[2]) else "";
+                const dock_field = if (field_count >= 4) trim(fields[3]) else "";
                 if (name.len > 0 and desc.len > 0) {
                     out[count] = .{
                         .name = name,
                         .desc = desc,
                         .status = "APPS.TXT",
                         .icon = if (icon_field.len > 0) icon_field[0] else '?',
+                        .dock = std.mem.eql(u8, dock_field, "dock=true"),
                     };
                     count += 1;
                 }

@@ -6173,7 +6173,7 @@ test "monitor: resources audits the fixed pools at their bounds (C3 claim 0339)"
     // 3848), so the registry holds exactly one descriptor here.
     try std.testing.expect(std.mem.indexOf(u8, out, "resources: procs=1/16\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "resources: windows=") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "/8\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "/9\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "resources: tables=0/512\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "resources: events=16 mbox=8 fds=8 timers=1 tcp=1\n") != null);
 }

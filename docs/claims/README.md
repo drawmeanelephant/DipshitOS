@@ -247,6 +247,7 @@ CI) fails if the table drifts from the claim files.
 | [9357-calm-lavoisier-memorial](9357-calm-lavoisier-memorial.md) | Antigravity (`docs/calm-lavoisier`) | ✅ done |
 | [9489-dhcp-renew](9489-dhcp-renew.md) | buffy (`agent/buffy/m5-net-dhcp-renew`) | ✅ DONE 2026-08-12 on `agent/buffy/m5-net-dhcp-renew` (from the N8 claim head `e645fd3` — PR #104; claim PR pending) |
 | [9492-multi-descriptor-payloads](9492-multi-descriptor-payloads.md) | buffy (`agent/buffy/macos27-custom-virtio-spike`) | ✅ done 2026-08-10 on `agent/buffy/macos27-custom-virtio-spike` |
+| [9697-dock](9697-dock.md) | buffy (`agent/buffy/m15-c4-dock`) | ✅ done 2026-08-20 — `driving_award.zig:107` `Kind.dock` + `dock_*` BSS + `arm` window 253 + `paint` dock bar + `pointer_tick` dock launch/raise + `image/apps.txt` `dock=true` (5 apps) + `desktop.zig:27` `dock` parse, host tests `arm` 5→`count` + `hit_test` + `user_open` + `syscall` `win_query` + `monitor` `resources` update, `verify-bss-budget` PASS `9788k/11534k` |
 | [9737-feature-negotiation-depth](9737-feature-negotiation-depth.md) | buffy (`agent/buffy/macos27-custom-virtio-spike`) | ✅ done 2026-08-10 on `agent/buffy/macos27-custom-virtio-spike` |
 | [9746-exception-vectors](9746-exception-vectors.md) | buffy (`freebuff/grab-newest-git-and-check-status-if-there-s-any-im-b9d5c028-9379-48e0-8ddb-ebfbf45ef2df`) | ✅ done 2026-08-08 — implementation, host tests, and the live class B gate all pass. |
 | [9946-wait-exit](9946-wait-exit.md) | Buffy (`agent/buffy/m4-wait-exit`) | ✅ done 2026-08-11 on `agent/buffy/m4-wait-exit` (PR #83) |
