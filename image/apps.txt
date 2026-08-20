@@ -1,11 +1,11 @@
-# DipshitOS app manifest (M13 B2, claim 8877). NAME.BIN | Display Name | icon
-CALC.BIN | 64-bit Calc | c
-NOTEPAD.BIN | Text Editor | n
-TOP.BIN | Task Manager | t
+# DipshitOS app manifest (M13 B2, claim 8877; M15 C4 dock flag). NAME.BIN | Display Name | icon | dock=true
+CALC.BIN | 64-bit Calc | c | dock=true
+NOTEPAD.BIN | Text Editor | n | dock=true
+TOP.BIN | Task Manager | t | dock=true
 KEYTEST.BIN | HID Input | k
 TYPE.BIN | File Reader | f
 DIR.BIN | Directory List | d
 FETCH.BIN | HTTP/1.0 Client | w
 CHAT.BIN | P2P Net Chat | m
-FILE.BIN | File Browser | b
-SETTINGS.BIN | Settings | s
+FILE.BIN | File Browser | b | dock=true
+SETTINGS.BIN | Settings | s | dock=true

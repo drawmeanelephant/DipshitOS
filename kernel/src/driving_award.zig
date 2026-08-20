@@ -49,8 +49,8 @@ const events = @import("events.zig"); // Milestone 9 (claim 9228): application e
 // Geometry + colors (fixed constants — the live record lives in the claim)
 // ---------------------------------------------------------------------------
 
-/// Bounded window registry size (fixed BSS).
-pub const max_windows: usize = 8;
+/// Bounded window registry size (fixed BSS, M15 C4 dock adds one fixed window).
+pub const max_windows: usize = 9;
 
 /// The clock window: an overlay in the terminal's top-right corner. 304x192
 /// at (960,16) — inside the 1280x720 scanout, overlapping the terminal.
@@ -100,6 +100,15 @@ pub const taskbar_bg_rgb: u32 = 0x0f172a;
 pub const taskbar_entry_active_rgb: u32 = 0x3b82f6;
 pub const taskbar_entry_dimmed_rgb: u32 = 0x1e293b;
 
+/// M15 C4 (Dock, #229): 24 px left dock, topmost fixed layer.
+pub const dock_w: u32 = 24;
+pub const dock_x: u32 = 0;
+pub const dock_y: u32 = 0;
+pub const dock_h: u32 = virtio_gpu.fb_height - taskbar_h;
+pub const dock_bg_rgb: u32 = 0x0f172a;
+pub const dock_icon_bg_rgb: u32 = 0x1e293b;
+pub const dock_icon_active_rgb: u32 = 0x3b82f6;
+
 /// Step 9 (Issue #212): the desktop wallpaper gradient.
 pub const wallpaper_top_rgb: u32 = 0x1a1a2e;
 pub const wallpaper_bot_rgb: u32 = 0x0a0a14;
@@ -111,6 +120,7 @@ pub const Kind = enum {
     user,
     taskbar,
     wallpaper,
+    dock,
 };
 
 /// One window in the registry. Value type; the registry is a fixed BSS
@@ -329,6 +339,19 @@ pub fn arm() void {
         .dirty = true,
     };
     win_count += 1;
+    // M15 C4: dock window (id 253) — 24 px left bar, always visible.
+    windows[win_count] = .{
+        .id = 253,
+        .title = "dock",
+        .x = dock_x,
+        .y = dock_y,
+        .w = dock_w,
+        .h = dock_h,
+        .kind = .dock,
+        .visible = true,
+        .dirty = true,
+    };
+    win_count += 1;
     focused_id = 0;
     armed_global = true;
     presents = 0;
@@ -372,6 +395,7 @@ pub fn kind_name(kind: Kind) []const u8 {
         .user => "user",
         .taskbar => "taskbar",
         .wallpaper => "wallpaper",
+        .dock => "dock",
     };
 }
 
@@ -817,8 +841,8 @@ pub fn cycle_focus() ?u8 {
     while (i <= win_count) : (i += 1) {
         const idx = (start + i) % win_count;
         if (!windows[idx].visible) continue;
-        // Wallpaper and taskbar are not cyclable.
-        if (windows[idx].kind == .wallpaper or windows[idx].kind == .taskbar) continue;
+        // Wallpaper, taskbar and dock are not cyclable.
+        if (windows[idx].kind == .wallpaper or windows[idx].kind == .taskbar or windows[idx].kind == .dock) continue;
         const target_id = windows[idx].id;
         _ = focus(target_id);
         return focused_id;
@@ -1051,48 +1075,82 @@ pub fn pointer_tick(st: input.PointerState, click: ?input.Click) ?u8 {
         const btn_released = (prev_ptr_buttons != 0 and st.buttons == 0);
 
         // Step 5/6/7: drag + close + minimize handling on MOUSE_DOWN.
+        // M15 C4: dock handling must precede user windows — dock is at 0,0,24,700.
         if (btn_pressed) {
-            // Check close/minimize buttons on user windows first.
             var handled_btn = false;
-            var wi: usize = win_count;
-            while (wi > 0) {
-                wi -= 1;
-                const w = &windows[wi];
-                if (w.kind != .user or !w.visible) continue;
-                // Close button: top-right corner (x + w.w - 14, y + 4, 8x8).
-                if (cursor_x >= w.x + w.w - 16 and cursor_x < w.x + w.w - 4 and
-                    cursor_y >= w.y and cursor_y < w.y + user_title_h)
-                {
-                    _ = user_close(w.id);
-                    handled_btn = true;
-                    break;
-                }
-                // Minimize button: left of close (x + w.w - 26, y + 4, 8x8).
-                if (cursor_x >= w.x + w.w - 28 and cursor_x < w.x + w.w - 16 and
-                    cursor_y >= w.y and cursor_y < w.y + user_title_h)
-                {
-                    _ = user_set_visible(w.id, false);
-                    handled_btn = true;
-                    break;
-                }
-                // Title bar drag initiation.
-                if (cursor_x >= w.x and cursor_x < w.x + w.w and
-                    cursor_y >= w.y and cursor_y < w.y + user_title_h)
-                {
-                    // M15 C3: snapped windows restore on drag-out — restore before
-                    // capturing the drag offset so the offset tracks the restored rect.
-                    if (snap_is_snapped(w.id)) {
-                        _ = snap_restore(w.id);
+            // M15 C4: dock icon click — 24 px left bar, 20×20 icons at (2,8+idx*32).
+            if (cursor_x < dock_w and cursor_y < dock_h) {
+                if (cursor_x >= 2 and cursor_x < 22) {
+                    var idx: usize = 0;
+                    while (idx < 5) : (idx += 1) {
+                        const iy = 8 + @as(u32, @intCast(idx)) * 32;
+                        if (cursor_y >= iy and cursor_y < iy + 20) {
+                            var has_user = false;
+                            var k: usize = 0;
+                            while (k < win_count) : (k += 1) {
+                                if (windows[k].kind == .user) { has_user = true; break; }
+                            }
+                            if (!has_user) {
+                                _ = user_open(64, 64, 512, 384, 99);
+                            } else {
+                                var kk: usize = 0;
+                                while (kk < win_count) : (kk += 1) {
+                                    if (windows[kk].kind == .user) {
+                                        _ = focus(windows[kk].id);
+                                        _ = raise(windows[kk].id);
+                                        break;
+                                    }
+                                }
+                            }
+                            _ = mark_dirty(0);
+                            handled_btn = true;
+                            break;
+                        }
                     }
-                    drag_id = w.id;
-                    drag_offset_x = if (cursor_x >= w.x) cursor_x - w.x else 0;
-                    drag_offset_y = if (cursor_y >= w.y) cursor_y - w.y else 0;
-                    _ = focus(w.id);
-                    _ = raise(w.id);
-                    _ = mark_dirty(0);
-                    focused_changed = w.id;
-                    handled_btn = true;
-                    break;
+                }
+            }
+            if (!handled_btn) {
+                // Check close/minimize buttons on user windows first.
+                var wi: usize = win_count;
+                while (wi > 0) {
+                    wi -= 1;
+                    const w = &windows[wi];
+                    if (w.kind != .user or !w.visible) continue;
+                    // Close button: top-right corner (x + w.w - 14, y + 4, 8x8).
+                    if (cursor_x >= w.x + w.w - 16 and cursor_x < w.x + w.w - 4 and
+                        cursor_y >= w.y and cursor_y < w.y + user_title_h)
+                    {
+                        _ = user_close(w.id);
+                        handled_btn = true;
+                        break;
+                    }
+                    // Minimize button: left of close (x + w.w - 26, y + 4, 8x8).
+                    if (cursor_x >= w.x + w.w - 28 and cursor_x < w.x + w.w - 16 and
+                        cursor_y >= w.y and cursor_y < w.y + user_title_h)
+                    {
+                        _ = user_set_visible(w.id, false);
+                        handled_btn = true;
+                        break;
+                    }
+                    // Title bar drag initiation.
+                    if (cursor_x >= w.x and cursor_x < w.x + w.w and
+                        cursor_y >= w.y and cursor_y < w.y + user_title_h)
+                    {
+                        // M15 C3: snapped windows restore on drag-out — restore before
+                        // capturing the drag offset so the offset tracks the restored rect.
+                        if (snap_is_snapped(w.id)) {
+                            _ = snap_restore(w.id);
+                        }
+                        drag_id = w.id;
+                        drag_offset_x = if (cursor_x >= w.x) cursor_x - w.x else 0;
+                        drag_offset_y = if (cursor_y >= w.y) cursor_y - w.y else 0;
+                        _ = focus(w.id);
+                        _ = raise(w.id);
+                        _ = mark_dirty(0);
+                        focused_changed = w.id;
+                        handled_btn = true;
+                        break;
+                    }
                 }
             }
             // Fall through to normal focus-at if no button/title bar was hit.
@@ -1398,6 +1456,22 @@ fn paint(w: *Window) void {
                 entry_x += entry_w + 4;
             }
         },
+        .dock => {
+            // M15 C4: 24 px left dock, vertical icon bar (hardcoded dock apps).
+            const fb: [*]u8 = @ptrCast(&virtio_gpu.gpu_fb);
+            const stride = virtio_gpu.fb_width * 4;
+            fill_rect(fb, stride, w.x, w.y, w.w, w.h, dock_bg_rgb);
+            // Icons for dock=true apps (first 5 from image/apps.txt).
+            const dock_icons = [_]u8{ 'c', 'n', 't', 'b', 's' };
+            var idx: usize = 0;
+            while (idx < dock_icons.len) : (idx += 1) {
+                const iy = w.y + 8 + @as(u32, @intCast(idx)) * 32;
+                if (iy + 24 > w.y + w.h) break;
+                const bg = if (idx == 0 and focused_id == 2) dock_icon_active_rgb else dock_icon_bg_rgb;
+                fill_rect(fb, stride, w.x + 2, iy, 20, 20, bg);
+                draw_glyph(fb, stride, w.x + 8, iy + 6, dock_icons[idx], 0xffffff);
+            }
+        },
     }
 }
 
@@ -1680,7 +1754,7 @@ pub fn drain(ticks: u64) virtio_gpu.CmdResult {
 
 test "driving_award: arm registers the terminal (window 0) and the clock (window 1)" {
     arm();
-    try std.testing.expectEqual(@as(usize, 4), win_count);
+    try std.testing.expectEqual(@as(usize, 5), win_count);
     try std.testing.expectEqual(@as(u8, 0), windows[0].id);
     try std.testing.expectEqual(Kind.terminal, windows[0].kind);
     try std.testing.expectEqual(@as(u8, 1), windows[1].id);
@@ -1858,9 +1932,9 @@ test "driving_award: user_open/fill/present round-trips a bounded user window" {
     // Open window 2 at (64, 64) 256x192 — the first free user slot.
     const r = user_open(64, 64, 512, 384, 7);
     try std.testing.expectEqual(UserOpenResult{ .opened = 2 }, r);
-    try std.testing.expectEqual(@as(usize, 5), win_count);
-    try std.testing.expectEqual(@as(u8, 2), windows[4].id);
-    try std.testing.expectEqual(Kind.user, windows[4].kind);
+    try std.testing.expectEqual(@as(usize, 6), win_count);
+    try std.testing.expectEqual(@as(u8, 2), windows[5].id);
+    try std.testing.expectEqual(Kind.user, windows[5].kind);
     try std.testing.expectEqual(@as(?usize, 7), user_owner(2));
     try std.testing.expect(user_owner(1) == null); // the clock is unowned
     // The new window is on top and focused.
@@ -1876,7 +1950,7 @@ test "driving_award: user_open/fill/present round-trips a bounded user window" {
     // The unfilled corner is zero (the back-buffer starts cleared).
     try std.testing.expectEqual(@as(u8, 0), user_bufs[0][(100 * user_buf_w + 200) * 4 + 0]);
     try std.testing.expect(user_present(2));
-    try std.testing.expect(windows[2].dirty);
+    try std.testing.expect(windows[5].dirty);
 }
 
 test "driving_award: user_open bounds and the four slots fill the registry" {
@@ -1893,7 +1967,7 @@ test "driving_award: user_open bounds and the four slots fill the registry" {
     try std.testing.expectEqual(UserOpenResult{ .opened = 4 }, user_open(576, 64, 512, 384, 9));
     try std.testing.expectEqual(UserOpenResult{ .opened = 5 }, user_open(64, 288, 512, 384, 10));
     try std.testing.expectEqual(UserOpenResult.full, user_open(0, 0, 10, 10, 11));
-    try std.testing.expectEqual(@as(usize, 8), win_count);
+    try std.testing.expectEqual(@as(usize, 9), win_count);
     try std.testing.expectEqual(@as(?usize, 7), user_owner(2));
     try std.testing.expectEqual(@as(?usize, 8), user_owner(3));
     try std.testing.expectEqual(@as(?usize, 9), user_owner(4));
@@ -1916,7 +1990,7 @@ test "driving_award: user_fill refuses unknown ids and out-of-bounds rects" {
 test "driving_award: user_close releases a user window and frees its slot" {
     arm();
     try std.testing.expectEqual(UserOpenResult{ .opened = 2 }, user_open(64, 64, 512, 384, 7));
-    try std.testing.expectEqual(@as(usize, 5), win_count);
+    try std.testing.expectEqual(@as(usize, 6), win_count);
     try std.testing.expectEqual(@as(u8, 2), focused_id);
     // The terminal and the clock are fixed — never closable.
     try std.testing.expect(!user_close(0));
@@ -1925,20 +1999,20 @@ test "driving_award: user_close releases a user window and frees its slot" {
     // Close window 2: count decrements, focus falls back to the terminal,
     // and the slot is reusable by the next open.
     try std.testing.expect(user_close(2));
-    try std.testing.expectEqual(@as(usize, 4), win_count);
+    try std.testing.expectEqual(@as(usize, 5), win_count);
     try std.testing.expectEqual(@as(u8, 0), focused_id);
     try std.testing.expect(terminal_focused());
     try std.testing.expect(find_user_window(2) == null);
     // Re-opening reuses id 2 (the freed slot — the "release, not leak" proof).
     try std.testing.expectEqual(UserOpenResult{ .opened = 2 }, user_open(64, 64, 512, 384, 7));
-    try std.testing.expectEqual(@as(usize, 5), win_count);
+    try std.testing.expectEqual(@as(usize, 6), win_count);
     // Two opens, one close, one re-open: slot 3 is still free for a second
     // window, and closing BOTH user windows returns the registry to the
     // two fixed windows.
     try std.testing.expectEqual(UserOpenResult{ .opened = 3 }, user_open(320, 64, 512, 384, 8));
     try std.testing.expect(user_close(3));
     try std.testing.expect(user_close(2));
-    try std.testing.expectEqual(@as(usize, 4), win_count);
+    try std.testing.expectEqual(@as(usize, 5), win_count);
     try std.testing.expectEqual(@as(u8, 0), focused_id);
 }
 
@@ -2009,7 +2083,7 @@ test "driving_award: user_query reports the full window state (z-order + focus +
     try std.testing.expectEqual(@as(u32, 64), q.y);
     try std.testing.expectEqual(@as(u32, 512), q.w);
     try std.testing.expectEqual(@as(u32, 384), q.h);
-    try std.testing.expectEqual(@as(u32, 4), q.z);
+    try std.testing.expectEqual(@as(u32, 5), q.z);
     try std.testing.expectEqual(@as(u32, 1), q.focused);
     try std.testing.expectEqual(@as(u32, 1), q.visible);
     try std.testing.expectEqual(@as(u32, 1), q.dirty);
@@ -2017,16 +2091,16 @@ test "driving_award: user_query reports the full window state (z-order + focus +
     // rank 4 (bottom of the two user windows), unfocused.
     try std.testing.expectEqual(UserOpenResult{ .opened = 3 }, user_open(320, 64, 512, 384, 8));
     q = user_query(2).?;
-    try std.testing.expectEqual(@as(u32, 4), q.z);
+    try std.testing.expectEqual(@as(u32, 5), q.z);
     try std.testing.expectEqual(@as(u32, 0), q.focused);
     q = user_query(3).?;
-    try std.testing.expectEqual(@as(u32, 5), q.z);
+    try std.testing.expectEqual(@as(u32, 6), q.z);
     try std.testing.expectEqual(@as(u32, 1), q.focused);
     // Raising window 2 moves it to the top (rank 5) without changing focus
     // (still id 3).
     try std.testing.expect(user_raise(2));
     q = user_query(2).?;
-    try std.testing.expectEqual(@as(u32, 5), q.z);
+    try std.testing.expectEqual(@as(u32, 6), q.z);
     try std.testing.expectEqual(@as(u32, 0), q.focused);
 }
 
@@ -2059,15 +2133,15 @@ test "driving_award: close_owner auto-closes exactly the owning process's window
     // Process 7 opens both slots; process 8 owns nothing yet.
     try std.testing.expectEqual(UserOpenResult{ .opened = 2 }, user_open(64, 64, 512, 384, 7));
     try std.testing.expectEqual(UserOpenResult{ .opened = 3 }, user_open(320, 64, 512, 384, 7));
-    try std.testing.expectEqual(@as(usize, 6), win_count);
+    try std.testing.expectEqual(@as(usize, 7), win_count);
     try std.testing.expectEqual(@as(u8, 3), focused_id);
     // Closing a process with no windows is a no-op (returns 0).
     try std.testing.expectEqual(@as(usize, 0), close_owner(8));
-    try std.testing.expectEqual(@as(usize, 6), win_count);
+    try std.testing.expectEqual(@as(usize, 7), win_count);
     // Closing process 7 releases BOTH of its windows and falls the focus
     // back to the terminal.
     try std.testing.expectEqual(@as(usize, 2), close_owner(7));
-    try std.testing.expectEqual(@as(usize, 4), win_count);
+    try std.testing.expectEqual(@as(usize, 5), win_count);
     try std.testing.expectEqual(@as(u8, 0), focused_id);
     try std.testing.expect(find_user_window(2) == null);
     try std.testing.expect(find_user_window(3) == null);
@@ -2286,7 +2360,7 @@ test "driving_award: M15 C2 — Alt+Tab overlay snapshots, cycles, commits" {
     try std.testing.expectEqual(@as(u8, 3), committed);
     try std.testing.expect(!alt_tab_is_active());
     try std.testing.expectEqual(@as(u8, 3), focused_id);
-    try std.testing.expectEqual(@as(usize, 5), win_count - 1); // raised to top
+    try std.testing.expectEqual(@as(usize, 6), win_count - 1); // raised to top
     // Re-activate then dismiss without commit.
     try std.testing.expect(alt_tab_activate());
     try std.testing.expectEqual(@as(?u8, 2), alt_tab_selected_id());
