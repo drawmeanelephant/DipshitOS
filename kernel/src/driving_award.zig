@@ -175,6 +175,16 @@ var overlay_selected: usize = 0;
 var overlay_ids: [max_windows]u8 = undefined;
 var overlay_count: usize = 0;
 
+/// M15 C3 (Snap zones, #227): drag snap state — BSS, no heap.
+pub const SnapZone = enum { none, left, right, top, bottom, top_left, top_right, bottom_left, bottom_right };
+var snap_zone: SnapZone = .none;
+var snap_last_x: [user_windows_max]u32 = [_]u32{0} ** user_windows_max;
+var snap_last_y: [user_windows_max]u32 = [_]u32{0} ** user_windows_max;
+var snap_last_w: [user_windows_max]u32 = [_]u32{0} ** user_windows_max;
+var snap_last_h: [user_windows_max]u32 = [_]u32{0} ** user_windows_max;
+var snap_last_valid: [user_windows_max]bool = [_]bool{false} ** user_windows_max;
+var snap_snapped: [user_windows_max]bool = [_]bool{false} ** user_windows_max;
+
 /// Step 7 (Issue #207): theme selection. 0=dark, 1=light, 2=amber.
 /// Read by the compositor chrome pass for title bars, clock, focus ring.
 pub var theme_id: u8 = 0;
@@ -330,6 +340,12 @@ pub fn arm() void {
     overlay_active = false;
     overlay_count = 0;
     overlay_selected = 0;
+    snap_zone = .none;
+    var si: usize = 0;
+    while (si < user_windows_max) : (si += 1) {
+        snap_last_valid[si] = false;
+        snap_snapped[si] = false;
+    }
 }
 
 pub fn armed() bool {
@@ -775,6 +791,15 @@ fn remove_user_at(idx: usize) void {
         overlay_active = false;
         overlay_count = 0;
     }
+    // M15 C3: clear snap state for the closed window.
+    if (snap_slot(removed_id)) |s| {
+        snap_last_valid[s] = false;
+        snap_snapped[s] = false;
+    }
+    if (drag_id != null and drag_id.? == removed_id) {
+        drag_id = null;
+        snap_zone = .none;
+    }
     // Reveal whatever sat under the released window.
     _ = mark_dirty(0);
     _ = mark_dirty(1);
@@ -884,6 +909,109 @@ pub fn alt_tab_dismiss() void {
     _ = mark_dirty(0);
 }
 
+/// M15 C3 (Snap zones, #227): 20 px threshold, corners first, then edges.
+pub fn snap_zone_for_point(x: u32, y: u32) SnapZone {
+    const thresh: u32 = 20;
+    const w = virtio_gpu.fb_width;
+    const h = virtio_gpu.fb_height;
+    const near_left = x < thresh;
+    const near_right = x + thresh >= w;
+    const near_top = y < thresh;
+    const near_bottom = y + thresh >= h;
+    // Corners take precedence (avoid flicker when corner zones overlap edges).
+    if (near_left and near_top) return .top_left;
+    if (near_right and near_top) return .top_right;
+    if (near_left and near_bottom) return .bottom_left;
+    if (near_right and near_bottom) return .bottom_right;
+    if (near_left) return .left;
+    if (near_right) return .right;
+    if (near_top) return .top;
+    if (near_bottom) return .bottom;
+    return .none;
+}
+
+/// Zone bounds in scanout coordinates (taskbar excluded for bottom zones).
+/// Returns the zone's full rect; caller clamps to `user_buf_w`/`h` for the window.
+pub fn snap_zone_bounds(zone: SnapZone) ?struct { x: u32, y: u32, w: u32, h: u32 } {
+    const w = virtio_gpu.fb_width;
+    const h = virtio_gpu.fb_height;
+    const half_w = w / 2;
+    const half_h = (h - taskbar_h) / 2;
+    return switch (zone) {
+        .none => null,
+        .left => .{ .x = 0, .y = 0, .w = half_w, .h = h - taskbar_h },
+        .right => .{ .x = half_w, .y = 0, .w = w - half_w, .h = h - taskbar_h },
+        .top => .{ .x = 0, .y = 0, .w = w, .h = half_h },
+        .bottom => .{ .x = 0, .y = half_h, .w = w, .h = h - half_h - taskbar_h },
+        .top_left => .{ .x = 0, .y = 0, .w = half_w, .h = half_h },
+        .top_right => .{ .x = half_w, .y = 0, .w = w - half_w, .h = half_h },
+        .bottom_left => .{ .x = 0, .y = half_h, .w = half_w, .h = half_h },
+        .bottom_right => .{ .x = half_w, .y = half_h, .w = w - half_w, .h = half_h },
+    };
+}
+
+/// Per-window slot for snap state (user windows 2..5 → 0..3).
+fn snap_slot(id: u8) ?usize {
+    if (id < user_window_id_base) return null;
+    const s = @as(usize, id - user_window_id_base);
+    if (s >= user_windows_max) return null;
+    return s;
+}
+
+/// True when the user window is currently snapped.
+pub fn snap_is_snapped(id: u8) bool {
+    const s = snap_slot(id) orelse return false;
+    return snap_snapped[s];
+}
+
+/// Snap the user window to the zone — saves last rect if not already snapped,
+/// clamps to `user_buf_w`/`h`, centers within zone, marks dirty, sets snapped.
+pub fn snap_window(id: u8, zone: SnapZone) bool {
+    const s = snap_slot(id) orelse return false;
+    const win = find_user_window(id) orelse return false;
+    const zb = snap_zone_bounds(zone) orelse return false;
+    if (!snap_snapped[s]) {
+        snap_last_x[s] = win.x;
+        snap_last_y[s] = win.y;
+        snap_last_w[s] = win.w;
+        snap_last_h[s] = win.h;
+        snap_last_valid[s] = true;
+    }
+    const win_w = @min(zb.w, user_buf_w);
+    const win_h = @min(zb.h, user_buf_h);
+    const win_x = zb.x + (zb.w - win_w) / 2;
+    const win_y = zb.y + (zb.h - win_h) / 2;
+    win.x = win_x;
+    win.y = win_y;
+    win.w = win_w;
+    win.h = win_h;
+    win.dirty = true;
+    snap_snapped[s] = true;
+    _ = mark_dirty(0);
+    return true;
+}
+
+/// Restore the window's pre-snap rect if it was snapped.
+pub fn snap_restore(id: u8) bool {
+    const s = snap_slot(id) orelse return false;
+    if (!snap_snapped[s] or !snap_last_valid[s]) return false;
+    const win = find_user_window(id) orelse return false;
+    win.x = snap_last_x[s];
+    win.y = snap_last_y[s];
+    win.w = snap_last_w[s];
+    win.h = snap_last_h[s];
+    win.dirty = true;
+    snap_snapped[s] = false;
+    snap_last_valid[s] = false;
+    _ = mark_dirty(0);
+    return true;
+}
+
+/// Current snap preview zone (for `draw_chrome`).
+pub fn snap_current_zone() SnapZone {
+    return snap_zone;
+}
+
 /// Map raw pointer buttons bitmask to ADR 0009 button flags.
 pub fn mouse_buttons_to_flags(buttons: u8) u16 {
     var flags: u16 = 0;
@@ -951,9 +1079,14 @@ pub fn pointer_tick(st: input.PointerState, click: ?input.Click) ?u8 {
                 if (cursor_x >= w.x and cursor_x < w.x + w.w and
                     cursor_y >= w.y and cursor_y < w.y + user_title_h)
                 {
+                    // M15 C3: snapped windows restore on drag-out — restore before
+                    // capturing the drag offset so the offset tracks the restored rect.
+                    if (snap_is_snapped(w.id)) {
+                        _ = snap_restore(w.id);
+                    }
                     drag_id = w.id;
-                    drag_offset_x = cursor_x - w.x;
-                    drag_offset_y = cursor_y - w.y;
+                    drag_offset_x = if (cursor_x >= w.x) cursor_x - w.x else 0;
+                    drag_offset_y = if (cursor_y >= w.y) cursor_y - w.y else 0;
                     _ = focus(w.id);
                     _ = raise(w.id);
                     _ = mark_dirty(0);
@@ -973,15 +1106,32 @@ pub fn pointer_tick(st: input.PointerState, click: ?input.Click) ?u8 {
             }
         }
 
-        // Step 5: drag continuation on MOUSE_MOVE.
+        // M15 C3: snap preview while dragging, snap on release.
         if (drag_id) |did| {
             if (moved and st.buttons != 0) {
                 const new_x: u32 = if (cursor_x >= drag_offset_x) cursor_x - drag_offset_x else 0;
                 const new_y: u32 = if (cursor_y >= drag_offset_y) cursor_y - drag_offset_y else 0;
                 _ = user_move(did, new_x, new_y);
+                const z = snap_zone_for_point(cursor_x, cursor_y);
+                if (z != snap_zone) {
+                    snap_zone = z;
+                    _ = mark_dirty(0);
+                }
             }
             if (btn_released) {
+                if (snap_zone != .none) {
+                    _ = snap_window(did, snap_zone);
+                }
                 drag_id = null;
+                if (snap_zone != .none) {
+                    snap_zone = .none;
+                    _ = mark_dirty(0);
+                }
+            }
+        } else {
+            if (snap_zone != .none) {
+                snap_zone = .none;
+                _ = mark_dirty(0);
             }
         }
 
@@ -1443,6 +1593,17 @@ fn draw_chrome() void {
                 else => 0x6366f1,
             };
             fill_rect(fb, stride, ov_x + ov_w - pad - 36, row_y + 6, 16, 16, preview_rgb);
+        }
+    }
+    // M15 C3: snap preview — translucent zone highlight while dragging near edge.
+    if (drag_id != null and snap_zone != .none) {
+        if (snap_zone_bounds(snap_zone)) |zb| {
+            // Opaque accent fill (honest preview for host test; true alpha would be compositor-pricey).
+            fill_rect(fb, stride, zb.x, zb.y, zb.w, zb.h, 0x3b82f6);
+            fill_rect(fb, stride, zb.x, zb.y, zb.w, 2, 0xffffff);
+            fill_rect(fb, stride, zb.x, zb.y + zb.h - 2, zb.w, 2, 0xffffff);
+            fill_rect(fb, stride, zb.x, zb.y, 2, zb.h, 0xffffff);
+            fill_rect(fb, stride, zb.x + zb.w - 2, zb.y, 2, zb.h, 0xffffff);
         }
     }
 }
@@ -2162,4 +2323,83 @@ test "driving_award: M15 C2 — overlay renders centered list with highlight" {
     // Inside the highlighted row (first selected is id 2) the row bg is active (0x3b82f6 blue in dark theme).
     const sel_y = ov_y + 24 + 8 + 10;
     try std.testing.expectEqual(@as(u32, 0x3b82f6), px.at(fb, stride, ov_x + 10, sel_y));
+}
+
+test "driving_award: M15 C3 — snap_zone_for_point detects halves and quadrants with corner precedence" {
+    // Edges 20 px, corners first.
+    try std.testing.expectEqual(SnapZone.left, snap_zone_for_point(5, 360));
+    try std.testing.expectEqual(SnapZone.right, snap_zone_for_point(1275, 360));
+    try std.testing.expectEqual(SnapZone.top, snap_zone_for_point(640, 5));
+    try std.testing.expectEqual(SnapZone.bottom, snap_zone_for_point(640, 715));
+    try std.testing.expectEqual(SnapZone.top_left, snap_zone_for_point(5, 5));
+    try std.testing.expectEqual(SnapZone.top_right, snap_zone_for_point(1275, 5));
+    try std.testing.expectEqual(SnapZone.bottom_left, snap_zone_for_point(5, 715));
+    try std.testing.expectEqual(SnapZone.bottom_right, snap_zone_for_point(1275, 715));
+    try std.testing.expectEqual(SnapZone.none, snap_zone_for_point(640, 360));
+}
+
+test "driving_award: M15 C3 — snap_window and snap_restore with per-window last_rect" {
+    arm();
+    _ = user_open(64, 64, 200, 100, 7);
+    const before = user_rect(2).?;
+    try std.testing.expect(!snap_is_snapped(2));
+    // Snap to left half — zone 640×700, win clamped to 512×384 centered.
+    try std.testing.expect(snap_window(2, .left));
+    try std.testing.expect(snap_is_snapped(2));
+    const after_left = user_rect(2).?;
+    try std.testing.expectEqual(@as(u32, 64), after_left.x);
+    try std.testing.expectEqual(@as(u32, 158), after_left.y);
+    try std.testing.expectEqual(@as(u32, 512), after_left.w);
+    try std.testing.expectEqual(@as(u32, 384), after_left.h);
+    // Restore.
+    try std.testing.expect(snap_restore(2));
+    try std.testing.expect(!snap_is_snapped(2));
+    const restored = user_rect(2).?;
+    try std.testing.expectEqual(before.x, restored.x);
+    try std.testing.expectEqual(before.y, restored.y);
+    // Snap to top-right quadrant then drag-out restore via pointer_tick.
+    try std.testing.expect(snap_window(2, .top_right));
+    try std.testing.expect(snap_is_snapped(2));
+    // Simulate drag start on snapped window title bar — should restore before dragging.
+    // Use a mapped cursor over the snapped window's title bar.
+    const win = find_user_window(2).?;
+    const cx = @as(u16, @intCast((@as(u32, win.x + 4) * 32768) / virtio_gpu.fb_width));
+    const cy = @as(u16, @intCast((@as(u32, win.y + 4) * 32768) / virtio_gpu.fb_height));
+    const st_click: input.PointerState = .{ .x = cx, .y = cy, .buttons = 0x01, .valid = true };
+    _ = pointer_tick(st_click, .{ .x = cx, .y = cy });
+    // After click, window should have been restored (drag_id set, is_snapped cleared).
+    try std.testing.expect(!snap_is_snapped(2));
+    try std.testing.expectEqual(before.x, find_user_window(2).?.x);
+    _ = user_close(2);
+}
+
+test "driving_award: M15 C3 — snap preview renders and zone bounds are within scanout" {
+    arm();
+    _ = user_open(100, 100, 200, 100, 7);
+    // Simulate dragging near left edge (cursor at x=5).
+    const st_drag: input.PointerState = .{ .x = @as(u16, @intCast((@as(u32, 5) * 32768) / virtio_gpu.fb_width)), .y = @as(u16, @intCast((@as(u32, 100) * 32768) / virtio_gpu.fb_height)), .buttons = 0x01, .valid = true };
+    // Start drag on title bar first.
+    const win = find_user_window(2).?;
+    const cx0 = @as(u16, @intCast((@as(u32, win.x + 4) * 32768) / virtio_gpu.fb_width));
+    const cy0 = @as(u16, @intCast((@as(u32, win.y + 4) * 32768) / virtio_gpu.fb_height));
+    _ = pointer_tick(.{ .x = cx0, .y = cy0, .buttons = 0x01, .valid = true }, .{ .x = cx0, .y = cy0 });
+    // Now drag to left edge.
+    _ = pointer_tick(st_drag, null);
+    try std.testing.expectEqual(SnapZone.left, snap_current_zone());
+    // Composite should paint the preview.
+    _ = composite();
+    const stride = virtio_gpu.fb_width * 4;
+    const fb: [*]u8 = @ptrCast(&virtio_gpu.gpu_fb);
+    const zb = snap_zone_bounds(.left).?;
+    const px = struct {
+        fn at(f: [*]u8, st: usize, x: usize, y: usize) u32 {
+            const o = y * st + x * 4;
+            return @as(u32, f[o + 2]) << 16 | @as(u32, f[o + 1]) << 8 | f[o];
+        }
+    };
+    // Preview border is white at zone's top-left corner.
+    try std.testing.expectEqual(@as(u32, 0xffffff), px.at(fb, stride, zb.x, zb.y));
+    // Inside preview is accent 0x3b82f6.
+    try std.testing.expectEqual(@as(u32, 0x3b82f6), px.at(fb, stride, zb.x + 4, zb.y + 4));
+    _ = user_close(2);
 }
