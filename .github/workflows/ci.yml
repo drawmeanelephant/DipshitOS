@@ -78,6 +78,9 @@ jobs:
       - name: Verify the bit-order mutation checks (class A — glyph raster + FAT endianness + virtio chain walk)
         run: bash tools/verify-mutations.sh
 
+      - name: Verify the kernel `.bss` ceiling (class A — ADR 0013 D3.1)
+        run: bash tools/verify-bss-budget.sh
+
       # --- Class B: Apple-silicon VZ hardware gates are NOT run here ---
 
       - name: State which gates this CI does NOT prove
