@@ -1088,7 +1088,10 @@ pub fn pointer_tick(st: input.PointerState, click: ?input.Click) ?u8 {
                             var has_user = false;
                             var k: usize = 0;
                             while (k < win_count) : (k += 1) {
-                                if (windows[k].kind == .user) { has_user = true; break; }
+                                if (windows[k].kind == .user) {
+                                    has_user = true;
+                                    break;
+                                }
                             }
                             if (!has_user) {
                                 _ = user_open(64, 64, 512, 384, 99);
