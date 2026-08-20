@@ -6,7 +6,7 @@
 //! the ADR 0007 slots 16/17 (`sys_win_move` / `sys_win_raise`) reposition
 //! and reorder its OWN window (owner-restricted, like fill/present/close):
 //!
-//!   1. `sys_win_open(64, 64, 256, 192)` (slot 12) opens the first free
+//!   1. `sys_win_open(64, 64, 512, 384)` (slot 12) opens the first free
 //!      user window (id 2) — OWNED by this process -> `winmove: open id=2`.
 //!   2. Four `sys_win_fill` calls (slot 13) paint the back-buffer: a dark
 //!      blue background (0x1a2b3c) + three 48x48 blocks (red 0xff0000,
@@ -15,17 +15,17 @@
 //!   4. `sys_win_move(2, 800, 400)` (slot 16) repositions the window ->
 //!      `winmove: move ok`.
 //!   5. `sys_win_present(2)` again, then `sys_win_move(2, 1200, 700)` —
-//!      the CLAMP proof: (1200, 700) + 256x192 would fall off the 1280x720
-//!      scanout, so it clamps to (1024, 528) — the bottom-right corner.
+//!      the CLAMP proof: (1200, 700) + 512x384 would fall off the 1280x720
+//!      scanout, so it clamps to (768, 336) — the bottom-right corner.
 //!   6. `sys_win_raise(2)` (slot 17) raises it to the top ->
 //!      `winmove: raise ok`, then a final `sys_win_present(2)`.
 //!   7. `sys_win_get(2, sp)` (slot 18) reads the CLAMPED rect back into a
 //!      16-byte stack buffer (four u32 LE words) and prints it —
-//!      `winmove: get 1024,528,256,192` — the EL0-side proof of the
+//!      `winmove: get 768,336,512,384` — the EL0-side proof of the
 //!      clamp (the move is silent; this reads the result back).
 //!   8. `sys_win_query(2, sp)` (slot 19) reads the FULL window state back
 //!      into a 32-byte stack buffer (eight u32 LE words) and prints it —
-//!      `winmove: query 1024,528,256,192 z=2 focused=1 visible=1 dirty=1` —
+//!      `winmove: query 768,336,512,384 z=2 focused=1 visible=1 dirty=1` —
 //!      the EL0-side proof of z-order rank + focus + visible/dirty.
 //!   9. `sys_win_set_visible(2, 0)` (slot 20) HIDES the window, then
 //!      `sys_sleep(2)` holds it hidden long enough for the gate's
@@ -58,10 +58,10 @@ pub const raise_line: []const u8 = "winmove: raise ok\n";
 pub const loop_line: []const u8 = "winmove: loop ok\n";
 /// The exact marker WINMOVE.BIN writes after reading its clamped rect back
 /// through `sys_win_get` (slot 18) — the live gate's grep target.
-pub const get_line: []const u8 = "winmove: get 1024,528,256,192\n";
+pub const get_line: []const u8 = "winmove: get 768,336,512,384\n";
 /// The exact marker WINMOVE.BIN writes after reading its FULL window state
 /// back through `sys_win_query` (slot 19) — the live gate's grep target.
-pub const query_line: []const u8 = "winmove: query 1024,528,256,192 z=2 focused=1 visible=1 dirty=1\n";
+pub const query_line: []const u8 = "winmove: query 768,336,512,384 z=2 focused=1 visible=1 dirty=1\n";
 /// The exact markers WINMOVE.BIN writes around the hide/show round trip
 /// through `sys_win_set_visible` (slot 20) — the live gate's grep targets.
 pub const hide_line: []const u8 = "winmove: hide ok\n";
@@ -69,12 +69,12 @@ pub const show_line: []const u8 = "winmove: show ok\n";
 
 export fn _start() callconv(.naked) noreturn {
     asm volatile (
-        \\// Phase 1 — sys_win_open(64, 64, 256, 192) (slot 12): the first
+        \\// Phase 1 — sys_win_open(64, 64, 512, 384) (slot 12): the first
         \\// free user window, owned by this process. Returns id 2.
         \\mov x0, #64
         \\mov x1, #64
-        \\mov x2, #256
-        \\mov x3, #192
+        \\mov x2, #512
+        \\mov x3, #384
         \\mov x8, #12
         \\svc #0
         \\cmp x0, #2
@@ -84,13 +84,13 @@ export fn _start() callconv(.naked) noreturn {
         \\mov x2, #19
         \\mov x8, #1
         \\svc #0
-        \\// Phase 2 — sys_win_fill(2, 0, 0, 256, 192, 0x1a2b3c) (slot 13):
+        \\// Phase 2 — sys_win_fill(2, 0, 0, 512, 384, 0x1a2b3c) (slot 13):
         \\// the dark-blue background.
         \\mov x0, #2
         \\mov x1, #0
         \\mov x2, #0
-        \\mov x3, #256
-        \\mov x4, #192
+        \\mov x3, #512
+        \\mov x4, #384
         \\movz x5, #0x1a, lsl #16
         \\movk x5, #0x2b3c
         \\mov x8, #13

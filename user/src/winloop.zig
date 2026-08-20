@@ -38,12 +38,12 @@ pub const loop_line: []const u8 = "winloop: loop ok\n";
 
 export fn _start() callconv(.naked) noreturn {
     asm volatile (
-        \\// Phase 1 — sys_win_open(64, 64, 256, 192) (slot 12): the first
+        \\// Phase 1 — sys_win_open(64, 64, 512, 384) (slot 12): the first
         \\// free user window, owned by this process. Returns id 2.
         \\mov x0, #64
         \\mov x1, #64
-        \\mov x2, #256
-        \\mov x3, #192
+        \\mov x2, #512
+        \\mov x3, #384
         \\mov x8, #12
         \\svc #0
         \\cmp x0, #2
@@ -53,13 +53,13 @@ export fn _start() callconv(.naked) noreturn {
         \\mov x2, #19
         \\mov x8, #1
         \\svc #0
-        \\// Phase 2 — sys_win_fill(2, 0, 0, 256, 192, 0x1a2b3c) (slot 13):
+        \\// Phase 2 — sys_win_fill(2, 0, 0, 512, 384, 0x1a2b3c) (slot 13):
         \\// the dark-blue background.
         \\mov x0, #2
         \\mov x1, #0
         \\mov x2, #0
-        \\mov x3, #256
-        \\mov x4, #192
+        \\mov x3, #512
+        \\mov x4, #384
         \\movz x5, #0x1a, lsl #16
         \\movk x5, #0x2b3c
         \\mov x8, #13

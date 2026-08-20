@@ -885,6 +885,29 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_guard.step);
 
     // ------------------------------------------------------------------
+    // Guest: thirtieth ESP user program (Issue #214 — GUI settings panel)
+    // SETTINGS.BIN. Reads/writes /data/SETTINGS.TXT through M10 file seam.
+    // ------------------------------------------------------------------
+    const settings_prog = b.addExecutable(.{
+        .name = "user-settings",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/settings_panel.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    settings_prog.linker_script = b.path("user/linker.ld");
+    const settings_step = b.step("settings", "Build the thirtieth ESP user program (zig-out/bin/SETTINGS.BIN)");
+    const settings_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    settings_elf2bin.addFileArg(settings_prog.getEmittedBin());
+    const settings_bin = settings_elf2bin.addOutputFileArg("SETTINGS.BIN");
+    settings_elf2bin.has_side_effects = true;
+    settings_elf2bin.stdio = .inherit;
+    settings_step.dependOn(&settings_elf2bin.step);
+    const install_settings = b.addInstallFileWithDir(settings_bin, .bin, "SETTINGS.BIN");
+    b.getInstallStep().dependOn(&install_settings.step);
+
+    // ------------------------------------------------------------------
     // Top-level steps. System-command steps are marked as having side
     // effects (and inherit stdio) so they always execute instead of being
     // skipped by the build cache. (No QEMU path: this project targets Apple
@@ -924,6 +947,7 @@ pub fn build(b: *std.Build) void {
     image.addFileArg(chime_bin); // ... [CHIME.BIN] (claim 3206: twenty-seventh user program, composition capstone proof)
     image.addFileArg(globals_bin); // ... [GLOBALS.BIN] (claim 3805: twenty-eighth user program, the first SEGMENTED DSK3 image)
     image.addFileArg(guard_bin); // ... [GUARD.BIN] (claim 8403: twenty-ninth user program, the hostile guard-page proof)
+    image.addFileArg(settings_bin); // ... [SETTINGS.BIN] (Issue #214: thirtieth user program, GUI settings panel)
     image.has_side_effects = true;
     image.stdio = .inherit;
     image_step.dependOn(&image.step);

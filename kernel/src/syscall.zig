@@ -75,7 +75,7 @@ const app_timers = @import("app_timers.zig"); // Milestone 14 (claim 7323): the 
 const virtio_snd = @import("virtio_snd.zig"); // Milestone 15 (claim 7636): the virtio-snd playback path behind sys_audio_*
 
 pub const slot_count: usize = 64;
-pub const implemented_count: usize = 46;
+pub const implemented_count: usize = 47;
 /// Card G6 (claim 0487) follow-on (slot 18): the fixed `sys_win_get` shape —
 /// four u32 LE words (x, y, w, h), 16 bytes, marshaled per call and copy_out'd
 /// through uaccess (the procs snapshot pattern).
@@ -206,6 +206,8 @@ pub const sys_audio_play: u64 = 43;
 pub const sys_audio_volume: u64 = 44;
 /// M15 follow-up (claim 9297): `sys_audio_mute(muted)` — slot 45.
 pub const sys_audio_mute: u64 = 45;
+/// Step 2 (Issue #205): `sys_win_fill_batch(buf_ptr, buf_len)` — slot 46.
+pub const sys_win_fill_batch: u64 = 46;
 
 pub const ErrorCode = enum(i64) {
     einval = -1,
@@ -327,6 +329,7 @@ fn ensure_table() *const [slot_count]Entry {
         table_storage[sys_audio_play] = .{ .name = "sys_audio_play", .handler = handle_audio_play };
         table_storage[sys_audio_volume] = .{ .name = "sys_audio_volume", .handler = handle_audio_volume };
         table_storage[sys_audio_mute] = .{ .name = "sys_audio_mute", .handler = handle_audio_mute };
+        table_storage[sys_win_fill_batch] = .{ .name = "sys_win_fill_batch", .handler = handle_win_fill_batch };
         table_ready = true;
     }
     return &table_storage;
@@ -669,6 +672,44 @@ fn handle_win_fill(args: Args, _: *exceptions.VectorFrame) u64 {
         return error_result(.einval);
     }
     return 0;
+}
+
+/// Step 2 (Issue #205): `sys_win_fill_batch(buf_ptr, buf_len)` — slot 46.
+/// Processes a packed array of fill rects in ONE SVC entry. Each rect is
+/// 24 bytes: {id: u8, _pad: [3]u8, x: u32, y: u32, w: u32, h: u32, rgb: u32}.
+/// Max 32 rects per batch (768 B). Returns the number of rects processed;
+/// negative error on bad pointer or oversized batch.
+fn handle_win_fill_batch(args: Args, _: *exceptions.VectorFrame) u64 {
+    const buf_ptr = args[0];
+    const buf_len = args[1];
+    // Each rect is 24 bytes; max 32 rects (768 B).
+    const rect_size: u64 = 24;
+    const max_rects: u64 = 32;
+    if (buf_len == 0 or buf_len > max_rects * rect_size or (buf_len % rect_size) != 0) {
+        return error_result(.einval);
+    }
+    const num_rects = buf_len / rect_size;
+    // Stack buffer for the batch (32 × 24 = 768 B).
+    var batch: [32 * 24]u8 = undefined;
+    const copy_len: usize = @intCast(buf_len);
+    if (uaccess.copy_in(@ptrCast(&batch), buf_ptr, copy_len) == .fault) return error_result(.efault);
+    var processed: u64 = 0;
+    var i: u64 = 0;
+    while (i < num_rects) : (i += 1) {
+        const off = i * rect_size;
+        const id = batch[off];
+        if (id > std.math.maxInt(u8)) continue;
+        const x = std.mem.readInt(u32, batch[off + 4 ..][0..4], .little);
+        const y = std.mem.readInt(u32, batch[off + 8 ..][0..4], .little);
+        const w = std.mem.readInt(u32, batch[off + 12 ..][0..4], .little);
+        const h = std.mem.readInt(u32, batch[off + 16 ..][0..4], .little);
+        const rgb = std.mem.readInt(u32, batch[off + 20 ..][0..4], .little);
+        if (!win_owned_by_caller(id)) continue;
+        if (driving_award.user_fill(id, x, y, w, h, rgb)) {
+            processed += 1;
+        }
+    }
+    return processed;
 }
 
 /// `sys_win_present(id)`: mark the CALLER'S user window dirty so the
@@ -1344,7 +1385,7 @@ fn handle_tcp_close(_: Args, _: *exceptions.VectorFrame) u64 {
 
 /// Deterministic monitor output for the implemented rows and their counters.
 pub fn report(con: *console.Console) void {
-    con.puts("syscalls: slots=64 implemented=46\n");
+    con.puts("syscalls: slots=64 implemented=47\n");
     var number: u64 = 0;
     while (number < implemented_count) : (number += 1) {
         const info = entry_info(number).?;
@@ -1376,7 +1417,7 @@ fn capture_marshaled_args(args: Args, _: *exceptions.VectorFrame) u64 {
     return 0xcafe;
 }
 
-test "syscall: runtime table has 64 slots and forty-four unique implemented rows" {
+test "syscall: runtime table has 64 slots and forty-five unique implemented rows" {
     init(test_writer);
     const table = ensure_table();
     try std.testing.expectEqual(@as(usize, 64), table.len);
@@ -1389,7 +1430,7 @@ test "syscall: runtime table has 64 slots and forty-four unique implemented rows
             implemented += 1;
         }
     }
-    try std.testing.expectEqual(@as(usize, 46), implemented);
+    try std.testing.expectEqual(@as(usize, 47), implemented);
     try std.testing.expectEqualStrings("sys_audio_info", entry_info(42).?.name);
     try std.testing.expectEqualStrings("sys_audio_play", entry_info(43).?.name);
     try std.testing.expectEqualStrings("sys_audio_volume", entry_info(44).?.name);
@@ -2147,7 +2188,7 @@ test "syscall: win open/fill/present/close round-trips with per-process ownershi
     // Close the OWN window: slot 15 releases it (0 on success).
     try std.testing.expectEqual(@as(u64, 0), dispatch(sys_win_close, .{ 2, 0, 0, 0, 0, 0 }, &frame));
     try std.testing.expectEqual(@as(u64, 1), call_count(sys_win_close));
-    try std.testing.expectEqual(@as(usize, 2), driving_award.count());
+    try std.testing.expectEqual(@as(usize, 4), driving_award.count());
     // A second close of the freed id is EINVAL (no such user window).
     try std.testing.expectEqual(error_result(.einval), dispatch(sys_win_close, .{ 2, 0, 0, 0, 0, 0 }, &frame));
     // Re-open (id 2 reused), then open the remaining slots (ids 3..5): the
@@ -2165,7 +2206,7 @@ test "syscall: win open/fill/present/close round-trips with per-process ownershi
     // Error mapping in the OWNING context: invalid geometry, out-of-bounds
     // rects, unknown ids, and the fixed windows are all EINVAL.
     try std.testing.expectEqual(error_result(.einval), dispatch(sys_win_open, .{ 0, 0, 0, 10, 0, 0 }, &frame));
-    try std.testing.expectEqual(error_result(.einval), dispatch(sys_win_open, .{ 0, 0, 10, 193, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_win_open, .{ 0, 0, 10, 385, 0, 0 }, &frame));
     try std.testing.expectEqual(error_result(.einval), dispatch(sys_win_fill, .{ 99, 0, 0, 10, 10, 0 }, &frame));
     try std.testing.expectEqual(error_result(.einval), dispatch(sys_win_fill, .{ 2, 255, 191, 2, 2, 0 }, &frame));
     try std.testing.expectEqual(error_result(.einval), dispatch(sys_win_present, .{ 99, 0, 0, 0, 0, 0 }, &frame));
@@ -2194,7 +2235,7 @@ test "syscall: win open/fill/present/close round-trips with per-process ownershi
     try std.testing.expect(driving_award.user_owner(3) == null);
     try std.testing.expect(driving_award.user_owner(4) == null);
     try std.testing.expect(driving_award.user_owner(5) == null);
-    try std.testing.expectEqual(@as(usize, 2), driving_award.count());
+    try std.testing.expectEqual(@as(usize, 4), driving_award.count());
     // The close counter only ever saw the THREE explicit dispatches (one
     // success + the two refusals above): the exit-path teardown is NOT a
     // syscall (it rides close_owner, never handle_win_close).
@@ -2284,7 +2325,7 @@ test "syscall: win query copies the full window state back and enforces ownershi
     try std.testing.expectEqual(@as(u32, 64), std.mem.readInt(u32, qbuf[4..8], .little));
     try std.testing.expectEqual(@as(u32, 256), std.mem.readInt(u32, qbuf[8..12], .little));
     try std.testing.expectEqual(@as(u32, 192), std.mem.readInt(u32, qbuf[12..16], .little));
-    try std.testing.expectEqual(@as(u32, 2), std.mem.readInt(u32, qbuf[16..20], .little)); // z
+    try std.testing.expectEqual(@as(u32, 4), std.mem.readInt(u32, qbuf[16..20], .little)); // z
     try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, qbuf[20..24], .little)); // focused
     try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, qbuf[24..28], .little)); // visible
     try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, qbuf[28..32], .little)); // dirty
@@ -2355,7 +2396,7 @@ test "syscall: counters are monotonic and report is deterministic" {
     var con = mock.console();
     report(&con);
     try std.testing.expectEqualStrings(
-        "syscalls: slots=64 implemented=46\n" ++
+        "syscalls: slots=64 implemented=47\n" ++
             "  0 sys_ping calls=2\n" ++
             "  1 sys_write calls=0\n" ++
             "  2 sys_yield calls=0\n" ++
@@ -2401,7 +2442,8 @@ test "syscall: counters are monotonic and report is deterministic" {
             "  42 sys_audio_info calls=0\n" ++
             "  43 sys_audio_play calls=0\n" ++
             "  44 sys_audio_volume calls=0\n" ++
-            "  45 sys_audio_mute calls=0\n",
+            "  45 sys_audio_mute calls=0\n" ++
+            "  46 sys_win_fill_batch calls=0\n",
         mock.contents(),
     );
 }

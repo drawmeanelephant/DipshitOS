@@ -10,8 +10,8 @@
 //! `sys_write` (slot 1).
 //!
 //! Lifecycle:
-//!   1. `sys_win_open(96, 96, 256, 192)` (slot 12) -> opens window id 2.
-//!   2. `sys_win_fill(2, 0, 0, 256, 192, 0x182026)` (slot 13) + `sys_win_present(2)`.
+//!   1. `sys_win_open(96, 96, 512, 384)` (slot 12) -> opens window id 2.
+//!   2. `sys_win_fill(2, 0, 0, 512, 384, 0x182026)` (slot 13) + `sys_win_present(2)`.
 //!   3. `sys_wait_event(sp)` (slot 22) event loop:
 //!      - `WIN_FOCUS` (6): paints green focus bar at (8, 8, 240, 6, 0x22c55e) + presents.
 //!      - `KEY_DOWN` (1): paints red key indicator at (32, 32, 64, 64, 0xef4444) + presents.
@@ -25,8 +25,8 @@ const std = @import("std");
 pub const window_id: u32 = 2;
 pub const window_x: u32 = 96;
 pub const window_y: u32 = 96;
-pub const window_w: u32 = 256;
-pub const window_h: u32 = 192;
+pub const window_w: u32 = 512;
+pub const window_h: u32 = 384;
 
 /// Colors painted by KEYTEST.BIN.
 pub const bg_rgb: u32 = 0x182026;
@@ -47,11 +47,11 @@ pub const exit_line: []const u8 = "keytest: exiting 99\n";
 
 export fn _start() callconv(.naked) noreturn {
     asm volatile (
-        \\// 1. sys_win_open(96, 96, 256, 192) (slot 12)
+        \\// 1. sys_win_open(96, 96, 512, 384) (slot 12)
         \\mov x0, #96
         \\mov x1, #96
-        \\mov x2, #256
-        \\mov x3, #192
+        \\mov x2, #512
+        \\mov x3, #384
         \\mov x8, #12
         \\svc #0
         \\cmp x0, #2
@@ -64,12 +64,12 @@ export fn _start() callconv(.naked) noreturn {
         \\mov x8, #1
         \\svc #0
         \\
-        \\// 2. sys_win_fill(2, 0, 0, 256, 192, 0x182026) (slot 13)
+        \\// 2. sys_win_fill(2, 0, 0, 512, 384, 0x182026) (slot 13)
         \\mov x0, #2
         \\mov x1, #0
         \\mov x2, #0
-        \\mov x3, #256
-        \\mov x4, #192
+        \\mov x3, #512
+        \\mov x4, #384
         \\movz x5, #0x18, lsl #16
         \\movk x5, #0x2026
         \\mov x8, #13

@@ -50,6 +50,7 @@ pub const sys_audio_info_num: u64 = 42;
 pub const sys_audio_play_num: u64 = 43;
 pub const sys_audio_volume_num: u64 = 44;
 pub const sys_audio_mute_num: u64 = 45;
+pub const sys_win_fill_batch_num: u64 = 46;
 pub const sys_timer_cancel_num: u64 = 41;
 pub const sys_udp_listen_num: u64 = 9;
 pub const sys_udp_send_num: u64 = 10;
@@ -116,21 +117,147 @@ pub const ProcessRow = extern struct {
 };
 
 // ---------------------------------------------------------------------------
-// Theme Palette Constants (ADR 0008 & ADR 0011)
+// Theme System (ADR 0008 & ADR 0011, Issue #207)
 // ---------------------------------------------------------------------------
 
-pub const COLOR_BG: u32 = 0x182026;
-pub const COLOR_SURFACE: u32 = 0x222d35;
-pub const COLOR_BORDER: u32 = 0x334155;
-pub const COLOR_TEXT_PRIMARY: u32 = 0xffffff;
-pub const COLOR_TEXT_MUTED: u32 = 0x94a3b8;
-pub const COLOR_ACCENT: u32 = 0x3b82f6;
-pub const COLOR_BTN_IDLE: u32 = 0x2d3748;
-pub const COLOR_BTN_HOVER: u32 = 0x4a5568;
-pub const COLOR_BTN_PRESSED: u32 = 0x1a202c;
-pub const COLOR_SUCCESS: u32 = 0x22c55e;
-pub const COLOR_DANGER: u32 = 0xef4444;
-pub const COLOR_WARNING: u32 = 0xf59e0b;
+pub const Theme = struct {
+    bg: u32,
+    surface: u32,
+    border: u32,
+    text_primary: u32,
+    text_muted: u32,
+    accent: u32,
+    btn_idle: u32,
+    btn_hover: u32,
+    btn_pressed: u32,
+    success: u32,
+    danger: u32,
+    warning: u32,
+};
+
+pub const THEME_DARK: Theme = .{
+    .bg = 0x182026,
+    .surface = 0x222d35,
+    .border = 0x334155,
+    .text_primary = 0xffffff,
+    .text_muted = 0x94a3b8,
+    .accent = 0x3b82f6,
+    .btn_idle = 0x2d3748,
+    .btn_hover = 0x4a5568,
+    .btn_pressed = 0x1a202c,
+    .success = 0x22c55e,
+    .danger = 0xef4444,
+    .warning = 0xf59e0b,
+};
+
+pub const THEME_LIGHT: Theme = .{
+    .bg = 0xf1f5f9,
+    .surface = 0xffffff,
+    .border = 0xcbd5e1,
+    .text_primary = 0x0f172a,
+    .text_muted = 0x64748b,
+    .accent = 0x2563eb,
+    .btn_idle = 0xe2e8f0,
+    .btn_hover = 0xcbd5e1,
+    .btn_pressed = 0x94a3b8,
+    .success = 0x16a34a,
+    .danger = 0xdc2626,
+    .warning = 0xd97706,
+};
+
+pub const THEME_AMBER: Theme = .{
+    .bg = 0x1a1000,
+    .surface = 0x2a1a00,
+    .border = 0x5a4000,
+    .text_primary = 0xffcc00,
+    .text_muted = 0x997700,
+    .accent = 0xff8800,
+    .btn_idle = 0x3a2800,
+    .btn_hover = 0x5a4000,
+    .btn_pressed = 0x1a1000,
+    .success = 0x88cc00,
+    .danger = 0xff4444,
+    .warning = 0xffaa00,
+};
+
+pub var current_theme: Theme = THEME_DARK;
+
+/// Select a theme by name. Returns true if found and applied.
+pub fn set_theme(name: []const u8) bool {
+    if (eql(name, "dark")) {
+        current_theme = THEME_DARK;
+        return true;
+    } else if (eql(name, "light")) {
+        current_theme = THEME_LIGHT;
+        return true;
+    } else if (eql(name, "amber")) {
+        current_theme = THEME_AMBER;
+        return true;
+    }
+    return false;
+}
+
+fn eql(a: []const u8, b: []const u8) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |ca, cb| {
+        if (ca != cb) return false;
+    }
+    return true;
+}
+
+// Theme color accessors — widget draw functions read from current_theme.
+pub fn theme_bg() u32 {
+    return current_theme.bg;
+}
+pub fn theme_surface() u32 {
+    return current_theme.surface;
+}
+pub fn theme_border() u32 {
+    return current_theme.border;
+}
+pub fn theme_text_primary() u32 {
+    return current_theme.text_primary;
+}
+pub fn theme_text_muted() u32 {
+    return current_theme.text_muted;
+}
+pub fn theme_accent() u32 {
+    return current_theme.accent;
+}
+pub fn theme_btn_idle() u32 {
+    return current_theme.btn_idle;
+}
+pub fn theme_btn_hover() u32 {
+    return current_theme.btn_hover;
+}
+pub fn theme_btn_pressed() u32 {
+    return current_theme.btn_pressed;
+}
+pub fn theme_success() u32 {
+    return current_theme.success;
+}
+pub fn theme_danger() u32 {
+    return current_theme.danger;
+}
+pub fn theme_warning() u32 {
+    return current_theme.warning;
+}
+
+// Backward-compatible pub const aliases for app code that references
+// ui.COLOR_*. These match the default (dark) theme. The widget draw
+// functions use theme_*() for dynamic theming.
+pub const COLOR_BG: u32 = THEME_DARK.bg;
+pub const COLOR_SURFACE: u32 = THEME_DARK.surface;
+pub const COLOR_BORDER: u32 = THEME_DARK.border;
+pub const COLOR_TEXT_PRIMARY: u32 = THEME_DARK.text_primary;
+pub const COLOR_TEXT_MUTED: u32 = THEME_DARK.text_muted;
+pub const COLOR_ACCENT: u32 = THEME_DARK.accent;
+pub const COLOR_BTN_IDLE: u32 = THEME_DARK.btn_idle;
+pub const COLOR_BTN_HOVER: u32 = THEME_DARK.btn_hover;
+pub const COLOR_BTN_PRESSED: u32 = THEME_DARK.btn_pressed;
+pub const COLOR_SUCCESS: u32 = THEME_DARK.success;
+pub const COLOR_DANGER: u32 = THEME_DARK.danger;
+pub const COLOR_WARNING: u32 = THEME_DARK.warning;
 
 // ---------------------------------------------------------------------------
 // Syscall Invocation Helpers (AArch64 inline assembly / host fallback)
@@ -556,6 +683,47 @@ pub fn draw_text_centered(win_id: u32, text: []const u8, rect: Rect, fg_rgb: u32
 }
 
 // ---------------------------------------------------------------------------
+// Step 6 (Issue #206): 8×16 font helpers for titles and headings.
+// Uses the kernel's 2×-stretched glyph table via a runtime pixel walk.
+// ---------------------------------------------------------------------------
+
+pub fn draw_char_16(win_id: u32, ch: u8, x: u32, y: u32, fg_rgb: u32) void {
+    if (ch < 0x20 or ch > 0x7e) return;
+    // The 8×16 glyph is the 8×8 glyph with each row doubled.
+    // We re-derive the stretch at render time to stay in sync with
+    // font8x8.zig's glyphs_16 table (same data, user-side copy).
+    const glyph = font8x8.glyphs[ch - 0x20];
+    var row_idx: usize = 0;
+    while (row_idx < 8) : (row_idx += 1) {
+        const row_byte = glyph[row_idx];
+        var col_idx: usize = 0;
+        while (col_idx < 8) : (col_idx += 1) {
+            if (font8x8.row_pixel(row_byte, col_idx)) {
+                // Draw 2× vertical: two fill_rect calls per pixel.
+                win_fill(win_id, x + @as(u32, @intCast(col_idx)), y + @as(u32, @intCast(row_idx * 2)), 1, 1, fg_rgb);
+                win_fill(win_id, x + @as(u32, @intCast(col_idx)), y + @as(u32, @intCast(row_idx * 2 + 1)), 1, 1, fg_rgb);
+            }
+        }
+    }
+}
+
+pub fn draw_text_large(win_id: u32, text: []const u8, x: u32, y: u32, fg_rgb: u32) void {
+    var cur_x = x;
+    for (text) |ch| {
+        draw_char_16(win_id, ch, cur_x, y, fg_rgb);
+        cur_x += 8;
+    }
+}
+
+pub fn draw_text_centered_large(win_id: u32, text: []const u8, rect: Rect, fg_rgb: u32) void {
+    const text_w = @as(u32, @intCast(text.len)) * 8;
+    const text_h: u32 = 16;
+    const x = if (rect.w > text_w) rect.x + (rect.w - text_w) / 2 else rect.x;
+    const y = if (rect.h > text_h) rect.y + (rect.h - text_h) / 2 else rect.y;
+    draw_text_large(win_id, text, x, y, fg_rgb);
+}
+
+// ---------------------------------------------------------------------------
 // Component: Button
 // ---------------------------------------------------------------------------
 
@@ -566,7 +734,7 @@ pub const Button = struct {
     label: []const u8,
     state: ButtonState = .idle,
     bg_color: ?u32 = null,
-    text_color: u32 = COLOR_TEXT_PRIMARY,
+    text_color: u32 = 0xffffff,
     is_active: bool = false,
 
     pub fn init(rect: Rect, label: []const u8) Button {
@@ -608,17 +776,17 @@ pub const Button = struct {
 
     pub fn draw(self: *const Button, win_id: u32) void {
         const bg = if (self.is_active)
-            COLOR_ACCENT
+            theme_accent()
         else if (self.bg_color) |c|
             c
         else switch (self.state) {
-            .idle => COLOR_BTN_IDLE,
-            .hover => COLOR_BTN_HOVER,
-            .pressed => COLOR_BTN_PRESSED,
+            .idle => theme_btn_idle(),
+            .hover => theme_btn_hover(),
+            .pressed => theme_btn_pressed(),
         };
 
         draw_rect(win_id, self.rect, bg);
-        draw_rect_outline(win_id, self.rect, 1, if (self.is_active) COLOR_TEXT_PRIMARY else COLOR_BORDER);
+        draw_rect_outline(win_id, self.rect, 1, if (self.is_active) theme_text_primary() else theme_border());
         draw_text_centered(win_id, self.label, self.rect, self.text_color);
     }
 };
@@ -630,7 +798,7 @@ pub const Button = struct {
 pub const Label = struct {
     rect: Rect,
     text: []const u8,
-    color: u32 = COLOR_TEXT_PRIMARY,
+    color: u32 = 0xffffff,
     align_center: bool = false,
 
     pub fn init(rect: Rect, text: []const u8) Label {
@@ -727,18 +895,18 @@ pub const TextInput = struct {
     }
 
     pub fn draw(self: *const TextInput, win_id: u32) void {
-        draw_rect(win_id, self.rect, COLOR_SURFACE);
-        draw_rect_outline(win_id, self.rect, 1, if (self.focused) COLOR_ACCENT else COLOR_BORDER);
+        draw_rect(win_id, self.rect, theme_surface());
+        draw_rect_outline(win_id, self.rect, 1, if (self.focused) theme_accent() else theme_border());
 
         const text_y = self.rect.y + (self.rect.h - 8) / 2;
         const text_x = self.rect.x + 4;
-        draw_text(win_id, self.get_text(), text_x, text_y, COLOR_TEXT_PRIMARY);
+        draw_text(win_id, self.get_text(), text_x, text_y, theme_text_primary());
 
         // Draw cursor bar if focused
         if (self.focused) {
             const cursor_x = text_x + @as(u32, @intCast(self.cursor)) * 8;
             if (cursor_x + 2 <= self.rect.x + self.rect.w) {
-                win_fill(win_id, cursor_x, text_y, 2, 8, COLOR_TEXT_PRIMARY);
+                win_fill(win_id, cursor_x, text_y, 2, 8, theme_text_primary());
             }
         }
     }
@@ -813,14 +981,14 @@ pub const ListView = struct {
 
         const row_rect = Rect.make(self.rect.x, row_y, self.rect.w, self.row_height);
         const bg = if (is_selected)
-            COLOR_ACCENT
+            theme_accent()
         else if (row % 2 == 0)
-            COLOR_SURFACE
+            theme_surface()
         else
-            COLOR_BG;
+            theme_bg();
 
         draw_rect(win_id, row_rect, bg);
-        draw_text(win_id, text, row_rect.x + 4, row_rect.y + (self.row_height - 8) / 2, COLOR_TEXT_PRIMARY);
+        draw_text(win_id, text, row_rect.x + 4, row_rect.y + (self.row_height - 8) / 2, theme_text_primary());
     }
 };
 
