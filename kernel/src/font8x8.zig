@@ -182,3 +182,40 @@ test "font8x8: the table is overwhelmingly horizontally asymmetric" {
     try std.testing.expectEqual(@as(usize, 5), n_sym);
     try std.testing.expectEqualStrings(" !*_|", symmetric_chars[0..n_sym]);
 }
+
+// ---------------------------------------------------------------------------
+// Step 6 (Issue #206): 8×16 font — a 2× vertical stretch of the 8×8 table.
+// Each source row becomes two identical destination rows. Comptime-generated
+// so it costs zero runtime; the table is 95 × 16 = 1520 bytes.
+// ---------------------------------------------------------------------------
+
+pub const glyphs_16: [95][16]u8 = blk: {
+    var result: [95][16]u8 = undefined;
+    for (glyphs, 0..) |g, i| {
+        var j: usize = 0;
+        while (j < 8) : (j += 1) {
+            result[i][j * 2] = g[j];
+            result[i][j * 2 + 1] = g[j];
+        }
+    }
+    break :blk result;
+};
+
+/// Whether 16px-font row `row` paints horizontal pixel `x`. Same convention
+/// as `row_pixel` — LSB-first, x=0 reads bit 0.
+pub inline fn row_pixel_16(row: u8, x: usize) bool {
+    return row_pixel(row, x);
+}
+
+test "font8x8: glyphs_16 is a correct 2x vertical stretch of glyphs" {
+    const std = @import("std");
+    // Every glyph in glyphs_16 should have row[i*2] == row[i*2+1] == glyphs[j][i].
+    var i: usize = 0;
+    while (i < 95) : (i += 1) {
+        var j: usize = 0;
+        while (j < 8) : (j += 1) {
+            try std.testing.expectEqual(glyphs[i][j], glyphs_16[i][j * 2]);
+            try std.testing.expectEqual(glyphs[i][j], glyphs_16[i][j * 2 + 1]);
+        }
+    }
+}

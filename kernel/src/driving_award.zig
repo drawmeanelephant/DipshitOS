@@ -90,14 +90,27 @@ pub const cursor_h: usize = 8;
 /// bound (no heap, no allocation).
 pub const user_window_id_base: u8 = 2;
 pub const user_windows_max: usize = 4;
-pub const user_buf_w: u32 = 256;
-pub const user_buf_h: u32 = 192;
+pub const user_buf_w: u32 = 512;
+pub const user_buf_h: u32 = 384;
+
+/// Step 8 (Issue #211): the system taskbar at the bottom of the scanout.
+pub const taskbar_h: u32 = 20;
+pub const taskbar_y: u32 = virtio_gpu.fb_height - taskbar_h;
+pub const taskbar_bg_rgb: u32 = 0x0f172a;
+pub const taskbar_entry_active_rgb: u32 = 0x3b82f6;
+pub const taskbar_entry_dimmed_rgb: u32 = 0x1e293b;
+
+/// Step 9 (Issue #212): the desktop wallpaper gradient.
+pub const wallpaper_top_rgb: u32 = 0x1a1a2e;
+pub const wallpaper_bot_rgb: u32 = 0x0a0a14;
 
 /// The window-kind tags (the terminal and the demo window).
 pub const Kind = enum {
     terminal,
     clock,
     user,
+    taskbar,
+    wallpaper,
 };
 
 /// One window in the registry. Value type; the registry is a fixed BSS
@@ -151,6 +164,96 @@ var cursor_y: u32 = 0;
 var cursor_shown: bool = false;
 var prev_ptr_buttons: u8 = 0;
 
+/// Step 5/6/7 (Issues #208/#209/#210): drag + close + minimize state.
+var drag_id: ?u8 = null;
+var drag_offset_x: u32 = 0;
+var drag_offset_y: u32 = 0;
+
+/// Step 7 (Issue #207): theme selection. 0=dark, 1=light, 2=amber.
+/// Read by the compositor chrome pass for title bars, clock, focus ring.
+pub var theme_id: u8 = 0;
+
+/// Theme color for the clock title bar background.
+pub fn clock_title_bg() u32 {
+    return switch (theme_id) {
+        1 => 0xf8fafc, // light: near-white title bar
+        2 => 0xb58900, // amber: warm gold
+        else => 0xb58900, // dark: original amber
+    };
+}
+
+/// Theme color for the clock body background.
+pub fn clock_bg() u32 {
+    return switch (theme_id) {
+        1 => 0xf1f5f9, // light: light gray
+        2 => 0x0a1a2e, // amber: dark navy (original)
+        else => 0x0a1a2e, // dark: original
+    };
+}
+
+/// Theme color for the user window title bar.
+pub fn user_title_bg() u32 {
+    return switch (theme_id) {
+        1 => 0xe2e8f0, // light: light surface
+        2 => 0x1a2b3c, // amber: dark blue (original)
+        else => 0x1a2b3c, // dark: original
+    };
+}
+
+/// Theme color for the focus ring.
+pub fn focus_ring() u32 {
+    return switch (theme_id) {
+        1 => 0x2563eb, // light: blue ring (distinct on white)
+        2 => 0xffffff, // amber: white (original)
+        else => 0xffffff, // dark: white (original)
+    };
+}
+
+/// Theme color for the taskbar background.
+pub fn taskbar_bg() u32 {
+    return switch (theme_id) {
+        1 => 0xe2e8f0, // light: light surface
+        2 => 0x0f172a, // amber: dark (original)
+        else => 0x0f172a, // dark: original
+    };
+}
+
+/// Theme color for the taskbar entry highlight.
+pub fn taskbar_entry_active() u32 {
+    return switch (theme_id) {
+        1 => 0x2563eb, // light: blue
+        2 => 0xff8800, // amber: orange
+        else => 0x3b82f6, // dark: blue (original)
+    };
+}
+
+/// Theme color for the taskbar entry (dimmed).
+pub fn taskbar_entry_dimmed() u32 {
+    return switch (theme_id) {
+        1 => 0xcbd5e1, // light: light border
+        2 => 0x1e293b, // amber: dark (original)
+        else => 0x1e293b, // dark: original
+    };
+}
+
+/// Theme color for the desktop wallpaper top.
+pub fn wallpaper_top() u32 {
+    return switch (theme_id) {
+        1 => 0xf1f5f9, // light: very light
+        2 => 0x1a1a2e, // amber: dark (original)
+        else => 0x1a1a2e, // dark: original
+    };
+}
+
+/// Theme color for the desktop wallpaper bottom.
+pub fn wallpaper_bot() u32 {
+    return switch (theme_id) {
+        1 => 0xe2e8f0, // light: light surface
+        2 => 0x0a0a14, // amber: darker (original)
+        else => 0x0a0a14, // dark: original
+    };
+}
+
 // ---------------------------------------------------------------------------
 // Arm / query
 // ---------------------------------------------------------------------------
@@ -184,6 +287,32 @@ pub fn arm() void {
         .dirty = true,
     };
     win_count += 1;
+    // Step 9: wallpaper window (id 254) — gradient background between terminal and clock.
+    windows[win_count] = .{
+        .id = 254,
+        .title = "wallpaper",
+        .x = 0,
+        .y = 0,
+        .w = virtio_gpu.fb_width,
+        .h = virtio_gpu.fb_height,
+        .kind = .wallpaper,
+        .visible = true,
+        .dirty = true,
+    };
+    win_count += 1;
+    // Step 8: taskbar window (id 255) — always topmost.
+    windows[win_count] = .{
+        .id = 255,
+        .title = "taskbar",
+        .x = 0,
+        .y = taskbar_y,
+        .w = virtio_gpu.fb_width,
+        .h = taskbar_h,
+        .kind = .taskbar,
+        .visible = true,
+        .dirty = true,
+    };
+    win_count += 1;
     focused_id = 0;
     armed_global = true;
     presents = 0;
@@ -191,6 +320,7 @@ pub fn arm() void {
     clock_has_tick = false;
     cursor_shown = false;
     prev_ptr_buttons = 0;
+    drag_id = null;
 }
 
 pub fn armed() bool {
@@ -215,6 +345,8 @@ pub fn kind_name(kind: Kind) []const u8 {
         .terminal => "terminal",
         .clock => "clock",
         .user => "user",
+        .taskbar => "taskbar",
+        .wallpaper => "wallpaper",
     };
 }
 
@@ -292,6 +424,12 @@ pub fn focus(id: u8) bool {
                 }
                 _ = mark_dirty(0);
             }
+            // Step 7 (Issue #210): auto-show a hidden window on focus.
+            if (!windows[i].visible) {
+                windows[i].visible = true;
+                windows[i].dirty = true;
+                _ = mark_dirty(0);
+            }
             focused_id = id;
             return true;
         }
@@ -325,6 +463,8 @@ pub fn hit_test(x: u32, y: u32) ?u8 {
         i -= 1;
         const w = &windows[i];
         if (!w.visible) continue;
+        // Wallpaper is background-only — not interactive.
+        if (w.kind == .wallpaper) continue;
         if (x >= w.x and x < w.x + w.w and y >= w.y and y < w.y + w.h) return w.id;
     }
     return null;
@@ -638,6 +778,8 @@ pub fn cycle_focus() ?u8 {
     while (i <= win_count) : (i += 1) {
         const idx = (start + i) % win_count;
         if (!windows[idx].visible) continue;
+        // Wallpaper and taskbar are not cyclable.
+        if (windows[idx].kind == .wallpaper or windows[idx].kind == .taskbar) continue;
         const target_id = windows[idx].id;
         _ = focus(target_id);
         return focused_id;
@@ -683,12 +825,66 @@ pub fn pointer_tick(st: input.PointerState, click: ?input.Click) ?u8 {
         const btn_pressed = (prev_ptr_buttons == 0 and st.buttons != 0) or (click != null);
         const btn_released = (prev_ptr_buttons != 0 and st.buttons == 0);
 
+        // Step 5/6/7: drag + close + minimize handling on MOUSE_DOWN.
         if (btn_pressed) {
-            if (focus_at(cursor_x, cursor_y)) {
-                const id = focused_id;
-                _ = raise(id);
-                _ = mark_dirty(0);
-                focused_changed = id;
+            // Check close/minimize buttons on user windows first.
+            var handled_btn = false;
+            var wi: usize = win_count;
+            while (wi > 0) {
+                wi -= 1;
+                const w = &windows[wi];
+                if (w.kind != .user or !w.visible) continue;
+                // Close button: top-right corner (x + w.w - 14, y + 4, 8x8).
+                if (cursor_x >= w.x + w.w - 16 and cursor_x < w.x + w.w - 4 and
+                    cursor_y >= w.y and cursor_y < w.y + user_title_h)
+                {
+                    _ = user_close(w.id);
+                    handled_btn = true;
+                    break;
+                }
+                // Minimize button: left of close (x + w.w - 26, y + 4, 8x8).
+                if (cursor_x >= w.x + w.w - 28 and cursor_x < w.x + w.w - 16 and
+                    cursor_y >= w.y and cursor_y < w.y + user_title_h)
+                {
+                    _ = user_set_visible(w.id, false);
+                    handled_btn = true;
+                    break;
+                }
+                // Title bar drag initiation.
+                if (cursor_x >= w.x and cursor_x < w.x + w.w and
+                    cursor_y >= w.y and cursor_y < w.y + user_title_h)
+                {
+                    drag_id = w.id;
+                    drag_offset_x = cursor_x - w.x;
+                    drag_offset_y = cursor_y - w.y;
+                    _ = focus(w.id);
+                    _ = raise(w.id);
+                    _ = mark_dirty(0);
+                    focused_changed = w.id;
+                    handled_btn = true;
+                    break;
+                }
+            }
+            // Fall through to normal focus-at if no button/title bar was hit.
+            if (!handled_btn) {
+                if (focus_at(cursor_x, cursor_y)) {
+                    const id = focused_id;
+                    _ = raise(id);
+                    _ = mark_dirty(0);
+                    focused_changed = id;
+                }
+            }
+        }
+
+        // Step 5: drag continuation on MOUSE_MOVE.
+        if (drag_id) |did| {
+            if (moved and st.buttons != 0) {
+                const new_x: u32 = if (cursor_x >= drag_offset_x) cursor_x - drag_offset_x else 0;
+                const new_y: u32 = if (cursor_y >= drag_offset_y) cursor_y - drag_offset_y else 0;
+                _ = user_move(did, new_x, new_y);
+            }
+            if (btn_released) {
+                drag_id = null;
             }
         }
 
@@ -787,6 +983,26 @@ fn draw_string(buf: [*]u8, stride: usize, x0: usize, y0: usize, s: []const u8, r
     for (s, 0..) |c, i| draw_glyph(buf, stride, x0 + i * 8, y0, c, rgb);
 }
 
+/// Step 6 (Issue #206): draw one 8×16 glyph at (x0, y0). Uses the 2×-stretched
+/// glyph table for titles and headings. Non-printable bytes are skipped.
+fn draw_glyph_16(buf: [*]u8, stride: usize, x0: usize, y0: usize, c: u8, rgb: u32) void {
+    if (c < 0x20 or c > 0x7e) return;
+    const glyph = font.glyphs_16[c - 0x20];
+    var gy: usize = 0;
+    while (gy < 16) : (gy += 1) {
+        const bits = glyph[gy];
+        var gx: usize = 0;
+        while (gx < 8) : (gx += 1) {
+            if (font.row_pixel_16(bits, gx)) put_px(buf, stride, x0 + gx, y0 + gy, rgb);
+        }
+    }
+}
+
+/// Draw a string using the 8×16 font. Each glyph advances 8px horizontally.
+fn draw_string_16(buf: [*]u8, stride: usize, x0: usize, y0: usize, s: []const u8, rgb: u32) void {
+    for (s, 0..) |c, i| draw_glyph_16(buf, stride, x0 + i * 8, y0, c, rgb);
+}
+
 /// Minimal unsigned-decimal formatting (no heap, no failure modes) — the
 /// clock's dynamic text. Returns the filled slice.
 pub fn fmt_decimal(buf: []u8, v: u64) []const u8 {
@@ -845,18 +1061,18 @@ fn fb_canvas() fbtext.Canvas {
 /// focus-status line. Pure — host-testable with an injectable buffer.
 pub fn render_clock_content(buf: [*]u8, stride: usize, w: usize, h: usize, ticks: u64, focused: bool) void {
     // Background + border (2 px), then the amber title bar.
-    fill_rect(buf, stride, 0, 0, w, h, clock_bg_rgb);
+    fill_rect(buf, stride, 0, 0, w, h, clock_bg());
     fill_rect(buf, stride, 0, 0, w, 2, clock_border_rgb);
     fill_rect(buf, stride, 0, h - 2, w, 2, clock_border_rgb);
     fill_rect(buf, stride, 0, 0, 2, h, clock_border_rgb);
     fill_rect(buf, stride, w - 2, 0, 2, h, clock_border_rgb);
-    fill_rect(buf, stride, 2, 2, w - 4, 16, clock_title_bg_rgb);
+    fill_rect(buf, stride, 2, 2, w - 4, 16, clock_title_bg());
 
     draw_string(buf, stride, 8, 6, "clock", clock_title_fg_rgb);
 
     var nb: [24]u8 = undefined;
     // Body lines (8 px grid, origin 8 px inside the border).
-    draw_string(buf, stride, 8, 26, "DRIVING AWARD", clock_accent_rgb);
+    draw_string_16(buf, stride, 8, 26, "DRIVING AWARD", clock_accent_rgb);
     draw_string(buf, stride, 8, 42, "ticks=", clock_fg_rgb);
     draw_string(buf, stride, 8 + 6 * 8, 42, fmt_decimal(&nb, ticks), clock_fg_rgb);
     draw_string(buf, stride, 8, 58, if (focused) "focus=clock" else "focus=roadpops", clock_fg_rgb);
@@ -903,6 +1119,38 @@ fn paint(w: *Window) void {
                 w.h,
             );
         },
+        .wallpaper => {
+            // Step 9: vertical gradient from wallpaper_top() to wallpaper_bot().
+            const fb: [*]u8 = @ptrCast(&virtio_gpu.gpu_fb);
+            const stride = virtio_gpu.fb_width * 4;
+            var y: u32 = 0;
+            while (y < virtio_gpu.fb_height) : (y += 1) {
+                const t = y * 256 / virtio_gpu.fb_height;
+                const r = ((wallpaper_top() >> 16) & 0xff) * (256 - t) / 256 + ((wallpaper_bot() >> 16) & 0xff) * t / 256;
+                const g = ((wallpaper_top() >> 8) & 0xff) * (256 - t) / 256 + ((wallpaper_bot() >> 8) & 0xff) * t / 256;
+                const b = (wallpaper_top() & 0xff) * (256 - t) / 256 + (wallpaper_bot() & 0xff) * t / 256;
+                const row_color: u32 = (@as(u32, @intCast(r)) << 16) | (@as(u32, @intCast(g)) << 8) | @as(u32, @intCast(b));
+                fill_rect(fb, stride, 0, y, virtio_gpu.fb_width, 1, row_color);
+            }
+        },
+        .taskbar => {
+            // Step 8: dark background bar spanning full width.
+            const fb: [*]u8 = @ptrCast(&virtio_gpu.gpu_fb);
+            const stride = virtio_gpu.fb_width * 4;
+            fill_rect(fb, stride, 0, taskbar_y, virtio_gpu.fb_width, taskbar_h, taskbar_bg());
+            // Render entries for each open user window.
+            var entry_x: u32 = 4;
+            var wi: usize = 0;
+            while (wi < win_count) : (wi += 1) {
+                const ww = &windows[wi];
+                if (ww.kind != .user) continue;
+                const entry_w: u32 = 80;
+                const entry_bg = if (focused_id == ww.id) taskbar_entry_active() else taskbar_entry_dimmed();
+                fill_rect(fb, stride, entry_x, taskbar_y + 2, entry_w, taskbar_h - 4, entry_bg);
+                draw_string(fb, stride, entry_x + 4, taskbar_y + 6, ww.title, 0xffffff);
+                entry_x += entry_w + 4;
+            }
+        },
     }
 }
 
@@ -928,10 +1176,30 @@ fn repaint_start() ?usize {
 pub fn composite() virtio_gpu.CmdResult {
     if (!armed_global) return .not_ready;
     const start = repaint_start() orelse return .ok;
+    // Step 9: render the wallpaper gradient BEFORE windows so it is the background.
+    if (start <= 1) {
+        // The wallpaper is at index 1; if it or anything below is dirty, render gradient.
+        const fb: [*]u8 = @ptrCast(&virtio_gpu.gpu_fb);
+        const stride = virtio_gpu.fb_width * 4;
+        var y: u32 = 0;
+        while (y < virtio_gpu.fb_height) : (y += 1) {
+            const t = y * 256 / virtio_gpu.fb_height;
+            const r = ((wallpaper_top() >> 16) & 0xff) * (256 - t) / 256 + ((wallpaper_bot() >> 16) & 0xff) * t / 256;
+            const g = ((wallpaper_top() >> 8) & 0xff) * (256 - t) / 256 + ((wallpaper_bot() >> 8) & 0xff) * t / 256;
+            const b = (wallpaper_top() & 0xff) * (256 - t) / 256 + (wallpaper_bot() & 0xff) * t / 256;
+            const row_color: u32 = (@as(u32, @intCast(r)) << 16) | (@as(u32, @intCast(g)) << 8) | @as(u32, @intCast(b));
+            fill_rect(fb, stride, 0, y, virtio_gpu.fb_width, 1, row_color);
+        }
+    }
     var i = start;
     while (i < win_count) : (i += 1) {
         const w = &windows[i];
         if (!w.visible) continue;
+        // Skip wallpaper and taskbar here — they are rendered specially.
+        if (w.kind == .wallpaper or w.kind == .taskbar) {
+            w.dirty = false;
+            continue;
+        }
         paint(w);
         w.dirty = false;
     }
@@ -956,7 +1224,7 @@ fn draw_chrome() void {
         const w = &windows[i];
         if (w.kind != .user or !w.visible) continue;
         // Title bar: "dui<id> pid=<pid>" (the owning pid when known).
-        fill_rect(fb, stride, w.x, w.y, w.w, user_title_h, user_title_bg_rgb);
+        fill_rect(fb, stride, w.x, w.y, w.w, user_title_h, user_title_bg());
         var tb: [24]u8 = undefined;
         var n: usize = 0;
         const label = "dui";
@@ -973,7 +1241,11 @@ fn draw_chrome() void {
             @memcpy(tb[n..][0..pids.len], pids);
             n += pids.len;
         }
-        draw_string(fb, stride, w.x + 4, w.y + 4, tb[0..n], user_title_fg_rgb);
+        draw_string_16(fb, stride, w.x + 4, w.y, tb[0..n], user_title_fg_rgb);
+        // Step 6: close button ("×" — red glyph at top-right of title bar).
+        draw_glyph(fb, stride, w.x + w.w - 14, w.y + 4, 'x', 0xef4444);
+        // Step 7: minimize button ("—" — muted glyph left of close).
+        draw_glyph(fb, stride, w.x + w.w - 26, w.y + 4, '-', 0x94a3b8);
     }
     // The focus ring: on the focused window's rect (D4 — focus is always
     // visible). 0xff = none (no ring). The full-screen TERMINAL never
@@ -991,10 +1263,10 @@ fn draw_chrome() void {
             const ry: usize = w.y;
             const rw: usize = if (w.w > wspan) wspan else w.w;
             const rh: usize = if (w.h > hspan) hspan else w.h;
-            fill_rect(fb, stride, rx, ry, rw, focus_ring_w, focus_ring_rgb);
-            fill_rect(fb, stride, rx, ry + rh - focus_ring_w, rw, focus_ring_w, focus_ring_rgb);
-            fill_rect(fb, stride, rx, ry, focus_ring_w, rh, focus_ring_rgb);
-            fill_rect(fb, stride, rx + rw - focus_ring_w, ry, focus_ring_w, rh, focus_ring_rgb);
+            fill_rect(fb, stride, rx, ry, rw, focus_ring_w, focus_ring());
+            fill_rect(fb, stride, rx, ry + rh - focus_ring_w, rw, focus_ring_w, focus_ring());
+            fill_rect(fb, stride, rx, ry, focus_ring_w, rh, focus_ring());
+            fill_rect(fb, stride, rx + rw - focus_ring_w, ry, focus_ring_w, rh, focus_ring());
             break;
         }
     }
@@ -1005,6 +1277,59 @@ fn draw_chrome() void {
         const cw = if (cx + cursor_w > wspan) wspan - cx else cursor_w;
         const ch = if (cy + cursor_h > hspan) hspan - cy else cursor_h;
         fill_rect(fb, stride, cx, cy, cw, ch, cursor_rgb);
+    }
+}
+
+/// Step 13 (Issue #213): boot splash screen. Renders once into the framebuffer
+/// and pushes a transfer+flush. Shows the system name in 8×16 font, version,
+/// and a cycling progress indicator. Returns after `max_ticks` or when a
+/// keystroke arrives (whichever is first).
+pub fn render_splash(max_ticks: u64) void {
+    if (!armed_global or !virtio_gpu.gpu_ready) return;
+    const fb: [*]u8 = @ptrCast(&virtio_gpu.gpu_fb);
+    const stride = virtio_gpu.fb_width * 4;
+    // Fill background.
+    fill_rect(fb, stride, 0, 0, virtio_gpu.fb_width, virtio_gpu.fb_height, wallpaper_top());
+    // Title: "DipshitOS" centered, using 8×16 font (the draw_glyph path,
+    // stretched to 2× height).
+    const title = "DipshitOS";
+    const title_x: usize = (virtio_gpu.fb_width - title.len * 8) / 2;
+    const title_y: usize = virtio_gpu.fb_height / 2 - 40;
+    // Render each glyph at 2× height (simple stretch).
+    for (title, 0..) |ch, i| {
+        if (ch < 0x20 or ch > 0x7e) continue;
+        const glyph = font.glyphs[ch - 0x20];
+        var gy: usize = 0;
+        while (gy < 8) : (gy += 1) {
+            const bits = glyph[gy];
+            var gx: usize = 0;
+            while (gx < 8) : (gx += 1) {
+                if (font.row_pixel(bits, gx)) {
+                    // Draw at 2× size.
+                    fill_rect(fb, stride, title_x + i * 8 + gx * 2, title_y + gy * 2, 2, 2, clock_accent_rgb);
+                }
+            }
+        }
+    }
+    // Version line.
+    draw_string(fb, stride, title_x + 16, title_y + 24, "v0.1", clock_fg_rgb);
+    // Push the splash frame.
+    _ = virtio_gpu.gpu_transfer();
+    _ = virtio_gpu.gpu_flush();
+    // Cycle progress indicator for max_ticks (or until GPU not ready).
+    var tick: u64 = 0;
+    while (tick < max_ticks) : (tick += 1) {
+        // Simple busy-wait for ~1 second per tick (the timer is not yet
+        // running at this point in boot).
+        var wait: u64 = 0;
+        while (wait < 10_000_000) : (wait += 1) {}
+        // Draw cycling dots.
+        const dots = [5]u8{ '.', 'o', 'O', 'o', '.' };
+        const dot_idx = tick % 5;
+        fill_rect(fb, stride, title_x + 24, title_y + 40, 40, 8, wallpaper_top());
+        draw_glyph(fb, stride, title_x + 24 + @as(usize, @intCast(dot_idx)) * 8, title_y + 40, dots[dot_idx], clock_fg_rgb);
+        _ = virtio_gpu.gpu_transfer();
+        _ = virtio_gpu.gpu_flush();
     }
 }
 
@@ -1027,7 +1352,7 @@ pub fn drain(ticks: u64) virtio_gpu.CmdResult {
 
 test "driving_award: arm registers the terminal (window 0) and the clock (window 1)" {
     arm();
-    try std.testing.expectEqual(@as(usize, 2), win_count);
+    try std.testing.expectEqual(@as(usize, 4), win_count);
     try std.testing.expectEqual(@as(u8, 0), windows[0].id);
     try std.testing.expectEqual(Kind.terminal, windows[0].kind);
     try std.testing.expectEqual(@as(u8, 1), windows[1].id);
@@ -1203,11 +1528,11 @@ test "driving_award: blit_rect copies a sub-rect at the destination offset" {
 test "driving_award: user_open/fill/present round-trips a bounded user window" {
     arm();
     // Open window 2 at (64, 64) 256x192 — the first free user slot.
-    const r = user_open(64, 64, 256, 192, 7);
+    const r = user_open(64, 64, 512, 384, 7);
     try std.testing.expectEqual(UserOpenResult{ .opened = 2 }, r);
-    try std.testing.expectEqual(@as(usize, 3), win_count);
-    try std.testing.expectEqual(@as(u8, 2), windows[2].id);
-    try std.testing.expectEqual(Kind.user, windows[2].kind);
+    try std.testing.expectEqual(@as(usize, 5), win_count);
+    try std.testing.expectEqual(@as(u8, 2), windows[4].id);
+    try std.testing.expectEqual(Kind.user, windows[4].kind);
     try std.testing.expectEqual(@as(?usize, 7), user_owner(2));
     try std.testing.expect(user_owner(1) == null); // the clock is unowned
     // The new window is on top and focused.
@@ -1230,17 +1555,17 @@ test "driving_award: user_open bounds and the four slots fill the registry" {
     arm();
     // Invalid geometry: zero size, oversize back-buffer, off-scanout.
     try std.testing.expectEqual(UserOpenResult.invalid, user_open(0, 0, 0, 10, 7));
-    try std.testing.expectEqual(UserOpenResult.invalid, user_open(0, 0, 257, 10, 7));
-    try std.testing.expectEqual(UserOpenResult.invalid, user_open(0, 0, 10, 193, 7));
+    try std.testing.expectEqual(UserOpenResult.invalid, user_open(0, 0, 513, 10, 7));
+    try std.testing.expectEqual(UserOpenResult.invalid, user_open(0, 0, 10, 385, 7));
     try std.testing.expectEqual(UserOpenResult.invalid, user_open(virtio_gpu.fb_width, 0, 10, 10, 7));
     try std.testing.expectEqual(UserOpenResult.invalid, user_open(virtio_gpu.fb_width - 4, 0, 10, 10, 7));
     // Four opens fill all slots (ids 2..5); the fifth is ENOSPC-shaped (.full).
-    try std.testing.expectEqual(UserOpenResult{ .opened = 2 }, user_open(64, 64, 256, 192, 7));
-    try std.testing.expectEqual(UserOpenResult{ .opened = 3 }, user_open(320, 64, 256, 192, 8));
-    try std.testing.expectEqual(UserOpenResult{ .opened = 4 }, user_open(576, 64, 256, 192, 9));
-    try std.testing.expectEqual(UserOpenResult{ .opened = 5 }, user_open(64, 288, 256, 192, 10));
+    try std.testing.expectEqual(UserOpenResult{ .opened = 2 }, user_open(64, 64, 512, 384, 7));
+    try std.testing.expectEqual(UserOpenResult{ .opened = 3 }, user_open(320, 64, 512, 384, 8));
+    try std.testing.expectEqual(UserOpenResult{ .opened = 4 }, user_open(576, 64, 512, 384, 9));
+    try std.testing.expectEqual(UserOpenResult{ .opened = 5 }, user_open(64, 288, 512, 384, 10));
     try std.testing.expectEqual(UserOpenResult.full, user_open(0, 0, 10, 10, 11));
-    try std.testing.expectEqual(@as(usize, 6), win_count);
+    try std.testing.expectEqual(@as(usize, 8), win_count);
     try std.testing.expectEqual(@as(?usize, 7), user_owner(2));
     try std.testing.expectEqual(@as(?usize, 8), user_owner(3));
     try std.testing.expectEqual(@as(?usize, 9), user_owner(4));
@@ -1249,12 +1574,12 @@ test "driving_award: user_open bounds and the four slots fill the registry" {
 
 test "driving_award: user_fill refuses unknown ids and out-of-bounds rects" {
     arm();
-    _ = user_open(64, 64, 256, 192, 7);
+    _ = user_open(64, 64, 512, 384, 7);
     try std.testing.expect(!user_fill(0, 0, 0, 10, 10, 0xffffff)); // terminal is not a user window
     try std.testing.expect(!user_fill(1, 0, 0, 10, 10, 0xffffff)); // clock is not a user window
     try std.testing.expect(!user_fill(9, 0, 0, 10, 10, 0xffffff)); // unknown
     try std.testing.expect(!user_fill(2, 0, 0, 0, 10, 0xffffff)); // zero size
-    try std.testing.expect(!user_fill(2, 255, 191, 2, 2, 0xffffff)); // past the window edge
+    try std.testing.expect(!user_fill(2, 511, 383, 2, 2, 0xffffff)); // past the window edge
     try std.testing.expect(!user_present(3)); // never opened
     try std.testing.expect(!user_present(0));
     try std.testing.expect(!user_present(1));
@@ -1262,8 +1587,8 @@ test "driving_award: user_fill refuses unknown ids and out-of-bounds rects" {
 
 test "driving_award: user_close releases a user window and frees its slot" {
     arm();
-    try std.testing.expectEqual(UserOpenResult{ .opened = 2 }, user_open(64, 64, 256, 192, 7));
-    try std.testing.expectEqual(@as(usize, 3), win_count);
+    try std.testing.expectEqual(UserOpenResult{ .opened = 2 }, user_open(64, 64, 512, 384, 7));
+    try std.testing.expectEqual(@as(usize, 5), win_count);
     try std.testing.expectEqual(@as(u8, 2), focused_id);
     // The terminal and the clock are fixed — never closable.
     try std.testing.expect(!user_close(0));
@@ -1272,27 +1597,27 @@ test "driving_award: user_close releases a user window and frees its slot" {
     // Close window 2: count decrements, focus falls back to the terminal,
     // and the slot is reusable by the next open.
     try std.testing.expect(user_close(2));
-    try std.testing.expectEqual(@as(usize, 2), win_count);
+    try std.testing.expectEqual(@as(usize, 4), win_count);
     try std.testing.expectEqual(@as(u8, 0), focused_id);
     try std.testing.expect(terminal_focused());
     try std.testing.expect(find_user_window(2) == null);
     // Re-opening reuses id 2 (the freed slot — the "release, not leak" proof).
-    try std.testing.expectEqual(UserOpenResult{ .opened = 2 }, user_open(64, 64, 256, 192, 7));
-    try std.testing.expectEqual(@as(usize, 3), win_count);
+    try std.testing.expectEqual(UserOpenResult{ .opened = 2 }, user_open(64, 64, 512, 384, 7));
+    try std.testing.expectEqual(@as(usize, 5), win_count);
     // Two opens, one close, one re-open: slot 3 is still free for a second
     // window, and closing BOTH user windows returns the registry to the
     // two fixed windows.
-    try std.testing.expectEqual(UserOpenResult{ .opened = 3 }, user_open(320, 64, 256, 192, 8));
+    try std.testing.expectEqual(UserOpenResult{ .opened = 3 }, user_open(320, 64, 512, 384, 8));
     try std.testing.expect(user_close(3));
     try std.testing.expect(user_close(2));
-    try std.testing.expectEqual(@as(usize, 2), win_count);
+    try std.testing.expectEqual(@as(usize, 4), win_count);
     try std.testing.expectEqual(@as(u8, 0), focused_id);
 }
 
 test "driving_award: user_move clamps on-scanout and user_raise reorders z" {
     arm();
-    try std.testing.expectEqual(UserOpenResult{ .opened = 2 }, user_open(64, 64, 256, 192, 7));
-    try std.testing.expectEqual(UserOpenResult{ .opened = 3 }, user_open(320, 64, 256, 192, 8));
+    try std.testing.expectEqual(UserOpenResult{ .opened = 2 }, user_open(64, 64, 512, 384, 7));
+    try std.testing.expectEqual(UserOpenResult{ .opened = 3 }, user_open(320, 64, 512, 384, 8));
     // The terminal + clock are fixed — never movable or raisable.
     try std.testing.expect(!user_move(0, 10, 10));
     try std.testing.expect(!user_move(1, 10, 10));
@@ -1315,13 +1640,13 @@ test "driving_award: user_move clamps on-scanout and user_raise reorders z" {
     try std.testing.expectEqual(@as(u8, 3), focused_id);
     // The clamp keeps the window fully on-scanout (bottom-right corner).
     try std.testing.expect(user_move(2, 1200, 700));
-    try std.testing.expectEqual(@as(u32, virtio_gpu.fb_width - 256), find_user_window(2).?.x);
-    try std.testing.expectEqual(@as(u32, virtio_gpu.fb_height - 192), find_user_window(2).?.y);
+    try std.testing.expectEqual(@as(u32, virtio_gpu.fb_width - 512), find_user_window(2).?.x);
+    try std.testing.expectEqual(@as(u32, virtio_gpu.fb_height - 384), find_user_window(2).?.y);
 }
 
 test "driving_award: user_rect reads back the clamped geometry (the sys_win_get seam)" {
     arm();
-    _ = user_open(64, 64, 256, 192, 7);
+    _ = user_open(64, 64, 512, 384, 7);
     // The fixed windows are never user windows -> null.
     try std.testing.expect(user_rect(0) == null);
     try std.testing.expect(user_rect(1) == null);
@@ -1330,16 +1655,16 @@ test "driving_award: user_rect reads back the clamped geometry (the sys_win_get 
     var r = user_rect(2).?;
     try std.testing.expectEqual(@as(u32, 64), r.x);
     try std.testing.expectEqual(@as(u32, 64), r.y);
-    try std.testing.expectEqual(@as(u32, 256), r.w);
-    try std.testing.expectEqual(@as(u32, 192), r.h);
+    try std.testing.expectEqual(@as(u32, 512), r.w);
+    try std.testing.expectEqual(@as(u32, 384), r.h);
     // After a CLAMPED move the read-back reports the clamped position — the
     // exact seam the EL0 `sys_win_get` exposes (the move is silent).
     try std.testing.expect(user_move(2, 1200, 700));
     r = user_rect(2).?;
-    try std.testing.expectEqual(@as(u32, virtio_gpu.fb_width - 256), r.x);
-    try std.testing.expectEqual(@as(u32, virtio_gpu.fb_height - 192), r.y);
-    try std.testing.expectEqual(@as(u32, 256), r.w);
-    try std.testing.expectEqual(@as(u32, 192), r.h);
+    try std.testing.expectEqual(@as(u32, virtio_gpu.fb_width - 512), r.x);
+    try std.testing.expectEqual(@as(u32, virtio_gpu.fb_height - 384), r.y);
+    try std.testing.expectEqual(@as(u32, 512), r.w);
+    try std.testing.expectEqual(@as(u32, 384), r.h);
 }
 
 test "driving_award: user_query reports the full window state (z-order + focus + flags)" {
@@ -1347,39 +1672,39 @@ test "driving_award: user_query reports the full window state (z-order + focus +
     try std.testing.expect(user_query(0) == null);
     try std.testing.expect(user_query(1) == null);
     try std.testing.expect(user_query(9) == null);
-    try std.testing.expectEqual(UserOpenResult{ .opened = 2 }, user_open(64, 64, 256, 192, 7));
+    try std.testing.expectEqual(UserOpenResult{ .opened = 2 }, user_open(64, 64, 512, 384, 7));
     // The single user window sits at the TOP of the z-order (registry index
-    // 2, above the terminal 0 + clock 1), holds focus, is visible, and is
-    // dirty from the open (the compositor has not run in a host test).
+    // 4, above terminal 0 + clock 1 + wallpaper 254 + taskbar 255),
+    // holds focus, is visible, and is dirty from the open.
     var q = user_query(2).?;
     try std.testing.expectEqual(@as(u32, 64), q.x);
     try std.testing.expectEqual(@as(u32, 64), q.y);
-    try std.testing.expectEqual(@as(u32, 256), q.w);
-    try std.testing.expectEqual(@as(u32, 192), q.h);
-    try std.testing.expectEqual(@as(u32, 2), q.z);
+    try std.testing.expectEqual(@as(u32, 512), q.w);
+    try std.testing.expectEqual(@as(u32, 384), q.h);
+    try std.testing.expectEqual(@as(u32, 4), q.z);
     try std.testing.expectEqual(@as(u32, 1), q.focused);
     try std.testing.expectEqual(@as(u32, 1), q.visible);
     try std.testing.expectEqual(@as(u32, 1), q.dirty);
     // A second window takes focus (id 3) and the z-order: window 2 drops to
-    // rank 1 (bottom of the two user windows), unfocused.
-    try std.testing.expectEqual(UserOpenResult{ .opened = 3 }, user_open(320, 64, 256, 192, 8));
+    // rank 4 (bottom of the two user windows), unfocused.
+    try std.testing.expectEqual(UserOpenResult{ .opened = 3 }, user_open(320, 64, 512, 384, 8));
     q = user_query(2).?;
-    try std.testing.expectEqual(@as(u32, 2), q.z);
+    try std.testing.expectEqual(@as(u32, 4), q.z);
     try std.testing.expectEqual(@as(u32, 0), q.focused);
     q = user_query(3).?;
-    try std.testing.expectEqual(@as(u32, 3), q.z);
+    try std.testing.expectEqual(@as(u32, 5), q.z);
     try std.testing.expectEqual(@as(u32, 1), q.focused);
-    // Raising window 2 moves it to the top (rank 3) without changing focus
+    // Raising window 2 moves it to the top (rank 5) without changing focus
     // (still id 3).
     try std.testing.expect(user_raise(2));
     q = user_query(2).?;
-    try std.testing.expectEqual(@as(u32, 3), q.z);
+    try std.testing.expectEqual(@as(u32, 5), q.z);
     try std.testing.expectEqual(@as(u32, 0), q.focused);
 }
 
 test "driving_award: user_set_visible hides and shows a user window (fixed windows refused)" {
     arm();
-    _ = user_open(64, 64, 256, 192, 7);
+    _ = user_open(64, 64, 512, 384, 7);
     // The terminal + clock are fixed — never hideable.
     try std.testing.expect(!user_set_visible(0, false));
     try std.testing.expect(!user_set_visible(1, false));
@@ -1404,22 +1729,22 @@ test "driving_award: user_set_visible hides and shows a user window (fixed windo
 test "driving_award: close_owner auto-closes exactly the owning process's windows" {
     arm();
     // Process 7 opens both slots; process 8 owns nothing yet.
-    try std.testing.expectEqual(UserOpenResult{ .opened = 2 }, user_open(64, 64, 256, 192, 7));
-    try std.testing.expectEqual(UserOpenResult{ .opened = 3 }, user_open(320, 64, 256, 192, 7));
-    try std.testing.expectEqual(@as(usize, 4), win_count);
+    try std.testing.expectEqual(UserOpenResult{ .opened = 2 }, user_open(64, 64, 512, 384, 7));
+    try std.testing.expectEqual(UserOpenResult{ .opened = 3 }, user_open(320, 64, 512, 384, 7));
+    try std.testing.expectEqual(@as(usize, 6), win_count);
     try std.testing.expectEqual(@as(u8, 3), focused_id);
     // Closing a process with no windows is a no-op (returns 0).
     try std.testing.expectEqual(@as(usize, 0), close_owner(8));
-    try std.testing.expectEqual(@as(usize, 4), win_count);
+    try std.testing.expectEqual(@as(usize, 6), win_count);
     // Closing process 7 releases BOTH of its windows and falls the focus
     // back to the terminal.
     try std.testing.expectEqual(@as(usize, 2), close_owner(7));
-    try std.testing.expectEqual(@as(usize, 2), win_count);
+    try std.testing.expectEqual(@as(usize, 4), win_count);
     try std.testing.expectEqual(@as(u8, 0), focused_id);
     try std.testing.expect(find_user_window(2) == null);
     try std.testing.expect(find_user_window(3) == null);
     // The slots are free again (id 2 re-opens for a different owner).
-    try std.testing.expectEqual(UserOpenResult{ .opened = 2 }, user_open(64, 64, 256, 192, 9));
+    try std.testing.expectEqual(UserOpenResult{ .opened = 2 }, user_open(64, 64, 512, 384, 9));
     try std.testing.expectEqual(@as(?usize, 9), user_owner(2));
 }
 

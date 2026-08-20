@@ -21,12 +21,12 @@ pub const window_id: u32 = 2;
 pub const ready_line: []const u8 = "victim: window=2 ready\n";
 
 export fn _start() callconv(.c) noreturn {
-    const win = ui.win_open(64, 64, 256, 192);
+    const win = ui.win_open(64, 64, 512, 384);
     if (win != window_id) {
         ui.write_console("victim: open failed\n");
         ui.exit_process(1);
     }
-    ui.win_fill(window_id, 0, 0, 256, 192, 0x1a2b3c);
+    ui.win_fill(window_id, 0, 0, 512, 384, 0x1a2b3c);
     ui.win_fill(window_id, 8, 8, 48, 48, 0xff0000);
     ui.win_present(window_id);
     ui.write_console(ready_line);

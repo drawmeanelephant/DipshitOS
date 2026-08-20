@@ -21,27 +21,27 @@ const DirEntry = ui.DirEntry;
 pub const window_id: u32 = 5;
 pub const window_x: u32 = 40;
 pub const window_y: u32 = 40;
-pub const window_w: u32 = 256;
-pub const window_h: u32 = 192;
+pub const window_w: u32 = 512;
+pub const window_h: u32 = 384;
 
 pub const exit_status: u32 = 43;
 pub const data_path: []const u8 = "/data";
 
-// Geometry (inside the 256x192 window).
-pub const title_rect = Rect.make(0, 0, 256, 22);
-pub const list_area = Rect.make(6, 26, 148, 130);
-pub const details_area = Rect.make(158, 26, 92, 130);
-pub const btn_open_rect = Rect.make(6, 162, 44, 22);
-pub const btn_rename_rect = Rect.make(54, 162, 52, 22);
-pub const btn_delete_rect = Rect.make(110, 162, 52, 22);
-pub const btn_back_rect = Rect.make(6, 162, 44, 22); // overlaps Open; mode-exclusive
+// Geometry (inside the 512x384 window).
+pub const title_rect = Rect.make(0, 0, 512, 22);
+pub const list_area = Rect.make(6, 26, 240, 290);
+pub const details_area = Rect.make(252, 26, 254, 290);
+pub const btn_open_rect = Rect.make(6, 322, 56, 22);
+pub const btn_rename_rect = Rect.make(66, 322, 64, 22);
+pub const btn_delete_rect = Rect.make(134, 322, 64, 22);
+pub const btn_back_rect = Rect.make(6, 322, 56, 22); // overlaps Open; mode-exclusive
 
 pub const list_row_h: u32 = 16;
 pub const glyph_w: u32 = 8;
 pub const line_h: u32 = 12;
 pub const view_text_x: u32 = 10;
 pub const view_text_y: u32 = 30;
-pub const view_cols: usize = 29; // (window_w - 12 - 12) / glyph_w
+pub const view_cols: usize = 59; // (list_area.w - 12) / glyph_w
 pub const view_rows: usize = 9; // ~(details_area.h - 12) / line_h
 
 pub const max_entries: usize = 16;
@@ -97,6 +97,16 @@ pub fn is_txt_file(name: []const u8) bool {
         ascii_upper(s[1]) == 'T' and
         ascii_upper(s[2]) == 'X' and
         ascii_upper(s[3]) == 'T';
+}
+
+/// True when the name ends in `.BIN` (case-insensitive).
+pub fn is_bin_file(name: []const u8) bool {
+    if (name.len < 4) return false;
+    const s = name[name.len - 4 ..];
+    return ascii_upper(s[0]) == '.' and
+        ascii_upper(s[1]) == 'B' and
+        ascii_upper(s[2]) == 'I' and
+        ascii_upper(s[3]) == 'N';
 }
 
 /// Number of display rows a content slice occupies, wrapping at `cols`
@@ -207,9 +217,19 @@ fn draw_list_row(win: u32, row: usize, name: []const u8, entry: *const DirEntry,
     else
         ui.COLOR_BG;
     ui.draw_rect(win, row_rect, bg);
-    // Cap the drawn name to the row width (148 - 8 padding = 140px = 17 glyphs).
-    const cap = @min(name.len, 17);
-    ui.draw_text(win, name[0..cap], row_rect.x + 4, row_rect.y + (list_row_h - 8) / 2, ui.COLOR_TEXT_PRIMARY);
+    // Step 12: colored type indicator (8x8 square before filename).
+    const icon_color: u32 = if (entry.is_dir != 0)
+        0x3b82f6 // blue for directories
+    else if (is_txt_file(name))
+        0x22c55e // green for .TXT
+    else if (is_bin_file(name))
+        0xf59e0b // amber for .BIN
+    else
+        0x64748b; // gray for unknown
+    ui.draw_rect(win, Rect.make(row_rect.x + 4, row_rect.y + 4, 8, 8), icon_color);
+    // Cap the drawn name to the row width (240 - 16 padding - 12 icon = 212px = 26 glyphs).
+    const cap = @min(name.len, 26);
+    ui.draw_text(win, name[0..cap], row_rect.x + 16, row_rect.y + (list_row_h - 8) / 2, ui.COLOR_TEXT_PRIMARY);
 }
 
 pub const AppState = struct {

@@ -6,7 +6,7 @@
 //! (`sys_win_open` / `sys_win_fill` / `sys_win_present`) end to end,
 //! entirely from EL0:
 //!
-//!   1. `sys_win_open(64, 64, 256, 192)` (slot 12) opens the first free
+//!   1. `sys_win_open(64, 64, 512, 384)` (slot 12) opens the first free
 //!      user window (id 2 — a kernel-owned fixed-BSS back-buffer) -> prints
 //!      `win: open id=2`.
 //!   2. Four `sys_win_fill` calls (slot 13) paint the back-buffer: a dark
@@ -37,8 +37,8 @@ pub const window_id: u32 = 2;
 /// The window geometry (sys_win_open's x/y/w/h — the gate's decode rect).
 pub const window_x: u32 = 64;
 pub const window_y: u32 = 64;
-pub const window_w: u32 = 256;
-pub const window_h: u32 = 192;
+pub const window_w: u32 = 512;
+pub const window_h: u32 = 384;
 /// The exact colors WIN.BIN paints (the gate's decoded-pixel targets).
 pub const bg_rgb: u32 = 0x1a2b3c;
 pub const red_rgb: u32 = 0xff0000;
@@ -53,12 +53,12 @@ pub const present_line: []const u8 = "win: present ok\n";
 
 export fn _start() callconv(.naked) noreturn {
     asm volatile (
-        \\// Phase 1 — sys_win_open(64, 64, 256, 192) (slot 12): the first
+        \\// Phase 1 — sys_win_open(64, 64, 512, 384) (slot 12): the first
         \\// free user window. Returns id 2; a wrong id parks (honest fail).
         \\mov x0, #64
         \\mov x1, #64
-        \\mov x2, #256
-        \\mov x3, #192
+        \\mov x2, #512
+        \\mov x3, #384
         \\mov x8, #12
         \\svc #0
         \\cmp x0, #2
@@ -68,13 +68,13 @@ export fn _start() callconv(.naked) noreturn {
         \\mov x2, #15
         \\mov x8, #1
         \\svc #0
-        \\// Phase 2 — sys_win_fill(2, 0, 0, 256, 192, 0x1a2b3c) (slot 13):
+        \\// Phase 2 — sys_win_fill(2, 0, 0, 512, 384, 0x1a2b3c) (slot 13):
         \\// the dark-blue background. 0 on success.
         \\mov x0, #2
         \\mov x1, #0
         \\mov x2, #0
-        \\mov x3, #256
-        \\mov x4, #192
+        \\mov x3, #512
+        \\mov x4, #384
         \\movz x5, #0x1a, lsl #16
         \\movk x5, #0x2b3c
         \\mov x8, #13

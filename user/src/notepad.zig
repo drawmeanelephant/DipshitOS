@@ -22,8 +22,8 @@ const Event = ui.Event;
 pub const window_id: u32 = 2;
 pub const window_x: u32 = 56;
 pub const window_y: u32 = 56;
-pub const window_w: u32 = 256;
-pub const window_h: u32 = 192;
+pub const window_w: u32 = 512;
+pub const window_h: u32 = 384;
 
 pub const exit_status: u32 = 43;
 pub const notes_path: []const u8 = "/data/notes.txt";
