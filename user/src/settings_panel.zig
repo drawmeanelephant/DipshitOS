@@ -8,6 +8,7 @@ const ui = @import("lib/ui.zig");
 const Rect = ui.Rect;
 const Button = ui.Button;
 const TextInput = ui.TextInput;
+const DropDown = ui.DropDown;
 const Event = ui.Event;
 
 pub const window_id: u32 = 6;
@@ -25,6 +26,9 @@ pub const label_x: u32 = 16;
 pub const input_x: u32 = 120;
 pub const input_w: u32 = 340;
 pub const input_h: u32 = 22;
+
+// Theme options for the dropdown.
+pub const theme_options = [_][]const u8{ "dark", "light", "amber" };
 
 // Hand-rolled string helpers (W^X-safe).
 fn eql(a: []const u8, b: []const u8) bool {
@@ -117,7 +121,7 @@ pub const AppState = struct {
     settings: Settings = Settings.init(),
 
     input_hostname: TextInput,
-    input_theme: TextInput,
+    dropdown_theme: DropDown,
     input_prompt: TextInput,
 
     btn_save: Button,
@@ -129,7 +133,7 @@ pub const AppState = struct {
     pub fn init() AppState {
         return .{
             .input_hostname = TextInput.init(Rect.make(input_x, row_y0, input_w, input_h)),
-            .input_theme = TextInput.init(Rect.make(input_x, row_y0 + row_h, input_w, input_h)),
+            .dropdown_theme = DropDown.init(Rect.make(input_x, row_y0 + row_h, input_w, input_h), &theme_options),
             .input_prompt = TextInput.init(Rect.make(input_x, row_y0 + row_h * 2, input_w, input_h)),
             .btn_save = Button.init(Rect.make(16, row_y0 + row_h * 3 + 16, 80, 24), "Save"),
             .btn_reset = Button.init(Rect.make(106, row_y0 + row_h * 3 + 16, 80, 24), "Reset"),
@@ -154,7 +158,7 @@ pub const AppState = struct {
             }
         }
         self.input_hostname.set_text(self.settings.hostname[0..self.settings.hostname_len]);
-        self.input_theme.set_text(self.settings.theme[0..self.settings.theme_len]);
+        self.dropdown_theme.set_selected_by_name(self.settings.theme[0..self.settings.theme_len]);
         self.input_prompt.set_text(self.settings.prompt[0..self.settings.prompt_len]);
         self.set_status("Loaded");
     }
@@ -163,7 +167,7 @@ pub const AppState = struct {
         var buf: [512]u8 = undefined;
         var pos: usize = 0;
         pos = append_pair(&buf, pos, "hostname", self.input_hostname.get_text());
-        pos = append_pair(&buf, pos, "theme", self.input_theme.get_text());
+        pos = append_pair(&buf, pos, "theme", self.dropdown_theme.selected_text());
         pos = append_pair(&buf, pos, "prompt", self.input_prompt.get_text());
         if (write_settings_file(buf[0..pos])) {
             self.set_status("Saved OK");
@@ -202,14 +206,14 @@ pub const AppState = struct {
             return true;
         }
         _ = self.input_hostname.handle_event(ev);
-        _ = self.input_theme.handle_event(ev);
+        if (self.dropdown_theme.handle_event(ev)) return true;
         _ = self.input_prompt.handle_event(ev);
         return true;
     }
 
     pub fn handle_key(self: *AppState, ev: *const Event) bool {
         if (self.input_hostname.handle_event(ev)) return true;
-        if (self.input_theme.handle_event(ev)) return true;
+        if (self.dropdown_theme.handle_event(ev)) return true;
         if (self.input_prompt.handle_event(ev)) return true;
         return false;
     }
@@ -230,7 +234,7 @@ pub const AppState = struct {
 
         // Input fields.
         self.input_hostname.draw(win);
-        self.input_theme.draw(win);
+        self.dropdown_theme.draw(win);
         self.input_prompt.draw(win);
 
         // Buttons.
