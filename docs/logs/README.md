@@ -81,6 +81,10 @@ verify-coordination`, and CI) fails if it drifts from the files.
 | `agent/buffy/m15-nvram-console` | [`agent-buffy-m15-nvram-console.md`](agent-buffy-m15-nvram-console.md) |
 | M1.5 console & shell core (agent B) | [`agent-buffy-m15-shell-core.md`](agent-buffy-m15-shell-core.md) |
 | `agent/buffy/m15-vz-serial-gate` | [`agent-buffy-m15-vz-serial-gate.md`](agent-buffy-m15-vz-serial-gate.md) |
+| `agent/buffy/m16-c1-image-format` | [`agent-buffy-m16-c1-image-format.md`](agent-buffy-m16-c1-image-format.md) |
+| `agent/buffy/m16-c2-guards` | [`agent-buffy-m16-c2-guards.md`](agent-buffy-m16-c2-guards.md) |
+| `agent/buffy/m16-c3-resources` | [`agent-buffy-m16-c3-resources.md`](agent-buffy-m16-c3-resources.md) |
+| `agent/buffy/m16-c4-composition` | [`agent-buffy-m16-c4-composition.md`](agent-buffy-m16-c4-composition.md) |
 | `agent/buffy/m2-badhandoff-fix` (PR #11) | [`agent-buffy-m2-badhandoff-fix.md`](agent-buffy-m2-badhandoff-fix.md) |
 | `agent/buffy/m2-kernel-proper` (PR #10) | [`agent-buffy-m2-kernel-proper.md`](agent-buffy-m2-kernel-proper.md) |
 | M2 fixed-memory-marker fallback (ADR 0004 D4, gate work item 3) | [`agent-buffy-m2-marker-fallback.md`](agent-buffy-m2-marker-fallback.md) |
@@ -134,6 +138,7 @@ verify-coordination`, and CI) fails if it drifts from the files.
 | `codex/el0-svc-task` | [`codex-el0-svc-task.md`](codex-el0-svc-task.md) |
 | `codex/vz-real-irq-delivery` | [`codex-vz-real-irq-delivery.md`](codex-vz-real-irq-delivery.md) |
 | `docs-calm-lavoisier-memorial`: Memorial to calm-lavoisier & Git Alignment (claim 9357) | [`docs-calm-lavoisier-memorial.md`](docs-calm-lavoisier-memorial.md) |
+| `docs/site-current-state-m15`: refresh the public GitHub Pages site to current reality (claim 7489) | [`docs-site-current-state-m15.md`](docs-site-current-state-m15.md) |
 | `site-current-state`: refresh the public GitHub Pages site to current reality (claim 1662) | [`docs-site-current-state.md`](docs-site-current-state.md) |
 | freebuff/can-you-check-out-our-status-and-work-on-the-next (milestone six, G4) | [`freebuff-can-you-check-out-our-status-and-work-on-the-next--7e2ecd0b-8acc-47ac-bb44-68841236e5fc.md`](freebuff-can-you-check-out-our-status-and-work-on-the-next--7e2ecd0b-8acc-47ac-bb44-68841236e5fc.md) |
 | freebuff/can-you-figure-out-why-the-text-is-getting-flipped (issue #125 glyph orientation) | [`freebuff-can-you-figure-out-why-the-text-is-getting-flipped-8600521b-d8d1-4667-a3e8-d2fa10b4ff03.md`](freebuff-can-you-figure-out-why-the-text-is-getting-flipped-8600521b-d8d1-4667-a3e8-d2fa10b4ff03.md) |
@@ -146,12 +151,14 @@ verify-coordination`, and CI) fails if it drifts from the files.
 | freebuff/grab-most-current-git-and-let-s-continue-on-with-o-bd839138-534f-40b1-97b3-220d1b1c9a61 | [`freebuff-grab-most-current-git-and-let-s-continue-on-with-o-bd839138-534f-40b1-97b3-220d1b1c9a61.md`](freebuff-grab-most-current-git-and-let-s-continue-on-with-o-bd839138-534f-40b1-97b3-220d1b1c9a61.md) |
 | M2 MMU-takeover root cause & fix (claim 0010) | [`freebuff-grab-newest-files-from-github-and-pick-something-t-a3eb337e-4b37-4bae-8548-242c49be7456.md`](freebuff-grab-newest-files-from-github-and-pick-something-t-a3eb337e-4b37-4bae-8548-242c49be7456.md) |
 | `freebuff/grab-newest-git-and-check-status-if-there-s-any-im-b9d5c028-9379-48e0-8ddb-ebfbf45ef2df` | [`freebuff-grab-newest-git-and-check-status-if-there-s-any-im-b9d5c028-9379-48e0-8ddb-ebfbf45ef2df.md`](freebuff-grab-newest-git-and-check-status-if-there-s-any-im-b9d5c028-9379-48e0-8ddb-ebfbf45ef2df.md) |
+| freebuff/hey-bestie-the-chat-got-lost-so-we-re-so-back-can--53baf792-c2f8-470d-a9f1-6344aa90847a (M14 shared user services) | [`freebuff-hey-bestie-the-chat-got-lost-so-we-re-so-back-can--53baf792-c2f8-470d-a9f1-6344aa90847a.md`](freebuff-hey-bestie-the-chat-got-lost-so-we-re-so-back-can--53baf792-c2f8-470d-a9f1-6344aa90847a.md) |
 | Status re-verification on merged main (claim 0014) | [`freebuff-let-s-get-the-latest-github-and-do-something-benef-e128807b-0418-4d4e-aebe-ba30b18c18c5.md`](freebuff-let-s-get-the-latest-github-and-do-something-benef-e128807b-0418-4d4e-aebe-ba30b18c18c5.md) |
 | M1.5 transcript test automation (`freebuff/m15-transcript-test`) | [`freebuff-m15-transcript-test.md`](freebuff-m15-transcript-test.md) |
 | freebuff/mainzig-modules | [`freebuff-mainzig-modules.md`](freebuff-mainzig-modules.md) |
 | Coordination-tooling hardening (claim 1801) | [`freebuff-make-sure-git-is-current-first-18548850-6288-40ff-bca2-007971e567ac.md`](freebuff-make-sure-git-is-current-first-18548850-6288-40ff-bca2-007971e567ac.md) |
 | make-sure-git-main-is-current (claim 4922) | [`freebuff-make-sure-git-main-is-current-7f307de5-d3c0-4d90-966c-3a4221ad4d24.md`](freebuff-make-sure-git-main-is-current-7f307de5-d3c0-4d90-966c-3a4221ad4d24.md) |
 | `freebuff/mmu-debt-contract` | [`freebuff-mmu-debt-contract.md`](freebuff-mmu-debt-contract.md) |
+| `m14-s1-clipboard`: the bounded kernel clipboard (claim 0169) | [`freebuff-new-worktree-who-dis-84637f8c-617d-4718-b605-bebdba7963d9.md`](freebuff-new-worktree-who-dis-84637f8c-617d-4718-b605-bebdba7963d9.md) |
 | freebuff/okay-we-ve-been-kind-of-freestyling-off-away-from--0584ad0f-9850-473f-8884-7c28b20acab7 | [`freebuff-okay-we-ve-been-kind-of-freestyling-off-away-from--0584ad0f-9850-473f-8884-7c28b20acab7.md`](freebuff-okay-we-ve-been-kind-of-freestyling-off-away-from--0584ad0f-9850-473f-8884-7c28b20acab7.md) |
 | `freebuff/pull-git-and-check-status-to-make-sure-everything--9934c25c-63ea-4cf3-b3fb-4b98fb81b9f4` | [`freebuff-pull-git-and-check-status-to-make-sure-everything--9934c25c-63ea-4cf3-b3fb-4b98fb81b9f4.md`](freebuff-pull-git-and-check-status-to-make-sure-everything--9934c25c-63ea-4cf3-b3fb-4b98fb81b9f4.md) |
 | `freebuff/pull-git-and-check-status-to-make-sure-everything--d4bf6a7f-c051-49b8-a1c4-bc479835e531` | [`freebuff-pull-git-and-check-status-to-make-sure-everything--d4bf6a7f-c051-49b8-a1c4-bc479835e531.md`](freebuff-pull-git-and-check-status-to-make-sure-everything--d4bf6a7f-c051-49b8-a1c4-bc479835e531.md) |

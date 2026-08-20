@@ -22,8 +22,8 @@ see [[evidence]].
 
 ## Current status
 
-Every milestone through twelve has landed; milestone thirteen (files &
-applications) is in progress with two of four cards shipped:
+Every milestone through fifteen has landed; milestone sixteen (the kernel
+grows up — internals consolidation) is the current stream:
 
 | Milestone | What it is | Status |
 |-----------|-----------|--------|
@@ -39,7 +39,10 @@ applications) is in progress with two of four cards shipped:
 | User filesystem ABI | Per-process file table, `/esp/` + `/data/` routing, file syscalls (slots 23–27), storage utilities | Done |
 | Desktop platform | ADR 0011: zero-heap `ui.zig` widget toolkit + `CALC.BIN`, `NOTEPAD.BIN`, `TOP.BIN`, `DESKTOP.BIN` launcher | Done |
 | Network apps | TCP syscall seam (slots 30–33), RFC 1035 DNS, `TCP.BIN`/`FETCH.BIN`/`CHAT.BIN` | Done |
-| Files & applications | `APPS.TXT` manifest + `FILE.BIN` graphical data browser; delete/rename and desktop composition are the open cards | In progress |
+| Files & applications | Mutating filesystem seam (slots 34–37), `APPS.TXT` manifest, `FILE.BIN` graphical data browser, desktop composition | Done |
+| Shared services | Clipboard + app timers + composition capstone + isolation hardening (slots 38–41) | Done |
+| Audio | virtio-snd, PCM playback, `beep`, the EL0 audio seam (slots 42–45), `JINGLE.BIN` + the boot chime + `CHIME.BIN` | Done |
+| Internals consolidation | Multi-segment user images, guard pages, measured pools (issues #190–#193) | Planned |
 
 The full, always-current accounting lives in the repository's
 [`docs/status.md`](https://github.com/drawmeanelephant/DipshitOS/blob/main/docs/status.md).
@@ -63,8 +66,9 @@ A single boot of DipshitOS gets you, in order:
 - A window manager — **Driving Award** — compositing a terminal and a live
   clock overlay.
 - EL0 user programs, exec'd from the disk, running as real processes with a
-  34-slot syscall ABI (slots 0–33) covering IPC, windows, files, events,
-  process control, and TCP.
+  46-slot syscall ABI (slots 0–45) covering IPC, windows, files, events,
+  process control, TCP, filesystem mutation, clipboard, app timers, and
+  audio.
 - Networking from raw Ethernet frames up through ARP, IPv4/ICMP, UDP, DHCP,
   and a bounded TCP client — plus an RFC 1035 DNS resolver.
 - USB keyboard input, enumerated over a real XHCI controller, typing into the
@@ -77,6 +81,10 @@ A single boot of DipshitOS gets you, in order:
   peer-to-peer graphical chat app (`CHAT.BIN`).
 - Keyboard, pointer, and window events routed to focused applications, so an
   EL0 program runs an interactive event loop.
+- A shared clipboard (copy/cut/paste across text apps) and per-process
+  application timers that post `TIMER` events instead of spin loops.
+- Sound: a virtio-snd device, PCM playback from EL0, a boot chime, and a
+  melody app that plays Twinkle Twinkle Little Star.
 
 ![A live DipshitOS boot: the Road Pops terminal showing the boot banner and an echoed session, with the Driving Award clock overlay in the top-right corner](index.assets/screenshot.png "A live DipshitOS boot")
 

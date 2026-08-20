@@ -15,7 +15,8 @@ capability is partial or hardware-specific, the page says so.
 - [[input|Input]] — USB XHCI, HID enumeration, keyboard events, and pointer/click events routed to focused applications.
 - [[storage|Storage & filesystem]] — FAT32 over virtio-blk, ESP + a second data partition, and a userland file syscall ABI.
 - [[processes|Processes & IPC]] — concurrent EL0 programs, mailboxes, wait, kill, `sys_exec`/`sys_kill`.
-- [[programs|User programs & demos]] — the 21 `.BIN` images exec'd from the disk, from seam proofs to the desktop apps.
+- [[programs|User programs & demos]] — the 27 `.BIN` images exec'd from the disk, from seam proofs to the desktop apps.
+- **Shared services & sound** — a machine-global clipboard, per-process app timers that post `TIMER` events, and a virtio-snd audio pipeline from the device up to EL0 melody apps.
 
 ## The headline capability: a real machine
 
@@ -31,6 +32,9 @@ Put together, a single boot proves the whole stack in sequence:
 6. A desktop launcher starts real applications — calculator, editor, process
    monitor, file browser — that paint windows, receive events, and talk to
    the network.
+7. Text moves between apps through a shared clipboard, apps wake on timers
+   instead of spinning, and the machine makes sound: a boot chime, a `beep`,
+   and EL0 melody apps over a virtio-snd device.
 
 <Aside kind="tip">
 
@@ -43,8 +47,6 @@ seam across every subsystem. See [[live-gates]].
 ## Not there yet
 
 - SMP, multi-display, accelerated/3D graphics, and the balloon device.
-- Filesystem *mutation* from userland — the M13 B1 card
-  (`sys_file_delete`/`rename`/`truncate`/`free`, ADR 0007 slots 34–37).
 - TCP server/listen and any routing beyond the NAT gateway.
 - The window manager's pointer-driven focus is guest-complete but its live
   proof is a manual/CG-gated seam; DNS is shipped, but the resolver is bounded

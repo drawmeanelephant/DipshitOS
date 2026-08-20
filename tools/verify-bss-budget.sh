@@ -20,11 +20,11 @@
 # ADR 0013 D3.1 (docs/decisions/0013-post-m14-abi-amendment.md), observed
 # 2026-08-20 via `zig build kernel` + `llvm-readelf -SW`:
 #
-#   baseline .bss = 6,119,552 B (5.84 MiB)
+#   baseline .bss = 9,787,576 B (9.33 MiB, as of main post-M16)
 #   post-M14 reservations = +1,737 B (ADR 0013 D3 -- planned)
-#   headroom = ~1.2 MiB for future claims
+#   headroom = ~1.7 MiB for future claims
 #
-# The budget = 7,340,032 B (7.0 MiB) gives 1,220,480 B of headroom over the
+# The budget = 11,534,336 B (11.0 MiB) gives 1,746,760 B of headroom over the
 # observed baseline. To raise the budget, amend ADR 0013 D3.1 with the
 # observed post-change measurement and a justification, then bump the
 # constant below.
@@ -46,17 +46,34 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 GATE_LOG="artifacts/bss-budget-gate.txt"
-exec > >(tee "$GATE_LOG") 2>&1
-trap 'sleep 0.5' EXIT
+mkdir -p "$(dirname "$GATE_LOG")"
 
 # Budget ceiling. Override at run time for ad-hoc checks:
 #   BSS_BUDGET_BYTES=8000000 bash tools/verify-bss-budget.sh
-BSS_BUDGET_BYTES="${BSS_BUDGET_BYTES:-7340032}" # 7.0 MiB (see header comment)
-LLVM_READELF="${LLVM_READELF:-/opt/homebrew/Cellar/llvm@21/21.1.8/bin/llvm-readelf}"
+BSS_BUDGET_BYTES="${BSS_BUDGET_BYTES:-11534336}" # 11.0 MiB (see header comment)
+# Discover llvm-readelf: env override > PATH > Homebrew > Xcode > fail.
+if [ -z "${LLVM_READELF:-}" ]; then
+    LLVM_READELF="$(command -v llvm-readelf 2>/dev/null || true)"
+fi
+if [ -z "${LLVM_READELF:-}" ]; then
+    # Homebrew — find the first llvm-readelf under Cellar/opt (symlinks ok)
+    LLVM_READELF="$(find /opt/homebrew/Cellar /opt/homebrew/opt /usr/local/opt \
+        -name llvm-readelf -not -type d 2>/dev/null | head -1 || true)"
+fi
+if [ -z "${LLVM_READELF:-}" ]; then
+    for p in /Library/Developer/CommandLineTools/usr/bin/llvm-readelf \
+             /Applications/Xcode*.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/llvm-readelf; do
+        [ -e "$p" ] && LLVM_READELF="$p" && break
+    done
+fi
+if [ -z "${LLVM_READELF:-}" ]; then
+    echo "verify-bss-budget: FAIL — llvm-readelf not found. Set LLVM_READELF=path."
+    exit 1
+fi
 
 echo "=== verify-bss-budget: ADR 0013 D3.1 CI gate — kernel .bss ceiling (class A, deterministic, no VM) ==="
 echo "budget source: docs/decisions/0013-post-m14-abi-amendment.md D3.1"
-echo "budget:        $BSS_BUDGET_BYTES B (7.0 MiB)"
+echo "budget:        $BSS_BUDGET_BYTES B (11.0 MiB)"
 echo
 
 # Build the kernel. `zig build kernel` runs elf2bin.py on the linked ELF;
@@ -66,7 +83,7 @@ echo "-- building kernel --"
 rm -rf .zig-cache
 zig build kernel 2>&1 | tail -1
 
-KERNEL_ELF="$(find .zig-cache -name 'dipshit-kernel' -type f 2>/dev/null | head -1)"
+KERNEL_ELF="$(find .zig-cache -name 'dipshit-kernel' -type f 2>/dev/null | head -1 || true)"
 if [ -z "$KERNEL_ELF" ]; then
     echo
     echo "verify-bss-budget: FAIL — kernel ELF not found in .zig-cache after build."
@@ -82,7 +99,7 @@ fi
 section_hex() { # section_name -> hex_size (empty on miss)
     local name="$1"
     "$LLVM_READELF" -SW "$KERNEL_ELF" \
-        | awk -v want="$name" '$3 == want { print $7; exit }'
+        | awk -v want="$name" '$3 == want { print $7; exit }' || true
 }
 BSS_SIZE_HEX="$(section_hex .bss)"
 if [ -z "$BSS_SIZE_HEX" ]; then
@@ -128,7 +145,7 @@ printf '  status:         %s\n' "$STATUS"
 # remains useful.
 echo
 echo "-- known large .bss contributors (sourced from kernel/src; informational) --"
-echo "  mmu.table_storage (kernel/src/mmu.zig):     1,048,576 B (1.0 MiB; page-table carve-out, ADR 0006)"
+echo "  mmu.table_storage (kernel/src/mmu.zig):     2,097,152 B (2.0 MiB; page-table carve-out, ADR 0006, doubled in M16 C4)"
 echo "  virtio_gpu.gpu_fb (kernel/src/virtio_gpu.zig): 3,686,400 B (3.52 MiB; 1280x720x4 scanout, align 4096)"
 echo "  post-M14 reservations (ADR 0013 D3):           1,737 B (~1.7 KiB; planned, not yet landed)"
 echo "  other (font, console, scheduler, virtio rings, process table, mailbox, evidence, etc.): the remainder"
@@ -140,11 +157,9 @@ if [ "$STATUS" = "FAIL" ]; then
     echo "  1. Remove the offending allocation (preferred -- amend the design)."
     echo "  2. Amend ADR 0013 D3.1 with the post-change measurement + justification,"
     echo "     then bump BSS_BUDGET_BYTES in this script."
-    sleep 0.5
     exit 1
 fi
 
 echo
 echo "verify-bss-budget: PASS — kernel .bss = $BSS_SIZE_DEC B / $BSS_BUDGET_BYTES B ($REMAINING B headroom)."
-sleep 0.5
 exit 0

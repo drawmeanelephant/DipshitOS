@@ -37,8 +37,10 @@ const uaccess = @import("uaccess.zig"); // claim 6120: fault-safe copy-in/copy-o
 const userspace = @import("userspace.zig"); // claim 5804: user-VA layout
 const virtio_blk = @import("virtio_blk.zig"); // claim 6420: the sector interface behind `mount` (milestone four card 2)
 const csprng = @import("csprng.zig"); // milestone four (claim 2665): the seeded CSPRNG behind `random`
+const clipboard = @import("clipboard.zig"); // milestone fourteen (claim 0169): the shared kernel clipboard behind `clip`
 const virtio_net = @import("virtio_net.zig"); // milestone five card N1 (claim 1373): the net transport behind `net`/`netsend`
 const virtio_gpu = @import("virtio_gpu.zig"); // milestone six card G1 (claim 6053): the gpu transport + framebuffer behind `screen`
+const virtio_snd = @import("virtio_snd.zig"); // milestone fifteen card A1 (claim 6140): the virtio-snd transport behind `sound`
 const road_pops = @import("road_pops.zig"); // milestone six card G3 (claim 1574): the Road Pops tee console behind `roadpops`
 const fbtext = @import("text.zig"); // milestone six card G2 (claim 3194): framebuffer text rendering behind `text`
 const xhci = @import("xhci.zig"); // milestone seven card I1 (claim 4272): the XHCI host-controller transport behind `usb`
@@ -46,6 +48,8 @@ const input = @import("input.zig"); // milestone seven card I3 (claim 6050): the
 const driving_award = @import("driving_award.zig"); // milestone six card G5 (claim 1543): Driving Award, the window manager behind `dui`
 const settings = @import("settings.zig"); // milestone eight card U8 (claim 2649): persistent settings engine
 const dns = @import("dns.zig"); // milestone twelve card N2 (claim 7566): DNS resolver
+const events = @import("events.zig"); // milestone sixteen C3 (claim 0339): per-process event queue bound behind `resources`
+const file_table = @import("file_table.zig"); // milestone sixteen C3 (claim 0339): per-process handle bound behind `resources`
 
 // ---------------------------------------------------------------------------
 // Limits (fixed-size, explicit bounds)
@@ -264,8 +268,12 @@ pub const Command = struct {
 /// (claim 1543) grows it 39 -> 40 (`dui`). Milestone eight card U6
 /// (claim 8323) grows it 40 -> 42 (`welcome`, `tour`). Milestone eight card U7
 /// (claim 2990) grows it 42 -> 43 (`sysinfo`). Milestone eight card U8
-/// (claim 2649) grows it 43 -> 44 (`settings`).
-pub const registry_count: usize = 44;
+/// (claim 2649) grows it 43 -> 44 (`settings`). Milestone fourteen card S1
+/// (claim 0169) grows it 44 -> 45 (`clip`). Milestone fifteen card A1
+/// (claim 6140) grows it 45 -> 46 (`sound`). Milestone fifteen card A2
+/// (claim 5877) grows it 46 -> 47 (`beep`). Milestone sixteen card C3
+/// (claim 0339) grows it 47 -> 48 (`resources`).
+pub const registry_count: usize = 48;
 
 /// Command registry, built at runtime into BSS. A `const` table would hold
 /// link-time absolute addresses for BOTH the string slices and the handler
@@ -282,10 +290,12 @@ fn ensure_registry() []const Command {
     if (!registry_ready) {
         registry_storage = .{
             .{ .name = "addrspaces", .help = "per-task user address spaces: per-task TTBR0, EL1-only kernel overlay, user-root contents", .usage = "addrspaces", .category = .memory_state, .handler = cmd_addrspaces },
+            .{ .name = "beep", .help = "synthesize + play a sine through the virtio-snd PCM path ('beep <freq> <ms>' — reports the full control flow + submit/drain accounting)", .usage = "beep <freq> <ms>", .category = .system, .min_args = 2, .max_args = 2, .handler = cmd_beep },
             .{ .name = "about", .help = "explain this questionable system", .usage = "about", .category = .machine_identity, .handler = cmd_about },
             .{ .name = "beans", .help = "count beans, probably", .usage = "beans [count]", .category = .machine_identity, .max_args = 1, .handler = cmd_beans },
             .{ .name = "cat", .help = "print a file from the ESP (by name or /path)", .usage = "cat <file|path>", .category = .storage, .min_args = 1, .max_args = 1, .handler = cmd_cat },
             .{ .name = "clear", .help = "clean up the crime scene", .usage = "clear", .category = .system, .handler = cmd_clear },
+            .{ .name = "clip", .help = "copy/paste the shared kernel clipboard ('clip <text...>' sets it, 'clip' prints it)", .usage = "clip [<text...>]", .category = .system, .handler = cmd_clip },
             .{ .name = "echo", .help = "repeat your regrettable decisions", .usage = "echo <text...>", .category = .system, .handler = cmd_echo },
             .{ .name = "elephant", .help = "operational mascot diagnostics", .usage = "elephant", .category = .machine_identity, .handler = cmd_elephant },
             .{ .name = "exec", .help = "load a user program from the ESP and enter it at EL0", .usage = "exec [<file> [arg...]]", .category = .tasks_processes, .max_args = 1 + esp_exec.max_exec_args, .handler = cmd_exec },
@@ -305,11 +315,13 @@ fn ensure_registry() []const Command {
             .{ .name = "pci", .help = "enumerate PCI devices on the bus", .usage = "pci", .category = .memory_state, .handler = cmd_pci },
             .{ .name = "procs", .help = "process registry: image, address space, lifecycle, exit status", .usage = "procs", .category = .tasks_processes, .handler = cmd_procs },
             .{ .name = "random", .help = "print n random bytes from the seeded CSPRNG (hex)", .usage = "random [n]", .category = .system, .max_args = 1, .handler = cmd_random },
+            .{ .name = "resources", .help = "fixed-pool audit: scheduler tasks, process registry, windows, page-table carve-out, and per-process ring bounds", .usage = "resources", .category = .memory_state, .handler = cmd_resources },
             .{ .name = "reboot", .help = "restart the machine", .usage = "reboot", .category = .system, .handler = cmd_reboot },
             .{ .name = "repeat", .help = "repeat text, safely bounded", .usage = "repeat <count> <text...>", .category = .system, .min_args = 1, .handler = cmd_repeat },
             .{ .name = "roadpops", .help = "Road Pops framebuffer console: armed/dirty/present counters (the boot terminal on the screen)", .usage = "roadpops", .category = .graphics_input, .handler = cmd_roadpops },
             .{ .name = "screen", .help = "virtio-gpu transport + framebuffer: device DID, features, scanout, status, re-arm ('screen fill <rrggbb>' fills the framebuffer and flushes it to the scanout)", .usage = "screen [fill <rrggbb>]", .category = .graphics_input, .max_args = 2, .handler = cmd_screen },
             .{ .name = "settings", .help = "persistent configuration: `settings [list]`, `settings get <key>`, `settings set <key> <val>`, `settings reset`", .usage = "settings [list|get <key>|set <key> <val>|reset]", .category = .system, .max_args = 3, .handler = cmd_settings },
+            .{ .name = "sound", .help = "virtio-snd transport: device DID, class, status, control-queue state, device-config counts (jacks/streams/channel-maps), re-arm; stream-state control: 'sound volume <0-100>' and 'sound mute <on|off>'", .usage = "sound [volume <0-100> | mute <on|off>]", .category = .system, .min_args = 0, .max_args = 2, .handler = cmd_sound },
             .{ .name = "text", .help = "framebuffer text: text region, cursor, scrollback ('text put <string...>' renders + flushes to the scanout; 'text clear' clears)", .usage = "text [put <string...>|clear]", .category = .graphics_input, .min_args = 0, .max_args = 9, .handler = cmd_text },
             .{ .name = "shutdown", .help = "request power-off", .usage = "shutdown", .category = .system, .handler = cmd_shutdown },
             .{ .name = "spawn", .help = "spawn the lifecycle demo task", .usage = "spawn", .category = .tasks_processes, .handler = cmd_spawn },
@@ -1291,6 +1303,48 @@ fn cmd_echo(m: *Monitor, args: []const []const u8) ExecError {
         m.console.puts(arg);
     }
     m.console.puts("\n");
+    return .none;
+}
+
+/// Milestone fourteen card S1 (claim 0169): the terminal half of the shared
+/// clipboard. With no args it pastes the current contents (the EL1h read of
+/// the SAME buffer the slots 38/39 syscalls use); with args it joins them
+/// (space-separated, the `echo` shape) and stores the result — the
+/// bounded-copy proof from the shell. Truncation is honest: the staging
+/// buffer is the clipboard capacity, so an over-long paste stores exactly
+/// `clipboard.capacity` bytes and reports it.
+fn cmd_clip(m: *Monitor, args: []const []const u8) ExecError {
+    if (args.len == 0) {
+        var buf: [clipboard.capacity]u8 = undefined;
+        const n = clipboard.get(&buf);
+        if (n == 0) {
+            m.console.puts("clip: empty\n");
+        } else {
+            m.console.puts("clip: ");
+            m.console.puts(buf[0..n]);
+            m.console.puts("\n");
+        }
+        return .none;
+    }
+    var staging: [clipboard.capacity]u8 = undefined;
+    var len: usize = 0;
+    for (args, 0..) |arg, index| {
+        if (index > 0) {
+            if (len < staging.len) {
+                staging[len] = ' ';
+                len += 1;
+            }
+        }
+        for (arg) |ch| {
+            if (len >= staging.len) break;
+            staging[len] = ch;
+            len += 1;
+        }
+    }
+    const stored = clipboard.set(staging[0..len]);
+    m.console.puts("clip: stored ");
+    m.console.print_u64(stored);
+    m.console.puts(" bytes\n");
     return .none;
 }
 
@@ -4056,6 +4110,238 @@ fn cmd_screen_peek(m: *Monitor) ExecError {
     return .none;
 }
 
+/// `sound` — report the virtio-snd transport: the OBSERVED device ID and
+/// class (a differing DID is a claim-time finding, recorded as the
+/// hardware truth), the device status (0x0f = DRIVER_OK post-rearm; 0xff =
+/// never discovered), the control-queue state, and the device-config
+/// counts (jacks/streams/channel-maps — only when actually captured,
+/// never guessed). Honest without the device: `ready=no` with the failure
+/// reason.
+fn cmd_sound(m: *Monitor, args: []const []const u8) ExecError {
+    // Stream-state control (claim 9297): `sound volume <0-100>` sets the
+    // bounded playback gain; `sound mute <on|off>` silences the stream.
+    // Both are pure kernel state — they work without a device, and the
+    // report below shows them. `sound` with no args is the transport
+    // report.
+    if (args.len == 2) {
+        if (std.mem.eql(u8, args[0], "volume")) {
+            const vol = parseInt(args[1]) catch {
+                m.console.puts("sound: volume must be 0..100\n");
+                return .none;
+            };
+            if (vol > 100) {
+                m.console.puts("sound: volume must be 0..100\n");
+                return .none;
+            }
+            const set = virtio_snd.snd_set_volume(@intCast(vol));
+            m.console.puts("sound: volume=");
+            m.console.print_u64(set);
+            m.console.puts("\n");
+            return .none;
+        }
+        if (std.mem.eql(u8, args[0], "mute")) {
+            const on = std.mem.eql(u8, args[1], "on");
+            const off = std.mem.eql(u8, args[1], "off");
+            if (!on and !off) {
+                m.console.puts("sound: mute must be 'on' or 'off'\n");
+                return .none;
+            }
+            _ = virtio_snd.snd_set_mute(on);
+            m.console.puts(if (on) "sound: mute=on\n" else "sound: mute=off\n");
+            return .none;
+        }
+        print_usage(m, lookup("sound").?);
+        return .usage;
+    }
+    if (args.len > 2) {
+        print_usage(m, lookup("sound").?);
+        return .usage;
+    }
+    if (!virtio_snd.snd_ready) {
+        m.console.puts("sound: no virtio-snd device (");
+        m.console.puts(if (virtio_snd.snd_fail.len > 0) virtio_snd.snd_fail else "DID 0x1059 not found on bus 0");
+        m.console.puts(")\n");
+    } else {
+        m.console.puts("sound: ready\n");
+    }
+    m.console.puts("sound: did=");
+    m.console.print_hex(virtio_snd.snd_did);
+    m.console.puts(" cls=");
+    m.console.print_hex(virtio_snd.snd_class);
+    m.console.puts(" st=");
+    m.console.print_hex(virtio_snd.snd_status());
+    m.console.puts("\n");
+    m.console.puts("sound: feats=");
+    m.console.print_hex(virtio_snd.snd_feats);
+    m.console.puts(" qsz=");
+    m.console.print_hex(virtio_snd.queue_size);
+    m.console.puts(" qoff=");
+    m.console.print_hex(virtio_snd.snd_queue_notify_off);
+    m.console.puts(" common=");
+    m.console.print_hex(virtio_snd.snd_common);
+    m.console.puts(" notify=");
+    m.console.print_hex(virtio_snd.snd_notify);
+    m.console.puts(" devcfg=");
+    m.console.print_hex(virtio_snd.snd_devcfg);
+    m.console.puts("\n");
+    m.console.puts("sound: ctrl_armed=");
+    m.console.print_u64(if (virtio_snd.ctrl_armed) 1 else 0);
+    m.console.puts(" tx_armed=");
+    m.console.print_u64(if (virtio_snd.tx_armed) 1 else 0);
+    m.console.puts(" notify_mult=");
+    m.console.print_hex(virtio_snd.snd_notify_mult);
+    m.console.puts(" ctl_qoff=");
+    m.console.print_hex(virtio_snd.snd_queue_notify_off);
+    m.console.puts(" tx_qoff=");
+    m.console.print_hex(virtio_snd.tx_queue_notify_off);
+    m.console.puts(" fail_stage=");
+    m.console.print_u64(virtio_snd.ctl_fail_stage);
+    m.console.puts(" spins=");
+    m.console.print_u64(virtio_snd.ctl_spins);
+    m.console.puts(" used_idx=");
+    m.console.print_u64(virtio_snd.ctl_used_idx);
+    m.console.puts(" used_id=");
+    m.console.print_u64(virtio_snd.ctl_used_id);
+    m.console.puts(" used_len=");
+    m.console.print_u64(virtio_snd.ctl_used_len);
+    m.console.puts("\n");
+    m.console.puts("sound: cfg=");
+    if (virtio_snd.snd_cfg()) |cfg| {
+        m.console.puts("jacks=");
+        m.console.print_u64(cfg.jacks);
+        m.console.puts(" streams=");
+        m.console.print_u64(cfg.streams);
+        m.console.puts(" chmaps=");
+        m.console.print_u64(cfg.chmaps);
+    } else {
+        m.console.puts("not-captured (config read never landed)");
+    }
+    // Fresh post-exit read of the devcfg window (safe: the identity map
+    // covers snd_bar0..+0x10000 and the devcfg capability resolved inside
+    // it — 0x100001000 on the live runs). Pre-exit vs post-exit values
+    // are compared so a firmware-mapping artifact is distinguishable from
+    // the device's true report.
+    m.console.puts(" fresh=");
+    if (virtio_snd.snd_devcfg >= virtio_snd.snd_bar0 and
+        virtio_snd.snd_devcfg + virtio_snd.cfg_bytes < virtio_snd.snd_bar0 + 0x10000)
+    {
+        m.console.puts("jacks=");
+        m.console.print_u64(virtio_snd.snd_read32(virtio_snd.cfg_jacks_off));
+        m.console.puts(" streams=");
+        m.console.print_u64(virtio_snd.snd_read32(virtio_snd.cfg_streams_off));
+        m.console.puts(" chmaps=");
+        m.console.print_u64(virtio_snd.snd_read32(virtio_snd.cfg_chmaps_off));
+    } else {
+        m.console.puts("devcfg-outside-bar0 (not re-readable post-exit)");
+    }
+    // The bounded stream-state (claim 9297): vol=0..100, mute=0|1.
+    m.console.puts("\nsound: vol=");
+    m.console.print_u64(virtio_snd.stream_volume);
+    m.console.puts(" mute=");
+    m.console.print_u64(if (virtio_snd.stream_muted) 1 else 0);
+    m.console.puts("\n");
+    return .none;
+}
+
+/// `beep <freq> <ms>` — synthesize a sine and play it through the
+/// virtio-snd PCM path (claim 5877, milestone fifteen card A2). The full
+/// flow runs: PCM_INFO (the A1-finding workaround — VZ does not populate
+/// the config counts, so the stream is enumerated by asking) →
+/// SET_PARAMS → PREPARE → START → TX-queue submit → used-ring drain →
+/// STOP → RELEASE. Every step's status + the submitted/drained accounting
+/// are printed — the live gate's evidence. Honest without the device:
+/// `beep` refuses with a clear reason.
+fn cmd_beep(m: *Monitor, args: []const []const u8) ExecError {
+    if (args.len != 2) {
+        print_usage(m, lookup("beep").?);
+        return .usage;
+    }
+    const freq = parseInt(args[0]) catch {
+        err_prefix(m);
+        m.console.puts("beep: invalid frequency: ");
+        m.console.puts(args[0]);
+        m.console.puts("\n");
+        return .invalid_argument;
+    };
+    const ms = parseInt(args[1]) catch {
+        err_prefix(m);
+        m.console.puts("beep: invalid duration: ");
+        m.console.puts(args[1]);
+        m.console.puts("\n");
+        return .invalid_argument;
+    };
+    if (freq < 1 or freq > 20000 or ms < 1 or ms > 650) {
+        err_prefix(m);
+        m.console.puts("beep: freq must be 1..20000 Hz and ms 1..650\n");
+        return .invalid_argument;
+    }
+    if (!virtio_snd.snd_ready) {
+        err_prefix(m);
+        m.console.puts("beep: no virtio-snd device (");
+        m.console.puts(if (virtio_snd.snd_fail.len > 0) virtio_snd.snd_fail else "DID 0x1059 not found on bus 0");
+        m.console.puts(")\n");
+        return .none;
+    }
+    const st = virtio_snd.snd_beep(@intCast(freq), @intCast(ms));
+    m.console.puts("beep: reply=");
+    var ri: usize = 0;
+    while (ri < 9) : (ri += 1) {
+        if (ri > 0) m.console.puts(" ");
+        m.console.print_hex(std.mem.readInt(u32, virtio_snd.ctl_reply_buf[ri * 4 ..][0..4], .little));
+    }
+    m.console.puts("\n");
+    m.console.puts("beep: info st=");
+    m.console.print_hex(virtio_snd.beep_info_status);
+    m.console.puts(" formats=");
+    m.console.print_hex(virtio_snd.beep_obs_formats);
+    m.console.puts(" rates=");
+    m.console.print_hex(virtio_snd.beep_obs_rates);
+    m.console.puts(" ch=");
+    m.console.print_u64(virtio_snd.beep_obs_ch_min);
+    m.console.puts("..");
+    m.console.print_u64(virtio_snd.beep_obs_ch_max);
+    m.console.puts(" dir=");
+    m.console.print_u64(virtio_snd.beep_obs_dir);
+    m.console.puts("\n");
+    m.console.puts("beep: params fmt=");
+    m.console.print_u64(virtio_snd.beep_format);
+    m.console.puts(" rate=");
+    m.console.print_u64(virtio_snd.beep_rate);
+    m.console.puts(" ch=");
+    m.console.print_u64(virtio_snd.beep_channels);
+    m.console.puts(" st=");
+    m.console.print_hex(virtio_snd.beep_params_status);
+    m.console.puts(" prepare=");
+    m.console.print_hex(virtio_snd.beep_prepare_status);
+    m.console.puts(" start=");
+    m.console.print_hex(virtio_snd.beep_start_status);
+    m.console.puts("\n");
+    m.console.puts("beep: tx submitted=");
+    m.console.print_u64(virtio_snd.beep_submitted);
+    m.console.puts(" drained=");
+    m.console.print_u64(virtio_snd.beep_drained);
+    m.console.puts(" frames=");
+    m.console.print_u64(virtio_snd.beep_frames);
+    m.console.puts(" pcm_status=");
+    m.console.print_hex(virtio_snd.beep_last_status);
+    m.console.puts(" latency=");
+    m.console.print_u64(virtio_snd.beep_last_latency);
+    m.console.puts("\n");
+    m.console.puts("beep: stop=");
+    m.console.print_hex(virtio_snd.beep_stop_status);
+    m.console.puts(" release=");
+    m.console.print_hex(virtio_snd.beep_release_status);
+    m.console.puts("\n");
+    if (st != virtio_snd.S_OK) {
+        m.console.puts("beep: FAILED (");
+        m.console.puts(if (virtio_snd.beep_fail.len > 0) virtio_snd.beep_fail else "unknown");
+        m.console.puts(")\n");
+    } else {
+        m.console.puts("beep: ok\n");
+    }
+    return .none;
+}
+
 /// `text` — report the framebuffer text layer: the region (rows/cols at
 /// the cell size), the cursor (row/col), the scrollback depth, and the
 /// colors. `text put <string...>` renders the string and pushes it to
@@ -4185,6 +4471,15 @@ fn cmd_exec(m: *Monitor, args: []const []const u8) ExecError {
             for (head, 0..) |byte, i| head_value |= @as(u64, byte) << @intCast(56 - i * 8);
             m.console.puts(" head=");
             m.console.print_hex(head_value);
+            // Claim 3805 (milestone sixteen C1): a segmented image's data+bss
+            // region is reported so the live gate can assert the kernel's own
+            // page accounting is exact. Flat DSK1 images omit it (byte-identical).
+            if (info.data_len > 0) {
+                m.console.puts(" data=");
+                m.console.print_hex(info.data_len);
+                m.console.puts(" datapages=");
+                m.console.print_u64(info.data_pages);
+            }
             m.console.puts("\n");
             return .none;
         },
@@ -4303,9 +4598,10 @@ fn cmd_addrspaces(m: *Monitor, args: []const []const u8) ExecError {
     m.console.print_hex(mmu.user_root_phys());
     m.console.puts("\n");
     // Claim 0826: the per-process-root budget — table pages consumed out of
-    // the fixed 256-page carve-out. Card 3g (claim 5795): FOUR live user
-    // roots (~15 each + leaf tables) stay well inside it; the scale live
-    // gate reads this line for the headroom assertion.
+    // the fixed 512-page carve-out (grown by claim 2714 for the M16
+    // composition). Card 3g (claim 5795): FOUR live user roots (~15 each +
+    // leaf tables) stay well inside it; the scale live gate reads this line
+    // for the headroom assertion.
     m.console.puts("addrspaces: tables=");
     m.console.print_u64(@intCast(mmu.tables_used()));
     m.console.puts("/");
@@ -4325,6 +4621,53 @@ fn cmd_addrspaces(m: *Monitor, args: []const []const u8) ExecError {
     m.console.puts(" el0_device=");
     m.console.print_u64(leaves.el0_device_leaves);
     m.console.puts("\n");
+    return .none;
+}
+
+// ---------------------------------------------------------------------------
+// Resources command (milestone sixteen C3, claim 0339)
+// ---------------------------------------------------------------------------
+
+/// The fixed-pool audit: one line per bounded kernel pool with its live
+/// occupancy vs its comptime bound. This is the C3 "measure, then grow
+/// only what the apps exhaust" evidence — the live gate reads these lines
+/// BEFORE filling the pool and AFTER, so the growth is pinned in the serial
+/// log rather than asserted from code alone. The pools left bounded
+/// (windows, mailbox rings, event queues, file handles, app timers, the
+/// single TCP client) are printed with their bounds so the audit records
+/// that they were checked and NOT grown (no demo app exhausts them).
+fn cmd_resources(m: *Monitor, args: []const []const u8) ExecError {
+    _ = args;
+    const s = scheduler.stats();
+    m.console.puts("resources: tasks=");
+    m.console.print_u64(@intCast(s.count));
+    m.console.puts("/");
+    m.console.print_u64(@intCast(scheduler.max_tasks));
+    m.console.puts(" zombies=");
+    m.console.print_u64(@intCast(s.zombies));
+    m.console.puts("\n");
+    m.console.puts("resources: procs=");
+    m.console.print_u64(@intCast(process.count()));
+    m.console.puts("/");
+    m.console.print_u64(@intCast(process.max_processes));
+    m.console.puts("\n");
+    m.console.puts("resources: windows=");
+    m.console.print_u64(@intCast(driving_award.count()));
+    m.console.puts("/");
+    m.console.print_u64(@intCast(driving_award.max_windows));
+    m.console.puts("\n");
+    m.console.puts("resources: tables=");
+    m.console.print_u64(@intCast(mmu.tables_used()));
+    m.console.puts("/");
+    m.console.print_u64(@intCast(mmu.tables_capacity()));
+    m.console.puts("\n");
+    m.console.puts("resources: events=");
+    m.console.print_u64(@intCast(events.max_events));
+    m.console.puts(" mbox=");
+    m.console.print_u64(@intCast(mailbox.max_messages));
+    m.console.puts(" fds=");
+    m.console.print_u64(@intCast(file_table.max_handles_per_process));
+    m.console.puts(" timers=1 tcp=1\n");
     return .none;
 }
 
@@ -4615,7 +4958,9 @@ const MapFixture = struct {
 };
 
 const TestEnv = struct {
-    mock: console.MockConsole(4096) = .{},
+    // 8192: the `help` listing of the full command registry (46 commands,
+    // milestone fifteen card A1 added `sound`) must fit with its footer.
+    mock: console.MockConsole(8192) = .{},
     machine: MockMachineControl = .{},
     fixture: MapFixture = undefined,
 
@@ -5797,13 +6142,40 @@ test "monitor: tasks is registered and reports the deterministic host state" {
     _ = scheduler.register_user(0, 0);
     try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"tasks"}));
     try std.testing.expectEqualStrings(
-        "tasks: enabled=0 current=0 switches=0 pool=4/7 zombies=0\n" ++
+        "tasks: enabled=0 current=0 switches=0 pool=4/11 zombies=0\n" ++
             "  shell    saves=0 resumes=0 advances=0 state=ready\n" ++
             "  worker   saves=0 resumes=0 advances=0 state=ready\n" ++
             "  user-el0 saves=0 resumes=0 advances=0 state=ready\n" ++
             "  idle     saves=0 resumes=0 advances=0 state=ready\n",
         env.mock.contents(),
     );
+}
+
+test "monitor: resources audits the fixed pools at their bounds (C3 claim 0339)" {
+    var env = TestEnv.init();
+    var mon = env.monitor();
+    try std.testing.expect(lookup("resources") != null);
+    try std.testing.expectEqualStrings("fixed-pool audit: scheduler tasks, process registry, windows, page-table carve-out, and per-process ring bounds", lookup("resources").?.help);
+    // Reset the pools the way kernel_main + a fresh boot do (scheduler.init
+    // also clears the process registry; mmu.reset clears the table cursor),
+    // then register the same shell/worker/user shape the `tasks` test uses.
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0);
+    _ = scheduler.register_user(0, 0);
+    mmu.reset();
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"resources"}));
+    const out = env.mock.contents();
+    // The occupancy lines are exact (4 tasks, 0 procs, 0 tables); the
+    // windows line only asserts the shape (other tests in this binary may
+    // have armed the window manager, leaving a non-zero win_count).
+    try std.testing.expect(std.mem.indexOf(u8, out, "resources: tasks=4/11 zombies=0\n") != null);
+    // register_user also registers the boot payload as a PROCESS (claim
+    // 3848), so the registry holds exactly one descriptor here.
+    try std.testing.expect(std.mem.indexOf(u8, out, "resources: procs=1/16\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "resources: windows=") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "/8\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "resources: tables=0/512\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "resources: events=16 mbox=8 fds=8 timers=1 tcp=1\n") != null);
 }
 
 test "monitor: procs reports the process table with lifecycle and exit status" {
@@ -5916,7 +6288,7 @@ test "monitor: syscalls is registered and reports deterministic rows" {
     try std.testing.expectEqualStrings("numbered syscall table and counters", lookup("syscalls").?.help);
     try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"syscalls"}));
     try std.testing.expectEqualStrings(
-        "syscalls: slots=64 implemented=38\n" ++
+        "syscalls: slots=64 implemented=47\n" ++
             "  0 sys_ping calls=0\n" ++
             "  1 sys_write calls=0\n" ++
             "  2 sys_yield calls=0\n" ++
@@ -5954,9 +6326,47 @@ test "monitor: syscalls is registered and reports deterministic rows" {
             "  34 sys_file_delete calls=0\n" ++
             "  35 sys_file_rename calls=0\n" ++
             "  36 sys_file_truncate calls=0\n" ++
-            "  37 sys_file_free calls=0\n",
+            "  37 sys_file_free calls=0\n" ++
+            "  38 sys_clipboard_set calls=0\n" ++
+            "  39 sys_clipboard_get calls=0\n" ++
+            "  40 sys_timer_set calls=0\n" ++
+            "  41 sys_timer_cancel calls=0\n" ++
+            "  42 sys_audio_info calls=0\n" ++
+            "  43 sys_audio_play calls=0\n" ++
+            "  44 sys_audio_volume calls=0\n" ++
+            "  45 sys_audio_mute calls=0\n" ++
+            "  46 sys_win_fill_batch calls=0\n",
         env.mock.contents(),
     );
+}
+
+test "monitor: clip copies and pastes the shared clipboard (claim 0169)" {
+    clipboard.init();
+    var env = TestEnv.init();
+    var mon = env.monitor();
+    try std.testing.expect(lookup("clip") != null);
+    try std.testing.expectEqualStrings("copy/paste the shared kernel clipboard ('clip <text...>' sets it, 'clip' prints it)", lookup("clip").?.help);
+
+    // Empty clipboard pastes the honest empty marker.
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"clip"}));
+    try std.testing.expectEqualStrings("clip: empty\n", env.mock.contents());
+
+    // Copy joins args space-separated and stores them.
+    env.mock.reset();
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "clip", "hello", "world" }));
+    try std.testing.expectEqualStrings("clip: stored 11 bytes\n", env.mock.contents());
+
+    // Paste reads the SAME bytes back.
+    env.mock.reset();
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"clip"}));
+    try std.testing.expectEqualStrings("clip: hello world\n", env.mock.contents());
+
+    // A new copy overwrites; an empty-arg copy clears.
+    env.mock.reset();
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "clip", "second" }));
+    env.mock.reset();
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"clip"}));
+    try std.testing.expectEqualStrings("clip: second\n", env.mock.contents());
 }
 
 test "monitor: uaccess command is honest on a host process (no vectors)" {
@@ -6155,4 +6565,49 @@ test "monitor: net dns command validation and execution" {
     env.mock.reset();
     try std.testing.expectEqual(ExecError.invalid_argument, exec(&mon, &.{ "net", "dns", "example.com", "999.0.0.1" }));
     try std.testing.expect(std.mem.indexOf(u8, env.mock.contents(), "error: invalid server address: 999.0.0.1\n") != null);
+}
+
+test "monitor: sound volume/mute drive the bounded stream state (claim 9297)" {
+    var env = TestEnv.init();
+    var mon = env.monitor();
+    try std.testing.expect(lookup("sound") != null);
+    try std.testing.expectEqualStrings("sound [volume <0-100> | mute <on|off>]", lookup("sound").?.usage);
+
+    // Defaults: full volume, unmuted.
+    virtio_snd.stream_volume = 100;
+    virtio_snd.stream_muted = false;
+
+    // `sound volume <0-100>` sets the bounded gain and echoes it.
+    env.mock.reset();
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "sound", "volume", "30" }));
+    try std.testing.expectEqualStrings("sound: volume=30\n", env.mock.contents());
+    try std.testing.expectEqual(@as(u8, 30), virtio_snd.stream_volume);
+
+    // Out-of-range is refused honestly (no silent clamping).
+    env.mock.reset();
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "sound", "volume", "101" }));
+    try std.testing.expectEqualStrings("sound: volume must be 0..100\n", env.mock.contents());
+    try std.testing.expectEqual(@as(u8, 30), virtio_snd.stream_volume);
+
+    // `sound mute on|off` sets the flag.
+    env.mock.reset();
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "sound", "mute", "on" }));
+    try std.testing.expectEqualStrings("sound: mute=on\n", env.mock.contents());
+    try std.testing.expect(virtio_snd.stream_muted);
+    env.mock.reset();
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "sound", "mute", "off" }));
+    try std.testing.expectEqualStrings("sound: mute=off\n", env.mock.contents());
+    try std.testing.expect(!virtio_snd.stream_muted);
+
+    // A bad subcommand is a usage error.
+    try std.testing.expectEqual(ExecError.usage, exec(&mon, &.{ "sound", "bogus", "1" }));
+
+    // The `sound` report shows the stream state (works without a device).
+    env.mock.reset();
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"sound"}));
+    try std.testing.expect(std.mem.indexOf(u8, env.mock.contents(), "sound: vol=30 mute=0\n") != null);
+
+    // Restore the honest default.
+    virtio_snd.stream_volume = 100;
+    virtio_snd.stream_muted = false;
 }

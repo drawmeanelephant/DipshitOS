@@ -167,10 +167,10 @@ delta matching the per-issue estimates (1,737 B).
 
 #### D3.2. Headroom
 
-The current kernel `.bss = 6,119,552 B` and is dominated by:
+The current kernel `.bss` (as of post-M16 main) is dominated by:
 
-- `mmu.table_storage` (`kernel/src/mmu.zig`): 256 × 512 × 8 = 1 MiB
-  fixed BSS for the page-table carve-out.
+- `mmu.table_storage` (`kernel/src/mmu.zig`): 512 × 512 × 8 = 2 MiB
+  fixed BSS for the page-table carve-out (doubled from 1 MiB in M16 C4).
 - `virtio_gpu.gpu_fb` (`kernel/src/virtio_gpu.zig`): 1280 × 720 × 4 =
   3.52 MiB scanout framebuffer (`align(4096)`).
 
@@ -179,6 +179,12 @@ independent data BSS, not page-table pages or scanout pixels). The
 1,737 B delta is **comfortably absorbed by existing `.bss` headroom**
 without affecting the page-table carve-out or any other layout
 constraint. No ADR 0006 amendment is required.
+
+**Budget update (2026-08-20):** the baseline grew from 6,119,552 B
+(pre-M15/M16) to 9,787,576 B (post-M16) due to the page-table
+carve-out doubling (256→512 pages) and M15/M16 kernel additions.
+The CI budget was raised from 7,340,032 B (7.0 MiB) to
+11,534,336 B (11.0 MiB), giving 1,746,760 B (~1.7 MiB) of headroom.
 
 ### D4. ABI contract under reservation
 

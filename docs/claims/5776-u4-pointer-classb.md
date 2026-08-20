@@ -4,7 +4,7 @@
 - **Prompt / plan:** issue #151 — finish the class-B CG pointer gate
 - **Depends on:** U4 (claim 4993, ⛔), the CG gate (claim 3692), the class-C
   gate (claim 9015), U5 (claim 0935)
-- **Status:** 🔄 in progress
+- **Status:** ✅ done (2026-08-16) — gate fixes landed in PR #174; exercised WITH trust (ptr-reports=0, confirming the claim-4769 activation wall); U4 stays class-C (claim 9015)
 
 ## Notes
 

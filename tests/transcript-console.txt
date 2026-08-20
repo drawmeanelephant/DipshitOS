@@ -21,6 +21,7 @@ memory / machine state
   mem         summarize the EFI memory map
   pages       physical page allocator pool
   pci         enumerate PCI devices on the bus
+  resources   fixed-pool audit: scheduler tasks, process registry, windows, page-table carve-out, and per-process ring bounds
   timer       interrupt controller + timer status
   uaccess     user-memory copy diagnostics (valid, fault, recovery)
 tasks / processes
@@ -47,13 +48,16 @@ graphics / input
   usb         XHCI host controller: `usb` transport report, `usb devices` enumerated HID devices, `usb report` last HID report
   dui         Driving Award window manager: registry (with owner pids), z-order, focus, hit-testing ('dui focus <n>' focuses; 'dui raise <n>' raises; 'dui move <n> <x> <y>' moves a user window; 'dui close <n>' releases a user window; 'dui list <pid>' filters by owner; 'dui hit <x> <y>' hit-tests; 'dui cycle' cycles focus like Alt+Tab)
 system
+  beep        synthesize + play a sine through the virtio-snd PCM path ('beep <freq> <ms>' — reports the full control flow + submit/drain accounting)
   clear       clean up the crime scene
+  clip        copy/paste the shared kernel clipboard ('clip <text...>' sets it, 'clip' prints it)
   echo        repeat your regrettable decisions
   help        grouped command catalog and per-command/per-topic help
   random      print n random bytes from the seeded CSPRNG (hex)
   reboot      restart the machine
   repeat      repeat text, safely bounded
   settings    persistent configuration: `settings [list]`, `settings get <key>`, `settings set <key> <val>`, `settings reset`
+  sound       virtio-snd transport: device DID, class, status, control-queue state, device-config counts (jacks/streams/channel-maps), re-arm; stream-state control: 'sound volume <0-100>' and 'sound mute <on|off>'
   shutdown    request power-off
 type 'help <command>' for details on a single command.
 type 'help <topic>' for a topic page (networking, windows, storage, graphics).
@@ -87,7 +91,7 @@ pages selftest: free ok
 pages selftest: alloc 1153 -> none (out of memory)
 pages selftest: ok free=0x0000000000000480
 dipshit> tasks
-tasks: enabled=0 current=0 switches=0 pool=4/7 zombies=0
+tasks: enabled=0 current=0 switches=0 pool=4/11 zombies=0
   shell    saves=0 resumes=0 advances=0 state=ready
   worker   saves=0 resumes=0 advances=0 state=ready
   user-el0 saves=0 resumes=0 advances=0 state=ready

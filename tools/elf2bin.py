@@ -31,7 +31,12 @@ import sys
 PT_LOAD = 1
 EM_AARCH64 = 183
 MAGIC = 0x314B5344  # "DSK1"
+MAGIC_SEGMENTS = 0x334B5344  # "DSK3" — segmented user image (milestone 16 C1)
 HEADER_SIZE = 24
+HEADER_SIZE_SEGMENTS = 48
+
+PF_X = 1
+PF_W = 2
 
 
 def read_header(data):
@@ -40,7 +45,26 @@ def read_header(data):
             "entry_offset": entry_offset, "image_size": image_size}
 
 
-def build(input_path, output_path):
+def _parse_loads(data):
+    """Return the list of (vaddr, p_offset, filesz, memsz, p_flags) PT_LOAD
+    segments in the ELF, or None on a malformed header."""
+    e_phoff = struct.unpack_from("<Q", data, 32)[0]
+    e_phentsize = struct.unpack_from("<H", data, 54)[0]
+    e_phnum = struct.unpack_from("<H", data, 56)[0]
+    loads = []
+    for i in range(e_phnum):
+        off = e_phoff + i * e_phentsize
+        if struct.unpack_from("<I", data, off)[0] != PT_LOAD:
+            continue
+        p_flags = struct.unpack_from("<I", data, off + 4)[0]
+        p_offset = struct.unpack_from("<Q", data, off + 8)[0]
+        p_vaddr = struct.unpack_from("<Q", data, off + 16)[0]
+        p_filesz, p_memsz = struct.unpack_from("<QQ", data, off + 32)
+        loads.append((p_vaddr, p_offset, p_filesz, p_memsz, p_flags))
+    return loads
+
+
+def build(input_path, output_path, segments=False):
     with open(input_path, "rb") as f:
         data = f.read()
 
@@ -57,33 +81,28 @@ def build(input_path, output_path):
         return 1
 
     e_entry = struct.unpack_from("<Q", data, 24)[0]
-    e_phoff = struct.unpack_from("<Q", data, 32)[0]
-    e_phentsize = struct.unpack_from("<H", data, 54)[0]
-    e_phnum = struct.unpack_from("<H", data, 56)[0]
-
-    loads = []
-    for i in range(e_phnum):
-        off = e_phoff + i * e_phentsize
-        if struct.unpack_from("<I", data, off)[0] != PT_LOAD:
-            continue
-        p_vaddr = struct.unpack_from("<Q", data, off + 16)[0]
-        p_offset = struct.unpack_from("<Q", data, off + 8)[0]
-        p_filesz, p_memsz = struct.unpack_from("<QQ", data, off + 32)
-        loads.append((p_vaddr, p_offset, p_filesz, p_memsz))
+    loads = _parse_loads(data)
     if not loads:
         print("elf2bin: %s has no PT_LOAD segments" % input_path, file=sys.stderr)
         return 1
 
     # Lay the segments out relative to the lowest vaddr, preserving the
     # linker's relative layout exactly (gaps stay zero-filled).
-    base = min(v for v, _, _, _ in loads)
-    end = max(v + m for v, _, _, m in loads)
+    base = min(v for v, _, _, _, _ in loads)
+    end = max(v + m for v, _, _, m, _ in loads)
     blob = bytearray(end - base)
-    for vaddr, poff, fsz, memsz in loads:
+    for vaddr, poff, fsz, memsz, _pflags in loads:
         rel = vaddr - base
         blob[rel:rel + fsz] = data[poff:poff + fsz]
         # (memsz > fsz tail stays zero: BSS)
 
+    if segments:
+        return _build_segmented(input_path, output_path, data, e_entry,
+                                loads, base, blob)
+    return _build_flat(input_path, output_path, e_entry, base, blob, loads)
+
+
+def _build_flat(input_path, output_path, e_entry, base, blob, loads):
     # entry_offset is file-relative (the loader jumps to base + entry_offset,
     # and the loadable content starts after the 24-byte header).
     entry_offset = HEADER_SIZE + e_entry - base
@@ -104,6 +123,66 @@ def build(input_path, output_path):
     return 0
 
 
+def _build_segmented(input_path, output_path, data, e_entry, loads, base, blob):
+    """Emit the segmented DSK3 user image (milestone 16 C1): a 48-byte header
+    carrying the RX text size, the initialized RW data size, and the total RW
+    (data + zeroed BSS) size, followed by [text+rodata][data] (the BSS tail is
+    implicit zero-fill, never stored). The loader maps text EL0-RO+PXN and the
+    data region EL0-RW+UXN+PXN."""
+    # The first writable segment's vaddr is the text/data boundary (the
+    # linker script page-aligns .data, so `text_size` is page-aligned).
+    data_start = end_of = base
+    for v, _, _, m, _ in loads:
+        end_of = max(end_of, v + m)
+    writable_starts = [v for v, _, _, _, fl in loads if fl & PF_W]
+    if writable_starts:
+        data_start = min(writable_starts)
+    else:
+        data_start = end_of
+
+    text_size = data_start - base
+    data_file_size = 0
+    data_mem_size = 0
+    for vaddr, poff, fsz, memsz, fl in loads:
+        if not (fl & PF_W):
+            continue
+        rel = vaddr - base
+        # data content is stored in the blob right after the text region.
+        if rel < text_size:
+            print("elf2bin: %s writable segment overlaps the RX region"
+                  % input_path, file=sys.stderr)
+            return 1
+        data_file_size += fsz
+        data_mem_size += memsz
+
+    if text_size == 0 or text_size % 4096 != 0:
+        print("elf2bin: %s text_size %#x is not page-aligned "
+              "(align .data to 4096 in the linker script)"
+              % (input_path, text_size), file=sys.stderr)
+        return 1
+
+    entry_offset = HEADER_SIZE_SEGMENTS + e_entry - base
+    if entry_offset < HEADER_SIZE_SEGMENTS or entry_offset >= HEADER_SIZE_SEGMENTS + text_size:
+        print("elf2bin: entry offset %#x outside the RX region" % entry_offset,
+              file=sys.stderr)
+        return 1
+
+    image_size = HEADER_SIZE_SEGMENTS + text_size + data_file_size
+    header = struct.pack("<IIQQQQQ", MAGIC_SEGMENTS, 0, entry_offset, image_size,
+                         text_size, data_file_size, data_mem_size)
+    content = bytes(blob[:text_size + data_file_size])
+    with open(output_path, "wb") as f:
+        f.write(header)
+        f.write(content)
+
+    print("elf2bin: %s -> %s: entry_offset=0x%x image_size=%d "
+          "text=%d data=%d (bss tail %d) from %d PT_LOAD segment(s)"
+          % (input_path, output_path, entry_offset, image_size,
+             text_size, data_file_size, data_mem_size - data_file_size,
+             len(loads)))
+    return 0
+
+
 def main(argv):
     # argv is sys.argv[1:] (script name already removed).
     if len(argv) == 2 and argv[0] == "--info":
@@ -117,17 +196,21 @@ def main(argv):
         print("kernel image %s: magic=0x%08x flags=%d entry_offset=0x%x "
               "image_size=%d" % (argv[1], h["magic"], h["flags"],
                                  h["entry_offset"], h["image_size"]))
-        if h["magic"] != MAGIC:
+        if h["magic"] not in (MAGIC, MAGIC_SEGMENTS):
             print("elf2bin: WARNING: magic mismatch (not a DipshitOS kernel "
                   "image?)", file=sys.stderr)
             return 1
         return 0
 
+    segments = False
+    if argv and argv[0] == "--segments":
+        segments = True
+        argv = argv[1:]
     if len(argv) != 2:
-        print("usage: elf2bin.py INPUT.elf OUTPUT.bin | elf2bin.py --info FILE.bin",
-              file=sys.stderr)
+        print("usage: elf2bin.py [--segments] INPUT.elf OUTPUT.bin | "
+              "elf2bin.py --info FILE.bin", file=sys.stderr)
         return 2
-    return build(argv[0], argv[1])
+    return build(argv[0], argv[1], segments=segments)
 
 
 if __name__ == "__main__":

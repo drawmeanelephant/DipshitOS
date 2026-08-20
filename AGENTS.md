@@ -14,19 +14,26 @@ These rules bind any AI agent or human contributor working in this project.
 
 ## Current milestone
 
-Milestones zero through seven are implemented and closed (boot pipeline;
+Milestones zero through twelve are implemented and closed (boot pipeline;
 kernel handoff; kernel proper — VZ serial gate since claim 1517;
-`m1.5-interactive-monitor`; `m3-userspace` — allocator, GIC + timer PPI
-(claim 9187), scheduler, EL0 + SVC, syscalls, uaccess; `m4-processes`;
-milestone five networking — virtio-net through DHCP + TCP (claims 1373…
-5357); milestone six graphics — Road Pops + the Driving Award window
-manager (claims 6053…0487); milestone seven input — USB XHCI + HID
-(claims 4272…6050)). The current stream is **milestone eight — usability:
-human interface (ADR 0008)** — cards U0–U3 (help catalog, shell editing,
-error/usage contract) are DONE 2026-08-14 (claims 8938/3275/1809/1511);
-U4–U8 (pointer focus, window HIG, first-boot, sysinfo, settings) are the
-next cards per `docs/march-m8.md`. For the canonical, always-current
-answer to "where are we, and what's next", read `docs/status.md`.
+`m1.5-interactive-monitor`; `m3-userspace`; `m4-processes`; milestone five
+networking — virtio-net through TCP; milestone six graphics — Road Pops +
+Driving Award; milestone seven input — USB XHCI + HID; milestone eight
+usability — ADR 0008; milestone nine app events — ADR 0009; milestone ten
+userland storage — ADR 0010; milestone eleven desktop platform — ADR 0011;
+milestone twelve userland network applications — ADR 0012). Milestone
+thirteen — **files & applications** — has all four cards live 2026-08-16
+(claims 5801/8877/4742/4046): the mutating filesystem seam (ADR 0007
+slots 34–37), the `APPS.TXT` application manifest, the `FILE.BIN` file
+browser, and manifest-driven desktop composition. The current stream is
+**milestone fourteen — shared user services** (planned 2026-08-16,
+issues #175–#178, per `docs/march-m14.md`): S1 clipboard (slots 38–39),
+S2 app timers (slots 40–41), S3 composition capstone, S4
+security/isolation hardening. Known open threads: M8 U4 pointer focus is
+class-C-only for its live proof (issue #151, claim 4769), and the
+synthesized keyboard seam reports `events=0` (issue #179). For the
+canonical, always-current answer to "where are we, and what's next", read
+`docs/status.md`.
 
 ## Milestone scope rules
 

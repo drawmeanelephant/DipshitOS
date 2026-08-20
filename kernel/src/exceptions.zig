@@ -132,6 +132,27 @@ pub fn set_svc_dispatcher(d: SvcDispatcher) void {
     svc_dispatcher = d;
 }
 
+/// Milestone sixteen C2 (claim 8403): the EL0-fault seam. Called for a
+/// synchronous exception taken FROM EL0 (SPSR.M == 0) that is NOT an SVC and
+/// NOT a recoverable uaccess fault — a hostile program stepping off its
+/// stack into a guard page, executing from data, or touching unmapped memory.
+/// The registered handler reaps the faulting process (status
+/// `scheduler.reserved_fault_status`) and stages the next task, so the
+/// machine never parks on a user fault. Host tests can register a plain
+/// function and assert dispatch behavior.
+pub const FaultDispatcher = *const fn (esr: u64, far: u64) void;
+
+var fault_dispatcher: ?FaultDispatcher = null;
+
+pub fn set_fault_dispatcher(d: FaultDispatcher) void {
+    fault_dispatcher = d;
+}
+
+/// True when a sync exception originated at EL0t (SPSR.M[3:0] == 0).
+pub fn is_from_el0(spsr: u64) bool {
+    return (spsr & 0xf) == 0;
+}
+
 /// The vector-frame pointer the IRQ stub must restore from when the
 /// dispatcher chain returns (claim 5275). Set to the interrupted task's
 /// frame at IRQ entry; the scheduler may rewrite it to the next task's
@@ -486,6 +507,19 @@ export fn exc_dispatch(
     // exception falls through to the normal report/park path.
     if (kind == kind_sync and uaccess.try_recover(esr, elr)) {
         return .{ .frame = @intFromPtr(frame), .sp_el0 = resume_sp_el0 };
+    }
+    // Milestone sixteen C2 (claim 8403): a synchronous exception from EL0
+    // that is not an SVC and not a recoverable uaccess fault is a hostile
+    // program touching a guard page / unmapped memory / a non-executable
+    // region. The fault dispatcher reaps the faulting process and stages the
+    // next task through the same resume_frame seam the exit path uses — the
+    // shell survives and the machine never parks on a user fault. EL1h
+    // faults (kernel bugs) still fall through to the report/park path below.
+    if (kind == kind_sync and is_from_el0(spsr)) {
+        if (fault_dispatcher) |d| {
+            d(esr, far);
+            return .{ .frame = resume_frame, .sp_el0 = resume_sp_el0 };
+        }
     }
     const will_resume = should_resume(kind, resume_armed);
     var buf: [512]u8 = undefined;
@@ -967,6 +1001,16 @@ fn test_svc_handler(frame: *VectorFrame, immediate: u16) bool {
     return true;
 }
 
+var test_fault_esr: u64 = 0;
+var test_fault_far: u64 = 0;
+var test_fault_resume_frame: ?*VectorFrame = null;
+
+fn test_fault_handler(esr: u64, far: u64) void {
+    test_fault_esr = esr;
+    test_fault_far = far;
+    if (test_fault_resume_frame) |selected| resume_frame = @intFromPtr(selected);
+}
+
 test "exceptions: ec_name decodes known and unknown classes" {
     try std.testing.expectEqualStrings("unknown-reason", ec_name(0x00000000));
     try std.testing.expectEqualStrings("unknown-reason", ec_name(0x00000000)); // udf
@@ -1020,6 +1064,29 @@ test "exceptions: only AArch64 SVC from EL0t reaches the SVC seam" {
     try std.testing.expect(!is_svc64_from_el0(kind_irq, svc_esr, 0x0));
     try std.testing.expect(!is_svc64_from_el0(kind_sync, svc_esr, 0x5));
     try std.testing.expect(!is_svc64_from_el0(kind_sync, 0, 0x0));
+}
+
+test "exceptions: is_from_el0 matches SPSR M field 0x0 only" {
+    try std.testing.expect(is_from_el0(0x0));
+    try std.testing.expect(!is_from_el0(0x4));
+    try std.testing.expect(!is_from_el0(0x5));
+    try std.testing.expect(!is_from_el0(0xd));
+}
+
+test "exceptions: an EL0 sync fault reaches the fault dispatcher and resumes its frame" {
+    var frame: VectorFrame = [_]u64{0} ** vector_frame_slots;
+    var selected: VectorFrame = [_]u64{0} ** vector_frame_slots;
+    test_fault_esr = 0;
+    test_fault_far = 0;
+    test_fault_resume_frame = &selected;
+    set_fault_dispatcher(test_fault_handler);
+    // A data-abort-lower (EC 0x24) from EL0 (SPSR.M == 0) at FAR 0x7fff_f000.
+    const esr: u64 = 0x24 << 26;
+    const result = exc_dispatch(&frame, esr, 0x7fff_f000, 0x4000, 0, kind_sync);
+    try std.testing.expectEqual(esr, test_fault_esr);
+    try std.testing.expectEqual(@as(u64, 0x7fff_f000), test_fault_far);
+    try std.testing.expectEqual(@intFromPtr(&selected), result.frame);
+    test_fault_resume_frame = null;
 }
 
 test "exceptions: SVC dispatcher mutates x0 and resumes the same EL0 frame" {

@@ -5,6 +5,14 @@
 //         [--console] [--debug-input] [--dump-marker <file>]
 //         [--nvram-console <file>] [--script <file>]
 //         [--script-after <text>] [--script-expect <text>] [--custom-virtio]
+//         [--sound] (milestone fifteen card A1, claim 6140: attach one
+//          VZVirtioSoundDeviceConfiguration with one
+//          VZVirtioSoundDeviceOutputStreamConfiguration (the PCM output
+//          stream) carrying a VZHostAudioOutputStreamSink, so the guest's
+//          virtio-snd device is discovered and its output can play on the
+//          host speakers. OFF by default: without the flag
+//          config.soundDevices stays [] — every existing gate is
+//          byte-identical.)
 //         [--script2 <file> --script2-after <text>] (claim 4613: a second
 //          scripted phase, forwarded once after its own serial marker)
 //         [--script3 <file> --script3-after <text>] (claim 7786: a third
@@ -175,6 +183,14 @@ var displayMode = false
 // devices behind it. So screen-side input needs a USB XHCI + HID stack,
 // not a virtio-input transport. See docs/claims/3868-virtio-input.md.
 var inputMode = false
+// Milestone fifteen card A1 (claim 6140): `--sound` attaches the
+// virtio-snd device (VZVirtioSoundDeviceConfiguration with one output
+// stream + a VZHostAudioOutputStreamSink). OFF by default — without the
+// flag config.soundDevices stays [] exactly as before, so every existing
+// gate stays byte-identical. A1 is the TRANSPORT: the guest discovers the
+// device, negotiates, and arms the control queue; the PCM playback path
+// (the audible beep) is card A2.
+var soundMode = false
 // Milestone seven card I2 (claim 4116): the minimal synthesized-key seam.
 // `--input-key <mac-keycode>` posts one keyDown (no keyUp) into the
 // VZVirtualMachineView after `--input-key-after <marker>` (default: the
@@ -399,6 +415,9 @@ while idx < arguments.count {
         idx += 1
     } else if arg == "--input" {
         inputMode = true
+        idx += 1
+    } else if arg == "--sound" {
+        soundMode = true
         idx += 1
     } else if arg == "--input-key", idx + 1 < arguments.count {
         guard let kc = UInt16(arguments[idx + 1]) else {
@@ -1068,6 +1087,21 @@ if let netCapturePath {
     config.networkDevices = [natConfig]
 } else {
     config.networkDevices = []
+}
+// Milestone fifteen card A1 (claim 6140): the virtio-snd device, attached
+// only under `--sound`. One output stream with a host audio sink — the
+// device the guest discovers (DID observed, not assumed: the 0x1040+type
+// scheme predicts 0x1059). Without the flag the config is exactly as
+// before: soundDevices = [] — every existing gate stays byte-identical.
+if soundMode {
+    let sound = VZVirtioSoundDeviceConfiguration()
+    let output = VZVirtioSoundDeviceOutputStreamConfiguration()
+    output.sink = VZHostAudioOutputStreamSink()
+    sound.streams = [output]
+    config.audioDevices = [sound]
+    print("SOUND: virtio-snd attached (1 output stream, host sink)")
+} else {
+    config.audioDevices = []
 }
 #if SPIKE
 if customVirtioEnabled, #available(macOS 27.0, *) {
@@ -1862,6 +1896,29 @@ func startScript3Input() {
     forwardScriptOnce(path: path, after: after, label: "script3", settle: script3Delay)
 }
 
+// Issue #179 follow-up (claim 8844): the activation wall (claim 4769) —
+// VZ's synthesized-input translation is session-dependent (macOS 14+
+// refuses programmatic focus-stealing while another app holds focus), so
+// a dispatch into the view reports ok=true whether or not a single
+// keystroke reaches the guest; a silent drop used to surface only as
+// guest `events=0`. Report the delivery-relevant window state on every
+// synthesized-keyboard path so a failing run is diagnosed at the host
+// instead of guessed at. Observed 2026-08-18: a not-key window at the
+// FIRST keystroke is consistent with BOTH events=0 (walled run) and a
+// full events=6 delivery (the wall lifted mid-sequence) — so this report
+// is evidence, not a prediction. Must be called on the main thread.
+func reportKeyboardKeyState(_ view: VZVirtualMachineView, label: String) {
+    let w = view.window
+    let key = w?.isKeyWindow ?? false
+    let main = w?.isMainWindow ?? false
+    let active = NSApp.isActive
+    if key {
+        FileHandle.standardOutput.write(Data("\(label): window key=\(key) main=\(main) active=\(active) — key window, input should translate\n".utf8))
+    } else {
+        FileHandle.standardOutput.write(Data("\(label): window key=\(key) main=\(main) active=\(active) — the claim-4769 activation wall may be holding (VZ synthesized-keyboard delivery is session-dependent: the guest can report events=0 OR translate normally; observed both on 2026-08-18). If this run shows guest events=0, re-run when the machine is idle or after a fresh login; no code fix exists (VZ has no programmatic keyboard API).\n".utf8))
+    }
+}
+
 // Milestone seven card I2 (claim 4116): synthesize ONE host key event into
 // the VZVirtualMachineView after the marker appears. VZ has no programmatic
 // keyboard-injection API — VZUSBKeyboardConfiguration is driven only by a
@@ -1894,6 +1951,9 @@ func startKeyInject() {
                         view.keyDown(with: down)
                     }
                     FileHandle.standardOutput.write(Data("KEY-INJECT: keyCode \(keyCode) keyDown dispatched to the VZVirtualMachineView after \"\(marker)\"\n".utf8))
+                    // Claim 8844: report the delivery-relevant window state so
+                    // a silent VZ drop (not-key window) is diagnosed here.
+                    reportKeyboardKeyState(view, label: "KEY-INJECT")
                 }
                 sent = true
                 break
@@ -2027,10 +2087,15 @@ func startChordInject() {
                     // drops/reorders reports at the guest's single-pending-
                     // report interrupt-IN endpoint (observed claim-time).
                     var remaining = events
-                    func fireNext(after delay: Double) {
+                    func fireNext(after delay: Double, first: Bool) {
                         if remaining.isEmpty {
                             FileHandle.standardOutput.write(Data("CHORD-SEQ: typed \(csv.debugDescription) into the VZVirtualMachineView after \"\(marker)\" ok=true\n".utf8))
                             return
+                        }
+                        if first, let view = machineView {
+                            // Claim 8844: same delivery-state report as
+                            // KEY-SEQ, before the first chord lands.
+                            reportKeyboardKeyState(view, label: "CHORD-SEQ")
                         }
                         let evt = remaining.removeFirst()
                         DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
@@ -2042,10 +2107,10 @@ func startChordInject() {
                                     view.keyUp(with: e)
                                 }
                             }
-                            fireNext(after: inputChordsDelay)
+                            fireNext(after: inputChordsDelay, first: false)
                         }
                     }
-                    fireNext(after: 0.0)
+                    fireNext(after: 0.0, first: true)
                 } else {
                     FileHandle.standardOutput.write(Data("CHORD-SEQ: aborted (unknown chord) ok=false\n".utf8))
                 }
@@ -2373,9 +2438,17 @@ func startKeyStringInject() {
                 }
                 if allOk {
                     var delay: Double = 0.0
-                    for ev in events {
+                    for (i, ev) in events.enumerated() {
                         let evt = ev
                         DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                            if i == 0, let view = machineView {
+                                // Claim 8844: report the delivery-relevant
+                                // window state BEFORE the first keystroke
+                                // lands (main thread) — a passing run shows
+                                // key=true; a walled run shows key=false
+                                // immediately, instead of a silent events=0.
+                                reportKeyboardKeyState(view, label: "KEY-SEQ")
+                            }
                             let t = ProcessInfo.processInfo.systemUptime
                             // VZ maps keyDown/keyUp by keyCode; keep the
                             // characters on both so the pair is symmetric.

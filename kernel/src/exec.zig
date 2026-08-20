@@ -74,6 +74,7 @@ const process = @import("process.zig");
 const mailbox = @import("mailbox.zig");
 // Milestone 9 (claim 7670): per-process event queue
 const events = @import("events.zig");
+const app_timers = @import("app_timers.zig"); // claim 7323: the per-process app timer reset on exec
 // Milestone 10 (claim 9948): per-process file handle table
 const file_table = @import("file_table.zig");
 // Claim 0826: the per-process text/stack/kernel-stack pages come from the
@@ -81,9 +82,12 @@ const file_table = @import("file_table.zig");
 const alloc = @import("alloc.zig");
 const memmap = @import("memmap.zig"); // host-test fixture view (page_size + the arming view)
 
-/// Fixed load buffer: 16 KiB (4 pages). A program larger than this is
-/// rejected honestly (`too_large`).
-pub const exec_program_max: usize = 16384;
+/// Fixed load buffer: 256 KiB (64 pages). A program larger than this is
+/// rejected honestly (`too_large`). Milestone sixteen C1 (claim 3805) lifts
+/// this from the original 16 KiB bound — the M15 JINGLE draft was 33 KB and
+/// would not load (claim 7636) — so programs can grow. 256 KiB = 8× the old
+/// bound and comfortably fits the first big program (`GLOBALS.BIN`).
+pub const exec_program_max: usize = 256 * 1024;
 /// Card 3e (claim 4636): the bounded argv block — at most 8 args, each in
 /// a 32-byte slot (31 chars + NUL terminator), 256 bytes total. Packed into
 /// the process's OWN text page right after the loaded content (the text
@@ -98,6 +102,12 @@ pub const default_name: []const u8 = "USER.BIN";
 /// elf2bin.py's DSK1 header size (magic/flags/entry/image_size).
 pub const dsk1_header_size: usize = 24;
 const dsk1_magic: u32 = 0x314b5344; // "DSK1"
+/// Milestone sixteen C1 (claim 3805): the segmented user-image header —
+/// 48 bytes: magic/flags/entry/image_size + text_size/data_file_size/
+/// data_mem_size, followed by [text+rodata][data] (the BSS tail is implicit
+/// zero-fill). The loader maps text EL0-RO+PXN and data+bss EL0-RW+UXN+PXN.
+pub const dsk3_header_size: usize = 48;
+const dsk3_magic: u32 = 0x334b5344; // "DSK3" ("DSK2" 0x324b5344 is the handoff magic)
 
 pub const ExecResult = enum {
     ok,
@@ -142,6 +152,11 @@ pub const LoadedInfo = struct {
     /// The process's OWN randomized user stack VA (claim 0826 — per-process
     /// stacks, so the reply prints this program's placement, not a global).
     stack_va: u64,
+    /// Claim 3805 (milestone sixteen C1): the mapped DATA+bss region's byte
+    /// length and page count (0 for a flat DSK1 image, which has no
+    /// writable segment). The `exec` reply prints these only when non-zero.
+    data_len: u64 = 0,
+    data_pages: u64 = 0,
 };
 
 /// Claim 6359 (ADR 0007 slot 28): the pid of the most recently exec'd
@@ -171,6 +186,8 @@ pub fn loaded() ?LoadedInfo {
         .content_len = info.content_len,
         .entry_va = info.entry_va,
         .stack_va = info.stack_va,
+        .data_len = info.data_len,
+        .data_pages = info.data_pages,
     };
 }
 
@@ -223,12 +240,42 @@ pub fn exec_file(name: []const u8, args: []const []const u8) ExecResult {
     // files ≤ esp_content_max; exec reads up to its own fixed buffer).
     const got = fat.read_file(name, &program) orelse return .not_found;
     if (got < dsk1_header_size) return .bad_magic;
-    if (std.mem.readInt(u32, program[0..4], .little) != dsk1_magic) return .bad_magic;
-    const entry_off = std.mem.readInt(u64, program[8..16], .little);
-    const image_size = std.mem.readInt(u64, program[16..24], .little);
-    if (image_size > program.len) return .too_large;
-    if (image_size > got) return .too_large; // truncated read — file bigger than the buffer
-    if (entry_off < dsk1_header_size or entry_off >= image_size) return .bad_entry;
+    const magic = std.mem.readInt(u32, program[0..4], .little);
+    // Milestone sixteen C1 (claim 3805): two load paths. DSK1 (the flat
+    // single-segment shape, kept for the boot-payload-era images and the
+    // argv consumers) maps one read-only W^X text page. DSK3 (the segmented
+    // shape from `elf2bin.py --segments`) adds a writable data region with a
+    // zero-filled BSS tail — the loader maps text EL0-RO+PXN and data+bss
+    // EL0-RW+UXN+PXN, so EL0 globals are real writable memory.
+    var header_size: usize = dsk1_header_size;
+    var entry_off: u64 = 0;
+    var image_size: u64 = 0;
+    var text_size: usize = 0;
+    var data_file_size: usize = 0;
+    var data_mem_size: usize = 0;
+    switch (magic) {
+        dsk1_magic => {
+            entry_off = std.mem.readInt(u64, program[8..16], .little);
+            image_size = std.mem.readInt(u64, program[16..24], .little);
+            if (image_size > program.len) return .too_large;
+            if (image_size > got) return .too_large; // truncated read — file bigger than the buffer
+            if (entry_off < dsk1_header_size or entry_off >= image_size) return .bad_entry;
+            text_size = @intCast(image_size - dsk1_header_size);
+        },
+        dsk3_magic => {
+            header_size = dsk3_header_size;
+            switch (parse_dsk3(&program, got)) {
+                .err => |err| return err,
+                .ok => |s| {
+                    entry_off = s.entry_off;
+                    text_size = s.text_size;
+                    data_file_size = s.data_file_size;
+                    data_mem_size = s.data_mem_size;
+                },
+            }
+        },
+        else => return .bad_magic,
+    }
     // Claim 0826: the exec gate is GONE — a second program loads and runs
     // while the first is alive (every process owns its own root + pages, so
     // nothing shared is rebuilt under a live task). The gates are capacity:
@@ -236,14 +283,15 @@ pub fn exec_file(name: []const u8, args: []const []const u8) ExecResult {
     // or tables), then the allocator, the table carve-out, the registry.
     if (!scheduler.has_free_slot()) return .pool_full;
 
-    const content_len: usize = @intCast(image_size - dsk1_header_size);
-    // Strip the 24-byte DSK1 header IN PLACE (staging): the user root maps
-    // whole pages at `text_va` (the clone masks the phys to page
-    // granularity), so the loadable content must start at a page boundary.
-    // The entry offset is file-relative, so the entry VA is unchanged:
-    // `text_va + (entry_offset - header)`.
-    std.mem.copyForwards(u8, program[0..content_len], program[dsk1_header_size..][0..content_len]);
-    @memset(program[content_len..], 0); // the rest of the staging page is padding
+    const content_len: usize = text_size;
+    // Strip the header IN PLACE (staging): the user root maps whole pages
+    // at `text_va` (the clone masks the phys to page granularity), so the
+    // loadable content must start at a page boundary. The entry offset is
+    // file-relative, so the entry VA is `text_va + (entry_offset - header)`.
+    // The stripped buffer layout is [text+rodata][data] for both formats
+    // (the data portion is empty for DSK1 — `data_file_size` is 0 there).
+    std.mem.copyForwards(u8, program[0 .. text_size + data_file_size], program[header_size..][0 .. text_size + data_file_size]);
+    @memset(program[text_size + data_file_size ..], 0); // the rest of the staging page is padding
     // Card 3e (claim 4636): pack the argv block into the staging buffer
     // right after the content (it is copied into the process's OWN text
     // page below — the text leaf is already EL0 read-only, so the block is
@@ -255,6 +303,12 @@ pub fn exec_file(name: []const u8, args: []const []const u8) ExecResult {
     var argv_va: u64 = 0;
     var text_len: usize = content_len;
     if (argc > 0) {
+        // Claim 3805: the segmented path does not yet reserve argv room in
+        // its page-aligned text region — an honest refusal (the flat DSK1
+        // path keeps the claim-4636 behavior). No current DSK3 program
+        // takes arguments; a later card packs argv into a reserved data
+        // tail when a DSK3 consumer needs it.
+        if (magic == dsk3_magic) return .no_args_room;
         const block_off = (content_len + 7) & ~@as(usize, 7);
         const page_limit = if (content_len == 0) alloc.page_size else ((content_len + alloc.page_size - 1) / alloc.page_size) * alloc.page_size;
         if (block_off + arg_block_bytes > page_limit or block_off + arg_block_bytes > exec_program_max) return .no_args_room;
@@ -271,14 +325,23 @@ pub fn exec_file(name: []const u8, args: []const []const u8) ExecResult {
     // `.usertext`/`.userbss` pages instead.
     const text_pages: u64 = (text_len + alloc.page_size - 1) / alloc.page_size;
     const text_phys = alloc.alloc_pages(text_pages) orelse return .out_of_memory;
+    // Claim 3805: the segmented image's data+bss pages (0 for a flat DSK1
+    // image, which has no writable segment).
+    const data_pages: u64 = (data_mem_size + alloc.page_size - 1) / alloc.page_size;
+    const data_phys: u64 = if (data_pages > 0) (alloc.alloc_pages(data_pages) orelse {
+        _ = alloc.free_pages(text_phys, text_pages);
+        return .out_of_memory;
+    }) else 0;
     const stack_pages: u64 = (scheduler.task_stack_size + alloc.page_size - 1) / alloc.page_size;
     const stack_phys = alloc.alloc_pages(stack_pages) orelse {
         _ = alloc.free_pages(text_phys, text_pages);
+        if (data_pages > 0) _ = alloc.free_pages(data_phys, data_pages);
         return .out_of_memory;
     };
     const kstack_pages: u64 = stack_pages;
     const kstack_phys = alloc.alloc_pages(kstack_pages) orelse {
         _ = alloc.free_pages(text_phys, text_pages);
+        if (data_pages > 0) _ = alloc.free_pages(data_phys, data_pages);
         _ = alloc.free_pages(stack_phys, stack_pages);
         return .out_of_memory;
     };
@@ -287,6 +350,14 @@ pub fn exec_file(name: []const u8, args: []const []const u8) ExecResult {
     // a valid kernel pointer).
     const text_dst: [*]u8 = @ptrFromInt(text_phys);
     @memcpy(text_dst[0..text_len], program[0..text_len]);
+    // Claim 3805: copy the initialized data, then zero-fill the BSS tail
+    // (the data aperture maps `data_mem_size` bytes; the file only carried
+    // `data_file_size` of them).
+    if (data_pages > 0) {
+        const data_dst: [*]u8 = @ptrFromInt(data_phys);
+        if (data_file_size > 0) @memcpy(data_dst[0..data_file_size], program[text_size .. text_size + data_file_size]);
+        @memset(data_dst[data_file_size..data_mem_size], 0);
+    }
     const kstack: []u8 = @as(*[scheduler.task_stack_size]u8, @ptrFromInt(kstack_phys))[0..];
     // Milestone four (claim 2665): ASLR — the loaded program's EL0 stack
     // lands at a per-boot random VA from the seeded CSPRNG (page-aligned,
@@ -297,14 +368,18 @@ pub fn exec_file(name: []const u8, args: []const []const u8) ExecResult {
     // out-of-band VA. rebuild_user_root runs the whole sequence (randomize
     // → map → clean → re-arm) — shared with the boot-time static payload
     // (claim 3693), which passes the static stack phys instead.
-    const rebuild = rebuild_user_root(text_phys, @intCast(text_len), stack_phys, scheduler.task_stack_size) orelse {
+    // Claim 3805: the data aperture maps right after the (page-aligned)
+    // text region, matching the linker's `.data` placement at base + text_size.
+    const data_va = userspace.text_va + text_size;
+    const rebuild = rebuild_user_root_full(text_phys, @intCast(text_len), data_va, data_phys, @intCast(data_mem_size), stack_phys, scheduler.task_stack_size) orelse {
         _ = alloc.free_pages(text_phys, text_pages);
+        if (data_pages > 0) _ = alloc.free_pages(data_phys, data_pages);
         _ = alloc.free_pages(stack_phys, stack_pages);
         _ = alloc.free_pages(kstack_phys, kstack_pages);
         return .table_full;
     };
 
-    const entry_va = userspace.text_va + (entry_off - dsk1_header_size);
+    const entry_va = userspace.text_va + (entry_off - header_size);
     // Milestone four (claim 3848): the loaded program is a PROCESS. The
     // descriptor owns the image + the rebuilt address space + the owned
     // pages; a later exec creates a NEW process (per-process identity)
@@ -321,6 +396,10 @@ pub fn exec_file(name: []const u8, args: []const []const u8) ExecResult {
             .text_len = @intCast(text_len),
             .text_phys = text_phys,
             .text_pages = text_pages,
+            .data_va = data_va,
+            .data_len = @intCast(data_mem_size),
+            .data_phys = data_phys,
+            .data_pages = data_pages,
             .stack_va = rebuild.stack_va,
             .stack_len = scheduler.task_stack_size,
             .stack_phys = stack_phys,
@@ -329,6 +408,7 @@ pub fn exec_file(name: []const u8, args: []const []const u8) ExecResult {
         .{ .phys = kstack_phys, .pages = kstack_pages },
     ) orelse {
         _ = alloc.free_pages(text_phys, text_pages);
+        if (data_pages > 0) _ = alloc.free_pages(data_phys, data_pages);
         _ = alloc.free_pages(stack_phys, stack_pages);
         _ = alloc.free_pages(kstack_phys, kstack_pages);
         return .process_full;
@@ -340,6 +420,7 @@ pub fn exec_file(name: []const u8, args: []const []const u8) ExecResult {
     mailbox.reset(proc_id);
     events.reset(proc_id);
     file_table.reset_process(proc_id);
+    app_timers.reset(proc_id); // claim 7323: a recycled pid inherits no stale app timer
     if (scheduler.register_exec_user(entry_va, rebuild.root_phys, @intCast(text_len), rebuild.stack_va, scheduler.task_stack_size, kstack, @intCast(argc), argv_va)) |task_id| {
         _ = process.bind(proc_id, task_id);
     } else {
@@ -384,21 +465,41 @@ pub const RootInfo = struct {
 };
 
 pub fn rebuild_user_root(text_phys: u64, text_len: u64, stack_phys: u64, stack_len: u64) ?RootInfo {
+    return rebuild_user_root_full(text_phys, text_len, 0, 0, 0, stack_phys, stack_len);
+}
+
+/// The full rebuild (milestone sixteen C1, claim 3805): like
+/// `rebuild_user_root` but with a writable DATA aperture (`data_phys`,
+/// `data_len` at `data_va`) mapped between text and stack — the segmented
+/// image's `.data` + zeroed `.bss`. `data_len == 0` omits the aperture.
+pub fn rebuild_user_root_full(
+    text_phys: u64,
+    text_len: u64,
+    data_va: u64,
+    data_phys: u64,
+    data_len: u64,
+    stack_phys: u64,
+    stack_len: u64,
+) ?RootInfo {
     const stack_va = csprng.random_stack_va();
     userspace.set_stack_va(stack_va);
-    const root_phys = mmu.build_user_root(
+    const root_phys = mmu.build_user_root_full(
         userspace.text_va,
         text_phys,
         text_len,
+        data_va,
+        data_phys,
+        data_len,
         stack_va,
         stack_phys,
         stack_len,
     ) orelse return null;
-    // The fresh clone tables and the mapped text are dirty in the D-cache;
-    // clean both before the scheduler's next TTBR0 switch (the walker +
-    // EL0 instruction fetch must see the real bytes).
+    // The fresh clone tables and the mapped text/data are dirty in the
+    // D-cache; clean both before the scheduler's next TTBR0 switch (the
+    // walker + EL0 instruction/data fetch must see the real bytes).
     mmu.clean_table_storage();
     mmu.clean_dcache_range(text_phys, text_len);
+    if (data_len > 0) mmu.clean_dcache_range(data_phys, data_len);
     // The user stack aperture moved: re-arm the syscall/uaccess regions so
     // sys_write bounds follow the randomized base (per-task re-arming at
     // SVC entry keeps every process's bounds correct, claim 0826).
@@ -412,6 +513,38 @@ pub fn rebuild_user_root(text_phys: u64, text_len: u64, stack_phys: u64, stack_l
 // ---------------------------------------------------------------------------
 
 const test_allocator = std.testing.allocator;
+
+/// The segmented DSK3 header fields (claim 3805), parsed + validated.
+pub const Segments = struct {
+    entry_off: u64,
+    text_size: usize,
+    data_file_size: usize,
+    data_mem_size: usize,
+};
+
+/// Parse + validate a DSK3 segmented header at the start of `buf` (the
+/// first `got` bytes are valid). Pure — no globals — so host tests pin the
+/// boundary checks without a FAT fixture (a valid DSK3 image is always
+/// ≥ 4 KiB of page-aligned text, above the 2 KiB test write cap).
+pub fn parse_dsk3(buf: []const u8, got: usize) union(enum) { ok: Segments, err: ExecResult } {
+    const entry_off = std.mem.readInt(u64, buf[8..16], .little);
+    const image_size = std.mem.readInt(u64, buf[16..24], .little);
+    const text_size: usize = @intCast(std.mem.readInt(u64, buf[24..32], .little));
+    const data_file_size: usize = @intCast(std.mem.readInt(u64, buf[32..40], .little));
+    const data_mem_size: usize = @intCast(std.mem.readInt(u64, buf[40..48], .little));
+    if (image_size > buf.len) return .{ .err = .too_large };
+    if (image_size > got) return .{ .err = .too_large }; // truncated read
+    if (image_size != dsk3_header_size + text_size + data_file_size) return .{ .err = .bad_magic };
+    if (text_size == 0 or text_size > exec_program_max) return .{ .err = .too_large };
+    if (data_mem_size < data_file_size or data_mem_size > exec_program_max) return .{ .err = .too_large };
+    if (entry_off < dsk3_header_size or entry_off >= dsk3_header_size + text_size) return .{ .err = .bad_entry };
+    return .{ .ok = .{
+        .entry_off = entry_off,
+        .text_size = text_size,
+        .data_file_size = data_file_size,
+        .data_mem_size = data_mem_size,
+    } };
+}
 
 /// Build a minimal DSK1 flat image: header (entry at offset 24 = content
 /// start) + `content`.
@@ -447,11 +580,15 @@ fn fake_write(lba: u64, data: *const [fat.sector_size]u8) bool {
 /// HOST buffer: exec dereferences the program's text page to load its
 /// bytes (`@ptrFromInt(text_phys)` is valid on the identity-mapped kernel,
 /// but a fake 0x100000 base would segfault the host tests).
-var fixture_pool: [64 * 4096]u8 align(4096) = undefined;
+// Milestone sixteen C3 (claim 0339): the pool grew to EIGHT live user
+// programs, and each exec'd program owns 9 pages (text 1 + user stack 4 +
+// EL1 exception stack 4), so the fixture pool must back 8 × 9 = 72 pages
+// plus headroom.
+var fixture_pool: [128 * 4096]u8 align(4096) = undefined;
 
 fn arm_allocator() void {
     const descriptors = [_]memmap.MemoryDescriptor{
-        .{ .type = .conventional_memory, .physical_start = @intFromPtr(&fixture_pool), .virtual_start = 0, .number_of_pages = 64, .attribute = 0 },
+        .{ .type = .conventional_memory, .physical_start = @intFromPtr(&fixture_pool), .virtual_start = 0, .number_of_pages = 128, .attribute = 0 },
     };
     const view = memmap.MapView.init(std.mem.asBytes(&descriptors), @sizeOf(memmap.MemoryDescriptor), descriptors.len);
     _ = alloc.init(view, &.{});
@@ -485,6 +622,47 @@ test "exec: DSK1 header parse rejects bad magic, entry, and oversize images" {
 test "exec: no disk is reported honestly" {
     esp.reset();
     try std.testing.expectEqual(ExecResult.no_disk, exec_file("USER.BIN", &.{}));
+}
+
+test "exec: DSK3 header validation pins the segment bounds (claim 3805)" {
+    var buf: [dsk3_header_size + 4096 + 16]u8 = [_]u8{0} ** (dsk3_header_size + 4096 + 16);
+    // A valid segmented header: page-aligned 4 KiB text + 8 data + 8 BSS.
+    std.mem.writeInt(u32, buf[0..4], dsk3_magic, .little);
+    std.mem.writeInt(u64, buf[8..16], dsk3_header_size, .little); // entry at content start
+    std.mem.writeInt(u64, buf[16..24], dsk3_header_size + 4096 + 8, .little);
+    std.mem.writeInt(u64, buf[24..32], 4096, .little);
+    std.mem.writeInt(u64, buf[32..40], 8, .little);
+    std.mem.writeInt(u64, buf[40..48], 16, .little);
+    const got = buf.len;
+    const ok = parse_dsk3(&buf, got).ok;
+    try std.testing.expectEqual(@as(u64, dsk3_header_size), ok.entry_off);
+    try std.testing.expectEqual(@as(usize, 4096), ok.text_size);
+    try std.testing.expectEqual(@as(usize, 8), ok.data_file_size);
+    try std.testing.expectEqual(@as(usize, 16), ok.data_mem_size);
+
+    // image_size must equal header + text + data_file (no phantom bytes).
+    var bad_image = buf;
+    std.mem.writeInt(u64, bad_image[16..24], dsk3_header_size + 4096 + 7, .little);
+    try std.testing.expectEqual(ExecResult.bad_magic, parse_dsk3(&bad_image, got).err);
+
+    // A zero text region is not a loadable program.
+    var zero_text = buf;
+    std.mem.writeInt(u64, zero_text[24..32], 0, .little);
+    std.mem.writeInt(u64, zero_text[16..24], dsk3_header_size + 0 + 8, .little);
+    try std.testing.expectEqual(ExecResult.too_large, parse_dsk3(&zero_text, got).err);
+
+    // BSS must not be smaller than the initialized data.
+    var bad_bss = buf;
+    std.mem.writeInt(u64, bad_bss[40..48], 4, .little);
+    try std.testing.expectEqual(ExecResult.too_large, parse_dsk3(&bad_bss, got).err);
+
+    // The entry must land inside the RX region.
+    var bad_entry = buf;
+    std.mem.writeInt(u64, bad_entry[8..16], dsk3_header_size + 4096, .little); // == text end
+    try std.testing.expectEqual(ExecResult.bad_entry, parse_dsk3(&bad_entry, got).err);
+
+    // A truncated read (got < image_size) is an honest too_large.
+    try std.testing.expectEqual(ExecResult.too_large, parse_dsk3(&buf, dsk3_header_size + 4096 + 4).err);
 }
 
 test "exec: ok path loads, validates, builds the root, and spawns the task" {
@@ -578,32 +756,42 @@ test "exec: a second program loads and runs while the first is alive" {
     const img = dsk1("user: hello from the ESP\n", 24, 24 + 25);
     try std.testing.expectEqual(esp.WriteResult.ok, esp.write_file("USER.BIN", img[0 .. 24 + 25]));
     // Claim 0826: the exec gate is gone — the FIRST exec succeeds with the
-    // pool slot free, and the SECOND (and THIRD and FOURTH — card 3g's
-    // 7-slot budget) succeed WITHOUT waiting for the earlier program to
-    // exit (the old `user_busy` refusal is gone).
-    try std.testing.expectEqual(ExecResult.ok, exec_file("USER.BIN", &.{}));
-    try std.testing.expectEqual(ExecResult.ok, exec_file("USER.BIN", &.{}));
-    try std.testing.expectEqual(ExecResult.ok, exec_file("USER.BIN", &.{}));
-    try std.testing.expectEqual(ExecResult.ok, exec_file("USER.BIN", &.{}));
-    // All four programs are live: RUNNING USER.BIN processes with their
+    // pool slot free, and the SECOND through EIGHTH succeed WITHOUT waiting
+    // for the earlier programs to exit (the old `user_busy` refusal is
+    // gone). Milestone sixteen C3 (claim 0339): the 11-slot budget holds
+    // EIGHT live user programs.
+    var n: usize = 0;
+    while (n < 8) : (n += 1) {
+        try std.testing.expectEqual(ExecResult.ok, exec_file("USER.BIN", &.{}));
+    }
+    // All eight programs are live: RUNNING USER.BIN processes with their
     // OWN roots, stacks, and executor tasks (the procs-table shape the
-    // live gate asserts — FOUR live programs is the card-3g scale proof
-    // at the host level).
-    try std.testing.expectEqual(@as(usize, 5), process.count()); // boot exited + A + B + C + D
+    // live gate asserts — EIGHT live programs is the C3 headline at the
+    // host level).
+    try std.testing.expectEqual(@as(usize, 9), process.count()); // boot exited + A..H
     const proc_a = process.info(1).?;
     const proc_b = process.info(2).?;
     const proc_c = process.info(3).?;
     const proc_d = process.info(4).?;
+    const proc_e = process.info(5).?;
+    const proc_f = process.info(6).?;
+    const proc_g = process.info(7).?;
+    const proc_h = process.info(8).?;
     try std.testing.expectEqualStrings("USER.BIN", proc_a.name);
     try std.testing.expectEqualStrings("USER.BIN", proc_b.name);
+    try std.testing.expectEqualStrings("USER.BIN", proc_h.name);
     try std.testing.expectEqual(process.State.running, proc_a.state);
     try std.testing.expectEqual(process.State.running, proc_b.state);
     try std.testing.expectEqual(process.State.running, proc_c.state);
     try std.testing.expectEqual(process.State.running, proc_d.state);
-    // Distinct executors, roots, and pages across all four processes.
-    const tasks_set = [_]usize{ proc_a.task_id.?, proc_b.task_id.?, proc_c.task_id.?, proc_d.task_id.? };
+    try std.testing.expectEqual(process.State.running, proc_e.state);
+    try std.testing.expectEqual(process.State.running, proc_f.state);
+    try std.testing.expectEqual(process.State.running, proc_g.state);
+    try std.testing.expectEqual(process.State.running, proc_h.state);
+    // Distinct executors, roots, and pages across all eight processes.
+    const tasks_set = [_]usize{ proc_a.task_id.?, proc_b.task_id.?, proc_c.task_id.?, proc_d.task_id.?, proc_e.task_id.?, proc_f.task_id.?, proc_g.task_id.?, proc_h.task_id.? };
     for (tasks_set, 0..) |t1, i| for (tasks_set[i + 1 ..]) |t2| try std.testing.expect(t1 != t2);
-    const roots_set = [_]u64{ proc_a.root_phys, proc_b.root_phys, proc_c.root_phys, proc_d.root_phys };
+    const roots_set = [_]u64{ proc_a.root_phys, proc_b.root_phys, proc_c.root_phys, proc_d.root_phys, proc_e.root_phys, proc_f.root_phys, proc_g.root_phys, proc_h.root_phys };
     for (roots_set, 0..) |r1, i| for (roots_set[i + 1 ..]) |r2| try std.testing.expect(r1 != r2);
     // Per-process ASLR (claim 0826): each process owns its stack PLACEMENT
     // (distinct when the CSPRNG is seeded, identical fixed VA when not) —
@@ -611,11 +799,11 @@ test "exec: a second program loads and runs while the first is alive" {
     try std.testing.expect(proc_a.text_phys != proc_b.text_phys);
     try std.testing.expect(proc_a.stack_phys != proc_b.stack_phys);
     try std.testing.expectEqualStrings("user-exec", scheduler.task_info(proc_a.task_id.?).?.name);
-    try std.testing.expectEqualStrings("user-exec", scheduler.task_info(proc_d.task_id.?).?.name);
-    // The pool is the capacity gate: a FIFTH program cannot load.
+    try std.testing.expectEqualStrings("user-exec", scheduler.task_info(proc_h.task_id.?).?.name);
+    // The pool is the capacity gate: a NINTH program cannot load.
     try std.testing.expect(!scheduler.has_free_slot());
     try std.testing.expectEqual(ExecResult.pool_full, exec_file("USER.BIN", &.{}));
-    try std.testing.expectEqual(@as(usize, 5), process.count()); // pool_full allocates nothing
+    try std.testing.expectEqual(@as(usize, 9), process.count()); // pool_full allocates nothing
 
 }
 
@@ -695,13 +883,13 @@ test "exec: COUNTER.BIN loads by name with its own marker and process" {
     try std.testing.expect(process.info(1).?.text_phys != process.info(2).?.text_phys);
 }
 
-test "exec: PEER.BIN loads by name — counter + peer fill the 7-slot pool" {
+test "exec: PEER.BIN loads by name — counter + peer fill the 11-slot pool" {
     // Card 3f (claim 5965): the THIRD ESP program loads by name exactly
-    // like USER.BIN/COUNTER.BIN (same DSK1 pipeline). Card 3g (claim
-    // 5795): the 7-slot budget holds FOUR user programs — counter + peer +
-    // two USER.BINs = 7/7 (shell + worker + 4 users + idle), so a FIFTH
-    // exec is pool_full (the 3b capacity proof re-derived at the new
-    // budget).
+    // like USER.BIN/COUNTER.BIN (same DSK1 pipeline). Milestone sixteen
+    // C3 (claim 0339): the 11-slot budget holds EIGHT user programs —
+    // counter + peer + six USER.BINs = 11/11 (shell + worker + 8 users +
+    // idle), so a NINTH exec is pool_full (the 3b capacity proof
+    // re-derived at the grown budget).
     try build_image(test_allocator);
     defer test_allocator.free(saved_image);
     esp.reset();
@@ -739,17 +927,19 @@ test "exec: PEER.BIN loads by name — counter + peer fill the 7-slot pool" {
     // counter's — the serial log can tell the two programs apart).
     const peer_text: [*]const u8 = @ptrFromInt(peer.text_phys);
     try std.testing.expectEqualStrings("peer: got \n", peer_text[0..11]);
-    // Card 3g: two more USER.BINs load (three live programs + the peer =
-    // FOUR user slots — the new budget's headline), then the pool is
-    // 7/7: a FIFTH exec is pool_full, checked BEFORE any allocation
+    // C3 (claim 0339): six more USER.BINs load (counter + peer + six users
+    // = EIGHT user slots — the grown budget's headline), then the pool is
+    // 11/11: a NINTH exec is pool_full, checked BEFORE any allocation
     // (nothing leaks).
     const user_img = dsk1("user: hello from the ESP\n", 24, 24 + 25);
     try std.testing.expectEqual(esp.WriteResult.ok, esp.write_file("USER.BIN", user_img[0 .. 24 + 25]));
-    try std.testing.expectEqual(ExecResult.ok, exec_file("USER.BIN", &.{})); // pid 3, slot 4
-    try std.testing.expectEqual(ExecResult.ok, exec_file("USER.BIN", &.{})); // pid 4, slot 5
+    var n: usize = 0;
+    while (n < 6) : (n += 1) {
+        try std.testing.expectEqual(ExecResult.ok, exec_file("USER.BIN", &.{})); // pids 3..8, slots 4..9
+    }
     try std.testing.expect(!scheduler.has_free_slot());
     try std.testing.expectEqual(ExecResult.pool_full, exec_file("USER.BIN", &.{}));
-    try std.testing.expectEqual(@as(usize, 5), process.count()); // boot exited + counter + peer + 2 users
+    try std.testing.expectEqual(@as(usize, 9), process.count()); // boot exited + counter + peer + 6 users
 }
 
 test "exec: permanent occupant + recycle — one spare slot, pool_full, then the re-exec lands" {
@@ -763,7 +953,7 @@ test "exec: permanent occupant + recycle — one spare slot, pool_full, then the
     _ = scheduler.register_worker(0x2000);
     _ = scheduler.register_user(0x3000, 0);
     scheduler.start();
-    // Retire the boot payload: shell + idle + worker leave TWO free slots.
+    // Retire the boot payload: shell + idle + worker leave EIGHT free slots.
     try std.testing.expect(scheduler.yield_current());
     try std.testing.expect(scheduler.yield_current());
     try std.testing.expectEqual(@as(usize, 2), scheduler.current_id());
@@ -776,19 +966,20 @@ test "exec: permanent occupant + recycle — one spare slot, pool_full, then the
     try std.testing.expectEqual(esp.WriteResult.ok, esp.write_file("USER.BIN", user_img[0 .. 24 + 25]));
 
     // The counter is the permanent occupant: it takes one slot and never
-    // exits (this test never drives it to exit). Card 3g (claim 5795):
-    // THREE short programs fill the remaining user slots (shell + idle +
-    // worker + counter + 3 users = the full 7-slot pool).
+    // exits (this test never drives it to exit). Milestone sixteen C3
+    // (claim 0339): SEVEN short programs fill the remaining user slots
+    // (shell + idle + worker + counter + 7 users = the full 11-slot pool).
     try std.testing.expectEqual(ExecResult.ok, exec_file("COUNTER.BIN", &.{})); // slot 2
     const free_after_counter = alloc.stats().free_pages;
-    try std.testing.expectEqual(ExecResult.ok, exec_file("USER.BIN", &.{})); // slot 3
-    try std.testing.expectEqual(ExecResult.ok, exec_file("USER.BIN", &.{})); // slot 4
-    try std.testing.expectEqual(ExecResult.ok, exec_file("USER.BIN", &.{})); // slot 5
+    var n: usize = 0;
+    while (n < 7) : (n += 1) {
+        try std.testing.expectEqual(ExecResult.ok, exec_file("USER.BIN", &.{})); // slots 3..9
+    }
     try std.testing.expect(!scheduler.has_free_slot());
-    // The capacity gate: a fifth exec while all four programs are live is
+    // The capacity gate: a ninth exec while all eight programs are live is
     // pool_full, checked BEFORE any allocation — nothing leaks.
     try std.testing.expectEqual(ExecResult.pool_full, exec_file("USER.BIN", &.{}));
-    try std.testing.expectEqual(free_after_counter - 27, alloc.stats().free_pages);
+    try std.testing.expectEqual(free_after_counter - 63, alloc.stats().free_pages);
 
     // Drive the FIRST short program's exit + reap (the idle task's
     // lifecycle reap): its 9 pages return to the allocator and its
@@ -802,11 +993,11 @@ test "exec: permanent occupant + recycle — one spare slot, pool_full, then the
     try std.testing.expect(scheduler.exit_current(43)); // user -> idle
     try std.testing.expectEqual(process.State.exited, process.info(2).?.state);
     // The exited process holds its pages until the reap...
-    try std.testing.expectEqual(free_after_counter - 27, alloc.stats().free_pages);
+    try std.testing.expectEqual(free_after_counter - 63, alloc.stats().free_pages);
     // ...the scheduler reap returns them (claim 4613) while the exited
     // descriptor stays in the procs table with its status.
     try std.testing.expect(scheduler.reap(3));
-    try std.testing.expectEqual(free_after_counter - 18, alloc.stats().free_pages);
+    try std.testing.expectEqual(free_after_counter - 54, alloc.stats().free_pages);
     try std.testing.expectEqual(process.State.exited, process.info(2).?.state);
     try std.testing.expectEqual(@as(u64, 43), process.info(2).?.exit_status);
     try std.testing.expectEqual(@as(u64, 0), process.info(2).?.text_pages);
@@ -818,11 +1009,11 @@ test "exec: permanent occupant + recycle — one spare slot, pool_full, then the
     // its programs exited)...
     try std.testing.expectEqual(ExecResult.ok, exec_file("USER.BIN", &.{}));
     try std.testing.expectEqual(process.State.running, process.info(3).?.state);
-    // ...and with the counter + three live programs the pool is full
+    // ...and with the counter + seven live programs the pool is full
     // again: a subsequent exec is pool_full, still leak-free.
     try std.testing.expect(!scheduler.has_free_slot());
     try std.testing.expectEqual(ExecResult.pool_full, exec_file("USER.BIN", &.{}));
-    try std.testing.expectEqual(free_after_counter - 27, alloc.stats().free_pages);
+    try std.testing.expectEqual(free_after_counter - 63, alloc.stats().free_pages);
     try std.testing.expectEqual(process.State.running, process.info(1).?.state);
 }
 

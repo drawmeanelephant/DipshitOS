@@ -70,9 +70,12 @@ const esp_exec = @import("exec.zig"); // Claim 6359 (ADR 0007 slot 28): the EL0 
 const esp = @import("esp.zig"); // Claim 6359: the ESP name bound for the path check
 const tcp = @import("tcp.zig"); // Milestone 12 (claim 7483): TCP client seam
 const csprng = @import("csprng.zig"); // ISN generation for TCP connect
+const clipboard = @import("clipboard.zig"); // Milestone 14 (claim 0169): the shared kernel clipboard
+const app_timers = @import("app_timers.zig"); // Milestone 14 (claim 7323): the per-process app timer facility
+const virtio_snd = @import("virtio_snd.zig"); // Milestone 15 (claim 7636): the virtio-snd playback path behind sys_audio_*
 
 pub const slot_count: usize = 64;
-pub const implemented_count: usize = 38;
+pub const implemented_count: usize = 47;
 /// Card G6 (claim 0487) follow-on (slot 18): the fixed `sys_win_get` shape —
 /// four u32 LE words (x, y, w, h), 16 bytes, marshaled per call and copy_out'd
 /// through uaccess (the procs snapshot pattern).
@@ -187,6 +190,24 @@ pub const sys_file_rename: u64 = 35;
 pub const sys_file_truncate: u64 = 36;
 /// Milestone 13 (claim 5801): `sys_file_free(volume)` — slot 37.
 pub const sys_file_free: u64 = 37;
+/// Milestone 14 (claim 0169): `sys_clipboard_set(buf_ptr, len)` — slot 38.
+pub const sys_clipboard_set: u64 = 38;
+/// Milestone 14 (claim 0169): `sys_clipboard_get(buf_ptr, max)` — slot 39.
+pub const sys_clipboard_get: u64 = 39;
+/// Milestone 14 (claim 7323): `sys_timer_set(delay_ticks)` — slot 40.
+pub const sys_timer_set: u64 = 40;
+/// Milestone 14 (claim 7323): `sys_timer_cancel()` — slot 41.
+pub const sys_timer_cancel: u64 = 41;
+/// Milestone 15 (claim 7636): `sys_audio_info(out_ptr)` — slot 42.
+pub const sys_audio_info: u64 = 42;
+/// Milestone 15 (claim 7636): `sys_audio_play(ptr, len)` — slot 43.
+pub const sys_audio_play: u64 = 43;
+/// M15 follow-up (claim 9297): `sys_audio_volume(vol)` — slot 44.
+pub const sys_audio_volume: u64 = 44;
+/// M15 follow-up (claim 9297): `sys_audio_mute(muted)` — slot 45.
+pub const sys_audio_mute: u64 = 45;
+/// Step 2 (Issue #205): `sys_win_fill_batch(buf_ptr, buf_len)` — slot 46.
+pub const sys_win_fill_batch: u64 = 46;
 
 pub const ErrorCode = enum(i64) {
     einval = -1,
@@ -197,6 +218,7 @@ pub const ErrorCode = enum(i64) {
     enoent = -6,
     eacces = -7,
     enametoolong = -8,
+    enxio = -9, // "no such device" — the sys_audio_* seam's honest no-device refusal
 };
 
 pub fn error_result(code: ErrorCode) u64 {
@@ -232,6 +254,9 @@ var udp_send_staging: [udp.payload_max]u8 = undefined;
 var udp_recv_scratch: [udp.datagram_max]u8 = undefined;
 /// Milestone 12 (claim 7483): fixed BSS scratch for TCP send payload.
 var tcp_send_staging: [tcp.payload_max]u8 = undefined;
+/// Milestone 14 (claim 0169): fixed BSS scratch for the clipboard (set
+/// staging + get read-back), marshaled per call, no allocation.
+var clipboard_staging: [clipboard.capacity]u8 = undefined;
 
 /// Initialize the writer seam, reset counters and the uaccess regions. The
 /// table remains a runtime-built BSS object; rebuilding is unnecessary once
@@ -241,6 +266,7 @@ pub fn init(writer: Writer) void {
     write_fn = writer;
     @memset(&call_counts, 0);
     uaccess.init();
+    clipboard.init();
     _ = ensure_table();
 }
 
@@ -295,6 +321,15 @@ fn ensure_table() *const [slot_count]Entry {
         table_storage[sys_file_rename] = .{ .name = "sys_file_rename", .handler = handle_file_rename };
         table_storage[sys_file_truncate] = .{ .name = "sys_file_truncate", .handler = handle_file_truncate };
         table_storage[sys_file_free] = .{ .name = "sys_file_free", .handler = handle_file_free };
+        table_storage[sys_clipboard_set] = .{ .name = "sys_clipboard_set", .handler = handle_clipboard_set };
+        table_storage[sys_clipboard_get] = .{ .name = "sys_clipboard_get", .handler = handle_clipboard_get };
+        table_storage[sys_timer_set] = .{ .name = "sys_timer_set", .handler = handle_timer_set };
+        table_storage[sys_timer_cancel] = .{ .name = "sys_timer_cancel", .handler = handle_timer_cancel };
+        table_storage[sys_audio_info] = .{ .name = "sys_audio_info", .handler = handle_audio_info };
+        table_storage[sys_audio_play] = .{ .name = "sys_audio_play", .handler = handle_audio_play };
+        table_storage[sys_audio_volume] = .{ .name = "sys_audio_volume", .handler = handle_audio_volume };
+        table_storage[sys_audio_mute] = .{ .name = "sys_audio_mute", .handler = handle_audio_mute };
+        table_storage[sys_win_fill_batch] = .{ .name = "sys_win_fill_batch", .handler = handle_win_fill_batch };
         table_ready = true;
     }
     return &table_storage;
@@ -639,6 +674,44 @@ fn handle_win_fill(args: Args, _: *exceptions.VectorFrame) u64 {
     return 0;
 }
 
+/// Step 2 (Issue #205): `sys_win_fill_batch(buf_ptr, buf_len)` — slot 46.
+/// Processes a packed array of fill rects in ONE SVC entry. Each rect is
+/// 24 bytes: {id: u8, _pad: [3]u8, x: u32, y: u32, w: u32, h: u32, rgb: u32}.
+/// Max 32 rects per batch (768 B). Returns the number of rects processed;
+/// negative error on bad pointer or oversized batch.
+fn handle_win_fill_batch(args: Args, _: *exceptions.VectorFrame) u64 {
+    const buf_ptr = args[0];
+    const buf_len = args[1];
+    // Each rect is 24 bytes; max 32 rects (768 B).
+    const rect_size: u64 = 24;
+    const max_rects: u64 = 32;
+    if (buf_len == 0 or buf_len > max_rects * rect_size or (buf_len % rect_size) != 0) {
+        return error_result(.einval);
+    }
+    const num_rects = buf_len / rect_size;
+    // Stack buffer for the batch (32 × 24 = 768 B).
+    var batch: [32 * 24]u8 = undefined;
+    const copy_len: usize = @intCast(buf_len);
+    if (uaccess.copy_in(@ptrCast(&batch), buf_ptr, copy_len) == .fault) return error_result(.efault);
+    var processed: u64 = 0;
+    var i: u64 = 0;
+    while (i < num_rects) : (i += 1) {
+        const off = i * rect_size;
+        const id = batch[off];
+        if (id > std.math.maxInt(u8)) continue;
+        const x = std.mem.readInt(u32, batch[off + 4 ..][0..4], .little);
+        const y = std.mem.readInt(u32, batch[off + 8 ..][0..4], .little);
+        const w = std.mem.readInt(u32, batch[off + 12 ..][0..4], .little);
+        const h = std.mem.readInt(u32, batch[off + 16 ..][0..4], .little);
+        const rgb = std.mem.readInt(u32, batch[off + 20 ..][0..4], .little);
+        if (!win_owned_by_caller(id)) continue;
+        if (driving_award.user_fill(id, x, y, w, h, rgb)) {
+            processed += 1;
+        }
+    }
+    return processed;
+}
+
 /// `sys_win_present(id)`: mark the CALLER'S user window dirty so the
 /// compositor blits its back-buffer on the next idle-loop pass (the
 /// deferred-present discipline — the syscall never touches the gpu
@@ -954,6 +1027,131 @@ fn handle_file_free(args: Args, _: *exceptions.VectorFrame) u64 {
     return @intCast(res);
 }
 
+/// Milestone 14 (claim 0169): slot 38 — sys_clipboard_set(buf_ptr, len)
+fn handle_clipboard_set(args: Args, _: *exceptions.VectorFrame) u64 {
+    const buf_ptr = args[0];
+    const raw_len = args[1];
+    _ = process.find_by_task(scheduler.current_id()) orelse return error_result(.einval);
+    if (raw_len == 0) {
+        _ = clipboard.set("");
+        return 0;
+    }
+    const take: usize = @min(@as(usize, @intCast(raw_len)), clipboard.capacity);
+    if (uaccess.copy_in(clipboard_staging[0..take], buf_ptr, take) != .ok) return error_result(.efault);
+    return @intCast(clipboard.set(clipboard_staging[0..take]));
+}
+
+/// Milestone 14 (claim 0169): slot 39 — sys_clipboard_get(buf_ptr, max)
+fn handle_clipboard_get(args: Args, _: *exceptions.VectorFrame) u64 {
+    const buf_ptr = args[0];
+    const raw_max = args[1];
+    _ = process.find_by_task(scheduler.current_id()) orelse return error_result(.einval);
+    if (raw_max == 0) return 0;
+    const take: usize = @min(@as(usize, @intCast(raw_max)), clipboard.capacity);
+    const n = clipboard.get(clipboard_staging[0..take]);
+    if (n > 0) {
+        if (uaccess.copy_out(buf_ptr, clipboard_staging[0..n], n) != .ok) return error_result(.efault);
+    }
+    return @intCast(n);
+}
+
+/// Milestone 14 (claim 7323): slot 40 — sys_timer_set(delay_ticks)
+/// Arm the CALLING process's app timer to fire ONE TIMER event (kind 9)
+/// into its ADR 0009 queue after `delay_ticks` scheduler ticks. Zero
+/// clamps to 1 (the sys_sleep minimum) and an over-long delay truncates
+/// honestly at app_timers.max_delay_ticks — both documented. Re-arming
+/// replaces any pending timer. Returns 0; EINVAL for a non-process caller.
+fn handle_timer_set(args: Args, _: *exceptions.VectorFrame) u64 {
+    const delay = args[0];
+    const pid = process.find_by_task(scheduler.current_id()) orelse return error_result(.einval);
+    _ = app_timers.set(pid, delay);
+    return 0;
+}
+
+/// Milestone 14 (claim 7323): slot 41 — sys_timer_cancel()
+/// Disarm the calling process's app timer. Returns 1 if a pending timer
+/// was canceled, 0 if none was armed; EINVAL for a non-process caller.
+fn handle_timer_cancel(args: Args, _: *exceptions.VectorFrame) u64 {
+    _ = args;
+    const pid = process.find_by_task(scheduler.current_id()) orelse return error_result(.einval);
+    return if (app_timers.cancel(pid)) 1 else 0;
+}
+
+/// Milestone 15 (claim 7636): slot 42 — sys_audio_info(out_ptr)
+/// Copy the device's negotiated playback state out through uaccess as a
+/// 24-byte `AudioInfo` struct {ready, format, rate, channels, period_bytes,
+/// max_len}. The app learns the format/rate/channels it must synthesize
+/// in (FLOAT 19 / 48000 7 / stereo 2 on the observed VZ device). Returns
+/// 0; `EINVAL` for a non-process caller, `EFAULT` for a bad buffer.
+fn handle_audio_info(args: Args, _: *exceptions.VectorFrame) u64 {
+    const out_ptr = args[0];
+    _ = process.find_by_task(scheduler.current_id()) orelse return error_result(.einval);
+    const info = virtio_snd.snd_audio_info();
+    const bytes = std.mem.asBytes(&info);
+    if (uaccess.copy_out(out_ptr, bytes, bytes.len) != .ok) return error_result(.efault);
+    return 0;
+}
+
+/// Milestone 15 (claim 7636): slot 43 — sys_audio_play(ptr, len)
+/// Copy the caller's PCM samples in through uaccess in bounded periods
+/// (4096 B — the A2 period buffer, zero heap), run the proven control
+/// flow (PCM_INFO → SET_PARAMS → PREPARE → START → submit/drain per
+/// period → STOP → RELEASE), and return the bytes played. Errors: `EINVAL`
+/// for a non-process caller or a zero length, `ENAMETOOLONG` over
+/// `audio_max_len`, `EFAULT` for a bad pointer, `ENXIO` when no sound
+/// device is attached (the default VM) or a device-level refusal.
+fn handle_audio_play(args: Args, _: *exceptions.VectorFrame) u64 {
+    const ptr = args[0];
+    const raw_len = args[1];
+    _ = process.find_by_task(scheduler.current_id()) orelse return error_result(.einval);
+    if (raw_len == 0) return error_result(.einval);
+    if (raw_len > virtio_snd.audio_max_len) return error_result(.enametoolong);
+    if (!virtio_snd.snd_ready) return error_result(.enxio);
+    const len: usize = @intCast(raw_len);
+    const st = virtio_snd.snd_audio_start();
+    if (st != virtio_snd.S_OK) return error_result(.enxio);
+    var off: usize = 0;
+    while (off < len) {
+        const chunk: usize = @min(len - off, @as(usize, virtio_snd.beep_period_bytes));
+        if (uaccess.copy_in(virtio_snd.beep_buf[4..][0..chunk], ptr + off, chunk) != .ok) {
+            _ = virtio_snd.snd_audio_stop();
+            return error_result(.efault);
+        }
+        if (virtio_snd.snd_audio_submit(@intCast(chunk)) != virtio_snd.S_OK) {
+            _ = virtio_snd.snd_audio_stop();
+            return error_result(.enxio);
+        }
+        off += chunk;
+    }
+    if (virtio_snd.snd_audio_stop() != virtio_snd.S_OK) return error_result(.enxio);
+    return @intCast(len);
+}
+
+/// M15 follow-up (claim 9297): slot 44 — sys_audio_volume(vol)
+/// Set the bounded kernel-side stream gain (0..100 percent) that
+/// `sys_audio_play` applies to every period at submit time. Pure kernel
+/// state — it works without a device (a later --sound attach inherits
+/// it). Returns the volume on success; `EINVAL` for a non-process caller
+/// or an out-of-range value (honest refusal, no silent clamping).
+fn handle_audio_volume(args: Args, _: *exceptions.VectorFrame) u64 {
+    const vol = args[0];
+    _ = process.find_by_task(scheduler.current_id()) orelse return error_result(.einval);
+    if (vol > 100) return error_result(.einval);
+    return virtio_snd.snd_set_volume(@intCast(vol));
+}
+
+/// M15 follow-up (claim 9297): slot 45 — sys_audio_mute(muted)
+/// Set the kernel-side mute state (1 = silent). Same contract as slot 44:
+/// pure kernel state, applied at the submit choke point. Returns 0 on
+/// success; `EINVAL` for a non-process caller or a value that is not 0/1.
+fn handle_audio_mute(args: Args, _: *exceptions.VectorFrame) u64 {
+    const muted = args[0];
+    _ = process.find_by_task(scheduler.current_id()) orelse return error_result(.einval);
+    if (muted > 1) return error_result(.einval);
+    _ = virtio_snd.snd_set_mute(muted == 1);
+    return 0;
+}
+
 /// Claim 6359 (ADR 0007 slot 28): `sys_exec(path_ptr, path_len)` — the
 /// EL0 exec seam. Marshals the path through the claim-6120 uaccess window
 /// (the `sys_file_open` pattern), requires a process caller, and reuses
@@ -1014,6 +1212,18 @@ fn handle_kill(args: Args, _: *exceptions.VectorFrame) u64 {
     };
 }
 
+/// True when the process currently making the syscall owns the single
+/// global TCP connection (`tcp.owner_pid` matches the caller's pid). False
+/// for a non-process caller or when another process owns it. The connection
+/// is process-owned once established — a second process is refused EACCES
+/// (the M14 S4 ownership audit; the connection auto-closes on owner exit
+/// via `tcp.close_owner`).
+fn tcp_owned_by_caller() bool {
+    const owner = process.find_by_task(scheduler.current_id()) orelse return false;
+    const current = tcp.owner_pid orelse return false;
+    return owner == current;
+}
+
 /// Slot 30: `sys_tcp_connect(ip, port)`: Connect to target IPv4:port.
 fn handle_tcp_connect(args: Args, _: *exceptions.VectorFrame) u64 {
     const ip_raw = args[0];
@@ -1034,6 +1244,9 @@ fn handle_tcp_connect(args: Args, _: *exceptions.VectorFrame) u64 {
     }
     if (tcp.state != .idle) {
         if (tcp.state == .established and std.mem.eql(u8, &ip, &tcp.peer_ip) and dst_port == tcp.peer_port) {
+            // Idempotent re-connect to the SAME peer is only allowed for
+            // the connection's owner (a second process is refused EACCES).
+            if (!tcp_owned_by_caller()) return error_result(.eacces);
             return 0;
         }
         return error_result(.einval);
@@ -1089,6 +1302,7 @@ fn handle_tcp_send(args: Args, _: *exceptions.VectorFrame) u64 {
     if (len == 0) return 0;
     if (len > tcp.payload_max) len = tcp.payload_max;
     if (tcp.state != .established) return error_result(.einval);
+    if (!tcp_owned_by_caller()) return error_result(.eacces);
 
     if (uaccess.copy_in(&tcp_send_staging, address, @intCast(len)) != .ok) return error_result(.efault);
 
@@ -1114,6 +1328,7 @@ fn handle_tcp_recv(args: Args, _: *exceptions.VectorFrame) u64 {
     if (tcp.state != .established and tcp.state != .closed and tcp.state != .fin_sent) {
         return error_result(.einval);
     }
+    if (!tcp_owned_by_caller()) return error_result(.eacces);
 
     virtio_net.net_rx_drain();
 
@@ -1136,6 +1351,7 @@ fn handle_tcp_recv(args: Args, _: *exceptions.VectorFrame) u64 {
 /// Slot 33: `sys_tcp_close()`: Initiate client FIN teardown.
 fn handle_tcp_close(_: Args, _: *exceptions.VectorFrame) u64 {
     if (tcp.state == .idle) return 0;
+    if (!tcp_owned_by_caller()) return error_result(.eacces);
     if (tcp.state == .established) {
         tcp.build_fin_msg();
         var out_len: usize = 0;
@@ -1167,9 +1383,9 @@ fn handle_tcp_close(_: Args, _: *exceptions.VectorFrame) u64 {
     return 0;
 }
 
-/// Deterministic monitor output for the thirty-eight implemented rows and their counters.
+/// Deterministic monitor output for the implemented rows and their counters.
 pub fn report(con: *console.Console) void {
-    con.puts("syscalls: slots=64 implemented=38\n");
+    con.puts("syscalls: slots=64 implemented=47\n");
     var number: u64 = 0;
     while (number < implemented_count) : (number += 1) {
         const info = entry_info(number).?;
@@ -1201,7 +1417,7 @@ fn capture_marshaled_args(args: Args, _: *exceptions.VectorFrame) u64 {
     return 0xcafe;
 }
 
-test "syscall: runtime table has 64 slots and thirty-eight unique implemented rows" {
+test "syscall: runtime table has 64 slots and forty-five unique implemented rows" {
     init(test_writer);
     const table = ensure_table();
     try std.testing.expectEqual(@as(usize, 64), table.len);
@@ -1214,7 +1430,11 @@ test "syscall: runtime table has 64 slots and thirty-eight unique implemented ro
             implemented += 1;
         }
     }
-    try std.testing.expectEqual(@as(usize, 38), implemented);
+    try std.testing.expectEqual(@as(usize, 47), implemented);
+    try std.testing.expectEqualStrings("sys_audio_info", entry_info(42).?.name);
+    try std.testing.expectEqualStrings("sys_audio_play", entry_info(43).?.name);
+    try std.testing.expectEqualStrings("sys_audio_volume", entry_info(44).?.name);
+    try std.testing.expectEqualStrings("sys_audio_mute", entry_info(45).?.name);
     try std.testing.expectEqualStrings("sys_ping", entry_info(0).?.name);
     try std.testing.expectEqualStrings("sys_exit", entry_info(3).?.name);
     try std.testing.expectEqualStrings("sys_sleep", entry_info(4).?.name);
@@ -1247,6 +1467,14 @@ test "syscall: runtime table has 64 slots and thirty-eight unique implemented ro
     try std.testing.expectEqualStrings("sys_tcp_send", entry_info(31).?.name);
     try std.testing.expectEqualStrings("sys_tcp_recv", entry_info(32).?.name);
     try std.testing.expectEqualStrings("sys_tcp_close", entry_info(33).?.name);
+    try std.testing.expectEqualStrings("sys_file_delete", entry_info(34).?.name);
+    try std.testing.expectEqualStrings("sys_file_rename", entry_info(35).?.name);
+    try std.testing.expectEqualStrings("sys_file_truncate", entry_info(36).?.name);
+    try std.testing.expectEqualStrings("sys_file_free", entry_info(37).?.name);
+    try std.testing.expectEqualStrings("sys_clipboard_set", entry_info(38).?.name);
+    try std.testing.expectEqualStrings("sys_clipboard_get", entry_info(39).?.name);
+    try std.testing.expectEqualStrings("sys_timer_set", entry_info(40).?.name);
+    try std.testing.expectEqualStrings("sys_timer_cancel", entry_info(41).?.name);
     try std.testing.expect(entry_info(63) == null);
 }
 
@@ -1960,7 +2188,7 @@ test "syscall: win open/fill/present/close round-trips with per-process ownershi
     // Close the OWN window: slot 15 releases it (0 on success).
     try std.testing.expectEqual(@as(u64, 0), dispatch(sys_win_close, .{ 2, 0, 0, 0, 0, 0 }, &frame));
     try std.testing.expectEqual(@as(u64, 1), call_count(sys_win_close));
-    try std.testing.expectEqual(@as(usize, 2), driving_award.count());
+    try std.testing.expectEqual(@as(usize, 4), driving_award.count());
     // A second close of the freed id is EINVAL (no such user window).
     try std.testing.expectEqual(error_result(.einval), dispatch(sys_win_close, .{ 2, 0, 0, 0, 0, 0 }, &frame));
     // Re-open (id 2 reused), then open the remaining slots (ids 3..5): the
@@ -1978,7 +2206,7 @@ test "syscall: win open/fill/present/close round-trips with per-process ownershi
     // Error mapping in the OWNING context: invalid geometry, out-of-bounds
     // rects, unknown ids, and the fixed windows are all EINVAL.
     try std.testing.expectEqual(error_result(.einval), dispatch(sys_win_open, .{ 0, 0, 0, 10, 0, 0 }, &frame));
-    try std.testing.expectEqual(error_result(.einval), dispatch(sys_win_open, .{ 0, 0, 10, 193, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_win_open, .{ 0, 0, 10, 385, 0, 0 }, &frame));
     try std.testing.expectEqual(error_result(.einval), dispatch(sys_win_fill, .{ 99, 0, 0, 10, 10, 0 }, &frame));
     try std.testing.expectEqual(error_result(.einval), dispatch(sys_win_fill, .{ 2, 255, 191, 2, 2, 0 }, &frame));
     try std.testing.expectEqual(error_result(.einval), dispatch(sys_win_present, .{ 99, 0, 0, 0, 0, 0 }, &frame));
@@ -2007,7 +2235,7 @@ test "syscall: win open/fill/present/close round-trips with per-process ownershi
     try std.testing.expect(driving_award.user_owner(3) == null);
     try std.testing.expect(driving_award.user_owner(4) == null);
     try std.testing.expect(driving_award.user_owner(5) == null);
-    try std.testing.expectEqual(@as(usize, 2), driving_award.count());
+    try std.testing.expectEqual(@as(usize, 4), driving_award.count());
     // The close counter only ever saw the THREE explicit dispatches (one
     // success + the two refusals above): the exit-path teardown is NOT a
     // syscall (it rides close_owner, never handle_win_close).
@@ -2097,7 +2325,7 @@ test "syscall: win query copies the full window state back and enforces ownershi
     try std.testing.expectEqual(@as(u32, 64), std.mem.readInt(u32, qbuf[4..8], .little));
     try std.testing.expectEqual(@as(u32, 256), std.mem.readInt(u32, qbuf[8..12], .little));
     try std.testing.expectEqual(@as(u32, 192), std.mem.readInt(u32, qbuf[12..16], .little));
-    try std.testing.expectEqual(@as(u32, 2), std.mem.readInt(u32, qbuf[16..20], .little)); // z
+    try std.testing.expectEqual(@as(u32, 4), std.mem.readInt(u32, qbuf[16..20], .little)); // z
     try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, qbuf[20..24], .little)); // focused
     try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, qbuf[24..28], .little)); // visible
     try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, qbuf[28..32], .little)); // dirty
@@ -2164,11 +2392,11 @@ test "syscall: counters are monotonic and report is deterministic" {
     _ = dispatch(sys_ping, .{ 9, 0, 0, 0, 0, 0 }, &frame);
     _ = dispatch(sys_ping, .{ 10, 0, 0, 0, 0, 0 }, &frame);
     try std.testing.expectEqual(@as(u64, 2), call_count(sys_ping));
-    var mock = console.MockConsole(1024){};
+    var mock = console.MockConsole(4096){};
     var con = mock.console();
     report(&con);
     try std.testing.expectEqualStrings(
-        "syscalls: slots=64 implemented=38\n" ++
+        "syscalls: slots=64 implemented=47\n" ++
             "  0 sys_ping calls=2\n" ++
             "  1 sys_write calls=0\n" ++
             "  2 sys_yield calls=0\n" ++
@@ -2206,7 +2434,16 @@ test "syscall: counters are monotonic and report is deterministic" {
             "  34 sys_file_delete calls=0\n" ++
             "  35 sys_file_rename calls=0\n" ++
             "  36 sys_file_truncate calls=0\n" ++
-            "  37 sys_file_free calls=0\n",
+            "  37 sys_file_free calls=0\n" ++
+            "  38 sys_clipboard_set calls=0\n" ++
+            "  39 sys_clipboard_get calls=0\n" ++
+            "  40 sys_timer_set calls=0\n" ++
+            "  41 sys_timer_cancel calls=0\n" ++
+            "  42 sys_audio_info calls=0\n" ++
+            "  43 sys_audio_play calls=0\n" ++
+            "  44 sys_audio_volume calls=0\n" ++
+            "  45 sys_audio_mute calls=0\n" ++
+            "  46 sys_win_fill_batch calls=0\n",
         mock.contents(),
     );
 }
@@ -2291,6 +2528,126 @@ test "syscall: mutating file slots 34..37 dispatch and fault safety (claim 5801)
     try std.testing.expectEqual(error_result(.ebadf), dispatch(sys_file_truncate, .{ 0, 4, 0, 0, 0, 0 }, &frame));
     // free with a bad volume -> EINVAL
     try std.testing.expectEqual(error_result(.einval), dispatch(sys_file_free, .{ 2, 0, 0, 0, 0, 0 }, &frame));
+}
+
+test "syscall: clipboard slots 38..39 dispatch and fault safety (claim 0169)" {
+    userspace.init();
+    init(test_writer);
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0); // task 2 = process 0 (boot payload)
+    scheduler.start();
+    var frame = fresh_frame();
+
+    // In task 0 (shell, not a registered process), calls return EINVAL.
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_clipboard_set, .{ 0x1000, 4, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_clipboard_get, .{ 0x1000, 4, 0, 0, 0, 0 }, &frame));
+
+    // Yield to the user task (task 2, pid 0).
+    try std.testing.expect(scheduler.yield_current()); // shell -> worker
+    try std.testing.expect(scheduler.yield_current()); // worker -> user (2)
+    try std.testing.expectEqual(@as(usize, 2), scheduler.current_id());
+
+    var test_buf: [64]u8 = undefined;
+    const test_buf_addr = @intFromPtr(&test_buf);
+    // The same region serves as the copy-in source (readable) and the
+    // copy-out destination (writable).
+    set_user_regions(
+        .{ .base = test_buf_addr, .len = test_buf.len },
+        .{ .base = test_buf_addr, .len = test_buf.len },
+    );
+
+    // Bad pointer on a non-empty set -> EFAULT (the copy-in path validates
+    // before touching memory).
+    try std.testing.expectEqual(error_result(.efault), dispatch(sys_clipboard_set, .{ uaccess.diagnostic_unmapped, 4, 0, 0, 0, 0 }, &frame));
+
+    // An EMPTY clipboard get returns 0 without validating the pointer — the
+    // same empty -> 0 discipline as udp/ipc recv (no copy runs).
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_clipboard_get, .{ uaccess.diagnostic_unmapped, 4, 0, 0, 0, 0 }, &frame));
+
+    // Set copies bytes into the shared buffer and returns the stored length.
+    @memcpy(test_buf[0..5], "hello");
+    try std.testing.expectEqual(@as(u64, 5), dispatch(sys_clipboard_set, .{ test_buf_addr, 5, 0, 0, 0, 0 }, &frame));
+
+    // A NON-empty get validates the pointer -> EFAULT.
+    try std.testing.expectEqual(error_result(.efault), dispatch(sys_clipboard_get, .{ uaccess.diagnostic_unmapped, 4, 0, 0, 0, 0 }, &frame));
+
+    // Get copies them back out (non-destructive) and returns the length.
+    @memset(&test_buf, 0);
+    try std.testing.expectEqual(@as(u64, 5), dispatch(sys_clipboard_get, .{ test_buf_addr, 64, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqualStrings("hello", test_buf[0..5]);
+
+    // A second get returns the SAME contents (the clipboard is not consumed).
+    @memset(&test_buf, 0);
+    try std.testing.expectEqual(@as(u64, 5), dispatch(sys_clipboard_get, .{ test_buf_addr, 64, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqualStrings("hello", test_buf[0..5]);
+
+    // max == 0 -> 0 without touching the buffer.
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_clipboard_get, .{ test_buf_addr, 0, 0, 0, 0, 0 }, &frame));
+
+    // An empty set clears the shared buffer.
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_clipboard_set, .{ test_buf_addr, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_clipboard_get, .{ test_buf_addr, 64, 0, 0, 0, 0 }, &frame));
+}
+
+test "syscall: app timer slots 40..41 dispatch, fire through the tick, and clamp (claim 7323)" {
+    userspace.init();
+    init(test_writer);
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0); // task 2 = process 0 (boot payload)
+    scheduler.start();
+    var frame = fresh_frame();
+
+    // In task 0 (shell, not a registered process), both calls return EINVAL.
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_timer_set, .{ 2, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_timer_cancel, .{ 0, 0, 0, 0, 0, 0 }, &frame));
+
+    // Yield to the user task (task 2, pid 0).
+    try std.testing.expect(scheduler.yield_current()); // shell -> worker
+    try std.testing.expect(scheduler.yield_current()); // worker -> user (2)
+    try std.testing.expectEqual(@as(usize, 2), scheduler.current_id());
+
+    // Cancel with nothing armed -> 0.
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_timer_cancel, .{ 0, 0, 0, 0, 0, 0 }, &frame));
+
+    // Arm a 2-tick timer -> 0, and the module sees it armed with 2 left.
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_timer_set, .{ 2, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expect(app_timers.armed_pending(0));
+    try std.testing.expectEqual(@as(u64, 2), app_timers.info(0).remaining);
+
+    // Re-arm replaces the pending countdown (back to 3).
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_timer_set, .{ 3, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u64, 3), app_timers.info(0).remaining);
+    try std.testing.expectEqual(@as(u64, 2), app_timers.info(0).sets);
+
+    // The scheduler tick drives the countdown; the timer fires exactly one
+    // TIMER event into pid 0's queue after three ticks.
+    scheduler.on_tick();
+    scheduler.on_tick();
+    try std.testing.expectEqual(@as(u64, 1), app_timers.info(0).remaining);
+    try std.testing.expectEqual(@as(usize, 0), events.pending(0));
+    scheduler.on_tick();
+    try std.testing.expect(!app_timers.armed_pending(0));
+    try std.testing.expectEqual(@as(u64, 1), app_timers.info(0).fired);
+    try std.testing.expectEqual(@as(usize, 1), events.pending(0));
+    const ev = events.peek(0).?;
+    try std.testing.expectEqual(events.TIMER, ev.kind);
+    _ = events.drop(0);
+
+    // Zero clamps to one tick (the sys_sleep minimum); over-long truncates.
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_timer_set, .{ 0, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u64, 1), app_timers.info(0).remaining);
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_timer_set, .{ app_timers.max_delay_ticks + 1000, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(app_timers.max_delay_ticks, app_timers.info(0).remaining);
+
+    // Cancel a pending timer -> 1, and it never fires.
+    try std.testing.expectEqual(@as(u64, 1), dispatch(sys_timer_cancel, .{ 0, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expect(!app_timers.armed_pending(0));
+    try std.testing.expectEqual(@as(u64, 1), app_timers.info(0).cancels);
+    scheduler.on_tick();
+    try std.testing.expectEqual(@as(usize, 0), events.pending(0));
+    try std.testing.expectEqual(@as(u64, 1), app_timers.info(0).fired);
 }
 
 test "syscall: slot 28 sys_exec marshals the path and maps loader errors" {
@@ -2557,4 +2914,165 @@ test "syscall: tcp connect, send, recv, close slots 30..33 and sys_kill slot 29"
 
     // Slot 33: sys_tcp_close when idle returns 0
     try std.testing.expectEqual(@as(u64, 0), dispatch(sys_tcp_close, .{ 0, 0, 0, 0, 0, 0 }, &frame));
+}
+
+test "syscall: TCP connection is process-owned — non-owner send/recv/close/connect refused EACCES (claim 4482)" {
+    init(test_writer);
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0); // task 2 = process 0 (boot payload)
+    var kstack: [scheduler.task_stack_size]u8 align(16) = undefined;
+    const peer_pid = process.create("PEER.BIN", .{ .entry_va = 0x400000, .content_len = 64 }, .{}, .{}).?;
+    const peer_task = scheduler.register_exec_user(userspace.text_va, 0x4000_0000, 100, 0x8000_0000, 8192, &kstack, 0, 0).?;
+    _ = process.bind(peer_pid, peer_task);
+    scheduler.start();
+
+    var test_buf: [64]u8 = undefined;
+    const test_buf_addr = @intFromPtr(&test_buf);
+    set_user_regions(
+        .{ .base = 0, .len = 0 },
+        .{ .base = test_buf_addr, .len = test_buf.len },
+    );
+    var frame = fresh_frame();
+
+    // Simulate process 0 (task 2) owning an ESTABLISHED connection to
+    // 10.0.0.2:9999 (the net bits so the idempotent-connect path is
+    // reachable; nothing transmits on the host).
+    tcp.reset();
+    tcp.state = .established;
+    tcp.peer_ip = .{ 10, 0, 0, 2 };
+    tcp.peer_port = 9999;
+    tcp.owner_pid = 0;
+    virtio_net.net_ready = true;
+    virtio_net.arp.own_ip = .{ 10, 0, 0, 1 };
+
+    // Drive the ring to the non-owner (task 3 = process 1).
+    try std.testing.expect(scheduler.yield_current()); // shell -> worker
+    try std.testing.expect(scheduler.yield_current()); // worker -> user (task 2)
+    try std.testing.expectEqual(@as(usize, 2), scheduler.current_id());
+    try std.testing.expect(scheduler.yield_current()); // user -> peer (task 3)
+    try std.testing.expectEqual(@as(usize, 3), scheduler.current_id());
+    try std.testing.expectEqual(@as(u64, 1), peer_pid);
+
+    // Non-owner: every connection-driving syscall is refused EACCES before
+    // any state is touched (the S4 ownership audit fix).
+    try std.testing.expectEqual(error_result(.eacces), dispatch(sys_tcp_send, .{ test_buf_addr, 4, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.eacces), dispatch(sys_tcp_recv, .{ test_buf_addr, 4, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.eacces), dispatch(sys_tcp_close, .{ 0, 0, 0, 0, 0, 0 }, &frame));
+    // Idempotent re-connect to the same peer is owner-only.
+    try std.testing.expectEqual(error_result(.eacces), dispatch(sys_tcp_connect, .{ 0x0a000002, 9999, 0, 0, 0, 0 }, &frame));
+    // The refused calls never mutated the connection.
+    try std.testing.expectEqual(@as(u64, 0), tcp.owner_pid.?);
+
+    // Drive the ring back to the owner (task 2): the idempotent re-connect
+    // succeeds (returns 0, no transmit) — the ownership check passes.
+    try std.testing.expect(scheduler.yield_current()); // peer -> idle
+    try std.testing.expect(scheduler.yield_current()); // idle -> shell
+    try std.testing.expect(scheduler.yield_current()); // shell -> worker
+    try std.testing.expect(scheduler.yield_current()); // worker -> user (task 2)
+    try std.testing.expectEqual(@as(usize, 2), scheduler.current_id());
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_tcp_connect, .{ 0x0a000002, 9999, 0, 0, 0, 0 }, &frame));
+
+    // Restore the honest default (net absent).
+    tcp.reset();
+    virtio_net.net_ready = false;
+    virtio_net.arp.own_ip = .{ 0, 0, 0, 0 };
+}
+
+test "syscall: slot 42 sys_audio_info marshals; slot 43 sys_audio_play refuses without a device" {
+    userspace.init();
+    init(test_writer);
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0); // task 2 = process 0 (boot payload)
+    scheduler.start();
+    virtio_snd.snd_ready = false; // honest default — no --sound device in a test
+    virtio_snd.ctrl_armed = false;
+    virtio_snd.tx_armed = false;
+    var frame = fresh_frame();
+
+    // In task 0 (shell, not a registered process), both audio syscalls are
+    // refused EINVAL before any state is touched.
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_audio_info, .{ 0x1000, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_audio_play, .{ 0x1000, 8, 0, 0, 0, 0 }, &frame));
+
+    // Yield to the user task (task 2, pid 0).
+    try std.testing.expect(scheduler.yield_current()); // shell -> worker
+    try std.testing.expect(scheduler.yield_current()); // worker -> user (2)
+    try std.testing.expectEqual(@as(usize, 2), scheduler.current_id());
+    try std.testing.expect(process.find_by_task(2) != null);
+
+    var info_buf: [32]u8 = @splat(0);
+    const info_addr = @intFromPtr(&info_buf);
+    set_user_regions(
+        .{ .base = 0, .len = 0 },
+        .{ .base = info_addr, .len = info_buf.len },
+    );
+
+    // Bad info buffer -> EFAULT.
+    try std.testing.expectEqual(error_result(.efault), dispatch(sys_audio_info, .{ uaccess.diagnostic_unmapped, 0, 0, 0, 0, 0 }, &frame));
+
+    // Valid buffer: the info struct is copied out with the honest no-device
+    // state (ready=0, format/rate 0xff — never guessed).
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_audio_info, .{ info_addr, 0, 0, 0, 0, 0 }, &frame));
+    const info: *const virtio_snd.AudioInfo = @ptrCast(@alignCast(&info_buf));
+    try std.testing.expectEqual(@as(u32, 0), info.ready);
+    try std.testing.expectEqual(@as(u8, 0xff), info.format);
+    try std.testing.expectEqual(@as(u8, 0xff), info.rate);
+    try std.testing.expectEqual(@as(u32, virtio_snd.audio_max_len), info.max_len);
+
+    // sys_audio_play arg validation before the device check: zero length ->
+    // EINVAL, over-long -> ENAMETOOLONG, then the honest no-device ENXIO.
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_audio_play, .{ info_addr, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.enametoolong), dispatch(sys_audio_play, .{ info_addr, virtio_snd.audio_max_len + 1, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.enxio), dispatch(sys_audio_play, .{ info_addr, 8, 0, 0, 0, 0 }, &frame));
+
+    // Restore the honest default.
+    virtio_snd.snd_ready = false;
+}
+
+test "syscall: slots 44/45 — sys_audio_volume/sys_audio_mute are bounded and process-only (claim 9297)" {
+    userspace.init();
+    init(test_writer);
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0); // task 2 = process 0 (boot payload)
+    scheduler.start();
+    var frame = fresh_frame();
+
+    // Defaults: full volume, unmuted — the honest out-of-the-box stream.
+    virtio_snd.stream_volume = 100;
+    virtio_snd.stream_muted = false;
+
+    // In task 0 (shell, not a registered process), both are refused EINVAL
+    // before any state is touched.
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_audio_volume, .{ 50, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_audio_mute, .{ 1, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u8, 100), virtio_snd.stream_volume);
+    try std.testing.expect(!virtio_snd.stream_muted);
+
+    // Yield to the user task (task 2, pid 0).
+    try std.testing.expect(scheduler.yield_current()); // shell -> worker
+    try std.testing.expect(scheduler.yield_current()); // worker -> user (2)
+    try std.testing.expectEqual(@as(usize, 2), scheduler.current_id());
+    try std.testing.expect(process.find_by_task(2) != null);
+
+    // Volume: bounded — 101 is refused EINVAL (no silent clamping), the
+    // in-range sets return the volume.
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_audio_volume, .{ 101, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u64, 30), dispatch(sys_audio_volume, .{ 30, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u8, 30), virtio_snd.stream_volume);
+    try std.testing.expectEqual(@as(u64, 100), dispatch(sys_audio_volume, .{ 100, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u8, 100), virtio_snd.stream_volume);
+
+    // Mute: only 0/1 — anything else is EINVAL.
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_audio_mute, .{ 2, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_audio_mute, .{ 1, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expect(virtio_snd.stream_muted);
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_audio_mute, .{ 0, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expect(!virtio_snd.stream_muted);
+
+    // Restore the honest default.
+    virtio_snd.stream_volume = 100;
+    virtio_snd.stream_muted = false;
 }

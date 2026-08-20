@@ -510,3 +510,75 @@ invoke `kernel/src/file_table.zig`'s new mutating ops, which sit on
 Proof program: `FSTEST.BIN` (`user/src/fstest.zig`, issue #161); live gate
 `tools/verify-live-fs-mutation.sh`. `FILE.BIN` grows Delete/Rename buttons
 over slots 34/35.
+
+## Amendment (2026-08-18, claim 0169 — the clipboard card)
+
+Milestone 14 card S1 freezes slots 38/39 in the dispatch table (the card's
+ONE ABI change, following slot 37 `sys_file_free`):
+
+| Slot | Name | Signature | Description |
+|:---|:---|:---|:---|
+| 38 | `sys_clipboard_set` | `clipboard_set(buf_ptr, len) -> i64` | Copy `len` bytes from the caller's region through uaccess into the ONE shared kernel clipboard (`kernel/src/clipboard.zig`, a fixed 512-byte BSS buffer — `len` > 512 is truncated honestly, the ipc/udp truncation pattern). Returns the stored length (0 clears); `EINVAL` for a non-process caller, `EFAULT` for a bad pointer. |
+| 39 | `sys_clipboard_get` | `clipboard_get(buf_ptr, max) -> i64` | Copy the current clipboard contents OUT through uaccess WITHOUT consuming them (a clipboard is a shared, non-destructive read — unlike the mailbox's recv). Returns the copied length (0 when empty, `max` > 512 clamps); `EINVAL` for a non-process caller, `EFAULT` for a bad buffer on a non-empty clipboard. |
+
+`implemented_count` is now 40; reserved slots become 40–63 (S2 later adds
+40/41). The handlers marshal bytes through the claim-6120 uaccess window;
+NOTEPAD gains Copy/Cut/Paste (Ctrl+C/X/V over the whole buffer) and the
+monitor gains the `clip` command (`clip <text...>` sets it, `clip` prints
+it) as the EL1h half of the same buffer.
+
+## Amendment (2026-08-18, claim 7323 — the application-timer card)
+
+Milestone 14 card S2 freezes slots 40/41 in the dispatch table (following
+slot 39 `sys_clipboard_get`):
+
+| Slot | Name | Signature | Description |
+|:---|:---|:---|:---|
+| 40 | `sys_timer_set` | `timer_set(delay_ticks) -> i64` | Arm the CALLING process's ONE app timer to fire a single `TIMER` event (kind 9) into its ADR 0009 event queue after `delay_ticks` SCHEDULER ticks (the `sys_sleep` clock — 1 s on VZ). `delay_ticks` 0 clamps to 1 (the `sys_sleep` minimum); an over-long delay truncates honestly at the 3600-tick kernel bound; re-arming replaces any pending timer. Returns 0; `EINVAL` for a non-process caller. |
+| 41 | `sys_timer_cancel` | `timer_cancel() -> i64` | Disarm the calling process's app timer. Returns 1 if a pending timer was canceled, 0 if none was armed; `EINVAL` for a non-process caller. |
+
+`implemented_count` is now 42; reserved slots become 42–63 (S3/S4 do not
+add slots). The facility is `kernel/src/app_timers.zig`: fixed BSS arrays
+(armed flag + countdown + counters), one slot per process, zero heap. The
+fire is driven from `scheduler.on_tick` (the same host-testable tick seam
+that wakes sleepers) — each tick counts an armed timer down and posts the
+`TIMER` event through `events.push`, which wakes a task blocked in
+`sys_wait_event` via the existing `on_event_pushed` hook. Process lifecycle
+resets the slot on create/exec/exit. Proof program: `TIMER.BIN`
+(`user/src/timertest.zig`, issue #176); live gate
+`tools/verify-live-timers.sh`.
+
+## Amendment (2026-08-18, claim 7636 — the EL0 audio-seam card)
+
+Milestone 15 card A3 freezes slots 42/43 in the dispatch table (following
+slot 41 `sys_timer_cancel`):
+
+| Slot | Name | Signature | Description |
+|:---|:---|:---|:---|
+| 42 | `sys_audio_info` | `audio_info(out_ptr) -> i64` | Copy the device's NEGOTIATED playback state out through uaccess as a fixed 24-byte `AudioInfo` {`ready`, `format`, `rate`, `channels`, `period_bytes`, `max_len`}. The FIRST call drives the probe + `SET_PARAMS` negotiation itself (before any play, the app must learn what to synthesize); later calls report the cached state. Returns 0; `EINVAL` for a non-process caller, `EFAULT` for a bad buffer. |
+| 43 | `sys_audio_play` | `audio_play(buf_ptr, len) -> i64` | Play `len` bytes of PCM samples (the format/rate/channels reported by slot 42) through the virtio-snd TX queue: uaccess copy-in in bounded 4096-byte periods (zero heap), the A2 control flow (INFO → SET_PARAMS → PREPARE → START → submit/drain per period → STOP → RELEASE), every drained byte counted. Returns the bytes played; `EINVAL` for a non-process caller or zero length, `ENAMETOOLONG` over the 64 KiB `audio_max_len` bound, `EFAULT` for a bad pointer, `ENXIO` when no sound device is attached (the default VM) or a device-level refusal. |
+
+`implemented_count` is now 44; reserved slots become 44–63. The backend is
+`kernel/src/virtio_snd.zig`'s proven A1/A2 path (the sound device is
+`--sound`-flag-gated on the host, so the default VM is untouched and the
+seam reports `ENXIO` there). Proof program: `JINGLE.BIN`
+(`user/src/jingle.zig`, card A3); live gate
+`tools/verify-live-sound-app.sh`.
+
+## Amendment (2026-08-18, claim 9297 — the stream-state control)
+
+M15 follow-up freezes slots 44/45 in the dispatch table (following slot 43
+`sys_audio_play`):
+
+| Slot | Name | Signature | Description |
+|:---|:---|:---|:---|
+| 44 | `sys_audio_volume` | `audio_volume(vol) -> i64` | Set the bounded kernel-side stream gain (0..100 percent) applied to every period `sys_audio_play` submits — the same choke point `beep` and the boot chime share. Pure kernel state (works without a device; a later `--sound` attach inherits it). Returns the volume on success; `EINVAL` for a non-process caller or an out-of-range value (honest refusal, no silent clamping). |
+| 45 | `sys_audio_mute` | `audio_mute(muted) -> i64` | Set the kernel-side mute state (1 = silent; zeroed samples still drain — the stream lifecycle and accounting are untouched). Returns 0 on success; `EINVAL` for a non-process caller or a value that is not 0/1. |
+
+`implemented_count` is now 46; reserved slots become 46–63. The monitor
+half is `sound volume <0-100>` / `sound mute <on|off>` on the existing
+`sound` command (the report shows `vol=`/`mute=`); the EL0 half rides the
+same `kernel/src/virtio_snd.zig` state. Proof program: CHIME.BIN calls
+both slots (vol=50, unmuted) before its first blip — the composition
+session proves the seam mutated kernel state; live gate
+`tools/verify-live-sound-control.sh`.

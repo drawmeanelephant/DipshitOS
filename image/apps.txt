@@ -8,3 +8,4 @@ DIR.BIN | Directory List | d
 FETCH.BIN | HTTP/1.0 Client | w
 CHAT.BIN | P2P Net Chat | m
 FILE.BIN | File Browser | b
+SETTINGS.BIN | Settings | s

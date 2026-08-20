@@ -718,6 +718,196 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_fstest.step);
 
     // ------------------------------------------------------------------
+    // Guest: twenty-third ESP user program (milestone fourteen, card S2 — claim 7323)
+    // TIMER.BIN. Headless per-process app-timer proof (arm/wait/fire/cancel).
+    // ------------------------------------------------------------------
+    const timertest_prog = b.addExecutable(.{
+        .name = "user-timertest",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/timertest.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    timertest_prog.linker_script = b.path("user/linker.ld");
+    const timertest_step = b.step("timertest", "Build the twenty-third ESP user program (zig-out/bin/TIMER.BIN)");
+    const timertest_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    timertest_elf2bin.addFileArg(timertest_prog.getEmittedBin());
+    const timertest_bin = timertest_elf2bin.addOutputFileArg("TIMER.BIN");
+    timertest_elf2bin.has_side_effects = true;
+    timertest_elf2bin.stdio = .inherit;
+    timertest_step.dependOn(&timertest_elf2bin.step);
+    const install_timertest = b.addInstallFileWithDir(timertest_bin, .bin, "TIMER.BIN");
+    b.getInstallStep().dependOn(&install_timertest.step);
+
+    // ------------------------------------------------------------------
+    // Guest: twenty-fourth ESP user program (milestone fourteen, card S4 — claim 4482)
+    // VICTIM.BIN. The hostile-proof's VICTIM: owns a window, loops forever.
+    // ------------------------------------------------------------------
+    const victim_prog = b.addExecutable(.{
+        .name = "user-hardening-victim",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/hardening_victim.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    victim_prog.linker_script = b.path("user/linker.ld");
+    const victim_step = b.step("hardening-victim", "Build the twenty-fourth ESP user program (zig-out/bin/VICTIM.BIN)");
+    const victim_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    victim_elf2bin.addFileArg(victim_prog.getEmittedBin());
+    const victim_bin = victim_elf2bin.addOutputFileArg("VICTIM.BIN");
+    victim_elf2bin.has_side_effects = true;
+    victim_elf2bin.stdio = .inherit;
+    victim_step.dependOn(&victim_elf2bin.step);
+    const install_victim = b.addInstallFileWithDir(victim_bin, .bin, "VICTIM.BIN");
+    b.getInstallStep().dependOn(&install_victim.step);
+
+    // ------------------------------------------------------------------
+    // Guest: twenty-fifth ESP user program (milestone fourteen, card S4 — claim 4482)
+    // HARDEN.BIN. The hostile-consumer proof: cross-process window attacks refused.
+    // ------------------------------------------------------------------
+    const harden_prog = b.addExecutable(.{
+        .name = "user-harden",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/harden.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    harden_prog.linker_script = b.path("user/linker.ld");
+    const harden_step = b.step("harden", "Build the twenty-fifth ESP user program (zig-out/bin/HARDEN.BIN)");
+    const harden_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    harden_elf2bin.addFileArg(harden_prog.getEmittedBin());
+    const harden_bin = harden_elf2bin.addOutputFileArg("HARDEN.BIN");
+    harden_elf2bin.has_side_effects = true;
+    harden_elf2bin.stdio = .inherit;
+    harden_step.dependOn(&harden_elf2bin.step);
+    const install_harden = b.addInstallFileWithDir(harden_bin, .bin, "HARDEN.BIN");
+    b.getInstallStep().dependOn(&install_harden.step);
+
+    // ------------------------------------------------------------------
+    // Guest: twenty-sixth ESP user program (milestone fifteen, card A3 — claim 7636)
+    // JINGLE.BIN. The EL0 audio seam proof: a melody played via sys_audio_play.
+    // ------------------------------------------------------------------
+    const jingle_prog = b.addExecutable(.{
+        .name = "user-jingle",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/jingle.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    jingle_prog.linker_script = b.path("user/linker.ld");
+    const jingle_step = b.step("jingle", "Build the twenty-sixth ESP user program (zig-out/bin/JINGLE.BIN)");
+    const jingle_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    jingle_elf2bin.addFileArg(jingle_prog.getEmittedBin());
+    const jingle_bin = jingle_elf2bin.addOutputFileArg("JINGLE.BIN");
+    jingle_elf2bin.has_side_effects = true;
+    jingle_elf2bin.stdio = .inherit;
+    jingle_step.dependOn(&jingle_elf2bin.step);
+    const install_jingle = b.addInstallFileWithDir(jingle_bin, .bin, "JINGLE.BIN");
+    b.getInstallStep().dependOn(&install_jingle.step);
+
+    // ------------------------------------------------------------------
+    // Guest: twenty-seventh ESP user program (milestone fifteen, card A4 — claim 3206)
+    // CHIME.BIN. The composition capstone's event side: a blip played via
+    // sys_audio_play on every M14 app-timer TIMER event.
+    // ------------------------------------------------------------------
+    const chime_prog = b.addExecutable(.{
+        .name = "user-chime",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/chime.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    chime_prog.linker_script = b.path("user/linker.ld");
+    const chime_step = b.step("chime", "Build the twenty-seventh ESP user program (zig-out/bin/CHIME.BIN)");
+    const chime_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    chime_elf2bin.addFileArg(chime_prog.getEmittedBin());
+    const chime_bin = chime_elf2bin.addOutputFileArg("CHIME.BIN");
+    chime_elf2bin.has_side_effects = true;
+    chime_elf2bin.stdio = .inherit;
+    chime_step.dependOn(&chime_elf2bin.step);
+    const install_chime = b.addInstallFileWithDir(chime_bin, .bin, "CHIME.BIN");
+    b.getInstallStep().dependOn(&install_chime.step);
+
+    // ------------------------------------------------------------------
+    // Guest: twenty-eighth ESP user program (milestone sixteen, card C1 — claim 3805)
+    // GLOBALS.BIN. The FIRST SEGMENTED user image: built with elf2bin's
+    // `--segments` mode so it carries a real writable .data + zero-filled
+    // .bss region (the M15 JINGLE finding, claim 7636, is reversed) and a
+    // 24 KiB .rodata blob that pushes it past the OLD 16 KiB load bound.
+    // ------------------------------------------------------------------
+    const globals_prog = b.addExecutable(.{
+        .name = "user-globals",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/globals.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    globals_prog.linker_script = b.path("user/linker-segmented.ld");
+    const globals_step = b.step("globals", "Build the twenty-eighth ESP user program (zig-out/bin/GLOBALS.BIN) — the first SEGMENTED DSK3 image");
+    const globals_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py", "--segments" });
+    globals_elf2bin.addFileArg(globals_prog.getEmittedBin());
+    const globals_bin = globals_elf2bin.addOutputFileArg("GLOBALS.BIN");
+    globals_elf2bin.has_side_effects = true;
+    globals_elf2bin.stdio = .inherit;
+    globals_step.dependOn(&globals_elf2bin.step);
+    const install_globals = b.addInstallFileWithDir(globals_bin, .bin, "GLOBALS.BIN");
+    b.getInstallStep().dependOn(&install_globals.step);
+
+    // ------------------------------------------------------------------
+    // Guest: twenty-ninth ESP user program (milestone sixteen, card C2 — claim 8403)
+    // GUARD.BIN. The hostile-EL0-refused proof: steps off its stack into the
+    // guard page below it, faults, and is REAPED (status 139) by the kernel's
+    // fault dispatcher instead of parking the machine. Flat DSK1.
+    // ------------------------------------------------------------------
+    const guard_prog = b.addExecutable(.{
+        .name = "user-guard",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/guard.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    guard_prog.linker_script = b.path("user/linker.ld");
+    const guard_step = b.step("guard", "Build the twenty-ninth ESP user program (zig-out/bin/GUARD.BIN) — the hostile guard-page proof");
+    const guard_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    guard_elf2bin.addFileArg(guard_prog.getEmittedBin());
+    const guard_bin = guard_elf2bin.addOutputFileArg("GUARD.BIN");
+    guard_elf2bin.has_side_effects = true;
+    guard_elf2bin.stdio = .inherit;
+    guard_step.dependOn(&guard_elf2bin.step);
+    const install_guard = b.addInstallFileWithDir(guard_bin, .bin, "GUARD.BIN");
+    b.getInstallStep().dependOn(&install_guard.step);
+
+    // ------------------------------------------------------------------
+    // Guest: thirtieth ESP user program (Issue #214 — GUI settings panel)
+    // SETTINGS.BIN. Reads/writes /data/SETTINGS.TXT through M10 file seam.
+    // ------------------------------------------------------------------
+    const settings_prog = b.addExecutable(.{
+        .name = "user-settings",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/settings_panel.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    settings_prog.linker_script = b.path("user/linker.ld");
+    const settings_step = b.step("settings", "Build the thirtieth ESP user program (zig-out/bin/SETTINGS.BIN)");
+    const settings_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    settings_elf2bin.addFileArg(settings_prog.getEmittedBin());
+    const settings_bin = settings_elf2bin.addOutputFileArg("SETTINGS.BIN");
+    settings_elf2bin.has_side_effects = true;
+    settings_elf2bin.stdio = .inherit;
+    settings_step.dependOn(&settings_elf2bin.step);
+    const install_settings = b.addInstallFileWithDir(settings_bin, .bin, "SETTINGS.BIN");
+    b.getInstallStep().dependOn(&install_settings.step);
+
+    // ------------------------------------------------------------------
     // Top-level steps. System-command steps are marked as having side
     // effects (and inherit stdio) so they always execute instead of being
     // skipped by the build cache. (No QEMU path: this project targets Apple
@@ -750,6 +940,14 @@ pub fn build(b: *std.Build) void {
     image.addFileArg(chat_bin); // ... [CHAT.BIN] (claim 5416: twentieth user program, graphical P2P chat)
     image.addFileArg(file_bin); // ... [FILE.BIN] (claim 4742: twenty-first user program, GUI file browser)
     image.addFileArg(fstest_bin); // ... [FSTEST.BIN] (claim 5801: twenty-second user program, mutating-fs proof)
+    image.addFileArg(timertest_bin); // ... [TIMER.BIN] (claim 7323: twenty-third user program, app-timer proof)
+    image.addFileArg(victim_bin); // ... [VICTIM.BIN] (claim 4482: twenty-fourth user program, hostile-proof victim)
+    image.addFileArg(harden_bin); // ... [HARDEN.BIN] (claim 4482: twenty-fifth user program, hostile-consumer proof)
+    image.addFileArg(jingle_bin); // ... [JINGLE.BIN] (claim 7636: twenty-sixth user program, EL0 audio-seam proof)
+    image.addFileArg(chime_bin); // ... [CHIME.BIN] (claim 3206: twenty-seventh user program, composition capstone proof)
+    image.addFileArg(globals_bin); // ... [GLOBALS.BIN] (claim 3805: twenty-eighth user program, the first SEGMENTED DSK3 image)
+    image.addFileArg(guard_bin); // ... [GUARD.BIN] (claim 8403: twenty-ninth user program, the hostile guard-page proof)
+    image.addFileArg(settings_bin); // ... [SETTINGS.BIN] (Issue #214: thirtieth user program, GUI settings panel)
     image.has_side_effects = true;
     image.stdio = .inherit;
     image_step.dependOn(&image.step);

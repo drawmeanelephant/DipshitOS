@@ -42,6 +42,12 @@ const virtio_net = @import("virtio_net.zig");
 // `--screenshot`) — the graphics keystone. Pre-exit discovery, post-MMU
 // re-arm, the control-queue 2D command path to a fixed BSS framebuffer.
 const virtio_gpu = @import("virtio_gpu.zig");
+// Milestone fifteen card A1 (claim 6140): virtio-snd transport (the
+// runner's VZVirtioSoundDeviceConfiguration under `--sound`) — the audio
+// keystone. Pre-exit discovery, post-MMU re-arm; DID 0x1059 expected
+// (0x1040 + virtio device type 25, the same scheme as net/entropy/gpu),
+// whatever is observed is recorded in `snd_did`.
+const virtio_snd = @import("virtio_snd.zig");
 const fbtext = @import("text.zig"); // milestone six card G2 (claim 3194): framebuffer text
 const road_pops = @import("road_pops.zig"); // milestone six card G3 (claim 1574): the Road Pops tee — the boot terminal on the screen
 const xhci = @import("xhci.zig"); // milestone seven card I1 (claim 4272): the XHCI host-controller transport (keyboard/pointer live behind it)
@@ -336,6 +342,19 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
     // on every existing gate — the default VM is unchanged.
     const gpu_ready = virtio_gpu.virtio_gpu_init();
 
+    // Milestone fifteen card A1 (claim 6140): the virtio-pci sound
+    // transport (the runner's `--sound` attachment — modern virtio-snd,
+    // DID 0x1059 expected per the 0x1040 + device-id scheme; confirm-at-
+    // claim-time, whatever is observed is recorded). Armed PRE-EXIT like
+    // the console/blk/entropy/net/gpu devices (config-space + BAR reads
+    // must stay pre-exit, claim 0013); its BAR0 window is handed to the
+    // identity map below, and the transport is RE-ARMED post-MMU (the
+    // claim-6420 lesson: VZ resets virtio devices at ExitBootServices)
+    // right after the MMU switch. The default runner attaches no sound
+    // device, so `snd_ready` is false on every existing gate — the
+    // default VM is unchanged.
+    const snd_ready = virtio_snd.virtio_snd_init();
+
     // Milestone seven card I1 (claim 4272): the XHCI host-controller
     // transport — the device VZ's `--input` attaches
     // (VZUSBKeyboardConfiguration + VZUSBScreenCoordinatePointingDeviceConfiguration,
@@ -451,6 +470,15 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
         extra_windows[extra_count] = .{ .base = virtio_gpu.gpu_bar0, .len = 0x10000 };
         extra_count += 1;
     }
+    // Milestone fifteen card A1 (claim 6140): the sound transport BAR
+    // (pre-exit resolved) — same Device-window treatment as the other
+    // transports so post-MMU common-config reads reach the device. Only
+    // present under the runner's `--sound` flag (default VM: no sound
+    // device, no window).
+    if (snd_ready and virtio_snd.snd_bar0 != 0) {
+        extra_windows[extra_count] = .{ .base = virtio_snd.snd_bar0, .len = 0x10000 };
+        extra_count += 1;
+    }
     const user_text = userspace.text_region(base);
     const user_stack = userspace.stack_region(base);
     const user_regions = [_]mmu.UserRegion{
@@ -491,6 +519,11 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
     // `build_identity_map` consumed above.
     syscall.set_user_regions(userspace.text_va_region(), userspace.stack_va_region());
     exceptions.set_svc_dispatcher(syscall.handle_svc);
+    // Milestone sixteen C2 (claim 8403): an EL0 synchronous fault (a guard-
+    // page step, an unmapped access, a non-executable fetch) is process
+    // termination, not a machine hang — the scheduler reaps the faulting
+    // process (status 139) and stages the next task.
+    exceptions.set_fault_dispatcher(scheduler.fault_current);
     // Claim 7948 (roadmap item 5, second half): GIC + generic timer. The
     // MADT/GTDT discovery ran PRE-EXIT inside pci.dump_acpi (post-exit ACPI
     // reads hang on VZ, claim 0013); program the controller + timer NOW —
@@ -755,6 +788,10 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
                 // transfer + flush per batch. The Road Pops tee's present
                 // target (rp_text_present) routes through the compositor.
                 driving_award.arm();
+                // Step 13 (Issue #213): boot splash — render once before Road Pops
+                // takes over the terminal. Shows the system name + version for
+                // ~3 seconds (busy-wait, no timer at this boot stage).
+                driving_award.render_splash(3);
                 // Claim 0015, Road Pops edition: a Target struct literal
                 // with all-constant fields (ctx + &fn entries) is folded
                 // into .rodata, whose &fn entries hold LINK-TIME absolute
@@ -775,6 +812,51 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
                 uart_puts(virtio_gpu.gpu_fail);
                 uart_puts(")\n");
             }
+        }
+    }
+    // Milestone fifteen card A1 (claim 6140): re-arm the virtio-snd
+    // transport post-MMU (the claim-6420/2665 lesson — VZ resets SOME
+    // virtio devices at ExitBootServices; blk/entropy reset to st=00, net
+    // does NOT — the sound answer is observed, not assumed: st=0f
+    // pre-rearm on the live runs, so the sound device is NOT reset, like
+    // net/gpu; the pre-rearm status is printed so the host sees it either
+    // way). The re-arm itself is unconditional and idempotent. A1 arms
+    // the CONTROL queue (queue 0) and reaches DRIVER_OK; the PCM
+    // playback path is card A2. The default runner attaches NO sound
+    // device, so on every existing gate this whole block is skipped and
+    // the boot output stays byte-identical.
+    if (snd_ready) {
+        uart_puts("snd: pre-rearm st=");
+        uart_hex8(virtio_snd.snd_status());
+        uart_puts("\n");
+        if (virtio_snd.snd_rearm()) {
+            uart_puts("snd: rearm ok st=");
+            uart_hex8(virtio_snd.snd_status());
+            uart_puts(" qoff=");
+            uart_hex(virtio_snd.snd_queue_notify_off);
+            uart_puts("\n");
+            // Milestone fifteen card A4 (claim 3206): the BOOT CHIME — the
+            // composition capstone's hearable welcome. The kernel plays a
+            // short two-tone "ding-dong" through the proven A2 beep path
+            // (snd_chime = snd_beep 660/150 + 880/220) the moment the
+            // transport is live, so the device + playback are proven at the
+            // earliest possible boot moment. Flag-gated the same way as the
+            // transport: no `--sound` device → no chime → the default boot
+            // stays byte-identical. A failure is reported honestly (never a
+            // hang — every step's status is the record, the same fields the
+            // monitor `beep` command reports).
+            const chime_st = virtio_snd.snd_chime();
+            if (chime_st == virtio_snd.S_OK) {
+                uart_puts("chime: boot chime played (660+880)\n");
+            } else {
+                uart_puts("chime: boot chime failed (");
+                uart_puts(virtio_snd.snd_fail);
+                uart_puts(")\n");
+            }
+        } else {
+            uart_puts("snd: rearm failed (");
+            uart_puts(virtio_snd.snd_fail);
+            uart_puts(")\n");
         }
     }
     // Milestone seven card I1 (claim 4272): initialize the XHCI host

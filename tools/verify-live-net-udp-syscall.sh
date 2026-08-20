@@ -32,7 +32,7 @@
 #
 # After the program exits, script2 (the 0.5 s settle pattern) runs the
 # OBSERVATION commands on the SAME kernel state: `syscalls` (the report
-# now prints rows 0-33 — implemented=38, rows 9/10/11 with calls > 0)
+# now prints rows 0-41 — implemented=46, rows 9/10/11 with calls > 0)
 # and `net udp` / `net` (the counters rx=2, tx=2, loop=1, drop=0 — the
 # loopback + the round trip, visible in the SAME monitor surface the
 # N5 gate greps).
@@ -227,8 +227,8 @@ if [ -f "$SERIAL" ]; then
     grep -a -qF -- "tasks user-exec exited status=17" "$SERIAL" && EXITT=1
     grep -a -qF -- "tasks user-exec reaped" "$SERIAL" && REAPED=1
     # The observation phase (script2): the syscall report now prints rows
-    # 0-33 (implemented=38) and the seam rows show real call counts.
-    grep -a -qF -- "syscalls: slots=64 implemented=38" "$SERIAL" && SYSCOUNT=1
+    # 0-41 (implemented=46) and the seam rows show real call counts.
+    grep -a -qF -- "syscalls: slots=64 implemented=46" "$SERIAL" && SYSCOUNT=1
     for row in "  9 sys_udp_listen calls=" "  10 sys_udp_send calls=" "  11 sys_udp_recv calls="; do
         if grep -a -qF -- "$row" "$SERIAL" && ! grep -a -qF -- "${row}0" "$SERIAL"; then
             ROWS=$((ROWS + 1))
@@ -258,7 +258,7 @@ CAPSIZE=0
     echo "revision: $REVISION branch=$BRANCH dirty-files=$DIRTY"
     echo "phase 1: exec UDP.BIN — sys_udp_listen(7000) -> 'udp: listen ok'; loopback send+recv -> 'udp: loop ping'; peer send (10.0.0.2:9999) + poll recv of the host's echoed answer -> 'udp: got ping'; unbound-port recv + unresolved-peer send -> 'udp: recv err -1' / 'udp: send err -1' (EINVAL from EL0); sys_exit(17) -> 'procs UDP.BIN exited status=17' — the markers IN ORDER"
     echo "phase 1 capture: the 42-byte ARP request + the 46-byte datagram (src 10.0.0.1:7000 -> 10.0.0.2:9999, payload 'ping') byte-exact"
-    echo "phase 2: syscalls (implemented=38, rows 9/10/11 with calls > 0) + net udp / net counters (rx=2, tx=2, loop=1, drop=0)"
+    echo "phase 2: syscalls (implemented=46, rows 9/10/11 with calls > 0) + net udp / net counters (rx=2, tx=2, loop=1, drop=0)"
     echo "date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     echo
 } >> "$REPORT"
@@ -288,7 +288,7 @@ echo "observation: syscalls-report=$SYSCOUNT rows-with-calls=$ROWS/3 net-udp-cou
 echo
 echo "=== result ==="
 if [ "$PASS" = 4 ]; then
-    echo "verify-live-net-udp-syscall: PASS — the UDP syscall seam is live on VZ: UDP.BIN (a USER PROGRAM loaded by exec) bound port 7000 through sys_udp_listen, loopback-sent and received through sys_udp_send/sys_udp_recv (the 12-byte datagram, byte-exact), sent the 46-byte datagram to 10.0.0.2:9999 (byte-exact in the capture behind the ARP request) and received the host's --net-udp-respond answer, observed the EINVAL error mapping from EL0 (unbound-port recv, unresolved-peer send), and exited with status 17 (the reap reports landed); the observation phase shows implemented=38 with rows 9/10/11 counted and the shared counters rx=2 tx=2 loop=1 drop=0. ($PASS/4 phases)."
+    echo "verify-live-net-udp-syscall: PASS — the UDP syscall seam is live on VZ: UDP.BIN (a USER PROGRAM loaded by exec) bound port 7000 through sys_udp_listen, loopback-sent and received through sys_udp_send/sys_udp_recv (the 12-byte datagram, byte-exact), sent the 46-byte datagram to 10.0.0.2:9999 (byte-exact in the capture behind the ARP request) and received the host's --net-udp-respond answer, observed the EINVAL error mapping from EL0 (unbound-port recv, unresolved-peer send), and exited with status 17 (the reap reports landed); the observation phase shows implemented=46 with rows 9/10/11 counted and the shared counters rx=2 tx=2 loop=1 drop=0. ($PASS/4 phases)."
     echo "PASS: $PASS/4" >> "$REPORT"
     sleep 0.5
     exit 0

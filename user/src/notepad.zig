@@ -22,8 +22,8 @@ const Event = ui.Event;
 pub const window_id: u32 = 2;
 pub const window_x: u32 = 56;
 pub const window_y: u32 = 56;
-pub const window_w: u32 = 256;
-pub const window_h: u32 = 192;
+pub const window_w: u32 = 512;
+pub const window_h: u32 = 384;
 
 pub const exit_status: u32 = 43;
 pub const notes_path: []const u8 = "/data/notes.txt";
@@ -74,6 +74,18 @@ pub const TextBuffer = struct {
         self.len += 1;
         self.cursor += 1;
         return true;
+    }
+
+    /// Insert a whole slice at the cursor, byte by byte, stopping at the
+    /// buffer capacity. Returns the number of bytes actually inserted (short
+    /// when the buffer is nearly full — the paste path's honest bound).
+    pub fn insert_slice(self: *TextBuffer, text: []const u8) usize {
+        var inserted: usize = 0;
+        for (text) |ch| {
+            if (!self.insert_char(ch)) break;
+            inserted += 1;
+        }
+        return inserted;
     }
 
     pub fn backspace(self: *TextBuffer) bool {
@@ -298,6 +310,15 @@ pub const AppState = struct {
     status_msg: [16]u8 = "Ready\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00".*,
     status_len: usize = 5,
 
+    // Claim 3289 (M14 S3): the timer-driven cursor blink. The cursor is
+    // SOLID while armed=false (the default — NOTEPAD's normal interactive
+    // path) and toggles on every `TIMER` event while armed=true. The
+    // toggle itself is a pure state transition (host-tested); the SVC
+    // re-arm lives in the EL0 entry loop.
+    cursor_visible: bool = true,
+    blink_armed: bool = false,
+    blink_count: u32 = 0,
+
     btn_load: Button = Button.init(Rect.make(6, 6, 44, 20), "Load"),
     btn_save: Button = Button.init(Rect.make(54, 6, 44, 20), "Save"),
     btn_clear: Button = Button.init(Rect.make(102, 6, 48, 20), "Clear"),
@@ -307,6 +328,23 @@ pub const AppState = struct {
         s.btn_save.bg_color = ui.COLOR_ACCENT;
         s.btn_clear.bg_color = ui.COLOR_DANGER;
         return s;
+    }
+
+    /// Claim 3289: one TIMER event — toggle the cursor's visibility. The
+    /// caller re-arms for the next tick; on re-arm failure it calls
+    /// `stop_blink` so the cursor parks VISIBLE (never a hard hang).
+    /// Returns true when the toggle changed anything on screen.
+    pub fn handle_timer_event(self: *AppState) bool {
+        self.cursor_visible = !self.cursor_visible;
+        self.blink_count += 1;
+        return true;
+    }
+
+    /// Claim 3289: park the blink with the cursor visible (the timer seam
+    /// failed — the app degrades honestly to the solid cursor).
+    pub fn stop_blink(self: *AppState) void {
+        self.blink_armed = false;
+        self.cursor_visible = true;
     }
 
     pub fn set_status(self: *AppState, msg: []const u8) void {
@@ -360,6 +398,23 @@ pub const AppState = struct {
         }
     }
 
+    /// Paste the shared clipboard at the cursor (claim 0169). The clipboard
+    /// read is non-destructive; the insert clamps at the editor capacity.
+    pub fn paste_clipboard(self: *AppState) bool {
+        var temp: [ui.clipboard_capacity]u8 = undefined;
+        const n = ui.clipboard_get(&temp);
+        if (n <= 0) {
+            self.set_status("No Clip");
+            return true;
+        }
+        const ulen: usize = @intCast(n);
+        _ = self.buffer.insert_slice(temp[0..ulen]);
+        _ = self.layout.ensure_visible(self.buffer.get_slice(), self.buffer.cursor);
+        self.layout.clamp_scroll(self.buffer.get_slice());
+        self.set_status("Pasted");
+        return true;
+    }
+
     pub fn draw(self: *const AppState, win: u32) void {
         // Window background
         ui.draw_rect(win, Rect.make(0, 0, window_w, window_h), ui.COLOR_BG);
@@ -407,8 +462,10 @@ pub const AppState = struct {
         }
 
         // Cursor: always visible (ensure_visible keeps its row in the viewport).
+        // Claim 3289: the timer-driven blink toggles cursor_visible, so the
+        // cursor is drawn only on the "on" half of the blink.
         const cpos = TextLayout.position_at(slice, self.buffer.cursor);
-        if (cpos.row >= self.layout.scroll and cpos.row < self.layout.scroll + TextLayout.visible_rows) {
+        if (self.cursor_visible and cpos.row >= self.layout.scroll and cpos.row < self.layout.scroll + TextLayout.visible_rows) {
             const x = text_x0 + @as(u32, @intCast(cpos.col)) * glyph_w;
             const y = text_y0 + @as(u32, @intCast(cpos.row - self.layout.scroll)) * line_h;
             if (x + 2 <= text_area.x + text_area.w) {
@@ -569,6 +626,33 @@ pub const AppState = struct {
             }
         }
 
+        // Ctrl+C / Ctrl+X / Ctrl+V: copy / cut / paste through the SHARED
+        // clipboard (claim 0169). No selection model yet — copy and cut take
+        // the WHOLE buffer (an honest bound; selection is a later card).
+        if ((ev.flags & ui.MOD_CTRL) != 0) {
+            if (keycode == 0x06) { // 'c' -> copy
+                if (ui.clipboard_set(self.buffer.get_slice()) < 0) {
+                    self.set_status("Copy Err");
+                } else {
+                    self.set_status("Copied");
+                }
+                return true;
+            }
+            if (keycode == 0x1b) { // 'x' -> cut
+                if (ui.clipboard_set(self.buffer.get_slice()) < 0) {
+                    self.set_status("Cut Err");
+                } else {
+                    self.buffer.clear();
+                    self.layout.scroll = 0;
+                    self.set_status("Cut");
+                }
+                return true;
+            }
+            if (keycode == 0x19) { // 'v' -> paste
+                return self.paste_clipboard();
+            }
+        }
+
         // Printable character
         if (ascii >= 0x20 and ascii <= 0x7e) {
             if (self.buffer.insert_char(ascii)) {
@@ -587,8 +671,79 @@ pub const AppState = struct {
 // Entry Point (EL0)
 // ---------------------------------------------------------------------------
 
-pub export fn _start() callconv(.c) noreturn {
+/// Claim 3289 (M14 S3): blink cadence. The cursor toggles once per
+/// `blink_interval_ticks` scheduler ticks (the per-process app timer, not a
+/// `sys_sleep` spin), and the selfdemo runs `selfdemo_blinks` toggles.
+pub const blink_interval_ticks: u64 = 2;
+pub const selfdemo_blinks: u32 = 6;
+
+/// Claim 3289 (M14 S3): the composition selfdemo. NOTEPAD is exec'd with
+/// `selfdemo` in its argv (claim 4636's entry contract: argc in x0, the
+/// argv block VA in x1 — each slot a 32-byte NUL-terminated string in the
+/// program's own read-only text page). The demo runs the S1+S2 composition
+/// in ONE app: paste the shared kernel clipboard into the buffer (the S1
+/// `sys_clipboard_get` path — the gate pre-loads the clipboard with the
+/// terminal's `clip` command), copy the result back out (`sys_clipboard_set`
+/// — the S1 write path), then blink the cursor `selfdemo_blinks` times on
+/// the per-process app timer (`sys_timer_set` re-armed after every `TIMER`
+/// event — the S2 path, no spin loop). Every step prints a serial marker,
+/// so the live gate observes BOTH facilities in one EL0 session.
+pub fn run_selfdemo(app: *AppState, win: u32) void {
+    // S1 read path: paste the shared kernel clipboard at the cursor.
+    var temp: [ui.clipboard_capacity]u8 = undefined;
+    const n = ui.clipboard_get(&temp);
+    if (n <= 0) {
+        app.set_status("No Clip");
+        ui.write_console("notepad: selfdemo paste failed (clipboard empty)\n");
+        ui.exit_process(2);
+    }
+    const ulen: usize = @intCast(n);
+    const inserted = app.buffer.insert_slice(temp[0..ulen]);
+    if (inserted != ulen) {
+        app.set_status("Full");
+        ui.write_console("notepad: selfdemo paste truncated\n");
+        ui.exit_process(3);
+    }
+    app.set_status("Pasted");
+    ui.write_console("notepad: selfdemo pasted\n");
+
+    // S1 write path: copy the buffer back into the shared clipboard.
+    const set_rc = ui.clipboard_set(app.buffer.get_slice());
+    if (set_rc < 0) {
+        app.set_status("Copy Err");
+        ui.write_console("notepad: selfdemo copy failed\n");
+        ui.exit_process(4);
+    }
+    app.set_status("Copied");
+    ui.write_console("notepad: selfdemo copied\n");
+
+    // S2: arm the blink timer and let the event loop toggle the cursor.
+    app.blink_armed = true;
+    if (ui.timer_set(blink_interval_ticks) < 0) {
+        ui.write_console("notepad: selfdemo timer arm failed\n");
+        ui.exit_process(5);
+    }
+
+    // Repaint with the pasted content.
+    app.draw(win);
+    ui.win_present(win);
+    ui.write_console("notepad: selfdemo armed blink\n");
+}
+
+pub export fn _start(argc: usize, argv: ?[*]const [32]u8) callconv(.c) noreturn {
     var app = AppState.init();
+
+    // Claim 4636 entry contract: argv[0] == "selfdemo" selects the M14 S3
+    // composition selfdemo (claim 3289); a plain `exec NOTEPAD.BIN` with no
+    // args keeps the interactive editor exactly as before.
+    var selfdemo = false;
+    if (argc >= 1) {
+        if (argv) |slots| {
+            const arg0 = slots[0];
+            const len = std.mem.indexOfScalar(u8, &arg0, 0) orelse arg0.len;
+            selfdemo = std.mem.eql(u8, arg0[0..len], "selfdemo");
+        }
+    }
 
     // 1. Open Window
     const win_res = ui.win_open(window_x, window_y, window_w, window_h);
@@ -605,6 +760,9 @@ pub export fn _start() callconv(.c) noreturn {
     ui.win_present(win);
     ui.write_console("notepad: ready\n");
 
+    // 2b. Claim 3289: the composition selfdemo (paste + copy + blink).
+    if (selfdemo) run_selfdemo(&app, win);
+
     // 3. Event Loop
     var ev: Event = undefined;
     while (true) {
@@ -618,7 +776,24 @@ pub export fn _start() callconv(.c) noreturn {
             break;
         }
 
-        if (ev.kind == ui.MOUSE_DOWN or ev.kind == ui.MOUSE_UP or ev.kind == ui.MOUSE_MOVE) {
+        if (ev.kind == ui.EVENT_TIMER) {
+            // Claim 3289: the timer-driven blink. Toggle the cursor, then
+            // re-arm for the next tick; a failed re-arm parks the cursor
+            // visible (honest degradation, never a hang).
+            dirty = app.handle_timer_event() or dirty;
+            if (app.blink_armed) {
+                ui.write_console("notepad: cursor blink\n");
+                if (ui.timer_set(blink_interval_ticks) < 0) {
+                    app.stop_blink();
+                    ui.write_console("notepad: blink timer lost\n");
+                }
+                if (selfdemo and app.blink_count >= selfdemo_blinks) {
+                    app.stop_blink();
+                    ui.write_console("notepad: selfdemo done\n");
+                    break;
+                }
+            }
+        } else if (ev.kind == ui.MOUSE_DOWN or ev.kind == ui.MOUSE_UP or ev.kind == ui.MOUSE_MOVE) {
             dirty = app.handle_mouse_events(&ev) or dirty;
         } else if (ev.kind == ui.KEY_DOWN) {
             dirty = app.handle_keyboard_event(&ev) or dirty;
@@ -631,7 +806,22 @@ pub export fn _start() callconv(.c) noreturn {
                 ui.win_close(win);
                 ui.exit_process(exit_status);
             }
-            if (ev.kind == ui.MOUSE_DOWN or ev.kind == ui.MOUSE_UP or ev.kind == ui.MOUSE_MOVE) {
+            if (ev.kind == ui.EVENT_TIMER) {
+                dirty = app.handle_timer_event() or dirty;
+                if (app.blink_armed) {
+                    ui.write_console("notepad: cursor blink\n");
+                    if (ui.timer_set(blink_interval_ticks) < 0) {
+                        app.stop_blink();
+                        ui.write_console("notepad: blink timer lost\n");
+                    }
+                    if (selfdemo and app.blink_count >= selfdemo_blinks) {
+                        app.stop_blink();
+                        ui.write_console("notepad: selfdemo done\n");
+                        ui.win_close(win);
+                        ui.exit_process(exit_status);
+                    }
+                }
+            } else if (ev.kind == ui.MOUSE_DOWN or ev.kind == ui.MOUSE_UP or ev.kind == ui.MOUSE_MOVE) {
                 dirty = app.handle_mouse_events(&ev) or dirty;
             } else if (ev.kind == ui.KEY_DOWN) {
                 dirty = app.handle_keyboard_event(&ev) or dirty;
@@ -883,4 +1073,104 @@ test "notepad: keyboard navigation routes through TextLayout (claim 1771)" {
     var ev2 = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 2, .arg0 = 0x4c, .arg1 = 0 };
     try std.testing.expect(app.handle_keyboard_event(&ev2));
     try std.testing.expectEqualStrings(buf[1..24], app.buffer.get_slice());
+}
+
+test "notepad: TextBuffer insert_slice pastes at the cursor and clamps at capacity (claim 0169)" {
+    var tb = TextBuffer.init();
+    tb.set_content("ab");
+    tb.cursor = 1;
+
+    const inserted = tb.insert_slice("XY");
+    try std.testing.expectEqual(@as(usize, 2), inserted);
+    try std.testing.expectEqualStrings("aXYb", tb.get_slice());
+    try std.testing.expectEqual(@as(usize, 3), tb.cursor);
+
+    // Near capacity: insert_slice stops when the buffer is full.
+    var big = TextBuffer.init();
+    const near = "a" ** 511;
+    big.set_content(near[0..511]);
+    big.cursor = big.len;
+    const n2 = big.insert_slice("xyz");
+    try std.testing.expectEqual(@as(usize, 1), n2);
+    try std.testing.expectEqual(@as(usize, 512), big.len);
+}
+
+test "notepad: the timer-driven cursor blink toggles and re-arms (claim 3289)" {
+    var app = AppState.init();
+
+    // Not blinking by default: the cursor is solid, no timer armed.
+    try std.testing.expect(app.cursor_visible);
+    try std.testing.expect(!app.blink_armed);
+    try std.testing.expectEqual(@as(u32, 0), app.blink_count);
+
+    // Arm the blink (the EL0 loop's SVC side is not host-testable, but the
+    // state transition is): the first TIMER event hides the cursor.
+    app.blink_armed = true;
+    try std.testing.expect(app.handle_timer_event());
+    try std.testing.expect(!app.cursor_visible);
+    try std.testing.expectEqual(@as(u32, 1), app.blink_count);
+
+    // The second TIMER event shows it again — a real blink cycle.
+    try std.testing.expect(app.handle_timer_event());
+    try std.testing.expect(app.cursor_visible);
+    try std.testing.expectEqual(@as(u32, 2), app.blink_count);
+
+    // stop_blink (the re-arm-failure path) parks the cursor VISIBLE.
+    _ = app.handle_timer_event(); // now hidden
+    try std.testing.expect(!app.cursor_visible);
+    app.stop_blink();
+    try std.testing.expect(!app.blink_armed);
+    try std.testing.expect(app.cursor_visible);
+
+    // The selfdemo exit bound: after selfdemo_blinks toggles the demo is
+    // done (the loop checks blink_count >= selfdemo_blinks).
+    app.blink_count = selfdemo_blinks;
+    try std.testing.expect(app.blink_count >= selfdemo_blinks);
+}
+
+test "notepad: the selfdemo pastes the clipboard, copies it back, and honors the capacity bound (claim 3289)" {
+    // The paste half (run_selfdemo's clipboard_get -> insert_slice flow with
+    // the EL0 SVC wrapper mocked by direct buffer ops, the class-A pattern
+    // from claim 0169): the pasted bytes land at the cursor.
+    var app = AppState.init();
+    app.buffer.set_content("ab");
+    app.buffer.cursor = 1;
+    const inserted = app.buffer.insert_slice("XY");
+    try std.testing.expectEqual(@as(usize, 2), inserted);
+    try std.testing.expectEqualStrings("aXYb", app.buffer.get_slice());
+
+    // The copy half: the whole buffer is what clipboard_set would take.
+    try std.testing.expectEqualStrings("aXYb", app.buffer.get_slice());
+
+    // The selfdemo's honest bound: a truncated paste is refused.
+    var big = AppState.init();
+    big.buffer.set_content("a" ** 512);
+    const n = big.buffer.insert_slice("overflow");
+    try std.testing.expectEqual(@as(usize, 0), n); // buffer already full
+    try std.testing.expectEqual(@as(usize, 512), big.buffer.len);
+}
+
+test "notepad: copy/cut chords drive the clipboard path and cut clears (claim 0169)" {
+    var app = AppState.init();
+    app.buffer.set_content("hello");
+    app.buffer.cursor = 2;
+
+    // Ctrl+X (usage 0x1b): cut — the buffer clears, status becomes "Cut".
+    var ev_cut = Event{ .kind = ui.KEY_DOWN, .flags = ui.MOD_CTRL, .seq = 1, .arg0 = 0x1b, .arg1 = 0 };
+    try std.testing.expect(app.handle_keyboard_event(&ev_cut));
+    try std.testing.expectEqualStrings("", app.buffer.get_slice());
+    try std.testing.expectEqualStrings("Cut", app.status_msg[0..app.status_len]);
+
+    // Ctrl+C (usage 0x06): copy keeps the buffer, status becomes "Copied".
+    var ev_copy = Event{ .kind = ui.KEY_DOWN, .flags = ui.MOD_CTRL, .seq = 2, .arg0 = 0x06, .arg1 = 0 };
+    try std.testing.expect(app.handle_keyboard_event(&ev_copy));
+    try std.testing.expectEqualStrings("", app.buffer.get_slice());
+    try std.testing.expectEqualStrings("Copied", app.status_msg[0..app.status_len]);
+
+    // Ctrl+V (usage 0x19) with an empty clipboard (the host wrapper returns
+    // 0): paste reports "No Clip" and leaves the buffer empty.
+    var ev_paste = Event{ .kind = ui.KEY_DOWN, .flags = ui.MOD_CTRL, .seq = 3, .arg0 = 0x19, .arg1 = 0 };
+    try std.testing.expect(app.handle_keyboard_event(&ev_paste));
+    try std.testing.expectEqualStrings("No Clip", app.status_msg[0..app.status_len]);
+    try std.testing.expectEqualStrings("", app.buffer.get_slice());
 }

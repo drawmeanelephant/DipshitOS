@@ -47,10 +47,10 @@
 #   5. The final procs read shows BOTH processes still running, and
 #      neither ever exits (no "name=PEER.BIN state=exited" /
 #      "name=COUNTER.BIN state=exited" anywhere in the log).
-#   6. Card 3g (claim 5795): with counter + peer + two USER.BINs the
-#      pool is 7/7 (shell + worker + 4 users + idle) — the FIFTH exec is
-#      refused with "error: no free scheduler pool slot" (the capacity
-#      proof, re-derived at the new budget).
+#   6. Milestone sixteen C3 (claim 0339): with counter + peer + six
+#      USER.BINs the pool is 11/11 (shell + worker + 8 users + idle) —
+#      the NINTH exec is refused with "error: no free scheduler pool slot"
+#      (the capacity proof, re-derived at the grown budget).
 #   7. The shell stays responsive (both echo replies); no exception park.
 #
 # The runner runs WITHOUT --script-expect: the never-exiting programs need
@@ -78,7 +78,7 @@ STATIC_EXIT_LINE="tasks user-el0 exited status=7"
 # The first echoed message: the flow is established (the peer received
 # what the counter sent) before the mbox drain snapshot runs.
 FLOW_MARKER="peer: got ping 1"
-# The refused fifth exec (7/7 pool — card 3g's budget).
+# The refused ninth exec (11/11 pool — milestone sixteen C3's budget).
 POOL_FULL_LINE="error: no free scheduler pool slot"
 
 echo "=== verify-live-ipc: claim 5965 — two live processes exchange data through the kernel mailbox, $BOOTS boot(s) ==="
@@ -100,10 +100,10 @@ codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/
 # 1 is deterministically PEER.BIN, since the boot payload's pid 0 stays an
 # exited registry row) + the two-running snapshot + the shell check.
 printf 'ls\nexec PEER.BIN\nexec COUNTER.BIN 1\nprocs\necho rx-ipc-phase1\n' > "$SCRIPT1"
-# Phase 2: the drained-ring snapshot + both-still-running + two more
-# USER.BINs (filling the pool to 7/7) + the FIFTH exec refusal + the
-# shell check.
-printf 'mbox\nprocs\nexec USER.BIN\nexec USER.BIN\nexec USER.BIN\necho rx-ipc-ok\n' > "$SCRIPT2"
+# Phase 2: the drained-ring snapshot + both-still-running + six more
+# USER.BINs (counter + peer + 6 users = 8 = 11/11 pool) + the NINTH exec
+# refusal + the shell check.
+printf 'mbox\nprocs\nexec USER.BIN\nexec USER.BIN\nexec USER.BIN\nexec USER.BIN\nexec USER.BIN\nexec USER.BIN\nexec USER.BIN\necho rx-ipc-ok\n' > "$SCRIPT2"
 
 run_one() {
     local tag="$1"
@@ -230,7 +230,7 @@ run_one() {
         [ "$(grep -aFc -- "name=PEER.BIN state=exited" artifacts/vm-serial.log || true)" = 0 ] && \
             [ "$(grep -aFc -- "name=COUNTER.BIN state=exited" artifacts/vm-serial.log || true)" = 0 ] && never_exited=1 || true
 
-        # 7/7 pool (card 3g): the fifth exec is refused.
+        # 11/11 pool (C3): the ninth exec is refused.
         [ "$(grep -aFc -- "$POOL_FULL_LINE" artifacts/vm-serial.log || true)" -ge 1 ] && pool_full=1 || true
         [ "$(grep -aFxc -- "rx-ipc-phase1" artifacts/vm-serial.log || true)" = 1 ] && echo1=1 || true
         [ "$(grep -aFxc -- "rx-ipc-ok" artifacts/vm-serial.log || true)" = 1 ] && echo2=1 || true
@@ -269,7 +269,7 @@ done
 echo
 echo "=== result ==="
 if [ "$pass" = "$BOOTS" ]; then
-    echo "verify-live-ipc: PASS — COUNTER.BIN's 6-message bursts flowed through the 8-slot kernel mailbox into PEER.BIN's sys_ipc_recv and came back byte-exact in the serial log, the peak ring depth stayed within 5..8 with ZERO enospc, and a fifth exec was pool_full at the 7/7 budget ($pass/$BOOTS boot(s))."
+    echo "verify-live-ipc: PASS — COUNTER.BIN's 6-message bursts flowed through the 8-slot kernel mailbox into PEER.BIN's sys_ipc_recv and came back byte-exact in the serial log, the peak ring depth stayed within 5..8 with ZERO enospc, and a ninth exec was pool_full at the 11/11 budget ($pass/$BOOTS boot(s))."
     echo "PASS: $pass/$BOOTS" >> "$REPORT"
     exit 0
 fi

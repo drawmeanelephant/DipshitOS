@@ -59,6 +59,13 @@ FETCH_BIN="${22:-$ROOT_DIR/zig-out/bin/FETCH.BIN}"
 CHAT_BIN="${23:-$ROOT_DIR/zig-out/bin/CHAT.BIN}"
 FILE_BIN="${24:-$ROOT_DIR/zig-out/bin/FILE.BIN}"
 FSTEST_BIN="${25:-$ROOT_DIR/zig-out/bin/FSTEST.BIN}"
+TIMERTEST_BIN="${26:-$ROOT_DIR/zig-out/bin/TIMER.BIN}"
+VICTIM_BIN="${27:-$ROOT_DIR/zig-out/bin/VICTIM.BIN}"
+HARDEN_BIN="${28:-$ROOT_DIR/zig-out/bin/HARDEN.BIN}"
+JINGLE_BIN="${29:-$ROOT_DIR/zig-out/bin/JINGLE.BIN}"
+CHIME_BIN="${30:-$ROOT_DIR/zig-out/bin/CHIME.BIN}"
+GLOBALS_BIN="${31:-$ROOT_DIR/zig-out/bin/GLOBALS.BIN}"
+GUARD_BIN="${32:-$ROOT_DIR/zig-out/bin/GUARD.BIN}"
 SIZE_MB="${DIPSHITOS_IMAGE_SIZE_MB:-128}"
 
 cd "$ROOT_DIR"
@@ -234,6 +241,58 @@ if [ -f "$FSTEST_BIN" ]; then
     fi
     FSTEST_ARGS+=("$FSTEST_BIN")
 fi
+TIMERTEST_ARGS=()
+if [ -f "$TIMERTEST_BIN" ]; then
+    if [ "$(head -c 4 "$TIMERTEST_BIN")" != "DSK1" ]; then
+        fail "'$TIMERTEST_BIN' does not start with the 'DSK1' image magic -- run 'zig build' first (it produces zig-out/bin/TIMER.BIN)."
+    fi
+    TIMERTEST_ARGS+=("$TIMERTEST_BIN")
+fi
+VICTIM_ARGS=()
+if [ -f "$VICTIM_BIN" ]; then
+    if [ "$(head -c 4 "$VICTIM_BIN")" != "DSK1" ]; then
+        fail "'$VICTIM_BIN' does not start with the 'DSK1' image magic -- run 'zig build' first (it produces zig-out/bin/VICTIM.BIN)."
+    fi
+    VICTIM_ARGS+=("$VICTIM_BIN")
+fi
+HARDEN_ARGS=()
+if [ -f "$HARDEN_BIN" ]; then
+    if [ "$(head -c 4 "$HARDEN_BIN")" != "DSK1" ]; then
+        fail "'$HARDEN_BIN' does not start with the 'DSK1' image magic -- run 'zig build' first (it produces zig-out/bin/HARDEN.BIN)."
+    fi
+    HARDEN_ARGS+=("$HARDEN_BIN")
+fi
+JINGLE_ARGS=()
+if [ -f "$JINGLE_BIN" ]; then
+    if [ "$(head -c 4 "$JINGLE_BIN")" != "DSK1" ]; then
+        fail "'$JINGLE_BIN' does not start with the 'DSK1' image magic -- run 'zig build' first (it produces zig-out/bin/JINGLE.BIN)."
+    fi
+    JINGLE_ARGS+=("$JINGLE_BIN")
+fi
+CHIME_ARGS=()
+if [ -f "$CHIME_BIN" ]; then
+    if [ "$(head -c 4 "$CHIME_BIN")" != "DSK1" ]; then
+        fail "'$CHIME_BIN' does not start with the 'DSK1' image magic -- run 'zig build' first (it produces zig-out/bin/CHIME.BIN)."
+    fi
+    CHIME_ARGS+=("$CHIME_BIN")
+fi
+# GLOBALS.BIN is the FIRST SEGMENTED image: its magic is DSK3 (milestone
+# sixteen C1, claim 3805), not DSK1.
+GLOBALS_ARGS=()
+if [ -f "$GLOBALS_BIN" ]; then
+    if [ "$(head -c 4 "$GLOBALS_BIN")" != "DSK3" ]; then
+        fail "'$GLOBALS_BIN' does not start with the 'DSK3' segmented-image magic -- run 'zig build' first (it produces zig-out/bin/GLOBALS.BIN)."
+    fi
+    GLOBALS_ARGS+=("$GLOBALS_BIN")
+fi
+# GUARD.BIN is a flat DSK1 hostile program (milestone sixteen C2, claim 8403).
+GUARD_ARGS=()
+if [ -f "$GUARD_BIN" ]; then
+    if [ "$(head -c 4 "$GUARD_BIN")" != "DSK1" ]; then
+        fail "'$GUARD_BIN' does not start with the 'DSK1' image magic -- run 'zig build' first (it produces zig-out/bin/GUARD.BIN)."
+    fi
+    GUARD_ARGS+=("$GUARD_BIN")
+fi
 
 # 3. Builder script.
 [ -f "$SCRIPT_DIR/mkfat32.py" ] || fail "missing $SCRIPT_DIR/mkfat32.py."
@@ -248,7 +307,7 @@ if [ -f "$APPS_TXT" ]; then
     APPS_TXT_ARGS+=(--apps-txt "$APPS_TXT")
 fi
 
-python3 "$SCRIPT_DIR/mkfat32.py" --size-mb "$SIZE_MB" "$IMAGE" "$EFI_BIN" "$KERNEL_BIN" "${USER_ARGS[@]}" "${COUNTER_ARGS[@]}" "${PEER_ARGS[@]}" "${STATUS43_ARGS[@]}" "${UDP_ARGS[@]}" "${WIN_ARGS[@]}" "${WINCLOSE_ARGS[@]}" "${WINLOOP_ARGS[@]}" "${WINMOVE_ARGS[@]}" "${KEYTEST_ARGS[@]}" "${SAVETEXT_ARGS[@]}" "${TYPE_ARGS[@]}" "${DIR_ARGS[@]}" "${CALC_ARGS[@]}" "${NOTEPAD_ARGS[@]}" "${TOP_ARGS[@]}" "${DESKTOP_ARGS[@]}" "${TCP_ARGS[@]+"${TCP_ARGS[@]}"}" "${FETCH_ARGS[@]+"${FETCH_ARGS[@]}"}" "${CHAT_ARGS[@]+"${CHAT_ARGS[@]}"}" "${FILE_ARGS[@]+"${FILE_ARGS[@]}"}" "${FSTEST_ARGS[@]+"${FSTEST_ARGS[@]}"}" "${APPS_TXT_ARGS[@]}" \
+python3 "$SCRIPT_DIR/mkfat32.py" --size-mb "$SIZE_MB" "$IMAGE" "$EFI_BIN" "$KERNEL_BIN" "${USER_ARGS[@]}" "${COUNTER_ARGS[@]}" "${PEER_ARGS[@]}" "${STATUS43_ARGS[@]}" "${UDP_ARGS[@]}" "${WIN_ARGS[@]}" "${WINCLOSE_ARGS[@]}" "${WINLOOP_ARGS[@]}" "${WINMOVE_ARGS[@]}" "${KEYTEST_ARGS[@]}" "${SAVETEXT_ARGS[@]}" "${TYPE_ARGS[@]}" "${DIR_ARGS[@]}" "${CALC_ARGS[@]}" "${NOTEPAD_ARGS[@]}" "${TOP_ARGS[@]}" "${DESKTOP_ARGS[@]}" "${TCP_ARGS[@]+"${TCP_ARGS[@]}"}" "${FETCH_ARGS[@]+"${FETCH_ARGS[@]}"}" "${CHAT_ARGS[@]+"${CHAT_ARGS[@]}"}" "${FILE_ARGS[@]+"${FILE_ARGS[@]}"}" "${FSTEST_ARGS[@]+"${FSTEST_ARGS[@]}"}" "${TIMERTEST_ARGS[@]+"${TIMERTEST_ARGS[@]}"}" "${VICTIM_ARGS[@]+"${VICTIM_ARGS[@]}"}" "${HARDEN_ARGS[@]+"${HARDEN_ARGS[@]}"}" "${JINGLE_ARGS[@]+"${JINGLE_ARGS[@]}"}" "${CHIME_ARGS[@]+"${CHIME_ARGS[@]}"}" "${GLOBALS_ARGS[@]+"${GLOBALS_ARGS[@]}"}" "${GUARD_ARGS[@]+"${GUARD_ARGS[@]}"}" "${APPS_TXT_ARGS[@]}" \
     || fail "image creation failed (see output above)."
 
 # 5. Self-verify by listing the image we just wrote.
@@ -304,6 +363,27 @@ if [ -f "$FILE_BIN" ]; then
 fi
 if [ -f "$FSTEST_BIN" ]; then
     printf '%s\n' "$LISTING" | grep -q 'FSTEST.BIN' || fail "FSTEST.BIN missing from the image listing"
+fi
+if [ -f "$TIMERTEST_BIN" ]; then
+    printf '%s\n' "$LISTING" | grep -q 'TIMER.BIN' || fail "TIMER.BIN missing from the image listing"
+fi
+if [ -f "$VICTIM_BIN" ]; then
+    printf '%s\n' "$LISTING" | grep -q 'VICTIM.BIN' || fail "VICTIM.BIN missing from the image listing"
+fi
+if [ -f "$HARDEN_BIN" ]; then
+    printf '%s\n' "$LISTING" | grep -q 'HARDEN.BIN' || fail "HARDEN.BIN missing from the image listing"
+fi
+if [ -f "$JINGLE_BIN" ]; then
+    printf '%s\n' "$LISTING" | grep -q 'JINGLE.BIN' || fail "JINGLE.BIN missing from the image listing"
+fi
+if [ -f "$CHIME_BIN" ]; then
+    printf '%s\n' "$LISTING" | grep -q 'CHIME.BIN' || fail "CHIME.BIN missing from the image listing"
+fi
+if [ -f "$GLOBALS_BIN" ]; then
+    printf '%s\n' "$LISTING" | grep -q 'GLOBALS.BIN' || fail "GLOBALS.BIN missing from the image listing"
+fi
+if [ -f "$GUARD_BIN" ]; then
+    printf '%s\n' "$LISTING" | grep -q 'GUARD.BIN' || fail "GUARD.BIN missing from the image listing"
 fi
 
 echo "make-image: done."

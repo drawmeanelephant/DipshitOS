@@ -46,11 +46,11 @@
 #   5. The re-exec LANDS in the freed slot (the recycle-under-a-permanent-
 #      occupant proof — the claim-0826 gate could never show this, because
 #      both its programs exited).
-#   6. Card 3g (claim 5795): with the counter + TWO USER.BINs live the
-#      pool is 6/7 (shell + worker + 2 users + idle + ONE spare) — the
-#      one-spare scenario re-derived at the new budget; the capacity
-#      gate's pool_full refusal now lives in the args/ipc/scale gates
-#      (the FIFTH exec at 7/7).
+#   6. Milestone sixteen C3 (claim 0339): with the counter + TWO USER.BINs
+#      live the pool is 6/11 (shell + worker + 2 users + idle + SIX spare)
+#      — the recycle-under-a-permanent-occupant scenario at the grown
+#      budget; the capacity gate's pool_full refusal now lives in the
+#      ipc/scale gates (the NINTH exec at 11/11).
 #   7. `pages` prints in BOTH phases; the exact-count relationship holds:
 #      phase-2 free == phase-1 free - 9 (phase 2 has ONE more live
 #      USER.BIN than phase 1 — counter + 2 users vs counter + 1 — so the
@@ -107,7 +107,7 @@ codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/
 printf 'ls\nexec COUNTER.BIN\nexec USER.BIN\nprocs\npages\necho rx-long-lived-phase1\n' > "$SCRIPT1"
 # Phase 2: after the first USER.BIN is reaped — re-exec into the freed
 # slot, snapshot again, then a SECOND USER.BIN (counter + two users =
-# 6/7 with one spare at the new budget), and re-read the free count.
+# 6/11 with six spare at the grown budget), and re-read the free count.
 printf 'exec USER.BIN\nprocs\nexec USER.BIN\npages\necho rx-long-lived-ok\n' > "$SCRIPT2"
 
 run_one() {
@@ -175,7 +175,7 @@ run_one() {
         # (phase 1 + the phase-2 re-exec into the freed slot).
         [ "$loaded_user" = 3 ] && reexec_landed=1
         # 6. Card 3g: the second phase-2 exec SUCCEEDS (counter + two
-        # users = 6/7, one spare) — no pool_full refusal here (that proof
+        # users = 6/11, six spare) — no pool_full refusal here (that proof
         # moved to the args/ipc/scale gates).
         # 7. Both pages reads present; the exact-count relationship holds:
         # phase-2 free == phase-1 free - 5 (one more live USER.BIN's
@@ -223,7 +223,7 @@ run_one() {
     echo "COUNTER.BIN (distinct markers, sys_write + sys_yield only, no sys_exit)"
     echo "occupies its pool slot permanently while USER.BIN is exec'd, runs,"
     echo "exits, is reaped (pages returned), and re-exec'd into the freed slot;"
-    echo "at the 7-slot budget counter + two users leave one spare. The second"
+    echo "at the 11-slot budget counter + two users leave six spare. The second"
     echo "scripted phase (--script2/--script2-after) forwards the re-exec after"
     echo "the first reap."
     echo
@@ -241,7 +241,7 @@ done
 echo
 echo "=== result ==="
 if [ "$pass" = "$BOOTS" ]; then
-    echo "verify-live-long-lived: PASS — COUNTER.BIN ran forever (distinct markers across the whole log) while USER.BIN exited, was reaped (pages returned), and re-exec'd into the freed slot; at the 7-slot budget counter + two users leave one spare, and the page counts differ by exactly the second program's 5 pages ($pass/$BOOTS boot(s))."
+    echo "verify-live-long-lived: PASS — COUNTER.BIN ran forever (distinct markers across the whole log) while USER.BIN exited, was reaped (pages returned), and re-exec'd into the freed slot; at the 11-slot budget counter + two users leave six spare, and the page counts differ by exactly the second program's 9 pages ($pass/$BOOTS boot(s))."
     echo "PASS: $pass/$BOOTS" >> "$REPORT"
     exit 0
 fi

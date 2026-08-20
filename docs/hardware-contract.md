@@ -809,6 +809,66 @@ host-runner evidence under `artifacts/live-cvspike-*` / `artifacts/vm-spike-*`).
   work end to end — a 12,340-byte three-descriptor payload is reassembled
   and echoed by the host (claim 9492). **[observed]**
 
+- Sound: virtio-snd device (`VZVirtioSoundDeviceConfiguration` under the
+  runner's flag-gated `--sound` mode; `config.audioDevices = []` without
+  the flag — the default VM is untouched). **Driven + discovered
+  2026-08-18 (claim 6140, milestone fifteen card A1):** the guest sees it
+  on bus 0 as **`VID=0x1af4 DID=0x1059` class 0x040100 (audio)** — the
+  modern virtio-pci sound device, DID = `0x1040 + virtio device type 25`
+  exactly as the repo's DID scheme predicted; the transitional `0x1019`
+  is also accepted by the driver. One output PCM stream with a host
+  audio sink is attached (a 2-stream experiment confirmed the config is
+  unaffected). The transport (`kernel/src/virtio_snd.zig`) discovers the
+  device pre-exit, negotiates VIRTIO_F_VERSION_1, arms the CONTROL queue
+  (queue 0, split ring, size 4), reaches DRIVER_OK, and re-arms post-MMU.
+  **The claim-6420 lesson's sound answer: the device is NOT reset at
+  ExitBootServices — `snd: pre-rearm st=0f` observed, like net/gpu, not
+  blk/entropy's st=00.** **[observed]** — `tools/verify-live-sound-device.sh`
+  PASS 1/1 (evidence `artifacts/live-sound-*`).
+  **Finding (claim 6140): VZ does not populate the virtio-snd device
+  config — the le32 jacks/streams/chmaps counts read 0/0/0 from both the
+  pre-exit firmware map and the post-exit identity map, and a 32-byte raw
+  dump of the devcfg window (BAR0+0x1000 = 0x100001000) is uniformly
+  zero, even with two output streams attached.** Stream topology is
+  therefore enumerated via the CONTROL-queue JACK_INFO/PCM_INFO queries
+  (card A2), not the config counts. **[observed]**, claim 5877:
+  `PCM_INFO(0)` (code 0x0100) replies S_OK and advertises **formats bits
+  5/17/19 (S16|S32|FLOAT), rates bits 7/10 (48000|96000), channels 1..2,
+  direction OUTPUT** — the enumerated topology (formats/rates bitmaps
+  from the live reply bytes 0x000a0020 / 0x00000480).
+  **Protocol facts pinned live (claim 5877, 2026-08-18):**
+  - **VZ speaks the virtio-1.3 control renumbering** — status OK = 0x8000
+    (a 1.2-style PCM_INFO code-3 request was answered with BAD_MSG
+    0x8001), request codes PCM_INFO 0x0100 / SET_PARAMS 0x0101 / PREPARE
+    0x0102 / RELEASE 0x0103 / START 0x0104 / STOP 0x0105.
+  - **Control replies are [status hdr][entries]** — the status is the
+    FIRST word, then the info entries (the Linux driver reads
+    [entries][status]; VZ writes status first). **[observed]**
+  - The TX (playback) queue for stream 0 is **queue 2** (notify offset 2,
+    multiplier 4); buffers are [pcm_xfer][samples] readable + a writable
+    [pcm_status] descriptor; the used entry lands when the device has
+    consumed the period. **[observed]** — 300 ms beep = 115200 B in
+    4096-B periods, all drained, pcm_status 0x8000, latency 4096.
+  - Transport disciplines proven again: the used ring's cache line must be
+    invalidated on every poll (the console/blk/net pattern) and the
+    16-bit kick is the QUEUE-INDEX write (Virtio 1.3 §4.1.5.2.1).
+    **[observed]** (claim 5877)
+  - **EL0 playback (claim 7636, card A3):** the same control flow + TX
+    path is driven from userspace through ADR 0007 slots 42/43
+    (`sys_audio_info` / `sys_audio_play`). The device keeps its
+    negotiated stream across repeated syscall-driven START/STOP cycles
+    (382 plays in one JINGLE.BIN session, every chunk drained).
+    **[observed]** — `tools/verify-live-sound-app.sh` PASS 1/1 (evidence
+    `artifacts/live-sound-app-*`).
+  - **Boot chime + event playback (claim 3206, card A4):** the kernel
+    plays a two-tone 660/880 Hz ding-dong through the beep path the
+    moment the transport is live (flag-gated — the default VM, with no
+    device, is byte-identical), and CHIME.BIN plays 880 Hz blips from
+    EL0 on every app-timer TIMER event. Both ride the same control flow
+    + TX path; the device drains every period. **[observed]** —
+    `tools/verify-live-m15-composition.sh` PASS 1/1 (evidence
+    `artifacts/live-m15-composition-*`).
+
 ## What milestone zero does NOT assume (and does not touch)
 
 - No direct MMIO. No UART programming. No DMA. No interrupts. No GIC.

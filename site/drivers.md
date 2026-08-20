@@ -20,6 +20,7 @@ the real host, and its device identity is recorded as observed, not assumed.
 | Entropy (0x1044) | `virtio_entropy.zig` + `csprng.zig` (ChaCha20) | done, live-gated |
 | Network (0x1041) | `virtio_net.zig` — TX/RX + ARP/IPv4/UDP/TCP above it | done, live-gated |
 | Graphics (0x1050) | `virtio_gpu.zig` — spec 2D path, B8G8R8X8 framebuffer | done, live-gated |
+| Sound (0x1059) | `virtio_snd.zig` — control queue, PCM_INFO/SET_PARAMS/PREPARE/START/STOP/RELEASE, bounded playback | done, live-gated |
 | Balloon | `VZMemoryBalloonDeviceConfiguration` | not started — low priority |
 
 ## USB: the XHCI controller
@@ -43,6 +44,7 @@ existed, the answer was observed and pinned:
 - The network device does **not** reset (`st=0f`).
 - The XHCI controller does **not** reset (pre-reset `USBSTS=0x9`/`USBCMD=0x0`).
 - The graphics device **resets** (`st=00`).
+- The sound device does **not** reset (`st=0f`, like net/gpu).
 
 Those observations live in
 [`docs/hardware-contract.md`](https://github.com/drawmeanelephant/DipshitOS/blob/main/docs/hardware-contract.md)

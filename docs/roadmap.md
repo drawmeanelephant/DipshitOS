@@ -1189,7 +1189,7 @@ on Accessibility trust).
 
 See [`march-m13.md`](march-m13.md) for the per-card tracker.
 
-### Milestone fourteen — shared user services (**PLANNED 2026-08-16, issues #175–#178**)
+### Milestone fourteen — shared user services (**✅ COMPLETE 2026-08-18 — S1 + S2 + S3 + S4 landed, issues #175–#178**)
 
 > After the file browser, the wishlist's shared-user-services items become the
 > natural next arc, in maintainer-preference order: **clipboard** (item 11,
@@ -1197,28 +1197,154 @@ See [`march-m13.md`](march-m13.md) for the per-card tracker.
 > apps stop spinning sleep loops), and **security/isolation hardening** (item
 > 19, grown alongside userland power, not as one giant milestone). M8's
 > remaining usability cards (U6–U8) are DONE; U4's live pointer proof is a
-> known class-C-only limitation (see issue #151).
+> known class-C-only limitation (see issue #151). **S1 done 2026-08-18**
+> (claim 0169 — the bounded shared kernel clipboard, slots 38–39;
+> `verify-live-clipboard.sh` PASS 1/1 on VZ); **S2 done 2026-08-18**
+> (claim 7323 — the bounded per-process app timer facility, slots 40–41;
+> `verify-live-timers.sh` PASS 1/1 on VZ); **S3 done 2026-08-18**
+> (claim 3289 — the composition capstone: NOTEPAD paste + copy + a
+> timer-driven cursor blink in one session;
+> `verify-live-m14-composition.sh` PASS 1/1 on VZ); **S4 done 2026-08-18**
+> (claim 4482 — the ownership/uaccess/resource-limit hardening audit with
+> a hostile-EL0-refused live proof; `verify-live-hardening.sh` PASS 1/1 on
+> VZ).
 
-- **S1 — Clipboard / shared text service** (issue #175, wishlist 11):
-  `sys_clipboard_set`/`sys_clipboard_get` (ADR 0007 slots 38–39), a single
-  bounded kernel clipboard buffer (pure BSS, zero heap), so NOTEPAD gains
-  copy/cut/paste and the terminal can copy. Live gate:
-  `verify-live-clipboard.sh`.
-- **S2 — Application timers** (issue #176, wishlist 12): a bounded
-  per-process timer facility (slots 40–41) that posts `TIMER` events on the
-  existing ADR 0009 event queue — apps stop spinning sleep loops (NOTEPAD
-  cursor blink, a live clock, TOP periodic refresh). Live gate:
-  `verify-live-timers.sh`.
-- **S3 — Composition capstone** (issue #177): NOTEPAD copy/paste with a
-  timer-driven cursor — S1+S2 proven together in a real app a human can
-  use. Live gate: `verify-live-m14-composition.sh`.
-- **S4 — Security/isolation hardening** (issue #178, wishlist 19):
-  process-ownership audit across every EL0-named resource, a uaccess
-  validation-depth sweep, and resource limits — proven by a hostile EL0
-  program refused cross-process access. Live gate:
-  `verify-live-hardening.sh`.
+- **S1 — Clipboard / shared text service** (issue #175, wishlist 11): ✅
+  done 2026-08-18 (claim 0169): `sys_clipboard_set`/`sys_clipboard_get`
+  (ADR 0007 slots 38–39, `implemented_count` 38→40), a single bounded
+  kernel clipboard buffer in `kernel/src/clipboard.zig` (pure BSS, zero
+  heap) — NOTEPAD gains copy/cut/paste (Ctrl+C/X/V) and the terminal gains
+  the `clip` command (`clip <text...>` sets it, `clip` pastes it). Live
+  gate: `verify-live-clipboard.sh` PASS 1/1 on VZ.
+- **S2 — Application timers** (issue #176, wishlist 12): ✅ done
+  2026-08-18 (claim 7323): a bounded per-process timer facility (ADR 0007
+  slots 40–41, `implemented_count` 40→42) — ONE countdown timer per
+  process in `kernel/src/app_timers.zig` (fixed BSS, zero heap), driven
+  from the scheduler tick, posting `TIMER` events (kind 9) on the existing
+  ADR 0009 queue, so an app BLOCKS in `sys_wait_event` instead of spinning
+  a sleep loop. `TIMER.BIN` proves arm → block → fire → cancel live; live
+  gate `verify-live-timers.sh` PASS 1/1 on VZ. (Wiring the timer into
+  NOTEPAD's cursor blink / a live clock / TOP refresh is card S3's
+  composition scope.)
+- **S3 — Composition capstone** (issue #177): ✅ done 2026-08-18 (claim
+  3289): NOTEPAD copy/paste with a timer-driven cursor — S1+S2 proven
+  together in a real app. The gate pre-loads the shared clipboard with
+  `clip`, execs `NOTEPAD.BIN selfdemo` (argv mode, claim 4636's entry
+  contract), and observes paste (`sys_clipboard_get`), copy
+  (`sys_clipboard_set`), and a timer-driven cursor blink (6 TIMER events,
+  arm + re-arm per fire) in ONE session, then NOTEPAD exits 43 through the
+  real lifecycle. Live gate `verify-live-m14-composition.sh` PASS 1/1 on
+  VZ (`implemented=42`, slots 38/39/40 all counted in the same boot).
+  Input-seam note (issue #179): synthesized keyboard reports `events=0` on
+  this machine, so the gate drives the composition via NOTEPAD's argv
+  selfdemo instead of scripted Ctrl+C/V chords — the chord path stays
+  host-tested and regains live coverage when the seam recovers.
+- **S4 — Security/isolation hardening** (issue #178, wishlist 19): ✅
+  done 2026-08-18 (claim 4482): the audit covered every EL0-named
+  resource — windows (already per-process via `win_owned_by_caller`),
+  file handles, event queues, app timers (per-process by construction),
+  and the documented machine-globals (clipboard, UDP, mailbox,
+  process-control) — plus the uaccess pointer/length sweep and the
+  bounded-pool refusal audit. The ONE gap found and closed: the TCP
+  connection's `owner_pid` was recorded on connect but never enforced, so
+  a second process could send/recv/close it; a non-owner is now refused
+  EACCES on send/recv/close/connect (class-A test 341). The hostile-EL0
+  proof runs TWO concurrent processes (VICTIM.BIN owns window 2 and
+  yield-loops forever; HARDEN.BIN attacks fill/present/close/move/query
+  and is refused EINVAL every time, then exits 44 — the victim never
+  exits). Live gate `verify-live-hardening.sh` PASS 1/1 on VZ.
 
 See [`march-m14.md`](march-m14.md) for the per-card tracker.
+
+### Milestone fifteen — audio (**COMPLETE 2026-08-18**; wishlist 18)
+
+> With events, files, GUI apps, the launcher, and the shared-services arc
+> shipped, the next concrete wishlist item is **audio** — "another real
+> device/service pipeline", the "DipshitOS becomes a computer" list. The
+> host side exists (`VZVirtioSoundDeviceConfiguration`, virtio-snd, macOS
+> 13+), so this is greenfield guest work: virtio-snd transport (A1) → a
+> bounded PCM playback buffer + `beep` (A2) → an EL0 audio seam (ADR 0007
+> slots 42+) + a `JINGLE.BIN` melody app (A3) → a hearable composition
+> capstone (A4, boot chime + event-triggered sound). Flag-gated `--sound`
+> keeps the default VM byte-identical. Deferred alternatives (items
+> 13/14/15/17) remain M16+ candidates.
+
+> **A1 shipped 2026-08-18 (claim 6140):** host `--sound` mode + the guest
+> virtio-snd transport, live-gated on VZ (`verify-live-sound-device.sh`
+> PASS 1/1). Observed: DID **0x1059** (the 0x1040+25 prediction held),
+> class 0x040100, DRIVER_OK, control queue armed, device NOT reset by VZ
+> (like net/gpu). Finding: VZ does not populate the le32 config counts
+> (0/0/0 — stream topology is enumerated by asking).
+>
+> **A2 shipped 2026-08-18 (claim 5877):** the PCM playback path —
+> `verify-live-sound-playback.sh` PASS 1/1 on VZ. PCM_INFO(0) advertises
+> S16\|S32\|FLOAT @ 48000\|96000 ch 1..2 OUTPUT; FLOAT/48000/stereo
+> negotiated; SET_PARAMS+PREPARE+START+STOP+RELEASE all S_OK; a 300 ms
+> beep = 115200 B submitted in 4096-B periods, **all drained** by the
+> device (pcm_status 0x8000). Protocol pinned by observation: VZ speaks
+> the virtio-1.3 control codes (OK=0x8000, not 0) and writes control
+> replies **[status hdr][entries]** (status first — the Linux driver
+> reads it last).
+>
+> **A3 shipped 2026-08-18 (claim 7636):** the EL0 audio seam — ADR 0007
+> slots 42/43 (`sys_audio_info`/`sys_audio_play`, `implemented_count`
+> 42→44), live-gated on VZ (`verify-live-sound-app.sh` PASS 1/1).
+> JINGLE.BIN (the 26th ESP program) execs from EL0, learns the negotiated
+> FLOAT/48000/stereo state via `sys_audio_info` (first-call probe +
+> SET_PARAMS — the app knows what to synthesize before any play), then
+> plays all 14 notes of Twinkle Twinkle Little Star via `sys_audio_play`:
+> per-note accounting exact (96000 B quarters / 192000 B halves at
+> FLOAT/stereo/48 kHz), 382 play calls in bounded 4 KiB chunks, exit 0.
+> Finding: app writable data must be a STACK local (a global BSS buffer
+> faults on write — the W^X text page).
+>
+> **A4 shipped 2026-08-18 (claim 3206) — milestone fifteen COMPLETE:**
+> the composition capstone, live-gated on VZ
+> (`verify-live-m15-composition.sh` PASS 1/1). **Boot chime:** the kernel
+> plays a two-tone ding-dong (660 Hz 150 ms + 880 Hz 220 ms) through the
+> A2 beep path the moment the sound transport is live — flag-gated on the
+> device (the default VM stays byte-identical; the unarmed refusal is
+> host-tested). **Event-triggered sound:** CHIME.BIN (the 27th ESP
+> program) arms a one-tick M14 app timer (slot 40) and BLOCKS in
+> `sys_wait_event`; every TIMER event (kind 9) fires an 880 Hz blip
+> through `sys_audio_play` (slots 42/43) — 3 ticks, each blip exactly
+> 38400 B in 10 chunks, `chime: done`, exit 0, and the same-boot syscalls
+> report shows `implemented=44` with `40 sys_timer_set calls=3` / `42
+> sys_audio_info calls=1` / `43 sys_audio_play calls=30`. The gate asserts
+> device + boot chime + EL0 info + per-tick accounting + lifecycle +
+> syscall counts in ONE session — the milestone's "hearable" composition
+> test. A1/A2/A3 gates re-ran green with the chime in the boot path.
+
+See [`march-m15.md`](march-m15.md) for the card tracker.
+
+### Milestone sixteen — the kernel grows up (**done 2026-08-19**; wishlist 15/14/13)
+
+> The M15-era claims recorded the pressure that finally activates the
+> wishlist's conditional items: the **16 KiB exec load bound** (a 33 KB
+> JINGLE.BIN would not load — claim 7636), the **W^X single-segment
+> layout** (a global BSS buffer faults on write from EL0 — every app's
+> mutable data must be a stack local), and the **fixed pools under real
+> load** (7 process slots, `pool_full` on a fifth concurrent user
+> program). So milestone sixteen is the internals-consolidation
+> milestone — the kernel grows up under the weight of its own apps:
+> a multi-segment user image with real writable globals + a lifted load
+> bound (C1, wishlist 15) → guard pages + per-segment permissions (C2,
+> wishlist 14) → the resource pools measured and grown only where the
+> demo apps actually hurt (C3, wishlist 13) → a composition capstone
+> proving all three in one session (C4). Wishlist 17 (deeper FS
+> semantics) stays deferred — M13's B1 already shipped
+> delete/rename/truncate/free and no app has produced new pressure.
+> The default VM (no flags) stays byte-identical at every card. Issues
+> **#190–#193** filed 2026-08-18 (one per card, the M14 way).
+
+See [`march-m16.md`](march-m16.md) for the card tracker.
+
+**Closed 2026-08-19 — C1 + C2 + C3 + C4 all live (claims 3805 + 8403 +
+0339 + 2714).** C4's composition capstone (`verify-live-m16-composition.sh`)
+ran GLOBALS.BIN, GUARD.BIN, and eight concurrent programs in ONE boot and
+exposed one more measured growth: the page-table carve-out is a total-roots
+budget (tables are never reclaimed), so the big app + hostile app + eight
+concurrent = 282 pages exceeded the old 256 — grown to 512 (2 MiB).
 
 ## Wishlist / hope chest (destinations, not commitments)
 
@@ -1278,13 +1404,20 @@ app/launcher model** (items 2, 5, 4, and 10 below).
 13. **Resource-model cleanup when the fixed pools hurt.** Windows, processes,
     mailboxes, and network state are wonderfully bounded now — keep them that
     way until real apps expose actual pain, *then* introduce dynamic kernel
-    objects/allocators because the workload demands them.
+    objects/allocators because the workload demands them. *(Started 2026-08-19 —
+    M16 C3, claim 0339: the scheduler executor pool grew 7→11 (8 live user
+    programs) because the apps exhausted the old four; the other pools stay
+    bounded — the "grow only what hurts" rule applied, live on VZ.)*
 14. **Richer virtual memory only when applications force it.** More flexible
     mappings, guard pages, larger programs, maybe mmap-ish primitives, COW much
-    later. No demand paging merely because Serious-OS bingo says so.
+    later. No demand paging merely because Serious-OS bingo says so. *(Started
+    2026-08-19 — M16 C2, claim 8403: guard pages below the stack / above the
+    data segment and EL0-fault → reap, live on VZ.)*
 15. **Executable-format evolution.** The DSK1 flat-image model has done heroic
     work; larger programs/libraries may eventually justify ELF loading or
-    another structured native format. Consumer first.
+    another structured native format. Consumer first. *(Started 2026-08-19 —
+    M16 C1, claim 3805: the DSK3 segmented image with writable data + zeroed
+    BSS and a 256 KiB load bound, live on VZ.)*
 16. **Reusable UI toolkit, but late.** Buttons, labels, text fields, lists,
     scrolling, layout — *after* two or three hand-built apps have shown what
     the common pieces actually are. Otherwise someone lovingly architects

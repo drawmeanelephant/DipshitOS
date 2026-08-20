@@ -17,7 +17,8 @@ map; the satellites below carry the detail.
 │  EL0 user programs + desktop apps (CALC.BIN,   │
 │  NOTEPAD.BIN, DESKTOP.BIN, FETCH.BIN, …)      │
 │  syscalls: ping/write/…/ipc/win/events/file/  │
-│             exec/kill/tcp (slots 0–33)        │
+│             exec/kill/tcp/fs/clip/timer/audio │
+│             (0–45)                            │
 ├───────────────────────────────────────────────┤
 │  Monitor + shell (dipshit>)                   │
 │  Road Pops terminal · Driving Award compositor │
@@ -25,8 +26,8 @@ map; the satellites below carry the detail.
 │  Scheduler (round-robin, 7 tasks) · processes │
 │  Physical allocator · identity-map MMU        │
 ├───────────────────────────────────────────────┤
-│  Drivers: virtio console/blk/entropy/gpu/net  │
-│  + USB XHCI + HID · GICv3 · generic timer     │
+│  Drivers: virtio console/blk/entropy/gpu/net/ │
+│  snd + USB XHCI + HID · GICv3 · generic timer │
 ├───────────────────────────────────────────────┤
 │  UEFI boot loader (BOOTAA64.EFI)              │
 └───────────────────────────────────────────────┘
@@ -63,11 +64,13 @@ Three rules show up everywhere:
 | Allocator | first-fit bitmap over the captured EFI map, with exclusion ranges |
 | Scheduler | tick-driven round-robin; 7 slots (shell + worker + 4 EL0 + idle) |
 | Processes | bounded registry, lifecycle states, exit-status propagation, IPC mailboxes |
-| Syscalls | ADR 0007: 64-slot table, 34 implemented (0–33), deterministic counters |
+| Syscalls | ADR 0007: 64-slot table, 46 implemented (0–45), deterministic counters |
 | Networking | virtio-net → ARP → IPv4/ICMP → UDP → DHCP → DNS → TCP, plus a NAT mode and the EL0 TCP seam |
 | Graphics | virtio-gpu framebuffer → text → Road Pops → Driving Award compositor |
+| Audio | virtio-snd → PCM playback → `beep` → the EL0 audio seam (slots 42–45) |
 | Input | XHCI host controller → USB enumeration → HID boot protocol → event FIFO → per-process event queues |
-| Events | keyboard/pointer/window events routed to focused EL0 apps (`sys_poll_event`/`sys_wait_event`) |
+| Events | keyboard/pointer/window events routed to focused EL0 apps (`sys_poll_event`/`sys_wait_event`), plus `TIMER` events from the app-timer facility |
+| Shared services | the machine-global clipboard (slots 38/39) + per-process app timers (slots 40/41) |
 | Desktop | the zero-heap `ui.zig` widget toolkit + CALC/NOTEPAD/TOP/DESKTOP/FILE applications |
 
 <Aside kind="note">

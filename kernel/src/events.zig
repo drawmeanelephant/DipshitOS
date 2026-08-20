@@ -28,6 +28,9 @@ pub const MOUSE_MOVE: u16 = 5;
 pub const WIN_FOCUS: u16 = 6;
 pub const WIN_BLUR: u16 = 7;
 pub const WIN_CLOSE: u16 = 8;
+/// Milestone 14 (claim 7323): the per-process app timer fired (posted by
+/// `kernel/src/app_timers.zig` when a `sys_timer_set` countdown reaches 0).
+pub const TIMER: u16 = 9;
 
 /// Modifier bitmasks (flags bits 0..7).
 pub const MOD_SHIFT: u16 = 0x0001;

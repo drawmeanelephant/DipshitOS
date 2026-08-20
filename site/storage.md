@@ -38,7 +38,10 @@ Milestone ten opened storage to EL0: a per-process file-handle table
 behind the `sys_file_open`/`read`/`write`/`close` and `sys_dir_list` syscalls
 (slots 23–27), with path canonicalization routing `/esp/...` and `/data/...`
 to the right volume. `SAVETEXT.BIN`, `TYPE.BIN`, and `DIR.BIN` prove the
-seam; `NOTEPAD.BIN` and `FILE.BIN` use it for real work.
+seam; `NOTEPAD.BIN` and `FILE.BIN` use it for real work. Milestone thirteen's
+B1 card extended the seam with `sys_file_delete`/`rename`/`truncate`/`free`
+(slots 34–37) — proven live by `FSTEST.BIN` and exposed through `FILE.BIN`'s
+Delete/Rename buttons.
 
 ## Loading programs
 
@@ -59,8 +62,8 @@ userland file syscall ABI end to end.
 
 **LIMITATION.** FAT32 only, no directories-with-subdirectories write
 semantics beyond what the path resolver exposes, no journaling, and no block
-cache. The ABI is read-only so far — delete, rename, truncate, and free are
-milestone thirteen's B1 card (slots 34–37). It is a storage *driver* with a
-bounded file API, not a POSIX filesystem.
+cache. The ABI covers delete, rename, truncate, and free (slots 34–37,
+milestone thirteen's B1 card), but it is a storage *driver* with a bounded
+file API, not a POSIX filesystem.
 
 </Aside>

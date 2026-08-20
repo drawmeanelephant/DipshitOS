@@ -63,10 +63,12 @@ const build_options = if (builtin.is_test) struct {
 } else @import("build_options");
 
 // Claim 5804: the user root CLONES the identity tree (per-task overlay),
-// so the carve-out must hold the identity map AND its clone. 256 pages =
-// 64 tables at 4 KiB: the identity map uses ~15, the clone ~15, and the
-// user leaf tables a couple more — ample headroom.
-const table_page_count = 256; // 1 MiB fixed BSS carve-out, no allocator.
+// so the carve-out must hold the identity map AND every root built over the
+// boot — table pages are never reclaimed, so this is a TOTAL-roots budget,
+// not a concurrent-roots budget. Milestone sixteen C4 (claim 2714) measured
+// the composition (a 28 KiB segmented app + a hostile app + EIGHT concurrent
+// programs = 282 pages) and grew the carve-out 256 → 512 pages.
+const table_page_count = 512; // 2 MiB fixed BSS carve-out, no allocator.
 var table_storage: [table_page_count][512]u64 align(4096) = undefined;
 var table_count: usize = 0;
 
@@ -138,16 +140,16 @@ pub fn reset() void {
 }
 
 /// Table pages consumed so far out of the fixed carve-out (`table_page_count`
-/// pages, 1 MiB BSS). The `addrspaces` command prints `tables=<used>/<cap>`
+/// pages, 2 MiB BSS). The `addrspaces` command prints `tables=<used>/<cap>`
 /// so the per-process-root budget is observable on a live boot: the identity
 /// map uses ~10-15 and each user-root clone ~10-15 + leaf tables, so two
-/// concurrent user roots stay well inside the 256-page carve-out (claim
-/// 0826's budget survey).
+/// concurrent user roots stay well inside the 512-page carve-out (claim
+/// 0826's budget survey; grown by claim 2714 for the M16 composition).
 pub fn tables_used() usize {
     return table_count;
 }
 
-/// Total table pages in the fixed carve-out (1 MiB BSS — see
+/// Total table pages in the fixed carve-out (2 MiB BSS — see
 /// `table_page_count`).
 pub fn tables_capacity() usize {
     return table_page_count;
@@ -167,7 +169,7 @@ pub fn roots_built() bool {
 /// written as normal stores and are dirty in the D-cache only; the walker
 /// reads memory directly, so the whole carve-out is cleaned before the
 /// scheduler's next TTBR0 switch (which ends in a TLBI + fresh walk).
-/// Cheap: 1 MiB of cache lines, once per exec.
+/// Cheap: 2 MiB of cache lines, once per exec.
 pub fn clean_table_storage() void {
     clean_dcache_range(@intFromPtr(&table_storage), table_page_count * 4096);
 }
@@ -570,6 +572,7 @@ fn clone_into_user_root(
     level: u8,
     va_base: u64,
     text: ?UserAperture,
+    data: ?UserAperture,
     stack: ?UserAperture,
 ) ?*align(4096) [512]u64 {
     const dst = new_table() orelse return null;
@@ -582,8 +585,9 @@ fn clone_into_user_root(
         const slot_va = va_base + @as(u64, i) * slot_bytes;
         const slot_end = slot_va + slot_bytes;
         const in_text = text != null and slot_va < text.?.va_end and slot_end > text.?.va_start;
+        const in_data = data != null and slot_va < data.?.va_end and slot_end > data.?.va_start;
         const in_stack = stack != null and slot_va < stack.?.va_end and slot_end > stack.?.va_start;
-        const hits_user = in_text or in_stack;
+        const hits_user = in_text or in_data or in_stack;
         if (hits_user and level < 3) {
             // The slot intersects a user aperture: the clone must descend
             // to the page level, splitting a covering block if needed.
@@ -591,17 +595,17 @@ fn clone_into_user_root(
                 table_entry(&src[i]) orelse return null
             else
                 split_block_view(desc) orelse return null;
-            const child = clone_into_user_root(child_src, level + 1, slot_va, text, stack) orelse return null;
+            const child = clone_into_user_root(child_src, level + 1, slot_va, text, data, stack) orelse return null;
             dst[i] = @intFromPtr(child) | 3;
         } else if (hits_user and level == 3) {
             // Page leaf inside a user aperture: the ONLY place EL0
             // permission is granted in the whole root.
-            const ap = if (in_text) text.? else stack.?;
+            const ap = if (in_text) text.? else if (in_data) data.? else stack.?;
             const pa = ap.phys + (slot_va - ap.va_start);
             const normal = (pa & ~@as(u64, 0xfff)) | attr_bits(.normal, true);
             dst[i] = user_leaf(normal, ap.writable, ap.executable) orelse return null;
         } else if ((desc & 3) == 3 and level < 3) {
-            const child = clone_into_user_root(table_entry(&src[i]) orelse return null, level + 1, slot_va, text, stack) orelse return null;
+            const child = clone_into_user_root(table_entry(&src[i]) orelse return null, level + 1, slot_va, text, data, stack) orelse return null;
             dst[i] = @intFromPtr(child) | 3;
         } else {
             dst[i] = desc; // block or page leaf — EL1-only AP=0b00, copy verbatim
@@ -626,10 +630,25 @@ fn clone_into_user_root(
 /// still tracks the most recently built root for the diagnostics. Returns
 /// null when the fixed table carve-out cannot hold another clone (the
 /// `table_full` bound).
-pub fn build_user_root(
+/// Full multi-aperture user root (milestone sixteen C1, claim 3805): like
+/// `build_user_root` but with an optional writable DATA aperture (EL0 RW +
+/// UXN) mapped between text and stack — the segmented image's `.data`/`.bss`
+/// region. `data_len == 0` (or `data_phys == 0`) omits the data aperture.
+///
+/// Milestone sixteen C2 (claim 8403): the GUARD PAGES are the natural
+/// consequence of this root mapping ONLY the explicit apertures. The page
+/// below the stack bottom (`stack_va - 4 KiB`) and the page above the data
+/// region (`data_va + data_len`, rounded up to the page) are left UNMAPPED,
+/// so an EL0 store stepping off either faults (FAR lands in the guard) and
+/// the fault dispatcher reaps the process — the stack can never grow into
+/// the data/text region and the data region can never spill past its end.
+pub fn build_user_root_full(
     text_va: u64,
     text_phys: u64,
     text_len: u64,
+    data_va: u64,
+    data_phys: u64,
+    data_len: u64,
     stack_va: u64,
     stack_phys: u64,
     stack_len: u64,
@@ -641,6 +660,13 @@ pub fn build_user_root(
         .writable = false,
         .executable = true,
     };
+    const data_ap: ?UserAperture = if (data_len == 0 or data_phys == 0) null else UserAperture{
+        .va_start = data_va,
+        .va_end = data_va + data_len,
+        .phys = data_phys,
+        .writable = true,
+        .executable = false,
+    };
     const stack_ap = UserAperture{
         .va_start = stack_va,
         .va_end = stack_va + stack_len,
@@ -648,11 +674,22 @@ pub fn build_user_root(
         .writable = true,
         .executable = false,
     };
-    const root = clone_into_user_root(&table_storage[0], 0, 0, text_ap, stack_ap) orelse return null;
+    const root = clone_into_user_root(&table_storage[0], 0, 0, text_ap, data_ap, stack_ap) orelse return null;
     const root_phys = @intFromPtr(root);
     user_root_value = root_phys;
     roots_ready = true;
     return root_phys;
+}
+
+pub fn build_user_root(
+    text_va: u64,
+    text_phys: u64,
+    text_len: u64,
+    stack_va: u64,
+    stack_phys: u64,
+    stack_len: u64,
+) ?u64 {
+    return build_user_root_full(text_va, text_phys, text_len, 0, 0, 0, stack_va, stack_phys, stack_len);
 }
 
 /// Pure permission transform pinned by host tests. Existing leaf, AttrIndex
@@ -688,7 +725,7 @@ test "mmu: build_user_root returns a fresh root per call (per-process roots)" {
     // programs (the capstone's headline), so the kernel root + 3 user roots
     // must fit the carve-out with headroom. Build the third user root and
     // pin the budget: every root is distinct, the global tracks the latest,
-    // and the 256-page carve-out bounds the whole multi-root set.
+    // and the 512-page carve-out bounds the whole multi-root set.
     const root3 = build_user_root(userspace.text_va, 0x1000, 64, 0x1a500000, 0x3000, 8192).?;
     try std.testing.expect(root3 != 0);
     // Distinct per-process roots, and the global tracks the latest.
@@ -696,7 +733,7 @@ test "mmu: build_user_root returns a fresh root per call (per-process roots)" {
     try std.testing.expect(root2 != root3);
     try std.testing.expectEqual(root3, user_root_phys());
     // The budget line is observable and bounded by the carve-out: kernel
-    // root + 3 user roots stay well inside the 256-page budget.
+    // root + 3 user roots stay well inside the 512-page budget.
     try std.testing.expect(tables_used() > 0);
     try std.testing.expect(tables_used() <= tables_capacity());
     try std.testing.expect(tables_used() < tables_capacity() / 2); // headroom for the boot-time static payload
@@ -749,7 +786,7 @@ pub fn install_identity_map() void {
     // access walks them, and any D-cache line invalidation without a clean in
     // between (observed: the firmware runtime SetVariable call between the
     // switch and the TLBI drops the dirty lines) leaves stale RAM for the
-    // post-TLBI re-walk to fault on. Clean the whole 512 KiB carve-out so the
+    // post-TLBI re-walk to fault on. Clean the whole 2 MiB carve-out so the
     // walker always reads the real tables.
     clean_dcache_range(@intFromPtr(&table_storage), table_page_count * 4096);
     // T0SZ selects the TTBR0 VA space size and therefore the initial lookup

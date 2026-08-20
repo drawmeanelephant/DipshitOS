@@ -55,7 +55,7 @@ pub fn init() void {
     entry_count = 0;
     _ = set_internal("hostname", "dipshit");
     _ = set_internal("prompt", "dipshit> ");
-    _ = set_internal("theme", "default");
+    _ = set_internal("theme", "dark");
     _ = set_internal("scrollback", "1000");
     initialized = true;
 }
@@ -129,10 +129,28 @@ fn set_internal(key: []const u8, val: []const u8) SetResult {
     return .ok;
 }
 
+const driving_award = @import("driving_award.zig");
+
 /// Set a configuration key-value pair in memory.
 pub fn set(key: []const u8, val: []const u8) SetResult {
     ensure_init();
-    return set_internal(key, val);
+    const result = set_internal(key, val);
+    // Step 7 (Issue #207): when theme is set, update the compositor's theme_id.
+    if (result == .ok and std.mem.eql(u8, key, "theme")) {
+        apply_theme(val);
+    }
+    return result;
+}
+
+/// Apply a theme by name, updating driving_award.theme_id.
+fn apply_theme(name: []const u8) void {
+    if (std.mem.eql(u8, name, "dark") or std.mem.eql(u8, name, "default")) {
+        driving_award.theme_id = 0;
+    } else if (std.mem.eql(u8, name, "light")) {
+        driving_award.theme_id = 1;
+    } else if (std.mem.eql(u8, name, "amber")) {
+        driving_award.theme_id = 2;
+    }
 }
 
 /// Parse a single `key=value` line into settings.
@@ -230,7 +248,7 @@ test "settings: default initialization and getters" {
     init();
     try std.testing.expectEqualStrings("dipshit", get_hostname());
     try std.testing.expectEqualStrings("dipshit> ", get_prompt());
-    try std.testing.expectEqualStrings("default", get("theme").?);
+    try std.testing.expectEqualStrings("dark", get("theme").?);
     try std.testing.expectEqualStrings("1000", get("scrollback").?);
 }
 

@@ -4,7 +4,7 @@
 - **Prompt / plan:** `docs/march-m13.md` housekeeping
 - **Scope:** Issue #159 — rename Driving Award's EL1h monitor command `win` to `dui`
 - **Depends on:** Milestone 13 B1–B4 (merged)
-- **Status:** 🔄 in progress
+- **Status:** ✅ done 2026-08-16 — win → dui rename live-gated: verify-live-win-syscall/close/move/hig assert dui: output; the keyboard-typed uname leg is blocked only by the unrelated input seam (issue #179)
 
 ## Notes
 
