@@ -131,6 +131,7 @@ CI) fails if the table drifts from the claim files.
 | [2616-dhcp-lifecycle-autonomous](2616-dhcp-lifecycle-autonomous.md) | buffy (`agent/buffy/audit-followup-3-dhcp-autonomy`) | 🔄 agent/buffy/audit-followup-3-dhcp-autonomy |
 | [2649-u8-persistent-settings](2649-u8-persistent-settings.md) | buffy (`agent/buffy/u8-persistent-settings`) | ✅ done |
 | [2665-m4-entropy-csprng](2665-m4-entropy-csprng.md) | Buffy (`agent/buffy/m4-entropy-csprng`) | ✅ done 2026-08-10 |
+| [2714-m16-c4-composition-capstone](2714-m16-c4-composition-capstone.md) | buffy (`agent/buffy/m16-c4-composition`) | ✅ done — live gate PASS 1/1 (2026-08-19) |
 | [2839-m4-closeout](2839-m4-closeout.md) | buffy (`agent/buffy/m4-closeout`) | ✅ done 2026-08-11 — **the full class A + class B gate set |
 | [2990-u7-sysinfo-snapshot](2990-u7-sysinfo-snapshot.md) | buffy (`agent/buffy/u7-sysinfo`) | ✅ done |
 | [3109-stale-doc-cleanup](3109-stale-doc-cleanup.md) | buffy (`freebuff/stale-doc-cleanup`) | ✅ done 2026-08-08 — stale blocker snapshots removed/corrected across README, roadmap, architecture, testing, hardware-contract, march-m15; before/after stale-phrase report in `artifacts/stale-doc-report.txt` (26 → 0 hits); link check clean; `docs/status.md` untouched |

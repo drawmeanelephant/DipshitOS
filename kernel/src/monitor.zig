@@ -4598,9 +4598,10 @@ fn cmd_addrspaces(m: *Monitor, args: []const []const u8) ExecError {
     m.console.print_hex(mmu.user_root_phys());
     m.console.puts("\n");
     // Claim 0826: the per-process-root budget — table pages consumed out of
-    // the fixed 256-page carve-out. Card 3g (claim 5795): FOUR live user
-    // roots (~15 each + leaf tables) stay well inside it; the scale live
-    // gate reads this line for the headroom assertion.
+    // the fixed 512-page carve-out (grown by claim 2714 for the M16
+    // composition). Card 3g (claim 5795): FOUR live user roots (~15 each +
+    // leaf tables) stay well inside it; the scale live gate reads this line
+    // for the headroom assertion.
     m.console.puts("addrspaces: tables=");
     m.console.print_u64(@intCast(mmu.tables_used()));
     m.console.puts("/");
@@ -6173,7 +6174,7 @@ test "monitor: resources audits the fixed pools at their bounds (C3 claim 0339)"
     try std.testing.expect(std.mem.indexOf(u8, out, "resources: procs=1/16\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "resources: windows=") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "/8\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "resources: tables=0/256\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "resources: tables=0/512\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "resources: events=16 mbox=8 fds=8 timers=1 tcp=1\n") != null);
 }
 

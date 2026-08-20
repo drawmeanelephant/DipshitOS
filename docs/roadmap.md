@@ -1317,7 +1317,7 @@ See [`march-m14.md`](march-m14.md) for the per-card tracker.
 
 See [`march-m15.md`](march-m15.md) for the card tracker.
 
-### Milestone sixteen — the kernel grows up (**in progress — C1 + C2 + C3 done 2026-08-19**; wishlist 15/14/13)
+### Milestone sixteen — the kernel grows up (**done 2026-08-19**; wishlist 15/14/13)
 
 > The M15-era claims recorded the pressure that finally activates the
 > wishlist's conditional items: the **16 KiB exec load bound** (a 33 KB
@@ -1338,6 +1338,13 @@ See [`march-m15.md`](march-m15.md) for the card tracker.
 > **#190–#193** filed 2026-08-18 (one per card, the M14 way).
 
 See [`march-m16.md`](march-m16.md) for the card tracker.
+
+**Closed 2026-08-19 — C1 + C2 + C3 + C4 all live (claims 3805 + 8403 +
+0339 + 2714).** C4's composition capstone (`verify-live-m16-composition.sh`)
+ran GLOBALS.BIN, GUARD.BIN, and eight concurrent programs in ONE boot and
+exposed one more measured growth: the page-table carve-out is a total-roots
+budget (tables are never reclaimed), so the big app + hostile app + eight
+concurrent = 282 pages exceeded the old 256 — grown to 512 (2 MiB).
 
 ## Wishlist / hope chest (destinations, not commitments)
 
