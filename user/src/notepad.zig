@@ -1626,7 +1626,7 @@ test "notepad: M15 C5 — soft-wrap at last space, hard fallback, gutter and sta
     try std.testing.expectEqual(RowBounds{ .start = 0, .glyphs = 29 }, TextLayout.row_bounds(&hard, 0));
     try std.testing.expectEqual(RowBounds{ .start = 29, .glyphs = 1 }, TextLayout.row_bounds(&hard, 1));
     // Soft-wrap with space: "aaaa...aaa bbbb...bbb" where first 20 'a's + space + 20 'b's, cols 29 should wrap at space.
-    const soft = text[0 .. 41]; // 20 'a' + space + 20 'b' =41, no newline yet
+    const soft = text[0..41]; // 20 'a' + space + 20 'b' =41, no newline yet
     // The first row should be 20 'a's (space is wrap point, not counted).
     try std.testing.expectEqual(@as(usize, 2), TextLayout.total_rows(soft));
     const rb0 = TextLayout.row_bounds(soft, 0);
