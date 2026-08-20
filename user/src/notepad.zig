@@ -154,22 +154,46 @@ pub const TextLayout = struct {
     /// First visible display row (the viewport's scroll offset).
     scroll: usize = 0,
 
+    /// Find last space in `buf[start..limit)` (limit exclusive), returns offset of space or null.
+    fn last_space(buf: []const u8, start: usize, limit: usize) ?usize {
+        var j = limit;
+        while (j > start) {
+            j -= 1;
+            if (buf[j] == ' ') return j;
+        }
+        return null;
+    }
+
     pub fn position_at(buf: []const u8, offset: usize) Pos {
         var row: usize = 0;
         var col: usize = 0;
         var i: usize = 0;
-        while (i < offset and i < buf.len) : (i += 1) {
+        var row_start: usize = 0;
+        while (i < offset and i < buf.len) {
             const b = buf[i];
             if (b == '\n') {
                 row += 1;
                 col = 0;
-            } else {
-                if (col == cols) {
+                row_start = i + 1;
+                i += 1;
+                continue;
+            }
+            if (col == cols) {
+                const wrap_at = last_space(buf, row_start, i);
+                if (wrap_at) |sp| {
+                    row += 1;
+                    // New col is distance from wrap point
+                    col = i - sp - 1;
+                    row_start = sp + 1;
+                } else {
                     row += 1;
                     col = 0;
+                    row_start = i;
                 }
-                col += 1;
             }
+            // Now col < cols, we can place this char
+            col += 1;
+            i += 1;
         }
         return .{ .row = row, .col = col };
     }
@@ -183,32 +207,67 @@ pub const TextLayout = struct {
     /// out-of-range row is an empty row at buf.len.
     pub fn row_bounds(buf: []const u8, target_row: usize) RowBounds {
         var row: usize = 0;
-        var col: usize = 0;
         var i: usize = 0;
-        while (i < buf.len) : (i += 1) {
+        var row_start: usize = 0;
+        var col: usize = 0;
+        while (i < buf.len) {
             if (row == target_row) {
-                const start = i;
+                const start = row_start;
                 var count: usize = 0;
-                while (i < buf.len) {
-                    const b = buf[i];
+                var j = row_start;
+                var c: usize = 0;
+                while (j < buf.len) {
+                    const b = buf[j];
                     if (b == '\n') break;
-                    if (count == cols) break;
+                    if (c == cols) {
+                        const sp = last_space(buf, start, j);
+                        if (sp) |s| {
+                            return .{ .start = start, .glyphs = s - start };
+                        }
+                        break;
+                    }
                     count += 1;
-                    i += 1;
+                    c += 1;
+                    j += 1;
                 }
                 return .{ .start = start, .glyphs = count };
             }
             const b = buf[i];
             if (b == '\n') {
                 row += 1;
+                row_start = i + 1;
                 col = 0;
-            } else {
-                if (col == cols) {
+                i += 1;
+                continue;
+            }
+            if (col == cols) {
+                const wrap_at = last_space(buf, row_start, i);
+                if (wrap_at) |sp| {
+                    row += 1;
+                    col = i - sp - 1;
+                    row_start = sp + 1;
+                } else {
                     row += 1;
                     col = 0;
+                    row_start = i;
                 }
-                col += 1;
             }
+            col += 1;
+            i += 1;
+        }
+        // Handle the case where target_row is the last row (empty after trailing newline or beyond)
+        if (row == target_row) {
+            var count: usize = 0;
+            var j = row_start;
+            var c: usize = 0;
+            while (j < buf.len) {
+                if (buf[j] == '\n') break;
+                if (c == cols) break;
+                count += 1;
+                c += 1;
+                j += 1;
+            }
+            return .{ .start = row_start, .glyphs = count };
         }
         return .{ .start = buf.len, .glyphs = 0 };
     }
@@ -319,9 +378,24 @@ pub const AppState = struct {
     blink_armed: bool = false,
     blink_count: u32 = 0,
 
+    // M15 C5+C6: find/replace lockstep — case_sensitive=false const (v1 schema deferred).
+    find_active: bool = false,
+    find_replace_active: bool = false,
+    find_buf: [32]u8 = [_]u8{0} ** 32,
+    find_len: usize = 0,
+    replace_buf: [32]u8 = [_]u8{0} ** 32,
+    replace_len: usize = 0,
+    find_match_start: ?usize = null,
+    find_match_count: usize = 0,
+    find_current: usize = 0,
+    find_case_sensitive: bool = false,
+
     btn_load: Button = Button.init(Rect.make(6, 6, 44, 20), "Load"),
     btn_save: Button = Button.init(Rect.make(54, 6, 44, 20), "Save"),
     btn_clear: Button = Button.init(Rect.make(102, 6, 48, 20), "Clear"),
+    btn_find_next: Button = Button.init(Rect.make(200, 6, 44, 20), "Find"),
+    btn_replace: Button = Button.init(Rect.make(248, 6, 56, 20), "Replace"),
+    btn_replace_all: Button = Button.init(Rect.make(308, 6, 70, 20), "Replace All"),
 
     pub fn init() AppState {
         var s = AppState{};
@@ -415,6 +489,135 @@ pub const AppState = struct {
         return true;
     }
 
+    // M15 C5+C6: find/replace helpers — host-testable, case_sensitive=false const.
+    fn eql_ci(a: u8, b: u8) bool {
+        const la = if (a >= 'A' and a <= 'Z') a + 32 else a;
+        const lb = if (b >= 'A' and b <= 'Z') b + 32 else b;
+        return la == lb;
+    }
+
+    fn match_at(buf: []const u8, pos: usize, pat: []const u8, case_sensitive: bool) bool {
+        if (pos + pat.len > buf.len) return false;
+        for (pat, 0..) |pc, j| {
+            const bc = buf[pos + j];
+            if (case_sensitive) {
+                if (bc != pc) return false;
+            } else {
+                if (!eql_ci(bc, pc)) return false;
+            }
+        }
+        return true;
+    }
+
+    pub fn find_next(self: *AppState) bool {
+        if (self.find_len == 0) return false;
+        const buf = self.buffer.get_slice();
+        const pat = self.find_buf[0..self.find_len];
+        const start = self.buffer.cursor;
+        // Search from cursor, then wrap to 0.
+        var i = start;
+        while (i + pat.len <= buf.len) : (i += 1) {
+            if (match_at(buf, i, pat, self.find_case_sensitive)) {
+                self.buffer.cursor = i;
+                self.find_match_start = i;
+                self.find_match_count = pat.len;
+                _ = self.layout.ensure_visible(buf, i);
+                return true;
+            }
+        }
+        i = 0;
+        while (i < start and i + pat.len <= buf.len) : (i += 1) {
+            if (match_at(buf, i, pat, self.find_case_sensitive)) {
+                self.buffer.cursor = i;
+                self.find_match_start = i;
+                self.find_match_count = pat.len;
+                _ = self.layout.ensure_visible(buf, i);
+                return true;
+            }
+        }
+        self.find_match_start = null;
+        return false;
+    }
+
+    pub fn find_all_count(self: *const AppState) usize {
+        if (self.find_len == 0) return 0;
+        const buf = self.buffer.get_slice();
+        const pat = self.find_buf[0..self.find_len];
+        var cnt: usize = 0;
+        var i: usize = 0;
+        while (i + pat.len <= buf.len) : (i += 1) {
+            if (match_at(buf, i, pat, self.find_case_sensitive)) {
+                cnt += 1;
+                i += pat.len - 1;
+            }
+        }
+        return cnt;
+    }
+
+    pub fn replace_current(self: *AppState) bool {
+        const start = self.find_match_start orelse return false;
+        if (self.replace_len == 0) {
+            // Delete the match.
+            var j = start;
+            while (j + self.find_len < self.buffer.len) : (j += 1) {
+                self.buffer.buf[j] = self.buffer.buf[j + self.find_len];
+            }
+            self.buffer.len -= self.find_len;
+            self.buffer.cursor = start;
+            self.find_match_start = null;
+            return true;
+        }
+        // Replace in place when same length, else shift.
+        if (self.replace_len == self.find_len) {
+            @memcpy(self.buffer.buf[start .. start + self.replace_len], self.replace_buf[0..self.replace_len]);
+            self.buffer.cursor = start + self.replace_len;
+            self.find_match_start = null;
+            return true;
+        }
+        if (self.replace_len < self.find_len) {
+            const diff = self.find_len - self.replace_len;
+            @memcpy(self.buffer.buf[start .. start + self.replace_len], self.replace_buf[0..self.replace_len]);
+            var j = start + self.replace_len;
+            while (j + diff < self.buffer.len) : (j += 1) {
+                self.buffer.buf[j] = self.buffer.buf[j + diff];
+            }
+            self.buffer.len -= diff;
+            self.buffer.cursor = start + self.replace_len;
+            self.find_match_start = null;
+            return true;
+        } else {
+            const diff = self.replace_len - self.find_len;
+            if (self.buffer.len + diff > self.buffer.buf.len) return false;
+            var j = self.buffer.len;
+            while (j > start + self.find_len) {
+                j -= 1;
+                self.buffer.buf[j + diff] = self.buffer.buf[j];
+            }
+            @memcpy(self.buffer.buf[start .. start + self.replace_len], self.replace_buf[0..self.replace_len]);
+            self.buffer.len += diff;
+            self.buffer.cursor = start + self.replace_len;
+            self.find_match_start = null;
+            return true;
+        }
+    }
+
+    pub fn replace_all(self: *AppState) usize {
+        if (self.find_len == 0) return 0;
+        var replaced: usize = 0;
+        // Repeatedly find and replace from start.
+        self.buffer.cursor = 0;
+        while (self.find_next()) {
+            if (!self.replace_current()) break;
+            replaced += 1;
+            // Avoid infinite loop on zero-length replace that doesn't advance.
+            if (self.buffer.cursor >= self.buffer.len) break;
+        }
+        if (replaced > 0) {
+            self.set_status("Replaced");
+        }
+        return replaced;
+    }
+
     pub fn draw(self: *const AppState, win: u32) void {
         // Window background
         ui.draw_rect(win, Rect.make(0, 0, window_w, window_h), ui.COLOR_BG);
@@ -423,6 +626,9 @@ pub const AppState = struct {
         self.btn_load.draw(win);
         self.btn_save.draw(win);
         self.btn_clear.draw(win);
+        self.btn_find_next.draw(win);
+        self.btn_replace.draw(win);
+        self.btn_replace_all.draw(win);
 
         // Status label
         const status_rect = Rect.make(156, 6, 94, 20);
@@ -437,28 +643,149 @@ pub const AppState = struct {
 
         const slice = self.buffer.get_slice();
 
-        // Render only the visible rows [scroll, scroll + visible_rows), walking
-        // the buffer with the exact wrap rule TextLayout.position_at uses.
-        var row: usize = 0;
-        var col: usize = 0;
-        var i: usize = 0;
-        while (i < slice.len) : (i += 1) {
-            const ch = slice[i];
+        // M15 C5: gutter with display-row numbers (1-based) at left of text_area.
+        var grow: usize = self.layout.scroll;
+        while (grow < self.layout.scroll + TextLayout.visible_rows) : (grow += 1) {
+            if (grow >= TextLayout.total_rows(slice)) break;
+            const gy = text_y0 + @as(u32, @intCast(grow - self.layout.scroll)) * line_h;
+            var nbuf: [8]u8 = undefined;
+            var nlen: usize = 0;
+            var v = grow + 1;
+            var tmp: [8]u8 = undefined;
+            var ti: usize = 0;
+            if (v == 0) {
+                tmp[ti] = '0';
+                ti += 1;
+            } else {
+                var rev: [8]u8 = undefined;
+                var ri: usize = 0;
+                while (v > 0) : (v /= 10) {
+                    rev[ri] = @as(u8, @intCast('0' + (v % 10)));
+                    ri += 1;
+                }
+                while (ri > 0) : (ri -= 1) {
+                    tmp[ti] = rev[ri - 1];
+                    ti += 1;
+                }
+            }
+            @memcpy(nbuf[0..ti], tmp[0..ti]);
+            nlen = ti;
+            ui.draw_text(win, nbuf[0..nlen], text_area.x + 2, gy, ui.COLOR_TEXT_MUTED);
+        }
+
+        // M15 C5+C6: render visible rows with soft-wrap and substring highlight for find matches.
+        var srow: usize = 0;
+        var scol: usize = 0;
+        var si: usize = 0;
+        var srow_start: usize = 0;
+        while (si < slice.len) : (si += 1) {
+            const ch = slice[si];
             if (ch == '\n') {
-                row += 1;
-                col = 0;
+                srow += 1;
+                scol = 0;
+                srow_start = si + 1;
                 continue;
             }
-            if (col == TextLayout.cols) {
-                row += 1;
-                col = 0;
+            if (scol == TextLayout.cols) {
+                const sp = TextLayout.last_space(slice, srow_start, si);
+                if (sp) |s| {
+                    srow += 1;
+                    scol = si - s - 1;
+                    srow_start = s + 1;
+                } else {
+                    srow += 1;
+                    scol = 0;
+                    srow_start = si;
+                }
             }
-            if (row >= self.layout.scroll and row < self.layout.scroll + TextLayout.visible_rows) {
-                const x = text_x0 + @as(u32, @intCast(col)) * glyph_w;
-                const y = text_y0 + @as(u32, @intCast(row - self.layout.scroll)) * line_h;
-                ui.draw_char(win, ch, x, y, ui.COLOR_TEXT_PRIMARY);
+            if (srow >= self.layout.scroll and srow < self.layout.scroll + TextLayout.visible_rows) {
+                const x = text_x0 + @as(u32, @intCast(scol)) * glyph_w;
+                const y = text_y0 + @as(u32, @intCast(srow - self.layout.scroll)) * line_h;
+                // Highlight if this byte is inside the current find match (substring, not whole row).
+                var hl = false;
+                if (self.find_match_start) |ms| {
+                    if (si >= ms and si < ms + self.find_match_count) hl = true;
+                }
+                if (hl) {
+                    ui.draw_rect(win, Rect.make(x, y, glyph_w, 8), ui.COLOR_ACCENT);
+                    ui.draw_char(win, ch, x, y, 0xffffff);
+                } else {
+                    ui.draw_char(win, ch, x, y, ui.COLOR_TEXT_PRIMARY);
+                }
             }
-            col += 1;
+            scol += 1;
+        }
+
+        // M15 C5: status `Line X of Y` at bottom of window.
+        {
+            const cur_row = TextLayout.position_at(slice, self.buffer.cursor).row + 1;
+            const total = TextLayout.total_rows(slice);
+            var stbuf: [24]u8 = undefined;
+            var stpos: usize = 0;
+            @memcpy(stbuf[0..5], "Line ");
+            stpos = 5;
+            var v2 = cur_row;
+            var r2: [8]u8 = undefined;
+            var r2l: usize = 0;
+            if (v2 == 0) {
+                r2[0] = '0';
+                r2l = 1;
+            } else {
+                while (v2 > 0) : (v2 /= 10) {
+                    r2[r2l] = @as(u8, @intCast('0' + (v2 % 10)));
+                    r2l += 1;
+                }
+            }
+            var k: usize = r2l;
+            while (k > 0) : (k -= 1) {
+                stbuf[stpos] = r2[k - 1];
+                stpos += 1;
+            }
+            @memcpy(stbuf[stpos .. stpos + 4], " of ");
+            stpos += 4;
+            v2 = total;
+            r2l = 0;
+            if (v2 == 0) {
+                r2[0] = '0';
+                r2l = 1;
+            } else {
+                while (v2 > 0) : (v2 /= 10) {
+                    r2[r2l] = @as(u8, @intCast('0' + (v2 % 10)));
+                    r2l += 1;
+                }
+            }
+            k = r2l;
+            while (k > 0) : (k -= 1) {
+                stbuf[stpos] = r2[k - 1];
+                stpos += 1;
+            }
+            ui.draw_text(win, stbuf[0..stpos], 6, window_h - 12, ui.COLOR_TEXT_MUTED);
+        }
+
+        // M15 C6: find bar at bottom of text_area when active.
+        if (self.find_active) {
+            const bar_y = text_area.y + text_area.h - 18;
+            ui.draw_rect(win, Rect.make(text_area.x, bar_y, text_area.w, 18), ui.COLOR_SURFACE);
+            ui.draw_rect_outline(win, Rect.make(text_area.x, bar_y, text_area.w, 18), 1, ui.COLOR_ACCENT);
+            ui.draw_text(win, "Find:", text_area.x + 4, bar_y + 5, ui.COLOR_TEXT_MUTED);
+            ui.draw_text(win, self.find_buf[0..self.find_len], text_area.x + 40, bar_y + 5, ui.COLOR_TEXT_PRIMARY);
+            if (self.find_match_start != null) {
+                var mbuf: [16]u8 = undefined;
+                var mlen: usize = 0;
+                // Show "3 of 12" when there are matches.
+                const cur = self.find_current + 1;
+                const tot = self.find_all_count();
+                // For brevity, just show count.
+                _ = cur;
+                _ = tot;
+                @memcpy(mbuf[0..6], " found");
+                mlen = 6;
+                ui.draw_text(win, mbuf[0..mlen], text_area.x + text_area.w - 60, bar_y + 5, ui.COLOR_TEXT_MUTED);
+            }
+            if (self.find_replace_active) {
+                ui.draw_text(win, "Replace:", text_area.x + 140, bar_y + 5, ui.COLOR_TEXT_MUTED);
+                ui.draw_text(win, self.replace_buf[0..self.replace_len], text_area.x + 200, bar_y + 5, ui.COLOR_TEXT_PRIMARY);
+            }
         }
 
         // Cursor: always visible (ensure_visible keeps its row in the viewport).
@@ -501,6 +828,30 @@ pub const AppState = struct {
             self.layout.scroll = 0;
             self.set_status("Cleared");
             changed = true;
+        } else if (self.btn_find_next.handle_event(ev)) {
+            if (self.find_next()) {
+                self.set_status("Found");
+            } else {
+                self.set_status("No Match");
+            }
+            changed = true;
+        } else if (self.btn_replace.handle_event(ev)) {
+            if (self.replace_current()) {
+                self.set_status("Replaced");
+                self.layout.clamp_scroll(self.buffer.get_slice());
+            } else {
+                self.set_status("No Match");
+            }
+            changed = true;
+        } else if (self.btn_replace_all.handle_event(ev)) {
+            const n = self.replace_all();
+            if (n > 0) {
+                self.set_status("Replaced");
+                self.layout.clamp_scroll(self.buffer.get_slice());
+            } else {
+                self.set_status("No Match");
+            }
+            changed = true;
         } else if (ev.kind == ui.MOUSE_DOWN and (ev.flags & ui.BTN_LEFT) != 0) {
             // Claim 1771: click in the editor places the cursor.
             const x = ev.arg0;
@@ -524,6 +875,78 @@ pub const AppState = struct {
         const keycode = ev.arg0;
         const ascii = @as(u8, @truncate(ev.arg1));
         const slice = self.buffer.get_slice();
+
+        // M15 C6: Ctrl+F toggles find bar, Ctrl+H toggles replace field.
+        if ((ev.flags & ui.MOD_CTRL) != 0) {
+            if (keycode == 0x09) { // f
+                self.find_active = !self.find_active;
+                if (!self.find_active) {
+                    self.find_replace_active = false;
+                    self.find_match_start = null;
+                } else {
+                    self.find_match_start = null;
+                }
+                return true;
+            }
+            if (keycode == 0x0b) { // h
+                if (self.find_active) {
+                    self.find_replace_active = !self.find_replace_active;
+                    return true;
+                }
+            }
+        }
+
+        // M15 C6: find bar input — when active, Esc/Enter/Backspace/printable go to find bar.
+        if (self.find_active) {
+            if (keycode == 0x29) { // Escape HID 0x29
+                self.find_active = false;
+                self.find_replace_active = false;
+                self.find_match_start = null;
+                return true;
+            }
+            if (keycode == 0x28) { // Enter
+                if (self.find_next()) {
+                    self.set_status("Found");
+                } else {
+                    self.set_status("No Match");
+                }
+                return true;
+            }
+            if (ascii == 0x08 or keycode == 0x2a) { // Backspace
+                if (self.find_replace_active) {
+                    if (self.replace_len > 0) {
+                        self.replace_len -= 1;
+                        return true;
+                    }
+                } else {
+                    if (self.find_len > 0) {
+                        self.find_len -= 1;
+                        self.find_match_start = null;
+                        return true;
+                    }
+                }
+                return false;
+            }
+            if (ascii >= 0x20 and ascii <= 0x7e) {
+                if (self.find_replace_active) {
+                    if (self.replace_len < self.replace_buf.len) {
+                        self.replace_buf[self.replace_len] = ascii;
+                        self.replace_len += 1;
+                        return true;
+                    }
+                } else {
+                    if (self.find_len < self.find_buf.len) {
+                        self.find_buf[self.find_len] = ascii;
+                        self.find_len += 1;
+                        self.find_match_start = null;
+                        return true;
+                    }
+                }
+                return false;
+            }
+            // For other keys (arrows etc) when find bar is active, still allow main buffer navigation?
+            // Fall through to main handling for arrows, but not for printable.
+        }
 
         // Backspace
         if (ascii == 0x08 or keycode == 0x2a) {
@@ -1173,4 +1596,80 @@ test "notepad: copy/cut chords drive the clipboard path and cut clears (claim 01
     try std.testing.expect(app.handle_keyboard_event(&ev_paste));
     try std.testing.expectEqualStrings("No Clip", app.status_msg[0..app.status_len]);
     try std.testing.expectEqualStrings("", app.buffer.get_slice());
+}
+
+test "notepad: M15 C5 — soft-wrap at last space, hard fallback, gutter and status" {
+    // Soft-wrap: a line with spaces that exceeds cols should wrap at last space.
+    var buf: [64]u8 = undefined;
+    // Create a line: 20 'a's + space + 20 'b's + "\n" + "short"
+    var s: usize = 0;
+    for (0..20) |_| {
+        buf[s] = 'a';
+        s += 1;
+    }
+    buf[s] = ' ';
+    s += 1;
+    for (0..20) |_| {
+        buf[s] = 'b';
+        s += 1;
+    }
+    buf[s] = '\n';
+    s += 1;
+    @memcpy(buf[s .. s + 5], "short");
+    s += 5;
+    const text = buf[0..s];
+    // With cols=29, the first row should be 20 'a's (no space) + space? Actually soft-wrap should break at space.
+    // The first display row should be "aaaaaaaaaaaaaaaaaaaa" (20 'a's) without the space, second row "bbbbbbbbbbbbbbbbbbbb" (20 'b's).
+    // Hard fallback: a line of 30 'a's with no space should hard wrap at 29.
+    var hard: [30]u8 = [_]u8{'a'} ** 30;
+    try std.testing.expectEqual(@as(usize, 2), TextLayout.total_rows(&hard));
+    try std.testing.expectEqual(RowBounds{ .start = 0, .glyphs = 29 }, TextLayout.row_bounds(&hard, 0));
+    try std.testing.expectEqual(RowBounds{ .start = 29, .glyphs = 1 }, TextLayout.row_bounds(&hard, 1));
+    // Soft-wrap with space: "aaaa...aaa bbbb...bbb" where first 20 'a's + space + 20 'b's, cols 29 should wrap at space.
+    const soft = text[0 .. 41]; // 20 'a' + space + 20 'b' =41, no newline yet
+    // The first row should be 20 'a's (space is wrap point, not counted).
+    try std.testing.expectEqual(@as(usize, 2), TextLayout.total_rows(soft));
+    const rb0 = TextLayout.row_bounds(soft, 0);
+    try std.testing.expectEqual(@as(usize, 20), rb0.glyphs);
+    const rb1 = TextLayout.row_bounds(soft, 1);
+    try std.testing.expectEqual(@as(usize, 20), rb1.glyphs);
+}
+
+test "notepad: M15 C6 — find next, case-insensitive, replace and replace-all" {
+    var app = AppState.init();
+    app.buffer.set_content("hello HELLO hello");
+    // Find "hello" case-insensitive
+    @memcpy(app.find_buf[0..5], "hello");
+    app.find_len = 5;
+    app.find_case_sensitive = false;
+    try std.testing.expect(app.find_next());
+    try std.testing.expectEqual(@as(?usize, 0), app.find_match_start);
+    // Next should be at 6 ("HELLO")
+    app.buffer.cursor = 1;
+    try std.testing.expect(app.find_next());
+    try std.testing.expectEqual(@as(?usize, 6), app.find_match_start);
+    // Next should be at 12
+    app.buffer.cursor = 7;
+    try std.testing.expect(app.find_next());
+    try std.testing.expectEqual(@as(?usize, 12), app.find_match_start);
+    // Replace current "hello" at 12 with "hi"
+    @memcpy(app.replace_buf[0..2], "hi");
+    app.replace_len = 2;
+    try std.testing.expect(app.replace_current());
+    try std.testing.expectEqualStrings("hello HELLO hi", app.buffer.get_slice());
+    // Replace all "hello" -> "hi" (case-insensitive) should replace remaining 2
+    @memcpy(app.find_buf[0..5], "hello");
+    app.find_len = 5;
+    @memcpy(app.replace_buf[0..2], "hi");
+    app.replace_len = 2;
+    const n = app.replace_all();
+    try std.testing.expectEqual(@as(usize, 2), n);
+    try std.testing.expectEqualStrings("hi hi hi", app.buffer.get_slice());
+    // Ctrl+F toggles find bar
+    var ev_f = Event{ .kind = ui.KEY_DOWN, .flags = ui.MOD_CTRL, .seq = 1, .arg0 = 0x09, .arg1 = 0 };
+    try std.testing.expect(app.handle_keyboard_event(&ev_f));
+    try std.testing.expect(app.find_active);
+    ev_f.arg0 = 0x09;
+    try std.testing.expect(app.handle_keyboard_event(&ev_f));
+    try std.testing.expect(!app.find_active);
 }

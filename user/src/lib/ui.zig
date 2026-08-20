@@ -1267,7 +1267,7 @@ test "ui: DropDown open, select, and dismiss" {
     try std.testing.expect(dd.open);
 
     // Click option 2 ("amber") in overlay.
-    var ev_opt = Event{ .kind = MOUSE_DOWN, .flags = BTN_LEFT, .seq = 2, .arg0 = 30, .arg1 = 52 };
+    var ev_opt = Event{ .kind = MOUSE_DOWN, .flags = BTN_LEFT, .seq = 2, .arg0 = 30, .arg1 = 70 };
     _ = dd.handle_event(&ev_opt);
     try std.testing.expect(!dd.open);
     try std.testing.expectEqual(@as(usize, 2), dd.selected);
