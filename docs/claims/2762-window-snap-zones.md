@@ -4,7 +4,7 @@
 - **Prompt / plan:** `docs/m17-desktop-completeness.md` C3 (issue #227)
 - **Scope:** Arc 2 Window Management — pure compositor geometry in `driving_award.zig`. Drag a user window within 20 px of screen edges snaps to halves/quadrants on release, translucent preview while dragging, restore original size on drag-out. No new syscall, no new event kind, no heap, BSS `last_user_rect[8]` + `last_drag_zone` + `is_snapped` bitmap. Respects `dock=true` future and `D7` layering (snap preview below notification, above windows). Stacks on C2's `driving_award` changes.
 - **Depends on:** C2 Alt+Tab overlay (✅ PR #251) — same file `driving_award.zig`, sequential; drag-to-move ✅ (pointer_tick).
-- **Status:** 🔄 agent/buffy/m15-c3-snap-zones
+- **Status:** ✅ done 2026-08-20 — `driving_award.zig:178` snap BSS (`last_rect`/`is_snapped`/`zone` ≈80 B) + `snap_zone_for_point`/`snap_window`/`snap_restore` + `pointer_tick` drag-out restore + `draw_chrome` preview, host tests `snap_zone`/`snap_window`/`preview` PASS, `verify-bss-budget` PASS `9787576/11534336`
 
 ## Notes
 

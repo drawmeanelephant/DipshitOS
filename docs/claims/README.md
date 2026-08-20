@@ -132,7 +132,7 @@ CI) fails if the table drifts from the claim files.
 | [2649-u8-persistent-settings](2649-u8-persistent-settings.md) | buffy (`agent/buffy/u8-persistent-settings`) | ✅ done |
 | [2665-m4-entropy-csprng](2665-m4-entropy-csprng.md) | Buffy (`agent/buffy/m4-entropy-csprng`) | ✅ done 2026-08-10 |
 | [2714-m16-c4-composition-capstone](2714-m16-c4-composition-capstone.md) | buffy (`agent/buffy/m16-c4-composition`) | ✅ done — live gate PASS 1/1 (2026-08-19) |
-| [2762-window-snap-zones](2762-window-snap-zones.md) | buffy (`agent/buffy/m15-c3-snap-zones`) | 🔄 agent/buffy/m15-c3-snap-zones |
+| [2762-window-snap-zones](2762-window-snap-zones.md) | buffy (`agent/buffy/m15-c3-snap-zones`) | ✅ done 2026-08-20 — `driving_award.zig:178` snap BSS (`last_rect`/`is_snapped`/`zone` ≈80 B) + `snap_zone_for_point`/`snap_window`/`snap_restore` + `pointer_tick` drag-out restore + `draw_chrome` preview, host tests `snap_zone`/`snap_window`/`preview` PASS, `verify-bss-budget` PASS `9787576/11534336` |
 | [2839-m4-closeout](2839-m4-closeout.md) | buffy (`agent/buffy/m4-closeout`) | ✅ done 2026-08-11 — **the full class A + class B gate set |
 | [2873-alt-tab-cycling-ui](2873-alt-tab-cycling-ui.md) | buffy (`agent/buffy/m15-c2-alt-tab`) | ✅ done 2026-08-20 — `driving_award.zig:168` overlay BSS (32 B) + `input.zig:86` Alt+Shift latch + `shell.zig:191` hold-Alt commit, host tests PASS 125/125 `driving_award`, class-A `verify-bss-budget` PASS `9787576/11534336`, `zig fmt` + `zig build` + `test-console` PASS |
 | [2990-u7-sysinfo-snapshot](2990-u7-sysinfo-snapshot.md) | buffy (`agent/buffy/u7-sysinfo`) | ✅ done |
