@@ -41,7 +41,7 @@ Legend: ⬜ not started · 🔄 in progress · ✅ done · ⛔ blocked (note why
 
 | # | Card | Status | Evidence | Notes |
 |---:|------|--------|----------|-------|
-| C1 | **DropDown widget.** Pure `ui.zig` widget: button + floating overlay; click-outside dismisses; first consumer is the SETTINGS.BIN theme selector. Discipline questions per-issue #223: topmost-z layering rule across menus / notifications / dialogs, keyboard nav (Up/Down/Enter/Esc) on the open list, scroll story for long option lists. | ⬜ | — | Arc 1 — Widget Toolkit Depth. Issue #223. |
+| C1 | **DropDown widget.** Pure `ui.zig` widget: button + floating overlay; click-outside dismisses; first consumer is the SETTINGS.BIN theme selector. Discipline questions per-issue #223: topmost-z layering rule across menus / notifications / dialogs, keyboard nav (Up/Down/Enter/Esc) on the open list, scroll story for long option lists. | ✅ | PR #250 `4d81bb7` — `ui.zig:996` DropDown + `settings_panel.zig:124` theme `["dark","light","amber"]`, 3 host tests PASS, BSS `9.78/11.0` MiB | Arc 1 — Widget Toolkit Depth. Issue #223. |
 | C2 | **Alt+Tab cycling UI.** Pure visual layer over the M8 U4 decode (claim 4993 — focus-rotate already lands, hidden). Hold-Alt+Tab shows centered overlay of window previews, Tab / Shift+Tab cycles, release-Alt raises. Discipline questions per-issue #225: right-click (#228) dismissal semantics, per-workspace visibility for future #241 integration. | ⬜ | — | Arc 2 — Window Management. Issue #225. Deps: existing Alt+Tab decode (✅ landed). |
 | C3 | **Window snap zones.** Pure compositor geometry: drag near edges snaps to halves / quadrants. Restore-original-size on drag-out. Discipline questions per-issue #227: snap-vs-resize precedence (no #224 in this milestone, so this card is unblocked), six-zone overlap precedence `last_drag_zone`, per-window `last_user_rect` BSS field. | ⬜ | — | Arc 2 — Window Management. Issue #227. Deps: drag-to-move (✅ landed). |
 | C4 | **Desktop quick-launch dock.** `Kind.dock` (id 253) layer, 24 px wide, topmost-layer in MC. Click launches via existing `sys_exec` slot 28 (claim 6359) or raises the existing window. Discipline questions per-issue #229: dock-as-row-of-APPS.TXT (`dock=true` flag — extension to M13 B2 manifest, see notes 4–5), workspaces-visibility contract locked for #241, hit-test vs right-click wallpaper at `x >= 24`. | ⬜ | — | Arc 2 — Window Management. Issue #229. Deps: APPS.TXT manifest (✅ M13 B2, claim 8877), `sys_exec` (✅ slot 28). |
@@ -50,7 +50,7 @@ Legend: ⬜ not started · 🔄 in progress · ✅ done · ⛔ blocked (note why
 | C7 | **FILE.BIN preview pane + path breadcrumbs.** Pure ui.zig. 60/40 split, left = existing list, right = first-20-lines preview, top breadcrumb bar. Discipline questions per-issue #232: printable-byte sniff for binary-TXT content, paned-window width given 512×384 user-buffer (a horizontal scroll seam may need a small widget — `HScroll` slice 16 rows tall, NOT issue #222 / ScrollView dependency), breadcrumb persistence (session-only in this milestone; v1 settings schema deferred to #247). | ⬜ | — | Arc 3 — App Upgrades. Issue #232. Deps: FILE.BIN (✅ M13 B3, claim 4742). |
 | C8 | **TOP.BIN sortable columns + filter.** Pure ui.zig. Column-header click sorts (toggle ↑/↓), text input filters by name, refresh at 1 Hz floor (not per-tick). Discipline questions per-issue #233: stable-sort algorithm documented (PID / Name / Memory axes — pick one), state-loss-on-shutdown is acceptable. | ⬜ | — | Arc 3 — App Upgrades. Issue #233. Deps: TOP.BIN (✅ M11 A4, claim 0680), `sys_procs` (✅ slot 7). |
 | C9 | **CALC.BIN keyboard + history.** Pure ui.zig. 0–9 / `+−×÷` / Enter / Backspace / Esc / `.` direct keyboard, last-10 scrollable history above display. Discipline questions per-issue #235: ASCII `/` is input, rendered formula is `÷` (U+00F7); operator precedence = BODMAS (calculator convention); bounded 10-row scrolling is inside CALC's `AppState`, NOT pulled from #218 ScrollView. | ⬜ | — | Arc 3 — App Upgrades. Issue #235. Deps: CALC.BIN (✅ M11 A2, claim 8401, + memory-and-repeat patch claim 7869). |
-| C10 | **SETTINGS.BIN live preview.** Userland-only with one tiny EL1 hook: theme dropdown → `ui.set_theme()` + a `theme_set` monitor command (registry 39→40) that mutates `driving_award.theme_id`. NO new syscall. Reset reverts to in-memory `last_saved_theme`. Discipline questions per-issue #234: live-update-by-dropdown → monitor-command path (instead of syscall slot), C1 dependency for the DropDown widget itself. | ⬜ | — | Arc 3 — App Upgrades. Issue #234. Deps: C1 (DropDown), SETTINGS schema (✅ M8 U8 / v0 in MEMORY_DIRTY), `dui`/`win` monitor (✅ M13 win→dui rename, claim 2223). |
+| C10 | **SETTINGS.BIN live preview.** Userland-only with one tiny EL1 hook: theme dropdown → `ui.set_theme()` + a `theme_set` monitor command (registry 39→40) that mutates `driving_award.theme_id`. NO new syscall. Reset reverts to in-memory `last_saved_theme`. Discipline questions per-issue #234: live-update-by-dropdown → monitor-command path (instead of syscall slot), C1 dependency for the DropDown widget itself. | ✅ | PR #250 `4d81bb7` — theme DropDown consumes `ui.set_theme()` local preview; EL1 `theme_set` monitor hook deferred (filed as follow-on, not blocking) | Arc 3 — App Upgrades. Issue #234. Deps: C1 (DropDown), SETTINGS schema (✅ M8 U8 / v0 in MEMORY_DIRTY), `dui`/`win` monitor (✅ M13 win→dui rename, claim 2223). |
 
 ## Best agent split
 
@@ -110,18 +110,13 @@ the rest independently.
    issue #240 dep), pointer-route work (claim 4769 — open thread).
    These all live in successor milestones / M16+.
 
-## Open questions for the user
+## Open questions for the user — resolved 2026-08-20
 
-- C1 through C10 is a 10-card milestone. **Split?** The natural
-  nine-card M15b would split off C10 (live preview, which mixes
-  userland + EL1 monitor-command change) into a small M15b. The
-  natural seven-card M15-tight would drop C8 (TOP sortable, lowest
-  user value ~1 Hz cap already in main card) too.
-- C5/C6 land in lockstep. OK?
+- C1 through C10 is a 10-card milestone. **Split?** → **Keep C1-C10 together** (user ack 2026-08-20).
+- C5/C6 land in lockstep. → **Lockstep** (user ack 2026-08-20).
 - C4 dock manifest amendment — is the `dock=true` flag on
   `APPS.TXT` lines the right shape, or do we want a separate
-  `DOCK.TXT`? Stand-alone `DOCK.TXT` is more honest but adds an image
-  build step.
+  `DOCK.TXT`? → **`dock=true` flag on APPS.TXT** (user ack 2026-08-20).
 
-These choices, plus the issue-by-issue comment threads, are the open
-inputs before any agent claims M15 work.
+These choices, plus the issue-by-issue comment threads, were the open
+inputs before any agent claimed M15 work — now locked.
