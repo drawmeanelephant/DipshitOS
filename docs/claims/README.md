@@ -133,6 +133,7 @@ CI) fails if the table drifts from the claim files.
 | [2665-m4-entropy-csprng](2665-m4-entropy-csprng.md) | Buffy (`agent/buffy/m4-entropy-csprng`) | ✅ done 2026-08-10 |
 | [2714-m16-c4-composition-capstone](2714-m16-c4-composition-capstone.md) | buffy (`agent/buffy/m16-c4-composition`) | ✅ done — live gate PASS 1/1 (2026-08-19) |
 | [2839-m4-closeout](2839-m4-closeout.md) | buffy (`agent/buffy/m4-closeout`) | ✅ done 2026-08-11 — **the full class A + class B gate set |
+| [2873-alt-tab-cycling-ui](2873-alt-tab-cycling-ui.md) | buffy (`agent/buffy/m15-c2-alt-tab`) | ✅ done 2026-08-20 — `driving_award.zig:168` overlay BSS (32 B) + `input.zig:86` Alt+Shift latch + `shell.zig:191` hold-Alt commit, host tests PASS 125/125 `driving_award`, class-A `verify-bss-budget` PASS `9787576/11534336`, `zig fmt` + `zig build` + `test-console` PASS |
 | [2990-u7-sysinfo-snapshot](2990-u7-sysinfo-snapshot.md) | buffy (`agent/buffy/u7-sysinfo`) | ✅ done |
 | [3109-stale-doc-cleanup](3109-stale-doc-cleanup.md) | buffy (`freebuff/stale-doc-cleanup`) | ✅ done 2026-08-08 — stale blocker snapshots removed/corrected across README, roadmap, architecture, testing, hardware-contract, march-m15; before/after stale-phrase report in `artifacts/stale-doc-report.txt` (26 → 0 hits); link check clean; `docs/status.md` untouched |
 | [3179-ipc-depth](3179-ipc-depth.md) | Buffy (`agent/buffy/m4-ipc-depth`) | ✅ done 2026-08-11 (PR #82, stacked after PR #81 card 4a) |

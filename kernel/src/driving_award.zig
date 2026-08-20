@@ -169,6 +169,12 @@ var drag_id: ?u8 = null;
 var drag_offset_x: u32 = 0;
 var drag_offset_y: u32 = 0;
 
+/// M15 C2 (Alt+Tab overlay, #225): hold-Alt cycling UI state — BSS, no heap.
+var overlay_active: bool = false;
+var overlay_selected: usize = 0;
+var overlay_ids: [max_windows]u8 = undefined;
+var overlay_count: usize = 0;
+
 /// Step 7 (Issue #207): theme selection. 0=dark, 1=light, 2=amber.
 /// Read by the compositor chrome pass for title bars, clock, focus ring.
 pub var theme_id: u8 = 0;
@@ -321,6 +327,9 @@ pub fn arm() void {
     cursor_shown = false;
     prev_ptr_buttons = 0;
     drag_id = null;
+    overlay_active = false;
+    overlay_count = 0;
+    overlay_selected = 0;
 }
 
 pub fn armed() bool {
@@ -761,6 +770,11 @@ fn remove_user_at(idx: usize) void {
     if (focused_id == removed_id) {
         focused_id = 0; // fall back to the terminal
     }
+    // M15 C2: overlay snapshot is stale after a close — dismiss honestly.
+    if (overlay_active) {
+        overlay_active = false;
+        overlay_count = 0;
+    }
     // Reveal whatever sat under the released window.
     _ = mark_dirty(0);
     _ = mark_dirty(1);
@@ -785,6 +799,89 @@ pub fn cycle_focus() ?u8 {
         return focused_id;
     }
     return null;
+}
+
+/// M15 C2 (Alt+Tab overlay, #225): hold-Alt cycling UI — BSS snapshot + highlight.
+/// Pure overlay: Alt held + first Tab captures user-window ids, Tab/Shift+Tab cycles
+/// `overlay_selected`, Alt release commits the highlight. No new syscall/kind.
+pub fn alt_tab_is_active() bool {
+    return overlay_active;
+}
+
+pub fn alt_tab_selected_id() ?u8 {
+    if (!overlay_active or overlay_count == 0) return null;
+    return overlay_ids[overlay_selected];
+}
+
+pub fn alt_tab_count() usize {
+    return overlay_count;
+}
+
+/// Snapshot user windows and activate the overlay. Returns true when an overlay
+/// with ≥2 windows is now visible (1 window → no overlay, honest no-op).
+pub fn alt_tab_activate() bool {
+    if (overlay_active) return false;
+    var ids: [max_windows]u8 = undefined;
+    var cnt: usize = 0;
+    var i: usize = 0;
+    while (i < win_count) : (i += 1) {
+        const w = windows[i];
+        if (!w.visible) continue;
+        if (w.kind != .user) continue;
+        if (cnt < max_windows) {
+            ids[cnt] = w.id;
+            cnt += 1;
+        }
+    }
+    if (cnt <= 1) return false;
+    var sel: usize = 0;
+    var found: ?usize = null;
+    var k: usize = 0;
+    while (k < cnt) : (k += 1) {
+        if (ids[k] == focused_id) {
+            found = k;
+            break;
+        }
+    }
+    if (found) |idx| sel = (idx + 1) % cnt else sel = 0;
+    var j: usize = 0;
+    while (j < cnt) : (j += 1) overlay_ids[j] = ids[j];
+    overlay_count = cnt;
+    overlay_selected = sel;
+    overlay_active = true;
+    _ = mark_dirty(0);
+    return true;
+}
+
+/// Cycle the highlight — Shift inverts (reverse).
+pub fn alt_tab_cycle(shift: bool) void {
+    if (!overlay_active or overlay_count == 0) return;
+    if (shift) {
+        if (overlay_selected == 0) overlay_selected = overlay_count - 1 else overlay_selected -= 1;
+    } else {
+        overlay_selected = (overlay_selected + 1) % overlay_count;
+    }
+    _ = mark_dirty(0);
+}
+
+/// Commit the highlighted window (focus+raise) and dismiss the overlay.
+pub fn alt_tab_commit() ?u8 {
+    if (!overlay_active or overlay_count == 0) return null;
+    const id = overlay_ids[overlay_selected];
+    overlay_active = false;
+    overlay_count = 0;
+    _ = focus(id);
+    _ = raise(id);
+    _ = mark_dirty(0);
+    return id;
+}
+
+/// Dismiss without committing (right-click / Escape).
+pub fn alt_tab_dismiss() void {
+    if (!overlay_active) return;
+    overlay_active = false;
+    overlay_count = 0;
+    _ = mark_dirty(0);
 }
 
 /// Map raw pointer buttons bitmask to ADR 0009 button flags.
@@ -1231,14 +1328,12 @@ fn draw_chrome() void {
         @memcpy(tb[0..3], label);
         n = 3;
         const idstr = fmt_decimal(tb[n..], w.id);
-        @memcpy(tb[n..][0..idstr.len], idstr);
         n += idstr.len;
         if (w.owner) |pid| {
             const ps = " pid=";
             @memcpy(tb[n..][0..ps.len], ps);
             n += ps.len;
             const pids = fmt_decimal(tb[n..], pid);
-            @memcpy(tb[n..][0..pids.len], pids);
             n += pids.len;
         }
         draw_string_16(fb, stride, w.x + 4, w.y, tb[0..n], user_title_fg_rgb);
@@ -1277,6 +1372,78 @@ fn draw_chrome() void {
         const cw = if (cx + cursor_w > wspan) wspan - cx else cursor_w;
         const ch = if (cy + cursor_h > hspan) hspan - cy else cursor_h;
         fill_rect(fb, stride, cx, cy, cw, ch, cursor_rgb);
+    }
+    // M15 C2 (Alt+Tab overlay, #225): centered window previews while Alt held.
+    // Topmost below notification (D7 ordering), above user chrome. Dim the
+    // backdrop by filling a translucent dark rect over the whole scanout, then
+    // a centered list of user-window rows with highlight on `overlay_selected`.
+    if (overlay_active and overlay_count > 0) {
+        // Dim backdrop — 50% dark (opaque dark gray is the honest preview for the
+        // host's ScreenCaptureKit composite; true alpha would be compositor-pricey).
+        fill_rect(fb, stride, 0, 0, wspan, hspan, 0x0f0f1a);
+        const ov_w: u32 = 440;
+        const row_h: u32 = 28;
+        const header_h: u32 = 24;
+        const pad: u32 = 8;
+        const ov_h: u32 = header_h + pad * 2 + @as(u32, @intCast(overlay_count)) * row_h + pad;
+        const ov_x: u32 = if (wspan > ov_w) (wspan - ov_w) / 2 else 0;
+        const ov_y: u32 = if (hspan > ov_h) (hspan - ov_h) / 2 else 0;
+        // Overlay surface + border.
+        fill_rect(fb, stride, ov_x, ov_y, ov_w, ov_h, 0x1e293b);
+        // 2-px border in accent.
+        fill_rect(fb, stride, ov_x, ov_y, ov_w, 2, clock_accent_rgb);
+        fill_rect(fb, stride, ov_x, ov_y + ov_h - 2, ov_w, 2, clock_accent_rgb);
+        fill_rect(fb, stride, ov_x, ov_y, 2, ov_h, clock_accent_rgb);
+        fill_rect(fb, stride, ov_x + ov_w - 2, ov_y, 2, ov_h, clock_accent_rgb);
+        draw_string(fb, stride, ov_x + pad, ov_y + pad, "Alt+Tab  —  Switch window", 0xffffff);
+        draw_string(fb, stride, ov_x + pad, ov_y + pad + 12, "(Tab / Shift+Tab cycles, release Alt)", 0x94a3b8);
+        var idx: usize = 0;
+        while (idx < overlay_count) : (idx += 1) {
+            const id = overlay_ids[idx];
+            const row_y = ov_y + header_h + pad + @as(u32, @intCast(idx)) * row_h;
+            const is_sel = idx == overlay_selected;
+            const bg = if (is_sel) taskbar_entry_active() else 0x0f172a;
+            fill_rect(fb, stride, ov_x + pad, row_y, ov_w - pad * 2, row_h - 2, bg);
+            // Outline highlight on selected.
+            if (is_sel) {
+                fill_rect(fb, stride, ov_x + pad, row_y, ov_w - pad * 2, 1, 0xffffff);
+                fill_rect(fb, stride, ov_x + pad, row_y + row_h - 3, ov_w - pad * 2, 1, 0xffffff);
+            }
+            var win_title: []const u8 = "user";
+            var win_owner: ?usize = null;
+            var k: usize = 0;
+            while (k < win_count) : (k += 1) {
+                if (windows[k].id == id and windows[k].kind == .user) {
+                    win_title = windows[k].title;
+                    win_owner = windows[k].owner;
+                    break;
+                }
+            }
+            var tbuf: [32]u8 = undefined;
+            var tn: usize = 0;
+            @memcpy(tbuf[0..4], "dui ");
+            tn = 4;
+            const id_s = fmt_decimal(tbuf[tn..], id);
+            tn += id_s.len;
+            if (win_owner) |pid| {
+                const pfx = " pid=";
+                @memcpy(tbuf[tn..][0..pfx.len], pfx);
+                tn += pfx.len;
+                const pid_s = fmt_decimal(tbuf[tn..], pid);
+                tn += pid_s.len;
+            }
+            draw_string(fb, stride, ov_x + pad + 6, row_y + 10, tbuf[0..tn], if (is_sel) 0xffffff else 0xd8dee9);
+            draw_string(fb, stride, ov_x + ov_w - pad - 80, row_y + 10, win_title, 0x94a3b8);
+            // Small preview color block — distinct per window id.
+            const preview_rgb: u32 = switch (id % 4) {
+                0 => 0x3b82f6,
+                1 => 0x10b981,
+                2 => 0xf59e0b,
+                3 => 0xef4444,
+                else => 0x6366f1,
+            };
+            fill_rect(fb, stride, ov_x + ov_w - pad - 36, row_y + 6, 16, 16, preview_rgb);
+        }
     }
 }
 
@@ -1926,4 +2093,73 @@ test "driving_award: card E4 — window lifecycle emits WIN_FOCUS, WIN_BLUR, and
 
     // Clean up window 3
     _ = user_close(win3);
+}
+
+test "driving_award: M15 C2 — Alt+Tab overlay snapshots, cycles, commits" {
+    arm();
+    // 0 user windows → no overlay.
+    try std.testing.expect(!alt_tab_is_active());
+    try std.testing.expect(!alt_tab_activate());
+    try std.testing.expect(!alt_tab_is_active());
+    // 1 user window → no overlay (honest no-op).
+    _ = user_open(10, 10, 200, 100, 7);
+    try std.testing.expect(!alt_tab_activate());
+    try std.testing.expectEqual(@as(usize, 0), alt_tab_count());
+    // 2 user windows → overlay snapshots both, selected is next after focused.
+    _ = user_open(120, 10, 200, 100, 8);
+    try std.testing.expectEqual(@as(u8, 3), focused_id); // last opened has focus
+    try std.testing.expect(alt_tab_activate());
+    try std.testing.expect(alt_tab_is_active());
+    try std.testing.expectEqual(@as(usize, 2), alt_tab_count());
+    // Focus is 3, so selected should be 2 (the other window).
+    try std.testing.expectEqual(@as(?u8, 2), alt_tab_selected_id());
+    // Cycle forward → wraps to 3, back → 2.
+    alt_tab_cycle(false);
+    try std.testing.expectEqual(@as(?u8, 3), alt_tab_selected_id());
+    alt_tab_cycle(false);
+    try std.testing.expectEqual(@as(?u8, 2), alt_tab_selected_id());
+    alt_tab_cycle(true); // Shift+Tab reverse
+    try std.testing.expectEqual(@as(?u8, 3), alt_tab_selected_id());
+    // Commit → focuses selected (3) and dismisses overlay.
+    const committed = alt_tab_commit().?;
+    try std.testing.expectEqual(@as(u8, 3), committed);
+    try std.testing.expect(!alt_tab_is_active());
+    try std.testing.expectEqual(@as(u8, 3), focused_id);
+    try std.testing.expectEqual(@as(usize, 5), win_count - 1); // raised to top
+    // Re-activate then dismiss without commit.
+    try std.testing.expect(alt_tab_activate());
+    try std.testing.expectEqual(@as(?u8, 2), alt_tab_selected_id());
+    alt_tab_dismiss();
+    try std.testing.expect(!alt_tab_is_active());
+    try std.testing.expectEqual(@as(u8, 3), focused_id); // unchanged
+    // Close while active → honest dismiss.
+    try std.testing.expect(alt_tab_activate());
+    try std.testing.expect(alt_tab_is_active());
+    _ = user_close(2);
+    try std.testing.expect(!alt_tab_is_active());
+    _ = user_close(3);
+}
+
+test "driving_award: M15 C2 — overlay renders centered list with highlight" {
+    arm();
+    _ = user_open(10, 10, 200, 100, 7);
+    _ = user_open(120, 10, 200, 100, 8);
+    _ = alt_tab_activate();
+    _ = composite();
+    const stride = virtio_gpu.fb_width * 4;
+    const fb: [*]u8 = @ptrCast(&virtio_gpu.gpu_fb);
+    const ov_w: u32 = 440;
+    const ov_x: u32 = (virtio_gpu.fb_width - ov_w) / 2;
+    const ov_y: u32 = (virtio_gpu.fb_height - (24 + 8 * 2 + 2 * 28 + 8)) / 2;
+    // Overlay border is accent color (0xffaa00 → B=0x00 G=0xaa R=0xff).
+    const px = struct {
+        fn at(f: [*]u8, st: usize, x: usize, y: usize) u32 {
+            const o = y * st + x * 4;
+            return @as(u32, f[o + 2]) << 16 | @as(u32, f[o + 1]) << 8 | f[o];
+        }
+    };
+    try std.testing.expectEqual(@as(u32, 0xffaa00), px.at(fb, stride, ov_x, ov_y));
+    // Inside the highlighted row (first selected is id 2) the row bg is active (0x3b82f6 blue in dark theme).
+    const sel_y = ov_y + 24 + 8 + 10;
+    try std.testing.expectEqual(@as(u32, 0x3b82f6), px.at(fb, stride, ov_x + 10, sel_y));
 }
