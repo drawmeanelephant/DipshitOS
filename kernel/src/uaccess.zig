@@ -51,12 +51,13 @@ pub const efault: u64 = @bitCast(@as(i64, -3));
 /// active. Revisit if the blanket or BAR placement ever grows.
 pub const diagnostic_unmapped: u64 = 0x1_2000_0000;
 
-/// EL0-readable regions (copy-in sources): user text (RX) + user stack (RW).
-var read_regions: [2]Region = .{ .{ .base = 0, .len = 0 }, .{ .base = 0, .len = 0 } };
-/// EL0-writable regions (copy-out destinations): the user stack only — the
+/// EL0-readable regions (copy-in sources): user text (RX) + data (RW) + user stack (RW).
+/// M16 C1: adds data for writable globals/BSS.
+var read_regions: [3]Region = .{ .{ .base = 0, .len = 0 }, .{ .base = 0, .len = 0 }, .{ .base = 0, .len = 0 } };
+/// EL0-writable regions (copy-out destinations): data + user stack — the
 /// text aperture is read-only at EL0, so copying into it is a permission
 /// fault (rejected at validation).
-var write_regions: [2]Region = .{ .{ .base = 0, .len = 0 }, .{ .base = 0, .len = 0 } };
+var write_regions: [3]Region = .{ .{ .base = 0, .len = 0 }, .{ .base = 0, .len = 0 }, .{ .base = 0, .len = 0 } };
 
 /// The window state is VOLATILE on purpose. `window_active` has no reader
 /// inside the copy loop, so without volatile semantics the optimizer
@@ -115,8 +116,8 @@ pub const Stats = struct {
 /// Reset module state (kernel boot / host tests). Regions are re-configured
 /// with `set_regions` immediately after.
 pub fn init() void {
-    read_regions = .{ .{ .base = 0, .len = 0 }, .{ .base = 0, .len = 0 } };
-    write_regions = .{ .{ .base = 0, .len = 0 }, .{ .base = 0, .len = 0 } };
+    read_regions = .{ .{ .base = 0, .len = 0 }, .{ .base = 0, .len = 0 }, .{ .base = 0, .len = 0 } };
+    write_regions = .{ .{ .base = 0, .len = 0 }, .{ .base = 0, .len = 0 }, .{ .base = 0, .len = 0 } };
     set_window_active(false);
     set_latch(false);
     saved_daif = 0;
@@ -128,8 +129,17 @@ pub fn init() void {
 /// Configure the claim-8215 EL0 apertures (text readable, stack read-write).
 /// The syscall layer delegates its `set_user_regions` here.
 pub fn set_regions(text: Region, stack: Region) void {
-    read_regions = .{ text, stack };
-    write_regions = .{ .{ .base = 0, .len = 0 }, stack };
+    read_regions = .{ text, .{ .base = 0, .len = 0 }, stack };
+    write_regions = .{ .{ .base = 0, .len = 0 }, .{ .base = 0, .len = 0 }, stack };
+}
+
+/// M16 C1: configure text + data + stack (data is RW, non-executable, for
+/// writable globals/BSS). The syscall layer delegates its
+/// `set_user_regions_m16` here. When data.len==0 the data slot stays zero
+/// and behavior is identical to the 2-region case.
+pub fn set_regions_m16(text: Region, data: Region, stack: Region) void {
+    read_regions = .{ text, data, stack };
+    write_regions = .{ .{ .base = 0, .len = 0 }, data, stack };
 }
 
 pub fn stats() Stats {

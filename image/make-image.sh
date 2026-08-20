@@ -64,6 +64,7 @@ VICTIM_BIN="${27:-$ROOT_DIR/zig-out/bin/VICTIM.BIN}"
 HARDEN_BIN="${28:-$ROOT_DIR/zig-out/bin/HARDEN.BIN}"
 JINGLE_BIN="${29:-$ROOT_DIR/zig-out/bin/JINGLE.BIN}"
 CHIME_BIN="${30:-$ROOT_DIR/zig-out/bin/CHIME.BIN}"
+BIGTEST_BIN="${31:-$ROOT_DIR/zig-out/bin/BIGTEST.BIN}"
 SIZE_MB="${DIPSHITOS_IMAGE_SIZE_MB:-128}"
 
 cd "$ROOT_DIR"
@@ -274,6 +275,13 @@ if [ -f "$CHIME_BIN" ]; then
     fi
     CHIME_ARGS+=("$CHIME_BIN")
 fi
+BIGTEST_ARGS=()
+if [ -f "$BIGTEST_BIN" ]; then
+    if [ "$(head -c 3 "$BIGTEST_BIN")" != "DSK" ]; then
+        fail "'$BIGTEST_BIN' does not start with the 'DSK' image magic -- run 'zig build' first (it produces zig-out/bin/BIGTEST.BIN)."
+    fi
+    BIGTEST_ARGS+=("$BIGTEST_BIN")
+fi
 
 # 3. Builder script.
 [ -f "$SCRIPT_DIR/mkfat32.py" ] || fail "missing $SCRIPT_DIR/mkfat32.py."
@@ -288,7 +296,7 @@ if [ -f "$APPS_TXT" ]; then
     APPS_TXT_ARGS+=(--apps-txt "$APPS_TXT")
 fi
 
-python3 "$SCRIPT_DIR/mkfat32.py" --size-mb "$SIZE_MB" "$IMAGE" "$EFI_BIN" "$KERNEL_BIN" "${USER_ARGS[@]}" "${COUNTER_ARGS[@]}" "${PEER_ARGS[@]}" "${STATUS43_ARGS[@]}" "${UDP_ARGS[@]}" "${WIN_ARGS[@]}" "${WINCLOSE_ARGS[@]}" "${WINLOOP_ARGS[@]}" "${WINMOVE_ARGS[@]}" "${KEYTEST_ARGS[@]}" "${SAVETEXT_ARGS[@]}" "${TYPE_ARGS[@]}" "${DIR_ARGS[@]}" "${CALC_ARGS[@]}" "${NOTEPAD_ARGS[@]}" "${TOP_ARGS[@]}" "${DESKTOP_ARGS[@]}" "${TCP_ARGS[@]+"${TCP_ARGS[@]}"}" "${FETCH_ARGS[@]+"${FETCH_ARGS[@]}"}" "${CHAT_ARGS[@]+"${CHAT_ARGS[@]}"}" "${FILE_ARGS[@]+"${FILE_ARGS[@]}"}" "${FSTEST_ARGS[@]+"${FSTEST_ARGS[@]}"}" "${TIMERTEST_ARGS[@]+"${TIMERTEST_ARGS[@]}"}" "${VICTIM_ARGS[@]+"${VICTIM_ARGS[@]}"}" "${HARDEN_ARGS[@]+"${HARDEN_ARGS[@]}"}" "${JINGLE_ARGS[@]+"${JINGLE_ARGS[@]}"}" "${CHIME_ARGS[@]+"${CHIME_ARGS[@]}"}" "${APPS_TXT_ARGS[@]}" \
+python3 "$SCRIPT_DIR/mkfat32.py" --size-mb "$SIZE_MB" "$IMAGE" "$EFI_BIN" "$KERNEL_BIN" "${USER_ARGS[@]}" "${COUNTER_ARGS[@]}" "${PEER_ARGS[@]}" "${STATUS43_ARGS[@]}" "${UDP_ARGS[@]}" "${WIN_ARGS[@]}" "${WINCLOSE_ARGS[@]}" "${WINLOOP_ARGS[@]}" "${WINMOVE_ARGS[@]}" "${KEYTEST_ARGS[@]}" "${SAVETEXT_ARGS[@]}" "${TYPE_ARGS[@]}" "${DIR_ARGS[@]}" "${CALC_ARGS[@]}" "${NOTEPAD_ARGS[@]}" "${TOP_ARGS[@]}" "${DESKTOP_ARGS[@]}" "${TCP_ARGS[@]+"${TCP_ARGS[@]}"}" "${FETCH_ARGS[@]+"${FETCH_ARGS[@]}"}" "${CHAT_ARGS[@]+"${CHAT_ARGS[@]}"}" "${FILE_ARGS[@]+"${FILE_ARGS[@]}"}" "${FSTEST_ARGS[@]+"${FSTEST_ARGS[@]}"}" "${TIMERTEST_ARGS[@]+"${TIMERTEST_ARGS[@]}"}" "${VICTIM_ARGS[@]+"${VICTIM_ARGS[@]}"}" "${HARDEN_ARGS[@]+"${HARDEN_ARGS[@]}"}" "${JINGLE_ARGS[@]+"${JINGLE_ARGS[@]}"}" "${CHIME_ARGS[@]+"${CHIME_ARGS[@]}"}" "${BIGTEST_ARGS[@]+"${BIGTEST_ARGS[@]}"}" "${APPS_TXT_ARGS[@]}" \
     || fail "image creation failed (see output above)."
 
 # 5. Self-verify by listing the image we just wrote.
@@ -359,6 +367,9 @@ if [ -f "$JINGLE_BIN" ]; then
 fi
 if [ -f "$CHIME_BIN" ]; then
     printf '%s\n' "$LISTING" | grep -q 'CHIME.BIN' || fail "CHIME.BIN missing from the image listing"
+fi
+if [ -f "$BIGTEST_BIN" ]; then
+    printf '%s\n' "$LISTING" | grep -q 'BIGTEST.BIN' || fail "BIGTEST.BIN missing from the image listing"
 fi
 
 echo "make-image: done."

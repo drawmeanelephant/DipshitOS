@@ -834,6 +834,29 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_chime.step);
 
     // ------------------------------------------------------------------
+    // Guest: twenty-eighth ESP user program (milestone sixteen, card C1 — claim 3900)
+    // BIGTEST.BIN. The DSK2 multi-segment proof: writable globals + BSS + >16 KiB.
+    // ------------------------------------------------------------------
+    const bigtest_prog = b.addExecutable(.{
+        .name = "user-bigtest",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/bigtest.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    bigtest_prog.linker_script = b.path("user/linker-m16.ld");
+    const bigtest_step = b.step("bigtest", "Build the twenty-eighth ESP user program (zig-out/bin/BIGTEST.BIN)");
+    const bigtest_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin-dsk2.py" });
+    bigtest_elf2bin.addFileArg(bigtest_prog.getEmittedBin());
+    const bigtest_bin = bigtest_elf2bin.addOutputFileArg("BIGTEST.BIN");
+    bigtest_elf2bin.has_side_effects = true;
+    bigtest_elf2bin.stdio = .inherit;
+    bigtest_step.dependOn(&bigtest_elf2bin.step);
+    const install_bigtest = b.addInstallFileWithDir(bigtest_bin, .bin, "BIGTEST.BIN");
+    b.getInstallStep().dependOn(&install_bigtest.step);
+
+    // ------------------------------------------------------------------
     // Top-level steps. System-command steps are marked as having side
     // effects (and inherit stdio) so they always execute instead of being
     // skipped by the build cache. (No QEMU path: this project targets Apple
@@ -871,6 +894,7 @@ pub fn build(b: *std.Build) void {
     image.addFileArg(harden_bin); // ... [HARDEN.BIN] (claim 4482: twenty-fifth user program, hostile-consumer proof)
     image.addFileArg(jingle_bin); // ... [JINGLE.BIN] (claim 7636: twenty-sixth user program, EL0 audio-seam proof)
     image.addFileArg(chime_bin); // ... [CHIME.BIN] (claim 3206: twenty-seventh user program, composition capstone proof)
+    image.addFileArg(bigtest_bin); // ... [BIGTEST.BIN] (claim 3900: twenty-eighth user program, M16 C1 DSK2 proof)
     image.has_side_effects = true;
     image.stdio = .inherit;
     image_step.dependOn(&image.step);

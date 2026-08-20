@@ -132,6 +132,19 @@ pub fn set_svc_dispatcher(d: SvcDispatcher) void {
     svc_dispatcher = d;
 }
 
+/// M16 C2: EL0 fault dispatcher — called for synchronous exceptions from EL0
+/// that are not SVC and not uaccess-recoverable (guard page, permission).
+/// The dispatcher should terminate the faulting EL0 task (via scheduler) and
+/// stage the next task's frame, returning true if handled. Runs in exception
+/// context, no console, no allocation.
+pub const FaultDispatcher = *const fn (u64, u64, u64, u64, *VectorFrame) bool;
+
+var fault_dispatcher: ?FaultDispatcher = null;
+
+pub fn set_fault_dispatcher(d: FaultDispatcher) void {
+    fault_dispatcher = d;
+}
+
 /// The vector-frame pointer the IRQ stub must restore from when the
 /// dispatcher chain returns (claim 5275). Set to the interrupted task's
 /// frame at IRQ entry; the scheduler may rewrite it to the next task's
@@ -518,6 +531,16 @@ export fn exc_dispatch(
         );
         asm volatile ("isb");
         return .{ .frame = @intFromPtr(frame), .sp_el0 = resume_sp_el0 };
+    }
+    // M16 C2: EL0 faults (guard page, permission) — terminate the faulting EL0 task.
+    // Reported above, now handled: the faulting EL0 task is reaped with status 139
+    // and the next task is staged, so the kernel survives a hostile app.
+    if (kind == kind_sync and (spsr & 0xf) == 0) {
+        if (fault_dispatcher) |d| {
+            if (d(esr, far, elr, spsr, frame)) {
+                return .{ .frame = resume_frame, .sp_el0 = resume_sp_el0 };
+            }
+        }
     }
     return .{ .frame = 0, .sp_el0 = resume_sp_el0 };
 }

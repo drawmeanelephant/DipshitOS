@@ -154,9 +154,11 @@ pub fn state_name(state: State) []const u8 {
 /// Claim 0826: the uaccess/syscall apertures a user task's syscalls
 /// validate against (its OWN text + stack VAs — every live user task has
 /// its own root + stack now). Zero for EL1h tasks (they never SVC).
+/// M16 C1: adds data (RW) for writable globals/BSS.
 pub const UserRegions = struct {
     text: userspace.Region = .{ .base = 0, .len = 0 },
     stack: userspace.Region = .{ .base = 0, .len = 0 },
+    data: userspace.Region = .{ .base = 0, .len = 0 },
 };
 
 const Task = struct {
@@ -401,6 +403,7 @@ pub fn register_exec_user(
     tasks[id].regions = .{
         .text = .{ .base = userspace.text_va, .len = text_len },
         .stack = .{ .base = stack_va, .len = stack_len },
+        .data = .{ .base = 0, .len = 0 },
     };
     // Card 3e (claim 4636): the entry-contract extension — the exec'd
     // program's `_start` receives argc in x0 and the argv block VA in x1.
@@ -409,6 +412,36 @@ pub fn register_exec_user(
     // `register_user` uses for the timer-witness VA in slot x9. A no-args
     // exec passes argc=0/argv_va=0: identical to the zeroed frame, so
     // earlier cards' no-args behavior is byte-for-byte unchanged.
+    const frame: *exceptions.VectorFrame = @ptrFromInt(tasks[id].sp);
+    _ = exceptions.frame_write(frame, 0, argc);
+    _ = exceptions.frame_write(frame, 1, argv_va);
+    return id;
+}
+
+/// M16 C1: DSK2 multi-segment variant — same as register_exec_user but with
+/// an additional writable data aperture (data_va/len). The caller owns the
+/// backing pages for text/data; the root already maps them. The data region
+/// is recorded in the TCB so uaccess bounds follow it. A zero data_len means
+/// no writable data (backward compat with the 2-region case).
+pub fn register_exec_user_m16(
+    entry_va: u64,
+    root_phys: u64,
+    text_len: u64,
+    data_va: u64,
+    data_len: u64,
+    stack_va: u64,
+    stack_len: u64,
+    kstack: []u8,
+    argc: u64,
+    argv_va: u64,
+) ?usize {
+    const sp_el0 = stack_va + stack_len;
+    const id = spawn("user-exec", entry_va, spsr_el0t_irqs, kstack, root_phys, sp_el0) orelse return null;
+    tasks[id].regions = .{
+        .text = .{ .base = userspace.text_va, .len = text_len },
+        .data = if (data_len > 0) .{ .base = data_va, .len = data_len } else .{ .base = 0, .len = 0 },
+        .stack = .{ .base = stack_va, .len = stack_len },
+    };
     const frame: *exceptions.VectorFrame = @ptrFromInt(tasks[id].sp);
     _ = exceptions.frame_write(frame, 0, argc);
     _ = exceptions.frame_write(frame, 1, argv_va);
@@ -858,6 +891,28 @@ pub fn on_tick() void {
     // the due ones (one TIMER event per process into its ADR 0009 queue,
     // which wakes a blocked sys_wait_event caller via on_event_pushed).
     app_timers.on_tick();
+}
+
+/// M16 C2: EL0 fault handler — terminate the faulting EL0 task with a fault
+/// status (139) and stage the next task. Called from the exception dispatcher
+/// for synchronous EL0 faults (guard page, permission fault) that are not
+/// SVC and not uaccess-recoverable. Runs in exception context, no console,
+/// no allocation. Returns true if the fault was from a running EL0 task and
+/// was handled; false otherwise (the exception will park).
+pub fn handle_el0_fault(esr: u64, far: u64, elr: u64, spsr: u64, frame: *exceptions.VectorFrame) bool {
+    _ = esr;
+    _ = far;
+    _ = elr;
+    _ = frame;
+    // Only handle faults from EL0t (M=0) for a running user task.
+    if ((spsr & 0xf) != 0) return false;
+    if (current >= max_tasks) return false;
+    if (tasks[current].state != .running) return false;
+    // The faulting task must be an EL0t task (spsr_el0t_irqs). The scheduler's
+    // own spsr for the current task should be EL0t, but we check the exception's
+    // spsr to be sure.
+    // Use the reserved fault status 139 (SIGSEGV) — distinct from normal exits.
+    return exit_current(139);
 }
 
 /// Remove the calling task from the runnable ring and stage its successor.

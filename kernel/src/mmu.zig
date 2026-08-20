@@ -526,7 +526,7 @@ fn map_page(va: u64, attr: Attr) bool {
 /// One EL0 aperture in the user root: a VA range backed by a physical
 /// range, W^X enforced (executable regions are EL0 RO + PXN; writable
 /// regions are EL0 RW + UXN + PXN).
-const UserAperture = struct {
+pub const UserAperture = struct {
     va_start: u64,
     va_end: u64,
     phys: u64,
@@ -572,6 +572,29 @@ fn clone_into_user_root(
     text: ?UserAperture,
     stack: ?UserAperture,
 ) ?*align(4096) [512]u64 {
+    var aps: [2]UserAperture = undefined;
+    var n: usize = 0;
+    if (text) |t| {
+        aps[n] = t;
+        n += 1;
+    }
+    if (stack) |s| {
+        aps[n] = s;
+        n += 1;
+    }
+    return clone_into_user_root_multi(src, level, va_base, aps[0..n]);
+}
+
+/// M16 C1: multi-aperture clone — same as clone_into_user_root but with
+/// an arbitrary slice of apertures (text/data/bss/stack). Each aperture
+/// carries its own phys and permission; the slot's hit test iterates the
+/// slice and the level-3 leaf uses the FIRST matching aperture.
+fn clone_into_user_root_multi(
+    src: *const [512]u64,
+    level: u8,
+    va_base: u64,
+    apertures: []const UserAperture,
+) ?*align(4096) [512]u64 {
     const dst = new_table() orelse return null;
     const shift = slot_shift(level);
     const slot_bytes: u64 = @as(u64, 1) << shift;
@@ -581,30 +604,31 @@ fn clone_into_user_root(
         if (desc == 0) continue;
         const slot_va = va_base + @as(u64, i) * slot_bytes;
         const slot_end = slot_va + slot_bytes;
-        const in_text = text != null and slot_va < text.?.va_end and slot_end > text.?.va_start;
-        const in_stack = stack != null and slot_va < stack.?.va_end and slot_end > stack.?.va_start;
-        const hits_user = in_text or in_stack;
+        var hit_idx: ?usize = null;
+        for (apertures, 0..) |ap, idx| {
+            if (slot_va < ap.va_end and slot_end > ap.va_start) {
+                hit_idx = idx;
+                break;
+            }
+        }
+        const hits_user = hit_idx != null;
         if (hits_user and level < 3) {
-            // The slot intersects a user aperture: the clone must descend
-            // to the page level, splitting a covering block if needed.
             const child_src: *const [512]u64 = if ((desc & 3) == 3)
                 table_entry(&src[i]) orelse return null
             else
                 split_block_view(desc) orelse return null;
-            const child = clone_into_user_root(child_src, level + 1, slot_va, text, stack) orelse return null;
+            const child = clone_into_user_root_multi(child_src, level + 1, slot_va, apertures) orelse return null;
             dst[i] = @intFromPtr(child) | 3;
         } else if (hits_user and level == 3) {
-            // Page leaf inside a user aperture: the ONLY place EL0
-            // permission is granted in the whole root.
-            const ap = if (in_text) text.? else stack.?;
+            const ap = apertures[hit_idx.?];
             const pa = ap.phys + (slot_va - ap.va_start);
             const normal = (pa & ~@as(u64, 0xfff)) | attr_bits(.normal, true);
             dst[i] = user_leaf(normal, ap.writable, ap.executable) orelse return null;
         } else if ((desc & 3) == 3 and level < 3) {
-            const child = clone_into_user_root(table_entry(&src[i]) orelse return null, level + 1, slot_va, text, stack) orelse return null;
+            const child = clone_into_user_root_multi(table_entry(&src[i]) orelse return null, level + 1, slot_va, apertures) orelse return null;
             dst[i] = @intFromPtr(child) | 3;
         } else {
-            dst[i] = desc; // block or page leaf — EL1-only AP=0b00, copy verbatim
+            dst[i] = desc;
         }
     }
     return dst;
@@ -653,6 +677,62 @@ pub fn build_user_root(
     user_root_value = root_phys;
     roots_ready = true;
     return root_phys;
+}
+
+/// M16 C1: build a user root from an arbitrary set of apertures (text/data/bss/stack).
+/// Each aperture is (va, phys, len, writable, executable). At least one must be
+/// executable (text) and one writable (stack). All are cloned from the identity
+/// tree with per-page permission. Returns fresh root phys or null on table exhaustion.
+pub fn build_user_root_with_apertures(apertures: []const UserAperture) ?u64 {
+    if (apertures.len == 0) return null;
+    // W^X check across all apertures
+    for (apertures) |ap| {
+        if (ap.writable and ap.executable) return null;
+        if (ap.va_end <= ap.va_start) return null;
+    }
+    const root = clone_into_user_root_multi(&table_storage[0], 0, 0, apertures) orelse return null;
+    const root_phys = @intFromPtr(root);
+    user_root_value = root_phys;
+    roots_ready = true;
+    return root_phys;
+}
+
+/// Convenience for M16 DSK2: text RX + stack RW + optional data/bss RW.
+/// Data/bss apertures are derived from DSK2 segments (flags RW). The caller
+/// owns the backing pages. This wraps build_user_root_with_apertures.
+pub fn build_user_root_m16(
+    text_va: u64,
+    text_phys: u64,
+    text_len: u64,
+    stack_va: u64,
+    stack_phys: u64,
+    stack_len: u64,
+    data_va: u64,
+    data_phys: u64,
+    data_len: u64,
+    bss_va: u64,
+    bss_phys: u64,
+    bss_len: u64,
+) ?u64 {
+    var aps: [4]UserAperture = undefined;
+    var n: usize = 0;
+    if (text_len > 0) {
+        aps[n] = .{ .va_start = text_va, .va_end = text_va + text_len, .phys = text_phys, .writable = false, .executable = true };
+        n += 1;
+    }
+    if (data_len > 0) {
+        aps[n] = .{ .va_start = data_va, .va_end = data_va + data_len, .phys = data_phys, .writable = true, .executable = false };
+        n += 1;
+    }
+    if (bss_len > 0) {
+        aps[n] = .{ .va_start = bss_va, .va_end = bss_va + bss_len, .phys = bss_phys, .writable = true, .executable = false };
+        n += 1;
+    }
+    if (stack_len > 0) {
+        aps[n] = .{ .va_start = stack_va, .va_end = stack_va + stack_len, .phys = stack_phys, .writable = true, .executable = false };
+        n += 1;
+    }
+    return build_user_root_with_apertures(aps[0..n]);
 }
 
 /// Pure permission transform pinned by host tests. Existing leaf, AttrIndex

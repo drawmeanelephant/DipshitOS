@@ -278,6 +278,15 @@ pub fn set_user_regions(text: userspace.Region, stack: userspace.Region) void {
     );
 }
 
+/// M16 C1: configure text + data + stack (data is RW for writable globals/BSS).
+pub fn set_user_regions_m16(text: userspace.Region, data: userspace.Region, stack: userspace.Region) void {
+    uaccess.set_regions_m16(
+        .{ .base = text.base, .len = text.len },
+        .{ .base = data.base, .len = data.len },
+        .{ .base = stack.base, .len = stack.len },
+    );
+}
+
 fn ensure_table() *const [slot_count]Entry {
     if (!table_ready) {
         for (&table_storage) |*entry| entry.* = .{};
@@ -362,10 +371,15 @@ pub fn dispatch(number: u64, args: Args, frame: *exceptions.VectorFrame) u64 {
 /// processes, the module-global regions set by the last root rebuild would
 /// otherwise validate one process's stack against another's. EL1h tasks
 /// never SVC, so their zero regions are inert. The ABI is untouched.
+/// M16 C1: when a task has writable data, arm the 3-region aperture.
 pub fn handle_svc(frame: *exceptions.VectorFrame, immediate: u16) bool {
     const regions = scheduler.current_user_regions();
-    if (regions.text.len != 0 or regions.stack.len != 0) {
-        set_user_regions(regions.text, regions.stack);
+    if (regions.text.len != 0 or regions.stack.len != 0 or regions.data.len != 0) {
+        if (regions.data.len != 0) {
+            set_user_regions_m16(regions.text, regions.data, regions.stack);
+        } else {
+            set_user_regions(regions.text, regions.stack);
+        }
     }
     var args: Args = undefined;
     for (&args, 0..) |*arg, reg| arg.* = exceptions.frame_read(frame, @intCast(reg));
