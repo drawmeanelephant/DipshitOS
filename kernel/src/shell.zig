@@ -184,15 +184,42 @@ pub fn boot_and_park(mon: *monitor.Monitor, rx_wired: bool) void {
             // Pops present so a report is never starved behind a slow
             // full-frame present.
             input.drain();
+            // M15 C2 (Alt+Tab overlay, #225): hold-Alt+Tab shows preview.
             // Card U4/U5 (claims 4993/0935, ADR 0008 D4): the pointer tick
             // (click = focus + raise; the cursor follows the pointer) and
             // the focus-cycle chord. The outcomes print here — the serial
             // evidence the live gate asserts.
-            if (input.take_alt_tab()) {
-                if (driving_award.cycle_focus()) |id| {
-                    mon.console.puts("dui: cycle focused=");
+            if (input.take_alt_tab_shift()) |shift| {
+                if (!driving_award.alt_tab_is_active()) {
+                    if (driving_award.alt_tab_activate()) {
+                        mon.console.puts("dui: alt-tab active count=");
+                        mon.console.print_u64(driving_award.alt_tab_count());
+                        mon.console.puts(" selected=");
+                        mon.console.print_u64(driving_award.alt_tab_selected_id() orelse 0xff);
+                        mon.console.puts("\n");
+                    } else {
+                        if (driving_award.cycle_focus()) |id| {
+                            mon.console.puts("dui: cycle focused=");
+                            mon.console.print_u64(id);
+                            mon.console.puts("\n");
+                        }
+                    }
+                } else {
+                    driving_award.alt_tab_cycle(shift);
+                    mon.console.puts("dui: alt-tab cycle selected=");
+                    mon.console.print_u64(driving_award.alt_tab_selected_id() orelse 0xff);
+                    mon.console.puts(" shift=");
+                    mon.console.print_u64(if (shift) 1 else 0);
+                    mon.console.puts("\n");
+                }
+            }
+            if (driving_award.alt_tab_is_active() and !input.alt_held()) {
+                if (driving_award.alt_tab_commit()) |id| {
+                    mon.console.puts("dui: alt-tab commit focused=");
                     mon.console.print_u64(id);
                     mon.console.puts("\n");
+                } else {
+                    driving_award.alt_tab_dismiss();
                 }
             }
             if (driving_award.pointer_tick(input.pointer_state(), input.take_click())) |id| {

@@ -87,6 +87,7 @@ var ptr_click_pending: bool = false;
 /// usage 0x2b) latches here — the shell idle loop consumes it as a
 /// focus-cycle request (ADR 0008 D4's keyboard cycling).
 var alt_tab_pending: bool = false;
+var alt_tab_shift: bool = false;
 
 /// Diagnostic hooks (kernel/src/main.zig wires these to uart_puts/uart_hex
 /// under `--input`; null in host tests and the default VM).
@@ -273,6 +274,7 @@ pub fn decode_keyboard_report(rep: []const u8) void {
 
     // Card U5 (ADR 0008 D4): Alt+Tab cycles window focus — the
     // chord is consumed as a window-manager signal across all windows.
+    // C2 (M15): capture Shift for reverse cycling.
     for (keys) |k| {
         if (k == 0x2b and alt) {
             var held = false;
@@ -284,6 +286,7 @@ pub fn decode_keyboard_report(rep: []const u8) void {
             }
             if (!held) {
                 alt_tab_pending = true;
+                alt_tab_shift = shift;
             }
         }
     }
@@ -442,9 +445,22 @@ pub fn take_click() ?Click {
 
 /// Card U5: consume the Alt+Tab chord edge.
 pub fn take_alt_tab() bool {
-    const was = alt_tab_pending;
+    if (take_alt_tab_shift() != null) return true;
+    return false;
+}
+
+/// C2 (M15): Alt still held (either left 0x04 or right 0x40).
+pub fn alt_held() bool {
+    return (kb_mods & 0x04) != 0 or (kb_mods & 0x40) != 0;
+}
+
+/// C2 (M15): consume the Alt+Tab edge with Shift direction — null if no edge, else `true` if Shift+Tab (reverse), `false` if plain Tab.
+pub fn take_alt_tab_shift() ?bool {
+    if (!alt_tab_pending) return null;
     alt_tab_pending = false;
-    return was;
+    const s = alt_tab_shift;
+    alt_tab_shift = false;
+    return s;
 }
 
 // ---------------------------------------------------------------------------
