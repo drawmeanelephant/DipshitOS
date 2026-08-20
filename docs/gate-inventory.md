@@ -42,6 +42,7 @@
 | `coordination` | A | gate | yes | yes | no | `bash tools/verify-coordination.sh` |
 | `coordination-tooling` | A | gate | yes | yes | no | `bash tools/status/test-coordination.sh` |
 | `mmu-debt` | A | gate | yes | yes | no | `bash tools/verify-mmu-debt.sh` |
+| `bss-budget` | A | gate | yes | yes | no | `bash tools/verify-bss-budget.sh` — **ADR 0013 D3.1**: kernel `.bss` ceiling (7.0 MiB). Builds the kernel, inspects the linked ELF's `.bss` size via `llvm-readelf -SW`, and fails if it exceeds the budget. Reads the budget source-of-truth from ADR 0013 D3.1; reports the measured size + remaining headroom. Override at run time with `BSS_BUDGET_BYTES=N`. Deterministic, no Apple silicon |
 | `verify-portable` | A | aggregate | no | no | no | `just verify-portable` (= legacy `just verify`) — the full class-A set |
 | `bad-handoff` | B | gate | yes | no | yes | `bash tools/verify-bad-handoff.sh` |
 | `marker` | B | gate | yes | no | yes | `bash tools/verify-marker.sh` (mechanism: `zig build marker`) |
@@ -160,6 +161,7 @@ GATE id=context class=A kind=gate ci=yes apple=no gate=yes cmd=zig build context
 GATE id=coordination class=A kind=gate ci=yes apple=no gate=yes cmd=bash tools/verify-coordination.sh
 GATE id=coordination-tooling class=A kind=gate ci=yes apple=no gate=yes cmd=bash tools/status/test-coordination.sh
 GATE id=mmu-debt class=A kind=gate ci=yes apple=no gate=yes cmd=bash tools/verify-mmu-debt.sh
+GATE id=bss-budget class=A kind=gate ci=yes apple=no gate=yes cmd=bash tools/verify-bss-budget.sh  # ADR 0013 D3.1: kernel .bss ceiling (7.0 MiB)
 GATE id=verify-portable class=A kind=aggregate ci=no apple=no gate=no cmd=just verify-portable
 GATE id=bad-handoff class=B kind=gate ci=no apple=yes gate=yes cmd=bash tools/verify-bad-handoff.sh
 GATE id=marker class=B kind=gate ci=no apple=yes gate=yes cmd=bash tools/verify-marker.sh

@@ -31,6 +31,7 @@ verify-portable:
     bash tools/verify-mmu-debt.sh
     bash tools/verify-glyph-raster.sh
     bash tools/verify-mutations.sh
+    bash tools/verify-bss-budget.sh
 
 # Run the Apple-silicon VZ hardware gates (class B): serial takeover
 # (zig build run, claim 1517), bad-handoff, marker, NVRAM console,
@@ -177,6 +178,10 @@ ragshit *ARGS:
 # Verify the MMU takeover contract is intact (class A — ADR 0006 supersession + kernel T0SZ=16/TLBI comments; deterministic, no VM — claims 0022/1517)
 verify-mmu-debt:
     bash tools/verify-mmu-debt.sh
+
+# Enforce the kernel `.bss` ceiling (class A — ADR 0013 D3.1; deterministic, no VM). Builds the kernel, reads the linked ELF's `.bss` size, and fails if it exceeds the explicit 7.0 MiB budget.
+verify-bss-budget:
+    bash tools/verify-bss-budget.sh
 
 # Verify the multiagent coordination surface (class A — claims/logs files + generated indexes)
 verify-coordination:
