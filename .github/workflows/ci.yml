@@ -87,7 +87,9 @@ jobs:
         run: |
           echo "CI complete: portable/build gates (class A) passed."
           echo "NOT proven by this CI — run on an Apple silicon host (just verify-vz):"
-          sed -n '/^<!-- GATE_INVENTORY:START -->$/,/^<!-- GATE_INVENTORY:END -->$/p' docs/gate-inventory.md \
+          # The machine-readable GATE_INVENTORY block lives in
+          # docs/archive/gate-inventory-detail.md (issue #265).
+          sed -n '/^<!-- GATE_INVENTORY:START -->$/,/^<!-- GATE_INVENTORY:END -->$/p' docs/archive/gate-inventory-detail.md \
             | grep ' class=B ' \
             | sed -E 's/^GATE id=([^ ]+) .*cmd=(.*)$/  - \1: \2/'
 

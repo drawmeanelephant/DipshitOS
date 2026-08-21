@@ -43,7 +43,8 @@ GitHub rather than duplicating them.
   runtime function tables, MMU debt boundary, the syscall ABI).
 - `docs/claims/` — per-claim scope and evidence.
 - `docs/hardware-contract.md` — observed vs inferred hardware facts.
-- `docs/gate-inventory.md` — the full gate table.
+- `docs/gate-inventory.md` — the lean gate table; full historical detail in
+  `docs/archive/gate-inventory-detail.md`.
 - `docs/status.md` — the canonical living status.
 
 <Aside kind="note">
