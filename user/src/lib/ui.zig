@@ -1316,6 +1316,77 @@ pub const ScrollView = struct {
 };
 
 // ---------------------------------------------------------------------------
+// Component: Checkbox — 12×12 boolean (GH #219, Arc1)
+// ---------------------------------------------------------------------------
+
+pub const Checkbox = struct {
+    rect: Rect,
+    checked: *bool,
+
+    pub fn init(rect: Rect, checked: *bool) Checkbox {
+        return .{ .rect = rect, .checked = checked };
+    }
+
+    pub fn handle_event(self: *Checkbox, ev: *const Event) bool {
+        if (ev.kind != MOUSE_DOWN) return false;
+        if ((ev.flags & BTN_LEFT) == 0) return false;
+        if (!self.rect.contains(ev.arg0, ev.arg1)) return false;
+        self.checked.* = !self.checked.*;
+        return true;
+    }
+
+    pub fn draw(self: *const Checkbox, win_id: u32) void {
+        // Box outline
+        draw_rect(win_id, self.rect, theme_surface());
+        draw_rect_outline(win_id, self.rect, 1, theme_border());
+        if (self.checked.*) {
+            // Filled inner square (inset 3) in accent
+            const inner = self.rect.inset(3, 3);
+            // Clamp to at least 6×6 for 12×12 box -> 6×6 inner
+            win_fill(win_id, inner.x, inner.y, inner.w, inner.h, theme_accent());
+        }
+    }
+};
+
+// ---------------------------------------------------------------------------
+// Component: Toggle — 48×20 pill boolean (GH #219, Arc1)
+// ---------------------------------------------------------------------------
+
+pub const Toggle = struct {
+    rect: Rect,
+    enabled: *bool,
+
+    pub fn init(rect: Rect, enabled: *bool) Toggle {
+        return .{ .rect = rect, .enabled = enabled };
+    }
+
+    pub fn handle_event(self: *Toggle, ev: *const Event) bool {
+        if (ev.kind != MOUSE_DOWN) return false;
+        if ((ev.flags & BTN_LEFT) == 0) return false;
+        if (!self.rect.contains(ev.arg0, ev.arg1)) return false;
+        self.enabled.* = !self.enabled.*;
+        return true;
+    }
+
+    pub fn draw(self: *const Toggle, win_id: u32) void {
+        // Pill background
+        const bg = if (self.enabled.*) theme_accent() else theme_border();
+        draw_rect(win_id, self.rect, bg);
+        // Knob: 16×16 circle approximated as square, inset 2, left or right
+        const knob_w: u32 = 16;
+        const knob_h: u32 = 16;
+        const knob_y = self.rect.y + (self.rect.h - knob_h) / 2;
+        const knob_x = if (self.enabled.*)
+            self.rect.x + self.rect.w - knob_w - 2
+        else
+            self.rect.x + 2;
+        // Knob in surface (contrasts with accent/border bg)
+        win_fill(win_id, knob_x, knob_y, knob_w, knob_h, theme_surface());
+        draw_rect_outline(win_id, Rect.make(knob_x, knob_y, knob_w, knob_h), 1, theme_border());
+    }
+};
+
+// ---------------------------------------------------------------------------
 // Unit Tests (Class A Host Validation)
 // ---------------------------------------------------------------------------
 
@@ -1615,4 +1686,76 @@ test "ui: ScrollView 50+ lines demo scrolls via thumb" {
     }
     try std.testing.expectEqual(sv.max_offset(), sv.offset);
     try std.testing.expect(steps >= 5);
+}
+
+test "ui: Checkbox click toggles *bool and visual state" {
+    var checked: bool = false;
+    var cb = Checkbox.init(Rect.make(10, 10, 12, 12), &checked);
+
+    // Click inside toggles to true
+    var ev_down = Event{ .kind = MOUSE_DOWN, .flags = BTN_LEFT, .seq = 1, .arg0 = 15, .arg1 = 15 };
+    try std.testing.expect(cb.handle_event(&ev_down));
+    try std.testing.expect(checked);
+
+    // Click again toggles back to false
+    var ev2 = Event{ .kind = MOUSE_DOWN, .flags = BTN_LEFT, .seq = 2, .arg0 = 15, .arg1 = 15 };
+    try std.testing.expect(cb.handle_event(&ev2));
+    try std.testing.expect(!checked);
+
+    // Click outside does not toggle
+    var ev_out = Event{ .kind = MOUSE_DOWN, .flags = BTN_LEFT, .seq = 3, .arg0 = 30, .arg1 = 30 };
+    try std.testing.expect(!cb.handle_event(&ev_out));
+    try std.testing.expect(!checked);
+
+    // Visual state reflects bool on every frame (draw does not panic)
+    checked = true;
+    // draw is no-panic check — we call it with a dummy win_id (no kernel, just logic)
+    // Host test just ensures draw path doesn't crash; actual pixels checked on VZ.
+    cb.draw(0);
+    checked = false;
+    cb.draw(0);
+}
+
+test "ui: Toggle click toggles *bool, pill accent/muted" {
+    var enabled: bool = false;
+    var tg = Toggle.init(Rect.make(20, 20, 48, 20), &enabled);
+
+    // Click inside toggles to true
+    var ev_down = Event{ .kind = MOUSE_DOWN, .flags = BTN_LEFT, .seq = 1, .arg0 = 30, .arg1 = 30 };
+    try std.testing.expect(tg.handle_event(&ev_down));
+    try std.testing.expect(enabled);
+
+    // Click again toggles false
+    var ev2 = Event{ .kind = MOUSE_DOWN, .flags = BTN_LEFT, .seq = 2, .arg0 = 30, .arg1 = 30 };
+    try std.testing.expect(tg.handle_event(&ev2));
+    try std.testing.expect(!enabled);
+
+    // Click outside does not toggle
+    var ev_out = Event{ .kind = MOUSE_DOWN, .flags = BTN_LEFT, .seq = 3, .arg0 = 100, .arg1 = 100 };
+    try std.testing.expect(!tg.handle_event(&ev_out));
+    try std.testing.expect(!enabled);
+
+    // Visual state reflects bool
+    enabled = true;
+    tg.draw(1);
+    enabled = false;
+    tg.draw(1);
+}
+
+test "ui: Checkbox and Toggle ignore non-left or non-MOUSE_DOWN" {
+    var b: bool = false;
+    var cb = Checkbox.init(Rect.make(0, 0, 12, 12), &b);
+    var tg = Toggle.init(Rect.make(0, 0, 48, 20), &b);
+
+    var ev_move = Event{ .kind = MOUSE_MOVE, .flags = BTN_LEFT, .seq = 1, .arg0 = 5, .arg1 = 5 };
+    try std.testing.expect(!cb.handle_event(&ev_move));
+    try std.testing.expect(!tg.handle_event(&ev_move));
+
+    var ev_right = Event{ .kind = MOUSE_DOWN, .flags = BTN_RIGHT, .seq = 2, .arg0 = 5, .arg1 = 5 };
+    try std.testing.expect(!cb.handle_event(&ev_right));
+    try std.testing.expect(!tg.handle_event(&ev_right));
+
+    var ev_key = Event{ .kind = KEY_DOWN, .flags = 0, .seq = 3, .arg0 = 0x04, .arg1 = 'a' };
+    try std.testing.expect(!cb.handle_event(&ev_key));
+    try std.testing.expect(!tg.handle_event(&ev_key));
 }

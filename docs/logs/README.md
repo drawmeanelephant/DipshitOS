@@ -43,6 +43,7 @@ verify-coordination`, and CI) fails if it drifts from the files.
 <!-- LOGS_INDEX:START -->
 | Branch | Log file |
 |--------|----------|
+| `agent/buffy/arc1-checkbox-toggle` | [`agent-buffy-arc1-checkbox-toggle.md`](agent-buffy-arc1-checkbox-toggle.md) |
 | `agent/buffy/arc1-scrollview` | [`agent-buffy-arc1-scrollview.md`](agent-buffy-arc1-scrollview.md) |
 | agent/buffy/audit-followup-1-gates-docs | [`agent-buffy-audit-followup-1-gates-docs.md`](agent-buffy-audit-followup-1-gates-docs.md) |
 | agent/buffy/audit-followup-2-input-depth | [`agent-buffy-audit-followup-2-input-depth.md`](agent-buffy-audit-followup-2-input-depth.md) |
