@@ -191,5 +191,6 @@ verify-coordination`, and CI) fails if it drifts from the files.
 | freebuff/you-are-working-in-the-dipshitos-repository-on-cur-264903eb-313e-440f-a0e4-224e3311933d | [`freebuff-you-are-working-in-the-dipshitos-repository-on-cur-264903eb-313e-440f-a0e4-224e3311933d.md`](freebuff-you-are-working-in-the-dipshitos-repository-on-cur-264903eb-313e-440f-a0e4-224e3311933d.md) |
 | M1.5 tracker origin (pre-branch era) | [`m1.5-tracker.md`](m1.5-tracker.md) |
 | `t3code/fetch-issue-264-details` | [`t3code-fetch-issue-264-details.md`](t3code-fetch-issue-264-details.md) |
+| `t3code/handle-issue-268-git-current` | [`t3code-handle-issue-268-git-current.md`](t3code-handle-issue-268-git-current.md) |
 | `t3code/issue-265-fix` | [`t3code-issue-265-fix.md`](t3code-issue-265-fix.md) |
 <!-- LOGS_INDEX:END -->
