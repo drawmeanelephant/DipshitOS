@@ -137,6 +137,13 @@ const Process = struct {
     task_id: ?usize = null,
     /// Exit status, snapshotted at exit so it survives the task reap.
     exit_status: u64 = 0,
+    /// Arc5 issue #246: per-process resource limits.
+    /// mem_limit: max pages (0 = unlimited). cpu_limit: max ticks (0 = unlimited).
+    /// mem_usage: current page count (text + data + stack). cpu_usage: tick counter.
+    mem_limit: u64 = 0,
+    cpu_limit: u64 = 0,
+    mem_usage: u64 = 0,
+    cpu_usage: u64 = 0,
 };
 
 var processes: [max_processes]Process = [_]Process{.{}} ** max_processes;
@@ -453,6 +460,67 @@ pub fn take_exit_report() ?ExitReport {
         .name = exit_report_names[index][0..exit_report_lens[index]],
         .status = exit_report_statuses[index],
     };
+}
+
+// ---------------------------------------------------------------------------
+// Arc5 issue #246: per-process resource limits
+// ---------------------------------------------------------------------------
+
+/// Set a per-process resource limit. type 0 = memory pages, type 1 = CPU ticks.
+/// Returns true on success, false on invalid type or process not found.
+pub fn setrlimit(id: usize, rtype: u64, value: u64) bool {
+    if (id >= max_processes or processes[id].state == .free) return false;
+    const p = &processes[id];
+    switch (rtype) {
+        0 => p.mem_limit = value,
+        1 => p.cpu_limit = value,
+        else => return false,
+    }
+    return true;
+}
+
+/// Get current resource usage for a process. Returns total pages and cpu ticks.
+pub fn getrusage(id: usize) ?struct { mem_usage: u64, cpu_usage: u64, mem_limit: u64, cpu_limit: u64 } {
+    if (id >= max_processes or processes[id].state == .free) return null;
+    const p = &processes[id];
+    return .{
+        .mem_usage = p.mem_usage,
+        .cpu_usage = p.cpu_usage,
+        .mem_limit = p.mem_limit,
+        .cpu_limit = p.cpu_limit,
+    };
+}
+
+/// Update memory usage for a process (called when pages are mapped/unmapped).
+pub fn update_mem_usage(id: usize, delta: u64) void {
+    if (id >= max_processes or processes[id].state == .free) return;
+    if (delta > 0) {
+        processes[id].mem_usage +%= delta;
+    } else {
+        const abs = -delta;
+        if (abs >= processes[id].mem_usage) {
+            processes[id].mem_usage = 0;
+        } else {
+            processes[id].mem_usage -= abs;
+        }
+    }
+}
+
+/// Increment CPU tick counter for a process. Returns true if the limit is exceeded.
+pub fn inc_cpu_ticks(id: usize) bool {
+    if (id >= max_processes or processes[id].state == .free) return false;
+    const p = &processes[id];
+    p.cpu_usage += 1;
+    if (p.cpu_limit != 0 and p.cpu_usage > p.cpu_limit) return true;
+    return false;
+}
+
+/// Check if a process exceeds its memory limit. Returns true if exceeded.
+pub fn check_mem_limit(id: usize) bool {
+    if (id >= max_processes or processes[id].state == .free) return false;
+    const p = &processes[id];
+    if (p.mem_limit != 0 and p.mem_usage > p.mem_limit) return true;
+    return false;
 }
 
 // ---------------------------------------------------------------------------

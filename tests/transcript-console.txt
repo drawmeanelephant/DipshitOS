@@ -50,6 +50,7 @@ graphics / input
 system
   beep        synthesize + play a sine through the virtio-snd PCM path ('beep <freq> <ms>' — reports the full control flow + submit/drain accounting)
   clear       clean up the crime scene
+  crash       list recent crash tombstones from /data/crash/
   clip        copy/paste the shared kernel clipboard ('clip <text...>' sets it, 'clip' prints it)
   echo        repeat your regrettable decisions
   help        grouped command catalog and per-command/per-topic help

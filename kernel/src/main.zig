@@ -1145,7 +1145,12 @@ fn pl011_init() void {
     mmio.mmio_write32(base + 0x30, 0x301); // CR: UARTEN | TXE | RXE
 }
 
+const serial_ring = @import("serial_ring.zig"); // Arc5 #243: capture last 512B for tombstones
+
 fn uart_putc(byte: u8) void {
+    // Arc5 #243: capture every serial byte into the ring buffer so
+    // crash tombstones can include the last 512 bytes of serial output.
+    serial_ring.append(&[_]u8{byte});
     // Claim 0015: in nvram-console builds every console byte rides the
     // NVRAM channel instead of the MMIO transport (which hangs post-exit
     // on VZ). Comptime-gated, so a default build is byte-identical.

@@ -47,6 +47,7 @@ const xhci = @import("xhci.zig"); // milestone seven card I1 (claim 4272): the X
 const input = @import("input.zig"); // milestone seven card I3 (claim 6050): the keyboard/pointer event FIFO behind `input`
 const driving_award = @import("driving_award.zig"); // milestone six card G5 (claim 1543): Driving Award, the window manager behind `dui`
 const settings = @import("settings.zig"); // milestone eight card U8 (claim 2649): persistent settings engine
+const tombstone = @import("tombstone.zig"); // Arc5 issue #243: crash tombstone engine
 const dns = @import("dns.zig"); // milestone twelve card N2 (claim 7566): DNS resolver
 const events = @import("events.zig"); // milestone sixteen C3 (claim 0339): per-process event queue bound behind `resources`
 const file_table = @import("file_table.zig"); // milestone sixteen C3 (claim 0339): per-process handle bound behind `resources`
@@ -273,7 +274,7 @@ pub const Command = struct {
 /// (claim 6140) grows it 45 -> 46 (`sound`). Milestone fifteen card A2
 /// (claim 5877) grows it 46 -> 47 (`beep`). Milestone sixteen card C3
 /// (claim 0339) grows it 47 -> 48 (`resources`).
-pub const registry_count: usize = 48;
+pub const registry_count: usize = 49;
 
 /// Command registry, built at runtime into BSS. A `const` table would hold
 /// link-time absolute addresses for BOTH the string slices and the handler
@@ -295,6 +296,7 @@ fn ensure_registry() []const Command {
             .{ .name = "beans", .help = "count beans, probably", .usage = "beans [count]", .category = .machine_identity, .max_args = 1, .handler = cmd_beans },
             .{ .name = "cat", .help = "print a file from the ESP (by name or /path)", .usage = "cat <file|path>", .category = .storage, .min_args = 1, .max_args = 1, .handler = cmd_cat },
             .{ .name = "clear", .help = "clean up the crime scene", .usage = "clear", .category = .system, .handler = cmd_clear },
+            .{ .name = "crash", .help = "list recent crash tombstones from /data/crash/", .usage = "crash", .category = .system, .handler = cmd_crash },
             .{ .name = "clip", .help = "copy/paste the shared kernel clipboard ('clip <text...>' sets it, 'clip' prints it)", .usage = "clip [<text...>]", .category = .system, .handler = cmd_clip },
             .{ .name = "echo", .help = "repeat your regrettable decisions", .usage = "echo <text...>", .category = .system, .handler = cmd_echo },
             .{ .name = "elephant", .help = "operational mascot diagnostics", .usage = "elephant", .category = .machine_identity, .handler = cmd_elephant },
@@ -1357,6 +1359,22 @@ fn cmd_clear(m: *Monitor, args: []const []const u8) ExecError {
     return .none;
 }
 
+/// `crash` — list recent crash tombstones from /data/crash/.
+/// Shows process name, PID, exit status, and tick for each tombstone.
+fn cmd_crash(m: *Monitor, args: []const []const u8) ExecError {
+    _ = args;
+    const n = tombstone.count();
+    if (n == 0) {
+        m.console.print_line("crash: no tombstones recorded");
+        return .none;
+    }
+    m.console.puts("crash: ");
+    m.console.print_u64(n);
+    m.console.print_line(" tombstone(s):");
+    _ = tombstone.list_to_console(m.console);
+    return .none;
+}
+
 fn cmd_hex(m: *Monitor, args: []const []const u8) ExecError {
     for (args) |arg| {
         const value = parseInt(arg) catch {
@@ -2073,7 +2091,131 @@ fn cmd_reboot(m: *Monitor, args: []const []const u8) ExecError {
 
 fn cmd_shutdown(m: *Monitor, args: []const []const u8) ExecError {
     _ = args;
+    m.console.print_line("shutdown: initiating graceful shutdown...");
+
+    // Step 1: Post WIN_CLOSE event to every user window (apps can save
+    // via the unsaved dialog from #242). The window stays alive until
+    // the process exits or is killed below.
+    m.console.print_line("shutdown: closing windows...");
+    var i: usize = 0;
+    while (i < process.max_processes) : (i += 1) {
+        if (process.info(@intCast(i))) |info| {
+            if (info.state == .running and info.task_id != null) {
+                // Post WIN_CLOSE to each user window owned by this process.
+                const pid_val: usize = @intCast(info.id);
+                var win_id: u8 = driving_award.user_window_id_base;
+                while (win_id < driving_award.user_window_id_base + @as(u8, @intCast(driving_award.user_windows_max))) : (win_id += 1) {
+                    if (driving_award.user_owner(win_id)) |owner| {
+                        if (owner == pid_val) {
+                            events.push(pid_val, .{
+                                .kind = events.WIN_CLOSE,
+                                .flags = 0,
+                                .seq = 0,
+                                .arg0 = win_id,
+                                .arg1 = 0,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Step 2: Wait 50 scheduler ticks (~5 seconds) for graceful exit
+    m.console.print_line("shutdown: waiting for apps (50 ticks)...");
+    _ = scheduler.sleep_current(50);
+
+    // Step 3: Forcibly kill any remaining user processes
+    m.console.print_line("shutdown: killing remaining processes...");
+    i = 0;
+    while (i < process.max_processes) : (i += 1) {
+        if (process.info(@intCast(i))) |info| {
+            if (info.state == .running) {
+                _ = scheduler.request_kill(@intCast(i));
+            }
+        }
+    }
+
+    // Step 4: Flush clipboard to /data/clipboard.txt (persistence across reboot)
+    m.console.print_line("shutdown: flushing clipboard...");
+    flush_clipboard_to_disk();
+
+    // Step 5: Write shutdown marker to /data/SHUTDOWN.TXT with tick + reason
+    m.console.print_line("shutdown: writing marker...");
+    write_shutdown_marker("graceful");
+
+    // Step 6: Halt the CPU (WFI loop — no return)
+    m.console.print_line("shutdown: halting...");
     return report_machine(m, "shutdown", m.machine.shutdown());
+}
+
+/// Write shutdown marker to /data/SHUTDOWN.TXT on the DATA partition.
+/// `reason` is a short label ("graceful", "reboot", etc.).
+fn write_shutdown_marker(reason: []const u8) void {
+    const ops = virtio_blk.disk_ops();
+
+    if (fat.mount_data(ops) != .ok) return;
+
+    // Format marker content: tick count + reason
+    var buf: [128]u8 = undefined;
+    var pos: usize = 0;
+
+    const header = "DipshitOS Shutdown\n";
+    @memcpy(buf[0..header.len], header);
+    pos = header.len;
+
+    const tick_prefix = "Tick: ";
+    @memcpy(buf[pos..][0..tick_prefix.len], tick_prefix);
+    pos += tick_prefix.len;
+    pos += write_u64_to(buf[pos..], timer.ticks);
+    buf[pos] = '\n';
+    pos += 1;
+
+    const reason_prefix = "Reason: ";
+    @memcpy(buf[pos..][0..reason_prefix.len], reason_prefix);
+    pos += reason_prefix.len;
+    const rlen = @min(reason.len, buf.len - pos);
+    @memcpy(buf[pos..][0..rlen], reason[0..rlen]);
+    pos += rlen;
+    buf[pos] = '\n';
+    pos += 1;
+
+    _ = fat.write_file("SHUTDOWN.TXT", buf[0..pos]);
+
+    _ = esp.set_disk(ops);
+}
+
+/// Flush the shared clipboard to /data/clipboard.txt for persistence
+/// across reboot (Arc5 #244).
+fn flush_clipboard_to_disk() void {
+    const clip_len = clipboard.current_len();
+    if (clip_len == 0) return;
+    var buf: [clipboard.capacity]u8 = undefined;
+    const n = clipboard.get(&buf);
+    if (n == 0) return;
+    const ops = virtio_blk.disk_ops();
+    if (fat.mount_data(ops) != .ok) return;
+    _ = fat.write_file("clipboard.txt", buf[0..n]);
+    _ = esp.set_disk(ops);
+}
+
+fn write_u64_to(out: []u8, val: u64) usize {
+    if (val == 0) {
+        if (out.len > 0) out[0] = '0';
+        return 1;
+    }
+    var buf: [20]u8 = undefined;
+    var v = val;
+    var len: usize = 0;
+    while (v > 0) : (len += 1) {
+        buf[len] = '0' + @as(u8, @intCast(v % 10));
+        v /= 10;
+    }
+    var i: usize = 0;
+    while (i < len and i < out.len) : (i += 1) {
+        out[i] = buf[len - 1 - i];
+    }
+    return @min(len, out.len);
 }
 
 // ---------------------------------------------------------------------------
@@ -4696,6 +4838,36 @@ fn cmd_resources(m: *Monitor, args: []const []const u8) ExecError {
     m.console.puts(" fds=");
     m.console.print_u64(@intCast(file_table.max_handles_per_process));
     m.console.puts(" timers=1 tcp=1\n");
+    // Arc5 issue #246: per-process resource usage vs limits
+    var id: usize = 0;
+    while (id < process.max_processes) : (id += 1) {
+        if (process.getrusage(id)) |ru| {
+            if (ru.mem_limit != 0 or ru.cpu_limit != 0 or ru.mem_usage != 0 or ru.cpu_usage != 0) {
+                m.console.puts("resources: pid=");
+                m.console.print_u64(@intCast(id));
+                const info = process.info(id).?;
+                m.console.puts(" ");
+                m.console.print_line(info.name);
+                m.console.puts("  mem=");
+                m.console.print_u64(ru.mem_usage);
+                m.console.puts("/");
+                if (ru.mem_limit != 0) {
+                    m.console.print_u64(ru.mem_limit);
+                } else {
+                    m.console.puts("unlimited");
+                }
+                m.console.puts(" cpu=");
+                m.console.print_u64(ru.cpu_usage);
+                m.console.puts("/");
+                if (ru.cpu_limit != 0) {
+                    m.console.print_u64(ru.cpu_limit);
+                } else {
+                    m.console.puts("unlimited");
+                }
+                m.console.puts("\n");
+            }
+        }
+    }
     return .none;
 }
 
@@ -4938,11 +5110,43 @@ pub const BootMessages = struct {
 /// does not print "DIPSHITOS 0.1" (the repository defines no release
 /// number) or a hardcoded "256 MiB detected" (memory must be derived from
 /// the captured map — `mem` does exactly that).
+/// Arc5 #244: read /data/SHUTDOWN.TXT and print the last shutdown reason
+/// on boot. Silent no-op when the file is absent or empty.
+fn show_last_shutdown(m: *Monitor) void {
+    const ops = virtio_blk.disk_ops();
+    if (fat.mount_data(ops) != .ok) return;
+    var file_buf: [256]u8 = undefined;
+    const n = fat.read_file("SHUTDOWN.TXT", &file_buf);
+    _ = esp.set_disk(ops);
+    if (n == null) return;
+    const bytes = file_buf[0..n.?];
+    // Extract the Reason: line if present
+    var found_reason = false;
+    var pos: usize = 0;
+    while (pos < bytes.len) {
+        var end = pos;
+        while (end < bytes.len and bytes[end] != '\n') : (end += 1) {}
+        const line = file_buf[pos..end];
+        if (std.mem.startsWith(u8, line, "Reason: ")) {
+            m.console.puts("Last shutdown: ");
+            m.console.print_line(line[8..]);
+            found_reason = true;
+            break;
+        }
+        pos = end + 1;
+    }
+    if (!found_reason and bytes.len > 0) {
+        m.console.print_line("Last shutdown: unknown (marker present)");
+    }
+}
+
 pub fn banner(m: *Monitor) void {
     m.console.print_line("DipshitOS - AArch64 firmware-assisted kernel monitor");
     m.console.puts(BootMessages.pick(m.state.handoff.image_handle));
     m.console.puts("\n");
     m.console.print_line("motd: aarch64 el1 kernel live; scheduler, uaccess, fs, net, gfx, xhci armed.");
+    // Arc5 #244: display last shutdown reason on boot if SHUTDOWN.TXT exists
+    show_last_shutdown(m);
     m.console.print_line("Type 'help' before touching anything expensive.");
 }
 
@@ -6018,7 +6222,7 @@ test "monitor: reboot and shutdown through a mock machine control" {
     try std.testing.expectEqualStrings("reboot: ok\n", env.mock.contents());
     env.mock.reset();
     try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"shutdown"}));
-    try std.testing.expectEqualStrings("shutdown: ok\n", env.mock.contents());
+    try std.testing.expect(std.mem.indexOf(u8, env.mock.contents(), "shutdown: ok") != null);
     try std.testing.expectEqual(@as(usize, 1), env.machine.reboot_calls);
     try std.testing.expectEqual(@as(usize, 1), env.machine.shutdown_calls);
 }

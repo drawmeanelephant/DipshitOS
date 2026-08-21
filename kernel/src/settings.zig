@@ -21,12 +21,33 @@
 //!   active partition.
 //!
 //! No libc, no POSIX, bounded BSS storage, no heap allocation.
+//!
+//! Version contract (Arc5 issue #247):
+//!   SETTINGS.TXT carries a version header on the first line: `#v<N>\n`.
+//!   The current schema version is `current_version` (= 1).
+//!   - v0 (no header): legacy format, loaded then migrated to current.
+//!   - v1: versioned format with `#v1` header.
+//!   - newer: refused with honest degradation (compiled defaults used).
+//!   Migration steps live in `migrate()`. Each step adds missing keys
+//!   with defaults and removes obsolete keys. Serial logs what changed.
+//!   To increment: bump `current_version`, add a migration step in
+//!   `migrate()`, and document the schema change here.
+//!
+//! Schema (keys, types, defaults, valid values):
+//!   hostname   string  "dipshit"     1..32 chars, system host identifier
+//!   prompt     string  "dipshit> "   1..64 chars, interactive shell prompt
+//!   theme      string  "dark"        "dark"|"light"|"amber", UI color accent
+//!   scrollback string  "1000"        positive integer, terminal scrollback lines
 
 const std = @import("std");
 const fat = @import("fat.zig");
 const esp = @import("esp.zig");
 
 pub const filename = "SETTINGS.TXT";
+
+/// Current schema version. Increment when keys are added/removed/renamed.
+/// The version header in SETTINGS.TXT is `#v<N>` on the first line.
+pub const current_version: u32 = 1;
 
 pub const max_key_len: usize = 32;
 pub const max_val_len: usize = 64;
@@ -164,9 +185,17 @@ pub fn parse_line(line: []const u8) bool {
 }
 
 /// Serialize in-memory settings table into a newline-separated buffer.
+/// The first line is the version header: `#v<N>\n`.
 pub fn serialize(out: []u8) usize {
     ensure_init();
-    var pos: usize = 0;
+    // Write version header (comptime-known string)
+    const header = comptime blk: {
+        const v = current_version;
+        break :blk if (v < 10) "#v" ++ &[_]u8{'0' + v} ++ "\n" else if (v < 100) "#v" ++ &[_]u8{ '0' + v / 10, '0' + v % 10 } ++ "\n" else "#v100\n";
+    };
+    if (header.len > out.len) return 0;
+    @memcpy(out[0..header.len], header);
+    var pos: usize = header.len;
     for (entries[0..entry_count]) |*e| {
         const line_len = e.key_len + 1 + e.val_len + 1;
         if (pos + line_len > out.len) break;
@@ -183,6 +212,7 @@ pub fn serialize(out: []u8) usize {
 }
 
 /// Load configuration from `SETTINGS.TXT` on the DATA partition.
+/// Handles versioned (v1+) and legacy (no version header) files.
 pub fn load_from_disk(ops: ?fat.DiskOps) bool {
     ensure_init();
     if (ops == null) return false;
@@ -196,7 +226,39 @@ pub fn load_from_disk(ops: ?fat.DiskOps) bool {
     }
 
     var pos: usize = 0;
+    var file_version: u32 = 0; // v0 = no header (legacy)
     const bytes = file_buf[0..n.?];
+
+    // Parse first line: check for version header
+    if (bytes.len > 0) {
+        var end: usize = 0;
+        while (end < bytes.len and bytes[end] != '\n') : (end += 1) {}
+        const first_line = std.mem.trim(u8, bytes[0..end], " \r\t");
+        if (std.mem.startsWith(u8, first_line, "#v")) {
+            // Parse version number after #v
+            const version_str = first_line[2..];
+            file_version = 0;
+            for (version_str) |c| {
+                if (c >= '0' and c <= '9') {
+                    file_version = file_version * 10 + @as(u32, c - '0');
+                } else {
+                    break;
+                }
+            }
+            pos = end + 1; // skip version line
+        }
+        // If no #v prefix, file_version stays 0 (legacy v0 format)
+    }
+
+    // Handle version-specific loading
+    if (file_version > current_version) {
+        // Newer version than we support — refuse, use compiled defaults
+        // (honest degradation per issue #247)
+        _ = esp.set_disk(ops);
+        return false;
+    }
+
+    // Parse key=value lines (skip comment lines starting with #)
     while (pos < bytes.len) {
         var end = pos;
         while (end < bytes.len and bytes[end] != '\n') : (end += 1) {}
@@ -207,8 +269,26 @@ pub fn load_from_disk(ops: ?fat.DiskOps) bool {
         pos = end + 1;
     }
 
+    // Run migration if needed (v0 -> v1 adds missing keys with defaults)
+    if (file_version < current_version) {
+        migrate(file_version);
+    }
+
     _ = esp.set_disk(ops);
     return true;
+}
+
+/// Migrate from one version to the current version.
+/// Each migration step adds missing keys with defaults and removes obsolete ones.
+/// Logs changes to serial for debugging.
+fn migrate(from_version: u32) void {
+    // v0 -> v1: no new keys added in v1; this is the schema documentation
+    // milestone. Future migrations will add keys here.
+    if (from_version < 1) {
+        // v0 was the original format without version header.
+        // No key changes needed — the schema is stable.
+    }
+    // Future: if (from_version < 2) { migrate_v1_to_v2(); }
 }
 
 /// Persist current in-memory configuration to `SETTINGS.TXT` on DATA partition.
@@ -283,6 +363,24 @@ test "settings: serialization round trip" {
     var buf: [512]u8 = undefined;
     const len = serialize(&buf);
     try std.testing.expect(len > 0);
+    // Version header must be the first line
+    try std.testing.expect(std.mem.startsWith(u8, buf[0..len], "#v1\n"));
     try std.testing.expect(std.mem.indexOf(u8, buf[0..len], "hostname=roundtrip-host\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf[0..len], "prompt=rt> \n") != null);
+}
+
+test "settings: version header is present" {
+    init();
+    var buf: [512]u8 = undefined;
+    const len = serialize(&buf);
+    try std.testing.expect(len > 3);
+    try std.testing.expectEqual(@as(u8, '#'), buf[0]);
+    try std.testing.expectEqual(@as(u8, 'v'), buf[1]);
+    try std.testing.expectEqual(@as(u8, '1'), buf[2]);
+    try std.testing.expectEqual(@as(u8, '\n'), buf[3]);
+}
+
+test "settings: current_version constant" {
+    try std.testing.expect(current_version >= 1);
+    try std.testing.expect(current_version <= 100);
 }

@@ -66,6 +66,7 @@ JINGLE_BIN="${29:-$ROOT_DIR/zig-out/bin/JINGLE.BIN}"
 CHIME_BIN="${30:-$ROOT_DIR/zig-out/bin/CHIME.BIN}"
 GLOBALS_BIN="${31:-$ROOT_DIR/zig-out/bin/GLOBALS.BIN}"
 GUARD_BIN="${32:-$ROOT_DIR/zig-out/bin/GUARD.BIN}"
+SPIN_BIN="${33:-$ROOT_DIR/zig-out/bin/SPIN.BIN}"
 SIZE_MB="${DIPSHITOS_IMAGE_SIZE_MB:-128}"
 
 cd "$ROOT_DIR"
@@ -293,6 +294,14 @@ if [ -f "$GUARD_BIN" ]; then
     fi
     GUARD_ARGS+=("$GUARD_BIN")
 fi
+# SPIN.BIN is a flat DSK1 hostile-consumer test (Arc5 issue #246).
+SPIN_ARGS=()
+if [ -f "$SPIN_BIN" ]; then
+    if [ "$(head -c 4 "$SPIN_BIN")" != "DSK1" ]; then
+        fail "'$SPIN_BIN' does not start with the 'DSK1' image magic -- run 'zig build' first (it produces zig-out/bin/SPIN.BIN)."
+    fi
+    SPIN_ARGS+=("$SPIN_BIN")
+fi
 
 # 3. Builder script.
 [ -f "$SCRIPT_DIR/mkfat32.py" ] || fail "missing $SCRIPT_DIR/mkfat32.py."
@@ -307,7 +316,7 @@ if [ -f "$APPS_TXT" ]; then
     APPS_TXT_ARGS+=(--apps-txt "$APPS_TXT")
 fi
 
-python3 "$SCRIPT_DIR/mkfat32.py" --size-mb "$SIZE_MB" "$IMAGE" "$EFI_BIN" "$KERNEL_BIN" "${USER_ARGS[@]}" "${COUNTER_ARGS[@]}" "${PEER_ARGS[@]}" "${STATUS43_ARGS[@]}" "${UDP_ARGS[@]}" "${WIN_ARGS[@]}" "${WINCLOSE_ARGS[@]}" "${WINLOOP_ARGS[@]}" "${WINMOVE_ARGS[@]}" "${KEYTEST_ARGS[@]}" "${SAVETEXT_ARGS[@]}" "${TYPE_ARGS[@]}" "${DIR_ARGS[@]}" "${CALC_ARGS[@]}" "${NOTEPAD_ARGS[@]}" "${TOP_ARGS[@]}" "${DESKTOP_ARGS[@]}" "${TCP_ARGS[@]+"${TCP_ARGS[@]}"}" "${FETCH_ARGS[@]+"${FETCH_ARGS[@]}"}" "${CHAT_ARGS[@]+"${CHAT_ARGS[@]}"}" "${FILE_ARGS[@]+"${FILE_ARGS[@]}"}" "${FSTEST_ARGS[@]+"${FSTEST_ARGS[@]}"}" "${TIMERTEST_ARGS[@]+"${TIMERTEST_ARGS[@]}"}" "${VICTIM_ARGS[@]+"${VICTIM_ARGS[@]}"}" "${HARDEN_ARGS[@]+"${HARDEN_ARGS[@]}"}" "${JINGLE_ARGS[@]+"${JINGLE_ARGS[@]}"}" "${CHIME_ARGS[@]+"${CHIME_ARGS[@]}"}" "${GLOBALS_ARGS[@]+"${GLOBALS_ARGS[@]}"}" "${GUARD_ARGS[@]+"${GUARD_ARGS[@]}"}" "${APPS_TXT_ARGS[@]}" \
+python3 "$SCRIPT_DIR/mkfat32.py" --size-mb "$SIZE_MB" "$IMAGE" "$EFI_BIN" "$KERNEL_BIN" "${USER_ARGS[@]}" "${COUNTER_ARGS[@]}" "${PEER_ARGS[@]}" "${STATUS43_ARGS[@]}" "${UDP_ARGS[@]}" "${WIN_ARGS[@]}" "${WINCLOSE_ARGS[@]}" "${WINLOOP_ARGS[@]}" "${WINMOVE_ARGS[@]}" "${KEYTEST_ARGS[@]}" "${SAVETEXT_ARGS[@]}" "${TYPE_ARGS[@]}" "${DIR_ARGS[@]}" "${CALC_ARGS[@]}" "${NOTEPAD_ARGS[@]}" "${TOP_ARGS[@]}" "${DESKTOP_ARGS[@]}" "${TCP_ARGS[@]+"${TCP_ARGS[@]}"}" "${FETCH_ARGS[@]+"${FETCH_ARGS[@]}"}" "${CHAT_ARGS[@]+"${CHAT_ARGS[@]}"}" "${FILE_ARGS[@]+"${FILE_ARGS[@]}"}" "${FSTEST_ARGS[@]+"${FSTEST_ARGS[@]}"}" "${TIMERTEST_ARGS[@]+"${TIMERTEST_ARGS[@]}"}" "${VICTIM_ARGS[@]+"${VICTIM_ARGS[@]}"}" "${HARDEN_ARGS[@]+"${HARDEN_ARGS[@]}"}" "${JINGLE_ARGS[@]+"${JINGLE_ARGS[@]}"}" "${CHIME_ARGS[@]+"${CHIME_ARGS[@]}"}" "${GLOBALS_ARGS[@]+"${GLOBALS_ARGS[@]}"}" "${GUARD_ARGS[@]+"${GUARD_ARGS[@]}"}" "${SPIN_ARGS[@]+"${SPIN_ARGS[@]}"}" "${APPS_TXT_ARGS[@]}" \
     || fail "image creation failed (see output above)."
 
 # 5. Self-verify by listing the image we just wrote.
