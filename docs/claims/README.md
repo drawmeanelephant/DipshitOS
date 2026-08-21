@@ -173,6 +173,7 @@ CI) fails if the table drifts from the claim files.
 | [4374-virtqueue-ring-allocator](4374-virtqueue-ring-allocator.md) | buffy (`agent/buffy/macos27-custom-virtio-spike`) | ✅ done 2026-08-10 on `agent/buffy/macos27-custom-virtio-spike` |
 | [4429-archive-m5-m6-prompts](4429-archive-m5-m6-prompts.md) | buffy (`agent/buffy/hygiene-archive-m5-m6-prompts`) | ✅ done |
 | [4482-m14-s4-hardening](4482-m14-s4-hardening.md) | buffy (`freebuff/hey-bestie-the-chat-got-lost-so-we-re-so-back-can--53baf792-c2f8-470d-a9f1-6344aa90847a`) | ✅ done (class A + class B, 2026-08-18) |
+| [4516-archive-ragshit-test-artifacts](4516-archive-ragshit-test-artifacts.md) | oxalpha (`t3code/handle-issue-268-git-current`) | ✅ done |
 | [4613-long-lived-process](4613-long-lived-process.md) | Buffy (`agent/buffy/m4-long-lived-process`) | ✅ done — Stage A (the second program + image pipeline + the |
 | [4636-exec-args](4636-exec-args.md) | Buffy (`agent/buffy/m4-exec-args`) | ✅ done 2026-08-10 (PR #78, staged after PR #77 card 3d) |
 | [4678-net-nat](4678-net-nat.md) | buffy (`agent/buffy/m5-net-nat`) | ✅ DONE 2026-08-12 on `agent/buffy/m5-net-nat` (from the N7/N8 prompt commit `0fcd96b` — PR #102's doc, on merged main `87fe7ae`; claim PR pending) |
