@@ -31,6 +31,8 @@ pub const WIN_CLOSE: u16 = 8;
 /// Milestone 14 (claim 7323): the per-process app timer fired (posted by
 /// `kernel/src/app_timers.zig` when a `sys_timer_set` countdown reaches 0).
 pub const TIMER: u16 = 9;
+/// Arc2 W1 (claim 3589, ADR 0013 D2): window resized — `arg0 = new w`, `arg1 = new h`.
+pub const WIN_RESIZE: u16 = 10;
 
 /// Modifier bitmasks (flags bits 0..7).
 pub const MOD_SHIFT: u16 = 0x0001;
