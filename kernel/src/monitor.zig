@@ -274,7 +274,7 @@ pub const Command = struct {
 /// (claim 6140) grows it 45 -> 46 (`sound`). Milestone fifteen card A2
 /// (claim 5877) grows it 46 -> 47 (`beep`). Milestone sixteen card C3
 /// (claim 0339) grows it 47 -> 48 (`resources`).
-pub const registry_count: usize = 49;
+pub const registry_count: usize = 50; // Arc5 #245: added `compose` command
 
 /// Command registry, built at runtime into BSS. A `const` table would hold
 /// link-time absolute addresses for BOTH the string slices and the handler
@@ -296,6 +296,7 @@ fn ensure_registry() []const Command {
             .{ .name = "beans", .help = "count beans, probably", .usage = "beans [count]", .category = .machine_identity, .max_args = 1, .handler = cmd_beans },
             .{ .name = "cat", .help = "print a file from the ESP (by name or /path)", .usage = "cat <file|path>", .category = .storage, .min_args = 1, .max_args = 1, .handler = cmd_cat },
             .{ .name = "clear", .help = "clean up the crime scene", .usage = "clear", .category = .system, .handler = cmd_clear },
+            .{ .name = "compose", .help = "list available Alt+key compose sequences for accented characters", .usage = "compose", .category = .system, .handler = cmd_compose },
             .{ .name = "crash", .help = "list recent crash tombstones from /data/crash/", .usage = "crash", .category = .system, .handler = cmd_crash },
             .{ .name = "clip", .help = "copy/paste the shared kernel clipboard ('clip <text...>' sets it, 'clip' prints it)", .usage = "clip [<text...>]", .category = .system, .handler = cmd_clip },
             .{ .name = "echo", .help = "repeat your regrettable decisions", .usage = "echo <text...>", .category = .system, .handler = cmd_echo },
@@ -1356,6 +1357,13 @@ fn cmd_clear(m: *Monitor, args: []const []const u8) ExecError {
     // support this sequence is ignored harmlessly; the fallback is a
     // documented no-op. Deterministic and testable at the byte level.
     m.console.puts("\x1b[2J\x1b[H");
+    return .none;
+}
+
+/// `compose` — list available Alt+key compose sequences (Arc5 #245, ADR 0014).
+fn cmd_compose(m: *Monitor, args: []const []const u8) ExecError {
+    _ = args;
+    input.compose_list(&m.console);
     return .none;
 }
 

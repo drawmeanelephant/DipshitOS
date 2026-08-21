@@ -246,6 +246,86 @@ pub fn pop_byte() ?u8 {
 }
 
 // ---------------------------------------------------------------------------
+// Arc5 #245: Compose state machine (ADR 0014)
+// ---------------------------------------------------------------------------
+
+/// Compose state: IDLE (normal) or WAITING (Alt held, awaiting second key).
+const ComposeState = enum { idle, waiting };
+
+/// A single compose pair: two HID usage IDs → Unicode codepoint.
+const ComposePair = struct {
+    first: u8,
+    second: u8,
+    codepoint: u21,
+};
+
+/// Compile-time compose table: ~27 pairs for common accented characters.
+/// Alt + first_key + second_key → Unicode codepoint.
+const compose_table = [_]ComposePair{
+    // Alt + e + vowel → acute accent
+    .{ .first = 0x08, .second = 0x04, .codepoint = 0x00e1 }, // e+a → á
+    .{ .first = 0x08, .second = 0x05, .codepoint = 0x00e9 }, // e+e → é
+    .{ .first = 0x08, .second = 0x0c, .codepoint = 0x00ed }, // e+i → í
+    .{ .first = 0x08, .second = 0x12, .codepoint = 0x00f3 }, // e+o → ó
+    .{ .first = 0x08, .second = 0x18, .codepoint = 0x00fa }, // e+u → ú
+    // Alt + u + vowel → umlaut
+    .{ .first = 0x18, .second = 0x04, .codepoint = 0x00e4 }, // u+a → ä
+    .{ .first = 0x18, .second = 0x05, .codepoint = 0x00eb }, // u+e → ë
+    .{ .first = 0x18, .second = 0x0c, .codepoint = 0x00ef }, // u+i → ï
+    .{ .first = 0x18, .second = 0x12, .codepoint = 0x00f6 }, // u+o → ö
+    .{ .first = 0x18, .second = 0x18, .codepoint = 0x00fc }, // u+u → ü
+    // Alt + ` + vowel → grave accent
+    .{ .first = 0x35, .second = 0x04, .codepoint = 0x00e0 }, // `+a → à
+    .{ .first = 0x35, .second = 0x05, .codepoint = 0x00e8 }, // `+e → è
+    .{ .first = 0x35, .second = 0x0c, .codepoint = 0x00ec }, // `+i → ì
+    .{ .first = 0x35, .second = 0x12, .codepoint = 0x00f2 }, // `+o → ò
+    .{ .first = 0x35, .second = 0x18, .codepoint = 0x00f9 }, // `+u → ù
+    // Alt + n + n → tilde
+    .{ .first = 0x11, .second = 0x11, .codepoint = 0x00f1 }, // n+n → ñ
+    // Alt + c → cedilla
+    .{ .first = 0x06, .second = 0x06, .codepoint = 0x00e7 }, // c+c → ç
+};
+
+/// Current compose state (BSS, bounded, no allocation).
+var compose_state: ComposeState = .idle;
+/// The first key of a pending compose sequence (HID usage).
+var compose_first: u8 = 0;
+
+/// Look up a compose pair in the table. Returns the Unicode codepoint or null.
+fn compose_lookup(first: u8, second: u8) ?u21 {
+    for (compose_table) |pair| {
+        if (pair.first == first and pair.second == second) return pair.codepoint;
+    }
+    return null;
+}
+
+/// Reset compose state (called on Alt release or focus change).
+pub fn compose_reset() void {
+    compose_state = .idle;
+}
+
+/// List all compose sequences for the `compose` monitor command.
+pub fn compose_list(con: anytype) void {
+    con.print_line("compose: Alt + key1 + key2 → Unicode codepoint");
+    for (compose_table) |pair| {
+        con.puts("  Alt+");
+        con.puts(&[_]u8{hid_to_ascii(pair.first, false) orelse '?'});
+        con.puts("+");
+        con.puts(&[_]u8{hid_to_ascii(pair.second, false) orelse '?'});
+        con.puts(" → U+");
+        var buf: [4]u8 = undefined;
+        var v = pair.codepoint;
+        var i: usize = 4;
+        while (i > 0) : (i -= 1) {
+            const nib = @as(u8, @intCast(v & 0xf));
+            buf[i - 1] = if (nib < 10) '0' + nib else 'a' + nib - 10;
+            v >>= 4;
+        }
+        con.print_line(&buf);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Report decode (keyboard boot report + best-effort absolute pointer)
 // ---------------------------------------------------------------------------
 
@@ -342,14 +422,58 @@ pub fn decode_keyboard_report(rep: []const u8) void {
             if (!held) {
                 kb_last_usage = k;
                 const ascii_char: u32 = if (hid_to_ascii(k, shift)) |ch| ch else 0;
-                app_events.push(owner_pid, .{
-                    .kind = app_events.KEY_DOWN,
-                    .flags = flags,
-                    .seq = 0,
-                    .arg0 = k,
-                    .arg1 = ascii_char,
-                });
-                events += 1;
+                // Arc5 #245: Compose state machine (ADR 0014).
+                // When Alt is held, route through compose logic instead of
+                // immediately dispatching KEY_DOWN.
+                if (alt and k != 0 and compose_state == .idle) {
+                    // Alt + key: start compose sequence (save pending event).
+                    compose_state = .waiting;
+                    compose_first = k;
+                } else if (compose_state == .waiting) {
+                    // Second key of compose sequence: look up the pair.
+                    const cp = compose_lookup(compose_first, k);
+                    compose_state = .idle;
+                    if (cp) |codepoint| {
+                        // Compose match: dispatch KEY_DOWN with Unicode codepoint.
+                        app_events.push(owner_pid, .{
+                            .kind = app_events.KEY_DOWN,
+                            .flags = flags,
+                            .seq = 0,
+                            .arg0 = k,
+                            .arg1 = codepoint,
+                        });
+                        events += 1;
+                    } else {
+                        // Compose miss: dispatch both keys as normal KEY_DOWN.
+                        const first_ascii: u32 = if (hid_to_ascii(compose_first, shift)) |ch| ch else 0;
+                        app_events.push(owner_pid, .{
+                            .kind = app_events.KEY_DOWN,
+                            .flags = flags,
+                            .seq = 0,
+                            .arg0 = compose_first,
+                            .arg1 = first_ascii,
+                        });
+                        events += 1;
+                        app_events.push(owner_pid, .{
+                            .kind = app_events.KEY_DOWN,
+                            .flags = flags,
+                            .seq = 0,
+                            .arg0 = k,
+                            .arg1 = ascii_char,
+                        });
+                        events += 1;
+                    }
+                } else {
+                    // Normal KEY_DOWN: no compose active.
+                    app_events.push(owner_pid, .{
+                        .kind = app_events.KEY_DOWN,
+                        .flags = flags,
+                        .seq = 0,
+                        .arg0 = k,
+                        .arg1 = ascii_char,
+                    });
+                    events += 1;
+                }
                 // Arc4 #236: translate PageUp/PageDown to MOUSE_SCROLL events.
                 // On VZ the absolute pointer has no wheel byte, so this is the
                 // working scroll path. ScrollView/HScrollBar consume kind 12.
