@@ -352,7 +352,7 @@ fn ensure_table() *const [slot_count]Entry {
         // ADR 0013 reserved slots 52–54 (not yet implemented). Stubs.
         table_storage[52] = .{ .name = "sys_win_move_to_workspace", .handler = handle_win_move_to_workspace };
         table_storage[sys_win_set_unsaved] = .{ .name = "sys_win_set_unsaved", .handler = handle_win_set_unsaved };
-        table_storage[54] = .{ .name = "sys_setrlimit", .handler = handle_enosys };
+        table_storage[54] = .{ .name = "sys_setrlimit", .handler = handle_setrlimit };
         table_ready = true;
     }
     return &table_storage;
@@ -409,6 +409,19 @@ pub fn handle_svc(frame: *exceptions.VectorFrame, immediate: u16) bool {
 /// without crashing the `syscalls` report.
 fn handle_enosys(_: Args, _: *exceptions.VectorFrame) u64 {
     return error_result(.enosys);
+}
+
+/// Arc5 issue #246: sys_setrlimit(type, value) — slot 54.
+/// type 0 = memory pages limit, type 1 = CPU ticks limit.
+/// Returns 0 on success, -1 on error.
+fn handle_setrlimit(args: Args, _: *exceptions.VectorFrame) u64 {
+    const rtype = args[0];
+    const value = args[1];
+    const current_pid = process.current() orelse return error_result(.eacces);
+    if (process.setrlimit(current_pid, rtype, value)) {
+        return 0;
+    }
+    return error_result(.einval);
 }
 
 fn handle_ping(args: Args, _: *exceptions.VectorFrame) u64 {

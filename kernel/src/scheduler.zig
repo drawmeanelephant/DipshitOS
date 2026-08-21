@@ -79,6 +79,11 @@ const tcp = @import("tcp.zig");
 // auto-closes the exiting process's user windows via `close_owner`. Pure
 // BSS writes, safe in the exception context `exit_current` runs in.
 const driving_award = @import("driving_award.zig");
+// Arc5 issue #243: crash tombstone recording — written in the exit path
+// when status is 139 (fault) or non-zero unexpected exits. Pure BSS
+// writes, safe in the exception context `exit_current` runs in.
+const tombstone = @import("tombstone.zig");
+const virtio_blk = @import("virtio_blk.zig"); // Arc5 #243: disk write for tombstones
 
 const user_stack_section = if (builtin.object_format == .elf) ".userbss" else "__DATA,__userbss";
 
@@ -124,6 +129,10 @@ pub const reserved_kill_status: u64 = 137;
 /// semantics; it is the `tasks GUARD.BIN exited status=139` line the live
 /// gate asserts, distinct from the kill path's 137.
 pub const reserved_fault_status: u64 = 139;
+/// Arc5 issue #246: per-process memory limit exceeded (killed in page fault path).
+pub const reserved_mem_limit_status: u64 = 140;
+/// Arc5 issue #246: per-process CPU limit exceeded (killed in scheduler tick).
+pub const reserved_cpu_limit_status: u64 = 141;
 
 /// The claim-9746 vector frame: 32 slots holding x0..x17, x30, a pad, and
 /// the claim-6729 callee-saved extension (x19..x28 + x29), pushed in
@@ -509,7 +518,13 @@ pub fn fault_current(esr: u64, far: u64) void {
     const idx = (fault_report_head + fault_report_count) % fault_report_max;
     fault_reports[idx] = .{ .name = name, .far = far, .ec = ec };
     fault_report_count += 1;
-    _ = exit_current(reserved_fault_status);
+    // Arc5 issue #246: if the process has a memory limit and it's exceeded,
+    // use status 140 (mem_limit) instead of 139 (guard page).
+    const fault_status = if (process.find_by_task(current)) |pid|
+        if (process.check_mem_limit(pid)) reserved_mem_limit_status else reserved_fault_status
+    else
+        reserved_fault_status;
+    _ = exit_current(fault_status);
 }
 
 /// The user apertures of the CURRENT task (the EL0t task about to SVC —
@@ -908,6 +923,16 @@ pub fn on_tick() void {
     // the due ones (one TIMER event per process into its ADR 0009 queue,
     // which wakes a blocked sys_wait_event caller via on_event_pushed).
     app_timers.on_tick();
+    // Arc5 issue #246: per-process CPU limit enforcement. Increment the
+    // current process's tick counter; if the limit is exceeded, terminate
+    // the process with status 141 (distinct from guard-page 139).
+    if (current != idle_id and tasks[current].state == .running) {
+        if (process.find_by_task(current)) |pid| {
+            if (process.inc_cpu_ticks(pid)) {
+                _ = exit_current(reserved_cpu_limit_status);
+            }
+        }
+    }
 }
 
 /// Remove the calling task from the runnable ring and stage its successor.
@@ -922,6 +947,33 @@ pub fn exit_current(status: u64) bool {
     const name = tasks[exiting].name;
     tasks[exiting].state = .zombie;
     tasks[exiting].exit_status = status;
+    // Arc5 issue #243: record a tombstone for fault exits (status 139)
+    // or any non-zero unexpected exit. The tombstone is written to /data/crash/
+    // on the DATA partition. Pure BSS writes, safe in this exception context.
+    if (status == reserved_fault_status or (status != 0 and status != reserved_kill_status)) {
+        // Get fault address from the most recent fault report if status is 139
+        var fault_addr: u64 = 0;
+        if (status == reserved_fault_status and fault_report_count > 0) {
+            const last_fault_idx = (fault_report_head + fault_report_count - 1) % fault_report_max;
+            fault_addr = fault_reports[last_fault_idx].far;
+        }
+        // Use the process name if available, otherwise the task name
+        const proc_name = if (process.find_by_task(exiting)) |pid|
+            process.info(pid).?.name
+        else
+            name;
+        const pid_val = if (process.find_by_task(exiting)) |pid| @as(u64, pid) else @as(u64, 0);
+        tombstone.record(proc_name, pid_val, status, fault_addr, "", 0);
+        // Arc5 issue #243: persist the tombstone to /data/crash/ on the DATA
+        // partition. The write is polled DMA through virtio-blk (no allocation,
+        // no interrupt, no global-state conflict with the exception context).
+        if (virtio_blk.blk_common != 0) {
+            _ = tombstone.write_to_disk(
+                tombstone.get(tombstone.count() - 1).?,
+                virtio_blk.disk_ops(),
+            );
+        }
+    }
     // Claim 3848: the exiting task's PROCESS (if any) becomes exited and
     // snapshots the status — the process-level exit report and `procs`
     // keep it after the slot is reaped. Pure registry writes, safe in the
