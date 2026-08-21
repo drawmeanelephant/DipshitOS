@@ -32,23 +32,26 @@
 |-----------|---------------------|--------|
 | Zero — boot pipeline | A Zig AArch64 UEFI app on a FAT32 ESP boots under real firmware; output observed on host (`\BOOTED.TXT`) | ✅ done |
 | One — kernel handoff | Separate freestanding `KERNEL.BIN` loaded, cache-maintained, jumped to, and returned (`\RC.TXT` = `kernel_rc=0x0`); ADR 0002 | ✅ done |
-| Two — kernel proper | ExitBootServices, captured EFI map, identity TTBR0_EL1 tables, MMIO serial probe + polled TX console (ADR 0004) | ✅ **gates passed 2026-08-08** (claim 1517): bad-handoff failure gate passing since 2026-08-06, VZ serial gate now **passing** (post-MMU virtio TX fixed) |
-| **1.5 — Interactive Kernel Monitor ("Dipshit Monitor")** | A live, interactive command monitor served by the kernel's serial console (the milestone-two terminal loop becomes its payload) | ✅ **done 2026-08-09** — all 7 hard gates pass; the last (filesystem, claim 3475) closed 2026-08-09 and upgraded to a real FAT32 storage driver (claim 6420); tagged `m1.5-interactive-monitor` |
-| Three — allocator, interrupts, tasks | Physical allocator, GIC + timer, tasks, EL0, and syscalls | 🚧 **active** — allocator, IRQ/timer, and round-robin tasks are done (claims 3972/5162/9187/5275); the first EL0t task + SVC boundary landed in claim 8215; the frozen 64-slot syscall ABI and slots 0–3 (`ping`/`write`/`yield`/`exit`) pass their live VZ gate (claim 3594); the fault-safe uaccess layer (claim 6120), the per-task address spaces card (claim 5804 — per-task TTBR0 with an EL1-only kernel overlay, VZ TTBR1 fallback), the user task lifecycle card (claim 6729 — explicit states, bounded spawn, exit→zombie, idle-task reaper, plus the callee-saved vector-frame fix that made preemption of compiled tasks safe), and the **ESP exec card (claim 6783 — a real user program, `USER.BIN`, is loaded from the ESP through the claim-6420 FAT path by the `exec` monitor command, the EL0 user root is rebuilt around its page, and the program runs at EL0, writing via sys_write, round-tripping pings, and exiting through the lifecycle)**, and the **blocking-syscalls card (claim 3200 — `sys_sleep` slot 4 blocks the caller for N scheduler ticks with timer-driven wakeup, the ESP program sleeps 2 ticks and wakes, and the worker keeps advancing during the sleep window)** all landed and pass their live VZ gates. **Milestone three is CLOSED 2026-08-10 (claim 0707): the full class A + class B gate set re-ran green at the candidate and the milestone is tagged `m3-userspace`** (see the march tracker [`docs/march-m3.md`](march-m3.md) row 8). |
-| Four — real randomness | Virtio entropy driver + ChaCha20 CSPRNG (RFC 7539), boot-time seed, `random` command, ASLR, general (non-ESP) filesystem, process abstraction | ✅ **done 2026-08-11 (claim 2839, tag `m4-processes` at `9d7e4d5`)** — milestone-four cards 1 + 2 + 3 landed 2026-08-10 (claims 2665/3693 + 3678 + 3848, see the march tracker [`docs/march-m4.md`](march-m4.md)): the kernel now has a REAL randomness source — virtio-pci entropy driver (`kernel/src/virtio_entropy.zig`, DID 0x1044) with the post-MMU re-arm (**observed: VZ resets the device at ExitBootServices — `entropy: pre-rearm st=00`**), a freestanding ChaCha20 CSPRNG (`kernel/src/csprng.zig`) keyed from a 64-byte boot seed (`entropy: seeded n=64`), the `random [n]` monitor command (registry 27→28), and EL0 user-stack ASLR consuming the seed for BOTH exec'd programs and the boot-time static payload (every EL0 task gets per-boot stack placement — `exec: loaded … stack=0x…`, `aslr: boot user stack=0x…`). Card 2 generalizes the claim-6420 FAT32 driver into a **general (non-ESP) filesystem**: `fat.mount_partition` mounts any volume at any LBA, directory cluster chains + `/`-path resolution make the image's EFI/BOOT tree reachable (`ls [<dir>]`, `cat <file|path>`), and the disk image now carries a **second FAT32 DATA partition** (36 MiB, Linux-FS type GUID) mounted by the new `mount <esp|data>` command (registry 28→29) with an honestly-labeled, re-snapshotted window (`[data]`); the write reply names the real volume. Card 3 adds the **process abstraction**: a bounded process registry (`kernel/src/process.zig`) where each Process owns the loaded image, the address space, the lifecycle state, and the **exit status (snapshotted at exit — it survives the executor task's reap)**; exec and the boot-time static payload register as real processes, `exit_current` feeds the registry, and the new `procs` monitor command (registry 29→30) prints the table (`procs: id=… name=… state=… task=… stack=0x… exit=…`, exited rows `task=reaped` with the kept status). New class-B gates `bash tools/verify-live-entropy.sh` **PASS 2/2** (two boots → different `random 32` hex + exec + boot stack placements), `bash tools/verify-live-gfs.sh` **PASS 1/1** (the DATA partition mounted by GUID, listed, read, `hello.txt` written and persisted across reboot ON THE DISK, independent of the ESP), and `bash tools/verify-live-procs.sh` **PASS 1/1** (the exec'd USER.BIN is a process — `state=running` with its ASLR stack — alongside the boot payload's `state=exited task=reaped exit=7`, plus `procs USER.BIN exited status=43`); evidence `artifacts/live-entropy-*`, `artifacts/live-gfs-*`, `artifacts/live-procs-*`; all shared-seam live regressions green. **Follow-on (claim 0826, 2026-08-10): concurrent processes** — the exec gate (one user program at a time) is gone: every process owns its own TTBR0 user root + allocator-backed text/user-stack/EL1-stack pages, the syscall/uaccess regions arm per task at SVC entry, and exec gates on capacity; the new class-B gate `bash tools/verify-live-concurrent.sh` **PASS 1/1 on VZ** shows `exec USER.BIN` twice back to back with a `procs` table holding TWO `name=USER.BIN state=running` rows (distinct task ids + ASLR stack VAs) and both programs' markers interleaving (evidence `artifacts/live-concurrent-*`); the full shared-seam live sweep (exec/procs/addrspaces/tasks/userspace/svc/uaccess/lifecycle/sleep/entropy) is green against the relaxed gate. **Follow-on 2 (claim 4613, 2026-08-10): a long-lived process among live peers** — claim 0826's two live processes were copies of the SAME program that both exited; a SECOND DSK1 image (`user/src/counter.zig` → COUNTER.BIN, embedded by the same build/image pipeline) NEVER exits (distinct `counter: alive` markers, sys_write + sys_yield only, no sys_exit), an exited program's allocator pages now return at the same reap that frees its executor slot (the exited descriptor stays in `procs`), and the class-B gate `bash tools/verify-live-long-lived.sh` **PASS 1/1 on VZ** shows the counter `state=running` across the whole session while USER.BIN exits, is reaped, and is re-exec'd into the freed slot (the runner's new `--script2`/`--script2-after` second phase forwards the re-exec after the first reap), the `pages` free count recovers, and a further exec with both live reports `pool_full` (evidence `artifacts/live-long-lived-*`); the full shared-seam live sweep is green against the second program. **Follow-on 3, card 3c (claim 7786, 2026-08-10): kill — the kernel owns process lifetime** — claim 4613's permanent occupant could REFUSE to exit but nothing could END it; the new `kill <pid|name>` monitor command (registry 30→31) arms the target's TCB (`scheduler.request_kill`) and the ring converts its NEXT selection into the existing exit path with the reserved status 137 (no syscall — ADR 0007 frozen; the switching core untouched). The killed process flows through the real lifecycle (`procs` shows `state=exited task=reaped exit=137`, pages returned at the reap), and the class-B gate `bash tools/verify-live-kill.sh` **PASS 1/1 on VZ**: NO `counter: alive` marker lands after the `kill:` line (only one task runs at a time, so the killed task never executes again), the `pages` free count recovers by EXACTLY 5, and a phase-3 re-exec lands in the freed slot (the runner gains `--script3`/`--script3-after` for the post-reap snapshot; evidence `artifacts/live-kill-*`); the full 12-gate shared-seam live sweep (exec/procs/concurrent/tasks/lifecycle/addrspaces/sleep/svc/uaccess/userspace/entropy/long-lived) is green. **Follow-on 3, card 3d (claim 1014, 2026-08-10): per-process exit reports — exact** — the exit/reap report was a single first-wins-while-undrained flag (documented debt from claims 0826/4613), so N exits in one idle-loop window collapsed to ONE report line and the concurrent/long-lived gates had to assert ≥1; three bounded 4-slot FIFOs (name+status rings, pushed from exception context — pure BSS writes — and drained IN ORDER by the shell idle loop and the monitor, no double-print; drop-oldest overflow documented + host-tested; ADR 0007, the switching core, and the lifecycle states untouched) now print EXACTLY N ordered report lines, and the two gates tightened to EXACT counts: `bash tools/verify-live-concurrent.sh` **PASS 1/1 on VZ** (both USER.BIN exits → exactly 2 `tasks user-exec exited status=43` / 2 `procs USER.BIN exited status=43` / 2 `tasks user-exec reaped`) and `bash tools/verify-live-long-lived.sh` **PASS 1/1** (the phase-1 exit + the phase-2 re-exec exit stay distinct, the boot payload's `tasks user-el0 exited status=7` stays its own line; evidence `artifacts/live-3d-*`); the full 12-gate shared-seam live sweep (exec/procs/concurrent/tasks/lifecycle/addrspaces/sleep/svc/uaccess/userspace/entropy/long-lived) is green. **Follow-on 3, card 3e (claim 4636, 2026-08-10): exec context block — arguments to EL0** — the tokenizer already split `exec <file> [arg...]` but `monitor.exec` ignored the extras, so a program's identity was its image only; this card packs a bounded argv block (8 args × 32 B, NUL-terminated, per-arg 31-byte truncation, >8 args refused honestly) into the process's OWN text page right after the loaded content — the text leaf is already EL0 read-only (W^X, AP=read-only), so the block is a READ-ONLY leaf with ZERO extra pages (the per-program 5-page budget and every exact-count page gate stay untouched) — and extends the ENTRY contract (NOT a syscall; ADR 0007 frozen): `_start` receives `argc` in x0 and the block VA in x1 via the claim-9746 frame slots; the text aperture extends over the block so uaccess copy_in reads it and copy_out faults (host-tested both directions). USER.BIN prints one `user: arg=<n>` line per arg before its existing markers. The class-B gate `bash tools/verify-live-args.sh` **PASS 1/1 on VZ**: `exec USER.BIN alpha` + `exec USER.BIN beta` back to back — the SAME binary loads twice (`exec: loaded USER.BIN size=` x2), the procs snapshot shows two `name=USER.BIN state=running` rows with distinct task ids + stack VAs, the DISTINCT markers (`user: arg=alpha` / `user: arg=beta`) prove which invocation is which, both programs complete (status 43, EXACT FIFO counts), a third exec is `pool_full` (5/5, no spare), and the shell stays responsive (evidence `artifacts/live-args-*`); the full 12-gate shared-seam live sweep (exec/procs/concurrent/tasks/lifecycle/addrspaces/sleep/svc/uaccess/userspace/entropy/long-lived) + the new args gate + kill are all green. **Follow-on 3, card 3f (claim 5965, 2026-08-10): IPC — distinct processes exchange data** — the FIRST inter-process data path: a bounded per-process kernel mailbox (`kernel/src/mailbox.zig`, 4 × 64 B BSS ring per process id, no allocation) behind the card's ONE ABI change (ADR 0007 slots 5/6, the `sys_sleep` slot-4 precedent): `sys_ipc_send(target, buf, len)` copy_in's the caller's bytes into the TARGET's ring (full → `ENOSPC` -5; `implemented_count` 5→7, `syscalls` rows 0–6), `sys_ipc_recv(buf, max)` copy_out's the caller's OWN ring (empty → 0; peek → copy_out → drop, so an EFAULT never loses a message); a process reaches only its own mailbox (recv) and a live target's (send), the ring resets on process create/recycle, and every byte crosses the uaccess window. The `mbox [<pid>]` monitor command (registry 31→32) dumps per-process pending/sent/recv + the queued bytes. COUNTER.BIN gains a periodic send (`ipc: ping <d>` every 3 iterations, target pid parsed from its argv — card 3e's entry contract) and a THIRD image PEER.BIN (`user/src/peer.zig` through the parameterized build pipeline) recv-loops forever and echoes `peer: got ping <d>` — TWO never-exiting programs exchanging bytes. The class-B gate `bash tools/verify-live-ipc.sh` **PASS 1/1 on VZ**: `exec PEER.BIN` + `exec COUNTER.BIN 1` back to back — the counter's `ipc: ping N` sends and the peer's byte-exact `peer: got ping N` echoes interleave across the whole log (send N → echo N, every send echoed, first echo after the first send), `mbox` shows PEER.BIN `pending=0 sent=1 recv=1` (bounded ring drained: sent − recv == pending, pending ≤ 1) and COUNTER.BIN `pending=0 sent=0 recv=0`, both processes still `state=running` at the final `procs` and neither ever exits, a third exec is `exec: no free scheduler pool slot` (5/5 pool — counter + peer + shell + worker + idle — NO spare; the 3g capstone raises the budget), and the shell stays responsive (evidence `artifacts/live-ipc-*`); the full 12-gate shared-seam live sweep (exec/procs/concurrent/tasks/lifecycle/addrspaces/sleep/svc/uaccess/userspace/entropy/long-lived) + the args + kill gates are all green. | **Follow-on 3, card 3g (claim 5795, 2026-08-11): pool scale — the capstone** — every prior card documented the 5-slot budget (3b/3c/3f: "5/5, NO spare"; 3a/3e: one spare); this card DELIBERATELY grows the scheduler pool `max_tasks` 5 → 7 (`idle_id` stays `max_tasks - 1`; shell + worker + FOUR EL0t user slots + idle, the 4th user slot the "spare" while three are live) and re-derives every capacity assertion — a BUDGET change only, ADR 0007 / the switching core / the lifecycle / the ring mechanics untouched. The host tests re-derive: `pool_full` at the new budget (a FIFTH exec, exact free-counts on the refused path), the transcript fixture `tasks: pool=4/5` → `pool=4/7`, and `mmu.build_user_root` pins the kernel root + 3 user roots inside half the 256-page carve-out. The new class-B gate `bash tools/verify-live-scale.sh` **PASS 1/1 on VZ**: `exec COUNTER.BIN` + `exec USER.BIN` ×3 back to back — FOUR `state=running` user rows with distinct task ids + stack VAs, the programs' markers + the counter's `counter: alive` markers interleaving with the worker's advances across the whole log, a FIFTH exec `exec: no free scheduler pool slot` (7/7 — shell + worker + 4 users + idle), `addrspaces: tables=150/256` inside the carve-out (106 pages headroom), the counter still `state=running` at the final procs, and the shell responsive (evidence `artifacts/live-scale-*`); the full shared-seam sweep re-derived against the 7-slot pool — 12-gate sweep (exec/procs/concurrent/tasks/lifecycle/addrspaces/sleep/svc/uaccess/userspace/entropy/long-lived) + args (now FOUR argv-distinguished USER.BINs, FIFTH exec `pool_full`) + kill + ipc (counter + peer + 2 USER.BINs fill 7/7, FIFTH exec refused) — all PASS 1/1. **Follow-on 4, card 4a (claim 5799, 2026-08-11): process observability — the table read FROM EL0** — the process registry exists (claim 3848) but only the EL1h monitor could read it; this card gives EL0 a READ-ONLY view: `sys_procs(buf, max)` = slot 7 (the card's ONE ABI change — ADR 0007 amendment, `implemented_count` 7→8, `syscalls` rows 0–7; every existing syscall number 0–6 stays frozen) copies a bounded snapshot of the process table out into the caller's region through uaccess — one fixed 40-byte row per non-free descriptor (u64 pid, u64 state code, u64 exit status, name[16] NUL-padded), `max` truncating to WHOLE rows (a partial row is never copied — a documented truncation result like the ipc recv path), marshaled into a fixed BSS scratch (no allocation). PEER.BIN (reused — the pool stays 7/7, no fourth image) polls `sys_procs` once per quantum until the snapshot shows a running process other than itself, then prints `peer: sees <pid> <name> <state>` per row and falls into its existing recv loop. The new class-B gate `bash tools/verify-live-procs-syscall.sh` **PASS 1/1 on VZ**: `exec PEER.BIN` + `exec COUNTER.BIN 1` — the serial log shows `peer: sees 0 user-el0 exited` / `peer: sees 1 PEER.BIN running` / `peer: sees 2 COUNTER.BIN running` (the counter's RUNNING row read FROM EL0 — distinct from the EL1h monitor's own `procs` read, which shows both with distinct tasks + stacks), the IPC flow still echoes byte-exact after the snapshot (`peer: got ping N` — the phase-1 read doesn't disturb the recv loop), both processes are `state=running` at the final procs and neither ever exits, and the shell stays responsive (evidence `artifacts/live-procs-syscall-*`); the full 12-gate shared-seam live sweep (exec/procs/concurrent/tasks/lifecycle/addrspaces/sleep/svc/uaccess/userspace/entropy/long-lived) + the args/kill/ipc/scale gates all PASS 1/1. **Follow-on 4, card 4b (claim 3179, 2026-08-11): IPC depth — more messages per process ring** — the card-3f mailbox is 4 × 64 B per process, so a bursty flow (more than 4 sends before the peer drains) refuses with ENOSPC; this card raises `mailbox.max_messages` 4 → 8 (the per-process ring grows 256 → 512 B of fixed BSS) as a DATA-PATH CONSTANT — NOT a syscall number (ADR 0007 documents the choice; the follow-on-4 set's ABI amendments are ONLY slots 7/8, on cards 4a/4c). The truncation contract is unchanged: a message > 64 B still truncates at the slot bound, a full ring still refuses with the same `ENOSPC` -5 (now at the 9th send), the same empty → 0 recv, the same drain invariant `sent − recv == pending ≤ capacity`, the same cross-process isolation. COUNTER.BIN's send cadence becomes a BURST: every 6th iteration it sends 6 messages back-to-back in ONE quantum (the peer is not scheduled mid-burst), then 5 quiet iterations (the peer drains 1 per round — the ring peaks at 6 of the 8 slots and drains to 0 before the next burst: NO ENOSPC, deterministically); each send checks its return and prints a distinct `ipc: enospc` marker on failure. The re-derived class-B gate `bash tools/verify-live-ipc.sh` **PASS 1/1 on VZ**: `exec PEER.BIN` + `exec COUNTER.BIN 1` — the serial log shows the counter's 6-message bursts (`ipc: ping N` … `ipc: ping N+5` back-to-back, no echo between — the peer cannot drain mid-burst) interleaved with the peer's byte-exact `peer: got ping N` echoes, ZERO `ipc: enospc` lines, the log's peak (sends − echoes) = 6 — the ring at its deepest: > 4 messages queued at once, never over the re-derived 8-slot bound (observed `mbox` `pending=5 sent=6 recv=1` mid-drain — sent − recv == pending ≤ 8), every send except the last in-flight burst window (≤ 6) echoed, COUNTER.BIN `pending=0 sent=0 recv=0`, both processes still `state=running` at the final procs and neither ever exits, a fifth exec is `pool_full` at 7/7, shell responsive (evidence `artifacts/live-ipc-*`); the full 12-gate shared-seam live sweep (exec/procs/concurrent/tasks/lifecycle/addrspaces/sleep/svc/uaccess/userspace/entropy/long-lived) + the args/kill/scale + the card-4a procs-syscall gates all PASS 1/1. **Follow-on 4, card 4c (claim 9946, 2026-08-11): exit-status propagation to a peer — `sys_wait`** — processes exist, exit, and are observed (4a reads the table FROM EL0), but a process cannot WAIT on a peer; this card lands `sys_wait(target)` = slot 8 (the follow-on-4 set's explicit slots 7/8 ABI amendment — ADR 0007, `implemented_count` 8→9, `syscalls` rows 0–8; every existing syscall number 0–7 frozen): the caller blocks until the target process exits and returns its status — bounded, kernel-owned, NOT POSIX wait (no zombies, no fds). A running target parks the caller through the claim-0635 sleep seam (`scheduler.wait_current` — the SVC frame stays on the caller's kernel stack), and the exit path's `wake_waiters` flips the task back to `ready` and patches the observed status into the saved frame's x0, so the syscall return lands when the ring resumes it; an already-exited target returns its stored status immediately; EINVAL for a non-process caller, a free/out-of-range target, a `created` target (it may never run), or a self-wait (the refused deadlock); the block is event-driven — the tick clock never wakes a waiter. The THIRD program STATUS43.BIN (`user/src/status43.zig`, a fourth ESP image through the same build/image pipeline, self-verified in the listing) prints its alive marker, sleeps 6 scheduler ticks (a deterministic window), then exits 43; COUNTER.BIN exec'd with the wait target in its argv (`exec COUNTER.BIN 0 1`) prints `ipc: waiting pid=1`, blocks, and prints `ipc: saw pid=1 status=43` on wake. The new class-B gate `bash tools/verify-live-wait.sh` **PASS 1/1 on VZ**: the phase-2 `tasks` snapshot (forwarded after `ipc: waiting pid=1`) shows TWO `state=blocked` user-exec rows — the sleeping STATUS43 + the waiting counter — while `procs` still shows `id=1 name=STATUS43.BIN state=running` (the target ALIVE while the waiter is blocked — the blocking proof), then `status43: exiting`, the counter's `ipc: saw pid=1 status=43` (the observation — the ring resumes the counter directly after the target's exit, its slot being next, so it precedes the shell's report drain), and the agreeing kernel records `tasks user-exec exited status=43` / `procs STATUS43.BIN exited status=43` / `tasks user-exec reaped` (evidence `artifacts/live-wait-*`); the full 12-gate shared-seam live sweep (exec/procs/concurrent/tasks/lifecycle/addrspaces/sleep/svc/uaccess/userspace/entropy/long-lived) + the args/kill/ipc/scale + the card-4a procs-syscall + the new wait gates all PASS 1/1. **Milestone four CLOSED 2026-08-11 (claim 2839): the full class A + class B gate set re-ran green at the candidate HEAD `9d7e4d5`** (class A 11/11 + class B 28/28, evidence `artifacts/gates-reverify-20260811-m4-closeout.txt`; the M4 prompt docs are archived to `docs/archive/`) and the milestone is tagged **`m4-processes`**. The next plan is milestone five, card N1 — virtio-net transport + TX (`docs/m5-net-tx-prompt.md`; the roadmap's network sketch, which "slots after milestone four closes"). |
-| Five — networking | The runner attaches a virtio-net device (`--net`, flag-gated); the guest's virtio-net transport drives TX end to end — feature negotiation, queues 0/1, MAC read, bounded frame staging, polled used-ring drain — and the host receives exact Ethernet frames | 🚧 **active** — milestone five, card N1 (**claim 1373**, branch `agent/buffy/m5-net-tx`): the virtio-net TRANSPORT + TX is live on VZ — device DID 0x1041 (class 0x020000), VER1\|MTU\|MAC negotiated (the device needs MTU accepted — `feat=0x28/0x1`), host-set MAC read via the feature path (`mac=02:00:00:00:00:01 source=feature`), queues 0/1 armed size 4, DRIVER_OK through the post-exit re-arm (**the net device does NOT reset at ExitBootServices — `net: pre-rearm st=0f` observed, unlike blk/entropy**), a 12-byte virtio_net_hdr consumed on every TX buffer (observed contract — the driver prepends a zeroed header), and `netsend` sends known frames the host captures byte-exactly (46-byte fixture + ring reuse + honest 1500-byte truncation). New class-B gate `bash tools/verify-live-net-tx.sh` **PASS 2/2**; the full class-A set and the **29-gate `verify-vz` aggregate (incl. the net gate) re-ran green** (proof the `--net` mode left the default VM byte-identical; evidence `artifacts/live-net-tx-*`, `artifacts/live-net-tx-vz-sweep.log`). **Card N2 (claim 6076, branch `agent/buffy/m5-net-rx`) — raw Ethernet RX is LIVE 2026-08-11**: the runner's `--net-inject <file>` writes the attachment's socket end ONCE on the guest's `net: rx-armed` serial trigger (host→guest; OFF by default); queue 0 is supplied with one fixed BSS buffer (4096 bytes), the used ring is drained POLLED (the net device's used-buffer IRQ is not yet observed — recorded, not assumed), each delivery is MAC-filtered (own + broadcast accepted, other dropped with a counter) into a bounded 4-slot frame FIFO, and `net recv` prints the received frame byte-exact. **Claim-time observations:** the device WRITES a 12-byte virtio_net_hdr into RX buffers (first frame device-len 72 for 60 bytes, first 16 bytes `00…01 00 ff ff ff ff` — `num_buffers=1`; the RX-header question answered) and REFUSES an RX buffer under 1530 bytes (1526/1528/1529 wedged the device — no frame written, used ring never advanced, TX stalled; 1530 works). New class-B gate `bash tools/verify-live-net-rx.sh` **PASS 3/3**: phase 1 injects the 60-byte broadcast known frame — `net recv` prints it byte-exact AND the guest re-sends it (the host capture is byte-exactly the injected fixture — the round trip); phase 2 own-MAC frame received byte-exact; phase 3 foreign-MAC frame dropped (`filtered=1`, rx-obs still records the delivery). Full class A green; the **29-gate `verify-vz` aggregate re-ran green 29/29** (evidence `artifacts/live-net-rx-*`, `artifacts/m5-net-rx-vz-sweep.log`). **Card N3 (claim 7293, branch `agent/buffy/m5-arp`) — ARP is LIVE 2026-08-11**: `kernel/src/arp.zig` (pure RFC 826 logic — static IP via `net ip <a.b.c.d>`, byte-exact request/reply builds, bounded 4-slot BSS table, counters) wired into the RX drain (a request for our IP is answered on the N1 TX path; a reply is learned; the rest dropped with a counter) + `net arp [<ip>]` subcommand + the runner's `--net-arp-respond <host-ip>` (deterministic host-side ARP answer inside the capture thread; OFF by default). New class-B gate `bash tools/verify-live-net-arp.sh` **PASS 3/3**: phase 1 the guest answers the injected request for its IP (42-byte reply byte-exact in the capture, repl=1); phase 2 the guest resolves 10.0.0.2 (request byte-exact in the capture; the host answer lands as `10.0.0.2 -> 02:00:00:00:00:02`, learn=1); phase 3 a request for 10.0.0.99 is dropped (drop=1, repl=0, still observable via `net recv`). Claim-time observation: the device delivers/transmits the 42-byte ARP frames unpadded (below the Ethernet 60-byte minimum). Full class A green; the **31-gate `verify-vz` aggregate re-ran green 31/31** (evidence `artifacts/live-net-arp-*`, `artifacts/m5-arp-vz-sweep.log`; `verify-live-concurrent` flaked once on a scheduler-timing `interleave=0` and passed on immediate retry — recorded, not hidden). **Card N4 (claim 0148, branch `agent/buffy/m5-ipv4`) — IPv4/ICMP is LIVE 2026-08-11**: `kernel/src/ipv4.zig` (pure RFC 791/792 logic — RFC 1071 one's-complement checksums, parse/build, byte-exact ICMP echo request/reply builders, fragments dropped COUNTED — no reassembly, honest bound) wired into the RX drain BESIDE the ARP dispatch (an echo request for our static IP is answered byte-exact on the N1 TX path; an echo reply is observed — `pongs_observed` + the echoed sequence; the rest dropped with counters) + `net ping <a.b.c.d>` subcommand (an echo needs a unicast dst — the peer must be in the ARP table first; refused honestly otherwise) + the runner's `--net-icmp-respond <host-ip>` (deterministic host-side echo answer inside the capture thread — type 0 reply, id/seq/payload echoed, both checksums recomputed; OFF by default). New class-B gate `bash tools/verify-live-net-icmp.sh` **PASS 3/3**: phase 1 the guest answers the injected 46-byte echo request for its IP (reply byte-exact in the capture with the identification + id/seq/payload echoed, repl=1); phase 2 the guest resolves 10.0.0.2 and pings it (the ARP request + 46-byte echo request are byte-exact in the capture; the host answer lands as pong=1 with seq=1); phase 3 an echo request for 10.0.0.99 is dropped (drop=1, repl=0, still observable via `net recv`). No new hardware-contract entry — the 46-byte frames travel unpadded, consistent with the N3 observation. Full class A green; the **32-gate `verify-vz` aggregate re-ran green 32/32** (evidence `artifacts/live-net-icmp-*`, `artifacts/m5-ipv4-vz-sweep.log`). **Card N5 (claim 8552, branch `agent/buffy/m5-udp`) — UDP is LIVE 2026-08-11**: `kernel/src/udp.zig` (pure RFC 768 logic — the 8-byte header, the checksum over the IPv4 PSEUDO-HEADER computed ALWAYS, a bounded 4-slot LISTEN table, bounded per-listener datagram rings, LOOPBACK — a send to our OWN IP delivers directly into the local receive path, no device round trip) wired into ipv4.zig's protocol dispatch (protocol 17 → udp on ALREADY-VALIDATED frames; TCP/other still dropped_proto) + `net udp [listen|close|send|recv]` subcommands + the runner's `--net-udp-respond <host-ip>:<host-port>` (deterministic host-side echo answer inside the capture thread — same payload byte-exact, checksums recomputed; OFF by default). New class-B gate `bash tools/verify-live-net-udp.sh` **PASS 4/4**: phase 1 LOOPBACK — a send to our own IP is delivered locally byte-exact with an EMPTY capture (rx=1 tx=1 loop=1 — no device round trip); phase 2 the host's injected datagram is delivered to the listener byte-exact (device len 58, rx=1 drop=0); phase 3 the guest resolves 10.0.0.2 and sends to it (the ARP request + the 46-byte datagram are byte-exact in the capture; the host answer lands in the listener buffer, rx=1 tx=1); phase 4 a datagram to a closed port is dropped (drop=1, no delivery, no reply, still observable via `net recv`). Claim-time fix recorded: the pseudo-header's zero/protocol word was initially reversed (0x1100 vs 0x0011) — every datagram failed verification against standard peers (the loopback self-verified only because the guest built AND verified with the same wrong sum); fixed and re-run green 4/4. No new hardware-contract entry — the 46-byte datagrams travel unpadded, consistent with the N3/N4 observation. Full class A green; the **33-gate `verify-vz` aggregate re-ran green 33/33** (evidence `artifacts/live-net-udp-*`, `artifacts/m5-udp-vz-sweep.log`). **Card N6 (claim 1384, branch `agent/buffy/m5-udp-syscall`) — the UDP syscall seam is LIVE 2026-08-12**: the ADR 0007 amendment slots 9/10/11 (`sys_udp_listen` / `sys_udp_send` / `sys_udp_recv`, implemented 9 → 12) expose the N5 UDP layer to EL0 USER PROGRAMS through the claim-6120 uaccess window — `handle_udp_listen` binds the SAME bounded kernel table the monitor's `net udp listen` uses (kernel-global, honest bound); `handle_udp_send` sends ONE datagram from the fixed src port 7000 (own-IP → the N5 LOOPBACK path; a peer needs its MAC in the ARP table — `.no_peer`/`.not_ready`/`.timeout` → `EINVAL`, the seam does NOT resolve ARP); `handle_udp_recv` peeks → copy_out → pops (a bad buffer (`EFAULT`) never loses the datagram) and DRAINS THE DEVICE FIRST (the claim-6076 polled-drain contract — an EL0 polling loop is self-sufficient without the shell idle loop, observed live). The EL0 proof rides **UDP.BIN** (`user/src/udp.zig`, the first network-syscall user program): binds 7000, loopback-sends to its own IP, sends the 46-byte datagram to 10.0.0.2:9999 (retried with a cooperative `sys_yield` if the ARP table is cold), polls `sys_udp_recv` for the host's `--net-udp-respond` answer (`udp: got ping`), observes the `EINVAL` mapping from EL0 (unbound-port recv, unresolved-peer send), and exits 17. New class-B gate `bash tools/verify-live-net-udp-syscall.sh` **PASS 4/4** — the program's full transcript IN ORDER (listen → loop → got → both errors → `procs UDP.BIN exited status=17` / `tasks user-exec exited status=17` / `tasks user-exec reaped`), the capture byte-exact (42-byte ARP request + the 46-byte datagram), and the observation phase on the SAME kernel state (`syscalls` rows 0–11 with rows 9/10/11 counted; `net udp`/`net` counters rx=2 tx=2 loop=1 drop=0). Gate-engineering lessons recorded: an early `--script-expect` killed the VM at ~5 s before the ring (1 s ticks, 5 tasks) returned to UDP.BIN after its yield — a healthy kernel looked hung (`switches=5`, all tasks `state=ready`, the host answer already rx'd); the gate now keys its observation phase on the program's OWN `udp: got ping` marker and its exit on `tasks user-exec reaped`, and the marker greps carry `|| true` (an absent marker under `set -euo pipefail` was killing the gate before it could report the FAIL). The poll also first-proves a user task RESUMING after `sys_yield` live (the boot payload yields as its last act, so no earlier gate observed it). Full class A green; the **34-gate `verify-vz` aggregate re-ran green 34/34** (evidence `artifacts/live-net-udp-syscall-*`, `artifacts/m5-udp-syscall-vz-sweep.log`). **Card N7 (claim 4678, branch `agent/buffy/m5-net-nat`) — outbound connectivity through `VZNATNetworkDeviceAttachment` is LIVE 2026-08-12**: the runner's flag-gated `--net-nat` (boolean, OFF by default, mutually exclusive with `--net` — one network device per guest; `config.networkDevices = []` without the flag — the default VM stays byte-identical) attaches the SAME virtio-net device with the NAT attachment; the host is the guest's router. RUNNER + GATE ONLY — NO guest code (the existing static-IP/ARP/ICMP stack is the baseline). Claim-time observations pinned in the hardware contract `[observed]` (saved logs `artifacts/live-net-nat-explore/`): the NAT attachment HONORS the configured locally-administered MAC (`net: mac=02:00:00:00:00:01 source=feature`); VZ exposes NO NAT prefix API — the subnet/gateway was observed on the first live run: **192.168.64.0/24, gateway 192.168.64.1**; the gateway ANSWERS ARP for its IP (the guest learns the gateway MAC — `net arp: 192.168.64.1 is at …`, `learn=1`) and ANSWERS ICMP echo (`net ping 192.168.64.1` → `pong=1` `seq=1` — the deterministic proof, NO internet); the NAT ROUTER MAC VARIES PER BOOT (`ae:07:75:20:da:64` vs the host bridge0 interface's `36:27:ce:a2:21:40` — gates assert the learned-line prefix, never a hardcoded MAC); the router SENDS IPv6 multicast at boot (router-advertisement-shaped, dst `33:33:00:00…`) — dropped by the N2 MAC filter (`filtered=3`, `drop=1`); the NAT attachment does NOT proxy-ARP off-subnet addresses (a guest `net arp 8.8.8.8` broadcast is unanswered and `net ping 8.8.8.8` honestly refuses — no routing rung; outbound proof stays at the gateway). New class-B gate `bash tools/verify-live-net-nat.sh` **PASS (ONE run, 11/11 assertions)** — the gate-shape change: NO capture file under NAT (the host translates the frames — that is the point), so the evidence is **guest-observed counters** (ip-set, the 42-byte ARP request, the 46-byte ping, `pong=1` `seq=1`, the learned gateway MAC, the MAC-under-NAT line, `arp=req=1,repl=0,learn=1,drop=1,fail=0`, transport `status=0x0f`, the shell echo, the runner's `net-nat: ENABLED`). Full class A green (incl. the `--net-nat`/`--net` mutual-exclusion fail path); the **35-gate `verify-vz` aggregate re-ran green 35/35** (evidence `artifacts/live-net-nat-*`, `artifacts/m5-net-nat-vz-sweep.log`). **Card N8 (claim 0351, branch `agent/buffy/m5-net-dhcp`) — DHCP is LIVE 2026-08-12**: the bounded RFC 2131 client on the N5/N6 UDP layer (a monitor card — NO ADR 0007 change, NO user program): NEW `kernel/src/dhcp.zig` (pure logic, the `arp.zig`/`udp.zig` pattern — DISCOVER broadcast with a CSPRNG xid → parse OFFER (cookie `0x63825363`, option 53 = 2, server id, yiaddr) → REQUEST (options 50 + 54) → parse ACK (option 53 = 5) → BOUND {ip, mask, gateway, server id, lease time}; honest bounds: no renewal/lease-expiry (the lease is recorded, not enforced), no hostname/DNS, no DHCPv6, no relay/giaddr, ONE fixed BSS state machine + one fixed 256-byte buffer, no heap), the ONE seam change (`virtio_net.net_dhcp_send` — the broadcast-dst send path, dst MAC ff:ff:ff:ff:ff:ff / dst IP 255.255.255.255, src 68 → dst 67, no ARP; the N5 `net_udp_send` semantics unchanged), the `net dhcp` subcommand (registry stays 34) + the `dhcp=` report line + counters with a bounded retry (`max_attempts = 3` then an honest refuse), and on BOUND it sets `arp.own_ip` (THE one copy — DHCP overwrites the static address honestly). Runner: `--net-dhcp-respond <lease-ip>` (OFF by default, requires `--net`) — the capture thread answers DISCOVER → OFFER and REQUEST → ACK with the FIXED gate-assertable lease {ip 10.0.0.2, mask 255.255.255.0, gw 10.0.0.1, server = the lease IP, lease 3600s}, the guest's xid echoed byte-exact, both checksums recomputed. Two live-boot bugs found and fixed at claim time: a 16-bit total/UDP-length overflow (`UInt8(...)` trap) and the reply echoing the CLIENT's message type instead of the server's answer (the kernel honestly counted it malformed) — DISCOVER → 2, REQUEST → 5. New class-B gate `bash tools/verify-live-net-dhcp.sh` **PASS 16/16 (TWO phases)**: phase 1 deterministic file-handle — the 286-byte DISCOVER byte-exact in the capture → OFFER → REQUEST (298 B, the same xid) → ACK → `net: dhcp bound ip=10.0.0.2 mask=255.255.255.0 gw=10.0.0.1 server=10.0.0.2 lease=3600` with `discover=1,offer=1,request=1,ack=1,nack=0,timeout=0,mal=0` + the host's NET-DHCP OFFER/ACK lines; phase 2 real NAT — **claim-time observation: the VZ NAT attachment serves NO DHCP server on this host** (the DISCOVER went out, `offer=0, mal=0` — the honest blocked-with-evidence outcome, never faked; recorded in the hardware contract `[observed]` with the saved log under `artifacts/live-net-dhcp-nat-explore/`), and the guest is NOT stranded: the static fallback still pings the NAT gateway (`pong=1 seq=1`). Full class A green (fmt, the unit suite 52/52, byte-identical transcript, build/image/inspect, swift build, context, coordination); the **36-gate `verify-vz` aggregate re-ran green 36/36** (evidence `artifacts/live-net-dhcp-*`, `artifacts/m5-net-dhcp-vz-sweep.log`) — the default VM stays byte-identical and the N6 seam regression (UDP.BIN) is green. **Card N9 (claim 9489, branch `agent/buffy/m5-net-dhcp-renew`) — the DHCP lease lifecycle is LIVE 2026-08-12**: closes the N8 honest bound (the lease time was recorded, not enforced) — RFC 2131 §4.4.5 on the SAME monitor-driven polled-drain contract, NO new commands (the `net` registry stays 34): `kernel/src/dhcp.zig` gains the `renewing`/`rebinding` states + the lease timer (`now_ticks`/`bound_ticks` from the 1 Hz `timer.ticks` — integer seconds; T1 = lease/2, T2 = lease*7/8), `enter_renewing`/`enter_rebinding` (the built REQUEST now carries `ciaddr` = the leased IP), `expire()` (arp.own_ip cleared — the address RELEASED honestly, the lease record zeroed, attempts reset for a fresh INIT), the counters `renew_sent`/`rebind_sent`/`renewed`/`expired`, and `handle_rx` accepts the ACK in RENEWING/REBINDING too (the lease restarts — `bound_ticks` re-stamped, `renewed` counts it). Seams: `net_dhcp_send_bound` (broadcast REQUEST, src = the leased IP) + `net_dhcp_send_unicast` (the RENEWING REQUEST to the server's IP + the caller-resolved MAC — the seam resolves nothing). Monitor: the `net dhcp` `.bound` branch checks the elapsed time each invocation — expiry → release + re-DISCOVER, T2 → REBINDING (broadcast), T1 → RENEWING (unicast; an unresolvable server MAC keeps the client BOUND until T2 — RFC-compliant degradation, never faked); the `dhcp=` report line gains `,renew=,rebind=,renewed=,expired=` at the END (the N8 gate's substring assertions stay green). Runner: `--net-dhcp-respond <ip>[:<lease-secs>]` (lease option 51 configurable, default 3600 — backward compatible) + `--script2-delay`/`--script3-delay` (the claim-6684 settle, flag-gated, default 0.5; the marker-wait deadline extends with a configured settle). New class-B gate `bash tools/verify-live-net-dhcp-renew.sh` **PASS 17/17 (TWO runs)**: Run A (lease 100 s, delays 55/92) — the RENEWING UNICAST REQUEST byte-exact in the capture (dst 02:00:00:00:00:02, src/dst IP 10.0.0.2, ciaddr 10.0.0.2 — the 1222-B capture's frame 3) vs the REBINDING broadcast (frame 4), `renewing (T1, elapsed=…)` + `rebinding (T2, elapsed=…)`, the counters `renew=1,rebind=1,renewed=2,expired=0`; Run B (lease 100 s, delay 106) — `lease expired (elapsed=… >= lease=100)`, the released report (`dhcp=idle,ip=0.0.0.0,…,expired=1`), and the client RECOVERS (a second DISCOVER → BOUND again). Full class A green (fmt, the unit suite 58/58 incl. the 6 new lifecycle tests, byte-identical transcript, build/image/inspect, swift build, context, coordination); the N8 gate re-ran green; the **37-gate `verify-vz` aggregate re-ran green 37/37** (evidence `artifacts/live-net-dhcp-renew-*`, `artifacts/live-net-dhcp-renew-explore/`, `artifacts/m5-net-dhcp-renew-vz-sweep.log`) — the default VM stays byte-identical. **Card N10 (claim 7026, branch `agent/buffy/m5-net-tcp`) — a bounded TCP client is LIVE 2026-08-12**: the roadmap's last sketched network rung, on the N5/N6 layer following the DHCP honest-bounds pattern (NO ADR 0007 change, NO user program): NEW `kernel/src/tcp.zig` (pure RFC 793 logic — the states idle/syn_sent/established/fin_sent/closed, the FIXED src port 8000, a bare 20-byte header (NO options — offset 5 only), the FIXED window 4096, the checksum over the IPv4 pseudo-header (protocol 6), payload ≤ 64 with NO segmentation/reassembly (ONE bounded RX segment), NO TCP loopback (outward-only — an own-IP connect is refused), the client-driven close (FIN → FIN-ACK → final ACK; a clean server FIN+ACK is ACKed and counted), the RST-RX path (a peer RST kills the connection — connection refused), and the bounded connect timeout (30 s of guest ticks, the card-N9 timer pattern — a SYN with no SYN-ACK refuses honestly, `timed_out`); honest bounds: NO retransmission (each segment sent exactly once on the caller's command), no urgent data, no congestion control. Seams: the ipv4 protocol-6 dispatch to `tcp.handle_rx` (ALREADY-VALIDATED frames — TCP is no longer `dropped_proto`) + `virtio_net.net_tcp_send`. Monitor: the `net tcp` subcommands (connect / (drive) / send <len> / recv / close / reset) + the `tcp=` report line (state, peer, counters — appended at the END, the N8/N9 gate assertions stay green). Runner: `--net-tcp-respond <host-ip>:<host-port>` (OFF by default, requires `--net`) — a tiny deterministic TCP server in the capture thread: SYN → SYN-ACK (the FIXED gate-assertable server ISN 0x12345678), data → ACK + the payload ECHOED byte-exact, FIN → FIN-ACK. New class-B gate `bash tools/verify-live-net-tcp.sh` **PASS 36/36 (THREE runs)**: Run A (file-handle + responder) — the full lifecycle byte-exact (SYN → handshake ACK (ack 0x12345679) → established → data → the echoed `01 02 03 04 05` → FIN → final ACK (0x1234567f) → closed, then a second connect + `net tcp reset`); the counters `syn=2,synack=2,ack=4,data_s=1,data_r=1,fin=1,finack=1,rst_s=1,rst_r=0,timedout=0,mal=0`; the capture's NINE-frame python walk verifies the seq/ack chain + every TCP checksum (533 B). Run B (ARP-responder-only — a deterministic black hole) — the bounded connect timeout: `tcp=syn_sent,syn=1,synack=0` → after 31 s `connect refused (no SYN-ACK after 30s)` → `tcp=idle,peer=0.0.0.0:0,timedout=1`. Run C (real NAT) — the claim-time observation: **the VZ NAT gateway answers the SYN with a RST** (no TCP listener on 192.168.64.1:9999 — connection refused; `rst_r=1`, `tcp=closed`, the drive returns it to idle; recorded in the hardware contract `[observed]`). Full class A green (fmt, the unit suite 66/66 incl. the 9 new tcp tests, byte-identical transcript, build/image/inspect, swift build, context, coordination); the N8/N9 gates re-ran green; the **38-gate `verify-vz` aggregate re-ran green 38/38** (evidence `artifacts/live-net-tcp-*`, `artifacts/live-net-tcp-explore/`, `artifacts/m5-net-tcp-vz-sweep.log`) — the default VM stays byte-identical. **Card N11 (claim 5357, branch `agent/buffy/m5-net-tcp-rto`) — bounded TCP retransmission is LIVE 2026-08-12**: closes the N10 honest bound ("NO retransmission — every segment sent exactly once on the caller's command"), NO new commands (the `net` registry stays 34): `kernel/src/tcp.zig` gains the ONE pending-unacked-segment buffer (the polled-drain contract — at most ONE unacked TX in flight; the retransmission copy is the bounded `segment_max` buffer), the FIXED `rto_ticks = 3` (guest seconds — no adaptive estimation, no Karn, no exponential backoff), the bound `retx_max = 10` (a segment is retransmitted at most 10 times, then the connection ABORTS honestly — `release_conn`, the N10 `abort_timeout` pattern: no RST, no TX, counted `retx_aborted`), the ACK-clears-pending paths (a peer ACK covering `snd_una` stops the timer — an acknowledged segment is never retransmitted), `record_pending()` (the monitor's TX sites arm the pending segment; bare ACKs and RSTs never do), and `poll_rto()` (the RTO poll — the retransmit rebuilds `msg` from the pending copy byte-identical). The shell idle loop polls it after the RX drain (the idle loop is the time engine — the card-N9 clock pattern; an ACK the drain just processed has cleared the pending state): the retransmit timer fires AUTONOMOUSLY — `net tcp: <syn|data|fin> retransmitted (n/10)` — and the bound prints `retransmission limit reached (10) — connection aborted`. The `tcp=` report line appends `,retx=,abort=` at the end (the N10 gate's substring assertions stay byte-exact); the 30 s connect timeout REMAINS the SYN's outer bound ((10+1)·3 = 33 s > 30 s — the N10 refusal is unchanged). Runner: `--net-tcp-respond <ip>:<port>[:handshake]` — the optional `:handshake` mode answers the SYN-ACK then goes SILENT on data/FIN (the gate's deterministic data black hole); default unchanged. New class-B gate `bash tools/verify-live-net-tcp-rto.sh` **PASS 34/34 (THREE runs)**: Run A (file-handle, ARP-responder-only — a black-hole SYN) — the idle loop retransmits the SYN (the `syn retransmitted (n/10)` lines), `retx≥2,abort=0` in the report (still syn_sent — the 30 s timeout has not expired), and the capture holds the byte-identical SYN frames (same seq/bytes/checksums — a python walk); Run B (file-handle + the full responder) — the SYN-ACK clears the pending state: `retx=0` despite the 7 s wait, no retransmission lines, exactly ONE SYN in the capture (the handshake completes); Run C (file-handle + the `:handshake` responder — a data black hole) — connect → established → send 5 (never ACKed) → the idle loop retransmits the data TEN times → `retransmission limit reached (10) — connection aborted` → the report releases (`tcp=idle,peer=0.0.0.0:0,…,retx=10,abort=1`), `net tcp` reads no connection, and the capture holds the ELEVEN byte-identical data frames. Full class A green (fmt, the unit suite 71/71 incl. the 5 new RTO tests, byte-identical transcript, build/image/inspect, swift build, context, coordination ×2, mmu-debt); the N10 gate re-ran green; the **39-gate `verify-vz` aggregate re-ran green 39/39** (evidence `artifacts/live-net-tcp-rto-*`, `artifacts/live-net-tcp-rto-explore/`, `artifacts/m5-net-tcp-rto-vz-sweep.log`; one pre-existing N10-gate Run-C ARP-learn flake reproduced on clean main — live-NAT ARP latency, recorded under `artifacts/live-net-tcp-arp-flake-baseline/`, not an N11 regression; the aggregate's N10 gate passed) — the default VM stays byte-identical. See [`docs/march-m5.md`](march-m5.md). |
-| Six — graphics: Driving Award + Road Pops | Boot to a **graphical interface**: a virtio-gpu framebuffer (G1), framebuffer text rendering (G2), the boot terminal re-targeted to the screen as **Road Pops** (G3), and the **Driving Award** window manager compositing multiple windows (G5), and a draw/window syscall seam for EL0 programs (G6). Keyboard/pointer input (the original G4) was split into **milestone seven** (USB XHCI + HID) | ✅ **done 2026-08-13 (cards G1–G6 live)** — card G1 (**claim 6053**, branch `agent/buffy/m6-gpu`) **LIVE 2026-08-12 — the FIRST NON-BLANK GUEST FRAMEBUFFER on VZ**: the runner's `--display`/`--screenshot` mode attaches `VZVirtioGraphicsDeviceConfiguration` (1280×720 scanout; OFF by default — the default VM byte-identical); `kernel/src/virtio_gpu.zig` discovers the modern virtio-pci gpu (**DID 0x1050 observed**, class 0x038000, dev 7; config layout common@+0x0000 / ISR@+0x1000 / notify@+0x4000 / devcfg@+0x8000 — claim-0013's decoded shape), negotiates **VER1-only** (device offers RING_PACKED\|RING_EVENT_IDX\|RING_INDIRECT_DESC\|VERSION_1), arms controlq (queue 0) + cursorq (queue 1), re-arms post-exit (**VZ RESETS the gpu at ExitBootServices — `pre-rearm st=00`, like blk/entropy, unlike net's `st=0f`**), and drives the spec 2D path GET_DISPLAY_INFO → CREATE_2D (B8G8R8X8) → ATTACH_BACKING (4K-aligned BSS framebuffer) → SET_SCANOUT → TRANSFER → FLUSH. **Claim-time findings** (hardware-contract + claim doc): virtio-gpu **1.2** wire shapes (the 24-byte `display_one`; the pre-1.2 20-byte shape wedged the device with DEVICE_NEEDS_RESET), the tail descriptor's `next` must be 0 (VZ walks it), command/framebuffer cache cleans are mandatory (MMU-on, not caches-off), and the scanout composites with **alpha** — an X/A byte of 0 renders fully transparent (the final black-screen fix; fills write X=0xff). `screen` / `screen fill <rrggbb>` / `screen peek` monitor commands (registry 34→35). New class-B gate `bash tools/verify-live-screen.sh` **PASS 1/1** — the transport report + guest-side fill bytes + the DECODED capture: 14400/14400 sampled pixels are the fill green (0x00ff00 → ~(117,251,76) through the color-managed pipeline; evidence `artifacts/live-screen-*`, `artifacts/gpu-screen-*s`). Full class A green; the **35-gate `verify-vz` aggregate re-ran green** (`artifacts/m6-gpu-vz-sweep.log`). **Card G2 (claim 3194, branch `agent/buffy/m6-text`) LIVE 2026-08-12 — the machine boots to WORDS on the screen**: `kernel/src/text.zig` (the public-domain 8x8 bitmap font — ASCII 0x20–0x7e, fixed BSS glyph table; putc/puts, cursor, line wrap, a bounded 128-line scrollback ring, `clear`; the pure renderer is host-tested against an injectable mock canvas — 21 tests incl. golden glyphs, wrap/scroll/clear, bounds, cursor, composition) paints the SAME banner + prompt the serial log carries over G1's framebuffer (fg 0x00ff00 on bg 0x101418) and pushes it through G1's transfer/flush unchanged (`text: boot banner presented`); `text` / `text put <string>` / `text clear` monitor commands (registry 35→36). New class-B gate `bash tools/verify-live-text.sh` **PASS 1/1** — the DECODED capture shows real glyphs: the banner region samples fg=0.255 (green family) over bg=0.745 (the dark 0x101418) — the screen is no longer monochrome — with the region below all background (evidence `artifacts/live-text-*`, `artifacts/gpu-screen-*s`); the live-pixel bound is "text visible with the expected color family" (color-managed + retina-scaled; byte-exact glyphs live in the class A mock — the G1 gate's precedent). Full class A green; the **36-gate `verify-vz` aggregate re-ran green 36/36** (`artifacts/m6-text-vz-sweep.log`). **Card G3 (claim 1574, branch `agent/buffy/m6-roadpops`) LIVE 2026-08-12 — ROAD POPS: the boot terminal is on the screen**: `kernel/src/road_pops.zig` is a TEE console — every byte still reaches serial FIRST (the shared seam; the transcript gates keep passing byte-identical) AND G2's text layer paints the same banner + prompt + every reply on the framebuffer, drained ONE full-frame present per output batch by the shell idle loop. The G2 one-shot boot paint is replaced by the tee rendering the shell's OWN banner (its first present emits the G2 `text: boot banner presented` evidence on serial). **Claim-time fix (claim-0015 redux, observed live):** a `road_pops.Target` struct literal with all-constant fields was folded into `.rodata`, whose `&fn` entries hold LINK-TIME absolute addresses — the tee's first write jumped to the link-time `rp_text_put_bytes` and faulted (`esr=0x02000000 elr=0x14260`); the Target is now built in RAM like `ensure_vtable` so every `&fn` resolves PC-relatively. `roadpops` monitor command (registry 36→37: armed/dirty/presents). New class-B gate `bash tools/verify-live-roadpops.sh` **PASS 1/1** — the DECODED capture shows the boot banner (fg=0.255) AND the LIVE SESSION glyphs below it (fg=0.124 — the echoed `echo ROADPOPS`/`uname` commands + replies rendered; the screen is a working terminal, not a one-shot splash), with the serial transcript still carrying the whole session (evidence `artifacts/live-roadpops-*`, `artifacts/gpu-screen-*s`). G1/G2 gates updated honestly for the Road Pops reality: the terminal's drain-presents render over the raw fill, so G1's pixel phase now asserts the non-blank terminal frame (the fill is proven guest-side — `fill=…ff00 transfer=ok flush=ok` + `peek p1=0xff`; its `cmds=` is now session-dynamic), and the `text` report's cur/lines are session-dynamic (its own output feeds the ring). Full class A green; the **37-gate `verify-vz` aggregate re-ran green 37/37** (`artifacts/m6-roadpops-vz-sweep.log`) — the default VM stayed byte-identical. **Card G5 (claim 1543) LIVE 2026-08-13 — Driving Award, the window manager**: `kernel/src/driving_award.zig` (bounded BSS registry, z-order, focus, hit-test, dirty-rect compositor) makes Road Pops window 0 and a 1 Hz clock overlay window 1; the I3 keyboard read source is gated on the terminal's focus. `win`/`win focus <n>`/`win raise <n>`/`win hit <x> <y>` (registry 39→40). New class-B gate `bash tools/verify-live-win.sh` **PASS 1/1** — the serial session (windows=2, hit-test focusing the clock then the terminal) + a KEYBOARD-typed `uname` landing in the focused terminal (`DipshitOS aarch64`), and the DECODED capture shows two overlapping windows with the right z-order (the clock's amber title bar + navy body over the terminal, the terminal's green glyphs beside it). Full class A green; the default VM stayed byte-identical. **Card G6 (claim 0487) LIVE 2026-08-13 — the draw/window syscall seam**: the ADR 0007 amendment slots 12/13/14 (`sys_win_open`/`sys_win_fill`/`sys_win_present`, implemented 12 → 15, then a teardown follow-on adds slot 15 `sys_win_close` + `dui close` → 16) expose the G5 window manager's user-window surface to EL0 — `sys_win_open` opens a bounded kernel-owned window (id 2..3, fixed BSS back-buffer ≤ 256×192 B8G8R8X8), `sys_win_fill` fills rects, `sys_win_present` marks it dirty for the compositor (no uaccess — plain numbers; the kernel owns the buffers; the window persists after the caller exits, the honest bound). WIN.BIN (`user/src/win.zig`, the first graphics user program, loaded by `exec`) drives it end to end: `win: open id=2` → `win: fill ok` (dark-blue background + red/cyan/white blocks) → `win: present ok` → `sys_exit(87)`. New class-B gate `bash tools/verify-live-win-syscall.sh` **PASS 1/1** — the observation phase on the SAME kernel state (`win: windows=3 focused=2` + `win[2]: user user rect=64,64,256,192` z=2; `syscalls` implemented=16 with open=1/fill=4/present=1 + slot 15 `sys_win_close` registered) and the DECODED capture shows the window's own content over the terminal (no terminal foreground showing through — z-order). Full class A green; the default VM stayed byte-identical (sys_win_open returns EINVAL when the manager is unarmed). **Teardown follow-on (this branch):** `dui close <n>` (monitor) + `sys_win_close` (slot 15) release a user window so the id (2..3) can be re-opened instead of leaking until reboot — both call `driving_award.user_close`; open → fill → present → close → re-open is host-tested in `driving_award` + `syscall`, and a SEVENTH image WINCLOSE.BIN proves it LIVE from EL0: the class-B gate `tools/verify-live-win-close.sh` **PASS 1/1** — WINCLOSE.BIN opens/fills/presents/CLOSES (slot 15) and exits 88, twice; `win` shows `windows=2` after the close (no `win[2]:` row) and the re-exec re-opens id 2 (the freed slot reused, never id 3). **Ownership follow-on (this branch):** windows are OWNED by the opening process and AUTO-CLOSE when it exits (the scheduler's `exit_current` calls `driving_award.close_owner(pid)` — the real teardown semantic); `sys_win_fill`/`present`/`close` are owner-restricted (host-tested cross-process refusals); an EIGHTH image WINLOOP.BIN keeps its window alive so the restructured `tools/verify-live-win-syscall.sh` still pixel-proves EL0 rendering (WIN.BIN's window now vanishes on exit — `windows=2`, `sys_win_close calls=0`). **Move/raise follow-on (this branch):** slots 16/17 (`sys_win_move`/`sys_win_raise`, implemented 16 → 18) reposition + restack the caller's window from EL0 (move clamps on-scanout, raise reorders the z-order, both owner-restricted); the monitor's `win move <n> <x> <y>` is the EL1h half; a NINTH image WINMOVE.BIN drives it live and `tools/verify-live-win-move.sh` **PASS 1/1** shows the clamped rect (`win[2]: user user rect=1024,528,256,192`) + the counters (move=2/raise=1) + the decoded capture with the window's colors at the NEW position. **Read-back follow-on (this branch):** slot 18 (`sys_win_get`, implemented 18 → 19) copies the caller's window rect (four u32 LE words) OUT through uaccess — the ONE pointer-taking win slot — so an EL0 program reads its clamped position back after `sys_win_move`; WINMOVE.BIN now prints `winmove: get 1024,528,256,192` (the gate's get=1 + implemented=19 assertions). **Full-state query follow-on (this branch):** slot 19 (`sys_win_query`, implemented 19 → 20) copies the caller's window FULL state (eight u32 LE words: x, y, w, h, z, focused, visible, dirty) OUT through uaccess — so an EL0 program introspects z-order rank + focus + visible/dirty, not just the rect; WINMOVE.BIN now prints `winmove: query 1024,528,256,192 z=2 focused=1 visible=1 dirty=1` (the gate's query=1 + implemented=20 assertions). **Visibility follow-on (this branch):** slot 20 (`sys_win_set_visible`, implemented 20 → 21) HIDES (`visible` 0) or SHOWS (`visible` 1) the caller's window from EL0 (`driving_award.user_set_visible`, owner-restricted; the fixed terminal + clock are refused, a non-0/1 flag is EINVAL) — hiding marks the terminal dirty so the next composite repaints over the hidden window, showing marks the window dirty so it reappears; the back-buffer + z-order rank are untouched. WINMOVE.BIN now hides its window, sleeps 2 ticks, shows it again, and prints `winmove: hide ok` / `winmove: show ok`; `tools/verify-live-win-move.sh` asserts hide=1/show=1/set_visible=2 + implemented=21 and gained a marker-driven capture (`--screenshot-after "winmove: hide ok"`, a new VMRunner flag) proving the PIXEL DISAPPEARS (no red/cyan/white blocks at the clamped spot while hidden) and RETURNS (the LATEST capture shows them back). Milestone six closed — G1–G6 all live. |
-| Seven — input: USB XHCI + HID (keyboard + pointer) | Give Road Pops its FIRST screen-side keystrokes: an XHCI host-controller transport (I1 — MMIO + command/event rings + port status), USB enumeration + HID boot-protocol parsing (I2 — the keyboard + pointing devices behind the XHCI controller), and a bounded event FIFO + keycode decode feeding the line editor (I3). **Premise corrected 2026-08-13 (claim 3868):** VZ's `VZUSBKeyboardConfiguration` + `VZUSBScreenCoordinatePointingDeviceConfiguration` present as an **Apple XHCI USB controller** (`VID=0x106b DID=0x1a06 CLS=0x0c0330`, two MMIO BARs `0x50001000` + `0x50000000`) with the keyboard/pointer as USB HID devices behind it — the hypothesized virtio-input (DID 0x1052) does not exist in the framework. | ✅ **done 2026-08-13 (cards I1–I3 live)** — card **I1 (claim 4272) LIVE 2026-08-13 — the XHCI host-controller transport works on VZ**: `kernel/src/xhci.zig` discovers the Apple XHCI controller pre-exit (bus 0 dev 8, DID 0x1a06 CLS 0x0c0330), maps its MMIO register space post-MMU (BAR0=0x50001000 cap regs / BAR1=0x50000000; CAPLENGTH=0x20, HCIVERSION=0x110, DBOFF=0x940, RTSOFF=0x520, HCSPARAMS1=0x10002010 = 16 slots/32 intrs/16 ports), sets up the command ring + event ring + ERST + primary interrupter, drives a NO-OP command TRB to CC=1 (the ring machinery proven), and reads the port status. **Claim-time observations** (hardware-contract + claim doc): the interrupter register set i lives at RTSOFF+0x20+(0x20×i) (writing ERSTSZ into the MFINDEX region wedged the emulation — the fix); **VZ does NOT reset the controller at ExitBootServices** (pre-reset USBSTS=0x9/USBCMD=0x0 — the XHCI answer to the `st=00` vs `st=0f` question); after HCRST+RS USBSTS=0x0; **ports 9 and 10 report CCS=1** — exactly the two attached HID devices (keyboard + pointer), the I2 handoff. `usb` monitor command (registry 37→38). New class-B gate `bash tools/verify-live-xhci.sh` **PASS 1/1** (14/14 assertions; the gate asserts the guest's own `usb` report — the card's gate-shape change: byte-exact host capture does not apply to a memory-mapped controller). Full class A green; the default VM is byte-identical (no XHCI lines in the default serial log; the `--input` mode is flag-gated OFF). **Card I2 (claim 4116) LIVE 2026-08-13 — USB enumeration + HID works on VZ**: `kernel/src/xhci.zig` now enumerates BOTH devices end to end (port reset → Enable Slot → Address Device → device + config descriptors over the control endpoint → Set Configuration 1 → interrupt-IN endpoint armed) and parses the HID boot-protocol reports — the **keyboard (port 9, slot 1, VID 0x05ac PID 0x8105, boot protocol=1, EP1-IN maxpkt 8, boot=1)** and the **absolute pointer (port 10, slot 2, VID 0x05ac PID 0x8106, protocol=0 — NOT a boot mouse — EP1-IN maxpkt 10, Set_Protocol(boot) honestly REFUSED boot=0)**. A synthesized host keyDown (macOS keyCode 0, dispatched by the runner's new minimal `--input-key`/`--input-key-after` seam — VZ has NO programmatic keyboard API) produced the observed 8-byte report `00 00 04 00 00 00 00 00` (mod 0, HID usage 0x04 = 'a'). `usb` gained `usb devices`/`usb report` (registry 38 stays). New class-B gate `bash tools/verify-live-usb.sh` **PASS 1/1** (11/11 assertions; the gate asserts the guest's own `usb devices` + `usb report` lines — no host-side byte-exact capture applies to a memory-mapped controller). **Card I3 (claim 6050) LIVE 2026-08-13 — keystrokes drive Road Pops on VZ**: `kernel/src/input.zig` is a bounded pure-BSS event FIFO + HID-usage → ASCII keymap + the shell-idle drain (the card-3d pattern, next to net RX): the XHCI interrupt-IN reports decode to ASCII bytes that the Road Pops tee's read path hands to the line editor. **Claim-time observations** (hardware-contract + claim doc): VZ delivers ~one report per Road Pops present cadence, so the runner's scripted key surface types at 2 s per keystroke (faster drops reports); single-TRB arming (re-armed per completion) is the correct shape — a multi-TRB depth experiment wrapped the transfer ring at the 8th report and dropped everything after; the input drain runs BEFORE the Road Pops present so a report is never starved behind a slow full-frame present. The runner's `--input-string`/`--input-string-after` synthesizes one NSEvent per keyDown/keyUp into the VZVirtualMachineView (VZ has NO programmatic keyboard API). `input` monitor command (registry 38→39: armed/fifo/drop count/last keyboard + pointer events). New class-B gate `bash tools/verify-live-input.sh` **PASS 1/1** (8/8 assertions): the keyboard typed `input\n` and the guest's own `input` report showed `events=6` (i,n,p,u,t,Enter) with `dropped=0` and `kb-usage=0x28 kb-byte=0xa` (Enter) — the typed command ran end to end. Full class A green; the default VM is byte-identical (no xhci/input/usb lines in the default serial log; the `--input` mode is flag-gated OFF). Milestone seven closed — I1/I2/I3 are all live,handing Road Pops its first screen-side keystrokes. (G5 — Driving Award
-— is now live on milestone six and consumes this input path; see [`docs/march-m6.md`](march-m6.md).) |
-| Eight — usability: human interface (ADR 0008) | One command grammar + grouped `help` (D1), a real line editor (history, cursor, Ctrl chords, tab completion — D2), one `error:`/`usage:`/`unknown command` shape (D3), a visible-focus window model (D4), an `about`/`welcome`/`motd`/`sysinfo` support surface (D5), all enforced by gates (D6). Normative contract: [`docs/decisions/0008-human-interface-guidelines.md`](decisions/0008-human-interface-guidelines.md) | ✅ **done 2026-08-15 (cards U0–U8 landed, PRs #135–#139)** — U0 ADR 0008 (claim 8938) ✅ 2026-08-14; U1 grouped `help`/catalog (claim 3275) ✅ 2026-08-14; U2 shell editing/history (claim 1809, + the latent XHCI interrupt-ring wrap fix) ✅ 2026-08-14; U3 the one `error:`/`usage:`/`unknown command` contract (claim 1511, + the u4 history-width fix the fuzz found) ✅ 2026-08-14; U5 window HIG — focus ring + title bars (claim 0935; gate `tools/verify-live-win-hig.sh` PASS 8/8 on VZ) ✅ 2026-08-14; U6 first-boot experience — refreshed `about`, `welcome`/`tour`, boot `motd` (claim 8323) ✅ 2026-08-15; U7 `sysinfo` support snapshot (claim 2990) ✅ 2026-08-15; U8 persistent `settings` — `hostname`/`prompt`/`theme`/`scrollback` backed by `SETTINGS.TXT` on the DATA partition, live reboot persistence (claim 2649; gate `tools/verify-live-settings.sh` PASS on VZ) ✅ 2026-08-15. U4 pointer focus + cursor (claim 4993) is the ONE card without a full live proof — the guest side is DONE and host-tested (click = focus + raise via `pointer_tick`, the magenta cursor, Alt+Tab decode) but five synthesized pointer delivery routes each produced zero guest pointer reports; the follow-on gates close that: **(claim 9015) the real-mouse path is a class-C gate** `bash tools/verify-pointer-manual.sh` (a human at the mouse; gate landed ✅ 2026-08-15 and smoke-proven — the PASS run is a human action by construction), and **(claim 3692) the CG route is a self-gating class-B gate** `bash tools/verify-live-pointer-cg.sh` (runner trust detection + honest `PTR-TRUST: untrusted` reporting + the one-time Accessibility grant path; gate landed ✅ 2026-08-15 — the trusted PASS awaits the TCC grant). Per-card tracker: [`docs/march-m8.md`](march-m8.md). **Handoff (2026-08-16, claim 4769, PR #174):** a route-by-route probe pinned the root cause — VZ only translates input for its KEY window, and macOS 14+ refuses programmatic activation for a background CLI process (even `.regular` policy / `finishLaunching` / a signed `.app` bundle), so NO synthesized route delivers while the machine is busy. Retesting with the machine IDLE refuted the idle hypothesis (runner stayed frontmost, `front=VMRunner` every post, cursor warped — still `key=false`, `ptr-reports=0`). Notably the KEYBOARD seam also now yields `events=0` in the guest ring (worked at 17:59 the same day; console session re-established 19:33) — an open thread for the next session. Class-C real-mouse gate (claim 9015) remains the working route. |
-| Nine — interactive application events (ADR 0009) | Route keyboard, pointer, and window lifecycle events directly to focused EL0 applications via per-process event queues; expose non-blocking `sys_poll_event` (slot 21) and blocking `sys_wait_event` (slot 22) syscalls; verified via `KEYTEST.BIN` interactive event loop live on VZ | ✅ **done 2026-08-15 (cards E0–E6 live)** — ADR 0009 contract (claim 7463), kernel per-process event FIFO `kernel/src/events.zig` (claim 7670), keyboard event routing (claim 7206), pointer/click routing (claim 9228), window lifecycle events `WIN_FOCUS`/`WIN_BLUR`/`WIN_CLOSE` (claim 0293), event syscall seam slots 21/22 in `kernel/src/syscall.zig` + `kernel/src/scheduler.zig` (claim 1016), and capstone interactive EL0 application `KEYTEST.BIN` (`user/src/keytest.zig`, claim 9328) with class-B live gate `tools/verify-live-events.sh` **PASS 1/1 on VZ**. |
-| Ten — userland filesystem & storage ABI (ADR 0010) | Userland filesystem & storage ABI: per-process file handle table (F1), path canonicalization and volume routing (`/esp/...`, `/data/...`, F2), file syscall seam slots 23–27 (`sys_file_open`, `sys_file_read`, `sys_file_write`, `sys_file_close`, `sys_dir_list`, F3), userland storage utilities (`SAVETEXT.BIN`, `TYPE.BIN`, `DIR.BIN`, F4); verified persistent across reboot on VZ | ✅ **done 2026-08-15 (cards F0–F4 live)** — ADR 0010 normative storage contract (claim 0662), per-process file table `kernel/src/file_table.zig` with 8 static handles and process lifecycle reset (claim 9948), path canonicalization & partition routing (claim 8313), file syscall seam slots 23–27 in `kernel/src/syscall.zig` (claim 3570), and userland storage applications `SAVETEXT.BIN`, `TYPE.BIN`, `DIR.BIN` with class-B live gate `tools/verify-live-user-fs.sh` **PASS 1/1 on VZ** (claim 0510). |
-| Eleven — desktop platform & GUI apps (ADR 0011) | A recognizable graphical desktop for userland applications: normative ADR 0011 UI contract (A0), the zero-heap micro-widget toolkit `user/src/lib/ui.zig` + `font8x8.zig` (A1), and four consumer GUI apps — `CALC.BIN` calculator (A2), `NOTEPAD.BIN` editor with persistent `/data/notes.txt` load/save (A3), `TOP.BIN` graphical process monitor with click-to-kill (A4), and the `DESKTOP.BIN` launcher capstone (A5) | ✅ **done 2026-08-15 (cards A0–A5 live), shipped 2026-08-16** — ADR 0011 desktop & GUI contract (claim 0664), micro-widget toolkit `user/src/lib/ui.zig` + `user/src/lib/font8x8.zig` with 0 heap allocation / pure static BSS (claim 8155), graphical calculator `CALC.BIN` (claim 8401), graphical text editor `NOTEPAD.BIN` (claim 3234), graphical process monitor `TOP.BIN` (claim 0680), and desktop launcher `DESKTOP.BIN` (claim 2427) with class-B capstone live gate `tools/verify-live-desktop.sh` **PASS 1/1 on VZ** — CALC.BIN OK, NOTEPAD.BIN OK, TOP.BIN OK, DESKTOP.BIN OK. **Post-ship polish (all merged to main):** CALC.BIN checked arithmetic + repeat-last-op + memory keys (claim 7869, PR #155), the EL0 process-control seam — `sys_exec` (ADR 0007 slot 28, claim 6359, PR #156, DESKTOP.BIN actually launches apps) + the `sys_wait_event` block/wake x0-clobber fix it uncovered, the toolkit `ui.exec_program`/`ui.kill_process` wrappers, `sys_kill` slot 29 (claim 7604, PR #157 — TOP.BIN's Kill button is real, live gate `tools/verify-live-sys-kill.sh` PASS on VZ), and NOTEPAD's scrollable viewport (claim 1771, PR #158). See [`docs/march-m11.md`](march-m11.md). |
-| Twelve — userland network applications (ADR 0012) | Connect userland applications to the network with TCP syscall ABI slots 30–33 (`sys_tcp_connect`, `sys_tcp_send`, `sys_tcp_recv`, `sys_tcp_close`), RFC 1035 DNS resolution, and standalone network applications (`TCP.BIN`, `FETCH.BIN`, `CHAT.BIN`) (Issues #148, #149, #150) | ✅ **done 2026-08-16 (cards N0–N3 live)** — ADR 0012 contract accepted; TCP syscall seam slots 30–33 in `kernel/src/syscall.zig` + `user/src/tcp_client.zig` (claim 7483, gate `tools/verify-live-net-tcp-syscall.sh` PASS); bounded RFC 1035 DNS client `kernel/src/dns.zig` (claim 7566, gate `tools/verify-live-net-dns.sh` PASS); capstone HTTP/1.0 client `FETCH.BIN` (`user/src/fetch.zig`) and graphical chat app `CHAT.BIN` (`user/src/chat.zig`) (claim 5416, gate `tools/verify-live-fetch.sh` PASS on VZ). Tracked in [`docs/march-m12.md`](march-m12.md). |
-| Thirteen — files & applications (ADR 0007 slots 34–37) | Give the desktop a file story: filesystem semantics depth `sys_file_delete`/`sys_file_rename`/`sys_file_truncate`/`sys_file_free` (B1), an application identity manifest so `DESKTOP.BIN` stops hardcoding its app list (B2), the `FILE.BIN` graphical file browser capstone (B3), and manifest-driven desktop composition (B4). Housekeeping: ✅ `win` → `dui` rename done (claim 2223); M8 U4's CG pointer gate (#151) closed as a documented limitation 2026-08-18 | ✅ **B2 live 2026-08-16 (claim 8877, PR #165)** — the `APPS.TXT` application identity manifest: `image/apps.txt` embedded by the image build; `DESKTOP.BIN` reads it via the M10 file seam (`sys_file_open`/`file_read`/`file_close`) and falls back to the hardcoded catalog only when missing (honest degradation). Live gate `tools/verify-live-desktop.sh` PASS on VZ — `desktop: manifest apps=8`, `DESKTOP.MANIFEST: OK`, `DESKTOP.LAUNCH: OK`. The gate's long tail exposed and fixed two PRE-EXISTING kernel bugs: (1) the EL0 `sys_file_read` path (~5 KiB staging) overflowed the 8 KiB per-process kernel stack DOWNWARD into the user stack (exec's text/stack/kstack heap allocations are adjacent) — `scheduler.task_stack_size` 8→16 KiB, exec page accounting updated (9 pages/exec); (2) the vector stubs saved only GPRs, so the kernel's NEON clobbered EL0 FP/SIMD state live across `svc` (a user `ldr q0` hoisted across the syscall came back corrupted) — every stub now branches to a shared `exc_fp_common` that pushes q0–q31 (512 B) below the GPR frame and pops them on restore, `build_initial_frame` reserves the same zeroed block, and the C-visible `VectorFrame` is byte-identical; the `[EXC]` report gained sp/x1/x2/x29 diagnostics. Also fixed 12 stale live-gate assertions (syscall `implemented=34`, `error:` prefixes, 9-page accounting) and the U4/U5 focus ring painting over the full-screen terminal (issue #164 — `verify-live-glyphs` back to 0 forward unknowns; the full 43-gate VZ sweep re-ran green post-merge). ✅ **B3 live 2026-08-16 (claim 4742)** — `FILE.BIN`, the graphical DATA-partition file browser (`user/src/file_browser.zig`, the twenty-first ESP program): a scrollable `ListView` (ui.zig toolkit) browses `/data/` via `sys_dir_list` (slot 27), a details pane shows size/type, and Enter/Open loads a `.TXT` entry read-only through `sys_file_open`/`read`/`close` (slots 23/24/26); zero heap, stack-allocated `AppState` (W^X-safe). Live gate `tools/verify-live-file-browser.sh` PASS 1/1 on VZ — `file: ready`, `file: listing 2 entries`, `file: open README.TXT`, `file: view README.TXT`, and `sys_dir_list`/`sys_file_open`/`sys_file_read` `calls=1`. ✅ **B1 live 2026-08-16 (claim 5801)** — the mutating filesystem seam (ADR 0007 slots 34–37): `sys_file_delete` / `sys_file_rename` / `sys_file_truncate` / `sys_file_free` over the M10 read-only ABI. `fat.zig` gains `delete_file`/`rename_file`/`truncate_file`/`free_space`, `file_table.zig` wraps them, `syscall.zig` registers slots 34–37 (`implemented_count` 34→38), and `ui.zig` + `FILE.BIN` (Delete/Rename buttons, `d`/`r` keys) expose them. `FSTEST.BIN` (twenty-second ESP program) drives the seam live; `tools/verify-live-fs-mutation.sh` PASS 1/1 on VZ — create+write → truncate → read-back `hello` → rename → free → delete → prove-gone, all four slots `calls=1`. ✅ **B4 live 2026-08-16 (claim 4046)** — desktop composition: `FILE.BIN` joins the desktop's fallback catalog (ninth entry) and `manifest_max_apps` 8→16 so the nine-entry `APPS.TXT` parses untruncated; the reworked `tools/verify-live-file-browser.sh` boots `DESKTOP.BIN` only, walks the manifest menu, and launches `FILE.BIN` through the M11 `sys_exec` seam (slot 28) before opening README.TXT — syscalls report shows `sys_exec` calls=1, `dir_list` calls=1, `file_open`/`file_read` calls=2; `verify-live-desktop.sh` now pins `manifest apps=9`. Per-card tracker: [`docs/march-m13.md`](march-m13.md). |
-| Fourteen — shared user services | Give the desktop shared services the text apps now make obvious: a clipboard (S1, wishlist 11), application timers so apps stop spinning sleep loops (S2, wishlist 12), a composition capstone proving them together (S3), and the security/isolation hardening that grows alongside userland power (S4, wishlist 19). Housekeeping: M8 U4's pointer live proof is a known class-C-only limitation (issue #151, claim 4769) | ✅ **M14 complete 2026-08-18 — S1/S2/S3/S4 live (claims 0169 + 7323 + 3289 + 4482)** — S1 the bounded shared kernel clipboard: `sys_clipboard_set`/`sys_clipboard_get` (ADR 0007 slots 38–39), ONE machine-global fixed 512-byte BSS buffer in `kernel/src/clipboard.zig` (zero heap), NOTEPAD copy/cut/paste (Ctrl+C/X/V) and the terminal `clip` command; `tools/verify-live-clipboard.sh` **PASS 1/1 on VZ**. S2 the bounded per-process application timer facility: `sys_timer_set`/`sys_timer_cancel` (ADR 0007 slots 40–41, `implemented_count` 40→42), ONE countdown timer per process in `kernel/src/app_timers.zig` (fixed BSS, zero heap) driven from the scheduler tick, posting `TIMER` events (kind 9) on the ADR 0009 queue — an app blocks in `sys_wait_event` instead of spinning; TIMER.BIN proves arm → block → fire → cancel on VZ; `tools/verify-live-timers.sh` **PASS 1/1 on VZ** (`implemented=42`, `sys_timer_set calls=3` / `sys_timer_cancel calls=2`). S3 the composition capstone — the same real app, NOTEPAD, uses both: the gate pre-loads the clipboard with `clip`, execs `NOTEPAD.BIN selfdemo` (argv mode, claim 4636's entry contract), and observes paste (`sys_clipboard_get`), copy (`sys_clipboard_set`), and a timer-driven cursor blink (6 TIMER events, arm + re-arm per fire, `sys_timer_set calls=7`), then NOTEPAD exits 43 through the real lifecycle; `tools/verify-live-m14-composition.sh` **PASS 1/1 on VZ** with `implemented=42` and slots 38/39/40 all counted in the same boot. Input-seam note (issue #179): the synthesized keyboard route reports `events=0` on this machine (reproduced on a fresh boot), so S3's gate drives the composition via NOTEPAD's argv selfdemo instead of scripted Ctrl+C/V chords — the chord path stays host-tested and regains live coverage when the seam recovers. S4 the security/isolation hardening (claim 4482): a process-ownership audit across every EL0-named resource (windows already per-process via `win_owned_by_caller`; file handles, event queues, app timers per-process by construction; clipboard/UDP/mailbox/process-control documented machine-globals), a uaccess pointer/length validation sweep, and a bounded-pool over-allocation refusal audit — the ONE gap found and closed: the TCP connection's `owner_pid` was set on connect but never enforced, so a non-owner is now refused EACCES on send/recv/close/connect (class-A test 341). The hostile-consumer proof runs TWO concurrent processes — VICTIM.BIN opens + owns user window 2 and yield-loops forever; HARDEN.BIN (a separate process) attacks fill/present/close/move/query and is refused EINVAL every time, reports `hardening: refused` + `survived`, exits status 44, and the victim never exits; `tools/verify-live-hardening.sh` **PASS 1/1 on VZ** (evidence `artifacts/live-hardening-*`). **Milestone fourteen COMPLETE 2026-08-18 — all four cards live** (S1 claim 0169, S2 claim 7323, S3 claim 3289, S4 claim 4482); the full class-A suite (45 modules, 463 tests incl. the new TCP-ownership test) + the class-B M14 gates are green; the #151 pointer class-C limitation was closed 2026-08-18 as a documented limitation — the synthesized route is unblockable in code (VZ has no programmatic pointer API, macOS 14+ refuses programmatic focus-stealing, and Accessibility trust does not help — claims 4769/5776), so the class-C real-mouse gate `verify-pointer-manual.sh` (claim 9015) is the working proof; the four M14 issues #175–#178 are closed with their claim + gate evidence; the #179 keyboard-seam `events=0` regression was closed 2026-08-18 as the claim-4769 activation-wall flake (the seam passed 3/5 live `verify-live-input.sh` runs that day with the stock binary, and the runner's keyboard paths now self-diagnose the window key state via claim 8844). No open issues remain. Per-card tracker: [`docs/march-m14.md`](march-m14.md). |
-| Fifteen — audio | Attach a virtio-snd device (flag-gated `--sound`) and drive sound end to end: virtio-snd transport (A1), a bounded PCM playback buffer + `beep` (A2), an EL0 audio seam (ADR 0007 slots 42+) + a melody app `JINGLE.BIN` (A3), and a hearable composition capstone (A4) | ✅ **M15 complete 2026-08-18 — A1/A2/A3/A4 live (claims 6140 + 5877 + 7636 + 3206)** — A1 `--sound` host mode + the virtio-snd transport (`verify-live-sound-device.sh` PASS 1/1: DID 0x1059, DRIVER_OK, NOT reset by VZ; finding: VZ leaves the le32 config counts 0/0/0 — topology is enumerated by asking). A2 the bounded PCM playback path (`verify-live-sound-playback.sh` PASS 1/1): PCM_INFO enumerates S16\|S32\|FLOAT @ 48000\|96000 ch 1..2; FLOAT/48000/stereo negotiated; 115200 B in 4096-B periods **all drained**; protocol pinned live — VZ speaks the virtio-1.3 control codes (OK=0x8000) with **[status][entries]** replies, and the used ring needs a dcache invalidate per poll. A3 the EL0 audio seam — ADR 0007 slots 42/43 (`sys_audio_info`/`sys_audio_play`, `implemented_count` 42→44): JINGLE.BIN plays all 14 notes of Twinkle Twinkle from EL0 (exact accounting, 382 play calls, exit 0; `verify-live-sound-app.sh` PASS 1/1). A4 the composition capstone (`verify-live-m15-composition.sh` PASS 1/1): the kernel's **boot chime** (a 660+880 Hz ding-dong through the A2 beep path the moment the transport is live — flag-gated, default VM byte-identical) and **CHIME.BIN** (27th ESP program) firing an 880 Hz blip on every M14 app-timer TIMER event — the app arms slot 40, BLOCKS in `sys_wait_event`, plays 38400 B per blip via slots 42/43 (3 ticks, 10 chunks each, `sys_timer_set calls=3`, `sys_audio_play calls=30`), exit 0 — all four layers (device + playback + EL0 + the hearable composition) proven in ONE session, and A1/A2/A3 re-ran green with the chime in the boot path. Theme = wishlist 18. M16 candidates stay on the map: resource-model cleanup (13), richer VM (14), executable-format (15), deeper FS semantics (17). **Follow-up (claim 9297, 2026-08-18): the bounded stream-state control** — `sound volume <0-100>` / `sound mute <on|off>` monitor subcommands + ADR 0007 slots 44/45 (`sys_audio_volume`/`sys_audio_mute`, `implemented_count` 44→46), gain applied in place at the TX submit choke point (mute zeroes samples but the stream still drains — accounting exact). `verify-live-sound-control.sh` PASS 1/1 on VZ: muted 76800-B beep drained exactly with pcm_status S_OK, CHIME.BIN's `vol=50` landed in kernel state via the seam; A1–A4 re-ran green. |
-| Sixteen — the kernel grows up (internals consolidation) | Give the kernel the address-space + resource depth the M11–M15 apps now force: a multi-segment user image with real writable globals and a lifted 16 KiB load bound (C1, wishlist 15), guard pages + per-segment permissions (C2, wishlist 14), the fixed pools measured and grown only where the demo apps actually hurt (C3, wishlist 13), and a composition capstone (C4). Wishlist 17 (deeper FS) stays deferred — no new pressure | ✅ **done 2026-08-19 (claims 3805 + 8403 + 0339 + 2714)** — the march deck is [`docs/march-m16.md`](march-m16.md); issues **#190–#193** filed (one per card, the M14 way). Pressure evidence from the M15 era: JINGLE.BIN's 33 KB draft would not load (16 KiB exec bound) and its global `chunk_buf` faulted on write (the W^X text page — no writable data segment), and the scheduler pool refuses a fifth concurrent user program (`pool_full`). **C1 (wishlist 15) — the image format grows up:** `elf2bin.py --segments` emits a DSK3 segmented image (48-byte header: `text_size`/`data_file_size`/`data_mem_size`, [text+rodata][data], BSS zero-fill implicit); `kernel/src/exec.zig` adds a second loader path (`parse_dsk3`, data pages owned + freed at reap), `mmu.build_user_root_full` maps a third EL0-RW+UXN data aperture, and the load bound lifts 16 KiB → 256 KiB. `GLOBALS.BIN` (28th ESP program — 28 KiB text, 8 B `.data`, 4 KiB `.bss`) is the proof: `tools/verify-live-m16-image.sh` **PASS 1/1 on VZ** (`size=0x7000` past the old bound, `data=0x1010 datapages=2` exact, `globals: data bss ok`, exit 42) — the JINGLE writable-global finding reversed. The flat DSK1 path + `user/linker.ld` stay byte-unchanged (the segmented program uses the new `user/linker-segmented.ld`). **C2 (wishlist 14) — address-space depth:** an EL0 synchronous fault (not an SVC, not a recoverable uaccess fault) now flows through a registered fault dispatcher → `scheduler.fault_current` → `exit_current(139)` — a hostile program touching a guard page is REAPED (status 139) instead of parking the machine, with a `fault: <name> far=0x… ec=…` FIFO line; guard pages are the user root mapping ONLY text/data/stack (the page below the stack and above the data region are unmapped). `GUARD.BIN` (29th ESP program) steps into the guard below its stack; `tools/verify-live-m16-guards.sh` **PASS 1/1 on VZ** (`fault: GUARD.BIN far=0x… ec=0x24` → `tasks user-exec exited status=139` / `procs GUARD.BIN exited status=139`, COUNTER.BIN still `state=running` beside it). **C3 (wishlist 13) — the resource model, measured:** the scheduler executor pool grew 7 → 11 (8 user slots) because the demo apps exhausted the old four (`pool_full` at the 5th exec); `process.max_processes` 8 → 16 for headroom; a `resources` monitor command audits every pool. `tools/verify-live-m16-resources.sh` **PASS 1/1 on VZ** (before `tasks=3/11 tables=62/512` → 8 concurrent programs → after `tasks=11/11 procs=9/16 tables=238/512`, ninth exec `pool_full`, windows/events/mbox/fds/timers/tcp stay bounded); the re-derived scale/args/ipc/long-lived gates all PASS 1/1. **C4 (the composition capstone) — the "kernel grew up" proof:** one boot runs `GLOBALS.BIN` (C1) then `GUARD.BIN` (C2) beside a persistent `COUNTER.BIN`, then seven `USER.BIN`s fill the grown pool; `tools/verify-live-m16-composition.sh` **PASS 1/1 on VZ** (`globals: data bss ok` exit 42 → `fault: GUARD.BIN far=0x… ec=0x24` reaped 139 → eight concurrent programs, `resources: tasks=11/11 procs=11/16 tables=282/512`). The composition exposed that the page-table carve-out is a total-roots budget (tables are never reclaimed), so the big app + hostile app + eight concurrent = 282 pages exceeded the old 256 — C4 grows `mmu.table_page_count` 256 → 512. The default VM (no flags) stays byte-identical at every card, and the full `verify-vz` sweep re-runs as each card lands. |
+| Two — kernel proper | ExitBootServices, captured EFI map, identity TTBR0_EL1 tables, MMIO serial probe + polled TX console (ADR 0004) | ✅ **gates passed 2026-08-08** (claim 1517) |
+| **1.5 — Interactive Kernel Monitor ("Dipshit Monitor")** | Live interactive monitor on serial console (TX+RX live) | ✅ **done 2026-08-09** (claim 3475/6420, tag `m1.5-interactive-monitor`, 7/7 gates) |
+| Three — allocator, interrupts, tasks | Physical allocator, GIC + timer, tasks, EL0/SVC, syscall ABI (0–4), uaccess, per-task TTBR0, lifecycle, ESP exec, sleep | ✅ done 2026-08-10 (claim 0707, tag `m3-userspace`) |
+| Four — real randomness | Virtio entropy (DID 0x1044) + ChaCha20 CSPRNG, ASLR, general DATA partition, process abstraction (concurrent/long-lived follows) | ✅ done 2026-08-11 (claim 2839, tag `m4-processes`) |
+| Five — networking | Virtio-net TX/RX, ARP, IPv4, UDP, NAT, DHCP, TCP + retransmission (N1–N11) | ✅ done 2026-08-12 (claim 5357) |
+| Six — graphics: Driving Award + Road Pops | Virtio-gpu (DID 0x1050, 1280×720 B8G8R8X8), text, Road Pops tee, Driving Award WM, draw syscalls 12–15 | ✅ done 2026-08-13 (claim 0487, G1–G6) |
+| Seven — input: USB XHCI + HID | Apple XHCI (VID 0x106b/DID 0x1a06), HID keyboard+pointer, event FIFO → line editor | ✅ done 2026-08-13 (claim 6050, I1–I3) |
+| Eight — usability (ADR 0008) | Grouped help, line-editor/history, error contract, window HIG, motd/about/sysinfo/settings | ✅ done 2026-08-15 (claim 2649, U0–U8) |
+| Nine — app events (ADR 0009) | Per-process event queues, sys_poll_event (21)/sys_wait_event (22), KEYTEST.BIN | ✅ done 2026-08-15 (claim 9328, E0–E6) |
+| Ten — userland FS (ADR 0010) | Per-process file table (8 handles), path canon, slots 23–27, SAVETEXT/TYPE/DIR.BIN | ✅ done 2026-08-15 (claim 0510, F0–F4) |
+| Eleven — desktop (ADR 0011) | Toolkit ui.zig/font8x8, CALC/NOTEPAD/TOP/DESKTOP.BIN (sys_exec 28, sys_kill 29) | ✅ done 2026-08-16 (claim 2427, A0–A5) |
+| Twelve — net apps (ADR 0012) | TCP slots 30–33, DNS, FETCH/CHAT.BIN | ✅ done 2026-08-16 (claim 5416, N0–N3) |
+| Thirteen — files & apps (slots 34–37) | Mutating FS (delete/rename/truncate), APPS.TXT manifest, FILE.BIN, manifest desktop | ✅ done 2026-08-16 (claims 5801/8877/4742/4046, B1–B4) |
+| Fourteen — shared services | Clipboard (38–39), app timers (40–41), NOTEPAD composition, hardening (S4) | ✅ done 2026-08-18 (claims 0169/7323/3289/4482, S1–S4) |
+| Fifteen — audio | Virtio-snd (DID 0x1059), PCM playback, sys_audio 42–45, JINGLE/CHIME.BIN, volume/mute | ✅ done 2026-08-18 (claim 3206, A1–A4) |
+| Sixteen — kernel grows up | DSK3 segmented image + data/BSS, guard pages (139), grown pools (tasks 11/processes 16/tables 512), composition | ✅ done 2026-08-19 (claims 3805/8403/0339/2714, C1–C4) |
+
+> **Narratives for M3–M16** are archived per milestone under `docs/archive/status-m{N}-detail.md` (issue #262).
+> Each archive preserves the verbatim pre-compression table row plus march/claim pointers; the live table above is the one-line summary.
+> Per-milestone detail trackers: `docs/march-m*.md`, `docs/roadmap.md`.
 
 Resolved loose end: the milestone-one `KERNEL.TXT` corruption is **fixed**
 (ADR 0002 — the loader now places image content at `base+0`; the write is
@@ -56,62 +59,10 @@ byte-perfect and gated by `zig build run`).
 
 ## Gate status
 
-Every gate below is backed by evidence re-verified
-2026-08-07 (full suite re-run on merged `main` 4702548,
-`artifacts/status-reverify-20260807.txt`) and re-run again at HEAD
-`5160eef` on 2026-08-08 (claim 8592 preflight, `artifacts/status-preflight-*.txt`),
-and re-run at the newest HEAD `076ddf1` on 2026-08-08 (claim 8073,
-`artifacts/gates-reverify-20260808-076ddf1.txt` — all class A gates plus
-the primary VZ serial gate), **and re-run in full at the
-`m1.5-interactive-monitor` tag (`74a51f3`) on 2026-08-09 (claim 7873,
-`artifacts/gates-reverify-20260809-m15-tag.txt` — the complete class A
-set plus the complete class B set: serial takeover, bad-handoff, marker,
-nvram-console, host-console, live-transcript, live-fs, live-timer,
-live-reboot, live-exceptions); all green** — **and re-run again at the
-newest HEAD `706712c` on 2026-08-09 (claim 2233,
-`artifacts/gates-reverify-20260809-706712c.txt` — class A 11/11, class B
-10/10: serial takeover, bad-handoff `kernel_rc=0x2`, marker ladder to
-`M2_TXOK!`, nvram-console, host-console, live-transcript RX 1/1, live-fs
-persistence pair 1/1, live-timer 1/1, live-reboot 2/2, live-exceptions
-1/1; all green)** — **and re-run again at the newest HEAD `a3644cf`
-(PR #53, claim 6420's FAT32 storage driver merged) on 2026-08-09
-(claim 0658, `artifacts/gates-reverify-20260809-a3644cf.txt` +
-`artifacts/classB-chunk{1,2,3}-a3644cf.log` — class A 11/11, class B
-10/10: serial takeover, bad-handoff `kernel_rc=0x2`, marker ladder to
-`M2_TXOK!`, nvram-console 82 chunks/5027 B, host-console, live-transcript
-RX 1/1, live-fs persistence pair 1/1, live-timer 1/1, live-reboot 2/2,
-live-exceptions 1/1; all green)**; files under `artifacts/`. **The
-milestone-three uaccess card (claim 6120) re-ran its affected gates at
-`f4b3143` + uaccess on 2026-08-10: the new live-uaccess gate 1/1
-(`artifacts/m3-uaccess-live.txt`), live-svc 1/1 with the payload's three
-writes (`write=3`), live-exceptions 1/1, live-userspace 1/1, live-timer
-1/1, live-tasks 1/1, live-transcript 1/1, and `zig build run` (serial
-takeover) all green; class A re-run green in full** **— and re-run in
-full at the milestone-three candidate HEAD `0c119d8` on 2026-08-10
-(claim 0707, `artifacts/gates-reverify-20260810-m3-closeout.txt` +
-`artifacts/classB-chunk{1,2,3,4}-m3-closeout.log` — class A 11/11,
-class B 17/17: serial takeover, bad-handoff, marker, nvram-console,
-host-console, live-transcript, live-fs, live-timer, live-tasks,
-live-userspace, live-svc, live-uaccess, live-addrspaces, live-lifecycle,
-live-exec, live-sleep, live-reboot; all green)**. The milestone-three
-close-out archived the completed M1.5/M3 prompt + design docs into
-`docs/archive/` (see the [Related docs](#related-docs) section).
-**Milestone-four close-out (claim 2839, 2026-08-11): the complete class A
-set (fmt, unit tests, test-console, build, image, inspect, swift runner
-build, context, coordination, coordination tooling, mmu-debt — 11/11) and
-the complete class B VZ set (the full 28-gate `verify-vz` aggregate: serial
-takeover, bad-handoff, marker, nvram-console, host-console,
-live-transcript, live-fs, live-gfs, live-timer, live-tasks,
-live-userspace, live-svc, live-uaccess, live-addrspaces, live-lifecycle,
-live-exec, live-args, live-procs, live-concurrent, live-long-lived,
-live-kill, live-sleep, live-entropy, live-reboot, live-ipc,
-live-procs-syscall, live-scale, live-wait — 28/28) re-ran green at the
-milestone-four candidate HEAD `9d7e4d5` on a clean tree; the milestone is
-tagged **`m4-processes`**. Evidence: `artifacts/gates-reverify-20260811-m4-closeout.txt`
-+ `artifacts/m4-closeout-classA-1.log` + the per-gate `vz-live-*` logs. The
-M4 prompt docs were archived to `docs/archive/`; the next plan is
-milestone five, card N1 (virtio-net transport + TX,
-`docs/m5-net-tx-prompt.md`).
+> All class-A (portable) and class-B (VZ hardware) gates are green at HEAD.
+> Full re-verification history (57 lines of per-candidate close-out notes for M3–M16) is archived in git
+> (`docs/status.md` @ `aa4f111`, `artifacts/gates-reverify-*.txt`). The live gate table below is the contract;
+> `docs/gate-inventory.md` defines classes (A portable, B VZ, C interactive, D diagnostic).
 
 | Gate | Command | Result | Last evidence |
 |------|---------|--------|---------------|
@@ -148,624 +99,94 @@ milestone five, card N1 (virtio-net transport + TX,
 | **Marker fallback gate** (gate work item 3) | `bash tools/verify-marker.sh` | ✅ **pass** | `artifacts/m2-marker-gate.txt` (2026-08-07, re-verified `artifacts/m2-marker-reverify-20260807.txt`): NVRAM ladder `M2_ENTRY → … → M2_MAPD! → M2_MMUP! → M2_SERIA → M2_READY` — identity-map switch completes and probe/transport are reached (see [gate work item 3](#immediate-gate-work-prerequisites-for-m15), claims 0009/0010/0013) |
 | **MMU-takeover root cause & fix** (claim 0010) | `bash tools/verify-marker.sh` | ✅ **fixed 2026-08-07** | ladder now advances `M2_MAPD! → M2_MMUP! → M2_SERIA` — the identity-map switch **completes** on VZ for the first time (`artifacts/m2-mmu-takeover-gate.txt`; see claim 0010) |
 | **VZ serial console discovery** (claim 0013) | pre-exit probe + NVRAM dump | ✅ **discovered 2026-08-07** | console = modern virtio-pci (bus 0 D5 `VID=0x1af4 DID=0x1043 class=0x078000`), ECAM `0x40000000`, BAR0 (64-bit) @ `0x100010000`, transport decoded + armed pre-exit (`SEL=VIRTIO`, ladder `M2_READY`); declared MMIO windows decoded as Apple efivars store + internal debug UART. Gate blocked at the time (post-MMU transport access hung, claims 0018/0020) — **resolved by claim 1517** (T0SZ=16 + TLBI at the switch) |
-| **NVRAM console channel** (claim 0015) | `bash tools/verify-nvram-console.sh` | ✅ **PASS 2026-08-07** | **first post-exit console bytes from a real VZ run**: 69–70 chunks reconstructed from `efi-vars.bin` — takeover banner, full memory map, probe record, shell banner, and real `version`/`mem`/`echo`/`help` command output (`artifacts/nvram-console-gate.txt`). Found + fixed a latent kernel bug on the way (ADR 0005: const function-pointer tables are not relocated by the flat loader — the first vtable dispatch on real hardware faulted; tables now built at runtime in BSS). See [Current blocker](#current-blocker-canonical--one-description-one-ordering) |
+| **NVRAM console channel** (claim 0015) | `bash tools/verify-nvram-console.sh` | ✅ **PASS 2026-08-07** | **first post-exit console bytes from a real VZ run**: 69–70 chunks reconstructed from `efi-vars.bin` — takeover banner, full memory map, probe record, shell banner, and real `version`/`mem`/`echo`/`help` command output (`artifacts/nvram-console-gate.txt`). Found + fixed a latent kernel bug on the way (ADR 0005: const function-pointer tables are not relocated by the flat loader — the first vtable dispatch on real hardware faulted; tables now built at runtime in BSS). (historical blocker, see git history `aa4f111` and `docs/archive/status-m3-detail.md`) |
 
-### Current blocker (canonical — one description, one ordering)
-
-> **RESOLVED 2026-08-08 (claims 1517 + 6684 + 0527).** The post-MMU virtio TX
-> blocker is fixed in production (claim 1517: T0SZ=16 + TLBI at the switch
-> — the start-level mismatch from claims 6460/7896) **and the RX path is
-> live** (claim 6684: the polled virtio receive queue delivers host
-> keystrokes end to end — `bash tools/verify-live-transcript.sh` asserts
-> the real `dipshit>` transcript in `vm-serial.log`, 3/3 boots) **and the
-> live reboot/shutdown observation is done** (claim 0527: `reboot`
-> resets the machine, `shutdown` powers it off — 4/4 boots via
-> `bash tools/verify-live-reboot.sh`) **and the filesystem gate is closed**
-> (claim 6420: `ls`/`cat`/`write` persist through reboot on the real disk
-> via the FAT32 storage driver, `verify-live-fs.sh`, 1/1 pair).
-> **Every M1.5 hard gate now passes** (all 7 closed; the last — the
-> deferred filesystem one — closed 2026-08-09 by claim 3475 and upgraded
-> to a real FAT driver by claim 6420). The post-M1.5 allocator and timer
-> interrupt cards are now complete (claims 3972/5162/9187); tasks are next.
-
-**Historical blocker (superseded by claim 1517):** reliable post-MMU access to the already-discovered virtio-pci console transport (class B) was required before live RX and a real interactive `dipshit>` session. The console is a modern virtio-pci device (bus 0 D5 `0x1af4/0x1043`, BAR0 `0x100010000`, claim 0013); the transport arms pre-exit (`M2_READY`) and TX works pre-exit (claim 0017) and post-ExitBootServices on the firmware translation (claim 0020 phase B), but **hung on the first post-MMU BAR/common-config read after the DipshitOS identity-map install** (claims 0018/0020, phase C/D). ExitBootServices itself is exonerated; the MMU switch (B→C) was the transition that destroyed access (claim 0020). Firmware and kernel memory attributes are byte-identical (claim 0021), so the hang was not an attribute mismatch; the no-TLBI safety contract and its validity window were in **ADR 0006** (claim 0022; superseded by claim 1517). The **NVRAM fallback console (claim 0015)** carried post-exit bytes via runtime `SetVariable` (69–70 chunks, shell + commands observed) but is not the virtio serial pipe; the **mock transcript (`zig build test-console`, class A)** is a portable host test, not VZ hardware. Ordering remains explicit: **post-MMU virtio TX (done, claim 1517), then virtio RX / live transcript** — RX cannot bypass the TX/MMU layer. Claims 6460/7896 characterized the layer: correcting the T0SZ start-level mismatch (25→16) restored end-to-end post-MMU TX in 6/18 boots, and the 4-cell walk-probe matrix proved the residual was stale-TLB interference, not a device hang — cell B (T0SZ=16 + TLBI) completed 9/9, which is exactly what claim 1517 makes production (see `docs/gate-inventory.md`). Class definitions: `docs/gate-inventory.md` (class A = portable/CI, class B = Apple-silicon/VZ hardware, class C = interactive, class D = diagnostic); a green CI badge proves class A only.
-
-Re-verified marker/host gates on merged `main` (2026-08-07): host-console gate ✅ `artifacts/m15-host-console-reverify-20260807.txt`; marker re-verify ladder `M2_ENTRY → … → M2_READY` (`artifacts/m2-marker-reverify-20260807.txt`); bad-handoff re-verify ✅ `artifacts/m2-badhandoff-reverify-20260807.txt`.
-
-### What we directly observe about the serial gate and the bad-handoff fix
-
-From the bad-handoff run before the fix (re-verified 2026-08-06), fresh from
-`artifacts/bad-handoff.img`:
-
-- `BOOTED.TXT` — written by the loader: **observed** (loader executed under
-  firmware).
-- `LOADER.TXT` — written by the loader: **observed** —
-  `base=0x7e4df000 size=0x823e8 entry_offset=0x18`, and
-  `ram_first8=0xaa0103eaaa0003e9`, which decodes to `mov x9, x0; mov x10, x1` —
-  the first two instructions of the kernel's naked shim. The image content is
-  at `base+0` and the jump lands on the shim as designed.
-- `RC.TXT` — **absent** before the fix: the kernel never returned to the
-  loader. `vm-serial.log` is empty (expected for `ConOut`; the runner's
-  `terminal=true` is only the no-marker default).
-
-**Bad-handoff root cause (now observed, fixed 2026-08-06):** the naked
-`_start` shim's `bl kernel_main` overwrote the link register with the shim's
-own return address (disassembly of the current kernel ELF: `bl 0x3c` at
-shim offset `0x30`, so LR = `0x34`). The shim's final `ret` therefore looped
-`0x34 → 0x38 → 0x34` forever instead of returning to the loader, so the
-pre-exit `return bad_handoff` could never reach the loader and `RC.TXT` was
-never written. Fix: save the loader's `x30` in `x20` (callee-saved under
-AAPCS64, preserved by `kernel_main`) before the `bl` and restore it before
-`ret` — two instructions in `kernel/src/main.zig` `_start`. After the fix:
-`RC.TXT` = `kernel_rc=0x0000000000000002` and `verify-bad-handoff.sh` exits 0
-(`artifacts/m2-badhandoff-fix-after.txt`).
-
-The **VZ serial gate is a separate, still-open question**: with the fix, the
-bad-handoff VM provably returns through the shim, but every good-path run
-still produces no serial output and the kernel never returns. Re-run
-2026-08-06 21:19 (claim 0002, `artifacts/m2-vz-run-20260806.txt`):
-`vm-serial.log` **0 bytes** after a 30 s run; loader evidence intact
-(`BOOTED.TXT` exact content, `LOADER.TXT` `base=0x7e4df000 size=0x823e8
-entry_offset=0x18`, `ram_first8=0xaa0103eaaa0003e9` = the shim's first two
-instructions `mov x9,x0; mov x10,x1` — the loader→shim jump is proven);
-`RC.TXT` absent (good path, expected — D6).
-
-<details><summary>Historical — how the serial gate's silence was first explained (claim 0009, superseded by 0010/0013)</summary>
-
-The ADR 0004 D4 marker fallback was implemented and its first VZ runs
-ended at `M2_MAPD!` (claim 0009) — the ladder discriminated the death site
-as the MMU-takeover window before the serial probe ever ran
-(`artifacts/m2-marker-gate.txt`, historical). A diagnostic run with the
-switch disabled showed `M2_MAPD! → M2_MMUP! → M2_SERIA` (`layout=none` halt).
-Claim 0010 then root-caused and fixed this: the guest implements the
-ARMv8.1+ TCR_EL1 layout (claim 0010; re-captured by 0021
-`artifacts/fw-mmu-capture-lines.txt` — raw `m2-firmware-regs.txt` not in
-this checkout), the identity map now covers undeclared MMIO as Device, and
-the `tlbi vmalle1`-forced re-walk that faulted on VZ is dropped (see TLBI
-bullets in `hardware-contract.md` and ADR 0006). The ladder now runs
-`M2_MAPD! → M2_MMUP! → M2_SERIA` (`artifacts/m2-mmu-takeover-gate.txt`).
-That "device absence in the declared windows" reading of `M2_SERIA` is
-itself superseded by claim 0013 (declared windows are Apple's efivars store
-+ debug UART; the real console is virtio-pci outside them). See
-[Current blocker](#current-blocker-canonical--one-description-one-ordering) and [The device absence is now fully explained](#what-we-directly-observe-about-the-serial-gate-and-the-bad-handoff-fix).
-
-Also observed (still current): the ADR 0004 D4 *memory-dump* form is
-**impossible on VZ** — guest RAM is not host-mapped (claim 0009).
-
-</details>
-
-**The device absence is now fully explained (claim 0013, 2026-08-07).** The
-console is not in the declared MMIO windows at all. Pre-exit diagnostics
-persisted through the NVRAM channel (the probe dump variables `DipshitP*` in
-`artifacts/efi-vars.bin`) decoded the ground truth: `0x01000000..0x01010000`
-contains Apple's EFI variable-store region (raw bytes spell `efivars\0`),
-and `0x20050000..0x20051000` is a PL011-family PrimeCell UART whose DR
-writes produce zero bytes in `vm-serial.log` (Apple's internal EFI debug
-UART). ACPI names no console (no SPCR/DBG2; the DSDT, Apple's own `Apple Vz`
-AML, declares only `PCI0` + `efivars`). The VZ serial attachment is a
-**modern virtio-pci console** — bus 0 device 5, `VID=0x1af4 DID=0x1043
-class=0x078000` — found by pre-exit PCI enumeration over ECAM `0x40000000`
-(MCFG). Its 64-bit BAR0 is firmware-assigned at `0x100010000` (above the
-4 GiB identity-map blanket; assignment varies across boots, which is why the
-fixed-window probe never saw it), and the transport is fully armed pre-exit
-(`SEL=VIRTIO`, ladder reaches `M2_READY`). The remaining wall is **post-MMU access to the transport window hangs on
-VZ** — the first post-switch BAR/common-config read does not return
-(claims 0018/0020; the MMU switch is the killer, not ExitBootServices).
-Claim 0015 then carried the console bytes over a post-exit-safe channel
-(the runtime `SetVariable` NVRAM channel — next paragraph); the open work
-is reliable post-MMU access to the transport (see
-[Current blocker](#current-blocker-canonical--one-description-one-ordering)).
-
-**The post-exit-safe channel is now live (claim 0015, 2026-08-07).** The
-NVRAM console channel carries the kernel's console bytes over runtime
-`SetVariable` after `ExitBootServices` (the channel claim 0009 proved
-alive). `bash tools/verify-nvram-console.sh` **passes**: 69–70 chunks
-reconstructed from `efi-vars.bin` give the takeover banner, the full
-25-descriptor memory map, the probe record, the seam diagnostics, the
-shell banner, and real command output (`version`, `mem`, `echo`, `help`)
-— the first post-exit console evidence from a real VZ run
-(`artifacts/nvram-console-gate.txt`, claim 0015). Two findings surfaced:
-
-1. **Latent kernel bug fixed (ADR 0005):** the flat loader copies the
-   kernel image to a runtime base with **no relocations**, so every `const`
-   function-pointer table in `.rodata` (vtables, the 14-command registry,
-   string-slice tables) held link-time absolute addresses. The first
-   vtable dispatch on real hardware — claim 0015's shell seam — faulted
-   instantly; host tests never caught it (macOS relocates test binaries).
-   All such tables are now built at runtime in BSS.
-2. **The NVRAM store is ~61 KiB writable, not 128 KiB** — the probe-dump
-   variable was starving the chunk channel; it is gated off in nvram
-   builds (the console stream carries the same evidence). The 64-chunk cap
-   also truncated the session (the store still had ~47 KiB free); raised
-   to 128.
-
-The virtio-console TX gate (claim 0002, `zig build run`) was blocked at
-that time (now **passing since claim 1517**); claim 0015 is the fallback
-channel claim 0013 named, and it makes the
-milestone's console evidence host-observable. The VZ post-exit death
-window was flaky (claim 0009, re-observed: runs sometimes die at
-`M2_MAPD!` or mid map-dump after `M2_TXOK!`); the gate retries up to 3
-boots with fresh stores.
-
-## Milestone 1.5 — the call
-
-Do **not** add more kernel-proper plumbing before making the machine
-interactive. The milestone-two kernel already owns the machine: it ends UEFI
-Boot Services, installs its own page tables, probes the MMIO serial
-candidates (PL011/16550/virtio-MMIO), and drives a polled **TX-only**
-console (ADR 0004 — "no interrupts, no FIFO/DMA, no RX path") before
-entering a terminal WFE loop. That console is exactly enough to serve an
-interactive monitor — the monitor is simply the loop's payload. No new
-firmware dependencies, no allocator, no interrupts, no storage drivers.
-
-One immediate blocker, on both ends of the wire: the kernel console has **no
-RX path at all** (ADR 0004), and until 2026-08-06 the VM runner's serial
-attachment sent guest output to a file with a `nil` host-to-guest input
-handle (`VZFileHandleSerialPortAttachment(fileHandleForReading: nil, ...)`
-in `host/vm-runner/Sources/VMRunner/main.swift`). The M1.5 host-plumbing
-slice (steps 4–7, landed 2026-08-06) added a `--console` mode that wires a
-real stdin-backed input handle and tees guest output live; the evidence
-path (`zig build run`) keeps the `nil`-input attachment, unchanged. Until
-keystrokes can actually be read by the guest, the monitor is output-only.
-
-### Definition of done — the target screen
-
-```text
-DIPSHITOS 0.1
-AArch64 firmware-assisted kernel monitor
-256 MiB detected
-Type 'help' before touching anything expensive.
-
-dipshit> help
-about      explain this questionable system
-cat        print a file from the ESP
-clear      clean up the crime scene
-echo       repeat your regrettable decisions
-elephant   operational mascot diagnostics
-handoff    display boot-to-kernel ABI data
-ls         list files on the ESP
-mem        summarize the EFI memory map
-reboot     restart the machine
-shutdown   request power-off
-version    display build information
-write      write text to a file
-
-dipshit>
-```
-
-### Hard gates (acceptance criteria)
-
-- [x] `zig build`, `zig build image`, and the existing regression checks still pass. *(The bad-handoff regression gate was **failing**; its root cause (shim LR clobber) was fixed 2026-08-06 — the gate now passes, see [Gate status](#gate-status).)*
-- [x] `zig build console` reaches `dipshit>` — the post-MMU TX fix (claim 1517) puts the live banner + `dipshit>` prompt in `vm-serial.log` on real VZ runs.
-- [x] Host keystrokes reach the kernel (RX path closed end to end) — **PASS 2026-08-08 (claim 6684)**: the polled virtio receive queue delivers host keystrokes; `verify-live-transcript.sh` drives `help`/`version`/`mem`/`echo` into a live session and asserts the replies in `vm-serial.log` (3/3 boots).
-- [x] At least ten commands work (31 commands, host-tested; the registry grew 20 → 21 with claim 5844's `pci`, → 22 with claim 5275's `tasks`, → 23 with claim 3594's `syscalls`, → 24 with claim 6120's `uaccess`, → 25 with claim 5804's `addrspaces`, → 26 with claim 6729's `spawn`, → 27 with claim 6783's `exec`, → 28 with claim 2665's `random`, → 29 with claim 3678's `mount`, → 30 with claim 3848's `procs`, → 31 with claim 7786's `kill`; real command output observed post-exit via the NVRAM channel, claim 0015, and live post-MMU via claim 1517).
-- [x] `ls`, `cat`, and `write` persist through reboot — **PASS 2026-08-09, upgraded to a real FAT storage driver (claim 6420)**: claim 3475's pre-exit snapshot + NVRAM persistence (passing 1/1) is **replaced** by a live FAT32 driver on the ESP (`kernel/src/fat.zig` — GPT + FAT32 mount/list/read/write with injected sector I/O, 11 host tests) over a virtio-blk transport (`kernel/src/virtio_blk.zig` — DID 0x1042 on this VZ, the spec's modern virtio-blk DID; queue 4, one request at a time). `write` now allocates clusters, updates both FAT copies, and writes the directory entry to the **disk itself**; run A persisted `hello world` and listed it `[esp]`, and run B — a fresh boot against the same disk image — still lists `HELLO.TXT [esp]` (the FAT 8.3 short name) and prints the content. **Hardware discovery fixed on the way:** VZ resets the virtio-blk device at ExitBootServices (its status reads 0 post-exit), so the queue is re-armed post-MMU (`blk_rearm`, common-config MMIO writes — verified DRIVER_OK + live reads/writes); the NVRAM variable store is no longer the persistence medium. `bash tools/verify-live-fs.sh`, class B, 1/1 pair. *(Claim 3475's other fixes stand: the per-flush TX markers/probe persist are first-flush-only / `-Dprobe-var`-gated.)*
-- [x] A scripted console session passes automatically (asserting in `vm-serial.log`) — the mock transcript (`zig build test-console`, class A) passes, and the **live** `vm-serial.log` transcript assertion now passes too (`bash tools/verify-live-transcript.sh`, claim 6684, class B).
-- [x] The VM can reboot or shut down from the shell — **PASS 2026-08-08 (claim 0527)**: a real EFI `ResetSystem` driven from a live `dipshit>` shell is observed end to end on VZ — `reboot` resets the machine (second full takeover, fresh memory-map key in `vm-serial.log`) and `shutdown` powers it off (VM state → stopped), 4/4 boots via `bash tools/verify-live-reboot.sh` (class B). The mechanism itself shipped + unit-proven in claim 0011. *(The claim-0011 `M2_RST!` marker write is best-effort by design and was lost in the teardown race; the machine-level reset/power-off is the evidence.)*
-- [x] No allocator, MMU replacement, interrupts, scheduler, or userspace is falsely claimed.
 
 ## The march tracker (per milestone)
 
-> **Moved 2026-08-06:** the per-step tracker and the best-agent-split
-> tables used to live in this file; agents marking steps collided here
-> with gate and milestone-status edits. They now live in the per-milestone
-> trackers — the active [`docs/march-m3.md`](march-m3.md) and the archived
-> [`docs/march-m15.md`](archive/march-m15.md) (M1.5, closed 2026-08-09) —
-> update a step's row there, never here. This file holds milestone-level
-> facts only (position, gates, hard gates) plus pointers.
+> Per-milestone card detail lives in `docs/march-m*.md` (M3), `docs/march-m4.md` (M4), etc.,
+> and the archived `docs/archive/march-m15.md` (M1.5, closed 2026-08-09).
+> `docs/status.md` holds only milestone-level facts; update a card's row in its march file, never here.
 
-## What comes immediately afterward
+## What comes next
 
-**Ordering after M1.5 is explicit and enforced by evidence classification** (`docs/gate-inventory.md`):
+Closed milestones M3–M16 are archived (see `docs/archive/status-m*-detail.md` and `docs/march-m*.md`).
+The ordered `## What comes immediately afterward` list (previously 223 lines, items 4–18 for M3–M8)
+and the `## Milestone 1.5 — the call` spec (56 lines) plus the `## What we directly observe` serial-gate
+archaeology (115 lines) are preserved in git history (`aa4f111`) and in the per-milestone archives.
 
-1. ~~**Reliable post-MMU access to the already-discovered virtio-pci console transport (post-MMU virtio TX, class B).**~~ **DONE 2026-08-08 (claim 1517)** — root cause (translation start-level mismatch + stale-TLB crutch, claims 6460/7896) fixed in production: T0SZ=16 + `tlbi vmalle1` at the switch; `zig build run` passes (banner + memory-map + terminal state in `vm-serial.log`).
-2. ~~**Virtio RX / live transcript (class B `live-transcript-rx`).**~~ **DONE 2026-08-08 (claim 6684)** — the polled virtio receive queue delivers host keystrokes end to end; `bash tools/verify-live-transcript.sh` asserts the live `dipshit>` transcript in `vm-serial.log` (3/3 boots).
-3. ~~**Live reboot/shutdown observation (M1.5 close-out, hard gate 6).**~~ **DONE 2026-08-08 (claim 0527)** — a real EFI `ResetSystem` from a live `dipshit>` shell observed end to end (`bash tools/verify-live-reboot.sh`, 4/4 boots: `reboot` resets the machine, `shutdown` powers it off). The last hard gate — the filesystem one — closed 2026-08-09 (claim 3475: `ls`/`cat`/`write` persist through reboot via the pre-exit ESP snapshot + NVRAM-persisted writes, `verify-live-fs.sh`) and **upgraded the same day to a real FAT32 storage driver (claim 6420)**: `write` persists to the ESP's FAT volume through a virtio-blk transport, files survive reboot on the disk itself, and the NVRAM persistence medium is gone. **All 7 M1.5 hard gates pass; the milestone is tagged `m1.5-interactive-monitor` (2026-08-09).**
-4. ~~**A physical page allocator over the captured EFI map.**~~ **DONE 2026-08-08 (claim 3972)** — first-fit bitmap allocator over the captured map's ConventionalMemory (fixed 128 KiB BSS bitmap over the 4 GiB identity-map span), wired post-exit in `kernel_main`; `pages`/`pages selftest` monitor commands; 18 unit tests; live-observed on VZ (`total=0xee2b` pages across 7 regions; selftest allocates the largest contiguous run and restores the pool). **Extended 2026-08-09 (claim 5162):** the pool now also covers loader + boot-services regions, with exclusion ranges protecting the live kernel image, stack, handoff page, and captured-map buffer — `pages` reports `excluded=…`; 25 alloc/memmap unit tests; full class-A set green at HEAD `19ad92c` (`artifacts/verify-portable-5162.txt`).
-5. ~~**Exception vectors** (first half of item 5).~~ **DONE 2026-08-08 (claim 9746)** — VBAR_EL1 vector table + basic synchronous/IRQ handlers installed post-MMU (kernel owns EL1; a pre-exit VBAR write was measured catastrophic on VZ — see the claim), `dipshit> fault` triggers a real `udf` that is reported and resumed live (class B gate `tools/verify-live-exceptions.sh`, 2/2).
-6. ~~**GIC + timer interrupts (second half of item 5).**~~ **DONE 2026-08-09 (claim 9187; supersedes claim 7948's blocker conclusion).** The spec-corrected GICv3 driver uses MADT types 0x0B/0x0C/0x0E, targets SGI/PPI registers in the redistributor's `+0x10000` SGI frame, selects the boot CPU frame, and programs the GTDT trigger mode. On real VZ, periodic CNTP PPI 30 enters the claim-9746 EL1 IRQ vector, is acknowledged, handled, EOI’d, and re-armed; `bash tools/verify-live-timer.sh`  requires five IRQ ticks and zero poll ticks and passes **3/3** while the shell remains responsive. The old idle-loop timer poll is no longer used in production.
-7. ~~**Tasks: tick-driven round-robin scheduler.**~~ **DONE 2026-08-09 (claim 5275)** — the first milestone-three tasks card: two kernel tasks (the shell/main task + a demo worker on its own static BSS stack) preempt at every timer PPI, round-robin, with a minimal save/restore (vector-frame pointer + ELR/SPSR only — the claim-9746 stubs already keep the register file on the stack). `dipshit> tasks` reports per-task saves/resumes/advances; the worker reports its progress from the shell idle loop (`tasks worker advances=N`); host tests cover frame construction, round-robin round-trips, and the report machinery. **Live gate `bash tools/verify-live-tasks.sh` PASS 3/3** (worker report line after >= 2 real context switches + responsive shell), and the strict live-timer gate still passes **3/3** under preemption (heartbeat/report lines now snapshot their counters at the event). Live regressions all green: live-exceptions, live-transcript, live-reboot, live-fs. Class-A green. No userspace, no MMU changes — a later card adds userspace.
-8. ~~**First EL0t task + SVC boundary.**~~ **DONE 2026-08-09 (claim 8215, PR #60)** — a statically linked EL0 task, page-local user text/stack apertures, x8-selected `svc #0`, SP_EL0-preserving scheduling, and a strict live userspace gate.
-9. ~~**Frozen syscall ABI + dispatch table.**~~ **DONE 2026-08-10 (claim 3594)** — ADR 0007 freezes x8 number, x0–x5 arguments, x0 result, slots 0–3 implemented and 4–63 reserved. The runtime-built table, bounded user-aperture `sys_write`, cooperative yield, non-returning exit, deterministic counters, and corrected one-shot live SVC gate pass.
-10. ~~**uaccess: fault-safe copy-in/copy-out.**~~ **DONE 2026-08-10 (claim 6120)** — `kernel/src/uaccess.zig` adds bounded `copy_in`/`copy_out` over the kernel-known EL0 apertures (user text read-only, user stack read-write) with the ADR 0007 `EFAULT` (`-3`) contract enforced (out-of-region, overflow, unmapped, permission), plus a masked fault-recovery window: a real EL1 data abort during a copy is latched, ELR advanced past the 4-byte faulting instruction, and the copy returns EFAULT instead of crashing the kernel (an optimizer-reordering hazard that parked on the first live run was fixed with volatile window state). `sys_write` migrated onto uaccess; the `uaccess` monitor command proves `valid=1 fault=1 recovered=1` on VZ; the EL0 payload passes an unmapped bad pointer, observes `-3`, and survives to write its marker. New class-B gate `bash tools/verify-live-uaccess.sh` passes 1/1; `verify-live-svc` updated to the payload's three writes (`calls=3`).
-11. ~~**Per-task user address spaces.**~~ **DONE 2026-08-10 (claim 5804)** — every task gets its own TTBR0 root; the EL0 task's root is a clone of the kernel identity tree with its text+stack leaves overlaid at their user VAs, so EL0 can reach ONLY those leaves (kernel RAM, firmware, and MMIO are EL1-only AP=0b00 → permission faults), with UXN/PXN (W^X) on every user leaf. **VZ TTBR1 fallback:** the original kernel-in-TTBR1 KVA-shadow design was measured incompatible on VZ (TTBR1 walks fault at the first descent with 4 KiB tables — the signature of 64 KiB table-address masking — and Normal-WB TTBR1 data accesses abort even with 64 KiB-aligned tables; see ADR 0007 + `hardware-contract.md`), so the kernel stays identity-mapped in TTBR0 with TTBR1=0 and per-task isolation comes from switching TTBR0 between roots that all carry the EL1-only kernel overlay. The scheduler switches TTBR0 per task; the `addrspaces` monitor command reports TTBR1=0, T0SZ=16, per-task TTBR0 roots, and the user root's leaf inventory (`el0=4`, `el0_device=0` on VZ). New class-B gate `bash tools/verify-live-addrspaces.sh` **PASS 1/1**, all live regressions green (uaccess/svc/userspace/tasks/timer/exceptions/transcript).
-12. ~~**User task lifecycle.**~~ **DONE 2026-08-10 (claim 6729)** — the scheduler pool gains an explicit lifecycle: `State` per slot (free→ready→running→zombie→free), bounded `spawn` (first free slot, null when full), `exit_current` → zombie, and the **scheduler-owned idle task** (always-ready ring fallback; reaps one zombie per iteration so the pool drains without a parent/child relationship). The `spawn` monitor command exercises a runtime spawn on a dedicated demo stack; `tasks` reports per-row `state=` + pool/zombie header; reports are per-task slots so the worker cannot starve the demo's. **Load-bearing fix (measured on VZ):** the claim-9746 vector frame saved only x0..x17+x30, so a context switch resumed the next task with the *preempting* task's live callee-saved registers — the shell's `mon` in x19 was clobbered by the worker's loop counter (≈0x872) and the shell's next console write faulted (`esr=0x96000021`, `far=0x872`; a VM-level error when idle was registered). The frame is now 32 slots (x19..x28+x29 saved; shared `exc_restore_tail`; stubs stay inside their 128-byte slots), making preemption of compiled tasks safe. The `addrspaces` command also prints `user root=` directly (the reaper removes the exited user's task row before the gate's post-exit script runs). New class-B gate `bash tools/verify-live-lifecycle.sh` **PASS 1/1**; all live regressions green (addrspaces/uaccess/svc/userspace/tasks/timer/exceptions/transcript/fs/reboot).
-13. ~~**Load and exec a real user program from the ESP.**~~ **DONE 2026-08-10 (claim 6783)** — a separate EL0 program (`user/src/main.zig`, naked asm on the fixed syscall ABI) is built into a flat `USER.BIN` (elf2bin DSK1) and embedded on the ESP by the image builder (`mkfat32.py` + `make-image.sh` + `zig build user`). The new `exec [<file>]` monitor command reads it through the claim-6420 FAT path into a fixed 4 KiB BSS page, strips the 24-byte header, rebuilds the EL0 user root around the loaded page with claim 5804's `build_user_root` (proven to work **post-install** because the kernel stays identity-mapped — `@intFromPtr` is still physical), and spawns it as an EL0t task — **gated on the previous user task being gone** (one user program at a time; the lifecycle's closed loop). The loaded program executes at EL0 from the ESP-loaded page: its `sys_write` markers land in the serial log directly, two sequenced pings prove SVC round-trips from a loaded image, and `sys_exit` (status 42) + the idle reap close the lifecycle. Two live-measured fixes: the user linker script must **discard `.eh_frame`** (the orphan sections landed at VMA 0, so the flat image's entry pointed at CFI bytes), and exec must **strip the DSK1 header in place** (the user-root leaf masks phys to page granularity, so mapping `program+24` mapped the header page — the EL0 task fetched "DSK1" and faulted on the zero pad). New class-B gate `bash tools/verify-live-exec.sh` **PASS 1/1**; all shared-seam regressions green (lifecycle/addrspaces/uaccess/svc/userspace/tasks/timer).
-14. ~~**Blocking syscalls: sleep/yield/wakeup in the tick scheduler.**~~ **DONE 2026-08-10 (claim 3200)** — a new `sys_sleep(ticks)` row (slot 4, ADR 0007 amendment) blocks the calling task for N scheduler ticks; the scheduler gains an explicit `blocked` state with per-task wakeup deadline, a tick counter advancing on every timer PPI, and a timer-driven `wake_expired` (IRQ context, console-free) that moves expired sleepers back to `ready` — the same resume path as `sys_yield`. The ESP-loaded user program is extended with a cooperative yield, a 2-tick sleep (asserting the 0 return), and a post-wake marker before exiting with status 43. The worker's advance lines during the sleep window prove other runnable tasks keep progressing. `user_root_in_use` now counts `blocked` tasks too — a sleeping user program still owns the user root. New class-B gate `bash tools/verify-live-sleep.sh`; all shared-seam regressions green.
-15. **Milestone-four close-out (DONE 2026-08-11, claim 2839)** — full class A
-    (11/11) + class B (28/28) gate re-run at the candidate HEAD `9d7e4d5`;
-    milestone tagged **`m4-processes`** (the claim-0707 pattern).
-17. **Milestone six, card G1 — virtio-gpu transport + framebuffer (DONE
-    2026-08-12, claim 6053; prompt `docs/m6-gpu-prompt.md`).** The FIRST
-    NON-BLANK GUEST FRAMEBUFFER is live on VZ: `--display` runner mode,
-    `kernel/src/virtio_gpu.zig`, `screen`/`screen fill`/`screen peek`
-    (registry 34→35), gate `tools/verify-live-screen.sh` PASS 1/1, and
-    the claim-time observations (DID 0x1050, VER1-only, reset at
-    ExitBootServices, B8G8R8X8 + opaque alpha, virtio-gpu 1.2 wire
-    shapes). The full 35-gate `verify-vz` aggregate re-ran green.
-    ~~**What's next: card G2 — framebuffer text rendering.**~~ **DONE
-    2026-08-12 (claim 3194):** `text.zig` (the built-in 8x8 bitmap font,
-    putc/puts/cursor/scrollback/clear; 21 host tests against a mock
-    canvas) paints the banner + `dipshit>` prompt on G1's framebuffer;
-    `text`/`text put`/`text clear` (registry 35→36); gate
-    `tools/verify-live-text.sh` PASS 1/1 (the decoded capture shows
-    glyphs — green fg over the dark bg, screen no longer monochrome); the
-    full 36-gate `verify-vz` aggregate re-ran green 36/36.
-    ~~**What's next: card G3 — Road Pops, the boot terminal goes
-    graphical.**~~ **DONE 2026-08-12 (claim 1574):** `road_pops.zig`
-    tees the console — serial shared seam + G2's text layer, drained one
-    present per output batch by the shell idle loop; the boot banner is
-    the shell's own, rendered by the tee; `roadpops` command (registry
-    36→37); gate `tools/verify-live-roadpops.sh` PASS 1/1 (the decoded
-    capture shows banner + live session glyphs below it); the 37-gate
-    `verify-vz` aggregate re-ran green 37/37. **Post-G3 hardening (the
-    SCK switch, 2026-08-12)**: the pixel gates now REQUIRE the
-    ScreenCaptureKit composited-window evidence (any cacheDisplay
-    fallback fails), and introduced the `tools/verify-live-glyphs.sh`
-    mirror-tripwire gate. **Issue #125 correction (claim 8742,
-    2026-08-14):** the imported font rows are LSB-left, but BOTH kernel
-    rasters read bit 7 as the left pixel; the first decoder repeated that
-    same wrong convention, so its historical PASS was self-consistent,
-    not independent proof of orientation. `font8x8.row_pixel` now owns
-    the LSB-left contract for the terminal and Driving Award renderers,
-    while the decoder normalizes source rows to screen order and pins the
-    convention with a hard-coded asymmetric `C` golden. **[observed]** The
-    repaired gate passed on VZ/ScreenCaptureKit: the terminal decoded
-    forward with 0 unknowns / 604 ink versus 549/595 mirrored; the clock
-    decoded exactly as title `clock` and body `DRIVING AWARD`, versus 4/5
-    and 10/13 unknown glyphs mirrored. The earlier 38/38 aggregate remains
-    historical; its glyph-orientation result is superseded by this claim's
-    targeted live rerun (`artifacts/live-glyphs-gate.txt`,
-    `artifacts/gpu-screen-15s`).
-    **What's next: milestone seven — input (keyboard + pointer)** so
-    keystrokes come from the screen side. **[observed]** 2026-08-13
-    (claim 3868): VZ exposes keyboard/pointer as an **Apple XHCI USB
-    controller** (`VID=0x106b DID=0x1a06 CLS=0x0c0330`) with USB HID
-    devices behind it — NOT the hypothesized virtio-input (DID 0x1052),
-    which does not exist in the framework. The G4 card was split into its
-    own milestone (I1 XHCI transport → I2 USB enumeration + HID → I3 event
-    FIFO + keycode decode); then G5 **Driving Award** back in milestone
-    six. **Card I1 (claim 4272) DONE 2026-08-13** — the XHCI host-controller
-    transport (MMIO + command/event rings + NO-OP + port status) is live
-    on VZ. **Card I2 (claim 4116) DONE 2026-08-13** — USB enumeration + HID
-    is live on VZ: BOTH devices enumerate end to end (port reset → Enable
-    Slot → Address Device → config descriptors → Set Configuration →
-    interrupt-IN armed) — the keyboard (port 9, PID 0x8105, boot protocol,
-    8-byte reports) and the absolute pointer (port 10, PID 0x8106,
-    non-boot, 10-byte reports); a synthesized host keyDown produced the
-    observed 8-byte report `00 00 04 00 00 00 00 00` (mod 0, HID usage
-    0x04 = 'a'). **Card I3 (claim 6050) DONE 2026-08-13** — the bounded BSS
-    event FIFO + keycode decode feeds Road Pops' line editor: the runner's
-    new `--input-string` seam (one synthesized NSEvent per keyDown/keyUp;
-    VZ has no keyboard API) typed `input\n` and the guest's own `input`
-    command reported `events=6` (i,n,p,u,t,Enter) with `dropped=0` — the
-    first screen-side keystrokes reach the terminal end to end. Plan
-    [`docs/march-m7.md`](march-m7.md).
-    **Card G5 (claim 1543) DONE 2026-08-13 — Driving Award, the window
-    manager**: `kernel/src/driving_award.zig` (bounded BSS registry,
-    z-order, focus, hit-test, dirty-rect compositor) makes Road Pops
-    window 0 and a 1 Hz clock overlay window 1;`dui`/`dui focus`/`dui raise`/`dui hit` (registry 39→40); gate `tools/verify-live-win.sh`
-    PASS 1/1 (two overlapping windows with the right z-order — the
-    decoded capture shows the clock's amber title bar + navy body over
-    the terminal — and a keyboard-typed `uname` landing in the focused
-    terminal). The 42-gate `verify-vz` aggregate now includes
-    `live-win`; the default VM stayed byte-identical.
-    **Card G6 (claim 0487) DONE 2026-08-13 — the draw/window syscall
-    seam**: the ADR 0007 slots 12/13/14 (`sys_win_open`/`sys_win_fill`/
-    `sys_win_present`, implemented 12 → 15, then a teardown follow-on
-    adds slot 15 `sys_win_close` + `dui close` → 16) expose the G5
-    user-window surface to EL0; WIN.BIN opens a bounded kernel-owned
-    window (id 2..3,
-    fixed BSS back-buffer ≤ 256×192 B8G8R8X8), fills it (dark-blue
-    background + red/cyan/white blocks), presents it, and exits 87; gate
-    `tools/verify-live-win-syscall.sh` PASS 1/1 (`dui: windows=3
-    focused=2` + `dui[2]: user user rect=64,64,256,192` z=2, `syscalls`
-    implemented=16 with open=1/fill=4/present=1 + slot 15
-    `sys_win_close` registered, and the decoded capture shows the window's
-    own content over the terminal).    **Teardown follow-on:** `dui close <n>`
-    + `sys_win_close` (slot 15) release a user window so the id can be
-    re-opened instead of leaking until reboot (open → close → re-open
-    host-tested in `driving_award` + `syscall`, and proven LIVE by
-    WINCLOSE.BIN — the gate `tools/verify-live-win-close.sh` PASS 1/1:
-    the window gone (`windows=2`) and the freed slot re-opened as id 2).
-    **Ownership follow-on:** windows are OWNED by the opening process and
-    AUTO-CLOSE when it exits (`close_owner` from the scheduler's exit
-    path); fill/present/close are owner-restricted (host-tested
-    cross-process refusals); WIN.BIN's window now vanishes on exit
-    (`windows=2`, `sys_win_close calls=0`) and WINLOOP.BIN keeps a window
-    alive for the decoded-capture pixel proof.
-    Milestone six closed — G1–G6 all live; the default VM stayed
-    byte-identical.
-16. ~~**Milestone five, card N1 — virtio-net transport + TX (the roadmap's
-    network sketch, whose dependency — "the process/IPC foundations" — is
-    now satisfied).**~~ **DONE 2026-08-11 (claim 1373).** The runner gains a
-    flag-gated `--net` mode (VZFileHandleNetworkDeviceAttachment capture,
-    fixed host MAC; the default VM stays byte-identical — the full
-    31-gate `verify-vz` aggregate re-ran green). Guest `kernel/src/virtio_net.zig`
-    discovers DID 0x1041 pre-exit, negotiates VER1\|MTU\|MAC (claim-time
-    finding: the device NEEDS MTU accepted — VER1-only and VER1\|MAC are
-    rejected with FEATURES_OK cleared), reads the host-set MAC via the
-    feature path, sets up queues 0/1 (split rings size 4), re-arms
-    post-exit (claim-time finding: the net device does NOT reset at
-    ExitBootServices — st=0f — unlike blk/entropy), and consumes a 12-byte
-    virtio_net_hdr on every TX buffer (observed; the driver prepends a
-    zeroed one). `net`/`netsend` monitor commands (registry 32→34);
-    bounded BSS frame staging (no heap). Class-B gate
-    `tools/verify-live-net-tx.sh` PASS 2/2 — the host receives known
-    frames byte-exact (46-byte fixture, ring reuse, honest 1500-byte
-    truncation). **RX (N2), ARP (N3), IPv4 (N4) are the later cards.**
-18. **Milestone eight, card U0 — human interface guidelines (ADR 0008).**
-    ✅ **DONE 2026-08-14 (claim 8938).** The normative interface contract
-    (`docs/decisions/0008-human-interface-guidelines.md`: D1 command grammar
-    + grouped `help`, D2 prompt/editing, D3 error/usage shapes, D4 window
-    interface, D5 support surface, D6 gate-enforceability) plus the
-    milestone-eight per-card tracker + agent split
-    ([`docs/march-m8.md`](march-m8.md): U0–U8 — help/catalog, editing/history,
-    error contract, pointer focus, window HIG, first-boot, sysinfo, persistent
-    settings). Docs only; explicitly NOT an ADR 0007 change and NOT a
-    POSIX/readline promise.
-    **Card U1 (claim 3275) DONE 2026-08-14** — the ADR 0008 D1 discovery
-    surface: `kernel/src/monitor.zig` gains a `Category` field on all 40
-    commands + a grouped `help` catalog in the D1 group order + `help <cmd>`
-    detail + `help <topic>` pages (networking, windows, storage, graphics;
-    command-named `syscalls`/`input` resolve to their command detail). The
-    byte-identical transcript (shell.zig e2e + `tests/transcript-console.txt`)
-    regenerated to the grouped listing, and the new live gate
-    `tools/verify-live-help.sh` PASS 1/1 on VZ (scripted help walk).
-    **Card U2 (claim 1809) DONE 2026-08-14** — the ADR 0008 D2 editing
-    surface: a bounded history ring, cursor left/right + Home/End, Ctrl-
-    A/E/K/U/L/C, Delete, and tab completion in `kernel/src/lineedit.zig`;
-    arrow/Home/End/Delete usages + Ctrl-chord decoding in `kernel/src/input.zig`;
-    `\b`/`\r` honored in `kernel/src/text.zig`; the registry completer + repaint
-    wired in `kernel/src/shell.zig`; and the runner's `--input-chords` seam.
-    Live gate `tools/verify-live-editing.sh` PASS 1/1 on VZ (scripted chords
-    drive mid-line insert + Up recall; unchanged transcript paths stay
-    byte-identical). En route it root-caused + fixed a latent I3 interrupt-
-    ring wrap OOB in `kernel/src/xhci.zig` (a phantom stale-report read after
-    the Link-TRB boundary).
-    **Card U3 (claim 1511) DONE 2026-08-14** — the ADR 0008 D3 error/usage
-    contract, mechanically enforced: one `usage: <cmd> <args>` (registry
-    single usage string via `print_usage`, reused for sub-verb misuse), one
-    `error: <actionable>` (`err_prefix`) across every refusal/failure site,
-    one `unknown command '<x>' -- try 'help'`. The byte-exact misuse
-    transcript now asserts all three shapes, and three deterministic host
-    fuzz tests (tokenizer / arbitrary argv / full editor+shell input path)
-    prove no handler panics. The full-path fuzz found + this card fixed a
-    latent U2 width bug: `remember_line`'s `@min(hist_count, hist_capacity
-    - 1)` inferred **u4** and overflowed at the 16th distinct history entry
-    (explicit `usize` anchor + a fill-past-capacity regression test). Live
-    help + live transcript gates re-run green.
-    **Card U5 (claim 0935) DONE 2026-08-14** — the ADR 0008 D4 chrome: a
-    white 3-px focus ring on the focused window (focus changes repaint),
-    title bars (name + owning pid) on user windows, `win cycle` + the
-    host-tested Alt+Tab decode for keyboard cycling; the new gate
-    `tools/verify-live-win-hig.sh` PASS 8/8 on VZ (scale-aware pixel
-    proof: ring on the focused window, terminal edge not ringed, the
-    title bar). **Card U4 (claim 4993) BLOCKED at the live seam** — the
-    guest side (click = focus + raise, the cursor, the axis mapping) is
-    host-tested and the runner `--pointer` seam landed, but five
-    synthesized pointer delivery routes all produced zero guest pointer
-    reports (hardware contract); the real-mouse observation and the
-    Accessibility-granted CG route are the recorded follow-ups. A latent
-    out-of-bounds write in `text.zig`'s render (the tiny-canvas host
-    test) was found and fixed (render is now canvas-bounded).
-    **Card U6 (claim 8323) DONE 2026-08-15** — the ADR 0008 D5 first-boot
-    experience: refreshed `about` with modern architecture realities (GICv3,
-    processes, FAT32, networking, windows, xHCI input), new `welcome` (alias
-    `tour`) guided walkthrough of the system, and a deterministic boot MOTD
-    status line (`motd: aarch64 el1 kernel live; scheduler, uaccess, fs, net, gfx, xhci armed.`);
-    class A transcript gate `tools/verify-transcript.sh` and live help gate
-    re-run green. The post-M8 candidate roadmap
-    (Milestone 9: Interactive EL0 Events, Milestone 10: Userland Filesystem ABI,
-    Milestone 11: Desktop Platform & GUI Apps, Milestone 12: Network Apps) is
-    structured in `docs/roadmap.md` (claim 4951).
-    **Card U7 (claim 2990) DONE 2026-08-15** — the ADR 0008 D5 `sysinfo` support
-    snapshot: canonical `sysinfo` command in `kernel/src/monitor.zig` (growing
-    registry 42 -> 43) unifying system, cpu/timer, memory, allocator,
-    scheduler, processes, storage, networking, graphics, and input diagnostics;
-    transcript fixture regenerated; class A gate `tools/verify-transcript.sh`,
-    unit tests, and live help gate re-run green.
-    **Card U8 (claim 2649) DONE 2026-08-15** — the ADR 0008 Card U8 persistent
-    settings engine: `kernel/src/settings.zig` provides in-memory key-value
-    configuration (`hostname`, `prompt`, `theme`, `scrollback`) backed by
-    `SETTINGS.TXT` on the DATA FAT32 partition; `cmd_settings` in `kernel/src/monitor.zig`
-    (growing registry 43 -> 44) implements `list`, `get`, `set`, `reset` verbs;
-    kernel boot initializes settings from the DATA partition, and `kernel/src/shell.zig`
-    dynamically renders the configured prompt. New class-B gate `tools/verify-live-settings.sh`
-    PASS 1/1 on VZ (two boots against same disk image: sets `hostname=elephant-box` and
-    custom prompt, fresh reboot confirms custom prompt and persisted hostname loaded).
-    **Milestone Eight usability cards U0–U8 are complete.**
+**Next is M17 — desktop completeness** (`docs/m17-desktop-completeness.md`, issues #212–#228, Arc1/Arc2):
+completable widgets (Checkbox/Toggle, ProgressBar, ScrollView, etc.), context menus, drag-to-resize,
+tray/dock/arc2 interactions. See `docs/march-arc2.md` and the claim index for active work.
+Wishlist items 13/14/17 remain deferred per `docs/roadmap.md`.
 
-The command layer above is portable; `docs/archive/march-m15.md` step 15's filesystem-command **deferral is superseded 2026-08-09** — first by the pre-exit ESP file window (claim 3475) and then, **on the same day, by the real FAT32 storage driver (claim 6420)**: `ls`/`cat`/`write` now read and write the live ESP's FAT volume through a virtio-blk transport, so files persist on the disk itself and **no storage driver remains deferred**. The allocator, interrupts, first tasks, EL0 boundary, syscall ABI, uaccess, per-task address spaces, lifecycle, ESP exec, and blocking syscalls are all complete; **milestone three is closed 2026-08-10 (tag `m3-userspace`, claim 0707)**.
+## Assumptions & gaps (checked against merged `main`)
 
-## Assumptions & gaps in this plan (checked against the merged `main`)
-
-- **ADR 0004 now exists and matches the plan's citation.** It is the
-  milestone-two kernel-proper ADR; its console is polled TX-only with
-  explicitly "no RX path" — exactly the constraint the plan warned about
-  ("VZ may expose only a virtio console rather than a simple MMIO UART").
-  The console identity on VZ is **observed** — a modern virtio-pci device
-  (claim 0013, bus 0 D5 `0x1af4/0x1043`, BAR `0x100010000`); the transport is
-  armed pre-exit and pre-exit TX works (claims 0013/0017). Post-MMU access
-  to that transport was blocked (claims 0018/0020) until claim 1517 fixed
-  the underlying start-level mismatch; post-MMU TX is now **observed**
-  (banner + memory-map + terminal state in `vm-serial.log`, claim 1517).
-  The virtio console's register layout is **[observed]** for the driven
-  queues — queue 1 TX (claim 1517) and queue 0 RX (claim 6684, live
-  keystrokes end to end) — see `docs/hardware-contract.md`.
-- **Runner serial input was `nil`; it is now a real handle in `--console`
-  mode.** The evidence path (`zig build run`) still uses
-  `VZFileHandleSerialPortAttachment(fileHandleForReading: nil, ...)`
-  unchanged; the M1.5 `--console` mode (landed 2026-08-06) wires a stdin
-  pipe as `fileHandleForReading` and forwards host bytes into it
-  (evidence: `artifacts/m15-host-console-gate.txt`).
-- **Output observation: evidence path still file-polls; console mode
-  streams.** `zig build run` still re-reads the serial log
-  (`Data(contentsOf:)`) on a timer — unchanged, evidence semantics intact.
-  The M1.5 `--console` mode uses a pipe-based duplex attachment and tees
-  guest output live to the terminal and the log (no full-log reloads).
-- **"256 MiB detected"** matches the runner's configured
-  `memorySize = 256 * 1024 * 1024` (unchanged on merged `main`); `mem`
-  should derive it from the captured map, not hardcode it.
-- **The kernel is post-Boot-Services and never returns.** `ExitBootServices`
-  is called (ADR 0004), `x3` is the handoff v2 struct (not the ESP root),
-  and the kernel ends in a WFE loop. Consequences baked into the steps
-  above: no UEFI Serial I/O protocol probe, no `GetMemoryMap`, no Simple
-  File System — the monitor is the terminal loop's payload.
-- **VZ firmware quirks still apply:** `ConOut` is not routed to the virtio
-  serial port or framebuffer, but the kernel drives the virtio console
-  itself — post-MMU virtio TX is now reliable (claim 1517, `zig build run`
-  passes; MMU-takeover, device identity, and post-MMU TX are [observed]
-  per claims 0010/0013/0020/0021/1517, and the RX-side register layout is
-  [observed] for the receive queue (claim 6684); see
-  `hardware-contract.md`). Transcript tests: `zig build
-  test-console` (class A mock) gates on bytes the shell actually emitted;
-  the live `vm-serial.log` assertion is the separate class-B gate
-  (`live-transcript-rx`, claim 6684 — `bash tools/verify-live-transcript.sh`
-  passes: live RX observed end to end, re-verified at `4ca9fb4` by claim
-  7392) and is not proven by mock or NVRAM bytes.
+- **ADR 0004 console:** polled TX-only virtio-pci (DID 0x1043, BAR 0x100010000, post-MMU TX fixed claim 1517, RX claim 6684).
+- **Runner serial input:** evidence path `VZFileHandleSerialPortAttachment(nil)` unchanged; `--console` wires stdin (M1.5).
+- **Memory:** `memorySize = 256 MiB`; `mem` derives from captured map.
+- **Kernel is post-ExitBootServices, never returns** (handoff v2 in x3, ends in WFE loop).
+- **Firmware quirks:** `ConOut` not routed to virtio; kernel drives console itself. See `hardware-contract.md`.
 
 ## Multiagent coordination
 
-This repo is developed by multiple agents and humans, sometimes on the same
-day (e.g. PR #8's M1.5 tracker and PR #10's gate evidence landed within
-hours of each other and collided; PR #12/#13 collided again on the same
-changelog section). The rules below make that safe. They are **binding**
-(mirrored in `AGENTS.md`).
+Multiple agents/humans develop this repo concurrently. Binding rules (mirrored in `AGENTS.md`):
 
-### Rules
-
-1. **Claim before you start.** Any non-trivial work gets a claim file in
-   [`docs/claims/`](claims/README.md) and a log entry in
-   [`docs/logs/`](logs/README.md) *before* code is written. Unclaimed work
-   is fair game; claimed work is not.
-2. **One editor per file at a time.** If two agents need the same file, the
-   second waits, or merges through the integration branch — never both edit
-   `kernel/src/main.zig` (or this file's tracked sections) simultaneously.
-3. **Append-only logs, one per branch.** The changelog is split by branch
-   under `docs/logs/<branch>.md` so parallel appends cannot collide.
-   Append-only: never rewrite or delete an entry. Corrections are *new*
-   entries that reference the old one.
-4. **Update on completion (and on blockers).** Flip your claim file's
-   status and append a log entry when done; append one when blocked so the
-   next agent doesn't repeat the attempt.
-5. **Own your evidence.** Every entry cites `artifacts/` files. No
-   observed claim without a saved log.
-6. **Doc edits go through this file.** Status prose lives here; other docs
-   link to it. If you must touch `README.md`/`roadmap.md`/`testing.md`,
-   prefer pointer-level changes and put the substance here.
-7. **Never hand-edit a generated index.** The claim and log index tables
-   in `docs/claims/README.md` / `docs/logs/README.md` are **generated**
-   from the claim/log files by `tools/status/refresh-indexes.sh` — create
-   your file, run the script, done. `tools/verify-coordination.sh`
-   (`just verify-coordination`, also CI) fails if the indexes drift from
-   the files, so a stale hand-edit cannot slip through a merge.
+1. **Claim before you start.** Non-trivial work → `docs/claims/<NNNN>-<slug>.md` + `docs/logs/<branch>.md` before code.
+2. **One editor per file at a time.** Second waiter merges via integration branch; never concurrent edits to `kernel/src/main.zig`.
+3. **Append-only logs, one per branch.** `docs/logs/<branch>.md`; corrections are new entries.
+4. **Update on completion/blockers.** Flip claim status and append log; blocked entries prevent repeat attempts.
+5. **Own your evidence.** Every `artifacts/` claim cites a saved log.
+6. **Doc edits go through this file.** Substance here; other docs are pointers.
+7. **Never hand-edit a generated index.** `docs/claims/README.md` / `docs/logs/README.md` are generated by `tools/status/refresh-indexes.sh`; CI `tools/verify-coordination.sh` fails on drift.
 
 ### Active claims
 
-> **How to claim:** copy `docs/claims/TEMPLATE.md` to
-> `docs/claims/<NNNN>-<slug>.md`, fill it in, set Status to `🔄 <branch>`
-> **before** starting work, then run
-> `bash tools/status/refresh-indexes.sh` — the claim and log index tables
-> are **generated from the files**, so claiming never edits a shared
-> table and never edits this file. Flip your claim file to `✅` (evidence)
-> or `⛔` (note why) on completion and re-run the script. Unclaimed
-> (`⬜`) claims are fair game; `🔄`/`✅` claims are not. The **canonical
-> index with status is [`docs/claims/README.md`](claims/README.md)**;
-> this file holds no claims table, so parallel claims never touch the
-> same lines here.
+> **How to claim:** copy `docs/claims/TEMPLATE.md` to `docs/claims/<NNNN>-<slug>.md`, set Status `🔄 <branch>` before work,
+> run `bash tools/status/refresh-indexes.sh`. Flip to `✅`/`⛔` on completion and re-run. Canonical index: [`docs/claims/README.md`](claims/README.md).
 
 ## Changelog (append-only, per branch)
 
-> **Moved 2026-08-06:** the changelog used to live in this file; every
-> agent appended here and parallel work collided (PR #8/#10, then
-> PR #12/#13). It is now **sharded by branch** under `docs/logs/` — each
-> branch owns its own append-only log, so cross-branch merges never touch
-> the same lines. All entries — including the final two stragglers,
-> migrated verbatim to `docs/logs/agent-buffy-m15-commands.md` on
-> 2026-08-06 — live in the per-branch logs; **this file holds no changelog
-> entries**, so there is nothing here for parallel agents to collide on.
-> See the [log index](logs/README.md) for the format and each branch's
-> file.
+> Sharded by branch under `docs/logs/` (see [log index](logs/README.md)). This file holds no changelog entries;
+> parallel agents never collide here. The final two stragglers were migrated verbatim to `docs/logs/agent-buffy-m15-commands.md` 2026-08-06.
 
 ## Immediate gate work (prerequisites for M1.5)
 
-Ordered; each has a prompt doc and a gate. **Status lives in the claim
-files** (canonical index: [`docs/claims/README.md`](claims/README.md)) —
-this section is pointer-level only, so a gate passing never needs an edit
-here.
+> All three items are **done** (historical). Bad-handoff gate ✅ 2026-08-06 (claim 0001, shim LR fix),
+> VZ serial gate ✅ 2026-08-08 (claim 1517, T0SZ=16+TLBI), marker fallback ✅ 2026-08-07 (claim 0009).
+> Status lives in claim files; this section is pointer-level only. See [`docs/claims/README.md`](claims/README.md).
 
-1. **Root-cause the failing bad-handoff gate** — `docs/m2-bad-handoff-fix-prompt.md`.
-   The kernel must return `0x2` to the loader on a bad magic; it does not.
-   This unblocks M1.5 hard gate 1 and possibly the serial gate too.
-   **Gate:** `bash tools/verify-bad-handoff.sh` exits 0 with
-   `RC.TXT` → `kernel_rc=0x2`; good path unregressed.
-   **Status:** see [`0001-bad-handoff-gate`](claims/0001-bad-handoff-gate.md)
-   — ✅ fixed 2026-08-06 (root cause: shim LR clobber; evidence in the
-   claim and `docs/logs/agent-buffy-m2-badhandoff-fix.md`). The serial gate
-   (item 2) no longer shares that suspect.
-2. **Run the VZ serial/MMU gate** — `docs/m2-vz-serial-gate-prompt.md`
-   (M1.5 march step 8's "confirm the serial console", `docs/archive/march-m15.md`).
-   **Gate:** exact banner `DipshitOS kernel has seized control.`,
-   `memory-map descriptors=0x...`, and `kernel terminal state` in
-   `vm-serial.log`; then flip matching `[inferred] → [observed]` entries in
-   `docs/hardware-contract.md`.
-   **Status:** see [`0002-vz-serial-gate`](claims/0002-vz-serial-gate.md) — ⛔ blocked (historical) → **PASS 2026-08-08 (claim 1517):** the gate (`zig build run`) now exits 0 with the exact banner, `memory-map descriptors=0x…`, and `kernel terminal state` in `vm-serial.log`. Root cause of the historical block (virtio TX hangs post-MMU) was the translation start-level mismatch; fixed in production with T0SZ=16 + `tlbi vmalle1` at the switch (claims 6460/7896/1517). The post-exit-safe fallback (claim 0015, `bash tools/verify-nvram-console.sh`) remains as the NVRAM channel for nvram-console builds.
-3. **If no usable serial device exists on VZ**, implement the ADR 0004 D4
-   fixed-memory-marker fallback (host-side dump of the kernel's BSS
-   `takeover_marker`). **Gate:** saved host-side dump matching the `M2_*`
-   markers. **Status:** ✅ done 2026-08-07 — see
-   [`0009-m2-marker-fallback`](claims/0009-m2-marker-fallback.md) and
-   `artifacts/m2-marker-gate.txt`. The gate passes with the **NVRAM ladder**
-   form (the memory-dump form is impossible on VZ — guest RAM is not
-   host-mapped, observed), and the ladder discriminated the serial gate:
-   every run ended at `M2_MAPD!` — the death was in the **MMU-takeover
-   window**. That death is now **root-caused and fixed by claim 0010** (see
-   the [gate table](#gate-status)): the ladder advances
-   `M2_MAPD! → M2_MMUP! → M2_SERIA`, the switch completes, and the probe
-   runs to completion finding no usable device in the declared windows
-   (that reading is superseded by claim 0013 — the real console is a
-   virtio-pci device outside them, see the gate table). See claim 0009 for
-   the original ladder and claim 0010 for the root cause and fix.
+## Housekeeping conventions
 
-## Housekeeping conventions (keep the project nice as it evolves)
-
-- **This file is the single source of truth for status and coordination.**
-  Update the moment a gate passes, fails, or a milestone completes; claim
-  work before starting (claim file in `docs/claims/`); append to your
-  branch's log under `docs/logs/`; regenerate the indexes with
-  `bash tools/status/refresh-indexes.sh` after creating either. Run
-  `bash tools/verify-coordination.sh` before opening a PR.
-- **Evidence lives under `artifacts/`** (gitignored, except `.gitkeep`).
-  Every gate claim names its evidence file and date. No evidence, no
-  "observed".
-- **Facts vs. inference:** hypotheses are marked `(inferred)`; hardware
-  tags flip only with matching saved logs (AGENTS.md evidence rules).
-- **Branch hygiene:** feature work on `agent/...` branches, PRs against
-  `main` (ADR 0003, `docs/branch-protection.md`); M1.5 work merges through
-  the integration branch.
-- **OS junk:** `.DS_Store` files are gitignored; delete them when noticed
-  (`find . -name .DS_Store -not -path './.git/*' -delete`).
+- **This file is the single source of truth** for status/coordination. Update on gate/milestone changes; claim first; log per branch; refresh indexes.
+- **Evidence under `artifacts/`** (gitignored). No evidence ⇒ not observed.
+- **Facts vs inference:** hypotheses `(inferred)`; hardware tags flip only with saved logs.
+- **Branch hygiene:** `agent/...` branches → PR against `main` (ADR 0003).
+- **OS junk:** `.DS_Store` gitignored; `find . -name .DS_Store -delete` when noticed.
 
 ## Related docs
 
-- [`roadmap.md`](roadmap.md) — milestone planning (the "where we're going"), plus the maintainer's **wishlist / hope chest** (destinations, not commitments) at the end.
-- [`archive/march-m15.md`](archive/march-m15.md) — archived M1.5 per-step tracker and best-agent split (milestone closed 2026-08-09; the active tracker is [`march-m3.md`](march-m3.md)).
-- [`march-m4.md`](march-m4.md) — milestone-four per-card tracker and best-agent split (cards 1 + 2 + 3 + 3a + 3b landed 2026-08-10 — entropy/CSPRNG + ASLR (claims 2665/3693), the general non-ESP filesystem (claim 3678), the process abstraction (claim 3848, `procs`), the concurrent-processes follow-on (claim 0826, two live user processes), and the long-lived-process follow-on 2 (claim 4613, a never-exiting COUNTER.BIN among live peers); network sketched as ⬜).
-- [`march-m6.md`](march-m6.md) — milestone-six per-card tracker (graphics: the **Driving Award** window manager + **Road Pops** terminal, sketched 2026-08-12; not committed).
-- [`march-m7.md`](march-m7.md) — milestone-seven per-card tracker (input: XHCI + USB HID + keycode decode).
-- [`march-m8.md`](march-m8.md) — milestone-eight per-card tracker (usability: ADR 0008 + the U0–U8 ladder).
-- [`testing.md`](testing.md) — the verification sequence and evidence policy.
-- [`logs/README.md`](logs/README.md) — per-branch append-only changelog index (the sharded changelog).
-- [`claims/README.md`](claims/README.md) — per-claim files index (the sharded claims table, generated).
-- [`../tools/status/`](../tools/status/) — index generator (`refresh-indexes.sh`) and the coordination gate (`verify-coordination.sh`).
-- [`hardware-contract.md`](hardware-contract.md) — hardware assumptions, `[observed]`/`[inferred]`.
-- [`architecture.md`](architecture.md) — components and data flow.
-- [`archive/m2-bad-handoff-fix-prompt.md`](archive/m2-bad-handoff-fix-prompt.md) — archived prompt: fix the failing failure-path gate (now passing; root cause was the shim LR clobber).
-- [`archive/m2-vz-serial-gate-prompt.md`](archive/m2-vz-serial-gate-prompt.md) — archived prompt: run the VZ serial/MMU gate.
-- [`archive/m15-host-plumbing-prompt.md`](archive/m15-host-plumbing-prompt.md) — archived prompt (agent A): duplex serial attachment, teeing, terminal safety, `zig build console`.
-- [`archive/m15-commands-prompt.md`](archive/m15-commands-prompt.md) — archived prompt (agent C): command registry, identity/memory/utility/control commands, personality (mock-console based).
-- [`decisions/`](decisions/) — ADRs 0001–0008 (binding: 0004 kernel proper, 0005 runtime-built function tables, 0006 MMU debt boundary, 0007 syscall ABI, 0008 human interface guidelines).
-- [`archive/`](archive/) — archived one-shot prompts and frozen designs from completed milestones (M2 kernel proper, M1.5 shell/commands + T0SZ experiment + tracker, M3 syscall ABI / march tracker / ragshit dogfood / runner scripted input).
-- [`calm-lavoisier-memorial.md`](calm-lavoisier-memorial.md) — memorial to the `calm-lavoisier` workspace (Day 1 through Milestone 14).
-- [`../AGENTS.md`](../AGENTS.md) — project rules (now including the multiagent coordination rules).
+- [`roadmap.md`](roadmap.md) — planning + wishlist (destinations, not commitments).
+- [`march-m3.md`](march-m3.md) — M3 tracker (active, allocator→sleep).
+- [`march-m4.md`](march-m4.md) — M4 tracker (entropy/CSPRNG, GFS, processes).
+- [`march-m5.md`](march-m5.md) — M5 tracker (network stack).
+- [`march-m6.md`](march-m6.md) — M6 tracker (graphics).
+- [`march-m7.md`](march-m7.md) — M7 tracker (input).
+- [`march-m8.md`](march-m8.md) — M8 tracker (usability, ADR 0008).
+- [`march-m9.md`](march-m9.md) — M9 tracker (app events, ADR 0009).
+- [`march-m10.md`](march-m10.md) — M10 tracker (FS ABI, ADR 0010).
+- [`march-m11.md`](march-m11.md) — M11 tracker (desktop, ADR 0011).
+- [`march-m12.md`](march-m12.md) — M12 tracker (net apps, ADR 0012).
+- [`march-m13.md`](march-m13.md) — M13 tracker (files+apps).
+- [`march-m14.md`](march-m14.md) — M14 tracker (shared services).
+- [`march-m15.md`](march-m15.md) — M15 tracker (audio).
+- [`march-m16.md`](march-m16.md) — M16 tracker (kernel consolidation).
+- [`m17-desktop-completeness.md`](m17-desktop-completeness.md) — M17 next (widgets, menus, resize, tray).
+- [`testing.md`](testing.md) — verification sequence & evidence policy.
+- [`hardware-contract.md`](hardware-contract.md) — hardware `[observed]`/`[inferred]`.
+- [`architecture.md`](architecture.md) — components & data flow.
+- [`gate-inventory.md`](gate-inventory.md) — gate classes (A/B/C/D).
+- [`archive/`](archive/) — archived one-shots + `status-m*-detail.md` per closed milestone (M3–M16) + frozen designs.
+- [`claims/README.md`](claims/README.md) / [`logs/README.md`](logs/README.md) — generated indexes.
+- [`../AGENTS.md`](../AGENTS.md) — project rules (incl. multiagent coordination).
+
