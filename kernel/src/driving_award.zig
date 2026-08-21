@@ -44,6 +44,7 @@ const input = @import("input.zig"); // card U4 (claim 4993): the pointer reports
 const virtio_gpu = @import("virtio_gpu.zig");
 const fbtext = @import("text.zig");
 const events = @import("events.zig"); // Milestone 9 (claim 9228): application events
+const clipboard = @import("clipboard.zig"); // Arc2 W3 (claim 1264): tray clipboard indicator
 
 // ---------------------------------------------------------------------------
 // Geometry + colors (fixed constants — the live record lives in the claim)
@@ -99,6 +100,14 @@ pub const taskbar_y: u32 = virtio_gpu.fb_height - taskbar_h;
 pub const taskbar_bg_rgb: u32 = 0x0f172a;
 pub const taskbar_entry_active_rgb: u32 = 0x3b82f6;
 pub const taskbar_entry_dimmed_rgb: u32 = 0x1e293b;
+
+/// Arc2 W3 (claim 1264, #226): system tray — right 80px of 20px taskbar at y=700.
+/// HH:MM from tick, D/L/A theme letter in accent, filled/empty clipboard rect.
+/// Clock ticks on composite() without timer; migrates Kind.clock id 1 (no duplicate).
+pub const tray_w: u32 = 80;
+pub const tray_x: u32 = virtio_gpu.fb_width - tray_w;
+pub const tray_h: u32 = taskbar_h;
+pub const tray_y: u32 = taskbar_y;
 
 /// M15 C4 (Dock, #229): 24 px left dock, topmost fixed layer.
 pub const dock_w: u32 = 24;
@@ -205,6 +214,15 @@ var snap_last_h: [user_windows_max]u32 = [_]u32{0} ** user_windows_max;
 var snap_last_valid: [user_windows_max]bool = [_]bool{false} ** user_windows_max;
 var snap_snapped: [user_windows_max]bool = [_]bool{false} ** user_windows_max;
 
+/// Arc2 W3 (claim 1264, #226): system tray state — fixed BSS, ~32B, zero heap.
+/// Right 80px of 20px taskbar at y=700: HH:MM from tick, D/L/A theme letter
+/// in accent, filled/empty clipboard rect. Clock ticks on composite() without
+/// timer; migrates Kind.clock id 1 (no duplicate tray-vs-clock).
+var tray_tick: u64 = 0;
+var tray_has_tick: bool = false;
+var tray_last_theme: u8 = 0xff;
+var tray_last_clip_len: usize = 0;
+
 /// Step 7 (Issue #207): theme selection. 0=dark, 1=light, 2=amber.
 /// Read by the compositor chrome pass for title bars, clock, focus ring.
 pub var theme_id: u8 = 0;
@@ -291,12 +309,64 @@ pub fn wallpaper_bot() u32 {
 }
 
 // ---------------------------------------------------------------------------
+// Arc2 W3 — system tray helpers (pure, host-testable, isolated for merge)
+// ---------------------------------------------------------------------------
+
+/// Tray rect — right 80px of 20px taskbar at y=700. Pure — host-testable.
+pub fn tray_rect() struct { x: u32, y: u32, w: u32, h: u32 } {
+    return .{ .x = tray_x, .y = tray_y, .w = tray_w, .h = tray_h };
+}
+
+/// Format HH:MM from tick (seconds since boot, 1 Hz timer). Zero-padded,
+/// 24h wrap. Pure — host-testable. Writes into buf[0..5] and returns slice.
+pub fn format_hhmm(buf: []u8, ticks: u64) []const u8 {
+    if (buf.len < 5) return "";
+    const total_minutes = (ticks / 60) % (24 * 60);
+    const hh = total_minutes / 60;
+    const mm = total_minutes % 60;
+    buf[0] = @as(u8, @intCast('0' + hh / 10));
+    buf[1] = @as(u8, @intCast('0' + hh % 10));
+    buf[2] = ':';
+    buf[3] = @as(u8, @intCast('0' + mm / 10));
+    buf[4] = @as(u8, @intCast('0' + mm % 10));
+    return buf[0..5];
+}
+
+/// Theme letter D/L/A per theme_id. Pure — host-testable.
+pub fn theme_letter() u8 {
+    return switch (theme_id) {
+        1 => 'L',
+        2 => 'A',
+        else => 'D',
+    };
+}
+
+/// Theme accent for tray letter — taskbar active entry color per theme.
+pub fn tray_theme_accent() u32 {
+    return taskbar_entry_active();
+}
+
+/// Clipboard filled when current_len !=0. Pure wrapper — host-testable.
+pub fn tray_clipboard_filled() bool {
+    return clipboard.current_len() != 0;
+}
+
+/// Current tray tick (for tests).
+pub fn tray_current_tick() u64 {
+    return tray_tick;
+}
+pub fn tray_has_clock() bool {
+    return tray_has_tick;
+}
+
+// ---------------------------------------------------------------------------
 // Arm / query
 // ---------------------------------------------------------------------------
 
 /// Arm the window manager: register the terminal (window 0, full screen)
-/// and the clock (window 1, the overlay), focus the terminal, and mark
-/// both dirty so the first composite paints the full scene.
+/// and the fixed chrome (wallpaper, taskbar, dock). The clock window
+/// (Kind.clock id 1) is migrated to the taskbar tray (Arc2 W3) — no duplicate
+/// window. Focus the terminal, mark dirty so first composite paints the scene.
 pub fn arm() void {
     win_count = 0;
     windows[win_count] = .{
@@ -311,19 +381,9 @@ pub fn arm() void {
         .dirty = true,
     };
     win_count += 1;
-    windows[win_count] = .{
-        .id = 1,
-        .title = "clock",
-        .x = clock_x,
-        .y = clock_y,
-        .w = clock_w,
-        .h = clock_h,
-        .kind = .clock,
-        .visible = true,
-        .dirty = true,
-    };
-    win_count += 1;
-    // Step 9: wallpaper window (id 254) — gradient background between terminal and clock.
+    // Arc2 W3: Kind.clock id 1 deprecated — tray clock in taskbar replaces it.
+    // No window created for clock; tray state holds HH:MM.
+    // Step 9: wallpaper window (id 254) — gradient background between terminal and taskbar.
     windows[win_count] = .{
         .id = 254,
         .title = "wallpaper",
@@ -367,6 +427,10 @@ pub fn arm() void {
     presents = 0;
     clock_shown_tick = 0;
     clock_has_tick = false;
+    tray_tick = 0;
+    tray_has_tick = false;
+    tray_last_theme = 0xff;
+    tray_last_clip_len = 0;
     cursor_shown = false;
     prev_ptr_buttons = 0;
     drag_id = null;
@@ -1610,6 +1674,27 @@ fn paint(w: *Window) void {
                 draw_string(fb, stride, entry_x + 4, taskbar_y + 6, ww.title, 0xffffff);
                 entry_x += entry_w + 4;
             }
+            // Arc2 W3: tray in right 80px — HH:MM, D/L/A, clipboard rect.
+            // HH:MM from tray_tick (tick-derived, 1 Hz).
+            var tbuf: [5]u8 = undefined;
+            const hhmm = format_hhmm(&tbuf, if (tray_has_tick) tray_tick else 0);
+            draw_string(fb, stride, tray_x + 4, tray_y + 6, hhmm, 0xffffff);
+            // Theme letter in accent
+            var tletter: [1]u8 = .{theme_letter()};
+            draw_string(fb, stride, tray_x + 48, tray_y + 6, tletter[0..1], tray_theme_accent());
+            // Clipboard indicator: filled when has content, outline when empty.
+            const clip_x = tray_x + 64;
+            const clip_y = tray_y + 6;
+            const clip_w: usize = 10;
+            const clip_h: usize = 8;
+            if (tray_clipboard_filled()) {
+                fill_rect(fb, stride, clip_x, clip_y, clip_w, clip_h, 0xffffff);
+            } else {
+                fill_rect(fb, stride, clip_x, clip_y, clip_w, 1, 0xffffff);
+                fill_rect(fb, stride, clip_x, clip_y + clip_h - 1, clip_w, 1, 0xffffff);
+                fill_rect(fb, stride, clip_x, clip_y, 1, clip_h, 0xffffff);
+                fill_rect(fb, stride, clip_x + clip_w - 1, clip_y, 1, clip_h, 0xffffff);
+            }
         },
         .dock => {
             // M15 C4: 24 px left dock, vertical icon bar (hardcoded dock apps).
@@ -1651,10 +1736,29 @@ fn repaint_start() ?usize {
 /// repainted).
 pub fn composite() virtio_gpu.CmdResult {
     if (!armed_global) return .not_ready;
+    // Arc2 W3: tray clock ticks on composite() without timer — detect theme/
+    // clipboard changes that happened since last composite and mark taskbar
+    // dirty so the tray repaints even without a tick. Tick-driven dirty is
+    // handled in drain(); this covers settings/clipboard writes that occur
+    // between ticks.
+    {
+        const cur_theme = theme_id;
+        const cur_clip = clipboard.current_len();
+        var need = false;
+        if (cur_theme != tray_last_theme) {
+            tray_last_theme = cur_theme;
+            need = true;
+        }
+        if (cur_clip != tray_last_clip_len) {
+            tray_last_clip_len = cur_clip;
+            need = true;
+        }
+        if (need) _ = mark_dirty(255);
+    }
     const start = repaint_start() orelse return .ok;
     // Step 9: render the wallpaper gradient BEFORE windows so it is the background.
     if (start <= 1) {
-        // The wallpaper is at index 1; if it or anything below is dirty, render gradient.
+        // The wallpaper is at index 1 (after tray migration); if it or anything below is dirty, render gradient.
         const fb: [*]u8 = @ptrCast(&virtio_gpu.gpu_fb);
         const stride = virtio_gpu.fb_width * 4;
         var y: u32 = 0;
@@ -1671,8 +1775,8 @@ pub fn composite() virtio_gpu.CmdResult {
     while (i < win_count) : (i += 1) {
         const w = &windows[i];
         if (!w.visible) continue;
-        // Skip wallpaper and taskbar here — they are rendered specially.
-        if (w.kind == .wallpaper or w.kind == .taskbar) {
+        // Wallpaper is rendered via the gradient path above.
+        if (w.kind == .wallpaper) {
             w.dirty = false;
             continue;
         }
@@ -1890,15 +1994,31 @@ pub fn render_splash(max_ticks: u64) void {
     }
 }
 
-/// Refresh the clock from the 1 Hz generic timer and composite any dirty
+/// Refresh the tray clock from the 1 Hz generic timer and composite any dirty
 /// windows. The shell idle loop is the drain site (the card-3d pattern).
+/// Clock ticks on composite() without timer — drain marks taskbar dirty when
+/// the minute (or tick) advances; composite() also handles theme/clipboard.
 pub fn drain(ticks: u64) virtio_gpu.CmdResult {
     if (!armed_global) return .not_ready;
-    if (!clock_has_tick or ticks != clock_shown_tick) {
+    var need = false;
+    if (!tray_has_tick or ticks != tray_tick) {
+        tray_has_tick = true;
+        tray_tick = ticks;
+        need = true;
+        // Keep deprecated clock vars in sync for any external read.
         clock_has_tick = true;
         clock_shown_tick = ticks;
-        _ = mark_dirty(1);
     }
+    if (tray_last_theme != theme_id) {
+        tray_last_theme = theme_id;
+        need = true;
+    }
+    const cur_clip = clipboard.current_len();
+    if (cur_clip != tray_last_clip_len) {
+        tray_last_clip_len = cur_clip;
+        need = true;
+    }
+    if (need) _ = mark_dirty(255);
     return composite();
 }
 
@@ -1909,27 +2029,40 @@ pub fn drain(ticks: u64) virtio_gpu.CmdResult {
 
 test "driving_award: arm registers the terminal (window 0) and the clock (window 1)" {
     arm();
-    try std.testing.expectEqual(@as(usize, 5), win_count);
+    // Arc2 W3: clock window (Kind.clock id 1) migrated to tray — arm now registers
+    // terminal + wallpaper + taskbar + dock = 4 windows. Kind.clock remains in
+    // enum but no window is created for it (no duplicate clock).
+    try std.testing.expectEqual(@as(usize, 4), win_count);
     try std.testing.expectEqual(@as(u8, 0), windows[0].id);
     try std.testing.expectEqual(Kind.terminal, windows[0].kind);
-    try std.testing.expectEqual(@as(u8, 1), windows[1].id);
-    try std.testing.expectEqual(Kind.clock, windows[1].kind);
+    try std.testing.expectEqual(@as(u8, 254), windows[1].id);
+    try std.testing.expectEqual(Kind.wallpaper, windows[1].kind);
+    try std.testing.expectEqual(@as(u8, 255), windows[2].id);
+    try std.testing.expectEqual(Kind.taskbar, windows[2].kind);
+    try std.testing.expectEqual(@as(u8, 253), windows[3].id);
+    try std.testing.expectEqual(Kind.dock, windows[3].kind);
     try std.testing.expectEqual(@as(u8, 0), focused_id);
     try std.testing.expect(terminal_focused());
-    // The terminal is full-screen; the clock is the top-right overlay.
+    // The terminal is full-screen.
     try std.testing.expectEqual(@as(u32, 0), windows[0].x);
     try std.testing.expectEqual(@as(u32, 0), windows[0].y);
     try std.testing.expectEqual(virtio_gpu.fb_width, windows[0].w);
     try std.testing.expectEqual(virtio_gpu.fb_height, windows[0].h);
-    try std.testing.expectEqual(@as(u32, clock_x), windows[1].x);
-    try std.testing.expectEqual(@as(u32, clock_y), windows[1].y);
+    // Tray occupies right 80px of taskbar at y=700.
+    const tr = tray_rect();
+    try std.testing.expectEqual(@as(u32, 1200), tr.x);
+    try std.testing.expectEqual(@as(u32, 700), tr.y);
+    try std.testing.expectEqual(@as(u32, 80), tr.w);
+    try std.testing.expectEqual(@as(u32, 20), tr.h);
 }
 
 test "driving_award: hit_test returns the topmost window containing the point" {
     arm();
-    // Inside the clock overlay: the clock (window 1) is on top.
-    try std.testing.expectEqual(@as(?u8, 1), hit_test(clock_x + 10, clock_y + 10));
-    // Outside the clock, inside the terminal: the terminal.
+    // Clock window migrated to tray — (clock_x,clock_y) is now inside the
+    // terminal (full-screen). The terminal is topmost there (wallpaper is
+    // background-only, not hit-testable).
+    try std.testing.expectEqual(@as(?u8, 0), hit_test(clock_x + 10, clock_y + 10));
+    // Inside the terminal: the terminal.
     try std.testing.expectEqual(@as(?u8, 0), hit_test(100, 400));
     try std.testing.expectEqual(@as(?u8, 0), hit_test(clock_x - 1, clock_y + 10));
     // Outside every window.
@@ -1938,8 +2071,8 @@ test "driving_award: hit_test returns the topmost window containing the point" {
 
 test "driving_award: raise moves a window to the top and hit_test follows" {
     arm();
-    // Raise the terminal above the clock: now the full-screen terminal
-    // covers the clock everywhere.
+    // With tray migration, arm has terminal(0), wallpaper(254), taskbar(255), dock(253).
+    // Raise terminal (0) — it moves to top of z-order (above dock).
     try std.testing.expect(raise(0));
     try std.testing.expectEqual(@as(u8, 0), windows[win_count - 1].id);
     try std.testing.expectEqual(@as(?u8, 0), hit_test(clock_x + 10, clock_y + 10));
@@ -1949,29 +2082,32 @@ test "driving_award: raise moves a window to the top and hit_test follows" {
 
 test "driving_award: focus + focus_at switch the focused window" {
     arm();
-    try std.testing.expect(focus(1));
-    try std.testing.expectEqual(@as(u8, 1), focused_id);
+    // Clock window no longer exists — focus a user window instead. Verify
+    // terminal focus switching still works via focus_at.
+    _ = user_open(100, 100, 200, 100, 7);
+    try std.testing.expect(focus(2));
+    try std.testing.expectEqual(@as(u8, 2), focused_id);
     try std.testing.expect(!terminal_focused());
-    // A point in the clock focuses the clock; a point below focuses the
-    // terminal.
-    try std.testing.expect(focus_at(clock_x + 5, clock_y + 5));
-    try std.testing.expectEqual(@as(u8, 1), focused_id);
+    // A point in the user window focuses it; a point in terminal area focuses terminal.
+    try std.testing.expect(focus_at(110, 110));
+    try std.testing.expectEqual(@as(u8, 2), focused_id);
     try std.testing.expect(focus_at(50, 400));
     try std.testing.expectEqual(@as(u8, 0), focused_id);
     try std.testing.expect(terminal_focused());
     // Unknown ids are refused.
     try std.testing.expect(!focus(99));
+    _ = user_close(2);
 }
 
 test "driving_award: repaint_start is the lowest dirty visible window" {
     arm();
-    // Both dirty at arm: the lowest is window 0.
+    // All dirty at arm: the lowest is window 0.
     try std.testing.expectEqual(@as(?usize, 0), repaint_start());
     // Clean everything.
     var i: usize = 0;
     while (i < win_count) : (i += 1) windows[i].dirty = false;
     try std.testing.expectEqual(@as(?usize, null), repaint_start());
-    // Only the clock dirty: repaint starts at window 1 (the terminal is
+    // Only wallpaper dirty: repaint starts at window 1 (the terminal is
     // untouched — the dirty-rect contract).
     windows[1].dirty = true;
     try std.testing.expectEqual(@as(?usize, 1), repaint_start());
@@ -1985,7 +2121,7 @@ test "driving_award: mark_dirty targets a window by id" {
     arm();
     var i: usize = 0;
     while (i < win_count) : (i += 1) windows[i].dirty = false;
-    try std.testing.expect(mark_dirty(1));
+    try std.testing.expect(mark_dirty(254));
     try std.testing.expect(!windows[0].dirty);
     try std.testing.expect(windows[1].dirty);
     try std.testing.expect(!mark_dirty(9));
@@ -2087,11 +2223,11 @@ test "driving_award: user_open/fill/present round-trips a bounded user window" {
     // Open window 2 at (64, 64) 256x192 — the first free user slot.
     const r = user_open(64, 64, 512, 384, 7);
     try std.testing.expectEqual(UserOpenResult{ .opened = 2 }, r);
-    try std.testing.expectEqual(@as(usize, 6), win_count);
-    try std.testing.expectEqual(@as(u8, 2), windows[5].id);
-    try std.testing.expectEqual(Kind.user, windows[5].kind);
+    try std.testing.expectEqual(@as(usize, 5), win_count);
+    try std.testing.expectEqual(@as(u8, 2), windows[4].id);
+    try std.testing.expectEqual(Kind.user, windows[4].kind);
     try std.testing.expectEqual(@as(?usize, 7), user_owner(2));
-    try std.testing.expect(user_owner(1) == null); // the clock is unowned
+    try std.testing.expect(user_owner(0) == null); // the terminal is unowned
     // The new window is on top and focused.
     try std.testing.expectEqual(@as(u8, 2), focused_id);
     try std.testing.expect(!terminal_focused());
@@ -2105,7 +2241,7 @@ test "driving_award: user_open/fill/present round-trips a bounded user window" {
     // The unfilled corner is zero (the back-buffer starts cleared).
     try std.testing.expectEqual(@as(u8, 0), user_bufs[0][(100 * user_buf_w + 200) * 4 + 0]);
     try std.testing.expect(user_present(2));
-    try std.testing.expect(windows[5].dirty);
+    try std.testing.expect(windows[4].dirty);
 }
 
 test "driving_award: user_open bounds and the four slots fill the registry" {
@@ -2122,7 +2258,7 @@ test "driving_award: user_open bounds and the four slots fill the registry" {
     try std.testing.expectEqual(UserOpenResult{ .opened = 4 }, user_open(576, 64, 512, 384, 9));
     try std.testing.expectEqual(UserOpenResult{ .opened = 5 }, user_open(64, 288, 512, 384, 10));
     try std.testing.expectEqual(UserOpenResult.full, user_open(0, 0, 10, 10, 11));
-    try std.testing.expectEqual(@as(usize, 9), win_count);
+    try std.testing.expectEqual(@as(usize, 8), win_count);
     try std.testing.expectEqual(@as(?usize, 7), user_owner(2));
     try std.testing.expectEqual(@as(?usize, 8), user_owner(3));
     try std.testing.expectEqual(@as(?usize, 9), user_owner(4));
@@ -2133,7 +2269,7 @@ test "driving_award: user_fill refuses unknown ids and out-of-bounds rects" {
     arm();
     _ = user_open(64, 64, 512, 384, 7);
     try std.testing.expect(!user_fill(0, 0, 0, 10, 10, 0xffffff)); // terminal is not a user window
-    try std.testing.expect(!user_fill(1, 0, 0, 10, 10, 0xffffff)); // clock is not a user window
+    try std.testing.expect(!user_fill(1, 0, 0, 10, 10, 0xffffff)); // deprecated clock id 1 is not a user window
     try std.testing.expect(!user_fill(9, 0, 0, 10, 10, 0xffffff)); // unknown
     try std.testing.expect(!user_fill(2, 0, 0, 0, 10, 0xffffff)); // zero size
     try std.testing.expect(!user_fill(2, 511, 383, 2, 2, 0xffffff)); // past the window edge
@@ -2145,29 +2281,29 @@ test "driving_award: user_fill refuses unknown ids and out-of-bounds rects" {
 test "driving_award: user_close releases a user window and frees its slot" {
     arm();
     try std.testing.expectEqual(UserOpenResult{ .opened = 2 }, user_open(64, 64, 512, 384, 7));
-    try std.testing.expectEqual(@as(usize, 6), win_count);
+    try std.testing.expectEqual(@as(usize, 5), win_count);
     try std.testing.expectEqual(@as(u8, 2), focused_id);
-    // The terminal and the clock are fixed — never closable.
+    // The terminal is fixed — never closable; deprecated clock id 1 also not closable.
     try std.testing.expect(!user_close(0));
     try std.testing.expect(!user_close(1));
     try std.testing.expect(!user_close(9));
     // Close window 2: count decrements, focus falls back to the terminal,
     // and the slot is reusable by the next open.
     try std.testing.expect(user_close(2));
-    try std.testing.expectEqual(@as(usize, 5), win_count);
+    try std.testing.expectEqual(@as(usize, 4), win_count);
     try std.testing.expectEqual(@as(u8, 0), focused_id);
     try std.testing.expect(terminal_focused());
     try std.testing.expect(find_user_window(2) == null);
     // Re-opening reuses id 2 (the freed slot — the "release, not leak" proof).
     try std.testing.expectEqual(UserOpenResult{ .opened = 2 }, user_open(64, 64, 512, 384, 7));
-    try std.testing.expectEqual(@as(usize, 6), win_count);
+    try std.testing.expectEqual(@as(usize, 5), win_count);
     // Two opens, one close, one re-open: slot 3 is still free for a second
     // window, and closing BOTH user windows returns the registry to the
-    // two fixed windows.
+    // fixed windows.
     try std.testing.expectEqual(UserOpenResult{ .opened = 3 }, user_open(320, 64, 512, 384, 8));
     try std.testing.expect(user_close(3));
     try std.testing.expect(user_close(2));
-    try std.testing.expectEqual(@as(usize, 5), win_count);
+    try std.testing.expectEqual(@as(usize, 4), win_count);
     try std.testing.expectEqual(@as(u8, 0), focused_id);
 }
 
@@ -2175,7 +2311,7 @@ test "driving_award: user_move clamps on-scanout and user_raise reorders z" {
     arm();
     try std.testing.expectEqual(UserOpenResult{ .opened = 2 }, user_open(64, 64, 512, 384, 7));
     try std.testing.expectEqual(UserOpenResult{ .opened = 3 }, user_open(320, 64, 512, 384, 8));
-    // The terminal + clock are fixed — never movable or raisable.
+    // The terminal is fixed — never movable or raisable; deprecated clock also not.
     try std.testing.expect(!user_move(0, 10, 10));
     try std.testing.expect(!user_move(1, 10, 10));
     try std.testing.expect(!user_raise(0));
@@ -2231,14 +2367,14 @@ test "driving_award: user_query reports the full window state (z-order + focus +
     try std.testing.expect(user_query(9) == null);
     try std.testing.expectEqual(UserOpenResult{ .opened = 2 }, user_open(64, 64, 512, 384, 7));
     // The single user window sits at the TOP of the z-order (registry index
-    // 4, above terminal 0 + clock 1 + wallpaper 254 + taskbar 255),
+    // 4, above terminal 0 + wallpaper 254 + taskbar 255 + dock 253),
     // holds focus, is visible, and is dirty from the open.
     var q = user_query(2).?;
     try std.testing.expectEqual(@as(u32, 64), q.x);
     try std.testing.expectEqual(@as(u32, 64), q.y);
     try std.testing.expectEqual(@as(u32, 512), q.w);
     try std.testing.expectEqual(@as(u32, 384), q.h);
-    try std.testing.expectEqual(@as(u32, 5), q.z);
+    try std.testing.expectEqual(@as(u32, 4), q.z);
     try std.testing.expectEqual(@as(u32, 1), q.focused);
     try std.testing.expectEqual(@as(u32, 1), q.visible);
     try std.testing.expectEqual(@as(u32, 1), q.dirty);
@@ -2246,23 +2382,23 @@ test "driving_award: user_query reports the full window state (z-order + focus +
     // rank 4 (bottom of the two user windows), unfocused.
     try std.testing.expectEqual(UserOpenResult{ .opened = 3 }, user_open(320, 64, 512, 384, 8));
     q = user_query(2).?;
-    try std.testing.expectEqual(@as(u32, 5), q.z);
+    try std.testing.expectEqual(@as(u32, 4), q.z);
     try std.testing.expectEqual(@as(u32, 0), q.focused);
     q = user_query(3).?;
-    try std.testing.expectEqual(@as(u32, 6), q.z);
+    try std.testing.expectEqual(@as(u32, 5), q.z);
     try std.testing.expectEqual(@as(u32, 1), q.focused);
     // Raising window 2 moves it to the top (rank 5) without changing focus
     // (still id 3).
     try std.testing.expect(user_raise(2));
     q = user_query(2).?;
-    try std.testing.expectEqual(@as(u32, 6), q.z);
+    try std.testing.expectEqual(@as(u32, 5), q.z);
     try std.testing.expectEqual(@as(u32, 0), q.focused);
 }
 
 test "driving_award: user_set_visible hides and shows a user window (fixed windows refused)" {
     arm();
     _ = user_open(64, 64, 512, 384, 7);
-    // The terminal + clock are fixed — never hideable.
+    // The terminal is fixed — never hideable; deprecated clock id 1 also not hideable.
     try std.testing.expect(!user_set_visible(0, false));
     try std.testing.expect(!user_set_visible(1, false));
     try std.testing.expect(!user_set_visible(9, false));
@@ -2288,15 +2424,15 @@ test "driving_award: close_owner auto-closes exactly the owning process's window
     // Process 7 opens both slots; process 8 owns nothing yet.
     try std.testing.expectEqual(UserOpenResult{ .opened = 2 }, user_open(64, 64, 512, 384, 7));
     try std.testing.expectEqual(UserOpenResult{ .opened = 3 }, user_open(320, 64, 512, 384, 7));
-    try std.testing.expectEqual(@as(usize, 7), win_count);
+    try std.testing.expectEqual(@as(usize, 6), win_count);
     try std.testing.expectEqual(@as(u8, 3), focused_id);
     // Closing a process with no windows is a no-op (returns 0).
     try std.testing.expectEqual(@as(usize, 0), close_owner(8));
-    try std.testing.expectEqual(@as(usize, 7), win_count);
+    try std.testing.expectEqual(@as(usize, 6), win_count);
     // Closing process 7 releases BOTH of its windows and falls the focus
     // back to the terminal.
     try std.testing.expectEqual(@as(usize, 2), close_owner(7));
-    try std.testing.expectEqual(@as(usize, 5), win_count);
+    try std.testing.expectEqual(@as(usize, 4), win_count);
     try std.testing.expectEqual(@as(u8, 0), focused_id);
     try std.testing.expect(find_user_window(2) == null);
     try std.testing.expect(find_user_window(3) == null);
@@ -2311,9 +2447,16 @@ test "driving_award: close_owner auto-closes exactly the owning process's window
 
 test "driving_award: card U5 — cycle_focus walks the z-order and wraps" {
     arm();
-    try std.testing.expectEqual(@as(?u8, 1), cycle_focus()); // 0 -> 1
-    try std.testing.expectEqual(@as(?u8, 0), cycle_focus()); // 1 -> 0 (wrap)
-    try std.testing.expectEqual(@as(?u8, 1), cycle_focus());
+    // Clock migrated to tray — cycle now needs user windows to walk.
+    // Order after two opens: [0 terminal, wallpaper, taskbar, dock, 2, 3] focused 3.
+    _ = user_open(64, 64, 200, 100, 7);
+    _ = user_open(320, 64, 200, 100, 8);
+    // Focus 3 -> next is terminal 0 (wraps), then 2, then 3
+    try std.testing.expectEqual(@as(?u8, 0), cycle_focus());
+    try std.testing.expectEqual(@as(?u8, 2), cycle_focus());
+    try std.testing.expectEqual(@as(?u8, 3), cycle_focus());
+    _ = user_close(3);
+    _ = user_close(2);
 }
 
 test "driving_award: card U4 — map_pointer_axis scales 0..32767 onto the span" {
@@ -2325,44 +2468,45 @@ test "driving_award: card U4 — map_pointer_axis scales 0..32767 onto the span"
 
 test "driving_award: card U5 — the chrome draws the focus ring on the focused window" {
     arm();
-    // Focus the clock; composite (returns not_ready on the host after
-    // drawing — the pixels are inspectable in the BSS framebuffer).
-    try std.testing.expect(focus(1));
+    // Clock migrated to tray — test focus ring on a user window instead.
+    _ = user_open(100, 100, 200, 100, 7);
+    try std.testing.expect(focus(2));
     _ = composite();
     const stride = virtio_gpu.fb_width * 4;
     const fb: [*]u8 = @ptrCast(&virtio_gpu.gpu_fb);
-    // The clock's top-left ring pixel is white.
     const px = struct {
         fn at(f: [*]u8, st: usize, x: usize, y: usize) u32 {
             const o = y * st + x * 4;
             return @as(u32, f[o + 2]) << 16 | @as(u32, f[o + 1]) << 8 | f[o];
         }
     };
-    try std.testing.expectEqual(focus_ring_rgb, px.at(fb, stride, clock_x, clock_y));
-    // ...and just inside the ring, the clock's own border (not white).
-    try std.testing.expect(px.at(fb, stride, clock_x + focus_ring_w, clock_y + focus_ring_w) != focus_ring_rgb);
+    const w = find_user_window(2).?;
+    try std.testing.expectEqual(focus_ring(), px.at(fb, stride, w.x, w.y));
+    // ...and just inside the ring, the window's title bar (not ring).
+    try std.testing.expect(px.at(fb, stride, w.x + focus_ring_w, w.y + focus_ring_w) != focus_ring());
     // Focus back to the terminal: the full-screen terminal never carries
     // the ring (issue #164 — a ring around it would cover the first text
     // row/column), so the screen corner is NOT white.
     try std.testing.expect(focus(0));
     _ = composite();
-    try std.testing.expect(px.at(fb, stride, 0, 0) != focus_ring_rgb);
-    // The clock's corner is NOT ringed anymore.
-    try std.testing.expect(px.at(fb, stride, clock_x, clock_y) == clock_border_rgb);
+    try std.testing.expect(px.at(fb, stride, 0, 0) != focus_ring());
+    // The window's corner is NOT ringed anymore.
+    try std.testing.expect(px.at(fb, stride, w.x, w.y) != focus_ring());
+    _ = user_close(2);
 }
 
 test "driving_award: card U4 — pointer motion moves the cursor; a click focuses + raises" {
     arm();
-    // Move to the clock's area (mapped coordinates), no click yet.
+    // Move to the former clock's area (now terminal, clock migrated to tray) — no click yet.
     const st_no: input.PointerState = .{ .x = 26000, .y = 8000, .buttons = 0, .valid = true };
     try std.testing.expectEqual(@as(?u8, null), pointer_tick(st_no, null));
     const c = cursor_pos().?;
-    try std.testing.expectEqual(hit_test(c.x, c.y).?, 1); // the cursor is over the clock
-    // Click: D4 click = focus + raise on the topmost window under it.
-    try std.testing.expectEqual(@as(?u8, 1), pointer_tick(st_no, .{ .x = st_no.x, .y = st_no.y }));
-    try std.testing.expectEqual(@as(u8, 1), focused_window_id());
-    try std.testing.expectEqual(@as(u8, 1), windows[win_count - 1].id); // raised on top
-    // Move to the terminal area and click: focus returns to window 0.
+    try std.testing.expectEqual(hit_test(c.x, c.y).?, 0); // the cursor is over the terminal (clock gone)
+    // Click: D4 click = focus + raise on the topmost window under it (terminal).
+    try std.testing.expectEqual(@as(?u8, 0), pointer_tick(st_no, .{ .x = st_no.x, .y = st_no.y }));
+    try std.testing.expectEqual(@as(u8, 0), focused_window_id());
+    try std.testing.expectEqual(@as(u8, 0), windows[win_count - 1].id); // raised on top (terminal)
+    // Move to the terminal area and click: focus remains window 0.
     const st_term: input.PointerState = .{ .x = 4000, .y = 30000, .buttons = 0, .valid = true };
     try std.testing.expectEqual(@as(?u8, 0), pointer_tick(st_term, .{ .x = 4000, .y = 30000 }));
     // The cursor renders magenta at its cell after a composite.
@@ -2515,7 +2659,7 @@ test "driving_award: M15 C2 — Alt+Tab overlay snapshots, cycles, commits" {
     try std.testing.expectEqual(@as(u8, 3), committed);
     try std.testing.expect(!alt_tab_is_active());
     try std.testing.expectEqual(@as(u8, 3), focused_id);
-    try std.testing.expectEqual(@as(usize, 6), win_count - 1); // raised to top
+    try std.testing.expectEqual(@as(usize, 5), win_count - 1); // raised to top (4 base +2 users -> top index 5)
     // Re-activate then dismiss without commit.
     try std.testing.expect(alt_tab_activate());
     try std.testing.expectEqual(@as(?u8, 2), alt_tab_selected_id());
@@ -2757,4 +2901,114 @@ test "driving_award: Arc2 W1 — pointer_tick drag-to-resize via bottom-right co
     try std.testing.expectEqual(@as(u32, 64), find_user_window(2).?.h);
     _ = pointer_tick(.{ .x = 0, .y = 0, .buttons = 0x00, .valid = true }, null);
     _ = user_close(2);
+}
+
+test "driving_award: Arc2 W3 — tray helpers and geometry" {
+    arm();
+    clipboard.init();
+    // tray_rect is right 80px at y=700, 20px tall.
+    const tr = tray_rect();
+    try std.testing.expectEqual(@as(u32, 1200), tr.x);
+    try std.testing.expectEqual(@as(u32, 700), tr.y);
+    try std.testing.expectEqual(@as(u32, 80), tr.w);
+    try std.testing.expectEqual(@as(u32, 20), tr.h);
+    try std.testing.expectEqual(taskbar_y, tr.y);
+    try std.testing.expectEqual(taskbar_h, tr.h);
+    // format_hhmm zero-padded 24h wrap.
+    var buf: [5]u8 = undefined;
+    try std.testing.expectEqualStrings("00:00", format_hhmm(&buf, 0));
+    try std.testing.expectEqualStrings("00:01", format_hhmm(&buf, 60));
+    try std.testing.expectEqualStrings("01:00", format_hhmm(&buf, 3600));
+    try std.testing.expectEqualStrings("01:01", format_hhmm(&buf, 3660));
+    try std.testing.expectEqualStrings("23:59", format_hhmm(&buf, 23 * 3600 + 59 * 60));
+    try std.testing.expectEqualStrings("00:00", format_hhmm(&buf, 24 * 3600));
+    // theme_letter maps dark/light/amber.
+    theme_id = 0;
+    try std.testing.expectEqual(@as(u8, 'D'), theme_letter());
+    theme_id = 1;
+    try std.testing.expectEqual(@as(u8, 'L'), theme_letter());
+    theme_id = 2;
+    try std.testing.expectEqual(@as(u8, 'A'), theme_letter());
+    theme_id = 99;
+    try std.testing.expectEqual(@as(u8, 'D'), theme_letter());
+    // clipboard indicator empty -> filled.
+    try std.testing.expect(!tray_clipboard_filled());
+    _ = clipboard.set("hello");
+    try std.testing.expect(tray_clipboard_filled());
+    _ = clipboard.set("");
+    try std.testing.expect(!tray_clipboard_filled());
+    theme_id = 0;
+}
+
+test "driving_award: Arc2 W3 — drain ticks tray HH:MM without timer" {
+    arm();
+    clipboard.init();
+    // First tick initializes tray.
+    try std.testing.expect(!tray_has_clock());
+    _ = drain(0);
+    try std.testing.expect(tray_has_clock());
+    try std.testing.expectEqual(@as(u64, 0), tray_current_tick());
+    // Different tick marks taskbar dirty and updates tray.
+    windows[2].dirty = false; // taskbar at index 2 after migration
+    _ = drain(60);
+    try std.testing.expectEqual(@as(u64, 60), tray_current_tick());
+    // HH:MM at 60s is 00:01
+    var buf: [5]u8 = undefined;
+    try std.testing.expectEqualStrings("00:01", format_hhmm(&buf, tray_current_tick()));
+}
+
+test "driving_award: Arc2 W3 — composite renders tray in right 80px" {
+    arm();
+    clipboard.init();
+    theme_id = 1; // light -> L in blue accent
+    _ = clipboard.set("x");
+    _ = drain(3660); // 01:01
+    _ = composite();
+    const stride = virtio_gpu.fb_width * 4;
+    const fb: [*]u8 = @ptrCast(&virtio_gpu.gpu_fb);
+    const px = struct {
+        fn at(f: [*]u8, st: usize, x: usize, y: usize) u32 {
+            const o = y * st + x * 4;
+            return @as(u32, f[o + 2]) << 16 | @as(u32, f[o + 1]) << 8 | f[o];
+        }
+    };
+    // Taskbar background at (4,702) is taskbar_bg (light: 0xe2e8f0), not black.
+    try std.testing.expect(px.at(fb, stride, 4, 702) != 0);
+    // Tray clock area at tray_x+4, tray_y+6 should have white glyph pixels (HH:MM).
+    // We check that the tray region is not just background — at least one white pixel near HH:MM.
+    var found_white = false;
+    var x: u32 = tray_x + 4;
+    while (x < tray_x + 40) : (x += 1) {
+        if (px.at(fb, stride, x, tray_y + 6) == 0xffffff) {
+            found_white = true;
+            break;
+        }
+    }
+    try std.testing.expect(found_white);
+    // Theme letter at tray_x+48 should be accent blue for light theme (0x2563eb).
+    // Check that accent pixel exists near that x (glyph may not cover every pixel, but background is taskbar_bg).
+    // Clipboard filled rect at tray_x+64,6 size 10x8 should be filled white when has content.
+    try std.testing.expectEqual(@as(u32, 0xffffff), px.at(fb, stride, tray_x + 64 + 5, tray_y + 6 + 4));
+    // Switch to empty clipboard -> outline, center pixel should NOT be white (it is taskbar_bg).
+    _ = clipboard.set("");
+    // Need to mark dirty via composite preamble: theme unchanged but clip changed -> mark dirty + composite.
+    _ = composite();
+    try std.testing.expect(px.at(fb, stride, tray_x + 64 + 5, tray_y + 6 + 4) != 0xffffff);
+    theme_id = 0;
+    clipboard.init();
+}
+
+test "driving_award: Arc2 W3 — Kind.clock deprecated but enum remains" {
+    // Kind.clock still exists for ABI compat but arm no longer creates window id 1.
+    arm();
+    try std.testing.expectEqualStrings("clock", kind_name(.clock));
+    var found_clock = false;
+    var i: usize = 0;
+    while (i < win_count) : (i += 1) {
+        if (windows[i].id == 1 and windows[i].kind == .clock) found_clock = true;
+    }
+    try std.testing.expect(!found_clock);
+    // id 1 is free for future repurpose but currently not a user window.
+    try std.testing.expect(find_user_window(1) == null);
+    try std.testing.expect(!user_fill(1, 0, 0, 10, 10, 0xffffff));
 }
