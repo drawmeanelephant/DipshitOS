@@ -345,6 +345,8 @@ pub const AppState = struct {
     entry_count: usize = 0,
 
     list: FileList = FileList.init(list_area),
+    // GH #218 ScrollView proof — vertical scrollbar for the file list (pure ui.zig, no ABI)
+    scroll_view: ui.ScrollView = ui.ScrollView.init(list_area, 0),
 
     // Current directory path (session-only, C7 breadcrumb).
     current_path: [path_max]u8 = [_]u8{0} ** path_max,
@@ -394,6 +396,27 @@ pub const AppState = struct {
         return self.current_path[0..self.current_path_len];
     }
 
+    // GH #218: keep ScrollView in sync with FileList (pixels <-> rows)
+    pub fn sync_scroll_view(self: *AppState) void {
+        const content_h: u32 = @as(u32, @intCast(self.entry_count)) * list_row_h;
+        self.scroll_view.set_content_height(content_h);
+        const target: u32 = @as(u32, @intCast(self.list.scroll)) * list_row_h;
+        if (target > self.scroll_view.max_offset()) {
+            self.scroll_view.offset = self.scroll_view.max_offset();
+        } else {
+            self.scroll_view.offset = target;
+        }
+    }
+
+    fn sync_list_from_scroll_view(self: *AppState) void {
+        const row = self.scroll_view.offset / list_row_h;
+        if (row != self.list.scroll) {
+            self.list.scroll = row;
+            self.list.ensure_visible(self.entry_count);
+            self.sync_scroll_view();
+        }
+    }
+
     /// Enumerate current_path via `sys_dir_list` (slot 27). Emits a
     /// `file: listing N entries` marker for the live gate.
     pub fn list_directory(self: *AppState) void {
@@ -406,6 +429,7 @@ pub const AppState = struct {
         }
         self.entry_count = @intCast(res);
         self.list.select(0, self.entry_count);
+        self.sync_scroll_view();
         // Auto-load preview for the new selection (C7).
         self.refresh_preview();
         self.set_status("Listed");
@@ -680,6 +704,8 @@ pub const AppState = struct {
             const is_sel = if (self.list.selected) |s| s == i else false;
             draw_list_row(win, row, name, entry, is_sel);
         }
+        // GH #218: ScrollView thumb for the file list (proportional, draggable)
+        self.scroll_view.draw(win);
     }
 
     fn draw_details(self: *const AppState, win: u32) void {
@@ -801,6 +827,13 @@ pub const AppState = struct {
         if (self.btn_delete.handle_event(ev)) {
             return self.delete_selected();
         }
+        // GH #218: ScrollView thumb drag / track click / wheel — must sync before and after
+        self.sync_scroll_view();
+        if (self.scroll_view.handle_event(ev)) {
+            self.sync_list_from_scroll_view();
+            self.refresh_preview();
+            return true;
+        }
         if (ev.kind == ui.MOUSE_DOWN and (ev.flags & ui.BTN_LEFT) != 0) {
             // Breadcrumb click has priority over list click (title bar).
             if (breadcrumb_rect.contains(ev.arg0, ev.arg1)) {
@@ -813,6 +846,7 @@ pub const AppState = struct {
             }
             const changed = self.list.click(ev.arg0, ev.arg1, self.entry_count);
             if (changed) {
+                self.sync_scroll_view();
                 self.refresh_preview();
                 return true;
             }
@@ -821,6 +855,11 @@ pub const AppState = struct {
                 // Single-click already handled; double-click could open dir but open does it.
                 return false;
             }
+            return false;
+        }
+        // Also handle drag-move/up outside MOUSE_DOWN for ScrollView thumb
+        if (ev.kind == ui.MOUSE_MOVE or ev.kind == ui.MOUSE_UP) {
+            // Already handled via scroll_view above; if not dragging, no-op
             return false;
         }
         return false;
@@ -856,16 +895,19 @@ pub const AppState = struct {
         switch (keycode) {
             0x52 => { // Up
                 self.list.move_by(-1, self.entry_count);
+                self.sync_scroll_view();
                 self.refresh_preview();
                 return true;
             },
             0x51 => { // Down
                 self.list.move_by(1, self.entry_count);
+                self.sync_scroll_view();
                 self.refresh_preview();
                 return true;
             },
             0x4a => { // Home
                 self.list.select(0, self.entry_count);
+                self.sync_scroll_view();
                 self.refresh_preview();
                 return true;
             },
@@ -873,8 +915,27 @@ pub const AppState = struct {
                 if (self.entry_count > 0) {
                     self.list.select(self.entry_count - 1, self.entry_count);
                 }
+                self.sync_scroll_view();
                 self.refresh_preview();
                 return true;
+            },
+            0x4b => { // PageUp — GH #218 via ScrollView
+                self.sync_scroll_view();
+                if (self.scroll_view.handle_event(ev)) {
+                    self.sync_list_from_scroll_view();
+                    self.refresh_preview();
+                    return true;
+                }
+                return false;
+            },
+            0x4e => { // PageDown — GH #218 via ScrollView
+                self.sync_scroll_view();
+                if (self.scroll_view.handle_event(ev)) {
+                    self.sync_list_from_scroll_view();
+                    self.refresh_preview();
+                    return true;
+                }
+                return false;
             },
             else => {},
         }
@@ -951,7 +1012,7 @@ pub export fn _start() callconv(.c) noreturn {
             break;
         }
 
-        if (ev.kind == ui.MOUSE_DOWN or ev.kind == ui.MOUSE_UP or ev.kind == ui.MOUSE_MOVE) {
+        if (ev.kind == ui.MOUSE_DOWN or ev.kind == ui.MOUSE_UP or ev.kind == ui.MOUSE_MOVE or ev.kind == ui.MOUSE_SCROLL) {
             dirty = app.handle_mouse_events(&ev) or dirty;
         } else if (ev.kind == ui.KEY_DOWN) {
             dirty = app.handle_keyboard_event(&ev) or dirty;
@@ -963,7 +1024,7 @@ pub export fn _start() callconv(.c) noreturn {
                 ui.win_close(win);
                 ui.exit_process(exit_status);
             }
-            if (ev.kind == ui.MOUSE_DOWN or ev.kind == ui.MOUSE_UP or ev.kind == ui.MOUSE_MOVE) {
+            if (ev.kind == ui.MOUSE_DOWN or ev.kind == ui.MOUSE_UP or ev.kind == ui.MOUSE_MOVE or ev.kind == ui.MOUSE_SCROLL) {
                 dirty = app.handle_mouse_events(&ev) or dirty;
             } else if (ev.kind == ui.KEY_DOWN) {
                 dirty = app.handle_keyboard_event(&ev) or dirty;
