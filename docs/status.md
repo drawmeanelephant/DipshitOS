@@ -51,7 +51,7 @@
 
 > **Narratives for M3–M16** are archived per milestone under `docs/archive/status-m{N}-detail.md` (issue #262).
 > Each archive preserves the verbatim pre-compression table row plus march/claim pointers; the live table above is the one-line summary.
-> Per-milestone detail trackers: `docs/march-m*.md`, `docs/roadmap.md`.
+> Per-milestone detail trackers: `docs/march-m*.md`; the completed milestones' roadmap plans are archived under `docs/archive/roadmap-m{N}.md` (issue #264).
 
 Resolved loose end: the milestone-one `KERNEL.TXT` corruption is **fixed**
 (ADR 0002 — the loader now places image content at `base+0`; the write is

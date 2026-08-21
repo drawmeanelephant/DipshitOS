@@ -26,8 +26,9 @@ enumeration + HID** (port reset, address assignment, config descriptors,
 interrupt-IN endpoints, HID boot-protocol report parsing) → **I3 the event
 FIFO + keycode decode** (bounded BSS FIFO feeding Road Pops' line editor +
 pointer). The runner's flag-gated `--input` mode (claim 3868, OFF by default)
-already attaches the configs; the full milestone sketch with non-goals is in
-[`docs/roadmap.md`](roadmap.md).
+already attaches the configs; the full milestone sketch with non-goals is
+archived at
+[`docs/archive/roadmap-m7.md`](archive/roadmap-m7.md).
 
 Legend: ⬜ not started · 🔄 in progress · ✅ done · ⛔ blocked (note why).
 

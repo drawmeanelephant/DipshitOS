@@ -11,7 +11,10 @@
 > ✅ only with real observed class-B evidence, never code-complete alone.
 
 Milestone five is the network milestone: the last "Eventually" item in
-[`docs/roadmap.md`](roadmap.md) (the virtio surface table's Network row).
+[`docs/roadmap.md`](roadmap.md) (now archived at
+[`docs/archive/roadmap-m5.md`](archive/roadmap-m5.md); the virtio surface
+table's Network row is archived at
+[`docs/archive/roadmap-m7.md`](archive/roadmap-m7.md)).
 Milestone four is CLOSED (claim 2839, tag `m4-processes`) — the process/IPC
 foundations the network sketch depended on are landed. The rungs of the
 ladder, in order: **N1 virtio-net transport + TX** → N2 raw Ethernet RX →

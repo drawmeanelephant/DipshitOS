@@ -17,7 +17,9 @@ above the task pool (the program's image + address space + lifecycle + exit
 status as one object — with the concurrent-processes follow-on removing the
 last single-program constraint: two live user processes, each with its own
 root + pages + task). The remaining later-milestone item from
-[`docs/roadmap.md`](roadmap.md) (network) is sketched below as a ⬜ row so
+[`docs/roadmap.md`](roadmap.md) (network — now archived at
+[`docs/archive/roadmap-m5.md`](archive/roadmap-m5.md)) is sketched below as a
+⬜ row so
 the tracker shows the whole milestone-four horizon. **Milestone four is
 CLOSED 2026-08-11 (claim 2839, tag `m4-processes` at `9d7e4d5`): the full
 class A + class B gate set re-ran green at the candidate** — see row 5.
