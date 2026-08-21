@@ -57,6 +57,7 @@ pub const sys_notify_num: u64 = 51;
 pub const sys_drag_start_num: u64 = 48;
 pub const sys_drag_read_num: u64 = 55;
 pub const sys_win_move_to_workspace_num: u64 = 52;
+pub const sys_win_set_unsaved_num: u64 = 53;
 pub const sys_timer_cancel_num: u64 = 41;
 pub const sys_udp_listen_num: u64 = 9;
 pub const sys_udp_send_num: u64 = 10;
@@ -80,6 +81,9 @@ pub const EVENT_TIMER: u16 = 9;
 pub const WIN_RESIZE: u16 = 10;
 pub const MOUSE_RIGHT_DOWN: u16 = 11;
 pub const MOUSE_RIGHT_UP: u16 = 13;
+/// Arc4 #242 (ADR 0013 D2): unsaved-changes warning from compositor.
+/// arg0 = 0 (save), 1 (don't save), 2 (cancel).
+pub const WIN_UNSAVED: u16 = 17;
 
 pub const MOD_SHIFT: u16 = 0x0001;
 pub const MOD_CTRL: u16 = 0x0002;
@@ -412,6 +416,12 @@ pub fn drag_read(buf: []u8) usize {
 /// Arc4 #241: move the window to a different workspace (0..2).
 pub fn win_move_to_workspace(id: u32, ws: u32) bool {
     return syscall2(sys_win_move_to_workspace_num, id, ws) == 0;
+}
+
+/// Arc4 #242: mark or clear the unsaved-changes flag on a user window.
+/// When set, clicking the close button shows a Save/Don't Save/Cancel dialog.
+pub fn win_set_unsaved(id: u32, flag: bool) bool {
+    return syscall2(sys_win_set_unsaved_num, id, if (flag) 1 else 0) == 0;
 }
 
 pub fn wait_event(ev: *Event) i64 {
