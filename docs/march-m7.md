@@ -5,7 +5,7 @@
 > [`docs/status.md`](status.md) is the canonical source for milestone-level
 > facts, current gates, and what comes next. This file holds only
 > milestone-seven's per-card detail and collision-free agent split, following
-> the [`march-m5.md`](march-m5.md) / [`march-m6.md`](march-m6.md) pattern.
+> the [`march-m5.md`](archive/march-m5.md) / [`march-m6.md`](march-m6.md) pattern.
 > It was created 2026-08-13 when milestone six's G4 input card was re-scoped
 > into its own milestone (the claim-3868 observation — see below). A card's
 > row flips to ✅ only with real observed class-B evidence, never

@@ -1,3 +1,7 @@
+> ARCHIVED — frozen historical record; do not treat as an active plan.
+> Milestone five closed 2026-08-12; canonical status
+> lives in [`docs/status.md`](../status.md).
+
 # Milestone five march — networking (living tracker)
 
 ## Where we are

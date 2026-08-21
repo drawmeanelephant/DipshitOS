@@ -188,6 +188,7 @@ CI) fails if the table drifts from the claim files.
 | [5275-tick-driven-task-scheduler](5275-tick-driven-task-scheduler.md) | buffy (`agent/buffy/macos27-custom-virtio-spike`) | ✅ done |
 | [5357-tcp-retransmit](5357-tcp-retransmit.md) | buffy (`agent/buffy/m5-net-tcp-rto`) | ✅ DONE 2026-08-12 on `agent/buffy/m5-net-tcp-rto` (from merged main `6a8ec41` — the N10 merge; claim PR pending) |
 | [5416-n3-capstone-apps](5416-n3-capstone-apps.md) | buffy (`agent/buffy/m12-n3-capstone-apps`) | ✅ done |
+| [5512-archive-march-m4-m5-trackers](5512-archive-march-m4-m5-trackers.md) | oxalpha (`agent/oxalpha/archive-march-m4-m5`) | ✅ done |
 | [5725-m3-docs-reconcile-syscall-abi](5725-m3-docs-reconcile-syscall-abi.md) | Buffy (`agent/buffy/m3-docs-reconcile-syscall-abi`) | ✅ done 2026-08-10 |
 | [5776-u4-pointer-classb](5776-u4-pointer-classb.md) | buffy (`agent/buffy/m13-u4-pointer-classb`) | ✅ done (2026-08-16) — gate fixes landed in PR #174; exercised WITH trust (ptr-reports=0, confirming the claim-4769 activation wall); U4 stays class-C (claim 9015) |
 | [5795-pool-scale-seven](5795-pool-scale-seven.md) | Buffy (`agent/buffy/m4-pool-scale`) | ✅ done — landed 2026-08-11 (claim flipped after class-A |

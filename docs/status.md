@@ -104,8 +104,9 @@ byte-perfect and gated by `zig build run`).
 
 ## The march tracker (per milestone)
 
-> Per-milestone card detail lives in `docs/march-m*.md` (M3), `docs/march-m4.md` (M4), etc.,
-> and the archived `docs/archive/march-m15.md` (M1.5, closed 2026-08-09).
+> Per-milestone card detail lives in `docs/march-m*.md` (M3, M6–M16);
+> completed-milestone trackers are archived — `docs/archive/march-m4.md` (M4),
+> `docs/archive/march-m5.md` (M5), and `docs/archive/march-m15.md` (M1.5, closed 2026-08-09).
 > `docs/status.md` holds only milestone-level facts; update a card's row in its march file, never here.
 
 ## What comes next
@@ -168,8 +169,8 @@ Multiple agents/humans develop this repo concurrently. Binding rules (mirrored i
 
 - [`roadmap.md`](roadmap.md) — planning + wishlist (destinations, not commitments).
 - [`march-m3.md`](march-m3.md) — M3 tracker (active, allocator→sleep).
-- [`march-m4.md`](march-m4.md) — M4 tracker (entropy/CSPRNG, GFS, processes).
-- [`march-m5.md`](march-m5.md) — M5 tracker (network stack).
+- [`archive/march-m4.md`](archive/march-m4.md) — M4 tracker (entropy/CSPRNG, GFS, processes; archived).
+- [`archive/march-m5.md`](archive/march-m5.md) — M5 tracker (network stack; archived).
 - [`march-m6.md`](march-m6.md) — M6 tracker (graphics).
 - [`march-m7.md`](march-m7.md) — M7 tracker (input).
 - [`march-m8.md`](march-m8.md) — M8 tracker (usability, ADR 0008).
