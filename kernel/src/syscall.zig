@@ -75,7 +75,7 @@ const app_timers = @import("app_timers.zig"); // Milestone 14 (claim 7323): the 
 const virtio_snd = @import("virtio_snd.zig"); // Milestone 15 (claim 7636): the virtio-snd playback path behind sys_audio_*
 
 pub const slot_count: usize = 64;
-pub const implemented_count: usize = 51;
+pub const implemented_count: usize = 52;
 /// Card G6 (claim 0487) follow-on (slot 18): the fixed `sys_win_get` shape —
 /// four u32 LE words (x, y, w, h), 16 bytes, marshaled per call and copy_out'd
 /// through uaccess (the procs snapshot pattern).
@@ -214,6 +214,8 @@ pub const sys_win_resize: u64 = 47;
 pub const sys_win_raise_front: u64 = 49;
 /// Arc4 #238 (ADR 0013 D1): `sys_win_lower_back(id)` — slot 50.
 pub const sys_win_lower_back: u64 = 50;
+/// Arc4 #240 (ADR 0013 D1): `sys_notify(text_ptr, text_len, level)` — slot 51.
+pub const sys_notify: u64 = 51;
 
 pub const ErrorCode = enum(i64) {
     einval = -1,
@@ -342,6 +344,7 @@ fn ensure_table() *const [slot_count]Entry {
         table_storage[48] = .{ .name = "sys_drag_start", .handler = handle_enosys };
         table_storage[sys_win_raise_front] = .{ .name = "sys_win_raise_front", .handler = handle_win_raise_front };
         table_storage[sys_win_lower_back] = .{ .name = "sys_win_lower_back", .handler = handle_win_lower_back };
+        table_storage[sys_notify] = .{ .name = "sys_notify", .handler = handle_notify };
         table_ready = true;
     }
     return &table_storage;
@@ -821,6 +824,31 @@ fn handle_win_lower_back(args: Args, _: *exceptions.VectorFrame) u64 {
     if (args[0] > std.math.maxInt(u8)) return error_result(.einval);
     if (!win_owned_by_caller(@truncate(args[0]))) return error_result(.einval);
     if (!driving_award.user_lower_back(@truncate(args[0]))) return error_result(.einval);
+    return 0;
+}
+
+/// Arc4 #240 (slot 51): `sys_notify(text_ptr, text_len, level)` — post a
+/// desktop notification toast. `level` 0=info, 1=warning, 2=error.
+/// Copies up to 280 bytes through uaccess into the bounded notification
+/// FIFO (4 entries, drop-oldest). Returns 0; EINVAL for a non-process
+/// caller or level > 2; EFAULT for a bad pointer.
+fn handle_notify(args: Args, _: *exceptions.VectorFrame) u64 {
+    const pid = process.find_by_task(scheduler.current_id()) orelse return error_result(.einval);
+    _ = pid;
+    const text_addr = args[0];
+    const text_len = args[1];
+    const level: u8 = @truncate(args[2]);
+    if (level > 2) return error_result(.einval);
+    if (text_len > driving_award.notify_text_max) return error_result(.einval);
+    if (text_len == 0) {
+        // Empty notification is a no-op (honest).
+        return 0;
+    }
+    // Copy text through uaccess.
+    var buf: [driving_award.notify_text_max]u8 = undefined;
+    const copy_len: usize = @min(text_len, driving_award.notify_text_max);
+    if (uaccess.copy_in(buf[0..copy_len], text_addr, copy_len) != .ok) return error_result(.efault);
+    driving_award.notify_push(buf[0..copy_len], level);
     return 0;
 }
 
@@ -1444,7 +1472,7 @@ fn handle_tcp_close(_: Args, _: *exceptions.VectorFrame) u64 {
 
 /// Deterministic monitor output for the implemented rows and their counters.
 pub fn report(con: *console.Console) void {
-    con.puts("syscalls: slots=64 implemented=51\n");
+    con.puts("syscalls: slots=64 implemented=52\n");
     var number: u64 = 0;
     while (number < implemented_count) : (number += 1) {
         const info = entry_info(number).?;
@@ -1476,7 +1504,7 @@ fn capture_marshaled_args(args: Args, _: *exceptions.VectorFrame) u64 {
     return 0xcafe;
 }
 
-test "syscall: runtime table has 64 slots and fifty-one unique implemented rows" {
+test "syscall: runtime table has 64 slots and fifty-two unique implemented rows" {
     init(test_writer);
     const table = ensure_table();
     try std.testing.expectEqual(@as(usize, 64), table.len);
@@ -1489,7 +1517,7 @@ test "syscall: runtime table has 64 slots and fifty-one unique implemented rows"
             implemented += 1;
         }
     }
-    try std.testing.expectEqual(@as(usize, 51), implemented);
+    try std.testing.expectEqual(@as(usize, 52), implemented);
     try std.testing.expectEqualStrings("sys_audio_info", entry_info(42).?.name);
     try std.testing.expectEqualStrings("sys_audio_play", entry_info(43).?.name);
     try std.testing.expectEqualStrings("sys_audio_volume", entry_info(44).?.name);
@@ -1539,6 +1567,7 @@ test "syscall: runtime table has 64 slots and fifty-one unique implemented rows"
     try std.testing.expectEqualStrings("sys_drag_start", entry_info(48).?.name);
     try std.testing.expectEqualStrings("sys_win_raise_front", entry_info(49).?.name);
     try std.testing.expectEqualStrings("sys_win_lower_back", entry_info(50).?.name);
+    try std.testing.expectEqualStrings("sys_notify", entry_info(51).?.name);
     try std.testing.expect(entry_info(63) == null);
 }
 
@@ -2460,7 +2489,7 @@ test "syscall: counters are monotonic and report is deterministic" {
     var con = mock.console();
     report(&con);
     try std.testing.expectEqualStrings(
-        "syscalls: slots=64 implemented=51\n" ++
+        "syscalls: slots=64 implemented=52\n" ++
             "  0 sys_ping calls=2\n" ++
             "  1 sys_write calls=0\n" ++
             "  2 sys_yield calls=0\n" ++
@@ -2511,7 +2540,8 @@ test "syscall: counters are monotonic and report is deterministic" {
             "  47 sys_win_resize calls=0\n" ++
             "  48 sys_drag_start calls=0\n" ++
             "  49 sys_win_raise_front calls=0\n" ++
-            "  50 sys_win_lower_back calls=0\n",
+            "  50 sys_win_lower_back calls=0\n" ++
+            "  51 sys_notify calls=0\n",
         mock.contents(),
     );
 }

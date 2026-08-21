@@ -233,6 +233,82 @@ var tray_has_tick: bool = false;
 var tray_last_theme: u8 = 0xff;
 var tray_last_clip_len: usize = 0;
 
+/// Arc4 #240: desktop notification toasts — bounded BSS FIFO, 4 entries.
+/// Follows the exit-report FIFO pattern (M3 claim 1014). Apps post via
+/// sys_notify; the compositor renders top-right and auto-dismisses.
+pub const notify_max: usize = 4;
+pub const notify_text_max: usize = 280;
+pub const notify_dismiss_ticks: u32 = 5;
+var notify_texts: [notify_max][notify_text_max]u8 = undefined;
+var notify_lens: [notify_max]usize = [_]usize{0} ** notify_max;
+var notify_levels: [notify_max]u8 = [_]u8{0} ** notify_max;
+var notify_head: usize = 0;
+var notify_count: usize = 0;
+var notify_ticks: [notify_max]u32 = [_]u32{0} ** notify_max;
+
+/// Push a notification into the bounded FIFO (drop-oldest on overflow).
+/// Called from the syscall handler (kernel context).
+pub fn notify_push(text: []const u8, level: u8) void {
+    const slot = (notify_head + notify_count) % notify_max;
+    const copy_len = @min(text.len, notify_text_max);
+    @memcpy(notify_texts[slot][0..copy_len], text[0..copy_len]);
+    notify_lens[slot] = copy_len;
+    notify_levels[slot] = level;
+    notify_ticks[slot] = 0;
+    if (notify_count < notify_max) {
+        notify_count += 1;
+    } else {
+        // Drop-oldest: advance head.
+        notify_head = (notify_head + 1) % notify_max;
+    }
+}
+
+/// Drain (dismiss) a notification by index within the visible set.
+/// Returns true if dismissed.
+pub fn notify_dismiss(index: usize) bool {
+    if (index >= notify_count) return false;
+    // Compact: shift remaining entries forward.
+    var i: usize = index;
+    while (i + 1 < notify_count) : (i += 1) {
+        const src = (notify_head + i + 1) % notify_max;
+        const dst = (notify_head + i) % notify_max;
+        const n = notify_lens[src];
+        @memcpy(notify_texts[dst][0..n], notify_texts[src][0..n]);
+        notify_lens[dst] = n;
+        notify_levels[dst] = notify_levels[src];
+        notify_ticks[dst] = notify_ticks[src];
+    }
+    notify_count -= 1;
+    return true;
+}
+
+/// Advance notification ticks (called once per composite). Auto-dismiss
+/// entries that have exceeded notify_dismiss_ticks.
+pub fn notify_advance_ticks() void {
+    if (notify_count == 0) return;
+    var i: usize = notify_count;
+    while (i > 0) {
+        i -= 1;
+        const slot = (notify_head + i) % notify_max;
+        notify_ticks[slot] +|= 1;
+        if (notify_ticks[slot] >= notify_dismiss_ticks) {
+            _ = notify_dismiss(i);
+        }
+    }
+}
+
+/// The current notification count (for compositor rendering).
+pub fn notify_count_visible() usize {
+    return notify_count;
+}
+
+/// Read notification data by visible index (0 = newest).
+pub fn notify_entry(index: usize) ?struct { text: []const u8, level: u8 } {
+    if (index >= notify_count) return null;
+    const slot = (notify_head + index) % notify_max;
+    return .{ .text = notify_texts[slot][0..notify_lens[slot]], .level = notify_levels[slot] };
+}
+
 /// Step 7 (Issue #207): theme selection. 0=dark, 1=light, 2=amber.
 /// Read by the compositor chrome pass for title bars, clock, focus ring.
 pub var theme_id: u8 = 0;
@@ -1893,6 +1969,8 @@ pub fn composite() virtio_gpu.CmdResult {
             }
         }
     }
+    // Arc4 #240: advance notification dismiss ticks once per composite.
+    notify_advance_ticks();
     draw_chrome();
     if (!virtio_gpu.gpu_ready) return .not_ready;
     presents += 1;
@@ -2047,6 +2125,35 @@ fn draw_chrome() void {
             fill_rect(fb, stride, zb.x, zb.y + zb.h - 2, zb.w, 2, 0xffffff);
             fill_rect(fb, stride, zb.x, zb.y, 2, zb.h, 0xffffff);
             fill_rect(fb, stride, zb.x + zb.w - 2, zb.y, 2, zb.h, 0xffffff);
+        }
+    }
+    // Arc4 #240: notification toasts — top-right, stacked newest-top.
+    // 300×40 px per toast, 8×8 font, colored left border.
+    if (notify_count > 0) {
+        const toast_w: u32 = 300;
+        const toast_h: u32 = 40;
+        const toast_x: u32 = if (wspan > toast_w) wspan - toast_w - 8 else 0;
+        var ti: usize = 0;
+        while (ti < notify_count) : (ti += 1) {
+            if (notify_entry(ti)) |entry| {
+                const toast_y: u32 = 8 + @as(u32, @intCast(ti)) * (toast_h + 4);
+                if (toast_y + toast_h > hspan) break;
+                // Background.
+                fill_rect(fb, stride, toast_x, toast_y, toast_w, toast_h, 0x1e293b);
+                // Colored left border: blue=info, amber=warn, red=error.
+                const border_color: u32 = switch (entry.level) {
+                    1 => 0xf59e0b, // amber warning
+                    2 => 0xef4444, // red error
+                    else => 0x3b82f6, // blue info
+                };
+                fill_rect(fb, stride, toast_x, toast_y, 4, toast_h, border_color);
+                // Text — up to 36 chars (300-8 px / 8 px per glyph).
+                const max_chars = 36;
+                const len = @min(entry.text.len, max_chars);
+                if (len > 0) {
+                    draw_string(fb, stride, toast_x + 10, toast_y + 6, entry.text[0..len], 0xffffff);
+                }
+            }
         }
     }
 }
@@ -3186,4 +3293,36 @@ test "driving_award: window fade-in state transitions" {
     w.fade_tick = 0;
     try std.testing.expectEqual(@as(u8, 0), w.fade_phase);
     _ = user_close(2);
+}
+
+test "driving_award: notification FIFO push/dismiss/advance" {
+    // Reset state.
+    notify_head = 0;
+    notify_count = 0;
+    // Push 3 notifications.
+    notify_push("hello", 0);
+    notify_push("warn", 1);
+    notify_push("error", 2);
+    try std.testing.expectEqual(@as(usize, 3), notify_count_visible());
+    // entry(0) = oldest, entry(count-1) = newest.
+    var e = notify_entry(2).?;
+    try std.testing.expectEqual(@as(u8, 2), e.level);
+    try std.testing.expectEqualStrings("error", e.text);
+    e = notify_entry(1).?;
+    try std.testing.expectEqualStrings("warn", e.text);
+    e = notify_entry(0).?;
+    try std.testing.expectEqualStrings("hello", e.text);
+    // Dismiss index 0 (oldest = hello).
+    try std.testing.expect(notify_dismiss(0));
+    try std.testing.expectEqual(@as(usize, 2), notify_count_visible());
+    // Overflow drops oldest.
+    notify_push("fourth", 0);
+    notify_push("fifth", 0);
+    try std.testing.expectEqual(@as(usize, notify_max), notify_count_visible());
+    // Auto-dismiss after notify_dismiss_ticks.
+    var t: u32 = 0;
+    while (t < notify_dismiss_ticks) : (t += 1) {
+        notify_advance_ticks();
+    }
+    try std.testing.expectEqual(@as(usize, 0), notify_count_visible());
 }
