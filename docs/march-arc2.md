@@ -14,7 +14,8 @@ Legend: ⬜ not started · 🔄 in progress · ✅ done · ⛔ blocked (note why
 
 | # | Card | Status | Evidence | Notes |
 |---|------|--------|----------|-------|
-| W1 | **Drag-to-resize (GH #224).** 6×6 bottom-right hit, `resize_id`/`resize_origin` like `drag_id`, clamp 128×64..512×384, chrome repaint, `sys_win_resize` slot 47 + `WIN_RESIZE` kind 10 (ADR 0013 D1/D2). | 🔄 `agent/buffy/arc2-resize` (claim 3589) | — | Groomed 2026-08-20 Arc2 deferred. Owns `driving_award.zig` resize geometry + `syscall.zig:47` + `events.zig:10`. Host tests clamp+hit-test. No dep on #228/#236. |
+| W1 | **Drag-to-resize (GH #224).** 6×6 bottom-right hit, `resize_id`/`resize_origin` like `drag_id`, clamp 128×64..512×384, chrome repaint, `sys_win_resize` slot 47 + `WIN_RESIZE` kind 10 (ADR 0013 D1/D2). | ✅ done 2026-08-21 — claim 3589 merged 44ca7d2 (`events kind 10` + `syscall slot 47→48`, 4 host tests, BSS 9788088/11534336 PASS) | `verify-unit-tests` 132/132 `driving_award`, `verify-bss-budget` PASS | Groomed 2026-08-20 Arc2 deferred. Owns `driving_award.zig` resize geometry + `syscall.zig:47` + `events.zig:10`. |
+
 | W2 | **Right-click context menus (GH #228).** `MOUSE_RIGHT_DOWN` kind 11 + `MOUSE_RIGHT_UP` kind 13 (kind 12 is `MOUSE_SCROLL`), `ui.zig` ContextMenu widget (items, show(x,y), outside-dismiss, z-order above windows), NOTEPAD/FILE.BIN/TOP integration. | 🔄 `agent/buffy/arc2-context-menu` (claim 1757) | — | Groomed 2026-08-20 Arc2 needs ABI. Owns `ui.zig` ContextMenu + `events.zig:11/13`. BTN_RIGHT already in HID report. No syscall needed. |
 | W3 | **System tray (GH #226).** `Kind.taskbar` id 255 20px @ y=700 right 80px: HH:MM (tick), theme D/L/A, clipboard rect; migrates `Kind.clock` id 1 (no duplicate). Compositor-only, no ABI. | 🔄 `agent/buffy/arc2-tray` (claim 1264) | — | Groomed 2026-08-20 Arc2 deferred, no ABI. Owns `driving_award.zig` tray. Depends on clipboard+theme live (✅). |
 
