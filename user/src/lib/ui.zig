@@ -53,6 +53,7 @@ pub const sys_audio_mute_num: u64 = 45;
 pub const sys_win_fill_batch_num: u64 = 46;
 pub const sys_win_raise_front_num: u64 = 49;
 pub const sys_win_lower_back_num: u64 = 50;
+pub const sys_notify_num: u64 = 51;
 pub const sys_timer_cancel_num: u64 = 41;
 pub const sys_udp_listen_num: u64 = 9;
 pub const sys_udp_send_num: u64 = 10;
@@ -388,6 +389,11 @@ pub fn win_raise_front(id: u32) bool {
 /// Arc4 #238: lower the window to the bottom of the z-order.
 pub fn win_lower_back(id: u32) bool {
     return syscall1(sys_win_lower_back_num, id) == 0;
+}
+
+/// Arc4 #240: post a desktop notification toast. level: 0=info, 1=warn, 2=error.
+pub fn notify(text: []const u8, level: u32) bool {
+    return syscall3(sys_notify_num, @intFromPtr(text.ptr), text.len, level) == 0;
 }
 
 pub fn wait_event(ev: *Event) i64 {
