@@ -161,6 +161,9 @@ pub const Window = struct {
     /// Arc4 #241: workspace assignment. 0..2 = workspace, fixed layers
     /// are always workspace 0 (visible on all).
     workspace: u8 = 0,
+    /// Arc4 #242: unsaved-changes flag. The compositor shows a
+    /// confirmation dialog when the user clicks close on a dirty window.
+    unsaved: bool = false,
 };
 
 /// Arc4 #239: fade-in constants. The window is at 25% opacity for
@@ -274,6 +277,88 @@ pub fn drag_cancel() void {
     drag_active = false;
     drag_payload_len = 0;
     drag_over_id = null;
+}
+
+/// Arc4 #242: unsaved-changes confirmation dialog state — BSS, no heap.
+/// When the user clicks close on a dirty window, a Save/Don't Save/Cancel
+/// dialog appears. The app must respond within 5 ticks or auto-don't-save.
+pub const unsaved_timeout_ticks: u32 = 5;
+var unsaved_dialog_open: bool = false;
+var unsaved_dialog_target: u8 = 0; // window id being closed
+var unsaved_dialog_ticks: u32 = 0;
+
+/// Arc4 #242: open the unsaved-changes dialog for a window.
+pub fn unsaved_dialog_show(target_id: u8) void {
+    unsaved_dialog_open = true;
+    unsaved_dialog_target = target_id;
+    unsaved_dialog_ticks = 0;
+}
+
+/// Arc4 #242: check if the unsaved dialog is open.
+pub fn unsaved_dialog_is_open() bool {
+    return unsaved_dialog_open;
+}
+
+/// Arc4 #242: advance the timeout tick. Returns the action when it fires.
+pub fn unsaved_dialog_advance_tick() ?enum { auto_close, none } {
+    if (!unsaved_dialog_open) return .none;
+    unsaved_dialog_ticks +|= 1;
+    if (unsaved_dialog_ticks >= unsaved_timeout_ticks) {
+        // Auto-don't-save: close the window.
+        const tid = unsaved_dialog_target;
+        unsaved_dialog_open = false;
+        _ = user_close(tid);
+        return .auto_close;
+    }
+    return .none;
+}
+
+/// Arc4 #242: handle a click inside the unsaved dialog.
+pub fn unsaved_dialog_click(x: u32, y: u32) enum { save, dont_save, cancel, none } {
+    if (!unsaved_dialog_open) return .none;
+    // Dialog rect: centered, 200×100.
+    const dlg_w: u32 = 200;
+    const dlg_h: u32 = 100;
+    const dlg_x: u32 = if (virtio_gpu.fb_width > dlg_w) (virtio_gpu.fb_width - dlg_w) / 2 else 0;
+    const dlg_y: u32 = if (virtio_gpu.fb_height > dlg_h) (virtio_gpu.fb_height - dlg_h) / 2 else 0;
+    // Save button: left, 60×20 at bottom of dialog.
+    if (x >= dlg_x + 20 and x < dlg_x + 80 and y >= dlg_y + dlg_h - 30 and y < dlg_y + dlg_h - 10) {
+        const tid = unsaved_dialog_target;
+        unsaved_dialog_open = false;
+        // Post WIN_UNSAVED arg0=0 (save) to the target.
+        if (find_user_window(tid)) |w| {
+            if (w.owner) |pid| {
+                events.push(pid, .{
+                    .kind = events.WIN_UNSAVED,
+                    .flags = 0,
+                    .seq = 0,
+                    .arg0 = 0, // save
+                    .arg1 = 0,
+                });
+            }
+        }
+        return .save;
+    }
+    // Don't Save button: middle.
+    if (x >= dlg_x + 90 and x < dlg_x + 150 and y >= dlg_y + dlg_h - 30 and y < dlg_y + dlg_h - 10) {
+        const tid = unsaved_dialog_target;
+        unsaved_dialog_open = false;
+        _ = user_close(tid);
+        return .dont_save;
+    }
+    // Cancel button: right.
+    if (x >= dlg_x + 160 and x < dlg_x + 220 and y >= dlg_y + dlg_h - 30 and y < dlg_y + dlg_h - 10) {
+        unsaved_dialog_open = false;
+        return .cancel;
+    }
+    return .none;
+}
+
+/// Arc4 #242: set/clear the unsaved flag on a user window.
+pub fn user_set_unsaved(id: u8, flag: bool) bool {
+    const w = find_user_window(id) orelse return false;
+    w.unsaved = flag;
+    return true;
 }
 
 /// M15 C2 (Alt+Tab overlay, #225): hold-Alt cycling UI state — BSS, no heap.
@@ -1430,6 +1515,15 @@ pub fn pointer_tick(st: input.PointerState, click: ?input.Click) ?u8 {
         // M15 C4: dock handling must precede user windows — dock is at 0,0,24,700.
         if (left_pressed) {
             var handled_btn = false;
+            // Arc4 #242: unsaved-changes dialog intercepts all clicks while open.
+            if (unsaved_dialog_open) {
+                switch (unsaved_dialog_click(cursor_x, cursor_y)) {
+                    .save, .dont_save, .cancel => {
+                        handled_btn = true;
+                    },
+                    .none => {},
+                }
+            }
             // M15 C4: dock icon click — 24 px left bar, 20×20 icons at (2,8+idx*32).
             if (cursor_x < dock_w and cursor_y < dock_h) {
                 if (cursor_x >= 2 and cursor_x < 22) {
@@ -1475,7 +1569,12 @@ pub fn pointer_tick(st: input.PointerState, click: ?input.Click) ?u8 {
                     if (cursor_x >= w.x + w.w - 16 and cursor_x < w.x + w.w - 4 and
                         cursor_y >= w.y and cursor_y < w.y + user_title_h)
                     {
-                        _ = user_close(w.id);
+                        // Arc4 #242: dirty window → show unsaved-changes dialog.
+                        if (w.unsaved) {
+                            unsaved_dialog_show(w.id);
+                        } else {
+                            _ = user_close(w.id);
+                        }
                         handled_btn = true;
                         break;
                     }
@@ -2130,6 +2229,8 @@ pub fn composite() virtio_gpu.CmdResult {
     }
     // Arc4 #240: advance notification dismiss ticks once per composite.
     notify_advance_ticks();
+    // Arc4 #242: advance unsaved-changes dialog timeout once per composite.
+    _ = unsaved_dialog_advance_tick();
     draw_chrome();
     if (!virtio_gpu.gpu_ready) return .not_ready;
     presents += 1;
@@ -2289,6 +2390,31 @@ fn draw_chrome() void {
             fill_rect(fb, stride, zb.x, zb.y, 2, zb.h, 0xffffff);
             fill_rect(fb, stride, zb.x + zb.w - 2, zb.y, 2, zb.h, 0xffffff);
         }
+    }
+    // Arc4 #242: unsaved-changes confirmation dialog — centered modal.
+    if (unsaved_dialog_open) {
+        const dlg_w: u32 = 200;
+        const dlg_h: u32 = 100;
+        const dlg_x: u32 = if (wspan > dlg_w) (wspan - dlg_w) / 2 else 0;
+        const dlg_y: u32 = if (hspan > dlg_h) (hspan - dlg_h) / 2 else 0;
+        // Dim backdrop.
+        fill_rect(fb, stride, 0, 0, wspan, hspan, 0x0f0f1a);
+        // Dialog surface.
+        fill_rect(fb, stride, dlg_x, dlg_y, dlg_w, dlg_h, 0x1e293b);
+        // Border.
+        fill_rect(fb, stride, dlg_x, dlg_y, dlg_w, 2, 0xf59e0b);
+        fill_rect(fb, stride, dlg_x, dlg_y + dlg_h - 2, dlg_w, 2, 0xf59e0b);
+        fill_rect(fb, stride, dlg_x, dlg_y, 2, dlg_h, 0xf59e0b);
+        fill_rect(fb, stride, dlg_x + dlg_w - 2, dlg_y, 2, dlg_h, 0xf59e0b);
+        // Message.
+        draw_string(fb, stride, dlg_x + 10, dlg_y + 10, "Save before closing?", 0xffffff);
+        // Buttons: Save (green), Don't Save (red), Cancel (gray).
+        fill_rect(fb, stride, dlg_x + 20, dlg_y + dlg_h - 30, 60, 20, 0x10b981);
+        draw_string(fb, stride, dlg_x + 26, dlg_y + dlg_h - 24, "Save", 0xffffff);
+        fill_rect(fb, stride, dlg_x + 90, dlg_y + dlg_h - 30, 60, 20, 0xef4444);
+        draw_string(fb, stride, dlg_x + 96, dlg_y + dlg_h - 24, "Don't", 0xffffff);
+        fill_rect(fb, stride, dlg_x + 160, dlg_y + dlg_h - 30, 30, 20, 0x64748b);
+        draw_string(fb, stride, dlg_x + 163, dlg_y + dlg_h - 24, "No", 0xffffff);
     }
     // Arc4 #240: notification toasts — top-right, stacked newest-top.
     // 300×40 px per toast, 8×8 font, colored left border.

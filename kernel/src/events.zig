@@ -50,6 +50,10 @@ pub const DRAG_LEAVE: u16 = 15;
 /// Arc4 #237: drop completed on a window.
 /// `arg0 = payload size`, `arg1 = source pid`.
 pub const DROP: u16 = 16;
+/// Arc4 #242 (ADR 0013 D2): unsaved-changes warning posted by compositor
+/// when user clicks close on a dirty window. `arg0` = 0 (save),
+/// 1 (don't save), 2 (cancel). App must consume within 5 ticks.
+pub const WIN_UNSAVED: u16 = 17;
 
 /// Modifier bitmasks (flags bits 0..7).
 pub const MOD_SHIFT: u16 = 0x0001;

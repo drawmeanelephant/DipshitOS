@@ -216,6 +216,8 @@ pub const sys_win_raise_front: u64 = 49;
 pub const sys_win_lower_back: u64 = 50;
 /// Arc4 #240 (ADR 0013 D1): `sys_notify(text_ptr, text_len, level)` — slot 51.
 pub const sys_notify: u64 = 51;
+/// Arc4 #242 (ADR 0013 D1): `sys_win_set_unsaved(id, flag)` — slot 53.
+pub const sys_win_set_unsaved: u64 = 53;
 /// Arc4 #237 (ADR 0013 D1): `sys_drag_read(buf_ptr, max_len)` — slot 55.
 pub const sys_drag_read: u64 = 55;
 
@@ -349,7 +351,7 @@ fn ensure_table() *const [slot_count]Entry {
         table_storage[sys_drag_read] = .{ .name = "sys_drag_read", .handler = handle_drag_read };
         // ADR 0013 reserved slots 52–54 (not yet implemented). Stubs.
         table_storage[52] = .{ .name = "sys_win_move_to_workspace", .handler = handle_win_move_to_workspace };
-        table_storage[53] = .{ .name = "sys_win_set_unsaved", .handler = handle_enosys };
+        table_storage[sys_win_set_unsaved] = .{ .name = "sys_win_set_unsaved", .handler = handle_win_set_unsaved };
         table_storage[54] = .{ .name = "sys_setrlimit", .handler = handle_enosys };
         table_ready = true;
     }
@@ -898,6 +900,18 @@ fn handle_win_move_to_workspace(args: Args, _: *exceptions.VectorFrame) u64 {
     const ws: u8 = @truncate(args[1]);
     if (ws >= driving_award.workspace_max) return error_result(.einval);
     if (!driving_award.user_move_to_workspace(id, ws)) return error_result(.einval);
+    return 0;
+}
+
+/// `sys_win_set_unsaved(id, flag)`: mark or clear the unsaved-changes flag
+/// on the caller's window. When the flag is set and the user clicks the
+/// close button, the compositor shows a Save/Don't Save/Cancel dialog
+/// instead of closing immediately. `flag` 0 = clear, 1 = set.
+fn handle_win_set_unsaved(args: Args, _: *exceptions.VectorFrame) u64 {
+    if (args[0] > std.math.maxInt(u8)) return error_result(.einval);
+    if (args[1] > 1) return error_result(.einval);
+    if (!win_owned_by_caller(@truncate(args[0]))) return error_result(.einval);
+    if (!driving_award.user_set_unsaved(@truncate(args[0]), args[1] != 0)) return error_result(.einval);
     return 0;
 }
 

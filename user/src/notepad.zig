@@ -395,6 +395,11 @@ pub const AppState = struct {
     find_current: usize = 0,
     find_case_sensitive: bool = false,
 
+    // Arc4 #242: unsaved-changes flag — set on any text modification,
+    // cleared on save/load. Drives the compositor's close-button dialog.
+    content_modified: bool = false,
+    win_id: u32 = 0, // set after win_open in _start
+
     btn_load: Button = Button.init(Rect.make(6, 6, 44, 20), "Load"),
     btn_save: Button = Button.init(Rect.make(54, 6, 44, 20), "Save"),
     btn_clear: Button = Button.init(Rect.make(102, 6, 48, 20), "Clear"),
@@ -471,6 +476,9 @@ pub const AppState = struct {
             self.layout.scroll = 0;
             self.set_status("Loaded");
             ui.write_console("notepad: loaded ok\n");
+            // Arc4 #242: loading a file clears the unsaved flag.
+            self.content_modified = false;
+            if (self.win_id != 0) _ = ui.win_set_unsaved(self.win_id, false);
         } else {
             self.set_status("Read Err");
             ui.write_console("notepad: read error\n");
@@ -492,9 +500,20 @@ pub const AppState = struct {
         if (written >= 0) {
             self.set_status("Saved");
             ui.write_console("notepad: saved ok\n");
+            // Arc4 #242: clear unsaved flag after successful save.
+            self.content_modified = false;
+            _ = ui.win_set_unsaved(self.win_id, false);
         } else {
             self.set_status("Save Err");
             ui.write_console("notepad: write failed\n");
+        }
+    }
+
+    /// Arc4 #242: mark content as modified and set the unsaved flag.
+    fn mark_modified(self: *AppState) void {
+        if (!self.content_modified and self.win_id != 0) {
+            self.content_modified = true;
+            _ = ui.win_set_unsaved(self.win_id, true);
         }
     }
 
@@ -853,6 +872,7 @@ pub const AppState = struct {
             self.buffer.clear();
             self.layout.scroll = 0;
             self.set_status("Cleared");
+            self.mark_modified();
             changed = true;
         } else if (self.btn_find_next.handle_event(ev)) {
             if (self.find_next()) {
@@ -865,6 +885,7 @@ pub const AppState = struct {
             if (self.replace_current()) {
                 self.set_status("Replaced");
                 self.layout.clamp_scroll(self.buffer.get_slice());
+                self.mark_modified();
             } else {
                 self.set_status("No Match");
             }
@@ -874,6 +895,7 @@ pub const AppState = struct {
             if (n > 0) {
                 self.set_status("Replaced");
                 self.layout.clamp_scroll(self.buffer.get_slice());
+                self.mark_modified();
             } else {
                 self.set_status("No Match");
             }
@@ -982,6 +1004,7 @@ pub const AppState = struct {
                 _ = self.layout.ensure_visible(slice, self.buffer.cursor);
                 self.layout.clamp_scroll(slice);
                 self.set_status("Editing");
+                self.mark_modified();
                 return true;
             }
             return false;
@@ -993,6 +1016,7 @@ pub const AppState = struct {
                 _ = self.layout.ensure_visible(slice, self.buffer.cursor);
                 self.layout.clamp_scroll(slice);
                 self.set_status("Editing");
+                self.mark_modified();
                 return true;
             }
             return false;
@@ -1055,6 +1079,7 @@ pub const AppState = struct {
                     _ = self.layout.ensure_visible(slice, self.buffer.cursor);
                     self.layout.clamp_scroll(slice);
                     self.set_status("Editing");
+                    self.mark_modified();
                     return true;
                 }
                 return false;
@@ -1096,11 +1121,14 @@ pub const AppState = struct {
                     self.buffer.clear();
                     self.layout.scroll = 0;
                     self.set_status("Cut");
+                    self.mark_modified();
                 }
                 return true;
             }
             if (keycode == 0x19) { // 'v' -> paste
-                return self.paste_clipboard();
+                const pasted = self.paste_clipboard();
+                if (pasted) self.mark_modified();
+                return pasted;
             }
         }
 
@@ -1110,6 +1138,7 @@ pub const AppState = struct {
                 _ = self.layout.ensure_visible(slice, self.buffer.cursor);
                 self.layout.clamp_scroll(slice);
                 self.set_status("Editing");
+                self.mark_modified();
                 return true;
             }
         }
@@ -1207,6 +1236,7 @@ pub export fn _start(argc: usize, argv: ?[*]const [32]u8) callconv(.c) noreturn 
         ui.exit_process(1);
     }
     const win = @as(u32, @intCast(win_res));
+    app.win_id = win;
 
     ui.write_console("notepad: open id=2\n");
 
@@ -1228,6 +1258,18 @@ pub export fn _start(argc: usize, argv: ?[*]const [32]u8) callconv(.c) noreturn 
 
         if (ev.kind == ui.WIN_CLOSE) {
             ui.write_console("notepad: win_close\n");
+            break;
+        }
+
+        // Arc4 #242: unsaved-changes dialog response from compositor.
+        if (ev.kind == ui.WIN_UNSAVED) {
+            if (ev.arg0 == 0) { // save
+                app.save_notes();
+                app.draw(win);
+                ui.win_present(win);
+            }
+            // arg0=1 (don't save) or arg0=2 (cancel after save) — just close.
+            ui.write_console("notepad: win_unsaved\n");
             break;
         }
 
@@ -1258,6 +1300,15 @@ pub export fn _start(argc: usize, argv: ?[*]const [32]u8) callconv(.c) noreturn 
         while (ui.poll_event(&ev) > 0) {
             if (ev.kind == ui.WIN_CLOSE) {
                 ui.write_console("notepad: win_close\n");
+                ui.win_close(win);
+                ui.exit_process(exit_status);
+            }
+            // Arc4 #242: unsaved-changes dialog response (drain path).
+            if (ev.kind == ui.WIN_UNSAVED) {
+                if (ev.arg0 == 0) {
+                    app.save_notes();
+                }
+                ui.write_console("notepad: win_unsaved\n");
                 ui.win_close(win);
                 ui.exit_process(exit_status);
             }
