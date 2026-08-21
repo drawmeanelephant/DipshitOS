@@ -21,7 +21,7 @@ const virtio_gpu = @import("virtio_gpu.zig");
 
 // ---------------------------------------------------------------------------
 // Geometry + colors (fixed constants; the claim-time record lives in
-// docs/m6-text-prompt.md and the hardware contract)
+// docs/archive/m6-text-prompt.md and the hardware contract)
 // ---------------------------------------------------------------------------
 
 /// 8×8 cells over the 1280×720 framebuffer.

@@ -169,6 +169,7 @@ CI) fails if the table drifts from the claim files.
 | [4116-usb-enum-hid](4116-usb-enum-hid.md) | buffy (`freebuff/can-you-check-out-our-status-and-work-on-the-next--7e2ecd0b-8acc-47ac-bb44-68841236e5fc`) | ✅ done 2026-08-13 — live-gated on VZ (`verify-live-usb.sh` PASS 1/1, 11/11 assertions); both USB HID devices enumerate end to end and a synthesized host keyDown produced the observed HID report |
 | [4272-xhci-transport](4272-xhci-transport.md) | buffy (`freebuff/can-you-check-out-our-status-and-work-on-the-next--7e2ecd0b-8acc-47ac-bb44-68841236e5fc`) | ✅ done 2026-08-13 — live-gated on VZ (`verify-live-xhci.sh` PASS 1/1, 14/14 assertions); the XHCI host-controller transport works end to end |
 | [4374-virtqueue-ring-allocator](4374-virtqueue-ring-allocator.md) | buffy (`agent/buffy/macos27-custom-virtio-spike`) | ✅ done 2026-08-10 on `agent/buffy/macos27-custom-virtio-spike` |
+| [4429-archive-m5-m6-prompts](4429-archive-m5-m6-prompts.md) | buffy (`agent/buffy/hygiene-archive-m5-m6-prompts`) | ✅ done |
 | [4482-m14-s4-hardening](4482-m14-s4-hardening.md) | buffy (`freebuff/hey-bestie-the-chat-got-lost-so-we-re-so-back-can--53baf792-c2f8-470d-a9f1-6344aa90847a`) | ✅ done (class A + class B, 2026-08-18) |
 | [4613-long-lived-process](4613-long-lived-process.md) | Buffy (`agent/buffy/m4-long-lived-process`) | ✅ done — Stage A (the second program + image pipeline + the |
 | [4636-exec-args](4636-exec-args.md) | Buffy (`agent/buffy/m4-exec-args`) | ✅ done 2026-08-10 (PR #78, staged after PR #77 card 3d) |
