@@ -71,6 +71,9 @@ pub const WIN_FOCUS: u16 = 6;
 pub const WIN_BLUR: u16 = 7;
 pub const WIN_CLOSE: u16 = 8;
 pub const EVENT_TIMER: u16 = 9;
+pub const WIN_RESIZE: u16 = 10;
+pub const MOUSE_RIGHT_DOWN: u16 = 11;
+pub const MOUSE_RIGHT_UP: u16 = 13;
 
 pub const MOD_SHIFT: u16 = 0x0001;
 pub const MOD_CTRL: u16 = 0x0002;
@@ -1135,12 +1138,125 @@ pub const DropDown = struct {
 };
 
 // ---------------------------------------------------------------------------
+// Component: ContextMenu — right-click popup (GH #228, Arc2 W2)
+// ---------------------------------------------------------------------------
+
+pub const ContextMenuItem = struct {
+    label: []const u8,
+    // Optional callback — not used in host tests, reserved for app wiring.
+    action: ?*const fn () void = null,
+};
+
+pub const ContextMenu = struct {
+    items: []const ContextMenuItem = &[_]ContextMenuItem{},
+    x: u32 = 0,
+    y: u32 = 0,
+    width: u32 = 120,
+    row_h: u32 = 16,
+    open: bool = false,
+    hover_idx: ?usize = null,
+    selected_idx: ?usize = null,
+
+    pub fn init(items: []const ContextMenuItem) ContextMenu {
+        return .{ .items = items };
+    }
+
+    pub fn show(self: *ContextMenu, x: u32, y: u32) void {
+        self.x = x;
+        self.y = y;
+        self.open = true;
+        self.hover_idx = null;
+        self.selected_idx = null;
+    }
+
+    pub fn dismiss(self: *ContextMenu) void {
+        self.open = false;
+        self.hover_idx = null;
+    }
+
+    pub fn is_open(self: *const ContextMenu) bool {
+        return self.open;
+    }
+
+    pub fn bounds(self: *const ContextMenu) Rect {
+        return Rect.make(self.x, self.y, self.width, @as(u32, @intCast(self.items.len)) * self.row_h);
+    }
+
+    fn hit_test(self: *const ContextMenu, px: u32, py: u32) ?usize {
+        if (!self.open) return null;
+        const b = self.bounds();
+        if (!b.contains(px, py)) return null;
+        const rel_y = py - b.y;
+        const idx = rel_y / self.row_h;
+        if (idx < self.items.len) return idx;
+        return null;
+    }
+
+    pub fn handle_event(self: *ContextMenu, ev: *const Event) bool {
+        switch (ev.kind) {
+            MOUSE_RIGHT_DOWN => {
+                // Show at click position — caller may also call show() directly.
+                // We treat right-down as show if not already open.
+                if (!self.open) {
+                    self.show(ev.arg0, ev.arg1);
+                    return true;
+                }
+                // If already open, treat as reposition.
+                self.show(ev.arg0, ev.arg1);
+                return true;
+            },
+            MOUSE_DOWN => {
+                if (!self.open) return false;
+                if (self.hit_test(ev.arg0, ev.arg1)) |idx| {
+                    self.selected_idx = idx;
+                    self.open = false;
+                    self.hover_idx = null;
+                    if (self.items[idx].action) |act| act();
+                    return true;
+                }
+                // Outside click dismisses.
+                self.dismiss();
+                return false;
+            },
+            MOUSE_MOVE => {
+                if (!self.open) return false;
+                self.hover_idx = self.hit_test(ev.arg0, ev.arg1);
+                return false;
+            },
+            MOUSE_RIGHT_UP => {
+                // No action — just consume if open to prevent fall-through.
+                if (self.open) return true;
+                return false;
+            },
+            else => return false,
+        }
+    }
+
+    pub fn draw(self: *const ContextMenu, win_id: u32) void {
+        if (!self.open) return;
+        const b = self.bounds();
+        // Background + border — above windows like dropdown.
+        draw_rect(win_id, b, theme_surface());
+        draw_rect_outline(win_id, b, 1, theme_border());
+        var i: usize = 0;
+        while (i < self.items.len) : (i += 1) {
+            const row_y = b.y + @as(u32, @intCast(i)) * self.row_h;
+            const row_rect = Rect.make(b.x + 1, row_y, b.w - 2, self.row_h);
+            const bg = if (self.hover_idx != null and self.hover_idx.? == i)
+                theme_btn_hover()
+            else
+                theme_surface();
+            win_fill(win_id, row_rect.x, row_rect.y, row_rect.w, row_rect.h, bg);
+            draw_text(win_id, self.items[i].label, row_rect.x + 4, row_rect.y + (self.row_h - 8) / 2, theme_text_primary());
+        }
+    }
+};
+
+// ---------------------------------------------------------------------------
 // Component: ScrollView — vertical scroll container (GH #218, Arc1)
 // ---------------------------------------------------------------------------
 
-/// Optional wheel event kind from #236 (not yet in kernel/events.zig).
-/// Handled opportunistically — thumb-drag + PAGE_UP/DOWN are required.
-pub const MOUSE_SCROLL: u16 = 13;
+pub const MOUSE_SCROLL: u16 = 12;
 
 pub const ScrollView = struct {
     rect: Rect,
@@ -2660,4 +2776,92 @@ test "ui: HScrollBar + ScrollView 2D demo scrolls via both" {
     // Draw both no panic
     sv.draw(0);
     hb.draw(0);
+}
+
+test "ui: ContextMenu show/dismiss and bounds" {
+    const items = [_]ContextMenuItem{
+        .{ .label = "Copy" },
+        .{ .label = "Cut" },
+        .{ .label = "Paste" },
+    };
+    var m = ContextMenu.init(items[0..]);
+    try std.testing.expect(!m.is_open());
+    m.show(50, 60);
+    try std.testing.expect(m.is_open());
+    const b = m.bounds();
+    try std.testing.expectEqual(@as(u32, 50), b.x);
+    try std.testing.expectEqual(@as(u32, 60), b.y);
+    try std.testing.expectEqual(@as(u32, 120), b.w);
+    try std.testing.expectEqual(@as(u32, 48), b.h);
+    m.dismiss();
+    try std.testing.expect(!m.is_open());
+    m.draw(0);
+}
+
+test "ui: ContextMenu hit-test maps rows and outside dismisses" {
+    const items = [_]ContextMenuItem{
+        .{ .label = "Open" },
+        .{ .label = "Rename" },
+        .{ .label = "Delete" },
+    };
+    var m = ContextMenu.init(items[0..]);
+    m.show(10, 10);
+    // Hit first row
+    var ev_down = Event{ .kind = MOUSE_DOWN, .flags = BTN_LEFT, .seq = 1, .arg0 = 15, .arg1 = 12 };
+    _ = m.handle_event(&ev_down);
+    try std.testing.expect(!m.is_open());
+    try std.testing.expectEqual(@as(?usize, 0), m.selected_idx);
+    // Reopen and click outside
+    m.show(10, 10);
+    var ev_out = Event{ .kind = MOUSE_DOWN, .flags = BTN_LEFT, .seq = 2, .arg0 = 200, .arg1 = 200 };
+    _ = m.handle_event(&ev_out);
+    try std.testing.expect(!m.is_open());
+    // Reopen and hover second row
+    m.show(10, 10);
+    var ev_move = Event{ .kind = MOUSE_MOVE, .flags = 0, .seq = 3, .arg0 = 15, .arg1 = 30 };
+    _ = m.handle_event(&ev_move);
+    try std.testing.expectEqual(@as(?usize, 1), m.hover_idx);
+    m.draw(0);
+}
+
+test "ui: ContextMenu via MOUSE_RIGHT_DOWN and NOTEPAD/FILE/TOP integration" {
+    const notepad_items = [_]ContextMenuItem{
+        .{ .label = "Copy" },
+        .{ .label = "Cut" },
+        .{ .label = "Paste" },
+    };
+    const file_items = [_]ContextMenuItem{
+        .{ .label = "Open" },
+        .{ .label = "Rename" },
+        .{ .label = "Delete" },
+    };
+    const top_items = [_]ContextMenuItem{
+        .{ .label = "Kill" },
+        .{ .label = "Inspect" },
+    };
+    var m1 = ContextMenu.init(notepad_items[0..]);
+    var m2 = ContextMenu.init(file_items[0..]);
+    var m3 = ContextMenu.init(top_items[0..]);
+    // Right-click shows menu
+    var ev_r = Event{ .kind = MOUSE_RIGHT_DOWN, .flags = BTN_RIGHT, .seq = 1, .arg0 = 100, .arg1 = 80 };
+    _ = m1.handle_event(&ev_r);
+    try std.testing.expect(m1.is_open());
+    try std.testing.expectEqual(@as(u32, 100), m1.bounds().x);
+    // FILE.BIN menu opens separately
+    var ev_r2 = Event{ .kind = MOUSE_RIGHT_DOWN, .flags = BTN_RIGHT, .seq = 2, .arg0 = 50, .arg1 = 40 };
+    _ = m2.handle_event(&ev_r2);
+    try std.testing.expect(m2.is_open());
+    // Click first item selects and dismisses
+    var ev_click = Event{ .kind = MOUSE_DOWN, .flags = BTN_LEFT, .seq = 3, .arg0 = 55, .arg1 = 42 };
+    _ = m2.handle_event(&ev_click);
+    try std.testing.expect(!m2.is_open());
+    try std.testing.expectEqual(@as(?usize, 0), m2.selected_idx);
+    // TOP menu hover
+    m3.show(20, 20);
+    var ev_move = Event{ .kind = MOUSE_MOVE, .flags = 0, .seq = 4, .arg0 = 25, .arg1 = 38 };
+    _ = m3.handle_event(&ev_move);
+    try std.testing.expectEqual(@as(?usize, 1), m3.hover_idx);
+    m1.draw(0);
+    m2.draw(0);
+    m3.draw(0);
 }

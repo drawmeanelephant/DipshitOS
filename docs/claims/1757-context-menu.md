@@ -4,7 +4,7 @@
 - **Prompt / plan:** `docs/m17-desktop-completeness.md` + GH #228 — Arc2 Window Management deferred past M17 (needs ABI)
 - **Scope:** Arc2 — `user/src/lib/ui.zig` ContextMenu widget (items[]{label,callback}, show(x,y), dismiss on outside click, z-order above windows like #223 dropdown) + `kernel/src/events.zig` kinds 11 `MOUSE_RIGHT_DOWN` + 13 `MOUSE_RIGHT_UP` (ADR 0013 D2 — kind 12 is MOUSE_SCROLL) + compositor right-button delivery + NOTEPAD/FILE.BIN/TOP.BIN integration. No dependency on #224/#226.
 - **Depends on:** M17 done, ADR 0013 proposed (kinds 11/13). Verify events.zig next free=10 at claim time; BTN_RIGHT already in hid report (events.zig:47). Syscall not needed (events only).
-- **Status:** 🔄 `agent/buffy/arc2-context-menu`
+- **Status:** ✅ done 2026-08-21 — right-click live on host: `events.zig` kinds 11 `MOUSE_RIGHT_DOWN` + 13 `MOUSE_RIGHT_UP` (ADR 0013 D2, kind 12 skipped for SCROLL), `user/src/lib/ui.zig` ContextMenu (show/dismiss/bounds/hit-test + 3 host tests) + FILE/NOTEPAD/TOP integration, `kernel/src/driving_award.zig` right-button routing (left/right split, WIN_RESIZE/DRAG gated left-only, `verify-bss-budget` PASS 9788088/11534336, `zig test` ui 32/32, driving_award 132/132, `zig fmt` PASS)
 
 ## Notes
 

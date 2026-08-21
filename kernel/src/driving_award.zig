@@ -1156,12 +1156,20 @@ pub fn pointer_tick(st: input.PointerState, click: ?input.Click) ?u8 {
         const btn_flags = mouse_buttons_to_flags(st.buttons);
         const all_flags = btn_flags | kb_flags;
 
-        const btn_pressed = (prev_ptr_buttons == 0 and st.buttons != 0) or (click != null);
-        const btn_released = (prev_ptr_buttons != 0 and st.buttons == 0);
+        const left_bit: u8 = 0x01;
+        const right_bit: u8 = 0x02;
+        const prev_left = (prev_ptr_buttons & left_bit) != 0;
+        const prev_right = (prev_ptr_buttons & right_bit) != 0;
+        const cur_left = (st.buttons & left_bit) != 0;
+        const cur_right = (st.buttons & right_bit) != 0;
+        const left_pressed = (!prev_left and cur_left) or (click != null);
+        const left_released = (prev_left and !cur_left);
+        const right_pressed = (!prev_right and cur_right);
+        const right_released = (prev_right and !cur_right);
 
-        // Step 5/6/7: drag + close + minimize handling on MOUSE_DOWN.
+        // Step 5/6/7: drag + close + minimize handling on MOUSE_DOWN (left only).
         // M15 C4: dock handling must precede user windows — dock is at 0,0,24,700.
-        if (btn_pressed) {
+        if (left_pressed) {
             var handled_btn = false;
             // M15 C4: dock icon click — 24 px left bar, 20×20 icons at (2,8+idx*32).
             if (cursor_x < dock_w and cursor_y < dock_h) {
@@ -1265,10 +1273,19 @@ pub fn pointer_tick(st: input.PointerState, click: ?input.Click) ?u8 {
                 }
             }
         }
+        // Arc2 W2: right-click — focus the hit window (no drag/resize/close).
+        if (right_pressed) {
+            if (focus_at(cursor_x, cursor_y)) {
+                const id = focused_id;
+                _ = raise(id);
+                _ = mark_dirty(0);
+                focused_changed = id;
+            }
+        }
 
         // Arc2 W1: resize drag — live clamp + chrome repaint + WIN_RESIZE.
         if (resize_id) |rid| {
-            if (moved and st.buttons != 0) {
+            if (moved and cur_left) {
                 const dx = @as(i32, @intCast(cursor_x)) - @as(i32, @intCast(resize_start_x));
                 const dy = @as(i32, @intCast(cursor_y)) - @as(i32, @intCast(resize_start_y));
                 const req_w = @as(i32, @intCast(resize_origin_w)) + dx;
@@ -1282,11 +1299,11 @@ pub fn pointer_tick(st: input.PointerState, click: ?input.Click) ?u8 {
                     }
                 }
             }
-            if (btn_released) {
+            if (left_released) {
                 resize_id = null;
             }
         } else if (drag_id) |did| {
-            if (moved and st.buttons != 0) {
+            if (moved and cur_left) {
                 const new_x: u32 = if (cursor_x >= drag_offset_x) cursor_x - drag_offset_x else 0;
                 const new_y: u32 = if (cursor_y >= drag_offset_y) cursor_y - drag_offset_y else 0;
                 _ = user_move(did, new_x, new_y);
@@ -1296,7 +1313,7 @@ pub fn pointer_tick(st: input.PointerState, click: ?input.Click) ?u8 {
                     _ = mark_dirty(0);
                 }
             }
-            if (btn_released) {
+            if (left_released) {
                 if (snap_zone != .none) {
                     _ = snap_window(did, snap_zone);
                 }
@@ -1329,7 +1346,7 @@ pub fn pointer_tick(st: input.PointerState, click: ?input.Click) ?u8 {
                             .arg1 = local_y,
                         });
                     }
-                    if (btn_pressed) {
+                    if (left_pressed) {
                         events.push(owner_pid, .{
                             .kind = events.MOUSE_DOWN,
                             .flags = all_flags,
@@ -1338,9 +1355,27 @@ pub fn pointer_tick(st: input.PointerState, click: ?input.Click) ?u8 {
                             .arg1 = local_y,
                         });
                     }
-                    if (btn_released) {
+                    if (left_released) {
                         events.push(owner_pid, .{
                             .kind = events.MOUSE_UP,
+                            .flags = all_flags,
+                            .seq = 0,
+                            .arg0 = local_x,
+                            .arg1 = local_y,
+                        });
+                    }
+                    if (right_pressed) {
+                        events.push(owner_pid, .{
+                            .kind = events.MOUSE_RIGHT_DOWN,
+                            .flags = all_flags,
+                            .seq = 0,
+                            .arg0 = local_x,
+                            .arg1 = local_y,
+                        });
+                    }
+                    if (right_released) {
+                        events.push(owner_pid, .{
+                            .kind = events.MOUSE_RIGHT_UP,
                             .flags = all_flags,
                             .seq = 0,
                             .arg0 = local_x,
