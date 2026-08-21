@@ -127,6 +127,10 @@ pub const AppState = struct {
     btn_save: Button,
     btn_reset: Button,
 
+    // C10 live preview: in-memory last_saved_theme for Reset and same-frame preview.
+    last_saved_theme: [max_value]u8 = [_]u8{0} ** max_value,
+    last_saved_theme_len: usize = 0,
+
     status_msg: [32]u8 = [_]u8{0} ** 32,
     status_len: usize = 0,
 
@@ -145,6 +149,13 @@ pub const AppState = struct {
         const n = read_settings_file(&buf);
         if (n == 0) {
             self.set_status("No settings file");
+            // Ensure a sane default theme even when file is missing.
+            if (self.last_saved_theme_len == 0) {
+                const def = "dark";
+                @memcpy(self.last_saved_theme[0..def.len], def);
+                self.last_saved_theme_len = def.len;
+            }
+            _ = ui.set_theme(self.last_saved_theme[0..self.last_saved_theme_len]);
             return;
         }
         var line_start: usize = 0;
@@ -160,6 +171,18 @@ pub const AppState = struct {
         self.input_hostname.set_text(self.settings.hostname[0..self.settings.hostname_len]);
         self.dropdown_theme.set_selected_by_name(self.settings.theme[0..self.settings.theme_len]);
         self.input_prompt.set_text(self.settings.prompt[0..self.settings.prompt_len]);
+        // C10: cache last_saved_theme and apply live preview via ui.set_theme (EL0 palette).
+        // Kernel chrome (driving_award.theme_id) stays via `settings set theme` / reboot — EL1 hook deferred per doc.
+        self.last_saved_theme_len = self.settings.theme_len;
+        if (self.last_saved_theme_len > 0) {
+            @memcpy(self.last_saved_theme[0..self.last_saved_theme_len], self.settings.theme[0..self.settings.theme_len]);
+            _ = ui.set_theme(self.last_saved_theme[0..self.last_saved_theme_len]);
+        } else {
+            const def = "dark";
+            @memcpy(self.last_saved_theme[0..def.len], def);
+            self.last_saved_theme_len = def.len;
+            _ = ui.set_theme(def);
+        }
         self.set_status("Loaded");
     }
 
@@ -170,6 +193,11 @@ pub const AppState = struct {
         pos = append_pair(&buf, pos, "theme", self.dropdown_theme.selected_text());
         pos = append_pair(&buf, pos, "prompt", self.input_prompt.get_text());
         if (write_settings_file(buf[0..pos])) {
+            // C10: Save persists and updates last_saved_theme so Reset reverts to the just-saved value.
+            const sel = self.dropdown_theme.selected_text();
+            self.last_saved_theme_len = @min(sel.len, max_value);
+            @memcpy(self.last_saved_theme[0..self.last_saved_theme_len], sel[0..self.last_saved_theme_len]);
+            _ = ui.set_theme(sel);
             self.set_status("Saved OK");
         } else {
             self.set_status("Save failed");
@@ -202,18 +230,44 @@ pub const AppState = struct {
             return true;
         }
         if (self.btn_reset.handle_event(ev)) {
+            // C10: Reset reverts to in-memory last_saved_theme, not just disk reload.
+            if (self.last_saved_theme_len > 0) {
+                self.dropdown_theme.set_selected_by_name(self.last_saved_theme[0..self.last_saved_theme_len]);
+                _ = ui.set_theme(self.last_saved_theme[0..self.last_saved_theme_len]);
+            }
             self.load();
             return true;
         }
         _ = self.input_hostname.handle_event(ev);
-        if (self.dropdown_theme.handle_event(ev)) return true;
+        // C10: live preview on dropdown selection change — EL0 palette updates same frame.
+        const old_sel = self.dropdown_theme.selected;
+        const old_open = self.dropdown_theme.open;
+        const dd_handled = self.dropdown_theme.handle_event(ev);
+        const sel_changed = old_sel != self.dropdown_theme.selected;
+        const open_changed = old_open != self.dropdown_theme.open;
+        if (sel_changed) {
+            _ = ui.set_theme(self.dropdown_theme.selected_text());
+            return true;
+        }
+        if (open_changed) return true;
+        if (dd_handled) return true;
         _ = self.input_prompt.handle_event(ev);
         return true;
     }
 
     pub fn handle_key(self: *AppState, ev: *const Event) bool {
         if (self.input_hostname.handle_event(ev)) return true;
-        if (self.dropdown_theme.handle_event(ev)) return true;
+        const old_sel = self.dropdown_theme.selected;
+        const old_open = self.dropdown_theme.open;
+        const dd_handled = self.dropdown_theme.handle_event(ev);
+        const sel_changed = old_sel != self.dropdown_theme.selected;
+        const open_changed = old_open != self.dropdown_theme.open;
+        if (sel_changed) {
+            _ = ui.set_theme(self.dropdown_theme.selected_text());
+            return true;
+        }
+        if (open_changed) return true;
+        if (dd_handled) return true;
         if (self.input_prompt.handle_event(ev)) return true;
         return false;
     }
