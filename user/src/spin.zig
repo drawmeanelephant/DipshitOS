@@ -19,7 +19,7 @@ pub const cpu_limit: u64 = 100;
 
 export fn _start() callconv(.naked) noreturn {
     asm volatile (
-        // Print alive marker
+    // Print alive marker
         \\mov x0, #1
         \\adr x1, 1f
         \\mov x2, #12

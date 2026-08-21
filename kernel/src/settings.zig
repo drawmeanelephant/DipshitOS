@@ -21,6 +21,23 @@
 //!   active partition.
 //!
 //! No libc, no POSIX, bounded BSS storage, no heap allocation.
+//!
+//! Version contract (Arc5 issue #247):
+//!   SETTINGS.TXT carries a version header on the first line: `#v<N>\n`.
+//!   The current schema version is `current_version` (= 1).
+//!   - v0 (no header): legacy format, loaded then migrated to current.
+//!   - v1: versioned format with `#v1` header.
+//!   - newer: refused with honest degradation (compiled defaults used).
+//!   Migration steps live in `migrate()`. Each step adds missing keys
+//!   with defaults and removes obsolete keys. Serial logs what changed.
+//!   To increment: bump `current_version`, add a migration step in
+//!   `migrate()`, and document the schema change here.
+//!
+//! Schema (keys, types, defaults, valid values):
+//!   hostname   string  "dipshit"     1..32 chars, system host identifier
+//!   prompt     string  "dipshit> "   1..64 chars, interactive shell prompt
+//!   theme      string  "dark"        "dark"|"light"|"amber", UI color accent
+//!   scrollback string  "1000"        positive integer, terminal scrollback lines
 
 const std = @import("std");
 const fat = @import("fat.zig");
