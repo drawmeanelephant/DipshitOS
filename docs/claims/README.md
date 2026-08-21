@@ -193,6 +193,7 @@ CI) fails if the table drifts from the claim files.
 | [5799-procs-syscall](5799-procs-syscall.md) | Buffy (`agent/buffy/m4-procs-syscall`) | ✅ done 2026-08-11 (claim flipped after class-A green + the new live gate + the full shared-seam sweep) |
 | [5801-fs-semantics](5801-fs-semantics.md) | buffy (`agent/buffy/m13-b1-fs-semantics`) | ✅ done 2026-08-16 — the mutating filesystem seam (slots 34–37) is live on VZ: FSTEST.BIN create+write → truncate → read-back → rename → free → delete → prove-gone; tools/verify-live-fs-mutation.sh PASS 1/1, all four slots calls=1 |
 | [5804-per-task-address-spaces](5804-per-task-address-spaces.md) | Buffy (`agent/buffy/m3-addrspaces`) | ✅ done 2026-08-10 |
+| [5828-trim-gate-inventory](5828-trim-gate-inventory.md) | ox-alpha (`t3code/issue-265-fix`) | ✅ done (2026-08-21) |
 | [5844-macos27-custom-virtio-spike](5844-macos27-custom-virtio-spike.md) | buffy (`agent/buffy/macos27-custom-virtio-spike`) | ✅ done 2026-08-09 on `agent/buffy/macos27-custom-virtio-spike` |
 | [5877-m15-a2-pcm-beep](5877-m15-a2-pcm-beep.md) | buffy (`freebuff/hey-bestie-the-chat-got-lost-so-we-re-so-back-can--53baf792-c2f8-470d-a9f1-6344aa90847a`) | ✅ done (2026-08-18) |
 | [5965-ipc-mailbox](5965-ipc-mailbox.md) | Buffy (`agent/buffy/m4-ipc`) | ✅ done 2026-08-10 (PR #79, staged after PR #78 card 3e) |
