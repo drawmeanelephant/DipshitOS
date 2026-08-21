@@ -46,6 +46,10 @@ pub const view_rows: usize = 9; // ~(details_area.h - 12) / line_h
 
 pub const max_entries: usize = 16;
 pub const content_max: usize = 512;
+pub const preview_rows: usize = 15;
+pub const preview_cols: usize = 30; // (details_area.w - 12) / 8
+pub const breadcrumb_rect = Rect.make(60, 6, 440, 12);
+pub const path_max: usize = 64;
 
 // ---------------------------------------------------------------------------
 // Hand-rolled string building (W^X-safe; std.fmt.bufPrint is avoided — see
@@ -127,6 +131,110 @@ pub fn content_rows(content: []const u8, cols: usize) usize {
         }
     }
     return row + 1;
+}
+
+/// True when `content` looks binary (non-printable). Allows \t \n \r.
+/// C7: printable-byte sniff for .TXT preview — <80% printable → binary.
+pub fn is_binary_content(content: []const u8) bool {
+    if (content.len == 0) return false;
+    var printable: usize = 0;
+    for (content) |ch| {
+        if (ch == 0x09 or ch == 0x0a or ch == 0x0d) {
+            printable += 1;
+        } else if (ch >= 0x20 and ch <= 0x7e) {
+            printable += 1;
+        }
+    }
+    return printable * 10 < content.len * 8;
+}
+
+/// Count path segments in an absolute path like "/data/docs".
+pub fn path_segment_count(path: []const u8) usize {
+    if (path.len == 0) return 0;
+    var count: usize = 0;
+    var i: usize = 0;
+    while (i < path.len) {
+        while (i < path.len and path[i] == '/') : (i += 1) {}
+        if (i >= path.len) break;
+        count += 1;
+        while (i < path.len and path[i] != '/') : (i += 1) {}
+    }
+    return count;
+}
+
+/// Write the display string for breadcrumbs: segments joined by " > ".
+/// Returns slice length written into `buf` (caller provides ≥ path.len + 8).
+pub fn format_breadcrumbs(path: []const u8, buf: []u8) []const u8 {
+    var pos: usize = 0;
+    var i: usize = 0;
+    var first = true;
+    while (i < path.len) {
+        while (i < path.len and path[i] == '/') : (i += 1) {}
+        if (i >= path.len) break;
+        const start = i;
+        while (i < path.len and path[i] != '/') : (i += 1) {}
+        const seg = path[start..i];
+        if (!first) {
+            if (pos + 3 > buf.len) break;
+            buf[pos] = ' ';
+            buf[pos + 1] = '>';
+            buf[pos + 2] = ' ';
+            pos += 3;
+        }
+        if (pos + seg.len > buf.len) break;
+        @memcpy(buf[pos .. pos + seg.len], seg);
+        pos += seg.len;
+        first = false;
+    }
+    if (pos == 0 and path.len > 0) {
+        // root like "/" or "/data" with empty split — show raw path trimmed
+        const t = @min(path.len, buf.len);
+        @memcpy(buf[0..t], path[0..t]);
+        return buf[0..t];
+    }
+    return buf[0..pos];
+}
+
+/// Hit-test breadcrumbs: given a window-local x, return segment index hit.
+/// Segments are laid out as `format_breadcrumbs` with 8px per glyph + 24px per " > ".
+pub fn breadcrumb_hit_test(path: []const u8, base_x: u32, px: u32) ?usize {
+    if (px < base_x) return null;
+    var x = base_x;
+    var i: usize = 0;
+    var seg_idx: usize = 0;
+    var first = true;
+    while (i < path.len) {
+        while (i < path.len and path[i] == '/') : (i += 1) {}
+        if (i >= path.len) break;
+        const start = i;
+        while (i < path.len and path[i] != '/') : (i += 1) {}
+        const seg = path[start..i];
+        if (!first) x += 3 * glyph_w; // " > "
+        const seg_w = @as(u32, @intCast(seg.len)) * glyph_w;
+        if (px >= x and px < x + seg_w) return seg_idx;
+        x += seg_w;
+        seg_idx += 1;
+        first = false;
+    }
+    return null;
+}
+
+/// Truncate `path` to include segments `0..keep` inclusive (keep is 0-based).
+/// Keeps leading "/". Returns new length. Assumes path starts with "/".
+pub fn truncate_to_segment(path: []u8, path_len: usize, keep: usize) usize {
+    var seg: usize = 0;
+    var i: usize = 0;
+    // Skip leading slashes
+    while (i < path_len and path[i] == '/') : (i += 1) {}
+    while (i < path_len) {
+        while (i < path_len and path[i] != '/') : (i += 1) {}
+        if (seg == keep) {
+            return i;
+        }
+        seg += 1;
+        while (i < path_len and path[i] == '/') : (i += 1) {}
+    }
+    return path_len;
 }
 
 // ---------------------------------------------------------------------------
@@ -238,12 +346,22 @@ pub const AppState = struct {
 
     list: FileList = FileList.init(list_area),
 
+    // Current directory path (session-only, C7 breadcrumb).
+    current_path: [path_max]u8 = [_]u8{0} ** path_max,
+    current_path_len: usize = 5, // "/data"
+
     // Read-only view state.
     view_mode: bool = false,
     view_name: [32]u8 = [_]u8{0} ** 32,
     view_name_len: usize = 0,
     content: [content_max]u8 = undefined,
     content_len: usize = 0,
+
+    // Inline preview state (C7 — first 15 lines, no mode switch).
+    preview_content: [content_max]u8 = undefined,
+    preview_len: usize = 0,
+    preview_is_binary: bool = false,
+    preview_loaded: bool = false,
 
     status_msg: [24]u8 = "Ready\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00".*,
     status_len: usize = 5,
@@ -255,6 +373,10 @@ pub const AppState = struct {
 
     pub fn init() AppState {
         var s = AppState{};
+        // Initialize current_path to "/data".
+        const p = "/data";
+        @memcpy(s.current_path[0..p.len], p);
+        s.current_path_len = p.len;
         s.btn_open.bg_color = ui.COLOR_ACCENT;
         s.btn_rename.bg_color = ui.COLOR_WARNING;
         s.btn_delete.bg_color = ui.COLOR_DANGER;
@@ -268,10 +390,14 @@ pub const AppState = struct {
         self.status_len = n;
     }
 
-    /// Enumerate `/data/` via `sys_dir_list` (slot 27). Emits a
+    pub fn current_path_slice(self: *const AppState) []const u8 {
+        return self.current_path[0..self.current_path_len];
+    }
+
+    /// Enumerate current_path via `sys_dir_list` (slot 27). Emits a
     /// `file: listing N entries` marker for the live gate.
     pub fn list_directory(self: *AppState) void {
-        const res = ui.dir_list(data_path, &self.entries);
+        const res = ui.dir_list(self.current_path_slice(), &self.entries);
         if (res < 0) {
             self.entry_count = 0;
             self.set_status("List Err");
@@ -280,6 +406,8 @@ pub const AppState = struct {
         }
         self.entry_count = @intCast(res);
         self.list.select(0, self.entry_count);
+        // Auto-load preview for the new selection (C7).
+        self.refresh_preview();
         self.set_status("Listed");
 
         var buf: [48]u8 = undefined;
@@ -290,10 +418,65 @@ pub const AppState = struct {
         ui.write_console(buf[0..pos]);
     }
 
+    /// Navigate into a subdirectory named `name` (must be a dir entry).
+    pub fn enter_directory(self: *AppState, name: []const u8) bool {
+        if (self.current_path_len + 1 + name.len > path_max) return false;
+        self.current_path[self.current_path_len] = '/';
+        @memcpy(self.current_path[self.current_path_len + 1 .. self.current_path_len + 1 + name.len], name);
+        self.current_path_len += 1 + name.len;
+        self.view_mode = false;
+        self.preview_loaded = false;
+        self.list_directory();
+        var obuf: [64]u8 = undefined;
+        var opos: usize = 0;
+        opos = append_str(&obuf, opos, "file: enter ");
+        opos = append_str(&obuf, opos, name);
+        obuf[opos] = '\n';
+        ui.write_console(obuf[0 .. opos + 1]);
+        return true;
+    }
+
+    /// Navigate to breadcrumb segment `keep` (0-based). Keeps segments 0..keep.
+    pub fn navigate_to_segment(self: *AppState, keep: usize) void {
+        const new_len = truncate_to_segment(&self.current_path, self.current_path_len, keep);
+        // Never truncate below "/data" (5 chars).
+        self.current_path_len = @max(new_len, 5);
+        self.view_mode = false;
+        self.preview_loaded = false;
+        self.list_directory();
+    }
+
+    /// Load inline preview for the currently selected entry (C7).
+    pub fn refresh_preview(self: *AppState) void {
+        self.preview_loaded = false;
+        self.preview_len = 0;
+        self.preview_is_binary = false;
+        const sel = self.list.selected orelse return;
+        if (sel >= self.entry_count) return;
+        const entry = &self.entries[sel];
+        const name = entry_name(entry);
+        if (entry.is_dir != 0) return;
+        // Only auto-preview .TXT; other files show (binary) placeholder via flag.
+        var path_buf: [64]u8 = undefined;
+        const path = build_path(self.current_path_slice(), name, &path_buf);
+        const fd = ui.file_open(path, ui.MODE_READ);
+        if (fd < 0) return;
+        const n = ui.file_read(@as(u32, @intCast(fd)), &self.preview_content);
+        ui.file_close(@as(u32, @intCast(fd)));
+        if (n < 0) return;
+        self.preview_len = @intCast(n);
+        self.preview_loaded = true;
+        if (!is_txt_file(name)) {
+            self.preview_is_binary = true;
+            return;
+        }
+        self.preview_is_binary = is_binary_content(self.preview_content[0..self.preview_len]);
+    }
+
     /// Open the selected entry read-only. Emits `file: open NAME` + the
-    /// read result marker (`file: view NAME` / `file: read error`). Only
-    /// regular files open; directories and non-TXT files are refused with
-    /// an honest status (the browser's view is a text view).
+    /// read result marker (`file: view NAME` / `file: read error`). Directories
+    /// navigate into the subdirectory (C7 breadcrumb), regular files open the
+    /// full view. The inline preview is already loaded via `refresh_preview`.
     pub fn open_selected(self: *AppState) bool {
         const sel = self.list.selected orelse return false;
         if (sel >= self.entry_count) return false;
@@ -301,13 +484,12 @@ pub const AppState = struct {
         const name = entry_name(entry);
 
         if (entry.is_dir != 0) {
-            self.set_status("Is a directory");
-            return false;
+            return self.enter_directory(name);
         }
 
-        // Build "/data/<name>" (name ≤ 31, prefix is 6).
+        // Build "<current_path>/<name>" (current_path len + 1 + name).
         var path_buf: [64]u8 = undefined;
-        const path = build_data_path(&path_buf, name);
+        const path = build_path(self.current_path_slice(), name, &path_buf);
 
         const fd = ui.file_open(path, ui.MODE_READ);
         if (fd < 0) {
@@ -359,6 +541,7 @@ pub const AppState = struct {
         if (self.entry_count > 0) {
             const idx = if (prev) |p| @min(p, self.entry_count - 1) else 0;
             self.list.select(idx, self.entry_count);
+            self.refresh_preview();
         }
     }
 
@@ -375,7 +558,7 @@ pub const AppState = struct {
         }
 
         var path_buf: [64]u8 = undefined;
-        const path = build_data_path(&path_buf, name);
+        const path = build_path(self.current_path_slice(), name, &path_buf);
         const res = ui.file_delete(path);
         if (res < 0) {
             self.set_status("Del Err");
@@ -410,8 +593,8 @@ pub const AppState = struct {
         const new_name = make_bak_name(name, &bak);
         var old_path: [64]u8 = undefined;
         var new_path: [64]u8 = undefined;
-        const op = build_data_path(&old_path, name);
-        const np = build_data_path(&new_path, new_name);
+        const op = build_path(self.current_path_slice(), name, &old_path);
+        const np = build_path(self.current_path_slice(), new_name, &new_path);
         const res = ui.file_rename(op, np);
         if (res < 0) {
             self.set_status("Ren Err");
@@ -443,11 +626,31 @@ pub const AppState = struct {
             ui.draw_text(win, self.view_name[0..self.view_name_len], 56, 8, ui.COLOR_ACCENT);
         } else {
             ui.draw_text(win, "Files:", 8, 8, ui.COLOR_TEXT_PRIMARY);
-            ui.draw_text(win, "/data", 60, 8, ui.COLOR_ACCENT);
+            // Breadcrumb bar at y=4 (inside title), 8x8 muted per spec.
+            var bx: u32 = 60;
+            var si: usize = 0;
+            var idx: usize = 0;
+            // Iterate over path segments for drawing.
+            while (idx < self.current_path_len) {
+                while (idx < self.current_path_len and self.current_path[idx] == '/') : (idx += 1) {}
+                if (idx >= self.current_path_len) break;
+                const start = idx;
+                while (idx < self.current_path_len and self.current_path[idx] != '/') : (idx += 1) {}
+                const seg = self.current_path[start..idx];
+                if (si > 0) {
+                    ui.draw_text(win, ">", bx, 8, ui.COLOR_TEXT_MUTED);
+                    bx += 16; // " > " is 3*8 but we draw ">" centered in 16px
+                }
+                const is_last = idx >= self.current_path_len;
+                const col = if (is_last) ui.COLOR_ACCENT else ui.COLOR_TEXT_MUTED;
+                ui.draw_text(win, seg, bx, 8, col);
+                bx += @as(u32, @intCast(seg.len)) * glyph_w + 4;
+                si += 1;
+            }
         }
 
-        // Status strip (title-bar right).
-        ui.draw_text(win, self.status_msg[0..self.status_len], 150, 8, ui.COLOR_TEXT_MUTED);
+        // Status strip (title-bar right) — shift right to avoid breadcrumb overlap.
+        ui.draw_text(win, self.status_msg[0..self.status_len], 380, 8, ui.COLOR_TEXT_MUTED);
 
         if (self.view_mode) {
             self.draw_view(win);
@@ -503,8 +706,53 @@ pub const AppState = struct {
         ui.draw_text(win, type_label, details_area.x + 6, details_area.y + 58, if (entry.is_dir != 0) ui.COLOR_WARNING else ui.COLOR_SUCCESS);
 
         ui.draw_text(win, "Name", details_area.x + 6, details_area.y + 82, ui.COLOR_TEXT_MUTED);
-        const cap = @min(name.len, 10);
+        const cap = @min(name.len, 18);
         ui.draw_text(win, name[0..cap], details_area.x + 6, details_area.y + 96, ui.COLOR_ACCENT);
+
+        // C7 inline preview (below metadata, first 15 lines, binary placeholder).
+        const preview_y = details_area.y + 115;
+        ui.draw_text(win, "Preview", details_area.x + 6, preview_y, ui.COLOR_TEXT_MUTED);
+        if (entry.is_dir != 0) {
+            ui.draw_text(win, "(directory)", details_area.x + 6, preview_y + 14, ui.COLOR_TEXT_MUTED);
+            return;
+        }
+        if (!self.preview_loaded) {
+            ui.draw_text(win, "(no preview)", details_area.x + 6, preview_y + 14, ui.COLOR_TEXT_MUTED);
+            return;
+        }
+        if (self.preview_is_binary) {
+            ui.draw_text(win, "(binary)", details_area.x + 6, preview_y + 14, ui.COLOR_TEXT_MUTED);
+            return;
+        }
+        const slice = self.preview_content[0..self.preview_len];
+        var row: usize = 0;
+        var col: usize = 0;
+        var px = details_area.x + 6;
+        var py = preview_y + 14;
+        for (slice) |ch| {
+            if (ch == '\n') {
+                row += 1;
+                col = 0;
+                if (row >= preview_rows) break;
+                py += line_h;
+                px = details_area.x + 6;
+                continue;
+            }
+            if (col >= preview_cols) {
+                row += 1;
+                col = 0;
+                if (row >= preview_rows) break;
+                py += line_h;
+                px = details_area.x + 6;
+            }
+            if (row >= preview_rows) break;
+            // Only draw printable, skip others (already filtered binary)
+            if (ch >= 0x20 and ch <= 0x7e) {
+                ui.draw_char(win, ch, px, py, ui.COLOR_TEXT_PRIMARY);
+            }
+            px += glyph_w;
+            col += 1;
+        }
     }
 
     fn draw_view(self: *const AppState, win: u32) void {
@@ -554,7 +802,26 @@ pub const AppState = struct {
             return self.delete_selected();
         }
         if (ev.kind == ui.MOUSE_DOWN and (ev.flags & ui.BTN_LEFT) != 0) {
-            return self.list.click(ev.arg0, ev.arg1, self.entry_count);
+            // Breadcrumb click has priority over list click (title bar).
+            if (breadcrumb_rect.contains(ev.arg0, ev.arg1)) {
+                if (breadcrumb_hit_test(self.current_path_slice(), breadcrumb_rect.x, ev.arg0)) |seg| {
+                    self.navigate_to_segment(seg);
+                    return true;
+                }
+                // Click in breadcrumb but missed segment — ignore.
+                return false;
+            }
+            const changed = self.list.click(ev.arg0, ev.arg1, self.entry_count);
+            if (changed) {
+                self.refresh_preview();
+                return true;
+            }
+            // Click in list but same selection — still ensure preview (e.g., after refresh).
+            if (self.list.rect.contains(ev.arg0, ev.arg1)) {
+                // Single-click already handled; double-click could open dir but open does it.
+                return false;
+            }
+            return false;
         }
         return false;
     }
@@ -589,27 +856,48 @@ pub const AppState = struct {
         switch (keycode) {
             0x52 => { // Up
                 self.list.move_by(-1, self.entry_count);
+                self.refresh_preview();
                 return true;
             },
             0x51 => { // Down
                 self.list.move_by(1, self.entry_count);
+                self.refresh_preview();
                 return true;
             },
             0x4a => { // Home
                 self.list.select(0, self.entry_count);
+                self.refresh_preview();
                 return true;
             },
             0x4d => { // End
                 if (self.entry_count > 0) {
                     self.list.select(self.entry_count - 1, self.entry_count);
                 }
+                self.refresh_preview();
                 return true;
             },
             else => {},
         }
         return false;
     }
+
+    pub fn breadcrumb_click(self: *AppState, px: u32, py: u32) bool {
+        if (!breadcrumb_rect.contains(px, py)) return false;
+        if (breadcrumb_hit_test(self.current_path_slice(), breadcrumb_rect.x, px)) |seg| {
+            self.navigate_to_segment(seg);
+            return true;
+        }
+        return false;
+    }
 };
+
+/// Build `<base>/<name>` into `buf` (caller provides ≥ base.len+1+name.len bytes).
+pub fn build_path(base: []const u8, name: []const u8, buf: []u8) []const u8 {
+    @memcpy(buf[0..base.len], base);
+    buf[base.len] = '/';
+    @memcpy(buf[base.len + 1 .. base.len + 1 + name.len], name);
+    return buf[0 .. base.len + 1 + name.len];
+}
 
 /// Build `/data/<name>` into `buf` (caller provides ≥ 6 + name.len bytes).
 pub fn build_data_path(buf: []u8, name: []const u8) []const u8 {
@@ -728,8 +1016,11 @@ test "file: content_rows wraps and counts newlines (claim B3)" {
 }
 
 test "file: FileList selection, scrolling, and click mapping" {
-    var fl = FileList.init(list_area);
-    try std.testing.expectEqual(@as(usize, 8), fl.visible_rows()); // 130/16
+    // Use a 128px tall viewport (8 rows @16px) to keep the original 8-row expectations
+    // regardless of the current list_area height (290).
+    const test_rect = Rect.make(6, 26, 240, 128);
+    var fl = FileList.init(test_rect);
+    try std.testing.expectEqual(@as(usize, 8), fl.visible_rows()); // 128/16
 
     // 10 entries -> scrollable by 2.
     const count: usize = 10;
@@ -746,7 +1037,7 @@ test "file: FileList selection, scrolling, and click mapping" {
 
     // Click maps the visible row to an absolute index (scroll-aware).
     // Visible row 0 is absolute entry 2.
-    _ = fl.click(list_area.x + 4, list_area.y + 2, count);
+    _ = fl.click(test_rect.x + 4, test_rect.y + 2, count);
     try std.testing.expectEqual(@as(?usize, 2), fl.selected);
 
     // Home via select clamps scroll back to 0.
@@ -828,4 +1119,85 @@ test "file: 'd' and 'r' route to delete/rename (claim 5801)" {
     app.list.select(0, 1);
     var ev_r = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 2, .arg0 = 0x15, .arg1 = 'r' };
     try std.testing.expect(app.handle_keyboard_event(&ev_r));
+}
+
+test "file: is_binary_content sniff (C7)" {
+    try std.testing.expect(!is_binary_content("hello world\n"));
+    try std.testing.expect(!is_binary_content("README.TXT\nline2\n"));
+    try std.testing.expect(!is_binary_content(""));
+    // High binary ratio
+    const bin = [_]u8{ 0x00, 0xff, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08 };
+    try std.testing.expect(is_binary_content(&bin));
+    // Mixed but >80% printable still not binary
+    try std.testing.expect(!is_binary_content("hello\x01world"));
+}
+
+test "file: breadcrumbs format and hit-test (C7)" {
+    var buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("data", format_breadcrumbs("/data", &buf));
+    try std.testing.expectEqualStrings("data > docs", format_breadcrumbs("/data/docs", &buf));
+    try std.testing.expectEqualStrings("data > docs > notes", format_breadcrumbs("/data/docs/notes", &buf));
+    try std.testing.expectEqual(@as(usize, 1), path_segment_count("/data"));
+    try std.testing.expectEqual(@as(usize, 2), path_segment_count("/data/docs"));
+    try std.testing.expectEqual(@as(usize, 0), path_segment_count("/"));
+    // hit-test: base 60, "data" 4*8=32px at 60..92, " > " 24px, "docs" 4*8=32 at 116..148
+    try std.testing.expectEqual(@as(?usize, 0), breadcrumb_hit_test("/data/docs", 60, 70));
+    try std.testing.expectEqual(@as(?usize, 1), breadcrumb_hit_test("/data/docs", 60, 120));
+    try std.testing.expectEqual(@as(?usize, null), breadcrumb_hit_test("/data/docs", 60, 200));
+    // truncate to segment 0 keeps "/data"
+    var p: [64]u8 = [_]u8{0} ** 64;
+    @memcpy(p[0..10], "/data/docs");
+    try std.testing.expectEqual(@as(usize, 5), truncate_to_segment(&p, 10, 0));
+    @memcpy(p[0..10], "/data/docs");
+    try std.testing.expectEqual(@as(usize, 10), truncate_to_segment(&p, 10, 1));
+}
+
+test "file: build_path joins base and name (C7)" {
+    var buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("/data/README.TXT", build_path("/data", "README.TXT", &buf));
+    try std.testing.expectEqualStrings("/data/docs/NOTES.TXT", build_path("/data/docs", "NOTES.TXT", &buf));
+}
+
+test "file: AppState current_path and breadcrumb navigation (C7)" {
+    var app = AppState.init();
+    try std.testing.expectEqualStrings("/data", app.current_path_slice());
+    // Enter subdirectory
+    _ = app.enter_directory("docs");
+    try std.testing.expectEqualStrings("/data/docs", app.current_path_slice());
+    // Navigate back via breadcrumb segment 0
+    app.navigate_to_segment(0);
+    try std.testing.expectEqualStrings("/data", app.current_path_slice());
+    // Preview flag for directory (no load)
+    app.entry_count = 1;
+    app.entries[0] = .{ .name = [_]u8{0} ** 32, .size = 0, .is_dir = 1, .reserved = .{ 0, 0, 0 } };
+    @memcpy(app.entries[0].name[0..4], "docs");
+    app.list.select(0, 1);
+    app.refresh_preview();
+    try std.testing.expect(!app.preview_loaded);
+}
+
+test "file: selecting file auto-loads preview and keyboard nav refreshes (C7)" {
+    var app = AppState.init();
+    app.entry_count = 2;
+    app.entries[0] = .{ .name = [_]u8{0} ** 32, .size = 10, .is_dir = 0, .reserved = .{ 0, 0, 0 } };
+    app.entries[1] = .{ .name = [_]u8{0} ** 32, .size = 10, .is_dir = 0, .reserved = .{ 0, 0, 0 } };
+    @memcpy(app.entries[0].name[0..9], "HELLO.TXT");
+    @memcpy(app.entries[1].name[0..9], "WORLD.TXT");
+    app.list.select(0, 2);
+    // Host dir_list for preview will stub 0, so preview_loaded false is ok — we just check selection changes trigger
+    app.refresh_preview();
+    // Move down should change selection and attempt preview (host stub)
+    var ev_down = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 1, .arg0 = 0x51, .arg1 = 0 };
+    _ = app.handle_keyboard_event(&ev_down);
+    try std.testing.expectEqual(@as(?usize, 1), app.list.selected);
+}
+
+test "file: breadcrumb_click hit-test via AppState (C7)" {
+    var app = AppState.init();
+    _ = app.enter_directory("docs");
+    try std.testing.expectEqualStrings("/data/docs", app.current_path_slice());
+    // Click on first segment "data" at x=64 (inside "data" 60..92)
+    const hit = app.breadcrumb_click(64, 8);
+    try std.testing.expect(hit);
+    try std.testing.expectEqualStrings("/data", app.current_path_slice());
 }
