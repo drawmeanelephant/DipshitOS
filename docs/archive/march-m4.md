@@ -1,3 +1,7 @@
+> ARCHIVED — frozen historical record; do not treat as an active plan.
+> Milestone four closed 2026-08-11; canonical status
+> lives in [`docs/status.md`](../status.md).
+
 # Milestone four march — real randomness (living tracker)
 
 ## Where we are
