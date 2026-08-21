@@ -377,6 +377,11 @@ pub const AppState = struct {
     cursor_visible: bool = true,
     blink_armed: bool = false,
     blink_count: u32 = 0,
+    // Arc4 #239: pause blink on keypress, resume after idle. The cursor
+    // stays solid for `blink_pause_ticks` timer events after the last
+    // keypress, then normal blink resumes.
+    blink_paused: bool = false,
+    blink_pause_remaining: u32 = 0,
 
     // M15 C5+C6: find/replace lockstep — case_sensitive=false const (v1 schema deferred).
     find_active: bool = false,
@@ -407,11 +412,32 @@ pub const AppState = struct {
     /// Claim 3289: one TIMER event — toggle the cursor's visibility. The
     /// caller re-arms for the next tick; on re-arm failure it calls
     /// `stop_blink` so the cursor parks VISIBLE (never a hard hang).
+    /// Arc4 #239: when paused (after a keypress), the cursor stays solid
+    /// and the pause counter decrements; blinking resumes when the
+    /// counter reaches zero.
     /// Returns true when the toggle changed anything on screen.
     pub fn handle_timer_event(self: *AppState) bool {
+        if (self.blink_paused) {
+            if (self.blink_pause_remaining > 0) {
+                self.blink_pause_remaining -= 1;
+            }
+            if (self.blink_pause_remaining == 0) {
+                self.blink_paused = false;
+            }
+            // Cursor stays visible during pause — no toggle.
+            return false;
+        }
         self.cursor_visible = !self.cursor_visible;
         self.blink_count += 1;
         return true;
+    }
+
+    /// Arc4 #239: pause the cursor blink on keypress. The cursor stays
+    /// solid for `blink_pause_ticks` timer events, then resumes.
+    pub fn pause_blink(self: *AppState) void {
+        self.blink_paused = true;
+        self.blink_pause_remaining = blink_pause_ticks;
+        self.cursor_visible = true; // immediately show cursor
     }
 
     /// Claim 3289: park the blink with the cursor visible (the timer seam
@@ -872,6 +898,8 @@ pub const AppState = struct {
 
     pub fn handle_keyboard_event(self: *AppState, ev: *const Event) bool {
         if (ev.kind != ui.KEY_DOWN) return false;
+        // Arc4 #239: any keypress pauses the cursor blink for a few ticks.
+        self.pause_blink();
         const keycode = ev.arg0;
         const ascii = @as(u8, @truncate(ev.arg1));
         const slice = self.buffer.get_slice();
@@ -1097,8 +1125,12 @@ pub const AppState = struct {
 /// Claim 3289 (M14 S3): blink cadence. The cursor toggles once per
 /// `blink_interval_ticks` scheduler ticks (the per-process app timer, not a
 /// `sys_sleep` spin), and the selfdemo runs `selfdemo_blinks` toggles.
-pub const blink_interval_ticks: u64 = 2;
+pub const blink_interval_ticks: u64 = 8;
 pub const selfdemo_blinks: u32 = 6;
+
+/// Arc4 #239: after a keypress, the cursor stays solid for this many
+/// timer ticks before resuming the blink (2 s on VZ).
+pub const blink_pause_ticks: u32 = 2;
 
 /// Claim 3289 (M14 S3): the composition selfdemo. NOTEPAD is exec'd with
 /// `selfdemo` in its argv (claim 4636's entry contract: argc in x0, the
@@ -1549,6 +1581,29 @@ test "notepad: the timer-driven cursor blink toggles and re-arms (claim 3289)" {
     // done (the loop checks blink_count >= selfdemo_blinks).
     app.blink_count = selfdemo_blinks;
     try std.testing.expect(app.blink_count >= selfdemo_blinks);
+}
+
+test "notepad: cursor blink pauses on keypress and resumes after idle (arc4 #239)" {
+    var app = AppState.init();
+    app.blink_armed = true;
+
+    // A keypress pauses the blink: cursor stays solid.
+    app.pause_blink();
+    try std.testing.expect(app.blink_paused);
+    try std.testing.expect(app.cursor_visible);
+    try std.testing.expectEqual(blink_pause_ticks, app.blink_pause_remaining);
+
+    // During the pause, TIMER events decrement the counter but don't toggle.
+    var i: u32 = 0;
+    while (i < blink_pause_ticks) : (i += 1) {
+        try std.testing.expect(!app.handle_timer_event()); // no toggle
+        try std.testing.expect(app.cursor_visible); // still solid
+    }
+
+    // After the pause expires, normal blink resumes.
+    try std.testing.expect(!app.blink_paused);
+    try std.testing.expect(app.handle_timer_event()); // now toggles
+    try std.testing.expect(!app.cursor_visible);
 }
 
 test "notepad: the selfdemo pastes the clipboard, copies it back, and honors the capacity bound (claim 3289)" {

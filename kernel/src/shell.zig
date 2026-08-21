@@ -227,6 +227,15 @@ pub fn boot_and_park(mon: *monitor.Monitor, rx_wired: bool) void {
                 mon.console.print_u64(id);
                 mon.console.puts("\n");
             }
+            // Arc4 #238: Ctrl+Shift+B lowers focused window to back.
+            if (input.take_lower_back()) {
+                const fid = driving_award.focused_window_id();
+                if (driving_award.user_lower_back(fid)) {
+                    mon.console.puts("dui: lower-back id=");
+                    mon.console.print_u64(fid);
+                    mon.console.puts("\n");
+                }
+            }
             // Claim 1574 (milestone six G3): Road Pops — one full-frame
             // present per dirty output batch (the card-3d drain pattern).
             // No-op when the tee is unarmed (default VM) or clean.
@@ -395,7 +404,7 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "  screen      virtio-gpu transport + framebuffer: device DID, features, scanout, status, re-arm ('screen fill <rrggbb>' fills the framebuffer and flushes it to the scanout)\n" ++
         "  text        framebuffer text: text region, cursor, scrollback ('text put <string...>' renders + flushes to the scanout; 'text clear' clears)\n" ++
         "  usb         XHCI host controller: `usb` transport report, `usb devices` enumerated HID devices, `usb report` last HID report\n" ++
-        "  dui         Driving Award window manager: registry (with owner pids), z-order, focus, hit-testing ('dui focus <n>' focuses; 'dui raise <n>' raises; 'dui move <n> <x> <y>' moves a user window; 'dui close <n>' releases a user window; 'dui list <pid>' filters by owner; 'dui hit <x> <y>' hit-tests; 'dui cycle' cycles focus like Alt+Tab)\n" ++
+        "  dui         Driving Award window manager: registry (with owner pids), z-order, focus, hit-testing ('dui focus <n>' focuses; 'dui raise <n>' raises; 'dui lower <n>' lowers to back; 'dui move <n> <x> <y>' moves a user window; 'dui close <n>' releases a user window; 'dui list <pid>' filters by owner; 'dui hit <x> <y>' hit-tests; 'dui cycle' cycles focus like Alt+Tab)\n" ++
         "system\n" ++
         "  beep        synthesize + play a sine through the virtio-snd PCM path ('beep <freq> <ms>' — reports the full control flow + submit/drain accounting)\n" ++
         "  clear       clean up the crime scene\n" ++
