@@ -885,6 +885,29 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_guard.step);
 
     // ------------------------------------------------------------------
+    // Guest: Arc5 hostile-consumer test — SPIN.BIN (Issue #246)
+    // Sets CPU tick limit via sys_setrlimit then spins until killed (status 141).
+    // ------------------------------------------------------------------
+    const spin_prog = b.addExecutable(.{
+        .name = "user-spin",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/spin.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    spin_prog.linker_script = b.path("user/linker.ld");
+    const spin_step = b.step("spin", "Build the Arc5 hostile-consumer test (zig-out/bin/SPIN.BIN) — CPU limit enforcement");
+    const spin_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    spin_elf2bin.addFileArg(spin_prog.getEmittedBin());
+    const spin_bin = spin_elf2bin.addOutputFileArg("SPIN.BIN");
+    spin_elf2bin.has_side_effects = true;
+    spin_elf2bin.stdio = .inherit;
+    spin_step.dependOn(&spin_elf2bin.step);
+    const install_spin = b.addInstallFileWithDir(spin_bin, .bin, "SPIN.BIN");
+    b.getInstallStep().dependOn(&install_spin.step);
+
+    // ------------------------------------------------------------------
     // Guest: thirtieth ESP user program (Issue #214 — GUI settings panel)
     // SETTINGS.BIN. Reads/writes /data/SETTINGS.TXT through M10 file seam.
     // ------------------------------------------------------------------
@@ -947,6 +970,7 @@ pub fn build(b: *std.Build) void {
     image.addFileArg(chime_bin); // ... [CHIME.BIN] (claim 3206: twenty-seventh user program, composition capstone proof)
     image.addFileArg(globals_bin); // ... [GLOBALS.BIN] (claim 3805: twenty-eighth user program, the first SEGMENTED DSK3 image)
     image.addFileArg(guard_bin); // ... [GUARD.BIN] (claim 8403: twenty-ninth user program, the hostile guard-page proof)
+    image.addFileArg(spin_bin); // ... [SPIN.BIN] (Arc5 #246: hostile-consumer CPU limit test)
     image.addFileArg(settings_bin); // ... [SETTINGS.BIN] (Issue #214: thirtieth user program, GUI settings panel)
     image.has_side_effects = true;
     image.stdio = .inherit;
