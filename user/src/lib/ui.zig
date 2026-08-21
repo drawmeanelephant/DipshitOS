@@ -1405,27 +1405,17 @@ pub const ScrollView = struct {
                 return false;
             },
             MOUSE_SCROLL => {
-                // arg0 as signed scroll delta: +1 down, -1 up (and shifted variants)
-                const delta_i: i32 = @as(i32, @bitCast(ev.arg0));
-                // Normalize to vertical scroll only; horizontal (arg0 == 2 etc) ignored here
-                if (delta_i == 0) return false;
-                // Each wheel notch scrolls ~16px or 3 lines (~24px); use 16 for test determinism
-                const step: i32 = if (delta_i > 0) 16 else -16;
-                // For larger magnitudes, scale (e.g., -2 or 2 for shift+wheel would be horizontal, ignore)
-                if (delta_i == 1 or delta_i == -1) {
-                    self.scroll_by(step);
-                    return true;
-                }
-                // Also handle signed small deltas generically
-                if (delta_i > 1) {
-                    self.scroll_by(delta_i * 16);
-                    return true;
-                }
-                if (delta_i < -1 and delta_i > -100) {
-                    self.scroll_by(delta_i * 16);
-                    return true;
-                }
-                return false;
+                // Arc4 #236: arg0 packed per ADR 0013 D2.
+                // bits 0–13 = magnitude, bit 14 = horizontal, bit 15 = sign.
+                const raw = ev.arg0;
+                const horizontal = (raw & 0x4000) != 0;
+                if (horizontal) return false; // vertical-only ScrollView
+                const magnitude: i32 = @intCast(raw & 0x1fff);
+                if (magnitude == 0) return false;
+                const sign: i32 = if ((raw & 0x8000) != 0) 1 else -1;
+                const step = sign * magnitude * 16;
+                self.scroll_by(step);
+                return true;
             },
             else => return false,
         }
@@ -1997,30 +1987,16 @@ pub const HScrollBar = struct {
                 const is_horizontal = is_shift or packed_horizontal;
                 if (!is_horizontal) return false;
                 var delta: i32 = 0;
-                if (is_shift) {
-                    const d: i32 = @as(i32, @bitCast(ev.arg0));
-                    if (d == 0) return false;
-                    if (d == 1 or d == -1) {
-                        delta = d * 16;
-                    } else if (d > 1 and d < 100) {
-                        delta = d * 16;
-                    } else if (d < -1 and d > -100) {
-                        delta = d * 16;
-                    } else {
-                        return false;
-                    }
-                } else if (ev.arg0 & 0x8000 != 0) {
-                    const mag = ev.arg0 & 0x3fff;
-                    delta = @as(i32, @intCast(mag));
-                    if (delta == 0) delta = 1;
-                    delta = delta * 16;
-                } else if (ev.arg0 & 0x3fff != 0 and (ev.arg0 & 0x4000) != 0) {
-                    const mag = ev.arg0 & 0x3fff;
-                    delta = -@as(i32, @intCast(mag)) * 16;
-                    if (delta == 0) delta = -16;
-                } else {
-                    return false;
-                }
+                // Arc4 #236: arg0 packed per ADR 0013 D2.
+                // bits 0–13 = magnitude, bit 14 = horizontal, bit 15 = sign.
+                // Shift+scroll overrides horizontal flag.
+                const raw = ev.arg0;
+                const magnitude: i32 = @intCast(raw & 0x1fff);
+                if (magnitude == 0) return false;
+                const horiz = is_shift or (raw & 0x4000) != 0;
+                if (!horiz) return false; // HScrollBar only consumes horizontal
+                const sign: i32 = if ((raw & 0x8000) != 0) 1 else -1;
+                delta = sign * magnitude * 16;
                 self.scroll_by(delta);
                 return true;
             },
@@ -2740,18 +2716,18 @@ test "ui: HScrollBar Shift+scroll and keyboard" {
     var ev_end = Event{ .kind = KEY_DOWN, .flags = 0, .seq = 4, .arg0 = 0x4d, .arg1 = 0 };
     _ = hb.handle_event(&ev_end);
     try std.testing.expectEqual(@as(u32, 200), hb.offset);
-    // Shift+scroll right
+    // Shift+scroll right (packed arg0: mag=1, sign=1, bit15=1)
     hb.offset = 0;
-    var ev_scroll = Event{ .kind = MOUSE_SCROLL, .flags = MOD_SHIFT, .seq = 5, .arg0 = 1, .arg1 = 0 };
+    var ev_scroll = Event{ .kind = MOUSE_SCROLL, .flags = MOD_SHIFT, .seq = 5, .arg0 = 0x8001, .arg1 = 0 };
     _ = hb.handle_event(&ev_scroll);
     try std.testing.expectEqual(@as(u32, 16), hb.offset);
     // Without Shift, vertical scroll ignored for HScrollBar
-    var ev_scroll_vert = Event{ .kind = MOUSE_SCROLL, .flags = 0, .seq = 6, .arg0 = 1, .arg1 = 0 };
+    var ev_scroll_vert = Event{ .kind = MOUSE_SCROLL, .flags = 0, .seq = 6, .arg0 = 0x8001, .arg1 = 0 };
     const before = hb.offset;
     _ = hb.handle_event(&ev_scroll_vert);
     try std.testing.expectEqual(before, hb.offset);
-    // Scroll left via Shift+scroll negative
-    var ev_scroll_left = Event{ .kind = MOUSE_SCROLL, .flags = MOD_SHIFT, .seq = 7, .arg0 = @as(u32, @bitCast(@as(i32, -1))), .arg1 = 0 };
+    // Scroll left via Shift+scroll (packed: mag=1, sign=0, bit15=0)
+    var ev_scroll_left = Event{ .kind = MOUSE_SCROLL, .flags = MOD_SHIFT, .seq = 7, .arg0 = 0x0001, .arg1 = 0 };
     _ = hb.handle_event(&ev_scroll_left);
     try std.testing.expectEqual(@as(u32, 0), hb.offset);
     // Content fits → no scroll even with keys

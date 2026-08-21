@@ -329,6 +329,30 @@ pub fn decode_keyboard_report(rep: []const u8) void {
                     .arg1 = ascii_char,
                 });
                 events += 1;
+                // Arc4 #236: translate PageUp/PageDown to MOUSE_SCROLL events.
+                // On VZ the absolute pointer has no wheel byte, so this is the
+                // working scroll path. ScrollView/HScrollBar consume kind 12.
+                if (k == 0x4b) { // PageUp
+                    // Packed arg0: magnitude=1, sign=0 (scroll up).
+                    app_events.push(owner_pid, .{
+                        .kind = app_events.MOUSE_SCROLL,
+                        .flags = 0,
+                        .seq = 0,
+                        .arg0 = 1, // magnitude=1, bit15=0 (up)
+                        .arg1 = 0,
+                    });
+                    events += 1;
+                } else if (k == 0x4e) { // PageDown
+                    // Packed arg0: magnitude=1, sign=1 (scroll down).
+                    app_events.push(owner_pid, .{
+                        .kind = app_events.MOUSE_SCROLL,
+                        .flags = 0,
+                        .seq = 0,
+                        .arg0 = 0x8001, // magnitude=1, bit15=1 (down)
+                        .arg1 = 0,
+                    });
+                    events += 1;
+                }
             }
         }
         // 2. Key UP: keys in kb_held but not in keys now

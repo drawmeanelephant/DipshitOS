@@ -35,6 +35,11 @@ pub const TIMER: u16 = 9;
 pub const WIN_RESIZE: u16 = 10;
 /// Arc2 W2 (claim 1757, ADR 0013 D2): right-click — `arg0 = local x`, `arg1 = local y` (kind 12 is MOUSE_SCROLL for #236).
 pub const MOUSE_RIGHT_DOWN: u16 = 11;
+/// Arc4 #236 (ADR 0013 D2): mouse wheel / scroll event.
+/// `arg0` packed: bits 0–13 magnitude (1..8191), bit 14 = horizontal
+/// (shift+scroll), bit 15 = sign (1 = down/right, 0 = up/left).
+/// `arg1 = 0` (reserved).
+pub const MOUSE_SCROLL: u16 = 12;
 pub const MOUSE_RIGHT_UP: u16 = 13;
 
 /// Modifier bitmasks (flags bits 0..7).
