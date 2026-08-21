@@ -335,7 +335,7 @@ fn ensure_registry() []const Command {
             .{ .name = "uname", .help = "compact system identity", .usage = "uname", .category = .machine_identity, .handler = cmd_uname },
             .{ .name = "version", .help = "display build information", .usage = "version", .category = .machine_identity, .handler = cmd_version },
             .{ .name = "welcome", .help = "guided tour of the system for new users", .usage = "welcome", .category = .machine_identity, .handler = cmd_welcome },
-            .{ .name = "dui", .help = "Driving Award window manager: registry (with owner pids), z-order, focus, hit-testing ('dui focus <n>' focuses; 'dui raise <n>' raises; 'dui move <n> <x> <y>' moves a user window; 'dui close <n>' releases a user window; 'dui list <pid>' filters by owner; 'dui hit <x> <y>' hit-tests; 'dui cycle' cycles focus like Alt+Tab)", .usage = "dui [focus <n>|raise <n>|move <n> <x> <y>|close <n>|list <pid>|hit <x> <y>|cycle]", .category = .graphics_input, .max_args = 4, .handler = cmd_dui },
+            .{ .name = "dui", .help = "Driving Award window manager: registry (with owner pids), z-order, focus, hit-testing ('dui focus <n>' focuses; 'dui raise <n>' raises; 'dui lower <n>' lowers to back; 'dui move <n> <x> <y>' moves a user window; 'dui close <n>' releases a user window; 'dui list <pid>' filters by owner; 'dui hit <x> <y>' hit-tests; 'dui cycle' cycles focus like Alt+Tab)", .usage = "dui [focus <n>|raise <n>|lower <n>|move <n> <x> <y>|close <n>|list <pid>|hit <x> <y>|cycle]", .category = .graphics_input, .max_args = 4, .handler = cmd_dui },
             .{ .name = "write", .help = "write text to a file on the ESP", .usage = "write <file> <text...>", .category = .storage, .min_args = 1, .handler = cmd_write },
         };
         registry_ready = true;
@@ -1455,6 +1455,34 @@ fn cmd_dui(m: *Monitor, args: []const []const u8) ExecError {
             _ = driving_award.composite();
             m.console.puts("dui raise: raised=");
             m.console.print_u64(id);
+            m.console.puts("\n");
+            return .none;
+        }
+        if (std.mem.eql(u8, args[0], "lower")) {
+            if (args.len != 2) {
+                print_usage(m, lookup("dui").?);
+                return .usage;
+            }
+            const id2 = parseInt(args[1]) catch {
+                err_prefix(m);
+                m.console.puts("invalid id: ");
+                m.console.puts(args[1]);
+                m.console.puts("\n");
+                return .invalid_argument;
+            };
+            if (id2 > 255) {
+                err_prefix(m);
+                m.console.print_line("id out of range");
+                return .invalid_argument;
+            }
+            if (!driving_award.user_lower_back(@intCast(id2))) {
+                err_prefix(m);
+                m.console.print_line("no such user window");
+                return .invalid_argument;
+            }
+            _ = driving_award.composite();
+            m.console.puts("dui lower: lowered=");
+            m.console.print_u64(id2);
             m.console.puts("\n");
             return .none;
         }
@@ -6288,7 +6316,7 @@ test "monitor: syscalls is registered and reports deterministic rows" {
     try std.testing.expectEqualStrings("numbered syscall table and counters", lookup("syscalls").?.help);
     try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"syscalls"}));
     try std.testing.expectEqualStrings(
-        "syscalls: slots=64 implemented=48\n" ++
+        "syscalls: slots=64 implemented=51\n" ++
             "  0 sys_ping calls=0\n" ++
             "  1 sys_write calls=0\n" ++
             "  2 sys_yield calls=0\n" ++
@@ -6336,7 +6364,10 @@ test "monitor: syscalls is registered and reports deterministic rows" {
             "  44 sys_audio_volume calls=0\n" ++
             "  45 sys_audio_mute calls=0\n" ++
             "  46 sys_win_fill_batch calls=0\n" ++
-            "  47 sys_win_resize calls=0\n",
+            "  47 sys_win_resize calls=0\n" ++
+            "  48 sys_drag_start calls=0\n" ++
+            "  49 sys_win_raise_front calls=0\n" ++
+            "  50 sys_win_lower_back calls=0\n",
         env.mock.contents(),
     );
 }

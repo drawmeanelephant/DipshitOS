@@ -88,6 +88,8 @@ var ptr_click_pending: bool = false;
 /// focus-cycle request (ADR 0008 D4's keyboard cycling).
 var alt_tab_pending: bool = false;
 var alt_tab_shift: bool = false;
+/// Arc4 #238: Ctrl+Shift+B lowers the focused window to back.
+var lower_back_pending: bool = false;
 
 /// Diagnostic hooks (kernel/src/main.zig wires these to uart_puts/uart_hex
 /// under `--input`; null in host tests and the default VM).
@@ -289,6 +291,19 @@ pub fn decode_keyboard_report(rep: []const u8) void {
                 alt_tab_shift = shift;
             }
         }
+        // Arc4 #238: Ctrl+Shift+B lowers focused window to back.
+        if (k == 0x05 and (flags & app_events.MOD_CTRL) != 0 and (flags & app_events.MOD_SHIFT) != 0) {
+            var held = false;
+            for (kb_held) |h| {
+                if (h == k) {
+                    held = true;
+                    break;
+                }
+            }
+            if (!held) {
+                lower_back_pending = true;
+            }
+        }
     }
 
     if (driving_award.focused_owner()) |owner_pid| {
@@ -461,6 +476,13 @@ pub fn take_alt_tab_shift() ?bool {
     const s = alt_tab_shift;
     alt_tab_shift = false;
     return s;
+}
+
+/// Arc4 #238: consume the Ctrl+Shift+B chord edge.
+pub fn take_lower_back() bool {
+    if (!lower_back_pending) return false;
+    lower_back_pending = false;
+    return true;
 }
 
 // ---------------------------------------------------------------------------

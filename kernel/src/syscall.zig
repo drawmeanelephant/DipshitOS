@@ -75,7 +75,7 @@ const app_timers = @import("app_timers.zig"); // Milestone 14 (claim 7323): the 
 const virtio_snd = @import("virtio_snd.zig"); // Milestone 15 (claim 7636): the virtio-snd playback path behind sys_audio_*
 
 pub const slot_count: usize = 64;
-pub const implemented_count: usize = 48;
+pub const implemented_count: usize = 51;
 /// Card G6 (claim 0487) follow-on (slot 18): the fixed `sys_win_get` shape —
 /// four u32 LE words (x, y, w, h), 16 bytes, marshaled per call and copy_out'd
 /// through uaccess (the procs snapshot pattern).
@@ -210,6 +210,10 @@ pub const sys_audio_mute: u64 = 45;
 pub const sys_win_fill_batch: u64 = 46;
 /// Arc2 W1 (claim 3589, ADR 0013 D1): `sys_win_resize(id, w, h)` — slot 47.
 pub const sys_win_resize: u64 = 47;
+/// Arc4 #238 (ADR 0013 D1): `sys_win_raise_front(id)` — slot 49.
+pub const sys_win_raise_front: u64 = 49;
+/// Arc4 #238 (ADR 0013 D1): `sys_win_lower_back(id)` — slot 50.
+pub const sys_win_lower_back: u64 = 50;
 
 pub const ErrorCode = enum(i64) {
     einval = -1,
@@ -333,6 +337,11 @@ fn ensure_table() *const [slot_count]Entry {
         table_storage[sys_audio_mute] = .{ .name = "sys_audio_mute", .handler = handle_audio_mute };
         table_storage[sys_win_fill_batch] = .{ .name = "sys_win_fill_batch", .handler = handle_win_fill_batch };
         table_storage[sys_win_resize] = .{ .name = "sys_win_resize", .handler = handle_win_resize };
+        // Arc4: slot 48 is reserved by ADR 0013 for sys_drag_start (#237).
+        // Stub: returns ENOSYS until #237 lands.
+        table_storage[48] = .{ .name = "sys_drag_start", .handler = handle_enosys };
+        table_storage[sys_win_raise_front] = .{ .name = "sys_win_raise_front", .handler = handle_win_raise_front };
+        table_storage[sys_win_lower_back] = .{ .name = "sys_win_lower_back", .handler = handle_win_lower_back };
         table_ready = true;
     }
     return &table_storage;
@@ -382,6 +391,13 @@ pub fn handle_svc(frame: *exceptions.VectorFrame, immediate: u16) bool {
         error_result(.enosys);
     _ = exceptions.frame_write(frame, 0, result);
     return true;
+}
+
+/// Stub for reserved-but-unimplemented slots (ADR 0013). Returns
+/// ENOSYS so the dispatch table can include forward-reserved rows
+/// without crashing the `syscalls` report.
+fn handle_enosys(_: Args, _: *exceptions.VectorFrame) u64 {
+    return error_result(.enosys);
 }
 
 fn handle_ping(args: Args, _: *exceptions.VectorFrame) u64 {
@@ -782,6 +798,29 @@ fn handle_win_raise(args: Args, _: *exceptions.VectorFrame) u64 {
     if (args[0] > std.math.maxInt(u8)) return error_result(.einval);
     if (!win_owned_by_caller(@truncate(args[0]))) return error_result(.einval);
     if (!driving_award.user_raise(@truncate(args[0]))) return error_result(.einval);
+    return 0;
+}
+
+/// Arc4 #238 (slot 49): `sys_win_raise_front(id)` — raise the CALLER'S
+/// user window to the top of the z-order (focus unchanged). Owner-
+/// restricted; refused on fixed layers. Returns 0; EINVAL for unknown id,
+/// non-user window, or a window the caller does NOT own.
+fn handle_win_raise_front(args: Args, _: *exceptions.VectorFrame) u64 {
+    if (args[0] > std.math.maxInt(u8)) return error_result(.einval);
+    if (!win_owned_by_caller(@truncate(args[0]))) return error_result(.einval);
+    if (!driving_award.user_raise_front(@truncate(args[0]))) return error_result(.einval);
+    return 0;
+}
+
+/// Arc4 #238 (slot 50): `sys_win_lower_back(id)` — lower the CALLER'S
+/// user window to the bottom of the z-order (above fixed windows, below
+/// all other user windows). Owner-restricted; refused on fixed layers.
+/// Returns 0; EINVAL for unknown id, non-user window, or a window the
+/// caller does NOT own.
+fn handle_win_lower_back(args: Args, _: *exceptions.VectorFrame) u64 {
+    if (args[0] > std.math.maxInt(u8)) return error_result(.einval);
+    if (!win_owned_by_caller(@truncate(args[0]))) return error_result(.einval);
+    if (!driving_award.user_lower_back(@truncate(args[0]))) return error_result(.einval);
     return 0;
 }
 
@@ -1405,7 +1444,7 @@ fn handle_tcp_close(_: Args, _: *exceptions.VectorFrame) u64 {
 
 /// Deterministic monitor output for the implemented rows and their counters.
 pub fn report(con: *console.Console) void {
-    con.puts("syscalls: slots=64 implemented=48\n");
+    con.puts("syscalls: slots=64 implemented=51\n");
     var number: u64 = 0;
     while (number < implemented_count) : (number += 1) {
         const info = entry_info(number).?;
@@ -1437,7 +1476,7 @@ fn capture_marshaled_args(args: Args, _: *exceptions.VectorFrame) u64 {
     return 0xcafe;
 }
 
-test "syscall: runtime table has 64 slots and forty-five unique implemented rows" {
+test "syscall: runtime table has 64 slots and fifty-one unique implemented rows" {
     init(test_writer);
     const table = ensure_table();
     try std.testing.expectEqual(@as(usize, 64), table.len);
@@ -1450,7 +1489,7 @@ test "syscall: runtime table has 64 slots and forty-five unique implemented rows
             implemented += 1;
         }
     }
-    try std.testing.expectEqual(@as(usize, 48), implemented);
+    try std.testing.expectEqual(@as(usize, 51), implemented);
     try std.testing.expectEqualStrings("sys_audio_info", entry_info(42).?.name);
     try std.testing.expectEqualStrings("sys_audio_play", entry_info(43).?.name);
     try std.testing.expectEqualStrings("sys_audio_volume", entry_info(44).?.name);
@@ -1497,6 +1536,9 @@ test "syscall: runtime table has 64 slots and forty-five unique implemented rows
     try std.testing.expectEqualStrings("sys_timer_cancel", entry_info(41).?.name);
     try std.testing.expectEqualStrings("sys_win_fill_batch", entry_info(46).?.name);
     try std.testing.expectEqualStrings("sys_win_resize", entry_info(47).?.name);
+    try std.testing.expectEqualStrings("sys_drag_start", entry_info(48).?.name);
+    try std.testing.expectEqualStrings("sys_win_raise_front", entry_info(49).?.name);
+    try std.testing.expectEqualStrings("sys_win_lower_back", entry_info(50).?.name);
     try std.testing.expect(entry_info(63) == null);
 }
 
@@ -2418,7 +2460,7 @@ test "syscall: counters are monotonic and report is deterministic" {
     var con = mock.console();
     report(&con);
     try std.testing.expectEqualStrings(
-        "syscalls: slots=64 implemented=48\n" ++
+        "syscalls: slots=64 implemented=51\n" ++
             "  0 sys_ping calls=2\n" ++
             "  1 sys_write calls=0\n" ++
             "  2 sys_yield calls=0\n" ++
@@ -2466,7 +2508,10 @@ test "syscall: counters are monotonic and report is deterministic" {
             "  44 sys_audio_volume calls=0\n" ++
             "  45 sys_audio_mute calls=0\n" ++
             "  46 sys_win_fill_batch calls=0\n" ++
-            "  47 sys_win_resize calls=0\n",
+            "  47 sys_win_resize calls=0\n" ++
+            "  48 sys_drag_start calls=0\n" ++
+            "  49 sys_win_raise_front calls=0\n" ++
+            "  50 sys_win_lower_back calls=0\n",
         mock.contents(),
     );
 }

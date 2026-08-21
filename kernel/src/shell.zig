@@ -227,6 +227,15 @@ pub fn boot_and_park(mon: *monitor.Monitor, rx_wired: bool) void {
                 mon.console.print_u64(id);
                 mon.console.puts("\n");
             }
+            // Arc4 #238: Ctrl+Shift+B lowers focused window to back.
+            if (input.take_lower_back()) {
+                const fid = driving_award.focused_window_id();
+                if (driving_award.user_lower_back(fid)) {
+                    mon.console.puts("dui: lower-back id=");
+                    mon.console.print_u64(fid);
+                    mon.console.puts("\n");
+                }
+            }
             // Claim 1574 (milestone six G3): Road Pops — one full-frame
             // present per dirty output batch (the card-3d drain pattern).
             // No-op when the tee is unarmed (default VM) or clean.

@@ -153,7 +153,17 @@ pub const Window = struct {
     /// `close_owner` — a real teardown semantic instead of a window that
     /// leaks until reboot.
     owner: ?usize = null,
+    /// Arc4 #239: animated window fade-in. 0=none (fully opaque),
+    /// 1=fade-in active. The paint path applies per-pixel alpha
+    /// blending during the fade frames.
+    fade_phase: u8 = 0,
+    fade_tick: u8 = 0,
 };
+
+/// Arc4 #239: fade-in constants. The window is at 25% opacity for
+/// `fade_half_frames` composites, then 50% for the same count, then
+/// fully opaque. Total fade-in = 2 × fade_half_frames composites.
+pub const fade_half_frames: u8 = 2;
 
 // ---------------------------------------------------------------------------
 // Registry state (fixed BSS)
@@ -686,6 +696,8 @@ pub fn user_open(x: u32, y: u32, w: u32, h: u32, owner: usize) UserOpenResult {
             .visible = true,
             .dirty = true,
             .owner = owner,
+            .fade_phase = 1, // Arc4 #239: start fade-in
+            .fade_tick = 0,
         };
         win_count += 1;
         _ = focus(id);
@@ -745,6 +757,32 @@ pub fn user_move(id: u8, x: u32, y: u32) bool {
 pub fn user_raise(id: u8) bool {
     if (find_user_window_index(id) == null) return false;
     return raise(id);
+}
+
+/// Arc4 #238 (slot 49): raise the caller's user window to the top of the
+/// z-order (EL0-callable variant of `user_raise`). Owner-restricted like
+/// `sys_win_raise`; refused on fixed layers. Returns false for unknown id,
+/// non-user window, or unarmed manager.
+pub fn user_raise_front(id: u8) bool {
+    if (!armed_global) return false;
+    if (find_user_window_index(id) == null) return false;
+    return raise(id);
+}
+
+/// Arc4 #238 (slot 50): lower the caller's user window to the bottom of
+/// the z-order — above fixed windows (wallpaper/taskbar/dock, ids 255/253)
+/// but below all other user windows. Owner-restricted; refused on fixed
+/// layers. Returns false for unknown id, non-user window, or unarmed.
+pub fn user_lower_back(id: u8) bool {
+    if (!armed_global) return false;
+    const idx = find_user_window_index(id) orelse return false;
+    // Move to index 0: shift everything above down by one.
+    const moved = windows[idx];
+    var j = idx;
+    while (j > 0) : (j -= 1) windows[j] = windows[j - 1];
+    windows[0] = moved;
+    windows[0].dirty = true;
+    return true;
 }
 
 /// Close (release) a user window: remove it from the registry (the z-order
@@ -1568,6 +1606,39 @@ pub fn blit_rect(
     }
 }
 
+/// Arc4 #239: alpha-blended blit. Blends `src` over `dst` with the
+/// given alpha (0..256). 256 = fully opaque (same as blit_rect),
+/// 64 = 25%, 128 = 50%. Per-pixel: dst = dst × (1 - a/256) + src × (a/256).
+/// Pure BSS math, no allocation.
+pub fn blit_rect_alpha(
+    dst: [*]u8,
+    dst_stride: usize,
+    src: [*]const u8,
+    src_stride: usize,
+    dx: usize,
+    dy: usize,
+    w: usize,
+    h: usize,
+    alpha: u16,
+) void {
+    if (alpha >= 256) {
+        blit_rect(dst, dst_stride, src, src_stride, dx, dy, w, h);
+        return;
+    }
+    const inv_alpha: u16 = 256 - alpha;
+    var y: usize = 0;
+    while (y < h) : (y += 1) {
+        const drow = dst + (dy + y) * dst_stride + dx * 4;
+        const srow = src + y * src_stride;
+        var x: usize = 0;
+        while (x < w * 4) : (x += 1) {
+            const d: u16 = drow[x];
+            const s: u16 = srow[x];
+            drow[x] = @intCast((d * inv_alpha + s * alpha) >> 8);
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Window painting
 // ---------------------------------------------------------------------------
@@ -1632,16 +1703,38 @@ fn paint(w: *Window) void {
         .user => {
             const idx = w.id - user_window_id_base;
             if (idx >= user_windows_max) return;
-            blit_rect(
-                @ptrCast(&virtio_gpu.gpu_fb),
-                virtio_gpu.fb_width * 4,
-                @ptrCast(&user_bufs[idx]),
-                user_buf_w * 4,
-                w.x,
-                w.y,
-                w.w,
-                w.h,
-            );
+            // Arc4 #239: during fade-in, blend with alpha over the
+            // background (wallpaper/terminal already composited below).
+            const alpha: u16 = if (w.fade_phase == 1)
+                if (w.fade_tick < fade_half_frames) 64 // 25%
+                else if (w.fade_tick < fade_half_frames * 2) 128 // 50%
+                else 256 // fully opaque (fade complete)
+            else
+                256;
+            if (alpha < 256) {
+                blit_rect_alpha(
+                    @ptrCast(&virtio_gpu.gpu_fb),
+                    virtio_gpu.fb_width * 4,
+                    @ptrCast(&user_bufs[idx]),
+                    user_buf_w * 4,
+                    w.x,
+                    w.y,
+                    w.w,
+                    w.h,
+                    alpha,
+                );
+            } else {
+                blit_rect(
+                    @ptrCast(&virtio_gpu.gpu_fb),
+                    virtio_gpu.fb_width * 4,
+                    @ptrCast(&user_bufs[idx]),
+                    user_buf_w * 4,
+                    w.x,
+                    w.y,
+                    w.w,
+                    w.h,
+                );
+            }
         },
         .wallpaper => {
             // Step 9: vertical gradient from wallpaper_top() to wallpaper_bot().
@@ -1782,6 +1875,23 @@ pub fn composite() virtio_gpu.CmdResult {
         }
         paint(w);
         w.dirty = false;
+    }
+    // Arc4 #239: advance fade-in ticks after painting. Each composite
+    // frame increments the tick; after 2 × fade_half_frames the fade
+    // completes and the window renders at full opacity.
+    {
+        var fi: usize = 0;
+        while (fi < win_count) : (fi += 1) {
+            const fw = &windows[fi];
+            if (fw.fade_phase == 1) {
+                fw.fade_tick +|= 1;
+                if (fw.fade_tick >= fade_half_frames * 2) {
+                    fw.fade_phase = 0; // fade complete
+                    fw.fade_tick = 0;
+                }
+                fw.dirty = true; // repaint at new alpha
+            }
+        }
     }
     draw_chrome();
     if (!virtio_gpu.gpu_ready) return .not_ready;
@@ -3011,4 +3121,69 @@ test "driving_award: Arc2 W3 — Kind.clock deprecated but enum remains" {
     // id 1 is free for future repurpose but currently not a user window.
     try std.testing.expect(find_user_window(1) == null);
     try std.testing.expect(!user_fill(1, 0, 0, 10, 10, 0xffffff));
+}
+
+test "driving_award: blit_rect_alpha blends src over dst at given opacity" {
+    // 4x4 dst filled with 0x404040 (dark gray), src filled with 0xc0c0c0 (light gray).
+    var dst: [4 * 4 * 4]u8 = undefined;
+    var src: [4 * 4 * 4]u8 = undefined;
+    for (0..(4 * 4 * 4)) |i| {
+        dst[i] = 0x40;
+        src[i] = 0xc0;
+    }
+    // 50% alpha (128): result = 0x40*(128/256) + 0xc0*(128/256) = 0x20 + 0x60 = 0x80.
+    blit_rect_alpha(&dst, 4 * 4, &src, 4 * 4, 0, 0, 4, 4, 128);
+    for (0..(4 * 4 * 4)) |i| {
+        try std.testing.expectEqual(@as(u8, 0x80), dst[i]);
+    }
+}
+
+test "driving_award: blit_rect_alpha at 25% opacity (64)" {
+    var dst: [4 * 4 * 4]u8 = undefined;
+    var src: [4 * 4 * 4]u8 = undefined;
+    for (0..(4 * 4 * 4)) |i| {
+        dst[i] = 0x00;
+        src[i] = 0xff;
+    }
+    // 25% alpha (64): result = 0*(192/256) + 255*(64/256) ≈ 63.
+    blit_rect_alpha(&dst, 4 * 4, &src, 4 * 4, 0, 0, 4, 4, 64);
+    for (0..(4 * 4 * 4)) |i| {
+        try std.testing.expectEqual(@as(u8, 63), dst[i]);
+    }
+}
+
+test "driving_award: blit_rect_alpha at full opacity falls back to memcpy" {
+    var dst: [4 * 4 * 4]u8 = undefined;
+    var src: [4 * 4 * 4]u8 = undefined;
+    for (0..(4 * 4 * 4)) |i| {
+        dst[i] = 0x00;
+        src[i] = 0xab;
+    }
+    blit_rect_alpha(&dst, 4 * 4, &src, 4 * 4, 0, 0, 4, 4, 256);
+    for (0..(4 * 4 * 4)) |i| {
+        try std.testing.expectEqual(@as(u8, 0xab), dst[i]);
+    }
+}
+
+test "driving_award: window fade-in state transitions" {
+    // user_open sets fade_phase=1, fade_tick=0.
+    armed_global = true;
+    _ = user_open(100, 100, 200, 150, 99);
+    const w = find_user_window(2).?;
+    try std.testing.expectEqual(@as(u8, 1), w.fade_phase);
+    try std.testing.expectEqual(@as(u8, 0), w.fade_tick);
+    // After fade_half_frames ticks, phase is still 1 but alpha should be 50%.
+    var fi: u8 = 0;
+    while (fi < fade_half_frames) : (fi += 1) {
+        w.fade_tick +|= 1;
+    }
+    try std.testing.expectEqual(@as(u8, 1), w.fade_phase);
+    // After another fade_half_frames, fade completes.
+    while (fi < fade_half_frames * 2) : (fi += 1) {
+        w.fade_tick +|= 1;
+    }
+    w.fade_phase = 0; // simulate composite advancing
+    w.fade_tick = 0;
+    try std.testing.expectEqual(@as(u8, 0), w.fade_phase);
+    _ = user_close(2);
 }

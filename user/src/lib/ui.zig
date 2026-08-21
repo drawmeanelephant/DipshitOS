@@ -51,6 +51,8 @@ pub const sys_audio_play_num: u64 = 43;
 pub const sys_audio_volume_num: u64 = 44;
 pub const sys_audio_mute_num: u64 = 45;
 pub const sys_win_fill_batch_num: u64 = 46;
+pub const sys_win_raise_front_num: u64 = 49;
+pub const sys_win_lower_back_num: u64 = 50;
 pub const sys_timer_cancel_num: u64 = 41;
 pub const sys_udp_listen_num: u64 = 9;
 pub const sys_udp_send_num: u64 = 10;
@@ -376,6 +378,16 @@ pub fn win_present(id: u32) void {
 
 pub fn win_close(id: u32) void {
     _ = syscall1(sys_win_close_num, id);
+}
+
+/// Arc4 #238: raise the window to the top of the z-order.
+pub fn win_raise_front(id: u32) bool {
+    return syscall1(sys_win_raise_front_num, id) == 0;
+}
+
+/// Arc4 #238: lower the window to the bottom of the z-order.
+pub fn win_lower_back(id: u32) bool {
+    return syscall1(sys_win_lower_back_num, id) == 0;
 }
 
 pub fn wait_event(ev: *Event) i64 {
