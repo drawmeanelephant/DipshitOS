@@ -208,6 +208,44 @@ var resize_start_y: u32 = 0;
 var resize_origin_w: u32 = 0;
 var resize_origin_h: u32 = 0;
 
+/// Arc4 #237: drag-and-drop state — BSS, no heap.
+/// The drag payload is copied from the source app via sys_drag_start,
+/// then delivered to the target window on DROP via uaccess.
+pub const drag_payload_max: usize = 512;
+var drag_payload: [drag_payload_max]u8 = undefined;
+var drag_payload_len: usize = 0;
+var drag_active: bool = false;
+var drag_source_pid: usize = 0;
+var drag_over_id: ?u8 = null; // window currently under pointer during drag
+
+/// Arc4 #237: store a drag payload from the source app (slot 48).
+/// Called from the syscall handler.
+pub fn drag_start(payload: []const u8, source_pid: usize) void {
+    const copy_len = @min(payload.len, drag_payload_max);
+    @memcpy(drag_payload[0..copy_len], payload[0..copy_len]);
+    drag_payload_len = copy_len;
+    drag_active = true;
+    drag_source_pid = source_pid;
+    drag_over_id = null;
+}
+
+/// Arc4 #237: check if a drag is currently active.
+pub fn drag_is_active() bool {
+    return drag_active;
+}
+
+/// Arc4 #237: get the drag payload for copy to target.
+pub fn drag_get_payload() []const u8 {
+    return drag_payload[0..drag_payload_len];
+}
+
+/// Arc4 #237: cancel an active drag (e.g. source window closed).
+pub fn drag_cancel() void {
+    drag_active = false;
+    drag_payload_len = 0;
+    drag_over_id = null;
+}
+
 /// M15 C2 (Alt+Tab overlay, #225): hold-Alt cycling UI state — BSS, no heap.
 var overlay_active: bool = false;
 var overlay_selected: usize = 0;
@@ -1506,6 +1544,68 @@ pub fn pointer_tick(st: input.PointerState, click: ?input.Click) ?u8 {
                 snap_zone = .none;
                 _ = mark_dirty(0);
             }
+        }
+
+        // Arc4 #237: drag-and-drop — detect window crossing during active drag.
+        if (drag_active and moved) {
+            const new_hit = hit_test(cursor_x, cursor_y);
+            const new_id: ?u8 = if (new_hit) |hid| blk: {
+                if (find_user_window(hid)) |w| {
+                    if (w.owner) |_| break :blk hid;
+                }
+                break :blk null;
+            } else null;
+            if (new_id != drag_over_id) {
+                // DRAG_LEAVE to old window.
+                if (drag_over_id) |old_id| {
+                    if (find_user_window(old_id)) |ow| {
+                        if (ow.owner) |old_owner| {
+                            events.push(old_owner, .{
+                                .kind = events.DRAG_LEAVE,
+                                .flags = 0,
+                                .seq = 0,
+                                .arg0 = 0,
+                                .arg1 = @intCast(drag_source_pid),
+                            });
+                        }
+                    }
+                }
+                // DRAG_ENTER to new window.
+                if (new_id) |nid| {
+                    if (find_user_window(nid)) |nw| {
+                        if (nw.owner) |new_owner| {
+                            events.push(new_owner, .{
+                                .kind = events.DRAG_ENTER,
+                                .flags = 0,
+                                .seq = 0,
+                                .arg0 = @intCast(drag_payload_len),
+                                .arg1 = @intCast(drag_source_pid),
+                            });
+                        }
+                    }
+                }
+                drag_over_id = new_id;
+            }
+        }
+        // Arc4 #237: DROP on left release during active drag.
+        // Two-step: DROP event signals payload available (arg0=size),
+        // then the target calls sys_drag_read to copy the payload.
+        if (drag_active and left_released) {
+            if (hit_test(cursor_x, cursor_y)) |drop_id| {
+                if (find_user_window(drop_id)) |dw| {
+                    if (dw.owner) |drop_owner| {
+                        events.push(drop_owner, .{
+                            .kind = events.DROP,
+                            .flags = 0,
+                            .seq = 0,
+                            .arg0 = @intCast(drag_payload_len),
+                            .arg1 = @intCast(drag_source_pid),
+                        });
+                    }
+                }
+            }
+            // Don't clear drag_active yet — sys_drag_read needs the payload.
+            // Clear after the target reads or on a new sys_drag_start.
         }
 
         // Deliver pointer events to hit user window

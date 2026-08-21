@@ -75,7 +75,7 @@ const app_timers = @import("app_timers.zig"); // Milestone 14 (claim 7323): the 
 const virtio_snd = @import("virtio_snd.zig"); // Milestone 15 (claim 7636): the virtio-snd playback path behind sys_audio_*
 
 pub const slot_count: usize = 64;
-pub const implemented_count: usize = 52;
+pub const implemented_count: usize = 56;
 /// Card G6 (claim 0487) follow-on (slot 18): the fixed `sys_win_get` shape —
 /// four u32 LE words (x, y, w, h), 16 bytes, marshaled per call and copy_out'd
 /// through uaccess (the procs snapshot pattern).
@@ -216,6 +216,8 @@ pub const sys_win_raise_front: u64 = 49;
 pub const sys_win_lower_back: u64 = 50;
 /// Arc4 #240 (ADR 0013 D1): `sys_notify(text_ptr, text_len, level)` — slot 51.
 pub const sys_notify: u64 = 51;
+/// Arc4 #237 (ADR 0013 D1): `sys_drag_read(buf_ptr, max_len)` — slot 55.
+pub const sys_drag_read: u64 = 55;
 
 pub const ErrorCode = enum(i64) {
     einval = -1,
@@ -339,12 +341,16 @@ fn ensure_table() *const [slot_count]Entry {
         table_storage[sys_audio_mute] = .{ .name = "sys_audio_mute", .handler = handle_audio_mute };
         table_storage[sys_win_fill_batch] = .{ .name = "sys_win_fill_batch", .handler = handle_win_fill_batch };
         table_storage[sys_win_resize] = .{ .name = "sys_win_resize", .handler = handle_win_resize };
-        // Arc4: slot 48 is reserved by ADR 0013 for sys_drag_start (#237).
-        // Stub: returns ENOSYS until #237 lands.
-        table_storage[48] = .{ .name = "sys_drag_start", .handler = handle_enosys };
+        // Arc4 #237: slot 48 — sys_drag_start.
+        table_storage[48] = .{ .name = "sys_drag_start", .handler = handle_drag_start };
         table_storage[sys_win_raise_front] = .{ .name = "sys_win_raise_front", .handler = handle_win_raise_front };
         table_storage[sys_win_lower_back] = .{ .name = "sys_win_lower_back", .handler = handle_win_lower_back };
         table_storage[sys_notify] = .{ .name = "sys_notify", .handler = handle_notify };
+        table_storage[sys_drag_read] = .{ .name = "sys_drag_read", .handler = handle_drag_read };
+        // ADR 0013 reserved slots 52–54 (not yet implemented). Stubs.
+        table_storage[52] = .{ .name = "sys_win_move_to_workspace", .handler = handle_enosys };
+        table_storage[53] = .{ .name = "sys_win_set_unsaved", .handler = handle_enosys };
+        table_storage[54] = .{ .name = "sys_setrlimit", .handler = handle_enosys };
         table_ready = true;
     }
     return &table_storage;
@@ -850,6 +856,36 @@ fn handle_notify(args: Args, _: *exceptions.VectorFrame) u64 {
     if (uaccess.copy_in(buf[0..copy_len], text_addr, copy_len) != .ok) return error_result(.efault);
     driving_award.notify_push(buf[0..copy_len], level);
     return 0;
+}
+
+/// Arc4 #237 (slot 48): `sys_drag_start(buf_ptr, buf_len)` — store a drag
+/// payload (up to 512 B) from the caller through uaccess. The compositor
+/// delivers DRAG_ENTER/LEAVE/DROP events as the pointer crosses windows.
+fn handle_drag_start(args: Args, _: *exceptions.VectorFrame) u64 {
+    const owner = process.find_by_task(scheduler.current_id()) orelse return error_result(.einval);
+    const buf_addr = args[0];
+    const buf_len: usize = @min(args[1], driving_award.drag_payload_max);
+    if (buf_len == 0) return error_result(.einval);
+    var buf: [driving_award.drag_payload_max]u8 = undefined;
+    if (uaccess.copy_in(buf[0..buf_len], buf_addr, buf_len) != .ok) return error_result(.efault);
+    driving_award.drag_start(buf[0..buf_len], owner);
+    return 0;
+}
+
+/// Arc4 #237 (slot 55): `sys_drag_read(buf_ptr, max_len)` — copy the drag
+/// payload OUT to the caller after receiving a DROP event. Consumes the
+/// payload (one read only). Returns bytes copied, 0 if no payload.
+fn handle_drag_read(args: Args, _: *exceptions.VectorFrame) u64 {
+    const buf_addr = args[0];
+    const max_len: usize = @min(args[1], driving_award.drag_payload_max);
+    if (!driving_award.drag_is_active()) return 0;
+    const payload = driving_award.drag_get_payload();
+    const copy_len = @min(payload.len, max_len);
+    if (copy_len == 0) return 0;
+    if (uaccess.copy_out(buf_addr, payload[0..copy_len], copy_len) != .ok) return error_result(.efault);
+    // Consume: clear the drag state.
+    driving_award.drag_cancel();
+    return @intCast(copy_len);
 }
 
 /// `sys_win_get(id, buf)`: copy the CALLER'S user window's geometry
@@ -1472,7 +1508,7 @@ fn handle_tcp_close(_: Args, _: *exceptions.VectorFrame) u64 {
 
 /// Deterministic monitor output for the implemented rows and their counters.
 pub fn report(con: *console.Console) void {
-    con.puts("syscalls: slots=64 implemented=52\n");
+    con.puts("syscalls: slots=64 implemented=56\n");
     var number: u64 = 0;
     while (number < implemented_count) : (number += 1) {
         const info = entry_info(number).?;
@@ -1504,7 +1540,7 @@ fn capture_marshaled_args(args: Args, _: *exceptions.VectorFrame) u64 {
     return 0xcafe;
 }
 
-test "syscall: runtime table has 64 slots and fifty-two unique implemented rows" {
+test "syscall: runtime table has 64 slots and fifty-six unique implemented rows" {
     init(test_writer);
     const table = ensure_table();
     try std.testing.expectEqual(@as(usize, 64), table.len);
@@ -1517,7 +1553,7 @@ test "syscall: runtime table has 64 slots and fifty-two unique implemented rows"
             implemented += 1;
         }
     }
-    try std.testing.expectEqual(@as(usize, 52), implemented);
+    try std.testing.expectEqual(@as(usize, 56), implemented);
     try std.testing.expectEqualStrings("sys_audio_info", entry_info(42).?.name);
     try std.testing.expectEqualStrings("sys_audio_play", entry_info(43).?.name);
     try std.testing.expectEqualStrings("sys_audio_volume", entry_info(44).?.name);
@@ -2489,7 +2525,7 @@ test "syscall: counters are monotonic and report is deterministic" {
     var con = mock.console();
     report(&con);
     try std.testing.expectEqualStrings(
-        "syscalls: slots=64 implemented=52\n" ++
+        "syscalls: slots=64 implemented=56\n" ++
             "  0 sys_ping calls=2\n" ++
             "  1 sys_write calls=0\n" ++
             "  2 sys_yield calls=0\n" ++
@@ -2541,7 +2577,11 @@ test "syscall: counters are monotonic and report is deterministic" {
             "  48 sys_drag_start calls=0\n" ++
             "  49 sys_win_raise_front calls=0\n" ++
             "  50 sys_win_lower_back calls=0\n" ++
-            "  51 sys_notify calls=0\n",
+            "  51 sys_notify calls=0\n" ++
+            "  52 sys_win_move_to_workspace calls=0\n" ++
+            "  53 sys_win_set_unsaved calls=0\n" ++
+            "  54 sys_setrlimit calls=0\n" ++
+            "  55 sys_drag_read calls=0\n",
         mock.contents(),
     );
 }

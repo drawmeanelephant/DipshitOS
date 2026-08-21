@@ -41,6 +41,15 @@ pub const MOUSE_RIGHT_DOWN: u16 = 11;
 /// `arg1 = 0` (reserved).
 pub const MOUSE_SCROLL: u16 = 12;
 pub const MOUSE_RIGHT_UP: u16 = 13;
+/// Arc4 #237 (ADR 0013 D2): pointer entered a window during active drag.
+/// `arg0 = payload size`, `arg1 = source pid`.
+pub const DRAG_ENTER: u16 = 14;
+/// Arc4 #237: pointer left a window during active drag.
+/// `arg0 = 0`, `arg1 = source pid`.
+pub const DRAG_LEAVE: u16 = 15;
+/// Arc4 #237: drop completed on a window.
+/// `arg0 = payload size`, `arg1 = source pid`.
+pub const DROP: u16 = 16;
 
 /// Modifier bitmasks (flags bits 0..7).
 pub const MOD_SHIFT: u16 = 0x0001;
