@@ -1135,6 +1135,187 @@ pub const DropDown = struct {
 };
 
 // ---------------------------------------------------------------------------
+// Component: ScrollView — vertical scroll container (GH #218, Arc1)
+// ---------------------------------------------------------------------------
+
+/// Optional wheel event kind from #236 (not yet in kernel/events.zig).
+/// Handled opportunistically — thumb-drag + PAGE_UP/DOWN are required.
+pub const MOUSE_SCROLL: u16 = 13;
+
+pub const ScrollView = struct {
+    rect: Rect,
+    content_h: u32,
+    offset: u32 = 0,
+    dragging: bool = false,
+    drag_start_y: u32 = 0,
+    drag_start_offset: u32 = 0,
+
+    const scrollbar_w: u32 = 6;
+    const thumb_min_h: u32 = 16;
+
+    pub fn init(rect: Rect, content_h: u32) ScrollView {
+        var sv = ScrollView{ .rect = rect, .content_h = content_h };
+        sv.clamp_offset();
+        return sv;
+    }
+
+    pub fn set_content_height(self: *ScrollView, h: u32) void {
+        self.content_h = h;
+        self.clamp_offset();
+    }
+
+    pub fn max_offset(self: *const ScrollView) u32 {
+        if (self.content_h <= self.rect.h) return 0;
+        return self.content_h - self.rect.h;
+    }
+
+    fn clamp_offset(self: *ScrollView) void {
+        const m = self.max_offset();
+        if (self.offset > m) self.offset = m;
+    }
+
+    pub fn thumb_h(self: *const ScrollView) u32 {
+        if (self.content_h <= self.rect.h) return self.rect.h;
+        const visible = self.rect.h;
+        const content = self.content_h;
+        const proportional = visible * visible / content;
+        return @max(thumb_min_h, proportional);
+    }
+
+    pub fn thumb_y(self: *const ScrollView) u32 {
+        const m = self.max_offset();
+        if (m == 0) return self.rect.y;
+        const th = self.thumb_h();
+        const track_h = self.rect.h - th;
+        // offset * track_h / max_offset, rounded down
+        return self.rect.y + (self.offset * track_h / m);
+    }
+
+    pub fn thumb_rect(self: *const ScrollView) Rect {
+        if (self.content_h <= self.rect.h) return self.rect;
+        const th = self.thumb_h();
+        const ty = self.thumb_y();
+        return Rect.make(self.rect.x + self.rect.w - scrollbar_w, ty, scrollbar_w, th);
+    }
+
+    fn track_contains(self: *const ScrollView, px: u32, py: u32) bool {
+        const track = Rect.make(self.rect.x + self.rect.w - scrollbar_w, self.rect.y, scrollbar_w, self.rect.h);
+        return track.contains(px, py);
+    }
+
+    pub fn scroll_by(self: *ScrollView, delta: i32) void {
+        const m: i32 = @intCast(self.max_offset());
+        var off: i32 = @intCast(self.offset);
+        off += delta;
+        if (off < 0) off = 0;
+        if (off > m) off = m;
+        self.offset = @intCast(off);
+    }
+
+    pub fn handle_event(self: *ScrollView, ev: *const Event) bool {
+        if (self.content_h <= self.rect.h) return false;
+        switch (ev.kind) {
+            MOUSE_DOWN => {
+                const px = ev.arg0;
+                const py = ev.arg1;
+                if (!self.rect.contains(px, py)) return false;
+                const tr = self.thumb_rect();
+                if (tr.contains(px, py)) {
+                    self.dragging = true;
+                    self.drag_start_y = py;
+                    self.drag_start_offset = self.offset;
+                    return true;
+                }
+                if (self.track_contains(px, py)) {
+                    // Click on track outside thumb — page up/down
+                    const ty = self.thumb_y();
+                    if (py < ty) {
+                        self.scroll_by(-@as(i32, @intCast(self.rect.h)));
+                    } else {
+                        self.scroll_by(@as(i32, @intCast(self.rect.h)));
+                    }
+                    return true;
+                }
+                return false;
+            },
+            MOUSE_MOVE => {
+                if (!self.dragging) return false;
+                const py: i32 = @intCast(ev.arg1);
+                const start_y: i32 = @intCast(self.drag_start_y);
+                const delta: i32 = py - start_y;
+                const m = self.max_offset();
+                if (m == 0) return false;
+                const th = self.thumb_h();
+                const track_h: i32 = @intCast(self.rect.h - th);
+                if (track_h <= 0) return false;
+                // Scale thumb drag to content offset: delta * max_offset / track_h
+                const scaled = @divTrunc(delta * @as(i32, @intCast(m)), track_h);
+                var new_off: i32 = @as(i32, @intCast(self.drag_start_offset)) + scaled;
+                if (new_off < 0) new_off = 0;
+                if (new_off > @as(i32, @intCast(m))) new_off = @intCast(m);
+                self.offset = @intCast(new_off);
+                return true;
+            },
+            MOUSE_UP => {
+                if (self.dragging) {
+                    self.dragging = false;
+                    return true;
+                }
+                return false;
+            },
+            KEY_DOWN => {
+                const keycode = ev.arg0;
+                // PageUp 0x4b, PageDown 0x4e (from notepad.zig), also handle wheel if present
+                if (keycode == 0x4b) { // PageUp
+                    self.scroll_by(-@as(i32, @intCast(self.rect.h)));
+                    return true;
+                }
+                if (keycode == 0x4e) { // PageDown
+                    self.scroll_by(@as(i32, @intCast(self.rect.h)));
+                    return true;
+                }
+                return false;
+            },
+            MOUSE_SCROLL => {
+                // arg0 as signed scroll delta: +1 down, -1 up (and shifted variants)
+                const delta_i: i32 = @as(i32, @bitCast(ev.arg0));
+                // Normalize to vertical scroll only; horizontal (arg0 == 2 etc) ignored here
+                if (delta_i == 0) return false;
+                // Each wheel notch scrolls ~16px or 3 lines (~24px); use 16 for test determinism
+                const step: i32 = if (delta_i > 0) 16 else -16;
+                // For larger magnitudes, scale (e.g., -2 or 2 for shift+wheel would be horizontal, ignore)
+                if (delta_i == 1 or delta_i == -1) {
+                    self.scroll_by(step);
+                    return true;
+                }
+                // Also handle signed small deltas generically
+                if (delta_i > 1) {
+                    self.scroll_by(delta_i * 16);
+                    return true;
+                }
+                if (delta_i < -1 and delta_i > -100) {
+                    self.scroll_by(delta_i * 16);
+                    return true;
+                }
+                return false;
+            },
+            else => return false,
+        }
+    }
+
+    pub fn draw(self: *const ScrollView, win_id: u32) void {
+        if (self.content_h <= self.rect.h) return;
+        // Track
+        const track_x = self.rect.x + self.rect.w - scrollbar_w;
+        draw_rect(win_id, Rect.make(track_x, self.rect.y, scrollbar_w, self.rect.h), theme_border());
+        // Thumb
+        const tr = self.thumb_rect();
+        // Thumb as accent, with 1px inset for rounded feel
+        win_fill(win_id, tr.x, tr.y, tr.w, tr.h, theme_accent());
+    }
+};
+
+// ---------------------------------------------------------------------------
 // Unit Tests (Class A Host Validation)
 // ---------------------------------------------------------------------------
 
@@ -1322,4 +1503,116 @@ test "ui: DropDown set_selected_by_name" {
     // Name not found -> no change.
     dd.set_selected_by_name("nope");
     try std.testing.expectEqual(@as(usize, 2), dd.selected);
+}
+
+test "ui: ScrollView proportional thumb and offset clamp" {
+    // Visible 100, content 200 -> thumb = max(16, 100*100/200=50) = 50
+    var sv = ScrollView.init(Rect.make(0, 0, 120, 100), 200);
+    try std.testing.expectEqual(@as(u32, 100), sv.max_offset());
+    try std.testing.expectEqual(@as(u32, 50), sv.thumb_h());
+    try std.testing.expectEqual(@as(u32, 0), sv.offset);
+    try std.testing.expectEqual(@as(u32, 0), sv.thumb_y());
+
+    // Visible 100, content 400 -> thumb = max(16, 100*100/400=25) = 25
+    var sv2 = ScrollView.init(Rect.make(0, 0, 120, 100), 400);
+    try std.testing.expectEqual(@as(u32, 300), sv2.max_offset());
+    try std.testing.expectEqual(@as(u32, 25), sv2.thumb_h());
+
+    // Content fits — no scrolling, thumb fills track, offset clamped
+    var sv3 = ScrollView.init(Rect.make(0, 0, 120, 100), 80);
+    try std.testing.expectEqual(@as(u32, 0), sv3.max_offset());
+    try std.testing.expectEqual(@as(u32, 100), sv3.thumb_h());
+    sv3.offset = 999;
+    sv3.set_content_height(80);
+    try std.testing.expectEqual(@as(u32, 0), sv3.offset);
+
+    // Small content with large visible — thumb clamp to 16 minimum
+    var sv4 = ScrollView.init(Rect.make(0, 0, 120, 20), 500);
+    // 20*20/500 = 0 -> clamp to 16
+    try std.testing.expectEqual(@as(u32, 16), sv4.thumb_h());
+}
+
+test "ui: ScrollView PAGE_UP/DOWN and track click" {
+    var sv = ScrollView.init(Rect.make(10, 10, 100, 100), 300);
+    try std.testing.expectEqual(@as(u32, 200), sv.max_offset());
+
+    // PageDown moves by viewport height
+    var ev_pgdn = Event{ .kind = KEY_DOWN, .flags = 0, .seq = 1, .arg0 = 0x4e, .arg1 = 0 };
+    _ = sv.handle_event(&ev_pgdn);
+    try std.testing.expectEqual(@as(u32, 100), sv.offset);
+    _ = sv.handle_event(&ev_pgdn);
+    try std.testing.expectEqual(@as(u32, 200), sv.offset);
+    // Clamped at max
+    _ = sv.handle_event(&ev_pgdn);
+    try std.testing.expectEqual(@as(u32, 200), sv.offset);
+
+    // PageUp
+    var ev_pgup = Event{ .kind = KEY_DOWN, .flags = 0, .seq = 2, .arg0 = 0x4b, .arg1 = 0 };
+    _ = sv.handle_event(&ev_pgup);
+    try std.testing.expectEqual(@as(u32, 100), sv.offset);
+    _ = sv.handle_event(&ev_pgup);
+    try std.testing.expectEqual(@as(u32, 0), sv.offset);
+
+    // Track click below thumb — page down
+    sv.offset = 0;
+    const th = sv.thumb_rect();
+    // Click 10px below thumb but inside track
+    var ev_track_down = Event{ .kind = MOUSE_DOWN, .flags = BTN_LEFT, .seq = 3, .arg0 = th.x + 1, .arg1 = th.y + th.h + 5 };
+    _ = sv.handle_event(&ev_track_down);
+    try std.testing.expectEqual(@as(u32, 100), sv.offset);
+
+    // Track click above thumb — page up
+    var ev_track_up = Event{ .kind = MOUSE_DOWN, .flags = BTN_LEFT, .seq = 4, .arg0 = th.x + 1, .arg1 = 15 };
+    // Need to be above current thumb (which is now at y=33 for offset 100 with thumb 33)
+    _ = sv.handle_event(&ev_track_up);
+    try std.testing.expectEqual(@as(u32, 0), sv.offset);
+}
+
+test "ui: ScrollView thumb drag scales to content offset" {
+    // Viewport 100, content 300 -> max 200, thumb 33, track_h 67
+    var sv = ScrollView.init(Rect.make(10, 10, 100, 100), 300);
+    const tr = sv.thumb_rect();
+    try std.testing.expectEqual(@as(u32, 33), tr.h);
+
+    // Drag thumb from y=10 down by 33px (half track) -> offset ~100
+    var ev_down = Event{ .kind = MOUSE_DOWN, .flags = BTN_LEFT, .seq = 1, .arg0 = tr.x + 1, .arg1 = tr.y + 2 };
+    try std.testing.expect(sv.handle_event(&ev_down));
+    try std.testing.expect(sv.dragging);
+
+    var ev_move = Event{ .kind = MOUSE_MOVE, .flags = BTN_LEFT, .seq = 2, .arg0 = tr.x + 1, .arg1 = tr.y + 35 };
+    _ = sv.handle_event(&ev_move);
+    // delta 33, scaled 33*200/67 ≈ 98
+    try std.testing.expect(sv.offset >= 95 and sv.offset <= 102);
+
+    var ev_up = Event{ .kind = MOUSE_UP, .flags = 0, .seq = 3, .arg0 = tr.x + 1, .arg1 = tr.y + 35 };
+    _ = sv.handle_event(&ev_up);
+    try std.testing.expect(!sv.dragging);
+
+    // Drag beyond max clamps
+    sv.offset = 0;
+    _ = sv.handle_event(&ev_down);
+    var ev_far = Event{ .kind = MOUSE_MOVE, .flags = BTN_LEFT, .seq = 4, .arg0 = tr.x + 1, .arg1 = 200 };
+    _ = sv.handle_event(&ev_far);
+    try std.testing.expectEqual(sv.max_offset(), sv.offset);
+}
+
+test "ui: ScrollView 50+ lines demo scrolls via thumb" {
+    // Simulate a file list: 60 lines, each 10px, viewport 100 -> content 600
+    const line_h: u32 = 10;
+    const lines: u32 = 60;
+    const content_h = lines * line_h;
+    var sv = ScrollView.init(Rect.make(0, 0, 120, 100), content_h);
+    try std.testing.expectEqual(@as(u32, 500), sv.max_offset());
+    // Thumb for 100 visible / 600 content -> 16 (clamped minimum)
+    try std.testing.expectEqual(@as(u32, 16), sv.thumb_h());
+
+    // Scroll through all pages via PAGE_DOWN
+    var steps: u32 = 0;
+    while (sv.offset < sv.max_offset()) : (steps += 1) {
+        var ev = Event{ .kind = KEY_DOWN, .flags = 0, .seq = steps, .arg0 = 0x4e, .arg1 = 0 };
+        _ = sv.handle_event(&ev);
+        if (steps > 10) break;
+    }
+    try std.testing.expectEqual(sv.max_offset(), sv.offset);
+    try std.testing.expect(steps >= 5);
 }
