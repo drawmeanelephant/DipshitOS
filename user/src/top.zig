@@ -127,6 +127,67 @@ fn state_color(state: ProcState) u32 {
     };
 }
 
+pub const SortColumn = enum { pid, name, state, exit };
+
+fn ascii_lower(c: u8) u8 {
+    if (c >= 'A' and c <= 'Z') return c + 32;
+    return c;
+}
+
+fn name_eql_ignore_case(a: []const u8, b: []const u8) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |ca, cb| if (ascii_lower(ca) != ascii_lower(cb)) return false;
+    return true;
+}
+
+fn name_cmp_ignore_case(a: []const u8, b: []const u8) i8 {
+    const n = @min(a.len, b.len);
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        const la = ascii_lower(a[i]);
+        const lb = ascii_lower(b[i]);
+        if (la < lb) return -1;
+        if (la > lb) return 1;
+    }
+    if (a.len < b.len) return -1;
+    if (a.len > b.len) return 1;
+    return 0;
+}
+
+fn proc_name_slice(p: *const ProcInfo) []const u8 {
+    if (p.name_len > 0) return p.name[0..p.name_len];
+    return p.name[0..0];
+}
+
+/// Stable compare for sorting: -1 if a<b, 1 if a>b, 0 if equal.
+pub fn compare_procs(a: *const ProcInfo, b: *const ProcInfo, col: SortColumn) i8 {
+    return switch (col) {
+        .pid => if (a.pid < b.pid) @as(i8, -1) else if (a.pid > b.pid) @as(i8, 1) else 0,
+        .name => name_cmp_ignore_case(proc_name_slice(a), proc_name_slice(b)),
+        .state => if (@intFromEnum(a.state) < @intFromEnum(b.state)) @as(i8, -1) else if (@intFromEnum(a.state) > @intFromEnum(b.state)) @as(i8, 1) else 0,
+        .exit => if (a.exit_status < b.exit_status) @as(i8, -1) else if (a.exit_status > b.exit_status) @as(i8, 1) else 0,
+    };
+}
+
+/// Case-insensitive substring match: true if needle is empty or needle ⊂ haystack.
+pub fn name_contains(haystack: []const u8, needle: []const u8) bool {
+    if (needle.len == 0) return true;
+    if (needle.len > haystack.len) return false;
+    var i: usize = 0;
+    while (i + needle.len <= haystack.len) : (i += 1) {
+        var ok = true;
+        var j: usize = 0;
+        while (j < needle.len) : (j += 1) {
+            if (ascii_lower(haystack[i + j]) != ascii_lower(needle[j])) {
+                ok = false;
+                break;
+            }
+        }
+        if (ok) return true;
+    }
+    return false;
+}
+
 pub const AppState = struct {
     table: ProcessTable = .{},
     btn_refresh: Button = Button.init(Rect.make(6, 6, 60, 20), "Refresh"),
@@ -135,6 +196,12 @@ pub const AppState = struct {
     auto_mode: bool = false,
     proc_history: [history_len]u16 = [_]u16{0} ** history_len,
     history_pos: usize = 0,
+    // C8 sorting / filtering
+    sort_column: SortColumn = .pid,
+    sort_asc: bool = true,
+    filter_input: ui.TextInput = ui.TextInput.init(Rect.make(260, 6, 110, 20)),
+    display_indices: [max_display_procs]usize = [_]usize{0} ** max_display_procs,
+    display_count: usize = 0,
 
     pub fn init() AppState {
         var s = AppState{};
@@ -142,7 +209,104 @@ pub const AppState = struct {
         s.btn_kill.bg_color = ui.COLOR_DANGER;
         _ = s.table.refresh_from_system();
         s.push_history();
+        s.rebuild_display();
         return s;
+    }
+
+    pub fn filter_slice(self: *const AppState) []const u8 {
+        return self.filter_input.get_text();
+    }
+
+    pub fn set_filter(self: *AppState, text: []const u8) void {
+        self.filter_input.set_text(text);
+        self.rebuild_display();
+    }
+
+    pub fn click_column(self: *AppState, col: SortColumn) void {
+        if (self.sort_column == col) {
+            self.sort_asc = !self.sort_asc;
+        } else {
+            self.sort_column = col;
+            self.sort_asc = true;
+        }
+        self.rebuild_display();
+    }
+
+    /// Rebuild display_indices = filtered + stable-sorted view of table.
+    pub fn rebuild_display(self: *AppState) void {
+        // Capture previously selected pid to preserve across filter/sort.
+        var prev_pid: ?u64 = null;
+        if (self.table.selected_row) |sel| {
+            if (sel < self.display_count) {
+                const abs = self.display_indices[sel];
+                if (abs < self.table.count) prev_pid = self.table.procs[abs].pid;
+            } else if (sel < self.table.count) {
+                prev_pid = self.table.procs[sel].pid;
+            }
+        }
+        const needle = self.filter_slice();
+        var n: usize = 0;
+        var i: usize = 0;
+        while (i < self.table.count) : (i += 1) {
+            const p = &self.table.procs[i];
+            if (name_contains(proc_name_slice(p), needle)) {
+                self.display_indices[n] = i;
+                n += 1;
+            }
+        }
+        // Stable insertion sort over display_indices.
+        var j: usize = 1;
+        while (j < n) : (j += 1) {
+            const key = self.display_indices[j];
+            var k = j;
+            while (k > 0) {
+                const a = &self.table.procs[self.display_indices[k - 1]];
+                const b = &self.table.procs[key];
+                const cmp = compare_procs(a, b, self.sort_column);
+                const should_shift = if (self.sort_asc) cmp > 0 else cmp < 0;
+                if (!should_shift) break;
+                self.display_indices[k] = self.display_indices[k - 1];
+                k -= 1;
+            }
+            self.display_indices[k] = key;
+        }
+        self.display_count = n;
+        // Restore selection by pid if possible.
+        if (prev_pid) |pid| {
+            var found: ?usize = null;
+            var idx: usize = 0;
+            while (idx < n) : (idx += 1) {
+                const abs = self.display_indices[idx];
+                if (self.table.procs[abs].pid == pid) {
+                    found = idx;
+                    break;
+                }
+            }
+            if (found) |f| {
+                self.table.selected_row = f;
+            } else {
+                self.table.selected_row = if (n > 0) @as(usize, 0) else null;
+            }
+        } else if (self.table.selected_row == null and n > 0) {
+            // Auto-select first running in filtered view.
+            var f: usize = 0;
+            while (f < n) : (f += 1) {
+                const pi = self.display_indices[f];
+                if (self.table.procs[pi].state == .running) {
+                    self.table.selected_row = f;
+                    break;
+                }
+            }
+        }
+        if (self.table.selected_row) |s| {
+            if (s >= n) self.table.selected_row = if (n > 0) n - 1 else null;
+        }
+    }
+
+    /// Map filtered display row to absolute table index.
+    pub fn display_to_absolute(self: *const AppState, display_row: usize) ?usize {
+        if (display_row >= self.display_count) return null;
+        return self.display_indices[display_row];
     }
 
     fn push_history(self: *AppState) void {
@@ -223,12 +387,15 @@ pub const AppState = struct {
         self.btn_refresh.draw(win);
         self.btn_kill.draw(win);
         self.btn_auto.draw(win);
+        // Filter input (C8)
+        ui.draw_text(win, "Filter:", 215, 12, ui.COLOR_TEXT_MUTED);
+        self.filter_input.draw(win);
 
-        // Stats header
+        // Stats header (shifted to avoid filter overlap)
         var stats_buf: [40]u8 = undefined;
         const running_cnt = self.table.count_running();
-        const stats_str = std.fmt.bufPrint(&stats_buf, "Procs: {d} Run: {d}", .{ self.table.count, running_cnt }) catch "Procs: ?";
-        ui.draw_text(win, stats_str, 180, 12, ui.COLOR_TEXT_MUTED);
+        const stats_str = std.fmt.bufPrint(&stats_buf, "Procs: {d} Run: {d}", .{ self.display_count, running_cnt }) catch "Procs: ?";
+        ui.draw_text(win, stats_str, 380, 12, ui.COLOR_TEXT_MUTED);
 
         // CPU usage bar
         self.draw_cpu_bar(win);
@@ -236,21 +403,35 @@ pub const AppState = struct {
         // Divider line
         ui.draw_rect(win, Rect.make(0, 48, window_w, 1), ui.COLOR_BORDER);
 
-        // Table Header
+        // Table Header — clickable sortable columns (C8)
         const header_rect = Rect.make(6, 52, window_w - 12, 16);
         ui.draw_rect(win, header_rect, ui.COLOR_SURFACE);
         ui.draw_rect_outline(win, header_rect, 1, ui.COLOR_BORDER);
-        ui.draw_text(win, "PID", header_rect.x + 4, header_rect.y + 4, ui.COLOR_TEXT_MUTED);
-        ui.draw_text(win, "NAME", header_rect.x + 32, header_rect.y + 4, ui.COLOR_TEXT_MUTED);
-        ui.draw_text(win, "STATE", header_rect.x + 130, header_rect.y + 4, ui.COLOR_TEXT_MUTED);
-        ui.draw_text(win, "EXIT", header_rect.x + 196, header_rect.y + 4, ui.COLOR_TEXT_MUTED);
+        const pid_active = self.sort_column == .pid;
+        const name_active = self.sort_column == .name;
+        const state_active = self.sort_column == .state;
+        const exit_active = self.sort_column == .exit;
+        const pid_ind: []const u8 = if (pid_active) (if (self.sort_asc) "^" else "v") else "";
+        const name_ind: []const u8 = if (name_active) (if (self.sort_asc) "^" else "v") else "";
+        const state_ind: []const u8 = if (state_active) (if (self.sort_asc) "^" else "v") else "";
+        const exit_ind: []const u8 = if (exit_active) (if (self.sort_asc) "^" else "v") else "";
+        // Draw header text with indicator; active column in accent.
+        ui.draw_text(win, "PID", header_rect.x + 4, header_rect.y + 4, if (pid_active) ui.COLOR_ACCENT else ui.COLOR_TEXT_MUTED);
+        if (pid_active) ui.draw_text(win, pid_ind, header_rect.x + 24, header_rect.y + 4, ui.COLOR_ACCENT);
+        ui.draw_text(win, "NAME", header_rect.x + 32, header_rect.y + 4, if (name_active) ui.COLOR_ACCENT else ui.COLOR_TEXT_MUTED);
+        if (name_active) ui.draw_text(win, name_ind, header_rect.x + 62, header_rect.y + 4, ui.COLOR_ACCENT);
+        ui.draw_text(win, "STATE", header_rect.x + 130, header_rect.y + 4, if (state_active) ui.COLOR_ACCENT else ui.COLOR_TEXT_MUTED);
+        if (state_active) ui.draw_text(win, state_ind, header_rect.x + 170, header_rect.y + 4, ui.COLOR_ACCENT);
+        ui.draw_text(win, "EXIT", header_rect.x + 196, header_rect.y + 4, if (exit_active) ui.COLOR_ACCENT else ui.COLOR_TEXT_MUTED);
+        if (exit_active) ui.draw_text(win, exit_ind, header_rect.x + 226, header_rect.y + 4, ui.COLOR_ACCENT);
 
-        // Table Rows
+        // Table Rows — filtered + sorted view (C8)
         const row_h: u32 = 16;
         var row_y: u32 = 70;
         var i: usize = 0;
-        while (i < self.table.count and row_y + row_h <= window_h - 44) : (i += 1) {
-            const proc = &self.table.procs[i];
+        while (i < self.display_count and row_y + row_h <= window_h - 44) : (i += 1) {
+            const abs = self.display_indices[i];
+            const proc = &self.table.procs[abs];
             const is_selected = if (self.table.selected_row) |sel| sel == i else false;
             const row_rect = Rect.make(6, row_y, window_w - 12, row_h);
 
@@ -306,8 +487,17 @@ pub const AppState = struct {
     pub fn handle_mouse_events(self: *AppState, ev: *const Event) bool {
         var changed = false;
 
+        // Filter input handles mouse focus (C8).
+        if (self.filter_input.handle_event(ev)) {
+            // Focus changed; no filter text yet.
+            return true;
+        }
+        // If filter input is focused, its text may have changed via KEY_DOWN handled elsewhere,
+        // but mouse click outside will have already unfocused it above.
+
         if (self.btn_refresh.handle_event(ev)) {
             _ = self.table.refresh_from_system();
+            self.rebuild_display();
             self.push_history();
             ui.write_console("top: refreshed ok\n");
             changed = true;
@@ -321,9 +511,22 @@ pub const AppState = struct {
         } else if (ev.kind == ui.MOUSE_DOWN and (ev.flags & ui.BTN_LEFT) != 0) {
             const click_x = ev.arg0;
             const click_y = ev.arg1;
+            // Header click → sort (C8).
+            if (click_y >= 52 and click_y < 68 and click_x >= 6 and click_x < window_w - 6) {
+                if (click_x < 32) {
+                    self.click_column(.pid);
+                } else if (click_x < 130) {
+                    self.click_column(.name);
+                } else if (click_x < 196) {
+                    self.click_column(.state);
+                } else {
+                    self.click_column(.exit);
+                }
+                return true;
+            }
             if (click_x >= 6 and click_x < window_w - 6 and click_y >= 70) {
                 const row_idx = (click_y - 70) / 16;
-                if (row_idx < self.table.count) {
+                if (row_idx < self.display_count) {
                     self.table.selected_row = row_idx;
                     changed = true;
                 }
@@ -335,23 +538,52 @@ pub const AppState = struct {
 
     pub fn handle_keyboard_event(self: *AppState, ev: *const Event) bool {
         if (ev.kind != ui.KEY_DOWN) return false;
+        // Filter input has priority when focused (C8).
+        if (self.filter_input.focused) {
+            // Let TextInput handle typing / backspace.
+            const prev_len = self.filter_input.len;
+            const handled = self.filter_input.handle_event(ev);
+            if (handled or self.filter_input.len != prev_len) {
+                self.rebuild_display();
+                return true;
+            }
+            // Even if not handled, keep focus (e.g., arrow keys should not move selection).
+            // Allow Escape to unfocus.
+            if (ev.arg0 == 0x29) { // Esc
+                self.filter_input.focused = false;
+                return true;
+            }
+            return false;
+        }
+
         const keycode = ev.arg0;
 
-        // Up arrow
+        // Up arrow — navigate filtered view (C8).
         if (keycode == 0x52) {
-            self.table.select_prev();
+            if (self.display_count == 0) return false;
+            if (self.table.selected_row) |sel| {
+                if (sel > 0) self.table.selected_row = sel - 1;
+            } else {
+                self.table.selected_row = 0;
+            }
             return true;
         }
 
-        // Down arrow
+        // Down arrow — navigate filtered view (C8).
         if (keycode == 0x51) {
-            self.table.select_next();
+            if (self.display_count == 0) return false;
+            if (self.table.selected_row) |sel| {
+                if (sel + 1 < self.display_count) self.table.selected_row = sel + 1;
+            } else {
+                self.table.selected_row = 0;
+            }
             return true;
         }
 
         // 'r' or 'R' -> Refresh
         if (ev.arg1 == 'r' or ev.arg1 == 'R') {
             _ = self.table.refresh_from_system();
+            self.rebuild_display();
             self.push_history();
             ui.write_console("top: refreshed ok\n");
             return true;
@@ -371,11 +603,21 @@ pub const AppState = struct {
             return true;
         }
 
+        // '/' or 'f' focuses filter (convenience).
+        if (ev.arg1 == '/' or ev.arg1 == 'f' or ev.arg1 == 'F') {
+            self.filter_input.focused = true;
+            return true;
+        }
+
+        // If filter has text, allow typing without focus via direct insert (fallback).
+        // But prefer focused mode; ungrabbed keys are table nav.
+
         return false;
     }
 
     pub fn handle_timer(self: *AppState) bool {
         _ = self.table.refresh_from_system();
+        self.rebuild_display();
         self.push_history();
         // Re-arm timer if still in auto mode
         if (self.auto_mode) {
@@ -385,14 +627,16 @@ pub const AppState = struct {
     }
 
     pub fn kill_selected(self: *AppState, row: usize) bool {
-        if (row >= self.table.count) return false;
-        const proc = &self.table.procs[row];
+        const abs = self.display_to_absolute(row) orelse return false;
+        if (abs >= self.table.count) return false;
+        const proc = &self.table.procs[abs];
         const res = ui.kill_process(proc.pid);
         var buf: [48]u8 = undefined;
         if (res == 0) {
             const msg = std.fmt.bufPrint(&buf, "top: kill pid={d}\n", .{proc.pid}) catch "top: kill\n";
             ui.write_console(msg);
             _ = self.table.refresh_from_system();
+            self.rebuild_display();
             self.push_history();
         } else {
             const msg = std.fmt.bufPrint(&buf, "top: kill pid={d} err={d}\n", .{ proc.pid, res }) catch "top: kill err\n";
@@ -530,7 +774,14 @@ test "top: kill_selected and the 'k' key route to the selected pid" {
     app.table.count = 2;
     app.table.procs[0] = .{ .pid = 0, .state = .exited, .exit_status = 7, .name = "user-el0\x00\x00\x00\x00\x00\x00\x00\x00".*, .name_len = 8 };
     app.table.procs[1] = .{ .pid = 1, .state = .running, .exit_status = 0, .name = "COUNTER.BIN\x00\x00\x00\x00\x00".*, .name_len = 11 };
-    app.table.selected_row = 1;
+    app.rebuild_display();
+    // After rebuild, selected should be first running in filtered view (pid 1 at display 0 or 1 depending on sort).
+    // Force select the running proc's display row.
+    var sel: usize = 0;
+    while (sel < app.display_count) : (sel += 1) {
+        if (app.display_to_absolute(sel).? == 1) break;
+    }
+    if (sel < app.display_count) app.table.selected_row = sel else app.table.selected_row = 0;
 
     var ev_k = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 1, .arg0 = 0x2e, .arg1 = 'k' };
     try std.testing.expect(app.handle_keyboard_event(&ev_k));
@@ -568,4 +819,135 @@ test "top: auto toggle arms and disarms timer" {
     app.toggle_auto_refresh();
     try std.testing.expect(!app.auto_mode);
     try std.testing.expectEqual(@as([]const u8, "Auto"), app.btn_auto.label);
+}
+
+test "top: compare_procs sorting (C8)" {
+    const a = ProcInfo{ .pid = 2, .state = .running, .exit_status = 0, .name = "B.BIN\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00".*, .name_len = 5 };
+    const b = ProcInfo{ .pid = 1, .state = .exited, .exit_status = 7, .name = "A.BIN\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00".*, .name_len = 5 };
+    try std.testing.expectEqual(@as(i8, 1), compare_procs(&a, &b, .pid)); // 2 > 1
+    try std.testing.expectEqual(@as(i8, -1), compare_procs(&b, &a, .pid));
+    try std.testing.expectEqual(@as(i8, 1), compare_procs(&a, &b, .name)); // B > A
+    try std.testing.expectEqual(@as(i8, -1), compare_procs(&b, &a, .name));
+    // Name case-insensitive
+    const c = ProcInfo{ .pid = 3, .state = .created, .exit_status = 0, .name = "a.bin\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00".*, .name_len = 5 };
+    try std.testing.expectEqual(@as(i8, 0), compare_procs(&b, &c, .name));
+}
+
+test "top: name_contains filter (C8)" {
+    try std.testing.expect(name_contains("HELLO.BIN", ""));
+    try std.testing.expect(name_contains("HELLO.BIN", "hello"));
+    try std.testing.expect(name_contains("HELLO.BIN", "llo"));
+    try std.testing.expect(!name_contains("HELLO.BIN", "world"));
+    try std.testing.expect(name_contains("Calc.BIN", "calc"));
+    try std.testing.expect(!name_contains("A", "AB"));
+}
+
+test "top: AppState sortable columns and indicator (C8)" {
+    var app = AppState.init();
+    app.table.count = 3;
+    app.table.procs[0] = .{ .pid = 2, .state = .running, .exit_status = 0, .name = "B.BIN\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00".*, .name_len = 5 };
+    app.table.procs[1] = .{ .pid = 0, .state = .exited, .exit_status = 7, .name = "A.BIN\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00".*, .name_len = 5 };
+    app.table.procs[2] = .{ .pid = 1, .state = .created, .exit_status = 0, .name = "C.BIN\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00".*, .name_len = 5 };
+    app.sort_column = .pid;
+    app.sort_asc = true;
+    app.rebuild_display();
+    // Sorted by pid asc: 0,1,2
+    try std.testing.expectEqual(@as(usize, 3), app.display_count);
+    try std.testing.expectEqual(@as(u64, 0), app.table.procs[app.display_indices[0]].pid);
+    try std.testing.expectEqual(@as(u64, 1), app.table.procs[app.display_indices[1]].pid);
+    try std.testing.expectEqual(@as(u64, 2), app.table.procs[app.display_indices[2]].pid);
+    // Toggle same column → desc
+    app.click_column(.pid);
+    try std.testing.expect(!app.sort_asc);
+    try std.testing.expectEqual(@as(u64, 2), app.table.procs[app.display_indices[0]].pid);
+    // Click different column → asc and name sort
+    app.click_column(.name);
+    try std.testing.expect(app.sort_asc);
+    try std.testing.expectEqual(SortColumn.name, app.sort_column);
+    try std.testing.expectEqual(@as(u64, 0), app.table.procs[app.display_indices[0]].pid); // A.BIN pid0
+}
+
+test "top: AppState text filter and sort+filter (C8)" {
+    var app = AppState.init();
+    app.table.count = 4;
+    app.table.procs[0] = .{ .pid = 0, .state = .running, .exit_status = 0, .name = "CALC.BIN\x00\x00\x00\x00\x00\x00\x00\x00".*, .name_len = 8 };
+    app.table.procs[1] = .{ .pid = 1, .state = .running, .exit_status = 0, .name = "NOTEPAD.BIN\x00\x00\x00\x00\x00".*, .name_len = 11 };
+    app.table.procs[2] = .{ .pid = 2, .state = .running, .exit_status = 0, .name = "TOP.BIN\x00\x00\x00\x00\x00\x00\x00\x00\x00".*, .name_len = 7 };
+    app.table.procs[3] = .{ .pid = 3, .state = .running, .exit_status = 0, .name = "FILE.BIN\x00\x00\x00\x00\x00\x00\x00\x00".*, .name_len = 8 };
+    app.sort_column = .pid;
+    app.sort_asc = true;
+    app.set_filter("top");
+    try std.testing.expectEqual(@as(usize, 1), app.display_count);
+    try std.testing.expectEqual(@as(u64, 2), app.table.procs[app.display_indices[0]].pid);
+    // Filter + sort: "bin" matches all 4, sorted by name
+    app.set_filter("bin");
+    app.click_column(.name);
+    try std.testing.expectEqual(@as(usize, 4), app.display_count);
+    // Sorted by name asc: CALC, FILE, NOTEPAD, TOP
+    try std.testing.expectEqual(@as(u64, 0), app.table.procs[app.display_indices[0]].pid);
+    try std.testing.expectEqual(@as(u64, 3), app.table.procs[app.display_indices[1]].pid);
+    try std.testing.expectEqual(@as(u64, 1), app.table.procs[app.display_indices[2]].pid);
+    try std.testing.expectEqual(@as(u64, 2), app.table.procs[app.display_indices[3]].pid);
+    // Clear filter
+    app.set_filter("");
+    try std.testing.expectEqual(@as(usize, 4), app.display_count);
+}
+
+test "top: AppState auto-refresh preserves sort and filter (C8)" {
+    var app = AppState.init();
+    app.table.count = 2;
+    app.table.procs[0] = .{ .pid = 1, .state = .running, .exit_status = 0, .name = "B.BIN\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00".*, .name_len = 5 };
+    app.table.procs[1] = .{ .pid = 0, .state = .running, .exit_status = 0, .name = "A.BIN\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00".*, .name_len = 5 };
+    app.sort_column = .name;
+    app.sort_asc = true;
+    app.set_filter("a");
+    try std.testing.expectEqual(@as(usize, 1), app.display_count);
+    // Simulate timer adding a new proc that also matches filter — rebuild should preserve sort/filter
+    app.table.count = 3;
+    app.table.procs[2] = .{ .pid = 2, .state = .running, .exit_status = 0, .name = "AA.BIN\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00".*, .name_len = 6 };
+    app.rebuild_display();
+    try std.testing.expectEqual(SortColumn.name, app.sort_column);
+    try std.testing.expect(app.sort_asc);
+    try std.testing.expectEqual(@as(usize, 2), app.display_count);
+    // Simulate handle_timer's rebuild path without wiping table (host stub would clear, so test rebuild directly)
+    app.rebuild_display();
+    try std.testing.expectEqual(@as(usize, 2), app.display_count);
+}
+
+test "top: header click via mouse event (C8)" {
+    var app = AppState.init();
+    app.table.count = 1;
+    app.table.procs[0] = .{ .pid = 0, .state = .running, .exit_status = 0, .name = "TEST.BIN\x00\x00\x00\x00\x00\x00\x00\x00".*, .name_len = 8 };
+    app.rebuild_display();
+    const hdr_y: u32 = 60;
+    // Click PID header (x=10)
+    var ev_pid = Event{ .kind = ui.MOUSE_DOWN, .flags = ui.BTN_LEFT, .seq = 1, .arg0 = 10, .arg1 = hdr_y };
+    _ = app.handle_mouse_events(&ev_pid);
+    try std.testing.expectEqual(SortColumn.pid, app.sort_column);
+    // Click NAME header (x=40)
+    var ev_name = Event{ .kind = ui.MOUSE_DOWN, .flags = ui.BTN_LEFT, .seq = 2, .arg0 = 40, .arg1 = hdr_y };
+    _ = app.handle_mouse_events(&ev_name);
+    try std.testing.expectEqual(SortColumn.name, app.sort_column);
+}
+
+test "top: row click selects filtered row (C8)" {
+    var app = AppState.init();
+    app.table.count = 2;
+    app.table.procs[0] = .{ .pid = 2, .state = .running, .exit_status = 0, .name = "B.BIN\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00".*, .name_len = 5 };
+    app.table.procs[1] = .{ .pid = 1, .state = .running, .exit_status = 0, .name = "A.BIN\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00".*, .name_len = 5 };
+    app.sort_column = .name;
+    app.sort_asc = true;
+    app.rebuild_display();
+    // Sorted: A.BIN (pid1) at display 0, B.BIN (pid2) at display 1
+    // Click row 1 (y=70+16)
+    var ev = Event{ .kind = ui.MOUSE_DOWN, .flags = ui.BTN_LEFT, .seq = 1, .arg0 = 10, .arg1 = 70 + 16 + 2 };
+    _ = app.handle_mouse_events(&ev);
+    try std.testing.expectEqual(@as(?usize, 1), app.table.selected_row);
+    const abs = app.display_to_absolute(1).?;
+    try std.testing.expectEqual(@as(u64, 2), app.table.procs[abs].pid);
+}
+
+test "top: AppState fits EL0 stack (C8, <4 KiB)" {
+    try std.testing.expect(@sizeOf(AppState) < 4 * 1024);
+    std.debug.print("TOP AppState size: {d}\n", .{@sizeOf(AppState)});
 }
