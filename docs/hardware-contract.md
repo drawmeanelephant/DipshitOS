@@ -88,9 +88,12 @@ Non-PCI platform facts:
   Under the legacy start level (T0SZ=25/W=39 over L0-rooted tables) every
   fresh TLB walk faults after the switch — the first post-switch BAR read
   hung (claims 0013/0018/0020); the start-level mismatch was isolated
-  (claims 6460/7896) and the production fix landed (claim 1517). The ADR 0006
-  invalidation list for later re-mapping milestones remains binding.
-  **[observed]**
+  (claims 6460/7896) and the production fix landed (claim 1517). With the
+  fix, **post-MMU virtio TX is [observed]** end to end on real VZ: the
+  takeover banner + memory-map print + `dipshit>` prompt land in
+  `vm-serial.log`. The invalidation list in **ADR 0006**
+  (`docs/decisions/0006-mmu-debt-boundary.md`) remains binding for every
+  later re-mapping milestone.
 - The identity map covers the low 4 GiB as Normal Write-Back and **every
   other address (including undeclared firmware MMIO)** as Device nGnRnE, so
   no post-switch access faults or hangs on an unmapped address.
