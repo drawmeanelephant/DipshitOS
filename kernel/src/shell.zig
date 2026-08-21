@@ -415,6 +415,7 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "system\n" ++
         "  beep        synthesize + play a sine through the virtio-snd PCM path ('beep <freq> <ms>' — reports the full control flow + submit/drain accounting)\n" ++
         "  clear       clean up the crime scene\n" ++
+        "  compose     list available Alt+key compose sequences for accented characters\n" ++
         "  crash       list recent crash tombstones from /data/crash/\n" ++
         "  clip        copy/paste the shared kernel clipboard ('clip <text...>' sets it, 'clip' prints it)\n" ++
         "  echo        repeat your regrettable decisions\n" ++
