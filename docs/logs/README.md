@@ -78,6 +78,7 @@ verify-coordination`, and CI) fails if it drifts from the files.
 | `agent/buffy/m15-c3-snap-zones` | [`agent-buffy-m15-c3-snap-zones.md`](agent-buffy-m15-c3-snap-zones.md) |
 | `agent/buffy/m15-c4-dock` | [`agent-buffy-m15-c4-dock.md`](agent-buffy-m15-c4-dock.md) |
 | `agent/buffy/m15-c5c6-notepad` | [`agent-buffy-m15-c5c6-notepad.md`](agent-buffy-m15-c5c6-notepad.md) |
+| `agent/buffy/m15-c8-top-sort` | [`agent-buffy-m15-c8-top-sort.md`](agent-buffy-m15-c8-top-sort.md) |
 | `agent/buffy/m15-commands` (PR #12) | [`agent-buffy-m15-commands.md`](agent-buffy-m15-commands.md) |
 | `agent/buffy/m15-host-plumbing` (PR #13) | [`agent-buffy-m15-host-plumbing.md`](agent-buffy-m15-host-plumbing.md) |
 | `agent/buffy/m15-machine-controls` | [`agent-buffy-m15-machine-controls.md`](agent-buffy-m15-machine-controls.md) |
