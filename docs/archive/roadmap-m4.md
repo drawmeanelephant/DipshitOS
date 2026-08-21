@@ -8,7 +8,7 @@
 > These bullets lived under `docs/roadmap.md`'s "Later milestones (sketches only,
 > not commitments)" section; they are milestone-four work (claims 2665/3678/3848/
 > 0826/4613/7786/1014/4636/5965/5795/5799/3179/9946), closed by tag
-> `m4-processes`. Per-card tracker: [`docs/march-m4.md`](../march-m4.md).
+> `m4-processes`. Per-card tracker: [`docs/march-m4.md`](march-m4.md).
 
 ---
 

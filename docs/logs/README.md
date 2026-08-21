@@ -149,6 +149,7 @@ verify-coordination`, and CI) fails if it drifts from the files.
 | `agent/codex/m3-ragshit-dogfood` | [`agent-codex-m3-ragshit-dogfood.md`](agent-codex-m3-ragshit-dogfood.md) |
 | `agent/codex/m3-syscall-abi` | [`agent-codex-m3-syscall-abi.md`](agent-codex-m3-syscall-abi.md) |
 | audit-2026 maintenance: timer-gate evidence restore + doc drift fixes (claim 6204) | [`agent-maintenance-audit-2026-issues.md`](agent-maintenance-audit-2026-issues.md) |
+| `agent/oxalpha/archive-march-m4-m5` | [`agent-oxalpha-archive-march-m4-m5.md`](agent-oxalpha-archive-march-m4-m5.md) |
 | milestone eight cards U4+U5: pointer focus/cursor + window HIG (zcode) | [`agent-zcode-m8-u4-u5-windows.md`](agent-zcode-m8-u4-u5-windows.md) |
 | `codex/el0-svc-task` | [`codex-el0-svc-task.md`](codex-el0-svc-task.md) |
 | `codex/vz-real-irq-delivery` | [`codex-vz-real-irq-delivery.md`](codex-vz-real-irq-delivery.md) |

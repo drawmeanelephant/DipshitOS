@@ -7,7 +7,7 @@
 >
 > The network-stack sketch + landed rungs N1–N6 lived under `docs/roadmap.md`'s
 > "Later milestones" section. Closed 2026-08-12 (claim 5357). Per-card tracker:
-> [`docs/march-m5.md`](../march-m5.md).
+> [`docs/march-m5.md`](march-m5.md).
 
 ---
 
