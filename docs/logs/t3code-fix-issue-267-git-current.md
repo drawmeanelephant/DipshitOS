@@ -1,0 +1,3 @@
+# Log — t3code/fix-issue-267-git-current (docs/logs hygiene)
+
+- **2026-08-21** — *opencode (`t3code/fix-issue-267-git-current`)*: claimed 🔄 then ✅ — issue #267 repo hygiene on `docs/logs/`: archived every log untouched for >7 days (last commit ≤ 2026-08-13) into `docs/archive/logs/`, renamed the 25 UUID-style freebuff filenames to `{agent}-{yyyymmdd}-{seq}.md` (map in `docs/claims/0162-logs-cleanup.md`), documented the convention in this README's prose and `docs/archive/README.md`, regenerated both indexes. Filenames only — no log entry content touched (append-only preserved); active path went from 146 files (~25 with 80+-char names) to 64 short-named files. Evidence: `verify-coordination.sh` ok, `test-coordination.sh` green, `refresh-indexes.sh --check` in sync.
