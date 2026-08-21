@@ -179,6 +179,16 @@ var drag_id: ?u8 = null;
 var drag_offset_x: u32 = 0;
 var drag_offset_y: u32 = 0;
 
+/// Arc2 W1 (claim 3589, #224): drag-to-resize — 6×6 bottom-right corner.
+pub const resize_min_w: u32 = 128;
+pub const resize_min_h: u32 = 64;
+pub const resize_hit_size: u32 = 6;
+var resize_id: ?u8 = null;
+var resize_start_x: u32 = 0;
+var resize_start_y: u32 = 0;
+var resize_origin_w: u32 = 0;
+var resize_origin_h: u32 = 0;
+
 /// M15 C2 (Alt+Tab overlay, #225): hold-Alt cycling UI state — BSS, no heap.
 var overlay_active: bool = false;
 var overlay_selected: usize = 0;
@@ -360,6 +370,7 @@ pub fn arm() void {
     cursor_shown = false;
     prev_ptr_buttons = 0;
     drag_id = null;
+    resize_id = null;
     overlay_active = false;
     overlay_count = 0;
     overlay_selected = 0;
@@ -764,6 +775,77 @@ pub fn user_set_visible(id: u8, visible: bool) bool {
     return true;
 }
 
+/// Arc2 W1 (claim 3589, #224): drag-to-resize — hit-test, clamp, and resize.
+///
+/// 6×6 bottom-right corner at (x+w-6, y+h-6). Pure — host-testable.
+pub fn is_resize_hit(win: Window, px: u32, py: u32) bool {
+    if (win.kind != .user or !win.visible) return false;
+    if (win.w < resize_hit_size or win.h < resize_hit_size) return false;
+    const rx = win.x + win.w - resize_hit_size;
+    const ry = win.y + win.h - resize_hit_size;
+    return px >= rx and px < win.x + win.w and py >= ry and py < win.y + win.h;
+}
+
+/// Clamp helpers — pure, host-testable. Buffer bounds 128×64..512×384 plus
+/// on-scanout containment (so a resize never writes beyond the framebuffer).
+pub fn clamp_resize_w(req_w: i32, win_x: u32) u32 {
+    var w: i32 = req_w;
+    if (w < @as(i32, resize_min_w)) w = @as(i32, resize_min_w);
+    if (w > @as(i32, user_buf_w)) w = @as(i32, user_buf_w);
+    // Screen containment: max is remaining width from win_x.
+    const max_screen = @as(i32, @intCast(virtio_gpu.fb_width -| win_x));
+    if (w > max_screen) w = max_screen;
+    if (w < @as(i32, resize_min_w)) w = @as(i32, resize_min_w);
+    if (w < 0) w = @as(i32, resize_min_w);
+    return @intCast(w);
+}
+
+pub fn clamp_resize_h(req_h: i32, win_y: u32) u32 {
+    var h: i32 = req_h;
+    if (h < @as(i32, resize_min_h)) h = @as(i32, resize_min_h);
+    if (h > @as(i32, user_buf_h)) h = @as(i32, user_buf_h);
+    const max_screen = @as(i32, @intCast(virtio_gpu.fb_height -| win_y));
+    if (h > max_screen) h = max_screen;
+    if (h < @as(i32, resize_min_h)) h = @as(i32, resize_min_h);
+    if (h < 0) h = @as(i32, resize_min_h);
+    return @intCast(h);
+}
+
+/// Resize a user window to (w, h), clamped to 128×64..512×384 and on-scanout.
+/// Marks the window dirty + the terminal dirty (reveal old rect + chrome repaint
+/// on next `composite()`), and emits `WIN_RESIZE` to the owning pid. Returns
+/// false for an unknown id / non-user window. The EL0 `sys_win_resize` enforces
+/// ownership on top of this; the compositor's pointer_tick calls it directly.
+pub fn user_resize(id: u8, w: u32, h: u32) bool {
+    const win = find_user_window(id) orelse return false;
+    const clamped_w = clamp_resize_w(@intCast(w), win.x);
+    const clamped_h = clamp_resize_h(@intCast(h), win.y);
+    win.w = clamped_w;
+    win.h = clamped_h;
+    win.dirty = true;
+    _ = mark_dirty(0);
+    _ = mark_dirty(1);
+    if (win.owner) |owner| {
+        events.push(owner, .{
+            .kind = events.WIN_RESIZE,
+            .flags = 0,
+            .seq = 0,
+            .arg0 = clamped_w,
+            .arg1 = clamped_h,
+        });
+    }
+    return true;
+}
+
+/// True when a resize drag is active.
+pub fn resize_active() bool {
+    return resize_id != null;
+}
+
+pub fn resize_current_id() ?u8 {
+    return resize_id;
+}
+
 /// Auto-close every user window owned by the process `owner` (the exit
 /// path's teardown seam — `scheduler.exit_current` calls this with the
 /// exited process's pid). Returns how many windows were released. Pure
@@ -823,6 +905,9 @@ fn remove_user_at(idx: usize) void {
     if (drag_id != null and drag_id.? == removed_id) {
         drag_id = null;
         snap_zone = .none;
+    }
+    if (resize_id != null and resize_id.? == removed_id) {
+        resize_id = null;
     }
     // Reveal whatever sat under the released window.
     _ = mark_dirty(0);
@@ -1071,12 +1156,20 @@ pub fn pointer_tick(st: input.PointerState, click: ?input.Click) ?u8 {
         const btn_flags = mouse_buttons_to_flags(st.buttons);
         const all_flags = btn_flags | kb_flags;
 
-        const btn_pressed = (prev_ptr_buttons == 0 and st.buttons != 0) or (click != null);
-        const btn_released = (prev_ptr_buttons != 0 and st.buttons == 0);
+        const left_bit: u8 = 0x01;
+        const right_bit: u8 = 0x02;
+        const prev_left = (prev_ptr_buttons & left_bit) != 0;
+        const prev_right = (prev_ptr_buttons & right_bit) != 0;
+        const cur_left = (st.buttons & left_bit) != 0;
+        const cur_right = (st.buttons & right_bit) != 0;
+        const left_pressed = (!prev_left and cur_left) or (click != null);
+        const left_released = (prev_left and !cur_left);
+        const right_pressed = (!prev_right and cur_right);
+        const right_released = (prev_right and !cur_right);
 
-        // Step 5/6/7: drag + close + minimize handling on MOUSE_DOWN.
+        // Step 5/6/7: drag + close + minimize handling on MOUSE_DOWN (left only).
         // M15 C4: dock handling must precede user windows — dock is at 0,0,24,700.
-        if (btn_pressed) {
+        if (left_pressed) {
             var handled_btn = false;
             // M15 C4: dock icon click — 24 px left bar, 20×20 icons at (2,8+idx*32).
             if (cursor_x < dock_w and cursor_y < dock_h) {
@@ -1135,6 +1228,20 @@ pub fn pointer_tick(st: input.PointerState, click: ?input.Click) ?u8 {
                         handled_btn = true;
                         break;
                     }
+                    // Arc2 W1: resize handle — 6×6 bottom-right corner.
+                    if (is_resize_hit(w.*, cursor_x, cursor_y)) {
+                        resize_id = w.id;
+                        resize_start_x = cursor_x;
+                        resize_start_y = cursor_y;
+                        resize_origin_w = w.w;
+                        resize_origin_h = w.h;
+                        _ = focus(w.id);
+                        _ = raise(w.id);
+                        _ = mark_dirty(0);
+                        focused_changed = w.id;
+                        handled_btn = true;
+                        break;
+                    }
                     // Title bar drag initiation.
                     if (cursor_x >= w.x and cursor_x < w.x + w.w and
                         cursor_y >= w.y and cursor_y < w.y + user_title_h)
@@ -1166,10 +1273,37 @@ pub fn pointer_tick(st: input.PointerState, click: ?input.Click) ?u8 {
                 }
             }
         }
+        // Arc2 W2: right-click — focus the hit window (no drag/resize/close).
+        if (right_pressed) {
+            if (focus_at(cursor_x, cursor_y)) {
+                const id = focused_id;
+                _ = raise(id);
+                _ = mark_dirty(0);
+                focused_changed = id;
+            }
+        }
 
-        // M15 C3: snap preview while dragging, snap on release.
-        if (drag_id) |did| {
-            if (moved and st.buttons != 0) {
+        // Arc2 W1: resize drag — live clamp + chrome repaint + WIN_RESIZE.
+        if (resize_id) |rid| {
+            if (moved and cur_left) {
+                const dx = @as(i32, @intCast(cursor_x)) - @as(i32, @intCast(resize_start_x));
+                const dy = @as(i32, @intCast(cursor_y)) - @as(i32, @intCast(resize_start_y));
+                const req_w = @as(i32, @intCast(resize_origin_w)) + dx;
+                const req_h = @as(i32, @intCast(resize_origin_h)) + dy;
+                const win = find_user_window(rid) orelse null;
+                if (win) |w| {
+                    const new_w = clamp_resize_w(req_w, w.x);
+                    const new_h = clamp_resize_h(req_h, w.y);
+                    if (new_w != w.w or new_h != w.h) {
+                        _ = user_resize(rid, new_w, new_h);
+                    }
+                }
+            }
+            if (left_released) {
+                resize_id = null;
+            }
+        } else if (drag_id) |did| {
+            if (moved and cur_left) {
                 const new_x: u32 = if (cursor_x >= drag_offset_x) cursor_x - drag_offset_x else 0;
                 const new_y: u32 = if (cursor_y >= drag_offset_y) cursor_y - drag_offset_y else 0;
                 _ = user_move(did, new_x, new_y);
@@ -1179,7 +1313,7 @@ pub fn pointer_tick(st: input.PointerState, click: ?input.Click) ?u8 {
                     _ = mark_dirty(0);
                 }
             }
-            if (btn_released) {
+            if (left_released) {
                 if (snap_zone != .none) {
                     _ = snap_window(did, snap_zone);
                 }
@@ -1212,7 +1346,7 @@ pub fn pointer_tick(st: input.PointerState, click: ?input.Click) ?u8 {
                             .arg1 = local_y,
                         });
                     }
-                    if (btn_pressed) {
+                    if (left_pressed) {
                         events.push(owner_pid, .{
                             .kind = events.MOUSE_DOWN,
                             .flags = all_flags,
@@ -1221,9 +1355,27 @@ pub fn pointer_tick(st: input.PointerState, click: ?input.Click) ?u8 {
                             .arg1 = local_y,
                         });
                     }
-                    if (btn_released) {
+                    if (left_released) {
                         events.push(owner_pid, .{
                             .kind = events.MOUSE_UP,
+                            .flags = all_flags,
+                            .seq = 0,
+                            .arg0 = local_x,
+                            .arg1 = local_y,
+                        });
+                    }
+                    if (right_pressed) {
+                        events.push(owner_pid, .{
+                            .kind = events.MOUSE_RIGHT_DOWN,
+                            .flags = all_flags,
+                            .seq = 0,
+                            .arg0 = local_x,
+                            .arg1 = local_y,
+                        });
+                    }
+                    if (right_released) {
+                        events.push(owner_pid, .{
+                            .kind = events.MOUSE_RIGHT_UP,
                             .flags = all_flags,
                             .seq = 0,
                             .arg0 = local_x,
@@ -2478,5 +2630,131 @@ test "driving_award: M15 C3 — snap preview renders and zone bounds are within 
     try std.testing.expectEqual(@as(u32, 0xffffff), px.at(fb, stride, zb.x, zb.y));
     // Inside preview is accent 0x3b82f6.
     try std.testing.expectEqual(@as(u32, 0x3b82f6), px.at(fb, stride, zb.x + 4, zb.y + 4));
+    _ = user_close(2);
+}
+
+test "driving_award: Arc2 W1 — clamp_resize_w/h clamp to 128×64..512×384 and screen" {
+    // Pure clamp math — no window needed except screen containment.
+    // Buffer bounds.
+    try std.testing.expectEqual(@as(u32, 128), clamp_resize_w(100, 0));
+    try std.testing.expectEqual(@as(u32, 128), clamp_resize_w(127, 0));
+    try std.testing.expectEqual(@as(u32, 128), clamp_resize_w(128, 0));
+    try std.testing.expectEqual(@as(u32, 200), clamp_resize_w(200, 0));
+    try std.testing.expectEqual(@as(u32, 512), clamp_resize_w(512, 0));
+    try std.testing.expectEqual(@as(u32, 512), clamp_resize_w(600, 0));
+    try std.testing.expectEqual(@as(u32, 512), clamp_resize_w(1000, 0));
+    try std.testing.expectEqual(@as(u32, 64), clamp_resize_h(10, 0));
+    try std.testing.expectEqual(@as(u32, 64), clamp_resize_h(64, 0));
+    try std.testing.expectEqual(@as(u32, 100), clamp_resize_h(100, 0));
+    try std.testing.expectEqual(@as(u32, 384), clamp_resize_h(384, 0));
+    try std.testing.expectEqual(@as(u32, 384), clamp_resize_h(500, 0));
+    // Screen containment: fb is 1280×720.
+    try std.testing.expectEqual(@as(u32, 280), clamp_resize_w(512, 1000)); // 1280-1000=280
+    try std.testing.expectEqual(@as(u32, 128), clamp_resize_w(128, 1152)); // 1280-1152=128 exactly min
+    // Negative request clamps to min.
+    try std.testing.expectEqual(@as(u32, 128), clamp_resize_w(-50, 0));
+    try std.testing.expectEqual(@as(u32, 64), clamp_resize_h(-10, 0));
+}
+
+test "driving_award: Arc2 W1 — is_resize_hit detects 6×6 bottom-right corner" {
+    arm();
+    _ = user_open(100, 50, 200, 100, 7);
+    const w = find_user_window(2).?.*;
+    // Inside the 6×6 corner: x+w-6 .. x+w-1, y+h-6 .. y+h-1
+    try std.testing.expect(is_resize_hit(w, 100 + 200 - 3, 50 + 100 - 3));
+    try std.testing.expect(is_resize_hit(w, 100 + 200 - 1, 50 + 100 - 1));
+    try std.testing.expect(is_resize_hit(w, 100 + 200 - 6, 50 + 100 - 6));
+    // Outside the corner but inside window — not a resize hit.
+    try std.testing.expect(!is_resize_hit(w, 100 + 10, 50 + 10));
+    try std.testing.expect(!is_resize_hit(w, 100 + 200 - 3, 50 + 10));
+    try std.testing.expect(!is_resize_hit(w, 100 + 200 - 7, 50 + 100 - 3));
+    // Outside window.
+    try std.testing.expect(!is_resize_hit(w, 100 + 200 + 1, 50 + 100 - 3));
+    _ = user_close(2);
+}
+
+test "driving_award: Arc2 W1 — user_resize clamps and emits WIN_RESIZE" {
+    events.init();
+    arm();
+    _ = user_open(64, 64, 200, 100, 9);
+    // Consume the WIN_FOCUS from open.
+    _ = events.pop(9);
+    // Below min clamps to 128×64.
+    try std.testing.expect(user_resize(2, 50, 10));
+    try std.testing.expectEqual(@as(u32, 128), find_user_window(2).?.w);
+    try std.testing.expectEqual(@as(u32, 64), find_user_window(2).?.h);
+    var ev = events.pop(9).?;
+    try std.testing.expectEqual(events.WIN_RESIZE, ev.kind);
+    try std.testing.expectEqual(@as(u32, 128), ev.arg0);
+    try std.testing.expectEqual(@as(u32, 64), ev.arg1);
+    // Above max clamps to 512×384.
+    try std.testing.expect(user_resize(2, 800, 500));
+    try std.testing.expectEqual(@as(u32, 512), find_user_window(2).?.w);
+    try std.testing.expectEqual(@as(u32, 384), find_user_window(2).?.h);
+    ev = events.pop(9).?;
+    try std.testing.expectEqual(events.WIN_RESIZE, ev.kind);
+    try std.testing.expectEqual(@as(u32, 512), ev.arg0);
+    try std.testing.expectEqual(@as(u32, 384), ev.arg1);
+    // Chrome dirty + terminal dirty for repaint.
+    try std.testing.expect(find_user_window(2).?.dirty);
+    try std.testing.expect(windows[0].dirty);
+    // Unknown id refused.
+    try std.testing.expect(!user_resize(99, 200, 100));
+    try std.testing.expect(!user_resize(0, 200, 100));
+    _ = user_close(2);
+}
+
+test "driving_award: Arc2 W1 — pointer_tick drag-to-resize via bottom-right corner" {
+    events.init();
+    arm();
+    _ = user_open(100, 50, 200, 100, 7);
+    _ = events.pop(7); // WIN_FOCUS
+    const win0 = find_user_window(2).?;
+    const rx = win0.x + win0.w - 3;
+    const ry = win0.y + win0.h - 3;
+    const cx = @as(u16, @intCast((rx * 32768) / virtio_gpu.fb_width));
+    const cy = @as(u16, @intCast((ry * 32768) / virtio_gpu.fb_height));
+    // MOUSE_DOWN in resize corner starts resize.
+    const st_down: input.PointerState = .{ .x = cx, .y = cy, .buttons = 0x01, .valid = true };
+    _ = pointer_tick(st_down, .{ .x = cx, .y = cy });
+    try std.testing.expect(resize_active());
+    try std.testing.expectEqual(@as(?u8, 2), resize_current_id());
+    // MOUSE_MOVE 30,20 larger — new size 230×120.
+    const nx = rx + 30;
+    const ny = ry + 20;
+    const cx2 = @as(u16, @intCast((nx * 32768) / virtio_gpu.fb_width));
+    const cy2 = @as(u16, @intCast((ny * 32768) / virtio_gpu.fb_height));
+    const st_move: input.PointerState = .{ .x = cx2, .y = cy2, .buttons = 0x01, .valid = true };
+    _ = pointer_tick(st_move, null);
+    try std.testing.expectEqual(@as(u32, 230), find_user_window(2).?.w);
+    try std.testing.expectEqual(@as(u32, 120), find_user_window(2).?.h);
+    try std.testing.expect(events.pending(7) >= 1);
+    var found_resize = false;
+    while (events.pop(7)) |ev| {
+        if (ev.kind == events.WIN_RESIZE) {
+            found_resize = true;
+            try std.testing.expectEqual(@as(u32, 230), ev.arg0);
+            try std.testing.expectEqual(@as(u32, 120), ev.arg1);
+        }
+    }
+    try std.testing.expect(found_resize);
+    // MOUSE_UP ends resize.
+    const st_up: input.PointerState = .{ .x = cx2, .y = cy2, .buttons = 0x00, .valid = true };
+    _ = pointer_tick(st_up, null);
+    try std.testing.expect(!resize_active());
+    // Drag should not have started.
+    try std.testing.expect(drag_id == null);
+    // Clamp test via pointer_tick: drag far negative — clamps to min.
+    // Need to re-hit after move: window is now 230×120 at (100,50), corner at 327,167.
+    const rx2 = find_user_window(2).?.x + find_user_window(2).?.w - 3;
+    const ry2 = find_user_window(2).?.y + find_user_window(2).?.h - 3;
+    const cx3 = @as(u16, @intCast((rx2 * 32768) / virtio_gpu.fb_width));
+    const cy3 = @as(u16, @intCast((ry2 * 32768) / virtio_gpu.fb_height));
+    _ = pointer_tick(.{ .x = cx3, .y = cy3, .buttons = 0x01, .valid = true }, .{ .x = cx3, .y = cy3 });
+    const st_far_neg: input.PointerState = .{ .x = 0, .y = 0, .buttons = 0x01, .valid = true };
+    _ = pointer_tick(st_far_neg, null);
+    try std.testing.expectEqual(@as(u32, 128), find_user_window(2).?.w);
+    try std.testing.expectEqual(@as(u32, 64), find_user_window(2).?.h);
+    _ = pointer_tick(.{ .x = 0, .y = 0, .buttons = 0x00, .valid = true }, null);
     _ = user_close(2);
 }
