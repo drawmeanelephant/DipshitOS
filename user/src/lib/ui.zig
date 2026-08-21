@@ -56,6 +56,7 @@ pub const sys_win_lower_back_num: u64 = 50;
 pub const sys_notify_num: u64 = 51;
 pub const sys_drag_start_num: u64 = 48;
 pub const sys_drag_read_num: u64 = 55;
+pub const sys_win_move_to_workspace_num: u64 = 52;
 pub const sys_timer_cancel_num: u64 = 41;
 pub const sys_udp_listen_num: u64 = 9;
 pub const sys_udp_send_num: u64 = 10;
@@ -406,6 +407,11 @@ pub fn drag_start(payload: []const u8) bool {
 /// Arc4 #237: read the drag payload after receiving a DROP event.
 pub fn drag_read(buf: []u8) usize {
     return @intCast(syscall2(sys_drag_read_num, @intFromPtr(buf.ptr), buf.len));
+}
+
+/// Arc4 #241: move the window to a different workspace (0..2).
+pub fn win_move_to_workspace(id: u32, ws: u32) bool {
+    return syscall2(sys_win_move_to_workspace_num, id, ws) == 0;
 }
 
 pub fn wait_event(ev: *Event) i64 {

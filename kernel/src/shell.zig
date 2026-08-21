@@ -236,6 +236,13 @@ pub fn boot_and_park(mon: *monitor.Monitor, rx_wired: bool) void {
                     mon.console.puts("\n");
                 }
             }
+            // Arc4 #241: Ctrl+F1/F2/F3 workspace switch.
+            if (input.take_workspace_switch()) |ws| {
+                driving_award.switch_workspace(ws);
+                mon.console.puts("dui: workspace=");
+                mon.console.print_u64(ws);
+                mon.console.puts("\n");
+            }
             // Claim 1574 (milestone six G3): Road Pops — one full-frame
             // present per dirty output batch (the card-3d drain pattern).
             // No-op when the tee is unarmed (default VM) or clean.

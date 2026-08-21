@@ -348,7 +348,7 @@ fn ensure_table() *const [slot_count]Entry {
         table_storage[sys_notify] = .{ .name = "sys_notify", .handler = handle_notify };
         table_storage[sys_drag_read] = .{ .name = "sys_drag_read", .handler = handle_drag_read };
         // ADR 0013 reserved slots 52–54 (not yet implemented). Stubs.
-        table_storage[52] = .{ .name = "sys_win_move_to_workspace", .handler = handle_enosys };
+        table_storage[52] = .{ .name = "sys_win_move_to_workspace", .handler = handle_win_move_to_workspace };
         table_storage[53] = .{ .name = "sys_win_set_unsaved", .handler = handle_enosys };
         table_storage[54] = .{ .name = "sys_setrlimit", .handler = handle_enosys };
         table_ready = true;
@@ -886,6 +886,19 @@ fn handle_drag_read(args: Args, _: *exceptions.VectorFrame) u64 {
     // Consume: clear the drag state.
     driving_award.drag_cancel();
     return @intCast(copy_len);
+}
+
+/// Arc4 #241 (slot 52): `sys_win_move_to_workspace(id, ws)` — move the
+/// caller's window to workspace `ws` (0..2). EINVAL for out-of-range or
+/// non-user window.
+fn handle_win_move_to_workspace(args: Args, _: *exceptions.VectorFrame) u64 {
+    if (args[0] > std.math.maxInt(u8)) return error_result(.einval);
+    const id: u8 = @truncate(args[0]);
+    if (!win_owned_by_caller(id)) return error_result(.einval);
+    const ws: u8 = @truncate(args[1]);
+    if (ws >= driving_award.workspace_max) return error_result(.einval);
+    if (!driving_award.user_move_to_workspace(id, ws)) return error_result(.einval);
+    return 0;
 }
 
 /// `sys_win_get(id, buf)`: copy the CALLER'S user window's geometry

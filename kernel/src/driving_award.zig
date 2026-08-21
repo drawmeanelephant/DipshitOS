@@ -158,6 +158,9 @@ pub const Window = struct {
     /// blending during the fade frames.
     fade_phase: u8 = 0,
     fade_tick: u8 = 0,
+    /// Arc4 #241: workspace assignment. 0..2 = workspace, fixed layers
+    /// are always workspace 0 (visible on all).
+    workspace: u8 = 0,
 };
 
 /// Arc4 #239: fade-in constants. The window is at 25% opacity for
@@ -176,6 +179,33 @@ var focused_id: u8 = 0xff;
 var armed_global: bool = false;
 /// Scanout presents pushed by the compositor since arm.
 var presents: usize = 0;
+
+/// Arc4 #241: virtual desktop workspaces. Three workspaces (0, 1, 2).
+/// The current workspace controls which user windows are visible.
+/// Fixed layers (terminal, wallpaper, taskbar, dock) are visible on all.
+pub const workspace_max: u8 = 3;
+pub var current_workspace: u8 = 0;
+
+/// Arc4 #241: switch to a workspace (0..2). Marks all windows dirty
+/// so the compositor repaints the new visibility set.
+pub fn switch_workspace(ws: u8) void {
+    if (ws >= workspace_max) return;
+    current_workspace = ws;
+    // Mark all windows dirty so the compositor repaints.
+    var i: usize = 0;
+    while (i < win_count) : (i += 1) {
+        windows[i].dirty = true;
+    }
+    _ = mark_dirty(0);
+    _ = mark_dirty(1);
+}
+
+/// Arc4 #241: check if a window is visible in the current workspace.
+pub fn workspace_visible(w: *const Window) bool {
+    // Fixed layers are always visible.
+    if (w.kind != .user) return true;
+    return w.workspace == current_workspace;
+}
 
 /// The clock's back-buffer (fixed BSS, contiguous B8G8R8X8). The
 /// compositor blits it over the terminal.
@@ -711,6 +741,8 @@ pub fn hit_test(x: u32, y: u32) ?u8 {
         i -= 1;
         const w = &windows[i];
         if (!w.visible) continue;
+        // Arc4 #241: skip windows not in the current workspace.
+        if (!workspace_visible(w)) continue;
         // Wallpaper is background-only — not interactive.
         if (w.kind == .wallpaper) continue;
         if (x >= w.x and x < w.x + w.w and y >= w.y and y < w.y + w.h) return w.id;
@@ -812,6 +844,7 @@ pub fn user_open(x: u32, y: u32, w: u32, h: u32, owner: usize) UserOpenResult {
             .owner = owner,
             .fade_phase = 1, // Arc4 #239: start fade-in
             .fade_tick = 0,
+            .workspace = current_workspace, // Arc4 #241: assign to current workspace
         };
         win_count += 1;
         _ = focus(id);
@@ -896,6 +929,16 @@ pub fn user_lower_back(id: u8) bool {
     while (j > 0) : (j -= 1) windows[j] = windows[j - 1];
     windows[0] = moved;
     windows[0].dirty = true;
+    return true;
+}
+
+/// Arc4 #241: move a user window to a different workspace.
+pub fn user_move_to_workspace(id: u8, ws: u8) bool {
+    if (!armed_global) return false;
+    const w = find_user_window(id) orelse return false;
+    w.workspace = ws;
+    w.dirty = true;
+    _ = mark_dirty(0);
     return true;
 }
 
@@ -1931,8 +1974,19 @@ fn paint(w: *Window) void {
             const fb: [*]u8 = @ptrCast(&virtio_gpu.gpu_fb);
             const stride = virtio_gpu.fb_width * 4;
             fill_rect(fb, stride, 0, taskbar_y, virtio_gpu.fb_width, taskbar_h, taskbar_bg());
+            // Arc4 #241: workspace switcher [1][2][3] on the left side.
+            var ws_x: u32 = 4;
+            var ws_idx: u8 = 0;
+            while (ws_idx < workspace_max) : (ws_idx += 1) {
+                const is_cur = ws_idx == current_workspace;
+                const ws_bg = if (is_cur) taskbar_entry_active() else taskbar_entry_dimmed();
+                fill_rect(fb, stride, ws_x, taskbar_y + 2, 20, taskbar_h - 4, ws_bg);
+                const label: [1]u8 = .{'1' + ws_idx};
+                draw_string(fb, stride, ws_x + 6, taskbar_y + 6, label[0..1], 0xffffff);
+                ws_x += 24;
+            }
             // Render entries for each open user window.
-            var entry_x: u32 = 4;
+            var entry_x: u32 = ws_x + 4;
             var wi: usize = 0;
             while (wi < win_count) : (wi += 1) {
                 const ww = &windows[wi];
@@ -2044,6 +2098,11 @@ pub fn composite() virtio_gpu.CmdResult {
     while (i < win_count) : (i += 1) {
         const w = &windows[i];
         if (!w.visible) continue;
+        // Arc4 #241: skip user windows not in the current workspace.
+        if (!workspace_visible(w)) {
+            w.dirty = false;
+            continue;
+        }
         // Wallpaper is rendered via the gradient path above.
         if (w.kind == .wallpaper) {
             w.dirty = false;
@@ -2091,6 +2150,8 @@ fn draw_chrome() void {
     while (i < win_count) : (i += 1) {
         const w = &windows[i];
         if (w.kind != .user or !w.visible) continue;
+        // Arc4 #241: skip chrome for windows not in the current workspace.
+        if (!workspace_visible(w)) continue;
         // Title bar: "dui<id> pid=<pid>" (the owning pid when known).
         fill_rect(fb, stride, w.x, w.y, w.w, user_title_h, user_title_bg());
         var tb: [24]u8 = undefined;
@@ -2125,6 +2186,8 @@ fn draw_chrome() void {
             if (windows[idx].id != focused_id) continue;
             const w = &windows[idx];
             if (w.kind == .terminal) break;
+            // Arc4 #241: don't draw focus ring on off-workspace windows.
+            if (!workspace_visible(w)) break;
             const rx: usize = w.x;
             const ry: usize = w.y;
             const rw: usize = if (w.w > wspan) wspan else w.w;
