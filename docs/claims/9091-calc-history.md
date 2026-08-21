@@ -1,0 +1,13 @@
+# Claim: CALC.BIN computation history + complete keyboard shortcuts (M15 C9)
+
+- **Owner:** buffy (`agent/buffy/m15-c9-calc-history`)
+- **Prompt / plan:** `docs/m17-desktop-completeness.md` C9 (issue #235) — after C8
+- **Scope:** Arc 3 App Upgrades — pure `user/src/calc.zig` (+ `user/src/lib/ui.zig` if needed for history scroll, but NOT #218 ScrollView per m17). C9: scrollable history above display (top 60px, 10 entries × ~40B ring, expression = result, scrolls when >6), Up/Down arrows cycle history (re-display), complete keyboard surface (0-9, +−×÷ via ASCII +/*/- and rendered ÷, ., Enter/=, Backspace, Esc, Up/Down, M+/M-/MR/MC verify), operator precedence BODMAS documented, bounded AppState, host tests for history/keys, verify-bss-budget.
+- **Depends on:** CALC.BIN ✅ M11 A2 claim 8401 + memory-and-repeat patch claim 7869; ui toolkit ✅ M11 A1; C8 ✅ 89dabe7 (no file conflict, AppState separate).
+- **Status:** ✅ done 2026-08-21 — `user/src/calc.zig` history + keyboard (`history_max 10` ring `HistoryEntry [32]u8+result`, `history_area 8,8,239,60` 6 visible @10px with `^`/`v` scroll, `display_rect 8,72,239,28` below history, buttons y+64 shift, `push_history_entry`/`record_history_from_engine`/`history_up`/`history_down`/`get_history_entry`, `draw` history + indicator, `handle_mouse_events` evaluate records `pending/a/b → history`, `handle_keyboard_event` complete surface digits `0-9`, ops `+-*/%`, `.` no-op, `Enter` `0x28`/`=` evaluate+record, `Backspace` `0x08`/`0x2a`, `Esc` `0x29`/`0x1b` clear, `Up` `0x52`/`Down` `0x51` cycle, `m` MR, `c` clear, BODMAS documented). Host tests 22/22 PASS (3 new: ring wrap/scroll, Up/Down cycle+keys, AppState 1744 <4KiB), `zig build` PASS `CALC.BIN 8153` (+2324B), `verify-bss-budget` PASS `9788088/11534336`.
+
+## Notes
+
+C9 is the last CALC upgrade before M15 close: history ring buffer `HistoryEntry { expr[32], result i64, has_result }` 10 entries, `history_head`/`history_len`/`history_cursor`/`scroll_offset`, `push_history(expr,result)` on every evaluate, `draw_history` top 60px (6 visible rows @10px) with scroll indicator, `handle_keyboard_event` extended for all shortcuts (digits, + - * / %  ., Enter, Backspace 0x08/0x2a, Esc 0x29, Up 0x52/Down 0x51 cycle, m/M for MR, etc.), memory keys verified (M+ M- MR MC buttons already work, keyboard m mapped to MR, shift+M etc documented), BODMAS precedence already in engine (evaluated left-to-right via pending_op, documented as calculator convention). All zero heap, history 10×40=400B stack.
+
+Evidence: `artifacts/disk.img` built with new CALC.BIN (8153 B), host tests `calc.zig` 22/22 PASS including `AppState 1744`.
