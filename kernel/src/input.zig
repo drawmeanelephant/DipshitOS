@@ -90,6 +90,8 @@ var alt_tab_pending: bool = false;
 var alt_tab_shift: bool = false;
 /// Arc4 #238: Ctrl+Shift+B lowers the focused window to back.
 var lower_back_pending: bool = false;
+/// Arc4 #241: Ctrl+F1/F2/F3 switches workspace. 0xff = no switch pending.
+var workspace_switch_pending: u8 = 0xff;
 
 /// Diagnostic hooks (kernel/src/main.zig wires these to uart_puts/uart_hex
 /// under `--input`; null in host tests and the default VM).
@@ -304,6 +306,25 @@ pub fn decode_keyboard_report(rep: []const u8) void {
                 lower_back_pending = true;
             }
         }
+        // Arc4 #241: Ctrl+F1/F2/F3 switches workspace.
+        if ((flags & app_events.MOD_CTRL) != 0) {
+            var ws: u8 = 0xff;
+            if (k == 0x58) ws = 0; // F1
+            if (k == 0x59) ws = 1; // F2
+            if (k == 0x5a) ws = 2; // F3
+            if (ws != 0xff) {
+                var held = false;
+                for (kb_held) |h| {
+                    if (h == k) {
+                        held = true;
+                        break;
+                    }
+                }
+                if (!held) {
+                    workspace_switch_pending = ws;
+                }
+            }
+        }
     }
 
     if (driving_award.focused_owner()) |owner_pid| {
@@ -507,6 +528,14 @@ pub fn take_lower_back() bool {
     if (!lower_back_pending) return false;
     lower_back_pending = false;
     return true;
+}
+
+/// Arc4 #241: consume the Ctrl+F1/F2/F3 workspace switch edge.
+pub fn take_workspace_switch() ?u8 {
+    if (workspace_switch_pending == 0xff) return null;
+    const ws = workspace_switch_pending;
+    workspace_switch_pending = 0xff;
+    return ws;
 }
 
 // ---------------------------------------------------------------------------
