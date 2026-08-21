@@ -125,5 +125,6 @@ verify-coordination`, and CI) fails if it drifts from the files.
 | freebuff/can-you-review-issues-223-247-and-try-to-provide-h (planning pass for issues #223–#247) | [`freebuff-20260820-001.md`](freebuff-20260820-001.md) |
 | `t3code/fetch-issue-264-details` | [`t3code-fetch-issue-264-details.md`](t3code-fetch-issue-264-details.md) |
 | t3code/fix-issue-267-git-current (docs/logs hygiene) | [`t3code-fix-issue-267-git-current.md`](t3code-fix-issue-267-git-current.md) |
+| `t3code/handle-issue-268-git-current` | [`t3code-handle-issue-268-git-current.md`](t3code-handle-issue-268-git-current.md) |
 | `t3code/issue-265-fix` | [`t3code-issue-265-fix.md`](t3code-issue-265-fix.md) |
 <!-- LOGS_INDEX:END -->
