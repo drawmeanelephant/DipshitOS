@@ -83,6 +83,7 @@ const driving_award = @import("driving_award.zig");
 // when status is 139 (fault) or non-zero unexpected exits. Pure BSS
 // writes, safe in the exception context `exit_current` runs in.
 const tombstone = @import("tombstone.zig");
+const serial_ring = @import("serial_ring.zig"); // Arc5 #243: serial snapshot for tombstones
 const virtio_blk = @import("virtio_blk.zig"); // Arc5 #243: disk write for tombstones
 
 const user_stack_section = if (builtin.object_format == .elf) ".userbss" else "__DATA,__userbss";
@@ -963,7 +964,10 @@ pub fn exit_current(status: u64) bool {
         else
             name;
         const pid_val = if (process.find_by_task(exiting)) |pid| @as(u64, pid) else @as(u64, 0);
-        tombstone.record(proc_name, pid_val, status, fault_addr, "", 0);
+        // Capture the last 512 bytes of serial output for the tombstone.
+        var serial_buf: [512]u8 = undefined;
+        const serial_n = serial_ring.snapshot(&serial_buf);
+        tombstone.record(proc_name, pid_val, status, fault_addr, serial_buf[0..serial_n], serial_n);
         // Arc5 issue #243: persist the tombstone to /data/crash/ on the DATA
         // partition. The write is polled DMA through virtio-blk (no allocation,
         // no interrupt, no global-state conflict with the exception context).
