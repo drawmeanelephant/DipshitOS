@@ -282,7 +282,7 @@ pub const Command = struct {
 /// grows it 54 -> 55 (`sym`). Milestone twenty-two D5 (issue #328)
 /// grows it 55 -> 56 (`strace`). Milestone twenty-two D6 (issue #329)
 /// grows it 56 -> 57 (`ps`).
-pub const registry_count: usize = 57; // 51 + sh/calc + `font` (M20 U1) + sym/strace/ps (M22 D3/D5/D6)
+pub const registry_count: usize = 58; // 51 + sh/calc + `font` (M20 U1) + sym/strace/ps (M22 D3/D5/D6) + `type` (M19 P1)
 
 /// `sym <file>` reads at most this many bytes for on-disk symtab inspection
 /// (M22 D3). ELF symbol tables live near the file tail; 64 KiB covers every
@@ -351,6 +351,7 @@ fn ensure_registry() []const Command {
             .{ .name = "sym", .help = "crash-report symbol table: 'sym' lists symbols loaded from the last ELF exec; 'sym <file>' parses an ELF's symtab from disk", .usage = "sym [<file>]", .category = .tasks_processes, .max_args = 1, .handler = cmd_sym },
             .{ .name = "syscalls", .help = "numbered syscall table and counters", .usage = "syscalls", .category = .tasks_processes, .handler = cmd_syscalls },
             .{ .name = "tasks", .help = "tick-driven task scheduler status", .usage = "tasks", .category = .tasks_processes, .handler = cmd_tasks },
+            .{ .name = "type", .help = "echo stdin (the pipe source) to stdout — the right half of `a | type`", .usage = "type", .category = .system, .handler = cmd_type },
             .{ .name = "timer", .help = "interrupt controller + timer status", .usage = "timer", .category = .memory_state, .handler = cmd_timer },
             .{ .name = "tour", .help = "guided tour of the system for new users", .usage = "tour", .category = .machine_identity, .handler = cmd_welcome },
             .{ .name = "uaccess", .help = "user-memory copy diagnostics (valid, fault, recovery)", .usage = "uaccess", .category = .memory_state, .handler = cmd_uaccess },
@@ -2109,6 +2110,17 @@ fn cmd_repeat(m: *Monitor, args: []const []const u8) ExecError {
 /// is reached, because scripts must execute through the shell's
 /// handle_line). Direct `monitor.exec` of `sh` — host tests only — gets
 /// an honest refusal rather than a silent no-op.
+/// `type` — M19 P1 (issue #290). The real work is a shell builtin
+/// (intercepted before monitor.exec); this registry entry exists for
+/// help/usage/completion discovery and refuses direct execution the same
+/// way `cmd_sh` does.
+fn cmd_type(m: *Monitor, args: []const []const u8) ExecError {
+    _ = args;
+    err_prefix(m);
+    m.console.print_line("type: echoes the pipe source; use it as the right half of `a | type`");
+    return .invalid_argument;
+}
+
 fn cmd_sh(m: *Monitor, args: []const []const u8) ExecError {
     _ = args;
     // ADR 0008 D3 shape 2: a refusal wears the `error:` prefix.
@@ -6944,7 +6956,7 @@ test "monitor: syscalls is registered and reports deterministic rows" {
     try std.testing.expectEqualStrings("numbered syscall table and counters", lookup("syscalls").?.help);
     try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"syscalls"}));
     try std.testing.expectEqualStrings(
-        "syscalls: slots=64 implemented=57\n" ++
+        "syscalls: slots=64 implemented=59\n" ++
             "  0 sys_ping calls=0\n" ++
             "  1 sys_write calls=0\n" ++
             "  2 sys_yield calls=0\n" ++
@@ -7001,6 +7013,8 @@ test "monitor: syscalls is registered and reports deterministic rows" {
             "  53 sys_win_set_unsaved calls=0\n" ++
             "  54 sys_setrlimit calls=0\n" ++
             "  55 sys_drag_read calls=0\n" ++
+            "  56 sys_pipe_read calls=0\n" ++
+            "  57 sys_pipe_write calls=0\n" ++
             "  58 sys_font_size calls=0\n",
         env.mock.contents(),
     );

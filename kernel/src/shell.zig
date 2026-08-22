@@ -25,6 +25,7 @@ const esp = @import("esp.zig"); // claim 3475: ESP file window (ls/cat/write)
 const fat = @import("fat.zig"); // M18 T16 (issue #419): direct FAT script reads (the sh /path form)
 const lineedit = @import("lineedit.zig");
 const tokenizer = @import("tokenizer.zig");
+const pipe = @import("pipe.zig"); // M19 P1 (issue #290): the bounded pipe behind the `|` operator
 const monitor = @import("monitor.zig");
 const handoff = @import("handoff.zig");
 const memmap = @import("memmap.zig");
@@ -1022,7 +1023,67 @@ fn handle_line(mon: *monitor.Monitor, raw_line: []const u8) void {
     shell_handle_expanded(mon, line);
 }
 
+/// M19 P1 (issue #290): the split of a line at its first `|` outside
+/// double quotes (matching the tokenizer's quote rule — a quote opens only
+/// at the start of an argument, so a `"` mid-token is a literal byte).
+const PipeSplit = struct { left: []const u8, right: []const u8 };
+
+const PipeSplitResult = union(enum) {
+    none,
+    split: PipeSplit,
+    multiple, // more than one `|` outside quotes — refused (single-pipe only)
+};
+
+fn pipe_split(line: []const u8) PipeSplitResult {
+    var in_quote = false;
+    var first: ?usize = null;
+    var i: usize = 0;
+    while (i < line.len) : (i += 1) {
+        if (line[i] == '"') in_quote = !in_quote;
+        if (line[i] == '|' and !in_quote) {
+            if (first == null) {
+                first = i;
+            } else {
+                return .multiple;
+            }
+        }
+    }
+    const idx = first orelse return .none;
+    return .{ .split = .{ .left = line[0..idx], .right = line[idx + 1 ..] } };
+}
+
+/// M19 P1 (issue #290): run `left | right`. Sequential model — the left
+/// command runs to completion with its stdout captured into the pipe, then
+/// the right command runs with its stdin fed from the pipe and its stdout
+/// passing through to the real console (so right-side output still reaches
+/// the scrollback wrapper). The console is swapped for each half and
+/// restored after; the pipe is reset before the left command runs.
+fn run_pipe(mon: *monitor.Monitor, left: []const u8, right: []const u8) void {
+    pipe.reset();
+    const saved = mon.console;
+    // Left: stdout → pipe.
+    mon.console = pipe.sink_console();
+    shell_handle_expanded(mon, left);
+    // Right: stdin ← pipe, stdout → real console.
+    mon.console = pipe.source_console(saved);
+    shell_handle_expanded(mon, right);
+    mon.console = saved;
+}
+
 fn shell_handle_expanded(mon: *monitor.Monitor, line: []const u8) void {
+    // M19 P1 (issue #290): the pipe operator — split before tokenizing so
+    // both halves go through the normal builtin/registry path.
+    switch (pipe_split(line)) {
+        .multiple => {
+            mon.console.print_line("pipes: only one pipe per line (no chaining)");
+            return;
+        },
+        .split => |sp| {
+            run_pipe(mon, sp.left, sp.right);
+            return;
+        },
+        .none => {},
+    }
     // M18 T12–T15: intercept shell builtins before monitor.exec
     const tokens = tokenizer.tokenize(line);
     if (tokens.too_many) {
@@ -1128,6 +1189,15 @@ fn shell_handle_expanded(mon: *monitor.Monitor, line: []const u8) void {
         } else {
             _ = settings.set("prompt", argv[1]);
             mon.console.print_line("prompt: ok");
+        }
+        return;
+    }
+    // M19 P1 (issue #290): `type` — echo stdin (the pipe source) to
+    // stdout. With no pipe the console has no input, so it prints nothing;
+    // as the RIGHT half of `a | type` it echoes the left command's output.
+    if (std.mem.eql(u8, argv[0], "type")) {
+        while (mon.console.readByte()) |b| {
+            mon.console.putc(b);
         }
         return;
     }
@@ -1567,6 +1637,7 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "  settings    persistent configuration: `settings [list]`, `settings get <key>`, `settings set <key> <val>`, `settings reset`\n" ++
         "  sound       virtio-snd transport: device DID, class, status, control-queue state, device-config counts (jacks/streams/channel-maps), re-arm; stream-state control: 'sound volume <0-100>' and 'sound mute <on|off>'\n" ++
         "  shutdown    request power-off\n" ++
+        "  type        echo stdin (the pipe source) to stdout — the right half of `a | type`\n" ++
         "type 'help <command>' for details on a single command.\n" ++
         "type 'help <topic>' for a topic page (networking, windows, storage, graphics).\n" ++
         "dipshit> version\r\n" ++
@@ -2708,4 +2779,82 @@ test "shell: T16 script: more than 64 executable lines is refused" {
     // Lines 0..63 executed (echo s0 .. echo s63); the 65th (echo s64) did not.
     try std.testing.expect(std.mem.indexOf(u8, out, "s63\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "s64\n") == null);
+}
+
+// ---------------------------------------------------------------------------
+// M19 P1 (issue #290): pipes
+// ---------------------------------------------------------------------------
+
+test "shell: M19 P1 pipe: pipe_split finds | outside quotes only" {
+    try std.testing.expect(pipe_split("echo a | type") == .split);
+    try std.testing.expect(pipe_split("echo a|type") == .split);
+    try std.testing.expect(pipe_split("echo \"a|b\"") == .none);
+    try std.testing.expect(pipe_split("echo a\"b|c\"") == .none);
+    try std.testing.expect(pipe_split("echo a | b | c") == .multiple);
+    try std.testing.expect(pipe_split("echo hello") == .none);
+    switch (pipe_split("echo hi | type")) {
+        .split => |sp| {
+            try std.testing.expectEqualStrings("echo hi ", sp.left);
+            try std.testing.expectEqualStrings(" type", sp.right);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "shell: M19 P1 pipe: echo hello | type prints hello exactly once" {
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("echo hello | type\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    // The left echo's output is captured into the pipe (never printed), and
+    // the right `type` echoes it — "hello\n" appears exactly once.
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, out, "hello\n"));
+}
+
+test "shell: M19 P1 pipe: ls | type lists the directory through the pipe" {
+    var mock = console.MockConsole(8192){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    esp.reset();
+    _ = esp.add_esp_entry("KERNEL.BIN", 0x88b38, "");
+    _ = esp.add_dir_entry("EFI");
+    mock.feed("ls | type\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "KERNEL.BIN") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "EFI") != null);
+}
+
+test "shell: M19 P1 pipe: chaining is refused (single pipe only)" {
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("echo a | echo b | echo c\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "pipes: only one pipe per line (no chaining)\n") != null);
+}
+
+test "shell: M19 P1 pipe: type with no pipe prints nothing" {
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("type\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    // Only the echoed line + prompt; `type` with an empty stdin adds nothing.
+    try std.testing.expect(std.mem.indexOf(u8, out, "type\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "unknown command") == null);
+}
+
+test "shell: M19 P1 pipe: right command that ignores stdin still runs" {
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("echo hi | echo bye\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "bye\n") != null);
 }
