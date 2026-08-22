@@ -35,6 +35,7 @@ const virtio_net = @import("virtio_net.zig"); // claim 6076 (card N2): polled RX
 const road_pops = @import("road_pops.zig"); // claim 1574 (milestone six G3): Road Pops framebuffer drain in the idle loop
 const input = @import("input.zig"); // claim 6050 (milestone seven I3): keyboard/pointer event FIFO drain in the idle loop
 const driving_award = @import("driving_award.zig"); // claim 1543 (milestone six G5): Driving Award window-manager drain (clock refresh + composite)
+const scrollback_mod = @import("scrollback.zig"); // M18 T1 (issue #404): terminal scrollback ring
 
 pub const PollResult = enum {
     /// No input byte is available right now; the caller should wait before
@@ -47,20 +48,73 @@ pub const PollResult = enum {
     processed,
 };
 
+/// Context for the scrollback Console wrapper. Lives in Shell BSS so the
+/// Console's opaque ctx pointer stays valid for the shell's lifetime.
+const ScrollbackCtx = struct {
+    inner: console.Console,
+    sb: *scrollback_mod.Scrollback,
+};
+
+fn sbWrite(ctx: *anyopaque, bytes: []const u8) void {
+    const sc: *ScrollbackCtx = @ptrCast(@alignCast(ctx));
+    sc.sb.append(bytes);
+    sc.inner.write(bytes);
+}
+fn sbFlush(ctx: *anyopaque) void {
+    const sc: *ScrollbackCtx = @ptrCast(@alignCast(ctx));
+    sc.inner.flush();
+}
+fn sbReadByte(ctx: *anyopaque) ?u8 {
+    const sc: *ScrollbackCtx = @ptrCast(@alignCast(ctx));
+    return sc.inner.readByte();
+}
+
+const scrollback_vtable: console.Console.VTable = .{
+    .write = sbWrite,
+    .flush = sbFlush,
+    .readByte = sbReadByte,
+};
+
 pub const Shell = struct {
     mon: monitor.Monitor,
     editor: lineedit.LineEditor = .{},
     prompt_shown: bool = false,
+    /// Scrollback ring capturing all console output.
+    scrollback: scrollback_mod.Scrollback = .{},
+    /// Context for the wrapped Console; lives here (BSS) for lifetime.
+    scrollback_ctx: ScrollbackCtx = undefined,
+    /// Number of lines scrolled back from live view (0 = live mode).
+    scroll_offset: usize = 0,
+    /// Mini CSI parser for intercepting scroll keys before the editor.
+    scroll_csi: u8 = 0,
+    scroll_csi_param: u8 = 0,
 
     pub fn init(con: console.Console, state: monitor.SystemState, machine: monitor.MachineControl) Shell {
-        var shell = Shell{ .mon = monitor.Monitor.init(con, state, machine) };
+        var shell = Shell{
+            .mon = monitor.Monitor.init(con, state, machine),
+            .scrollback = scrollback_mod.Scrollback{},
+            .scrollback_ctx = undefined,
+            .scroll_offset = 0,
+        };
+        shell.scrollback.reset();
         // ADR 0008 D2: tab completion over the command registry + sub-verbs.
         shell.editor.completion = monitor.complete;
         return shell;
     }
 
-    /// Print the boot banner once (`monitor.banner`).
+    /// Print the boot banner once (`monitor.banner`). Also wraps the
+    /// console with scrollback capture (must happen here, not in init(),
+    /// so that self-referential pointers within the Shell remain valid —
+    /// init() returns by value and would leave dangling pointers).
     pub fn boot(self: *Shell) void {
+        self.scrollback_ctx = ScrollbackCtx{
+            .inner = self.mon.console,
+            .sb = &self.scrollback,
+        };
+        self.mon.console = console.Console{
+            .ctx = &self.scrollback_ctx,
+            .vtable = &scrollback_vtable,
+        };
         monitor.banner(&self.mon);
     }
 
@@ -73,6 +127,11 @@ pub const Shell = struct {
             self.prompt_shown = true;
         }
         const byte = self.mon.console.readByte() orelse return .idle;
+        // M18 T1: shadow-track CSI state for PageUp/PageDown scroll keys.
+        // Only the final '~' byte of a scroll sequence is consumed; all
+        // other bytes (including arrow-key sequences) pass through to
+        // the editor unchanged.
+        if (self.scroll_csi_track(byte)) return .pending;
         switch (self.editor.feed(self.mon.console, byte)) {
             .none => return .pending,
             .repaint => {
@@ -99,6 +158,77 @@ pub const Shell = struct {
                 handle_line(&self.mon, line);
                 return .processed;
             },
+        }
+    }
+
+    /// M18 T1: shadow-track CSI sequences to detect PageUp (CSI 5 ~) and
+    /// PageDown (CSI 6 ~). All bytes always reach the line editor except
+    /// the final '~' of a scroll sequence, which is consumed. Returns true
+    /// only when a scroll key's final byte was consumed.
+    fn scroll_csi_track(self: *Shell, byte: u8) bool {
+        switch (self.scroll_csi) {
+            0 => {
+                if (byte == 0x1B) self.scroll_csi = 1;
+                return false; // always pass through
+            },
+            1 => {
+                if (byte == '[') {
+                    self.scroll_csi = 2;
+                    self.scroll_csi_param = 0;
+                } else {
+                    self.scroll_csi = 0; // lone ESC — editor handles it
+                }
+                return false; // always pass through
+            },
+            2 => {
+                if (byte >= '0' and byte <= '9') {
+                    self.scroll_csi_param = byte - '0';
+                    self.scroll_csi = 3;
+                    return false; // pass digit through
+                }
+                // single-char final (A/B/C/D etc) — editor handles arrow keys
+                self.scroll_csi = 0;
+                return false; // pass through
+            },
+            3 => {
+                if (byte >= '0' and byte <= '9') {
+                    const scaled: u16 = @as(u16, self.scroll_csi_param) * 10;
+                    self.scroll_csi_param = @intCast(@min(scaled + (byte - '0'), 255));
+                    return false; // pass digit through
+                }
+                if (byte == '~') {
+                    self.scroll_csi = 0;
+                    return self.scroll_handle(self.scroll_csi_param);
+                }
+                // unhandled final byte — reset and let editor handle it
+                self.scroll_csi = 0;
+                return false;
+            },
+            else => {
+                self.scroll_csi = 0;
+                return false;
+            },
+        }
+    }
+
+    /// Handle a completed CSI parameter for scroll keys.
+    /// Returns true if the key was consumed.
+    fn scroll_handle(self: *Shell, param: u8) bool {
+        switch (param) {
+            5 => { // PageUp: scroll up one page (10 lines)
+                const max_off = self.scrollback.stored();
+                self.scroll_offset = @min(self.scroll_offset + 10, max_off);
+                return true;
+            },
+            6 => { // PageDown: scroll down one page (10 lines)
+                if (self.scroll_offset > 10) {
+                    self.scroll_offset -= 10;
+                } else {
+                    self.scroll_offset = 0;
+                }
+                return true;
+            },
+            else => return false,
         }
     }
 };
@@ -130,13 +260,14 @@ var boot_shell_storage: Shell = undefined;
 /// without RX it prints the prompt and returns so the caller parks in WFE.
 /// Never spins hot, never reads a device register.
 pub fn boot_and_park(mon: *monitor.Monitor, rx_wired: bool) void {
-    monitor.banner(mon);
     if (!rx_wired) {
+        monitor.banner(mon);
         mon.console.puts(settings.get_prompt());
         return;
     }
     const shell: *Shell = &boot_shell_storage;
     shell.* = Shell.init(mon.console, mon.state, mon.machine);
+    shell.boot();
     while (true) {
         if (shell.poll() == .idle) {
             // Claim 9187: the timer is serviced only through the IRQ path.
@@ -769,4 +900,92 @@ test "shell: host fuzz of the full input path never panics (editor + tokenizer +
     mock.feed("\x03echo survived\n");
     while (shell.poll() != .idle) {}
     try std.testing.expect(std.mem.indexOf(u8, mock.contents(), "survived\n") != null);
+}
+
+test "shell: scrollback captures console output" {
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    // Run a few commands that produce output
+    mock.feed("echo hello\necho world\necho scrollback\n");
+    while (shell.poll() != .idle) {}
+
+    // The scrollback ring should have captured the output
+    const stored = shell.scrollback.stored();
+    // Banner lines (~2-3) + 3 prompts + 3 echoed command lines + 3 output lines
+    try std.testing.expect(stored >= 3);
+
+    // Verify we can retrieve lines
+    var dst: [200][128]u8 = undefined;
+    var slices: [200][]u8 = undefined;
+    for (&slices, 0..) |*s, j| s.* = dst[j][0..];
+    const n = shell.scrollback.copy_lines(0, 3, slices[0..]);
+    try std.testing.expect(n >= 1);
+    // The most recent line should contain "scrollback"
+    var found: bool = false;
+    for (slices[0..n]) |sl| {
+        if (std.mem.indexOf(u8, sl, "scrollback") != null) found = true;
+    }
+    try std.testing.expect(found);
+}
+
+test "shell: PageUp/PageDown adjust scroll_offset" {
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    // Run commands to fill scrollback
+    mock.feed("echo line1\necho line2\necho line3\necho line4\necho line5\n");
+    mock.feed("echo line6\necho line7\necho line8\necho line9\necho line10\n");
+    while (shell.poll() != .idle) {}
+
+    // Start fresh, scroll should be 0
+    try std.testing.expectEqual(@as(usize, 0), shell.scroll_offset);
+    const total = shell.scrollback.stored();
+
+    // Feed PageUp (ESC [ 5 ~) — should increase scroll offset by 10
+    mock.feed("\x1b[5~");
+    while (shell.poll() != .idle) {}
+    try std.testing.expect(shell.scroll_offset >= 10 or shell.scroll_offset == total);
+
+    // Feed PageDown (ESC [ 6 ~) — should decrease scroll offset
+    const before_pgdn = shell.scroll_offset;
+    mock.feed("\x1b[6~");
+    while (shell.poll() != .idle) {}
+    try std.testing.expect(shell.scroll_offset < before_pgdn or (before_pgdn == 0 and shell.scroll_offset == 0));
+
+    // Multiple PageDown should bring us back to live (offset 0)
+    mock.feed("\x1b[6~\x1b[6~\x1b[6~");
+    while (shell.poll() != .idle) {}
+    try std.testing.expectEqual(@as(usize, 0), shell.scroll_offset);
+}
+
+test "shell: scrollback overflow bounds scroll_offset" {
+    var mock = console.MockConsole(8192){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+
+    // Feed many PageUp sequences — scroll_offset should not exceed stored lines
+    mock.feed("\x1b[5~\x1b[5~\x1b[5~\x1b[5~\x1b[5~");
+    while (shell.poll() != .idle) {}
+
+    const stored = shell.scrollback.stored();
+    try std.testing.expect(shell.scroll_offset <= stored);
+}
+
+test "shell: scrollback ring survives poll cycle" {
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+
+    mock.feed("echo test\n");
+    while (shell.poll() != .idle) {}
+
+    const stored1 = shell.scrollback.stored();
+    try std.testing.expect(stored1 > 0);
+
+    mock.feed("echo another\n");
+    while (shell.poll() != .idle) {}
+
+    const stored2 = shell.scrollback.stored();
+    try std.testing.expect(stored2 > stored1);
 }

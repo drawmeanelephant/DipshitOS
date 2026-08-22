@@ -85,16 +85,24 @@
   filter, CALC keyboard/history, SETTINGS theme preview. Shipped
   2026-08-21 — full card detail:
   [`docs/m17-desktop-completeness.md`](m17-desktop-completeness.md).
-- **Post-M17 arcs**, groomed from the same issue set (ABI reserved by
-  ADR 0013):
-  - **Arc2 — window management**: drag-to-resize (#224), right-click
-    context menus (#228), system tray (#226) — cards W1–W3 landed
-    2026-08-21; tracker: [`docs/march-arc2.md`](march-arc2.md).
-  - **Arc4 — rich interactions**: mouse wheel (#236), z-order (#238),
-    animations (#239), notifications (#240), drag-and-drop (#237) are on
-    `main` as of this writing; #241 workspaces, #242 unsaved-state,
-    #243 tombstones, #244 graceful shutdown, #245 compose, #246 resource
-    limits, #247 settings migration remain open issues.
+- **Post-M17 arcs** — ALL DONE 2026-08-21:
+  - **Arc1 — widget depth**: ScrollView, Checkbox/Toggle, ProgressBar,
+    Dialog, HScrollBar, DropDown. PRs #259–#261.
+  - **Arc2 — window management**: drag-to-resize, context menus, system
+    tray. PRs #271–#273, claim 1264.
+  - **Arc3 — app upgrades**: NOTEPAD wrap/find, FILE.BIN preview/breadcrumbs,
+    TOP sort/filter, CALC keyboard/history, SETTINGS live preview.
+  - **Arc4 — rich interactions**: mouse wheel, drag-drop, z-order,
+    animations, notifications, workspaces, unsaved dialog.
+    PRs #274–#280.
+  - **Arc5 — system polish**: compose sequences (ADR 0014), tombstones,
+    graceful shutdown, resource limits, settings migration.
+    PRs #287–#289.
+- **M18–M27 — the experience layer**: the forward roadmap covering
+  terminal depth, shell programming, Unicode, window management polish,
+  developer tools, a text editor, CALC depth, file manager, network
+  apps, and desktop polish. Full card detail:
+  [`docs/roadmap-post-arc5.md`](roadmap-post-arc5.md).
 - Known open threads carried across milestones: M8 U4 pointer focus is
   class-C-only for its live proof (issue #151, claim 4769), and the
   synthesized keyboard seam reports `events=0` (issue #179).
