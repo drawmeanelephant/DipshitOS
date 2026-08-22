@@ -93,6 +93,14 @@ pub const Shell = struct {
     selecting: bool = false,
     sel_start: usize = 0, // line offset (from newest) where selection begins
     sel_end: usize = 0, // line offset (from newest) where selection ends
+    /// M18 T3: reverse-i-search state.
+    searching: bool = false,
+    search_query: [64]u8 = undefined,
+    search_query_len: usize = 0,
+    /// Saved editor state from before search started.
+    search_draft: [lineedit.max_line]u8 = undefined,
+    search_draft_len: usize = 0,
+    search_draft_cursor: usize = 0,
 
     pub fn init(con: console.Console, state: monitor.SystemState, machine: monitor.MachineControl) Shell {
         var shell = Shell{
@@ -154,9 +162,21 @@ pub const Shell = struct {
         }
         // M18 T2: intercept Ctrl+V at the prompt to paste clipboard
         // (only in live mode, not during scrollback selection).
-        if (!self.selecting and byte == 0x16) { // Ctrl+V
+        if (!self.selecting and !self.searching and byte == 0x16) { // Ctrl+V
             self.paste_clipboard();
             return .pending;
+        }
+        // M18 T3: intercept Ctrl+R to enter reverse-i-search.
+        if (byte == 0x12) { // Ctrl+R
+            if (!self.selecting) {
+                self.search_enter();
+                return .pending;
+            }
+            return .pending;
+        }
+        // M18 T3: search mode — every byte feeds the query matcher.
+        if (self.searching) {
+            return self.search_handle(byte);
         }
         // M18 T1: shadow-track CSI state for PageUp/PageDown scroll keys.
         // Only the final '~' byte of a scroll sequence is consumed; all
@@ -355,6 +375,125 @@ pub const Shell = struct {
         while (i < n) : (i += 1) {
             _ = self.editor.feed(self.mon.console, cbuf[i]);
         }
+    }
+
+    /// M18 T3: reverse-i-search — search backward through scrollback +
+    /// editor history for lines containing the query string.
+    /// Returns the search result line and its length, or null on no match.
+    fn search_match(self: *Shell, query: []const u8) ?[]const u8 {
+        if (query.len == 0) return null;
+
+        // Search the editor's session history ring first (newest first).
+        var hi: usize = 0;
+        while (hi < self.editor.hist_count) : (hi += 1) {
+            const line = self.editor.history[hi][0..self.editor.hist_len[hi]];
+            if (std.mem.indexOf(u8, line, query) != null) return line;
+        }
+
+        // Search the scrollback ring lines (newest first).
+        const sb_stored = self.scrollback.stored();
+        if (sb_stored > 0) {
+            var dst: [128][128]u8 = undefined;
+            var slices: [128][]u8 = undefined;
+            for (&slices, 0..) |*s, j| s.* = dst[j][0..];
+            const n = self.scrollback.copy_lines(0, @min(sb_stored, 128), slices[0..]);
+            var si: usize = 0;
+            while (si < n) : (si += 1) {
+                if (std.mem.indexOf(u8, slices[si], query) != null) return slices[si];
+            }
+        }
+
+        return null;
+    }
+
+    /// Enter reverse-i-search mode. Saves the current editor state so
+    /// we can restore it on cancel.
+    fn search_enter(self: *Shell) void {
+        // Save current editor state
+        @memcpy(self.search_draft[0..self.editor.len], self.editor.buffer[0..self.editor.len]);
+        self.search_draft_len = self.editor.len;
+        self.search_draft_cursor = self.editor.cursor;
+
+        self.searching = true;
+        self.search_query_len = 0;
+        self.search_redraw();
+    }
+
+    /// Redraw the search prompt + current match.
+    fn search_redraw(self: *Shell) void {
+        // Move to a new line and show the search UI
+        self.mon.console.puts("\r\n");
+        self.mon.console.puts("(reverse-i-search)`");
+        if (self.search_query_len > 0) {
+            self.mon.console.puts(self.search_query[0..self.search_query_len]);
+        } else {
+            self.mon.console.puts("_");
+        }
+        self.mon.console.puts("`: ");
+
+        // Show the current match (if any)
+        const query = if (self.search_query_len > 0) self.search_query[0..self.search_query_len] else &[0]u8{};
+        if (self.search_match(query)) |match| {
+            self.mon.console.puts(match);
+            // Load it into the editor so Enter accepts it
+            self.editor.len = @min(match.len, lineedit.max_line);
+            @memcpy(self.editor.buffer[0..self.editor.len], match[0..self.editor.len]);
+            self.editor.cursor = self.editor.len;
+        } else {
+            self.mon.console.puts("(no match)");
+        }
+    }
+
+    /// Handle a keypress in search mode.
+    fn search_handle(self: *Shell, byte: u8) PollResult {
+        switch (byte) {
+            0x1B => { // Esc: cancel, restore draft
+                self.search_exit(false);
+                return .processed;
+            },
+            0x0D => { // Enter: accept the current match
+                self.search_exit(true);
+                return .processed;
+            },
+            0x7F, 0x08 => { // Backspace / Delete: remove last query char
+                if (self.search_query_len > 0) {
+                    self.search_query_len -= 1;
+                    self.search_redraw();
+                }
+                return .pending;
+            },
+            0x03 => { // Ctrl+C: cancel
+                self.search_exit(false);
+                self.prompt_shown = false;
+                return .processed;
+            },
+            0x0C => { // Ctrl+L: ignore the clear
+                return .pending;
+            },
+            else => {
+                // Only accept printable ASCII
+                if (byte >= 0x20 and byte <= 0x7E and self.search_query_len < 64) {
+                    self.search_query[self.search_query_len] = byte;
+                    self.search_query_len += 1;
+                    self.search_redraw();
+                }
+                return .pending;
+            },
+        }
+    }
+
+    /// Exit search mode, restoring or accepting.
+    fn search_exit(self: *Shell, accept: bool) void {
+        self.searching = false;
+        if (!accept) {
+            // Restore the saved draft
+            @memcpy(self.editor.buffer[0..self.search_draft_len], self.search_draft[0..self.search_draft_len]);
+            self.editor.len = self.search_draft_len;
+            self.editor.cursor = self.search_draft_cursor;
+        }
+        // Redraw the prompt
+        self.mon.console.puts("\r\n");
+        self.prompt_shown = false;
     }
 };
 
@@ -1265,4 +1404,140 @@ test "shell: T2 selection: Down arrow beyond sel_start exits selection" {
     while (shell.poll() != .idle) {}
     // After a single Down when sel_start == sel_end, selecting should be false
     try std.testing.expect(!shell.selecting);
+}
+
+test "shell: T3 search: Ctrl+R enters search mode, Esc exits" {
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+
+    // Submit a command so there's history to search
+    mock.feed("echo hello-search\n");
+    while (shell.poll() != .idle) {}
+
+    // Ctrl+R enters search mode
+    try std.testing.expect(!shell.searching);
+    mock.feed("\x12"); // Ctrl+R
+    while (shell.poll() != .idle) {}
+    try std.testing.expect(shell.searching);
+
+    // Esc exits search mode
+    mock.feed("\x1b");
+    while (shell.poll() != .idle) {}
+    try std.testing.expect(!shell.searching);
+}
+
+test "shell: T3 search: typing finds a match in history" {
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+
+    // Submit some commands to history
+    mock.feed("echo alpha-bravo\necho delta-echo\necho foxtrot\n");
+    while (shell.poll() != .idle) {}
+
+    // Enter search mode
+    mock.feed("\x12"); // Ctrl+R
+    while (shell.poll() != .idle) {}
+    try std.testing.expect(shell.searching);
+
+    // Type characters that match "delta"
+    for ("delta") |ch| {
+        var buf: [1]u8 = [_]u8{ch};
+        mock.feed(&buf);
+        while (shell.poll() != .idle) {}
+    }
+    try std.testing.expect(shell.searching);
+
+    // Verify editor buffer now contains "delta-echo"
+    const editor_line = shell.editor.buffer[0..shell.editor.len];
+    try std.testing.expect(std.mem.indexOf(u8, editor_line, "delta-echo") != null);
+
+    // Enter accepts the match
+    mock.feed("\x0d");
+    while (shell.poll() != .idle) {}
+    try std.testing.expect(!shell.searching);
+
+    // Editor should still have the matched line
+    const accepted = shell.editor.buffer[0..shell.editor.len];
+    try std.testing.expect(std.mem.indexOf(u8, accepted, "delta-echo") != null);
+}
+
+test "shell: T3 search: Backspace narrows query and finds new match" {
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+
+    mock.feed("echo zulu-XYZ\n");
+    while (shell.poll() != .idle) {}
+
+    // Search for "zul" — should find "zulu-XYZ"
+    mock.feed("\x12zul"); // Ctrl+R, then type zul
+    while (shell.poll() != .idle) {}
+    try std.testing.expect(shell.searching);
+
+    // Backspace to narrow to "zu"
+    mock.feed("\x7f");
+    while (shell.poll() != .idle) {}
+    try std.testing.expectEqual(@as(usize, 2), shell.search_query_len);
+    try std.testing.expectEqualStrings("zu", shell.search_query[0..2]);
+}
+
+test "shell: T3 search: Ctrl+C cancels search and restores draft" {
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+
+    // Type something at the prompt before searching
+    mock.feed("draft-line");
+    while (shell.poll() != .idle) {}
+
+    // Enter search mode (saves draft)
+    mock.feed("\x12");
+    while (shell.poll() != .idle) {}
+    try std.testing.expect(shell.searching);
+
+    // Ctrl+C cancels
+    mock.feed("\x03");
+    while (shell.poll() != .idle) {}
+    try std.testing.expect(!shell.searching);
+
+    // Draft should be restored
+    try std.testing.expect(std.mem.indexOf(u8, shell.editor.buffer[0..shell.editor.len], "draft-line") != null);
+}
+
+test "shell: T3 search: empty query shows no match" {
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+
+    mock.feed("echo something\n");
+    while (shell.poll() != .idle) {}
+
+    // Enter search mode, then immediately Enter (empty query)
+    mock.feed("\x12\x0d");
+    while (shell.poll() != .idle) {}
+    try std.testing.expect(!shell.searching);
+}
+
+test "shell: T3 search: non-printable bytes are ignored in search" {
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+
+    mock.feed("echo test\n");
+    while (shell.poll() != .idle) {}
+
+    // Enter search mode, send an arrow key (ESC [ A)
+    mock.feed("\x12");
+    while (shell.poll() != .idle) {}
+
+    // Arrow keys: ESC cancels search (expected), shell should not crash
+    mock.feed("\x1b[A");
+    while (shell.poll() != .idle) {}
+    try std.testing.expect(!shell.searching); // Esc in search cancels
+    // The shell is still functional — next command should work
+    mock.feed("echo survived\n");
+    while (shell.poll() != .idle) {}
+    try std.testing.expect(std.mem.indexOf(u8, mock.contents(), "survived") != null);
 }
