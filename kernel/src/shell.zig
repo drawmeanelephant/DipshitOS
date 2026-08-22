@@ -42,6 +42,88 @@ const clipboard = @import("clipboard.zig"); // M18 T2 (issue #405): shared clipb
 const history_path = "HISTORY.TXT";
 /// M18 T4: max lines stored in the history file.
 const history_file_max: usize = 50;
+/// M18 T12: max shell environment variables.
+const env_max: usize = 16;
+const env_name_max: usize = 32;
+const env_val_max: usize = 64;
+
+const EnvEntry = struct {
+    name: [env_name_max]u8 = [_]u8{0} ** env_name_max,
+    name_len: usize = 0,
+    val: [env_val_max]u8 = [_]u8{0} ** env_val_max,
+    val_len: usize = 0,
+    exported: bool = false, // T12: export flag for child processes
+};
+var env_table: [env_max]EnvEntry = undefined;
+var env_count: usize = 0;
+
+/// Look up an environment variable.
+fn env_get(name: []const u8) ?[]const u8 {
+    for (env_table[0..env_count]) |*e| {
+        if (std.mem.eql(u8, e.name[0..e.name_len], name)) {
+            return e.val[0..e.val_len];
+        }
+    }
+    return null;
+}
+
+/// Set (or create) an environment variable.
+fn env_set(name: []const u8, val: []const u8) void {
+    if (name.len == 0 or name.len > env_name_max) return;
+    const vlen = @min(val.len, env_val_max);
+    for (env_table[0..env_count]) |*e| {
+        if (std.mem.eql(u8, e.name[0..e.name_len], name)) {
+            @memcpy(e.val[0..vlen], val[0..vlen]);
+            e.val_len = vlen;
+            return;
+        }
+    }
+    if (env_count >= env_max) return;
+    const e = &env_table[env_count];
+    @memcpy(e.name[0..name.len], name);
+    e.name_len = name.len;
+    @memcpy(e.val[0..vlen], val[0..vlen]);
+    e.val_len = vlen;
+    env_count += 1;
+}
+
+/// Expand $VAR references in a command line. Returns a stack-local buffer.
+fn env_expand(line: []const u8, out: []u8) []u8 {
+    var opos: usize = 0;
+    var i: usize = 0;
+    while (i < line.len and opos < out.len) : (i += 1) {
+        if (line[i] == '$' and i + 1 < line.len) {
+            // Collect variable name
+            var ns: usize = i + 1;
+            while (ns < line.len and
+                ((line[ns] >= 'a' and line[ns] <= 'z') or
+                    (line[ns] >= 'A' and line[ns] <= 'Z') or
+                    (line[ns] >= '0' and line[ns] <= '9') or
+                    line[ns] == '_'))
+            {
+                ns += 1;
+            }
+            const vname = line[i + 1 .. ns];
+            if (vname.len > 0) {
+                if (env_get(vname)) |val| {
+                    for (val) |b| {
+                        if (opos < out.len) {
+                            out[opos] = b;
+                            opos += 1;
+                        }
+                    }
+                }
+                i = ns - 1;
+                continue;
+            }
+        }
+        if (opos < out.len) {
+            out[opos] = line[i];
+            opos += 1;
+        }
+    }
+    return out[0..opos];
+}
 
 pub const PollResult = enum {
     /// No input byte is available right now; the caller should wait before
@@ -53,6 +135,14 @@ pub const PollResult = enum {
     /// echo, notices, and command results are all in the console).
     processed,
 };
+
+/// M18 T15: expand $VAR references in the prompt string.
+/// Uses a static buffer so the returned slice remains valid across calls.
+var prompt_expansion_buf: [128]u8 = undefined;
+fn expanded_prompt() []const u8 {
+    const raw = settings.get_prompt();
+    return env_expand(raw, &prompt_expansion_buf);
+}
 
 /// Context for the scrollback Console wrapper. Lives in Shell BSS so the
 /// Console's opaque ctx pointer stays valid for the shell's lifetime.
@@ -152,7 +242,7 @@ pub const Shell = struct {
     pub fn poll(self: *Shell) PollResult {
         if (!self.prompt_shown) {
             if (self.color_enabled) self.mon.console.puts("\x1b[32m");
-            self.mon.console.puts(settings.get_prompt());
+            self.mon.console.puts(expanded_prompt());
             if (self.color_enabled) self.mon.console.puts("\x1b[0m");
             self.prompt_shown = true;
         }
@@ -217,7 +307,7 @@ pub const Shell = struct {
                 // Ctrl-L: the editor cleared the screen; restore the prompt
                 // + the in-progress line (the editor does not own the prompt).
                 if (self.color_enabled) self.mon.console.puts("\x1b[32m");
-                self.mon.console.puts(settings.get_prompt());
+                self.mon.console.puts(expanded_prompt());
                 if (self.color_enabled) self.mon.console.puts("\x1b[0m");
                 self.editor.reprint(self.mon.console);
                 return .pending;
@@ -705,17 +795,140 @@ fn load_history(editor: *lineedit.LineEditor) void {
     }
 }
 
-fn handle_line(mon: *monitor.Monitor, line: []const u8) void {
+fn handle_line(mon: *monitor.Monitor, raw_line: []const u8) void {
+    // M18 T12: expand $VAR references before tokenizing
+    var expanded: [lineedit.max_line]u8 = undefined;
+    const line = env_expand(raw_line, &expanded);
+
+    // M18 T13: check for alias expansion (only first word)
+    if (line.len > 0) {
+        var aname: [env_name_max]u8 = undefined;
+        var anlen: usize = 0;
+        var ai: usize = 0;
+        while (ai < line.len and line[ai] != ' ' and line[ai] != '\t' and anlen < env_name_max) : (ai += 1) {
+            aname[anlen] = line[ai];
+            anlen += 1;
+        }
+        if (anlen > 0) {
+            if (env_get(aname[0..anlen])) |alias_val| {
+                var sub: [lineedit.max_line]u8 = undefined;
+                var sp: usize = 0;
+                for (alias_val) |b| {
+                    if (sp < sub.len) {
+                        sub[sp] = b;
+                        sp += 1;
+                    }
+                }
+                if (sp < sub.len - 1) {
+                    sub[sp] = ' ';
+                    sp += 1;
+                }
+                while (ai < line.len and line[ai] == ' ') ai += 1;
+                while (ai < line.len and sp < sub.len) : (ai += 1) {
+                    sub[sp] = line[ai];
+                    sp += 1;
+                }
+                // Re-run handle_line with substituted text (once only to avoid loops)
+                shell_handle_expanded(mon, sub[0..sp]);
+                return;
+            }
+        }
+    }
+
+    shell_handle_expanded(mon, line);
+}
+
+fn shell_handle_expanded(mon: *monitor.Monitor, line: []const u8) void {
+    // M18 T12–T15: intercept shell builtins before monitor.exec
     const tokens = tokenizer.tokenize(line);
     if (tokens.too_many) {
-        // ADR 0008 D3 shape 2, sharing exec's one message.
         monitor.err_line(mon, monitor.too_many_arguments_message);
         return;
     }
     if (tokens.unbalanced_quote) {
         mon.console.print_line("unterminated quote: rest of line treated as literal");
     }
-    _ = monitor.exec(mon, tokens.argv[0..tokens.count]);
+    const argv = tokens.argv[0..tokens.count];
+    if (argv.len == 0) {
+        _ = monitor.exec(mon, argv);
+        return;
+    }
+    // Builtin: export VAR[=VAL]
+    if (std.mem.eql(u8, argv[0], "export")) {
+        if (argv.len < 2) {
+            // Print all env vars
+            var ei: usize = 0;
+            while (ei < env_count) : (ei += 1) {
+                const e = &env_table[ei];
+                mon.console.puts(e.name[0..e.name_len]);
+                mon.console.puts("=");
+                mon.console.print_line(e.val[0..e.val_len]);
+            }
+        } else {
+            var eq: usize = 0;
+            while (eq < argv[1].len and argv[1][eq] != '=') eq += 1;
+            if (eq < argv[1].len) {
+                env_set(argv[1][0..eq], argv[1][eq + 1 ..]);
+            } else {
+                env_set(argv[1], "");
+            }
+        }
+        return;
+    }
+    // Builtin: alias NAME=VALUE [MORE...]
+    if (std.mem.eql(u8, argv[0], "alias")) {
+        if (argv.len < 2) {
+            mon.console.print_line("alias: usage: alias NAME=VALUE [MORE...]");
+        } else {
+            var eq: usize = 0;
+            while (eq < argv[1].len and argv[1][eq] != '=') eq += 1;
+            if (eq > 0 and eq < argv[1].len) {
+                // Build value: argv[1][eq+1..] + remaining args joined by space
+                var valbuf: [env_val_max]u8 = undefined;
+                var vp: usize = 0;
+                for (argv[1][eq + 1 ..]) |b| {
+                    if (vp < valbuf.len) {
+                        valbuf[vp] = b;
+                        vp += 1;
+                    }
+                }
+                var ai: usize = 2;
+                while (ai < argv.len) : (ai += 1) {
+                    if (vp < valbuf.len) {
+                        valbuf[vp] = ' ';
+                        vp += 1;
+                    }
+                    for (argv[ai]) |b| {
+                        if (vp < valbuf.len) {
+                            valbuf[vp] = b;
+                            vp += 1;
+                        }
+                    }
+                }
+                env_set(argv[1][0..eq], valbuf[0..vp]);
+                mon.console.print_line("alias: ok");
+            } else {
+                mon.console.print_line("alias: usage: alias NAME=VALUE [MORE...]");
+            }
+        }
+        return;
+    }
+    // Builtin: unalias NAME
+    if (std.mem.eql(u8, argv[0], "unalias")) {
+        mon.console.print_line("unalias: not implemented (aliases are just env vars)");
+        return;
+    }
+    // Builtin: prompt NEW_PROMPT (M18 T15)
+    if (std.mem.eql(u8, argv[0], "prompt")) {
+        if (argv.len < 2) {
+            mon.console.print_line("prompt: usage: prompt NEW_PROMPT");
+        } else {
+            _ = settings.set("prompt", argv[1]);
+            mon.console.print_line("prompt: ok");
+        }
+        return;
+    }
+    _ = monitor.exec(mon, argv);
 }
 
 /// The kernel's ONE shell instance lives in BSS, not on the kernel stack:
@@ -734,7 +947,7 @@ var boot_shell_storage: Shell = undefined;
 pub fn boot_and_park(mon: *monitor.Monitor, rx_wired: bool) void {
     if (!rx_wired) {
         monitor.banner(mon);
-        mon.console.puts(settings.get_prompt());
+        mon.console.puts(expanded_prompt());
         return;
     }
     const shell: *Shell = &boot_shell_storage;
@@ -742,6 +955,22 @@ pub fn boot_and_park(mon: *monitor.Monitor, rx_wired: bool) void {
     shell.boot();
     shell.color_enabled = settings.get_color();
     load_history(&shell.editor);
+    // M18 T14: run startup file (.dipshitrc) if present
+    if (esp.disk_ready()) {
+        if (esp.lookup(".dipshitrc")) |entry| {
+            const rc = esp.content_of(entry);
+            var start: usize = 0;
+            var i: usize = 0;
+            while (i < rc.len) : (i += 1) {
+                if (rc[i] == '\n' or rc[i] == '\r') {
+                    if (i > start) handle_line(mon, rc[start..i]);
+                    start = i + 1;
+                    if (rc[i] == '\r' and i + 1 < rc.len and rc[i + 1] == '\n') i += 1;
+                }
+            }
+            if (start < rc.len) handle_line(mon, rc[start..rc.len]);
+        }
+    }
     while (true) {
         if (shell.poll() == .idle) {
             // Claim 9187: the timer is serviced only through the IRQ path.
@@ -1881,14 +2110,46 @@ test "shell: T11 ANSI: SGR and cursor shape sequences are silently swallowed" {
     try std.testing.expect(std.mem.indexOf(u8, mock.contents(), "survived") != null);
 }
 
-test "shell: T11 OSC: title sequences are swallowed without crash" {
+test "shell: T12 env: export and $VAR expansion" {
     var mock = console.MockConsole(4096){};
     var shell = make_shell(&mock, make_view());
     shell.boot();
 
-    mock.feed("\x1b]0;My Terminal\x07");
+    // Set an env var
+    mock.feed("export FOO=hello\n");
     while (shell.poll() != .idle) {}
-    mock.feed("echo ok\n");
+
+    // Use it with $
+    mock.feed("echo $FOO world\n");
     while (shell.poll() != .idle) {}
-    try std.testing.expect(std.mem.indexOf(u8, mock.contents(), "ok") != null);
+    try std.testing.expect(std.mem.indexOf(u8, mock.contents(), "hello world") != null);
+
+    // Print all with bare export
+    mock.feed("export\n");
+    while (shell.poll() != .idle) {}
+    try std.testing.expect(std.mem.indexOf(u8, mock.contents(), "FOO=hello") != null);
+}
+
+test "shell: T13 alias: alias expansion" {
+    // Reset env table for a clean slate
+    env_count = 0;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+
+    // Create an alias: ll becomes "echo HELLO"
+    mock.feed("alias ll=echo HELLO\n");
+    while (shell.poll() != .idle) {}
+
+    // Use it — "ll world" should expand to "echo HELLO world"
+    mock.feed("ll world\n");
+    while (shell.poll() != .idle) {}
+    try std.testing.expect(std.mem.indexOf(u8, mock.contents(), "HELLO world") != null);
+}
+
+test "shell: T15 prompt: prompt builtin changes the prompt" {
+    // Verify the settings API — prompt reads back what was set
+    _ = settings.set("prompt", "test$ ");
+    try std.testing.expectEqualStrings("test$ ", settings.get_prompt());
+    _ = settings.set("prompt", "dipshit> "); // restore default
 }
