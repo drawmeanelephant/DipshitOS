@@ -223,7 +223,8 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
                       tcp_bytes=None, fetch_bytes=None,
                       chat_bytes=None, file_bytes=None, fstest_bytes=None, timertest_bytes=None,
                       victim_bytes=None, harden_bytes=None,
-                      jingle_bytes=None, chime_bytes=None, globals_bytes=None,                      guard_bytes=None, spin_bytes=None, apps_txt_bytes=None):
+                       jingle_bytes=None, chime_bytes=None, globals_bytes=None,                      guard_bytes=None, spin_bytes=None, apps_txt_bytes=None,
+                       hello_bytes=None):
     """Write a FAT32 volume (boot sector, FSInfo, FATs, directories, files)
     into `img` at the volume's offset.
 
@@ -276,6 +277,7 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
     guard_clusters = (len(guard_bytes) + bps - 1) // bps if guard_bytes else 0
     spin_clusters = (len(spin_bytes) + bps - 1) // bps if spin_bytes else 0
     apps_txt_clusters = (len(apps_txt_bytes) + bps - 1) // bps if apps_txt_bytes else 0
+    hello_clusters = (len(hello_bytes) + bps - 1) // bps if hello_bytes else 0
     file_clusters = (len(efi_bytes) + bps - 1) // bps
     root_entries_count = 2  # vol_label + efi_entry
     if kernel_bytes: root_entries_count += 1
@@ -310,6 +312,7 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
     if guard_bytes: root_entries_count += 1
     if spin_bytes: root_entries_count += 1
     if apps_txt_bytes: root_entries_count += 1
+    if hello_bytes: root_entries_count += 1
 
     root_clusters = (root_entries_count * 32 + bps - 1) // bps
     efi_dir_cluster = 2 + root_clusters
@@ -346,7 +349,8 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
     guard_start = globals_start + globals_clusters
     spin_start = guard_start + guard_clusters
     apps_txt_start = spin_start + spin_clusters
-    efi_start = apps_txt_start + apps_txt_clusters
+    hello_start = apps_txt_start + apps_txt_clusters
+    efi_start = hello_start + hello_clusters
     allocated = efi_start + file_clusters - 2  # clusters used beyond root(2)
     if allocated > geo.clusters:
         raise ValueError(
@@ -429,6 +433,8 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
         chain(spin_start, spin_clusters)            # SPIN.BIN data
     if apps_txt_bytes:
         chain(apps_txt_start, apps_txt_clusters)  # APPS.TXT data
+    if hello_bytes:
+        chain(hello_start, hello_clusters)          # HELLO.ELF data
     chain(efi_start, file_clusters)            # BOOTAA64.EFI data
 
     def wsec(sector, data):
@@ -523,6 +529,8 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
         root_entries += dir_entry(b"SPIN    BIN", 0x20, spin_start, len(spin_bytes))
     if apps_txt_bytes:
         root_entries += dir_entry(b"APPS    TXT", 0x20, apps_txt_start, len(apps_txt_bytes))
+    if hello_bytes:
+        root_entries += dir_entry(b"HELLO   ELF", 0x20, hello_start, len(hello_bytes))
 
     root_entries = root_entries.ljust(root_clusters * bps, b"\x00")
     for i in range(root_clusters):
@@ -660,6 +668,10 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
         for i in range(apps_txt_clusters):
             chunk = apps_txt_bytes[i * bps:(i + 1) * bps]
             wsec(geo.cluster_sector(apps_txt_start + i), chunk.ljust(bps, b"\x00"))
+    if hello_bytes:
+        for i in range(hello_clusters):
+            chunk = hello_bytes[i * bps:(i + 1) * bps]
+            wsec(geo.cluster_sector(hello_start + i), chunk.ljust(bps, b"\x00"))
     for i in range(file_clusters):
         chunk = efi_bytes[i * bps:(i + 1) * bps]
         wsec(geo.cluster_sector(efi_start + i), chunk.ljust(bps, b"\x00"))
@@ -925,7 +937,8 @@ def build_image(total_sectors, esp_offset, efi_bytes, kernel_bytes=None,
                 fetch_bytes=None, chat_bytes=None, file_bytes=None, fstest_bytes=None, timertest_bytes=None,
                 victim_bytes=None, harden_bytes=None,
                 jingle_bytes=None, chime_bytes=None, globals_bytes=None,
-                guard_bytes=None, spin_bytes=None, apps_txt_bytes=None):
+                guard_bytes=None, spin_bytes=None, apps_txt_bytes=None,
+                hello_bytes=None):
     img = bytearray(total_sectors * BYTES_PER_SECTOR)
     last_usable = total_sectors - 34
     first_usable = 34
@@ -969,7 +982,7 @@ def build_image(total_sectors, esp_offset, efi_bytes, kernel_bytes=None,
                       keytest_bytes, savetext_bytes, type_bytes, dir_bytes,
                       calc_bytes, notepad_bytes, top_bytes, desktop_bytes,
                       tcp_bytes, fetch_bytes, chat_bytes, file_bytes, fstest_bytes, timertest_bytes,
-                      victim_bytes, harden_bytes, jingle_bytes, chime_bytes, globals_bytes, guard_bytes, spin_bytes, apps_txt_bytes)
+                      victim_bytes, harden_bytes, jingle_bytes, chime_bytes, globals_bytes, guard_bytes, spin_bytes, apps_txt_bytes, hello_bytes)
     geo_data = Fat32Geometry(data_sectors, data_start)
     build_data_volume(img, geo_data)
     return bytes(img)
@@ -1049,6 +1062,8 @@ def main(argv):
                     help="optional flat user program (GUARD.BIN) to embed at the volume root (milestone 16, card C2 -- claim 8403)")
     ap.add_argument("spin_file", nargs="?",
                     help="optional flat user program (SPIN.BIN) to embed at the volume root (Arc5 issue #246 -- CPU limit test)")
+    ap.add_argument("hello_file", nargs="?",
+                    help="optional AArch64 ELF32 executable (HELLO.ELF) to embed at the volume root (M22 D1, issue #324 -- ELF-loader gate)")
     ap.add_argument("--apps-txt", metavar="FILE",
                     help="optional plain-text application manifest (APPS.TXT) to embed at the "
                          "volume root (milestone 13, card B2 -- claim 8877)")
@@ -1352,6 +1367,15 @@ def main(argv):
         with open(args.apps_txt, "rb") as f:
             apps_txt_bytes = f.read()
 
+    hello_bytes = None
+    if args.hello_file:
+        with open(args.hello_file, "rb") as f:
+            hello_bytes = f.read()
+        if hello_bytes[:4] != b"\x7fELF":
+            print("WARNING: %s does not start with the ELF magic; it may "
+                  "not be an AArch64 executable" % args.hello_file,
+                  file=sys.stderr)
+
     total_sectors = args.size_mb * 1024 * 1024 // BYTES_PER_SECTOR
     img = build_image(total_sectors, args.esp_offset, efi_bytes, kernel_bytes,
                       user_bytes, counter_bytes, peer_bytes, status43_bytes,
@@ -1359,7 +1383,7 @@ def main(argv):
                       winmove_bytes, keytest_bytes, savetext_bytes, type_bytes,
                       dir_bytes, calc_bytes, notepad_bytes, top_bytes, desktop_bytes,
                       tcp_bytes, fetch_bytes, chat_bytes, file_bytes, fstest_bytes, timertest_bytes,
-                      victim_bytes, harden_bytes, jingle_bytes, chime_bytes, globals_bytes, guard_bytes, spin_bytes, apps_txt_bytes)
+                      victim_bytes, harden_bytes, jingle_bytes, chime_bytes, globals_bytes, guard_bytes, spin_bytes, apps_txt_bytes, hello_bytes)
     with open(args.image, "wb") as f:
         f.write(img)
     extra = ", %d-byte kernel image embedded" % len(kernel_bytes) if kernel_bytes else ""
