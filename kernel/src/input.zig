@@ -170,6 +170,10 @@ pub fn hid_to_bytes(usage: u8, shift: bool, ctrl: bool, out: *[max_key_bytes]u8)
         return 0;
     }
     switch (usage) {
+        0x29 => { // Escape (lone ESC — the line editor treats it as a no-op key)
+            out[0] = 0x1b;
+            return 1;
+        },
         0x4f => { // Right arrow
             out[0] = 0x1b;
             out[1] = '[';
@@ -200,11 +204,25 @@ pub fn hid_to_bytes(usage: u8, shift: bool, ctrl: bool, out: *[max_key_bytes]u8)
             out[2] = 'H';
             return 3;
         },
+        0x4b => { // PageUp (the shell's scroll interceptor consumes CSI 5 ~)
+            out[0] = 0x1b;
+            out[1] = '[';
+            out[2] = '5';
+            out[3] = '~';
+            return 4;
+        },
         0x4d => { // End
             out[0] = 0x1b;
             out[1] = '[';
             out[2] = 'F';
             return 3;
+        },
+        0x4e => { // PageDown (the shell's scroll interceptor consumes CSI 6 ~)
+            out[0] = 0x1b;
+            out[1] = '[';
+            out[2] = '6';
+            out[3] = '~';
+            return 4;
         },
         0x4c => { // Delete (forward)
             out[0] = 0x1b;
@@ -705,6 +723,20 @@ test "input: hid_to_bytes maps the nav cluster to ESC sequences" {
     n = hid_to_bytes(0x4c, false, false, &out);
     try std.testing.expectEqual(@as(usize, 4), n);
     try std.testing.expectEqualSlices(u8, "\x1b[3~", out[0..n]);
+    // PageUp -> ESC [ 5 ~, PageDown -> ESC [ 6 ~ (4 bytes each) — the
+    // shell's scroll interceptor consumes these (M18 T1).
+    n = hid_to_bytes(0x4b, false, false, &out);
+    try std.testing.expectEqual(@as(usize, 4), n);
+    try std.testing.expectEqualSlices(u8, "\x1b[5~", out[0..n]);
+    n = hid_to_bytes(0x4e, false, false, &out);
+    try std.testing.expectEqual(@as(usize, 4), n);
+    try std.testing.expectEqualSlices(u8, "\x1b[6~", out[0..n]);
+    // Escape -> a lone ESC byte (the line editor treats it as a no-op).
+    n = hid_to_bytes(0x29, false, false, &out);
+    try std.testing.expectEqual(@as(usize, 1), n);
+    try std.testing.expectEqual(@as(u8, 0x1b), out[0]);
+    // Not a printable, not a nav key: no bytes invented.
+    try std.testing.expectEqual(@as(usize, 0), hid_to_bytes(0x39, false, false, &out)); // Caps Lock
 }
 
 test "input: hid_to_bytes maps ctrl+a-z to ASCII control codes" {

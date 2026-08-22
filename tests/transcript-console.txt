@@ -59,6 +59,7 @@ system
   random      print n random bytes from the seeded CSPRNG (hex)
   reboot      restart the machine
   repeat      repeat text, safely bounded
+  sh          run a script file of shell commands ('sh <script>' executes it line by line; 64 lines max, 256 chars per line; '#' comments; 'exit' stops early)
   settings    persistent configuration: `settings [list]`, `settings get <key>`, `settings set <key> <val>`, `settings reset`
   sound       virtio-snd transport: device DID, class, status, control-queue state, device-config counts (jacks/streams/channel-maps), re-arm; stream-state control: 'sound volume <0-100>' and 'sound mute <on|off>'
   shutdown    request power-off

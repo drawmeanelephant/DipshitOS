@@ -50,6 +50,26 @@ in selection_copy (stack).
   6 new host tests
 - **New:** `tools/verify-live-selection.sh` — class-B VZ gate
 
+### Live-gate evidence (2026-08-22; updated by claim 5093 + the arrow-chord follow-up)
+
+`bash tools/verify-live-selection.sh` — **class-B PASS 1/1** on real VZ:
+`artifacts/live-selection-gate.txt`, `live-selection-report.txt`,
+`live-selection-serial-01.log` (banner=1 fill-ready=1 copied=1 pasted=1
+report=1 done=1 runner-flag=1). Phase 2 now types **PageUp + Up through
+the synthesized keyboard** (`--input-chords`, claim 5093) — the real
+scroll keys enter selection and extend the range; the shell's own
+`input` report proves both chords reached the guest keymap (`events=2
+dropped=0 kb-usage=0x52 kb-byte=A`). Phase 3 (`--script2`,
+`--script2-delay 12` to land after the chords) keeps ONLY the Ctrl
+chords on serial — Ctrl+C (copy, prints `copied`) and Ctrl+V (paste,
+whose first selected line is observed submitting as `unknown command
+'line-1x'` — the honest paste proof) — because VZ's synthesized keyboard
+cannot deliver modifier chords (activation wall, hardware contract).
+Re-passed after claim 5093's T2 fixes: the lone-ESC-in-selection cancel
+now passes the following byte through (was: ate the keystroke), and
+paging back to live (offset 0) clears `selecting` (was: a real Enter
+copied+discarded the line).
+
 ### Verification
 
 - `zig test kernel/src/shell.zig` — 519/519 tests pass (6 new T2 tests)

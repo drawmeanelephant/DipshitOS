@@ -2033,6 +2033,9 @@ func macChord(_ token: String) -> (UInt16, NSEvent.ModifierFlags, String)? {
     case "home": return (0x73, [], "\u{F729}")
     case "end": return (0x77, [], "\u{F72B}")
     case "delete": return (0x75, [], "\u{F728}")
+    case "pageup": return (0x74, [], "\u{F72C}")
+    case "pagedown": return (0x79, [], "\u{F72D}")
+    case "escape": return (0x35, [], "\u{1B}")
     default:
         if token.hasPrefix("ctrl-"), token.count == 6 {
             let letter = token[token.index(token.startIndex, offsetBy: 5)]
