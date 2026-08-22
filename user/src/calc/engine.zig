@@ -159,6 +159,8 @@ pub const CalcEngine = struct {
 
     /// Raise the error state from the caller layer (K9 expression
     /// syntax/overflow/div-zero errors).
+    /// Raise the error state from the caller layer (K7 domain errors:
+    /// asin/acos out of range, tan at cos = 0).
     pub fn raise_error(self: *CalcEngine) void {
         self.fail();
     }
