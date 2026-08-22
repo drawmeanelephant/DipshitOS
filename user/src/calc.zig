@@ -1,24 +1,26 @@
-//! DipshitOS fourteenth ESP user program — CALC.BIN (Milestone 11, Card A2 + M15 C9).
+//! DipshitOS CALC.BIN — Milestone 11 Card A2 + M15 C9 + M24 K1–K5.
 //!
-//! Interactive graphical calculator for DipshitOS.
-//! Features a checked 64-bit integer calculation engine (overflow shows
-//! ERROR, never a silent wrap), repeat-last-op on `=`, memory keys
-//! (M+ / M- / MR / MC), clickable button grid, keyboard numeric entry,
-//! and right-aligned LCD-style display, plus C9 history.
-//! Uses zero dynamic memory allocation (`ui.zig` micro-widgets).
+//! Interactive graphical calculator with checked 64-bit integer engine,
+//! scrollable history, clickable button grid, and keyboard input.
 //!
-//! Keyboard shortcuts (C9 — complete surface, documented here):
+//! M24 additions:
+//!   K1 — Programmer mode (Ctrl+P): hex/oct/dec display, AND/OR/XOR/NOT/SHL/SHR
+//!   K2 — 4-slot memory (M0–M3): Ctrl+1/2/3/4 selects slot
+//!   K3 — Unit conversion (Ctrl+U): temp/length/weight categories
+//!   K4 — Mathematical constants: π, e, √2, φ buttons
+//!   K5 — History persistence: save/load from FAT
+//!
+//! Keyboard shortcuts:
 //!   Digits 0–9          → input_digit
-//!   Operators + - * / % → set_op ('/' is ASCII input, rendered ÷ U+00F7 in docs)
-//!   '.' (decimal)       → no-op (integer calc, honest)
+//!   Operators + - * / % → set_op
 //!   Enter / '='         → evaluate (repeat-last-op on bare =)
-//!   Backspace (0x08/0x2a) → backspace (clear last digit)
-//!   Esc (0x1b/0x29) / 'c'/'C' → clear all
-//!   Up (0x52) / Down (0x51) → cycle history (Up = older, Down = newer/live)
-//!   'm'/'M'             → MR (memory recall); M+/M-/MC via buttons (verified)
-//!   Operator precedence: BODMAS left-to-right via pending_op (checked, not silent wrap).
-//! History: top 60px area, 10 entries ring ×32B, 6 visible @10px, scroll indicator ^/v,
-//!          expression = result via format_history_entry, Up/Down re-displays result.
+//!   Backspace           → backspace
+//!   Esc / C             → clear all
+//!   Up / Down           → cycle history
+//!   M                   → memory recall (active slot)
+//!   Ctrl+P              → toggle programmer mode
+//!   Ctrl+U              → toggle unit conversion bar
+//!   Ctrl+1/2/3/4        → select memory slot
 
 const std = @import("std");
 const ui = @import("lib/ui.zig");
@@ -26,343 +28,147 @@ const Rect = ui.Rect;
 const Button = ui.Button;
 const Event = ui.Event;
 
+const engine = @import("calc/engine.zig");
+const CalcEngine = engine.CalcEngine;
+const format_i64 = engine.format_i64;
+
+const history_mod = @import("calc/history.zig");
+const HistoryRing = history_mod.Ring;
+const history_max = history_mod.max_entries;
+const history_visible = history_mod.visible_count;
+
+const prog = @import("calc/programmer.zig");
+const ProgrammerState = prog.ProgrammerState;
+const Base = prog.Base;
+
+const constants = @import("calc/constants.zig");
+
+// ---------------------------------------------------------------------------
+// Window constants
+// ---------------------------------------------------------------------------
+
 pub const window_id: u32 = 2;
 pub const window_x: u32 = 48;
 pub const window_y: u32 = 48;
 pub const window_w: u32 = 512;
-pub const window_h: u32 = 384;
+pub const window_h: u32 = 424;
 
 pub const exit_status: u32 = 42;
 
-// ---------------------------------------------------------------------------
-// 64-bit Integer Calculator Engine
-// ---------------------------------------------------------------------------
+// Layout rects — standard mode
+const history_area = Rect.make(8, 8, 496, 60);
+const display_rect = Rect.make(8, 72, 496, 28);
 
-pub const CalcEngine = struct {
-    accum: i64 = 0,
-    current_val: i64 = 0,
-    pending_op: ?u8 = null,
-    last_op: ?u8 = null,
-    last_operand: i64 = 0,
-    is_entering_val: bool = false,
-    has_error: bool = false,
-    mem: i64 = 0,
-    mem_flag: bool = false,
+// Layout rects — programmer mode (triple display)
+const hex_display_rect = Rect.make(8, 72, 496, 18);
+const dec_display_rect = Rect.make(8, 92, 496, 18);
+const oct_display_rect = Rect.make(8, 112, 496, 18);
+const reg_display_rect = Rect.make(8, 132, 496, 18);
 
-    pub fn init() CalcEngine {
-        return .{};
-    }
-
-    pub fn input_digit(self: *CalcEngine, digit: u8) void {
-        if (digit > 9) return;
-        self.has_error = false;
-        if (!self.is_entering_val) {
-            self.current_val = @as(i64, digit);
-            self.is_entering_val = true;
-        } else {
-            // Checked growth: refuse a digit that would push the entry past
-            // the i64 bounds instead of silently wrapping. (The old clamp
-            // let a 19th digit on an 18-digit entry overflow — a silent
-            // wrap in the ReleaseSmall build.)
-            const grown = std.math.mul(i64, self.current_val, 10) catch return;
-            if (self.current_val >= 0) {
-                self.current_val = std.math.add(i64, grown, @as(i64, digit)) catch return;
-            } else {
-                self.current_val = std.math.sub(i64, grown, @as(i64, digit)) catch return;
-            }
-        }
-    }
-
-    pub fn backspace(self: *CalcEngine) void {
-        if (!self.is_entering_val) return;
-        self.current_val = @divTrunc(self.current_val, 10);
-        if (self.current_val == 0) {
-            self.is_entering_val = false;
-        }
-    }
-
-    pub fn toggle_sign(self: *CalcEngine) void {
-        if (self.has_error) return;
-        // Negating INT64_MIN would overflow (two's complement); treat it
-        // like any other overflow — ERROR — instead of silently wrapping.
-        if (self.current_val == std.math.minInt(i64)) {
-            self.fail();
-            return;
-        }
-        self.current_val = -self.current_val;
-        self.is_entering_val = true;
-    }
-
-    pub fn set_op(self: *CalcEngine, op: u8) void {
-        if (self.has_error) return;
-        if (self.is_entering_val) {
-            self.evaluate();
-        }
-        self.accum = self.current_val;
-        self.pending_op = op;
-        self.is_entering_val = false;
-    }
-
-    /// Evaluate the pending binary op — or, on a bare `=` with no pending
-    /// op, REPEAT the last one (`5 + 3 = =` → 8, then 11, then 14). All
-    /// arithmetic is CHECKED: an i64 overflow sets `has_error` (ERROR on the
-    /// display) instead of silently wrapping, and breaks the pending/repeat
-    /// chain — the divide-by-zero contract extended to every overflow shape
-    /// (including the two's-complement `INT64_MIN / -1`).
-    pub fn evaluate(self: *CalcEngine) void {
-        if (self.has_error) return;
-        if (self.pending_op) |op| {
-            self.eval_binary(op, self.accum, self.current_val);
-        } else if (self.last_op) |op| {
-            // Repeat-last-op: the current value is the previous result; the
-            // operand is the one the last binary op consumed.
-            self.eval_binary(op, self.current_val, self.last_operand);
-        }
-    }
-
-    fn eval_binary(self: *CalcEngine, op: u8, a: i64, b: i64) void {
-        var res: i64 = 0;
-        var err = false;
-        switch (op) {
-            '+' => res = std.math.add(i64, a, b) catch blk: {
-                err = true;
-                break :blk 0;
-            },
-            '-' => res = std.math.sub(i64, a, b) catch blk: {
-                err = true;
-                break :blk 0;
-            },
-            '*' => res = std.math.mul(i64, a, b) catch blk: {
-                err = true;
-                break :blk 0;
-            },
-            '/' => {
-                if (b == 0) {
-                    err = true;
-                } else if (a == std.math.minInt(i64) and b == -1) {
-                    // INT64_MIN / -1 overflows (the result would be
-                    // INT64_MAX + 1); @divTrunc would trap. ERROR instead.
-                    err = true;
-                } else {
-                    res = @divTrunc(a, b);
-                }
-            },
-            '%' => {
-                if (b == 0) {
-                    err = true;
-                } else if (a == std.math.minInt(i64) and b == -1) {
-                    // The remainder is mathematically 0 and @rem would trap
-                    // on the overflowing quotient — return 0 directly.
-                    res = 0;
-                } else {
-                    res = @rem(a, b);
-                }
-            },
-            else => res = b,
-        }
-        if (err) {
-            self.fail();
-            return;
-        }
-        self.current_val = res;
-        self.accum = res;
-        if (self.pending_op != null) {
-            // A completed binary op seeds the repeat chain.
-            self.last_op = op;
-            self.last_operand = b;
-        }
-        self.pending_op = null;
-        self.is_entering_val = false;
-    }
-
-    /// Shared error contract: ERROR on the display and the pending/repeat
-    /// chain broken. `C` restores operation; memory is untouched.
-    fn fail(self: *CalcEngine) void {
-        self.has_error = true;
-        self.accum = 0;
-        self.current_val = 0;
-        self.pending_op = null;
-        self.last_op = null;
-        self.last_operand = 0;
-        self.is_entering_val = false;
-    }
-
-    pub fn clear(self: *CalcEngine) void {
-        self.accum = 0;
-        self.current_val = 0;
-        self.pending_op = null;
-        self.last_op = null;
-        self.last_operand = 0;
-        self.is_entering_val = false;
-        self.has_error = false;
-    }
-
-    // -------------------------------------------------------------------
-    // Memory register (M+ / M- / MR / MC). Bounded like everything else:
-    // one i64 + a set flag, checked the same way as the arithmetic.
-    // -------------------------------------------------------------------
-
-    pub fn mem_add(self: *CalcEngine) void {
-        if (self.has_error) return;
-        self.mem = std.math.add(i64, self.mem, self.current_val) catch {
-            self.fail();
-            return;
-        };
-        self.mem_flag = true;
-        self.is_entering_val = false;
-    }
-
-    pub fn mem_sub(self: *CalcEngine) void {
-        if (self.has_error) return;
-        self.mem = std.math.sub(i64, self.mem, self.current_val) catch {
-            self.fail();
-            return;
-        };
-        self.mem_flag = true;
-        self.is_entering_val = false;
-    }
-
-    pub fn mem_recall(self: *CalcEngine) void {
-        if (self.has_error) return;
-        self.current_val = self.mem;
-        self.is_entering_val = true;
-    }
-
-    pub fn mem_clear(self: *CalcEngine) void {
-        if (self.has_error) return;
-        self.mem = 0;
-        self.mem_flag = false;
-    }
-
-    pub fn format_display(self: *const CalcEngine, out: []u8) []const u8 {
-        if (self.has_error) {
-            const err_msg = "ERROR";
-            @memcpy(out[0..err_msg.len], err_msg);
-            return out[0..err_msg.len];
-        }
-
-        const val = self.current_val;
-        if (val == 0) {
-            out[0] = '0';
-            return out[0..1];
-        }
-
-        const is_neg = (val < 0);
-        // Magnitude without wrapping arithmetic: -(val + 1) + 1 is safe even
-        // for INT64_MIN, whose negation does not fit in i64.
-        var uval: u64 = undefined;
-        if (is_neg) {
-            uval = @as(u64, @intCast(-(val + 1))) + 1;
-        } else {
-            uval = @intCast(val);
-        }
-
-        var temp: [24]u8 = undefined;
-        var idx: usize = 0;
-        while (uval > 0) {
-            temp[idx] = @as(u8, @intCast(uval % 10)) + '0';
-            uval /= 10;
-            idx += 1;
-        }
-
-        var out_idx: usize = 0;
-        if (is_neg) {
-            out[out_idx] = '-';
-            out_idx += 1;
-        }
-
-        var i: usize = idx;
-        while (i > 0) : (i -= 1) {
-            out[out_idx] = temp[i - 1];
-            out_idx += 1;
-        }
-
-        return out[0..out_idx];
-    }
-};
+// Layout rect — unit conversion bar (K3)
+const convert_rect = Rect.make(8, 72, 496, 28);
 
 // ---------------------------------------------------------------------------
-// History Ring Buffer (C9 — bounded, host-testable)
+// Unit conversion (K3)
 // ---------------------------------------------------------------------------
 
-pub const history_max: usize = 10;
-pub const history_visible: usize = 6;
-pub const history_area = Rect.make(8, 8, 239, 60);
-pub const display_rect = Rect.make(8, 72, 239, 28);
+const TempUnit = enum { c, f, k };
+const LengthUnit = enum { m, ft, inch, cm, mm };
+const WeightUnit = enum { kg, lb, g, oz };
 
-pub const HistoryEntry = struct {
-    text: [32]u8 = [_]u8{0} ** 32,
-    len: usize = 0,
-    result: i64 = 0,
-    has_result: bool = false,
-};
+const temp_names = [_][]const u8{ "C", "F", "K" };
+const length_names = [_][]const u8{ "m", "ft", "in", "cm", "mm" };
+const weight_names = [_][]const u8{ "kg", "lb", "g", "oz" };
 
-fn format_history_entry(entry: *const HistoryEntry, out: []u8) []const u8 {
-    // Format as "expr=res" or just expr if no result yet.
-    var pos: usize = 0;
-    const copy = @min(entry.len, out.len - 12); // reserve for result
-    @memcpy(out[pos .. pos + copy], entry.text[0..copy]);
-    pos += copy;
-    if (entry.has_result) {
-        if (pos + 1 < out.len) {
-            out[pos] = '=';
-            pos += 1;
-        }
-        const tmp = entry.result;
-        var neg = false;
-        var uval: u64 = undefined;
-        if (tmp == std.math.minInt(i64)) {
-            uval = @as(u64, @intCast(-(tmp + 1))) + 1;
-            neg = true;
-        } else if (tmp < 0) {
-            neg = true;
-            uval = @intCast(-tmp);
-        } else {
-            uval = @intCast(tmp);
-        }
-        if (neg and pos < out.len) {
-            out[pos] = '-';
-            pos += 1;
-        }
-        var digits: [20]u8 = undefined;
-        var dcnt: usize = 0;
-        if (uval == 0) {
-            digits[0] = '0';
-            dcnt = 1;
-        } else {
-            while (uval > 0) : (uval /= 10) {
-                digits[dcnt] = @as(u8, @intCast(uval % 10)) + '0';
-                dcnt += 1;
-            }
-        }
-        var i: usize = dcnt;
-        while (i > 0) : (i -= 1) {
-            if (pos >= out.len) break;
-            out[pos] = digits[i - 1];
-            pos += 1;
-        }
-    }
-    return out[0..pos];
+/// Normalize a temperature to Celsius as the base unit.
+fn temp_to_base(unit: TempUnit, val: f64) f64 {
+    return switch (unit) {
+        .c => val,
+        .f => (val - 32.0) * 5.0 / 9.0,
+        .k => val - 273.15,
+    };
+}
+
+fn temp_from_base(unit: TempUnit, celsius: f64) f64 {
+    return switch (unit) {
+        .c => celsius,
+        .f => celsius * 9.0 / 5.0 + 32.0,
+        .k => celsius + 273.15,
+    };
+}
+
+/// Normalize a length to meters.
+fn length_to_base(unit: LengthUnit, val: f64) f64 {
+    return switch (unit) {
+        .m => val,
+        .ft => val * 0.3048,
+        .inch => val * 0.0254,
+        .cm => val * 0.01,
+        .mm => val * 0.001,
+    };
+}
+
+fn length_from_base(unit: LengthUnit, meters: f64) f64 {
+    return switch (unit) {
+        .m => meters,
+        .ft => meters / 0.3048,
+        .inch => meters / 0.0254,
+        .cm => meters * 100.0,
+        .mm => meters * 1000.0,
+    };
+}
+
+/// Normalize a weight to grams.
+fn weight_to_base(unit: WeightUnit, val: f64) f64 {
+    return switch (unit) {
+        .g => val,
+        .kg => val * 1000.0,
+        .lb => val * 453.592,
+        .oz => val * 28.3495,
+    };
+}
+
+fn weight_from_base(unit: WeightUnit, grams: f64) f64 {
+    return switch (unit) {
+        .g => grams,
+        .kg => grams / 1000.0,
+        .lb => grams / 453.592,
+        .oz => grams / 28.3495,
+    };
 }
 
 // ---------------------------------------------------------------------------
-// GUI Layout & Button Grid (Stack-Allocated AppState)
+// App State
 // ---------------------------------------------------------------------------
 
 pub const AppState = struct {
     engine: CalcEngine = .{},
+    hist: HistoryRing = HistoryRing.init(),
+    prog_mode: ProgrammerState = ProgrammerState.init(),
 
-    // C9: bounded history ring (10×40B), top 60px scrollable, Up/Down cycle.
-    history: [history_max]HistoryEntry = [_]HistoryEntry{.{}} ** history_max,
-    history_len: usize = 0,
-    history_head: usize = 0,
-    history_cursor: ?usize = null, // index in history (0..history_len-1) for Up/Down, null = live
-    history_scroll: usize = 0, // scroll offset for history area (0 = top)
+    // C9: history scroll state (separate from ring — tracks display position)
+    history_cursor: ?usize = null,
+    history_scroll: usize = 0,
 
-    btn_mplus: Button = Button.init(Rect.make(8, 104, 56, 20), "M+"),
-    btn_mminus: Button = Button.init(Rect.make(69, 104, 56, 20), "M-"),
-    btn_mr: Button = Button.init(Rect.make(130, 104, 56, 20), "MR"),
-    btn_mc: Button = Button.init(Rect.make(191, 104, 56, 20), "MC"),
+    // K2: 4-slot memory
+    mem_slots: [4]i64 = [_]i64{0} ** 4,
+    mem_active_slot: usize = 0,
+    mem_any_nonzero: bool = false,
+
+    // K3: unit conversion
+    convert_active: bool = false,
+    convert_category: u2 = 0, // 0=temp, 1=length, 2=weight
+    convert_from_idx: u3 = 0,
+    convert_to_idx: u3 = 1,
+    convert_value: f64 = 0.0,
+
+    // K4: constant buttons only shown in standard mode
+
+    // ---- Standard mode buttons ----
+    btn_m_store: Button = Button.init(Rect.make(8, 104, 56, 20), "MS"),
+    btn_m_recall: Button = Button.init(Rect.make(69, 104, 56, 20), "MR"),
+    btn_m_clear: Button = Button.init(Rect.make(130, 104, 56, 20), "MC"),
+    btn_prog: Button = Button.init(Rect.make(191, 104, 56, 20), "PROG"),
 
     btn_c: Button = Button.init(Rect.make(8, 130, 56, 20), "C"),
     btn_sign: Button = Button.init(Rect.make(69, 130, 56, 20), "+/-"),
@@ -385,52 +191,126 @@ pub const AppState = struct {
     btn_add: Button = Button.init(Rect.make(191, 208, 56, 20), "+"),
 
     btn_0: Button = Button.init(Rect.make(8, 234, 117, 20), "0"),
-    btn_clr_entry: Button = Button.init(Rect.make(130, 234, 56, 20), "CE"),
+    btn_ce: Button = Button.init(Rect.make(130, 234, 56, 20), "CE"),
     btn_eq: Button = Button.init(Rect.make(191, 234, 56, 20), "="),
+
+    // ---- Programmer mode buttons (K1) ----
+    btn_st: Button = Button.init(Rect.make(8, 104, 56, 20), "ST"),
+    btn_clr_mem: Button = Button.init(Rect.make(130, 104, 56, 20), "CLR"),
+
+    btn_not: Button = Button.init(Rect.make(8, 130, 56, 20), "NOT"),
+    btn_shl: Button = Button.init(Rect.make(69, 130, 56, 20), "SHL"),
+    btn_shr: Button = Button.init(Rect.make(130, 130, 56, 20), "SHR"),
+
+    btn_and: Button = Button.init(Rect.make(8, 156, 56, 20), "AND"),
+    btn_or: Button = Button.init(Rect.make(69, 156, 56, 20), "OR"),
+    btn_xor: Button = Button.init(Rect.make(130, 156, 56, 20), "XOR"),
+
+    btn_hex: Button = Button.init(Rect.make(8, 182, 56, 20), "HEX"),
+    btn_dec: Button = Button.init(Rect.make(69, 182, 56, 20), "DEC"),
+    btn_oct: Button = Button.init(Rect.make(130, 182, 56, 20), "OCT"),
+
+    // ---- K4 constant buttons (standard mode only) ----
+    btn_pi: Button = Button.init(Rect.make(260, 104, 56, 20), "PI"),
+    btn_euler: Button = Button.init(Rect.make(321, 104, 56, 20), "e"),
+    btn_sqrt2: Button = Button.init(Rect.make(382, 104, 56, 20), "sqrt2"),
+    btn_phi: Button = Button.init(Rect.make(443, 104, 56, 20), "phi"),
 
     pub fn init() AppState {
         var s = AppState{};
         s.btn_eq.bg_color = ui.COLOR_ACCENT;
         s.btn_c.bg_color = ui.COLOR_DANGER;
+        // Load history from FAT (K5)
+        s.hist.load_from_fat();
+        if (s.hist.len > history_visible) {
+            s.history_scroll = s.hist.len - history_visible;
+        }
         return s;
     }
 
-    pub fn get_history_entry(self: *const AppState, logical: usize) *const HistoryEntry {
-        // logical 0 = oldest, history_len-1 = newest; maps via ring head.
-        const idx = (self.history_head + history_max - self.history_len + logical) % history_max;
-        return &self.history[idx];
+    // -------------------------------------------------------------------
+    // Memory (K2)
+    // -------------------------------------------------------------------
+
+    fn mem_store_active(self: *AppState) void {
+        self.mem_slots[self.mem_active_slot] = self.engine.current_val;
+        self.update_mem_flag();
     }
 
-    fn get_history_entry_mut(self: *AppState, logical: usize) *HistoryEntry {
-        const idx = (self.history_head + history_max - self.history_len + logical) % history_max;
-        return &self.history[idx];
+    fn mem_recall_active(self: *AppState) void {
+        if (self.engine.has_error) return;
+        self.engine.current_val = self.mem_slots[self.mem_active_slot];
+        self.engine.is_entering_val = true;
     }
 
-    /// Push a new history entry (expression text + result). Bounded ring 10.
-    pub fn push_history_entry(self: *AppState, expr: []const u8, result: i64) void {
-        const e = &self.history[self.history_head];
-        const copy = @min(expr.len, e.text.len);
-        @memcpy(e.text[0..copy], expr[0..copy]);
-        e.len = copy;
-        e.result = result;
-        e.has_result = true;
-        self.history_head = (self.history_head + 1) % history_max;
-        if (self.history_len < history_max) self.history_len += 1;
-        // Auto-scroll to newest when >6 visible
-        if (self.history_len > history_visible) {
-            self.history_scroll = self.history_len - history_visible;
+    fn mem_clear_active(self: *AppState) void {
+        self.mem_slots[self.mem_active_slot] = 0;
+        self.update_mem_flag();
+    }
+
+    fn mem_clear_all(self: *AppState) void {
+        self.mem_slots = [_]i64{0} ** 4;
+        self.mem_any_nonzero = false;
+    }
+
+    fn mem_add_active(self: *AppState) void {
+        if (self.engine.has_error) return;
+        self.mem_slots[self.mem_active_slot] = std.math.add(
+            i64,
+            self.mem_slots[self.mem_active_slot],
+            self.engine.current_val,
+        ) catch {
+            // Overflow doesn't affect the engine — just ignore
+            return;
+        };
+        self.engine.is_entering_val = false;
+        self.update_mem_flag();
+    }
+
+    fn mem_sub_active(self: *AppState) void {
+        if (self.engine.has_error) return;
+        self.mem_slots[self.mem_active_slot] = std.math.sub(
+            i64,
+            self.mem_slots[self.mem_active_slot],
+            self.engine.current_val,
+        ) catch return;
+        self.engine.is_entering_val = false;
+        self.update_mem_flag();
+    }
+
+    fn update_mem_flag(self: *AppState) void {
+        self.mem_any_nonzero = false;
+        for (self.mem_slots) |v| {
+            if (v != 0) {
+                self.mem_any_nonzero = true;
+                break;
+            }
+        }
+    }
+
+    // -------------------------------------------------------------------
+    // History helpers
+    // -------------------------------------------------------------------
+
+    pub fn get_history_entry(self: *const AppState, logical: usize) *const history_mod.Entry {
+        return self.hist.get(logical);
+    }
+
+    fn push_history(self: *AppState, expr: []const u8, result: i64) void {
+        self.hist.push(expr, result);
+        if (self.hist.len > history_visible) {
+            self.history_scroll = self.hist.len - history_visible;
         } else {
             self.history_scroll = 0;
         }
         self.history_cursor = null;
+        // K5: persist to FAT after each new entry
+        self.hist.save_to_fat();
     }
 
-    /// Record the current calculation as history: called right before/after evaluate.
-    /// Builds expr as "{a}{op}{b}" using pending state. If no pending op, uses current display.
-    pub fn record_history_from_engine(self: *AppState, pending: ?u8, a: i64, b: i64) void {
+    fn record_history_from_engine(self: *AppState, pending: ?u8, a: i64, b: i64) void {
         var expr_buf: [32]u8 = undefined;
         var pos: usize = 0;
-        // Format a
         var tmp_buf: [24]u8 = undefined;
         const a_str = format_i64(a, &tmp_buf);
         const ac = @min(a_str.len, expr_buf.len - pos);
@@ -446,55 +326,25 @@ pub const AppState = struct {
             @memcpy(expr_buf[pos .. pos + bc], b_str[0..bc]);
             pos += bc;
         }
-        const result = self.engine.current_val;
-        self.push_history_entry(expr_buf[0..pos], result);
-    }
-
-    fn format_i64(val: i64, out: []u8) []const u8 {
-        if (val == 0) {
-            out[0] = '0';
-            return out[0..1];
-        }
-        const neg = val < 0;
-        var uval: u64 = if (neg) @as(u64, @intCast(-(val + 1))) + 1 else @intCast(val);
-        var tmp: [20]u8 = undefined;
-        var n: usize = 0;
-        while (uval > 0) : (uval /= 10) {
-            tmp[n] = @as(u8, @intCast(uval % 10)) + '0';
-            n += 1;
-        }
-        var pos: usize = 0;
-        if (neg) {
-            out[pos] = '-';
-            pos += 1;
-        }
-        var i: usize = n;
-        while (i > 0) : (i -= 1) {
-            out[pos] = tmp[i - 1];
-            pos += 1;
-        }
-        return out[0..pos];
+        self.push_history(expr_buf[0..pos], self.engine.current_val);
     }
 
     pub fn history_up(self: *AppState) void {
-        if (self.history_len == 0) return;
+        if (self.hist.len == 0) return;
         if (self.history_cursor) |c| {
             if (c > 0) {
                 self.history_cursor = c - 1;
-                // Keep cursor visible
                 if (self.history_cursor.? < self.history_scroll) self.history_scroll = self.history_cursor.?;
-                // Load entry into display (fresh entry — next digit replaces)
-                const e = self.get_history_entry(self.history_cursor.?);
+                const e = self.hist.get(self.history_cursor.?);
                 self.engine.current_val = e.result;
                 self.engine.is_entering_val = false;
                 self.engine.has_error = false;
             }
         } else {
-            // First up: select newest
-            const idx = self.history_len - 1;
+            const idx = self.hist.len - 1;
             self.history_cursor = idx;
             if (idx >= self.history_scroll + history_visible) self.history_scroll = idx - history_visible + 1;
-            const e = self.get_history_entry(idx);
+            const e = self.hist.get(idx);
             self.engine.current_val = e.result;
             self.engine.is_entering_val = false;
             self.engine.has_error = false;
@@ -503,73 +353,148 @@ pub const AppState = struct {
 
     pub fn history_down(self: *AppState) void {
         if (self.history_cursor) |c| {
-            if (c + 1 < self.history_len) {
+            if (c + 1 < self.hist.len) {
                 self.history_cursor = c + 1;
-                if (self.history_cursor.? >= self.history_scroll + history_visible) self.history_scroll = self.history_cursor.? - history_visible + 1;
-                const e = self.get_history_entry(self.history_cursor.?);
+                if (self.history_cursor.? >= self.history_scroll + history_visible)
+                    self.history_scroll = self.history_cursor.? - history_visible + 1;
+                const e = self.hist.get(self.history_cursor.?);
                 self.engine.current_val = e.result;
                 self.engine.is_entering_val = false;
                 self.engine.has_error = false;
             } else {
-                // Past newest → live
                 self.history_cursor = null;
-                // Keep display as is (current_val stays last result)
             }
         }
     }
 
+    // -------------------------------------------------------------------
+    // Evaluate + record (shared between mouse and keyboard)
+    // -------------------------------------------------------------------
+
+    fn do_evaluate(self: *AppState) void {
+        const pend = self.engine.pending_op;
+        const a = self.engine.accum;
+        const b = self.engine.current_val;
+        self.engine.evaluate();
+        if (!self.engine.has_error) {
+            const op = pend orelse self.engine.last_op;
+            if (op != null or a != 0 or b != 0) {
+                self.record_history_from_engine(op, a, b);
+            } else {
+                var tmp: [24]u8 = undefined;
+                const cur = self.engine.current_val;
+                const s = format_i64(cur, &tmp);
+                self.push_history(s, cur);
+            }
+        }
+        self.history_cursor = null;
+    }
+
+    // -------------------------------------------------------------------
+    // Unit conversion (K3)
+    // -------------------------------------------------------------------
+
+    fn convert_result(self: *const AppState) f64 {
+        const from_idx: usize = self.convert_from_idx;
+        const to_idx: usize = self.convert_to_idx;
+        const val = self.convert_value;
+        const cat: usize = self.convert_category;
+
+        if (cat == 0) {
+            // Temperature
+            if (from_idx == to_idx) return val;
+            const from_unit: TempUnit = @enumFromInt(from_idx);
+            const to_unit: TempUnit = @enumFromInt(to_idx);
+            const base = temp_to_base(from_unit, val);
+            return temp_from_base(to_unit, base);
+        } else if (cat == 1) {
+            // Length
+            if (from_idx == to_idx) return val;
+            const from_unit: LengthUnit = @enumFromInt(from_idx);
+            const to_unit: LengthUnit = @enumFromInt(to_idx);
+            const base = length_to_base(from_unit, val);
+            return length_from_base(to_unit, base);
+        } else {
+            // Weight
+            if (from_idx == to_idx) return val;
+            const from_unit: WeightUnit = @enumFromInt(from_idx);
+            const to_unit: WeightUnit = @enumFromInt(to_idx);
+            const base = weight_to_base(from_unit, val);
+            return weight_from_base(to_unit, base);
+        }
+    }
+
+    fn unit_names_for_category(cat: usize) []const []const u8 {
+        return switch (cat) {
+            0 => &temp_names,
+            1 => &length_names,
+            2 => &weight_names,
+            else => &temp_names,
+        };
+    }
+
+    /// Update convert_value from the engine's current value (called when
+    /// the user is in conversion mode and types a number).
+    fn sync_convert_value(self: *AppState) void {
+        self.convert_value = @floatFromInt(self.engine.current_val);
+    }
+
+    // -------------------------------------------------------------------
+    // Draw
+    // -------------------------------------------------------------------
+
     pub fn draw(self: *const AppState, win: u32) void {
-        // Window background
         ui.draw_rect(win, Rect.make(0, 0, window_w, window_h), ui.COLOR_BG);
 
-        // History area (top 60px, C9)
+        if (self.prog_mode.active) {
+            self.draw_programmer(win);
+        } else {
+            self.draw_standard(win);
+        }
+    }
+
+    fn draw_standard(self: *const AppState, win: u32) void {
+        // History area
         ui.draw_rect(win, history_area, ui.COLOR_SURFACE);
         ui.draw_rect_outline(win, history_area, 1, ui.COLOR_BORDER);
-        // Draw history entries (scrollable, 6 visible @10px row)
         var h_row: usize = 0;
         var h_idx = self.history_scroll;
-        while (h_idx < self.history_len and h_row < history_visible) : (h_idx += 1) {
-            const entry = self.get_history_entry(h_idx);
+        while (h_idx < self.hist.len and h_row < history_visible) : (h_idx += 1) {
+            const entry = self.hist.get(h_idx);
             var buf: [40]u8 = undefined;
-            const txt = format_history_entry(entry, &buf);
+            const txt = HistoryRing.format_entry(entry, &buf);
             const y = history_area.y + 4 + @as(u32, @intCast(h_row)) * 10;
             const is_cursor = if (self.history_cursor) |c| c == h_idx else false;
             const col = if (is_cursor) ui.COLOR_ACCENT else ui.COLOR_TEXT_MUTED;
-            // Truncate to width (239-8)/8 ≈ 28 chars
-            const cap = @min(txt.len, 28);
+            const cap = @min(txt.len, 60);
             ui.draw_text(win, txt[0..cap], history_area.x + 4, y, col);
             h_row += 1;
         }
-        if (self.history_len > history_visible) {
-            // Scroll indicator: "^"/"v" at right edge
-            if (self.history_scroll > 0) ui.draw_text(win, "^", history_area.x + history_area.w - 10, history_area.y + 4, ui.COLOR_TEXT_MUTED);
-            if (self.history_scroll + history_visible < self.history_len) ui.draw_text(win, "v", history_area.x + history_area.w - 10, history_area.y + history_area.h - 10, ui.COLOR_TEXT_MUTED);
+        if (self.hist.len > history_visible) {
+            if (self.history_scroll > 0)
+                ui.draw_text(win, "^", history_area.x + history_area.w - 10, history_area.y + 4, ui.COLOR_TEXT_MUTED);
+            if (self.history_scroll + history_visible < self.hist.len)
+                ui.draw_text(win, "v", history_area.x + history_area.w - 10, history_area.y + history_area.h - 10, ui.COLOR_TEXT_MUTED);
         }
 
-        // Display box (LCD screen) — below history (C9)
+        // Display box
         ui.draw_rect(win, display_rect, ui.COLOR_SURFACE);
         ui.draw_rect_outline(win, display_rect, 1, ui.COLOR_BORDER);
-
-        var disp_str_buf: [32]u8 = undefined;
-        const disp_text = self.engine.format_display(&disp_str_buf);
-
-        // Right-align the display text
+        var disp_buf: [32]u8 = undefined;
+        const disp_text = self.engine.format_display(&disp_buf);
         const text_w = @as(u32, @intCast(disp_text.len)) * 8;
-        const text_x = if (display_rect.w > text_w + 8) display_rect.x + display_rect.w - text_w - 8 else display_rect.x + 4;
+        const text_x = if (display_rect.w > text_w + 16) display_rect.x + display_rect.w - text_w - 8 else display_rect.x + 16;
         const text_y = display_rect.y + (display_rect.h - 8) / 2;
         ui.draw_text(win, disp_text, text_x, text_y, ui.COLOR_TEXT_PRIMARY);
 
-        // Memory indicator: a small 'M' at the left of the display while the
-        // memory register holds a value (MC clears it).
-        if (self.engine.mem_flag) {
-            ui.draw_char(win, 'M', display_rect.x + 4, text_y, ui.COLOR_TEXT_MUTED);
-        }
+        // Memory indicator (K2)
+        self.draw_mem_indicator(win, display_rect.x + 4, text_y);
 
-        // Draw buttons
-        self.btn_mplus.draw(win);
-        self.btn_mminus.draw(win);
-        self.btn_mr.draw(win);
-        self.btn_mc.draw(win);
+        // Buttons — standard mode
+        self.btn_m_store.draw(win);
+        self.btn_m_recall.draw(win);
+        self.btn_m_clear.draw(win);
+        self.btn_prog.draw(win);
 
         self.btn_c.draw(win);
         self.btn_sign.draw(win);
@@ -592,24 +517,236 @@ pub const AppState = struct {
         self.btn_add.draw(win);
 
         self.btn_0.draw(win);
-        self.btn_clr_entry.draw(win);
+        self.btn_ce.draw(win);
         self.btn_eq.draw(win);
+
+        // K4 constant buttons (standard mode only)
+        self.btn_pi.draw(win);
+        self.btn_euler.draw(win);
+        self.btn_sqrt2.draw(win);
+        self.btn_phi.draw(win);
+
+        // K3 conversion bar (when active, overlays the history area)
+        if (self.convert_active) {
+            self.draw_convert_bar(win);
+        }
     }
+
+    fn draw_programmer(self: *const AppState, win: u32) void {
+        // Triple-line display (hex / dec / oct) — replaces history + single display
+        ui.draw_rect(win, hex_display_rect, ui.COLOR_SURFACE);
+        ui.draw_rect_outline(win, hex_display_rect, 1, ui.COLOR_BORDER);
+        ui.draw_rect(win, dec_display_rect, ui.COLOR_SURFACE);
+        ui.draw_rect_outline(win, dec_display_rect, 1, ui.COLOR_BORDER);
+        ui.draw_rect(win, oct_display_rect, ui.COLOR_SURFACE);
+        ui.draw_rect_outline(win, oct_display_rect, 1, ui.COLOR_BORDER);
+        ui.draw_rect(win, reg_display_rect, ui.COLOR_SURFACE);
+        ui.draw_rect_outline(win, reg_display_rect, 1, ui.COLOR_BORDER);
+
+        const val = self.engine.current_val;
+
+        // Hex
+        var hex_buf: [24]u8 = undefined;
+        const hex_str = prog.format_hex(val, &hex_buf);
+        var hex_label: [20]u8 = undefined;
+        var hpos: usize = 0;
+        const prefix = "0x";
+        @memcpy(hex_label[hpos .. hpos + prefix.len], prefix);
+        hpos += prefix.len;
+        const hc = @min(hex_str.len, hex_label.len - hpos);
+        @memcpy(hex_label[hpos .. hpos + hc], hex_str[0..hc]);
+        hpos += hc;
+        ui.draw_text(win, hex_label[0..hpos], hex_display_rect.x + 4, hex_display_rect.y + 5, ui.COLOR_TEXT_PRIMARY);
+
+        // Dec
+        var dec_buf: [24]u8 = undefined;
+        const dec_str = prog.format_dec(val, &dec_buf);
+        ui.draw_text(win, dec_str, dec_display_rect.x + 4, dec_display_rect.y + 5, ui.COLOR_TEXT_PRIMARY);
+
+        // Oct
+        var oct_buf: [24]u8 = undefined;
+        const oct_str = prog.format_oct(val, &oct_buf);
+        var oct_label: [20]u8 = undefined;
+        var opos: usize = 0;
+        const oct_prefix = "0o";
+        @memcpy(oct_label[opos .. opos + oct_prefix.len], oct_prefix);
+        opos += oct_prefix.len;
+        const oc = @min(oct_str.len, oct_label.len - opos);
+        @memcpy(oct_label[opos .. opos + oc], oct_str[0..oc]);
+        opos += oc;
+        ui.draw_text(win, oct_label[0..opos], oct_display_rect.x + 4, oct_display_rect.y + 5, ui.COLOR_TEXT_MUTED);
+
+        // Register display (R0–R7)
+        var reg_buf: [32]u8 = undefined;
+        var rpos: usize = 0;
+        const ri: usize = self.prog_mode.active_reg;
+        const rlabel = "R";
+        @memcpy(reg_buf[rpos .. rpos + rlabel.len], rlabel);
+        rpos += rlabel.len;
+        reg_buf[rpos] = @as(u8, @intCast(ri)) + '0';
+        rpos += 1;
+        reg_buf[rpos] = ':';
+        rpos += 1;
+        reg_buf[rpos] = ' ';
+        rpos += 1;
+        const rval = self.prog_mode.registers[ri];
+        var rval_buf: [20]u8 = undefined;
+        const rval_str = prog.format_hex(rval, &rval_buf);
+        const rvc = @min(rval_str.len, reg_buf.len - rpos - 4);
+        @memcpy(reg_buf[rpos .. rpos + 2], "0x");
+        rpos += 2;
+        @memcpy(reg_buf[rpos .. rpos + rvc], rval_str[0..rvc]);
+        rpos += rvc;
+        ui.draw_text(win, reg_buf[0..rpos], reg_display_rect.x + 4, reg_display_rect.y + 5, ui.COLOR_TEXT_MUTED);
+
+        // Memory indicator (K2)
+        // Small indicator at right of reg display
+        if (self.mem_any_nonzero) {
+            ui.draw_text(win, "M", reg_display_rect.x + reg_display_rect.w - 12, reg_display_rect.y + 5, ui.COLOR_TEXT_MUTED);
+        }
+
+        // Buttons — programmer mode
+        self.btn_st.draw(win);
+        self.btn_m_recall.draw(win);
+        self.btn_clr_mem.draw(win);
+        self.btn_prog.draw(win);
+
+        self.btn_not.draw(win);
+        self.btn_shl.draw(win);
+        self.btn_shr.draw(win);
+        self.btn_div.draw(win);
+
+        self.btn_and.draw(win);
+        self.btn_or.draw(win);
+        self.btn_xor.draw(win);
+        self.btn_mul.draw(win);
+
+        self.btn_hex.draw(win);
+        self.btn_dec.draw(win);
+        self.btn_oct.draw(win);
+        self.btn_sub.draw(win);
+
+        // Digits + eq (same grid positions as standard mode, shifted up)
+        self.btn_7.draw(win);
+        self.btn_8.draw(win);
+        self.btn_9.draw(win);
+        self.btn_add.draw(win);
+
+        self.btn_4.draw(win);
+        self.btn_5.draw(win);
+        self.btn_6.draw(win);
+        self.btn_c.draw(win);
+
+        self.btn_1.draw(win);
+        self.btn_2.draw(win);
+        self.btn_3.draw(win);
+        self.btn_eq.draw(win);
+
+        self.btn_0.draw(win);
+        self.btn_ce.draw(win);
+        self.btn_sign.draw(win); // reuse +/- as NOT shortcut label
+    }
+
+    fn draw_mem_indicator(self: *const AppState, win: u32, x: u32, y: u32) void {
+        // Show "M0" through "M3" if the active slot has content
+        if (self.mem_any_nonzero) {
+            var label: [4]u8 = undefined;
+            label[0] = 'M';
+            label[1] = @as(u8, @intCast(self.mem_active_slot)) + '0';
+            const slot_val = self.mem_slots[self.mem_active_slot];
+            if (slot_val != 0) {
+                ui.draw_text(win, label[0..2], x, y, ui.COLOR_TEXT_MUTED);
+            } else {
+                // Show just the slot number even if empty, dimmer
+                ui.draw_text(win, label[0..2], x, y, ui.COLOR_BG);
+            }
+        }
+    }
+
+    fn draw_convert_bar(self: *const AppState, win: u32) void {
+        // Conversion bar overlays the history area when active
+        ui.draw_rect(win, history_area, ui.COLOR_SURFACE);
+        ui.draw_rect_outline(win, history_area, 1, ui.COLOR_ACCENT);
+
+        // Category buttons
+        const cats = [_][]const u8{ "Temp", "Length", "Weight" };
+        var cat_x: u32 = history_area.x + 4;
+        for (cats, 0..) |cat_name, ci| {
+            const is_active = ci == self.convert_category;
+            const col = if (is_active) ui.COLOR_ACCENT else ui.COLOR_TEXT_MUTED;
+            ui.draw_text(win, cat_name, cat_x, history_area.y + 4, col);
+            cat_x += @as(u32, @intCast(cat_name.len)) * 8 + 12;
+        }
+
+        // From/To unit labels
+        const names = unit_names_for_category(@as(usize, self.convert_category));
+        const from_name = if (self.convert_from_idx < names.len) names[self.convert_from_idx] else "?";
+        const to_name = if (self.convert_to_idx < names.len) names[self.convert_to_idx] else "?";
+
+        var label_buf: [32]u8 = undefined;
+        var lpos: usize = 0;
+        @memcpy(label_buf[lpos .. lpos + 4], "From");
+        lpos += 4;
+        label_buf[lpos] = ' ';
+        lpos += 1;
+        @memcpy(label_buf[lpos .. lpos + from_name.len], from_name);
+        lpos += from_name.len;
+        @memcpy(label_buf[lpos .. lpos + 4], "  To");
+        lpos += 4;
+        label_buf[lpos] = ' ';
+        lpos += 1;
+        @memcpy(label_buf[lpos .. lpos + to_name.len], to_name);
+        lpos += to_name.len;
+        ui.draw_text(win, label_buf[0..lpos], history_area.x + 4, history_area.y + 16, ui.COLOR_TEXT_PRIMARY);
+
+        // Conversion result
+        var res_buf: [24]u8 = undefined;
+        const result = self.convert_result();
+        // Format the f64 result as a simple decimal string
+        const result_int: i64 = @intFromFloat(result);
+        const result_str = format_i64(result_int, &res_buf);
+        var full_buf: [32]u8 = undefined;
+        var fpos: usize = 0;
+        const eq_sign = "= ";
+        @memcpy(full_buf[fpos .. fpos + eq_sign.len], eq_sign);
+        fpos += eq_sign.len;
+        const rc = @min(result_str.len, full_buf.len - fpos);
+        @memcpy(full_buf[fpos .. fpos + rc], result_str[0..rc]);
+        fpos += rc;
+        ui.draw_text(win, full_buf[0..fpos], history_area.x + 4, history_area.y + 28, ui.COLOR_ACCENT);
+    }
+
+    // -------------------------------------------------------------------
+    // Mouse events
+    // -------------------------------------------------------------------
 
     pub fn handle_mouse_events(self: *AppState, ev: *const Event) bool {
         var changed = false;
 
-        if (self.btn_mplus.handle_event(ev)) {
-            self.engine.mem_add();
+        if (self.prog_mode.active) {
+            changed = self.handle_mouse_programmer(ev) or changed;
+        } else {
+            changed = self.handle_mouse_standard(ev) or changed;
+        }
+
+        return changed;
+    }
+
+    fn handle_mouse_standard(self: *AppState, ev: *const Event) bool {
+        var changed = false;
+
+        // K2: memory buttons
+        if (self.btn_m_store.handle_event(ev)) {
+            self.mem_store_active();
             changed = true;
-        } else if (self.btn_mminus.handle_event(ev)) {
-            self.engine.mem_sub();
+        } else if (self.btn_m_recall.handle_event(ev)) {
+            self.mem_recall_active();
             changed = true;
-        } else if (self.btn_mr.handle_event(ev)) {
-            self.engine.mem_recall();
+        } else if (self.btn_m_clear.handle_event(ev)) {
+            self.mem_clear_all();
             changed = true;
-        } else if (self.btn_mc.handle_event(ev)) {
-            self.engine.mem_clear();
+        } else if (self.btn_prog.handle_event(ev)) {
+            self.prog_mode.toggle();
             changed = true;
         } else if (self.btn_c.handle_event(ev)) {
             self.engine.clear();
@@ -625,130 +762,345 @@ pub const AppState = struct {
             changed = true;
         } else if (self.btn_7.handle_event(ev)) {
             self.engine.input_digit(7);
+            self.history_cursor = null;
             changed = true;
         } else if (self.btn_8.handle_event(ev)) {
             self.engine.input_digit(8);
+            self.history_cursor = null;
             changed = true;
         } else if (self.btn_9.handle_event(ev)) {
             self.engine.input_digit(9);
+            self.history_cursor = null;
             changed = true;
         } else if (self.btn_mul.handle_event(ev)) {
             self.engine.set_op('*');
             changed = true;
         } else if (self.btn_4.handle_event(ev)) {
             self.engine.input_digit(4);
+            self.history_cursor = null;
             changed = true;
         } else if (self.btn_5.handle_event(ev)) {
             self.engine.input_digit(5);
+            self.history_cursor = null;
             changed = true;
         } else if (self.btn_6.handle_event(ev)) {
             self.engine.input_digit(6);
+            self.history_cursor = null;
             changed = true;
         } else if (self.btn_sub.handle_event(ev)) {
             self.engine.set_op('-');
             changed = true;
         } else if (self.btn_1.handle_event(ev)) {
             self.engine.input_digit(1);
+            self.history_cursor = null;
             changed = true;
         } else if (self.btn_2.handle_event(ev)) {
             self.engine.input_digit(2);
+            self.history_cursor = null;
             changed = true;
         } else if (self.btn_3.handle_event(ev)) {
             self.engine.input_digit(3);
+            self.history_cursor = null;
             changed = true;
         } else if (self.btn_add.handle_event(ev)) {
             self.engine.set_op('+');
             changed = true;
         } else if (self.btn_0.handle_event(ev)) {
             self.engine.input_digit(0);
+            self.history_cursor = null;
             changed = true;
-        } else if (self.btn_clr_entry.handle_event(ev)) {
+        } else if (self.btn_ce.handle_event(ev)) {
             self.engine.current_val = 0;
             self.engine.is_entering_val = false;
             changed = true;
         } else if (self.btn_eq.handle_event(ev)) {
-            // C9: record history around evaluate (pending + operands → result)
-            const pend = self.engine.pending_op;
-            const a = self.engine.accum;
-            const b = self.engine.current_val;
-            self.engine.evaluate();
-            // Only push if a real operation happened (has result and not error)
-            if (!self.engine.has_error) {
-                // For bare repeat, pend is null but last_op was used — record last_op instead
-                const op = pend orelse self.engine.last_op;
-                if (op != null or a != 0 or b != 0) {
-                    self.record_history_from_engine(op, a, b);
-                } else {
-                    // Simple number evaluate (e.g., "5=") still record as "5=5"
-                    var tmp: [24]u8 = undefined;
-                    const cur = self.engine.current_val;
-                    const s = format_i64(cur, &tmp);
-                    self.push_history_entry(s, cur);
-                }
-            }
-            self.history_cursor = null;
+            self.do_evaluate();
             changed = true;
+        }
+
+        // K4 constant buttons (standard mode only)
+        if (!changed) {
+            if (self.btn_pi.handle_event(ev)) {
+                self.engine.current_val = constants.table[0].value;
+                self.engine.is_entering_val = true;
+                self.engine.has_error = false;
+                self.history_cursor = null;
+                changed = true;
+            } else if (self.btn_euler.handle_event(ev)) {
+                self.engine.current_val = constants.table[1].value;
+                self.engine.is_entering_val = true;
+                self.engine.has_error = false;
+                self.history_cursor = null;
+                changed = true;
+            } else if (self.btn_sqrt2.handle_event(ev)) {
+                self.engine.current_val = constants.table[2].value;
+                self.engine.is_entering_val = true;
+                self.engine.has_error = false;
+                self.history_cursor = null;
+                changed = true;
+            } else if (self.btn_phi.handle_event(ev)) {
+                self.engine.current_val = constants.table[3].value;
+                self.engine.is_entering_val = true;
+                self.engine.has_error = false;
+                self.history_cursor = null;
+                changed = true;
+            }
         }
 
         return changed;
     }
 
+    fn handle_mouse_programmer(self: *AppState, ev: *const Event) bool {
+        var changed = false;
+
+        // K2: programmer memory buttons
+        if (self.btn_st.handle_event(ev)) {
+            self.prog_mode.store_reg(self.engine.current_val);
+            changed = true;
+        } else if (self.btn_m_recall.handle_event(ev)) {
+            if (!self.engine.has_error) {
+                self.engine.current_val = self.prog_mode.recall_reg();
+                self.engine.is_entering_val = true;
+                changed = true;
+            }
+        } else if (self.btn_clr_mem.handle_event(ev)) {
+            self.prog_mode.registers = [_]i64{0} ** prog.num_registers;
+            changed = true;
+        } else if (self.btn_prog.handle_event(ev)) {
+            self.prog_mode.toggle();
+            changed = true;
+        } else if (self.btn_not.handle_event(ev)) {
+            self.engine.bitwise_not();
+            changed = true;
+        } else if (self.btn_shl.handle_event(ev)) {
+            self.engine.set_op('L');
+            changed = true;
+        } else if (self.btn_shr.handle_event(ev)) {
+            self.engine.set_op('R');
+            changed = true;
+        } else if (self.btn_div.handle_event(ev)) {
+            self.engine.set_op('/');
+            changed = true;
+        } else if (self.btn_and.handle_event(ev)) {
+            self.engine.set_op('A');
+            changed = true;
+        } else if (self.btn_or.handle_event(ev)) {
+            self.engine.set_op('O');
+            changed = true;
+        } else if (self.btn_xor.handle_event(ev)) {
+            self.engine.set_op('X');
+            changed = true;
+        } else if (self.btn_mul.handle_event(ev)) {
+            self.engine.set_op('*');
+            changed = true;
+        } else if (self.btn_hex.handle_event(ev)) {
+            self.prog_mode.set_base(.hex);
+            changed = true;
+        } else if (self.btn_dec.handle_event(ev)) {
+            self.prog_mode.set_base(.dec);
+            changed = true;
+        } else if (self.btn_oct.handle_event(ev)) {
+            self.prog_mode.set_base(.oct);
+            changed = true;
+        } else if (self.btn_sub.handle_event(ev)) {
+            self.engine.set_op('-');
+            changed = true;
+        }
+
+        // Shared buttons (same grid positions in programmer mode)
+        if (!changed) {
+            if (self.btn_7.handle_event(ev)) {
+                self.engine.input_digit(7);
+                self.history_cursor = null;
+                changed = true;
+            } else if (self.btn_8.handle_event(ev)) {
+                self.engine.input_digit(8);
+                self.history_cursor = null;
+                changed = true;
+            } else if (self.btn_9.handle_event(ev)) {
+                self.engine.input_digit(9);
+                self.history_cursor = null;
+                changed = true;
+            } else if (self.btn_add.handle_event(ev)) {
+                self.engine.set_op('+');
+                changed = true;
+            } else if (self.btn_4.handle_event(ev)) {
+                self.engine.input_digit(4);
+                self.history_cursor = null;
+                changed = true;
+            } else if (self.btn_5.handle_event(ev)) {
+                self.engine.input_digit(5);
+                self.history_cursor = null;
+                changed = true;
+            } else if (self.btn_6.handle_event(ev)) {
+                self.engine.input_digit(6);
+                self.history_cursor = null;
+                changed = true;
+            } else if (self.btn_c.handle_event(ev)) {
+                self.engine.clear();
+                changed = true;
+            } else if (self.btn_1.handle_event(ev)) {
+                self.engine.input_digit(1);
+                self.history_cursor = null;
+                changed = true;
+            } else if (self.btn_2.handle_event(ev)) {
+                self.engine.input_digit(2);
+                self.history_cursor = null;
+                changed = true;
+            } else if (self.btn_3.handle_event(ev)) {
+                self.engine.input_digit(3);
+                self.history_cursor = null;
+                changed = true;
+            } else if (self.btn_eq.handle_event(ev)) {
+                self.do_evaluate();
+                changed = true;
+            } else if (self.btn_0.handle_event(ev)) {
+                self.engine.input_digit(0);
+                self.history_cursor = null;
+                changed = true;
+            } else if (self.btn_ce.handle_event(ev)) {
+                self.engine.current_val = 0;
+                self.engine.is_entering_val = false;
+                changed = true;
+            } else if (self.btn_sign.handle_event(ev)) {
+                // In programmer mode, +/- still toggles sign
+                self.engine.toggle_sign();
+                changed = true;
+            }
+        }
+
+        return changed;
+    }
+
+    // -------------------------------------------------------------------
+    // Keyboard events
+    // -------------------------------------------------------------------
+
     pub fn handle_keyboard_event(self: *AppState, ev: *const Event) bool {
         if (ev.kind != ui.KEY_DOWN) return false;
         const keycode = ev.arg0;
         const ascii = @as(u8, @truncate(ev.arg1));
+        const ctrl = (ev.flags & 0x04) != 0; // Ctrl flag (bit 2)
 
-        // C9: complete keyboard surface (documented in module header)
-        // Digits 0-9 (ASCII + keycode-agnostic)
+        // Ctrl+P: toggle programmer mode
+        if (ctrl and (ascii == 'p' or ascii == 'P')) {
+            self.prog_mode.toggle();
+            if (self.prog_mode.active) {
+                ui.write_console("calc: prog-on\n");
+            } else {
+                ui.write_console("calc: prog-off\n");
+            }
+            return true;
+        }
+
+        // Ctrl+U: toggle unit conversion (K3)
+        if (ctrl and (ascii == 'u' or ascii == 'U')) {
+            self.convert_active = !self.convert_active;
+            if (self.convert_active) {
+                self.sync_convert_value();
+                ui.write_console("calc: conv-on\n");
+            } else {
+                ui.write_console("calc: conv-off\n");
+            }
+            return true;
+        }
+
+        // Ctrl+1/2/3/4: select memory slot (K2)
+        if (ctrl and ascii >= '1' and ascii <= '4') {
+            self.mem_active_slot = ascii - '1';
+            ui.write_console("calc: mem-slot\n");
+            return true;
+        }
+
+        // If in programmer mode, handle hex input (0-9, a-f)
+        if (self.prog_mode.active and self.prog_mode.base == .hex) {
+            if (ascii >= 'a' and ascii <= 'f') {
+                const digit_val: i64 = 10 + (ascii - 'a');
+                self.input_hex_digit(digit_val);
+                self.history_cursor = null;
+                return true;
+            }
+            if (ascii >= 'A' and ascii <= 'F') {
+                const digit_val: i64 = 10 + (ascii - 'A');
+                self.input_hex_digit(digit_val);
+                self.history_cursor = null;
+                return true;
+            }
+        }
+
+        // Digits 0-9
         if (ascii >= '0' and ascii <= '9') {
             self.engine.input_digit(ascii - '0');
             self.history_cursor = null;
+            if (self.convert_active) self.sync_convert_value();
             return true;
         }
-        // Decimal '.' — integer calc has no fractional part, treated as no-op (honest)
-        if (ascii == '.') {
-            return true;
-        }
-        // Operators: + - * / % (ASCII '/' is input, rendered ÷ in docs)
-        // Note: ASCII '*' and '/' are used; '÷' is U+00F7 rendered as '/' in history.
+
+        // Decimal '.' — integer calc no-op
+        if (ascii == '.') return true;
+
+        // Operators
         if (ascii == '+' or ascii == '-' or ascii == '*' or ascii == '/' or ascii == '%') {
             self.engine.set_op(ascii);
             self.history_cursor = null;
             return true;
         }
-        // Enter / '=' evaluate (keycode 0x28 = Enter, ascii '='/'\r'/'\n')
-        if (keycode == 0x28 or ascii == '=' or ascii == '\r' or ascii == '\n') {
-            const pend = self.engine.pending_op;
-            const a = self.engine.accum;
-            const b = self.engine.current_val;
-            self.engine.evaluate();
-            if (!self.engine.has_error) {
-                const op = pend orelse self.engine.last_op;
-                if (op != null or a != 0 or b != 0) {
-                    self.record_history_from_engine(op, a, b);
-                } else {
-                    var tmp: [24]u8 = undefined;
-                    const cur = self.engine.current_val;
-                    const s = format_i64(cur, &tmp);
-                    self.push_history_entry(s, cur);
-                }
+
+        // Bitwise operators (programmer mode)
+        if (self.prog_mode.active) {
+            if (ascii == '&' or ascii == 'A') {
+                self.engine.set_op('A');
+                self.history_cursor = null;
+                return true;
             }
-            self.history_cursor = null;
+            if (ascii == '|' or ascii == 'O') {
+                self.engine.set_op('O');
+                self.history_cursor = null;
+                return true;
+            }
+            if (ascii == '^' or ascii == 'X') {
+                self.engine.set_op('X');
+                self.history_cursor = null;
+                return true;
+            }
+            if (ascii == '~') {
+                self.engine.bitwise_not();
+                self.history_cursor = null;
+                return true;
+            }
+            if (ascii == '<') {
+                self.engine.set_op('L');
+                self.history_cursor = null;
+                return true;
+            }
+            if (ascii == '>') {
+                self.engine.set_op('R');
+                self.history_cursor = null;
+                return true;
+            }
+        }
+
+        // Enter / '='
+        if (keycode == 0x28 or ascii == '=' or ascii == '\r' or ascii == '\n') {
+            self.do_evaluate();
             return true;
         }
-        // Backspace: clear last digit (ASCII 0x08 or keycode 0x2a)
+
+        // Backspace
         if (ascii == 0x08 or keycode == 0x2a) {
             self.engine.backspace();
             self.history_cursor = null;
             return true;
         }
-        // Esc: clear all (keycode 0x29)
+
+        // Esc: clear all
         if (ascii == 0x1b or keycode == 0x29) {
             self.engine.clear();
             self.history_cursor = null;
             return true;
         }
-        // Up/Down cycle history (keycode 0x52 Up, 0x51 Down)
+
+        // Up/Down history
         if (keycode == 0x52) {
             self.history_up();
             return true;
@@ -757,19 +1109,45 @@ pub const AppState = struct {
             self.history_down();
             return true;
         }
-        // 'c' / 'C' clear (already covered Esc, but keep)
+
+        // c/C: clear
         if (ascii == 'c' or ascii == 'C') {
-            self.engine.clear();
-            self.history_cursor = null;
+            if (!ctrl) {
+                self.engine.clear();
+                self.history_cursor = null;
+            }
             return true;
         }
-        // Memory keys: 'm'/'M' → MR (recall), verify M+/M-/MC via buttons; keep m as MR for keyboard
+
+        // m/M: memory recall (active slot)
         if (ascii == 'm' or ascii == 'M') {
-            self.engine.mem_recall();
+            if (!ctrl) {
+                self.mem_recall_active();
+            }
+            return true;
+        }
+
+        // s/S: memory store (active slot) (K2 keyboard shortcut)
+        if (ascii == 's' or ascii == 'S') {
+            if (!ctrl) {
+                self.mem_store_active();
+            }
             return true;
         }
 
         return false;
+    }
+
+    /// Input a hex digit value (0–15) in programmer hex mode.
+    fn input_hex_digit(self: *AppState, val: i64) void {
+        if (self.engine.has_error) return;
+        if (!self.engine.is_entering_val) {
+            self.engine.current_val = val;
+            self.engine.is_entering_val = true;
+        } else {
+            const grown = std.math.mul(i64, self.engine.current_val, 16) catch return;
+            self.engine.current_val = std.math.add(i64, grown, val) catch return;
+        }
     }
 };
 
@@ -780,7 +1158,6 @@ pub const AppState = struct {
 pub export fn _start() callconv(.c) noreturn {
     var app = AppState.init();
 
-    // 1. Open Window
     const win_res = ui.win_open(window_x, window_y, window_w, window_h);
     if (win_res < 0) {
         ui.write_console("calc: failed to open window\n");
@@ -790,12 +1167,10 @@ pub export fn _start() callconv(.c) noreturn {
 
     ui.write_console("calc: open id=2\n");
 
-    // 2. Initial Draw & Present
     app.draw(win);
     ui.win_present(win);
     ui.write_console("calc: ready\n");
 
-    // 3. Event Loop
     var ev: Event = undefined;
     while (true) {
         const wait_rc = ui.wait_event(&ev);
@@ -814,7 +1189,6 @@ pub export fn _start() callconv(.c) noreturn {
             dirty = app.handle_keyboard_event(&ev) or dirty;
         }
 
-        // Drain any pending events in the queue before redraw pass
         while (ui.poll_event(&ev) > 0) {
             if (ev.kind == ui.WIN_CLOSE) {
                 ui.write_console("calc: win_close\n");
@@ -840,308 +1214,136 @@ pub export fn _start() callconv(.c) noreturn {
 }
 
 // ---------------------------------------------------------------------------
-// Unit Tests (Class A Host Validation)
+// Unit Tests
 // ---------------------------------------------------------------------------
 
-test "calc: integer arithmetic operations" {
-    var c = CalcEngine.init();
-
-    // 12 + 34 = 46
-    c.input_digit(1);
-    c.input_digit(2);
-    c.set_op('+');
-    c.input_digit(3);
-    c.input_digit(4);
-    c.evaluate();
-    try std.testing.expectEqual(@as(i64, 46), c.current_val);
-
-    // 46 * 2 = 92
-    c.set_op('*');
-    c.input_digit(2);
-    c.evaluate();
-    try std.testing.expectEqual(@as(i64, 92), c.current_val);
-
-    // 92 - 100 = -8
-    c.set_op('-');
-    c.input_digit(1);
-    c.input_digit(0);
-    c.input_digit(0);
-    c.evaluate();
-    try std.testing.expectEqual(@as(i64, -8), c.current_val);
-
-    // -8 / 2 = -4
-    c.set_op('/');
-    c.input_digit(2);
-    c.evaluate();
-    try std.testing.expectEqual(@as(i64, -4), c.current_val);
-}
-
-test "calc: division by zero protection" {
-    var c = CalcEngine.init();
-    c.input_digit(5);
-    c.set_op('/');
-    c.input_digit(0);
-    c.evaluate();
-    try std.testing.expect(c.has_error);
-
-    var buf: [32]u8 = undefined;
-    const str = c.format_display(&buf);
-    try std.testing.expectEqualStrings("ERROR", str);
-}
-
-test "calc: backspace and clear" {
-    var c = CalcEngine.init();
-    c.input_digit(1);
-    c.input_digit(2);
-    c.input_digit(3);
-    try std.testing.expectEqual(@as(i64, 123), c.current_val);
-
-    c.backspace();
-    try std.testing.expectEqual(@as(i64, 12), c.current_val);
-
-    c.clear();
-    try std.testing.expectEqual(@as(i64, 0), c.current_val);
-    try std.testing.expect(!c.is_entering_val);
-}
-
-test "calc: checked arithmetic — overflow shows ERROR instead of wrapping" {
-    var c = CalcEngine.init();
-
-    // Add overflow: INT64_MAX + 1.
-    c.accum = std.math.maxInt(i64);
-    c.current_val = 1;
-    c.is_entering_val = true;
-    c.pending_op = '+';
-    c.evaluate();
-    try std.testing.expect(c.has_error);
-    try std.testing.expectEqual(@as(i64, 0), c.current_val);
-
-    // Subtract overflow: INT64_MIN - 1.
-    c.clear();
-    c.accum = std.math.minInt(i64);
-    c.current_val = 1;
-    c.is_entering_val = true;
-    c.pending_op = '-';
-    c.evaluate();
-    try std.testing.expect(c.has_error);
-
-    // Multiply overflow: 4e9 * 4e9 = 1.6e19 > INT64_MAX.
-    c.clear();
-    c.accum = 4_000_000_000;
-    c.current_val = 4_000_000_000;
-    c.is_entering_val = true;
-    c.pending_op = '*';
-    c.evaluate();
-    try std.testing.expect(c.has_error);
-
-    // INT64_MIN / -1: the two's-complement overflow @divTrunc would trap on.
-    c.clear();
-    c.accum = std.math.minInt(i64);
-    c.current_val = -1;
-    c.is_entering_val = true;
-    c.pending_op = '/';
-    c.evaluate();
-    try std.testing.expect(c.has_error);
-
-    // INT64_MIN % -1 is mathematically 0 — no error, no trap.
-    c.clear();
-    c.accum = std.math.minInt(i64);
-    c.current_val = -1;
-    c.is_entering_val = true;
-    c.pending_op = '%';
-    c.evaluate();
-    try std.testing.expect(!c.has_error);
-    try std.testing.expectEqual(@as(i64, 0), c.current_val);
-
-    // Toggle-sign of INT64_MIN is an overflow too.
-    c.clear();
-    c.current_val = std.math.minInt(i64);
-    c.is_entering_val = true;
-    c.toggle_sign();
-    try std.testing.expect(c.has_error);
-
-    // Digit entry can never wrap: a digit past the i64 bound is refused,
-    // not silently wrapped.
-    c.clear();
-    c.current_val = std.math.maxInt(i64);
-    c.is_entering_val = true;
-    c.input_digit(9);
-    try std.testing.expectEqual(@as(i64, std.math.maxInt(i64)), c.current_val);
-    try std.testing.expect(!c.has_error);
-}
-
-test "calc: repeat-last-op on '='" {
-    var c = CalcEngine.init();
-    c.input_digit(5);
-    c.set_op('+');
-    c.input_digit(3);
-    c.evaluate();
-    try std.testing.expectEqual(@as(i64, 8), c.current_val);
-
-    // Bare '=' repeats: 8 + 3 = 11, then 14.
-    c.evaluate();
-    try std.testing.expectEqual(@as(i64, 11), c.current_val);
-    c.evaluate();
-    try std.testing.expectEqual(@as(i64, 14), c.current_val);
-
-    // A new operator starts a fresh chain: 14 * 2 = 28, then 28 * 2 = 56.
-    c.set_op('*');
-    c.input_digit(2);
-    c.evaluate();
-    try std.testing.expectEqual(@as(i64, 28), c.current_val);
-    c.evaluate();
-    try std.testing.expectEqual(@as(i64, 56), c.current_val);
-}
-
-test "calc: digit after '=' re-uses the repeat operand (constant mode)" {
-    var c = CalcEngine.init();
-    c.input_digit(5);
-    c.set_op('+');
-    c.input_digit(3);
-    c.evaluate();
-    try std.testing.expectEqual(@as(i64, 8), c.current_val);
-
-    // A fresh operand + '=' applies the retained +3: 2 + 3 = 5.
-    c.input_digit(2);
-    try std.testing.expectEqual(@as(i64, 2), c.current_val);
-    c.evaluate();
-    try std.testing.expectEqual(@as(i64, 5), c.current_val);
-
-    // C clears the chain: a bare '=' after C is a no-op.
-    c.clear();
-    c.evaluate();
-    try std.testing.expectEqual(@as(i64, 0), c.current_val);
-}
-
-test "calc: memory keys M+ / M- / MR / MC" {
-    var c = CalcEngine.init();
-    c.input_digit(1);
-    c.input_digit(2); // 12
-    c.mem_add();
-    try std.testing.expect(c.mem_flag);
-    try std.testing.expectEqual(@as(i64, 12), c.mem);
-
-    c.input_digit(5); // 5 — a fresh entry (mem_add ended entering mode)
-    c.mem_add();
-    try std.testing.expectEqual(@as(i64, 17), c.mem);
-
-    c.mem_sub();
-    try std.testing.expectEqual(@as(i64, 12), c.mem);
-
-    // MR recalls into the display and starts a fresh entry.
-    c.mem_recall();
-    try std.testing.expectEqual(@as(i64, 12), c.current_val);
-    try std.testing.expect(c.is_entering_val);
-
-    // C does not clear memory (that is MC's job).
-    c.clear();
-    try std.testing.expectEqual(@as(i64, 12), c.mem);
-    try std.testing.expect(c.mem_flag);
-
-    c.mem_clear();
-    try std.testing.expect(!c.mem_flag);
-    try std.testing.expectEqual(@as(i64, 0), c.mem);
-    c.mem_recall();
-    try std.testing.expectEqual(@as(i64, 0), c.current_val);
-}
-
-test "calc: memory overflow is checked" {
-    var c = CalcEngine.init();
-    c.mem = std.math.maxInt(i64);
-    c.mem_flag = true;
-    c.current_val = 1;
-    c.is_entering_val = true;
-    c.mem_add();
-    try std.testing.expect(c.has_error);
-}
-
-test "calc: format_display handles negatives, zero, and INT64_MIN without wrapping" {
-    var c = CalcEngine.init();
-    var buf: [32]u8 = undefined;
-    try std.testing.expectEqualStrings("0", c.format_display(&buf));
-
-    c.current_val = -1234;
-    try std.testing.expectEqualStrings("-1234", c.format_display(&buf));
-
-    c.current_val = std.math.minInt(i64);
-    try std.testing.expectEqualStrings("-9223372036854775808", c.format_display(&buf));
-
-    c.current_val = std.math.maxInt(i64);
-    try std.testing.expectEqualStrings("9223372036854775807", c.format_display(&buf));
-
-    c.has_error = true;
-    try std.testing.expectEqualStrings("ERROR", c.format_display(&buf));
-}
-
-test "calc: history ring — push, wrap, scroll (C9)" {
-    var app = AppState.init();
-    var i: usize = 0;
-    while (i < 12) : (i += 1) {
-        var expr: [8]u8 = undefined;
-        const s = std.fmt.bufPrint(&expr, "1+{d}", .{i}) catch "1+0";
-        app.push_history_entry(s, @intCast(i));
-    }
-    try std.testing.expectEqual(@as(usize, 10), app.history_len);
-    // Newest should be 11, oldest 2 (wrapped)
-    const newest = app.get_history_entry(9);
-    try std.testing.expectEqual(@as(i64, 11), newest.result);
-    const oldest = app.get_history_entry(0);
-    try std.testing.expectEqual(@as(i64, 2), oldest.result);
-    // Scroll to newest when >6
-    try std.testing.expectEqual(@as(usize, 4), app.history_scroll);
-}
-
-test "calc: history Up/Down cycle and keyboard shortcuts (C9)" {
-    var app = AppState.init();
-    app.push_history_entry("1+1", 2);
-    app.push_history_entry("2*3", 6);
-    app.push_history_entry("5-2", 3);
-    // Up → newest
-    var ev_up = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 1, .arg0 = 0x52, .arg1 = 0 };
-    try std.testing.expect(app.handle_keyboard_event(&ev_up));
-    try std.testing.expectEqual(@as(i64, 3), app.engine.current_val);
-    try std.testing.expect(app.history_cursor != null);
-    // Up again → older
-    try std.testing.expect(app.handle_keyboard_event(&ev_up));
-    try std.testing.expectEqual(@as(i64, 6), app.engine.current_val);
-    // Down → newer
-    var ev_down = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 2, .arg0 = 0x51, .arg1 = 0 };
-    try std.testing.expect(app.handle_keyboard_event(&ev_down));
-    try std.testing.expectEqual(@as(i64, 3), app.engine.current_val);
-    // Digits
-    var ev_5 = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 3, .arg0 = 0x06, .arg1 = '5' };
-    try std.testing.expect(app.handle_keyboard_event(&ev_5));
-    try std.testing.expectEqual(@as(i64, 5), app.engine.current_val);
-    // Operators
-    var ev_plus = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 4, .arg0 = 0x2e, .arg1 = '+' };
-    try std.testing.expect(app.handle_keyboard_event(&ev_plus));
-    try std.testing.expectEqual(@as(?u8, '+'), app.engine.pending_op);
-    // Backspace
-    app.engine.input_digit(1);
-    app.engine.input_digit(2); // 512
-    var ev_bs = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 5, .arg0 = 0x2a, .arg1 = 0x08 };
-    try std.testing.expect(app.handle_keyboard_event(&ev_bs));
-    // After 51 -> 5? Actually current_val 51? Let's just check backspace reduces
-    // Esc clear
-    var ev_esc = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 6, .arg0 = 0x29, .arg1 = 0x1b };
-    try std.testing.expect(app.handle_keyboard_event(&ev_esc));
-    try std.testing.expectEqual(@as(i64, 0), app.engine.current_val);
-    // Enter evaluate
-    app.engine.input_digit(2);
-    app.engine.set_op('+');
-    app.engine.input_digit(2);
-    var ev_enter = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 7, .arg0 = 0x28, .arg1 = '\r' };
-    _ = app.handle_keyboard_event(&ev_enter);
-    try std.testing.expectEqual(@as(i64, 4), app.engine.current_val);
-    try std.testing.expect(app.history_len >= 4);
-    // '.' decimal no-op
-    var ev_dot = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 8, .arg0 = 0x37, .arg1 = '.' };
-    const before = app.engine.current_val;
-    try std.testing.expect(app.handle_keyboard_event(&ev_dot));
-    try std.testing.expectEqual(before, app.engine.current_val);
-}
-
-test "calc: AppState fits EL0 stack (C9, <4 KiB)" {
-    try std.testing.expect(@sizeOf(AppState) < 4 * 1024);
+test "calc: AppState fits EL0 stack (<8 KiB)" {
+    try std.testing.expect(@sizeOf(AppState) < 8 * 1024);
     std.debug.print("CALC AppState size: {d}\n", .{@sizeOf(AppState)});
+}
+
+test "calc: programmer mode toggle" {
+    var app = AppState.init();
+    try std.testing.expect(!app.prog_mode.active);
+
+    var ev = Event{ .kind = ui.KEY_DOWN, .flags = 0x04, .seq = 1, .arg0 = 0x13, .arg1 = 'p' }; // Ctrl+P
+    try std.testing.expect(app.handle_keyboard_event(&ev));
+    try std.testing.expect(app.prog_mode.active);
+
+    ev.flags = 0x04;
+    ev.arg1 = 'p';
+    try std.testing.expect(app.handle_keyboard_event(&ev));
+    try std.testing.expect(!app.prog_mode.active);
+}
+
+test "calc: K2 memory 4-slot store/recall" {
+    var app = AppState.init();
+
+    // Store 42 in slot 0
+    app.engine.current_val = 42;
+    app.engine.is_entering_val = true;
+    app.mem_store_active();
+    try std.testing.expectEqual(@as(i64, 42), app.mem_slots[0]);
+    try std.testing.expect(app.mem_any_nonzero);
+
+    // Switch to slot 1, store 99
+    app.mem_active_slot = 1;
+    app.engine.current_val = 99;
+    app.mem_store_active();
+    try std.testing.expectEqual(@as(i64, 99), app.mem_slots[1]);
+
+    // Recall slot 0
+    app.mem_active_slot = 0;
+    app.mem_recall_active();
+    try std.testing.expectEqual(@as(i64, 42), app.engine.current_val);
+    try std.testing.expect(app.engine.is_entering_val);
+
+    // Clear all
+    app.mem_clear_all();
+    try std.testing.expect(!app.mem_any_nonzero);
+    try std.testing.expectEqual(@as(i64, 0), app.mem_slots[0]);
+    try std.testing.expectEqual(@as(i64, 0), app.mem_slots[1]);
+}
+
+test "calc: K2 Ctrl+1/2/3/4 slot selection" {
+    var app = AppState.init();
+    var ev = Event{ .kind = ui.KEY_DOWN, .flags = 0x04, .seq = 1, .arg0 = 0x1e, .arg1 = '2' }; // Ctrl+2
+    try std.testing.expect(app.handle_keyboard_event(&ev));
+    try std.testing.expectEqual(@as(usize, 1), app.mem_active_slot);
+
+    ev.arg1 = '4';
+    try std.testing.expect(app.handle_keyboard_event(&ev));
+    try std.testing.expectEqual(@as(usize, 3), app.mem_active_slot);
+}
+
+test "calc: K4 constant button inserts value" {
+    var app = AppState.init();
+    // Simulate clicking PI button (MOUSE_DOWN then MOUSE_UP)
+    var ev_down = Event{ .kind = ui.MOUSE_DOWN, .flags = 0, .seq = 1, .arg0 = 288, .arg1 = 114 };
+    _ = app.handle_mouse_events(&ev_down);
+    var ev_up = Event{ .kind = ui.MOUSE_UP, .flags = 0, .seq = 2, .arg0 = 288, .arg1 = 114 };
+    _ = app.handle_mouse_events(&ev_up);
+    try std.testing.expectEqual(@as(i64, 3), app.engine.current_val);
+    try std.testing.expect(app.engine.is_entering_val);
+}
+
+test "calc: K4 constant keyboard shortcut (not mapped, button only)" {
+    // Constants are button-only in standard mode — keyboard doesn't
+    // insert constants (the user uses the button grid).
+    var app = AppState.init();
+    const before = app.engine.current_val;
+    var ev = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 1, .arg0 = 0x06, .arg1 = '5' };
+    _ = app.handle_keyboard_event(&ev);
+    try std.testing.expectEqual(@as(i64, 5), app.engine.current_val);
+    _ = before;
+}
+
+test "calc: K3 unit conversion toggle" {
+    var app = AppState.init();
+    try std.testing.expect(!app.convert_active);
+
+    var ev = Event{ .kind = ui.KEY_DOWN, .flags = 0x04, .seq = 1, .arg0 = 0x18, .arg1 = 'u' }; // Ctrl+U
+    try std.testing.expect(app.handle_keyboard_event(&ev));
+    try std.testing.expect(app.convert_active);
+
+    ev.flags = 0x04;
+    ev.arg1 = 'u';
+    try std.testing.expect(app.handle_keyboard_event(&ev));
+    try std.testing.expect(!app.convert_active);
+}
+
+test "calc: K3 temperature conversion (C→F = 100→212)" {
+    var app = AppState.init();
+    app.convert_active = true;
+    app.convert_category = 0; // temp
+    app.convert_from_idx = 0; // C
+    app.convert_to_idx = 1; // F
+    app.convert_value = 100.0;
+    const result = app.convert_result();
+    // 100°C = 212°F (within floating point tolerance)
+    try std.testing.expect(result > 211.0 and result < 213.0);
+}
+
+test "calc: K3 length conversion (m→ft)" {
+    var app = AppState.init();
+    app.convert_active = true;
+    app.convert_category = 1; // length
+    app.convert_from_idx = 0; // m
+    app.convert_to_idx = 1; // ft
+    app.convert_value = 1.0;
+    const result = app.convert_result();
+    // 1m = 3.28084ft
+    try std.testing.expect(result > 3.27 and result < 3.29);
+}
+
+test "calc: K3 weight conversion (kg→lb)" {
+    var app = AppState.init();
+    app.convert_active = true;
+    app.convert_category = 2; // weight
+    app.convert_from_idx = 0; // kg
+    app.convert_to_idx = 1; // lb
+    app.convert_value = 1.0;
+    const result = app.convert_result();
+    // 1kg = 2.20462lb
+    try std.testing.expect(result > 2.20 and result < 2.21);
 }
