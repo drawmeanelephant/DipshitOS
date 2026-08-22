@@ -5756,7 +5756,7 @@ test "monitor: text reports the region and refuses put/clear without the transpo
     try std.testing.expectEqual(ExecError.usage, exec(&mon, &.{ "text", "bogus" }));
     // `text` is registered (the registry-row shape).
     try std.testing.expect(lookup("text") != null);
-    try std.testing.expectEqualStrings("framebuffer text: text region, cursor, scrollback ('text put <string...>' renders + flushes to the scanout; 'text clear' clears)", lookup("text").?.help);
+    try std.testing.expectEqualStrings("framebuffer text: text region, cursor, scrollback ('text put <string...>' renders + flushes to the scanout; 'text clear' clears; 'text fontdebug [on|off]' missing-glyph stats)", lookup("text").?.help);
 }
 
 test "monitor: roadpops reports the tee state honestly" {
