@@ -4,7 +4,7 @@
 - **Prompt / plan:** `docs/agent-concurrency-plan.md` (Lane E), `docs/march-m21.md`
 - **Scope:** M21 W1–W5: tiling mode, master-detail, minimize, workspace-aware alt-tab, notification center
 - **Depends on:** M18 done ✅ (M20 font sizes are a soft dependency — chrome uses existing 8×8 font)
-- **Status:** 🔄 agent/buffy/m21-compositor
+- **Status:** ✅ done
 
 ## Notes
 
