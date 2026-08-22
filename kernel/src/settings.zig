@@ -38,6 +38,7 @@
 //!   prompt     string  "dipshit> "   1..64 chars, interactive shell prompt
 //!   theme      string  "dark"        "dark"|"light"|"amber", UI color accent
 //!   scrollback string  "1000"        positive integer, terminal scrollback lines
+//!   color      string  "on"          "on"|"off", ANSI terminal colors in shell
 
 const std = @import("std");
 const fat = @import("fat.zig");
@@ -126,6 +127,12 @@ pub fn get_prompt() []const u8 {
 /// Dynamic helper for system hostname.
 pub fn get_hostname() []const u8 {
     return get("hostname") orelse "dipshit";
+}
+
+/// M18 T5: whether ANSI terminal colors are enabled.
+pub fn get_color() bool {
+    const val = get("color") orelse return true; // on by default
+    return std.mem.eql(u8, val, "on") or std.mem.eql(u8, val, "1") or std.mem.eql(u8, val, "true");
 }
 
 fn set_internal(key: []const u8, val: []const u8) SetResult {

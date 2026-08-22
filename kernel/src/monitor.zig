@@ -274,7 +274,7 @@ pub const Command = struct {
 /// (claim 6140) grows it 45 -> 46 (`sound`). Milestone fifteen card A2
 /// (claim 5877) grows it 46 -> 47 (`beep`). Milestone sixteen card C3
 /// (claim 0339) grows it 47 -> 48 (`resources`).
-pub const registry_count: usize = 50; // Arc5 #245: added `compose` command
+pub const registry_count: usize = 51; // M18 T5: added `color` command
 
 /// Command registry, built at runtime into BSS. A `const` table would hold
 /// link-time absolute addresses for BOTH the string slices and the handler
@@ -299,6 +299,7 @@ fn ensure_registry() []const Command {
             .{ .name = "compose", .help = "list available Alt+key compose sequences for accented characters", .usage = "compose", .category = .system, .handler = cmd_compose },
             .{ .name = "crash", .help = "list recent crash tombstones from /data/crash/", .usage = "crash", .category = .system, .handler = cmd_crash },
             .{ .name = "clip", .help = "copy/paste the shared kernel clipboard ('clip <text...>' sets it, 'clip' prints it)", .usage = "clip [<text...>]", .category = .system, .handler = cmd_clip },
+            .{ .name = "color", .help = "toggle ANSI terminal colors ('color on'/'color off'; 'color' shows current)", .usage = "color [on|off]", .category = .system, .max_args = 1, .handler = cmd_color },
             .{ .name = "echo", .help = "repeat your regrettable decisions", .usage = "echo <text...>", .category = .system, .handler = cmd_echo },
             .{ .name = "elephant", .help = "operational mascot diagnostics", .usage = "elephant", .category = .machine_identity, .handler = cmd_elephant },
             .{ .name = "exec", .help = "load a user program from the ESP and enter it at EL0", .usage = "exec [<file> [arg...]]", .category = .tasks_processes, .max_args = 1 + esp_exec.max_exec_args, .handler = cmd_exec },
@@ -1313,6 +1314,28 @@ fn cmd_echo(m: *Monitor, args: []const []const u8) ExecError {
 /// clipboard. With no args it pastes the current contents (the EL1h read of
 /// the SAME buffer the slots 38/39 syscalls use); with args it joins them
 /// (space-separated, the `echo` shape) and stores the result — the
+/// M18 T5: toggle ANSI terminal colors on or off.
+fn cmd_color(m: *Monitor, args: []const []const u8) ExecError {
+    if (args.len == 0) {
+        m.console.puts("color: ");
+        m.console.print_line(if (settings.get_color()) "on" else "off");
+        return .none;
+    }
+    if (std.mem.eql(u8, args[0], "on") or std.mem.eql(u8, args[0], "1") or std.mem.eql(u8, args[0], "true")) {
+        _ = settings.set("color", "on");
+        _ = settings.set("color", "on");
+        m.console.print_line("color: on");
+        return .none;
+    }
+    if (std.mem.eql(u8, args[0], "off") or std.mem.eql(u8, args[0], "0") or std.mem.eql(u8, args[0], "false")) {
+        _ = settings.set("color", "off");
+        m.console.print_line("color: off");
+        return .none;
+    }
+    m.console.print_line("usage: color [on|off]");
+    return .none;
+}
+
 /// bounded-copy proof from the shell. Truncation is honest: the staging
 /// buffer is the clipboard capacity, so an over-long paste stores exactly
 /// `clipboard.capacity` bytes and reports it.
