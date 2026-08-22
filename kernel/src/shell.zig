@@ -106,6 +106,9 @@ pub const Shell = struct {
     search_draft: [lineedit.max_line]u8 = undefined,
     search_draft_len: usize = 0,
     search_draft_cursor: usize = 0,
+    /// M18 T5: whether ANSI color escapes are emitted.
+    /// Set true in boot_and_park(), false in host tests (preserves transcript).
+    color_enabled: bool = false,
 
     pub fn init(con: console.Console, state: monitor.SystemState, machine: monitor.MachineControl) Shell {
         var shell = Shell{
@@ -141,7 +144,9 @@ pub const Shell = struct {
     /// is available — callers park between polls; tests drive until idle.
     pub fn poll(self: *Shell) PollResult {
         if (!self.prompt_shown) {
+            if (self.color_enabled) self.mon.console.puts("\x1b[32m");
             self.mon.console.puts(settings.get_prompt());
+            if (self.color_enabled) self.mon.console.puts("\x1b[0m");
             self.prompt_shown = true;
         }
         const byte = self.mon.console.readByte() orelse return .idle;
@@ -193,7 +198,9 @@ pub const Shell = struct {
             .repaint => {
                 // Ctrl-L: the editor cleared the screen; restore the prompt
                 // + the in-progress line (the editor does not own the prompt).
+                if (self.color_enabled) self.mon.console.puts("\x1b[32m");
                 self.mon.console.puts(settings.get_prompt());
+                if (self.color_enabled) self.mon.console.puts("\x1b[0m");
                 self.editor.reprint(self.mon.console);
                 return .pending;
             },
@@ -611,6 +618,7 @@ pub fn boot_and_park(mon: *monitor.Monitor, rx_wired: bool) void {
     const shell: *Shell = &boot_shell_storage;
     shell.* = Shell.init(mon.console, mon.state, mon.machine);
     shell.boot();
+    shell.color_enabled = settings.get_color();
     load_history(&shell.editor);
     while (true) {
         if (shell.poll() == .idle) {
@@ -893,6 +901,7 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "  compose     list available Alt+key compose sequences for accented characters\n" ++
         "  crash       list recent crash tombstones from /data/crash/\n" ++
         "  clip        copy/paste the shared kernel clipboard ('clip <text...>' sets it, 'clip' prints it)\n" ++
+        "  color       toggle ANSI terminal colors ('color on'/'color off'; 'color' shows current)\n" ++
         "  echo        repeat your regrettable decisions\n" ++
         "  help        grouped command catalog and per-command/per-topic help\n" ++
         "  random      print n random bytes from the seeded CSPRNG (hex)\n" ++

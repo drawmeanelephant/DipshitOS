@@ -53,6 +53,7 @@ system
   compose     list available Alt+key compose sequences for accented characters
   crash       list recent crash tombstones from /data/crash/
   clip        copy/paste the shared kernel clipboard ('clip <text...>' sets it, 'clip' prints it)
+  color       toggle ANSI terminal colors ('color on'/'color off'; 'color' shows current)
   echo        repeat your regrettable decisions
   help        grouped command catalog and per-command/per-topic help
   random      print n random bytes from the seeded CSPRNG (hex)
