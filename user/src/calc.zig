@@ -57,6 +57,122 @@ const science = @import("calc/science.zig");
 // ---------------------------------------------------------------------------
 
 pub const window_id: u32 = 2;
+
+const pow10_tab = [_]u64{ 1, 10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000, 1000000000, 10000000000 };
+
+/// K12: decimal rendering with a ',' every three integer digits.
+pub fn format_thousands(val: i64, out: []u8) []const u8 {
+    var plain: [24]u8 = undefined;
+    const s = format_i64(val, &plain);
+    if (s.len == 0) return s;
+    const digits = if (s[0] == '-') s[1..] else s;
+    const groups = (digits.len + 2) / 3;
+    const need = s.len + groups - 1;
+    if (need > out.len) return out[0..0];
+    var pos: usize = 0;
+    if (s[0] == '-') {
+        out[pos] = '-';
+        pos += 1;
+    }
+    for (digits, 0..) |d, idx| {
+        if (idx > 0 and (digits.len - idx) % 3 == 0) {
+            out[pos] = ',';
+            pos += 1;
+        }
+        out[pos] = d;
+        pos += 1;
+    }
+    return out[0..pos];
+}
+
+/// K12: fixed-point with exactly `places` fractional digits (half-away
+/// rounding). The scaled magnitude is clamped so the display path stays
+/// exact in f64; this formats float-valued results (unit conversion),
+/// not the i64 engine's own values.
+pub fn format_fixed(val: f64, places: u8, out: []u8) []const u8 {
+    const p: u64 = pow10_tab[@min(places, 10)];
+    var scaled_f = @abs(val) * @as(f64, @floatFromInt(p));
+    if (scaled_f >= 9.2e18) scaled_f = 9.2e18; // clamp; display-only path
+    const scaled: u64 = @intFromFloat(@round(scaled_f));
+    const int_part: u64 = scaled / p;
+    const frac: u64 = scaled % p;
+
+    var int_buf: [24]u8 = undefined;
+    const int_str = format_i64(@intCast(int_part), &int_buf);
+
+    var pos: usize = 0;
+    if (val < 0 and pos < out.len) {
+        out[pos] = '-';
+        pos += 1;
+    }
+    const ic = @min(int_str.len, out.len - pos);
+    @memcpy(out[pos .. pos + ic], int_str[0..ic]);
+    pos += ic;
+    if (places > 0 and pos + 1 < out.len) {
+        out[pos] = '.';
+        pos += 1;
+        var frac_digits: [10]u8 = undefined;
+        var fi: usize = @min(places, 10);
+        var fv = frac;
+        while (fi > 0) {
+            fi -= 1;
+            frac_digits[fi] = @as(u8, @intCast(fv % 10)) + '0';
+            fv /= 10;
+        }
+        const fc = @min(@as(usize, places), out.len - pos);
+        @memcpy(out[pos .. pos + fc], frac_digits[0..fc]);
+        pos += fc;
+    }
+    return out[0..pos];
+}
+
+pub const CalcConfig = struct {
+    dec_places: u8 = 2,
+    thousands_sep: bool = false,
+    hex_leading_zeros: bool = false,
+};
+
+fn parse_cfg_int(text: []const u8) ?i64 {
+    var v: i64 = 0;
+    var n: usize = 0;
+    for (text) |ch| {
+        if (ch < '0' or ch > '9') break;
+        v = std.math.mul(i64, v, 10) catch return null;
+        v = std.math.add(i64, v, ch - '0') catch return null;
+        n += 1;
+    }
+    if (n == 0) return null;
+    return v;
+}
+
+/// K12: parse "dec=N\nsep=0|1\nhexlz=0|1\n" — tolerant of junk lines.
+pub fn parse_config(text: []const u8) CalcConfig {
+    var cfg = CalcConfig{};
+    var it = std.mem.splitScalar(u8, text, '\n');
+    while (it.next()) |line_raw| {
+        const line = std.mem.trim(u8, line_raw, " \r\t");
+        if (std.mem.startsWith(u8, line, "dec=")) {
+            if (parse_cfg_int(line[4..])) |v| {
+                if (v >= 0 and v <= 10) cfg.dec_places = @intCast(v);
+            }
+        } else if (std.mem.startsWith(u8, line, "sep=")) {
+            cfg.thousands_sep = line.len > 4 and line[4] == '1';
+        } else if (std.mem.startsWith(u8, line, "hexlz=")) {
+            cfg.hex_leading_zeros = line.len > 6 and line[6] == '1';
+        }
+    }
+    return cfg;
+}
+
+/// K12: render the config into `buf` for /data/calc_cfg.txt.
+pub fn write_config(cfg: CalcConfig, buf: []u8) []const u8 {
+    const out = std.fmt.bufPrint(buf, "dec={d}\nsep={d}\nhexlz={d}\n", .{
+        cfg.dec_places,
+        @as(u8, if (cfg.thousands_sep) 1 else 0),
+        @as(u8, if (cfg.hex_leading_zeros) 1 else 0),
+    }) catch return buf[0..0];
+    return out;
+}
 pub const window_x: u32 = 48;
 pub const window_y: u32 = 48;
 pub const window_w: u32 = 512;
@@ -183,6 +299,13 @@ pub const AppState = struct {
     expr_buf: [48]u8 = [_]u8{0} ** 48,
     expr_len: usize = 0,
 
+    // K12: formatting controls (persisted to /data/calc_cfg.txt)
+    cfg_active: bool = false, // settings bar visible
+    cfg_row: u2 = 0, // selected row while the settings bar is open
+    dec_places: u8 = 2, // fractional digits shown for float-valued results (0–10)
+    thousands_sep: bool = false, // 1234567 -> "1,234,567"
+    hex_leading_zeros: bool = false, // 16-digit padded hex in programmer mode
+
     // ---- Standard mode buttons ----
     btn_m_store: Button = Button.init(Rect.make(8, 104, 56, 20), "MS"),
     btn_m_recall: Button = Button.init(Rect.make(69, 104, 56, 20), "MR"),
@@ -258,6 +381,8 @@ pub const AppState = struct {
         if (s.hist.len > history_visible) {
             s.history_scroll = s.hist.len - history_visible;
         }
+        // Load formatting config from FAT (K12)
+        s.cfg_load();
         return s;
     }
 
@@ -511,6 +636,67 @@ pub const AppState = struct {
     }
 
     // -------------------------------------------------------------------
+    // Settings / formatting controls (K12)
+    // -------------------------------------------------------------------
+
+    const cfg_path = "/data/calc_cfg.txt";
+
+    fn cfg_load(self: *AppState) void {
+        var file_buf: [64]u8 = undefined;
+        const fd = ui.file_open(cfg_path, ui.MODE_READ);
+        if (fd < 0) return;
+        const n = ui.file_read(@as(u32, @intCast(fd)), &file_buf);
+        ui.file_close(@as(u32, @intCast(fd)));
+        if (n <= 0) return;
+        const c = parse_config(file_buf[0..@intCast(n)]);
+        self.dec_places = c.dec_places;
+        self.thousands_sep = c.thousands_sep;
+        self.hex_leading_zeros = c.hex_leading_zeros;
+    }
+
+    fn cfg_save(self: *const AppState) void {
+        var buf: [64]u8 = undefined;
+        const text = write_config(.{
+            .dec_places = self.dec_places,
+            .thousands_sep = self.thousands_sep,
+            .hex_leading_zeros = self.hex_leading_zeros,
+        }, &buf);
+        const fd = ui.file_open(cfg_path, ui.MODE_CREATE | ui.MODE_WRITE);
+        if (fd < 0) return;
+        _ = ui.file_write(@as(u32, @intCast(fd)), text);
+        ui.file_close(@as(u32, @intCast(fd)));
+    }
+
+    /// Adjust the selected settings row (+1/-1); toggles wrap booleans.
+    fn cfg_adjust(self: *AppState, delta: i32) void {
+        switch (self.cfg_row) {
+            0 => {
+                var v = @as(i32, self.dec_places) + delta;
+                if (v < 0) v = 10; // wrap
+                if (v > 10) v = 0;
+                self.dec_places = @intCast(v);
+            },
+            1 => {
+                if (delta != 0) self.thousands_sep = !self.thousands_sep;
+            },
+            else => {
+                if (delta != 0) self.hex_leading_zeros = !self.hex_leading_zeros;
+            },
+        }
+        self.cfg_save();
+        ui.write_console("calc: cfg-save\n");
+    }
+
+    /// Click y within history_area → settings row (null when outside).
+    fn cfg_row_at(y: u32) ?usize {
+        if (y < history_area.y + 4) return null;
+        const rel = y - (history_area.y + 4);
+        const row = rel / 16;
+        if (row > 2) return null;
+        return row;
+    }
+
+    // -------------------------------------------------------------------
     // Display text (K6: SCI toggle + auto-switch at |v| >= 1e10)
     // -------------------------------------------------------------------
 
@@ -526,6 +712,8 @@ pub const AppState = struct {
         if (self.sci_mode or sci_auto(v)) {
             return format_sci(@floatFromInt(v), buf);
         }
+        // K12: optional thousands separator on the plain integer display
+        if (self.thousands_sep) return format_thousands(v, buf);
         return self.engine.format_display(buf);
     }
 
@@ -699,6 +887,28 @@ pub const AppState = struct {
         if (self.convert_active) {
             self.draw_convert_bar(win);
         }
+
+        // K12 settings bar (when active, overlays the history area)
+        if (self.cfg_active) {
+            self.draw_cfg_bar(win);
+        }
+    }
+
+    fn draw_cfg_bar(self: *const AppState, win: u32) void {
+        ui.draw_rect(win, history_area, ui.COLOR_SURFACE);
+        ui.draw_rect_outline(win, history_area, 1, ui.COLOR_ACCENT);
+
+        var row_buf: [48]u8 = undefined;
+        const rows = [_][]const u8{
+            std.fmt.bufPrint(row_buf[0..24], "DEC PLACES   < {d} >", .{self.dec_places}) catch "?",
+            if (self.thousands_sep) "THOUSANDS    ON" else "THOUSANDS    OFF",
+            if (self.hex_leading_zeros) "HEX PAD      ON" else "HEX PAD      OFF",
+        };
+        for (rows, 0..) |row_text, ri| {
+            const y = history_area.y + 4 + @as(u32, @intCast(ri)) * 16;
+            const col = if (ri == self.cfg_row) ui.COLOR_TEXT_PRIMARY else ui.COLOR_TEXT_MUTED;
+            ui.draw_text(win, row_text[0..@min(row_text.len, 60)], history_area.x + 4, y, col);
+        }
     }
 
     fn draw_programmer(self: *const AppState, win: u32) void {
@@ -716,7 +926,15 @@ pub const AppState = struct {
 
         // Hex
         var hex_buf: [24]u8 = undefined;
-        const hex_str = prog.format_hex(val, &hex_buf);
+        // K12: optional 16-digit zero padding in hex display
+        var hex_str_buf: [20]u8 = undefined;
+        const raw_hex = prog.format_hex(val, &hex_buf);
+        const hex_str = if (self.hex_leading_zeros and raw_hex.len < 16) blk: {
+            const pad = 16 - raw_hex.len;
+            @memset(hex_str_buf[0..pad], '0');
+            @memcpy(hex_str_buf[pad .. pad + raw_hex.len], raw_hex);
+            break :blk hex_str_buf[0 .. pad + raw_hex.len];
+        } else raw_hex;
         var hex_label: [20]u8 = undefined;
         var hpos: usize = 0;
         const prefix = "0x";
@@ -868,12 +1086,10 @@ pub const AppState = struct {
         lpos += to_name.len;
         ui.draw_text(win, label_buf[0..lpos], history_area.x + 4, history_area.y + 16, ui.COLOR_TEXT_PRIMARY);
 
-        // Conversion result
-        var res_buf: [24]u8 = undefined;
+        // Conversion result — K12: dec_places formats the fractional part
+        var res_buf: [32]u8 = undefined;
         const result = self.convert_result();
-        // Format the f64 result as a simple decimal string
-        const result_int: i64 = @intFromFloat(result);
-        const result_str = format_i64(result_int, &res_buf);
+        const result_str = format_fixed(result, self.dec_places, &res_buf);
         var full_buf: [32]u8 = undefined;
         var fpos: usize = 0;
         const eq_sign = "= ";
@@ -903,6 +1119,22 @@ pub const AppState = struct {
 
     fn handle_mouse_standard(self: *AppState, ev: *const Event) bool {
         var changed = false;
+
+        // K12: the settings bar consumes clicks over the history area
+        // (act once, on release — DOWN+UP would double-adjust)
+        if (self.cfg_active and ev.kind == ui.MOUSE_UP) {
+            const x = ev.arg0;
+            const y = ev.arg1;
+            const inside = x >= history_area.x and x < history_area.x + history_area.w and
+                y >= history_area.y and y < history_area.y + history_area.h;
+            if (inside) {
+                if (cfg_row_at(y)) |row| {
+                    self.cfg_row = @intCast(row);
+                    self.cfg_adjust(1);
+                }
+                return true;
+            }
+        }
 
         // K2: memory buttons
         if (self.btn_m_store.handle_event(ev)) {
@@ -1247,6 +1479,45 @@ pub const AppState = struct {
             self.mem_active_slot = ascii - '1';
             ui.write_console("calc: mem-slot\n");
             return true;
+        }
+
+        // K12: Ctrl+, toggles the settings bar
+        if (ctrl and ascii == ',') {
+            self.cfg_active = !self.cfg_active;
+            self.cfg_row = 0;
+            ui.write_console(if (self.cfg_active) "calc: cfg-open\n" else "calc: cfg-close\n");
+            return true;
+        }
+
+        // K12: while the settings bar is open it consumes keys
+        if (self.cfg_active) {
+            if (keycode == 0x52) { // Up — move selection
+                if (self.cfg_row > 0) self.cfg_row -= 1;
+                return true;
+            }
+            if (keycode == 0x51) { // Down
+                if (self.cfg_row < 2) self.cfg_row += 1;
+                return true;
+            }
+            if (ascii == '+' or ascii == '=' or keycode == 0x4F) { // Right/increase
+                self.cfg_adjust(1);
+                return true;
+            }
+            if (ascii == '-' or keycode == 0x50) { // Left/decrease
+                self.cfg_adjust(-1);
+                return true;
+            }
+            if (ascii == ' ' or ascii == '\r' or ascii == '\n' or keycode == 0x28) {
+                // Space/Enter: apply the row's primary action
+                self.cfg_adjust(1);
+                return true;
+            }
+            if (ascii == 0x1b or keycode == 0x29) {
+                self.cfg_active = false;
+                ui.write_console("calc: cfg-close\n");
+                return true;
+            }
+            return true; // swallow everything else while open
         }
 
         // K9: while the expression editor is active it consumes keys
@@ -1912,4 +2183,87 @@ fn press_at(app: *AppState, x: u32, y: u32) void {
 
 fn tap(app: *AppState, x: u32, y: u32) void {
     press_at(app, x, y);
+}
+
+test "calc K12: thousands separator formatting" {
+    var buf: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("1,234,567", format_thousands(1234567, &buf));
+    try std.testing.expectEqualStrings("999", format_thousands(999, &buf));
+    try std.testing.expectEqualStrings("1,000", format_thousands(1000, &buf));
+    try std.testing.expectEqualStrings("-12,345,678", format_thousands(-12345678, &buf));
+    try std.testing.expectEqualStrings("0", format_thousands(0, &buf));
+}
+
+test "calc K12: fixed-point with dec places" {
+    var buf: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("0.33", format_fixed(1.0 / 3.0, 2, &buf));
+    try std.testing.expectEqualStrings("37.78", format_fixed(37.7778, 2, &buf)); // e.g. 100C in F-scale math
+    try std.testing.expectEqualStrings("5.00", format_fixed(5, 2, &buf));
+    try std.testing.expectEqualStrings("212.00", format_fixed(212, 2, &buf));
+    try std.testing.expectEqualStrings("3.1416", format_fixed(3.14159, 4, &buf));
+    try std.testing.expectEqualStrings("-2.50", format_fixed(-2.5, 2, &buf));
+    try std.testing.expectEqualStrings("7", format_fixed(7, 0, &buf));
+}
+
+test "calc K12: config parse/write round-trip" {
+    const cfg = CalcConfig{ .dec_places = 7, .thousands_sep = true, .hex_leading_zeros = true };
+    var buf: [64]u8 = undefined;
+    const text = write_config(cfg, &buf);
+    const back = parse_config(text);
+    try std.testing.expectEqual(@as(u8, 7), back.dec_places);
+    try std.testing.expect(back.thousands_sep);
+    try std.testing.expect(back.hex_leading_zeros);
+
+    // Tolerant of junk; out-of-range values are ignored (defaults hold)
+    const junk = parse_config("hello\ndec=99\nsep=yes\nhexlz=0\n");
+    try std.testing.expectEqual(@as(u8, 2), junk.dec_places); // 99 rejected, default kept
+    try std.testing.expect(!junk.thousands_sep); // only '1' means on
+}
+
+test "calc K12: Ctrl+, opens the settings bar; keys adjust" {
+    var app = AppState.init();
+    try std.testing.expect(!app.cfg_active);
+    var ev = Event{ .kind = ui.KEY_DOWN, .flags = 0x04, .seq = 1, .arg0 = 0, .arg1 = ',' };
+    try std.testing.expect(app.handle_keyboard_event(&ev));
+    try std.testing.expect(app.cfg_active);
+
+    // '+' bumps dec places 2 -> 3
+    var plus = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 2, .arg0 = 0, .arg1 = '+' };
+    _ = app.handle_keyboard_event(&plus);
+    try std.testing.expectEqual(@as(u8, 3), app.dec_places);
+
+    // Down moves to THOUSANDS row; Enter toggles it on
+    var down = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 3, .arg0 = 0x51, .arg1 = 0 };
+    _ = app.handle_keyboard_event(&down);
+    var enter = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 4, .arg0 = 0x28, .arg1 = '\r' };
+    _ = app.handle_keyboard_event(&enter);
+    try std.testing.expect(app.thousands_sep);
+
+    // Esc closes
+    var esc = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 5, .arg0 = 0x29, .arg1 = 0x1b };
+    _ = app.handle_keyboard_event(&esc);
+    try std.testing.expect(!app.cfg_active);
+}
+
+test "calc K12: settings bar click adjusts row" {
+    var app = AppState.init();
+    app.cfg_active = true;
+    // Row 0 spans y=12..27 → click at y=14 increments dec places
+    var ev_up = Event{ .kind = ui.MOUSE_UP, .flags = 0, .seq = 2, .arg0 = 40, .arg1 = 14 };
+    _ = app.handle_mouse_events(&ev_up);
+    try std.testing.expectEqual(@as(u8, 3), app.dec_places); // default 2 + 1
+
+    // Row 1 (THOUSANDS) at y=28..43 toggles the separator on
+    var ev2u = Event{ .kind = ui.MOUSE_UP, .flags = 0, .seq = 4, .arg0 = 40, .arg1 = 30 };
+    _ = app.handle_mouse_events(&ev2u);
+    try std.testing.expect(app.thousands_sep);
+}
+
+test "calc K12: display honors thousands separator" {
+    var app = AppState.init();
+    app.engine.current_val = 1234567;
+    var buf: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("1234567", app.display_text(&buf));
+    app.thousands_sep = true;
+    try std.testing.expectEqualStrings("1,234,567", app.display_text(&buf));
 }
