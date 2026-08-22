@@ -38,6 +38,11 @@ const driving_award = @import("driving_award.zig"); // claim 1543 (milestone six
 const scrollback_mod = @import("scrollback.zig"); // M18 T1 (issue #404): terminal scrollback ring
 const clipboard = @import("clipboard.zig"); // M18 T2 (issue #405): shared clipboard for copy/paste
 
+/// M18 T4: path for persistent shell history file.
+const history_path = "HISTORY.TXT";
+/// M18 T4: max lines stored in the history file.
+const history_file_max: usize = 50;
+
 pub const PollResult = enum {
     /// No input byte is available right now; the caller should wait before
     /// polling again (the kernel parks in WFE between polls).
@@ -207,6 +212,8 @@ pub const Shell = struct {
                     monitor.err_line(&self.mon, "input refused: line longer than 256 bytes");
                 }
                 handle_line(&self.mon, line);
+                // M18 T4: persist non-empty lines.
+                if (line.len > 0) save_to_history(line);
                 return .processed;
             },
         }
@@ -497,6 +504,78 @@ pub const Shell = struct {
     }
 };
 
+/// M18 T4: append a command line to the persistent history file.
+fn save_to_history(line: []const u8) void {
+    if (!esp.disk_ready()) return;
+    // Read existing history, trim oldest if at capacity, append new line.
+    var existing: [2048]u8 = undefined;
+    var existing_len: usize = 0;
+    if (esp.lookup(history_path)) |entry| {
+        const content = esp.content_of(entry);
+        existing_len = @min(content.len, 2048);
+        @memcpy(existing[0..existing_len], content[0..existing_len]);
+    }
+    var line_count: usize = 0;
+    var i: usize = 0;
+    while (i < existing_len) : (i += 1) {
+        if (existing[i] == '\n') line_count += 1;
+    }
+    if (existing_len > 0 and existing[existing_len - 1] != '\n') line_count += 1;
+    var start: usize = 0;
+    if (line_count >= history_file_max) {
+        while (start < existing_len and existing[start] != '\n') start += 1;
+        if (start < existing_len) start += 1;
+    }
+    var buf: [2048]u8 = undefined;
+    var pos: usize = 0;
+    const tail = existing[start..existing_len];
+    @memcpy(buf[pos..][0..tail.len], tail);
+    pos += tail.len;
+    @memcpy(buf[pos..][0..line.len], line);
+    pos += line.len;
+    buf[pos] = '\n';
+    pos += 1;
+    _ = esp.write_file(history_path, buf[0..pos]);
+}
+
+/// M18 T4: load persistent history from HISTORY.TXT into editor ring.
+fn load_history(editor: *lineedit.LineEditor) void {
+    if (!esp.disk_ready()) return;
+    const entry = esp.lookup(history_path) orelse return;
+    const content = esp.content_of(entry);
+    if (content.len == 0) return;
+    var line_starts: [64]usize = undefined;
+    var line_lens: [64]usize = undefined;
+    var line_count: usize = 0;
+    var i: usize = 0;
+    while (i < content.len and line_count < 64) : (i += 1) {
+        const start = i;
+        while (i < content.len and content[i] != '\n') i += 1;
+        const len = i - start;
+        if (len > 0 and len < lineedit.max_line) {
+            line_starts[line_count] = start;
+            line_lens[line_count] = len;
+            line_count += 1;
+        }
+    }
+    var li: usize = line_count;
+    while (li > 0) : (li -= 1) {
+        const idx = li - 1;
+        const line = content[line_starts[idx]..][0..line_lens[idx]];
+        if (editor.hist_count > 0 and std.mem.eql(u8, line, editor.history[0][0..editor.hist_len[0]])) continue;
+        const keep: usize = @min(editor.hist_count, lineedit.hist_capacity - 1);
+        var j = keep;
+        while (j > 0) : (j -= 1) {
+            @memcpy(editor.history[j][0..editor.hist_len[j - 1]], editor.history[j - 1][0..editor.hist_len[j - 1]]);
+            editor.hist_len[j] = editor.hist_len[j - 1];
+        }
+        const n = @min(line.len, lineedit.max_line);
+        @memcpy(editor.history[0][0..n], line[0..n]);
+        editor.hist_len[0] = n;
+        editor.hist_count = keep + 1;
+    }
+}
+
 fn handle_line(mon: *monitor.Monitor, line: []const u8) void {
     const tokens = tokenizer.tokenize(line);
     if (tokens.too_many) {
@@ -532,6 +611,7 @@ pub fn boot_and_park(mon: *monitor.Monitor, rx_wired: bool) void {
     const shell: *Shell = &boot_shell_storage;
     shell.* = Shell.init(mon.console, mon.state, mon.machine);
     shell.boot();
+    load_history(&shell.editor);
     while (true) {
         if (shell.poll() == .idle) {
             // Claim 9187: the timer is serviced only through the IRQ path.
