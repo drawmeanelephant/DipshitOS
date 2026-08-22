@@ -116,10 +116,26 @@ The ordered `## What comes immediately afterward` list (previously 223 lines, it
 and the `## Milestone 1.5 — the call` spec (56 lines) plus the `## What we directly observe` serial-gate
 archaeology (115 lines) are preserved in git history (`aa4f111`) and in the per-milestone archives.
 
-**Next is M17 — desktop completeness** (`docs/m17-desktop-completeness.md`, issues #212–#228, Arc1/Arc2):
-completable widgets (Checkbox/Toggle, ProgressBar, ScrollView, etc.), context menus, drag-to-resize,
-tray/dock/arc2 interactions. See `docs/march-arc2.md` and the claim index for active work.
-Wishlist items 13/14/17 remain deferred per `docs/roadmap.md`.
+**M17 — desktop completeness** (C1–C10 + Arc1–5): ✅ done 2026-08-21.
+All post-M17 arcs (widget depth, window management, app upgrades, rich interactions, system polish)
+are complete. The forward roadmap is M18–M27 — the experience layer:
+
+| Milestone | Focus | Cards |
+|-----------|-------|-------|
+| M18 | Terminal & shell depth | T1–T5 (scrollback, selection, search, history, colors) |
+| M19 | Shell as programming environment | P1–P5 (pipes, redirection, env vars, functions, scripts) |
+| M20 | Text rendering & Unicode | U1–U5 (font sizes, Unicode glyphs, search, chrome, tabs) |
+| M21 | Window management depth | W1–W5 (tiling, master-detail, minimize, workspace alt-tab, notifications) |
+| M22 | Developer tools | D1–D5 (ELF loader, assembler, symbols, disassembler, strace) |
+| M23 | The text editor | E1–E6 (EDIT.BIN, undo/redo, goto, tabs, syntax, console split) |
+| M24 | CALC grows up | K1–K5 (programmer mode, memory, units, constants, history persist) |
+| M25 | File manager depth | F1–F5 (bulk ops, properties, mkdir, du, recent files) |
+| M26 | Network experience | N1–N5 (ping, netstat, HTTP fetch display, bandwidth, connection mgr) |
+| M27 | Desktop polish & completeness | G1–G6 (boot splash, about, previews, sounds, sysmon, tooltips) |
+
+Full card detail: [`docs/roadmap-post-arc5.md`](roadmap-post-arc5.md).
+ABI budget: 56/64 slots used, 8 remaining (M19+M20+M22 consume 5, leaving 3).
+Known open threads: U4 pointer class-C (issue #151), keyboard events=0 (issue #179).
 
 ## Assumptions & gaps (checked against merged `main`)
 
@@ -182,7 +198,18 @@ Multiple agents/humans develop this repo concurrently. Binding rules (mirrored i
 - [`march-m14.md`](march-m14.md) — M14 tracker (shared services).
 - [`march-m15.md`](march-m15.md) — M15 tracker (audio).
 - [`march-m16.md`](march-m16.md) — M16 tracker (kernel consolidation).
-- [`m17-desktop-completeness.md`](m17-desktop-completeness.md) — M17 next (widgets, menus, resize, tray).
+- [`m17-desktop-completeness.md`](m17-desktop-completeness.md) — M17 (widgets, menus, resize, tray; done).
+- [`roadmap-post-arc5.md`](roadmap-post-arc5.md) — M18–M27 the experience layer (forward roadmap).
+- [`march-m18.md`](march-m18.md) — M18 tracker (terminal & shell depth).
+- [`march-m19.md`](march-m19.md) — M19 tracker (shell programming environment).
+- [`march-m20.md`](march-m20.md) — M20 tracker (text rendering & Unicode).
+- [`march-m21.md`](march-m21.md) — M21 tracker (window management depth).
+- [`march-m22.md`](march-m22.md) — M22 tracker (developer tools).
+- [`march-m23.md`](march-m23.md) — M23 tracker (the text editor).
+- [`march-m24.md`](march-m24.md) — M24 tracker (CALC grows up).
+- [`march-m25.md`](march-m25.md) — M25 tracker (file manager depth).
+- [`march-m26.md`](march-m26.md) — M26 tracker (network experience).
+- [`march-m27.md`](march-m27.md) — M27 tracker (desktop polish & completeness).
 - [`testing.md`](testing.md) — verification sequence & evidence policy.
 - [`hardware-contract.md`](hardware-contract.md) — hardware `[observed]`/`[inferred]`.
 - [`architecture.md`](architecture.md) — components & data flow.
