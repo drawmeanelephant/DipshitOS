@@ -273,8 +273,263 @@ pub const latin1: [96][8]u8 = blk: {
 /// table entry (caller applies the M20-U11 fallback).
 pub fn glyph(cp: u21) ?*const [8]u8 {
     if (cp >= 0xA0 and cp <= 0xFF) return &latin1[cp - 0xA0];
+    if (cp >= 0x100 and cp <= 0x17F) return &ext_a[cp - 0x100];
     return null;
 }
+
+// ---------------------------------------------------------------------------
+// Latin Extended-A (M20-U3): U+0100–U+017F, same generation scheme —
+// compose(base, accent) where possible, hand-authored for strokes,
+// ligatures and specials.
+// ---------------------------------------------------------------------------
+
+const eth_stroke_upper: [8]u8 = .{ 0x0f, 0x1b, 0x33, 0x3f, 0x33, 0x1b, 0x0f, 0x00 };
+const d_stroke_lower: [8]u8 = blk: {
+    var g = ascii_glyph('d');
+    g[2] |= 0x47;
+    break :blk g;
+};
+const h_stroke_upper: [8]u8 = blk: {
+    var g = ascii_glyph('H');
+    g[4] |= 0x7f;
+    break :blk g;
+};
+const h_stroke_lower: [8]u8 = blk: {
+    var g = ascii_glyph('h');
+    g[4] |= 0x7f;
+    break :blk g;
+};
+const dotless_i: [8]u8 = blk: {
+    var g = ascii_glyph('i');
+    g[0] = 0;
+    break :blk g;
+};
+const ij_upper: [8]u8 = .{ 0x77, 0x22, 0x22, 0x22, 0x22, 0x17, 0x18, 0x00 };
+const ij_lower: [8]u8 = .{ 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x1f, 0x0c };
+/// Kra: a k pushed down to x-height (no ascender).
+const kra: [8]u8 = blk: {
+    const k = ascii_glyph('k');
+    break :blk .{ 0x00, 0x00, k[0], k[1], k[4], k[5], k[6], k[7] };
+};
+const l_middot_upper: [8]u8 = blk: {
+    var g = ascii_glyph('L');
+    g[3] |= 0x40;
+    break :blk g;
+};
+const l_middot_lower: [8]u8 = blk: {
+    var g = ascii_glyph('l');
+    g[3] |= 0x60;
+    break :blk g;
+};
+const l_slash_upper: [8]u8 = blk: {
+    var g = ascii_glyph('L');
+    g[2] |= 0x20;
+    g[3] |= 0x18;
+    g[4] |= 0x04;
+    break :blk g;
+};
+const l_slash_lower: [8]u8 = blk: {
+    var g = ascii_glyph('l');
+    g[2] |= 0x20;
+    g[3] |= 0x18;
+    g[5] |= 0x02;
+    break :blk g;
+};
+const apostrophe_n: [8]u8 = blk: {
+    var g = ascii_glyph('n');
+    g[0] |= 0x01;
+    g[1] |= 0x01;
+    break :blk g;
+};
+const eng_upper: [8]u8 = blk: {
+    var g = ascii_glyph('N');
+    g[6] |= 0x1c;
+    break :blk g;
+};
+const eng_lower: [8]u8 = blk: {
+    var g = ascii_glyph('n');
+    g[6] |= 0x08;
+    break :blk .{ g[0], g[1], g[2], g[3], g[4], g[5], g[6], 0x11 };
+};
+const oe_upper: [8]u8 = blk: {
+    const o = ascii_glyph('O');
+    const e_half = [_]u8{ 0x70, 0x10, 0x30, 0x10, 0x10, 0x70, 0x70, 0x00 };
+    break :blk .{
+        o[0],        o[1] | e_half[1], o[2] | e_half[2], o[3] | e_half[3],
+        o[4] | e_half[4], o[5] | e_half[5], o[6] | e_half[6], o[7],
+    };
+};
+const oe_lower: [8]u8 = blk: {
+    const o = ascii_glyph('o');
+    const e = ascii_glyph('e');
+    break :blk .{
+        o[0] | e[0], o[1] | e[1], o[2] | e[2], o[3] | e[3],
+        o[4] | e[4], o[5] | e[5], o[6] | e[6], o[7] | e[7],
+    };
+};
+const t_stroke_upper: [8]u8 = blk: {
+    var g = ascii_glyph('T');
+    g[3] |= 0x7f;
+    break :blk g;
+};
+const t_stroke_lower: [8]u8 = blk: {
+    var g = ascii_glyph('t');
+    g[3] |= 0x63;
+    break :blk g;
+};
+/// Long s: an f without the crossbar.
+const long_s: [8]u8 = blk: {
+    var g = ascii_glyph('f');
+    g[3] = 0x06;
+    break :blk g;
+};
+
+const EntryA = Entry;
+
+/// U+0100–U+017F in order (128 entries). Index = codepoint − 0x100.
+const ext_a_spec = [_]EntryA{
+    e_comp('A', .macron), // 100 Ā
+    e_comp('a', .macron), // 101 ā
+    e_comp('A', .breve), // 102 Ă
+    e_comp('a', .breve), // 103 ă
+    e_comp('A', .ogonek), // 104 Ą
+    e_comp('a', .ogonek), // 105 ą
+    e_comp('C', .acute), // 106 Ć
+    e_comp('c', .acute), // 107 ć
+    e_comp('C', .circumflex), // 108 Ĉ
+    e_comp('c', .circumflex), // 109 ĉ
+    e_comp('C', .dot_above), // 10A Ċ
+    e_comp('c', .dot_above), // 10B ċ
+    e_comp('C', .caron), // 10C Č
+    e_comp('c', .caron), // 10D č
+    e_comp('D', .caron), // 10E Ď
+    e_comp('d', .caron), // 10F ď
+    e_hand(eth_stroke_upper), // 110 Đ
+    e_hand(d_stroke_lower), // 111 đ
+    e_comp('E', .macron), // 112 Ē
+    e_comp('e', .macron), // 113 ē
+    e_comp('E', .breve), // 114 Ĕ
+    e_comp('e', .breve), // 115 ĕ
+    e_comp('E', .dot_above), // 116 Ė
+    e_comp('e', .dot_above), // 117 ė
+    e_comp('E', .ogonek), // 118 Ę
+    e_comp('e', .ogonek), // 119 ę
+    e_comp('E', .caron), // 11A Ě
+    e_comp('e', .caron), // 11B ě
+    e_comp('G', .circumflex), // 11C Ĝ
+    e_comp('g', .circumflex), // 11D ĝ
+    e_comp('G', .breve), // 11E Ğ
+    e_comp('g', .breve), // 11F ğ
+    e_comp('G', .dot_above), // 120 Ġ
+    e_comp('g', .dot_above), // 121 ġ
+    e_comp('G', .cedilla), // 122 Ģ
+    e_comp('g', .cedilla), // 123 ģ
+    e_comp('H', .circumflex), // 124 Ĥ
+    e_comp('h', .circumflex), // 125 ĥ
+    e_hand(h_stroke_upper), // 126 Ħ
+    e_hand(h_stroke_lower), // 127 ħ
+    e_comp('I', .tilde), // 128 Ĩ
+    e_comp('i', .tilde), // 129 ĩ
+    e_comp('I', .macron), // 12A Ī
+    e_comp('i', .macron), // 12B ī
+    e_comp('I', .breve), // 12C Ĭ
+    e_comp('i', .breve), // 12D ĭ
+    e_comp('I', .ogonek), // 12E Į
+    e_comp('i', .ogonek), // 12F į
+    e_comp('I', .dot_above), // 130 İ
+    e_hand(dotless_i), // 131 ı
+    e_hand(ij_upper), // 132 Ĳ
+    e_hand(ij_lower), // 133 ĳ
+    e_comp('J', .circumflex), // 134 Ĵ
+    e_comp('j', .circumflex), // 135 ĵ
+    e_comp('K', .cedilla), // 136 Ķ
+    e_comp('k', .cedilla), // 137 ķ
+    e_hand(kra), // 138 ĸ
+    e_comp('L', .acute), // 139 Ĺ
+    e_comp('l', .acute), // 13A ĺ
+    e_comp('L', .cedilla), // 13B Ļ
+    e_comp('l', .cedilla), // 13C ļ
+    e_comp('L', .caron), // 13D Ľ
+    e_comp('l', .caron), // 13E ľ
+    e_hand(l_middot_upper), // 13F Ŀ
+    e_hand(l_middot_lower), // 140 ŀ
+    e_hand(l_slash_upper), // 141 Ł
+    e_hand(l_slash_lower), // 142 ł
+    e_comp('N', .acute), // 143 Ń
+    e_comp('n', .acute), // 144 ń
+    e_comp('N', .cedilla), // 145 Ņ
+    e_comp('n', .cedilla), // 146 ņ
+    e_comp('N', .caron), // 147 Ň
+    e_comp('n', .caron), // 148 ň
+    e_hand(apostrophe_n), // 149 ŉ
+    e_hand(eng_upper), // 14A Ŋ
+    e_hand(eng_lower), // 14B ŋ
+    e_comp('O', .macron), // 14C Ō
+    e_comp('o', .macron), // 14D ō
+    e_comp('O', .breve), // 14E Ŏ
+    e_comp('o', .breve), // 14F ŏ
+    e_comp('O', .double_acute), // 150 Ő
+    e_comp('o', .double_acute), // 151 ő
+    e_hand(oe_upper), // 152 Œ
+    e_hand(oe_lower), // 153 œ
+    e_comp('R', .acute), // 154 Ŕ
+    e_comp('r', .acute), // 155 ŕ
+    e_comp('R', .cedilla), // 156 Ŗ
+    e_comp('r', .cedilla), // 157 ŗ
+    e_comp('R', .caron), // 158 Ř
+    e_comp('r', .caron), // 159 ř
+    e_comp('S', .acute), // 15A Ś
+    e_comp('s', .acute), // 15B ś
+    e_comp('S', .circumflex), // 15C Ŝ
+    e_comp('s', .circumflex), // 15D ŝ
+    e_comp('S', .cedilla), // 15E Ş
+    e_comp('s', .cedilla), // 15F ş
+    e_comp('S', .caron), // 160 Š
+    e_comp('s', .caron), // 161 š
+    e_comp('T', .cedilla), // 162 Ţ
+    e_comp('t', .cedilla), // 163 ţ
+    e_comp('T', .caron), // 164 Ť
+    e_comp('t', .caron), // 165 ť
+    e_hand(t_stroke_upper), // 166 Ŧ
+    e_hand(t_stroke_lower), // 167 ŧ
+    e_comp('U', .tilde), // 168 Ũ
+    e_comp('u', .tilde), // 169 ũ
+    e_comp('U', .macron), // 16A Ū
+    e_comp('u', .macron), // 16B ū
+    e_comp('U', .breve), // 16C Ŭ
+    e_comp('u', .breve), // 16D ŭ
+    e_comp('U', .ring), // 16E Ů
+    e_comp('u', .ring), // 16F ů
+    e_comp('U', .double_acute), // 170 Ű
+    e_comp('u', .double_acute), // 171 ű
+    e_comp('U', .ogonek), // 172 Ų
+    e_comp('u', .ogonek), // 173 ų
+    e_comp('W', .circumflex), // 174 Ŵ
+    e_comp('w', .circumflex), // 175 ŵ
+    e_comp('Y', .circumflex), // 176 Ŷ
+    e_comp('y', .circumflex), // 177 ŷ
+    e_comp('Y', .diaeresis), // 178 Ÿ
+    e_comp('Z', .acute), // 179 Ź
+    e_comp('z', .acute), // 17A ź
+    e_comp('Z', .dot_above), // 17B Ż
+    e_comp('z', .dot_above), // 17C ż
+    e_comp('Z', .caron), // 17D Ž
+    e_comp('z', .caron), // 17E ž
+    e_hand(long_s), // 17F ſ
+};
+
+/// The rendered Latin Extended-A table: index = codepoint − 0x100.
+pub const ext_a: [128][8]u8 = blk: {
+    @setEvalBranchQuota(20000);
+    var out: [128][8]u8 = undefined;
+    for (ext_a_spec, 0..) |entry, i| {
+        out[i] = switch (entry) {
+            .hand => |g| g,
+            .comp => |c| compose(c.base, c.acc),
+        };
+    }
+    break :blk out;
+};
 
 test "font_unicode: é composes e with an acute overlay in the top rows" {
     const e = font.glyphs['e' - 0x20];
@@ -302,7 +557,31 @@ test "font_unicode: NBSP is blank, lookup rejects untabled ranges" {
     for (latin1[0xA0 - 0xA0]) |row| try std.testing.expectEqual(@as(u8, 0), row);
     try std.testing.expect(glyph(0xE9) != null);
     try std.testing.expect(glyph(0x7F) == null);
-    try std.testing.expect(glyph(0x180) == null); // Ext-A lands with U3
+    try std.testing.expect(glyph(0x180) == null); // past both Latin tables
+}
+
+test "font_unicode: Ext-A covers the whole block with real art (M20-U3)" {
+    // Š composes S + caron: body matches, top rows gain pixels.
+    const s = font.glyphs['S' - 0x20];
+    const scaron = ext_a[0x160 - 0x100];
+    var overlay = false;
+    for (0..3) |i| {
+        if ((scaron[i] & ~s[i]) != 0) overlay = true;
+    }
+    try std.testing.expect(overlay);
+    // Every entry is tabled and non-blank (no silent holes in the block).
+    for (ext_a, 0..) |g, i| {
+        const cp = 0x100 + i;
+        if (cp >= 0x0132 and cp <= 0x0133) continue; // IJ has intentional ink
+        var any = false;
+        for (g) |row| {
+            if (row != 0) any = true;
+        }
+        try std.testing.expect(any);
+    }
+    // The long s is NOT identical to f (crossbar removed).
+    const f = font.glyphs['f' - 0x20];
+    try std.testing.expect(!std.mem.eql(u8, &f, &ext_a[0x17F - 0x100]));
 }
 
 test "font_unicode: FFFD is the diamond-with-question-mark silhouette" {

@@ -382,7 +382,7 @@ pub fn putc_unicode(cp: u21) void {
     var slot = cursor_slot();
     if (w == 2 and cur_col + 1 >= cols) slot = new_line(); // room for both halves
     if (cur_col >= cols) slot = new_line();
-    if (glyph_for(cp) != null and cp <= 0xFF) {
+    if (glyph_for(cp) != null and cp <= 0x17F) {
         ring[slot][cur_col] = @intCast(cp); // literal encoding (ASCII + Latin tables)
     } else {
         ring[slot][cur_col] = cell_fffd; // M20-U11 fallback art
@@ -404,6 +404,7 @@ fn cell_glyph(cell: Cell) ?*const [8]u8 {
     if (cell == cell_fffd) return &font_unicode.fffd_glyph;
     if (cell >= 0x20 and cell <= 0x7e) return &font.glyphs[cell - 0x20];
     if (cell >= 0xA0 and cell <= 0xFF) return &font_unicode.latin1[cell - 0xA0];
+    if (cell >= 0x100 and cell <= 0x17F) return &font_unicode.ext_a[cell - 0x100];
     return null;
 }
 
@@ -920,6 +921,26 @@ test "text: missing glyph falls back to the replacement character (U11)" {
         if (std.mem.eql(u8, &fg, &pixel(canvas, gx, 0))) any_fg = true;
     }
     try std.testing.expect(any_fg);
+}
+
+test "text: Ext-A Š decodes, stores literal, and paints its caron (U3)" {
+    init();
+    clear();
+    // UTF-8 for U+0160 (Š): E2 8C A0? No — U+0160 = 0xC5 0xA0.
+    puts("\xc5\xa0");
+    try std.testing.expectEqual(@as(Cell, 0x160), ring[cur_line][0]);
+    const canvas = testCanvas();
+    render(canvas);
+    const scaron = font_unicode.ext_a[0x160 - 0x100];
+    var painted = false;
+    var gy: usize = 0;
+    while (gy < 8) : (gy += 1) {
+        var gx: usize = 0;
+        while (gx < 8) : (gx += 1) {
+            if (font.row_pixel(scaron[gy], gx)) painted = true;
+        }
+    }
+    try std.testing.expect(painted);
 }
 
 test "text: debug_font counts and reports misses through the hook (U11)" {
