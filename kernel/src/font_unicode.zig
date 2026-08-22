@@ -124,8 +124,8 @@ const ae_lower: [8]u8 = .{ 0x00, 0x00, 0x76, 0x19, 0x3f, 0x19, 0x19, 0x76 };
 const o_slash_upper: [8]u8 = blk: {
     const o = ascii_glyph('O');
     break :blk .{
-        o[0],           o[1] | 0x20, o[2] | 0x10, o[3] | 0x08,
-        o[4] | 0x04,    o[5] | 0x02, o[6] | 0x01, o[7],
+        o[0],        o[1] | 0x20, o[2] | 0x10, o[3] | 0x08,
+        o[4] | 0x04, o[5] | 0x02, o[6] | 0x01, o[7],
     };
 };
 const o_slash_lower: [8]u8 = blk: {
@@ -355,7 +355,7 @@ const oe_upper: [8]u8 = blk: {
     const o = ascii_glyph('O');
     const e_half = [_]u8{ 0x70, 0x10, 0x30, 0x10, 0x10, 0x70, 0x70, 0x00 };
     break :blk .{
-        o[0],        o[1] | e_half[1], o[2] | e_half[2], o[3] | e_half[3],
+        o[0],             o[1] | e_half[1], o[2] | e_half[2], o[3] | e_half[3],
         o[4] | e_half[4], o[5] | e_half[5], o[6] | e_half[6], o[7],
     };
 };
