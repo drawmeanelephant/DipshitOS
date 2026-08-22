@@ -36,6 +36,7 @@ const road_pops = @import("road_pops.zig"); // claim 1574 (milestone six G3): Ro
 const input = @import("input.zig"); // claim 6050 (milestone seven I3): keyboard/pointer event FIFO drain in the idle loop
 const driving_award = @import("driving_award.zig"); // claim 1543 (milestone six G5): Driving Award window-manager drain (clock refresh + composite)
 const scrollback_mod = @import("scrollback.zig"); // M18 T1 (issue #404): terminal scrollback ring
+const clipboard = @import("clipboard.zig"); // M18 T2 (issue #405): shared clipboard for copy/paste
 
 pub const PollResult = enum {
     /// No input byte is available right now; the caller should wait before
@@ -88,6 +89,10 @@ pub const Shell = struct {
     /// Mini CSI parser for intercepting scroll keys before the editor.
     scroll_csi: u8 = 0,
     scroll_csi_param: u8 = 0,
+    /// M18 T2: selection state for copy-from-scrollback.
+    selecting: bool = false,
+    sel_start: usize = 0, // line offset (from newest) where selection begins
+    sel_end: usize = 0, // line offset (from newest) where selection ends
 
     pub fn init(con: console.Console, state: monitor.SystemState, machine: monitor.MachineControl) Shell {
         var shell = Shell{
@@ -127,6 +132,32 @@ pub const Shell = struct {
             self.prompt_shown = true;
         }
         const byte = self.mon.console.readByte() orelse return .idle;
+        // M18 T2: intercept Ctrl+C / Enter when selecting in scrollback.
+        // (Esc is NOT intercepted here — it must pass through to the CSI
+        //  tracker so Up/Down arrows work. A lone Esc cancels selection
+        //  in the tracker's state machine.)
+        if (self.selecting) {
+            switch (byte) {
+                0x03 => { // Ctrl+C: copy and return to live
+                    self.selection_copy_and_exit();
+                    self.prompt_shown = false;
+                    return .processed;
+                },
+                0x0D => { // Enter: copy and return to live
+                    self.mon.console.puts("\n");
+                    self.selection_copy_and_exit();
+                    self.prompt_shown = false;
+                    return .processed;
+                },
+                else => {},
+            }
+        }
+        // M18 T2: intercept Ctrl+V at the prompt to paste clipboard
+        // (only in live mode, not during scrollback selection).
+        if (!self.selecting and byte == 0x16) { // Ctrl+V
+            self.paste_clipboard();
+            return .pending;
+        }
         // M18 T1: shadow-track CSI state for PageUp/PageDown scroll keys.
         // Only the final '~' byte of a scroll sequence is consumed; all
         // other bytes (including arrow-key sequences) pass through to
@@ -176,7 +207,13 @@ pub const Shell = struct {
                     self.scroll_csi = 2;
                     self.scroll_csi_param = 0;
                 } else {
-                    self.scroll_csi = 0; // lone ESC — editor handles it
+                    self.scroll_csi = 0; // lone ESC — pass through for editor
+                    // M18 T2: lone ESC in selection mode cancels selection
+                    if (self.selecting) {
+                        self.selection_cancel();
+                        self.prompt_shown = false;
+                        return true;
+                    }
                 }
                 return false; // always pass through
             },
@@ -185,6 +222,27 @@ pub const Shell = struct {
                     self.scroll_csi_param = byte - '0';
                     self.scroll_csi = 3;
                     return false; // pass digit through
+                }
+                // M18 T2: intercept Up/Down arrows when selecting in scrollback.
+                if (self.selecting) {
+                    if (byte == 'A') { // Up: extend selection upward
+                        const max_off = self.scrollback.stored();
+                        if (self.sel_end < max_off) {
+                            self.sel_end += 1;
+                        }
+                        self.scroll_csi = 0;
+                        return true;
+                    }
+                    if (byte == 'B') { // Down: shrink selection toward live
+                        if (self.sel_end > self.sel_start) {
+                            self.sel_end -= 1;
+                        } else {
+                            // Single-line selection: Down exits to live
+                            self.selection_cancel();
+                        }
+                        self.scroll_csi = 0;
+                        return true;
+                    }
                 }
                 // single-char final (A/B/C/D etc) — editor handles arrow keys
                 self.scroll_csi = 0;
@@ -218,6 +276,11 @@ pub const Shell = struct {
             5 => { // PageUp: scroll up one page (10 lines)
                 const max_off = self.scrollback.stored();
                 self.scroll_offset = @min(self.scroll_offset + 10, max_off);
+                if (self.scroll_offset > 0 and !self.selecting) {
+                    self.selecting = true;
+                    self.sel_start = self.scroll_offset;
+                    self.sel_end = self.scroll_offset;
+                }
                 return true;
             },
             6 => { // PageDown: scroll down one page (10 lines)
@@ -226,9 +289,71 @@ pub const Shell = struct {
                 } else {
                     self.scroll_offset = 0;
                 }
+                if (self.scroll_offset > 0 and !self.selecting) {
+                    self.selecting = true;
+                    self.sel_start = self.scroll_offset;
+                    self.sel_end = self.scroll_offset;
+                }
                 return true;
             },
             else => return false,
+        }
+    }
+
+    /// Called when the user presses Ctrl+C or Enter while selecting in the
+    /// scrollback view. Copies the selected lines to the clipboard and
+    /// returns to live mode. Returns true if consumed.
+    fn selection_copy_and_exit(self: *Shell) void {
+        if (!self.selecting or self.scroll_offset == 0) return;
+        // Build the selected text from scrollback lines
+        const start = if (self.sel_start < self.sel_end) self.sel_start else self.sel_end;
+        const end = if (self.sel_start > self.sel_end) self.sel_start else self.sel_end;
+        const count = end - start + 1;
+
+        // Retrieve the selected lines into a stack buffer
+        const buflen: usize = 512;
+        var buf: [buflen]u8 = undefined;
+        var pos: usize = 0;
+        var dst: [128][]u8 = undefined;
+        var dst_bufs: [128][128]u8 = undefined;
+        for (&dst, 0..) |*d, j| d.* = dst_bufs[j][0..];
+
+        const n = self.scrollback.copy_lines(start, @min(count, 128), dst[0..]);
+        var i: usize = 0;
+        while (i < n and pos < buflen - 2) : (i += 1) {
+            const line = dst[i];
+            for (line) |ch| {
+                if (ch == 0 or pos >= buflen - 2) break;
+                buf[pos] = ch;
+                pos += 1;
+            }
+            if (i + 1 < n and pos < buflen - 1) {
+                buf[pos] = '\n';
+                pos += 1;
+            }
+        }
+        _ = clipboard.set(buf[0..pos]);
+        self.mon.console.print_line("copied");
+
+        // Return to live mode
+        self.selecting = false;
+        self.scroll_offset = 0;
+    }
+
+    /// Cancel selection and return to live mode (Esc key).
+    fn selection_cancel(self: *Shell) void {
+        self.selecting = false;
+        self.scroll_offset = 0;
+    }
+
+    /// Paste clipboard contents into the editor at cursor position.
+    fn paste_clipboard(self: *Shell) void {
+        var cbuf: [clipboard.capacity]u8 = undefined;
+        const n = clipboard.get(&cbuf);
+        if (n == 0) return;
+        var i: usize = 0;
+        while (i < n) : (i += 1) {
+            _ = self.editor.feed(self.mon.console, cbuf[i]);
         }
     }
 };
@@ -988,4 +1113,156 @@ test "shell: scrollback ring survives poll cycle" {
 
     const stored2 = shell.scrollback.stored();
     try std.testing.expect(stored2 > stored1);
+}
+
+test "shell: T2 selection: PageUp enters select mode, Esc exits" {
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    // Fill scrollback
+    var i: usize = 0;
+    while (i < 30) : (i += 1) {
+        mock.feed("echo line\n");
+        while (shell.poll() != .idle) {}
+    }
+
+    // PageUp: scroll back, enter selection mode
+    try std.testing.expect(!shell.selecting);
+    try std.testing.expectEqual(@as(usize, 0), shell.scroll_offset);
+    mock.feed("\x1b[5~"); // PageUp
+    while (shell.poll() != .idle) {}
+    try std.testing.expect(shell.selecting);
+    try std.testing.expect(shell.scroll_offset > 0);
+
+    // Lone Esc (ESC + space to signal end-of-escape): cancel selection, return to live
+    mock.feed("\x1b ");
+    while (shell.poll() != .idle) {}
+    try std.testing.expect(!shell.selecting);
+    try std.testing.expectEqual(@as(usize, 0), shell.scroll_offset);
+}
+
+test "shell: T2 selection: Up/Down arrows adjust selection range" {
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    var i: usize = 0;
+    while (i < 30) : (i += 1) {
+        mock.feed("echo line\n");
+        while (shell.poll() != .idle) {}
+    }
+
+    // PageUp to enter selection
+    mock.feed("\x1b[5~");
+    while (shell.poll() != .idle) {}
+    try std.testing.expect(shell.selecting);
+    const sel_end_before = shell.sel_end;
+
+    // Up arrow (CSI A): extend selection upward
+    mock.feed("\x1b[A");
+    while (shell.poll() != .idle) {}
+    try std.testing.expect(shell.sel_end > sel_end_before);
+
+    // Down arrow (CSI B): shrink selection downward
+    const sel_end_after_up = shell.sel_end;
+    mock.feed("\x1b[B");
+    while (shell.poll() != .idle) {}
+    try std.testing.expect(shell.sel_end < sel_end_after_up);
+}
+
+test "shell: T2 selection: Ctrl+C copies to clipboard and returns to live" {
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    // Fill with enough output that there's something in the scrollback
+    var i: usize = 0;
+    while (i < 20) : (i += 1) {
+        mock.feed("echo filler\n");
+        while (shell.poll() != .idle) {}
+    }
+
+    // Scroll back
+    mock.feed("\x1b[5~");
+    while (shell.poll() != .idle) {}
+    try std.testing.expect(shell.selecting);
+
+    // Copy with Ctrl+C
+    mock.feed("\x03"); // Ctrl+C
+    while (shell.poll() != .idle) {}
+
+    // Should have returned to live
+    try std.testing.expect(!shell.selecting);
+    try std.testing.expectEqual(@as(usize, 0), shell.scroll_offset);
+
+    // Clipboard should have the copied text (non-empty)
+    var cbuf: [clipboard.capacity]u8 = undefined;
+    const n = clipboard.get(&cbuf);
+    try std.testing.expect(n > 0);
+    // Should contain some recognizable output
+    try std.testing.expect(std.mem.indexOf(u8, cbuf[0..n], "filler") != null);
+}
+
+test "shell: T2 paste: Ctrl+V inserts clipboard at cursor" {
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+
+    // Set clipboard directly
+    _ = clipboard.set("PASTED_TEXT");
+
+    // Type "echo " then Ctrl+V then Enter
+    mock.feed("echo \x16\n");
+    while (shell.poll() != .idle) {}
+
+    // Output should contain the pasted text
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "PASTED_TEXT") != null);
+}
+
+test "shell: T2 selection: Enter copies and returns to live" {
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    var i: usize = 0;
+    while (i < 30) : (i += 1) {
+        mock.feed("echo spam\n");
+        while (shell.poll() != .idle) {}
+    }
+
+    // PageUp to enter selection
+    mock.feed("\x1b[5~");
+    while (shell.poll() != .idle) {}
+    try std.testing.expect(shell.selecting);
+
+    // Enter: copy and return to live
+    mock.feed("\x0d");
+    while (shell.poll() != .idle) {}
+    try std.testing.expect(!shell.selecting);
+    try std.testing.expectEqual(@as(usize, 0), shell.scroll_offset);
+
+    // Clipboard should not be empty
+    var cbuf: [clipboard.capacity]u8 = undefined;
+    const n = clipboard.get(&cbuf);
+    try std.testing.expect(n > 0);
+}
+
+test "shell: T2 selection: Down arrow beyond sel_start exits selection" {
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    var i: usize = 0;
+    while (i < 30) : (i += 1) {
+        mock.feed("echo line\n");
+        while (shell.poll() != .idle) {}
+    }
+
+    // PageUp to enter selection
+    mock.feed("\x1b[5~");
+    while (shell.poll() != .idle) {}
+    try std.testing.expect(shell.selecting);
+
+    // Press Down once to shrink (sel_start == sel_end after PageUp, so this exits)
+    mock.feed("\x1b[B");
+    while (shell.poll() != .idle) {}
+    // After a single Down when sel_start == sel_end, selecting should be false
+    try std.testing.expect(!shell.selecting);
 }
