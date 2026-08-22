@@ -11,6 +11,7 @@
 //!   K5 — History persistence: save/load from FAT
 //!   K7 — Trigonometry: SIN/COS/TAN/ASIN/ACOS/ATAN, DEG/RAD toggle
 //!   K6 — Scientific notation display: SCI toggle, auto-switch at 1e10
+//!   K10 — Clipboard: Ctrl+C result, Ctrl+Shift+C "expr = result", Ctrl+V paste
 //!
 //! Keyboard shortcuts:
 //!   Digits 0–9          → input_digit
@@ -54,6 +55,27 @@ const science = @import("calc/science.zig");
 // ---------------------------------------------------------------------------
 
 pub const window_id: u32 = 2;
+
+/// K10: parse a leading (optionally signed) integer out of pasted text.
+/// Tolerates trailing junk; requires at least one digit. Overflow → null
+/// rather than a silent wrap.
+pub fn parse_pasted_number(text: []const u8) ?i64 {
+    var i: usize = 0;
+    var neg = false;
+    if (i < text.len and (text[i] == '-' or text[i] == '+')) {
+        neg = text[i] == '-';
+        i += 1;
+    }
+    var v: i64 = 0;
+    var n: usize = 0;
+    while (i < text.len and text[i] >= '0' and text[i] <= '9') : (n += 1) {
+        v = std.math.mul(i64, v, 10) catch return null;
+        v = std.math.add(i64, v, text[i] - '0') catch return null;
+        i += 1;
+    }
+    if (n == 0) return null;
+    return if (neg) -v else v;
+}
 pub const window_x: u32 = 48;
 pub const window_y: u32 = 48;
 pub const window_w: u32 = 512;
@@ -307,6 +329,52 @@ pub const AppState = struct {
                 self.mem_any_nonzero = true;
                 break;
             }
+        }
+    }
+
+    // -------------------------------------------------------------------
+    // Clipboard (K10)
+    // -------------------------------------------------------------------
+
+    /// Copy the current result to the shared clipboard; with_expr copies
+    /// the newest history entry as "<expr> = <result>".
+    fn copy_to_clipboard(self: *const AppState, with_expr: bool) void {
+        var buf: [96]u8 = undefined;
+        _ = ui.clipboard_set(self.clipboard_payload(with_expr, &buf));
+    }
+
+    fn clipboard_payload(self: *const AppState, with_expr: bool, buf: []u8) []const u8 {
+        var pos: usize = 0;
+        if (with_expr and self.hist.len > 0) {
+            const e = self.hist.get(self.hist.len - 1);
+            const c = @min(e.len, buf.len);
+            @memcpy(buf[0..c], e.text[0..c]);
+            pos += c;
+            if (pos + 3 <= buf.len) {
+                @memcpy(buf[pos .. pos + 3], " = ");
+                pos += 3;
+            }
+        }
+        var tmp: [24]u8 = undefined;
+        const s = format_i64(self.engine.current_val, &tmp);
+        const c2 = @min(s.len, buf.len - pos);
+        @memcpy(buf[pos .. pos + c2], s[0..c2]);
+        pos += c2;
+        return buf[0..pos];
+    }
+
+    /// Paste a number from the shared clipboard into the display.
+    fn paste_from_clipboard(self: *AppState) void {
+        var buf: [64]u8 = undefined;
+        const n = ui.clipboard_get(&buf);
+        if (n <= 0) return;
+        const len: usize = @min(@as(usize, @intCast(n)), buf.len);
+        if (parse_pasted_number(buf[0..len])) |v| {
+            self.engine.current_val = v;
+            self.engine.is_entering_val = true;
+            self.engine.has_error = false;
+            self.history_cursor = null;
+            ui.write_console("calc: clip-paste\n");
         }
     }
 
@@ -1119,6 +1187,20 @@ pub const AppState = struct {
             return true;
         }
 
+        // K10: Ctrl+C copies the result; Ctrl+Shift+C copies "expr = result"
+        if (ctrl and (ascii == 'c' or ascii == 'C')) {
+            const shift = (ev.flags & ui.MOD_SHIFT) != 0;
+            self.copy_to_clipboard(shift);
+            ui.write_console(if (shift) "calc: clip-copy-expr\n" else "calc: clip-copy\n");
+            return true;
+        }
+
+        // K10: Ctrl+V pastes a number from the shared clipboard
+        if (ctrl and (ascii == 'v' or ascii == 'V')) {
+            self.paste_from_clipboard();
+            return true;
+        }
+
         // Ctrl+U: toggle unit conversion (K3)
         if (ctrl and (ascii == 'u' or ascii == 'U')) {
             self.convert_active = !self.convert_active;
@@ -1601,4 +1683,62 @@ test "calc K6: SCI button toggles mode" {
     _ = app.handle_mouse_events(&ev_up);
     try std.testing.expect(!app.sci_mode);
     try std.testing.expectEqualStrings("7", app.display_text(&buf));
+}
+
+test "calc K10: payload is the result as text" {
+    var app = AppState.init();
+    app.engine.current_val = 42;
+    var buf: [96]u8 = undefined;
+    try std.testing.expectEqualStrings("42", app.clipboard_payload(false, &buf));
+    app.engine.current_val = -7;
+    try std.testing.expectEqualStrings("-7", app.clipboard_payload(false, &buf));
+}
+
+test "calc K10: Shift payload is 'expr = result'" {
+    var app = AppState.init();
+    // Evaluate something so history has an entry
+    app.engine.current_val = 14;
+    var tmp_buf: [24]u8 = undefined;
+    const s = format_i64(2, &tmp_buf);
+    _ = s;
+    app.push_history("2+3*4", 14);
+    app.engine.current_val = 14;
+    var buf: [96]u8 = undefined;
+    const p = app.clipboard_payload(true, &buf);
+    try std.testing.expectEqualStrings("2+3*4 = 14", p);
+    // Without history, falls back to just the result
+    var empty = AppState.init();
+    empty.engine.current_val = 9;
+    var buf2: [96]u8 = undefined;
+    try std.testing.expectEqualStrings("9", empty.clipboard_payload(true, &buf2));
+}
+
+test "calc K10: parse_pasted_number" {
+    try std.testing.expectEqual(@as(?i64, 42), parse_pasted_number("42"));
+    try std.testing.expectEqual(@as(?i64, -7), parse_pasted_number("-7"));
+    try std.testing.expectEqual(@as(?i64, 5), parse_pasted_number("+5"));
+    try std.testing.expectEqual(@as(?i64, 12), parse_pasted_number("12\n"));
+    try std.testing.expectEqual(@as(?i64, null), parse_pasted_number("abc"));
+    try std.testing.expectEqual(@as(?i64, null), parse_pasted_number(""));
+    try std.testing.expectEqual(@as(?i64, null), parse_pasted_number("-"));
+    try std.testing.expectEqual(@as(?i64, null), parse_pasted_number("999999999999999999999999"));
+}
+
+test "calc K10: copy/paste chords are consumed" {
+    var app = AppState.init();
+    app.engine.current_val = 42;
+    // Ctrl+C
+    var evc = Event{ .kind = ui.KEY_DOWN, .flags = 0x04, .seq = 1, .arg0 = 0, .arg1 = 'c' };
+    try std.testing.expect(app.handle_keyboard_event(&evc));
+    // Ctrl+Shift+C
+    var evcs = Event{ .kind = ui.KEY_DOWN, .flags = 0x04 | ui.MOD_SHIFT, .seq = 2, .arg0 = 0, .arg1 = 'C' };
+    try std.testing.expect(app.handle_keyboard_event(&evcs));
+    // Ctrl+V — host clipboard stub returns 0, paste is a no-op but consumed
+    var evv = Event{ .kind = ui.KEY_DOWN, .flags = 0x04, .seq = 3, .arg0 = 0, .arg1 = 'v' };
+    try std.testing.expect(app.handle_keyboard_event(&evv));
+    // Plain c still clears (no clash)
+    app.engine.current_val = 5;
+    var evplain = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 4, .arg0 = 0, .arg1 = 'c' };
+    _ = app.handle_keyboard_event(&evplain);
+    try std.testing.expectEqual(@as(i64, 0), app.engine.current_val);
 }
