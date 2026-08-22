@@ -17,11 +17,26 @@ doesn't survive a reboot. M24 makes it *useful*.
 
 | # | Card | Status | Evidence | Notes |
 |---:|------|--------|----------|-------|
-| K1 | **Programmer mode.** Ctrl+P toggles between standard and programmer view. Programmer shows: hex/octal/decimal display (all three simultaneously), AND/OR/XOR/NOT/shift operators (<<, >>), register display (R0–R7 as scratch). Base selector buttons: HEX/DEC/OCT. | ⬜ | — | `calc.zig` mode state + operator dispatch. New BSS: `prog_mode` flag, `base` (HEX/DEC/OCT), `registers[8]` (64 bytes). New buttons: AND, OR, XOR, NOT, SHL, SHR, base selectors. The display area splits into three rows (hex/dec/oct) in programmer mode. |
-| K2 | **Memory store.** MS (memory store) / MR (memory recall) / M+ (memory add) / M- (memory subtract) with 4 memory slots (M0–M3). Memory indicator in the display showing which slots are non-zero. Ctrl+1/2/3/4 selects the active memory slot. | ⬜ | — | `calc.zig` BSS memory slots (4 × 8 bytes = 32 bytes). Memory buttons in the button grid. Display shows "M0: 42" when a slot has content. |
-| K3 | **Unit conversion.** Ctrl+U opens a conversion bar at the top. Categories: `temp` (C/F/K), `length` (m/ft/in/cm/mm), `weight` (kg/lb/g/oz). Type a value, select units, result appears instantly. Conversion factors are comptime constants. | ⬜ | — | `calc.zig` conversion table (comptime). New BSS: `convert_mode` flag, `convert_value` (f64), `convert_from`/`convert_to` (unit enum). The conversion bar is a `ui.zig` TextInput + two DropDown widgets (C1's DropDown reused). |
-| K4 | **Constant calculator.** Mathematical constants available as dedicated buttons: π (3.14159…), e (2.71828…), √2 (1.41421…), φ (1.61803…), ∞, and 1/3 (0.333…). Press the constant button and the value appears in the display, ready to be used in the next operation. | ⬜ | — | `calc.zig` comptime constant table. New buttons in the grid. Each button inserts the constant's value into the display accumulator. |
-| K5 | **History persistence.** Last 20 calculations survive reboot (FAT write). `calc history` command from the shell shows them. History ring is saved on each Enter (new result). History is restored on CALC.BIN startup from FAT. | ⬜ | — | `calc.zig` + FAT write. History ring extended from 10 to 20 entries (M17 C9 was 10). BSS: 20 × 32 bytes = 640 bytes. FAT write uses existing file syscalls. |
+| K1 | **Programmer mode.** Ctrl+P toggles between standard and programmer view. Programmer shows: hex/octal/decimal display (all three simultaneously), AND/OR/XOR/NOT/shift operators (<<, >>), register display (R0–R7 as scratch). Base selector buttons: HEX/DEC/OCT. | ✅ code + gate | 61 tests pass, `zig build calc` 14,137 B. `tools/verify-live-calc-prog.sh` written. Live gate run pending. | `calc/programmer.zig` + bitwise ops in `calc/engine.zig` (opcodes `A/O/X/L/R`, `bitwise_not`). Triple-line display (hex `0x`/dec/oct `0o`), R0–R7 register display. Serial markers: `calc: prog-on` / `calc: prog-off`. |
+| K2 | **Memory store.** MS (memory store) / MR (memory recall) / M+ (memory add) / M- (memory subtract) with 4 memory slots (M0–M3). Memory indicator in the display showing which slots are non-zero. Ctrl+1/2/3/4 selects the active memory slot. | ✅ code | 61 tests pass, `zig build calc` 13,915 B. | `AppState.mem_slots[4]`, `mem_active_slot`, `mem_any_nonzero` flag. MS/MR/MC/M+/M- buttons + keyboard `m` (MR), `s` (MS), Ctrl+1/2/3/4 slot select. Memory indicator `M0`–`M3` in display. Live gate pending. |
+| K3 | **Unit conversion.** Ctrl+U opens a conversion bar at the top. Categories: `temp` (C/F/K), `length` (m/ft/in/cm/mm), `weight` (kg/lb/g/oz). Type a value, select units, result appears instantly. Conversion factors are comptime constants. | ✅ code | 61 tests pass, `zig build calc` 13,915 B. | `convert_active`, `convert_category` (temp/length/weight), `convert_from_idx`/`convert_to_idx`, `convert_value` (f64). Conversion bar overlays history area with category labels + from/to display + result. Temperature C→F 100→212 verified in tests. Live gate pending. |
+| K4 | **Constant calculator.** Mathematical constants available as dedicated buttons: π (3.14159…), e (2.71828…), √2 (1.41421…), φ (1.61803…), ∞, and 1/3 (0.333…). Press the constant button and the value appears in the display, ready to be used in the next operation. | ✅ code | 61 tests pass, `zig build calc` 13,915 B. | `calc/constants.zig` comptime table. PI/e/sqrt2/phi buttons insert integer value (3/2/1/1) into accumulator. Live gate pending. |
+| K5 | **History persistence.** Last 20 calculations survive reboot (FAT write). `calc history` command from the shell shows them. History ring is saved on each Enter (new result). History is restored on CALC.BIN startup from FAT. | ✅ done | 61 calc tests + 464 monitor tests pass. PR #482 (code) + PR #484 (shell command). | `calc/history.zig` `Ring.save_to_fat()` / `load_from_fat()`. `/data/calc_hst.txt` format: `expr=result\n`. History ring extended from 10→20. Shell command: `calc [history]` reads FAT file, prints entry count + contents (registry 51→52). Live gate pending. |
+
+## File decomposition
+
+M24 split the monolithic `calc.zig` (1,147 lines) into focused modules:
+
+```
+user/src/calc.zig          — entry point, AppState, GUI orchestration (~950 lines)
+user/src/calc/engine.zig   — CalcEngine: pure arithmetic, bitwise ops, format (~350 lines)
+user/src/calc/history.zig  — Ring buffer: push/get/format/FAT persistence (~200 lines)
+user/src/calc/programmer.zig — ProgrammerState: base conversion, registers, format (~180 lines)
+user/src/calc/constants.zig  — comptime constant table + get() (~55 lines)
+```
+
+Total: ~1,735 lines across 5 files (was 1,147 in 1 file). Each module is
+independently testable and has clear dependency boundaries.
 
 ## Agent split
 

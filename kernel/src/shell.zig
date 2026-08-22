@@ -1451,6 +1451,7 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "  dui         Driving Award window manager: registry (with owner pids), z-order, focus, hit-testing ('dui focus <n>' focuses; 'dui raise <n>' raises; 'dui lower <n>' lowers to back; 'dui move <n> <x> <y>' moves a user window; 'dui close <n>' releases a user window; 'dui list <pid>' filters by owner; 'dui hit <x> <y>' hit-tests; 'dui cycle' cycles focus like Alt+Tab)\n" ++
         "system\n" ++
         "  beep        synthesize + play a sine through the virtio-snd PCM path ('beep <freq> <ms>' — reports the full control flow + submit/drain accounting)\n" ++
+        "  calc        calculator utilities: 'calc history' shows saved calculation history from /data/calc_hst.txt\n" ++
         "  clear       clean up the crime scene\n" ++
         "  compose     list available Alt+key compose sequences for accented characters\n" ++
         "  crash       list recent crash tombstones from /data/crash/\n" ++
@@ -1535,7 +1536,7 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "error: no command given; type 'help' for a list of commands\n" ++
         "dipshit> ";
 
-    var mock = console.MockConsole(8192){};
+    var mock = console.MockConsole(16384){};
     var shell = make_shell(&mock, make_view());
     shell.boot();
     // Arm the module allocator from the same fixture map the monitor sees,
