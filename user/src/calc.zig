@@ -9,6 +9,7 @@
 //!   K3 — Unit conversion (Ctrl+U): temp/length/weight categories
 //!   K4 — Mathematical constants: π, e, √2, φ buttons
 //!   K5 — History persistence: save/load from FAT
+//!   K6 — Scientific notation display: SCI toggle, auto-switch at 1e10
 //!
 //! Keyboard shortcuts:
 //!   Digits 0–9          → input_digit
@@ -31,6 +32,8 @@ const Event = ui.Event;
 const engine = @import("calc/engine.zig");
 const CalcEngine = engine.CalcEngine;
 const format_i64 = engine.format_i64;
+const format_sci = engine.format_sci;
+const sci_auto = engine.sci_auto;
 
 const history_mod = @import("calc/history.zig");
 const HistoryRing = history_mod.Ring;
@@ -164,6 +167,9 @@ pub const AppState = struct {
 
     // K4: constant buttons only shown in standard mode
 
+    // K6: scientific notation display
+    sci_mode: bool = false,
+
     // ---- Standard mode buttons ----
     btn_m_store: Button = Button.init(Rect.make(8, 104, 56, 20), "MS"),
     btn_m_recall: Button = Button.init(Rect.make(69, 104, 56, 20), "MR"),
@@ -215,6 +221,9 @@ pub const AppState = struct {
     btn_euler: Button = Button.init(Rect.make(321, 104, 56, 20), "e"),
     btn_sqrt2: Button = Button.init(Rect.make(382, 104, 56, 20), "sqrt2"),
     btn_phi: Button = Button.init(Rect.make(443, 104, 56, 20), "phi"),
+
+    // ---- K6 scientific notation toggle (standard mode, below keypad) ----
+    btn_sci: Button = Button.init(Rect.make(8, 260, 56, 20), "SCI"),
 
     pub fn init() AppState {
         var s = AppState{};
@@ -440,6 +449,19 @@ pub const AppState = struct {
     }
 
     // -------------------------------------------------------------------
+    // Display text (K6: SCI toggle + auto-switch at |v| >= 1e10)
+    // -------------------------------------------------------------------
+
+    fn display_text(self: *const AppState, buf: []u8) []const u8 {
+        if (self.engine.has_error) return self.engine.format_display(buf);
+        const v = self.engine.current_val;
+        if (self.sci_mode or sci_auto(v)) {
+            return format_sci(@floatFromInt(v), buf);
+        }
+        return self.engine.format_display(buf);
+    }
+
+    // -------------------------------------------------------------------
     // Draw
     // -------------------------------------------------------------------
 
@@ -481,7 +503,7 @@ pub const AppState = struct {
         ui.draw_rect(win, display_rect, ui.COLOR_SURFACE);
         ui.draw_rect_outline(win, display_rect, 1, ui.COLOR_BORDER);
         var disp_buf: [32]u8 = undefined;
-        const disp_text = self.engine.format_display(&disp_buf);
+        const disp_text = self.display_text(&disp_buf);
         const text_w = @as(u32, @intCast(disp_text.len)) * 8;
         const text_x = if (display_rect.w > text_w + 16) display_rect.x + display_rect.w - text_w - 8 else display_rect.x + 16;
         const text_y = display_rect.y + (display_rect.h - 8) / 2;
@@ -525,6 +547,9 @@ pub const AppState = struct {
         self.btn_euler.draw(win);
         self.btn_sqrt2.draw(win);
         self.btn_phi.draw(win);
+
+        // K6 scientific-notation toggle
+        self.btn_sci.draw(win);
 
         // K3 conversion bar (when active, overlays the history area)
         if (self.convert_active) {
@@ -843,6 +868,19 @@ pub const AppState = struct {
                 self.engine.is_entering_val = true;
                 self.engine.has_error = false;
                 self.history_cursor = null;
+                changed = true;
+            }
+        }
+
+        // K6 scientific-notation toggle
+        if (!changed) {
+            if (self.btn_sci.handle_event(ev)) {
+                self.sci_mode = !self.sci_mode;
+                if (self.sci_mode) {
+                    ui.write_console("calc: sci-on\n");
+                } else {
+                    ui.write_console("calc: sci-off\n");
+                }
                 changed = true;
             }
         }
@@ -1346,4 +1384,65 @@ test "calc: K3 weight conversion (kg→lb)" {
     const result = app.convert_result();
     // 1kg = 2.20462lb
     try std.testing.expect(result > 2.20 and result < 2.21);
+}
+
+test "calc K6: format_sci large integer (123456789012345 → 1.23456e+14)" {
+    var buf: [32]u8 = undefined;
+    const s = format_sci(123456789012345.0, &buf);
+    try std.testing.expectEqualStrings("1.23456e+14", s);
+}
+
+test "calc K6: format_sci small value (0.000001234 → 1.234e-6)" {
+    var buf: [32]u8 = undefined;
+    const s = format_sci(0.000001234, &buf);
+    try std.testing.expectEqualStrings("1.234e-6", s);
+}
+
+test "calc K6: format_sci zero, negative, exact power, trailing-zero strip" {
+    var buf: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("0", format_sci(0.0, &buf));
+    try std.testing.expectEqualStrings("-5.2e+4", format_sci(-52000.0, &buf));
+    try std.testing.expectEqualStrings("1e+10", format_sci(1e10, &buf));
+    try std.testing.expectEqualStrings("1.23e+4", format_sci(12300.0, &buf));
+    try std.testing.expectEqualStrings("5.67e-8", format_sci(5.67e-8, &buf));
+}
+
+test "calc K6: auto-switch at |v| >= 1e10" {
+    try std.testing.expect(sci_auto(12_345_678_901));
+    try std.testing.expect(!sci_auto(9_999_999_999));
+    try std.testing.expect(!sci_auto(0));
+    try std.testing.expect(sci_auto(-20_000_000_000));
+
+    // Display path: big value renders scientific even with sci_mode off.
+    var app = AppState.init();
+    app.engine.current_val = 123456789012345;
+    var buf: [32]u8 = undefined;
+    const s = app.display_text(&buf);
+    try std.testing.expectEqualStrings("1.23456e+14", s);
+
+    // Small values keep plain formatting when SCI is off.
+    app.engine.current_val = 42;
+    try std.testing.expectEqualStrings("42", app.display_text(&buf));
+}
+
+test "calc K6: SCI button toggles mode" {
+    var app = AppState.init();
+    try std.testing.expect(!app.sci_mode);
+    // SCI button rect: (8, 260, 56, 20) → click center (36, 270)
+    var ev_down = Event{ .kind = ui.MOUSE_DOWN, .flags = 0, .seq = 1, .arg0 = 36, .arg1 = 270 };
+    _ = app.handle_mouse_events(&ev_down);
+    var ev_up = Event{ .kind = ui.MOUSE_UP, .flags = 0, .seq = 2, .arg0 = 36, .arg1 = 270 };
+    _ = app.handle_mouse_events(&ev_up);
+    try std.testing.expect(app.sci_mode);
+
+    // With SCI on, even a small value displays scientific.
+    app.engine.current_val = 7;
+    var buf: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("7e+0", app.display_text(&buf));
+
+    // Second click toggles back off.
+    _ = app.handle_mouse_events(&ev_down);
+    _ = app.handle_mouse_events(&ev_up);
+    try std.testing.expect(!app.sci_mode);
+    try std.testing.expectEqualStrings("7", app.display_text(&buf));
 }
