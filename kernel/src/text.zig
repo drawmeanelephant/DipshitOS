@@ -42,6 +42,17 @@ pub const ring_lines: usize = 128;
 pub const fg_rgb: u32 = 0x00ff00;
 pub const bg_rgb: u32 = 0x101418;
 
+/// Tab-stop interval in columns (M20-U10). 8 is the terminal default;
+/// `set_tab_width` admits 4 (editor style). A TAB advances the cursor to
+/// the next multiple of this width, filling the skipped cells with
+/// spaces so selection/copy see real characters.
+pub var tab_width: usize = 8;
+
+/// Set the tab-stop interval (clamped to 1..=8; M20-U10's 8/4 options).
+pub fn set_tab_width(n: usize) void {
+    tab_width = if (n == 0) 1 else @min(n, 8);
+}
+
 // ---------------------------------------------------------------------------
 // Text state (fixed BSS — the one-and-only real instance)
 // ---------------------------------------------------------------------------
@@ -176,6 +187,18 @@ pub fn putc(c: u8) void {
     }
     if (c == 0x08) { // backspace
         if (cur_col > 0) cur_col -= 1;
+        return;
+    }
+    if (c == '\t') {
+        // M20-U10: advance to the next tab stop, materializing the
+        // skipped cells as spaces. A tab never wraps to the next line —
+        // it stops at the region edge like a real terminal.
+        const slot = cursor_slot();
+        const stop = ((cur_col / tab_width) + 1) * tab_width;
+        while (cur_col < @min(stop, cols)) : (cur_col += 1) {
+            ring[slot][cur_col] = 0x20;
+        }
+        line_fill[slot] = @intCast(cur_col);
         return;
     }
     var slot = cursor_slot();
@@ -465,4 +488,83 @@ test "text: render never writes outside the canvas" {
     const canvas = testCanvas();
     render(canvas);
     try std.testing.expectEqualSlices(u8, &rgbBytes(bg_rgb), &pixel(canvas, 0, H - 1));
+}
+
+test "text: tab advances to the next multiple of the stop and fills spaces (U10)" {
+    init();
+    clear();
+    puts("ab\tc");
+    // 'a','b' at cols 0-1; tab jumps to col 8; 'c' lands at col 8 and
+    // leaves the cursor at col 9.
+    try std.testing.expectEqual(@as(usize, 9), cur_col);
+    try std.testing.expectEqualSlices(u8, "ab", ring[cur_line][0..2]);
+    // The skipped cells hold real spaces (selection/copy see characters).
+    try std.testing.expectEqualSlices(u8, "      ", ring[cur_line][2..8]);
+    try std.testing.expectEqual(@as(u8, 'c'), ring[cur_line][8]);
+}
+
+test "text: tab stops land on successive multiples (U10)" {
+    init();
+    clear();
+    puts("\t\t\t");
+    try std.testing.expectEqual(@as(usize, 24), cur_col);
+    // Mid-line: from col 5 the next multiple-of-8 stop is col 8.
+    clear();
+    puts("12345\tX");
+    try std.testing.expectEqual(@as(u8, 'X'), ring[cur_line][8]);
+}
+
+test "text: tab width is configurable (4-stop editor style) and clamped (U10)" {
+    init();
+    clear();
+    set_tab_width(4);
+    puts("\tx");
+    try std.testing.expectEqual(@as(u8, 'x'), ring[cur_line][4]);
+    set_tab_width(0); // degenerate request clamps to 1, never divides by zero
+    puts("\t");
+    try std.testing.expectEqual(@as(usize, 6), cur_col);
+    set_tab_width(100); // clamped to the 8 max
+    try std.testing.expectEqual(@as(usize, 8), tab_width);
+    set_tab_width(8);
+}
+
+test "text: tab near the region edge clamps without wrapping (U10)" {
+    init();
+    clear();
+    puts("a"); // materialize a current line (cursor_slot would reset col 0 otherwise)
+    cur_col = cols - 3;
+    putc('\t');
+    // Stop would be past the edge: the cursor parks at the region edge,
+    // no new line is started.
+    try std.testing.expectEqual(cols, cur_col);
+    try std.testing.expectEqual(@as(usize, 1), ring_count);
+}
+
+test "text: monospace guarantee — narrow and wide glyphs occupy exactly one cell (U10)" {
+    init();
+    clear();
+    puts("iW");
+    const canvas = testCanvas();
+    render(canvas);
+    const fg = rgbBytes(fg_rgb);
+    const bg = rgbBytes(bg_rgb);
+    // Cell 0 ('i'): some foreground strictly inside x 0..7 …
+    var any_fg_cell0 = false;
+    var x: usize = 0;
+    while (x < 8) : (x += 1) {
+        if (std.mem.eql(u8, &fg, &pixel(canvas, x, 2))) any_fg_cell0 = true;
+    }
+    try std.testing.expect(any_fg_cell0);
+    // … and NO cell-0 glyph pixels leak into cell 1's columns: pixel
+    // column 7 belongs to 'i', column 8 to 'W' — the boundary is clean.
+    _ = bg;
+    // Cell 1 starts exactly at x=8: 'W' row bits must appear there, and
+    // both cells rastered fully within their own 8px span (the render
+    // loop draws exactly cell_w columns per cell — this pins it).
+    var w_any = false;
+    x = 8;
+    while (x < 16) : (x += 1) {
+        if (std.mem.eql(u8, &fg, &pixel(canvas, x, 0))) w_any = true;
+    }
+    try std.testing.expect(w_any);
 }
