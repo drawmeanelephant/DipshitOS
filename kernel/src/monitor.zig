@@ -274,7 +274,7 @@ pub const Command = struct {
 /// (claim 6140) grows it 45 -> 46 (`sound`). Milestone fifteen card A2
 /// (claim 5877) grows it 46 -> 47 (`beep`). Milestone sixteen card C3
 /// (claim 0339) grows it 47 -> 48 (`resources`).
-pub const registry_count: usize = 51; // M18 T5: added `color` command
+pub const registry_count: usize = 52; // M24 K5: added `calc` command
 
 /// Command registry, built at runtime into BSS. A `const` table would hold
 /// link-time absolute addresses for BOTH the string slices and the handler
@@ -294,6 +294,7 @@ fn ensure_registry() []const Command {
             .{ .name = "beep", .help = "synthesize + play a sine through the virtio-snd PCM path ('beep <freq> <ms>' — reports the full control flow + submit/drain accounting)", .usage = "beep <freq> <ms>", .category = .system, .min_args = 2, .max_args = 2, .handler = cmd_beep },
             .{ .name = "about", .help = "explain this questionable system", .usage = "about", .category = .machine_identity, .handler = cmd_about },
             .{ .name = "beans", .help = "count beans, probably", .usage = "beans [count]", .category = .machine_identity, .max_args = 1, .handler = cmd_beans },
+            .{ .name = "calc", .help = "calculator utilities: 'calc history' shows saved calculation history from /data/calc_hst.txt", .usage = "calc [history]", .category = .system, .max_args = 1, .handler = cmd_calc },
             .{ .name = "cat", .help = "print a file from the ESP (by name or /path)", .usage = "cat <file|path>", .category = .storage, .min_args = 1, .max_args = 1, .handler = cmd_cat },
             .{ .name = "clear", .help = "clean up the crime scene", .usage = "clear", .category = .system, .handler = cmd_clear },
             .{ .name = "compose", .help = "list available Alt+key compose sequences for accented characters", .usage = "compose", .category = .system, .handler = cmd_compose },
@@ -1034,6 +1035,54 @@ fn cmd_mount(m: *Monitor, args: []const []const u8) ExecError {
             return .machine_failed;
         },
     }
+}
+
+/// Calculator utilities: 'calc history' reads and prints /data/calc_hst.txt
+/// (M24 K5 — the persisted calculation history ring).
+fn cmd_calc(m: *Monitor, args: []const []const u8) ExecError {
+    if (args.len == 0 or std.mem.eql(u8, args[0], "history")) {
+        const path = "/data/calc_hst.txt";
+        const size = fat.file_size(path) orelse {
+            err_prefix(m);
+            m.console.print_line("calc: no history file found (/data/calc_hst.txt)");
+            return .none;
+        };
+        if (size == 0) {
+            m.console.print_line("calc: history is empty");
+            return .none;
+        }
+        var buf: [esp.write_content_max]u8 = undefined;
+        if (size > @as(u32, @intCast(buf.len))) {
+            err_prefix(m);
+            m.console.puts("calc: history file is ");
+            m.console.print_hex(size);
+            m.console.puts(" bytes; display caps at ");
+            m.console.print_hex(esp.write_content_max);
+            m.console.print_line(" bytes");
+            return .invalid_argument;
+        }
+        const got = fat.read_file(path, &buf) orelse {
+            err_prefix(m);
+            m.console.print_line("calc: failed to read history file");
+            return .invalid_argument;
+        };
+        // Count lines for the header
+        var lines: u32 = 0;
+        for (buf[0..got]) |ch| {
+            if (ch == '\n') lines += 1;
+        }
+        m.console.puts("calc history (");
+        m.console.print_u64(lines);
+        m.console.print_line(" entries):\n");
+        m.console.puts(buf[0..got]);
+        if (got > 0 and buf[got - 1] != '\n') m.console.puts("\n");
+        return .none;
+    }
+    err_prefix(m);
+    m.console.puts("unknown calc subcommand: ");
+    m.console.print_line(args[0]);
+    print_usage(m, lookup("calc").?);
+    return .invalid_argument;
 }
 
 /// Print a file's content — a bare name serves the ESP window (unchanged
