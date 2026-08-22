@@ -157,6 +157,12 @@ pub const CalcEngine = struct {
         self.is_entering_val = false;
     }
 
+    /// Raise the error state from the caller layer (K7 domain errors:
+    /// asin/acos out of range, tan at cos = 0).
+    pub fn raise_error(self: *CalcEngine) void {
+        self.fail();
+    }
+
     pub fn clear(self: *CalcEngine) void {
         self.accum = 0;
         self.current_val = 0;

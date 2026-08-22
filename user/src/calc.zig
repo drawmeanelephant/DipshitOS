@@ -9,6 +9,7 @@
 //!   K3 — Unit conversion (Ctrl+U): temp/length/weight categories
 //!   K4 — Mathematical constants: π, e, √2, φ buttons
 //!   K5 — History persistence: save/load from FAT
+//!   K7 — Trigonometry: SIN/COS/TAN/ASIN/ACOS/ATAN, DEG/RAD toggle
 //!
 //! Keyboard shortcuts:
 //!   Digits 0–9          → input_digit
@@ -42,6 +43,8 @@ const ProgrammerState = prog.ProgrammerState;
 const Base = prog.Base;
 
 const constants = @import("calc/constants.zig");
+
+const science = @import("calc/science.zig");
 
 // ---------------------------------------------------------------------------
 // Window constants
@@ -164,6 +167,9 @@ pub const AppState = struct {
 
     // K4: constant buttons only shown in standard mode
 
+    // K7: trigonometry — DEG/RAD mode (default RAD) + function buttons
+    deg_mode: bool = false,
+
     // ---- Standard mode buttons ----
     btn_m_store: Button = Button.init(Rect.make(8, 104, 56, 20), "MS"),
     btn_m_recall: Button = Button.init(Rect.make(69, 104, 56, 20), "MR"),
@@ -215,6 +221,15 @@ pub const AppState = struct {
     btn_euler: Button = Button.init(Rect.make(321, 104, 56, 20), "e"),
     btn_sqrt2: Button = Button.init(Rect.make(382, 104, 56, 20), "sqrt2"),
     btn_phi: Button = Button.init(Rect.make(443, 104, 56, 20), "phi"),
+
+    // ---- K7 trig buttons (standard mode, below keypad) ----
+    btn_sin: Button = Button.init(Rect.make(8, 286, 56, 20), "SIN"),
+    btn_cos: Button = Button.init(Rect.make(69, 286, 56, 20), "COS"),
+    btn_tan: Button = Button.init(Rect.make(130, 286, 56, 20), "TAN"),
+    btn_deg_rad: Button = Button.init(Rect.make(191, 286, 56, 20), "RAD"),
+    btn_asin: Button = Button.init(Rect.make(8, 312, 56, 20), "ASIN"),
+    btn_acos: Button = Button.init(Rect.make(69, 312, 56, 20), "ACOS"),
+    btn_atan: Button = Button.init(Rect.make(130, 312, 56, 20), "ATAN"),
 
     pub fn init() AppState {
         var s = AppState{};
@@ -440,6 +455,44 @@ pub const AppState = struct {
     }
 
     // -------------------------------------------------------------------
+    // Trigonometry (K7)
+    // -------------------------------------------------------------------
+
+    fn store_float_result(self: *AppState, r: f64) void {
+        const rounded = @round(r);
+        if (!std.math.isFinite(rounded) or @abs(rounded) > 9.2e18) {
+            self.engine.raise_error();
+            return;
+        }
+        self.engine.current_val = @intFromFloat(rounded);
+        self.engine.is_entering_val = true;
+    }
+
+    /// Current value as an angle, converted to radians in DEG mode.
+    fn angle_in(self: *const AppState) f64 {
+        const v: f64 = @floatFromInt(self.engine.current_val);
+        return if (self.deg_mode) v * science.pi / 180.0 else v;
+    }
+
+    fn apply_trig_result(self: *AppState, result: science.ScienceError!f64) void {
+        if (result) |r| {
+            self.store_float_result(r);
+        } else |_| {
+            self.engine.raise_error();
+        }
+    }
+
+    /// Inverse functions produce angles — convert back to degrees in DEG mode.
+    fn apply_inv_angle(self: *AppState, result: science.ScienceError!f64) void {
+        if (result) |r| {
+            const out = if (self.deg_mode) r * 180.0 / science.pi else r;
+            self.store_float_result(out);
+        } else |_| {
+            self.engine.raise_error();
+        }
+    }
+
+    // -------------------------------------------------------------------
     // Draw
     // -------------------------------------------------------------------
 
@@ -525,6 +578,15 @@ pub const AppState = struct {
         self.btn_euler.draw(win);
         self.btn_sqrt2.draw(win);
         self.btn_phi.draw(win);
+
+        // K7 trig buttons (standard mode)
+        self.btn_sin.draw(win);
+        self.btn_cos.draw(win);
+        self.btn_tan.draw(win);
+        self.btn_deg_rad.draw(win);
+        self.btn_asin.draw(win);
+        self.btn_acos.draw(win);
+        self.btn_atan.draw(win);
 
         // K3 conversion bar (when active, overlays the history area)
         if (self.convert_active) {
@@ -843,6 +905,34 @@ pub const AppState = struct {
                 self.engine.is_entering_val = true;
                 self.engine.has_error = false;
                 self.history_cursor = null;
+                changed = true;
+            }
+        }
+
+        // K7 trig buttons (standard mode)
+        if (!changed) {
+            if (self.btn_sin.handle_event(ev)) {
+                self.apply_trig_result(science.sin(self.angle_in()));
+                changed = true;
+            } else if (self.btn_cos.handle_event(ev)) {
+                self.apply_trig_result(science.cos(self.angle_in()));
+                changed = true;
+            } else if (self.btn_tan.handle_event(ev)) {
+                self.apply_trig_result(science.tan(self.angle_in()));
+                changed = true;
+            } else if (self.btn_deg_rad.handle_event(ev)) {
+                self.deg_mode = !self.deg_mode;
+                self.btn_deg_rad.label = if (self.deg_mode) "DEG" else "RAD";
+                ui.write_console(if (self.deg_mode) "calc: deg-mode\n" else "calc: rad-mode\n");
+                changed = true;
+            } else if (self.btn_asin.handle_event(ev)) {
+                self.apply_inv_angle(science.asin(@floatFromInt(self.engine.current_val)));
+                changed = true;
+            } else if (self.btn_acos.handle_event(ev)) {
+                self.apply_inv_angle(science.acos(@floatFromInt(self.engine.current_val)));
+                changed = true;
+            } else if (self.btn_atan.handle_event(ev)) {
+                self.apply_inv_angle(science.atan(@floatFromInt(self.engine.current_val)));
                 changed = true;
             }
         }
@@ -1296,6 +1386,74 @@ test "calc: K4 constant keyboard shortcut (not mapped, button only)" {
     _ = app.handle_keyboard_event(&ev);
     try std.testing.expectEqual(@as(i64, 5), app.engine.current_val);
     _ = before;
+}
+
+fn click_button(app: *AppState, x: u32, y: u32) void {
+    var ev_down = Event{ .kind = ui.MOUSE_DOWN, .flags = 0, .seq = 1, .arg0 = x, .arg1 = y };
+    _ = app.handle_mouse_events(&ev_down);
+    var ev_up = Event{ .kind = ui.MOUSE_UP, .flags = 0, .seq = 2, .arg0 = x, .arg1 = y };
+    _ = app.handle_mouse_events(&ev_up);
+}
+
+test "calc K7: sin(90deg) = 1 via buttons" {
+    var app = AppState.init();
+    // Type 90 (digits 9, 0)
+    var ev9 = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 1, .arg0 = 0x09, .arg1 = '9' };
+    _ = app.handle_keyboard_event(&ev9);
+    var ev0 = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 2, .arg0 = 0, .arg1 = '0' };
+    _ = app.handle_keyboard_event(&ev0);
+    try std.testing.expectEqual(@as(i64, 90), app.engine.current_val);
+
+    // Switch to DEG mode (button at 191,286 center → 219,296)
+    click_button(&app, 219, 296);
+    try std.testing.expect(app.deg_mode);
+
+    // SIN button at (8,286) center → 36,296
+    click_button(&app, 36, 296);
+    try std.testing.expectEqual(@as(i64, 1), app.engine.current_val);
+}
+
+test "calc K7: cos(0) = 1 in default RAD mode" {
+    var app = AppState.init();
+    try std.testing.expect(!app.deg_mode); // RAD is the default
+    // COS button at (69,286) center → 97,296; current value is 0
+    click_button(&app, 97, 296);
+    try std.testing.expectEqual(@as(i64, 1), app.engine.current_val);
+}
+
+test "calc K7: inverse functions round-trip in DEG mode" {
+    var app = AppState.init();
+    // DEG on, asin(1) → 90
+    click_button(&app, 219, 296); // DEG/RAD toggle
+    app.engine.current_val = 1;
+    app.engine.is_entering_val = true;
+    click_button(&app, 36, 322); // ASIN at (8,312) center → 36,322
+    try std.testing.expectEqual(@as(i64, 90), app.engine.current_val);
+
+    // acos(1) → 0
+    app.engine.current_val = 1;
+    click_button(&app, 97, 322); // ACOS at (69,312) center → 97,322
+    try std.testing.expectEqual(@as(i64, 0), app.engine.current_val);
+
+    // atan(1) → 45 in DEG
+    app.engine.current_val = 1;
+    click_button(&app, 158, 322); // ATAN at (130,312) center → 158,322
+    try std.testing.expectEqual(@as(i64, 45), app.engine.current_val);
+}
+
+test "calc K7: tan(90deg) and asin(2) raise ERROR" {
+    var app = AppState.init();
+    click_button(&app, 219, 296); // DEG mode
+    app.engine.current_val = 90;
+    app.engine.is_entering_val = true;
+    click_button(&app, 158, 296); // TAN at (130,286)
+    try std.testing.expect(app.engine.has_error);
+
+    app.engine.clear();
+    app.engine.current_val = 2;
+    app.engine.is_entering_val = true;
+    click_button(&app, 36, 322); // ASIN out of domain
+    try std.testing.expect(app.engine.has_error);
 }
 
 test "calc: K3 unit conversion toggle" {
