@@ -22,6 +22,7 @@ const builtin = @import("builtin");
 const alloc = @import("alloc.zig");
 const console = @import("console.zig");
 const esp = @import("esp.zig"); // claim 3475: ESP file window (ls/cat/write)
+const fat = @import("fat.zig"); // M18 T16 (issue #419): direct FAT script reads (the sh /path form)
 const lineedit = @import("lineedit.zig");
 const tokenizer = @import("tokenizer.zig");
 const monitor = @import("monitor.zig");
@@ -46,6 +47,25 @@ const history_file_max: usize = 50;
 const env_max: usize = 16;
 const env_name_max: usize = 32;
 const env_val_max: usize = 64;
+/// M18 T16 (issue #419): script bounds — at most 64 executable lines,
+/// at most 256 chars per line, staged into 64 × 256 = 16384 bytes.
+const script_max_lines: usize = 64;
+const script_line_max: usize = 256;
+const script_staging_max: usize = script_max_lines * script_line_max;
+
+/// M18 T16: true while a script is executing — the nesting guard that
+/// refuses `sh` inside a script (`sh: scripts cannot call scripts`).
+/// Module scope, like env_table: the execution path (handle_line) is
+/// module-level, so a flag on the Shell struct would be unreachable
+/// there. Never set while another script runs (nesting is refused), so
+/// no reentrancy is possible.
+var script_active: bool = false;
+/// M18 T16: a running script asked to stop early via `exit`.
+var script_stop: bool = false;
+/// M18 T16: BSS staging for the script file. Deliberately NOT stack: the
+/// kernel stack is 16 KiB (ADR 0004 D5) and the LineEditor ring already
+/// crowds it (claim 1809's lesson).
+var script_staging: [script_staging_max]u8 = undefined;
 
 const EnvEntry = struct {
     name: [env_name_max]u8 = [_]u8{0} ** env_name_max,
@@ -165,11 +185,26 @@ fn sbReadByte(ctx: *anyopaque) ?u8 {
     return sc.inner.readByte();
 }
 
-const scrollback_vtable: console.Console.VTable = .{
-    .write = sbWrite,
-    .flush = sbFlush,
-    .readByte = sbReadByte,
-};
+/// M18 T1: the scrollback wrapper's vtable is built at runtime into BSS,
+/// NOT a const table — a const table holds link-time absolute function
+/// addresses, wrong at the kernel's runtime-chosen load base (claim 0015
+/// root cause, ADR 0005; the same reason MachineControl's vtable and the
+/// monitor registry are built at runtime). A const vtable here faulted on
+/// the first banner write through the wrapped console and silently hung
+/// every M18 boot at the aslr seam (observed 2026-08-22, claim 0469).
+var scrollback_vtable: console.Console.VTable = undefined;
+var scrollback_vtable_ready = false;
+fn ensure_scrollback_vtable() *const console.Console.VTable {
+    if (!scrollback_vtable_ready) {
+        scrollback_vtable = .{
+            .write = sbWrite,
+            .flush = sbFlush,
+            .readByte = sbReadByte,
+        };
+        scrollback_vtable_ready = true;
+    }
+    return &scrollback_vtable;
+}
 
 pub const Shell = struct {
     mon: monitor.Monitor,
@@ -231,7 +266,7 @@ pub const Shell = struct {
         };
         self.mon.console = console.Console{
             .ctx = &self.scrollback_ctx,
-            .vtable = &scrollback_vtable,
+            .vtable = ensure_scrollback_vtable(),
         };
         monitor.banner(&self.mon);
     }
@@ -251,7 +286,10 @@ pub const Shell = struct {
         // Newlines inside paste are kept as-is; the whole buffer is
         // submitted as one multi-line block when paste ends.
         if (self.paste_active) {
-            if (self.scroll_csi_track(byte)) return .pending;
+            if (self.scroll_csi_track(byte)) {
+                self.editor.csi_reset(); // tracker consumed a byte mid-CSI
+                return .pending;
+            }
             if (self.paste_buf_len < lineedit.max_line) {
                 self.paste_buf[self.paste_buf_len] = byte;
                 self.paste_buf_len += 1;
@@ -300,7 +338,16 @@ pub const Shell = struct {
         // Only the final '~' byte of a scroll sequence is consumed; all
         // other bytes (including arrow-key sequences) pass through to
         // the editor unchanged.
-        if (self.scroll_csi_track(byte)) return .pending;
+        if (self.scroll_csi_track(byte)) {
+            // The tracker consumed the final byte of a sequence the editor
+            // was mid-way through (scroll keys' '~', selection arrows,
+            // swallowed CSI finals). Reset the editor's CSI state so the
+            // next keystroke types cleanly — without this, `[5`/`[6`
+            // fragments from a scroll key insert into the line and the
+            // following ESC is swallowed (T1 live-gate finding).
+            self.editor.csi_reset();
+            return .pending;
+        }
         switch (self.editor.feed(self.mon.console, byte)) {
             .none => return .pending,
             .repaint => {
@@ -354,11 +401,16 @@ pub const Shell = struct {
                     self.scroll_csi = 4;
                 } else {
                     self.scroll_csi = 0; // lone ESC — pass through for editor
-                    // M18 T2: lone ESC in selection mode cancels selection
+                    // M18 T2: a lone ESC in selection mode cancels
+                    // selection. The cancel fires on the byte AFTER the
+                    // ESC (the tracker cannot know a lone ESC until
+                    // something else arrives), but that byte is a real
+                    // keystroke — it must NOT be eaten (lineedit: "a lone
+                    // ESC does not eat the next keystroke"; live-gate
+                    // finding: the chord after ESC lost its first char).
                     if (self.selecting) {
                         self.selection_cancel();
                         self.prompt_shown = false;
-                        return true;
                     }
                 }
                 return false; // always pass through
@@ -465,7 +517,16 @@ pub const Shell = struct {
                 } else {
                     self.scroll_offset = 0;
                 }
-                if (self.scroll_offset > 0 and !self.selecting) {
+                if (self.scroll_offset == 0) {
+                    // Back at the live view: selection is over. Without
+                    // this, a real Enter (0x0D) after scrolling back to
+                    // live hits the selection branch and copies+discards
+                    // the line instead of submitting it (T1 live-gate
+                    // finding — only serial '\n' slipped past before).
+                    self.selecting = false;
+                    self.sel_start = 0;
+                    self.sel_end = 0;
+                } else if (!self.selecting) {
                     self.selecting = true;
                     self.sel_start = self.scroll_offset;
                     self.sel_end = self.scroll_offset;
@@ -677,7 +738,11 @@ pub const Shell = struct {
                 self.search_exit(false);
                 return .processed;
             },
-            0x0D => { // Enter: accept the current match
+            0x0D, 0x0A => { // Enter: accept the current match. The
+                // keyboard Return decodes to LF (input.zig), and the line
+                // editor already treats CR and LF alike — search accepts
+                // both (T3 live-gate finding: a synthesized Return chord
+                // was ignored in search mode).
                 self.search_exit(true);
                 return .processed;
             },
@@ -777,10 +842,16 @@ fn load_history(editor: *lineedit.LineEditor) void {
             line_count += 1;
         }
     }
-    var li: usize = line_count;
-    while (li > 0) : (li -= 1) {
-        const idx = li - 1;
-        const line = content[line_starts[idx]..][0..line_lens[idx]];
+    // HISTORY.TXT is append-ordered (oldest first, newest last), so the
+    // file's LAST line is the most recent command. Insert lines in file
+    // order at index 0, leaving the newest at history[0] — the same
+    // newest-first shape the session ring has, so the first Up arrow
+    // after boot recalls the most recent command (the T4 intent; the
+    // original backward iteration left the OLDEST at index 0 — fixed
+    // 2026-08-22 while bringing up the live gate, claim 0469).
+    var li: usize = 0;
+    while (li < line_count) : (li += 1) {
+        const line = content[line_starts[li]..][0..line_lens[li]];
         if (editor.hist_count > 0 and std.mem.eql(u8, line, editor.history[0][0..editor.hist_len[0]])) continue;
         const keep: usize = @min(editor.hist_count, lineedit.hist_capacity - 1);
         var j = keep;
@@ -792,6 +863,119 @@ fn load_history(editor: *lineedit.LineEditor) void {
         @memcpy(editor.history[0][0..n], line[0..n]);
         editor.hist_len[0] = n;
         editor.hist_count = keep + 1;
+    }
+}
+
+/// M18 T16 (issue #419): load a script file into the staging buffer.
+/// Bare names resolve through the ESP window (like `cat`); `/`-paths read
+/// the FAT volume directly, so files up to the full 16 KiB staging bound
+/// are reachable even when they exceed the window's per-file content cap.
+/// Prints the honest refusal and returns null on any miss.
+fn script_load(mon: *monitor.Monitor, name: []const u8) ?[]const u8 {
+    if (std.mem.indexOfScalar(u8, name, '/') != null) {
+        const size = fat.file_size(name) orelse {
+            mon.console.puts("sh: ");
+            mon.console.puts(name);
+            mon.console.print_line(": not found (no such file on the FAT volume)");
+            return null;
+        };
+        if (size > @as(u32, @intCast(script_staging_max))) {
+            mon.console.puts("sh: ");
+            mon.console.puts(name);
+            mon.console.puts(": file is ");
+            mon.console.print_hex(size);
+            mon.console.puts(" bytes; scripts cap at ");
+            mon.console.print_hex(script_staging_max);
+            mon.console.print_line(" bytes");
+            return null;
+        }
+        const got = fat.read_file(name, &script_staging) orelse {
+            mon.console.puts("sh: ");
+            mon.console.puts(name);
+            mon.console.print_line(": not found (no such file on the FAT volume)");
+            return null;
+        };
+        return script_staging[0..got];
+    }
+    const e = esp.lookup(name) orelse {
+        mon.console.puts("sh: ");
+        mon.console.puts(name);
+        mon.console.print_line(": not found (no such file on the ESP)");
+        return null;
+    };
+    switch (e.kind) {
+        .esp_dir => {
+            mon.console.puts("sh: ");
+            mon.console.puts(name);
+            mon.console.print_line(": is a directory");
+            return null;
+        },
+        .esp_file => {
+            if (e.len == 0 and e.size > 0) {
+                mon.console.puts("sh: ");
+                mon.console.puts(name);
+                mon.console.puts(": content not loaded (file is ");
+                mon.console.print_hex(e.size);
+                mon.console.puts(" bytes; the window keeps files up to ");
+                mon.console.print_hex(esp.esp_content_max);
+                mon.console.print_line(" bytes)");
+                return null;
+            }
+        },
+    }
+    return esp.content_of(e);
+}
+
+/// M18 T16 (issue #419): execute a script file of shell commands, one
+/// line at a time, through handle_line() — the same path interactive
+/// input takes, so env expansion, aliases, and builtins all apply inside
+/// scripts. Bounds: file ≤ 16 KiB staging, ≤ 64 executable lines,
+/// ≤ 256 chars per line. A failing command never aborts the script (no
+/// abort-on-error by default); `exit` stops it early; scripts cannot
+/// call scripts.
+fn run_script(mon: *monitor.Monitor, name: []const u8) void {
+    if (script_active) {
+        mon.console.print_line("sh: scripts cannot call scripts");
+        return;
+    }
+    const content = script_load(mon, name) orelse return;
+    script_active = true;
+    defer script_active = false;
+    script_stop = false;
+    var exec_lines: usize = 0;
+    var start: usize = 0;
+    var i: usize = 0;
+    while (i <= content.len) : (i += 1) {
+        if (i == content.len or content[i] == '\n' or content[i] == '\r') {
+            if (i > start) {
+                const raw = content[start..i];
+                // Skip leading whitespace so comments and blank lines
+                // are recognized wherever they start.
+                var t: usize = 0;
+                while (t < raw.len and (raw[t] == ' ' or raw[t] == '\t')) t += 1;
+                const line = raw[t..];
+                if (line.len > 0 and line[0] != '#') {
+                    if (exec_lines >= script_max_lines) {
+                        mon.console.puts("sh: too many lines (max ");
+                        mon.console.print_u64(script_max_lines);
+                        mon.console.print_line(")");
+                        break;
+                    }
+                    if (line.len > script_line_max) {
+                        mon.console.puts("sh: line too long (max ");
+                        mon.console.print_u64(script_line_max);
+                        mon.console.print_line(" bytes)");
+                    } else {
+                        handle_line(mon, line);
+                        exec_lines += 1;
+                        if (script_stop) break;
+                    }
+                }
+            }
+            start = i + 1;
+            // Skip the LF of a CRLF pair.
+            if (i < content.len and content[i] == '\r' and i + 1 < content.len and content[i + 1] == '\n') i += 1;
+        }
     }
 }
 
@@ -916,6 +1100,25 @@ fn shell_handle_expanded(mon: *monitor.Monitor, line: []const u8) void {
     // Builtin: unalias NAME
     if (std.mem.eql(u8, argv[0], "unalias")) {
         mon.console.print_line("unalias: not implemented (aliases are just env vars)");
+        return;
+    }
+    // M18 T16 (issue #419): 'exit' inside a running script stops it
+    // early. Outside a script it is not a command — it falls through to
+    // the registry's unknown-command shape below.
+    if (std.mem.eql(u8, argv[0], "exit") and script_active) {
+        script_stop = true;
+        return;
+    }
+    // Builtin: sh SCRIPT (M18 T16, issue #419) — run a script file of
+    // shell commands line by line. Intercepted here (like export/alias)
+    // because execution must go through handle_line; the monitor registry
+    // entry exists for help/usage/completion discovery.
+    if (std.mem.eql(u8, argv[0], "sh")) {
+        if (argv.len != 2) {
+            mon.console.print_line("sh: usage: sh <script>");
+            return;
+        }
+        run_script(mon, argv[1]);
         return;
     }
     // Builtin: prompt NEW_PROMPT (M18 T15)
@@ -1259,6 +1462,7 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "  random      print n random bytes from the seeded CSPRNG (hex)\n" ++
         "  reboot      restart the machine\n" ++
         "  repeat      repeat text, safely bounded\n" ++
+        "  sh          run a script file of shell commands ('sh <script>' executes it line by line; 64 lines max, 256 chars per line; '#' comments; 'exit' stops early)\n" ++
         "  settings    persistent configuration: `settings [list]`, `settings get <key>`, `settings set <key> <val>`, `settings reset`\n" ++
         "  sound       virtio-snd transport: device DID, class, status, control-queue state, device-config counts (jacks/streams/channel-maps), re-arm; stream-state control: 'sound volume <0-100>' and 'sound mute <on|off>'\n" ++
         "  shutdown    request power-off\n" ++
@@ -1332,7 +1536,7 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "error: no command given; type 'help' for a list of commands\n" ++
         "dipshit> ";
 
-    var mock = console.MockConsole(8192){};
+    var mock = console.MockConsole(16384){};
     var shell = make_shell(&mock, make_view());
     shell.boot();
     // Arm the module allocator from the same fixture map the monitor sees,
@@ -1847,6 +2051,79 @@ test "shell: T2 selection: Down arrow beyond sel_start exits selection" {
     try std.testing.expect(!shell.selecting);
 }
 
+test "shell: typed input after scroll keys types cleanly (T1 gate finding)" {
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    var i: usize = 0;
+    while (i < 30) : (i += 1) {
+        mock.feed("echo line\n");
+        while (shell.poll() != .idle) {}
+    }
+
+    // PageUp x2 then PageDown x2, then type a command. The shell consumes
+    // the '~' of each scroll sequence; the editor must not be left mid-CSI
+    // (no `[5`/`[6` fragments in the line, no swallowed ESC).
+    mock.feed("\x1b[5~\x1b[5~\x1b[6~\x1b[6~echo clean-typed\n");
+    while (shell.poll() != .idle) {}
+    try std.testing.expectEqual(@as(usize, 0), shell.scroll_offset);
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "clean-typed\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "unknown command") == null);
+}
+
+test "shell: paging back to live clears selection so Enter submits (T1 gate finding)" {
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    var i: usize = 0;
+    while (i < 30) : (i += 1) {
+        mock.feed("echo line\n");
+        while (shell.poll() != .idle) {}
+    }
+
+    // PageUp enters selection; PageDown back to live must clear it.
+    mock.feed("\x1b[5~");
+    while (shell.poll() != .idle) {}
+    try std.testing.expect(shell.selecting);
+    mock.feed("\x1b[6~");
+    while (shell.poll() != .idle) {}
+    try std.testing.expect(!shell.selecting);
+    try std.testing.expectEqual(@as(usize, 0), shell.scroll_offset);
+
+    // A REAL Enter (0x0D) must submit the line — not copy+discard.
+    mock.feed("echo done-typed\r");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "done-typed\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "copied") == null);
+}
+
+test "shell: ESC while selecting cancels without eating the next keystroke (T2 gate finding)" {
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    var i: usize = 0;
+    while (i < 30) : (i += 1) {
+        mock.feed("echo line\n");
+        while (shell.poll() != .idle) {}
+    }
+
+    // PageUp enters selection; ESC then a typed command: the cancel fires
+    // on the byte after ESC, but that byte is a real keystroke ('e' of
+    // echo) and must not be eaten.
+    mock.feed("\x1b[5~");
+    while (shell.poll() != .idle) {}
+    try std.testing.expect(shell.selecting);
+    mock.feed("\x1becho esc-ok\n");
+    while (shell.poll() != .idle) {}
+    try std.testing.expect(!shell.selecting);
+    try std.testing.expectEqual(@as(usize, 0), shell.scroll_offset);
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "esc-ok\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "unknown command") == null);
+}
+
 test "shell: T3 search: Ctrl+R enters search mode, Esc exits" {
     var mock = console.MockConsole(4096){};
     var shell = make_shell(&mock, make_view());
@@ -1900,6 +2177,32 @@ test "shell: T3 search: typing finds a match in history" {
     try std.testing.expect(!shell.searching);
 
     // Editor should still have the matched line
+    const accepted = shell.editor.buffer[0..shell.editor.len];
+    try std.testing.expect(std.mem.indexOf(u8, accepted, "delta-echo") != null);
+}
+
+test "shell: T3 search: LF accepts the match like CR (keyboard Return)" {
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+
+    mock.feed("echo delta-echo\n");
+    while (shell.poll() != .idle) {}
+
+    mock.feed("\x12"); // Ctrl+R
+    while (shell.poll() != .idle) {}
+    try std.testing.expect(shell.searching);
+
+    for ("delta") |ch| {
+        var buf: [1]u8 = [_]u8{ch};
+        mock.feed(&buf);
+        while (shell.poll() != .idle) {}
+    }
+
+    // The keyboard Return decodes to LF (0x0a) — must accept like CR.
+    mock.feed("\x0a");
+    while (shell.poll() != .idle) {}
+    try std.testing.expect(!shell.searching);
     const accepted = shell.editor.buffer[0..shell.editor.len];
     try std.testing.expect(std.mem.indexOf(u8, accepted, "delta-echo") != null);
 }
@@ -2153,4 +2456,155 @@ test "shell: T15 prompt: prompt builtin changes the prompt" {
     _ = settings.set("prompt", "test$ ");
     try std.testing.expectEqualStrings("test$ ", settings.get_prompt());
     _ = settings.set("prompt", "dipshit> "); // restore default
+}
+
+test "shell: T16 script: sh executes a script file line by line" {
+    // The issue's host test: a script with two echo commands; both lines
+    // execute through handle_line and both outputs appear, with no prompt
+    // printed between them (script mode never repaints the prompt).
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    esp.reset();
+    _ = esp.add_esp_entry("SCRIPT.TXT", 0, "echo script-first\n# a comment\n\necho script-second\n");
+    mock.feed("sh SCRIPT.TXT\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "script-first\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "script-second\n") != null);
+    // Both outputs are contiguous: no prompt or echo between them.
+    try std.testing.expect(std.mem.indexOf(u8, out, "script-first\nscript-second\n") != null);
+    // Comments never execute or print.
+    try std.testing.expect(std.mem.indexOf(u8, out, "a comment") == null);
+}
+
+test "shell: T16 script: exit stops the script early" {
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    esp.reset();
+    _ = esp.add_esp_entry("EXIT.TXT", 0, "echo before-exit\nexit\necho after-exit\n");
+    mock.feed("sh EXIT.TXT\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "before-exit\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "after-exit") == null);
+}
+
+test "shell: T16 script: sh refuses nested script calls" {
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    esp.reset();
+    _ = esp.add_esp_entry("OUTER.TXT", 0, "echo outer-line\nsh INNER.TXT\necho outer-tail\n");
+    _ = esp.add_esp_entry("INNER.TXT", 0, "echo inner-line\n");
+    mock.feed("sh OUTER.TXT\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "sh: scripts cannot call scripts\n") != null);
+    // The outer script continues after the refusal (no abort-on-error)...
+    try std.testing.expect(std.mem.indexOf(u8, out, "outer-line\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "outer-tail\n") != null);
+    // ...and the inner script never ran.
+    try std.testing.expect(std.mem.indexOf(u8, out, "inner-line") == null);
+}
+
+test "shell: T16 script: missing script is reported honestly" {
+    var mock = console.MockConsole(2048){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    esp.reset();
+    mock.feed("sh NOPE.TXT\n");
+    while (shell.poll() != .idle) {}
+    try std.testing.expect(std.mem.indexOf(u8, mock.contents(), "sh: NOPE.TXT: not found (no such file on the ESP)\n") != null);
+}
+
+test "shell: T16 script: sh with no arguments shows usage" {
+    var mock = console.MockConsole(2048){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    esp.reset();
+    mock.feed("sh\n");
+    while (shell.poll() != .idle) {}
+    try std.testing.expect(std.mem.indexOf(u8, mock.contents(), "sh: usage: sh <script>\n") != null);
+}
+
+test "shell: T16 script: bare exit at the prompt stays an unknown command" {
+    var mock = console.MockConsole(2048){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    esp.reset();
+    mock.feed("exit\n");
+    while (shell.poll() != .idle) {}
+    try std.testing.expect(std.mem.indexOf(u8, mock.contents(), "unknown command 'exit' -- try 'help'\n") != null);
+}
+
+test "shell: T16 script: line longer than 256 bytes is refused and skipped" {
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    esp.reset();
+    const content = "echo before-long\n" ++ ("x" ** 300) ++ "\necho after-long\n";
+    _ = esp.add_esp_entry("LONG.TXT", 0, content);
+    mock.feed("sh LONG.TXT\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "sh: line too long (max 256 bytes)\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "before-long\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "after-long\n") != null);
+    // The over-long line never reached the executor (no 300-char echo).
+    try std.testing.expect(std.mem.indexOf(u8, out, "x" ** 300) == null);
+}
+
+test "shell: T4 history: load_history restores newest-first" {
+    // HISTORY.TXT is append-ordered (oldest first, newest last); the
+    // restore must leave the most recent command at history[0] so the
+    // first Up arrow after boot recalls it (verified live 2026-08-22,
+    // claim 0469 — the original backward iteration left the OLDEST at
+    // index 0, and the live gate caught it).
+    var mock = console.MockConsole(1024){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    esp.reset();
+    _ = esp.add_esp_entry("HISTORY.TXT", 0, "echo first\necho second\necho third\n");
+    esp.set_disk_ready_for_test(true);
+    defer esp.set_disk_ready_for_test(false);
+    load_history(&shell.editor);
+    try std.testing.expectEqual(@as(usize, 3), shell.editor.hist_count);
+    try std.testing.expectEqualStrings("echo third", shell.editor.history[0][0..shell.editor.hist_len[0]]);
+    try std.testing.expectEqualStrings("echo second", shell.editor.history[1][0..shell.editor.hist_len[1]]);
+    try std.testing.expectEqualStrings("echo first", shell.editor.history[2][0..shell.editor.hist_len[2]]);
+}
+
+test "shell: T16 script: more than 64 executable lines is refused" {
+    var mock = console.MockConsole(8192){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    esp.reset();
+    // 65 executable lines ("echo s0" .. "echo s64"); comments/blanks do
+    // not count toward the bound.
+    var content: [1500]u8 = undefined;
+    var clen: usize = 0;
+    var n: usize = 0;
+    while (n < 65) : (n += 1) {
+        const prefix = "echo s";
+        @memcpy(content[clen..][0..prefix.len], prefix);
+        clen += prefix.len;
+        if (n >= 10) {
+            content[clen] = '0' + @as(u8, @intCast(n / 10));
+            clen += 1;
+        }
+        content[clen] = '0' + @as(u8, @intCast(n % 10));
+        clen += 1;
+        content[clen] = '\n';
+        clen += 1;
+    }
+    _ = esp.add_esp_entry("MANY.TXT", 0, content[0..clen]);
+    mock.feed("sh MANY.TXT\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "sh: too many lines (max 64)\n") != null);
+    // Lines 0..63 executed (echo s0 .. echo s63); the 65th (echo s64) did not.
+    try std.testing.expect(std.mem.indexOf(u8, out, "s63\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "s64\n") == null);
 }

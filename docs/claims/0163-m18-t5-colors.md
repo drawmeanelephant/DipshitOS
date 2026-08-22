@@ -27,6 +27,14 @@ Implements issue #408 T5: terminal ANSI color support.
 - **Modified:** `tests/transcript-console.txt` — `color` line in help output
 - **New:** `tools/verify-live-color.sh` — class-B VZ gate
 
+### Live-gate evidence (2026-08-22, claim 0469 session)
+
+`bash tools/verify-live-color.sh` — **class-B PASS 1/1** on real VZ:
+`artifacts/live-color-gate.txt`, `live-color-report.txt`,
+`live-color-serial-01.log` (banner=1 on=1 dir=1 off=1 done=1 — prompt
+wrapped in ANSI escapes, `ls` directories bold, `color` toggle persisted).
+The gate needed no changes (pure serial walk).
+
 ### Verification
 
 - `zig test kernel/src/shell.zig` — 525/525

@@ -273,8 +273,11 @@ pub const Command = struct {
 /// (claim 0169) grows it 44 -> 45 (`clip`). Milestone fifteen card A1
 /// (claim 6140) grows it 45 -> 46 (`sound`). Milestone fifteen card A2
 /// (claim 5877) grows it 46 -> 47 (`beep`). Milestone sixteen card C3
-/// (claim 0339) grows it 47 -> 48 (`resources`).
-pub const registry_count: usize = 52; // M24 K5: added `calc` command
+/// (claim 0339) grows it 47 -> 48 (`resources`). Milestone eighteen T5
+/// (claim 0163) grows it 50 -> 51 (`color`). Milestone eighteen T16
+/// (issue #419) grows it 51 -> 52 (`sh`). Milestone twenty-four K5
+/// grows it 52 -> 53 (`calc`).
+pub const registry_count: usize = 53; // 51 + `sh` (M18 T16) + `calc` (M24 K5)
 
 /// Command registry, built at runtime into BSS. A `const` table would hold
 /// link-time absolute addresses for BOTH the string slices and the handler
@@ -323,6 +326,7 @@ fn ensure_registry() []const Command {
             .{ .name = "resources", .help = "fixed-pool audit: scheduler tasks, process registry, windows, page-table carve-out, and per-process ring bounds", .usage = "resources", .category = .memory_state, .handler = cmd_resources },
             .{ .name = "reboot", .help = "restart the machine", .usage = "reboot", .category = .system, .handler = cmd_reboot },
             .{ .name = "repeat", .help = "repeat text, safely bounded", .usage = "repeat <count> <text...>", .category = .system, .min_args = 1, .handler = cmd_repeat },
+            .{ .name = "sh", .help = "run a script file of shell commands ('sh <script>' executes it line by line; 64 lines max, 256 chars per line; '#' comments; 'exit' stops early)", .usage = "sh <script>", .category = .system, .min_args = 1, .max_args = 1, .handler = cmd_sh },
             .{ .name = "roadpops", .help = "Road Pops framebuffer console: armed/dirty/present counters (the boot terminal on the screen)", .usage = "roadpops", .category = .graphics_input, .handler = cmd_roadpops },
             .{ .name = "screen", .help = "virtio-gpu transport + framebuffer: device DID, features, scanout, status, re-arm ('screen fill <rrggbb>' fills the framebuffer and flushes it to the scanout)", .usage = "screen [fill <rrggbb>]", .category = .graphics_input, .max_args = 2, .handler = cmd_screen },
             .{ .name = "settings", .help = "persistent configuration: `settings [list]`, `settings get <key>`, `settings set <key> <val>`, `settings reset`", .usage = "settings [list|get <key>|set <key> <val>|reset]", .category = .system, .max_args = 3, .handler = cmd_settings },
@@ -2072,6 +2076,20 @@ fn cmd_repeat(m: *Monitor, args: []const []const u8) ExecError {
         m.console.puts("\n");
     }
     return .none;
+}
+
+/// `sh` — M18 T16 (issue #419): registered here for discovery (help,
+/// tab completion, usage shape). Actual script execution lives in the
+/// interactive shell (`shell.zig` intercepts `sh` before this registry
+/// is reached, because scripts must execute through the shell's
+/// handle_line). Direct `monitor.exec` of `sh` — host tests only — gets
+/// an honest refusal rather than a silent no-op.
+fn cmd_sh(m: *Monitor, args: []const []const u8) ExecError {
+    _ = args;
+    // ADR 0008 D3 shape 2: a refusal wears the `error:` prefix.
+    err_prefix(m);
+    m.console.print_line("sh: script execution runs through the interactive shell");
+    return .invalid_argument;
 }
 
 /// `settings` — report and modify persistent configuration (claim 2649,

@@ -45,9 +45,25 @@ Implements issue #406 T3: reverse-i-search triggered by Ctrl+R (0x12).
   search_handle, search_match, search_redraw, search_exit, 6 new host tests
 - **New:** `tools/verify-live-search.sh` — class-B VZ gate
 
+### Live-gate evidence (2026-08-22; updated by the arrow-chord follow-up)
+
+`bash tools/verify-live-search.sh` — **class-B PASS 1/1** on real VZ:
+`artifacts/live-search-gate.txt`, `live-search-report.txt`,
+`live-search-serial-01.log` (banner=1 fill-ready=1 search=1 match=1
+done=1 runner-flag=1). The walk now sends ONLY the Ctrl+R entry over
+serial (a modifier chord — the activation wall) and types the QUERY and
+the Enter-accept through the synthesized keyboard (`--input-chords`,
+claim 5093): the search bar re-prints on every chord, so the log's
+`(reverse-i-search)`special`: echo special-search-target-777` line proves
+the keyboard-typed query found the right history line. The keyboard
+Return decodes to LF, which search mode now accepts like CR (the line
+editor already treated CR and LF alike — live-gate fix: a synthesized
+Return was ignored in search mode). The accepted line + appended marker
+submit and run as one echo, whose output carries the done marker.
+
 ### Verification
 
-- `zig test kernel/src/shell.zig` — 525/525 tests pass (6 new T3 tests)
+- `zig test kernel/src/shell.zig` — 549/549 tests pass (T3 tests incl. LF-accepts-like-CR)
 - `bash tools/verify-unit-tests.sh` — all modules pass
 - `zig build test-console` — transcript byte-identical
 - `zig build kernel` — kernel builds

@@ -155,6 +155,13 @@ pub fn reset() void {
     state.clear();
 }
 
+/// Host-test hook: mark the window as disk-backed so the shell's
+/// disk_ready-guarded paths (history load, startup file) can be exercised
+/// without a mounted FAT volume. Never called by kernel code.
+pub fn set_disk_ready_for_test(ready: bool) void {
+    state.disk_ready = ready;
+}
+
 /// Install the disk sector interface, mount the ESP's FAT32 volume, and
 /// populate the window from the root directory (the snapshot). Returns the
 /// FAT mount result; `null` ops leaves the window empty and honest

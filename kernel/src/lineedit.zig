@@ -122,6 +122,16 @@ pub const LineEditor = struct {
         self.hist_cursor = 0;
     }
 
+    /// Abandon any in-progress CSI decode. The shell consumes the final
+    /// byte of a scroll/paste/selection sequence before it reaches the
+    /// editor, leaving the editor mid-`ESC [ <param>`; the next byte would
+    /// otherwise be swallowed (or `[ <param>` fragments inserted). The
+    /// shell calls this whenever its tracker consumes a byte.
+    pub fn csi_reset(self: *LineEditor) void {
+        self.esc_state = 0;
+        self.esc_param = 0;
+    }
+
     /// Reprint the current line after a screen clear (Ctrl-L): the shell
     /// prints the prompt, then this emits the content and repositions the
     /// cursor. No redraw bookkeeping — the screen is already cleared.
