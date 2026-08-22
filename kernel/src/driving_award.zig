@@ -168,6 +168,12 @@ pub const Window = struct {
     /// receive events, and are skipped by Alt+Tab. The dock icon shows
     /// the restore action when minimized.
     minimized: bool = false,
+    /// M21 W6: maximized flag. Maximised windows fill the workspace area
+    /// (screen minus taskbar and dock). Title bar stays visible.
+    maximized: bool = false,
+    /// M21 W8: always-on-top flag. Always-on-top windows render above
+    /// all normal windows in the z-order, regardless of focus.
+    always_on_top: bool = false,
 };
 
 /// Arc4 #239: fade-in constants. The window is at 25% opacity for
@@ -407,6 +413,17 @@ var minimize_prev_y: [user_windows_max]u32 = [_]u32{0} ** user_windows_max;
 var minimize_prev_w: [user_windows_max]u32 = [_]u32{0} ** user_windows_max;
 var minimize_prev_h: [user_windows_max]u32 = [_]u32{0} ** user_windows_max;
 var minimize_prev_valid: [user_windows_max]bool = [_]bool{false} ** user_windows_max;
+
+/// M21 W6: per-window pre-maximize rect storage.
+var pre_max_x: [user_windows_max]u32 = [_]u32{0} ** user_windows_max;
+var pre_max_y: [user_windows_max]u32 = [_]u32{0} ** user_windows_max;
+var pre_max_w: [user_windows_max]u32 = [_]u32{0} ** user_windows_max;
+var pre_max_h: [user_windows_max]u32 = [_]u32{0} ** user_windows_max;
+var pre_max_valid: [user_windows_max]bool = [_]bool{false} ** user_windows_max;
+
+/// M21 W7: fullscreen state — BSS, no heap.
+pub var fullscreen_active: bool = false;
+pub var fullscreen_window_id: ?u8 = null;
 
 /// Arc2 W3 (claim 1264, #226): system tray state — fixed BSS, ~32B, zero heap.
 /// Right 80px of 20px taskbar at y=700: HH:MM from tick, D/L/A theme letter
@@ -960,7 +977,7 @@ pub const UserOpenResult = union(enum) {
 
 /// Find a user window by id (only `.user` kinds — the terminal/clock ids
 /// are fixed and never match the user id base).
-fn find_user_window(id: u8) ?*Window {
+pub fn find_user_window(id: u8) ?*Window {
     const idx = find_user_window_index(id) orelse return null;
     return &windows[idx];
 }
@@ -1715,6 +1732,147 @@ pub fn restore_from_dock(id: u8) bool {
     w.dirty = true;
     _ = focus(id);
     _ = raise(id);
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// M21 W6 — Maximize / restore
+// ---------------------------------------------------------------------------
+
+/// M21 W6: toggle maximize on the focused window. Maximized windows
+/// fill the workspace area (screen minus taskbar and dock). Title bar
+/// stays visible. Saves the pre-maximize rect for restore.
+pub fn toggle_maximize(id: u8) bool {
+    const s = user_window_slot(id) orelse return false;
+    const w = find_user_window(id) orelse return false;
+    if (w.maximized) {
+        // Restore from maximize.
+        if (pre_max_valid[s]) {
+            w.x = pre_max_x[s];
+            w.y = pre_max_y[s];
+            w.w = pre_max_w[s];
+            w.h = pre_max_h[s];
+            pre_max_valid[s] = false;
+        }
+        w.maximized = false;
+    } else {
+        // Save current rect and maximize.
+        pre_max_x[s] = w.x;
+        pre_max_y[s] = w.y;
+        pre_max_w[s] = w.w;
+        pre_max_h[s] = w.h;
+        pre_max_valid[s] = true;
+        w.x = dock_w;
+        w.y = 0;
+        w.w = virtio_gpu.fb_width - dock_w;
+        w.h = virtio_gpu.fb_height - taskbar_h;
+        w.maximized = true;
+        // W6 edge case: tiled wins — clear tile state.
+        if (tile_master_id) |mid| {
+            if (mid == id) {
+                tile_master_id = null;
+                if (tile_stack_id) |sid| {
+                    tile_master_id = sid;
+                    tile_stack_id = null;
+                }
+                tile_mode = tile_master_id != null;
+            }
+        }
+        if (tile_stack_id) |sid| {
+            if (sid == id) tile_stack_id = null;
+        }
+    }
+    w.dirty = true;
+    _ = mark_dirty(0);
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// M21 W7 — Fullscreen mode
+// ---------------------------------------------------------------------------
+
+/// M21 W7: toggle fullscreen on the focused window. Fullscreen fills
+/// the ENTIRE framebuffer (1280x720), no title bar, no border, taskbar
+/// and dock hidden. Only the fullscreen window paints.
+pub fn toggle_fullscreen(id: u8) bool {
+    const w = find_user_window(id) orelse return false;
+    if (fullscreen_active and fullscreen_window_id == id) {
+        // Exit fullscreen — restore saved rect.
+        const s = user_window_slot(id) orelse return false;
+        if (pre_max_valid[s]) {
+            w.x = pre_max_x[s];
+            w.y = pre_max_y[s];
+            w.w = pre_max_w[s];
+            w.h = pre_max_h[s];
+            pre_max_valid[s] = false;
+        }
+        fullscreen_active = false;
+        fullscreen_window_id = null;
+        // Show taskbar and dock again.
+        var i: usize = 0;
+        while (i < win_count) : (i += 1) {
+            if (windows[i].kind == .taskbar or windows[i].kind == .dock) {
+                windows[i].visible = true;
+                windows[i].dirty = true;
+            }
+        }
+    } else {
+        // Enter fullscreen — save current rect and fill screen.
+        const s = user_window_slot(id) orelse return false;
+        pre_max_x[s] = w.x;
+        pre_max_y[s] = w.y;
+        pre_max_w[s] = w.w;
+        pre_max_h[s] = w.h;
+        pre_max_valid[s] = true;
+        w.x = 0;
+        w.y = 0;
+        w.w = virtio_gpu.fb_width;
+        w.h = virtio_gpu.fb_height;
+        fullscreen_active = true;
+        fullscreen_window_id = id;
+        // Hide taskbar and dock.
+        var i: usize = 0;
+        while (i < win_count) : (i += 1) {
+            if (windows[i].kind == .taskbar or windows[i].kind == .dock) {
+                windows[i].visible = false;
+            }
+        }
+    }
+    w.dirty = true;
+    _ = mark_dirty(0);
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// M21 W8 — Always-on-top
+// ---------------------------------------------------------------------------
+
+/// M21 W8: toggle always-on-top on a user window. Always-on-top windows
+/// render above all normal windows in the z-order.
+pub fn toggle_always_on_top(id: u8) bool {
+    const w = find_user_window(id) orelse return false;
+    w.always_on_top = !w.always_on_top;
+    w.dirty = true;
+    _ = mark_dirty(0);
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// M21 W10 — Keyboard window movement
+// ---------------------------------------------------------------------------
+
+/// M21 W10: move the focused window by (dx, dy) pixels. Used for
+/// Alt+arrow keyboard movement (16px normal, 1px with Shift).
+pub fn move_window_keyboard(id: u8, dx: i32, dy: i32) bool {
+    const w = find_user_window(id) orelse return false;
+    const new_x: i32 = @as(i32, @intCast(w.x)) + dx;
+    const new_y: i32 = @as(i32, @intCast(w.y)) + dy;
+    const clamped_x: u32 = if (new_x < 0) 0 else @intCast(@min(@as(u32, @intCast(new_x)), virtio_gpu.fb_width - w.w));
+    const clamped_y: u32 = if (new_y < 0) 0 else @intCast(@min(@as(u32, @intCast(new_y)), virtio_gpu.fb_height - w.h));
+    w.x = clamped_x;
+    w.y = clamped_y;
+    w.dirty = true;
+    _ = mark_dirty(0);
     return true;
 }
 

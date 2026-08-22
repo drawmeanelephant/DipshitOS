@@ -1322,6 +1322,54 @@ pub fn boot_and_park(mon: *monitor.Monitor, rx_wired: bool) void {
                     mon.console.puts("\n");
                 }
             }
+            // M21 W6: Ctrl+Shift+M toggles maximize.
+            if (input.take_maximize()) {
+                const fid = driving_award.focused_window_id();
+                if (driving_award.toggle_maximize(fid)) {
+                    const w = driving_award.find_user_window(fid);
+                    mon.console.puts("dui: maximize id=");
+                    mon.console.print_u64(fid);
+                    mon.console.puts(" max=");
+                    mon.console.puts(if (w != null and w.?.maximized) "on" else "off");
+                    mon.console.puts("\n");
+                }
+            }
+            // M21 W7: F11 toggles fullscreen.
+            if (input.take_fullscreen()) {
+                const fid = driving_award.focused_window_id();
+                if (driving_award.toggle_fullscreen(fid)) {
+                    mon.console.puts("dui: fullscreen id=");
+                    mon.console.print_u64(fid);
+                    mon.console.puts(" on=");
+                    mon.console.puts(if (driving_award.fullscreen_active) "yes" else "no");
+                    mon.console.puts("\n");
+                }
+            }
+            // M21 W8: Ctrl+Shift+T toggles always-on-top.
+            if (input.take_always_on_top()) {
+                const fid = driving_award.focused_window_id();
+                if (driving_award.toggle_always_on_top(fid)) {
+                    const w = driving_award.find_user_window(fid);
+                    mon.console.puts("dui: always-on-top id=");
+                    mon.console.print_u64(fid);
+                    mon.console.puts(" flag=");
+                    mon.console.puts(if (w != null and w.?.always_on_top) "on" else "off");
+                    mon.console.puts("\n");
+                }
+            }
+            // M21 W10: Alt+arrow keyboard window movement.
+            if (input.take_move()) |mv| {
+                const fid = driving_award.focused_window_id();
+                if (driving_award.move_window_keyboard(fid, mv.dx, mv.dy)) {
+                    mon.console.puts("dui: move id=");
+                    mon.console.print_u64(fid);
+                    mon.console.puts(" dx=");
+                    mon.console.print_u64(@as(u64, @intCast(mv.dx + 32))); // offset for display
+                    mon.console.puts(" dy=");
+                    mon.console.print_u64(@as(u64, @intCast(mv.dy + 32))); // offset for display
+                    mon.console.puts("\n");
+                }
+            }
             // Claim 1574 (milestone six G3): Road Pops — one full-frame
             // present per dirty output batch (the card-3d drain pattern).
             // No-op when the tee is unarmed (default VM) or clean.

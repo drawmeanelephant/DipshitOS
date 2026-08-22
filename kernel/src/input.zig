@@ -100,6 +100,16 @@ var tile_toggle_pending: bool = false;
 var tile_swap_master_pending: bool = false;
 /// M21 W3: Ctrl+N minimizes the focused window.
 var minimize_pending: bool = false;
+/// M21 W6: Ctrl+Shift+M toggles maximize.
+var maximize_pending: bool = false;
+/// M21 W7: F11 toggles fullscreen.
+var fullscreen_pending: bool = false;
+/// M21 W8: Ctrl+Shift+T toggles always-on-top.
+var always_on_top_pending: bool = false;
+/// M21 W10: Alt+arrow movement. 0xff = no movement pending.
+var move_pending_dx: i32 = 0;
+var move_pending_dy: i32 = 0;
+var move_pending_fine: bool = false;
 
 /// Diagnostic hooks (kernel/src/main.zig wires these to uart_puts/uart_hex
 /// under `--input`; null in host tests and the default VM).
@@ -480,6 +490,69 @@ pub fn decode_keyboard_report(rep: []const u8) void {
                     minimize_pending = true;
                 }
             }
+            // M21 W6: Ctrl+Shift+M toggles maximize.
+            if (k == 0x10 and (flags & app_events.MOD_SHIFT) != 0) { // 'm' + Shift
+                var held = false;
+                for (kb_held) |h| {
+                    if (h == k) {
+                        held = true;
+                        break;
+                    }
+                }
+                if (!held) {
+                    maximize_pending = true;
+                }
+            }
+            // M21 W8: Ctrl+Shift+T toggles always-on-top.
+            if (k == 0x17 and (flags & app_events.MOD_SHIFT) != 0) { // 't' + Shift
+                var held = false;
+                for (kb_held) |h| {
+                    if (h == k) {
+                        held = true;
+                        break;
+                    }
+                }
+                if (!held) {
+                    always_on_top_pending = true;
+                }
+            }
+        }
+        // M21 W7: F11 (usage 0x5c) toggles fullscreen.
+        if (k == 0x5c) {
+            var held = false;
+            for (kb_held) |h| {
+                if (h == k) {
+                    held = true;
+                    break;
+                }
+            }
+            if (!held) {
+                fullscreen_pending = true;
+            }
+        }
+        // M21 W10: Alt+arrow for keyboard window movement.
+        if (alt) {
+            var dx: i32 = 0;
+            var dy: i32 = 0;
+            if (k == 0x4f) dx = 16; // Right arrow
+            if (k == 0x50) dx = -16; // Left arrow
+            if (k == 0x52) dy = -16; // Up arrow
+            if (k == 0x51) dy = 16; // Down arrow
+            if (dx != 0 or dy != 0) {
+                var held = false;
+                for (kb_held) |h| {
+                    if (h == k) {
+                        held = true;
+                        break;
+                    }
+                }
+                if (!held) {
+                    // Alt+Shift = fine movement (1px).
+                    move_pending_dx = if (shift) @divTrunc(dx, 16) else dx;
+                    move_pending_dy = if (shift) @divTrunc(dy, 16) else dy;
+                    move_pending_fine = shift;
+                }
+            }
         }
     }
 
@@ -764,6 +837,37 @@ pub fn take_workspace_cycle() bool {
     if (!workspace_cycle_pending) return false;
     workspace_cycle_pending = false;
     return true;
+}
+
+/// M21 W6: consume the Ctrl+Shift+M maximize toggle edge.
+pub fn take_maximize() bool {
+    if (!maximize_pending) return false;
+    maximize_pending = false;
+    return true;
+}
+
+/// M21 W7: consume the F11 fullscreen toggle edge.
+pub fn take_fullscreen() bool {
+    if (!fullscreen_pending) return false;
+    fullscreen_pending = false;
+    return true;
+}
+
+/// M21 W8: consume the Ctrl+Shift+T always-on-top toggle edge.
+pub fn take_always_on_top() bool {
+    if (!always_on_top_pending) return false;
+    always_on_top_pending = false;
+    return true;
+}
+
+/// M21 W10: consume the Alt+arrow movement edge. Returns (dx, dy) or
+/// null if no movement is pending.
+pub fn take_move() ?struct { dx: i32, dy: i32 } {
+    if (move_pending_dx == 0 and move_pending_dy == 0) return null;
+    const result = .{ .dx = move_pending_dx, .dy = move_pending_dy };
+    move_pending_dx = 0;
+    move_pending_dy = 0;
+    return result;
 }
 
 // ---------------------------------------------------------------------------
