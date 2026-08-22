@@ -171,6 +171,8 @@ pub fn init() void {
     esc_param = 0;
     u8_need = 0;
     u8_acc = 0;
+    missing_glyph_count = 0;
+    last_missing_cp = 0;
     initialized = true;
 }
 
@@ -384,6 +386,7 @@ pub fn putc_unicode(cp: u21) void {
         ring[slot][cur_col] = @intCast(cp); // literal encoding (ASCII + Latin tables)
     } else {
         ring[slot][cur_col] = cell_fffd; // M20-U11 fallback art
+        note_missing(cp);
     }
     cur_col += 1;
     if (w == 2 and cur_col < cols) {
@@ -408,6 +411,29 @@ fn cell_glyph(cell: Cell) ?*const [8]u8 {
 /// Lives in the reserved 0x8000+ dynamic opcode space so it can never
 /// collide with a literal codepoint.
 pub const cell_fffd: Cell = 0x8000;
+
+// ---------------------------------------------------------------------------
+// Missing-glyph diagnostics (M20-U11)
+// ---------------------------------------------------------------------------
+
+/// Dev setting (mirror of the SETTINGS.TXT `debug_font` key): when true,
+/// every fallback-to-replacement records + reports the codepoint.
+pub var debug_font: bool = false;
+
+/// Serial log hook wired by main.zig at boot ("text: no glyph for
+/// U+XXXX"). Null in host tests — counting alone is observable there.
+pub var missing_glyph_log: ?*const fn (cp: u21) void = null;
+
+/// Fallback statistics since init() (reset by clear/init).
+pub var missing_glyph_count: usize = 0;
+pub var last_missing_cp: u21 = 0;
+
+fn note_missing(cp: u21) void {
+    if (!debug_font) return;
+    missing_glyph_count += 1;
+    last_missing_cp = cp;
+    if (missing_glyph_log) |log_fn| log_fn(cp);
+}
 
 /// Emit a string.
 pub fn puts(s: []const u8) void {
@@ -877,4 +903,48 @@ test "text: DEL and unknown control bytes stay invisible blanks (U2)" {
     const canvas = testCanvas();
     render(canvas); // must not crash painting them; cells are spaces
     try std.testing.expectEqual(@as(Cell, 0x20), ring[cur_line][0]);
+}
+
+test "text: missing glyph falls back to the replacement character (U11)" {
+    init();
+    clear();
+    // U+FFFF is a guaranteed non-character: no table will ever hold it.
+    putc_unicode(0xFFFF);
+    try std.testing.expectEqual(cell_fffd, ring[cur_line][0]);
+    const canvas = testCanvas();
+    render(canvas);
+    // The FFFD art (diamond) really paints — top row has foreground.
+    const fg = rgbBytes(fg_rgb);
+    var any_fg = false;
+    for (0..8) |gx| {
+        if (std.mem.eql(u8, &fg, &pixel(canvas, gx, 0))) any_fg = true;
+    }
+    try std.testing.expect(any_fg);
+}
+
+test "text: debug_font counts and reports misses through the hook (U11)" {
+    init();
+    clear();
+    debug_font = false;
+    putc_unicode(0x2603); // no glyph — but quiet when debug off
+    try std.testing.expectEqual(@as(usize, 0), missing_glyph_count);
+    debug_font = true;
+    defer debug_font = false;
+    missing_glyph_log = null;
+    putc_unicode(0x2603);
+    putc_unicode(0x10FFFF);
+    try std.testing.expectEqual(@as(usize, 2), missing_glyph_count);
+    try std.testing.expectEqual(@as(u21, 0x10FFFF), last_missing_cp);
+    // A wired hook gets called (observable via a module-level flag).
+    const S = struct {
+        var called: bool = false;
+        fn hook(cp: u21) void {
+            called = true;
+            std.testing.expectEqual(@as(u21, 0x2603), cp) catch {};
+        }
+    };
+    missing_glyph_log = &S.hook;
+    putc_unicode(0x2603);
+    try std.testing.expect(S.called);
+    missing_glyph_log = null;
 }

@@ -331,7 +331,7 @@ fn ensure_registry() []const Command {
             .{ .name = "screen", .help = "virtio-gpu transport + framebuffer: device DID, features, scanout, status, re-arm ('screen fill <rrggbb>' fills the framebuffer and flushes it to the scanout)", .usage = "screen [fill <rrggbb>]", .category = .graphics_input, .max_args = 2, .handler = cmd_screen },
             .{ .name = "settings", .help = "persistent configuration: `settings [list]`, `settings get <key>`, `settings set <key> <val>`, `settings reset`", .usage = "settings [list|get <key>|set <key> <val>|reset]", .category = .system, .max_args = 3, .handler = cmd_settings },
             .{ .name = "sound", .help = "virtio-snd transport: device DID, class, status, control-queue state, device-config counts (jacks/streams/channel-maps), re-arm; stream-state control: 'sound volume <0-100>' and 'sound mute <on|off>'", .usage = "sound [volume <0-100> | mute <on|off>]", .category = .system, .min_args = 0, .max_args = 2, .handler = cmd_sound },
-            .{ .name = "text", .help = "framebuffer text: text region, cursor, scrollback ('text put <string...>' renders + flushes to the scanout; 'text clear' clears)", .usage = "text [put <string...>|clear]", .category = .graphics_input, .min_args = 0, .max_args = 9, .handler = cmd_text },
+            .{ .name = "text", .help = "framebuffer text: text region, cursor, scrollback ('text put <string...>' renders + flushes to the scanout; 'text clear' clears; 'text fontdebug [on|off]' missing-glyph stats)", .usage = "text [put <string...>|clear|fontdebug [on|off]]", .category = .graphics_input, .min_args = 0, .max_args = 9, .handler = cmd_text },
             .{ .name = "shutdown", .help = "request power-off", .usage = "shutdown", .category = .system, .handler = cmd_shutdown },
             .{ .name = "spawn", .help = "spawn the lifecycle demo task", .usage = "spawn", .category = .tasks_processes, .handler = cmd_spawn },
             .{ .name = "sysinfo", .help = "comprehensive system and subsystem diagnostic snapshot", .usage = "sysinfo", .category = .machine_identity, .handler = cmd_sysinfo },
@@ -4677,6 +4677,28 @@ fn cmd_text(m: *Monitor, args: []const []const u8) ExecError {
         const r = driving_award.composite();
         m.console.puts("text clear: ");
         print_cmd_result(m, r);
+        m.console.puts("\n");
+        return .none;
+    }
+    if (std.mem.eql(u8, args[0], "fontdebug")) {
+        // M20-U11: toggle the missing-glyph dev setting and report stats.
+        if (args.len > 1) {
+            if (std.mem.eql(u8, args[1], "on")) {
+                fbtext.debug_font = true;
+            } else if (std.mem.eql(u8, args[1], "off")) {
+                fbtext.debug_font = false;
+            } else {
+                print_usage(m, lookup("text").?);
+                return .usage;
+            }
+        }
+        m.console.print_line("fontdebug:");
+        m.console.puts("  state=");
+        m.console.print_line(if (fbtext.debug_font) "on" else "off");
+        m.console.puts("  missing=");
+        m.console.print_u64(fbtext.missing_glyph_count);
+        m.console.puts(" last=U+");
+        m.console.print_hex(fbtext.last_missing_cp);
         m.console.puts("\n");
         return .none;
     }
