@@ -1280,6 +1280,48 @@ pub fn boot_and_park(mon: *monitor.Monitor, rx_wired: bool) void {
                 mon.console.print_u64(ws);
                 mon.console.puts("\n");
             }
+            // M21 W4: Alt+` cycles workspaces directly.
+            if (input.take_workspace_cycle()) {
+                driving_award.cycle_workspace();
+                mon.console.puts("dui: workspace-cycle ws=");
+                mon.console.print_u64(driving_award.current_workspace);
+                mon.console.puts("\n");
+            }
+            // M21 W1: Ctrl+T toggles tiling mode.
+            if (input.take_tile_toggle()) {
+                driving_award.toggle_tiling();
+                mon.console.puts("dui: tile=");
+                mon.console.puts(if (driving_award.tile_mode) "on" else "off");
+                if (driving_award.tile_master_id) |mid| {
+                    mon.console.puts(" master=");
+                    mon.console.print_u64(mid);
+                }
+                if (driving_award.tile_stack_id) |sid| {
+                    mon.console.puts(" stack=");
+                    mon.console.print_u64(sid);
+                }
+                mon.console.puts("\n");
+            }
+            // M21 W2: Ctrl+M swaps master/detail in tiled mode.
+            if (input.take_tile_swap_master()) {
+                driving_award.swap_master();
+                mon.console.puts("dui: master-swap side=");
+                mon.console.puts(if (driving_award.tile_master_side) "left" else "right");
+                mon.console.puts("\n");
+            }
+            // M21 W3: Ctrl+N minimizes the focused window.
+            if (input.take_minimize()) {
+                const fid = driving_award.focused_window_id();
+                if (driving_award.minimize_window(fid)) {
+                    mon.console.puts("dui: minimized id=");
+                    mon.console.print_u64(fid);
+                    mon.console.puts("\n");
+                } else {
+                    mon.console.puts("dui: minimize-failed id=");
+                    mon.console.print_u64(fid);
+                    mon.console.puts("\n");
+                }
+            }
             // Claim 1574 (milestone six G3): Road Pops — one full-frame
             // present per dirty output batch (the card-3d drain pattern).
             // No-op when the tee is unarmed (default VM) or clean.

@@ -164,6 +164,10 @@ pub const Window = struct {
     /// Arc4 #242: unsaved-changes flag. The compositor shows a
     /// confirmation dialog when the user clicks close on a dirty window.
     unsaved: bool = false,
+    /// M21 W3: minimized flag. Minimized windows don't paint, don't
+    /// receive events, and are skipped by Alt+Tab. The dock icon shows
+    /// the restore action when minimized.
+    minimized: bool = false,
 };
 
 /// Arc4 #239: fade-in constants. The window is at 25% opacity for
@@ -201,6 +205,13 @@ pub fn switch_workspace(ws: u8) void {
     }
     _ = mark_dirty(0);
     _ = mark_dirty(1);
+}
+
+/// M21 W4: cycle to the next workspace (wrapping). Marks all windows
+/// dirty so the compositor repaints the new visibility set.
+pub fn cycle_workspace() void {
+    const next = (current_workspace + 1) % workspace_max;
+    switch_workspace(next);
 }
 
 /// Arc4 #241: check if a window is visible in the current workspace.
@@ -377,6 +388,26 @@ var snap_last_h: [user_windows_max]u32 = [_]u32{0} ** user_windows_max;
 var snap_last_valid: [user_windows_max]bool = [_]bool{false} ** user_windows_max;
 var snap_snapped: [user_windows_max]bool = [_]bool{false} ** user_windows_max;
 
+/// M21 W1/W2: tiling state — BSS, no heap.
+/// `tile_mode` is true when the focused workspace uses tiling layout.
+/// `tile_master_id` / `tile_stack_id` are the window ids assigned to
+/// master and stack roles. When tiling is toggled, the compositor
+/// recalculates window rects. The split ratio is 2/3 master, 1/3 detail.
+pub var tile_mode: bool = false;
+pub var tile_master_id: ?u8 = null;
+pub var tile_stack_id: ?u8 = null;
+/// M21 W2: master side — true = master on left (default), false = right.
+pub var tile_master_side: bool = true;
+/// M21 W2: master/detail split ratio (comptime). 2/3 : 1/3.
+pub const tile_master_pct: u32 = 667; // per mille (66.7%)
+/// M21 W3: per-window minimized state. When a window is minimized,
+/// its previous rect is saved here for restore.
+var minimize_prev_x: [user_windows_max]u32 = [_]u32{0} ** user_windows_max;
+var minimize_prev_y: [user_windows_max]u32 = [_]u32{0} ** user_windows_max;
+var minimize_prev_w: [user_windows_max]u32 = [_]u32{0} ** user_windows_max;
+var minimize_prev_h: [user_windows_max]u32 = [_]u32{0} ** user_windows_max;
+var minimize_prev_valid: [user_windows_max]bool = [_]bool{false} ** user_windows_max;
+
 /// Arc2 W3 (claim 1264, #226): system tray state — fixed BSS, ~32B, zero heap.
 /// Right 80px of 20px taskbar at y=700: HH:MM from tick, D/L/A theme letter
 /// in accent, filled/empty clipboard rect. Clock ticks on composite() without
@@ -386,10 +417,12 @@ var tray_has_tick: bool = false;
 var tray_last_theme: u8 = 0xff;
 var tray_last_clip_len: usize = 0;
 
-/// Arc4 #240: desktop notification toasts — bounded BSS FIFO, 4 entries.
-/// Follows the exit-report FIFO pattern (M3 claim 1014). Apps post via
-/// sys_notify; the compositor renders top-right and auto-dismisses.
-pub const notify_max: usize = 4;
+/// Arc4 #240/M21 W5: desktop notification toasts — bounded BSS FIFO,
+/// 10 entries (expanded from 4 for the notification center). Follows the
+/// exit-report FIFO pattern (M3 claim 1014). Apps post via sys_notify;
+/// the compositor renders top-right and auto-dismisses. The notification
+/// center (W5) shows the last 10 in a pull-out panel.
+pub const notify_max: usize = 10;
 pub const notify_text_max: usize = 280;
 pub const notify_dismiss_ticks: u32 = 5;
 var notify_texts: [notify_max][notify_text_max]u8 = undefined;
@@ -397,6 +430,12 @@ var notify_lens: [notify_max]usize = [_]usize{0} ** notify_max;
 var notify_levels: [notify_max]u8 = [_]u8{0} ** notify_max;
 var notify_head: usize = 0;
 var notify_count: usize = 0;
+
+/// M21 W5: notification center panel state — BSS, no heap.
+/// The panel opens on tray clock click and shows the last 10 notifications.
+pub var notif_center_open: bool = false;
+pub const notif_center_w: u32 = 300;
+pub const notif_center_h: u32 = 400;
 var notify_ticks: [notify_max]u32 = [_]u32{0} ** notify_max;
 
 /// Push a notification into the bounded FIFO (drop-oldest on overflow).
@@ -460,6 +499,52 @@ pub fn notify_entry(index: usize) ?struct { text: []const u8, level: u8 } {
     if (index >= notify_count) return null;
     const slot = (notify_head + index) % notify_max;
     return .{ .text = notify_texts[slot][0..notify_lens[slot]], .level = notify_levels[slot] };
+}
+
+/// M21 W5: toggle the notification center panel. Called on tray clock click.
+pub fn notif_center_toggle() void {
+    notif_center_open = !notif_center_open;
+    _ = mark_dirty(0);
+}
+
+/// M21 W5: dismiss a notification by index in the center panel.
+pub fn notif_center_dismiss(index: usize) bool {
+    const result = notify_dismiss(index);
+    if (result) _ = mark_dirty(0);
+    return result;
+}
+
+/// M21 W5: clear all notifications from the center panel.
+pub fn notif_center_clear_all() void {
+    notify_count = 0;
+    notify_head = 0;
+    _ = mark_dirty(0);
+}
+
+/// M21 W5: hit-test the notification center panel. Returns the
+/// notification index if a click landed on a notification row, or
+/// ~0 for the "clear all" button, or null for a miss.
+pub fn notif_center_hit_test(x: u32, y: u32) ?usize {
+    if (!notif_center_open) return null;
+    const panel_x: u32 = if (virtio_gpu.fb_width > notif_center_w) virtio_gpu.fb_width - notif_center_w else 0;
+    const panel_y: u32 = 40;
+    const row_h: u32 = 36;
+    const pad: u32 = 8;
+    const header_h: u32 = 24;
+    // "Clear all" button at the bottom.
+    const btn_y = panel_y + header_h + pad * 2 + @as(u32, @intCast(@min(notify_count, 8))) * row_h + pad;
+    if (x >= panel_x + pad and x < panel_x + notif_center_w - pad and y >= btn_y and y < btn_y + 20) {
+        return ~@as(usize, 0); // clear all sentinel
+    }
+    // Check notification rows.
+    var i: usize = 0;
+    while (i < @min(notify_count, 8)) : (i += 1) {
+        const row_y = panel_y + header_h + pad + @as(u32, @intCast(i)) * row_h;
+        if (x >= panel_x + pad and x < panel_x + notif_center_w - pad and y >= row_y and y < row_y + row_h) {
+            return i;
+        }
+    }
+    return null;
 }
 
 /// Step 7 (Issue #207): theme selection. 0=dark, 1=light, 2=amber.
@@ -1246,6 +1331,22 @@ fn remove_user_at(idx: usize) void {
         snap_last_valid[s] = false;
         snap_snapped[s] = false;
     }
+    // M21 W1: clear tiling state if a tiled window is closed.
+    if (tile_master_id) |mid| {
+        if (mid == removed_id) {
+            tile_master_id = null;
+            if (tile_stack_id) |sid| {
+                tile_master_id = sid;
+                tile_stack_id = null;
+            }
+            tile_mode = tile_master_id != null;
+        }
+    }
+    if (tile_stack_id) |sid| {
+        if (sid == removed_id) {
+            tile_stack_id = null;
+        }
+    }
     if (drag_id != null and drag_id.? == removed_id) {
         drag_id = null;
         snap_zone = .none;
@@ -1303,9 +1404,13 @@ pub fn alt_tab_activate() bool {
     var cnt: usize = 0;
     var i: usize = 0;
     while (i < win_count) : (i += 1) {
-        const w = windows[i];
+        const w = &windows[i];
         if (!w.visible) continue;
         if (w.kind != .user) continue;
+        // M21 W3: skip minimized windows in Alt+Tab.
+        if (w.minimized) continue;
+        // M21 W4: only show windows on the current workspace.
+        if (!workspace_visible(w)) continue;
         if (cnt < max_windows) {
             ids[cnt] = w.id;
             cnt += 1;
@@ -1465,6 +1570,162 @@ pub fn snap_current_zone() SnapZone {
     return snap_zone;
 }
 
+// ---------------------------------------------------------------------------
+// M21 W1/W2 — Tiling mode
+// ---------------------------------------------------------------------------
+
+/// Usable area for tiled windows (avoids dock + taskbar).
+const tile_x_start = dock_w;
+const tile_y_start: u32 = 0;
+
+/// M21 W1: toggle tiling for the focused window. When tiling is activated,
+/// the focused window becomes master (or stack if a master already exists).
+/// Max 2 tiled windows per workspace; third window reverts to floating.
+pub fn toggle_tiling() void {
+    const fid = focused_id;
+    if (fid < user_window_id_base or fid >= user_window_id_base + user_windows_max) return;
+    // If already tiled, detach this window (back to floating).
+    if (tile_master_id) |mid| {
+        if (mid == fid) {
+            tile_master_id = null;
+            if (tile_stack_id) |sid| {
+                // Stack becomes the only tiled window — promote to master.
+                tile_master_id = sid;
+                tile_stack_id = null;
+            }
+            tile_mode = tile_master_id != null;
+            apply_tile_layout();
+            return;
+        }
+    }
+    if (tile_stack_id) |sid| {
+        if (sid == fid) {
+            tile_stack_id = null;
+            tile_mode = tile_master_id != null;
+            apply_tile_layout();
+            return;
+        }
+    }
+    // Not yet tiled — add this window.
+    if (tile_master_id == null) {
+        tile_master_id = fid;
+    } else if (tile_stack_id == null) {
+        tile_stack_id = fid;
+    } else {
+        // Both slots occupied — detach the oldest (master) and shift.
+        tile_master_id = tile_stack_id;
+        tile_stack_id = fid;
+    }
+    tile_mode = true;
+    apply_tile_layout();
+}
+
+/// M21 W2: swap which window is master and which is detail.
+pub fn swap_master() void {
+    if (!tile_mode) return;
+    if (tile_master_id) |mid| {
+        if (tile_stack_id) |sid| {
+            tile_master_id = sid;
+            tile_stack_id = mid;
+        }
+    }
+    tile_master_side = !tile_master_side;
+    apply_tile_layout();
+}
+
+/// Apply the current tiling layout: recalculate window rects for all
+/// tiled windows. Master gets 2/3 width, detail gets 1/3.
+fn apply_tile_layout() void {
+    if (!tile_mode) return;
+    const usable_w = virtio_gpu.fb_width - tile_x_start;
+    const usable_h: u32 = virtio_gpu.fb_height - taskbar_h;
+    const master_w: u32 = usable_w * tile_master_pct / 1000;
+    const detail_w: u32 = usable_w - master_w;
+    // Master window.
+    if (tile_master_id) |mid| {
+        if (find_user_window(mid)) |w| {
+            if (tile_master_side) {
+                w.x = tile_x_start;
+            } else {
+                w.x = tile_x_start + detail_w;
+            }
+            w.y = tile_y_start;
+            w.w = master_w;
+            w.h = usable_h;
+            w.dirty = true;
+            _ = mark_dirty(0); // terminal repaint behind old rect
+        }
+    }
+    // Detail (stack) window.
+    if (tile_stack_id) |sid| {
+        if (find_user_window(sid)) |w| {
+            if (tile_master_side) {
+                w.x = tile_x_start + master_w;
+            } else {
+                w.x = tile_x_start;
+            }
+            w.y = tile_y_start;
+            w.w = detail_w;
+            w.h = usable_h;
+            w.dirty = true;
+            _ = mark_dirty(0);
+        }
+    }
+}
+
+/// M21 W3: minimize the focused window. Saves its current rect for
+/// restore. Returns false for unknown id or non-user window.
+pub fn minimize_window(id: u8) bool {
+    const s = user_window_slot(id) orelse return false;
+    const w = find_user_window(id) orelse return false;
+    // Save current rect for restore.
+    minimize_prev_x[s] = w.x;
+    minimize_prev_y[s] = w.y;
+    minimize_prev_w[s] = w.w;
+    minimize_prev_h[s] = w.h;
+    minimize_prev_valid[s] = true;
+    // Mark as minimized and hide.
+    w.minimized = true;
+    w.visible = false;
+    w.dirty = true;
+    _ = mark_dirty(0); // reveal whatever sat under
+    // Fall focus back to terminal or next window.
+    if (focused_id == id) {
+        focused_id = 0;
+    }
+    return true;
+}
+
+/// M21 W3: restore a minimized window from dock click. Returns false
+/// if the window is not minimized or unknown.
+pub fn restore_from_dock(id: u8) bool {
+    const s = user_window_slot(id) orelse return false;
+    const w = find_user_window(id) orelse return false;
+    if (!w.minimized) return false;
+    // Restore saved rect.
+    if (minimize_prev_valid[s]) {
+        w.x = minimize_prev_x[s];
+        w.y = minimize_prev_y[s];
+        w.w = minimize_prev_w[s];
+        w.h = minimize_prev_h[s];
+        minimize_prev_valid[s] = false;
+    }
+    w.minimized = false;
+    w.visible = true;
+    w.dirty = true;
+    _ = focus(id);
+    _ = raise(id);
+    return true;
+}
+
+/// Helper: user window slot index (id - base) or null.
+fn user_window_slot(id: u8) ?usize {
+    if (id < user_window_id_base) return null;
+    const s = @as(usize, id - user_window_id_base);
+    if (s >= user_windows_max) return null;
+    return s;
+}
+
 /// Map raw pointer buttons bitmask to ADR 0009 button flags.
 pub fn mouse_buttons_to_flags(buttons: u8) u16 {
     var flags: u16 = 0;
@@ -1531,23 +1792,35 @@ pub fn pointer_tick(st: input.PointerState, click: ?input.Click) ?u8 {
                     while (idx < 5) : (idx += 1) {
                         const iy = 8 + @as(u32, @intCast(idx)) * 32;
                         if (cursor_y >= iy and cursor_y < iy + 20) {
-                            var has_user = false;
+                            // M21 W3: first try to restore a minimized window.
+                            var restored = false;
                             var k: usize = 0;
                             while (k < win_count) : (k += 1) {
-                                if (windows[k].kind == .user) {
-                                    has_user = true;
+                                if (windows[k].kind == .user and windows[k].minimized) {
+                                    _ = restore_from_dock(windows[k].id);
+                                    restored = true;
                                     break;
                                 }
                             }
-                            if (!has_user) {
-                                _ = user_open(64, 64, 512, 384, 99);
-                            } else {
+                            if (!restored) {
+                                var has_user = false;
                                 var kk: usize = 0;
                                 while (kk < win_count) : (kk += 1) {
                                     if (windows[kk].kind == .user) {
-                                        _ = focus(windows[kk].id);
-                                        _ = raise(windows[kk].id);
+                                        has_user = true;
                                         break;
+                                    }
+                                }
+                                if (!has_user) {
+                                    _ = user_open(64, 64, 512, 384, 99);
+                                } else {
+                                    var kkk: usize = 0;
+                                    while (kkk < win_count) : (kkk += 1) {
+                                        if (windows[kkk].kind == .user) {
+                                            _ = focus(windows[kkk].id);
+                                            _ = raise(windows[kkk].id);
+                                            break;
+                                        }
                                     }
                                 }
                             }
@@ -1556,6 +1829,27 @@ pub fn pointer_tick(st: input.PointerState, click: ?input.Click) ?u8 {
                             break;
                         }
                     }
+                }
+            }
+            // M21 W5: tray clock click — toggle notification center panel.
+            if (!handled_btn) {
+                const tr = tray_rect();
+                if (cursor_x >= tr.x and cursor_x < tr.x + tr.w and
+                    cursor_y >= tr.y and cursor_y < tr.y + tr.h)
+                {
+                    notif_center_toggle();
+                    handled_btn = true;
+                }
+            }
+            // M21 W5: notification center panel click handling.
+            if (!handled_btn and notif_center_open) {
+                if (notif_center_hit_test(cursor_x, cursor_y)) |hit| {
+                    if (hit == ~@as(usize, 0)) {
+                        notif_center_clear_all();
+                    } else {
+                        _ = notif_center_dismiss(hit);
+                    }
+                    handled_btn = true;
                 }
             }
             if (!handled_btn) {
@@ -2125,13 +2419,31 @@ fn paint(w: *Window) void {
             fill_rect(fb, stride, w.x, w.y, w.w, w.h, dock_bg_rgb);
             // Icons for dock=true apps (first 5 from image/apps.txt).
             const dock_icons = [_]u8{ 'c', 'n', 't', 'b', 's' };
+            // M21 W3: count minimized windows to show restore indicators.
+            var minimized_count: usize = 0;
+            {
+                var mi: usize = 0;
+                while (mi < win_count) : (mi += 1) {
+                    if (windows[mi].kind == .user and windows[mi].minimized) minimized_count += 1;
+                }
+            }
             var idx: usize = 0;
             while (idx < dock_icons.len) : (idx += 1) {
                 const iy = w.y + 8 + @as(u32, @intCast(idx)) * 32;
                 if (iy + 24 > w.y + w.h) break;
-                const bg = if (idx == 0 and focused_id == 2) dock_icon_active_rgb else dock_icon_bg_rgb;
+                // M21 W3: highlight first icon if there are minimized windows.
+                const bg = if (idx == 0 and minimized_count > 0)
+                    0xf59e0b // amber — indicates minimized windows to restore
+                else if (idx == 0 and focused_id == 2)
+                    dock_icon_active_rgb
+                else
+                    dock_icon_bg_rgb;
                 fill_rect(fb, stride, w.x + 2, iy, 20, 20, bg);
                 draw_glyph(fb, stride, w.x + 8, iy + 6, dock_icons[idx], 0xffffff);
+                // M21 W3: small dot indicator below the icon for each minimized window.
+                if (idx == 0 and minimized_count > 0) {
+                    fill_rect(fb, stride, w.x + 8, iy + 22, 2, 2, 0xf59e0b);
+                }
             }
         },
     }
@@ -2330,7 +2642,16 @@ fn draw_chrome() void {
         fill_rect(fb, stride, ov_x, ov_y + ov_h - 2, ov_w, 2, clock_accent_rgb);
         fill_rect(fb, stride, ov_x, ov_y, 2, ov_h, clock_accent_rgb);
         fill_rect(fb, stride, ov_x + ov_w - 2, ov_y, 2, ov_h, clock_accent_rgb);
+        // M21 W4: show workspace name in the overlay header.
         draw_string(fb, stride, ov_x + pad, ov_y + pad, "Alt+Tab  —  Switch window", 0xffffff);
+        var ws_label_buf: [8]u8 = undefined;
+        ws_label_buf[0] = ' ';
+        ws_label_buf[1] = ' ';
+        ws_label_buf[2] = 'W';
+        ws_label_buf[3] = 'S';
+        ws_label_buf[4] = ' ';
+        ws_label_buf[5] = '0' + current_workspace;
+        draw_string(fb, stride, ov_x + pad + 200, ov_y + pad, ws_label_buf[0..6], 0xf59e0b);
         draw_string(fb, stride, ov_x + pad, ov_y + pad + 12, "(Tab / Shift+Tab cycles, release Alt)", 0x94a3b8);
         var idx: usize = 0;
         while (idx < overlay_count) : (idx += 1) {
@@ -2444,6 +2765,53 @@ fn draw_chrome() void {
                 }
             }
         }
+    }
+    // M21 W5: notification center panel — right-side pull-out when open.
+    if (notif_center_open) {
+        const panel_x: u32 = if (wspan > notif_center_w) wspan - notif_center_w else 0;
+        const panel_y: u32 = 40;
+        const row_h: u32 = 36;
+        const pad: u32 = 8;
+        const header_h: u32 = 24;
+        const display_count = @min(notify_count, 8);
+        const panel_h: u32 = header_h + pad * 2 + @as(u32, @intCast(display_count)) * row_h + pad + 28;
+        // Dim backdrop.
+        fill_rect(fb, stride, 0, 0, wspan, hspan, 0x0f0f1a);
+        // Panel surface.
+        fill_rect(fb, stride, panel_x, panel_y, notif_center_w, panel_h, 0x1e293b);
+        // Border.
+        fill_rect(fb, stride, panel_x, panel_y, notif_center_w, 2, 0x3b82f6);
+        fill_rect(fb, stride, panel_x, panel_y + panel_h - 2, notif_center_w, 2, 0x3b82f6);
+        fill_rect(fb, stride, panel_x, panel_y, 2, panel_h, 0x3b82f6);
+        fill_rect(fb, stride, panel_x + notif_center_w - 2, panel_y, 2, panel_h, 0x3b82f6);
+        // Header.
+        draw_string(fb, stride, panel_x + pad, panel_y + pad, "Notifications", 0xffffff);
+        // Notification rows.
+        var ni: usize = 0;
+        while (ni < display_count) : (ni += 1) {
+            if (notify_entry(ni)) |entry| {
+                const row_y = panel_y + header_h + pad + @as(u32, @intCast(ni)) * row_h;
+                const bg: u32 = if (ni == 0) 0x0f172a else 0x1e293b;
+                fill_rect(fb, stride, panel_x + pad, row_y, notif_center_w - pad * 2, row_h - 2, bg);
+                // Colored left border.
+                const border_color: u32 = switch (entry.level) {
+                    1 => 0xf59e0b,
+                    2 => 0xef4444,
+                    else => 0x3b82f6,
+                };
+                fill_rect(fb, stride, panel_x + pad, row_y, 4, row_h - 2, border_color);
+                // Text — up to 34 chars.
+                const max_chars = 34;
+                const len = @min(entry.text.len, max_chars);
+                if (len > 0) {
+                    draw_string(fb, stride, panel_x + pad + 10, row_y + 6, entry.text[0..len], 0xffffff);
+                }
+            }
+        }
+        // "Clear all" button.
+        const btn_y = panel_y + header_h + pad * 2 + @as(u32, @intCast(display_count)) * row_h + pad;
+        fill_rect(fb, stride, panel_x + pad, btn_y, notif_center_w - pad * 2, 20, 0xef4444);
+        draw_string(fb, stride, panel_x + pad + 8, btn_y + 6, "Clear all", 0xffffff);
     }
 }
 
@@ -3604,9 +3972,11 @@ test "driving_award: notification FIFO push/dismiss/advance" {
     // Dismiss index 0 (oldest = hello).
     try std.testing.expect(notify_dismiss(0));
     try std.testing.expectEqual(@as(usize, 2), notify_count_visible());
-    // Overflow drops oldest.
-    notify_push("fourth", 0);
-    notify_push("fifth", 0);
+    // Overflow drops oldest — push enough to fill the ring.
+    var p: usize = 0;
+    while (p < notify_max) : (p += 1) {
+        notify_push("item", 0);
+    }
     try std.testing.expectEqual(@as(usize, notify_max), notify_count_visible());
     // Auto-dismiss after notify_dismiss_ticks.
     var t: u32 = 0;

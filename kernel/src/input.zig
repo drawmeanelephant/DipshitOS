@@ -92,6 +92,14 @@ var alt_tab_shift: bool = false;
 var lower_back_pending: bool = false;
 /// Arc4 #241: Ctrl+F1/F2/F3 switches workspace. 0xff = no switch pending.
 var workspace_switch_pending: u8 = 0xff;
+/// M21 W4: Alt+` cycles workspaces directly.
+var workspace_cycle_pending: bool = false;
+/// M21 W1: Ctrl+T toggles tiling mode.
+var tile_toggle_pending: bool = false;
+/// M21 W2: Ctrl+M swaps master/detail in tiled mode.
+var tile_swap_master_pending: bool = false;
+/// M21 W3: Ctrl+N minimizes the focused window.
+var minimize_pending: bool = false;
 
 /// Diagnostic hooks (kernel/src/main.zig wires these to uart_puts/uart_hex
 /// under `--input`; null in host tests and the default VM).
@@ -372,9 +380,7 @@ pub fn decode_keyboard_report(rep: []const u8) void {
     const alt = (flags & app_events.MOD_ALT) != 0;
     kb_mods = mods;
     var keys: [6]u8 = [_]u8{0} ** 6;
-    for (rep[2..8], 0..) |k, i| keys[i] = k;
-
-    // Card U5 (ADR 0008 D4): Alt+Tab cycles window focus — the
+    for (rep[2..8], 0..) |k, i| keys[i] = k; // Card U5 (ADR 0008 D4): Alt+Tab cycles window focus — the
     // chord is consumed as a window-manager signal across all windows.
     // C2 (M15): capture Shift for reverse cycling.
     for (keys) |k| {
@@ -389,6 +395,19 @@ pub fn decode_keyboard_report(rep: []const u8) void {
             if (!held) {
                 alt_tab_pending = true;
                 alt_tab_shift = shift;
+            }
+        }
+        // M21 W4: Alt+` (backtick, usage 0x35) cycles workspaces.
+        if (k == 0x35 and alt) {
+            var held = false;
+            for (kb_held) |h| {
+                if (h == k) {
+                    held = true;
+                    break;
+                }
+            }
+            if (!held) {
+                workspace_cycle_pending = true;
             }
         }
         // Arc4 #238: Ctrl+Shift+B lowers focused window to back.
@@ -420,6 +439,45 @@ pub fn decode_keyboard_report(rep: []const u8) void {
                 }
                 if (!held) {
                     workspace_switch_pending = ws;
+                }
+            }
+            // M21 W1: Ctrl+T toggles tiling mode.
+            if (k == 0x17) { // 't' usage
+                var held = false;
+                for (kb_held) |h| {
+                    if (h == k) {
+                        held = true;
+                        break;
+                    }
+                }
+                if (!held) {
+                    tile_toggle_pending = true;
+                }
+            }
+            // M21 W2: Ctrl+M swaps master/detail in tiled mode.
+            if (k == 0x10) { // 'm' usage
+                var held = false;
+                for (kb_held) |h| {
+                    if (h == k) {
+                        held = true;
+                        break;
+                    }
+                }
+                if (!held) {
+                    tile_swap_master_pending = true;
+                }
+            }
+            // M21 W3: Ctrl+N minimizes the focused window.
+            if (k == 0x11) { // 'n' usage
+                var held = false;
+                for (kb_held) |h| {
+                    if (h == k) {
+                        held = true;
+                        break;
+                    }
+                }
+                if (!held) {
+                    minimize_pending = true;
                 }
             }
         }
@@ -678,6 +736,34 @@ pub fn take_workspace_switch() ?u8 {
     const ws = workspace_switch_pending;
     workspace_switch_pending = 0xff;
     return ws;
+}
+
+/// M21 W1: consume the Ctrl+T tiling toggle edge.
+pub fn take_tile_toggle() bool {
+    if (!tile_toggle_pending) return false;
+    tile_toggle_pending = false;
+    return true;
+}
+
+/// M21 W2: consume the Ctrl+M master swap edge.
+pub fn take_tile_swap_master() bool {
+    if (!tile_swap_master_pending) return false;
+    tile_swap_master_pending = false;
+    return true;
+}
+
+/// M21 W3: consume the Ctrl+N minimize edge.
+pub fn take_minimize() bool {
+    if (!minimize_pending) return false;
+    minimize_pending = false;
+    return true;
+}
+
+/// M21 W4: consume the Alt+` workspace cycle edge.
+pub fn take_workspace_cycle() bool {
+    if (!workspace_cycle_pending) return false;
+    workspace_cycle_pending = false;
+    return true;
 }
 
 // ---------------------------------------------------------------------------
