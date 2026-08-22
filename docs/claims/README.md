@@ -84,6 +84,7 @@ CI) fails if the table drifts from the claim files.
 | [2873-alt-tab-cycling-ui](2873-alt-tab-cycling-ui.md) | buffy (`agent/buffy/m15-c2-alt-tab`) | ✅ done 2026-08-20 — `driving_award.zig:168` overlay BSS (32 B) + `input.zig:86` Alt+Shift latch + `shell.zig:191` hold-Alt commit, host tests PASS 125/125 `driving_award`, class-A `verify-bss-budget` PASS `9787576/11534336`, `zig fmt` + `zig build` + `test-console` PASS |
 | [3589-drag-resize](3589-drag-resize.md) | Muse Spark (`agent/buffy/arc2-resize`) | ✅ done 2026-08-21 — drag-to-resize live on host (merge 44ca7d2): `driving_award` 6×6 hit + clamped resize + WIN_RESIZE kind 10 + `sys_win_resize` slot 47 (implemented_count 47→48), 4 host tests, `verify-bss-budget` PASS 9788088/11534336, `verify-coordination` PASS — branch `agent/buffy/arc2-resize` merged to `main` (commit 17e7951) |
 | [3679-m18-t4-history](3679-m18-t4-history.md) | buffy (`agent/buffy/m18-t4-history`) | ✅ done 2026-08-22 |
+| [4402-m27-compositor-polish](4402-m27-compositor-polish.md) | Buffy (`agent/buffy/m21-compositor`) | 🔄 agent/buffy/m21-compositor |
 | [4429-archive-m5-m6-prompts](4429-archive-m5-m6-prompts.md) | buffy (`agent/buffy/hygiene-archive-m5-m6-prompts`) | ✅ done |
 | [4516-archive-ragshit-test-artifacts](4516-archive-ragshit-test-artifacts.md) | oxalpha (`t3code/handle-issue-268-git-current`) | ✅ done |
 | [5093-scroll-keys-chords](5093-scroll-keys-chords.md) | buffy (`agent/buffy/m18-t16-scripting`) | ✅ done 2026-08-22 |

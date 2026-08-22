@@ -462,6 +462,25 @@ pub const notif_center_w: u32 = 300;
 pub const notif_center_h: u32 = 400;
 var notify_ticks: [notify_max]u32 = [_]u32{0} ** notify_max;
 
+/// M27 G6: tooltip state — BSS, no heap.
+/// Hover over UI elements for 1 second → tooltip appears with description.
+pub var tooltip_visible: bool = false;
+pub var tooltip_timer: u32 = 0;
+pub var tooltip_x: u32 = 0;
+pub var tooltip_y: u32 = 0;
+pub var tooltip_text: [32]u8 = undefined;
+pub var tooltip_text_len: u8 = 0;
+pub const tooltip_hover_ticks: u32 = 10; // ~1 second at 10 Hz composite
+
+/// M27 G2: about dialog state — BSS, no heap.
+pub var about_dialog_open: bool = false;
+
+/// M27 G3: alt-tab preview buffer — 64×48 B8G8R8X8 (12,288 bytes).
+/// Nearest-neighbor scaled from each window's framebuffer content.
+pub const preview_w: u32 = 64;
+pub const preview_h: u32 = 48;
+var preview_buf: [preview_w * preview_h * 4]u8 = undefined;
+
 /// Push a notification into the bounded FIFO (drop-oldest on overflow).
 /// Called from the syscall handler (kernel context).
 pub fn notify_push(text: []const u8, level: u8) void {
@@ -1961,6 +1980,106 @@ pub fn dismiss_transients() void {
     }
 }
 
+// ---------------------------------------------------------------------------
+// M27 G6 — Tooltip system
+// ---------------------------------------------------------------------------
+
+/// M27 G6: set a tooltip at the current cursor position. Called by the
+/// compositor when hovering over a UI element. The tooltip appears after
+/// tooltip_hover_ticks of steady hover.
+pub fn tooltip_set(x: u32, y: u32, text: []const u8) void {
+    tooltip_x = x;
+    tooltip_y = y;
+    const len = @min(text.len, 32);
+    @memcpy(tooltip_text[0..len], text[0..len]);
+    tooltip_text_len = @intCast(len);
+    tooltip_timer = 0;
+    tooltip_visible = false;
+}
+
+/// M27 G6: clear the tooltip (called on mouse move).
+pub fn tooltip_clear() void {
+    tooltip_visible = false;
+    tooltip_timer = 0;
+    tooltip_text_len = 0;
+}
+
+/// M27 G6: advance the tooltip hover timer. Called once per composite.
+/// Shows the tooltip after the hover delay.
+pub fn tooltip_advance_tick() void {
+    if (tooltip_text_len == 0) return;
+    tooltip_timer +|= 1;
+    if (tooltip_timer >= tooltip_hover_ticks) {
+        tooltip_visible = true;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// M27 G2 — About dialog
+// ---------------------------------------------------------------------------
+
+/// M27 G2: toggle the about dialog.
+pub fn about_dialog_toggle() void {
+    about_dialog_open = !about_dialog_open;
+    _ = mark_dirty(0);
+}
+
+/// M27 G3: scale a window's framebuffer content into the preview buffer
+/// using nearest-neighbor sampling. For user windows, reads from user_bufs;
+/// for the terminal, reads from the scanout framebuffer.
+pub fn render_preview(id: u8) void {
+    @memset(&preview_buf, 0);
+    // Find the window and its source buffer.
+    var src: [*]const u8 = undefined;
+    var src_w: u32 = 0;
+    var src_h: u32 = 0;
+    var src_stride: usize = 0;
+    if (id >= user_window_id_base) {
+        const idx = id - user_window_id_base;
+        if (idx >= user_windows_max) return;
+        src = @ptrCast(&user_bufs[idx]);
+        src_w = user_buf_w;
+        src_h = user_buf_h;
+        src_stride = user_buf_w * 4;
+    } else if (id == 0) {
+        // Terminal — read from scanout framebuffer.
+        src = @ptrCast(&virtio_gpu.gpu_fb);
+        src_w = virtio_gpu.fb_width;
+        src_h = virtio_gpu.fb_height;
+        src_stride = virtio_gpu.fb_width * 4;
+    } else {
+        return; // clock/deprecated — no preview
+    }
+    // Nearest-neighbor scale to preview_w × preview_h.
+    var py: u32 = 0;
+    while (py < preview_h) : (py += 1) {
+        const src_y = py * src_h / preview_h;
+        var px: u32 = 0;
+        while (px < preview_w) : (px += 1) {
+            const src_x = px * src_w / preview_w;
+            const src_off = src_y * src_stride + src_x * 4;
+            const dst_off = (py * preview_w + px) * 4;
+            preview_buf[dst_off] = src[src_off];
+            preview_buf[dst_off + 1] = src[src_off + 1];
+            preview_buf[dst_off + 2] = src[src_off + 2];
+            preview_buf[dst_off + 3] = 0xff;
+        }
+    }
+}
+
+/// M27 G2: hit-test the about dialog. Returns true if a click landed
+/// on the close button.
+pub fn about_dialog_hit_test(x: u32, y: u32) bool {
+    if (!about_dialog_open) return false;
+    const dlg_w: u32 = 280;
+    const dlg_h: u32 = 160;
+    const dlg_x: u32 = if (virtio_gpu.fb_width > dlg_w) (virtio_gpu.fb_width - dlg_w) / 2 else 0;
+    const dlg_y: u32 = if (virtio_gpu.fb_height > dlg_h) (virtio_gpu.fb_height - dlg_h) / 2 else 0;
+    // Close button: top-right corner (8x8).
+    return x >= dlg_x + dlg_w - 12 and x < dlg_x + dlg_w - 4 and
+        y >= dlg_y + 4 and y < dlg_y + 12;
+}
+
 /// Helper: user window slot index (id - base) or null.
 fn user_window_slot(id: u8) ?usize {
     if (id < user_window_id_base) return null;
@@ -1997,6 +2116,8 @@ pub fn pointer_tick(st: input.PointerState, click: ?input.Click) ?u8 {
             cursor_x = nx;
             cursor_y = ny;
             cursor_shown = true;
+            // M27 G6: clear tooltip on mouse move.
+            tooltip_clear();
             _ = mark_dirty(0); // the cursor moves over a full repaint
         }
 
@@ -2114,6 +2235,13 @@ pub fn pointer_tick(st: input.PointerState, click: ?input.Click) ?u8 {
                     } else {
                         _ = notif_center_dismiss(hit);
                     }
+                    handled_btn = true;
+                }
+            }
+            // M27 G2: about dialog close button click.
+            if (!handled_btn and about_dialog_open) {
+                if (about_dialog_hit_test(cursor_x, cursor_y)) {
+                    about_dialog_open = false;
                     handled_btn = true;
                 }
             }
@@ -2810,6 +2938,8 @@ pub fn composite() virtio_gpu.CmdResult {
     _ = unsaved_dialog_advance_tick();
     // M21 W16: advance transient window timeouts.
     _ = transient_advance_tick();
+    // M27 G6: advance tooltip hover timer.
+    tooltip_advance_tick();
     draw_chrome();
     if (!virtio_gpu.gpu_ready) return .not_ready;
     presents += 1;
@@ -2957,15 +3087,18 @@ fn draw_chrome() void {
             }
             draw_string(fb, stride, ov_x + pad + 6, row_y + 10, tbuf[0..tn], if (is_sel) 0xffffff else 0xd8dee9);
             draw_string(fb, stride, ov_x + ov_w - pad - 80, row_y + 10, win_title, 0x94a3b8);
-            // Small preview color block — distinct per window id.
-            const preview_rgb: u32 = switch (id % 4) {
-                0 => 0x3b82f6,
-                1 => 0x10b981,
-                2 => 0xf59e0b,
-                3 => 0xef4444,
-                else => 0x6366f1,
-            };
-            fill_rect(fb, stride, ov_x + ov_w - pad - 36, row_y + 6, 16, 16, preview_rgb);
+            // M27 G3: render scaled preview of the window's content.
+            render_preview(id);
+            const pv_x = ov_x + ov_w - pad - 68;
+            const pv_y = row_y + 4;
+            const pv_w: u32 = 64;
+            const pv_h: u32 = row_h - 8;
+            blit_rect(fb, stride, @ptrCast(&preview_buf), pv_w * 4, pv_x, pv_y, pv_w, pv_h);
+            // Border around preview.
+            fill_rect(fb, stride, pv_x, pv_y, pv_w, 1, 0x64748b);
+            fill_rect(fb, stride, pv_x, pv_y + pv_h - 1, pv_w, 1, 0x64748b);
+            fill_rect(fb, stride, pv_x, pv_y, 1, pv_h, 0x64748b);
+            fill_rect(fb, stride, pv_x + pv_w - 1, pv_y, 1, pv_h, 0x64748b);
         }
     }
     // M15 C3: snap preview — translucent zone highlight while dragging near edge.
@@ -3079,6 +3212,47 @@ fn draw_chrome() void {
         const btn_y = panel_y + header_h + pad * 2 + @as(u32, @intCast(display_count)) * row_h + pad;
         fill_rect(fb, stride, panel_x + pad, btn_y, notif_center_w - pad * 2, 20, 0xef4444);
         draw_string(fb, stride, panel_x + pad + 8, btn_y + 6, "Clear all", 0xffffff);
+    }
+    // M27 G2: about dialog — centered modal.
+    if (about_dialog_open) {
+        const dlg_w: u32 = 280;
+        const dlg_h: u32 = 160;
+        const dlg_x: u32 = if (wspan > dlg_w) (wspan - dlg_w) / 2 else 0;
+        const dlg_y: u32 = if (hspan > dlg_h) (hspan - dlg_h) / 2 else 0;
+        // Dim backdrop.
+        fill_rect(fb, stride, 0, 0, wspan, hspan, 0x0f0f1a);
+        // Dialog surface.
+        fill_rect(fb, stride, dlg_x, dlg_y, dlg_w, dlg_h, 0x1e293b);
+        // Border.
+        fill_rect(fb, stride, dlg_x, dlg_y, dlg_w, 2, 0x3b82f6);
+        fill_rect(fb, stride, dlg_x, dlg_y + dlg_h - 2, dlg_w, 2, 0x3b82f6);
+        fill_rect(fb, stride, dlg_x, dlg_y, 2, dlg_h, 0x3b82f6);
+        fill_rect(fb, stride, dlg_x + dlg_w - 2, dlg_y, 2, dlg_h, 0x3b82f6);
+        // Title.
+        draw_string(fb, stride, dlg_x + 10, dlg_y + 10, "DipshitOS", clock_accent_rgb);
+        // Version.
+        draw_string(fb, stride, dlg_x + 10, dlg_y + 26, "v0.1  (M21+M27)", 0x94a3b8);
+        // Info lines.
+        draw_string(fb, stride, dlg_x + 10, dlg_y + 42, "AArch64 on Apple Virtualization", 0xd8dee9);
+        draw_string(fb, stride, dlg_x + 10, dlg_y + 54, ".framework", 0xd8dee9);
+        draw_string(fb, stride, dlg_x + 10, dlg_y + 70, "Built with Zig 0.16", 0x94a3b8);
+        draw_string(fb, stride, dlg_x + 10, dlg_y + 86, "Window Manager: Driving Award", 0x94a3b8);
+        // Close button.
+        fill_rect(fb, stride, dlg_x + dlg_w - 16, dlg_y + 4, 8, 8, 0xef4444);
+        draw_glyph(fb, stride, dlg_x + dlg_w - 14, dlg_y + 4, 'x', 0xffffff);
+    }
+    // M27 G6: tooltip — small text box below cursor on hover.
+    if (tooltip_visible and tooltip_text_len > 0) {
+        const tw: u32 = @as(u32, tooltip_text_len) * 8 + 8;
+        const th: u32 = 14;
+        var tx: u32 = cursor_x + 4;
+        var ty: u32 = cursor_y + 12;
+        // Clamp to scanout.
+        if (tx + tw > wspan) tx = if (wspan > tw) wspan - tw else 0;
+        if (ty + th > hspan) ty = if (hspan > th) hspan - th else 0;
+        fill_rect(fb, stride, tx, ty, tw, th, 0x1e293b);
+        fill_rect(fb, stride, tx, ty, tw, 1, 0x3b82f6);
+        draw_string(fb, stride, tx + 4, ty + 3, tooltip_text[0..tooltip_text_len], 0xffffff);
     }
 }
 

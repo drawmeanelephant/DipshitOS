@@ -106,6 +106,8 @@ var maximize_pending: bool = false;
 var fullscreen_pending: bool = false;
 /// M21 W8: Ctrl+Shift+T toggles always-on-top.
 var always_on_top_pending: bool = false;
+/// M27 G2: Ctrl+Shift+A opens about dialog.
+var about_pending: bool = false;
 /// M21 W10: Alt+arrow movement. 0xff = no movement pending.
 var move_pending_dx: i32 = 0;
 var move_pending_dy: i32 = 0;
@@ -516,6 +518,19 @@ pub fn decode_keyboard_report(rep: []const u8) void {
                     always_on_top_pending = true;
                 }
             }
+            // M27 G2: Ctrl+Shift+A opens about dialog.
+            if (k == 0x04 and (flags & app_events.MOD_SHIFT) != 0) { // 'a' + Shift
+                var held = false;
+                for (kb_held) |h| {
+                    if (h == k) {
+                        held = true;
+                        break;
+                    }
+                }
+                if (!held) {
+                    about_pending = true;
+                }
+            }
         }
         // M21 W7: F11 (usage 0x5c) toggles fullscreen.
         if (k == 0x5c) {
@@ -857,6 +872,13 @@ pub fn take_fullscreen() bool {
 pub fn take_always_on_top() bool {
     if (!always_on_top_pending) return false;
     always_on_top_pending = false;
+    return true;
+}
+
+/// M27 G2: consume the Ctrl+Shift+A about dialog edge.
+pub fn take_about() bool {
+    if (!about_pending) return false;
+    about_pending = false;
     return true;
 }
 
