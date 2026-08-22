@@ -96,6 +96,54 @@ pub const Canvas = struct {
 };
 
 // ---------------------------------------------------------------------------
+// Character width (M20-U4 — wcwidth, comptime-evaluable)
+// ---------------------------------------------------------------------------
+
+/// The terminal width of a codepoint in cells: 0 (invisible/combining),
+/// 1 (narrow), or 2 (wide). Bounded to the ranges this OS can actually
+/// encounter: Latin-1 + Latin Extended-A render narrow; CJK ideographs,
+/// fullwidth forms and the emoji blocks are wide even though only a
+/// subset paints real glyphs (the rest fall back — U11); combining
+/// diacritics, variation selectors and the zero-width joiners occupy no
+/// cell at all. Unlisted codepoints default to 1. Works at comptime so
+/// font tables can be generated against it.
+pub fn char_width(cp: u21) u8 {
+    return switch (cp) {
+        // Combining diacritical marks (overlay the previous cell).
+        0x0300...0x036F => 0,
+        // Zero-width characters: ZWSP, ZWNJ, ZWJ, LRM, RLM.
+        0x200B...0x200F => 0,
+        // Word joiner.
+        0x2060 => 0,
+        // Variation selectors.
+        0xFE00...0xFE0F => 0,
+        // CJK ideographs (no glyph tables yet — still 2 cells wide).
+        0x4E00...0x9FFF => 2,
+        // Halfwidth/known-narrow punctuation inside the fullwidth block.
+        0xFF01...0xFF60 => 2,
+        // Emoji blocks (U+1F300–U+1F9FF): Miscellaneous Symbols and
+        // Pictographs, Emoticons, Supplemental Symbols and Pictographs.
+        0x1F300...0x1F9FF => 2,
+        else => 1,
+    };
+}
+
+/// Whether `cp` is a combining mark that overlays the previous base
+/// character (the width-0 set that MODIFIES rather than vanishes).
+pub fn is_combining(cp: u21) bool {
+    return cp >= 0x0300 and cp <= 0x036F;
+}
+
+/// Whether `cp` is an ignorable zero-width codepoint (ZWJ/ZWNJ/ZWSP/
+/// selectors): it neither takes a cell nor modifies its neighbor.
+pub fn is_zero_width_ignorable(cp: u21) bool {
+    return switch (cp) {
+        0x200B...0x200F, 0xFE00...0xFE0F, 0x2060 => true,
+        else => false,
+    };
+}
+
+// ---------------------------------------------------------------------------
 // State operations (pure — host-testable)
 // ---------------------------------------------------------------------------
 
@@ -567,4 +615,30 @@ test "text: monospace guarantee — narrow and wide glyphs occupy exactly one ce
         if (std.mem.eql(u8, &fg, &pixel(canvas, x, 0))) w_any = true;
     }
     try std.testing.expect(w_any);
+}
+
+test "text: char_width categories (U4)" {
+    // Narrow: ASCII and the Latin ranges we render.
+    try std.testing.expectEqual(@as(u8, 1), char_width('A'));
+    try std.testing.expectEqual(@as(u8, 1), char_width(0x7E));
+    try std.testing.expectEqual(@as(u8, 1), char_width(0xE9)); // é
+    try std.testing.expectEqual(@as(u8, 1), char_width(0x160)); // Š
+    // Wide: CJK ideographs, fullwidth forms, emoji.
+    try std.testing.expectEqual(@as(u8, 2), char_width(0x4E2D)); // 中
+    try std.testing.expectEqual(@as(u8, 2), char_width(0xFF21)); // Ａ fullwidth
+    try std.testing.expectEqual(@as(u8, 2), char_width(0x1F525)); // fire
+    // Zero: combining marks, joiners, variation selectors.
+    try std.testing.expectEqual(@as(u8, 0), char_width(0x0301)); // combining acute
+    try std.testing.expectEqual(@as(u8, 0), char_width(0x200D)); // ZWJ
+    try std.testing.expectEqual(@as(u8, 0), char_width(0xFE0F)); // VS-16
+    try std.testing.expect(is_combining(0x0332));
+    try std.testing.expect(!is_combining('e'));
+    try std.testing.expect(is_zero_width_ignorable(0x200B));
+    try std.testing.expect(is_zero_width_ignorable(0xFE00));
+    try std.testing.expect(!is_zero_width_ignorable(0x0301)); // combining is not ignorable
+}
+
+test "text: char_width is comptime-evaluable" {
+    const w: u8 = comptime char_width(0x4E2D);
+    _ = w;
 }
