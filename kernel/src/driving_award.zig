@@ -174,6 +174,13 @@ pub const Window = struct {
     /// M21 W8: always-on-top flag. Always-on-top windows render above
     /// all normal windows in the z-order, regardless of focus.
     always_on_top: bool = false,
+    /// M21 W15: modal flag. Modal windows block input to windows below.
+    /// Used by dialogs, context menus, dropdowns, popups.
+    modal: bool = false,
+    /// M21 W16: transient flag. Transient windows are short-lived popups
+    /// that auto-close on timeout or click-outside.
+    transient: bool = false,
+    transient_timeout: u32 = 0,
 };
 
 /// Arc4 #239: fade-in constants. The window is at 25% opacity for
@@ -1876,6 +1883,84 @@ pub fn move_window_keyboard(id: u8, dx: i32, dy: i32) bool {
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// M21 W15 — Modal windows
+// ---------------------------------------------------------------------------
+
+/// M21 W15: set a window as modal. Modal windows block input to windows
+/// below them. Clicks outside the modal are ignored (except to dismiss).
+pub fn set_modal(id: u8, modal: bool) bool {
+    const w = find_user_window(id) orelse return false;
+    w.modal = modal;
+    if (modal) {
+        // Raise the modal above all other windows.
+        _ = raise(id);
+        _ = focus(id);
+    }
+    return true;
+}
+
+/// M21 W15: check if a modal window is currently open.
+pub fn modal_active() bool {
+    var i: usize = 0;
+    while (i < win_count) : (i += 1) {
+        if (windows[i].modal and windows[i].visible) return true;
+    }
+    return false;
+}
+
+/// M21 W15: get the topmost modal window id, or null.
+pub fn topmost_modal_id() ?u8 {
+    var i: usize = win_count;
+    while (i > 0) {
+        i -= 1;
+        if (windows[i].modal and windows[i].visible) return windows[i].id;
+    }
+    return null;
+}
+
+// ---------------------------------------------------------------------------
+// M21 W16 — Transient window behavior
+// ---------------------------------------------------------------------------
+
+/// M21 W16: set a window as transient with a timeout. Transient windows
+/// are short-lived popups that auto-close when the timeout expires.
+pub fn set_transient(id: u8, timeout: u32) bool {
+    const w = find_user_window(id) orelse return false;
+    w.transient = true;
+    w.transient_timeout = timeout;
+    return true;
+}
+
+/// M21 W16: advance transient timeouts. Called once per composite.
+/// Returns the id of any window that expired (and was closed).
+pub fn transient_advance_tick() ?u8 {
+    var i: usize = 0;
+    while (i < win_count) : (i += 1) {
+        if (windows[i].transient and windows[i].transient_timeout > 0) {
+            windows[i].transient_timeout -|= 1;
+            if (windows[i].transient_timeout == 0) {
+                const id = windows[i].id;
+                _ = user_close(id);
+                return id;
+            }
+        }
+    }
+    return null;
+}
+
+/// M21 W16: dismiss all transient windows (e.g., on click-outside).
+pub fn dismiss_transients() void {
+    // Iterate backwards to handle removals safely.
+    var i: usize = win_count;
+    while (i > 0) {
+        i -= 1;
+        if (windows[i].transient) {
+            _ = user_close(windows[i].id);
+        }
+    }
+}
+
 /// Helper: user window slot index (id - base) or null.
 fn user_window_slot(id: u8) ?usize {
     if (id < user_window_id_base) return null;
@@ -1941,6 +2026,28 @@ pub fn pointer_tick(st: input.PointerState, click: ?input.Click) ?u8 {
                         handled_btn = true;
                     },
                     .none => {},
+                }
+            }
+            // M21 W15: modal windows block input to windows below.
+            // Clicks outside the modal are ignored (except to dismiss).
+            if (!handled_btn and modal_active()) {
+                if (topmost_modal_id()) |modal_id| {
+                    if (find_user_window(modal_id)) |mw| {
+                        if (cursor_x >= mw.x and cursor_x < mw.x + mw.w and
+                            cursor_y >= mw.y and cursor_y < mw.y + mw.h)
+                        {
+                            // Click inside modal — process normally below.
+                        } else {
+                            // Click outside modal — dismiss transient popups.
+                            if (mw.transient) {
+                                _ = user_close(modal_id);
+                                handled_btn = true;
+                            } else {
+                                // Non-transient modal: ignore click.
+                                handled_btn = true;
+                            }
+                        }
+                    }
                 }
             }
             // M15 C4: dock icon click — 24 px left bar, 20×20 icons at (2,8+idx*32).
@@ -2701,6 +2808,8 @@ pub fn composite() virtio_gpu.CmdResult {
     notify_advance_ticks();
     // Arc4 #242: advance unsaved-changes dialog timeout once per composite.
     _ = unsaved_dialog_advance_tick();
+    // M21 W16: advance transient window timeouts.
+    _ = transient_advance_tick();
     draw_chrome();
     if (!virtio_gpu.gpu_ready) return .not_ready;
     presents += 1;
