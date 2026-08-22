@@ -93,7 +93,7 @@ pub const Shell = struct {
     scroll_offset: usize = 0,
     /// Mini CSI parser for intercepting scroll keys before the editor.
     scroll_csi: u8 = 0,
-    scroll_csi_param: u8 = 0,
+    scroll_csi_param: u16 = 0,
     /// M18 T2: selection state for copy-from-scrollback.
     selecting: bool = false,
     sel_start: usize = 0, // line offset (from newest) where selection begins
@@ -109,6 +109,10 @@ pub const Shell = struct {
     /// M18 T5: whether ANSI color escapes are emitted.
     /// Set true in boot_and_park(), false in host tests (preserves transcript).
     color_enabled: bool = false,
+    /// M18 T6: bracketed paste mode — accumulating pasted text.
+    paste_active: bool = false,
+    paste_buf: [lineedit.max_line]u8 = undefined,
+    paste_buf_len: usize = 0,
 
     pub fn init(con: console.Console, state: monitor.SystemState, machine: monitor.MachineControl) Shell {
         var shell = Shell{
@@ -150,6 +154,17 @@ pub const Shell = struct {
             self.prompt_shown = true;
         }
         const byte = self.mon.console.readByte() orelse return .idle;
+        // M18 T6: bracketed paste mode — buffer bytes until 201~.
+        // Newlines inside paste are kept as-is; the whole buffer is
+        // submitted as one multi-line block when paste ends.
+        if (self.paste_active) {
+            if (self.scroll_csi_track(byte)) return .pending;
+            if (self.paste_buf_len < lineedit.max_line) {
+                self.paste_buf[self.paste_buf_len] = byte;
+                self.paste_buf_len += 1;
+            }
+            return .pending;
+        }
         // M18 T2: intercept Ctrl+C / Enter when selecting in scrollback.
         // (Esc is NOT intercepted here — it must pass through to the CSI
         //  tracker so Up/Down arrows work. A lone Esc cancels selection
@@ -284,8 +299,8 @@ pub const Shell = struct {
             },
             3 => {
                 if (byte >= '0' and byte <= '9') {
-                    const scaled: u16 = @as(u16, self.scroll_csi_param) * 10;
-                    self.scroll_csi_param = @intCast(@min(scaled + (byte - '0'), 255));
+                    const scaled: u16 = self.scroll_csi_param * 10;
+                    self.scroll_csi_param = @min(scaled + (byte - '0'), 999);
                     return false; // pass digit through
                 }
                 if (byte == '~') {
@@ -303,9 +318,9 @@ pub const Shell = struct {
         }
     }
 
-    /// Handle a completed CSI parameter for scroll keys.
+    /// Handle a completed CSI parameter for scroll keys + paste.
     /// Returns true if the key was consumed.
-    fn scroll_handle(self: *Shell, param: u8) bool {
+    fn scroll_handle(self: *Shell, param: u16) bool {
         switch (param) {
             5 => { // PageUp: scroll up one page (10 lines)
                 const max_off = self.scrollback.stored();
@@ -328,6 +343,37 @@ pub const Shell = struct {
                     self.sel_start = self.scroll_offset;
                     self.sel_end = self.scroll_offset;
                 }
+                return true;
+            },
+            200 => { // Bracketed paste start
+                self.paste_active = true;
+                self.paste_buf_len = 0;
+                return true;
+            },
+            201 => { // Bracketed paste end — submit accumulated buffer
+                self.paste_active = false;
+                const saved_len = self.paste_buf_len;
+                self.paste_buf_len = 0;
+                // Execute each line through the normal shell path
+                var start: usize = 0;
+                var i: usize = 0;
+                while (i < saved_len) : (i += 1) {
+                    if (self.paste_buf[i] == '\n' or self.paste_buf[i] == '\r') {
+                        if (i > start) {
+                            handle_line(&self.mon, self.paste_buf[start..i]);
+                        }
+                        start = i + 1;
+                        // Skip the LF of a CRLF pair
+                        if (self.paste_buf[i] == '\r' and i + 1 < saved_len and self.paste_buf[i + 1] == '\n') {
+                            i += 1;
+                            start = i + 1;
+                        }
+                    }
+                }
+                if (start < saved_len) {
+                    handle_line(&self.mon, self.paste_buf[start..saved_len]);
+                }
+                self.prompt_shown = false;
                 return true;
             },
             else => return false,
@@ -1629,4 +1675,94 @@ test "shell: T3 search: non-printable bytes are ignored in search" {
     mock.feed("echo survived\n");
     while (shell.poll() != .idle) {}
     try std.testing.expect(std.mem.indexOf(u8, mock.contents(), "survived") != null);
+}
+
+test "shell: T6 paste: bracketed paste start/end toggles paste_active" {
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+
+    // Start paste
+    try std.testing.expect(!shell.paste_active);
+    mock.feed("\x1b[200~");
+    while (shell.poll() != .idle) {}
+    try std.testing.expect(shell.paste_active);
+
+    // End paste
+    mock.feed("\x1b[201~");
+    while (shell.poll() != .idle) {}
+    try std.testing.expect(!shell.paste_active);
+}
+
+test "shell: T6 paste: bytes are buffered during paste" {
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+
+    mock.feed("\x1b[200~");
+    while (shell.poll() != .idle) {}
+
+    // Type some bytes while in paste mode
+    mock.feed("hello");
+    while (shell.poll() != .idle) {}
+    try std.testing.expect(shell.paste_buf_len == 5);
+    try std.testing.expect(std.mem.eql(u8, shell.paste_buf[0..5], "hello"));
+
+    // End paste
+    mock.feed("\x1b[201~");
+    while (shell.poll() != .idle) {}
+    try std.testing.expectEqual(@as(usize, 0), shell.paste_buf_len);
+}
+
+test "shell: T6 paste: pasted commands execute after paste end" {
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+
+    // Paste a simple echo command
+    mock.feed("\x1b[200~echo pasted-ok\n\x1b[201~");
+    while (shell.poll() != .idle) {}
+    try std.testing.expect(!shell.paste_active);
+
+    // The echoed output should appear
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "pasted-ok") != null);
+}
+
+test "shell: T6 paste: multi-line paste executes each line" {
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+
+    // Paste two commands
+    mock.feed("\x1b[200~echo first\necho second\n\x1b[201~");
+    while (shell.poll() != .idle) {}
+    try std.testing.expect(!shell.paste_active);
+
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "first") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "second") != null);
+}
+
+test "shell: T6 paste: max_line bound prevents overflow" {
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+
+    // Start paste and send more than max_line bytes
+    mock.feed("\x1b[200~");
+    while (shell.poll() != .idle) {}
+    var i: usize = 0;
+    while (i < 260) : (i += 1) {
+        mock.feed("x");
+        while (shell.poll() != .idle) {}
+    }
+
+    // Should not exceed max_line
+    try std.testing.expect(shell.paste_buf_len <= lineedit.max_line);
+
+    // End paste should not crash
+    mock.feed("\x1b[201~");
+    while (shell.poll() != .idle) {}
+    try std.testing.expect(!shell.paste_active);
 }
