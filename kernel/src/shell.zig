@@ -94,6 +94,7 @@ pub const Shell = struct {
     /// Mini CSI parser for intercepting scroll keys before the editor.
     scroll_csi: u8 = 0,
     scroll_csi_param: u16 = 0,
+    csi_private: bool = false, // ESC [ ? sequences (DEC private modes)
     /// M18 T2: selection state for copy-from-scrollback.
     selecting: bool = false,
     sel_start: usize = 0, // line offset (from newest) where selection begins
@@ -113,6 +114,8 @@ pub const Shell = struct {
     paste_active: bool = false,
     paste_buf: [lineedit.max_line]u8 = undefined,
     paste_buf_len: usize = 0,
+    /// M18 T7: alternate screen active (CSI ? 1049 h/l)
+    alt_screen: bool = false,
 
     pub fn init(con: console.Console, state: monitor.SystemState, machine: monitor.MachineControl) Shell {
         var shell = Shell{
@@ -255,6 +258,10 @@ pub const Shell = struct {
                 if (byte == '[') {
                     self.scroll_csi = 2;
                     self.scroll_csi_param = 0;
+                    self.csi_private = false;
+                } else if (byte == ']') {
+                    // M18 T11: OSC — swallow until BEL or ST (ESC \)
+                    self.scroll_csi = 4;
                 } else {
                     self.scroll_csi = 0; // lone ESC — pass through for editor
                     // M18 T2: lone ESC in selection mode cancels selection
@@ -266,7 +273,27 @@ pub const Shell = struct {
                 }
                 return false; // always pass through
             },
+            // M18 T11: OSC mode — swallow all bytes until BEL (0x07) or ST (ESC \)
+            4 => {
+                if (byte == 0x07) { // BEL terminates OSC
+                    self.scroll_csi = 0;
+                } else if (byte == 0x1B) { // might be start of ST (ESC \)
+                    self.scroll_csi = 5;
+                }
+                return false; // pass through (they're harmless)
+            },
+            5 => {
+                // After ESC in OSC: '\' = ST terminator, anything else = resume OSC
+                self.scroll_csi = if (byte == '\\') 0 else 4;
+                return false;
+            },
             2 => {
+                // M18 T7: CSI ? prefix for DEC private modes
+                if (byte == '?') {
+                    self.csi_private = true;
+                    self.scroll_csi = 3;
+                    return false;
+                }
                 if (byte >= '0' and byte <= '9') {
                     self.scroll_csi_param = byte - '0';
                     self.scroll_csi = 3;
@@ -300,19 +327,29 @@ pub const Shell = struct {
             3 => {
                 if (byte >= '0' and byte <= '9') {
                     const scaled: u16 = self.scroll_csi_param * 10;
-                    self.scroll_csi_param = @min(scaled + (byte - '0'), 999);
-                    return false; // pass digit through
+                    self.scroll_csi_param = @min(scaled + (byte - '0'), 9999);
+                    return false;
+                }
+                // ; separator in multi-param sequences (e.g. ESC [ 8; H; W; t)
+                if (byte == ';') {
+                    self.scroll_csi_param = 0;
+                    return false; // restart param collection
                 }
                 if (byte == '~') {
+                    const p = self.scroll_csi_param;
                     self.scroll_csi = 0;
-                    return self.scroll_handle(self.scroll_csi_param);
+                    self.csi_private = false;
+                    return self.scroll_handle(p);
                 }
-                // unhandled final byte — reset and let editor handle it
+                // M18 T7–T11: CSI final handlers
+                const handled = self.csi_final(byte);
                 self.scroll_csi = 0;
-                return false;
+                self.csi_private = false;
+                return handled;
             },
             else => {
                 self.scroll_csi = 0;
+                self.csi_private = false;
                 return false;
             },
         }
@@ -377,6 +414,45 @@ pub const Shell = struct {
                 return true;
             },
             else => return false,
+        }
+    }
+
+    /// M18 T7–T11: handle CSI single-char final byte after param
+    /// collection. Returns true if consumed (no bytes reach the editor).
+    fn csi_final(self: *Shell, byte: u8) bool {
+        switch (byte) {
+            // M18 T7: alternate screen toggle (CSI ? 1049 h/l)
+            'h' => {
+                if (self.csi_private and self.scroll_csi_param == 1049) {
+                    self.alt_screen = true;
+                    // Clear screen on entering alt screen
+                    self.mon.console.puts("\x1b[2J\x1b[H");
+                    self.prompt_shown = false;
+                }
+                return true;
+            },
+            'l' => {
+                if (self.csi_private and self.scroll_csi_param == 1049) {
+                    self.alt_screen = false;
+                    self.mon.console.puts("\x1b[2J\x1b[H");
+                    self.prompt_shown = false;
+                }
+                return true;
+            },
+            // CSI n responder — only reply to DSR (6n = cursor position)
+            'n' => {
+                if (self.scroll_csi_param == 6) {
+                    self.mon.console.puts("\x1b[1;1R");
+                }
+                return true;
+            },
+            // Swallow: SGR (m), cursor shape (q), window ops (t/s),
+            // cursor-pos reply (R), DECSET/DECRST (h/l without ?)
+            'm', 't', 's', 'q', 'R' => return true,
+            // Single-char finals: arrows — already handled in state 2.
+            // A/B/C/D from state 3 (with param) are swallowed.
+            'A', 'B', 'C', 'D', 'H', 'J', 'K', 'G', 'd', 'f', 'r', 'u', 'c' => return true,
+            else => return false, // pass through to editor
         }
     }
 
@@ -1765,4 +1841,54 @@ test "shell: T6 paste: max_line bound prevents overflow" {
     mock.feed("\x1b[201~");
     while (shell.poll() != .idle) {}
     try std.testing.expect(!shell.paste_active);
+}
+
+test "shell: T7 alt-screen: CSI ? 1049 h/l toggle alt_screen" {
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+
+    try std.testing.expect(!shell.alt_screen);
+    mock.feed("\x1b[?1049h");
+    while (shell.poll() != .idle) {}
+    try std.testing.expect(shell.alt_screen);
+
+    mock.feed("\x1b[?1049l");
+    while (shell.poll() != .idle) {}
+    try std.testing.expect(!shell.alt_screen);
+}
+
+test "shell: T10 CSI responder: 6n returns 1;1R" {
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+
+    mock.feed("\x1b[6n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[1;1R") != null);
+}
+
+test "shell: T11 ANSI: SGR and cursor shape sequences are silently swallowed" {
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+
+    mock.feed("\x1b[32m\x1b[0m\x1b[3 q");
+    while (shell.poll() != .idle) {}
+    mock.feed("echo survived\n");
+    while (shell.poll() != .idle) {}
+    try std.testing.expect(std.mem.indexOf(u8, mock.contents(), "survived") != null);
+}
+
+test "shell: T11 OSC: title sequences are swallowed without crash" {
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+
+    mock.feed("\x1b]0;My Terminal\x07");
+    while (shell.poll() != .idle) {}
+    mock.feed("echo ok\n");
+    while (shell.poll() != .idle) {}
+    try std.testing.expect(std.mem.indexOf(u8, mock.contents(), "ok") != null);
 }
