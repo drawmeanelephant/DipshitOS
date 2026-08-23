@@ -1003,6 +1003,31 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_ps.step);
 
     // ------------------------------------------------------------------
+    // Guest: thirty-fourth ESP user program (M26 N1 — issue #399) PING.BIN.
+    // Headless ICMP ping: sends echo requests, shows RTT + loss stats.
+    // Uses existing ICMP path (net ping) when available; falls back to
+    // simulated RTT for host tests. No window, no heap.
+    // ------------------------------------------------------------------
+    const ping_prog = b.addExecutable(.{
+        .name = "user-ping",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/ping.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    ping_prog.linker_script = b.path("user/linker.ld");
+    const ping_step = b.step("ping", "Build the thirty-fourth ESP user program (zig-out/bin/PING.BIN)");
+    const ping_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    ping_elf2bin.addFileArg(ping_prog.getEmittedBin());
+    const ping_bin = ping_elf2bin.addOutputFileArg("PING.BIN");
+    ping_elf2bin.has_side_effects = true;
+    ping_elf2bin.stdio = .inherit;
+    ping_step.dependOn(&ping_elf2bin.step);
+    const install_ping = b.addInstallFileWithDir(ping_bin, .bin, "PING.BIN");
+    b.getInstallStep().dependOn(&install_ping.step);
+
+    // ------------------------------------------------------------------
     // Top-level steps. System-command steps are marked as having side
     // effects (and inherit stdio) so they always execute instead of being
     // skipped by the build cache. (No QEMU path: this project targets Apple
