@@ -256,6 +256,10 @@ var table_storage: [slot_count]Entry = undefined;
 var table_ready = false;
 var call_counts: [slot_count]u64 = [_]u64{0} ** slot_count;
 var write_fn: ?Writer = null;
+/// M22 D5 (issue #328): when set, dispatch() prints one line per syscall
+/// issued by that pid. Armed by the monitor's `strace` command around an
+/// exec; cleared by `strace off`.
+pub var strace_pid: ?usize = null;
 /// Card 4a (claim 5799): fixed BSS scratch for the process snapshot —
 /// `max_processes` rows × 40 bytes, marshaled per call, no allocation.
 var procs_scratch: [process.max_processes * process.snapshot_row_bytes]u8 = undefined;
@@ -377,7 +381,106 @@ pub fn dispatch(number: u64, args: Args, frame: *exceptions.VectorFrame) u64 {
     if (number >= slot_count) return error_result(.enosys);
     call_counts[number] +%= 1;
     const handler = ensure_table()[number].handler orelse return error_result(.enosys);
-    return handler(args, frame);
+    // M22 D5: sys_exit never returns from its handler (the scheduler
+    // stages another task), so its trace line must be printed BEFORE the
+    // call — with an em-dash result, the convention for "no return value".
+    if (tracing_current()) {
+        if (number == sys_exit) {
+            var buf: [96]u8 = undefined;
+            var pos: usize = append_trace_str(buf[0..], "[strace ");
+            pos += append_trace_dec(buf[pos..], @intCast(traced_pid_for_current()));
+            pos += append_trace_str(buf[pos..], "] sys_exit(");
+            pos += append_trace_hex(buf[pos..], args[0]);
+            pos += append_trace_str(buf[pos..], ") = \xe2\x80\x94\n");
+            if (write_fn) |wp| wp(buf[0..pos]);
+        }
+    }
+    const result = handler(args, frame);
+    maybe_trace(number, args, result);
+    return result;
+}
+
+fn tracing_current() bool {
+    const target = strace_pid orelse return false;
+    const pid = process.find_by_task(scheduler.current_id()) orelse return false;
+    return pid == target;
+}
+
+fn traced_pid_for_current() usize {
+    return process.find_by_task(scheduler.current_id()) orelse 0;
+}
+
+/// M22 D5 (issue #328): synchronous per-syscall trace line for the traced
+/// pid — `[strace 3] sys_write(0x1, 0x400100, 0xc) = 0xc`. Runs in SVC
+/// context; the kernel is single-threaded so a direct console write is
+/// safe (the same path tombstones use).
+fn maybe_trace(number: u64, args: Args, result: u64) void {
+    const target = strace_pid orelse return;
+    const w = write_fn orelse return;
+    const pid = process.find_by_task(scheduler.current_id()) orelse return;
+    if (pid != target) return;
+    var buf: [112]u8 = undefined;
+    var pos: usize = 0;
+    pos += append_trace_str(buf[pos..], "[strace ");
+    pos += append_trace_dec(buf[pos..], @intCast(pid));
+    pos += append_trace_str(buf[pos..], "] ");
+    pos += append_trace_str(buf[pos..], ensure_table()[number].name);
+    pos += append_trace_str(buf[pos..], "(");
+    pos += append_trace_hex(buf[pos..], args[0]);
+    pos += append_trace_str(buf[pos..], ", ");
+    pos += append_trace_hex(buf[pos..], args[1]);
+    pos += append_trace_str(buf[pos..], ", ");
+    pos += append_trace_hex(buf[pos..], args[2]);
+    pos += append_trace_str(buf[pos..], ") = ");
+    pos += append_trace_hex(buf[pos..], result);
+    if (pos < buf.len) {
+        buf[pos] = '\n';
+        pos += 1;
+    }
+    w(buf[0..pos]);
+}
+
+fn append_trace_str(buf: []u8, s: []const u8) usize {
+    const take = @min(s.len, buf.len);
+    @memcpy(buf[0..take], s[0..take]);
+    return take;
+}
+
+fn append_trace_dec(buf: []u8, v_in: u64) usize {
+    var v = v_in;
+    var tmp: [20]u8 = undefined;
+    var n: usize = 0;
+    if (v == 0) {
+        tmp[0] = '0';
+        n = 1;
+    }
+    while (v > 0) : (v /= 10) {
+        tmp[n] = @intCast('0' + v % 10);
+        n += 1;
+    }
+    var i: usize = 0;
+    while (i < n) : (i += 1) buf[i] = tmp[n - 1 - i];
+    return n;
+}
+
+fn append_trace_hex(buf: []u8, v: u64) usize {
+    const digits = "0123456789abcdef";
+    buf[0] = '0';
+    buf[1] = 'x';
+    if (v == 0) {
+        buf[2] = '0';
+        return 3;
+    }
+    var tmp: [16]u8 = undefined;
+    var n: usize = 0;
+    var vv = v;
+    while (vv > 0) : (vv /= 16) {
+        tmp[n] = digits[@intCast(vv % 16)];
+        n += 1;
+    }
+    var i: usize = 0;
+    while (i < n) : (i += 1) buf[2 + i] = tmp[n - 1 - i];
+    return 2 + n;
 }
 
 /// Adapter registered through claim 8215's `set_svc_dispatcher` seam.

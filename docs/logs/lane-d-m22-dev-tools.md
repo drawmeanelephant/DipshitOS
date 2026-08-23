@@ -106,3 +106,20 @@ D2→D4 round trip ON THE MACHINE: ASM.BIN's PROG.ELF decoded byte-exactly,
 then the same file executed via D1 exiting status 71.
 artifacts/m22-disas-live.txt, artifacts/live-disas-report.txt.
 verify-unit-tests green; verify-coordination ok.
+
+## 2026-08-22 — claim 9815: D5 (issue #328) done — syscall tracer
+
+No new syscall slot consumed: the monitor's `strace` command arms
+`syscall.strace_pid` around an exec (loader records the spawned pid at
+the success point, before the task first runs, so every syscall lands).
+dispatch() prints one synchronous line per traced syscall
+(`[strace 1] sys_write(0x1, 0x400020, 0x1a) = 0x1a`). sys_exit is
+special-cased BEFORE the handler call with an em-dash result — its
+handler never returns (scheduler stages the next task), so a post-print
+is unreachable. Registry 54→55 (`strace exec ... | off`; shell help
+golden updated).
+
+Evidence: verify-live-strace.sh PASS 1/1 on VZ — armed, both trace lines
+observed, program ran normally to exit 42, off disarmed.
+artifacts/m22-strace-live.txt, artifacts/live-strace-report.txt.
+verify-unit-tests green.

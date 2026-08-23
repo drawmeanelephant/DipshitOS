@@ -21,7 +21,8 @@ const alloc = @import("alloc.zig");
 const console = @import("console.zig");
 const esp = @import("esp.zig");
 const esp_exec = @import("exec.zig"); // claim 6783: load a user program from the ESP and enter it at EL0
-const fat = @import("fat.zig"); // claim 6420: FAT write diagnostics (last failing LBA)
+const fat = @import("fat.zig");
+const syscall_mod = @import("syscall.zig"); // claim 6420: FAT write diagnostics (last failing LBA)
 const exceptions = @import("exceptions.zig");
 const gic = @import("gic.zig");
 const handoff = @import("handoff.zig");
@@ -277,8 +278,9 @@ pub const Command = struct {
 /// (claim 0163) grows it 50 -> 51 (`color`). Milestone eighteen T16
 /// (issue #419) grows it 51 -> 52 (`sh`). Milestone twenty-four K5
 /// grows it 52 -> 53 (`calc`). Milestone twenty-two D3 (issue #326)
-/// grows it 53 -> 54 (`sym`).
-pub const registry_count: usize = 54; // 51 + `sh` (M18 T16) + `calc` (M24 K5) + `sym` (M22 D3)
+/// grows it 53 -> 54 (`sym`). Milestone twenty-two D5 (issue #328)
+/// grows it 54 -> 55 (`strace`).
+pub const registry_count: usize = 55; // + sh/calc/sym + `strace` (M22 D5)
 
 /// `sym <file>` reads at most this many bytes for on-disk symtab inspection
 /// (M22 D3). ELF symbol tables live near the file tail; 64 KiB covers every
@@ -341,6 +343,7 @@ fn ensure_registry() []const Command {
             .{ .name = "shutdown", .help = "request power-off", .usage = "shutdown", .category = .system, .handler = cmd_shutdown },
             .{ .name = "spawn", .help = "spawn the lifecycle demo task", .usage = "spawn", .category = .tasks_processes, .handler = cmd_spawn },
             .{ .name = "sysinfo", .help = "comprehensive system and subsystem diagnostic snapshot", .usage = "sysinfo", .category = .machine_identity, .handler = cmd_sysinfo },
+            .{ .name = "strace", .help = "trace a program's syscalls: 'strace exec APP.BIN [args]' arms the tracer around an exec and prints one line per syscall; 'strace off' disarms", .usage = "strace exec <file> [args...] | off", .category = .tasks_processes, .handler = cmd_strace },
             .{ .name = "sym", .help = "crash-report symbol table: 'sym' lists symbols loaded from the last ELF exec; 'sym <file>' parses an ELF's symtab from disk", .usage = "sym [<file>]", .category = .tasks_processes, .max_args = 1, .handler = cmd_sym },
             .{ .name = "syscalls", .help = "numbered syscall table and counters", .usage = "syscalls", .category = .tasks_processes, .handler = cmd_syscalls },
             .{ .name = "tasks", .help = "tick-driven task scheduler status", .usage = "tasks", .category = .tasks_processes, .handler = cmd_tasks },
@@ -4921,6 +4924,34 @@ fn cmd_sym(m: *Monitor, args: []const []const u8) ExecError {
 
 /// Staging buffer for `sym <file>` disk inspection.
 var sym_file_buf: [sym_file_max]u8 = undefined;
+
+/// M22 D5 (issue #328): `strace exec <file> [args...]` arms the kernel
+/// tracer for the process the exec spawns (the loader records its pid at
+/// the success point, before the task first runs, so every syscall is
+/// seen). `strace off` disarms. Anything else prints usage honestly.
+fn cmd_strace(m: *Monitor, args: []const []const u8) ExecError {
+    if (args.len == 1 and std.mem.eql(u8, args[0], "off")) {
+        syscall_mod.strace_pid = null;
+        m.console.print_line("strace: off");
+        return .none;
+    }
+    if (args.len >= 2 and std.mem.eql(u8, args[0], "exec")) {
+        const res = esp_exec.exec_file(args[1], args[2..]);
+        if (res != .ok) {
+            err_prefix(m);
+            m.console.puts("strace: exec refused (");
+            m.console.print_u64(@intFromEnum(res));
+            m.console.print_line(")");
+            return .invalid_argument;
+        }
+        syscall_mod.strace_pid = esp_exec.last_exec_pid();
+        m.console.print_line("strace: armed");
+        return .none;
+    }
+    err_prefix(m);
+    m.console.print_line("usage: strace exec <file> [args...] | strace off");
+    return .invalid_argument;
+}
 
 fn cmd_syscalls(m: *Monitor, args: []const []const u8) ExecError {
     _ = args;
