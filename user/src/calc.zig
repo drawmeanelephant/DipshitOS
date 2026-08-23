@@ -1556,7 +1556,68 @@ pub const AppState = struct {
 // Entry Point (EL0)
 // ---------------------------------------------------------------------------
 
-pub export fn _start() callconv(.c) noreturn {
+/// K11: read one 32-byte NUL-terminated argv slot.
+fn cli_arg(block: [*]u8, i: usize) []const u8 {
+    const slot = block + i * 32;
+    var len: usize = 0;
+    while (len < 32 and slot[len] != 0) len += 1;
+    return slot[0..len];
+}
+
+/// K11: CLI mode — `exec CALC.BIN <expr>` evaluates and prints, no GUI.
+fn cli_main(argc: usize, argv_va: u64) noreturn {
+    const block: [*]u8 = @ptrFromInt(argv_va);
+
+    // Join up to argc args into one expression line ("2 + 3" works too).
+    var buf: [256]u8 = undefined;
+    var pos: usize = 0;
+    var i: usize = 0;
+    while (i < argc) : (i += 1) {
+        const arg = cli_arg(block, i);
+        if (argc == 1 and (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help"))) {
+            ui.write_console("CALC.BIN - DipshitOS calculator\n" ++
+                "usage: exec CALC.BIN [expression]\n" ++
+                "       exec CALC.BIN -h      show this help\n" ++
+                "examples: exec CALC.BIN '2+3*4'   -> 2+3*4 = 14\n" ++
+                "          exec CALC.BIN '(2+3)*4' -> (2+3)*4 = 20\n" ++
+                "no args opens the GUI calculator.\n");
+            ui.exit_process(0);
+        }
+        if (pos > 0 and pos < buf.len) {
+            buf[pos] = ' ';
+            pos += 1;
+        }
+        const c = @min(arg.len, buf.len - pos);
+        @memcpy(buf[pos .. pos + c], arg[0..c]);
+        pos += c;
+    }
+    if (pos == 0) gui_main();
+
+    const result = expr_mod.evaluate(buf[0..pos]) catch {
+        ui.write_console("calc: invalid expression\n");
+        ui.exit_process(1);
+    };
+
+    // "<expr> = <result>"
+    var out: [300]u8 = undefined;
+    var opos: usize = 0;
+    const ec = @min(pos, out.len - 24);
+    @memcpy(out[0..ec], buf[0..ec]);
+    opos += ec;
+    @memcpy(out[opos .. opos + 3], " = ");
+    opos += 3;
+    var num_buf: [24]u8 = undefined;
+    const ns = format_i64(result, &num_buf);
+    const nc = @min(ns.len, out.len - opos - 1);
+    @memcpy(out[opos .. opos + nc], ns[0..nc]);
+    opos += nc;
+    out[opos] = '\n';
+    opos += 1;
+    ui.write_console(out[0..opos]);
+    ui.exit_process(exit_status);
+}
+
+fn gui_main() noreturn {
     var app = AppState.init();
 
     const win_res = ui.win_open(window_x, window_y, window_w, window_h);
@@ -1612,6 +1673,25 @@ pub export fn _start() callconv(.c) noreturn {
     ui.write_console("calc: exiting 43\n");
     ui.win_close(win);
     ui.exit_process(exit_status);
+}
+
+/// K11 entry contract: the kernel's exec passes argc in x0 and the argv
+/// block VA in x1 (card 3e, claim 4636). With args: CLI mode — evaluate,
+/// print, exit. Without: open the GUI window.
+pub export fn _start(argc: u64, argv_va: u64) callconv(.c) noreturn {
+    if (argc > 0 and argv_va != 0) {
+        cli_main(@intCast(argc), argv_va);
+    }
+    gui_main();
+}
+
+test "calc K11: cli_arg reads NUL-terminated 32-byte slots" {
+    var block = [_]u8{0} ** 64;
+    @memcpy(block[0..5], "2+3*4");
+    try std.testing.expectEqualStrings("2+3*4", cli_arg(&block, 0));
+    @memcpy(block[32..34], "xy");
+    try std.testing.expectEqualStrings("xy", cli_arg(&block, 1));
+    try std.testing.expectEqual(@as(usize, 0), cli_arg(&block, 2).len);
 }
 
 // ---------------------------------------------------------------------------

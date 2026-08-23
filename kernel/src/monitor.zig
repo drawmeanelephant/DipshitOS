@@ -1083,6 +1083,17 @@ fn cmd_calc(m: *Monitor, args: []const []const u8) ExecError {
         if (got > 0 and buf[got - 1] != '\n') m.console.puts("\n");
         return .none;
     }
+    // M24 K11 (issue #375) — Lane B shared-file insertion (Rule 4, one
+    // self-contained commit): any non-`history` argument is an expression
+    // for CALC.BIN's CLI mode; hand the args over verbatim. CALC.BIN
+    // evaluates, prints "<expr> = <result>", and exits — no GUI window.
+    // A no-args or `calc history` invocation never reaches this path.
+    if (args.len >= 1 and esp_exec.max_exec_args >= args.len) {
+        switch (esp_exec.exec_file("CALC.BIN", args)) {
+            .ok => return .none,
+            else => {}, // fall through to the honest error below
+        }
+    }
     err_prefix(m);
     m.console.puts("unknown calc subcommand: ");
     m.console.print_line(args[0]);
