@@ -27,6 +27,126 @@ pub fn is_expr_char(c: u8) bool {
         c == '/' or c == '%' or c == '(' or c == ')' or c == ' ';
 }
 
+/// K15: identifier characters for definition names.
+fn is_name_char(c: u8) bool {
+    return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or c == '_' or (c >= '0' and c <= '9');
+}
+
+/// K15: resolve a definition name to a value; null = unknown name.
+pub const Resolver = *const fn (name: []const u8) ?f64;
+
+/// K15: float evaluation with named definitions — used when an expression
+/// contains identifiers (`2 * pi`). Same grammar as the integer parser;
+/// division is true division and % keeps its remainder semantics.
+pub fn evaluate_f64(src: []const u8, resolver: Resolver) ExprError!f64 {
+    var p = ParserF{ .s = src, .i = 0, .resolve = resolver };
+    const v = try p.expr();
+    p.skipWs();
+    if (p.i != p.s.len) return error.Syntax;
+    return v;
+}
+
+const ParserF = struct {
+    s: []const u8,
+    i: usize,
+    resolve: Resolver,
+
+    fn skipWs(p: *ParserF) void {
+        while (p.i < p.s.len and p.s[p.i] == ' ') p.i += 1;
+    }
+
+    fn peek(p: *ParserF) ?u8 {
+        p.skipWs();
+        if (p.i >= p.s.len) return null;
+        return p.s[p.i];
+    }
+
+    fn expr(p: *ParserF) ExprError!f64 {
+        var v = try p.term();
+        while (true) {
+            const c = p.peek() orelse break;
+            if (c != '+' and c != '-') break;
+            p.i += 1;
+            const r = try p.term();
+            v = if (c == '+') v + r else v - r;
+        }
+        return v;
+    }
+
+    fn term(p: *ParserF) ExprError!f64 {
+        var v = try p.factor();
+        while (true) {
+            const c = p.peek() orelse break;
+            if (c != '*' and c != '/' and c != '%') break;
+            p.i += 1;
+            const r = try p.factor();
+            switch (c) {
+                '*' => v = v * r,
+                '/' => {
+                    if (r == 0) return error.DivideByZero;
+                    v = v / r;
+                },
+                else => {
+                    if (r == 0) return error.DivideByZero;
+                    v = @rem(v, r);
+                },
+            }
+        }
+        return v;
+    }
+
+    fn factor(p: *ParserF) ExprError!f64 {
+        const c = p.peek() orelse return error.Syntax;
+        if (c == '(') {
+            p.i += 1;
+            const v = try p.expr();
+            if ((p.peek() orelse return error.Syntax) != ')') return error.Syntax;
+            p.i += 1;
+            return v;
+        }
+        if (c == '-') {
+            p.i += 1;
+            return -(try p.factor());
+        }
+        if (c == '+') {
+            p.i += 1;
+            return p.factor();
+        }
+        // Identifier?
+        if ((c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or c == '_') {
+            p.skipWs();
+            const start = p.i;
+            while (p.i < p.s.len and is_name_char(p.s[p.i])) p.i += 1;
+            const name = p.s[start..p.i];
+            if (p.resolve(name)) |val| return val;
+            return error.Syntax; // unknown name
+        }
+        return p.number();
+    }
+
+    fn number(p: *ParserF) ExprError!f64 {
+        p.skipWs();
+        var v: f64 = 0;
+        var n: usize = 0;
+        var saw_dot = false;
+        var frac_scale: f64 = 1;
+        while (p.i < p.s.len) {
+            const ch = p.s[p.i];
+            if (ch >= '0' and ch <= '9') {
+                v = v * 10 + @as(f64, @floatFromInt(ch - '0'));
+                if (saw_dot) frac_scale *= 10;
+                p.i += 1;
+                n += 1;
+            } else if (ch == '.' and !saw_dot) {
+                saw_dot = true;
+                p.i += 1;
+            } else break;
+        }
+        if (n == 0) return error.Syntax;
+        return v / frac_scale;
+    }
+};
+
 const Parser = struct {
     s: []const u8,
     i: usize,
@@ -151,4 +271,30 @@ test "expr: errors are typed" {
 
 test "expr: whitespace tolerated" {
     try std.testing.expectEqual(@as(i64, 14), try evaluate(" 2 + 3 * 4 "));
+}
+
+test "expr: float evaluation with definitions" {
+    // Issue case: define PI=3.14, 2*PI = 6.28
+    const r = struct {
+        fn resolve(name: []const u8) ?f64 {
+            if (std.mem.eql(u8, name, "pi")) return 3.14;
+            if (std.mem.eql(u8, name, "tax_rate")) return 0.08;
+            return null;
+        }
+    }.resolve;
+    try std.testing.expectApproxEqAbs(@as(f64, 6.28), try evaluate_f64("2 * pi", r), 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 8.0), try evaluate_f64("100 * tax_rate", r), 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.5), try evaluate_f64("1/2", r), 1e-12); // true division
+    try std.testing.expectError(error.Syntax, evaluate_f64("2 * nope", r)); // unknown name
+    try std.testing.expectApproxEqAbs(@as(f64, 3.84), try evaluate_f64("(1+2)*tax_rate*16", r), 1e-9);
+}
+
+test "expr: name parsing respects boundaries" {
+    const r = struct {
+        fn resolve(name: []const u8) ?f64 {
+            if (std.mem.eql(u8, name, "ab")) return 2;
+            return null;
+        }
+    }.resolve;
+    try std.testing.expectError(error.Syntax, evaluate_f64("abc", r)); // prefix must not match "ab"
 }
