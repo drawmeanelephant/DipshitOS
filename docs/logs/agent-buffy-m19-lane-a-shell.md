@@ -135,3 +135,19 @@ Host-tested; live gate pending.
 - Host tests: 7 new (basic inline, nested refusal, unmatched error,
   empty no-op, fn-body preservation, prefix+suffix, no-subst-passthrough).
   653/653 shell tests pass. All verify gates green.
+
+## 2026-08-23 — claim 7033: P10 arithmetic expansion done (issue #299)
+
+P10 (arithmetic expansion: `$((expr))` evaluates 64-bit signed integer
+expressions) landed. Host-tested.
+
+- `shell.zig`: `ArithLexer` tokenizes integers, operators (`+ - * / %`),
+  and parentheses. Recursive-descent parser with precedence: `()` >
+  unary `-` > `* / %` > `+ -`. Division/modulo by zero → 0.
+  `arith_expand` scans for `$((expr))`, finds matching `))` with depth
+  tracking, evaluates, formats as decimal, splices into line.
+  Wired into `handle_line` before `cmd_subst`. Skipped for `fn` defs.
+- Host tests: 12 new (addition, precedence, grouping, subtraction,
+  division, modulo, negative, unary minus, mixed prefix/suffix,
+  no-op, empty expression, nested parens). 665/665 shell tests pass.
+  All verify gates green.

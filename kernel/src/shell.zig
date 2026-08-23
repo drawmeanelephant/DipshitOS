@@ -1077,16 +1077,26 @@ fn run_script(mon: *monitor.Monitor, name: []const u8) void {
 }
 
 fn handle_line(mon: *monitor.Monitor, raw_line: []const u8) void {
+    // P10: arithmetic expansion `$((expr))` — evaluate and substitute.
+    // Skip for fn definitions (preserve $((...)  in function bodies).
+    var arith_buf: [lineedit.max_line]u8 = undefined;
+    const line_after_arith = if (subst_active or
+        std.mem.startsWith(u8, raw_line, "fn ") or
+        std.mem.startsWith(u8, raw_line, "fn\t"))
+        raw_line
+    else
+        arith_expand(raw_line, &arith_buf);
+
     // P9: command substitution `$(cmd)` — execute inner command, capture
     // stdout, substitute back into the line.  Skip for fn definitions.
     // Also skip when subst_active (prevent nesting).
     var subst_buf: [lineedit.max_line]u8 = undefined;
     const line_after_subst = if (subst_active or
-        std.mem.startsWith(u8, raw_line, "fn ") or
-        std.mem.startsWith(u8, raw_line, "fn\t"))
-        raw_line
+        std.mem.startsWith(u8, line_after_arith, "fn ") or
+        std.mem.startsWith(u8, line_after_arith, "fn\t"))
+        line_after_arith
     else
-        cmd_subst(mon, raw_line, &subst_buf);
+        cmd_subst(mon, line_after_arith, &subst_buf);
 
     // M18 T12: expand $VAR references before tokenizing.
     // P8: skip expansion for `fn` definitions so `$name` in function
@@ -1539,6 +1549,194 @@ fn cmd_subst(mon: *monitor.Monitor, raw: []const u8, out: []u8) []const u8 {
         op += trimmed.len;
     }
     // copy suffix
+    if (suffix.len > 0 and op + suffix.len <= out.len) {
+        @memcpy(out[op..][0..suffix.len], suffix);
+        op += suffix.len;
+    }
+    return out[0..op];
+}
+
+/// M19 P10 (issue #299): arithmetic expansion — `$((expr))` evaluates
+/// a 64-bit signed integer expression and substitutes the decimal result.
+/// Supports +, -, *, /, %, parentheses, and unary minus. Recursive
+/// descent handles precedence: () > unary - > * / % > + -.
+const ArithToken = enum { num, plus, minus, star, slash, percent, lparen, rparen, eof };
+
+const ArithLexer = struct {
+    src: []const u8,
+    pos: usize,
+    peek_token: ArithToken,
+    peek_val: i64,
+
+    fn init(src: []const u8) ArithLexer {
+        var l = ArithLexer{ .src = src, .pos = 0, .peek_token = .eof, .peek_val = 0 };
+        l.advance();
+        return l;
+    }
+
+    fn advance(self: *ArithLexer) void {
+        while (self.pos < self.src.len and (self.src[self.pos] == ' ' or self.src[self.pos] == '\t'))
+            self.pos += 1;
+        if (self.pos >= self.src.len) {
+            self.peek_token = .eof;
+            return;
+        }
+        switch (self.src[self.pos]) {
+            '+' => {
+                self.peek_token = .plus;
+                self.pos += 1;
+            },
+            '-' => {
+                self.peek_token = .minus;
+                self.pos += 1;
+            },
+            '*' => {
+                self.peek_token = .star;
+                self.pos += 1;
+            },
+            '/' => {
+                self.peek_token = .slash;
+                self.pos += 1;
+            },
+            '%' => {
+                self.peek_token = .percent;
+                self.pos += 1;
+            },
+            '(' => {
+                self.peek_token = .lparen;
+                self.pos += 1;
+            },
+            ')' => {
+                self.peek_token = .rparen;
+                self.pos += 1;
+            },
+            '0'...'9' => {
+                var val: i64 = 0;
+                while (self.pos < self.src.len and self.src[self.pos] >= '0' and self.src[self.pos] <= '9') {
+                    val = val * 10 + @as(i64, self.src[self.pos] - '0');
+                    self.pos += 1;
+                }
+                self.peek_token = .num;
+                self.peek_val = val;
+            },
+            else => {
+                self.peek_token = .eof;
+            },
+        }
+    }
+
+    fn next(self: *ArithLexer) ArithToken {
+        const t = self.peek_token;
+        self.advance();
+        return t;
+    }
+};
+
+fn arith_parse_expr(lexer: *ArithLexer) i64 {
+    var left = arith_parse_term(lexer);
+    while (true) {
+        switch (lexer.peek_token) {
+            .plus => {
+                _ = lexer.next();
+                left += arith_parse_term(lexer);
+            },
+            .minus => {
+                _ = lexer.next();
+                left -= arith_parse_term(lexer);
+            },
+            else => break,
+        }
+    }
+    return left;
+}
+
+fn arith_parse_term(lexer: *ArithLexer) i64 {
+    var left = arith_parse_factor(lexer);
+    while (true) {
+        switch (lexer.peek_token) {
+            .star => {
+                _ = lexer.next();
+                left *= arith_parse_factor(lexer);
+            },
+            .slash => {
+                _ = lexer.next();
+                const r = arith_parse_factor(lexer);
+                if (r != 0) left = @divTrunc(left, r) else left = 0;
+            },
+            .percent => {
+                _ = lexer.next();
+                const r = arith_parse_factor(lexer);
+                if (r != 0) left = @mod(left, r) else left = 0;
+            },
+            else => break,
+        }
+    }
+    return left;
+}
+
+fn arith_parse_factor(lexer: *ArithLexer) i64 {
+    if (lexer.peek_token == .minus) {
+        _ = lexer.next();
+        return -arith_parse_factor(lexer);
+    }
+    if (lexer.peek_token == .plus) {
+        _ = lexer.next();
+        return arith_parse_factor(lexer);
+    }
+    if (lexer.peek_token == .num) {
+        const val = lexer.peek_val;
+        _ = lexer.next();
+        return val;
+    }
+    if (lexer.peek_token == .lparen) {
+        _ = lexer.next();
+        const val = arith_parse_expr(lexer);
+        _ = lexer.next(); // consume )
+        return val;
+    }
+    return 0;
+}
+
+/// Scan `raw` for `$((expr))`, evaluate the expression, and splice the
+/// decimal result back into the line.  Returns the substituted line.
+fn arith_expand(raw: []const u8, out: []u8) []const u8 {
+    const dollar_lparen = std.mem.indexOf(u8, raw, "$((") orelse return raw;
+    const expr_start = dollar_lparen + 3;
+
+    var depth: usize = 0;
+    var i: usize = expr_start;
+    while (i < raw.len - 1) : (i += 1) {
+        if (raw[i] == '(') {
+            depth += 1;
+        } else if (raw[i] == ')') {
+            if (depth == 0 and raw[i + 1] == ')') break;
+            if (depth > 0) depth -= 1;
+        }
+    }
+    if (i >= raw.len - 1) return raw;
+    const expr_end = i;
+    const suffix_start = i + 2;
+
+    const expr = raw[expr_start..expr_end];
+    if (expr.len == 0) return raw;
+
+    var lexer = ArithLexer.init(expr);
+    const result = arith_parse_expr(&lexer);
+
+    var buf: [24]u8 = undefined;
+    const str = std.fmt.bufPrint(&buf, "{d}", .{result}) catch return raw;
+
+    const prefix = raw[0..dollar_lparen];
+    const suffix = raw[suffix_start..];
+    var op: usize = 0;
+    if (prefix.len > 0) {
+        @memcpy(out[op..][0..prefix.len], prefix);
+        op += prefix.len;
+    }
+    if (str.len > 0) {
+        @memcpy(out[op..][0..str.len], str);
+        op += str.len;
+    }
     if (suffix.len > 0 and op + suffix.len <= out.len) {
         @memcpy(out[op..][0..suffix.len], suffix);
         op += suffix.len;
@@ -3900,4 +4098,135 @@ test "shell: M19 P9 subst: no substitution when no $( present" {
     while (shell.poll() != .idle) {}
     const out = mock.contents();
     try std.testing.expect(std.mem.indexOf(u8, out, "just a normal command") != null);
+}
+test "shell: M19 P10 arith: basic addition" {
+    env_count = 0;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("echo $((2 + 3))\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "5") != null);
+}
+
+test "shell: M19 P10 arith: multiplication precedence over addition" {
+    env_count = 0;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("echo $((2 + 3 * 4))\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "14") != null);
+}
+
+test "shell: M19 P10 arith: parenthesized grouping" {
+    env_count = 0;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("echo $(( (1+2) * 3 ))\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "9") != null);
+}
+
+test "shell: M19 P10 arith: subtraction" {
+    env_count = 0;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("echo $((10 - 3))\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "7") != null);
+}
+
+test "shell: M19 P10 arith: division" {
+    env_count = 0;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("echo $((10 / 3))\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "3") != null);
+}
+
+test "shell: M19 P10 arith: modulo" {
+    env_count = 0;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("echo $((10 % 3))\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "1") != null);
+}
+
+test "shell: M19 P10 arith: negative result" {
+    env_count = 0;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("echo $((3 - 10))\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "-7") != null);
+}
+
+test "shell: M19 P10 arith: unary minus" {
+    env_count = 0;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("echo $((-5 + 3))\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "-2") != null);
+}
+
+test "shell: M19 P10 arith: mixed prefix and suffix" {
+    env_count = 0;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("echo result=$((1+2))\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "result=3") != null);
+}
+
+test "shell: M19 P10 arith: no $(( in line is a no-op" {
+    env_count = 0;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("echo plain\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "plain") != null);
+}
+
+test "shell: M19 P10 arith: empty $((  )) passes through literally" {
+    env_count = 0;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("echo before$((  ))after\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "before") != null);
+}
+
+test "shell: M19 P10 arith: nested parens in expression" {
+    env_count = 0;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("echo $(( ( (2+3) ) ))\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "5") != null);
 }

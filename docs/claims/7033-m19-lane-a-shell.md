@@ -14,7 +14,7 @@
 - **Depends on:** M18 done ✅ (merged to main as `4d11713`, PR #485).
   Lane A is the critical path — Lane C (M20 text) and Lane E (M21
   compositor) depend on it.
-- **Status:** 🔄 in progress — P1 (pipes) ✅ done 2026-08-22; P2 (redirection) ✅ done 2026-08-23; P3 (env vars) ✅ done 2026-08-23; P4 (functions) ✅ done 2026-08-23; P8 (function args) ✅ done 2026-08-23; P9 (command substitution) ✅ done 2026-08-23
+- **Status:** 🔄 in progress — P1 (pipes) ✅ done 2026-08-22; P2 (redirection) ✅ done 2026-08-23; P3 (env vars) ✅ done 2026-08-23; P4 (functions) ✅ done 2026-08-23; P8 (function args) ✅ done 2026-08-23; P9 (command substitution) ✅ done 2026-08-23; P10 (arithmetic expansion) ✅ done 2026-08-23
 
 ## Notes
 
@@ -179,6 +179,30 @@ updated as cards land.
   all modules green. `zig build test-console` transcript byte-identical.
   `zig fmt --check` clean. `zig build` + `zig build image` green.
 - Class B: live gate `verify-live-subst.sh` pending.
+
+## P10 — arithmetic expansion (issue #299) — done 2026-08-23
+
+- `kernel/src/shell.zig`: `ArithLexer` struct (tokenizes integers, operators,
+  and parentheses) and recursive-descent parser (`arith_parse_expr` →
+  `arith_parse_term` → `arith_parse_factor`) with precedence: `()` >
+  unary `-` > `* / %` > `+ -`. `arith_expand` scans for `$((expr))`,
+  finds matching `))` with depth tracking, evaluates via the parser,
+  formats result as decimal, and splices into the line.
+- Handles: 64-bit signed integers, unary minus, division by zero → 0,
+  modulo by zero → 0, empty expression → pass-through.
+- Wired into `handle_line` before `cmd_subst` (arithmetic expands first,
+  then command substitution, then env vars). Skipped for `fn` definitions
+  (preserves `$((...)` in function bodies).
+- No new ABI — pure `shell.zig`, ~128 bytes BSS.
+
+### Verification
+
+- Host (class A): 12 new tests (addition, precedence, grouping,
+  subtraction, division, modulo, negative result, unary minus,
+  mixed prefix/suffix, no-op passthrough, empty expression,
+  nested parens). 665/665 shell tests pass. `verify-unit-tests.sh`
+  all modules green. `zig build test-console` transcript byte-identical.
+  `zig fmt --check` clean. `zig build` + `zig build image` green.
 
 ## P3 — environment variables (issue #292) — done 2026-08-23
 
