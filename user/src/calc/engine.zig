@@ -6,6 +6,7 @@
 //! extends this to 4 slots in the caller layer.
 
 const std = @import("std");
+const mathfn = @import("mathfn.zig");
 
 pub const CalcEngine = struct {
     accum: i64 = 0,
@@ -123,6 +124,13 @@ pub const CalcEngine = struct {
                 const shift: u6 = if (b < 0 or b > 63) 0 else @intCast(b);
                 res = a >> shift;
             },
+            'P' => { // POW x^y (K8) — exact checked integer power
+                if (mathfn.pow_checked(a, b)) |r| {
+                    res = r;
+                } else |_| {
+                    err = true;
+                }
+            },
             else => res = b,
         }
         if (err) {
@@ -158,9 +166,8 @@ pub const CalcEngine = struct {
     }
 
     /// Raise the error state from the caller layer (K9 expression
-    /// syntax/overflow/div-zero errors).
-    /// Raise the error state from the caller layer (K7 domain errors:
-    /// asin/acos out of range, tan at cos = 0).
+    /// syntax/overflow/div-zero errors, K7 domain errors: asin/acos out
+    /// of range, tan at cos = 0, K7/K8 shared contract).
     pub fn raise_error(self: *CalcEngine) void {
         self.fail();
     }
