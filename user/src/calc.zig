@@ -11,8 +11,10 @@
 //!   K5 — History persistence: save/load from FAT
 //!   K7 — Trigonometry: SIN/COS/TAN/ASIN/ACOS/ATAN, DEG/RAD toggle
 //!   K6 — Scientific notation display: SCI toggle, auto-switch at 1e10
-//!   K10 — Clipboard: Ctrl+C result, Ctrl+Shift+C "expr = result", Ctrl+V paste
 //!   K8 — Log/exp: LN/LOG/EXP/POW/SQRT/ABS buttons
+//!   K9 — Expression editor: EXPR toggle, type full expressions, click
+//!        history rows to edit
+//!   K10 — Clipboard: Ctrl+C result, Ctrl+Shift+C "expr = result", Ctrl+V paste
 //!
 //! Keyboard shortcuts:
 //!   Digits 0–9          → input_digit
@@ -49,6 +51,7 @@ const Base = prog.Base;
 
 const constants = @import("calc/constants.zig");
 
+const expr_mod = @import("calc/expr.zig");
 const mathfn = @import("calc/mathfn.zig");
 const science = @import("calc/science.zig");
 
@@ -199,6 +202,11 @@ pub const AppState = struct {
     // K6: scientific notation display
     sci_mode: bool = false,
 
+    // K9: expression editor
+    expr_mode: bool = false,
+    expr_buf: [48]u8 = [_]u8{0} ** 48,
+    expr_len: usize = 0,
+
     // ---- Standard mode buttons ----
     btn_m_store: Button = Button.init(Rect.make(8, 104, 56, 20), "MS"),
     btn_m_recall: Button = Button.init(Rect.make(69, 104, 56, 20), "MR"),
@@ -269,6 +277,9 @@ pub const AppState = struct {
     btn_abs: Button = Button.init(Rect.make(69, 364, 56, 20), "ABS"),
     // ---- K6 scientific notation toggle (standard mode, below keypad) ----
     btn_sci: Button = Button.init(Rect.make(8, 260, 56, 20), "SCI"),
+
+    // ---- K9 expression editor toggle (standard mode, next to SCI) ----
+    btn_expr: Button = Button.init(Rect.make(69, 260, 56, 20), "EXPR"),
 
     pub fn init() AppState {
         var s = AppState{};
@@ -601,12 +612,81 @@ pub const AppState = struct {
     // -------------------------------------------------------------------
 
     fn display_text(self: *const AppState, buf: []u8) []const u8 {
+        // K9: while editing an expression, the raw text is the display.
+        if (self.expr_mode and self.expr_len > 0) {
+            const c = @min(self.expr_len, buf.len);
+            @memcpy(buf[0..c], self.expr_buf[0..c]);
+            return buf[0..c];
+        }
         if (self.engine.has_error) return self.engine.format_display(buf);
         const v = self.engine.current_val;
         if (self.sci_mode or sci_auto(v)) {
             return format_sci(@floatFromInt(v), buf);
         }
         return self.engine.format_display(buf);
+    }
+
+    // -------------------------------------------------------------------
+    // Expression editor (K9)
+    // -------------------------------------------------------------------
+
+    fn expr_append(self: *AppState, ch: u8) void {
+        if (self.expr_len >= self.expr_buf.len) return;
+        if (!expr_mod.is_expr_char(ch)) return;
+        self.expr_buf[self.expr_len] = ch;
+        self.expr_len += 1;
+    }
+
+    fn expr_backspace(self: *AppState) void {
+        if (self.expr_len > 0) self.expr_len -= 1;
+    }
+
+    fn expr_reset_input(self: *AppState) void {
+        self.expr_len = 0;
+    }
+
+    fn expr_exit(self: *AppState) void {
+        self.expr_mode = false;
+        self.expr_reset_input();
+    }
+
+    /// Evaluate the edited expression; on success record "expr=result" in
+    /// history exactly like a button-flow calculation.
+    fn expr_evaluate(self: *AppState) void {
+        if (self.expr_len == 0) return;
+        const result = expr_mod.evaluate(self.expr_buf[0..self.expr_len]) catch {
+            self.engine.raise_error();
+            ui.write_console("calc: expr-error\n");
+            return;
+        };
+        self.engine.current_val = result;
+        self.engine.is_entering_val = false;
+        self.engine.has_error = false;
+        self.push_history(self.expr_buf[0..self.expr_len], result);
+        self.expr_reset_input();
+        ui.write_console("calc: expr-ok\n");
+    }
+
+    /// Load a history entry's expression back into the editor (K9:
+    /// click a history entry to edit it).
+    fn expr_load_from_history(self: *AppState, logical_idx: usize) void {
+        if (logical_idx >= self.hist.len) return;
+        const e = self.hist.get(logical_idx);
+        const n = @min(e.len, self.expr_buf.len);
+        @memcpy(self.expr_buf[0..n], e.text[0..n]);
+        self.expr_len = n;
+        self.expr_mode = true;
+        self.history_cursor = null;
+        ui.write_console("calc: expr-edit\n");
+    }
+
+    /// Row index under a history-area click, or null.
+    fn history_row_at(y: u32) ?usize {
+        if (y < history_area.y + 4) return null;
+        const rel = y - (history_area.y + 4);
+        const row = rel / 10;
+        if (row >= history_visible) return null;
+        return row;
     }
 
     // -------------------------------------------------------------------
@@ -707,6 +787,9 @@ pub const AppState = struct {
 
         // K6 scientific-notation toggle
         self.btn_sci.draw(win);
+
+        // K9 expression editor toggle
+        self.btn_expr.draw(win);
 
         // K8 log/exp buttons (standard mode)
         self.btn_ln.draw(win);
@@ -1078,6 +1161,16 @@ pub const AppState = struct {
             }
         }
 
+        // K9 expression editor toggle
+        if (!changed) {
+            if (self.btn_expr.handle_event(ev)) {
+                self.expr_mode = !self.expr_mode;
+                self.expr_reset_input();
+                ui.write_console(if (self.expr_mode) "calc: expr-on\n" else "calc: expr-off\n");
+                changed = true;
+            }
+        }
+
         // K8 log/exp buttons
         if (!changed) {
             const v: f64 = @floatFromInt(self.engine.current_val);
@@ -1099,6 +1192,23 @@ pub const AppState = struct {
             } else if (self.btn_abs.handle_event(ev)) {
                 self.store_unary_result(@abs(v));
                 changed = true;
+            }
+        }
+
+        // K9: click a history row to edit that entry's expression
+        if (!changed and (ev.kind == ui.MOUSE_DOWN or ev.kind == ui.MOUSE_UP)) {
+            const x = ev.arg0;
+            const y = ev.arg1;
+            const inside_x = x >= history_area.x and x < history_area.x + history_area.w;
+            const inside_y = y >= history_area.y and y < history_area.y + history_area.h;
+            if (inside_x and inside_y) {
+                if (history_row_at(y)) |row| {
+                    const logical = self.history_scroll + row;
+                    if (logical < self.hist.len) {
+                        self.expr_load_from_history(logical);
+                        changed = true;
+                    }
+                }
             }
         }
 
@@ -1279,6 +1389,28 @@ pub const AppState = struct {
             self.mem_active_slot = ascii - '1';
             ui.write_console("calc: mem-slot\n");
             return true;
+        }
+
+        // K9: while the expression editor is active it consumes keys
+        if (self.expr_mode) {
+            if (ascii == 0x08 or keycode == 0x2a) {
+                self.expr_backspace();
+                return true;
+            }
+            if (ascii == 0x1b or keycode == 0x29) {
+                self.expr_exit();
+                ui.write_console("calc: expr-off\n");
+                return true;
+            }
+            if (keycode == 0x28 or ascii == '=' or ascii == '\r' or ascii == '\n') {
+                self.expr_evaluate();
+                return true;
+            }
+            if (!ctrl and expr_mod.is_expr_char(ascii)) {
+                self.expr_append(ascii);
+                return true;
+            }
+            return true; // swallow unhandled keys while editing
         }
 
         // If in programmer mode, handle hex input (0-9, a-f)
@@ -1746,6 +1878,93 @@ test "calc K6: SCI button toggles mode" {
     try std.testing.expectEqualStrings("7", app.display_text(&buf));
 }
 
+fn tap_key(app: *AppState, ascii: u8, ctrl: bool) bool {
+    var ev = Event{ .kind = ui.KEY_DOWN, .flags = if (ctrl) 0x04 else 0, .seq = 1, .arg0 = 0, .arg1 = ascii };
+    return app.handle_keyboard_event(&ev);
+}
+
+test "calc K9: EXPR toggle button" {
+    var app = AppState.init();
+    try std.testing.expect(!app.expr_mode);
+    tap(&app, 97, 270); // EXPR at (69,260) center
+    try std.testing.expect(app.expr_mode);
+    tap(&app, 97, 270);
+    try std.testing.expect(!app.expr_mode);
+}
+
+test "calc K9: type 2+3*4 and Enter yields 14" {
+    var app = AppState.init();
+    tap(&app, 97, 270); // EXPR on
+    for ("2+3*4") |ch| _ = tap_key(&app, ch, false);
+    try std.testing.expectEqualStrings("2+3*4", app.expr_buf[0..app.expr_len]);
+    // Display shows the raw expression while editing
+    var buf: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("2+3*4", app.display_text(&buf));
+    _ = tap_key(&app, '\r', false); // Enter evaluates
+    try std.testing.expectEqual(@as(i64, 14), app.engine.current_val);
+    try std.testing.expectEqual(@as(usize, 0), app.expr_len);
+    // Expression (not just result) is in history
+    const e = app.hist.get(app.hist.len - 1);
+    try std.testing.expectEqualStrings("2+3*4", e.text[0..e.len]);
+    try std.testing.expectEqual(@as(i64, 14), e.result);
+}
+
+test "calc K9: parens precedence (2+3)*4 = 20" {
+    var app = AppState.init();
+    tap(&app, 97, 270);
+    for ("(2+3)*4=") |ch| _ = tap_key(&app, ch, false);
+    try std.testing.expectEqual(@as(i64, 20), app.engine.current_val);
+}
+
+test "calc K9: backspace edits the expression" {
+    var app = AppState.init();
+    tap(&app, 97, 270);
+    for ("12+3") |ch| _ = tap_key(&app, ch, false);
+    _ = tap_key(&app, 0x08, false); // Backspace removes '3'
+    try std.testing.expectEqualStrings("12+", app.expr_buf[0..app.expr_len]);
+    _ = tap_key(&app, '5', false);
+    _ = tap_key(&app, '\r', false);
+    try std.testing.expectEqual(@as(i64, 17), app.engine.current_val);
+}
+
+test "calc K9: click a history row to edit its expression" {
+    var app = AppState.init();
+    tap(&app, 97, 270);
+    for ("2+3*4") |ch| _ = tap_key(&app, ch, false);
+    _ = tap_key(&app, '\r', false);
+
+    // Exit editor mode, then click the newest history row (bottom row of
+    // the history area: y = 8+4+5*10 = 62; x anywhere in the area)
+    tap(&app, 97, 270);
+    var ev_up = Event{ .kind = ui.MOUSE_UP, .flags = 0, .seq = 9, .arg0 = 200, .arg1 = 15 };
+    _ = app.handle_mouse_events(&ev_up);
+    try std.testing.expect(app.expr_mode);
+    try std.testing.expectEqualStrings("2+3*4", app.expr_buf[0..app.expr_len]);
+
+    // Edit it to 2+3*5 and re-evaluate
+    _ = tap_key(&app, 0x08, false);
+    _ = tap_key(&app, '5', false);
+    _ = tap_key(&app, '\r', false);
+    try std.testing.expectEqual(@as(i64, 17), app.engine.current_val);
+}
+
+test "calc K9: syntax error raises ERROR state" {
+    var app = AppState.init();
+    tap(&app, 97, 270);
+    for ("2+") |ch| _ = tap_key(&app, ch, false);
+    _ = tap_key(&app, '\r', false);
+    try std.testing.expect(app.engine.has_error);
+    // Editor keeps the broken expression visible for fixing (serial
+    // marker calc: expr-error records the failure).
+    var buf: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("2+", app.display_text(&buf));
+    // Fix it and re-evaluate
+    _ = tap_key(&app, '3', false);
+    _ = tap_key(&app, '\r', false);
+    try std.testing.expect(!app.engine.has_error);
+    try std.testing.expectEqual(@as(i64, 5), app.engine.current_val);
+}
+
 test "calc K10: payload is the result as text" {
     var app = AppState.init();
     app.engine.current_val = 42;
@@ -1802,13 +2021,6 @@ test "calc K10: copy/paste chords are consumed" {
     var evplain = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 4, .arg0 = 0, .arg1 = 'c' };
     _ = app.handle_keyboard_event(&evplain);
     try std.testing.expectEqual(@as(i64, 0), app.engine.current_val);
-}
-
-fn tap(app: *AppState, x: u32, y: u32) void {
-    var ev_down = Event{ .kind = ui.MOUSE_DOWN, .flags = 0, .seq = 1, .arg0 = x, .arg1 = y };
-    _ = app.handle_mouse_events(&ev_down);
-    var ev_up = Event{ .kind = ui.MOUSE_UP, .flags = 0, .seq = 2, .arg0 = x, .arg1 = y };
-    _ = app.handle_mouse_events(&ev_up);
 }
 
 test "calc K8: sqrt(16) = 4 via button" {
@@ -1878,4 +2090,15 @@ test "calc K8: POW evaluates exact integer power" {
     app.engine.is_entering_val = true;
     app.engine.evaluate();
     try std.testing.expect(app.engine.has_error);
+}
+
+fn press_at(app: *AppState, x: u32, y: u32) void {
+    var ev_down = Event{ .kind = ui.MOUSE_DOWN, .flags = 0, .seq = 1, .arg0 = x, .arg1 = y };
+    _ = app.handle_mouse_events(&ev_down);
+    var ev_up = Event{ .kind = ui.MOUSE_UP, .flags = 0, .seq = 2, .arg0 = x, .arg1 = y };
+    _ = app.handle_mouse_events(&ev_up);
+}
+
+fn tap(app: *AppState, x: u32, y: u32) void {
+    press_at(app, x, y);
 }
