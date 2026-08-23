@@ -81,7 +81,8 @@ pub const slot_count: usize = 64;
 /// reserved pipe slots (M19) — the gap is intentional, see
 /// docs/agent-concurrency-plan.md §8.
 /// M19 P1 (issue #290): slots 56/57 are the bounded pipe.
-pub const implemented_count: usize = 59;
+/// M26 N1 (issue #399): slots 59/60 are ping send/poll.
+pub const implemented_count: usize = 61;
 /// Card G6 (claim 0487) follow-on (slot 18): the fixed `sys_win_get` shape —
 /// four u32 LE words (x, y, w, h), 16 bytes, marshaled per call and copy_out'd
 /// through uaccess (the procs snapshot pattern).
@@ -233,6 +234,14 @@ pub const sys_pipe_write: u64 = 57;
 /// else. Only window 0 (the terminal) renders through the kernel text
 /// layer today; other ids get EINVAL.
 pub const sys_font_size: u64 = 58;
+/// M26 N1 (issue #399): `sys_ping_send(ip)` — slot 59. Send one ICMP echo
+/// request to `ip` (low 32 bits network order). Returns 0 on success;
+/// EINVAL for no peer / no IP / not ready.
+pub const sys_ping_send: u64 = 59;
+/// M26 N1 (issue #399): `sys_ping_poll()` — slot 60. Drain RX and report
+/// whether a pong has landed since the last send. Returns the last echo
+/// reply sequence (u16) if a pong was observed, else 0.
+pub const sys_ping_poll: u64 = 60;
 
 pub const ErrorCode = enum(i64) {
     einval = -1,
@@ -374,6 +383,9 @@ fn ensure_table() *const [slot_count]Entry {
         table_storage[54] = .{ .name = "sys_setrlimit", .handler = handle_setrlimit };
         // M20-U1 (claim 5127): slot 58 — sys_font_size.
         table_storage[sys_font_size] = .{ .name = "sys_font_size", .handler = handle_font_size };
+        // M26 N1 (issue #399): slots 59/60 — ping send/poll.
+        table_storage[sys_ping_send] = .{ .name = "sys_ping_send", .handler = handle_ping_send };
+        table_storage[sys_ping_poll] = .{ .name = "sys_ping_poll", .handler = handle_ping_poll };
         table_ready = true;
     }
     return &table_storage;
@@ -1052,6 +1064,42 @@ fn handle_font_size(args: Args, _: *exceptions.VectorFrame) u64 {
     driving_award.mark_terminal_dirty();
     _ = driving_award.composite();
     return 0;
+}
+
+/// M26 N1 (issue #399, slot 59): `sys_ping_send(ip)` — send one ICMP echo
+/// request to `ip` (low 32 bits network order, e.g. 10.0.0.2 = 0x0a000002).
+/// Uses the same `net_ping_request` path as the monitor's `net ping`
+/// (ARP-resolved, own-IP check, `net_ready` guard). Returns 0 on success;
+/// EINVAL when no IP set / peer not in ARP / transport not ready (the
+/// caller should `net arp <ip>` first).
+fn handle_ping_send(args: Args, _: *exceptions.VectorFrame) u64 {
+    const ip_raw = args[0];
+    const ip: [4]u8 = .{
+        @truncate(ip_raw >> 24),
+        @truncate(ip_raw >> 16),
+        @truncate(ip_raw >> 8),
+        @truncate(ip_raw),
+    };
+    var out_len: usize = 0;
+    switch (virtio_net.net_ping_request(ip, &out_len)) {
+        .ok => {
+            virtio_net.ipv4.requests_sent += 1;
+            virtio_net.ipv4.ping_seq +%= 1;
+            return 0;
+        },
+        .not_ready, .no_peer => return error_result(.einval),
+        .timeout => return error_result(.einval),
+    }
+}
+
+/// M26 N1 (issue #399, slot 60): `sys_ping_poll()` — drain RX and report
+/// whether a pong has landed. Returns the last echo reply sequence
+/// (`ipv4.last_seq`, u16) if `pongs_observed > 0`, else 0. The caller
+/// sends one ping and polls until the expected sequence appears.
+fn handle_ping_poll(_: Args, _: *exceptions.VectorFrame) u64 {
+    virtio_net.net_rx_drain();
+    if (virtio_net.ipv4.pongs_observed == 0) return 0;
+    return virtio_net.ipv4.last_seq;
 }
 
 /// Arc4 #237 (slot 55): `sys_drag_read(buf_ptr, max_len)` — copy the drag
@@ -1757,7 +1805,7 @@ fn capture_marshaled_args(args: Args, _: *exceptions.VectorFrame) u64 {
     return 0xcafe;
 }
 
-test "syscall: runtime table has 64 slots and fifty-nine unique implemented rows" {
+test "syscall: runtime table has 64 slots and sixty-one unique implemented rows" {
     init(test_writer);
     const table = ensure_table();
     try std.testing.expectEqual(@as(usize, 64), table.len);
@@ -1770,7 +1818,7 @@ test "syscall: runtime table has 64 slots and fifty-nine unique implemented rows
             implemented += 1;
         }
     }
-    try std.testing.expectEqual(@as(usize, 59), implemented);
+    try std.testing.expectEqual(@as(usize, 61), implemented);
     try std.testing.expectEqualStrings("sys_pipe_read", entry_info(sys_pipe_read).?.name);
     try std.testing.expectEqualStrings("sys_pipe_write", entry_info(sys_pipe_write).?.name);
     try std.testing.expectEqualStrings("sys_font_size", entry_info(sys_font_size).?.name);
@@ -1824,6 +1872,8 @@ test "syscall: runtime table has 64 slots and fifty-nine unique implemented rows
     try std.testing.expectEqualStrings("sys_win_raise_front", entry_info(49).?.name);
     try std.testing.expectEqualStrings("sys_win_lower_back", entry_info(50).?.name);
     try std.testing.expectEqualStrings("sys_notify", entry_info(51).?.name);
+    try std.testing.expectEqualStrings("sys_ping_send", entry_info(sys_ping_send).?.name);
+    try std.testing.expectEqualStrings("sys_ping_poll", entry_info(sys_ping_poll).?.name);
     try std.testing.expect(entry_info(63) == null);
 }
 
@@ -2745,7 +2795,7 @@ test "syscall: counters are monotonic and report is deterministic" {
     var con = mock.console();
     report(&con);
     try std.testing.expectEqualStrings(
-        "syscalls: slots=64 implemented=59\n" ++
+        "syscalls: slots=64 implemented=61\n" ++
             "  0 sys_ping calls=2\n" ++
             "  1 sys_write calls=0\n" ++
             "  2 sys_yield calls=0\n" ++
@@ -2804,7 +2854,9 @@ test "syscall: counters are monotonic and report is deterministic" {
             "  55 sys_drag_read calls=0\n" ++
             "  56 sys_pipe_read calls=0\n" ++
             "  57 sys_pipe_write calls=0\n" ++
-            "  58 sys_font_size calls=0\n",
+            "  58 sys_font_size calls=0\n" ++
+            "  59 sys_ping_send calls=0\n" ++
+            "  60 sys_ping_poll calls=0\n",
         mock.contents(),
     );
 }

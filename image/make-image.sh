@@ -321,12 +321,22 @@ ASM_BIN="${35:-$ROOT_DIR/zig-out/bin/ASM.BIN}"
 # M22 D4 (issue #327): DISAS.BIN is a flat DSK1 program (the disassembler).
 DISAS_BIN="${36:-$ROOT_DIR/zig-out/bin/DISAS.BIN}"
 PS_BIN="${37:-$ROOT_DIR/zig-out/bin/PS.BIN}"
+# M26 N1 (issue #399): PING.BIN is a flat DSK1 program (ICMP ping).
+PING_BIN="${39:-$ROOT_DIR/zig-out/bin/PING.BIN}"
 DISAS_ARGS=()
 if [ -f "$DISAS_BIN" ]; then
     if [ "$(head -c 4 "$DISAS_BIN")" != "DSK1" ]; then
         fail "'$DISAS_BIN' does not start with the 'DSK1' image magic -- run 'zig build' first."
     fi
     DISAS_ARGS+=("$DISAS_BIN")
+fi
+
+PING_ARGS=()
+if [ -f "$PING_BIN" ]; then
+    if [ "$(head -c 4 "$PING_BIN")" != "DSK1" ]; then
+        fail "'$PING_BIN' does not start with the 'DSK1' image magic -- run 'zig build' first."
+    fi
+    PING_ARGS+=("$PING_BIN")
 fi
 
 CRASH_BIN="${38:-$ROOT_DIR/zig-out/bin/CRASH.ELF}"

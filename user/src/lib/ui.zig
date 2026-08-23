@@ -578,6 +578,17 @@ pub fn tcp_close() i64 {
     return syscall0(sys_tcp_close_num);
 }
 
+pub const sys_ping_send_num: u64 = 59;
+pub const sys_ping_poll_num: u64 = 60;
+
+pub fn ping_send(ip: u32) i64 {
+    return syscall1(sys_ping_send_num, ip);
+}
+
+pub fn ping_poll() i64 {
+    return syscall0(sys_ping_poll_num);
+}
+
 pub const ProcState = enum(u64) {
     created = 1,
     running = 2,
