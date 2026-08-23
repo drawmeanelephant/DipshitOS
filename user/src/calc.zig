@@ -315,6 +315,9 @@ pub const AppState = struct {
     date_result_len: usize = 0,
     date_result: [48]u8 = [_]u8{0} ** 48,
 
+    // K14: random numbers — xorshift64* seeded from the generic timer
+    rand_state: u64 = 0, // 0 = unseeded
+
     // ---- Standard mode buttons ----
     btn_m_store: Button = Button.init(Rect.make(8, 104, 56, 20), "MS"),
     btn_m_recall: Button = Button.init(Rect.make(69, 104, 56, 20), "MR"),
@@ -380,6 +383,9 @@ pub const AppState = struct {
 
     // ---- K9 expression editor toggle (standard mode, next to SCI) ----
     btn_expr: Button = Button.init(Rect.make(69, 260, 56, 20), "EXPR"),
+
+    // ---- K14 random button (standard mode, same row as SCI/EXPR) ----
+    btn_rand: Button = Button.init(Rect.make(130, 260, 56, 20), "RAND"),
 
     pub fn init() AppState {
         var s = AppState{};
@@ -645,6 +651,43 @@ pub const AppState = struct {
     }
 
     // -------------------------------------------------------------------
+    // Random numbers (K14)
+    // -------------------------------------------------------------------
+
+    /// xorshift64* — tiny, deterministic given its seed, and re-seeded from
+    /// the boot-counter at press time so consecutive presses differ. This
+    /// is NOT the kernel CSPRNG: M24's ABI budget is zero new slots and no
+    /// EL0 entropy seam exists, so the honest choice is a PRNG with the
+    /// seed source documented.
+    fn rand_next(self: *AppState) u64 {
+        if (self.rand_state == 0) {
+            self.rand_state = dates.now() | 1; // never zero
+        }
+        var x = self.rand_state;
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        self.rand_state = x;
+        return x *% 0x2545F4914F6CDD1D;
+    }
+
+    /// RAND: display value N > 0 → uniform-ish [0, N); N == 0 → [0, 2^32).
+    fn rand_apply(self: *AppState) void {
+        const n = self.engine.current_val;
+        const r = self.rand_next();
+        var v: i64 = undefined;
+        if (n > 0) {
+            v = @intCast(r % @as(u64, @intCast(n)));
+        } else {
+            v = @intCast(r & 0xFFFF_FFFF);
+        }
+        self.engine.current_val = v;
+        self.engine.is_entering_val = true;
+        self.history_cursor = null;
+        ui.write_console("calc: rand\n");
+    }
+
+    // -------------------------------------------------------------------
     // Settings / formatting controls (K12)
     // -------------------------------------------------------------------
 
@@ -891,6 +934,9 @@ pub const AppState = struct {
 
         // K9 expression editor toggle
         self.btn_expr.draw(win);
+
+        // K14 random button
+        self.btn_rand.draw(win);
 
         // K3 conversion bar (when active, overlays the history area)
         if (self.convert_active) {
@@ -1415,6 +1461,14 @@ pub const AppState = struct {
             }
         }
 
+        // K14 random button
+        if (!changed) {
+            if (self.btn_rand.handle_event(ev)) {
+                self.rand_apply();
+                changed = true;
+            }
+        }
+
         // K9: click a history row to edit that entry's expression
         if (!changed and (ev.kind == ui.MOUSE_DOWN or ev.kind == ui.MOUSE_UP)) {
             const x = ev.arg0;
@@ -1784,6 +1838,14 @@ pub const AppState = struct {
         }
         if (keycode == 0x51) {
             self.history_down();
+            return true;
+        }
+
+        // K14: r/R generates a random number
+        if (ascii == 'r' or ascii == 'R') {
+            if (!ctrl) {
+                self.rand_apply();
+            }
             return true;
         }
 
@@ -2479,4 +2541,41 @@ test "calc K13: bad date raises ERROR marker" {
     var esc = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 3, .arg0 = 0x29, .arg1 = 0x1b };
     _ = app.handle_keyboard_event(&esc);
     try std.testing.expect(!app.date_active);
+}
+
+test "calc K14: RAND button yields different values in [0, 2^32)" {
+    var app = AppState.init();
+    app.engine.current_val = 0; // zero display → full 32-bit range
+    press_at(&app, 158, 270); // RAND at (130,260) center
+    const a = app.engine.current_val;
+    press_at(&app, 158, 270);
+    const b = app.engine.current_val;
+    try std.testing.expect(a >= 0 and a <= 0xFFFF_FFFF);
+    try std.testing.expect(b >= 0 and b <= 0xFFFF_FFFF);
+    try std.testing.expect(a != b); // seeded by an advancing timer stub
+}
+
+test "calc K14: RAND respects [0, N) with N on the display" {
+    var app = AppState.init();
+    app.engine.current_val = 10;
+    var seen_nonzero = false;
+    for (0..50) |_| {
+        app.engine.current_val = 10; // re-set: RAND replaces the display value
+        app.rand_apply();
+        try std.testing.expect(app.engine.current_val >= 0 and app.engine.current_val < 10);
+        if (app.engine.current_val > 0) seen_nonzero = true;
+    }
+    try std.testing.expect(seen_nonzero);
+
+    // N == 1 always yields 0
+    app.engine.current_val = 1;
+    app.rand_apply();
+    try std.testing.expectEqual(@as(i64, 0), app.engine.current_val);
+}
+
+test "calc K14: r key shortcut" {
+    var app = AppState.init();
+    var ev = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 1, .arg0 = 0, .arg1 = 'r' };
+    try std.testing.expect(app.handle_keyboard_event(&ev));
+    try std.testing.expect(app.engine.current_val >= 0);
 }
