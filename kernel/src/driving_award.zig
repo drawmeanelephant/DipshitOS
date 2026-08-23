@@ -484,6 +484,43 @@ pub fn clock_bg() u32 {
     };
 }
 
+/// M20-U9: window border width — 2px, visible on every theme.
+pub const chrome_border_w: usize = 2;
+
+/// Theme color for the user window border (darker than the title bar).
+pub fn user_border() u32 {
+    return switch (theme_id) {
+        1 => 0x94a3b8, // light: slate
+        2 => 0x0c1826, // amber: near-black navy (original)
+        else => 0x0c1826, // dark: original
+    };
+}
+
+/// M20-U9 layout helper: where the centered title text starts and how
+/// many bytes of it to draw, given a window width and label length.
+/// Leaves room for the minimize+close buttons on the right; labels too
+/// wide for the remaining span truncate with a trailing "...".
+pub fn chrome_title_layout(win_w: usize, label_len: usize) struct { x_off: usize, draw_len: usize, truncated: bool } {
+    const btn_reserve: usize = 34; // minimize + close + margins (right side)
+    const min_pad: usize = 4; // never start left of x+4
+    const usable = if (win_w > btn_reserve + min_pad) win_w - btn_reserve else win_w;
+    const max_chars = usable / 8;
+    var draw_len = label_len;
+    var truncated = false;
+    if (draw_len > max_chars and max_chars >= 4) {
+        draw_len = max_chars - 3;
+        truncated = true;
+    } else if (draw_len > max_chars) {
+        draw_len = max_chars;
+        truncated = true;
+    }
+    const text_px = if (truncated) (draw_len + 3) * 8 else draw_len * 8;
+    var x_off: usize = 0;
+    if (win_w > text_px) x_off = (win_w - text_px) / 2;
+    if (x_off < min_pad) x_off = min_pad;
+    return .{ .x_off = x_off, .draw_len = draw_len, .truncated = truncated };
+}
+
 /// Theme color for the user window title bar.
 pub fn user_title_bg() u32 {
     return switch (theme_id) {
@@ -2253,7 +2290,20 @@ fn draw_chrome() void {
         if (w.kind != .user or !w.visible) continue;
         // Arc4 #241: skip chrome for windows not in the current workspace.
         if (!workspace_visible(w)) continue;
-        // Title bar: "dui<id> pid=<pid>" (the owning pid when known).
+        // M20-U9: 2px border around the whole window first (paint order:
+        // background → border → title bar → buttons → title → content).
+        {
+            const b = user_border();
+            const bw = chrome_border_w;
+            const ww: usize = if (w.w > wspan) wspan else w.w;
+            const wh: usize = if (w.h > hspan) hspan else w.h;
+            fill_rect(fb, stride, w.x, w.y, ww, bw, b); // top
+            if (wh > bw) fill_rect(fb, stride, w.x, w.y + wh - bw, ww, bw, b); // bottom
+            fill_rect(fb, stride, w.x, w.y, bw, wh, b); // left
+            if (ww > bw) fill_rect(fb, stride, w.x + ww - bw, w.y, bw, wh, b); // right
+        }
+        // Title bar: "dui<id> pid=<pid>" (the owning pid when known),
+        // CENTERED with "..." truncation when it does not fit (M20-U9).
         fill_rect(fb, stride, w.x, w.y, w.w, user_title_h, user_title_bg());
         var tb: [24]u8 = undefined;
         var n: usize = 0;
@@ -2269,7 +2319,15 @@ fn draw_chrome() void {
             const pids = fmt_decimal(tb[n..], pid);
             n += pids.len;
         }
-        draw_string_16(fb, stride, w.x + 4, w.y, tb[0..n], user_title_fg_rgb);
+        const lay = chrome_title_layout(w.w, n);
+        if (!lay.truncated) {
+            draw_string_16(fb, stride, w.x + lay.x_off, w.y, tb[0..lay.draw_len], user_title_fg_rgb);
+        } else {
+            var tt: [24]u8 = undefined;
+            @memcpy(tt[0..lay.draw_len], tb[0..lay.draw_len]);
+            @memcpy(tt[lay.draw_len..][0..3], "...");
+            draw_string_16(fb, stride, w.x + lay.x_off, w.y, tt[0 .. lay.draw_len + 3], user_title_fg_rgb);
+        }
         // Step 6: close button ("×" — red glyph at top-right of title bar).
         draw_glyph(fb, stride, w.x + w.w - 14, w.y + 4, 'x', 0xef4444);
         // Step 7: minimize button ("—" — muted glyph left of close).
@@ -2631,6 +2689,44 @@ test "driving_award: mark_dirty targets a window by id" {
     try std.testing.expect(!windows[0].dirty);
     try std.testing.expect(windows[1].dirty);
     try std.testing.expect(!mark_dirty(9));
+}
+
+test "driving_award: chrome_title_layout centers and truncates (M20-U9)" {
+    // A wide window with a short label: centered, no truncation.
+    {
+        const l = chrome_title_layout(512, 8);
+        try std.testing.expect(!l.truncated);
+        // 8 chars = 64px; (512-64)/2 = 224 ≥ min pad.
+        try std.testing.expectEqual(@as(usize, 224), l.x_off);
+        try std.testing.expectEqual(@as(usize, 8), l.draw_len);
+    }
+    // A narrow window with a long label: truncates with "..." and never
+    // starts left of the minimum pad.
+    {
+        const l = chrome_title_layout(120, 24);
+        try std.testing.expect(l.truncated);
+        try std.testing.expect(l.draw_len + 3 <= 120 / 8);
+        try std.testing.expect(l.x_off >= 4);
+        // The ellipsis fits inside the reserved span.
+        const text_px = (l.draw_len + 3) * 8;
+        try std.testing.expect(l.x_off + text_px <= 120);
+    }
+    // Degenerate: tiny window keeps at least the pad.
+    {
+        const l = chrome_title_layout(16, 10);
+        try std.testing.expectEqual(@as(usize, 4), l.x_off);
+    }
+}
+
+test "driving_award: the border is two pixels on every theme (M20-U9)" {
+    const saved = theme_id;
+    defer theme_id = saved;
+    theme_id = 0;
+    _ = user_border();
+    try std.testing.expectEqual(@as(usize, 2), chrome_border_w);
+    theme_id = 1;
+    _ = user_border();
+    try std.testing.expectEqual(@as(usize, 2), chrome_border_w);
 }
 
 test "driving_award: fmt_decimal formats unsigned values without leading zeros" {
