@@ -83,3 +83,26 @@ verify-unit-tests green; verify-coordination ok.
 
 
 
+
+## 2026-08-22 — claim 9815: D4 (issue #327) done — disassembler
+
+New `user/src/disas.zig` (DISAS.BIN): decoder inverse of the D2 encoder.
+Covers nop/svc/brk/ret, MOVZ/MOVK (+lsl), imm12 add/sub/cmp, register
+ops (incl. ORR-xzr MOV alias and SUBS-xzr CMP), B/BL/B.cond/CBZ/CBNZ
+with absolute targets computed from each word's own address, ADR/ADRP/
+LDR-literal, LDR/STR unsigned-offset; unknowns print `.word`. Output
+line format per the issue: `00000054: 680080d2  movz x8, #3`.
+`disas <file> [offset]` takes decimal or 0x-hex offsets; 4 KiB input
+bound; stack-only workspace.
+
+Wiring: DISAS.BIN positional added through build.zig/make-image/mkfat32
+(slot order now SETTINGS(34) ASM(35) DISAS(36) CRASH(generated locally)
+HELLO(generated locally) APPS.TXT — one ordering slip caught because
+mkfat32's magic checks named the mismatch).
+
+Evidence: disas.zig 7/7 host tests (decode known words + honest .word
+fallback); verify-live-disas.sh PASS 1/1 on VZ — the gate closes the
+D2→D4 round trip ON THE MACHINE: ASM.BIN's PROG.ELF decoded byte-exactly,
+then the same file executed via D1 exiting status 71.
+artifacts/m22-disas-live.txt, artifacts/live-disas-report.txt.
+verify-unit-tests green; verify-coordination ok.

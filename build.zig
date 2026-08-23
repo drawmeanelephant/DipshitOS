@@ -956,6 +956,30 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_asm.step);
 
     // ------------------------------------------------------------------
+    // Guest: thirty-second ESP user program (M22 D4 — issue #327) DISAS.BIN.
+    // The AArch64 disassembler: hex dump + mnemonic per instruction word,
+    // inverse of ASM.BIN's encoders.
+    // ------------------------------------------------------------------
+    const disas_prog = b.addExecutable(.{
+        .name = "user-disas",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/disas.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    disas_prog.linker_script = b.path("user/linker.ld");
+    const disas_step = b.step("disas", "Build the thirty-second ESP user program (zig-out/bin/DISAS.BIN)");
+    const disas_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    disas_elf2bin.addFileArg(disas_prog.getEmittedBin());
+    const disas_bin = disas_elf2bin.addOutputFileArg("DISAS.BIN");
+    disas_elf2bin.has_side_effects = true;
+    disas_elf2bin.stdio = .inherit;
+    disas_step.dependOn(&disas_elf2bin.step);
+    const install_disas = b.addInstallFileWithDir(disas_bin, .bin, "DISAS.BIN");
+    b.getInstallStep().dependOn(&install_disas.step);
+
+    // ------------------------------------------------------------------
     // Top-level steps. System-command steps are marked as having side
     // effects (and inherit stdio) so they always execute instead of being
     // skipped by the build cache. (No QEMU path: this project targets Apple
@@ -998,6 +1022,7 @@ pub fn build(b: *std.Build) void {
     image.addFileArg(spin_bin); // ... [SPIN.BIN] (Arc5 #246: hostile-consumer CPU limit test)
     image.addFileArg(settings_bin); // ... [SETTINGS.BIN] (Issue #214: thirtieth user program, GUI settings panel)
     image.addFileArg(asm_bin); // ... [ASM.BIN] (M22 D2, issue #325: thirty-first user program, the assembler)
+    image.addFileArg(disas_bin); // ... [DISAS.BIN] (M22 D4, issue #327: thirty-second user program, the disassembler)
     image.has_side_effects = true;
     image.stdio = .inherit;
     image_step.dependOn(&image.step);
