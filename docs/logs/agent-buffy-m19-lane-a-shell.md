@@ -97,3 +97,23 @@ Host-tested; live gate pending.
   640/640 shell tests pass. All verify gates green (`verify-unit-tests.sh`,
   `test-console` transcript byte-identical, `zig fmt --check`, build +
   image clean).
+
+## 2026-08-23 — claim 7033: P8 function args done (issue #297)
+
+P8 (function arguments: `fn name(a, b) { ... }`, `$0`–`$N` positionals)
+landed. Host-tested; live gate pending.
+
+- `shell.zig`: `FuncEntry` extended with `arg_names[4][16]`, `arg_name_lens`,
+  `arg_count`. `func_define` parses `fn name(a, b) { ... }` — extracts
+  comma-separated argument names from parentheses, clamped to 4.
+  `func_call` sets `$0` (function name) + `$1`..`$N` (caller args) via
+  `env_set`, and named args (`$name` = caller value). Body lines expanded
+  at invocation time (`env_expand` in func_call, not at definition).
+- `handle_line` skips `env_expand` for `fn` commands so `$name` in
+  function bodies stays literal until invoked.
+- `fn` listing updated to show arg signatures: `name(a, b) { ... }`.
+  No-arg `fn name { ... }` still works (P4 compat).
+- Host tests: 6 new (arg define, positional $0–$N, named $VAR, no-arg
+  compat, listing signature, clamp 4). 646/646 shell tests pass.
+  All verify gates green.
+

@@ -56,6 +56,8 @@ const func_max: usize = 8;
 const func_name_max: usize = 32;
 const func_cmds_per_func: usize = 4;
 const func_cmd_max: usize = 64;
+const func_arg_max: usize = 4;
+const func_arg_name_max: usize = 16;
 /// M18 T16 (issue #419): script bounds — at most 64 executable lines,
 /// at most 256 chars per line, staged into 64 × 256 = 16384 bytes.
 const script_max_lines: usize = 64;
@@ -90,6 +92,9 @@ var env_count: usize = 0;
 const FuncEntry = struct {
     name: [func_name_max]u8 = [_]u8{0} ** func_name_max,
     name_len: usize = 0,
+    arg_names: [func_arg_max][func_arg_name_max]u8 = [_][func_arg_name_max]u8{[_]u8{0} ** func_arg_name_max} ** func_arg_max,
+    arg_name_lens: [func_arg_max]usize = [_]usize{0} ** func_arg_max,
+    arg_count: usize = 0,
     body: [func_cmds_per_func][func_cmd_max]u8 = [_][func_cmd_max]u8{[_]u8{0} ** func_cmd_max} ** func_cmds_per_func,
     body_lens: [func_cmds_per_func]usize = [_]usize{0} ** func_cmds_per_func,
     body_count: usize = 0,
@@ -1070,9 +1075,14 @@ fn run_script(mon: *monitor.Monitor, name: []const u8) void {
 }
 
 fn handle_line(mon: *monitor.Monitor, raw_line: []const u8) void {
-    // M18 T12: expand $VAR references before tokenizing
+    // M18 T12: expand $VAR references before tokenizing.
+    // P8: skip expansion for `fn` definitions so `$name` in function
+    // bodies stays literal — it'll be expanded at invocation time.
     var expanded: [lineedit.max_line]u8 = undefined;
-    const line = env_expand(raw_line, &expanded);
+    const line = if (std.mem.startsWith(u8, raw_line, "fn ") or std.mem.startsWith(u8, raw_line, "fn\t"))
+        raw_line
+    else
+        env_expand(raw_line, &expanded);
 
     // M18 T13: check for alias expansion (only first word)
     if (line.len > 0) {
@@ -1293,13 +1303,34 @@ fn func_find(name: []const u8) ?usize {
 
 /// M19 P4: define a function from `NAME { cmd1; cmd2 }` text.
 fn func_define(mon: *monitor.Monitor, text: []const u8) void {
-    // Parse: name { commands... }
+    // Parse: name(a, b) { commands... }
     var i: usize = 0;
-    while (i < text.len and text[i] != ' ' and text[i] != '{') i += 1;
+    while (i < text.len and text[i] != ' ' and text[i] != '{' and text[i] != '(') i += 1;
     const name = if (i > 0) text[0..i] else "";
     if (name.len == 0 or name.len > func_name_max) {
         mon.console.print_line("fn: invalid function name");
         return;
+    }
+    // Parse argument list: (a, b, c)
+    var arg_names: [func_arg_max][func_arg_name_max]u8 = undefined;
+    var arg_name_lens: [func_arg_max]usize = [_]usize{0} ** func_arg_max;
+    var arg_count: usize = 0;
+    if (i < text.len and text[i] == '(') {
+        i += 1; // skip (
+        while (i < text.len and text[i] != ')' and arg_count < func_arg_max) {
+            // Skip whitespace/comma
+            while (i < text.len and (text[i] == ' ' or text[i] == ',')) i += 1;
+            const a_start = i;
+            while (i < text.len and text[i] != ' ' and text[i] != ',' and text[i] != ')') i += 1;
+            const aname = text[a_start..i];
+            if (aname.len > 0) {
+                const n = @min(aname.len, func_arg_name_max);
+                @memcpy(arg_names[arg_count][0..n], aname[0..n]);
+                arg_name_lens[arg_count] = n;
+                arg_count += 1;
+            }
+        }
+        if (i < text.len and text[i] == ')') i += 1;
     }
     // Find `{
     while (i < text.len and text[i] != '{') i += 1;
@@ -1347,6 +1378,9 @@ fn func_define(mon: *monitor.Monitor, text: []const u8) void {
     // Upsert: replace existing or append
     if (func_find(name)) |idx| {
         const f = &func_table[idx];
+        f.arg_names = arg_names;
+        f.arg_name_lens = arg_name_lens;
+        f.arg_count = arg_count;
         f.body = cmds;
         f.body_lens = cmd_lens;
         f.body_count = cmd_count;
@@ -1360,6 +1394,9 @@ fn func_define(mon: *monitor.Monitor, text: []const u8) void {
     const f = &func_table[func_count];
     @memcpy(f.name[0..name.len], name);
     f.name_len = name.len;
+    f.arg_names = arg_names;
+    f.arg_name_lens = arg_name_lens;
+    f.arg_count = arg_count;
     f.body = cmds;
     f.body_lens = cmd_lens;
     f.body_count = cmd_count;
@@ -1367,14 +1404,49 @@ fn func_define(mon: *monitor.Monitor, text: []const u8) void {
     mon.console.print_line("fn: ok");
 }
 
-/// M19 P4: call a function by name.
+/// M19 P4+P8: call a function by name, with optional arguments.
 fn func_call(mon: *monitor.Monitor, argv: []const []const u8) void {
     const idx = func_find(argv[0]) orelse return;
     const f = &func_table[idx];
+
+    // P8: set positional $0 (function name) and $1..$N (caller args).
+    env_set("0", f.name[0..f.name_len]);
+
+    // $1..$N = caller arguments
+    var ai: usize = 1;
+    while (ai < argv.len and ai <= func_arg_max) : (ai += 1) {
+        // Build positional name: "1", "2", ...
+        var pos_name: [4]u8 = undefined;
+        var pnl: usize = 0;
+        const pn: usize = ai;
+        if (pn >= 100) {
+            pos_name[pnl] = @as(u8, @intCast('0' + (pn / 100) % 10));
+            pnl += 1;
+        }
+        if (pn >= 10) {
+            pos_name[pnl] = @as(u8, @intCast('0' + (pn / 10) % 10));
+            pnl += 1;
+        }
+        pos_name[pnl] = @as(u8, @intCast('0' + pn % 10));
+        pnl += 1;
+        env_set(pos_name[0..pnl], argv[ai]);
+    }
+
+    // Also set named args ($name = caller value) if function declares them
+    ai = 1;
+    while (ai < argv.len and ai - 1 < f.arg_count) : (ai += 1) {
+        const an = f.arg_names[ai - 1][0..f.arg_name_lens[ai - 1]];
+        env_set(an, argv[ai]);
+    }
+
     // Execute each command in the body sequentially.
+    // P8: expand $VAR in body lines before execution (function bodies
+    // are stored raw, so $name references expand at invocation time).
     var ci: usize = 0;
     while (ci < f.body_count) : (ci += 1) {
-        shell_handle_expanded(mon, f.body[ci][0..f.body_lens[ci]]);
+        var exp_buf: [func_cmd_max * 2]u8 = undefined;
+        const cmd = env_expand(f.body[ci][0..f.body_lens[ci]], &exp_buf);
+        shell_handle_expanded(mon, cmd);
     }
 }
 
@@ -1577,7 +1649,13 @@ fn shell_handle_expanded(mon: *monitor.Monitor, line: []const u8) void {
                 while (fi < func_count) : (fi += 1) {
                     const f = &func_table[fi];
                     mon.console.puts(f.name[0..f.name_len]);
-                    mon.console.puts("() { ");
+                    mon.console.puts("(");
+                    var ai: usize = 0;
+                    while (ai < f.arg_count) : (ai += 1) {
+                        if (ai > 0) mon.console.puts(", ");
+                        mon.console.puts(f.arg_names[ai][0..f.arg_name_lens[ai]]);
+                    }
+                    mon.console.puts(") { ");
                     var ci: usize = 0;
                     while (ci < f.body_count) : (ci += 1) {
                         if (ci > 0) mon.console.puts("; ");
@@ -1603,8 +1681,8 @@ fn shell_handle_expanded(mon: *monitor.Monitor, line: []const u8) void {
                 }
             }
         } else if (std.mem.eql(u8, argv[1], "-h")) {
-            mon.console.print_line("fn: usage: fn NAME() { cmd1; cmd2 }");
-            mon.console.print_line("fn:        fn -l            list all functions");
+            mon.console.print_line("fn: usage: fn NAME(a, b) { cmd1; cmd2 }");
+            mon.console.print_line("fn:        fn              list all functions");
             mon.console.print_line("fn:        fn -d NAME       delete a function");
         } else {
             // fn NAME { cmd1; cmd2 } — define a function.
@@ -3554,4 +3632,92 @@ test "shell: M19 P4 fn: fn list when empty shows message" {
     mock.feed("fn\n");
     while (shell.poll() != .idle) {}
     try std.testing.expect(std.mem.indexOf(u8, mock.contents(), "no functions defined") != null);
+}
+
+test "shell: M19 P8 fn: define function with arguments" {
+    func_count = 0;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("fn greet(name, msg) { echo $msg, $name; echo done }\n");
+    while (shell.poll() != .idle) {}
+    try std.testing.expect(func_count == 1);
+    try std.testing.expectEqualSlices(u8, "greet", func_table[0].name[0..func_table[0].name_len]);
+    try std.testing.expectEqual(@as(usize, 2), func_table[0].arg_count);
+    try std.testing.expectEqualSlices(u8, "name", func_table[0].arg_names[0][0..func_table[0].arg_name_lens[0]]);
+    try std.testing.expectEqualSlices(u8, "msg", func_table[0].arg_names[1][0..func_table[0].arg_name_lens[1]]);
+    try std.testing.expectEqual(@as(usize, 2), func_table[0].body_count);
+}
+
+test "shell: M19 P8 fn: call function with arguments, positional 0-N set" {
+    env_count = 0;
+    func_count = 0;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    // Define a function that echoes positional args
+    mock.feed("fn args_test { echo $0; echo $1; echo $2 }\n");
+    while (shell.poll() != .idle) {}
+    mock.reset();
+    // Call it with two arguments
+    mock.feed("args_test alpha beta\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "args_test") != null); // $0
+    try std.testing.expect(std.mem.indexOf(u8, out, "alpha") != null); // $1
+    try std.testing.expect(std.mem.indexOf(u8, out, "beta") != null); // $2
+}
+
+test "shell: M19 P8 fn: named arguments available as dollar-VAR" {
+    env_count = 0;
+    func_count = 0;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("fn greet(name) { echo hello $name }\n");
+    while (shell.poll() != .idle) {}
+    mock.reset();
+    mock.feed("greet world\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "hello world") != null);
+}
+
+test "shell: M19 P8 fn: function without args still works (P4 compat)" {
+    env_count = 0;
+    func_count = 0;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("fn noargs { echo still works }\n");
+    while (shell.poll() != .idle) {}
+    try std.testing.expectEqual(@as(usize, 0), func_table[0].arg_count);
+    mock.reset();
+    mock.feed("noargs\n");
+    while (shell.poll() != .idle) {}
+    try std.testing.expect(std.mem.indexOf(u8, mock.contents(), "still works") != null);
+}
+
+test "shell: M19 P8 fn: listing shows argument signature" {
+    func_count = 0;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("fn foo(a, b, c) { echo ok }\n");
+    while (shell.poll() != .idle) {}
+    mock.reset();
+    mock.feed("fn\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "foo(a, b, c)") != null);
+}
+
+test "shell: M19 P8 fn: too many args clamped to 4" {
+    func_count = 0;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("fn many(a, b, c, d, e, f) { echo $4 }\n");
+    while (shell.poll() != .idle) {}
+    try std.testing.expectEqual(@as(usize, 4), func_table[0].arg_count); // clamped to 4
 }

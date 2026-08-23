@@ -14,7 +14,7 @@
 - **Depends on:** M18 done ✅ (merged to main as `4d11713`, PR #485).
   Lane A is the critical path — Lane C (M20 text) and Lane E (M21
   compositor) depend on it.
-- **Status:** 🔄 in progress — P1 (pipes) ✅ done 2026-08-22; P2 (redirection) ✅ done 2026-08-23; P3 (env vars) ✅ done 2026-08-23; P4 (functions) ✅ done 2026-08-23
+- **Status:** 🔄 in progress — P1 (pipes) ✅ done 2026-08-22; P2 (redirection) ✅ done 2026-08-23; P3 (env vars) ✅ done 2026-08-23; P4 (functions) ✅ done 2026-08-23; P8 (function args) ✅ done 2026-08-23
 
 ## Notes
 
@@ -131,6 +131,32 @@ updated as cards land.
   modules green. `zig build test-console` transcript byte-identical.
   `zig fmt --check` clean. `zig build` + `zig build image` green.
 - Class B: live gate `verify-live-function.sh` pending.
+
+## P8 — function arguments (issue #297) — done 2026-08-23
+
+- `kernel/src/shell.zig`: `FuncEntry` extended with `arg_names` array
+  (4 × 16 bytes), `arg_name_lens`, and `arg_count`. `func_define` parses
+  `fn name(a, b) { ... }` — extracts comma-separated argument names from
+  parentheses, clamped to `func_arg_max` (4). `func_call` injects
+  positional `$0` (function name) and `$1`..`$N` (caller arguments) via
+  `env_set` before executing body lines. Body lines are `env_expand`-ed
+  at invocation time so `$name` references resolve to caller values.
+- `handle_line`: skips `env_expand` for `fn` commands so `$` references
+  in function bodies are preserved literally at definition time.
+- `fn` listing updated to show argument signatures: `name(a, b) { ... }`.
+  Help text updated. No-arg functions (`fn name { ... }`) continue to
+  work (P4 compat).
+- No new ABI — pure `shell.zig`. No new files.
+
+### Verification
+
+- Host (class A): 6 new tests (define-with-args, call-with-positionals,
+  named-arg-expansion, no-arg-compat, listing-with-signature,
+  arg-count-clamped). 646/646 shell tests pass. `verify-unit-tests.sh`
+  all modules green. `zig build test-console` transcript byte-identical.
+  `zig fmt --check` clean. `zig build` + `zig build image` green.
+- Class B: live gate `verify-live-function.sh` pending (covers both P4
+  and P8).
 
 ## P3 — environment variables (issue #292) — done 2026-08-23
 
