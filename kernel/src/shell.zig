@@ -80,6 +80,11 @@ var script_stop: bool = false;
 /// crowds it (claim 1809's lesson).
 var script_staging: [script_staging_max]u8 = undefined;
 
+/// M19 P11 (issue #300): exit status of the last command — `true` sets
+/// it to true, `false` to false, `monitor.exec` sets it based on
+/// success/error. Module scope so `handle_line` can read it.
+var last_exit_ok: bool = true;
+
 const EnvEntry = struct {
     name: [env_name_max]u8 = [_]u8{0} ** env_name_max,
     name_len: usize = 0,
@@ -1744,6 +1749,98 @@ fn arith_expand(raw: []const u8, out: []u8) []const u8 {
     return out[0..op];
 }
 
+/// M19 P11 (issue #300): find a whole-word keyword in a slice.
+/// Returns the index of the first byte of the keyword if found as a
+/// standalone word (preceded by start-or-whitespace, followed by
+/// end-or-whitespace-or-`;`), or null otherwise.
+fn find_if_keyword(text: []const u8, kw: []const u8) ?usize {
+    var i: usize = 0;
+    while (i + kw.len <= text.len) : (i += 1) {
+        if (!std.mem.eql(u8, text[i..][0..kw.len], kw)) continue;
+        // Check word boundary before.
+        if (i > 0 and text[i - 1] != ' ' and text[i - 1] != '\t' and text[i - 1] != ';') continue;
+        // Check word boundary after.
+        const after = i + kw.len;
+        if (after < text.len and text[after] != ' ' and text[after] != '\t' and text[after] != ';') continue;
+        return i;
+    }
+    return null;
+}
+
+/// M19 P11 (issue #300): execute the body of an if/then/else block.
+/// Splits `body` on `;` and executes each sub-command via
+/// `shell_handle_expanded`. Each sub-command goes through the full
+/// builtin/pipeline/redirect path.
+fn run_if_body(mon: *monitor.Monitor, body: []const u8) void {
+    var start: usize = 0;
+    var i: usize = 0;
+    while (i <= body.len) : (i += 1) {
+        if (i == body.len or body[i] == ';') {
+            if (i > start) {
+                // Trim leading/trailing whitespace.
+                var lo = start;
+                while (lo < i and (body[lo] == ' ' or body[lo] == '\t')) lo += 1;
+                var hi = i;
+                while (hi > lo and (body[hi - 1] == ' ' or body[hi - 1] == '\t')) hi -= 1;
+                if (hi > lo) shell_handle_expanded(mon, body[lo..hi]);
+            }
+            start = i + 1;
+        }
+    }
+}
+
+/// M19 P11 (issue #300): execute `if COND; then BODY; [else BODY]; fi`.
+/// Parses the raw line (already expanded) to find the keywords, evaluates
+/// the condition, then executes the appropriate body.
+fn run_if(mon: *monitor.Monitor, line: []const u8) void {
+    // Strip "if " prefix.
+    const rest = if (line.len > 3 and line[3] == ' ') line[4..] else line[3..];
+
+    // Find `then`.
+    const then_pos = find_if_keyword(rest, "then") orelse {
+        mon.console.print_line("if: missing 'then'");
+        return;
+    };
+    // Trim trailing whitespace/semicolons from the condition.
+    var cond_end = then_pos;
+    while (cond_end > 0 and (rest[cond_end - 1] == ' ' or rest[cond_end - 1] == '\t' or rest[cond_end - 1] == ';')) cond_end -= 1;
+    const condition = rest[0..cond_end];
+
+    // Find `else` and `fi` after `then`.
+    const after_then = rest[then_pos + 4 ..];
+    // Skip past "then" to find the body start (after "then ").
+    var body_start: usize = 0;
+    while (body_start < after_then.len and after_then[body_start] != ' ' and after_then[body_start] != ';') body_start += 1;
+    // Skip whitespace/semicolons.
+    while (body_start < after_then.len and (after_then[body_start] == ' ' or after_then[body_start] == ';')) body_start += 1;
+    const then_rest = after_then[body_start..];
+
+    const else_pos = find_if_keyword(then_rest, "else");
+    const fi_pos = find_if_keyword(then_rest, "fi") orelse {
+        mon.console.print_line("if: missing 'fi'");
+        return;
+    };
+
+    const then_body = if (else_pos) |ep|
+        then_rest[0..ep]
+    else
+        then_rest[0..fi_pos];
+
+    // Execute condition.
+    shell_handle_expanded(mon, condition);
+
+    if (last_exit_ok) {
+        run_if_body(mon, then_body);
+    } else if (else_pos) |ep| {
+        // Skip past "else" to get the else body.
+        var eb_start: usize = ep + 4;
+        while (eb_start < then_rest.len and then_rest[eb_start] != ' ' and then_rest[eb_start] != ';') eb_start += 1;
+        while (eb_start < then_rest.len and (then_rest[eb_start] == ' ' or then_rest[eb_start] == ';')) eb_start += 1;
+        const else_body = then_rest[eb_start..fi_pos];
+        run_if_body(mon, else_body);
+    }
+}
+
 fn shell_handle_expanded(mon: *monitor.Monitor, line: []const u8) void {
     // M19 P2 (issue #291): the redirect operators — `>`, `>>`, `<` —
     // split before tokenizing so the command half goes through the
@@ -1780,7 +1877,7 @@ fn shell_handle_expanded(mon: *monitor.Monitor, line: []const u8) void {
     }
     const argv = tokens.argv[0..tokens.count];
     if (argv.len == 0) {
-        _ = monitor.exec(mon, argv);
+        last_exit_ok = (monitor.exec(mon, argv) == .none);
         return;
     }
     // Builtin: export VAR[=VAL]
@@ -1932,6 +2029,21 @@ fn shell_handle_expanded(mon: *monitor.Monitor, line: []const u8) void {
         }
         return;
     }
+    // M19 P11: `true` — set exit status to success.
+    if (std.mem.eql(u8, argv[0], "true")) {
+        last_exit_ok = true;
+        return;
+    }
+    // M19 P11: `false` — set exit status to failure.
+    if (std.mem.eql(u8, argv[0], "false")) {
+        last_exit_ok = false;
+        return;
+    }
+    // M19 P11: `if COND; then BODY; [else BODY]; fi`.
+    if (std.mem.eql(u8, argv[0], "if")) {
+        run_if(mon, line);
+        return;
+    }
     // Builtin: fn (M19 P4) — list, define, delete shell functions.
     if (std.mem.eql(u8, argv[0], "fn")) {
         if (argv.len == 1) {
@@ -2005,7 +2117,7 @@ fn shell_handle_expanded(mon: *monitor.Monitor, line: []const u8) void {
         func_call(mon, argv);
         return;
     }
-    _ = monitor.exec(mon, argv);
+    last_exit_ok = (monitor.exec(mon, argv) == .none);
 }
 
 /// The kernel's ONE shell instance lives in BSS, not on the kernel stack:
@@ -4229,4 +4341,89 @@ test "shell: M19 P10 arith: nested parens in expression" {
     while (shell.poll() != .idle) {}
     const out = mock.contents();
     try std.testing.expect(std.mem.indexOf(u8, out, "5") != null);
+}
+
+test "shell: M19 P11 if: true runs then" {
+    env_count = 0;
+    last_exit_ok = true;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("if true; then echo yep; fi\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "yep\n") != null);
+}
+
+test "shell: M19 P11 if: false skips then" {
+    env_count = 0;
+    last_exit_ok = true;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("if false; then echo nope; fi\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "nope\n") == null);
+}
+
+test "shell: M19 P11 if: true else branch skipped" {
+    env_count = 0;
+    last_exit_ok = true;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("if true; then echo ok; else echo nah; fi\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "ok\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "nah\n") == null);
+}
+
+test "shell: M19 P11 if: false else branch runs" {
+    env_count = 0;
+    last_exit_ok = true;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("if false; then echo ok; else echo nah; fi\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "ok\n") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "nah\n") != null);
+}
+
+test "shell: M19 P11 if: multiple commands in then body" {
+    env_count = 0;
+    last_exit_ok = true;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("if true; then echo one; echo two; fi\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "one\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "two\n") != null);
+}
+
+test "shell: M19 P11 if: missing fi prints error" {
+    env_count = 0;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("if true; then echo ok\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "missing 'fi'") != null);
+}
+
+test "shell: M19 P11 if: missing then prints error" {
+    env_count = 0;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("if true echo ok; fi\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "missing 'then'") != null);
 }

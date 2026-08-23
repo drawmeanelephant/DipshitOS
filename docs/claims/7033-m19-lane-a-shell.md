@@ -14,7 +14,7 @@
 - **Depends on:** M18 done ✅ (merged to main as `4d11713`, PR #485).
   Lane A is the critical path — Lane C (M20 text) and Lane E (M21
   compositor) depend on it.
-- **Status:** 🔄 in progress — P1 (pipes) ✅ done 2026-08-22; P2 (redirection) ✅ done 2026-08-23; P3 (env vars) ✅ done 2026-08-23; P4 (functions) ✅ done 2026-08-23; P8 (function args) ✅ done 2026-08-23; P9 (command substitution) ✅ done 2026-08-23; P10 (arithmetic expansion) ✅ done 2026-08-23
+- **Status:** 🔄 in progress — P1 (pipes) ✅ done 2026-08-22; P2 (redirection) ✅ done 2026-08-23; P3 (env vars) ✅ done 2026-08-23; P4 (functions) ✅ done 2026-08-23; P8 (function args) ✅ done 2026-08-23; P9 (command substitution) ✅ done 2026-08-23; P10 (arithmetic expansion) ✅ done 2026-08-23; P11 (conditionals) ✅ done 2026-08-23
 
 ## Notes
 
@@ -203,6 +203,28 @@ updated as cards land.
   nested parens). 665/665 shell tests pass. `verify-unit-tests.sh`
   all modules green. `zig build test-console` transcript byte-identical.
   `zig fmt --check` clean. `zig build` + `zig build image` green.
+
+## P11 — conditionals (issue #300) — done 2026-08-23
+
+- `kernel/src/shell.zig`: `last_exit_ok` module-level bool (exit status
+  of the last command). New builtins: `true` (sets exit status to
+  success), `false` (sets to failure), `if COND; then BODY; [else
+  BODY]; fi`. `find_if_keyword` matches whole-word keywords (bounded
+  by whitespace, semicolons, or string boundaries). `run_if_body`
+  splits on `;` and executes each sub-command via `shell_handle_expanded`.
+  `run_if` parses the if/then/else/fi structure, evaluates the condition
+  via `shell_handle_expanded`, and executes the appropriate body.
+- `monitor.exec` calls updated to set `last_exit_ok` based on
+  `ExecError.none`.
+- No new ABI — pure `shell.zig`, ~4 bytes BSS (`last_exit_ok`).
+
+### Verification
+
+- Host (class A): 7 new tests (true-then, false-skip, true-else-skip,
+  false-else-run, multi-command body, missing fi, missing then).
+  672/672 shell tests pass. `verify-unit-tests.sh` all modules green.
+  `zig build test-console` transcript byte-identical. `zig fmt --check`
+  clean. `zig build` + `zig build image` green.
 
 ## P3 — environment variables (issue #292) — done 2026-08-23
 
