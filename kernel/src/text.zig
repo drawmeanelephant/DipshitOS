@@ -226,6 +226,9 @@ pub fn init() void {
     missing_glyph_count = 0;
     last_missing_cp = 0;
     dyn_count = 0;
+    @memset(&glyph_cache, mem_zero);
+    glyph_cache_hits = 0;
+    glyph_cache_misses = 0;
     initialized = true;
 }
 
@@ -881,6 +884,106 @@ pub fn wrap_line(
 }
 
 // ---------------------------------------------------------------------------
+// Glyph rendering cache (M20-U13)
+// ---------------------------------------------------------------------------
+
+/// Pre-scaled glyph rows for one (cell, font-size) pair: `rows[y]` bit x
+/// means framebuffer column x of the cell is foreground. Width is
+/// font_size.px() ≤ 24, so u32 holds every narrow glyph. Emoji stay on
+/// the direct path (their 16px art needs up to 48 columns at large).
+const GlyphCacheEntry = struct {
+    stamp: u32,
+    cell: Cell,
+    size: u2,
+    rows: [24]u32,
+};
+
+/// 128 entries × ~104 B ≈ 13 KiB BSS (the halved option from the card,
+/// respecting the kernel budget).
+const glyph_cache_cap = 128;
+const mem_zero: GlyphCacheEntry = .{ .stamp = 0, .cell = 0, .size = 0, .rows = [_]u32{0} ** 24 };
+var glyph_cache: [glyph_cache_cap]GlyphCacheEntry = undefined;
+var glyph_cache_stamp: u32 = 0;
+
+/// Diagnostics since init(): hits vs misses (misses include evictions).
+pub var glyph_cache_hits: usize = 0;
+pub var glyph_cache_misses: usize = 0;
+
+/// Look up (or compute + insert) the scaled rows for a paintable cell.
+/// Pure function of (cell, size) except for the cache bookkeeping.
+fn cached_glyph_rows(cell: Cell, size: FontSize) ?*const [24]u32 {
+    // Only cache what decodes through the static paths.
+    const paintable = cell != cell_wide_cont and
+        ((cell >= 0x20 and cell <= 0x7e) or (cell >= 0xA0 and cell <= 0xFF) or
+            (cell >= 0x100 and cell <= 0x17F) or cell == cell_fffd);
+    if (!paintable) return null;
+
+    const sz: u2 = @intFromEnum(size);
+    var oldest: usize = 0;
+    var oldest_stamp: u32 = 0xFFFFFFFF;
+    for (glyph_cache[0..], 0..) |*e, i| {
+        if (e.stamp == 0) {
+            // Free slot: claim immediately (this is a miss — nothing
+            // cached yet for this key).
+            glyph_cache_misses += 1;
+            e.cell = cell;
+            e.size = sz;
+            fill_glyph_cache_entry(e, cell, sz);
+            e.stamp = glyph_cache_stamp +% 1;
+            glyph_cache_stamp +%= 1;
+            return &e.rows;
+        }
+        if (e.cell == cell and e.size == sz) {
+            e.stamp = glyph_cache_stamp +% 1;
+            glyph_cache_stamp +%= 1;
+            glyph_cache_hits += 1;
+            return &e.rows;
+        }
+        if (e.stamp < oldest_stamp) {
+            oldest_stamp = e.stamp;
+            oldest = i;
+        }
+    }
+    // Cache full: evict the LRU entry.
+    glyph_cache_misses += 1;
+    const e = &glyph_cache[oldest];
+    e.cell = cell;
+    e.size = sz;
+    fill_glyph_cache_entry(e, cell, sz);
+    e.stamp = glyph_cache_stamp +% 1;
+    glyph_cache_stamp +%= 1;
+    return &e.rows;
+}
+
+/// Compute the scaled rows for a cell into an entry.
+fn fill_glyph_cache_entry(e: *GlyphCacheEntry, cell: Cell, sz: u2) void {
+    const g8 = blk: {
+        if (cell == cell_fffd) break :blk &font_unicode.fffd_glyph;
+        if (cell >= 0x20 and cell <= 0x7e) break :blk &font.glyphs[cell - 0x20];
+        if (cell >= 0xA0 and cell <= 0xFF) break :blk &font_unicode.latin1[cell - 0xA0];
+        if (cell >= 0x100 and cell <= 0x17F) break :blk &font_unicode.ext_a[cell - 0x100];
+        unreachable; // guarded by paintable check
+    };
+    const scale: usize = @as(usize, sz) + 1; // small=1, medium=2, large=3
+    @memset(&e.rows, 0);
+    for (0..8) |y| {
+        var x: usize = 0;
+        while (x < 8) : (x += 1) {
+            if (!font.row_pixel(g8[y], x)) continue;
+            var sy: usize = 0;
+            while (sy < scale) : (sy += 1) {
+                var sx: usize = 0;
+                while (sx < scale) : (sx += 1) {
+                    const px = x * scale + sx;
+                    const py = y * scale + sy;
+                    e.rows[py] |= @as(u32, 1) << @intCast(px);
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Missing-glyph diagnostics (M20-U11)
 // ---------------------------------------------------------------------------
 
@@ -1003,6 +1106,23 @@ pub fn render(canvas: Canvas) void {
                                     put_pixel(canvas, col * cw + ex * scale + bx, r * ch + ey * scale + by, fg_rgb);
                                 }
                             }
+                        }
+                    }
+                }
+                continue;
+            }
+
+            // M20-U13: static-path cells paint from the pre-scaled
+            // cache; dynamic composites (pool clusters) take the direct
+            // path below.
+            if (cached_glyph_rows(cell, font_size)) |scaled| {
+                var py: usize = 0;
+                while (py < ch) : (py += 1) {
+                    const bits = scaled[py];
+                    var px: usize = 0;
+                    while (px < cw) : (px += 1) {
+                        if ((bits >> @intCast(px)) & 1 != 0) {
+                            put_pixel(canvas, col * cw + px, row_pix + py, fg_rgb);
                         }
                     }
                 }
@@ -1715,6 +1835,65 @@ test "text: wrap_line reports truncation on a small out-buffer (U15)" {
     const r = wrap_line("aaa bbb ccc", 3, &one);
     try std.testing.expect(r.truncated);
     try std.testing.expectEqual(@as(usize, 1), r.segments.len);
+}
+
+test "text: glyph cache hits, sizes, and LRU eviction (U13)" {
+    init();
+    clear();
+    try std.testing.expectEqual(@as(usize, 0), glyph_cache_hits);
+    // First render of 'A': a miss that fills one slot.
+    puts("A");
+    render(testCanvas());
+    const misses_after_first = glyph_cache_misses;
+    const hits_after_first = glyph_cache_hits;
+    try std.testing.expect(misses_after_first >= 1);
+    // Repaint: every visible cell hits ('A' and the trailing blank both
+    // live in the cache now), and nothing new fills.
+    const misses_before_repaint = glyph_cache_misses;
+    render(testCanvas());
+    try std.testing.expect(glyph_cache_hits > hits_after_first);
+    try std.testing.expectEqual(misses_before_repaint, glyph_cache_misses);
+    // A different size is a different key.
+    set_font_size(.medium);
+    defer set_font_size(.small);
+    clear();
+    puts("A");
+    const m_misses = glyph_cache_misses;
+    render(testCanvas());
+    try std.testing.expect(glyph_cache_misses > m_misses);
+    set_font_size(.small);
+    clear();
+    // Eviction: paint more distinct cells than the cache holds; every
+    // new cell must miss, and repaints after the flood still hit.
+    var i: usize = 0;
+    while (i < glyph_cache_cap + 10) : (i += 1) {
+        putc(@intCast(0x21 + (i % 90)));
+        if (i % 70 == 69) putc('\n');
+    }
+    const pre_flood_misses = glyph_cache_misses;
+    render(testCanvas());
+    try std.testing.expect(glyph_cache_misses > pre_flood_misses);
+    const pre_repaint_hits = glyph_cache_hits;
+    render(testCanvas());
+    try std.testing.expect(glyph_cache_hits > pre_repaint_hits);
+}
+
+test "text: cached rows are pixel-identical to the direct path (U13)" {
+    init();
+    clear();
+    puts("R");
+    // Direct computation for 'R' at small…
+    var want: [24]u32 = [_]u32{0} ** 24;
+    const g8 = font.glyphs['R' - 0x20];
+    for (0..8) |y| {
+        var x: usize = 0;
+        while (x < 8) : (x += 1) {
+            if (font.row_pixel(g8[y], x)) want[y] |= @as(u32, 1) << @intCast(x);
+        }
+    }
+    // …must equal what the cache hands back.
+    const got = cached_glyph_rows(@intCast('R'), .small).?;
+    try std.testing.expectEqualSlices(u32, &want, got);
 }
 
 test "text: an exhausted cluster pool degrades to ignoring new marks (U6)" {
