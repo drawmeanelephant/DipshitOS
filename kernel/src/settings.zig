@@ -172,7 +172,24 @@ pub fn set(key: []const u8, val: []const u8) SetResult {
     if (result == .ok and std.mem.eql(u8, key, "debug_font")) {
         apply_debug_font(val);
     }
+    // M20-U1 (claim 5127): font_size persists the terminal font choice.
+    if (result == .ok and std.mem.eql(u8, key, "font_size")) {
+        apply_font_size(val);
+    }
     return result;
+}
+
+/// Apply the font_size key to the framebuffer text layer.
+fn apply_font_size(val: []const u8) void {
+    const size: ?text.FontSize = if (std.mem.eql(u8, val, "small"))
+        .small
+    else if (std.mem.eql(u8, val, "medium"))
+        .medium
+    else if (std.mem.eql(u8, val, "large"))
+        .large
+    else
+        null;
+    if (size) |s| text.set_font_size(s);
 }
 
 /// Apply the debug_font key to the framebuffer text layer.

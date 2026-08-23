@@ -73,9 +73,13 @@ const csprng = @import("csprng.zig"); // ISN generation for TCP connect
 const clipboard = @import("clipboard.zig"); // Milestone 14 (claim 0169): the shared kernel clipboard
 const app_timers = @import("app_timers.zig"); // Milestone 14 (claim 7323): the per-process app timer facility
 const virtio_snd = @import("virtio_snd.zig"); // Milestone 15 (claim 7636): the virtio-snd playback path behind sys_audio_*
+const fbtext = @import("text.zig"); // M20-U1 (claim 5127): sys_font_size's terminal font state
 
 pub const slot_count: usize = 64;
-pub const implemented_count: usize = 56;
+/// 56 through M18 + slot 58 `sys_font_size` (M20-U1); 56/57 are Lane A's
+/// reserved pipe slots (M19) — the gap is intentional, see
+/// docs/agent-concurrency-plan.md §8.
+pub const implemented_count: usize = 57;
 /// Card G6 (claim 0487) follow-on (slot 18): the fixed `sys_win_get` shape —
 /// four u32 LE words (x, y, w, h), 16 bytes, marshaled per call and copy_out'd
 /// through uaccess (the procs snapshot pattern).
@@ -220,6 +224,11 @@ pub const sys_notify: u64 = 51;
 pub const sys_win_set_unsaved: u64 = 53;
 /// Arc4 #237 (ADR 0013 D1): `sys_drag_read(buf_ptr, max_len)` — slot 55.
 pub const sys_drag_read: u64 = 55;
+/// M20-U1 (claim 5127): `sys_font_size(window_id, size)` — slot 58.
+/// size 0=8×8 small, 1=16×16 medium, 2=24×24 large; EINVAL for anything
+/// else. Only window 0 (the terminal) renders through the kernel text
+/// layer today; other ids get EINVAL.
+pub const sys_font_size: u64 = 58;
 
 pub const ErrorCode = enum(i64) {
     einval = -1,
@@ -353,6 +362,8 @@ fn ensure_table() *const [slot_count]Entry {
         table_storage[52] = .{ .name = "sys_win_move_to_workspace", .handler = handle_win_move_to_workspace };
         table_storage[sys_win_set_unsaved] = .{ .name = "sys_win_set_unsaved", .handler = handle_win_set_unsaved };
         table_storage[54] = .{ .name = "sys_setrlimit", .handler = handle_setrlimit };
+        // M20-U1 (claim 5127): slot 58 — sys_font_size.
+        table_storage[sys_font_size] = .{ .name = "sys_font_size", .handler = handle_font_size };
         table_ready = true;
     }
     return &table_storage;
@@ -884,6 +895,25 @@ fn handle_drag_start(args: Args, _: *exceptions.VectorFrame) u64 {
     var buf: [driving_award.drag_payload_max]u8 = undefined;
     if (uaccess.copy_in(buf[0..buf_len], buf_addr, buf_len) != .ok) return error_result(.efault);
     driving_award.drag_start(buf[0..buf_len], owner);
+    return 0;
+}
+
+/// M20-U1 (claim 5127, slot 58): `sys_font_size(window_id, size)` —
+/// switch the terminal text layer between 8×8/16×16/24×24 and repaint.
+/// EINVAL for any window other than the terminal (0) or a bad size.
+fn handle_font_size(args: Args, _: *exceptions.VectorFrame) u64 {
+    const win_id: u64 = args[0];
+    const size: u64 = args[1];
+    if (win_id != 0) return error_result(.einval);
+    const s: fbtext.FontSize = switch (size) {
+        0 => .small,
+        1 => .medium,
+        2 => .large,
+        else => return error_result(.einval),
+    };
+    fbtext.set_font_size(s);
+    driving_award.mark_terminal_dirty();
+    _ = driving_award.composite();
     return 0;
 }
 
@@ -1548,10 +1578,18 @@ fn handle_tcp_close(_: Args, _: *exceptions.VectorFrame) u64 {
 
 /// Deterministic monitor output for the implemented rows and their counters.
 pub fn report(con: *console.Console) void {
-    con.puts("syscalls: slots=64 implemented=56\n");
+    var live: usize = 0;
+    for (ensure_table()) |e| {
+        if (e.handler != null) live += 1;
+    }
+    con.puts("syscalls: slots=64 implemented=");
+    con.print_u64(live);
+    con.puts("\n");
+    // Slots are no longer contiguous (58 is live, 56/57 are Lane A
+    // reservations), so walk the whole namespace and skip holes.
     var number: u64 = 0;
-    while (number < implemented_count) : (number += 1) {
-        const info = entry_info(number).?;
+    while (number < slot_count) : (number += 1) {
+        const info = entry_info(number) orelse continue;
         con.puts("  ");
         con.print_u64(info.number);
         con.puts(" ");
@@ -1580,7 +1618,7 @@ fn capture_marshaled_args(args: Args, _: *exceptions.VectorFrame) u64 {
     return 0xcafe;
 }
 
-test "syscall: runtime table has 64 slots and fifty-six unique implemented rows" {
+test "syscall: runtime table has 64 slots and fifty-seven unique implemented rows" {
     init(test_writer);
     const table = ensure_table();
     try std.testing.expectEqual(@as(usize, 64), table.len);
@@ -1593,7 +1631,8 @@ test "syscall: runtime table has 64 slots and fifty-six unique implemented rows"
             implemented += 1;
         }
     }
-    try std.testing.expectEqual(@as(usize, 56), implemented);
+    try std.testing.expectEqual(@as(usize, 57), implemented);
+    try std.testing.expectEqualStrings("sys_font_size", entry_info(sys_font_size).?.name);
     try std.testing.expectEqualStrings("sys_audio_info", entry_info(42).?.name);
     try std.testing.expectEqualStrings("sys_audio_play", entry_info(43).?.name);
     try std.testing.expectEqualStrings("sys_audio_volume", entry_info(44).?.name);
@@ -2565,7 +2604,7 @@ test "syscall: counters are monotonic and report is deterministic" {
     var con = mock.console();
     report(&con);
     try std.testing.expectEqualStrings(
-        "syscalls: slots=64 implemented=56\n" ++
+        "syscalls: slots=64 implemented=57\n" ++
             "  0 sys_ping calls=2\n" ++
             "  1 sys_write calls=0\n" ++
             "  2 sys_yield calls=0\n" ++
@@ -2621,7 +2660,8 @@ test "syscall: counters are monotonic and report is deterministic" {
             "  52 sys_win_move_to_workspace calls=0\n" ++
             "  53 sys_win_set_unsaved calls=0\n" ++
             "  54 sys_setrlimit calls=0\n" ++
-            "  55 sys_drag_read calls=0\n",
+            "  55 sys_drag_read calls=0\n" ++
+            "  58 sys_font_size calls=0\n",
         mock.contents(),
     );
 }

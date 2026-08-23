@@ -55,6 +55,57 @@ pub fn set_tab_width(n: usize) void {
 }
 
 // ---------------------------------------------------------------------------
+// Font sizes (M20-U1): 8×8 small (default), 16×16 medium, 24×24 large.
+// All three are nearest-neighbor scalings of the single 8×8 source —
+// comptime tables live in font_unicode.zig; the raster block-fills from
+// the same source rows, which paints exactly the table bits (pinned by
+// a test there).
+// ---------------------------------------------------------------------------
+
+pub const FontSize = enum(u2) {
+    small = 0,
+    medium = 1,
+    large = 2,
+
+    /// The cell edge in pixels for this size.
+    pub fn px(s: FontSize) usize {
+        return switch (s) {
+            .small => 8,
+            .medium => 16,
+            .large => 24,
+        };
+    }
+};
+
+/// The terminal layer's font size (window 0 is the only kernel-rendered
+/// text window). Default small — the boot look is unchanged.
+pub var font_size: FontSize = .small;
+
+/// Change the font size. Geometry applies to output from now on: the
+/// scrollback keeps its content, and lines wrap at the new width going
+/// forward (no reflow — honest bound, matches classic terminal behavior).
+pub fn set_font_size(s: FontSize) void {
+    font_size = s;
+}
+
+/// Current cell dimensions in pixels.
+pub fn cur_cell_w() usize {
+    return font_size.px();
+}
+pub fn cur_cell_h() usize {
+    return font_size.px();
+}
+
+/// Visible columns/rows at the current size (the ring stays `cols` wide;
+/// bigger cells show fewer).
+pub fn visible_cols() usize {
+    return virtio_gpu.fb_width / cur_cell_w();
+}
+pub fn visible_rows() usize {
+    return virtio_gpu.fb_height / cur_cell_h();
+}
+
+// ---------------------------------------------------------------------------
 // Text state (fixed BSS — the one-and-only real instance)
 // ---------------------------------------------------------------------------
 
@@ -258,7 +309,8 @@ pub fn putc(c: u8) void {
         // it stops at the region edge like a real terminal.
         const slot = cursor_slot();
         const stop = ((cur_col / tab_width) + 1) * tab_width;
-        while (cur_col < @min(stop, cols)) : (cur_col += 1) {
+        const edge = @min(cols, visible_cols());
+        while (cur_col < @min(stop, edge)) : (cur_col += 1) {
             ring[slot][cur_col] = 0x20;
         }
         line_fill[slot] = @intCast(cur_col);
@@ -382,18 +434,19 @@ pub fn putc_unicode(cp: u21) void {
     }
     if (w == 2) {
         // M20-U4/U2: wide codepoints claim two cells — base + continuation.
+        const edge = @min(cols, visible_cols());
         var slot = cursor_slot();
-        if (cur_col + 1 >= cols) slot = new_line(); // room for both halves
-        if (cur_col >= cols) slot = new_line();
+        if (cur_col + 1 >= edge) slot = new_line(); // room for both halves
+        if (cur_col >= edge) slot = new_line();
         ring[slot][cur_col] = cell_fffd; // real art lands with U7's emoji table
         note_missing(cp);
         cur_col += 1;
-        if (cur_col < cols) {
+        if (cur_col < edge) {
             ring[slot][cur_col] = cell_wide_cont;
             cur_col += 1;
         }
         if (cur_col > line_fill[slot]) line_fill[slot] = @intCast(cur_col);
-        if (cur_col >= cols) _ = new_line();
+        if (cur_col >= edge) _ = new_line();
         return;
     }
     if (glyph_for(cp) != null and cp <= 0x17F) {
@@ -539,11 +592,11 @@ fn backspace() void {
 /// narrow path of putc_unicode and dotted-circle insertion).
 fn store_narrow_cell(cell: Cell) void {
     var slot = cursor_slot();
-    if (cur_col >= cols) slot = new_line();
+    if (cur_col >= @min(cols, visible_cols())) slot = new_line();
     ring[slot][cur_col] = cell;
     cur_col += 1;
     if (cur_col > line_fill[slot]) line_fill[slot] = @intCast(cur_col);
-    if (cur_col >= cols) _ = new_line();
+    if (cur_col >= @min(cols, visible_cols())) _ = new_line();
 }
 
 // ---------------------------------------------------------------------------
@@ -627,7 +680,9 @@ pub fn render(canvas: Canvas) void {
     // any undersized destination stay in bounds (a latent out-of-bounds
     // write the 16x16 test exercised into adjacent globals for its whole
     // life; new BSS neighbors turned it into a bus error).
-    const visible: usize = @min(@min(ring_count, rows), canvas.height / cell_h);
+    const cw = cur_cell_w();
+    const ch = cur_cell_h();
+    const visible: usize = @min(@min(ring_count, rows), canvas.height / ch);
     // The visible window: the last `visible` lines of the ring. The
     // cursor line is the last one; its slot is cur_line.
     var r: usize = 0;
@@ -638,22 +693,32 @@ pub fn render(canvas: Canvas) void {
         else
             0;
         const slot = (first_valid + ring_count - visible + r) % ring_lines;
-        const row_pix = r * cell_h;
-        const cols_fit = @min(cols, canvas.width / cell_w);
+        const row_pix = r * ch;
+        const cols_fit = @min(cols, canvas.width / cw);
         var col: usize = 0;
         while (col < cols_fit) : (col += 1) {
             // M20-U2: cells decode through one path. The continuation
             // half of a wide character paints nothing (its base cell
             // already drew); unknown opcodes stay blank.
             const g = cell_glyph(ring[slot][col]) orelse continue;
-            const col_pix = col * cell_w;
+            const col_pix = col * cw;
+            // M20-U1: nearest-neighbor scaling — every source pixel
+            // becomes an exact scale² block, painting exactly the bits
+            // of the comptime-scaled tables (equality pinned by tests).
+            const scale = cw / 8;
             var gy: usize = 0;
-            while (gy < cell_h) : (gy += 1) {
+            while (gy < 8) : (gy += 1) {
                 const row_bits = g[gy];
                 var gx: usize = 0;
-                while (gx < cell_w) : (gx += 1) {
+                while (gx < 8) : (gx += 1) {
                     if (font.row_pixel(row_bits, gx)) {
-                        put_pixel(canvas, col_pix + gx, row_pix + gy, fg_rgb);
+                        var by: usize = 0;
+                        while (by < scale) : (by += 1) {
+                            var bx: usize = 0;
+                            while (bx < scale) : (bx += 1) {
+                                put_pixel(canvas, col_pix + gx * scale + bx, row_pix + gy * scale + by, fg_rgb);
+                            }
+                        }
                     }
                 }
             }
@@ -1173,6 +1238,69 @@ test "text: backspace deletes a whole cluster — composed or wide (U5)" {
     try std.testing.expectEqual(@as(usize, 5), cur_col);
     backspace();
     try std.testing.expectEqual(@as(usize, 3), cur_col);
+}
+
+test "text: font sizes — same glyph, exact nearest-neighbor cells (U1)" {
+    init();
+    clear();
+    puts("X");
+    // SMALL: 8×8, the classic look.
+    try std.testing.expectEqual(FontSize.small, font_size);
+    {
+        const canvas = testCanvas();
+        render(canvas);
+        const fg = rgbBytes(fg_rgb);
+        // 'X' row 0 = 0x63 → bits 0,1,5,6 set: pixel (0,0) lit.
+        try std.testing.expectEqualSlices(u8, &fg, &pixel(canvas, 0, 0));
+        try std.testing.expectEqualSlices(u8, &bg_bytes(), &pixel(canvas, 3, 0));
+    }
+    // MEDIUM: 16×16 — every source pixel is an exact 2×2 block.
+    set_font_size(.medium);
+    defer set_font_size(.small);
+    {
+        const canvas = testCanvas();
+        render(canvas);
+        const fg = rgbBytes(fg_rgb);
+        const bg = bg_bytes();
+        // Source bit (0,0) → block x0..1,y0..1.
+        try std.testing.expectEqualSlices(u8, &fg, &pixel(canvas, 0, 0));
+        try std.testing.expectEqualSlices(u8, &fg, &pixel(canvas, 1, 1));
+        // Source blank (3,0) → block x6..7,y0..1 stays background.
+        try std.testing.expectEqualSlices(u8, &bg, &pixel(canvas, 7, 0));
+    }
+    // LARGE: 24×24 on a big-enough canvas — 3×3 blocks.
+    var buf24: [24 * 24 * 4]u8 = undefined;
+    @memset(&buf24, 0);
+    set_font_size(.large);
+    {
+        const canvas = Canvas{ .base = &buf24, .width = 24, .height = 24, .stride = 24 * 4 };
+        render(canvas);
+        const fg = rgbBytes(fg_rgb);
+        const off = (1 * 24 + 2) * 4; // pixel (2,1) inside source bit(0,0)'s block
+        try std.testing.expectEqual(fg[0], buf24[off]);
+        try std.testing.expectEqual(fg[2], buf24[off + 2]);
+    }
+}
+
+fn bg_bytes() [3]u8 {
+    return rgbBytes(bg_rgb);
+}
+
+test "text: visible geometry follows the font size and wrap respects it (U1)" {
+    init();
+    clear();
+    try std.testing.expectEqual(@as(usize, 160), visible_cols());
+    try std.testing.expectEqual(@as(usize, 90), visible_rows());
+    set_font_size(.medium);
+    defer set_font_size(.small);
+    try std.testing.expectEqual(@as(usize, 80), visible_cols());
+    try std.testing.expectEqual(@as(usize, 45), visible_rows());
+    // Wrapping now happens at the narrower edge, not the ring width.
+    clear();
+    var i: usize = 0;
+    while (i < 81) : (i += 1) putc('x');
+    try std.testing.expectEqual(@as(usize, 2), ring_count);
+    try std.testing.expectEqual(@as(usize, 1), cur_col);
 }
 
 test "text: an exhausted cluster pool degrades to ignoring new marks (U6)" {

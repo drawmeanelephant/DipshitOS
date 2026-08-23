@@ -277,7 +277,7 @@ pub const Command = struct {
 /// (claim 0163) grows it 50 -> 51 (`color`). Milestone eighteen T16
 /// (issue #419) grows it 51 -> 52 (`sh`). Milestone twenty-four K5
 /// grows it 52 -> 53 (`calc`).
-pub const registry_count: usize = 53; // 51 + `sh` (M18 T16) + `calc` (M24 K5)
+pub const registry_count: usize = 54; // 51 + `sh` (M18 T16) + `calc` (M24 K5) + `font` (M20 U1)
 
 /// Command registry, built at runtime into BSS. A `const` table would hold
 /// link-time absolute addresses for BOTH the string slices and the handler
@@ -300,6 +300,7 @@ fn ensure_registry() []const Command {
             .{ .name = "calc", .help = "calculator utilities: 'calc history' shows saved calculation history from /data/calc_hst.txt", .usage = "calc [history]", .category = .system, .max_args = 1, .handler = cmd_calc },
             .{ .name = "cat", .help = "print a file from the ESP (by name or /path)", .usage = "cat <file|path>", .category = .storage, .min_args = 1, .max_args = 1, .handler = cmd_cat },
             .{ .name = "clear", .help = "clean up the crime scene", .usage = "clear", .category = .system, .handler = cmd_clear },
+            .{ .name = "font", .help = "terminal font size: small 8x8 (default), medium 16x16, large 24x24 (M20-U1)", .usage = "font [small|medium|large]", .category = .graphics_input, .min_args = 0, .max_args = 1, .handler = cmd_font },
             .{ .name = "compose", .help = "list available Alt+key compose sequences for accented characters", .usage = "compose", .category = .system, .handler = cmd_compose },
             .{ .name = "crash", .help = "list recent crash tombstones from /data/crash/", .usage = "crash", .category = .system, .handler = cmd_crash },
             .{ .name = "clip", .help = "copy/paste the shared kernel clipboard ('clip <text...>' sets it, 'clip' prints it)", .usage = "clip [<text...>]", .category = .system, .handler = cmd_clip },
@@ -4610,6 +4611,42 @@ fn cmd_beep(m: *Monitor, args: []const []const u8) ExecError {
     return .none;
 }
 
+/// `font` — report or switch the terminal's font size (M20-U1). The
+/// same setter slot 58 drives; the compositor repaints immediately.
+fn cmd_font(m: *Monitor, args: []const []const u8) ExecError {
+    if (args.len == 0) {
+        m.console.print_line("font:");
+        m.console.puts("  size=");
+        m.console.print_line(switch (fbtext.font_size) {
+            .small => "small (8x8)",
+            .medium => "medium (16x16)",
+            .large => "large (24x24)",
+        });
+        return .none;
+    }
+    const target: ?fbtext.FontSize = if (std.mem.eql(u8, args[0], "small"))
+        .small
+    else if (std.mem.eql(u8, args[0], "medium"))
+        .medium
+    else if (std.mem.eql(u8, args[0], "large"))
+        .large
+    else
+        null;
+    if (target == null) {
+        print_usage(m, lookup("font").?);
+        return .usage;
+    }
+    fbtext.set_font_size(target.?);
+    _ = settings.set("font_size", @tagName(target.?));
+    // Repaint through the compositor when the gpu is up.
+    if (virtio_gpu.gpu_ready) {
+        driving_award.mark_terminal_dirty();
+        _ = driving_award.composite();
+    }
+    m.console.print_line("font: set to the terminal");
+    return .none;
+}
+
 /// `text` — report the framebuffer text layer: the region (rows/cols at
 /// the cell size), the cursor (row/col), the scrollback depth, and the
 /// colors. `text put <string...>` renders the string and pushes it to
@@ -6640,7 +6677,7 @@ test "monitor: syscalls is registered and reports deterministic rows" {
     try std.testing.expectEqualStrings("numbered syscall table and counters", lookup("syscalls").?.help);
     try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"syscalls"}));
     try std.testing.expectEqualStrings(
-        "syscalls: slots=64 implemented=56\n" ++
+        "syscalls: slots=64 implemented=57\n" ++
             "  0 sys_ping calls=0\n" ++
             "  1 sys_write calls=0\n" ++
             "  2 sys_yield calls=0\n" ++
@@ -6696,7 +6733,8 @@ test "monitor: syscalls is registered and reports deterministic rows" {
             "  52 sys_win_move_to_workspace calls=0\n" ++
             "  53 sys_win_set_unsaved calls=0\n" ++
             "  54 sys_setrlimit calls=0\n" ++
-            "  55 sys_drag_read calls=0\n",
+            "  55 sys_drag_read calls=0\n" ++
+            "  58 sys_font_size calls=0\n",
         env.mock.contents(),
     );
 }

@@ -562,6 +562,94 @@ pub const ext_a: [128][8]u8 = blk: {
     break :blk out;
 };
 
+// ---------------------------------------------------------------------------
+// Comptime nearest-neighbor scaling (M20-U1): each source pixel becomes
+// an exact n×n block — bit fidelity without anti-aliasing. text.zig's
+// raster block-fills from the same source rows; these materialized
+// tables exist for consumers that want raw scaled bits (window chrome,
+// the glyph cache).
+// ---------------------------------------------------------------------------
+
+pub const Glyph16 = [16]u16;
+pub const Glyph24 = [24]u32;
+
+/// 2× horizontal doubling of one 8-bit row into 16 bits.
+fn row16(r: u8) u16 {
+    var out: u16 = 0;
+    for (0..8) |x| {
+        if ((r >> @as(u3, @intCast(x))) & 1 != 0) {
+            out |= @as(u16, 0b11) << @intCast(x * 2);
+        }
+    }
+    return out;
+}
+
+/// 3× horizontal tripling of one 8-bit row into 24 bits.
+fn row24(r: u8) u32 {
+    var out: u32 = 0;
+    for (0..8) |x| {
+        if ((r >> @as(u3, @intCast(x))) & 1 != 0) {
+            out |= @as(u32, 0b111) << @intCast(x * 3);
+        }
+    }
+    return out;
+}
+
+pub fn scale16(g: [8]u8) Glyph16 {
+    var out: Glyph16 = undefined;
+    for (0..8) |y| {
+        out[y * 2] = row16(g[y]);
+        out[y * 2 + 1] = row16(g[y]);
+    }
+    return out;
+}
+
+pub fn scale24(g: [8]u8) Glyph24 {
+    var out: Glyph24 = undefined;
+    for (0..8) |y| {
+        out[y * 3] = row24(g[y]);
+        out[y * 3 + 1] = row24(g[y]);
+        out[y * 3 + 2] = row24(g[y]);
+    }
+    return out;
+}
+
+fn scale_all_16(comptime src: anytype) [src.len]Glyph16 {
+    var out: [src.len]Glyph16 = undefined;
+    for (src, 0..) |g, i| out[i] = scale16(g);
+    return out;
+}
+fn scale_all_24(comptime src: anytype) [src.len]Glyph24 {
+    var out: [src.len]Glyph24 = undefined;
+    for (src, 0..) |g, i| out[i] = scale24(g);
+    return out;
+}
+
+/// ASCII at all three sizes (index = ASCII − 0x20, like font8x8.glyphs).
+pub const ascii_16: [95]Glyph16 = scale_all_16(font.glyphs);
+pub const ascii_24: [95]Glyph24 = scale_all_24(font.glyphs);
+
+/// Latin-1 Supplement at medium/large (index = cp − 0xA0).
+pub const latin1_16: [96]Glyph16 = scale_all_16(latin1);
+pub const latin1_24: [96]Glyph24 = scale_all_24(latin1);
+
+/// Latin Extended-A at medium/large (index = cp − 0x100).
+pub const ext_a_16: [128]Glyph16 = scale_all_16(ext_a);
+pub const ext_a_24: [128]Glyph24 = scale_all_24(ext_a);
+
+test "font_unicode: scaling is exact nearest-neighbor doubling/tripling" {
+    const g = [_]u8{ 0b10110001, 0, 0, 0, 0, 0, 0, 0 };
+    const s16 = scale16(g);
+    // Set bits x=0,4,5,7 double into pairs: 0-1, 8-9, 10-11, 14-15.
+    try std.testing.expectEqual(@as(u16, 0b1100111100000011), s16[0]);
+    try std.testing.expectEqual(s16[0], s16[1]); // vertical duplication
+    try std.testing.expectEqual(@as(u16, 0), s16[2]);
+    const s24 = scale24(g);
+    try std.testing.expectEqual(@as(u32, 0b111000111111000000000111), s24[0]);
+    try std.testing.expectEqual(s24[0], s24[1]);
+    try std.testing.expectEqual(s24[1], s24[2]);
+}
+
 test "font_unicode: é composes e with an acute overlay in the top rows" {
     const e = font.glyphs['e' - 0x20];
     const ee = latin1[0xE9 - 0xA0];
