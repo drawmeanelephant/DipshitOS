@@ -1432,6 +1432,7 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "  mbox        per-process IPC mailbox: pending messages and drain counters\n" ++
         "  procs       process registry: image, address space, lifecycle, exit status\n" ++
         "  spawn       spawn the lifecycle demo task\n" ++
+        "  sym         crash-report symbol table: 'sym' lists symbols loaded from the last ELF exec; 'sym <file>' parses an ELF's symtab from disk\n" ++
         "  syscalls    numbered syscall table and counters\n" ++
         "  tasks       tick-driven task scheduler status\n" ++
         "storage\n" ++

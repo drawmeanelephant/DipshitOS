@@ -13,6 +13,7 @@
 //! No libc, no POSIX, bounded BSS storage, no heap allocation.
 
 const std = @import("std");
+const symbol = @import("symbol.zig");
 const fat = @import("fat.zig");
 const esp = @import("esp.zig");
 const timer = @import("timer.zig");
@@ -34,9 +35,15 @@ pub const Tombstone = struct {
     name_len: usize = 0,
     exit_status: u64,
     fault_addr: u64 = 0,
+    /// Faulting PC (ELR) — the code address used for symbol resolution.
+    pc: u64 = 0,
     tick: u64,
     serial_snapshot: [512]u8 = [_]u8{0} ** 512,
     serial_len: usize = 0,
+    /// "(in name+0xoffset)" note resolved via the kernel symbol table
+    /// (M22 D3, issue #326). Empty when nothing matched.
+    sym_note: [96]u8 = [_]u8{0} ** 96,
+    sym_note_len: usize = 0,
 };
 
 /// Ring buffer of tombstones (drop-oldest on overflow).
@@ -62,6 +69,7 @@ pub fn record(
     pid: u64,
     status: u64,
     fault_addr: u64,
+    pc: u64,
     serial_snapshot: []const u8,
     serial_len: usize,
 ) void {
@@ -77,8 +85,34 @@ pub fn record(
         .pid = pid,
         .exit_status = status,
         .fault_addr = fault_addr,
+        .pc = pc,
         .tick = timer.ticks,
     };
+
+    // M22 D3 (issue #326): name the faulting code. The PC anchors CODE
+    // symbols (BRK faults carry far=0); fall back to the fault address for
+    // data aborts whose PC sits outside every known range.
+    if (status == 139) { // reserved_fault_status (kept literal: scheduler owns the name)
+        const m = if (pc != 0) symbol.lookup(pc) else null;
+        const chosen = m orelse symbol.lookup(fault_addr);
+        if (chosen) |hit| {
+            const note = "(in ";
+            @memcpy(t.sym_note[0..note.len], note);
+            var npos = note.len;
+            const take_name = @min(hit.name.len, t.sym_note.len - npos - 24);
+            @memcpy(t.sym_note[npos..][0..take_name], hit.name[0..take_name]);
+            npos += take_name;
+            const mid = "+0x";
+            @memcpy(t.sym_note[npos..][0..mid.len], mid);
+            npos += mid.len;
+            npos += write_hex(t.sym_note[npos..], hit.offset);
+            if (npos < t.sym_note.len) {
+                t.sym_note[npos] = ')';
+                npos += 1;
+            }
+            t.sym_note_len = npos;
+        }
+    }
 
     // Copy name (truncate to 31 chars + NUL)
     const name_len = @min(name.len, 31);
@@ -139,6 +173,12 @@ pub fn format_tombstone(t: *const Tombstone, out: []u8) usize {
     pos += write_line(out[pos..], "Tick: ");
     pos += write_u64(out[pos..], t.tick);
     pos += write_line(out[pos..], "\n");
+
+    if (t.sym_note_len > 0) {
+        pos += write_line(out[pos..], "Symbol: ");
+        pos += write_bytes(out[pos..], t.sym_note[0..t.sym_note_len]);
+        pos += write_line(out[pos..], "\n");
+    }
 
     // Serial snapshot
     if (t.serial_len > 0) {
@@ -230,6 +270,10 @@ pub fn list_to_console(con: console.Console) usize {
             con.print_u64(t.exit_status);
             con.puts(" tick=");
             con.print_u64(t.tick);
+            if (t.sym_note_len > 0) {
+                con.puts(" ");
+                con.puts(t.sym_note[0..t.sym_note_len]);
+            }
             con.puts("\n");
             listed += 1;
         }
@@ -302,7 +346,7 @@ test "tombstone: record and retrieve" {
     init();
     try std.testing.expectEqual(@as(usize, 0), count());
 
-    record("TEST.BIN", 1, 139, 0x12345, "", 0);
+    record("TEST.BIN", 1, 139, 0x12345, 0, "", 0);
     try std.testing.expectEqual(@as(usize, 1), count());
 
     const t = get(0).?;
@@ -316,7 +360,7 @@ test "tombstone: drop-oldest overflow" {
     init();
     for (0..9) |i| {
         const name = [_]u8{ 'A', @as(u8, '0' + @as(u8, @intCast(i % 10))) };
-        record(&name, i, 1, 0, "", 0);
+        record(&name, i, 1, 0, 0, "", 0);
     }
     // Should have max_tombstones (8), oldest (PID 0) dropped
     try std.testing.expectEqual(@as(usize, max_tombstones), count());
@@ -326,7 +370,7 @@ test "tombstone: drop-oldest overflow" {
 
 test "tombstone: format includes header" {
     init();
-    record("CRASH.BIN", 42, 139, 0xDEAD, "hello", 5);
+    record("CRASH.BIN", 42, 139, 0xDEAD, 0x400010, "hello", 5);
 
     var buf: [tombstone_max_bytes]u8 = undefined;
     const len = format_tombstone(get(0).?, &buf);
@@ -338,4 +382,30 @@ test "tombstone: format includes header" {
     try std.testing.expect(std.mem.indexOf(u8, buf[0..len], "Exit Status: 139") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf[0..len], "Fault Address: 0x") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf[0..len], "hello") != null);
+}
+
+test "tombstone: crash inside a known symbol carries the note" {
+    init();
+    const sym = @import("symbol.zig");
+    sym.reset();
+    _ = sym.add("crasher", 0x40000c, 20);
+
+    // BRK-style fault: far=0 but PC lands inside "crasher".
+    record("CRASH.ELF", 3, 139, 0, 0x400010, "", 0);
+    const t = get(0).?;
+    try std.testing.expect(t.sym_note_len > 0);
+    try std.testing.expectEqualStrings("(in crasher+0x4)", t.sym_note[0..t.sym_note_len]);
+
+    // The note flows into the formatted report.
+    var buf: [tombstone_max_bytes]u8 = undefined;
+    const len = format_tombstone(get(0).?, &buf);
+    const report = buf[0..len];
+    try std.testing.expect(std.mem.indexOf(u8, report, "(in crasher+0x4)") != null);
+
+    // Data-abort style: pc outside any range falls back to fault_addr.
+    sym.reset();
+    _ = sym.add("guard_zone", 0x500000, 64);
+    record("GUARD.BIN", 4, 139, 0x500010, 0x400abc, "", 0);
+    const t2 = get(count() - 1).?;
+    try std.testing.expectEqualStrings("(in guard_zone+0x10)", t2.sym_note[0..t2.sym_note_len]);
 }

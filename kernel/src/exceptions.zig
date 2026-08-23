@@ -140,7 +140,7 @@ pub fn set_svc_dispatcher(d: SvcDispatcher) void {
 /// `scheduler.reserved_fault_status`) and stages the next task, so the
 /// machine never parks on a user fault. Host tests can register a plain
 /// function and assert dispatch behavior.
-pub const FaultDispatcher = *const fn (esr: u64, far: u64) void;
+pub const FaultDispatcher = *const fn (esr: u64, far: u64, pc: u64) void;
 
 var fault_dispatcher: ?FaultDispatcher = null;
 
@@ -517,7 +517,9 @@ export fn exc_dispatch(
     // faults (kernel bugs) still fall through to the report/park path below.
     if (kind == kind_sync and is_from_el0(spsr)) {
         if (fault_dispatcher) |d| {
-            d(esr, far);
+            // M22 D3 (issue #326): ELR rides along — BRK faults carry a
+            // meaningless FAR but their PC names the crashing function.
+            d(esr, far, elr);
             return .{ .frame = resume_frame, .sp_el0 = resume_sp_el0 };
         }
     }
@@ -1005,7 +1007,8 @@ var test_fault_esr: u64 = 0;
 var test_fault_far: u64 = 0;
 var test_fault_resume_frame: ?*VectorFrame = null;
 
-fn test_fault_handler(esr: u64, far: u64) void {
+fn test_fault_handler(esr: u64, far: u64, pc: u64) void {
+    _ = pc; // M22 D3: the PC rides along for symbol resolution; tests ignore it
     test_fault_esr = esr;
     test_fault_far = far;
     if (test_fault_resume_frame) |selected| resume_frame = @intFromPtr(selected);

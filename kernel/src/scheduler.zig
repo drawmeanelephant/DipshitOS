@@ -288,7 +288,7 @@ var reap_report_count: usize = 0;
 /// loop prints `fault: <name> far=0x... ec=0x...` IN ORDER. The name
 /// pointer is a safe snapshot (task names are static string literals).
 pub const fault_report_max: usize = 4;
-const FaultEntry = struct { name: []const u8, far: u64, ec: u64 };
+const FaultEntry = struct { name: []const u8, far: u64, ec: u64, pc: u64 = 0 };
 var fault_reports: [fault_report_max]FaultEntry = [_]FaultEntry{.{ .name = "", .far = 0, .ec = 0 }} ** fault_report_max;
 var fault_report_head: usize = 0;
 var fault_report_count: usize = 0;
@@ -502,7 +502,7 @@ pub fn request_kill(id: usize) KillResult {
 /// page-return lifecycle runs, the ring stages the next task, and the shell
 /// survives. Pure BSS writes, safe in the exception context the dispatcher
 /// runs in (no console, no allocation).
-pub fn fault_current(esr: u64, far: u64) void {
+pub fn fault_current(esr: u64, far: u64, pc: u64) void {
     if (task_count == 0) return;
     // Prefer the PROCESS name (e.g. "GUARD.BIN") over the generic task name
     // ("user-exec") — the process name is a stable name_buf slice, so the
@@ -517,7 +517,7 @@ pub fn fault_current(esr: u64, far: u64) void {
         fault_report_count -= 1;
     }
     const idx = (fault_report_head + fault_report_count) % fault_report_max;
-    fault_reports[idx] = .{ .name = name, .far = far, .ec = ec };
+    fault_reports[idx] = .{ .name = name, .far = far, .ec = ec, .pc = pc };
     fault_report_count += 1;
     // Arc5 issue #246: if the process has a memory limit and it's exceeded,
     // use status 140 (mem_limit) instead of 139 (guard page).
@@ -952,11 +952,16 @@ pub fn exit_current(status: u64) bool {
     // or any non-zero unexpected exit. The tombstone is written to /data/crash/
     // on the DATA partition. Pure BSS writes, safe in this exception context.
     if (status == reserved_fault_status or (status != 0 and status != reserved_kill_status)) {
-        // Get fault address from the most recent fault report if status is 139
+        // Get fault address + PC from the most recent fault report if
+        // status is 139. M22 D3 (issue #326): the PC rides along so the
+        // tombstone can resolve CODE symbols for BRK-style faults whose
+        // FAR is meaningless.
         var fault_addr: u64 = 0;
+        var fault_pc: u64 = 0;
         if (status == reserved_fault_status and fault_report_count > 0) {
             const last_fault_idx = (fault_report_head + fault_report_count - 1) % fault_report_max;
             fault_addr = fault_reports[last_fault_idx].far;
+            fault_pc = fault_reports[last_fault_idx].pc;
         }
         // Use the process name if available, otherwise the task name
         const proc_name = if (process.find_by_task(exiting)) |pid|
@@ -967,7 +972,7 @@ pub fn exit_current(status: u64) bool {
         // Capture the last 512 bytes of serial output for the tombstone.
         var serial_buf: [512]u8 = undefined;
         const serial_n = serial_ring.snapshot(&serial_buf);
-        tombstone.record(proc_name, pid_val, status, fault_addr, serial_buf[0..serial_n], serial_n);
+        tombstone.record(proc_name, pid_val, status, fault_addr, fault_pc, serial_buf[0..serial_n], serial_n);
         // Arc5 issue #243: persist the tombstone to /data/crash/ on the DATA
         // partition. The write is polled DMA through virtio-blk (no allocation,
         // no interrupt, no global-state conflict with the exception context).
@@ -1914,7 +1919,7 @@ test "scheduler: an EL0 fault reaps the task with status 139 and reports it" {
     try std.testing.expect(yield_current()); // shell -> worker
     try std.testing.expect(yield_current()); // worker -> user
     try std.testing.expectEqual(@as(usize, 2), current_id());
-    fault_current(0x24 << 26, 0x7fff_f000); // user -> idle
+    fault_current(0x24 << 26, 0x7fff_f000, 0x4000); // user -> idle
     try std.testing.expectEqual(@as(usize, idle_id), current_id());
     try std.testing.expect(is_terminated(2));
     try std.testing.expectEqual(@as(?u64, reserved_fault_status), terminated_status(2));

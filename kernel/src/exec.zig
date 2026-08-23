@@ -84,6 +84,9 @@ const memmap = @import("memmap.zig"); // host-test fixture view (page_size + the
 // M22 D1 (issue #324): the AArch64 ELF parse/validate module — exec_file
 // sniffs the ELF magic and takes this path alongside DSK1/DSK3.
 const elf_mod = @import("elf.zig");
+// M22 D3 (issue #326): crash-report symbol names — populated from the
+// loaded image's .symtab on every ELF exec, cleared on every other exec.
+const symbol = @import("symbol.zig");
 
 /// Fixed load buffer: 256 KiB (64 pages). A program larger than this is
 /// rejected honestly (`too_large`). Milestone sixteen C1 (claim 3805) lifts
@@ -297,6 +300,17 @@ pub fn exec_file(name: []const u8, args: []const []const u8) ExecResult {
         },
         elf_magic => {
             const image = elf_mod.parse(program[0..got]) catch |err| return elf_exec_error(err);
+            // M22 D3 (issue #326): crash-report symbol names follow the
+            // program — every exec starts from an empty table, then this
+            // image's .symtab repopulates it. Harvest BEFORE staging
+            // rearranges the buffer (names point into it and the table
+            // copies them out immediately).
+            symbol.reset();
+            var syms: [symbol.max_symbols]elf_mod.SymInfo = undefined;
+            const sym_n = elf_mod.collect_symbols(program[0..got], &syms);
+            for (syms[0..sym_n]) |si| {
+                _ = symbol.add(si.name, si.addr, si.size);
+            }
             const seg0 = image.segments[0];
             // The loader contract (elf.zig): segment 0 sits at
             // userspace.text_va, an optional writable segment 1 directly

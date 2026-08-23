@@ -55,4 +55,31 @@ Evidence: asm.zig 12/12 host tests; verify-live-asm.sh PASS 1/1 on VZ
 artifacts/live-asm-report.txt. verify-live-fs-mutation PASS with the retry
 fix. verify-unit-tests green; verify-coordination ok.
 
+## 2026-08-22 — claim 9815: D3 (issue #326) done — symbolized crash reports
+
+New `kernel/src/symbol.zig` (BSS, 32 entries, reset-per-exec) +
+`elf.collect_symbols` (.symtab/.strtab walk; GLOBAL/WEAK FUNC+OBJECT;
+names sliced from the pre-staging buffer). exec's ELF branch harvests
+BEFORE staging rearranges the buffer (first attempt collected after
+staging and found nothing — the headers had been overwritten by text).
+Fault plumbing now carries PC end-to-end: exceptions fault-dispatcher
+signature gains elr, scheduler FaultEntry stores it, tombstone.record
+resolves `(in name+0xoff)` via lookup(pc) with fault_addr fallback.
+Monitor registry 53→54 (`sym`; file-inspect mode reads ≤64 KiB staging).
+tools/mkhello-elf.py --crash emits CRASH.ELF carrying a real symtab —
+initially with the wrong ELF32 Sym field order (name,info,... instead of
+name,value,size,info,other,shndx), caught on-host and fixed in the
+generator (the kernel reader was correct).
+
+Gotchas hit + fixed along the way: shell.zig's golden help transcript
+pins registry order — `sym` registered between spawn and syscalls.
+Gate uses two runner phases (script2 after the status=139 line) because
+the crashed task's reap prints a quantum after the exec prompt returns.
+
+Evidence: symbol.zig 4/4, elf.zig 8/8, tombstone.zig 27/27,
+shell.zig 563/563; verify-live-symbols.sh PASS 1/1 on VZ — artifacts/
+m22-symbols-live.txt, artifacts/live-symbols-report.txt.
+verify-unit-tests green; verify-coordination ok.
+
+
 

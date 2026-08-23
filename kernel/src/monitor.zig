@@ -276,8 +276,14 @@ pub const Command = struct {
 /// (claim 0339) grows it 47 -> 48 (`resources`). Milestone eighteen T5
 /// (claim 0163) grows it 50 -> 51 (`color`). Milestone eighteen T16
 /// (issue #419) grows it 51 -> 52 (`sh`). Milestone twenty-four K5
-/// grows it 52 -> 53 (`calc`).
-pub const registry_count: usize = 53; // 51 + `sh` (M18 T16) + `calc` (M24 K5)
+/// grows it 52 -> 53 (`calc`). Milestone twenty-two D3 (issue #326)
+/// grows it 53 -> 54 (`sym`).
+pub const registry_count: usize = 54; // 51 + `sh` (M18 T16) + `calc` (M24 K5) + `sym` (M22 D3)
+
+/// `sym <file>` reads at most this many bytes for on-disk symtab inspection
+/// (M22 D3). ELF symbol tables live near the file tail; 64 KiB covers every
+/// program the D1 loader can run that still fits its own staging contract.
+pub const sym_file_max: usize = 64 * 1024;
 
 /// Command registry, built at runtime into BSS. A `const` table would hold
 /// link-time absolute addresses for BOTH the string slices and the handler
@@ -335,6 +341,7 @@ fn ensure_registry() []const Command {
             .{ .name = "shutdown", .help = "request power-off", .usage = "shutdown", .category = .system, .handler = cmd_shutdown },
             .{ .name = "spawn", .help = "spawn the lifecycle demo task", .usage = "spawn", .category = .tasks_processes, .handler = cmd_spawn },
             .{ .name = "sysinfo", .help = "comprehensive system and subsystem diagnostic snapshot", .usage = "sysinfo", .category = .machine_identity, .handler = cmd_sysinfo },
+            .{ .name = "sym", .help = "crash-report symbol table: 'sym' lists symbols loaded from the last ELF exec; 'sym <file>' parses an ELF's symtab from disk", .usage = "sym [<file>]", .category = .tasks_processes, .max_args = 1, .handler = cmd_sym },
             .{ .name = "syscalls", .help = "numbered syscall table and counters", .usage = "syscalls", .category = .tasks_processes, .handler = cmd_syscalls },
             .{ .name = "tasks", .help = "tick-driven task scheduler status", .usage = "tasks", .category = .tasks_processes, .handler = cmd_tasks },
             .{ .name = "timer", .help = "interrupt controller + timer status", .usage = "timer", .category = .memory_state, .handler = cmd_timer },
@@ -4851,6 +4858,69 @@ fn cmd_exec(m: *Monitor, args: []const []const u8) ExecError {
 // ---------------------------------------------------------------------------
 // Syscall ABI command (claim 3594)
 // ---------------------------------------------------------------------------
+
+/// M22 D3 (issue #326): `sym` — list the crash-report symbol table loaded
+/// by the most recent ELF exec, or parse an ELF's symtab straight from the
+/// volume without loading it.
+fn cmd_sym(m: *Monitor, args: []const []const u8) ExecError {
+    const symbol = @import("symbol.zig");
+    const elf_mod = @import("elf.zig");
+    if (args.len == 0) {
+        const n = symbol.count();
+        if (n == 0) {
+            m.console.print_line("sym: no symbols loaded (exec an ELF image)");
+            return .none;
+        }
+        m.console.puts("sym: ");
+        m.console.print_u64(n);
+        m.console.print_line(" symbol(s):");
+        var i: usize = 0;
+        while (i < n) : (i += 1) {
+            const sym = symbol.get(i).?;
+            m.console.puts("  ");
+            m.console.puts(sym.name_slice());
+            m.console.puts(" addr=");
+            m.console.print_hex(sym.addr);
+            m.console.puts(" size=");
+            m.console.print_hex(sym.size);
+            m.console.print_line("");
+        }
+        return .none;
+    }
+
+    // File inspection: read up to sym_file_max bytes and walk sections.
+    const name = args[0];
+    const got = fat.read_file(name, &sym_file_buf) orelse {
+        err_prefix(m);
+        m.console.puts(name);
+        m.console.print_line(": not found on the active volume");
+        return .invalid_argument;
+    };
+    var infos: [symbol.max_symbols]elf_mod.SymInfo = undefined;
+    const n = elf_mod.collect_symbols(sym_file_buf[0..got], &infos);
+    if (n == 0) {
+        m.console.puts(name);
+        m.console.print_line(": no symbols (stripped or not an AArch64 ELF)");
+        return .none;
+    }
+    m.console.puts(name);
+    m.console.puts(": ");
+    m.console.print_u64(n);
+    m.console.print_line(" symbol(s):");
+    for (infos[0..n]) |si| {
+        m.console.puts("  ");
+        m.console.puts(si.name);
+        m.console.puts(" addr=");
+        m.console.print_hex(si.addr);
+        m.console.puts(" size=");
+        m.console.print_hex(si.size);
+        m.console.print_line("");
+    }
+    return .none;
+}
+
+/// Staging buffer for `sym <file>` disk inspection.
+var sym_file_buf: [sym_file_max]u8 = undefined;
 
 fn cmd_syscalls(m: *Monitor, args: []const []const u8) ExecError {
     _ = args;
