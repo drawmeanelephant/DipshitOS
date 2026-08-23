@@ -11,6 +11,7 @@
 //!   K5 — History persistence: save/load from FAT
 //!   K7 — Trigonometry: SIN/COS/TAN/ASIN/ACOS/ATAN, DEG/RAD toggle
 //!   K6 — Scientific notation display: SCI toggle, auto-switch at 1e10
+//!   K8 — Log/exp: LN/LOG/EXP/POW/SQRT/ABS buttons
 //!
 //! Keyboard shortcuts:
 //!   Digits 0–9          → input_digit
@@ -47,6 +48,7 @@ const Base = prog.Base;
 
 const constants = @import("calc/constants.zig");
 
+const mathfn = @import("calc/mathfn.zig");
 const science = @import("calc/science.zig");
 
 // ---------------------------------------------------------------------------
@@ -235,6 +237,14 @@ pub const AppState = struct {
     btn_asin: Button = Button.init(Rect.make(8, 312, 56, 20), "ASIN"),
     btn_acos: Button = Button.init(Rect.make(69, 312, 56, 20), "ACOS"),
     btn_atan: Button = Button.init(Rect.make(130, 312, 56, 20), "ATAN"),
+
+    // ---- K8 log/exp buttons (standard mode, below the trig rows) ----
+    btn_ln: Button = Button.init(Rect.make(8, 338, 56, 20), "LN"),
+    btn_log: Button = Button.init(Rect.make(69, 338, 56, 20), "LOG"),
+    btn_exp: Button = Button.init(Rect.make(130, 338, 56, 20), "EXP"),
+    btn_pow: Button = Button.init(Rect.make(191, 338, 56, 20), "POW"),
+    btn_sqrt: Button = Button.init(Rect.make(8, 364, 56, 20), "SQRT"),
+    btn_abs: Button = Button.init(Rect.make(69, 364, 56, 20), "ABS"),
     // ---- K6 scientific notation toggle (standard mode, below keypad) ----
     btn_sci: Button = Button.init(Rect.make(8, 260, 56, 20), "SCI"),
 
@@ -462,6 +472,25 @@ pub const AppState = struct {
     }
 
     // -------------------------------------------------------------------
+    // Logarithmic & exponential (K8)
+    // -------------------------------------------------------------------
+
+    /// Store a float function result, rounded to the engine's i64.
+    fn store_unary_result(self: *AppState, result: mathfn.MathError!f64) void {
+        if (result) |r| {
+            const rounded = @round(r);
+            if (!std.math.isFinite(rounded) or @abs(rounded) > 9.2e18) {
+                self.engine.raise_error();
+                return;
+            }
+            self.engine.current_val = @intFromFloat(rounded);
+            self.engine.is_entering_val = true;
+        } else |_| {
+            self.engine.raise_error();
+        }
+    }
+
+    // -------------------------------------------------------------------
     // Trigonometry (K7)
     // -------------------------------------------------------------------
 
@@ -610,6 +639,14 @@ pub const AppState = struct {
 
         // K6 scientific-notation toggle
         self.btn_sci.draw(win);
+
+        // K8 log/exp buttons (standard mode)
+        self.btn_ln.draw(win);
+        self.btn_log.draw(win);
+        self.btn_exp.draw(win);
+        self.btn_pow.draw(win);
+        self.btn_sqrt.draw(win);
+        self.btn_abs.draw(win);
 
         // K3 conversion bar (when active, overlays the history area)
         if (self.convert_active) {
@@ -969,6 +1006,30 @@ pub const AppState = struct {
                 } else {
                     ui.write_console("calc: sci-off\n");
                 }
+                changed = true;
+            }
+        }
+
+        // K8 log/exp buttons
+        if (!changed) {
+            const v: f64 = @floatFromInt(self.engine.current_val);
+            if (self.btn_ln.handle_event(ev)) {
+                self.store_unary_result(mathfn.ln(v));
+                changed = true;
+            } else if (self.btn_log.handle_event(ev)) {
+                self.store_unary_result(mathfn.log10(v));
+                changed = true;
+            } else if (self.btn_exp.handle_event(ev)) {
+                self.store_unary_result(mathfn.exp(v));
+                changed = true;
+            } else if (self.btn_pow.handle_event(ev)) {
+                self.engine.set_op('P');
+                changed = true;
+            } else if (self.btn_sqrt.handle_event(ev)) {
+                self.store_unary_result(mathfn.sqrt(v));
+                changed = true;
+            } else if (self.btn_abs.handle_event(ev)) {
+                self.store_unary_result(@abs(v));
                 changed = true;
             }
         }
@@ -1601,4 +1662,80 @@ test "calc K6: SCI button toggles mode" {
     _ = app.handle_mouse_events(&ev_up);
     try std.testing.expect(!app.sci_mode);
     try std.testing.expectEqualStrings("7", app.display_text(&buf));
+}
+
+fn tap(app: *AppState, x: u32, y: u32) void {
+    var ev_down = Event{ .kind = ui.MOUSE_DOWN, .flags = 0, .seq = 1, .arg0 = x, .arg1 = y };
+    _ = app.handle_mouse_events(&ev_down);
+    var ev_up = Event{ .kind = ui.MOUSE_UP, .flags = 0, .seq = 2, .arg0 = x, .arg1 = y };
+    _ = app.handle_mouse_events(&ev_up);
+}
+
+test "calc K8: sqrt(16) = 4 via button" {
+    var app = AppState.init();
+    app.engine.current_val = 16;
+    app.engine.is_entering_val = true;
+    tap(&app, 36, 374); // SQRT at (8,364) center
+    try std.testing.expectEqual(@as(i64, 4), app.engine.current_val);
+}
+
+test "calc K8: log(100) = 2 via button" {
+    var app = AppState.init();
+    app.engine.current_val = 100;
+    app.engine.is_entering_val = true;
+    tap(&app, 97, 348); // LOG at (69,338) center
+    try std.testing.expectEqual(@as(i64, 2), app.engine.current_val);
+}
+
+test "calc K8: ln rounds (ln(e)≈1, entered as 3)" {
+    var app = AppState.init();
+    app.engine.current_val = 3;
+    app.engine.is_entering_val = true;
+    tap(&app, 36, 348); // LN at (8,338) center; ln(3)=1.0986 → 1
+    try std.testing.expectEqual(@as(i64, 1), app.engine.current_val);
+}
+
+test "calc K8: exp(1) ≈ e rounds to 3" {
+    var app = AppState.init();
+    app.engine.current_val = 1;
+    app.engine.is_entering_val = true;
+    tap(&app, 158, 348); // EXP at (130,338) center
+    try std.testing.expectEqual(@as(i64, 3), app.engine.current_val);
+}
+
+test "calc K8: abs and domain errors" {
+    var app = AppState.init();
+    app.engine.current_val = -42;
+    app.engine.is_entering_val = true;
+    tap(&app, 97, 374); // ABS at (69,364) center
+    try std.testing.expectEqual(@as(i64, 42), app.engine.current_val);
+
+    app.engine.current_val = -5;
+    tap(&app, 36, 348); // ln(-5) → ERROR
+    try std.testing.expect(app.engine.has_error);
+}
+
+test "calc K8: POW evaluates exact integer power" {
+    var app = AppState.init();
+    // 2 POW 10 = : type 2, POW button, type 10, Enter
+    var ev2 = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 1, .arg0 = 0x03, .arg1 = '2' };
+    _ = app.handle_keyboard_event(&ev2);
+    tap(&app, 219, 348); // POW at (191,338) center
+    var ev1 = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 2, .arg0 = 0x02, .arg1 = '1' };
+    _ = app.handle_keyboard_event(&ev1);
+    var ev0 = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 3, .arg0 = 0x0d, .arg1 = '0' };
+    _ = app.handle_keyboard_event(&ev0);
+    try std.testing.expect(!app.engine.has_error);
+    var ev_eq = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 4, .arg0 = 0x28, .arg1 = '\r' };
+    _ = app.handle_keyboard_event(&ev_eq);
+    try std.testing.expectEqual(@as(i64, 1024), app.engine.current_val);
+
+    // Overflow raises ERROR: 10 POW 19
+    app.engine.clear();
+    app.engine.accum = 10;
+    app.engine.pending_op = 'P';
+    app.engine.current_val = 19;
+    app.engine.is_entering_val = true;
+    app.engine.evaluate();
+    try std.testing.expect(app.engine.has_error);
 }
