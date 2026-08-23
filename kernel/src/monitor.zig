@@ -21,7 +21,8 @@ const alloc = @import("alloc.zig");
 const console = @import("console.zig");
 const esp = @import("esp.zig");
 const esp_exec = @import("exec.zig"); // claim 6783: load a user program from the ESP and enter it at EL0
-const fat = @import("fat.zig"); // claim 6420: FAT write diagnostics (last failing LBA)
+const fat = @import("fat.zig");
+const syscall_mod = @import("syscall.zig"); // claim 6420: FAT write diagnostics (last failing LBA)
 const exceptions = @import("exceptions.zig");
 const gic = @import("gic.zig");
 const handoff = @import("handoff.zig");
@@ -276,8 +277,17 @@ pub const Command = struct {
 /// (claim 0339) grows it 47 -> 48 (`resources`). Milestone eighteen T5
 /// (claim 0163) grows it 50 -> 51 (`color`). Milestone eighteen T16
 /// (issue #419) grows it 51 -> 52 (`sh`). Milestone twenty-four K5
-/// grows it 52 -> 53 (`calc`).
-pub const registry_count: usize = 54; // 51 + `sh` (M18 T16) + `calc` (M24 K5) + `font` (M20 U1)
+/// grows it 52 -> 53 (`calc`). Milestone twenty U1 (issue #307, claim
+/// 5127) grows it 53 -> 54 (`font`). Milestone twenty-two D3 (issue #326)
+/// grows it 54 -> 55 (`sym`). Milestone twenty-two D5 (issue #328)
+/// grows it 55 -> 56 (`strace`). Milestone twenty-two D6 (issue #329)
+/// grows it 56 -> 57 (`ps`).
+pub const registry_count: usize = 57; // 51 + sh/calc + `font` (M20 U1) + sym/strace/ps (M22 D3/D5/D6)
+
+/// `sym <file>` reads at most this many bytes for on-disk symtab inspection
+/// (M22 D3). ELF symbol tables live near the file tail; 64 KiB covers every
+/// program the D1 loader can run that still fits its own staging contract.
+pub const sym_file_max: usize = 64 * 1024;
 
 /// Command registry, built at runtime into BSS. A `const` table would hold
 /// link-time absolute addresses for BOTH the string slices and the handler
@@ -334,8 +344,11 @@ fn ensure_registry() []const Command {
             .{ .name = "sound", .help = "virtio-snd transport: device DID, class, status, control-queue state, device-config counts (jacks/streams/channel-maps), re-arm; stream-state control: 'sound volume <0-100>' and 'sound mute <on|off>'", .usage = "sound [volume <0-100> | mute <on|off>]", .category = .system, .min_args = 0, .max_args = 2, .handler = cmd_sound },
             .{ .name = "text", .help = "framebuffer text: text region, cursor, scrollback ('text put <string...>' renders + flushes to the scanout; 'text clear' clears; 'text putraw' skips the trailing newline; 'text fontdebug [on|off]' missing-glyph stats)", .usage = "text [put <string...>|putraw <string...>|clear|fontdebug [on|off]]", .category = .graphics_input, .min_args = 0, .max_args = 9, .handler = cmd_text },
             .{ .name = "shutdown", .help = "request power-off", .usage = "shutdown", .category = .system, .handler = cmd_shutdown },
+            .{ .name = "ps", .help = "process status table: PID, name, state, memory footprint, CPU ticks, and executor task per live/exited process (M22 D6)", .usage = "ps", .category = .tasks_processes, .handler = cmd_ps },
             .{ .name = "spawn", .help = "spawn the lifecycle demo task", .usage = "spawn", .category = .tasks_processes, .handler = cmd_spawn },
             .{ .name = "sysinfo", .help = "comprehensive system and subsystem diagnostic snapshot", .usage = "sysinfo", .category = .machine_identity, .handler = cmd_sysinfo },
+            .{ .name = "strace", .help = "trace a program's syscalls: 'strace exec APP.BIN [args]' arms the tracer around an exec and prints one line per syscall; 'strace off' disarms", .usage = "strace exec <file> [args...] | off", .category = .tasks_processes, .handler = cmd_strace },
+            .{ .name = "sym", .help = "crash-report symbol table: 'sym' lists symbols loaded from the last ELF exec; 'sym <file>' parses an ELF's symtab from disk", .usage = "sym [<file>]", .category = .tasks_processes, .max_args = 1, .handler = cmd_sym },
             .{ .name = "syscalls", .help = "numbered syscall table and counters", .usage = "syscalls", .category = .tasks_processes, .handler = cmd_syscalls },
             .{ .name = "tasks", .help = "tick-driven task scheduler status", .usage = "tasks", .category = .tasks_processes, .handler = cmd_tasks },
             .{ .name = "timer", .help = "interrupt controller + timer status", .usage = "timer", .category = .memory_state, .handler = cmd_timer },
@@ -4943,6 +4956,196 @@ fn cmd_exec(m: *Monitor, args: []const []const u8) ExecError {
 // ---------------------------------------------------------------------------
 // Syscall ABI command (claim 3594)
 // ---------------------------------------------------------------------------
+
+/// M22 D3 (issue #326): `sym` — list the crash-report symbol table loaded
+/// by the most recent ELF exec, or parse an ELF's symtab straight from the
+/// volume without loading it.
+fn cmd_sym(m: *Monitor, args: []const []const u8) ExecError {
+    const symbol = @import("symbol.zig");
+    const elf_mod = @import("elf.zig");
+    if (args.len == 0) {
+        const n = symbol.count();
+        if (n == 0) {
+            m.console.print_line("sym: no symbols loaded (exec an ELF image)");
+            return .none;
+        }
+        m.console.puts("sym: ");
+        m.console.print_u64(n);
+        m.console.print_line(" symbol(s):");
+        var i: usize = 0;
+        while (i < n) : (i += 1) {
+            const sym = symbol.get(i).?;
+            m.console.puts("  ");
+            m.console.puts(sym.name_slice());
+            m.console.puts(" addr=");
+            m.console.print_hex(sym.addr);
+            m.console.puts(" size=");
+            m.console.print_hex(sym.size);
+            m.console.print_line("");
+        }
+        return .none;
+    }
+
+    // File inspection: read up to sym_file_max bytes and walk sections.
+    const name = args[0];
+    const got = fat.read_file(name, &sym_file_buf) orelse {
+        err_prefix(m);
+        m.console.puts(name);
+        m.console.print_line(": not found on the active volume");
+        return .invalid_argument;
+    };
+    var infos: [symbol.max_symbols]elf_mod.SymInfo = undefined;
+    const n = elf_mod.collect_symbols(sym_file_buf[0..got], &infos);
+    if (n == 0) {
+        m.console.puts(name);
+        m.console.print_line(": no symbols (stripped or not an AArch64 ELF)");
+        return .none;
+    }
+    m.console.puts(name);
+    m.console.puts(": ");
+    m.console.print_u64(n);
+    m.console.print_line(" symbol(s):");
+    for (infos[0..n]) |si| {
+        m.console.puts("  ");
+        m.console.puts(si.name);
+        m.console.puts(" addr=");
+        m.console.print_hex(si.addr);
+        m.console.puts(" size=");
+        m.console.print_hex(si.size);
+        m.console.print_line("");
+    }
+    return .none;
+}
+
+/// Staging buffer for `sym <file>` disk inspection.
+var sym_file_buf: [sym_file_max]u8 = undefined;
+
+/// M22 D5 (issue #328): `strace exec <file> [args...]` arms the kernel
+/// tracer for the process the exec spawns (the loader records its pid at
+/// the success point, before the task first runs, so every syscall is
+/// seen). `strace off` disarms. Anything else prints usage honestly.
+fn cmd_strace(m: *Monitor, args: []const []const u8) ExecError {
+    if (args.len == 1 and std.mem.eql(u8, args[0], "off")) {
+        syscall_mod.strace_pid = null;
+        m.console.print_line("strace: off");
+        return .none;
+    }
+    if (args.len >= 2 and std.mem.eql(u8, args[0], "exec")) {
+        const res = esp_exec.exec_file(args[1], args[2..]);
+        if (res != .ok) {
+            err_prefix(m);
+            m.console.puts("strace: exec refused (");
+            m.console.print_u64(@intFromEnum(res));
+            m.console.print_line(")");
+            return .invalid_argument;
+        }
+        syscall_mod.strace_pid = esp_exec.last_exec_pid();
+        m.console.print_line("strace: armed");
+        return .none;
+    }
+    err_prefix(m);
+    m.console.print_line("usage: strace exec <file> [args...] | strace off");
+    return .invalid_argument;
+}
+
+/// M22 D6 (issue #329): `ps` — the process status table. One row per
+/// non-free registry entry: PID, name, state, memory footprint (text +
+/// data + stack + kernel-stack pages), CPU ticks (via the executor task
+/// when bound), and the task id. `procs` remains the verbose view; this is
+/// the scannable table.
+fn cmd_ps(m: *Monitor, args: []const []const u8) ExecError {
+    _ = args;
+    m.console.puts("  PID  NAME                 STATE     MEM       CPU  TASK\n");
+    var id: usize = 0;
+    var rows: usize = 0;
+    while (id < process.max_processes) : (id += 1) {
+        const info = process.info(id) orelse continue;
+        if (info.state == .free) continue;
+        rows += 1;
+        var line: [96]u8 = undefined;
+        var pos: usize = 0;
+        pos = pad_left(&line, pos, id, 5);
+        pos = append_str(&line, pos, "  ");
+        pos = pad_right(&line, pos, info.name, 20);
+        pos = append_str(&line, pos, " ");
+        pos = pad_right(&line, pos, @tagName(info.state), 9);
+        pos = append_str(&line, pos, " ");
+        // Memory: owned pages only (boot payload reports its static stack).
+        const mem_kib = ((info.text_pages + info.data_pages + info.stack_pages + info.kernel_stack_pages) * 4);
+        pos = pad_left(&line, pos, mem_kib, 5);
+        line[pos] = 'K';
+        pos += 1;
+        pos = append_str(&line, pos, "   ");
+        pos = pad_left_u64(&line, pos, info.cpu_usage, 6);
+        pos = append_str(&line, pos, "  ");
+        if (info.task_id) |tid| {
+            pos = pad_left(&line, pos, tid, 4);
+        } else {
+            pos = append_str(&line, pos, "   -");
+        }
+        if (pos < line.len) {
+            line[pos] = '\n';
+            m.console.write(line[0 .. pos + 1]);
+        } else {
+            m.console.write(line[0..pos]);
+            m.console.print_line("");
+        }
+    }
+    if (rows == 0) m.console.print_line("ps: no processes");
+    return .none;
+}
+
+fn append_str(buf: []u8, pos: usize, src: []const u8) usize {
+    const take = @min(src.len, buf.len - pos);
+    @memcpy(buf[pos..][0..take], src[0..take]);
+    return pos + take;
+}
+
+fn pad_left(buf: []u8, pos: usize, v: usize, width: usize) usize {
+    var tmp: [20]u8 = undefined;
+    var n: usize = 0;
+    var v2 = v;
+    if (v2 == 0) {
+        tmp[0] = '0';
+        n = 1;
+    }
+    while (v2 > 0) : (v2 /= 10) {
+        tmp[n] = @intCast('0' + v2 % 10);
+        n += 1;
+    }
+    var written: usize = 0;
+    while (n + written < width) : (written += 1) buf[pos + written] = ' ';
+    var i: usize = 0;
+    while (i < n) : (i += 1) buf[pos + written + i] = tmp[n - 1 - i];
+    return pos + written + n;
+}
+
+fn pad_left_u64(buf: []u8, pos: usize, v_in: u64, width: usize) usize {
+    var tmp: [20]u8 = undefined;
+    var n: usize = 0;
+    var v = v_in;
+    if (v == 0) {
+        tmp[0] = '0';
+        n = 1;
+    }
+    while (v > 0) : (v /= 10) {
+        tmp[n] = @intCast('0' + v % 10);
+        n += 1;
+    }
+    var written: usize = 0;
+    while (n + written < width) : (written += 1) buf[pos + written] = ' ';
+    var i: usize = 0;
+    while (i < n) : (i += 1) buf[pos + written + i] = tmp[n - 1 - i];
+    return pos + written + n;
+}
+
+fn pad_right(buf: []u8, pos: usize, src: []const u8, width: usize) usize {
+    const take = @min(src.len, width);
+    @memcpy(buf[pos..][0..take], src[0..take]);
+    var written = take;
+    while (written < width) : (written += 1) buf[pos + written] = ' ';
+    return pos + written;
+}
 
 fn cmd_syscalls(m: *Monitor, args: []const []const u8) ExecError {
     _ = args;

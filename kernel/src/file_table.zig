@@ -78,7 +78,18 @@ fn mount_partition(p: Partition) bool {
         .esp => fat.mount(ops),
         .data => fat.mount_data(ops),
     };
-    return res == .ok;
+    if (res == .ok) return true;
+    // M22 D2 discovery (claim 9815): VZ's post-ExitBootServices device
+    // reset makes the FIRST post-boot transport mount attempt fail with
+    // io_failed while an immediate second attempt succeeds (observed on
+    // real VZ hardware: verify-live-fs-mutation failed its first open and
+    // passed once the mount was retried). Retry the mount exactly once —
+    // a cold transport warms; a genuinely dead one still fails honestly.
+    const retry = switch (p) {
+        .esp => fat.mount(ops),
+        .data => fat.mount_data(ops),
+    };
+    return retry == .ok;
 }
 
 pub fn init() void {

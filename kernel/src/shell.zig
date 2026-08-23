@@ -1528,7 +1528,10 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "  kill        terminate a running process (kernel-owned lifetime)\n" ++
         "  mbox        per-process IPC mailbox: pending messages and drain counters\n" ++
         "  procs       process registry: image, address space, lifecycle, exit status\n" ++
+        "  ps          process status table: PID, name, state, memory footprint, CPU ticks, and executor task per live/exited process (M22 D6)\n" ++
         "  spawn       spawn the lifecycle demo task\n" ++
+        "  strace      trace a program's syscalls: 'strace exec APP.BIN [args]' arms the tracer around an exec and prints one line per syscall; 'strace off' disarms\n" ++
+        "  sym         crash-report symbol table: 'sym' lists symbols loaded from the last ELF exec; 'sym <file>' parses an ELF's symtab from disk\n" ++
         "  syscalls    numbered syscall table and counters\n" ++
         "  tasks       tick-driven task scheduler status\n" ++
         "storage\n" ++

@@ -224,7 +224,8 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
                       chat_bytes=None, file_bytes=None, fstest_bytes=None, timertest_bytes=None,
                       victim_bytes=None, harden_bytes=None,
                        jingle_bytes=None, chime_bytes=None, globals_bytes=None,                      guard_bytes=None, spin_bytes=None, apps_txt_bytes=None,
-                       hello_bytes=None):
+                       hello_bytes=None, asm_bytes=None, settings_bytes=None,
+                       crash_bytes=None, disas_bytes=None, ps_bytes=None):
     """Write a FAT32 volume (boot sector, FSInfo, FATs, directories, files)
     into `img` at the volume's offset.
 
@@ -278,6 +279,11 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
     spin_clusters = (len(spin_bytes) + bps - 1) // bps if spin_bytes else 0
     apps_txt_clusters = (len(apps_txt_bytes) + bps - 1) // bps if apps_txt_bytes else 0
     hello_clusters = (len(hello_bytes) + bps - 1) // bps if hello_bytes else 0
+    asm_clusters = (len(asm_bytes) + bps - 1) // bps if asm_bytes else 0
+    settings_clusters = (len(settings_bytes) + bps - 1) // bps if settings_bytes else 0
+    crash_clusters = (len(crash_bytes) + bps - 1) // bps if crash_bytes else 0
+    disas_clusters = (len(disas_bytes) + bps - 1) // bps if disas_bytes else 0
+    ps_clusters = (len(ps_bytes) + bps - 1) // bps if ps_bytes else 0
     file_clusters = (len(efi_bytes) + bps - 1) // bps
     root_entries_count = 2  # vol_label + efi_entry
     if kernel_bytes: root_entries_count += 1
@@ -313,6 +319,11 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
     if spin_bytes: root_entries_count += 1
     if apps_txt_bytes: root_entries_count += 1
     if hello_bytes: root_entries_count += 1
+    if asm_bytes: root_entries_count += 1
+    if settings_bytes: root_entries_count += 1
+    if crash_bytes: root_entries_count += 1
+    if disas_bytes: root_entries_count += 1
+    if ps_bytes: root_entries_count += 1
 
     root_clusters = (root_entries_count * 32 + bps - 1) // bps
     efi_dir_cluster = 2 + root_clusters
@@ -348,7 +359,12 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
     globals_start = chime_start + chime_clusters
     guard_start = globals_start + globals_clusters
     spin_start = guard_start + guard_clusters
-    apps_txt_start = spin_start + spin_clusters
+    asm_start = spin_start + spin_clusters
+    settings_start = asm_start + asm_clusters
+    crash_start = settings_start + settings_clusters
+    disas_start = crash_start + crash_clusters
+    ps_start = disas_start + disas_clusters
+    apps_txt_start = ps_start + ps_clusters
     hello_start = apps_txt_start + apps_txt_clusters
     efi_start = hello_start + hello_clusters
     allocated = efi_start + file_clusters - 2  # clusters used beyond root(2)
@@ -431,6 +447,16 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
         chain(guard_start, guard_clusters)          # GUARD.BIN data
     if spin_bytes:
         chain(spin_start, spin_clusters)            # SPIN.BIN data
+    if asm_bytes:
+        chain(asm_start, asm_clusters)              # ASM.BIN data
+    if settings_bytes:
+        chain(settings_start, settings_clusters)  # SETTINGS.BIN data
+    if crash_bytes:
+        chain(crash_start, crash_clusters)          # CRASH.ELF data
+    if disas_bytes:
+        chain(disas_start, disas_clusters)          # DISAS.BIN data
+    if ps_bytes:
+        chain(ps_start, ps_clusters)                # PS.BIN data
     if apps_txt_bytes:
         chain(apps_txt_start, apps_txt_clusters)  # APPS.TXT data
     if hello_bytes:
@@ -527,6 +553,16 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
         root_entries += dir_entry(b"GUARD   BIN", 0x20, guard_start, len(guard_bytes))
     if spin_bytes:
         root_entries += dir_entry(b"SPIN    BIN", 0x20, spin_start, len(spin_bytes))
+    if asm_bytes:
+        root_entries += dir_entry(b"ASM     BIN", 0x20, asm_start, len(asm_bytes))
+    if settings_bytes:
+        root_entries += dir_entry(b"SETTINGSBIN", 0x20, settings_start, len(settings_bytes))
+    if crash_bytes:
+        root_entries += dir_entry(b"CRASH   ELF", 0x20, crash_start, len(crash_bytes))
+    if disas_bytes:
+        root_entries += dir_entry(b"DISAS   BIN", 0x20, disas_start, len(disas_bytes))
+    if ps_bytes:
+        root_entries += dir_entry(b"PS      BIN", 0x20, ps_start, len(ps_bytes))
     if apps_txt_bytes:
         root_entries += dir_entry(b"APPS    TXT", 0x20, apps_txt_start, len(apps_txt_bytes))
     if hello_bytes:
@@ -664,6 +700,26 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
         for i in range(spin_clusters):
             chunk = spin_bytes[i * bps:(i + 1) * bps]
             wsec(geo.cluster_sector(spin_start + i), chunk.ljust(bps, b"\x00"))
+    if asm_bytes:
+        for i in range(asm_clusters):
+            chunk = asm_bytes[i * bps:(i + 1) * bps]
+            wsec(geo.cluster_sector(asm_start + i), chunk.ljust(bps, b"\x00"))
+    if settings_bytes:
+        for i in range(settings_clusters):
+            chunk = settings_bytes[i * bps:(i + 1) * bps]
+            wsec(geo.cluster_sector(settings_start + i), chunk.ljust(bps, b"\x00"))
+    if crash_bytes:
+        for i in range(crash_clusters):
+            chunk = crash_bytes[i * bps:(i + 1) * bps]
+            wsec(geo.cluster_sector(crash_start + i), chunk.ljust(bps, b"\x00"))
+    if disas_bytes:
+        for i in range(disas_clusters):
+            chunk = disas_bytes[i * bps:(i + 1) * bps]
+            wsec(geo.cluster_sector(disas_start + i), chunk.ljust(bps, b"\x00"))
+    if ps_bytes:
+        for i in range(ps_clusters):
+            chunk = ps_bytes[i * bps:(i + 1) * bps]
+            wsec(geo.cluster_sector(ps_start + i), chunk.ljust(bps, b"\x00"))
     if apps_txt_bytes:
         for i in range(apps_txt_clusters):
             chunk = apps_txt_bytes[i * bps:(i + 1) * bps]
@@ -938,7 +994,8 @@ def build_image(total_sectors, esp_offset, efi_bytes, kernel_bytes=None,
                 victim_bytes=None, harden_bytes=None,
                 jingle_bytes=None, chime_bytes=None, globals_bytes=None,
                 guard_bytes=None, spin_bytes=None, apps_txt_bytes=None,
-                hello_bytes=None):
+                hello_bytes=None, asm_bytes=None, settings_bytes=None,
+                crash_bytes=None, disas_bytes=None, ps_bytes=None):
     img = bytearray(total_sectors * BYTES_PER_SECTOR)
     last_usable = total_sectors - 34
     first_usable = 34
@@ -982,7 +1039,7 @@ def build_image(total_sectors, esp_offset, efi_bytes, kernel_bytes=None,
                       keytest_bytes, savetext_bytes, type_bytes, dir_bytes,
                       calc_bytes, notepad_bytes, top_bytes, desktop_bytes,
                       tcp_bytes, fetch_bytes, chat_bytes, file_bytes, fstest_bytes, timertest_bytes,
-                      victim_bytes, harden_bytes, jingle_bytes, chime_bytes, globals_bytes, guard_bytes, spin_bytes, apps_txt_bytes, hello_bytes)
+                      victim_bytes, harden_bytes, jingle_bytes, chime_bytes, globals_bytes, guard_bytes, spin_bytes, apps_txt_bytes, hello_bytes, asm_bytes, settings_bytes, crash_bytes, disas_bytes, ps_bytes)
     geo_data = Fat32Geometry(data_sectors, data_start)
     build_data_volume(img, geo_data)
     return bytes(img)
@@ -1062,6 +1119,16 @@ def main(argv):
                     help="optional flat user program (GUARD.BIN) to embed at the volume root (milestone 16, card C2 -- claim 8403)")
     ap.add_argument("spin_file", nargs="?",
                     help="optional flat user program (SPIN.BIN) to embed at the volume root (Arc5 issue #246 -- CPU limit test)")
+    ap.add_argument("settings_file", nargs="?",
+                    help="optional flat user program (SETTINGS.BIN) to embed at the volume root (Issue #214 -- GUI settings panel)")
+    ap.add_argument("asm_file", nargs="?",
+                    help="optional flat user program (ASM.BIN) to embed at the volume root (M22 D2, issue #325 -- on-machine assembler)")
+    ap.add_argument("ps_file", nargs="?",
+                    help="optional flat user program (PS.BIN) to embed at the volume root (M22 D6, issue #329 -- windowed process viewer)")
+    ap.add_argument("disas_file", nargs="?",
+                    help="optional flat user program (DISAS.BIN) to embed at the volume root (M22 D4, issue #327 -- disassembler)")
+    ap.add_argument("crash_file", nargs="?",
+                    help="optional AArch64 ELF32 executable (CRASH.ELF) to embed at the volume root (M22 D3, issue #326 -- symbolized-crash gate)")
     ap.add_argument("hello_file", nargs="?",
                     help="optional AArch64 ELF32 executable (HELLO.ELF) to embed at the volume root (M22 D1, issue #324 -- ELF-loader gate)")
     ap.add_argument("--apps-txt", metavar="FILE",
@@ -1367,6 +1434,51 @@ def main(argv):
         with open(args.apps_txt, "rb") as f:
             apps_txt_bytes = f.read()
 
+    asm_bytes = None
+    if args.asm_file:
+        with open(args.asm_file, "rb") as f:
+            asm_bytes = f.read()
+        if asm_bytes[:4] != b"DSK1":
+            print("WARNING: %s does not start with the 'DSK1' magic; it may "
+                  "not be a DipshitOS user program image" % args.asm_file,
+                  file=sys.stderr)
+
+    settings_bytes = None
+    if args.settings_file:
+        with open(args.settings_file, "rb") as f:
+            settings_bytes = f.read()
+        if settings_bytes[:4] != b"DSK1":
+            print("WARNING: %s does not start with the 'DSK1' magic; it may "
+                  "not be a DipshitOS user program image" % args.settings_file,
+                  file=sys.stderr)
+
+    ps_bytes = None
+    if args.ps_file:
+        with open(args.ps_file, "rb") as f:
+            ps_bytes = f.read()
+        if ps_bytes[:4] != b"DSK1":
+            print("WARNING: %s does not start with the 'DSK1' magic; it may "
+                  "not be a DipshitOS user program image" % args.ps_file,
+                  file=sys.stderr)
+
+    disas_bytes = None
+    if args.disas_file:
+        with open(args.disas_file, "rb") as f:
+            disas_bytes = f.read()
+        if disas_bytes[:4] != b"DSK1":
+            print("WARNING: %s does not start with the 'DSK1' magic; it may "
+                  "not be a DipshitOS user program image" % args.disas_file,
+                  file=sys.stderr)
+
+    crash_bytes = None
+    if args.crash_file:
+        with open(args.crash_file, "rb") as f:
+            crash_bytes = f.read()
+        if crash_bytes[:4] != b"\x7fELF":
+            print("WARNING: %s does not start with the ELF magic; it may "
+                  "not be an AArch64 executable" % args.crash_file,
+                  file=sys.stderr)
+
     hello_bytes = None
     if args.hello_file:
         with open(args.hello_file, "rb") as f:
@@ -1383,7 +1495,7 @@ def main(argv):
                       winmove_bytes, keytest_bytes, savetext_bytes, type_bytes,
                       dir_bytes, calc_bytes, notepad_bytes, top_bytes, desktop_bytes,
                       tcp_bytes, fetch_bytes, chat_bytes, file_bytes, fstest_bytes, timertest_bytes,
-                      victim_bytes, harden_bytes, jingle_bytes, chime_bytes, globals_bytes, guard_bytes, spin_bytes, apps_txt_bytes, hello_bytes)
+                      victim_bytes, harden_bytes, jingle_bytes, chime_bytes, globals_bytes, guard_bytes, spin_bytes, apps_txt_bytes, hello_bytes, asm_bytes, settings_bytes, crash_bytes, disas_bytes, ps_bytes)
     with open(args.image, "wb") as f:
         f.write(img)
     extra = ", %d-byte kernel image embedded" % len(kernel_bytes) if kernel_bytes else ""

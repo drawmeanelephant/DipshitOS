@@ -303,6 +303,58 @@ if [ -f "$SPIN_BIN" ]; then
     SPIN_ARGS+=("$SPIN_BIN")
 fi
 
+# SETTINGS.BIN is a flat DSK1 program (Issue #214, GUI settings panel).
+# build.zig passes it as a positional but no slot consumed it before --
+# restored here so the desktop's APPS.TXT-driven launcher has its app.
+SETTINGS_BIN="${34:-$ROOT_DIR/zig-out/bin/SETTINGS.BIN}"
+SETTINGS_ARGS=()
+if [ -f "$SETTINGS_BIN" ]; then
+    if [ "$(head -c 4 "$SETTINGS_BIN")" != "DSK1" ]; then
+        fail "'$SETTINGS_BIN' does not start with the 'DSK1' image magic."
+    fi
+    SETTINGS_ARGS+=("$SETTINGS_BIN")
+fi
+
+# M22 D2 (issue #325): ASM.BIN is a flat DSK1 program (the on-machine
+# AArch64 assembler).
+ASM_BIN="${35:-$ROOT_DIR/zig-out/bin/ASM.BIN}"
+# M22 D4 (issue #327): DISAS.BIN is a flat DSK1 program (the disassembler).
+DISAS_BIN="${36:-$ROOT_DIR/zig-out/bin/DISAS.BIN}"
+PS_BIN="${37:-$ROOT_DIR/zig-out/bin/PS.BIN}"
+DISAS_ARGS=()
+if [ -f "$DISAS_BIN" ]; then
+    if [ "$(head -c 4 "$DISAS_BIN")" != "DSK1" ]; then
+        fail "'$DISAS_BIN' does not start with the 'DSK1' image magic -- run 'zig build' first."
+    fi
+    DISAS_ARGS+=("$DISAS_BIN")
+fi
+
+CRASH_BIN="${38:-$ROOT_DIR/zig-out/bin/CRASH.ELF}"
+PS_ARGS=()
+if [ -f "$PS_BIN" ]; then
+    if [ "$(head -c 4 "$PS_BIN")" != "DSK1" ]; then
+        fail "'$PS_BIN' does not start with the 'DSK1' image magic -- run 'zig build' first."
+    fi
+    PS_ARGS+=("$PS_BIN")
+fi
+ASM_ARGS=()
+if [ -f "$ASM_BIN" ]; then
+    if [ "$(head -c 4 "$ASM_BIN")" != "DSK1" ]; then
+        fail "'$ASM_BIN' does not start with the 'DSK1' image magic -- run 'zig build' first (it produces zig-out/bin/ASM.BIN)."
+    fi
+    ASM_ARGS+=("$ASM_BIN")
+fi
+
+# M22 D3 (issue #326): CRASH.ELF — a BRK-inside-'crasher' program with a
+# real symtab; generated fresh on every image build for the symbolized-
+# crash gate (verify-live-symbols.sh).
+CRASH_ELF="$ROOT_DIR/zig-out/bin/CRASH.ELF"
+python3 "$ROOT_DIR/tools/mkhello-elf.py" --crash "$CRASH_ELF" || fail "CRASH.ELF generation failed."
+if [ "$(head -c 4 "$CRASH_ELF")" != "$(printf '\x7fELF')" ]; then
+    fail "'$CRASH_ELF' does not start with the ELF magic."
+fi
+CRASH_ARGS=("$CRASH_ELF")
+
 # M22 D1 (issue #324): HELLO.ELF — a minimal statically linked AArch64
 # ELF32 executable, generated fresh on every image build. The kernel's ELF
 # loader path (`exec HELLO.ELF`, magic sniff in exec.exec_file) maps its
@@ -327,7 +379,7 @@ if [ -f "$APPS_TXT" ]; then
     APPS_TXT_ARGS+=(--apps-txt "$APPS_TXT")
 fi
 
-python3 "$SCRIPT_DIR/mkfat32.py" --size-mb "$SIZE_MB" "$IMAGE" "$EFI_BIN" "$KERNEL_BIN" "${USER_ARGS[@]}" "${COUNTER_ARGS[@]}" "${PEER_ARGS[@]}" "${STATUS43_ARGS[@]}" "${UDP_ARGS[@]}" "${WIN_ARGS[@]}" "${WINCLOSE_ARGS[@]}" "${WINLOOP_ARGS[@]}" "${WINMOVE_ARGS[@]}" "${KEYTEST_ARGS[@]}" "${SAVETEXT_ARGS[@]}" "${TYPE_ARGS[@]}" "${DIR_ARGS[@]}" "${CALC_ARGS[@]}" "${NOTEPAD_ARGS[@]}" "${TOP_ARGS[@]}" "${DESKTOP_ARGS[@]}" "${TCP_ARGS[@]+"${TCP_ARGS[@]}"}" "${FETCH_ARGS[@]+"${FETCH_ARGS[@]}"}" "${CHAT_ARGS[@]+"${CHAT_ARGS[@]}"}" "${FILE_ARGS[@]+"${FILE_ARGS[@]}"}" "${FSTEST_ARGS[@]+"${FSTEST_ARGS[@]}"}" "${TIMERTEST_ARGS[@]+"${TIMERTEST_ARGS[@]}"}" "${VICTIM_ARGS[@]+"${VICTIM_ARGS[@]}"}" "${HARDEN_ARGS[@]+"${HARDEN_ARGS[@]}"}" "${JINGLE_ARGS[@]+"${JINGLE_ARGS[@]}"}" "${CHIME_ARGS[@]+"${CHIME_ARGS[@]}"}" "${GLOBALS_ARGS[@]+"${GLOBALS_ARGS[@]}"}" "${GUARD_ARGS[@]+"${GUARD_ARGS[@]}"}" "${SPIN_ARGS[@]+"${SPIN_ARGS[@]}"}" "$HELLO_ELF" "${APPS_TXT_ARGS[@]}" \
+python3 "$SCRIPT_DIR/mkfat32.py" --size-mb "$SIZE_MB" "$IMAGE" "$EFI_BIN" "$KERNEL_BIN" "${USER_ARGS[@]}" "${COUNTER_ARGS[@]}" "${PEER_ARGS[@]}" "${STATUS43_ARGS[@]}" "${UDP_ARGS[@]}" "${WIN_ARGS[@]}" "${WINCLOSE_ARGS[@]}" "${WINLOOP_ARGS[@]}" "${WINMOVE_ARGS[@]}" "${KEYTEST_ARGS[@]}" "${SAVETEXT_ARGS[@]}" "${TYPE_ARGS[@]}" "${DIR_ARGS[@]}" "${CALC_ARGS[@]}" "${NOTEPAD_ARGS[@]}" "${TOP_ARGS[@]}" "${DESKTOP_ARGS[@]}" "${TCP_ARGS[@]+"${TCP_ARGS[@]}"}" "${FETCH_ARGS[@]+"${FETCH_ARGS[@]}"}" "${CHAT_ARGS[@]+"${CHAT_ARGS[@]}"}" "${FILE_ARGS[@]+"${FILE_ARGS[@]}"}" "${FSTEST_ARGS[@]+"${FSTEST_ARGS[@]}"}" "${TIMERTEST_ARGS[@]+"${TIMERTEST_ARGS[@]}"}" "${VICTIM_ARGS[@]+"${VICTIM_ARGS[@]}"}" "${HARDEN_ARGS[@]+"${HARDEN_ARGS[@]}"}" "${JINGLE_ARGS[@]+"${JINGLE_ARGS[@]}"}" "${CHIME_ARGS[@]+"${CHIME_ARGS[@]}"}" "${GLOBALS_ARGS[@]+"${GLOBALS_ARGS[@]}"}" "${GUARD_ARGS[@]+"${GUARD_ARGS[@]}"}" "${SPIN_ARGS[@]+"${SPIN_ARGS[@]}"}" "${SETTINGS_ARGS[@]+"${SETTINGS_ARGS[@]}"}" "${ASM_ARGS[@]+"${ASM_ARGS[@]}"}" "${PS_ARGS[@]+"${PS_ARGS[@]}"}" "${DISAS_ARGS[@]+"${DISAS_ARGS[@]}"}" "${CRASH_ARGS[@]+"${CRASH_ARGS[@]}"}" "$HELLO_ELF" "${APPS_TXT_ARGS[@]}" \
     || fail "image creation failed (see output above)."
 
 # 5. Self-verify by listing the image we just wrote.
@@ -405,6 +457,21 @@ fi
 if [ -f "$GUARD_BIN" ]; then
     printf '%s\n' "$LISTING" | grep -q 'GUARD.BIN' || fail "GUARD.BIN missing from the image listing"
 fi
+if [ -f "$SETTINGS_BIN" ]; then
+    printf '%s\n' "$LISTING" | grep -q 'SETTINGS.BIN' || fail "SETTINGS.BIN missing from the image listing"
+fi
+if [ -f "$ASM_BIN" ]; then
+    printf '%s\n' "$LISTING" | grep -q 'ASM.BIN' || fail "ASM.BIN missing from the image listing"
+fi
+if [ -f "$SETTINGS_BIN" ]; then
+    printf '%s\n' "$LISTING" | grep -q 'SETTINGS.BIN' || fail "SETTINGS.BIN missing from the image listing"
+fi
+if [ -f "$ASM_BIN" ]; then
+    printf '%s\n' "$LISTING" | grep -q 'ASM.BIN' || fail "ASM.BIN missing from the image listing"
+fi
+printf '%s\n' "$LISTING" | grep -q 'CRASH.ELF' || fail "CRASH.ELF missing from the image listing"
+printf '%s\n' "$LISTING" | grep -q 'DISAS.BIN' || fail "DISAS.BIN missing from the image listing"
+printf '%s\n' "$LISTING" | grep -q 'PS.BIN' || fail "PS.BIN missing from the image listing"
 printf '%s\n' "$LISTING" | grep -q 'HELLO.ELF' || fail "HELLO.ELF missing from the image listing"
 
 echo "make-image: done."

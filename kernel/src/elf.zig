@@ -112,6 +112,122 @@ pub fn is_elf(buf: []const u8) bool {
     return buf.len >= magic.len and std.mem.eql(u8, buf[0..magic.len], &magic);
 }
 
+// ---------------------------------------------------------------------------
+// Symbol collection (M22 D3, issue #326): walk section headers, find the
+// SHT_SYMTAB (+ its linked strtab), and emit function/object symbols with
+// non-local binding. Names are slices INTO `buf` — the caller must copy
+// them before dropping the buffer.
+// ---------------------------------------------------------------------------
+
+const sh_type_symtab: u32 = 2;
+const stt_func: u8 = 2;
+const stt_object: u8 = 1;
+const stb_local: u8 = 0;
+
+pub const SymInfo = struct {
+    name: []const u8,
+    addr: u64,
+    size: u64,
+};
+
+/// Collect up to `out.len` symbols from `buf`. Returns how many were
+/// written. Malformed/absent symbol tables yield 0 — never an error (a
+/// stripped image simply has no names).
+pub fn collect_symbols(buf: []const u8, out: []SymInfo) usize {
+    if (!is_elf(buf)) return 0;
+    const ei_class = buf[4];
+    if (ei_class != 1 and ei_class != 2) return 0;
+
+    var shoff: u64 = 0;
+    var shentsize: usize = 0;
+    var shnum: usize = 0;
+    if (ei_class == 1) {
+        if (buf.len < 52) return 0;
+        shoff = read_u32(buf, 32);
+        shentsize = read_u16(buf, 46);
+        shnum = read_u16(buf, 48);
+        if (shentsize != 40) return 0;
+    } else {
+        if (buf.len < 64) return 0;
+        shoff = read_u64(buf, 40);
+        shentsize = read_u16(buf, 58);
+        shnum = read_u16(buf, 60);
+        if (shentsize != 64) return 0;
+    }
+    if (shnum == 0 or shoff == 0) return 0;
+    const table_bytes = @as(u64, shnum) * @as(u64, shentsize);
+    if (shoff > buf.len or table_bytes > buf.len - shoff) return 0;
+
+    // Locate SHT_SYMTAB; remember its linked strtab index.
+    var symtab_off: u64 = 0;
+    var symtab_size: u64 = 0;
+    var symtab_entsize: u64 = 0;
+    var strtab_idx: usize = 0;
+    var found = false;
+    var i: usize = 0;
+    while (i < shnum) : (i += 1) {
+        const rec = shoff + @as(u64, i) * @as(u64, shentsize);
+        const sh_type = read_u32(buf, @intCast(rec + 4));
+        if (sh_type != sh_type_symtab) continue;
+        const sh_offset = if (ei_class == 1) read_u32(buf, @intCast(rec + 16)) else read_u64(buf, @intCast(rec + 24));
+        const sh_size = if (ei_class == 1) read_u32(buf, @intCast(rec + 20)) else read_u64(buf, @intCast(rec + 32));
+        strtab_idx = if (ei_class == 1) read_u32(buf, @intCast(rec + 24)) else read_u32(buf, @intCast(rec + 40));
+        symtab_off = sh_offset;
+        symtab_size = sh_size;
+        symtab_entsize = if (ei_class == 1) read_u32(buf, @intCast(rec + 36)) else read_u64(buf, @intCast(rec + 56));
+        found = true;
+        break;
+    }
+    if (!found) return 0;
+
+    // Resolve the strtab section record.
+    if (strtab_idx >= shnum) return 0;
+    const srec = shoff + @as(u64, strtab_idx) * @as(u64, shentsize);
+    const str_off = if (ei_class == 1) read_u32(buf, @intCast(srec + 16)) else read_u64(buf, @intCast(srec + 24));
+    const str_size = if (ei_class == 1) read_u32(buf, @intCast(srec + 20)) else read_u64(buf, @intCast(srec + 32));
+    if (str_off > buf.len or str_size > buf.len - str_off) return 0;
+    const strtab = buf[@intCast(str_off)..][0..@intCast(str_size)];
+
+    // Expected entry sizes per class.
+    const want_entsize: u64 = if (ei_class == 1) 16 else 24;
+    if (symtab_entsize != want_entsize) return 0;
+    if (symtab_off > buf.len or symtab_size > buf.len - symtab_off) return 0;
+
+    var written: usize = 0;
+    const entries = symtab_size / symtab_entsize;
+    var e: usize = 0;
+    while (e < entries) : (e += 1) {
+        if (written == out.len) break;
+        const rec = symtab_off + e * symtab_entsize;
+        var st_name: u32 = 0;
+        var st_info: u8 = 0;
+        var st_value: u64 = 0;
+        var st_size: u64 = 0;
+        if (ei_class == 1) {
+            st_name = read_u32(buf, @intCast(rec));
+            st_info = buf[rec + 12];
+            st_value = read_u32(buf, @intCast(rec + 4));
+            st_size = read_u32(buf, @intCast(rec + 8));
+        } else {
+            st_name = read_u32(buf, @intCast(rec));
+            st_info = buf[rec + 4];
+            st_value = read_u64(buf, @intCast(rec + 8));
+            st_size = read_u64(buf, @intCast(rec + 16));
+        }
+        // Keep GLOBAL(1)/WEAK(2) FUNC/OBJECT; skip locals and specials.
+        const binding = st_info >> 4;
+        const kind = st_info & 0xf;
+        if (binding == stb_local) continue;
+        if (kind != stt_func and kind != stt_object) continue;
+        if (st_name >= strtab.len) continue;
+        const name_slice = std.mem.sliceTo(strtab[st_name..], 0);
+        if (name_slice.len == 0) continue;
+        out[written] = .{ .name = name_slice, .addr = st_value, .size = st_size };
+        written += 1;
+    }
+    return written;
+}
+
 fn read_u16(buf: []const u8, off: usize) u16 {
     return std.mem.readInt(u16, buf[off..][0..2], .little);
 }
@@ -446,4 +562,61 @@ test "elf: two-segment layout validates the data-base contract" {
     var overlap = img;
     std.mem.writeInt(u32, overlap[88..92], 118, .little); // data file starts inside text file range
     try testing.expectError(error.overlapping_segments, parse(&overlap));
+}
+
+test "elf: collect_symbols reads a hand-built symtab" {
+    // Build an ELF32 with two sections: symtab + strtab, three symbols
+    // (global func "crasher", local skipped, global object "msg").
+    var img = [_]u8{0} ** 512;
+    @memcpy(img[0..4], &magic);
+    img[4] = 1;
+    img[5] = 1;
+    std.mem.writeInt(u16, img[18..20], em_aarch64, .little);
+    const shoff: u32 = 52;
+    std.mem.writeInt(u32, img[32..36], shoff, .little); // e_shoff
+    std.mem.writeInt(u16, img[46..48], 40, .little); // e_shentsize
+    std.mem.writeInt(u16, img[48..50], 2, .little); // e_shnum: symtab+strtab
+
+    // Section 0 @52: SHT_SYMTAB, offset 132, size 48 (3 entries), link=1.
+    std.mem.writeInt(u32, img[shoff..][0..4], 0, .little); // sh_name
+    std.mem.writeInt(u32, img[shoff + 4 ..][0..4], 2, .little); // SHT_SYMTAB
+    std.mem.writeInt(u32, img[shoff + 16 ..][0..4], 132, .little); // sh_offset
+    std.mem.writeInt(u32, img[shoff + 20 ..][0..4], 48, .little); // sh_size
+    std.mem.writeInt(u32, img[shoff + 24 ..][0..4], 1, .little); // sh_link -> strtab
+    std.mem.writeInt(u32, img[shoff + 36 ..][0..4], 16, .little); // sh_entsize
+
+    // Section 1 @92: SHT_STRTAB, offset 180, size 40.
+    const s1 = shoff + 40;
+    std.mem.writeInt(u32, img[s1 + 4 ..][0..4], 3, .little); // STRTAB
+    std.mem.writeInt(u32, img[s1 + 16 ..][0..4], 180, .little);
+    std.mem.writeInt(u32, img[s1 + 20 ..][0..4], 40, .little);
+
+    // Strtab: [0]=NUL, "crasher\0", "msg\0"
+    @memcpy(img[181..189], "crasher\x00");
+    @memcpy(img[189..193], "msg\x00");
+
+    // Symtab entries at 132: entry 0 is the reserved null symbol.
+    // Entry 1: GLOBAL FUNC crasher @0x400010 size 20; st_name=1.
+    var e1 = shoff;
+    _ = &e1;
+    const sym_base: u32 = 132;
+    std.mem.writeInt(u32, img[sym_base + 16 ..][0..4], 1, .little); // st_name
+    img[sym_base + 16 + 12] = (1 << 4) | 2; // GLOBAL FUNC
+    std.mem.writeInt(u32, img[sym_base + 16 + 4 ..][0..4], 0x400010, .little); // st_value
+    std.mem.writeInt(u32, img[sym_base + 16 + 8 ..][0..4], 20, .little); // st_size
+    // Entry 2: LOCAL func (skipped).
+    std.mem.writeInt(u32, img[sym_base + 32 ..][0..4], 9, .little);
+    img[sym_base + 32 + 12] = (0 << 4) | 2;
+
+    var out: [8]SymInfo = undefined;
+    const n = collect_symbols(&img, &out);
+    try testing.expectEqual(@as(usize, 1), n);
+    try testing.expectEqualStrings("crasher", out[0].name);
+    try testing.expectEqual(@as(u64, 0x400010), out[0].addr);
+    try testing.expectEqual(@as(u64, 20), out[0].size);
+
+    // Stripped image (no sections) yields zero without error.
+    var bare = elf32_one(&[_]u8{0} ** 4, 0x400000, 0, 0, 5);
+    _ = &bare;
+    try testing.expectEqual(@as(usize, 0), collect_symbols(&bare, &out));
 }
