@@ -50,6 +50,8 @@ const Base = prog.Base;
 const constants = @import("calc/constants.zig");
 
 const expr_mod = @import("calc/expr.zig");
+
+const dates = @import("calc/dates.zig");
 const science = @import("calc/science.zig");
 
 // ---------------------------------------------------------------------------
@@ -305,6 +307,13 @@ pub const AppState = struct {
     dec_places: u8 = 2, // fractional digits shown for float-valued results (0–10)
     thousands_sep: bool = false, // 1234567 -> "1,234,567"
     hex_leading_zeros: bool = false, // 16-digit padded hex in programmer mode
+
+    // K13: date/time arithmetic (Ctrl+D bar over the history area)
+    date_active: bool = false,
+    date_buf: [40]u8 = [_]u8{0} ** 40, // command line: "d1 - d2", "d + N", "now"
+    date_len: usize = 0,
+    date_result_len: usize = 0,
+    date_result: [48]u8 = [_]u8{0} ** 48,
 
     // ---- Standard mode buttons ----
     btn_m_store: Button = Button.init(Rect.make(8, 104, 56, 20), "MS"),
@@ -891,7 +900,114 @@ pub const AppState = struct {
         // K12 settings bar (when active, overlays the history area)
         if (self.cfg_active) {
             self.draw_cfg_bar(win);
+        } else if (self.date_active) {
+            // K13 date bar (when active, overlays the history area)
+            self.draw_date_bar(win);
         }
+    }
+
+    fn draw_date_bar(self: *const AppState, win: u32) void {
+        ui.draw_rect(win, history_area, ui.COLOR_SURFACE);
+        ui.draw_rect_outline(win, history_area, 1, ui.COLOR_ACCENT);
+
+        // Row 0: the command line
+        var line0: [56]u8 = undefined;
+        const prompt = "> ";
+        @memcpy(line0[0..prompt.len], prompt);
+        const dl = @min(self.date_len, line0.len - prompt.len - 4);
+        @memcpy(line0[prompt.len .. prompt.len + dl], self.date_buf[0..dl]);
+        ui.draw_text(win, line0[0 .. prompt.len + dl], history_area.x + 4, history_area.y + 4, ui.COLOR_TEXT_PRIMARY);
+
+        // Row 1: result of the last operation (or usage hint)
+        if (self.date_result_len > 0) {
+            const rl = @min(self.date_result_len, 60);
+            ui.draw_text(win, self.date_result[0..rl], history_area.x + 4, history_area.y + 20, ui.COLOR_ACCENT);
+        } else {
+            const hint = "d1 - d2 | d + N | now";
+            ui.draw_text(win, hint, history_area.x + 4, history_area.y + 20, ui.COLOR_TEXT_MUTED);
+        }
+    }
+
+    fn fmt_date_result(self: *AppState, comptime f: []const u8, args: anytype) usize {
+        const s = std.fmt.bufPrint(&self.date_result, f, args) catch return 0;
+        return s.len;
+    }
+
+    /// K13: evaluate the date command line; results are numeric in the; results are numeric in the
+    /// engine/history (days or seconds), human-readable in the bar.
+    fn date_evaluate(self: *AppState) void {
+        if (self.date_len == 0) return;
+        const text = self.date_buf[0..self.date_len];
+
+        var out_len: usize = 0;
+        var value: i64 = 0;
+
+        if (std.mem.eql(u8, text, "now")) {
+            value = @intCast(dates.now());
+            out_len = self.fmt_date_result("{d}s since boot", .{value});
+        } else if (std.mem.indexOf(u8, text, " - ")) |sep| {
+            // date_diff
+            const a = dates.parse(text[0..sep]) catch {
+                self.date_fail();
+                return;
+            };
+            const b = dates.parse(text[sep + 3 ..]) catch {
+                self.date_fail();
+                return;
+            };
+            value = a - b;
+            out_len = self.fmt_date_result("{d} days", .{value});
+        } else if (std.mem.indexOf(u8, text, " + ")) |sep| {
+            // date_add
+            const base = dates.parse(text[0..sep]) catch {
+                self.date_fail();
+                return;
+            };
+            var num_buf: [16]u8 = undefined;
+            const rest = text[sep + 3 ..];
+            if (rest.len >= num_buf.len) {
+                self.date_fail();
+                return;
+            }
+            @memcpy(num_buf[0..rest.len], rest);
+            const days = parse_cfg_int(num_buf[0..rest.len]) orelse {
+                self.date_fail();
+                return;
+            };
+            value = base + days;
+            var fmt_buf: [16]u8 = undefined;
+            const new_date = dates.format(value, &fmt_buf);
+            @memcpy(self.date_result[0..new_date.len], new_date);
+            out_len = new_date.len;
+        } else {
+            // A bare date: show its day count
+            value = dates.parse(text) catch {
+                self.date_fail();
+                return;
+            };
+            out_len = self.fmt_date_result("day {d}", .{value});
+        }
+
+        self.date_result_len = out_len;
+        self.engine.current_val = value;
+        self.engine.is_entering_val = false;
+        self.engine.has_error = false;
+        self.push_history(text, value);
+        self.date_len = 0;
+        ui.write_console("calc: date-ok\n");
+    }
+
+    fn date_fail(self: *AppState) void {
+        const msg = "? (YYYY-MM-DD)";
+        @memcpy(self.date_result[0..msg.len], msg);
+        self.date_result_len = msg.len;
+        self.engine.raise_error();
+        ui.write_console("calc: date-error\n");
+    }
+
+    fn is_date_char(ch: u8) bool {
+        return (ch >= '0' and ch <= '9') or ch == '-' or ch == '+' or ch == ' ' or
+            ch == 'n' or ch == 'o' or ch == 'w';
     }
 
     fn draw_cfg_bar(self: *const AppState, win: u32) void {
@@ -1487,6 +1603,37 @@ pub const AppState = struct {
             self.cfg_row = 0;
             ui.write_console(if (self.cfg_active) "calc: cfg-open\n" else "calc: cfg-close\n");
             return true;
+        }
+
+        // K13: Ctrl+D toggles the date bar
+        if (ctrl and (ascii == 'd' or ascii == 'D')) {
+            self.date_active = !self.date_active;
+            self.date_len = 0;
+            ui.write_console(if (self.date_active) "calc: date-open\n" else "calc: date-close\n");
+            return true;
+        }
+
+        // K13: while the date bar is open it consumes keys
+        if (self.date_active and !ctrl) {
+            if (ascii == 0x08 or keycode == 0x2a) {
+                if (self.date_len > 0) self.date_len -= 1;
+                return true;
+            }
+            if (ascii == 0x1b or keycode == 0x29) {
+                self.date_active = false;
+                ui.write_console("calc: date-close\n");
+                return true;
+            }
+            if (keycode == 0x28 or ascii == '\r' or ascii == '\n' or ascii == '=') {
+                self.date_evaluate();
+                return true;
+            }
+            if (is_date_char(ascii) and self.date_len < self.date_buf.len) {
+                self.date_buf[self.date_len] = ascii;
+                self.date_len += 1;
+                return true;
+            }
+            return true; // swallow everything else while open
         }
 
         // K12: while the settings bar is open it consumes keys
@@ -2266,4 +2413,70 @@ test "calc K12: display honors thousands separator" {
     try std.testing.expectEqualStrings("1234567", app.display_text(&buf));
     app.thousands_sep = true;
     try std.testing.expectEqualStrings("1,234,567", app.display_text(&buf));
+}
+
+test "calc K13: Ctrl+D opens date bar; diff command works" {
+    var app = AppState.init();
+    try std.testing.expect(!app.date_active);
+    var evd = Event{ .kind = ui.KEY_DOWN, .flags = 0x04, .seq = 1, .arg0 = 0, .arg1 = 'd' };
+    try std.testing.expect(app.handle_keyboard_event(&evd));
+    try std.testing.expect(app.date_active);
+
+    for ("2026-01-10 - 2026-01-01") |ch| {
+        var ev = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 2, .arg0 = 0, .arg1 = ch };
+        _ = app.handle_keyboard_event(&ev);
+    }
+    var evr = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 3, .arg0 = 0x28, .arg1 = '\r' };
+    _ = app.handle_keyboard_event(&evr);
+    // 9 days lands in engine + history; result line says "9 days"
+    // "A - B" reads A minus B
+    try std.testing.expectEqual(@as(i64, 9), app.engine.current_val);
+    const e = app.hist.get(app.hist.len - 1);
+    try std.testing.expectEqualStrings("2026-01-10 - 2026-01-01", e.text[0..e.len]);
+    try std.testing.expectEqualStrings("9 days", app.date_result[0..app.date_result_len]);
+}
+
+test "calc K13: date_add renders the new date" {
+    var app = AppState.init();
+    app.date_active = true;
+    for ("2026-01-01 + 30") |ch| {
+        var ev = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 1, .arg0 = 0, .arg1 = ch };
+        _ = app.handle_keyboard_event(&ev);
+    }
+    var evr = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 2, .arg0 = 0x28, .arg1 = '\r' };
+    _ = app.handle_keyboard_event(&evr);
+    // Engine holds the new date's epoch-day count (20484 = 2026-01-31)
+    try std.testing.expectEqual(@as(i64, 20484), app.engine.current_val);
+    try std.testing.expectEqualStrings("2026-01-31", app.date_result[0..app.date_result_len]);
+}
+
+test "calc K13: now yields a positive second count" {
+    var app = AppState.init();
+    app.date_active = true;
+    for ("now") |ch| {
+        var ev = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 1, .arg0 = 0, .arg1 = ch };
+        _ = app.handle_keyboard_event(&ev);
+    }
+    var evr = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 2, .arg0 = 0x28, .arg1 = '\r' };
+    _ = app.handle_keyboard_event(&evr);
+    try std.testing.expect(app.engine.current_val > 0); // host stub counts by 42
+    try std.testing.expect(app.date_result_len > 0);
+}
+
+test "calc K13: bad date raises ERROR marker" {
+    var app = AppState.init();
+    app.date_active = true;
+    for ("2026-13-40") |ch| {
+        var ev = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 1, .arg0 = 0, .arg1 = ch };
+        _ = app.handle_keyboard_event(&ev);
+    }
+    var evr = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 2, .arg0 = 0x28, .arg1 = '\r' };
+    _ = app.handle_keyboard_event(&evr);
+    try std.testing.expect(app.engine.has_error);
+    try std.testing.expectEqualStrings("? (YYYY-MM-DD)", app.date_result[0..app.date_result_len]);
+
+    // Esc closes
+    var esc = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 3, .arg0 = 0x29, .arg1 = 0x1b };
+    _ = app.handle_keyboard_event(&esc);
+    try std.testing.expect(!app.date_active);
 }
