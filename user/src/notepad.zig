@@ -554,6 +554,24 @@ pub const AppState = struct {
         return true;
     }
 
+    /// Ordinal (0-based) of the current match among all matches, or
+    /// null with no active match. M20-U8's "Match N of M" needs it.
+    pub fn find_current_ordinal(self: *const AppState) ?usize {
+        const ms = self.find_match_start orelse return null;
+        const buf = self.buffer.get_slice();
+        const pat = self.find_buf[0..self.find_len];
+        var ord: usize = 0;
+        var i: usize = 0;
+        while (i + pat.len <= buf.len and i <= ms) : (i += 1) {
+            if (match_at(buf, i, pat, self.find_case_sensitive)) {
+                if (i == ms) return ord;
+                ord += 1;
+                i += pat.len - 1;
+            }
+        }
+        return ord;
+    }
+
     pub fn find_next(self: *AppState) bool {
         if (self.find_len == 0) return false;
         const buf = self.buffer.get_slice();
@@ -815,17 +833,20 @@ pub const AppState = struct {
             ui.draw_text(win, "Find:", text_area.x + 4, bar_y + 5, ui.COLOR_TEXT_MUTED);
             ui.draw_text(win, self.find_buf[0..self.find_len], text_area.x + 40, bar_y + 5, ui.COLOR_TEXT_PRIMARY);
             if (self.find_match_start != null) {
-                var mbuf: [16]u8 = undefined;
-                var mlen: usize = 0;
-                // Show "3 of 12" when there are matches.
-                const cur = self.find_current + 1;
+                // M20-U8: real "Match N of M".
+                const cur = self.find_current_ordinal().? + 1;
                 const tot = self.find_all_count();
-                // For brevity, just show count.
-                _ = cur;
-                _ = tot;
-                @memcpy(mbuf[0..6], " found");
-                mlen = 6;
-                ui.draw_text(win, mbuf[0..mlen], text_area.x + text_area.w - 60, bar_y + 5, ui.COLOR_TEXT_MUTED);
+                var mbuf: [24]u8 = undefined;
+                const mline = std.fmt.bufPrint(&mbuf, "{d} of {d}", .{ cur, tot }) catch "of";
+                ui.draw_text(win, mline, text_area.x + text_area.w - 60, bar_y + 5, ui.COLOR_TEXT_MUTED);
+            }
+            // Case-sensitivity chip: lit when matching is case-sensitive.
+            {
+                const chip_x = text_area.x + 40 + @as(u32, @intCast(self.find_len)) * 6 + 8;
+                if (chip_x + 24 < text_area.x + text_area.w - 70) {
+                    ui.draw_rect_outline(win, Rect.make(chip_x, bar_y + 3, 22, 12), 1, if (self.find_case_sensitive) ui.COLOR_ACCENT else ui.COLOR_TEXT_MUTED);
+                    ui.draw_text(win, "Aa", chip_x + 4, bar_y + 5, if (self.find_case_sensitive) ui.COLOR_ACCENT else ui.COLOR_TEXT_MUTED);
+                }
             }
             if (self.find_replace_active) {
                 ui.draw_text(win, "Replace:", text_area.x + 140, bar_y + 5, ui.COLOR_TEXT_MUTED);
@@ -928,6 +949,13 @@ pub const AppState = struct {
 
         // M15 C6: Ctrl+F toggles find bar, Ctrl+H toggles replace field.
         if ((ev.flags & ui.MOD_CTRL) != 0) {
+            // M20-U8: Ctrl+Shift+F toggles case-sensitive matching.
+            if (keycode == 0x09 and (ev.flags & ui.MOD_SHIFT) != 0) {
+                if (self.find_active) {
+                    self.find_case_sensitive = !self.find_case_sensitive;
+                    return true;
+                }
+            }
             if (keycode == 0x09) { // f
                 self.find_active = !self.find_active;
                 if (!self.find_active) {
@@ -1778,4 +1806,36 @@ test "notepad: M15 C6 — find next, case-insensitive, replace and replace-all" 
     ev_f.arg0 = 0x09;
     try std.testing.expect(app.handle_keyboard_event(&ev_f));
     try std.testing.expect(!app.find_active);
+}
+
+test "notepad: M20-U8 — Match N of M ordinal and case-sensitive toggle" {
+    var app = AppState.init();
+    app.buffer.set_content("hat hat hat");
+    @memcpy(app.find_buf[0..3], "hat");
+    app.find_len = 3;
+    // First match.
+    try std.testing.expect(app.find_next());
+    try std.testing.expectEqual(@as(usize, 0), app.find_current_ordinal().?);
+    try std.testing.expectEqual(@as(usize, 3), app.find_all_count());
+    // Second + third ordinals walk with the matches.
+    app.buffer.cursor = 1;
+    try std.testing.expect(app.find_next());
+    try std.testing.expectEqual(@as(usize, 1), app.find_current_ordinal().?);
+    app.buffer.cursor = 5;
+    try std.testing.expect(app.find_next());
+    try std.testing.expectEqual(@as(usize, 2), app.find_current_ordinal().?);
+    // Case-insensitive finds HAT too…
+    // Prepend "HAT " by inserting at the cursor after moving home.
+    app.buffer.cursor = 0;
+    _ = app.buffer.insert_slice("HAT ");
+    try std.testing.expectEqual(@as(usize, 4), app.find_all_count());
+    // …but Ctrl+Shift+F flips to case-sensitive and HAT disappears.
+    app.find_active = true;
+    var ev_cs = Event{ .kind = ui.KEY_DOWN, .flags = ui.MOD_CTRL | ui.MOD_SHIFT, .seq = 2, .arg0 = 0x09, .arg1 = 0 };
+    try std.testing.expect(app.handle_keyboard_event(&ev_cs));
+    try std.testing.expect(app.find_case_sensitive);
+    try std.testing.expectEqual(@as(usize, 3), app.find_all_count());
+    // Toggling again restores case-insensitive matching.
+    try std.testing.expect(app.handle_keyboard_event(&ev_cs));
+    try std.testing.expect(!app.find_case_sensitive);
 }

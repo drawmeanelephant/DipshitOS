@@ -368,6 +368,15 @@ pub const AppState = struct {
     status_msg: [24]u8 = "Ready\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00".*,
     status_len: usize = 5,
 
+    // M20-U8: Ctrl+F filename filter. The full listing is snapshotted on
+    // activation; every keystroke rebuilds `entries` from the snapshot
+    // by case-insensitive substring match (real-time narrowing).
+    filter_active: bool = false,
+    filter_buf: [24]u8 = [_]u8{0} ** 24,
+    filter_len: usize = 0,
+    shadow: [max_entries]DirEntry = undefined,
+    shadow_count: usize = 0,
+
     btn_open: Button = Button.init(btn_open_rect, "Open"),
     btn_rename: Button = Button.init(btn_rename_rect, "Rename"),
     btn_delete: Button = Button.init(btn_delete_rect, "Delete"),
@@ -390,6 +399,80 @@ pub const AppState = struct {
         const n = @min(msg.len, self.status_msg.len);
         @memcpy(self.status_msg[0..n], msg[0..n]);
         self.status_len = n;
+    }
+
+    /// M20-U8: toggle the Ctrl+F filter bar. Activation snapshots the
+    /// full listing; deactivation restores it.
+    pub fn toggle_filter(self: *AppState) bool {
+        if (!self.filter_active) {
+            self.filter_active = true;
+            self.filter_len = 0;
+            self.shadow_count = self.entry_count;
+            for (0..self.entry_count) |i| self.shadow[i] = self.entries[i];
+        } else {
+            self.filter_active = false;
+            self.filter_len = 0;
+            self.restore_shadow();
+        }
+        return true;
+    }
+
+    fn restore_shadow(self: *AppState) void {
+        self.entry_count = self.shadow_count;
+        for (0..self.shadow_count) |i| self.entries[i] = self.shadow[i];
+        if (self.entry_count > 0) self.list.select(0, self.entry_count);
+    }
+
+    fn matches_filter(name: []const u8, pat: []const u8) bool {
+        if (pat.len == 0) return true;
+        if (pat.len > name.len) return false;
+        var i: usize = 0;
+        while (i + pat.len <= name.len) : (i += 1) {
+            var ok = true;
+            for (pat, 0..) |pc, j| {
+                const nc = name[i + j];
+                const lo_n = if (nc >= 'A' and nc <= 'Z') nc + 32 else nc;
+                const lo_p = if (pc >= 'A' and pc <= 'Z') pc + 32 else pc;
+                if (lo_n != lo_p) {
+                    ok = false;
+                    break;
+                }
+            }
+            if (ok) return true;
+        }
+        return false;
+    }
+
+    /// Rebuild the visible entries from the shadow per the filter text.
+    pub fn apply_filter(self: *AppState) void {
+        const pat = self.filter_buf[0..self.filter_len];
+        var n: usize = 0;
+        for (self.shadow[0..self.shadow_count]) |e| {
+            if (matches_filter(entry_name(&e), pat)) {
+                self.entries[n] = e;
+                n += 1;
+                if (n == max_entries) break;
+            }
+        }
+        self.entry_count = n;
+        if (n > 0) self.list.select(0, n);
+    }
+
+    /// Feed one printable byte / backspace to the active filter.
+    pub fn filter_input(self: *AppState, ascii_char: u8) bool {
+        if (!self.filter_active) return false;
+        if (ascii_char == 0x08) { // backspace
+            if (self.filter_len > 0) self.filter_len -= 1;
+        } else if (ascii_char >= 0x20 and ascii_char < 0x7f) {
+            if (self.filter_len < self.filter_buf.len) {
+                self.filter_buf[self.filter_len] = ascii_char;
+                self.filter_len += 1;
+            }
+        } else {
+            return false;
+        }
+        self.apply_filter();
+        return true;
     }
 
     pub fn current_path_slice(self: *const AppState) []const u8 {
@@ -676,6 +759,17 @@ pub const AppState = struct {
         // Status strip (title-bar right) — shift right to avoid breadcrumb overlap.
         ui.draw_text(win, self.status_msg[0..self.status_len], 380, 8, ui.COLOR_TEXT_MUTED);
 
+        // M20-U8: the find bar sits between breadcrumbs and the listing.
+        if (!self.view_mode and self.filter_active) {
+            const fb = Rect.make(list_area.x, list_area.y, list_area.w, 14);
+            const list_top = list_area.y + 16;
+            _ = list_top;
+            ui.draw_rect(win, fb, ui.COLOR_SURFACE);
+            ui.draw_rect_outline(win, fb, 1, ui.COLOR_ACCENT);
+            ui.draw_text(win, "Find:", fb.x + 4, fb.y + 3, ui.COLOR_TEXT_MUTED);
+            ui.draw_text(win, self.filter_buf[0..self.filter_len], fb.x + 40, fb.y + 3, ui.COLOR_TEXT_PRIMARY);
+        }
+
         if (self.view_mode) {
             self.draw_view(win);
             self.btn_back.draw(win);
@@ -877,6 +971,24 @@ pub const AppState = struct {
                 return true;
             }
             return false;
+        }
+
+        // M20-U8: Ctrl+F toggles the filename filter bar.
+        if ((ev.flags & ui.MOD_CTRL) != 0 and keycode == 0x09) {
+            return self.toggle_filter();
+        }
+
+        // While the filter is active, typing narrows the list and Escape
+        // leaves (restoring the full listing). Letters no longer trigger
+        // the d/r shortcuts — they are filter input.
+        if (self.filter_active) {
+            if (keycode == 0x29) return self.toggle_filter(); // Escape
+            if (keycode == 0x2a) return self.filter_input(0x08); // Backspace
+            if (ascii_char >= 0x20 and ascii_char < 0x7f and
+                (ev.flags & ui.MOD_CTRL) == 0)
+            {
+                return self.filter_input(ascii_char);
+            }
         }
 
         // Enter opens the selected entry.
@@ -1261,4 +1373,53 @@ test "file: breadcrumb_click hit-test via AppState (C7)" {
     const hit = app.breadcrumb_click(64, 8);
     try std.testing.expect(hit);
     try std.testing.expectEqualStrings("/data", app.current_path_slice());
+}
+
+test "file: M20-U8 — Ctrl+F filter narrows the listing in real time" {
+    var app = AppState.init();
+    // Fabricate a listing.
+    app.entry_count = 3;
+    @memcpy(app.entries[0].name[0..9], "HELLO.TXT");
+    @memcpy(app.entries[1].name[0..8], "world.md");
+    @memcpy(app.entries[2].name[0..6], "hats.c");
+    app.list.select(0, 3);
+
+    // Ctrl+F (usage 0x09) activates and snapshots.
+    const ev_ctrl_f = Event{ .kind = ui.KEY_DOWN, .flags = ui.MOD_CTRL, .seq = 1, .arg0 = 0x09, .arg1 = 0 };
+    try std.testing.expect(app.handle_keyboard_event(&ev_ctrl_f));
+    try std.testing.expect(app.filter_active);
+
+    // Type 'h': HELLO.TXT + hats.c remain, world.md vanishes.
+    try std.testing.expect(app.handle_keyboard_event(&Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 2, .arg0 = 0x0b, .arg1 = 'h' }));
+    try std.testing.expectEqual(@as(usize, 2), app.entry_count);
+    // 'a' narrows to "ha": only hats.c survives.
+    try std.testing.expect(app.handle_keyboard_event(&Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 3, .arg0 = 0x04, .arg1 = 'a' }));
+    try std.testing.expectEqual(@as(usize, 1), app.entry_count);
+    try std.testing.expectEqualStrings("hats.c", entry_name(&app.entries[0]));
+    // 't' refines to "hat": still just hats.c.
+    try std.testing.expect(app.handle_keyboard_event(&Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 4, .arg0 = 0x17, .arg1 = 't' }));
+    try std.testing.expectEqual(@as(usize, 1), app.entry_count);
+    try std.testing.expectEqualStrings("hats.c", entry_name(&app.entries[0]));
+    // Backspace re-widens: "ha" still only matches hats.c…
+    try std.testing.expect(app.handle_keyboard_event(&Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 5, .arg0 = 0x2a, .arg1 = 0 }));
+    try std.testing.expectEqual(@as(usize, 1), app.entry_count);
+    // …but dropping to "h" brings HELLO.TXT back.
+    try std.testing.expect(app.handle_keyboard_event(&Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 6, .arg0 = 0x2a, .arg1 = 0 }));
+    try std.testing.expectEqual(@as(usize, 2), app.entry_count);
+
+    // Escape leaves the filter: full listing restored.
+    try std.testing.expect(app.handle_keyboard_event(&Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 7, .arg0 = 0x29, .arg1 = 0 }));
+    try std.testing.expect(!app.filter_active);
+    try std.testing.expectEqual(@as(usize, 3), app.entry_count);
+}
+
+test "file: M20-U8 — letters feed the filter instead of d/r shortcuts" {
+    var app = AppState.init();
+    app.entry_count = 1;
+    @memcpy(app.entries[0].name[0..4], "d.md");
+    _ = app.toggle_filter();
+    // 'd' would delete without a filter; with it active it must only type.
+    try std.testing.expect(app.handle_keyboard_event(&Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 1, .arg0 = 0x07, .arg1 = 'd' }));
+    try std.testing.expectEqual(@as(usize, 1), app.entry_count); // not deleted
+    try std.testing.expectEqual(@as(usize, 1), app.filter_len);
 }
