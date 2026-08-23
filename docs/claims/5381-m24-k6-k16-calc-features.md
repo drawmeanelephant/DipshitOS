@@ -11,7 +11,7 @@
   mode (#380).
 - **Depends on:** K1–K5 landed on `main` (#482, #484). Nothing else — Lane B
   is fully independent per the concurrency plan.
-- **Status:** 🔄 in progress
+- **Status:** ✅ done (code + host tests; live-gate bring-up pass pending for the set)
 
 ## Notes
 
