@@ -277,11 +277,12 @@ pub const Command = struct {
 /// (claim 0339) grows it 47 -> 48 (`resources`). Milestone eighteen T5
 /// (claim 0163) grows it 50 -> 51 (`color`). Milestone eighteen T16
 /// (issue #419) grows it 51 -> 52 (`sh`). Milestone twenty-four K5
-/// grows it 52 -> 53 (`calc`). Milestone twenty-two D3 (issue #326)
-/// grows it 53 -> 54 (`sym`). Milestone twenty-two D5 (issue #328)
-/// grows it 54 -> 55 (`strace`). Milestone twenty-two D6 (issue #329)
-/// grows it 55 -> 56 (`ps`).
-pub const registry_count: usize = 56; // + sh/calc/sym/strace + `ps` (M22 D6)
+/// grows it 52 -> 53 (`calc`). Milestone twenty U1 (issue #307, claim
+/// 5127) grows it 53 -> 54 (`font`). Milestone twenty-two D3 (issue #326)
+/// grows it 54 -> 55 (`sym`). Milestone twenty-two D5 (issue #328)
+/// grows it 55 -> 56 (`strace`). Milestone twenty-two D6 (issue #329)
+/// grows it 56 -> 57 (`ps`).
+pub const registry_count: usize = 57; // 51 + sh/calc + `font` (M20 U1) + sym/strace/ps (M22 D3/D5/D6)
 
 /// `sym <file>` reads at most this many bytes for on-disk symtab inspection
 /// (M22 D3). ELF symbol tables live near the file tail; 64 KiB covers every
@@ -309,6 +310,7 @@ fn ensure_registry() []const Command {
             .{ .name = "calc", .help = "calculator utilities: 'calc history' shows saved calculation history from /data/calc_hst.txt", .usage = "calc [history]", .category = .system, .max_args = 1, .handler = cmd_calc },
             .{ .name = "cat", .help = "print a file from the ESP (by name or /path)", .usage = "cat <file|path>", .category = .storage, .min_args = 1, .max_args = 1, .handler = cmd_cat },
             .{ .name = "clear", .help = "clean up the crime scene", .usage = "clear", .category = .system, .handler = cmd_clear },
+            .{ .name = "font", .help = "terminal font size: small 8x8 (default), medium 16x16, large 24x24 (M20-U1)", .usage = "font [small|medium|large]", .category = .graphics_input, .min_args = 0, .max_args = 1, .handler = cmd_font },
             .{ .name = "compose", .help = "list available Alt+key compose sequences for accented characters", .usage = "compose", .category = .system, .handler = cmd_compose },
             .{ .name = "crash", .help = "list recent crash tombstones from /data/crash/", .usage = "crash", .category = .system, .handler = cmd_crash },
             .{ .name = "clip", .help = "copy/paste the shared kernel clipboard ('clip <text...>' sets it, 'clip' prints it)", .usage = "clip [<text...>]", .category = .system, .handler = cmd_clip },
@@ -340,7 +342,7 @@ fn ensure_registry() []const Command {
             .{ .name = "screen", .help = "virtio-gpu transport + framebuffer: device DID, features, scanout, status, re-arm ('screen fill <rrggbb>' fills the framebuffer and flushes it to the scanout)", .usage = "screen [fill <rrggbb>]", .category = .graphics_input, .max_args = 2, .handler = cmd_screen },
             .{ .name = "settings", .help = "persistent configuration: `settings [list]`, `settings get <key>`, `settings set <key> <val>`, `settings reset`", .usage = "settings [list|get <key>|set <key> <val>|reset]", .category = .system, .max_args = 3, .handler = cmd_settings },
             .{ .name = "sound", .help = "virtio-snd transport: device DID, class, status, control-queue state, device-config counts (jacks/streams/channel-maps), re-arm; stream-state control: 'sound volume <0-100>' and 'sound mute <on|off>'", .usage = "sound [volume <0-100> | mute <on|off>]", .category = .system, .min_args = 0, .max_args = 2, .handler = cmd_sound },
-            .{ .name = "text", .help = "framebuffer text: text region, cursor, scrollback ('text put <string...>' renders + flushes to the scanout; 'text clear' clears)", .usage = "text [put <string...>|clear]", .category = .graphics_input, .min_args = 0, .max_args = 9, .handler = cmd_text },
+            .{ .name = "text", .help = "framebuffer text: text region, cursor, scrollback ('text put <string...>' renders + flushes to the scanout; 'text clear' clears; 'text putraw' skips the trailing newline; 'text fontdebug [on|off]' missing-glyph stats)", .usage = "text [put <string...>|putraw <string...>|clear|fontdebug [on|off]]", .category = .graphics_input, .min_args = 0, .max_args = 9, .handler = cmd_text },
             .{ .name = "shutdown", .help = "request power-off", .usage = "shutdown", .category = .system, .handler = cmd_shutdown },
             .{ .name = "ps", .help = "process status table: PID, name, state, memory footprint, CPU ticks, and executor task per live/exited process (M22 D6)", .usage = "ps", .category = .tasks_processes, .handler = cmd_ps },
             .{ .name = "spawn", .help = "spawn the lifecycle demo task", .usage = "spawn", .category = .tasks_processes, .handler = cmd_spawn },
@@ -1093,6 +1095,17 @@ fn cmd_calc(m: *Monitor, args: []const []const u8) ExecError {
         m.console.puts(buf[0..got]);
         if (got > 0 and buf[got - 1] != '\n') m.console.puts("\n");
         return .none;
+    }
+    // M24 K11 (issue #375) — Lane B shared-file insertion (Rule 4, one
+    // self-contained commit): any non-`history` argument is an expression
+    // for CALC.BIN's CLI mode; hand the args over verbatim. CALC.BIN
+    // evaluates, prints "<expr> = <result>", and exits — no GUI window.
+    // A no-args or `calc history` invocation never reaches this path.
+    if (args.len >= 1 and esp_exec.max_exec_args >= args.len) {
+        switch (esp_exec.exec_file("CALC.BIN", args)) {
+            .ok => return .none,
+            else => {}, // fall through to the honest error below
+        }
     }
     err_prefix(m);
     m.console.puts("unknown calc subcommand: ");
@@ -4622,6 +4635,42 @@ fn cmd_beep(m: *Monitor, args: []const []const u8) ExecError {
     return .none;
 }
 
+/// `font` — report or switch the terminal's font size (M20-U1). The
+/// same setter slot 58 drives; the compositor repaints immediately.
+fn cmd_font(m: *Monitor, args: []const []const u8) ExecError {
+    if (args.len == 0) {
+        m.console.print_line("font:");
+        m.console.puts("  size=");
+        m.console.print_line(switch (fbtext.font_size) {
+            .small => "small (8x8)",
+            .medium => "medium (16x16)",
+            .large => "large (24x24)",
+        });
+        return .none;
+    }
+    const target: ?fbtext.FontSize = if (std.mem.eql(u8, args[0], "small"))
+        .small
+    else if (std.mem.eql(u8, args[0], "medium"))
+        .medium
+    else if (std.mem.eql(u8, args[0], "large"))
+        .large
+    else
+        null;
+    if (target == null) {
+        print_usage(m, lookup("font").?);
+        return .usage;
+    }
+    fbtext.set_font_size(target.?);
+    _ = settings.set("font_size", @tagName(target.?));
+    // Repaint through the compositor when the gpu is up.
+    if (virtio_gpu.gpu_ready) {
+        driving_award.mark_terminal_dirty();
+        _ = driving_award.composite();
+    }
+    m.console.print_line("font: set to the terminal");
+    return .none;
+}
+
 /// `text` — report the framebuffer text layer: the region (rows/cols at
 /// the cell size), the cursor (row/col), the scrollback depth, and the
 /// colors. `text put <string...>` renders the string and pushes it to
@@ -4630,14 +4679,16 @@ fn cmd_beep(m: *Monitor, args: []const []const u8) ExecError {
 /// device, `put`/`clear` refuse.
 fn cmd_text(m: *Monitor, args: []const []const u8) ExecError {
     if (args.len == 0) {
+        // M20-U1: rows/cols/cell report the LIVE font-size geometry
+        // (visible grid at the current size), not the ring constants.
         m.console.puts("text: rows=");
-        m.console.print_u64(fbtext.rows);
+        m.console.print_u64(fbtext.visible_rows());
         m.console.puts(" cols=");
-        m.console.print_u64(fbtext.cols);
+        m.console.print_u64(fbtext.visible_cols());
         m.console.puts(" cell=");
-        m.console.print_u64(fbtext.cell_w);
+        m.console.print_u64(fbtext.cur_cell_w());
         m.console.puts("x");
-        m.console.print_u64(fbtext.cell_h);
+        m.console.print_u64(fbtext.cur_cell_h());
         m.console.puts(" cur=");
         m.console.print_u64(fbtext.cursor_row());
         m.console.puts(",");
@@ -4651,7 +4702,10 @@ fn cmd_text(m: *Monitor, args: []const []const u8) ExecError {
         m.console.puts("\n");
         return .none;
     }
-    if (std.mem.eql(u8, args[0], "put")) {
+    if (std.mem.eql(u8, args[0], "put") or std.mem.eql(u8, args[0], "putraw")) {
+        // M20-U14 gate seam: `putraw` skips the trailing newline so a
+        // follow-up `text` report shows the exact landing column.
+        const raw = std.mem.eql(u8, args[0], "putraw");
         if (args.len < 2) {
             print_usage(m, lookup("text").?);
             return .usage;
@@ -4664,9 +4718,20 @@ fn cmd_text(m: *Monitor, args: []const []const u8) ExecError {
         var i: usize = 1;
         while (i < args.len) : (i += 1) {
             if (i > 1) fbtext.putc(' ');
-            fbtext.puts(args[i]);
+            // M20-U10 gate seam: "\t" expands to a real TAB — raw TAB
+            // bytes cannot survive the line editor's completion.
+            const arg = args[i];
+            var j: usize = 0;
+            while (j < arg.len) : (j += 1) {
+                if (arg[j] == '\\' and j + 1 < arg.len and arg[j + 1] == 't') {
+                    fbtext.putc('\t');
+                    j += 1;
+                } else {
+                    fbtext.putc(arg[j]);
+                }
+            }
         }
-        fbtext.putc('\n');
+        if (!raw) fbtext.putc('\n');
         // Card G5 (claim 1543): present through the Driving Award
         // compositor so the clock overlay stays composited over the
         // repainted terminal.
@@ -4689,6 +4754,34 @@ fn cmd_text(m: *Monitor, args: []const []const u8) ExecError {
         const r = driving_award.composite();
         m.console.puts("text clear: ");
         print_cmd_result(m, r);
+        m.console.puts("\n");
+        return .none;
+    }
+    if (std.mem.eql(u8, args[0], "fontdebug")) {
+        // M20-U11: toggle the missing-glyph dev setting and report stats.
+        if (args.len > 1) {
+            if (std.mem.eql(u8, args[1], "on")) {
+                fbtext.debug_font = true;
+            } else if (std.mem.eql(u8, args[1], "off")) {
+                fbtext.debug_font = false;
+            } else {
+                print_usage(m, lookup("text").?);
+                return .usage;
+            }
+        }
+        m.console.print_line("fontdebug:");
+        m.console.puts("  state=");
+        m.console.print_line(if (fbtext.debug_font) "on" else "off");
+        m.console.puts("  missing=");
+        m.console.print_u64(fbtext.missing_glyph_count);
+        // U+XXXX, four hex digits, matching the serial log format of the
+        // missing-glyph hook ("text: no glyph for U+XXXX").
+        m.console.puts(" last=U+");
+        const shifts = [_]u4{ 12, 8, 4, 0 };
+        for (shifts) |sh| {
+            const d: u8 = @intCast((fbtext.last_missing_cp >> sh) & 0xf);
+            m.console.putc(if (d < 10) '0' + d else 'a' + d - 10);
+        }
         m.console.puts("\n");
         return .none;
     }
@@ -5967,7 +6060,7 @@ test "monitor: text reports the region and refuses put/clear without the transpo
     try std.testing.expectEqual(ExecError.usage, exec(&mon, &.{ "text", "bogus" }));
     // `text` is registered (the registry-row shape).
     try std.testing.expect(lookup("text") != null);
-    try std.testing.expectEqualStrings("framebuffer text: text region, cursor, scrollback ('text put <string...>' renders + flushes to the scanout; 'text clear' clears)", lookup("text").?.help);
+    try std.testing.expectEqualStrings("framebuffer text: text region, cursor, scrollback ('text put <string...>' renders + flushes to the scanout; 'text clear' clears; 'text putraw' skips the trailing newline; 'text fontdebug [on|off]' missing-glyph stats)", lookup("text").?.help);
 }
 
 test "monitor: roadpops reports the tee state honestly" {
@@ -6851,7 +6944,7 @@ test "monitor: syscalls is registered and reports deterministic rows" {
     try std.testing.expectEqualStrings("numbered syscall table and counters", lookup("syscalls").?.help);
     try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"syscalls"}));
     try std.testing.expectEqualStrings(
-        "syscalls: slots=64 implemented=56\n" ++
+        "syscalls: slots=64 implemented=57\n" ++
             "  0 sys_ping calls=0\n" ++
             "  1 sys_write calls=0\n" ++
             "  2 sys_yield calls=0\n" ++
@@ -6907,7 +7000,8 @@ test "monitor: syscalls is registered and reports deterministic rows" {
             "  52 sys_win_move_to_workspace calls=0\n" ++
             "  53 sys_win_set_unsaved calls=0\n" ++
             "  54 sys_setrlimit calls=0\n" ++
-            "  55 sys_drag_read calls=0\n",
+            "  55 sys_drag_read calls=0\n" ++
+            "  58 sys_font_size calls=0\n",
         env.mock.contents(),
     );
 }
