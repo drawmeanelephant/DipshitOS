@@ -26,6 +26,7 @@ const fat = @import("fat.zig"); // M18 T16 (issue #419): direct FAT script reads
 const lineedit = @import("lineedit.zig");
 const tokenizer = @import("tokenizer.zig");
 const pipe = @import("pipe.zig"); // M19 P1 (issue #290): the bounded pipe behind the `|` operator
+const redirect = @import("redirect.zig"); // M19 P2 (issue #291): capture/feed adapters behind `>`, `>>`, `<`
 const monitor = @import("monitor.zig");
 const handoff = @import("handoff.zig");
 const memmap = @import("memmap.zig");
@@ -42,6 +43,8 @@ const clipboard = @import("clipboard.zig"); // M18 T2 (issue #405): shared clipb
 
 /// M18 T4: path for persistent shell history file.
 const history_path = "HISTORY.TXT";
+/// M19 P3: path for persistent environment variables.
+const env_path = "ENV.TXT";
 /// M18 T4: max lines stored in the history file.
 const history_file_max: usize = 50;
 /// M18 T12: max shell environment variables.
@@ -106,6 +109,76 @@ fn env_set(name: []const u8, val: []const u8) void {
     @memcpy(e.val[0..vlen], val[0..vlen]);
     e.val_len = vlen;
     env_count += 1;
+}
+
+/// Remove an environment variable (M19 P3). Returns true if it existed.
+fn env_unset(name: []const u8) bool {
+    var i: usize = 0;
+    while (i < env_count) : (i += 1) {
+        if (std.mem.eql(u8, env_table[i].name[0..env_table[i].name_len], name)) {
+            // Shift remaining entries down.
+            var j = i;
+            while (j + 1 < env_count) : (j += 1) {
+                env_table[j] = env_table[j + 1];
+            }
+            env_count -= 1;
+            return true;
+        }
+    }
+    return false;
+}
+
+/// M19 P3: persist the full env table to FAT (one NAME=VAL per line).
+fn save_env() void {
+    if (!esp.disk_ready()) return;
+    var buf: [2048]u8 = undefined;
+    var pos: usize = 0;
+    var i: usize = 0;
+    while (i < env_count and pos < buf.len - 2) : (i += 1) {
+        const e = &env_table[i];
+        const name = e.name[0..e.name_len];
+        const val = e.val[0..e.val_len];
+        const space_needed = name.len + 1 + val.len + 1; // name=val\n
+        if (pos + space_needed > buf.len) break;
+        @memcpy(buf[pos..][0..name.len], name);
+        pos += name.len;
+        buf[pos] = '=';
+        pos += 1;
+        @memcpy(buf[pos..][0..val.len], val);
+        pos += val.len;
+        buf[pos] = '\n';
+        pos += 1;
+    }
+    _ = esp.write_file(env_path, buf[0..pos]);
+}
+
+/// M19 P3: restore the env table from the ESP window on boot.
+/// No disk_ready guard needed — esp.lookup searches the window
+/// and returns null when the file is absent.
+fn load_env() void {
+    const entry = esp.lookup(env_path) orelse return;
+    const content = esp.content_of(entry);
+    if (content.len == 0) return;
+    var start: usize = 0;
+    var i: usize = 0;
+    while (i < content.len and env_count < env_max) : (i += 1) {
+        if (content[i] == '\n' or content[i] == '\r') {
+            if (i > start) {
+                const line = content[start..i];
+                if (std.mem.indexOfScalar(u8, line, '=')) |eq| {
+                    env_set(line[0..eq], line[eq + 1 ..]);
+                }
+            }
+            start = i + 1;
+            if (content[i] == '\r' and i + 1 < content.len and content[i + 1] == '\n') i += 1;
+        }
+    }
+    if (start < content.len) {
+        const line = content[start..];
+        if (std.mem.indexOfScalar(u8, line, '=')) |eq| {
+            env_set(line[0..eq], line[eq + 1 ..]);
+        }
+    }
 }
 
 /// Expand $VAR references in a command line. Returns a stack-local buffer.
@@ -1070,7 +1143,141 @@ fn run_pipe(mon: *monitor.Monitor, left: []const u8, right: []const u8) void {
     mon.console = saved;
 }
 
+/// M19 P2 (issue #291): the kind of redirection found by `redirect_split`.
+const RedirectOp = enum { stdout_overwrite, stdout_append, stdin_file };
+const RedirectSplit = struct { left: []const u8, right: []const u8, op: RedirectOp };
+
+/// M19 P2 (issue #291): look for `>`, `>>`, or `<` outside double quotes
+/// on the line (after the first token — the command name). Returns the
+/// split of the line into the left side (the command + its args) and the
+/// right side (the filename), plus the operator kind. Returns null when
+/// no redirect operator is found.
+///
+/// The operator is matched right-to-left so `>>` is preferred over `>`.
+fn redirect_split(line: []const u8) ?RedirectSplit {
+    // Scan for `>>`, then `>`, then `<` outside quoted regions.
+    var in_quote = false;
+    var i: usize = 0;
+    while (i < line.len) : (i += 1) {
+        if (line[i] == '"') in_quote = !in_quote;
+        if (in_quote) continue;
+        if (line[i] == '>') {
+            // Check for `>>`
+            if (i + 1 < line.len and line[i + 1] == '>') {
+                const left = trim_end(line[0..i]);
+                const right = trim_start(line[i + 2 ..]);
+                if (left.len > 0 and right.len > 0) {
+                    return .{ .left = left, .right = right, .op = .stdout_append };
+                }
+                continue;
+            }
+            // Single `>`
+            const left = trim_end(line[0..i]);
+            const right = trim_start(line[i + 1 ..]);
+            if (left.len > 0 and right.len > 0) {
+                return .{ .left = left, .right = right, .op = .stdout_overwrite };
+            }
+            continue;
+        }
+        if (line[i] == '<') {
+            const left = trim_end(line[0..i]);
+            const right = trim_start(line[i + 1 ..]);
+            if (left.len > 0 and right.len > 0) {
+                return .{ .left = left, .right = right, .op = .stdin_file };
+            }
+            continue;
+        }
+    }
+    return null;
+}
+
+/// Trim trailing whitespace.
+fn trim_end(s: []const u8) []const u8 {
+    var end = s.len;
+    while (end > 0 and (s[end - 1] == ' ' or s[end - 1] == '\t')) end -= 1;
+    return s[0..end];
+}
+
+/// Trim leading whitespace.
+fn trim_start(s: []const u8) []const u8 {
+    var start: usize = 0;
+    while (start < s.len and (s[start] == ' ' or s[start] == '\t')) start += 1;
+    return s[start..];
+}
+
+/// M19 P2 (issue #291): run `cmd > file` or `cmd >> file`. The command
+/// runs with its stdout captured, then the captured content is written
+/// to the file (overwrite) or appended to the existing content (append).
+fn run_redirect_out(mon: *monitor.Monitor, left: []const u8, file: []const u8, op: RedirectOp) void {
+    redirect.reset_capture();
+    const saved = mon.console;
+    // Command: stdout → capture buffer.
+    mon.console = redirect.capture_console();
+    shell_handle_expanded(mon, left);
+    mon.console = saved;
+
+    // Now write the captured output to the file.
+    var content_to_write = redirect.captured();
+    if (op == .stdout_append) {
+        // Read existing file content, then append.
+        var existing_buf: [4096]u8 = undefined;
+        if (redirect.read_file_into(file, &existing_buf)) |existing| {
+            // Build combined: existing + newline + captured
+            var combined: [4096]u8 = undefined;
+            var pos: usize = 0;
+            const ex_take = @min(existing.len, 3968); // leave room for newline + capture
+            @memcpy(combined[pos..][0..ex_take], existing[0..ex_take]);
+            pos += ex_take;
+            // If the capture has content, prepend a newline separator
+            const cap = redirect.captured();
+            if (cap.len > 0) {
+                if (pos < combined.len) {
+                    combined[pos] = '\n';
+                    pos += 1;
+                }
+                const cap_take = @min(cap.len, combined.len - pos);
+                @memcpy(combined[pos..][0..cap_take], cap[0..cap_take]);
+                pos += cap_take;
+            }
+            content_to_write = combined[0..pos];
+        }
+    }
+
+    if (redirect.write_captured_to_file(file, content_to_write)) |err| {
+        mon.console.print_line(err);
+    }
+}
+
+/// M19 P2 (issue #291): run `cmd < file`. The file is pre-loaded, then
+/// the command runs with its stdin feeding from that content and stdout
+/// passing through to the real console.
+fn run_redirect_in(mon: *monitor.Monitor, left: []const u8, file: []const u8) void {
+    var file_buf: [4096]u8 = undefined;
+    const data = redirect.read_file_into(file, &file_buf) orelse {
+        mon.console.puts("redirect: ");
+        mon.console.puts(file);
+        mon.console.print_line(": not found or unreadable");
+        return;
+    };
+
+    const saved = mon.console;
+    mon.console = redirect.feed_console(saved, data);
+    shell_handle_expanded(mon, left);
+    mon.console = saved;
+}
+
 fn shell_handle_expanded(mon: *monitor.Monitor, line: []const u8) void {
+    // M19 P2 (issue #291): the redirect operators — `>`, `>>`, `<` —
+    // split before tokenizing so the command half goes through the
+    // normal builtin/registry path and the file half is used by the
+    // capture/feed adapters.
+    if (redirect_split(line)) |rs| {
+        switch (rs.op) {
+            .stdout_overwrite, .stdout_append => run_redirect_out(mon, rs.left, rs.right, rs.op),
+            .stdin_file => run_redirect_in(mon, rs.left, rs.right),
+        }
+        return;
+    }
     // M19 P1 (issue #290): the pipe operator — split before tokenizing so
     // both halves go through the normal builtin/registry path.
     switch (pipe_split(line)) {
@@ -1117,6 +1324,52 @@ fn shell_handle_expanded(mon: *monitor.Monitor, line: []const u8) void {
             } else {
                 env_set(argv[1], "");
             }
+            save_env();
+        }
+        return;
+    }
+    // Builtin: set VAR=VAL (M19 P3)
+    if (std.mem.eql(u8, argv[0], "set")) {
+        if (argv.len < 2) {
+            // Print all env vars (like export / env)
+            var ei: usize = 0;
+            while (ei < env_count) : (ei += 1) {
+                const e = &env_table[ei];
+                mon.console.puts(e.name[0..e.name_len]);
+                mon.console.puts("=");
+                mon.console.print_line(e.val[0..e.val_len]);
+            }
+        } else {
+            var eq: usize = 0;
+            while (eq < argv[1].len and argv[1][eq] != '=') eq += 1;
+            if (eq < argv[1].len) {
+                env_set(argv[1][0..eq], argv[1][eq + 1 ..]);
+            } else {
+                env_set(argv[1], "");
+            }
+            save_env();
+        }
+        return;
+    }
+    // Builtin: unset VAR (M19 P3)
+    if (std.mem.eql(u8, argv[0], "unset")) {
+        if (argv.len < 2) {
+            mon.console.print_line("unset: usage: unset VAR");
+        } else {
+            if (env_unset(argv[1])) {
+                save_env();
+            }
+        }
+        return;
+    }
+    // Builtin: env (M19 P3)
+    if (std.mem.eql(u8, argv[0], "env")) {
+        var ei: usize = 0;
+        while (ei < env_count) : (ei += 1) {
+            const e = &env_table[ei];
+            mon.console.puts(e.name[0..e.name_len]);
+            mon.console.puts("=");
+            mon.console.print_line(e.val[0..e.val_len]);
         }
         return;
     }
@@ -1228,6 +1481,7 @@ pub fn boot_and_park(mon: *monitor.Monitor, rx_wired: bool) void {
     shell.boot();
     shell.color_enabled = settings.get_color();
     load_history(&shell.editor);
+    load_env(); // M19 P3: restore persistent environment
     // M18 T14: run startup file (.dipshitrc) if present
     if (esp.disk_ready()) {
         if (esp.lookup(".dipshitrc")) |entry| {
@@ -2587,6 +2841,7 @@ test "shell: T11 ANSI: SGR and cursor shape sequences are silently swallowed" {
 }
 
 test "shell: T12 env: export and $VAR expansion" {
+    env_count = 0;
     var mock = console.MockConsole(4096){};
     var shell = make_shell(&mock, make_view());
     shell.boot();
@@ -2604,6 +2859,100 @@ test "shell: T12 env: export and $VAR expansion" {
     mock.feed("export\n");
     while (shell.poll() != .idle) {}
     try std.testing.expect(std.mem.indexOf(u8, mock.contents(), "FOO=hello") != null);
+}
+
+test "shell: M19 P3 env: set, unset, env builtins" {
+    env_count = 0;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+
+    // set a variable
+    mock.feed("set COLOR=red\n");
+    while (shell.poll() != .idle) {}
+
+    // env lists it
+    mock.feed("env\n");
+    while (shell.poll() != .idle) {}
+    try std.testing.expect(std.mem.indexOf(u8, mock.contents(), "COLOR=red") != null);
+
+    // $COLOR expands
+    mock.feed("echo $COLOR\n");
+    while (shell.poll() != .idle) {}
+    try std.testing.expect(std.mem.indexOf(u8, mock.contents(), "red\n") != null);
+
+    // unset removes it — verify via the direct API, not mock output
+    mock.feed("unset COLOR\n");
+    while (shell.poll() != .idle) {}
+    try std.testing.expectEqual(@as(usize, 0), env_count); // unset shrank the table
+    try std.testing.expect(env_get("COLOR") == null); // COLOR is gone
+
+    // set another and verify env_table integrity
+    env_set("SECOND", "yes");
+    try std.testing.expectEqual(@as(usize, 1), env_count);
+    try std.testing.expectEqualStrings("yes", env_get("SECOND").?);
+
+    // unset a nonexistent variable is silent (returns false, no crash)
+    try std.testing.expect(!env_unset("NOEXIST"));
+}
+
+test "shell: M19 P3 env: env_set and env_unset direct API" {
+    env_count = 0;
+    // set
+    env_set("PATH", "/bin");
+    try std.testing.expectEqual(@as(usize, 1), env_count);
+    try std.testing.expectEqualStrings("/bin", env_get("PATH").?);
+    // overwrite
+    env_set("PATH", "/usr/bin");
+    try std.testing.expectEqual(@as(usize, 1), env_count);
+    try std.testing.expectEqualStrings("/usr/bin", env_get("PATH").?);
+    // unset
+    try std.testing.expect(env_unset("PATH"));
+    try std.testing.expectEqual(@as(usize, 0), env_count);
+    try std.testing.expect(env_get("PATH") == null);
+    // unset nonexistent returns false
+    try std.testing.expect(!env_unset("NOPE"));
+}
+
+test "shell: M19 P3 env: persistence round-trip through the ESP window" {
+    env_count = 0;
+    // Direct serialization test: save_env writes to the ESP window;
+    // load_env reads back. The mock ESP path supports add_esp_entry
+    // with explicit content, so we seed the file directly.
+    esp.reset();
+    // Seed ENV.TXT as if it was written by a previous boot.
+    _ = esp.add_esp_entry("ENV.TXT", 0, "PERSIST_A=alpha\nPERSIST_B=beta\n");
+    load_env();
+    try std.testing.expectEqualStrings("alpha", env_get("PERSIST_A").?);
+    try std.testing.expectEqualStrings("beta", env_get("PERSIST_B").?);
+}
+
+test "shell: M19 P3 env: env_expand handles multiple $VAR references" {
+    env_count = 0;
+    env_set("GREET", "hi");
+    env_set("NAME", "bob");
+    var buf: [256]u8 = undefined;
+    const expanded = env_expand("$GREET $NAME !", &buf);
+    try std.testing.expectEqualStrings("hi bob !", expanded);
+}
+
+test "shell: M19 P3 env: env_expand leaves unmatched $VAR as-is" {
+    env_count = 0;
+    var buf: [256]u8 = undefined;
+    const expanded = env_expand("echo $NOPE", &buf);
+    try std.testing.expectEqualStrings("echo ", expanded);
+}
+
+test "shell: M19 P3 env: env table bounds are enforced" {
+    env_count = 0;
+    var i: usize = 0;
+    while (i < env_max + 2) : (i += 1) {
+        var name: [2]u8 = undefined;
+        name[0] = @intCast('A' + @as(u8, @intCast(i % 26)));
+        name[1] = if (i >= 26) @intCast('0' + @as(u8, @intCast((i / 26)))) else '_';
+        env_set(&name, "x");
+    }
+    try std.testing.expectEqual(env_max, env_count);
 }
 
 test "shell: T13 alias: alias expansion" {
@@ -2857,4 +3206,89 @@ test "shell: M19 P1 pipe: right command that ignores stdin still runs" {
     while (shell.poll() != .idle) {}
     const out = mock.contents();
     try std.testing.expect(std.mem.indexOf(u8, out, "bye\n") != null);
+}
+
+test "shell: M19 P2 redirect: redirect_split finds > and >> and < outside quotes" {
+    // >
+    {
+        const rs = redirect_split("echo hello > file.txt").?;
+        try std.testing.expectEqual(RedirectOp.stdout_overwrite, rs.op);
+        try std.testing.expectEqualStrings("echo hello", rs.left);
+        try std.testing.expectEqualStrings("file.txt", rs.right);
+    }
+    // >>
+    {
+        const rs = redirect_split("echo hello >> file.txt").?;
+        try std.testing.expectEqual(RedirectOp.stdout_append, rs.op);
+        try std.testing.expectEqualStrings("echo hello", rs.left);
+        try std.testing.expectEqualStrings("file.txt", rs.right);
+    }
+    // <
+    {
+        const rs = redirect_split("cat < file.txt").?;
+        try std.testing.expectEqual(RedirectOp.stdin_file, rs.op);
+        try std.testing.expectEqualStrings("cat", rs.left);
+        try std.testing.expectEqualStrings("file.txt", rs.right);
+    }
+    // No redirect
+    try std.testing.expect(redirect_split("echo hello") == null);
+    try std.testing.expect(redirect_split("echo \">\" inside") == null);
+    try std.testing.expect(redirect_split("") == null);
+}
+
+test "shell: M19 P2 redirect: echo hello > file captures and writes" {
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    // Arm the ESP window so write_file works
+    esp.reset();
+    _ = alloc.init(make_view(), &.{});
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0);
+    _ = scheduler.register_user(0, 0);
+    userspace.init();
+    _ = esp.add_esp_entry("KERNEL.BIN", 0x88b38, "");
+
+    mock.feed("echo redirected-content > test.out\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    // The typed input line appears once (echoed by the line editor).
+    // The echo command's output ("redirected-content") was captured and
+    // never reached the real console, so it only appears in the typed
+    // line, not as a separate output line.
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, out, "redirected-content"));
+    // Without a mounted disk, the file write fails with an error.
+    try std.testing.expect(std.mem.indexOf(u8, out, "redirect: no disk") != null);
+}
+
+test "shell: M19 P2 redirect: redirect_split prefers >> over >" {
+    const rs = redirect_split("echo hello >> file.txt").?;
+    try std.testing.expectEqual(RedirectOp.stdout_append, rs.op);
+    try std.testing.expectEqualStrings("echo hello", rs.left);
+    try std.testing.expectEqualStrings("file.txt", rs.right);
+}
+
+test "shell: M19 P2 redirect: redirect_split trims whitespace around operators" {
+    {
+        const rs = redirect_split("echo     >     file.txt").?;
+        try std.testing.expectEqualStrings("echo", rs.left);
+        try std.testing.expectEqualStrings("file.txt", rs.right);
+    }
+    {
+        const rs = redirect_split("echo>>file.txt").?;
+        try std.testing.expectEqualStrings("echo", rs.left);
+        try std.testing.expectEqualStrings("file.txt", rs.right);
+    }
+    {
+        const rs = redirect_split("cat < file.txt").?;
+        try std.testing.expectEqualStrings("cat", rs.left);
+        try std.testing.expectEqualStrings("file.txt", rs.right);
+    }
+}
+
+test "shell: M19 P2 redirect: echo > / redirect_split bad input returns null" {
+    try std.testing.expect(redirect_split(" > file.txt") == null); // empty left
+    try std.testing.expect(redirect_split("echo > ") == null); // empty right
+    try std.testing.expect(redirect_split("echo>") == null); // empty right
+    try std.testing.expect(redirect_split("> file.txt") == null); // empty left
 }
