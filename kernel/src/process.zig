@@ -360,6 +360,9 @@ pub const ProcessInfo = struct {
     kernel_stack_phys: u64,
     kernel_stack_pages: u64,
     exit_status: u64,
+    /// Arc5 #246 usage counter (scheduler tick increments; M22 D6 exposes
+    /// it in the ps table's CPU column).
+    cpu_usage: u64 = 0,
 };
 
 // ---------------------------------------------------------------------------
@@ -425,6 +428,7 @@ pub fn info(id: usize) ?ProcessInfo {
         .kernel_stack_phys = p.kernel_stack.phys,
         .kernel_stack_pages = p.kernel_stack.pages,
         .exit_status = p.exit_status,
+        .cpu_usage = p.cpu_usage,
     };
 }
 

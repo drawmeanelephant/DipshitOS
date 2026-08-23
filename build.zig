@@ -980,6 +980,29 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_disas.step);
 
     // ------------------------------------------------------------------
+    // Guest: thirty-third ESP user program (M22 D6 — issue #329) PS.BIN.
+    // Windowed process viewer: 1 Hz sys_procs snapshot rendered as rows.
+    // ------------------------------------------------------------------
+    const ps_prog = b.addExecutable(.{
+        .name = "user-ps",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/ps.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    ps_prog.linker_script = b.path("user/linker.ld");
+    const ps_step = b.step("ps", "Build the thirty-third ESP user program (zig-out/bin/PS.BIN)");
+    const ps_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    ps_elf2bin.addFileArg(ps_prog.getEmittedBin());
+    const ps_bin = ps_elf2bin.addOutputFileArg("PS.BIN");
+    ps_elf2bin.has_side_effects = true;
+    ps_elf2bin.stdio = .inherit;
+    ps_step.dependOn(&ps_elf2bin.step);
+    const install_ps = b.addInstallFileWithDir(ps_bin, .bin, "PS.BIN");
+    b.getInstallStep().dependOn(&install_ps.step);
+
+    // ------------------------------------------------------------------
     // Top-level steps. System-command steps are marked as having side
     // effects (and inherit stdio) so they always execute instead of being
     // skipped by the build cache. (No QEMU path: this project targets Apple
@@ -1023,6 +1046,7 @@ pub fn build(b: *std.Build) void {
     image.addFileArg(settings_bin); // ... [SETTINGS.BIN] (Issue #214: thirtieth user program, GUI settings panel)
     image.addFileArg(asm_bin); // ... [ASM.BIN] (M22 D2, issue #325: thirty-first user program, the assembler)
     image.addFileArg(disas_bin); // ... [DISAS.BIN] (M22 D4, issue #327: thirty-second user program, the disassembler)
+    image.addFileArg(ps_bin); // ... [PS.BIN] (M22 D6, issue #329: thirty-third user program, the process viewer)
     image.has_side_effects = true;
     image.stdio = .inherit;
     image_step.dependOn(&image.step);

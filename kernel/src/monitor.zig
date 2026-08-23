@@ -279,8 +279,9 @@ pub const Command = struct {
 /// (issue #419) grows it 51 -> 52 (`sh`). Milestone twenty-four K5
 /// grows it 52 -> 53 (`calc`). Milestone twenty-two D3 (issue #326)
 /// grows it 53 -> 54 (`sym`). Milestone twenty-two D5 (issue #328)
-/// grows it 54 -> 55 (`strace`).
-pub const registry_count: usize = 55; // + sh/calc/sym + `strace` (M22 D5)
+/// grows it 54 -> 55 (`strace`). Milestone twenty-two D6 (issue #329)
+/// grows it 55 -> 56 (`ps`).
+pub const registry_count: usize = 56; // + sh/calc/sym/strace + `ps` (M22 D6)
 
 /// `sym <file>` reads at most this many bytes for on-disk symtab inspection
 /// (M22 D3). ELF symbol tables live near the file tail; 64 KiB covers every
@@ -341,6 +342,7 @@ fn ensure_registry() []const Command {
             .{ .name = "sound", .help = "virtio-snd transport: device DID, class, status, control-queue state, device-config counts (jacks/streams/channel-maps), re-arm; stream-state control: 'sound volume <0-100>' and 'sound mute <on|off>'", .usage = "sound [volume <0-100> | mute <on|off>]", .category = .system, .min_args = 0, .max_args = 2, .handler = cmd_sound },
             .{ .name = "text", .help = "framebuffer text: text region, cursor, scrollback ('text put <string...>' renders + flushes to the scanout; 'text clear' clears)", .usage = "text [put <string...>|clear]", .category = .graphics_input, .min_args = 0, .max_args = 9, .handler = cmd_text },
             .{ .name = "shutdown", .help = "request power-off", .usage = "shutdown", .category = .system, .handler = cmd_shutdown },
+            .{ .name = "ps", .help = "process status table: PID, name, state, memory footprint, CPU ticks, and executor task per live/exited process (M22 D6)", .usage = "ps", .category = .tasks_processes, .handler = cmd_ps },
             .{ .name = "spawn", .help = "spawn the lifecycle demo task", .usage = "spawn", .category = .tasks_processes, .handler = cmd_spawn },
             .{ .name = "sysinfo", .help = "comprehensive system and subsystem diagnostic snapshot", .usage = "sysinfo", .category = .machine_identity, .handler = cmd_sysinfo },
             .{ .name = "strace", .help = "trace a program's syscalls: 'strace exec APP.BIN [args]' arms the tracer around an exec and prints one line per syscall; 'strace off' disarms", .usage = "strace exec <file> [args...] | off", .category = .tasks_processes, .handler = cmd_strace },
@@ -4951,6 +4953,105 @@ fn cmd_strace(m: *Monitor, args: []const []const u8) ExecError {
     err_prefix(m);
     m.console.print_line("usage: strace exec <file> [args...] | strace off");
     return .invalid_argument;
+}
+
+/// M22 D6 (issue #329): `ps` — the process status table. One row per
+/// non-free registry entry: PID, name, state, memory footprint (text +
+/// data + stack + kernel-stack pages), CPU ticks (via the executor task
+/// when bound), and the task id. `procs` remains the verbose view; this is
+/// the scannable table.
+fn cmd_ps(m: *Monitor, args: []const []const u8) ExecError {
+    _ = args;
+    m.console.puts("  PID  NAME                 STATE     MEM       CPU  TASK\n");
+    var id: usize = 0;
+    var rows: usize = 0;
+    while (id < process.max_processes) : (id += 1) {
+        const info = process.info(id) orelse continue;
+        if (info.state == .free) continue;
+        rows += 1;
+        var line: [96]u8 = undefined;
+        var pos: usize = 0;
+        pos = pad_left(&line, pos, id, 5);
+        pos = append_str(&line, pos, "  ");
+        pos = pad_right(&line, pos, info.name, 20);
+        pos = append_str(&line, pos, " ");
+        pos = pad_right(&line, pos, @tagName(info.state), 9);
+        pos = append_str(&line, pos, " ");
+        // Memory: owned pages only (boot payload reports its static stack).
+        const mem_kib = ((info.text_pages + info.data_pages + info.stack_pages + info.kernel_stack_pages) * 4);
+        pos = pad_left(&line, pos, mem_kib, 5);
+        line[pos] = 'K';
+        pos += 1;
+        pos = append_str(&line, pos, "   ");
+        pos = pad_left_u64(&line, pos, info.cpu_usage, 6);
+        pos = append_str(&line, pos, "  ");
+        if (info.task_id) |tid| {
+            pos = pad_left(&line, pos, tid, 4);
+        } else {
+            pos = append_str(&line, pos, "   -");
+        }
+        if (pos < line.len) {
+            line[pos] = '\n';
+            m.console.write(line[0 .. pos + 1]);
+        } else {
+            m.console.write(line[0..pos]);
+            m.console.print_line("");
+        }
+    }
+    if (rows == 0) m.console.print_line("ps: no processes");
+    return .none;
+}
+
+fn append_str(buf: []u8, pos: usize, src: []const u8) usize {
+    const take = @min(src.len, buf.len - pos);
+    @memcpy(buf[pos..][0..take], src[0..take]);
+    return pos + take;
+}
+
+fn pad_left(buf: []u8, pos: usize, v: usize, width: usize) usize {
+    var tmp: [20]u8 = undefined;
+    var n: usize = 0;
+    var v2 = v;
+    if (v2 == 0) {
+        tmp[0] = '0';
+        n = 1;
+    }
+    while (v2 > 0) : (v2 /= 10) {
+        tmp[n] = @intCast('0' + v2 % 10);
+        n += 1;
+    }
+    var written: usize = 0;
+    while (n + written < width) : (written += 1) buf[pos + written] = ' ';
+    var i: usize = 0;
+    while (i < n) : (i += 1) buf[pos + written + i] = tmp[n - 1 - i];
+    return pos + written + n;
+}
+
+fn pad_left_u64(buf: []u8, pos: usize, v_in: u64, width: usize) usize {
+    var tmp: [20]u8 = undefined;
+    var n: usize = 0;
+    var v = v_in;
+    if (v == 0) {
+        tmp[0] = '0';
+        n = 1;
+    }
+    while (v > 0) : (v /= 10) {
+        tmp[n] = @intCast('0' + v % 10);
+        n += 1;
+    }
+    var written: usize = 0;
+    while (n + written < width) : (written += 1) buf[pos + written] = ' ';
+    var i: usize = 0;
+    while (i < n) : (i += 1) buf[pos + written + i] = tmp[n - 1 - i];
+    return pos + written + n;
+}
+
+fn pad_right(buf: []u8, pos: usize, src: []const u8, width: usize) usize {
+    const take = @min(src.len, width);
+    @memcpy(buf[pos..][0..take], src[0..take]);
+    var written = take;
+    while (written < width) : (written += 1) buf[pos + written] = ' ';
+    return pos + written;
 }
 
 fn cmd_syscalls(m: *Monitor, args: []const []const u8) ExecError {
