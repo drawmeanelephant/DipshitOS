@@ -105,7 +105,7 @@ verify-coordination`, and CI) fails if it drifts from the files.
 | `agent/buffy/m16-c3-resources` | [`agent-buffy-m16-c3-resources.md`](agent-buffy-m16-c3-resources.md) |
 | `agent/buffy/m16-c4-composition` | [`agent-buffy-m16-c4-composition.md`](agent-buffy-m16-c4-composition.md) |
 | `agent/buffy/m18-t16-scripting` | [`agent-buffy-m18-t16-scripting.md`](agent-buffy-m18-t16-scripting.md) |
-| # Branch log: agent/buffy/m21-compositor | [`agent-buffy-m21-compositor.md`](agent-buffy-m21-compositor.md) |
+| agent/buffy/m21-compositor | [`agent-buffy-m21-compositor.md`](agent-buffy-m21-compositor.md) |
 | `agent/buffy/m24-calc-features` | [`agent-buffy-m24-calc-features.md`](agent-buffy-m24-calc-features.md) |
 | milestone nine interactive application events (claim 7463) | [`agent-buffy-m9-events.md`](agent-buffy-m9-events.md) |
 | milestone nine tracker (claim 8234) | [`agent-buffy-m9-tracker.md`](agent-buffy-m9-tracker.md) |

@@ -1,4 +1,4 @@
-# Branch log: agent/buffy/m21-compositor
+# Log — agent/buffy/m21-compositor
 
 ## 2026-08-22 — Buffy (claim 1079)
 
