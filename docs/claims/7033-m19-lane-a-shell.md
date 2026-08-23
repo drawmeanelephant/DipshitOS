@@ -14,7 +14,7 @@
 - **Depends on:** M18 done ✅ (merged to main as `4d11713`, PR #485).
   Lane A is the critical path — Lane C (M20 text) and Lane E (M21
   compositor) depend on it.
-- **Status:** 🔄 in progress — P1 (pipes) ✅ done 2026-08-22; P2 (redirection) ✅ done 2026-08-23; P3 (env vars) ✅ done 2026-08-23; P4 (functions) ✅ done 2026-08-23; P8 (function args) ✅ done 2026-08-23; P9 (command substitution) ✅ done 2026-08-23; P10 (arithmetic expansion) ✅ done 2026-08-23; P11 (conditionals) ✅ done 2026-08-23; P12 (loops) ✅ done 2026-08-23
+- **Status:** 🔄 in progress — P1 (pipes) ✅ done 2026-08-22; P2 (redirection) ✅ done 2026-08-23; P3 (env vars) ✅ done 2026-08-23; P4 (functions) ✅ done 2026-08-23; P8 (function args) ✅ done 2026-08-23; P9 (command substitution) ✅ done 2026-08-23; P10 (arithmetic expansion) ✅ done 2026-08-23; P11 (conditionals) ✅ done 2026-08-23; P12 (loops) ✅ done 2026-08-23; P13 (here-documents) ✅ done 2026-08-23
 
 ## Notes
 
@@ -248,6 +248,26 @@ updated as cards land.
   for-missing-done, for-missing-do, while-true, while-false,
   while-break, while-missing-done, while-missing-do, for-multi-cmd).
   683/683 shell tests pass. `verify-unit-tests.sh` all modules green.
+  `zig build` + `zig build image` green. `zig fmt --check` clean.
+
+## P13 — here-documents (issue #302) — done 2026-08-23
+
+- `kernel/src/shell.zig`: `heredoc_active`, `heredoc_delim`, `heredoc_buf`
+  (4 KiB), `heredoc_cmd` module-level state. `heredoc_max_lines = 64`.
+  `handle_line` detects `<<DELIM` before expansions: extracts command
+  (before `<<`) and delimiter (after `<<`), strips quotes from
+  `"DELIM"` to disable `$VAR` expansion, enters collection mode.
+  Collection mode: each subsequent `handle_line` call appends to the
+  buffer until the delimiter line is found. On delimiter: optionally
+  expands `$VAR` (unquoted delimiter only), feeds content to command
+  via `redirect.feed_console`. Trailing newline added after last line.
+- No new ABI — pure `shell.zig`, ~4 KiB BSS.
+
+### Verification
+
+- Host (class A): 6 new tests (basic heredoc, empty, variable
+  expansion, quoted delimiter, missing command, multiple lines).
+  689/689 shell tests pass. `verify-unit-tests.sh` all modules green.
   `zig build` + `zig build image` green. `zig fmt --check` clean.
 
 ## P3 — environment variables (issue #292) — done 2026-08-23

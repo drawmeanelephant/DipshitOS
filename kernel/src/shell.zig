@@ -93,6 +93,20 @@ var break_flag: bool = false;
 var continue_flag: bool = false;
 const loop_max_iter: usize = 256;
 
+/// M19 P13 (issue #302): here-document state. After detecting `<<DELIM`
+/// in a command line, the shell collects subsequent lines until it finds
+/// the delimiter. The collected content is fed as stdin to the command.
+var heredoc_active: bool = false;
+var heredoc_delim: [32]u8 = undefined;
+var heredoc_delim_len: usize = 0;
+var heredoc_buf: [4096]u8 = undefined;
+var heredoc_len: usize = 0;
+var heredoc_line_count: usize = 0;
+var heredoc_expand: bool = true;
+var heredoc_cmd: [lineedit.max_line]u8 = undefined;
+var heredoc_cmd_len: usize = 0;
+const heredoc_max_lines: usize = 64;
+
 const EnvEntry = struct {
     name: [env_name_max]u8 = [_]u8{0} ** env_name_max,
     name_len: usize = 0,
@@ -1090,6 +1104,93 @@ fn run_script(mon: *monitor.Monitor, name: []const u8) void {
 }
 
 fn handle_line(mon: *monitor.Monitor, raw_line: []const u8) void {
+    // M19 P13: here-document collection mode. When `heredoc_active` is
+    // true, each line is collected until the delimiter is found.
+    if (heredoc_active) {
+        // Trim the line for delimiter comparison.
+        var trimmed = raw_line;
+        while (trimmed.len > 0 and (trimmed[0] == ' ' or trimmed[0] == '\t')) trimmed = trimmed[1..];
+        var tend = trimmed.len;
+        while (tend > 0 and (trimmed[tend - 1] == ' ' or trimmed[tend - 1] == '\t')) tend -= 1;
+        const t = trimmed[0..tend];
+
+        if (std.mem.eql(u8, t, heredoc_delim[0..heredoc_delim_len])) {
+            // Delimiter found — execute the command with collected content.
+            heredoc_active = false;
+            // Add trailing newline after last line.
+            if (heredoc_len > 0 and heredoc_len < heredoc_buf.len) {
+                heredoc_buf[heredoc_len] = '\n';
+                heredoc_len += 1;
+            }
+            var content = heredoc_buf[0..heredoc_len];
+            // Expand $VAR if unquoted delimiter.
+            if (heredoc_expand) {
+                var exp_buf: [4096]u8 = undefined;
+                content = env_expand(content, &exp_buf);
+            }
+            const saved = mon.console;
+            mon.console = redirect.feed_console(saved, content);
+            shell_handle_expanded(mon, heredoc_cmd[0..heredoc_cmd_len]);
+            mon.console = saved;
+            return;
+        }
+        // Append line to heredoc buffer.
+        heredoc_line_count += 1;
+        if (heredoc_line_count > heredoc_max_lines) {
+            heredoc_active = false;
+            mon.console.print_line("heredoc: too many lines (max 64)");
+            return;
+        }
+        if (raw_line.len > 0) {
+            if (heredoc_len > 0 and heredoc_len < heredoc_buf.len) {
+                heredoc_buf[heredoc_len] = '\n';
+                heredoc_len += 1;
+            }
+            const copy_len = @min(raw_line.len, heredoc_buf.len - heredoc_len);
+            @memcpy(heredoc_buf[heredoc_len..][0..copy_len], raw_line[0..copy_len]);
+            heredoc_len += copy_len;
+        }
+        return;
+    }
+
+    // M19 P13: detect `<<DELIM` in the raw line (before any expansions).
+    if (std.mem.indexOf(u8, raw_line, "<<")) |dl_pos| {
+        // Extract delimiter after `<<`.
+        var dstart = dl_pos + 2;
+        while (dstart < raw_line.len and raw_line[dstart] == ' ') dstart += 1;
+        if (dstart < raw_line.len) {
+            var dend = dstart;
+            while (dend < raw_line.len and raw_line[dend] != ' ' and raw_line[dend] != ';' and raw_line[dend] != '\t') dend += 1;
+            var delim = raw_line[dstart..dend];
+            // Check for quoted delimiter (no expansion).
+            heredoc_expand = true;
+            if (delim.len >= 2 and delim[0] == '"' and delim[delim.len - 1] == '"') {
+                delim = delim[1..][0 .. delim.len - 2];
+                heredoc_expand = false;
+            }
+            if (delim.len == 0 or delim.len > 31) {
+                mon.console.print_line("heredoc: invalid delimiter");
+                return;
+            }
+            // Extract the command part (before `<<`).
+            var cmd_end = dl_pos;
+            while (cmd_end > 0 and (raw_line[cmd_end - 1] == ' ' or raw_line[cmd_end - 1] == '\t')) cmd_end -= 1;
+            if (cmd_end == 0) {
+                mon.console.print_line("heredoc: missing command before <<");
+                return;
+            }
+            // Enter heredoc collection mode.
+            @memcpy(heredoc_delim[0..delim.len], delim);
+            heredoc_delim_len = delim.len;
+            @memcpy(heredoc_cmd[0..cmd_end], raw_line[0..cmd_end]);
+            heredoc_cmd_len = cmd_end;
+            heredoc_len = 0;
+            heredoc_line_count = 0;
+            heredoc_active = true;
+            return;
+        }
+    }
+
     // P10: arithmetic expansion `$((expr))` — evaluate and substitute.
     // Skip for fn definitions (preserve $((...)  in function bodies).
     var arith_buf: [lineedit.max_line]u8 = undefined;
@@ -4744,4 +4845,86 @@ test "shell: M19 P12 for: multiple commands in body" {
     const out = mock.contents();
     try std.testing.expect(std.mem.indexOf(u8, out, "first\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "second\n") != null);
+}
+test "shell: M19 P13 heredoc: basic heredoc feeds stdin to command" {
+    env_count = 0;
+    last_exit_ok = true;
+    var mock = console.MockConsole(8192){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    // type reads stdin and echoes to stdout
+    mock.feed("type <<EOF\nhello\nworld\nEOF\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    // type should output "hello\nworld\n" from the heredoc
+    try std.testing.expect(std.mem.indexOf(u8, out, "hello\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "world\n") != null);
+}
+
+test "shell: M19 P13 heredoc: empty heredoc feeds nothing" {
+    env_count = 0;
+    last_exit_ok = true;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("type <<EOF\nEOF\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    // type with empty stdin should produce no output beyond prompts
+    // (just the prompt lines, no extra content)
+    try std.testing.expect(std.mem.indexOf(u8, out, "missing") == null);
+}
+
+test "shell: M19 P13 heredoc: variable expansion in unquoted heredoc" {
+    env_count = 0;
+    last_exit_ok = true;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("set NAME=elephant\n");
+    while (shell.poll() != .idle) {}
+    mock.feed("type <<EOF\nhello $NAME\nEOF\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "hello elephant\n") != null);
+}
+
+test "shell: M19 P13 heredoc: quoted delimiter prevents expansion" {
+    env_count = 0;
+    last_exit_ok = true;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("set NAME=elephant\n");
+    while (shell.poll() != .idle) {}
+    mock.feed("type <<\"EOF\"\nhello $NAME\nEOF\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    // $NAME should NOT be expanded — literal "$NAME" in output
+    try std.testing.expect(std.mem.indexOf(u8, out, "hello $NAME\n") != null);
+}
+
+test "shell: M19 P13 heredoc: missing command prints error" {
+    env_count = 0;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("<<EOF\nhello\nEOF\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "missing command") != null);
+}
+
+test "shell: M19 P13 heredoc: multiple lines collected" {
+    env_count = 0;
+    last_exit_ok = true;
+    var mock = console.MockConsole(8192){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("type <<EOF\nline1\nline2\nline3\nEOF\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "line1\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "line2\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "line3\n") != null);
 }
