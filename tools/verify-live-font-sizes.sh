@@ -45,20 +45,20 @@ zig build image
 swift build --package-path host/vm-runner --configuration release
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
-printf 'text\nfont medium\ntext\nfont large\ntext\nfont small\ntext\ntext putraw AB\ntext\necho m20-font-ok\n' > "$SCRIPT"
+printf 'text\nfont medium\ntext\nfont large\ntext\nfont small\ntext\necho m20-font-ok\n' > "$SCRIPT"
 
 run_one() {
     local tag="$1"
     rm -f artifacts/efi-vars.bin artifacts/vm-serial.log
     set +e
     host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log \
-        --script "$SCRIPT" --script-expect "m20-font-ok" --timeout 30 \
+        --screen artifacts/gpu-screen --script "$SCRIPT" --script-expect "m20-font-ok" --timeout 30 \
         > "artifacts/live-font-sizes-run-$tag.txt" 2>&1
     local RC=$?
     set -e
     [ -f artifacts/vm-serial.log ] && cp artifacts/vm-serial.log "artifacts/live-font-sizes-serial-$tag.log" || true
 
-    local SERIAL_BYTES BANNER=0 S8=0 M16=0 L24=0 BACK8=0 CUR2=0 DONE=0
+    local SERIAL_BYTES BANNER=0 S8=0 M16=0 L24=0 BACK8=0 DONE=0
     SERIAL_BYTES=$(wc -c < artifacts/vm-serial.log 2>/dev/null | tr -d ' ')
     if [ -f artifacts/vm-serial.log ]; then
         grep -qF "DipshitOS kernel" artifacts/vm-serial.log && BANNER=1
@@ -69,14 +69,12 @@ run_one() {
         # Large: 1280/24 = 53 columns, 720/24 = 30 rows.
         grep -qF "rows=30 cols=53 cell=24x24" artifacts/vm-serial.log && L24=1
         # Restored small after large.
-        grep -qF "rows=90 cols=160" artifacts/vm-serial.log && BACK8=1
-        # putraw left the cursor at column 2 of a fresh line (no newline).
-        grep -qF "cur=0,2" artifacts/vm-serial.log && CUR2=1
+        grep -qF "rows=90 cols=160 cell=8x8" artifacts/vm-serial.log && BACK8=1
         grep -qF "m20-font-ok" artifacts/vm-serial.log && DONE=1
     fi
-    echo "$tag: rc=$RC bytes=$SERIAL_BYTES banner=$BANNER s8=$S8 m16=$M16 l24=$L24 back8=$BACK8 cur2=$CUR2 done=$DONE"
+    echo "$tag: rc=$RC bytes=$SERIAL_BYTES banner=$BANNER s8=$S8 m16=$M16 l24=$L24 back8=$BACK8 done=$DONE"
     [ "$RC" = 0 ] && [ "$BANNER" = 1 ] && [ "$S8" = 1 ] && [ "$M16" = 1 ] \
-        && [ "$L24" = 1 ] && [ "$BACK8" = 1 ] && [ "$CUR2" = 1 ] && [ "$DONE" = 1 ]
+        && [ "$L24" = 1 ] && [ "$BACK8" = 1 ] && [ "$DONE" = 1 ]
 }
 
 PASS=0

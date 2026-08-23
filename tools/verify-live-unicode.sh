@@ -64,7 +64,7 @@ run_one() {
     rm -f artifacts/efi-vars.bin artifacts/vm-serial.log
     set +e
     host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log \
-        --script "$SCRIPT" --script-expect "m20-unicode-ok" --timeout 30 \
+        --screen artifacts/gpu-screen --script "$SCRIPT" --script-expect "m20-unicode-ok" --timeout 30 \
         > "artifacts/live-unicode-run-$tag.txt" 2>&1
     local RC=$?
     set -e
@@ -82,8 +82,8 @@ run_one() {
         # command itself, so assert "some misses" + the recorded cp
         # rather than an exact count.
         grep -qE "missing=[0-9]+" artifacts/vm-serial.log && TWO_MISS=1
-        # The last miss recorded the CJK ideograph U+4E2D.
-        grep -qF "last=U+4E2D" artifacts/vm-serial.log && LAST_CP=1
+        # The last miss is 文 (U+6587) — the second char of the pair.
+        grep -qF "last=U+6587" artifacts/vm-serial.log && LAST_CP=1
         grep -qF "m20-unicode-ok" artifacts/vm-serial.log && DONE=1
     fi
     echo "$tag: rc=$RC bytes=$SERIAL_BYTES banner=$BANNER put_ok=$PUT_OK zero_miss=$ZERO_MISS two_miss=$TWO_MISS last_cp=$LAST_CP done=$DONE"

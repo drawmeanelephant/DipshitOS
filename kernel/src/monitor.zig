@@ -4694,7 +4694,18 @@ fn cmd_text(m: *Monitor, args: []const []const u8) ExecError {
         var i: usize = 1;
         while (i < args.len) : (i += 1) {
             if (i > 1) fbtext.putc(' ');
-            fbtext.puts(args[i]);
+            // M20-U10 gate seam: "\t" expands to a real TAB — raw TAB
+            // bytes cannot survive the line editor's completion.
+            const arg = args[i];
+            var j: usize = 0;
+            while (j < arg.len) : (j += 1) {
+                if (arg[j] == '\\' and j + 1 < arg.len and arg[j + 1] == 't') {
+                    fbtext.putc('\t');
+                    j += 1;
+                } else {
+                    fbtext.putc(arg[j]);
+                }
+            }
         }
         if (!raw) fbtext.putc('\n');
         // Card G5 (claim 1543): present through the Driving Award
@@ -4739,8 +4750,14 @@ fn cmd_text(m: *Monitor, args: []const []const u8) ExecError {
         m.console.print_line(if (fbtext.debug_font) "on" else "off");
         m.console.puts("  missing=");
         m.console.print_u64(fbtext.missing_glyph_count);
+        // U+XXXX, four hex digits, matching the serial log format of the
+        // missing-glyph hook ("text: no glyph for U+XXXX").
         m.console.puts(" last=U+");
-        m.console.print_hex(fbtext.last_missing_cp);
+        const shifts = [_]u4{ 12, 8, 4, 0 };
+        for (shifts) |sh| {
+            const d: u8 = @intCast((fbtext.last_missing_cp >> sh) & 0xf);
+            m.console.putc(if (d < 10) '0' + d else 'a' + d - 10);
+        }
         m.console.puts("\n");
         return .none;
     }
