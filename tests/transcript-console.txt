@@ -68,6 +68,7 @@ system
   settings    persistent configuration: `settings [list]`, `settings get <key>`, `settings set <key> <val>`, `settings reset`
   sound       virtio-snd transport: device DID, class, status, control-queue state, device-config counts (jacks/streams/channel-maps), re-arm; stream-state control: 'sound volume <0-100>' and 'sound mute <on|off>'
   shutdown    request power-off
+  type        echo stdin (the pipe source) to stdout — the right half of `a | type`
 type 'help <command>' for details on a single command.
 type 'help <topic>' for a topic page (networking, windows, storage, graphics).
 dipshit> version

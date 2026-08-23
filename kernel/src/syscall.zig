@@ -71,6 +71,7 @@ const esp = @import("esp.zig"); // Claim 6359: the ESP name bound for the path c
 const tcp = @import("tcp.zig"); // Milestone 12 (claim 7483): TCP client seam
 const csprng = @import("csprng.zig"); // ISN generation for TCP connect
 const clipboard = @import("clipboard.zig"); // Milestone 14 (claim 0169): the shared kernel clipboard
+const pipe = @import("pipe.zig"); // M19 P1 (issue #290): the bounded pipe buffer behind slots 56/57
 const app_timers = @import("app_timers.zig"); // Milestone 14 (claim 7323): the per-process app timer facility
 const virtio_snd = @import("virtio_snd.zig"); // Milestone 15 (claim 7636): the virtio-snd playback path behind sys_audio_*
 const fbtext = @import("text.zig"); // M20-U1 (claim 5127): sys_font_size's terminal font state
@@ -79,7 +80,8 @@ pub const slot_count: usize = 64;
 /// 56 through M18 + slot 58 `sys_font_size` (M20-U1); 56/57 are Lane A's
 /// reserved pipe slots (M19) — the gap is intentional, see
 /// docs/agent-concurrency-plan.md §8.
-pub const implemented_count: usize = 57;
+/// M19 P1 (issue #290): slots 56/57 are the bounded pipe.
+pub const implemented_count: usize = 59;
 /// Card G6 (claim 0487) follow-on (slot 18): the fixed `sys_win_get` shape —
 /// four u32 LE words (x, y, w, h), 16 bytes, marshaled per call and copy_out'd
 /// through uaccess (the procs snapshot pattern).
@@ -224,6 +226,8 @@ pub const sys_notify: u64 = 51;
 pub const sys_win_set_unsaved: u64 = 53;
 /// Arc4 #237 (ADR 0013 D1): `sys_drag_read(buf_ptr, max_len)` — slot 55.
 pub const sys_drag_read: u64 = 55;
+pub const sys_pipe_read: u64 = 56;
+pub const sys_pipe_write: u64 = 57;
 /// M20-U1 (claim 5127): `sys_font_size(window_id, size)` — slot 58.
 /// size 0=8×8 small, 1=16×16 medium, 2=24×24 large; EINVAL for anything
 /// else. Only window 0 (the terminal) renders through the kernel text
@@ -363,6 +367,8 @@ fn ensure_table() *const [slot_count]Entry {
         table_storage[sys_notify] = .{ .name = "sys_notify", .handler = handle_notify };
         table_storage[sys_drag_read] = .{ .name = "sys_drag_read", .handler = handle_drag_read };
         // ADR 0013 reserved slots 52–54 (not yet implemented). Stubs.
+        table_storage[sys_pipe_read] = .{ .name = "sys_pipe_read", .handler = handle_pipe_read };
+        table_storage[sys_pipe_write] = .{ .name = "sys_pipe_write", .handler = handle_pipe_write };
         table_storage[52] = .{ .name = "sys_win_move_to_workspace", .handler = handle_win_move_to_workspace };
         table_storage[sys_win_set_unsaved] = .{ .name = "sys_win_set_unsaved", .handler = handle_win_set_unsaved };
         table_storage[54] = .{ .name = "sys_setrlimit", .handler = handle_setrlimit };
@@ -999,6 +1005,34 @@ fn handle_drag_start(args: Args, _: *exceptions.VectorFrame) u64 {
     if (uaccess.copy_in(buf[0..buf_len], buf_addr, buf_len) != .ok) return error_result(.efault);
     driving_award.drag_start(buf[0..buf_len], owner);
     return 0;
+}
+
+/// M19 P1 (slot 56): sys_pipe_read — copy unread pipe bytes OUT through
+/// uaccess. max_len clamped to capacity; empty pipe → 0; bad buffer → EFAULT.
+fn handle_pipe_read(args: Args, _: *exceptions.VectorFrame) u64 {
+    const buf_addr = args[0];
+    const max_len: usize = @min(args[1], pipe.pipe_capacity);
+    if (max_len == 0) return 0;
+    const avail = pipe.available();
+    if (avail == 0) return 0;
+    const take = @min(avail, max_len);
+    if (uaccess.copy_out(buf_addr, pipe.unread_slice()[0..take], take) != .ok) return error_result(.efault);
+    pipe.advance_read(take);
+    return @intCast(take);
+}
+
+/// M19 P1 (slot 57): sys_pipe_write — copy bytes into pipe through uaccess.
+/// ENOSPC when full; EFAULT for bad buffer; EINVAL for oversized write.
+fn handle_pipe_write(args: Args, _: *exceptions.VectorFrame) u64 {
+    const buf_addr = args[0];
+    const len = args[1];
+    if (len == 0) return 0;
+    if (len > pipe.pipe_capacity) return error_result(.einval);
+    const room = pipe.capacity_left();
+    if (len > room) return error_result(.enospc);
+    if (uaccess.copy_in(pipe.append_slice()[0..@intCast(len)], buf_addr, @intCast(len)) != .ok) return error_result(.efault);
+    pipe.advance_write(@intCast(len));
+    return len;
 }
 
 /// M20-U1 (claim 5127, slot 58): `sys_font_size(window_id, size)` —
@@ -1723,7 +1757,7 @@ fn capture_marshaled_args(args: Args, _: *exceptions.VectorFrame) u64 {
     return 0xcafe;
 }
 
-test "syscall: runtime table has 64 slots and fifty-seven unique implemented rows" {
+test "syscall: runtime table has 64 slots and fifty-nine unique implemented rows" {
     init(test_writer);
     const table = ensure_table();
     try std.testing.expectEqual(@as(usize, 64), table.len);
@@ -1736,7 +1770,9 @@ test "syscall: runtime table has 64 slots and fifty-seven unique implemented row
             implemented += 1;
         }
     }
-    try std.testing.expectEqual(@as(usize, 57), implemented);
+    try std.testing.expectEqual(@as(usize, 59), implemented);
+    try std.testing.expectEqualStrings("sys_pipe_read", entry_info(sys_pipe_read).?.name);
+    try std.testing.expectEqualStrings("sys_pipe_write", entry_info(sys_pipe_write).?.name);
     try std.testing.expectEqualStrings("sys_font_size", entry_info(sys_font_size).?.name);
     try std.testing.expectEqualStrings("sys_audio_info", entry_info(42).?.name);
     try std.testing.expectEqualStrings("sys_audio_play", entry_info(43).?.name);
@@ -2709,7 +2745,7 @@ test "syscall: counters are monotonic and report is deterministic" {
     var con = mock.console();
     report(&con);
     try std.testing.expectEqualStrings(
-        "syscalls: slots=64 implemented=57\n" ++
+        "syscalls: slots=64 implemented=59\n" ++
             "  0 sys_ping calls=2\n" ++
             "  1 sys_write calls=0\n" ++
             "  2 sys_yield calls=0\n" ++
@@ -2766,6 +2802,8 @@ test "syscall: counters are monotonic and report is deterministic" {
             "  53 sys_win_set_unsaved calls=0\n" ++
             "  54 sys_setrlimit calls=0\n" ++
             "  55 sys_drag_read calls=0\n" ++
+            "  56 sys_pipe_read calls=0\n" ++
+            "  57 sys_pipe_write calls=0\n" ++
             "  58 sys_font_size calls=0\n",
         mock.contents(),
     );
