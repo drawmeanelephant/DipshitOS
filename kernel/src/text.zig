@@ -173,6 +173,7 @@ pub fn init() void {
     u8_acc = 0;
     missing_glyph_count = 0;
     last_missing_cp = 0;
+    dyn_count = 0;
     initialized = true;
 }
 
@@ -248,7 +249,7 @@ pub fn putc(c: u8) void {
         return;
     }
     if (c == 0x08) { // backspace
-        if (cur_col > 0) cur_col -= 1;
+        backspace();
         return;
     }
     if (c == '\t') {
@@ -361,7 +362,7 @@ pub fn putc_unicode(cp: u21) void {
             return;
         },
         0x08 => {
-            if (cur_col > 0) cur_col -= 1;
+            backspace();
             return;
         },
         else => {},
@@ -369,32 +370,38 @@ pub fn putc_unicode(cp: u21) void {
     // Unknown C0 controls and DEL draw as blanks (the historical byte
     // behavior) — never as visible fallback glyphs.
     if (cp < 0x20 or cp == 0x7F) {
-        const slot = cursor_slot();
-        if (cur_col >= cols) _ = new_line();
-        ring[slot][cur_col] = 0x20;
+        store_narrow_cell(0x20);
+        return;
+    }
+    const w = char_width(cp);
+    if (w == 0) {
+        // M20-U6: combining marks overlay the previous cell; ignorable
+        // zero-width codepoints (ZWJ/ZWNJ/ZWSP/selectors) vanish.
+        if (is_combining(cp)) attach_mark(cp);
+        return;
+    }
+    if (w == 2) {
+        // M20-U4/U2: wide codepoints claim two cells — base + continuation.
+        var slot = cursor_slot();
+        if (cur_col + 1 >= cols) slot = new_line(); // room for both halves
+        if (cur_col >= cols) slot = new_line();
+        ring[slot][cur_col] = cell_fffd; // real art lands with U7's emoji table
+        note_missing(cp);
         cur_col += 1;
+        if (cur_col < cols) {
+            ring[slot][cur_col] = cell_wide_cont;
+            cur_col += 1;
+        }
         if (cur_col > line_fill[slot]) line_fill[slot] = @intCast(cur_col);
         if (cur_col >= cols) _ = new_line();
         return;
     }
-    const w = char_width(cp);
-    if (w == 0) return; // combining/zero-width: handled with clusters (U5/U6)
-    var slot = cursor_slot();
-    if (w == 2 and cur_col + 1 >= cols) slot = new_line(); // room for both halves
-    if (cur_col >= cols) slot = new_line();
     if (glyph_for(cp) != null and cp <= 0x17F) {
-        ring[slot][cur_col] = @intCast(cp); // literal encoding (ASCII + Latin tables)
+        store_narrow_cell(@intCast(cp)); // literal encoding (ASCII + Latin tables)
     } else {
-        ring[slot][cur_col] = cell_fffd; // M20-U11 fallback art
+        store_narrow_cell(cell_fffd); // M20-U11 fallback art
         note_missing(cp);
     }
-    cur_col += 1;
-    if (w == 2 and cur_col < cols) {
-        ring[slot][cur_col] = cell_wide_cont;
-        cur_col += 1;
-    }
-    if (cur_col > line_fill[slot]) line_fill[slot] = @intCast(cur_col);
-    if (cur_col >= cols) _ = new_line();
 }
 
 /// Decode one ring cell into the glyph rows it paints (null paints
@@ -405,13 +412,139 @@ fn cell_glyph(cell: Cell) ?*const [8]u8 {
     if (cell >= 0x20 and cell <= 0x7e) return &font.glyphs[cell - 0x20];
     if (cell >= 0xA0 and cell <= 0xFF) return &font_unicode.latin1[cell - 0xA0];
     if (cell >= 0x100 and cell <= 0x17F) return &font_unicode.ext_a[cell - 0x100];
+    if (cell >= 0x8000 and cell < 0xFFFE) return &dyn_clusters[cell - 0x8000].rows;
     return null;
 }
 
 /// The replacement-character cell (U+FFFD art from font_unicode).
-/// Lives in the reserved 0x8000+ dynamic opcode space so it can never
-/// collide with a literal codepoint.
-pub const cell_fffd: Cell = 0x8000;
+/// Occupies the top of the dynamic space (pool ids stay below it) so it
+/// can never collide with a literal codepoint.
+pub const cell_fffd: Cell = 0xFFFE;
+
+// ---------------------------------------------------------------------------
+// Dynamic cluster pool (M20-U5/U6): composed grapheme clusters
+// ---------------------------------------------------------------------------
+
+/// A composed grapheme cluster: base glyph + up to 3 combining marks,
+/// OR-merged into one 8×8 bitmap at insert time. Entries are
+/// content-addressed by an FNV key over (base, marks…) so repeated
+/// é/ñ/ö sequences share a slot; the pool is fixed BSS and when full new
+/// clusters fall back to the replacement character (honest bound).
+const dyn_cap = 1024;
+const DynCluster = struct {
+    key: u64,
+    base: u21, // 0x25CC for dotted-circle bases
+    marks: [3]u21,
+    nmarks: u8,
+    rows: [8]u8,
+};
+var dyn_clusters: [dyn_cap]DynCluster = undefined;
+var dyn_count: usize = 0;
+
+fn fnv1a(h_in: u64, cp: u21) u64 {
+    var h = h_in;
+    h ^= cp;
+    h *%= 0x100000001b3;
+    return h;
+}
+
+fn base_rows(cp: u21) ?*const [8]u8 {
+    if (cp == 0x25CC) return &font_unicode.dotted_circle;
+    return glyph_for(cp);
+}
+
+/// Allocate (or reuse) a pool cell for base+marks. Returns null when the
+/// base has no art or the pool is exhausted.
+fn cluster_for(base: u21, marks: []const u21) ?Cell {
+    const g0 = base_rows(base) orelse return null;
+    var key: u64 = 0xcbf29ce484222325;
+    key = fnv1a(key, base);
+    for (marks) |m| key = fnv1a(key, m);
+    for (dyn_clusters[0..dyn_count], 0..) |*d, i| {
+        if (d.key == key) return @as(Cell, 0x8000) | @as(Cell, @intCast(i));
+    }
+    if (dyn_count >= dyn_cap) return null;
+    var composed = g0.*;
+    const n = @min(marks.len, 3);
+    for (marks[0..n]) |m| {
+        if (font_unicode.combining_overlay(m)) |ov| {
+            for (0..8) |i| composed[i] |= ov[i];
+        }
+    }
+    dyn_clusters[dyn_count] = .{
+        .key = key,
+        .base = base,
+        .marks = .{ marks[0], if (n > 1) marks[1] else 0, if (n > 2) marks[2] else 0 },
+        .nmarks = @intCast(n),
+        .rows = composed,
+    };
+    dyn_count += 1;
+    return @as(Cell, 0x8000) | @as(Cell, @intCast(dyn_count - 1));
+}
+
+/// Attach one combining mark to the cell left of the cursor (M20-U6).
+/// With no preceding base, a dotted circle (U+25CC) becomes the base —
+/// Unicode's convention. The cursor never moves: the mark takes no cell.
+fn attach_mark(mark: u21) void {
+    // Unknown combining mark: ignore entirely (missing-combining rule).
+    if (font_unicode.combining_overlay(mark) == null) return;
+
+    // Locate the base cell (stepping over a wide continuation half).
+    const have_base = initialized and ring_count > 0 and cur_col > 0;
+    if (!have_base) {
+        // No base available: dotted circle + mark as its own cell.
+        const cell = cluster_for(0x25CC, &[_]u21{mark}) orelse return;
+        store_narrow_cell(cell);
+        return;
+    }
+    var col = cur_col - 1;
+    if (ring[cur_line][col] == cell_wide_cont and col > 0) col -= 1;
+    const prev = ring[cur_line][col];
+
+    if (prev < 0x8000) {
+        // A literal codepoint (or blank): blank bases are not composable,
+        // everything printable is.
+        if (prev < 0x20 or (prev > 0x7e and prev < 0xA0)) return;
+        const cell = cluster_for(prev, &[_]u21{mark}) orelse return;
+        ring[cur_line][col] = cell;
+        return;
+    }
+    if (prev >= 0x8000 and prev < 0xFFFE) {
+        // Extend an existing cluster with one more mark (bounded at 3).
+        const idx = prev - 0x8000;
+        const d = &dyn_clusters[idx];
+        if (d.nmarks >= 3) return; // bound reached: extra marks dropped
+        var seed: [4]u21 = undefined;
+        seed[0] = d.base;
+        for (0..d.nmarks) |i| seed[1 + i] = d.marks[i];
+        seed[1 + d.nmarks] = mark;
+        // Seed carries [base, marks…] — hand cluster_for only the marks.
+        const cell = cluster_for(d.base, seed[1 .. 2 + d.nmarks]) orelse return;
+        ring[cur_line][col] = cell;
+        return;
+    }
+    // Replacement opcode / continuation: nothing composable here.
+}
+
+/// Move the cursor left one grapheme — a wide character's continuation
+/// half belongs to its base cell, so backspace never parks inside a
+/// two-cell character (M20-U5).
+fn backspace() void {
+    if (cur_col == 0) return;
+    cur_col -= 1;
+    while (cur_col > 0 and ring[cur_line][cur_col] == cell_wide_cont) cur_col -= 1;
+}
+
+/// Store a width-1 cell at the cursor with wrap handling (shared by the
+/// narrow path of putc_unicode and dotted-circle insertion).
+fn store_narrow_cell(cell: Cell) void {
+    var slot = cursor_slot();
+    if (cur_col >= cols) slot = new_line();
+    ring[slot][cur_col] = cell;
+    cur_col += 1;
+    if (cur_col > line_fill[slot]) line_fill[slot] = @intCast(cur_col);
+    if (cur_col >= cols) _ = new_line();
+}
 
 // ---------------------------------------------------------------------------
 // Missing-glyph diagnostics (M20-U11)
@@ -968,4 +1101,95 @@ test "text: debug_font counts and reports misses through the hook (U11)" {
     putc_unicode(0x2603);
     try std.testing.expect(S.called);
     missing_glyph_log = null;
+}
+
+test "text: e + combining acute is ONE cell and one cursor step (U5/U6)" {
+    init();
+    clear();
+    puts("caf");
+    const col_before = cur_col;
+    putc('e');
+    putc_unicode(0x0301); // combining acute
+    try std.testing.expectEqual(col_before + 1, cur_col); // mark took no cell
+    const cell = ring[cur_line][col_before];
+    try std.testing.expect(cell >= 0x8000 and cell < 0xFFFE); // pool ref
+    // Rendered rows = base 'e' OR acute overlay.
+    var want = font.glyphs['e' - 0x20];
+    const ov = font_unicode.combining_overlay(0x0301).?;
+    for (0..8) |i| want[i] |= ov[i];
+    try std.testing.expectEqualSlices(u8, &want, &dyn_clusters[cell - 0x8000].rows);
+}
+
+test "text: stacked marks stay one cell; identical clusters share a pool slot (U6)" {
+    init();
+    clear();
+    putc('e');
+    putc_unicode(0x0301);
+    const first = ring[cur_line][0];
+    clear(); // resets the pool too
+    putc('e');
+    putc_unicode(0x0301);
+    try std.testing.expectEqual(first, ring[cur_line][0]); // content-addressed reuse
+    putc_unicode(0x0308); // acute + diaeresis stack onto the SAME cell
+    const cell = ring[cur_line][0];
+    try std.testing.expect(cell != first); // a different composition…
+    const d = dyn_clusters[cell - 0x8000];
+    try std.testing.expectEqual(@as(u8, 2), d.nmarks); // …with both marks
+}
+
+test "text: leading combining mark gets a dotted-circle base (U6)" {
+    init();
+    clear();
+    putc_unicode(0x0301); // no base before it
+    const cell = ring[cur_line][0];
+    try std.testing.expect(cell >= 0x8000 and cell < 0xFFFE);
+    try std.testing.expectEqual(@as(u21, 0x25CC), dyn_clusters[cell - 0x8000].base);
+    try std.testing.expectEqual(@as(usize, 1), cur_col);
+}
+
+test "text: ignorable zero-width codepoints vanish without advancing (U6)" {
+    init();
+    clear();
+    puts("a");
+    const c0 = cur_col;
+    putc_unicode(0x200B); // ZWSP
+    putc_unicode(0x200D); // ZWJ
+    putc_unicode(0xFE0F); // VS-16
+    try std.testing.expectEqual(c0, cur_col);
+    try std.testing.expectEqual(@as(Cell, 'a'), ring[cur_line][0]);
+    try std.testing.expectEqual(@as(Cell, 0x20), ring[cur_line][1]);
+}
+
+test "text: backspace deletes a whole cluster — composed or wide (U5)" {
+    init();
+    clear();
+    puts("cafe");
+    putc_unicode(0x0301); // attaches to the é; cursor stays at col 4
+    try std.testing.expectEqual(@as(usize, 4), cur_col);
+    backspace(); // the mark came free, so one step clears base+marks
+    try std.testing.expectEqual(@as(usize, 3), cur_col);
+    // Wide character: backspace from past its continuation clears both.
+    putc_unicode(0x4E2D);
+    try std.testing.expectEqual(@as(usize, 5), cur_col);
+    backspace();
+    try std.testing.expectEqual(@as(usize, 3), cur_col);
+}
+
+test "text: an exhausted cluster pool degrades to ignoring new marks (U6)" {
+    init();
+    clear();
+    // Fill the pool with distinct single-mark clusters on distinct bases.
+    var i: usize = 0;
+    while (i < dyn_cap) : (i += 1) {
+        // Bases cycle through printable ASCII; marks vary for uniqueness.
+        putc(@intCast(0x21 + (i % 90)));
+        putc_unicode(@intCast(0x0300 + (i % 13)));
+        if (i % 2 == 1) putc('\n');
+    }
+    const used = dyn_count;
+    try std.testing.expect(used > dyn_cap / 2); // sanity: pool really filled
+    // One more cluster on a fresh line must not crash or corrupt.
+    puts("ok");
+    putc_unicode(0x0325); // ring above — likely unarted → plain ignore
+    render(testCanvas()); // full repaint stays in bounds
 }

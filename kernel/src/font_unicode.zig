@@ -277,6 +277,37 @@ pub fn glyph(cp: u21) ?*const [8]u8 {
     return null;
 }
 
+/// The overlay bitmap for a combining diacritical mark (U+0300–U+036F
+/// subset we support), or null when the mark has no art (the caller
+/// ignores unknown marks per M20-U11's missing-combining rule).
+pub fn combining_overlay(cp: u21) ?[8]u8 {
+    const acc: ?Accent = switch (cp) {
+        0x0300 => .grave,
+        0x0301 => .acute,
+        0x0302 => .circumflex,
+        0x0303 => .tilde,
+        0x0304 => .macron,
+        0x0306 => .breve,
+        0x0307 => .dot_above,
+        0x0308 => .diaeresis,
+        0x030A => .ring,
+        0x030B => .double_acute,
+        0x030C => .caron,
+        0x0327 => .cedilla,
+        0x0328 => .ogonek,
+        else => null,
+    };
+    const a = acc orelse return null;
+    return a.mask();
+}
+
+test "font_unicode: combining overlays exist for the common marks" {
+    try std.testing.expect(combining_overlay(0x0301) != null); // acute
+    try std.testing.expect(combining_overlay(0x0308) != null); // diaeresis
+    try std.testing.expect(combining_overlay(0x0327) != null); // cedilla (below)
+    try std.testing.expect(combining_overlay(0x0360) == null); // unarted double mark
+}
+
 // ---------------------------------------------------------------------------
 // Latin Extended-A (M20-U3): U+0100–U+017F, same generation scheme —
 // compose(base, accent) where possible, hand-authored for strokes,
