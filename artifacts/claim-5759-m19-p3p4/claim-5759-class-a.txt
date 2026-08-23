@@ -1,0 +1,9 @@
+=== claim 5759 class-A gate summary (2026-08-23T23:42:39Z) ===
+revision: 1e0a4e5e62fc3fb8965939b57b46187d773ab680 branch=agent/ox-alpha/m19-p3p4-chaining-exit-status
+zig fmt: clean
+verify-unit-tests: all present monitor modules passed
+verify-transcript: PASS — mock transcript is byte-identical to the canonical fixture
+verify-coordination: ok
+test-coordination: all 15 tests passed
+verify-mmu-debt: PASS — MMU takeover contract intact (T0SZ=16 + TLBI at the switch; ADR 0006 + ADR 0004 D3 + hardware-contract + kernel comments).
+verify-bss-budget: PASS — kernel .bss = 10016448 B / 11534336 B (1517888 B headroom).
