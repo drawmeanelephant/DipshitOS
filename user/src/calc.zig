@@ -52,6 +52,8 @@ const Base = prog.Base;
 const constants = @import("calc/constants.zig");
 
 const expr_mod = @import("calc/expr.zig");
+
+const dates = @import("calc/dates.zig");
 const mathfn = @import("calc/mathfn.zig");
 const science = @import("calc/science.zig");
 
@@ -80,6 +82,122 @@ pub fn parse_pasted_number(text: []const u8) ?i64 {
     }
     if (n == 0) return null;
     return if (neg) -v else v;
+}
+
+const pow10_tab = [_]u64{ 1, 10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000, 1000000000, 10000000000 };
+
+/// K12: decimal rendering with a ',' every three integer digits.
+pub fn format_thousands(val: i64, out: []u8) []const u8 {
+    var plain: [24]u8 = undefined;
+    const s = format_i64(val, &plain);
+    if (s.len == 0) return s;
+    const digits = if (s[0] == '-') s[1..] else s;
+    const groups = (digits.len + 2) / 3;
+    const need = s.len + groups - 1;
+    if (need > out.len) return out[0..0];
+    var pos: usize = 0;
+    if (s[0] == '-') {
+        out[pos] = '-';
+        pos += 1;
+    }
+    for (digits, 0..) |d, idx| {
+        if (idx > 0 and (digits.len - idx) % 3 == 0) {
+            out[pos] = ',';
+            pos += 1;
+        }
+        out[pos] = d;
+        pos += 1;
+    }
+    return out[0..pos];
+}
+
+/// K12: fixed-point with exactly `places` fractional digits (half-away
+/// rounding). The scaled magnitude is clamped so the display path stays
+/// exact in f64; this formats float-valued results (unit conversion),
+/// not the i64 engine's own values.
+pub fn format_fixed(val: f64, places: u8, out: []u8) []const u8 {
+    const p: u64 = pow10_tab[@min(places, 10)];
+    var scaled_f = @abs(val) * @as(f64, @floatFromInt(p));
+    if (scaled_f >= 9.2e18) scaled_f = 9.2e18; // clamp; display-only path
+    const scaled: u64 = @intFromFloat(@round(scaled_f));
+    const int_part: u64 = scaled / p;
+    const frac: u64 = scaled % p;
+
+    var int_buf: [24]u8 = undefined;
+    const int_str = format_i64(@intCast(int_part), &int_buf);
+
+    var pos: usize = 0;
+    if (val < 0 and pos < out.len) {
+        out[pos] = '-';
+        pos += 1;
+    }
+    const ic = @min(int_str.len, out.len - pos);
+    @memcpy(out[pos .. pos + ic], int_str[0..ic]);
+    pos += ic;
+    if (places > 0 and pos + 1 < out.len) {
+        out[pos] = '.';
+        pos += 1;
+        var frac_digits: [10]u8 = undefined;
+        var fi: usize = @min(places, 10);
+        var fv = frac;
+        while (fi > 0) {
+            fi -= 1;
+            frac_digits[fi] = @as(u8, @intCast(fv % 10)) + '0';
+            fv /= 10;
+        }
+        const fc = @min(@as(usize, places), out.len - pos);
+        @memcpy(out[pos .. pos + fc], frac_digits[0..fc]);
+        pos += fc;
+    }
+    return out[0..pos];
+}
+
+pub const CalcConfig = struct {
+    dec_places: u8 = 2,
+    thousands_sep: bool = false,
+    hex_leading_zeros: bool = false,
+};
+
+fn parse_cfg_int(text: []const u8) ?i64 {
+    var v: i64 = 0;
+    var n: usize = 0;
+    for (text) |ch| {
+        if (ch < '0' or ch > '9') break;
+        v = std.math.mul(i64, v, 10) catch return null;
+        v = std.math.add(i64, v, ch - '0') catch return null;
+        n += 1;
+    }
+    if (n == 0) return null;
+    return v;
+}
+
+/// K12: parse "dec=N\nsep=0|1\nhexlz=0|1\n" — tolerant of junk lines.
+pub fn parse_config(text: []const u8) CalcConfig {
+    var cfg = CalcConfig{};
+    var it = std.mem.splitScalar(u8, text, '\n');
+    while (it.next()) |line_raw| {
+        const line = std.mem.trim(u8, line_raw, " \r\t");
+        if (std.mem.startsWith(u8, line, "dec=")) {
+            if (parse_cfg_int(line[4..])) |v| {
+                if (v >= 0 and v <= 10) cfg.dec_places = @intCast(v);
+            }
+        } else if (std.mem.startsWith(u8, line, "sep=")) {
+            cfg.thousands_sep = line.len > 4 and line[4] == '1';
+        } else if (std.mem.startsWith(u8, line, "hexlz=")) {
+            cfg.hex_leading_zeros = line.len > 6 and line[6] == '1';
+        }
+    }
+    return cfg;
+}
+
+/// K12: render the config into `buf` for /data/calc_cfg.txt.
+pub fn write_config(cfg: CalcConfig, buf: []u8) []const u8 {
+    const out = std.fmt.bufPrint(buf, "dec={d}\nsep={d}\nhexlz={d}\n", .{
+        cfg.dec_places,
+        @as(u8, if (cfg.thousands_sep) 1 else 0),
+        @as(u8, if (cfg.hex_leading_zeros) 1 else 0),
+    }) catch return buf[0..0];
+    return out;
 }
 pub const window_x: u32 = 48;
 pub const window_y: u32 = 48;
@@ -207,6 +325,20 @@ pub const AppState = struct {
     expr_buf: [48]u8 = [_]u8{0} ** 48,
     expr_len: usize = 0,
 
+    // K12: formatting controls (persisted to /data/calc_cfg.txt)
+    cfg_active: bool = false, // settings bar visible
+    cfg_row: u2 = 0, // selected row while the settings bar is open
+    dec_places: u8 = 2, // fractional digits shown for float-valued results (0–10)
+    thousands_sep: bool = false, // 1234567 -> "1,234,567"
+    hex_leading_zeros: bool = false, // 16-digit padded hex in programmer mode
+
+    // K13: date/time arithmetic (Ctrl+D bar over the history area)
+    date_active: bool = false,
+    date_buf: [40]u8 = [_]u8{0} ** 40, // command line: "d1 - d2", "d + N", "now"
+    date_len: usize = 0,
+    date_result_len: usize = 0,
+    date_result: [48]u8 = [_]u8{0} ** 48,
+
     // ---- Standard mode buttons ----
     btn_m_store: Button = Button.init(Rect.make(8, 104, 56, 20), "MS"),
     btn_m_recall: Button = Button.init(Rect.make(69, 104, 56, 20), "MR"),
@@ -290,6 +422,8 @@ pub const AppState = struct {
         if (s.hist.len > history_visible) {
             s.history_scroll = s.hist.len - history_visible;
         }
+        // Load formatting config from FAT (K12)
+        s.cfg_load();
         return s;
     }
 
@@ -608,6 +742,67 @@ pub const AppState = struct {
     }
 
     // -------------------------------------------------------------------
+    // Settings / formatting controls (K12)
+    // -------------------------------------------------------------------
+
+    const cfg_path = "/data/calc_cfg.txt";
+
+    fn cfg_load(self: *AppState) void {
+        var file_buf: [64]u8 = undefined;
+        const fd = ui.file_open(cfg_path, ui.MODE_READ);
+        if (fd < 0) return;
+        const n = ui.file_read(@as(u32, @intCast(fd)), &file_buf);
+        ui.file_close(@as(u32, @intCast(fd)));
+        if (n <= 0) return;
+        const c = parse_config(file_buf[0..@intCast(n)]);
+        self.dec_places = c.dec_places;
+        self.thousands_sep = c.thousands_sep;
+        self.hex_leading_zeros = c.hex_leading_zeros;
+    }
+
+    fn cfg_save(self: *const AppState) void {
+        var buf: [64]u8 = undefined;
+        const text = write_config(.{
+            .dec_places = self.dec_places,
+            .thousands_sep = self.thousands_sep,
+            .hex_leading_zeros = self.hex_leading_zeros,
+        }, &buf);
+        const fd = ui.file_open(cfg_path, ui.MODE_CREATE | ui.MODE_WRITE);
+        if (fd < 0) return;
+        _ = ui.file_write(@as(u32, @intCast(fd)), text);
+        ui.file_close(@as(u32, @intCast(fd)));
+    }
+
+    /// Adjust the selected settings row (+1/-1); toggles wrap booleans.
+    fn cfg_adjust(self: *AppState, delta: i32) void {
+        switch (self.cfg_row) {
+            0 => {
+                var v = @as(i32, self.dec_places) + delta;
+                if (v < 0) v = 10; // wrap
+                if (v > 10) v = 0;
+                self.dec_places = @intCast(v);
+            },
+            1 => {
+                if (delta != 0) self.thousands_sep = !self.thousands_sep;
+            },
+            else => {
+                if (delta != 0) self.hex_leading_zeros = !self.hex_leading_zeros;
+            },
+        }
+        self.cfg_save();
+        ui.write_console("calc: cfg-save\n");
+    }
+
+    /// Click y within history_area → settings row (null when outside).
+    fn cfg_row_at(y: u32) ?usize {
+        if (y < history_area.y + 4) return null;
+        const rel = y - (history_area.y + 4);
+        const row = rel / 16;
+        if (row > 2) return null;
+        return row;
+    }
+
+    // -------------------------------------------------------------------
     // Display text (K6: SCI toggle + auto-switch at |v| >= 1e10)
     // -------------------------------------------------------------------
 
@@ -623,6 +818,8 @@ pub const AppState = struct {
         if (self.sci_mode or sci_auto(v)) {
             return format_sci(@floatFromInt(v), buf);
         }
+        // K12: optional thousands separator on the plain integer display
+        if (self.thousands_sep) return format_thousands(v, buf);
         return self.engine.format_display(buf);
     }
 
@@ -803,6 +1000,135 @@ pub const AppState = struct {
         if (self.convert_active) {
             self.draw_convert_bar(win);
         }
+
+        // K12 settings bar (when active, overlays the history area)
+        if (self.cfg_active) {
+            self.draw_cfg_bar(win);
+        } else if (self.date_active) {
+            // K13 date bar (when active, overlays the history area)
+            self.draw_date_bar(win);
+        }
+    }
+
+    fn draw_date_bar(self: *const AppState, win: u32) void {
+        ui.draw_rect(win, history_area, ui.COLOR_SURFACE);
+        ui.draw_rect_outline(win, history_area, 1, ui.COLOR_ACCENT);
+
+        // Row 0: the command line
+        var line0: [56]u8 = undefined;
+        const prompt = "> ";
+        @memcpy(line0[0..prompt.len], prompt);
+        const dl = @min(self.date_len, line0.len - prompt.len - 4);
+        @memcpy(line0[prompt.len .. prompt.len + dl], self.date_buf[0..dl]);
+        ui.draw_text(win, line0[0 .. prompt.len + dl], history_area.x + 4, history_area.y + 4, ui.COLOR_TEXT_PRIMARY);
+
+        // Row 1: result of the last operation (or usage hint)
+        if (self.date_result_len > 0) {
+            const rl = @min(self.date_result_len, 60);
+            ui.draw_text(win, self.date_result[0..rl], history_area.x + 4, history_area.y + 20, ui.COLOR_ACCENT);
+        } else {
+            const hint = "d1 - d2 | d + N | now";
+            ui.draw_text(win, hint, history_area.x + 4, history_area.y + 20, ui.COLOR_TEXT_MUTED);
+        }
+    }
+
+    fn fmt_date_result(self: *AppState, comptime f: []const u8, args: anytype) usize {
+        const s = std.fmt.bufPrint(&self.date_result, f, args) catch return 0;
+        return s.len;
+    }
+
+    /// K13: evaluate the date command line; results are numeric in the; results are numeric in the
+    /// engine/history (days or seconds), human-readable in the bar.
+    fn date_evaluate(self: *AppState) void {
+        if (self.date_len == 0) return;
+        const text = self.date_buf[0..self.date_len];
+
+        var out_len: usize = 0;
+        var value: i64 = 0;
+
+        if (std.mem.eql(u8, text, "now")) {
+            value = @intCast(dates.now());
+            out_len = self.fmt_date_result("{d}s since boot", .{value});
+        } else if (std.mem.indexOf(u8, text, " - ")) |sep| {
+            // date_diff
+            const a = dates.parse(text[0..sep]) catch {
+                self.date_fail();
+                return;
+            };
+            const b = dates.parse(text[sep + 3 ..]) catch {
+                self.date_fail();
+                return;
+            };
+            value = a - b;
+            out_len = self.fmt_date_result("{d} days", .{value});
+        } else if (std.mem.indexOf(u8, text, " + ")) |sep| {
+            // date_add
+            const base = dates.parse(text[0..sep]) catch {
+                self.date_fail();
+                return;
+            };
+            var num_buf: [16]u8 = undefined;
+            const rest = text[sep + 3 ..];
+            if (rest.len >= num_buf.len) {
+                self.date_fail();
+                return;
+            }
+            @memcpy(num_buf[0..rest.len], rest);
+            const days = parse_cfg_int(num_buf[0..rest.len]) orelse {
+                self.date_fail();
+                return;
+            };
+            value = base + days;
+            var fmt_buf: [16]u8 = undefined;
+            const new_date = dates.format(value, &fmt_buf);
+            @memcpy(self.date_result[0..new_date.len], new_date);
+            out_len = new_date.len;
+        } else {
+            // A bare date: show its day count
+            value = dates.parse(text) catch {
+                self.date_fail();
+                return;
+            };
+            out_len = self.fmt_date_result("day {d}", .{value});
+        }
+
+        self.date_result_len = out_len;
+        self.engine.current_val = value;
+        self.engine.is_entering_val = false;
+        self.engine.has_error = false;
+        self.push_history(text, value);
+        self.date_len = 0;
+        ui.write_console("calc: date-ok\n");
+    }
+
+    fn date_fail(self: *AppState) void {
+        const msg = "? (YYYY-MM-DD)";
+        @memcpy(self.date_result[0..msg.len], msg);
+        self.date_result_len = msg.len;
+        self.engine.raise_error();
+        ui.write_console("calc: date-error\n");
+    }
+
+    fn is_date_char(ch: u8) bool {
+        return (ch >= '0' and ch <= '9') or ch == '-' or ch == '+' or ch == ' ' or
+            ch == 'n' or ch == 'o' or ch == 'w';
+    }
+
+    fn draw_cfg_bar(self: *const AppState, win: u32) void {
+        ui.draw_rect(win, history_area, ui.COLOR_SURFACE);
+        ui.draw_rect_outline(win, history_area, 1, ui.COLOR_ACCENT);
+
+        var row_buf: [48]u8 = undefined;
+        const rows = [_][]const u8{
+            std.fmt.bufPrint(row_buf[0..24], "DEC PLACES   < {d} >", .{self.dec_places}) catch "?",
+            if (self.thousands_sep) "THOUSANDS    ON" else "THOUSANDS    OFF",
+            if (self.hex_leading_zeros) "HEX PAD      ON" else "HEX PAD      OFF",
+        };
+        for (rows, 0..) |row_text, ri| {
+            const y = history_area.y + 4 + @as(u32, @intCast(ri)) * 16;
+            const col = if (ri == self.cfg_row) ui.COLOR_TEXT_PRIMARY else ui.COLOR_TEXT_MUTED;
+            ui.draw_text(win, row_text[0..@min(row_text.len, 60)], history_area.x + 4, y, col);
+        }
     }
 
     fn draw_programmer(self: *const AppState, win: u32) void {
@@ -820,7 +1146,15 @@ pub const AppState = struct {
 
         // Hex
         var hex_buf: [24]u8 = undefined;
-        const hex_str = prog.format_hex(val, &hex_buf);
+        // K12: optional 16-digit zero padding in hex display
+        var hex_str_buf: [20]u8 = undefined;
+        const raw_hex = prog.format_hex(val, &hex_buf);
+        const hex_str = if (self.hex_leading_zeros and raw_hex.len < 16) blk: {
+            const pad = 16 - raw_hex.len;
+            @memset(hex_str_buf[0..pad], '0');
+            @memcpy(hex_str_buf[pad .. pad + raw_hex.len], raw_hex);
+            break :blk hex_str_buf[0 .. pad + raw_hex.len];
+        } else raw_hex;
         var hex_label: [20]u8 = undefined;
         var hpos: usize = 0;
         const prefix = "0x";
@@ -972,12 +1306,10 @@ pub const AppState = struct {
         lpos += to_name.len;
         ui.draw_text(win, label_buf[0..lpos], history_area.x + 4, history_area.y + 16, ui.COLOR_TEXT_PRIMARY);
 
-        // Conversion result
-        var res_buf: [24]u8 = undefined;
+        // Conversion result — K12: dec_places formats the fractional part
+        var res_buf: [32]u8 = undefined;
         const result = self.convert_result();
-        // Format the f64 result as a simple decimal string
-        const result_int: i64 = @intFromFloat(result);
-        const result_str = format_i64(result_int, &res_buf);
+        const result_str = format_fixed(result, self.dec_places, &res_buf);
         var full_buf: [32]u8 = undefined;
         var fpos: usize = 0;
         const eq_sign = "= ";
@@ -1007,6 +1339,22 @@ pub const AppState = struct {
 
     fn handle_mouse_standard(self: *AppState, ev: *const Event) bool {
         var changed = false;
+
+        // K12: the settings bar consumes clicks over the history area
+        // (act once, on release — DOWN+UP would double-adjust)
+        if (self.cfg_active and ev.kind == ui.MOUSE_UP) {
+            const x = ev.arg0;
+            const y = ev.arg1;
+            const inside = x >= history_area.x and x < history_area.x + history_area.w and
+                y >= history_area.y and y < history_area.y + history_area.h;
+            if (inside) {
+                if (cfg_row_at(y)) |row| {
+                    self.cfg_row = @intCast(row);
+                    self.cfg_adjust(1);
+                }
+                return true;
+            }
+        }
 
         // K2: memory buttons
         if (self.btn_m_store.handle_event(ev)) {
@@ -1391,6 +1739,76 @@ pub const AppState = struct {
             return true;
         }
 
+        // K12: Ctrl+, toggles the settings bar
+        if (ctrl and ascii == ',') {
+            self.cfg_active = !self.cfg_active;
+            self.cfg_row = 0;
+            ui.write_console(if (self.cfg_active) "calc: cfg-open\n" else "calc: cfg-close\n");
+            return true;
+        }
+
+        // K13: Ctrl+D toggles the date bar
+        if (ctrl and (ascii == 'd' or ascii == 'D')) {
+            self.date_active = !self.date_active;
+            self.date_len = 0;
+            ui.write_console(if (self.date_active) "calc: date-open\n" else "calc: date-close\n");
+            return true;
+        }
+
+        // K13: while the date bar is open it consumes keys
+        if (self.date_active and !ctrl) {
+            if (ascii == 0x08 or keycode == 0x2a) {
+                if (self.date_len > 0) self.date_len -= 1;
+                return true;
+            }
+            if (ascii == 0x1b or keycode == 0x29) {
+                self.date_active = false;
+                ui.write_console("calc: date-close\n");
+                return true;
+            }
+            if (keycode == 0x28 or ascii == '\r' or ascii == '\n' or ascii == '=') {
+                self.date_evaluate();
+                return true;
+            }
+            if (is_date_char(ascii) and self.date_len < self.date_buf.len) {
+                self.date_buf[self.date_len] = ascii;
+                self.date_len += 1;
+                return true;
+            }
+            return true; // swallow everything else while open
+        }
+
+        // K12: while the settings bar is open it consumes keys
+        if (self.cfg_active) {
+            if (keycode == 0x52) { // Up — move selection
+                if (self.cfg_row > 0) self.cfg_row -= 1;
+                return true;
+            }
+            if (keycode == 0x51) { // Down
+                if (self.cfg_row < 2) self.cfg_row += 1;
+                return true;
+            }
+            if (ascii == '+' or ascii == '=' or keycode == 0x4F) { // Right/increase
+                self.cfg_adjust(1);
+                return true;
+            }
+            if (ascii == '-' or keycode == 0x50) { // Left/decrease
+                self.cfg_adjust(-1);
+                return true;
+            }
+            if (ascii == ' ' or ascii == '\r' or ascii == '\n' or keycode == 0x28) {
+                // Space/Enter: apply the row's primary action
+                self.cfg_adjust(1);
+                return true;
+            }
+            if (ascii == 0x1b or keycode == 0x29) {
+                self.cfg_active = false;
+                ui.write_console("calc: cfg-close\n");
+                return true;
+            }
+            return true; // swallow everything else while open
+        }
+
         // K9: while the expression editor is active it consumes keys
         if (self.expr_mode) {
             if (ascii == 0x08 or keycode == 0x2a) {
@@ -1556,7 +1974,68 @@ pub const AppState = struct {
 // Entry Point (EL0)
 // ---------------------------------------------------------------------------
 
-pub export fn _start() callconv(.c) noreturn {
+/// K11: read one 32-byte NUL-terminated argv slot.
+fn cli_arg(block: [*]u8, i: usize) []const u8 {
+    const slot = block + i * 32;
+    var len: usize = 0;
+    while (len < 32 and slot[len] != 0) len += 1;
+    return slot[0..len];
+}
+
+/// K11: CLI mode — `exec CALC.BIN <expr>` evaluates and prints, no GUI.
+fn cli_main(argc: usize, argv_va: u64) noreturn {
+    const block: [*]u8 = @ptrFromInt(argv_va);
+
+    // Join up to argc args into one expression line ("2 + 3" works too).
+    var buf: [256]u8 = undefined;
+    var pos: usize = 0;
+    var i: usize = 0;
+    while (i < argc) : (i += 1) {
+        const arg = cli_arg(block, i);
+        if (argc == 1 and (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help"))) {
+            ui.write_console("CALC.BIN - DipshitOS calculator\n" ++
+                "usage: exec CALC.BIN [expression]\n" ++
+                "       exec CALC.BIN -h      show this help\n" ++
+                "examples: exec CALC.BIN '2+3*4'   -> 2+3*4 = 14\n" ++
+                "          exec CALC.BIN '(2+3)*4' -> (2+3)*4 = 20\n" ++
+                "no args opens the GUI calculator.\n");
+            ui.exit_process(0);
+        }
+        if (pos > 0 and pos < buf.len) {
+            buf[pos] = ' ';
+            pos += 1;
+        }
+        const c = @min(arg.len, buf.len - pos);
+        @memcpy(buf[pos .. pos + c], arg[0..c]);
+        pos += c;
+    }
+    if (pos == 0) gui_main();
+
+    const result = expr_mod.evaluate(buf[0..pos]) catch {
+        ui.write_console("calc: invalid expression\n");
+        ui.exit_process(1);
+    };
+
+    // "<expr> = <result>"
+    var out: [300]u8 = undefined;
+    var opos: usize = 0;
+    const ec = @min(pos, out.len - 24);
+    @memcpy(out[0..ec], buf[0..ec]);
+    opos += ec;
+    @memcpy(out[opos .. opos + 3], " = ");
+    opos += 3;
+    var num_buf: [24]u8 = undefined;
+    const ns = format_i64(result, &num_buf);
+    const nc = @min(ns.len, out.len - opos - 1);
+    @memcpy(out[opos .. opos + nc], ns[0..nc]);
+    opos += nc;
+    out[opos] = '\n';
+    opos += 1;
+    ui.write_console(out[0..opos]);
+    ui.exit_process(exit_status);
+}
+
+fn gui_main() noreturn {
     var app = AppState.init();
 
     const win_res = ui.win_open(window_x, window_y, window_w, window_h);
@@ -1612,6 +2091,25 @@ pub export fn _start() callconv(.c) noreturn {
     ui.write_console("calc: exiting 43\n");
     ui.win_close(win);
     ui.exit_process(exit_status);
+}
+
+/// K11 entry contract: the kernel's exec passes argc in x0 and the argv
+/// block VA in x1 (card 3e, claim 4636). With args: CLI mode — evaluate,
+/// print, exit. Without: open the GUI window.
+pub export fn _start(argc: u64, argv_va: u64) callconv(.c) noreturn {
+    if (argc > 0 and argv_va != 0) {
+        cli_main(@intCast(argc), argv_va);
+    }
+    gui_main();
+}
+
+test "calc K11: cli_arg reads NUL-terminated 32-byte slots" {
+    var block = [_]u8{0} ** 64;
+    @memcpy(block[0..5], "2+3*4");
+    try std.testing.expectEqualStrings("2+3*4", cli_arg(&block, 0));
+    @memcpy(block[32..34], "xy");
+    try std.testing.expectEqualStrings("xy", cli_arg(&block, 1));
+    try std.testing.expectEqual(@as(usize, 0), cli_arg(&block, 2).len);
 }
 
 // ---------------------------------------------------------------------------
@@ -2101,4 +2599,153 @@ fn press_at(app: *AppState, x: u32, y: u32) void {
 
 fn tap(app: *AppState, x: u32, y: u32) void {
     press_at(app, x, y);
+}
+
+test "calc K12: thousands separator formatting" {
+    var buf: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("1,234,567", format_thousands(1234567, &buf));
+    try std.testing.expectEqualStrings("999", format_thousands(999, &buf));
+    try std.testing.expectEqualStrings("1,000", format_thousands(1000, &buf));
+    try std.testing.expectEqualStrings("-12,345,678", format_thousands(-12345678, &buf));
+    try std.testing.expectEqualStrings("0", format_thousands(0, &buf));
+}
+
+test "calc K12: fixed-point with dec places" {
+    var buf: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("0.33", format_fixed(1.0 / 3.0, 2, &buf));
+    try std.testing.expectEqualStrings("37.78", format_fixed(37.7778, 2, &buf)); // e.g. 100C in F-scale math
+    try std.testing.expectEqualStrings("5.00", format_fixed(5, 2, &buf));
+    try std.testing.expectEqualStrings("212.00", format_fixed(212, 2, &buf));
+    try std.testing.expectEqualStrings("3.1416", format_fixed(3.14159, 4, &buf));
+    try std.testing.expectEqualStrings("-2.50", format_fixed(-2.5, 2, &buf));
+    try std.testing.expectEqualStrings("7", format_fixed(7, 0, &buf));
+}
+
+test "calc K12: config parse/write round-trip" {
+    const cfg = CalcConfig{ .dec_places = 7, .thousands_sep = true, .hex_leading_zeros = true };
+    var buf: [64]u8 = undefined;
+    const text = write_config(cfg, &buf);
+    const back = parse_config(text);
+    try std.testing.expectEqual(@as(u8, 7), back.dec_places);
+    try std.testing.expect(back.thousands_sep);
+    try std.testing.expect(back.hex_leading_zeros);
+
+    // Tolerant of junk; out-of-range values are ignored (defaults hold)
+    const junk = parse_config("hello\ndec=99\nsep=yes\nhexlz=0\n");
+    try std.testing.expectEqual(@as(u8, 2), junk.dec_places); // 99 rejected, default kept
+    try std.testing.expect(!junk.thousands_sep); // only '1' means on
+}
+
+test "calc K12: Ctrl+, opens the settings bar; keys adjust" {
+    var app = AppState.init();
+    try std.testing.expect(!app.cfg_active);
+    var ev = Event{ .kind = ui.KEY_DOWN, .flags = 0x04, .seq = 1, .arg0 = 0, .arg1 = ',' };
+    try std.testing.expect(app.handle_keyboard_event(&ev));
+    try std.testing.expect(app.cfg_active);
+
+    // '+' bumps dec places 2 -> 3
+    var plus = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 2, .arg0 = 0, .arg1 = '+' };
+    _ = app.handle_keyboard_event(&plus);
+    try std.testing.expectEqual(@as(u8, 3), app.dec_places);
+
+    // Down moves to THOUSANDS row; Enter toggles it on
+    var down = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 3, .arg0 = 0x51, .arg1 = 0 };
+    _ = app.handle_keyboard_event(&down);
+    var enter = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 4, .arg0 = 0x28, .arg1 = '\r' };
+    _ = app.handle_keyboard_event(&enter);
+    try std.testing.expect(app.thousands_sep);
+
+    // Esc closes
+    var esc = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 5, .arg0 = 0x29, .arg1 = 0x1b };
+    _ = app.handle_keyboard_event(&esc);
+    try std.testing.expect(!app.cfg_active);
+}
+
+test "calc K12: settings bar click adjusts row" {
+    var app = AppState.init();
+    app.cfg_active = true;
+    // Row 0 spans y=12..27 → click at y=14 increments dec places
+    var ev_up = Event{ .kind = ui.MOUSE_UP, .flags = 0, .seq = 2, .arg0 = 40, .arg1 = 14 };
+    _ = app.handle_mouse_events(&ev_up);
+    try std.testing.expectEqual(@as(u8, 3), app.dec_places); // default 2 + 1
+
+    // Row 1 (THOUSANDS) at y=28..43 toggles the separator on
+    var ev2u = Event{ .kind = ui.MOUSE_UP, .flags = 0, .seq = 4, .arg0 = 40, .arg1 = 30 };
+    _ = app.handle_mouse_events(&ev2u);
+    try std.testing.expect(app.thousands_sep);
+}
+
+test "calc K12: display honors thousands separator" {
+    var app = AppState.init();
+    app.engine.current_val = 1234567;
+    var buf: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("1234567", app.display_text(&buf));
+    app.thousands_sep = true;
+    try std.testing.expectEqualStrings("1,234,567", app.display_text(&buf));
+}
+
+test "calc K13: Ctrl+D opens date bar; diff command works" {
+    var app = AppState.init();
+    try std.testing.expect(!app.date_active);
+    var evd = Event{ .kind = ui.KEY_DOWN, .flags = 0x04, .seq = 1, .arg0 = 0, .arg1 = 'd' };
+    try std.testing.expect(app.handle_keyboard_event(&evd));
+    try std.testing.expect(app.date_active);
+
+    for ("2026-01-10 - 2026-01-01") |ch| {
+        var ev = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 2, .arg0 = 0, .arg1 = ch };
+        _ = app.handle_keyboard_event(&ev);
+    }
+    var evr = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 3, .arg0 = 0x28, .arg1 = '\r' };
+    _ = app.handle_keyboard_event(&evr);
+    // 9 days lands in engine + history; result line says "9 days"
+    // "A - B" reads A minus B
+    try std.testing.expectEqual(@as(i64, 9), app.engine.current_val);
+    const e = app.hist.get(app.hist.len - 1);
+    try std.testing.expectEqualStrings("2026-01-10 - 2026-01-01", e.text[0..e.len]);
+    try std.testing.expectEqualStrings("9 days", app.date_result[0..app.date_result_len]);
+}
+
+test "calc K13: date_add renders the new date" {
+    var app = AppState.init();
+    app.date_active = true;
+    for ("2026-01-01 + 30") |ch| {
+        var ev = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 1, .arg0 = 0, .arg1 = ch };
+        _ = app.handle_keyboard_event(&ev);
+    }
+    var evr = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 2, .arg0 = 0x28, .arg1 = '\r' };
+    _ = app.handle_keyboard_event(&evr);
+    // Engine holds the new date's epoch-day count (20484 = 2026-01-31)
+    try std.testing.expectEqual(@as(i64, 20484), app.engine.current_val);
+    try std.testing.expectEqualStrings("2026-01-31", app.date_result[0..app.date_result_len]);
+}
+
+test "calc K13: now yields a positive second count" {
+    var app = AppState.init();
+    app.date_active = true;
+    for ("now") |ch| {
+        var ev = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 1, .arg0 = 0, .arg1 = ch };
+        _ = app.handle_keyboard_event(&ev);
+    }
+    var evr = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 2, .arg0 = 0x28, .arg1 = '\r' };
+    _ = app.handle_keyboard_event(&evr);
+    try std.testing.expect(app.engine.current_val > 0); // host stub counts by 42
+    try std.testing.expect(app.date_result_len > 0);
+}
+
+test "calc K13: bad date raises ERROR marker" {
+    var app = AppState.init();
+    app.date_active = true;
+    for ("2026-13-40") |ch| {
+        var ev = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 1, .arg0 = 0, .arg1 = ch };
+        _ = app.handle_keyboard_event(&ev);
+    }
+    var evr = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 2, .arg0 = 0x28, .arg1 = '\r' };
+    _ = app.handle_keyboard_event(&evr);
+    try std.testing.expect(app.engine.has_error);
+    try std.testing.expectEqualStrings("? (YYYY-MM-DD)", app.date_result[0..app.date_result_len]);
+
+    // Esc closes
+    var esc = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 3, .arg0 = 0x29, .arg1 = 0x1b };
+    _ = app.handle_keyboard_event(&esc);
+    try std.testing.expect(!app.date_active);
 }
