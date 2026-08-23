@@ -117,3 +117,21 @@ landed. Host-tested; live gate pending.
   compat, listing signature, clamp 4). 646/646 shell tests pass.
   All verify gates green.
 
+
+## 2026-08-23 — claim 7033: P9 command substitution done (issue #298)
+
+P9 (command substitution: `$(cmd)` inlines captured stdout) landed.
+Host-tested; live gate pending.
+
+- `shell.zig`: new `cmd_subst` function — scans for `$()`, finds matching
+  `)`, rejects nested `$(` via a `$`+`(` check inside the inner region,
+  trims whitespace, executes the inner command via `handle_line` with stdout
+  captured through `redirect.capture_console()`, trims trailing newlines, and
+  substitutes the captured output back into the line. `subst_active` guard
+  prevents recursive substitution. `fn` definitions skip substitution so
+  `$()` in bodies stays literal.
+- Bounded: one substitution per line, max 256 bytes captured output.
+  Empty inner commands return the raw line unchanged.
+- Host tests: 7 new (basic inline, nested refusal, unmatched error,
+  empty no-op, fn-body preservation, prefix+suffix, no-subst-passthrough).
+  653/653 shell tests pass. All verify gates green.

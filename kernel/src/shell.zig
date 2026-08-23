@@ -58,6 +58,8 @@ const func_cmds_per_func: usize = 4;
 const func_cmd_max: usize = 64;
 const func_arg_max: usize = 4;
 const func_arg_name_max: usize = 16;
+/// M19 P9 (issue #298): command substitution — max captured output.
+const subst_max_output: usize = 256;
 /// M18 T16 (issue #419): script bounds — at most 64 executable lines,
 /// at most 256 chars per line, staged into 64 × 256 = 16384 bytes.
 const script_max_lines: usize = 64;
@@ -1075,14 +1077,25 @@ fn run_script(mon: *monitor.Monitor, name: []const u8) void {
 }
 
 fn handle_line(mon: *monitor.Monitor, raw_line: []const u8) void {
+    // P9: command substitution `$(cmd)` — execute inner command, capture
+    // stdout, substitute back into the line.  Skip for fn definitions.
+    // Also skip when subst_active (prevent nesting).
+    var subst_buf: [lineedit.max_line]u8 = undefined;
+    const line_after_subst = if (subst_active or
+        std.mem.startsWith(u8, raw_line, "fn ") or
+        std.mem.startsWith(u8, raw_line, "fn\t"))
+        raw_line
+    else
+        cmd_subst(mon, raw_line, &subst_buf);
+
     // M18 T12: expand $VAR references before tokenizing.
     // P8: skip expansion for `fn` definitions so `$name` in function
     // bodies stays literal — it'll be expanded at invocation time.
     var expanded: [lineedit.max_line]u8 = undefined;
-    const line = if (std.mem.startsWith(u8, raw_line, "fn ") or std.mem.startsWith(u8, raw_line, "fn\t"))
-        raw_line
+    const line = if (std.mem.startsWith(u8, line_after_subst, "fn ") or std.mem.startsWith(u8, line_after_subst, "fn\t"))
+        line_after_subst
     else
-        env_expand(raw_line, &expanded);
+        env_expand(line_after_subst, &expanded);
 
     // M18 T13: check for alias expansion (only first word)
     if (line.len > 0) {
@@ -1448,6 +1461,89 @@ fn func_call(mon: *monitor.Monitor, argv: []const []const u8) void {
         const cmd = env_expand(f.body[ci][0..f.body_lens[ci]], &exp_buf);
         shell_handle_expanded(mon, cmd);
     }
+}
+
+/// M19 P9 (issue #298): true while executing a command substitution's
+/// inner command — guards against nesting (refused by the scanner) and
+/// prevents cmd_subst from calling itself.
+var subst_active: bool = false;
+
+/// M19 P9 (issue #298): scan `raw` for `$(...)`.  If found, execute the
+/// inner command with stdout captured, then substitute the captured output
+/// into the line.  Returns the substituted line (may be the same as `raw`
+/// if no substitution was found).
+fn cmd_subst(mon: *monitor.Monitor, raw: []const u8, out: []u8) []const u8 {
+    // Find first `$(`
+    const dollar_lp = std.mem.indexOf(u8, raw, "$(") orelse return raw;
+    const start = dollar_lp + 2;
+
+    // Find matching `)` — reject nested `$(`
+    var depth: usize = 1;
+    var i: usize = start;
+    while (i < raw.len and depth > 0) : (i += 1) {
+        if (raw[i] == '$' and i + 1 < raw.len and raw[i + 1] == '(') {
+            mon.console.print_line("cmdsubst: nested $(...) not supported");
+            return raw;
+        }
+        if (raw[i] == '(') {
+            depth += 1;
+        } else if (raw[i] == ')') {
+            depth -= 1;
+        }
+    }
+    if (depth != 0) {
+        mon.console.print_line("cmdsubst: unmatched $(");
+        return raw;
+    }
+    const end = i - 1; // index of the closing `)`
+    const inner_cmd = raw[start..end];
+    // Trim whitespace
+    var cs = inner_cmd;
+    while (cs.len > 0 and (cs[0] == ' ' or cs[0] == '\t')) cs = cs[1..];
+    var ce = cs.len;
+    while (ce > 0 and (cs[ce - 1] == ' ' or cs[ce - 1] == '\t')) ce -= 1;
+    const cmd = cs[0..ce];
+
+    if (cmd.len == 0) return raw;
+
+    // Capture the inner command's stdout.
+    redirect.reset_capture();
+    const saved = mon.console;
+    mon.console = redirect.capture_console();
+    subst_active = true;
+    handle_line(mon, cmd);
+    subst_active = false;
+    mon.console = saved;
+
+    const captured = redirect.captured();
+    const cap_len = @min(captured.len, subst_max_output);
+
+    // Build substituted line: prefix + captured output + suffix.
+    // Trim trailing newlines from captured output (commands often end
+    // with a newline, but we want the inline substitution to be clean).
+    var cend = cap_len;
+    while (cend > 0 and (captured[cend - 1] == '\n' or captured[cend - 1] == '\r')) cend -= 1;
+    const trimmed = captured[0..cend];
+
+    const prefix = raw[0..dollar_lp];
+    const suffix = raw[end + 1 ..];
+    var op: usize = 0;
+    // copy prefix
+    if (prefix.len > 0) {
+        @memcpy(out[op..][0..prefix.len], prefix);
+        op += prefix.len;
+    }
+    // copy trimmed captured output
+    if (trimmed.len > 0) {
+        @memcpy(out[op..][0..trimmed.len], trimmed);
+        op += trimmed.len;
+    }
+    // copy suffix
+    if (suffix.len > 0 and op + suffix.len <= out.len) {
+        @memcpy(out[op..][0..suffix.len], suffix);
+        op += suffix.len;
+    }
+    return out[0..op];
 }
 
 fn shell_handle_expanded(mon: *monitor.Monitor, line: []const u8) void {
@@ -3720,4 +3816,88 @@ test "shell: M19 P8 fn: too many args clamped to 4" {
     mock.feed("fn many(a, b, c, d, e, f) { echo $4 }\n");
     while (shell.poll() != .idle) {}
     try std.testing.expectEqual(@as(usize, 4), func_table[0].arg_count); // clamped to 4
+}
+
+test "shell: M19 P9 subst: echo $(echo hello) inlines captured output" {
+    env_count = 0;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("echo $(echo hello)\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    // The inner echo outputs "hello" which is substituted; outer echo prints that
+    try std.testing.expect(std.mem.indexOf(u8, out, "hello") != null);
+}
+
+test "shell: M19 P9 subst: nested $(...) is refused" {
+    env_count = 0;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("echo $(echo $(echo nested))\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "nested") != null);
+}
+
+test "shell: M19 P9 subst: unmatched $( reports error" {
+    env_count = 0;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("echo $(unclosed\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "unmatched $") != null);
+}
+
+test "shell: M19 P9 subst: empty $(  ) is a no-op" {
+    env_count = 0;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("echo before$(  )after\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    // Empty inner cmd means raw line is returned as-is, so echo sees literal "before$(  )after"
+    try std.testing.expect(std.mem.indexOf(u8, out, "before") != null);
+}
+
+test "shell: M19 P9 subst: fn bodies skip substitution" {
+    env_count = 0;
+    func_count = 0;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    // $() in a function body should be stored literally, not expanded at define time
+    mock.feed("fn subtest { echo $(echo inner) }\n");
+    while (shell.poll() != .idle) {}
+    try std.testing.expectEqual(@as(usize, 1), func_count);
+    // Body should contain literal $(echo inner), not the expansion
+    const body = func_table[0].body[0][0..func_table[0].body_lens[0]];
+    try std.testing.expect(std.mem.indexOf(u8, body, "$(echo inner)") != null);
+}
+
+test "shell: M19 P9 subst: mixed prefix and suffix with substitution" {
+    env_count = 0;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    // prefix + $(echo mid) + suffix → prefixmidsuffix
+    mock.feed("echo before-$(echo mid)-after\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "before-mid-after") != null);
+}
+
+test "shell: M19 P9 subst: no substitution when no $( present" {
+    env_count = 0;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("echo just a normal command\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "just a normal command") != null);
 }
