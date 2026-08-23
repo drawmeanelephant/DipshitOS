@@ -931,6 +931,31 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_settings.step);
 
     // ------------------------------------------------------------------
+    // Guest: thirty-first ESP user program (M22 D2 — issue #325) ASM.BIN.
+    // The on-machine two-pass AArch64 assembler: reads a bounded source
+    // file, emits a minimal statically linked AArch64 ELF32 executable
+    // (single R+X PT_LOAD at 0x400000) that the D1 loader runs via exec.
+    // ------------------------------------------------------------------
+    const asm_prog = b.addExecutable(.{
+        .name = "user-asm",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/asm.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    asm_prog.linker_script = b.path("user/linker.ld");
+    const asm_step = b.step("asm", "Build the thirty-first ESP user program (zig-out/bin/ASM.BIN)");
+    const asm_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    asm_elf2bin.addFileArg(asm_prog.getEmittedBin());
+    const asm_bin = asm_elf2bin.addOutputFileArg("ASM.BIN");
+    asm_elf2bin.has_side_effects = true;
+    asm_elf2bin.stdio = .inherit;
+    asm_step.dependOn(&asm_elf2bin.step);
+    const install_asm = b.addInstallFileWithDir(asm_bin, .bin, "ASM.BIN");
+    b.getInstallStep().dependOn(&install_asm.step);
+
+    // ------------------------------------------------------------------
     // Top-level steps. System-command steps are marked as having side
     // effects (and inherit stdio) so they always execute instead of being
     // skipped by the build cache. (No QEMU path: this project targets Apple
@@ -972,6 +997,7 @@ pub fn build(b: *std.Build) void {
     image.addFileArg(guard_bin); // ... [GUARD.BIN] (claim 8403: twenty-ninth user program, the hostile guard-page proof)
     image.addFileArg(spin_bin); // ... [SPIN.BIN] (Arc5 #246: hostile-consumer CPU limit test)
     image.addFileArg(settings_bin); // ... [SETTINGS.BIN] (Issue #214: thirtieth user program, GUI settings panel)
+    image.addFileArg(asm_bin); // ... [ASM.BIN] (M22 D2, issue #325: thirty-first user program, the assembler)
     image.has_side_effects = true;
     image.stdio = .inherit;
     image_step.dependOn(&image.step);

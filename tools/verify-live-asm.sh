@@ -1,0 +1,130 @@
+#!/usr/bin/env bash
+#
+# verify-live-asm.sh -- M22 D2 class-B gate (issue #325, claim 9815): the
+# on-machine assembler produces an ELF the on-machine loader runs.
+#
+# The chain, all asserted in vm-serial.log:
+#   1. `write PROG.S ...` stages a one-line (';'-separated) AArch64 source
+#      program on the ESP through the monitor's write command.
+#   2. `exec ASM.BIN /esp/PROG.S /esp/PROG.ELF` — ASM.BIN reads the source
+#      through the M10 file seam (slots 23/24), assembles it two-pass, and
+#      writes a minimal AArch64 ELF32 executable back out (slot 25). The
+#      reply "asm: wrote N bytes to /esp/PROG.ELF" proves the assembly.
+#   3. `exec PROG.ELF` — the M22 D1 loader sniffs the ELF magic ASM.BIN
+#      just wrote, maps it at the EL0 text aperture, and runs it: the
+#      program's sys_write marker ("ASM HELLO") lands in the serial log
+#      and sys_exit closes with status 17.
+#   4. The shell stays responsive and nothing parked.
+#
+# Source program (semicolons = statement separators; the monitor's line
+# parser caps a command at 17 tokens, so the staged program stays small —
+# the full hello-world surface is covered by asm.zig's host tests):
+#   _start:
+#   mov x8, 3        // sys_exit
+#   mov x0, 71       // exit status (the live marker: a mis-encoded
+#                    // instruction faults with a tombstone instead of
+#                    // producing this exact status)
+#   svc 0
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+GATE_LOG="artifacts/m22-asm-live.txt"
+exec > >(tee "$GATE_LOG") 2>&1
+trap 'sleep 0.5' EXIT
+
+BOOTS="${BOOTS:-1}"
+REPORT="artifacts/live-asm-report.txt"
+SCRIPT="artifacts/live-asm-script.txt"
+STATIC_EXIT_LINE="tasks user-el0 exited status=7"
+ASM_WROTE_LINE="asm: wrote 96 bytes to /esp/PROG.ELF"
+EXIT_LINE="tasks user-exec exited status=71"
+REAP_LINE="tasks user-exec reaped"
+SCRIPT2="artifacts/live-asm-script2.txt"
+
+echo "=== verify-live-asm: M22 D2 (issue #325) — assemble ON the machine, run the output through the D1 loader, $BOOTS boot(s) ==="
+zig version
+swift --version 2>&1 | head -1
+sw_vers
+REVISION="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
+BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
+DIRTY="$(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
+echo "revision: $REVISION branch=$BRANCH boots=$BOOTS dirty-files=$DIRTY"
+
+zig fmt --check boot/src/*.zig kernel/src/*.zig user/src/*.zig build.zig
+zig build
+zig build image
+swift build --package-path host/vm-runner --configuration release
+codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
+
+SRC='_start:;mov x8, 3;mov x0, 71;svc 0'
+# `mount esp` re-snapshots the ESP window so the freshly written ELF is
+# visible to exec's volume lookup (userland writes bypass the window).
+printf 'ls\nwrite PROG.S %s\nexec ASM.BIN /esp/PROG.S /esp/PROG.ELF\n' "$SRC" > "$SCRIPT"
+printf 'mount esp\nls\nexec PROG.ELF\necho rx-asm-ok\n' > "$SCRIPT2"
+
+run_one() {
+    local tag="$1"
+    local run_log="artifacts/live-asm-run-$tag.txt"
+    local serial_copy="artifacts/live-asm-serial-$tag.log"
+    rm -f artifacts/efi-vars.bin artifacts/vm-serial.log
+
+    set +e
+    host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log \
+        --script "$SCRIPT" --script-after "$STATIC_EXIT_LINE" \
+        --script2 "$SCRIPT2" --script2-after "$ASM_WROTE_LINE" \
+        --script-expect "$EXIT_LINE" --timeout 90 > "$run_log" 2>&1
+    local rc=$?
+    set -e
+    [ -f artifacts/vm-serial.log ] && cp artifacts/vm-serial.log "$serial_copy" || true
+
+    local bytes=0 banner=0 listed=0 written=0 assembled=0 loaded=0 exit71=0 reaped=0 echo_ok=0 fatal=0
+    if [ -f artifacts/vm-serial.log ]; then
+        bytes="$(wc -c < artifacts/vm-serial.log | tr -d ' ')"
+        [ "$(grep -aFxc -- "DipshitOS kernel has seized control." artifacts/vm-serial.log || true)" = 1 ] && banner=1
+        [ "$(grep -aFc -- "PROG.S" artifacts/vm-serial.log || true)" -ge 2 ] && listed=1
+        [ "$(grep -aFc -- "write: ok" artifacts/vm-serial.log || true)" = 1 ] && written=1
+        [ "$(grep -aFc -- "asm: wrote 96 bytes to /esp/PROG.ELF" artifacts/vm-serial.log || true)" = 1 ] && assembled=1
+        [ "$(grep -aFc -- "exec: loaded PROG.ELF size=" artifacts/vm-serial.log || true)" = 1 ] && loaded=1
+        [ "$(grep -aFxc -- "$EXIT_LINE" artifacts/vm-serial.log || true)" -ge 1 ] && exit71=1
+        [ "$(grep -aFxc -- "$EXIT_LINE" artifacts/vm-serial.log || true)" = 1 ] && exited=1
+        [ "$(grep -aFc -- "$REAP_LINE" artifacts/vm-serial.log || true)" -ge 2 ] && reaped=1
+        [ "$(grep -aFxc -- "rx-asm-ok" artifacts/vm-serial.log || true)" = 1 ] && echo_ok=1
+        grep -qF -- "[EXC] parking:" artifacts/vm-serial.log && fatal=1 || true
+    fi
+    echo "$tag: runner-rc=$rc serial-bytes=$bytes banner=$banner listed=$listed written=$written assembled=$assembled loaded=$loaded exit71=$exit71 reaped=$reaped echo=$echo_ok fatal=$fatal" | tee -a "$REPORT"
+    [ "$rc" = 0 ] && [ "$banner" = 1 ] && [ "$listed" = 1 ] && [ "$written" = 1 ] && \
+        [ "$assembled" = 1 ] && [ "$loaded" = 1 ] && [ "$exit71" = 1 ] && \
+        [ "$reaped" = 1 ] && [ "$echo_ok" = 1 ] && [ "$fatal" = 0 ]
+}
+
+: > "$REPORT"
+{
+    echo "DIPSHITOS live assembler gate (M22 D2, issue #325, claim 9815)"
+    echo "revision: $REVISION branch=$BRANCH boots=$BOOTS dirty-files=$DIRTY"
+    echo "script: $(cat "$SCRIPT" | tr '\n' '|')"
+    echo "date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    echo
+} >> "$REPORT"
+
+pass=0
+n=0
+while [ "$n" -lt "$BOOTS" ]; do
+    n=$((n + 1))
+    echo
+    echo "=== live-asm boot $n ==="
+    if run_one "$(printf '%02d' "$n")"; then pass=$((pass + 1)); fi
+done
+
+echo
+echo "=== result ==="
+if [ "$pass" = "$BOOTS" ]; then
+    echo "verify-live-asm: PASS — ASM.BIN staged a source file, assembled it to a valid AArch64 ELF32 on the machine, and the D1 loader executed it (exit status 71 observed) ($pass/$BOOTS boot(s))."
+    echo "PASS: $pass/$BOOTS" >> "$REPORT"
+    exit 0
+fi
+echo "verify-live-asm: FAILED — $pass/$BOOTS boot(s) passed; see $REPORT and per-boot logs."
+echo "FAIL: $pass/$BOOTS" >> "$REPORT"
+exit 1
