@@ -158,6 +158,7 @@ fn set_internal(key: []const u8, val: []const u8) SetResult {
 }
 
 const driving_award = @import("driving_award.zig");
+const text = @import("text.zig");
 
 /// Set a configuration key-value pair in memory.
 pub fn set(key: []const u8, val: []const u8) SetResult {
@@ -167,7 +168,33 @@ pub fn set(key: []const u8, val: []const u8) SetResult {
     if (result == .ok and std.mem.eql(u8, key, "theme")) {
         apply_theme(val);
     }
+    // M20-U11 (claim 5127): debug_font is the text layer's dev setting.
+    if (result == .ok and std.mem.eql(u8, key, "debug_font")) {
+        apply_debug_font(val);
+    }
+    // M20-U1 (claim 5127): font_size persists the terminal font choice.
+    if (result == .ok and std.mem.eql(u8, key, "font_size")) {
+        apply_font_size(val);
+    }
     return result;
+}
+
+/// Apply the font_size key to the framebuffer text layer.
+fn apply_font_size(val: []const u8) void {
+    const size: ?text.FontSize = if (std.mem.eql(u8, val, "small"))
+        .small
+    else if (std.mem.eql(u8, val, "medium"))
+        .medium
+    else if (std.mem.eql(u8, val, "large"))
+        .large
+    else
+        null;
+    if (size) |s| text.set_font_size(s);
+}
+
+/// Apply the debug_font key to the framebuffer text layer.
+fn apply_debug_font(val: []const u8) void {
+    text.debug_font = std.mem.eql(u8, val, "true") or std.mem.eql(u8, val, "on") or std.mem.eql(u8, val, "1");
 }
 
 /// Apply a theme by name, updating driving_award.theme_id.
@@ -337,6 +364,16 @@ test "settings: default initialization and getters" {
     try std.testing.expectEqualStrings("dipshit> ", get_prompt());
     try std.testing.expectEqualStrings("dark", get("theme").?);
     try std.testing.expectEqualStrings("1000", get("scrollback").?);
+}
+
+test "settings: debug_font applies to the text layer (M20-U11)" {
+    init();
+    defer _ = set("debug_font", "false");
+    try std.testing.expect(!text.debug_font);
+    try std.testing.expectEqual(SetResult.ok, set("debug_font", "true"));
+    try std.testing.expect(text.debug_font);
+    try std.testing.expectEqual(SetResult.ok, set("debug_font", "off"));
+    try std.testing.expect(!text.debug_font);
 }
 
 test "settings: set and update existing keys" {

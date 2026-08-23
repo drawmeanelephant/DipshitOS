@@ -243,7 +243,10 @@ pub const LineEditor = struct {
             return .repaint;
         }
         if (byte == '\t') return self.complete(con);
-        if (byte >= 0x20 and byte <= 0x7e) return self.insert(con, byte);
+        // M20-U2 (claim 5127): bytes >= 0x80 insert as ordinary data —
+        // they are the continuation/lead bytes of UTF-8, which the
+        // framebuffer text layer decodes downstream. DEL stays an edit.
+        if (byte >= 0x20 and byte != 0x7f) return self.insert(con, byte);
         // Other control bytes are ignored: not echoed, not appended.
         return .none;
     }

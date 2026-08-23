@@ -1,0 +1,25 @@
+# DipshitOS Unicode torture document (M20-U14)
+# Every line exercises one tricky rendering case. The host golden test
+# renders this whole file through kernel/src/text.zig and pins the pixel
+# fingerprint. Lines starting with '#' are prose (they still render).
+# --- composed characters from ADR 0014 compose sequences ---
+café naïve jalapeño Ångström
+Škoda Žižek Łódź Đorđe Ærø
+# --- combining sequences (decomposed, not precomposed) ---
+e + U+0301 = é
+u + U+0308 + U+0304 = ǖ
+# --- zero-width characters ---
+A​B (ZWSP between), X‍Y (ZWJ between), H‌W (ZWNJ between)
+# --- wide characters and mixed-width lines ---
+中華 CJK next to ASCII
+全角角ＡＢＣ fullwidth forms
+# --- empty combining mark (no base before it) — dotted circle expected ---
+́leading acute
+# --- long grapheme cluster: base + three marks ---
+a̧̋̇ stacked marks on a
+# --- tab stops at various columns ---
+one	two	three	four
+x		y			z
+# --- edge-case codepoints: non-characters render as replacement ---
+U+FFFF → ￼ and U+FFFE → ￼
+unassigned plane-1 dance: 🦄 (not shipped — double-wide fallback)

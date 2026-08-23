@@ -9,6 +9,12 @@
 //!   K3 — Unit conversion (Ctrl+U): temp/length/weight categories
 //!   K4 — Mathematical constants: π, e, √2, φ buttons
 //!   K5 — History persistence: save/load from FAT
+//!   K7 — Trigonometry: SIN/COS/TAN/ASIN/ACOS/ATAN, DEG/RAD toggle
+//!   K6 — Scientific notation display: SCI toggle, auto-switch at 1e10
+//!   K8 — Log/exp: LN/LOG/EXP/POW/SQRT/ABS buttons
+//!   K9 — Expression editor: EXPR toggle, type full expressions, click
+//!        history rows to edit
+//!   K10 — Clipboard: Ctrl+C result, Ctrl+Shift+C "expr = result", Ctrl+V paste
 //!
 //! Keyboard shortcuts:
 //!   Digits 0–9          → input_digit
@@ -31,6 +37,8 @@ const Event = ui.Event;
 const engine = @import("calc/engine.zig");
 const CalcEngine = engine.CalcEngine;
 const format_i64 = engine.format_i64;
+const format_sci = engine.format_sci;
+const sci_auto = engine.sci_auto;
 
 const history_mod = @import("calc/history.zig");
 const HistoryRing = history_mod.Ring;
@@ -43,11 +51,36 @@ const Base = prog.Base;
 
 const constants = @import("calc/constants.zig");
 
+const expr_mod = @import("calc/expr.zig");
+const mathfn = @import("calc/mathfn.zig");
+const science = @import("calc/science.zig");
+
 // ---------------------------------------------------------------------------
 // Window constants
 // ---------------------------------------------------------------------------
 
 pub const window_id: u32 = 2;
+
+/// K10: parse a leading (optionally signed) integer out of pasted text.
+/// Tolerates trailing junk; requires at least one digit. Overflow → null
+/// rather than a silent wrap.
+pub fn parse_pasted_number(text: []const u8) ?i64 {
+    var i: usize = 0;
+    var neg = false;
+    if (i < text.len and (text[i] == '-' or text[i] == '+')) {
+        neg = text[i] == '-';
+        i += 1;
+    }
+    var v: i64 = 0;
+    var n: usize = 0;
+    while (i < text.len and text[i] >= '0' and text[i] <= '9') : (n += 1) {
+        v = std.math.mul(i64, v, 10) catch return null;
+        v = std.math.add(i64, v, text[i] - '0') catch return null;
+        i += 1;
+    }
+    if (n == 0) return null;
+    return if (neg) -v else v;
+}
 pub const window_x: u32 = 48;
 pub const window_y: u32 = 48;
 pub const window_w: u32 = 512;
@@ -164,6 +197,16 @@ pub const AppState = struct {
 
     // K4: constant buttons only shown in standard mode
 
+    // K7: trigonometry — DEG/RAD mode (default RAD) + function buttons
+    deg_mode: bool = false,
+    // K6: scientific notation display
+    sci_mode: bool = false,
+
+    // K9: expression editor
+    expr_mode: bool = false,
+    expr_buf: [48]u8 = [_]u8{0} ** 48,
+    expr_len: usize = 0,
+
     // ---- Standard mode buttons ----
     btn_m_store: Button = Button.init(Rect.make(8, 104, 56, 20), "MS"),
     btn_m_recall: Button = Button.init(Rect.make(69, 104, 56, 20), "MR"),
@@ -215,6 +258,28 @@ pub const AppState = struct {
     btn_euler: Button = Button.init(Rect.make(321, 104, 56, 20), "e"),
     btn_sqrt2: Button = Button.init(Rect.make(382, 104, 56, 20), "sqrt2"),
     btn_phi: Button = Button.init(Rect.make(443, 104, 56, 20), "phi"),
+
+    // ---- K7 trig buttons (standard mode, below keypad) ----
+    btn_sin: Button = Button.init(Rect.make(8, 286, 56, 20), "SIN"),
+    btn_cos: Button = Button.init(Rect.make(69, 286, 56, 20), "COS"),
+    btn_tan: Button = Button.init(Rect.make(130, 286, 56, 20), "TAN"),
+    btn_deg_rad: Button = Button.init(Rect.make(191, 286, 56, 20), "RAD"),
+    btn_asin: Button = Button.init(Rect.make(8, 312, 56, 20), "ASIN"),
+    btn_acos: Button = Button.init(Rect.make(69, 312, 56, 20), "ACOS"),
+    btn_atan: Button = Button.init(Rect.make(130, 312, 56, 20), "ATAN"),
+
+    // ---- K8 log/exp buttons (standard mode, below the trig rows) ----
+    btn_ln: Button = Button.init(Rect.make(8, 338, 56, 20), "LN"),
+    btn_log: Button = Button.init(Rect.make(69, 338, 56, 20), "LOG"),
+    btn_exp: Button = Button.init(Rect.make(130, 338, 56, 20), "EXP"),
+    btn_pow: Button = Button.init(Rect.make(191, 338, 56, 20), "POW"),
+    btn_sqrt: Button = Button.init(Rect.make(8, 364, 56, 20), "SQRT"),
+    btn_abs: Button = Button.init(Rect.make(69, 364, 56, 20), "ABS"),
+    // ---- K6 scientific notation toggle (standard mode, below keypad) ----
+    btn_sci: Button = Button.init(Rect.make(8, 260, 56, 20), "SCI"),
+
+    // ---- K9 expression editor toggle (standard mode, next to SCI) ----
+    btn_expr: Button = Button.init(Rect.make(69, 260, 56, 20), "EXPR"),
 
     pub fn init() AppState {
         var s = AppState{};
@@ -285,6 +350,52 @@ pub const AppState = struct {
                 self.mem_any_nonzero = true;
                 break;
             }
+        }
+    }
+
+    // -------------------------------------------------------------------
+    // Clipboard (K10)
+    // -------------------------------------------------------------------
+
+    /// Copy the current result to the shared clipboard; with_expr copies
+    /// the newest history entry as "<expr> = <result>".
+    fn copy_to_clipboard(self: *const AppState, with_expr: bool) void {
+        var buf: [96]u8 = undefined;
+        _ = ui.clipboard_set(self.clipboard_payload(with_expr, &buf));
+    }
+
+    fn clipboard_payload(self: *const AppState, with_expr: bool, buf: []u8) []const u8 {
+        var pos: usize = 0;
+        if (with_expr and self.hist.len > 0) {
+            const e = self.hist.get(self.hist.len - 1);
+            const c = @min(e.len, buf.len);
+            @memcpy(buf[0..c], e.text[0..c]);
+            pos += c;
+            if (pos + 3 <= buf.len) {
+                @memcpy(buf[pos .. pos + 3], " = ");
+                pos += 3;
+            }
+        }
+        var tmp: [24]u8 = undefined;
+        const s = format_i64(self.engine.current_val, &tmp);
+        const c2 = @min(s.len, buf.len - pos);
+        @memcpy(buf[pos .. pos + c2], s[0..c2]);
+        pos += c2;
+        return buf[0..pos];
+    }
+
+    /// Paste a number from the shared clipboard into the display.
+    fn paste_from_clipboard(self: *AppState) void {
+        var buf: [64]u8 = undefined;
+        const n = ui.clipboard_get(&buf);
+        if (n <= 0) return;
+        const len: usize = @min(@as(usize, @intCast(n)), buf.len);
+        if (parse_pasted_number(buf[0..len])) |v| {
+            self.engine.current_val = v;
+            self.engine.is_entering_val = true;
+            self.engine.has_error = false;
+            self.history_cursor = null;
+            ui.write_console("calc: clip-paste\n");
         }
     }
 
@@ -440,6 +551,145 @@ pub const AppState = struct {
     }
 
     // -------------------------------------------------------------------
+    // Logarithmic & exponential (K8)
+    // -------------------------------------------------------------------
+
+    /// Store a float function result, rounded to the engine's i64.
+    fn store_unary_result(self: *AppState, result: mathfn.MathError!f64) void {
+        if (result) |r| {
+            const rounded = @round(r);
+            if (!std.math.isFinite(rounded) or @abs(rounded) > 9.2e18) {
+                self.engine.raise_error();
+                return;
+            }
+            self.engine.current_val = @intFromFloat(rounded);
+            self.engine.is_entering_val = true;
+        } else |_| {
+            self.engine.raise_error();
+        }
+    }
+
+    // -------------------------------------------------------------------
+    // Trigonometry (K7)
+    // -------------------------------------------------------------------
+
+    fn store_float_result(self: *AppState, r: f64) void {
+        const rounded = @round(r);
+        if (!std.math.isFinite(rounded) or @abs(rounded) > 9.2e18) {
+            self.engine.raise_error();
+            return;
+        }
+        self.engine.current_val = @intFromFloat(rounded);
+        self.engine.is_entering_val = true;
+    }
+
+    /// Current value as an angle, converted to radians in DEG mode.
+    fn angle_in(self: *const AppState) f64 {
+        const v: f64 = @floatFromInt(self.engine.current_val);
+        return if (self.deg_mode) v * science.pi / 180.0 else v;
+    }
+
+    fn apply_trig_result(self: *AppState, result: science.ScienceError!f64) void {
+        if (result) |r| {
+            self.store_float_result(r);
+        } else |_| {
+            self.engine.raise_error();
+        }
+    }
+
+    /// Inverse functions produce angles — convert back to degrees in DEG mode.
+    fn apply_inv_angle(self: *AppState, result: science.ScienceError!f64) void {
+        if (result) |r| {
+            const out = if (self.deg_mode) r * 180.0 / science.pi else r;
+            self.store_float_result(out);
+        } else |_| {
+            self.engine.raise_error();
+        }
+    }
+
+    // -------------------------------------------------------------------
+    // Display text (K6: SCI toggle + auto-switch at |v| >= 1e10)
+    // -------------------------------------------------------------------
+
+    fn display_text(self: *const AppState, buf: []u8) []const u8 {
+        // K9: while editing an expression, the raw text is the display.
+        if (self.expr_mode and self.expr_len > 0) {
+            const c = @min(self.expr_len, buf.len);
+            @memcpy(buf[0..c], self.expr_buf[0..c]);
+            return buf[0..c];
+        }
+        if (self.engine.has_error) return self.engine.format_display(buf);
+        const v = self.engine.current_val;
+        if (self.sci_mode or sci_auto(v)) {
+            return format_sci(@floatFromInt(v), buf);
+        }
+        return self.engine.format_display(buf);
+    }
+
+    // -------------------------------------------------------------------
+    // Expression editor (K9)
+    // -------------------------------------------------------------------
+
+    fn expr_append(self: *AppState, ch: u8) void {
+        if (self.expr_len >= self.expr_buf.len) return;
+        if (!expr_mod.is_expr_char(ch)) return;
+        self.expr_buf[self.expr_len] = ch;
+        self.expr_len += 1;
+    }
+
+    fn expr_backspace(self: *AppState) void {
+        if (self.expr_len > 0) self.expr_len -= 1;
+    }
+
+    fn expr_reset_input(self: *AppState) void {
+        self.expr_len = 0;
+    }
+
+    fn expr_exit(self: *AppState) void {
+        self.expr_mode = false;
+        self.expr_reset_input();
+    }
+
+    /// Evaluate the edited expression; on success record "expr=result" in
+    /// history exactly like a button-flow calculation.
+    fn expr_evaluate(self: *AppState) void {
+        if (self.expr_len == 0) return;
+        const result = expr_mod.evaluate(self.expr_buf[0..self.expr_len]) catch {
+            self.engine.raise_error();
+            ui.write_console("calc: expr-error\n");
+            return;
+        };
+        self.engine.current_val = result;
+        self.engine.is_entering_val = false;
+        self.engine.has_error = false;
+        self.push_history(self.expr_buf[0..self.expr_len], result);
+        self.expr_reset_input();
+        ui.write_console("calc: expr-ok\n");
+    }
+
+    /// Load a history entry's expression back into the editor (K9:
+    /// click a history entry to edit it).
+    fn expr_load_from_history(self: *AppState, logical_idx: usize) void {
+        if (logical_idx >= self.hist.len) return;
+        const e = self.hist.get(logical_idx);
+        const n = @min(e.len, self.expr_buf.len);
+        @memcpy(self.expr_buf[0..n], e.text[0..n]);
+        self.expr_len = n;
+        self.expr_mode = true;
+        self.history_cursor = null;
+        ui.write_console("calc: expr-edit\n");
+    }
+
+    /// Row index under a history-area click, or null.
+    fn history_row_at(y: u32) ?usize {
+        if (y < history_area.y + 4) return null;
+        const rel = y - (history_area.y + 4);
+        const row = rel / 10;
+        if (row >= history_visible) return null;
+        return row;
+    }
+
+    // -------------------------------------------------------------------
     // Draw
     // -------------------------------------------------------------------
 
@@ -481,7 +731,7 @@ pub const AppState = struct {
         ui.draw_rect(win, display_rect, ui.COLOR_SURFACE);
         ui.draw_rect_outline(win, display_rect, 1, ui.COLOR_BORDER);
         var disp_buf: [32]u8 = undefined;
-        const disp_text = self.engine.format_display(&disp_buf);
+        const disp_text = self.display_text(&disp_buf);
         const text_w = @as(u32, @intCast(disp_text.len)) * 8;
         const text_x = if (display_rect.w > text_w + 16) display_rect.x + display_rect.w - text_w - 8 else display_rect.x + 16;
         const text_y = display_rect.y + (display_rect.h - 8) / 2;
@@ -525,6 +775,29 @@ pub const AppState = struct {
         self.btn_euler.draw(win);
         self.btn_sqrt2.draw(win);
         self.btn_phi.draw(win);
+
+        // K7 trig buttons (standard mode)
+        self.btn_sin.draw(win);
+        self.btn_cos.draw(win);
+        self.btn_tan.draw(win);
+        self.btn_deg_rad.draw(win);
+        self.btn_asin.draw(win);
+        self.btn_acos.draw(win);
+        self.btn_atan.draw(win);
+
+        // K6 scientific-notation toggle
+        self.btn_sci.draw(win);
+
+        // K9 expression editor toggle
+        self.btn_expr.draw(win);
+
+        // K8 log/exp buttons (standard mode)
+        self.btn_ln.draw(win);
+        self.btn_log.draw(win);
+        self.btn_exp.draw(win);
+        self.btn_pow.draw(win);
+        self.btn_sqrt.draw(win);
+        self.btn_abs.draw(win);
 
         // K3 conversion bar (when active, overlays the history area)
         if (self.convert_active) {
@@ -847,6 +1120,98 @@ pub const AppState = struct {
             }
         }
 
+        // K7 trig buttons (standard mode)
+        if (!changed) {
+            if (self.btn_sin.handle_event(ev)) {
+                self.apply_trig_result(science.sin(self.angle_in()));
+                changed = true;
+            } else if (self.btn_cos.handle_event(ev)) {
+                self.apply_trig_result(science.cos(self.angle_in()));
+                changed = true;
+            } else if (self.btn_tan.handle_event(ev)) {
+                self.apply_trig_result(science.tan(self.angle_in()));
+                changed = true;
+            } else if (self.btn_deg_rad.handle_event(ev)) {
+                self.deg_mode = !self.deg_mode;
+                self.btn_deg_rad.label = if (self.deg_mode) "DEG" else "RAD";
+                ui.write_console(if (self.deg_mode) "calc: deg-mode\n" else "calc: rad-mode\n");
+                changed = true;
+            } else if (self.btn_asin.handle_event(ev)) {
+                self.apply_inv_angle(science.asin(@floatFromInt(self.engine.current_val)));
+                changed = true;
+            } else if (self.btn_acos.handle_event(ev)) {
+                self.apply_inv_angle(science.acos(@floatFromInt(self.engine.current_val)));
+                changed = true;
+            } else if (self.btn_atan.handle_event(ev)) {
+                self.apply_inv_angle(science.atan(@floatFromInt(self.engine.current_val)));
+                changed = true;
+            }
+        }
+
+        // K6 scientific-notation toggle
+        if (!changed) {
+            if (self.btn_sci.handle_event(ev)) {
+                self.sci_mode = !self.sci_mode;
+                if (self.sci_mode) {
+                    ui.write_console("calc: sci-on\n");
+                } else {
+                    ui.write_console("calc: sci-off\n");
+                }
+                changed = true;
+            }
+        }
+
+        // K9 expression editor toggle
+        if (!changed) {
+            if (self.btn_expr.handle_event(ev)) {
+                self.expr_mode = !self.expr_mode;
+                self.expr_reset_input();
+                ui.write_console(if (self.expr_mode) "calc: expr-on\n" else "calc: expr-off\n");
+                changed = true;
+            }
+        }
+
+        // K8 log/exp buttons
+        if (!changed) {
+            const v: f64 = @floatFromInt(self.engine.current_val);
+            if (self.btn_ln.handle_event(ev)) {
+                self.store_unary_result(mathfn.ln(v));
+                changed = true;
+            } else if (self.btn_log.handle_event(ev)) {
+                self.store_unary_result(mathfn.log10(v));
+                changed = true;
+            } else if (self.btn_exp.handle_event(ev)) {
+                self.store_unary_result(mathfn.exp(v));
+                changed = true;
+            } else if (self.btn_pow.handle_event(ev)) {
+                self.engine.set_op('P');
+                changed = true;
+            } else if (self.btn_sqrt.handle_event(ev)) {
+                self.store_unary_result(mathfn.sqrt(v));
+                changed = true;
+            } else if (self.btn_abs.handle_event(ev)) {
+                self.store_unary_result(@abs(v));
+                changed = true;
+            }
+        }
+
+        // K9: click a history row to edit that entry's expression
+        if (!changed and (ev.kind == ui.MOUSE_DOWN or ev.kind == ui.MOUSE_UP)) {
+            const x = ev.arg0;
+            const y = ev.arg1;
+            const inside_x = x >= history_area.x and x < history_area.x + history_area.w;
+            const inside_y = y >= history_area.y and y < history_area.y + history_area.h;
+            if (inside_x and inside_y) {
+                if (history_row_at(y)) |row| {
+                    const logical = self.history_scroll + row;
+                    if (logical < self.hist.len) {
+                        self.expr_load_from_history(logical);
+                        changed = true;
+                    }
+                }
+            }
+        }
+
         return changed;
     }
 
@@ -993,6 +1358,20 @@ pub const AppState = struct {
             return true;
         }
 
+        // K10: Ctrl+C copies the result; Ctrl+Shift+C copies "expr = result"
+        if (ctrl and (ascii == 'c' or ascii == 'C')) {
+            const shift = (ev.flags & ui.MOD_SHIFT) != 0;
+            self.copy_to_clipboard(shift);
+            ui.write_console(if (shift) "calc: clip-copy-expr\n" else "calc: clip-copy\n");
+            return true;
+        }
+
+        // K10: Ctrl+V pastes a number from the shared clipboard
+        if (ctrl and (ascii == 'v' or ascii == 'V')) {
+            self.paste_from_clipboard();
+            return true;
+        }
+
         // Ctrl+U: toggle unit conversion (K3)
         if (ctrl and (ascii == 'u' or ascii == 'U')) {
             self.convert_active = !self.convert_active;
@@ -1010,6 +1389,28 @@ pub const AppState = struct {
             self.mem_active_slot = ascii - '1';
             ui.write_console("calc: mem-slot\n");
             return true;
+        }
+
+        // K9: while the expression editor is active it consumes keys
+        if (self.expr_mode) {
+            if (ascii == 0x08 or keycode == 0x2a) {
+                self.expr_backspace();
+                return true;
+            }
+            if (ascii == 0x1b or keycode == 0x29) {
+                self.expr_exit();
+                ui.write_console("calc: expr-off\n");
+                return true;
+            }
+            if (keycode == 0x28 or ascii == '=' or ascii == '\r' or ascii == '\n') {
+                self.expr_evaluate();
+                return true;
+            }
+            if (!ctrl and expr_mod.is_expr_char(ascii)) {
+                self.expr_append(ascii);
+                return true;
+            }
+            return true; // swallow unhandled keys while editing
         }
 
         // If in programmer mode, handle hex input (0-9, a-f)
@@ -1298,6 +1699,74 @@ test "calc: K4 constant keyboard shortcut (not mapped, button only)" {
     _ = before;
 }
 
+fn click_button(app: *AppState, x: u32, y: u32) void {
+    var ev_down = Event{ .kind = ui.MOUSE_DOWN, .flags = 0, .seq = 1, .arg0 = x, .arg1 = y };
+    _ = app.handle_mouse_events(&ev_down);
+    var ev_up = Event{ .kind = ui.MOUSE_UP, .flags = 0, .seq = 2, .arg0 = x, .arg1 = y };
+    _ = app.handle_mouse_events(&ev_up);
+}
+
+test "calc K7: sin(90deg) = 1 via buttons" {
+    var app = AppState.init();
+    // Type 90 (digits 9, 0)
+    var ev9 = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 1, .arg0 = 0x09, .arg1 = '9' };
+    _ = app.handle_keyboard_event(&ev9);
+    var ev0 = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 2, .arg0 = 0, .arg1 = '0' };
+    _ = app.handle_keyboard_event(&ev0);
+    try std.testing.expectEqual(@as(i64, 90), app.engine.current_val);
+
+    // Switch to DEG mode (button at 191,286 center → 219,296)
+    click_button(&app, 219, 296);
+    try std.testing.expect(app.deg_mode);
+
+    // SIN button at (8,286) center → 36,296
+    click_button(&app, 36, 296);
+    try std.testing.expectEqual(@as(i64, 1), app.engine.current_val);
+}
+
+test "calc K7: cos(0) = 1 in default RAD mode" {
+    var app = AppState.init();
+    try std.testing.expect(!app.deg_mode); // RAD is the default
+    // COS button at (69,286) center → 97,296; current value is 0
+    click_button(&app, 97, 296);
+    try std.testing.expectEqual(@as(i64, 1), app.engine.current_val);
+}
+
+test "calc K7: inverse functions round-trip in DEG mode" {
+    var app = AppState.init();
+    // DEG on, asin(1) → 90
+    click_button(&app, 219, 296); // DEG/RAD toggle
+    app.engine.current_val = 1;
+    app.engine.is_entering_val = true;
+    click_button(&app, 36, 322); // ASIN at (8,312) center → 36,322
+    try std.testing.expectEqual(@as(i64, 90), app.engine.current_val);
+
+    // acos(1) → 0
+    app.engine.current_val = 1;
+    click_button(&app, 97, 322); // ACOS at (69,312) center → 97,322
+    try std.testing.expectEqual(@as(i64, 0), app.engine.current_val);
+
+    // atan(1) → 45 in DEG
+    app.engine.current_val = 1;
+    click_button(&app, 158, 322); // ATAN at (130,312) center → 158,322
+    try std.testing.expectEqual(@as(i64, 45), app.engine.current_val);
+}
+
+test "calc K7: tan(90deg) and asin(2) raise ERROR" {
+    var app = AppState.init();
+    click_button(&app, 219, 296); // DEG mode
+    app.engine.current_val = 90;
+    app.engine.is_entering_val = true;
+    click_button(&app, 158, 296); // TAN at (130,286)
+    try std.testing.expect(app.engine.has_error);
+
+    app.engine.clear();
+    app.engine.current_val = 2;
+    app.engine.is_entering_val = true;
+    click_button(&app, 36, 322); // ASIN out of domain
+    try std.testing.expect(app.engine.has_error);
+}
+
 test "calc: K3 unit conversion toggle" {
     var app = AppState.init();
     try std.testing.expect(!app.convert_active);
@@ -1346,4 +1815,290 @@ test "calc: K3 weight conversion (kg→lb)" {
     const result = app.convert_result();
     // 1kg = 2.20462lb
     try std.testing.expect(result > 2.20 and result < 2.21);
+}
+
+test "calc K6: format_sci large integer (123456789012345 → 1.23456e+14)" {
+    var buf: [32]u8 = undefined;
+    const s = format_sci(123456789012345.0, &buf);
+    try std.testing.expectEqualStrings("1.23456e+14", s);
+}
+
+test "calc K6: format_sci small value (0.000001234 → 1.234e-6)" {
+    var buf: [32]u8 = undefined;
+    const s = format_sci(0.000001234, &buf);
+    try std.testing.expectEqualStrings("1.234e-6", s);
+}
+
+test "calc K6: format_sci zero, negative, exact power, trailing-zero strip" {
+    var buf: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("0", format_sci(0.0, &buf));
+    try std.testing.expectEqualStrings("-5.2e+4", format_sci(-52000.0, &buf));
+    try std.testing.expectEqualStrings("1e+10", format_sci(1e10, &buf));
+    try std.testing.expectEqualStrings("1.23e+4", format_sci(12300.0, &buf));
+    try std.testing.expectEqualStrings("5.67e-8", format_sci(5.67e-8, &buf));
+}
+
+test "calc K6: auto-switch at |v| >= 1e10" {
+    try std.testing.expect(sci_auto(12_345_678_901));
+    try std.testing.expect(!sci_auto(9_999_999_999));
+    try std.testing.expect(!sci_auto(0));
+    try std.testing.expect(sci_auto(-20_000_000_000));
+
+    // Display path: big value renders scientific even with sci_mode off.
+    var app = AppState.init();
+    app.engine.current_val = 123456789012345;
+    var buf: [32]u8 = undefined;
+    const s = app.display_text(&buf);
+    try std.testing.expectEqualStrings("1.23456e+14", s);
+
+    // Small values keep plain formatting when SCI is off.
+    app.engine.current_val = 42;
+    try std.testing.expectEqualStrings("42", app.display_text(&buf));
+}
+
+test "calc K6: SCI button toggles mode" {
+    var app = AppState.init();
+    try std.testing.expect(!app.sci_mode);
+    // SCI button rect: (8, 260, 56, 20) → click center (36, 270)
+    var ev_down = Event{ .kind = ui.MOUSE_DOWN, .flags = 0, .seq = 1, .arg0 = 36, .arg1 = 270 };
+    _ = app.handle_mouse_events(&ev_down);
+    var ev_up = Event{ .kind = ui.MOUSE_UP, .flags = 0, .seq = 2, .arg0 = 36, .arg1 = 270 };
+    _ = app.handle_mouse_events(&ev_up);
+    try std.testing.expect(app.sci_mode);
+
+    // With SCI on, even a small value displays scientific.
+    app.engine.current_val = 7;
+    var buf: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("7e+0", app.display_text(&buf));
+
+    // Second click toggles back off.
+    _ = app.handle_mouse_events(&ev_down);
+    _ = app.handle_mouse_events(&ev_up);
+    try std.testing.expect(!app.sci_mode);
+    try std.testing.expectEqualStrings("7", app.display_text(&buf));
+}
+
+fn tap_key(app: *AppState, ascii: u8, ctrl: bool) bool {
+    var ev = Event{ .kind = ui.KEY_DOWN, .flags = if (ctrl) 0x04 else 0, .seq = 1, .arg0 = 0, .arg1 = ascii };
+    return app.handle_keyboard_event(&ev);
+}
+
+test "calc K9: EXPR toggle button" {
+    var app = AppState.init();
+    try std.testing.expect(!app.expr_mode);
+    tap(&app, 97, 270); // EXPR at (69,260) center
+    try std.testing.expect(app.expr_mode);
+    tap(&app, 97, 270);
+    try std.testing.expect(!app.expr_mode);
+}
+
+test "calc K9: type 2+3*4 and Enter yields 14" {
+    var app = AppState.init();
+    tap(&app, 97, 270); // EXPR on
+    for ("2+3*4") |ch| _ = tap_key(&app, ch, false);
+    try std.testing.expectEqualStrings("2+3*4", app.expr_buf[0..app.expr_len]);
+    // Display shows the raw expression while editing
+    var buf: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("2+3*4", app.display_text(&buf));
+    _ = tap_key(&app, '\r', false); // Enter evaluates
+    try std.testing.expectEqual(@as(i64, 14), app.engine.current_val);
+    try std.testing.expectEqual(@as(usize, 0), app.expr_len);
+    // Expression (not just result) is in history
+    const e = app.hist.get(app.hist.len - 1);
+    try std.testing.expectEqualStrings("2+3*4", e.text[0..e.len]);
+    try std.testing.expectEqual(@as(i64, 14), e.result);
+}
+
+test "calc K9: parens precedence (2+3)*4 = 20" {
+    var app = AppState.init();
+    tap(&app, 97, 270);
+    for ("(2+3)*4=") |ch| _ = tap_key(&app, ch, false);
+    try std.testing.expectEqual(@as(i64, 20), app.engine.current_val);
+}
+
+test "calc K9: backspace edits the expression" {
+    var app = AppState.init();
+    tap(&app, 97, 270);
+    for ("12+3") |ch| _ = tap_key(&app, ch, false);
+    _ = tap_key(&app, 0x08, false); // Backspace removes '3'
+    try std.testing.expectEqualStrings("12+", app.expr_buf[0..app.expr_len]);
+    _ = tap_key(&app, '5', false);
+    _ = tap_key(&app, '\r', false);
+    try std.testing.expectEqual(@as(i64, 17), app.engine.current_val);
+}
+
+test "calc K9: click a history row to edit its expression" {
+    var app = AppState.init();
+    tap(&app, 97, 270);
+    for ("2+3*4") |ch| _ = tap_key(&app, ch, false);
+    _ = tap_key(&app, '\r', false);
+
+    // Exit editor mode, then click the newest history row (bottom row of
+    // the history area: y = 8+4+5*10 = 62; x anywhere in the area)
+    tap(&app, 97, 270);
+    var ev_up = Event{ .kind = ui.MOUSE_UP, .flags = 0, .seq = 9, .arg0 = 200, .arg1 = 15 };
+    _ = app.handle_mouse_events(&ev_up);
+    try std.testing.expect(app.expr_mode);
+    try std.testing.expectEqualStrings("2+3*4", app.expr_buf[0..app.expr_len]);
+
+    // Edit it to 2+3*5 and re-evaluate
+    _ = tap_key(&app, 0x08, false);
+    _ = tap_key(&app, '5', false);
+    _ = tap_key(&app, '\r', false);
+    try std.testing.expectEqual(@as(i64, 17), app.engine.current_val);
+}
+
+test "calc K9: syntax error raises ERROR state" {
+    var app = AppState.init();
+    tap(&app, 97, 270);
+    for ("2+") |ch| _ = tap_key(&app, ch, false);
+    _ = tap_key(&app, '\r', false);
+    try std.testing.expect(app.engine.has_error);
+    // Editor keeps the broken expression visible for fixing (serial
+    // marker calc: expr-error records the failure).
+    var buf: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("2+", app.display_text(&buf));
+    // Fix it and re-evaluate
+    _ = tap_key(&app, '3', false);
+    _ = tap_key(&app, '\r', false);
+    try std.testing.expect(!app.engine.has_error);
+    try std.testing.expectEqual(@as(i64, 5), app.engine.current_val);
+}
+
+test "calc K10: payload is the result as text" {
+    var app = AppState.init();
+    app.engine.current_val = 42;
+    var buf: [96]u8 = undefined;
+    try std.testing.expectEqualStrings("42", app.clipboard_payload(false, &buf));
+    app.engine.current_val = -7;
+    try std.testing.expectEqualStrings("-7", app.clipboard_payload(false, &buf));
+}
+
+test "calc K10: Shift payload is 'expr = result'" {
+    var app = AppState.init();
+    // Evaluate something so history has an entry
+    app.engine.current_val = 14;
+    var tmp_buf: [24]u8 = undefined;
+    const s = format_i64(2, &tmp_buf);
+    _ = s;
+    app.push_history("2+3*4", 14);
+    app.engine.current_val = 14;
+    var buf: [96]u8 = undefined;
+    const p = app.clipboard_payload(true, &buf);
+    try std.testing.expectEqualStrings("2+3*4 = 14", p);
+    // Without history, falls back to just the result
+    var empty = AppState.init();
+    empty.engine.current_val = 9;
+    var buf2: [96]u8 = undefined;
+    try std.testing.expectEqualStrings("9", empty.clipboard_payload(true, &buf2));
+}
+
+test "calc K10: parse_pasted_number" {
+    try std.testing.expectEqual(@as(?i64, 42), parse_pasted_number("42"));
+    try std.testing.expectEqual(@as(?i64, -7), parse_pasted_number("-7"));
+    try std.testing.expectEqual(@as(?i64, 5), parse_pasted_number("+5"));
+    try std.testing.expectEqual(@as(?i64, 12), parse_pasted_number("12\n"));
+    try std.testing.expectEqual(@as(?i64, null), parse_pasted_number("abc"));
+    try std.testing.expectEqual(@as(?i64, null), parse_pasted_number(""));
+    try std.testing.expectEqual(@as(?i64, null), parse_pasted_number("-"));
+    try std.testing.expectEqual(@as(?i64, null), parse_pasted_number("999999999999999999999999"));
+}
+
+test "calc K10: copy/paste chords are consumed" {
+    var app = AppState.init();
+    app.engine.current_val = 42;
+    // Ctrl+C
+    var evc = Event{ .kind = ui.KEY_DOWN, .flags = 0x04, .seq = 1, .arg0 = 0, .arg1 = 'c' };
+    try std.testing.expect(app.handle_keyboard_event(&evc));
+    // Ctrl+Shift+C
+    var evcs = Event{ .kind = ui.KEY_DOWN, .flags = 0x04 | ui.MOD_SHIFT, .seq = 2, .arg0 = 0, .arg1 = 'C' };
+    try std.testing.expect(app.handle_keyboard_event(&evcs));
+    // Ctrl+V — host clipboard stub returns 0, paste is a no-op but consumed
+    var evv = Event{ .kind = ui.KEY_DOWN, .flags = 0x04, .seq = 3, .arg0 = 0, .arg1 = 'v' };
+    try std.testing.expect(app.handle_keyboard_event(&evv));
+    // Plain c still clears (no clash)
+    app.engine.current_val = 5;
+    var evplain = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 4, .arg0 = 0, .arg1 = 'c' };
+    _ = app.handle_keyboard_event(&evplain);
+    try std.testing.expectEqual(@as(i64, 0), app.engine.current_val);
+}
+
+test "calc K8: sqrt(16) = 4 via button" {
+    var app = AppState.init();
+    app.engine.current_val = 16;
+    app.engine.is_entering_val = true;
+    tap(&app, 36, 374); // SQRT at (8,364) center
+    try std.testing.expectEqual(@as(i64, 4), app.engine.current_val);
+}
+
+test "calc K8: log(100) = 2 via button" {
+    var app = AppState.init();
+    app.engine.current_val = 100;
+    app.engine.is_entering_val = true;
+    tap(&app, 97, 348); // LOG at (69,338) center
+    try std.testing.expectEqual(@as(i64, 2), app.engine.current_val);
+}
+
+test "calc K8: ln rounds (ln(e)≈1, entered as 3)" {
+    var app = AppState.init();
+    app.engine.current_val = 3;
+    app.engine.is_entering_val = true;
+    tap(&app, 36, 348); // LN at (8,338) center; ln(3)=1.0986 → 1
+    try std.testing.expectEqual(@as(i64, 1), app.engine.current_val);
+}
+
+test "calc K8: exp(1) ≈ e rounds to 3" {
+    var app = AppState.init();
+    app.engine.current_val = 1;
+    app.engine.is_entering_val = true;
+    tap(&app, 158, 348); // EXP at (130,338) center
+    try std.testing.expectEqual(@as(i64, 3), app.engine.current_val);
+}
+
+test "calc K8: abs and domain errors" {
+    var app = AppState.init();
+    app.engine.current_val = -42;
+    app.engine.is_entering_val = true;
+    tap(&app, 97, 374); // ABS at (69,364) center
+    try std.testing.expectEqual(@as(i64, 42), app.engine.current_val);
+
+    app.engine.current_val = -5;
+    tap(&app, 36, 348); // ln(-5) → ERROR
+    try std.testing.expect(app.engine.has_error);
+}
+
+test "calc K8: POW evaluates exact integer power" {
+    var app = AppState.init();
+    // 2 POW 10 = : type 2, POW button, type 10, Enter
+    var ev2 = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 1, .arg0 = 0x03, .arg1 = '2' };
+    _ = app.handle_keyboard_event(&ev2);
+    tap(&app, 219, 348); // POW at (191,338) center
+    var ev1 = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 2, .arg0 = 0x02, .arg1 = '1' };
+    _ = app.handle_keyboard_event(&ev1);
+    var ev0 = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 3, .arg0 = 0x0d, .arg1 = '0' };
+    _ = app.handle_keyboard_event(&ev0);
+    try std.testing.expect(!app.engine.has_error);
+    var ev_eq = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 4, .arg0 = 0x28, .arg1 = '\r' };
+    _ = app.handle_keyboard_event(&ev_eq);
+    try std.testing.expectEqual(@as(i64, 1024), app.engine.current_val);
+
+    // Overflow raises ERROR: 10 POW 19
+    app.engine.clear();
+    app.engine.accum = 10;
+    app.engine.pending_op = 'P';
+    app.engine.current_val = 19;
+    app.engine.is_entering_val = true;
+    app.engine.evaluate();
+    try std.testing.expect(app.engine.has_error);
+}
+
+fn press_at(app: *AppState, x: u32, y: u32) void {
+    var ev_down = Event{ .kind = ui.MOUSE_DOWN, .flags = 0, .seq = 1, .arg0 = x, .arg1 = y };
+    _ = app.handle_mouse_events(&ev_down);
+    var ev_up = Event{ .kind = ui.MOUSE_UP, .flags = 0, .seq = 2, .arg0 = x, .arg1 = y };
+    _ = app.handle_mouse_events(&ev_up);
+}
+
+fn tap(app: *AppState, x: u32, y: u32) void {
+    press_at(app, x, y);
 }
