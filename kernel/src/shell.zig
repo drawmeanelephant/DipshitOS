@@ -1362,8 +1362,8 @@ fn shell_handle_expanded(mon: *monitor.Monitor, line: []const u8) void {
         }
         return;
     }
-    // Builtin: env (M19 P3)
-    if (std.mem.eql(u8, argv[0], "env")) {
+    // Builtin: env / printenv (M19 P3 + M22 D7, issue #330)
+    if (std.mem.eql(u8, argv[0], "env") or std.mem.eql(u8, argv[0], "printenv")) {
         var ei: usize = 0;
         while (ei < env_count) : (ei += 1) {
             const e = &env_table[ei];
@@ -2890,10 +2890,22 @@ test "shell: M19 P3 env: set, unset, env builtins" {
     // set another and verify env_table integrity
     env_set("SECOND", "yes");
     try std.testing.expectEqual(@as(usize, 1), env_count);
-    try std.testing.expectEqualStrings("yes", env_get("SECOND").?);
-
-    // unset a nonexistent variable is silent (returns false, no crash)
+    try std.testing.expectEqualStrings("yes", env_get("SECOND").?); // unset a nonexistent variable is silent (returns false, no crash)
     try std.testing.expect(!env_unset("NOEXIST"));
+}
+
+test "shell: M22 D7 printenv: printenv is an alias for env" {
+    env_count = 0;
+    env_set("HOME", "/data");
+    env_set("USER", "root");
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("printenv\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "HOME=/data") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "USER=root") != null);
 }
 
 test "shell: M19 P3 env: env_set and env_unset direct API" {
