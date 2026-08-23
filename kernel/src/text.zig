@@ -717,6 +717,167 @@ pub fn measure_text(text: []const u8, size: FontSize) TextMetrics {
 }
 
 // ---------------------------------------------------------------------------
+// Line breaking & word wrapping (M20-U15)
+// ---------------------------------------------------------------------------
+
+/// One wrapped segment: a byte range into the source line (UTF-8 intact).
+pub const WrapSegment = struct {
+    start: usize,
+    len: usize,
+    /// True when the break AFTER this segment was forced (no boundary).
+    hard_break: bool = false,
+};
+
+pub const WrapResult = struct {
+    segments: []const WrapSegment,
+    /// True when `out` was too small to hold every segment.
+    truncated: bool = false,
+};
+
+/// Break opportunities, per M20-U15:
+///   - after a space (the space stays at the end of its segment),
+///   - after a hyphen,
+///   - adjacent to a wide codepoint,
+///   - after an explicit U+200B zero-width space.
+/// When a row would overflow `max_width_cells`, back up to the last
+/// opportunity; with none available, hard-break at the edge. Widths come
+/// from `char_width` — combining marks ride along free. Segments are
+/// byte ranges so callers can slice the original UTF-8 without copying.
+pub fn wrap_line(
+    line: []const u8,
+    max_width_cells: usize,
+    out: []WrapSegment,
+) WrapResult {
+    var segs: usize = 0;
+    var truncated = false;
+    var seg_start: usize = 0;
+    var x: usize = 0; // cells since seg_start
+    var last_break: ?usize = null; // BYTE offset just after a break point
+    // Spaces are dropped at soft breaks (terminal convention); hyphens
+    // and wide-char boundaries keep their trailing character.
+    var last_break_trims_space = false;
+
+    var need: u8 = 0;
+    var acc: u21 = 0;
+    var i: usize = 0;
+    while (i < line.len) : (i += 1) {
+        const b = line[i];
+        const cp_opt: ?u21 = blk: {
+            if (need > 0) {
+                if ((b & 0xC0) != 0x80) {
+                    need = 0;
+                    acc = 0;
+                    break :blk null;
+                }
+                need -= 1;
+                const next: u21 = (@as(u21, acc) << 6) | (b & 0x3F);
+                if (need == 0) {
+                    acc = 0;
+                    break :blk next;
+                }
+                acc = next;
+                break :blk null;
+            }
+            if (b < 0x80) break :blk b;
+            if (b >= 0xC2 and b <= 0xDF) {
+                need = 1;
+                acc = b & 0x1F;
+                break :blk null;
+            }
+            if (b >= 0xE0 and b <= 0xEF) {
+                need = 2;
+                acc = b & 0x0F;
+                break :blk null;
+            }
+            if (b >= 0xF0 and b <= 0xF4) {
+                need = 3;
+                acc = b & 0x07;
+                break :blk null;
+            }
+            break :blk null;
+        };
+        const cp = cp_opt orelse continue;
+
+        // Explicit zero-width space: force a break right here.
+        if (cp == 0x200B) {
+            if (segs >= out.len) {
+                truncated = true;
+                break;
+            }
+            out[segs] = .{ .start = seg_start, .len = i - seg_start };
+            segs += 1;
+            seg_start = i + 1;
+            x = 0;
+            last_break = null;
+            continue;
+        }
+
+        const w: usize = char_width(cp);
+
+        // Overflow check BEFORE placing this codepoint.
+        if (w > 0 and x + w > max_width_cells) {
+            if (segs >= out.len) {
+                truncated = true;
+                break;
+            }
+            if (last_break) |brk| {
+                var emit_end = brk;
+                if (last_break_trims_space) {
+                    while (emit_end > seg_start and line[emit_end - 1] == ' ') emit_end -= 1;
+                }
+                out[segs] = .{ .start = seg_start, .len = emit_end - seg_start };
+                segs += 1;
+                // Rewind to the boundary and re-walk from there so the
+                // next segment counts its own cells exactly.
+                seg_start = brk;
+                x = 0;
+                last_break = null;
+                need = 0;
+                acc = 0;
+                i = brk - 1; // the loop's += 1 lands on brk
+                continue;
+            }
+            out[segs] = .{ .start = seg_start, .len = i - seg_start, .hard_break = true };
+            segs += 1;
+            seg_start = i;
+            x = 0;
+            last_break = null;
+        }
+
+        // Place the codepoint.
+        if (w > 0) x += w;
+
+        // Record break opportunities AFTER placement.
+        switch (cp) {
+            ' ' => {
+                last_break = i + 1;
+                last_break_trims_space = true;
+            },
+            '-' => {
+                last_break = i + 1;
+                last_break_trims_space = false;
+            },
+            else => {},
+        }
+        if (w == 2) {
+            last_break = i + 1;
+            last_break_trims_space = false;
+        }
+    }
+
+    // Trailing segment (only when something remains uncovered).
+    if (!truncated and seg_start < line.len) {
+        if (segs >= out.len) {
+            truncated = true;
+        } else {
+            out[segs] = .{ .start = seg_start, .len = line.len - seg_start };
+            segs += 1;
+        }
+    }
+    return .{ .segments = out[0..segs], .truncated = truncated };
+}
+
+// ---------------------------------------------------------------------------
 // Missing-glyph diagnostics (M20-U11)
 // ---------------------------------------------------------------------------
 
@@ -1496,6 +1657,61 @@ test "text: measure_text — exact monospace arithmetic (U12)" {
     const m5 = measure_text(long_buf[0..81], .medium);
     try std.testing.expectEqual(@as(usize, 2), m5.line_count);
     try std.testing.expectEqual(@as(usize, 80 * 16), m5.max_line_width);
+}
+
+test "text: wrap_line segment contents pin the issue's examples (U15)" {
+    var segs: [8]WrapSegment = undefined;
+    // "hello world" at 8 cells → "hello", then "world".
+    {
+        const r = wrap_line("hello world", 8, &segs);
+        try std.testing.expectEqual(@as(usize, 2), r.segments.len);
+        try std.testing.expectEqualStrings("hello", "hello world"[r.segments[0].start..][0..r.segments[0].len]);
+        try std.testing.expectEqualStrings("world", "hello world"[r.segments[1].start..][0..r.segments[1].len]);
+    }
+    // No boundary in range → hard break exactly at the edge.
+    {
+        const r = wrap_line("supercalifragilistic", 10, &segs);
+        try std.testing.expectEqual(@as(usize, 2), r.segments.len);
+        try std.testing.expect(r.segments[0].hard_break);
+        try std.testing.expectEqualStrings("supercalif", "supercalifragilistic"[0..r.segments[0].len]);
+        try std.testing.expectEqualStrings("ragilistic", "supercalifragilistic"[r.segments[1].start..][0..r.segments[1].len]);
+    }
+    // Hyphen is a break AFTER point.
+    {
+        const r = wrap_line("state-of-the-art", 7, &segs);
+        try std.testing.expect(r.segments.len >= 2);
+        try std.testing.expectEqualStrings("state-", "state-of-the-art"[0..r.segments[0].len]);
+    }
+    // Wide codepoints break around themselves when they don't fit…
+    {
+        const r = wrap_line("a\xe4\xb8\xadb", 2, &segs); // a 中 b
+        try std.testing.expectEqual(@as(usize, 3), r.segments.len);
+        const src = "a\xe4\xb8\xadb";
+        try std.testing.expectEqualStrings("a", src[0..r.segments[0].len]);
+        try std.testing.expectEqualStrings("\xe4\xb8\xad", src[r.segments[1].start..][0..r.segments[1].len]);
+        try std.testing.expectEqualStrings("b", src[r.segments[2].start..][0..r.segments[2].len]);
+    }
+    // …and stay glued to the previous word while they fit.
+    {
+        const r = wrap_line("a\xe4\xb8\xadb", 3, &segs);
+        try std.testing.expectEqual(@as(usize, 2), r.segments.len);
+        try std.testing.expectEqualStrings("a\xe4\xb8\xad", "a\xe4\xb8\xadb"[0..r.segments[0].len]);
+        try std.testing.expectEqualStrings("b", "a\xe4\xb8\xadb"[r.segments[1].start..][0..r.segments[1].len]);
+    }
+    // Zero-width space forces a break and vanishes from layout.
+    {
+        const r = wrap_line("ab\xe2\x80\x8bcd", 5, &segs); // ab\u{200B}cd
+        try std.testing.expectEqual(@as(usize, 2), r.segments.len);
+        try std.testing.expectEqualStrings("ab", "ab\xe2\x80\x8bcd"[0..r.segments[0].len]);
+        try std.testing.expectEqualStrings("cd", "ab\xe2\x80\x8bcd"[r.segments[1].start..][0..r.segments[1].len]);
+    }
+}
+
+test "text: wrap_line reports truncation on a small out-buffer (U15)" {
+    var one: [1]WrapSegment = undefined;
+    const r = wrap_line("aaa bbb ccc", 3, &one);
+    try std.testing.expect(r.truncated);
+    try std.testing.expectEqual(@as(usize, 1), r.segments.len);
 }
 
 test "text: an exhausted cluster pool degrades to ignoring new marks (U6)" {
