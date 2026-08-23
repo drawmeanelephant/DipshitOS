@@ -85,6 +85,10 @@ var script_staging: [script_staging_max]u8 = undefined;
 /// success/error. Module scope so `handle_line` can read it.
 var last_exit_ok: bool = true;
 
+/// M19 P15 (issue #304): shell trace mode — when enabled, each command
+/// is printed to the console (prefixed with `+ `) before execution.
+var trace_enabled: bool = false;
+
 /// M19 P12 (issue #301): loop state — bounded iteration counter and
 /// break/continue flags. Module scope so `shell_handle_expanded` builtins
 /// can set them and `run_for`/`run_while` can read them.
@@ -2141,6 +2145,11 @@ fn shell_handle_expanded(mon: *monitor.Monitor, line: []const u8) void {
         last_exit_ok = (monitor.exec(mon, argv) == .none);
         return;
     }
+    // M19 P15: trace mode — print command before execution.
+    if (trace_enabled) {
+        mon.console.puts("+ ");
+        mon.console.print_line(line);
+    }
     // Builtin: export VAR[=VAL]
     if (std.mem.eql(u8, argv[0], "export")) {
         if (argv.len < 2) {
@@ -2166,6 +2175,17 @@ fn shell_handle_expanded(mon: *monitor.Monitor, line: []const u8) void {
     }
     // Builtin: set VAR=VAL (M19 P3)
     if (std.mem.eql(u8, argv[0], "set")) {
+        // M19 P15: set -x / set +x for trace mode.
+        if (argv.len == 2 and std.mem.eql(u8, argv[1], "-x")) {
+            trace_enabled = true;
+            mon.console.print_line("trace: on");
+            return;
+        }
+        if (argv.len == 2 and std.mem.eql(u8, argv[1], "+x")) {
+            trace_enabled = false;
+            mon.console.print_line("trace: off");
+            return;
+        }
         if (argv.len < 2) {
             // Print all env vars (like export / env)
             var ei: usize = 0;
@@ -2175,6 +2195,9 @@ fn shell_handle_expanded(mon: *monitor.Monitor, line: []const u8) void {
                 mon.console.puts("=");
                 mon.console.print_line(e.val[0..e.val_len]);
             }
+            // Also show trace status.
+            mon.console.puts("trace: ");
+            mon.console.print_line(if (trace_enabled) "on" else "off");
         } else {
             var eq: usize = 0;
             while (eq < argv[1].len and argv[1][eq] != '=') eq += 1;
@@ -4927,4 +4950,68 @@ test "shell: M19 P13 heredoc: multiple lines collected" {
     try std.testing.expect(std.mem.indexOf(u8, out, "line1\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "line2\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "line3\n") != null);
+}
+test "shell: M19 P15 set -x: trace prints commands" {
+    env_count = 0;
+    last_exit_ok = true;
+    trace_enabled = false;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("set -x\n");
+    while (shell.poll() != .idle) {}
+    mock.feed("echo hello\n");
+    while (shell.poll() != .idle) {}
+    mock.feed("set +x\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    // Should contain "+ echo hello" from the trace
+    try std.testing.expect(std.mem.indexOf(u8, out, "+ echo hello\n") != null);
+    // After set +x, trace should be off (no more + lines)
+}
+
+test "shell: M19 P15 set -x: set without args shows trace status" {
+    env_count = 0;
+    last_exit_ok = true;
+    trace_enabled = false;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("set -x\n");
+    while (shell.poll() != .idle) {}
+    mock.feed("set\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "trace: on") != null);
+}
+
+test "shell: M19 P14 pipe+redirect: echo | type > file" {
+    env_count = 0;
+    last_exit_ok = true;
+    trace_enabled = false;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    // echo hello | type > test_out.txt
+    // type reads from pipe (hello), redirects to file
+    mock.feed("echo hello | type > test_out.txt\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    // Should succeed (no error message)
+    try std.testing.expect(std.mem.indexOf(u8, out, "error") == null);
+}
+
+test "shell: M19 P14 pipe+redirect: cmd < file | cmd > file" {
+    env_count = 0;
+    last_exit_ok = true;
+    trace_enabled = false;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    // type < test_out.txt | type > test_out2.txt
+    // Reads from file, pipes through type, writes to another file
+    mock.feed("type < test_out.txt | type > test_out2.txt\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "error") == null);
 }

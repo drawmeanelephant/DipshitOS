@@ -14,7 +14,7 @@
 - **Depends on:** M18 done ✅ (merged to main as `4d11713`, PR #485).
   Lane A is the critical path — Lane C (M20 text) and Lane E (M21
   compositor) depend on it.
-- **Status:** 🔄 in progress — P1 (pipes) ✅ done 2026-08-22; P2 (redirection) ✅ done 2026-08-23; P3 (env vars) ✅ done 2026-08-23; P4 (functions) ✅ done 2026-08-23; P8 (function args) ✅ done 2026-08-23; P9 (command substitution) ✅ done 2026-08-23; P10 (arithmetic expansion) ✅ done 2026-08-23; P11 (conditionals) ✅ done 2026-08-23; P12 (loops) ✅ done 2026-08-23; P13 (here-documents) ✅ done 2026-08-23
+- **Status:** 🔄 in progress — P1 (pipes) ✅ done 2026-08-22; P2 (redirection) ✅ done 2026-08-23; P3 (env vars) ✅ done 2026-08-23; P4 (functions) ✅ done 2026-08-23; P8 (function args) ✅ done 2026-08-23; P9 (command substitution) ✅ done 2026-08-23; P10 (arithmetic expansion) ✅ done 2026-08-23; P11 (conditionals) ✅ done 2026-08-23; P12 (loops) ✅ done 2026-08-23; P13 (here-documents) ✅ done 2026-08-23; P14 (pipe to/from files) ✅ done 2026-08-23; P15 (set -x tracing) ✅ done 2026-08-23
 
 ## Notes
 
@@ -269,6 +269,31 @@ updated as cards land.
   expansion, quoted delimiter, missing command, multiple lines).
   689/689 shell tests pass. `verify-unit-tests.sh` all modules green.
   `zig build` + `zig build image` green. `zig fmt --check` clean.
+
+## P14 — pipe to/from files (issue #303) — done 2026-08-23
+
+- Verified that existing P1 (pipe) and P2 (redirection) already compose
+  correctly: `redirect_split` finds `>`/`<` in lines containing `|`,
+  and `run_redirect_out`/`run_redirect_in` execute the left side through
+  `shell_handle_expanded` which handles pipes. No code changes needed —
+  the composition works because each adapter swaps the console, runs
+  the command, and restores. 2 new tests confirm.
+
+## P15 — set -x tracing (issue #304) — done 2026-08-23
+
+- `kernel/src/shell.zig`: `trace_enabled` module-level bool. `set -x`
+  enables trace mode, `set +x` disables. `set` without args shows env
+  vars plus trace status. In `shell_handle_expanded`, after tokenization
+  and before builtin dispatch, prints `+ <line>` when trace is enabled.
+  Works with pipes, redirects, scripts, and functions.
+- 1 byte BSS.
+
+### Verification
+
+- Host (class A): 4 new tests (P14: pipe+redirect, cmd<file|cmd>file;
+  P15: set -x trace output, set shows trace status). 693/693 shell
+  tests pass. `verify-unit-tests.sh` all modules green. `zig build` +
+  `zig build image` green. `zig fmt --check` clean.
 
 ## P3 — environment variables (issue #292) — done 2026-08-23
 

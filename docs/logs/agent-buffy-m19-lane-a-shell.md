@@ -193,3 +193,20 @@ P13 (here-documents: `cmd <<DELIM ... DELIM`) landed. Host-tested.
   optionally expands vars, feeds content via `redirect.feed_console`.
   Trailing newline added after last line.
 - Host tests: 6 new. 689/689 shell tests pass. All verify gates green.
+
+## 2026-08-23 — claim 7033: P14 pipe to/from files done (issue #303)
+
+P14 (pipe + redirect composition) verified — no code changes needed.
+Existing P1 pipe and P2 redirect already compose correctly because
+`redirect_split` finds `>`/`<` in lines with `|`, and adapters swap
+the console independently. 2 new tests confirm.
+
+## 2026-08-23 — claim 7033: P15 set -x tracing done (issue #304)
+
+P15 (shell trace mode: `set -x`/`set +x`) landed. Host-tested.
+
+- `shell.zig`: `trace_enabled` bool. `set -x` enables, `set +x`
+  disables, `set` without args shows env + trace status. Trace prints
+  `+ <line>` before each command in `shell_handle_expanded`.
+- Host tests: 2 new (trace output, set shows status). 693/693 shell
+  tests pass. All verify gates green.
