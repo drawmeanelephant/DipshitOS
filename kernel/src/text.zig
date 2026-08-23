@@ -18,6 +18,7 @@
 const std = @import("std");
 const font = @import("font8x8.zig");
 const font_unicode = @import("font_unicode.zig");
+const font_emoji = @import("font_emoji.zig");
 const virtio_gpu = @import("virtio_gpu.zig");
 
 // ---------------------------------------------------------------------------
@@ -388,6 +389,14 @@ fn utf8_step(b: u8) ?u21 {
 /// wired up by later M20 cards; unknown opcodes render blank.
 pub const cell_wide_cont: Cell = 0xFFFF;
 
+/// Emoji base cells: 0x2000 | index into font_emoji.emojis (range
+/// [0x2000, 0x3000)). The glyph paints 16px across this cell AND the
+/// following continuation cell.
+pub const cell_emoji_base: Cell = 0x2000;
+
+/// First cell of the dynamic cluster-pool space (M20-U5/U6 refs).
+pub const cell_dyn_base: Cell = 0x8000;
+
 /// The unified glyph lookup for a literal codepoint (M20-U11 shape):
 /// ASCII from font8x8, ≥0xA0 from the Unicode tables, null when there is
 /// no glyph (caller renders the replacement character).
@@ -433,13 +442,19 @@ pub fn putc_unicode(cp: u21) void {
         return;
     }
     if (w == 2) {
-        // M20-U4/U2: wide codepoints claim two cells — base + continuation.
+        // M20-U4/U7: wide codepoints claim two cells — base + continuation.
+        // Tabled emoji paint their 16×16 art; everything else (CJK until
+        // tables exist) falls back to a double-wide replacement box.
         const edge = @min(cols, visible_cols());
         var slot = cursor_slot();
         if (cur_col + 1 >= edge) slot = new_line(); // room for both halves
         if (cur_col >= edge) slot = new_line();
-        ring[slot][cur_col] = cell_fffd; // real art lands with U7's emoji table
-        note_missing(cp);
+        if (font_emoji.lookup(cp)) |idx| {
+            ring[slot][cur_col] = cell_emoji_base | @as(Cell, @intCast(idx));
+        } else {
+            ring[slot][cur_col] = cell_fffd;
+            note_missing(cp);
+        }
         cur_col += 1;
         if (cur_col < edge) {
             ring[slot][cur_col] = cell_wide_cont;
@@ -697,10 +712,38 @@ pub fn render(canvas: Canvas) void {
         const cols_fit = @min(cols, canvas.width / cw);
         var col: usize = 0;
         while (col < cols_fit) : (col += 1) {
-            // M20-U2: cells decode through one path. The continuation
+            // M20-U2/U7: cells decode through one path. The continuation
             // half of a wide character paints nothing (its base cell
             // already drew); unknown opcodes stay blank.
-            const g = cell_glyph(ring[slot][col]) orelse continue;
+            const cell = ring[slot][col];
+
+            // Emoji base cells paint their full 16px art across BOTH
+            // cells at the current font size.
+            if (cell >= cell_emoji_base and cell < cell_dyn_base and cell - cell_emoji_base < font_emoji.emojis.len) blk_emoji: {
+                const idx = cell - cell_emoji_base;
+                if (idx >= font_emoji.emojis.len) break :blk_emoji;
+                const art = &font_emoji.emojis[idx].rows;
+                const scale = cw / 8; // pixels per source pixel
+                var ey: usize = 0;
+                while (ey < 16) : (ey += 1) {
+                    const bits = art[ey];
+                    var ex: usize = 0;
+                    while (ex < 16) : (ex += 1) {
+                        if ((bits >> @intCast(ex)) & 1 != 0) {
+                            var by: usize = 0;
+                            while (by < scale) : (by += 1) {
+                                var bx: usize = 0;
+                                while (bx < scale) : (bx += 1) {
+                                    put_pixel(canvas, col * cw + ex * scale + bx, r * ch + ey * scale + by, fg_rgb);
+                                }
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
+
+            const g = cell_glyph(cell) orelse continue;
             const col_pix = col * cw;
             // M20-U1: nearest-neighbor scaling — every source pixel
             // becomes an exact scale² block, painting exactly the bits
@@ -1301,6 +1344,28 @@ test "text: visible geometry follows the font size and wrap respects it (U1)" {
     while (i < 81) : (i += 1) putc('x');
     try std.testing.expectEqual(@as(usize, 2), ring_count);
     try std.testing.expectEqual(@as(usize, 1), cur_col);
+}
+
+test "text: emoji render two cells wide with real art (U7)" {
+    init();
+    clear();
+    puts("a");
+    // 🔥 fire = U+1F525, UTF-8 F0 9F 94 A5 — arrives through the byte path.
+    puts("\xf0\x9f\x94\xa5");
+    putc('b');
+    try std.testing.expectEqual(@as(usize, 4), cur_col); // a + 2 + b
+    const cell = ring[cur_line][1];
+    try std.testing.expectEqual(cell_emoji_base, cell & 0xFF00);
+    try std.testing.expectEqual(cell_wide_cont, ring[cur_line][2]);
+    try std.testing.expectEqual(@as(Cell, 'b'), ring[cur_line][3]);
+}
+
+test "text: unknown wide codepoints stay double-wide fallback (U7)" {
+    init();
+    clear();
+    putc_unicode(0x1F984); // unicorn — not shipped
+    try std.testing.expectEqual(cell_fffd, ring[cur_line][0]);
+    try std.testing.expectEqual(cell_wide_cont, ring[cur_line][1]);
 }
 
 test "text: an exhausted cluster pool degrades to ignoring new marks (U6)" {
