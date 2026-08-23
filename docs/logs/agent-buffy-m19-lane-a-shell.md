@@ -210,3 +210,13 @@ P15 (shell trace mode: `set -x`/`set +x`) landed. Host-tested.
   `+ <line>` before each command in `shell_handle_expanded`.
 - Host tests: 2 new (trace output, set shows status). 693/693 shell
   tests pass. All verify gates green.
+
+## 2026-08-23 — claim 7033: P16 temp files done (issue #305)
+
+P16 (temp files: `mktemp` command) landed. Host-tested.
+
+- `monitor.zig`: `cmd_mktemp` generates unique filename via CSPRNG
+  (4 hex digits), creates empty file via `esp.write_file`. `registry_count`
+  bumped 58→59. Transcript fixture updated.
+- Host: transcript test passes. 693/693 shell + 526/526 monitor tests
+  pass. All verify gates green.
