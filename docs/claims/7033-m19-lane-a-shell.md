@@ -14,7 +14,7 @@
 - **Depends on:** M18 done ✅ (merged to main as `4d11713`, PR #485).
   Lane A is the critical path — Lane C (M20 text) and Lane E (M21
   compositor) depend on it.
-- **Status:** 🔄 in progress — P1 (pipes) ✅ done 2026-08-22; P2 (redirection) ✅ done 2026-08-23; P3 (env vars) ✅ done 2026-08-23; P4 (functions) ✅ done 2026-08-23; P8 (function args) ✅ done 2026-08-23; P9 (command substitution) ✅ done 2026-08-23; P10 (arithmetic expansion) ✅ done 2026-08-23; P11 (conditionals) ✅ done 2026-08-23; P12 (loops) ✅ done 2026-08-23; P13 (here-documents) ✅ done 2026-08-23; P14 (pipe to/from files) ✅ done 2026-08-23; P15 (set -x tracing) ✅ done 2026-08-23
+- **Status:** 🔄 in progress — P1 (pipes) ✅ done 2026-08-22; P2 (redirection) ✅ done 2026-08-23; P3 (env vars) ✅ done 2026-08-23; P4 (functions) ✅ done 2026-08-23; P8 (function args) ✅ done 2026-08-23; P9 (command substitution) ✅ done 2026-08-23; P10 (arithmetic expansion) ✅ done 2026-08-23; P11 (conditionals) ✅ done 2026-08-23; P12 (loops) ✅ done 2026-08-23; P13 (here-documents) ✅ done 2026-08-23; P14 (pipe to/from files) ✅ done 2026-08-23; P15 (set -x tracing) ✅ done 2026-08-23; P16 (temp files) ✅ done 2026-08-23
 
 ## Notes
 
@@ -294,6 +294,20 @@ updated as cards land.
   P15: set -x trace output, set shows trace status). 693/693 shell
   tests pass. `verify-unit-tests.sh` all modules green. `zig build` +
   `zig build image` green. `zig fmt --check` clean.
+
+## P16 — temp files (issue #305) — done 2026-08-23
+
+- `kernel/src/monitor.zig`: new `mktemp` command (category: storage).
+  `cmd_mktemp` generates a unique filename using CSPRNG (4 random hex
+  digits), builds `PREFIX_XXXX.BIN` (default prefix `TMP`), creates
+  empty file via `esp.write_file`, prints the filename. `registry_count`
+  bumped from 58 to 59. Transcript fixture updated.
+
+### Verification
+
+- Host: transcript test passes (mktemp in help listing). 693/693 shell
+  tests pass. 526/526 monitor tests pass. `verify-unit-tests.sh` all
+  modules green. `zig build` + `zig build image` green.
 
 ## P3 — environment variables (issue #292) — done 2026-08-23
 

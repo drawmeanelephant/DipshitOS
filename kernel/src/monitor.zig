@@ -282,7 +282,7 @@ pub const Command = struct {
 /// grows it 54 -> 55 (`sym`). Milestone twenty-two D5 (issue #328)
 /// grows it 55 -> 56 (`strace`). Milestone twenty-two D6 (issue #329)
 /// grows it 56 -> 57 (`ps`).
-pub const registry_count: usize = 58; // 51 + sh/calc + `font` (M20 U1) + sym/strace/ps (M22 D3/D5/D6) + `type` (M19 P1)
+pub const registry_count: usize = 59; // 51 + sh/calc + `font` (M20 U1) + sym/strace/ps (M22 D3/D5/D6) + `type` (M19 P1) + `mktemp` (M19 P16)
 
 /// `sym <file>` reads at most this many bytes for on-disk symtab inspection
 /// (M22 D3). ELF symbol tables live near the file tail; 64 KiB covers every
@@ -361,6 +361,7 @@ fn ensure_registry() []const Command {
             .{ .name = "welcome", .help = "guided tour of the system for new users", .usage = "welcome", .category = .machine_identity, .handler = cmd_welcome },
             .{ .name = "dui", .help = "Driving Award window manager: registry (with owner pids), z-order, focus, hit-testing ('dui focus <n>' focuses; 'dui raise <n>' raises; 'dui lower <n>' lowers to back; 'dui move <n> <x> <y>' moves a user window; 'dui close <n>' releases a user window; 'dui list <pid>' filters by owner; 'dui hit <x> <y>' hit-tests; 'dui cycle' cycles focus like Alt+Tab)", .usage = "dui [focus <n>|raise <n>|lower <n>|move <n> <x> <y>|close <n>|list <pid>|hit <x> <y>|cycle]", .category = .graphics_input, .max_args = 4, .handler = cmd_dui },
             .{ .name = "write", .help = "write text to a file on the ESP", .usage = "write <file> <text...>", .category = .storage, .min_args = 1, .handler = cmd_write },
+            .{ .name = "mktemp", .help = "create a temporary file (empty, unique name)", .usage = "mktemp [prefix]", .category = .storage, .max_args = 1, .handler = cmd_mktemp },
         };
         registry_ready = true;
     }
@@ -1274,6 +1275,65 @@ fn cmd_write(m: *Monitor, args: []const []const u8) ExecError {
             m.console.print_hex_min(fat.last_fail_lba());
             m.console.print_line(") - file NOT persisted");
             return .machine_failed;
+        },
+    }
+}
+
+/// M19 P16 (issue #305): create a temporary file with a unique name.
+/// Usage: mktemp [prefix] - creates prefix_XXXX.BIN (default TMP_XXXX.BIN).
+fn cmd_mktemp(m: *Monitor, args: []const []const u8) ExecError {
+    const prefix = if (args.len > 0) args[0] else "TMP";
+    // Generate 4 random hex digits.
+    var rnd: [2]u8 = undefined;
+    csprng.random_bytes(&rnd);
+    const hex = "0123456789abcdef";
+    var suffix: [4]u8 = undefined;
+    suffix[0] = hex[(rnd[0] >> 4) & 0x0f];
+    suffix[1] = hex[rnd[0] & 0x0f];
+    suffix[2] = hex[(rnd[1] >> 4) & 0x0f];
+    suffix[3] = hex[rnd[1] & 0x0f];
+    // Build filename: PREFIX_XXXX.BIN
+    var name_buf: [32]u8 = undefined;
+    var n: usize = 0;
+    for (prefix) |b| {
+        if (n < name_buf.len - 10) {
+            name_buf[n] = b;
+            n += 1;
+        }
+    }
+    if (n < name_buf.len - 10) {
+        name_buf[n] = '_';
+        n += 1;
+    }
+    @memcpy(name_buf[n..][0..4], &suffix);
+    n += 4;
+    @memcpy(name_buf[n..][0..4], ".BIN");
+    n += 4;
+    const name = name_buf[0..n];
+    // Create empty file.
+    switch (esp.write_file(name, "")) {
+        .ok => {
+            m.console.puts(name);
+            m.console.puts("\n");
+            return .none;
+        },
+        .no_disk => {
+            err_prefix(m);
+            m.console.puts(name);
+            m.console.print_line(": no disk available");
+            return .not_implemented;
+        },
+        .name_invalid => {
+            err_prefix(m);
+            m.console.puts(name);
+            m.console.print_line(": invalid filename");
+            return .invalid_argument;
+        },
+        else => {
+            err_prefix(m);
+            m.console.puts(name);
+            m.console.print_line(": write failed");
+            return .invalid_argument;
         },
     }
 }
