@@ -53,6 +53,9 @@ const expr_mod = @import("calc/expr.zig");
 
 const dates = @import("calc/dates.zig");
 
+const stats_mod = @import("calc/stats.zig");
+const Stats = stats_mod.Stats;
+
 const defs_mod = @import("calc/defs.zig");
 const Defs = defs_mod.Defs;
 
@@ -333,6 +336,14 @@ pub const AppState = struct {
     // K15: named definitions (persisted to /data/calc_defs.txt)
     defs: Defs = .{},
     float_display: ?f64 = null, // exact render of a float-valued expression
+
+    // K16: statistics mode (Ctrl+S bar over the history area)
+    stats_active: bool = false,
+    stats_input: [120]u8 = [_]u8{0} ** 120, // comma-separated list text
+    stats_len: usize = 0,
+    stats_store: Stats = .{},
+    stats_result_len: usize = 0,
+    stats_result: [64]u8 = [_]u8{0} ** 64,
 
     // ---- Standard mode buttons ----
     btn_m_store: Button = Button.init(Rect.make(8, 104, 56, 20), "MS"),
@@ -1051,7 +1062,67 @@ pub const AppState = struct {
         } else if (self.date_active) {
             // K13 date bar (when active, overlays the history area)
             self.draw_date_bar(win);
+        } else if (self.stats_active) {
+            // K16 stats bar (when active, overlays the history area)
+            self.draw_stats_bar(win);
         }
+    }
+
+    fn draw_stats_bar(self: *const AppState, win: u32) void {
+        ui.draw_rect(win, history_area, ui.COLOR_SURFACE);
+        ui.draw_rect_outline(win, history_area, 1, ui.COLOR_ACCENT);
+
+        var line0: [128]u8 = undefined;
+        const prompt = "1,2,3 > ";
+        @memcpy(line0[0..prompt.len], prompt);
+        const dl = @min(self.stats_len, line0.len - prompt.len - 4);
+        @memcpy(line0[prompt.len .. prompt.len + dl], self.stats_input[0..dl]);
+        ui.draw_text(win, line0[0 .. prompt.len + dl], history_area.x + 4, history_area.y + 4, ui.COLOR_TEXT_PRIMARY);
+
+        if (self.stats_result_len > 0) {
+            const rl = @min(self.stats_result_len, 60);
+            ui.draw_text(win, self.stats_result[0..rl], history_area.x + 4, history_area.y + 20, ui.COLOR_ACCENT);
+        } else {
+            const hint = "comma-separated values, Enter computes";
+            ui.draw_text(win, hint, history_area.x + 4, history_area.y + 20, ui.COLOR_TEXT_MUTED);
+        }
+    }
+
+    fn fmt_stats_result(self: *AppState, comptime f: []const u8, args: anytype) usize {
+        const s = std.fmt.bufPrint(&self.stats_result, f, args) catch return 0;
+        return s.len;
+    }
+
+    fn stats_evaluate(self: *AppState) void {
+        if (self.stats_len == 0) return;
+        self.stats_store.parse_list(self.stats_input[0..self.stats_len]) catch {
+            const msg = "? too many (max 100)";
+            @memcpy(self.stats_result[0..msg.len], msg);
+            self.stats_result_len = msg.len;
+            ui.write_console("calc: stats-error\n");
+            return;
+        };
+        const r = self.stats_store.compute() catch {
+            const msg = "? enter numbers first";
+            @memcpy(self.stats_result[0..msg.len], msg);
+            self.stats_result_len = msg.len;
+            ui.write_console("calc: stats-error\n");
+            return;
+        };
+        // mean lands in the engine for chaining; full summary in the bar
+        self.engine.current_val = @intFromFloat(@round(r.mean));
+        self.engine.is_entering_val = false;
+        self.engine.has_error = false;
+        self.float_display = r.mean;
+        self.stats_result_len = self.fmt_stats_result(
+            "n={d} mean={d:.2} med={d:.2} min={d} max={d} sd={d:.2}",
+            .{ r.n, r.mean, r.median, @as(i64, @intFromFloat(@round(r.min))), @as(i64, @intFromFloat(@round(r.max))), r.std_dev },
+        );
+        var hist_buf: [32]u8 = undefined;
+        const hs = format_i64(@intCast(r.n), &hist_buf);
+        self.push_history(hs, self.engine.current_val);
+        self.stats_len = 0;
+        ui.write_console("calc: stats-ok\n");
     }
 
     fn draw_date_bar(self: *const AppState, win: u32) void {
@@ -1759,6 +1830,39 @@ pub const AppState = struct {
             self.cfg_row = 0;
             ui.write_console(if (self.cfg_active) "calc: cfg-open\n" else "calc: cfg-close\n");
             return true;
+        }
+
+        // K16: Ctrl+S toggles statistics mode
+        if (ctrl and (ascii == 's' or ascii == 'S')) {
+            self.stats_active = !self.stats_active;
+            self.stats_len = 0;
+            ui.write_console(if (self.stats_active) "calc: stats-on\n" else "calc: stats-off\n");
+            return true;
+        }
+
+        // K16: while the stats bar is open it consumes keys
+        if (self.stats_active and !ctrl) {
+            if (ascii == 0x08 or keycode == 0x2a) {
+                if (self.stats_len > 0) self.stats_len -= 1;
+                return true;
+            }
+            if (ascii == 0x1b or keycode == 0x29) {
+                self.stats_active = false;
+                ui.write_console("calc: stats-off\n");
+                return true;
+            }
+            const ok_ch = (ascii >= '0' and ascii <= '9') or ascii == ',' or ascii == '.' or
+                ascii == '-' or ascii == '+' or ascii == ' ';
+            if (ok_ch and self.stats_len < self.stats_input.len) {
+                self.stats_input[self.stats_len] = ascii;
+                self.stats_len += 1;
+                return true;
+            }
+            if (keycode == 0x28 or ascii == '\r' or ascii == '\n') {
+                self.stats_evaluate();
+                return true;
+            }
+            return true; // swallow everything else while open
         }
 
         // K13: Ctrl+D toggles the date bar
@@ -2764,3 +2868,42 @@ test "calc K15: unknown name and bad def raise errors" {
     try std.testing.expect(app.engine.has_error);
 }
 
+
+test "calc K16: Ctrl+S opens stats; [1,2,3,4,5] computes" {
+    var app = AppState.init();
+    try std.testing.expect(!app.stats_active);
+    var evs = Event{ .kind = ui.KEY_DOWN, .flags = 0x04, .seq = 1, .arg0 = 0, .arg1 = 's' };
+    try std.testing.expect(app.handle_keyboard_event(&evs));
+    try std.testing.expect(app.stats_active);
+
+    for ("1,2,3,4,5") |ch| {
+        var ev = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 2, .arg0 = 0, .arg1 = ch };
+        _ = app.handle_keyboard_event(&ev);
+    }
+    var evr = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 3, .arg0 = 0x28, .arg1 = '\r' };
+    _ = app.handle_keyboard_event(&evr);
+
+    // mean lands in engine (exact here); summary line carries the rest
+    try std.testing.expectEqual(@as(i64, 3), app.engine.current_val);
+    const text = app.stats_result[0..app.stats_result_len];
+    try std.testing.expect(std.mem.indexOf(u8, text, "n=5") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "mean=3") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "med=3") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "min=1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "max=5") != null);
+
+    // Esc closes
+    var esc = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 4, .arg0 = 0x29, .arg1 = 0x1b };
+    _ = app.handle_keyboard_event(&esc);
+    try std.testing.expect(!app.stats_active);
+}
+
+test "calc K16: plain s stays memory-store while stats closed" {
+    var app = AppState.init();
+    app.engine.current_val = 42;
+    app.engine.is_entering_val = true;
+    var ev = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 1, .arg0 = 0, .arg1 = 's' };
+    _ = app.handle_keyboard_event(&ev);
+    try std.testing.expect(!app.stats_active);
+    try std.testing.expectEqual(@as(i64, 42), app.mem_slots[0]);
+}
