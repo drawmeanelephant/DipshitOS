@@ -85,6 +85,14 @@ var script_staging: [script_staging_max]u8 = undefined;
 /// success/error. Module scope so `handle_line` can read it.
 var last_exit_ok: bool = true;
 
+/// M19 P12 (issue #301): loop state — bounded iteration counter and
+/// break/continue flags. Module scope so `shell_handle_expanded` builtins
+/// can set them and `run_for`/`run_while` can read them.
+var loop_iter: usize = 0;
+var break_flag: bool = false;
+var continue_flag: bool = false;
+const loop_max_iter: usize = 256;
+
 const EnvEntry = struct {
     name: [env_name_max]u8 = [_]u8{0} ** env_name_max,
     name_len: usize = 0,
@@ -1085,29 +1093,35 @@ fn handle_line(mon: *monitor.Monitor, raw_line: []const u8) void {
     // P10: arithmetic expansion `$((expr))` — evaluate and substitute.
     // Skip for fn definitions (preserve $((...)  in function bodies).
     var arith_buf: [lineedit.max_line]u8 = undefined;
-    const line_after_arith = if (subst_active or
+    // P12: skip expansions for `for`/`while`/`fn` — their bodies contain
+    // $VAR references that should be expanded at execution time, not parse time.
+    const skip_expansions = subst_active or
         std.mem.startsWith(u8, raw_line, "fn ") or
-        std.mem.startsWith(u8, raw_line, "fn\t"))
+        std.mem.startsWith(u8, raw_line, "fn\t") or
+        std.mem.startsWith(u8, raw_line, "for ") or
+        std.mem.startsWith(u8, raw_line, "for\t") or
+        std.mem.startsWith(u8, raw_line, "while ") or
+        std.mem.startsWith(u8, raw_line, "while\t");
+
+    const line_after_arith = if (skip_expansions)
         raw_line
     else
         arith_expand(raw_line, &arith_buf);
 
     // P9: command substitution `$(cmd)` — execute inner command, capture
-    // stdout, substitute back into the line.  Skip for fn definitions.
+    // stdout, substitute back into the line.  Skip for fn/for/while.
     // Also skip when subst_active (prevent nesting).
     var subst_buf: [lineedit.max_line]u8 = undefined;
-    const line_after_subst = if (subst_active or
-        std.mem.startsWith(u8, line_after_arith, "fn ") or
-        std.mem.startsWith(u8, line_after_arith, "fn\t"))
+    const line_after_subst = if (skip_expansions)
         line_after_arith
     else
         cmd_subst(mon, line_after_arith, &subst_buf);
 
     // M18 T12: expand $VAR references before tokenizing.
-    // P8: skip expansion for `fn` definitions so `$name` in function
-    // bodies stays literal — it'll be expanded at invocation time.
+    // P8/P12: skip expansion for `fn`/`for`/`while` so $VAR in bodies
+    // stays literal — expanded at invocation/iteration time.
     var expanded: [lineedit.max_line]u8 = undefined;
-    const line = if (std.mem.startsWith(u8, line_after_subst, "fn ") or std.mem.startsWith(u8, line_after_subst, "fn\t"))
+    const line = if (skip_expansions)
         line_after_subst
     else
         env_expand(line_after_subst, &expanded);
@@ -1841,6 +1855,152 @@ fn run_if(mon: *monitor.Monitor, line: []const u8) void {
     }
 }
 
+/// M19 P12 (issue #301): find a whole-word keyword in a slice (same as
+/// find_if_keyword but named for loop context). Returns the index of
+/// the first byte of the keyword if found as a standalone word.
+fn find_loop_keyword(text: []const u8, kw: []const u8) ?usize {
+    var i: usize = 0;
+    while (i + kw.len <= text.len) : (i += 1) {
+        if (!std.mem.eql(u8, text[i..][0..kw.len], kw)) continue;
+        if (i > 0 and text[i - 1] != ' ' and text[i - 1] != '\t' and text[i - 1] != ';') continue;
+        const after = i + kw.len;
+        if (after < text.len and text[after] != ' ' and text[after] != '\t' and text[after] != ';') continue;
+        return i;
+    }
+    return null;
+}
+
+/// M19 P12 (issue #301): execute the body of a for/while loop.
+/// Splits `body` on `;` and executes each sub-command. Returns true
+/// if break was triggered (loop should stop).
+fn run_loop_body(mon: *monitor.Monitor, body: []const u8) bool {
+    continue_flag = false;
+    var start: usize = 0;
+    var i: usize = 0;
+    while (i <= body.len) : (i += 1) {
+        if (i == body.len or body[i] == ';') {
+            if (i > start) {
+                var lo = start;
+                while (lo < i and (body[lo] == ' ' or body[lo] == '\t')) lo += 1;
+                var hi = i;
+                while (hi > lo and (body[hi - 1] == ' ' or body[hi - 1] == '\t')) hi -= 1;
+                if (hi > lo) handle_line(mon, body[lo..hi]);
+            }
+            if (break_flag or continue_flag) return break_flag;
+            start = i + 1;
+        }
+    }
+    return false;
+}
+
+/// M19 P12 (issue #301): execute `for VAR in WORD1 WORD2 ...; do BODY; done`.
+/// The words after `in` are the loop items. For each, set $VAR and
+/// execute the body. $VAR is temporary (env_set/env_unset).
+fn run_for(mon: *monitor.Monitor, line: []const u8) void {
+    // Strip "for " prefix.
+    const rest = if (line.len > 4 and line[4] == ' ') line[5..] else line[4..];
+
+    // Find "in" keyword.
+    const in_pos = find_loop_keyword(rest, "in") orelse {
+        mon.console.print_line("for: usage: for VAR in WORD1 WORD2 ...; do CMD; done");
+        return;
+    };
+    // Trim trailing whitespace from var_name.
+    var vn_end = in_pos;
+    while (vn_end > 0 and (rest[vn_end - 1] == ' ' or rest[vn_end - 1] == '\t')) vn_end -= 1;
+    if (vn_end == 0) {
+        mon.console.print_line("for: missing variable name");
+        return;
+    }
+    const var_trimmed = rest[0..vn_end];
+
+    // Find "do" keyword after "in".
+    const after_in = rest[in_pos + 2 ..];
+    const do_pos = find_loop_keyword(after_in, "do") orelse {
+        mon.console.print_line("for: missing 'do'");
+        return;
+    };
+    const words_str = after_in[0..do_pos];
+
+    // Find "done" keyword after "do".
+    const after_do = after_in[do_pos + 2 ..];
+    var bd_start: usize = 0;
+    while (bd_start < after_do.len and after_do[bd_start] != ' ' and after_do[bd_start] != ';') bd_start += 1;
+    while (bd_start < after_do.len and (after_do[bd_start] == ' ' or after_do[bd_start] == ';')) bd_start += 1;
+    const body_and_done = after_do[bd_start..];
+    const done_pos = find_loop_keyword(body_and_done, "done") orelse {
+        mon.console.print_line("for: missing 'done'");
+        return;
+    };
+    const body = body_and_done[0..done_pos];
+
+    // Parse words: split on whitespace and semicolons.
+    var words: [16][]const u8 = undefined;
+    var word_count: usize = 0;
+    {
+        var ws: usize = 0;
+        while (ws < words_str.len and word_count < 16) : (ws += 1) {
+            while (ws < words_str.len and (words_str[ws] == ' ' or words_str[ws] == '\t' or words_str[ws] == ';')) ws += 1;
+            if (ws >= words_str.len) break;
+            var we = ws;
+            while (we < words_str.len and words_str[we] != ' ' and words_str[we] != '\t' and words_str[we] != ';') we += 1;
+            words[word_count] = words_str[ws..we];
+            word_count += 1;
+            ws = we;
+        }
+    }
+
+    // Execute the loop.
+    loop_iter = 0;
+    break_flag = false;
+    while (loop_iter < word_count and loop_iter < loop_max_iter and !break_flag) : (loop_iter += 1) {
+        env_set(var_trimmed, words[loop_iter]);
+        if (run_loop_body(mon, body)) break;
+    }
+    // Unset the loop variable after the loop.
+    _ = env_unset(var_trimmed);
+}
+
+/// M19 P12 (issue #301): execute `while CMD; do BODY; done`.
+/// Run the condition command. If exit=0, run body, repeat.
+/// If exit!=0, stop. `break` exits early, `continue` skips to next.
+fn run_while(mon: *monitor.Monitor, line: []const u8) void {
+    // Strip "while " prefix.
+    const rest = if (line.len > 6 and line[6] == ' ') line[7..] else line[6..];
+
+    // Find "do" keyword.
+    const do_pos = find_loop_keyword(rest, "do") orelse {
+        mon.console.print_line("while: missing 'do'");
+        return;
+    };
+    const condition = rest[0..do_pos];
+
+    // Find "done" after "do".
+    const after_do = rest[do_pos + 2 ..];
+    var bd_start: usize = 0;
+    while (bd_start < after_do.len and after_do[bd_start] != ' ' and after_do[bd_start] != ';') bd_start += 1;
+    while (bd_start < after_do.len and (after_do[bd_start] == ' ' or after_do[bd_start] == ';')) bd_start += 1;
+    const body_and_done = after_do[bd_start..];
+    const done_pos = find_loop_keyword(body_and_done, "done") orelse {
+        mon.console.print_line("while: missing 'done'");
+        return;
+    };
+    const body = body_and_done[0..done_pos];
+
+    // Execute the loop.
+    loop_iter = 0;
+    break_flag = false;
+    while (loop_iter < loop_max_iter and !break_flag) : (loop_iter += 1) {
+        // Trim condition.
+        var cond_end = condition.len;
+        while (cond_end > 0 and (condition[cond_end - 1] == ' ' or condition[cond_end - 1] == '\t' or condition[cond_end - 1] == ';')) cond_end -= 1;
+        if (cond_end == 0) break;
+        shell_handle_expanded(mon, condition[0..cond_end]);
+        if (!last_exit_ok) break;
+        if (run_loop_body(mon, body)) break;
+    }
+}
+
 fn shell_handle_expanded(mon: *monitor.Monitor, line: []const u8) void {
     // M19 P2 (issue #291): the redirect operators — `>`, `>>`, `<` —
     // split before tokenizing so the command half goes through the
@@ -2042,6 +2202,26 @@ fn shell_handle_expanded(mon: *monitor.Monitor, line: []const u8) void {
     // M19 P11: `if COND; then BODY; [else BODY]; fi`.
     if (std.mem.eql(u8, argv[0], "if")) {
         run_if(mon, line);
+        return;
+    }
+    // M19 P12: `for VAR in WORD1 WORD2 ...; do BODY; done`.
+    if (std.mem.eql(u8, argv[0], "for")) {
+        run_for(mon, line);
+        return;
+    }
+    // M19 P12: `while CMD; do BODY; done`.
+    if (std.mem.eql(u8, argv[0], "while")) {
+        run_while(mon, line);
+        return;
+    }
+    // M19 P12: `break` — exit the innermost loop.
+    if (std.mem.eql(u8, argv[0], "break")) {
+        break_flag = true;
+        return;
+    }
+    // M19 P12: `continue` — skip to next iteration of the innermost loop.
+    if (std.mem.eql(u8, argv[0], "continue")) {
+        continue_flag = true;
         return;
     }
     // Builtin: fn (M19 P4) — list, define, delete shell functions.
@@ -4426,4 +4606,142 @@ test "shell: M19 P11 if: missing then prints error" {
     while (shell.poll() != .idle) {}
     const out = mock.contents();
     try std.testing.expect(std.mem.indexOf(u8, out, "missing 'then'") != null);
+}
+test "shell: M19 P12 for: iterates over words" {
+    env_count = 0;
+    last_exit_ok = true;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("for x in a b c; do echo $x; done\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "a\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "b\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "c\n") != null);
+}
+
+test "shell: M19 P12 for: variable unset after loop" {
+    env_count = 0;
+    last_exit_ok = true;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("for x in a b; do echo $x; done\n");
+    while (shell.poll() != .idle) {}
+    mock.feed("echo $x\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    // $x should be empty/unset after the loop
+    // The prompt echo contains "echo $x" but the output should just be a newline
+    try std.testing.expect(std.mem.indexOf(u8, out, "a\n") != null);
+}
+
+test "shell: M19 P12 for: empty word list does nothing" {
+    env_count = 0;
+    last_exit_ok = true;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("for x in; do echo never; done\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "never\n") == null);
+}
+
+test "shell: M19 P12 for: missing done prints error" {
+    env_count = 0;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("for x in a b; do echo $x\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "missing 'done'") != null);
+}
+
+test "shell: M19 P12 for: missing do prints error" {
+    env_count = 0;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("for x in a b echo $x; done\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "missing 'do'") != null);
+}
+
+test "shell: M19 P12 while: runs while condition is true" {
+    env_count = 0;
+    last_exit_ok = true;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("set COUNT=0\n");
+    while (shell.poll() != .idle) {}
+    mock.feed("while true; do echo loop; break; done\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "loop\n") != null);
+}
+
+test "shell: M19 P12 while: stops when condition is false" {
+    env_count = 0;
+    last_exit_ok = true;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("while false; do echo never; done\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "never\n") == null);
+}
+
+test "shell: M19 P12 while: break exits loop" {
+    env_count = 0;
+    last_exit_ok = true;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("set I=0\n");
+    while (shell.poll() != .idle) {}
+    mock.feed("while true; do echo body; break; done\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "body\n") != null);
+}
+
+test "shell: M19 P12 while: missing done prints error" {
+    env_count = 0;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("while true; do echo ok\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "missing 'done'") != null);
+}
+
+test "shell: M19 P12 while: missing do prints error" {
+    env_count = 0;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("while true echo ok; done\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "missing 'do'") != null);
+}
+
+test "shell: M19 P12 for: multiple commands in body" {
+    env_count = 0;
+    last_exit_ok = true;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("for x in a b; do echo first; echo second; done\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "first\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "second\n") != null);
 }

@@ -166,3 +166,17 @@ landed. Host-tested.
 - Host tests: 7 new (true-then, false-skip, true-else-skip,
   false-else-run, multi-command body, missing fi, missing then).
   672/672 shell tests pass. All verify gates green.
+
+## 2026-08-23 — claim 7033: P12 loops done (issue #301)
+
+P12 (loop constructs: for/while with break/continue) landed. Host-tested.
+
+- `shell.zig`: `loop_iter`, `break_flag`, `continue_flag` module-level
+  state. `loop_max_iter = 256`. New builtins: `for VAR in WORD1 ...;
+  do BODY; done`, `while CMD; do BODY; done`, `break`, `continue`.
+  `find_loop_keyword` whole-word matching. `run_loop_body` splits on
+  `;`, executes via `handle_line`. `run_for` parses for/in/do/done,
+  splits words on whitespace and `;`, sets `$VAR` per iteration,
+  unsets after. `run_while` evaluates condition, loops while exit=0.
+  `handle_line` skips expansions for for/while lines.
+- Host tests: 11 new. 683/683 shell tests pass. All verify gates green.

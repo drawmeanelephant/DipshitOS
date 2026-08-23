@@ -14,7 +14,7 @@
 - **Depends on:** M18 done ✅ (merged to main as `4d11713`, PR #485).
   Lane A is the critical path — Lane C (M20 text) and Lane E (M21
   compositor) depend on it.
-- **Status:** 🔄 in progress — P1 (pipes) ✅ done 2026-08-22; P2 (redirection) ✅ done 2026-08-23; P3 (env vars) ✅ done 2026-08-23; P4 (functions) ✅ done 2026-08-23; P8 (function args) ✅ done 2026-08-23; P9 (command substitution) ✅ done 2026-08-23; P10 (arithmetic expansion) ✅ done 2026-08-23; P11 (conditionals) ✅ done 2026-08-23
+- **Status:** 🔄 in progress — P1 (pipes) ✅ done 2026-08-22; P2 (redirection) ✅ done 2026-08-23; P3 (env vars) ✅ done 2026-08-23; P4 (functions) ✅ done 2026-08-23; P8 (function args) ✅ done 2026-08-23; P9 (command substitution) ✅ done 2026-08-23; P10 (arithmetic expansion) ✅ done 2026-08-23; P11 (conditionals) ✅ done 2026-08-23; P12 (loops) ✅ done 2026-08-23
 
 ## Notes
 
@@ -225,6 +225,30 @@ updated as cards land.
   672/672 shell tests pass. `verify-unit-tests.sh` all modules green.
   `zig build test-console` transcript byte-identical. `zig fmt --check`
   clean. `zig build` + `zig build image` green.
+
+## P12 — loops (issue #301) — done 2026-08-23
+
+- `kernel/src/shell.zig`: `loop_iter`, `break_flag`, `continue_flag`
+  module-level state. `loop_max_iter = 256`. New builtins: `for VAR in
+  WORD1 ...; do BODY; done`, `while CMD; do BODY; done`, `break`,
+  `continue`. `find_loop_keyword` matches whole-word keywords.
+  `run_loop_body` splits on `;` and executes via `handle_line` (full
+  env/alias/arith expansion). `run_for` parses `for/in/do/done`,
+  splits words on whitespace and `;`, loops setting `$VAR` per
+  iteration, unsets after. `run_while` evaluates condition via
+  `shell_handle_expanded`, loops while `last_exit_ok`.
+- `handle_line`: skip expansions for `for`/`while` lines (body `$VAR`
+  expanded at iteration time, not parse time). Word parsing treats
+  `;` as separator.
+- No new ABI — pure `shell.zig`, ~10 bytes BSS.
+
+### Verification
+
+- Host (class A): 11 new tests (for-words, for-unset, for-empty,
+  for-missing-done, for-missing-do, while-true, while-false,
+  while-break, while-missing-done, while-missing-do, for-multi-cmd).
+  683/683 shell tests pass. `verify-unit-tests.sh` all modules green.
+  `zig build` + `zig build image` green. `zig fmt --check` clean.
 
 ## P3 — environment variables (issue #292) — done 2026-08-23
 
