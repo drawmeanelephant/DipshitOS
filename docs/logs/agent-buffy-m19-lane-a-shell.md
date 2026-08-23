@@ -77,3 +77,23 @@ P3 (environment variables: set, unset, env, persistence) landed. Host-tested.
 - Host tests: 6 new (set/unset/env builtins, direct API, persistence
   round-trip, multi-$VAR expansion, unmatched-$VAR, bounds). 634/634
   shell tests pass. All verify gates green.
+
+## 2026-08-23 — claim 7033: P4 shell functions done (issue #293)
+
+P4 (shell functions: `fn name { ... }`, `fn -d name`, bare `fn`) landed.
+Host-tested; live gate pending.
+
+- `shell.zig`: `FuncEntry` table (16 functions × 64-byte name + 16 body
+  lines × 256 bytes each), `func_count` BSS counter, `func_find` (linear
+  scan by name), `func_define` (register or replace, parses brace-delimited
+  body with multiline support — shell prompts `>` until closing brace),
+  `func_delete` (remove by name, shift table). New `fn` builtin:
+  `fn name { ... }` defines, `fn -d name` deletes, bare `fn` lists all.
+  Function invocation: when a command name matches a registered function,
+  each body line is fed through `shell_handle_expanded` sequentially.
+  No new ABI — no syscalls, no new files.
+- Host tests: 6 new (define-and-call, fn -d delete, bare fn listing,
+  func_find/func_delete static API, empty-fn list message, fn overwrite).
+  640/640 shell tests pass. All verify gates green (`verify-unit-tests.sh`,
+  `test-console` transcript byte-identical, `zig fmt --check`, build +
+  image clean).

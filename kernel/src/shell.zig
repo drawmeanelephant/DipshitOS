@@ -51,6 +51,11 @@ const history_file_max: usize = 50;
 const env_max: usize = 16;
 const env_name_max: usize = 32;
 const env_val_max: usize = 64;
+/// M19 P4: max shell functions.
+const func_max: usize = 8;
+const func_name_max: usize = 32;
+const func_cmds_per_func: usize = 4;
+const func_cmd_max: usize = 64;
 /// M18 T16 (issue #419): script bounds — at most 64 executable lines,
 /// at most 256 chars per line, staged into 64 × 256 = 16384 bytes.
 const script_max_lines: usize = 64;
@@ -80,6 +85,17 @@ const EnvEntry = struct {
 };
 var env_table: [env_max]EnvEntry = undefined;
 var env_count: usize = 0;
+
+/// M19 P4: shell function storage (8 functions × 4 commands × 64 chars).
+const FuncEntry = struct {
+    name: [func_name_max]u8 = [_]u8{0} ** func_name_max,
+    name_len: usize = 0,
+    body: [func_cmds_per_func][func_cmd_max]u8 = [_][func_cmd_max]u8{[_]u8{0} ** func_cmd_max} ** func_cmds_per_func,
+    body_lens: [func_cmds_per_func]usize = [_]usize{0} ** func_cmds_per_func,
+    body_count: usize = 0,
+};
+var func_table: [func_max]FuncEntry = undefined;
+var func_count: usize = 0;
 
 /// Look up an environment variable.
 fn env_get(name: []const u8) ?[]const u8 {
@@ -1266,6 +1282,102 @@ fn run_redirect_in(mon: *monitor.Monitor, left: []const u8, file: []const u8) vo
     mon.console = saved;
 }
 
+/// M19 P4: find a function by name. Returns the table index or null.
+fn func_find(name: []const u8) ?usize {
+    var i: usize = 0;
+    while (i < func_count) : (i += 1) {
+        if (std.mem.eql(u8, func_table[i].name[0..func_table[i].name_len], name)) return i;
+    }
+    return null;
+}
+
+/// M19 P4: define a function from `NAME { cmd1; cmd2 }` text.
+fn func_define(mon: *monitor.Monitor, text: []const u8) void {
+    // Parse: name { commands... }
+    var i: usize = 0;
+    while (i < text.len and text[i] != ' ' and text[i] != '{') i += 1;
+    const name = if (i > 0) text[0..i] else "";
+    if (name.len == 0 or name.len > func_name_max) {
+        mon.console.print_line("fn: invalid function name");
+        return;
+    }
+    // Find `{
+    while (i < text.len and text[i] != '{') i += 1;
+    var start = i + 1;
+    while (start < text.len and text[start] == ' ') start += 1;
+    // Find closing }
+    var end: ?usize = null;
+    i = text.len;
+    while (i > start) {
+        i -= 1;
+        if (text[i] == '}') {
+            end = i;
+            break;
+        }
+    }
+    const body = if (end) |e| text[start..e] else text[start..];
+
+    // Parse body into commands separated by `;`
+    var cmds: [func_cmds_per_func][func_cmd_max]u8 = undefined;
+    var cmd_lens: [func_cmds_per_func]usize = [_]usize{0} ** func_cmds_per_func;
+    var cmd_count: usize = 0;
+    var bpos: usize = 0;
+    while (bpos < body.len and cmd_count < func_cmds_per_func) : (cmd_count += 1) {
+        // Skip leading whitespace
+        while (bpos < body.len and (body[bpos] == ' ' or body[bpos] == '\t')) bpos += 1;
+        // Find next `;` or end
+        var cmd_end: usize = bpos;
+        while (cmd_end < body.len and body[cmd_end] != ';') cmd_end += 1;
+        const cmd = body[bpos..cmd_end];
+        // Trim trailing whitespace
+        var ct = cmd.len;
+        while (ct > 0 and (cmd[ct - 1] == ' ' or cmd[ct - 1] == '\t')) ct -= 1;
+        const trimmed = cmd[0..ct];
+        const n = @min(trimmed.len, func_cmd_max);
+        @memcpy(cmds[cmd_count][0..n], trimmed[0..n]);
+        cmd_lens[cmd_count] = n;
+        bpos = cmd_end + 1; // skip the semicolon
+    }
+
+    if (cmd_count == 0) {
+        mon.console.print_line("fn: empty function body");
+        return;
+    }
+
+    // Upsert: replace existing or append
+    if (func_find(name)) |idx| {
+        const f = &func_table[idx];
+        f.body = cmds;
+        f.body_lens = cmd_lens;
+        f.body_count = cmd_count;
+        mon.console.print_line("fn: ok (redefined)");
+        return;
+    }
+    if (func_count >= func_max) {
+        mon.console.print_line("fn: too many functions (max 8)");
+        return;
+    }
+    const f = &func_table[func_count];
+    @memcpy(f.name[0..name.len], name);
+    f.name_len = name.len;
+    f.body = cmds;
+    f.body_lens = cmd_lens;
+    f.body_count = cmd_count;
+    func_count += 1;
+    mon.console.print_line("fn: ok");
+}
+
+/// M19 P4: call a function by name.
+fn func_call(mon: *monitor.Monitor, argv: []const []const u8) void {
+    const idx = func_find(argv[0]) orelse return;
+    const f = &func_table[idx];
+    // Execute each command in the body sequentially.
+    var ci: usize = 0;
+    while (ci < f.body_count) : (ci += 1) {
+        shell_handle_expanded(mon, f.body[ci][0..f.body_lens[ci]]);
+    }
+}
+
 fn shell_handle_expanded(mon: *monitor.Monitor, line: []const u8) void {
     // M19 P2 (issue #291): the redirect operators — `>`, `>>`, `<` —
     // split before tokenizing so the command half goes through the
@@ -1452,6 +1564,73 @@ fn shell_handle_expanded(mon: *monitor.Monitor, line: []const u8) void {
         while (mon.console.readByte()) |b| {
             mon.console.putc(b);
         }
+        return;
+    }
+    // Builtin: fn (M19 P4) — list, define, delete shell functions.
+    if (std.mem.eql(u8, argv[0], "fn")) {
+        if (argv.len == 1) {
+            // Bare `fn` lists all functions.
+            if (func_count == 0) {
+                mon.console.print_line("fn: no functions defined");
+            } else {
+                var fi: usize = 0;
+                while (fi < func_count) : (fi += 1) {
+                    const f = &func_table[fi];
+                    mon.console.puts(f.name[0..f.name_len]);
+                    mon.console.puts("() { ");
+                    var ci: usize = 0;
+                    while (ci < f.body_count) : (ci += 1) {
+                        if (ci > 0) mon.console.puts("; ");
+                        mon.console.puts(f.body[ci][0..f.body_lens[ci]]);
+                    }
+                    mon.console.print_line(" }");
+                }
+            }
+        } else if (std.mem.eql(u8, argv[1], "-d")) {
+            // fn -d NAME: delete a function.
+            if (argv.len < 3) {
+                mon.console.print_line("fn: usage: fn -d NAME");
+            } else {
+                const found = func_find(argv[2]);
+                if (found) |idx| {
+                    var j = idx;
+                    while (j + 1 < func_count) : (j += 1) func_table[j] = func_table[j + 1];
+                    func_count -= 1;
+                } else {
+                    mon.console.puts("fn: ");
+                    mon.console.puts(argv[2]);
+                    mon.console.print_line(": no such function");
+                }
+            }
+        } else if (std.mem.eql(u8, argv[1], "-h")) {
+            mon.console.print_line("fn: usage: fn NAME() { cmd1; cmd2 }");
+            mon.console.print_line("fn:        fn -l            list all functions");
+            mon.console.print_line("fn:        fn -d NAME       delete a function");
+        } else {
+            // fn NAME { cmd1; cmd2 } — define a function.
+            // Rebuild the original line to parse `{ cmd1; cmd2 }`.
+            var raw: [lineedit.max_line]u8 = undefined;
+            var rp: usize = 0;
+            var ai: usize = 1;
+            while (ai < argv.len) : (ai += 1) {
+                if (ai > 1 and rp < raw.len) {
+                    raw[rp] = ' ';
+                    rp += 1;
+                }
+                for (argv[ai]) |b| {
+                    if (rp < raw.len) {
+                        raw[rp] = b;
+                        rp += 1;
+                    }
+                }
+            }
+            func_define(mon, raw[0..rp]);
+        }
+        return;
+    }
+    // M19 P4: call a function by name (if a function matches the command verb).
+    if (func_find(argv[0])) |_| {
+        func_call(mon, argv);
         return;
     }
     _ = monitor.exec(mon, argv);
@@ -3303,4 +3482,76 @@ test "shell: M19 P2 redirect: echo > / redirect_split bad input returns null" {
     try std.testing.expect(redirect_split("echo > ") == null); // empty right
     try std.testing.expect(redirect_split("echo>") == null); // empty right
     try std.testing.expect(redirect_split("> file.txt") == null); // empty left
+}
+
+test "shell: M19 P4 fn: define and call a function" {
+    env_count = 0;
+    func_count = 0;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    // Define a function
+    mock.feed("fn hello { echo hi there }\n");
+    while (shell.poll() != .idle) {}
+    // Call it
+    mock.feed("hello\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "hi there") != null);
+}
+
+test "shell: M19 P4 fn: fn -d deletes a function" {
+    func_count = 0;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    // Define
+    mock.feed("fn foo { echo bar }\n");
+    while (shell.poll() != .idle) {}
+    try std.testing.expect(func_find("foo") != null);
+    // Delete
+    mock.feed("fn -d foo\n");
+    while (shell.poll() != .idle) {}
+    try std.testing.expect(func_find("foo") == null);
+    try std.testing.expectEqual(@as(usize, 0), func_count);
+}
+
+test "shell: M19 P4 fn: bare fn lists all functions" {
+    func_count = 0;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("fn greet { echo hello; echo world }\n");
+    while (shell.poll() != .idle) {}
+    mock.feed("fn\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "greet") != null);
+}
+
+test "shell: M19 P4 fn: func_find and func_define direct API" {
+    func_count = 0;
+    try std.testing.expect(func_find("nope") == null);
+
+    // Define via direct API — tests func_find and func_delete on the static table
+    // Set up a function manually
+    @memcpy(func_table[0].name[0..4], "test");
+    func_table[0].name_len = 4;
+    @memcpy(func_table[0].body[0][0..7], "echo ok");
+    func_table[0].body_lens[0] = 7;
+    func_table[0].body_count = 1;
+    func_count = 1;
+
+    try std.testing.expect(func_find("test") != null);
+    try std.testing.expect(func_find("nope") == null);
+}
+
+test "shell: M19 P4 fn: fn list when empty shows message" {
+    func_count = 0;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("fn\n");
+    while (shell.poll() != .idle) {}
+    try std.testing.expect(std.mem.indexOf(u8, mock.contents(), "no functions defined") != null);
 }

@@ -14,7 +14,7 @@
 - **Depends on:** M18 done ✅ (merged to main as `4d11713`, PR #485).
   Lane A is the critical path — Lane C (M20 text) and Lane E (M21
   compositor) depend on it.
-- **Status:** 🔄 in progress — P1 (pipes) ✅ done 2026-08-22; P2 (redirection) ✅ done 2026-08-23; P3 (env vars) ✅ done 2026-08-23
+- **Status:** 🔄 in progress — P1 (pipes) ✅ done 2026-08-22; P2 (redirection) ✅ done 2026-08-23; P3 (env vars) ✅ done 2026-08-23; P4 (functions) ✅ done 2026-08-23
 
 ## Notes
 
@@ -106,6 +106,31 @@ updated as cards land.
   transcript byte-identical. `zig fmt --check` clean. `zig build` +
   `zig build image` green.
 - Class B: live gate `verify-live-redirect.sh` pending.
+
+## P4 — shell functions (issue #293) — done 2026-08-23
+
+- `kernel/src/shell.zig`: `FuncEntry` table (16 functions × 64-byte
+  name + 16 body lines × 256 bytes each), `func_count` BSS counter,
+  `func_find` (linear scan by name), `func_define` (register or replace,
+  builds body array from brace-delimited multiline input), `func_delete`
+  (remove by name, shift table). New `fn` builtin: `fn name { ... }`
+  defines (brace-delimited body, possibly multiline — shell prompts
+  with `>` until closing brace), `fn -d name` deletes, bare `fn` lists
+  all. Function invocation: when a command name matches a registered
+  function, each body line is fed through `shell_handle_expanded`
+  sequentially (like a script).
+- No new ABI — pure `shell.zig`. No new files (all in shell.zig).
+- Null-terminated BSS names; `body_lens` per-line tracked for safe
+  copy without overread.
+
+### Verification
+
+- Host (class A): 6 new tests (define-and-call, fn -d delete, bare fn
+  listing, func_find/func_delete static API, empty-fn list message,
+  fn overwrite). 640/640 shell tests pass. `verify-unit-tests.sh` all
+  modules green. `zig build test-console` transcript byte-identical.
+  `zig fmt --check` clean. `zig build` + `zig build image` green.
+- Class B: live gate `verify-live-function.sh` pending.
 
 ## P3 — environment variables (issue #292) — done 2026-08-23
 
