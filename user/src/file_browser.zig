@@ -51,6 +51,15 @@ pub const preview_cols: usize = 30; // (details_area.w - 12) / 8
 pub const breadcrumb_rect = Rect.make(60, 6, 440, 12);
 pub const path_max: usize = 64;
 
+// F11: column header geometry (inside the list area, 14px tall).
+pub const header_h: u32 = 14;
+pub const col_name_x: u32 = list_area.x + 16; // after icon column
+pub const col_name_w: u32 = 120;
+pub const col_size_x: u32 = col_name_x + col_name_w;
+pub const col_size_w: u32 = 50;
+pub const col_type_x: u32 = col_size_x + col_size_w;
+pub const col_type_w: u32 = list_area.x + list_area.w - col_type_x;
+
 // ---------------------------------------------------------------------------
 // Hand-rolled string building (W^X-safe; std.fmt.bufPrint is avoided — see
 // desktop.zig claim 8877 for the FP/SIMD root cause).
@@ -92,6 +101,57 @@ fn ascii_upper(c: u8) u8 {
     return c;
 }
 
+fn ascii_lower(c: u8) u8 {
+    if (c >= 'A' and c <= 'Z') return c + 32;
+    return c;
+}
+
+// ---------------------------------------------------------------------------
+// F11: Sorting support (mirrors TOP.BIN's SortColumn pattern)
+// ---------------------------------------------------------------------------
+
+pub const SortColumn = enum { name, size, col_type };
+
+/// Case-insensitive name comparison. Returns -1 if a<b, 1 if a>b, 0 if equal.
+pub fn name_cmp_ignore_case(a: []const u8, b: []const u8) i8 {
+    const min_len = @min(a.len, b.len);
+    for (0..min_len) |i| {
+        const ca = ascii_lower(a[i]);
+        const cb = ascii_lower(b[i]);
+        if (ca < cb) return -1;
+        if (ca > cb) return 1;
+    }
+    if (a.len < b.len) return -1;
+    if (a.len > b.len) return 1;
+    return 0;
+}
+
+/// Compare two DirEntries for sorting. Returns -1 if a should come before b.
+pub fn compare_entries(a: *const DirEntry, b: *const DirEntry, col: SortColumn) i8 {
+    return switch (col) {
+        .name => {
+            // Directories sort after files when sorting by name.
+            if (a.is_dir != 0 and b.is_dir == 0) return 1;
+            if (a.is_dir == 0 and b.is_dir != 0) return -1;
+            return name_cmp_ignore_case(entry_name(a), entry_name(b));
+        },
+        .size => {
+            // Directories sort after files.
+            if (a.is_dir != 0 and b.is_dir == 0) return 1;
+            if (a.is_dir == 0 and b.is_dir != 0) return -1;
+            if (a.size < b.size) return -1;
+            if (a.size > b.size) return 1;
+            return name_cmp_ignore_case(entry_name(a), entry_name(b));
+        },
+        .col_type => {
+            // Directories first, then by name.
+            if (a.is_dir != 0 and b.is_dir == 0) return -1;
+            if (a.is_dir == 0 and b.is_dir != 0) return 1;
+            return name_cmp_ignore_case(entry_name(a), entry_name(b));
+        },
+    };
+}
+
 /// True when the name ends in `.TXT` (case-insensitive) — the files this
 /// browser opens read-only.
 pub fn is_txt_file(name: []const u8) bool {
@@ -111,6 +171,11 @@ pub fn is_bin_file(name: []const u8) bool {
         ascii_upper(s[1]) == 'B' and
         ascii_upper(s[2]) == 'I' and
         ascii_upper(s[3]) == 'N';
+}
+
+/// True when the name starts with '.' — a hidden/dotfile (F12).
+pub fn is_hidden_file(name: []const u8) bool {
+    return name.len > 0 and name[0] == '.';
 }
 
 /// Number of display rows a content slice occupies, wrapping at `cols`
@@ -314,7 +379,7 @@ pub const FileList = struct {
 
 /// Render one list row (shared by AppState.draw_list).
 fn draw_list_row(win: u32, row: usize, name: []const u8, entry: *const DirEntry, is_sel: bool) void {
-    const row_y = list_area.y + @as(u32, @intCast(row)) * list_row_h;
+    const row_y = list_area.y + header_h + @as(u32, @intCast(row)) * list_row_h;
     const row_rect = Rect.make(list_area.x, row_y, list_area.w, list_row_h);
     const bg = if (is_sel)
         ui.COLOR_ACCENT
@@ -368,6 +433,18 @@ pub const AppState = struct {
     status_msg: [24]u8 = "Ready\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00".*,
     status_len: usize = 5,
 
+    // F11: sorting state.
+    sort_column: SortColumn = .name,
+    sort_asc: bool = true,
+    sort_indices: [max_entries]usize = init: {
+        var idx: [max_entries]usize = undefined;
+        for (0..max_entries) |i| idx[i] = i;
+        break :init idx;
+    },
+
+    // F12: show/hide dotfiles (Ctrl+H toggle).
+    show_hidden: bool = true,
+
     // M20-U8: Ctrl+F filename filter. The full listing is snapshotted on
     // activation; every keystroke rebuilds `entries` from the snapshot
     // by case-insensitive substring match (real-time narrowing).
@@ -407,8 +484,8 @@ pub const AppState = struct {
         if (!self.filter_active) {
             self.filter_active = true;
             self.filter_len = 0;
-            self.shadow_count = self.entry_count;
-            for (0..self.entry_count) |i| self.shadow[i] = self.entries[i];
+            // Shadow is already populated by list_directory with the full
+            // (pre-hidden-filter) listing; no re-snapshot needed.
         } else {
             self.filter_active = false;
             self.filter_len = 0;
@@ -445,17 +522,93 @@ pub const AppState = struct {
 
     /// Rebuild the visible entries from the shadow per the filter text.
     pub fn apply_filter(self: *AppState) void {
+        // Lazily snapshot entries if shadow is empty (tests or direct mutation).
+        if (self.shadow_count == 0 and self.entry_count > 0) {
+            self.shadow_count = self.entry_count;
+            for (0..self.entry_count) |i| self.shadow[i] = self.entries[i];
+        }
         const pat = self.filter_buf[0..self.filter_len];
         var n: usize = 0;
         for (self.shadow[0..self.shadow_count]) |e| {
-            if (matches_filter(entry_name(&e), pat)) {
+            const name = entry_name(&e);
+            if (!self.show_hidden and is_hidden_file(name)) continue;
+            if (matches_filter(name, pat)) {
                 self.entries[n] = e;
                 n += 1;
                 if (n == max_entries) break;
             }
         }
         self.entry_count = n;
+        self.rebuild_sort();
         if (n > 0) self.list.select(0, n);
+    }
+
+    /// F12: toggle hidden (dotfile) visibility. Returns true on state change.
+    pub fn toggle_hidden(self: *AppState) bool {
+        self.show_hidden = !self.show_hidden;
+        // Lazily snapshot entries if shadow is empty (tests or direct mutation).
+        if (self.shadow_count == 0 and self.entry_count > 0) {
+            self.shadow_count = self.entry_count;
+            for (0..self.entry_count) |i| self.shadow[i] = self.entries[i];
+        }
+        // Rebuild from shadow (full unfiltered listing) then re-filter.
+        self.restore_shadow();
+        self.filter_hidden();
+        self.rebuild_sort();
+        if (self.filter_active) self.apply_filter();
+        self.list.select(0, self.entry_count);
+        self.sync_scroll_view();
+        self.refresh_preview();
+        return true;
+    }
+
+    /// Remove entries whose names start with '.' when show_hidden is false.
+    /// Operates in-place on self.entries; call after list_directory.
+    fn filter_hidden(self: *AppState) void {
+        if (self.show_hidden) return;
+        var n: usize = 0;
+        for (self.entries[0..self.entry_count]) |e| {
+            const name = entry_name(&e);
+            if (!is_hidden_file(name)) {
+                self.entries[n] = e;
+                n += 1;
+            }
+        }
+        self.entry_count = n;
+    }
+
+    /// F11: rebuild the sort_indices indirection layer. Uses insertion sort
+    /// (stable, matches TOP.BIN pattern).
+    pub fn rebuild_sort(self: *AppState) void {
+        // Initialize identity mapping.
+        for (0..self.entry_count) |i| self.sort_indices[i] = i;
+        // Stable insertion sort on sort_indices.
+        var i: usize = 1;
+        while (i < self.entry_count) : (i += 1) {
+            const key = self.sort_indices[i];
+            var k = i;
+            while (k > 0) {
+                const a = &self.entries[self.sort_indices[k - 1]];
+                const b = &self.entries[key];
+                const cmp = compare_entries(a, b, self.sort_column);
+                const should_swap = if (self.sort_asc) cmp > 0 else cmp < 0;
+                if (!should_swap) break;
+                self.sort_indices[k] = self.sort_indices[k - 1];
+                k -= 1;
+            }
+            self.sort_indices[k] = key;
+        }
+    }
+
+    /// F11: click a column header to sort by that column.
+    pub fn click_column(self: *AppState, col: SortColumn) void {
+        if (self.sort_column == col) {
+            self.sort_asc = !self.sort_asc;
+        } else {
+            self.sort_column = col;
+            self.sort_asc = true;
+        }
+        self.rebuild_sort();
     }
 
     /// Feed one printable byte / backspace to the active filter.
@@ -479,8 +632,11 @@ pub const AppState = struct {
         return self.current_path[0..self.current_path_len];
     }
 
-    // GH #218: keep ScrollView in sync with FileList (pixels <-> rows)
+    // GH #218: keep ScrollView in sync with FileList (pixels <-> rows).
+    // F11: the scrollable area starts below the 14px column header.
     pub fn sync_scroll_view(self: *AppState) void {
+        // Recalculate the scroll rect to exclude the column header.
+        self.scroll_view.rect = Rect.make(list_area.x, list_area.y + header_h, list_area.w, list_area.h - header_h);
         const content_h: u32 = @as(u32, @intCast(self.entry_count)) * list_row_h;
         self.scroll_view.set_content_height(content_h);
         const target: u32 = @as(u32, @intCast(self.list.scroll)) * list_row_h;
@@ -511,6 +667,11 @@ pub const AppState = struct {
             return;
         }
         self.entry_count = @intCast(res);
+        // Snapshot full (unfiltered) listing for Ctrl+F filter and F12 toggle.
+        self.shadow_count = self.entry_count;
+        for (0..self.entry_count) |i| self.shadow[i] = self.entries[i];
+        self.filter_hidden();
+        self.rebuild_sort();
         self.list.select(0, self.entry_count);
         self.sync_scroll_view();
         // Auto-load preview for the new selection (C7).
@@ -560,7 +721,7 @@ pub const AppState = struct {
         self.preview_is_binary = false;
         const sel = self.list.selected orelse return;
         if (sel >= self.entry_count) return;
-        const entry = &self.entries[sel];
+        const entry = &self.entries[self.sort_indices[sel]];
         const name = entry_name(entry);
         if (entry.is_dir != 0) return;
         // Only auto-preview .TXT; other files show (binary) placeholder via flag.
@@ -587,7 +748,7 @@ pub const AppState = struct {
     pub fn open_selected(self: *AppState) bool {
         const sel = self.list.selected orelse return false;
         if (sel >= self.entry_count) return false;
-        const entry = &self.entries[sel];
+        const entry = &self.entries[self.sort_indices[sel]];
         const name = entry_name(entry);
 
         if (entry.is_dir != 0) {
@@ -657,7 +818,7 @@ pub const AppState = struct {
     pub fn delete_selected(self: *AppState) bool {
         const sel = self.list.selected orelse return false;
         if (sel >= self.entry_count) return false;
-        const entry = &self.entries[sel];
+        const entry = &self.entries[self.sort_indices[sel]];
         const name = entry_name(entry);
         if (entry.is_dir != 0) {
             self.set_status("Is dir");
@@ -689,7 +850,7 @@ pub const AppState = struct {
     pub fn rename_selected(self: *AppState) bool {
         const sel = self.list.selected orelse return false;
         if (sel >= self.entry_count) return false;
-        const entry = &self.entries[sel];
+        const entry = &self.entries[self.sort_indices[sel]];
         const name = entry_name(entry);
         if (entry.is_dir != 0) {
             self.set_status("Is dir");
@@ -786,6 +947,24 @@ pub const AppState = struct {
         ui.draw_rect(win, list_area, ui.COLOR_SURFACE);
         ui.draw_rect_outline(win, list_area, 1, ui.COLOR_BORDER);
 
+        // F11: draw column headers at the top of the list area.
+        const hdr_rect = Rect.make(list_area.x, list_area.y, list_area.w, header_h);
+        ui.draw_rect(win, hdr_rect, ui.COLOR_BTN_IDLE);
+        ui.draw_rect_outline(win, hdr_rect, 1, ui.COLOR_BORDER);
+
+        const ind: []const u8 = if (self.sort_asc) " ^" else " v";
+        ui.draw_text(win, "Name", col_name_x, list_area.y + 3, ui.COLOR_TEXT_PRIMARY);
+        ui.draw_text(win, "Size", col_size_x, list_area.y + 3, ui.COLOR_TEXT_PRIMARY);
+        ui.draw_text(win, "Type", col_type_x, list_area.y + 3, ui.COLOR_TEXT_PRIMARY);
+        // Draw sort indicator next to the active column.
+        const ind_x: u32 = switch (self.sort_column) {
+            .name => col_name_x + 4 * glyph_w,
+            .size => col_size_x + 4 * glyph_w,
+            .col_type => col_type_x + 4 * glyph_w,
+        };
+        ui.draw_text(win, ind, ind_x, list_area.y + 3, ui.COLOR_ACCENT);
+
+        // Draw file rows below the header.
         const vis = self.list.visible_rows();
         var i = self.list.scroll;
         var row: usize = 0;
@@ -793,7 +972,8 @@ pub const AppState = struct {
             i += 1;
             row += 1;
         }) {
-            const entry = &self.entries[i];
+            const idx = self.sort_indices[i];
+            const entry = &self.entries[idx];
             const name = entry_name(entry);
             const is_sel = if (self.list.selected) |s| s == i else false;
             draw_list_row(win, row, name, entry, is_sel);
@@ -811,7 +991,7 @@ pub const AppState = struct {
             return;
         };
         if (sel >= self.entry_count) return;
-        const entry = &self.entries[sel];
+        const entry = &self.entries[self.sort_indices[sel]];
         const name = entry_name(entry);
 
         ui.draw_text(win, "Size", details_area.x + 6, details_area.y + 6, ui.COLOR_TEXT_MUTED);
@@ -938,7 +1118,24 @@ pub const AppState = struct {
                 // Click in breadcrumb but missed segment — ignore.
                 return false;
             }
-            const changed = self.list.click(ev.arg0, ev.arg1, self.entry_count);
+            // F11: column header click sorts by that column.
+            const hdr_y = list_area.y;
+            if (ev.arg1 >= hdr_y and ev.arg1 < hdr_y + header_h and
+                ev.arg0 >= list_area.x and ev.arg0 < list_area.x + list_area.w)
+            {
+                if (ev.arg0 >= col_name_x and ev.arg0 < col_name_x + col_name_w) {
+                    self.click_column(.name);
+                } else if (ev.arg0 >= col_size_x and ev.arg0 < col_size_x + col_size_w) {
+                    self.click_column(.size);
+                } else if (ev.arg0 >= col_type_x) {
+                    self.click_column(.col_type);
+                }
+                self.list.select(0, self.entry_count);
+                self.refresh_preview();
+                return true;
+            }
+            // Offset y by header height so row 0 maps to the first file row.
+            const changed = self.list.click(ev.arg0, ev.arg1 +% header_h, self.entry_count);
             if (changed) {
                 self.sync_scroll_view();
                 self.refresh_preview();
@@ -976,6 +1173,20 @@ pub const AppState = struct {
         // M20-U8: Ctrl+F toggles the filename filter bar.
         if ((ev.flags & ui.MOD_CTRL) != 0 and keycode == 0x09) {
             return self.toggle_filter();
+        }
+
+        // F12: Ctrl+H toggles hidden (dotfile) visibility.
+        if ((ev.flags & ui.MOD_CTRL) != 0 and keycode == 0x0B) {
+            self.set_status(if (self.show_hidden) "Hidden off" else "Hidden on");
+            return self.toggle_hidden();
+        }
+
+        // F16: Ctrl+Shift+C copies the current path to the clipboard.
+        if ((ev.flags & ui.MOD_CTRL) != 0 and (ev.flags & ui.MOD_SHIFT) != 0 and keycode == 0x06) {
+            _ = ui.clipboard_set(self.current_path_slice());
+            self.set_status("Path copied");
+            ui.write_console("file: clipboard path copied\n");
+            return true;
         }
 
         // While the filter is active, typing narrows the list and Escape
@@ -1422,4 +1633,118 @@ test "file: M20-U8 — letters feed the filter instead of d/r shortcuts" {
     try std.testing.expect(app.handle_keyboard_event(&Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 1, .arg0 = 0x07, .arg1 = 'd' }));
     try std.testing.expectEqual(@as(usize, 1), app.entry_count); // not deleted
     try std.testing.expectEqual(@as(usize, 1), app.filter_len);
+}
+
+test "file: F12 — is_hidden_file detects dotfiles" {
+    try std.testing.expect(is_hidden_file(".hidden"));
+    try std.testing.expect(is_hidden_file("."));
+    try std.testing.expect(!is_hidden_file("README.TXT"));
+    try std.testing.expect(!is_hidden_file("data"));
+    try std.testing.expect(!is_hidden_file(""));
+}
+
+test "file: F12 — toggle_hidden filters dotfiles in-place" {
+    var app = AppState.init();
+    app.show_hidden = true; // start with hidden visible
+    app.entry_count = 4;
+    @memcpy(app.entries[0].name[0..4], ".git");
+    app.entries[0].is_dir = 1;
+    @memcpy(app.entries[1].name[0..10], "README.TXT");
+    app.entries[1].is_dir = 0;
+    @memcpy(app.entries[2].name[0..4], ".env");
+    app.entries[2].is_dir = 0;
+    @memcpy(app.entries[3].name[0..8], "DATA.BIN");
+    app.entries[3].is_dir = 0;
+    app.list.select(0, 4);
+
+    // Toggle off: .git and .env removed, 2 entries remain.
+    try std.testing.expect(app.toggle_hidden());
+    try std.testing.expect(!app.show_hidden);
+    try std.testing.expectEqual(@as(usize, 2), app.entry_count);
+    try std.testing.expectEqualStrings("README.TXT", entry_name(&app.entries[0]));
+    try std.testing.expectEqualStrings("DATA.BIN", entry_name(&app.entries[1]));
+
+    // Toggle back on: all 4 entries restored.
+    try std.testing.expect(app.toggle_hidden());
+    try std.testing.expect(app.show_hidden);
+    try std.testing.expectEqual(@as(usize, 4), app.entry_count);
+}
+
+test "file: F12 — Ctrl+H shortcut toggles hidden visibility" {
+    var app = AppState.init();
+    app.show_hidden = true;
+    app.entry_count = 2;
+    @memcpy(app.entries[0].name[0..5], ".bash");
+    @memcpy(app.entries[1].name[0..4], "file");
+    app.list.select(0, 2);
+
+    // Ctrl+H (usage 0x0B) toggles.
+    const ev = Event{ .kind = ui.KEY_DOWN, .flags = ui.MOD_CTRL, .seq = 1, .arg0 = 0x0B, .arg1 = 0 };
+    try std.testing.expect(app.handle_keyboard_event(&ev));
+    try std.testing.expect(!app.show_hidden);
+    try std.testing.expectEqual(@as(usize, 1), app.entry_count);
+    try std.testing.expectEqualStrings("file", entry_name(&app.entries[0]));
+}
+
+test "file: F11 — compare_entries sorts by name, size, type" {
+    var a = DirEntry{ .name = [_]u8{0} ** 32, .size = 100, .is_dir = 0, .reserved = .{ 0, 0, 0 } };
+    var b = DirEntry{ .name = [_]u8{0} ** 32, .size = 50, .is_dir = 0, .reserved = .{ 0, 0, 0 } };
+    @memcpy(a.name[0..5], "B.TXT");
+    @memcpy(b.name[0..5], "A.TXT");
+    // Name sort: A before B
+    try std.testing.expectEqual(@as(i8, -1), compare_entries(&b, &a, .name));
+    try std.testing.expectEqual(@as(i8, 1), compare_entries(&a, &b, .name));
+    // Size sort: 50 before 100
+    try std.testing.expectEqual(@as(i8, -1), compare_entries(&b, &a, .size));
+    try std.testing.expectEqual(@as(i8, 1), compare_entries(&a, &b, .size));
+    // Directories sort after files in name and size, before files in col_type
+    var dir = DirEntry{ .name = [_]u8{0} ** 32, .size = 0, .is_dir = 1, .reserved = .{ 0, 0, 0 } };
+    @memcpy(dir.name[0..3], "DIR");
+    try std.testing.expectEqual(@as(i8, 1), compare_entries(&dir, &a, .name)); // dir after file
+    try std.testing.expectEqual(@as(i8, -1), compare_entries(&dir, &a, .col_type)); // dir before file
+}
+
+test "file: F11 — click_column toggles direction and rebuilds sort" {
+    var app = AppState.init();
+    app.entry_count = 3;
+    @memcpy(app.entries[0].name[0..5], "C.TXT");
+    app.entries[0].size = 30;
+    @memcpy(app.entries[1].name[0..5], "A.TXT");
+    app.entries[1].size = 10;
+    @memcpy(app.entries[2].name[0..5], "B.TXT");
+    app.entries[2].size = 20;
+    app.rebuild_sort();
+
+    // Default sort: name ascending -> A, B, C (indices 1, 2, 0)
+    try std.testing.expectEqual(@as(usize, 1), app.sort_indices[0]);
+    try std.testing.expectEqual(@as(usize, 2), app.sort_indices[1]);
+    try std.testing.expectEqual(@as(usize, 0), app.sort_indices[2]);
+
+    // Click size column -> size ascending: A(10), B(20), C(30)
+    app.click_column(.size);
+    try std.testing.expect(app.sort_asc);
+    try std.testing.expectEqual(@as(usize, 1), app.sort_indices[0]);
+    try std.testing.expectEqual(@as(usize, 2), app.sort_indices[1]);
+    try std.testing.expectEqual(@as(usize, 0), app.sort_indices[2]);
+
+    // Click size again -> size descending: C(30), B(20), A(10)
+    app.click_column(.size);
+    try std.testing.expect(!app.sort_asc);
+    try std.testing.expectEqual(@as(usize, 0), app.sort_indices[0]);
+    try std.testing.expectEqual(@as(usize, 2), app.sort_indices[1]);
+    try std.testing.expectEqual(@as(usize, 1), app.sort_indices[2]);
+}
+
+test "file: F11 — name_cmp_ignore_case is case-insensitive" {
+    try std.testing.expectEqual(@as(i8, 0), name_cmp_ignore_case("README.TXT", "readme.txt"));
+    try std.testing.expectEqual(@as(i8, -1), name_cmp_ignore_case("a.txt", "B.txt"));
+    try std.testing.expectEqual(@as(i8, 1), name_cmp_ignore_case("Z.txt", "a.txt"));
+}
+
+test "file: F16 — Ctrl+Shift+C shortcut sets clipboard path" {
+    var app = AppState.init();
+    // Ctrl+Shift+C (Ctrl=0x02, Shift=0x01, usage 'c'=0x06)
+    const ev = Event{ .kind = ui.KEY_DOWN, .flags = ui.MOD_CTRL | ui.MOD_SHIFT, .seq = 1, .arg0 = 0x06, .arg1 = 'C' };
+    try std.testing.expect(app.handle_keyboard_event(&ev));
+    try std.testing.expectEqualStrings("Path copied", app.status_msg[0..app.status_len]);
 }
