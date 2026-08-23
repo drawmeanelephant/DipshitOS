@@ -180,3 +180,16 @@ P12 (loop constructs: for/while with break/continue) landed. Host-tested.
   unsets after. `run_while` evaluates condition, loops while exit=0.
   `handle_line` skips expansions for for/while lines.
 - Host tests: 11 new. 683/683 shell tests pass. All verify gates green.
+
+## 2026-08-23 — claim 7033: P13 here-documents done (issue #302)
+
+P13 (here-documents: `cmd <<DELIM ... DELIM`) landed. Host-tested.
+
+- `shell.zig`: `heredoc_active`, `heredoc_delim`, `heredoc_buf` (4 KiB),
+  `heredoc_cmd` module-level state. `heredoc_max_lines = 64`.
+  `handle_line` detects `<<DELIM` before expansions, enters collection
+  mode. Each subsequent `handle_line` appends to buffer until delimiter
+  found. Quoted `"DELIM"` disables `$VAR` expansion. On delimiter:
+  optionally expands vars, feeds content via `redirect.feed_console`.
+  Trailing newline added after last line.
+- Host tests: 6 new. 689/689 shell tests pass. All verify gates green.
