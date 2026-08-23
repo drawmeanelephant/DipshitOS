@@ -4873,6 +4873,37 @@ fn cmd_exec(m: *Monitor, args: []const []const u8) ExecError {
             m.console.print_line("image leaves no room for the argv block (256 bytes)");
             return .invalid_argument;
         },
+        // M22 D1 (issue #324): honest ELF refusals.
+        .bad_elf => {
+            err_prefix(m);
+            m.console.puts(name);
+            m.console.print_line(": not a valid ELF file");
+            return .invalid_argument;
+        },
+        .unsupported_arch => {
+            err_prefix(m);
+            m.console.puts(name);
+            m.console.print_line(": unsupported architecture (AArch64 only)");
+            return .invalid_argument;
+        },
+        .no_pt_load => {
+            err_prefix(m);
+            m.console.puts(name);
+            m.console.print_line(": no PT_LOAD segments");
+            return .invalid_argument;
+        },
+        .too_many_segments => {
+            err_prefix(m);
+            m.console.puts(name);
+            m.console.print_line(": too many segments (max 2)");
+            return .invalid_argument;
+        },
+        .segment_too_large => {
+            err_prefix(m);
+            m.console.puts(name);
+            m.console.print_line(": segment too large or bad segment layout");
+            return .invalid_argument;
+        },
     }
 }
 

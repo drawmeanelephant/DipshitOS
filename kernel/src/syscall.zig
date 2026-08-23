@@ -1375,6 +1375,8 @@ fn handle_exec(args: Args, _: *exceptions.VectorFrame) u64 {
             break :blk @as(u64, if (esp_exec.last_exec_pid()) |new_pid| @intCast(new_pid) else 0);
         },
         .no_disk, .too_large, .bad_magic, .bad_entry, .no_args_room, .too_many_args => error_result(.einval),
+        // M22 D1 (issue #324): ELF refusals are the caller's bad image.
+        .bad_elf, .unsupported_arch, .no_pt_load, .too_many_segments, .segment_too_large => error_result(.einval),
         .not_found => error_result(.enoent),
         .pool_full, .out_of_memory, .table_full, .process_full => error_result(.enospc),
     };

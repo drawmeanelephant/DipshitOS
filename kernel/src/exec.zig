@@ -81,6 +81,9 @@ const file_table = @import("file_table.zig");
 // physical page allocator (claims 3972/5162).
 const alloc = @import("alloc.zig");
 const memmap = @import("memmap.zig"); // host-test fixture view (page_size + the arming view)
+// M22 D1 (issue #324): the AArch64 ELF parse/validate module — exec_file
+// sniffs the ELF magic and takes this path alongside DSK1/DSK3.
+const elf_mod = @import("elf.zig");
 
 /// Fixed load buffer: 256 KiB (64 pages). A program larger than this is
 /// rejected honestly (`too_large`). Milestone sixteen C1 (claim 3805) lifts
@@ -108,6 +111,8 @@ const dsk1_magic: u32 = 0x314b5344; // "DSK1"
 /// zero-fill). The loader maps text EL0-RO+PXN and data+bss EL0-RW+UXN+PXN.
 pub const dsk3_header_size: usize = 48;
 const dsk3_magic: u32 = 0x334b5344; // "DSK3" ("DSK2" 0x324b5344 is the handoff magic)
+/// M22 D1 (issue #324): AArch64 ELF executables ("\x7fELF", little-endian).
+const elf_magic: u32 = 0x464c457f;
 
 pub const ExecResult = enum {
     ok,
@@ -137,6 +142,19 @@ pub const ExecResult = enum {
     /// The process registry holds only live (created/running) processes —
     /// no free slot and no exited descriptor to recycle.
     process_full,
+    // M22 D1 (issue #324): honest ELF refusals, one per failure class.
+    /// Structurally invalid ELF (bad header, truncated table, entry outside
+    /// the initialized text).
+    bad_elf,
+    /// Not an AArch64 little-endian image.
+    unsupported_arch,
+    /// The file declares no PT_LOAD program headers.
+    no_pt_load,
+    /// More than two PT_LOAD segments (the loader maps text + data only).
+    too_many_segments,
+    /// A segment escapes the load bound/buffer, overlaps the other, or
+    /// breaks the W^X / placement contract.
+    segment_too_large,
 };
 
 /// The loaded program image (BSS, page-aligned so the user root can map the
@@ -253,6 +271,9 @@ pub fn exec_file(name: []const u8, args: []const []const u8) ExecResult {
     var text_size: usize = 0;
     var data_file_size: usize = 0;
     var data_mem_size: usize = 0;
+    // M22 D1: the ELF branch stages the image into the contiguous
+    // [text][data] layout itself, so the shared strip below is skipped.
+    var pre_staged = false;
     switch (magic) {
         dsk1_magic => {
             entry_off = std.mem.readInt(u64, program[8..16], .little);
@@ -274,6 +295,27 @@ pub fn exec_file(name: []const u8, args: []const []const u8) ExecResult {
                 },
             }
         },
+        elf_magic => {
+            const image = elf_mod.parse(program[0..got]) catch |err| return elf_exec_error(err);
+            const seg0 = image.segments[0];
+            // The loader contract (elf.zig): segment 0 sits at
+            // userspace.text_va, an optional writable segment 1 directly
+            // after its memory image. Stage [text][data] contiguously —
+            // exactly the stripped DSK3 shape downstream expects. The copy
+            // is forward-safe because parse() rejects overlapping file
+            // ranges and every destination offset is below its source.
+            text_size = @intCast(seg0.mem_size);
+            std.mem.copyForwards(u8, program[0..seg0.file_size], program[seg0.file_offset..][0..seg0.file_size]);
+            if (image.segment_count == 2) {
+                const seg1 = image.segments[1];
+                data_file_size = seg1.file_size;
+                data_mem_size = seg1.mem_size;
+                std.mem.copyForwards(u8, program[text_size..][0..seg1.file_size], program[seg1.file_offset..][0..seg1.file_size]);
+            }
+            header_size = seg0.file_offset;
+            entry_off = header_size + image.entry_rel;
+            pre_staged = true;
+        },
         else => return .bad_magic,
     }
     // Claim 0826: the exec gate is GONE — a second program loads and runs
@@ -290,7 +332,11 @@ pub fn exec_file(name: []const u8, args: []const []const u8) ExecResult {
     // file-relative, so the entry VA is `text_va + (entry_offset - header)`.
     // The stripped buffer layout is [text+rodata][data] for both formats
     // (the data portion is empty for DSK1 — `data_file_size` is 0 there).
-    std.mem.copyForwards(u8, program[0 .. text_size + data_file_size], program[header_size..][0 .. text_size + data_file_size]);
+    // M22 D1: the ELF branch already staged its contiguous layout, so only
+    // the DSK header paths strip here.
+    if (!pre_staged) {
+        std.mem.copyForwards(u8, program[0 .. text_size + data_file_size], program[header_size..][0 .. text_size + data_file_size]);
+    }
     @memset(program[text_size + data_file_size ..], 0); // the rest of the staging page is padding
     // Card 3e (claim 4636): pack the argv block into the staging buffer
     // right after the content (it is copied into the process's OWN text
@@ -307,8 +353,9 @@ pub fn exec_file(name: []const u8, args: []const []const u8) ExecResult {
         // its page-aligned text region — an honest refusal (the flat DSK1
         // path keeps the claim-4636 behavior). No current DSK3 program
         // takes arguments; a later card packs argv into a reserved data
-        // tail when a DSK3 consumer needs it.
-        if (magic == dsk3_magic) return .no_args_room;
+        // tail when a DSK3 consumer needs it. M22 D1: ELF images share the
+        // refusal (their text region is fixed by the loader contract).
+        if (magic != dsk1_magic) return .no_args_room;
         const block_off = (content_len + 7) & ~@as(usize, 7);
         const page_limit = if (content_len == 0) alloc.page_size else ((content_len + alloc.page_size - 1) / alloc.page_size) * alloc.page_size;
         if (block_off + arg_block_bytes > page_limit or block_off + arg_block_bytes > exec_program_max) return .no_args_room;
@@ -433,6 +480,31 @@ pub fn exec_file(name: []const u8, args: []const []const u8) ExecResult {
     // success point so the EL0 caller can read it back.
     last_pid = proc_id;
     return .ok;
+}
+
+/// M22 D1 (issue #324): map an `elf.parse` refusal onto the exec result —
+/// one honest class per failure, matching the issue's message list.
+fn elf_exec_error(err: elf_mod.Error) ExecResult {
+    return switch (err) {
+        error.not_elf,
+        error.truncated,
+        error.bad_phdr,
+        => .bad_elf,
+        error.unsupported_class,
+        error.unsupported_endian,
+        error.unsupported_machine,
+        => .unsupported_arch,
+        error.no_load_segments => .no_pt_load,
+        error.too_many_segments => .too_many_segments,
+        error.bad_entry => .bad_entry,
+        error.segment_too_large,
+        error.overlapping_segments,
+        error.writable_text,
+        error.readable_data,
+        error.bad_text_base,
+        error.bad_data_base,
+        => .segment_too_large,
+    };
 }
 
 /// Rebuild the EL0 user root around a fresh randomized stack placement
@@ -881,6 +953,76 @@ test "exec: COUNTER.BIN loads by name with its own marker and process" {
     try std.testing.expectEqual(process.State.running, process.info(1).?.state);
     try std.testing.expectEqual(process.State.running, process.info(2).?.state);
     try std.testing.expect(process.info(1).?.text_phys != process.info(2).?.text_phys);
+}
+
+/// M22 D1 (issue #324): build a minimal but fully valid AArch64 ELF32
+/// executable — ELF header (52 B) + one PT_LOAD phdr (32 B) + code. The
+/// single segment is R+X at `elf_mod.text_base` with entry at its start.
+fn elf32_hello() [128]u8 {
+    var img = [_]u8{0} ** 128;
+    @memcpy(img[0..4], &elf_mod.magic);
+    img[4] = 1; // ELF32
+    img[5] = 1; // little-endian
+    img[6] = 1; // EV_CURRENT
+    std.mem.writeInt(u16, img[16..18], 2, .little); // e_type = EXEC
+    std.mem.writeInt(u16, img[18..20], elf_mod.em_aarch64, .little);
+    std.mem.writeInt(u32, img[20..24], 1, .little); // e_version
+    std.mem.writeInt(u32, img[24..28], @intCast(elf_mod.text_base), .little); // e_entry
+    std.mem.writeInt(u32, img[28..32], 52, .little); // e_phoff
+    std.mem.writeInt(u16, img[40..42], 52, .little); // e_ehsize
+    std.mem.writeInt(u16, img[42..44], 32, .little); // e_phentsize
+    std.mem.writeInt(u16, img[44..46], 1, .little); // e_phnum
+    std.mem.writeInt(u32, img[52..56], 1, .little); // PT_LOAD
+    std.mem.writeInt(u32, img[56..60], 84, .little); // p_offset (after headers)
+    std.mem.writeInt(u32, img[60..64], @intCast(elf_mod.text_base), .little); // p_vaddr
+    std.mem.writeInt(u32, img[68..72], 44, .little); // p_filesz (128 - 84)
+    std.mem.writeInt(u32, img[72..76], 44, .little); // p_memsz
+    std.mem.writeInt(u32, img[76..80], 5, .little); // R+X
+    const marker = "elf: loaded from the ESP\n";
+    @memcpy(img[84..][0..marker.len], marker);
+    return img;
+}
+
+test "exec: a valid AArch64 ELF32 loads through the magic-sniff path" {
+    try build_image(test_allocator);
+    defer test_allocator.free(saved_image);
+    esp.reset();
+    try std.testing.expectEqual(fat.MountResult.ok, esp.set_disk(.{ .read = &fake_read, .write = &fake_write }));
+    arm_allocator();
+    _ = mmu.build_user_root(userspace.text_va, 0x1000, 64, userspace.stack_va, 0x2000, 8192) orelse return error.TestUnexpectedResult;
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0);
+    scheduler.start();
+    try std.testing.expect(scheduler.yield_current());
+    try std.testing.expect(scheduler.yield_current());
+    try std.testing.expectEqual(@as(usize, 2), scheduler.current_id());
+    try std.testing.expect(scheduler.exit_current(7));
+    try std.testing.expect(scheduler.reap(2));
+
+    const hello = elf32_hello();
+    try std.testing.expectEqual(esp.WriteResult.ok, esp.write_file("HELLO.ELF", hello[0..]));
+    try std.testing.expectEqual(ExecResult.ok, exec_file("HELLO.ELF", &.{}));
+    const info = loaded().?;
+    try std.testing.expectEqualStrings("HELLO.ELF", info.name);
+    // content_len is the segment's memory size; the entry lands at the
+    // aperture base (entry_rel == 0 for this fixture).
+    try std.testing.expectEqual(@as(usize, 44), info.content_len);
+    try std.testing.expectEqual(userspace.text_va, info.entry_va);
+    // The staged text page carries the segment bytes, not the ELF header.
+    const proc = process.info(1).?;
+    try std.testing.expectEqualStrings("HELLO.ELF", proc.name);
+    const text_dst: [*]const u8 = @ptrFromInt(proc.text_phys);
+    try std.testing.expectEqualStrings("elf: loaded from the ESP\n", text_dst[0..25]);
+
+    // Honest refusals: an x86_64-marked image and a truncated header.
+    var x86 = elf32_hello();
+    std.mem.writeInt(u16, x86[18..20], 0x3e, .little); // EM_X86_64
+    try std.testing.expectEqual(esp.WriteResult.ok, esp.write_file("BAD.ELF", x86[0..]));
+    try std.testing.expectEqual(ExecResult.unsupported_arch, exec_file("BAD.ELF", &.{}));
+    // Truncated ELF (magic intact, header cut short) → honest refusal.
+    try std.testing.expectEqual(esp.WriteResult.ok, esp.write_file("SHORT.ELF", hello[0..40]));
+    try std.testing.expectEqual(ExecResult.bad_elf, exec_file("SHORT.ELF", &.{}));
 }
 
 test "exec: PEER.BIN loads by name — counter + peer fill the 11-slot pool" {

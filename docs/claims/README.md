@@ -89,6 +89,7 @@ CI) fails if the table drifts from the claim files.
 | [5127-m20-text-rendering-lane-c](5127-m20-text-rendering-lane-c.md) | ox-alpha (`lane-c/m20-text-rendering`) | 🔄 in progress |
 | [5227-notepad-wrap-find](5227-notepad-wrap-find.md) | buffy (`agent/buffy/m15-c5c6-notepad`) | ✅ done 2026-08-20 — `user/src/notepad.zig` soft-wrap (`TextLayout` last_space, gutter, `Line X of Y`) + `find_next`/`replace`/`replace_all` (case_sensitive=false) + `AppState` find bar (`find_active`/`find_buf`/`replace_buf`) + `draw` highlight + `handle_keyboard_event` Ctrl+F/H, host tests `soft-wrap`/`find` PASS, `verify-bss-budget` PASS `9788088/11534336` |
 | [5301-m24-calc-decompose-k1-k5](5301-m24-calc-decompose-k1-k5.md) | buffy (`agent/buffy/m24-calc-features`) | ✅ done 2026-08-22 — PR #482 |
+| [5381-m24-k6-k16-calc-features](5381-m24-k6-k16-calc-features.md) | ox-alpha (`lane-b/m24-calc-features`) | 🔄 in progress |
 | [5512-archive-march-m4-m5-trackers](5512-archive-march-m4-m5-trackers.md) | oxalpha (`agent/oxalpha/archive-march-m4-m5`) | ✅ done |
 | [5828-trim-gate-inventory](5828-trim-gate-inventory.md) | ox-alpha (`t3code/issue-265-fix`) | ✅ done (2026-08-21) |
 | [6204-audit-2026-maintenance](6204-audit-2026-maintenance.md) | maintenance (`agent/maintenance/audit-2026-issues`) | 🔄 agent/maintenance/audit-2026-issues |
@@ -103,6 +104,7 @@ CI) fails if the table drifts from the claim files.
 | [9090-status-compress](9090-status-compress.md) | muse-spark (`agent/buffy/status-compress`) | ✅ done |
 | [9091-calc-history](9091-calc-history.md) | buffy (`agent/buffy/m15-c9-calc-history`) | ✅ done 2026-08-21 — `user/src/calc.zig` history + keyboard (`history_max 10` ring `HistoryEntry [32]u8+result`, `history_area 8,8,239,60` 6 visible @10px with `^`/`v` scroll, `display_rect 8,72,239,28` below history, buttons y+64 shift, `push_history_entry`/`record_history_from_engine`/`history_up`/`history_down`/`get_history_entry`, `draw` history + indicator, `handle_mouse_events` evaluate records `pending/a/b → history`, `handle_keyboard_event` complete surface digits `0-9`, ops `+-*/%`, `.` no-op, `Enter` `0x28`/`=` evaluate+record, `Backspace` `0x08`/`0x2a`, `Esc` `0x29`/`0x1b` clear, `Up` `0x52`/`Down` `0x51` cycle, `m` MR, `c` clear, BODMAS documented). Host tests 22/22 PASS (3 new: ring wrap/scroll, Up/Down cycle+keys, AppState 1744 <4KiB), `zig build` PASS `CALC.BIN 8153` (+2324B), `verify-bss-budget` PASS `9788088/11534336`. |
 | [9697-dock](9697-dock.md) | buffy (`agent/buffy/m15-c4-dock`) | ✅ done 2026-08-20 — `driving_award.zig:107` `Kind.dock` + `dock_*` BSS + `arm` window 253 + `paint` dock bar + `pointer_tick` dock launch/raise + `image/apps.txt` `dock=true` (5 apps) + `desktop.zig:27` `dock` parse, host tests `arm` 5→`count` + `hit_test` + `user_open` + `syscall` `win_query` + `monitor` `resources` update, `verify-bss-budget` PASS `9788k/11534k` |
+| [9815-m22-dev-tools-lane](9815-m22-dev-tools-lane.md) | ox-alpha (`lane-d/m22-dev-tools`) | 🔄 in progress |
 | [9867-m18-t1-scrollback](9867-m18-t1-scrollback.md) | buffy (`agent/buffy/m18-t1-scrollback`) | ✅ done 2026-08-22 |
 <!-- CLAIMS_INDEX:END -->
 

@@ -157,6 +157,12 @@ pub const CalcEngine = struct {
         self.is_entering_val = false;
     }
 
+    /// Raise the error state from the caller layer (K7 domain errors:
+    /// asin/acos out of range, tan at cos = 0).
+    pub fn raise_error(self: *CalcEngine) void {
+        self.fail();
+    }
+
     pub fn clear(self: *CalcEngine) void {
         self.accum = 0;
         self.current_val = 0;
@@ -237,6 +243,95 @@ pub fn format_i64(val: i64, out: []u8) []const u8 {
         pos += 1;
     }
     return out[0..pos];
+}
+
+/// Scientific notation with 6 significant digits — K6.
+/// `d.ddddd e+NN` / `d.ddd e-NN`; trailing zeros are stripped from the
+/// fraction and the exponent is never zero-padded (`1.23e+4`, not
+/// `1.23000e+04`). Mantissa digits are truncated (not rounded) at 6 sig
+/// figs so the display never double-rounds a longer value upward.
+pub fn format_sci(val: f64, out: []u8) []const u8 {
+    if (val == 0) {
+        out[0] = '0';
+        return out[0..1];
+    }
+
+    var pos: usize = 0;
+    if (out.len < 8) return out[0..0]; // need room for "-d e+NN" minimum
+
+    var m = @abs(val);
+    if (val < 0) {
+        if (pos < out.len) {
+            out[pos] = '-';
+            pos += 1;
+        }
+    }
+
+    // Normalize to [1, 10) by power-of-10 steps.
+    var exp: i32 = 0;
+    while (m >= 10.0) : (exp += 1) m /= 10.0;
+    while (m < 1.0) : (exp -= 1) m *= 10.0;
+
+    // Truncate to 6 significant digits as an integer 100000..999999.
+    var scaled: u64 = @intFromFloat(m * 100000.0);
+    if (scaled > 999_999) scaled = 999_999;
+
+    // Emit d.dddd, stripping trailing zeros (and a bare '.').
+    var digits: [6]u8 = undefined;
+    var di: usize = 6;
+    while (di > 0) {
+        di -= 1;
+        digits[di] = @as(u8, @intCast(scaled % 10)) + '0';
+        scaled /= 10;
+    }
+    var frac_end: usize = 6;
+    while (frac_end > 1 and digits[frac_end - 1] == '0') frac_end -= 1;
+
+    out[pos] = digits[0];
+    pos += 1;
+    if (frac_end > 1) {
+        out[pos] = '.';
+        pos += 1;
+        const fc = frac_end - 1;
+        @memcpy(out[pos .. pos + fc], digits[1..frac_end]);
+        pos += fc;
+    }
+
+    // Exponent: sign + minimal decimal digits.
+    out[pos] = 'e';
+    pos += 1;
+    const eneg = exp < 0;
+    var eabs: u32 = @intCast(if (eneg) -exp else exp);
+    if (eneg) {
+        out[pos] = '-';
+        pos += 1;
+    } else {
+        out[pos] = '+';
+        pos += 1;
+    }
+    var etmp: [10]u8 = undefined;
+    var en: usize = 0;
+    while (true) {
+        etmp[en] = @as(u8, @intCast(eabs % 10)) + '0';
+        en += 1;
+        eabs /= 10;
+        if (eabs == 0) break;
+    }
+    var ei: usize = en;
+    while (ei > 0) : (ei -= 1) {
+        out[pos] = etmp[ei - 1];
+        pos += 1;
+    }
+    return out[0..pos];
+}
+
+/// K6 auto-switch threshold — |v| >= 1e10 renders scientific even when SCI
+/// mode is off. (The issue's < 1e-4 half is unreachable for nonzero
+/// integers; format_sci covers fractional magnitudes when they exist.)
+pub fn sci_auto(v: i64) bool {
+    if (v == 0) return false;
+    const av: u64 = if (v < 0) @as(u64, @intCast(-(v + 1))) + 1 else @intCast(v);
+    return av >= 10_000_000_000;
 }
 
 // ---------------------------------------------------------------------------
