@@ -29,6 +29,7 @@ tasks / processes
   kill        terminate a running process (kernel-owned lifetime)
   mbox        per-process IPC mailbox: pending messages and drain counters
   procs       process registry: image, address space, lifecycle, exit status
+  printenv    print the shell environment (KEY=VALUE per line; M22 D7)
   ps          process status table: PID, name, state, memory footprint, CPU ticks, and executor task per live/exited process (M22 D6)
   spawn       spawn the lifecycle demo task
   strace      trace a program's syscalls: 'strace exec APP.BIN [args]' arms the tracer around an exec and prints one line per syscall; 'strace off' disarms

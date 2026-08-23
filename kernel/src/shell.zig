@@ -107,6 +107,21 @@ fn env_set(name: []const u8, val: []const u8) void {
     env_count += 1;
 }
 
+/// M22 D7 (issue #330): read access to the environment table for the
+/// monitor's `printenv` command. Returns the pair count.
+pub fn env_pair_count() usize {
+    return env_count;
+}
+
+pub const EnvPair = struct { name: []const u8, val: []const u8 };
+
+/// The i-th KEY/VALUE pair (index order), or null when out of range.
+pub fn env_pair(i: usize) ?EnvPair {
+    if (i >= env_count) return null;
+    const e = &env_table[i];
+    return .{ .name = e.name[0..e.name_len], .val = e.val[0..e.val_len] };
+}
+
 /// Expand $VAR references in a command line. Returns a stack-local buffer.
 fn env_expand(line: []const u8, out: []u8) []u8 {
     var opos: usize = 0;
@@ -1528,6 +1543,7 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "  kill        terminate a running process (kernel-owned lifetime)\n" ++
         "  mbox        per-process IPC mailbox: pending messages and drain counters\n" ++
         "  procs       process registry: image, address space, lifecycle, exit status\n" ++
+        "  printenv    print the shell environment (KEY=VALUE per line; M22 D7)\n" ++
         "  ps          process status table: PID, name, state, memory footprint, CPU ticks, and executor task per live/exited process (M22 D6)\n" ++
         "  spawn       spawn the lifecycle demo task\n" ++
         "  strace      trace a program's syscalls: 'strace exec APP.BIN [args]' arms the tracer around an exec and prints one line per syscall; 'strace off' disarms\n" ++

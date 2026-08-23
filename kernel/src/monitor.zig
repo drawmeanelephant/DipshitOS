@@ -22,7 +22,8 @@ const console = @import("console.zig");
 const esp = @import("esp.zig");
 const esp_exec = @import("exec.zig"); // claim 6783: load a user program from the ESP and enter it at EL0
 const fat = @import("fat.zig");
-const syscall_mod = @import("syscall.zig"); // claim 6420: FAT write diagnostics (last failing LBA)
+const syscall_mod = @import("syscall.zig");
+const shell = @import("shell.zig"); // claim 6420: FAT write diagnostics (last failing LBA)
 const exceptions = @import("exceptions.zig");
 const gic = @import("gic.zig");
 const handoff = @import("handoff.zig");
@@ -281,8 +282,9 @@ pub const Command = struct {
 /// 5127) grows it 53 -> 54 (`font`). Milestone twenty-two D3 (issue #326)
 /// grows it 54 -> 55 (`sym`). Milestone twenty-two D5 (issue #328)
 /// grows it 55 -> 56 (`strace`). Milestone twenty-two D6 (issue #329)
-/// grows it 56 -> 57 (`ps`).
-pub const registry_count: usize = 57; // 51 + sh/calc + `font` (M20 U1) + sym/strace/ps (M22 D3/D5/D6)
+/// grows it 56 -> 57 (`ps`). Milestone twenty-two D7 (issue #330)
+/// grows it 57 -> 58 (`printenv`).
+pub const registry_count: usize = 58; // 51 + sh/calc/font + sym/strace/ps + `printenv` (M22 D7)
 
 /// `sym <file>` reads at most this many bytes for on-disk symtab inspection
 /// (M22 D3). ELF symbol tables live near the file tail; 64 KiB covers every
@@ -344,6 +346,7 @@ fn ensure_registry() []const Command {
             .{ .name = "sound", .help = "virtio-snd transport: device DID, class, status, control-queue state, device-config counts (jacks/streams/channel-maps), re-arm; stream-state control: 'sound volume <0-100>' and 'sound mute <on|off>'", .usage = "sound [volume <0-100> | mute <on|off>]", .category = .system, .min_args = 0, .max_args = 2, .handler = cmd_sound },
             .{ .name = "text", .help = "framebuffer text: text region, cursor, scrollback ('text put <string...>' renders + flushes to the scanout; 'text clear' clears; 'text putraw' skips the trailing newline; 'text fontdebug [on|off]' missing-glyph stats)", .usage = "text [put <string...>|putraw <string...>|clear|fontdebug [on|off]]", .category = .graphics_input, .min_args = 0, .max_args = 9, .handler = cmd_text },
             .{ .name = "shutdown", .help = "request power-off", .usage = "shutdown", .category = .system, .handler = cmd_shutdown },
+            .{ .name = "printenv", .help = "print the shell environment (KEY=VALUE per line; M22 D7)", .usage = "printenv", .category = .tasks_processes, .handler = cmd_printenv },
             .{ .name = "ps", .help = "process status table: PID, name, state, memory footprint, CPU ticks, and executor task per live/exited process (M22 D6)", .usage = "ps", .category = .tasks_processes, .handler = cmd_ps },
             .{ .name = "spawn", .help = "spawn the lifecycle demo task", .usage = "spawn", .category = .tasks_processes, .handler = cmd_spawn },
             .{ .name = "sysinfo", .help = "comprehensive system and subsystem diagnostic snapshot", .usage = "sysinfo", .category = .machine_identity, .handler = cmd_sysinfo },
@@ -5053,6 +5056,25 @@ fn cmd_strace(m: *Monitor, args: []const []const u8) ExecError {
 /// data + stack + kernel-stack pages), CPU ticks (via the executor task
 /// when bound), and the task id. `procs` remains the verbose view; this is
 /// the scannable table.
+/// M22 D7 (issue #330): `printenv` — dump the shell environment table as
+/// KEY=VALUE lines via the shell module's bounded accessors.
+fn cmd_printenv(m: *Monitor, args: []const []const u8) ExecError {
+    _ = args;
+    const n = shell.env_pair_count();
+    if (n == 0) {
+        m.console.print_line("printenv: no environment variables set");
+        return .none;
+    }
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        const pair = shell.env_pair(i).?;
+        m.console.write(pair.name);
+        m.console.puts("=");
+        m.console.print_line(pair.val);
+    }
+    return .none;
+}
+
 fn cmd_ps(m: *Monitor, args: []const []const u8) ExecError {
     _ = args;
     m.console.puts("  PID  NAME                 STATE     MEM       CPU  TASK\n");

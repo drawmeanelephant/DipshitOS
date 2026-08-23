@@ -129,6 +129,7 @@ verify-coordination`, and CI) fails if it drifts from the files.
 | freebuff/can-you-review-issues-223-247-and-try-to-provide-h (planning pass for issues #223–#247) | [`freebuff-20260820-001.md`](freebuff-20260820-001.md) |
 | lane-b/m24-calc-features | [`lane-b-m24-calc-features.md`](lane-b-m24-calc-features.md) |
 | `lane-c/m20-text-rendering` | [`lane-c-m20-text-rendering.md`](lane-c-m20-text-rendering.md) |
+| `lane-d/m22-d7-printenv` | [`lane-d-m22-d7-printenv.md`](lane-d-m22-d7-printenv.md) |
 | `lane-d/m22-dev-tools` | [`lane-d-m22-dev-tools.md`](lane-d-m22-dev-tools.md) |
 | `t3code/fetch-issue-264-details` | [`t3code-fetch-issue-264-details.md`](t3code-fetch-issue-264-details.md) |
 | t3code/fix-issue-267-git-current (docs/logs hygiene) | [`t3code-fix-issue-267-git-current.md`](t3code-fix-issue-267-git-current.md) |
