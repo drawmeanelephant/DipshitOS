@@ -759,9 +759,11 @@ pub fn wrap_line(
 
     var need: u8 = 0;
     var acc: u21 = 0;
+    var cp_start: usize = 0; // byte offset of the current codepoint's lead
     var i: usize = 0;
     while (i < line.len) : (i += 1) {
         const b = line[i];
+        if (need == 0) cp_start = i;
         const cp_opt: ?u21 = blk: {
             if (need > 0) {
                 if ((b & 0xC0) != 0x80) {
@@ -798,13 +800,14 @@ pub fn wrap_line(
         };
         const cp = cp_opt orelse continue;
 
-        // Explicit zero-width space: force a break right here.
+        // Explicit zero-width space: force a break right here (the ZWSP
+        // itself belongs to neither segment).
         if (cp == 0x200B) {
             if (segs >= out.len) {
                 truncated = true;
                 break;
             }
-            out[segs] = .{ .start = seg_start, .len = i - seg_start };
+            out[segs] = .{ .start = seg_start, .len = cp_start - seg_start };
             segs += 1;
             seg_start = i + 1;
             x = 0;
@@ -837,9 +840,9 @@ pub fn wrap_line(
                 i = brk - 1; // the loop's += 1 lands on brk
                 continue;
             }
-            out[segs] = .{ .start = seg_start, .len = i - seg_start, .hard_break = true };
+            out[segs] = .{ .start = seg_start, .len = cp_start - seg_start, .hard_break = true };
             segs += 1;
-            seg_start = i;
+            seg_start = cp_start;
             x = 0;
             last_break = null;
         }
