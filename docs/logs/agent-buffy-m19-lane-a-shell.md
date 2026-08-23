@@ -36,3 +36,30 @@ P1 (pipe syscalls, slots 56/57) landed and passed on VZ.
   transcript must match byte-for-byte; a str_replace that normalized the
   fixture's line endings broke the gate — fixed by copying the emitted
   transcript over the fixture (git diff shows only the one `type` line).
+
+## 2026-08-23 — claim 7033: P2 redirection done (issue #291)
+
+P2 (I/O redirection: `>`, `>>`, `<`) landed. Host-tested; live gate pending.
+
+- New `kernel/src/redirect.zig`: 4 KiB BSS capture buffer, two console
+  adapters (`capture_console` for `>`/`>>` — captures command stdout;
+  `feed_console` for `<` — pre-loaded file feeds command stdin), two
+  file helpers (`write_captured_to_file` writes buffer via ESP or FAT,
+  `read_file_into` reads file into caller buffer from ESP or FAT).
+  Vtables built at runtime into BSS (ADR 0005).
+- `shell.zig`: `redirect_split` (finds `>`, `>>`, `<` outside double
+  quotes, returns operator kind + left/right split), inline
+  `trim_start`/`trim_end` helpers (Zig 0.16 removed
+  `std.mem.trimLeft`/`trimRight`), `run_redirect_out` (captures stdout
+  → writes to file; `>>` reads existing + appends with newline),
+  `run_redirect_in` (pre-loads file → feeds as stdin). Redirect handled
+  in `shell_handle_expanded` before pipe split; no ABI impact.
+- `tools/verify-unit-tests.sh`: added `redirect` to MODULES list.
+- Host tests: 6 redirect module tests (capture, overflow, reset, feed),
+  6 shell redirect tests (split rules for >/>>/<, whitespace trimming,
+  bad-input null). 628/628 shell tests pass. `verify-unit-tests.sh` all
+  modules green. `zig build test-console` transcript byte-identical.
+  `zig fmt --check` clean. `zig build` + `zig build image` green.
+- Zig 0.16 API note: the unused `@import("tokenizer.zig")` in
+  `redirect_split` was replaced with inline trim helpers since
+  `std.mem.trimRight`/`trimLeft` were removed in 0.16.

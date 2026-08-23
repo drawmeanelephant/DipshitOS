@@ -26,6 +26,7 @@ const fat = @import("fat.zig"); // M18 T16 (issue #419): direct FAT script reads
 const lineedit = @import("lineedit.zig");
 const tokenizer = @import("tokenizer.zig");
 const pipe = @import("pipe.zig"); // M19 P1 (issue #290): the bounded pipe behind the `|` operator
+const redirect = @import("redirect.zig"); // M19 P2 (issue #291): capture/feed adapters behind `>`, `>>`, `<`
 const monitor = @import("monitor.zig");
 const handoff = @import("handoff.zig");
 const memmap = @import("memmap.zig");
@@ -1070,7 +1071,141 @@ fn run_pipe(mon: *monitor.Monitor, left: []const u8, right: []const u8) void {
     mon.console = saved;
 }
 
+/// M19 P2 (issue #291): the kind of redirection found by `redirect_split`.
+const RedirectOp = enum { stdout_overwrite, stdout_append, stdin_file };
+const RedirectSplit = struct { left: []const u8, right: []const u8, op: RedirectOp };
+
+/// M19 P2 (issue #291): look for `>`, `>>`, or `<` outside double quotes
+/// on the line (after the first token — the command name). Returns the
+/// split of the line into the left side (the command + its args) and the
+/// right side (the filename), plus the operator kind. Returns null when
+/// no redirect operator is found.
+///
+/// The operator is matched right-to-left so `>>` is preferred over `>`.
+fn redirect_split(line: []const u8) ?RedirectSplit {
+    // Scan for `>>`, then `>`, then `<` outside quoted regions.
+    var in_quote = false;
+    var i: usize = 0;
+    while (i < line.len) : (i += 1) {
+        if (line[i] == '"') in_quote = !in_quote;
+        if (in_quote) continue;
+        if (line[i] == '>') {
+            // Check for `>>`
+            if (i + 1 < line.len and line[i + 1] == '>') {
+                const left = trim_end(line[0..i]);
+                const right = trim_start(line[i + 2 ..]);
+                if (left.len > 0 and right.len > 0) {
+                    return .{ .left = left, .right = right, .op = .stdout_append };
+                }
+                continue;
+            }
+            // Single `>`
+            const left = trim_end(line[0..i]);
+            const right = trim_start(line[i + 1 ..]);
+            if (left.len > 0 and right.len > 0) {
+                return .{ .left = left, .right = right, .op = .stdout_overwrite };
+            }
+            continue;
+        }
+        if (line[i] == '<') {
+            const left = trim_end(line[0..i]);
+            const right = trim_start(line[i + 1 ..]);
+            if (left.len > 0 and right.len > 0) {
+                return .{ .left = left, .right = right, .op = .stdin_file };
+            }
+            continue;
+        }
+    }
+    return null;
+}
+
+/// Trim trailing whitespace.
+fn trim_end(s: []const u8) []const u8 {
+    var end = s.len;
+    while (end > 0 and (s[end - 1] == ' ' or s[end - 1] == '\t')) end -= 1;
+    return s[0..end];
+}
+
+/// Trim leading whitespace.
+fn trim_start(s: []const u8) []const u8 {
+    var start: usize = 0;
+    while (start < s.len and (s[start] == ' ' or s[start] == '\t')) start += 1;
+    return s[start..];
+}
+
+/// M19 P2 (issue #291): run `cmd > file` or `cmd >> file`. The command
+/// runs with its stdout captured, then the captured content is written
+/// to the file (overwrite) or appended to the existing content (append).
+fn run_redirect_out(mon: *monitor.Monitor, left: []const u8, file: []const u8, op: RedirectOp) void {
+    redirect.reset_capture();
+    const saved = mon.console;
+    // Command: stdout → capture buffer.
+    mon.console = redirect.capture_console();
+    shell_handle_expanded(mon, left);
+    mon.console = saved;
+
+    // Now write the captured output to the file.
+    var content_to_write = redirect.captured();
+    if (op == .stdout_append) {
+        // Read existing file content, then append.
+        var existing_buf: [4096]u8 = undefined;
+        if (redirect.read_file_into(file, &existing_buf)) |existing| {
+            // Build combined: existing + newline + captured
+            var combined: [4096]u8 = undefined;
+            var pos: usize = 0;
+            const ex_take = @min(existing.len, 3968); // leave room for newline + capture
+            @memcpy(combined[pos..][0..ex_take], existing[0..ex_take]);
+            pos += ex_take;
+            // If the capture has content, prepend a newline separator
+            const cap = redirect.captured();
+            if (cap.len > 0) {
+                if (pos < combined.len) {
+                    combined[pos] = '\n';
+                    pos += 1;
+                }
+                const cap_take = @min(cap.len, combined.len - pos);
+                @memcpy(combined[pos..][0..cap_take], cap[0..cap_take]);
+                pos += cap_take;
+            }
+            content_to_write = combined[0..pos];
+        }
+    }
+
+    if (redirect.write_captured_to_file(file, content_to_write)) |err| {
+        mon.console.print_line(err);
+    }
+}
+
+/// M19 P2 (issue #291): run `cmd < file`. The file is pre-loaded, then
+/// the command runs with its stdin feeding from that content and stdout
+/// passing through to the real console.
+fn run_redirect_in(mon: *monitor.Monitor, left: []const u8, file: []const u8) void {
+    var file_buf: [4096]u8 = undefined;
+    const data = redirect.read_file_into(file, &file_buf) orelse {
+        mon.console.puts("redirect: ");
+        mon.console.puts(file);
+        mon.console.print_line(": not found or unreadable");
+        return;
+    };
+
+    const saved = mon.console;
+    mon.console = redirect.feed_console(saved, data);
+    shell_handle_expanded(mon, left);
+    mon.console = saved;
+}
+
 fn shell_handle_expanded(mon: *monitor.Monitor, line: []const u8) void {
+    // M19 P2 (issue #291): the redirect operators — `>`, `>>`, `<` —
+    // split before tokenizing so the command half goes through the
+    // normal builtin/registry path and the file half is used by the
+    // capture/feed adapters.
+    if (redirect_split(line)) |rs| {
+        switch (rs.op) {
+            .stdout_overwrite, .stdout_append => run_redirect_out(mon, rs.left, rs.right, rs.op),
+            .stdin_file => run_redirect_in(mon, rs.left, rs.right),
+        }
+        return;
+    }
     // M19 P1 (issue #290): the pipe operator — split before tokenizing so
     // both halves go through the normal builtin/registry path.
     switch (pipe_split(line)) {
@@ -2857,4 +2992,89 @@ test "shell: M19 P1 pipe: right command that ignores stdin still runs" {
     while (shell.poll() != .idle) {}
     const out = mock.contents();
     try std.testing.expect(std.mem.indexOf(u8, out, "bye\n") != null);
+}
+
+test "shell: M19 P2 redirect: redirect_split finds > and >> and < outside quotes" {
+    // >
+    {
+        const rs = redirect_split("echo hello > file.txt").?;
+        try std.testing.expectEqual(RedirectOp.stdout_overwrite, rs.op);
+        try std.testing.expectEqualStrings("echo hello", rs.left);
+        try std.testing.expectEqualStrings("file.txt", rs.right);
+    }
+    // >>
+    {
+        const rs = redirect_split("echo hello >> file.txt").?;
+        try std.testing.expectEqual(RedirectOp.stdout_append, rs.op);
+        try std.testing.expectEqualStrings("echo hello", rs.left);
+        try std.testing.expectEqualStrings("file.txt", rs.right);
+    }
+    // <
+    {
+        const rs = redirect_split("cat < file.txt").?;
+        try std.testing.expectEqual(RedirectOp.stdin_file, rs.op);
+        try std.testing.expectEqualStrings("cat", rs.left);
+        try std.testing.expectEqualStrings("file.txt", rs.right);
+    }
+    // No redirect
+    try std.testing.expect(redirect_split("echo hello") == null);
+    try std.testing.expect(redirect_split("echo \">\" inside") == null);
+    try std.testing.expect(redirect_split("") == null);
+}
+
+test "shell: M19 P2 redirect: echo hello > file captures and writes" {
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    // Arm the ESP window so write_file works
+    esp.reset();
+    _ = alloc.init(make_view(), &.{});
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0);
+    _ = scheduler.register_user(0, 0);
+    userspace.init();
+    _ = esp.add_esp_entry("KERNEL.BIN", 0x88b38, "");
+
+    mock.feed("echo redirected-content > test.out\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    // The typed input line appears once (echoed by the line editor).
+    // The echo command's output ("redirected-content") was captured and
+    // never reached the real console, so it only appears in the typed
+    // line, not as a separate output line.
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, out, "redirected-content"));
+    // Without a mounted disk, the file write fails with an error.
+    try std.testing.expect(std.mem.indexOf(u8, out, "redirect: no disk") != null);
+}
+
+test "shell: M19 P2 redirect: redirect_split prefers >> over >" {
+    const rs = redirect_split("echo hello >> file.txt").?;
+    try std.testing.expectEqual(RedirectOp.stdout_append, rs.op);
+    try std.testing.expectEqualStrings("echo hello", rs.left);
+    try std.testing.expectEqualStrings("file.txt", rs.right);
+}
+
+test "shell: M19 P2 redirect: redirect_split trims whitespace around operators" {
+    {
+        const rs = redirect_split("echo     >     file.txt").?;
+        try std.testing.expectEqualStrings("echo", rs.left);
+        try std.testing.expectEqualStrings("file.txt", rs.right);
+    }
+    {
+        const rs = redirect_split("echo>>file.txt").?;
+        try std.testing.expectEqualStrings("echo", rs.left);
+        try std.testing.expectEqualStrings("file.txt", rs.right);
+    }
+    {
+        const rs = redirect_split("cat < file.txt").?;
+        try std.testing.expectEqualStrings("cat", rs.left);
+        try std.testing.expectEqualStrings("file.txt", rs.right);
+    }
+}
+
+test "shell: M19 P2 redirect: echo > / redirect_split bad input returns null" {
+    try std.testing.expect(redirect_split(" > file.txt") == null); // empty left
+    try std.testing.expect(redirect_split("echo > ") == null); // empty right
+    try std.testing.expect(redirect_split("echo>") == null); // empty right
+    try std.testing.expect(redirect_split("> file.txt") == null); // empty left
 }
