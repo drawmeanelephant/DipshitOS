@@ -615,6 +615,108 @@ fn store_narrow_cell(cell: Cell) void {
 }
 
 // ---------------------------------------------------------------------------
+// Text measurement (M20-U12)
+// ---------------------------------------------------------------------------
+
+/// How much room a byte string needs at a given font size.
+pub const TextMetrics = struct {
+    /// Width including soft-wrap simulation: the longest RENDERED row in
+    /// pixels (never wider than the visible area).
+    width_px: usize,
+    /// Height: rendered rows (explicit newlines + wraps) × cell height.
+    height_px: usize,
+    /// Rendered row count (soft-wrapped lines count individually).
+    line_count: usize,
+    /// The widest single row in pixels before capping (diagnostics).
+    max_line_width: usize,
+};
+
+/// Measure `text` (UTF-8) as if painted into the terminal at font size
+/// `size`. Monospace means measurement is exact cell arithmetic — no
+/// pixel loop needed. Wide codepoints occupy their full two cells;
+/// combining/zero-width codepoints occupy none (matching putc_unicode).
+pub fn measure_text(text: []const u8, size: FontSize) TextMetrics {
+    const cw = size.px();
+    const ch = size.px();
+    const edge = @min(cols, virtio_gpu.fb_width / cw);
+    var x: usize = 0; // cells on current row
+    var n_rows: usize = 0;
+    var max_cells: usize = 0;
+
+    var need: u8 = 0;
+    var acc: u21 = 0;
+    for (text) |b| {
+        const cp_opt: ?u21 = blk: {
+            if (need > 0) {
+                if ((b & 0xC0) != 0x80) {
+                    need = 0;
+                    acc = 0;
+                    break :blk null; // broken byte: skip in measurement
+                }
+                need -= 1;
+                const next: u21 = (@as(u21, acc) << 6) | (b & 0x3F);
+                if (need == 0) {
+                    acc = 0;
+                    break :blk next;
+                }
+                acc = next;
+                break :blk null;
+            }
+            if (b < 0x80) break :blk b;
+            if (b >= 0xC2 and b <= 0xDF) {
+                need = 1;
+                acc = b & 0x1F;
+                break :blk null;
+            }
+            if (b >= 0xE0 and b <= 0xEF) {
+                need = 2;
+                acc = b & 0x0F;
+                break :blk null;
+            }
+            if (b >= 0xF0 and b <= 0xF4) {
+                need = 3;
+                acc = b & 0x07;
+                break :blk null;
+            }
+            break :blk null;
+        };
+        const cp = cp_opt orelse continue;
+        if (cp == '\n') {
+            if (x > max_cells) max_cells = x;
+            n_rows += 1;
+            x = 0;
+            continue;
+        }
+        if (cp == '\r' or cp == 0x08) {
+            x = if (cp == '\r') 0 else if (x > 0) x - 1 else 0;
+            continue;
+        }
+        if (cp < 0x20 or cp == 0x7F) {
+            x += 1; // invisible blank still takes a cell
+            continue;
+        }
+        const w = char_width(cp);
+        if (w == 0) continue; // combining / zero-width: no cell
+        // Wrap when the codepoint does not fit on the current row.
+        const span: usize = w;
+        if (x + span > edge) {
+            if (x > max_cells) max_cells = x;
+            n_rows += 1;
+            x = 0;
+        }
+        x += span;
+    }
+    if (x > max_cells) max_cells = x;
+    const final_rows = n_rows + @intFromBool(x > 0 or text.len == 0);
+    return .{
+        .width_px = max_cells * cw,
+        .height_px = final_rows * ch,
+        .line_count = final_rows,
+        .max_line_width = max_cells * cw,
+    };
+}
+
+// ---------------------------------------------------------------------------
 // Missing-glyph diagnostics (M20-U11)
 // ---------------------------------------------------------------------------
 
@@ -1366,6 +1468,34 @@ test "text: unknown wide codepoints stay double-wide fallback (U7)" {
     putc_unicode(0x1F984); // unicorn — not shipped
     try std.testing.expectEqual(cell_fffd, ring[cur_line][0]);
     try std.testing.expectEqual(cell_wide_cont, ring[cur_line][1]);
+}
+
+test "text: measure_text — exact monospace arithmetic (U12)" {
+    init();
+    // "hello" at small = 5 cells × 8px = 40px, one row of 8px.
+    const m = measure_text("hello", .small);
+    try std.testing.expectEqual(@as(usize, 40), m.width_px);
+    try std.testing.expectEqual(@as(usize, 40), m.max_line_width);
+    try std.testing.expectEqual(@as(usize, 1), m.line_count);
+    try std.testing.expectEqual(@as(usize, 8), m.height_px);
+    // Multi-line: explicit newline splits rows; widest wins.
+    const m2 = measure_text("hi\nhello\nhey", .small);
+    try std.testing.expectEqual(@as(usize, 40), m2.width_px);
+    try std.testing.expectEqual(@as(usize, 3), m2.line_count);
+    try std.testing.expectEqual(@as(usize, 24), m2.height_px);
+    // Font size scales linearly.
+    const m3 = measure_text("hello", .medium);
+    try std.testing.expectEqual(@as(usize, 80), m3.width_px);
+    // Wide codepoint counts two cells (中 = U+4E2D, UTF-8 E4 B8 AD).
+    const m4 = measure_text("\xe4\xb8\xad", .small);
+    try std.testing.expectEqual(@as(usize, 16), m4.width_px);
+    // Soft wrap: 81 narrow chars at medium (80-col edge) → 2 rows.
+    var long_buf: [82]u8 = undefined;
+    @memset(&long_buf, 'x');
+    long_buf[81] = 0;
+    const m5 = measure_text(long_buf[0..81], .medium);
+    try std.testing.expectEqual(@as(usize, 2), m5.line_count);
+    try std.testing.expectEqual(@as(usize, 80 * 16), m5.max_line_width);
 }
 
 test "text: an exhausted cluster pool degrades to ignoring new marks (U6)" {
