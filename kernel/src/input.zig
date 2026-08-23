@@ -882,11 +882,13 @@ pub fn take_about() bool {
     return true;
 }
 
+pub const MoveDelta = struct { dx: i32, dy: i32 };
+
 /// M21 W10: consume the Alt+arrow movement edge. Returns (dx, dy) or
 /// null if no movement is pending.
-pub fn take_move() ?struct { dx: i32, dy: i32 } {
+pub fn take_move() ?MoveDelta {
     if (move_pending_dx == 0 and move_pending_dy == 0) return null;
-    const result = .{ .dx = move_pending_dx, .dy = move_pending_dy };
+    const result = MoveDelta{ .dx = move_pending_dx, .dy = move_pending_dy };
     move_pending_dx = 0;
     move_pending_dy = 0;
     return result;
