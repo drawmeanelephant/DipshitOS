@@ -603,6 +603,28 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_desktop.step);
 
     // ------------------------------------------------------------------
+    // Guy: thirtieth ESP user program (M23 E1 — EDIT.BIN, the text editor with console split)
+    // ------------------------------------------------------------------
+    const edit_prog = b.addExecutable(.{
+        .name = "user-edit",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/edit.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    edit_prog.linker_script = b.path("user/linker.ld");
+    const edit_step = b.step("edit", "Build the thirtieth user program (zig-out/bin/EDIT.BIN)");
+    const edit_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    edit_elf2bin.addFileArg(edit_prog.getEmittedBin());
+    const edit_bin = edit_elf2bin.addOutputFileArg("EDIT.BIN");
+    edit_elf2bin.has_side_effects = true;
+    edit_elf2bin.stdio = .inherit;
+    edit_step.dependOn(&edit_elf2bin.step);
+    const install_edit = b.addInstallFileWithDir(edit_bin, .bin, "EDIT.BIN");
+    b.getInstallStep().dependOn(&install_edit.step);
+
+    // ------------------------------------------------------------------
     // Guest: eighteenth ESP user program (milestone twelve, card N1 — claim 7483)
     // TCP.BIN. Userland TCP proof program.
     // ------------------------------------------------------------------
@@ -1072,6 +1094,7 @@ pub fn build(b: *std.Build) void {
     image.addFileArg(asm_bin); // ... [ASM.BIN] (M22 D2, issue #325: thirty-first user program, the assembler)
     image.addFileArg(disas_bin); // ... [DISAS.BIN] (M22 D4, issue #327: thirty-second user program, the disassembler)
     image.addFileArg(ps_bin); // ... [PS.BIN] (M22 D6, issue #329: thirty-third user program, the process viewer)
+    image.addFileArg(edit_bin); // ... [EDIT.BIN] (M23 E1+E6, issue #507: thirty-fourth user program, the text editor with console split)
     image.has_side_effects = true;
     image.stdio = .inherit;
     image_step.dependOn(&image.step);

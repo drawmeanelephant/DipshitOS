@@ -9,3 +9,4 @@ FETCH.BIN | HTTP/1.0 Client | w
 CHAT.BIN | P2P Net Chat | m
 FILE.BIN | File Browser | b | dock=true
 SETTINGS.BIN | Settings | s | dock=true
+EDIT.BIN | Text Editor | e

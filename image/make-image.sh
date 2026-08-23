@@ -321,6 +321,8 @@ ASM_BIN="${35:-$ROOT_DIR/zig-out/bin/ASM.BIN}"
 # M22 D4 (issue #327): DISAS.BIN is a flat DSK1 program (the disassembler).
 DISAS_BIN="${36:-$ROOT_DIR/zig-out/bin/DISAS.BIN}"
 PS_BIN="${37:-$ROOT_DIR/zig-out/bin/PS.BIN}"
+# M23 E1 (issue #507): EDIT.BIN is a flat DSK1 program (text editor).
+EDIT_BIN="${38:-$ROOT_DIR/zig-out/bin/EDIT.BIN}"
 # M26 N1 (issue #399): PING.BIN is a flat DSK1 program (ICMP ping).
 PING_BIN="${39:-$ROOT_DIR/zig-out/bin/PING.BIN}"
 DISAS_ARGS=()
