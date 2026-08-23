@@ -105,6 +105,7 @@ verify-coordination`, and CI) fails if it drifts from the files.
 | `agent/buffy/m16-c3-resources` | [`agent-buffy-m16-c3-resources.md`](agent-buffy-m16-c3-resources.md) |
 | `agent/buffy/m16-c4-composition` | [`agent-buffy-m16-c4-composition.md`](agent-buffy-m16-c4-composition.md) |
 | `agent/buffy/m18-t16-scripting` | [`agent-buffy-m18-t16-scripting.md`](agent-buffy-m18-t16-scripting.md) |
+| agent/buffy/m21-compositor | [`agent-buffy-m21-compositor.md`](agent-buffy-m21-compositor.md) |
 | `agent/buffy/m24-calc-features` | [`agent-buffy-m24-calc-features.md`](agent-buffy-m24-calc-features.md) |
 | milestone nine interactive application events (claim 7463) | [`agent-buffy-m9-events.md`](agent-buffy-m9-events.md) |
 | milestone nine tracker (claim 8234) | [`agent-buffy-m9-tracker.md`](agent-buffy-m9-tracker.md) |
@@ -127,6 +128,7 @@ verify-coordination`, and CI) fails if it drifts from the files.
 | `m14-s1-clipboard`: the bounded kernel clipboard (claim 0169) | [`freebuff-20260818-002.md`](freebuff-20260818-002.md) |
 | freebuff/can-you-review-issues-223-247-and-try-to-provide-h (planning pass for issues #223–#247) | [`freebuff-20260820-001.md`](freebuff-20260820-001.md) |
 | lane-b/m24-calc-features | [`lane-b-m24-calc-features.md`](lane-b-m24-calc-features.md) |
+| `lane-c/m20-text-rendering` | [`lane-c-m20-text-rendering.md`](lane-c-m20-text-rendering.md) |
 | `lane-d/m22-dev-tools` | [`lane-d-m22-dev-tools.md`](lane-d-m22-dev-tools.md) |
 | `t3code/fetch-issue-264-details` | [`t3code-fetch-issue-264-details.md`](t3code-fetch-issue-264-details.md) |
 | t3code/fix-issue-267-git-current (docs/logs hygiene) | [`t3code-fix-issue-267-git-current.md`](t3code-fix-issue-267-git-current.md) |

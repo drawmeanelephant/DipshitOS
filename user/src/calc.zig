@@ -11,8 +11,10 @@
 //!   K5 — History persistence: save/load from FAT
 //!   K7 — Trigonometry: SIN/COS/TAN/ASIN/ACOS/ATAN, DEG/RAD toggle
 //!   K6 — Scientific notation display: SCI toggle, auto-switch at 1e10
+//!   K8 — Log/exp: LN/LOG/EXP/POW/SQRT/ABS buttons
 //!   K9 — Expression editor: EXPR toggle, type full expressions, click
 //!        history rows to edit
+//!   K10 — Clipboard: Ctrl+C result, Ctrl+Shift+C "expr = result", Ctrl+V paste
 //!
 //! Keyboard shortcuts:
 //!   Digits 0–9          → input_digit
@@ -67,6 +69,7 @@ fn resolve_def(name: []const u8) ?f64 {
     if (active_defs) |d| return d.get(name);
     return null;
 }
+const mathfn = @import("calc/mathfn.zig");
 const science = @import("calc/science.zig");
 
 // ---------------------------------------------------------------------------
@@ -74,6 +77,27 @@ const science = @import("calc/science.zig");
 // ---------------------------------------------------------------------------
 
 pub const window_id: u32 = 2;
+
+/// K10: parse a leading (optionally signed) integer out of pasted text.
+/// Tolerates trailing junk; requires at least one digit. Overflow → null
+/// rather than a silent wrap.
+pub fn parse_pasted_number(text: []const u8) ?i64 {
+    var i: usize = 0;
+    var neg = false;
+    if (i < text.len and (text[i] == '-' or text[i] == '+')) {
+        neg = text[i] == '-';
+        i += 1;
+    }
+    var v: i64 = 0;
+    var n: usize = 0;
+    while (i < text.len and text[i] >= '0' and text[i] <= '9') : (n += 1) {
+        v = std.math.mul(i64, v, 10) catch return null;
+        v = std.math.add(i64, v, text[i] - '0') catch return null;
+        i += 1;
+    }
+    if (n == 0) return null;
+    return if (neg) -v else v;
+}
 
 const pow10_tab = [_]u64{ 1, 10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000, 1000000000, 10000000000 };
 
@@ -405,6 +429,14 @@ pub const AppState = struct {
     btn_asin: Button = Button.init(Rect.make(8, 312, 56, 20), "ASIN"),
     btn_acos: Button = Button.init(Rect.make(69, 312, 56, 20), "ACOS"),
     btn_atan: Button = Button.init(Rect.make(130, 312, 56, 20), "ATAN"),
+
+    // ---- K8 log/exp buttons (standard mode, below the trig rows) ----
+    btn_ln: Button = Button.init(Rect.make(8, 338, 56, 20), "LN"),
+    btn_log: Button = Button.init(Rect.make(69, 338, 56, 20), "LOG"),
+    btn_exp: Button = Button.init(Rect.make(130, 338, 56, 20), "EXP"),
+    btn_pow: Button = Button.init(Rect.make(191, 338, 56, 20), "POW"),
+    btn_sqrt: Button = Button.init(Rect.make(8, 364, 56, 20), "SQRT"),
+    btn_abs: Button = Button.init(Rect.make(69, 364, 56, 20), "ABS"),
     // ---- K6 scientific notation toggle (standard mode, below keypad) ----
     btn_sci: Button = Button.init(Rect.make(8, 260, 56, 20), "SCI"),
 
@@ -487,6 +519,52 @@ pub const AppState = struct {
                 self.mem_any_nonzero = true;
                 break;
             }
+        }
+    }
+
+    // -------------------------------------------------------------------
+    // Clipboard (K10)
+    // -------------------------------------------------------------------
+
+    /// Copy the current result to the shared clipboard; with_expr copies
+    /// the newest history entry as "<expr> = <result>".
+    fn copy_to_clipboard(self: *const AppState, with_expr: bool) void {
+        var buf: [96]u8 = undefined;
+        _ = ui.clipboard_set(self.clipboard_payload(with_expr, &buf));
+    }
+
+    fn clipboard_payload(self: *const AppState, with_expr: bool, buf: []u8) []const u8 {
+        var pos: usize = 0;
+        if (with_expr and self.hist.len > 0) {
+            const e = self.hist.get(self.hist.len - 1);
+            const c = @min(e.len, buf.len);
+            @memcpy(buf[0..c], e.text[0..c]);
+            pos += c;
+            if (pos + 3 <= buf.len) {
+                @memcpy(buf[pos .. pos + 3], " = ");
+                pos += 3;
+            }
+        }
+        var tmp: [24]u8 = undefined;
+        const s = format_i64(self.engine.current_val, &tmp);
+        const c2 = @min(s.len, buf.len - pos);
+        @memcpy(buf[pos .. pos + c2], s[0..c2]);
+        pos += c2;
+        return buf[0..pos];
+    }
+
+    /// Paste a number from the shared clipboard into the display.
+    fn paste_from_clipboard(self: *AppState) void {
+        var buf: [64]u8 = undefined;
+        const n = ui.clipboard_get(&buf);
+        if (n <= 0) return;
+        const len: usize = @min(@as(usize, @intCast(n)), buf.len);
+        if (parse_pasted_number(buf[0..len])) |v| {
+            self.engine.current_val = v;
+            self.engine.is_entering_val = true;
+            self.engine.has_error = false;
+            self.history_cursor = null;
+            ui.write_console("calc: clip-paste\n");
         }
     }
 
@@ -639,6 +717,25 @@ pub const AppState = struct {
     /// the user is in conversion mode and types a number).
     fn sync_convert_value(self: *AppState) void {
         self.convert_value = @floatFromInt(self.engine.current_val);
+    }
+
+    // -------------------------------------------------------------------
+    // Logarithmic & exponential (K8)
+    // -------------------------------------------------------------------
+
+    /// Store a float function result, rounded to the engine's i64.
+    fn store_unary_result(self: *AppState, result: mathfn.MathError!f64) void {
+        if (result) |r| {
+            const rounded = @round(r);
+            if (!std.math.isFinite(rounded) or @abs(rounded) > 9.2e18) {
+                self.engine.raise_error();
+                return;
+            }
+            self.engine.current_val = @intFromFloat(rounded);
+            self.engine.is_entering_val = true;
+        } else |_| {
+            self.engine.raise_error();
+        }
     }
 
     // -------------------------------------------------------------------
@@ -945,7 +1042,6 @@ pub const AppState = struct {
         return row;
     }
 
-
     // -------------------------------------------------------------------
     // Draw
     // -------------------------------------------------------------------
@@ -1050,6 +1146,13 @@ pub const AppState = struct {
 
         // K14 random button
         self.btn_rand.draw(win);
+        // K8 log/exp buttons (standard mode)
+        self.btn_ln.draw(win);
+        self.btn_log.draw(win);
+        self.btn_exp.draw(win);
+        self.btn_pow.draw(win);
+        self.btn_sqrt.draw(win);
+        self.btn_abs.draw(win);
 
         // K3 conversion bar (when active, overlays the history area)
         if (self.convert_active) {
@@ -1642,6 +1745,30 @@ pub const AppState = struct {
             }
         }
 
+        // K8 log/exp buttons
+        if (!changed) {
+            const v: f64 = @floatFromInt(self.engine.current_val);
+            if (self.btn_ln.handle_event(ev)) {
+                self.store_unary_result(mathfn.ln(v));
+                changed = true;
+            } else if (self.btn_log.handle_event(ev)) {
+                self.store_unary_result(mathfn.log10(v));
+                changed = true;
+            } else if (self.btn_exp.handle_event(ev)) {
+                self.store_unary_result(mathfn.exp(v));
+                changed = true;
+            } else if (self.btn_pow.handle_event(ev)) {
+                self.engine.set_op('P');
+                changed = true;
+            } else if (self.btn_sqrt.handle_event(ev)) {
+                self.store_unary_result(mathfn.sqrt(v));
+                changed = true;
+            } else if (self.btn_abs.handle_event(ev)) {
+                self.store_unary_result(@abs(v));
+                changed = true;
+            }
+        }
+
         // K9: click a history row to edit that entry's expression
         if (!changed and (ev.kind == ui.MOUSE_DOWN or ev.kind == ui.MOUSE_UP)) {
             const x = ev.arg0;
@@ -1802,6 +1929,20 @@ pub const AppState = struct {
             } else {
                 ui.write_console("calc: prog-off\n");
             }
+            return true;
+        }
+
+        // K10: Ctrl+C copies the result; Ctrl+Shift+C copies "expr = result"
+        if (ctrl and (ascii == 'c' or ascii == 'C')) {
+            const shift = (ev.flags & ui.MOD_SHIFT) != 0;
+            self.copy_to_clipboard(shift);
+            ui.write_console(if (shift) "calc: clip-copy-expr\n" else "calc: clip-copy\n");
+            return true;
+        }
+
+        // K10: Ctrl+V pastes a number from the shared clipboard
+        if (ctrl and (ascii == 'v' or ascii == 'V')) {
+            self.paste_from_clipboard();
             return true;
         }
 
@@ -2603,6 +2744,133 @@ test "calc K9: syntax error raises ERROR state" {
     try std.testing.expectEqual(@as(i64, 5), app.engine.current_val);
 }
 
+test "calc K10: payload is the result as text" {
+    var app = AppState.init();
+    app.engine.current_val = 42;
+    var buf: [96]u8 = undefined;
+    try std.testing.expectEqualStrings("42", app.clipboard_payload(false, &buf));
+    app.engine.current_val = -7;
+    try std.testing.expectEqualStrings("-7", app.clipboard_payload(false, &buf));
+}
+
+test "calc K10: Shift payload is 'expr = result'" {
+    var app = AppState.init();
+    // Evaluate something so history has an entry
+    app.engine.current_val = 14;
+    var tmp_buf: [24]u8 = undefined;
+    const s = format_i64(2, &tmp_buf);
+    _ = s;
+    app.push_history("2+3*4", 14);
+    app.engine.current_val = 14;
+    var buf: [96]u8 = undefined;
+    const p = app.clipboard_payload(true, &buf);
+    try std.testing.expectEqualStrings("2+3*4 = 14", p);
+    // Without history, falls back to just the result
+    var empty = AppState.init();
+    empty.engine.current_val = 9;
+    var buf2: [96]u8 = undefined;
+    try std.testing.expectEqualStrings("9", empty.clipboard_payload(true, &buf2));
+}
+
+test "calc K10: parse_pasted_number" {
+    try std.testing.expectEqual(@as(?i64, 42), parse_pasted_number("42"));
+    try std.testing.expectEqual(@as(?i64, -7), parse_pasted_number("-7"));
+    try std.testing.expectEqual(@as(?i64, 5), parse_pasted_number("+5"));
+    try std.testing.expectEqual(@as(?i64, 12), parse_pasted_number("12\n"));
+    try std.testing.expectEqual(@as(?i64, null), parse_pasted_number("abc"));
+    try std.testing.expectEqual(@as(?i64, null), parse_pasted_number(""));
+    try std.testing.expectEqual(@as(?i64, null), parse_pasted_number("-"));
+    try std.testing.expectEqual(@as(?i64, null), parse_pasted_number("999999999999999999999999"));
+}
+
+test "calc K10: copy/paste chords are consumed" {
+    var app = AppState.init();
+    app.engine.current_val = 42;
+    // Ctrl+C
+    var evc = Event{ .kind = ui.KEY_DOWN, .flags = 0x04, .seq = 1, .arg0 = 0, .arg1 = 'c' };
+    try std.testing.expect(app.handle_keyboard_event(&evc));
+    // Ctrl+Shift+C
+    var evcs = Event{ .kind = ui.KEY_DOWN, .flags = 0x04 | ui.MOD_SHIFT, .seq = 2, .arg0 = 0, .arg1 = 'C' };
+    try std.testing.expect(app.handle_keyboard_event(&evcs));
+    // Ctrl+V — host clipboard stub returns 0, paste is a no-op but consumed
+    var evv = Event{ .kind = ui.KEY_DOWN, .flags = 0x04, .seq = 3, .arg0 = 0, .arg1 = 'v' };
+    try std.testing.expect(app.handle_keyboard_event(&evv));
+    // Plain c still clears (no clash)
+    app.engine.current_val = 5;
+    var evplain = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 4, .arg0 = 0, .arg1 = 'c' };
+    _ = app.handle_keyboard_event(&evplain);
+    try std.testing.expectEqual(@as(i64, 0), app.engine.current_val);
+}
+
+test "calc K8: sqrt(16) = 4 via button" {
+    var app = AppState.init();
+    app.engine.current_val = 16;
+    app.engine.is_entering_val = true;
+    tap(&app, 36, 374); // SQRT at (8,364) center
+    try std.testing.expectEqual(@as(i64, 4), app.engine.current_val);
+}
+
+test "calc K8: log(100) = 2 via button" {
+    var app = AppState.init();
+    app.engine.current_val = 100;
+    app.engine.is_entering_val = true;
+    tap(&app, 97, 348); // LOG at (69,338) center
+    try std.testing.expectEqual(@as(i64, 2), app.engine.current_val);
+}
+
+test "calc K8: ln rounds (ln(e)≈1, entered as 3)" {
+    var app = AppState.init();
+    app.engine.current_val = 3;
+    app.engine.is_entering_val = true;
+    tap(&app, 36, 348); // LN at (8,338) center; ln(3)=1.0986 → 1
+    try std.testing.expectEqual(@as(i64, 1), app.engine.current_val);
+}
+
+test "calc K8: exp(1) ≈ e rounds to 3" {
+    var app = AppState.init();
+    app.engine.current_val = 1;
+    app.engine.is_entering_val = true;
+    tap(&app, 158, 348); // EXP at (130,338) center
+    try std.testing.expectEqual(@as(i64, 3), app.engine.current_val);
+}
+
+test "calc K8: abs and domain errors" {
+    var app = AppState.init();
+    app.engine.current_val = -42;
+    app.engine.is_entering_val = true;
+    tap(&app, 97, 374); // ABS at (69,364) center
+    try std.testing.expectEqual(@as(i64, 42), app.engine.current_val);
+
+    app.engine.current_val = -5;
+    tap(&app, 36, 348); // ln(-5) → ERROR
+    try std.testing.expect(app.engine.has_error);
+}
+
+test "calc K8: POW evaluates exact integer power" {
+    var app = AppState.init();
+    // 2 POW 10 = : type 2, POW button, type 10, Enter
+    var ev2 = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 1, .arg0 = 0x03, .arg1 = '2' };
+    _ = app.handle_keyboard_event(&ev2);
+    tap(&app, 219, 348); // POW at (191,338) center
+    var ev1 = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 2, .arg0 = 0x02, .arg1 = '1' };
+    _ = app.handle_keyboard_event(&ev1);
+    var ev0 = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 3, .arg0 = 0x0d, .arg1 = '0' };
+    _ = app.handle_keyboard_event(&ev0);
+    try std.testing.expect(!app.engine.has_error);
+    var ev_eq = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 4, .arg0 = 0x28, .arg1 = '\r' };
+    _ = app.handle_keyboard_event(&ev_eq);
+    try std.testing.expectEqual(@as(i64, 1024), app.engine.current_val);
+
+    // Overflow raises ERROR: 10 POW 19
+    app.engine.clear();
+    app.engine.accum = 10;
+    app.engine.pending_op = 'P';
+    app.engine.current_val = 19;
+    app.engine.is_entering_val = true;
+    app.engine.evaluate();
+    try std.testing.expect(app.engine.has_error);
+}
+
 fn press_at(app: *AppState, x: u32, y: u32) void {
     var ev_down = Event{ .kind = ui.MOUSE_DOWN, .flags = 0, .seq = 1, .arg0 = x, .arg1 = y };
     _ = app.handle_mouse_events(&ev_down);
@@ -2867,7 +3135,6 @@ test "calc K15: unknown name and bad def raise errors" {
     _ = app.handle_keyboard_event(&evr);
     try std.testing.expect(app.engine.has_error);
 }
-
 
 test "calc K16: Ctrl+S opens stats; [1,2,3,4,5] computes" {
     var app = AppState.init();

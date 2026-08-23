@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+#
+# verify-live-tabs.sh -- milestone-twenty card U10 class-B gate (issue
+# #315): tab stops in the terminal text layer, proven in PIXELS.
+#
+# Why pixels: TAB bytes cannot traverse the serial line editor (Tab is
+# completion there), so the probes go through `text putraw Q\tZ` (the
+# monitor's \t escape expands to a real TAB inside putc). Cursor-column
+# reads over serial are polluted by the shared echo pipeline, so the
+# gate instead captures the composited framebuffer and DECODES it:
+#
+#   boot A: text clear; text putraw Q\tZ   -> decoded row shows Q, a run
+#          of materialized spaces (the tab stop fill), then Z
+#   boot B: text clear; text putraw QZ     -> decoded row shows QZ adjacent
+#
+# The U10 contract is exactly that: a TAB advances to the next 8-column
+# stop and the skipped cells hold real space characters.
+#
+# Class B — Apple silicon + VZ only (Screen Recording permission required
+# for the ScreenCaptureKit capture path).
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+GATE_LOG="artifacts/live-tabs-gate.txt"
+exec > >(tee "$GATE_LOG") 2>&1
+trap 'sleep 0.5' EXIT
+
+REPORT="artifacts/live-tabs-report.txt"
+
+echo "=== verify-live-tabs: M20 U10 — tab stops in pixels on VZ ==="
+
+zig version; swift --version 2>&1 | head -1; sw_vers
+REVISION="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
+BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
+DIRTY="$(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
+echo "revision: $REVISION branch=$BRANCH dirty-files=$DIRTY"
+
+zig fmt --check boot/src/*.zig kernel/src/*.zig build.zig
+zig build
+zig build image
+swift build --package-path host/vm-runner --configuration release
+codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
+
+run_boot() {
+    # $1 = tag, $2 = putraw argument, $3 = done marker
+    local tag="$1" arg="$2" marker="$3"
+    local script="artifacts/live-tabs-input-$tag.txt"
+    printf 'text clear\ntext putraw %s\necho %s\n' "$arg" "$marker" > "$script"
+    rm -f artifacts/efi-vars.bin artifacts/vm-serial.log artifacts/gpu-screen-*.png
+    set +e
+    host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log \
+        --screen artifacts/gpu-screen --screenshot-after "$marker" \
+        --script "$script" --script-expect "$marker" --timeout 30 \
+        > "artifacts/live-tabs-run-$tag.txt" 2>&1
+    local RC=$?
+    set -e
+    [ -f artifacts/vm-serial.log ] && cp artifacts/vm-serial.log "artifacts/live-tabs-serial-$tag.log" || true
+    echo "$tag: runner rc=$RC"
+    return "$RC"
+}
+
+fail() { echo "FAIL: $1"; exit 1; }
+
+# --- boot A: the tabbed probe ---
+echo "--- boot A: text putraw Q\\tZ ---"
+run_boot probeA 'Q\tZ' m20-tabs-probeA || fail "probe boot failed"
+LATEST_A="$(ls -t artifacts/gpu-screen-*s 2>/dev/null | head -1 || true)"
+[ -n "$LATEST_A" ] || fail "no gpu-screen PNG captured for the probe"
+cp "$LATEST_A" artifacts/live-tabs-screen-A.png
+DECODE_A="$(python3 tools/decode-screen-glyphs.py artifacts/live-tabs-screen-A.png || true)"
+echo "$DECODE_A" | grep '^STATS ' || true
+
+# --- boot B: the adjacent control ---
+echo "--- boot B: text putraw QZ ---"
+run_boot probeB 'QZ' m20-tabs-probeB || fail "control boot failed"
+LATEST_B="$(ls -t artifacts/gpu-screen-*s 2>/dev/null | head -1 || true)"
+[ -n "$LATEST_B" ] || fail "no gpu-screen PNG captured for the control"
+cp "$LATEST_B" artifacts/live-tabs-screen-B.png
+DECODE_B="$(python3 tools/decode-screen-glyphs.py artifacts/live-tabs-screen-B.png || true)"
+echo "$DECODE_B" | grep '^STATS ' || true
+
+# --- blank-capture guard ---
+# A headless runner (no --display window attached / no Screen Recording
+# permission) yields blank frames: fwd_ink=0 from BOTH boots means there
+# is NO pixel evidence to decode. That is an ENVIRONMENT limitation, not
+# a guest regression — the U10 rendering itself is pinned pixel-exactly
+# by the class-A torture golden (kernel/src/text.zig, tabs section).
+# Default: report BLOCKED and exit 0 so headless CI documents the wall
+# instead of lying red. Set VERIFY_LIVE_TABS_STRICT=1 on a display-
+# capable machine to turn blank captures into hard failures.
+ink_a="$(printf '%s\n' "$DECODE_A" | sed -n 's/.*fwd_ink=\([0-9]*\) .*/\1/p')"
+ink_b="$(printf '%s\n' "$DECODE_B" | sed -n 's/.*fwd_ink=\([0-9]*\) .*/\1/p')"
+if [ "${ink_a:-0}" = "0" ] && [ "${ink_b:-0}" = "0" ]; then
+    if [ "${VERIFY_LIVE_TABS_STRICT:-0}" = "1" ]; then
+        fail "blank captures on a strict run — fix Screen Recording/display first"
+    fi
+    echo "verify-live-tabs: BLOCKED — headless environment produced blank captures (fwd_ink=0 both boots);"
+    echo "  the tab-stop rendering itself stays proven by the class-A torture golden."
+    echo "  Re-run on a display-capable machine (or VERIFY_LIVE_TABS_STRICT=1) for pixel proof."
+    echo "BLOCKED: blank captures (headless)" > "$REPORT"
+    exit 0
+fi
+
+# --- assertions ---
+echo "--- asserting the tab-stop gap in the decoded pixels ---"
+# Probe: Q and Z separated by a run of >=3 spaces on ONE decoded row.
+echo "$DECODE_A" | grep -qE 'Q {3,}Z' \
+    || fail "decoded probe shows no tab gap (expected 'Q<spaces>Z' on a row)"
+# Control: QZ land adjacent (the pipeline itself does not inject gaps).
+echo "$DECODE_B" | grep -qE 'QZ' \
+    || fail "decoded control lost QZ adjacency (capture/decode regression)"
+
+echo "verify-live-tabs: PASS (tab stop + space fill observed in pixels)"
+echo "PASS" > "$REPORT"

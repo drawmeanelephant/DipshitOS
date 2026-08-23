@@ -92,6 +92,26 @@ var alt_tab_shift: bool = false;
 var lower_back_pending: bool = false;
 /// Arc4 #241: Ctrl+F1/F2/F3 switches workspace. 0xff = no switch pending.
 var workspace_switch_pending: u8 = 0xff;
+/// M21 W4: Alt+` cycles workspaces directly.
+var workspace_cycle_pending: bool = false;
+/// M21 W1: Ctrl+T toggles tiling mode.
+var tile_toggle_pending: bool = false;
+/// M21 W2: Ctrl+M swaps master/detail in tiled mode.
+var tile_swap_master_pending: bool = false;
+/// M21 W3: Ctrl+N minimizes the focused window.
+var minimize_pending: bool = false;
+/// M21 W6: Ctrl+Shift+M toggles maximize.
+var maximize_pending: bool = false;
+/// M21 W7: F11 toggles fullscreen.
+var fullscreen_pending: bool = false;
+/// M21 W8: Ctrl+Shift+T toggles always-on-top.
+var always_on_top_pending: bool = false;
+/// M27 G2: Ctrl+Shift+A opens about dialog.
+var about_pending: bool = false;
+/// M21 W10: Alt+arrow movement. 0xff = no movement pending.
+var move_pending_dx: i32 = 0;
+var move_pending_dy: i32 = 0;
+var move_pending_fine: bool = false;
 
 /// Diagnostic hooks (kernel/src/main.zig wires these to uart_puts/uart_hex
 /// under `--input`; null in host tests and the default VM).
@@ -372,9 +392,7 @@ pub fn decode_keyboard_report(rep: []const u8) void {
     const alt = (flags & app_events.MOD_ALT) != 0;
     kb_mods = mods;
     var keys: [6]u8 = [_]u8{0} ** 6;
-    for (rep[2..8], 0..) |k, i| keys[i] = k;
-
-    // Card U5 (ADR 0008 D4): Alt+Tab cycles window focus — the
+    for (rep[2..8], 0..) |k, i| keys[i] = k; // Card U5 (ADR 0008 D4): Alt+Tab cycles window focus — the
     // chord is consumed as a window-manager signal across all windows.
     // C2 (M15): capture Shift for reverse cycling.
     for (keys) |k| {
@@ -389,6 +407,19 @@ pub fn decode_keyboard_report(rep: []const u8) void {
             if (!held) {
                 alt_tab_pending = true;
                 alt_tab_shift = shift;
+            }
+        }
+        // M21 W4: Alt+` (backtick, usage 0x35) cycles workspaces.
+        if (k == 0x35 and alt) {
+            var held = false;
+            for (kb_held) |h| {
+                if (h == k) {
+                    held = true;
+                    break;
+                }
+            }
+            if (!held) {
+                workspace_cycle_pending = true;
             }
         }
         // Arc4 #238: Ctrl+Shift+B lowers focused window to back.
@@ -420,6 +451,121 @@ pub fn decode_keyboard_report(rep: []const u8) void {
                 }
                 if (!held) {
                     workspace_switch_pending = ws;
+                }
+            }
+            // M21 W1: Ctrl+T toggles tiling mode.
+            if (k == 0x17) { // 't' usage
+                var held = false;
+                for (kb_held) |h| {
+                    if (h == k) {
+                        held = true;
+                        break;
+                    }
+                }
+                if (!held) {
+                    tile_toggle_pending = true;
+                }
+            }
+            // M21 W2: Ctrl+M swaps master/detail in tiled mode.
+            if (k == 0x10) { // 'm' usage
+                var held = false;
+                for (kb_held) |h| {
+                    if (h == k) {
+                        held = true;
+                        break;
+                    }
+                }
+                if (!held) {
+                    tile_swap_master_pending = true;
+                }
+            }
+            // M21 W3: Ctrl+N minimizes the focused window.
+            if (k == 0x11) { // 'n' usage
+                var held = false;
+                for (kb_held) |h| {
+                    if (h == k) {
+                        held = true;
+                        break;
+                    }
+                }
+                if (!held) {
+                    minimize_pending = true;
+                }
+            }
+            // M21 W6: Ctrl+Shift+M toggles maximize.
+            if (k == 0x10 and (flags & app_events.MOD_SHIFT) != 0) { // 'm' + Shift
+                var held = false;
+                for (kb_held) |h| {
+                    if (h == k) {
+                        held = true;
+                        break;
+                    }
+                }
+                if (!held) {
+                    maximize_pending = true;
+                }
+            }
+            // M21 W8: Ctrl+Shift+T toggles always-on-top.
+            if (k == 0x17 and (flags & app_events.MOD_SHIFT) != 0) { // 't' + Shift
+                var held = false;
+                for (kb_held) |h| {
+                    if (h == k) {
+                        held = true;
+                        break;
+                    }
+                }
+                if (!held) {
+                    always_on_top_pending = true;
+                }
+            }
+            // M27 G2: Ctrl+Shift+A opens about dialog.
+            if (k == 0x04 and (flags & app_events.MOD_SHIFT) != 0) { // 'a' + Shift
+                var held = false;
+                for (kb_held) |h| {
+                    if (h == k) {
+                        held = true;
+                        break;
+                    }
+                }
+                if (!held) {
+                    about_pending = true;
+                }
+            }
+        }
+        // M21 W7: F11 (usage 0x5c) toggles fullscreen.
+        if (k == 0x5c) {
+            var held = false;
+            for (kb_held) |h| {
+                if (h == k) {
+                    held = true;
+                    break;
+                }
+            }
+            if (!held) {
+                fullscreen_pending = true;
+            }
+        }
+        // M21 W10: Alt+arrow for keyboard window movement.
+        if (alt) {
+            var dx: i32 = 0;
+            var dy: i32 = 0;
+            if (k == 0x4f) dx = 16; // Right arrow
+            if (k == 0x50) dx = -16; // Left arrow
+            if (k == 0x52) dy = -16; // Up arrow
+            if (k == 0x51) dy = 16; // Down arrow
+            if (dx != 0 or dy != 0) {
+                var held = false;
+                for (kb_held) |h| {
+                    if (h == k) {
+                        held = true;
+                        break;
+                    }
+                }
+                if (!held) {
+                    // Alt+Shift = fine movement (1px).
+                    move_pending_dx = if (shift) @divTrunc(dx, 16) else dx;
+                    move_pending_dy = if (shift) @divTrunc(dy, 16) else dy;
+                    move_pending_fine = shift;
                 }
             }
         }
@@ -678,6 +824,74 @@ pub fn take_workspace_switch() ?u8 {
     const ws = workspace_switch_pending;
     workspace_switch_pending = 0xff;
     return ws;
+}
+
+/// M21 W1: consume the Ctrl+T tiling toggle edge.
+pub fn take_tile_toggle() bool {
+    if (!tile_toggle_pending) return false;
+    tile_toggle_pending = false;
+    return true;
+}
+
+/// M21 W2: consume the Ctrl+M master swap edge.
+pub fn take_tile_swap_master() bool {
+    if (!tile_swap_master_pending) return false;
+    tile_swap_master_pending = false;
+    return true;
+}
+
+/// M21 W3: consume the Ctrl+N minimize edge.
+pub fn take_minimize() bool {
+    if (!minimize_pending) return false;
+    minimize_pending = false;
+    return true;
+}
+
+/// M21 W4: consume the Alt+` workspace cycle edge.
+pub fn take_workspace_cycle() bool {
+    if (!workspace_cycle_pending) return false;
+    workspace_cycle_pending = false;
+    return true;
+}
+
+/// M21 W6: consume the Ctrl+Shift+M maximize toggle edge.
+pub fn take_maximize() bool {
+    if (!maximize_pending) return false;
+    maximize_pending = false;
+    return true;
+}
+
+/// M21 W7: consume the F11 fullscreen toggle edge.
+pub fn take_fullscreen() bool {
+    if (!fullscreen_pending) return false;
+    fullscreen_pending = false;
+    return true;
+}
+
+/// M21 W8: consume the Ctrl+Shift+T always-on-top toggle edge.
+pub fn take_always_on_top() bool {
+    if (!always_on_top_pending) return false;
+    always_on_top_pending = false;
+    return true;
+}
+
+/// M27 G2: consume the Ctrl+Shift+A about dialog edge.
+pub fn take_about() bool {
+    if (!about_pending) return false;
+    about_pending = false;
+    return true;
+}
+
+pub const MoveDelta = struct { dx: i32, dy: i32 };
+
+/// M21 W10: consume the Alt+arrow movement edge. Returns (dx, dy) or
+/// null if no movement is pending.
+pub fn take_move() ?MoveDelta {
+    if (move_pending_dx == 0 and move_pending_dy == 0) return null;
+    const result = MoveDelta{ .dx = move_pending_dx, .dy = move_pending_dy };
+    move_pending_dx = 0;
+    move_pending_dy = 0;
+    return result;
 }
 
 // ---------------------------------------------------------------------------
