@@ -52,6 +52,18 @@ const constants = @import("calc/constants.zig");
 const expr_mod = @import("calc/expr.zig");
 
 const dates = @import("calc/dates.zig");
+
+const defs_mod = @import("calc/defs.zig");
+const Defs = defs_mod.Defs;
+
+/// K15: resolver bridge — expr.zig's float evaluator needs a plain fn
+/// pointer; the single CALC instance publishes its table here.
+var active_defs: ?*const Defs = null;
+
+fn resolve_def(name: []const u8) ?f64 {
+    if (active_defs) |d| return d.get(name);
+    return null;
+}
 const science = @import("calc/science.zig");
 
 // ---------------------------------------------------------------------------
@@ -318,6 +330,10 @@ pub const AppState = struct {
     // K14: random numbers — xorshift64* seeded from the generic timer
     rand_state: u64 = 0, // 0 = unseeded
 
+    // K15: named definitions (persisted to /data/calc_defs.txt)
+    defs: Defs = .{},
+    float_display: ?f64 = null, // exact render of a float-valued expression
+
     // ---- Standard mode buttons ----
     btn_m_store: Button = Button.init(Rect.make(8, 104, 56, 20), "MS"),
     btn_m_recall: Button = Button.init(Rect.make(69, 104, 56, 20), "MR"),
@@ -398,6 +414,8 @@ pub const AppState = struct {
         }
         // Load formatting config from FAT (K12)
         s.cfg_load();
+        // Load named definitions from FAT (K15)
+        s.defs_load();
         return s;
     }
 
@@ -688,6 +706,31 @@ pub const AppState = struct {
     }
 
     // -------------------------------------------------------------------
+    // Definitions (K15)
+    // -------------------------------------------------------------------
+
+    const defs_path = "/data/calc_defs.txt";
+
+    fn defs_load(self: *AppState) void {
+        var file_buf: [256]u8 = undefined;
+        const fd = ui.file_open(defs_path, ui.MODE_READ);
+        if (fd < 0) return;
+        const n = ui.file_read(@as(u32, @intCast(fd)), &file_buf);
+        ui.file_close(@as(u32, @intCast(fd)));
+        if (n <= 0) return;
+        self.defs.load_file_text(file_buf[0..@intCast(n)]);
+    }
+
+    fn defs_save(self: *const AppState) void {
+        var buf: [256]u8 = undefined;
+        const text = self.defs.write_file_text(&buf);
+        const fd = ui.file_open(defs_path, ui.MODE_CREATE | ui.MODE_WRITE);
+        if (fd < 0) return;
+        _ = ui.file_write(@as(u32, @intCast(fd)), text);
+        ui.file_close(@as(u32, @intCast(fd)));
+    }
+
+    // -------------------------------------------------------------------
     // Settings / formatting controls (K12)
     // -------------------------------------------------------------------
 
@@ -766,6 +809,10 @@ pub const AppState = struct {
         }
         // K12: optional thousands separator on the plain integer display
         if (self.thousands_sep) return format_thousands(v, buf);
+        // K15: exact fractional render of a float-valued expression
+        if (self.float_display) |fv| {
+            if (!self.engine.is_entering_val) return format_fixed(fv, self.dec_places, buf);
+        }
         return self.engine.format_display(buf);
     }
 
@@ -775,7 +822,8 @@ pub const AppState = struct {
 
     fn expr_append(self: *AppState, ch: u8) void {
         if (self.expr_len >= self.expr_buf.len) return;
-        if (!expr_mod.is_expr_char(ch)) return;
+        const extra = (ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or ch == '_' or ch == '=' or ch == '.';
+        if (!expr_mod.is_expr_char(ch) and !extra) return;
         self.expr_buf[self.expr_len] = ch;
         self.expr_len += 1;
     }
@@ -797,6 +845,60 @@ pub const AppState = struct {
     /// history exactly like a button-flow calculation.
     fn expr_evaluate(self: *AppState) void {
         if (self.expr_len == 0) return;
+        const text = self.expr_buf[0..self.expr_len];
+
+        // K15: "def name = expression" stores a named value
+        if (defs_mod.parse_def_command(text)) |cmd| {
+            active_defs = &self.defs;
+            defer active_defs = null;
+            const v = expr_mod.evaluate_f64(cmd.expr, resolve_def) catch {
+                self.engine.raise_error();
+                ui.write_console("calc: def-error\n");
+                return;
+            };
+            self.defs.put(cmd.name, v) catch {
+                self.engine.raise_error();
+                ui.write_console("calc: def-error\n");
+                return;
+            };
+            self.defs_save();
+            self.float_display = v;
+            self.engine.is_entering_val = false;
+            self.engine.has_error = false;
+            self.push_history(text, @intFromFloat(@round(v)));
+            self.expr_reset_input();
+            ui.write_console("calc: def-ok\n");
+            return;
+        }
+
+        // K15: identifier present -> float evaluation with definitions
+        // any letter in the expression means a definition is referenced
+        var has_ident = false;
+        for (text) |ch| {
+            if ((ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z')) {
+                has_ident = true;
+                break;
+            }
+        }
+        if (has_ident) {
+            active_defs = &self.defs;
+            defer active_defs = null;
+            const fv = expr_mod.evaluate_f64(text, resolve_def) catch {
+                self.engine.raise_error();
+                ui.write_console("calc: expr-error\n");
+                return;
+            };
+            self.engine.current_val = @intFromFloat(@round(fv));
+            self.engine.is_entering_val = false;
+            self.engine.has_error = false;
+            self.float_display = fv;
+            self.push_history(text, @intFromFloat(@round(fv)));
+            self.expr_reset_input();
+            ui.write_console("calc: expr-ok-float\n");
+            return;
+        }
+        self.float_display = null;
+
         const result = expr_mod.evaluate(self.expr_buf[0..self.expr_len]) catch {
             self.engine.raise_error();
             ui.write_console("calc: expr-error\n");
@@ -1732,11 +1834,23 @@ pub const AppState = struct {
                 ui.write_console("calc: expr-off\n");
                 return true;
             }
-            if (keycode == 0x28 or ascii == '=' or ascii == '\r' or ascii == '\n') {
+            if (ascii == '=') {
+                // inside a def line, '=' is literal text
+                const t = self.expr_buf[0..self.expr_len];
+                if (std.mem.startsWith(u8, std.mem.trim(u8, t, " "), "def")) {
+                    self.expr_append(ascii);
+                    return true;
+                }
                 self.expr_evaluate();
                 return true;
             }
-            if (!ctrl and expr_mod.is_expr_char(ascii)) {
+            if (keycode == 0x28 or ascii == '\r' or ascii == '\n') {
+                self.expr_evaluate();
+                return true;
+            }
+            if (!ctrl and (expr_mod.is_expr_char(ascii) or ascii == '.' or
+                (ascii >= 'a' and ascii <= 'z') or (ascii >= 'A' and ascii <= 'Z') or ascii == '_'))
+            {
                 self.expr_append(ascii);
                 return true;
             }
@@ -1761,6 +1875,7 @@ pub const AppState = struct {
 
         // Digits 0-9
         if (ascii >= '0' and ascii <= '9') {
+            self.float_display = null;
             self.engine.input_digit(ascii - '0');
             self.history_cursor = null;
             if (self.convert_active) self.sync_convert_value();
@@ -1827,6 +1942,7 @@ pub const AppState = struct {
         // Esc: clear all
         if (ascii == 0x1b or keycode == 0x29) {
             self.engine.clear();
+            self.float_display = null;
             self.history_cursor = null;
             return true;
         }
@@ -2579,3 +2695,72 @@ test "calc K14: r key shortcut" {
     try std.testing.expect(app.handle_keyboard_event(&ev));
     try std.testing.expect(app.engine.current_val >= 0);
 }
+
+test "calc K15: def pi = 3.14 then 2*pi displays 6.28" {
+    var app = AppState.init();
+    tap(&app, 97, 270); // EXPR on
+    for ("def pi = 3.14") |ch| {
+        var ev = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 1, .arg0 = 0, .arg1 = ch };
+        _ = app.handle_keyboard_event(&ev);
+    }
+    var evr = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 2, .arg0 = 0x28, .arg1 = '\r' };
+    _ = app.handle_keyboard_event(&evr);
+    try std.testing.expect((app.defs.get("pi") orelse 0) > 3.139 and (app.defs.get("pi") orelse 0) < 3.141);
+    try std.testing.expect(!app.engine.has_error);
+
+    // 2 * pi -> 6.28 rendered with dec_places
+    for ("2 * pi") |ch| {
+        var ev = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 3, .arg0 = 0, .arg1 = ch };
+        _ = app.handle_keyboard_event(&ev);
+    }
+    _ = app.handle_keyboard_event(&evr);
+    try std.testing.expectEqual(@as(?f64, 6.28), app.float_display);
+    var buf: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("6.28", app.display_text(&buf));
+}
+
+test "calc K15: def persistence round-trip via pure text" {
+    var app = AppState.init();
+    app.date_active = false;
+    _ = &app;
+    // store two defs through the same path the def command uses
+    app.defs.put("tax_rate", 0.08) catch unreachable;
+    app.defs.put("n", 42) catch unreachable;
+    var buf: [256]u8 = undefined;
+    const text = app.defs.write_file_text(&buf);
+
+    var fresh = AppState.init();
+    fresh.defs.load_file_text(text);
+    try std.testing.expectEqual(@as(?f64, 0.08), fresh.defs.get("tax_rate"));
+    try std.testing.expectEqual(@as(?f64, 42), fresh.defs.get("n"));
+
+    // and they resolve in expressions
+    active_defs = &fresh.defs;
+    defer active_defs = null;
+    const v = try expr_mod.evaluate_f64("100 * tax_rate", resolve_def);
+    try std.testing.expectApproxEqAbs(@as(f64, 8.0), v, 1e-9);
+}
+
+test "calc K15: unknown name and bad def raise errors" {
+    var app = AppState.init();
+    tap(&app, 97, 270);
+    for ("2 * nope") |ch| {
+        var ev = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 1, .arg0 = 0, .arg1 = ch };
+        _ = app.handle_keyboard_event(&ev);
+    }
+    var evr = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 2, .arg0 = 0x28, .arg1 = '\r' };
+    _ = app.handle_keyboard_event(&evr);
+    try std.testing.expect(app.engine.has_error);
+
+    // def without '=' fails cleanly
+    app.engine.clear();
+    app.expr_mode = true;
+    app.expr_reset_input();
+    for ("def broken") |ch| {
+        var ev = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 3, .arg0 = 0, .arg1 = ch };
+        _ = app.handle_keyboard_event(&ev);
+    }
+    _ = app.handle_keyboard_event(&evr);
+    try std.testing.expect(app.engine.has_error);
+}
+
