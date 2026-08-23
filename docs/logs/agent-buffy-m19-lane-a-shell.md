@@ -63,3 +63,17 @@ P2 (I/O redirection: `>`, `>>`, `<`) landed. Host-tested; live gate pending.
 - Zig 0.16 API note: the unused `@import("tokenizer.zig")` in
   `redirect_split` was replaced with inline trim helpers since
   `std.mem.trimRight`/`trimLeft` were removed in 0.16.
+
+## 2026-08-23 — claim 7033: P3 env vars done (issue #292)
+
+P3 (environment variables: set, unset, env, persistence) landed. Host-tested.
+
+- `shell.zig`: `env_unset` removes a variable and shifts the table;
+  `save_env` persists to ENV.TXT through the ESP window; `load_env`
+  restores on boot (no disk_ready gate — the esp.lookup path works
+  without a FAT mount, which also makes it host-testable). New builtins:
+  `set` (like `export`), `unset`, `env`. Reuses existing M18 T12
+  infrastructure (env_set/env_get/env_expand, 16-entry BSS table).
+- Host tests: 6 new (set/unset/env builtins, direct API, persistence
+  round-trip, multi-$VAR expansion, unmatched-$VAR, bounds). 634/634
+  shell tests pass. All verify gates green.
