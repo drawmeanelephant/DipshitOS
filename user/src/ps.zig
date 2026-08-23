@@ -32,9 +32,7 @@ var snap_buf: [proc_snapshot_rows * proc_row_size]u8 = undefined;
 var rows: [max_rows]ui.ProcInfo = undefined;
 
 pub export fn _start() callconv(.c) noreturn {
-    ui.write_console("ps: entered\n");
     const win_res = ui.win_open(win_x, win_y, win_w, win_h);
-    ui.write_console("ps: opened\n");
     if (win_res < 0) {
         ui.write_console("ps: failed to open window\n");
         ui.exit_process(1);
