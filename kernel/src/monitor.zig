@@ -332,7 +332,7 @@ fn ensure_registry() []const Command {
             .{ .name = "screen", .help = "virtio-gpu transport + framebuffer: device DID, features, scanout, status, re-arm ('screen fill <rrggbb>' fills the framebuffer and flushes it to the scanout)", .usage = "screen [fill <rrggbb>]", .category = .graphics_input, .max_args = 2, .handler = cmd_screen },
             .{ .name = "settings", .help = "persistent configuration: `settings [list]`, `settings get <key>`, `settings set <key> <val>`, `settings reset`", .usage = "settings [list|get <key>|set <key> <val>|reset]", .category = .system, .max_args = 3, .handler = cmd_settings },
             .{ .name = "sound", .help = "virtio-snd transport: device DID, class, status, control-queue state, device-config counts (jacks/streams/channel-maps), re-arm; stream-state control: 'sound volume <0-100>' and 'sound mute <on|off>'", .usage = "sound [volume <0-100> | mute <on|off>]", .category = .system, .min_args = 0, .max_args = 2, .handler = cmd_sound },
-            .{ .name = "text", .help = "framebuffer text: text region, cursor, scrollback ('text put <string...>' renders + flushes to the scanout; 'text clear' clears; 'text fontdebug [on|off]' missing-glyph stats)", .usage = "text [put <string...>|clear|fontdebug [on|off]]", .category = .graphics_input, .min_args = 0, .max_args = 9, .handler = cmd_text },
+            .{ .name = "text", .help = "framebuffer text: text region, cursor, scrollback ('text put <string...>' renders + flushes to the scanout; 'text clear' clears; 'text putraw' skips the trailing newline; 'text fontdebug [on|off]' missing-glyph stats)", .usage = "text [put <string...>|putraw <string...>|clear|fontdebug [on|off]]", .category = .graphics_input, .min_args = 0, .max_args = 9, .handler = cmd_text },
             .{ .name = "shutdown", .help = "request power-off", .usage = "shutdown", .category = .system, .handler = cmd_shutdown },
             .{ .name = "spawn", .help = "spawn the lifecycle demo task", .usage = "spawn", .category = .tasks_processes, .handler = cmd_spawn },
             .{ .name = "sysinfo", .help = "comprehensive system and subsystem diagnostic snapshot", .usage = "sysinfo", .category = .machine_identity, .handler = cmd_sysinfo },
@@ -4655,14 +4655,16 @@ fn cmd_font(m: *Monitor, args: []const []const u8) ExecError {
 /// device, `put`/`clear` refuse.
 fn cmd_text(m: *Monitor, args: []const []const u8) ExecError {
     if (args.len == 0) {
+        // M20-U1: rows/cols/cell report the LIVE font-size geometry
+        // (visible grid at the current size), not the ring constants.
         m.console.puts("text: rows=");
-        m.console.print_u64(fbtext.rows);
+        m.console.print_u64(fbtext.visible_rows());
         m.console.puts(" cols=");
-        m.console.print_u64(fbtext.cols);
+        m.console.print_u64(fbtext.visible_cols());
         m.console.puts(" cell=");
-        m.console.print_u64(fbtext.cell_w);
+        m.console.print_u64(fbtext.cur_cell_w());
         m.console.puts("x");
-        m.console.print_u64(fbtext.cell_h);
+        m.console.print_u64(fbtext.cur_cell_h());
         m.console.puts(" cur=");
         m.console.print_u64(fbtext.cursor_row());
         m.console.puts(",");
@@ -4676,7 +4678,10 @@ fn cmd_text(m: *Monitor, args: []const []const u8) ExecError {
         m.console.puts("\n");
         return .none;
     }
-    if (std.mem.eql(u8, args[0], "put")) {
+    if (std.mem.eql(u8, args[0], "put") or std.mem.eql(u8, args[0], "putraw")) {
+        // M20-U14 gate seam: `putraw` skips the trailing newline so a
+        // follow-up `text` report shows the exact landing column.
+        const raw = std.mem.eql(u8, args[0], "putraw");
         if (args.len < 2) {
             print_usage(m, lookup("text").?);
             return .usage;
@@ -4691,7 +4696,7 @@ fn cmd_text(m: *Monitor, args: []const []const u8) ExecError {
             if (i > 1) fbtext.putc(' ');
             fbtext.puts(args[i]);
         }
-        fbtext.putc('\n');
+        if (!raw) fbtext.putc('\n');
         // Card G5 (claim 1543): present through the Driving Award
         // compositor so the clock overlay stays composited over the
         // repainted terminal.
@@ -5824,7 +5829,7 @@ test "monitor: text reports the region and refuses put/clear without the transpo
     try std.testing.expectEqual(ExecError.usage, exec(&mon, &.{ "text", "bogus" }));
     // `text` is registered (the registry-row shape).
     try std.testing.expect(lookup("text") != null);
-    try std.testing.expectEqualStrings("framebuffer text: text region, cursor, scrollback ('text put <string...>' renders + flushes to the scanout; 'text clear' clears; 'text fontdebug [on|off]' missing-glyph stats)", lookup("text").?.help);
+    try std.testing.expectEqualStrings("framebuffer text: text region, cursor, scrollback ('text put <string...>' renders + flushes to the scanout; 'text clear' clears; 'text putraw' skips the trailing newline; 'text fontdebug [on|off]' missing-glyph stats)", lookup("text").?.help);
 }
 
 test "monitor: roadpops reports the tee state honestly" {
