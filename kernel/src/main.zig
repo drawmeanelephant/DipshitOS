@@ -781,6 +781,9 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
                 // presented` evidence on serial, honestly — the boot
                 // banner IS presented at that moment).
                 fbtext.init();
+                // M20-U11 (claim 5127): missing-glyph diagnostics log to
+                // serial when the debug_font dev setting is on.
+                fbtext.missing_glyph_log = &log_missing_glyph;
                 // Card G5 (claim 1543): arm Driving Award — the window
                 // manager. Road Pops (the terminal) registers as window 0
                 // and a 1 Hz clock overlay as window 1; the compositor
@@ -1195,6 +1198,20 @@ fn uart_puts(text: []const u8) void {
     if (comptime !build_options.nvram_console) {
         if (console_kind == .virtio and virtio_console.vp_tx_len > 0) virtio_console.virtio_pci_flush();
     }
+}
+
+/// M20-U11: serial side of the missing-glyph debug log (the framebuffer
+/// text layer calls this only with debug_font on; writing through fbtext
+/// itself would recurse).
+fn log_missing_glyph(cp: u21) void {
+    uart_puts("text: no glyph for U+");
+    var shift: u4 = 12;
+    while (true) : (shift -= 4) {
+        const nibble: u8 = @intCast((cp >> shift) & 0xf);
+        uart_putc(if (nibble < 10) '0' + nibble else 'a' + nibble - 10);
+        if (shift == 0) break;
+    }
+    uart_puts("\n");
 }
 
 fn uart_hex(value: u64) void {
