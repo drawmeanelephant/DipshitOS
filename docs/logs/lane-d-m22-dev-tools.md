@@ -27,3 +27,32 @@ responsive, no [EXC] parking) — artifacts/m22-elf-live.txt,
 artifacts/live-elf-report.txt. verify-unit-tests all green;
 verify-coordination ok; verify-bss-budget PASS.
 
+## 2026-08-22 — claim 9815: D2 (issue #325) done + PRE-EXISTING MAIN BUG FOUND
+
+**Bug found while gating D2 (affects all lanes):** the first userland FAT
+mount after boot fails with io_failed on real VZ (VZ resets virtio-blk at
+ExitBootServices; the boot-time rearm leaves the first post-boot transport
+touch flaky). Every userland file_open returned -6 → FSTEST/probes died.
+`tools/verify-live-fs-mutation.sh` (M13 gate) FAILS on pristine origin/main
+(bisected 4265ea3..5a25e38 — all fail; FS code unchanged since c3cfc41, so
+environmental/VZ-timing regression, not a code revert). Fix: single retry of
+the mount in file_table.mount_partition — gate PASSes with it. Shipped as
+its own PR before D2.
+
+D2 itself: new `user/src/asm.zig` (ASM.BIN) — two-pass AArch64 assembler,
+newline-or-`;` statement separators, labels, `.word`, ~25 encodings pinned
+by 12 host tests; emits minimal AArch64 ELF32 (single R+X PT_LOAD at
+0x400000, the D1 contract). DSK1 flat images map text only — no writable
+.bss aperture — so workspace lives on the task stack (~12.4/16 KiB).
+Wiring: ASM.BIN embedded via mkfat32/make-image (also restored the
+previously-dropped SETTINGS.BIN positional). Gate uses two runner phases:
+script2 waits for `asm: wrote` before `mount esp` + exec (userland writes
+bypass the ESP window snapshot).
+
+Evidence: asm.zig 12/12 host tests; verify-live-asm.sh PASS 1/1 on VZ
+(`asm: wrote 96 bytes to /esp/PROG.ELF` → `exec PROG.ELF size=0xc` →
+`exited status=71`) — artifacts/m22-asm-live.txt,
+artifacts/live-asm-report.txt. verify-live-fs-mutation PASS with the retry
+fix. verify-unit-tests green; verify-coordination ok.
+
+
