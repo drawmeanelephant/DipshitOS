@@ -19,7 +19,9 @@
 - **Depends on:** M18 done ✅ (per plan Lane C is Phase 2 after M19, but
   the lane owns disjoint files from shell.zig; no Lane A agent is
   editing shared files at claim time — verified via open PR/branch list)
-- **Status:** 🔄 in progress
+- **Status:** ✅ done 2026-08-22 — all 15 issues closed (#306–#320);
+  live gates: font-sizes PASS 1/1, unicode PASS 1/1, tabs BLOCKED
+  (headless captures) with pixel proof delegated to the class-A golden
 
 ## Notes
 
