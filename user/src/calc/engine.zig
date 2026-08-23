@@ -165,8 +165,9 @@ pub const CalcEngine = struct {
         self.is_entering_val = false;
     }
 
-    /// Raise the error state from the caller layer (K8 domain/overflow
-    /// errors: ln/log of <= 0, POW overflow or negative non-±1 exponent).
+    /// Raise the error state from the caller layer (K7 domain errors,
+    /// K8 domain/overflow errors: asin/acos range, tan at cos = 0,
+    /// ln/log of <= 0, POW overflow or negative non-±1 exponent).
     pub fn raise_error(self: *CalcEngine) void {
         self.fail();
     }
