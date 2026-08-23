@@ -1896,6 +1896,39 @@ test "text: cached rows are pixel-identical to the direct path (U13)" {
     try std.testing.expectEqualSlices(u32, &want, got);
 }
 
+test "text: Unicode torture document renders deterministically (U14)" {
+    // tools/test-unicode-torture.sh drives this via `zig test`; the file
+    // is embedded so the golden travels with the repo state.
+    const torture = @embedFile("unicode-torture.txt");
+    init();
+    clear();
+    puts(torture);
+    try std.testing.expect(ring_count >= 20); // the whole document landed
+    // Render into a bounded canvas and fingerprint the pixels. ANY
+    // rendering change to text.zig or the font tables shifts the hash —
+    // intentional regressions must re-pin it deliberately.
+    var canvas_buf: [64 * 16 * 4]u8 = undefined;
+    const canvas = Canvas{
+        .base = &canvas_buf,
+        .width = 64,
+        .height = 16,
+        .stride = 64 * 4,
+    };
+    render(canvas);
+    var h: u64 = 14695981039346656037;
+    for (canvas_buf) |b| {
+        h ^= b;
+        h *%= 1099511628211;
+    }
+    try std.testing.expectEqual(@as(u64, TORTURE_GOLDEN), h);
+}
+
+/// FNV-1a over the 64×16 canvas after rendering tools/unicode-torture.txt
+/// at small size. Re-pin ONLY with an explanation in the commit message.
+/// Pinned from the first verified render (commit introducing U14);
+/// re-pin ONLY with an explanation in the commit message.
+const TORTURE_GOLDEN: u64 = 0xbbf8e4b0b4763f44;
+
 test "text: an exhausted cluster pool degrades to ignoring new marks (U6)" {
     init();
     clear();
