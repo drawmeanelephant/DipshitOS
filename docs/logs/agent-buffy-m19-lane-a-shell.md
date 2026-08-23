@@ -151,3 +151,18 @@ expressions) landed. Host-tested.
   division, modulo, negative, unary minus, mixed prefix/suffix,
   no-op, empty expression, nested parens). 665/665 shell tests pass.
   All verify gates green.
+
+## 2026-08-23 — claim 7033: P11 conditionals done (issue #300)
+
+P11 (conditional execution: `if/then/else/fi` testing exit status)
+landed. Host-tested.
+
+- `shell.zig`: `last_exit_ok` module-level bool. New builtins: `true`,
+  `false`, `if COND; then BODY; [else BODY]; fi`. `find_if_keyword`
+  matches whole-word keywords. `run_if_body` splits on `;` and executes
+  via `shell_handle_expanded`. `run_if` parses the structure, evaluates
+  the condition, executes appropriate body. `monitor.exec` calls updated
+  to set `last_exit_ok`.
+- Host tests: 7 new (true-then, false-skip, true-else-skip,
+  false-else-run, multi-command body, missing fi, missing then).
+  672/672 shell tests pass. All verify gates green.
