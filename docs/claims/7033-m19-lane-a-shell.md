@@ -14,7 +14,7 @@
 - **Depends on:** M18 done ✅ (merged to main as `4d11713`, PR #485).
   Lane A is the critical path — Lane C (M20 text) and Lane E (M21
   compositor) depend on it.
-- **Status:** 🔄 in progress — P1 (pipes) ✅ done 2026-08-22; P2 (redirection) ✅ done 2026-08-23; P3 (env vars) ✅ done 2026-08-23; P4 (functions) ✅ done 2026-08-23; P8 (function args) ✅ done 2026-08-23
+- **Status:** 🔄 in progress — P1 (pipes) ✅ done 2026-08-22; P2 (redirection) ✅ done 2026-08-23; P3 (env vars) ✅ done 2026-08-23; P4 (functions) ✅ done 2026-08-23; P8 (function args) ✅ done 2026-08-23; P9 (command substitution) ✅ done 2026-08-23
 
 ## Notes
 
@@ -157,6 +157,28 @@ updated as cards land.
   `zig fmt --check` clean. `zig build` + `zig build image` green.
 - Class B: live gate `verify-live-function.sh` pending (covers both P4
   and P8).
+
+## P9 — command substitution (issue #298) — done 2026-08-23
+
+- `kernel/src/shell.zig`: `cmd_subst` function scans for `$(cmd)`, finds the
+  matching `)`, rejects nested `$(` inside the inner region, extracts and
+  trims the inner command, executes it via `handle_line` with stdout captured
+  through the redirect module's `capture_console`, trims trailing newlines,
+  and substitutes the captured output back into the original line.
+- `subst_active` guard prevents recursive substitution (the inner command
+  skips `cmd_subst`). `fn` definitions skip substitution so `$()` in function
+  bodies is preserved literally until invocation time.
+- Bounded: one substitution per line, max 256 bytes of captured output
+  (`subst_max_output`). Empty inner commands are a no-op.
+
+### Verification
+
+- Host (class A): 7 new tests (basic inline, nested refusal, unmatched
+  error, empty no-op, fn-body preservation, prefix+suffix combination,
+  no-subst-passthrough). 653/653 shell tests pass. `verify-unit-tests.sh`
+  all modules green. `zig build test-console` transcript byte-identical.
+  `zig fmt --check` clean. `zig build` + `zig build image` green.
+- Class B: live gate `verify-live-subst.sh` pending.
 
 ## P3 — environment variables (issue #292) — done 2026-08-23
 
