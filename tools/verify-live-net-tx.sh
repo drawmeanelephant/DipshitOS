@@ -36,6 +36,15 @@
 # under artifacts/: live-net-tx-*.txt (runner output), live-net-tx-*.log
 # (serial copies), live-net-tx-*.bin (host captures), and the report.
 #
+# Run isolation (#523 item 2 / issue #528, claim 5069): every boot attaches
+# a private DiskImageKit stacked disk (read-only base + throwaway ASIF
+# overlay), a private EFI var store (recreated fresh per boot, as the
+# pre-isolation gate did), and a private serial log under $RUN_DIR — two
+# concurrent instances cannot clobber each other's disks, NVRAM, or
+# evidence. Set DIPSHIT_GATE_SUFFIX=_alt to give this instance its own
+# canonical evidence names (two simultaneous instances MUST differ), and
+# DIPSHIT_KEEP_RUN=1 to keep the scratch dir.
+#
 # Class B — Apple silicon + VZ only; boots real VMs. A green CI badge
 # proves class A only and says nothing about this gate.
 #
@@ -50,11 +59,16 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-GATE_LOG="artifacts/live-net-tx-gate.txt"
-exec > >(tee "$GATE_LOG") 2>&1
-trap 'sleep 0.5' EXIT
+source tools/lib/gate-run.sh
 
-REPORT="artifacts/live-net-tx-report.txt"
+SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
+
+GATE_LOG="$(art live-net-tx-gate.txt)"
+exec > >(tee "$GATE_LOG") 2>&1
+trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
+
+REPORT="$(art live-net-tx-report.txt)"
 
 echo "=== verify-live-net-tx: claim 1373 — virtio-net transport + TX (DID 0x1041, feature negotiation, queue setup, re-arm, byte-exact host capture) ==="
 
@@ -72,13 +86,20 @@ zig build image
 swift build --package-path host/vm-runner --configuration release
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
+# --- per-run isolation -------------------------------------------------------------
+# Private scratch dir + pristine-boot overlay for EVERY boot.
+# See tools/lib/gate-run.sh.
+gate_begin live-net-tx
+echo "run dir: $RUN_DIR"
+
+
 # --- scripted keystrokes -----------------------------------------------------
-cat > artifacts/live-net-tx-script-1.txt <<'EOF'
+cat > "$RUN_DIR/script-1.txt" <<'EOF'
 net
 netsend 32
 echo net-tx-ok
 EOF
-cat > artifacts/live-net-tx-script-2.txt <<'EOF'
+cat > "$RUN_DIR/script-2.txt" <<'EOF'
 net
 netsend 32
 netsend 32
@@ -87,14 +108,16 @@ echo net-tx-ok
 EOF
 
 # --- byte-exact fixture (the class-A build_known_frame shape) ---------------
-python3 - <<'PY'
+RUN_DIR="$RUN_DIR" python3 - <<'PY'
+import os
+rd = os.environ["RUN_DIR"]
 fixture = bytes([0xff]*6) + bytes([0x02,0,0,0,0,1]) + bytes([0x08,0]) + bytes(range(32))
 assert len(fixture) == 46, len(fixture)
-open("artifacts/live-net-tx-fixture.bin","wb").write(fixture)
+open(rd+"/live-net-tx-fixture.bin","wb").write(fixture)
 # The truncated 3000-byte request: payload clamps at 1500 -> frame 1514.
 big = bytes([0xff]*6) + bytes([0x02,0,0,0,0,1]) + bytes([0x08,0]) + bytes(i & 0xff for i in range(1500))
 assert len(big) == 1514, len(big)
-open("artifacts/live-net-tx-fixture-big.bin","wb").write(big)
+open(rd+"/live-net-tx-fixture-big.bin","wb").write(big)
 PY
 
 # --- per-phase gate ----------------------------------------------------------
@@ -104,28 +127,32 @@ PY
 # phase 2 = concatenation of 46 + 46 + 1514).
 run_one() {
     local tag="$1" script="$2" capture="$3"
-    rm -f artifacts/efi-vars.bin artifacts/vm-serial.log "$capture"
+    rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial-$tag.log" "$capture"
     set +e
-    host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log \
-        --net "$capture" --script "$script" --script-expect $'net-tx-ok\ndipshit> ' --timeout 40 \
-        > "artifacts/live-net-tx-run-$tag.txt" 2>&1
+        # Rot class 1 (#528): the colored prompt killed '<marker>\ndipshit> '
+        # anchors; this marker reply is output-only and last.
+    host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
+        --serial "$RUN_DIR/vm-serial-$tag.log" \
+        --net "$capture" --script "$script" --script-expect "net-tx-ok" --timeout 40 \
+        > "$(art live-net-tx-run-$tag.txt)" 2>&1
     local RC=$?
     set -e
-    [ -f artifacts/vm-serial.log ] && cp artifacts/vm-serial.log "artifacts/live-net-tx-serial-$tag.log" || true
+    [ -f "$RUN_DIR/vm-serial-$tag.log" ] && cp "$RUN_DIR/vm-serial-$tag.log" "$(art live-net-tx-serial-$tag.log)" || true
+    local SER="$(art live-net-tx-serial-$tag.log)"
 
     local SERIAL_BYTES=0 DID=0 MAC=0 MACSRC=0 FEAT=0 QUEUES=0 STATUS=0 TXREPLY=0
-    if [ -f artifacts/vm-serial.log ]; then
-        SERIAL_BYTES=$(wc -c < artifacts/vm-serial.log | tr -d ' ')
+    if [ -f "$SER" ]; then
+        SERIAL_BYTES=$(wc -c < "$SER" | tr -d ' ')
         # The net report: the OBSERVED device (DID 0x1041, class 0x020000,
         # bus slot), the host-set MAC from the negotiated feature,
         # VER1|MTU|MAC accepted, both queues, DRIVER_OK + re-arm.
-        grep -a -qF -- "net: did=0x0000000000001041 class=0x0000000000020000 dev=1" artifacts/vm-serial.log && DID=1
-        grep -a -qF -- "net: mac=02:00:00:00:00:01 source=feature" artifacts/vm-serial.log && MAC=1 && MACSRC=1
-        grep -a -qF -- "net: feat=0x0000000000000028/0x0000000000000001" artifacts/vm-serial.log && FEAT=1
-        grep -a -qF -- "q0=rx:size=4 q1=tx:size=4" artifacts/vm-serial.log && QUEUES=1
-        grep -a -qF -- "net: status=0x000000000000000f rearm=1" artifacts/vm-serial.log && STATUS=1
+        grep -a -qF -- "net: did=0x0000000000001041 class=0x0000000000020000 dev=1" "$SER" && DID=1
+        grep -a -qF -- "net: mac=02:00:00:00:00:01 source=feature" "$SER" && MAC=1 && MACSRC=1
+        grep -a -qF -- "net: feat=0x0000000000000028/0x0000000000000001" "$SER" && FEAT=1
+        grep -a -qF -- "q0=rx:size=4 q1=tx:size=4" "$SER" && QUEUES=1
+        grep -a -qF -- "net: status=0x000000000000000f rearm=1" "$SER" && STATUS=1
         # TX replies: every netsend reports the drain (frames/bytes).
-        grep -a -qF -- "netsend: tx ok" artifacts/vm-serial.log && TXREPLY=1
+        grep -a -qF -- "netsend: tx ok" "$SER" && TXREPLY=1
     fi
     local PASS=0
     if [ "$RC" = 0 ] && [ "$DID" = 1 ] && [ "$MAC" = 1 ] && [ "$MACSRC" = 1 ] && [ "$FEAT" = 1 ] && [ "$QUEUES" = 1 ] && [ "$STATUS" = 1 ] && [ "$TXREPLY" = 1 ]; then
@@ -154,10 +181,11 @@ PHASES=0
 echo
     echo "=== phase 1: single known frame (net report + netsend 32) ==="
     P1=0
-    run_one "p1" "artifacts/live-net-tx-script-1.txt" "artifacts/live-net-tx-cap-1.bin" && P1=1 || true
+    run_one "p1" "$RUN_DIR/script-1.txt" "$RUN_DIR/cap-1.bin" && P1=1 || true
     # Phase 1 capture is EXACTLY the 46-byte fixture (one frame).
     CAP1=0
-    if [ -f artifacts/live-net-tx-cap-1.bin ] && cmp -s artifacts/live-net-tx-cap-1.bin artifacts/live-net-tx-fixture.bin; then
+    cp "$RUN_DIR/cap-1.bin" "$(art live-net-tx-cap-1.bin)" 2>/dev/null || true
+    if [ -f "$RUN_DIR/cap-1.bin" ] && cmp -s "$RUN_DIR/cap-1.bin" "$RUN_DIR/live-net-tx-fixture.bin"; then
         CAP1=1
     fi
     echo "phase 1 capture-exact-single-frame=$CAP1"
@@ -167,16 +195,19 @@ echo
     echo
     echo "=== phase 2: ring reuse + honest truncation (32 / 32 / 3000) ==="
     P2=0
-    run_one "p2" "artifacts/live-net-tx-script-2.txt" "artifacts/live-net-tx-cap-2.bin" && P2=1 || true
+    run_one "p2" "$RUN_DIR/script-2.txt" "$RUN_DIR/cap-2.bin" && P2=1 || true
     # Phase 2 capture: 46 + 46 + 1514 = 1606 bytes, laid out exactly as
     # fixture + fixture + big-fixture, and the driver's counter says
     # frames=3 (ring reuse across three submissions).
     CAP2=0
-    if [ -f artifacts/live-net-tx-cap-2.bin ] && grep -a -qF -- "netsend: tx ok frames=3" artifacts/vm-serial.log; then
-        if python3 - <<'PY'
-cap = open("artifacts/live-net-tx-cap-2.bin","rb").read()
-f1 = open("artifacts/live-net-tx-fixture.bin","rb").read()
-fb = open("artifacts/live-net-tx-fixture-big.bin","rb").read()
+    cp "$RUN_DIR/cap-2.bin" "$(art live-net-tx-cap-2.bin)" 2>/dev/null || true
+    if [ -f "$RUN_DIR/cap-2.bin" ] && grep -a -qF -- "netsend: tx ok frames=3" "$(art live-net-tx-serial-p2.log)"; then
+        if python3 - "$RUN_DIR" <<'PY'
+import sys
+rd = sys.argv[1]
+cap = open(rd+"/cap-2.bin","rb").read()
+f1 = open(rd+"/live-net-tx-fixture.bin","rb").read()
+fb = open(rd+"/live-net-tx-fixture-big.bin","rb").read()
 raise SystemExit(0 if (len(cap) == 1606 and cap[:46] == f1 and cap[46:92] == f1 and cap[92:] == fb) else 1)
 PY
         then

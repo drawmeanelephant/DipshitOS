@@ -56,25 +56,39 @@
 # live-net-udp-*.log (serial copies), live-net-udp-*.bin (host
 # captures), and the report.
 #
+# Run isolation (#523 item 2 / issue #528, claim 5069): every boot attaches
+# a private DiskImageKit stacked disk (read-only base + throwaway ASIF
+# overlay), a private EFI var store (recreated fresh per boot, as the
+# pre-isolation gate did), and a private serial log under $RUN_DIR — two
+# concurrent instances cannot clobber each other's disks, NVRAM, or
+# evidence. Set DIPSHIT_GATE_SUFFIX=_alt to give this instance its own
+# canonical evidence names (two simultaneous instances MUST differ), and
+# DIPSHIT_KEEP_RUN=1 to keep the scratch dir.
+#
 # Class B — Apple silicon + VZ only; boots real VMs. A green CI badge
 # proves class A only and says nothing about this gate.
 #
 # Usage:
 #   bash tools/verify-live-net-udp.sh
 #
-# Evidence: artifacts/live-net-udp-gate.txt (full output),
-# artifacts/live-net-udp-report.txt (per-phase detail).
+# Evidence: "$RUN_DIR/live-net-udp-gate.txt" (full output),
+# "$RUN_DIR/live-net-udp-report.txt" (per-phase detail).
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-GATE_LOG="artifacts/live-net-udp-gate.txt"
-exec > >(tee "$GATE_LOG") 2>&1
-trap 'sleep 0.5' EXIT
+source tools/lib/gate-run.sh
 
-REPORT="artifacts/live-net-udp-report.txt"
+SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
+
+GATE_LOG="$(art live-net-udp-gate.txt)"
+exec > >(tee "$GATE_LOG") 2>&1
+trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
+
+REPORT="$(art live-net-udp-report.txt)"
 
 echo "=== verify-live-net-udp: claim 8552 — UDP live on VZ (loopback, host->guest, round trip, closed-port scope check) ==="
 
@@ -92,6 +106,13 @@ zig build image
 swift build --package-path host/vm-runner --configuration release
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
+# --- per-run isolation -------------------------------------------------------------
+# Private scratch dir + pristine-boot overlay for EVERY boot.
+# See tools/lib/gate-run.sh.
+gate_begin live-net-udp
+echo "run dir: $RUN_DIR"
+
+
 # --- scripted keystrokes -----------------------------------------------------
 # TWO script phases per run (the claim-4613 pattern): --script (phase 1)
 # sets the IP + the listener and prints a ready marker; the runner's
@@ -101,46 +122,46 @@ codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/
 # OBSERVATION commands — deterministic, not a sleep race. Phase 1
 # (loopback) has NO injection: the send + recv are synchronous in script2
 # (the loopback path never touches the device).
-cat > artifacts/live-net-udp-script-1.txt <<'EOF'
+cat > "$RUN_DIR/live-net-udp-script-1.txt" <<'EOF'
 net ip 10.0.0.1
 net udp listen 7000
 echo udp-phase1-ready
 EOF
-cat > artifacts/live-net-udp-script-1b.txt <<'EOF'
+cat > "$RUN_DIR/live-net-udp-script-1b.txt" <<'EOF'
 net udp send 10.0.0.1 7000 4
 net udp recv 7000
 net udp
 echo net-udp-ok
 EOF
-cat > artifacts/live-net-udp-script-2.txt <<'EOF'
+cat > "$RUN_DIR/live-net-udp-script-2.txt" <<'EOF'
 net ip 10.0.0.1
 net udp listen 7000
 echo udp-phase1-ready
 EOF
-cat > artifacts/live-net-udp-script-2b.txt <<'EOF'
+cat > "$RUN_DIR/live-net-udp-script-2b.txt" <<'EOF'
 net udp recv 7000
 net recv
 net
 echo net-udp-ok
 EOF
-cat > artifacts/live-net-udp-script-3.txt <<'EOF'
+cat > "$RUN_DIR/live-net-udp-script-3.txt" <<'EOF'
 net ip 10.0.0.1
 net arp 10.0.0.2
 net udp listen 7000
 echo udp-phase3-ready
 EOF
-cat > artifacts/live-net-udp-script-3b.txt <<'EOF'
+cat > "$RUN_DIR/live-net-udp-script-3b.txt" <<'EOF'
 net udp send 10.0.0.2 9999 4
 net udp recv 7000
 net udp recv 7000
 net
 echo net-udp-ok
 EOF
-cat > artifacts/live-net-udp-script-4.txt <<'EOF'
+cat > "$RUN_DIR/live-net-udp-script-4.txt" <<'EOF'
 net ip 10.0.0.1
 echo udp-phase1-ready
 EOF
-cat > artifacts/live-net-udp-script-4b.txt <<'EOF'
+cat > "$RUN_DIR/live-net-udp-script-4b.txt" <<'EOF'
 net udp recv 9998
 net recv
 net
@@ -156,7 +177,8 @@ EOF
 # p3: the guest's own send frame (10.0.0.1:7000 -> 10.0.0.2:9999, ident
 #     0x0000, TTL 64) — the expected capture bytes.
 # p4: the 46-byte frame to a CLOSED port (10.0.0.1:9998).
-python3 - <<'PY'
+RUN_DIR="$RUN_DIR" python3 - <<'PY'
+import os
 def csum(b):
     s = 0
     for i in range(0, len(b) - 1, 2):
@@ -203,7 +225,7 @@ payload = b"\x01\x02\x03\x04"
 # p2: host -> guest datagram (dst = broadcast so the MAC filter accepts)
 req2 = udp_frame(bcast, host_mac, host_ip, guest_ip, 9999, 7000, payload, ident=0xabcd)
 assert len(req2) == 46, len(req2)
-open("artifacts/live-net-udp-fixture-2.bin","wb").write(req2)
+open(os.environ["RUN_DIR"]+"/live-net-udp-fixture-2.bin","wb").write(req2)
 # p3: the guest's own send frame (dst = host MAC, ident 0x0000 —
 # build_frame leaves the identification field zero). The capture holds
 # BOTH the script-1 resolve's broadcast ARP request AND the script-2
@@ -217,11 +239,11 @@ req3_arp = arp_pkt(bcast, guest_mac, 1, guest_mac, guest_ip, [0]*6, host_ip)
 assert len(req3_arp) == 42, len(req3_arp)
 req3_udp = udp_frame(host_mac, guest_mac, guest_ip, host_ip, 7000, 9999, payload, ident=0)
 assert len(req3_udp) == 46, len(req3_udp)
-open("artifacts/live-net-udp-fixture-3.bin","wb").write(req3_arp + req3_udp)
+open(os.environ["RUN_DIR"]+"/live-net-udp-fixture-3.bin","wb").write(req3_arp + req3_udp)
 # p4: a datagram to a CLOSED port (10.0.0.1:9998)
 req4 = udp_frame(bcast, host_mac, host_ip, guest_ip, 9999, 9998, payload, ident=1)
 assert len(req4) == 46, len(req4)
-open("artifacts/live-net-udp-fixture-4.bin","wb").write(req4)
+open(os.environ["RUN_DIR"]+"/live-net-udp-fixture-4.bin","wb").write(req4)
 
 # The datagram hex the guest's net udp recv prints. For the loopback
 # (phase 1): src 7000 -> dst 7000, len 12, checksum, payload. For the
@@ -248,8 +270,8 @@ def datagram_hex(src_port, dst_port, plen):
 def recv_line(dg_hex):
     return "net udp recv: " + dg_hex
 
-open("artifacts/live-net-udp-recv-1.txt","w").write(recv_line(datagram_hex(7000, 7000, 4)))
-open("artifacts/live-net-udp-recv-2.txt","w").write(recv_line(datagram_hex(9999, 7000, 4)))
+open(os.environ["RUN_DIR"]+"/live-net-udp-recv-1.txt","w").write(recv_line(datagram_hex(7000, 7000, 4)))
+open(os.environ["RUN_DIR"]+"/live-net-udp-recv-2.txt","w").write(recv_line(datagram_hex(9999, 7000, 4)))
 PY
 
 # --- per-phase gate ----------------------------------------------------------
@@ -257,54 +279,58 @@ PY
 # $5 = inject file ("" = none), $6 = capture file, $7 = extra runner flags.
 run_one() {
     local tag="$1" script="$2" script2="$3" after2="$4" inject="$5" capture="$6" extra="$7"
-    rm -f artifacts/efi-vars.bin artifacts/vm-serial.log "$capture"
+    rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial-$tag.log" "$capture"
     set +e
+        # Rot class 1 (#528): the colored prompt killed '<marker>\ndipshit> '
+        # anchors; this marker reply is output-only and last.
     local ARGS=()
     [ -n "$inject" ] && ARGS+=(--net-inject "$inject" --net-inject-after "net ip: ip=10.0.0.1")
     [ -n "$extra" ] && ARGS+=($extra)
-    host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log \
-        --net "$capture" ${ARGS[@]+"${ARGS[@]}"} --script "$script" --script2 "$script2" --script2-after "$after2" --script-expect $'net-udp-ok\ndipshit> ' --timeout 40 \
-        > "artifacts/live-net-udp-run-$tag.txt" 2>&1
+    host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
+        --serial "$RUN_DIR/vm-serial-$tag.log" \
+        --net "$capture" ${ARGS[@]+"${ARGS[@]}"} --script "$script" --script2 "$script2" --script2-after "$after2" --script-expect "net-udp-ok" --timeout 40 \
+        > "$(art live-net-udp-run-$tag.txt)" 2>&1
     local RC=$?
     set -e
-    [ -f artifacts/vm-serial.log ] && cp artifacts/vm-serial.log "artifacts/live-net-udp-serial-$tag.log" || true
+    [ -f "$RUN_DIR/vm-serial-$tag.log" ] && cp "$RUN_DIR/vm-serial-$tag.log" "$(art live-net-udp-serial-$tag.log)" || true
+    local SER="$(art live-net-udp-serial-$tag.log)"
 
     local SERIAL_BYTES=0 IPSET=0 RECV=0 RECVLEN=0 RECVEXACT=0 RX1=0 TX1=0 LOOP=0 DROP=0 SENT=0 SENDLINE=0 NOFRAMES=0 FRAMELEN=0
-    if [ -f artifacts/vm-serial.log ]; then
-        SERIAL_BYTES=$(wc -c < artifacts/vm-serial.log | tr -d ' ')
+    if [ -f "$SER" ]; then
+        SERIAL_BYTES=$(wc -c < "$SER" | tr -d ' ')
         # The static-IP marker (also the injection trigger).
-        grep -a -qF -- "net ip: ip=10.0.0.1" artifacts/vm-serial.log && IPSET=1
+        grep -a -qF -- "net ip: ip=10.0.0.1" "$SER" && IPSET=1
         case "$tag" in
             p1)
-                grep -a -qF -- "net udp recv: port=7000" artifacts/vm-serial.log && RECV=1
-                grep -a -qF -- "net udp recv: [0] len=12" artifacts/vm-serial.log && RECVLEN=1
-                grep -a -qF -- "$(cat artifacts/live-net-udp-recv-1.txt)" artifacts/vm-serial.log && RECVEXACT=1
-                grep -a -qF -- "net udp: rx=1,tx=1,loop=1,drop=0" artifacts/vm-serial.log && RX1=1
-                grep -a -qF -- "net-udp-ok" artifacts/vm-serial.log && SENT=1
+                grep -a -qF -- "net udp recv: port=7000" "$SER" && RECV=1
+                grep -a -qF -- "net udp recv: [0] len=12" "$SER" && RECVLEN=1
+                grep -a -qF -- "$(cat "$RUN_DIR/live-net-udp-recv-1.txt")" "$SER" && RECVEXACT=1
+                grep -a -qF -- "net udp: rx=1,tx=1,loop=1,drop=0" "$SER" && RX1=1
+                grep -a -qF -- "net-udp-ok" "$SER" && SENT=1
                 ;;
             p2)
-                grep -a -qF -- "net udp recv: port=7000" artifacts/vm-serial.log && RECV=1
-                grep -a -qF -- "net udp recv: [0] len=12" artifacts/vm-serial.log && RECVLEN=1
-                grep -a -qF -- "$(cat artifacts/live-net-udp-recv-2.txt)" artifacts/vm-serial.log && RECVEXACT=1
-                grep -a -qF -- "net recv: [0] len=58" artifacts/vm-serial.log && FRAMELEN=1
-                grep -a -qF -- " udp=rx=1,tx=0,loop=0,drop=0" artifacts/vm-serial.log && RX1=1
-                grep -a -qF -- "net-udp-ok" artifacts/vm-serial.log && SENT=1
+                grep -a -qF -- "net udp recv: port=7000" "$SER" && RECV=1
+                grep -a -qF -- "net udp recv: [0] len=12" "$SER" && RECVLEN=1
+                grep -a -qF -- "$(cat "$RUN_DIR/live-net-udp-recv-2.txt")" "$SER" && RECVEXACT=1
+                grep -a -qF -- "net recv: [0] len=58" "$SER" && FRAMELEN=1
+                grep -a -qF -- " udp=rx=1,tx=0,loop=0,drop=0" "$SER" && RX1=1
+                grep -a -qF -- "net-udp-ok" "$SER" && SENT=1
                 ;;
             p3)
-                grep -a -qF -- "net udp: sent 4 bytes to 10.0.0.2:9999 (46 bytes)" artifacts/vm-serial.log && SENDLINE=1
-                grep -a -qF -- "net udp recv: port=7000" artifacts/vm-serial.log && RECV=1
-                grep -a -qF -- "net udp recv: [0] len=12" artifacts/vm-serial.log && RECVLEN=1
-                grep -a -qF -- "$(cat artifacts/live-net-udp-recv-2.txt)" artifacts/vm-serial.log && RECVEXACT=1
-                grep -a -qF -- " udp=rx=1,tx=1,loop=0,drop=0" artifacts/vm-serial.log && RX1=1
-                grep -a -qF -- "net-udp-ok" artifacts/vm-serial.log && SENT=1
+                grep -a -qF -- "net udp: sent 4 bytes to 10.0.0.2:9999 (46 bytes)" "$SER" && SENDLINE=1
+                grep -a -qF -- "net udp recv: port=7000" "$SER" && RECV=1
+                grep -a -qF -- "net udp recv: [0] len=12" "$SER" && RECVLEN=1
+                grep -a -qF -- "$(cat "$RUN_DIR/live-net-udp-recv-2.txt")" "$SER" && RECVEXACT=1
+                grep -a -qF -- " udp=rx=1,tx=1,loop=0,drop=0" "$SER" && RX1=1
+                grep -a -qF -- "net-udp-ok" "$SER" && SENT=1
                 ;;
             p4)
                 # Nothing delivered (the port is closed)...
-                grep -a -qF -- "net udp recv: no datagrams for port 9998" artifacts/vm-serial.log && NOFRAMES=1
+                grep -a -qF -- "net udp recv: no datagrams for port 9998" "$SER" && NOFRAMES=1
                 # ...but the frame IS observable via net recv (the N2 seam).
-                grep -a -qF -- "net recv: [0] len=58" artifacts/vm-serial.log && FRAMELEN=1
-                grep -a -qF -- " udp=rx=0,tx=0,loop=0,drop=1" artifacts/vm-serial.log && DROP=1
-                grep -a -qF -- "net-udp-ok" artifacts/vm-serial.log && SENT=1
+                grep -a -qF -- "net recv: [0] len=58" "$SER" && FRAMELEN=1
+                grep -a -qF -- " udp=rx=0,tx=0,loop=0,drop=1" "$SER" && DROP=1
+                grep -a -qF -- "net-udp-ok" "$SER" && SENT=1
                 ;;
         esac
     fi
@@ -350,9 +376,9 @@ PHASES=0
 echo
     echo "=== phase 1: loopback — send to our own IP delivers locally, no device round trip ==="
     P1=0
-    run_one "p1" "artifacts/live-net-udp-script-1.txt" "artifacts/live-net-udp-script-1b.txt" "udp-phase1-ready" "" "artifacts/live-net-udp-cap-1.bin" "" && P1=1 || true
+    run_one "p1" "$RUN_DIR/live-net-udp-script-1.txt" "$RUN_DIR/live-net-udp-script-1b.txt" "udp-phase1-ready" "" "$RUN_DIR/live-net-udp-cap-1.bin" "" && P1=1 || true
     CAP1=0
-    if [ ! -f artifacts/live-net-udp-cap-1.bin ] || [ ! -s artifacts/live-net-udp-cap-1.bin ]; then
+    if [ ! -f "$RUN_DIR/live-net-udp-cap-1.bin" ] || [ ! -s "$RUN_DIR/live-net-udp-cap-1.bin" ]; then
         CAP1=1
     fi
     echo "phase 1 capture-empty=$CAP1"
@@ -362,7 +388,7 @@ echo
     echo
     echo "=== phase 2: host -> guest — the injected datagram is delivered to the listener, byte-exact ==="
     P2=0
-    run_one "p2" "artifacts/live-net-udp-script-2.txt" "artifacts/live-net-udp-script-2b.txt" "udp-phase1-ready" "artifacts/live-net-udp-fixture-2.bin" "artifacts/live-net-udp-cap-2.bin" "" && P2=1 || true
+    run_one "p2" "$RUN_DIR/live-net-udp-script-2.txt" "$RUN_DIR/live-net-udp-script-2b.txt" "udp-phase1-ready" "$RUN_DIR/live-net-udp-fixture-2.bin" "$RUN_DIR/live-net-udp-cap-2.bin" "" && P2=1 || true
     echo "phase 2 pass=$P2"
     [ "$P2" = 1 ] && PASS=$((PASS + 1))
     PHASES=$((PHASES + 1))
@@ -370,10 +396,10 @@ echo
     echo
     echo "=== phase 3: guest -> host round trip — the datagram is byte-exact in the capture and the host answer lands in the listener buffer ==="
     P3=0
-    run_one "p3" "artifacts/live-net-udp-script-3.txt" "artifacts/live-net-udp-script-3b.txt" "udp-phase3-ready" "" "artifacts/live-net-udp-cap-3.bin" "--net-arp-respond 10.0.0.2 --net-udp-respond 10.0.0.2:9999" && P3=1 || true
+    run_one "p3" "$RUN_DIR/live-net-udp-script-3.txt" "$RUN_DIR/live-net-udp-script-3b.txt" "udp-phase3-ready" "" "$RUN_DIR/live-net-udp-cap-3.bin" "--net-arp-respond 10.0.0.2 --net-udp-respond 10.0.0.2:9999" && P3=1 || true
     CAP3=0
     for _ in 1 2 3 4 5; do
-        if [ -f artifacts/live-net-udp-cap-3.bin ] && cmp -s artifacts/live-net-udp-cap-3.bin artifacts/live-net-udp-fixture-3.bin; then
+        if [ -f "$RUN_DIR/live-net-udp-cap-3.bin" ] && cmp -s "$RUN_DIR/live-net-udp-cap-3.bin" "$RUN_DIR/live-net-udp-fixture-3.bin"; then
             CAP3=1
             break
         fi
@@ -386,9 +412,9 @@ echo
     echo
     echo "=== phase 4: a datagram to a CLOSED port is dropped (scope check) ==="
     P4=0
-    run_one "p4" "artifacts/live-net-udp-script-4.txt" "artifacts/live-net-udp-script-4b.txt" "udp-phase1-ready" "artifacts/live-net-udp-fixture-4.bin" "artifacts/live-net-udp-cap-4.bin" "" && P4=1 || true
+    run_one "p4" "$RUN_DIR/live-net-udp-script-4.txt" "$RUN_DIR/live-net-udp-script-4b.txt" "udp-phase1-ready" "$RUN_DIR/live-net-udp-fixture-4.bin" "$RUN_DIR/live-net-udp-cap-4.bin" "" && P4=1 || true
     CAP4=0
-    if [ ! -f artifacts/live-net-udp-cap-4.bin ] || [ ! -s artifacts/live-net-udp-cap-4.bin ]; then
+    if [ ! -f "$RUN_DIR/live-net-udp-cap-4.bin" ] || [ ! -s "$RUN_DIR/live-net-udp-cap-4.bin" ]; then
         CAP4=1
     fi
     echo "phase 4 capture-empty=$CAP4"
@@ -403,7 +429,7 @@ if [ "$PASS" = "$PHASES" ]; then
     sleep 0.5
     exit 0
 else
-    echo "verify-live-net-udp: FAILED — $PASS/$PHASES phases passed; see artifacts/live-net-udp-report.txt, the per-phase runner output and serial logs, and the capture files."
+    echo "verify-live-net-udp: FAILED — $PASS/$PHASES phases passed; see "$RUN_DIR/live-net-udp-report.txt", the per-phase runner output and serial logs, and the capture files."
     echo "FAIL: $PASS/$PHASES" >> "$REPORT"
     sleep 0.5
     exit 1
