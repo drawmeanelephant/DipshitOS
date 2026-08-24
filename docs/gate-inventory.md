@@ -108,6 +108,7 @@ card's close-out and graduate to the archive when their milestone closes.
 | `live-win-hig` | B | `bash tools/verify-live-win-hig.sh` | ✅ pass | 2026-08-15* |
 | `live-pointer-cg` | B | `bash tools/verify-live-pointer-cg.sh` | ⚠️ open — self-gates on Accessibility trust; class-B pass unachieved, card U4 stays class-C | 2026-08-16 |
 | `live-pointer-virtio` | B | `bash tools/verify-live-pointer-virtio.sh` | ✅ pass — headless pointer injection over custom-virtio queue 3 (claim 9367); #151's focus proof upgraded to class-B-headless, no trust needed on this path | 2026-08-24 |
+| `live-virtio-e2e` | B | `bash tools/verify-live-virtio-e2e.sh` | ✅ pass — #523 acceptance row: injected input in, structured console + framebuffer snapshot out over the custom-virtio control plane, headless (claim 0680); no CGEvent synthesis, no screenshot scraping in the critical path | 2026-08-24 |
 | `live-settings` | B | `bash tools/verify-live-settings.sh` | ✅ pass | 2026-08-15* |
 | `live-events` | B | `bash tools/verify-live-events.sh` | ✅ pass | 2026-08-15* |
 | `live-user-fs` | B | `bash tools/verify-live-user-fs.sh` | ✅ pass | 2026-08-15* |

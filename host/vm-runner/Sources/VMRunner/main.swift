@@ -17,6 +17,21 @@
 //          attaching the full four-queue shape. HID-shaped 16-byte messages
 //          per docs/hardware-contract.md. No window, no activation wall
 //          (#151), no silent synthesized drop (#179).)
+//         [--cvc-snap] (claim 0680, issue #523 item 3 capstone: attach the
+//          FIFTH virtqueue — the framebuffer-snapshot channel. The guest
+//          streams its composed scanout over queue 4 as tagged binary
+//          messages; the runner reassembles them into a raw BGRX file.
+//          Implies --via-virtio.)
+//         [--cvc-console-file <path>] (claim 0680: structured console —
+//          capture every queue-1 guest log line to <path>; also arms the
+//          guest's console tee with a kind-3 control message once the pool
+//          is ready. Requires --custom-virtio.)
+//         [--snapshot-after <marker>] (claim 0680: fire one kind-4 snapshot
+//          request when <marker> appears in the serial stream; repeatable,
+//          each instance writes <base>-<n>.raw. Requires --screen (the GPU
+//          owns the framebuffer). Implies --cvc-snap.)
+//         [--snapshot-out <base>] (claim 0680: override the snapshot output
+//          base path; default is the --screen base + "-snap".)
 //         [--sound] (milestone fifteen card A1, claim 6140: attach one
 //          VZVirtioSoundDeviceConfiguration with one
 //          VZVirtioSoundDeviceOutputStreamConfiguration (the PCM output
@@ -310,6 +325,31 @@ var cvcEchoEnabled = false
 // NSEvent synthesis, no view, no window. Implies the full four-queue device
 // (custom virtio + cvc-echo + input).
 var viaVirtioEnabled = false
+// Claim 0680 (issue #523 item 3 capstone): `--cvc-snap` adds the FIFTH
+// virtqueue — the framebuffer-snapshot channel. The guest streams its
+// composed scanout as tagged binary messages over queue 4; the runner
+// reassembles them into a raw BGRX file, replacing ScreenCaptureKit
+// scraping (and its Screen Recording TCC dependency) for gates that opt in.
+// Implies --via-virtio (five contiguous queues).
+var cvcSnapEnabled = false
+// Claim 0680: `--cvc-console-file <path>` captures every queue-1 guest log
+// line to a structured file (the structured console). When the file is set,
+// the host also answers the guest's "cvconsole-ready" line with a kind-3
+// control message arming the guest's console tee, so kernel console output
+// rides queue 1 alongside serial. Requires --custom-virtio (queue 1).
+var cvcConsoleFilePath: String?
+// Claim 0680: `--snapshot-after <marker>` fires one kind-4 snapshot request
+// when <marker> appears in the serial stream (repeatable; each instance
+// writes its own numbered .raw). `--snapshot-out <base>` overrides the
+// default output base (<screen path>-snap).
+struct SnapshotTrigger {
+    let marker: String
+    let outPath: String
+    var fired = false
+}
+var snapshotAfterMarkers: [String] = []
+var snapshotOutBase: String?
+var snapshotTriggers: [SnapshotTrigger] = []
 // Milestone five card N1 (claim 1373): `--net <capture-file>` attaches the
 // virtio-net device; the guest's TX frames are captured byte-exactly to the
 // file. nil = default (no network device attached, config.networkDevices
@@ -581,6 +621,33 @@ while idx < arguments.count {
         idx += 2
     } else if arg == "--pointer-virtio-after", idx + 1 < arguments.count {
         pointerVirtioAfter = arguments[idx + 1]
+        idx += 2
+    } else if arg == "--cvc-snap" {
+        // Claim 0680: the five-queue shape — adds the framebuffer-snapshot
+        // queue. Implies --via-virtio (contiguous queues).
+        cvcSnapEnabled = true
+        viaVirtioEnabled = true
+        customVirtioEnabled = true
+        cvcEchoEnabled = true
+        idx += 1
+    } else if arg == "--cvc-console-file", idx + 1 < arguments.count {
+        // Claim 0680: structured console — capture every queue-1 guest log
+        // line to this file and arm the guest's console tee (kind-3) when
+        // it signals readiness.
+        cvcConsoleFilePath = arguments[idx + 1]
+        customVirtioEnabled = true
+        idx += 2
+    } else if arg == "--snapshot-after", idx + 1 < arguments.count {
+        // Claim 0680: fire one kind-4 snapshot request when this serial
+        // marker appears (repeatable; outputs are numbered per instance).
+        snapshotAfterMarkers.append(arguments[idx + 1])
+        cvcSnapEnabled = true
+        viaVirtioEnabled = true
+        customVirtioEnabled = true
+        cvcEchoEnabled = true
+        idx += 2
+    } else if arg == "--snapshot-out", idx + 1 < arguments.count {
+        snapshotOutBase = arguments[idx + 1]
         idx += 2
     } else if arg == "--net", idx + 1 < arguments.count {
         netCapturePath = arguments[idx + 1]
@@ -900,6 +967,21 @@ if consoleMode || scriptMode {
     }
 }
 
+// Claim 0680: the structured-console sink. Opened when --cvc-console-file
+// was passed; the delegate writes every queue-1 guest log line into it
+// verbatim (raw bytes, no injected newlines — the guest's own '\n'
+// terminators are the only line breaks, so the file stays byte-faithful).
+var cvcConsoleFileHandle: FileHandle?
+if let path = cvcConsoleFilePath {
+    let url = URL(fileURLWithPath: path)
+    FileManager.default.createFile(atPath: url.path, contents: nil)
+    do {
+        cvcConsoleFileHandle = try FileHandle(forWritingTo: url)
+    } catch {
+        fail("Could not open cvc console file at \(url.path): \(error)")
+    }
+}
+
 let serialConfig = VZVirtioConsoleDeviceSerialPortConfiguration()
 if consoleMode || scriptMode {
     // Duplex attachment: the host-to-guest input handle is non-nil.
@@ -1003,6 +1085,22 @@ if screenshotAfter != nil, screenshotPath == nil {
 // only makes sense with a sequence to schedule.
 if pointerVirtioScript == nil, pointerVirtioAfter != nil {
     fail("--pointer-virtio-after requires --pointer-virtio (there is no sequence to schedule).")
+}
+// Claim 0680: snapshot requests ride the five-queue device and stream the
+// composed scanout, which only exists when the GPU is attached.
+if !snapshotAfterMarkers.isEmpty, screenshotPath == nil {
+    fail("--snapshot-after requires --screen (the guest composites into the virtio-gpu scanout; without it there is no framebuffer to stream).")
+}
+if cvcConsoleFilePath != nil, !customVirtioEnabled {
+    fail("--cvc-console-file requires the custom virtio device (queue 1 carries the structured console).")
+}
+// Claim 0680: build the trigger list — one numbered raw file per
+// --snapshot-after instance, in registration order.
+do {
+    let snapBase = snapshotOutBase ?? (screenshotPath.map { $0 + "-snap" } ?? "snapshot")
+    for (i, marker) in snapshotAfterMarkers.enumerated() {
+        snapshotTriggers.append(SnapshotTrigger(marker: marker, outPath: "\(snapBase)-\(i).raw"))
+    }
 }
 
 if let netCapturePath {
@@ -1246,7 +1344,7 @@ if customVirtioEnabled {
     // Loud, never silent (issue #523 acceptance): this binary was compiled
     // WITHOUT -DSPIKE, so it has no custom-virtio code at all. Ignoring
     // the flag would boot a different machine than the caller asked for.
-    fail("--custom-virtio/--cvc-echo/--via-virtio require a SPIKE build (macOS 27 SDK types); rebuild with `swift build --package-path host/vm-runner --configuration release -Xswiftc -DSPIKE` (`zig build spike-virtio` drives it). This binary cannot attach the requested device.")
+    fail("--custom-virtio/--cvc-echo/--via-virtio/--cvc-snap/--cvc-console-file/--snapshot-after require a SPIKE build (macOS 27 SDK types); rebuild with `swift build --package-path host/vm-runner --configuration release -Xswiftc -DSPIKE` (`zig build spike-virtio` drives it). This binary cannot attach the requested device.")
 }
 #endif
 do { try config.validate() } catch { fail("Invalid VM configuration: \(error)") }
@@ -1296,6 +1394,10 @@ if consoleMode {
     if let script3Path { print("  script3: \(script3Path)  (claim 7786: forwarded once after script3-after appears)") }
     if let script3After { print("  script3-after: \"\(script3After)\"  (forward script3 once after this serial text appears)") }
     if let screenshotAfter { print("  screenshot-after: \"\(screenshotAfter)\"  (capture the framebuffer once after this serial text appears)") }
+    if !snapshotTriggers.isEmpty {
+        for t in snapshotTriggers { print("  snapshot-after: \"\(t.marker)\"  (claim 0680: kind-4 request over queue 3; guest streams the scanout → \(t.outPath))") }
+    }
+    if let cvcConsoleFilePath { print("  cvc-console-file: \(cvcConsoleFilePath)  (claim 0680: structured console — every queue-1 log line captured; kind-3 arms the guest tee on \"cvconsole-ready\")") }
     if let scriptExpect { print("  script-expect: \"\(scriptExpect)\"  (exit 0 iff observed in the serial log)") }
 } else {
     print("  serial log: \(serialLogPath)  (timeout: \(Int(timeout))s)")
@@ -1956,6 +2058,34 @@ func captureScreenshotIfMarker(_ text: String) {
         screenshotAfterCaptured = true
         captureScreenshotMarker("after")
     }
+}
+
+// Claim 0680 (issue #523 item 3 capstone): marker-driven snapshot requests.
+// When a registered --snapshot-after marker appears in the serial stream,
+// enqueue one kind-4 control message; the guest composites and streams the
+// scanout back over queue 4, and the delegate writes the raw BGRX file.
+// The serial marker is CHOREOGRAPHY (when to ask), not evidence — the
+// pixels themselves travel the custom-virtio channel.
+func fireSnapshotsIfMarker(_ text: String) {
+    #if SPIKE
+    for i in snapshotTriggers.indices {
+        if snapshotTriggers[i].fired { continue }
+        let trigger = snapshotTriggers[i]
+        guard text.contains(trigger.marker) else { continue }
+        snapshotTriggers[i].fired = true
+        guard #available(macOS 27.0, *) else { continue }
+        FileHandle.standardOutput.write(Data("CVC-SNAP-REQ: kind-4 request scheduled after \"\(trigger.marker)\" transport=cv-input → \(trigger.outPath)\n".utf8))
+        CustomVirtioSpike.pendingSnapPath = trigger.outPath
+        CustomVirtioSpike.deviceQueue.async {
+            if !CustomVirtioSpike.enqueueMessageNow(
+                CustomVirtioSpike.controlMessage(CustomVirtioSpike.inputKindSnapshotReq, payload: []),
+                label: "snap-req → \(trigger.outPath)"
+            ) {
+                FileHandle.standardError.write(Data("ERROR: CVC-SNAP-REQ: queue 3 pool empty at request time (\(trigger.outPath))\n".utf8))
+            }
+        }
+    }
+    #endif
 }
 
 // ---------------------------------------------------------------------------
@@ -3441,6 +3571,7 @@ func scriptPoll() {
     }
     captureScreenshotIfDue()
     captureScreenshotIfMarker(lastText)
+    fireSnapshotsIfMarker(lastText)
     if Date() > deadline {
         print("FAILURE: expected transcript '\(scriptExpect ?? "<none>")' not observed within \(Int(timeout))s.")
         if !lastText.isEmpty {
@@ -3557,9 +3688,10 @@ enum CustomVirtioSpike {
     // queue, queue 1 = the guest log transport. The claim-3141 push echo
     // (--cvc-echo) adds queue 2 — the queue COUNT is the capability signal;
     // the guest driver probes its size through the common config. The
-    // claim-9588 input channel (--via-virtio) adds queue 3 (virtqueues are
-    // contiguous, so --via-virtio implies the push-echo shape too).
-    static let queueCount: UInt16 = viaVirtioEnabled ? 4 : (cvcEchoEnabled ? 3 : 2)
+    // claim-9588 input channel (--via-virtio) adds queue 3, and the
+    // claim-0680 snapshot channel (--cvc-snap) adds queue 4 (virtqueues are
+    // contiguous, so each deeper flag implies the full shape below it).
+    static let queueCount: UInt16 = cvcSnapEnabled ? 5 : (viaVirtioEnabled ? 4 : (cvcEchoEnabled ? 3 : 2))
 
     // ---- Claim 9588 INPUT channel (queue 3): HID-shaped input messages.
     // Wire format is normative in docs/hardware-contract.md:
@@ -3570,6 +3702,8 @@ enum CustomVirtioSpike {
     static let inputMsgLen = 16
     static let inputKindKeyboard: UInt8 = 1
     static let inputKindPointer: UInt8 = 2
+    static let inputKindConsoleCtrl: UInt8 = 3
+    static let inputKindSnapshotReq: UInt8 = 4
     static let inputKeyboardReportLen = 8
     static let inputPointerReportLen = 5
     // HID boot-protocol modifier bits (the guest's hid_modifiers_to_flags
@@ -3851,6 +3985,41 @@ enum CustomVirtioSpike {
         }
     }
 
+    // ---- Claim 0680 control plane (queue 3 carries kinds 3/4 alongside
+    // the input kinds; queue 4 streams the framebuffer back) ----
+
+    /// Build a fixed 16-byte control message ([kind][flags=0][len LE][payload]).
+    static func controlMessage(_ kind: UInt8, payload: [UInt8]) -> Data {
+        var msg = Data(repeating: 0, count: inputMsgLen)
+        msg[0] = kind
+        msg[2] = UInt8(payload.count & 0xff)
+        for (i, b) in payload.enumerated() { msg[4 + i] = b }
+        return msg
+    }
+
+    /// Snapshot wire tags + sizes (normative in docs/hardware-contract.md).
+    static let snapTagHeader: UInt8 = 0x01
+    static let snapTagChunk: UInt8 = 0x02
+    static let snapTagDone: UInt8 = 0x03
+
+    /// One in-flight snapshot assembly (touched only on the deviceQueue —
+    /// the same serial discipline as every other element access).
+    struct SnapAssembly {
+        var width = 0
+        var height = 0
+        var bpp = 0
+        var total = 0
+        var chunkLen = 0
+        var expectedChunks = 0
+        var receivedChunks = 0
+        var data = Data()
+        var outPath = ""
+    }
+    static var snap: SnapAssembly?
+    /// The output path of the snapshot request most recently sent — set by
+    /// fireSnapshotsIfMarker, consumed by the stream's header message.
+    static var pendingSnapPath: String?
+
     // ---- Claim 3141 host-push echo state (all touched only on the
     // device's serial deviceQueue) ----
     // The byte-exact request the host app writes into the guest's pre-armed
@@ -3896,6 +4065,12 @@ enum CustomVirtioSpike {
         config.customVirtioDevices = [deviceConfig]
 
         let did = 0x1040 + Int(deviceID)  // virtio transitional PCI DID = 0x1040 + device_id (add, not OR)
+        if cvcSnapEnabled {
+            return String(
+                format: "  custom virtio: ENABLED — VID 0x1af4 DID 0x%04x (virtio deviceID 0x%02x), class 0x%02x/0x%02x, %d queue(s) incl. the claim-3141 push-echo queue, the claim-9588 INPUT queue, and the claim-0680 SNAPSHOT queue (--cvc-snap)",
+                did, Int(deviceID), Int(pciClass), Int(pciSubclass), Int(queueCount)
+            )
+        }
         if viaVirtioEnabled {
             return String(
                 format: "  custom virtio: ENABLED — VID 0x1af4 DID 0x%04x (virtio deviceID 0x%02x), class 0x%02x/0x%02x, %d queue(s) incl. the claim-3141 push-echo queue and the claim-9588 INPUT queue (--via-virtio)",
@@ -3960,6 +4135,14 @@ final class CustomVirtioSpikeDeviceDelegate: NSObject, VZCustomVirtioDeviceDeleg
             // are the GUEST's — never dequeue them; each log line is the
             // host-side evidence that the pool is cycling.
             print("CUSTOM-VIRTIO-INPUT: queue 3 notified (guest rx pool cycling)")
+            return
+        }
+        if queue.queueIndex == 4 && cvcSnapEnabled {
+            // Claim 0680 snapshot queue: the guest streams header/chunk/
+            // done messages as device-read payloads; each element is
+            // acknowledged ("OK:<n>") and returned so the guest's next
+            // submit can proceed.
+            handleSnapshotNotification(queue: queue)
             return
         }
         // Drain every available element (many may be in flight — claim
@@ -4044,6 +4227,124 @@ final class CustomVirtioSpikeDeviceDelegate: NSObject, VZCustomVirtioDeviceDeleg
         print("CUSTOM-VIRTIO-PUSH: host enqueued req=\"\(CustomVirtioSpike.pushRequestText)\" (\(CustomVirtioSpike.pushRequest.count) byte(s)) into the pre-armed rx buffer")
     }
 
+    /// Claim 0680: queue-4 notifications — reassemble the guest's tagged
+    /// snapshot stream (header → chunks → done) into a raw BGRX file.
+    /// Strict-order assembly: the guest submits sequentially and waits for
+    /// each OK, so chunk seq must equal the received count. Any mismatch
+    /// reports loudly, drops the assembly, and still acknowledges the
+    /// element (the guest counts its own failure; neither side wedges).
+    private func handleSnapshotNotification(queue: VZVirtioQueue) {
+        while let element = queue.nextElement() {
+            var bytes: [UInt8] = []
+            for buffer in element.readBuffers() {
+                bytes.append(contentsOf: [UInt8](buffer))
+            }
+            if let err = consumeSnapshotMessage(bytes) {
+                print("CVC-SNAPSHOT: ERROR \(err) (\(bytes.count)-byte message dropped, assembly aborted)")
+                CustomVirtioSpike.snap = nil
+            }
+            do {
+                try element.write(Data("OK:\(bytes.count)".utf8))
+            } catch {
+                print("CVC-SNAPSHOT: ack write FAILED: \(error)")
+            }
+            element.returnToQueue()
+        }
+    }
+
+    /// Consume one tagged snapshot message; nil = accepted, String = loud
+    /// error. Mirrors the guest's little-endian framing exactly.
+    private func consumeSnapshotMessage(_ bytes: [UInt8]) -> String? {
+        guard bytes.count >= 1 else { return "empty message" }
+        switch bytes[0] {
+        case CustomVirtioSpike.snapTagHeader:
+            guard bytes.count >= 24 else { return "short header" }
+            guard bytes[1...4].elementsEqual("SNAP".utf8) else { return "bad header magic" }
+            guard bytes[5] == 1 else { return "unsupported header version \(bytes[5])" }
+            var a = CustomVirtioSpike.SnapAssembly()
+            func le32(_ off: Int) -> Int {
+                Int(bytes[off]) | (Int(bytes[off + 1]) << 8) | (Int(bytes[off + 2]) << 16) | (Int(bytes[off + 3]) << 24)
+            }
+            a.bpp = Int(bytes[6])
+            a.width = le32(8)
+            a.height = le32(12)
+            a.total = le32(16)
+            a.chunkLen = le32(20)
+            guard a.width > 0, a.height > 0, a.bpp == 4 else { return "nonsensical geometry w=\(a.width) h=\(a.height) bpp=\(a.bpp)" }
+            guard a.total > 0, a.chunkLen > 0 else { return "nonsensical sizes total=\(a.total) chunk=\(a.chunkLen)" }
+            a.expectedChunks = (a.total + a.chunkLen - 1) / a.chunkLen
+            a.data.reserveCapacity(a.total)
+            // The out path rides the trigger that requested THIS stream;
+            // keep it across the header reset by re-reading the pending
+            // trigger assignment made in fireSnapshotsIfMarker.
+            if let pending = CustomVirtioSpike.pendingSnapPath { a.outPath = pending }
+            CustomVirtioSpike.pendingSnapPath = nil
+            CustomVirtioSpike.snap = a
+            print("CVC-SNAPSHOT: header w=\(a.width) h=\(a.height) bpp=\(a.bpp) total=\(a.total) chunk=\(a.chunkLen) chunks=\(a.expectedChunks) → \(a.outPath)")
+            return nil
+        case CustomVirtioSpike.snapTagChunk:
+            guard var a = CustomVirtioSpike.snap else { return "chunk before header" }
+            guard bytes.count >= 12 else { return "short chunk envelope" }
+            let seq = Int(bytes[2]) | (Int(bytes[3]) << 8)
+            let len = Int(bytes[4]) | (Int(bytes[5]) << 8)
+            let cksum = UInt16(Int(bytes[6]) | (Int(bytes[7]) << 8))
+            guard seq == a.receivedChunks else { return "chunk seq \(seq) out of order (expected \(a.receivedChunks))" }
+            guard len == bytes.count - 12, len > 0 else { return "chunk len field \(len) != payload \(bytes.count - 12)" }
+            guard rfc1071(Array(bytes[12...])) == cksum else { return "chunk seq \(seq) cksum mismatch" }
+            a.data.append(contentsOf: bytes[12...])
+            a.receivedChunks += 1
+            CustomVirtioSpike.snap = a
+            if a.receivedChunks % 32 == 0 {
+                print("CVC-SNAPSHOT: chunk \(a.receivedChunks)/\(a.expectedChunks)")
+            }
+            return nil
+        case CustomVirtioSpike.snapTagDone:
+            guard let a = CustomVirtioSpike.snap else { return "done before header" }
+            guard bytes.count >= 10 else { return "short done message" }
+            let chunks = Int(bytes[2]) | (Int(bytes[3]) << 8)
+            let total = Int(bytes[4]) | (Int(bytes[5]) << 8) | (Int(bytes[6]) << 16) | (Int(bytes[7]) << 24)
+            let cksum = UInt16(Int(bytes[8]) | (Int(bytes[9]) << 8))
+            guard chunks == a.expectedChunks, chunks == a.receivedChunks else {
+                return "done claims \(chunks) chunks (expected \(a.expectedChunks), received \(a.receivedChunks))"
+            }
+            guard total == a.data.count else { return "done claims \(total) bytes (received \(a.data.count))" }
+            let frameCksum = rfc1071([UInt8](a.data))
+            guard frameCksum == cksum else {
+                return String(format: "frame cksum mismatch got=0x%04x want=0x%04x", frameCksum, cksum)
+            }
+            let out = Data(a.data)
+            let url = URL(fileURLWithPath: a.outPath)
+            do {
+                try out.write(to: url)
+            } catch {
+                return "raw write to \(a.outPath) FAILED: \(error)"
+            }
+            print(String(format: "CVC-SNAPSHOT: done chunks=%d bytes=%d cksum=0x%04x path=%@", chunks, total, cksum, a.outPath))
+            CustomVirtioSpike.snap = nil
+            return nil
+        default:
+            return "unknown tag 0x\(String(bytes[0], radix: 16))"
+        }
+    }
+
+    /// RFC 1071 one's-complement Internet checksum over big-endian words —
+    /// byte-for-byte the same function as the guest's ipv4.checksum /
+    /// virtio_custom.checksum1071, so the host verifies what the guest sent.
+    /// The accumulator is UInt64: a whole-frame checksum over the 3.5 MiB
+    /// scanout overflows UInt32 before the fold (observed live as a Swift
+    /// "arithmetic overflow" trap, claim 0680).
+    private func rfc1071(_ b: [UInt8]) -> UInt16 {
+        var sum: UInt64 = 0
+        var i = 0
+        while i + 1 < b.count {
+            sum += (UInt64(b[i]) << 8) | UInt64(b[i + 1])
+            i += 2
+        }
+        if i < b.count { sum += UInt64(b[i]) << 8 }
+        while (sum >> 16) != 0 { sum = (sum & 0xffff) + (sum >> 16) }
+        return ~UInt16(sum & 0xffff)
+    }
+
     private func process(element: VZVirtioQueueElement, device: VZCustomVirtioDevice, queueIndex: Int) {
         // Reassemble the guest's device-read spans (claim 9492: a
         // >4 KiB payload arrives as several readBuffers()).
@@ -4057,6 +4358,22 @@ final class CustomVirtioSpikeDeviceDelegate: NSObject, VZCustomVirtioDeviceDeleg
             // write buffers — the guest verifies the ack.
             let line = String(bytes: bytes, encoding: .utf8) ?? "<non-utf8>"
             print("CUSTOM-VIRTIO-LOG: \(line)")
+            // Claim 0680: structured console — raw bytes into the file, no
+            // injected newlines, so the capture stays byte-faithful.
+            if let h = cvcConsoleFileHandle {
+                do { try h.write(Data(bytes)) } catch {
+                    print("CUSTOM-VIRTIO-CONSOLE: file write FAILED: \(error)")
+                }
+            }
+            if line == "cvconsole-ready" && cvcConsoleFileHandle != nil {
+                // Claim 0680: the guest's queue-3 pool is live — arm the
+                // console tee (kind-3, bit0=1) NOW on this serial
+                // deviceQueue, event-driven like the claim-3141 push.
+                _ = CustomVirtioSpike.enqueueMessageNow(
+                    CustomVirtioSpike.controlMessage(CustomVirtioSpike.inputKindConsoleCtrl, payload: [0x01]),
+                    label: "console-arm enable=1"
+                )
+            }
             if line == "cvc-push-armed" && cvcEchoEnabled {
                 // Claim 3141: the guest pre-armed its push rx buffer — the
                 // HOST now chooses the moment and enqueues the request.

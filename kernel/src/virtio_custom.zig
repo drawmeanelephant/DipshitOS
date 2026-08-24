@@ -105,6 +105,7 @@ const mmio = @import("mmio.zig");
 const mmu = @import("mmu.zig");
 const pci = @import("pci.zig");
 const evidence = @import("evidence.zig");
+const virtio_gpu = @import("virtio_gpu.zig");
 
 const VirtqDesc = extern struct {
     addr: u64,
@@ -154,8 +155,13 @@ pub const push_qidx: u16 = 2;
 /// which attaches FOUR virtqueues; contiguous queues mean --via-virtio
 /// implies the push-echo shape too).
 pub const input_qidx: u16 = 3;
-/// Probe up to the input queue (the deepest optional queue).
-pub const max_queue_probe: u16 = input_qidx + 1;
+/// The claim-0680 snapshot queue index (present only under the runner's
+/// `--cvc-snap`, which attaches FIVE virtqueues; --cvc-snap therefore
+/// implies the full four-queue shape). Queue-count IS the capability
+/// signal, unchanged rule.
+pub const snap_qidx: u16 = 4;
+/// Probe up to the snapshot queue (the deepest optional queue).
+pub const max_queue_probe: u16 = snap_qidx + 1;
 /// The pre-armed push receive buffer: capacity (one device-write descriptor)
 /// and the exact request size the host writes (`"CVC-PING-0x42"`).
 pub const push_buf_len: usize = 16;
@@ -167,6 +173,8 @@ pub var armed_queues: u16 = 0;
 pub var has_push_queue: bool = false;
 /// True when init armed the optional input queue (index `input_qidx`).
 pub var has_input_queue: bool = false;
+/// True when init armed the optional snapshot queue (index `snap_qidx`).
+pub var has_snap_queue: bool = false;
 
 /// Descriptor flags (Virtio 1.3 §2.7.6).
 const vq_next: u16 = 0x1; // VIRTQ_DESC_F_NEXT: more descriptors follow
@@ -666,6 +674,7 @@ pub fn init() bool {
     armed_queues = 0;
     has_push_queue = false;
     has_input_queue = false;
+    has_snap_queue = false;
     var qi: u16 = 0;
     while (qi < max_queue_probe) : (qi += 1) {
         vp_write16(0x16, qi); // queue_select
@@ -694,6 +703,7 @@ pub fn init() bool {
     if (armed_queues < queue_count) return false;
     has_push_queue = armed_queues > push_qidx;
     has_input_queue = armed_queues > input_qidx;
+    has_snap_queue = armed_queues > snap_qidx;
     vp_write8(0x14, 1 | 2 | 8 | 4); // DRIVER_OK
     if ((vp_read8(0x14) & 4) == 0) return false;
     cv_ready = true;
@@ -829,15 +839,24 @@ pub fn submit(payload_buf: []const u8, reply_buf: []u8) ?u16 {
 pub const input_buf_cap: usize = 32;
 /// Fixed total message size: [kind u8][flags u8][len u16le][12-byte payload].
 pub const input_msg_len: usize = 16;
-/// Message kinds (kind 1 keyboard, kind 2 pointer — claim 9367).
+/// Message kinds (kind 1 keyboard, kind 2 pointer — claim 9367; kind 3
+/// console control and kind 4 snapshot request — claim 0680). Queue 3 is
+/// the general host→guest CONTROL/INPUT queue: every kind rides the same
+/// 16-byte envelope into the same pre-armed receive pool.
 pub const input_kind_keyboard: u8 = 1;
 pub const input_kind_pointer: u8 = 2;
+pub const input_kind_console_ctrl: u8 = 3;
+pub const input_kind_snapshot_req: u8 = 4;
 /// Kind-1 payload length: the raw HID keyboard boot report.
 pub const input_keyboard_rep_len: usize = 8;
 /// Kind-2 payload length: the raw absolute-pointer report
 /// [buttons, x_lo, x_hi, y_lo, y_hi] — the same shape the XHCI pointer's
 /// interrupt-IN reports decode from (coords are HID absolute 0..32767).
 pub const input_pointer_rep_len: usize = 5;
+/// Kind-3 payload length: one control byte (bit0 = console-tee enable).
+pub const input_ctrl_rep_len: usize = 1;
+/// Kind-4 payload length: the snapshot request is empty.
+pub const input_snap_req_len: usize = 0;
 /// Pre-armed receive buffers (bounded pool; the host paces well below this
 /// and the idle-loop drain replenishes within one tick anyway).
 pub const input_pool_count: usize = 8;
@@ -849,10 +868,12 @@ pub var input_rx_bufs: [input_pool_count][input_buf_cap]u8 align(16) = undefined
 var input_rx_handles: [input_pool_count]u16 = [_]u16{0} ** input_pool_count;
 /// True once `arm_input_pool` posted + kicked the whole pool.
 pub var input_armed: bool = false;
-/// Messages consumed and dispatched (valid envelopes, either kind).
+/// Messages consumed and dispatched (valid envelopes, any kind).
 pub var input_rx_count: u32 = 0;
 /// Kind-2 pointer messages consumed and dispatched (claim 9367).
 pub var input_ptr_count: u32 = 0;
+/// Kind-3 console-control messages consumed (claim 0680).
+pub var input_ctrl_count: u32 = 0;
 /// Malformed messages dropped (bad kind / bad len / short envelope) — the
 /// loud-by-counter failure mode; never a partial decode.
 pub var input_bad_count: u32 = 0;
@@ -921,6 +942,22 @@ fn dispatch_input_msg(msg: []const u8) void {
             }
             input_ptr_count += 1;
             if (on_pointer_report) |hook| hook(msg[4 .. 4 + len]);
+        },
+        input_kind_console_ctrl => {
+            if (len != input_ctrl_rep_len or msg.len < 4 + len) {
+                input_bad_count += 1;
+                return;
+            }
+            input_ctrl_count += 1;
+            console_tee_set_enabled((msg[4] & 0x01) != 0);
+        },
+        input_kind_snapshot_req => {
+            if (len != input_snap_req_len) {
+                input_bad_count += 1;
+                return;
+            }
+            input_rx_count += 1;
+            snap_pending = true; // serviced from the idle seam, never inline
         },
         else => {
             input_bad_count += 1;
@@ -1053,6 +1090,11 @@ pub fn cvlog_puts(line: []const u8) bool {
     // array would fold into .rodata with a baked (image-relative) pointer.
     cv_scatter[0] = cv_log_line[0..cv_log_line_len];
     const h = submit_ex(1, cv_scatter[0..1], cv_log_ack_buf[0..], false) orelse return false;
+    // Claim 0680 fix: the chain MUST go back to the free list — a polled
+    // send-and-forget here leaked two descriptors per line, which the
+    // spike's five lines survived but the console tee's sustained traffic
+    // did not (ring exhausted after ~16 sends, every later send dropped).
+    defer free_chain_q(1, h);
     const n = wait(1, h, cv_log_budget, cv_log_ack_buf[0..]) orelse return false;
     cv_log_ack_len = @min(@as(usize, n), cv_log_ack_buf.len);
     if (cv_log_ack_len < 5) return false; // "ACK:0" is the shortest valid ack
@@ -1066,8 +1108,269 @@ pub fn cvlog_puts(line: []const u8) bool {
 }
 
 // ---------------------------------------------------------------------------
-// Host tests — only the pieces that need no device
+// Structured console tee (claim 0680, issue #523 item 3): when the host
+// arms it (kind-3 control message), every kernel console byte is DUPLICATED
+// onto queue 1 as it already is on serial — vm-serial.log parsing stops
+// being the only way to observe guest output. Line-buffered like the
+// virtio-console transport: complete lines (terminated by '\n') go as one
+// message; a partial line flushes from the idle seam (the prompt case).
+// Default-off, additive: without the kind-3 message nothing changes.
 // ---------------------------------------------------------------------------
+
+/// Tee line capacity. Longer kernel output hard-splits into back-to-back
+/// messages; the host appends the raw bytes verbatim (NO injected newline),
+/// so the reconstructed stream stays byte-faithful to serial across splits.
+pub const tee_line_cap: usize = 256;
+/// Bounded wait budget for ONE tee'd line — much tighter than the spike's
+/// cv_log_budget: console output happens everywhere, and a stalled host
+/// must cost microseconds-plus-counter, never a hang.
+pub const tee_budget: usize = 4_000_000;
+
+var tee_line_buf: [tee_line_cap]u8 align(16) = undefined;
+var tee_line_len: usize = 0;
+var tee_ack_buf: [32]u8 align(16) = undefined;
+/// True once a kind-3 enable arrived (and stayed true until an explicit
+/// disable — bit0=0 — arrives).
+pub var tee_enabled: bool = false;
+/// Lines dropped because the host did not drain queue 1 within the budget
+/// (or the transport was unavailable). Loud-by-counter; never a wedge.
+pub var tee_drop_count: u32 = 0;
+/// Lines successfully delivered over queue 1.
+pub var tee_sent_count: u32 = 0;
+
+/// Arm/disarm the console tee (kind-3 payload bit0). Resets the partial
+/// accumulator either way so no stale fragment leaks across state changes.
+fn console_tee_set_enabled(enable: bool) void {
+    tee_enabled = enable;
+    tee_line_len = 0;
+    if (enable) _ = tee_send_line("cvconsole: armed\n");
+}
+
+/// Accumulate one console byte; flush on newline or when the staging
+/// buffer is full. Called from uart_putc — MUST stay cheap when disarmed.
+pub fn console_tee_putc(byte: u8) void {
+    if (!tee_enabled or !cv_ready) return;
+    if (tee_line_len >= tee_line_cap) tee_flush(false);
+    if (tee_line_len >= tee_line_cap) {
+        // Even after the forced flush the byte does not fit (impossible:
+        // cap > 0 means a flush always empties) — count and drop honestly.
+        tee_drop_count += 1;
+        return;
+    }
+    tee_line_buf[tee_line_len] = byte;
+    tee_line_len += 1;
+    if (byte == '\n') tee_flush(true);
+}
+
+/// Idle-seam hook: deliver a partial line (the prompt has no trailing
+/// newline). One cheap branch when there is nothing buffered.
+pub fn console_tee_flush_partial() void {
+    if (!tee_enabled or !cv_ready or tee_line_len == 0) return;
+    tee_flush(false);
+}
+
+/// Send the accumulated bytes as one queue-1 message and reset the
+/// accumulator. `terminated` is diagnostic-only today (the wire form is
+/// the raw bytes either way).
+fn tee_flush(terminated: bool) void {
+    _ = terminated;
+    const n = tee_line_len;
+    tee_line_len = 0;
+    if (n == 0) return;
+    if (!tee_send_line(tee_line_buf[0..n])) tee_drop_count += 1;
+}
+
+/// One tee message: copy into the BSS staging buffer, submit on queue 1,
+/// poll-wait for the host's ACK:<len>, validate. False = dropped (counted
+/// by the caller). Self-contained — deliberately NOT cvlog_puts, whose
+/// 64-byte report buffer would split long kernel lines mid-token.
+fn tee_send_line(line: []const u8) bool {
+    if (!cv_ready) return false;
+    if (cv_rings[1].armed == false) return false;
+    if (line.len == 0 or line.len > tee_tx_buf.len) return false;
+    @memcpy(tee_tx_buf[0..line.len], line);
+    cv_scatter[0] = tee_tx_buf[0..line.len];
+    const h = submit_ex(1, cv_scatter[0..1], tee_ack_buf[0..], false) orelse return false;
+    defer free_chain_q(1, h); // claim 0680: never leak a polled send's chain
+    const n = wait(1, h, tee_budget, tee_ack_buf[0..]) orelse return false;
+    if (n < 4) return false;
+    if (!std.mem.eql(u8, tee_ack_buf[0..3], "OK" ++ ":")) return false;
+    tee_sent_count += 1;
+    return true;
+}
+
+/// The tee's own TX staging (BSS — runtime address discipline, claim 0015).
+var tee_tx_buf: [tee_line_cap]u8 align(16) = undefined;
+
+// ---------------------------------------------------------------------------
+// Framebuffer snapshot channel (claim 0680, issue #523 item 3): a kind-4
+// request arms `snap_pending`; the idle seam calls service_snapshot(), which
+// streams the composed scanout (`virtio_gpu.gpu_fb`) as tagged binary
+// messages over the optional fifth queue. Wire format normative in
+// docs/hardware-contract.md:
+//
+//   header  [tag=0x01]['S''N''A''P'][ver=1][bpp][width u32le]
+//           [height u32le][total u32le][chunk u32le]           (32 bytes)
+//   chunk   [tag=0x02][seq u16le][len u16le][cksum u16le][rsvd u8 x6]
+//           [payload ≤ chunk_len]                              (12 + len)
+//   done    [tag=0x03][chunks u16le][total u32le][cksum u16le]
+//           [rsvd x8]                                          (16 bytes)
+//
+// cksum is the RFC 1071 one's-complement checksum (big-endian words) over
+// the chunk payload / the whole frame respectively. Chunks point DIRECTLY
+// into gpu_fb (no staging copy, no BSS impact); submit_ex cleans their
+// dcache range before the kick. The host acknowledges every element with
+// "OK:<n>" exactly like the log transport.
+// ---------------------------------------------------------------------------
+
+pub const snap_tag_header: u8 = 0x01;
+pub const snap_tag_chunk: u8 = 0x02;
+pub const snap_tag_done: u8 = 0x03;
+/// Snapshot chunk payload size: 32 KiB → 113 chunks for the 1280×720×4
+/// scanout. Small enough for one descriptor per part, large enough that
+/// the round trips do not dominate.
+pub const snap_chunk_len: usize = 32768;
+/// True while a kind-4 request waits for the idle seam (set by
+/// dispatch_input_msg, consumed by service_snapshot).
+pub var snap_pending: bool = false;
+/// Snapshots successfully streamed since boot.
+pub var snap_count: u32 = 0;
+/// Snapshot requests refused or failed mid-stream (loud by counter).
+pub var snap_fail_count: u32 = 0;
+
+/// BSS buffers the framing messages are built into (runtime addresses —
+/// anonymous slice arrays would fold .rodata pointers into descriptors).
+var snap_hdr_buf: [32]u8 align(16) = undefined;
+var snap_chunk_hdr_buf: [12]u8 align(16) = undefined;
+var snap_done_buf: [16]u8 align(16) = undefined;
+var snap_ack_buf: [32]u8 align(16) = undefined;
+
+/// RFC 1071 one's-complement Internet checksum, big-endian word semantics
+/// (mirrors ipv4.checksum; kept local so this module stays self-contained
+/// and testable without importing the network stack). The accumulator is
+/// u64: a whole-frame checksum over the 3.5 MiB scanout overflows u32
+/// before the fold (observed live, claim 0680).
+pub fn checksum1071(data: []const u8) u16 {
+    var sum: u64 = 0;
+    var i: usize = 0;
+    while (i + 1 < data.len) : (i += 2) {
+        sum += (@as(u64, data[i]) << 8) | data[i + 1];
+    }
+    if (i < data.len) sum += @as(u64, data[i]) << 8;
+    while (sum >> 16 != 0) sum = (sum & 0xffff) + (sum >> 16);
+    return ~@as(u16, @truncate(sum));
+}
+
+fn put16(buf: []u8, off: usize, v: u16) void {
+    buf[off] = @truncate(v & 0xff);
+    buf[off + 1] = @truncate(v >> 8);
+}
+fn put32(buf: []u8, off: usize, v: u32) void {
+    buf[off] = @truncate(v & 0xff);
+    buf[off + 1] = @truncate((v >> 8) & 0xff);
+    buf[off + 2] = @truncate((v >> 16) & 0xff);
+    buf[off + 3] = @truncate((v >> 24) & 0xff);
+}
+
+/// Build the 32-byte snapshot header message (pure; unit-tested).
+pub fn build_snap_header(w: u32, h: u32, bpp: u32, total: u32, chunk: u32) [32]u8 {
+    var m = [_]u8{0} ** 32;
+    m[0] = snap_tag_header;
+    m[1] = 'S';
+    m[2] = 'N';
+    m[3] = 'A';
+    m[4] = 'P';
+    m[5] = 1; // version
+    m[6] = @truncate(bpp);
+    put32(&m, 8, w);
+    put32(&m, 12, h);
+    put32(&m, 16, total);
+    put32(&m, 20, chunk);
+    return m;
+}
+
+/// Build one 12-byte chunk header (payload follows as its own descriptor).
+pub fn build_snap_chunk(seq: u16, len: u16, cksum: u16) [12]u8 {
+    var m = [_]u8{0} ** 12;
+    m[0] = snap_tag_chunk;
+    put16(&m, 2, seq);
+    put16(&m, 4, len);
+    put16(&m, 6, cksum);
+    return m;
+}
+
+/// Build the 16-byte done message.
+pub fn build_snap_done(chunks: u16, total: u32, cksum: u16) [16]u8 {
+    var m = [_]u8{0} ** 16;
+    m[0] = snap_tag_done;
+    put16(&m, 2, chunks);
+    put32(&m, 4, total);
+    put16(&m, 8, cksum);
+    return m;
+}
+
+/// Submit one pre-built message (+ optional second scatter part) on the
+/// snapshot queue and verify the host's OK ack. Returns false loudly.
+fn snap_submit(parts: []const []const u8) bool {
+    const h = submit_ex(snap_qidx, parts, snap_ack_buf[0..], false) orelse return false;
+    defer free_chain_q(snap_qidx, h); // claim 0680: 113-chunk streams cannot afford leaks
+    const n = wait(snap_qidx, h, tee_budget * 4, snap_ack_buf[0..]) orelse return false;
+    if (n < 3) return false;
+    return std.mem.eql(u8, snap_ack_buf[0..3], "OK" ++ ":");
+}
+
+/// Stream the whole framebuffer (called from the idle seam AFTER poll_input
+/// so the latest composite is what ships). One-shot per kind-4 request;
+/// failures increment `snap_fail_count` and end the stream early — the
+/// host-side assembly reports what it got.
+pub fn service_snapshot() void {
+    snap_pending = false;
+    if (!cv_ready or !has_snap_queue) {
+        snap_fail_count += 1;
+        return;
+    }
+    if (!virtio_gpu.gpu_setup_ok) {
+        // No scanout was ever set up (GPU absent or not yet flushed):
+        // refuse loudly-by-counter rather than ship an undefined buffer.
+        snap_fail_count += 1;
+        return;
+    }
+    const total = virtio_gpu.fb_size;
+    const frame_cksum = checksum1071(virtio_gpu.gpu_fb[0..]);
+    const chunks: u16 = @intCast((total + snap_chunk_len - 1) / snap_chunk_len);
+
+    snap_hdr_buf = build_snap_header(virtio_gpu.fb_width, virtio_gpu.fb_height, virtio_gpu.fb_bpp, @intCast(total), @intCast(snap_chunk_len));
+    cv_scatter[0] = snap_hdr_buf[0..];
+    if (!snap_submit(cv_scatter[0..1])) {
+        snap_fail_count += 1;
+        return;
+    }
+
+    var seq: u16 = 0;
+    var off: usize = 0;
+    while (off < total) : ({
+        off += snap_chunk_len;
+        seq += 1;
+    }) {
+        const n: usize = @min(snap_chunk_len, total - off);
+        const cks = checksum1071(virtio_gpu.gpu_fb[off..][0..n]);
+        snap_chunk_hdr_buf = build_snap_chunk(seq, @intCast(n), cks);
+        cv_scatter[0] = snap_chunk_hdr_buf[0..];
+        cv_scatter[1] = virtio_gpu.gpu_fb[off..][0..n];
+        if (!snap_submit(cv_scatter[0..2])) {
+            snap_fail_count += 1;
+            return;
+        }
+    }
+
+    snap_done_buf = build_snap_done(chunks, @intCast(total), frame_cksum);
+    cv_scatter[0] = snap_done_buf[0..];
+    if (!snap_submit(cv_scatter[0..1])) {
+        snap_fail_count += 1;
+        return;
+    }
+    snap_count += 1;
+}
 
 /// Test-hook recording (module-level BSS — nested functions cannot capture
 /// mutable locals in Zig 0.16).
@@ -1278,10 +1581,10 @@ test "virtio_custom: push-echo shapes (claim 3141) — queue index, buffer sizes
     // descriptor of capacity 16 and the request is exactly 13 bytes
     // ("CVC-PING-0x42").
     try std.testing.expectEqual(@as(u16, 2), push_qidx);
-    // The probe depth now covers the claim-9588 input queue too; the push
-    // queue sits one below it.
+    // The probe depth now covers the claim-0680 snapshot queue too; the
+    // push queue sits two below it.
     try std.testing.expectEqual(push_qidx + 1, input_qidx);
-    try std.testing.expectEqual(@as(u16, 4), max_queue_probe);
+    try std.testing.expectEqual(@as(u16, 5), max_queue_probe);
     try std.testing.expect(push_buf_len >= push_req_len);
     try std.testing.expectEqual(@as(usize, 16), push_rx_buf.len);
 }
@@ -1290,7 +1593,7 @@ test "virtio_custom: input-channel shapes (claim 9588) — queue index, envelope
     // The input queue rides at index 3 (four-queue --via-virtio device);
     // the envelope is a fixed 16 bytes carrying an 8-byte HID report.
     try std.testing.expectEqual(@as(u16, 3), input_qidx);
-    try std.testing.expectEqual(@as(u16, 4), max_queue_probe);
+    try std.testing.expectEqual(@as(u16, 5), max_queue_probe);
     try std.testing.expectEqual(@as(usize, 16), input_msg_len);
     try std.testing.expectEqual(@as(usize, 8), input_keyboard_rep_len);
     try std.testing.expectEqual(@as(u8, 1), input_kind_keyboard);
@@ -1391,4 +1694,143 @@ test "virtio_custom: kind-2 pointer messages dispatch through the pointer hook (
     try std.testing.expectEqual(@as(usize, 1), test_ptr_calls);
     input_ptr_count = 0;
     input_bad_count = 0;
+}
+
+test "virtio_custom: checksum1071 matches RFC 1071 semantics" {
+    // Zero data folds to the complement of zero.
+    try std.testing.expectEqual(@as(u16, 0xffff), checksum1071(&[_]u8{ 0, 0, 0, 0 }));
+    // Big-endian word pairing: {0x01,0x02,0x03,0x04} sums 0x0102+0x0304
+    // = 0x0406 → complement 0xfbf9.
+    try std.testing.expectEqual(@as(u16, 0xfbf9), checksum1071(&[_]u8{ 0x01, 0x02, 0x03, 0x04 }));
+    // Odd length pads the trailing byte with zero: {0x01,0x02,0x03}
+    // sums 0x0102 + 0x0300 = 0x0402 → complement 0xfbfd.
+    try std.testing.expectEqual(@as(u16, 0xfbfd), checksum1071(&[_]u8{ 0x01, 0x02, 0x03 }));
+    // Carry folding: 0xff00 + 0xff00 = 0x1fe00 → fold 0xfe01 → complement
+    // 0x01fe.
+    try std.testing.expectEqual(@as(u16, 0x01fe), checksum1071(&[_]u8{ 0xff, 0x00, 0xff, 0x00 }));
+    // Whole-frame scale: 256 KiB of 0xff = 131072 words × 0xffff sums to
+    // 0x1_FFFE_0000, which OVERFLOWS a u32 accumulator before folding
+    // (observed live as a host-side Swift arithmetic-overflow trap,
+    // claim 0680). Fold: 0x1_FFFE_0000 → 0x1_FFFE → 0xFFFF → complement
+    // 0x0000 — a valid checksum of zero, exactly what the wire needs.
+    const big_ff = [_]u8{0xff} ** 262144;
+    try std.testing.expectEqual(@as(u16, 0x0000), checksum1071(&big_ff));
+}
+
+test "virtio_custom: snapshot framing builders produce the documented wire shapes (claim 0680)" {
+    const hdr = build_snap_header(1280, 720, 4, 3686400, 32768);
+    try std.testing.expectEqual(@as(u8, snap_tag_header), hdr[0]);
+    try std.testing.expectEqualStrings("SNAP", hdr[1..5]);
+    try std.testing.expectEqual(@as(u8, 1), hdr[5]); // version
+    try std.testing.expectEqual(@as(u8, 4), hdr[6]); // bpp
+    try std.testing.expectEqual(@as(u64, 1280), @as(u64, hdr[8]) | (@as(u64, hdr[9]) << 8) | (@as(u64, hdr[10]) << 16) | (@as(u64, hdr[11]) << 24));
+    try std.testing.expectEqual(@as(u64, 720), @as(u64, hdr[12]) | (@as(u64, hdr[13]) << 8) | (@as(u64, hdr[14]) << 16) | (@as(u64, hdr[15]) << 24));
+    try std.testing.expectEqual(@as(u64, 3686400), @as(u64, hdr[16]) | (@as(u64, hdr[17]) << 8) | (@as(u64, hdr[18]) << 16) | (@as(u64, hdr[19]) << 24));
+    try std.testing.expectEqual(@as(u64, 32768), @as(u64, hdr[20]) | (@as(u64, hdr[21]) << 8) | (@as(u64, hdr[22]) << 16) | (@as(u64, hdr[23]) << 24));
+    for (hdr[24..32]) |b| try std.testing.expectEqual(@as(u8, 0), b);
+
+    const chunk = build_snap_chunk(112, 32768, 0xbeef);
+    try std.testing.expectEqual(@as(u8, snap_tag_chunk), chunk[0]);
+    try std.testing.expectEqual(@as(u64, 112), @as(u64, chunk[2]) | (@as(u64, chunk[3]) << 8));
+    try std.testing.expectEqual(@as(u64, 32768), @as(u64, chunk[4]) | (@as(u64, chunk[5]) << 8));
+    try std.testing.expectEqual(@as(u64, 0xbeef), @as(u64, chunk[6]) | (@as(u64, chunk[7]) << 8));
+
+    const done = build_snap_done(113, 3686400, 0x1234);
+    try std.testing.expectEqual(@as(u8, snap_tag_done), done[0]);
+    try std.testing.expectEqual(@as(u64, 113), @as(u64, done[2]) | (@as(u64, done[3]) << 8));
+    try std.testing.expectEqual(@as(u64, 3686400), @as(u64, done[4]) | (@as(u64, done[5]) << 8) | (@as(u64, done[6]) << 16) | (@as(u64, done[7]) << 24));
+    try std.testing.expectEqual(@as(u64, 0x1234), @as(u64, done[8]) | (@as(u64, done[9]) << 8));
+
+    // Chunk-count arithmetic for the real scanout: ceil(3686400 / 32768).
+    const total: usize = virtio_gpu.fb_size;
+    try std.testing.expectEqual(@as(usize, 113), (total + snap_chunk_len - 1) / snap_chunk_len);
+}
+
+test "virtio_custom: kind-3 console control arms and disarms the tee (claim 0680)" {
+    var msg: [input_msg_len]u8 align(16) = undefined;
+    msg[0] = input_kind_console_ctrl;
+    msg[1] = 0;
+    msg[2] = @intCast(input_ctrl_rep_len & 0xff);
+    msg[3] = 0;
+
+    tee_enabled = false;
+    tee_line_len = 0;
+    input_ctrl_count = 0;
+    input_bad_count = 0;
+
+    msg[4] = 0x01; // bit0 = enable
+    dispatch_input_msg(&msg);
+    try std.testing.expectEqual(@as(bool, true), tee_enabled);
+    try std.testing.expectEqual(@as(u32, 1), input_ctrl_count);
+    try std.testing.expectEqual(@as(u32, 0), input_bad_count);
+    try std.testing.expectEqual(@as(usize, 0), tee_line_len); // accumulator reset
+
+    msg[4] = 0x00; // disable
+    dispatch_input_msg(&msg);
+    try std.testing.expectEqual(@as(bool, false), tee_enabled);
+    try std.testing.expectEqual(@as(u32, 2), input_ctrl_count);
+
+    // Wrong payload length is malformed, not a state change.
+    msg[2] = 0;
+    dispatch_input_msg(&msg);
+    try std.testing.expectEqual(@as(bool, false), tee_enabled);
+    try std.testing.expectEqual(@as(u32, 1), input_bad_count);
+    input_ctrl_count = 0;
+    input_bad_count = 0;
+}
+
+test "virtio_custom: kind-4 snapshot request pends for the idle seam (claim 0680)" {
+    var msg: [input_msg_len]u8 align(16) = undefined;
+    msg[0] = input_kind_snapshot_req;
+    msg[1] = 0;
+    msg[2] = 0;
+    msg[3] = 0;
+
+    snap_pending = false;
+    input_bad_count = 0;
+    dispatch_input_msg(&msg);
+    try std.testing.expectEqual(@as(bool, true), snap_pending);
+    try std.testing.expectEqual(@as(u32, 0), input_bad_count);
+
+    // A non-empty payload under a snapshot envelope is malformed.
+    msg[2] = 1;
+    dispatch_input_msg(&msg);
+    try std.testing.expectEqual(@as(u32, 1), input_bad_count);
+    input_bad_count = 0;
+}
+
+test "virtio_custom: console tee accumulator buffers, splits, and drops (claim 0680)" {
+    tee_enabled = true;
+    cv_ready = true; // accumulate for real; sends still fail (rings unarmed)
+    tee_line_len = 0;
+    tee_drop_count = 0;
+    defer cv_ready = false;
+
+    // Bytes accumulate until newline; the flush attempt fails unarmed and
+    // counts as a drop (loud-by-counter), leaving the accumulator empty.
+    console_tee_putc('a');
+    console_tee_putc('b');
+    try std.testing.expectEqual(@as(usize, 2), tee_line_len);
+    console_tee_putc('\n');
+    try std.testing.expectEqual(@as(usize, 0), tee_line_len);
+    try std.testing.expectEqual(@as(u32, 1), tee_drop_count);
+
+    // Overflow forces a split exactly at the capacity boundary: byte 257
+    // triggers one failed (unarmed) flush of the full 256-byte line —
+    // counted as a drop — then lands in the emptied accumulator; the
+    // remaining 7 bytes follow.
+    tee_drop_count = 0;
+    var i: usize = 0;
+    while (i < tee_line_cap + 8) : (i += 1) console_tee_putc('x');
+    try std.testing.expectEqual(@as(usize, 8), tee_line_len);
+    try std.testing.expectEqual(@as(u32, 1), tee_drop_count);
+
+    // Disarmed putc is a cheap no-op.
+    tee_enabled = false;
+    tee_line_len = 0;
+    tee_drop_count = 0;
+    console_tee_putc('z');
+    try std.testing.expectEqual(@as(usize, 0), tee_line_len);
+    try std.testing.expectEqual(@as(u32, 0), tee_drop_count);
+    tee_enabled = false;
 }

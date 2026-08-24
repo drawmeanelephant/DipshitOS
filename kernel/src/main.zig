@@ -1163,6 +1163,11 @@ fn uart_putc(byte: u8) void {
     // Arc5 #243: capture every serial byte into the ring buffer so
     // crash tombstones can include the last 512 bytes of serial output.
     serial_ring.append(&[_]u8{byte});
+    // Claim 0680 (issue #523 item 3): when the host armed the structured
+    // console, every console byte is DUPLICATED onto custom-virtio queue 1
+    // (line-buffered; partial lines flush from the idle seam). One cheap
+    // branch while disarmed; serial output is untouched.
+    virtio_custom.console_tee_putc(byte);
     // Claim 0015: in nvram-console builds every console byte rides the
     // NVRAM channel instead of the MMIO transport (which hangs post-exit
     // on VZ). Comptime-gated, so a default build is byte-identical.
@@ -1656,6 +1661,12 @@ fn custom_virtio_spike() void {
             uart_puts("cvspike: q3 armed bufs=");
             uart_hex(virtio_custom.input_pool_count);
             uart_puts("\n");
+            // Claim 0680: the pool is live — tell the host, which answers
+            // by enqueueing the kind-3 console-control message (arming the
+            // structured-console tee) when --cvc-console-file was passed.
+            // Event-driven like the claim-3141 "cvc-push-armed" trigger:
+            // no timing dance.
+            _ = virtio_custom.cvlog_puts("cvconsole-ready");
         }
     } else {
         uart_puts("cvspike: q3 absent\n");
@@ -1809,6 +1820,12 @@ const M15Console = struct {
         // drain point for queue-3 completions (decode + replenish). One
         // cheap branch unless the four-queue device armed its pool.
         if (virtio_custom.cv_ready and virtio_custom.input_armed) virtio_custom.poll_input();
+        // Claim 0680: service a pending framebuffer snapshot request (set
+        // by a kind-4 control message) and flush any partial console-tee
+        // line (the prompt case) — both once per idle tick, after the
+        // input pump so the freshest composite is what ships.
+        if (virtio_custom.snap_pending) virtio_custom.service_snapshot();
+        virtio_custom.console_tee_flush_partial();
         if (console_kind == .virtio) return virtio_console.virtio_read_byte();
         return null;
     }

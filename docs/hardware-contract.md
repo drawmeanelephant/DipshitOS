@@ -51,10 +51,11 @@ same queue. Queue COUNT (2 vs 3) is the capability signal — probed through
 the common-config `queue_size` read of select=2, which reads 0 per spec on
 the two-queue device (**[observed]** both shapes). Byte protocol:
 `CVC-PING-0x42` (13 B) request → verbatim echo reply → `OK:13` ack.
-Productionization TODO (documented, not built): input-injection HID over a
-dedicated custom device (replaces CGEvent synthesis — issues #179/#151),
-structured console/gate-marker + framebuffer-snapshot queues instead of
-vm-serial.log parsing and glyph scraping, feature-bit-driven capabilities.
+Productionization status (claim 0680, 2026-08-24): the control plane is
+BUILT for all three seams — input injection (kinds 1/2, claims 9588/9367),
+structured console + framebuffer snapshots (kinds 3/4 and queue 4, below).
+Feature-bit-driven capabilities remain future work; queue-count stays the
+capability signal.
 
 ## Input channel over the custom virtio device
 
@@ -70,11 +71,13 @@ Device shape (queue count IS the capability signal, unchanged rule):
 | `--custom-virtio` | 2 | 0 exchange · 1 guest log |
 | `--cvc-echo` | 3 | + 2 host-push echo |
 | `--via-virtio` | 4 | + **3 input** |
+| `--cvc-snap` | 5 | + **4 snapshot** (claim 0680) |
 
-Virtqueues are contiguous, so `--via-virtio` implies the full four-queue
-shape including the push echo (`--cvc-echo` semantics). The guest driver
-probes queue 3's size through the common config: a non-zero read arms it;
-zero means absent and everything upstream stays byte-identical.
+Virtqueues are contiguous, so each deeper flag implies the full shape below
+it (`--cvc-snap` implies the four-queue world including push echo and
+input). The guest driver probes each optional queue's size through the
+common config: a non-zero read arms it; zero means absent and everything
+upstream stays byte-identical.
 
 Wire format — one message per receive buffer, written by the HOST into a
 buffer the GUEST pre-armed (the only host→guest data path the SDK exposes,
@@ -84,9 +87,11 @@ the claim-3141 virtio-net-RX pattern):
 offset  size  field
 0       1     kind    1 = HID keyboard boot report
                       2 = absolute-pointer report (claim 9367)
+                      3 = console control (claim 0680)
+                      4 = framebuffer snapshot request (claim 0680)
 1       1     flags   reserved, host writes 0
 2       2     len     payload length, little-endian (8 for kind 1,
-                      5 for kind 2)
+                      5 for kind 2, 1 for kind 3, 0 for kind 4)
 4       12    payload kind 1: the raw 8-byte report [mods, 0, k0..k5]
               (HID boot protocol: mods bit0=LCtrl bit1=LShift bit2=LAlt
               bit3=LCmd; k0..k5 = usage IDs, 0-padded)
@@ -96,6 +101,9 @@ offset  size  field
               x/y are HID ABSOLUTE logicals 0..32767 (the guest's
               map_pointer_axis scales them onto the framebuffer axis —
               the same convention the USB screen-coordinate pointer uses)
+              kind 3: one control byte — bit0 set arms the structured-
+              console tee, bit0 clear disarms it
+              kind 4: empty — a request to stream one snapshot
 ```
 
 Fixed total size 16 bytes. Receive buffers are posted at capacity 32 bytes
@@ -183,6 +191,64 @@ window to the array end), so a gate must `dui raise <id>` a user window
 above the fullscreen terminal before clicking it — session setup via
 documented monitor commands, with the focus proof still driven purely by
 the injected messages.
+
+## Structured console + framebuffer snapshots over the custom virtio device
+
+Claim 0680 (issue #523 item 3 capstone): the two remaining observation
+channels ride the device, so a gate can drive guest input AND read guest
+output with no CGEvent synthesis and no ScreenCaptureKit screenshot
+scraping (and none of their TCC permissions) anywhere in the critical path.
+
+Structured console (queues 1 + 3): the guest sends `cvconsole-ready` on
+queue 1 right after arming its queue-3 pool; the host answers with ONE
+kind-3 control message (bit0=1) when it wants the tee. While armed, every
+kernel console byte is DUPLICATED onto queue 1 as it already goes to
+serial — line-buffered into messages of up to 256 bytes; a partial line
+(the prompt case) flushes from the shell idle seam. The host writes the
+raw bytes verbatim into its `--cvc-console-file` (NO injected newlines),
+so the capture stays byte-faithful to serial. Serial keeps flowing
+unchanged; the tee is additive and default-off. A send whose host ACK does
+not arrive within a tight budget increments a drop counter instead of
+stalling output.
+
+Framebuffer snapshots (queue 4): a kind-4 request arms a pending flag; the
+guest's idle seam then streams the composed scanout (`virtio_gpu.gpu_fb`,
+1280×720 BGRX, 3,686,400 bytes) as tagged little-endian messages:
+
+```
+header  [tag=0x01]['S''N''A''P'][ver=1][bpp][width u32le]
+        [height u32le][total u32le][chunk u32le]              (32 bytes)
+chunk   [tag=0x02][seq u16le][len u16le][cksum u16le][rsvd x6]
+        [payload ≤ chunk_len]                                 (12 + len)
+done    [tag=0x03][chunks u16le][total u32le][cksum u16le]
+        [rsvd x8]                                             (16 bytes)
+```
+
+`cksum` is the RFC 1071 one's-complement checksum over the chunk payload /
+the whole frame. Chunks are 32 KiB (113 per frame) submitted strictly in
+order, each acknowledged by the host (`OK:<n>`, the log-transport
+convention); chunk payloads point DIRECTLY into `gpu_fb` — no staging
+copy. The host reassembles into `<screen-base>-snap-<n>.raw`, verifying
+sequence continuity, per-chunk checksums, totals, and the whole-frame
+checksum before writing the file; any mismatch aborts the assembly loudly
+on both ends (never a silently corrupt image).
+
+Contract facts pinned live (claim 0680, macOS 27.0 build 26A5416b):
+
+1. **Polled sends must free their descriptor chains.** A submit+wait that
+   never returns the chain to the free list leaks two descriptors per
+   send; the spike's five lines survived, but sustained tee traffic
+   exhausted the 32-descriptor ring within seconds and every later send
+   dropped silently-by-counter until the fix (`defer free_chain_q`).
+2. **RFC 1071 needs a u64 accumulator at whole-frame scale** — a 32-bit
+   sum overflows long before 3.5 MiB (the host side died mid-stream with
+   a Swift arithmetic-overflow trap). Guest and host both accumulate u64
+   and fold once.
+3. **Injected keys go to whoever owns keyboard focus** — at a headless
+   boot the fullscreen terminal is the sink only until a user window
+   opens; a gate must type BEFORE opening windows (or refocus first).
+4. The five-queue attach is otherwise byte-identical: all four-queue and
+   smaller gates re-ran PASS unchanged on the same build.
 
 Non-PCI platform facts:
 
