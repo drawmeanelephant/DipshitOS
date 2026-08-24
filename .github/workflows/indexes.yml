@@ -81,14 +81,29 @@ jobs:
 
           git add docs/claims/README.md docs/logs/README.md
           git commit -m "chore(indexes): regenerate coordination indexes"
-          git push --force-with-lease=refs/heads/"$BRANCH":refs/heads/"$BRANCH" \
-            origin HEAD:"$BRANCH" \
-            || git push origin HEAD:"$BRANCH"
+
+          # The bot owns this branch outright and every run rebuilds it from
+          # origin/main, so stale bot history is always discarded (never
+          # merged) — a force push is the intended primitive. The old lease
+          # form compared the remote against the JUST-RESET local branch, so
+          # it could never match the surviving head ref of an auto-merged PR
+          # (GitHub leaves the branch behind — runs after #541/#542 merged
+          # failed with 'stale info' then 'non-fast-forward'). Lease against
+          # the freshly fetched remote-tracking ref first; the deterministic
+          # unconditional force covers first runs (no tracking ref) and any
+          # auto-merge interleaving between fetch and push.
+          git push --force-with-lease=refs/heads/"$BRANCH":refs/remotes/origin/"$BRANCH" \
+            origin HEAD:"$BRANCH" 2>/dev/null \
+            || git push --force origin HEAD:"$BRANCH"
 
           TITLE="chore(indexes): regenerate coordination indexes"
           BODY="Automated regeneration of the claim/log index tables by .github/workflows/indexes.yml (claim 2599). Merging this PR is the only way index tables ever change on main."
 
-          if gh pr view "$BRANCH" --json state --jq .state >/dev/null 2>&1; then
+          # Only an OPEN PR is reusable. A merged PR's head branch survives
+          # on the remote, and gh pr edit silently no-ops / errors on a
+          # merged PR — in that case, or when no PR exists at all, open a
+          # fresh one for the newly pushed head.
+          if gh pr view "$BRANCH" --json state --jq .state 2>/dev/null | grep -qx OPEN; then
             gh pr edit "$BRANCH" --title "$TITLE" --body "$BODY" >/dev/null
           else
             gh pr create --base main --head "$BRANCH" \

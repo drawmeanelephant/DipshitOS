@@ -59,6 +59,8 @@ const exceptions = @import("exceptions.zig");
 const mailbox = @import("mailbox.zig"); // claim 5965: per-process rings
 const process = @import("process.zig"); // claim 5965: target/current-process lookup
 const scheduler = @import("scheduler.zig");
+const arp = @import("arp.zig"); // M26 N2 (issue #400): the ARP table for the net-stats snapshot
+const dhcp = @import("dhcp.zig"); // M26 N2 (issue #400): DHCP lease state for the net-stats snapshot
 const udp = @import("udp.zig"); // claim 1384 (card N6): the milestone-five UDP layer
 const virtio_net = @import("virtio_net.zig"); // claim 1384 (card N6): net_udp_send (TX + loopback)
 const uaccess = @import("uaccess.zig"); // claim 6120: fault-safe copy-in
@@ -82,7 +84,8 @@ pub const slot_count: usize = 64;
 /// docs/agent-concurrency-plan.md §8.
 /// M19 P1 (issue #290): slots 56/57 are the bounded pipe.
 /// M26 N1 (issue #399): slots 59/60 are ping send/poll.
-pub const implemented_count: usize = 62;
+/// M26 N2 (issue #400): slot 62 is the net-stats snapshot.
+pub const implemented_count: usize = 63;
 /// Card G6 (claim 0487) follow-on (slot 18): the fixed `sys_win_get` shape —
 /// four u32 LE words (x, y, w, h), 16 bytes, marshaled per call and copy_out'd
 /// through uaccess (the procs snapshot pattern).
@@ -244,6 +247,16 @@ pub const sys_ping_send: u64 = 59;
 /// whether a pong has landed since the last send. Returns the last echo
 /// reply sequence (u16) if a pong was observed, else 0.
 pub const sys_ping_poll: u64 = 60;
+/// M26 N2 (issue #400): `sys_net_stats(buf_ptr, buf_len)` — slot 62.
+/// Copy a fixed packed snapshot of the kernel's network state OUT through
+/// uaccess (a read-only view, `sys_procs` style): interface MAC/IP/GW,
+/// DHCP lease state, the TCP connection state/peer/IP/port + segment
+/// counters, UDP listeners + datagram counters, the ARP table, and the
+/// virtio-net RX/TX counters. Returns bytes copied; EFAULT for a bad
+/// buffer; EINVAL for a non-EL0 caller. `buf_len` floors to whole
+/// snapshots; `buf_len < snapshot size` copies nothing (honest
+/// truncation, like the process table's whole-rows rule).
+pub const sys_net_stats: u64 = 62;
 
 pub const ErrorCode = enum(i64) {
     einval = -1,
@@ -389,6 +402,8 @@ fn ensure_table() *const [slot_count]Entry {
         // M26 N1 (issue #399): slots 59/60 — ping send/poll.
         table_storage[sys_ping_send] = .{ .name = "sys_ping_send", .handler = handle_ping_send };
         table_storage[sys_ping_poll] = .{ .name = "sys_ping_poll", .handler = handle_ping_poll };
+        // M26 N2 (issue #400): slot 62 — net-stats snapshot.
+        table_storage[sys_net_stats] = .{ .name = "sys_net_stats", .handler = handle_net_stats };
         table_ready = true;
     }
     return &table_storage;
@@ -1103,6 +1118,109 @@ fn handle_ping_poll(_: Args, _: *exceptions.VectorFrame) u64 {
     virtio_net.net_rx_drain();
     if (virtio_net.ipv4.pongs_observed == 0) return 0;
     return virtio_net.ipv4.last_seq;
+}
+
+// ---------------------------------------------------------------------------
+// M26 N2 (issue #400): the net-stats snapshot — slot 62
+// ---------------------------------------------------------------------------
+
+/// The fixed packed snapshot exposed by `sys_net_stats`. All integers
+/// little-endian; IPs are raw network-order bytes (`[4]u8`); MACs raw
+/// bytes (`[6]u8`). Enums are their `@intFromEnum` naturals, pinned in
+/// the doc comments. The userland mirror lives in
+/// `user/src/lib/netstats.zig` — the host tests on both sides pin
+/// `@sizeOf` and the key `@offsetOf`s so drift fails loudly.
+pub const NetStats = extern struct {
+    // ---- interface ---------------------------------------------------------
+    mac: [6]u8 = .{ 0, 0, 0, 0, 0, 0 }, // the virtio-net MAC
+    own_ip: [4]u8 = .{ 0, 0, 0, 0 }, // arp.own_ip (`net ip` or DHCP ACK)
+    gateway: [4]u8 = .{ 0, 0, 0, 0 }, // dhcp.lease_gw; 0 = unset
+    // ---- dhcp ---------------------------------------------------------------
+    dhcp_state: u8 = 0, // 0 idle,1 selecting,2 requesting,3 bound,4 renewing,5 rebinding
+    lease_ip: [4]u8 = .{ 0, 0, 0, 0 },
+    lease_mask: [4]u8 = .{ 0, 0, 0, 0 },
+    lease_server: [4]u8 = .{ 0, 0, 0, 0 },
+    lease_secs: u32 = 0,
+    // ---- TCP ----------------------------------------------------------------
+    tcp_state: u8 = 0, // 0 idle,1 syn_sent,2 established,3 fin_sent,4 closed
+    tcp_peer_ip: [4]u8 = .{ 0, 0, 0, 0 },
+    tcp_peer_port: u16 = 0,
+    // ---- UDP ----------------------------------------------------------------
+    udp_count: u8 = 0, // valid listen entries (0..4)
+    udp_ports: [4]u16 = .{ 0, 0, 0, 0 }, // ports of the valid entries, packed
+    // ---- ARP ----------------------------------------------------------------
+    arp_count: u8 = 0, // valid table entries (0..4)
+    arp_ips: [4][4]u8 = .{ .{ 0, 0, 0, 0 }, .{ 0, 0, 0, 0 }, .{ 0, 0, 0, 0 }, .{ 0, 0, 0, 0 } },
+    arp_macs: [4][6]u8 = .{ .{ 0, 0, 0, 0, 0, 0 }, .{ 0, 0, 0, 0, 0, 0 }, .{ 0, 0, 0, 0, 0, 0 }, .{ 0, 0, 0, 0, 0, 0 } },
+    // ---- counters -----------------------------------------------------------
+    tx_frames: u64 = 0,
+    tx_bytes: u64 = 0,
+    rx_frames: u64 = 0,
+    rx_bytes: u64 = 0,
+    rx_filtered: u64 = 0,
+    rx_overflow: u64 = 0,
+    // tcp segment counters: syn_sent, synack_recv, ack_sent, data_sent,
+    // data_recv, fin_sent, finack_recv, rst_sent
+    tcp_segs: [8]u64 = .{ 0, 0, 0, 0, 0, 0, 0, 0 },
+    // udp datagram counters: received, sent, loopbacked, dropped
+    udp_dgrams: [4]u64 = .{ 0, 0, 0, 0 },
+};
+
+pub const net_stats_bytes: usize = @sizeOf(NetStats);
+var netstats_scratch: [net_stats_bytes]u8 = undefined;
+
+/// `sys_net_stats(buf, len)` — marshal the live network state into the
+/// fixed scratch and copy it OUT through uaccess (read-only view, nobody
+/// owns the data). EFAULT on a bad buffer; 0 for a buffer too small for
+/// one whole snapshot.
+fn handle_net_stats(args: Args, _: *exceptions.VectorFrame) u64 {
+    const address = args[0];
+    const max = args[1];
+    if (max < net_stats_bytes) return 0;
+
+    var snap: NetStats = .{};
+    snap.mac = virtio_net.net_mac;
+    snap.own_ip = arp.own_ip;
+    snap.gateway = dhcp.lease_gw;
+    snap.dhcp_state = @intFromEnum(dhcp.state);
+    snap.lease_ip = dhcp.lease_ip;
+    snap.lease_mask = dhcp.lease_mask;
+    snap.lease_server = dhcp.lease_server;
+    snap.lease_secs = dhcp.lease_time;
+    snap.tcp_state = @intFromEnum(tcp.state);
+    snap.tcp_peer_ip = tcp.peer_ip;
+    snap.tcp_peer_port = tcp.peer_port;
+    var udp_i: usize = 0;
+    for (udp.listen) |e| {
+        if (e.valid and udp_i < 4) {
+            snap.udp_ports[udp_i] = e.port;
+            udp_i += 1;
+        }
+    }
+    snap.udp_count = @intCast(udp_i);
+    var arp_i: usize = 0;
+    for (arp.table) |e| {
+        if (e.valid and arp_i < arp.table_slots) {
+            snap.arp_ips[arp_i] = e.ip;
+            snap.arp_macs[arp_i] = e.mac;
+            arp_i += 1;
+        }
+    }
+    snap.arp_count = @intCast(arp_i);
+    snap.tx_frames = virtio_net.net_dev.tx_frames;
+    snap.tx_bytes = virtio_net.net_dev.tx_bytes;
+    snap.rx_frames = virtio_net.rx_frames;
+    snap.rx_bytes = virtio_net.rx_bytes;
+    snap.rx_filtered = virtio_net.rx_filtered;
+    snap.rx_overflow = virtio_net.rx_overflow;
+    snap.tcp_segs = .{ tcp.syn_sent, tcp.synack_recv, tcp.ack_sent, tcp.data_sent, tcp.data_recv, tcp.fin_sent, tcp.finack_recv, tcp.rst_sent };
+    snap.udp_dgrams = .{ udp.received, udp.sent, udp.loopbacked, udp.dropped_badsum + udp.dropped_closed + udp.dropped_len };
+
+    // Marshal through the fixed scratch (no stack copies of untrusted
+    // sizes; the struct is comptime-sized).
+    @memcpy(&netstats_scratch, std.mem.asBytes(&snap));
+    if (uaccess.copy_out(address, netstats_scratch[0..net_stats_bytes], net_stats_bytes) != .ok) return error_result(.efault);
+    return net_stats_bytes;
 }
 
 /// Arc4 #237 (slot 55): `sys_drag_read(buf_ptr, max_len)` — copy the drag
@@ -1829,7 +1947,7 @@ fn capture_marshaled_args(args: Args, _: *exceptions.VectorFrame) u64 {
     return 0xcafe;
 }
 
-test "syscall: runtime table has 64 slots and sixty-two unique implemented rows" {
+test "syscall: runtime table has 64 slots and sixty-three unique implemented rows" {
     init(test_writer);
     const table = ensure_table();
     try std.testing.expectEqual(@as(usize, 64), table.len);
@@ -1842,7 +1960,7 @@ test "syscall: runtime table has 64 slots and sixty-two unique implemented rows"
             implemented += 1;
         }
     }
-    try std.testing.expectEqual(@as(usize, 62), implemented);
+    try std.testing.expectEqual(@as(usize, 63), implemented);
     try std.testing.expectEqualStrings("sys_pipe_read", entry_info(sys_pipe_read).?.name);
     try std.testing.expectEqualStrings("sys_pipe_write", entry_info(sys_pipe_write).?.name);
     try std.testing.expectEqualStrings("sys_font_size", entry_info(sys_font_size).?.name);
@@ -1898,6 +2016,7 @@ test "syscall: runtime table has 64 slots and sixty-two unique implemented rows"
     try std.testing.expectEqualStrings("sys_notify", entry_info(51).?.name);
     try std.testing.expectEqualStrings("sys_ping_send", entry_info(sys_ping_send).?.name);
     try std.testing.expectEqualStrings("sys_ping_poll", entry_info(sys_ping_poll).?.name);
+    try std.testing.expectEqualStrings("sys_net_stats", entry_info(sys_net_stats).?.name);
     try std.testing.expect(entry_info(63) == null);
 }
 
@@ -2325,6 +2444,59 @@ test "syscall: handle_svc decodes and dispatches slot 7 via the frame" {
     try std.testing.expectEqual(@as(u64, 1), exceptions.frame_read(&frame, 0));
     try std.testing.expectEqual(@as(u64, 1), call_count(sys_procs));
     try std.testing.expectEqualStrings("user-el0", buf[24 .. 24 + 8]);
+}
+
+test "syscall: sys_net_stats marshals a whole snapshot and pins the layout" {
+    init(test_writer);
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0); // process 0
+    scheduler.start();
+    var frame = fresh_frame();
+
+    // Pin the layout — the userland mirror (user/src/lib/netstats.zig)
+    // must match every offset or this test fails loudly.
+    try std.testing.expectEqual(@as(usize, 0), @offsetOf(NetStats, "mac"));
+    try std.testing.expectEqual(@as(usize, 6), @offsetOf(NetStats, "own_ip"));
+    try std.testing.expectEqual(@as(usize, 10), @offsetOf(NetStats, "gateway"));
+    try std.testing.expectEqual(@as(usize, 14), @offsetOf(NetStats, "dhcp_state"));
+    try std.testing.expectEqual(@as(usize, 28), @offsetOf(NetStats, "lease_secs"));
+    try std.testing.expectEqual(@as(usize, 32), @offsetOf(NetStats, "tcp_state"));
+    try std.testing.expectEqual(@as(usize, 33), @offsetOf(NetStats, "tcp_peer_ip"));
+    try std.testing.expectEqual(@as(usize, 38), @offsetOf(NetStats, "tcp_peer_port"));
+    try std.testing.expectEqual(@as(usize, 40), @offsetOf(NetStats, "udp_count"));
+    // The whole struct must stay well under the 512-byte scratch budget.
+    try std.testing.expect(net_stats_bytes <= 256);
+
+    // Mutate some state so the snapshot demonstrably carries it (restore
+    // the previous values on the way out — host tests share globals).
+    const saved_own_ip = arp.own_ip;
+    const saved_peer_ip = tcp.peer_ip;
+    const saved_peer_port = tcp.peer_port;
+    defer arp.own_ip = saved_own_ip;
+    defer tcp.peer_ip = saved_peer_ip;
+    defer tcp.peer_port = saved_peer_port;
+    arp.own_ip = .{ 10, 0, 0, 2 };
+    tcp.peer_ip = .{ 10, 0, 0, 9 };
+    tcp.peer_port = 8080;
+
+    var buf: [net_stats_bytes]u8 = undefined;
+    set_user_regions(
+        .{ .base = 0, .len = 0 },
+        .{ .base = @intFromPtr(&buf), .len = buf.len },
+    );
+    // Too-small buffer: honest truncation — 0 bytes, no copy.
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_net_stats, .{ @intFromPtr(&buf), net_stats_bytes - 1, 0, 0, 0, 0 }, &frame));
+    // Full snapshot: returns the byte count; the state round-trips.
+    const rc = dispatch(sys_net_stats, .{ @intFromPtr(&buf), buf.len, 0, 0, 0, 0 }, &frame);
+    try std.testing.expectEqual(@as(u64, net_stats_bytes), rc);
+    const snap: *align(1) const NetStats = @ptrCast(&buf);
+    try std.testing.expectEqualSlices(u8, &arp.own_ip, &snap.own_ip); // the mutation round-trips
+    try std.testing.expectEqual(@as(u16, 8080), snap.tcp_peer_port);
+    try std.testing.expectEqualSlices(u8, &tcp.peer_ip, &snap.tcp_peer_ip);
+    // A bad user pointer is EFAULT (nothing copied).
+    try std.testing.expectEqual(error_result(.efault), dispatch(sys_net_stats, .{ uaccess.diagnostic_unmapped, buf.len, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u64, 3), call_count(sys_net_stats));
 }
 
 test "syscall: wait returns an already-exited target's status and refuses invalid/self/EL1h targets exactly" {
@@ -2819,7 +2991,7 @@ test "syscall: counters are monotonic and report is deterministic" {
     var con = mock.console();
     report(&con);
     try std.testing.expectEqualStrings(
-        "syscalls: slots=64 implemented=62\n" ++
+        "syscalls: slots=64 implemented=63\n" ++
             "  0 sys_ping calls=2\n" ++
             "  1 sys_write calls=0\n" ++
             "  2 sys_yield calls=0\n" ++
@@ -2881,7 +3053,8 @@ test "syscall: counters are monotonic and report is deterministic" {
             "  58 sys_font_size calls=0\n" ++
             "  59 sys_ping_send calls=0\n" ++
             "  60 sys_ping_poll calls=0\n" ++
-            "  61 sys_win_set_title calls=0\n",
+            "  61 sys_win_set_title calls=0\n" ++
+            "  62 sys_net_stats calls=0\n",
         mock.contents(),
     );
 }

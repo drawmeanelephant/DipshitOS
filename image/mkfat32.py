@@ -225,7 +225,8 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
                       victim_bytes=None, harden_bytes=None,
                        jingle_bytes=None, chime_bytes=None, globals_bytes=None,                      guard_bytes=None, spin_bytes=None, apps_txt_bytes=None,
                        hello_bytes=None, asm_bytes=None, settings_bytes=None,
-                       crash_bytes=None, disas_bytes=None, edit_bytes=None, ps_bytes=None):
+                       crash_bytes=None, disas_bytes=None, edit_bytes=None, ps_bytes=None,
+                       resmon_bytes=None, devcons_bytes=None, netstat_bytes=None):
     """Write a FAT32 volume (boot sector, FSInfo, FATs, directories, files)
     into `img` at the volume's offset.
 
@@ -285,6 +286,9 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
     disas_clusters = (len(disas_bytes) + bps - 1) // bps if disas_bytes else 0
     edit_clusters = (len(edit_bytes) + bps - 1) // bps if edit_bytes else 0
     ps_clusters = (len(ps_bytes) + bps - 1) // bps if ps_bytes else 0
+    resmon_clusters = (len(resmon_bytes) + bps - 1) // bps if resmon_bytes else 0
+    devcons_clusters = (len(devcons_bytes) + bps - 1) // bps if devcons_bytes else 0
+    netstat_clusters = (len(netstat_bytes) + bps - 1) // bps if netstat_bytes else 0
     file_clusters = (len(efi_bytes) + bps - 1) // bps
     root_entries_count = 2  # vol_label + efi_entry
     if kernel_bytes: root_entries_count += 1
@@ -326,6 +330,9 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
     if disas_bytes: root_entries_count += 1
     if edit_bytes: root_entries_count += 1
     if ps_bytes: root_entries_count += 1
+    if resmon_bytes: root_entries_count += 1
+    if devcons_bytes: root_entries_count += 1
+    if netstat_bytes: root_entries_count += 1
 
     root_clusters = (root_entries_count * 32 + bps - 1) // bps
     efi_dir_cluster = 2 + root_clusters
@@ -367,7 +374,10 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
     disas_start = crash_start + crash_clusters
     edit_start = disas_start + disas_clusters
     ps_start = edit_start + edit_clusters
-    apps_txt_start = ps_start + ps_clusters
+    resmon_start = ps_start + ps_clusters
+    devcons_start = resmon_start + resmon_clusters
+    netstat_start = devcons_start + devcons_clusters
+    apps_txt_start = netstat_start + netstat_clusters
     hello_start = apps_txt_start + apps_txt_clusters
     efi_start = hello_start + hello_clusters
     allocated = efi_start + file_clusters - 2  # clusters used beyond root(2)
@@ -462,6 +472,12 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
         chain(edit_start, edit_clusters)            # EDIT.BIN data
     if ps_bytes:
         chain(ps_start, ps_clusters)                # PS.BIN data
+    if resmon_bytes:
+        chain(resmon_start, resmon_clusters)        # RESMON.BIN data
+    if devcons_bytes:
+        chain(devcons_start, devcons_clusters)      # DEVCONS.BIN data
+    if netstat_bytes:
+        chain(netstat_start, netstat_clusters)      # NETSTAT.BIN data
     if apps_txt_bytes:
         chain(apps_txt_start, apps_txt_clusters)  # APPS.TXT data
     if hello_bytes:
@@ -570,6 +586,12 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
         root_entries += dir_entry(b"EDIT    BIN", 0x20, edit_start, len(edit_bytes))
     if ps_bytes:
         root_entries += dir_entry(b"PS      BIN", 0x20, ps_start, len(ps_bytes))
+    if resmon_bytes:
+        root_entries += dir_entry(b"RESMON  BIN", 0x20, resmon_start, len(resmon_bytes))
+    if devcons_bytes:
+        root_entries += dir_entry(b"DEVCONS BIN", 0x20, devcons_start, len(devcons_bytes))
+    if netstat_bytes:
+        root_entries += dir_entry(b"NETSTAT BIN", 0x20, netstat_start, len(netstat_bytes))
     if apps_txt_bytes:
         root_entries += dir_entry(b"APPS    TXT", 0x20, apps_txt_start, len(apps_txt_bytes))
     if hello_bytes:
@@ -731,6 +753,18 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
         for i in range(ps_clusters):
             chunk = ps_bytes[i * bps:(i + 1) * bps]
             wsec(geo.cluster_sector(ps_start + i), chunk.ljust(bps, b"\x00"))
+    if resmon_bytes:
+        for i in range(resmon_clusters):
+            chunk = resmon_bytes[i * bps:(i + 1) * bps]
+            wsec(geo.cluster_sector(resmon_start + i), chunk.ljust(bps, b"\x00"))
+    if devcons_bytes:
+        for i in range(devcons_clusters):
+            chunk = devcons_bytes[i * bps:(i + 1) * bps]
+            wsec(geo.cluster_sector(devcons_start + i), chunk.ljust(bps, b"\x00"))
+    if netstat_bytes:
+        for i in range(netstat_clusters):
+            chunk = netstat_bytes[i * bps:(i + 1) * bps]
+            wsec(geo.cluster_sector(netstat_start + i), chunk.ljust(bps, b"\x00"))
     if apps_txt_bytes:
         for i in range(apps_txt_clusters):
             chunk = apps_txt_bytes[i * bps:(i + 1) * bps]
@@ -1006,7 +1040,8 @@ def build_image(total_sectors, esp_offset, efi_bytes, kernel_bytes=None,
                 jingle_bytes=None, chime_bytes=None, globals_bytes=None,
                 guard_bytes=None, spin_bytes=None, apps_txt_bytes=None,
                 hello_bytes=None, asm_bytes=None, settings_bytes=None,
-                crash_bytes=None, disas_bytes=None, edit_bytes=None, ps_bytes=None):
+                crash_bytes=None, disas_bytes=None, edit_bytes=None, ps_bytes=None,
+                resmon_bytes=None, devcons_bytes=None, netstat_bytes=None):
     img = bytearray(total_sectors * BYTES_PER_SECTOR)
     last_usable = total_sectors - 34
     first_usable = 34
@@ -1050,7 +1085,8 @@ def build_image(total_sectors, esp_offset, efi_bytes, kernel_bytes=None,
                       keytest_bytes, savetext_bytes, type_bytes, dir_bytes,
                       calc_bytes, notepad_bytes, top_bytes, desktop_bytes,
                       tcp_bytes, fetch_bytes, chat_bytes, file_bytes, fstest_bytes, timertest_bytes,
-                      victim_bytes, harden_bytes, jingle_bytes, chime_bytes, globals_bytes, guard_bytes, spin_bytes, apps_txt_bytes, hello_bytes, asm_bytes, settings_bytes, crash_bytes, disas_bytes, edit_bytes, ps_bytes)
+                      victim_bytes, harden_bytes, jingle_bytes, chime_bytes, globals_bytes, guard_bytes, spin_bytes, apps_txt_bytes, hello_bytes, asm_bytes, settings_bytes, crash_bytes, disas_bytes, edit_bytes, ps_bytes,
+                      resmon_bytes, devcons_bytes, netstat_bytes)
     geo_data = Fat32Geometry(data_sectors, data_start)
     build_data_volume(img, geo_data)
     return bytes(img)
@@ -1140,6 +1176,12 @@ def main(argv):
                     help="optional flat user program (DISAS.BIN) to embed at the volume root (M22 D4, issue #327 -- disassembler)")
     ap.add_argument("edit_file", nargs="?",
                     help="optional flat user program (EDIT.BIN) to embed at the volume root (M23 E1, issue #507 -- text editor)")
+    ap.add_argument("resmon_file", nargs="?",
+                    help="optional flat user program (RESMON.BIN) to embed at the volume root (M22 D10, issue #333 -- resource monitor)")
+    ap.add_argument("devcons_file", nargs="?",
+                    help="optional flat user program (DEVCONS.BIN) to embed at the volume root (M22 D14, issue #337 -- developer console)")
+    ap.add_argument("netstat_file", nargs="?",
+                    help="optional SEGMENTED user program (NETSTAT.BIN) to embed at the volume root (M26 N2, issue #400 -- network dashboard)")
     ap.add_argument("crash_file", nargs="?",
                     help="optional AArch64 ELF32 executable (CRASH.ELF) to embed at the volume root (M22 D3, issue #326 -- symbolized-crash gate)")
     ap.add_argument("hello_file", nargs="?",
@@ -1492,6 +1534,23 @@ def main(argv):
                   "not be a DipshitOS user program image" % args.edit_file,
                   file=sys.stderr)
 
+    resmon_bytes = None
+    if args.resmon_file:
+        with open(args.resmon_file, "rb") as f:
+            resmon_bytes = f.read()
+    devcons_bytes = None
+    if args.devcons_file:
+        with open(args.devcons_file, "rb") as f:
+            devcons_bytes = f.read()
+    netstat_bytes = None
+    if args.netstat_file:
+        with open(args.netstat_file, "rb") as f:
+            netstat_bytes = f.read()
+        if netstat_bytes[:4] not in (b"DSK1", b"DSK3"):
+            print("WARNING: %s does not start with the 'DSK1'/'DSK3' magic; it may "
+                  "not be a DipshitOS user program image" % args.netstat_file,
+                  file=sys.stderr)
+
     crash_bytes = None
     if args.crash_file:
         with open(args.crash_file, "rb") as f:
@@ -1517,7 +1576,8 @@ def main(argv):
                       winmove_bytes, keytest_bytes, savetext_bytes, type_bytes,
                       dir_bytes, calc_bytes, notepad_bytes, top_bytes, desktop_bytes,
                       tcp_bytes, fetch_bytes, chat_bytes, file_bytes, fstest_bytes, timertest_bytes,
-                      victim_bytes, harden_bytes, jingle_bytes, chime_bytes, globals_bytes, guard_bytes, spin_bytes, apps_txt_bytes, hello_bytes, asm_bytes, settings_bytes, crash_bytes, disas_bytes, edit_bytes, ps_bytes)
+                      victim_bytes, harden_bytes, jingle_bytes, chime_bytes, globals_bytes, guard_bytes, spin_bytes, apps_txt_bytes, hello_bytes, asm_bytes, settings_bytes, crash_bytes, disas_bytes, edit_bytes, ps_bytes,
+                      resmon_bytes, devcons_bytes, netstat_bytes)
     with open(args.image, "wb") as f:
         f.write(img)
     extra = ", %d-byte kernel image embedded" % len(kernel_bytes) if kernel_bytes else ""
@@ -1543,6 +1603,9 @@ def main(argv):
     extra += ", %d-byte chat program embedded" % len(chat_bytes) if chat_bytes else ""
     extra += ", %d-byte file program embedded" % len(file_bytes) if file_bytes else ""
     extra += ", %d-byte fstest program embedded" % len(fstest_bytes) if fstest_bytes else ""
+    extra += ", %d-byte resmon program embedded" % len(resmon_bytes) if resmon_bytes else ""
+    extra += ", %d-byte devcons program embedded" % len(devcons_bytes) if devcons_bytes else ""
+    extra += ", %d-byte netstat program embedded" % len(netstat_bytes) if netstat_bytes else ""
     print("wrote %s: %d MiB, ESP at LBA %d, %d-byte EFI application embedded%s" %
           (args.image, args.size_mb, args.esp_offset, len(efi_bytes), extra))
     return 0
