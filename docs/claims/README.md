@@ -41,16 +41,16 @@ check fails the gate — change the slug and the ID changes.
    [`TEMPLATE.md`](TEMPLATE.md) to `docs/claims/<NNNN>-<slug>.md`.
 2. Fill in Owner (agent id + branch), Prompt / plan, Scope, Depends on.
 3. Set Status to `🔄 <branch>` **before** starting work.
-4. `git add` your new claim file, then run
-   `bash tools/status/refresh-indexes.sh` to regenerate the
-   [Active claims index](#active-claims-index) below. The table is
-   **generated from the git-tracked claim files** — never hand-edit it
-   (two agents hand-appending to the same table is exactly how parallel
-   claims collide on merge). Staging first keeps other agents' untracked
-   staging files out of your index and your gate run.
+4. `git add` your new claim file and commit it — **do not** regenerate or
+   commit the [Active claims index](#active-claims-index) below. Since
+   claim 2599, `.github/workflows/indexes.yml` regenerates both index
+   tables on `main` immediately after every merge (the single serialized
+   writer of a shared derived artifact); branch-side table churn is what
+   made those two files collide on nearly every near-simultaneous merge.
+   A local `bash tools/status/refresh-indexes.sh` is an optional preview.
 5. On completion or blockers: flip Status in **your claim file** to `✅`
    (with evidence) or `⛔` (note why), append to `docs/logs/<branch>.md`,
-   and re-run the refresh script so the index shows it.
+   and commit — the bot updates the index on merge.
 
 While 🔄, two fields keep you honest (optional for grandfathered claims):
 
@@ -67,10 +67,13 @@ own branch's log that reference the old one.
 ## Active claims index
 
 **This table is the canonical index** (status included) and it is
-**generated** from the claim files by `bash tools/status/refresh-indexes.sh`
-— do not hand-edit it. `docs/status.md` points here. The coordination
-gate (`bash tools/verify-coordination.sh`, `just verify-coordination`, and
-CI) fails if the table drifts from the claim files.
+**generated** from the claim files by `.github/workflows/indexes.yml` on
+`main` immediately after every merge (claim 2599) — do not hand-edit it,
+and never commit regenerated tables from a branch. `docs/status.md` points
+here. The coordination gate (`bash tools/verify-coordination.sh`,
+`just verify-coordination`, and CI) validates the table's structure on
+PRs; sync is enforced on main by the bot, whose strict `--check` run fails
+loudly if the generator or a table is broken.
 
 <!-- CLAIMS_INDEX:START -->
 | Claim | Owner (branch) | Status |

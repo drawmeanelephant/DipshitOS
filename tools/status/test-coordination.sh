@@ -19,6 +19,9 @@
 #   6. Another agent's UNTRACKED claim+log staging files in a shared
 #      checkout do NOT fail --check or verify-coordination (the tooling
 #      judges tracked files only; regression for PR #524 / claim 2564).
+#   7. A STALE committed index does NOT fail verify-coordination (branches
+#      never commit table churn; CI regenerates on main — claim 2599), but
+#      --check still fails on it (the bot's contract).
 #
 # Usage: bash tools/status/test-coordination.sh
 # (also `just test-coordination` and CI)
@@ -290,6 +293,34 @@ elif printf '%s' "$out" | grep -q '^warn: .* for .* days'; then
     ok "stale 🔄 claim warns without failing the gate"
 else
     nope "stale claim produced no warning: $out"
+fi
+
+# --- 9. positive: a STALE committed index does not fail the gate (claim 2599)
+# Branches no longer regenerate or commit the index tables — CI regenerates
+# them on main after merge — so a branch's committed indexes are stale by
+# design. The PR-side gate must tolerate that drift; --check must still fail
+# on it (the bot's contract).
+dt="$(bash "$TMP/tools/status/claim-id.sh" 'branch/one' 'drift-tolerated')"
+cat > "$TMP/docs/claims/${dt}-drift-tolerated.md" <<EOF
+# Claim: drift tolerated
+
+- **Owner:** test-agent (\`branch/one\`)
+- **Status:** ✅ done 2026-08-24
+- **Depends on:** —
+EOF
+run git add -A   # tracked, but the index tables are deliberately NOT refreshed
+out="$(run bash tools/status/refresh-indexes.sh --check 2>&1 || true)"
+case "$out" in
+    *"out of sync"*)
+        ok "--check still fails on a stale index (bot contract on main)" ;;
+    *)
+        nope "--check did not report index drift: $out" ;;
+esac
+if run bash tools/verify-coordination.sh >/dev/null 2>&1; then
+    ok "verify-coordination tolerates a stale committed index (branches never commit table churn)"
+else
+    out="$(run bash tools/verify-coordination.sh 2>&1 || true)"
+    nope "verify-coordination failed on index drift (should be bot-only): $out"
 fi
 
 # --- final: clean sandbox passes -------------------------------------------

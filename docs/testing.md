@@ -114,15 +114,18 @@ Every verification command belongs to exactly one class (canonical inventory:
     `0024+` does not carry its deterministic ID (computed from the owner
     branch + filename slug by `tools/status/claim-id.sh`; `0001–0023` are
     grandfathered), or if the generated claim/log index tables in
-    `docs/claims/README.md` / `docs/logs/README.md` drift from the files
-    or are structurally malformed (every row must have the exact expected
-    column count, so an unescaped `|` in a claim status cannot corrupt a
-    table). Fix by running `bash tools/status/refresh-indexes.sh` after
-    creating a claim file or branch log.
+    `docs/claims/README.md` / `docs/logs/README.md` are structurally
+    malformed (every row must have the exact expected column count, so an
+    unescaped `|` in a claim status cannot corrupt a table). Index *sync*
+    is not checked on PRs: since claim 2599 branches do not regenerate or
+    commit the tables — `.github/workflows/indexes.yml` regenerates them on
+    main after every merge, so a branch's committed indexes are stale by
+    design.
 18. Test the coordination tooling itself: `bash
     tools/status/test-coordination.sh` (also `just test-coordination` and
     CI) — positive/negative cases for cell escaping, structural table
-    validation, and deterministic claim IDs, run in a throwaway sandbox.
+    validation, drift tolerance, and deterministic claim IDs, run in a
+    throwaway sandbox.
 19. Run the live RX / transcript gate (class B, claim 6684):
     `bash tools/verify-live-transcript.sh` (also `just
     verify-live-transcript`) — boots the production image, forwards

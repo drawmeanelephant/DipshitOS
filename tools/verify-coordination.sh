@@ -13,22 +13,26 @@
 #   3. Every branch log (docs/logs/*.md, except README.md) opens with a
 #      "# Log — <title>" header.
 #   4. The generated index tables in docs/claims/README.md and
-#      docs/logs/README.md are in sync with the actual files AND
-#      structurally valid (every row has the expected column count, so an
-#      unescaped '|' cannot corrupt a table).
+#      docs/logs/README.md are structurally valid (markers present, every
+#      row has the expected column count, so an unescaped '|' cannot
+#      corrupt a table). Sync with the claim/log files is NOT checked here:
+#      since claim 2599 branches do not regenerate or commit the tables —
+#      .github/workflows/indexes.yml regenerates them on main after merge,
+#      so a branch's committed indexes are stale by design. (refresh-indexes
+#      --check still enforces sync where it is meaningful: on main / bot.)
 #   5. docs/status.md stays an edit-free coordination surface: no changelog
 #      entries, no claims table, no march/agent-split tables (those live in
 #      docs/logs/, docs/claims/README.md, and docs/march-m3.md; the
 #      completed M1.5 tracker is archived at docs/archive/march-m15.md).
 #
 # Run before opening a PR (`just verify-coordination`; also runs in CI).
-# If it fails, fix the file(s) it names and/or run:
-#     bash tools/status/refresh-indexes.sh
+# If it fails, fix the file(s) it names. Index tables are regenerated on
+# main by CI (claim 2599); a local `bash tools/status/refresh-indexes.sh`
+# is an optional preview only — do not commit its output from a branch.
 #
 # Tracked files only: this checkout is shared by concurrent agents, so
 # another agent's UNTRACKED claim/log staging files must not fail this
-# branch's gate (they are not part of what merges). Stage your new files
-# with git BEFORE running tools/status/refresh-indexes.sh.
+# branch's gate (they are not part of what merges).
 
 set -euo pipefail
 
@@ -175,10 +179,10 @@ if grep -qE '^## Best agent split|^\| Agent \| Owns \|' docs/status.md; then
 fi
 [ -f docs/march-m3.md ] || bad "docs/march-m3.md missing (docs/status.md points to it)"
 
-# --- generated index sync ---------------------------------------------------
+# --- generated index integrity (sync is enforced by CI on main, not here) ---
 
-if ! bash tools/status/refresh-indexes.sh --check; then
-    bad "indexes out of sync — run: bash tools/status/refresh-indexes.sh"
+if ! bash tools/status/refresh-indexes.sh --check-structure >/dev/null; then
+    bad "index tables malformed (markers missing or a row has the wrong column count)"
 fi
 
 if [ "$fail" -ne 0 ]; then

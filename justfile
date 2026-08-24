@@ -191,7 +191,7 @@ verify-coordination:
 test-coordination:
     bash tools/status/test-coordination.sh
 
-# Regenerate the claim/log index tables from the files (developer tooling, not a gate — run after creating a claim or branch log)
+# Preview the claim/log index tables (developer tooling, not a gate — CI regenerates the tables on main after merge; do not commit branch output)
 refresh-indexes:
     bash tools/status/refresh-indexes.sh
 
