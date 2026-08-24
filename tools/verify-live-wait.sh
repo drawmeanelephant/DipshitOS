@@ -53,17 +53,31 @@
 # already in the log. Evidence saved under artifacts/: live-wait-gate.txt,
 # live-wait-report.txt, live-wait-run-<NN>.txt, live-wait-serial-<NN>.log.
 
+# Run isolation (#523 item 2 / issue #528, claim 5069): every boot attaches
+# a private DiskImageKit stacked disk (read-only base + throwaway ASIF
+# overlay), a private EFI var store (recreated fresh per boot, as the
+# pre-isolation gate did), and a private serial log under $RUN_DIR — two
+# concurrent instances cannot clobber each other's disks, NVRAM, or
+# evidence. Set DIPSHIT_GATE_SUFFIX=_alt to give this instance its own
+# canonical evidence names (two simultaneous instances MUST differ), and
+# DIPSHIT_KEEP_RUN=1 to keep the scratch dir.
+#
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-GATE_LOG="artifacts/live-wait-gate.txt"
+source tools/lib/gate-run.sh
+
+SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
+
+GATE_LOG="$(art live-wait-gate.txt)"
 exec > >(tee "$GATE_LOG") 2>&1
-trap 'sleep 0.5' EXIT
+trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
 
 BOOTS="${BOOTS:-1}"
-REPORT="artifacts/live-wait-report.txt"
+REPORT="$(art live-wait-report.txt)"
 SCRIPT1="artifacts/live-wait-script1.txt"
 SCRIPT2="artifacts/live-wait-script2.txt"
 # The static claim-8215 payload's exit line: the runner forwards phase 1
@@ -88,6 +102,7 @@ PROCS_EXIT_LINE="procs STATUS43.BIN exited status=43"
 REAP_LINE="tasks user-exec reaped"
 
 echo "=== verify-live-wait: claim 9946 — a process observes a peer's exit status via sys_wait (slot 8), $BOOTS boot(s) ==="
+
 zig version
 swift --version 2>&1 | head -1
 sw_vers
@@ -102,6 +117,12 @@ zig build image
 swift build --package-path host/vm-runner --configuration release
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
+# --- per-run isolation -------------------------------------------------------------
+# Private scratch dir + pristine-boot overlay for EVERY boot.
+# See tools/lib/gate-run.sh.
+gate_begin live-wait
+echo "run dir: $RUN_DIR"
+
 # Phase 1: the target (pid 1) + the observer (argv[0]=0 keeps the IPC path
 # silent, argv[1]=1 is the wait target) + an early snapshot + shell check.
 printf 'ls\nexec STATUS43.BIN\nexec COUNTER.BIN 0 1\nprocs\necho rx-wait-phase1\n' > "$SCRIPT1"
@@ -111,46 +132,48 @@ printf 'tasks\nprocs\necho rx-wait-ok\n' > "$SCRIPT2"
 
 run_one() {
     local tag="$1"
-    local run_log="artifacts/live-wait-run-$tag.txt"
-    local serial_copy="artifacts/live-wait-serial-$tag.log"
-    rm -f artifacts/efi-vars.bin artifacts/vm-serial.log
+    local run_log="$(art live-wait-run-$tag.txt)"
+    local serial_copy="$(art live-wait-serial-$tag.log)"
+    rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial-$tag.log"
 
     set +e
-    host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log \
+    host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
+        --serial "$RUN_DIR/vm-serial-$tag.log" \
         --script "$SCRIPT1" --script-after "$STATIC_EXIT_LINE" \
         --script2 "$SCRIPT2" --script2-after "$WAIT_MARKER" \
         --script-expect "$REAP_LINE" --timeout 60 > "$run_log" 2>&1
     local rc=$?
     set -e
-    [ -f artifacts/vm-serial.log ] && cp artifacts/vm-serial.log "$serial_copy" || true
+    [ -f "$RUN_DIR/vm-serial-$tag.log" ] && cp "$RUN_DIR/vm-serial-$tag.log" "$(art live-wait-serial-$tag.log)" || true
+    local SER="$serial_copy"
 
     local bytes=0 banner=0 listed=0 target_loaded=0 counter_loaded=0 \
         alive=0 exiting=0 waiting=0 blocked=0 target_alive=0 \
         exit_record=0 procs_exit=0 reaped=0 saw=0 order=0 echo1=0 echo2=0 fatal=0
-    if [ -f artifacts/vm-serial.log ]; then
-        bytes="$(wc -c < artifacts/vm-serial.log | tr -d ' ')"
-        [ "$(grep -aFxc -- "DipshitOS kernel has seized control." artifacts/vm-serial.log || true)" = 1 ] && banner=1
-        [ "$(grep -aFc -- "STATUS43.BIN" artifacts/vm-serial.log || true)" -ge 2 ] && listed=1
-        [ "$(grep -aFc -- "exec: loaded STATUS43.BIN size=" artifacts/vm-serial.log || true)" -ge 1 ] && target_loaded=1
-        [ "$(grep -aFc -- "exec: loaded COUNTER.BIN size=" artifacts/vm-serial.log || true)" -ge 1 ] && counter_loaded=1
-        [ "$(grep -aFc -- "status43: alive" artifacts/vm-serial.log || true)" -ge 1 ] && alive=1
-        [ "$(grep -aFc -- "status43: exiting" artifacts/vm-serial.log || true)" -ge 1 ] && exiting=1
-        [ "$(grep -aFc -- "$WAIT_MARKER" artifacts/vm-serial.log || true)" -ge 1 ] && waiting=1
+    if [ -f "$SER" ]; then
+        bytes="$(wc -c < "$SER" | tr -d ' ')"
+        [ "$(grep -aFxc -- "DipshitOS kernel has seized control." "$SER" || true)" = 1 ] && banner=1
+        [ "$(grep -aFc -- "STATUS43.BIN" "$SER" || true)" -ge 2 ] && listed=1
+        [ "$(grep -aFc -- "exec: loaded STATUS43.BIN size=" "$SER" || true)" -ge 1 ] && target_loaded=1
+        [ "$(grep -aFc -- "exec: loaded COUNTER.BIN size=" "$SER" || true)" -ge 1 ] && counter_loaded=1
+        [ "$(grep -aFc -- "status43: alive" "$SER" || true)" -ge 1 ] && alive=1
+        [ "$(grep -aFc -- "status43: exiting" "$SER" || true)" -ge 1 ] && exiting=1
+        [ "$(grep -aFc -- "$WAIT_MARKER" "$SER" || true)" -ge 1 ] && waiting=1
         # The blocking proof: the phase-2 tasks snapshot shows the waiting
         # counter AND the sleeping STATUS43 as blocked user-exec task rows
         # (the boot payload's row is "user-el0", a different name).
-        [ "$(grep -acE -- "user-exec.*state=blocked" artifacts/vm-serial.log || true)" -ge 2 ] && blocked=1
+        [ "$(grep -acE -- "user-exec.*state=blocked" "$SER" || true)" -ge 2 ] && blocked=1
         # The target is STILL ALIVE (its process row reads running) while
         # the waiter is blocked — a STATUS43 running row between the
         # waiting marker and the observed status.
         local target_row target_row_ln
-        target_row="$(grep -aE -- "procs: id=[0-9]+ name=STATUS43.BIN state=running" artifacts/vm-serial.log | tail -1 || true)"
+        target_row="$(grep -aE -- "procs: id=[0-9]+ name=STATUS43.BIN state=running" "$SER" | tail -1 || true)"
         [ -n "$target_row" ] && target_alive=1 || true
-        target_row_ln="$(grep -anE -- "procs: id=[0-9]+ name=STATUS43.BIN state=running" artifacts/vm-serial.log | tail -1 | cut -d: -f1 || true)"
-        [ "$(grep -aFc -- "$EXIT_LINE" artifacts/vm-serial.log || true)" -ge 1 ] && exit_record=1
-        [ "$(grep -aFc -- "$PROCS_EXIT_LINE" artifacts/vm-serial.log || true)" -ge 1 ] && procs_exit=1
-        [ "$(grep -aFc -- "$REAP_LINE" artifacts/vm-serial.log || true)" -ge 1 ] && reaped=1
-        [ "$(grep -aFc -- "$SAW_MARKER" artifacts/vm-serial.log || true)" -ge 1 ] && saw=1
+        target_row_ln="$(grep -anE -- "procs: id=[0-9]+ name=STATUS43.BIN state=running" "$SER" | tail -1 | cut -d: -f1 || true)"
+        [ "$(grep -aFc -- "$EXIT_LINE" "$SER" || true)" -ge 1 ] && exit_record=1
+        [ "$(grep -aFc -- "$PROCS_EXIT_LINE" "$SER" || true)" -ge 1 ] && procs_exit=1
+        [ "$(grep -aFc -- "$REAP_LINE" "$SER" || true)" -ge 1 ] && reaped=1
+        [ "$(grep -aFc -- "$SAW_MARKER" "$SER" || true)" -ge 1 ] && saw=1
         # Ordering: waiting marker < target still running < observed status
         # — the counter blocked while the target was alive and only woke
         # after it exited. (The kernel's exit records are asserted
@@ -158,13 +181,13 @@ run_one() {
         # target's exit — its slot is next — so the observation can precede
         # the shell's report drain in the log.)
         local wait_ln saw_ln
-        wait_ln="$(grep -anF -- "$WAIT_MARKER" artifacts/vm-serial.log | head -1 | cut -d: -f1)"
-        saw_ln="$(grep -anF -- "$SAW_MARKER" artifacts/vm-serial.log | head -1 | cut -d: -f1)"
+        wait_ln="$(grep -anF -- "$WAIT_MARKER" "$SER" | head -1 | cut -d: -f1)"
+        saw_ln="$(grep -anF -- "$SAW_MARKER" "$SER" | head -1 | cut -d: -f1)"
         [ -n "$wait_ln" ] && [ -n "$target_row_ln" ] && [ -n "$saw_ln" ] && \
             [ "$wait_ln" -lt "$target_row_ln" ] && [ "$target_row_ln" -lt "$saw_ln" ] && order=1 || true
-        [ "$(grep -aFxc -- "rx-wait-phase1" artifacts/vm-serial.log || true)" = 1 ] && echo1=1
-        [ "$(grep -aFxc -- "rx-wait-ok" artifacts/vm-serial.log || true)" = 1 ] && echo2=1
-        grep -qF -- "[EXC] parking:" artifacts/vm-serial.log && fatal=1 || true
+        [ "$(grep -aFxc -- "rx-wait-phase1" "$SER" || true)" = 1 ] && echo1=1
+        [ "$(grep -aFxc -- "rx-wait-ok" "$SER" || true)" = 1 ] && echo2=1
+        grep -qF -- "[EXC] parking:" "$SER" && fatal=1 || true
     fi
     echo "$tag: runner-rc=$rc serial-bytes=$bytes banner=$banner listed=$listed target_loaded=$target_loaded counter_loaded=$counter_loaded alive=$alive exiting=$exiting waiting=$waiting blocked=$blocked target_alive=$target_alive exit_record=$exit_record procs_exit=$procs_exit reaped=$reaped saw=$saw order=$order echo1=$echo1 echo2=$echo2 fatal=$fatal" | tee -a "$REPORT"
     [ "$rc" = 0 ] && [ "$banner" = 1 ] && [ "$listed" = 1 ] && [ "$target_loaded" = 1 ] && \

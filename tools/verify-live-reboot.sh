@@ -47,6 +47,15 @@
 # Class B -- Apple silicon + VZ only; boots real VMs. A green CI badge
 # proves class A only and says nothing about this gate.
 #
+# Run isolation (#523 item 2 / issue #528, claim 5069): every boot attaches
+# a private DiskImageKit stacked disk (read-only base + throwaway ASIF
+# overlay), a private EFI var store (recreated fresh per boot, as the
+# pre-isolation gate did), and a private serial log under $RUN_DIR — two
+# concurrent instances cannot clobber each other's disks, NVRAM, or
+# evidence. Set DIPSHIT_GATE_SUFFIX=_alt to give this instance its own
+# canonical evidence names (two simultaneous instances MUST differ), and
+# DIPSHIT_KEEP_RUN=1 to keep the scratch dir.
+#
 # Usage:
 #   bash tools/verify-live-reboot.sh          # BOOTS boot(s) of each command
 #   BOOTS=2 bash tools/verify-live-reboot.sh
@@ -61,15 +70,21 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-GATE_LOG="artifacts/live-reboot-gate.txt"
+source tools/lib/gate-run.sh
+
+SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
+
+GATE_LOG="$(art live-reboot-gate.txt)"
 exec > >(tee "$GATE_LOG") 2>&1
-trap 'sleep 0.5' EXIT
+trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
 
 BOOTS="${BOOTS:-1}"
-REPORT="artifacts/live-reboot-report.txt"
+REPORT="$(art live-reboot-report.txt)"
 TIMEOUT="${LIVE_REBOOT_TIMEOUT:-50}"
 
 echo "=== verify-live-reboot: claim 0527 — live reboot/shutdown (real EFI ResetSystem from a live dipshit> shell), $BOOTS boot(s) per command ==="
+
 
 # --- tool versions + revision -----------------------------------------------
 zig version; swift --version 2>&1 | head -1; sw_vers
@@ -85,11 +100,17 @@ zig build image
 swift build --package-path host/vm-runner --configuration release
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
+# --- per-run isolation -------------------------------------------------------------
+# Private scratch dir + pristine-boot overlay for EVERY boot.
+# See tools/lib/gate-run.sh.
+gate_begin live-reboot
+echo "run dir: $RUN_DIR"
+
 # --- scripted keystrokes -----------------------------------------------------
-cat > artifacts/live-reboot-script-reboot.txt <<'EOF'
+cat > "$RUN_DIR/script-reboot.txt" <<'EOF'
 reboot
 EOF
-cat > artifacts/live-reboot-script-shutdown.txt <<'EOF'
+cat > "$RUN_DIR/script-shutdown.txt" <<'EOF'
 shutdown
 EOF
 
@@ -98,26 +119,33 @@ EOF
 # effect of that command was observed.
 run_one() {
     local tag="$1" cmd="$2" script="$3"
-    rm -f artifacts/efi-vars.bin artifacts/vm-serial.log
+    rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial-$tag.log"
     set +e
-    host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log \
+    host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
+        --serial "$RUN_DIR/vm-serial-$tag.log" \
         --script "$script" --script-expect "__NEVER_EXPECTED__" --timeout "$TIMEOUT" \
-        > "artifacts/live-reboot-run-$tag.txt" 2>&1
+        > "$(art live-reboot-run-$tag.txt)" 2>&1
     local RC=$?
     set -e
-    [ -f artifacts/vm-serial.log ] && cp artifacts/vm-serial.log "artifacts/live-reboot-serial-$tag.log" || true
+    [ -f "$RUN_DIR/vm-serial-$tag.log" ] && cp "$RUN_DIR/vm-serial-$tag.log" "$(art live-reboot-serial-$tag.log)" || true
+    local SER="$(art live-reboot-serial-$tag.log)"
 
     local SERIAL_BYTES BANNERS KEYS ECHOED STOPPED RST=0
-    SERIAL_BYTES=$(wc -c < artifacts/vm-serial.log 2>/dev/null | tr -d ' ' || echo 0)
-    BANNERS=$(grep -a -c -- "kernel has seized control" artifacts/vm-serial.log 2>/dev/null || echo 0)
-    KEYS=$(grep -a -o -- "key=0x[0-9a-f]*" artifacts/vm-serial.log 2>/dev/null | sort -u | wc -l | tr -d ' ')
-    if grep -a -qF -- "dipshit> $cmd" artifacts/vm-serial.log 2>/dev/null; then ECHOED=1; else ECHOED=0; fi
-    if grep -a -qF -- "VM ended before the expected transcript appeared" "artifacts/live-reboot-run-$tag.txt"; then STOPPED=1; else STOPPED=0; fi
+    SERIAL_BYTES=$(wc -c < "$SER" 2>/dev/null | tr -d ' ' || echo 0)
+    BANNERS=$(grep -a -c -- "kernel has seized control" "$SER" 2>/dev/null || echo 0)
+    KEYS=$(grep -a -o -- "key=0x[0-9a-f]*" "$SER" 2>/dev/null | sort -u | wc -l | tr -d ' ')
+    # OBSERVED TODAY (2026-08-24, claim 5069): M18 T5 (claim 0163) colors
+    # the prompt — the echo line's serial bytes are
+    # `\x1b[32mdipshit> \x1b[0m<cmd>\r`, so the historical "dipshit> <cmd>"
+    # can never match again.
+    if grep -a -qF -- $'\x1b[32mdipshit> \x1b[0m'"$cmd" "$SER" 2>/dev/null; then ECHOED=1; else ECHOED=0; fi
+    if grep -a -qF -- "VM ended before the expected transcript appeared" "$(art live-reboot-run-$tag.txt)"; then STOPPED=1; else STOPPED=0; fi
     # Claim-0011 M2_RST! marker in the EFI variable store (REPORTED, not a
-    # pass criterion -- best-effort channel; see header).
-    if [ -f artifacts/efi-vars.bin ]; then
+    # pass criterion -- best-effort channel; see header). The store is the
+    # per-run one under $RUN_DIR (claim 5069 isolation).
+    if [ -f "$RUN_DIR/efi-vars.bin" ]; then
         RST=$(python3 -c "
-data = open('artifacts/efi-vars.bin','rb').read()
+data = open('$RUN_DIR/efi-vars.bin','rb').read()
 needle = bytes.fromhex('4d 32 5f 52 53 54 21 00')  # 'M2_RST!\x00' stored LE
 print(1 if any(data[i:i+8] == needle for i in range(len(data))) else 0)
 ")
@@ -168,7 +196,7 @@ for cmd in reboot shutdown; do
         TOTAL=$((TOTAL + 1))
         echo
         echo "=== live-$cmd boot $n ==="
-        if run_one "$(printf '%s-%02d' "$cmd" "$n")" "$cmd" "artifacts/live-reboot-script-$cmd.txt"; then
+        if run_one "$(printf '%s-%02d' "$cmd" "$n")" "$cmd" "$RUN_DIR/script-$cmd.txt"; then
             PASS_TOTAL=$((PASS_TOTAL + 1))
         fi
     done
