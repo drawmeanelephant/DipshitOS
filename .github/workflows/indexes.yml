@@ -60,6 +60,12 @@ jobs:
           git config user.name  "indexes-bot"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
+          # actions/checkout forces a GITHUB_TOKEN Authorization header onto
+          # github.com remotes; without this unset, git push authenticates as
+          # github-actions[bot] (contents:read) instead of INDEXES_PAT.
+          git config --unset-all "http.https://github.com/.extraheader" || true
+          gh auth setup-git
+
           git fetch origin main "$BRANCH" 2>/dev/null || git fetch origin main
 
           # Always rebuild from main's exact tree and regenerate, so the PR
