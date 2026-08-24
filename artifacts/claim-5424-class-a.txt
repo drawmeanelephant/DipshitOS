@@ -1,0 +1,10 @@
+=== claim 5424 class-A gate summary (2026-08-24T01:07:50Z) ===
+revision: 09f12941251584bb7b30ee46b9630a1b524812c6 branch=agent/ox-alpha/m19-p5p6-quoting-globbing
+zig fmt: clean
+verify-unit-tests: all present monitor modules passed
+verify-transcript: PASS — mock transcript is byte-identical to the canonical fixture
+verify-coordination: ok
+test-coordination: all 15 tests passed
+verify-mmu-debt: PASS — MMU takeover contract intact (T0SZ=16 + TLBI at the switch; ADR 0006 + ADR 0004 D3 + hardware-contract + kernel comments).
+=== verify-glyph-raster: PASS (goldens green, self-test green, mutation detected) ===
+verify-bss-budget: PASS — kernel .bss = 10019840 B / 11534336 B (1514496 B headroom).

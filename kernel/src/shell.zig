@@ -123,6 +123,23 @@ fn exec_error_code(e: monitor.ExecError) u8 {
 /// is printed to the console (prefixed with `+ `) before execution.
 var trace_enabled: bool = false;
 
+/// M19 P5 (issue #294): BSS backing for tokenizer materialization —
+/// joined/escaped tokens are not contiguous slices of the input line.
+/// Module scope, not the 16 KiB kernel stack (claim 1809's lesson); safe
+/// under the single-active-dispatch invariant every other shell staging
+/// buffer relies on (scripts, heredocs, substitutions never nest).
+var tokenize_scratch: [lineedit.max_line]u8 = undefined;
+
+/// M19 P6 (issue #295): bounded glob expansion — at most 64 matches per
+/// line TOTAL, so `ls *.BIN *.ELF` cannot blow past the argv rebuild.
+const glob_max_matches: usize = 64;
+
+/// M19 P6: BSS storage for the expanded argv rebuild (original slots plus
+/// the match bound; see glob_expand_argv for why this size always fits).
+var glob_argv_storage: [tokenizer.max_tokens + glob_max_matches][]const u8 = undefined;
+/// M19 P6: scratch for one wildcard argument's sorted matches.
+var glob_match_storage: [glob_max_matches][]const u8 = undefined;
+
 /// M19 P12 (issue #301): loop state — bounded iteration counter and
 /// break/continue flags. Module scope so `shell_handle_expanded` builtins
 /// can set them and `run_for`/`run_while` can read them.
@@ -270,11 +287,35 @@ fn load_env() void {
 }
 
 /// Expand $VAR references in a command line. Returns a stack-local buffer.
+/// M19 P5 (issue #294): single quotes protect everything — inside `'...'`
+/// no `$` ever expands (the quote bytes themselves are copied through; the
+/// tokenizer still sees them). A backslash pair outside single quotes is
+/// copied verbatim so `\$VAR` survives to the tokenizer, which strips the
+/// backslash — the escape prevents expansion without env_expand needing to
+/// interpret escapes.
 fn env_expand(line: []const u8, out: []u8) []u8 {
     var opos: usize = 0;
     var i: usize = 0;
+    var in_single = false;
     while (i < line.len and opos < out.len) : (i += 1) {
-        if (line[i] == '$' and i + 1 < line.len and line[i + 1] == '?') {
+        if (line[i] == '\'') {
+            in_single = !in_single;
+            out[opos] = '\'';
+            opos += 1;
+            continue;
+        }
+        if (!in_single and line[i] == '\\' and i + 1 < line.len) {
+            // Escape pair passes through untouched (tokenizer consumes it).
+            out[opos] = '\\';
+            opos += 1;
+            if (opos < out.len) {
+                out[opos] = line[i + 1];
+                opos += 1;
+            }
+            i += 1; // loop's +1 covers the escaped byte
+            continue;
+        }
+        if (!in_single and line[i] == '$' and i + 1 < line.len and line[i + 1] == '?') {
             // M19 P4 (issue #293): `$?` — the read-only numeric exit
             // status of the last command, substituted here (NOT stored
             // in the env table). Structured bodies (fn/for/while) skip
@@ -301,7 +342,7 @@ fn env_expand(line: []const u8, out: []u8) []u8 {
             i += 1; // consume the '?' too (loop's +1 covers '$')
             continue;
         }
-        if (line[i] == '$' and i + 1 < line.len) {
+        if (!in_single and line[i] == '$' and i + 1 < line.len) {
             // Collect variable name
             var ns: usize = i + 1;
             while (ns < line.len and
@@ -1414,6 +1455,8 @@ const ChainSplitResult = union(enum) {
 /// segments are kept by the split and skipped at run time.
 fn chain_split(line: []const u8) ChainSplitResult {
     var in_quote = false;
+    var in_single = false;
+    var esc = false; // M19 P5: a backslashed byte has no operator meaning
     var segs: [chain_max_cmds][]const u8 = undefined;
     var ops: [chain_max_cmds - 1]ChainOp = undefined;
     var seg_count: usize = 0;
@@ -1421,11 +1464,23 @@ fn chain_split(line: []const u8) ChainSplitResult {
     var start: usize = 0;
     var i: usize = 0;
     while (i < line.len) : (i += 1) {
+        if (esc) {
+            esc = false;
+            continue;
+        }
+        if (line[i] == '\\') {
+            esc = true;
+            continue;
+        }
+        if (line[i] == '\'') {
+            in_single = !in_single;
+            continue;
+        }
         if (line[i] == '"') {
             in_quote = !in_quote;
             continue;
         }
-        if (in_quote) continue;
+        if (in_quote or in_single) continue;
         var op: ?ChainOp = null;
         var op_width: usize = 1;
         if (line[i] == '&' and i + 1 < line.len and line[i + 1] == '&') {
@@ -1489,11 +1544,25 @@ const PipeSplitResult = union(enum) {
 
 fn pipe_split(line: []const u8) PipeSplitResult {
     var in_quote = false;
+    var in_single = false;
+    var esc = false; // M19 P5: a backslashed byte has no operator meaning
     var first: ?usize = null;
     var i: usize = 0;
     while (i < line.len) : (i += 1) {
+        if (esc) {
+            esc = false;
+            continue;
+        }
+        if (line[i] == '\\') {
+            esc = true;
+            continue;
+        }
+        if (line[i] == '\'') {
+            in_single = !in_single;
+            continue;
+        }
         if (line[i] == '"') in_quote = !in_quote;
-        if (line[i] == '|' and !in_quote) {
+        if (!in_single and !in_quote and line[i] == '|') {
             if (first == null) {
                 first = i;
             } else {
@@ -1537,10 +1606,27 @@ const RedirectSplit = struct { left: []const u8, right: []const u8, op: Redirect
 fn redirect_split(line: []const u8) ?RedirectSplit {
     // Scan for `>>`, then `>`, then `<` outside quoted regions.
     var in_quote = false;
+    var in_single = false;
+    var esc = false; // M19 P5: a backslashed byte has no operator meaning
     var i: usize = 0;
     while (i < line.len) : (i += 1) {
-        if (line[i] == '"') in_quote = !in_quote;
-        if (in_quote) continue;
+        if (esc) {
+            esc = false;
+            continue;
+        }
+        if (line[i] == '\\') {
+            esc = true;
+            continue;
+        }
+        if (line[i] == '\'') {
+            in_single = !in_single;
+            continue;
+        }
+        if (line[i] == '"') {
+            in_quote = !in_quote;
+            continue;
+        }
+        if (in_single or in_quote) continue;
         if (line[i] == '>') {
             // Check for `>>`
             if (i + 1 < line.len and line[i + 1] == '>') {
@@ -1583,6 +1669,134 @@ fn trim_start(s: []const u8) []const u8 {
     var start: usize = 0;
     while (start < s.len and (s[start] == ' ' or s[start] == '\t')) start += 1;
     return s[start..];
+}
+
+// ---------------------------------------------------------------------------
+// M19 P6 (issue #295): globbing — `*`, `?`, `[abc]`, `[a-z]` expansion
+// against the ESP window listing.
+// ---------------------------------------------------------------------------
+
+/// One `[...]` class against byte `c`. `pattern[p]` must be `'['`; on a
+/// match returns the index just past the closing `']'`, else null. An
+/// unclosed class never matches (the pattern then stays literal via the
+/// no-match path). A `]` directly after `[` is a member, not the closer.
+fn glob_class(pattern: []const u8, p: usize, c: u8) ?usize {
+    var j = p + 1;
+    var matched = false;
+    var first = true;
+    while (j < pattern.len and (pattern[j] != ']' or first)) {
+        first = false;
+        if (j + 2 < pattern.len and pattern[j + 1] == '-' and pattern[j + 2] != ']') {
+            if (c >= pattern[j] and c <= pattern[j + 2]) matched = true;
+            j += 3;
+        } else {
+            if (pattern[j] == c) matched = true;
+            j += 1;
+        }
+    }
+    if (j >= pattern.len or !matched) return null;
+    return j + 1; // past ']'
+}
+
+/// fnmatch-style matcher: `*` any run (greedy with explicit backtrack
+/// points — iterative, no recursion, no allocation), `?` one byte,
+/// `[...]` classes per glob_class. Everything else is a literal byte.
+fn glob_match(pattern: []const u8, name: []const u8) bool {
+    var p: usize = 0;
+    var n: usize = 0;
+    var star_p: ?usize = null;
+    var star_n: usize = 0;
+    while (n < name.len) {
+        if (p < pattern.len) {
+            switch (pattern[p]) {
+                '*' => {
+                    star_p = p;
+                    star_n = n;
+                    p += 1;
+                    continue;
+                },
+                '?' => {
+                    p += 1;
+                    n += 1;
+                    continue;
+                },
+                '[' => {
+                    if (glob_class(pattern, p, name[n])) |np| {
+                        p = np;
+                        n += 1;
+                        continue;
+                    }
+                },
+                else => {
+                    if (pattern[p] == name[n]) {
+                        p += 1;
+                        n += 1;
+                        continue;
+                    }
+                },
+            }
+        }
+        // Mismatch: resume inside the last `*`, one byte further.
+        if (star_p) |sp| {
+            p = sp + 1;
+            star_n += 1;
+            n = star_n;
+        } else return false;
+    }
+    while (p < pattern.len and pattern[p] == '*') p += 1;
+    return p == pattern.len;
+}
+
+/// M19 P6: rebuild argv for dispatch. Arguments flagged by the tokenizer
+/// expand against the ESP window listing (bounded scope: the ESP root —
+/// the same listing bare `ls` prints); everything else copies through.
+/// No match → the literal pattern passes (nullglob-off). More than
+/// glob_max_matches matches ACROSS the whole line → honest refusal, null,
+/// nothing executes. Matches are byte-sorted (insertion sort).
+fn glob_expand_argv(
+    mon: *monitor.Monitor,
+    argv: []const []const u8,
+    wild: []const bool,
+    out: [][]const u8,
+) ?usize {
+    var count: usize = 0;
+    var total_matched: usize = 0;
+    for (argv, wild) |arg, is_wild| {
+        if (!is_wild) {
+            out[count] = arg;
+            count += 1;
+            continue;
+        }
+        var m: usize = 0;
+        for (esp.entries()) |*e| {
+            const ename = e.name[0..e.name_len];
+            if (!glob_match(arg, ename)) continue;
+            // Insertion sort by name (byte-wise ascending).
+            var pos = m;
+            while (pos > 0 and std.mem.lessThan(u8, ename, glob_match_storage[pos - 1])) : (pos -= 1) {
+                glob_match_storage[pos] = glob_match_storage[pos - 1];
+            }
+            glob_match_storage[pos] = ename;
+            m += 1;
+            if (m >= glob_max_matches) break; // storage bound; sorted insert kept order
+        }
+        if (total_matched + m > glob_max_matches) {
+            mon.console.print_line("glob: too many matches (max 64)");
+            set_exit_ok(false);
+            return null;
+        }
+        if (m == 0) {
+            out[count] = arg; // no match: literal passthrough
+            count += 1;
+            continue;
+        }
+        for (glob_match_storage[0..m]) |name| {
+            out[count] = name;
+            count += 1;
+        }
+        total_matched += m;
+    }
+    return count;
 }
 
 /// M19 P2 (issue #291): run `cmd > file` or `cmd >> file`. The command
@@ -2343,8 +2557,10 @@ fn shell_handle_expanded(mon: *monitor.Monitor, line: []const u8) void {
         },
         .none => {},
     }
-    // M18 T12–T15: intercept shell builtins before monitor.exec
-    const tokens = tokenizer.tokenize(line);
+    // M18 T12–T15: intercept shell builtins before monitor.exec.
+    // M19 P5: the tokenizer materializes joined/escaped tokens into the
+    // BSS scratch (single-active-dispatch invariant, script_staging rule).
+    const tokens = tokenizer.tokenize(line, &tokenize_scratch);
     if (tokens.too_many) {
         monitor.err_line(mon, monitor.too_many_arguments_message);
         return;
@@ -2352,7 +2568,12 @@ fn shell_handle_expanded(mon: *monitor.Monitor, line: []const u8) void {
     if (tokens.unbalanced_quote) {
         mon.console.print_line("unterminated quote: rest of line treated as literal");
     }
-    const argv = tokens.argv[0..tokens.count];
+    // M19 P6 (issue #295): expand unquoted wildcard arguments against the
+    // ESP listing before anything executes — builtins and registry
+    // commands see already-expanded argv.
+    var gargv = glob_argv_storage;
+    const gcount = glob_expand_argv(mon, tokens.argv[0..tokens.count], tokens.arg_glob[0..tokens.count], &gargv) orelse return;
+    const argv = gargv[0..gcount];
     if (argv.len == 0) {
         set_exit_code(exec_error_code(monitor.exec(mon, argv))); // M19 P4
         return;
@@ -3309,30 +3530,34 @@ test "shell: ctrl-c on an empty line cancels without executing" {
 test "shell: host fuzz of the tokenizer never panics and stays in bounds (card U3)" {
     // Card U3 (claim 1809's sibling): the tokenizer must accept ANY byte
     // stream without panicking and every returned token must be a slice
-    // of the input line (never OOB). Deterministic PRNG, fixed seed — the
+    // of the input line OR of the caller's scratch (M19 P5 materializes
+    // joined/escaped tokens there). Deterministic PRNG, fixed seed — the
     // same corpus on every run.
     var prng = std.Random.DefaultPrng.init(0x5543_0001);
     const rnd = prng.random();
     const alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 \t\"'./-_=+*&^%$#@!~`;:<>?[]{}()|\\\n\x00\x7f";
     var line_buf: [300]u8 = undefined;
+    var scratch: [300]u8 = undefined;
+    const scratch_base = @intFromPtr(&scratch);
     var iter: usize = 0;
     while (iter < 4000) : (iter += 1) {
         const len = rnd.uintLessThan(usize, line_buf.len);
         for (line_buf[0..len]) |*b| b.* = alphabet[rnd.uintLessThan(usize, alphabet.len)];
         const line = line_buf[0..len];
-        const result = tokenizer.tokenize(line);
+        @memset(&scratch, 0);
+        const result = tokenizer.tokenize(line, &scratch);
         // Never more than max_tokens tokens.
         try std.testing.expect(result.count <= tokenizer.max_tokens);
         // too_many can only be set together with a full count.
         if (result.too_many) try std.testing.expectEqual(tokenizer.max_tokens, result.count);
-        // Every token is a slice of the line: in-bounds and non-overlapping
-        // by construction (tokenize only slices into `line`).
-        for (result.argv[0..result.count]) |token| {
+        // Every token is a slice of `line` or `scratch`: in-bounds either way.
+        for (result.argv[0..result.count], result.arg_glob[0..result.count]) |token, g| {
+            _ = g;
             const start = @intFromPtr(token.ptr);
             const end = start + token.len;
-            const base = @intFromPtr(line.ptr);
-            try std.testing.expect(start >= base);
-            try std.testing.expect(end <= base + line.len);
+            const in_line = start >= @intFromPtr(line.ptr) and end <= @intFromPtr(line.ptr) + line.len;
+            const in_scratch = start >= scratch_base and end <= scratch_base + scratch.len;
+            try std.testing.expect(in_line or in_scratch);
         }
     }
 }
@@ -5405,4 +5630,101 @@ test "shell: M19 P3 empty segments are skipped without breaking the chain" {
     while (shell.poll() != .idle) {}
     const out = mock.contents();
     try std.testing.expect(std.mem.indexOf(u8, out, "fine\n") != null);
+}
+
+// ---------------------------------------------------------------------------
+// M19 P5 (issue #294) quoting & escaping + P6 (issue #295) globbing
+// ---------------------------------------------------------------------------
+
+test "shell: M19 P6 glob_match: star, question, class, ranges" {
+    try std.testing.expect(glob_match("*", ""));
+    try std.testing.expect(glob_match("*", "anything"));
+    try std.testing.expect(glob_match("*.BIN", "USER.BIN"));
+    try std.testing.expect(!glob_match("*.BIN", "USER.ELF"));
+    try std.testing.expect(glob_match("ab?d", "abcd"));
+    try std.testing.expect(!glob_match("ab?d", "abd"));
+    try std.testing.expect(glob_match("[abc]at", "bat"));
+    try std.testing.expect(!glob_match("[abc]at", "dat"));
+    try std.testing.expect(glob_match("ch[a-m]p", "chap"));
+    try std.testing.expect(glob_match("ch[a-m]p", "chip"));
+    try std.testing.expect(!glob_match("ch[a-m]p", "chzp"));
+    // The class matches exactly ONE byte.
+    try std.testing.expect(!glob_match("ch[a-m]p", "chimp"));
+    // Star backtracking across a failed class match.
+    try std.testing.expect(glob_match("*[xy].BIN", "abcz.BIN") == false);
+    try std.testing.expect(glob_match("*[xz].BIN", "abcz.BIN"));
+    // Exact literal.
+    try std.testing.expect(glob_match("KERNEL.BIN", "KERNEL.BIN"));
+    try std.testing.expect(!glob_match("KERNEL.BIN", "KERNEL2.BIN"));
+}
+
+test "shell: M19 P6 no disk in host tests: wildcard stays literal (nullglob-off)" {
+    env_count = 0;
+    trace_enabled = false;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("echo *.NOTFOUND\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    // The ESP window is empty in host tests, so nothing matches and the
+    // pattern passes through untouched.
+    try std.testing.expect(std.mem.indexOf(u8, out, "*.NOTFOUND\n") != null);
+}
+
+test "shell: M19 P5 single quotes protect operators from the chain splitter" {
+    env_count = 0;
+    trace_enabled = false;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    // The `;` inside single quotes must NOT split the chain: echo prints
+    // one argument containing it.
+    mock.feed("echo 'a;b'\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "\na;b\n") != null);
+}
+
+test "shell: M19 P5 backslash defuses an operator" {
+    env_count = 0;
+    trace_enabled = false;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("echo a\\;b\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "\na;b\n") != null);
+}
+
+test "shell: M19 P5 single quotes block $VAR expansion" {
+    env_count = 0;
+    defer env_count = 0;
+    env_set("GLOBE", "world");
+    trace_enabled = false;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("echo '$GLOBE'\n"); // literal
+    while (shell.poll() != .idle) {}
+    mock.feed("echo \"$GLOBE\"\n"); // expanded
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "\n$GLOBE\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\nworld\n") != null);
+}
+
+test "shell: M19 P5 \\$ prevents expansion, tokenizer strips the escape" {
+    env_count = 0;
+    trace_enabled = false;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("set HOME /esp\n");
+    while (shell.poll() != .idle) {}
+    mock.feed("echo \\$HOME\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "\n$HOME\n") != null);
 }
