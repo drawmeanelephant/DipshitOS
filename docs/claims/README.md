@@ -92,6 +92,7 @@ CI) fails if the table drifts from the claim files.
 | [5227-notepad-wrap-find](5227-notepad-wrap-find.md) | buffy (`agent/buffy/m15-c5c6-notepad`) | ✅ done 2026-08-20 — `user/src/notepad.zig` soft-wrap (`TextLayout` last_space, gutter, `Line X of Y`) + `find_next`/`replace`/`replace_all` (case_sensitive=false) + `AppState` find bar (`find_active`/`find_buf`/`replace_buf`) + `draw` highlight + `handle_keyboard_event` Ctrl+F/H, host tests `soft-wrap`/`find` PASS, `verify-bss-budget` PASS `9788088/11534336` |
 | [5301-m24-calc-decompose-k1-k5](5301-m24-calc-decompose-k1-k5.md) | buffy (`agent/buffy/m24-calc-features`) | ✅ done 2026-08-22 — PR #482 |
 | [5381-m24-k6-k16-calc-features](5381-m24-k6-k16-calc-features.md) | ox-alpha (`lane-b/m24-calc-features`) | ✅ done (code + host tests; live-gate bring-up pass pending for the set) |
+| [5424-m19-p5-quoting-p6-globbing](5424-m19-p5-quoting-p6-globbing.md) | ox-alpha (`agent/ox-alpha/m19-p5p6-quoting-globbing`) | ✅ done (2026-08-23) |
 | [5512-archive-march-m4-m5-trackers](5512-archive-march-m4-m5-trackers.md) | oxalpha (`agent/oxalpha/archive-march-m4-m5`) | ✅ done |
 | [5759-m19-p3-chaining-p4-exit-status](5759-m19-p3-chaining-p4-exit-status.md) | ox-alpha (`agent/ox-alpha/m19-p3p4-chaining-exit-status`) | ✅ done (2026-08-23) |
 | [5828-trim-gate-inventory](5828-trim-gate-inventory.md) | ox-alpha (`t3code/issue-265-fix`) | ✅ done (2026-08-21) |
