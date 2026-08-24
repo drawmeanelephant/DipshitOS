@@ -13,11 +13,22 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-GATE_LOG="artifacts/live-fetch-gate.txt"
-exec > >(tee "$GATE_LOG") 2>&1
-trap 'sleep 0.5' EXIT
+source tools/lib/gate-run.sh
 
-REPORT="artifacts/live-fetch-report.txt"
+SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
+
+# Run isolation (#523 item 2 / issue #528; fleet remainder claim 2259):
+# private stacked disk (pristine-per-boot overlay), EFI var store, serial
+# log, capture, and scripts under $RUN_DIR. Set DIPSHIT_GATE_SUFFIX=_alt
+# for distinct canonical evidence names; DIPSHIT_KEEP_RUN=1 keeps the
+# scratch dir.
+
+GATE_LOG="$(art live-fetch-gate.txt)"
+exec > >(tee "$GATE_LOG") 2>&1
+trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
+
+REPORT="$(art live-fetch-report.txt)"
 
 echo "=== verify-live-fetch: claim 5416 — HTTP/1.0 client FETCH.BIN live on VZ (EL0 TCP connect, HTTP GET, response streaming, clean close) ==="
 
@@ -35,34 +46,39 @@ zig build image
 swift build --package-path host/vm-runner --configuration release
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
+# --- per-run isolation -------------------------------------------------------
+gate_begin live-fetch
+echo "run dir: $RUN_DIR"
+
 # --- scripted keystrokes -----------------------------------------------------
-cat > artifacts/live-fetch-script-1.txt <<'EOF'
+cat > "$RUN_DIR/script-1.txt" <<'EOF'
 net ip 10.0.0.1
 net arp 10.0.0.2
 exec FETCH.BIN
 echo fetch-launched
 EOF
-cat > artifacts/live-fetch-script-2.txt <<'EOF'
+cat > "$RUN_DIR/script-2.txt" <<'EOF'
 procs
 echo fetch-ok
 EOF
 
 # --- the run ----------------------------------------------------------------
-rm -f artifacts/efi-vars.bin artifacts/vm-serial.log artifacts/live-fetch-cap.bin
+rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial.log" "$RUN_DIR/cap.bin"
 set +e
-host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log \
-    --net artifacts/live-fetch-cap.bin \
+host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
+    --serial "$RUN_DIR/vm-serial.log" \
+    --net "$RUN_DIR/cap.bin" \
     --net-arp-respond 10.0.0.2 --net-tcp-respond 10.0.0.2:80 \
-    --script artifacts/live-fetch-script-1.txt \
-    --script2 artifacts/live-fetch-script-2.txt --script2-after 'fetch: done' \
+    --script "$RUN_DIR/script-1.txt" \
+    --script2 "$RUN_DIR/script-2.txt" --script2-after 'fetch: done' \
     --script-expect $'tasks user-exec reaped' --timeout 90 \
-    > artifacts/live-fetch-run.txt 2>&1
+    > "$(art live-fetch-run.txt)" 2>&1
 RC=$?
 set -e
-[ -f artifacts/vm-serial.log ] && cp artifacts/vm-serial.log artifacts/live-fetch-serial.log || true
+[ -f "$RUN_DIR/vm-serial.log" ] && cp "$RUN_DIR/vm-serial.log" "$(art live-fetch-serial.log)" || true
 
 # --- assertions -------------------------------------------------------------
-SERIAL="artifacts/vm-serial.log"
+SERIAL="$RUN_DIR/vm-serial.log"
 SERIAL_BYTES=0; IPSET=0
 F_START=0; F_CONN=0; F_REQ=0; F_HTTP200=0; F_BODY=0; F_DONE=0; F_EXIT42=0; OK=0
 
@@ -80,10 +96,10 @@ if [ -f "$SERIAL" ]; then
 fi
 
 ATCP_SYN=0; ATCP_HTTP=0; ARUNNER=0
-if [ -f artifacts/live-fetch-run.txt ]; then
-    grep -a -qF -- "NET-TCP: answered the guest's SYN" artifacts/live-fetch-run.txt && ATCP_SYN=1
-    grep -a -qF -- "NET-TCP: answered the guest's HTTP request with 200 OK" artifacts/live-fetch-run.txt && ATCP_HTTP=1
-    grep -a -qF -- "net-tcp-respond: ENABLED" artifacts/live-fetch-run.txt && ARUNNER=1
+if [ -f "$(art live-fetch-run.txt)" ]; then
+    grep -a -qF -- "NET-TCP: answered the guest's SYN" "$(art live-fetch-run.txt)" && ATCP_SYN=1
+    grep -a -qF -- "NET-TCP: answered the guest's HTTP request with 200 OK" "$(art live-fetch-run.txt)" && ATCP_HTTP=1
+    grep -a -qF -- "net-tcp-respond: ENABLED" "$(art live-fetch-run.txt)" && ARUNNER=1
 fi
 
 cat > "$REPORT" <<EOF

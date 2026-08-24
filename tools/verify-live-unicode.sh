@@ -28,13 +28,23 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-GATE_LOG="artifacts/live-unicode-gate.txt"
+source tools/lib/gate-run.sh
+
+SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
+
+# Run isolation (#523 item 2 / issue #528; fleet remainder claim 2259):
+# private stacked disk (pristine-per-boot overlay), EFI var store, serial
+# log, screen captures, and scripts under $RUN_DIR. Set
+# DIPSHIT_GATE_SUFFIX=_alt for distinct canonical evidence names;
+# DIPSHIT_KEEP_RUN=1 keeps the scratch dir.
+
+GATE_LOG="$(art live-unicode-gate.txt)"
 exec > >(tee "$GATE_LOG") 2>&1
-trap 'sleep 0.5' EXIT
+trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
 
 BOOTS="${BOOTS:-1}"
-REPORT="artifacts/live-unicode-report.txt"
-SCRIPT="artifacts/live-unicode-input.txt"
+REPORT="$(art live-unicode-report.txt)"
 
 echo "=== verify-live-unicode: M20 U2/U3/U11 — Unicode on VZ, $BOOTS boot(s) ==="
 
@@ -50,6 +60,12 @@ zig build image
 swift build --package-path host/vm-runner --configuration release
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
+# --- per-run isolation -------------------------------------------------------
+gate_begin live-unicode
+echo "run dir: $RUN_DIR"
+
+SCRIPT="$RUN_DIR/input.txt"
+
 cat > "$SCRIPT" <<'EOF'
 text fontdebug on
 text put café
@@ -61,30 +77,34 @@ EOF
 
 run_one() {
     local tag="$1"
-    rm -f artifacts/efi-vars.bin artifacts/vm-serial.log
+    rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial.log"
+    rm -f "$RUN_DIR"/gpu-screen-*
     set +e
-    host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log \
-        --screen artifacts/gpu-screen --script "$SCRIPT" --script-expect "m20-unicode-ok" --timeout 30 \
-        > "artifacts/live-unicode-run-$tag.txt" 2>&1
+    host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
+        --serial "$RUN_DIR/vm-serial.log" \
+        --screen "$RUN_DIR/gpu-screen" --script "$SCRIPT" --script-expect "m20-unicode-ok" --timeout 30 \
+        > "$(art live-unicode-run-$tag.txt)" 2>&1
     local RC=$?
     set -e
-    [ -f artifacts/vm-serial.log ] && cp artifacts/vm-serial.log "artifacts/live-unicode-serial-$tag.log" || true
+    [ -f "$RUN_DIR/vm-serial.log" ] && cp "$RUN_DIR/vm-serial.log" "$(art live-unicode-serial-$tag.log)" || true
+    cp "$RUN_DIR"/gpu-screen-* artifacts/ 2>/dev/null || true
+    SERIAL="$RUN_DIR/vm-serial.log"
 
     local SERIAL_BYTES BANNER=0 PUT_OK=0 ZERO_MISS=0 TWO_MISS=0 LAST_CP=0 DONE=0
-    SERIAL_BYTES=$(wc -c < artifacts/vm-serial.log 2>/dev/null | tr -d ' ')
-    if [ -f artifacts/vm-serial.log ]; then
-        grep -qF "DipshitOS kernel" artifacts/vm-serial.log && BANNER=1
+    SERIAL_BYTES=$(wc -c < "$SERIAL" 2>/dev/null | tr -d ' ')
+    if [ -f "$SERIAL" ]; then
+        grep -qF "DipshitOS kernel" "$SERIAL" && BANNER=1
         # café flushed through the compositor without transport error.
-        grep -qF "text put: ok" artifacts/vm-serial.log && PUT_OK=1
+        grep -qF "text put: ok" "$SERIAL" && PUT_OK=1
         # After café alone: no missing glyphs (é is in the Latin-1 table).
-        grep -qF "missing=0" artifacts/vm-serial.log && ZERO_MISS=1
+        grep -qF "missing=0" "$SERIAL" && ZERO_MISS=1
         # 中文 misses accumulate from BOTH the typed-line echo and the
         # command itself, so assert "some misses" + the recorded cp
         # rather than an exact count.
-        grep -qE "missing=[0-9]+" artifacts/vm-serial.log && TWO_MISS=1
+        grep -qE "missing=[0-9]+" "$SERIAL" && TWO_MISS=1
         # The last miss is 文 (U+6587) — the second char of the pair.
-        grep -qF "last=U+6587" artifacts/vm-serial.log && LAST_CP=1
-        grep -qF "m20-unicode-ok" artifacts/vm-serial.log && DONE=1
+        grep -qF "last=U+6587" "$SERIAL" && LAST_CP=1
+        grep -qF "m20-unicode-ok" "$SERIAL" && DONE=1
     fi
     echo "$tag: rc=$RC bytes=$SERIAL_BYTES banner=$BANNER put_ok=$PUT_OK zero_miss=$ZERO_MISS two_miss=$TWO_MISS last_cp=$LAST_CP done=$DONE"
     [ "$RC" = 0 ] && [ "$BANNER" = 1 ] && [ "$PUT_OK" = 1 ] && [ "$ZERO_MISS" = 1 ] \

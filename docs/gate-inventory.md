@@ -85,13 +85,13 @@ card's close-out and graduate to the archive when their milestone closes.
 | `live-net-arp` | B | `bash tools/verify-live-net-arp.sh` | ✅ pass | 2026-08-11 |
 | `live-net-icmp` | B | `bash tools/verify-live-net-icmp.sh` | ✅ pass | 2026-08-11 |
 | `live-net-udp` | B | `bash tools/verify-live-net-udp.sh` | ✅ pass | 2026-08-11 |
-| `live-net-udp-syscall` | B | `bash tools/verify-live-net-udp-syscall.sh` | ✅ pass | 2026-08-12 |
+| `live-net-udp-syscall` | B | `bash tools/verify-live-net-udp-syscall.sh` | ✅ pass | 2026-08-24* |
 | `live-net-nat` | B | `bash tools/verify-live-net-nat.sh` | ✅ pass | 2026-08-12 |
-| `live-net-dhcp` | B | `bash tools/verify-live-net-dhcp.sh` | ✅ pass | 2026-08-12 |
-| `live-net-dhcp-renew` | B | `bash tools/verify-live-net-dhcp-renew.sh` | ✅ pass | 2026-08-12 |
-| `live-net-dhcp-autonomous` | B | `bash tools/verify-live-net-dhcp-autonomous.sh` | ✅ pass | 2026-08-12* |
+| `live-net-dhcp` | B | `bash tools/verify-live-net-dhcp.sh` | ✅ pass | 2026-08-24* |
+| `live-net-dhcp-renew` | B | `bash tools/verify-live-net-dhcp-renew.sh` | ✅ pass | 2026-08-24* |
+| `live-net-dhcp-autonomous` | B | `bash tools/verify-live-net-dhcp-autonomous.sh` | ✅ pass | 2026-08-24* |
 | `live-net-tcp` | B | `bash tools/verify-live-net-tcp.sh` | ✅ pass | 2026-08-12 |
-| `live-net-tcp-rto` | B | `bash tools/verify-live-net-tcp-rto.sh` | ✅ pass | 2026-08-12 |
+| `live-net-tcp-rto` | B | `bash tools/verify-live-net-tcp-rto.sh` | ✅ pass | 2026-08-24* |
 | `live-screen` | B | `bash tools/verify-live-screen.sh` | ✅ pass | 2026-08-13* |
 | `live-text` | B | `bash tools/verify-live-text.sh` | ✅ pass | 2026-08-13* |
 | `live-roadpops` | B | `bash tools/verify-live-roadpops.sh` | ✅ pass | 2026-08-13* |
@@ -110,12 +110,12 @@ card's close-out and graduate to the archive when their milestone closes.
 | `live-settings` | B | `bash tools/verify-live-settings.sh` | ✅ pass | 2026-08-15* |
 | `live-events` | B | `bash tools/verify-live-events.sh` | ✅ pass | 2026-08-15* |
 | `live-user-fs` | B | `bash tools/verify-live-user-fs.sh` | ✅ pass | 2026-08-15* |
-| `live-desktop` | B | `bash tools/verify-live-desktop.sh` | ✅ pass | 2026-08-16* |
-| `live-sys-kill` | B | `bash tools/verify-live-sys-kill.sh` | ✅ pass | 2026-08-16* |
-| `live-m16-image` | B | `bash tools/verify-live-m16-image.sh` | ✅ pass | 2026-08-19* |
-| `live-m16-guards` | B | `bash tools/verify-live-m16-guards.sh` | ✅ pass | 2026-08-19* |
-| `live-m16-resources` | B | `bash tools/verify-live-m16-resources.sh` | ✅ pass | 2026-08-19* |
-| `live-m16-composition` | B | `bash tools/verify-live-m16-composition.sh` | ✅ pass | 2026-08-19* |
+| `live-desktop` | B | `bash tools/verify-live-desktop.sh` | 🔴 pre-existing red — CALC window 512x424 > back-buffer cap 384 (595bc71 vs 19a6335); migration itself landed | 2026-08-24* |
+| `live-sys-kill` | B | `bash tools/verify-live-sys-kill.sh` | ✅ pass | 2026-08-24* |
+| `live-m16-image` | B | `bash tools/verify-live-m16-image.sh` | ✅ pass | 2026-08-24* |
+| `live-m16-guards` | B | `bash tools/verify-live-m16-guards.sh` | ✅ pass | 2026-08-24* |
+| `live-m16-resources` | B | `bash tools/verify-live-m16-resources.sh` | ✅ pass | 2026-08-24* |
+| `live-m16-composition` | B | `bash tools/verify-live-m16-composition.sh` | ✅ pass | 2026-08-24* |
 | `cvc-echo` | B | `bash tools/verify-cvc-echo.sh` | ✅ pass | 2026-08-24 |
 | `verify-vz` | B | `just verify-vz` (aggregate — every class-B gate above) | aggregate | 2026-08-19 |
 
@@ -162,12 +162,19 @@ the three rot classes from issue #528. Per-gate status after migration:
 
 - **Green under isolation** — every migrated gate not listed below ran
   rc=0 on this host post-migration (evidence: `artifacts/` gate logs).
-- **Pre-existing red, confirmed on unmodified origin/main the same day**
-  (cited, not masked): `live-win`, `live-win-syscall`, `live-win-close`,
-  `live-win-move` (pixel decode vs capture cadence), `live-win-hig`
-  (`dui: cycle` missing), `live-asm` + `live-disas` (M22 D4 fixture drift,
-  "bad entry offset"), `live-calc-prog` ("failed to open window"),
-  `verify-live-user-fs` (bare make-image.sh subset build), `live-net-nat`.
+- **Pre-existing red, reproduced on unmodified origin/main** (detached
+  baseline d1dc6fe under /var/folders/.../opencode/baseline-main; cited,
+  not masked): `live-win`, `live-win-syscall`, `live-win-close`,
+  `live-win-move` ("clock title bar is not amber" pixel family),
+  `live-win-hig` (`dui: cycle` missing), `live-asm` + `live-disas` (M22 D4
+  fixture drift, "bad entry offset"), `live-calc-prog` AND NOW ALSO
+  `live-desktop`: CALC.BIN's window grew to 512x424 in M24 K1-K5 (595bc71,
+  PR #482) while driving_award.zig's user back-buffer cap is user_buf_h=384
+  (19a6335) — sys_win_open returns invalid for CALC on any boot since
+  2026-08-22 (`calc: failed to open window`; newer main surfaces it as
+  `desktop: launch CALC.BIN err=6`). Kernel/user constants out of the
+  migration's scope; left for the owner. `verify-live-user-fs` (builder
+  subset), `live-net-nat` unchanged.
 - **Environment-blocked on this agent session** (TCC): `live-screen`,
   `live-text`, `live-glyphs`, `live-roadpops` (Screen Recording),
   `live-pointer-cg` (Accessibility, issue #151) — reproduced identically
@@ -180,8 +187,19 @@ the three rot classes from issue #528. Per-gate status after migration:
   `artifacts/disk.img` behave like main; write-gates (fs/gfs/user-fs/
   settings/scripting) therefore boot the canonical image under the
   gate-run.sh mkdir spin-lock instead of copies/overlays.
-- **Unresolved**: `live-tabs` probe-decode race (paint vs screenshot-after)
-  under isolated boots; needs its own follow-up.
+- **tabs probe-decode race ROOT-CAUSED (claim 2259)**: three stacked
+  host-side layers FIXED gate-side (script-expect == screenshot marker made
+  the marker capture unreachable — scriptPoll checks the expect first and
+  returns; typed-marker triggers fired on the ECHO of forwarded bytes;
+  SCK single-shot captures of the non-active window return seconds-stale
+  compositions). The walk now parks exit 12 s past the probe marker and
+  reads the LAST periodic ladder frame deterministically. REMAINING RED is
+  a guest/tools question outside the migration scope: even current frames
+  never decode Q{3,}Z (minimal repro: `text put Q\tZ` last-command-only;
+  `text` reports cur=4,38 cols=160 cell=8x8; decoded lines lose leading
+  glyphs) — suspected tools/decode-screen-glyphs.py grid alignment vs M20
+  Lane C's 8px cells (628ab20) or the putraw composite path. Handed to the
+  text-layer owners; the gate fails honestly meanwhile.
 
 Existing flake registry rows continue below.
 
