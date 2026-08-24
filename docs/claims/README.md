@@ -52,6 +52,15 @@ check fails the gate — change the slug and the ID changes.
    (with evidence) or `⛔` (note why), append to `docs/logs/<branch>.md`,
    and re-run the refresh script so the index shows it.
 
+While 🔄, two fields keep you honest (optional for grandfathered claims):
+
+- `- **Touches:**` — comma-separated repo paths/globs you will edit. The
+  gate **fails** when two ACTIVE claims from different branches declare
+  overlapping files.
+- `- **Heartbeat:**` — bump the date by committing the claim file every
+  week or two. A 🔄 claim with no commit for 14+ days draws a gate
+  warning; past ~21 days anyone may flip it ⛔ via their own log entry.
+
 Never edit another agent's claim file. Corrections are new entries in your
 own branch's log that reference the old one.
 
@@ -69,6 +78,7 @@ CI) fails if the table drifts from the claim files.
 | [0162-logs-cleanup](0162-logs-cleanup.md) | opencode (`t3code/fix-issue-267-git-current`) | ✅ done 2026-08-21 |
 | [0163-m18-t5-colors](0163-m18-t5-colors.md) | buffy (`agent/buffy/m18-t5-colors`) | ✅ done 2026-08-22 |
 | [0265-top-sort-filter](0265-top-sort-filter.md) | buffy (`agent/buffy/m15-c8-top-sort`) | ✅ done 2026-08-21 — `user/src/top.zig` sortable columns + filtering (`SortColumn pid/name/state/exit`, `compare_procs`, `name_contains` case-insensitive, stable insertion sort on `display_indices`, `filter_input TextInput 260,6,110,20` with label `Filter:`, header hit-test 52..68 click_column toggle ↑/↓, `rebuild_display` filtered+sorted, `handle_mouse_events` header+filter+row (display), `handle_keyboard_event` filter-focused priority + filtered Up/Down, `handle_timer`/`kill_selected` rebuild, `draw` header indicator accent + filtered rows). Host tests 23/23 PASS (8 new: compare, contains, sortable, filter, sort+filter, auto-refresh preserve, header click, row click), `TOP AppState 1352 <4KiB`, `zig build` PASS `TOP.BIN 10526` (+2355B), `verify-bss-budget` PASS `9788088/11534336` headroom `1746248`, `zig fmt --check` PASS. |
+| [0434-m25-lane-a-bulk-props](0434-m25-lane-a-bulk-props.md) | ox-alpha (`agent/ox-alpha/m25-filemanager-depth`) | 🔄 agent/ox-alpha/m25-filemanager-depth |
 | [0469-m18-t16-scripting](0469-m18-t16-scripting.md) | buffy (`agent/buffy/m18-t16-scripting`) | ✅ done 2026-08-22 |
 | [0819-scrollview](0819-scrollview.md) | Muse Spark (`agent/buffy/arc1-scrollview`) | 🔄 `agent/buffy/arc1-scrollview` |
 | [0835-hscrollbar](0835-hscrollbar.md) | Muse Spark (`agent/buffy/arc1-progressbar`) | ✅ done 2026-08-21 — `user/src/lib/ui.zig` HScrollBar + 4 host tests, `zig test` 29/29, `verify-bss-budget` 9788088/11534336, `verify-coordination` PASS |
@@ -81,7 +91,8 @@ CI) fails if the table drifts from the claim files.
 | [2203-trim-hardware-contract](2203-trim-hardware-contract.md) | ox-alpha (`agent/ox-alpha/hygiene-trim-hardware-contract`) | ✅ done (`agent/ox-alpha/hygiene-trim-hardware-contract`) |
 | [2336-file-inline-preview](2336-file-inline-preview.md) | buffy (`agent/buffy/m15-c7-file-preview`) | ✅ done 2026-08-21 — `user/src/file_browser.zig` inline preview (selection auto-loads `preview_content[512]` first 15 lines, `is_binary_content` ≥80% printable sniff → `(binary)` placeholder for non-TXT/binary, `preview_is_binary` flag) + breadcrumb bar (`breadcrumb_rect 60,6,440,12` muted, `format_breadcrumbs`/`breadcrumb_hit_test`/`truncate_to_segment`, `current_path[64]` session-only, `enter_directory`/`navigate_to_segment`/`breadcrumb_click`, `build_path` helper, `refresh_preview` on select/click/keyboard, `draw_details` preview below metadata) + `HScroll` deferred (preview wraps at `preview_cols 30`, no extra widget). Host tests 25/25 PASS (6 new: binary sniff, breadcrumbs hit-test, build_path, current_path nav, preview auto-load, breadcrumb_click), `zig build` PASS `FILE.BIN 10882` (+24B), `verify-bss-budget` PASS `9788088/11534336` (1746248 B headroom), `zig fmt --check` PASS. |
 | [2418-checkbox-toggle](2418-checkbox-toggle.md) | Muse Spark (`agent/buffy/arc1-checkbox-toggle`) | 🔄 `agent/buffy/arc1-checkbox-toggle` |
-| [2564-tracked-only-coordination-gate](2564-tracked-only-coordination-gate.md) | ox-alpha (`agent/ox-alpha/coordination-tracked-gate`) | 🔄 in progress |
+| [2539-m25-lane-b-mkdir-du-recent](2539-m25-lane-b-mkdir-du-recent.md) | ox-alpha (`agent/ox-alpha/m25-filemanager-depth`) | 🔄 agent/ox-alpha/m25-filemanager-depth |
+| [2564-tracked-only-coordination-gate](2564-tracked-only-coordination-gate.md) | ox-alpha (`agent/ox-alpha/coordination-tracked-gate`) | ✅ done 2026-08-24 — PR #525 merged (`e22b375`): both coordination tools list files via `git ls-files -c`; sandbox in test-coordination.sh is a git repo; untracked-immunity regression case added (16/16); verified in a detached worktree at the pushed commit |
 | [2616-dhcp-lifecycle-autonomous](2616-dhcp-lifecycle-autonomous.md) | buffy (`agent/buffy/audit-followup-3-dhcp-autonomy`) | 🔄 agent/buffy/audit-followup-3-dhcp-autonomy |
 | [2762-window-snap-zones](2762-window-snap-zones.md) | buffy (`agent/buffy/m15-c3-snap-zones`) | ✅ done 2026-08-20 — `driving_award.zig:178` snap BSS (`last_rect`/`is_snapped`/`zone` ≈80 B) + `snap_zone_for_point`/`snap_window`/`snap_restore` + `pointer_tick` drag-out restore + `draw_chrome` preview, host tests `snap_zone`/`snap_window`/`preview` PASS, `verify-bss-budget` PASS `9787576/11534336` |
 | [2860-trim-roadmap-completed-milestones](2860-trim-roadmap-completed-milestones.md) | t3code (`t3code/fetch-issue-264-details`) | ✅ done 2026-08-21 |
@@ -91,7 +102,7 @@ CI) fails if the table drifts from the claim files.
 | [4402-m27-compositor-polish](4402-m27-compositor-polish.md) | Buffy (`agent/buffy/m21-compositor`) | 🔄 agent/buffy/m21-compositor |
 | [4429-archive-m5-m6-prompts](4429-archive-m5-m6-prompts.md) | buffy (`agent/buffy/hygiene-archive-m5-m6-prompts`) | ✅ done |
 | [4516-archive-ragshit-test-artifacts](4516-archive-ragshit-test-artifacts.md) | oxalpha (`t3code/handle-issue-268-git-current`) | ✅ done |
-| [4928-per-agent-worktrees](4928-per-agent-worktrees.md) | ox-alpha (`agent/ox-alpha/agent-worktrees`) | 🔄 `agent/ox-alpha/agent-worktrees` |
+| [4928-per-agent-worktrees](4928-per-agent-worktrees.md) | ox-alpha (`agent/ox-alpha/agent-worktrees`) | ✅ done 2026-08-24 — PR #526 merged: `just new-agent/resume-agent/drop-agent/list-agents`, canonical naming (`../dipshitos-<name>`, `agent/<name>/<slug>`), AGENTS.md mandates one worktree per agent; round-trip selftest + gates green; `just` installed on dev host (v1.58.0) |
 | [5093-scroll-keys-chords](5093-scroll-keys-chords.md) | buffy (`agent/buffy/m18-t16-scripting`) | ✅ done 2026-08-22 |
 | [5127-m20-text-rendering-lane-c](5127-m20-text-rendering-lane-c.md) | ox-alpha (`lane-c/m20-text-rendering`) | ✅ done 2026-08-22 — all 15 issues closed (#306–#320); |
 | [5227-notepad-wrap-find](5227-notepad-wrap-find.md) | buffy (`agent/buffy/m15-c5c6-notepad`) | ✅ done 2026-08-20 — `user/src/notepad.zig` soft-wrap (`TextLayout` last_space, gutter, `Line X of Y`) + `find_next`/`replace`/`replace_all` (case_sensitive=false) + `AppState` find bar (`find_active`/`find_buf`/`replace_buf`) + `draw` highlight + `handle_keyboard_event` Ctrl+F/H, host tests `soft-wrap`/`find` PASS, `verify-bss-budget` PASS `9788088/11534336` |
@@ -101,6 +112,7 @@ CI) fails if the table drifts from the claim files.
 | [5512-archive-march-m4-m5-trackers](5512-archive-march-m4-m5-trackers.md) | oxalpha (`agent/oxalpha/archive-march-m4-m5`) | ✅ done |
 | [5759-m19-p3-chaining-p4-exit-status](5759-m19-p3-chaining-p4-exit-status.md) | ox-alpha (`agent/ox-alpha/m19-p3p4-chaining-exit-status`) | ✅ done (2026-08-23) |
 | [5828-trim-gate-inventory](5828-trim-gate-inventory.md) | ox-alpha (`t3code/issue-265-fix`) | ✅ done (2026-08-21) |
+| [6014-claim-touches-and-staleness](6014-claim-touches-and-staleness.md) | ox-alpha (`agent/ox-alpha/claim-lifecycle`) | 🔄 `agent/ox-alpha/claim-lifecycle` |
 | [6204-audit-2026-maintenance](6204-audit-2026-maintenance.md) | maintenance (`agent/maintenance/audit-2026-issues`) | 🔄 agent/maintenance/audit-2026-issues |
 | [6215-adr-0013-post-m14-abi-amendment](6215-adr-0013-post-m14-abi-amendment.md) | buffy (`freebuff/can-you-review-issues-223-247-and-try-to-provide-h-f6c8d8a0-9349-4ada-9bca-1705150f0bde`) | ✅ done 2026-08-20 (as **proposed** ADR; the status flips to **accepted** when M14 closes and the first post-M14 claim cites it) — `docs/decisions/0013-post-m14-abi-amendment.md` exists (~18 KiB, ~290 lines), with D1 slot reservation (47–54), D2 event-kind reservation (10–17 with kind-12/13/16 collision resolutions called out by name), D3 BSS budgets + D3.1 observed measurement, D4 ABI contract under reservation, D5 slot-allocation table after M14 + post-M14, D6 event-kind table, D7 layering rule, D8 modifier matrix, and an Open-issues section for the implementing claims. |
 | [6437-progressbar](6437-progressbar.md) | Muse Spark (`agent/buffy/arc1-progressbar`) | ✅ done 2026-08-21 — `user/src/lib/ui.zig` ProgressBar + 5 host tests, `zig test` 22/22, `verify-bss-budget` 9788088/11534336, `verify-coordination` PASS |

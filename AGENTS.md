@@ -97,7 +97,11 @@ rules are:
 - **Claim before you start.** Non-trivial work gets a claim file under
   `docs/claims/` (copy `docs/claims/TEMPLATE.md`) and a log entry in
   `docs/logs/<branch>.md` before code is written. Claimed work is not
-  duplicated by other agents.
+  duplicated by other agents. Declare the files you will edit in
+  `- **Touches:**` and bump `- **Heartbeat:**` while 🔄: the gate fails
+  when two ACTIVE claims from different branches declare overlapping
+  files, and warns when a 🔄 claim has had no commit for 14+ days (past
+  ~21 days, anyone may flip it ⛔ via their own branch log entry).
 - **One editor per file at a time.** If two agents need the same file, the
   second waits or merges through the integration branch — never edit the
   same file (e.g. `kernel/src/main.zig`) concurrently.

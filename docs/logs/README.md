@@ -118,11 +118,13 @@ verify-coordination`, and CI) fails if it drifts from the files.
 | sysinfo support snapshot (claim 2990) | [`agent-buffy-u7-sysinfo.md`](agent-buffy-u7-sysinfo.md) |
 | persistent settings (claim 2649) | [`agent-buffy-u8-persistent-settings.md`](agent-buffy-u8-persistent-settings.md) |
 | per-agent worktrees | [`agent-ox-alpha-agent-worktrees.md`](agent-ox-alpha-agent-worktrees.md) |
+| claim lifecycle: declared files + staleness | [`agent-ox-alpha-claim-lifecycle.md`](agent-ox-alpha-claim-lifecycle.md) |
 | tracked-only coordination gate | [`agent-ox-alpha-coordination-tracked-gate.md`](agent-ox-alpha-coordination-tracked-gate.md) |
 | agent/ox-alpha/hygiene-trim-hardware-contract | [`agent-ox-alpha-hygiene-trim-hardware-contract.md`](agent-ox-alpha-hygiene-trim-hardware-contract.md) |
 | `agent/ox-alpha/m19-p3p4-chaining-exit-status` | [`agent-ox-alpha-m19-p3p4-chaining-exit-status.md`](agent-ox-alpha-m19-p3p4-chaining-exit-status.md) |
 | `agent/ox-alpha/m19-p5p6-quoting-globbing` | [`agent-ox-alpha-m19-p5p6-quoting-globbing.md`](agent-ox-alpha-m19-p5p6-quoting-globbing.md) |
 | `agent/ox-alpha/m19-p7-background-jobs` | [`agent-ox-alpha-m19-p7-background-jobs.md`](agent-ox-alpha-m19-p7-background-jobs.md) |
+| agent/ox-alpha/m25-filemanager-depth | [`agent-ox-alpha-m25-filemanager-depth.md`](agent-ox-alpha-m25-filemanager-depth.md) |
 | `agent/oxalpha/archive-march-m4-m5` | [`agent-oxalpha-archive-march-m4-m5.md`](agent-oxalpha-archive-march-m4-m5.md) |
 | milestone eight cards U4+U5: pointer focus/cursor + window HIG (zcode) | [`agent-zcode-m8-u4-u5-windows.md`](agent-zcode-m8-u4-u5-windows.md) |
 | `docs-calm-lavoisier-memorial`: Memorial to calm-lavoisier & Git Alignment (claim 9357) | [`docs-calm-lavoisier-memorial.md`](docs-calm-lavoisier-memorial.md) |

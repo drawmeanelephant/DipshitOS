@@ -42,6 +42,24 @@ bad() { printf 'error: %s\n' "$*" >&2; fail=1; }
 
 claim_files="$(git ls-files -c -- 'docs/claims' | grep -E '/[0-9]{4}-[^/]*\.md$' | sort || true)"
 seen=""
+active_declared=""
+now="$(date +%s)"
+STALE_DAYS="${STALE_DAYS:-14}"
+
+# tokens_overlap A B -- do two Touches tokens collide?
+# Exact match, or either side is a `prefix*` glob matching the other.
+tokens_overlap() {
+    x="$1"; y="$2"
+    [ "$x" = "$y" ] && return 0
+    case "$x" in
+        *\*) p="${x%\*}"; case "$y" in "$p"*) return 0 ;; esac ;;
+    esac
+    case "$y" in
+        *\*) p="${y%\*}"; case "$x" in "$p"*) return 0 ;; esac ;;
+    esac
+    return 1
+}
+
 for f in $claim_files; do
     [ -e "$f" ] || continue
     base="$(basename "$f")"
@@ -83,7 +101,50 @@ for f in $claim_files; do
             fi
         fi
     fi
+
+    # --- claim lifecycle: Touches conflicts + staleness (#523 items 4-5) ---
+    # Only ACTIVE (🔄) claims participate. Fields are optional so the
+    # grandfathered claim files stay valid.
+    status_line="$(sed -n 's/^- \*\*Status:\*\* //p' "$f" | head -1)"
+    case "$status_line" in
+        🔄*)
+            ab="$(sed -n 's/^- \*\*Owner:\*\* [^`]*`\([^`]*\)`.*/\1/p' "$f" | head -1)"
+            touches="$(sed -n 's/^- \*\*Touches:\*\* //p' "$f" | head -1 | tr ',' ' ')"
+            last_ts="$(git log -1 --format=%ct -- "$f" 2>/dev/null || true)"
+            if [ -n "$last_ts" ]; then
+                age_days=$(( (now - last_ts) / 86400 ))
+                if [ "$age_days" -ge "$STALE_DAYS" ]; then
+                    printf 'warn: %s: 🔄 for %d days — update the Heartbeat (commit the claim file) or, past ~21 days, anyone may flip it ⛔ with a log entry\n' "$base" "$age_days" >&2
+                fi
+            fi
+            for t in $touches; do
+                [ -n "$ab" ] || break
+                active_declared="${active_declared}${ab} ${t}
+"
+            done
+            ;;
+    esac
 done
+
+# Pairwise overlap between ACTIVE claims from different branches.
+# Reported once per unordered pair.
+if [ -n "$active_declared" ]; then
+    while read -r b1 t1; do
+        [ -n "$t1" ] || continue
+        while read -r b2 t2; do
+            [ -n "$t2" ] || continue
+            [ "$b1" != "$b2" ] || continue
+            if [[ "$b1$t1" < "$b2$t2" ]]; then continue; fi
+            if tokens_overlap "$t1" "$t2"; then
+                bad "ACTIVE claims from '$b1' and '$b2' both declare '$t1' / '$t2' — one editor per file: coordinate, or wait for the other claim to land"
+            fi
+        done <<EOF2
+$active_declared
+EOF2
+    done <<EOF1
+$active_declared
+EOF1
+fi
 
 # --- branch logs ------------------------------------------------------------
 

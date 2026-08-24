@@ -1,7 +1,7 @@
 # Claim: tracked-only coordination gate
 
 - **Owner:** ox-alpha (`agent/ox-alpha/coordination-tracked-gate`)
-- **Status:** 🔄 in progress
+- **Status:** ✅ done 2026-08-24 — PR #525 merged (`e22b375`): both coordination tools list files via `git ls-files -c`; sandbox in test-coordination.sh is a git repo; untracked-immunity regression case added (16/16); verified in a detached worktree at the pushed commit
 - **Depends on:** —
 
 ## Problem

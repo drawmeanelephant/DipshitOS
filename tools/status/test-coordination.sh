@@ -227,6 +227,71 @@ EOF
     run git add -A
 fi
 
+# --- 6. negative: two ACTIVE claims from different branches declaring the
+# same Touches path fail the gate ---------------------------------------------
+ta="$(bash "$TMP/tools/status/claim-id.sh" 'branch/one' 'touches-a')"
+tb="$(bash "$TMP/tools/status/claim-id.sh" 'branch/two' 'touches-b')"
+cat > "$TMP/docs/claims/${ta}-touches-a.md" <<EOF
+# Claim: touches a
+
+- **Owner:** test-agent (\`branch/one\`)
+- **Touches:** kernel/src/shell.zig, kernel/src/pipe.zig
+- **Status:** 🔄 \`branch/one\`
+- **Depends on:** —
+EOF
+cat > "$TMP/docs/claims/${tb}-touches-b.md" <<EOF
+# Claim: touches b
+
+- **Owner:** other-agent (\`branch/two\`)
+- **Touches:** kernel/src/text.zig kernel/src/shell.zig
+- **Status:** 🔄 \`branch/two\`
+- **Depends on:** —
+EOF
+run git add -A
+out="$(run bash tools/verify-coordination.sh 2>&1 || true)"
+case "$out" in
+    *"both declare"*)
+        ok "overlapping Touches between ACTIVE claims fail the gate" ;;
+    *)
+        nope "overlapping Touches were not rejected: $out" ;;
+esac
+
+# --- 7. positive: disjoint Touches from different branches pass --------------
+# Flip b's touch away from shell.zig; both claims stay ACTIVE.
+sed 's|kernel/src/text.zig kernel/src/shell.zig|kernel/src/text.zig|' \
+    "$TMP/docs/claims/${tb}-touches-b.md" > "$TMP/docs/claims/${tb}.new"
+mv "$TMP/docs/claims/${tb}.new" "$TMP/docs/claims/${tb}-touches-b.md"
+run git add -A
+run bash tools/status/refresh-indexes.sh >/dev/null
+if run bash tools/verify-coordination.sh >/dev/null 2>&1; then
+    ok "disjoint Touches between ACTIVE claims pass the gate"
+else
+    nope "disjoint Touches failed the gate"
+fi
+
+# --- 8. warning only: a stale 🔄 claim does not fail the gate -----------------
+ts="$(bash "$TMP/tools/status/claim-id.sh" 'branch/one' 'stale-fixture')"
+cat > "$TMP/docs/claims/${ts}-stale-fixture.md" <<EOF
+# Claim: stale fixture
+
+- **Owner:** test-agent (\`branch/one\`)
+- **Heartbeat:** 2000-01-01
+- **Status:** 🔄 \`branch/one\`
+- **Depends on:** —
+EOF
+run git add -A
+run bash tools/status/refresh-indexes.sh >/dev/null
+run env GIT_AUTHOR_DATE="2026-01-01T00:00:00Z" GIT_COMMITTER_DATE="2026-01-01T00:00:00Z" \
+    git -c user.email=coord@test -c user.name=coord commit -qm "stale fixture"
+out="$(run bash tools/verify-coordination.sh 2>&1)" && rc=0 || rc=$?
+if [ "$rc" -ne 0 ]; then
+    nope "staleness escalated to an error: $out"
+elif printf '%s' "$out" | grep -q '^warn: .* for .* days'; then
+    ok "stale 🔄 claim warns without failing the gate"
+else
+    nope "stale claim produced no warning: $out"
+fi
+
 # --- final: clean sandbox passes -------------------------------------------
 run bash tools/status/refresh-indexes.sh >/dev/null
 if run bash tools/verify-coordination.sh >/dev/null 2>&1; then
