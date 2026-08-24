@@ -50,6 +50,10 @@
 # Class B -- Apple silicon + VZ only; boots a real VM. A green CI badge
 # proves class A only and says nothing about this gate.
 #
+# Run isolation (#523 item 2 / issue #528, claim 5069): private stacked
+# disk + EFI vars + serial log under $RUN_DIR; DIPSHIT_GATE_SUFFIX/_KEEP_RUN
+# supported.
+#
 # Usage:
 #   bash tools/verify-live-input-depth.sh
 #
@@ -61,9 +65,14 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-GATE_LOG="artifacts/live-input-depth-gate.txt"
+source tools/lib/gate-run.sh
+
+SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
+
+GATE_LOG="$(art live-input-depth-gate.txt)"
 exec > >(tee "$GATE_LOG") 2>&1
-trap 'sleep 0.5' EXIT
+trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
 
 REPORT="artifacts/live-input-depth-report.txt"
 
@@ -82,6 +91,10 @@ zig build image
 swift build --package-path host/vm-runner --configuration release
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
+# --- per-run isolation -------------------------------------------------------
+gate_begin live-input-depth
+echo "run dir: $RUN_DIR"
+
 # --- the serial script + the keyboard chord sequence ------------------------
 # The serial script only proves the shell stays responsive on serial; the
 # REAL typing is the keyboard's. The chords start AFTER the boot self-test
@@ -89,7 +102,7 @@ codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/
 # delivery ceiling (state-based reports flushed ~once per present; faster
 # keyDown/keyUp pairs net to zero inside the delivery window and the guest
 # sees nothing -- observed claim-time, not a guest bug).
-cat > artifacts/live-input-depth-script.txt <<'EOF'
+cat > "$RUN_DIR/script.txt" <<'EOF'
 echo depth-serial-ok
 EOF
 
@@ -97,28 +110,28 @@ CHORDS="e,c,h,o,space,f,a,s,t,o,k,return,i,n,p,u,t,return"
 
 run_one() {
     local out="$1" serial="$2"
-    rm -f artifacts/efi-vars.bin artifacts/vm-serial.log
-    host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log \
+    rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial.log"
+    host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
+        --serial "$RUN_DIR/vm-serial.log" \
         --input --display \
-        --script artifacts/live-input-depth-script.txt \
+        --script "$RUN_DIR/script.txt" \
         --input-chords "$CHORDS" --input-chords-after "userspace: el0=1" \
         --input-chords-delay 2.0 \
         --script-expect "input: armed=1 fifo=0/64 dropped=0 events=18" \
         --timeout 130 \
-        > "$out" 2>&1
+        > "$(art live-input-depth-run.txt)" 2>&1
     local RC=$?
-    [ -f artifacts/vm-serial.log ] && cp artifacts/vm-serial.log "$serial" || true
-    echo "$RC" > /tmp/live-input-depth-rc.txt
+    [ -f "$RUN_DIR/vm-serial.log" ] && cp "$RUN_DIR/vm-serial.log" "$(art live-input-depth-serial.log)" || true
+    echo "$RC" > "$RUN_DIR/rc.txt"
 }
 
-rm -f artifacts/efi-vars.bin artifacts/vm-serial.log
 set +e
-run_one "artifacts/live-input-depth-run.txt" "artifacts/live-input-depth-serial.log"
-RC="$(cat /tmp/live-input-depth-rc.txt)"
+run_one "$(art live-input-depth-run.txt)" "$(art live-input-depth-serial.log)"
+RC="$(cat "$RUN_DIR/rc.txt")"
 set -e
 
 # --- assertions --------------------------------------------------------------
-SERIAL="artifacts/live-input-depth-serial.log"
+SERIAL="$(art live-input-depth-serial.log)"
 SERIAL_BYTES=0 ARMED=0 FASTOK=0 NODROP=0 EVENTS=0 ENTER=0 OBSDONE=0 RUNNERFLAG=0 DELAY=0
 if [ -f "$SERIAL" ]; then
     SERIAL_BYTES=$(wc -c < "$SERIAL" | tr -d ' ')
