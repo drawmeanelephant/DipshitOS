@@ -22,9 +22,10 @@ a scope, and a gate, and it only flips to observed when the gate passes.
 
 The canonical index is
 [`docs/claims/README.md`](https://github.com/drawmeanelephant/DipshitOS/blob/main/docs/claims/README.md),
-regenerated on main after every merge by
-`.github/workflows/indexes.yml`; branches never commit table churn, and
-the coordination gate checks table structure (not drift) on pull requests.
+regenerated after every merge by
+`.github/workflows/indexes.yml` via one auto-merge PR; branches never
+commit table churn, and the coordination gate checks table structure (not
+drift) on pull requests.
 
 ## Why this matters to you
 

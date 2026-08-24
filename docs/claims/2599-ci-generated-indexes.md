@@ -5,7 +5,7 @@
 - **Scope:**
   1. `refresh-indexes.sh` gains a structure-only validation mode (markers + column count, no sync diff).
   2. `verify-coordination.sh` enforces index *structure*, not *sync* — drift stops failing PRs.
-  3. New `.github/workflows/indexes.yml`: on push to main, regenerate indexes and push a bot commit (`[skip ci]`, concurrency-serialized, rebase-retried) so main's tables are always fresh.
+  3. New `.github/workflows/indexes.yml`: on push to main, regenerate indexes and open/update one **auto-merge squash PR** (`indexes/bot-regenerate`) — branch protection forbids direct pushes (no-bypass ruleset per docs/branch-protection.md), so a direct bot push was rejected on the first live run; requires `INDEXES_PAT` secret + "Allow auto-merge" enabled.
   4. Docs (AGENTS.md, claims/logs READMEs, TEMPLATE, gate-inventory, testing, status pointers, site pages): branches no longer run/commit the refresh script; resolve-by-regeneration recipe for legacy conflicts.
   5. Test suite: gate tolerates stale committed indexes; `--check` still fails on drift (bot contract); structure enforcement retained.
 - **Touches:** tools/verify-coordination.sh, tools/status/refresh-indexes.sh, tools/status/test-coordination.sh, .github/workflows/indexes.yml, AGENTS.md, docs/claims/README.md, docs/claims/TEMPLATE.md, docs/logs/README.md, docs/gate-inventory.md, docs/testing.md, docs/status.md, site/contributing.md, site/claims.md

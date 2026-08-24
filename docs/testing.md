@@ -118,9 +118,9 @@ Every verification command belongs to exactly one class (canonical inventory:
     malformed (every row must have the exact expected column count, so an
     unescaped `|` in a claim status cannot corrupt a table). Index *sync*
     is not checked on PRs: since claim 2599 branches do not regenerate or
-    commit the tables — `.github/workflows/indexes.yml` regenerates them on
-    main after every merge, so a branch's committed indexes are stale by
-    design.
+    commit the tables — `.github/workflows/indexes.yml` opens an auto-merge
+    regeneration PR against main after every merge, so a branch's committed
+    indexes are stale by design.
 18. Test the coordination tooling itself: `bash
     tools/status/test-coordination.sh` (also `just test-coordination` and
     CI) — positive/negative cases for cell escaping, structural table

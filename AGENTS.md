@@ -112,11 +112,14 @@ rules are:
   claim and log index tables in `docs/claims/README.md` and
   `docs/logs/README.md` are generated from the git-tracked claim/log files,
   but since claim 2599 **branches do not regenerate or commit them**:
-  `.github/workflows/indexes.yml` regenerates both tables on `main`
-  immediately after every merge (the single serialized writer of a shared
+  `.github/workflows/indexes.yml` owns both tables after merge (the single
+  serialized writer of a shared
   derived artifact). Committing table churn from a branch is what made
   those two files collide on nearly every near-simultaneous merge; don't
-  reintroduce it. A local `bash tools/status/refresh-indexes.sh` (`just
+  reintroduce it. Branch protection forbids direct pushes, so after every
+  merge the workflow opens (or updates) one **auto-merge regeneration PR**
+  (`indexes/bot-regenerate`) instead of pushing to main — tables land a few
+  minutes later, through the normal required checks. A local `bash tools/status/refresh-indexes.sh` (`just
   refresh-indexes`) is an optional preview of what the table will look
   like — do not commit its output. The coordination gate judges tracked
   files only, so other agents' untracked staging files in a shared checkout
