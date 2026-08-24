@@ -58,13 +58,20 @@
 //!   without CGEvent/NSEvent synthesis (issues #179/#151). Same host-push
 //!   pattern at pool scale: `arm_input_pool()` pre-arms EIGHT device-write
 //!   receive buffers; the host dequeues one per injected key report, writes
+//!   receive buffers; the host dequeues one per injected input message,
+//!   writes
 //!   a fixed 16-byte message ([kind u8][flags u8][len u16le][payload]),
-//!   kind 1 = raw 8-byte HID keyboard boot report, and returns it;
+//!   kind 1 = raw 8-byte HID keyboard boot report, kind 2 = raw 5-byte
+//!   absolute-pointer report [buttons, x_lo, x_hi, y_lo, y_hi] (claim 9367),
+//!   and returns it;
 //!   `poll_input()` — called from the shell idle loop's RX seam in main.zig
 //!   — validates each completion, hands kind-1 payloads to the
 //!   `on_input_report` hook (main.zig wires it to input.decode_keyboard_
 //!   report so injected keys are ordinary keys downstream: event FIFO,
-//!   compose, keymap, `input` counters), and replenishes the buffer. Wire
+//!   compose, keymap, `input` counters) and kind-2 payloads to the
+//!   `on_pointer_report` hook (wired to input.decode_pointer_report — the
+//!   exact path XHCI pointer reports take, so click-to-focus works with no
+//!   USB device attached), and replenishes the buffer. Wire
 //!   format is normative in docs/hardware-contract.md.
 //!
 //! Feature negotiation (claim 9737): the driver reads the full 64-bit
@@ -822,10 +829,15 @@ pub fn submit(payload_buf: []const u8, reply_buf: []u8) ?u16 {
 pub const input_buf_cap: usize = 32;
 /// Fixed total message size: [kind u8][flags u8][len u16le][12-byte payload].
 pub const input_msg_len: usize = 16;
-/// Message kinds (only kind 1 is defined).
+/// Message kinds (kind 1 keyboard, kind 2 pointer — claim 9367).
 pub const input_kind_keyboard: u8 = 1;
+pub const input_kind_pointer: u8 = 2;
 /// Kind-1 payload length: the raw HID keyboard boot report.
 pub const input_keyboard_rep_len: usize = 8;
+/// Kind-2 payload length: the raw absolute-pointer report
+/// [buttons, x_lo, x_hi, y_lo, y_hi] — the same shape the XHCI pointer's
+/// interrupt-IN reports decode from (coords are HID absolute 0..32767).
+pub const input_pointer_rep_len: usize = 5;
 /// Pre-armed receive buffers (bounded pool; the host paces well below this
 /// and the idle-loop drain replenishes within one tick anyway).
 pub const input_pool_count: usize = 8;
@@ -837,8 +849,10 @@ pub var input_rx_bufs: [input_pool_count][input_buf_cap]u8 align(16) = undefined
 var input_rx_handles: [input_pool_count]u16 = [_]u16{0} ** input_pool_count;
 /// True once `arm_input_pool` posted + kicked the whole pool.
 pub var input_armed: bool = false;
-/// Messages consumed and dispatched (kind-1 valid envelopes).
+/// Messages consumed and dispatched (valid envelopes, either kind).
 pub var input_rx_count: u32 = 0;
+/// Kind-2 pointer messages consumed and dispatched (claim 9367).
+pub var input_ptr_count: u32 = 0;
 /// Malformed messages dropped (bad kind / bad len / short envelope) — the
 /// loud-by-counter failure mode; never a partial decode.
 pub var input_bad_count: u32 = 0;
@@ -847,6 +861,11 @@ pub var input_bad_count: u32 = 0;
 /// FIFO when an app window owns focus, console bytes at the terminal, and
 /// the `input` report counters either way). Null = count-only (honest no-op).
 pub var on_input_report: ?*const fn (rep: []const u8) void = null;
+/// Claim 9367: the pointer decode hook — main.zig wires it to
+/// input.decode_pointer_report so an injected absolute-pointer report takes
+/// the exact path an XHCI pointer report takes (`dui` click-to-focus,
+/// cursor moves, `input` ptr-* counters). Null = count-only.
+pub var on_pointer_report: ?*const fn (rep: []const u8) void = null;
 
 /// Pre-arm the receive pool on queue 3 and kick once. Returns true when all
 /// EIGHT buffers are posted; false when the transport/queue is unavailable
@@ -876,23 +895,37 @@ pub fn arm_input_pool() bool {
     return true;
 }
 
-/// Validate one completed message and dispatch kind-1 payloads to the hook.
+/// Validate one completed message and dispatch kind-1 (keyboard) / kind-2
+/// (pointer) payloads to their hooks. Anything else — bad kind, bad flags,
+/// wrong payload length, short envelope — increments the bad counter and is
+/// dropped loudly-by-counter, never decoded partially.
 fn dispatch_input_msg(msg: []const u8) void {
     if (msg.len < 4 or msg[1] != 0) {
         input_bad_count += 1;
         return;
     }
-    if (msg[0] != input_kind_keyboard) {
-        input_bad_count += 1;
-        return;
-    }
     const len: usize = @as(usize, msg[2]) | (@as(usize, msg[3]) << 8);
-    if (len != input_keyboard_rep_len or msg.len < 4 + len) {
-        input_bad_count += 1;
-        return;
+    switch (msg[0]) {
+        input_kind_keyboard => {
+            if (len != input_keyboard_rep_len or msg.len < 4 + len) {
+                input_bad_count += 1;
+                return;
+            }
+            input_rx_count += 1;
+            if (on_input_report) |hook| hook(msg[4 .. 4 + len]);
+        },
+        input_kind_pointer => {
+            if (len != input_pointer_rep_len or msg.len < 4 + len) {
+                input_bad_count += 1;
+                return;
+            }
+            input_ptr_count += 1;
+            if (on_pointer_report) |hook| hook(msg[4 .. 4 + len]);
+        },
+        else => {
+            input_bad_count += 1;
+        },
     }
-    input_rx_count += 1;
-    if (on_input_report) |hook| hook(msg[4 .. 4 + len]);
 }
 
 /// Return one consumed buffer to service: free its chain (the deterministic
@@ -1043,6 +1076,15 @@ var test_hook_last_len: usize = 0;
 fn test_input_hook(rep: []const u8) void {
     test_hook_calls += 1;
     test_hook_last_len = rep.len;
+}
+
+var test_ptr_calls: usize = 0;
+var test_ptr_last_len: usize = 0;
+var test_ptr_last_buttons: u8 = 0;
+fn test_pointer_hook(rep: []const u8) void {
+    test_ptr_calls += 1;
+    test_ptr_last_len = rep.len;
+    if (rep.len >= 1) test_ptr_last_buttons = rep[0];
 }
 
 test "virtio_custom: payload is the 16-byte known string, reply cap 64, big payload 12340" {
@@ -1251,6 +1293,9 @@ test "virtio_custom: input-channel shapes (claim 9588) — queue index, envelope
     try std.testing.expectEqual(@as(u16, 4), max_queue_probe);
     try std.testing.expectEqual(@as(usize, 16), input_msg_len);
     try std.testing.expectEqual(@as(usize, 8), input_keyboard_rep_len);
+    try std.testing.expectEqual(@as(u8, 1), input_kind_keyboard);
+    try std.testing.expectEqual(@as(u8, 2), input_kind_pointer);
+    try std.testing.expectEqual(@as(usize, 5), input_pointer_rep_len);
     try std.testing.expect(input_buf_cap >= input_msg_len);
     try std.testing.expectEqual(@as(usize, 32), input_buf_cap);
     try std.testing.expectEqual(@as(usize, 8), input_pool_count);
@@ -1281,7 +1326,7 @@ test "virtio_custom: dispatch_input_msg validates the envelope and counts honest
     try std.testing.expectEqual(@as(usize, 1), test_hook_calls);
     try std.testing.expectEqual(@as(usize, 8), test_hook_last_len);
 
-    msg[0] = 2; // unknown kind
+    msg[0] = 7; // unknown kind
     dispatch_input_msg(&msg);
     try std.testing.expectEqual(@as(u32, 1), input_rx_count);
     try std.testing.expectEqual(@as(u32, 1), input_bad_count);
@@ -1302,5 +1347,48 @@ test "virtio_custom: dispatch_input_msg validates the envelope and counts honest
     try std.testing.expectEqual(@as(u32, 1), input_rx_count);
     try std.testing.expectEqual(@as(usize, 1), test_hook_calls);
     input_rx_count = 0;
+    input_bad_count = 0;
+}
+
+test "virtio_custom: kind-2 pointer messages dispatch through the pointer hook (claim 9367)" {
+    var msg: [input_msg_len]u8 align(16) = undefined;
+    // Absolute-pointer report: button 1 down at logical (24576, 4551)
+    // — guest pixels (960, 100) on the 1280x720 framebuffer.
+    const rep = [input_pointer_rep_len]u8{ 0x01, 0x00, 0x60, 0xa7, 0x11 };
+    msg[0] = input_kind_pointer;
+    msg[1] = 0;
+    msg[2] = @intCast(input_pointer_rep_len & 0xff);
+    msg[3] = 0;
+    @memcpy(msg[4 .. 4 + input_pointer_rep_len], &rep);
+
+    on_pointer_report = &test_pointer_hook;
+    defer on_pointer_report = null;
+    test_ptr_calls = 0;
+    test_ptr_last_len = 0;
+    test_ptr_last_buttons = 0;
+    input_ptr_count = 0;
+    input_bad_count = 0;
+
+    dispatch_input_msg(&msg); // valid
+    try std.testing.expectEqual(@as(u32, 1), input_ptr_count);
+    try std.testing.expectEqual(@as(u32, 0), input_bad_count);
+    try std.testing.expectEqual(@as(usize, 1), test_ptr_calls);
+    try std.testing.expectEqual(@as(usize, 5), test_ptr_last_len);
+    try std.testing.expectEqual(@as(u8, 0x01), test_ptr_last_buttons);
+
+    // Wrong payload length (a keyboard-sized payload under a pointer
+    // envelope) is malformed, not partially decoded.
+    msg[2] = 8;
+    dispatch_input_msg(&msg);
+    try std.testing.expectEqual(@as(u32, 1), input_bad_count);
+    try std.testing.expectEqual(@as(u32, 1), input_ptr_count);
+
+    // Null hook still counts the message honestly.
+    on_pointer_report = null;
+    msg[2] = @intCast(input_pointer_rep_len & 0xff);
+    dispatch_input_msg(&msg);
+    try std.testing.expectEqual(@as(u32, 2), input_ptr_count);
+    try std.testing.expectEqual(@as(usize, 1), test_ptr_calls);
+    input_ptr_count = 0;
     input_bad_count = 0;
 }

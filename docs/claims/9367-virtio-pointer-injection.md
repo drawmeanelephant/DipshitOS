@@ -16,7 +16,7 @@
 - **Touches:** kernel/src/virtio_custom.zig, kernel/src/main.zig, kernel/src/input.zig, host/vm-runner/Sources/VMRunner/main.swift, tools/verify-live-pointer-virtio.sh, docs/hardware-contract.md
 - **Depends on:** 9588 (queue-3 input channel, landed), 3141 (host-push pattern, landed)
 - **Heartbeat:** 2026-08-24
-- **Status:** 🔄 t3code/finish-issue-523-progress
+- **Status:** ✅ done 2026-08-24 — PASS observed live (see Evidence)
 
 ## Notes
 
@@ -32,3 +32,26 @@ serial evidence of ptr-reports>0 and >=2 distinct focus moves while the
 guest's own report shows armed=0 (no USB keyboard or pointer was ever
 attached); regression `GATE_VIRTIO=1 bash tools/verify-live-input.sh` stays
 green; unit tests cover the kind-2 envelope validation.
+
+## Evidence
+
+- **Live gate** `bash tools/verify-live-pointer-virtio.sh` — PASS
+  2026-08-24 (macOS 27.0 build 26A5416b, real VZ boot, HEADLESS):
+  `rc=0 armed=1(no-USB) ptr-reports=8 focus-lines=2 distinct=2 q3=1 q2=1
+  winloop=1 done=1 gpu=1 host-seq=1 host-down=1 host-up=1 host-complete=1
+  host-four-q=1 host-no-synthesis=1`. Serial: `input: armed=0 …
+  ptr-reports=8` (no USB HID device ever attached) and the window
+  manager's own `dui: pointer focus=2` → `focus=0`. Artifacts
+  `live-pointer-virtio-*`.
+- **Regression** `GATE_VIRTIO=1 bash tools/verify-live-input.sh` — PASS
+  unchanged (keyboard channel untouched).
+- **Unit tests**: `zig test kernel/src/virtio_custom.zig` 27/27 including
+  the new kind-2 envelope-validation test; `zig test kernel/src/input.zig`
+  189/189 after the `decode_pointer_report` rename; `verify-unit-tests`
+  green.
+- **Live findings pinned in hardware-contract.md**: (1) pointer messages
+  pace at 2.5 s — presses are edge-detected once per shell-idle pass at
+  the present cadence, and 0.25 s spacing collapsed every click (observed:
+  ptr-reports=8, zero focus moves); (2) hit-testing scans the window array
+  from the end and the fullscreen terminal sits last, so the gate raises
+  WINLOOP (`dui raise 2`) as session setup before clicking it.

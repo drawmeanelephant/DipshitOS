@@ -252,6 +252,8 @@ var inputChordsDelay: Double = 3.0
 // same single-TRB arming).
 var pointerScript: String?
 var pointerAfter: String?
+var pointerVirtioScript: String?
+var pointerVirtioAfter: String?
 // The pointer delivery route: "window" (sendEvent into the key window —
 // observed NOT to reach VZ's pointer translation), "app" (NSApp.postEvent
 // into the application queue), or "cg" (real CGEventPost at the HID tap —
@@ -569,6 +571,17 @@ while idx < arguments.count {
         customVirtioEnabled = true
         cvcEchoEnabled = true
         idx += 1
+    } else if arg == "--pointer-virtio", idx + 1 < arguments.count {
+        // Claim 9367: pointer injection over the custom-virtio INPUT queue
+        // (kind-2 absolute-pointer messages) — implies --via-virtio.
+        pointerVirtioScript = arguments[idx + 1]
+        viaVirtioEnabled = true
+        customVirtioEnabled = true
+        cvcEchoEnabled = true
+        idx += 2
+    } else if arg == "--pointer-virtio-after", idx + 1 < arguments.count {
+        pointerVirtioAfter = arguments[idx + 1]
+        idx += 2
     } else if arg == "--net", idx + 1 < arguments.count {
         netCapturePath = arguments[idx + 1]
         idx += 2
@@ -986,6 +999,11 @@ if netNatEnabled, netCapturePath != nil {
 if screenshotAfter != nil, screenshotPath == nil {
     fail("--screenshot-after requires --screen (the marker capture writes into the --screen base filename).")
 }
+// Claim 9367: --pointer-virtio rides the four-queue device; the after-marker
+// only makes sense with a sequence to schedule.
+if pointerVirtioScript == nil, pointerVirtioAfter != nil {
+    fail("--pointer-virtio-after requires --pointer-virtio (there is no sequence to schedule).")
+}
 
 if let netCapturePath {
     let netURL = URL(fileURLWithPath: netCapturePath)
@@ -1322,6 +1340,9 @@ if let s = inputChords {
 }
 if viaVirtioEnabled {
     print("  via-virtio: ENABLED (claim 9588, issue #523 item 3) — keyboard injection rides the custom-virtio INPUT queue as HID-shaped 16-byte messages; NO NSEvent/CGEvent synthesis and no window/view required (attacks #179 synthesized-drop and #151 activation wall)")
+}
+if let seq = pointerVirtioScript {
+    print("  pointer-virtio: ENABLED (claim 9367, issue #523 item 3 / #151) — \(seq.debugDescription) rides the custom-virtio INPUT queue as kind-2 absolute-pointer messages after \"\(pointerVirtioAfter ?? "winloop: present ok")\" (transport=cv-input; headless-safe, no view)")
 }
 if let script = pointerScript {
     print("  pointer: ENABLED (milestone eight card U4, claim 4993) — \(script.debugDescription) after \"\(pointerAfter ?? "tasks user-el0 reaped")\" via route \"\(pointerRoute)\"; trust=post:\(CGPreflightPostEventAccess()) ax:\(AXIsProcessTrusted()) (request-trust=\(pointerRequestTrust ? "on" : "off"))")
@@ -2577,6 +2598,65 @@ func startPointerInject() {
     }
 }
 
+// Claim 9367: the --pointer-virtio sequence — pointer injection over the
+// custom-virtio INPUT queue (kind-2 absolute-pointer messages), HEADLESS:
+// no view, no window, no NSEvent/CGEvent anywhere. Same step grammar and
+// guest-pixel coordinate space as --pointer ("x,y[,c]" steps, 0<=x<=1280,
+// 0<=y<=720); each pixel coord is converted to the HID absolute 0..32767
+// logical space the guest's map_pointer_axis expects. The sequence is
+// scheduled once `--pointer-virtio-after <marker>` appears in the serial
+// log (deterministic choreography, not a sleep).
+func startPointerVirtioInject() {
+    guard let script = pointerVirtioScript else { return }
+    let q = DispatchQueue(label: "dipshitos.ptrcv")
+    q.async {
+        let marker = pointerVirtioAfter ?? "winloop: present ok"
+        let waitDeadline = Date().addingTimeInterval(120)
+        var sent = false
+        while Date() < waitDeadline {
+            if let log = try? String(contentsOf: serialURL, encoding: .utf8), log.contains(marker) {
+                Thread.sleep(forTimeInterval: 0.5)
+                #if SPIKE
+                guard #available(macOS 27.0, *) else {
+                    fail("--pointer-virtio requires macOS 27 (VZCustomVirtioDevice).")
+                }
+                // Resolve every step up front; a malformed step aborts
+                // before any message fires (fail honestly, invent nothing).
+                var steps: [CustomVirtioSpike.PtrStep] = []
+                for part in script.split(separator: ";") {
+                    let fields = part.split(separator: ",", omittingEmptySubsequences: false).map { String($0).trimmingCharacters(in: .whitespaces) }
+                    guard fields.count >= 2, let gx = Double(fields[0]), let gy = Double(fields[1]), gx >= 0, gy >= 0, gx <= 1280, gy <= 720 else {
+                        FileHandle.standardError.write(Data("ERROR: --pointer-virtio step '\(part)' is not <x>,<y>[,c] with 0<=x<=1280, 0<=y<=720\n".utf8))
+                        steps = []
+                        break
+                    }
+                    let click = fields.count >= 3 && (fields[2] == "c" || fields[2] == "1")
+                    // Guest pixels -> HID absolute logical (the inverse of
+                    // driving_award.map_pointer_axis on the 1280x720 fb).
+                    let lx = UInt16(min(32767, Int((gx * 32768.0 / 1280.0).rounded())))
+                    let ly = UInt16(min(32767, Int((gy * 32768.0 / 720.0).rounded())))
+                    steps.append(CustomVirtioSpike.PtrStep(x: lx, y: ly, buttons: click ? 0x01 : 0))
+                }
+                if !steps.isEmpty {
+                    FileHandle.standardOutput.write(Data("PTR-CV-SEQ: \(steps.count) pointer steps scheduled after \"\(marker)\" transport=cv-input\n".utf8))
+                    CustomVirtioSpike.injectPointerSteps(steps, sequenceTag: "ptr-seq")
+                } else {
+                    FileHandle.standardOutput.write(Data("PTR-CV-SEQ: aborted (malformed step) ok=false\n".utf8))
+                }
+                sent = true
+                break
+                #else
+                fail("--pointer-virtio requires the SPIKE build (zig build spike-virtio).")
+                #endif
+            }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        if !sent {
+            FileHandle.standardError.write(Data("ERROR: guest did not emit pointer-virtio marker '\(marker)' within 120s; pointer steps not sent\n".utf8))
+        }
+    }
+}
+
 // Milestone seven card I3 (claim 6050): type the `--input-string` text into
 // the VZVirtualMachineView once the marker appears — keyDown + keyUp per
 // char (shift for uppercase, `\n` = Enter). VZ has no programmatic keyboard
@@ -3435,6 +3515,7 @@ if consoleMode {
     startKeyStringInject()
     startChordInject()
     startPointerInject()
+    startPointerVirtioInject()
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { scriptPoll() }
 } else {
     setupDisplayWindow()
@@ -3480,13 +3561,17 @@ enum CustomVirtioSpike {
     // contiguous, so --via-virtio implies the push-echo shape too).
     static let queueCount: UInt16 = viaVirtioEnabled ? 4 : (cvcEchoEnabled ? 3 : 2)
 
-    // ---- Claim 9588 INPUT channel (queue 3): HID-shaped keyboard messages.
+    // ---- Claim 9588 INPUT channel (queue 3): HID-shaped input messages.
     // Wire format is normative in docs/hardware-contract.md:
     //   [kind u8][flags u8][len u16le][12-byte payload], fixed 16 bytes;
-    //   kind 1 = raw 8-byte HID keyboard boot report [mods, 0, k0..k5].
+    //   kind 1 = raw 8-byte HID keyboard boot report [mods, 0, k0..k5];
+    //   kind 2 = raw 5-byte absolute-pointer report [buttons, x_lo, x_hi,
+    //   y_lo, y_hi] (claim 9367), HID absolute 0..32767 coords.
     static let inputMsgLen = 16
     static let inputKindKeyboard: UInt8 = 1
+    static let inputKindPointer: UInt8 = 2
     static let inputKeyboardReportLen = 8
+    static let inputPointerReportLen = 5
     // HID boot-protocol modifier bits (the guest's hid_modifiers_to_flags
     // reads exactly these: bit0 LCtrl, bit1 LShift, bit2 LAlt, bit3 LCmd).
     static let hidModCtrl: UInt8 = 0x01
@@ -3498,6 +3583,16 @@ enum CustomVirtioSpike {
         let usage: UInt8
         let isDown: Bool
         var label: String { "\(isDown ? "down" : "up") usage=0x\(String(usage, radix: 16)) mods=0x\(String(mods, radix: 16))" }
+    }
+
+    /// Claim 9367: one injected pointer report — absolute logical coords
+    /// (HID 0..32767 convention; the guest maps them onto the framebuffer)
+    /// plus the button byte (bit0 = button 1).
+    struct PtrStep {
+        let x: UInt16
+        let y: UInt16
+        let buttons: UInt8
+        var label: String { "buttons=0x\(String(buttons, radix: 16)) x=\(x) y=\(y)" }
     }
 
     /// Map one character of the `macKey` vocabulary to its HID usage ID +
@@ -3625,31 +3720,52 @@ enum CustomVirtioSpike {
         return msg
     }
 
-    /// Enqueue one input message into a pre-armed receive buffer on queue 3
-    /// and return it (used ring advance + SPI — the only host→guest data
-    /// path). Runs ON the device delegate queue so element access stays
-    /// single-threaded with the callbacks. Returns false when the pool is
-    /// momentarily empty (the caller retries — ordering preserved); shape or
-    /// write failures report loudly on stderr.
-    static func enqueueInputNow(_ stroke: HidStroke, sequenceTag: String) -> Bool {
+    /// Claim 9367: build the fixed 16-byte kind-2 pointer message — payload
+    /// [buttons, x_lo, x_hi, y_lo, y_hi], the exact shape the guest's
+    /// decode_pointer_report reads from an XHCI pointer report.
+    static func inputPointerMessage(x: UInt16, y: UInt16, buttons: UInt8) -> Data {
+        var msg = Data(repeating: 0, count: inputMsgLen)
+        msg[0] = inputKindPointer
+        msg[2] = UInt8(inputPointerReportLen & 0xff)
+        msg[4] = buttons
+        msg[5] = UInt8(x & 0xff)
+        msg[6] = UInt8((x >> 8) & 0xff)
+        msg[7] = UInt8(y & 0xff)
+        msg[8] = UInt8((y >> 8) & 0xff)
+        return msg
+    }
+
+    /// Enqueue one pre-built input message into a pre-armed receive buffer
+    /// on queue 3 and return it (used ring advance + SPI — the only
+    /// host→guest data path). Runs ON the device delegate queue so element
+    /// access stays single-threaded with the callbacks. Returns false when
+    /// the pool is momentarily empty (the caller retries — ordering
+    /// preserved); shape or write failures report loudly on stderr.
+    @discardableResult
+    static func enqueueMessageNow(_ msg: Data, label: String) -> Bool {
         guard let device, let queue = device.queue(at: 3) else {
             FileHandle.standardError.write(Data("ERROR: CUSTOM-VIRTIO-INPUT: queue 3 unavailable (device \(device == nil ? "nil" : "present"))\n".utf8))
             return true // unrecoverable: do not retry-spin the sequence
         }
         guard let element = queue.nextElement() else {
-            return false // pool empty: retry THIS stroke, later strokes wait
+            return false // pool empty: retry THIS message, later ones wait
         }
-        let msg = inputMessage(mods: stroke.mods, usage: stroke.usage, isDown: stroke.isDown)
         do {
             try element.write(msg)
         } catch {
-            FileHandle.standardError.write(Data("ERROR: CUSTOM-VIRTIO-INPUT: write FAILED (\(sequenceTag) \(stroke.label)): \(error)\n".utf8))
+            FileHandle.standardError.write(Data("ERROR: CUSTOM-VIRTIO-INPUT: write FAILED (\(label)): \(error)\n".utf8))
             element.returnToQueue()
             return true
         }
         element.returnToQueue()
-        print("CUSTOM-VIRTIO-INPUT: enqueued \(sequenceTag) \(stroke.label) (\(msg.count)-byte message)")
+        print("CUSTOM-VIRTIO-INPUT: enqueued \(label) (\(msg.count)-byte message)")
         return true
+    }
+
+    /// Keyboard convenience: build + enqueue one stroke's message.
+    static func enqueueInputNow(_ stroke: HidStroke, sequenceTag: String) -> Bool {
+        let msg = inputMessage(mods: stroke.mods, usage: stroke.usage, isDown: stroke.isDown)
+        return enqueueMessageNow(msg, label: "\(sequenceTag) \(stroke.label)")
     }
 
     /// Deliver a stroke sequence in STRICT order on the device queue: the
@@ -3681,6 +3797,57 @@ enum CustomVirtioSpike {
             }
         } else {
             FileHandle.standardError.write(Data("ERROR: CUSTOM-VIRTIO-INPUT: rx pool empty after 40 retries (\(sequenceTag) \(stroke.label)) — sequence ABORTED at \(index)/\(strokes.count)\n".utf8))
+        }
+    }
+
+    /// Claim 9367: deliver a POINTER step sequence in STRICT order on the
+    /// device queue — same shape as the stroke ladder (0.25 s pacing, pool-
+    /// empty retry delays the rest instead of reordering, exhaustion fails
+    /// LOUDLY). Each move is one kind-2 message; a click step emits
+    /// down then up at the same coords so the guest's button edge logic
+    /// sees exactly what a physical click produces.
+    /// Claim 9367: deliver a POINTER step sequence in STRICT order on the
+    /// device queue — same shape as the stroke ladder (pool-empty retry
+    /// delays the rest instead of reordering, exhaustion fails LOUDLY).
+    /// Each move is one kind-2 message; a click step emits down then up at
+    /// the same coords so the guest's button edge logic sees exactly what a
+    /// physical click produces. PACING: pointer presses are edge-detected
+    /// by driving_award.pointer_tick, which runs once per shell-idle pass —
+    /// at the Road Pops present cadence (~1.5–2 s, observed claim-time),
+    /// NOT per message. Spacing below one idle pass collapses press+release
+    /// into a single tick and the click never fires (observed live, this
+    /// claim), so pointer sequences pace at `pacingSeconds` (default 2.5 s,
+    /// the same order as the synthesized chord paths' 2–3 s).
+    static func injectPointerSteps(_ steps: [PtrStep], sequenceTag: String, pacingSeconds: Double = 2.5) {
+        deviceQueue.async {
+            var msgs: [(Data, String)] = []
+            for s in steps {
+                msgs.append((inputPointerMessage(x: s.x, y: s.y, buttons: 0), "\(sequenceTag) move buttons=0x0 x=\(s.x) y=\(s.y)"))
+                if s.buttons & 0x01 != 0 {
+                    msgs.append((inputPointerMessage(x: s.x, y: s.y, buttons: 0x01), "\(sequenceTag) down buttons=0x1 x=\(s.x) y=\(s.y)"))
+                    msgs.append((inputPointerMessage(x: s.x, y: s.y, buttons: 0), "\(sequenceTag) up buttons=0x0 x=\(s.x) y=\(s.y)"))
+                }
+            }
+            deliverMessages(msgs, sequenceTag: sequenceTag, index: 0, attempts: 0, pacingSeconds: pacingSeconds)
+        }
+    }
+
+    private static func deliverMessages(_ msgs: [(Data, String)], sequenceTag: String, index: Int, attempts: Int, pacingSeconds: Double = 0.25) {
+        if index >= msgs.count {
+            print("CUSTOM-VIRTIO-INPUT: sequence complete tag=\(sequenceTag) n=\(msgs.count) ok=true")
+            return
+        }
+        let (msg, label) = msgs[index]
+        if enqueueMessageNow(msg, label: label) {
+            deviceQueue.asyncAfter(deadline: .now() + pacingSeconds) {
+                deliverMessages(msgs, sequenceTag: sequenceTag, index: index + 1, attempts: 0, pacingSeconds: pacingSeconds)
+            }
+        } else if attempts < 40 {
+            deviceQueue.asyncAfter(deadline: .now() + pacingSeconds) {
+                deliverMessages(msgs, sequenceTag: sequenceTag, index: index, attempts: attempts + 1, pacingSeconds: pacingSeconds)
+            }
+        } else {
+            FileHandle.standardError.write(Data("ERROR: CUSTOM-VIRTIO-INPUT: rx pool empty after 40 retries (\(label)) — sequence ABORTED at \(index)/\(msgs.count)\n".utf8))
         }
     }
 

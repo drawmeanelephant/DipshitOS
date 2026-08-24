@@ -1352,6 +1352,15 @@ fn cv_input_dispatch(rep: []const u8) void {
     input.decode_keyboard_report(rep);
 }
 
+/// Claim 9367: the input channel's POINTER decode hook. Kind-2 payloads are
+/// raw 5-byte absolute-pointer reports; feeding them through the SAME
+/// decode function an XHCI pointer report takes makes injected pointers
+/// ordinary pointers downstream — cursor moves, `dui` click-to-focus, and
+/// the `input` ptr-* counters — with no USB device attached at all.
+fn cv_pointer_dispatch(rep: []const u8) void {
+    input.decode_pointer_report(rep);
+}
+
 /// Drive the spike device: init (probe + negotiate + DRIVER_OK + both
 /// queues armed), arm the SPI window, then run the transport experiment:
 /// (1) claim 4374 — two batches of four CONCURRENT in-flight exchanges on
@@ -1639,6 +1648,7 @@ fn custom_virtio_spike() void {
     // live long before the first message. Completions are pumped by
     // poll_input() from the shell idle loop's RX seam (M15Console).
     virtio_custom.on_input_report = &cv_input_dispatch;
+    virtio_custom.on_pointer_report = &cv_pointer_dispatch;
     if (virtio_custom.has_input_queue) {
         if (!virtio_custom.arm_input_pool()) {
             uart_puts("cvspike: q3 arm failed\n");
