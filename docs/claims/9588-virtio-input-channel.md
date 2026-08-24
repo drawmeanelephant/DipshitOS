@@ -17,7 +17,7 @@
 - **Touches:** host/vm-runner/Sources/VMRunner/main.swift kernel/src/virtio_custom.zig kernel/src/main.zig docs/hardware-contract.md tools/verify-live-input.sh
 - **Depends on:** claims 0828/4374/4837/9737 (custom-virtio transport + log queue), claim 3141 (host-push rx pattern), claims 4116/6050 (HID report decode path)
 - **Heartbeat:** 2026-08-24
-- **Status:** 🔄 in progress
+- **Status:** ✅ done (2026-08-24)
 
 Copy to `docs/claims/<NNNN>-<slug>.md`, fill it in, set Status to
 `🔄 <branch>` **before** starting work, and commit — the index tables
@@ -65,3 +65,34 @@ Verification: zig fmt --check; tools/verify-unit-tests.sh; zig build
 test-console; zig build; zig build image; zig build inspect; swift build
 (base AND -DSPIKE); verify-coordination.sh + test-coordination.sh; the
 proof script's rc=0 with evidence under artifacts/.
+
+## Result (2026-08-24 — observed, not inferred)
+
+All four scope items landed and the live proof passed:
+
+- **Contract:** "Input channel over the custom virtio device" in
+  `docs/hardware-contract.md`, written BEFORE either end; key facts flipped
+  to [observed] after the live run.
+- **Host:** `--via-virtio` on VMRunner (implies custom-virtio + cvc-echo →
+  4 queues); KEY-INJECT / KEY-SEQ / CHORD-SEQ gain HID-shaped message
+  delivery with STRICT ordering (chained enqueue; a pool-empty retry delays,
+  never reorders — a fixed-schedule burst was live-observed typing
+  `inpu⏎t` before the fix). Loud guards: custom-virtio flags on a non-SPIKE
+  binary or sub-27 host are fatal.
+- **Guest:** queue-3 pool (8 × 32-byte rx buffers) armed at spike init;
+  `poll_input()` pumps completions from the M15Console readByte idle seam,
+  validates the 16-byte envelope, and feeds `input.decode_keyboard_report`
+  via `on_input_report` — the same path USB reports take, so
+  `sys_poll_event`/`sys_wait_event` see injected keys as ordinary events.
+  Headless keyboard sink fixed: without a WM the terminal receives decoded
+  bytes unconditionally (`rp_read_source`).
+- **Proof:** `GATE_VIRTIO=1 bash tools/verify-live-input.sh` rc=0 TWICE
+  (16/16 assertions each); `GATE_VIRTIO=all` rc=0 — classic synthesized
+  phase AND virtio phase green in ONE run. Decisive line
+  (`artifacts/live-input-virtio-serial.log`):
+  `input: armed=0 fifo=0/64 dropped=0 events=6 kb-mods=0x0 kb-usage=0x28
+  kb-byte=0xa ptr-btns=0 ptr-x=0 ptr-y=0 ptr-reports=0` — no USB keyboard
+  existed (armed=0), yet six injected keys arrived and executed `input`
+  headless: no CGEvent/NSEvent synthesis (#179), no window activation
+  (#151). Evidence: `artifacts/live-input-virtio-{gate,report,run}.txt`,
+  `artifacts/live-input-virtio-serial.log` (+ `-r2` repetition set).
