@@ -58,3 +58,37 @@
   fetch.zig, build.zig, image/make-image.sh, image/mkfat32.py,
   tools/verify-live-netstat.sh (new), tools/verify-live-fetch.sh,
   docs/march-m26.md.
+
+## 2026-08-24 — CI/CD failures root-caused and fixed (both PR-side and main-side)
+
+Two CI failures surfaced after this branch's PR opened; both fixed in
+commit 0b15021, pushed to the branch, and the PR re-verified green:
+
+1. **PR #543 "Build (macOS + Swift Launcher)" failed** in FOUR module
+   test binaries (machine, monitor, shell, syscall — all transitively
+   include monitor.zig's tests): the monitor `syscalls` command test
+   still expected `implemented=62`. Found the stale copy at
+   `kernel/src/monitor.zig:7432` (my syscall.zig report test was
+   updated but monitor.zig's duplicate expectation wasn't). Fixed to
+   implemented=63 + the `62 sys_net_stats calls=0` row; the full
+   `verify-unit-tests.sh` sweep (the exact CI script) now passes
+   locally, and CI passed on the re-run (6m26s).
+2. **Indexes workflow failed after EVERY main push** once PR #535
+   (auto-merged) left its head branch behind: `--force-with-lease=
+   refs/heads/$BRANCH:refs/heads/$BRANCH` leased against the JUST-RESET
+   local branch instead of the surviving remote branch, so the push
+   rejected `(stale info)`, and the plain-push fallback rejected
+   (non-fast-forward) — #541/+ #542 merges both failed it, leaving the
+   claim/log index tables stale on main. Fixed `.github/workflows/
+   indexes.yml`: lease against the freshly fetched remote-tracking ref,
+   deterministic `--force` fallback (bot-owned branch, history always
+   discarded), and an explicit OPEN-PR check (merged-PR ghost branch now
+   gets a fresh `gh pr create`). Rehearsed the exact push sequence
+   against a scratch branch (create + second-run update both rc=0,
+   scratch deleted). The fix ships with this PR; the next merge's Indexes
+   run will force-update `indexes/bot-regenerate` and open a fresh
+   auto-merge PR.
+
+Verification: `bash tools/verify-unit-tests.sh` full sweep green;
+`gh pr checks 543`: Build (macOS + Swift Launcher) pass 6m26s, spike
+pass, site-publication pass ×2; `gh pr mergeable` still MERGEABLE.
