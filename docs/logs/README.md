@@ -29,8 +29,8 @@ one.
    claim file. If you must touch `README.md`/`roadmap.md`/`testing.md`,
    prefer pointer-level changes.
 5. Do **not** regenerate or commit the [Log index](#log-index) below —
-   since claim 2599, `.github/workflows/indexes.yml` regenerates it on
-   `main` after every merge, so committing table churn from a branch is
+   since claim 2599, `.github/workflows/indexes.yml` owns it after every
+   merge, so committing table churn from a branch is
    exactly what made the two index files collide on near-simultaneous
    merges. A local `bash tools/status/refresh-indexes.sh` is an optional
    preview only.
@@ -51,10 +51,11 @@ contents were never rewritten, so the append-only rule holds.
 ## Log index
 
 **This table is generated** from the log files by
-`.github/workflows/indexes.yml` on `main` immediately after every merge
-(claim 2599) — never hand-edit it, and never commit regenerated tables
+`.github/workflows/indexes.yml` after every merge (claim 2599) — never
+hand-edit it, and never commit regenerated tables
 from a branch (that shared-file churn is what collided on merges; the bot
-is the single serialized writer). The coordination gate
+is the single serialized writer, landing tables via one auto-merge PR).
+The coordination gate
 (`bash tools/verify-coordination.sh`, `just verify-coordination`, and CI)
 validates the table's structure on PRs; sync is enforced only where it is
 meaningful — on main.

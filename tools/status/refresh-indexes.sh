@@ -29,9 +29,10 @@
 # (git ls-files), never from a raw directory glob.
 #
 # WHO RUNS THIS: since claim 2599, branches do NOT regenerate or commit the
-# index tables — `.github/workflows/indexes.yml` regenerates them on main
-# immediately after every merge (the only serialized writer of a shared
-# derived artifact). Branch-side runs are an optional local preview of what
+# index tables — `.github/workflows/indexes.yml` opens an auto-merge
+# regeneration PR against main after every merge (the only serialized
+# writer of a shared derived artifact; branch protection forbids direct
+# pushes). Branch-side runs are an optional local preview of what
 # the table will look like; do not commit the result. The PR-side
 # coordination gate uses --check-structure (drift cannot fail a PR, because
 # a PR's committed indexes are stale by design); the bot and humans use

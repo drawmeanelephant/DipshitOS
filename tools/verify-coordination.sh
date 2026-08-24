@@ -17,7 +17,8 @@
 #      row has the expected column count, so an unescaped '|' cannot
 #      corrupt a table). Sync with the claim/log files is NOT checked here:
 #      since claim 2599 branches do not regenerate or commit the tables —
-#      .github/workflows/indexes.yml regenerates them on main after merge,
+#      .github/workflows/indexes.yml opens a regeneration PR against main
+#      after every merge,
 #      so a branch's committed indexes are stale by design. (refresh-indexes
 #      --check still enforces sync where it is meaningful: on main / bot.)
 #   5. docs/status.md stays an edit-free coordination surface: no changelog

@@ -43,8 +43,8 @@ check fails the gate — change the slug and the ID changes.
 3. Set Status to `🔄 <branch>` **before** starting work.
 4. `git add` your new claim file and commit it — **do not** regenerate or
    commit the [Active claims index](#active-claims-index) below. Since
-   claim 2599, `.github/workflows/indexes.yml` regenerates both index
-   tables on `main` immediately after every merge (the single serialized
+   claim 2599, `.github/workflows/indexes.yml` owns both index tables
+   after every merge (the single serialized
    writer of a shared derived artifact); branch-side table churn is what
    made those two files collide on nearly every near-simultaneous merge.
    A local `bash tools/status/refresh-indexes.sh` is an optional preview.
@@ -67,8 +67,8 @@ own branch's log that reference the old one.
 ## Active claims index
 
 **This table is the canonical index** (status included) and it is
-**generated** from the claim files by `.github/workflows/indexes.yml` on
-`main` immediately after every merge (claim 2599) — do not hand-edit it,
+**generated** from the claim files by `.github/workflows/indexes.yml`
+after every merge (claim 2599) — do not hand-edit it,
 and never commit regenerated tables from a branch. `docs/status.md` points
 here. The coordination gate (`bash tools/verify-coordination.sh`,
 `just verify-coordination`, and CI) validates the table's structure on
