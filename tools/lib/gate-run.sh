@@ -71,6 +71,10 @@ gate_end() {
 # on macOS).
 GATE_DISK_LOCK=".build/gate-disk.lock"
 gate_shared_disk_lock() {
+    # The lock lives under .build/, which a fresh worktree may not have yet
+    # (observed 2026-08-24, claim 2259: without this, mkdir fails forever
+    # and every caller spins until the 600s takeover).
+    mkdir -p -- "$(dirname -- "$GATE_DISK_LOCK")"
     local waited=0
     while ! mkdir "$GATE_DISK_LOCK" 2>/dev/null; do
         sleep 1
