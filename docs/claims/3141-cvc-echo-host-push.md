@@ -6,7 +6,7 @@
 - **Touches:** host/vm-runner/Sources/VMRunner/main.swift, kernel/src/main.zig, kernel/src/virtio_custom.zig, tools/verify-cvc-echo.sh, docs/hardware-contract.md, docs/status.md
 - **Depends on:** 5844/0828/4374/9492/9737/4837/5804 (custom-virtio transport + guest driver), 6637 (merged in #529 — its ACTIVE row declared main.swift; flipped ✅ in this branch with a log note so the Touches gate can pass)
 - **Heartbeat:** 2026-08-24
-- **Status:** 🔄 `t3code/c259b00a`
+- **Status:** ✅ done 2026-08-24 — `bash tools/verify-cvc-echo.sh` PASS 1/1 on this host (all host+guest assertions byte-exact; artifacts `live-cvc-*`); regression `verify-custom-virtio.sh` PASS unchanged; coordination suite ok
 
 ## Notes
 
