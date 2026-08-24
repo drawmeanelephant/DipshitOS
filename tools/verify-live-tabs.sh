@@ -57,23 +57,53 @@ gate_begin live-tabs
 echo "run dir: $RUN_DIR"
 
 run_boot() {
-    # $1 = tag, $2 = putraw argument, $3 = done marker
+    # $1 = tag, $2 = putraw argument, $3 = probe marker
     local tag="$1" arg="$2" marker="$3"
+    # RACE FIX (fleet remainder claim 2259, root cause pinned): the old walk
+    # set --screenshot-after AND --script-expect to the SAME marker. In the
+    # runner's scriptPoll (host/vm-runner/Sources/VMRunner/main.swift) the
+    # script-expect check runs BEFORE the marker-capture hook and RETURNS on
+    # a match — so the marker-driven capture could never fire, and the gate's
+    # `gpu-screen-*s` glob silently collected the PERIODIC 5/10/15 s frames
+    # instead. Whichever periodic frame happened to be newest decided the
+    # decode: pre-paint frames failed the tab-gap assert (the documented
+    # probe-decode race), and a boot where no periodic frame fit before exit
+    # lost the PNG entirely. The walk now separates the triggers BY
+    # CONSTRUCTION: the probe marker fires --screenshot-after; --script2
+    # (parked --script2-delay 3 past the probe marker) types the SETTLE
+    # marker, which is the --script-expect. The capture therefore always has
+    # >= 3 s to complete before teardown, and its filename is DETERMINISTIC
+    # (<base>-<label> = gpu-screen-after; the base has no extension).
     local script="$RUN_DIR/input-$tag.txt"
-    printf 'text clear\ntext putraw %s\necho %s\n' "$arg" "$marker" > "$script"
-    rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial-$tag.log" "$RUN_DIR"/gpu-screen-*.png
+    local script2="$RUN_DIR/settle-$tag.txt"
+    printf 'text clear\ntext putraw %s\ntext fontdebug\necho %s\n' "$arg" "$marker" > "$script"
+    echo "echo $marker-settled" > "$script2"
+    rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial-$tag.log" artifacts/gpu-screen-*
     set +e
     # Private WRITABLE copy (not overlay): keeps main-like boot pacing so the
     # post-marker screenshot catches the painted row (observed claim 5069).
+    #
+    # STALENESS MARGIN (claim 2259): in a non-active-window session the
+    # window server recomposites the runner window LAGGINGLY — single-shot
+    # marker captures returned frames seconds stale (the decoded frame
+    # predated the very trigger string in the serial log; observed twice).
+    # The claim-6053 PERIODIC ladder (-5s/-10s/-15s) keeps sampling though,
+    # and empirically catches up within ~5 s (the 10 s frame was already
+    # current). So: NO marker capture; the exit is PARKED (--script2-delay
+    # 12 -> teardown >= 12 s after the probe marker, >= 11 s after the
+    # paint), and the evidence is the LAST ladder frame (gpu-screen-15s,
+    # taken >= 9 s after the paint on any sane boot) — deterministic name,
+    # deterministic ordering, generous compositor margin.
     host/vm-runner/.build/release/VMRunner "$RUN_DIR/disk-base.img" \
         --serial "$RUN_DIR/vm-serial-$tag.log" \
-        --screen artifacts/gpu-screen --screenshot-after "$marker" \
-        --script "$script" --script-expect "$marker" --timeout 30 \
+        --screen artifacts/gpu-screen \
+        --script "$script" \
+        --script2 "$script2" --script2-after "$marker" --script2-delay 12 \
+        --script-expect "$marker-settled" --timeout 60 \
         > "$(art live-tabs-run-$tag.txt)" 2>&1
     local RC=$?
     set -e
     [ -f "$RUN_DIR/vm-serial-$tag.log" ] && cp "$RUN_DIR/vm-serial-$tag.log" "$(art live-tabs-serial-$tag.log)" || true
-    cp "$RUN_DIR"/gpu-screen-* artifacts/ 2>/dev/null || true
     echo "$tag: runner rc=$RC"
     return "$RC"
 }
@@ -83,18 +113,16 @@ fail() { echo "FAIL: $1"; exit 1; }
 # --- boot A: the tabbed probe ---
 echo "--- boot A: text putraw Q\\tZ ---"
 run_boot probeA 'Q\tZ' m20-tabs-probeA || fail "probe boot failed"
-LATEST_A="$(ls -t artifacts/gpu-screen-*s 2>/dev/null | head -1 || true)"
-[ -n "$LATEST_A" ] || fail "no gpu-screen PNG captured for the probe"
-cp "$LATEST_A" artifacts/live-tabs-screen-A.png
+[ -f artifacts/gpu-screen-15s ] || fail "no ladder capture for the probe (gpu-screen-15s missing)"
+cp artifacts/gpu-screen-15s artifacts/live-tabs-screen-A.png
 DECODE_A="$(python3 tools/decode-screen-glyphs.py artifacts/live-tabs-screen-A.png || true)"
 echo "$DECODE_A" | grep '^STATS ' || true
 
 # --- boot B: the adjacent control ---
 echo "--- boot B: text putraw QZ ---"
 run_boot probeB 'QZ' m20-tabs-probeB || fail "control boot failed"
-LATEST_B="$(ls -t artifacts/gpu-screen-*s 2>/dev/null | head -1 || true)"
-[ -n "$LATEST_B" ] || fail "no gpu-screen PNG captured for the control"
-cp "$LATEST_B" artifacts/live-tabs-screen-B.png
+[ -f artifacts/gpu-screen-15s ] || fail "no ladder capture for the control (gpu-screen-15s missing)"
+cp artifacts/gpu-screen-15s artifacts/live-tabs-screen-B.png
 DECODE_B="$(python3 tools/decode-screen-glyphs.py artifacts/live-tabs-screen-B.png || true)"
 echo "$DECODE_B" | grep '^STATS ' || true
 
