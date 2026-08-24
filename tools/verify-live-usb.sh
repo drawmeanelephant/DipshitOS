@@ -48,6 +48,10 @@
 # its decode (mod 0, keys 0x4), the runner's KEY-INJECT line, and a
 # responsive shell.
 #
+# Run isolation (#523 item 2 / issue #528, claim 5069): private stacked
+# disk + EFI vars + serial log under $RUN_DIR; DIPSHIT_GATE_SUFFIX/_KEEP_RUN
+# supported.
+#
 # Class B — Apple silicon + VZ only; boots a real VM. A green CI badge
 # proves class A only and says nothing about this gate.
 #
@@ -62,9 +66,14 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-GATE_LOG="artifacts/live-usb-gate.txt"
+source tools/lib/gate-run.sh
+
+SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
+
+GATE_LOG="$(art live-usb-gate.txt)"
 exec > >(tee "$GATE_LOG") 2>&1
-trap 'sleep 0.5' EXIT
+trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
 
 REPORT="artifacts/live-usb-report.txt"
 
@@ -84,13 +93,24 @@ zig build image
 swift build --package-path host/vm-runner --configuration release
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
+# --- per-run isolation -------------------------------------------------------
+gate_begin live-usb
+echo "run dir: $RUN_DIR"
+
 # --- scripted keystrokes ----------------------------------------------------
 # One script: the enumeration table, then the report poll (the report the
 # synthesized key already produced is delivered to the armed interrupt ring
 # and drained by the poll). The key is injected AFTER the boot's
 # `usb: enumerated` line by the runner's --input-key seam, so the report is
 # already pending when `usb report` runs — deterministic, not a sleep race.
-cat > artifacts/live-usb-script.txt <<'EOF'
+# The leading EMPTY line absorbs the synthesized --input-key keystroke:
+# OBSERVED TODAY (2026-08-24, claim 5069) on this host (and reproduced on
+# unmodified main) the key 0 ('a') injected after "usb: enumerated" races
+# the script forwarder and prepends to the first typed line, producing
+# `ausb devices` — an unknown command — so the report never prints. The
+# sacrificial line takes the collision; everything after runs clean.
+cat > "$RUN_DIR/script.txt" <<'EOF'
+
 usb devices
 usb report
 echo usb-gate-ok
@@ -99,25 +119,30 @@ EOF
 # --- per-run gate ------------------------------------------------------------
 run_one() {
     local out="$1" serial="$2"
-    rm -f artifacts/efi-vars.bin artifacts/vm-serial.log
-    host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log \
-        --input --display --input-key 0 --input-key-after "usb: enumerated" \
-        --script artifacts/live-usb-script.txt \
-        --script-expect $'usb-gate-ok\ndipshit> ' --timeout 40 \
-        > "$out" 2>&1
+    rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial.log"
+    # OBSERVED TODAY (2026-08-24, claim 5069): anchoring the synthesized
+    # key at "usb: enumerated" (boot time) made `usb report` read "no
+    # report (timeout)" — the injected report was consumed long before the
+    # script reached it. Anchor moved to the `usb devices` REPORT output so
+    # the keystroke lands immediately before `usb report` runs.
+    host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
+        --serial "$RUN_DIR/vm-serial.log" \
+        --input --display --input-key 0 --input-key-after "usb devices: count=" \
+        --script "$RUN_DIR/script.txt" \
+        --script-expect "usb-gate-ok" --timeout 40 \
+        > "$(art live-usb-run.txt)" 2>&1
     local RC=$?
-    [ -f artifacts/vm-serial.log ] && cp artifacts/vm-serial.log "$serial" || true
-    echo "$RC" > /tmp/live-usb-rc.txt
+    [ -f "$RUN_DIR/vm-serial.log" ] && cp "$RUN_DIR/vm-serial.log" "$(art live-usb-serial.log)" || true
+    echo "$RC" > "$RUN_DIR/rc.txt"
 }
 
-rm -f artifacts/efi-vars.bin artifacts/vm-serial.log
 set +e
-run_one "artifacts/live-usb-run.txt" "artifacts/live-usb-serial.log"
-RC="$(cat /tmp/live-usb-rc.txt)"
+run_one "$(art live-usb-run.txt)" "$(art live-usb-serial.log)"
+RC="$(cat "$RUN_DIR/rc.txt")"
 set -e
 
 # --- assertions --------------------------------------------------------------
-SERIAL="artifacts/live-usb-serial.log"
+SERIAL="$(art live-usb-serial.log)"
 SERIAL_BYTES=0 ENUMOK=0 COUNT=0 KBD=0 PTR=0 REPORTED=0 KBDECODE=0 OBSDONE=0 KEYINJECT=0 RUNNERFLAG=0
 if [ -f "$SERIAL" ]; then
     SERIAL_BYTES=$(wc -c < "$SERIAL" | tr -d ' ')
