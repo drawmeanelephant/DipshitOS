@@ -1682,11 +1682,11 @@ fn cmd_which(m: *Monitor, args: []const []const u8) ExecError {
 /// Check if a name is a shell builtin (from shell.zig dispatch_line).
 fn is_shell_builtin(name: []const u8) bool {
     const builtins = [_][]const u8{
-        "export",  "set",      "unset",   "env",    "printenv",
-        "alias",   "unalias",  "exit",    "sh",     "prompt",
-        "type",    "true",     "false",   "jobs",   "fg",
-        "if",      "for",      "while",   "break",  "continue",
-        "fn",      "cd",
+        "export", "set",     "unset", "env",   "printenv",
+        "alias",  "unalias", "exit",  "sh",    "prompt",
+        "type",   "true",    "false", "jobs",  "fg",
+        "if",     "for",     "while", "break", "continue",
+        "fn",     "cd",
     };
     for (builtins) |b| {
         if (std.mem.eql(u8, name, b)) return true;
