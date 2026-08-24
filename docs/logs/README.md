@@ -63,6 +63,7 @@ meaningful — on main.
 <!-- LOGS_INDEX:START -->
 | Branch | Log file |
 |--------|----------|
+| `freebuff/m22-lane-d-wave2` | [`0720-m22-lane-d-wave2.md`](0720-m22-lane-d-wave2.md) |
 | `agent/buffy/arc1-checkbox-toggle` | [`agent-buffy-arc1-checkbox-toggle.md`](agent-buffy-arc1-checkbox-toggle.md) |
 | `agent/buffy/arc1-progressbar` | [`agent-buffy-arc1-progressbar.md`](agent-buffy-arc1-progressbar.md) |
 | `agent/buffy/arc1-scrollview` | [`agent-buffy-arc1-scrollview.md`](agent-buffy-arc1-scrollview.md) |
@@ -115,7 +116,9 @@ meaningful — on main.
 | `agent/buffy/m19-lane-a-shell` | [`agent-buffy-m19-lane-a-shell.md`](agent-buffy-m19-lane-a-shell.md) |
 | agent/buffy/m21-compositor-w9-w11-w12 | [`agent-buffy-m21-compositor-w9-w11-w12.md`](agent-buffy-m21-compositor-w9-w11-w12.md) |
 | agent/buffy/m21-compositor | [`agent-buffy-m21-compositor.md`](agent-buffy-m21-compositor.md) |
+| `agent/buffy/m23-text-editor` | [`agent-buffy-m23-text-editor.md`](agent-buffy-m23-text-editor.md) |
 | `agent/buffy/m24-calc-features` | [`agent-buffy-m24-calc-features.md`](agent-buffy-m24-calc-features.md) |
+| agent/buffy/m26-netstat-fetch | [`agent-buffy-m26-netstat-fetch.md`](agent-buffy-m26-netstat-fetch.md) |
 | milestone nine interactive application events (claim 7463) | [`agent-buffy-m9-events.md`](agent-buffy-m9-events.md) |
 | milestone nine tracker (claim 8234) | [`agent-buffy-m9-tracker.md`](agent-buffy-m9-tracker.md) |
 | Roadmap refinement (claim 4951) | [`agent-buffy-roadmap-refinement.md`](agent-buffy-roadmap-refinement.md) |
@@ -125,6 +128,7 @@ meaningful — on main.
 | First-boot experience (claim 8323) | [`agent-buffy-u6-first-boot.md`](agent-buffy-u6-first-boot.md) |
 | sysinfo support snapshot (claim 2990) | [`agent-buffy-u7-sysinfo.md`](agent-buffy-u7-sysinfo.md) |
 | persistent settings (claim 2649) | [`agent-buffy-u8-persistent-settings.md`](agent-buffy-u8-persistent-settings.md) |
+| agent/gates fleet-remainder | [`agent-gates-fleet-remainder.md`](agent-gates-fleet-remainder.md) |
 | per-agent worktrees | [`agent-ox-alpha-agent-worktrees.md`](agent-ox-alpha-agent-worktrees.md) |
 | claim lifecycle: declared files + staleness | [`agent-ox-alpha-claim-lifecycle.md`](agent-ox-alpha-claim-lifecycle.md) |
 | tracked-only coordination gate | [`agent-ox-alpha-coordination-tracked-gate.md`](agent-ox-alpha-coordination-tracked-gate.md) |
@@ -137,6 +141,7 @@ meaningful — on main.
 | run-isolated gates via DiskImageKit overlays | [`agent-ox-alpha-run-isolated-gates.md`](agent-ox-alpha-run-isolated-gates.md) |
 | `agent/oxalpha/archive-march-m4-m5` | [`agent-oxalpha-archive-march-m4-m5.md`](agent-oxalpha-archive-march-m4-m5.md) |
 | t3code/c259b00a (cvc-echo host-push spike) | [`agent-t3code-c259b00a-cvc-echo.md`](agent-t3code-c259b00a-cvc-echo.md) |
+| agent/virtio virtio-input-channel | [`agent-virtio-virtio-input-channel.md`](agent-virtio-virtio-input-channel.md) |
 | milestone eight cards U4+U5: pointer focus/cursor + window HIG (zcode) | [`agent-zcode-m8-u4-u5-windows.md`](agent-zcode-m8-u4-u5-windows.md) |
 | `docs-calm-lavoisier-memorial`: Memorial to calm-lavoisier & Git Alignment (claim 9357) | [`docs-calm-lavoisier-memorial.md`](docs-calm-lavoisier-memorial.md) |
 | `docs/site-current-state-m15`: refresh the public GitHub Pages site to current reality (claim 7489) | [`docs-site-current-state-m15.md`](docs-site-current-state-m15.md) |
