@@ -181,6 +181,12 @@ pub const Window = struct {
     /// that auto-close on timeout or click-outside.
     transient: bool = false,
     transient_timeout: u32 = 0,
+    /// M21 W12: dynamic title buffer. Apps set this via sys_win_set_title.
+    /// `title` points here when a dynamic title is set; otherwise it
+    /// points to a static string literal. 64 bytes — enough for "NOTEPAD -
+    /// filename.txt (*)" plus room.
+    title_buf: [64]u8 = [_]u8{0} ** 64,
+    title_len: u8 = 0,
 };
 
 /// Arc4 #239: fade-in constants. The window is at 25% opacity for
@@ -624,6 +630,15 @@ pub fn user_border() u32 {
     };
 }
 
+/// M21 W9: muted border color for unfocused windows (visible but not
+/// attention-grabbing). The focused window gets an accent border instead.
+pub fn user_border_unfocused() u32 {
+    return switch (theme_id) {
+        1 => 0x9ca3af, // light: muted slate
+        2 => 0x44403c, // amber: warm stone
+        else => 0x475569, // dark: muted blue-gray
+    };
+}
 /// M20-U9 layout helper: where the centered title text starts and how
 /// many bytes of it to draw, given a window width and label length.
 /// Leaves room for the minimize+close buttons on the right; labels too
@@ -658,12 +673,13 @@ pub fn user_title_bg() u32 {
     };
 }
 
-/// Theme color for the focus ring.
+/// M21 W9: theme color for the focus ring — accent per theme.
+/// Dark: blue, Light: deeper blue, Amber: amber.
 pub fn focus_ring() u32 {
     return switch (theme_id) {
-        1 => 0x2563eb, // light: blue ring (distinct on white)
-        2 => 0xffffff, // amber: white (original)
-        else => 0xffffff, // dark: white (original)
+        1 => 0x1d4ed8, // light: blue ring (distinct on white)
+        2 => 0xf59e0b, // amber: warm amber
+        else => 0x3b82f6, // dark: blue accent
     };
 }
 
@@ -1921,6 +1937,112 @@ pub fn toggle_always_on_top(id: u8) bool {
 }
 
 // ---------------------------------------------------------------------------
+// M21 W12 — Window title updates
+// ---------------------------------------------------------------------------
+
+/// M21 W12: set the dynamic title of a user window. Copies up to 63 bytes
+/// (one byte reserved for NUL terminator in monitor output) into the
+/// window's title buffer. The `title` slice is then pointed at the buffer
+/// so taskbar, alt-tab, and monitor listings show the custom title.
+/// Returns false for unknown window id.
+pub fn set_window_title(id: u8, new_title: []const u8) bool {
+    const w = find_user_window(id) orelse return false;
+    const len = @min(new_title.len, 63);
+    @memcpy(w.title_buf[0..len], new_title[0..len]);
+    w.title_buf[len] = 0; // NUL-terminate for monitor safety
+    w.title_len = @intCast(len);
+    w.title = w.title_buf[0..len];
+    w.dirty = true;
+    _ = mark_dirty(0);
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// M21 W11 — Window persistence across sessions
+// ---------------------------------------------------------------------------
+
+pub const persist_record_bytes: usize = 32;
+pub const persist_max_records: usize = 16;
+pub const persist_max_bytes: usize = persist_record_bytes * persist_max_records;
+
+pub fn serialize_state(buf: []u8) usize {
+    if (buf.len < persist_max_bytes) return 0;
+    var off: usize = 0;
+    var wi: usize = 0;
+    while (wi < win_count and off + persist_record_bytes <= buf.len) : (wi += 1) {
+        const w = &windows[wi];
+        if (w.kind != .user) continue;
+        var flags: u8 = 0;
+        if (w.minimized) flags |= 0x01;
+        if (w.maximized) flags |= 0x02;
+        if (w.always_on_top) flags |= 0x04;
+        buf[off] = w.id;
+        buf[off + 1] = flags;
+        buf[off + 2] = w.workspace;
+        buf[off + 3] = 0;
+        buf[off + 4] = @truncate(w.x);
+        buf[off + 5] = @truncate(w.x >> 8);
+        buf[off + 6] = @truncate(w.x >> 16);
+        buf[off + 7] = @truncate(w.x >> 24);
+        buf[off + 8] = @truncate(w.y);
+        buf[off + 9] = @truncate(w.y >> 8);
+        buf[off + 10] = @truncate(w.y >> 16);
+        buf[off + 11] = @truncate(w.y >> 24);
+        buf[off + 12] = @truncate(w.w);
+        buf[off + 13] = @truncate(w.w >> 8);
+        buf[off + 14] = @truncate(w.w >> 16);
+        buf[off + 15] = @truncate(w.w >> 24);
+        buf[off + 16] = @truncate(w.h);
+        buf[off + 17] = @truncate(w.h >> 8);
+        buf[off + 18] = @truncate(w.h >> 16);
+        buf[off + 19] = @truncate(w.h >> 24);
+        @memset(buf[off + 20 .. off + 32], 0);
+        const title = if (w.title_len > 0) w.title_buf[0..w.title_len] else w.title;
+        const tlen = @min(title.len, 12);
+        @memcpy(buf[off + 20 .. off + 20 + tlen], title[0..tlen]);
+        off += persist_record_bytes;
+    }
+    return off;
+}
+
+pub fn restore_state(buf: []const u8, owner: usize) usize {
+    var restored: usize = 0;
+    var off: usize = 0;
+    while (off + persist_record_bytes <= buf.len) : (off += persist_record_bytes) {
+        const id: u8 = buf[off];
+        if (id == 0) continue;
+        const flags: u8 = buf[off + 1];
+        const ws: u8 = buf[off + 2];
+        const x = read_u32_le(buf[off + 4 .. off + 8]);
+        const y = read_u32_le(buf[off + 8 .. off + 12]);
+        const ww = read_u32_le(buf[off + 12 .. off + 16]);
+        const wh = read_u32_le(buf[off + 16 .. off + 20]);
+        if (ww == 0 or wh == 0) continue;
+        if (x >= virtio_gpu.fb_width or y >= virtio_gpu.fb_height) continue;
+        const result = user_open(x, y, ww, wh, owner);
+        if (result != .opened) continue;
+        const new_id = result.opened;
+        const w = find_user_window(new_id) orelse continue;
+        w.minimized = (flags & 0x01) != 0;
+        w.maximized = (flags & 0x02) != 0;
+        w.always_on_top = (flags & 0x04) != 0;
+        w.workspace = ws;
+        w.owner = owner;
+        var tlen: usize = 0;
+        while (tlen < 12 and buf[off + 20 + tlen] != 0) : (tlen += 1) {}
+        if (tlen > 0) {
+            _ = set_window_title(new_id, buf[off + 20 .. off + 20 + tlen]);
+        }
+        restored += 1;
+    }
+    return restored;
+}
+
+fn read_u32_le(b: []const u8) u32 {
+    return @as(u32, b[0]) | (@as(u32, b[1]) << 8) | (@as(u32, b[2]) << 16) | (@as(u32, b[3]) << 24);
+}
+
+// ---------------------------------------------------------------------------
 // M21 W10 — Keyboard window movement
 // ---------------------------------------------------------------------------
 
@@ -3002,7 +3124,7 @@ fn draw_chrome() void {
         // M20-U9: 2px border around the whole window first (paint order:
         // background → border → title bar → buttons → title → content).
         {
-            const b = user_border();
+            const b = if (w.id == focused_id) user_border() else user_border_unfocused();
             const bw = chrome_border_w;
             const ww: usize = if (w.w > wspan) wspan else w.w;
             const wh: usize = if (w.h > hspan) hspan else w.h;
