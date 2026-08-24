@@ -28,6 +28,8 @@ const tokenizer = @import("tokenizer.zig");
 const pipe = @import("pipe.zig"); // M19 P1 (issue #290): the bounded pipe behind the `|` operator
 const redirect = @import("redirect.zig"); // M19 P2 (issue #291): capture/feed adapters behind `>`, `>>`, `<`
 const monitor = @import("monitor.zig");
+const exec_mod = @import("exec.zig"); // M19 P7 (issue #296): last_exec_pid for job tracking
+const process = @import("process.zig"); // M19 P7 (issue #296): live job state + real exit statuses
 const handoff = @import("handoff.zig");
 const memmap = @import("memmap.zig");
 const scheduler = @import("scheduler.zig"); // claim 5275: worker progress printing (main context only)
@@ -139,6 +141,149 @@ const glob_max_matches: usize = 64;
 var glob_argv_storage: [tokenizer.max_tokens + glob_max_matches][]const u8 = undefined;
 /// M19 P6: scratch for one wildcard argument's sorted matches.
 var glob_match_storage: [glob_max_matches][]const u8 = undefined;
+
+// ---------------------------------------------------------------------------
+// M19 P7 (issue #296): foreground/background jobs.
+//
+// Honest scope: only program launches spawn processes (the registry `exec`
+// path) — builtins are synchronous EL1 calls with nothing to background.
+// A trailing `&` marks the launch; the job table tracks the child pid and
+// the reaper reports its REAL registry exit status exactly once.
+// ---------------------------------------------------------------------------
+
+/// Bounded table per the issue: at most 4 background jobs.
+const bg_job_max: usize = 4;
+const bg_name_max: usize = 32;
+
+const BgJob = struct {
+    /// null = free slot. Registry pids start at 0, so a plain integer
+    /// sentinel would collide with the first real process.
+    pid: ?usize = null,
+    name: [bg_name_max]u8 = [_]u8{0} ** bg_name_max,
+    name_len: usize = 0,
+    /// The `[N] Done:` line has been printed — the slot stays occupied
+    /// until then so `jobs`/`fg` never observe a half-registered entry.
+    done_reported: bool = false,
+};
+
+var bg_jobs: [bg_job_max]BgJob = [_]BgJob{.{}} ** bg_job_max;
+
+/// Set by expand_and_dispatch when the line carried a trailing unquoted
+/// `&`; consumed by the registry-dispatch fall-through (or dropped when
+/// the command could not spawn anything).
+var bg_pending: bool = false;
+
+/// Register a freshly spawned child as background job N (slot number is
+/// the job number). Returns false when the table is full — the caller has
+/// already refused honestly and the child runs untracked.
+fn bg_job_add(pid: usize, name: []const u8) bool {
+    for (&bg_jobs) |*job| {
+        if (job.pid != null) continue;
+        job.pid = pid;
+        const n = @min(name.len, bg_name_max);
+        @memcpy(job.name[0..n], name[0..n]);
+        job.name_len = n;
+        job.done_reported = false;
+        return true;
+    }
+    return false;
+}
+
+/// Free slot `n` (1-based job number).
+fn bg_job_free(n: usize) void {
+    if (n == 0 or n > bg_job_max) return;
+    bg_jobs[n - 1] = .{};
+}
+
+/// The reaper: print `[N] Done: NAME (exit=CODE)` once per finished job.
+/// Called from the shell idle path. A vanished descriptor (registry
+/// recycled under us) reports `(gone)` — honest about what was observed.
+fn bg_reap(mon: *monitor.Monitor) void {
+    for (&bg_jobs, 0..) |*job, i| {
+        const jpid = job.pid orelse continue;
+        if (job.done_reported) continue;
+        const info = process.info(jpid);
+        const state = if (info) |inf| inf.state else .free;
+        if (state != .exited and state != .free) continue; // still running
+        mon.console.puts("[");
+        mon.console.print_u64(@intCast(i + 1));
+        mon.console.puts("] Done: ");
+        if (info) |inf| {
+            mon.console.puts(inf.name);
+            if (state == .exited) {
+                mon.console.puts(" (exit=");
+                mon.console.print_u64(inf.exit_status);
+                mon.console.puts(")");
+            } else {
+                mon.console.puts(" (gone)");
+            }
+        } else {
+            mon.console.puts(job.name[0..job.name_len]);
+            mon.console.puts(" (gone)");
+        }
+        mon.console.print_line("");
+        bg_job_free(i + 1);
+    }
+}
+
+/// Find the most recently added occupied slot (highest job number), for
+/// bare `fg`.
+fn bg_job_latest() ?usize {
+    var i = bg_job_max;
+    while (i > 0) : (i -= 1) {
+        if (bg_jobs[i - 1].pid != null) return i;
+    }
+    return null;
+}
+
+/// M19 P7 (issue #296): the index of a TRAILING unquoted/unescaped `&`
+/// (only whitespace follows it), or null. More than one unquoted `&`, or
+/// one that is not trailing, leaves the line untouched — the tokenizer
+/// refuses it exactly as before this card. Scanner states match the
+/// chain/pipe/redirect scanners (single quote, double quote, backslash).
+fn trailing_bg_amp(line: []const u8) ?usize {
+    var in_single = false;
+    var in_double = false;
+    var esc = false;
+    var amp_count: usize = 0;
+    var trailing: ?usize = null;
+    var i: usize = 0;
+    while (i < line.len) : (i += 1) {
+        const c = line[i];
+        if (esc) {
+            esc = false;
+            continue;
+        }
+        if (c == '\\') {
+            esc = true;
+            continue;
+        }
+        if (in_single) {
+            if (c == '\'') in_single = false;
+            continue;
+        }
+        if (c == '\'') {
+            in_single = true;
+            continue;
+        }
+        if (in_double) {
+            if (c == '"') in_double = false;
+            continue;
+        }
+        if (c == '"') {
+            in_double = true;
+            continue;
+        }
+        if (c != '&') continue;
+        amp_count += 1;
+        // Trailing candidate: every byte after must be space/tab.
+        var rest = i + 1;
+        while (rest < line.len and (line[rest] == ' ' or line[rest] == '\t')) rest += 1;
+        if (rest == line.len) trailing = i;
+    }
+    if (amp_count == 1) return trailing;
+    return null;
+}
 
 /// M19 P12 (issue #301): loop state — bounded iteration counter and
 /// break/continue flags. Module scope so `shell_handle_expanded` builtins
@@ -1376,6 +1521,19 @@ fn expand_and_dispatch(mon: *monitor.Monitor, raw_line: []const u8) void {
         line_after_subst
     else
         env_expand(line_after_subst, &expanded);
+
+    // M19 P7 (issue #296): one trailing unquoted `&` backgrounds the
+    // command — strip it, dispatch the rest, and clear the flag no matter
+    // how the dispatch returns (a non-spawning command simply records no
+    // job: there was nothing asynchronous to track).
+    if (trailing_bg_amp(line)) |idx| {
+        const cmd = trim_end(line[0..idx]);
+        if (cmd.len == 0) return; // bare `&`: nothing to run
+        bg_pending = true;
+        dispatch_line(mon, cmd);
+        bg_pending = false;
+        return;
+    }
 
     dispatch_line(mon, line);
 }
@@ -2756,6 +2914,39 @@ fn shell_handle_expanded(mon: *monitor.Monitor, line: []const u8) void {
         set_exit_ok(false);
         return;
     }
+    // M19 P7 (issue #296): `jobs` — list background jobs with LIVE state
+    // read from the process registry.
+    if (std.mem.eql(u8, argv[0], "jobs")) {
+        var any = false;
+        for (&bg_jobs, 0..) |*job, i| {
+            const jpid = job.pid orelse continue;
+            any = true;
+            const inf = process.info(jpid);
+            const st = if (inf) |x| x.state else .free;
+            const running = st != .exited and st != .free;
+            mon.console.puts("[");
+            mon.console.print_u64(@intCast(i + 1));
+            mon.console.puts(if (running) "] Running: " else "] Done: ");
+            mon.console.puts(job.name[0..job.name_len]);
+            if (!running) {
+                if (inf != null and inf.?.state == .exited) {
+                    mon.console.puts(" (exit=");
+                    mon.console.print_u64(inf.?.exit_status);
+                    mon.console.puts(")");
+                } else {
+                    mon.console.puts(" (gone)");
+                }
+            }
+            mon.console.print_line("");
+        }
+        if (!any) mon.console.print_line("jobs: no background jobs");
+        return;
+    }
+    // M19 P7 (issue #296): `fg [N]` — wait/report a background job.
+    if (std.mem.eql(u8, argv[0], "fg")) {
+        fg_run(mon, argv);
+        return;
+    }
     // M19 P11: `if COND; then BODY; [else BODY]; fi`.
     if (std.mem.eql(u8, argv[0], "if")) {
         run_if(mon, line);
@@ -2856,7 +3047,119 @@ fn shell_handle_expanded(mon: *monitor.Monitor, line: []const u8) void {
     }
     // M19 P4 (issue #293): fall-through registry dispatch records the
     // conventional numeric status (0 / 127 unknown / 2 usage / 1 failure).
-    set_exit_code(exec_error_code(monitor.exec(mon, argv)));
+    // M19 P7 (issue #296): when a trailing `&` asked for the background,
+    // a launch that produced a NEW pid becomes a tracked job; anything
+    // else consumed the flag without one.
+    const pid_before = exec_mod.last_exec_pid();
+    const exec_err = monitor.exec(mon, argv);
+    set_exit_code(exec_error_code(exec_err));
+    if (bg_pending) {
+        const pid_after = exec_mod.last_exec_pid();
+        if (exec_err == .none and pid_after != null and pid_after.? != pid_before) {
+            const pinfo = process.info(pid_after.?);
+            const pname: []const u8 = if (pinfo) |pi| pi.name else "job";
+            if (bg_job_add(pid_after.?, pname)) {
+                for (&bg_jobs, 0..) |*job, i| {
+                    if (job.pid == null or job.pid.? != pid_after.?) continue;
+                    mon.console.puts("[");
+                    mon.console.print_u64(@intCast(i + 1));
+                    mon.console.puts("] running: ");
+                    mon.console.puts(job.name[0..job.name_len]);
+                    mon.console.print_line("");
+                    break;
+                }
+            } else {
+                mon.console.print_line("jobs: too many background jobs (max 4)");
+                set_exit_ok(false);
+            }
+        }
+    }
+}
+
+/// M19 P7 (issue #296): `fg [N]` — report a finished job (propagating its
+/// REAL registry exit status into `$?` via P4), or bounded-wait ~5 timer
+/// ticks (1 Hz cadence) and honestly report `still running` on timeout,
+/// leaving it backgrounded. No argument targets the most recent job.
+const fg_wait_ticks: u64 = 5;
+
+fn fg_parse_job_number(text: []const u8) ?usize {
+    if (text.len == 0 or text.len > 2) return null;
+    var n: usize = 0;
+    for (text) |c| {
+        if (c < '0' or c > '9') return null;
+        n = n * 10 + (c - '0');
+    }
+    if (n < 1 or n > bg_job_max) return null;
+    return n;
+}
+
+fn fg_report_done(mon: *monitor.Monitor, n: usize, name: []const u8, inf: ?process.ProcessInfo) void {
+    mon.console.puts("[");
+    mon.console.print_u64(@intCast(n));
+    mon.console.puts("] Done: ");
+    if (inf) |pi| {
+        mon.console.puts(pi.name);
+        if (pi.state == .exited) {
+            mon.console.puts(" (exit=");
+            mon.console.print_u64(pi.exit_status);
+            mon.console.puts(")");
+        } else {
+            mon.console.puts(" (gone)");
+        }
+        // The child's own status becomes fg's status ($? sees it next).
+        if (pi.state == .exited) set_exit_code(@intCast(@min(pi.exit_status, 255)));
+    } else {
+        mon.console.puts(name[0..name.len]);
+        mon.console.puts(" (gone)");
+    }
+    mon.console.print_line("");
+    bg_job_free(n);
+}
+
+fn fg_run(mon: *monitor.Monitor, argv: []const []const u8) void {
+    const n: usize = if (argv.len >= 2) blk: {
+        break :blk fg_parse_job_number(argv[1]) orelse {
+            mon.console.print_line("fg: usage: fg [N] (N is a background job number)");
+            set_exit_ok(false);
+            return;
+        };
+    } else bg_job_latest() orelse {
+        mon.console.print_line("fg: no background jobs");
+        set_exit_ok(false);
+        return;
+    };
+    const job = &bg_jobs[n - 1];
+    const jpid = job.pid orelse {
+        mon.console.puts("fg: job ");
+        mon.console.print_u64(@intCast(n));
+        mon.console.print_line(" already done");
+        set_exit_ok(false);
+        return;
+    };
+    // Bounded wait while the child is live. WFE parks until the next IRQ —
+    // the 1 Hz comparator and every scheduler tick both wake it, so the
+    // child progresses while we wait. Host tests skip the spin entirely:
+    // this repo's host IS aarch64, so is_test (not the arch) discriminates.
+    if (!comptime builtin.is_test and builtin.cpu.arch == .aarch64) {
+        const start = timer.ticks;
+        while (true) {
+            const winfo = process.info(jpid);
+            const wst = if (winfo) |x| x.state else .free;
+            if (wst == .exited or wst == .free) break;
+            if (timer.ticks -% start >= fg_wait_ticks) break;
+            asm volatile ("wfe");
+        }
+    }
+    const inf = process.info(jpid);
+    const st = if (inf) |x| x.state else .free;
+    if (st == .exited or st == .free) {
+        fg_report_done(mon, n, job.name[0..job.name_len], inf);
+    } else {
+        mon.console.puts("fg: job ");
+        mon.console.print_u64(@intCast(n));
+        mon.console.print_line(" still running");
+        set_exit_ok(false);
+    }
 }
 
 /// The kernel's ONE shell instance lives in BSS, not on the kernel stack:
@@ -2912,6 +3215,10 @@ pub fn boot_and_park(mon: *monitor.Monitor, rx_wired: bool) void {
             timer.maybe_heartbeat(&mon.console);
             scheduler.maybe_report(&mon.console);
             userspace.maybe_report(&mon.console);
+            // M19 P7 (issue #296): reap finished background jobs — the
+            // `[N] Done:` line prints from the same idle path as every
+            // other asynchronous report above.
+            bg_reap(mon);
             // Claim 6076 (card N2): the polled RX drain — the net device's
             // used-buffer IRQ is not yet observed on this platform, so the
             // shell idle loop is the drain point (the card-3d shell-idle-
@@ -5727,4 +6034,161 @@ test "shell: M19 P5 \\$ prevents expansion, tokenizer strips the escape" {
     while (shell.poll() != .idle) {}
     const out = mock.contents();
     try std.testing.expect(std.mem.indexOf(u8, out, "\n$HOME\n") != null);
+}
+
+// ---------------------------------------------------------------------------
+// M19 P7 (issue #296): foreground/background jobs
+// ---------------------------------------------------------------------------
+
+test "shell: M19 P7 trailing_bg_amp: trailing only, quote/escape aware" {
+    try std.testing.expectEqual(@as(?usize, 9), trailing_bg_amp("sleep 10 &"));
+    try std.testing.expectEqual(@as(?usize, 13), trailing_bg_amp("exec FOO.BIN & "));
+    try std.testing.expect(trailing_bg_amp("echo a & echo b") == null); // not trailing
+    try std.testing.expect(trailing_bg_amp("echo 'hi & bye'") == null); // quoted
+    try std.testing.expect(trailing_bg_amp("echo hi\\&") == null); // escaped
+    try std.testing.expect(trailing_bg_amp("a & b &") == null); // two amps
+    try std.testing.expect(trailing_bg_amp("no amp here") == null);
+}
+
+test "shell: M19 P7 background of a non-spawning command records no job" {
+    env_count = 0;
+    trace_enabled = false;
+    bg_jobs = [_]BgJob{.{}} ** bg_job_max;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("echo sync-bg &\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    // The command ran (synchronously), and nothing was tracked.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\nsync-bg\n") != null);
+    try std.testing.expect(bg_job_latest() == null);
+}
+
+test "shell: M19 P7 jobs and fg report an empty table" {
+    env_count = 0;
+    trace_enabled = false;
+    bg_jobs = [_]BgJob{.{}} ** bg_job_max;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("jobs\nfg\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "jobs: no background jobs\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "fg: no background jobs\n") != null);
+}
+
+test "shell: M19 P7 reaper reports a vanished child once and frees the slot" {
+    env_count = 0;
+    trace_enabled = false;
+    bg_jobs = [_]BgJob{.{}} ** bg_job_max;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    // Fabricate a tracked job whose pid can never exist (host tests have
+    // no process registry entries): the reaper must report it exactly
+    // once as gone and free the slot.
+    try std.testing.expect(bg_job_add(9999, "VANISHED.BIN"));
+    bg_reap(&shell.mon);
+    const first = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, first, "[1] Done: VANISHED.BIN (gone)\n") != null);
+    try std.testing.expect(bg_job_latest() == null);
+    // Second pass: silent — the line prints ONCE.
+    bg_reap(&shell.mon);
+    try std.testing.expectEqual(first.len, mock.contents().len);
+}
+
+test "shell: M19 P7 fg refuses bad numbers and freed slots" {
+    env_count = 0;
+    trace_enabled = false;
+    bg_jobs = [_]BgJob{.{}} ** bg_job_max;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("fg x\n");
+    while (shell.poll() != .idle) {}
+    mock.feed("fg 9\n");
+    while (shell.poll() != .idle) {}
+    try std.testing.expect(bg_job_add(9998, "WENT.BIN"));
+    bg_job_free(1);
+    mock.feed("fg 1\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "fg: usage: fg [N]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "already done") != null);
+}
+
+test "shell: M19 P7 bare & is a harmless no-op" {
+    env_count = 0;
+    trace_enabled = false;
+    bg_jobs = [_]BgJob{.{}} ** bg_job_max;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("&\n");
+    while (shell.poll() != .idle) {}
+    try std.testing.expect(bg_job_latest() == null);
+}
+
+test "shell: M19 P7 fg propagates the child's real exit status into $?" {
+    env_count = 0;
+    trace_enabled = false;
+    bg_jobs = [_]BgJob{.{}} ** bg_job_max;
+    process.init();
+    // A REAL registry entry — created, bound to a task, exited with 43 —
+    // exactly the lifecycle an `exec STATUS43.BIN &` produces on hardware.
+    const pid = process.create("STATUS43.BIN", .{ .entry_va = 0x400000, .content_len = 1 }, .{}, .{}).?;
+    _ = process.bind(pid, 7);
+    _ = process.on_task_exit(7, 43);
+    try std.testing.expect(bg_job_add(pid, "STATUS43.BIN"));
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("jobs\nfg 1\necho $?\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "[1] Done: STATUS43.BIN") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "(exit=43)") != null);
+    // fg's own status IS the child's status (clamped to u8).
+    try std.testing.expect(std.mem.indexOf(u8, out, "\n43\n") != null);
+}
+
+test "shell: M19 P7 fg on a live child honestly times out and keeps tracking" {
+    env_count = 0;
+    trace_enabled = false;
+    bg_jobs = [_]BgJob{.{}} ** bg_job_max;
+    process.init();
+    // Created + bound but never exits: the eternal-COUNTER shape.
+    const pid = process.create("COUNTER.BIN", .{ .entry_va = 0x400000, .content_len = 1 }, .{}, .{}).?;
+    _ = process.bind(pid, 9);
+    try std.testing.expect(bg_job_add(pid, "COUNTER.BIN"));
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("jobs\nfg 1\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "[1] Running: COUNTER.BIN\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "fg: job 1 still running\n") != null);
+    // Still tracked afterwards.
+    try std.testing.expect(bg_job_latest() != null);
+}
+
+test "shell: M19 P7 reaper announces a real exited child with its status" {
+    env_count = 0;
+    trace_enabled = false;
+    bg_jobs = [_]BgJob{.{}} ** bg_job_max;
+    process.init();
+    const pid = process.create("QUICK.BIN", .{ .entry_va = 0x400000, .content_len = 1 }, .{}, .{}).?;
+    _ = process.bind(pid, 5);
+    try std.testing.expect(bg_job_add(pid, "QUICK.BIN"));
+    _ = process.on_task_exit(5, 7);
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    bg_reap(&shell.mon);
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "[1] Done: QUICK.BIN (exit=7)\n") != null);
+    try std.testing.expect(bg_job_latest() == null);
 }
