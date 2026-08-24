@@ -75,11 +75,26 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-GATE_LOG="artifacts/live-net-dhcp-renew-gate.txt"
-exec > >(tee "$GATE_LOG") 2>&1
-trap 'sleep 0.5' EXIT
+source tools/lib/gate-run.sh
 
-REPORT="artifacts/live-net-dhcp-renew-report.txt"
+SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
+
+# Run isolation (#523 item 2 / issue #528; fleet remainder claim 2259):
+# private stacked disk (pristine-per-boot overlay), EFI var store, serial
+# logs, captures, and scripts under $RUN_DIR for both runs; the rc
+# handoff files live under $RUN_DIR too (they were /tmp globals).
+# Expectation note (#528 rot class 1, claim 2259): the historical
+# $'...ndipshit> ' script-expects died with M18 T5's ANSI-colored prompt
+# (claim 0163); both runs anchor on the OUTPUT-ONLY done echo.
+# Set DIPSHIT_GATE_SUFFIX=_alt for distinct canonical evidence names;
+# DIPSHIT_KEEP_RUN=1 keeps the scratch dir.
+
+GATE_LOG="$(art live-net-dhcp-renew-gate.txt)"
+exec > >(tee "$GATE_LOG") 2>&1
+trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
+
+REPORT="$(art live-net-dhcp-renew-report.txt)"
 
 echo "=== verify-live-net-dhcp-renew: claim 9489 — the DHCP lease lifecycle live on VZ (Run A renewing + rebinding, Run B expiry + recovery) ==="
 
@@ -97,6 +112,10 @@ zig build image
 swift build --package-path host/vm-runner --configuration release
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
+# --- per-run isolation -------------------------------------------------------
+gate_begin live-net-dhcp-renew
+echo "run dir: $RUN_DIR"
+
 # --- scripted keystrokes ----------------------------------------------------
 # The claim-4613 three-phase pattern. Phase 1 binds (the repeated `net
 # dhcp` invocations drive DISCOVER -> OFFER -> REQUEST -> ACK -> BOUND —
@@ -107,7 +126,7 @@ codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/
 # invocation), the second observes the renewed BOUND, `net` reads the
 # counters. Phase 3 repeats for the next rung. Deterministic — no sleep
 # races inside the guest; the delays are the gate's clock.
-cat > artifacts/live-net-dhcp-renew-a1.txt <<'EOF'
+cat > "$RUN_DIR/a1.txt" <<'EOF'
 net dhcp
 net dhcp
 net dhcp
@@ -123,12 +142,12 @@ net dhcp
 net arp 10.0.0.2
 echo n9a-phase1-ready
 EOF
-cat > artifacts/live-net-dhcp-renew-a2.txt <<'EOF'
+cat > "$RUN_DIR/a2.txt" <<'EOF'
 echo n9a-phase2-ready
 net
 echo n9a-done
 EOF
-cat > artifacts/live-net-dhcp-renew-b1.txt <<'EOF'
+cat > "$RUN_DIR/b1.txt" <<'EOF'
 net dhcp
 net dhcp
 net dhcp
@@ -143,7 +162,7 @@ net dhcp
 net dhcp
 echo n9b-phase1-ready
 EOF
-cat > artifacts/live-net-dhcp-renew-b2.txt <<'EOF'
+cat > "$RUN_DIR/b2.txt" <<'EOF'
 net
 net dhcp
 net dhcp
@@ -159,43 +178,47 @@ EOF
 # $3 = capture file.
 run_a() {
     local out="$1" serial="$2" capture="$3"
-    rm -f artifacts/efi-vars.bin artifacts/vm-serial.log "$capture"
-    host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log \
+    rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial-a.log" "$capture"
+    host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
+        --serial "$RUN_DIR/vm-serial-a.log" \
         --net "$capture" --net-dhcp-respond 10.0.0.2:100 --net-arp-respond 10.0.0.2 \
         --net-dhcp-respond-norenew \
-        --script artifacts/live-net-dhcp-renew-a1.txt \
-        --script2 artifacts/live-net-dhcp-renew-a2.txt --script2-after "n9a-phase1-ready" --script2-delay 92 \
-        --script-expect $'n9a-done\ndipshit> ' --timeout 220 \
+        --script "$RUN_DIR/a1.txt" \
+        --script2 "$RUN_DIR/a2.txt" --script2-after "n9a-phase1-ready" --script2-delay 92 \
+        --script-expect 'n9a-done' --timeout 220 \
         > "$out" 2>&1
     local RC=$?
-    [ -f artifacts/vm-serial.log ] && cp artifacts/vm-serial.log "$serial" || true
-    echo "$RC" > /tmp/live-net-dhcp-renew-rc-a.txt
+    [ -f "$RUN_DIR/vm-serial-a.log" ] && cp "$RUN_DIR/vm-serial-a.log" "$serial" || true
+    echo "$RC" > "$RUN_DIR/rc-a"
 }
 
 # Run B (expiry + recovery): same shape, no ARP responder needed.
 run_b() {
     local out="$1" serial="$2" capture="$3"
-    rm -f artifacts/efi-vars.bin artifacts/vm-serial.log "$capture"
-    host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log \
+    rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial-b.log" "$capture"
+    host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
+        --serial "$RUN_DIR/vm-serial-b.log" \
         --net "$capture" --net-dhcp-respond 10.0.0.2:100 --net-dhcp-respond-norebind \
-        --script artifacts/live-net-dhcp-renew-b1.txt \
-        --script2 artifacts/live-net-dhcp-renew-b2.txt --script2-after "n9b-phase1-ready" --script2-delay 106 \
-        --script-expect $'n9b-done\ndipshit> ' --timeout 220 \
+        --script "$RUN_DIR/b1.txt" \
+        --script2 "$RUN_DIR/b2.txt" --script2-after "n9b-phase1-ready" --script2-delay 106 \
+        --script-expect 'n9b-done' --timeout 220 \
         > "$out" 2>&1
     local RC=$?
-    [ -f artifacts/vm-serial.log ] && cp artifacts/vm-serial.log "$serial" || true
-    echo "$RC" > /tmp/live-net-dhcp-renew-rc-b.txt
+    [ -f "$RUN_DIR/vm-serial-b.log" ] && cp "$RUN_DIR/vm-serial-b.log" "$serial" || true
+    echo "$RC" > "$RUN_DIR/rc-b"
 }
 
 set +e
-run_a "artifacts/live-net-dhcp-renew-a-run.txt" "artifacts/live-net-dhcp-renew-a-serial.log" "artifacts/live-net-dhcp-renew-a-cap.bin"
-RCA="$(cat /tmp/live-net-dhcp-renew-rc-a.txt)"
-run_b "artifacts/live-net-dhcp-renew-b-run.txt" "artifacts/live-net-dhcp-renew-b-serial.log" "artifacts/live-net-dhcp-renew-b-cap.bin"
-RCB="$(cat /tmp/live-net-dhcp-renew-rc-b.txt)"
+run_a "$(art live-net-dhcp-renew-a-run.txt)" "$(art live-net-dhcp-renew-a-serial.log)" "$RUN_DIR/a-cap.bin"
+RCA="$(cat "$RUN_DIR/rc-a")"
+cp "$RUN_DIR/a-cap.bin" "$(art live-net-dhcp-renew-a-cap.bin)" 2>/dev/null || true
+run_b "$(art live-net-dhcp-renew-b-run.txt)" "$(art live-net-dhcp-renew-b-serial.log)" "$RUN_DIR/b-cap.bin"
+RCB="$(cat "$RUN_DIR/rc-b")"
+cp "$RUN_DIR/b-cap.bin" "$(art live-net-dhcp-renew-b-cap.bin)" 2>/dev/null || true
 set -e
 
 # --- Run A assertions ---------------------------------------------------------
-SA="artifacts/live-net-dhcp-renew-a-serial.log"
+SA="$(art live-net-dhcp-renew-a-serial.log)"
 SA_BYTES=0 ABOUND=0 ARENEW=0 AREBIND=0 ACOUNTERS=0 ADONE=0
 if [ -f "$SA" ]; then
     SA_BYTES=$(wc -c < "$SA" | tr -d ' ')
@@ -216,10 +239,10 @@ fi
 ARUNNER=0 ANETACK=0 AREFUSE=0
 # The host REFUSED the unicast RENEWING REQUEST (its own stdout line —
 # the refusal that forces the T2 escalation).
-grep -a -qF -- "NET-DHCP: refused the guest's unicast RENEWING REQUEST" artifacts/live-net-dhcp-renew-a-run.txt && AREFUSE=1
+grep -a -qF -- "NET-DHCP: refused the guest's unicast RENEWING REQUEST" "$(art live-net-dhcp-renew-a-run.txt)" && AREFUSE=1
 # The host answered the (broadcast rebinding) REQUEST (its own stdout).
-grep -a -qF -- "NET-DHCP: answered the guest's DHCP REQUEST" artifacts/live-net-dhcp-renew-a-run.txt && ANETACK=1
-grep -a -qF -- "net-dhcp-respond: ENABLED (milestone five card N8, claim 0351) + card N9 (claim 9489)" artifacts/live-net-dhcp-renew-a-run.txt && ARUNNER=1
+grep -a -qF -- "NET-DHCP: answered the guest's DHCP REQUEST" "$(art live-net-dhcp-renew-a-run.txt)" && ANETACK=1
+grep -a -qF -- "net-dhcp-respond: ENABLED (milestone five card N8, claim 0351) + card N9 (claim 9489)" "$(art live-net-dhcp-renew-a-run.txt)" && ARUNNER=1
 # The capture proves the RENEWING frame is UNICAST and the REBINDING
 # frame is BROADCAST: the byte order is deterministic — DISCOVER (286 B)
 # + REQUEST (298 B) + the phase-1 ARP request for the server (42 B) +
@@ -228,10 +251,10 @@ grep -a -qF -- "net-dhcp-respond: ENABLED (milestone five card N8, claim 0351) +
 # ff:ff:ff:ff:ff:ff). 286 + 298 + 42 + 298 + 298 = 1222 bytes (pinned by
 # the claim-time exploratory capture).
 ACAP=0
-if [ -f artifacts/live-net-dhcp-renew-a-cap.bin ]; then
-    ASIZE=$(wc -c < artifacts/live-net-dhcp-renew-a-cap.bin | tr -d ' ')
+if [ -f "$(art live-net-dhcp-renew-a-cap.bin)" ]; then
+    ASIZE=$(wc -c < "$(art live-net-dhcp-renew-a-cap.bin)" | tr -d ' ')
     if [ "$ASIZE" = 1222 ]; then
-        AHEX=$(xxd -p artifacts/live-net-dhcp-renew-a-cap.bin | tr -d '\n')
+        AHEX=$(xxd -p "$(art live-net-dhcp-renew-a-cap.bin)" | tr -d '\n')
         # The RENEWING REQUEST at byte 626: dst MAC 02:00:00:00:00:02,
         # dst IP (626+30..34) = 0a000002, ciaddr (626+54..58) = 0a000002.
         if [ "${AHEX:1252:12}" = "020000000002" ] && \
@@ -245,7 +268,7 @@ if [ -f artifacts/live-net-dhcp-renew-a-cap.bin ]; then
 fi
 
 # --- Run B assertions ---------------------------------------------------------
-SB="artifacts/live-net-dhcp-renew-b-serial.log"
+SB="$(art live-net-dhcp-renew-b-serial.log)"
 SB_BYTES=0 BEXPIRED=0 BRELEASED=0 BREDISC=0 BRECOVER=0 BDONE=0
 if [ -f "$SB" ]; then
     SB_BYTES=$(wc -c < "$SB" | tr -d ' ')
@@ -263,15 +286,15 @@ if [ -f "$SB" ]; then
     grep -a -qF -- "n9b-done" "$SB" && BDONE=1
 fi
 BRUNNER=0 BREFUSE=0
-grep -a -qF -- "net-dhcp-respond: ENABLED (milestone five card N8, claim 0351) + card N9 (claim 9489)" artifacts/live-net-dhcp-renew-b-run.txt && BRUNNER=1
+grep -a -qF -- "net-dhcp-respond: ENABLED (milestone five card N8, claim 0351) + card N9 (claim 9489)" "$(art live-net-dhcp-renew-b-run.txt)" && BRUNNER=1
 # The host REFUSED the broadcast REBINDING REQUEST (its own stdout — the
 # refusal that lets the lease run out).
-grep -a -qF -- "NET-DHCP: refused the guest's broadcast REBINDING REQUEST" artifacts/live-net-dhcp-renew-b-run.txt && BREFUSE=1
+grep -a -qF -- "NET-DHCP: refused the guest's broadcast REBINDING REQUEST" "$(art live-net-dhcp-renew-b-run.txt)" && BREFUSE=1
 # The recovery re-DISCOVER is a SECOND 286-byte broadcast frame (the
 # capture holds at least DISCOVER + REQUEST + the re-DISCOVER).
 BCAP=0
-if [ -f artifacts/live-net-dhcp-renew-b-cap.bin ]; then
-    BSIZE=$(wc -c < artifacts/live-net-dhcp-renew-b-cap.bin | tr -d ' ')
+if [ -f "$(art live-net-dhcp-renew-b-cap.bin)" ]; then
+    BSIZE=$(wc -c < "$(art live-net-dhcp-renew-b-cap.bin)" | tr -d ' ')
     [ "$BSIZE" -ge 870 ] && BCAP=1 # 286 + 298 + 286
 fi
 

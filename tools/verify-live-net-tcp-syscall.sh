@@ -23,11 +23,22 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-GATE_LOG="artifacts/live-net-tcp-syscall-gate.txt"
-exec > >(tee "$GATE_LOG") 2>&1
-trap 'sleep 0.5' EXIT
+source tools/lib/gate-run.sh
 
-REPORT="artifacts/live-net-tcp-syscall-report.txt"
+SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
+
+# Run isolation (#523 item 2 / issue #528; fleet remainder claim 2259):
+# private stacked disk (pristine-per-boot overlay), EFI var store, serial
+# log, capture, and scripts under $RUN_DIR. Set DIPSHIT_GATE_SUFFIX=_alt
+# for distinct canonical evidence names; DIPSHIT_KEEP_RUN=1 keeps the
+# scratch dir.
+
+GATE_LOG="$(art live-net-tcp-syscall-gate.txt)"
+exec > >(tee "$GATE_LOG") 2>&1
+trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
+
+REPORT="$(art live-net-tcp-syscall-report.txt)"
 
 echo "=== verify-live-net-tcp-syscall: claim 7483 — the TCP syscall seam live on VZ (TCP.BIN from EL0: connect, send, recv echo, close, exit 18) ==="
 
@@ -45,14 +56,18 @@ zig build image
 swift build --package-path host/vm-runner --configuration release
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
+# --- per-run isolation -------------------------------------------------------
+gate_begin live-net-tcp-syscall
+echo "run dir: $RUN_DIR"
+
 # --- scripted keystrokes -----------------------------------------------------
-cat > artifacts/live-net-tcp-syscall-script-1.txt <<'EOF'
+cat > "$RUN_DIR/script-1.txt" <<'EOF'
 net ip 10.0.0.1
 net arp 10.0.0.2
 exec TCP.BIN
 echo tcp-syscall-ready
 EOF
-cat > artifacts/live-net-tcp-syscall-script-2.txt <<'EOF'
+cat > "$RUN_DIR/script-2.txt" <<'EOF'
 syscalls
 tasks
 net
@@ -60,21 +75,22 @@ echo net-tcp-ok
 EOF
 
 # --- the run ----------------------------------------------------------------
-rm -f artifacts/efi-vars.bin artifacts/vm-serial.log artifacts/live-net-tcp-syscall-cap.bin
+rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial.log" "$RUN_DIR/cap.bin"
 set +e
-host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log \
-    --net artifacts/live-net-tcp-syscall-cap.bin \
+host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
+    --serial "$RUN_DIR/vm-serial.log" \
+    --net "$RUN_DIR/cap.bin" \
     --net-arp-respond 10.0.0.2 --net-tcp-respond 10.0.0.2:9999 \
-    --script artifacts/live-net-tcp-syscall-script-1.txt \
-    --script2 artifacts/live-net-tcp-syscall-script-2.txt --script2-after 'tcp: got echo hello' \
+    --script "$RUN_DIR/script-1.txt" \
+    --script2 "$RUN_DIR/script-2.txt" --script2-after 'tcp: got echo hello' \
     --script-expect $'tasks user-exec reaped' --timeout 90 \
-    > artifacts/live-net-tcp-syscall-run.txt 2>&1
+    > "$(art live-net-tcp-syscall-run.txt)" 2>&1
 RC=$?
 set -e
-[ -f artifacts/vm-serial.log ] && cp artifacts/vm-serial.log artifacts/live-net-tcp-syscall-serial.log || true
+[ -f "$RUN_DIR/vm-serial.log" ] && cp "$RUN_DIR/vm-serial.log" "$(art live-net-tcp-syscall-serial.log)" || true
 
 # --- assertions -------------------------------------------------------------
-SERIAL="artifacts/vm-serial.log"
+SERIAL="$RUN_DIR/vm-serial.log"
 SERIAL_BYTES=0; IPSET=0
 CONNECTED=0; GOTECHO=0; ORDER=0
 EXITP=0; EXITT=0; REAPED=0
@@ -97,7 +113,9 @@ if [ -f "$SERIAL" ]; then
     grep -a -qF -- "tasks user-exec exited status=18" "$SERIAL" && EXITT=1
     grep -a -qF -- "tasks user-exec reaped" "$SERIAL" && REAPED=1
 
-    grep -a -qF -- "syscalls: slots=64 implemented=46" "$SERIAL" && SYSCOUNT=1
+    # OBSERVED BYTES (2026-08-24, claim 2259): implemented=61 today, not
+    # 46 — slots 47-60 landed after M12 across the M17-M26 arcs.
+    grep -a -qF -- "syscalls: slots=64 implemented=61" "$SERIAL" && SYSCOUNT=1
     for row in "  30 sys_tcp_connect calls=" "  31 sys_tcp_send calls=" "  32 sys_tcp_recv calls=" "  33 sys_tcp_close calls="; do
         if grep -a -qF -- "$row" "$SERIAL" && ! grep -a -qF -- "${row}0" "$SERIAL"; then
             TCPROWS=$((TCPROWS + 1))
@@ -107,11 +125,11 @@ if [ -f "$SERIAL" ]; then
 fi
 
 ANETSYN=0; ANETDATA=0; ANETFIN=0; ARUNNER=0
-if [ -f artifacts/live-net-tcp-syscall-run.txt ]; then
-    grep -a -qF -- "NET-TCP: answered the guest's SYN" artifacts/live-net-tcp-syscall-run.txt && ANETSYN=1
-    grep -a -qF -- "NET-TCP: echoed the guest's 5-byte data" artifacts/live-net-tcp-syscall-run.txt && ANETDATA=1
-    grep -a -qF -- "NET-TCP: answered the guest's FIN" artifacts/live-net-tcp-syscall-run.txt && ANETFIN=1
-    grep -a -qF -- "net-tcp-respond: ENABLED" artifacts/live-net-tcp-syscall-run.txt && ARUNNER=1
+if [ -f "$(art live-net-tcp-syscall-run.txt)" ]; then
+    grep -a -qF -- "NET-TCP: answered the guest's SYN" "$(art live-net-tcp-syscall-run.txt)" && ANETSYN=1
+    grep -a -qF -- "NET-TCP: echoed the guest's 5-byte data" "$(art live-net-tcp-syscall-run.txt)" && ANETDATA=1
+    grep -a -qF -- "NET-TCP: answered the guest's FIN" "$(art live-net-tcp-syscall-run.txt)" && ANETFIN=1
+    grep -a -qF -- "net-tcp-respond: ENABLED" "$(art live-net-tcp-syscall-run.txt)" && ARUNNER=1
 fi
 
 cat > "$REPORT" <<EOF

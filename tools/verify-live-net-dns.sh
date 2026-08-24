@@ -20,11 +20,22 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-GATE_LOG="artifacts/live-net-dns-gate.txt"
-exec > >(tee "$GATE_LOG") 2>&1
-trap 'sleep 0.5' EXIT
+source tools/lib/gate-run.sh
 
-REPORT="artifacts/live-net-dns-report.txt"
+SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
+
+# Run isolation (#523 item 2 / issue #528; fleet remainder claim 2259):
+# private stacked disk (pristine-per-boot overlay), EFI var store, serial
+# log, capture, and scripts under $RUN_DIR. Set DIPSHIT_GATE_SUFFIX=_alt
+# for distinct canonical evidence names; DIPSHIT_KEEP_RUN=1 keeps the
+# scratch dir.
+
+GATE_LOG="$(art live-net-dns-gate.txt)"
+exec > >(tee "$GATE_LOG") 2>&1
+trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
+
+REPORT="$(art live-net-dns-report.txt)"
 
 echo "=== verify-live-net-dns: claim 7566 — bounded DNS client live on VZ (RFC 1035 A-record queries, response parsing, address extraction) ==="
 
@@ -42,8 +53,12 @@ zig build image
 swift build --package-path host/vm-runner --configuration release
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
+# --- per-run isolation -------------------------------------------------------
+gate_begin live-net-dns
+echo "run dir: $RUN_DIR"
+
 # --- scripted keystrokes -----------------------------------------------------
-cat > artifacts/live-net-dns-script-1.txt <<'EOF'
+cat > "$RUN_DIR/script-1.txt" <<'EOF'
 net ip 10.0.0.1
 net arp 10.0.0.2
 net dns example.com 10.0.0.2
@@ -53,20 +68,21 @@ echo net-dns-ok
 EOF
 
 # --- the run ----------------------------------------------------------------
-rm -f artifacts/efi-vars.bin artifacts/vm-serial.log artifacts/live-net-dns-cap.bin
+rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial.log" "$RUN_DIR/cap.bin"
 set +e
-host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log \
-    --net artifacts/live-net-dns-cap.bin \
+host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
+    --serial "$RUN_DIR/vm-serial.log" \
+    --net "$RUN_DIR/cap.bin" \
     --net-arp-respond 10.0.0.2 --net-dns-respond 10.0.0.2:53 \
-    --script artifacts/live-net-dns-script-1.txt \
-    --script-expect $'net-dns-ok' --timeout 60 \
-    > artifacts/live-net-dns-run.txt 2>&1
+    --script "$RUN_DIR/script-1.txt" \
+    --script-expect 'net-dns-ok' --timeout 60 \
+    > "$(art live-net-dns-run.txt)" 2>&1
 RC=$?
 set -e
-[ -f artifacts/vm-serial.log ] && cp artifacts/vm-serial.log artifacts/live-net-dns-serial.log || true
+[ -f "$RUN_DIR/vm-serial.log" ] && cp "$RUN_DIR/vm-serial.log" "$(art live-net-dns-serial.log)" || true
 
 # --- assertions -------------------------------------------------------------
-SERIAL="artifacts/vm-serial.log"
+SERIAL="$RUN_DIR/vm-serial.log"
 SERIAL_BYTES=0; IPSET=0
 DNS_EXAMPLE=0; DNS_LOCAL=0; DNS_COUNTERS=0; OK=0
 
@@ -80,10 +96,10 @@ if [ -f "$SERIAL" ]; then
 fi
 
 ANETDNS1=0; ANETDNS2=0; ARUNNER=0
-if [ -f artifacts/live-net-dns-run.txt ]; then
-    grep -a -qF -- "NET-DNS: answered the guest's DNS query for 'example.com'" artifacts/live-net-dns-run.txt && ANETDNS1=1
-    grep -a -qF -- "NET-DNS: answered the guest's DNS query for 'myhost.local'" artifacts/live-net-dns-run.txt && ANETDNS2=1
-    grep -a -qF -- "net-dns-respond: ENABLED" artifacts/live-net-dns-run.txt && ARUNNER=1
+if [ -f "$(art live-net-dns-run.txt)" ]; then
+    grep -a -qF -- "NET-DNS: answered the guest's DNS query for 'example.com'" "$(art live-net-dns-run.txt)" && ANETDNS1=1
+    grep -a -qF -- "NET-DNS: answered the guest's DNS query for 'myhost.local'" "$(art live-net-dns-run.txt)" && ANETDNS2=1
+    grep -a -qF -- "net-dns-respond: ENABLED" "$(art live-net-dns-run.txt)" && ARUNNER=1
 fi
 
 cat > "$REPORT" <<EOF
