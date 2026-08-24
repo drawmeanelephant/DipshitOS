@@ -36,6 +36,10 @@
 # so the live assertion is "distinct color families in the expected
 # regions", not per-byte equality.
 #
+# Run isolation (#523 item 2 / issue #528, claim 5069): private stacked
+# disk + EFI vars + serial log + screen captures under $RUN_DIR;
+# DIPSHIT_GATE_SUFFIX/_KEEP_RUN supported.
+#
 # Class B — Apple silicon + VZ only; boots real VMs. A green CI badge proves
 # class A only and says nothing about this gate.
 #
@@ -50,9 +54,14 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-GATE_LOG="artifacts/live-win-move-gate.txt"
+source tools/lib/gate-run.sh
+
+SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
+
+GATE_LOG="$(art live-win-move-gate.txt)"
 exec > >(tee "$GATE_LOG") 2>&1
-trap 'sleep 0.5' EXIT
+trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
 
 REPORT="artifacts/live-win-move-report.txt"
 
@@ -72,42 +81,52 @@ zig build image
 swift build --package-path host/vm-runner --configuration release
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
+# --- per-run isolation -------------------------------------------------------
+gate_begin live-win-move
+echo "run dir: $RUN_DIR"
+
 # --- scripted session ---------------------------------------------------------
-cat > artifacts/live-win-move-script.txt <<'EOF'
+cat > "$RUN_DIR/script.txt" <<'EOF'
 exec WINMOVE.BIN
 EOF
-cat > artifacts/live-win-move-script2.txt <<'EOF'
+cat > "$RUN_DIR/script2.txt" <<'EOF'
 dui
 syscalls
 dui move 2 1024 528
 dui raise 2
 EOF
 
+# Boots the private WRITABLE copy (not an overlay): the timed screen
+# captures need main-like boot pacing; overlays shift guest timing
+# so the fill/present lands after the last scheduled capture.
+
 # --- per-run gate -------------------------------------------------------------
 run_one() {
     local out="$1" serial="$2"
-    rm -f artifacts/efi-vars.bin artifacts/vm-serial.log artifacts/gpu-screen-*
-    host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log \
-        --display --screen artifacts/gpu-screen \
+    rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial.log" "$RUN_DIR"/gpu-screen-*
+    host/vm-runner/.build/release/VMRunner "$RUN_DIR/disk-base.img" \
+        --serial "$RUN_DIR/vm-serial.log" \
+        --display --screen "$RUN_DIR/gpu-screen" \
         --screenshot-after "winmove: hide ok" \
         --script artifacts/live-win-move-script.txt \
-        --script2 artifacts/live-win-move-script2.txt --script2-after "winmove: loop ok" \
+        --script2 "$RUN_DIR/script2.txt" --script2-after "winmove: loop ok" \
         --script-expect "timer heartbeat ticks=20 irq=20 poll=0" \
         --timeout 60 \
         > "$out" 2>&1
     local RC=$?
-    [ -f artifacts/vm-serial.log ] && cp artifacts/vm-serial.log "$serial" || true
-    echo "$RC" > /tmp/live-win-move-rc.txt
+    [ -f "$RUN_DIR/vm-serial.log" ] && cp "$RUN_DIR/vm-serial.log" "$serial" || true
+    echo "$RC" > "$RUN_DIR/rc.txt"
 }
 
-rm -f artifacts/efi-vars.bin artifacts/vm-serial.log
+rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial.log"
 set +e
-run_one "artifacts/live-win-move-run.txt" "artifacts/live-win-move-serial.log"
-RC="$(cat /tmp/live-win-move-rc.txt)"
+run_one "$(art live-win-move-run.txt)" "$(art live-win-move-serial.log)"
+RC="$(cat "$RUN_DIR/rc.txt")"
+cp "$RUN_DIR"/gpu-screen-* artifacts/ 2>/dev/null || true
 set -e
 
 # --- assertions ---------------------------------------------------------------
-SERIAL="artifacts/live-win-move-serial.log"
+SERIAL="$(art live-win-move-serial.log)"
 OPEN=0 FILL=0 PRESENT=0 MOVE=0 RAISE=0 LOOP=0 GET=0 QUERY=0 HIDE=0 SHOW=0 VIS=0 WIN3=0 RECT=0 OWNER=0 IMPL=0 CNT=0 MMOVE=0 MRAISE=0
 if [ -f "$SERIAL" ]; then
     # WINMOVE.BIN's EL0 markers (open/fill/present/move/raise/loop).
