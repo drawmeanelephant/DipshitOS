@@ -43,6 +43,12 @@
 # artifacts/: live-screen-*.txt (runner output), live-screen-*.log
 # (serial copies), gpu-screen-*s.png (the captures), and the report.
 #
+# Run isolation (#523 item 2 / issue #528, claim 5069): the boot attaches a
+# private DiskImageKit stacked disk (read-only base + throwaway ASIF
+# overlay), a private EFI var store, and writes its serial log and screen
+# captures under $RUN_DIR before they are copied to the canonical evidence
+# names. DIPSHIT_GATE_SUFFIX=_alt / DIPSHIT_KEEP_RUN=1 supported.
+#
 # Class B — Apple silicon + VZ only; boots real VMs. A green CI badge
 # proves class A only and says nothing about this gate.
 #
@@ -57,11 +63,16 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-GATE_LOG="artifacts/live-screen-gate.txt"
-exec > >(tee "$GATE_LOG") 2>&1
-trap 'sleep 0.5' EXIT
+source tools/lib/gate-run.sh
 
-REPORT="artifacts/live-screen-report.txt"
+SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
+
+GATE_LOG="$(art live-screen-gate.txt)"
+exec > >(tee "$GATE_LOG") 2>&1
+trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
+
+REPORT="$(art live-screen-report.txt)"
 RUNNER="host/vm-runner/.build/release/VMRunner"
 
 echo "=== verify-live-screen: claim 6053 — virtio-gpu transport + framebuffer (DID 0x1050, 1.2 display-info, B8G8R8X8 resource, re-arm, first non-blank scanout) ==="
@@ -73,27 +84,35 @@ swift build --package-path host/vm-runner --configuration release >/dev/null 2>&
 # The other live gates' convention: the fresh binary needs the
 # com.apple.security.virtualization entitlement before it can boot a VM.
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
+
+# --- per-run isolation -------------------------------------------------------
+# Private scratch dir + pristine-boot overlay for EVERY boot.
+gate_begin live-screen
+echo "run dir: $RUN_DIR"
+SCRIPT="$RUN_DIR/script.txt"
 zig build >/dev/null 2>&1
 zig build image >/dev/null 2>&1
 
 # 2. The scripted boot: report, then the solid GREEN fill (the gate color),
 # then the guest-side byte proof, then the report again.
-SCRIPT="artifacts/live-screen-script.txt"
+SCRIPT="$RUN_DIR/script.txt"
 printf 'screen\nscreen fill 00ff00\nscreen peek\nscreen\n' > "$SCRIPT"
-rm -f artifacts/vm-serial.log artifacts/gpu-screen-*.png "$REPORT"
+rm -f "$RUN_DIR/vm-serial.log" "$RUN_DIR"/gpu-screen-*.png "$REPORT"
 
 echo
 echo "[2/3] live VZ run (scripted)"
 set +e
-"$RUNNER" artifacts/disk.img artifacts/vm-serial.log \
-    --screen artifacts/gpu-screen --script "$SCRIPT" \
+"$RUNNER" "${GATE_RUNNER_ARGS[@]}" \
+    --serial "$RUN_DIR/vm-serial.log" --screen "$RUN_DIR/gpu-screen" --script "$SCRIPT" \
     --expect "gpu: screen filled" --timeout 30 \
-    > artifacts/live-screen-run.txt 2>&1
+    > "$(art live-screen-run.txt)" 2>&1
 RC=$?
 set -e
+[ -f "$RUN_DIR/vm-serial.log" ] && cp "$RUN_DIR/vm-serial.log" "$(art live-screen-serial.log)" || true
+for f in "$RUN_DIR"/gpu-screen-*.png; do [ -e "$f" ] && cp "$f" artifacts/ || true; done
 echo "runner exit: $RC"
 echo "--- runner output (gpu lines) ---"
-grep -E "gpu:|screen:|screen fill|SUCCESS" artifacts/live-screen-run.txt | head -40
+grep -E "gpu:|screen:|screen fill|SUCCESS" "$(art live-screen-run.txt)" | head -40
 if [ "$RC" -ne 0 ]; then
     echo "FAIL: runner did not complete successfully (exit $RC)"
     exit 1
@@ -119,23 +138,23 @@ if grep -q "capture path: cacheDisplay fallback" artifacts/live-screen-run.txt; 
 fi
 
 # Phase 1a — the transport report (the class-B record of the device).
-grep -q "gpu: pre-rearm st=00" artifacts/vm-serial.log || fail "missing pre-rearm st=00 (the claim-time reset-at-ExitBootServices observation)"
-grep -q "gpu: setup ok scanout=0x0000000000000500x0x00000000000002d0" artifacts/vm-serial.log || fail "missing gpu setup-ok line"
-grep -q "screen: did=0x0000000000001050" artifacts/vm-serial.log || fail "DID is not 0x1050"
-grep -q "screen: feat=0x0000000000000000/0x0000000000000001" artifacts/vm-serial.log || fail "accepted feature mask is not VER1-only"
-grep -q "screen: scanout=0x0000000000000500x0x00000000000002d0 enabled=0x0000000000000001" artifacts/vm-serial.log || fail "scanout is not 1280x720 enabled"
-grep -q "screen: status=0x000000000000000f rearm=1 setup=1" artifacts/vm-serial.log || fail "status/rearm/setup not as expected"
+grep -q "gpu: pre-rearm st=00" "$(art live-screen-serial.log)" || fail "missing pre-rearm st=00 (the claim-time reset-at-ExitBootServices observation)"
+grep -q "gpu: setup ok scanout=0x0000000000000500x0x00000000000002d0" "$(art live-screen-serial.log)" || fail "missing gpu setup-ok line"
+grep -q "screen: did=0x0000000000001050" "$(art live-screen-serial.log)" || fail "DID is not 0x1050"
+grep -q "screen: feat=0x0000000000000000/0x0000000000000001" "$(art live-screen-serial.log)" || fail "accepted feature mask is not VER1-only"
+grep -q "screen: scanout=0x0000000000000500x0x00000000000002d0 enabled=0x0000000000000001" "$(art live-screen-serial.log)" || fail "scanout is not 1280x720 enabled"
+grep -q "screen: status=0x000000000000000f rearm=1 setup=1" "$(art live-screen-serial.log)" || fail "status/rearm/setup not as expected"
 # The exact cmds counter is session-dependent since G3 (Road Pops): the
 # terminal's drain-presents — and the heartbeat/worker reports it tees —
 # add TRANSFER+FLUSH pairs on top of the 6 setup commands. The HEALTH
 # contract is the stable part: errors=0 timeouts=0 with the device at
 # DRIVER_OK through the re-arm.
-grep -qE "screen: status=0x000000000000000f rearm=1 setup=1 cmds=[0-9]+ errors=0 timeouts=0" artifacts/vm-serial.log || fail "status/rearm/setup are not healthy (errors=0 timeouts=0)"
-grep -q "screen fill: fill=0x000000000000ff00 transfer=ok flush=ok" artifacts/vm-serial.log || fail "fill/transfer/flush did not all complete ok"
+grep -qE "screen: status=0x000000000000000f rearm=1 setup=1 cmds=[0-9]+ errors=0 timeouts=0" "$(art live-screen-serial.log)" || fail "status/rearm/setup are not healthy (errors=0 timeouts=0)"
+grep -q "screen fill: fill=0x000000000000ff00 transfer=ok flush=ok" "$(art live-screen-serial.log)" || fail "fill/transfer/flush did not all complete ok"
 
 # Phase 1b — the guest-side byte proof (the framebuffer REALLY holds green).
-grep -q "screen peek: fb=0x00000000" artifacts/vm-serial.log || fail "missing screen peek line"
-grep -q "p1=0x00000000000000ff" artifacts/vm-serial.log || fail "framebuffer's green channel is not 0xff"
+grep -q "screen peek: fb=0x00000000" "$(art live-screen-serial.log)" || fail "missing screen peek line"
+grep -q "p1=0x00000000000000ff" "$(art live-screen-serial.log)" || fail "framebuffer's green channel is not 0xff"
 
 # Phase 2 — the pixel proof: decode the captured PNG and assert the frame
 # is NON-BLANK. Since G3 (Road Pops, claim 1574) the shell's terminal
@@ -218,4 +237,4 @@ fi
 
 echo
 echo "=== verify-live-screen: PASS (the non-blank framebuffer — transport healthy, fill proven guest-side, terminal frame on screen) ==="
-echo "evidence: artifacts/live-screen-run.txt, artifacts/vm-serial.log, artifacts/gpu-screen-*.png" | tee "$REPORT"
+echo "evidence: artifacts/live-screen-run.txt, the per-run serial log, artifacts/gpu-screen-*.png" | tee "$REPORT"

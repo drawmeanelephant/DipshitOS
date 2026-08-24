@@ -45,6 +45,12 @@
 # (runner output, serial copies, the report) + gpu-screen-*s.png (the
 # captures).
 #
+# Run isolation (#523 item 2 / issue #528, claim 5069): the boot attaches a
+# private DiskImageKit stacked disk (read-only base + throwaway ASIF
+# overlay), a private EFI var store, and writes its serial log and screen
+# captures under $RUN_DIR before they are copied to the canonical evidence
+# names. DIPSHIT_GATE_SUFFIX=_alt / DIPSHIT_KEEP_RUN=1 supported.
+#
 # Class B — Apple silicon + VZ only; boots real VMs. A green CI badge
 # proves class A only and says nothing about this gate.
 #
@@ -59,11 +65,16 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-GATE_LOG="artifacts/live-roadpops-gate.txt"
-exec > >(tee "$GATE_LOG") 2>&1
-trap 'sleep 0.5' EXIT
+source tools/lib/gate-run.sh
 
-REPORT="artifacts/live-roadpops-report.txt"
+SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
+
+GATE_LOG="$(art live-roadpops-gate.txt)"
+exec > >(tee "$GATE_LOG") 2>&1
+trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
+
+REPORT="$(art live-roadpops-report.txt)"
 RUNNER="host/vm-runner/.build/release/VMRunner"
 
 echo "=== verify-live-roadpops: claim 1574 — Road Pops, the boot terminal on the screen (tee console: serial shared seam + framebuffer text) ==="
@@ -75,28 +86,36 @@ swift build --package-path host/vm-runner --configuration release >/dev/null 2>&
 # The other live gates' convention: the fresh binary needs the
 # com.apple.security.virtualization entitlement before it can boot a VM.
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
+
+# --- per-run isolation -------------------------------------------------------
+# Private scratch dir + pristine-boot overlay for EVERY boot.
+gate_begin live-roadpops
+echo "run dir: $RUN_DIR"
+SCRIPT="$RUN_DIR/script.txt"
 zig build >/dev/null 2>&1
 zig build image >/dev/null 2>&1
 
 # 2. The scripted boot: a real terminal SESSION — echo a distinctive
 # marker, run uname, and report the tee state. The boot banner + prompt
 # already rendered through the tee before the script arrives.
-SCRIPT="artifacts/live-roadpops-script.txt"
+SCRIPT="$RUN_DIR/script.txt"
 printf 'echo ROADPOPS\nuname\nroadpops\n' > "$SCRIPT"
-rm -f artifacts/vm-serial.log artifacts/gpu-screen-*.png "$REPORT"
+rm -f "$RUN_DIR/vm-serial.log" "$RUN_DIR"/gpu-screen-*.png "$REPORT"
 
 echo
 echo "[2/3] live VZ run (scripted)"
 set +e
-"$RUNNER" artifacts/disk.img artifacts/vm-serial.log \
-    --screen artifacts/gpu-screen --script "$SCRIPT" \
+"$RUNNER" "${GATE_RUNNER_ARGS[@]}" \
+    --serial "$RUN_DIR/vm-serial.log" --screen "$RUN_DIR/gpu-screen" --script "$SCRIPT" \
     --expect "roadpops: armed target=fbtext" --timeout 30 \
-    > artifacts/live-roadpops-run.txt 2>&1
+    > "$(art live-roadpops-run.txt)" 2>&1
 RC=$?
 set -e
+[ -f "$RUN_DIR/vm-serial.log" ] && cp "$RUN_DIR/vm-serial.log" "$(art live-roadpops-serial.log)" || true
+for f in "$RUN_DIR"/gpu-screen-*.png; do [ -e "$f" ] && cp "$f" artifacts/ || true; done
 echo "runner exit: $RC"
 echo "--- runner output (roadpops/text/session lines) ---"
-grep -E "roadpops:|text:|ROADPOPS|SUCCESS|FAILURE" artifacts/live-roadpops-run.txt | head -40
+grep -E "roadpops:|text:|ROADPOPS|SUCCESS|FAILURE" "$(art live-roadpops-run.txt)" | head -40
 if [ "$RC" -ne 0 ]; then
     echo "FAIL: runner did not complete successfully (exit $RC)"
     exit 1
@@ -115,23 +134,23 @@ fail() { echo "FAIL: $1"; exit 1; }
 # path produced each capture. Require the SCK line and forbid the
 # fallback line — a single fallback capture means the decoded PNG is not
 # what the operator sees.
-grep -q "capture path: ScreenCaptureKit" artifacts/live-roadpops-run.txt \
+grep -q "capture path: ScreenCaptureKit" "$(art live-roadpops-run.txt)" \
     || fail "pixel evidence did not come from ScreenCaptureKit (composited window) — Screen Recording permission missing or the SCK path broke"
-if grep -q "capture path: cacheDisplay fallback" artifacts/live-roadpops-run.txt; then
+if grep -q "capture path: cacheDisplay fallback" "$(art live-roadpops-run.txt)"; then
     fail "some captures fell back to cacheDisplay (offscreen render) — every capture must be the composited window"
 fi
 
 # Phase 1 — the shared-seam serial evidence (the machine STILL boots to a
 # terminal on serial AND the same session rendered on the screen).
-grep -q "roadpops: armed target=fbtext" artifacts/vm-serial.log || fail "the Road Pops tee was not armed with the framebuffer target"
-grep -q "text: boot banner presented" artifacts/vm-serial.log || fail "boot banner not presented (the tee's first present must emit the G2 evidence)"
+grep -q "roadpops: armed target=fbtext" "$(art live-roadpops-serial.log)" || fail "the Road Pops tee was not armed with the framebuffer target"
+grep -q "text: boot banner presented" "$(art live-roadpops-serial.log)" || fail "boot banner not presented (the tee's first present must emit the G2 evidence)"
 # The script arrives as one input burst, so the mid-burst report can
 # catch the echo pending its drain (dirty=1) — the honest assert is
 # armed=1 with at least the boot present already pushed.
-grep -qE "roadpops: armed=1 dirty=[01] presents=[1-9][0-9]*" artifacts/vm-serial.log || fail "the roadpops report does not show armed=1 with presents>=1"
-grep -q "DipshitOS - AArch64 firmware-assisted kernel monitor" artifacts/vm-serial.log || fail "serial transcript lost the banner (shared-seam regression)"
-grep -q "ROADPOPS" artifacts/vm-serial.log || fail "the echo reply never reached serial (shared-seam regression)"
-grep -q "DipshitOS aarch64" artifacts/vm-serial.log || fail "the uname reply never reached serial (shared-seam regression)"
+grep -qE "roadpops: armed=1 dirty=[01] presents=[1-9][0-9]*" "$(art live-roadpops-serial.log)" || fail "the roadpops report does not show armed=1 with presents>=1"
+grep -q "DipshitOS - AArch64 firmware-assisted kernel monitor" "$(art live-roadpops-serial.log)" || fail "serial transcript lost the banner (shared-seam regression)"
+grep -q "ROADPOPS" "$(art live-roadpops-serial.log)" || fail "the echo reply never reached serial (shared-seam regression)"
+grep -q "DipshitOS aarch64" "$(art live-roadpops-serial.log)" || fail "the uname reply never reached serial (shared-seam regression)"
 
 # Phase 2 — the pixel proof: decode the captured PNG and assert a WORKING
 # terminal. The runner writes `--screen <base>` captures as <base>-Ns.
@@ -239,4 +258,4 @@ fi
 
 echo
 echo "=== verify-live-roadpops: PASS (the boot terminal is on the screen — Road Pops, serial shared seam intact) ==="
-echo "evidence: artifacts/live-roadpops-run.txt, artifacts/vm-serial.log, artifacts/gpu-screen-*.png" | tee "$REPORT"
+echo "evidence: "$(art live-roadpops-run.txt)", the per-run serial log, artifacts/gpu-screen-*.png" | tee "$REPORT"
