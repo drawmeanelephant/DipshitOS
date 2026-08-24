@@ -9,9 +9,9 @@
 - **Status:** ⬜ unclaimed · 🔄 in progress · ✅ done · ⛔ blocked
 
 Copy to `docs/claims/<NNNN>-<slug>.md`, fill it in, set Status to
-`🔄 <branch>` **before** starting work, then run
-`bash tools/status/refresh-indexes.sh` to regenerate the index (never
-hand-edit it). Flip Status to `✅`/`⛔` on completion.
+`🔄 <branch>` **before** starting work, and commit — the index tables
+regenerate on main after merge (`.github/workflows/indexes.yml`); never
+commit table churn from a branch. Flip Status to `✅`/`⛔` on completion.
 
 While a claim is 🔄:
 - **Touches** is machine-checked: two ACTIVE claims from different branches

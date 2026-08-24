@@ -1,0 +1,27 @@
+# Claim: ci-generated-indexes
+
+- **Owner:** ox-alpha (`t3code/concurrent-agents-merge-conflicts`)
+- **Prompt / plan:** user request 2026-08-24 — scale concurrent agents by removing the last guaranteed merge-conflict class: every branch regenerates `docs/claims/README.md` / `docs/logs/README.md` because the gate fails on drift, so those two files collide textually on nearly every near-simultaneous merge (both recent conflicts were inside generated index regions).
+- **Scope:**
+  1. `refresh-indexes.sh` gains a structure-only validation mode (markers + column count, no sync diff).
+  2. `verify-coordination.sh` enforces index *structure*, not *sync* — drift stops failing PRs.
+  3. New `.github/workflows/indexes.yml`: on push to main, regenerate indexes and push a bot commit (`[skip ci]`, concurrency-serialized, rebase-retried) so main's tables are always fresh.
+  4. Docs (AGENTS.md, claims/logs READMEs, TEMPLATE, gate-inventory, testing, status pointers, site pages): branches no longer run/commit the refresh script; resolve-by-regeneration recipe for legacy conflicts.
+  5. Test suite: gate tolerates stale committed indexes; `--check` still fails on drift (bot contract); structure enforcement retained.
+- **Touches:** tools/verify-coordination.sh, tools/status/refresh-indexes.sh, tools/status/test-coordination.sh, .github/workflows/indexes.yml, AGENTS.md, docs/claims/README.md, docs/claims/TEMPLATE.md, docs/logs/README.md, docs/gate-inventory.md, docs/testing.md, docs/status.md, site/contributing.md, site/claims.md
+- **Depends on:** —
+- **Heartbeat:** 2026-08-24
+- **Status:** 🔄 `t3code/concurrent-agents-merge-conflicts`
+
+## Notes
+
+Why not keep branch-side regeneration: any file two branches both must
+modify collides on merge regardless of discipline; the only safe writer for
+a shared derived artifact is a single serialized one (the bot). The local
+gate keeps everything that is per-file checkable (claim/log well-formedness,
+deterministic IDs, Touches overlap, staleness, status.md tripwires, table
+structure). Sync correctness moves to main, where it is meaningful and
+machine-enforced immediately after merge.
+
+Verify with `bash tools/status/test-coordination.sh` and
+`bash tools/verify-coordination.sh`.

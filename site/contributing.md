@@ -28,8 +28,9 @@ Work lands as a **claim**:
 2. Implement on a branch, with host tests.
 3. Where hardware is involved, add a class B gate and save evidence under
    `artifacts/`.
-4. Refresh the indexes (`bash tools/status/refresh-indexes.sh`) and run
-   `bash tools/verify-coordination.sh` before opening a PR.
+4. Run `bash tools/verify-coordination.sh` before opening a PR. Do not
+   regenerate or commit the index tables — CI regenerates them on main
+   after every merge.
 
 The ceremony is not optional — it is how the project keeps "observed" honest.
 

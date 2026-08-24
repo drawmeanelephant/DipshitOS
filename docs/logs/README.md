@@ -28,10 +28,12 @@ one.
    tracker (`docs/march-m15.md`); per-work detail goes here and in your
    claim file. If you must touch `README.md`/`roadmap.md`/`testing.md`,
    prefer pointer-level changes.
-5. Run `bash tools/status/refresh-indexes.sh` to regenerate the
-   [Log index](#log-index) below — it is **generated from the log files**,
-   so never hand-edit it (hand-appending rows to a shared table is how
-   parallel branches collide on merge).
+5. Do **not** regenerate or commit the [Log index](#log-index) below —
+   since claim 2599, `.github/workflows/indexes.yml` regenerates it on
+   `main` after every merge, so committing table churn from a branch is
+   exactly what made the two index files collide on near-simultaneous
+   merges. A local `bash tools/status/refresh-indexes.sh` is an optional
+   preview only.
 
 ## Filenames & archive (issue #267)
 
@@ -49,9 +51,13 @@ contents were never rewritten, so the append-only rule holds.
 ## Log index
 
 **This table is generated** from the log files by
-`bash tools/status/refresh-indexes.sh` — do not hand-edit it. The
-coordination gate (`bash tools/verify-coordination.sh`, `just
-verify-coordination`, and CI) fails if it drifts from the files.
+`.github/workflows/indexes.yml` on `main` immediately after every merge
+(claim 2599) — never hand-edit it, and never commit regenerated tables
+from a branch (that shared-file churn is what collided on merges; the bot
+is the single serialized writer). The coordination gate
+(`bash tools/verify-coordination.sh`, `just verify-coordination`, and CI)
+validates the table's structure on PRs; sync is enforced only where it is
+meaningful — on main.
 
 <!-- LOGS_INDEX:START -->
 | Branch | Log file |

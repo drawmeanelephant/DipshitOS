@@ -108,15 +108,29 @@ rules are:
 - **The changelog is append-only, one file per branch.** Logs live under
   `docs/logs/` so parallel appends cannot collide. Never rewrite or delete
   entries; corrections are new entries referencing the old one.
-- **Indexes are generated, not edited.** The claim and log index tables
-  in `docs/claims/README.md` and `docs/logs/README.md` are generated from
-  the git-tracked claim/log files by `bash tools/status/refresh-indexes.sh`
-  — stage new files with `git add`, run it, then commit; never hand-edit a
-  shared table. The coordination gate judges tracked files only, so other
-  agents' untracked staging files in a shared checkout cannot fail your PR.
-  Run `bash tools/verify-coordination.sh` (`just verify-coordination`, also
-  CI) before opening a PR; it fails on index drift or malformed claim/log
-  files.
+- **Indexes are generated at merge time — never by your branch.** The
+  claim and log index tables in `docs/claims/README.md` and
+  `docs/logs/README.md` are generated from the git-tracked claim/log files,
+  but since claim 2599 **branches do not regenerate or commit them**:
+  `.github/workflows/indexes.yml` regenerates both tables on `main`
+  immediately after every merge (the single serialized writer of a shared
+  derived artifact). Committing table churn from a branch is what made
+  those two files collide on nearly every near-simultaneous merge; don't
+  reintroduce it. A local `bash tools/status/refresh-indexes.sh` (`just
+  refresh-indexes`) is an optional preview of what the table will look
+  like — do not commit its output. The coordination gate judges tracked
+  files only, so other agents' untracked staging files in a shared checkout
+  cannot fail your PR. Run `bash tools/verify-coordination.sh`
+  (`just verify-coordination`, also CI) before opening a PR; it fails on
+  malformed claim/log files and structurally broken tables, not on index
+  drift (a branch's committed indexes are stale by design).
+- **Index-region merge conflicts: resolve by regeneration.** If you hit a
+  textual conflict inside a generated index region (legacy branches,
+  rebases onto old mains), do not hand-resolve rows: take either side
+  wholesale (`git checkout --ours/--theirs <file>`), optionally run
+  `bash tools/status/refresh-indexes.sh` to preview correctness, and
+  commit — or simply drop the hunk entirely; the bot regenerates the truth
+  on main after merge.
 - **Update on completion and on blockers.** Flip your claim file's status
   and append a log entry when done; append one when blocked so the next
   agent does not repeat the attempt.

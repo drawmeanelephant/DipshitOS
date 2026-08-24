@@ -9,12 +9,13 @@
 # (docs/logs/<branch>.md), then run this script.
 #
 # Usage:
-#   refresh-indexes.sh          # regenerate the tables in place
-#   refresh-indexes.sh --check  # verify the tables match the files (exit 1 if not)
+#   refresh-indexes.sh                  # regenerate the tables in place
+#   refresh-indexes.sh --check          # verify the tables match the files (exit 1 if not)
+#   refresh-indexes.sh --check-structure  # markers + column count only, no sync diff
 #
 # Generated cell content (claim Owner/Status, log titles) is escaped for
 # Markdown tables (| -> \|, \ -> \\) so a literal pipe in a claim file can
-# never widen (and corrupt) the index table. --check also validates the
+# never widen (and corrupt) the index table. Both check modes validate the
 # table structure row-by-row (every row must have the exact expected number
 # of columns), so a table cannot pass merely because it matches a broken
 # generator's own output.
@@ -25,10 +26,16 @@
 #   <!-- LOGS_INDEX:START --> ... <!-- LOGS_INDEX:END -->
 #
 # Tracked files only: the indexes are generated from files known to git
-# (git ls-files), never from a raw directory glob. The checkout is shared
-# by concurrent agents, so another agent's untracked staging files must not
-# leak into your regenerated index (and your gate run). Workflow: create
-# your claim/log files, `git add` them, then run this script, then commit.
+# (git ls-files), never from a raw directory glob.
+#
+# WHO RUNS THIS: since claim 2599, branches do NOT regenerate or commit the
+# index tables — `.github/workflows/indexes.yml` regenerates them on main
+# immediately after every merge (the only serialized writer of a shared
+# derived artifact). Branch-side runs are an optional local preview of what
+# the table will look like; do not commit the result. The PR-side
+# coordination gate uses --check-structure (drift cannot fail a PR, because
+# a PR's committed indexes are stale by design); the bot and humans use
+# --check, which still fails on drift where drift is meaningful (main).
 
 set -euo pipefail
 
@@ -134,6 +141,32 @@ require_markers() { # FILE MARKER
 
 check_mode() {
     local rc=0
+    check_structure || rc=1
+    if [ "$rc" -eq 0 ]; then
+        extract_region docs/claims/README.md CLAIMS_INDEX > "$tmp/claims.actual"
+        if ! diff -u "$tmp/claims.actual" "$tmp/claims.table"; then
+            echo "error: docs/claims/README.md claim index is out of sync" >&2
+            rc=1
+        fi
+        extract_region docs/logs/README.md LOGS_INDEX > "$tmp/logs.actual"
+        if ! diff -u "$tmp/logs.actual" "$tmp/logs.table"; then
+            echo "error: docs/logs/README.md log index is out of sync" >&2
+            rc=1
+        fi
+    fi
+    if [ "$rc" -eq 0 ]; then
+        echo "coordination indexes are in sync"
+    else
+        echo "hint: run: bash tools/status/refresh-indexes.sh" >&2
+    fi
+    return "$rc"
+}
+
+# Structure-only validation: markers present and every row well-formed.
+# No sync diff — used by verify-coordination.sh on PRs, where a branch's
+# committed indexes are stale by design (the bot regenerates on main).
+check_structure() {
+    local rc=0
     require_markers docs/claims/README.md CLAIMS_INDEX || {
         echo "error: CLAIMS_INDEX markers missing from docs/claims/README.md" >&2
         rc=1
@@ -142,9 +175,9 @@ check_mode() {
         echo "error: LOGS_INDEX markers missing from docs/logs/README.md" >&2
         rc=1
     }
-    if [ "$rc" -ne 0 ]; then return 1; fi
-    # Structural validation runs before the sync diff: a table that matches a
-    # broken generator's output must still fail here, not just on drift.
+    [ "$rc" -eq 0 ] || return 1
+    # Structural validation: a table that matches a broken generator's own
+    # output must still fail here.
     if ! validate_table docs/claims/README.md CLAIMS_INDEX 3; then
         echo "error: docs/claims/README.md claim index is structurally malformed (a cell contains an unescaped '|'?)" >&2
         rc=1
@@ -153,20 +186,8 @@ check_mode() {
         echo "error: docs/logs/README.md log index is structurally malformed (a cell contains an unescaped '|'?)" >&2
         rc=1
     fi
-    extract_region docs/claims/README.md CLAIMS_INDEX > "$tmp/claims.actual"
-    if ! diff -u "$tmp/claims.actual" "$tmp/claims.table"; then
-        echo "error: docs/claims/README.md claim index is out of sync" >&2
-        rc=1
-    fi
-    extract_region docs/logs/README.md LOGS_INDEX > "$tmp/logs.actual"
-    if ! diff -u "$tmp/logs.actual" "$tmp/logs.table"; then
-        echo "error: docs/logs/README.md log index is out of sync" >&2
-        rc=1
-    fi
     if [ "$rc" -eq 0 ]; then
-        echo "coordination indexes are in sync"
-    else
-        echo "hint: run: bash tools/status/refresh-indexes.sh" >&2
+        echo "coordination indexes are structurally valid"
     fi
     return "$rc"
 }
@@ -185,9 +206,10 @@ logs_index > "$tmp/logs.table"
 
 case "$MODE" in
     --check) check_mode ;;
+    --check-structure) check_structure ;;
     refresh) refresh_mode ;;
     *)
-        echo "usage: refresh-indexes.sh [--check]" >&2
+        echo "usage: refresh-indexes.sh [--check|--check-structure]" >&2
         exit 2
         ;;
 esac
