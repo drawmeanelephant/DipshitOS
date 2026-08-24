@@ -117,6 +117,7 @@ verify-coordination`, and CI) fails if it drifts from the files.
 | First-boot experience (claim 8323) | [`agent-buffy-u6-first-boot.md`](agent-buffy-u6-first-boot.md) |
 | sysinfo support snapshot (claim 2990) | [`agent-buffy-u7-sysinfo.md`](agent-buffy-u7-sysinfo.md) |
 | persistent settings (claim 2649) | [`agent-buffy-u8-persistent-settings.md`](agent-buffy-u8-persistent-settings.md) |
+| per-agent worktrees | [`agent-ox-alpha-agent-worktrees.md`](agent-ox-alpha-agent-worktrees.md) |
 | tracked-only coordination gate | [`agent-ox-alpha-coordination-tracked-gate.md`](agent-ox-alpha-coordination-tracked-gate.md) |
 | agent/ox-alpha/hygiene-trim-hardware-contract | [`agent-ox-alpha-hygiene-trim-hardware-contract.md`](agent-ox-alpha-hygiene-trim-hardware-contract.md) |
 | `agent/ox-alpha/m19-p3p4-chaining-exit-status` | [`agent-ox-alpha-m19-p3p4-chaining-exit-status.md`](agent-ox-alpha-m19-p3p4-chaining-exit-status.md) |

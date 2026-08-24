@@ -195,6 +195,39 @@ test-coordination:
 refresh-indexes:
     bash tools/status/refresh-indexes.sh
 
+# Create an isolated per-agent checkout (issue #523 item 1; claim 4928):
+#   just new-agent buffy m18-t16-scripting
+# → worktree at ../dipshitos-<name>, branch agent/<name>/<slug> off origin/main.
+# Each worktree has its own .build/ and artifacts/, so concurrent agents
+# never contend for build caches or live VM gate files. Claim your work
+# INSIDE the new worktree (docs/claims/TEMPLATE.md), not from the main one.
+new-agent NAME SLUG:
+    @test ! -e "../dipshitos-{{NAME}}" \
+        || { echo "error: ../dipshitos-{{NAME}} already exists (just resume-agent {{NAME}} <branch>?)"; exit 1; }
+    git fetch -q origin
+    @git show-ref --verify -q "refs/heads/agent/{{NAME}}/{{SLUG}}" \
+        && { echo "error: branch agent/{{NAME}}/{{SLUG}} already exists — use: just resume-agent {{NAME}} agent/{{NAME}}/{{SLUG}}"; exit 1; } || true
+    git worktree add "../dipshitos-{{NAME}}" -b "agent/{{NAME}}/{{SLUG}}" origin/main
+    @echo "→ cd ../dipshitos-{{NAME}}"
+
+# Reattach an existing branch into its own worktree:
+#   just resume-agent buffy agent/buffy/m18-t16-scripting
+resume-agent NAME BRANCH:
+    @test ! -e "../dipshitos-{{NAME}}" \
+        || { echo "error: ../dipshitos-{{NAME}} already exists"; exit 1; }
+    @git show-ref --verify -q "refs/heads/{{BRANCH}}" \
+        || { echo "error: no local branch {{BRANCH}} (git fetch + retry?)"; exit 1; }
+    git worktree add "../dipshitos-{{NAME}}" "{{BRANCH}}"
+    @echo "→ cd ../dipshitos-{{NAME}}"
+
+# Remove an agent worktree when its work is merged (branch kept until you delete it)
+drop-agent NAME:
+    git worktree remove "../dipshitos-{{NAME}}"
+
+# Show every checkout/worktree and its branch
+list-agents:
+    @git worktree list
+
 # Verify the pre-exit failure path (class B — boots a VZ VM; Apple silicon only)
 verify-bad-handoff:
     bash tools/verify-bad-handoff.sh
