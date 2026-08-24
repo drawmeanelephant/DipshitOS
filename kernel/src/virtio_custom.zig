@@ -53,6 +53,20 @@
 //!   the only host→guest data path (virtio-net-RX shaped), discovered from
 //!   the Xcode 27 Virtualization.framework ObjC headers.
 //!
+//! * The claim-9588 INPUT channel (queue 3, present only under the runner's
+//!   `--via-virtio`, which attaches FOUR virtqueues): keyboard injection
+//!   without CGEvent/NSEvent synthesis (issues #179/#151). Same host-push
+//!   pattern at pool scale: `arm_input_pool()` pre-arms EIGHT device-write
+//!   receive buffers; the host dequeues one per injected key report, writes
+//!   a fixed 16-byte message ([kind u8][flags u8][len u16le][payload]),
+//!   kind 1 = raw 8-byte HID keyboard boot report, and returns it;
+//!   `poll_input()` — called from the shell idle loop's RX seam in main.zig
+//!   — validates each completion, hands kind-1 payloads to the
+//!   `on_input_report` hook (main.zig wires it to input.decode_keyboard_
+//!   report so injected keys are ordinary keys downstream: event FIFO,
+//!   compose, keymap, `input` counters), and replenishes the buffer. Wire
+//!   format is normative in docs/hardware-contract.md.
+//!
 //! Feature negotiation (claim 9737): the driver reads the full 64-bit
 //! device-features word, accepts VIRTIO_F_VERSION_1 (bit 32) always and
 //! VIRTIO_F_ANY_LAYOUT (bit 27) / VIRTIO_F_NOTIFICATION_DATA (bit 38)
@@ -129,15 +143,23 @@ pub const queue_count: u16 = 2;
 /// skips the whole push experiment when it reads 0 — no feature-bit mapping
 /// guessed from session notes.
 pub const push_qidx: u16 = 2;
-pub const max_queue_probe: u16 = queue_count + 1;
+/// The claim-9588 input-queue index (present only under `--via-virtio`,
+/// which attaches FOUR virtqueues; contiguous queues mean --via-virtio
+/// implies the push-echo shape too).
+pub const input_qidx: u16 = 3;
+/// Probe up to the input queue (the deepest optional queue).
+pub const max_queue_probe: u16 = input_qidx + 1;
 /// The pre-armed push receive buffer: capacity (one device-write descriptor)
 /// and the exact request size the host writes (`"CVC-PING-0x42"`).
 pub const push_buf_len: usize = 16;
 pub const push_req_len: usize = 13;
-/// Queues actually armed by `init` (2 on every device; 3 under --cvc-echo).
+/// Queues actually armed by `init` (2 on every device; 3 under --cvc-echo;
+/// 4 under --via-virtio).
 pub var armed_queues: u16 = 0;
 /// True when init armed the optional push queue (index `push_qidx`).
 pub var has_push_queue: bool = false;
+/// True when init armed the optional input queue (index `input_qidx`).
+pub var has_input_queue: bool = false;
 
 /// Descriptor flags (Virtio 1.3 §2.7.6).
 const vq_next: u16 = 0x1; // VIRTQ_DESC_F_NEXT: more descriptors follow
@@ -636,6 +658,7 @@ pub fn init() bool {
     // has_push_queue false, keep the classic world byte-identical.
     armed_queues = 0;
     has_push_queue = false;
+    has_input_queue = false;
     var qi: u16 = 0;
     while (qi < max_queue_probe) : (qi += 1) {
         vp_write16(0x16, qi); // queue_select
@@ -662,7 +685,8 @@ pub fn init() bool {
         armed_queues = qi + 1;
     }
     if (armed_queues < queue_count) return false;
-    has_push_queue = armed_queues > queue_count;
+    has_push_queue = armed_queues > push_qidx;
+    has_input_queue = armed_queues > input_qidx;
     vp_write8(0x14, 1 | 2 | 8 | 4); // DRIVER_OK
     if ((vp_read8(0x14) & 4) == 0) return false;
     cv_ready = true;
@@ -785,6 +809,143 @@ pub fn submit(payload_buf: []const u8, reply_buf: []u8) ?u16 {
     return submit_ex(0, &.{payload_buf}, reply_buf, false);
 }
 
+// ---------------------------------------------------------------------------
+// Input channel (claim 9588, issue #523 item 3): queue 3 carries host→guest
+// keyboard injection as fixed 16-byte messages (wire format normative in
+// docs/hardware-contract.md). Same virtio-net-RX pattern as the push echo,
+// at pool scale: eight pre-armed device-write buffers, replenished per
+// completion, consumed by a polled drain from the shell idle loop's RX seam.
+// ---------------------------------------------------------------------------
+
+/// Receive-buffer capacity (the descriptor length; messages are 16 bytes —
+/// a mismatch surfaces as the bad counter, never a wedge).
+pub const input_buf_cap: usize = 32;
+/// Fixed total message size: [kind u8][flags u8][len u16le][12-byte payload].
+pub const input_msg_len: usize = 16;
+/// Message kinds (only kind 1 is defined).
+pub const input_kind_keyboard: u8 = 1;
+/// Kind-1 payload length: the raw HID keyboard boot report.
+pub const input_keyboard_rep_len: usize = 8;
+/// Pre-armed receive buffers (bounded pool; the host paces well below this
+/// and the idle-loop drain replenishes within one tick anyway).
+pub const input_pool_count: usize = 8;
+
+/// The pre-armed receive buffers (BSS — runtime addresses; .rodata pointers
+/// are image-relative in a flat image, the claim-0015 lesson).
+pub var input_rx_bufs: [input_pool_count][input_buf_cap]u8 align(16) = undefined;
+/// Each buffer's chain head (used-ring id -> slot lookup).
+var input_rx_handles: [input_pool_count]u16 = [_]u16{0} ** input_pool_count;
+/// True once `arm_input_pool` posted + kicked the whole pool.
+pub var input_armed: bool = false;
+/// Messages consumed and dispatched (kind-1 valid envelopes).
+pub var input_rx_count: u32 = 0;
+/// Malformed messages dropped (bad kind / bad len / short envelope) — the
+/// loud-by-counter failure mode; never a partial decode.
+pub var input_bad_count: u32 = 0;
+/// The decode hook: main.zig wires it to input.decode_keyboard_report so an
+/// injected key report takes the exact path an XHCI report takes (event
+/// FIFO when an app window owns focus, console bytes at the terminal, and
+/// the `input` report counters either way). Null = count-only (honest no-op).
+pub var on_input_report: ?*const fn (rep: []const u8) void = null;
+
+/// Pre-arm the receive pool on queue 3 and kick once. Returns true when all
+/// EIGHT buffers are posted; false when the transport/queue is unavailable
+/// or the ring cannot satisfy the pool (partial pools are not armed).
+pub fn arm_input_pool() bool {
+    if (!cv_ready or !has_input_queue) return false;
+    const r = &cv_rings[input_qidx];
+    if (!r.armed) return false;
+    var posted: usize = 0;
+    for (0..input_pool_count) |i| {
+        const head = alloc_chain(r, 1) orelse break;
+        r.desc[head].addr = mmu.to_phys(@intFromPtr(&input_rx_bufs[i]));
+        r.desc[head].len = @intCast(input_buf_cap);
+        r.desc[head].flags |= vq_write; // device-write only (an RX buffer)
+        const slot = r.avail.idx % queue_size;
+        r.avail.ring[slot] = head;
+        r.avail.idx +%= 1;
+        input_rx_handles[i] = head;
+        posted += 1;
+    }
+    if (posted != input_pool_count) return false;
+    mmu.clean_dcache_range(@intFromPtr(&r.desc), @sizeOf(VirtqDesc) * queue_size);
+    mmu.clean_dcache_range(@intFromPtr(&r.avail), @sizeOf(VirtqAvail));
+    for (0..input_pool_count) |i| mmu.clean_dcache_range(@intFromPtr(&input_rx_bufs[i]), input_buf_cap);
+    kick(input_qidx);
+    input_armed = true;
+    return true;
+}
+
+/// Validate one completed message and dispatch kind-1 payloads to the hook.
+fn dispatch_input_msg(msg: []const u8) void {
+    if (msg.len < 4 or msg[1] != 0) {
+        input_bad_count += 1;
+        return;
+    }
+    if (msg[0] != input_kind_keyboard) {
+        input_bad_count += 1;
+        return;
+    }
+    const len: usize = @as(usize, msg[2]) | (@as(usize, msg[3]) << 8);
+    if (len != input_keyboard_rep_len or msg.len < 4 + len) {
+        input_bad_count += 1;
+        return;
+    }
+    input_rx_count += 1;
+    if (on_input_report) |hook| hook(msg[4 .. 4 + len]);
+}
+
+/// Return one consumed buffer to service: free its chain (the deterministic
+/// LIFO hands the same head back), refill the descriptor, re-post it.
+fn rearm_input_slot(r: *VirtqRing, slot: usize) void {
+    free_chain(r, input_rx_handles[slot]);
+    const head = alloc_chain(r, 1) orelse return;
+    r.desc[head].addr = mmu.to_phys(@intFromPtr(&input_rx_bufs[slot]));
+    r.desc[head].len = @intCast(input_buf_cap);
+    r.desc[head].flags |= vq_write;
+    const avail_slot = r.avail.idx % queue_size;
+    r.avail.ring[avail_slot] = head;
+    r.avail.idx +%= 1;
+    input_rx_handles[slot] = head;
+}
+
+/// Non-blocking pump for the shell idle loop's RX seam: scan the used ring,
+/// dispatch every completed message, and replenish its buffer (one kick per
+/// batch). Bounded per call so a burst cannot starve the loop. A no-op
+/// unless the four-queue device armed its pool.
+pub fn poll_input() void {
+    if (!cv_ready or !has_input_queue or !input_armed) return;
+    const r = &cv_rings[input_qidx];
+    if (!r.armed) return;
+    var replenished = false;
+    var processed: usize = 0;
+    while (processed < queue_size) : (processed += 1) {
+        mmu.invalidate_dcache_range(@intFromPtr(&r.used), @sizeOf(VirtqUsed));
+        if (r.used.idx == r.last_used) break;
+        const elem = r.used.ring[r.last_used % queue_size];
+        r.last_used +%= 1;
+        // Match the completion back to its pool slot by chain head.
+        var slot: ?usize = null;
+        for (&input_rx_handles, 0..) |h, i| {
+            if (h == elem.id) {
+                slot = i;
+                break;
+            }
+        }
+        const s = slot orelse continue; // unknown element: skip, never lost
+        const n: usize = @min(@as(usize, elem.len), input_msg_len);
+        mmu.invalidate_dcache_range(@intFromPtr(&input_rx_bufs[s]), n);
+        dispatch_input_msg(input_rx_bufs[s][0..n]);
+        rearm_input_slot(r, s);
+        replenished = true;
+    }
+    if (replenished) {
+        mmu.clean_dcache_range(@intFromPtr(&r.desc), @sizeOf(VirtqDesc) * queue_size);
+        mmu.clean_dcache_range(@intFromPtr(&r.avail), @sizeOf(VirtqAvail));
+        kick(input_qidx);
+    }
+}
+
 /// Return element `handle`'s chain to queue `qidx`'s free list.
 pub fn free_chain_q(qidx: u16, handle: u16) void {
     if (!cv_ready) return;
@@ -874,6 +1035,15 @@ pub fn cvlog_puts(line: []const u8) bool {
 // ---------------------------------------------------------------------------
 // Host tests — only the pieces that need no device
 // ---------------------------------------------------------------------------
+
+/// Test-hook recording (module-level BSS — nested functions cannot capture
+/// mutable locals in Zig 0.16).
+var test_hook_calls: usize = 0;
+var test_hook_last_len: usize = 0;
+fn test_input_hook(rep: []const u8) void {
+    test_hook_calls += 1;
+    test_hook_last_len = rep.len;
+}
 
 test "virtio_custom: payload is the 16-byte known string, reply cap 64, big payload 12340" {
     try std.testing.expectEqual(@as(usize, 16), payload.len);
@@ -1042,6 +1212,10 @@ test "virtio_custom: fresh transport reports no-device honestly" {
     try std.testing.expect(!cvlog_puts("nope")); // queue 1 unarmed
     try std.testing.expect(!arm_push()); // push queue unavailable
     try std.testing.expect(wait_any_push(10) == null);
+    try std.testing.expect(!has_input_queue); // four-queue device absent
+    try std.testing.expect(!arm_input_pool()); // input queue unavailable
+    try std.testing.expect(!input_armed);
+    poll_input(); // honest no-op on an unarmed transport
     reset_irq_observation();
     try std.testing.expectEqual(@as(u32, 0), irq_count);
     try std.testing.expectEqual(@as(u32, 0xffffffff), irq_first);
@@ -1062,7 +1236,71 @@ test "virtio_custom: push-echo shapes (claim 3141) — queue index, buffer sizes
     // descriptor of capacity 16 and the request is exactly 13 bytes
     // ("CVC-PING-0x42").
     try std.testing.expectEqual(@as(u16, 2), push_qidx);
-    try std.testing.expectEqual(@as(u16, 3), max_queue_probe);
+    // The probe depth now covers the claim-9588 input queue too; the push
+    // queue sits one below it.
+    try std.testing.expectEqual(push_qidx + 1, input_qidx);
+    try std.testing.expectEqual(@as(u16, 4), max_queue_probe);
     try std.testing.expect(push_buf_len >= push_req_len);
     try std.testing.expectEqual(@as(usize, 16), push_rx_buf.len);
+}
+
+test "virtio_custom: input-channel shapes (claim 9588) — queue index, envelope, pool" {
+    // The input queue rides at index 3 (four-queue --via-virtio device);
+    // the envelope is a fixed 16 bytes carrying an 8-byte HID report.
+    try std.testing.expectEqual(@as(u16, 3), input_qidx);
+    try std.testing.expectEqual(@as(u16, 4), max_queue_probe);
+    try std.testing.expectEqual(@as(usize, 16), input_msg_len);
+    try std.testing.expectEqual(@as(usize, 8), input_keyboard_rep_len);
+    try std.testing.expect(input_buf_cap >= input_msg_len);
+    try std.testing.expectEqual(@as(usize, 32), input_buf_cap);
+    try std.testing.expectEqual(@as(usize, 8), input_pool_count);
+    try std.testing.expectEqual(@as(usize, 32), input_rx_bufs[0].len);
+}
+
+test "virtio_custom: dispatch_input_msg validates the envelope and counts honestly" {
+    var msg: [input_msg_len]u8 align(16) = undefined;
+    const report = [input_keyboard_rep_len]u8{ 0x02, 0, 0x04, 0, 0, 0, 0, 0 }; // Shift+a
+    msg[0] = input_kind_keyboard;
+    msg[1] = 0;
+    msg[2] = @intCast(input_keyboard_rep_len & 0xff);
+    msg[3] = 0;
+    @memcpy(msg[4 .. 4 + input_keyboard_rep_len], &report);
+
+    // The hook records into module-level BSS (a Zig 0.16 nested function
+    // cannot capture mutable locals).
+    on_input_report = &test_input_hook;
+    defer on_input_report = null;
+    test_hook_calls = 0;
+    test_hook_last_len = 0;
+    input_rx_count = 0;
+    input_bad_count = 0;
+
+    dispatch_input_msg(&msg); // valid
+    try std.testing.expectEqual(@as(u32, 1), input_rx_count);
+    try std.testing.expectEqual(@as(u32, 0), input_bad_count);
+    try std.testing.expectEqual(@as(usize, 1), test_hook_calls);
+    try std.testing.expectEqual(@as(usize, 8), test_hook_last_len);
+
+    msg[0] = 2; // unknown kind
+    dispatch_input_msg(&msg);
+    try std.testing.expectEqual(@as(u32, 1), input_rx_count);
+    try std.testing.expectEqual(@as(u32, 1), input_bad_count);
+
+    msg[0] = input_kind_keyboard;
+    msg[1] = 0;
+    msg[2] = 7; // wrong payload length
+    dispatch_input_msg(&msg);
+    try std.testing.expectEqual(@as(u32, 2), input_bad_count);
+
+    msg[2] = 8;
+    msg[1] = 9; // reserved flags nonzero
+    dispatch_input_msg(&msg);
+    try std.testing.expectEqual(@as(u32, 3), input_bad_count);
+
+    dispatch_input_msg(msg[0..3]); // truncated envelope
+    try std.testing.expectEqual(@as(u32, 4), input_bad_count);
+    try std.testing.expectEqual(@as(u32, 1), input_rx_count);
+    try std.testing.expectEqual(@as(usize, 1), test_hook_calls);
+    input_rx_count = 0;
+    input_bad_count = 0;
 }

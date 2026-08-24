@@ -603,7 +603,11 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_desktop.step);
 
     // ------------------------------------------------------------------
-    // Guy: thirtieth ESP user program (M23 E1 — EDIT.BIN, the text editor with console split)
+    // Guy: thirtieth ESP user program (M23 E1-E6 — EDIT.BIN, the text editor).
+    // Built as a SEGMENTED DSK3 image (like GLOBALS.BIN): the editor's ~140 KiB
+    // of state (4 × 32 KiB tab buffers + undo ring) lives in .data/.bss as a
+    // global, and the flat DSK1 format maps text read-only — a writable global
+    // needs the DSK3 loader's RW data+bss aperture (observed in the live gate).
     // ------------------------------------------------------------------
     const edit_prog = b.addExecutable(.{
         .name = "user-edit",
@@ -613,9 +617,9 @@ pub fn build(b: *std.Build) void {
             .optimize = .ReleaseSmall,
         }),
     });
-    edit_prog.linker_script = b.path("user/linker.ld");
-    const edit_step = b.step("edit", "Build the thirtieth user program (zig-out/bin/EDIT.BIN)");
-    const edit_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    edit_prog.linker_script = b.path("user/linker-segmented.ld");
+    const edit_step = b.step("edit", "Build the thirtieth user program (zig-out/bin/EDIT.BIN) — DSK3 segmented (writable .data/.bss)");
+    const edit_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py", "--segments" });
     edit_elf2bin.addFileArg(edit_prog.getEmittedBin());
     const edit_bin = edit_elf2bin.addOutputFileArg("EDIT.BIN");
     edit_elf2bin.has_side_effects = true;
@@ -1050,6 +1054,54 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_ping.step);
 
     // ------------------------------------------------------------------
+    // Guest: thirty-fifth ESP user program (M22 D10 — issue #333) RESMON.BIN.
+    // Lightweight resource monitor window: shows process count, scheduler
+    // state, and uptime via sys_procs (slot 7). Auto-refreshes at 1 Hz.
+    // ------------------------------------------------------------------
+    const resmon_prog = b.addExecutable(.{
+        .name = "user-resmon",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/resmon.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    resmon_prog.linker_script = b.path("user/linker.ld");
+    const resmon_step = b.step("resmon", "Build the thirty-fifth ESP user program (zig-out/bin/RESMON.BIN)");
+    const resmon_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    resmon_elf2bin.addFileArg(resmon_prog.getEmittedBin());
+    const resmon_bin = resmon_elf2bin.addOutputFileArg("RESMON.BIN");
+    resmon_elf2bin.has_side_effects = true;
+    resmon_elf2bin.stdio = .inherit;
+    resmon_step.dependOn(&resmon_elf2bin.step);
+    const install_resmon = b.addInstallFileWithDir(resmon_bin, .bin, "RESMON.BIN");
+    b.getInstallStep().dependOn(&install_resmon.step);
+
+    // ------------------------------------------------------------------
+    // Guest: thirty-sixth ESP user program (M22 D14 — issue #337) DEVCONS.BIN.
+    // Developer console: split-screen log viewer + command prompt window.
+    // Auto-refreshes on key input; output on serial console.
+    // ------------------------------------------------------------------
+    const devcons_prog = b.addExecutable(.{
+        .name = "user-devcons",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/devcons.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    devcons_prog.linker_script = b.path("user/linker.ld");
+    const devcons_step = b.step("devcons", "Build the thirty-sixth ESP user program (zig-out/bin/DEVCONS.BIN)");
+    const devcons_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    devcons_elf2bin.addFileArg(devcons_prog.getEmittedBin());
+    const devcons_bin = devcons_elf2bin.addOutputFileArg("DEVCONS.BIN");
+    devcons_elf2bin.has_side_effects = true;
+    devcons_elf2bin.stdio = .inherit;
+    devcons_step.dependOn(&devcons_elf2bin.step);
+    const install_devcons = b.addInstallFileWithDir(devcons_bin, .bin, "DEVCONS.BIN");
+    b.getInstallStep().dependOn(&install_devcons.step);
+
+    // ------------------------------------------------------------------
     // Top-level steps. System-command steps are marked as having side
     // effects (and inherit stdio) so they always execute instead of being
     // skipped by the build cache. (No QEMU path: this project targets Apple
@@ -1095,6 +1147,8 @@ pub fn build(b: *std.Build) void {
     image.addFileArg(disas_bin); // ... [DISAS.BIN] (M22 D4, issue #327: thirty-second user program, the disassembler)
     image.addFileArg(ps_bin); // ... [PS.BIN] (M22 D6, issue #329: thirty-third user program, the process viewer)
     image.addFileArg(edit_bin); // ... [EDIT.BIN] (M23 E1+E6, issue #507: thirty-fourth user program, the text editor with console split)
+    image.addFileArg(resmon_bin); // ... [RESMON.BIN] (M22 D10, issue #333: thirty-fifth user program, resource monitor)
+    image.addFileArg(devcons_bin); // ... [DEVCONS.BIN] (M22 D14, issue #337: thirty-sixth user program, developer console)
     image.has_side_effects = true;
     image.stdio = .inherit;
     image_step.dependOn(&image.step);

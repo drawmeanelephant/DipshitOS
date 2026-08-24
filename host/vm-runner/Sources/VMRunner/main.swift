@@ -11,6 +11,12 @@
 //         [--script-after <text>] [--script-expect <text>] [--custom-virtio]
 //         [--cvc-echo] (claim 3141: the host-initiated custom-virtio push
 //          echo — implies --custom-virtio and attaches a third queue)
+//         [--via-virtio] (claim 9588, issue #523 item 3: inject keys through
+//          the custom-virtio INPUT queue — queue 3 — instead of synthesizing
+//          NSEvents into a view; implies --custom-virtio AND --cvc-echo,
+//          attaching the full four-queue shape. HID-shaped 16-byte messages
+//          per docs/hardware-contract.md. No window, no activation wall
+//          (#151), no silent synthesized drop (#179).)
 //         [--sound] (milestone fifteen card A1, claim 6140: attach one
 //          VZVirtioSoundDeviceConfiguration with one
 //          VZVirtioSoundDeviceOutputStreamConfiguration (the PCM output
@@ -297,6 +303,11 @@ var customVirtioEnabled = false
 // enqueues the request into the guest's pre-armed receive buffer, the guest
 // replies on the same queue, and the delegate verifies byte-exactly.
 var cvcEchoEnabled = false
+// Claim 9588 (issue #523 item 3): `--via-virtio` injects keys through the
+// custom-virtio INPUT queue (queue 3) as HID-shaped 16-byte messages — no
+// NSEvent synthesis, no view, no window. Implies the full four-queue device
+// (custom virtio + cvc-echo + input).
+var viaVirtioEnabled = false
 // Milestone five card N1 (claim 1373): `--net <capture-file>` attaches the
 // virtio-net device; the guest's TX frames are captured byte-exactly to the
 // file. nil = default (no network device attached, config.networkDevices
@@ -547,6 +558,14 @@ while idx < arguments.count {
         idx += 1
     } else if arg == "--cvc-echo" {
         // Claim 3141: the host-push echo spike — implies the device attach.
+        customVirtioEnabled = true
+        cvcEchoEnabled = true
+        idx += 1
+    } else if arg == "--via-virtio" {
+        // Claim 9588: keyboard injection over the custom-virtio INPUT queue
+        // (queue 3). Virtqueues are contiguous, so the four-queue shape
+        // implies --custom-virtio AND the claim-3141 push echo.
+        viaVirtioEnabled = true
         customVirtioEnabled = true
         cvcEchoEnabled = true
         idx += 1
@@ -1204,6 +1223,13 @@ if customVirtioEnabled, #available(macOS 27.0, *) {
     // at all, so the base `swift build` must not reference them.
     print(CustomVirtioSpike.attach(to: config))
 }
+#else
+if customVirtioEnabled {
+    // Loud, never silent (issue #523 acceptance): this binary was compiled
+    // WITHOUT -DSPIKE, so it has no custom-virtio code at all. Ignoring
+    // the flag would boot a different machine than the caller asked for.
+    fail("--custom-virtio/--cvc-echo/--via-virtio require a SPIKE build (macOS 27 SDK types); rebuild with `swift build --package-path host/vm-runner --configuration release -Xswiftc -DSPIKE` (`zig build spike-virtio` drives it). This binary cannot attach the requested device.")
+}
 #endif
 do { try config.validate() } catch { fail("Invalid VM configuration: \(error)") }
 
@@ -1274,13 +1300,28 @@ if inputMode {
     print("  input: ENABLED (milestone seven card I1, claim 4272) — keyboard + pointing devices attached (VZUSBKeyboardConfiguration + VZUSBScreenCoordinatePointingDeviceConfiguration); the guest-side device is the Apple XHCI USB controller (DID 0x1a06) with the HID devices behind it")
 }
 if let kc = inputKeyCode {
-    print("  input-key: ENABLED (milestone seven card I2, claim 4116) — synthesized keyDown keyCode \(kc) dispatched to the view after \"\(inputKeyAfter ?? "usb: enumerated")\" (the minimal I2 report seam; the full scripted surface is I3)")
+    if viaVirtioEnabled {
+        print("  input-key: ENABLED (milestone seven card I2, claim 4116) — keyDown keyCode \(kc) rides the custom-virtio INPUT queue (claim 9588; HID-shaped messages, no view) after \"\(inputKeyAfter ?? "usb: enumerated")\"")
+    } else {
+        print("  input-key: ENABLED (milestone seven card I2, claim 4116) — synthesized keyDown keyCode \(kc) dispatched to the view after \"\(inputKeyAfter ?? "usb: enumerated")\" (the minimal I2 report seam; the full scripted surface is I3)")
+    }
 }
 if let s = inputString {
-    print("  input-string: ENABLED (milestone seven card I3, claim 6050) — typing \(s.debugDescription) into the view after \"\(inputStringAfter ?? "dipshit> ")\" (keyDown + keyUp per char, shift for uppercase)")
+    if viaVirtioEnabled {
+        print("  input-string: ENABLED (milestone seven card I3, claim 6050) — typing \(s.debugDescription) over the custom-virtio INPUT queue (claim 9588; HID-shaped messages, no view) after \"\(inputStringAfter ?? "dipshit> ")\"")
+    } else {
+        print("  input-string: ENABLED (milestone seven card I3, claim 6050) — typing \(s.debugDescription) into the view after \"\(inputStringAfter ?? "dipshit> ")\" (keyDown + keyUp per char, shift for uppercase)")
+    }
 }
 if let s = inputChords {
-    print("  input-chords: ENABLED (milestone eight card U2, claim 1809) — typing \(s.debugDescription) into the view after \"\(inputChordsAfter ?? "userspace: el0=1")\" (keyDown + keyUp per chord: printable chars, return/up/down/left/right/home/end/delete/tab, ctrl-a..ctrl-z; \(inputChordsDelay) s per keystroke)")
+    if viaVirtioEnabled {
+        print("  input-chords: ENABLED (milestone eight card U2, claim 1809) — typing \(s.debugDescription) over the custom-virtio INPUT queue (claim 9588; HID-shaped messages, no view) after \"\(inputChordsAfter ?? "userspace: el0=1")\"")
+    } else {
+        print("  input-chords: ENABLED (milestone eight card U2, claim 1809) — typing \(s.debugDescription) into the view after \"\(inputChordsAfter ?? "userspace: el0=1")\" (keyDown + keyUp per chord: printable chars, return/up/down/left/right/home/end/delete/tab, ctrl-a..ctrl-z; \(inputChordsDelay) s per keystroke)")
+    }
+}
+if viaVirtioEnabled {
+    print("  via-virtio: ENABLED (claim 9588, issue #523 item 3) — keyboard injection rides the custom-virtio INPUT queue as HID-shaped 16-byte messages; NO NSEvent/CGEvent synthesis and no window/view required (attacks #179 synthesized-drop and #151 activation wall)")
 }
 if let script = pointerScript {
     print("  pointer: ENABLED (milestone eight card U4, claim 4993) — \(script.debugDescription) after \"\(pointerAfter ?? "tasks user-el0 reaped")\" via route \"\(pointerRoute)\"; trust=post:\(CGPreflightPostEventAccess()) ax:\(AXIsProcessTrusted()) (request-trust=\(pointerRequestTrust ? "on" : "off"))")
@@ -2029,6 +2070,30 @@ func startKeyInject() {
             if let text = try? String(contentsOf: serialURL, encoding: .utf8),
                text.contains(marker) {
                 Thread.sleep(forTimeInterval: 0.5) // let the armed ring settle
+                #if SPIKE
+                if viaVirtioEnabled {
+                    // Claim 9588: ride the custom-virtio INPUT queue — no
+                    // view, no NSEvent, no window (headless-safe). KeyDown
+                    // only, the same single-report shape as the synthesized
+                    // seam.
+                    guard #available(macOS 27.0, *) else {
+                        fail("--via-virtio requires macOS 27 (VZCustomVirtioDevice).")
+                    }
+                    guard let ch = CustomVirtioSpike.charFromMacCode(keyCode),
+                          let (usage, shift) = CustomVirtioSpike.hidUsage(for: ch) else {
+                        FileHandle.standardError.write(Data("ERROR: --via-virtio --input-key: no HID mapping for macOS keycode \(keyCode)\n".utf8))
+                        return
+                    }
+                    let mods: UInt8 = shift ? CustomVirtioSpike.hidModShift : 0
+                    FileHandle.standardOutput.write(Data("KEY-INJECT: keyCode \(keyCode) keyDown rides the custom-virtio INPUT queue after \"\(marker)\"\n".utf8))
+                    CustomVirtioSpike.injectStrokes(
+                        [CustomVirtioSpike.HidStroke(mods: mods, usage: usage, isDown: true)],
+                        sequenceTag: "key-inject"
+                    )
+                    sent = true
+                    break
+                }
+                #endif
                 DispatchQueue.main.async {
                     guard let view = machineView else {
                         FileHandle.standardError.write(Data("ERROR: --input-key needs --display/--screenshot (no VZVirtualMachineView)\n".utf8))
@@ -2156,6 +2221,30 @@ func startChordInject() {
         while Date() < waitDeadline {
             if let log = try? String(contentsOf: serialURL, encoding: .utf8), log.contains(marker) {
                 Thread.sleep(forTimeInterval: 1.0) // let the armed ring settle
+                #if SPIKE
+                if viaVirtioEnabled {
+                    // Claim 9588: chords ride the custom-virtio INPUT queue —
+                    // keyDown + keyUp per token as HID reports, no view, no
+                    // window, headless-safe.
+                    guard #available(macOS 27.0, *) else {
+                        fail("--via-virtio requires macOS 27 (VZCustomVirtioDevice).")
+                    }
+                    var strokes: [CustomVirtioSpike.HidStroke] = []
+                    for token in csv.split(separator: ",").map(String.init) {
+                        guard let (mods, usage) = CustomVirtioSpike.hidChord(token) else {
+                            FileHandle.standardError.write(Data("ERROR: --via-virtio --input-chords: no HID mapping for chord '\(token)'\n".utf8))
+                            FileHandle.standardOutput.write(Data("CHORD-SEQ: aborted (unknown chord) ok=false\n".utf8))
+                            return
+                        }
+                        strokes.append(CustomVirtioSpike.HidStroke(mods: mods, usage: usage, isDown: true))
+                        strokes.append(CustomVirtioSpike.HidStroke(mods: 0, usage: 0, isDown: false))
+                    }
+                    FileHandle.standardOutput.write(Data("CHORD-SEQ: typed \(csv.debugDescription) over the custom-virtio INPUT queue after \"\(marker)\" transport=cv-input\n".utf8))
+                    CustomVirtioSpike.injectStrokes(strokes, sequenceTag: "chord-seq")
+                    sent = true
+                    break
+                }
+                #endif
                 guard let view = machineView else {
                     FileHandle.standardError.write(Data("ERROR: --input-chords needs --display/--screenshot (no VZVirtualMachineView)\n".utf8))
                     return
@@ -2502,6 +2591,31 @@ func startKeyStringInject() {
         while Date() < waitDeadline {
             if let log = try? String(contentsOf: serialURL, encoding: .utf8), log.contains(marker) {
                 Thread.sleep(forTimeInterval: 0.5) // let the armed ring settle
+                #if SPIKE
+                if viaVirtioEnabled {
+                    // Claim 9588: type through the custom-virtio INPUT queue
+                    // — keyDown + keyUp per char as HID reports, no view, no
+                    // window, headless-safe.
+                    guard #available(macOS 27.0, *) else {
+                        fail("--via-virtio requires macOS 27 (VZCustomVirtioDevice).")
+                    }
+                    var strokes: [CustomVirtioSpike.HidStroke] = []
+                    for ch in text {
+                        guard let (usage, shift) = CustomVirtioSpike.hidUsage(for: ch) else {
+                            FileHandle.standardError.write(Data("ERROR: --via-virtio --input-string: no HID usage for '\(ch)'\n".utf8))
+                            FileHandle.standardOutput.write(Data("KEY-SEQ: aborted (no HID usage) ok=false\n".utf8))
+                            return
+                        }
+                        let mods: UInt8 = shift ? CustomVirtioSpike.hidModShift : 0
+                        strokes.append(CustomVirtioSpike.HidStroke(mods: mods, usage: usage, isDown: true))
+                        strokes.append(CustomVirtioSpike.HidStroke(mods: 0, usage: 0, isDown: false))
+                    }
+                    FileHandle.standardOutput.write(Data("KEY-SEQ: typed \(text.debugDescription) over the custom-virtio INPUT queue after \"\(marker)\" transport=cv-input\n".utf8))
+                    CustomVirtioSpike.injectStrokes(strokes, sequenceTag: "key-seq")
+                    sent = true
+                    break
+                }
+                #endif
                 guard let view = machineView else {
                     FileHandle.standardError.write(Data("ERROR: --input-string needs --display/--screenshot (no VZVirtualMachineView)\n".utf8))
                     return
@@ -3361,8 +3475,214 @@ enum CustomVirtioSpike {
     // Two queues (claims 4374/4837): queue 0 = the exchange/transport
     // queue, queue 1 = the guest log transport. The claim-3141 push echo
     // (--cvc-echo) adds queue 2 — the queue COUNT is the capability signal;
-    // the guest driver probes its size through the common config.
-    static let queueCount: UInt16 = cvcEchoEnabled ? 3 : 2
+    // the guest driver probes its size through the common config. The
+    // claim-9588 input channel (--via-virtio) adds queue 3 (virtqueues are
+    // contiguous, so --via-virtio implies the push-echo shape too).
+    static let queueCount: UInt16 = viaVirtioEnabled ? 4 : (cvcEchoEnabled ? 3 : 2)
+
+    // ---- Claim 9588 INPUT channel (queue 3): HID-shaped keyboard messages.
+    // Wire format is normative in docs/hardware-contract.md:
+    //   [kind u8][flags u8][len u16le][12-byte payload], fixed 16 bytes;
+    //   kind 1 = raw 8-byte HID keyboard boot report [mods, 0, k0..k5].
+    static let inputMsgLen = 16
+    static let inputKindKeyboard: UInt8 = 1
+    static let inputKeyboardReportLen = 8
+    // HID boot-protocol modifier bits (the guest's hid_modifiers_to_flags
+    // reads exactly these: bit0 LCtrl, bit1 LShift, bit2 LAlt, bit3 LCmd).
+    static let hidModCtrl: UInt8 = 0x01
+    static let hidModShift: UInt8 = 0x02
+
+    /// One injected key report: (modifier byte, usage ID, down or up).
+    struct HidStroke {
+        let mods: UInt8
+        let usage: UInt8
+        let isDown: Bool
+        var label: String { "\(isDown ? "down" : "up") usage=0x\(String(usage, radix: 16)) mods=0x\(String(mods, radix: 16))" }
+    }
+
+    /// Map one character of the `macKey` vocabulary to its HID usage ID +
+    /// shift requirement (the guest keymap's inverse — a–z, 0–9, punctuation,
+    /// space, `\n` = Enter). nil = outside the vocabulary (fail honestly).
+    static func hidUsage(for ch: Character) -> (usage: UInt8, shift: Bool)? {
+        switch ch {
+        case "a": return (0x04, false); case "b": return (0x05, false)
+        case "c": return (0x06, false); case "d": return (0x07, false)
+        case "e": return (0x08, false); case "f": return (0x09, false)
+        case "g": return (0x0A, false); case "h": return (0x0B, false)
+        case "i": return (0x0C, false); case "j": return (0x0D, false)
+        case "k": return (0x0E, false); case "l": return (0x0F, false)
+        case "m": return (0x10, false); case "n": return (0x11, false)
+        case "o": return (0x12, false); case "p": return (0x13, false)
+        case "q": return (0x14, false); case "r": return (0x15, false)
+        case "s": return (0x16, false); case "t": return (0x17, false)
+        case "u": return (0x18, false); case "v": return (0x19, false)
+        case "w": return (0x1A, false); case "x": return (0x1B, false)
+        case "y": return (0x1C, false); case "z": return (0x1D, false)
+        case "A": return (0x04, true);  case "B": return (0x05, true)
+        case "C": return (0x06, true);  case "D": return (0x07, true)
+        case "E": return (0x08, true);  case "F": return (0x09, true)
+        case "G": return (0x0A, true);  case "H": return (0x0B, true)
+        case "I": return (0x0C, true);  case "J": return (0x0D, true)
+        case "K": return (0x0E, true);  case "L": return (0x0F, true)
+        case "M": return (0x10, true);  case "N": return (0x11, true)
+        case "O": return (0x12, true);  case "P": return (0x13, true)
+        case "Q": return (0x14, true);  case "R": return (0x15, true)
+        case "S": return (0x16, true);  case "T": return (0x17, true)
+        case "U": return (0x18, true);  case "V": return (0x19, true)
+        case "W": return (0x1A, true);  case "X": return (0x1B, true)
+        case "Y": return (0x1C, true);  case "Z": return (0x1D, true)
+        case "1": return (0x1E, false); case "2": return (0x1F, false)
+        case "3": return (0x20, false); case "4": return (0x21, false)
+        case "5": return (0x22, false); case "6": return (0x23, false)
+        case "7": return (0x24, false); case "8": return (0x25, false)
+        case "9": return (0x26, false); case "0": return (0x27, false)
+        case "\n", "\r": return (0x28, false) // Enter / Return
+        case " ": return (0x2C, false)
+        case "-": return (0x2D, false); case "=": return (0x2E, false)
+        case "[": return (0x2F, false); case "]": return (0x30, false)
+        case "\\": return (0x31, false)
+        case ";": return (0x33, false); case "'": return (0x34, false)
+        case "`": return (0x35, false)
+        case ",": return (0x36, false); case ".": return (0x37, false)
+        case "/": return (0x38, false)
+        default: return nil
+        }
+    }
+
+    /// Map one `macChord` token to (mods, usage). Same accepted vocabulary:
+    /// named nav tokens + ctrl-a..ctrl-z + single printable chars. The nav
+    /// usages are the guest keymap's editing cluster (arrows CSI x, Home/
+    /// End/PgUp/PgDn; `delete` = forward-delete 0x4C → the guest's CSI 3~,
+    /// matching the macOS-0x75 semantics macChord carries).
+    static func hidChord(_ token: String) -> (mods: UInt8, usage: UInt8)? {        switch token {
+        case "return": return (0, 0x28)
+        case "space": return (0, 0x2C)
+        case "tab": return (0, 0x2B)
+        case "escape": return (0, 0x29)
+        case "up": return (0, 0x52)
+        case "down": return (0, 0x51)
+        case "left": return (0, 0x50)
+        case "right": return (0, 0x4F)
+        case "home": return (0, 0x4A)
+        case "end": return (0, 0x4D)
+        case "delete": return (0, 0x4C)
+        case "pageup": return (0, 0x4B)
+        case "pagedown": return (0, 0x4E)
+        default: break
+        }
+        if token.hasPrefix("ctrl-"), token.count == 6 {
+            let letter = token[token.index(token.startIndex, offsetBy: 5)]
+            if let (usage, shift) = hidUsage(for: letter), !shift {
+                return (hidModCtrl, usage)
+            }
+            return nil
+        }
+        if token.count == 1, let (usage, shift) = hidUsage(for: token[token.startIndex]) {
+            return (shift ? hidModShift : 0, usage)
+        }
+        return nil
+    }
+
+    /// Reverse of the free function macKey(for:): macOS virtual keycode →
+    /// character, so `--input-key`'s numeric keycode can ride the HID
+    /// channel (mirrors macKey's pairs exactly; nil = unmapped, loud fail).
+    static func charFromMacCode(_ code: UInt16) -> Character? {
+        switch code {
+        case 0x00: return "a"; case 0x0B: return "b"; case 0x08: return "c"
+        case 0x02: return "d"; case 0x0E: return "e"; case 0x03: return "f"
+        case 0x05: return "g"; case 0x04: return "h"; case 0x22: return "i"
+        case 0x26: return "j"; case 0x28: return "k"; case 0x25: return "l"
+        case 0x2E: return "m"; case 0x2D: return "n"; case 0x1F: return "o"
+        case 0x23: return "p"; case 0x0C: return "q"; case 0x0F: return "r"
+        case 0x01: return "s"; case 0x11: return "t"; case 0x20: return "u"
+        case 0x09: return "v"; case 0x0D: return "w"; case 0x07: return "x"
+        case 0x10: return "y"; case 0x06: return "z"
+        case 0x12: return "1"; case 0x13: return "2"; case 0x14: return "3"
+        case 0x15: return "4"; case 0x17: return "5"; case 0x16: return "6"
+        case 0x1A: return "7"; case 0x1C: return "8"; case 0x19: return "9"
+        case 0x1D: return "0"
+        case 0x31: return " "; case 0x24: return "\n"
+        case 0x2F: return "."; case 0x2B: return ","; case 0x2C: return "/"
+        case 0x1B: return "-"; case 0x18: return "="; case 0x21: return "["
+        case 0x1E: return "]"; case 0x2A: return "\\"; case 0x29: return ";"
+        case 0x27: return "'"; case 0x32: return "`"
+        default: return nil
+        }
+    }
+
+    /// Build the fixed 16-byte input message for one stroke (contract shape:
+    /// [kind][flags=0][len LE][payload]; kind 1 payload = the raw report).
+    static func inputMessage(mods: UInt8, usage: UInt8, isDown: Bool) -> Data {
+        var msg = Data(repeating: 0, count: inputMsgLen)
+        msg[0] = inputKindKeyboard
+        msg[2] = UInt8(inputKeyboardReportLen & 0xff)
+        if isDown {
+            msg[4] = mods       // byte 0 of the HID boot report: modifiers
+            msg[6] = usage      // byte 2: first keycode slot (byte 1 reserved)
+        }
+        // keyUp = the all-zero report — the guest's held-set transition
+        // logic emits KEY_UP exactly like a physical release.
+        return msg
+    }
+
+    /// Enqueue one input message into a pre-armed receive buffer on queue 3
+    /// and return it (used ring advance + SPI — the only host→guest data
+    /// path). Runs ON the device delegate queue so element access stays
+    /// single-threaded with the callbacks. Returns false when the pool is
+    /// momentarily empty (the caller retries — ordering preserved); shape or
+    /// write failures report loudly on stderr.
+    static func enqueueInputNow(_ stroke: HidStroke, sequenceTag: String) -> Bool {
+        guard let device, let queue = device.queue(at: 3) else {
+            FileHandle.standardError.write(Data("ERROR: CUSTOM-VIRTIO-INPUT: queue 3 unavailable (device \(device == nil ? "nil" : "present"))\n".utf8))
+            return true // unrecoverable: do not retry-spin the sequence
+        }
+        guard let element = queue.nextElement() else {
+            return false // pool empty: retry THIS stroke, later strokes wait
+        }
+        let msg = inputMessage(mods: stroke.mods, usage: stroke.usage, isDown: stroke.isDown)
+        do {
+            try element.write(msg)
+        } catch {
+            FileHandle.standardError.write(Data("ERROR: CUSTOM-VIRTIO-INPUT: write FAILED (\(sequenceTag) \(stroke.label)): \(error)\n".utf8))
+            element.returnToQueue()
+            return true
+        }
+        element.returnToQueue()
+        print("CUSTOM-VIRTIO-INPUT: enqueued \(sequenceTag) \(stroke.label) (\(msg.count)-byte message)")
+        return true
+    }
+
+    /// Deliver a stroke sequence in STRICT order on the device queue: the
+    /// next stroke is scheduled only after the previous one was accepted,
+    /// so a pool-empty retry delays the rest of the sequence instead of
+    /// reordering it (observed live, claim 9588: a fixed-schedule burst hit
+    /// a momentarily empty pool and typed 'inpu⏎t' — the guest executed two
+    /// garbled commands). 0.25 s pacing; exhaustion fails LOUDLY, never
+    /// drops silently.
+    static func injectStrokes(_ strokes: [HidStroke], sequenceTag: String) {
+        deviceQueue.async {
+            deliverStrokes(strokes, sequenceTag: sequenceTag, index: 0, attempts: 0)
+        }
+    }
+
+    private static func deliverStrokes(_ strokes: [HidStroke], sequenceTag: String, index: Int, attempts: Int) {
+        if index >= strokes.count {
+            print("CUSTOM-VIRTIO-INPUT: sequence complete tag=\(sequenceTag) n=\(strokes.count) ok=true")
+            return
+        }
+        let stroke = strokes[index]
+        if enqueueInputNow(stroke, sequenceTag: sequenceTag) {
+            deviceQueue.asyncAfter(deadline: .now() + 0.25) {
+                deliverStrokes(strokes, sequenceTag: sequenceTag, index: index + 1, attempts: 0)
+            }
+        } else if attempts < 40 {
+            deviceQueue.asyncAfter(deadline: .now() + 0.25) {
+                deliverStrokes(strokes, sequenceTag: sequenceTag, index: index, attempts: attempts + 1)
+            }
+        } else {
+            FileHandle.standardError.write(Data("ERROR: CUSTOM-VIRTIO-INPUT: rx pool empty after 40 retries (\(sequenceTag) \(stroke.label)) — sequence ABORTED at \(index)/\(strokes.count)\n".utf8))
+        }
+    }
 
     // ---- Claim 3141 host-push echo state (all touched only on the
     // device's serial deviceQueue) ----
@@ -3384,9 +3704,18 @@ enum CustomVirtioSpike {
     static let configDelegate = CustomVirtioSpikeConfigDelegate()
     static let deviceDelegate = CustomVirtioSpikeDeviceDelegate()
 
+    /// THE device delegate queue, created here so the injection paths can
+    /// schedule their element access onto the SAME serial queue the
+    /// callbacks run on (all queue-element access single-threaded).
+    static let deviceQueue = DispatchQueue(label: "dipshitos.customvirtio")
+
+    /// The live device (captured at didCreateDevice; strong — lives as long
+    /// as the VM). The input-injection paths dereference it on deviceQueue.
+    static var device: VZCustomVirtioDevice?
+
     static func attach(to config: VZVirtualMachineConfiguration) -> String {
         let provider = VZCustomVirtioDeviceDelegateProvider(
-            deviceQueue: DispatchQueue(label: "dipshitos.customvirtio"),
+            deviceQueue: deviceQueue,
             delegate: configDelegate
         )
 
@@ -3400,6 +3729,12 @@ enum CustomVirtioSpike {
         config.customVirtioDevices = [deviceConfig]
 
         let did = 0x1040 + Int(deviceID)  // virtio transitional PCI DID = 0x1040 + device_id (add, not OR)
+        if viaVirtioEnabled {
+            return String(
+                format: "  custom virtio: ENABLED — VID 0x1af4 DID 0x%04x (virtio deviceID 0x%02x), class 0x%02x/0x%02x, %d queue(s) incl. the claim-3141 push-echo queue and the claim-9588 INPUT queue (--via-virtio)",
+                did, Int(deviceID), Int(pciClass), Int(pciSubclass), Int(queueCount)
+            )
+        }
         if cvcEchoEnabled {
             return String(
                 format: "  custom virtio: ENABLED — VID 0x1af4 DID 0x%04x (virtio deviceID 0x%02x), class 0x%02x/0x%02x, %d queue(s) incl. the claim-3141 push-echo queue (--cvc-echo)",
@@ -3420,6 +3755,10 @@ final class CustomVirtioSpikeConfigDelegate: NSObject, VZCustomVirtioDeviceConfi
     func customVirtioConfiguration(_ deviceConfiguration: VZCustomVirtioDeviceConfiguration, didCreateDevice device: VZCustomVirtioDevice) {
         print("CUSTOM-VIRTIO: device created (didCreateDevice)")
         device.delegate = CustomVirtioSpike.deviceDelegate
+        // Claim 9588: capture the live device so the input-injection paths
+        // can reach its queues (they touch it on CustomVirtioSpike.deviceQueue
+        // only — the same serial queue every callback runs on).
+        CustomVirtioSpike.device = device
     }
 }
 
@@ -3446,6 +3785,14 @@ final class CustomVirtioSpikeDeviceDelegate: NSObject, VZCustomVirtioDeviceDeleg
             // drain it blindly (the armed rx buffer must survive until the
             // host chooses to enqueue into it).
             handlePushNotification(device: device, queue: queue)
+            return
+        }
+        if queue.queueIndex == 3 && viaVirtioEnabled {
+            // Claim 9588 input queue: notifications here are the guest's
+            // arm-time kick and per-batch replenish kicks. The rx buffers
+            // are the GUEST's — never dequeue them; each log line is the
+            // host-side evidence that the pool is cycling.
+            print("CUSTOM-VIRTIO-INPUT: queue 3 notified (guest rx pool cycling)")
             return
         }
         // Drain every available element (many may be in flight — claim

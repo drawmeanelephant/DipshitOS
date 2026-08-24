@@ -3187,6 +3187,9 @@ pub fn boot_and_park(mon: *monitor.Monitor, rx_wired: bool) void {
     shell.color_enabled = settings.get_color();
     load_history(&shell.editor);
     load_env(); // M19 P3: restore persistent environment
+    // M21 W11: restore window state from previous session.
+    restore_windows();
+
     // M18 T14: run startup file (.dipshitrc) if present
     if (esp.disk_ready()) {
         if (esp.lookup(".dipshitrc")) |entry| {
@@ -3457,9 +3460,41 @@ pub fn boot_and_park(mon: *monitor.Monitor, rx_wired: bool) void {
                     mon.console.puts(") — connection aborted\n");
                 },
             }
+            // M21 W11: save window state every ~300 idle cycles.
+            persist_window_state_tick();
             idle_wait_rx();
         }
     }
+}
+
+/// M21 W11: BSS counter for periodic window state persistence.
+var persist_save_counter: usize = 0;
+const persist_save_every: usize = 300; // ~30 seconds at ~10 Hz poll rate
+
+/// M21 W11: tick the persist counter and save if it wraps.
+fn persist_window_state_tick() void {
+    persist_save_counter +%= 1;
+    if (persist_save_counter % persist_save_every == 0) {
+        save_windows();
+    }
+}
+
+/// M21 W11: save current window state to ESP as WINDOWS.SAV.
+fn save_windows() void {
+    var buf: [driving_award.persist_max_bytes]u8 = undefined;
+    const n = driving_award.serialize_state(&buf);
+    if (n > 0) {
+        _ = esp.write_file("WINDOWS.SAV", buf[0..n]);
+    }
+}
+
+/// M21 W11: restore window state from ESP's WINDOWS.SAV (if it exists).
+fn restore_windows() void {
+    if (!esp.disk_ready()) return;
+    const entry = esp.lookup("WINDOWS.SAV") orelse return;
+    const content = esp.content_of(entry);
+    if (content.len == 0) return;
+    _ = driving_award.restore_state(content, 99);
 }
 
 /// Idle between input polls in RX-wired mode: a bounded nop delay, not WFE.
@@ -3569,10 +3604,13 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "  tasks       tick-driven task scheduler status\n" ++
         "storage\n" ++
         "  cat         print a file from the ESP (by name or /path)\n" ++
-        "  ls          list files on the ESP (or a directory by path)\n" ++
+        "  ls          list files on the ESP (or a directory by path); '-l' for long format (D15)\n" ++
         "  mount       switch the active FAT volume (esp or data)\n" ++
         "  write       write text to a file on the ESP\n" ++
         "  mktemp      create a temporary file (empty, unique name)\n" ++
+        "  stat        file metadata: size, type, cluster, path (D8)\n" ++
+        "  find        recursive file search with glob patterns ('find / -name \"*.BIN\"' — bounded 3 levels, 256 results)\n" ++
+        "  inventory   list all installed applications from APPS.TXT with sizes and types (D16)\n" ++
         "networking\n" ++
         "  net         virtio-net transport + RX + ARP + ICMP + UDP + DHCP + TCP + DNS: device DID, MAC, queues, feature bits, RX counters ('net recv' prints received frames; 'net ip <a.b.c.d>' sets the static IP; 'net arp [<a.b.c.d>]' shows/resolves the ARP table; 'net ping <a.b.c.d>' sends an ICMP echo request; 'net udp [listen <port>|close <port>|send <addr> <port> <len>|recv [<port>]]' drives UDP; 'net dhcp' runs the bounded DHCP client one step per invocation; 'net tcp [connect <addr> <port>|send <len>|recv|close|reset]' drives the bounded TCP client; 'net dns <hostname> [<server>]' resolves DNS A-records)\n" ++
         "  netsend     send a known Ethernet frame (bounded staging, TX + used-ring drain)\n" ++
@@ -3602,6 +3640,9 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "  sound       virtio-snd transport: device DID, class, status, control-queue state, device-config counts (jacks/streams/channel-maps), re-arm; stream-state control: 'sound volume <0-100>' and 'sound mute <on|off>'\n" ++
         "  shutdown    request power-off\n" ++
         "  type        echo stdin (the pipe source) to stdout — the right half of `a | type`\n" ++
+        "  dmesg       system log viewer: last bytes of serial output (D12)\n" ++
+        "  time        command timing: measure elapsed ticks and wall-clock time (D13)\n" ++
+        "  which       locate a command: shell builtin, monitor command, or ESP application (D16)\n" ++
         "type 'help <command>' for details on a single command.\n" ++
         "type 'help <topic>' for a topic page (networking, windows, storage, graphics).\n" ++
         "dipshit> version\r\n" ++

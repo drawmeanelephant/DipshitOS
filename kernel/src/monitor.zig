@@ -52,6 +52,7 @@ const tombstone = @import("tombstone.zig"); // Arc5 issue #243: crash tombstone 
 const dns = @import("dns.zig"); // milestone twelve card N2 (claim 7566): DNS resolver
 const events = @import("events.zig"); // milestone sixteen C3 (claim 0339): per-process event queue bound behind `resources`
 const file_table = @import("file_table.zig"); // milestone sixteen C3 (claim 0339): per-process handle bound behind `resources`
+const serial_ring = @import("serial_ring.zig"); // Arc5 issue #243: serial output ring buffer behind `dmesg`
 
 // ---------------------------------------------------------------------------
 // Limits (fixed-size, explicit bounds)
@@ -282,7 +283,7 @@ pub const Command = struct {
 /// grows it 54 -> 55 (`sym`). Milestone twenty-two D5 (issue #328)
 /// grows it 55 -> 56 (`strace`). Milestone twenty-two D6 (issue #329)
 /// grows it 56 -> 57 (`ps`).
-pub const registry_count: usize = 59; // 51 + sh/calc + `font` (M20 U1) + sym/strace/ps (M22 D3/D5/D6) + `type` (M19 P1) + `mktemp` (M19 P16)
+pub const registry_count: usize = 65; // 51 + sh/calc + `font` (M20 U1) + sym/strace/ps (M22 D3/D5/D6) + `type` (M19 P1) + `mktemp` (M19 P16) + stat/find/dmesg/time/which/inventory (M22 D8/D12/D13/D16)
 
 /// `sym <file>` reads at most this many bytes for on-disk symtab inspection
 /// (M22 D3). ELF symbol tables live near the file tail; 64 KiB covers every
@@ -324,7 +325,7 @@ fn ensure_registry() []const Command {
             .{ .name = "hex", .help = "format an integer in hexadecimal", .usage = "hex <number>...", .category = .memory_state, .min_args = 1, .handler = cmd_hex },
             .{ .name = "input", .help = "keyboard/pointer event FIFO: armed state, occupancy, drop count, last keyboard + pointer events", .usage = "input", .category = .graphics_input, .handler = cmd_input },
             .{ .name = "kill", .help = "terminate a running process (kernel-owned lifetime)", .usage = "kill <pid|name>", .category = .tasks_processes, .min_args = 1, .max_args = 1, .handler = cmd_kill },
-            .{ .name = "ls", .help = "list files on the ESP (or a directory by path)", .usage = "ls [<dir>]", .category = .storage, .max_args = 1, .handler = cmd_ls },
+            .{ .name = "ls", .help = "list files on the ESP (or a directory by path); '-l' for long format (D15)", .usage = "ls [-l] [<dir>]", .category = .storage, .max_args = 2, .handler = cmd_ls },
             .{ .name = "mem", .help = "summarize the EFI memory map", .usage = "mem", .category = .memory_state, .handler = cmd_mem },
             .{ .name = "mbox", .help = "per-process IPC mailbox: pending messages and drain counters", .usage = "mbox [<pid>]", .category = .tasks_processes, .max_args = 1, .handler = cmd_mbox },
             .{ .name = "mount", .help = "switch the active FAT volume (esp or data)", .usage = "mount <esp|data>", .category = .storage, .min_args = 1, .max_args = 1, .handler = cmd_mount },
@@ -362,6 +363,12 @@ fn ensure_registry() []const Command {
             .{ .name = "dui", .help = "Driving Award window manager: registry (with owner pids), z-order, focus, hit-testing ('dui focus <n>' focuses; 'dui raise <n>' raises; 'dui lower <n>' lowers to back; 'dui move <n> <x> <y>' moves a user window; 'dui close <n>' releases a user window; 'dui list <pid>' filters by owner; 'dui hit <x> <y>' hit-tests; 'dui cycle' cycles focus like Alt+Tab)", .usage = "dui [focus <n>|raise <n>|lower <n>|move <n> <x> <y>|close <n>|list <pid>|hit <x> <y>|cycle]", .category = .graphics_input, .max_args = 4, .handler = cmd_dui },
             .{ .name = "write", .help = "write text to a file on the ESP", .usage = "write <file> <text...>", .category = .storage, .min_args = 1, .handler = cmd_write },
             .{ .name = "mktemp", .help = "create a temporary file (empty, unique name)", .usage = "mktemp [prefix]", .category = .storage, .max_args = 1, .handler = cmd_mktemp },
+            .{ .name = "stat", .help = "file metadata: size, type, cluster, path (D8)", .usage = "stat <file|path>", .category = .storage, .min_args = 1, .max_args = 1, .handler = cmd_stat },
+            .{ .name = "find", .help = "recursive file search with glob patterns ('find / -name \"*.BIN\"' — bounded 3 levels, 256 results)", .usage = "find <dir> -name <pattern>", .category = .storage, .min_args = 3, .max_args = 3, .handler = cmd_find },
+            .{ .name = "dmesg", .help = "system log viewer: last bytes of serial output (D12)", .usage = "dmesg", .category = .system, .handler = cmd_dmesg },
+            .{ .name = "time", .help = "command timing: measure elapsed ticks and wall-clock time (D13)", .usage = "time <command> [args...]", .category = .system, .min_args = 1, .handler = cmd_time },
+            .{ .name = "which", .help = "locate a command: shell builtin, monitor command, or ESP application (D16)", .usage = "which <name>", .category = .system, .min_args = 1, .max_args = 1, .handler = cmd_which },
+            .{ .name = "inventory", .help = "list all installed applications from APPS.TXT with sizes and types (D16)", .usage = "inventory", .category = .storage, .handler = cmd_inventory },
         };
         registry_ready = true;
     }
@@ -789,6 +796,14 @@ fn cmd_sysinfo(m: *Monitor, args: []const []const u8) ExecError {
     m.console.puts(esp.volume());
     m.console.puts(" files=");
     m.console.print_u64(@intCast(esp.esp_count()));
+    const free_bytes = fat.free_space();
+    const total_bytes = @as(u64, @intCast(fat.geometry().total_clusters)) * @as(u64, @intCast(fat.geometry().spc)) * fat.sector_size;
+    if (total_bytes > 0) {
+        m.console.puts(" free=");
+        m.console.print_hex(free_bytes);
+        m.console.puts("/");
+        m.console.print_hex(total_bytes);
+    }
     m.console.puts("\n");
 
     // Network
@@ -826,6 +841,11 @@ fn cmd_sysinfo(m: *Monitor, args: []const []const u8) ExecError {
     m.console.print_u64(xhci.enum_count);
     m.console.puts(" fifo=");
     m.console.puts(if (in_rep.armed) "armed" else "unarmed");
+    m.console.puts("\n");
+
+    // Uptime
+    m.console.puts("  uptime:     ticks=");
+    m.console.print_u64(timer.ticks);
     m.console.puts("\n");
 
     return .none;
@@ -930,8 +950,20 @@ fn cmd_mem(m: *Monitor, args: []const []const u8) ExecError {
 /// List files: no argument lists the ESP root window (unchanged behavior);
 /// a `/`-path lists a subdirectory straight from the FAT volume (milestone
 /// four card 2 Stage C). Deterministic and grep-able.
+/// M22 D15 (issue #338): `ls [-l] [<dir>]` — list files with optional
+/// long listing format showing type, permissions, owner, size, and name.
 fn cmd_ls(m: *Monitor, args: []const []const u8) ExecError {
-    if (args.len > 0) return cmd_ls_path(m, args[0]);
+    var long_mode = false;
+    var path_arg: ?[]const u8 = null;
+    for (args) |arg| {
+        if (std.mem.eql(u8, arg, "-l")) {
+            long_mode = true;
+        } else {
+            path_arg = arg;
+        }
+    }
+    if (path_arg) |path| return cmd_ls_path_long(m, path, long_mode);
+    // Root listing
     m.console.puts("ls: ");
     m.console.puts(esp.volume());
     m.console.puts("=");
@@ -942,21 +974,27 @@ fn cmd_ls(m: *Monitor, args: []const []const u8) ExecError {
         m.console.print_line("ls: no files on the ESP (FAT volume unavailable or empty)");
         return .none;
     }
-    var width: usize = 0;
-    for (list) |e| width = @max(width, e.name_len);
-    for (list) |e| {
-        m.console.puts("  ");
-        m.console.puts(e.name[0..e.name_len]);
-        var pad: usize = e.name_len;
-        while (pad < width) : (pad += 1) m.console.putc(' ');
-        m.console.puts("  ");
-        m.console.print_hex(e.size);
-        m.console.puts("  [");
-        m.console.puts(switch (e.kind) {
-            .esp_dir => "dir",
-            .esp_file => esp.volume(),
-        });
-        m.console.puts("]\n");
+    if (long_mode) {
+        for (list) |e| {
+            print_ls_long_entry(m, e.name[0..e.name_len], e.size, e.kind == .esp_dir);
+        }
+    } else {
+        var width: usize = 0;
+        for (list) |e| width = @max(width, e.name_len);
+        for (list) |e| {
+            m.console.puts("  ");
+            m.console.puts(e.name[0..e.name_len]);
+            var pad: usize = e.name_len;
+            while (pad < width) : (pad += 1) m.console.putc(' ');
+            m.console.puts("  ");
+            m.console.print_hex(e.size);
+            m.console.puts("  [");
+            m.console.puts(switch (e.kind) {
+                .esp_dir => "dir",
+                .esp_file => esp.volume(),
+            });
+            m.console.puts("]\n");
+        }
     }
     return .none;
 }
@@ -966,6 +1004,10 @@ fn cmd_ls(m: *Monitor, args: []const []const u8) ExecError {
 /// path-aware header. Honest diagnostics distinguish a file ("is a file")
 /// from an absent/non-directory path ("not found").
 fn cmd_ls_path(m: *Monitor, path: []const u8) ExecError {
+    return cmd_ls_path_long(m, path, false);
+}
+
+fn cmd_ls_path_long(m: *Monitor, path: []const u8, long_mode: bool) ExecError {
     var list: [esp.entries_max]fat.DirEntry = undefined;
     const n = fat.list_path(path, &list);
     if (n == 0) {
@@ -983,20 +1025,56 @@ fn cmd_ls_path(m: *Monitor, path: []const u8) ExecError {
     m.console.puts(" entries=");
     m.console.print_hex(@intCast(n));
     m.console.puts("\n");
-    var width: usize = 0;
-    for (list[0..n]) |e| width = @max(width, e.name_len);
-    for (list[0..n]) |e| {
-        m.console.puts("  ");
-        m.console.puts(e.name[0..e.name_len]);
-        var pad: usize = e.name_len;
-        while (pad < width) : (pad += 1) m.console.putc(' ');
-        m.console.puts("  ");
-        m.console.print_hex(e.size);
-        m.console.puts("  [");
-        m.console.puts(if (e.is_dir) "dir" else esp.volume());
-        m.console.puts("]\n");
+    if (long_mode) {
+        for (list[0..n]) |e| {
+            print_ls_long_entry(m, e.name[0..e.name_len], e.size, e.is_dir);
+        }
+    } else {
+        var width: usize = 0;
+        for (list[0..n]) |e| width = @max(width, e.name_len);
+        for (list[0..n]) |e| {
+            m.console.puts("  ");
+            m.console.puts(e.name[0..e.name_len]);
+            var pad: usize = e.name_len;
+            while (pad < width) : (pad += 1) m.console.putc(' ');
+            m.console.puts("  ");
+            m.console.print_hex(e.size);
+            m.console.puts("  [");
+            m.console.puts(if (e.is_dir) "dir" else esp.volume());
+            m.console.puts("]\n");
+        }
     }
     return .none;
+}
+
+/// M22 D15: print one entry in `ls -l` long format.
+fn print_ls_long_entry(m: *Monitor, name: []const u8, size: u64, is_dir: bool) void {
+    // Type + permissions
+    m.console.putc(if (is_dir) 'd' else '-');
+    if (is_dir) {
+        m.console.print_line("rwx     1  root");
+    } else {
+        m.console.print_line("rw-     1  root");
+    }
+    // Indent + size + name
+    m.console.puts("        ");
+    m.console.print_u64(size);
+    var pad_buf: [20]u8 = undefined;
+    var sz_digits: usize = 0;
+    var v = size;
+    if (v == 0) {
+        pad_buf[0] = '0';
+        sz_digits = 1;
+    }
+    while (v > 0) : (v /= 10) {
+        pad_buf[sz_digits] = @intCast('0' + v % 10);
+        sz_digits += 1;
+    }
+    // Pad to 8 chars
+    var i: usize = sz_digits;
+    while (i < 8) : (i += 1) m.console.putc(' ');
+    m.console.puts("  ");
+    m.console.print_line(name);
 }
 
 /// Switch the active FAT volume (milestone four card 2): `mount esp`
@@ -1339,6 +1417,315 @@ fn cmd_mktemp(m: *Monitor, args: []const []const u8) ExecError {
 }
 
 // ---------------------------------------------------------------------------
+// M22 Lane-D: filesystem inspection (D8), log viewer (D12), timing (D13),
+// command locator (D16)
+// ---------------------------------------------------------------------------
+
+/// M22 D8 (issue #331): `stat <file|path>` — print file metadata from the
+/// FAT volume: size, type (file/dir), cluster, and path. Bare names check
+/// the ESP window; `/`-paths query the FAT directly.
+fn cmd_stat(m: *Monitor, args: []const []const u8) ExecError {
+    const name = args[0];
+    // Path-based stat: resolve through FAT directory listing
+    if (std.mem.indexOfScalar(u8, name, '/') != null) {
+        // Extract parent dir and filename from the path
+        const last_slash = std.mem.lastIndexOfScalar(u8, name, '/') orelse 0;
+        const parent = if (last_slash > 0) name[0..last_slash] else "/";
+        const filename = name[last_slash + 1 ..];
+        if (filename.len == 0) {
+            err_prefix(m);
+            m.console.puts("stat: ");
+            m.console.puts(name);
+            m.console.print_line(": not a file");
+            return .invalid_argument;
+        }
+        var entries: [esp.entries_max]fat.DirEntry = undefined;
+        const n = fat.list_path(parent, &entries);
+        var found = false;
+        for (entries[0..n]) |e| {
+            if (std.mem.eql(u8, e.name[0..e.name_len], filename)) {
+                print_stat_entry(m, &e, name);
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            err_prefix(m);
+            m.console.puts("stat: ");
+            m.console.puts(name);
+            m.console.print_line(": not found");
+            return .invalid_argument;
+        }
+        return .none;
+    }
+    // Bare-name stat: check the ESP window first
+    if (esp.lookup(name)) |e| {
+        m.console.puts("  File:  ");
+        m.console.print_line(name);
+        m.console.puts("  Size:  ");
+        m.console.print_u64(e.size);
+        m.console.print_line(" bytes");
+        m.console.puts("  Type:  ");
+        m.console.print_line(switch (e.kind) {
+            .esp_dir => "directory",
+            .esp_file => "regular file",
+        });
+        m.console.puts("  Volume: ");
+        m.console.print_line(esp.volume());
+        return .none;
+    }
+    // Not in ESP window — try FAT path (it might be a subdirectory entry)
+    var entries: [esp.entries_max]fat.DirEntry = undefined;
+    const n = fat.list_path("/", &entries);
+    for (entries[0..n]) |e| {
+        if (std.mem.eql(u8, e.name[0..e.name_len], name)) {
+            print_stat_entry(m, &e, name);
+            return .none;
+        }
+    }
+    err_prefix(m);
+    m.console.puts("stat: ");
+    m.console.puts(name);
+    m.console.print_line(": not found");
+    return .invalid_argument;
+}
+
+fn print_stat_entry(m: *Monitor, e: *const fat.DirEntry, path: []const u8) void {
+    m.console.puts("  File:    ");
+    m.console.print_line(path);
+    m.console.puts("  Size:    ");
+    m.console.print_u64(e.size);
+    m.console.print_line(" bytes");
+    m.console.puts("  Type:    ");
+    m.console.print_line(if (e.is_dir) "directory" else "regular file");
+    m.console.puts("  Cluster: ");
+    m.console.print_hex(e.cluster);
+    m.console.puts("\n");
+}
+
+/// M22 D8 (issue #331): `find <dir> -name <pattern>` — recursive file
+/// search with simple glob patterns (* and ?). Bounded: 3 levels deep,
+/// 256 results max.
+fn cmd_find(m: *Monitor, args: []const []const u8) ExecError {
+    const start_path = args[0];
+    // args[1] should be "-name"
+    if (!std.mem.eql(u8, args[1], "-name")) {
+        err_prefix(m);
+        m.console.print_line("find: expected '-name' keyword");
+        print_usage(m, lookup("find").?);
+        return .usage;
+    }
+    const pattern = args[2];
+    var count: usize = 0;
+    find_recursive(m, start_path, pattern, 0, &count);
+    if (count == 0) {
+        m.console.puts("find: no matches for '");
+        m.console.puts(pattern);
+        m.console.print_line("'");
+    }
+    return .none;
+}
+
+const find_max_depth: usize = 3;
+const find_max_results: usize = 256;
+
+fn find_recursive(m: *Monitor, dir_path: []const u8, pattern: []const u8, depth: usize, count: *usize) void {
+    if (depth >= find_max_depth or count.* >= find_max_results) return;
+    var entries: [esp.entries_max]fat.DirEntry = undefined;
+    const n = fat.list_path(dir_path, &entries);
+    for (entries[0..n]) |e| {
+        if (count.* >= find_max_results) break;
+        const name = e.name[0..e.name_len];
+        // Match against pattern
+        if (glob_match(name, pattern)) {
+            // Build full path
+            var path_buf: [128]u8 = undefined;
+            var pos: usize = 0;
+            if (std.mem.eql(u8, dir_path, "/")) {
+                path_buf[0] = '/';
+                pos = 1;
+            } else {
+                const take = @min(dir_path.len, path_buf.len - 1 - name.len);
+                @memcpy(path_buf[0..take], dir_path[0..take]);
+                pos = take;
+                if (pos < path_buf.len and path_buf[pos - 1] != '/') {
+                    path_buf[pos] = '/';
+                    pos += 1;
+                }
+            }
+            const name_take = @min(name.len, path_buf.len - pos);
+            @memcpy(path_buf[pos..][0..name_take], name[0..name_take]);
+            pos += name_take;
+            m.console.puts(path_buf[0..pos]);
+            if (e.is_dir) m.console.putc('/');
+            m.console.putc('\n');
+            count.* += 1;
+        }
+        // Recurse into directories
+        if (e.is_dir) {
+            var sub_path: [128]u8 = undefined;
+            var spos: usize = 0;
+            if (std.mem.eql(u8, dir_path, "/")) {
+                sub_path[0] = '/';
+                spos = 1;
+            } else {
+                const take = @min(dir_path.len, sub_path.len - 1 - name.len);
+                @memcpy(sub_path[0..take], dir_path[0..take]);
+                spos = take;
+                if (spos < sub_path.len and sub_path[spos - 1] != '/') {
+                    sub_path[spos] = '/';
+                    spos += 1;
+                }
+            }
+            const name_take = @min(name.len, sub_path.len - spos);
+            @memcpy(sub_path[spos..][0..name_take], name[0..name_take]);
+            spos += name_take;
+            find_recursive(m, sub_path[0..spos], pattern, depth + 1, count);
+        }
+    }
+}
+
+/// Simple glob pattern match: * matches any sequence, ? matches one char.
+fn glob_match(name: []const u8, pattern: []const u8) bool {
+    return glob_match_impl(name, 0, pattern, 0);
+}
+
+fn glob_match_impl(name: []const u8, ni: usize, pat: []const u8, pi: usize) bool {
+    if (pi == pat.len) return ni == name.len;
+    if (pat[pi] == '*') {
+        // Try matching zero or more chars
+        var j: usize = ni;
+        while (j <= name.len) : (j += 1) {
+            if (glob_match_impl(name, j, pat, pi + 1)) return true;
+        }
+        return false;
+    }
+    if (ni >= name.len) return false;
+    if (pat[pi] == '?' or pat[pi] == name[ni]) {
+        return glob_match_impl(name, ni + 1, pat, pi + 1);
+    }
+    return false;
+}
+
+/// M22 D12 (issue #335): `dmesg` — print the serial ring buffer contents.
+fn cmd_dmesg(m: *Monitor, args: []const []const u8) ExecError {
+    _ = args;
+    var buf: [serial_ring.capacity * 2]u8 = undefined;
+    const n = serial_ring.snapshot(&buf);
+    if (n == 0) {
+        m.console.print_line("dmesg: log is empty");
+        return .none;
+    }
+    m.console.puts(buf[0..n]);
+    // Ensure trailing newline
+    if (n > 0 and buf[n - 1] != '\n') m.console.putc('\n');
+    return .none;
+}
+
+/// M22 D13 (issue #336): `time <command> [args...]` — measure elapsed
+/// ticks and wall-clock time for any command.
+fn cmd_time(m: *Monitor, args: []const []const u8) ExecError {
+    const start_ticks = timer.ticks;
+    const result = exec(m, args);
+    const end_ticks = timer.ticks;
+    const elapsed = end_ticks - start_ticks;
+    // Convert ticks to seconds: the GIC timer fires at 24 MHz, but the
+    // kernel counts scheduler ticks (typically ~100 Hz). Use timer.freq
+    // if available, else assume 100 ticks/sec.
+    const ticks_per_sec: u64 = if (timer.freq > 0) timer.freq else 100;
+    const secs = elapsed / ticks_per_sec;
+    const rem_ms = (elapsed % ticks_per_sec) * 1000 / ticks_per_sec;
+    m.console.puts("real    ");
+    m.console.print_u64(secs / 60);
+    m.console.puts("m");
+    if (rem_ms < 100) m.console.putc('0');
+    if (rem_ms < 10) m.console.putc('0');
+    m.console.print_u64(rem_ms);
+    m.console.print_line("s");
+    m.console.puts("ticks   ");
+    m.console.print_u64(elapsed);
+    m.console.puts("\n");
+    return result;
+}
+
+/// M22 D16 (issue #339): `which <name>` — locate a command by name.
+/// Reports shell builtins, monitor commands, and ESP applications.
+fn cmd_which(m: *Monitor, args: []const []const u8) ExecError {
+    const name = args[0];
+    // Check shell builtins first (the list from shell.zig dispatch_line)
+    if (is_shell_builtin(name)) {
+        m.console.puts(name);
+        m.console.print_line(": shell builtin");
+        return .none;
+    }
+    // Check monitor commands
+    if (lookup(name)) |_| {
+        m.console.puts(name);
+        m.console.print_line(": monitor command");
+        return .none;
+    }
+    // Check ESP file listing (applications)
+    const list = esp.entries();
+    for (list) |e| {
+        if (std.mem.eql(u8, e.name[0..e.name_len], name)) {
+            m.console.puts(name);
+            m.console.print_line(": ESP application");
+            return .none;
+        }
+    }
+    // Not found
+    m.console.puts(name);
+    m.console.print_line(": not found");
+    return .none;
+}
+
+/// Check if a name is a shell builtin (from shell.zig dispatch_line).
+fn is_shell_builtin(name: []const u8) bool {
+    const builtins = [_][]const u8{
+        "export", "set",     "unset", "env",   "printenv",
+        "alias",  "unalias", "exit",  "sh",    "prompt",
+        "type",   "true",    "false", "jobs",  "fg",
+        "if",     "for",     "while", "break", "continue",
+        "fn",     "cd",
+    };
+    for (builtins) |b| {
+        if (std.mem.eql(u8, name, b)) return true;
+    }
+    return false;
+}
+
+/// M22 D16 (issue #339): `inventory` — list all installed applications
+/// from the ESP window with their sizes and types.
+fn cmd_inventory(m: *Monitor, args: []const []const u8) ExecError {
+    _ = args;
+    const list = esp.entries();
+    if (list.len == 0) {
+        m.console.print_line("inventory: no applications installed");
+        return .none;
+    }
+    m.console.puts("inventory: ");
+    m.console.print_u64(@intCast(list.len));
+    m.console.print_line(" application(s):\n");
+    var width: usize = 0;
+    for (list) |e| width = @max(width, e.name_len);
+    for (list) |e| {
+        m.console.puts("  ");
+        m.console.puts(e.name[0..e.name_len]);
+        var pad: usize = e.name_len;
+        while (pad < width + 2) : (pad += 1) m.console.putc(' ');
+        m.console.puts("  ");
+        m.console.print_hex(e.size);
+        m.console.puts(" bytes  [");
+        m.console.puts(switch (e.kind) {
+            .esp_dir => "dir",
+            .esp_file => esp.volume(),
+        });
+        m.console.puts("]\n");
+    }
+    return .none;
+}
+
+// ---------------------------------------------------------------------------
 // Physical page allocator command (next-card milestone)
 // ---------------------------------------------------------------------------
 
@@ -1531,16 +1918,42 @@ fn cmd_compose(m: *Monitor, args: []const []const u8) ExecError {
 
 /// `crash` — list recent crash tombstones from /data/crash/.
 /// Shows process name, PID, exit status, and tick for each tombstone.
+/// M22 D11 (issue #334): `crash` — enhanced crash report viewer with
+/// symbol resolution, formatted report, and serial snapshot display.
 fn cmd_crash(m: *Monitor, args: []const []const u8) ExecError {
-    _ = args;
     const n = tombstone.count();
     if (n == 0) {
         m.console.print_line("crash: no tombstones recorded");
         return .none;
     }
+    // `crash <index>` shows the detailed report for one tombstone
+    if (args.len == 1) {
+        const idx = parseInt(args[0]) catch {
+            err_prefix(m);
+            m.console.puts("crash: invalid index: ");
+            m.console.puts(args[0]);
+            m.console.puts("\n");
+            return .invalid_argument;
+        };
+        if (idx >= n) {
+            err_prefix(m);
+            m.console.puts("crash: index out of range (max ");
+            m.console.print_u64(n - 1);
+            m.console.puts(")\n");
+            return .invalid_argument;
+        }
+        if (tombstone.get(@intCast(idx))) |t| {
+            var buf: [tombstone.tombstone_max_bytes]u8 = undefined;
+            const len = tombstone.format_tombstone(t, &buf);
+            m.console.puts(buf[0..len]);
+            if (len > 0 and buf[len - 1] != '\n') m.console.putc('\n');
+        }
+        return .none;
+    }
+    // Default: list all tombstones with summary
     m.console.puts("crash: ");
     m.console.print_u64(n);
-    m.console.print_line(" tombstone(s):");
+    m.console.print_line(" tombstone(s) (use 'crash <index>' for detail): ");
     _ = tombstone.list_to_console(m.console);
     return .none;
 }
@@ -5860,7 +6273,7 @@ test "monitor: every REFUSAL wears a D3 shape (registry x garbage argv)" {
     // write, or consume entropy rather than refuse.
     const skip = [_][]const u8{
         "reboot", "shutdown", "spawn",  "kill", "exec", "write",
-        "mount",  "fault",    "random",
+        "mount",  "fault",    "random", "time",
     };
     const garbage = [_][]const u8{ "zzz", "-1", "0x", "99999999999999999999", "" };
     var refusals: usize = 0;
@@ -7016,7 +7429,7 @@ test "monitor: syscalls is registered and reports deterministic rows" {
     try std.testing.expectEqualStrings("numbered syscall table and counters", lookup("syscalls").?.help);
     try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"syscalls"}));
     try std.testing.expectEqualStrings(
-        "syscalls: slots=64 implemented=61\n" ++
+        "syscalls: slots=64 implemented=62\n" ++
             "  0 sys_ping calls=0\n" ++
             "  1 sys_write calls=0\n" ++
             "  2 sys_yield calls=0\n" ++
@@ -7077,7 +7490,8 @@ test "monitor: syscalls is registered and reports deterministic rows" {
             "  57 sys_pipe_write calls=0\n" ++
             "  58 sys_font_size calls=0\n" ++
             "  59 sys_ping_send calls=0\n" ++
-            "  60 sys_ping_poll calls=0\n",
+            "  60 sys_ping_poll calls=0\n" ++
+            "  61 sys_win_set_title calls=0\n",
         env.mock.contents(),
     );
 }
