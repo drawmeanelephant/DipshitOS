@@ -48,25 +48,39 @@
 # under artifacts/: live-net-rx-*.txt (runner output), live-net-rx-*.log
 # (serial copies), live-net-rx-*.bin (host captures), and the report.
 #
+# Run isolation (#523 item 2 / issue #528, claim 5069): every boot attaches
+# a private DiskImageKit stacked disk (read-only base + throwaway ASIF
+# overlay), a private EFI var store (recreated fresh per boot, as the
+# pre-isolation gate did), and a private serial log under $RUN_DIR — two
+# concurrent instances cannot clobber each other's disks, NVRAM, or
+# evidence. Set DIPSHIT_GATE_SUFFIX=_alt to give this instance its own
+# canonical evidence names (two simultaneous instances MUST differ), and
+# DIPSHIT_KEEP_RUN=1 to keep the scratch dir.
+#
 # Class B — Apple silicon + VZ only; boots real VMs. A green CI badge
 # proves class A only and says nothing about this gate.
 #
 # Usage:
 #   bash tools/verify-live-net-rx.sh
 #
-# Evidence: artifacts/live-net-rx-gate.txt (full output),
-# artifacts/live-net-rx-report.txt (per-phase detail).
+# Evidence: "$RUN_DIR/live-net-rx-gate.txt" (full output),
+# "$RUN_DIR/live-net-rx-report.txt" (per-phase detail).
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-GATE_LOG="artifacts/live-net-rx-gate.txt"
-exec > >(tee "$GATE_LOG") 2>&1
-trap 'sleep 0.5' EXIT
+source tools/lib/gate-run.sh
 
-REPORT="artifacts/live-net-rx-report.txt"
+SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
+
+GATE_LOG="$(art live-net-rx-gate.txt)"
+exec > >(tee "$GATE_LOG") 2>&1
+trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
+
+REPORT="$(art live-net-rx-report.txt)"
 
 echo "=== verify-live-net-rx: claim 6076 — virtio-net RX + the round trip (buffer supply, polled used-ring drain, MAC filter, bounded FIFO, net recv, host->guest injection) ==="
 
@@ -84,19 +98,26 @@ zig build image
 swift build --package-path host/vm-runner --configuration release
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
+# --- per-run isolation -------------------------------------------------------------
+# Private scratch dir + pristine-boot overlay for EVERY boot.
+# See tools/lib/gate-run.sh.
+gate_begin live-net-rx
+echo "run dir: $RUN_DIR"
+
+
 # --- scripted keystrokes -----------------------------------------------------
-cat > artifacts/live-net-rx-script-1.txt <<'EOF'
+cat > "$RUN_DIR/live-net-rx-script-1.txt" <<'EOF'
 net recv
 net
 netsend 46
 echo net-rx-ok
 EOF
-cat > artifacts/live-net-rx-script-2.txt <<'EOF'
+cat > "$RUN_DIR/live-net-rx-script-2.txt" <<'EOF'
 net recv
 net
 echo net-rx-ok
 EOF
-cat > artifacts/live-net-rx-script-3.txt <<'EOF'
+cat > "$RUN_DIR/live-net-rx-script-3.txt" <<'EOF'
 net recv
 net
 echo net-rx-ok
@@ -108,17 +129,18 @@ EOF
 #     capture must hold the same bytes).
 # p2: a 46-byte frame addressed TO the guest MAC (own-MAC filter).
 # p3: a 46-byte frame addressed to a FOREIGN MAC (filter drop).
-python3 - <<'PY'
+RUN_DIR="$RUN_DIR" python3 - <<'PY'
+import os
 own = bytes([0x02,0,0,0,0,1])
 p1 = bytes([0xff]*6) + own + bytes([0x08,0]) + bytes(range(46))
 assert len(p1) == 60, len(p1)
-open("artifacts/live-net-rx-fixture-1.bin","wb").write(p1)
+open(os.environ["RUN_DIR"]+"/live-net-rx-fixture-1.bin","wb").write(p1)
 p2 = own + bytes([0x02,0,0,0,0,2]) + bytes([0x08,0]) + bytes(range(32))
 assert len(p2) == 46, len(p2)
-open("artifacts/live-net-rx-fixture-2.bin","wb").write(p2)
+open(os.environ["RUN_DIR"]+"/live-net-rx-fixture-2.bin","wb").write(p2)
 p3 = bytes([0x02,0,0,0,0,3]) + bytes([0x02,0,0,0,0,4]) + bytes([0x08,0]) + bytes(range(32))
 assert len(p3) == 46, len(p3)
-open("artifacts/live-net-rx-fixture-3.bin","wb").write(p3)
+open(os.environ["RUN_DIR"]+"/live-net-rx-fixture-3.bin","wb").write(p3)
 # The hex the guest's net recv prints. OBSERVED at claim time: the device
 # writes a 12-byte virtio_net_hdr (all zero except num_buffers=1 at bytes
 # 10-11) BEFORE the raw frame, so the recv line = the observed header +
@@ -127,62 +149,66 @@ open("artifacts/live-net-rx-fixture-3.bin","wb").write(p3)
 def hexs(b): return " ".join("%02x" % x for x in b)
 obs_hdr = bytes([0]*10) + bytes([0x01, 0x00])
 def recv_line(b): return "net recv: " + hexs(obs_hdr) + " " + hexs(b)
-open("artifacts/live-net-rx-fixture-1.hex","w").write(hexs(p1))
-open("artifacts/live-net-rx-recv-1.txt","w").write(recv_line(p1))
-open("artifacts/live-net-rx-fixture-2.hex","w").write(hexs(p2))
-open("artifacts/live-net-rx-recv-2.txt","w").write(recv_line(p2))
-open("artifacts/live-net-rx-fixture-3.hex","w").write(hexs(p3))
+open(os.environ["RUN_DIR"]+"/live-net-rx-fixture-1.hex","w").write(hexs(p1))
+open(os.environ["RUN_DIR"]+"/live-net-rx-recv-1.txt","w").write(recv_line(p1))
+open(os.environ["RUN_DIR"]+"/live-net-rx-fixture-2.hex","w").write(hexs(p2))
+open(os.environ["RUN_DIR"]+"/live-net-rx-recv-2.txt","w").write(recv_line(p2))
+open(os.environ["RUN_DIR"]+"/live-net-rx-fixture-3.hex","w").write(hexs(p3))
 PY
 
 # --- per-phase gate ----------------------------------------------------------
 # $1 = tag, $2 = script file, $3 = inject file, $4 = capture file.
 run_one() {
     local tag="$1" script="$2" inject="$3" capture="$4"
-    rm -f artifacts/efi-vars.bin artifacts/vm-serial.log "$capture"
+    rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial-$tag.log" "$capture"
     set +e
-    host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log \
-        --net "$capture" --net-inject "$inject" --script "$script" --script-expect $'net-rx-ok\ndipshit> ' --timeout 40 \
-        > "artifacts/live-net-rx-run-$tag.txt" 2>&1
+        # Rot class 1 (#528): the colored prompt killed '<marker>\ndipshit> '
+        # anchors; this marker reply is output-only and last.
+    host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
+        --serial "$RUN_DIR/vm-serial-$tag.log" \
+        --net "$capture" --net-inject "$inject" --script "$script" --script-expect "net-rx-ok" --timeout 40 \
+        > "$(art live-net-rx-run-$tag.txt)" 2>&1
     local RC=$?
     set -e
-    [ -f artifacts/vm-serial.log ] && cp artifacts/vm-serial.log "artifacts/live-net-rx-serial-$tag.log" || true
+    [ -f "$RUN_DIR/vm-serial-$tag.log" ] && cp "$RUN_DIR/vm-serial-$tag.log" "$(art live-net-rx-serial-$tag.log)" || true
+    local SER="$(art live-net-rx-serial-$tag.log)"
 
     local SERIAL_BYTES=0 RXARMED=0 RECV=0 RECVLEN=0 RXOBS=0 FILTERED=0 NOFRAMES=0
-    if [ -f artifacts/vm-serial.log ]; then
-        SERIAL_BYTES=$(wc -c < artifacts/vm-serial.log | tr -d ' ')
+    if [ -f "$SER" ]; then
+        SERIAL_BYTES=$(wc -c < "$SER" | tr -d ' ')
         # The guest's queue-0 RX-armed marker (the injection trigger).
-        grep -a -qF -- "net: rx-armed" artifacts/vm-serial.log && RXARMED=1
+        grep -a -qF -- "net: rx-armed" "$SER" && RXARMED=1
         # The rx-obs record (delivery proof — device-written length + first
         # 16 bytes pin the claim-time RX-header question).
-        grep -a -qF -- "net: rx-obs len=" artifacts/vm-serial.log && RXOBS=1
+        grep -a -qF -- "net: rx-obs len=" "$SER" && RXOBS=1
         case "$tag" in
             p1)
-                grep -a -qF -- "net recv: frames=1" artifacts/vm-serial.log && RECV=1
+                grep -a -qF -- "net recv: frames=1" "$SER" && RECV=1
                 # The FULL recv line, byte-exact: the observed 12-byte
                 # virtio_net_hdr (num_buffers=1) + the injected 60-byte frame.
-                grep -a -qF -- "$(cat artifacts/live-net-rx-recv-1.txt)" artifacts/vm-serial.log && RECVLEN=1
-                grep -a -qF -- "net recv: [0] len=72" artifacts/vm-serial.log && RECVLEN=1
-                grep -a -qF -- "net: rx-obs len=72" artifacts/vm-serial.log && RECVLEN=1
-                grep -a -qF -- "net: rx=frames=1,bytes=72,filtered=0,overflow=0,fifo=0" artifacts/vm-serial.log && FILTERED=1
-                grep -a -qF -- "netsend: tx ok" artifacts/vm-serial.log && NOFRAMES=1
+                grep -a -qF -- "$(cat "$RUN_DIR/live-net-rx-recv-1.txt")" "$SER" && RECVLEN=1
+                grep -a -qF -- "net recv: [0] len=72" "$SER" && RECVLEN=1
+                grep -a -qF -- "net: rx-obs len=72" "$SER" && RECVLEN=1
+                grep -a -qF -- "net: rx=frames=1,bytes=72,filtered=0,overflow=0,fifo=0" "$SER" && FILTERED=1
+                grep -a -qF -- "netsend: tx ok" "$SER" && NOFRAMES=1
                 ;;
             p2)
-                grep -a -qF -- "net recv: frames=1" artifacts/vm-serial.log && RECV=1
-                grep -a -qF -- "$(cat artifacts/live-net-rx-recv-2.txt)" artifacts/vm-serial.log && RECVLEN=1
-                grep -a -qF -- "net recv: [0] len=58" artifacts/vm-serial.log && RECVLEN=1
-                grep -a -qF -- "net: rx-obs len=58" artifacts/vm-serial.log && RECVLEN=1
-                grep -a -qF -- "net: rx=frames=1,bytes=58,filtered=0,overflow=0,fifo=0" artifacts/vm-serial.log && FILTERED=1
+                grep -a -qF -- "net recv: frames=1" "$SER" && RECV=1
+                grep -a -qF -- "$(cat "$RUN_DIR/live-net-rx-recv-2.txt")" "$SER" && RECVLEN=1
+                grep -a -qF -- "net recv: [0] len=58" "$SER" && RECVLEN=1
+                grep -a -qF -- "net: rx-obs len=58" "$SER" && RECVLEN=1
+                grep -a -qF -- "net: rx=frames=1,bytes=58,filtered=0,overflow=0,fifo=0" "$SER" && FILTERED=1
                 # The session-completion marker (the script's final echo).
-                grep -a -qF -- "net-rx-ok" artifacts/vm-serial.log && NOFRAMES=1
+                grep -a -qF -- "net-rx-ok" "$SER" && NOFRAMES=1
                 ;;
             p3)
                 # `net recv: no frames` IS the recv command's output — it ran
                 # and honestly reported the filter drop.
-                grep -a -qF -- "net recv: no frames" artifacts/vm-serial.log && RECV=1 && NOFRAMES=1
-                grep -a -qF -- "net: rx=frames=0,bytes=0,filtered=1,overflow=0,fifo=0" artifacts/vm-serial.log && FILTERED=1
+                grep -a -qF -- "net recv: no frames" "$SER" && RECV=1 && NOFRAMES=1
+                grep -a -qF -- "net: rx=frames=0,bytes=0,filtered=1,overflow=0,fifo=0" "$SER" && FILTERED=1
                 # The foreign frame WAS delivered (the rx-obs record proves a
                 # drop, not a failed delivery).
-                grep -a -qF -- "net: rx-obs len=58" artifacts/vm-serial.log && RECVLEN=1
+                grep -a -qF -- "net: rx-obs len=58" "$SER" && RECVLEN=1
                 ;;
         esac
     fi
@@ -214,11 +240,11 @@ PHASES=0
 echo
     echo "=== phase 1: broadcast frame received byte-exact + re-sent (the round trip) ==="
     P1=0
-    run_one "p1" "artifacts/live-net-rx-script-1.txt" "artifacts/live-net-rx-fixture-1.bin" "artifacts/live-net-rx-cap-1.bin" && P1=1 || true
+    run_one "p1" "$RUN_DIR/live-net-rx-script-1.txt" "$RUN_DIR/live-net-rx-fixture-1.bin" "$RUN_DIR/live-net-rx-cap-1.bin" && P1=1 || true
     # The capture (guest's netsend 46 echo) must be byte-exactly the
     # injected 60-byte fixture.
     CAP1=0
-    if [ -f artifacts/live-net-rx-cap-1.bin ] && cmp -s artifacts/live-net-rx-cap-1.bin artifacts/live-net-rx-fixture-1.bin; then
+    if [ -f "$RUN_DIR/live-net-rx-cap-1.bin" ] && cmp -s "$RUN_DIR/live-net-rx-cap-1.bin" "$RUN_DIR/live-net-rx-fixture-1.bin"; then
         CAP1=1
     fi
     echo "phase 1 capture-round-trip-exact=$CAP1"
@@ -228,14 +254,14 @@ echo
     echo
     echo "=== phase 2: own-MAC frame received byte-exact ==="
     P2=0
-    run_one "p2" "artifacts/live-net-rx-script-2.txt" "artifacts/live-net-rx-fixture-2.bin" "artifacts/live-net-rx-cap-2.bin" && P2=1 || true
+    run_one "p2" "$RUN_DIR/live-net-rx-script-2.txt" "$RUN_DIR/live-net-rx-fixture-2.bin" "$RUN_DIR/live-net-rx-cap-2.bin" && P2=1 || true
     [ "$P2" = 1 ] && PASS=$((PASS + 1))
     PHASES=$((PHASES + 1))
 
     echo
     echo "=== phase 3: foreign-MAC frame dropped by the filter ==="
     P3=0
-    run_one "p3" "artifacts/live-net-rx-script-3.txt" "artifacts/live-net-rx-fixture-3.bin" "artifacts/live-net-rx-cap-3.bin" && P3=1 || true
+    run_one "p3" "$RUN_DIR/live-net-rx-script-3.txt" "$RUN_DIR/live-net-rx-fixture-3.bin" "$RUN_DIR/live-net-rx-cap-3.bin" && P3=1 || true
     [ "$P3" = 1 ] && PASS=$((PASS + 1))
     PHASES=$((PHASES + 1))
 
@@ -247,7 +273,7 @@ if [ "$PASS" = "$PHASES" ]; then
     sleep 0.5
     exit 0
 else
-    echo "verify-live-net-rx: FAILED — $PASS/$PHASES phases passed; see artifacts/live-net-rx-report.txt, the per-phase runner output and serial logs, and the capture files."
+    echo "verify-live-net-rx: FAILED — $PASS/$PHASES phases passed; see "$RUN_DIR/live-net-rx-report.txt", the per-phase runner output and serial logs, and the capture files."
     echo "FAIL: $PASS/$PHASES" >> "$REPORT"
     sleep 0.5
     exit 1

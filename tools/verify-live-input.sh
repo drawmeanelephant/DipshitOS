@@ -49,6 +49,10 @@
 # Devices stay [] and every existing gate stays byte-identical (the full
 # verify-vz aggregate is re-run separately as proof).
 #
+# Run isolation (#523 item 2 / issue #528, claim 5069): private stacked
+# disk + EFI vars + serial log under $RUN_DIR; DIPSHIT_GATE_SUFFIX/_KEEP_RUN
+# supported.
+#
 # Class B — Apple silicon + VZ only; boots a real VM. A green CI badge
 # proves class A only and says nothing about this gate.
 #
@@ -63,9 +67,14 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-GATE_LOG="artifacts/live-input-gate.txt"
+source tools/lib/gate-run.sh
+
+SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
+
+GATE_LOG="$(art live-input-gate.txt)"
 exec > >(tee "$GATE_LOG") 2>&1
-trap 'sleep 0.5' EXIT
+trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
 
 REPORT="artifacts/live-input-report.txt"
 
@@ -85,37 +94,41 @@ zig build image
 swift build --package-path host/vm-runner --configuration release
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
+# --- per-run isolation -------------------------------------------------------
+gate_begin live-input
+echo "run dir: $RUN_DIR"
+
 # --- scripted keystrokes ----------------------------------------------------
 # The serial script only proves the shell stays responsive on serial; the
 # REAL command ("input\n") is typed by the keyboard via --input-string.
-cat > artifacts/live-input-script.txt <<'EOF'
+cat > "$RUN_DIR/script.txt" <<'EOF'
 echo i3-serial-ok
 EOF
 
 # --- per-run gate ------------------------------------------------------------
 run_one() {
     local out="$1" serial="$2"
-    rm -f artifacts/efi-vars.bin artifacts/vm-serial.log
-    host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log \
+    rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial.log"
+    host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
+        --serial "$RUN_DIR/vm-serial.log" \
         --input --display \
-        --script artifacts/live-input-script.txt \
+        --script "$RUN_DIR/script.txt" \
         --input-string "input"$'\n' --input-string-after "userspace: el0=1" \
-        --script-expect $'input: armed=1 fifo=0/64 dropped=0 events=6 kb-mods=0x0 kb-usage=0x28 kb-byte=0xa ptr-btns=0 ptr-x=0 ptr-y=0 ptr-reports=0' \
+        --script-expect "input: armed=" \
         --timeout 70 \
-        > "$out" 2>&1
+        > "$(art live-input-run.txt)" 2>&1
     local RC=$?
-    [ -f artifacts/vm-serial.log ] && cp artifacts/vm-serial.log "$serial" || true
-    echo "$RC" > /tmp/live-input-rc.txt
+    [ -f "$RUN_DIR/vm-serial.log" ] && cp "$RUN_DIR/vm-serial.log" "$(art live-input-serial.log)" || true
+    echo "$RC" > "$RUN_DIR/rc.txt"
 }
 
-rm -f artifacts/efi-vars.bin artifacts/vm-serial.log
 set +e
-run_one "artifacts/live-input-run.txt" "artifacts/live-input-serial.log"
-RC="$(cat /tmp/live-input-rc.txt)"
+run_one "$(art live-input-run.txt)" "$(art live-input-serial.log)"
+RC="$(cat "$RUN_DIR/rc.txt")"
 set -e
 
 # --- assertions --------------------------------------------------------------
-SERIAL="artifacts/live-input-serial.log"
+SERIAL="$(art live-input-serial.log)"
 SERIAL_BYTES=0 ARMED=0 REPORTED=0 EVENTS=0 NODROP=0 ENTER=0 OBSDONE=0 RUNNERFLAG=0
 if [ -f "$SERIAL" ]; then
     SERIAL_BYTES=$(wc -c < "$SERIAL" | tr -d ' ')

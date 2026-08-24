@@ -8,21 +8,35 @@
 # returned to EL0 with x0 restored. The shell prints the deferred line only
 # after the timer preempts the EL0 task and schedules EL1h again.
 
+# Run isolation (#523 item 2 / issue #528, claim 5069): every boot attaches
+# a private DiskImageKit stacked disk (read-only base + throwaway ASIF
+# overlay), a private EFI var store (recreated fresh per boot, as the
+# pre-isolation gate did), and a private serial log under $RUN_DIR — two
+# concurrent instances cannot clobber each other's disks, NVRAM, or
+# evidence. Set DIPSHIT_GATE_SUFFIX=_alt to give this instance its own
+# canonical evidence names (two simultaneous instances MUST differ), and
+# DIPSHIT_KEEP_RUN=1 to keep the scratch dir.
+#
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-GATE_LOG="artifacts/live-userspace-gate.txt"
+source tools/lib/gate-run.sh
+
+SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
+
+GATE_LOG="$(art live-userspace-gate.txt)"
 exec > >(tee "$GATE_LOG") 2>&1
-trap 'sleep 0.5' EXIT
+trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
 
 BOOTS="${BOOTS:-1}"
-REPORT="artifacts/live-userspace-report.txt"
-SCRIPT="artifacts/live-userspace-script.txt"
+REPORT="$(art live-userspace-report.txt)"
 EXPECT="userspace: el0=1 svc=2 roundtrips=1 arg=2 result=2 rejected=0"
 
 echo "=== verify-live-userspace: claim 8215 — EL0t + SVC round-trip + timer preemption, $BOOTS boot(s) ==="
+
 zig version
 swift --version 2>&1 | head -1
 sw_vers
@@ -37,29 +51,38 @@ zig build image
 swift build --package-path host/vm-runner --configuration release
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
+# --- per-run isolation -------------------------------------------------------------
+# Private scratch dir + pristine-boot overlay for EVERY boot.
+# See tools/lib/gate-run.sh.
+gate_begin live-userspace
+echo "run dir: $RUN_DIR"
+SCRIPT="$RUN_DIR/script.txt"
+
 printf 'tasks\necho rx-el0-ok\n' > "$SCRIPT"
 
 run_one() {
     local tag="$1"
-    rm -f artifacts/efi-vars.bin artifacts/vm-serial.log
+    rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial-$tag.log"
     set +e
-    host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log \
+    host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
+        --serial "$RUN_DIR/vm-serial-$tag.log" \
         --script "$SCRIPT" --script-expect "$EXPECT" --timeout 60 \
-        > "artifacts/live-userspace-run-$tag.txt" 2>&1
+        > "$(art live-userspace-run-$tag.txt)" 2>&1
     local rc=$?
     set -e
-    [ -f artifacts/vm-serial.log ] && cp artifacts/vm-serial.log "artifacts/live-userspace-serial-$tag.log" || true
+    [ -f "$RUN_DIR/vm-serial-$tag.log" ] && cp "$RUN_DIR/vm-serial-$tag.log" "$(art live-userspace-serial-$tag.log)" || true
+    local SER="$(art live-userspace-serial-$tag.log)"
 
     local bytes=0 banner=0 tasks=0 user_row=0 worker=0 svc=0 echo_ok=0 fatal=0
-    if [ -f artifacts/vm-serial.log ]; then
-        bytes="$(wc -c < artifacts/vm-serial.log | tr -d ' ')"
-        grep -qF -- "DipshitOS kernel has seized control." artifacts/vm-serial.log && banner=1
-        grep -qF -- "tasks: enabled=1" artifacts/vm-serial.log && tasks=1
-        grep -qE -- "user-el0 +saves=[0-9]+ resumes=[0-9]+ advances=0" artifacts/vm-serial.log && user_row=1
-        grep -qE -- "tasks worker advances=[1-9][0-9]*" artifacts/vm-serial.log && worker=1
-        grep -qF -- "$EXPECT" artifacts/vm-serial.log && svc=1
-        grep -qF -- "rx-el0-ok" artifacts/vm-serial.log && echo_ok=1
-        grep -qF -- "[EXC] parking:" artifacts/vm-serial.log && fatal=1 || true
+    if [ -f "$SER" ]; then
+        bytes="$(wc -c < "$SER" | tr -d ' ')"
+        grep -qF -- "DipshitOS kernel has seized control." "$SER" && banner=1
+        grep -qF -- "tasks: enabled=1" "$SER" && tasks=1
+        grep -qE -- "user-el0 +saves=[0-9]+ resumes=[0-9]+ advances=0" "$SER" && user_row=1
+        grep -qE -- "tasks worker advances=[1-9][0-9]*" "$SER" && worker=1
+        grep -qF -- "$EXPECT" "$SER" && svc=1
+        grep -qF -- "rx-el0-ok" "$SER" && echo_ok=1
+        grep -qF -- "[EXC] parking:" "$SER" && fatal=1 || true
     fi
     echo "$tag: rc=$rc serial-bytes=$bytes banner=$banner tasks=$tasks user-row=$user_row worker=$worker svc=$svc echo=$echo_ok fatal=$fatal" | tee -a "$REPORT"
     [ "$rc" = 0 ] && [ "$banner" = 1 ] && [ "$tasks" = 1 ] && \

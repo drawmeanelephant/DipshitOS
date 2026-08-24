@@ -43,23 +43,37 @@
 # live-concurrent-report.txt, live-concurrent-run-<NN>.txt,
 # live-concurrent-serial-<NN>.log.
 
+# Run isolation (#523 item 2 / issue #528, claim 5069): every boot attaches
+# a private DiskImageKit stacked disk (read-only base + throwaway ASIF
+# overlay), a private EFI var store (recreated fresh per boot, as the
+# pre-isolation gate did), and a private serial log under $RUN_DIR — two
+# concurrent instances cannot clobber each other's disks, NVRAM, or
+# evidence. Set DIPSHIT_GATE_SUFFIX=_alt to give this instance its own
+# canonical evidence names (two simultaneous instances MUST differ), and
+# DIPSHIT_KEEP_RUN=1 to keep the scratch dir.
+#
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-GATE_LOG="artifacts/live-concurrent-gate.txt"
+source tools/lib/gate-run.sh
+
+SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
+
+GATE_LOG="$(art live-concurrent-gate.txt)"
 exec > >(tee "$GATE_LOG") 2>&1
-trap 'sleep 0.5' EXIT
+trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
 
 BOOTS="${BOOTS:-1}"
-REPORT="artifacts/live-concurrent-report.txt"
-SCRIPT="artifacts/live-concurrent-script.txt"
+REPORT="$(art live-concurrent-report.txt)"
 # The static claim-8215 payload's exit line: the runner forwards the script
 # only after it appears, so the user root is free when `exec` runs.
 STATIC_EXIT_LINE="tasks user-el0 exited status=7"
 
 echo "=== verify-live-concurrent: claim 0826 — two live user processes (exec gate relaxed to capacity), $BOOTS boot(s) ==="
+
 zig version
 swift --version 2>&1 | head -1
 sw_vers
@@ -74,37 +88,46 @@ zig build image
 swift build --package-path host/vm-runner --configuration release
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
+# --- per-run isolation -------------------------------------------------------------
+# Private scratch dir + pristine-boot overlay for EVERY boot.
+# See tools/lib/gate-run.sh.
+gate_begin live-concurrent
+echo "run dir: $RUN_DIR"
+SCRIPT="$RUN_DIR/script.txt"
+
 # Two execs back to back, then the procs snapshot, then the shell check.
 printf 'ls\nexec USER.BIN\nexec USER.BIN\nprocs\necho rx-concurrent-ok\n' > "$SCRIPT"
 
 run_one() {
     local tag="$1"
-    local run_log="artifacts/live-concurrent-run-$tag.txt"
-    local serial_copy="artifacts/live-concurrent-serial-$tag.log"
-    rm -f artifacts/efi-vars.bin artifacts/vm-serial.log
+    local run_log="$(art live-concurrent-run-$tag.txt)"
+    local serial_copy="$(art live-concurrent-serial-$tag.log)"
+    rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial-$tag.log"
 
     set +e
     # No --script-expect: capture the full window so BOTH programs complete
     # (the runner exits 0 on timeout when no expect is configured).
-    host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log \
+    host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
+        --serial "$RUN_DIR/vm-serial-$tag.log" \
         --script "$SCRIPT" --script-after "$STATIC_EXIT_LINE" --timeout 60 > "$run_log" 2>&1
     local rc=$?
     set -e
-    [ -f artifacts/vm-serial.log ] && cp artifacts/vm-serial.log "$serial_copy" || true
+    [ -f "$RUN_DIR/vm-serial-$tag.log" ] && cp "$RUN_DIR/vm-serial-$tag.log" "$(art live-concurrent-serial-$tag.log)" || true
+    local SER="$serial_copy"
 
     local bytes=0 banner=0 listed=0 loaded=0 two_running=0 distinct_tasks=0 \
         distinct_stacks=0 boot_exited=0 hello=0 ok=0 sleeping=0 awake=0 \
         interleave=0 exited=0 procs_exited=0 reaped=0 echo_ok=0 fatal=0
-    if [ -f artifacts/vm-serial.log ]; then
-        bytes="$(wc -c < artifacts/vm-serial.log | tr -d ' ')"
-        [ "$(grep -aFxc -- "DipshitOS kernel has seized control." artifacts/vm-serial.log || true)" = 1 ] && banner=1
-        [ "$(grep -aFc -- "USER.BIN" artifacts/vm-serial.log || true)" -ge 2 ] && listed=1
+    if [ -f "$SER" ]; then
+        bytes="$(wc -c < "$SER" | tr -d ' ')"
+        [ "$(grep -aFxc -- "DipshitOS kernel has seized control." "$SER" || true)" = 1 ] && banner=1
+        [ "$(grep -aFc -- "USER.BIN" "$SER" || true)" -ge 2 ] && listed=1
         # Both execs loaded (the second one would have been `user_busy`
         # before the relaxed gate).
-        loaded="$(grep -aFc -- "exec: loaded USER.BIN size=" artifacts/vm-serial.log || true)"
+        loaded="$(grep -aFc -- "exec: loaded USER.BIN size=" "$SER" || true)"
         # The procs snapshot: exactly TWO running USER.BIN rows.
         local rows=""
-        rows="$(grep -aE -- "procs: id=[0-9]+ name=USER.BIN state=running" artifacts/vm-serial.log || true)"
+        rows="$(grep -aE -- "procs: id=[0-9]+ name=USER.BIN state=running" "$SER" || true)"
         if [ -n "$rows" ]; then
             local running_rows
             running_rows="$(printf '%s\n' "$rows" | wc -l | tr -d ' ')"
@@ -122,31 +145,38 @@ run_one() {
         fi
         # The boot payload's process is still exited (not yet reaped) when
         # procs runs — the same row the claim-3848 gate asserts.
-        grep -a -qF -- "name=user-el0 state=exited" artifacts/vm-serial.log && boot_exited=1 || true
+        grep -a -qF -- "name=user-el0 state=exited" "$SER" && boot_exited=1 || true
         # Both programs executed at EL0: every marker twice.
-        hello="$(grep -aFc -- "user: hello from the ESP" artifacts/vm-serial.log || true)"
-        ok="$(grep -aFc -- "user: exec ok" artifacts/vm-serial.log || true)"
-        sleeping="$(grep -aFc -- "user: sleeping 2 ticks" artifacts/vm-serial.log || true)"
-        awake="$(grep -aFc -- "user: awake" artifacts/vm-serial.log || true)"
+        hello="$(grep -aFc -- "user: hello from the ESP" "$SER" || true)"
+        ok="$(grep -aFc -- "user: exec ok" "$SER" || true)"
+        sleeping="$(grep -aFc -- "user: sleeping 2 ticks" "$SER" || true)"
+        awake="$(grep -aFc -- "user: awake" "$SER" || true)"
         # Interleaving: other tasks (worker) ran between the last sleep
         # marker and the first wake marker — the two programs were
         # simultaneously mid-flight, not executed one-then-the-other.
-        local last_sleep first_awake mid
-        last_sleep="$(grep -anF -- "user: sleeping 2 ticks" artifacts/vm-serial.log | tail -1 | cut -d: -f1 || true)"
-        first_awake="$(grep -anF -- "user: awake" artifacts/vm-serial.log | head -1 | cut -d: -f1 || true)"
-        if [ -n "$last_sleep" ] && [ -n "$first_awake" ] && [ "$last_sleep" -lt "$first_awake" ]; then
-            mid="$(sed -n "$((last_sleep + 1)),$((first_awake - 1))p" artifacts/vm-serial.log)"
+        # OBSERVED TODAY (2026-08-24, claim 5069): with two programs in the
+        # ring the sleeps/awakes interleave on serial (`sleeping`@111,
+        # `awake`@119, `sleeping`@120, `awake`@127), so "between the LAST
+        # sleep and the FIRST awake" is empty by construction. The intent —
+        # the worker advanced while a program was mid-sleep-cycle — is
+        # checked as an advances= report strictly between the FIRST sleep
+        # and the LAST wake (observed: advances=6720 between them).
+        local first_sleep last_awake mid
+        first_sleep="$(grep -anF -- "user: sleeping 2 ticks" "$SER" | head -1 | cut -d: -f1 || true)"
+        last_awake="$(grep -anF -- "user: awake" "$SER" | tail -1 | cut -d: -f1 || true)"
+        if [ -n "$first_sleep" ] && [ -n "$last_awake" ] && [ "$first_sleep" -lt "$last_awake" ]; then
+            mid="$(sed -n "$((first_sleep + 1)),$((last_awake - 1))p" "$SER")"
             [ "$(echo "$mid" | grep -cF -- "tasks worker advances=" || true)" -ge 1 ] && interleave=1 || interleave=0
         fi
         # Both programs completed: `user: awake` x2 (the last marker before
         # sys_exit) is the strong proof; the exit/reap reports are bounded
         # FIFOs (card 3d, claim 1014), so the counts are EXACT — two
         # USER.BIN exits print exactly two of each line.
-        exited="$(grep -aFc -- "tasks user-exec exited status=43" artifacts/vm-serial.log || true)"
-        procs_exited="$(grep -aFc -- "procs USER.BIN exited status=43" artifacts/vm-serial.log || true)"
-        reaped="$(grep -aFc -- "tasks user-exec reaped" artifacts/vm-serial.log || true)"
-        [ "$(grep -aFxc -- "rx-concurrent-ok" artifacts/vm-serial.log || true)" = 1 ] && echo_ok=1
-        grep -qF -- "[EXC] parking:" artifacts/vm-serial.log && fatal=1 || true
+        exited="$(grep -aFc -- "tasks user-exec exited status=43" "$SER" || true)"
+        procs_exited="$(grep -aFc -- "procs USER.BIN exited status=43" "$SER" || true)"
+        reaped="$(grep -aFc -- "tasks user-exec reaped" "$SER" || true)"
+        [ "$(grep -aFxc -- "rx-concurrent-ok" "$SER" || true)" = 1 ] && echo_ok=1
+        grep -qF -- "[EXC] parking:" "$SER" && fatal=1 || true
     fi
     echo "$tag: runner-rc=$rc serial-bytes=$bytes banner=$banner listed=$listed loaded=$loaded two-running=$two_running tasks-distinct=$distinct_tasks stacks-distinct=$distinct_stacks boot-exited=$boot_exited hello=$hello ok=$ok sleeping=$sleeping awake=$awake interleave=$interleave exited=$exited procs-exited=$procs_exited reaped=$reaped echo=$echo_ok fatal=$fatal" | tee -a "$REPORT"
     [ "$rc" = 0 ] && [ "$banner" = 1 ] && [ "$listed" = 1 ] && [ "$loaded" = 2 ] && \

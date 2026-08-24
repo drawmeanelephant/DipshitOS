@@ -17,6 +17,15 @@
 # echoed but is never an EXACT output line, so each assertion below can
 # only be satisfied by the command's real output.
 #
+# Run isolation (#523 item 2 / issue #528, claim 5069): every boot attaches
+# a private DiskImageKit stacked disk (read-only base + throwaway ASIF
+# overlay), a private EFI var store (recreated fresh per boot, as the
+# pre-isolation gate did), and a private serial log under $RUN_DIR — two
+# concurrent instances cannot clobber each other's disks, NVRAM, or
+# evidence. Set DIPSHIT_GATE_SUFFIX=_alt to give this instance its own
+# canonical evidence names (two simultaneous instances MUST differ), and
+# DIPSHIT_KEEP_RUN=1 to keep the scratch dir.
+#
 # Class B — Apple silicon + VZ only.
 
 set -euo pipefail
@@ -24,12 +33,17 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-GATE_LOG="artifacts/live-quote-gate.txt"
+source tools/lib/gate-run.sh
+
+SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
+
+GATE_LOG="$(art live-quote-gate.txt)"
 exec > >(tee "$GATE_LOG") 2>&1
-trap 'sleep 0.5' EXIT
+trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
 
 BOOTS="${BOOTS:-1}"
-REPORT="artifacts/live-quote-report.txt"
+REPORT="$(art live-quote-report.txt)"
 SCRIPT="artifacts/live-quote-input.txt"
 
 echo "=== verify-live-quote: M19 P5 — quoting & escaping on VZ, $BOOTS boot(s) ==="
@@ -46,6 +60,13 @@ zig build image
 swift build --package-path host/vm-runner --configuration release
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
+# --- per-run isolation -------------------------------------------------------------
+# Private scratch dir + pristine-boot overlay for EVERY boot.
+# See tools/lib/gate-run.sh.
+gate_begin live-quote
+echo "run dir: $RUN_DIR"
+
+
 cat > "$SCRIPT" <<'EOF'
 echo 'hello world'
 set FOO=bar
@@ -59,26 +80,28 @@ EOF
 
 run_one() {
     local tag="$1"
-    rm -f artifacts/efi-vars.bin artifacts/vm-serial.log
+    rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial-$tag.log"
     set +e
-    host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log \
+    host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
+        --serial "$RUN_DIR/vm-serial-$tag.log" \
         --script "$SCRIPT" --script-expect "quote-done" --timeout 30 \
-        > "artifacts/live-quote-run-$tag.txt" 2>&1
+        > "$(art live-quote-run-$tag.txt)" 2>&1
     local RC=$?
     set -e
-    [ -f artifacts/vm-serial.log ] && cp artifacts/vm-serial.log "artifacts/live-quote-serial-$tag.log" || true
+    [ -f "$RUN_DIR/vm-serial-$tag.log" ] && cp "$RUN_DIR/vm-serial-$tag.log" "$(art live-quote-serial-$tag.log)" || true
+    local SER="$(art live-quote-serial-$tag.log)"
 
     local SERIAL_BYTES BANNER=0 SINGLE=0 EXPAND=0 SQBLOCK=0 ESCBLOCK=0 ESCOP=0 QOP=0 DONE=0
-    SERIAL_BYTES=$(wc -c < artifacts/vm-serial.log 2>/dev/null | tr -d ' ')
-    if [ -f artifacts/vm-serial.log ]; then
-        grep -qF "DipshitOS kernel" artifacts/vm-serial.log && BANNER=1
-        [ "$(grep -x -c "hello world" artifacts/vm-serial.log | tr -d ' ')" = 1 ] && SINGLE=1
-        grep -x -q "value bar" artifacts/vm-serial.log && EXPAND=1
+    SERIAL_BYTES=$(wc -c < "$SER" 2>/dev/null | tr -d ' ')
+    if [ -f "$SER" ]; then
+        grep -qF "DipshitOS kernel" "$SER" && BANNER=1
+        [ "$(grep -x -c "hello world" "$SER" | tr -d ' ')" = 1 ] && SINGLE=1
+        grep -x -q "value bar" "$SER" && EXPAND=1
         # Both protection paths print the same literal line — expect two.
-        [ "$(grep -x -c '\$FOO' artifacts/vm-serial.log | tr -d ' ')" = 2 ] && { SQBLOCK=1; ESCBLOCK=1; }
-        [ "$(grep -x -c "a;b" artifacts/vm-serial.log | tr -d ' ')" = 1 ] && ESCOP=1
-        [ "$(grep -x -c "q;b" artifacts/vm-serial.log | tr -d ' ')" = 1 ] && QOP=1
-        grep -qF "quote-done" artifacts/vm-serial.log && DONE=1
+        [ "$(grep -x -c '\$FOO' "$SER" | tr -d ' ')" = 2 ] && { SQBLOCK=1; ESCBLOCK=1; }
+        [ "$(grep -x -c "a;b" "$SER" | tr -d ' ')" = 1 ] && ESCOP=1
+        [ "$(grep -x -c "q;b" "$SER" | tr -d ' ')" = 1 ] && QOP=1
+        grep -qF "quote-done" "$SER" && DONE=1
     fi
     echo "$tag: rc=$RC bytes=$SERIAL_BYTES banner=$BANNER single=$SINGLE expand=$EXPAND sqblock=$SQBLOCK escblock=$ESCBLOCK escop=$ESCOP qop=$QOP done=$DONE"
     [ "$RC" = 0 ] && [ "$BANNER" = 1 ] && [ "$SINGLE" = 1 ] && [ "$EXPAND" = 1 ] \

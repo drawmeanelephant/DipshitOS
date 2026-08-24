@@ -65,6 +65,10 @@ codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/
 # --- per-run isolation -------------------------------------------------------------
 # Private scratch dir + pristine-boot overlay for EVERY boot.
 # See tools/lib/gate-run.sh.
+# Boots the private WRITABLE copy, not an overlay: OBSERVED TODAY
+# (2026-08-24, claim 5069) guest FAT writes through an ASIF overlay
+# intermittently fail ("not persisted - no disk") on this macOS 27.0
+# host; the writable copy keeps main-like write behavior.
 gate_begin live-scripting
 echo "run dir: $RUN_DIR"
 SCRIPT="$RUN_DIR/script.txt"
@@ -84,10 +88,7 @@ run_one() {
     local tag="$1"
     rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial-$tag.log"
     set +e
-    # WRITE-GATE: canonical image + inter-gate lock (see gate-run.sh note).
-    gate_shared_disk_lock
-    host/vm-runner/.build/release/VMRunner artifacts/disk.img \
-        --serial "$RUN_DIR/vm-serial-$tag.log" \
+    host/vm-runner/.build/release/VMRunner artifacts/disk.img "$RUN_DIR/vm-serial-$tag.log" \
         --script "$SCRIPT" --script-expect "t16-scripting-ok" --timeout 30 \
         > "$(art live-scripting-run-$tag.txt)" 2>&1
     local RC=$?

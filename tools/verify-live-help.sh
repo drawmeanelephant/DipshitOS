@@ -20,6 +20,15 @@
 #   help syscalls   -> a command named like a topic: the command detail wins
 #   echo help-live-ok -> the runner's success signal
 #
+# Run isolation (#523 item 2 / issue #528, claim 5069): every boot attaches
+# a private DiskImageKit stacked disk (read-only base + throwaway ASIF
+# overlay), a private EFI var store (recreated fresh per boot, as the
+# pre-isolation gate did), and a private serial log under $RUN_DIR — two
+# concurrent instances cannot clobber each other's disks, NVRAM, or
+# evidence. Set DIPSHIT_GATE_SUFFIX=_alt to give this instance its own
+# canonical evidence names (two simultaneous instances MUST differ), and
+# DIPSHIT_KEEP_RUN=1 to keep the scratch dir.
+#
 # Class B — Apple silicon + VZ only; boots a real VM.
 #
 # Usage:
@@ -27,22 +36,27 @@
 #   BOOTS=3 bash tools/verify-live-help.sh
 #
 # Evidence saved under artifacts/: live-help-gate.txt, live-help-report.txt,
-# live-help-run-<NN>.txt, live-help-serial-<NN>.log, live-help-script.txt.
+# live-help-run-<NN>.txt, live-help-serial-<NN>.log.
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-GATE_LOG="artifacts/live-help-gate.txt"
+source tools/lib/gate-run.sh
+
+SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
+
+GATE_LOG="$(art live-help-gate.txt)"
 exec > >(tee "$GATE_LOG") 2>&1
-trap 'sleep 0.5' EXIT
+trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
 
 BOOTS="${BOOTS:-1}"
-REPORT="artifacts/live-help-report.txt"
-SCRIPT="artifacts/live-help-script.txt"
+REPORT="$(art live-help-report.txt)"
 
 echo "=== verify-live-help: claim 3275 — ADR 0008 help walk on VZ, $BOOTS boot(s) ==="
+
 
 zig version; swift --version 2>&1 | head -1; sw_vers
 REVISION="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
@@ -56,6 +70,11 @@ zig build
 zig build image
 swift build --package-path host/vm-runner --configuration release
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
+
+# --- per-run isolation -------------------------------------------------------
+gate_begin live-help
+echo "run dir: $RUN_DIR"
+SCRIPT="$RUN_DIR/script.txt"
 
 # --- the scripted keystrokes ------------------------------------------------
 cat > "$SCRIPT" <<'EOF'
@@ -71,38 +90,40 @@ EOF
 
 run_one() {
     local tag="$1"
-    rm -f artifacts/efi-vars.bin artifacts/vm-serial.log
+    rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial-$tag.log"
     set +e
-    host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log \
+    host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
+        --serial "$RUN_DIR/vm-serial-$tag.log" \
         --script "$SCRIPT" --script-expect "help-live-ok" --timeout 40 \
-        > "artifacts/live-help-run-$tag.txt" 2>&1
+        > "$(art live-help-run-$tag.txt)" 2>&1
     local RC=$?
     set -e
-    [ -f artifacts/vm-serial.log ] && cp artifacts/vm-serial.log "artifacts/live-help-serial-$tag.log" || true
+    local SER="$(art live-help-serial-$tag.log)"
+    [ -f "$RUN_DIR/vm-serial-$tag.log" ] && cp "$RUN_DIR/vm-serial-$tag.log" "$SER" || true
 
     local SERIAL_BYTES
-    SERIAL_BYTES=$(wc -c < artifacts/vm-serial.log 2>/dev/null | tr -d ' ')
+    SERIAL_BYTES=$(wc -c < "$SER" 2>/dev/null | tr -d ' ')
     local BANNER=0 GROUP_ID=0 GROUP_MEM=0 GROUP_GFX=0 FOOTER=0 CMD_DETAIL=0 CMD_USAGE=0 TOPIC_NET=0 TOPIC_WIN=0 TOPIC_STORAGE=0 TOPIC_GFX=0 CMD_WINS=0 ECHO=0
-    if [ -f artifacts/vm-serial.log ]; then
-        grep -qF -- "DipshitOS kernel has seized control." artifacts/vm-serial.log && BANNER=1
+    if [ -f "$SER" ]; then
+        grep -qF -- "DipshitOS kernel has seized control." "$SER" && BANNER=1
         # Grouped catalog: the ADR 0008 D1 group headers (not the flat list).
         # One grep per flag, each on its own line — bash 3.2 `set -e` misbehaves
         # on a backslash-continued `&&` chain inside a function.
-        grep -qF -- "machine / identity" artifacts/vm-serial.log && GROUP_ID=1
-        grep -qF -- "memory / machine state" artifacts/vm-serial.log && GROUP_MEM=1
-        grep -qF -- "graphics / input" artifacts/vm-serial.log && GROUP_GFX=1
-        grep -qF -- "type 'help <topic>' for a topic page" artifacts/vm-serial.log && FOOTER=1
+        grep -qF -- "machine / identity" "$SER" && GROUP_ID=1
+        grep -qF -- "memory / machine state" "$SER" && GROUP_MEM=1
+        grep -qF -- "graphics / input" "$SER" && GROUP_GFX=1
+        grep -qF -- "type 'help <topic>' for a topic page" "$SER" && FOOTER=1
         # `help net` — command detail (name - help, then the usage line).
-        grep -qF -- "net - virtio-net transport" artifacts/vm-serial.log && CMD_DETAIL=1
-        grep -qF -- "usage: net [recv" artifacts/vm-serial.log && CMD_USAGE=1
+        grep -qF -- "net - virtio-net transport" "$SER" && CMD_DETAIL=1
+        grep -qF -- "usage: net [recv" "$SER" && CMD_USAGE=1
         # Topic pages.
-        grep -qF -- "virtio-net (DID 0x1041), flag-gated" artifacts/vm-serial.log && TOPIC_NET=1
-        grep -qF -- "owns the window registry" artifacts/vm-serial.log && TOPIC_WIN=1
-        grep -qF -- "GPT + FAT32 over virtio-blk" artifacts/vm-serial.log && TOPIC_STORAGE=1
-        grep -qF -- "1280x720 B8G8R8X8, 2D blits only" artifacts/vm-serial.log && TOPIC_GFX=1
+        grep -qF -- "virtio-net (DID 0x1041), flag-gated" "$SER" && TOPIC_NET=1
+        grep -qF -- "owns the window registry" "$SER" && TOPIC_WIN=1
+        grep -qF -- "GPT + FAT32 over virtio-blk" "$SER" && TOPIC_STORAGE=1
+        grep -qF -- "1280x720 B8G8R8X8, 2D blits only" "$SER" && TOPIC_GFX=1
         # `help syscalls` — a command wins over any topic interpretation.
-        grep -qF -- "syscalls - numbered syscall table" artifacts/vm-serial.log && CMD_WINS=1
-        grep -qF -- "help-live-ok" artifacts/vm-serial.log && ECHO=1
+        grep -qF -- "syscalls - numbered syscall table" "$SER" && CMD_WINS=1
+        grep -qF -- "help-live-ok" "$SER" && ECHO=1
     fi
     {
         echo "$tag: rc=$RC serial-bytes=$SERIAL_BYTES banner=$BANNER group-id=$GROUP_ID group-mem=$GROUP_MEM group-gfx=$GROUP_GFX footer=$FOOTER cmd-detail=$CMD_DETAIL cmd-usage=$CMD_USAGE topic-net=$TOPIC_NET topic-win=$TOPIC_WIN topic-storage=$TOPIC_STORAGE topic-gfx=$TOPIC_GFX cmd-wins=$CMD_WINS echo=$ECHO"
@@ -139,7 +160,7 @@ if [ "$PASS" = "$BOOTS" ]; then
     sleep 0.5
     exit 0
 else
-    echo "verify-live-help: FAILED — $PASS/$BOOTS boot(s) passed; see artifacts/live-help-report.txt and the per-boot serial logs."
+    echo "verify-live-help: FAILED — $PASS/$BOOTS boot(s) passed; see $(art live-help-report.txt) and the per-boot serial logs."
     echo "FAIL: $PASS/$BOOTS" >> "$REPORT"
     sleep 0.5
     exit 1

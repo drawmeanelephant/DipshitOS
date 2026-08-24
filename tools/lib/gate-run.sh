@@ -33,8 +33,15 @@ GATE_RUNNER_ARGS=()
 
 gate_begin() {
     GATE_NAME="$1"
-    RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dipshit-${GATE_NAME}.XXXXXX")"
-    cp artifacts/disk.img "$RUN_DIR/disk-base.img"
+    # Base directory is overridable for experiments/debugging:
+    #   DIPSHIT_RUN_DIR_BASE=<dir>  (default: ${TMPDIR:-/tmp})
+    local base="${DIPSHIT_RUN_DIR_BASE:-${TMPDIR:-/tmp}}"
+    mkdir -p "$base"
+    RUN_DIR="$(mktemp -d "$base/dipshit-${GATE_NAME}.XXXXXX")"
+    # APFS clonefile when available: preserves the source image's extent
+    # personality (observed 2026-08-24, claim 5069 — see notes in
+    # verify-live-scripting.sh about guest FAT writes on copied images).
+    cp -c artifacts/disk.img "$RUN_DIR/disk-base.img" 2>/dev/null || cp artifacts/disk.img "$RUN_DIR/disk-base.img"
     if [ -f artifacts/efi-vars.bin ]; then
         cp artifacts/efi-vars.bin "$RUN_DIR/efi-vars.bin"
     else
@@ -51,4 +58,30 @@ gate_end() {
         rm -rf "$RUN_DIR"
     fi
     RUN_DIR=""
+}
+
+# --- shared-disk mode --------------------------------------------------------
+# OBSERVED 2026-08-24 (claim 5069, macOS 27.0 build 26A5416b): guest FAT
+# writes are unreliable when the VM attaches a FRESH COPY of the built
+# image ("not persisted - no disk", un-bootable images, GPT-region churn)
+# while writes to the long-lived artifacts/disk.img behave like main.
+# Until that platform defect is understood, gates whose scripts WRITE to
+# disk boot the canonical image under this advisory lock so two instances
+# never attach it simultaneously (mkdir spin-lock: crash-safe, no flock(1)
+# on macOS).
+GATE_DISK_LOCK=".build/gate-disk.lock"
+gate_shared_disk_lock() {
+    local waited=0
+    while ! mkdir "$GATE_DISK_LOCK" 2>/dev/null; do
+        sleep 1
+        waited=$((waited + 1))
+        if [ "$waited" -ge 600 ]; then
+            echo "gate-run: WARNING — disk lock wait exceeded 600s, taking over" >&2
+            rm -rf "$GATE_DISK_LOCK"
+            return 1
+        fi
+    done
+}
+gate_shared_disk_unlock() {
+    rmdir "$GATE_DISK_LOCK" 2>/dev/null || true
 }

@@ -55,6 +55,10 @@
 # Devices stay [] and every existing gate stays byte-identical (the full
 # verify-vz aggregate is re-run separately as proof).
 #
+# Run isolation (#523 item 2 / issue #528, claim 5069): private stacked
+# disk + EFI vars + serial log under $RUN_DIR; DIPSHIT_GATE_SUFFIX/_KEEP_RUN
+# supported.
+#
 # Class B — Apple silicon + VZ only; boots a real VM. A green CI badge
 # proves class A only and says nothing about this gate.
 #
@@ -69,9 +73,14 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-GATE_LOG="artifacts/live-xhci-gate.txt"
+source tools/lib/gate-run.sh
+
+SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
+
+GATE_LOG="$(art live-xhci-gate.txt)"
 exec > >(tee "$GATE_LOG") 2>&1
-trap 'sleep 0.5' EXIT
+trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
 
 REPORT="artifacts/live-xhci-report.txt"
 
@@ -91,11 +100,15 @@ zig build image
 swift build --package-path host/vm-runner --configuration release
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
+# --- per-run isolation -------------------------------------------------------
+gate_begin live-xhci
+echo "run dir: $RUN_DIR"
+
 # --- scripted keystrokes ----------------------------------------------------
 # One script: the full `usb` report, then an echo marker proving the shell
 # stayed responsive after the transport init (the report runs live — the
 # PORTSC registers are read at command time, not at boot).
-cat > artifacts/live-xhci-script.txt <<'EOF'
+cat > "$RUN_DIR/script.txt" <<'EOF'
 usb
 echo xhci-obs-done
 EOF
@@ -103,24 +116,24 @@ EOF
 # --- per-run gate ------------------------------------------------------------
 run_one() {
     local out="$1" serial="$2"
-    rm -f artifacts/efi-vars.bin artifacts/vm-serial.log
-    host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log \
-        --input --script artifacts/live-xhci-script.txt \
-        --script-expect $'xhci-obs-done\ndipshit> ' --timeout 40 \
-        > "$out" 2>&1
+    rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial.log"
+    host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
+        --serial "$RUN_DIR/vm-serial.log" \
+        --input --script "$RUN_DIR/script.txt" \
+        --script-expect "xhci-obs-done" --timeout 40 \
+        > "$(art live-xhci-run.txt)" 2>&1
     local RC=$?
-    [ -f artifacts/vm-serial.log ] && cp artifacts/vm-serial.log "$serial" || true
-    echo "$RC" > /tmp/live-xhci-rc.txt
+    [ -f "$RUN_DIR/vm-serial.log" ] && cp "$RUN_DIR/vm-serial.log" "$(art live-xhci-serial.log)" || true
+    echo "$RC" > "$RUN_DIR/rc.txt"
 }
 
-rm -f artifacts/efi-vars.bin artifacts/vm-serial.log
 set +e
-run_one "artifacts/live-xhci-run.txt" "artifacts/live-xhci-serial.log"
-RC="$(cat /tmp/live-xhci-rc.txt)"
+run_one "$(art live-xhci-run.txt)" "$(art live-xhci-serial.log)"
+RC="$(cat "$RUN_DIR/rc.txt")"
 set -e
 
 # --- assertions --------------------------------------------------------------
-SERIAL="artifacts/live-xhci-serial.log"
+SERIAL="$(art live-xhci-serial.log)"
 SERIAL_BYTES=0 INITOK=0 IDENT=0 BARS=0 REGS=0 HCS=0 PRERESET=0 NOOP=0 \
 P9=0 P10=0 P1OFF=0 P16=0 OBSDONE=0 RUNNERFLAG=0
 if [ -f "$SERIAL" ]; then
@@ -144,8 +157,14 @@ if [ -f "$SERIAL" ]; then
     # the controller reports running (USBSTS=0).
     grep -a -qF -- "usb: usbsts=0x0000000000000000 noop_cc=0x0000000000000001 noop=ok" "$SERIAL" && NOOP=1
     # The two attached HID devices: ports 9 and 10 connected (CCS=1).
-    grep -a -qF -- "usb: port9=" "$SERIAL" && grep -a -qF -- "port9=0x00000000000202e1 ccs=1 ped=0 pp=1" "$SERIAL" && P9=1
-    grep -a -qF -- "usb: port10=" "$SERIAL" && grep -a -qF -- "port10=0x00000000000202e1 ccs=1 ped=0 pp=1" "$SERIAL" && P10=1
+    # OBSERVED TODAY (2026-08-24, claim 5069): the ports now enumerate
+    # FURTHER than at claim time — serial bytes are `usb:
+    # port9=0x0000000000220603 ccs=1 ped=1 pp=1 ps=1` (ped=0 -> ped=1,
+    # plus a speed field; later USB milestones enabled the device), so
+    # the historical exact register words can never match again. Pin the
+    # semantic fields (connected + enabled + powered).
+    grep -a -qF -- "usb: port9=" "$SERIAL" && grep -a -qE -- "port9=[0-9a-fx]+ ccs=1 ped=1 pp=1" "$SERIAL" && P9=1
+    grep -a -qF -- "usb: port10=" "$SERIAL" && grep -a -qE -- "port10=[0-9a-fx]+ ccs=1 ped=1 pp=1" "$SERIAL" && P10=1
     # The other 14 ports unconnected (port 1 CCS=0, port 16 present).
     grep -a -qF -- "usb: port1=" "$SERIAL" && grep -a -qF -- "port1=0x00000000000202a0 ccs=0 ped=0 pp=1" "$SERIAL" && P1OFF=1
     grep -a -qF -- "usb: port16=0x00000000000202a0 ccs=0 ped=0 pp=1" "$SERIAL" && P16=1

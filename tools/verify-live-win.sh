@@ -39,6 +39,10 @@
 # live assertion is "distinct color families in the expected regions", not
 # per-glyph equality. The observed capture colors are pinned in the claim.
 #
+# Run isolation (#523 item 2 / issue #528, claim 5069): private stacked
+# disk + EFI vars + serial log + screen captures under $RUN_DIR;
+# DIPSHIT_GATE_SUFFIX/_KEEP_RUN supported.
+#
 # Class B — Apple silicon + VZ only; boots real VMs. A green CI badge
 # proves class A only and says nothing about this gate.
 #
@@ -53,9 +57,14 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-GATE_LOG="artifacts/live-win-gate.txt"
+source tools/lib/gate-run.sh
+
+SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
+
+GATE_LOG="$(art live-win-gate.txt)"
 exec > >(tee "$GATE_LOG") 2>&1
-trap 'sleep 0.5' EXIT
+trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
 
 REPORT="artifacts/live-win-report.txt"
 
@@ -75,40 +84,50 @@ zig build image
 swift build --package-path host/vm-runner --configuration release
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
+# --- per-run isolation -------------------------------------------------------
+gate_begin live-win
+echo "run dir: $RUN_DIR"
+
 # --- scripted session + keyboard typing --------------------------------------
 # The serial script drives the registry; the KEYBOARD types `uname\n` after
 # `dui hit 100 400` re-focuses the terminal (the trigger marker).
-cat > artifacts/live-win-script.txt <<'EOF'
+cat > "$RUN_DIR/script.txt" <<'EOF'
 dui
 dui hit 1000 100
 dui
 dui hit 100 400
 EOF
 
+# Boots the private WRITABLE copy (not an overlay): the timed screen
+# captures need main-like boot pacing; overlays shift guest timing
+# so the fill/present lands after the last scheduled capture.
+
 # --- per-run gate -------------------------------------------------------------
 run_one() {
     local out="$1" serial="$2"
-    rm -f artifacts/efi-vars.bin artifacts/vm-serial.log artifacts/gpu-screen-*
-    host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log \
-        --display --input --screen artifacts/gpu-screen \
-        --script artifacts/live-win-script.txt \
+    rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial.log" "$RUN_DIR"/gpu-screen-*
+    host/vm-runner/.build/release/VMRunner "$RUN_DIR/disk-base.img" \
+        --serial "$RUN_DIR/vm-serial.log" \
+        --display --input --screen "$RUN_DIR/gpu-screen" \
+        --script "$RUN_DIR/script.txt" \
         --input-string "uname"$'\n' --input-string-after "dui hit: 100,400 -> 0" \
         --script-expect "DipshitOS aarch64" \
         --timeout 60 \
         > "$out" 2>&1
     local RC=$?
-    [ -f artifacts/vm-serial.log ] && cp artifacts/vm-serial.log "$serial" || true
-    echo "$RC" > /tmp/live-win-rc.txt
+    [ -f "$RUN_DIR/vm-serial.log" ] && cp "$RUN_DIR/vm-serial.log" "$serial" || true
+    echo "$RC" > "$RUN_DIR/rc.txt"
 }
 
-rm -f artifacts/efi-vars.bin artifacts/vm-serial.log
+rm -f "$RUN_DIR/efi-vars.bin"
 set +e
-run_one "artifacts/live-win-run.txt" "artifacts/live-win-serial.log"
-RC="$(cat /tmp/live-win-rc.txt)"
+run_one "$(art live-win-run.txt)" "$(art live-win-serial.log)"
+RC="$(cat "$RUN_DIR/rc.txt")"
+cp "$RUN_DIR"/gpu-screen-* artifacts/ 2>/dev/null || true
 set -e
 
 # --- assertions ---------------------------------------------------------------
-SERIAL="artifacts/live-win-serial.log"
+SERIAL="$(art live-win-serial.log)"
 TWO_WIN=0 ROW0=0 ROW1=0 HIT1=0 FOCUS1=0 HIT0=0 KB_UNAME=0 RUNNERFLAG=0
 if [ -f "$SERIAL" ]; then
     grep -a -qF -- "dui: windows=2 focused=0" "$SERIAL" && TWO_WIN=1

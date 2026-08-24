@@ -23,6 +23,9 @@
 #      exits with status 99 (`sys_exit(99)`, slot 3).
 #   8. The monitor session checks `procs` and `syscalls` on the serial console.
 #
+# Run isolation (#523 item 2 / issue #528, claim 5069): private stacked
+# disk + EFI vars + serial log + screen captures under $RUN_DIR.
+#
 # Class B — Apple silicon + VZ only; boots real VMs.
 #
 # Usage:
@@ -36,9 +39,14 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-GATE_LOG="artifacts/live-events-gate.txt"
+source tools/lib/gate-run.sh
+
+SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
+
+GATE_LOG="$(art live-events-gate.txt)"
 exec > >(tee "$GATE_LOG") 2>&1
-trap 'sleep 0.5' EXIT
+trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
 
 REPORT="artifacts/live-events-report.txt"
 
@@ -60,11 +68,15 @@ zig build image
 swift build --package-path host/vm-runner --configuration release
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
+# --- per-run isolation -------------------------------------------------------
+gate_begin live-events
+echo "run dir: $RUN_DIR"
+
 # --- scripted session ---------------------------------------------------------
-cat > artifacts/live-events-script.txt <<'EOF'
+cat > "$RUN_DIR/script.txt" <<'EOF'
 exec KEYTEST.BIN
 EOF
-cat > artifacts/live-events-script2.txt <<'EOF'
+cat > "$RUN_DIR/script2.txt" <<'EOF'
 procs
 syscalls
 EOF
@@ -72,25 +84,29 @@ EOF
 # --- per-run gate -------------------------------------------------------------
 run_one() {
     local out="$1" serial="$2"
-    rm -f artifacts/efi-vars.bin artifacts/vm-serial.log artifacts/gpu-screen-*
-    host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log \
-        --display --input --screen artifacts/gpu-screen \
-        --script artifacts/live-events-script.txt \
+    rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial.log" "$RUN_DIR"/gpu-screen-*
+    set +e
+    host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
+        --serial "$RUN_DIR/vm-serial.log" \
+        --display --input --screen "$RUN_DIR/gpu-screen" \
+        --script "$RUN_DIR/script.txt" \
         --input-string "A" --input-string-after "keytest: win_focus" \
-        --script2 artifacts/live-events-script2.txt --script2-after "keytest: exiting 99" \
+        --script2 "$RUN_DIR/script2.txt" --script2-after "keytest: exiting 99" \
         --script-expect "exited status=99" \
         --timeout 60 \
         > "$out" 2>&1
     local RC=$?
-    [ -f artifacts/vm-serial.log ] && cp artifacts/vm-serial.log "$serial" || true
-    echo "$RC" > /tmp/live-events-rc.txt
+    set -e
+    [ -f "$RUN_DIR/vm-serial.log" ] && cp "$RUN_DIR/vm-serial.log" "$serial" || true
+    echo "$RC" > "$RUN_DIR/rc.txt"
 }
 
 echo "--- Phase 1: running interactive event application on VZ ---"
 OUT="artifacts/live-events-run.txt"
-SERIAL="artifacts/live-events-serial.log"
+SERIAL="$(art live-events-serial.log)"
 run_one "$OUT" "$SERIAL"
-RC="$(cat /tmp/live-events-rc.txt)"
+RC="$(cat "$RUN_DIR/rc.txt")"
+cp "$RUN_DIR"/gpu-screen-* artifacts/ 2>/dev/null || true
 rm -f /tmp/live-events-rc.txt
 
 echo "VMRunner exit code: $RC"

@@ -25,6 +25,14 @@
 # GUID, listed, read, written, and re-read after a reboot.
 #
 # Per run this reports: rc, serial-bytes, and per-assertion flags.
+# Run isolation (#523 item 2 / issue #528, claim 5069): every PAIR of boots
+# runs against a PRIVATE WRITABLE disk image ($RUN_DIR/disk-base.img, seeded
+# fresh from artifacts/disk.img after the build), a private EFI var store,
+# and private serial logs under $RUN_DIR — same shape as verify-live-fs.sh
+# (the writable copy is required: run B proves run A's write persisted on
+# the SAME image through a reboot). DIPSHIT_GATE_SUFFIX=_alt gives distinct
+# canonical evidence names; DIPSHIT_KEEP_RUN=1 keeps the scratch dir.
+#
 # Class B — Apple silicon + VZ only; boots real VMs.
 #
 # Usage:
@@ -39,14 +47,23 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-GATE_LOG="artifacts/live-gfs-gate.txt"
+source tools/lib/gate-run.sh
+
+SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
+
+GATE_LOG="$(art live-gfs-gate.txt)"
 exec > >(tee "$GATE_LOG") 2>&1
-trap 'sleep 0.5' EXIT
+trap 'gate_shared_disk_unlock; gate_end 2>/dev/null || true; sleep 0.5' EXIT
 
 PAIRS="${BOOTS:-1}"
-REPORT="artifacts/live-gfs-report.txt"
+REPORT="$(art live-gfs-report.txt)"
 
 echo "=== verify-live-gfs: claim 3678 — general (non-ESP) filesystem: data partition mount + persistence on VZ, $PAIRS pair(s) of boots ==="
+
+# --- per-run isolation -------------------------------------------------------
+gate_begin live-gfs
+echo "run dir: $RUN_DIR"
 
 # --- tool versions + revision -----------------------------------------------
 zig version; swift --version 2>&1 | head -1; sw_vers
@@ -63,14 +80,14 @@ swift build --package-path host/vm-runner --configuration release
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
 # --- scripted keystrokes -----------------------------------------------------
-cat > artifacts/live-gfs-script-A.txt <<'EOF'
+cat > "$RUN_DIR/script-A.txt" <<'EOF'
 mount data
 write hello.txt hello world
 ls
 cat README.TXT
 cat DATA.TXT
 EOF
-cat > artifacts/live-gfs-script-B.txt <<'EOF'
+cat > "$RUN_DIR/script-B.txt" <<'EOF'
 mount data
 ls
 cat hello.txt
@@ -81,38 +98,42 @@ EOF
 run_one() {
     local tag="$1" script="$2" expect="$3" fresh="$4"
     if [ "$fresh" = 1 ]; then
-        rm -f artifacts/efi-vars.bin
+        rm -f "$RUN_DIR/efi-vars.bin"
     fi
-    rm -f artifacts/vm-serial.log
+    rm -f "$RUN_DIR/vm-serial-$tag.log"
     set +e
-    host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log \
+    gate_shared_disk_lock
+    host/vm-runner/.build/release/VMRunner artifacts/disk.img \
+        --serial "$RUN_DIR/vm-serial-$tag.log" \
         --script "$script" --script-expect "$expect" --timeout 40 \
-        > "artifacts/live-gfs-run-$tag.txt" 2>&1
+        > "$(art live-gfs-run-$tag.txt)" 2>&1
     local RC=$?
+    gate_shared_disk_unlock
     set -e
-    [ -f artifacts/vm-serial.log ] && cp artifacts/vm-serial.log "artifacts/live-gfs-serial-$tag.log" || true
+    [ -f "$RUN_DIR/vm-serial-$tag.log" ] && cp "$RUN_DIR/vm-serial-$tag.log" "$(art live-gfs-serial-$tag.log)" || true
+    local SER="$(art live-gfs-serial-$tag.log)"
 
     local SERIAL_BYTES=0
     local MOUNTOK=0 LSHEAD=0 DATAFILES=0 CATDATA=0 WRITEOK=0 FILELISTED=0 CATHELLO=0
-    if [ -f artifacts/vm-serial.log ]; then
-        SERIAL_BYTES=$(wc -c < artifacts/vm-serial.log | tr -d ' ')
+    if [ -f "$SER" ]; then
+        SERIAL_BYTES=$(wc -c < "$SER" | tr -d ' ')
         # The mount reply proves the DATA partition was discovered by type
         # GUID and mounted (the general, non-ESP volume).
-        grep -a -qF -- "mount: data vol_lba=" artifacts/vm-serial.log && MOUNTOK=1
+        grep -a -qF -- "mount: data vol_lba=" "$SER" && MOUNTOK=1
         # The re-snapshotted window is labeled data (ls: data=N, not esp=N).
-        grep -a -qF -- "ls: data=" artifacts/vm-serial.log && LSHEAD=1
+        grep -a -qF -- "ls: data=" "$SER" && LSHEAD=1
         # The data volume's own files are listed (with [data], not [esp]).
-        grep -a -qF -- "  README.TXT" artifacts/vm-serial.log && DATAFILES=1
-        grep -a -qF -- "  DATA.TXT" artifacts/vm-serial.log && DATAFILES=1
-        grep -a -qF -- "  [data]" artifacts/vm-serial.log && DATAFILES=1
+        grep -a -qF -- "  README.TXT" "$SER" && DATAFILES=1
+        grep -a -qF -- "  DATA.TXT" "$SER" && DATAFILES=1
+        grep -a -qF -- "  [data]" "$SER" && DATAFILES=1
         # The DATA.TXT cat reply (volume content, not the ESP's).
-        grep -a -qF -- "general data volume contents" artifacts/vm-serial.log && CATDATA=1
+        grep -a -qF -- "general data volume contents" "$SER" && CATDATA=1
         # The write reply (hello world -> the DATA volume's root).
-        grep -a -qF -- "write: ok (persisted" artifacts/vm-serial.log && WRITEOK=1
+        grep -a -qF -- "write: ok (persisted" "$SER" && WRITEOK=1
         # hello.txt listed after the write (run A: window; run B: from disk).
-        grep -a -qi -- "  hello" artifacts/vm-serial.log && FILELISTED=1
+        grep -a -qi -- "  hello" "$SER" && FILELISTED=1
         # The cat hello.txt reply.
-        grep -a -qF -- "hello world" artifacts/vm-serial.log && CATHELLO=1
+        grep -a -qF -- "hello world" "$SER" && CATHELLO=1
     fi
     local PASS=0
     # Common requirements (both runs): the DATA volume mounted by GUID, its
@@ -154,10 +175,14 @@ while [ "$n" -lt "$PAIRS" ]; do
     # The expect is the LAST reply (the DATA.TXT cat + next prompt): the
     # runner exits when it appears, so it must be the final script line's
     # reply, not an earlier one.
-    run_one "A-$n" "artifacts/live-gfs-script-A.txt" $'general data volume contents: 1234567890\ndipshit> ' 1 && AOK=1 || true
+    # Reply+idle-prompt anchor (colored prompt bytes; see fs gate note):
+    # fires only at shell idle after the reply, so the pair's second boot
+    # never reads a mid-writeback image.
+    run_one "A-$n" "$RUN_DIR/script-A.txt" $'general data volume contents: 1234567890\n\x1b[32mdipshit> ' 1 && AOK=1 || true
     echo "=== live-gfs pair $n, run B (persistence through reboot, same disk) ==="
     BOK=0
-    run_one "B-$n" "artifacts/live-gfs-script-B.txt" $'hello world\ndipshit> ' 0 && BOK=1 || true
+    sleep 3
+    run_one "B-$n" "$RUN_DIR/script-B.txt" $'hello world\n\x1b[32mdipshit> ' 0 && BOK=1 || true
     if [ "$AOK" = 1 ] && [ "$BOK" = 1 ]; then
         PASS=$((PASS + 1))
     fi

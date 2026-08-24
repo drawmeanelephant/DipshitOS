@@ -1,7 +1,7 @@
 # Claim: run-isolated gates via DiskImageKit overlays
 
 - **Owner:** ox-alpha (`agent/ox-alpha/run-isolated-gates`)
-- **Status:** ✅ done 2026-08-24 — PR #529 merged (957e452); flipped from 🔄 by ox-alpha in worktree `t3code/c259b00a` (same owner, see docs/logs/agent-t3code-c259b00a-cvc-echo.md) so the ACTIVE-Touches gate no longer holds main.swift against claim 3141
+- **Status:** ✅ done 2026-08-24 — PR #529 merged (957e452); flipped from 🔄 independently by ox-alpha in worktree `t3code/c259b00a` (for claim 3141) and in worktree `t3code-732c1e83` (for claim 5069) so the ACTIVE-Touches gate stops holding its files; both flips recorded here and in their branch logs
 - **Touches:** host/vm-runner/Sources/VMRunner/main.swift, tools/lib/gate-run.sh, tools/verify-live-net-tcp.sh, docs/gate-inventory.md, AGENTS.md
 - **Depends on:** 4928 (worktrees), 2564 (tracked-only gate)
 - **Heartbeat:** 2026-08-24

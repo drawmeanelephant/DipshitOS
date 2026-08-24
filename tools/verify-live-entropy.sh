@@ -26,18 +26,31 @@
 # reap line. Evidence saved under artifacts/live-entropy-* +
 # artifacts/m4-entropy-live.txt.
 
+# Run isolation (#523 item 2 / issue #528, claim 5069): every boot attaches
+# a private DiskImageKit stacked disk (read-only base + throwaway ASIF
+# overlay), a private EFI var store (recreated fresh per boot, as the
+# pre-isolation gate did), and a private serial log under $RUN_DIR — two
+# concurrent instances cannot clobber each other's disks, NVRAM, or
+# evidence. Set DIPSHIT_GATE_SUFFIX=_alt to give this instance its own
+# canonical evidence names (two simultaneous instances MUST differ), and
+# DIPSHIT_KEEP_RUN=1 to keep the scratch dir.
+#
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-GATE_LOG="artifacts/m4-entropy-live.txt"
+source tools/lib/gate-run.sh
+
+SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
+
+GATE_LOG="$(art m4-entropy-live.txt)"
 exec > >(tee "$GATE_LOG") 2>&1
-trap 'sleep 0.5' EXIT
+trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
 
 BOOTS="${BOOTS:-2}"
-REPORT="artifacts/live-entropy-report.txt"
-SCRIPT="artifacts/live-entropy-script.txt"
+REPORT="$(art live-entropy-report.txt)"
 # The static claim-8215 payload's exit line: the runner forwards the script
 # only after it appears, so the user root is free when `exec` runs.
 STATIC_EXIT_LINE="tasks user-el0 exited status=7"
@@ -46,6 +59,7 @@ STATIC_EXIT_LINE="tasks user-el0 exited status=7"
 EXEC_REAP_LINE="tasks user-exec reaped"
 
 echo "=== verify-live-entropy: claim 2665 — REAL virtio entropy -> CSPRNG seed -> random command, $BOOTS boot(s) ==="
+
 zig version
 swift --version 2>&1 | head -1
 sw_vers
@@ -60,54 +74,63 @@ zig build image
 swift build --package-path host/vm-runner --configuration release
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
+# --- per-run isolation -------------------------------------------------------------
+# Private scratch dir + pristine-boot overlay for EVERY boot.
+# See tools/lib/gate-run.sh.
+gate_begin live-entropy
+echo "run dir: $RUN_DIR"
+SCRIPT="$RUN_DIR/script.txt"
+
 printf 'pci\nrandom 32\nexec USER.BIN\necho rx-entropy-ok\n' > "$SCRIPT"
 
 run_one() {
     local tag="$1"
-    local run_log="artifacts/live-entropy-run-$tag.txt"
-    local serial_copy="artifacts/live-entropy-serial-$tag.log"
-    rm -f artifacts/efi-vars.bin artifacts/vm-serial.log
+    local run_log="$(art live-entropy-run-$tag.txt)"
+    local serial_copy="$(art live-entropy-serial-$tag.log)"
+    rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial-$tag.log"
 
     set +e
-    host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log \
+    host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
+        --serial "$RUN_DIR/vm-serial-$tag.log" \
         --script "$SCRIPT" --script-after "$STATIC_EXIT_LINE" \
         --script-expect "$EXEC_REAP_LINE" --timeout 60 > "$run_log" 2>&1
     local rc=$?
     set -e
-    [ -f artifacts/vm-serial.log ] && cp artifacts/vm-serial.log "$serial_copy" || true
+    [ -f "$RUN_DIR/vm-serial-$tag.log" ] && cp "$RUN_DIR/vm-serial-$tag.log" "$(art live-entropy-serial-$tag.log)" || true
+    local SER="$serial_copy"
 
     local bytes=0 banner=0 seed=0 did1044=0 random_ok=0 hex_len=0 exec_ok=0 stack=0 aslr_ok=0 echo_ok=0 fatal=0
     local hex="" stack_hex="" boot_stack=""
-    if [ -f artifacts/vm-serial.log ]; then
-        bytes="$(wc -c < artifacts/vm-serial.log | tr -d ' ')"
-        [ "$(grep -aFxc -- "DipshitOS kernel has seized control." artifacts/vm-serial.log || true)" = 1 ] && banner=1
-        [ "$(grep -aFxc -- "entropy: seeded n=64" artifacts/vm-serial.log || true)" = 1 ] && seed=1
-        [ "$(grep -aFc -- "DID=0x0000000000001044" artifacts/vm-serial.log || true)" -ge 1 ] && did1044=1
+    if [ -f "$SER" ]; then
+        bytes="$(wc -c < "$SER" | tr -d ' ')"
+        [ "$(grep -aFxc -- "DipshitOS kernel has seized control." "$SER" || true)" = 1 ] && banner=1
+        [ "$(grep -aFxc -- "entropy: seeded n=64" "$SER" || true)" = 1 ] && seed=1
+        [ "$(grep -aFc -- "DID=0x0000000000001044" "$SER" || true)" -ge 1 ] && did1044=1
         # Boot-time ASLR (claim 3693): the static EL0 payload's stack is
         # rebuilt at a CSPRNG-randomized VA — `aslr: boot user stack=0x…`
         # must be present and in the ASLR band.
-        boot_stack="$(grep -a 'aslr: boot user stack=' artifacts/vm-serial.log | sed -E 's/.*stack=0x([0-9a-f]{16}).*/\1/' | head -1 || true)"
+        boot_stack="$(grep -a 'aslr: boot user stack=' "$SER" | sed -E 's/.*stack=0x([0-9a-f]{16}).*/\1/' | head -1 || true)"
         if [ -n "$boot_stack" ]; then
             bdec=$((16#$boot_stack))
             [ "$bdec" -ge $((16#10000000)) ] && [ "$bdec" -lt $((16#80000000)) ] && aslr_ok=1
         fi
         # `random 32` line: exactly 64 lowercase hex chars after "hex=".
         local rline
-        rline="$(grep -a 'random: n=32 hex=' artifacts/vm-serial.log | head -1 || true)"
+        rline="$(grep -a 'random: n=32 hex=' "$SER" | head -1 || true)"
         if [ -n "$rline" ]; then
             hex="$(printf '%s' "$rline" | sed -E 's/.*hex=([0-9a-f]+)$/\1/')"
             hex_len="${#hex}"
             [ "$hex_len" = 64 ] && random_ok=1
         fi
-        [ "$(grep -aFc -- "exec: loaded USER.BIN size=" artifacts/vm-serial.log || true)" = 1 ] && exec_ok=1
+        [ "$(grep -aFc -- "exec: loaded USER.BIN size=" "$SER" || true)" = 1 ] && exec_ok=1
         local eline
-        eline="$(grep -a 'exec: loaded USER.BIN' artifacts/vm-serial.log | head -1 || true)"
+        eline="$(grep -a 'exec: loaded USER.BIN' "$SER" | head -1 || true)"
         if [ -n "$eline" ]; then
             stack_hex="$(printf '%s' "$eline" | sed -E 's/.*stack=0x([0-9a-f]{16}).*/\1/')"
             [ -n "$stack_hex" ] && [ "$stack_hex" != "0000000000000000" ] && stack=1
         fi
-        [ "$(grep -aFxc -- "rx-entropy-ok" artifacts/vm-serial.log || true)" = 1 ] && echo_ok=1
-        grep -qF -- "[EXC] parking:" artifacts/vm-serial.log && fatal=1 || true
+        [ "$(grep -aFxc -- "rx-entropy-ok" "$SER" || true)" = 1 ] && echo_ok=1
+        grep -qF -- "[EXC] parking:" "$SER" && fatal=1 || true
     fi
     echo "$tag: runner-rc=$rc serial-bytes=$bytes banner=$banner seed=$seed did1044=$did1044 random=$random_ok hex-len=$hex_len exec=$exec_ok stack=$stack aslr=$aslr_ok echo=$echo_ok fatal=$fatal" | tee -a "$REPORT"
     echo "$tag: random-hex=$hex" | tee -a "$REPORT"

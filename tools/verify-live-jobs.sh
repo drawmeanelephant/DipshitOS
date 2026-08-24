@@ -25,6 +25,15 @@
 # registry's REAL exit status (whether it lands before `fg 1` or not is
 # hardware timing, but it must appear and appear once).
 #
+# Run isolation (#523 item 2 / issue #528, claim 5069): every boot attaches
+# a private DiskImageKit stacked disk (read-only base + throwaway ASIF
+# overlay), a private EFI var store (recreated fresh per boot, as the
+# pre-isolation gate did), and a private serial log under $RUN_DIR — two
+# concurrent instances cannot clobber each other's disks, NVRAM, or
+# evidence. Set DIPSHIT_GATE_SUFFIX=_alt to give this instance its own
+# canonical evidence names (two simultaneous instances MUST differ), and
+# DIPSHIT_KEEP_RUN=1 to keep the scratch dir.
+#
 # Class B — Apple silicon + VZ only.
 
 set -euo pipefail
@@ -32,12 +41,17 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-GATE_LOG="artifacts/live-jobs-gate.txt"
+source tools/lib/gate-run.sh
+
+SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
+
+GATE_LOG="$(art live-jobs-gate.txt)"
 exec > >(tee "$GATE_LOG") 2>&1
-trap 'sleep 0.5' EXIT
+trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
 
 BOOTS="${BOOTS:-1}"
-REPORT="artifacts/live-jobs-report.txt"
+REPORT="$(art live-jobs-report.txt)"
 SCRIPT="artifacts/live-jobs-input.txt"
 
 echo "=== verify-live-jobs: M19 P7 — background jobs on VZ, $BOOTS boot(s) ==="
@@ -53,6 +67,13 @@ zig build
 zig build image
 swift build --package-path host/vm-runner --configuration release
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
+
+# --- per-run isolation -------------------------------------------------------------
+# Private scratch dir + pristine-boot overlay for EVERY boot.
+# See tools/lib/gate-run.sh.
+gate_begin live-jobs
+echo "run dir: $RUN_DIR"
+
 
 cat > "$SCRIPT" <<'EOF'
 exec COUNTER.BIN &
@@ -70,29 +91,31 @@ EOF
 
 run_one() {
     local tag="$1"
-    rm -f artifacts/efi-vars.bin artifacts/vm-serial.log
+    rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial-$tag.log"
     set +e
-    host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log \
+    host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
+        --serial "$RUN_DIR/vm-serial-$tag.log" \
         --script "$SCRIPT" --script-expect "jobs-done" --timeout 60 \
-        > "artifacts/live-jobs-run-$tag.txt" 2>&1
+        > "$(art live-jobs-run-$tag.txt)" 2>&1
     local RC=$?
     set -e
-    [ -f artifacts/vm-serial.log ] && cp artifacts/vm-serial.log "artifacts/live-jobs-serial-$tag.log" || true
+    [ -f "$RUN_DIR/vm-serial-$tag.log" ] && cp "$RUN_DIR/vm-serial-$tag.log" "$(art live-jobs-serial-$tag.log)" || true
+    local SER="$(art live-jobs-serial-$tag.log)"
 
     local SERIAL_BYTES BANNER=0 LAUNCH1=0 LISTING=0 LAUNCH2=0 DONE43=0 STILLRUNNING=0 DONE=0
-    SERIAL_BYTES=$(wc -c < artifacts/vm-serial.log 2>/dev/null | tr -d ' ')
-    if [ -f artifacts/vm-serial.log ]; then
-        grep -qF "DipshitOS kernel" artifacts/vm-serial.log && BANNER=1
+    SERIAL_BYTES=$(wc -c < "$SER" 2>/dev/null | tr -d ' ')
+    if [ -f "$SER" ]; then
+        grep -qF "DipshitOS kernel" "$SER" && BANNER=1
         # Launch confirmations with real tracked pids behind them.
-        [ "$(grep -x -c '\[1\] running: COUNTER.BIN' artifacts/vm-serial.log | tr -d ' ')" = 1 ] && LAUNCH1=1
-        [ "$(grep -x -c '\[2\] running: STATUS43.BIN' artifacts/vm-serial.log | tr -d ' ')" = 1 ] && LAUNCH2=1
+        [ "$(grep -x -c '\[1\] running: COUNTER.BIN' "$SER" | tr -d ' ')" = 1 ] && LAUNCH1=1
+        [ "$(grep -x -c '\[2\] running: STATUS43.BIN' "$SER" | tr -d ' ')" = 1 ] && LAUNCH2=1
         # `jobs` sees the eternal child as Running.
-        [ "$(grep -x -c '\[1\] Running: COUNTER.BIN' artifacts/vm-serial.log | tr -d ' ')" = 1 ] && LISTING=1
+        [ "$(grep -x -c '\[1\] Running: COUNTER.BIN' "$SER" | tr -d ' ')" = 1 ] && LISTING=1
         # Exactly one Done line, carrying the child's REAL registry status.
-        [ "$(grep -x -c '\[2\] Done: STATUS43.BIN (exit=43)' artifacts/vm-serial.log | tr -d ' ')" = 1 ] && DONE43=1
+        [ "$(grep -x -c '\[2\] Done: STATUS43.BIN (exit=43)' "$SER" | tr -d ' ')" = 1 ] && DONE43=1
         # fg on the eternal child honestly times out, leaving it tracked.
-        grep -qF "fg: job 1 still running" artifacts/vm-serial.log && STILLRUNNING=1
-        grep -qF "jobs-done" artifacts/vm-serial.log && DONE=1
+        grep -qF "fg: job 1 still running" "$SER" && STILLRUNNING=1
+        grep -qF "jobs-done" "$SER" && DONE=1
     fi
     echo "$tag: rc=$RC bytes=$SERIAL_BYTES banner=$BANNER launch1=$LAUNCH1 listing=$LISTING launch2=$LAUNCH2 done43=$DONE43 stillrunning=$STILLRUNNING done=$DONE"
     [ "$RC" = 0 ] && [ "$BANNER" = 1 ] && [ "$LAUNCH1" = 1 ] && [ "$LAUNCH2" = 1 ] \

@@ -8,6 +8,15 @@
 #
 # The walk: color on, ls, color off, echo color-live-ok
 #
+# Run isolation (#523 item 2 / issue #528, claim 5069): every boot attaches
+# a private DiskImageKit stacked disk (read-only base + throwaway ASIF
+# overlay), a private EFI var store (recreated fresh per boot, as the
+# pre-isolation gate did), and a private serial log under $RUN_DIR — two
+# concurrent instances cannot clobber each other's disks, NVRAM, or
+# evidence. Set DIPSHIT_GATE_SUFFIX=_alt to give this instance its own
+# canonical evidence names (two simultaneous instances MUST differ), and
+# DIPSHIT_KEEP_RUN=1 to keep the scratch dir.
+#
 # Class B — Apple silicon + VZ only.
 
 set -euo pipefail
@@ -15,13 +24,17 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-GATE_LOG="artifacts/live-color-gate.txt"
+source tools/lib/gate-run.sh
+
+SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
+
+GATE_LOG="$(art live-color-gate.txt)"
 exec > >(tee "$GATE_LOG") 2>&1
-trap 'sleep 0.5' EXIT
+trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
 
 BOOTS="${BOOTS:-1}"
-REPORT="artifacts/live-color-report.txt"
-SCRIPT="artifacts/live-color-script.txt"
+REPORT="$(art live-color-report.txt)"
 
 echo "=== verify-live-color: M18 T5 — terminal ANSI colors on VZ, $BOOTS boot(s) ==="
 
@@ -37,6 +50,14 @@ zig build image
 swift build --package-path host/vm-runner --configuration release
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
+# --- per-run isolation -------------------------------------------------------------
+# Private scratch dir + pristine-boot overlay for EVERY boot.
+# See tools/lib/gate-run.sh.
+gate_begin live-color
+echo "run dir: $RUN_DIR"
+SCRIPT="$RUN_DIR/script.txt"
+
+
 cat > "$SCRIPT" <<'EOF'
 color on
 color
@@ -47,23 +68,25 @@ EOF
 
 run_one() {
     local tag="$1"
-    rm -f artifacts/efi-vars.bin artifacts/vm-serial.log
+    rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial-$tag.log"
     set +e
-    host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log \
+    host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
+        --serial "$RUN_DIR/vm-serial-$tag.log" \
         --script "$SCRIPT" --script-expect "color-live-ok" --timeout 30 \
-        > "artifacts/live-color-run-$tag.txt" 2>&1
+        > "$(art live-color-run-$tag.txt)" 2>&1
     local RC=$?
     set -e
-    [ -f artifacts/vm-serial.log ] && cp artifacts/vm-serial.log "artifacts/live-color-serial-$tag.log" || true
+    [ -f "$RUN_DIR/vm-serial-$tag.log" ] && cp "$RUN_DIR/vm-serial-$tag.log" "$(art live-color-serial-$tag.log)" || true
+    local SER="$(art live-color-serial-$tag.log)"
 
     local SERIAL_BYTES BANNER=0 COLOR_ON=0 LS_DIR=0 COLOR_OFF=0 DONE=0
-    SERIAL_BYTES=$(wc -c < artifacts/vm-serial.log 2>/dev/null | tr -d ' ')
-    if [ -f artifacts/vm-serial.log ]; then
-        grep -qF "DipshitOS kernel" artifacts/vm-serial.log && BANNER=1
-        grep -qF "color: on" artifacts/vm-serial.log && COLOR_ON=1
-        grep -qF "[dir]" artifacts/vm-serial.log && LS_DIR=1
-        grep -qF "color: off" artifacts/vm-serial.log && COLOR_OFF=1
-        grep -qF "color-live-ok" artifacts/vm-serial.log && DONE=1
+    SERIAL_BYTES=$(wc -c < "$SER" 2>/dev/null | tr -d ' ')
+    if [ -f "$SER" ]; then
+        grep -qF "DipshitOS kernel" "$SER" && BANNER=1
+        grep -qF "color: on" "$SER" && COLOR_ON=1
+        grep -qF "[dir]" "$SER" && LS_DIR=1
+        grep -qF "color: off" "$SER" && COLOR_OFF=1
+        grep -qF "color-live-ok" "$SER" && DONE=1
     fi
     echo "$tag: rc=$RC bytes=$SERIAL_BYTES banner=$BANNER on=$COLOR_ON dir=$LS_DIR off=$COLOR_OFF done=$DONE"
     [ "$RC" = 0 ] && [ "$BANNER" = 1 ] && [ "$COLOR_ON" = 1 ] && [ "$LS_DIR" = 1 ] && [ "$COLOR_OFF" = 1 ] && [ "$DONE" = 1 ]

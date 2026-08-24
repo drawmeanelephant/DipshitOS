@@ -20,6 +20,15 @@
 #   serial-bytes    vm-serial.log size
 #   banner/help/fault-trigger/exc-sync/exc-ec/exc-resume/resumed/echo   flags
 #
+# Run isolation (#523 item 2 / issue #528, claim 5069): every boot attaches
+# a private DiskImageKit stacked disk (read-only base + throwaway ASIF
+# overlay), a private EFI var store (recreated fresh per boot, as the
+# pre-isolation gate did), and a private serial log under $RUN_DIR — two
+# concurrent instances cannot clobber each other's disks, NVRAM, or
+# evidence. Set DIPSHIT_GATE_SUFFIX=_alt to give this instance its own
+# canonical evidence names (two simultaneous instances MUST differ), and
+# DIPSHIT_KEEP_RUN=1 to keep the scratch dir.
+#
 # Class B — Apple silicon + VZ only; boots a real VM. A green CI badge
 # proves class A only and says nothing about this gate.
 #
@@ -37,15 +46,20 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-GATE_LOG="artifacts/live-exceptions-gate.txt"
+source tools/lib/gate-run.sh
+
+SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
+
+GATE_LOG="$(art live-exceptions-gate.txt)"
 exec > >(tee "$GATE_LOG") 2>&1
-trap 'sleep 0.5' EXIT
+trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
 
 BOOTS="${BOOTS:-1}"
-REPORT="artifacts/live-exceptions-report.txt"
-SCRIPT="artifacts/live-exceptions-script.txt"
+REPORT="$(art live-exceptions-report.txt)"
 
 echo "=== verify-live-exceptions: claim 9746 — live exception vectors (VBAR_EL1 + sync handler), $BOOTS boot(s) ==="
+
 
 # --- tool versions + revision -----------------------------------------------
 zig version; swift --version 2>&1 | head -1; sw_vers
@@ -61,6 +75,13 @@ zig build image
 swift build --package-path host/vm-runner --configuration release
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
+# --- per-run isolation -------------------------------------------------------------
+# Private scratch dir + pristine-boot overlay for EVERY boot.
+# See tools/lib/gate-run.sh.
+gate_begin live-exceptions
+echo "run dir: $RUN_DIR"
+SCRIPT="$RUN_DIR/script.txt"
+
 # --- the scripted keystrokes ------------------------------------------------
 cat > "$SCRIPT" <<'EOF'
 help
@@ -71,28 +92,30 @@ EOF
 # --- THE GATE: per-boot live run, fresh variable store each -----------------
 run_one() {
     local tag="$1"
-    rm -f artifacts/efi-vars.bin artifacts/vm-serial.log
+    rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial-$tag.log"
     set +e
-    host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log \
+    host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
+        --serial "$RUN_DIR/vm-serial-$tag.log" \
         --script "$SCRIPT" --script-expect "rx-exc-ok" --timeout 40 \
-        > "artifacts/live-exceptions-run-$tag.txt" 2>&1
+        > "$(art live-exceptions-run-$tag.txt)" 2>&1
     local RC=$?
     set -e
-    [ -f artifacts/vm-serial.log ] && cp artifacts/vm-serial.log "artifacts/live-exceptions-serial-$tag.log" || true
+    [ -f "$RUN_DIR/vm-serial-$tag.log" ] && cp "$RUN_DIR/vm-serial-$tag.log" "$(art live-exceptions-serial-$tag.log)" || true
+    local SER="$(art live-exceptions-serial-$tag.log)"
 
     local SERIAL_BYTES
-    SERIAL_BYTES=$(wc -c < artifacts/vm-serial.log 2>/dev/null | tr -d ' ')
+    SERIAL_BYTES=$(wc -c < "$SER" 2>/dev/null | tr -d ' ')
     local BANNER=0 HELP=0 TRIGGER=0 EXC_SYNC=0 EXC_EC=0 EXC_RESUME=0 RESUMED=0 ECHO=0
-    [ -f artifacts/vm-serial.log ] || { SERIAL_BYTES=0; }
-    if [ -f artifacts/vm-serial.log ]; then
-        grep -qF -- "DipshitOS kernel has seized control." artifacts/vm-serial.log && BANNER=1
-        grep -qF -- "available commands:" artifacts/vm-serial.log && HELP=1
-        grep -qF -- "fault: triggering udf (synchronous exception)..." artifacts/vm-serial.log && TRIGGER=1
-        grep -qF -- "[EXC] sync from EL1" artifacts/vm-serial.log && EXC_SYNC=1
-        grep -qF -- "ec=0x00 unknown-reason" artifacts/vm-serial.log && EXC_EC=1
-        grep -qF -- "[EXC] resume-armed: skipping faulting instruction" artifacts/vm-serial.log && EXC_RESUME=1
-        grep -qF -- "fault: handled, resumed after faulting instruction" artifacts/vm-serial.log && RESUMED=1
-        grep -qF -- "rx-exc-ok" artifacts/vm-serial.log && ECHO=1
+    [ -f "$SER" ] || { SERIAL_BYTES=0; }
+    if [ -f "$SER" ]; then
+        grep -qF -- "DipshitOS kernel has seized control." "$SER" && BANNER=1
+        grep -qF -- "available commands:" "$SER" && HELP=1
+        grep -qF -- "fault: triggering udf (synchronous exception)..." "$SER" && TRIGGER=1
+        grep -qF -- "[EXC] sync from EL1" "$SER" && EXC_SYNC=1
+        grep -qF -- "ec=0x00 unknown-reason" "$SER" && EXC_EC=1
+        grep -qF -- "[EXC] resume-armed: skipping faulting instruction" "$SER" && EXC_RESUME=1
+        grep -qF -- "fault: handled, resumed after faulting instruction" "$SER" && RESUMED=1
+        grep -qF -- "rx-exc-ok" "$SER" && ECHO=1
     fi
     {
         echo "$tag: rc=$RC serial-bytes=$SERIAL_BYTES banner=$BANNER help=$HELP trigger=$TRIGGER exc-sync=$EXC_SYNC exc-ec=$EXC_EC exc-resume=$EXC_RESUME resumed=$RESUMED echo=$ECHO"

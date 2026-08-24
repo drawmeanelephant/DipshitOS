@@ -47,6 +47,12 @@
 # (runner output, serial copies, the report) + gpu-screen-*s.png (the
 # captures).
 #
+# Run isolation (#523 item 2 / issue #528, claim 5069): the boot attaches a
+# private DiskImageKit stacked disk (read-only base + throwaway ASIF
+# overlay), a private EFI var store, and writes its serial log and screen
+# captures under $RUN_DIR before they are copied to the canonical evidence
+# names. DIPSHIT_GATE_SUFFIX=_alt / DIPSHIT_KEEP_RUN=1 supported.
+#
 # Class B — Apple silicon + VZ only; boots real VMs. A green CI badge
 # proves class A only and says nothing about this gate.
 #
@@ -61,11 +67,16 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-GATE_LOG="artifacts/live-text-gate.txt"
-exec > >(tee "$GATE_LOG") 2>&1
-trap 'sleep 0.5' EXIT
+source tools/lib/gate-run.sh
 
-REPORT="artifacts/live-text-report.txt"
+SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
+
+GATE_LOG="$(art live-text-gate.txt)"
+exec > >(tee "$GATE_LOG") 2>&1
+trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
+
+REPORT="$(art live-text-report.txt)"
 RUNNER="host/vm-runner/.build/release/VMRunner"
 
 echo "=== verify-live-text: claim 3194 — framebuffer text (BSS 8x8 font, banner painted on G1's scanout, first words on the screen) ==="
@@ -77,27 +88,35 @@ swift build --package-path host/vm-runner --configuration release >/dev/null 2>&
 # The other live gates' convention: the fresh binary needs the
 # com.apple.security.virtualization entitlement before it can boot a VM.
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
+
+# --- per-run isolation -------------------------------------------------------
+# Private scratch dir + pristine-boot overlay for EVERY boot.
+gate_begin live-text
+echo "run dir: $RUN_DIR"
+SCRIPT="$RUN_DIR/script.txt"
 zig build >/dev/null 2>&1
 zig build image >/dev/null 2>&1
 
 # 2. The scripted boot: the `text` command reports the layer AFTER the
 # boot banner painted it (the banner itself is the painted evidence).
-SCRIPT="artifacts/live-text-script.txt"
+SCRIPT="$RUN_DIR/script.txt"
 printf 'text\n' > "$SCRIPT"
-rm -f artifacts/vm-serial.log artifacts/gpu-screen-*.png "$REPORT"
+rm -f "$RUN_DIR/vm-serial.log" "$RUN_DIR"/gpu-screen-*.png "$REPORT"
 
 echo
 echo "[2/3] live VZ run (scripted)"
 set +e
-"$RUNNER" artifacts/disk.img artifacts/vm-serial.log \
-    --screen artifacts/gpu-screen --script "$SCRIPT" \
+"$RUNNER" "${GATE_RUNNER_ARGS[@]}" \
+    --serial "$RUN_DIR/vm-serial.log" --screen "$RUN_DIR/gpu-screen" --script "$SCRIPT" \
     --expect "text: boot banner presented" --timeout 30 \
-    > artifacts/live-text-run.txt 2>&1
+    > "$(art live-text-run.txt)" 2>&1
 RC=$?
 set -e
+[ -f "$RUN_DIR/vm-serial.log" ] && cp "$RUN_DIR/vm-serial.log" "$(art live-text-serial.log)" || true
+for f in "$RUN_DIR"/gpu-screen-*.png; do [ -e "$f" ] && cp "$f" artifacts/ || true; done
 echo "runner exit: $RC"
 echo "--- runner output (text/gpu lines) ---"
-grep -E "gpu:|text:|SUCCESS|FAILURE" artifacts/live-text-run.txt | head -40
+grep -E "gpu:|text:|SUCCESS|FAILURE" "$(art live-text-run.txt)" | head -40
 if [ "$RC" -ne 0 ]; then
     echo "FAIL: runner did not complete successfully (exit $RC)"
     exit 1
@@ -116,24 +135,24 @@ fail() { echo "FAIL: $1"; exit 1; }
 # path produced each capture. Require the SCK line and forbid the
 # fallback line — a single fallback capture means the decoded PNG is not
 # what the operator sees.
-grep -q "capture path: ScreenCaptureKit" artifacts/live-text-run.txt \
+grep -q "capture path: ScreenCaptureKit" "$(art live-text-run.txt)" \
     || fail "pixel evidence did not come from ScreenCaptureKit (composited window) — Screen Recording permission missing or the SCK path broke"
-if grep -q "capture path: cacheDisplay fallback" artifacts/live-text-run.txt; then
+if grep -q "capture path: cacheDisplay fallback" "$(art live-text-run.txt)"; then
     fail "some captures fell back to cacheDisplay (offscreen render) — every capture must be the composited window"
 fi
 
 # Phase 1 — the shared-seam serial evidence (the machine still boots to a
 # terminal on serial AND paints the same words on the screen).
-grep -q "gpu: pre-rearm st=00" artifacts/vm-serial.log || fail "missing pre-rearm st=00 (the claim-time reset-at-ExitBootServices observation)"
-grep -q "text: boot banner presented" artifacts/vm-serial.log || fail "boot banner was not presented to the framebuffer"
+grep -q "gpu: pre-rearm st=00" "$(art live-text-serial.log)" || fail "missing pre-rearm st=00 (the claim-time reset-at-ExitBootServices observation)"
+grep -q "text: boot banner presented" "$(art live-text-serial.log)" || fail "boot banner was not presented to the framebuffer"
 # Since G3 (Road Pops), the echoed session + replies land in the text
 # ring, so the report's cur/lines are session-dependent (it even reflects
 # its own output progress mid-print) — the STABLE parts are the region,
 # the cell, and the fg/bg colors, which is what G2 proves.
-grep -q "text: rows=90 cols=160 cell=8x8" artifacts/vm-serial.log || fail "the text report does not show the 90x160 region with 8x8 cells"
-grep -q "text: rows=90 cols=160 cell=8x8 .*fg=0x000000000000ff00 bg=0x0000000000101418" artifacts/vm-serial.log || fail "the text report does not show the G2 fg/bg colors"
-grep -q "DipshitOS - AArch64 firmware-assisted kernel monitor" artifacts/vm-serial.log || fail "serial transcript lost the banner (shared-seam regression)"
-grep -q "dipshit> " artifacts/vm-serial.log || fail "serial transcript lost the prompt (shared-seam regression)"
+grep -q "text: rows=90 cols=160 cell=8x8" "$(art live-text-serial.log)" || fail "the text report does not show the 90x160 region with 8x8 cells"
+grep -q "text: rows=90 cols=160 cell=8x8 .*fg=0x000000000000ff00 bg=0x0000000000101418" "$(art live-text-serial.log)" || fail "the text report does not show the G2 fg/bg colors"
+grep -q "DipshitOS - AArch64 firmware-assisted kernel monitor" "$(art live-text-serial.log)" || fail "serial transcript lost the banner (shared-seam regression)"
+grep -q "dipshit> " "$(art live-text-serial.log)" || fail "serial transcript lost the prompt (shared-seam regression)"
 
 # Phase 2 — the pixel proof: decode the captured PNG and assert TEXT.
 # The runner writes `--screen <base>` captures as <base>-Ns (no extension).
@@ -234,4 +253,4 @@ fi
 
 echo
 echo "=== verify-live-text: PASS (the machine boots to words on the screen — banner on serial AND on the framebuffer) ==="
-echo "evidence: artifacts/live-text-run.txt, artifacts/vm-serial.log, artifacts/gpu-screen-*.png" | tee "$REPORT"
+echo "evidence: "$(art live-text-run.txt)", the per-run serial log, artifacts/gpu-screen-*.png" | tee "$REPORT"

@@ -26,6 +26,15 @@
 #   serial-bytes    vm-serial.log size
 #   banner / interrupts-armed / timer-cmd-armed / echo / irq / heartbeat
 #
+# Run isolation (#523 item 2 / issue #528, claim 5069): every boot attaches
+# a private DiskImageKit stacked disk (read-only base + throwaway ASIF
+# overlay), a private EFI var store (recreated fresh per boot, as the
+# pre-isolation gate did), and a private serial log under $RUN_DIR — two
+# concurrent instances cannot clobber each other's disks, NVRAM, or
+# evidence. Set DIPSHIT_GATE_SUFFIX=_alt to give this instance its own
+# canonical evidence names (two simultaneous instances MUST differ), and
+# DIPSHIT_KEEP_RUN=1 to keep the scratch dir.
+#
 # Class B — Apple silicon + VZ only; boots a real VM. A green CI badge
 # proves class A only and says nothing about this gate.
 #
@@ -35,23 +44,27 @@
 #
 # Evidence saved under artifacts/: live-timer-gate.txt (full output),
 # live-timer-report.txt (per-boot detail), live-timer-run-<NN>.txt (runner
-# output), live-timer-serial-<NN>.log (vm-serial.log copy),
-# live-timer-script.txt (the forwarded keystrokes).
+# output), live-timer-serial-<NN>.log (vm-serial.log copy).
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-GATE_LOG="artifacts/live-timer-gate.txt"
+source tools/lib/gate-run.sh
+
+SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
+
+GATE_LOG="$(art live-timer-gate.txt)"
 exec > >(tee "$GATE_LOG") 2>&1
-trap 'sleep 0.5' EXIT
+trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
 
 BOOTS="${BOOTS:-1}"
-REPORT="artifacts/live-timer-report.txt"
-SCRIPT="artifacts/live-timer-script.txt"
+REPORT="$(art live-timer-report.txt)"
 
 echo "=== verify-live-timer: claim 9187 — live CNTP PPI through the EL1 IRQ vector, $BOOTS boot(s) ==="
+
 
 # --- tool versions + revision -----------------------------------------------
 zig version; swift --version 2>&1 | head -1; sw_vers
@@ -67,6 +80,11 @@ zig build image
 swift build --package-path host/vm-runner --configuration release
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
+# --- per-run isolation -------------------------------------------------------
+gate_begin live-timer
+echo "run dir: $RUN_DIR"
+SCRIPT="$RUN_DIR/script.txt"
+
 # --- the scripted keystrokes ------------------------------------------------
 cat > "$SCRIPT" <<'EOF'
 timer
@@ -76,28 +94,30 @@ EOF
 # --- THE GATE: per-boot live run, fresh variable store each -----------------
 run_one() {
     local tag="$1"
-    rm -f artifacts/efi-vars.bin artifacts/vm-serial.log
+    rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial-$tag.log"
     set +e
     # --script-expect watches the fifth IRQ heartbeat (written ~5 s after boot);
     # the runner exits 0 as soon as it appears in the serial log.
-    host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log \
+    host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
+        --serial "$RUN_DIR/vm-serial-$tag.log" \
         --script "$SCRIPT" --script-expect "timer heartbeat ticks=5 irq=5 poll=0" --timeout 60 \
-        > "artifacts/live-timer-run-$tag.txt" 2>&1
+        > "$(art live-timer-run-$tag.txt)" 2>&1
     local RC=$?
     set -e
-    [ -f artifacts/vm-serial.log ] && cp artifacts/vm-serial.log "artifacts/live-timer-serial-$tag.log" || true
+    local SER="$(art live-timer-serial-$tag.log)"
+    [ -f "$RUN_DIR/vm-serial-$tag.log" ] && cp "$RUN_DIR/vm-serial-$tag.log" "$SER" || true
 
     local SERIAL_BYTES
-    SERIAL_BYTES=$(wc -c < artifacts/vm-serial.log 2>/dev/null | tr -d ' ')
+    SERIAL_BYTES=$(wc -c < "$SER" 2>/dev/null | tr -d ' ')
     local BANNER=0 INTERRUPTS=0 CMD_ARMED=0 ECHO=0 IRQ=0 HEARTBEAT=0
-    [ -f artifacts/vm-serial.log ] || { SERIAL_BYTES=0; }
-    if [ -f artifacts/vm-serial.log ]; then
-        grep -qF -- "DipshitOS kernel has seized control." artifacts/vm-serial.log && BANNER=1
-        grep -qF -- "interrupts: gic=" artifacts/vm-serial.log && INTERRUPTS=1
-        grep -qF -- "timer: armed=1" artifacts/vm-serial.log && CMD_ARMED=1
-        grep -qF -- "rx-timer-ok" artifacts/vm-serial.log && ECHO=1
-        grep -qF -- "timer irq delivered ppi=0x1e irq_ticks=1" artifacts/vm-serial.log && IRQ=1
-        grep -qF -- "timer heartbeat ticks=5 irq=5 poll=0" artifacts/vm-serial.log && HEARTBEAT=1
+    [ -f "$SER" ] || { SERIAL_BYTES=0; }
+    if [ -f "$SER" ]; then
+        grep -qF -- "DipshitOS kernel has seized control." "$SER" && BANNER=1
+        grep -qF -- "interrupts: gic=" "$SER" && INTERRUPTS=1
+        grep -qF -- "timer: armed=1" "$SER" && CMD_ARMED=1
+        grep -qF -- "rx-timer-ok" "$SER" && ECHO=1
+        grep -qF -- "timer irq delivered ppi=0x1e irq_ticks=1" "$SER" && IRQ=1
+        grep -qF -- "timer heartbeat ticks=5 irq=5 poll=0" "$SER" && HEARTBEAT=1
     fi
     {
         echo "$tag: rc=$RC serial-bytes=$SERIAL_BYTES banner=$BANNER interrupts=$INTERRUPTS cmd-armed=$CMD_ARMED echo=$ECHO irq=$IRQ heartbeat=$HEARTBEAT"
@@ -136,7 +156,7 @@ if [ "$PASS" = "$BOOTS" ]; then
     sleep 0.5
     exit 0
 else
-    echo "verify-live-timer: FAILED — $PASS/$BOOTS boot(s) passed; see artifacts/live-timer-report.txt and the per-boot serial logs."
+    echo "verify-live-timer: FAILED — $PASS/$BOOTS boot(s) passed; see $(art live-timer-report.txt) and the per-boot serial logs."
     echo "FAIL: $PASS/$BOOTS" >> "$REPORT"
     sleep 0.5
     exit 1

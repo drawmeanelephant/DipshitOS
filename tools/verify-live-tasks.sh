@@ -35,6 +35,15 @@
 #   banner / interrupts / tasks-cmd / shell-row / worker-row / worker-adv /
 #   echo / heartbeat  per-assertion flags
 #
+# Run isolation (#523 item 2 / issue #528, claim 5069): every boot attaches
+# a private DiskImageKit stacked disk (read-only base + throwaway ASIF
+# overlay), a private EFI var store (recreated fresh per boot, as the
+# pre-isolation gate did), and a private serial log under $RUN_DIR — two
+# concurrent instances cannot clobber each other's disks, NVRAM, or
+# evidence. Set DIPSHIT_GATE_SUFFIX=_alt to give this instance its own
+# canonical evidence names (two simultaneous instances MUST differ), and
+# DIPSHIT_KEEP_RUN=1 to keep the scratch dir.
+#
 # Class B — Apple silicon + VZ only; boots a real VM. A green CI badge
 # proves class A only and says nothing about this gate.
 #
@@ -52,15 +61,20 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-GATE_LOG="artifacts/live-tasks-gate.txt"
+source tools/lib/gate-run.sh
+
+SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
+
+GATE_LOG="$(art live-tasks-gate.txt)"
 exec > >(tee "$GATE_LOG") 2>&1
-trap 'sleep 0.5' EXIT
+trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
 
 BOOTS="${BOOTS:-1}"
-REPORT="artifacts/live-tasks-report.txt"
-SCRIPT="artifacts/live-tasks-script.txt"
+REPORT="$(art live-tasks-report.txt)"
 
 echo "=== verify-live-tasks: claim 5275 — tick-driven round-robin tasks (shell + worker advance across ticks), $BOOTS boot(s) ==="
+
 
 # --- tool versions + revision -----------------------------------------------
 zig version; swift --version 2>&1 | head -1; sw_vers
@@ -76,6 +90,13 @@ zig build image
 swift build --package-path host/vm-runner --configuration release
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
+# --- per-run isolation -------------------------------------------------------------
+# Private scratch dir + pristine-boot overlay for EVERY boot.
+# See tools/lib/gate-run.sh.
+gate_begin live-tasks
+echo "run dir: $RUN_DIR"
+SCRIPT="$RUN_DIR/script.txt"
+
 # --- the scripted keystrokes ------------------------------------------------
 cat > "$SCRIPT" <<'EOF'
 tasks
@@ -85,34 +106,36 @@ EOF
 # --- THE GATE: per-boot live run, fresh variable store each -----------------
 run_one() {
     local tag="$1"
-    rm -f artifacts/efi-vars.bin artifacts/vm-serial.log
+    rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial-$tag.log"
     set +e
     # --script-expect waits for the worker's first report line, written
     # only after a full worker quantum, the EL0 quantum, and a shell idle
     # loop (>= 3 real context switches); the runner exits 0
     # as soon as it appears in the serial log.
-    host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log \
+    host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
+        --serial "$RUN_DIR/vm-serial-$tag.log" \
         --script "$SCRIPT" --script-expect "tasks worker advances=" --timeout 60 \
-        > "artifacts/live-tasks-run-$tag.txt" 2>&1
+        > "$(art live-tasks-run-$tag.txt)" 2>&1
     local RC=$?
     set -e
-    [ -f artifacts/vm-serial.log ] && cp artifacts/vm-serial.log "artifacts/live-tasks-serial-$tag.log" || true
+    [ -f "$RUN_DIR/vm-serial-$tag.log" ] && cp "$RUN_DIR/vm-serial-$tag.log" "artifacts/live-tasks-serial-$tag.log" || true
+    local SER="$(art live-tasks-serial-$tag.log)"
 
     local SERIAL_BYTES
-    SERIAL_BYTES=$(wc -c < artifacts/vm-serial.log 2>/dev/null | tr -d ' ')
+    SERIAL_BYTES=$(wc -c < "$SER" 2>/dev/null | tr -d ' ')
     local BANNER=0 INTERRUPTS=0 CMD=0 SHELL_ROW=0 WORKER_ROW=0 WORKER_ADV=0 WORKER_REPORT=0 ECHO=0 HEARTBEAT=0 SWITCHES=0
-    [ -f artifacts/vm-serial.log ] || { SERIAL_BYTES=0; }
-    if [ -f artifacts/vm-serial.log ]; then
-        grep -qF -- "DipshitOS kernel has seized control." artifacts/vm-serial.log && BANNER=1
-        grep -qF -- "interrupts: gic=" artifacts/vm-serial.log && INTERRUPTS=1
-        grep -qF -- "tasks: enabled=1" artifacts/vm-serial.log && CMD=1
-        grep -qE -- "shell +saves=[0-9]+ resumes=[0-9]+ advances=0" artifacts/vm-serial.log && SHELL_ROW=1
-        grep -qE -- "worker +saves=[0-9]+ resumes=[0-9]+ advances=[0-9]+" artifacts/vm-serial.log && WORKER_ROW=1
-        grep -qE -- "worker +saves=[0-9]+ resumes=[0-9]+ advances=[1-9][0-9]*" artifacts/vm-serial.log && WORKER_ADV=1
-        grep -qE -- "tasks worker advances=[1-9][0-9]*" artifacts/vm-serial.log && WORKER_REPORT=1
-        grep -qF -- "rx-tasks-ok" artifacts/vm-serial.log && ECHO=1
-        grep -qF -- "timer heartbeat ticks=5 irq=5 poll=0" artifacts/vm-serial.log && HEARTBEAT=1
-        grep -qE -- "tasks: enabled=1 current=[0-4] switches=[1-9][0-9]*" artifacts/vm-serial.log && SWITCHES=1
+    [ -f "$SER" ] || { SERIAL_BYTES=0; }
+    if [ -f "$SER" ]; then
+        grep -qF -- "DipshitOS kernel has seized control." "$SER" && BANNER=1
+        grep -qF -- "interrupts: gic=" "$SER" && INTERRUPTS=1
+        grep -qF -- "tasks: enabled=1" "$SER" && CMD=1
+        grep -qE -- "shell +saves=[0-9]+ resumes=[0-9]+ advances=0" "$SER" && SHELL_ROW=1
+        grep -qE -- "worker +saves=[0-9]+ resumes=[0-9]+ advances=[0-9]+" "$SER" && WORKER_ROW=1
+        grep -qE -- "worker +saves=[0-9]+ resumes=[0-9]+ advances=[1-9][0-9]*" "$SER" && WORKER_ADV=1
+        grep -qE -- "tasks worker advances=[1-9][0-9]*" "$SER" && WORKER_REPORT=1
+        grep -qF -- "rx-tasks-ok" "$SER" && ECHO=1
+        grep -qF -- "timer heartbeat ticks=5 irq=5 poll=0" "$SER" && HEARTBEAT=1
+        grep -qE -- "tasks: enabled=1 current=[0-4] switches=[1-9][0-9]*" "$SER" && SWITCHES=1
     fi
     {
         echo "$tag: rc=$RC serial-bytes=$SERIAL_BYTES banner=$BANNER interrupts=$INTERRUPTS cmd=$CMD shell-row=$SHELL_ROW worker-row=$WORKER_ROW worker-adv=$WORKER_ADV worker-report=$WORKER_REPORT echo=$ECHO heartbeat=$HEARTBEAT switches=$SWITCHES"

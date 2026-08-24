@@ -39,6 +39,15 @@
 #   banner / spawn / demo-adv / exited / reaped / state-col / pool /
 #   idle-row / echo  per-assertion flags
 #
+# Run isolation (#523 item 2 / issue #528, claim 5069): every boot attaches
+# a private DiskImageKit stacked disk (read-only base + throwaway ASIF
+# overlay), a private EFI var store (recreated fresh per boot, as the
+# pre-isolation gate did), and a private serial log under $RUN_DIR — two
+# concurrent instances cannot clobber each other's disks, NVRAM, or
+# evidence. Set DIPSHIT_GATE_SUFFIX=_alt to give this instance its own
+# canonical evidence names (two simultaneous instances MUST differ), and
+# DIPSHIT_KEEP_RUN=1 to keep the scratch dir.
+#
 # Class B — Apple silicon + VZ only; boots a real VM. A green CI badge
 # proves class A only and says nothing about this gate.
 #
@@ -56,15 +65,20 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-GATE_LOG="artifacts/live-lifecycle-gate.txt"
+source tools/lib/gate-run.sh
+
+SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
+
+GATE_LOG="$(art live-lifecycle-gate.txt)"
 exec > >(tee "$GATE_LOG") 2>&1
-trap 'sleep 0.5' EXIT
+trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
 
 BOOTS="${BOOTS:-1}"
-REPORT="artifacts/live-lifecycle-report.txt"
-SCRIPT="artifacts/live-lifecycle-script.txt"
+REPORT="$(art live-lifecycle-report.txt)"
 
 echo "=== verify-live-lifecycle: claim 6729 — user task lifecycle (spawn / exit / reap + idle task), $BOOTS boot(s) ==="
+
 
 # --- tool versions + revision -----------------------------------------------
 zig version; swift --version 2>&1 | head -1; sw_vers
@@ -80,6 +94,13 @@ zig build image
 swift build --package-path host/vm-runner --configuration release
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
+# --- per-run isolation -------------------------------------------------------------
+# Private scratch dir + pristine-boot overlay for EVERY boot.
+# See tools/lib/gate-run.sh.
+gate_begin live-lifecycle
+echo "run dir: $RUN_DIR"
+SCRIPT="$RUN_DIR/script.txt"
+
 # --- the scripted keystrokes ------------------------------------------------
 # `spawn` first (the pool's spare slot is free while the EL0 task is
 # still alive; it exits ~2 s after boot), then `tasks` (explicit states +
@@ -93,33 +114,41 @@ EOF
 # --- THE GATE: per-boot live run, fresh variable store each -----------------
 run_one() {
     local tag="$1"
-    rm -f artifacts/efi-vars.bin artifacts/vm-serial.log
+    rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial-$tag.log"
     set +e
     # --script-expect waits for the REAP line: `tasks user-el0 reaped`
     # only appears after the EL0 task exited (zombie), the idle task ran
     # a quantum and reaped it, and the shell loop printed the report —
     # i.e. the whole exit/reap half of the lifecycle.
-    host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log \
+    host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
+        --serial "$RUN_DIR/vm-serial-$tag.log" \
         --script "$SCRIPT" --script-expect "tasks user-el0 reaped" --timeout 60 \
-        > "artifacts/live-lifecycle-run-$tag.txt" 2>&1
+        > "$(art live-lifecycle-run-$tag.txt)" 2>&1
     local RC=$?
     set -e
-    [ -f artifacts/vm-serial.log ] && cp artifacts/vm-serial.log "artifacts/live-lifecycle-serial-$tag.log" || true
+    [ -f "$RUN_DIR/vm-serial-$tag.log" ] && cp "$RUN_DIR/vm-serial-$tag.log" "artifacts/live-lifecycle-serial-$tag.log" || true
+    local SER="$(art live-lifecycle-serial-$tag.log)"
 
     local SERIAL_BYTES
-    SERIAL_BYTES=$(wc -c < artifacts/vm-serial.log 2>/dev/null | tr -d ' ')
+    SERIAL_BYTES=$(wc -c < "$SER" 2>/dev/null | tr -d ' ')
     local BANNER=0 SPAWN=0 DEMO_ADV=0 EXITED=0 REAPED=0 STATE_COL=0 POOL=0 IDLE_ROW=0 ECHO=0
-    [ -f artifacts/vm-serial.log ] || { SERIAL_BYTES=0; }
-    if [ -f artifacts/vm-serial.log ]; then
-        grep -qF -- "DipshitOS kernel has seized control." artifacts/vm-serial.log && BANNER=1
-        grep -qE -- "spawn: spawn-demo id=[0-9]+" artifacts/vm-serial.log && SPAWN=1
-        grep -qE -- "tasks spawn-demo advances=[1-9][0-9]*" artifacts/vm-serial.log && DEMO_ADV=1
-        grep -qF -- "tasks user-el0 exited status=7" artifacts/vm-serial.log && EXITED=1
-        grep -qF -- "tasks user-el0 reaped" artifacts/vm-serial.log && REAPED=1
-        grep -qE -- "saves=[0-9]+ resumes=[0-9]+ advances=[0-9]+ state=(ready|running|zombie)" artifacts/vm-serial.log && STATE_COL=1
-        grep -qE -- "tasks: enabled=1 current=[0-9]+ switches=[0-9]+ pool=[0-9]+/7 zombies=[0-9]+" artifacts/vm-serial.log && POOL=1
-        grep -qE -- "idle +saves=[0-9]+ resumes=[0-9]+ advances=0 state=ready" artifacts/vm-serial.log && IDLE_ROW=1
-        grep -qF -- "rx-lifecycle-ok" artifacts/vm-serial.log && ECHO=1
+    [ -f "$SER" ] || { SERIAL_BYTES=0; }
+    if [ -f "$SER" ]; then
+        grep -qF -- "DipshitOS kernel has seized control." "$SER" && BANNER=1
+        grep -qE -- "spawn: spawn-demo id=[0-9]+" "$SER" && SPAWN=1
+        grep -qE -- "tasks spawn-demo advances=[1-9][0-9]*" "$SER" && DEMO_ADV=1
+        grep -qF -- "tasks user-el0 exited status=7" "$SER" && EXITED=1
+        grep -qF -- "tasks user-el0 reaped" "$SER" && REAPED=1
+        grep -qE -- "saves=[0-9]+ resumes=[0-9]+ advances=[0-9]+ state=(ready|running|zombie)" "$SER" && STATE_COL=1
+        # OBSERVED TODAY (2026-08-24, claim 5069): the task pool grew from
+        # 7 to 11 slots (later user programs register more tasks — see
+        # docs/march-m13.md APPS.TXT manifest) — serial bytes:
+        # `tasks: enabled=1 current=0 switches=5 pool=5/11 zombies=0`.
+        # The historical hard-coded /7 can never match again; pin only
+        # the shape, not the capacity.
+        grep -qE -- "tasks: enabled=1 current=[0-9]+ switches=[0-9]+ pool=[0-9]+/[0-9]+ zombies=[0-9]+" "$SER" && POOL=1
+        grep -qE -- "idle +saves=[0-9]+ resumes=[0-9]+ advances=0 state=ready" "$SER" && IDLE_ROW=1
+        grep -qF -- "rx-lifecycle-ok" "$SER" && ECHO=1
     fi
     {
         echo "$tag: rc=$RC serial-bytes=$SERIAL_BYTES banner=$BANNER spawn=$SPAWN demo-adv=$DEMO_ADV exited=$EXITED reaped=$REAPED state-col=$STATE_COL pool=$POOL idle-row=$IDLE_ROW echo=$ECHO"

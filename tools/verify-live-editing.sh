@@ -28,6 +28,10 @@
 # The default VM is untouched: without --input config.keyboards/pointing
 # Devices stay [] and every existing gate stays byte-identical.
 #
+# Run isolation (#523 item 2 / issue #528, claim 5069): private stacked
+# disk + EFI vars + serial log under $RUN_DIR; DIPSHIT_GATE_SUFFIX/_KEEP_RUN
+# supported.
+#
 # Class B -- Apple silicon + VZ only; boots a real VM.
 #
 # Usage:
@@ -41,9 +45,14 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-GATE_LOG="artifacts/live-editing-gate.txt"
+source tools/lib/gate-run.sh
+
+SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
+
+GATE_LOG="$(art live-editing-gate.txt)"
 exec > >(tee "$GATE_LOG") 2>&1
-trap 'sleep 0.5' EXIT
+trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
 
 REPORT="artifacts/live-editing-report.txt"
 
@@ -62,6 +71,10 @@ zig build image
 swift build --package-path host/vm-runner --configuration release
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
+# --- per-run isolation -------------------------------------------------------
+gate_begin live-editing
+echo "run dir: $RUN_DIR"
+
 # --- the serial script + the keyboard chord sequence ------------------------
 # The serial script only proves the shell stays responsive on serial; the
 # REAL editing is typed by the keyboard via --input-chords. The chords start
@@ -75,7 +88,7 @@ codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/
 #   echo ab <Left> c <Enter>  -> mid-line insert -> "echo acb", prints "acb"
 #   <Up> <Enter>              -> history recall -> re-runs it, prints "acb"
 #   echo u2done <Enter>       -> final marker (the runner's exit condition)
-cat > artifacts/live-editing-script.txt <<'EOF'
+cat > "$RUN_DIR/script.txt" <<'EOF'
 echo u2-serial-ok
 EOF
 
@@ -96,36 +109,36 @@ CHORDS="e,c,h,o,space,a,b,left,c,return,up,return,e,c,h,o,space,u,2,d,o,n,e,retu
 #   Ctrl-U  junk then kill-to-start           -> runs `echo u2under`
 #   Ctrl-L  clear screen mid-line             -> ESC[2J in the log, then runs
 #   Ctrl-C  cancel a line that must NOT run   -> `^C`, and NEVER never runs
-printf 'cho u2chord\001e\n' > artifacts/live-editing-chords.txt
-printf 'echo u2en\001\005d\n' >> artifacts/live-editing-chords.txt
-printf 'echo u2killXXXX\033[D\033[D\033[D\033[D\013\n' >> artifacts/live-editing-chords.txt
-printf 'JUNK\025echo u2under\n' >> artifacts/live-editing-chords.txt
-printf 'echo u2clear\014\n' >> artifacts/live-editing-chords.txt
-printf 'echo NEVER\003echo u2cancel\n' >> artifacts/live-editing-chords.txt
+printf 'cho u2chord\001e\n' > "$RUN_DIR/chords.txt"
+printf 'echo u2en\001\005d\n' >> "$RUN_DIR/chords.txt"
+printf 'echo u2killXXXX\033[D\033[D\033[D\033[D\013\n' >> "$RUN_DIR/chords.txt"
+printf 'JUNK\025echo u2under\n' >> "$RUN_DIR/chords.txt"
+printf 'echo u2clear\014\n' >> "$RUN_DIR/chords.txt"
+printf 'echo NEVER\003echo u2cancel\n' >> "$RUN_DIR/chords.txt"
 
 run_one() {
     local out="$1" serial="$2"
-    rm -f artifacts/efi-vars.bin artifacts/vm-serial.log
-    host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log \
+    rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial.log"
+    host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
+        --serial "$RUN_DIR/vm-serial.log" \
         --input --display \
-        --script artifacts/live-editing-script.txt \
+        --script "$RUN_DIR/script.txt" \
         --input-chords "$CHORDS" --input-chords-after "userspace: el0=1" \
-        --script2 artifacts/live-editing-chords.txt --script2-after "u2done" \
+        --script2 "$RUN_DIR/chords.txt" --script2-after "u2done" \
         --script-expect "u2cancel" \
         --timeout 240 \
-        > "$out" 2>&1
+        > "$(art live-editing-run.txt)" 2>&1
     local RC=$?
-    [ -f artifacts/vm-serial.log ] && cp artifacts/vm-serial.log "$serial" || true
-    echo "$RC" > /tmp/live-editing-rc.txt
+    [ -f "$RUN_DIR/vm-serial.log" ] && cp "$RUN_DIR/vm-serial.log" "$(art live-editing-serial.log)" || true
+    echo "$RC" > "$RUN_DIR/rc.txt"
 }
 
-rm -f artifacts/efi-vars.bin artifacts/vm-serial.log
 set +e
-run_one "artifacts/live-editing-run.txt" "artifacts/live-editing-serial.log"
-RC="$(cat /tmp/live-editing-rc.txt)"
+run_one "$(art live-editing-run.txt)" "$(art live-editing-serial.log)"
+RC="$(cat "$RUN_DIR/rc.txt")"
 set -e
 
-SERIAL="artifacts/live-editing-serial.log"
+SERIAL="$(art live-editing-serial.log)"
 SERIAL_BYTES=0 ARMED=0 ACB2=0 DONE=0 SERIALOK=0 RUNNERFLAG=0
 CHORD_A=0 CHORD_E=0 CHORD_K=0 CHORD_U=0 CHORD_L=0 CHORD_C=0 NOJUNK=0
 if [ -f "$SERIAL" ]; then

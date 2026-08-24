@@ -67,17 +67,31 @@
 # live-long-lived-report.txt, live-long-lived-run-<NN>.txt,
 # live-long-lived-serial-<NN>.log.
 
+# Run isolation (#523 item 2 / issue #528, claim 5069): every boot attaches
+# a private DiskImageKit stacked disk (read-only base + throwaway ASIF
+# overlay), a private EFI var store (recreated fresh per boot, as the
+# pre-isolation gate did), and a private serial log under $RUN_DIR — two
+# concurrent instances cannot clobber each other's disks, NVRAM, or
+# evidence. Set DIPSHIT_GATE_SUFFIX=_alt to give this instance its own
+# canonical evidence names (two simultaneous instances MUST differ), and
+# DIPSHIT_KEEP_RUN=1 to keep the scratch dir.
+#
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-GATE_LOG="artifacts/live-long-lived-gate.txt"
+source tools/lib/gate-run.sh
+
+SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
+
+GATE_LOG="$(art live-long-lived-gate.txt)"
 exec > >(tee "$GATE_LOG") 2>&1
-trap 'sleep 0.5' EXIT
+trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
 
 BOOTS="${BOOTS:-1}"
-REPORT="artifacts/live-long-lived-report.txt"
+REPORT="$(art live-long-lived-report.txt)"
 SCRIPT1="artifacts/live-long-lived-script1.txt"
 SCRIPT2="artifacts/live-long-lived-script2.txt"
 # The static claim-8215 payload's exit line: the runner forwards phase 1
@@ -88,6 +102,7 @@ STATIC_EXIT_LINE="tasks user-el0 exited status=7"
 EXEC_REAP_LINE="tasks user-exec reaped"
 
 echo "=== verify-live-long-lived: claim 4613 — a long-lived process among live peers (distinct programs), $BOOTS boot(s) ==="
+
 zig version
 swift --version 2>&1 | head -1
 sw_vers
@@ -102,6 +117,12 @@ zig build image
 swift build --package-path host/vm-runner --configuration release
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
+# --- per-run isolation -------------------------------------------------------------
+# Private scratch dir + pristine-boot overlay for EVERY boot.
+# See tools/lib/gate-run.sh.
+gate_begin live-long-lived
+echo "run dir: $RUN_DIR"
+
 # Phase 1: list, start the permanent occupant, exec the short program, and
 # snapshot the two-live-processes table + the allocator free count.
 printf 'ls\nexec COUNTER.BIN\nexec USER.BIN\nprocs\npages\necho rx-long-lived-phase1\n' > "$SCRIPT1"
@@ -112,48 +133,50 @@ printf 'exec USER.BIN\nprocs\nexec USER.BIN\npages\necho rx-long-lived-ok\n' > "
 
 run_one() {
     local tag="$1"
-    local run_log="artifacts/live-long-lived-run-$tag.txt"
-    local serial_copy="artifacts/live-long-lived-serial-$tag.log"
-    rm -f artifacts/efi-vars.bin artifacts/vm-serial.log
+    local run_log="$(art live-long-lived-run-$tag.txt)"
+    local serial_copy="$(art live-long-lived-serial-$tag.log)"
+    rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial-$tag.log"
 
     set +e
     # No --script-expect: capture the full window so the reap-then-re-exec
     # handoff completes and the counter's markers keep landing (the runner
     # exits 0 on timeout when no expect is configured).
-    host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log \
+    host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
+        --serial "$RUN_DIR/vm-serial-$tag.log" \
         --script "$SCRIPT1" --script-after "$STATIC_EXIT_LINE" \
         --script2 "$SCRIPT2" --script2-after "$EXEC_REAP_LINE" --timeout 75 > "$run_log" 2>&1
     local rc=$?
     set -e
-    [ -f artifacts/vm-serial.log ] && cp artifacts/vm-serial.log "$serial_copy" || true
+    [ -f "$RUN_DIR/vm-serial-$tag.log" ] && cp "$RUN_DIR/vm-serial-$tag.log" "$(art live-long-lived-serial-$tag.log)" || true
+    local SER="$serial_copy"
 
     local bytes=0 banner=0 listed=0 loaded_counter=0 loaded_user=0 markers=0 \
         never_exits=0 two_running=0 distinct_tasks=0 user_exited=0 \
         exited_row=0 user_reaped=0 procs_user_exited=0 reexec_landed=0 \
         pages_reads=0 free_recovered=0 final_counter_running=0 \
         phase1_echo=0 echo_ok=0 fatal=0
-    if [ -f artifacts/vm-serial.log ]; then
-        bytes="$(wc -c < artifacts/vm-serial.log | tr -d ' ')"
-        [ "$(grep -aFxc -- "DipshitOS kernel has seized control." artifacts/vm-serial.log || true)" = 1 ] && banner=1
+    if [ -f "$SER" ]; then
+        bytes="$(wc -c < "$SER" | tr -d ' ')"
+        [ "$(grep -aFxc -- "DipshitOS kernel has seized control." "$SER" || true)" = 1 ] && banner=1
         # 1. Both programs listed on the ESP + both exec replies present.
-        grep -a -qE -- "^  COUNTER.BIN " artifacts/vm-serial.log && listed=1
-        loaded_counter="$(grep -aFc -- "exec: loaded COUNTER.BIN size=" artifacts/vm-serial.log || true)"
-        loaded_user="$(grep -aFc -- "exec: loaded USER.BIN size=" artifacts/vm-serial.log || true)"
+        grep -a -qE -- "^  COUNTER.BIN " "$SER" && listed=1
+        loaded_counter="$(grep -aFc -- "exec: loaded COUNTER.BIN size=" "$SER" || true)"
+        loaded_user="$(grep -aFc -- "exec: loaded USER.BIN size=" "$SER" || true)"
         # 2. The counter's markers span the whole log; it never exits.
-        markers="$(grep -aFc -- "counter: alive" artifacts/vm-serial.log || true)"
-        [ "$(grep -aFc -- "procs COUNTER.BIN exited" artifacts/vm-serial.log || true)" = 0 ] && never_exits=1
+        markers="$(grep -aFc -- "counter: alive" "$SER" || true)"
+        [ "$(grep -aFc -- "procs COUNTER.BIN exited" "$SER" || true)" = 0 ] && never_exits=1
         local first_marker last_marker first_user_exit last_user_exit
-        first_marker="$(grep -anF -- "counter: alive" artifacts/vm-serial.log | head -1 | cut -d: -f1 || true)"
-        last_marker="$(grep -anF -- "counter: alive" artifacts/vm-serial.log | tail -1 | cut -d: -f1 || true)"
-        first_user_exit="$(grep -anE -- "tasks user-exec exited status=43|procs USER.BIN exited status=43" artifacts/vm-serial.log | head -1 | cut -d: -f1 || true)"
-        last_user_exit="$(grep -anE -- "tasks user-exec exited status=43|procs USER.BIN exited status=43" artifacts/vm-serial.log | tail -1 | cut -d: -f1 || true)"
+        first_marker="$(grep -anF -- "counter: alive" "$SER" | head -1 | cut -d: -f1 || true)"
+        last_marker="$(grep -anF -- "counter: alive" "$SER" | tail -1 | cut -d: -f1 || true)"
+        first_user_exit="$(grep -anE -- "tasks user-exec exited status=43|procs USER.BIN exited status=43" "$SER" | head -1 | cut -d: -f1 || true)"
+        last_user_exit="$(grep -anE -- "tasks user-exec exited status=43|procs USER.BIN exited status=43" "$SER" | tail -1 | cut -d: -f1 || true)"
         if [ -n "$first_marker" ] && [ -n "$last_marker" ] && [ -n "$first_user_exit" ] && [ -n "$last_user_exit" ]; then
             [ "$first_marker" -lt "$first_user_exit" ] && [ "$last_marker" -gt "$last_user_exit" ] && never_exits=1 || never_exits=0
         fi
         # 3. A procs read shows BOTH programs running with distinct tasks.
         local counter_rows user_rows
-        counter_rows="$(grep -aE -- "procs: id=[0-9]+ name=COUNTER.BIN state=running" artifacts/vm-serial.log || true)"
-        user_rows="$(grep -aE -- "procs: id=[0-9]+ name=USER.BIN state=running" artifacts/vm-serial.log || true)"
+        counter_rows="$(grep -aE -- "procs: id=[0-9]+ name=COUNTER.BIN state=running" "$SER" || true)"
+        user_rows="$(grep -aE -- "procs: id=[0-9]+ name=USER.BIN state=running" "$SER" || true)"
         if [ -n "$counter_rows" ] && [ -n "$user_rows" ]; then
             two_running=1
             local t1 t2
@@ -165,11 +188,11 @@ run_one() {
         # the exit/reap reports are EXACT (both USER.BIN runs exit status
         # 43), and the boot payload's exit stays its own distinct line.
         local boot_exits
-        user_exited="$(grep -aFc -- "tasks user-exec exited status=43" artifacts/vm-serial.log || true)"
-        procs_user_exited="$(grep -aFc -- "procs USER.BIN exited status=43" artifacts/vm-serial.log || true)"
-        user_reaped="$(grep -aFc -- "tasks user-exec reaped" artifacts/vm-serial.log || true)"
-        grep -a -qF -- "name=USER.BIN state=exited" artifacts/vm-serial.log && exited_row=1 || exited_row=0
-        boot_exits="$(grep -aFc -- "tasks user-el0 exited status=7" artifacts/vm-serial.log || true)"
+        user_exited="$(grep -aFc -- "tasks user-exec exited status=43" "$SER" || true)"
+        procs_user_exited="$(grep -aFc -- "procs USER.BIN exited status=43" "$SER" || true)"
+        user_reaped="$(grep -aFc -- "tasks user-exec reaped" "$SER" || true)"
+        grep -a -qF -- "name=USER.BIN state=exited" "$SER" && exited_row=1 || exited_row=0
+        boot_exits="$(grep -aFc -- "tasks user-el0 exited status=7" "$SER" || true)"
         [ "$boot_exits" = 1 ] && boot_exited=1 || boot_exited=0
         # 5. The re-exec landed: exactly TWO successful USER.BIN loads
         # (phase 1 + the phase-2 re-exec into the freed slot).
@@ -181,7 +204,7 @@ run_one() {
         # phase-2 free == phase-1 free - 5 (one more live USER.BIN's
         # pages). A leak would show a bigger drop than 9.
         local pages_lines p1 p2
-        pages_lines="$(grep -aF -- "pages: armed=1 total=" artifacts/vm-serial.log || true)"
+        pages_lines="$(grep -aF -- "pages: armed=1 total=" "$SER" || true)"
         pages_reads="$(printf '%s\n' "$pages_lines" | grep -cF -- "pages: armed=1 total=" || true)"
         p1="$(printf '%s\n' "$pages_lines" | sed -n '1p' | sed -E 's/.*free=0x([0-9a-f]+).*/\1/' || true)"
         p2="$(printf '%s\n' "$pages_lines" | sed -n '2p' | sed -E 's/.*free=0x([0-9a-f]+).*/\1/' || true)"
@@ -192,13 +215,13 @@ run_one() {
         fi
         # 8. The counter is running at the FINAL procs read.
         local last_counter_row
-        last_counter_row="$(grep -aE -- "procs: id=[0-9]+ name=COUNTER.BIN" artifacts/vm-serial.log | tail -1 || true)"
+        last_counter_row="$(grep -aE -- "procs: id=[0-9]+ name=COUNTER.BIN" "$SER" | tail -1 || true)"
         if [ -n "$last_counter_row" ]; then
             printf '%s\n' "$last_counter_row" | grep -qF -- "state=running" && final_counter_running=1
         fi
-        [ "$(grep -aFxc -- "rx-long-lived-phase1" artifacts/vm-serial.log || true)" = 1 ] && phase1_echo=1
-        [ "$(grep -aFxc -- "rx-long-lived-ok" artifacts/vm-serial.log || true)" = 1 ] && echo_ok=1
-        grep -qF -- "[EXC] parking:" artifacts/vm-serial.log && fatal=1 || true
+        [ "$(grep -aFxc -- "rx-long-lived-phase1" "$SER" || true)" = 1 ] && phase1_echo=1
+        [ "$(grep -aFxc -- "rx-long-lived-ok" "$SER" || true)" = 1 ] && echo_ok=1
+        grep -qF -- "[EXC] parking:" "$SER" && fatal=1 || true
     fi
     echo "$tag: runner-rc=$rc serial-bytes=$bytes banner=$banner listed=$listed loaded-counter=$loaded_counter loaded-user=$loaded_user markers=$markers never-exits=$never_exits two-running=$two_running tasks-distinct=$distinct_tasks user-exited=$user_exited exited-row=$exited_row procs-user-exited=$procs_user_exited user-reaped=$user_reaped reexec-landed=$reexec_landed pages-reads=$pages_reads free-recovered=$free_recovered final-counter-running=$final_counter_running phase1-echo=$phase1_echo echo=$echo_ok fatal=$fatal" | tee -a "$REPORT"
     [ "$rc" = 0 ] && [ "$banner" = 1 ] && [ "$listed" = 1 ] && \

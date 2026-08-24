@@ -95,11 +95,6 @@ REPORT="$(art live-net-tcp-report.txt)"
 
 echo "=== verify-live-net-tcp: claim 7026 — the bounded RFC 793 TCP client live on VZ (Run A full lifecycle + reset, Run B the bounded connect timeout, Run C the real-NAT observation) ==="
 
-# --- per-run isolation -------------------------------------------------------
-# Private scratch dir + pristine-boot overlay for EVERY boot (three runs,
-# three independent stacks). See tools/lib/gate-run.sh.
-gate_begin live-net-tcp
-echo "run dir: $RUN_DIR"
 
 # --- tool versions + revision -----------------------------------------------
 zig version; swift --version 2>&1 | head -1; sw_vers
@@ -114,6 +109,12 @@ zig build
 zig build image
 swift build --package-path host/vm-runner --configuration release
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
+
+# --- per-run isolation -------------------------------------------------------
+# Private scratch dir + pristine-boot overlay for EVERY boot (three runs,
+# three independent stacks). See tools/lib/gate-run.sh.
+gate_begin live-net-tcp
+echo "run dir: $RUN_DIR"
 
 # --- scripted keystrokes ----------------------------------------------------
 # Run A: the full lifecycle. `net arp 10.0.0.2` (twice) resolves the

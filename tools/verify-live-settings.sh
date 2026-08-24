@@ -20,6 +20,15 @@
 #         printing the custom prompt `elephant> ` and `hostname=elephant-box`.
 #
 # Per run this reports: rc, serial-bytes, and per-assertion flags.
+# Run isolation (#523 item 2 / issue #528, claim 5069): every boot attaches
+# a private DiskImageKit stacked disk (read-only base + throwaway ASIF
+# overlay), a private EFI var store (recreated fresh per boot, as the
+# pre-isolation gate did), and a private serial log under $RUN_DIR — two
+# concurrent instances cannot clobber each other's disks, NVRAM, or
+# evidence. Set DIPSHIT_GATE_SUFFIX=_alt to give this instance its own
+# canonical evidence names (two simultaneous instances MUST differ), and
+# DIPSHIT_KEEP_RUN=1 to keep the scratch dir.
+#
 # Class B — Apple silicon + VZ only; boots real VMs.
 #
 # Usage:
@@ -31,12 +40,17 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-GATE_LOG="artifacts/live-settings-gate.txt"
+source tools/lib/gate-run.sh
+
+SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
+
+GATE_LOG="$(art live-settings-gate.txt)"
 exec > >(tee "$GATE_LOG") 2>&1
-trap 'sleep 0.5' EXIT
+trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
 
 PAIRS="${BOOTS:-1}"
-REPORT="artifacts/live-settings-report.txt"
+REPORT="$(art live-settings-report.txt)"
 
 echo "=== verify-live-settings: claim 2649 — persistent settings on DATA partition across VZ reboot, $PAIRS pair(s) of boots ==="
 
@@ -53,6 +67,13 @@ zig build
 zig build image
 swift build --package-path host/vm-runner --configuration release
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
+
+# --- per-run isolation -------------------------------------------------------------
+# Private scratch dir + pristine-boot overlay for EVERY boot.
+# See tools/lib/gate-run.sh.
+gate_begin live-settings
+echo "run dir: $RUN_DIR"
+
 
 # --- scripted keystrokes -----------------------------------------------------
 cat > artifacts/live-settings-script-A.txt <<'EOF'
@@ -71,31 +92,35 @@ EOF
 run_one() {
     local tag="$1" script="$2" expect="$3" fresh="$4"
     if [ "$fresh" = 1 ]; then
-        rm -f artifacts/efi-vars.bin
+        rm -f "$RUN_DIR/efi-vars.bin"
     fi
-    rm -f artifacts/vm-serial.log
+    rm -f "$RUN_DIR/vm-serial-$tag.log"
     set +e
-    host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log \
+    gate_shared_disk_lock
+    host/vm-runner/.build/release/VMRunner artifacts/disk.img \
+        --serial "$RUN_DIR/vm-serial-$tag.log" \
         --script "$script" --script-expect "$expect" --timeout 40 \
-        > "artifacts/live-settings-run-$tag.txt" 2>&1
+        > "$(art live-settings-run-$tag.txt)" 2>&1
     local RC=$?
     set -e
-    [ -f artifacts/vm-serial.log ] && cp artifacts/vm-serial.log "artifacts/live-settings-serial-$tag.log" || true
+    gate_shared_disk_unlock
+    [ -f "$RUN_DIR/vm-serial-$tag.log" ] && cp "$RUN_DIR/vm-serial-$tag.log" "$(art live-settings-serial-$tag.log)" || true
+    local SER="$(art live-settings-serial-$tag.log)"
 
     local SERIAL_BYTES=0
     local DEFAULTS_OK=0 SET_HOST_OK=0 SET_PROMPT_OK=0 GET_HOST_OK=0 PERSISTED_HOST=0 CUSTOM_PROMPT=0
-    if [ -f artifacts/vm-serial.log ]; then
-        SERIAL_BYTES=$(wc -c < artifacts/vm-serial.log | tr -d ' ')
+    if [ -f "$SER" ]; then
+        SERIAL_BYTES=$(wc -c < "$SER" | tr -d ' ')
         # Check initial default or list
-        grep -a -qF -- "hostname=dipshit" artifacts/vm-serial.log && DEFAULTS_OK=1
+        grep -a -qF -- "hostname=dipshit" "$SER" && DEFAULTS_OK=1
         # Check set responses
-        grep -a -qF -- "settings: hostname=elephant-box (persisted)" artifacts/vm-serial.log && SET_HOST_OK=1
-        grep -a -qF -- "settings: prompt=elephant> (persisted)" artifacts/vm-serial.log && SET_PROMPT_OK=1
+        grep -a -qF -- "settings: hostname=elephant-box (persisted)" "$SER" && SET_HOST_OK=1
+        grep -a -qF -- "settings: prompt=elephant> (persisted)" "$SER" && SET_PROMPT_OK=1
         # Check get hostname
-        grep -a -qF -- "settings: hostname=elephant-box" artifacts/vm-serial.log && GET_HOST_OK=1
+        grep -a -qF -- "settings: hostname=elephant-box" "$SER" && GET_HOST_OK=1
         # Check persisted across reboot (Run B)
-        grep -a -qF -- "hostname=elephant-box" artifacts/vm-serial.log && PERSISTED_HOST=1
-        grep -a -qF -- "elephant>" artifacts/vm-serial.log && CUSTOM_PROMPT=1
+        grep -a -qF -- "hostname=elephant-box" "$SER" && PERSISTED_HOST=1
+        grep -a -qF -- "elephant>" "$SER" && CUSTOM_PROMPT=1
     fi
     local PASS=0
     if [ "$tag" = "A-1" ] || [ "$tag" = "A" ]; then

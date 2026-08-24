@@ -45,13 +45,19 @@
 # C goldens in font8x8.zig, text.zig, and driving_award.zig); this gate proves
 # the LIVE pixels read forward, mechanically and reproducibly.
 #
+# Run isolation (#523 item 2 / issue #528, claim 5069): the boot attaches a
+# private DiskImageKit stacked disk (read-only base + throwaway ASIF
+# overlay), a private EFI var store, and writes its serial log and screen
+# captures under $RUN_DIR before they are copied to the canonical evidence
+# names. DIPSHIT_GATE_SUFFIX=_alt / DIPSHIT_KEEP_RUN=1 supported.
+#
 # Class B — Apple silicon + VZ only; boots real VMs.
 #
 # Usage:
 #   bash tools/verify-live-glyphs.sh
 #
 # Evidence: artifacts/live-glyphs-gate.txt (full output),
-# artifacts/live-glyphs-report.txt, artifacts/live-glyphs-run.txt (runner),
+# artifacts/live-glyphs-report.txt, "$(art live-glyphs-run.txt)" (runner),
 # artifacts/gpu-screen-*s (the captures).
 #
 # Dependencies: python3 (stdlib only — zlib/struct, no PIL), the runner +
@@ -63,11 +69,16 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-GATE_LOG="artifacts/live-glyphs-gate.txt"
-exec > >(tee "$GATE_LOG") 2>&1
-trap 'sleep 0.5' EXIT
+source tools/lib/gate-run.sh
 
-REPORT="artifacts/live-glyphs-report.txt"
+SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
+
+GATE_LOG="$(art live-glyphs-gate.txt)"
+exec > >(tee "$GATE_LOG") 2>&1
+trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
+
+REPORT="$(art live-glyphs-report.txt)"
 RUNNER="host/vm-runner/.build/release/VMRunner"
 
 echo "=== verify-live-glyphs: the mirror tripwire — the captured framebuffer decodes FORWARD against the font8x8 LSB-left source convention ==="
@@ -80,27 +91,35 @@ swift build --package-path host/vm-runner --configuration release >/dev/null 2>&
 # The other live gates' convention: the fresh binary needs the
 # com.apple.security.virtualization entitlement before it can boot a VM.
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
+
+# --- per-run isolation -------------------------------------------------------
+# Private scratch dir + pristine-boot overlay for EVERY boot.
+gate_begin live-glyphs
+echo "run dir: $RUN_DIR"
+SCRIPT="$RUN_DIR/script.txt"
 zig build >/dev/null 2>&1
 zig build image >/dev/null 2>&1
 
 # 2. The scripted boot: a real terminal SESSION so the captured frame is
 # full of words (banner + echo + uname + the tee report).
-SCRIPT="artifacts/live-glyphs-script.txt"
+SCRIPT="$RUN_DIR/script.txt"
 printf 'echo ROADPOPS\nuname\nroadpops\n' > "$SCRIPT"
-rm -f artifacts/vm-serial.log artifacts/gpu-screen-*.png "$REPORT"
+rm -f "$RUN_DIR/vm-serial.log" "$RUN_DIR"/gpu-screen-*.png "$REPORT"
 
 echo
 echo "[2/3] live VZ run (scripted)"
 set +e
-"$RUNNER" artifacts/disk.img artifacts/vm-serial.log \
-    --screen artifacts/gpu-screen --script "$SCRIPT" \
+"$RUNNER" "${GATE_RUNNER_ARGS[@]}" \
+    --serial "$RUN_DIR/vm-serial.log" --screen "$RUN_DIR/gpu-screen" --script "$SCRIPT" \
     --expect "roadpops: armed target=fbtext" --timeout 30 \
-    > artifacts/live-glyphs-run.txt 2>&1
+    > "$(art live-glyphs-run.txt)" 2>&1
 RC=$?
 set -e
+[ -f "$RUN_DIR/vm-serial.log" ] && cp "$RUN_DIR/vm-serial.log" "$(art live-glyphs-serial.log)" || true
+for f in "$RUN_DIR"/gpu-screen-*.png; do [ -e "$f" ] && cp "$f" artifacts/ || true; done
 echo "runner exit: $RC"
 echo "--- runner output (roadpops/text lines) ---"
-grep -E "roadpops:|text:|SUCCESS|FAILURE" artifacts/live-glyphs-run.txt | head -20
+grep -E "roadpops:|text:|SUCCESS|FAILURE" "$(art live-glyphs-run.txt)" | head -20
 if [ "$RC" -ne 0 ]; then
     echo "FAIL: runner did not complete successfully (exit $RC)"
     exit 1
@@ -115,16 +134,16 @@ fail() { echo "FAIL: $1"; exit 1; }
 # Phase 0 — the evidence path (the SCK enforcement shared with the other
 # pixel gates): the decode must run on the COMPOSITED WINDOW pixels, not
 # the cacheDisplay offscreen render.
-grep -q "capture path: ScreenCaptureKit" artifacts/live-glyphs-run.txt \
+grep -q "capture path: ScreenCaptureKit" "$(art live-glyphs-run.txt)" \
     || fail "pixel evidence did not come from ScreenCaptureKit (composited window) — Screen Recording permission missing or the SCK path broke"
-if grep -q "capture path: cacheDisplay fallback" artifacts/live-glyphs-run.txt; then
+if grep -q "capture path: cacheDisplay fallback" "$(art live-glyphs-run.txt)"; then
     fail "some captures fell back to cacheDisplay (offscreen render) — every capture must be the composited window"
 fi
 
 # Phase 1 — the shared-seam serial evidence (the session IS on screen).
-grep -q "roadpops: armed target=fbtext" artifacts/vm-serial.log || fail "the Road Pops tee was not armed with the framebuffer target"
-grep -q "text: boot banner presented" artifacts/vm-serial.log || fail "boot banner not presented (the tee's first present)"
-grep -q "DipshitOS - AArch64 firmware-assisted kernel monitor" artifacts/vm-serial.log || fail "serial transcript lost the banner (shared-seam regression)"
+grep -q "roadpops: armed target=fbtext" "$(art live-glyphs-serial.log)" || fail "the Road Pops tee was not armed with the framebuffer target"
+grep -q "text: boot banner presented" "$(art live-glyphs-serial.log)" || fail "boot banner not presented (the tee's first present)"
+grep -q "DipshitOS - AArch64 firmware-assisted kernel monitor" "$(art live-glyphs-serial.log)" || fail "serial transcript lost the banner (shared-seam regression)"
 
 # Phase 2 — THE MIRROR TRIPWIRE: decode the captured PNG against the
 # kernel's own LSB-left font table in both orientations and assert the text
@@ -215,4 +234,4 @@ echo "clock window decodes forward (title 'clock' + body 'DRIVING AWARD'; mirror
 
 echo
 echo "=== verify-live-glyphs: PASS (the captured framebuffer decodes FORWARD against the font8x8 LSB-left convention — mirror regression impossible to miss, terminal AND clock window) ==="
-echo "evidence: artifacts/live-glyphs-run.txt, artifacts/vm-serial.log, artifacts/gpu-screen-*s, tools/decode-screen-glyphs.py" | tee "$REPORT"
+echo "evidence: "$(art live-glyphs-run.txt)", the per-run serial log, artifacts/gpu-screen-*s, tools/decode-screen-glyphs.py" | tee "$REPORT"

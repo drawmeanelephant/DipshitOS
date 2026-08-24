@@ -49,25 +49,39 @@
 # live-net-icmp-*.log (serial copies), live-net-icmp-*.bin (host
 # captures), and the report.
 #
+# Run isolation (#523 item 2 / issue #528, claim 5069): every boot attaches
+# a private DiskImageKit stacked disk (read-only base + throwaway ASIF
+# overlay), a private EFI var store (recreated fresh per boot, as the
+# pre-isolation gate did), and a private serial log under $RUN_DIR — two
+# concurrent instances cannot clobber each other's disks, NVRAM, or
+# evidence. Set DIPSHIT_GATE_SUFFIX=_alt to give this instance its own
+# canonical evidence names (two simultaneous instances MUST differ), and
+# DIPSHIT_KEEP_RUN=1 to keep the scratch dir.
+#
 # Class B — Apple silicon + VZ only; boots real VMs. A green CI badge
 # proves class A only and says nothing about this gate.
 #
 # Usage:
 #   bash tools/verify-live-net-icmp.sh
 #
-# Evidence: artifacts/live-net-icmp-gate.txt (full output),
-# artifacts/live-net-icmp-report.txt (per-phase detail).
+# Evidence: "$RUN_DIR/live-net-icmp-gate.txt" (full output),
+# "$RUN_DIR/live-net-icmp-report.txt" (per-phase detail).
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-GATE_LOG="artifacts/live-net-icmp-gate.txt"
-exec > >(tee "$GATE_LOG") 2>&1
-trap 'sleep 0.5' EXIT
+source tools/lib/gate-run.sh
 
-REPORT="artifacts/live-net-icmp-report.txt"
+SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
+
+GATE_LOG="$(art live-net-icmp-gate.txt)"
+exec > >(tee "$GATE_LOG") 2>&1
+trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
+
+REPORT="$(art live-net-icmp-report.txt)"
 
 echo "=== verify-live-net-icmp: claim 0148 — IPv4/ICMP live on VZ (answer an echo for our address, ping a peer, scope check) ==="
 
@@ -85,6 +99,13 @@ zig build image
 swift build --package-path host/vm-runner --configuration release
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
+# --- per-run isolation -------------------------------------------------------------
+# Private scratch dir + pristine-boot overlay for EVERY boot.
+# See tools/lib/gate-run.sh.
+gate_begin live-net-icmp
+echo "run dir: $RUN_DIR"
+
+
 # --- scripted keystrokes -----------------------------------------------------
 # TWO script phases per run (the claim-4613 pattern): the guest executes
 # a forwarded script BURST in tens of ms — far faster than the host-side
@@ -96,31 +117,31 @@ codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/
 # transmitted) within ~50 ms; then --script2 (forwarded only after the
 # ready marker, with the claim-6684 0.5 s settle) runs the OBSERVATION
 # commands — deterministic, not a sleep race.
-cat > artifacts/live-net-icmp-script-1.txt <<'EOF'
+cat > "$RUN_DIR/live-net-icmp-script-1.txt" <<'EOF'
 net ip 10.0.0.1
 echo icmp-phase1-ready
 EOF
-cat > artifacts/live-net-icmp-script-1b.txt <<'EOF'
+cat > "$RUN_DIR/live-net-icmp-script-1b.txt" <<'EOF'
 net recv
 net
 echo net-icmp-ok
 EOF
-cat > artifacts/live-net-icmp-script-2.txt <<'EOF'
+cat > "$RUN_DIR/live-net-icmp-script-2.txt" <<'EOF'
 net ip 10.0.0.1
 net arp 10.0.0.2
 echo icmp-phase2-ready
 EOF
-cat > artifacts/live-net-icmp-script-2b.txt <<'EOF'
+cat > "$RUN_DIR/live-net-icmp-script-2b.txt" <<'EOF'
 net ping 10.0.0.2
 net arp
 net
 echo net-icmp-ok
 EOF
-cat > artifacts/live-net-icmp-script-3.txt <<'EOF'
+cat > "$RUN_DIR/live-net-icmp-script-3.txt" <<'EOF'
 net ip 10.0.0.1
 echo icmp-phase1-ready
 EOF
-cat > artifacts/live-net-icmp-script-3b.txt <<'EOF'
+cat > "$RUN_DIR/live-net-icmp-script-3b.txt" <<'EOF'
 net recv
 net
 echo net-icmp-ok
@@ -139,7 +160,8 @@ EOF
 #     (concatenated, in order); the runner answers both.
 # p3: an echo request for 10.0.0.99 (NOT our address) — must NOT be
 #     answered (capture stays empty).
-python3 - <<'PY'
+RUN_DIR="$RUN_DIR" python3 - <<'PY'
+import os
 def csum(b):
     s = 0
     for i in range(0, len(b) - 1, 2):
@@ -220,10 +242,10 @@ zero4 = [0]*4
 # MAC = the host's).
 req1 = echo_req(bcast, host_mac, host_ip, guest_ip, ident=0xabcd, icmp_id=0x1234, seq=0x5678)
 assert len(req1) == 46, len(req1)
-open("artifacts/live-net-icmp-fixture-1.bin","wb").write(req1)
+open(os.environ["RUN_DIR"]+"/live-net-icmp-fixture-1.bin","wb").write(req1)
 rep1 = echo_reply_from_req(req1, guest_mac, guest_ip)
 assert len(rep1) == 46, len(rep1)
-open("artifacts/live-net-icmp-reply-1.bin","wb").write(rep1)
+open(os.environ["RUN_DIR"]+"/live-net-icmp-reply-1.bin","wb").write(rep1)
 # p2: the guest's resolve + ping (expected capture: ARP request THEN echo
 # request — script 1 resolves, script 2 pings; the echo request's dst is
 # the LEARNED host MAC 02:00:00:00:00:02).
@@ -231,11 +253,11 @@ req2_arp = arp_pkt(bcast, guest_mac, 1, guest_mac, guest_ip, zero6, host_ip)
 assert len(req2_arp) == 42, len(req2_arp)
 req2_icmp = echo_req(host_mac, guest_mac, guest_ip, host_ip, ident=1, icmp_id=1, seq=1)
 assert len(req2_icmp) == 46, len(req2_icmp)
-open("artifacts/live-net-icmp-fixture-2.bin","wb").write(req2_arp + req2_icmp)
+open(os.environ["RUN_DIR"]+"/live-net-icmp-fixture-2.bin","wb").write(req2_arp + req2_icmp)
 # p3: an echo request for an address we do not own (dst = broadcast)
 req3 = echo_req(bcast, host_mac, host_ip, other_ip, ident=1, icmp_id=1, seq=1)
 assert len(req3) == 46, len(req3)
-open("artifacts/live-net-icmp-fixture-3.bin","wb").write(req3)
+open(os.environ["RUN_DIR"]+"/live-net-icmp-fixture-3.bin","wb").write(req3)
 # The hex the guest's net recv prints. OBSERVED at claim time (card N2):
 # the device writes a 12-byte virtio_net_hdr (num_buffers=1 at bytes
 # 10-11) BEFORE the raw frame, so the recv line = the observed header +
@@ -243,8 +265,8 @@ open("artifacts/live-net-icmp-fixture-3.bin","wb").write(req3)
 def hexs(b): return " ".join("%02x" % x for x in b)
 obs_hdr = bytes([0]*10) + bytes([0x01, 0x00])
 def recv_line(b): return "net recv: " + hexs(obs_hdr) + " " + hexs(b)
-open("artifacts/live-net-icmp-recv-1.txt","w").write(recv_line(req1))
-open("artifacts/live-net-icmp-recv-3.txt","w").write(recv_line(req3))
+open(os.environ["RUN_DIR"]+"/live-net-icmp-recv-1.txt","w").write(recv_line(req1))
+open(os.environ["RUN_DIR"]+"/live-net-icmp-recv-3.txt","w").write(recv_line(req3))
 PY
 
 # --- per-phase gate ----------------------------------------------------------
@@ -252,53 +274,57 @@ PY
 # $5 = inject file ("" = none), $6 = capture file, $7 = extra runner flags.
 run_one() {
     local tag="$1" script="$2" script2="$3" after2="$4" inject="$5" capture="$6" extra="$7"
-    rm -f artifacts/efi-vars.bin artifacts/vm-serial.log "$capture"
+    rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial-$tag.log" "$capture"
     set +e
+        # Rot class 1 (#528): the colored prompt killed '<marker>\ndipshit> '
+        # anchors; this marker reply is output-only and last.
     local ARGS=()
     [ -n "$inject" ] && ARGS+=(--net-inject "$inject" --net-inject-after "net ip: ip=10.0.0.1")
     [ -n "$extra" ] && ARGS+=($extra)
-    host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log \
-        --net "$capture" "${ARGS[@]}" --script "$script" --script2 "$script2" --script2-after "$after2" --script-expect $'net-icmp-ok\ndipshit> ' --timeout 40 \
-        > "artifacts/live-net-icmp-run-$tag.txt" 2>&1
+    host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
+        --serial "$RUN_DIR/vm-serial-$tag.log" \
+        --net "$capture" "${ARGS[@]}" --script "$script" --script2 "$script2" --script2-after "$after2" --script-expect "net-icmp-ok" --timeout 40 \
+        > "$(art live-net-icmp-run-$tag.txt)" 2>&1
     local RC=$?
     set -e
-    [ -f artifacts/vm-serial.log ] && cp artifacts/vm-serial.log "artifacts/live-net-icmp-serial-$tag.log" || true
+    [ -f "$RUN_DIR/vm-serial-$tag.log" ] && cp "$RUN_DIR/vm-serial-$tag.log" "$(art live-net-icmp-serial-$tag.log)" || true
+    local SER="$(art live-net-icmp-serial-$tag.log)"
 
     local SERIAL_BYTES=0 IPSET=0 RECV=0 RECVLEN=0 REPL=0 DROP=0 PING=0 PONG=0 ENTRY=0 LEARN=0 SENT=0
-    if [ -f artifacts/vm-serial.log ]; then
-        SERIAL_BYTES=$(wc -c < artifacts/vm-serial.log | tr -d ' ')
+    if [ -f "$SER" ]; then
+        SERIAL_BYTES=$(wc -c < "$SER" | tr -d ' ')
         # The static-IP marker (also the injection trigger).
-        grep -a -qF -- "net ip: ip=10.0.0.1" artifacts/vm-serial.log && IPSET=1
+        grep -a -qF -- "net ip: ip=10.0.0.1" "$SER" && IPSET=1
         case "$tag" in
             p1)
-                grep -a -qF -- "net recv: frames=1" artifacts/vm-serial.log && RECV=1
-                grep -a -qF -- "net recv: [0] len=58" artifacts/vm-serial.log && RECVLEN=1
+                grep -a -qF -- "net recv: frames=1" "$SER" && RECV=1
+                grep -a -qF -- "net recv: [0] len=58" "$SER" && RECVLEN=1
                 # The FULL recv line, byte-exact: the observed 12-byte
                 # virtio_net_hdr + the injected 46-byte echo request.
-                grep -a -qF -- "$(cat artifacts/live-net-icmp-recv-1.txt)" artifacts/vm-serial.log && RECVLEN=1
+                grep -a -qF -- "$(cat "$RUN_DIR/live-net-icmp-recv-1.txt")" "$SER" && RECVLEN=1
                 # The reply counter moved (the answer was transmitted).
-                grep -a -qF -- " icmp=req=0,repl=1,pong=0,drop=0,fail=0,seq=0" artifacts/vm-serial.log && REPL=1
-                grep -a -qF -- "net-icmp-ok" artifacts/vm-serial.log && SENT=1
+                grep -a -qF -- " icmp=req=0,repl=1,pong=0,drop=0,fail=0,seq=0" "$SER" && REPL=1
+                grep -a -qF -- "net-icmp-ok" "$SER" && SENT=1
                 ;;
             p2)
-                grep -a -qF -- "net ping: echo request to 10.0.0.2 sent (46 bytes)" artifacts/vm-serial.log && PING=1
+                grep -a -qF -- "net ping: echo request to 10.0.0.2 sent (46 bytes)" "$SER" && PING=1
                 # The runner's host-side ICMP reply landed: the pong
                 # counter moved with the ECHOED sequence (seq=1).
-                grep -a -qF -- " icmp=req=1,repl=0,pong=1,drop=0,fail=0,seq=1" artifacts/vm-serial.log && PONG=1
+                grep -a -qF -- " icmp=req=1,repl=0,pong=1,drop=0,fail=0,seq=1" "$SER" && PONG=1
                 # The resolve that preceded the ping (script 1) learned:
                 # the entry line + the counter line (net arp, no arg).
-                grep -a -qF -- "net arp: 10.0.0.2 -> 02:00:00:00:00:02" artifacts/vm-serial.log && ENTRY=1
-                grep -a -qF -- "net arp: req=1,repl=0,learn=1,drop=0,fail=0" artifacts/vm-serial.log && LEARN=1
-                grep -a -qF -- "net-icmp-ok" artifacts/vm-serial.log && SENT=1
+                grep -a -qF -- "net arp: 10.0.0.2 -> 02:00:00:00:00:02" "$SER" && ENTRY=1
+                grep -a -qF -- "net arp: req=1,repl=0,learn=1,drop=0,fail=0" "$SER" && LEARN=1
+                grep -a -qF -- "net-icmp-ok" "$SER" && SENT=1
                 ;;
             p3)
                 # The frame WAS observed (the N2 seam is intact)...
-                grep -a -qF -- "net recv: frames=1" artifacts/vm-serial.log && RECV=1
-                grep -a -qF -- "net recv: [0] len=58" artifacts/vm-serial.log && RECVLEN=1
-                grep -a -qF -- "$(cat artifacts/live-net-icmp-recv-3.txt)" artifacts/vm-serial.log && RECVLEN=1
+                grep -a -qF -- "net recv: frames=1" "$SER" && RECV=1
+                grep -a -qF -- "net recv: [0] len=58" "$SER" && RECVLEN=1
+                grep -a -qF -- "$(cat "$RUN_DIR/live-net-icmp-recv-3.txt")" "$SER" && RECVLEN=1
                 # ...but NOT answered (drop=1, repl=0) — the scope check.
-                grep -a -qF -- " icmp=req=0,repl=0,pong=0,drop=1,fail=0,seq=0" artifacts/vm-serial.log && DROP=1
-                grep -a -qF -- "net-icmp-ok" artifacts/vm-serial.log && SENT=1
+                grep -a -qF -- " icmp=req=0,repl=0,pong=0,drop=1,fail=0,seq=0" "$SER" && DROP=1
+                grep -a -qF -- "net-icmp-ok" "$SER" && SENT=1
                 ;;
         esac
     fi
@@ -342,13 +368,13 @@ PHASES=0
 echo
     echo "=== phase 1: the guest answers an ICMP echo request for its IP (byte-exact reply in the capture) ==="
     P1=0
-    run_one "p1" "artifacts/live-net-icmp-script-1.txt" "artifacts/live-net-icmp-script-1b.txt" "icmp-phase1-ready" "artifacts/live-net-icmp-fixture-1.bin" "artifacts/live-net-icmp-cap-1.bin" "" && P1=1 || true
+    run_one "p1" "$RUN_DIR/live-net-icmp-script-1.txt" "$RUN_DIR/live-net-icmp-script-1b.txt" "icmp-phase1-ready" "$RUN_DIR/live-net-icmp-fixture-1.bin" "$RUN_DIR/live-net-icmp-cap-1.bin" "" && P1=1 || true
     # The capture (the guest's reply) must be byte-exactly the reply
     # fixture — with a short retry (the reply passes through the TX queue,
     # the capture thread, and the file).
     CAP1=0
     for _ in 1 2 3 4 5; do
-        if [ -f artifacts/live-net-icmp-cap-1.bin ] && cmp -s artifacts/live-net-icmp-cap-1.bin artifacts/live-net-icmp-reply-1.bin; then
+        if [ -f "$RUN_DIR/live-net-icmp-cap-1.bin" ] && cmp -s "$RUN_DIR/live-net-icmp-cap-1.bin" "$RUN_DIR/live-net-icmp-reply-1.bin"; then
             CAP1=1
             break
         fi
@@ -361,10 +387,10 @@ echo
     echo
     echo "=== phase 2: the guest pings a peer (request captured, host echo answer observed) ==="
     P2=0
-    run_one "p2" "artifacts/live-net-icmp-script-2.txt" "artifacts/live-net-icmp-script-2b.txt" "icmp-phase2-ready" "" "artifacts/live-net-icmp-cap-2.bin" "--net-arp-respond 10.0.0.2 --net-icmp-respond 10.0.0.2" && P2=1 || true
+    run_one "p2" "$RUN_DIR/live-net-icmp-script-2.txt" "$RUN_DIR/live-net-icmp-script-2b.txt" "icmp-phase2-ready" "" "$RUN_DIR/live-net-icmp-cap-2.bin" "--net-arp-respond 10.0.0.2 --net-icmp-respond 10.0.0.2" && P2=1 || true
     CAP2=0
     for _ in 1 2 3 4 5; do
-        if [ -f artifacts/live-net-icmp-cap-2.bin ] && cmp -s artifacts/live-net-icmp-cap-2.bin artifacts/live-net-icmp-fixture-2.bin; then
+        if [ -f "$RUN_DIR/live-net-icmp-cap-2.bin" ] && cmp -s "$RUN_DIR/live-net-icmp-cap-2.bin" "$RUN_DIR/live-net-icmp-fixture-2.bin"; then
             CAP2=1
             break
         fi
@@ -377,9 +403,9 @@ echo
     echo
     echo "=== phase 3: an echo request for a foreign address is NOT answered (scope check) ==="
     P3=0
-    run_one "p3" "artifacts/live-net-icmp-script-3.txt" "artifacts/live-net-icmp-script-3b.txt" "icmp-phase1-ready" "artifacts/live-net-icmp-fixture-3.bin" "artifacts/live-net-icmp-cap-3.bin" "" && P3=1 || true
+    run_one "p3" "$RUN_DIR/live-net-icmp-script-3.txt" "$RUN_DIR/live-net-icmp-script-3b.txt" "icmp-phase1-ready" "$RUN_DIR/live-net-icmp-fixture-3.bin" "$RUN_DIR/live-net-icmp-cap-3.bin" "" && P3=1 || true
     CAP3=0
-    if [ ! -f artifacts/live-net-icmp-cap-3.bin ] || [ ! -s artifacts/live-net-icmp-cap-3.bin ]; then
+    if [ ! -f "$RUN_DIR/live-net-icmp-cap-3.bin" ] || [ ! -s "$RUN_DIR/live-net-icmp-cap-3.bin" ]; then
         CAP3=1
     fi
     echo "phase 3 capture-empty=$CAP3"
@@ -394,7 +420,7 @@ if [ "$PASS" = "$PHASES" ]; then
     sleep 0.5
     exit 0
 else
-    echo "verify-live-net-icmp: FAILED — $PASS/$PHASES phases passed; see artifacts/live-net-icmp-report.txt, the per-phase runner output and serial logs, and the capture files."
+    echo "verify-live-net-icmp: FAILED — $PASS/$PHASES phases passed; see "$RUN_DIR/live-net-icmp-report.txt", the per-phase runner output and serial logs, and the capture files."
     echo "FAIL: $PASS/$PHASES" >> "$REPORT"
     sleep 0.5
     exit 1
