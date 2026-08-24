@@ -147,7 +147,13 @@
 import AppKit
 import ApplicationServices
 import Darwin
+// DiskImageKit ships in the macOS 27 SDK only (#523 item 2). The class-A
+// CI job builds against the older macos-latest SDK, so the import and the
+// --overlay-base implementation are compiled in ONLY when the SDK has the
+// framework; elsewhere the flag fails honestly at runtime.
+#if canImport(DiskImageKit)
 import DiskImageKit
+#endif
 import Foundation
 import ScreenCaptureKit
 import Virtualization
@@ -793,6 +799,7 @@ config.cpuCount = 2
 
 do {
     if let base = overlayBasePath {
+#if canImport(DiskImageKit)
         guard #available(macOS 27.0, *) else {
             fail("--overlay-base requires macOS 27+ DiskImageKit.")
         }
@@ -816,6 +823,9 @@ do {
         let attachment = try VZDiskImageStorageDeviceAttachment(diskImage: stacked)
         config.storageDevices = [VZVirtioBlockDeviceConfiguration(attachment: attachment)]
         print("  disk: \(base) (base, read-only) + throwaway ASIF overlay in \(stackDir.path)")
+#else
+        fail("--overlay-base needs an SDK with DiskImageKit (macOS 27+); this binary was built without it.")
+#endif
     } else {
         let attachment = try VZDiskImageStorageDeviceAttachment(url: diskURL, readOnly: false)
         config.storageDevices = [VZVirtioBlockDeviceConfiguration(attachment: attachment)]
