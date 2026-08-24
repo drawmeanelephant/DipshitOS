@@ -85,6 +85,40 @@ var script_staging: [script_staging_max]u8 = undefined;
 /// success/error. Module scope so `handle_line` can read it.
 var last_exit_ok: bool = true;
 
+/// M19 P4 (issue #293): numeric exit status of the last command, 0–255.
+/// Kept in sync with `last_exit_ok` through the helpers below — never
+/// write either global directly from execution paths.
+var last_exit: u8 = 0;
+
+/// M19 P4 (issue #293): record a boolean outcome — 0 on success, 1 on
+/// failure — and keep the P11 bool and the P4 number in lockstep.
+fn set_exit_ok(ok: bool) void {
+    last_exit_ok = ok;
+    last_exit = if (ok) 0 else 1;
+}
+
+/// M19 P4 (issue #293): record a specific exit code (0 means success).
+fn set_exit_code(code: u8) void {
+    last_exit = code;
+    last_exit_ok = (code == 0);
+}
+
+/// M19 P4 (issue #293): map a monitor dispatch result to a conventional
+/// shell-style status. Dispatch-level only: external programs are spawned
+/// fire-and-forget (the interactive shell does not block on them), so this
+/// reflects whether the command was found, well-formed, and spawnable —
+/// not the child's own exit status (that lands in the process registry).
+fn exec_error_code(e: monitor.ExecError) u8 {
+    return switch (e) {
+        .none => 0,
+        .unknown_command => 127,
+        .usage => 2,
+        .invalid_argument => 1,
+        .not_implemented => 1,
+        .machine_failed => 1,
+    };
+}
+
 /// M19 P15 (issue #304): shell trace mode — when enabled, each command
 /// is printed to the console (prefixed with `+ `) before execution.
 var trace_enabled: bool = false;
@@ -240,6 +274,33 @@ fn env_expand(line: []const u8, out: []u8) []u8 {
     var opos: usize = 0;
     var i: usize = 0;
     while (i < line.len and opos < out.len) : (i += 1) {
+        if (line[i] == '$' and i + 1 < line.len and line[i + 1] == '?') {
+            // M19 P4 (issue #293): `$?` — the read-only numeric exit
+            // status of the last command, substituted here (NOT stored
+            // in the env table). Structured bodies (fn/for/while) skip
+            // pre-expansion by design, so their `$?` expands at body
+            // execution time when handle_line re-enters.
+            var num: [3]u8 = undefined; // u8 prints in ≤3 digits
+            var nlen: usize = 0;
+            var v = last_exit;
+            if (v == 0) {
+                num[0] = '0';
+                nlen = 1;
+            } else {
+                while (v > 0) {
+                    num[nlen] = '0' + v % 10;
+                    nlen += 1;
+                    v /= 10;
+                }
+            }
+            var d = nlen;
+            while (d > 0 and opos < out.len) : (d -= 1) {
+                out[opos] = num[d - 1];
+                opos += 1;
+            }
+            i += 1; // consume the '?' too (loop's +1 covers '$')
+            continue;
+        }
         if (line[i] == '$' and i + 1 < line.len) {
             // Collect variable name
             var ns: usize = i + 1;
@@ -399,14 +460,21 @@ pub const Shell = struct {
         monitor.banner(&self.mon);
     }
 
+    /// M19 P4 (issue #293): print the prompt in the color that reports the
+    /// last exit status — green on 0, red otherwise (T5/T15 seam). No-ops
+    /// the escape bytes when colors are disabled.
+    fn puts_colored_prompt(self: *Shell) void {
+        if (self.color_enabled) self.mon.console.puts(if (last_exit_ok) "\x1b[32m" else "\x1b[31m");
+        self.mon.console.puts(expanded_prompt());
+        if (self.color_enabled) self.mon.console.puts("\x1b[0m");
+    }
+
     /// Drive one byte of input. Prints the prompt exactly once
     /// per line (on the poll that starts it). Returns `.idle` when no byte
     /// is available — callers park between polls; tests drive until idle.
     pub fn poll(self: *Shell) PollResult {
         if (!self.prompt_shown) {
-            if (self.color_enabled) self.mon.console.puts("\x1b[32m");
-            self.mon.console.puts(expanded_prompt());
-            if (self.color_enabled) self.mon.console.puts("\x1b[0m");
+            self.puts_colored_prompt();
             self.prompt_shown = true;
         }
         const byte = self.mon.console.readByte() orelse return .idle;
@@ -481,9 +549,7 @@ pub const Shell = struct {
             .repaint => {
                 // Ctrl-L: the editor cleared the screen; restore the prompt
                 // + the in-progress line (the editor does not own the prompt).
-                if (self.color_enabled) self.mon.console.puts("\x1b[32m");
-                self.mon.console.puts(expanded_prompt());
-                if (self.color_enabled) self.mon.console.puts("\x1b[0m");
+                self.puts_colored_prompt();
                 self.editor.reprint(self.mon.console);
                 return .pending;
             },
@@ -1195,6 +1261,45 @@ fn handle_line(mon: *monitor.Monitor, raw_line: []const u8) void {
         }
     }
 
+    // M19 P3 (issue #292): chaining is decided on the RAW line, BEFORE
+    // any expansion — each segment then expands at its own execution
+    // time, so `$?`, `$(cmd)`, and `$VAR` in later segments observe the
+    // state earlier segments left behind (the POSIX ordering; expanding
+    // the whole line up front would bake in stale values).
+    //
+    // Structured forms keep their internal `;` semantics (function
+    // definitions, loop headers, if/then/else) and are dispatched un-split.
+    const structured_form = std.mem.startsWith(u8, raw_line, "if ") or
+        std.mem.startsWith(u8, raw_line, "if\t") or
+        std.mem.startsWith(u8, raw_line, "fn ") or
+        std.mem.startsWith(u8, raw_line, "fn\t") or
+        std.mem.startsWith(u8, raw_line, "for ") or
+        std.mem.startsWith(u8, raw_line, "for\t") or
+        std.mem.startsWith(u8, raw_line, "while ") or
+        std.mem.startsWith(u8, raw_line, "while\t");
+    if (!structured_form) {
+        switch (chain_split(raw_line)) {
+            .too_many => {
+                mon.console.print_line("chains: too many commands (max 4 per chain)");
+                return;
+            },
+            .chain => |c| {
+                run_chain(mon, c.segs[0..c.seg_count], c.ops[0..c.op_count]);
+                return;
+            },
+            .none => {},
+        }
+    }
+
+    expand_and_dispatch(mon, raw_line);
+}
+
+/// The per-command expansion pipeline every submitted line used to run
+/// through before dispatch: arithmetic substitution, command substitution,
+/// `$VAR` expansion (skipped wholesale for `fn`/`for`/`while` lines so
+/// body references expand at execution time), then the alias check and
+/// the builtin/registry path. M19 P3 chains call this once PER SEGMENT.
+fn expand_and_dispatch(mon: *monitor.Monitor, raw_line: []const u8) void {
     // P10: arithmetic expansion `$((expr))` — evaluate and substitute.
     // Skip for fn definitions (preserve $((...)  in function bodies).
     var arith_buf: [lineedit.max_line]u8 = undefined;
@@ -1231,6 +1336,14 @@ fn handle_line(mon: *monitor.Monitor, raw_line: []const u8) void {
     else
         env_expand(line_after_subst, &expanded);
 
+    dispatch_line(mon, line);
+}
+
+/// M19 P3 (issue #292): dispatch one already-expanded command segment —
+/// the M18 T13 first-word alias check followed by the normal builtin /
+/// registry path. Extracted verbatim from handle_line's tail so chains,
+/// scripts, and plain lines share one dispatch seam.
+fn dispatch_line(mon: *monitor.Monitor, line: []const u8) void {
     // M18 T13: check for alias expansion (only first word)
     if (line.len > 0) {
         var aname: [env_name_max]u8 = undefined;
@@ -1259,7 +1372,7 @@ fn handle_line(mon: *monitor.Monitor, raw_line: []const u8) void {
                     sub[sp] = line[ai];
                     sp += 1;
                 }
-                // Re-run handle_line with substituted text (once only to avoid loops)
+                // Re-run once through the expanded path (no alias-of-alias loops)
                 shell_handle_expanded(mon, sub[0..sp]);
                 return;
             }
@@ -1267,6 +1380,100 @@ fn handle_line(mon: *monitor.Monitor, raw_line: []const u8) void {
     }
 
     shell_handle_expanded(mon, line);
+}
+
+/// M19 P3 (issue #292): a chaining operator between two segments.
+/// `;` always runs the next segment; `&&` runs it only when the last
+/// actual status is success; `||` only on failure. `&&`/`||` have equal
+/// precedence, left to right; a SKIPPED segment leaves the status
+/// untouched, which yields the POSIX behavior for mixed chains
+/// (`a && b || c` runs `c` exactly when everything so far failed).
+const ChainOp = enum { seq, run_and, run_or };
+
+/// M19 P3 (issue #292): bounded chains — at most 4 commands (3 operators).
+const chain_max_cmds: usize = 4;
+
+const ChainSplitResult = union(enum) {
+    /// No top-level operator — a single command (the common case).
+    none,
+    /// More than chain_max_cmds segments — refused honestly, nothing runs.
+    too_many,
+    chain: struct {
+        segs: [chain_max_cmds][]const u8,
+        ops: [chain_max_cmds - 1]ChainOp,
+        seg_count: usize,
+        op_count: usize,
+    },
+};
+
+/// M19 P3 (issue #292): split a line on `;`, `&&`, `||` OUTSIDE double
+/// quotes (the same quote rule as pipe_split — a quote opens only where
+/// the tokenizer would open one, so a quote byte mid-token is literal).
+/// A lone `|` is NOT an operator here; pipes bind tighter and are handled
+/// per-segment by shell_handle_expanded. Segments are trimmed; empty
+/// segments are kept by the split and skipped at run time.
+fn chain_split(line: []const u8) ChainSplitResult {
+    var in_quote = false;
+    var segs: [chain_max_cmds][]const u8 = undefined;
+    var ops: [chain_max_cmds - 1]ChainOp = undefined;
+    var seg_count: usize = 0;
+    var op_count: usize = 0;
+    var start: usize = 0;
+    var i: usize = 0;
+    while (i < line.len) : (i += 1) {
+        if (line[i] == '"') {
+            in_quote = !in_quote;
+            continue;
+        }
+        if (in_quote) continue;
+        var op: ?ChainOp = null;
+        var op_width: usize = 1;
+        if (line[i] == '&' and i + 1 < line.len and line[i + 1] == '&') {
+            op = .run_and;
+            op_width = 2;
+        } else if (line[i] == '|' and i + 1 < line.len and line[i + 1] == '|') {
+            op = .run_or;
+            op_width = 2;
+        } else if (line[i] == ';') {
+            op = .seq;
+        }
+        if (op) |o| {
+            // This operator opens segment seg_count + 1; the bound caps
+            // segments at chain_max_cmds, so operators at chain_max_cmds - 1.
+            if (seg_count >= chain_max_cmds - 1) return .too_many;
+            segs[seg_count] = trim_start(trim_end(line[start..i]));
+            ops[op_count] = o;
+            seg_count += 1;
+            op_count += 1;
+            start = i + op_width;
+            i += op_width - 1; // the loop's +1 covers the rest of a two-char op
+        }
+    }
+    segs[seg_count] = trim_start(trim_end(line[start..]));
+    seg_count += 1;
+    // No operator found — the ordinary single-command path, unchanged.
+    if (op_count == 0) return .none;
+    return .{ .chain = .{ .segs = segs, .ops = ops, .seg_count = seg_count, .op_count = op_count } };
+}
+
+/// M19 P3 (issue #292): evaluate a chain left to right. Each segment runs
+/// through the full per-command pipeline (expansions → alias → builtins →
+/// registry), so pipes, redirection, and `$?` compose within any segment
+/// and expand at segment execution time. Short-circuit decisions read the
+/// live status; a skipped segment changes nothing.
+fn run_chain(mon: *monitor.Monitor, segs: []const []const u8, ops: []const ChainOp) void {
+    var idx: usize = 0;
+    while (idx < segs.len) : (idx += 1) {
+        const should_run = if (idx == 0) true else switch (ops[idx - 1]) {
+            .seq => true,
+            .run_and => last_exit_ok,
+            .run_or => !last_exit_ok,
+        };
+        if (!should_run) continue;
+        if (segs[idx].len == 0) continue; // empty segment: no-op, status preserved
+        expand_and_dispatch(mon, segs[idx]);
+        if (script_stop) break; // M18 T16: `exit` stops the script mid-chain
+    }
 }
 
 /// M19 P1 (issue #290): the split of a line at its first `|` outside
@@ -2107,6 +2314,10 @@ fn run_while(mon: *monitor.Monitor, line: []const u8) void {
 }
 
 fn shell_handle_expanded(mon: *monitor.Monitor, line: []const u8) void {
+    // M19 P4 (issue #293): optimistic success default — builtins that
+    // complete normally propagate 0 without every return site having to
+    // record it; failure paths below overwrite explicitly.
+    set_exit_ok(true);
     // M19 P2 (issue #291): the redirect operators — `>`, `>>`, `<` —
     // split before tokenizing so the command half goes through the
     // normal builtin/registry path and the file half is used by the
@@ -2122,6 +2333,7 @@ fn shell_handle_expanded(mon: *monitor.Monitor, line: []const u8) void {
     // both halves go through the normal builtin/registry path.
     switch (pipe_split(line)) {
         .multiple => {
+            set_exit_ok(false); // M19 P4: a refusal is a failed command
             mon.console.print_line("pipes: only one pipe per line (no chaining)");
             return;
         },
@@ -2142,7 +2354,7 @@ fn shell_handle_expanded(mon: *monitor.Monitor, line: []const u8) void {
     }
     const argv = tokens.argv[0..tokens.count];
     if (argv.len == 0) {
-        last_exit_ok = (monitor.exec(mon, argv) == .none);
+        set_exit_code(exec_error_code(monitor.exec(mon, argv))); // M19 P4
         return;
     }
     // M19 P15: trace mode — print command before execution.
@@ -2315,12 +2527,12 @@ fn shell_handle_expanded(mon: *monitor.Monitor, line: []const u8) void {
     }
     // M19 P11: `true` — set exit status to success.
     if (std.mem.eql(u8, argv[0], "true")) {
-        last_exit_ok = true;
+        set_exit_ok(true);
         return;
     }
     // M19 P11: `false` — set exit status to failure.
     if (std.mem.eql(u8, argv[0], "false")) {
-        last_exit_ok = false;
+        set_exit_ok(false);
         return;
     }
     // M19 P11: `if COND; then BODY; [else BODY]; fi`.
@@ -2421,7 +2633,9 @@ fn shell_handle_expanded(mon: *monitor.Monitor, line: []const u8) void {
         func_call(mon, argv);
         return;
     }
-    last_exit_ok = (monitor.exec(mon, argv) == .none);
+    // M19 P4 (issue #293): fall-through registry dispatch records the
+    // conventional numeric status (0 / 127 unknown / 2 usage / 1 failure).
+    set_exit_code(exec_error_code(monitor.exec(mon, argv)));
 }
 
 /// The kernel's ONE shell instance lives in BSS, not on the kernel stack:
@@ -5015,4 +5229,180 @@ test "shell: M19 P14 pipe+redirect: cmd < file | cmd > file" {
     while (shell.poll() != .idle) {}
     const out = mock.contents();
     try std.testing.expect(std.mem.indexOf(u8, out, "error") == null);
+}
+
+// ---------------------------------------------------------------------------
+// M19 P3 (issue #292) chaining + M19 P4 (issue #293) exit status
+// ---------------------------------------------------------------------------
+
+test "shell: M19 P3 chain_split: no operator is none" {
+    try std.testing.expect(chain_split("echo hello") == .none);
+    try std.testing.expect(chain_split("") == .none);
+    try std.testing.expect(chain_split("   ") == .none);
+}
+
+test "shell: M19 P3 chain_split: seq, and, or with trimming" {
+    const r = chain_split("echo one ; echo two && echo three || echo four");
+    switch (r) {
+        .chain => |c| {
+            try std.testing.expectEqual(@as(usize, 4), c.seg_count);
+            try std.testing.expectEqualStrings("echo one", c.segs[0]);
+            try std.testing.expectEqualStrings("echo two", c.segs[1]);
+            try std.testing.expectEqualStrings("echo three", c.segs[2]);
+            try std.testing.expectEqualStrings("echo four", c.segs[3]);
+            try std.testing.expectEqual(ChainOp.seq, c.ops[0]);
+            try std.testing.expectEqual(ChainOp.run_and, c.ops[1]);
+            try std.testing.expectEqual(ChainOp.run_or, c.ops[2]);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "shell: M19 P3 chain_split: quotes protect operators; lone | is not a chain op" {
+    // `;` inside double quotes stays part of the segment.
+    switch (chain_split("echo \"a;b\" ; echo c")) {
+        .chain => |c| {
+            try std.testing.expectEqual(@as(usize, 2), c.seg_count);
+            try std.testing.expectEqualStrings("echo \"a;b\"", c.segs[0]);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    // A single pipe binds tighter — the chain layer must not see it.
+    try std.testing.expect(chain_split("echo a | type") == .none);
+}
+
+test "shell: M19 P3 chain_split: more than 4 commands is refused" {
+    try std.testing.expect(chain_split("a ; b ; c ; d ; e") == .too_many);
+    // Exactly 4 segments (3 operators) is the bound.
+    try std.testing.expect(chain_split("a ; b ; c ; d") != .too_many);
+}
+
+test "shell: M19 P3 seq runs both halves" {
+    env_count = 0;
+    trace_enabled = false;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("echo one ; echo two\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "one\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "two\n") != null);
+}
+
+test "shell: M19 P3 && skips on failure, || rescues it" {
+    env_count = 0;
+    trace_enabled = false;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("false && echo nope\n");
+    while (shell.poll() != .idle) {}
+    mock.feed("false || echo yep\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    // Line-exact: the mock echoes the typed line back, so a bare substring
+    // would match the echo of "…&& echo nope" itself.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\nnope\n") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\nyep\n") != null);
+}
+
+test "shell: M19 P3 mixed precedence matches the issue example" {
+    env_count = 0;
+    trace_enabled = false;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    // The issue's exact shape: cmd2 skipped on failure; cmd3 always runs.
+    mock.feed("false && echo skipped ; echo always\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "\nskipped\n") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\nalways\n") != null);
+}
+
+test "shell: M19 P3 success chain and equal-precedence left-to-right" {
+    env_count = 0;
+    trace_enabled = false;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("true && echo yes || echo no\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "yes\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "no\n") == null);
+}
+
+test "shell: M19 P4 $? expands to the last status" {
+    env_count = 0;
+    trace_enabled = false;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("true\necho $?\n"); // expect an exact "0" line
+    while (shell.poll() != .idle) {}
+    mock.feed("false\necho $?\n"); // expect an exact "1" line
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "\n0\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\n1\n") != null);
+}
+
+test "shell: M19 P4 unknown command reports 127 through $?" {
+    env_count = 0;
+    trace_enabled = false;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("nosuchverb42\necho $?\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "\n127\n") != null);
+}
+
+test "shell: M19 P4 usage refusal reports 2; exec miss reports nonzero" {
+    env_count = 0;
+    trace_enabled = false;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    // An empty submission reaches the registry with no verb -> usage -> 2
+    // (the same shape the canonical transcript records).
+    mock.feed("\necho $?\n");
+    while (shell.poll() != .idle) {}
+    const first = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, first, "\n2\n") != null);
+    // exec of a missing image -> invalid_argument -> 1.
+    mock.feed("exec NOTEXIST.BIN\necho $?\n");
+    while (shell.poll() != .idle) {}
+    const second = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, second[first.len..], "\n1\n") != null);
+}
+
+test "shell: M19 P4 $? in a LATER chain segment expands at execution time" {
+    env_count = 0;
+    trace_enabled = false;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    // The live-gate regression: expanding the whole line up front would
+    // bake the PRE-LINE status into `$?` and print exit=0. Per-segment
+    // expansion must observe the failure the first segment just recorded.
+    mock.feed("exec NOTEXIST.BIN ; echo exit=$?\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "\nexit=1\n") != null);
+}
+
+test "shell: M19 P3 empty segments are skipped without breaking the chain" {
+    env_count = 0;
+    trace_enabled = false;
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("; ; echo fine\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "fine\n") != null);
 }
