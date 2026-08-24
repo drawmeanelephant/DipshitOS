@@ -10,7 +10,7 @@
 - **Touches:** `user/src/edit.zig`
 - **Depends on:** M23 E1+E6 (already landed on `main` in PR #508).
 - **Heartbeat:** 2026-08-24
-- **Status:** 🔄 agent/buffy/m23-text-editor
+- **Status:** ✅ done — 75/75 host tests pass, build clean, gate written
 
 ## Notes
 
