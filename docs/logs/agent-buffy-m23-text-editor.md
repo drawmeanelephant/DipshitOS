@@ -1,4 +1,4 @@
-# Branch log: agent/buffy/m23-text-editor
+# Log — `agent/buffy/m23-text-editor`
 
 ## 2026-08-24 — claim 7746 filed
 
