@@ -16,6 +16,15 @@
 #   text            -> cur=0,2
 #   echo m20-font-ok
 #
+# Run isolation (#523 item 2 / issue #528, claim 5069): every boot attaches
+# a private DiskImageKit stacked disk (read-only base + throwaway ASIF
+# overlay), a private EFI var store (recreated fresh per boot, as the
+# pre-isolation gate did), and a private serial log under $RUN_DIR — two
+# concurrent instances cannot clobber each other's disks, NVRAM, or
+# evidence. Set DIPSHIT_GATE_SUFFIX=_alt to give this instance its own
+# canonical evidence names (two simultaneous instances MUST differ), and
+# DIPSHIT_KEEP_RUN=1 to keep the scratch dir.
+#
 # Class B — Apple silicon + VZ only.
 
 set -euo pipefail
@@ -23,12 +32,17 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-GATE_LOG="artifacts/live-font-sizes-gate.txt"
+source tools/lib/gate-run.sh
+
+SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
+
+GATE_LOG="$(art live-font-sizes-gate.txt)"
 exec > >(tee "$GATE_LOG") 2>&1
-trap 'sleep 0.5' EXIT
+trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
 
 BOOTS="${BOOTS:-1}"
-REPORT="artifacts/live-font-sizes-report.txt"
+REPORT="$(art live-font-sizes-report.txt)"
 SCRIPT="artifacts/live-font-sizes-input.txt"
 
 echo "=== verify-live-font-sizes: M20 U1 — font sizes on VZ, $BOOTS boot(s) ==="
@@ -45,32 +59,41 @@ zig build image
 swift build --package-path host/vm-runner --configuration release
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
+# --- per-run isolation -------------------------------------------------------------
+# Private scratch dir + pristine-boot overlay for EVERY boot.
+# See tools/lib/gate-run.sh.
+gate_begin live-font-sizes
+echo "run dir: $RUN_DIR"
+
+
 printf 'text\nfont medium\ntext\nfont large\ntext\nfont small\ntext\necho m20-font-ok\n' > "$SCRIPT"
 
 run_one() {
     local tag="$1"
-    rm -f artifacts/efi-vars.bin artifacts/vm-serial.log
+    rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial-$tag.log"
     set +e
-    host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log \
+    host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
+        --serial "$RUN_DIR/vm-serial-$tag.log" \
         --screen artifacts/gpu-screen --script "$SCRIPT" --script-expect "m20-font-ok" --timeout 30 \
-        > "artifacts/live-font-sizes-run-$tag.txt" 2>&1
+        > "$(art live-font-sizes-run-$tag.txt)" 2>&1
     local RC=$?
     set -e
-    [ -f artifacts/vm-serial.log ] && cp artifacts/vm-serial.log "artifacts/live-font-sizes-serial-$tag.log" || true
+    [ -f "$RUN_DIR/vm-serial-$tag.log" ] && cp "$RUN_DIR/vm-serial-$tag.log" "$(art live-font-sizes-serial-$tag.log)" || true
+    local SER="$(art live-font-sizes-serial-$tag.log)"
 
     local SERIAL_BYTES BANNER=0 S8=0 M16=0 L24=0 BACK8=0 DONE=0
-    SERIAL_BYTES=$(wc -c < artifacts/vm-serial.log 2>/dev/null | tr -d ' ')
-    if [ -f artifacts/vm-serial.log ]; then
-        grep -qF "DipshitOS kernel" artifacts/vm-serial.log && BANNER=1
+    SERIAL_BYTES=$(wc -c < "$SER" 2>/dev/null | tr -d ' ')
+    if [ -f "$SER" ]; then
+        grep -qF "DipshitOS kernel" "$SER" && BANNER=1
         # Baseline small: 160x90 at 8x8.
-        grep -qF "rows=90 cols=160 cell=8x8" artifacts/vm-serial.log && S8=1
+        grep -qF "rows=90 cols=160 cell=8x8" "$SER" && S8=1
         # Medium: exactly halved geometry.
-        grep -qF "rows=45 cols=80 cell=16x16" artifacts/vm-serial.log && M16=1
+        grep -qF "rows=45 cols=80 cell=16x16" "$SER" && M16=1
         # Large: 1280/24 = 53 columns, 720/24 = 30 rows.
-        grep -qF "rows=30 cols=53 cell=24x24" artifacts/vm-serial.log && L24=1
+        grep -qF "rows=30 cols=53 cell=24x24" "$SER" && L24=1
         # Restored small after large.
-        grep -qF "rows=90 cols=160 cell=8x8" artifacts/vm-serial.log && BACK8=1
-        grep -qF "m20-font-ok" artifacts/vm-serial.log && DONE=1
+        grep -qF "rows=90 cols=160 cell=8x8" "$SER" && BACK8=1
+        grep -qF "m20-font-ok" "$SER" && DONE=1
     fi
     echo "$tag: rc=$RC bytes=$SERIAL_BYTES banner=$BANNER s8=$S8 m16=$M16 l24=$L24 back8=$BACK8 done=$DONE"
     [ "$RC" = 0 ] && [ "$BANNER" = 1 ] && [ "$S8" = 1 ] && [ "$M16" = 1 ] \

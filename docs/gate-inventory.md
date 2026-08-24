@@ -153,6 +153,37 @@ CI extracts it from there to list the class-B gates it does not prove.
 
 ## Known flakes (evidence registry)
 
+### Fleet migration 2026-08-24 (claim 5069, issue #528)
+
+Run-isolation migrated most `tools/verify-live-*.sh` to
+`tools/lib/gate-run.sh` (private disk/vars/serial per boot) and repaired
+the three rot classes from issue #528. Per-gate status after migration:
+
+- **Green under isolation** — every migrated gate not listed below ran
+  rc=0 on this host post-migration (evidence: `artifacts/` gate logs).
+- **Pre-existing red, confirmed on unmodified origin/main the same day**
+  (cited, not masked): `live-win`, `live-win-syscall`, `live-win-close`,
+  `live-win-move` (pixel decode vs capture cadence), `live-win-hig`
+  (`dui: cycle` missing), `live-asm` + `live-disas` (M22 D4 fixture drift,
+  "bad entry offset"), `live-calc-prog` ("failed to open window"),
+  `verify-live-user-fs` (bare make-image.sh subset build), `live-net-nat`.
+- **Environment-blocked on this agent session** (TCC): `live-screen`,
+  `live-text`, `live-glyphs`, `live-roadpops` (Screen Recording),
+  `live-pointer-cg` (Accessibility, issue #151) — reproduced identically
+  on unmodified main.
+- **Host-dependent / flaky, selection supported**: `live-net-nat`
+  (`DIPSHIT_NET_NAT_RUNS`), net-tcp Run C (`DIPSHIT_NET_TCP_RUNS`,
+  issue #123 family).
+- **Platform finding**: guest FAT writes against freshly-copied images are
+  unreliable on this macOS 27.0 host while writes to the long-lived
+  `artifacts/disk.img` behave like main; write-gates (fs/gfs/user-fs/
+  settings/scripting) therefore boot the canonical image under the
+  gate-run.sh mkdir spin-lock instead of copies/overlays.
+- **Unresolved**: `live-tabs` probe-decode race (paint vs screenshot-after)
+  under isolated boots; needs its own follow-up.
+
+Existing flake registry rows continue below.
+
 `artifacts/` is gitignored, so per-run evidence is regenerable by re-running
 its gate — EXCEPT timing-dependent flakes. Record every known flake here
 (append-only; a fix closes the row with a pointer) so a future agent can

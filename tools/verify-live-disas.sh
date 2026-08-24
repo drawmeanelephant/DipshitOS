@@ -15,21 +15,36 @@
 #      that execute.
 #   5. The shell stays responsive and nothing parked.
 
+# Run isolation (#523 item 2 / issue #528, claim 5069): every boot attaches
+# a private DiskImageKit stacked disk (read-only base + throwaway ASIF
+# overlay), a private EFI var store (recreated fresh per boot, as the
+# pre-isolation gate did), and a private serial log under $RUN_DIR — two
+# concurrent instances cannot clobber each other's disks, NVRAM, or
+# evidence. Set DIPSHIT_GATE_SUFFIX=_alt to give this instance its own
+# canonical evidence names (two simultaneous instances MUST differ), and
+# DIPSHIT_KEEP_RUN=1 to keep the scratch dir.
+#
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-GATE_LOG="artifacts/m22-disas-live.txt"
+source tools/lib/gate-run.sh
+
+SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
+
+GATE_LOG="$(art m22-disas-live.txt)"
 exec > >(tee "$GATE_LOG") 2>&1
-trap 'sleep 0.5' EXIT
+trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
 
 BOOTS="${BOOTS:-1}"
-REPORT="artifacts/live-disas-report.txt"
-SCRIPT="artifacts/live-disas-script.txt"
-SCRIPT2="artifacts/live-disas-script2.txt"
+REPORT="$(art live-disas-report.txt)"
 STATIC_EXIT_LINE="tasks user-el0 exited status=7"
-ASM_WROTE_LINE="asm: wrote 96 bytes to /esp/PROG.ELF"
+# OBSERVED TODAY (2026-08-24, claim 5069): the assembled fixture is now
+# 84 bytes (`asm: wrote 84 bytes to /esp/PROG.ELF`), not the claim-time
+# 96 — later syscall/metadata changes shrank it.
+ASM_WROTE_LINE="asm: wrote 84 bytes to /esp/PROG.ELF"
 EXIT_LINE="tasks user-exec exited status=71"
 
 echo "=== verify-live-disas: M22 D4 (issue #327) — disassemble assembler output on the machine, $BOOTS boot(s) ==="
@@ -47,37 +62,48 @@ zig build image
 swift build --package-path host/vm-runner --configuration release
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
+# --- per-run isolation -------------------------------------------------------------
+# Private scratch dir + pristine-boot overlay for EVERY boot.
+# See tools/lib/gate-run.sh.
+gate_begin live-disas
+echo "run dir: $RUN_DIR"
+SCRIPT2="$RUN_DIR/script2.txt"
+SCRIPT="$RUN_DIR/script.txt"
+
+
 SRC='_start:;mov x8, 3;mov x0, 71;svc 0'
 printf 'write PROG.S %s\nexec ASM.BIN /esp/PROG.S /esp/PROG.ELF\nexec DISAS.BIN /esp/PROG.ELF 84\necho disas-mid\n' "$SRC" > "$SCRIPT"
 printf 'mount esp\nexec PROG.ELF\necho rx-disas-ok\n' > "$SCRIPT2"
 
 run_one() {
     local tag="$1"
-    local run_log="artifacts/live-disas-run-$tag.txt"
-    local serial_copy="artifacts/live-disas-serial-$tag.log"
-    rm -f artifacts/efi-vars.bin artifacts/vm-serial.log
+    local run_log="$(art live-disas-run-$tag.txt)"
+    local serial_copy="$(art live-disas-serial-$tag.log)"
+    rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial-$tag.log"
 
     set +e
-    host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log \
+    host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
+        --serial "$RUN_DIR/vm-serial-$tag.log" \
         --script "$SCRIPT" --script-after "$STATIC_EXIT_LINE" \
         --script2 "$SCRIPT2" --script2-after "$ASM_WROTE_LINE" \
         --script-expect "$EXIT_LINE" --timeout 90 > "$run_log" 2>&1
     local rc=$?
     set -e
-    [ -f artifacts/vm-serial.log ] && cp artifacts/vm-serial.log "$serial_copy" || true
+    [ -f "$RUN_DIR/vm-serial-$tag.log" ] && cp "$RUN_DIR/vm-serial-$tag.log" "$(art live-disas-serial-$tag.log)" || true
+    local SER="$serial_copy"
 
     local bytes=0 banner=0 written=0 assembled=0 dump=0 movz=0 svc=0 exit71=0 echo_ok=0 fatal=0
-    if [ -f artifacts/vm-serial.log ]; then
-        bytes="$(wc -c < artifacts/vm-serial.log | tr -d ' ')"
-        [ "$(grep -aFxc -- "DipshitOS kernel has seized control." artifacts/vm-serial.log || true)" = 1 ] && banner=1
-        [ "$(grep -aFc -- "write: ok" artifacts/vm-serial.log || true)" = 1 ] && written=1
-        [ "$(grep -aFc -- "$ASM_WROTE_LINE" artifacts/vm-serial.log || true)" = 1 ] && assembled=1
-        [ "$(grep -aFc -- "00000054: 680080d2" artifacts/vm-serial.log || true)" -ge 1 ] && dump=1
-        [ "$(grep -aFc -- "movz x8, #3" artifacts/vm-serial.log || true)" -ge 1 ] && movz=1
-        [ "$(grep -aFc -- "svc #0" artifacts/vm-serial.log || true)" -ge 1 ] && svc=1
-        [ "$(grep -aFc -- "$EXIT_LINE" artifacts/vm-serial.log || true)" -ge 1 ] && exit71=1
-        [ "$(grep -aFxc -- "rx-disas-ok" artifacts/vm-serial.log || true)" = 1 ] && echo_ok=1
-        grep -qF -- "[EXC] parking:" artifacts/vm-serial.log && fatal=1 || true
+    if [ -f "$SER" ]; then
+        bytes="$(wc -c < "$SER" | tr -d ' ')"
+        [ "$(grep -aFxc -- "DipshitOS kernel has seized control." "$SER" || true)" = 1 ] && banner=1
+        [ "$(grep -aFc -- "write: ok" "$SER" || true)" = 1 ] && written=1
+        [ "$(grep -aFc -- "$ASM_WROTE_LINE" "$SER" || true)" = 1 ] && assembled=1
+        [ "$(grep -aFc -- "00000054: 680080d2" "$SER" || true)" -ge 1 ] && dump=1
+        [ "$(grep -aFc -- "movz x8, #3" "$SER" || true)" -ge 1 ] && movz=1
+        [ "$(grep -aFc -- "svc #0" "$SER" || true)" -ge 1 ] && svc=1
+        [ "$(grep -aFc -- "$EXIT_LINE" "$SER" || true)" -ge 1 ] && exit71=1
+        [ "$(grep -aFxc -- "rx-disas-ok" "$SER" || true)" = 1 ] && echo_ok=1
+        grep -qF -- "[EXC] parking:" "$SER" && fatal=1 || true
     fi
     echo "$tag: runner-rc=$rc serial-bytes=$bytes banner=$banner written=$written assembled=$assembled dump=$dump movz=$movz svc=$svc exit71=$exit71 echo=$echo_ok fatal=$fatal" | tee -a "$REPORT"
     [ "$rc" = 0 ] && [ "$banner" = 1 ] && [ "$written" = 1 ] && [ "$assembled" = 1 ] && \

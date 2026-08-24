@@ -18,6 +18,15 @@
 # as an exact "zz*.nomatch" line — the typed echo has the "echo " prefix,
 # so only the unmatched wildcard's output matches exactly.
 #
+# Run isolation (#523 item 2 / issue #528, claim 5069): every boot attaches
+# a private DiskImageKit stacked disk (read-only base + throwaway ASIF
+# overlay), a private EFI var store (recreated fresh per boot, as the
+# pre-isolation gate did), and a private serial log under $RUN_DIR — two
+# concurrent instances cannot clobber each other's disks, NVRAM, or
+# evidence. Set DIPSHIT_GATE_SUFFIX=_alt to give this instance its own
+# canonical evidence names (two simultaneous instances MUST differ), and
+# DIPSHIT_KEEP_RUN=1 to keep the scratch dir.
+#
 # Class B — Apple silicon + VZ only.
 
 set -euo pipefail
@@ -25,12 +34,17 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-GATE_LOG="artifacts/live-glob-gate.txt"
+source tools/lib/gate-run.sh
+
+SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
+
+GATE_LOG="$(art live-glob-gate.txt)"
 exec > >(tee "$GATE_LOG") 2>&1
-trap 'sleep 0.5' EXIT
+trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
 
 BOOTS="${BOOTS:-1}"
-REPORT="artifacts/live-glob-report.txt"
+REPORT="$(art live-glob-report.txt)"
 SCRIPT="artifacts/live-glob-input.txt"
 
 echo "=== verify-live-glob: M19 P6 — wildcard expansion on VZ, $BOOTS boot(s) ==="
@@ -47,6 +61,13 @@ zig build image
 swift build --package-path host/vm-runner --configuration release
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
+# --- per-run isolation -------------------------------------------------------------
+# Private scratch dir + pristine-boot overlay for EVERY boot.
+# See tools/lib/gate-run.sh.
+gate_begin live-glob
+echo "run dir: $RUN_DIR"
+
+
 cat > "$SCRIPT" <<'EOF'
 write ga.bin alpha
 write gb.bin beta
@@ -59,28 +80,30 @@ EOF
 
 run_one() {
     local tag="$1"
-    rm -f artifacts/efi-vars.bin artifacts/vm-serial.log
+    rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial-$tag.log"
     set +e
-    host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log \
+    host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
+        --serial "$RUN_DIR/vm-serial-$tag.log" \
         --script "$SCRIPT" --script-expect "glob-done" --timeout 30 \
-        > "artifacts/live-glob-run-$tag.txt" 2>&1
+        > "$(art live-glob-run-$tag.txt)" 2>&1
     local RC=$?
     set -e
-    [ -f artifacts/vm-serial.log ] && cp artifacts/vm-serial.log "artifacts/live-glob-serial-$tag.log" || true
+    [ -f "$RUN_DIR/vm-serial-$tag.log" ] && cp "$RUN_DIR/vm-serial-$tag.log" "$(art live-glob-serial-$tag.log)" || true
+    local SER="$(art live-glob-serial-$tag.log)"
 
     local SERIAL_BYTES BANNER=0 FILES=0 STAR=0 QMARK=0 CLASS=0 LITERAL=0 DONE=0
-    SERIAL_BYTES=$(wc -c < artifacts/vm-serial.log 2>/dev/null | tr -d ' ')
-    if [ -f artifacts/vm-serial.log ]; then
-        grep -qF "DipshitOS kernel" artifacts/vm-serial.log && BANNER=1
+    SERIAL_BYTES=$(wc -c < "$SER" 2>/dev/null | tr -d ' ')
+    if [ -f "$SER" ]; then
+        grep -qF "DipshitOS kernel" "$SER" && BANNER=1
         # Both writes landed (the write builtin confirms each file).
-        grep -qF "ga.bin" artifacts/vm-serial.log && grep -qF "gb.bin" artifacts/vm-serial.log && FILES=1
+        grep -qF "ga.bin" "$SER" && grep -qF "gb.bin" "$SER" && FILES=1
         # Star, ?, and class all expand to BOTH names in sorted order.
         local EXPANDS=0
-        [ "$(grep -x -c "ga.bin gb.bin" artifacts/vm-serial.log | tr -d ' ')" = 3 ] && EXPANDS=1
+        [ "$(grep -x -c "ga.bin gb.bin" "$SER" | tr -d ' ')" = 3 ] && EXPANDS=1
         STAR=$EXPANDS; QMARK=$EXPANDS; CLASS=$EXPANDS
         # No match: exact literal line (typed echo carries the command).
-        [ "$(grep -x -c 'zz\*.nomatch' artifacts/vm-serial.log | tr -d ' ')" = 1 ] && LITERAL=1
-        grep -qF "glob-done" artifacts/vm-serial.log && DONE=1
+        [ "$(grep -x -c 'zz\*.nomatch' "$SER" | tr -d ' ')" = 1 ] && LITERAL=1
+        grep -qF "glob-done" "$SER" && DONE=1
     fi
     echo "$tag: rc=$RC bytes=$SERIAL_BYTES banner=$BANNER files=$FILES star=$STAR qmark=$QMARK class=$CLASS literal=$LITERAL done=$DONE"
     [ "$RC" = 0 ] && [ "$BANNER" = 1 ] && [ "$FILES" = 1 ] && [ "$STAR" = 1 ] \

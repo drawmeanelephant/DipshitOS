@@ -9,18 +9,31 @@
 #      gives the viewer something to show. Gate asserts the launch chain.
 #   3. Shell stays responsive.
 
+# Run isolation (#523 item 2 / issue #528, claim 5069): every boot attaches
+# a private DiskImageKit stacked disk (read-only base + throwaway ASIF
+# overlay), a private EFI var store (recreated fresh per boot, as the
+# pre-isolation gate did), and a private serial log under $RUN_DIR — two
+# concurrent instances cannot clobber each other's disks, NVRAM, or
+# evidence. Set DIPSHIT_GATE_SUFFIX=_alt to give this instance its own
+# canonical evidence names (two simultaneous instances MUST differ), and
+# DIPSHIT_KEEP_RUN=1 to keep the scratch dir.
+#
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-GATE_LOG="artifacts/m22-ps-live.txt"
+source tools/lib/gate-run.sh
+
+SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
+
+GATE_LOG="$(art m22-ps-live.txt)"
 exec > >(tee "$GATE_LOG") 2>&1
-trap 'sleep 0.5' EXIT
+trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
 
 BOOTS="${BOOTS:-1}"
-REPORT="artifacts/live-ps-report.txt"
-SCRIPT="artifacts/live-ps-script.txt"
+REPORT="$(art live-ps-report.txt)"
 SCRIPT2="artifacts/live-ps-script2.txt"
 STATIC_EXIT_LINE="tasks user-el0 exited status=7"
 PS_OPEN_LINE="ps: ready"
@@ -41,33 +54,43 @@ zig build image
 swift build --package-path host/vm-runner --configuration release
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
+# --- per-run isolation -------------------------------------------------------------
+# Private scratch dir + pristine-boot overlay for EVERY boot.
+# See tools/lib/gate-run.sh.
+gate_begin live-ps
+echo "run dir: $RUN_DIR"
+SCRIPT="$RUN_DIR/script.txt"
+
+
 printf 'ps\nexec COUNTER.BIN\nps\nexec PS.BIN\necho rx-ps-ok\n' > "$SCRIPT"
 printf 'strace exec HELLO.ELF\n' > "$SCRIPT2"
 
 run_one() {
     local tag="$1"
-    local run_log="artifacts/live-ps-run-$tag.txt"
-    local serial_copy="artifacts/live-ps-serial-$tag.log"
-    rm -f artifacts/efi-vars.bin artifacts/vm-serial.log
+    local run_log="$(art live-ps-run-$tag.txt)"
+    local serial_copy="$(art live-ps-serial-$tag.log)"
+    rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial-$tag.log"
 
     set +e
-    host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log \
+    host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
+        --serial "$RUN_DIR/vm-serial-$tag.log" \
         --display --input \
         --script "$SCRIPT" --script-after "$STATIC_EXIT_LINE" \
         --timeout 60 > "$run_log" 2>&1
     local rc=$?
     set -e
-    [ -f artifacts/vm-serial.log ] && cp artifacts/vm-serial.log "$serial_copy" || true
+    [ -f "$RUN_DIR/vm-serial-$tag.log" ] && cp "$RUN_DIR/vm-serial-$tag.log" "$(art live-ps-serial-$tag.log)" || true
+    local SER="$serial_copy"
 
     local bytes=0 banner=0 table=1 counter=0 psready=0 echo_ok=0 fatal=0
-    if [ -f artifacts/vm-serial.log ]; then
-        bytes="$(wc -c < artifacts/vm-serial.log | tr -d ' ')"
-        [ "$(grep -aFxc -- "DipshitOS kernel has seized control." artifacts/vm-serial.log || true)" = 1 ] && banner=1
-        [ "$(grep -aFc -- "PID  NAME" artifacts/vm-serial.log || true)" -ge 2 ] && table=1
-        [ "$(grep -aFc -- "COUNTER.BIN" artifacts/vm-serial.log || true)" -ge 3 ] && counter=1
-        [ "$(grep -aFxc -- "ps: ready" artifacts/vm-serial.log || true)" = 1 ] && psready=1
-        [ "$(grep -aFxc -- "rx-ps-ok" artifacts/vm-serial.log || true)" = 1 ] && echo_ok=1
-        grep -qF -- "[EXC] parking:" artifacts/vm-serial.log && fatal=1 || true
+    if [ -f "$SER" ]; then
+        bytes="$(wc -c < "$SER" | tr -d ' ')"
+        [ "$(grep -aFxc -- "DipshitOS kernel has seized control." "$SER" || true)" = 1 ] && banner=1
+        [ "$(grep -aFc -- "PID  NAME" "$SER" || true)" -ge 2 ] && table=1
+        [ "$(grep -aFc -- "COUNTER.BIN" "$SER" || true)" -ge 3 ] && counter=1
+        [ "$(grep -aFxc -- "ps: ready" "$SER" || true)" = 1 ] && psready=1
+        [ "$(grep -aFxc -- "rx-ps-ok" "$SER" || true)" = 1 ] && echo_ok=1
+        grep -qF -- "[EXC] parking:" "$SER" && fatal=1 || true
     fi
     echo "$tag: runner-rc=$rc serial-bytes=$bytes banner=$banner table=$table counter=$counter psready=$psready echo=$echo_ok fatal=$fatal" | tee -a "$REPORT"
     [ "$rc" = 0 ] && [ "$banner" = 1 ] && [ "$table" = 1 ] && [ "$counter" = 1 ] && \

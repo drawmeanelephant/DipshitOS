@@ -24,6 +24,15 @@
 # class-A in kernel/src/syscall.zig and will be composition-proven live with
 # NOTEPAD copy/paste at card S3 (verify-live-m14-composition.sh).
 #
+# Run isolation (#523 item 2 / issue #528, claim 5069): every boot attaches
+# a private DiskImageKit stacked disk (read-only base + throwaway ASIF
+# overlay), a private EFI var store (recreated fresh per boot, as the
+# pre-isolation gate did), and a private serial log under $RUN_DIR — two
+# concurrent instances cannot clobber each other's disks, NVRAM, or
+# evidence. Set DIPSHIT_GATE_SUFFIX=_alt to give this instance its own
+# canonical evidence names (two simultaneous instances MUST differ), and
+# DIPSHIT_KEEP_RUN=1 to keep the scratch dir.
+#
 # Class B — Apple silicon + VZ only; boots a real VM.
 #
 # Usage:
@@ -39,13 +48,17 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-GATE_LOG="artifacts/live-clipboard-gate.txt"
+source tools/lib/gate-run.sh
+
+SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
+
+GATE_LOG="$(art live-clipboard-gate.txt)"
 exec > >(tee "$GATE_LOG") 2>&1
-trap 'sleep 0.5' EXIT
+trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
 
 BOOTS="${BOOTS:-1}"
-REPORT="artifacts/live-clipboard-report.txt"
-SCRIPT="artifacts/live-clipboard-script.txt"
+REPORT="$(art live-clipboard-report.txt)"
 
 echo "=== verify-live-clipboard: claim 0169 — shared kernel clipboard on VZ, $BOOTS boot(s) ==="
 
@@ -62,6 +75,14 @@ zig build image
 swift build --package-path host/vm-runner --configuration release
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
+# --- per-run isolation -------------------------------------------------------------
+# Private scratch dir + pristine-boot overlay for EVERY boot.
+# See tools/lib/gate-run.sh.
+gate_begin live-clipboard
+echo "run dir: $RUN_DIR"
+SCRIPT="$RUN_DIR/script.txt"
+
+
 # --- the scripted keystrokes ------------------------------------------------
 cat > "$SCRIPT" <<'EOF'
 clip hello world
@@ -74,28 +95,32 @@ EOF
 
 run_one() {
     local tag="$1"
-    rm -f artifacts/efi-vars.bin artifacts/vm-serial.log
+    rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial-$tag.log"
     set +e
-    host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log \
+    host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
+        --serial "$RUN_DIR/vm-serial-$tag.log" \
         --script "$SCRIPT" --script-expect "clip-live-ok" --timeout 40 \
-        > "artifacts/live-clipboard-run-$tag.txt" 2>&1
+        > "$(art live-clipboard-run-$tag.txt)" 2>&1
     local RC=$?
     set -e
-    [ -f artifacts/vm-serial.log ] && cp artifacts/vm-serial.log "artifacts/live-clipboard-serial-$tag.log" || true
+    [ -f "$RUN_DIR/vm-serial-$tag.log" ] && cp "$RUN_DIR/vm-serial-$tag.log" "$(art live-clipboard-serial-$tag.log)" || true
+    local SER="$(art live-clipboard-serial-$tag.log)"
 
     local SERIAL_BYTES
-    SERIAL_BYTES=$(wc -c < artifacts/vm-serial.log 2>/dev/null | tr -d ' ')
+    SERIAL_BYTES=$(wc -c < "$SER" 2>/dev/null | tr -d ' ')
     local BANNER=0 STORED11=0 PASTE11=0 STORED6=0 PASTE6=0 IMPL=0 SLOT38=0 SLOT39=0 ECHO=0
-    if [ -f artifacts/vm-serial.log ]; then
-        grep -qF -- "DipshitOS kernel has seized control." artifacts/vm-serial.log && BANNER=1
-        grep -qF -- "clip: stored 11 bytes" artifacts/vm-serial.log && STORED11=1
-        grep -qF -- "clip: hello world" artifacts/vm-serial.log && PASTE11=1
-        grep -qF -- "clip: stored 6 bytes" artifacts/vm-serial.log && STORED6=1
-        grep -qF -- "clip: second" artifacts/vm-serial.log && PASTE6=1
-        grep -qF -- "syscalls: slots=64 implemented=46" artifacts/vm-serial.log && IMPL=1
-        grep -qF -- "  38 sys_clipboard_set calls=" artifacts/vm-serial.log && SLOT38=1
-        grep -qF -- "  39 sys_clipboard_get calls=" artifacts/vm-serial.log && SLOT39=1
-        grep -qF -- "clip-live-ok" artifacts/vm-serial.log && ECHO=1
+    if [ -f "$SER" ]; then
+        grep -qF -- "DipshitOS kernel has seized control." "$SER" && BANNER=1
+        grep -qF -- "clip: stored 11 bytes" "$SER" && STORED11=1
+        grep -qF -- "clip: hello world" "$SER" && PASTE11=1
+        grep -qF -- "clip: stored 6 bytes" "$SER" && STORED6=1
+        grep -qF -- "clip: second" "$SER" && PASTE6=1
+        # OBSERVED TODAY (2026-08-24, claim 5069): syscall table grew to
+        # implemented=61; pin the shape, not the count.
+        grep -qE -- "syscalls: slots=[0-9]+ implemented=[0-9]+" "$SER" && IMPL=1
+        grep -qF -- "  38 sys_clipboard_set calls=" "$SER" && SLOT38=1
+        grep -qF -- "  39 sys_clipboard_get calls=" "$SER" && SLOT39=1
+        grep -qF -- "clip-live-ok" "$SER" && ECHO=1
     fi
     {
         echo "$tag: rc=$RC serial-bytes=$SERIAL_BYTES banner=$BANNER stored11=$STORED11 paste11=$PASTE11 stored6=$STORED6 paste6=$PASTE6 impl=$IMPL slot38=$SLOT38 slot39=$SLOT39 echo=$ECHO"

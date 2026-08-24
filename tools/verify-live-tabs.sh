@@ -16,6 +16,9 @@
 # The U10 contract is exactly that: a TAB advances to the next 8-column
 # stop and the skipped cells hold real space characters.
 #
+# Run isolation (#523 item 2 / issue #528, claim 5069): private stacked
+# disk + EFI vars + serial log + screen captures under $RUN_DIR.
+#
 # Class B — Apple silicon + VZ only (Screen Recording permission required
 # for the ScreenCaptureKit capture path).
 
@@ -24,11 +27,16 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-GATE_LOG="artifacts/live-tabs-gate.txt"
-exec > >(tee "$GATE_LOG") 2>&1
-trap 'sleep 0.5' EXIT
+source tools/lib/gate-run.sh
 
-REPORT="artifacts/live-tabs-report.txt"
+SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
+
+GATE_LOG="$(art live-tabs-gate.txt)"
+exec > >(tee "$GATE_LOG") 2>&1
+trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
+
+REPORT="$(art live-tabs-report.txt)"
 
 echo "=== verify-live-tabs: M20 U10 — tab stops in pixels on VZ ==="
 
@@ -44,20 +52,28 @@ zig build image
 swift build --package-path host/vm-runner --configuration release
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
+# --- per-run isolation -------------------------------------------------------
+gate_begin live-tabs
+echo "run dir: $RUN_DIR"
+
 run_boot() {
     # $1 = tag, $2 = putraw argument, $3 = done marker
     local tag="$1" arg="$2" marker="$3"
-    local script="artifacts/live-tabs-input-$tag.txt"
+    local script="$RUN_DIR/input-$tag.txt"
     printf 'text clear\ntext putraw %s\necho %s\n' "$arg" "$marker" > "$script"
-    rm -f artifacts/efi-vars.bin artifacts/vm-serial.log artifacts/gpu-screen-*.png
+    rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial-$tag.log" "$RUN_DIR"/gpu-screen-*.png
     set +e
-    host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log \
+    # Private WRITABLE copy (not overlay): keeps main-like boot pacing so the
+    # post-marker screenshot catches the painted row (observed claim 5069).
+    host/vm-runner/.build/release/VMRunner "$RUN_DIR/disk-base.img" \
+        --serial "$RUN_DIR/vm-serial-$tag.log" \
         --screen artifacts/gpu-screen --screenshot-after "$marker" \
         --script "$script" --script-expect "$marker" --timeout 30 \
-        > "artifacts/live-tabs-run-$tag.txt" 2>&1
+        > "$(art live-tabs-run-$tag.txt)" 2>&1
     local RC=$?
     set -e
-    [ -f artifacts/vm-serial.log ] && cp artifacts/vm-serial.log "artifacts/live-tabs-serial-$tag.log" || true
+    [ -f "$RUN_DIR/vm-serial-$tag.log" ] && cp "$RUN_DIR/vm-serial-$tag.log" "$(art live-tabs-serial-$tag.log)" || true
+    cp "$RUN_DIR"/gpu-screen-* artifacts/ 2>/dev/null || true
     echo "$tag: runner rc=$RC"
     return "$RC"
 }

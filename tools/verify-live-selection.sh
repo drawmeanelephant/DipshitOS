@@ -27,6 +27,15 @@
 #                                            (the two keyboard chords)
 #   echo selection-live-ok                -> success marker
 #
+# Run isolation (#523 item 2 / issue #528, claim 5069): every boot attaches
+# a private DiskImageKit stacked disk (read-only base + throwaway ASIF
+# overlay), a private EFI var store (recreated fresh per boot, as the
+# pre-isolation gate did), and a private serial log under $RUN_DIR — two
+# concurrent instances cannot clobber each other's disks, NVRAM, or
+# evidence. Set DIPSHIT_GATE_SUFFIX=_alt to give this instance its own
+# canonical evidence names (two simultaneous instances MUST differ), and
+# DIPSHIT_KEEP_RUN=1 to keep the scratch dir.
+#
 # Class B — Apple silicon + VZ only; boots a real VM.
 
 set -euo pipefail
@@ -34,13 +43,17 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-GATE_LOG="artifacts/live-selection-gate.txt"
+source tools/lib/gate-run.sh
+
+SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
+
+GATE_LOG="$(art live-selection-gate.txt)"
 exec > >(tee "$GATE_LOG") 2>&1
-trap 'sleep 0.5' EXIT
+trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
 
 BOOTS="${BOOTS:-1}"
-REPORT="artifacts/live-selection-report.txt"
-SCRIPT="artifacts/live-selection-script.txt"
+REPORT="$(art live-selection-report.txt)"
 
 echo "=== verify-live-selection: M18 T2 — scrollback selection + copy/paste on VZ, $BOOTS boot(s) ==="
 
@@ -56,6 +69,14 @@ zig build
 zig build image
 swift build --package-path host/vm-runner --configuration release
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
+
+# --- per-run isolation -------------------------------------------------------------
+# Private scratch dir + pristine-boot overlay for EVERY boot.
+# See tools/lib/gate-run.sh.
+gate_begin live-selection
+echo "run dir: $RUN_DIR"
+SCRIPT="$RUN_DIR/script.txt"
+
 
 # --- phase 1: fill scrollback with echo lines --------------------------------
 cat > "$SCRIPT" <<'EOF'
@@ -100,9 +121,10 @@ printf '\003echo \n\026\ninput\necho selection-live-ok\n' > artifacts/live-selec
 
 run_one() {
     local tag="$1"
-    rm -f artifacts/efi-vars.bin artifacts/vm-serial.log
+    rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial-$tag.log"
     set +e
-    host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log \
+    host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
+        --serial "$RUN_DIR/vm-serial-$tag.log" \
         --input --display \
         --script "$SCRIPT" \
         --input-chords "$CHORDS" --input-chords-after "fill-ready" \
@@ -110,25 +132,26 @@ run_one() {
         --script2 artifacts/live-selection-keys.txt --script2-after "fill-ready" --script2-delay 12 \
         --script-expect "selection-live-ok" \
         --timeout 60 \
-        > "artifacts/live-selection-run-$tag.txt" 2>&1
+        > "$(art live-selection-run-$tag.txt)" 2>&1
     local RC=$?
     set -e
-    [ -f artifacts/vm-serial.log ] && cp artifacts/vm-serial.log "artifacts/live-selection-serial-$tag.log" || true
+    [ -f "$RUN_DIR/vm-serial-$tag.log" ] && cp "$RUN_DIR/vm-serial-$tag.log" "$(art live-selection-serial-$tag.log)" || true
+    local SER="$(art live-selection-serial-$tag.log)"
 
     local SERIAL_BYTES
-    SERIAL_BYTES=$(wc -c < artifacts/vm-serial.log 2>/dev/null | tr -d ' ')
+    SERIAL_BYTES=$(wc -c < "$SER" 2>/dev/null | tr -d ' ')
     local BANNER=0 FILL_READY=0 COPIED=0 PASTED=0 INREPORT=0 DONE=0 RUNNERFLAG=0
-    if [ -f artifacts/vm-serial.log ]; then
-        grep -qF -- "DipshitOS kernel has seized control." artifacts/vm-serial.log && BANNER=1
-        grep -qF -- "fill-ready" artifacts/vm-serial.log && FILL_READY=1
-        grep -qF -- "copied" artifacts/vm-serial.log && COPIED=1
+    if [ -f "$SER" ]; then
+        grep -qF -- "DipshitOS kernel has seized control." "$SER" && BANNER=1
+        grep -qF -- "fill-ready" "$SER" && FILL_READY=1
+        grep -qF -- "copied" "$SER" && COPIED=1
         # The paste proof: the clipboard's first selected line is fed into
         # the editor and submitted (observed live as "unknown command
         # 'line-16'"). The line number depends on scrollback capture, so
         # match the line-1x shape.
-        grep -qE -- "unknown command 'line-1[0-9]'" artifacts/vm-serial.log && PASTED=1
-        grep -qF -- "input: armed=1 fifo=0/64 dropped=0 events=2" artifacts/vm-serial.log && INREPORT=1
-        grep -qF -- "selection-live-ok" artifacts/vm-serial.log && DONE=1
+        grep -qE -- "unknown command 'line-1[0-9]'" "$SER" && PASTED=1
+        grep -qF -- "input: armed=1 fifo=0/64 dropped=0 events=2" "$SER" && INREPORT=1
+        grep -qF -- "selection-live-ok" "$SER" && DONE=1
     fi
     grep -a -qF -- "input-chords: ENABLED" "artifacts/live-selection-run-$tag.txt" && RUNNERFLAG=1
     {

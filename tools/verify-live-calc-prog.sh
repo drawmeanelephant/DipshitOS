@@ -16,6 +16,15 @@
 #   (assert calc: prog-off)                -> mode switched back
 #   echo calc-prog-live-ok                 -> success marker
 #
+# Run isolation (#523 item 2 / issue #528, claim 5069): every boot attaches
+# a private DiskImageKit stacked disk (read-only base + throwaway ASIF
+# overlay), a private EFI var store (recreated fresh per boot, as the
+# pre-isolation gate did), and a private serial log under $RUN_DIR — two
+# concurrent instances cannot clobber each other's disks, NVRAM, or
+# evidence. Set DIPSHIT_GATE_SUFFIX=_alt to give this instance its own
+# canonical evidence names (two simultaneous instances MUST differ), and
+# DIPSHIT_KEEP_RUN=1 to keep the scratch dir.
+#
 # Class B — Apple silicon + VZ only; boots a real VM.
 #
 # Usage:
@@ -31,13 +40,17 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-GATE_LOG="artifacts/live-calc-prog-gate.txt"
+source tools/lib/gate-run.sh
+
+SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
+
+GATE_LOG="$(art live-calc-prog-gate.txt)"
 exec > >(tee "$GATE_LOG") 2>&1
-trap 'sleep 0.5' EXIT
+trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
 
 BOOTS="${BOOTS:-1}"
-REPORT="artifacts/live-calc-prog-report.txt"
-SCRIPT="artifacts/live-calc-prog-script.txt"
+REPORT="$(art live-calc-prog-report.txt)"
 
 echo "=== verify-live-calc-prog: M24 K1 — programmer mode on VZ, $BOOTS boot(s) ==="
 
@@ -55,6 +68,14 @@ zig build image
 swift build --package-path host/vm-runner --configuration release
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
+# --- per-run isolation -------------------------------------------------------------
+# Private scratch dir + pristine-boot overlay for EVERY boot.
+# See tools/lib/gate-run.sh.
+gate_begin live-calc-prog
+echo "run dir: $RUN_DIR"
+SCRIPT="$RUN_DIR/script.txt"
+
+
 # --- phase 1: launch CALC.BIN from the monitor ------------------------------
 cat > "$SCRIPT" <<'EOF'
 exec CALC.BIN
@@ -67,27 +88,29 @@ INPUT_CHORDS="${CTRL_P},${CTRL_P},echo calc-prog-live-ok"
 
 run_one() {
     local tag="$1"
-    rm -f artifacts/efi-vars.bin artifacts/vm-serial.log
+    rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial-$tag.log"
     set +e
-    host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log \
+    host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
+        --serial "$RUN_DIR/vm-serial-$tag.log" \
         --script "$SCRIPT" \
         --input-chords "$INPUT_CHORDS" \
         --input-chords-after "calc: ready" \
         --script-expect "calc-prog-live-ok" \
         --timeout 45 \
-        > "artifacts/live-calc-prog-run-$tag.txt" 2>&1
+        > "$(art live-calc-prog-run-$tag.txt)" 2>&1
     local RC=$?
     set -e
-    [ -f artifacts/vm-serial.log ] && cp artifacts/vm-serial.log "artifacts/live-calc-prog-serial-$tag.log" || true
+    [ -f "$RUN_DIR/vm-serial-$tag.log" ] && cp "$RUN_DIR/vm-serial-$tag.log" "$(art live-calc-prog-serial-$tag.log)" || true
+    local SER="$(art live-calc-prog-serial-$tag.log)"
 
     local SERIAL_BYTES=0 BANNER=0 CALC_READY=0 PROG_ON=0 PROG_OFF=0 DONE=0
-    if [ -f artifacts/vm-serial.log ]; then
-        SERIAL_BYTES=$(wc -c < artifacts/vm-serial.log 2>/dev/null | tr -d ' ')
-        grep -qF -- "DipshitOS kernel has seized control." artifacts/vm-serial.log && BANNER=1
-        grep -qF -- "calc: ready" artifacts/vm-serial.log && CALC_READY=1
-        grep -qF -- "calc: prog-on" artifacts/vm-serial.log && PROG_ON=1
-        grep -qF -- "calc: prog-off" artifacts/vm-serial.log && PROG_OFF=1
-        grep -qF -- "calc-prog-live-ok" artifacts/vm-serial.log && DONE=1
+    if [ -f "$SER" ]; then
+        SERIAL_BYTES=$(wc -c < "$SER" 2>/dev/null | tr -d ' ')
+        grep -qF -- "DipshitOS kernel has seized control." "$SER" && BANNER=1
+        grep -qF -- "calc: ready" "$SER" && CALC_READY=1
+        grep -qF -- "calc: prog-on" "$SER" && PROG_ON=1
+        grep -qF -- "calc: prog-off" "$SER" && PROG_OFF=1
+        grep -qF -- "calc-prog-live-ok" "$SER" && DONE=1
     fi
     {
         echo "$tag: rc=$RC serial-bytes=$SERIAL_BYTES banner=$BANNER calc-ready=$CALC_READY prog-on=$PROG_ON prog-off=$PROG_OFF done=$DONE"
