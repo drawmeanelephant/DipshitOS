@@ -34,3 +34,37 @@ Class-B gate `tools/verify-live-editor.sh` written (execs EDIT.BIN,
 sends Ctrl+T/Z/G via input-chords, asserts serial markers).
 
 M23 march tracker updated: all 6 cards now ✅.
+
+2026-08-24 — Class-B live gate PASSED (1/1 boots). Debugging the gate
+uncovered three real bugs, all fixed:
+
+1. `image/make-image.sh` + `mkfat32.py`: EDIT.BIN was silently dropped from
+   the ESP — `EDIT_ARGS` never built / passed to mkfat32 (no `edit_file`
+   positional). resmon/devcons latent-but-reachable? (declared but never
+   wired) — probed later. Fix: wired EDIT_ARGS end to end + self-verify
+   grep. RESMON only in the spike build; they were already feeding the
+   shim.
+2. `kernel/src/fat.zig`: `max_chain_clusters = 256` limited reads to 128KiB,
+   so exec of a 181KiB EDIT.BIN failed with the misleading `too_large`
+   (the error text quotes the 256KiB staging buffer). Raised to 512
+   (= 256KiB at spc=1), matching `exec_program_max`; writes stay bounded
+   by write_content_max.
+3. EDIT.BIN was a DSK1 flat image with 128KiB+ of writable BSS — the
+   flat loader maps it read-only, so the app faulted at EL0 on boot.
+   Fixed: `g_app` moved to BSS, built as DSK3 segmented via
+   `linker-segmented.ld` + `--segments` (the GLOBALS.BIN pattern);
+   make-image.sh + mkfat32.py accept DSK1/DSK3 for EDIT.
+4. `user/src/edit.zig`: event keycode convention bug — the kernel sends
+   `arg0 = keycode (HID usage)`, `arg1 = ASCII`, but all four key
+   handlers read the keycode from `arg1`. Swapped; also fixed E6 console
+   split usage (0x32→0x35 backtick) and Ctrl+Y (0x15→0x1c).
+5. Gate transport: `--input-chords` via the VZ view needs a key window
+   (issue #179 activation wall — never key in a scripted session). The
+   gate now builds the runner with `-DSPIKE` and runs `--via-virtio`, so
+   chords ride the claim-9588 custom-virtio INPUT queue headless-safe;
+   `--display` is kept for the GPU (windows) with no view keyboard.
+
+The gate types 'h','i' (so Ctrl+Z has a real edit to undo), then sends
+ctrl-z (undo), ctrl-t (tab), ctrl-g (goto). Evidence: artifacts/live-editor-*
+(serial logs, report, gate output, editor-screen-{5s,10s,15s} screenshots).
+All assertions green: banner, edit-ready, tab-open, undo, goto-open.

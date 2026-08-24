@@ -793,7 +793,7 @@ const TabArray = struct {
 // ---------------------------------------------------------------------------
 
 pub const AppState = struct {
-    tabs: TabArray = TabArray.init(),
+    tabs: TabArray = .{},
     shell: MiniShell = .{},
     status: [40]u8 = [_]u8{0} ** 40,
     status_len: usize = 8,
@@ -802,8 +802,14 @@ pub const AppState = struct {
     goto_prompt: GotoPrompt = .{},
     win_id: u32 = 0,
 
-    pub fn init() AppState {
-        return .{};
+    /// Populate a fresh editor state IN PLACE — never returned by value, so
+    /// the ~140 KiB struct (4 × 32 KiB tab buffers) never lands on the
+    /// 16 KiB task stack. The app lives in a BSS global (g_app).
+    pub fn init(self: *AppState) void {
+        self.* = .{};
+        self.tabs.tabs[0].is_used = true;
+        self.tabs.count = 1;
+        self.tabs.set_filename(0, "UNTITLED");
     }
 
     fn fb(self: *AppState) *FileBuffer {
@@ -1059,8 +1065,16 @@ pub const AppState = struct {
 // Entry Point
 // ---------------------------------------------------------------------------
 
+/// The editor's ~140 KiB of state (4 × 32 KiB tab buffers + undo ring) lives
+/// in a BSS GLOBAL, not on the 16 KiB task stack — a stack local of that
+/// size faults at EL0 immediately (observed in the live gate). The DSK3
+/// segmented image build gives the .data/.bss a writable aperture
+/// (user/linker-segmented.ld + elf2bin.py --segments), so the globals are
+/// real writable memory.
+var g_app: AppState = undefined;
+
 pub export fn _start(argc: usize, argv: ?[*]const [32]u8) callconv(.c) noreturn {
-    var app = AppState.init();
+    AppState.init(&g_app);
 
     // Optional: load a file on startup
     _ = argc;
@@ -1072,9 +1086,9 @@ pub export fn _start(argc: usize, argv: ?[*]const [32]u8) callconv(.c) noreturn 
         ui.exit_process(1);
     }
     const win = @as(u32, @intCast(win_res));
-    app.win_id = win;
+    g_app.win_id = win;
 
-    app.draw(win);
+    g_app.draw(win);
     ui.win_present(win);
     ui.write_console("edit: ready\n");
 
@@ -1088,7 +1102,7 @@ pub export fn _start(argc: usize, argv: ?[*]const [32]u8) callconv(.c) noreturn 
         if (ev.kind == ui.WIN_CLOSE) break;
 
         if (ev.kind == ui.KEY_DOWN) {
-            dirty = handle_key(&app, &ev) or dirty;
+            dirty = handle_key(&g_app, &ev) or dirty;
         }
 
         // Drain pending queue
@@ -1098,12 +1112,12 @@ pub export fn _start(argc: usize, argv: ?[*]const [32]u8) callconv(.c) noreturn 
                 ui.exit_process(exit_status);
             }
             if (ev.kind == ui.KEY_DOWN) {
-                dirty = handle_key(&app, &ev) or dirty;
+                dirty = handle_key(&g_app, &ev) or dirty;
             }
         }
 
         if (dirty) {
-            app.draw(win);
+            g_app.draw(win);
             ui.win_present(win);
         }
     }
@@ -1115,7 +1129,9 @@ pub export fn _start(argc: usize, argv: ?[*]const [32]u8) callconv(.c) noreturn 
 
 /// Top-level key dispatch: routes to goto prompt, console, or editor.
 fn handle_key(app: *AppState, ev: *const Event) bool {
-    const keycode: u16 = @as(u16, @intCast(ev.arg1));
+    // Kernel event contract (events.zig): arg0 = keycode (HID usage),
+    // arg1 = ASCII byte.
+    const keycode: u16 = @as(u16, @truncate(ev.arg0));
 
     // E3: Goto-line prompt takes priority when active
     if (app.goto_prompt.active) {
@@ -1123,7 +1139,8 @@ fn handle_key(app: *AppState, ev: *const Event) bool {
     }
 
     // Ctrl+` toggles the console split (E6) — works in both modes
-    if ((ev.flags & ui.MOD_CTRL) != 0 and keycode == 0x32) {
+    // (backtick/grave HID usage 0x35)
+    if ((ev.flags & ui.MOD_CTRL) != 0 and keycode == 0x35) {
         app.show_shell = !app.show_shell;
         app.shell.reset();
         if (app.show_shell) {
@@ -1151,7 +1168,7 @@ fn handle_key(app: *AppState, ev: *const Event) bool {
         }
         return false;
     }
-    if ((ev.flags & ui.MOD_CTRL) != 0 and keycode == 0x15) { // Y
+    if ((ev.flags & ui.MOD_CTRL) != 0 and keycode == 0x1c) { // Y
         if (app.fb().redo_last()) {
             app.set_status("Redo");
             ui.write_console("edit: redo\n");
@@ -1199,8 +1216,8 @@ fn handle_key(app: *AppState, ev: *const Event) bool {
 }
 
 fn handle_goto_key(app: *AppState, ev: *const Event) bool {
-    const ascii: i32 = @as(i32, @intCast(ev.arg0));
-    const keycode: u16 = @as(u16, @intCast(ev.arg1));
+    const ascii: i32 = @as(i32, @intCast(ev.arg1));
+    const keycode: u16 = @as(u16, @truncate(ev.arg0));
 
     // Enter: jump to line
     if (ascii == '\r' or ascii == '\n' or keycode == 0x28) {
@@ -1241,8 +1258,8 @@ fn handle_goto_key(app: *AppState, ev: *const Event) bool {
 }
 
 fn handle_editor_key(app: *AppState, ev: *const Event) bool {
-    const ascii: i32 = @as(i32, @intCast(ev.arg0));
-    const keycode: u16 = @as(u16, @intCast(ev.arg1));
+    const ascii: i32 = @as(i32, @intCast(ev.arg1));
+    const keycode: u16 = @as(u16, @truncate(ev.arg0));
     const fb_ptr = app.fb();
 
     // Navigation keys
@@ -1335,8 +1352,8 @@ fn handle_editor_key(app: *AppState, ev: *const Event) bool {
 }
 
 fn handle_console_key(app: *AppState, ev: *const Event) bool {
-    const ascii: i32 = @as(i32, @intCast(ev.arg0));
-    const keycode: u16 = @as(u16, @intCast(ev.arg1));
+    const ascii: i32 = @as(i32, @intCast(ev.arg1));
+    const keycode: u16 = @as(u16, @truncate(ev.arg0));
 
     // Enter executes
     if (ascii == '\r' or ascii == '\n') {

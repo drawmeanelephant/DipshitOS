@@ -41,4 +41,9 @@ white. The scanner runs during paint, not per keystroke.
 
 Verification: host unit tests for undo/redo round-trip, goto-line clamping,
 tab open/close/switch, and syntax token classification. Class-B live gate
-`verify-live-editor.sh` exercises the features on VZ.
+`verify-live-editor.sh` PASSED 2026-08-24 (1/1 boots): types 'h','i', then
+sends ctrl-z (undo), ctrl-t (tab), ctrl-g (goto) over the claim-9588
+custom-virtio INPUT queue and asserts the serial markers `edit: ready`,
+`edit: undo`, `edit: tab-open`, `edit: goto-open` — see the branch log for
+the five integration bugs this uncovered and fixed (image wiring, FAT
+cluster cap, DSK3 build, keycode arg contract, virtio gate transport).

@@ -57,7 +57,11 @@ echo "revision: $REVISION branch=$BRANCH boots=$BOOTS dirty-files=$DIRTY"
 zig fmt --check boot/src/*.zig kernel/src/*.zig build.zig
 zig build
 zig build image
-swift build --package-path host/vm-runner --configuration release
+# The SPIKE build (macOS 27 SDK types) so chords can ride the claim-9588
+# custom-virtio INPUT queue: no VZ view, no window activation, no #179
+# synthesized-keyboard drop (the editor needs --display for the GPU, but the
+# VZ view is never key in a scripted agent session).
+swift build --package-path host/vm-runner --configuration release -Xswiftc -DSPIKE
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
 # --- per-run isolation ------------------------------------------------------
@@ -70,10 +74,13 @@ cat > "$SCRIPT" <<'EOF'
 exec EDIT.BIN
 EOF
 
-# --- phase 2: Ctrl+T (new tab), Ctrl+Z (undo), Ctrl+G (goto) ----------------
-# Ctrl+T = ctrl-t, Ctrl+Z = ctrl-z, Ctrl+G = ctrl-g (the runner maps
-# ctrl-a..ctrl-z to macOS keycodes via --input-chords)
-INPUT_CHORDS="ctrl-t,ctrl-z,ctrl-g"
+# --- phase 2: type text, then Ctrl+Z (undo), Ctrl+T (new tab), Ctrl+G (goto)
+# The editor starts with an empty buffer, so the undo chord needs two typed
+# characters first: 'h', 'i', then ctrl-z undoes them ('edit: undo'),
+# ctrl-t opens a tab ('edit: tab-open'), ctrl-g opens the goto prompt
+# ('edit: goto-open'). Each chord rides the claim-9588 custom-virtio INPUT
+# queue headless-safe (no VZ view, no activation wall).
+INPUT_CHORDS="h,i,ctrl-z,ctrl-t,ctrl-g"
 
 run_one() {
     local tag="$1"
@@ -81,6 +88,8 @@ run_one() {
     set +e
     host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
         --serial "$RUN_DIR/vm-serial-$tag.log" \
+        --display --screen "$(art editor-screen)" \
+        --via-virtio \
         --script "$SCRIPT" \
         --input-chords "$INPUT_CHORDS" \
         --input-chords-after "edit: ready" \

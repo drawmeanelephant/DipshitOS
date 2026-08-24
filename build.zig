@@ -603,7 +603,11 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_desktop.step);
 
     // ------------------------------------------------------------------
-    // Guy: thirtieth ESP user program (M23 E1 — EDIT.BIN, the text editor with console split)
+    // Guy: thirtieth ESP user program (M23 E1-E6 — EDIT.BIN, the text editor).
+    // Built as a SEGMENTED DSK3 image (like GLOBALS.BIN): the editor's ~140 KiB
+    // of state (4 × 32 KiB tab buffers + undo ring) lives in .data/.bss as a
+    // global, and the flat DSK1 format maps text read-only — a writable global
+    // needs the DSK3 loader's RW data+bss aperture (observed in the live gate).
     // ------------------------------------------------------------------
     const edit_prog = b.addExecutable(.{
         .name = "user-edit",
@@ -613,9 +617,9 @@ pub fn build(b: *std.Build) void {
             .optimize = .ReleaseSmall,
         }),
     });
-    edit_prog.linker_script = b.path("user/linker.ld");
-    const edit_step = b.step("edit", "Build the thirtieth user program (zig-out/bin/EDIT.BIN)");
-    const edit_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    edit_prog.linker_script = b.path("user/linker-segmented.ld");
+    const edit_step = b.step("edit", "Build the thirtieth user program (zig-out/bin/EDIT.BIN) — DSK3 segmented (writable .data/.bss)");
+    const edit_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py", "--segments" });
     edit_elf2bin.addFileArg(edit_prog.getEmittedBin());
     const edit_bin = edit_elf2bin.addOutputFileArg("EDIT.BIN");
     edit_elf2bin.has_side_effects = true;

@@ -41,7 +41,7 @@ pub const name_max: usize = 64;
 /// cluster (16 slots); the chain follower bounds at this many slots.
 pub const max_root_slots: usize = 128;
 /// Bound on clusters followed per chain (files / directory chains).
-const max_chain_clusters: usize = 256;
+const max_chain_clusters: usize = 512;
 /// Bound on clusters allocated for one write (write_content_max / 512 + 1).
 const max_alloc_clusters: usize = 64;
 /// Bound on LFN parts kept in memory (a 255-char name needs 20; the root
