@@ -43,7 +43,7 @@ art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 GATE_LOG="$(art live-user-fs-gate.txt)"
 exec > >(tee "$GATE_LOG") 2>&1
-trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
+trap 'gate_shared_disk_unlock; gate_end 2>/dev/null || true; sleep 0.5' EXIT
 
 REPORT="$(art live-user-fs-report.txt)"
 
@@ -90,7 +90,8 @@ echo "--- Phase 1: Boot A (SAVETEXT.BIN) ---"
 rm -f "$RUN_DIR/efi-vars.bin"
 rm -f "$RUN_DIR/vm-serial-A.log"
 set +e
-host/vm-runner/.build/release/VMRunner "$RUN_DIR/disk-base.img" \
+gate_shared_disk_lock
+    host/vm-runner/.build/release/VMRunner artifacts/disk.img \
     --serial "$RUN_DIR/vm-serial-A.log" \
     --script "$RUN_DIR/script-A.txt" \
     --script-after "$STATIC_EXIT_LINE" \
@@ -98,6 +99,7 @@ host/vm-runner/.build/release/VMRunner "$RUN_DIR/disk-base.img" \
     --timeout 40 > "$(art live-user-fs-run-A.txt)" 2>&1
 RC_A=$?
 set -e
+gate_shared_disk_unlock
 [ -f "$RUN_DIR/vm-serial-A.log" ] && cp "$RUN_DIR/vm-serial-A.log" "$(art live-user-fs-serial-A.log)" || true
 
 if [ $RC_A -ne 0 ]; then
@@ -121,7 +123,8 @@ echo "--- Phase 2: Boot B (TYPE.BIN + DIR.BIN persistence verification) ---"
 sleep 3
 rm -f "$RUN_DIR/vm-serial-B.log"
 set +e
-host/vm-runner/.build/release/VMRunner "$RUN_DIR/disk-base.img" \
+gate_shared_disk_lock
+    host/vm-runner/.build/release/VMRunner artifacts/disk.img \
     --serial "$RUN_DIR/vm-serial-B.log" \
     --script "$RUN_DIR/script-B.txt" \
     --script-after "$STATIC_EXIT_LINE" \
@@ -129,6 +132,7 @@ host/vm-runner/.build/release/VMRunner "$RUN_DIR/disk-base.img" \
     --timeout 40 > "$(art live-user-fs-run-B.txt)" 2>&1
 RC_B=$?
 set -e
+gate_shared_disk_unlock
 [ -f "$RUN_DIR/vm-serial-B.log" ] && cp "$RUN_DIR/vm-serial-B.log" "$(art live-user-fs-serial-B.log)" || true
 
 if [ $RC_B -ne 0 ]; then

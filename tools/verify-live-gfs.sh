@@ -54,7 +54,7 @@ art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 GATE_LOG="$(art live-gfs-gate.txt)"
 exec > >(tee "$GATE_LOG") 2>&1
-trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
+trap 'gate_shared_disk_unlock; gate_end 2>/dev/null || true; sleep 0.5' EXIT
 
 PAIRS="${BOOTS:-1}"
 REPORT="$(art live-gfs-report.txt)"
@@ -102,11 +102,13 @@ run_one() {
     fi
     rm -f "$RUN_DIR/vm-serial-$tag.log"
     set +e
-    host/vm-runner/.build/release/VMRunner "$RUN_DIR/disk-base.img" \
+    gate_shared_disk_lock
+    host/vm-runner/.build/release/VMRunner artifacts/disk.img \
         --serial "$RUN_DIR/vm-serial-$tag.log" \
         --script "$script" --script-expect "$expect" --timeout 40 \
         > "$(art live-gfs-run-$tag.txt)" 2>&1
     local RC=$?
+    gate_shared_disk_unlock
     set -e
     [ -f "$RUN_DIR/vm-serial-$tag.log" ] && cp "$RUN_DIR/vm-serial-$tag.log" "$(art live-gfs-serial-$tag.log)" || true
     local SER="$(art live-gfs-serial-$tag.log)"

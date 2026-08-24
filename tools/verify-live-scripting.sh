@@ -20,6 +20,15 @@
 # execute path on real hardware, plus the nesting refusal and the
 # missing-file error.
 #
+# Run isolation (#523 item 2 / issue #528, claim 5069): every boot attaches
+# a private DiskImageKit stacked disk (read-only base + throwaway ASIF
+# overlay), a private EFI var store (recreated fresh per boot, as the
+# pre-isolation gate did), and a private serial log under $RUN_DIR — two
+# concurrent instances cannot clobber each other's disks, NVRAM, or
+# evidence. Set DIPSHIT_GATE_SUFFIX=_alt to give this instance its own
+# canonical evidence names (two simultaneous instances MUST differ), and
+# DIPSHIT_KEEP_RUN=1 to keep the scratch dir.
+#
 # Class B — Apple silicon + VZ only.
 
 set -euo pipefail
@@ -27,13 +36,17 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-GATE_LOG="artifacts/live-scripting-gate.txt"
+source tools/lib/gate-run.sh
+
+SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
+
+GATE_LOG="$(art live-scripting-gate.txt)"
 exec > >(tee "$GATE_LOG") 2>&1
-trap 'sleep 0.5' EXIT
+trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
 
 BOOTS="${BOOTS:-1}"
-REPORT="artifacts/live-scripting-report.txt"
-SCRIPT="artifacts/live-scripting-input.txt"
+REPORT="$(art live-scripting-report.txt)"
 
 echo "=== verify-live-scripting: M18 T16 — sh scripting mode on VZ, $BOOTS boot(s) ==="
 
@@ -49,6 +62,14 @@ zig build image
 swift build --package-path host/vm-runner --configuration release
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
+# --- per-run isolation -------------------------------------------------------------
+# Private scratch dir + pristine-boot overlay for EVERY boot.
+# See tools/lib/gate-run.sh.
+gate_begin live-scripting
+echo "run dir: $RUN_DIR"
+SCRIPT="$RUN_DIR/script.txt"
+
+
 cat > "$SCRIPT" <<'EOF'
 write SCRIPT.TXT echo t16-first-marker
 sh SCRIPT.TXT
@@ -61,30 +82,34 @@ EOF
 
 run_one() {
     local tag="$1"
-    rm -f artifacts/efi-vars.bin artifacts/vm-serial.log
+    rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial-$tag.log"
     set +e
-    host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log \
+    # WRITE-GATE: canonical image + inter-gate lock (see gate-run.sh note).
+    gate_shared_disk_lock
+    host/vm-runner/.build/release/VMRunner artifacts/disk.img \
+        --serial "$RUN_DIR/vm-serial-$tag.log" \
         --script "$SCRIPT" --script-expect "t16-scripting-ok" --timeout 30 \
-        > "artifacts/live-scripting-run-$tag.txt" 2>&1
+        > "$(art live-scripting-run-$tag.txt)" 2>&1
     local RC=$?
     set -e
-    [ -f artifacts/vm-serial.log ] && cp artifacts/vm-serial.log "artifacts/live-scripting-serial-$tag.log" || true
+    [ -f "$RUN_DIR/vm-serial-$tag.log" ] && cp "$RUN_DIR/vm-serial-$tag.log" "$(art live-scripting-serial-$tag.log)" || true
+    local SER="$(art live-scripting-serial-$tag.log)"
 
     local SERIAL_BYTES BANNER=0 RAN=0 NESTED=0 NOINNER=0 MISSING=0 DONE=0
-    SERIAL_BYTES=$(wc -c < artifacts/vm-serial.log 2>/dev/null | tr -d ' ')
-    if [ -f artifacts/vm-serial.log ]; then
-        grep -qF "DipshitOS kernel" artifacts/vm-serial.log && BANNER=1
+    SERIAL_BYTES=$(wc -c < "$SER" 2>/dev/null | tr -d ' ')
+    if [ -f "$SER" ]; then
+        grep -qF "DipshitOS kernel" "$SER" && BANNER=1
         # t16-first-marker appears exactly twice: the typed `write` line's
         # echo plus the script's own output. A nested re-execution of
         # SCRIPT.TXT (or a double run) would add a third occurrence.
-        [ "$(grep -oF -- 't16-first-marker' artifacts/vm-serial.log | wc -l | tr -d ' ')" = 2 ] && RAN=1
-        grep -qF "sh: scripts cannot call scripts" artifacts/vm-serial.log && NESTED=1
+        [ "$(grep -oF -- 't16-first-marker' "$SER" | wc -l | tr -d ' ')" = 2 ] && RAN=1
+        grep -qF "sh: scripts cannot call scripts" "$SER" && NESTED=1
         # t16-inner-ran appears exactly once (the typed `write` line's
         # echo). If INNER.TXT had run despite the refusal, its `echo`
         # output would add a second occurrence.
-        [ "$(grep -oF -- 't16-inner-ran' artifacts/vm-serial.log | wc -l | tr -d ' ')" = 1 ] && NOINNER=1
-        grep -qF "sh: MISSING.TXT: not found (no such file on the ESP)" artifacts/vm-serial.log && MISSING=1
-        grep -qF "t16-scripting-ok" artifacts/vm-serial.log && DONE=1
+        [ "$(grep -oF -- 't16-inner-ran' "$SER" | wc -l | tr -d ' ')" = 1 ] && NOINNER=1
+        grep -qF "sh: MISSING.TXT: not found (no such file on the ESP)" "$SER" && MISSING=1
+        grep -qF "t16-scripting-ok" "$SER" && DONE=1
     fi
     echo "$tag: rc=$RC bytes=$SERIAL_BYTES banner=$BANNER ran=$RAN nested=$NESTED noinner=$NOINNER missing=$MISSING done=$DONE"
     [ "$RC" = 0 ] && [ "$BANNER" = 1 ] && [ "$RAN" = 1 ] && [ "$NESTED" = 1 ] && [ "$NOINNER" = 1 ] && [ "$MISSING" = 1 ] && [ "$DONE" = 1 ]
