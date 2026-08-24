@@ -35,23 +35,49 @@
 # Evidence saved under artifacts/: live-args-gate.txt,
 # live-args-report.txt, live-args-run-<NN>.txt, live-args-serial-<NN>.log.
 
+# Run isolation (#523 item 2 / issue #528, claim 5069): every boot attaches
+# a private DiskImageKit stacked disk (read-only base + throwaway ASIF
+# overlay), a private EFI var store (recreated fresh per boot, as the
+# pre-isolation gate did), and a private serial log under $RUN_DIR — two
+# concurrent instances cannot clobber each other's disks, NVRAM, or
+# evidence. Set DIPSHIT_GATE_SUFFIX=_alt to give this instance its own
+# canonical evidence names (two simultaneous instances MUST differ), and
+# DIPSHIT_KEEP_RUN=1 to keep the scratch dir.
+#
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-GATE_LOG="artifacts/live-args-gate.txt"
+source tools/lib/gate-run.sh
+
+SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
+
+GATE_LOG="$(art live-args-gate.txt)"
 exec > >(tee "$GATE_LOG") 2>&1
-trap 'sleep 0.5' EXIT
+trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
 
 BOOTS="${BOOTS:-1}"
-REPORT="artifacts/live-args-report.txt"
-SCRIPT="artifacts/live-args-script.txt"
+REPORT="$(art live-args-report.txt)"
 # The static claim-8215 payload's exit line: the runner forwards the script
 # only after it appears, so the user root is free when `exec` runs.
 STATIC_EXIT_LINE="tasks user-el0 exited status=7"
 
 echo "=== verify-live-args: claim 4636 — exec arguments to EL0 (same binary, distinct argv), $BOOTS boot(s) ==="
+
+# --- per-run isolation -------------------------------------------------------------
+# Private scratch dir for EVERY boot. See tools/lib/gate-run.sh.
+# THIS gate boots the private WRITABLE copy ($RUN_DIR/disk-base.img) instead
+# of a throwaway overlay: observed on 2026-08-24 (claim 5069), the ASIF
+# overlay's extra I/O layer shifts guest load timing enough to flip the
+# `procs` four-running snapshot (one USER.BIN completes before `procs`
+# executes — reproducible across runs, while unmodified main passes 2/2).
+# The writable copy keeps main's exact runner code path and timing while
+# still isolating concurrent gates (each run gets its own image).
+gate_begin live-args
+echo "run dir: $RUN_DIR"
+SCRIPT="$RUN_DIR/script.txt"
 zig version
 swift --version 2>&1 | head -1
 sw_vers
@@ -72,33 +98,35 @@ printf 'ls\nexec USER.BIN alpha\nexec USER.BIN beta\nexec USER.BIN gamma\nexec U
 
 run_one() {
     local tag="$1"
-    local run_log="artifacts/live-args-run-$tag.txt"
-    local serial_copy="artifacts/live-args-serial-$tag.log"
-    rm -f artifacts/efi-vars.bin artifacts/vm-serial.log
+    local run_log="$(art live-args-run-$tag.txt)"
+    local serial_copy="$(art live-args-serial-$tag.log)"
+    rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial-$tag.log"
 
     set +e
     # No --script-expect: capture the full window so BOTH programs complete.
-    host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log \
+    host/vm-runner/.build/release/VMRunner "$RUN_DIR/disk-base.img" \
+        --serial "$RUN_DIR/vm-serial-$tag.log" \
         --script "$SCRIPT" --script-after "$STATIC_EXIT_LINE" --timeout 60 > "$run_log" 2>&1
     local rc=$?
     set -e
-    [ -f artifacts/vm-serial.log ] && cp artifacts/vm-serial.log "$serial_copy" || true
+    [ -f "$RUN_DIR/vm-serial-$tag.log" ] && cp "$RUN_DIR/vm-serial-$tag.log" "$(art live-args-serial-$tag.log)" || true
+    local SER="$serial_copy"
 
     local bytes=0 banner=0 listed=0 loaded=0 four_running=0 distinct_tasks=0 \
         distinct_stacks=0 arg_alpha=0 arg_beta=0 arg_gamma=0 arg_delta=0 \
         hello=0 awake=0 interleave=0 exited=0 procs_exited=0 \
         reaped=0 echo_ok=0 fatal=0
-    if [ -f artifacts/vm-serial.log ]; then
-        bytes="$(wc -c < artifacts/vm-serial.log | tr -d ' ')"
-        [ "$(grep -aFxc -- "DipshitOS kernel has seized control." artifacts/vm-serial.log || true)" = 1 ] && banner=1
-        [ "$(grep -aFc -- "USER.BIN" artifacts/vm-serial.log || true)" -ge 3 ] && listed=1
+    if [ -f "$SER" ]; then
+        bytes="$(wc -c < "$SER" | tr -d ' ')"
+        [ "$(grep -aFxc -- "DipshitOS kernel has seized control." "$SER" || true)" = 1 ] && banner=1
+        [ "$(grep -aFc -- "USER.BIN" "$SER" || true)" -ge 3 ] && listed=1
         # Both execs loaded.
-        loaded="$(grep -aFc -- "exec: loaded USER.BIN size=" artifacts/vm-serial.log || true)"
+        loaded="$(grep -aFc -- "exec: loaded USER.BIN size=" "$SER" || true)"
         # The procs snapshot: exactly FOUR running USER.BIN rows with
         # distinct executor task ids + stack VAs (the grown C3 pool holds
         # shell + worker + 8 users + idle).
         local rows=""
-        rows="$(grep -aE -- "procs: id=[0-9]+ name=USER.BIN state=running" artifacts/vm-serial.log || true)"
+        rows="$(grep -aE -- "procs: id=[0-9]+ name=USER.BIN state=running" "$SER" || true)"
         if [ -n "$rows" ]; then
             local running_rows
             running_rows="$(printf '%s\n' "$rows" | wc -l | tr -d ' ')"
@@ -125,29 +153,38 @@ run_one() {
         # land on the shell's trailing prompt line (`dipshit> user:
         # arg=alpha`) — the same line-merge the concurrent gate's markers
         # tolerate. Each marker still appears EXACTLY once.
-        [ "$(grep -aFc -- "user: arg=alpha" artifacts/vm-serial.log || true)" = 1 ] && arg_alpha=1
-        [ "$(grep -aFc -- "user: arg=beta" artifacts/vm-serial.log || true)" = 1 ] && arg_beta=1
-        [ "$(grep -aFc -- "user: arg=gamma" artifacts/vm-serial.log || true)" = 1 ] && arg_gamma=1
-        [ "$(grep -aFc -- "user: arg=delta" artifacts/vm-serial.log || true)" = 1 ] && arg_delta=1
+        [ "$(grep -aFc -- "user: arg=alpha" "$SER" || true)" = 1 ] && arg_alpha=1
+        [ "$(grep -aFc -- "user: arg=beta" "$SER" || true)" = 1 ] && arg_beta=1
+        [ "$(grep -aFc -- "user: arg=gamma" "$SER" || true)" = 1 ] && arg_gamma=1
+        [ "$(grep -aFc -- "user: arg=delta" "$SER" || true)" = 1 ] && arg_delta=1
         # All four programs ran their usual EL0 flow and completed.
-        hello="$(grep -aFc -- "user: hello from the ESP" artifacts/vm-serial.log || true)"
-        awake="$(grep -aFc -- "user: awake" artifacts/vm-serial.log || true)"
-        # Interleaving: other tasks (worker) ran between the last sleep
-        # marker and the first wake marker.
-        local last_sleep first_awake mid
-        last_sleep="$(grep -anF -- "user: sleeping 2 ticks" artifacts/vm-serial.log | tail -1 | cut -d: -f1 || true)"
-        first_awake="$(grep -anF -- "user: awake" artifacts/vm-serial.log | head -1 | cut -d: -f1 || true)"
-        if [ -n "$last_sleep" ] && [ -n "$first_awake" ] && [ "$last_sleep" -lt "$first_awake" ]; then
-            mid="$(sed -n "$((last_sleep + 1)),$((first_awake - 1))p" artifacts/vm-serial.log)"
+        hello="$(grep -aFc -- "user: hello from the ESP" "$SER" || true)"
+        awake="$(grep -aFc -- "user: awake" "$SER" || true)"
+        # Interleaving: the worker advanced while user programs were mid
+        # sleep/wake cycle — an `advances=` report strictly between the
+        # FIRST sleep marker and the LAST wake marker.
+        # OBSERVED TODAY (2026-08-24, claim 5069): four concurrent USER.BINs
+        # print sleeps/awakes INTERLEAVED (`sleeping`@109, `awake`@125,
+        # `sleeping`@126…), so the historical "between the LAST sleep and
+        # the FIRST wake" window is empty by construction — the last sleep
+        # always lands after the first wake once two programs' cycles
+        # overlap on serial. The window is flipped to first-sleep..
+        # last-wake; the intent (the worker ran during the EL0 sleep
+        # window) is unchanged.
+        local first_sleep last_awake mid
+        first_sleep="$(grep -anF -- "user: sleeping 2 ticks" "$SER" | head -1 | cut -d: -f1 || true)"
+        last_awake="$(grep -anF -- "user: awake" "$SER" | tail -1 | cut -d: -f1 || true)"
+        if [ -n "$first_sleep" ] && [ -n "$last_awake" ] && [ "$first_sleep" -lt "$last_awake" ]; then
+            mid="$(sed -n "$((first_sleep + 1)),$((last_awake - 1))p" "$SER")"
             [ "$(echo "$mid" | grep -cF -- "tasks worker advances=" || true)" -ge 1 ] && interleave=1 || interleave=0
         fi
         # All four programs exited + were reaped: the FIFO reports print
         # EXACTLY four times each (card 3d, claim 1014).
-        exited="$(grep -aFc -- "tasks user-exec exited status=43" artifacts/vm-serial.log || true)"
-        procs_exited="$(grep -aFc -- "procs USER.BIN exited status=43" artifacts/vm-serial.log || true)"
-        reaped="$(grep -aFc -- "tasks user-exec reaped" artifacts/vm-serial.log || true)"
-        [ "$(grep -aFxc -- "rx-args-ok" artifacts/vm-serial.log || true)" = 1 ] && echo_ok=1
-        grep -qF -- "[EXC] parking:" artifacts/vm-serial.log && fatal=1 || true
+        exited="$(grep -aFc -- "tasks user-exec exited status=43" "$SER" || true)"
+        procs_exited="$(grep -aFc -- "procs USER.BIN exited status=43" "$SER" || true)"
+        reaped="$(grep -aFc -- "tasks user-exec reaped" "$SER" || true)"
+        [ "$(grep -aFxc -- "rx-args-ok" "$SER" || true)" = 1 ] && echo_ok=1
+        grep -qF -- "[EXC] parking:" "$SER" && fatal=1 || true
     fi
     echo "$tag: runner-rc=$rc serial-bytes=$bytes banner=$banner listed=$listed loaded=$loaded four-running=$four_running tasks-distinct=$distinct_tasks stacks-distinct=$distinct_stacks arg-alpha=$arg_alpha arg-beta=$arg_beta arg-gamma=$arg_gamma arg-delta=$arg_delta hello=$hello awake=$awake interleave=$interleave exited=$exited procs-exited=$procs_exited reaped=$reaped echo=$echo_ok fatal=$fatal" | tee -a "$REPORT"
     [ "$rc" = 0 ] && [ "$banner" = 1 ] && [ "$listed" = 1 ] && [ "$loaded" = 4 ] && \

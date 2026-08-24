@@ -13,22 +13,42 @@
 #      (recovered=1) — a real EL1 data abort consumed by the exception path
 #      and converted to EFAULT, with the shell still responsive after.
 
+# Run isolation (#523 item 2 / issue #528, claim 5069): every boot attaches
+# a private DiskImageKit stacked disk (read-only base + throwaway ASIF
+# overlay), a private EFI var store (recreated fresh per boot, as the
+# pre-isolation gate did), and a private serial log under $RUN_DIR — two
+# concurrent instances cannot clobber each other's disks, NVRAM, or
+# evidence. Set DIPSHIT_GATE_SUFFIX=_alt to give this instance its own
+# canonical evidence names (two simultaneous instances MUST differ), and
+# DIPSHIT_KEEP_RUN=1 to keep the scratch dir.
+#
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-GATE_LOG="artifacts/m3-uaccess-live.txt"
+source tools/lib/gate-run.sh
+
+SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
+
+GATE_LOG="$(art m3-uaccess-live.txt)"
 exec > >(tee "$GATE_LOG") 2>&1
-trap 'sleep 0.5' EXIT
+trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
 
 BOOTS="${BOOTS:-1}"
-REPORT="artifacts/live-uaccess-report.txt"
-SCRIPT="artifacts/live-uaccess-script.txt"
+REPORT="$(art live-uaccess-report.txt)"
 EXIT_LINE="tasks user-el0 exited status=7"
 MON_LINE="uaccess: valid=1 fault=1 recovered=1 copies=4 validation_faults=1"
 
 echo "=== verify-live-uaccess: claim 6120 — EFAULT contract + fault recovery on EL0 SVC, $BOOTS boot(s) ==="
+
+# --- per-run isolation -------------------------------------------------------------
+# Private scratch dir + pristine-boot overlay for EVERY boot.
+# See tools/lib/gate-run.sh.
+gate_begin live-uaccess
+echo "run dir: $RUN_DIR"
+SCRIPT="$RUN_DIR/script.txt"
 zig version
 swift --version 2>&1 | head -1
 sw_vers
@@ -47,30 +67,32 @@ printf 'syscalls\nuaccess\necho rx-uaccess-ok\n' > "$SCRIPT"
 
 run_one() {
     local tag="$1"
-    local run_log="artifacts/live-uaccess-run-$tag.txt"
-    local serial_copy="artifacts/live-uaccess-serial-$tag.log"
-    rm -f artifacts/efi-vars.bin artifacts/vm-serial.log
+    local run_log="$(art live-uaccess-run-$tag.txt)"
+    local serial_copy="$(art live-uaccess-serial-$tag.log)"
+    rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial-$tag.log"
 
     set +e
-    host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log \
+    host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
+        --serial "$RUN_DIR/vm-serial-$tag.log" \
         --script "$SCRIPT" --script-after "$EXIT_LINE" \
         --script-expect $'rx-uaccess-ok\n' --timeout 45 > "$run_log" 2>&1
     local rc=$?
     set -e
-    [ -f artifacts/vm-serial.log ] && cp artifacts/vm-serial.log "$serial_copy" || true
+    [ -f "$RUN_DIR/vm-serial-$tag.log" ] && cp "$RUN_DIR/vm-serial-$tag.log" "$(art live-uaccess-serial-$tag.log)" || true
+    local SER="$serial_copy"
 
     local bytes=0 banner=0 write_ok=0 marker=0 ping=0 write_count=0 mon=0 echo_ok=0 userspace_ok=0 fatal=0
-    if [ -f artifacts/vm-serial.log ]; then
-        bytes="$(wc -c < artifacts/vm-serial.log | tr -d ' ')"
-        [ "$(grep -aFxc -- "DipshitOS kernel has seized control." artifacts/vm-serial.log || true)" = 1 ] && banner=1
-        [ "$(grep -aFc -- "syscall: write ok n=23" artifacts/vm-serial.log || true)" -ge 1 ] && write_ok=1
-        [ "$(grep -aFc -- "uaccess: efault ok n=8" artifacts/vm-serial.log || true)" -ge 1 ] && marker=1
-        [ "$(grep -aFxc -- "  0 sys_ping calls=2" artifacts/vm-serial.log || true)" = 1 ] && ping=1
-        [ "$(grep -aFxc -- "  1 sys_write calls=3" artifacts/vm-serial.log || true)" = 1 ] && write_count=1
-        [ "$(grep -aFxc -- "$MON_LINE" artifacts/vm-serial.log || true)" = 1 ] && mon=1
-        [ "$(grep -aFxc -- "rx-uaccess-ok" artifacts/vm-serial.log || true)" = 1 ] && echo_ok=1
-        [ "$(grep -aFxc -- "userspace: el0=1 svc=2 roundtrips=1 arg=2 result=2 rejected=0" artifacts/vm-serial.log || true)" = 1 ] && userspace_ok=1
-        grep -qF -- "[EXC] parking:" artifacts/vm-serial.log && fatal=1 || true
+    if [ -f "$SER" ]; then
+        bytes="$(wc -c < "$SER" | tr -d ' ')"
+        [ "$(grep -aFxc -- "DipshitOS kernel has seized control." "$SER" || true)" = 1 ] && banner=1
+        [ "$(grep -aFc -- "syscall: write ok n=23" "$SER" || true)" -ge 1 ] && write_ok=1
+        [ "$(grep -aFc -- "uaccess: efault ok n=8" "$SER" || true)" -ge 1 ] && marker=1
+        [ "$(grep -aFxc -- "  0 sys_ping calls=2" "$SER" || true)" = 1 ] && ping=1
+        [ "$(grep -aFxc -- "  1 sys_write calls=3" "$SER" || true)" = 1 ] && write_count=1
+        [ "$(grep -aFxc -- "$MON_LINE" "$SER" || true)" = 1 ] && mon=1
+        [ "$(grep -aFxc -- "rx-uaccess-ok" "$SER" || true)" = 1 ] && echo_ok=1
+        [ "$(grep -aFxc -- "userspace: el0=1 svc=2 roundtrips=1 arg=2 result=2 rejected=0" "$SER" || true)" = 1 ] && userspace_ok=1
+        grep -qF -- "[EXC] parking:" "$SER" && fatal=1 || true
     fi
     echo "$tag: runner-rc=$rc serial-bytes=$bytes banner=$banner write=$write_ok marker=$marker ping=$ping write-count=$write_count mon=$mon echo=$echo_ok userspace=$userspace_ok fatal=$fatal" | tee -a "$REPORT"
     [ "$rc" = 0 ] && [ "$banner" = 1 ] && [ "$write_ok" = 1 ] && \
