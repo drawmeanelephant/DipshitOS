@@ -1333,6 +1333,16 @@ const cv_push_req = [13]u8{ 'C', 'V', 'C', '-', 'P', 'I', 'N', 'G', '-', '0', 'x
 var cv_push_reply: [virtio_custom.push_buf_len]u8 align(16) = undefined;
 var cv_push_ack_buf: [16]u8 align(16) = [_]u8{0} ** 16;
 
+/// Claim 9588: the input channel's decode hook. Kind-1 payloads are raw
+/// 8-byte HID keyboard boot reports; feeding them through the SAME decode
+/// function an XHCI report takes makes injected keys ordinary keys
+/// downstream — per-process event FIFO (sys_poll_event / sys_wait_event)
+/// when an app window owns focus, console bytes + `input` counters at the
+/// terminal.
+fn cv_input_dispatch(rep: []const u8) void {
+    input.decode_keyboard_report(rep);
+}
+
 /// Drive the spike device: init (probe + negotiate + DRIVER_OK + both
 /// queues armed), arm the SPI window, then run the transport experiment:
 /// (1) claim 4374 — two batches of four CONCURRENT in-flight exchanges on
@@ -1611,6 +1621,27 @@ fn custom_virtio_spike() void {
     uart_puts(if (push_ok) "1" else "0");
     uart_puts("\n");
 
+    // ---- Claim 9588: the INPUT channel over queue 3 ---------------------
+    // Only when the device exposed the fourth queue (the runner's
+    // --via-virtio attaches it; smaller shapes skip this block with one
+    // honest line). Wire the decode hook FIRST (injected keys must decode
+    // from the first completion on), then pre-arm the receive pool; the
+    // host injects only after a shell marker, so the pool is guaranteed
+    // live long before the first message. Completions are pumped by
+    // poll_input() from the shell idle loop's RX seam (M15Console).
+    virtio_custom.on_input_report = &cv_input_dispatch;
+    if (virtio_custom.has_input_queue) {
+        if (!virtio_custom.arm_input_pool()) {
+            uart_puts("cvspike: q3 arm failed\n");
+        } else {
+            uart_puts("cvspike: q3 armed bufs=");
+            uart_hex(virtio_custom.input_pool_count);
+            uart_puts("\n");
+        }
+    } else {
+        uart_puts("cvspike: q3 absent\n");
+    }
+
     // The used-ring advances are observed by poll (fast); the device IRQs
     // travel through the GIC + vector and can trail them. Give the
     // notifications a bounded window to assert, so the report names how
@@ -1753,6 +1784,12 @@ const M15Console = struct {
         // Claim 6684: live RX through the polled virtio receive queue
         // (queue 0). Runs whenever the console is the virtio device — post-MMU
         // the transport is reachable (claim 1517). Never blocks.
+        // Claim 9588: pump the custom-virtio input channel here too — the
+        // shell idle loop calls readByte once per idle tick (shell.zig's
+        // non-blocking poll), making this main.zig-owned idle seam the
+        // drain point for queue-3 completions (decode + replenish). One
+        // cheap branch unless the four-queue device armed its pool.
+        if (virtio_custom.cv_ready and virtio_custom.input_armed) virtio_custom.poll_input();
         if (console_kind == .virtio) return virtio_console.virtio_read_byte();
         return null;
     }
