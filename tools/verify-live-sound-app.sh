@@ -40,11 +40,22 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-GATE_LOG="artifacts/live-sound-app-gate.txt"
-exec > >(tee "$GATE_LOG") 2>&1
-trap 'sleep 0.5' EXIT
+source tools/lib/gate-run.sh
 
-REPORT="artifacts/live-sound-app-report.txt"
+SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
+
+# Run isolation (#523 item 2 / issue #528; fleet remainder claim 2259):
+# private stacked disk (pristine-per-boot overlay), EFI var store, serial
+# log, and scripts under $RUN_DIR per boot. Set DIPSHIT_GATE_SUFFIX=_alt
+# for distinct canonical evidence names; DIPSHIT_KEEP_RUN=1 keeps the
+# scratch dir.
+
+GATE_LOG="$(art live-sound-app-gate.txt)"
+exec > >(tee "$GATE_LOG") 2>&1
+trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
+
+REPORT="$(art live-sound-app-report.txt)"
 
 echo "=== verify-live-sound-app: claim 7636 — M15 A3 EL0 audio seam on VZ ==="
 
@@ -54,7 +65,8 @@ export PATH
 zig version; swift --version 2>&1 | head -1; sw_vers
 REVISION="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
 BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
-echo "revision: $REVISION branch=$BRANCH"
+DIRTY="$(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
+echo "revision: $REVISION branch=$BRANCH dirty-files=$DIRTY"
 
 # Build all binaries and disk image
 zig build
@@ -62,50 +74,64 @@ zig build image
 swift build --package-path host/vm-runner --configuration release
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
+# --- per-run isolation -------------------------------------------------------
+gate_begin live-sound-app
+echo "run dir: $RUN_DIR"
+
+# Sequencing (claim 2259): the script2 forward parks 3 s past `jingle:
+# done` so the async reap settles and the shell is back at a live prompt
+# before `syscalls` is typed (a forward typed at `done` was never echoed).
+
 # The script: at the prompt, exec JINGLE.BIN. It plays the melody and
 # prints a marker per note; the syscalls report afterwards proves the
 # audio slots were called from EL0.
-cat > artifacts/live-sound-app-script.txt <<'EOF'
+cat > "$RUN_DIR/script.txt" <<'EOF'
 exec JINGLE.BIN
 EOF
 
-cat > artifacts/live-sound-app-script2.txt <<'EOF'
-echo sound-app-live-ok
+# Order matters (fleet remainder claim 2259, OBSERVED 2026-08-24): the
+# syscalls report must print BEFORE the success echo — the runner exits on
+# the echo, so an echo-first order truncated the report and lost the
+# syscall-count assertions.
+cat > "$RUN_DIR/script2.txt" <<'EOF'
 syscalls
+echo sound-app-live-ok
 EOF
 
 # The boot payload's exit line frees the pool slot the exec lands in.
 STATIC_EXIT_LINE="tasks user-el0 exited status=7"
 
 echo "--- Phase 1: Running JINGLE.BIN on VZ (--sound) ---"
-rm -f artifacts/efi-vars.bin
-rm -f artifacts/vm-serial.log
+rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial.log"
 
 set +e
-host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log \
+host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
+    --serial "$RUN_DIR/vm-serial.log" \
     --sound \
-    --script artifacts/live-sound-app-script.txt \
+    --script "$RUN_DIR/script.txt" \
     --script-after "$STATIC_EXIT_LINE" \
-    --script2 artifacts/live-sound-app-script2.txt \
+    --script2 "$RUN_DIR/script2.txt" \
     --script2-after "jingle: done" \
+    --script2-delay 3 \
     --script-expect "sound-app-live-ok" \
-    --timeout 150 > artifacts/live-sound-app-run.txt 2>&1
+    --timeout 150 > "$(art live-sound-app-run.txt)" 2>&1
 RC=$?
 set -e
 
-[ -f artifacts/vm-serial.log ] && cp artifacts/vm-serial.log artifacts/live-sound-app-serial.log || true
+[ -f "$RUN_DIR/vm-serial.log" ] && cp "$RUN_DIR/vm-serial.log" "$(art live-sound-app-serial.log)" || true
+SER="$(art live-sound-app-serial.log)"
 
 echo "VMRunner exit code: $RC"
 if [ $RC -ne 0 ]; then
     echo "ERROR: VMRunner failed with return code $RC"
-    cat artifacts/live-sound-app-run.txt
+    cat "$(art live-sound-app-run.txt)"
     exit 1
 fi
 
 echo "--- Phase 2: Verifying the EL0 audio-seam markers ---"
 
 # Host: the --sound attach.
-grep -q "SOUND: virtio-snd attached" artifacts/live-sound-app-run.txt || {
+grep -q "SOUND: virtio-snd attached" "$(art live-sound-app-run.txt)" || {
     echo "ERROR: runner did not report the --sound attach"
     exit 1
 }
@@ -113,11 +139,11 @@ echo "SOUND.ATTACH: OK"
 
 # App start: the negotiated state learned from the device via
 # sys_audio_info (the first-call negotiation).
-grep -q "jingle: info fmt=19 rate=7 ch=2" artifacts/live-sound-app-serial.log || {
+grep -q "jingle: info fmt=19 rate=7 ch=2" "$SER" || {
     echo "ERROR: sys_audio_info did not report the negotiated FLOAT/48000/stereo state"
     exit 1
 }
-grep -q "jingle: info fmt=19 rate=7 ch=2 period=4096 max=65536" artifacts/live-sound-app-serial.log || {
+grep -q "jingle: info fmt=19 rate=7 ch=2 period=4096 max=65536" "$SER" || {
     echo "ERROR: the audio_info period/max report is not period=4096 max=65536"
     exit 1
 }
@@ -141,34 +167,34 @@ for spec in "1 262 250 96000" \
             "14 262 500 192000"; do
     set -- $spec
     want="jingle: note $1 f=$2 dur=$3"
-    grep -q "$want" artifacts/live-sound-app-serial.log || {
+    grep -q "$want" "$SER" || {
         echo "ERROR: missing note marker: $want"
         exit 1
     }
-    grep -q "$want chunks=.* played=$4" artifacts/live-sound-app-serial.log || {
+    grep -q "$want chunks=.* played=$4" "$SER" || {
         echo "ERROR: note $1 accounting is not played=$4:"
-        grep -a "jingle: note $1 " artifacts/live-sound-app-serial.log
+        grep -a "jingle: note $1 " $SER
         exit 1
     }
     echo "JINGLE.NOTE.$1: OK (f=$2 dur=$3 played=$4)"
 done
 
 # The app finished.
-grep -q "jingle: done" artifacts/live-sound-app-serial.log || {
+grep -q "jingle: done" "$SER" || {
     echo "ERROR: the melody did not finish (jingle: done missing)"
     exit 1
 }
 echo "JINGLE.DONE: OK"
 
 # The syscalls report: slots 42 and 43 were called from EL0.
-grep -q "42 sys_audio_info calls=1" artifacts/live-sound-app-serial.log || {
+grep -q "42 sys_audio_info calls=1" "$SER" || {
     echo "ERROR: sys_audio_info call count is not 1"
     exit 1
 }
 echo "SYSCALL.INFO: OK (1 call)"
-grep -q "43 sys_audio_play calls=1[4-9]\|43 sys_audio_play calls=[2-9][0-9]" artifacts/live-sound-app-serial.log || {
+grep -q "43 sys_audio_play calls=1[4-9]\|43 sys_audio_play calls=[2-9][0-9]" "$SER" || {
     echo "ERROR: sys_audio_play was not called at least 14 times (the chunked notes)"
-    grep -a "43 sys_audio_play" artifacts/live-sound-app-serial.log || true
+    grep -a "43 sys_audio_play" "$SER" || true
     exit 1
 }
 echo "SYSCALL.PLAY: OK (14+ calls — every note chunk was its own syscall)"
@@ -177,13 +203,14 @@ echo ""
 echo "=== A3 EL0 audio seam gate PASSED on VZ ==="
 {
     echo "verify-live-sound-app.sh — claim 7636 (M15 A3) — PASSED"
-    echo "revision: $REVISION branch=$BRANCH"
+    DIRTY="$(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
+echo "revision: $REVISION branch=$BRANCH dirty-files=$DIRTY"
     echo "date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo ""
     echo "--- guest serial evidence ---"
-    grep -aE "^jingle:|^42 sys_audio_info|^43 sys_audio_play|^sound-app" artifacts/live-sound-app-serial.log
+    grep -aE "^jingle:|^42 sys_audio_info|^43 sys_audio_play|^sound-app" $SER
     echo ""
     echo "--- host evidence ---"
-    grep -a "SOUND:" artifacts/live-sound-app-run.txt
+    grep -a "SOUND:" $(art live-sound-app-run.txt)
 } > "$REPORT"
 cat "$REPORT"
