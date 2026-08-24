@@ -5,7 +5,7 @@
 - **Scope:** fleet migration of the remaining unmigrated `tools/verify-live-*.sh` class-B gates: (1) per-run isolation via gate_begin/gate_end ($RUN_DIR, GATE_RUNNER_ARGS overlays or private writable copies, per-run --vars/--serial); (2) rot-class-1 expects — replace `<marker>\ndipshit> ` prompt-suffix expects with OUTPUT-ONLY substrings (prompt ANSI-colored since M18 T5, claim 0163); (3) rot-class-2 stale counter-line asserts aligned to observed bytes with citation comments; (4) rot-class-3 host-dependent observation runs made env-selectable defaulting to today's behavior.
 - **Touches:** tools/verify-live-* docs/gate-inventory.md
 - **Depends on:** PR #529 (tools/lib/gate-run.sh) — already on origin/main
-- **Heartbeat:** 2026-08-24
+- **Heartbeat:** 2026-08-24 (batch 6 done: 31 gates migrated; win-family pixel red confirmed pre-existing on main)
 - **Status:** 🔄 in progress
 
 ## Notes
