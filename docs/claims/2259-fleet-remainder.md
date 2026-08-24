@@ -7,7 +7,7 @@
 - **Touches (amended 2026-08-24, tabs investigation):** + tools/verify-live-tabs.sh (item-2 fix work; no other ACTIVE claim declares it)
 - **Depends on:** PR #529 (tools/lib/gate-run.sh) + PR #531 (claim 5069 fleet migration) — already on origin/main
 - **Heartbeat:** 2026-08-24
-- **Status:** 🔄 `agent/gates/fleet-remainder`
+- **Status:** ✅ done 2026-08-24 — all scope delivered: 26 gates migrated (25 rc=0 individually on this host; live-desktop migrated-but-red, pre-existing CALC geometry regression reproduced on unmodified origin/main d1dc6fe baseline and left for its owner with citations); tabs race root-caused with three host-side layers fixed gate-side + precise handoff note for the open guest/tools question; seven pre-existing reds reproduced on the detached baseline; canary design notes in the branch log (no .github infra touched); concurrency proof under artifacts/fleet-remainder-concurrency/. PR opened from this branch.
 
 ## Notes
 
