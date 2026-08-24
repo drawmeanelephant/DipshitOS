@@ -1,3 +1,5 @@
 # Log — agent/gates fleet-remainder
 
 - **2026-08-24** — *gates (agent/gates/fleet-remainder)*: claim 2259 opened → #537 remainder of the gate fleet: migrate last 24 verify-live-* gates + tabs decode race; canary job = design notes only (runner/TCC decisions belong to maintainer) → 🔄 in progress.
+- **2026-08-24** — *gates (agent/gates/fleet-remainder)*: kickoff commit 2f8a191 had created only this log entry; docs/claims/2259-fleet-remainder.md now actually created (claim-id verified 2259). Fleet ground truth: 27 of 96 verify-live-* scripts lack tools/lib/gate-run.sh; #537's "24" headline vs its 23-gate enumeration reconciled as 23 enumerated + 3 strays outside the enumeration (sys-kill, unicode, fetch); pointer-cg stays unmigrated by design (#151, class-C-only). Claim migrates all 26 non-excluded. Also flipped claim 2599 → ✅ independently (all scope landed via PRs #532–#535, origin branch deleted; precedent claim 6637) so its ACTIVE Touches on docs/gate-inventory.md stop blocking this branch's required inventory update. Coordination baseline green pre-work: verify-coordination ok, test-coordination 21/21.
+

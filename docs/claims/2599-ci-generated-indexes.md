@@ -11,7 +11,7 @@
 - **Touches:** tools/verify-coordination.sh, tools/status/refresh-indexes.sh, tools/status/test-coordination.sh, .github/workflows/indexes.yml, AGENTS.md, docs/claims/README.md, docs/claims/TEMPLATE.md, docs/logs/README.md, docs/gate-inventory.md, docs/testing.md, docs/status.md, site/contributing.md, site/claims.md
 - **Depends on:** —
 - **Heartbeat:** 2026-08-24
-- **Status:** 🔄 `t3code/concurrent-agents-merge-conflicts`
+- **Status:** ✅ done 2026-08-24 — all five scope items landed on main via PRs #532/#533/#534 (+ #535's first bot regeneration); origin branch deleted after merge. Flipped independently by `agent/gates/fleet-remainder` so the ACTIVE-Touches gate stops holding docs/gate-inventory.md (precedent: claim 6637's independent flip, recorded here and in the flipping agent's branch log)
 
 ## Notes
 
