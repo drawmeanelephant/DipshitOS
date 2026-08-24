@@ -288,8 +288,8 @@ if [ -f "$VRUN" ]; then
     # The runner attached the four-queue device incl. the input queue.
     grep -a -qF -- "claim-9588 INPUT queue (--via-virtio)" "$VRUN" && H_ENABLED=1
     grep -a -qF -- "CUSTOM-VIRTIO: guest set DRIVER_OK" "$VRUN" && H_DRIVER_OK=1
-    # The first keystroke ('i', HID usage 0x08) went out as an input message.
-    grep -a -qF -- "CUSTOM-VIRTIO-INPUT: enqueued key-seq down usage=0x8 mods=0x0" "$VRUN" && H_ENQUEUE_I=1
+    # The first keystroke ('i', HID usage 0x0c) went out as an input message.
+    grep -a -qF -- "CUSTOM-VIRTIO-INPUT: enqueued key-seq down usage=0xc mods=0x0" "$VRUN" && H_ENQUEUE_I=1
     # The LAST keystroke (Enter down, usage 0x28) was enqueued too — the
     # runner cannot have exited before it: the exit marker IS the guest's
     # decode of this very message. (The trailing keyUp/summary lines are

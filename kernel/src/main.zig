@@ -78,7 +78,13 @@ fn rp_text_clear(_: *anyopaque) void {
 // keyboard bytes reach the Road Pops line editor only while the terminal
 // window is focused; otherwise they stay queued in the input FIFO. Serial
 // (the scripted evidence channel) remains the always-wired fallback.
+// Claim 9588: without a window manager (headless boot — no gpu device, the
+// WM never armed) there are no windows to focus and the terminal IS the only
+// interactive surface, so keyboard bytes flow unconditionally there. With
+// the WM armed the focus discipline applies unchanged (every existing
+// --input gate also passes --display, so their behavior is identical).
 fn rp_read_source() ?u8 {
+    if (!driving_award.armed()) return input.pop_byte();
     return if (driving_award.terminal_focused()) input.pop_byte() else null;
 }
 
@@ -951,8 +957,11 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
     // read path from the keyboard event FIFO, gated on window focus (the
     // terminal must be focused for keyboard bytes to reach the line
     // editor). Serial stays the fallback. No-op without `--input` (the
-    // default VM's read path is serial-only).
-    if (input.armed()) road_pops.set_read_source(rp_read_source);
+    // default VM's read path is serial-only). Claim 9588: the custom-virtio
+    // input channel feeds the SAME FIFO, so its pool being armed wires the
+    // read source too — injected keys then reach the line editor exactly
+    // like USB keys do.
+    if (input.armed() or virtio_custom.input_armed) road_pops.set_read_source(rp_read_source);
     var mon = monitor.Monitor.init(
         road_pops.tee_console(),
         .{

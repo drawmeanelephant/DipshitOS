@@ -125,8 +125,26 @@ console keeps its panic/fallback role untouched; the input channel is
 additive and default-off (without the flags the VM configuration is
 byte-identical).
 
-Status: **[design]** at definition time (claim 9588); facts flip to
-**[observed]** with the live class-B proof under `artifacts/`.
+**[observed]** claim 9588 (2026-08-24, macOS 27.0 build 26A5416b): the full
+channel proved live and headless (`GATE_VIRTIO=1 bash tools/verify-live-input.sh`,
+evidence under `artifacts/live-input-virtio-*`). One boot carried the whole
+assertion set byte-exactly: four-queue device attach + DRIVER_OK; guest q3
+pool armed (`cvspike: q3 armed bufs=0x0000000000000008`) alongside a GREEN
+claim-3141 push echo (`cvspike: q2 ok=1`) in the same boot; six HID-shaped
+16-byte messages enqueued strictly in order and consumed via the idle-loop
+pump (queue-3 replenish notifications observed host-side); and the guest's
+own report `input: armed=0 fifo=0/64 dropped=0 events=6 kb-mods=0x0
+kb-usage=0x28 kb-byte=0xa ptr-btns=0 ptr-x=0 ptr-y=0 ptr-reports=0` —
+armed=0 proving no USB keyboard was ever attached while events=6 proves the
+injected keys decoded through the standard path. Two live findings pinned
+here as contract facts: (1) a fixed-schedule burst can outrun the pool's
+replenish under desktop load, so delivery is STRICTLY ORDERED — each stroke
+is enqueued only after the previous was accepted, and a pool-empty retry
+delays (never reorders) the rest of the sequence (a reordered burst was
+observed typing `inpu⏎t`); (2) without a window manager (headless boot) the
+terminal is the keyboard sink by definition — the FIFO→line-editor bridge
+flows unconditionally when the WM is unarmed, unchanged focus discipline
+when it is armed.
 
 Non-PCI platform facts:
 

@@ -3628,22 +3628,16 @@ enum CustomVirtioSpike {
     /// Enqueue one input message into a pre-armed receive buffer on queue 3
     /// and return it (used ring advance + SPI — the only host→guest data
     /// path). Runs ON the device delegate queue so element access stays
-    /// single-threaded with the callbacks. If the pool is momentarily empty
-    /// the enqueue retries (bounded); exhaustion fails LOUDLY, never drops.
-    static func enqueueInput(_ stroke: HidStroke, sequenceTag: String, attempt: Int = 0) {
+    /// single-threaded with the callbacks. Returns false when the pool is
+    /// momentarily empty (the caller retries — ordering preserved); shape or
+    /// write failures report loudly on stderr.
+    static func enqueueInputNow(_ stroke: HidStroke, sequenceTag: String) -> Bool {
         guard let device, let queue = device.queue(at: 3) else {
             FileHandle.standardError.write(Data("ERROR: CUSTOM-VIRTIO-INPUT: queue 3 unavailable (device \(device == nil ? "nil" : "present"))\n".utf8))
-            return
+            return true // unrecoverable: do not retry-spin the sequence
         }
         guard let element = queue.nextElement() else {
-            if attempt >= 40 {
-                FileHandle.standardError.write(Data("ERROR: CUSTOM-VIRTIO-INPUT: rx pool empty after 40 retries (\(sequenceTag) \(stroke.label)) — message NOT delivered\n".utf8))
-                return
-            }
-            deviceQueue.asyncAfter(deadline: .now() + 0.25) {
-                enqueueInput(stroke, sequenceTag: sequenceTag, attempt: attempt + 1)
-            }
-            return
+            return false // pool empty: retry THIS stroke, later strokes wait
         }
         let msg = inputMessage(mods: stroke.mods, usage: stroke.usage, isDown: stroke.isDown)
         do {
@@ -3651,26 +3645,42 @@ enum CustomVirtioSpike {
         } catch {
             FileHandle.standardError.write(Data("ERROR: CUSTOM-VIRTIO-INPUT: write FAILED (\(sequenceTag) \(stroke.label)): \(error)\n".utf8))
             element.returnToQueue()
-            return
+            return true
         }
         element.returnToQueue()
         print("CUSTOM-VIRTIO-INPUT: enqueued \(sequenceTag) \(stroke.label) (\(msg.count)-byte message)")
+        return true
     }
 
-    /// Schedule a stroke sequence on the device queue at 0.25 s spacing
-    /// (the pool holds eight buffers; the guest's idle-loop pump replenishes
-    /// within a tick, but pacing keeps the proof deterministic).
+    /// Deliver a stroke sequence in STRICT order on the device queue: the
+    /// next stroke is scheduled only after the previous one was accepted,
+    /// so a pool-empty retry delays the rest of the sequence instead of
+    /// reordering it (observed live, claim 9588: a fixed-schedule burst hit
+    /// a momentarily empty pool and typed 'inpu⏎t' — the guest executed two
+    /// garbled commands). 0.25 s pacing; exhaustion fails LOUDLY, never
+    /// drops silently.
     static func injectStrokes(_ strokes: [HidStroke], sequenceTag: String) {
-        var delay: Double = 0.0
-        for stroke in strokes {
-            let s = stroke
-            deviceQueue.asyncAfter(deadline: .now() + delay) {
-                enqueueInput(s, sequenceTag: sequenceTag)
-            }
-            delay += 0.25
+        deviceQueue.async {
+            deliverStrokes(strokes, sequenceTag: sequenceTag, index: 0, attempts: 0)
         }
-        deviceQueue.asyncAfter(deadline: .now() + delay + 0.05) {
+    }
+
+    private static func deliverStrokes(_ strokes: [HidStroke], sequenceTag: String, index: Int, attempts: Int) {
+        if index >= strokes.count {
             print("CUSTOM-VIRTIO-INPUT: sequence complete tag=\(sequenceTag) n=\(strokes.count) ok=true")
+            return
+        }
+        let stroke = strokes[index]
+        if enqueueInputNow(stroke, sequenceTag: sequenceTag) {
+            deviceQueue.asyncAfter(deadline: .now() + 0.25) {
+                deliverStrokes(strokes, sequenceTag: sequenceTag, index: index + 1, attempts: 0)
+            }
+        } else if attempts < 40 {
+            deviceQueue.asyncAfter(deadline: .now() + 0.25) {
+                deliverStrokes(strokes, sequenceTag: sequenceTag, index: index, attempts: attempts + 1)
+            }
+        } else {
+            FileHandle.standardError.write(Data("ERROR: CUSTOM-VIRTIO-INPUT: rx pool empty after 40 retries (\(sequenceTag) \(stroke.label)) — sequence ABORTED at \(index)/\(strokes.count)\n".utf8))
         }
     }
 
