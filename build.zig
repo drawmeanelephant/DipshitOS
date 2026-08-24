@@ -1054,6 +1054,31 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_ping.step);
 
     // ------------------------------------------------------------------
+    // Guest: thirty-seventh ESP user program (M26 N2 — issue #400) NETSTAT.BIN.
+    // Network dashboard: interface / TCP / UDP / ARP / DHCP / counters,
+    // refreshed at 1 Hz from sys_net_stats (slot 62). Writable BSS
+    // snapshot -> SEGMENTED DSK3 image (the GLOBALS.BIN pattern).
+    // ------------------------------------------------------------------
+    const netstat_prog = b.addExecutable(.{
+        .name = "user-netstat",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/netstat.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    netstat_prog.linker_script = b.path("user/linker-segmented.ld");
+    const netstat_step = b.step("netstat", "Build the thirty-seventh ESP user program (zig-out/bin/NETSTAT.BIN)");
+    const netstat_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py", "--segments" });
+    netstat_elf2bin.addFileArg(netstat_prog.getEmittedBin());
+    const netstat_bin = netstat_elf2bin.addOutputFileArg("NETSTAT.BIN");
+    netstat_elf2bin.has_side_effects = true;
+    netstat_elf2bin.stdio = .inherit;
+    netstat_step.dependOn(&netstat_elf2bin.step);
+    const install_netstat = b.addInstallFileWithDir(netstat_bin, .bin, "NETSTAT.BIN");
+    b.getInstallStep().dependOn(&install_netstat.step);
+
+    // ------------------------------------------------------------------
     // Guest: thirty-fifth ESP user program (M22 D10 — issue #333) RESMON.BIN.
     // Lightweight resource monitor window: shows process count, scheduler
     // state, and uptime via sys_procs (slot 7). Auto-refreshes at 1 Hz.
@@ -1149,6 +1174,7 @@ pub fn build(b: *std.Build) void {
     image.addFileArg(edit_bin); // ... [EDIT.BIN] (M23 E1+E6, issue #507: thirty-fourth user program, the text editor with console split)
     image.addFileArg(resmon_bin); // ... [RESMON.BIN] (M22 D10, issue #333: thirty-fifth user program, resource monitor)
     image.addFileArg(devcons_bin); // ... [DEVCONS.BIN] (M22 D14, issue #337: thirty-sixth user program, developer console)
+    image.addFileArg(netstat_bin); // ... [NETSTAT.BIN] (M26 N2, issue #400: thirty-seventh user program, the network dashboard)
     image.has_side_effects = true;
     image.stdio = .inherit;
     image_step.dependOn(&image.step);

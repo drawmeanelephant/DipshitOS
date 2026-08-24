@@ -3,6 +3,12 @@
 //! Connects over TCP (slot 30), transmits HTTP/1.0 GET request (slot 31),
 //! streams response headers and body to the console (slot 32 + slot 1),
 //! cleanly tears down the connection (slot 33), and exits status 42 (slot 3).
+//!
+//! M26 N3 (issue #401): the terminal display now separates the response
+//! into a "--- response headers ---" section (buffered through the bare
+//! `\r\n\r\n` terminator) and a "--- response body ---" section streamed
+//! as before, with serial markers `fetch: headers` and `fetch: body` for
+//! the class-B gate. The splitter is a pure, host-tested function.
 
 const std = @import("std");
 const ui = @import("lib/ui.zig");
@@ -10,6 +16,21 @@ const ui = @import("lib/ui.zig");
 pub const default_ip: u32 = 0x0a000002; // 10.0.0.2
 pub const default_port: u16 = 80;
 pub const exit_status: u32 = 42;
+pub const header_scratch_max: usize = 1024;
+
+/// M26 N3: find the end of the HTTP header block (the first `\r\n\r\n`).
+/// Returns the index ONE PAST the terminator, or null when not yet present.
+/// Pure — host-tested.
+pub fn header_end(buf: []const u8) ?usize {
+    if (buf.len < 4) return null;
+    var i: usize = 0;
+    while (i + 3 < buf.len) : (i += 1) {
+        if (buf[i] == '\r' and buf[i + 1] == '\n' and buf[i + 2] == '\r' and buf[i + 3] == '\n') {
+            return i + 4;
+        }
+    }
+    return null;
+}
 
 pub export fn _start() callconv(.c) noreturn {
     ui.write_console("fetch: starting\n");
@@ -32,7 +53,12 @@ pub export fn _start() callconv(.c) noreturn {
     }
     ui.write_console("fetch: request sent\n");
 
-    // 3. Receive & stream response
+    // 3. Receive & stream response. M26 N3: buffer the header block
+    // through the bare `\r\n\r\n`, emit it as its own section, then
+    // stream the body as it arrives.
+    var header_buf: [header_scratch_max]u8 = undefined;
+    var header_len: usize = 0;
+    var headers_done = false;
     var rx_buf: [64]u8 = undefined;
     var total_bytes: usize = 0;
     var empty_polls: usize = 0;
@@ -41,8 +67,41 @@ pub export fn _start() callconv(.c) noreturn {
         const n = ui.tcp_recv(&rx_buf);
         if (n > 0) {
             const count = @as(usize, @intCast(n));
-            ui.write_console(rx_buf[0..count]);
-            total_bytes += count;
+            const chunk = rx_buf[0..count];
+
+            if (!headers_done) {
+                // Buffer up to the scratch cap, then the header section is
+                // whatever we have (bounded honesty — never grow past it).
+                const space = header_scratch_max - header_len;
+                const take = @min(space, chunk.len);
+                @memcpy(header_buf[header_len .. header_len + take], chunk[0..take]);
+                header_len += take;
+
+                if (header_end(header_buf[0..header_len])) |end| {
+                    headers_done = true;
+                    ui.write_console("fetch: headers\n");
+                    ui.write_console("--- response headers ---\n");
+                    ui.write_console(header_buf[0..end]);
+                    ui.write_console("--- response body ---\n");
+                    ui.write_console("fetch: body\n");
+                    // Body bytes that already arrived inside this chunk
+                    // (headers + body often share one TCP segment) belong
+                    // to the body section, not the header buffer.
+                    if (header_len > end) {
+                        ui.write_console(header_buf[end..header_len]);
+                        total_bytes += header_len - end;
+                    }
+                } else if (header_len >= header_scratch_max) {
+                    // Oversized header: give up splitting, dump what we have.
+                    headers_done = true;
+                    ui.write_console("fetch: headers-overflow\n");
+                    ui.write_console(header_buf[0..header_len]);
+                    ui.write_console("\nfetch: body\n");
+                }
+            } else {
+                ui.write_console(chunk);
+                total_bytes += count;
+            }
             empty_polls = 0;
         } else if (n == 0) {
             empty_polls += 1;
@@ -63,4 +122,26 @@ pub export fn _start() callconv(.c) noreturn {
 
     // 5. Exit with milestone proof status 42
     ui.exit_process(exit_status);
+}
+
+test "fetch: header_end finds the bare CRLFCRLF terminator" {
+    const hdr = "HTTP/1.0 200 OK\r\nContent-Length: 5\r\n\r\nhello";
+    try std.testing.expectEqual(@as(?usize, 38), header_end(hdr));
+    const cut = header_end(hdr).?;
+    try std.testing.expectEqualStrings("HTTP/1.0 200 OK\r\nContent-Length: 5\r\n\r\n", hdr[0..cut]);
+}
+
+test "fetch: header_end null before the terminator" {
+    try std.testing.expect(header_end("HTTP/1.0 200 OK\r\n") == null);
+    try std.testing.expect(header_end("HTTP") == null);
+    try std.testing.expect(header_end("") == null);
+}
+
+test "fetch: header_end handles bare LF and windowed searches" {
+    // A terminator split across two 64-byte recv chunks still matches
+    // because the search runs over the accumulated buffer.
+    const early = "HTTP/1.0 200 OK\r\nContent-Length: 5\r\n\r";
+    try std.testing.expect(header_end(early) == null);
+    const full = early ++ "\nbody";
+    try std.testing.expectEqual(@as(?usize, 38), header_end(full));
 }

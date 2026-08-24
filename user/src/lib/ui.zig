@@ -580,6 +580,7 @@ pub fn tcp_close() i64 {
 
 pub const sys_ping_send_num: u64 = 59;
 pub const sys_ping_poll_num: u64 = 60;
+pub const sys_net_stats_num: u64 = 62;
 
 pub fn ping_send(ip: u32) i64 {
     return syscall1(sys_ping_send_num, ip);

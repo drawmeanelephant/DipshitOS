@@ -15,7 +15,8 @@
   fixes (PR #541, stacked lineage — this branch is cut from it, so the
   ESP wiring for APP binaries exists here too).
 - **Heartbeat:** 2026-08-24
-- **Status:** 🔄 in progress
+- **Status:** ✅ done — 428/428 kernel tests + all userland tests pass,
+  both class-B live gates green (see log)
 
 ## Notes
 
