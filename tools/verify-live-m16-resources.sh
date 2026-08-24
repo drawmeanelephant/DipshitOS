@@ -13,15 +13,26 @@
 # measurement via the new `resources` command, which prints every bounded
 # pool's live occupancy vs its bound.
 #
-# Script (forwarded after the boot payload exits + is reaped):
-#   resources | ls | exec COUNTER.BIN | exec USER.BIN x7 | procs
-#     | resources | exec USER.BIN (ninth) | echo rx-resources-ok
+# Script (forwarded after the boot payload exits + is reaped) — REPAIR
+# NOTE (2026-08-24, claim 2259): the fillers are COUNTER.BIN x8, not
+# USER.BIN x7+1. USER.BIN has ALWAYS self-exited status=43 after one
+# yield+sleep (e3f11be, 2026-08-10, milestone-three blocking-syscall
+# lane), so the original fill was a race: on this host today one USER.BIN
+# was reaped before the procs snapshot (seven running, not eight) and its
+# freed slot let the NINTH exec succeed. COUNTER.BIN never exits (the
+# same program this gate already trusts as the survivor), which makes
+# grow/refuse/bounded deterministic without weakening the card's
+# phenomenon.
 #
+#   resources | ls | exec COUNTER.BIN x8 | procs
+#     | resources | exec COUNTER.BIN (ninth) | echo rx-resources-ok
+#
+
 # All asserted in vm-serial.log:
 #   1. The BEFORE `resources` read shows the baseline: tasks<=5 (shell +
 #      worker + idle + at most the boot zombie) and procs<=1.
-#   2. COUNTER.BIN loads once and USER.BIN loads SEVEN times (8 live
-#      programs — "more concurrent applications than today's pool allows").
+#   2. COUNTER.BIN loads EIGHT times (8 live programs — "more concurrent
+#      applications than today's pool allows").
 #   3. The procs snapshot shows EIGHT running user processes with EIGHT
 #      distinct executor task ids + stack VAs.
 #   4. The AFTER `resources` read pins the grown accounting: tasks=11/11
@@ -35,6 +46,12 @@
 #   7. The counter stays running; the shell stays responsive; no exception
 #      park.
 #
+# Run isolation (#523 item 2 / issue #528; fleet remainder claim 2259):
+# private stacked disk (pristine-per-boot overlay), EFI var store, serial
+# log, and scripts under $RUN_DIR per boot. Set DIPSHIT_GATE_SUFFIX=_alt
+# for distinct canonical evidence names; DIPSHIT_KEEP_RUN=1 keeps the
+# scratch dir.
+#
 # Evidence saved under artifacts/: live-m16-resources-gate.txt,
 # live-m16-resources-report.txt, live-m16-resources-run-<NN>.txt,
 # live-m16-resources-serial-<NN>.log.
@@ -44,13 +61,17 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-GATE_LOG="artifacts/live-m16-resources-gate.txt"
+source tools/lib/gate-run.sh
+
+SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
+
+GATE_LOG="$(art live-m16-resources-gate.txt)"
 exec > >(tee "$GATE_LOG") 2>&1
-trap 'sleep 0.5' EXIT
+trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
 
 BOOTS="${BOOTS:-1}"
-REPORT="artifacts/live-m16-resources-report.txt"
-SCRIPT="artifacts/live-m16-resources-script.txt"
+REPORT="$(art live-m16-resources-report.txt)"
 STATIC_EXIT_LINE="tasks user-el0 exited status=7"
 POOL_FULL_LINE="error: no free scheduler pool slot"
 
@@ -69,36 +90,43 @@ zig build image
 swift build --package-path host/vm-runner --configuration release
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
+# --- per-run isolation -------------------------------------------------------
+gate_begin live-m16-resources
+echo "run dir: $RUN_DIR"
+
+SCRIPT="$RUN_DIR/script.txt"
+
 # BEFORE accounting -> fill the pool to 8 -> procs snapshot -> AFTER
 # accounting -> ninth exec (pool_full) -> shell check.
-printf 'resources\nls\nexec COUNTER.BIN\nexec USER.BIN\nexec USER.BIN\nexec USER.BIN\nexec USER.BIN\nexec USER.BIN\nexec USER.BIN\nexec USER.BIN\nprocs\nresources\nexec USER.BIN\necho rx-resources-ok\n' > "$SCRIPT"
+printf 'resources\nls\nexec COUNTER.BIN\nexec COUNTER.BIN\nexec COUNTER.BIN\nexec COUNTER.BIN\nexec COUNTER.BIN\nexec COUNTER.BIN\nexec COUNTER.BIN\nexec COUNTER.BIN\nprocs\nresources\nexec COUNTER.BIN\necho rx-resources-ok\n' > "$SCRIPT"
 
 run_one() {
     local tag="$1"
-    local run_log="artifacts/live-m16-resources-run-$tag.txt"
-    local serial_copy="artifacts/live-m16-resources-serial-$tag.log"
-    rm -f artifacts/efi-vars.bin artifacts/vm-serial.log
+    local run_log="$(art live-m16-resources-run-$tag.txt)"
+    local serial_copy="$(art live-m16-resources-serial-$tag.log)"
+    rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial.log"
 
     set +e
-    host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log \
+    host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
+        --serial "$RUN_DIR/vm-serial.log" \
         --script "$SCRIPT" --script-after "$STATIC_EXIT_LINE" \
         --timeout 60 > "$run_log" 2>&1
     local rc=$?
     set -e
-    [ -f artifacts/vm-serial.log ] && cp artifacts/vm-serial.log "$serial_copy" || true
+    [ -f "$RUN_DIR/vm-serial.log" ] && cp "$RUN_DIR/vm-serial.log" "$serial_copy" || true
 
     local bytes=0 banner=0 resources_before=0 resources_after=0 \
         baseline_tasks=0 loaded_counter=0 loaded_user=0 eight_running=0 \
         distinct_tasks=0 distinct_stacks=0 pool_full=0 counter_running=0 \
         bounded_left=0 echo_ok=0 fatal=0
-    if [ -f artifacts/vm-serial.log ]; then
-        bytes="$(wc -c < artifacts/vm-serial.log | tr -d ' ')"
-        [ "$(grep -aFxc -- "DipshitOS kernel has seized control." artifacts/vm-serial.log || true)" = 1 ] && banner=1
+    if [ -f "$serial_copy" ]; then
+        bytes="$(wc -c < "$serial_copy" | tr -d ' ')"
+        [ "$(grep -aFxc -- "DipshitOS kernel has seized control." "$serial_copy" || true)" = 1 ] && banner=1
 
         # 1. The BEFORE `resources` read: the baseline before filling (the
         # first resources line in the log).
         local before_line
-        before_line="$(grep -aF -- "resources: tasks=" artifacts/vm-serial.log | head -1 || true)"
+        before_line="$(grep -aF -- "resources: tasks=" "$serial_copy" | head -1 || true)"
         if [ -n "$before_line" ]; then
             resources_before=1
             local bt
@@ -106,13 +134,15 @@ run_one() {
             [ -n "$bt" ] && [ "$bt" -le 5 ] && baseline_tasks=1 || true
         fi
 
-        # 2. Loads: one counter + seven USER.BINs.
-        loaded_counter="$(grep -aFc -- "exec: loaded COUNTER.BIN size=" artifacts/vm-serial.log || true)"
-        loaded_user="$(grep -aFc -- "exec: loaded USER.BIN size=" artifacts/vm-serial.log || true)"
+        # 2. Loads: EIGHT counter instances (the non-exiting filler).
+        #    Any USER.BIN load would be a walk regression (it must not be
+        #    typed at all anymore), so assert zero.
+        loaded_counter="$(grep -aFc -- "exec: loaded COUNTER.BIN size=" "$serial_copy" || true)"
+        loaded_user="$(grep -aFc -- "exec: loaded USER.BIN size=" "$serial_copy" || true)"
 
-        # 3. EIGHT running user processes with distinct tasks + stacks.
+        # 3. EIGHT running processes with distinct tasks + stacks.
         local rows
-        rows="$(grep -aE -- "procs: id=[0-9]+ name=(COUNTER.BIN|USER.BIN) state=running" artifacts/vm-serial.log || true)"
+        rows="$(grep -aE -- "procs: id=[0-9]+ name=COUNTER.BIN state=running" "$serial_copy" || true)"
         if [ -n "$rows" ]; then
             local running_rows n_tasks n_stacks
             running_rows="$(printf '%s\n' "$rows" | wc -l | tr -d ' ')"
@@ -126,35 +156,41 @@ run_one() {
         # 4. The AFTER `resources` read: tasks=11/11 (shell + worker + idle
         # + 8 users) and procs=9/16 (boot exited + 8 running).
         local after_line
-        after_line="$(grep -aF -- "resources: tasks=" artifacts/vm-serial.log | tail -1 || true)"
+        after_line="$(grep -aF -- "resources: tasks=" "$serial_copy" | tail -1 || true)"
         if [ -n "$after_line" ] && printf '%s\n' "$after_line" | grep -qF -- "resources: tasks=11/11"; then
             resources_after=1
         fi
-        grep -a -qF -- "resources: procs=9/16" artifacts/vm-serial.log && resources_after=1 || true
+        grep -a -qF -- "resources: procs=9/16" "$serial_copy" && resources_after=1 || true
 
         # 5. The NINTH exec is refused.
-        [ "$(grep -aFc -- "$POOL_FULL_LINE" artifacts/vm-serial.log || true)" -ge 1 ] && pool_full=1 || true
+        [ "$(grep -aFc -- "$POOL_FULL_LINE" "$serial_copy" || true)" -ge 1 ] && pool_full=1 || true
 
         # 6. The audit's "left bounded" record: the pools NOT grown still
         # print their bounds (windows=N/8 on its own line, then the
         # per-process ring bounds events=16 mbox=8 fds=8 timers=1 tcp=1).
-        if grep -a -qE -- "resources: windows=[0-9]+/8" artifacts/vm-serial.log && \
-           grep -a -qF -- "resources: events=16 mbox=8 fds=8 timers=1 tcp=1" artifacts/vm-serial.log; then
+        #    OBSERVED BYTES (2026-08-24, claim 2259): the window bound is
+        #    9 today, not 8 — M15 C4's desktop dock added Kind.dock 253 as
+        #    a ninth window (6c8b5b3, 2026-08-20); and arc5 added the
+        #    `tables=` MMU row between windows and events (5672654,
+        #    2026-08-21).
+        if grep -a -qE -- "resources: windows=[0-9]+/9" "$serial_copy" && \
+           grep -a -qE -- "resources: tables=[0-9]+/512" "$serial_copy" && \
+           grep -a -qF -- "resources: events=16 mbox=8 fds=8 timers=1 tcp=1" "$serial_copy"; then
             bounded_left=1
         fi
 
         # 7. The counter stays running; shell responsive; no park.
         local last_counter_row
-        last_counter_row="$(grep -aE -- "procs: id=[0-9]+ name=COUNTER.BIN" artifacts/vm-serial.log | tail -1 || true)"
+        last_counter_row="$(grep -aE -- "procs: id=[0-9]+ name=COUNTER.BIN" "$serial_copy" | tail -1 || true)"
         if [ -n "$last_counter_row" ]; then
             printf '%s\n' "$last_counter_row" | grep -qF -- "state=running" && counter_running=1
         fi
-        [ "$(grep -aFxc -- "rx-resources-ok" artifacts/vm-serial.log || true)" = 1 ] && echo_ok=1
-        grep -qF -- "[EXC] parking:" artifacts/vm-serial.log && fatal=1 || true
+        [ "$(grep -aFxc -- "rx-resources-ok" "$serial_copy" || true)" = 1 ] && echo_ok=1
+        grep -qF -- "[EXC] parking:" "$serial_copy" && fatal=1 || true
     fi
     echo "$tag: runner-rc=$rc serial-bytes=$bytes banner=$banner resources-before=$resources_before baseline-tasks=$baseline_tasks loaded-counter=$loaded_counter loaded-user=$loaded_user eight-running=$eight_running tasks-distinct=$distinct_tasks stacks-distinct=$distinct_stacks resources-after=$resources_after pool-full=$pool_full bounded-left=$bounded_left counter-running=$counter_running echo=$echo_ok fatal=$fatal" | tee -a "$REPORT"
     [ "$rc" = 0 ] && [ "$banner" = 1 ] && [ "$resources_before" = 1 ] && \
-        [ "$baseline_tasks" = 1 ] && [ "$loaded_counter" = 1 ] && [ "$loaded_user" = 7 ] && \
+        [ "$baseline_tasks" = 1 ] && [ "$loaded_counter" = 8 ] && [ "$loaded_user" = 0 ] && \
         [ "$eight_running" = 1 ] && [ "$distinct_tasks" = 1 ] && [ "$distinct_stacks" = 1 ] && \
         [ "$resources_after" = 1 ] && [ "$pool_full" = 1 ] && [ "$bounded_left" = 1 ] && \
         [ "$counter_running" = 1 ] && [ "$echo_ok" = 1 ] && [ "$fatal" = 0 ]

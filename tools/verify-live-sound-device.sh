@@ -39,11 +39,22 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-GATE_LOG="artifacts/live-sound-gate.txt"
-exec > >(tee "$GATE_LOG") 2>&1
-trap 'sleep 0.5' EXIT
+source tools/lib/gate-run.sh
 
-REPORT="artifacts/live-sound-report.txt"
+SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
+
+# Run isolation (#523 item 2 / issue #528; fleet remainder claim 2259):
+# private stacked disk (pristine-per-boot overlay), EFI var store, serial
+# log, and scripts under $RUN_DIR per boot. Set DIPSHIT_GATE_SUFFIX=_alt
+# for distinct canonical evidence names; DIPSHIT_KEEP_RUN=1 keeps the
+# scratch dir.
+
+GATE_LOG="$(art live-sound-gate.txt)"
+exec > >(tee "$GATE_LOG") 2>&1
+trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
+
+REPORT="$(art live-sound-report.txt)"
 
 echo "=== verify-live-sound-device: claim 6140 — M15 A1 virtio-snd transport on VZ ==="
 
@@ -53,7 +64,8 @@ export PATH
 zig version; swift --version 2>&1 | head -1; sw_vers
 REVISION="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
 BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
-echo "revision: $REVISION branch=$BRANCH"
+DIRTY="$(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
+echo "revision: $REVISION branch=$BRANCH dirty-files=$DIRTY"
 
 # Build all binaries and disk image
 zig build
@@ -61,37 +73,42 @@ zig build image
 swift build --package-path host/vm-runner --configuration release
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
+# --- per-run isolation -------------------------------------------------------
+gate_begin live-sound
+echo "run dir: $RUN_DIR"
+
 # The script: at the prompt, run the `sound` transport report.
-cat > artifacts/live-sound-script.txt <<'EOF'
+cat > "$RUN_DIR/script.txt" <<'EOF'
 sound
 EOF
 
 echo "--- Phase 1: Running the A1 sound transport on VZ (--sound) ---"
-rm -f artifacts/efi-vars.bin
-rm -f artifacts/vm-serial.log
+rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial.log"
 
 set +e
-host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log \
+host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
+    --serial "$RUN_DIR/vm-serial.log" \
     --sound \
-    --script artifacts/live-sound-script.txt \
+    --script "$RUN_DIR/script.txt" \
     --script-expect "sound: cfg=" \
-    --timeout 90 > artifacts/live-sound-run.txt 2>&1
+    --timeout 90 > "$(art live-sound-run.txt)" 2>&1
 RC=$?
 set -e
 
-[ -f artifacts/vm-serial.log ] && cp artifacts/vm-serial.log artifacts/live-sound-serial.log || true
+[ -f "$RUN_DIR/vm-serial.log" ] && cp "$RUN_DIR/vm-serial.log" "$(art live-sound-serial.log)" || true
+SER="$(art live-sound-serial.log)"
 
 echo "VMRunner exit code: $RC"
 if [ $RC -ne 0 ]; then
     echo "ERROR: VMRunner failed with return code $RC"
-    cat artifacts/live-sound-run.txt
+    cat "$(art live-sound-run.txt)"
     exit 1
 fi
 
 echo "--- Phase 2: Verifying the transport markers ---"
 
 # Host side: the --sound attach actually happened.
-grep -q "SOUND: virtio-snd attached" artifacts/live-sound-run.txt || {
+grep -q "SOUND: virtio-snd attached" "$(art live-sound-run.txt)" || {
     echo "ERROR: runner did not report the --sound attach"
     exit 1
 }
@@ -99,45 +116,45 @@ echo "SOUND.ATTACH: OK"
 
 # Guest side: pre-rearm + rearm evidence (the transport survives the MMU
 # switch; st=0x0f pre-rearm = NOT reset by VZ, recorded).
-grep -q "snd: pre-rearm st=0f" artifacts/live-sound-serial.log || {
+grep -q "snd: pre-rearm st=0f" "$SER" || {
     echo "ERROR: pre-rearm status line missing (expected st=0f — sound is not reset by VZ)"
     exit 1
 }
 echo "SND.PRE_REARM: OK (st=0x0f — not reset by VZ, like net/gpu)"
 
-grep -q "snd: rearm ok st=0f" artifacts/live-sound-serial.log || {
+grep -q "snd: rearm ok st=0f" "$SER" || {
     echo "ERROR: rearm did not reach DRIVER_OK (st=0x0f)"
     exit 1
 }
 echo "SND.REARM: OK"
 
 # DID: the claim-time observation. A differing DID is a FINDING.
-grep -q "did=0x0000000000001059" artifacts/live-sound-serial.log || {
+grep -q "did=0x0000000000001059" "$SER" || {
     echo "ERROR: DID is not 0x1059 — a FINDING: record the observed DID as the hardware truth"
     exit 1
 }
 echo "SND.DID: OK (0x1059 — 0x1040+25 prediction held)"
 
-grep -q "cls=0x0000000000040100" artifacts/live-sound-serial.log || {
+grep -q "cls=0x0000000000040100" "$SER" || {
     echo "ERROR: PCI class is not 0x040100 (audio)"
     exit 1
 }
 echo "SND.CLASS: OK (0x040100 audio)"
 
-grep -q "st=0x000000000000000f" artifacts/live-sound-serial.log || {
+grep -q "st=0x000000000000000f" "$SER" || {
     echo "ERROR: device status is not DRIVER_OK (0x0f)"
     exit 1
 }
 echo "SND.STATUS: OK (DRIVER_OK)"
 
-grep -q "qsz=0x0000000000000004" artifacts/live-sound-serial.log || {
+grep -q "qsz=0x0000000000000004" "$SER" || {
     echo "ERROR: control queue size is not 4"
     exit 1
 }
 echo "SND.QUEUE: OK (control queue armed, qsz=4)"
 
 # The honest config-count record: VZ reports 0/0/0 (finding recorded).
-grep -q "sound: cfg=jacks=0 streams=0 chmaps=0" artifacts/live-sound-serial.log || {
+grep -q "sound: cfg=jacks=0 streams=0 chmaps=0" "$SER" || {
     echo "ERROR: the device-config counts line is missing"
     exit 1
 }
@@ -147,13 +164,14 @@ echo ""
 echo "=== A1 sound transport gate PASSED on VZ ==="
 {
     echo "verify-live-sound-device.sh — claim 6140 (M15 A1) — PASSED"
-    echo "revision: $REVISION branch=$BRANCH"
+    DIRTY="$(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
+echo "revision: $REVISION branch=$BRANCH dirty-files=$DIRTY"
     echo "date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo ""
     echo "--- guest serial evidence ---"
-    grep -aE "^snd:|^sound:" artifacts/live-sound-serial.log
+    grep -aE "^snd:|^sound:" $SER
     echo ""
     echo "--- host evidence ---"
-    grep -a "SOUND:" artifacts/live-sound-run.txt
+    grep -a "SOUND:" $(art live-sound-run.txt)
 } > "$REPORT"
 cat "$REPORT"

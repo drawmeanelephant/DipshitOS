@@ -33,6 +33,12 @@
 #   Phase 3 (after GUARD exits, +2 s settle):  exec USER.BIN x7 + resources
 #                                              + procs + echo
 #
+# Run isolation (#523 item 2 / issue #528; fleet remainder claim 2259):
+# private stacked disk (pristine-per-boot overlay), EFI var store, serial
+# log, and scripts under $RUN_DIR per boot. Set DIPSHIT_GATE_SUFFIX=_alt
+# for distinct canonical evidence names; DIPSHIT_KEEP_RUN=1 keeps the
+# scratch dir.
+#
 # Evidence saved under artifacts/: live-m16-composition-gate.txt,
 # live-m16-composition-report.txt, live-m16-composition-run-<NN>.txt,
 # live-m16-composition-serial-<NN>.log.
@@ -42,15 +48,17 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-GATE_LOG="artifacts/live-m16-composition-gate.txt"
+source tools/lib/gate-run.sh
+
+SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
+
+GATE_LOG="$(art live-m16-composition-gate.txt)"
 exec > >(tee "$GATE_LOG") 2>&1
-trap 'sleep 0.5' EXIT
+trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
 
 BOOTS="${BOOTS:-1}"
-REPORT="artifacts/live-m16-composition-report.txt"
-SCRIPT1="artifacts/live-m16-composition-script1.txt"
-SCRIPT2="artifacts/live-m16-composition-script2.txt"
-SCRIPT3="artifacts/live-m16-composition-script3.txt"
+REPORT="$(art live-m16-composition-report.txt)"
 
 # The static boot payload's exit line: phase 1 is forwarded only after it
 # appears, so the boot payload's slot is free when GLOBALS.BIN execs.
@@ -80,6 +88,14 @@ zig build image
 swift build --package-path host/vm-runner --configuration release
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
+# --- per-run isolation -------------------------------------------------------
+gate_begin live-m16-composition
+echo "run dir: $RUN_DIR"
+
+SCRIPT1="$RUN_DIR/script1.txt"
+SCRIPT2="$RUN_DIR/script2.txt"
+SCRIPT3="$RUN_DIR/script3.txt"
+
 # Phase 1: the C1 proof — the segmented image with writable globals.
 printf 'exec GLOBALS.BIN\n' > "$SCRIPT1"
 # Phase 2: the C2 proof — the hostile guard-page program beside a persistent
@@ -91,12 +107,13 @@ printf 'exec USER.BIN\nexec USER.BIN\nexec USER.BIN\nexec USER.BIN\nexec USER.BI
 
 run_one() {
     local tag="$1"
-    local run_log="artifacts/live-m16-composition-run-$tag.txt"
-    local serial_copy="artifacts/live-m16-composition-serial-$tag.log"
-    rm -f artifacts/efi-vars.bin artifacts/vm-serial.log
+    local run_log="$(art live-m16-composition-run-$tag.txt)"
+    local serial_copy="$(art live-m16-composition-serial-$tag.log)"
+    rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial.log"
 
     set +e
-    host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log \
+    host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
+        --serial "$RUN_DIR/vm-serial.log" \
         --script "$SCRIPT1" --script-after "$STATIC_EXIT_LINE" \
         --script2 "$SCRIPT2" --script2-after "$GLOBALS_REAP_LINE" \
         --script3 "$SCRIPT3" --script3-after "$GUARD_EXIT_LINE" --script3-delay 2 \
@@ -104,39 +121,39 @@ run_one() {
         --timeout 120 > "$run_log" 2>&1
     local rc=$?
     set -e
-    [ -f artifacts/vm-serial.log ] && cp artifacts/vm-serial.log "$serial_copy" || true
+    [ -f "$RUN_DIR/vm-serial.log" ] && cp "$RUN_DIR/vm-serial.log" "$serial_copy" || true
 
     local bytes=0 banner=0 globals_loaded=0 globals_data=0 globals_ok=0 \
         globals_exit=0 guard_alive=0 guard_fault=0 guard_exit=0 counter_alive=0 \
         counter_loaded=0 user_loaded=0 eight_running=0 distinct_tasks=0 \
         distinct_stacks=0 tasks_full=0 procs_full=0 tables_grown=0 globals_row=0 \
         guard_row=0 echo_ok=0 fatal=0
-    if [ -f artifacts/vm-serial.log ]; then
-        bytes="$(wc -c < artifacts/vm-serial.log | tr -d ' ')"
-        [ "$(grep -aFxc -- "DipshitOS kernel has seized control." artifacts/vm-serial.log || true)" = 1 ] && banner=1
+    if [ -f "$serial_copy" ]; then
+        bytes="$(wc -c < "$serial_copy" | tr -d ' ')"
+        [ "$(grep -aFxc -- "DipshitOS kernel has seized control." "$serial_copy" || true)" = 1 ] && banner=1
 
         # C1: the bigger app with real globals — 28 KiB image (past the old
         # 16 KiB bound), exact data-page accounting, the success marker, exit 42.
-        [ "$(grep -aFc -- "exec: loaded GLOBALS.BIN size=0x0000000000007000" artifacts/vm-serial.log || true)" = 1 ] && globals_loaded=1
-        grep -a -qF -- "data=0x0000000000001010 datapages=2" artifacts/vm-serial.log && globals_data=1
+        [ "$(grep -aFc -- "exec: loaded GLOBALS.BIN size=0x0000000000007000" "$serial_copy" || true)" = 1 ] && globals_loaded=1
+        grep -a -qF -- "data=0x0000000000001010 datapages=2" "$serial_copy" && globals_data=1
         # Substring match (the marker can land right after the "dipshit> "
         # prompt on the same serial line).
-        [ "$(grep -aFc -- "globals: data bss ok" artifacts/vm-serial.log || true)" -ge 1 ] && globals_ok=1
-        grep -a -qE -- "procs: id=[0-9]+ name=GLOBALS.BIN state=exited .*exit=42" artifacts/vm-serial.log && globals_exit=1
+        [ "$(grep -aFc -- "globals: data bss ok" "$serial_copy" || true)" -ge 1 ] && globals_ok=1
+        grep -a -qE -- "procs: id=[0-9]+ name=GLOBALS.BIN state=exited .*exit=42" "$serial_copy" && globals_exit=1
 
         # C2: the hostile program faulted (EC 0x24) and was reaped 139; the
         # benign neighbor actually ran.
-        [ "$(grep -aFc -- "guard: stepping off" artifacts/vm-serial.log || true)" -ge 1 ] && guard_alive=1
-        grep -a -qE -- "fault: GUARD.BIN far=0x[0-9a-f]+ ec=0x24" artifacts/vm-serial.log && guard_fault=1
-        grep -a -qE -- "procs: id=[0-9]+ name=GUARD.BIN state=exited .*exit=139" artifacts/vm-serial.log && guard_exit=1
-        [ "$(grep -aFc -- "counter: alive" artifacts/vm-serial.log || true)" -ge 1 ] && counter_alive=1
+        [ "$(grep -aFc -- "guard: stepping off" "$serial_copy" || true)" -ge 1 ] && guard_alive=1
+        grep -a -qE -- "fault: GUARD.BIN far=0x[0-9a-f]+ ec=0x24" "$serial_copy" && guard_fault=1
+        grep -a -qE -- "procs: id=[0-9]+ name=GUARD.BIN state=exited .*exit=139" "$serial_copy" && guard_exit=1
+        [ "$(grep -aFc -- "counter: alive" "$serial_copy" || true)" -ge 1 ] && counter_alive=1
 
         # C3: the grown pool — one counter + seven USER.BINs = EIGHT live
         # user programs; the pool accounting pins the grown budget.
-        counter_loaded="$(grep -aFc -- "exec: loaded COUNTER.BIN size=" artifacts/vm-serial.log || true)"
-        user_loaded="$(grep -aFc -- "exec: loaded USER.BIN size=" artifacts/vm-serial.log || true)"
+        counter_loaded="$(grep -aFc -- "exec: loaded COUNTER.BIN size=" "$serial_copy" || true)"
+        user_loaded="$(grep -aFc -- "exec: loaded USER.BIN size=" "$serial_copy" || true)"
         local rows
-        rows="$(grep -aE -- "procs: id=[0-9]+ name=(COUNTER.BIN|USER.BIN) state=running" artifacts/vm-serial.log || true)"
+        rows="$(grep -aE -- "procs: id=[0-9]+ name=(COUNTER.BIN|USER.BIN) state=running" "$serial_copy" || true)"
         if [ -n "$rows" ]; then
             local running_rows n_tasks n_stacks
             running_rows="$(printf '%s\n' "$rows" | wc -l | tr -d ' ')"
@@ -149,20 +166,20 @@ run_one() {
         # The grown pool is fully occupied by the eight live users, no
         # zombies remain (both transients reaped), and the process registry
         # holds boot + globals + guard + counter + seven users = 11.
-        grep -a -qF -- "resources: tasks=11/11 zombies=0" artifacts/vm-serial.log && tasks_full=1
-        grep -a -qF -- "resources: procs=11/16" artifacts/vm-serial.log && procs_full=1
+        grep -a -qF -- "resources: tasks=11/11 zombies=0" "$serial_copy" && tasks_full=1
+        grep -a -qF -- "resources: procs=11/16" "$serial_copy" && procs_full=1
         # The page-table carve-out grew 256 → 512 to fit this composition
         # (the big app + hostile app + eight concurrent roots total 282 pages
         # — the OLD 256-page carve-out refused the last two USER.BINs with
         # table_full). The audit pins the grown capacity.
-        grep -a -qE -- "resources: tables=[0-9]+/512" artifacts/vm-serial.log && tables_grown=1
+        grep -a -qE -- "resources: tables=[0-9]+/512" "$serial_copy" && tables_grown=1
         # The two transient programs' rows survive in the process table
         # beside the running eight.
-        grep -a -qE -- "procs: id=[0-9]+ name=GLOBALS.BIN state=exited" artifacts/vm-serial.log && globals_row=1
-        grep -a -qE -- "procs: id=[0-9]+ name=GUARD.BIN state=exited" artifacts/vm-serial.log && guard_row=1
+        grep -a -qE -- "procs: id=[0-9]+ name=GLOBALS.BIN state=exited" "$serial_copy" && globals_row=1
+        grep -a -qE -- "procs: id=[0-9]+ name=GUARD.BIN state=exited" "$serial_copy" && guard_row=1
 
-        [ "$(grep -aFxc -- "m16-composition-live-ok" artifacts/vm-serial.log || true)" = 1 ] && echo_ok=1
-        grep -qF -- "[EXC] parking:" artifacts/vm-serial.log && fatal=1 || true
+        [ "$(grep -aFxc -- "m16-composition-live-ok" "$serial_copy" || true)" = 1 ] && echo_ok=1
+        grep -qF -- "[EXC] parking:" "$serial_copy" && fatal=1 || true
     fi
     echo "$tag: runner-rc=$rc serial-bytes=$bytes banner=$banner globals-loaded=$globals_loaded globals-data=$globals_data globals-ok=$globals_ok globals-exit=$globals_exit guard-alive=$guard_alive guard-fault=$guard_fault guard-exit=$guard_exit counter-alive=$counter_alive counter-loaded=$counter_loaded user-loaded=$user_loaded eight-running=$eight_running tasks-distinct=$distinct_tasks stacks-distinct=$distinct_stacks tasks-full=$tasks_full procs-full=$procs_full tables-grown=$tables_grown globals-row=$globals_row guard-row=$guard_row echo=$echo_ok fatal=$fatal" | tee -a "$REPORT"
     [ "$rc" = 0 ] && [ "$banner" = 1 ] && [ "$globals_loaded" = 1 ] && \

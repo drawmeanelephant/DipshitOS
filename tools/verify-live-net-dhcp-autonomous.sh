@@ -66,11 +66,24 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-GATE_LOG="artifacts/live-net-dhcp-autonomous-gate.txt"
-exec > >(tee "$GATE_LOG") 2>&1
-trap 'sleep 0.5' EXIT
+source tools/lib/gate-run.sh
 
-REPORT="artifacts/live-net-dhcp-autonomous-report.txt"
+SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
+
+# Run isolation (#523 item 2 / issue #528; fleet remainder claim 2259):
+# private stacked disk (pristine-per-boot overlay), EFI var store, serial
+# log, capture, and scripts under $RUN_DIR. Expectation note (#528 rot
+# class 1, claim 2259): the historical $'...ndipshit> ' script-expect
+# died with M18 T5's ANSI-colored prompt (claim 0163); the run anchors on
+# the OUTPUT-ONLY done echo. Set DIPSHIT_GATE_SUFFIX=_alt for distinct
+# canonical evidence names; DIPSHIT_KEEP_RUN=1 keeps the scratch dir.
+
+GATE_LOG="$(art live-net-dhcp-autonomous-gate.txt)"
+exec > >(tee "$GATE_LOG") 2>&1
+trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
+
+REPORT="$(art live-net-dhcp-autonomous-report.txt)"
 
 echo "=== verify-live-net-dhcp-autonomous: issue #119 — the DHCP lease lifecycle advances from the idle loop (T1 renew + T2 escalation with NO typed net dhcp), live on VZ ==="
 
@@ -87,9 +100,13 @@ zig build image
 swift build --package-path host/vm-runner --configuration release
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
+# --- per-run isolation -------------------------------------------------------
+gate_begin live-net-dhcp-autonomous
+echo "run dir: $RUN_DIR"
+
 # --- scripted sessions ------------------------------------------------------
 # Phase 1: bind + resolve the server MAC (the renewing unicast needs it).
-cat > artifacts/live-net-dhcp-autonomous-1.txt <<'EOF'
+cat > "$RUN_DIR/p1.txt" <<'EOF'
 net dhcp
 net dhcp
 net dhcp
@@ -107,34 +124,35 @@ echo dhcp-auto-phase1-ready
 EOF
 # Phase 2 (delay 92 — past T2=87): NO net dhcp — only a marker + a `net`
 # REPORT (a report cannot advance the lifecycle).
-cat > artifacts/live-net-dhcp-autonomous-2.txt <<'EOF'
+cat > "$RUN_DIR/p2.txt" <<'EOF'
 echo dhcp-auto-p2
 net
 echo dhcp-auto-done
 EOF
 
 # The premise self-check: the phase-2 script types no `net dhcp`.
-if grep -q "net dhcp" artifacts/live-net-dhcp-autonomous-2.txt; then
+if grep -q "net dhcp" "$RUN_DIR/p2.txt"; then
     echo "verify-live-net-dhcp-autonomous: FAILED — the phase-2 script contains 'net dhcp' (the gate must prove autonomy with NO typed lifecycle command)."
     exit 1
 fi
 
-rm -f artifacts/efi-vars.bin artifacts/vm-serial.log artifacts/live-net-dhcp-autonomous-cap.bin
+rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial.log" "$RUN_DIR/cap.bin"
 set +e
-host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log \
-    --net artifacts/live-net-dhcp-autonomous-cap.bin \
+host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
+    --serial "$RUN_DIR/vm-serial.log" \
+    --net "$RUN_DIR/cap.bin" \
     --net-dhcp-respond 10.0.0.2:100 --net-arp-respond 10.0.0.2 \
     --net-dhcp-respond-norenew \
-    --script artifacts/live-net-dhcp-autonomous-1.txt \
-    --script2 artifacts/live-net-dhcp-autonomous-2.txt --script2-after "dhcp-auto-phase1-ready" --script2-delay 92 \
-    --script-expect $'dhcp-auto-done\ndipshit> ' --timeout 220 \
-    > artifacts/live-net-dhcp-autonomous-run.txt 2>&1
+    --script "$RUN_DIR/p1.txt" \
+    --script2 "$RUN_DIR/p2.txt" --script2-after "dhcp-auto-phase1-ready" --script2-delay 92 \
+    --script-expect 'dhcp-auto-done' --timeout 220 \
+    > "$(art live-net-dhcp-autonomous-run.txt)" 2>&1
 RC=$?
 set -e
-[ -f artifacts/vm-serial.log ] && cp artifacts/vm-serial.log artifacts/live-net-dhcp-autonomous-serial.log || true
+[ -f "$RUN_DIR/vm-serial.log" ] && cp "$RUN_DIR/vm-serial.log" "$(art live-net-dhcp-autonomous-serial.log)" || true
 
 # --- assertions -------------------------------------------------------------
-SERIAL="artifacts/live-net-dhcp-autonomous-serial.log"
+SERIAL="$(art live-net-dhcp-autonomous-serial.log)"
 SERIAL_BYTES=0 BOUND=0 ARENEW=0 AREBIND=0 COUNTERS=0 DONE=0
 if [ -f "$SERIAL" ]; then
     SERIAL_BYTES=$(wc -c < "$SERIAL" | tr -d ' ')
@@ -147,20 +165,20 @@ if [ -f "$SERIAL" ]; then
     grep -a -qF -- "dhcp-auto-done" "$SERIAL" && DONE=1
 fi
 RUNNER=0 REFUSE=0
-grep -a -qF -- "net-dhcp-respond: ENABLED (milestone five card N8, claim 0351) + card N9 (claim 9489)" artifacts/live-net-dhcp-autonomous-run.txt && RUNNER=1
-grep -a -qF -- "net-arp-respond: ENABLED" artifacts/live-net-dhcp-autonomous-run.txt && RUNNER=1
-grep -a -qF -- "net-dhcp-respond-norenew: ENABLED" artifacts/live-net-dhcp-autonomous-run.txt && RUNNER=1
+grep -a -qF -- "net-dhcp-respond: ENABLED (milestone five card N8, claim 0351) + card N9 (claim 9489)" "$(art live-net-dhcp-autonomous-run.txt)" && RUNNER=1
+grep -a -qF -- "net-arp-respond: ENABLED" "$(art live-net-dhcp-autonomous-run.txt)" && RUNNER=1
+grep -a -qF -- "net-dhcp-respond-norenew: ENABLED" "$(art live-net-dhcp-autonomous-run.txt)" && RUNNER=1
 # The host refused the unicast RENEWING REQUEST (its own stdout line).
-grep -a -qF -- "NET-DHCP: refused the guest's unicast RENEWING REQUEST" artifacts/live-net-dhcp-autonomous-run.txt && REFUSE=1
+grep -a -qF -- "NET-DHCP: refused the guest's unicast RENEWING REQUEST" "$(art live-net-dhcp-autonomous-run.txt)" && REFUSE=1
 
 # The capture: 1222 B = DISCOVER 286 + REQUEST 298 + ARP req 42 + RENEW
 # 298 (unicast, dst 02:00:00:00:00:02, dst IP 0a000002, ciaddr 0a000002)
 # + REBIND 298 (broadcast) — byte offsets as the N9 renew gate pins.
 CAPTURE=0
-if [ -f artifacts/live-net-dhcp-autonomous-cap.bin ]; then
-    CSIZE=$(wc -c < artifacts/live-net-dhcp-autonomous-cap.bin | tr -d ' ')
+if [ -f "$RUN_DIR/cap.bin" ]; then
+    CSIZE=$(wc -c < "$RUN_DIR/cap.bin" | tr -d ' ')
     if [ "$CSIZE" = 1222 ]; then
-        CHEX=$(xxd -p artifacts/live-net-dhcp-autonomous-cap.bin | tr -d '\n')
+        CHEX=$(xxd -p "$RUN_DIR/cap.bin" | tr -d '\n')
         if [ "${CHEX:1252:12}" = "020000000002" ] && \
            [ "${CHEX:1312:8}" = "0a000002" ] && \
            [ "${CHEX:1360:8}" = "0a000002" ] && \

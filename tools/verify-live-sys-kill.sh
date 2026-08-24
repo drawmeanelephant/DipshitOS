@@ -37,9 +37,25 @@ GATE_LOG="artifacts/live-sys-kill-gate.txt"
 exec > >(tee "$GATE_LOG") 2>&1
 trap 'sleep 0.5' EXIT
 
-REPORT="artifacts/live-sys-kill-report.txt"
-SCRIPT1="artifacts/live-sys-kill-script1.txt"
-SCRIPT2="artifacts/live-sys-kill-script2.txt"
+source tools/lib/gate-run.sh
+
+SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
+
+# Run isolation (#523 item 2 / issue #528; fleet remainder claim 2259):
+# private stacked disk (pristine-per-boot overlay), EFI var store, serial
+# log, and scripts under $RUN_DIR. The synthesized-keyboard `k` is subject
+# to the documented claim-4769 activation wall / issue #179 machine-state
+# dependency — a walled run self-reports KEY-SEQ window key/main/active
+# false; re-run when the machine is idle (no code fix exists).
+# Set DIPSHIT_GATE_SUFFIX=_alt for distinct canonical evidence names;
+# DIPSHIT_KEEP_RUN=1 keeps the scratch dir.
+
+GATE_LOG="$(art live-sys-kill-gate.txt)"
+exec > >(tee "$GATE_LOG") 2>&1
+trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
+
+REPORT="$(art live-sys-kill-report.txt)"
 # The static claim-8215 payload's exit line: phase 1 lands only after it,
 # so the boot payload's slot is free (COUNTER becomes pid 1).
 STATIC_EXIT_LINE="tasks user-el0 exited status=7"
@@ -62,35 +78,43 @@ zig build image
 swift build --package-path host/vm-runner --configuration release
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
+# --- per-run isolation -------------------------------------------------------
+gate_begin live-sys-kill
+echo "run dir: $RUN_DIR"
+
+SCRIPT1="$RUN_DIR/script1.txt"
+SCRIPT2="$RUN_DIR/script2.txt"
+
 # Phase 1: the never-exiting target + the task manager (TOP opens last, so
 # its window holds keyboard focus for the injected `k`).
 printf 'exec COUNTER.BIN\nexec TOP.BIN\n' > "$SCRIPT1"
 # Phase 2: after the kill lands — the process table + the syscall counter.
 printf 'procs\nsyscalls\necho done-sys-kill\n' > "$SCRIPT2"
 
-rm -f artifacts/efi-vars.bin artifacts/vm-serial.log artifacts/gpu-screen-*
+rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial.log"
 
 set +e
-host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log \
+host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
+    --serial "$RUN_DIR/vm-serial.log" \
     --display --input \
     --script "$SCRIPT1" --script-after "$STATIC_EXIT_LINE" \
     --input-string "k" --input-string-after "top: ready" \
     --script2 "$SCRIPT2" --script2-after "$KILL_EXIT_LINE" \
     --script-expect "done-sys-kill" \
-    --timeout 75 > artifacts/live-sys-kill-run.txt 2>&1
+    --timeout 75 > "$(art live-sys-kill-run.txt)" 2>&1
 RC=$?
 set -e
 
-[ -f artifacts/vm-serial.log ] && cp artifacts/vm-serial.log artifacts/live-sys-kill-serial.log || true
+[ -f "$RUN_DIR/vm-serial.log" ] && cp "$RUN_DIR/vm-serial.log" "$(art live-sys-kill-serial.log)" || true
 
 echo "VMRunner exit code: $RC"
 if [ $RC -ne 0 ]; then
     echo "ERROR: VMRunner failed with return code $RC"
-    cat artifacts/live-sys-kill-run.txt
+    cat "$(art live-sys-kill-run.txt)"
     exit 1
 fi
 
-SERIAL="artifacts/live-sys-kill-serial.log"
+SERIAL="$(art live-sys-kill-serial.log)"
 
 # --- serial assertions ------------------------------------------------------
 TOPR=0 MARKERS=0 MARKERS_BEFORE=0 NO_MARKERS_AFTER=0 KILL_MARK=0 \

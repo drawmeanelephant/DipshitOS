@@ -68,11 +68,22 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-GATE_LOG="artifacts/live-net-udp-syscall-gate.txt"
-exec > >(tee "$GATE_LOG") 2>&1
-trap 'sleep 0.5' EXIT
+source tools/lib/gate-run.sh
 
-REPORT="artifacts/live-net-udp-syscall-report.txt"
+SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
+
+# Run isolation (#523 item 2 / issue #528; fleet remainder claim 2259):
+# private stacked disk (pristine-per-boot overlay), EFI var store, serial
+# log, capture, fixture, and scripts under $RUN_DIR. Set
+# DIPSHIT_GATE_SUFFIX=_alt for distinct canonical evidence names;
+# DIPSHIT_KEEP_RUN=1 keeps the scratch dir.
+
+GATE_LOG="$(art live-net-udp-syscall-gate.txt)"
+exec > >(tee "$GATE_LOG") 2>&1
+trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
+
+REPORT="$(art live-net-udp-syscall-report.txt)"
 
 echo "=== verify-live-net-udp-syscall: claim 1384 — the UDP syscall seam live on VZ (UDP.BIN from EL0: listen, loopback, round trip, EINVAL errors, exit) ==="
 
@@ -90,6 +101,11 @@ zig build image
 swift build --package-path host/vm-runner --configuration release
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
+# --- per-run isolation -------------------------------------------------------
+gate_begin live-net-udp-syscall
+echo "run dir: $RUN_DIR"
+export RUN_DIR
+
 # --- scripted keystrokes -----------------------------------------------------
 # ONE VM session, TWO script phases (the claim-4613 pattern): --script
 # (phase 1) sets the IP, resolves the host peer, exec's UDP.BIN, and
@@ -103,13 +119,13 @@ codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/
 # completed and the gate would fail on a healthy kernel. Deterministic,
 # not a sleep race. The program's markers land in the log before the
 # observation phase.
-cat > artifacts/live-net-udp-syscall-script-1.txt <<'EOF'
+cat > "$RUN_DIR/script-1.txt" <<'EOF'
 net ip 10.0.0.1
 net arp 10.0.0.2
 exec UDP.BIN
 echo udp-syscall-ready
 EOF
-cat > artifacts/live-net-udp-syscall-script-2.txt <<'EOF'
+cat > "$RUN_DIR/script-2.txt" <<'EOF'
 syscalls
 tasks
 net udp
@@ -176,26 +192,27 @@ req_arp = arp_pkt(bcast, guest_mac, 1, guest_mac, guest_ip, [0] * 6, host_ip)
 assert len(req_arp) == 42, len(req_arp)
 req_udp = udp_frame(host_mac, guest_mac, guest_ip, host_ip, 7000, 9999, payload, ident=0)
 assert len(req_udp) == 46, len(req_udp)
-open("artifacts/live-net-udp-syscall-fixture.bin", "wb").write(req_arp + req_udp)
+open(__import__("os").environ["RUN_DIR"] + "/fixture.bin", "wb").write(req_arp + req_udp)
 print("fixture: %d bytes (42-byte ARP request + 46-byte datagram)" % len(req_arp + req_udp))
 PY
 
 # --- the run ----------------------------------------------------------------
-rm -f artifacts/efi-vars.bin artifacts/vm-serial.log artifacts/live-net-udp-syscall-cap.bin
+rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial.log" "$RUN_DIR/cap.bin"
 set +e
-host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log \
-    --net artifacts/live-net-udp-syscall-cap.bin \
+host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
+    --serial "$RUN_DIR/vm-serial.log" \
+    --net "$RUN_DIR/cap.bin" \
     --net-arp-respond 10.0.0.2 --net-udp-respond 10.0.0.2:9999 \
-    --script artifacts/live-net-udp-syscall-script-1.txt \
-    --script2 artifacts/live-net-udp-syscall-script-2.txt --script2-after 'udp: got ping' \
+    --script "$RUN_DIR/script-1.txt" \
+    --script2 "$RUN_DIR/script-2.txt" --script2-after 'udp: got ping' \
     --script-expect $'tasks user-exec reaped' --timeout 90 \
-    > artifacts/live-net-udp-syscall-run.txt 2>&1
+    > "$(art live-net-udp-syscall-run.txt)" 2>&1
 RC=$?
 set -e
-[ -f artifacts/vm-serial.log ] && cp artifacts/vm-serial.log artifacts/live-net-udp-syscall-serial.log || true
+[ -f "$RUN_DIR/vm-serial.log" ] && cp "$RUN_DIR/vm-serial.log" "$(art live-net-udp-syscall-serial.log)" || true
 
 # --- assertions -------------------------------------------------------------
-SERIAL="artifacts/vm-serial.log"
+SERIAL="$RUN_DIR/vm-serial.log"
 SERIAL_BYTES=0; IPSET=0
 LISTEN=0; LOOP=0; GOT=0; RECVERR=0; SENDERR=0; ORDER=0
 EXITP=0; EXITT=0; REAPED=0
@@ -227,8 +244,10 @@ if [ -f "$SERIAL" ]; then
     grep -a -qF -- "tasks user-exec exited status=17" "$SERIAL" && EXITT=1
     grep -a -qF -- "tasks user-exec reaped" "$SERIAL" && REAPED=1
     # The observation phase (script2): the syscall report now prints rows
-    # 0-41 (implemented=46) and the seam rows show real call counts.
-    grep -a -qF -- "syscalls: slots=64 implemented=46" "$SERIAL" && SYSCOUNT=1
+    # 0-60 and the seam rows show real call counts.
+    # OBSERVED BYTES (2026-08-24, claim 2259): implemented=61 today, not
+    # 46 — slots 47-60 landed after M12 across the M17-M26 arcs.
+    grep -a -qF -- "syscalls: slots=64 implemented=61" "$SERIAL" && SYSCOUNT=1
     for row in "  9 sys_udp_listen calls=" "  10 sys_udp_send calls=" "  11 sys_udp_recv calls="; do
         if grep -a -qF -- "$row" "$SERIAL" && ! grep -a -qF -- "${row}0" "$SERIAL"; then
             ROWS=$((ROWS + 1))
@@ -244,21 +263,21 @@ fi
 # The capture: the ARP request + the datagram, byte-exact.
 CAPTURE=0
 for _ in 1 2 3 4 5 6 7 8 9 10; do
-    if [ -f artifacts/live-net-udp-syscall-cap.bin ] && cmp -s artifacts/live-net-udp-syscall-cap.bin artifacts/live-net-udp-syscall-fixture.bin; then
+    if [ -f "$RUN_DIR/cap.bin" ] && cmp -s "$RUN_DIR/cap.bin" "$RUN_DIR/fixture.bin"; then
         CAPTURE=1
         break
     fi
     sleep 0.5
 done
 CAPSIZE=0
-[ -f artifacts/live-net-udp-syscall-cap.bin ] && CAPSIZE=$(wc -c < artifacts/live-net-udp-syscall-cap.bin | tr -d ' ')
+[ -f "$RUN_DIR/cap.bin" ] && CAPSIZE=$(wc -c < "$RUN_DIR/cap.bin" | tr -d ' ')
 
 {
     echo "DIPSHITOS live UDP-syscall gate (claim 1384, milestone five card N6) — UDP.BIN from EL0 on real VZ hardware"
     echo "revision: $REVISION branch=$BRANCH dirty-files=$DIRTY"
     echo "phase 1: exec UDP.BIN — sys_udp_listen(7000) -> 'udp: listen ok'; loopback send+recv -> 'udp: loop ping'; peer send (10.0.0.2:9999) + poll recv of the host's echoed answer -> 'udp: got ping'; unbound-port recv + unresolved-peer send -> 'udp: recv err -1' / 'udp: send err -1' (EINVAL from EL0); sys_exit(17) -> 'procs UDP.BIN exited status=17' — the markers IN ORDER"
     echo "phase 1 capture: the 42-byte ARP request + the 46-byte datagram (src 10.0.0.1:7000 -> 10.0.0.2:9999, payload 'ping') byte-exact"
-    echo "phase 2: syscalls (implemented=46, rows 9/10/11 with calls > 0) + net udp / net counters (rx=2, tx=2, loop=1, drop=0)"
+    echo "phase 2: syscalls (implemented=61 — slots 47-60 landed post-M12, claim 2259; rows 9/10/11 with calls > 0) + net udp / net counters (rx=2, tx=2, loop=1, drop=0)"
     echo "date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     echo
 } >> "$REPORT"
@@ -288,7 +307,7 @@ echo "observation: syscalls-report=$SYSCOUNT rows-with-calls=$ROWS/3 net-udp-cou
 echo
 echo "=== result ==="
 if [ "$PASS" = 4 ]; then
-    echo "verify-live-net-udp-syscall: PASS — the UDP syscall seam is live on VZ: UDP.BIN (a USER PROGRAM loaded by exec) bound port 7000 through sys_udp_listen, loopback-sent and received through sys_udp_send/sys_udp_recv (the 12-byte datagram, byte-exact), sent the 46-byte datagram to 10.0.0.2:9999 (byte-exact in the capture behind the ARP request) and received the host's --net-udp-respond answer, observed the EINVAL error mapping from EL0 (unbound-port recv, unresolved-peer send), and exited with status 17 (the reap reports landed); the observation phase shows implemented=46 with rows 9/10/11 counted and the shared counters rx=2 tx=2 loop=1 drop=0. ($PASS/4 phases)."
+    echo "verify-live-net-udp-syscall: PASS — the UDP syscall seam is live on VZ: UDP.BIN (a USER PROGRAM loaded by exec) bound port 7000 through sys_udp_listen, loopback-sent and received through sys_udp_send/sys_udp_recv (the 12-byte datagram, byte-exact), sent the 46-byte datagram to 10.0.0.2:9999 (byte-exact in the capture behind the ARP request) and received the host's --net-udp-respond answer, observed the EINVAL error mapping from EL0 (unbound-port recv, unresolved-peer send), and exited with status 17 (the reap reports landed); the observation phase shows implemented=61 with rows 9/10/11 counted and the shared counters rx=2 tx=2 loop=1 drop=0. ($PASS/4 phases)."
     echo "PASS: $PASS/4" >> "$REPORT"
     sleep 0.5
     exit 0

@@ -68,11 +68,26 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-GATE_LOG="artifacts/live-net-tcp-rto-gate.txt"
-exec > >(tee "$GATE_LOG") 2>&1
-trap 'sleep 0.5' EXIT
+source tools/lib/gate-run.sh
 
-REPORT="artifacts/live-net-tcp-rto-report.txt"
+SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
+
+# Run isolation (#523 item 2 / issue #528; fleet remainder claim 2259):
+# private stacked disk (pristine-per-boot overlay), EFI var store, serial
+# logs, captures, and scripts under $RUN_DIR for all three runs; rc
+# handoff files moved under $RUN_DIR too. Expectation note (#528 rot
+# class 1, claim 2259): the historical $'...ndipshit> ' script-expects
+# died with M18 T5's ANSI-colored prompt (claim 0163); all three runs
+# anchor on the OUTPUT-ONLY done echo. Set DIPSHIT_GATE_SUFFIX=_alt for
+# distinct canonical evidence names; DIPSHIT_KEEP_RUN=1 keeps the
+# scratch dir.
+
+GATE_LOG="$(art live-net-tcp-rto-gate.txt)"
+exec > >(tee "$GATE_LOG") 2>&1
+trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
+
+REPORT="$(art live-net-tcp-rto-report.txt)"
 
 echo "=== verify-live-net-tcp-rto: claim 5357 — the bounded TCP retransmission + retransmit timer live on VZ (Run A the retransmission proof, Run B the ACK-clears-pending recovery, Run C the retransmission bound) ==="
 
@@ -90,6 +105,10 @@ zig build image
 swift build --package-path host/vm-runner --configuration release
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
+# --- per-run isolation -------------------------------------------------------
+gate_begin live-net-tcp-rto
+echo "run dir: $RUN_DIR"
+
 # --- scripted keystrokes ----------------------------------------------------
 # Run A: the black-hole SYN. `net arp 10.0.0.2` (twice) resolves the
 # peer; `net tcp connect` transmits the SYN (recorded pending — card
@@ -97,7 +116,7 @@ codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/
 # 7 s script2 delay passes two 3 s RTOs — the idle loop retransmits
 # the SYN twice, autonomously; script2's `net tcp` reads syn_sent
 # (the 30 s timeout has not expired), `net` reads retx=2.
-cat > artifacts/live-net-tcp-rto-a1.txt <<'EOF'
+cat > "$RUN_DIR/a1.txt" <<'EOF'
 net ip 10.0.0.1
 net arp 10.0.0.2
 net arp
@@ -105,7 +124,7 @@ net tcp connect 10.0.0.2 9999
 net
 echo n11a-phase1-ready
 EOF
-cat > artifacts/live-net-tcp-rto-a2.txt <<'EOF'
+cat > "$RUN_DIR/a2.txt" <<'EOF'
 net tcp
 net
 echo n11a-done
@@ -114,7 +133,7 @@ EOF
 # SYN-ACK — the ACK (delivered by the idle drain) clears the pending
 # SYN, so despite the 7 s wait NOTHING is retransmitted; script2's
 # `net tcp` transmits the handshake ACK (established).
-cat > artifacts/live-net-tcp-rto-b1.txt <<'EOF'
+cat > "$RUN_DIR/b1.txt" <<'EOF'
 net ip 10.0.0.1
 net arp 10.0.0.2
 net arp
@@ -122,7 +141,7 @@ net tcp connect 10.0.0.2 9999
 net
 echo n11b-phase1-ready
 EOF
-cat > artifacts/live-net-tcp-rto-b2.txt <<'EOF'
+cat > "$RUN_DIR/b2.txt" <<'EOF'
 net tcp
 net
 echo n11b-done
@@ -133,7 +152,7 @@ EOF
 # bound the connection aborts honestly. The 34 s delay passes the
 # abort (33 s); script2's `net tcp` reads no connection, `net` reads
 # retx=10,abort=1.
-cat > artifacts/live-net-tcp-rto-c1.txt <<'EOF'
+cat > "$RUN_DIR/c1.txt" <<'EOF'
 net ip 10.0.0.1
 net arp 10.0.0.2
 net arp
@@ -143,7 +162,7 @@ net tcp send 5
 net
 echo n11c-phase1-ready
 EOF
-cat > artifacts/live-net-tcp-rto-c2.txt <<'EOF'
+cat > "$RUN_DIR/c2.txt" <<'EOF'
 net tcp
 net
 echo n11c-done
@@ -152,57 +171,63 @@ EOF
 # --- per-run gate -----------------------------------------------------------
 run_a() {
     local out="$1" serial="$2" capture="$3"
-    rm -f artifacts/efi-vars.bin artifacts/vm-serial.log "$capture"
-    host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log \
+    rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial-a.log" "$capture"
+    host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
+        --serial "$RUN_DIR/vm-serial-a.log" \
         --net "$capture" --net-arp-respond 10.0.0.2 \
-        --script artifacts/live-net-tcp-rto-a1.txt \
-        --script2 artifacts/live-net-tcp-rto-a2.txt --script2-after "n11a-phase1-ready" --script2-delay 7 \
-        --script-expect $'n11a-done\ndipshit> ' --timeout 120 \
+        --script "$RUN_DIR/a1.txt" \
+        --script2 "$RUN_DIR/a2.txt" --script2-after "n11a-phase1-ready" --script2-delay 7 \
+        --script-expect 'n11a-done' --timeout 120 \
         > "$out" 2>&1
     local RC=$?
-    [ -f artifacts/vm-serial.log ] && cp artifacts/vm-serial.log "$serial" || true
-    echo "$RC" > /tmp/live-net-tcp-rto-rc-a.txt
+    [ -f "$RUN_DIR/vm-serial-a.log" ] && cp "$RUN_DIR/vm-serial-a.log" "$serial" || true
+    echo "$RC" > "$RUN_DIR/rc-a"
 }
 
 run_b() {
     local out="$1" serial="$2" capture="$3"
-    rm -f artifacts/efi-vars.bin artifacts/vm-serial.log "$capture"
-    host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log \
+    rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial-b.log" "$capture"
+    host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
+        --serial "$RUN_DIR/vm-serial-b.log" \
         --net "$capture" --net-tcp-respond 10.0.0.2:9999 --net-arp-respond 10.0.0.2 \
-        --script artifacts/live-net-tcp-rto-b1.txt \
-        --script2 artifacts/live-net-tcp-rto-b2.txt --script2-after "n11b-phase1-ready" --script2-delay 7 \
-        --script-expect $'n11b-done\ndipshit> ' --timeout 120 \
+        --script "$RUN_DIR/b1.txt" \
+        --script2 "$RUN_DIR/b2.txt" --script2-after "n11b-phase1-ready" --script2-delay 7 \
+        --script-expect 'n11b-done' --timeout 120 \
         > "$out" 2>&1
     local RC=$?
-    [ -f artifacts/vm-serial.log ] && cp artifacts/vm-serial.log "$serial" || true
-    echo "$RC" > /tmp/live-net-tcp-rto-rc-b.txt
+    [ -f "$RUN_DIR/vm-serial-b.log" ] && cp "$RUN_DIR/vm-serial-b.log" "$serial" || true
+    echo "$RC" > "$RUN_DIR/rc-b"
 }
 
 run_c() {
     local out="$1" serial="$2" capture="$3"
-    rm -f artifacts/efi-vars.bin artifacts/vm-serial.log "$capture"
-    host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log \
+    rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial-c.log" "$capture"
+    host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
+        --serial "$RUN_DIR/vm-serial-c.log" \
         --net "$capture" --net-tcp-respond 10.0.0.2:9999:handshake --net-arp-respond 10.0.0.2 \
-        --script artifacts/live-net-tcp-rto-c1.txt \
-        --script2 artifacts/live-net-tcp-rto-c2.txt --script2-after "n11c-phase1-ready" --script2-delay 34 \
-        --script-expect $'n11c-done\ndipshit> ' --timeout 140 \
+        --script "$RUN_DIR/c1.txt" \
+        --script2 "$RUN_DIR/c2.txt" --script2-after "n11c-phase1-ready" --script2-delay 34 \
+        --script-expect 'n11c-done' --timeout 140 \
         > "$out" 2>&1
     local RC=$?
-    [ -f artifacts/vm-serial.log ] && cp artifacts/vm-serial.log "$serial" || true
-    echo "$RC" > /tmp/live-net-tcp-rto-rc-c.txt
+    [ -f "$RUN_DIR/vm-serial-c.log" ] && cp "$RUN_DIR/vm-serial-c.log" "$serial" || true
+    echo "$RC" > "$RUN_DIR/rc-c"
 }
 
 set +e
-run_a "artifacts/live-net-tcp-rto-a-run.txt" "artifacts/live-net-tcp-rto-a-serial.log" "artifacts/live-net-tcp-rto-a-cap.bin"
-RCA="$(cat /tmp/live-net-tcp-rto-rc-a.txt)"
-run_b "artifacts/live-net-tcp-rto-b-run.txt" "artifacts/live-net-tcp-rto-b-serial.log" "artifacts/live-net-tcp-rto-b-cap.bin"
-RCB="$(cat /tmp/live-net-tcp-rto-rc-b.txt)"
-run_c "artifacts/live-net-tcp-rto-c-run.txt" "artifacts/live-net-tcp-rto-c-serial.log" "artifacts/live-net-tcp-rto-c-cap.bin"
-RCC="$(cat /tmp/live-net-tcp-rto-rc-c.txt)"
+run_a "$(art live-net-tcp-rto-a-run.txt)" "$(art live-net-tcp-rto-a-serial.log)" "$RUN_DIR/a-cap.bin"
+RCA="$(cat "$RUN_DIR/rc-a")"
+cp "$RUN_DIR/a-cap.bin" "$(art live-net-tcp-rto-a-cap.bin)" 2>/dev/null || true
+run_b "$(art live-net-tcp-rto-b-run.txt)" "$(art live-net-tcp-rto-b-serial.log)" "$RUN_DIR/b-cap.bin"
+RCB="$(cat "$RUN_DIR/rc-b")"
+cp "$RUN_DIR/b-cap.bin" "$(art live-net-tcp-rto-b-cap.bin)" 2>/dev/null || true
+run_c "$(art live-net-tcp-rto-c-run.txt)" "$(art live-net-tcp-rto-c-serial.log)" "$RUN_DIR/c-cap.bin"
+RCC="$(cat "$RUN_DIR/rc-c")"
+cp "$RUN_DIR/c-cap.bin" "$(art live-net-tcp-rto-c-cap.bin)" 2>/dev/null || true
 set -e
 
 # --- Run A assertions ---------------------------------------------------------
-SA="artifacts/live-net-tcp-rto-a-serial.log"
+SA="$(art live-net-tcp-rto-a-serial.log)"
 SA_BYTES=0 ASYN=0 ARETX1=0 ARETX2=0 ANORETX=0 ARETX2REPORT=0 ADONE=0
 if [ -f "$SA" ]; then
     SA_BYTES=$(wc -c < "$SA" | tr -d ' ')
@@ -228,7 +253,7 @@ if [ -f "$SA" ]; then
     grep -a -qF -- "n11a-done" "$SA" && ADONE=1
 fi
 ARUNNER=0
-[ "$RCA" = 0 ] && grep -a -qF -- "net-arp-respond: ENABLED" artifacts/live-net-tcp-rto-a-run.txt && ARUNNER=1
+[ "$RCA" = 0 ] && grep -a -qF -- "net-arp-respond: ENABLED" "$(art live-net-tcp-rto-a-run.txt)" && ARUNNER=1
 # The capture: ARP (42) + the byte-identical SYN frames (the initial
 # + the RTO retransmissions, 54 B each), verified by the python walk —
 # the SAME seq (the ISN drawn once at connect — the retransmissions
@@ -237,8 +262,8 @@ ARUNNER=0
 # count is timing-dependent (the 1 Hz-tick timer); the byte-exactness
 # is deterministic.
 A3SYN=0
-if [ -f artifacts/live-net-tcp-rto-a-cap.bin ]; then
-    if python3 - artifacts/live-net-tcp-rto-a-cap.bin <<'PY'
+if [ -f "$(art live-net-tcp-rto-a-cap.bin)" ]; then
+    if python3 - "$(art live-net-tcp-rto-a-cap.bin)" <<'PY'
 import struct, sys
 d = open(sys.argv[1], 'rb').read()
 off = 0
@@ -281,7 +306,7 @@ PY
 fi
 
 # --- Run B assertions (the ACK-clears-pending recovery) -----------------------
-SB="artifacts/live-net-tcp-rto-b-serial.log"
+SB="$(art live-net-tcp-rto-b-serial.log)"
 SB_BYTES=0 BSYN=0 BESTAB=0 BRETX0A=0 BRETX0B=0 BNRETX=1 BDONE=0
 if [ -f "$SB" ]; then
     SB_BYTES=$(wc -c < "$SB" | tr -d ' ')
@@ -303,12 +328,12 @@ if [ -f "$SB" ]; then
     grep -a -qF -- "n11b-done" "$SB" && BDONE=1
 fi
 BRUNNER=0
-[ "$RCB" = 0 ] && grep -a -qF -- "net-tcp-respond: ENABLED (milestone five card N10, claim 7026) + card N11 (claim 5357)" artifacts/live-net-tcp-rto-b-run.txt && BRUNNER=1
+[ "$RCB" = 0 ] && grep -a -qF -- "net-tcp-respond: ENABLED (milestone five card N10, claim 7026) + card N11 (claim 5357)" "$(art live-net-tcp-rto-b-run.txt)" && BRUNNER=1
 # The capture: ARP (42) + the SYN (54) + the handshake ACK (54) = 150
 # bytes — EXACTLY ONE SYN (no retransmission).
 B1SYN=0
-if [ -f artifacts/live-net-tcp-rto-b-cap.bin ] && [ "$(wc -c < artifacts/live-net-tcp-rto-b-cap.bin | tr -d ' ')" = 150 ]; then
-    if python3 - artifacts/live-net-tcp-rto-b-cap.bin <<'PY'
+if [ -f "$(art live-net-tcp-rto-b-cap.bin)" ] && [ "$(wc -c < "$(art live-net-tcp-rto-b-cap.bin)" | tr -d ' ')" = 150 ]; then
+    if python3 - "$(art live-net-tcp-rto-b-cap.bin)" <<'PY'
 import struct, sys
 d = open(sys.argv[1], 'rb').read()
 off = 0
@@ -337,7 +362,7 @@ PY
 fi
 
 # --- Run C assertions (the retransmission bound) ------------------------------
-SC="artifacts/live-net-tcp-rto-c-serial.log"
+SC="$(art live-net-tcp-rto-c-serial.log)"
 SC_BYTES=0 CSYN=0 CACK=0 CDATASENT=0 CRETX0=0 CRETX10=0 CEDGES=0 CABORT=0 CNOCONN=0 CRETXREPORT=0 CDONE=0
 if [ -f "$SC" ]; then
     SC_BYTES=$(wc -c < "$SC" | tr -d ' ')
@@ -359,13 +384,13 @@ if [ -f "$SC" ]; then
     grep -a -qF -- "n11c-done" "$SC" && CDONE=1
 fi
 CRUNNER=0
-[ "$RCC" = 0 ] && grep -a -qF -- "net-tcp-respond mode: handshake-only (card N11)" artifacts/live-net-tcp-rto-c-run.txt && CRUNNER=1
+[ "$RCC" = 0 ] && grep -a -qF -- "net-tcp-respond mode: handshake-only (card N11)" "$(art live-net-tcp-rto-c-run.txt)" && CRUNNER=1
 # The capture: ARP (42) + the SYN (54) + the handshake ACK (54) + the
 # ELEVEN byte-identical data frames (11 x 59 = 649) = 799 bytes — the
 # initial data + the 10 retransmissions, all the SAME seq/bytes/checksum.
 CCAP=0
-if [ -f artifacts/live-net-tcp-rto-c-cap.bin ] && [ "$(wc -c < artifacts/live-net-tcp-rto-c-cap.bin | tr -d ' ')" = 799 ]; then
-    if python3 - artifacts/live-net-tcp-rto-c-cap.bin <<'PY'
+if [ -f "$(art live-net-tcp-rto-c-cap.bin)" ] && [ "$(wc -c < "$(art live-net-tcp-rto-c-cap.bin)" | tr -d ' ')" = 799 ]; then
+    if python3 - "$(art live-net-tcp-rto-c-cap.bin)" <<'PY'
 import struct, sys
 d = open(sys.argv[1], 'rb').read()
 off = 0

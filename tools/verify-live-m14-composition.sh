@@ -31,7 +31,8 @@
 # `exec NOTEPAD.BIN selfdemo` after the boot payload exits. NOTEPAD prints
 # `selfdemo pasted` / `selfdemo copied` / `selfdemo armed blink` and one
 # `notepad: cursor blink` per TIMER event. Phase 2 (after `selfdemo done`)
-# runs `syscalls` (implemented=46, slots 38/39/40 counted in the same boot)
+# runs `syscalls` (implemented=61 today — slots 47-60 landed post-M14;
+# slots 38/39/40 counted in the same boot)
 # and the success echo.
 #
 # Class B — Apple silicon + VZ only; boots a real VM.
@@ -39,21 +40,31 @@
 # Usage:
 #   bash tools/verify-live-m14-composition.sh
 #
+# Run isolation (#523 item 2 / issue #528; fleet remainder claim 2259):
+# private stacked disk (pristine-per-boot overlay), EFI var store, serial
+# log, and scripts under $RUN_DIR. Set DIPSHIT_GATE_SUFFIX=_alt for
+# distinct canonical evidence names; DIPSHIT_KEEP_RUN=1 keeps the scratch
+# dir.
+#
 # Evidence saved under artifacts/: live-composition-gate.txt,
 # live-composition-report.txt, live-composition-run.txt,
-# live-composition-serial.log, live-composition-script.txt,
-# live-composition-script2.txt.
+# live-composition-serial.log.
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-GATE_LOG="artifacts/live-composition-gate.txt"
-exec > >(tee "$GATE_LOG") 2>&1
-trap 'sleep 0.5' EXIT
+source tools/lib/gate-run.sh
 
-REPORT="artifacts/live-composition-report.txt"
+SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
+
+GATE_LOG="$(art live-composition-gate.txt)"
+exec > >(tee "$GATE_LOG") 2>&1
+trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
+
+REPORT="$(art live-composition-report.txt)"
 
 echo "=== verify-live-m14-composition: claim 3289 — M14 S3 composition capstone on VZ ==="
 
@@ -63,7 +74,8 @@ export PATH
 zig version; swift --version 2>&1 | head -1; sw_vers
 REVISION="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
 BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
-echo "revision: $REVISION branch=$BRANCH"
+DIRTY="$(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
+echo "revision: $REVISION branch=$BRANCH dirty-files=$DIRTY"
 
 # Build all binaries and disk image
 zig build
@@ -71,60 +83,74 @@ zig build image
 swift build --package-path host/vm-runner --configuration release
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
+# --- per-run isolation -------------------------------------------------------
+gate_begin live-m14-composition
+echo "run dir: $RUN_DIR"
+
 # Phase 1: set the clipboard (S1 write side via the terminal half), then
 # exec NOTEPAD in its selfdemo mode (argv "selfdemo", claim 4636 entry
 # contract). The selfdemo pastes the pre-loaded clipboard (S1 read side),
 # copies it back (S1 write side from EL0), and arms the blink timer (S2).
-cat > artifacts/live-composition-script.txt <<'EOF'
+cat > "$RUN_DIR/script.txt" <<'EOF'
 clip hello world
 exec NOTEPAD.BIN selfdemo
 EOF
 
 # Phase 2: after the selfdemo completes, the syscalls report proves slots
 # 38/39/40 were all called in this boot.
-cat > artifacts/live-composition-script2.txt <<'EOF'
+cat > "$RUN_DIR/script2.txt" <<'EOF'
 syscalls
 echo composition-live-ok
 EOF
 
 STATIC_EXIT_LINE="tasks user-el0 exited status=7"
 
+# Exit condition (fleet remainder claim 2259, OBSERVED 2026-08-24): the
+# kernel reaper is asynchronous — its `tasks user-exec exited status=43` /
+# `procs NOTEPAD.BIN exited status=43` lines reliably TRAIL the sweep echo,
+# so expecting `composition-live-ok` truncated the serial before the
+# lifecycle proof landed. The runner now exits on the reap line instead,
+# which also guarantees every earlier marker (syscalls report included) is
+# inside the captured window.
+REAP_EXPECT="procs NOTEPAD.BIN exited status=43"
+
 echo "--- Phase 1: Running the M14 composition (clipboard + blink) on VZ ---"
-rm -f artifacts/efi-vars.bin
-rm -f artifacts/vm-serial.log artifacts/gpu-screen-*
+rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial.log"
 
 set +e
-host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log \
+host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
+    --serial "$RUN_DIR/vm-serial.log" \
     --display \
-    --script artifacts/live-composition-script.txt \
+    --script "$RUN_DIR/script.txt" \
     --script-after "$STATIC_EXIT_LINE" \
-    --script2 artifacts/live-composition-script2.txt \
+    --script2 "$RUN_DIR/script2.txt" \
     --script2-after "notepad: selfdemo done" \
-    --script-expect "composition-live-ok" \
-    --timeout 90 > artifacts/live-composition-run.txt 2>&1
+    --script-expect "$REAP_EXPECT" \
+    --timeout 90 > "$(art live-composition-run.txt)" 2>&1
 RC=$?
 set -e
 
-[ -f artifacts/vm-serial.log ] && cp artifacts/vm-serial.log artifacts/live-composition-serial.log || true
+[ -f "$RUN_DIR/vm-serial.log" ] && cp "$RUN_DIR/vm-serial.log" "$(art live-composition-serial.log)" || true
+SER="$(art live-composition-serial.log)"
 
 echo "VMRunner exit code: $RC"
 if [ $RC -ne 0 ]; then
     echo "ERROR: VMRunner failed with return code $RC"
-    cat artifacts/live-composition-run.txt
+    cat "$(art live-composition-run.txt)"
     exit 1
 fi
 
 echo "--- Phase 2: Verifying the composition markers ---"
 
 # S1 read side: NOTEPAD pasted the clipboard the terminal set.
-grep -q "notepad: selfdemo pasted" artifacts/live-composition-serial.log || {
+grep -q "notepad: selfdemo pasted" "$SER" || {
     echo "ERROR: NOTEPAD paste marker missing from serial log"
     exit 1
 }
 echo "S1.PASTE: OK"
 
 # S1 write side: NOTEPAD copied the buffer back into the shared clipboard.
-grep -q "notepad: selfdemo copied" artifacts/live-composition-serial.log || {
+grep -q "notepad: selfdemo copied" "$SER" || {
     echo "ERROR: NOTEPAD copy marker missing from serial log"
     exit 1
 }
@@ -132,65 +158,68 @@ echo "S1.COPY: OK"
 
 # S2: the timer-driven blink — at least two TIMER events (two cursor
 # toggles) observed, and the demo ran to completion.
-BLINK_COUNT=$(grep -c "notepad: cursor blink" artifacts/live-composition-serial.log || true)
+BLINK_COUNT=$(grep -c "notepad: cursor blink" "$SER" || true)
 if [ "${BLINK_COUNT:-0}" -lt 2 ]; then
     echo "ERROR: expected at least 2 cursor blink markers, saw ${BLINK_COUNT:-0}"
     exit 1
 fi
 echo "S2.BLINK: OK ($BLINK_COUNT TIMER events observed)"
 
-grep -q "notepad: selfdemo armed blink" artifacts/live-composition-serial.log || {
+grep -q "notepad: selfdemo armed blink" "$SER" || {
     echo "ERROR: blink arm marker missing from serial log"
     exit 1
 }
-grep -q "notepad: selfdemo done" artifacts/live-composition-serial.log || {
+grep -q "notepad: selfdemo done" "$SER" || {
     echo "ERROR: selfdemo done marker missing from serial log"
     exit 1
 }
 echo "S2.ARM+DONE: OK"
 
 # NOTEPAD exits through the real lifecycle.
-grep -q "notepad: exiting 43" artifacts/live-composition-serial.log || {
+grep -q "notepad: exiting 43" "$SER" || {
     echo "ERROR: NOTEPAD exit marker missing from serial log"
     exit 1
 }
-grep -q "tasks user-exec exited status=43" artifacts/live-composition-serial.log || {
+grep -q "tasks user-exec exited status=43" "$SER" || {
     echo "ERROR: NOTEPAD exit status line missing from serial log"
     exit 1
 }
 echo "LIFECYCLE: OK"
 
-# The syscalls report: implemented=46, and slots 38/39/40 all counted in
-# the same boot — sys_clipboard_set calls=1 (the selfdemo copy; the
-# terminal `clip` command is the EL1h half and does NOT ride the syscall
-# counter), sys_clipboard_get calls=1 (the selfdemo paste), sys_timer_set
-# calls=7 (the arm + one re-arm per TIMER event, six blinks).
-grep -q "syscalls: slots=64 implemented=46" artifacts/live-composition-serial.log || {
-    echo "ERROR: implemented=46 syscalls report missing from serial log"
+# The syscalls report — OBSERVED BYTES (2026-08-24, claim 2259):
+# `implemented=61` today, not 46: slots 47–60 landed after M14 across the
+# M17–M26 arcs (win_resize, drag, notify, workspaces, setrlimit, pipes,
+# font_size, ping, ...). Slots 38/39/40 all counted in the same boot —
+# sys_clipboard_set calls=1 (the selfdemo copy; the terminal `clip`
+# command is the EL1h half and does NOT ride the syscall counter),
+# sys_clipboard_get calls=1 (the selfdemo paste), sys_timer_set calls=7
+# (the arm + one re-arm per TIMER event, six blinks).
+grep -q "syscalls: slots=64 implemented=61" "$SER" || {
+    echo "ERROR: implemented=61 syscalls report missing from serial log"
     exit 1
 }
-grep -q "38 sys_clipboard_set calls=1" artifacts/live-composition-serial.log || {
+grep -q "38 sys_clipboard_set calls=1" "$SER" || {
     echo "ERROR: sys_clipboard_set calls=1 missing from syscalls report"
     exit 1
 }
-grep -q "39 sys_clipboard_get calls=1" artifacts/live-composition-serial.log || {
+grep -q "39 sys_clipboard_get calls=1" "$SER" || {
     echo "ERROR: sys_clipboard_get calls=1 missing from syscalls report"
     exit 1
 }
-grep -q "40 sys_timer_set calls=7" artifacts/live-composition-serial.log || {
+grep -q "40 sys_timer_set calls=7" "$SER" || {
     echo "ERROR: sys_timer_set calls=7 missing from syscalls report"
     exit 1
 }
 echo "SYSCALL COUNTS: OK"
 
-grep -q "composition-live-ok" artifacts/live-composition-serial.log || {
+grep -q "composition-live-ok" "$SER" || {
     echo "ERROR: final sweep marker missing from serial log"
     exit 1
 }
 
 # Input-seam state (issue #179): recorded for the report, never gates.
 KB_STATE="not-checked"
-if grep -q "input: armed" artifacts/live-composition-serial.log; then
+if grep -q "input: armed" "$SER"; then
     KB_STATE="keyboard-armed-events-unobserved"
 fi
 
@@ -209,14 +238,14 @@ Verified Components:
   (kind 9, ADR 0009 queue), re-arming after every fire; no spin loop
 - Composition: the SAME EL0 program (NOTEPAD.BIN) used both facilities,
   then exited status 43 through the real lifecycle
-- syscalls report: implemented=46 with slots 38/39/40 all counted live
+- syscalls report: implemented=61 (slots 47-60 landed post-M14) with slots 38/39/40 all counted live
 - Input seam (issue #179): $KB_STATE — the gate drives the composition via
   NOTEPAD's argv selfdemo mode because the synthesized keyboard route
   reports events=0 on this machine; the chord path is host-tested and
   regains live coverage when the seam recovers
 
 Serial Output Highlights:
-$(grep -E 'notepad: (ready|selfdemo|cursor blink|exiting)|sys_clipboard|sys_timer|syscalls:' artifacts/live-composition-serial.log || true)
+$(grep -E 'notepad: (ready|selfdemo|cursor blink|exiting)|sys_clipboard|sys_timer|syscalls:' "$SER" || true)
 EOF
 
 echo "verify-live-m14-composition: PASS — NOTEPAD pastes (S1) and blinks (S2) in one session on VZ."
