@@ -82,7 +82,7 @@ pub const slot_count: usize = 64;
 /// docs/agent-concurrency-plan.md §8.
 /// M19 P1 (issue #290): slots 56/57 are the bounded pipe.
 /// M26 N1 (issue #399): slots 59/60 are ping send/poll.
-pub const implemented_count: usize = 61;
+pub const implemented_count: usize = 62;
 /// Card G6 (claim 0487) follow-on (slot 18): the fixed `sys_win_get` shape —
 /// four u32 LE words (x, y, w, h), 16 bytes, marshaled per call and copy_out'd
 /// through uaccess (the procs snapshot pattern).
@@ -225,6 +225,8 @@ pub const sys_win_lower_back: u64 = 50;
 pub const sys_notify: u64 = 51;
 /// Arc4 #242 (ADR 0013 D1): `sys_win_set_unsaved(id, flag)` — slot 53.
 pub const sys_win_set_unsaved: u64 = 53;
+/// M21 W12 (ADR 0013 D1): `sys_win_set_title(id, text_ptr, text_len)` — slot 61.
+pub const sys_win_set_title: u64 = 61;
 /// Arc4 #237 (ADR 0013 D1): `sys_drag_read(buf_ptr, max_len)` — slot 55.
 pub const sys_drag_read: u64 = 55;
 pub const sys_pipe_read: u64 = 56;
@@ -380,6 +382,7 @@ fn ensure_table() *const [slot_count]Entry {
         table_storage[sys_pipe_write] = .{ .name = "sys_pipe_write", .handler = handle_pipe_write };
         table_storage[52] = .{ .name = "sys_win_move_to_workspace", .handler = handle_win_move_to_workspace };
         table_storage[sys_win_set_unsaved] = .{ .name = "sys_win_set_unsaved", .handler = handle_win_set_unsaved };
+        table_storage[sys_win_set_title] = .{ .name = "sys_win_set_title", .handler = handle_win_set_title };
         table_storage[54] = .{ .name = "sys_setrlimit", .handler = handle_setrlimit };
         // M20-U1 (claim 5127): slot 58 — sys_font_size.
         table_storage[sys_font_size] = .{ .name = "sys_font_size", .handler = handle_font_size };
@@ -1131,6 +1134,27 @@ fn handle_win_move_to_workspace(args: Args, _: *exceptions.VectorFrame) u64 {
     return 0;
 }
 
+/// `sys_win_set_title(id, text_ptr, text_len)`: set the dynamic title of
+/// the caller's user window. Up to 63 bytes are copied from `text_ptr` into
+/// the window's title buffer; the title is then visible in the taskbar and
+/// Alt+Tab overlay. Returns 0; `EINVAL` for bad id or non-owner; `EFAULT`
+/// for bad `text_ptr`.
+fn handle_win_set_title(args: Args, _: *exceptions.VectorFrame) u64 {
+    if (args[0] > std.math.maxInt(u8)) return error_result(.einval);
+    const id: u8 = @truncate(args[0]);
+    if (!win_owned_by_caller(id)) return error_result(.einval);
+    const ptr = args[1];
+    const len = args[2];
+    if (len > 64) return error_result(.einval);
+    if (len > 0 and ptr == 0) return error_result(.einval);
+    var buf: [64]u8 = undefined;
+    if (len > 0) {
+        if (uaccess.copy_in(&buf, ptr, @intCast(len)) != .ok) return error_result(.efault);
+    }
+    if (!driving_award.set_window_title(id, buf[0..len])) return error_result(.einval);
+    return 0;
+}
+
 /// `sys_win_set_unsaved(id, flag)`: mark or clear the unsaved-changes flag
 /// on the caller's window. When the flag is set and the user clicks the
 /// close button, the compositor shows a Save/Don't Save/Cancel dialog
@@ -1805,7 +1829,7 @@ fn capture_marshaled_args(args: Args, _: *exceptions.VectorFrame) u64 {
     return 0xcafe;
 }
 
-test "syscall: runtime table has 64 slots and sixty-one unique implemented rows" {
+test "syscall: runtime table has 64 slots and sixty-two unique implemented rows" {
     init(test_writer);
     const table = ensure_table();
     try std.testing.expectEqual(@as(usize, 64), table.len);
@@ -1818,7 +1842,7 @@ test "syscall: runtime table has 64 slots and sixty-one unique implemented rows"
             implemented += 1;
         }
     }
-    try std.testing.expectEqual(@as(usize, 61), implemented);
+    try std.testing.expectEqual(@as(usize, 62), implemented);
     try std.testing.expectEqualStrings("sys_pipe_read", entry_info(sys_pipe_read).?.name);
     try std.testing.expectEqualStrings("sys_pipe_write", entry_info(sys_pipe_write).?.name);
     try std.testing.expectEqualStrings("sys_font_size", entry_info(sys_font_size).?.name);
@@ -2795,7 +2819,7 @@ test "syscall: counters are monotonic and report is deterministic" {
     var con = mock.console();
     report(&con);
     try std.testing.expectEqualStrings(
-        "syscalls: slots=64 implemented=61\n" ++
+        "syscalls: slots=64 implemented=62\n" ++
             "  0 sys_ping calls=2\n" ++
             "  1 sys_write calls=0\n" ++
             "  2 sys_yield calls=0\n" ++
@@ -2856,7 +2880,8 @@ test "syscall: counters are monotonic and report is deterministic" {
             "  57 sys_pipe_write calls=0\n" ++
             "  58 sys_font_size calls=0\n" ++
             "  59 sys_ping_send calls=0\n" ++
-            "  60 sys_ping_poll calls=0\n",
+            "  60 sys_ping_poll calls=0\n" ++
+            "  61 sys_win_set_title calls=0\n",
         mock.contents(),
     );
 }

@@ -113,6 +113,7 @@ meaningful — on main.
 | `agent/buffy/m16-c4-composition` | [`agent-buffy-m16-c4-composition.md`](agent-buffy-m16-c4-composition.md) |
 | `agent/buffy/m18-t16-scripting` | [`agent-buffy-m18-t16-scripting.md`](agent-buffy-m18-t16-scripting.md) |
 | `agent/buffy/m19-lane-a-shell` | [`agent-buffy-m19-lane-a-shell.md`](agent-buffy-m19-lane-a-shell.md) |
+| agent/buffy/m21-compositor-w9-w11-w12 | [`agent-buffy-m21-compositor-w9-w11-w12.md`](agent-buffy-m21-compositor-w9-w11-w12.md) |
 | agent/buffy/m21-compositor | [`agent-buffy-m21-compositor.md`](agent-buffy-m21-compositor.md) |
 | `agent/buffy/m24-calc-features` | [`agent-buffy-m24-calc-features.md`](agent-buffy-m24-calc-features.md) |
 | milestone nine interactive application events (claim 7463) | [`agent-buffy-m9-events.md`](agent-buffy-m9-events.md) |
