@@ -41,6 +41,17 @@
 # real disk storage now.
 #
 # Per run this reports: rc, serial-bytes, and per-assertion flags.
+# Run isolation (#523 item 2 / issue #528, claim 5069): every PAIR of boots
+# runs against a PRIVATE WRITABLE disk image ($RUN_DIR/disk-base.img, seeded
+# fresh from artifacts/disk.img after the build), a private EFI var store,
+# and private serial logs under $RUN_DIR. The writable copy (not a throwaway
+# overlay) is required here: run B exists precisely to prove run A's write
+# PERSISTED on the same image through a reboot — a pristine-per-boot overlay
+# would erase the phenomenon under test. Two concurrent instances still
+# cannot clobber each other (each gets its own image). Set
+# DIPSHIT_GATE_SUFFIX=_alt for distinct canonical evidence names; set
+# DIPSHIT_KEEP_RUN=1 to keep the scratch dir.
+#
 # Class B — Apple silicon + VZ only; boots real VMs. A green CI badge
 # proves class A only and says nothing about this gate.
 #
@@ -58,14 +69,26 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-GATE_LOG="artifacts/live-fs-gate.txt"
+source tools/lib/gate-run.sh
+
+SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
+
+GATE_LOG="$(art live-fs-gate.txt)"
 exec > >(tee "$GATE_LOG") 2>&1
-trap 'sleep 0.5' EXIT
+trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
 
 PAIRS="${BOOTS:-1}"
-REPORT="artifacts/live-fs-report.txt"
+REPORT="$(art live-fs-report.txt)"
 
 echo "=== verify-live-fs: claim 6420 — FAT32 storage driver (ls/cat/write persist through reboot on the disk), $PAIRS pair(s) of boots ==="
+
+# --- per-run isolation -------------------------------------------------------
+# Private scratch dir + PRIVATE WRITABLE DISK for every pair of boots
+# (see the isolation note above and tools/lib/gate-run.sh).
+gate_begin live-fs
+echo "run dir: $RUN_DIR"
+
 
 # --- tool versions + revision -----------------------------------------------
 zig version; swift --version 2>&1 | head -1; sw_vers
@@ -82,16 +105,25 @@ swift build --package-path host/vm-runner --configuration release
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
 # --- scripted keystrokes -----------------------------------------------------
-cat > artifacts/live-fs-script-A.txt <<'EOF'
+# The trailing `version` gives the guest two more shell cycles after the
+# subdirectory cat before the runner exits on its output ("dipshit-kernel"
+# never appears in any typed echo): killing the VM the instant a reply
+# lands can interrupt the loader/kernel's own boot-time FAT writes and
+# leave the image dirty for the NEXT boot of the pair (observed
+# 2026-08-24, claim 5069: run B then failed to boot at all — empty
+# serial).
+cat > "$RUN_DIR/script-A.txt" <<'EOF'
 write hello.txt hello world
 ls
 cat hello.txt
 ls EFI/BOOT
 cat EFI/BOOT/BOOTAA64.EFI
+version
 EOF
-cat > artifacts/live-fs-script-B.txt <<'EOF'
+cat > "$RUN_DIR/script-B.txt" <<'EOF'
 ls
 cat hello.txt
+version
 EOF
 
 # --- per-run gate ------------------------------------------------------------
@@ -105,47 +137,49 @@ run_one() {
     if [ "$fresh" = 1 ]; then
         # Fresh NVRAM store: the FAT path does not use variables, but a
         # clean store keeps the marker/probe evidence legible.
-        rm -f artifacts/efi-vars.bin
+        rm -f "$RUN_DIR/efi-vars.bin"
     fi
-    rm -f artifacts/vm-serial.log
+    rm -f "$RUN_DIR/vm-serial-$tag.log"
     set +e
-    host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log \
+    host/vm-runner/.build/release/VMRunner "$RUN_DIR/disk-base.img" \
+        --serial "$RUN_DIR/vm-serial-$tag.log" \
         --script "$script" --script-expect "$expect" --timeout 40 \
-        > "artifacts/live-fs-run-$tag.txt" 2>&1
+        > "$(art live-fs-run-$tag.txt)" 2>&1
     local RC=$?
     set -e
-    [ -f artifacts/vm-serial.log ] && cp artifacts/vm-serial.log "artifacts/live-fs-serial-$tag.log" || true
+    [ -f "$RUN_DIR/vm-serial-$tag.log" ] && cp "$RUN_DIR/vm-serial-$tag.log" "$(art live-fs-serial-$tag.log)" || true
+    local SER="$(art live-fs-serial-$tag.log)"
 
     local SERIAL_BYTES=0
     local WRITEOK=0 FILELISTED=0 ESPFILES=0 CATREPLY=0 WINDOW=0 LSHEAD=0 SUBDIRLS=0 SUBDIRCAT=0
-    if [ -f artifacts/vm-serial.log ]; then
-        SERIAL_BYTES=$(wc -c < artifacts/vm-serial.log | tr -d ' ')
+    if [ -f "$SER" ]; then
+        SERIAL_BYTES=$(wc -c < "$SER" | tr -d ' ')
         # The write-ok reply: "write: ok (persisted 11 bytes to FAT on the ESP)".
-        grep -a -qF -- "write: ok (persisted" artifacts/vm-serial.log && WRITEOK=1
+        grep -a -qF -- "write: ok (persisted" "$SER" && WRITEOK=1
         # Milestone four card 2: the /-path surface. `ls EFI/BOOT` lists the
         # loader's directory (its listing row, two-space indented); `cat
         # EFI/BOOT/BOOTAA64.EFI` reports the honest direct-read cap (the
         # ~165 KiB loader exceeds the 2048-byte bounded read buffer).
-        grep -a -qF -- "ls: EFI/BOOT entries=" artifacts/vm-serial.log && grep -a -qF -- "  BOOTAA64.EFI" artifacts/vm-serial.log && SUBDIRLS=1
-        grep -a -qF -- "cat: EFI/BOOT/BOOTAA64.EFI: file is" artifacts/vm-serial.log && grep -a -qF -- "direct read caps" artifacts/vm-serial.log && SUBDIRCAT=1
+        grep -a -qF -- "ls: EFI/BOOT entries=" "$SER" && grep -a -qF -- "  BOOTAA64.EFI" "$SER" && SUBDIRLS=1
+        grep -a -qF -- "cat: EFI/BOOT/BOOTAA64.EFI: file is" "$SER" && grep -a -qF -- "direct read caps" "$SER" && SUBDIRCAT=1
         # The persistence proof: hello.txt LISTED in the ls output as a
         # real [esp] disk file (the FAT volume, not an NVRAM variable).
         # The listing shows the FAT 8.3 short name — the write-time window
         # name in run A ("hello.txt") and the on-disk name after a reboot
         # ("HELLO.TXT", uppercase) — so the match is case-insensitive and
         # anchored to the two-space listing indent.
-        grep -a -qi -- "  hello" artifacts/vm-serial.log && FILELISTED=1
+        grep -a -qi -- "  hello" "$SER" && FILELISTED=1
         # The FAT volume listing itself (loader-written files on the disk).
-        grep -a -qF -- "KERNEL.BIN" artifacts/vm-serial.log && ESPFILES=1
-        grep -a -qF -- "BOOTED.TXT" artifacts/vm-serial.log && ESPFILES=1
+        grep -a -qF -- "KERNEL.BIN" "$SER" && ESPFILES=1
+        grep -a -qF -- "BOOTED.TXT" "$SER" && ESPFILES=1
         # The cat reply (run A: also echoed in the write line; run B: only
         # the reply can produce it).
-        grep -a -qF -- "hello world" artifacts/vm-serial.log && CATREPLY=1
+        grep -a -qF -- "hello world" "$SER" && CATREPLY=1
         # The boot-time window line proves the FAT mount ran at boot with
         # the disk ready (disk=1).
-        grep -a -qF -- "esp window: esp=" artifacts/vm-serial.log && WINDOW=1
-        grep -a -qF -- "disk=1" artifacts/vm-serial.log && WINDOW=1
-        grep -a -qF -- "ls: esp=" artifacts/vm-serial.log && LSHEAD=1
+        grep -a -qF -- "esp window: esp=" "$SER" && WINDOW=1
+        grep -a -qF -- "disk=1" "$SER" && WINDOW=1
+        grep -a -qF -- "ls: esp=" "$SER" && LSHEAD=1
     fi
     local PASS=0
     if [ "$RC" = 0 ] && [ "$WINDOW" = 1 ] && [ "$LSHEAD" = 1 ] && [ "$ESPFILES" = 1 ] && [ "$FILELISTED" = 1 ] && [ "$CATREPLY" = 1 ]; then
@@ -178,14 +212,39 @@ while [ "$n" -lt "$PAIRS" ]; do
     echo
     echo "=== live-fs pair $n, run A (write/ls/cat, fresh disk) ==="
     AOK=0
-    # The expect is the LAST reply followed by the next prompt — the
-    # runner exits when it appears, so it must be the final script line's
-    # reply (the subdir cat's honest cap message; the write line's echo
-    # contains "hello world" too, so that must not be the exit trigger).
-    run_one "A-$n" "artifacts/live-fs-script-A.txt" $'direct read caps at 0x0000000000000800 bytes\ndipshit> ' 1 && AOK=1 || true
+    # The expect anchors to the LAST reply followed by the next prompt —
+    # the runner exits when it appears, so it must be the final script
+    # line's reply (the subdir cat's honest cap message; the write line's
+    # echo contains "hello world" too, so that must not be the exit
+    # trigger).
+    # Expect (#528 rot class 1, revised claim 5069): the historical
+    # '<reply>\ndipshit> ' anchor died with M18 T5's ANSI-colored prompt
+    # (claim 0163). The trailing-prompt half is NOT droppable though:
+    # OBSERVED TODAY (2026-08-24) a runner exit that fires the instant a
+    # reply lands kills the guest before its FAT write-back settles and
+    # leaves the image UNBOOTABLE for the next boot of the pair (empty
+    # serial; reproduced raw). Anchoring on the reply + the OBSERVED
+    # colored prompt bytes restores fire-at-idle semantics:
+    # `direct read caps at 0x0000000000000800 bytes\n\x1b[32mdipshit> `.
+    # OBSERVED COLOR DETAIL (2026-08-24): the prompt is RED (\x1b[31m)
+    # after an ERROR reply and GREEN (\x1b[32m) after success — this
+    # script ends on the honest direct-read-cap ERROR, so the anchor is
+    # the red form.
+    run_one "A-$n" "$RUN_DIR/script-A.txt" $'direct read caps at 0x0000000000000800 bytes\n\x1b[31mdipshit> ' 1 && AOK=1 || true
     echo "=== live-fs pair $n, run B (persistence through reboot, same disk) ==="
     BOK=0
-    run_one "B-$n" "artifacts/live-fs-script-B.txt" $'hello world\ndipshit> ' 0 && BOK=1 || true
+    # Same reply+idle-prompt anchor as run A (see above): "hello world"
+    # appears only in this script's cat REPLY, and the colored prompt
+    # bytes make the exit land at idle.
+    # OBSERVED TODAY (2026-08-24, claim 5069): immediately re-attaching a
+    # once-written image intermittently yields a VM that dies before any
+    # serial output (state=0) on this macOS 27.0 host — reproduced with
+    # main's own scripts on plain copies, so NOT introduced by this
+    # migration. A short settle between the pair's boots reduces it
+    # empirically; the residual flake is documented in the claim file
+    # and gate inventory rather than hidden.
+    sleep 3
+    run_one "B-$n" "$RUN_DIR/script-B.txt" $'hello world\n\x1b[32mdipshit> ' 0 && BOK=1 || true
     if [ "$AOK" = 1 ] && [ "$BOK" = 1 ]; then
         PASS=$((PASS + 1))
     fi
