@@ -1090,6 +1090,11 @@ pub fn cvlog_puts(line: []const u8) bool {
     // array would fold into .rodata with a baked (image-relative) pointer.
     cv_scatter[0] = cv_log_line[0..cv_log_line_len];
     const h = submit_ex(1, cv_scatter[0..1], cv_log_ack_buf[0..], false) orelse return false;
+    // Claim 0680 fix: the chain MUST go back to the free list — a polled
+    // send-and-forget here leaked two descriptors per line, which the
+    // spike's five lines survived but the console tee's sustained traffic
+    // did not (ring exhausted after ~16 sends, every later send dropped).
+    defer free_chain_q(1, h);
     const n = wait(1, h, cv_log_budget, cv_log_ack_buf[0..]) orelse return false;
     cv_log_ack_len = @min(@as(usize, n), cv_log_ack_buf.len);
     if (cv_log_ack_len < 5) return false; // "ACK:0" is the shortest valid ack
@@ -1186,6 +1191,7 @@ fn tee_send_line(line: []const u8) bool {
     @memcpy(tee_tx_buf[0..line.len], line);
     cv_scatter[0] = tee_tx_buf[0..line.len];
     const h = submit_ex(1, cv_scatter[0..1], tee_ack_buf[0..], false) orelse return false;
+    defer free_chain_q(1, h); // claim 0680: never leak a polled send's chain
     const n = wait(1, h, tee_budget, tee_ack_buf[0..]) orelse return false;
     if (n < 4) return false;
     if (!std.mem.eql(u8, tee_ack_buf[0..3], "OK" ++ ":")) return false;
@@ -1241,14 +1247,16 @@ var snap_ack_buf: [32]u8 align(16) = undefined;
 
 /// RFC 1071 one's-complement Internet checksum, big-endian word semantics
 /// (mirrors ipv4.checksum; kept local so this module stays self-contained
-/// and testable without importing the network stack).
+/// and testable without importing the network stack). The accumulator is
+/// u64: a whole-frame checksum over the 3.5 MiB scanout overflows u32
+/// before the fold (observed live, claim 0680).
 pub fn checksum1071(data: []const u8) u16 {
-    var sum: u32 = 0;
+    var sum: u64 = 0;
     var i: usize = 0;
     while (i + 1 < data.len) : (i += 2) {
-        sum += (@as(u32, data[i]) << 8) | data[i + 1];
+        sum += (@as(u64, data[i]) << 8) | data[i + 1];
     }
-    if (i < data.len) sum += @as(u32, data[i]) << 8;
+    if (i < data.len) sum += @as(u64, data[i]) << 8;
     while (sum >> 16 != 0) sum = (sum & 0xffff) + (sum >> 16);
     return ~@as(u16, @truncate(sum));
 }
@@ -1305,6 +1313,7 @@ pub fn build_snap_done(chunks: u16, total: u32, cksum: u16) [16]u8 {
 /// snapshot queue and verify the host's OK ack. Returns false loudly.
 fn snap_submit(parts: []const []const u8) bool {
     const h = submit_ex(snap_qidx, parts, snap_ack_buf[0..], false) orelse return false;
+    defer free_chain_q(snap_qidx, h); // claim 0680: 113-chunk streams cannot afford leaks
     const n = wait(snap_qidx, h, tee_budget * 4, snap_ack_buf[0..]) orelse return false;
     if (n < 3) return false;
     return std.mem.eql(u8, snap_ack_buf[0..3], "OK" ++ ":");
@@ -1699,6 +1708,13 @@ test "virtio_custom: checksum1071 matches RFC 1071 semantics" {
     // Carry folding: 0xff00 + 0xff00 = 0x1fe00 → fold 0xfe01 → complement
     // 0x01fe.
     try std.testing.expectEqual(@as(u16, 0x01fe), checksum1071(&[_]u8{ 0xff, 0x00, 0xff, 0x00 }));
+    // Whole-frame scale: 256 KiB of 0xff = 131072 words × 0xffff sums to
+    // 0x1_FFFE_0000, which OVERFLOWS a u32 accumulator before folding
+    // (observed live as a host-side Swift arithmetic-overflow trap,
+    // claim 0680). Fold: 0x1_FFFE_0000 → 0x1_FFFE → 0xFFFF → complement
+    // 0x0000 — a valid checksum of zero, exactly what the wire needs.
+    const big_ff = [_]u8{0xff} ** 262144;
+    try std.testing.expectEqual(@as(u16, 0x0000), checksum1071(&big_ff));
 }
 
 test "virtio_custom: snapshot framing builders produce the documented wire shapes (claim 0680)" {

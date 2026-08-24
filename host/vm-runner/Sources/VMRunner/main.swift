@@ -4330,14 +4330,17 @@ final class CustomVirtioSpikeDeviceDelegate: NSObject, VZCustomVirtioDeviceDeleg
     /// RFC 1071 one's-complement Internet checksum over big-endian words —
     /// byte-for-byte the same function as the guest's ipv4.checksum /
     /// virtio_custom.checksum1071, so the host verifies what the guest sent.
+    /// The accumulator is UInt64: a whole-frame checksum over the 3.5 MiB
+    /// scanout overflows UInt32 before the fold (observed live as a Swift
+    /// "arithmetic overflow" trap, claim 0680).
     private func rfc1071(_ b: [UInt8]) -> UInt16 {
-        var sum: UInt32 = 0
+        var sum: UInt64 = 0
         var i = 0
         while i + 1 < b.count {
-            sum += (UInt32(b[i]) << 8) | UInt32(b[i + 1])
+            sum += (UInt64(b[i]) << 8) | UInt64(b[i + 1])
             i += 2
         }
-        if i < b.count { sum += UInt32(b[i]) << 8 }
+        if i < b.count { sum += UInt64(b[i]) << 8 }
         while (sum >> 16) != 0 { sum = (sum & 0xffff) + (sum >> 16) }
         return ~UInt16(sum & 0xffff)
     }
