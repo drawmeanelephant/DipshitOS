@@ -56,6 +56,78 @@ dedicated custom device (replaces CGEvent synthesis — issues #179/#151),
 structured console/gate-marker + framebuffer-snapshot queues instead of
 vm-serial.log parsing and glyph scraping, feature-bit-driven capabilities.
 
+## Input channel over the custom virtio device
+
+Claim 9588 (issue #523 item 3): queue 3 of the custom virtio device carries
+host→guest keyboard injection, retiring the synthesized-NSEvent seam for
+gates (the claim-4769 activation wall and the claim-8844 `events=0` failure
+mode do not apply — no window, view, or CGEvent exists on this path).
+
+Device shape (queue count IS the capability signal, unchanged rule):
+
+| Runner flag | Queues | Queue plan |
+|-------------|--------|------------|
+| `--custom-virtio` | 2 | 0 exchange · 1 guest log |
+| `--cvc-echo` | 3 | + 2 host-push echo |
+| `--via-virtio` | 4 | + **3 input** |
+
+Virtqueues are contiguous, so `--via-virtio` implies the full four-queue
+shape including the push echo (`--cvc-echo` semantics). The guest driver
+probes queue 3's size through the common config: a non-zero read arms it;
+zero means absent and everything upstream stays byte-identical.
+
+Wire format — one message per receive buffer, written by the HOST into a
+buffer the GUEST pre-armed (the only host→guest data path the SDK exposes,
+the claim-3141 virtio-net-RX pattern):
+
+```
+offset  size  field
+0       1     kind    1 = HID keyboard boot report (only kind defined)
+1       1     flags   reserved, host writes 0
+2       2     len     payload length, little-endian (8 for kind 1)
+4       12    payload kind 1: the raw 8-byte report [mods, 0, k0..k5]
+              (HID boot protocol: mods bit0=LCtrl bit1=LShift bit2=LAlt
+              bit3=LCmd; k0..k5 = usage IDs, 0-padded)
+```
+
+Fixed total size 16 bytes. Receive buffers are posted at capacity 32 bytes
+(a size mismatch is a guest-side malformed-message counter, never a wedge).
+
+Semantics:
+
+- The guest pre-arms a pool of EIGHT device-write buffers on queue 3 at
+  spike-init time (one kick) and replenishes each buffer immediately after
+  consuming its completion (free → re-alloc → re-post → kick). A message
+  whose envelope or `len` does not validate increments the bad-message
+  counter and is dropped loudly-by-counter, never decoded partially.
+- Kind-1 payloads are handed to `input.decode_keyboard_report` verbatim —
+  the exact function XHCI keyboard reports go through — so injected keys
+  are ordinary keys everywhere downstream: the per-process event FIFO
+  (`sys_poll_event`/`sys_wait_event`) when an app window owns focus, the
+  console byte FIFO + line editor when the terminal does, and the `input`
+  monitor command's counters either way.
+- The guest pumps completions from the shell idle loop's RX poll seam (one
+  cheap used-ring read when unarmed); polled, like every other
+  custom-virtio path — no IRQ dependency.
+- Host pacing: messages enqueue at 0.25 s spacing on the device's serial
+  delegate queue (all element access single-threaded with the callbacks);
+  if the pool is momentarily empty the enqueue retries (bounded, loud on
+  exhaustion) instead of dropping.
+- Host token→usage mapping is the guest keymap's inverse over the same
+  vocabulary `macKey`/`macChord` accept (a–z, 0–9, punctuation, Enter,
+  named nav tokens, ctrl-x); keyUp is the all-zero report, so held-set
+  transitions drive KEY_DOWN/KEY_UP exactly like a real keyboard.
+
+Version detection is loud: `--via-virtio`/`--cvc-echo`/`--custom-virtio`
+on a binary without the SPIKE custom-virtio code, or on a host older than
+macOS 27, is a fatal runner error — never a silent flag ignore. The serial
+console keeps its panic/fallback role untouched; the input channel is
+additive and default-off (without the flags the VM configuration is
+byte-identical).
+
+Status: **[design]** at definition time (claim 9588); facts flip to
+**[observed]** with the live class-B proof under `artifacts/`.
+
 Non-PCI platform facts:
 
 - **EFI variable store**: file-backed (`VZEFIVariableStore`); create with
