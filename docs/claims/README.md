@@ -88,6 +88,7 @@ CI) fails if the table drifts from the claim files.
 | [4402-m27-compositor-polish](4402-m27-compositor-polish.md) | Buffy (`agent/buffy/m21-compositor`) | 🔄 agent/buffy/m21-compositor |
 | [4429-archive-m5-m6-prompts](4429-archive-m5-m6-prompts.md) | buffy (`agent/buffy/hygiene-archive-m5-m6-prompts`) | ✅ done |
 | [4516-archive-ragshit-test-artifacts](4516-archive-ragshit-test-artifacts.md) | oxalpha (`t3code/handle-issue-268-git-current`) | ✅ done |
+| [4928-per-agent-worktrees](4928-per-agent-worktrees.md) | ox-alpha (`agent/ox-alpha/agent-worktrees`) | 🔄 `agent/ox-alpha/agent-worktrees` |
 | [5093-scroll-keys-chords](5093-scroll-keys-chords.md) | buffy (`agent/buffy/m18-t16-scripting`) | ✅ done 2026-08-22 |
 | [5127-m20-text-rendering-lane-c](5127-m20-text-rendering-lane-c.md) | ox-alpha (`lane-c/m20-text-rendering`) | ✅ done 2026-08-22 — all 15 issues closed (#306–#320); |
 | [5227-notepad-wrap-find](5227-notepad-wrap-find.md) | buffy (`agent/buffy/m15-c5c6-notepad`) | ✅ done 2026-08-20 — `user/src/notepad.zig` soft-wrap (`TextLayout` last_space, gutter, `Line X of Y`) + `find_next`/`replace`/`replace_all` (case_sensitive=false) + `AppState` find bar (`find_active`/`find_buf`/`replace_buf`) + `draw` highlight + `handle_keyboard_event` Ctrl+F/H, host tests `soft-wrap`/`find` PASS, `verify-bss-budget` PASS `9788088/11534336` |

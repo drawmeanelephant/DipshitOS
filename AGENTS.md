@@ -85,6 +85,15 @@ full coordination setup (per-claim files, per-branch logs, conventions)
 lives under `docs/claims/`, `docs/logs/`, and `docs/status.md`; the binding
 rules are:
 
+- **One worktree per agent.** Concurrent agents never share a checkout.
+  Create yours with `just new-agent <name> <slug>` (worktree at
+  `../dipshitos-<name>`, branch `agent/<name>/<slug>` off `origin/main`),
+  reattach later with `just resume-agent`, clean up with `just drop-agent`.
+  Each worktree has its own `.build/` and `artifacts/`, so builds and
+  class-B VM gates cannot collide. Claim and log from inside your own
+  worktree. Shared-checkout staging leaks caused PR #524's false
+  coordination failure; claim 2564 made the gate immune to it, worktrees
+  remove the entire class.
 - **Claim before you start.** Non-trivial work gets a claim file under
   `docs/claims/` (copy `docs/claims/TEMPLATE.md`) and a log entry in
   `docs/logs/<branch>.md` before code is written. Claimed work is not
