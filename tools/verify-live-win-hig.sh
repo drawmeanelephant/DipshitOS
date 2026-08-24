@@ -33,6 +33,9 @@
 # real-mouse question and the Accessibility-granted CG route remain the
 # follow-up.
 #
+# Run isolation (#523 item 2 / issue #528, claim 5069): private stacked
+# disk + EFI vars + serial log + screen captures under $RUN_DIR.
+#
 # Class B — Apple silicon + VZ only; boots a real VM.
 #
 # Usage:
@@ -46,12 +49,17 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-GATE_LOG="artifacts/win-hig-gate.txt"
+source tools/lib/gate-run.sh
+
+SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
+
+GATE_LOG="$(art win-hig-gate.txt)"
 exec > >(tee "$GATE_LOG") 2>&1
-trap 'sleep 0.5' EXIT
+trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
 
 REPORT="artifacts/win-hig-report.txt"
-SCREEN_BASE="artifacts/hig-screen"
+SCREEN_BASE="$RUN_DIR/hig-screen"
 
 echo "=== verify-live-win-hig: card U5 (claim 0935) — the focus ring + title bars are visible and move with focus ==="
 
@@ -68,26 +76,34 @@ zig build image
 swift build --package-path host/vm-runner --configuration release
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
+# --- per-run isolation -------------------------------------------------------
+gate_begin live-win-hig
+echo "run dir: $RUN_DIR"
+
 # --- the session --------------------------------------------------------------
-cat > artifacts/win-hig-script.txt <<'EOF'
+cat > "$RUN_DIR/script.txt" <<'EOF'
 dui cycle
 exec WINLOOP.BIN
 echo hig-serial-ok
 EOF
 
-rm -f artifacts/efi-vars.bin artifacts/vm-serial.log "$SCREEN_BASE"*
+rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial.log" "$SCREEN_BASE"*
 set +e
-host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log \
+set +e
+host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
+    --serial "$RUN_DIR/vm-serial.log" \
     --input --display \
-    --script artifacts/win-hig-script.txt \
+    --script "$RUN_DIR/script.txt" \
     --screen "$SCREEN_BASE" --screenshot-after "winloop: present ok" \
     --timeout 120 \
-    > artifacts/win-hig-run.txt 2>&1
+    > "$(art win-hig-run.txt)" 2>&1
 RC=$?
 set -e
 
 # --- serial assertions --------------------------------------------------------
-SERIAL="artifacts/vm-serial.log"
+SERIAL="$RUN_DIR/vm-serial.log"
+cp "$SERIAL" "$(art win-hig-serial.log)" 2>/dev/null || true
+cp "$SCREEN_BASE"* artifacts/ 2>/dev/null || true
 CYCLED=0 THREE=0 OBSDONE=0 RUNNERFLAG=0
 if [ -f "$SERIAL" ]; then
     grep -a -qF -- "dui: cycle focused=1" "$SERIAL" && CYCLED=1

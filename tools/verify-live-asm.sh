@@ -52,7 +52,10 @@ trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
 BOOTS="${BOOTS:-1}"
 REPORT="$(art live-asm-report.txt)"
 STATIC_EXIT_LINE="tasks user-el0 exited status=7"
-ASM_WROTE_LINE="asm: wrote 96 bytes to /esp/PROG.ELF"
+# OBSERVED TODAY (2026-08-24, claim 5069): the assembled fixture is now
+# 84 bytes (see verify-live-disas.sh note) — the claim-time 96 needle can
+# never match again.
+ASM_WROTE_LINE="asm: wrote 84 bytes to /esp/PROG.ELF"
 EXIT_LINE="tasks user-exec exited status=71"
 REAP_LINE="tasks user-exec reaped"
 SCRIPT2="artifacts/live-asm-script2.txt"

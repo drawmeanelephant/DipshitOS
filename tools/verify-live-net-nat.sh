@@ -57,6 +57,16 @@
 # byte-identical. Evidence under artifacts/: live-net-nat-*.txt (runner
 # output), live-net-nat-*.log (serial copies), and the report.
 #
+# Run isolation (#523 item 2 / issue #528, claim 5069): private stacked
+# disk + EFI vars + serial log under $RUN_DIR. No guest disk writes in
+# this gate, so the throwaway overlay is safe here.
+#
+# Host-dependent observation (#528 rot class 3): this WHOLE gate observes
+# how THIS host's VZ NAT gateway answers a ping to 192.168.64.1 — the
+# learn counters vary per host exactly like net-tcp's Run C. Selectable
+# via DIPSHIT_NET_NAT_RUNS (default "A" = run it; set empty to skip on a
+# host whose NAT behaves differently).
+#
 # Class B — Apple silicon + VZ only; boots a real VM. A green CI badge
 # proves class A only and says nothing about this gate.
 #
@@ -71,9 +81,14 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-GATE_LOG="artifacts/live-net-nat-gate.txt"
+source tools/lib/gate-run.sh
+
+SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
+
+GATE_LOG="$(art live-net-nat-gate.txt)"
 exec > >(tee "$GATE_LOG") 2>&1
-trap 'sleep 0.5' EXIT
+trap 'gate_shared_disk_unlock; gate_end 2>/dev/null || true; sleep 0.5' EXIT
 
 REPORT="artifacts/live-net-nat-report.txt"
 
@@ -93,6 +108,10 @@ zig build image
 swift build --package-path host/vm-runner --configuration release
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
+# --- per-run isolation -------------------------------------------------------
+gate_begin live-net-nat
+echo "run dir: $RUN_DIR"
+
 # --- scripted keystrokes ----------------------------------------------------
 # The claim-4613 two-phase pattern: --script (phase 1) sets the static
 # address on the OBSERVED NAT subnet (192.168.64.0/24, gateway .1),
@@ -103,13 +122,13 @@ codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/
 # race: the ARP reply and the echo reply land in the polled RX drain
 # during shell idle between the commands, exactly as observed at claim
 # time (artifacts/live-net-nat-explore/).
-cat > artifacts/live-net-nat-script-1.txt <<'EOF'
+cat > "$RUN_DIR/script-1.txt" <<'EOF'
 net ip 192.168.64.5
 net arp 192.168.64.1
 net ping 192.168.64.1
 echo nat-phase1-ready
 EOF
-cat > artifacts/live-net-nat-script-2.txt <<'EOF'
+cat > "$RUN_DIR/script-2.txt" <<'EOF'
 net arp 192.168.64.1
 net arp
 net
@@ -121,14 +140,17 @@ EOF
 # shape). $1 = the runner output file, $2 = the serial log.
 run_one() {
     local out="$1" serial="$2"
-    rm -f artifacts/efi-vars.bin artifacts/vm-serial.log
+    rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial.log"
     # Capture the host's NAT bridge state DURING the run (documentation
     # only — the interface name (bridge0 here) and the router MAC vary
     # per host/boot; the guest-observed learn counters are the gate).
-    host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log \
-        --net-nat --script artifacts/live-net-nat-script-1.txt \
-        --script2 artifacts/live-net-nat-script-2.txt --script2-after "nat-phase1-ready" \
-        --script-expect $'nat-obs-done\ndipshit> ' --timeout 40 \
+    # Rot class 1 (#528): colored prompt killed the '<marker>\ndipshit> '
+    # anchor; this marker reply is output-only and last.
+    host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
+        --serial "$RUN_DIR/vm-serial.log" \
+        --net-nat --script "$RUN_DIR/script-1.txt" \
+        --script2 "$RUN_DIR/script-2.txt" --script2-after "nat-phase1-ready" \
+        --script-expect "nat-obs-done" --timeout 40 \
         > "$out" 2>&1 &
     local RUNNER_PID=$!
     sleep 10
@@ -137,18 +159,22 @@ run_one() {
     } > artifacts/live-net-nat-bridge.txt 2>&1 || true
     wait "$RUNNER_PID"
     local RC=$?
-    [ -f artifacts/vm-serial.log ] && cp artifacts/vm-serial.log "$serial" || true
-    echo "$RC" > /tmp/live-net-nat-rc.txt
+    [ -f "$RUN_DIR/vm-serial.log" ] && cp "$RUN_DIR/vm-serial.log" "$serial" || true
+    echo "$RC" > "$RUN_DIR/rc.txt"
 }
 
-rm -f artifacts/efi-vars.bin artifacts/vm-serial.log
-set +e
-run_one "artifacts/live-net-nat-run.txt" "artifacts/live-net-nat-serial.log"
-RC="$(cat /tmp/live-net-nat-rc.txt)"
-set -e
+RUNS="${DIPSHIT_NET_NAT_RUNS:-A}"
+if [ "$RUNS" != "" ] && [ "$RUNS" != "none" ]; then
+    set +e
+    run_one "$(art live-net-nat-run.txt)" "$(art live-net-nat-serial.log)"
+    RC="$(cat "$RUN_DIR/rc.txt")"
+    set -e
+else
+    RC=skip
+fi
 
 # --- assertions --------------------------------------------------------------
-SERIAL="artifacts/live-net-nat-serial.log"
+SERIAL="$(art live-net-nat-serial.log)"
 SERIAL_BYTES=0 IPSET=0 ARPSENT=0 PINGSENT=0 PONG=0 GWLEARNED=0 MACNAT=0 \
 ARPLEARN=0 STATUS=0 OBSDONE=0 RUNNERFLAG=0
 if [ -f "$SERIAL" ]; then
