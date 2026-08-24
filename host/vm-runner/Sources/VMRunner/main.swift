@@ -9,6 +9,8 @@
 //         [--console] [--debug-input] [--dump-marker <file>]
 //         [--nvram-console <file>] [--script <file>]
 //         [--script-after <text>] [--script-expect <text>] [--custom-virtio]
+//         [--cvc-echo] (claim 3141: the host-initiated custom-virtio push
+//          echo — implies --custom-virtio and attaches a third queue)
 //         [--sound] (milestone fifteen card A1, claim 6140: attach one
 //          VZVirtioSoundDeviceConfiguration with one
 //          VZVirtioSoundDeviceOutputStreamConfiguration (the PCM output
@@ -290,6 +292,11 @@ var script3Delay: Double = 0.5
 var script3Path: String?
 var script3After: String?
 var customVirtioEnabled = false
+// Claim 3141 (issue #523 item 3): `--cvc-echo` runs the HOST-initiated push
+// echo over a third virtqueue — implies --custom-virtio. The host app
+// enqueues the request into the guest's pre-armed receive buffer, the guest
+// replies on the same queue, and the delegate verifies byte-exactly.
+var cvcEchoEnabled = false
 // Milestone five card N1 (claim 1373): `--net <capture-file>` attaches the
 // virtio-net device; the guest's TX frames are captured byte-exactly to the
 // file. nil = default (no network device attached, config.networkDevices
@@ -537,6 +544,11 @@ while idx < arguments.count {
         idx += 2
     } else if arg == "--custom-virtio" {
         customVirtioEnabled = true
+        idx += 1
+    } else if arg == "--cvc-echo" {
+        // Claim 3141: the host-push echo spike — implies the device attach.
+        customVirtioEnabled = true
+        cvcEchoEnabled = true
         idx += 1
     } else if arg == "--net", idx + 1 < arguments.count {
         netCapturePath = arguments[idx + 1]
@@ -3347,8 +3359,23 @@ enum CustomVirtioSpike {
     static let pciClass: UInt8 = 0x00
     static let pciSubclass: UInt8 = 0x00
     // Two queues (claims 4374/4837): queue 0 = the exchange/transport
-    // queue, queue 1 = the guest log transport.
-    static let queueCount: UInt16 = 2
+    // queue, queue 1 = the guest log transport. The claim-3141 push echo
+    // (--cvc-echo) adds queue 2 — the queue COUNT is the capability signal;
+    // the guest driver probes its size through the common config.
+    static let queueCount: UInt16 = cvcEchoEnabled ? 3 : 2
+
+    // ---- Claim 3141 host-push echo state (all touched only on the
+    // device's serial deviceQueue) ----
+    // The byte-exact request the host app writes into the guest's pre-armed
+    // receive buffer, and the phase machine:
+    //   0 idle            — the rx buffer is armed, waiting for the guest's
+    //                       "cvc-push-armed" log line to trigger the push
+    //   1 awaiting reply  — the request was enqueued + returned
+    //   2 done            — the reply was observed and verified (or failed)
+    static let pushRequest = Data("CVC-PING-0x42".utf8)
+    /// Byte-exact success line constants (the gate greps these verbatim).
+    static let pushRequestText = "CVC-PING-0x42"
+    static var pushPhase = 0
 
     // The provider holds the configuration delegate *weakly* and the created
     // VZCustomVirtioDevice holds the device delegate *weakly* too, so both
@@ -3373,6 +3400,12 @@ enum CustomVirtioSpike {
         config.customVirtioDevices = [deviceConfig]
 
         let did = 0x1040 + Int(deviceID)  // virtio transitional PCI DID = 0x1040 + device_id (add, not OR)
+        if cvcEchoEnabled {
+            return String(
+                format: "  custom virtio: ENABLED — VID 0x1af4 DID 0x%04x (virtio deviceID 0x%02x), class 0x%02x/0x%02x, %d queue(s) incl. the claim-3141 push-echo queue (--cvc-echo)",
+                did, Int(deviceID), Int(pciClass), Int(pciSubclass), Int(queueCount)
+            )
+        }
         return String(
             format: "  custom virtio: ENABLED — VID 0x1af4 DID 0x%04x (virtio deviceID 0x%02x), class 0x%02x/0x%02x, %d queue(s); guest PCI discovery evidence (spike)",
             did, Int(deviceID), Int(pciClass), Int(pciSubclass), Int(queueCount)
@@ -3408,6 +3441,13 @@ final class CustomVirtioSpikeDeviceDelegate: NSObject, VZCustomVirtioDeviceDeleg
 
     func customVirtioDevice(_ device: VZCustomVirtioDevice, didReceiveNotificationFor queue: VZVirtioQueue) {
         print("CUSTOM-VIRTIO: guest notified queue \(queue.queueIndex) (size \(queue.queueSize))")
+        if queue.queueIndex == 2 && cvcEchoEnabled {
+            // Claim 3141 push-echo queue: phase-dependent handling — never
+            // drain it blindly (the armed rx buffer must survive until the
+            // host chooses to enqueue into it).
+            handlePushNotification(device: device, queue: queue)
+            return
+        }
         // Drain every available element (many may be in flight — claim
         // 4374's concurrency): queue 0 exchanges get the payload echoed
         // back verbatim; queue 1 log lines are printed to stdout and
@@ -3415,11 +3455,82 @@ final class CustomVirtioSpikeDeviceDelegate: NSObject, VZCustomVirtioDeviceDeleg
         // so the used ring advances (its length reflects writtenByteCount)
         // and the device IRQ asserts.
         while let element = queue.nextElement() {
-            process(element: element, queueIndex: Int(queue.queueIndex))
+            process(element: element, device: device, queueIndex: Int(queue.queueIndex))
         }
     }
 
-    private func process(element: VZVirtioQueueElement, queueIndex: Int) {
+    /// Claim 3141: queue-2 notifications. Phase 0 = the arm-time kick (the
+    /// guest pre-armed its receive buffer) — log and leave the buffer in
+    /// place. Phase 1 = the guest's reply arrived after our push — verify
+    /// byte-exactly, write the ack, return.
+    private func handlePushNotification(device: VZCustomVirtioDevice, queue: VZVirtioQueue) {
+        switch CustomVirtioSpike.pushPhase {
+        case 0:
+            print("CUSTOM-VIRTIO-PUSH: queue 2 notified with the rx buffer armed (idle — waiting for the guest's armed signal)")
+        case 1:
+            while let element = queue.nextElement() {
+                var bytes: [UInt8] = []
+                for buffer in element.readBuffers() {
+                    bytes.append(contentsOf: [UInt8](buffer))
+                }
+                let expected = [UInt8](CustomVirtioSpike.pushRequest)
+                if bytes == expected {
+                    // Byte-exact reply observed: acknowledge with OK:<len>
+                    // so the guest can verify the full loop closed.
+                    let ackText = "OK:\(bytes.count)"
+                    do {
+                        try element.write(Data(ackText.utf8))
+                        print("CUSTOM-VIRTIO-PUSH: reply verified rsp=\"\(CustomVirtioSpike.pushRequestText)\" (byte-exact), wrote ack=\"\(ackText)\"")
+                    } catch {
+                        print("CUSTOM-VIRTIO-PUSH: ack write FAILED: \(error)")
+                    }
+                } else {
+                    print("CUSTOM-VIRTIO-PUSH: reply MISMATCH (\(bytes.count) byte(s), expected \(expected.count)): hex=[\(hexSummary(bytes))]")
+                }
+                element.returnToQueue()
+                CustomVirtioSpike.pushPhase = 2
+            }
+        default:
+            print("CUSTOM-VIRTIO-PUSH: unexpected queue 2 notification in phase \(CustomVirtioSpike.pushPhase)")
+        }
+    }
+
+    /// Claim 3141: the host app ENQUEUES the request. Called on observing
+    /// the guest's "cvc-push-armed" log line (event-driven — no timing
+    /// dance): dequeue the pre-armed receive buffer, write the request into
+    /// it, return it. The framework then advances the used ring and asserts
+    /// the device interrupt — the only host→guest data path the SDK exposes.
+    private func enqueuePushRequest(device: VZCustomVirtioDevice) {
+        guard CustomVirtioSpike.pushPhase == 0 else {
+            print("CUSTOM-VIRTIO-PUSH: push requested in phase \(CustomVirtioSpike.pushPhase) (skipped)")
+            return
+        }
+        guard let queue = device.queue(at: 2) else {
+            print("CUSTOM-VIRTIO-PUSH: queueAtIndex(2) unavailable")
+            return
+        }
+        guard let element = queue.nextElement() else {
+            print("CUSTOM-VIRTIO-PUSH: no pre-armed rx buffer available (nextElement nil)")
+            return
+        }
+        guard element.readBuffersByteCount == 0, element.writeBuffersByteCount >= CustomVirtioSpike.pushRequest.count else {
+            print("CUSTOM-VIRTIO-PUSH: unexpected rx shape (read \(element.readBuffersByteCount), write \(element.writeBuffersByteCount))")
+            element.returnToQueue()
+            return
+        }
+        do {
+            try element.write(CustomVirtioSpike.pushRequest)
+        } catch {
+            print("CUSTOM-VIRTIO-PUSH: request write FAILED: \(error)")
+            element.returnToQueue()
+            return
+        }
+        element.returnToQueue()
+        CustomVirtioSpike.pushPhase = 1
+        print("CUSTOM-VIRTIO-PUSH: host enqueued req=\"\(CustomVirtioSpike.pushRequestText)\" (\(CustomVirtioSpike.pushRequest.count) byte(s)) into the pre-armed rx buffer")
+    }
+
+    private func process(element: VZVirtioQueueElement, device: VZCustomVirtioDevice, queueIndex: Int) {
         // Reassemble the guest's device-read spans (claim 9492: a
         // >4 KiB payload arrives as several readBuffers()).
         var bytes: [UInt8] = []
@@ -3432,6 +3543,13 @@ final class CustomVirtioSpikeDeviceDelegate: NSObject, VZCustomVirtioDeviceDeleg
             // write buffers — the guest verifies the ack.
             let line = String(bytes: bytes, encoding: .utf8) ?? "<non-utf8>"
             print("CUSTOM-VIRTIO-LOG: \(line)")
+            if line == "cvc-push-armed" && cvcEchoEnabled {
+                // Claim 3141: the guest pre-armed its push rx buffer — the
+                // HOST now chooses the moment and enqueues the request.
+                // Inline on this serial deviceQueue, so ordering with the
+                // queue-2 reply notification is deterministic.
+                enqueuePushRequest(device: device)
+            }
             let ack = Data("ACK:\(bytes.count)".utf8)
             do {
                 try element.write(ack)

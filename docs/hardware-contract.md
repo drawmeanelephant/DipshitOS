@@ -27,6 +27,35 @@ assumption comes from documentation or reasoning only.
 | Sound (virtio-snd) | `0x1af4/0x1059` cls `0x040100` | **NO** (`st=0f`) | Device config counts read **0/0/0** (jacks/streams/chmaps) — enumerate topology via CONTROL-queue JACK_INFO/PCM_INFO queries. VZ speaks the **virtio-1.3 control renumbering** (OK=`0x8000`; PCM_INFO `0x0100` … STOP `0x0105`). Control replies are `[status hdr][entries]` (status FIRST — Linux reads the reverse). Playback TX queue = **queue 2**. Formats S16\|S32\|FLOAT, rates 48k\|96k, 1–2 ch, OUTPUT. **[observed]** claims 6140/5877/7636/3206 |
 | Custom virtio | `0x1af4/0x1082` (vendor-defined) | n/a | Firmware boots it with the PCI command register **disabled** (`0x10`) — write `command=0x16` in init before any BAR access. Used-buffer IRQ is a real SPI (69) but **coalesced per burst** — drain the whole used ring. **[observed]** claims 5844/0828/9737 |
 
+Custom-virtio identity rationale (claim 3141): the device keeps the
+virtio-pci transitional scheme — vendor `0x1af4` is REQUIRED so the
+transport is discoverable as virtio (a private vendor ID would make it a
+vendor-specific PCI device and break the capability walk every guest driver
+here uses); DID = `0x1040 + deviceID`, with `deviceID = 0x42`. The OASIS
+virtio device-type registry has no type 66 assigned (registered types end
+well below `0x40`; `0x40+` are unassigned/reserved), and VZ exposes
+`deviceID` verbatim in config space, so `0x1af4/0x1082` cannot collide with
+any real virtio device shipped by VZ. If the TC ever assigns type 0x42, this
+spike must move its deviceID. Class `0x00/0x00` (pre-PCI-2.0 "legacy",
+unclaimed by any class driver) keeps macOS from binding anything to it.
+
+Host-push channel (queue 2, claim 3141, `--cvc-echo` only — the classic
+`--custom-virtio` attach stays two-queue): the Xcode 27 SDK exposes NO
+host-side enqueue — `VZVirtioQueue` elements exist only as descriptors the
+guest posted, and `returnToQueue` (used-ring advance + SPI assert) is the
+framework's ONLY host→guest signaling. The push therefore uses the
+virtio-net-RX pattern: the guest pre-arms ONE empty device-write receive
+buffer and signals readiness over queue 1; the host dequeues it via
+`nextElement()`, writes the request, returns it; the guest replies on the
+same queue. Queue COUNT (2 vs 3) is the capability signal — probed through
+the common-config `queue_size` read of select=2, which reads 0 per spec on
+the two-queue device (**[observed]** both shapes). Byte protocol:
+`CVC-PING-0x42` (13 B) request → verbatim echo reply → `OK:13` ack.
+Productionization TODO (documented, not built): input-injection HID over a
+dedicated custom device (replaces CGEvent synthesis — issues #179/#151),
+structured console/gate-marker + framebuffer-snapshot queues instead of
+vm-serial.log parsing and glyph scraping, feature-bit-driven capabilities.
+
 Non-PCI platform facts:
 
 - **EFI variable store**: file-backed (`VZEFIVariableStore`); create with
