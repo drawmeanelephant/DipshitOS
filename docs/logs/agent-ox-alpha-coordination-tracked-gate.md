@@ -9,3 +9,14 @@
   tracked-files-only listing in verify-coordination.sh and
   refresh-indexes.sh; sandbox in test-coordination.sh becomes a git repo;
   new regression case for untracked immunity. Claim 2564.
+
+- **2026-08-24** — *ox-alpha*: DONE. PR #525 merged as e22b375 after two
+  rounds: (1) rebase conflict in the generated logs-index region resolved by
+  regenerating, not hand-merging — during which `git add -A` briefly swept
+  the foreign m25 staging files into the commit (caught and removed before
+  push); (2) first push failed CI because refresh-indexes.sh had fixed only
+  the worktree copies while `git commit` shipped stale index tables with
+  rows for files absent from the commit — fixed by staging explicitly and
+  verifying the COMMIT in a detached worktree before pushing. Lesson: gate
+  the tree you ship, not the one you see.
+

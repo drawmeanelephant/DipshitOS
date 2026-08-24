@@ -1,7 +1,7 @@
 # Claim: per-agent worktrees
 
 - **Owner:** ox-alpha (`agent/ox-alpha/agent-worktrees`)
-- **Status:** 🔄 `agent/ox-alpha/agent-worktrees`
+- **Status:** ✅ done 2026-08-24 — PR #526 merged: `just new-agent/resume-agent/drop-agent/list-agents`, canonical naming (`../dipshitos-<name>`, `agent/<name>/<slug>`), AGENTS.md mandates one worktree per agent; round-trip selftest + gates green; `just` installed on dev host (v1.58.0)
 - **Depends on:** 2564 (tracked-only coordination gate — complementary; that fix made the gate immune to shared-checkout leaks, this removes the shared checkout)
 
 ## Problem
