@@ -11,7 +11,7 @@
 - **Touches:** tools/verify-coordination.sh, tools/status/refresh-indexes.sh, tools/status/test-coordination.sh, .github/workflows/indexes.yml, AGENTS.md, docs/claims/README.md, docs/claims/TEMPLATE.md, docs/logs/README.md, docs/gate-inventory.md, docs/testing.md, docs/status.md, site/contributing.md, site/claims.md
 - **Depends on:** —
 - **Heartbeat:** 2026-08-24
-- **Status:** 🔄 `t3code/concurrent-agents-merge-conflicts`
+- **Status:** ✅ done 2026-08-24 — observed end-to-end on this host: PRs #532/#533/#534 merged; live runs fixed two real failures (no-bypass ruleset rejected direct push → auto-merge PR design; checkout's forced GITHUB_TOKEN header beat the PAT → extraheader unset + `gh auth setup-git`); run 32723105968 pushed `indexes/bot-regenerate`, PR #535 opened, required check passed (macOS build 4m42s), auto-squash-merged as `2954d68`; main's tables now carry the 2599/5069 rows (logs index 93 rows) with zero branch-side churn. Test suite 21/21.
 
 ## Notes
 
