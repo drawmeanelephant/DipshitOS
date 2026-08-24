@@ -1,7 +1,7 @@
 # Claim: claim lifecycle — declared files + staleness
 
 - **Owner:** ox-alpha (`agent/ox-alpha/claim-lifecycle`)
-- **Status:** 🔄 `agent/ox-alpha/claim-lifecycle`
+- **Status:** ✅ done 2026-08-24 — PR #527 merged (8420a89): Touches overlap gate + staleness warnings live; test suite 19/19; AGENTS.md/TEMPLATE/README conventions landed
 - **Depends on:** 2564 (tracked-only gate), 4928 (per-agent worktrees)
 - **Touches:** tools/verify-coordination.sh, tools/status/test-coordination.sh, docs/claims/TEMPLATE.md, docs/claims/README.md, AGENTS.md, docs/claims/2564-tracked-only-coordination-gate.md, docs/claims/4928-per-agent-worktrees.md
 

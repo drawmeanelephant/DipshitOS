@@ -107,6 +107,12 @@ jobs:
   # SDK. The macos-latest job above cannot build it; this job runs on
   # GitHub's `xcode-27` public-preview image (arm64, Xcode 27 / macOS 27.0
   # SDK) and compiles the SPIKE-gated Swift code. No VM is booted.
+  #
+  # This job is ALSO the compile check for every macOS-27-only API in
+  # VMRunner main.swift: DiskImageKit stacked overlays (--overlay-base,
+  # issue #523 item 2 / claim 6637) are `#if canImport(DiskImageKit)`-
+  # gated, so the macos-latest canary above skips them while THIS job
+  # compiles them for real.
   build-swift-spike-macos27:
     name: Build Swift launcher + custom-virtio spike (macOS 27 SDK)
     runs-on: xcode-27

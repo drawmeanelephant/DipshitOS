@@ -1,6 +1,10 @@
 // DipshitOS VM runner for the Apple Virtualization.framework path.
 //
 // Usage: VMRunner <disk-image> [serial-log] [--screen <png>]
+//        VMRunner --overlay-base <base.img> [serial-log] [flags...]
+// (--overlay-base: macOS 27 DiskImageKit stacked image — read-only base +
+//  throwaway ASIF overlay per run; positional <disk-image> is then ignored.
+//  --vars <path>: per-run EFI variable store.)
 //         [--timeout <s>] [--expect <line>] [--terminal-marker <line>]
 //         [--console] [--debug-input] [--dump-marker <file>]
 //         [--nvram-console <file>] [--script <file>]
@@ -143,6 +147,13 @@
 import AppKit
 import ApplicationServices
 import Darwin
+// DiskImageKit ships in the macOS 27 SDK only (#523 item 2). The class-A
+// CI job builds against the older macos-latest SDK, so the import and the
+// --overlay-base implementation are compiled in ONLY when the SDK has the
+// framework; elsewhere the flag fails honestly at runtime.
+#if canImport(DiskImageKit)
+import DiskImageKit
+#endif
 import Foundation
 import ScreenCaptureKit
 import Virtualization
@@ -401,10 +412,33 @@ var netTcpSrvNxt: UInt32 = 0x12345679 // after the SYN
 // per guest for now).
 var netNatEnabled = false
 
-var idx = 2
+// Issue #523 item 2 (claim 6637): run isolation.
+// `--overlay-base <path>`: open <path> READ-ONLY as the base of a
+// DiskImageKit stacked image and append a fresh ASIF overlay layer (created
+// in a private temp dir, removed at exit). Every run boots a pristine disk
+// by construction; guest writes land in the overlay and are discarded. The
+// positional <disk-image> argument is ignored in this mode.
+// `--vars <path>`: per-run EFI variable store (default artifacts/efi-vars.bin,
+// kept for back-compat with every existing invocation).
+var overlayBasePath: String?
+var varsOverridePath: String?
+
+var idx = arguments.count > 1 && arguments[1].hasPrefix("--") ? 1 : 2
 while idx < arguments.count {
     let arg = arguments[idx]
-    if arg == "--screen", idx + 1 < arguments.count {
+    if arg == "--overlay-base", idx + 1 < arguments.count {
+        overlayBasePath = arguments[idx + 1]
+        idx += 2
+    } else if arg == "--vars", idx + 1 < arguments.count {
+        varsOverridePath = arguments[idx + 1]
+        idx += 2
+    } else if arg == "--serial", idx + 1 < arguments.count {
+        // Per-run serial log path (#523 item 2): the default
+        // artifacts/vm-serial.log is shared state two concurrent gates
+        // would clobber.
+        serialLogPath = arguments[idx + 1]
+        idx += 2
+    } else if arg == "--screen", idx + 1 < arguments.count {
         screenshotPath = arguments[idx + 1]
         idx += 2
     } else if arg == "--screenshot-after", idx + 1 < arguments.count {
@@ -693,6 +727,17 @@ func restoreTerminal() {
 
 atexit { restoreTerminal() }
 
+// Issue #523 item 2 (claim 6637): when --overlay-base is used, the throwaway
+// ASIF overlay layer lives in this directory; it is removed at exit so
+// concurrent runs never share (or leave behind) writable state. Set
+// DIPSHIT_KEEP_OVERLAY=1 to keep it for post-mortem.
+var overlayCleanupPath: String?
+atexit {
+    if let p = overlayCleanupPath, ProcessInfo.processInfo.environment["DIPSHIT_KEEP_OVERLAY"] == nil {
+        try? FileManager.default.removeItem(atPath: p)
+    }
+}
+
 func fail(_ message: String) -> Never {
     restoreTerminal()
     FileHandle.standardError.write(Data("ERROR: \(message)\n".utf8))
@@ -723,13 +768,17 @@ guard osVersion.majorVersion >= 27 else {
     fail("macOS \(osVersion.majorVersion) is too old — this project requires macOS 27 or newer (Apple silicon + Virtualization.framework).")
 }
 
+let overlayMode = overlayBasePath != nil
 let diskURL = URL(fileURLWithPath: diskImagePath)
-guard FileManager.default.fileExists(atPath: diskURL.path) else {
-    fail("Disk image not found at '\(diskImagePath)'. Run 'zig build image' first.")
+if !overlayMode {
+    guard FileManager.default.fileExists(atPath: diskURL.path) else {
+        fail("Disk image not found at '\(diskImagePath)'. Run 'zig build image' first.")
+    }
 }
 let artifactsDir = URL(fileURLWithPath: "artifacts")
 try? FileManager.default.createDirectory(at: artifactsDir, withIntermediateDirectories: true)
-let varsURL = artifactsDir.appendingPathComponent("efi-vars.bin")
+let varsURL = URL(fileURLWithPath: varsOverridePath ?? "artifacts/efi-vars.bin")
+try? FileManager.default.createDirectory(at: varsURL.deletingLastPathComponent(), withIntermediateDirectories: true)
 let variableStore: VZEFIVariableStore
 if FileManager.default.fileExists(atPath: varsURL.path) {
     variableStore = VZEFIVariableStore(url: varsURL)
@@ -749,8 +798,38 @@ config.memorySize = 256 * 1024 * 1024
 config.cpuCount = 2
 
 do {
-    let attachment = try VZDiskImageStorageDeviceAttachment(url: diskURL, readOnly: false)
-    config.storageDevices = [VZVirtioBlockDeviceConfiguration(attachment: attachment)]
+    if let base = overlayBasePath {
+#if canImport(DiskImageKit)
+        guard #available(macOS 27.0, *) else {
+            fail("--overlay-base requires macOS 27+ DiskImageKit.")
+        }
+        // macOS 27 DiskImageKit stacked image (issue #523 item 2, claim
+        // 6637): read-only base + a fresh ASIF overlay layer in a private
+        // temp dir (removed at exit by the atexit handler). API verified
+        // against the Xcode 27 SDK swiftinterfaces.
+        let baseURL = URL(fileURLWithPath: base)
+        guard FileManager.default.fileExists(atPath: baseURL.path) else {
+            fail("Overlay base image not found at '\(base)'.")
+        }
+        let stackDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("dipshit-overlay-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: stackDir, withIntermediateDirectories: true)
+        overlayCleanupPath = stackDir.path
+        let diskBase = try DiskImage(opening: .open(url: baseURL, mode: .readOnly))
+        let layer = ASIFCreationConfiguration.layer(
+            url: stackDir.appendingPathComponent("overlay.asif"),
+            type: .overlay(blockCount: Int(diskBase.blockCount)))
+        let stacked = try diskBase.appending(layer)
+        let attachment = try VZDiskImageStorageDeviceAttachment(diskImage: stacked)
+        config.storageDevices = [VZVirtioBlockDeviceConfiguration(attachment: attachment)]
+        print("  disk: \(base) (base, read-only) + throwaway ASIF overlay in \(stackDir.path)")
+#else
+        fail("--overlay-base needs an SDK with DiskImageKit (macOS 27+); this binary was built without it.")
+#endif
+    } else {
+        let attachment = try VZDiskImageStorageDeviceAttachment(url: diskURL, readOnly: false)
+        config.storageDevices = [VZVirtioBlockDeviceConfiguration(attachment: attachment)]
+    }
 } catch {
     fail("Could not attach disk image '\(diskImagePath)': \(error)")
 }
