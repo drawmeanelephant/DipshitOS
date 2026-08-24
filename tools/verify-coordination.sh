@@ -24,6 +24,11 @@
 # Run before opening a PR (`just verify-coordination`; also runs in CI).
 # If it fails, fix the file(s) it names and/or run:
 #     bash tools/status/refresh-indexes.sh
+#
+# Tracked files only: this checkout is shared by concurrent agents, so
+# another agent's UNTRACKED claim/log staging files must not fail this
+# branch's gate (they are not part of what merges). Stage your new files
+# with git BEFORE running tools/status/refresh-indexes.sh.
 
 set -euo pipefail
 
@@ -35,9 +40,10 @@ bad() { printf 'error: %s\n' "$*" >&2; fail=1; }
 
 # --- claim files -----------------------------------------------------------
 
-claim_files="$(ls docs/claims/[0-9][0-9][0-9][0-9]-*.md 2>/dev/null || true)"
+claim_files="$(git ls-files -c -- 'docs/claims' | grep -E '/[0-9]{4}-[^/]*\.md$' | sort || true)"
 seen=""
 for f in $claim_files; do
+    [ -e "$f" ] || continue
     base="$(basename "$f")"
     case "$base" in
         [0-9][0-9][0-9][0-9]-[a-z0-9-]*.md) ;;
@@ -81,14 +87,14 @@ done
 
 # --- branch logs ------------------------------------------------------------
 
-for f in docs/logs/*.md; do
+while IFS= read -r f; do
     [ -e "$f" ] || continue
     [ "$(basename "$f")" = "README.md" ] && continue
     # Canonical header uses an em dash; refresh-indexes.sh tolerates a
     # plain hyphen when deriving the index title, but new logs must use the
     # em-dash form so the gate stays strict.
     head -1 "$f" | grep -q '^# Log — ' || bad "$(basename "$f"): first line must be '# Log — <title>'"
-done
+done < <(git ls-files -c -- 'docs/logs' | grep -E '\.md$' | sort)
 
 # --- docs/status.md invariants (keep it an edit-free pointer surface) -------
 
