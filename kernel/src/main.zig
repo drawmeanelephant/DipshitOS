@@ -1320,6 +1320,19 @@ var cv_big_reply: [virtio_custom.big_payload_len]u8 align(16) = undefined;
 /// every reference goes through a runtime-computed PC-relative address.
 const cv_log_lines = [_][7:0]u8{ "cvlog-1".*, "cvlog-2".*, "cvlog-3".* };
 
+// ---------------------------------------------------------------------------
+// Claim 3141 (--cvc-echo): the HOST-initiated push echo over queue 2.
+// Byte-exact protocol constants. Raw BYTE arrays again (no baked slice
+// pointers — see cv_log_lines).
+// ---------------------------------------------------------------------------
+
+/// The host's request, written into the pre-armed receive buffer.
+const cv_push_req = [13]u8{ 'C', 'V', 'C', '-', 'P', 'I', 'N', 'G', '-', '0', 'x', '4', '2' };
+/// The guest's reply staging (the request echoed verbatim) + its ack buffer
+/// (the host writes "OK:13").
+var cv_push_reply: [virtio_custom.push_buf_len]u8 align(16) = undefined;
+var cv_push_ack_buf: [16]u8 align(16) = [_]u8{0} ** 16;
+
 /// Drive the spike device: init (probe + negotiate + DRIVER_OK + both
 /// queues armed), arm the SPI window, then run the transport experiment:
 /// (1) claim 4374 — two batches of four CONCURRENT in-flight exchanges on
@@ -1536,6 +1549,66 @@ fn custom_virtio_spike() void {
     }
     uart_puts("cvspike: q1 ok=");
     uart_putc('0' + @as(u8, @intCast(log_count)));
+    uart_puts("\n");
+
+    // ---- Claim 3141: HOST-initiated push echo over queue 2 --------------
+    // Only when the device exposed the third queue (the runner's --cvc-echo
+    // attaches it; the classic --custom-virtio world stays two-queue and
+    // skips this block with one honest line). Sequence: pre-arm ONE
+    // device-write receive buffer + kick, signal readiness over queue 1
+    // ("cvc-push-armed"), and the HOST delegate — when it processes that
+    // line — enqueues the 13-byte request into the buffer at a time of its
+    // choosing. This guest then reads the request back verbatim, replies on
+    // queue 2, and verifies the host's OK:<len> ack.
+    var push_ok = false;
+    if (virtio_custom.has_push_queue) {
+        if (!virtio_custom.arm_push()) {
+            uart_puts("cvspike: q2 arm failed\n");
+        } else {
+            uart_puts("cvspike: q2 armed rx=1 handle=");
+            uart_hex(virtio_custom.push_rx_handle);
+            uart_puts("\n");
+            if (!virtio_custom.cvlog_puts("cvc-push-armed")) {
+                uart_puts("cvspike: q2 armed-signal failed\n");
+            } else if (virtio_custom.wait_any_push(cv_wait_budget)) |rx| {
+                const n: usize = @min(@as(usize, rx.len), virtio_custom.push_req_len);
+                const handle_ok = rx.handle == virtio_custom.push_rx_handle;
+                const req_ok = @as(usize, rx.len) == cv_push_req.len and std.mem.eql(u8, virtio_custom.push_rx_buf[0..n], &cv_push_req);
+                uart_puts("cvspike: q2 req=\"CVC-PING-0x42\" n=");
+                uart_hex(rx.len);
+                uart_puts(if (req_ok) " req=ok" else " req=bad");
+                uart_puts(if (handle_ok) " handle=ok\n" else " handle=bad\n");
+                if (req_ok and handle_ok) {
+                    // Reply: echo the request verbatim (BSS staging slice)
+                    // plus a write buffer for the host's ack.
+                    @memcpy(cv_push_reply[0..n], virtio_custom.push_rx_buf[0..n]);
+                    virtio_custom.cv_scatter[0] = cv_push_reply[0..n];
+                    if (virtio_custom.submit_ex(virtio_custom.push_qidx, virtio_custom.cv_scatter[0..1], cv_push_ack_buf[0..], false)) |rh| {
+                        var ack_ok = false;
+                        if (virtio_custom.wait(virtio_custom.push_qidx, rh, cv_wait_budget, cv_push_ack_buf[0..])) |an| {
+                            ack_ok = an == 5 and std.mem.eql(u8, cv_push_ack_buf[0..5], "OK:13");
+                        }
+                        virtio_custom.free_chain_q(virtio_custom.push_qidx, rh);
+                        uart_puts("cvspike: q2 rsp=\"CVC-PING-0x42\" ack=\"");
+                        const al: usize = @min(@as(usize, virtio_custom.used_len), cv_push_ack_buf.len);
+                        uart_puts(cv_push_ack_buf[0..al]);
+                        uart_puts("\" ok=");
+                        uart_puts(if (ack_ok) "1" else "0");
+                        uart_puts("\n");
+                        push_ok = ack_ok;
+                    } else {
+                        uart_puts("cvspike: q2 reply submit failed\n");
+                    }
+                }
+            } else {
+                uart_puts("cvspike: q2 timeout (no host push observed)\n");
+            }
+        }
+    } else {
+        uart_puts("cvspike: q2 absent (two-queue device)\n");
+    }
+    uart_puts("cvspike: q2 ok=");
+    uart_puts(if (push_ok) "1" else "0");
     uart_puts("\n");
 
     // The used-ring advances are observed by poll (fast); the device IRQs

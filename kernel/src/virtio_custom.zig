@@ -39,10 +39,19 @@
 //!     writtenByteCount), clamped for the caller by `reply_len()`.
 //!   * `free_chain(queue, handle)` returns the chain's descriptors to the
 //!     free list.
-//!   * `cvlog_puts(line)` is the guest log path: one element on queue 1
+//! * `cvlog_puts(line)` is the guest log path: one element on queue 1
 //!     carrying the line, the host echoes `CUSTOM-VIRTIO-LOG: <line>` to
 //!     its stdout and replies `ACK:<len>`; returns true when the ack
 //!     verifies.
+//! * The claim-3141 HOST-push echo (queue 2, present only under the
+//!   runner's `--cvc-echo`, which attaches a third virtqueue): `arm_push()`
+//!   pre-arms ONE empty device-write receive buffer and kicks; the HOST app
+//!   dequeues it whenever it chooses, writes the request, and returns it;
+//!   `wait_any_push()` observes the completion; the driver then posts the
+//!   reply through the normal submit_ex/wait path on queue 2. The SDK has
+//!   NO host-side enqueue — this pre-arm/dequeue/write/return pattern is
+//!   the only host→guest data path (virtio-net-RX shaped), discovered from
+//!   the Xcode 27 Virtualization.framework ObjC headers.
 //!
 //! Feature negotiation (claim 9737): the driver reads the full 64-bit
 //! device-features word, accepts VIRTIO_F_VERSION_1 (bit 32) always and
@@ -111,8 +120,24 @@ pub const custom_device_id: u32 = 0x42;
 pub const queue_size: u16 = 32;
 /// Queues armed by `init`: 0 = the exchange/transport queue, 1 = the guest
 /// log transport (claims 4374/4837). The host side attaches this many
-/// queues (`virtioQueueCount = 2`).
+/// queues (`virtioQueueCount = 2`) unless the runner runs the claim-3141
+/// push spike (`--cvc-echo`), which attaches ONE more.
 pub const queue_count: u16 = 2;
+/// The optional push-echo queue index (present only under `--cvc-echo`;
+/// the host exposes it as a third virtqueue). Queue-count IS the capability
+/// signal: the driver probes queue 2's size through the common config and
+/// skips the whole push experiment when it reads 0 — no feature-bit mapping
+/// guessed from session notes.
+pub const push_qidx: u16 = 2;
+pub const max_queue_probe: u16 = queue_count + 1;
+/// The pre-armed push receive buffer: capacity (one device-write descriptor)
+/// and the exact request size the host writes (`"CVC-PING-0x42"`).
+pub const push_buf_len: usize = 16;
+pub const push_req_len: usize = 13;
+/// Queues actually armed by `init` (2 on every device; 3 under --cvc-echo).
+pub var armed_queues: u16 = 0;
+/// True when init armed the optional push queue (index `push_qidx`).
+pub var has_push_queue: bool = false;
 
 /// Descriptor flags (Virtio 1.3 §2.7.6).
 const vq_next: u16 = 0x1; // VIRTQ_DESC_F_NEXT: more descriptors follow
@@ -319,8 +344,9 @@ pub const VirtqRing = struct {
     armed: bool = false,
 };
 
-/// The armed rings, one per queue (indexed by queue number).
-pub var cv_rings: [queue_count]VirtqRing = undefined;
+/// The armed rings, one per queue (indexed by queue number; slot
+/// `push_qidx` is used only when the device exposes the third queue).
+pub var cv_rings: [max_queue_probe]VirtqRing = undefined;
 /// Transport initialized (DRIVER_OK set) and queues armed.
 pub var cv_ready: bool = false;
 
@@ -605,10 +631,16 @@ pub fn init() bool {
 
     // Arm every queue: select, size, ring addresses (le64 written as two
     // 32-bit stores — claim 0013 access-size quirk), enable, notify offset.
+    // Queue `push_qidx` is OPTIONAL (the claim-3141 --cvc-echo device): a
+    // size-0 read means the two-queue device — stop cleanly, leave
+    // has_push_queue false, keep the classic world byte-identical.
+    armed_queues = 0;
+    has_push_queue = false;
     var qi: u16 = 0;
-    while (qi < queue_count) : (qi += 1) {
+    while (qi < max_queue_probe) : (qi += 1) {
         vp_write16(0x16, qi); // queue_select
         const qsz = vp_read16(0x18);
+        if (qsz == 0) break; // absent queue (spec: reads return 0 past the last)
         if (qsz < queue_size) return false;
         vp_write16(0x18, queue_size); // queue_size = 32 (power of 2, §4.1.4.3)
         const r = &cv_rings[qi];
@@ -627,7 +659,10 @@ pub fn init() bool {
         vp_write16(0x1c, 1); // queue_enable
         r.notify_off = vp_read16(0x1e);
         r.armed = true;
+        armed_queues = qi + 1;
     }
+    if (armed_queues < queue_count) return false;
+    has_push_queue = armed_queues > queue_count;
     vp_write8(0x14, 1 | 2 | 8 | 4); // DRIVER_OK
     if ((vp_read8(0x14) & 4) == 0) return false;
     cv_ready = true;
@@ -648,7 +683,7 @@ pub fn init() bool {
 /// (outstanding < queue_size); freed chains are recycled (claim 4374).
 pub fn submit_ex(qidx: u16, scatter: []const []const u8, reply_buf: []const u8, reply_first: bool) ?u16 {
     if (!cv_ready) return null;
-    if (qidx >= queue_count) return null;
+    if (qidx >= armed_queues) return null;
     const r = &cv_rings[qidx];
     if (!r.armed) return null;
     if (scatter.len == 0 or reply_buf.len == 0) return null;
@@ -660,16 +695,88 @@ pub fn submit_ex(qidx: u16, scatter: []const []const u8, reply_buf: []const u8, 
     mmu.clean_dcache_range(@intFromPtr(&r.avail), @sizeOf(VirtqAvail));
     for (scatter) |part| mmu.clean_dcache_range(@intFromPtr(part.ptr), part.len);
     mmu.clean_dcache_range(@intFromPtr(reply_buf.ptr), reply_buf.len);
+    kick(qidx);
+    return head;
+}
+
+/// Kick queue `qidx` (notify the device): the negotiated NOTIFICATION_DATA
+/// format (Virtio 1.3 §4.1.5.2.1: vqn << 16 | next_off, ring_flags 0) or
+/// the classic 16-bit queue index. Shared by submit_ex and the push API.
+fn kick(qidx: u16) void {
+    const r = &cv_rings[qidx];
     if (has_notification_data) {
-        // Virtio 1.3 §4.1.5.2.1: vqn << 16 | next_off | (ring_flags << 30);
-        // next_off is the avail index the driver just posted, ring_flags 0
-        // (we always expect the used-ring notification).
         const data: u32 = (@as(u32, qidx) << 16) | (@as(u32, r.avail.idx) & 0x3fff);
         mmio.mmio_write32(cv_notify + @as(u64, r.notify_off) * cv_notify_mult, data);
     } else {
         mmio.mmio_write16(cv_notify + @as(u64, r.notify_off) * cv_notify_mult, qidx);
     }
-    return head;
+}
+
+// ---------------------------------------------------------------------------
+// Host-push echo transport (claim 3141, issue #523 item 3): the HOST app
+// initiates. The SDK exposes no host-side enqueue — elements exist only as
+// descriptors the guest posted — so this is the virtio-net-RX pattern:
+// the driver PRE-ARMS one empty device-write receive buffer on queue 2 and
+// kicks; the host dequeues it at a time of its choosing, writes the request,
+// and returns it (used ring advances + the device IRQ asserts); this driver
+// observes the completion, reads the request, and posts the reply.
+// ---------------------------------------------------------------------------
+
+/// The pre-armed receive buffer the host writes its request into (BSS — a
+/// runtime address; .rodata pointers are image-relative in a flat image).
+pub var push_rx_buf: [push_buf_len]u8 align(16) = undefined;
+/// Chain head of the pre-armed receive buffer (the handle wait_any_push
+/// matches against the used entry's id).
+pub var push_rx_handle: u16 = 0;
+
+/// Pre-arm ONE receive buffer on the push queue and kick once. Returns true
+/// when armed + kicked; false when the transport/queue is unavailable.
+pub fn arm_push() bool {
+    if (!cv_ready or !has_push_queue) return false;
+    const r = &cv_rings[push_qidx];
+    if (!r.armed) return false;
+    const head = alloc_chain(r, 1) orelse return false;
+    r.desc[head].addr = mmu.to_phys(@intFromPtr(&push_rx_buf));
+    r.desc[head].len = @intCast(push_buf_len);
+    r.desc[head].flags |= vq_write; // device-write only (an RX buffer)
+    const slot = r.avail.idx % queue_size;
+    r.avail.ring[slot] = head;
+    r.avail.idx +%= 1;
+    push_rx_handle = head;
+    mmu.clean_dcache_range(@intFromPtr(&r.desc), @sizeOf(VirtqDesc) * queue_size);
+    mmu.clean_dcache_range(@intFromPtr(&r.avail), @sizeOf(VirtqAvail));
+    mmu.clean_dcache_range(@intFromPtr(&push_rx_buf), push_buf_len);
+    kick(push_qidx);
+    return true;
+}
+
+/// One completed pre-armed receive buffer: which chain came back and how
+/// many bytes the host wrote into it.
+pub const PushRx = struct { handle: u16, len: u32 };
+
+/// Poll the push queue's used ring until the pre-armed receive buffer
+/// completes (or the budget runs out). Entries are consumed one per loop
+/// iteration; a zero-length entry (a drained spare — none with the single
+/// pre-armed buffer) is skipped, not lost. On the match the host-written
+/// bytes are invalidated for reading and `used_len` carries the length.
+pub fn wait_any_push(budget: usize) ?PushRx {
+    if (!cv_ready or !has_push_queue) return null;
+    const r = &cv_rings[push_qidx];
+    if (!r.armed) return null;
+    var i: usize = 0;
+    while (i < budget) : (i += 1) {
+        mmu.invalidate_dcache_range(@intFromPtr(&r.used), @sizeOf(VirtqUsed));
+        if (r.used.idx != r.last_used) {
+            const elem = r.used.ring[r.last_used % queue_size];
+            r.last_used +%= 1;
+            if (elem.len == 0) continue; // drained spare — keep waiting
+            used_len = elem.len;
+            const n: usize = @min(@as(usize, elem.len), push_buf_len);
+            mmu.invalidate_dcache_range(@intFromPtr(&push_rx_buf), n);
+            return .{ .handle = @intCast(elem.id), .len = elem.len };
+        }
+    }
+    return null;
 }
 
 /// Convenience single-payload submit on queue 0 (classic read-then-write
@@ -681,7 +788,7 @@ pub fn submit(payload_buf: []const u8, reply_buf: []u8) ?u16 {
 /// Return element `handle`'s chain to queue `qidx`'s free list.
 pub fn free_chain_q(qidx: u16, handle: u16) void {
     if (!cv_ready) return;
-    if (qidx >= queue_count) return;
+    if (qidx >= armed_queues) return;
     free_chain(&cv_rings[qidx], handle);
 }
 
@@ -693,7 +800,7 @@ pub fn free_chain_q(qidx: u16, handle: u16) void {
 /// describe the exchange. Returns the used length, or null on timeout.
 pub fn wait(qidx: u16, handle: u16, budget: usize, reply_buf: []u8) ?u32 {
     if (!cv_ready) return null;
-    if (qidx >= queue_count) return null;
+    if (qidx >= armed_queues) return null;
     const r = &cv_rings[qidx];
     if (!r.armed) return null;
     var i: usize = 0;
@@ -933,6 +1040,8 @@ test "virtio_custom: fresh transport reports no-device honestly" {
     var reply_buf: [64]u8 = undefined;
     try std.testing.expect(submit(payload_buf[0..], reply_buf[0..]) == null); // unarmed
     try std.testing.expect(!cvlog_puts("nope")); // queue 1 unarmed
+    try std.testing.expect(!arm_push()); // push queue unavailable
+    try std.testing.expect(wait_any_push(10) == null);
     reset_irq_observation();
     try std.testing.expectEqual(@as(u32, 0), irq_count);
     try std.testing.expectEqual(@as(u32, 0xffffffff), irq_first);
@@ -946,4 +1055,14 @@ test "virtio_custom: note_irq records the first INTID and count" {
     note_irq(69);
     try std.testing.expectEqual(@as(u32, 2), irq_count);
     try std.testing.expectEqual(@as(u32, 69), irq_first);
+}
+
+test "virtio_custom: push-echo shapes (claim 3141) — queue index, buffer sizes" {
+    // The push queue rides ONE past the classic pair; the rx buffer is one
+    // descriptor of capacity 16 and the request is exactly 13 bytes
+    // ("CVC-PING-0x42").
+    try std.testing.expectEqual(@as(u16, 2), push_qidx);
+    try std.testing.expectEqual(@as(u16, 3), max_queue_probe);
+    try std.testing.expect(push_buf_len >= push_req_len);
+    try std.testing.expectEqual(@as(usize, 16), push_rx_buf.len);
 }

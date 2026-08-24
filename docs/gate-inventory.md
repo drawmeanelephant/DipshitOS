@@ -116,6 +116,7 @@ card's close-out and graduate to the archive when their milestone closes.
 | `live-m16-guards` | B | `bash tools/verify-live-m16-guards.sh` | ✅ pass | 2026-08-19* |
 | `live-m16-resources` | B | `bash tools/verify-live-m16-resources.sh` | ✅ pass | 2026-08-19* |
 | `live-m16-composition` | B | `bash tools/verify-live-m16-composition.sh` | ✅ pass | 2026-08-19* |
+| `cvc-echo` | B | `bash tools/verify-cvc-echo.sh` | ✅ pass | 2026-08-24 |
 | `verify-vz` | B | `just verify-vz` (aggregate — every class-B gate above) | aggregate | 2026-08-19 |
 
 \* A bare date is the gate's own recorded PASS date; `date*` is the closing
