@@ -16,6 +16,9 @@
 #      emits) fails refresh-indexes.sh --check via structural validation.
 #   5. A hand-sequenced claim number (0024) fails verify-coordination with
 #      the deterministic-ID error.
+#   6. Another agent's UNTRACKED claim+log staging files in a shared
+#      checkout do NOT fail --check or verify-coordination (the tooling
+#      judges tracked files only; regression for PR #524 / claim 2564).
 #
 # Usage: bash tools/status/test-coordination.sh
 # (also `just test-coordination` and CI)
@@ -67,6 +70,12 @@ cat > "$TMP/docs/logs/branch-one.md" <<'EOF'
 
 - **2026-08-08** — *test-agent*: fixture entry.
 EOF
+
+# The coordination tooling judges git-tracked files only, so the sandbox
+# must be a repo with every fixture staged (mirrors a real branch state).
+git -C "$TMP" init -q
+git -C "$TMP" add -A
+git -C "$TMP" -c user.email=coord@test -c user.name=coord commit -qm "sandbox fixture"
 
 run() { ( cd "$TMP" && "$@" ); }
 
@@ -149,6 +158,31 @@ else
     nope "derived-numbered claim ${derived} failed verify-coordination"
 fi
 
+# --- 3.5 positive: foreign UNTRACKED staging files cannot fail the gate ------
+# What a shared checkout looks like in practice: another agent stages m25
+# claim/log files here untracked (PR #524, commit 42d1078). The committed
+# index has no rows for them; the gate must not care.
+utid="$(bash "$TMP/tools/status/claim-id.sh" 'branch/other-agent' 'untracked-fixture')"
+cat > "$TMP/docs/claims/${utid}-untracked-fixture.md" <<EOF
+# Claim: untracked fixture
+
+- **Owner:** other-agent (\`branch/other-agent\`)
+- **Status:** 🔄 \`branch/other-agent\`
+- **Depends on:** —
+EOF
+cat > "$TMP/docs/logs/branch-other-agent.md" <<'EOF'
+# Log — Untracked fixture
+
+- **2026-08-23** — *other-agent*: staging entry, deliberately never committed here.
+EOF
+if run bash tools/status/refresh-indexes.sh --check >/dev/null 2>&1 \
+    && run bash tools/verify-coordination.sh >/dev/null 2>&1; then
+    ok "untracked foreign claim+log do not fail --check or verify-coordination"
+else
+    nope "untracked foreign staging files leaked into the gate or indexes"
+fi
+rm -f "$TMP/docs/claims/${utid}-untracked-fixture.md" "$TMP/docs/logs/branch-other-agent.md"
+
 # --- 4. negative: a raw '|' in a table row fails structural validation ------
 # What a broken (unescaping) generator emits: a pipe straight into a cell.
 sed 's/see `x\\|y`/see `x|y`/' "$TMP/docs/claims/README.md" > "$TMP/docs/claims/README.md.new"
@@ -180,6 +214,7 @@ else
 - **Status:** ✅ done
 - **Depends on:** —
 EOF
+    run git add -A   # untracked files are invisible to the gate by design
     run bash tools/status/refresh-indexes.sh >/dev/null
     out="$(run bash tools/verify-coordination.sh 2>&1 || true)"
     case "$out" in
@@ -189,6 +224,7 @@ EOF
             nope "hand-sequenced 0024 claim was not rejected: $out" ;;
     esac
     rm -f "$TMP/docs/claims/0024-hand-sequenced.md"
+    run git add -A
 fi
 
 # --- final: clean sandbox passes -------------------------------------------

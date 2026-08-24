@@ -97,11 +97,13 @@ rules are:
   entries; corrections are new entries referencing the old one.
 - **Indexes are generated, not edited.** The claim and log index tables
   in `docs/claims/README.md` and `docs/logs/README.md` are generated from
-  the claim/log files by `bash tools/status/refresh-indexes.sh` — run it
-  after creating a claim file or branch log; never hand-edit a shared
-  table. Run `bash tools/verify-coordination.sh` (`just
-  verify-coordination`, also CI) before opening a PR; it fails on index
-  drift or malformed claim/log files.
+  the git-tracked claim/log files by `bash tools/status/refresh-indexes.sh`
+  — stage new files with `git add`, run it, then commit; never hand-edit a
+  shared table. The coordination gate judges tracked files only, so other
+  agents' untracked staging files in a shared checkout cannot fail your PR.
+  Run `bash tools/verify-coordination.sh` (`just verify-coordination`, also
+  CI) before opening a PR; it fails on index drift or malformed claim/log
+  files.
 - **Update on completion and on blockers.** Flip your claim file's status
   and append a log entry when done; append one when blocked so the next
   agent does not repeat the attempt.

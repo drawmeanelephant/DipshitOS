@@ -41,11 +41,13 @@ check fails the gate — change the slug and the ID changes.
    [`TEMPLATE.md`](TEMPLATE.md) to `docs/claims/<NNNN>-<slug>.md`.
 2. Fill in Owner (agent id + branch), Prompt / plan, Scope, Depends on.
 3. Set Status to `🔄 <branch>` **before** starting work.
-4. Run `bash tools/status/refresh-indexes.sh` to regenerate the
+4. `git add` your new claim file, then run
+   `bash tools/status/refresh-indexes.sh` to regenerate the
    [Active claims index](#active-claims-index) below. The table is
-   **generated from the claim files** — never hand-edit it (two agents
-   hand-appending to the same table is exactly how parallel claims
-   collide on merge).
+   **generated from the git-tracked claim files** — never hand-edit it
+   (two agents hand-appending to the same table is exactly how parallel
+   claims collide on merge). Staging first keeps other agents' untracked
+   staging files out of your index and your gate run.
 5. On completion or blockers: flip Status in **your claim file** to `✅`
    (with evidence) or `⛔` (note why), append to `docs/logs/<branch>.md`,
    and re-run the refresh script so the index shows it.
@@ -79,6 +81,7 @@ CI) fails if the table drifts from the claim files.
 | [2203-trim-hardware-contract](2203-trim-hardware-contract.md) | ox-alpha (`agent/ox-alpha/hygiene-trim-hardware-contract`) | ✅ done (`agent/ox-alpha/hygiene-trim-hardware-contract`) |
 | [2336-file-inline-preview](2336-file-inline-preview.md) | buffy (`agent/buffy/m15-c7-file-preview`) | ✅ done 2026-08-21 — `user/src/file_browser.zig` inline preview (selection auto-loads `preview_content[512]` first 15 lines, `is_binary_content` ≥80% printable sniff → `(binary)` placeholder for non-TXT/binary, `preview_is_binary` flag) + breadcrumb bar (`breadcrumb_rect 60,6,440,12` muted, `format_breadcrumbs`/`breadcrumb_hit_test`/`truncate_to_segment`, `current_path[64]` session-only, `enter_directory`/`navigate_to_segment`/`breadcrumb_click`, `build_path` helper, `refresh_preview` on select/click/keyboard, `draw_details` preview below metadata) + `HScroll` deferred (preview wraps at `preview_cols 30`, no extra widget). Host tests 25/25 PASS (6 new: binary sniff, breadcrumbs hit-test, build_path, current_path nav, preview auto-load, breadcrumb_click), `zig build` PASS `FILE.BIN 10882` (+24B), `verify-bss-budget` PASS `9788088/11534336` (1746248 B headroom), `zig fmt --check` PASS. |
 | [2418-checkbox-toggle](2418-checkbox-toggle.md) | Muse Spark (`agent/buffy/arc1-checkbox-toggle`) | 🔄 `agent/buffy/arc1-checkbox-toggle` |
+| [2564-tracked-only-coordination-gate](2564-tracked-only-coordination-gate.md) | ox-alpha (`agent/ox-alpha/coordination-tracked-gate`) | 🔄 in progress |
 | [2616-dhcp-lifecycle-autonomous](2616-dhcp-lifecycle-autonomous.md) | buffy (`agent/buffy/audit-followup-3-dhcp-autonomy`) | 🔄 agent/buffy/audit-followup-3-dhcp-autonomy |
 | [2762-window-snap-zones](2762-window-snap-zones.md) | buffy (`agent/buffy/m15-c3-snap-zones`) | ✅ done 2026-08-20 — `driving_award.zig:178` snap BSS (`last_rect`/`is_snapped`/`zone` ≈80 B) + `snap_zone_for_point`/`snap_window`/`snap_restore` + `pointer_tick` drag-out restore + `draw_chrome` preview, host tests `snap_zone`/`snap_window`/`preview` PASS, `verify-bss-budget` PASS `9787576/11534336` |
 | [2860-trim-roadmap-completed-milestones](2860-trim-roadmap-completed-milestones.md) | t3code (`t3code/fetch-issue-264-details`) | ✅ done 2026-08-21 |
