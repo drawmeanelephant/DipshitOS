@@ -23,6 +23,12 @@
 # as-is:
 #   <!-- CLAIMS_INDEX:START --> ... <!-- CLAIMS_INDEX:END -->
 #   <!-- LOGS_INDEX:START --> ... <!-- LOGS_INDEX:END -->
+#
+# Tracked files only: the indexes are generated from files known to git
+# (git ls-files), never from a raw directory glob. The checkout is shared
+# by concurrent agents, so another agent's untracked staging files must not
+# leak into your regenerated index (and your gate run). Workflow: create
+# your claim/log files, `git add` them, then run this script, then commit.
 
 set -euo pipefail
 
@@ -47,26 +53,28 @@ claims_index() {
     local f num owner status
     printf '| Claim | Owner (branch) | Status |\n'
     printf '|-------|----------------|--------|\n'
-    for f in docs/claims/[0-9][0-9][0-9][0-9]-*.md; do
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
         [ -e "$f" ] || continue
         num="$(basename "$f" .md)"
         owner="$(sed -n 's/^- \*\*Owner:\*\* //p' "$f" | head -1)"
         status="$(sed -n 's/^- \*\*Status:\*\* //p' "$f" | head -1)"
         printf '| [%s](%s) | %s | %s |\n' "$num" "$num.md" \
             "$(esc "${owner:-—}")" "$(esc "${status:-—}")"
-    done
+    done < <(git ls-files -c -- 'docs/claims' | grep -E '/[0-9]{4}-[^/]*\.md$' | sort)
 }
 
 logs_index() {
     local f b title
     printf '| Branch | Log file |\n'
     printf '|--------|----------|\n'
-    for f in docs/logs/*.md; do
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
         b="$(basename "$f")"
         [ "$b" = "README.md" ] && continue
         title="$(head -1 "$f" | sed 's/^# Log — //; s/^# Log - //')"
         printf '| %s | [`%s`](%s) |\n' "$(esc "${title:-$b}")" "$b" "$b"
-    done
+    done < <(git ls-files -c -- 'docs/logs' | grep -E '\.md$' | sort)
 }
 
 # --- region splicing helpers ---------------------------------------------
