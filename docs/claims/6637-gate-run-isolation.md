@@ -1,7 +1,7 @@
 # Claim: run-isolated gates via DiskImageKit overlays
 
 - **Owner:** ox-alpha (`agent/ox-alpha/run-isolated-gates`)
-- **Status:** 🔄 `agent/ox-alpha/run-isolated-gates`
+- **Status:** ✅ done — merged to main via PR #529 (2026-08-24; flipped by claim 5069's agent so the fleet-migration Touches stop colliding)
 - **Touches:** host/vm-runner/Sources/VMRunner/main.swift, tools/lib/gate-run.sh, tools/verify-live-net-tcp.sh, docs/gate-inventory.md, AGENTS.md
 - **Depends on:** 4928 (worktrees), 2564 (tracked-only gate)
 
