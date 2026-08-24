@@ -120,6 +120,7 @@ verify-coordination`, and CI) fails if it drifts from the files.
 | per-agent worktrees | [`agent-ox-alpha-agent-worktrees.md`](agent-ox-alpha-agent-worktrees.md) |
 | claim lifecycle: declared files + staleness | [`agent-ox-alpha-claim-lifecycle.md`](agent-ox-alpha-claim-lifecycle.md) |
 | tracked-only coordination gate | [`agent-ox-alpha-coordination-tracked-gate.md`](agent-ox-alpha-coordination-tracked-gate.md) |
+| # Branch log: agent/ox-alpha/gate-fleet-migration | [`agent-ox-alpha-gate-fleet-migration.md`](agent-ox-alpha-gate-fleet-migration.md) |
 | agent/ox-alpha/hygiene-trim-hardware-contract | [`agent-ox-alpha-hygiene-trim-hardware-contract.md`](agent-ox-alpha-hygiene-trim-hardware-contract.md) |
 | `agent/ox-alpha/m19-p3p4-chaining-exit-status` | [`agent-ox-alpha-m19-p3p4-chaining-exit-status.md`](agent-ox-alpha-m19-p3p4-chaining-exit-status.md) |
 | `agent/ox-alpha/m19-p5p6-quoting-globbing` | [`agent-ox-alpha-m19-p5p6-quoting-globbing.md`](agent-ox-alpha-m19-p5p6-quoting-globbing.md) |
