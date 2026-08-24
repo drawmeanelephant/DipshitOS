@@ -65,10 +65,6 @@ REPORT="$(art live-timer-report.txt)"
 
 echo "=== verify-live-timer: claim 9187 — live CNTP PPI through the EL1 IRQ vector, $BOOTS boot(s) ==="
 
-# --- per-run isolation -------------------------------------------------------
-gate_begin live-timer
-echo "run dir: $RUN_DIR"
-SCRIPT="$RUN_DIR/script.txt"
 
 # --- tool versions + revision -----------------------------------------------
 zig version; swift --version 2>&1 | head -1; sw_vers
@@ -83,6 +79,11 @@ zig build
 zig build image
 swift build --package-path host/vm-runner --configuration release
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
+
+# --- per-run isolation -------------------------------------------------------
+gate_begin live-timer
+echo "run dir: $RUN_DIR"
+SCRIPT="$RUN_DIR/script.txt"
 
 # --- the scripted keystrokes ------------------------------------------------
 cat > "$SCRIPT" <<'EOF'

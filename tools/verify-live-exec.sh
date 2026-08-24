@@ -57,12 +57,6 @@ EXEC_REAP_LINE="tasks user-exec reaped"
 
 echo "=== verify-live-exec: claim 6783 — load + exec a user program from the ESP at EL0, $BOOTS boot(s) ==="
 
-# --- per-run isolation -------------------------------------------------------------
-# Private scratch dir + pristine-boot overlay for EVERY boot.
-# See tools/lib/gate-run.sh.
-gate_begin live-exec
-echo "run dir: $RUN_DIR"
-SCRIPT="$RUN_DIR/script.txt"
 zig version
 swift --version 2>&1 | head -1
 sw_vers
@@ -76,6 +70,13 @@ zig build
 zig build image
 swift build --package-path host/vm-runner --configuration release
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
+
+# --- per-run isolation -------------------------------------------------------------
+# Private scratch dir + pristine-boot overlay for EVERY boot.
+# See tools/lib/gate-run.sh.
+gate_begin live-exec
+echo "run dir: $RUN_DIR"
+SCRIPT="$RUN_DIR/script.txt"
 
 printf 'ls\nexec USER.BIN\necho rx-exec-ok\n' > "$SCRIPT"
 

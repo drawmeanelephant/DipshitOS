@@ -57,10 +57,6 @@ REPORT="$(art live-help-report.txt)"
 
 echo "=== verify-live-help: claim 3275 — ADR 0008 help walk on VZ, $BOOTS boot(s) ==="
 
-# --- per-run isolation -------------------------------------------------------
-gate_begin live-help
-echo "run dir: $RUN_DIR"
-SCRIPT="$RUN_DIR/script.txt"
 
 zig version; swift --version 2>&1 | head -1; sw_vers
 REVISION="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
@@ -74,6 +70,11 @@ zig build
 zig build image
 swift build --package-path host/vm-runner --configuration release
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
+
+# --- per-run isolation -------------------------------------------------------
+gate_begin live-help
+echo "run dir: $RUN_DIR"
+SCRIPT="$RUN_DIR/script.txt"
 
 # --- the scripted keystrokes ------------------------------------------------
 cat > "$SCRIPT" <<'EOF'

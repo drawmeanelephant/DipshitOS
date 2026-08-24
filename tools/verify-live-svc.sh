@@ -37,12 +37,6 @@ EXIT_LINE="tasks user-el0 exited status=7"
 
 echo "=== verify-live-svc: claim 3594 — syscall table on EL0 SVC, $BOOTS boot(s) ==="
 
-# --- per-run isolation -------------------------------------------------------------
-# Private scratch dir + pristine-boot overlay for EVERY boot.
-# See tools/lib/gate-run.sh.
-gate_begin live-svc
-echo "run dir: $RUN_DIR"
-SCRIPT="$RUN_DIR/script.txt"
 zig version
 swift --version 2>&1 | head -1
 sw_vers
@@ -56,6 +50,13 @@ zig build
 zig build image
 swift build --package-path host/vm-runner --configuration release
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
+
+# --- per-run isolation -------------------------------------------------------------
+# Private scratch dir + pristine-boot overlay for EVERY boot.
+# See tools/lib/gate-run.sh.
+gate_begin live-svc
+echo "run dir: $RUN_DIR"
+SCRIPT="$RUN_DIR/script.txt"
 
 printf 'syscalls\necho rx-svc-ok\n' > "$SCRIPT"
 

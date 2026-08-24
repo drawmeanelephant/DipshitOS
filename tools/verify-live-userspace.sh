@@ -37,12 +37,6 @@ EXPECT="userspace: el0=1 svc=2 roundtrips=1 arg=2 result=2 rejected=0"
 
 echo "=== verify-live-userspace: claim 8215 — EL0t + SVC round-trip + timer preemption, $BOOTS boot(s) ==="
 
-# --- per-run isolation -------------------------------------------------------------
-# Private scratch dir + pristine-boot overlay for EVERY boot.
-# See tools/lib/gate-run.sh.
-gate_begin live-userspace
-echo "run dir: $RUN_DIR"
-SCRIPT="$RUN_DIR/script.txt"
 zig version
 swift --version 2>&1 | head -1
 sw_vers
@@ -56,6 +50,13 @@ zig build
 zig build image
 swift build --package-path host/vm-runner --configuration release
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
+
+# --- per-run isolation -------------------------------------------------------------
+# Private scratch dir + pristine-boot overlay for EVERY boot.
+# See tools/lib/gate-run.sh.
+gate_begin live-userspace
+echo "run dir: $RUN_DIR"
+SCRIPT="$RUN_DIR/script.txt"
 
 printf 'tasks\necho rx-el0-ok\n' > "$SCRIPT"
 

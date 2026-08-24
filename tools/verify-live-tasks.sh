@@ -75,12 +75,6 @@ REPORT="$(art live-tasks-report.txt)"
 
 echo "=== verify-live-tasks: claim 5275 — tick-driven round-robin tasks (shell + worker advance across ticks), $BOOTS boot(s) ==="
 
-# --- per-run isolation -------------------------------------------------------------
-# Private scratch dir + pristine-boot overlay for EVERY boot.
-# See tools/lib/gate-run.sh.
-gate_begin live-tasks
-echo "run dir: $RUN_DIR"
-SCRIPT="$RUN_DIR/script.txt"
 
 # --- tool versions + revision -----------------------------------------------
 zig version; swift --version 2>&1 | head -1; sw_vers
@@ -95,6 +89,13 @@ zig build
 zig build image
 swift build --package-path host/vm-runner --configuration release
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
+
+# --- per-run isolation -------------------------------------------------------------
+# Private scratch dir + pristine-boot overlay for EVERY boot.
+# See tools/lib/gate-run.sh.
+gate_begin live-tasks
+echo "run dir: $RUN_DIR"
+SCRIPT="$RUN_DIR/script.txt"
 
 # --- the scripted keystrokes ------------------------------------------------
 cat > "$SCRIPT" <<'EOF'

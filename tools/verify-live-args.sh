@@ -66,18 +66,6 @@ STATIC_EXIT_LINE="tasks user-el0 exited status=7"
 
 echo "=== verify-live-args: claim 4636 — exec arguments to EL0 (same binary, distinct argv), $BOOTS boot(s) ==="
 
-# --- per-run isolation -------------------------------------------------------------
-# Private scratch dir for EVERY boot. See tools/lib/gate-run.sh.
-# THIS gate boots the private WRITABLE copy ($RUN_DIR/disk-base.img) instead
-# of a throwaway overlay: observed on 2026-08-24 (claim 5069), the ASIF
-# overlay's extra I/O layer shifts guest load timing enough to flip the
-# `procs` four-running snapshot (one USER.BIN completes before `procs`
-# executes — reproducible across runs, while unmodified main passes 2/2).
-# The writable copy keeps main's exact runner code path and timing while
-# still isolating concurrent gates (each run gets its own image).
-gate_begin live-args
-echo "run dir: $RUN_DIR"
-SCRIPT="$RUN_DIR/script.txt"
 zig version
 swift --version 2>&1 | head -1
 sw_vers
@@ -91,6 +79,19 @@ zig build
 zig build image
 swift build --package-path host/vm-runner --configuration release
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
+
+# --- per-run isolation -------------------------------------------------------------
+# Private scratch dir for EVERY boot. See tools/lib/gate-run.sh.
+# THIS gate boots the private WRITABLE copy ($RUN_DIR/disk-base.img) instead
+# of a throwaway overlay: observed on 2026-08-24 (claim 5069), the ASIF
+# overlay's extra I/O layer shifts guest load timing enough to flip the
+# `procs` four-running snapshot (one USER.BIN completes before `procs`
+# executes — reproducible across runs, while unmodified main passes 2/2).
+# The writable copy keeps main's exact runner code path and timing while
+# still isolating concurrent gates (each run gets its own image).
+gate_begin live-args
+echo "run dir: $RUN_DIR"
+SCRIPT="$RUN_DIR/script.txt"
 
 # Four execs with DISTINCT args back to back, the procs snapshot, then
 # the shell check (the capacity ending lives in the scale/resources gates).

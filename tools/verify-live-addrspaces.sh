@@ -53,12 +53,6 @@ MON_LINE="uaccess: valid=1 fault=1 recovered=1 copies=4 validation_faults=1"
 
 echo "=== verify-live-addrspaces: claim 5804 — per-task TTBR0 / EL1-only kernel overlay / MMIO excluded from EL0 (VZ TTBR1 fallback), $BOOTS boot(s) ==="
 
-# --- per-run isolation -------------------------------------------------------------
-# Private scratch dir + pristine-boot overlay for EVERY boot.
-# See tools/lib/gate-run.sh.
-gate_begin live-addrspaces
-echo "run dir: $RUN_DIR"
-SCRIPT="$RUN_DIR/script.txt"
 zig version
 swift --version 2>&1 | head -1
 sw_vers
@@ -72,6 +66,13 @@ zig build
 zig build image
 swift build --package-path host/vm-runner --configuration release
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
+
+# --- per-run isolation -------------------------------------------------------------
+# Private scratch dir + pristine-boot overlay for EVERY boot.
+# See tools/lib/gate-run.sh.
+gate_begin live-addrspaces
+echo "run dir: $RUN_DIR"
+SCRIPT="$RUN_DIR/script.txt"
 
 printf 'syscalls\nuaccess\naddrspaces\necho rx-addrspaces-ok\n' > "$SCRIPT"
 

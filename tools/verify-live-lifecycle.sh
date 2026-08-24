@@ -79,12 +79,6 @@ REPORT="$(art live-lifecycle-report.txt)"
 
 echo "=== verify-live-lifecycle: claim 6729 — user task lifecycle (spawn / exit / reap + idle task), $BOOTS boot(s) ==="
 
-# --- per-run isolation -------------------------------------------------------------
-# Private scratch dir + pristine-boot overlay for EVERY boot.
-# See tools/lib/gate-run.sh.
-gate_begin live-lifecycle
-echo "run dir: $RUN_DIR"
-SCRIPT="$RUN_DIR/script.txt"
 
 # --- tool versions + revision -----------------------------------------------
 zig version; swift --version 2>&1 | head -1; sw_vers
@@ -99,6 +93,13 @@ zig build
 zig build image
 swift build --package-path host/vm-runner --configuration release
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
+
+# --- per-run isolation -------------------------------------------------------------
+# Private scratch dir + pristine-boot overlay for EVERY boot.
+# See tools/lib/gate-run.sh.
+gate_begin live-lifecycle
+echo "run dir: $RUN_DIR"
+SCRIPT="$RUN_DIR/script.txt"
 
 # --- the scripted keystrokes ------------------------------------------------
 # `spawn` first (the pool's spare slot is free while the EL0 task is
