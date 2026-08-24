@@ -82,12 +82,20 @@ the claim-3141 virtio-net-RX pattern):
 
 ```
 offset  size  field
-0       1     kind    1 = HID keyboard boot report (only kind defined)
+0       1     kind    1 = HID keyboard boot report
+                      2 = absolute-pointer report (claim 9367)
 1       1     flags   reserved, host writes 0
-2       2     len     payload length, little-endian (8 for kind 1)
+2       2     len     payload length, little-endian (8 for kind 1,
+                      5 for kind 2)
 4       12    payload kind 1: the raw 8-byte report [mods, 0, k0..k5]
               (HID boot protocol: mods bit0=LCtrl bit1=LShift bit2=LAlt
               bit3=LCmd; k0..k5 = usage IDs, 0-padded)
+              kind 2: the raw 5-byte report [buttons, x_lo, x_hi, y_lo,
+              y_hi] — the exact shape input.decode_pointer_report reads
+              from an XHCI pointer report; buttons bit0 = button 1;
+              x/y are HID ABSOLUTE logicals 0..32767 (the guest's
+              map_pointer_axis scales them onto the framebuffer axis —
+              the same convention the USB screen-coordinate pointer uses)
 ```
 
 Fixed total size 16 bytes. Receive buffers are posted at capacity 32 bytes
@@ -106,13 +114,24 @@ Semantics:
   (`sys_poll_event`/`sys_wait_event`) when an app window owns focus, the
   console byte FIFO + line editor when the terminal does, and the `input`
   monitor command's counters either way.
+- Kind-2 payloads (claim 9367) are handed to `input.decode_pointer_report`
+  verbatim — the exact function an XHCI pointer report goes through — so
+  injected pointers are ordinary pointers downstream: cursor motion,
+  `dui` click-to-focus (the window manager's pointer_tick edge logic sees
+  a press exactly as it would from USB), and the `input` ptr-* counters.
 - The guest pumps completions from the shell idle loop's RX poll seam (one
   cheap used-ring read when unarmed); polled, like every other
   custom-virtio path — no IRQ dependency.
-- Host pacing: messages enqueue at 0.25 s spacing on the device's serial
-  delegate queue (all element access single-threaded with the callbacks);
-  if the pool is momentarily empty the enqueue retries (bounded, loud on
-  exhaustion) instead of dropping.
+- Host pacing: keyboard messages enqueue at 0.25 s spacing on the device's
+  serial delegate queue (all element access single-threaded with the
+  callbacks); if the pool is momentarily empty the enqueue retries
+  (bounded, loud on exhaustion) instead of dropping. POINTER sequences
+  pace at 2.5 s per message instead: presses are edge-detected by
+  `driving_award.pointer_tick`, which runs once per shell-idle pass — at
+  the Road Pops present cadence (~1.5–2 s), NOT per message — and
+  sub-tick spacing collapses press+release into one pass so the click
+  never fires (**[observed]** claim 9367 live failure at 0.25 s, clean
+  focus moves at 2.5 s).
 - Host token→usage mapping is the guest keymap's inverse over the same
   vocabulary `macKey`/`macChord` accept (a–z, 0–9, punctuation, Enter,
   named nav tokens, ctrl-x); keyUp is the all-zero report, so held-set
@@ -145,6 +164,25 @@ observed typing `inpu⏎t`); (2) without a window manager (headless boot) the
 terminal is the keyboard sink by definition — the FIFO→line-editor bridge
 flows unconditionally when the WM is unarmed, unchanged focus discipline
 when it is armed.
+
+**[observed]** claim 9367 (2026-08-24, macOS 27.0 build 26A5416b): kind-2
+pointer messages proved live and headless
+(`bash tools/verify-live-pointer-virtio.sh`, evidence under
+`artifacts/live-pointer-virtio-*`): four-queue attach; q3 pool armed +
+claim-3141 push echo green in the same boot; eight kind-2 messages
+(2 moves + 2×[down,up] over WINLOOP → terminal) enqueued strictly in
+order at 2.5 s pacing and decoded through `decode_pointer_report`; guest's
+own report `input: armed=0 ... ptr-x=16384 ptr-y=27307 ptr-reports=8`
+(armed=0 — NO USB HID device was ever attached); and two click-driven
+focus moves printed by the window manager itself (`dui: pointer focus=2`
+then `focus=0`) — issue #151's pointer-focus proof upgraded from
+class-C-only to class-B-headless. Two live findings pinned as contract
+facts: (1) the pointer pacing rule above (0.25 s collapses clicks);
+(2) hit-testing scans the window ARRAY from the end (raise() moves a
+window to the array end), so a gate must `dui raise <id>` a user window
+above the fullscreen terminal before clicking it — session setup via
+documented monitor commands, with the focus proof still driven purely by
+the injected messages.
 
 Non-PCI platform facts:
 

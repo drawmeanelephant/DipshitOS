@@ -715,10 +715,15 @@ pub fn decode_keyboard_report(rep: []const u8) void {
     kb_held = keys;
 }
 
-/// Record a pointer report (best-effort absolute decode: buttons + little-
+/// Decode one absolute-pointer report (best-effort: buttons + little-
 /// endian X/Y). The raw bytes are the ground truth; the absolute report's
 /// exact word order is a claim-time observation, recorded honestly.
-fn record_pointer_report(rep: []const u8) void {
+///
+/// Public since claim 9367: the custom-virtio INPUT channel's kind-2
+/// pointer messages are handed here verbatim — the exact path an XHCI
+/// pointer report takes — so injected pointers are ordinary pointers
+/// downstream (cursor, `dui` click-to-focus, `input` ptr-* counters).
+pub fn decode_pointer_report(rep: []const u8) void {
     if (rep.len < 3) return;
     const prev_buttons = ptr_buttons;
     ptr_buttons = rep[0];
@@ -751,7 +756,7 @@ pub fn drain() void {
                 // The absolute pointer enumerates with bInterfaceProtocol 0
                 // (not a boot mouse), so hid_kind is .unknown — the raw
                 // report is still recorded best-effort.
-                .mouse, .unknown => record_pointer_report(bytes),
+                .mouse, .unknown => decode_pointer_report(bytes),
             }
         }
     }
@@ -1044,7 +1049,7 @@ test "input: pointer report is recorded best-effort (buttons + LE X/Y)" {
     ptr_x = 0;
     ptr_y = 0;
     ptr_reports = 0;
-    record_pointer_report(&[_]u8{ 0x01, 0x34, 0x12, 0x78, 0x56 });
+    decode_pointer_report(&[_]u8{ 0x01, 0x34, 0x12, 0x78, 0x56 });
     try std.testing.expectEqual(@as(u8, 0x01), ptr_buttons);
     try std.testing.expectEqual(@as(u16, 0x1234), ptr_x);
     try std.testing.expectEqual(@as(u16, 0x5678), ptr_y);
