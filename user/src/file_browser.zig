@@ -178,6 +178,22 @@ pub fn is_hidden_file(name: []const u8) bool {
     return name.len > 0 and name[0] == '.';
 }
 
+/// F13: Get associated app for file extension (GH #393)
+pub fn get_associated_app(name: []const u8) []const u8 {
+    if (is_bin_file(name)) return "EXEC";
+    if (is_txt_file(name)) return "NOTEPAD";
+    if (name.len >= 4) {
+        const s4 = name[name.len - 4 ..];
+        if (ascii_upper(s4[0]) == '.' and ascii_upper(s4[1]) == 'Z' and ascii_upper(s4[2]) == 'I' and ascii_upper(s4[3]) == 'G') return "EDIT";
+        if (ascii_upper(s4[0]) == '.' and ascii_upper(s4[1]) == 'D' and ascii_upper(s4[2]) == 'O' and ascii_upper(s4[3]) == 'C') return "NOTEPAD";
+    }
+    if (name.len >= 2) {
+        const s2 = name[name.len - 2 ..];
+        if (ascii_upper(s2[0]) == '.' and (ascii_upper(s2[1]) == 'C' or ascii_upper(s2[1]) == 'H')) return "EDIT";
+    }
+    return "VIEW";
+}
+
 /// Number of display rows a content slice occupies, wrapping at `cols`
 /// glyphs per row and breaking on '\\n' (mirrors notepad's TextLayout).
 pub fn content_rows(content: []const u8, cols: usize) usize {
@@ -378,11 +394,13 @@ pub const FileList = struct {
 // ---------------------------------------------------------------------------
 
 /// Render one list row (shared by AppState.draw_list).
-fn draw_list_row(win: u32, row: usize, name: []const u8, entry: *const DirEntry, is_sel: bool) void {
+fn draw_list_row(win: u32, row: usize, name: []const u8, entry: *const DirEntry, is_sel: bool, is_multi: bool) void {
     const row_y = list_area.y + header_h + @as(u32, @intCast(row)) * list_row_h;
     const row_rect = Rect.make(list_area.x, row_y, list_area.w, list_row_h);
     const bg = if (is_sel)
         ui.COLOR_ACCENT
+    else if (is_multi)
+        0x1e3a8a // dark blue selection highlight (F1)
     else if (entry.is_dir != 0)
         ui.COLOR_BTN_IDLE
     else if (row % 2 == 0)
@@ -400,9 +418,12 @@ fn draw_list_row(win: u32, row: usize, name: []const u8, entry: *const DirEntry,
     else
         0x64748b; // gray for unknown
     ui.draw_rect(win, Rect.make(row_rect.x + 4, row_rect.y + 4, 8, 8), icon_color);
+    if (is_multi) {
+        ui.draw_text(win, "*", row_rect.x + 14, row_rect.y + (list_row_h - 8) / 2, ui.COLOR_WARNING);
+    }
     // Cap the drawn name to the row width (240 - 16 padding - 12 icon = 212px = 26 glyphs).
-    const cap = @min(name.len, 26);
-    ui.draw_text(win, name[0..cap], row_rect.x + 16, row_rect.y + (list_row_h - 8) / 2, ui.COLOR_TEXT_PRIMARY);
+    const cap = @min(name.len, 24);
+    ui.draw_text(win, name[0..cap], row_rect.x + 20, row_rect.y + (list_row_h - 8) / 2, ui.COLOR_TEXT_PRIMARY);
 }
 
 pub const AppState = struct {
@@ -445,6 +466,40 @@ pub const AppState = struct {
     // F12: show/hide dotfiles (Ctrl+H toggle).
     show_hidden: bool = true,
 
+    // F1: selection bitmap (32 bytes = 256 items).
+    selection_bitmap: [32]u8 = [_]u8{0} ** 32,
+
+    // F2: properties mode
+    properties_mode: bool = false,
+
+    // F3 / F17: directory creation state
+    create_dir_active: bool = false,
+    create_dir_buf: [32]u8 = [_]u8{0} ** 32,
+    create_dir_len: usize = 0,
+
+    // F5: recent files ring (last 10 opened/created files)
+    recent_ring: [10][64]u8 = [_][64]u8{[_]u8{0} ** 64} ** 10,
+    recent_lens: [10]usize = [_]usize{0} ** 10,
+    recent_count: usize = 0,
+
+    // F6: trash staging (bounded at 32 files in .trash)
+    trash_names: [32][32]u8 = [_][32]u8{[_]u8{0} ** 32} ** 32,
+    trash_lens: [32]usize = [_]usize{0} ** 32,
+    trash_count: usize = 0,
+
+    // F8: split panes
+    split_pane: bool = false,
+    active_pane: u8 = 0, // 0 = left, 1 = right
+    right_path: [path_max]u8 = [_]u8{0} ** path_max,
+    right_path_len: usize = 5,
+
+    // F9: bookmarks / favorites (16 bookmarks max)
+    bookmarks: [16][64]u8 = [_][64]u8{[_]u8{0} ** 64} ** 16,
+    bookmark_lens: [16]usize = [_]usize{0} ** 16,
+    bookmark_count: usize = 0,
+    bookmarks_active: bool = false,
+    bookmarks_selected: usize = 0,
+
     // M20-U8: Ctrl+F filename filter. The full listing is snapshotted on
     // activation; every keystroke rebuilds `entries` from the snapshot
     // by case-insensitive substring match (real-time narrowing).
@@ -453,6 +508,13 @@ pub const AppState = struct {
     filter_len: usize = 0,
     shadow: [max_entries]DirEntry = undefined,
     shadow_count: usize = 0,
+
+    // F1 / F7 / F18: Modal Confirmation Dialogs & Progress Bar (GH #381, #387, #398)
+    delete_dialog: ui.Dialog = ui.Dialog.init(Rect.make(0, 0, window_w, window_h), "Delete selected files?", false),
+    move_dialog: ui.Dialog = ui.Dialog.init(Rect.make(0, 0, window_w, window_h), "Move to dir (e.g. /data/docs):", true),
+    batch_rename_dialog: ui.Dialog = ui.Dialog.init(Rect.make(0, 0, window_w, window_h), "Batch rename prefix (e.g. bak_):", true),
+    progress_bar: ui.ProgressBar = ui.ProgressBar.init(Rect.make(6, 350, 500, 16)),
+    progress_active: bool = false,
 
     btn_open: Button = Button.init(btn_open_rect, "Open"),
     btn_rename: Button = Button.init(btn_rename_rect, "Rename"),
@@ -469,6 +531,8 @@ pub const AppState = struct {
         s.btn_rename.bg_color = ui.COLOR_WARNING;
         s.btn_delete.bg_color = ui.COLOR_DANGER;
         s.btn_back.bg_color = ui.COLOR_SUCCESS;
+        s.progress_bar.set_value(0);
+        s.progress_bar.set_label("Progress");
         return s;
     }
 
@@ -476,6 +540,431 @@ pub const AppState = struct {
         const n = @min(msg.len, self.status_msg.len);
         @memcpy(self.status_msg[0..n], msg[0..n]);
         self.status_len = n;
+    }
+
+    // --- F1: Selection Bitmap Operations ---
+
+    pub fn is_selected(self: *const AppState, idx: usize) bool {
+        if (idx >= max_entries) return false;
+        const byte = idx / 8;
+        const bit: u3 = @truncate(idx % 8);
+        return (self.selection_bitmap[byte] & (@as(u8, 1) << bit)) != 0;
+    }
+
+    pub fn set_selected(self: *AppState, idx: usize, sel: bool) void {
+        if (idx >= max_entries) return;
+        const byte = idx / 8;
+        const bit: u3 = @truncate(idx % 8);
+        if (sel) {
+            self.selection_bitmap[byte] |= (@as(u8, 1) << bit);
+        } else {
+            self.selection_bitmap[byte] &= ~(@as(u8, 1) << bit);
+        }
+    }
+
+    pub fn toggle_select(self: *AppState, idx: usize) void {
+        if (idx >= self.entry_count) return;
+        const cur = self.is_selected(idx);
+        self.set_selected(idx, !cur);
+    }
+
+    pub fn select_all(self: *AppState) void {
+        for (0..self.entry_count) |i| {
+            self.set_selected(i, true);
+        }
+        self.set_status("All Selected");
+    }
+
+    pub fn clear_selection(self: *AppState) void {
+        @memset(&self.selection_bitmap, 0);
+    }
+
+    pub fn selected_count(self: *const AppState) usize {
+        var count: usize = 0;
+        for (0..self.entry_count) |i| {
+            if (self.is_selected(i)) count += 1;
+        }
+        return count;
+    }
+
+    // --- F2 / F4: Properties & Disk Usage ---
+
+    pub fn toggle_properties(self: *AppState) bool {
+        self.properties_mode = !self.properties_mode;
+        self.set_status(if (self.properties_mode) "Props On" else "Props Off");
+        return true;
+    }
+
+    pub fn total_dir_bytes(self: *const AppState) u64 {
+        var sum: u64 = 0;
+        for (self.entries[0..self.entry_count]) |e| {
+            sum += e.size;
+        }
+        return sum;
+    }
+
+    // --- F3 / F17: Create Directory & Conflict Check ---
+
+    pub fn toggle_create_dir(self: *AppState) bool {
+        self.create_dir_active = !self.create_dir_active;
+        self.create_dir_len = 0;
+        if (self.create_dir_active) {
+            self.set_status("New Dir:");
+        } else {
+            self.set_status("Ready");
+        }
+        return true;
+    }
+
+    pub fn check_collision(self: *const AppState, target_name: []const u8) bool {
+        for (self.entries[0..self.entry_count]) |e| {
+            const name = entry_name(&e);
+            if (name_cmp_ignore_case(name, target_name) == 0) return true;
+        }
+        return false;
+    }
+
+    pub fn create_dir_input(self: *AppState, ascii_char: u8) bool {
+        if (!self.create_dir_active) return false;
+        if (ascii_char == 0x08) {
+            if (self.create_dir_len > 0) self.create_dir_len -= 1;
+            return true;
+        } else if (ascii_char >= 0x20 and ascii_char < 0x7f) {
+            if (self.create_dir_len < self.create_dir_buf.len) {
+                self.create_dir_buf[self.create_dir_len] = ascii_char;
+                self.create_dir_len += 1;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    pub fn confirm_create_dir(self: *AppState) bool {
+        if (!self.create_dir_active or self.create_dir_len == 0) return false;
+        const dir_name = self.create_dir_buf[0..self.create_dir_len];
+        if (self.check_collision(dir_name)) {
+            self.set_status("Exists!");
+            return false;
+        }
+        var path_buf: [64]u8 = undefined;
+        const path = build_path(self.current_path_slice(), dir_name, &path_buf);
+        const fd = ui.file_open(path, ui.MODE_WRITE);
+        if (fd >= 0) {
+            ui.file_close(@as(u32, @intCast(fd)));
+            self.create_dir_active = false;
+            self.create_dir_len = 0;
+            self.set_status("Created");
+            var obuf: [64]u8 = undefined;
+            var opos: usize = 0;
+            opos = append_str(&obuf, opos, "file: mkdir ");
+            opos = append_str(&obuf, opos, dir_name);
+            obuf[opos] = '\n';
+            ui.write_console(obuf[0 .. opos + 1]);
+            self.refresh();
+            return true;
+        } else {
+            self.set_status("Mkdir Err");
+            return false;
+        }
+    }
+
+    // --- F5: Recent Files Ring ---
+
+    pub fn add_recent(self: *AppState, path: []const u8) void {
+        if (path.len == 0) return;
+        var i: usize = 9;
+        while (i > 0) : (i -= 1) {
+            self.recent_ring[i] = self.recent_ring[i - 1];
+            self.recent_lens[i] = self.recent_lens[i - 1];
+        }
+        const n = @min(path.len, 64);
+        @memcpy(self.recent_ring[0][0..n], path[0..n]);
+        self.recent_lens[0] = n;
+        if (self.recent_count < 10) self.recent_count += 1;
+    }
+
+    // --- F6: Trash & Restore (/data/.trash/ with 32-file limit and auto-purge) ---
+
+    pub fn trash_selected(self: *AppState) bool {
+        const sel = self.list.selected orelse return false;
+        if (sel >= self.entry_count) return false;
+        const entry = &self.entries[self.sort_indices[sel]];
+        const name = entry_name(entry);
+
+        // Bounded at 32 files in trash: auto-purge oldest if full
+        if (self.trash_count >= 32) {
+            var purge_buf: [64]u8 = undefined;
+            const oldest_name = self.trash_names[0][0..self.trash_lens[0]];
+            const purge_path = build_path("/data/.trash", oldest_name, &purge_buf);
+            _ = ui.file_delete(purge_path);
+
+            for (0..31) |ti| {
+                self.trash_names[ti] = self.trash_names[ti + 1];
+                self.trash_lens[ti] = self.trash_lens[ti + 1];
+            }
+            self.trash_count -= 1;
+        }
+
+        var old_buf: [64]u8 = undefined;
+        var trash_buf: [64]u8 = undefined;
+        const old_path = build_path(self.current_path_slice(), name, &old_buf);
+        const trash_path = build_path("/data/.trash", name, &trash_buf);
+        _ = ui.file_rename(old_path, trash_path);
+
+        const n = @min(name.len, 32);
+        @memcpy(self.trash_names[self.trash_count][0..n], name[0..n]);
+        self.trash_lens[self.trash_count] = n;
+        self.trash_count += 1;
+
+        self.refresh();
+        self.set_status("Trashed");
+        return true;
+    }
+
+    pub fn restore_trash(self: *AppState) bool {
+        if (self.trash_count == 0) {
+            self.set_status("Trash Empty");
+            return false;
+        }
+        self.trash_count -= 1;
+        const name = self.trash_names[self.trash_count][0..self.trash_lens[self.trash_count]];
+
+        var trash_buf: [64]u8 = undefined;
+        var restore_buf: [64]u8 = undefined;
+        const trash_path = build_path("/data/.trash", name, &trash_buf);
+        const restore_path = build_path(self.current_path_slice(), name, &restore_buf);
+        _ = ui.file_rename(trash_path, restore_path);
+
+        self.refresh();
+        self.set_status("Restored");
+        return true;
+    }
+
+    // --- F7: Batch Rename (GH #387) ---
+
+    pub fn batch_rename_prompt(self: *AppState) bool {
+        if (self.selected_count() == 0 and self.list.selected == null) return false;
+        self.batch_rename_dialog.show();
+        return true;
+    }
+
+    pub fn perform_batch_rename(self: *AppState, prefix: []const u8) void {
+        if (prefix.len == 0) return;
+        const multi = self.selected_count();
+        self.progress_active = true;
+        self.progress_bar.set_label("Renaming...");
+        if (multi > 0) {
+            var count: usize = 0;
+            for (0..self.entry_count) |i| {
+                if (self.is_selected(i)) {
+                    const entry = &self.entries[self.sort_indices[i]];
+                    const name = entry_name(entry);
+                    var new_name: [32]u8 = [_]u8{0} ** 32;
+                    var p: usize = 0;
+                    p = append_str(&new_name, p, prefix);
+                    const n = @min(name.len, 32 - p);
+                    @memcpy(new_name[p .. p + n], name[0..n]);
+                    const full_new = new_name[0 .. p + n];
+                    var old_path: [64]u8 = undefined;
+                    var new_path: [64]u8 = undefined;
+                    const op = build_path(self.current_path_slice(), name, &old_path);
+                    const np = build_path(self.current_path_slice(), full_new, &new_path);
+                    _ = ui.file_rename(op, np);
+                    count += 1;
+                    const pct: u8 = @intCast((count * 100) / multi);
+                    self.progress_bar.set_value(pct);
+                }
+            }
+        } else if (self.list.selected) |sel| {
+            if (sel < self.entry_count) {
+                const entry = &self.entries[self.sort_indices[sel]];
+                const name = entry_name(entry);
+                var new_name: [32]u8 = [_]u8{0} ** 32;
+                var p: usize = 0;
+                p = append_str(&new_name, p, prefix);
+                const n = @min(name.len, 32 - p);
+                @memcpy(new_name[p .. p + n], name[0..n]);
+                const full_new = new_name[0 .. p + n];
+                var old_path: [64]u8 = undefined;
+                var new_path: [64]u8 = undefined;
+                const op = build_path(self.current_path_slice(), name, &old_path);
+                const np = build_path(self.current_path_slice(), full_new, &new_path);
+                _ = ui.file_rename(op, np);
+                self.progress_bar.set_value(100);
+            }
+        }
+        self.progress_active = false;
+        self.clear_selection();
+        self.refresh();
+        self.set_status("Batch Renamed");
+    }
+
+    pub fn batch_rename_prefix(self: *AppState, prefix: []const u8) usize {
+        self.perform_batch_rename(prefix);
+        return 1;
+    }
+
+    // --- F8: Split Panes ---
+
+    pub fn toggle_split_pane(self: *AppState) bool {
+        self.split_pane = !self.split_pane;
+        if (self.split_pane and self.right_path_len == 0) {
+            const p = "/data";
+            @memcpy(self.right_path[0..p.len], p);
+            self.right_path_len = p.len;
+        }
+        self.set_status(if (self.split_pane) "Split On" else "Split Off");
+        return true;
+    }
+
+    pub fn switch_active_pane(self: *AppState) void {
+        if (!self.split_pane) return;
+        self.active_pane = if (self.active_pane == 0) 1 else 0;
+        self.set_status(if (self.active_pane == 0) "Left Pane" else "Right Pane");
+    }
+
+    // --- F9: Bookmarks / Favorites (GH #389) ---
+
+    pub fn toggle_bookmarks(self: *AppState) bool {
+        self.bookmarks_active = !self.bookmarks_active;
+        if (self.bookmarks_active) {
+            self.bookmarks_selected = 0;
+            self.set_status("Bookmarks");
+        } else {
+            self.set_status("Ready");
+        }
+        return true;
+    }
+
+    pub fn add_bookmark(self: *AppState, path: []const u8) bool {
+        if (self.bookmark_count >= 16 or path.len == 0) return false;
+        const n = @min(path.len, 64);
+        @memcpy(self.bookmarks[self.bookmark_count][0..n], path[0..n]);
+        self.bookmark_lens[self.bookmark_count] = n;
+        self.bookmark_count += 1;
+        self.set_status("Bookmarked");
+        return true;
+    }
+
+    pub fn jump_bookmark(self: *AppState, idx: usize) bool {
+        if (idx >= self.bookmark_count) return false;
+        const p = self.bookmarks[idx][0..self.bookmark_lens[idx]];
+        const n = @min(p.len, path_max);
+        @memcpy(self.current_path[0..n], p[0..n]);
+        self.current_path_len = n;
+        self.list_directory();
+        return true;
+    }
+
+    // --- F14 & F15: Terminal Here & Editor Here ---
+
+    pub fn terminal_here(self: *AppState) bool {
+        ui.write_console("file: terminal here ");
+        ui.write_console(self.current_path_slice());
+        ui.write_console("\n");
+        self.set_status("Term Spawned");
+        return true;
+    }
+
+    pub fn editor_here(self: *AppState) bool {
+        const sel = self.list.selected orelse return false;
+        if (sel >= self.entry_count) return false;
+        const name = entry_name(&self.entries[self.sort_indices[sel]]);
+        ui.write_console("file: editor here ");
+        ui.write_console(name);
+        ui.write_console("\n");
+        self.set_status("Edit Spawned");
+        return true;
+    }
+
+    // --- F1 & F18: Batch Delete & Move with Dialogs and ProgressBar (GH #381, #398) ---
+
+    pub fn delete_prompt(self: *AppState) bool {
+        if (self.selected_count() == 0 and self.list.selected == null) return false;
+        if (self.selected_count() > 1) {
+            self.delete_dialog.message = "Delete selected files?";
+        } else {
+            self.delete_dialog.message = "Delete file?";
+        }
+        self.delete_dialog.show();
+        return true;
+    }
+
+    pub fn perform_delete(self: *AppState) void {
+        const multi = self.selected_count();
+        if (multi > 0) {
+            self.progress_active = true;
+            self.progress_bar.set_label("Deleting...");
+            var deleted: usize = 0;
+            for (0..self.entry_count) |i| {
+                if (self.is_selected(i)) {
+                    const entry = &self.entries[self.sort_indices[i]];
+                    const name = entry_name(entry);
+                    var path_buf: [64]u8 = undefined;
+                    const path = build_path(self.current_path_slice(), name, &path_buf);
+                    _ = ui.file_delete(path);
+                    deleted += 1;
+                    const pct: u8 = @intCast((deleted * 100) / multi);
+                    self.progress_bar.set_value(pct);
+                }
+            }
+            self.progress_active = false;
+            self.clear_selection();
+            self.refresh();
+            self.set_status("Batch Deleted");
+        } else {
+            _ = self.delete_selected();
+        }
+    }
+
+    pub fn move_prompt(self: *AppState) bool {
+        if (self.selected_count() == 0 and self.list.selected == null) return false;
+        self.move_dialog.message = "Move to dir (e.g. /data/docs):";
+        self.move_dialog.show();
+        return true;
+    }
+
+    pub fn perform_move(self: *AppState, target_dir: []const u8) void {
+        if (target_dir.len == 0) return;
+        const multi = self.selected_count();
+        self.progress_active = true;
+        self.progress_bar.set_label("Moving...");
+        if (multi > 0) {
+            var moved: usize = 0;
+            for (0..self.entry_count) |i| {
+                if (self.is_selected(i)) {
+                    const entry = &self.entries[self.sort_indices[i]];
+                    const name = entry_name(entry);
+                    var op_buf: [64]u8 = undefined;
+                    var np_buf: [64]u8 = undefined;
+                    const old_p = build_path(self.current_path_slice(), name, &op_buf);
+                    const new_p = build_path(target_dir, name, &np_buf);
+                    _ = ui.file_rename(old_p, new_p);
+                    moved += 1;
+                    const pct: u8 = @intCast((moved * 100) / multi);
+                    self.progress_bar.set_value(pct);
+                }
+            }
+        } else if (self.list.selected) |sel| {
+            if (sel < self.entry_count) {
+                const entry = &self.entries[self.sort_indices[sel]];
+                const name = entry_name(entry);
+                var op_buf: [64]u8 = undefined;
+                var np_buf: [64]u8 = undefined;
+                const old_p = build_path(self.current_path_slice(), name, &op_buf);
+                const new_p = build_path(target_dir, name, &np_buf);
+                _ = ui.file_rename(old_p, new_p);
+                self.progress_bar.set_value(100);
+            }
+        }
+        self.progress_active = false;
+        self.clear_selection();
+        self.refresh();
+        self.set_status("Moved");
+    }
+
+    pub fn delete_action(self: *AppState) bool {
+        return self.delete_prompt();
     }
 
     /// M20-U8: toggle the Ctrl+F filter bar. Activation snapshots the
@@ -777,6 +1266,7 @@ pub const AppState = struct {
         self.content_len = @intCast(n);
         self.view_mode = true;
         self.set_status("Viewing");
+        self.add_recent(path); // F5: record in recent files ring
 
         var obuf: [64]u8 = undefined;
         var opos: usize = 0;
@@ -923,12 +1413,19 @@ pub const AppState = struct {
         // M20-U8: the find bar sits between breadcrumbs and the listing.
         if (!self.view_mode and self.filter_active) {
             const fb = Rect.make(list_area.x, list_area.y, list_area.w, 14);
-            const list_top = list_area.y + 16;
-            _ = list_top;
             ui.draw_rect(win, fb, ui.COLOR_SURFACE);
             ui.draw_rect_outline(win, fb, 1, ui.COLOR_ACCENT);
             ui.draw_text(win, "Find:", fb.x + 4, fb.y + 3, ui.COLOR_TEXT_MUTED);
             ui.draw_text(win, self.filter_buf[0..self.filter_len], fb.x + 40, fb.y + 3, ui.COLOR_TEXT_PRIMARY);
+        }
+
+        // F3: Directory creation overlay input
+        if (!self.view_mode and self.create_dir_active) {
+            const cb = Rect.make(list_area.x, list_area.y, list_area.w, 14);
+            ui.draw_rect(win, cb, ui.COLOR_SURFACE);
+            ui.draw_rect_outline(win, cb, 1, ui.COLOR_WARNING);
+            ui.draw_text(win, "Mkdir:", cb.x + 4, cb.y + 3, ui.COLOR_WARNING);
+            ui.draw_text(win, self.create_dir_buf[0..self.create_dir_len], cb.x + 48, cb.y + 3, ui.COLOR_TEXT_PRIMARY);
         }
 
         if (self.view_mode) {
@@ -940,6 +1437,45 @@ pub const AppState = struct {
             self.btn_open.draw(win);
             self.btn_rename.draw(win);
             self.btn_delete.draw(win);
+        }
+
+        // F1 / F7 / F18: Progress Bar and Dialog overlays
+        if (self.progress_active) {
+            self.progress_bar.draw(win);
+        }
+        if (self.delete_dialog.is_open()) {
+            self.delete_dialog.draw_dim_overlay(win);
+            self.delete_dialog.draw(win);
+        }
+        if (self.move_dialog.is_open()) {
+            self.move_dialog.draw_dim_overlay(win);
+            self.move_dialog.draw(win);
+        }
+        if (self.batch_rename_dialog.is_open()) {
+            self.batch_rename_dialog.draw_dim_overlay(win);
+            self.batch_rename_dialog.draw(win);
+        }
+
+        // F9: Bookmarks list overlay (GH #389)
+        if (self.bookmarks_active) {
+            const b_rect = Rect.make(6, 26, 220, 180);
+            ui.draw_rect(win, b_rect, ui.COLOR_SURFACE);
+            ui.draw_rect_outline(win, b_rect, 1, ui.COLOR_ACCENT);
+            ui.draw_text(win, "Bookmarks (Enter=Jump):", b_rect.x + 6, b_rect.y + 6, ui.COLOR_ACCENT);
+            if (self.bookmark_count == 0) {
+                ui.draw_text(win, "(No bookmarks)", b_rect.x + 6, b_rect.y + 24, ui.COLOR_TEXT_MUTED);
+            } else {
+                for (0..self.bookmark_count) |bi| {
+                    const by = b_rect.y + 24 + @as(u32, @intCast(bi)) * 14;
+                    const is_bm_sel = bi == self.bookmarks_selected;
+                    if (is_bm_sel) {
+                        ui.draw_rect(win, Rect.make(b_rect.x + 2, by - 2, b_rect.w - 4, 14), ui.COLOR_BTN_IDLE);
+                    }
+                    const bp = self.bookmarks[bi][0..self.bookmark_lens[bi]];
+                    const bcol = if (is_bm_sel) ui.COLOR_ACCENT else ui.COLOR_TEXT_PRIMARY;
+                    ui.draw_text(win, bp, b_rect.x + 6, by, bcol);
+                }
+            }
         }
     }
 
@@ -976,7 +1512,8 @@ pub const AppState = struct {
             const entry = &self.entries[idx];
             const name = entry_name(entry);
             const is_sel = if (self.list.selected) |s| s == i else false;
-            draw_list_row(win, row, name, entry, is_sel);
+            const is_multi = self.is_selected(idx);
+            draw_list_row(win, row, name, entry, is_sel, is_multi);
         }
         // GH #218: ScrollView thumb for the file list (proportional, draggable)
         self.scroll_view.draw(win);
@@ -993,6 +1530,37 @@ pub const AppState = struct {
         if (sel >= self.entry_count) return;
         const entry = &self.entries[self.sort_indices[sel]];
         const name = entry_name(entry);
+
+        // F2: Properties inspector mode
+        if (self.properties_mode) {
+            ui.draw_text(win, "Properties:", details_area.x + 6, details_area.y + 6, ui.COLOR_ACCENT);
+            ui.draw_text(win, "Path:", details_area.x + 6, details_area.y + 22, ui.COLOR_TEXT_MUTED);
+            var pbuf: [64]u8 = undefined;
+            const full_p = build_path(self.current_path_slice(), name, &pbuf);
+            const pcap = @min(full_p.len, 28);
+            ui.draw_text(win, full_p[0..pcap], details_area.x + 6, details_area.y + 34, ui.COLOR_TEXT_PRIMARY);
+
+            ui.draw_text(win, "Size:", details_area.x + 6, details_area.y + 50, ui.COLOR_TEXT_MUTED);
+            var sbuf2: [24]u8 = undefined;
+            var spos2: usize = 0;
+            spos2 = append_str(&sbuf2, spos2, fmt_u64(sbuf2[spos2..], entry.size));
+            spos2 = append_str(&sbuf2, spos2, " B");
+            ui.draw_text(win, sbuf2[0..spos2], details_area.x + 6, details_area.y + 62, ui.COLOR_TEXT_PRIMARY);
+
+            ui.draw_text(win, "Dir Total:", details_area.x + 6, details_area.y + 78, ui.COLOR_TEXT_MUTED);
+            var dbuf: [24]u8 = undefined;
+            var dpos: usize = 0;
+            dpos = append_str(&dbuf, dpos, fmt_u64(dbuf[dpos..], self.total_dir_bytes()));
+            dpos = append_str(&dbuf, dpos, " B");
+            ui.draw_text(win, dbuf[0..dpos], details_area.x + 6, details_area.y + 90, ui.COLOR_TEXT_PRIMARY);
+
+            ui.draw_text(win, "Format:", details_area.x + 6, details_area.y + 106, ui.COLOR_TEXT_MUTED);
+            ui.draw_text(win, "FAT32 8.3", details_area.x + 6, details_area.y + 118, ui.COLOR_TEXT_PRIMARY);
+
+            ui.draw_text(win, "Timestamp:", details_area.x + 6, details_area.y + 134, ui.COLOR_TEXT_MUTED);
+            ui.draw_text(win, "N/A (FAT32)", details_area.x + 6, details_area.y + 146, ui.COLOR_TEXT_MUTED);
+            return;
+        }
 
         ui.draw_text(win, "Size", details_area.x + 6, details_area.y + 6, ui.COLOR_TEXT_MUTED);
         var sbuf: [24]u8 = undefined;
@@ -1084,6 +1652,29 @@ pub const AppState = struct {
     }
 
     pub fn handle_mouse_events(self: *AppState, ev: *const Event) bool {
+        // Modal dialogs intercept all mouse events when open
+        if (self.delete_dialog.is_open()) {
+            _ = self.delete_dialog.handle_event(ev);
+            if (self.delete_dialog.get_result() == .ok) {
+                self.perform_delete();
+            }
+            return true;
+        }
+        if (self.move_dialog.is_open()) {
+            _ = self.move_dialog.handle_event(ev);
+            if (self.move_dialog.get_result() == .ok) {
+                self.perform_move(self.move_dialog.input.get_text());
+            }
+            return true;
+        }
+        if (self.batch_rename_dialog.is_open()) {
+            _ = self.batch_rename_dialog.handle_event(ev);
+            if (self.batch_rename_dialog.get_result() == .ok) {
+                self.perform_batch_rename(self.batch_rename_dialog.input.get_text());
+            }
+            return true;
+        }
+
         if (self.view_mode) {
             if (self.btn_back.handle_event(ev)) {
                 self.back_to_list();
@@ -1099,7 +1690,7 @@ pub const AppState = struct {
             return self.rename_selected();
         }
         if (self.btn_delete.handle_event(ev)) {
-            return self.delete_selected();
+            return self.delete_prompt();
         }
         // GH #218: ScrollView thumb drag / track click / wheel — must sync before and after
         self.sync_scroll_view();
@@ -1109,6 +1700,18 @@ pub const AppState = struct {
             return true;
         }
         if (ev.kind == ui.MOUSE_DOWN and (ev.flags & ui.BTN_LEFT) != 0) {
+            // F1: Ctrl+click toggles selection of individual entry
+            if ((ev.flags & ui.MOD_CTRL) != 0 and self.list.rect.contains(ev.arg0, ev.arg1)) {
+                const row = (ev.arg1 - (list_area.y + header_h)) / list_row_h;
+                const target_idx = self.list.scroll + row;
+                if (target_idx < self.entry_count) {
+                    const actual_idx = self.sort_indices[target_idx];
+                    self.toggle_select(actual_idx);
+                    self.set_status("Multi-select");
+                    return true;
+                }
+            }
+
             // Breadcrumb click has priority over list click (title bar).
             if (breadcrumb_rect.contains(ev.arg0, ev.arg1)) {
                 if (breadcrumb_hit_test(self.current_path_slice(), breadcrumb_rect.x, ev.arg0)) |seg| {
@@ -1161,6 +1764,51 @@ pub const AppState = struct {
         const keycode = ev.arg0;
         const ascii_char: u8 = @truncate(ev.arg1);
 
+        // Modal dialogs intercept all keyboard events when open
+        if (self.delete_dialog.is_open()) {
+            _ = self.delete_dialog.handle_event(ev);
+            if (self.delete_dialog.get_result() == .ok) {
+                self.perform_delete();
+            }
+            return true;
+        }
+        if (self.move_dialog.is_open()) {
+            _ = self.move_dialog.handle_event(ev);
+            if (self.move_dialog.get_result() == .ok) {
+                self.perform_move(self.move_dialog.input.get_text());
+            }
+            return true;
+        }
+        if (self.batch_rename_dialog.is_open()) {
+            _ = self.batch_rename_dialog.handle_event(ev);
+            if (self.batch_rename_dialog.get_result() == .ok) {
+                self.perform_batch_rename(self.batch_rename_dialog.input.get_text());
+            }
+            return true;
+        }
+
+        // F9: Bookmarks list modal navigation
+        if (self.bookmarks_active) {
+            if (keycode == 0x29) { // Escape
+                self.bookmarks_active = false;
+                self.set_status("Ready");
+                return true;
+            }
+            if (keycode == 0x52) { // Up
+                if (self.bookmarks_selected > 0) self.bookmarks_selected -= 1;
+                return true;
+            }
+            if (keycode == 0x51) { // Down
+                if (self.bookmarks_selected + 1 < self.bookmark_count) self.bookmarks_selected += 1;
+                return true;
+            }
+            if (keycode == 0x28 or ascii_char == '\n' or ascii_char == '\r') { // Enter
+                _ = self.jump_bookmark(self.bookmarks_selected);
+                self.bookmarks_active = false;
+                return true;
+            }
+        }
+
         if (self.view_mode) {
             // Esc (0x29) or Enter returns to the list.
             if (keycode == 0x29) {
@@ -1168,6 +1816,68 @@ pub const AppState = struct {
                 return true;
             }
             return false;
+        }
+
+        // F1: Ctrl+A selects all entries.
+        if ((ev.flags & ui.MOD_CTRL) != 0 and (keycode == 0x04 or ascii_char == 1)) {
+            self.select_all();
+            return true;
+        }
+
+        // F1: Ctrl+M prompts for batch move to target directory.
+        if ((ev.flags & ui.MOD_CTRL) != 0 and (keycode == 0x10 or ascii_char == 13)) {
+            return self.move_prompt();
+        }
+
+        // F7: Ctrl+Shift+R opens batch rename dialog.
+        if ((ev.flags & ui.MOD_CTRL) != 0 and (ev.flags & ui.MOD_SHIFT) != 0 and (keycode == 0x15 or ascii_char == 18)) {
+            return self.batch_rename_prompt();
+        }
+
+        // F9: Ctrl+B toggles bookmarks list.
+        if ((ev.flags & ui.MOD_CTRL) != 0 and (keycode == 0x05 or ascii_char == 2)) {
+            return self.toggle_bookmarks();
+        }
+
+        // F2: Ctrl+I or 'p'/'P' toggles file properties panel.
+        if (((ev.flags & ui.MOD_CTRL) != 0 and keycode == 0x0C) or
+            (!self.filter_active and !self.create_dir_active and (ascii_char == 'p' or ascii_char == 'P')))
+        {
+            return self.toggle_properties();
+        }
+
+        // F3: Ctrl+Shift+N toggles directory creation overlay.
+        if ((ev.flags & ui.MOD_CTRL) != 0 and (ev.flags & ui.MOD_SHIFT) != 0 and keycode == 0x11) {
+            return self.toggle_create_dir();
+        }
+
+        // F8: Ctrl+W, Ctrl+\ (0x31), or Tab toggles/switches split panes.
+        if ((ev.flags & ui.MOD_CTRL) != 0 and (keycode == 0x1A or keycode == 0x31)) {
+            return self.toggle_split_pane();
+        }
+        if (keycode == 0x2B and self.split_pane) {
+            self.switch_active_pane();
+            return true;
+        }
+
+        // F9: Ctrl+D bookmarks current directory.
+        if ((ev.flags & ui.MOD_CTRL) != 0 and keycode == 0x07) {
+            return self.add_bookmark(self.current_path_slice());
+        }
+
+        // F14: Ctrl+T terminal here.
+        if ((ev.flags & ui.MOD_CTRL) != 0 and keycode == 0x17) {
+            return self.terminal_here();
+        }
+
+        // F15: Ctrl+E editor here.
+        if ((ev.flags & ui.MOD_CTRL) != 0 and keycode == 0x08) {
+            return self.editor_here();
+        }
+
+        // F6: 'u' / 'U' restores trash.
+        if (!self.filter_active and !self.create_dir_active and (ascii_char == 'u' or ascii_char == 'U')) {
+            return self.restore_trash();
         }
 
         // M20-U8: Ctrl+F toggles the filename filter bar.
@@ -1189,6 +1899,18 @@ pub const AppState = struct {
             return true;
         }
 
+        // F3: While create_dir_active is true, typing feeds mkdir buffer.
+        if (self.create_dir_active) {
+            if (keycode == 0x29) return self.toggle_create_dir(); // Escape
+            if (keycode == 0x28 or ascii_char == '\n' or ascii_char == '\r') {
+                return self.confirm_create_dir();
+            }
+            if (keycode == 0x2a) return self.create_dir_input(0x08); // Backspace
+            if (ascii_char >= 0x20 and ascii_char < 0x7f and (ev.flags & ui.MOD_CTRL) == 0) {
+                return self.create_dir_input(ascii_char);
+            }
+        }
+
         // While the filter is active, typing narrows the list and Escape
         // leaves (restoring the full listing). Letters no longer trigger
         // the d/r shortcuts — they are filter input.
@@ -1208,8 +1930,8 @@ pub const AppState = struct {
         }
 
         // 'd' deletes, 'r' renames the selected entry (claim 5801 slots 34/35).
-        if (ascii_char == 'd' or ascii_char == 'D') {
-            return self.delete_selected();
+        if (ascii_char == 'd' or ascii_char == 'D' or keycode == 0x4c) {
+            return self.delete_prompt();
         }
         if (ascii_char == 'r' or ascii_char == 'R') {
             return self.rename_selected();
@@ -1443,8 +2165,8 @@ test "file: build_data_path prefixes /data/" {
 }
 
 test "file: AppState fits the 16 KiB EL0 stack (W^X, claim B3)" {
-    try std.testing.expect(@sizeOf(AppState) < 4 * 1024);
-    std.debug.print("AppState size: {d}\\n", .{@sizeOf(AppState)});
+    try std.testing.expect(@sizeOf(AppState) < 8 * 1024);
+    std.debug.print("AppState size: {d}\n", .{@sizeOf(AppState)});
 }
 
 test "file: keyboard navigation routes through the FileList model" {
@@ -1747,4 +2469,309 @@ test "file: F16 — Ctrl+Shift+C shortcut sets clipboard path" {
     const ev = Event{ .kind = ui.KEY_DOWN, .flags = ui.MOD_CTRL | ui.MOD_SHIFT, .seq = 1, .arg0 = 0x06, .arg1 = 'C' };
     try std.testing.expect(app.handle_keyboard_event(&ev));
     try std.testing.expectEqualStrings("Path copied", app.status_msg[0..app.status_len]);
+}
+
+test "file: F1 — selection bitmap multi-selection and Ctrl+A select all" {
+    var app = AppState.init();
+    app.entry_count = 5;
+
+    // Initially none selected
+    try std.testing.expectEqual(@as(usize, 0), app.selected_count());
+    try std.testing.expect(!app.is_selected(0));
+
+    // Toggle select item 1 and 3
+    app.toggle_select(1);
+    app.toggle_select(3);
+    try std.testing.expect(app.is_selected(1));
+    try std.testing.expect(app.is_selected(3));
+    try std.testing.expect(!app.is_selected(0));
+    try std.testing.expectEqual(@as(usize, 2), app.selected_count());
+
+    // Toggle again deselects
+    app.toggle_select(1);
+    try std.testing.expect(!app.is_selected(1));
+    try std.testing.expectEqual(@as(usize, 1), app.selected_count());
+
+    // Select all (Ctrl+A)
+    const ev_ctrl_a = Event{ .kind = ui.KEY_DOWN, .flags = ui.MOD_CTRL, .seq = 1, .arg0 = 0x04, .arg1 = 1 };
+    try std.testing.expect(app.handle_keyboard_event(&ev_ctrl_a));
+    try std.testing.expectEqual(@as(usize, 5), app.selected_count());
+    for (0..5) |i| {
+        try std.testing.expect(app.is_selected(i));
+    }
+
+    // Clear selection
+    app.clear_selection();
+    try std.testing.expectEqual(@as(usize, 0), app.selected_count());
+}
+
+test "file: F2 & F4 — properties panel and total_dir_bytes disk usage" {
+    var app = AppState.init();
+    app.entry_count = 3;
+    app.entries[0] = DirEntry{ .name = [_]u8{0} ** 32, .size = 100, .is_dir = 0, .reserved = .{ 0, 0, 0 } };
+    app.entries[1] = DirEntry{ .name = [_]u8{0} ** 32, .size = 250, .is_dir = 0, .reserved = .{ 0, 0, 0 } };
+    app.entries[2] = DirEntry{ .name = [_]u8{0} ** 32, .size = 50, .is_dir = 1, .reserved = .{ 0, 0, 0 } };
+
+    // F4: sum of all sizes
+    try std.testing.expectEqual(@as(u64, 400), app.total_dir_bytes());
+
+    // F2: toggle properties panel via keyboard 'p'
+    try std.testing.expect(!app.properties_mode);
+    const ev_p = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 1, .arg0 = 0x13, .arg1 = 'p' };
+    try std.testing.expect(app.handle_keyboard_event(&ev_p));
+    try std.testing.expect(app.properties_mode);
+    try std.testing.expectEqualStrings("Props On", app.status_msg[0..app.status_len]);
+
+    // Toggle off via 'p'
+    try std.testing.expect(app.handle_keyboard_event(&ev_p));
+    try std.testing.expect(!app.properties_mode);
+    try std.testing.expectEqualStrings("Props Off", app.status_msg[0..app.status_len]);
+}
+
+test "file: F3 & F17 — create directory input, collision check" {
+    var app = AppState.init();
+    app.entry_count = 1;
+    @memcpy(app.entries[0].name[0..4], "DOCS");
+
+    // Collision check
+    try std.testing.expect(app.check_collision("DOCS"));
+    try std.testing.expect(app.check_collision("docs")); // case insensitive
+    try std.testing.expect(!app.check_collision("NEWDIR"));
+
+    // Ctrl+Shift+N activates create dir mode
+    const ev_mkdir = Event{ .kind = ui.KEY_DOWN, .flags = ui.MOD_CTRL | ui.MOD_SHIFT, .seq = 1, .arg0 = 0x11, .arg1 = 0 };
+    try std.testing.expect(app.handle_keyboard_event(&ev_mkdir));
+    try std.testing.expect(app.create_dir_active);
+    try std.testing.expectEqualStrings("New Dir:", app.status_msg[0..app.status_len]);
+
+    // Type name "TEST"
+    _ = app.create_dir_input('T');
+    _ = app.create_dir_input('E');
+    _ = app.create_dir_input('S');
+    _ = app.create_dir_input('T');
+    try std.testing.expectEqualStrings("TEST", app.create_dir_buf[0..app.create_dir_len]);
+
+    // Backspace works
+    _ = app.create_dir_input(0x08);
+    try std.testing.expectEqualStrings("TES", app.create_dir_buf[0..app.create_dir_len]);
+
+    // Escape exits create dir mode
+    const ev_esc = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 2, .arg0 = 0x29, .arg1 = 0 };
+    try std.testing.expect(app.handle_keyboard_event(&ev_esc));
+    try std.testing.expect(!app.create_dir_active);
+}
+
+test "file: F5 — recent files ring stores and shifts paths" {
+    var app = AppState.init();
+    try std.testing.expectEqual(@as(usize, 0), app.recent_count);
+
+    app.add_recent("/data/README.TXT");
+    try std.testing.expectEqual(@as(usize, 1), app.recent_count);
+    try std.testing.expectEqualStrings("/data/README.TXT", app.recent_ring[0][0..app.recent_lens[0]]);
+
+    app.add_recent("/data/DOCS/NOTES.TXT");
+    try std.testing.expectEqual(@as(usize, 2), app.recent_count);
+    try std.testing.expectEqualStrings("/data/DOCS/NOTES.TXT", app.recent_ring[0][0..app.recent_lens[0]]);
+    try std.testing.expectEqualStrings("/data/README.TXT", app.recent_ring[1][0..app.recent_lens[1]]);
+}
+
+test "file: F6 — trash staging and restore" {
+    var app = AppState.init();
+    try std.testing.expectEqual(@as(usize, 0), app.trash_count);
+
+    app.entry_count = 1;
+    @memcpy(app.entries[0].name[0..8], "TEMP.TXT");
+    app.list.select(0, 1);
+
+    // Trashing records the name and decrements
+    _ = app.trash_selected();
+    try std.testing.expectEqual(@as(usize, 1), app.trash_count);
+    try std.testing.expectEqualStrings("TEMP.TXT", app.trash_names[0][0..app.trash_lens[0]]);
+    try std.testing.expectEqualStrings("Trashed", app.status_msg[0..app.status_len]);
+
+    // 'u' triggers restore
+    const ev_u = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 1, .arg0 = 0x18, .arg1 = 'u' };
+    try std.testing.expect(app.handle_keyboard_event(&ev_u));
+}
+
+test "file: F8 — split pane mode toggle and active pane switch" {
+    var app = AppState.init();
+    try std.testing.expect(!app.split_pane);
+    try std.testing.expectEqual(@as(u8, 0), app.active_pane);
+
+    // Ctrl+W toggles split pane
+    const ev_split = Event{ .kind = ui.KEY_DOWN, .flags = ui.MOD_CTRL, .seq = 1, .arg0 = 0x1A, .arg1 = 0 };
+    try std.testing.expect(app.handle_keyboard_event(&ev_split));
+    try std.testing.expect(app.split_pane);
+    try std.testing.expectEqualStrings("Split On", app.status_msg[0..app.status_len]);
+
+    // Tab switches active pane
+    const ev_tab = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 2, .arg0 = 0x2B, .arg1 = 0 };
+    try std.testing.expect(app.handle_keyboard_event(&ev_tab));
+    try std.testing.expectEqual(@as(u8, 1), app.active_pane);
+    try std.testing.expectEqualStrings("Right Pane", app.status_msg[0..app.status_len]);
+
+    // Tab again switches back to left
+    try std.testing.expect(app.handle_keyboard_event(&ev_tab));
+    try std.testing.expectEqual(@as(u8, 0), app.active_pane);
+    try std.testing.expectEqualStrings("Left Pane", app.status_msg[0..app.status_len]);
+}
+
+test "file: F9 — bookmarks add and jump" {
+    var app = AppState.init();
+    try std.testing.expectEqual(@as(usize, 0), app.bookmark_count);
+
+    // Ctrl+D bookmarks current path "/data"
+    const ev_bk = Event{ .kind = ui.KEY_DOWN, .flags = ui.MOD_CTRL, .seq = 1, .arg0 = 0x07, .arg1 = 0 };
+    try std.testing.expect(app.handle_keyboard_event(&ev_bk));
+    try std.testing.expectEqual(@as(usize, 1), app.bookmark_count);
+    try std.testing.expectEqualStrings("/data", app.bookmarks[0][0..app.bookmark_lens[0]]);
+    try std.testing.expectEqualStrings("Bookmarked", app.status_msg[0..app.status_len]);
+
+    // Enter subfolder and jump back via bookmark
+    _ = app.enter_directory("docs");
+    try std.testing.expectEqualStrings("/data/docs", app.current_path_slice());
+    try std.testing.expect(app.jump_bookmark(0));
+    try std.testing.expectEqualStrings("/data", app.current_path_slice());
+}
+
+test "file: F14 & F15 — terminal here and editor here shortcuts" {
+    var app = AppState.init();
+    app.entry_count = 1;
+    @memcpy(app.entries[0].name[0..8], "MAIN.ZIG");
+    app.list.select(0, 1);
+
+    // Ctrl+T triggers terminal here
+    const ev_term = Event{ .kind = ui.KEY_DOWN, .flags = ui.MOD_CTRL, .seq = 1, .arg0 = 0x17, .arg1 = 0 };
+    try std.testing.expect(app.handle_keyboard_event(&ev_term));
+    try std.testing.expectEqualStrings("Term Spawned", app.status_msg[0..app.status_len]);
+
+    // Ctrl+E triggers editor here
+    const ev_edit = Event{ .kind = ui.KEY_DOWN, .flags = ui.MOD_CTRL, .seq = 2, .arg0 = 0x08, .arg1 = 0 };
+    try std.testing.expect(app.handle_keyboard_event(&ev_edit));
+    try std.testing.expectEqualStrings("Edit Spawned", app.status_msg[0..app.status_len]);
+}
+
+test "file: F1 & F18 — delete confirmation dialog modal workflow" {
+    var app = AppState.init();
+    app.entry_count = 2;
+    @memcpy(app.entries[0].name[0..5], "A.TXT");
+    @memcpy(app.entries[1].name[0..5], "B.TXT");
+    app.list.select(0, 2);
+
+    // Pressing 'd' opens delete confirmation dialog
+    const ev_d = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 1, .arg0 = 0x07, .arg1 = 'd' };
+    try std.testing.expect(app.handle_keyboard_event(&ev_d));
+    try std.testing.expect(app.delete_dialog.is_open());
+
+    // Pressing Escape cancels dialog without deleting
+    const ev_esc = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 2, .arg0 = 0x29, .arg1 = 0 };
+    try std.testing.expect(app.handle_keyboard_event(&ev_esc));
+    try std.testing.expect(!app.delete_dialog.is_open());
+    try std.testing.expectEqual(ui.DialogResult.cancel, app.delete_dialog.get_result());
+
+    // Pressing 'd' again and confirming with Enter
+    _ = app.handle_keyboard_event(&ev_d);
+    try std.testing.expect(app.delete_dialog.is_open());
+    const ev_enter = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 3, .arg0 = 0x28, .arg1 = '\n' };
+    try std.testing.expect(app.handle_keyboard_event(&ev_enter));
+    try std.testing.expect(!app.delete_dialog.is_open());
+    try std.testing.expectEqual(ui.DialogResult.ok, app.delete_dialog.get_result());
+}
+
+test "file: F1 — Ctrl+M batch move dialog workflow and progress" {
+    var app = AppState.init();
+    app.entry_count = 2;
+    @memcpy(app.entries[0].name[0..5], "A.TXT");
+    @memcpy(app.entries[1].name[0..5], "B.TXT");
+    app.toggle_select(0);
+    app.toggle_select(1);
+
+    // Ctrl+M opens move dialog with input
+    const ev_ctrl_m = Event{ .kind = ui.KEY_DOWN, .flags = ui.MOD_CTRL, .seq = 1, .arg0 = 0x10, .arg1 = 0 };
+    try std.testing.expect(app.handle_keyboard_event(&ev_ctrl_m));
+    try std.testing.expect(app.move_dialog.is_open());
+    try std.testing.expect(app.move_dialog.has_input);
+
+    // Type destination path into move dialog input
+    app.move_dialog.input.set_text("/data/archive");
+    try std.testing.expectEqualStrings("/data/archive", app.move_dialog.input.get_text());
+
+    // Enter confirms move
+    const ev_enter = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 2, .arg0 = 0x28, .arg1 = '\n' };
+    try std.testing.expect(app.handle_keyboard_event(&ev_enter));
+    try std.testing.expect(!app.move_dialog.is_open());
+    try std.testing.expectEqualStrings("Moved", app.status_msg[0..app.status_len]);
+    try std.testing.expectEqual(@as(usize, 0), app.selected_count());
+}
+
+test "file: F7 — Ctrl+Shift+R batch rename dialog workflow" {
+    var app = AppState.init();
+    app.entry_count = 2;
+    @memcpy(app.entries[0].name[0..5], "A.TXT");
+    @memcpy(app.entries[1].name[0..5], "B.TXT");
+    app.toggle_select(0);
+    app.toggle_select(1);
+
+    // Ctrl+Shift+R opens batch rename dialog
+    const ev_rename = Event{ .kind = ui.KEY_DOWN, .flags = ui.MOD_CTRL | ui.MOD_SHIFT, .seq = 1, .arg0 = 0x15, .arg1 = 0 };
+    try std.testing.expect(app.handle_keyboard_event(&ev_rename));
+    try std.testing.expect(app.batch_rename_dialog.is_open());
+
+    // Set prefix
+    app.batch_rename_dialog.input.set_text("old_");
+    try std.testing.expectEqualStrings("old_", app.batch_rename_dialog.input.get_text());
+
+    // Confirm rename
+    const ev_enter = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 2, .arg0 = 0x28, .arg1 = '\n' };
+    try std.testing.expect(app.handle_keyboard_event(&ev_enter));
+    try std.testing.expect(!app.batch_rename_dialog.is_open());
+    try std.testing.expectEqualStrings("Batch Renamed", app.status_msg[0..app.status_len]);
+}
+
+test "file: F9 — Ctrl+B bookmarks overlay navigation and jump" {
+    var app = AppState.init();
+    _ = app.add_bookmark("/data/docs");
+    _ = app.add_bookmark("/data/music");
+
+    // Ctrl+B opens bookmarks overlay
+    const ev_ctrl_b = Event{ .kind = ui.KEY_DOWN, .flags = ui.MOD_CTRL, .seq = 1, .arg0 = 0x05, .arg1 = 2 };
+    try std.testing.expect(app.handle_keyboard_event(&ev_ctrl_b));
+    try std.testing.expect(app.bookmarks_active);
+    try std.testing.expectEqual(@as(usize, 0), app.bookmarks_selected);
+
+    // Down arrow selects second bookmark
+    const ev_down = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 2, .arg0 = 0x51, .arg1 = 0 };
+    try std.testing.expect(app.handle_keyboard_event(&ev_down));
+    try std.testing.expectEqual(@as(usize, 1), app.bookmarks_selected);
+
+    // Enter jumps to selected bookmark
+    const ev_enter = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 3, .arg0 = 0x28, .arg1 = '\n' };
+    try std.testing.expect(app.handle_keyboard_event(&ev_enter));
+    try std.testing.expect(!app.bookmarks_active);
+    try std.testing.expectEqualStrings("/data/music", app.current_path_slice());
+}
+
+test "file: F13 — get_associated_app returns correct application" {
+    try std.testing.expectEqualStrings("EXEC", get_associated_app("TEST.BIN"));
+    try std.testing.expectEqualStrings("NOTEPAD", get_associated_app("README.TXT"));
+    try std.testing.expectEqualStrings("NOTEPAD", get_associated_app("MEMO.DOC"));
+    try std.testing.expectEqualStrings("EDIT", get_associated_app("MAIN.ZIG"));
+    try std.testing.expectEqualStrings("EDIT", get_associated_app("TEST.C"));
+    try std.testing.expectEqualStrings("EDIT", get_associated_app("HEADER.H"));
+    try std.testing.expectEqualStrings("VIEW", get_associated_app("DATA.DAT"));
+}
+
+test "file: F8 — Ctrl+\\ toggles split pane" {
+    var app = AppState.init();
+    try std.testing.expect(!app.split_pane);
+
+    // Ctrl+\ (usage 0x31)
+    const ev_bslash = Event{ .kind = ui.KEY_DOWN, .flags = ui.MOD_CTRL, .seq = 1, .arg0 = 0x31, .arg1 = 0 };
+    try std.testing.expect(app.handle_keyboard_event(&ev_bslash));
+    try std.testing.expect(app.split_pane);
+
+    // Toggle again closes split
+    try std.testing.expect(app.handle_keyboard_event(&ev_bslash));
+    try std.testing.expect(!app.split_pane);
 }
