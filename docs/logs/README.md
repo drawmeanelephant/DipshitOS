@@ -116,6 +116,7 @@ meaningful — on main.
 | `agent/buffy/m19-lane-a-shell` | [`agent-buffy-m19-lane-a-shell.md`](agent-buffy-m19-lane-a-shell.md) |
 | agent/buffy/m21-compositor-w9-w11-w12 | [`agent-buffy-m21-compositor-w9-w11-w12.md`](agent-buffy-m21-compositor-w9-w11-w12.md) |
 | agent/buffy/m21-compositor | [`agent-buffy-m21-compositor.md`](agent-buffy-m21-compositor.md) |
+| `agent/buffy/m22-devtools-d8-d16` | [`agent-buffy-m22-devtools-d8-d16.md`](agent-buffy-m22-devtools-d8-d16.md) |
 | `agent/buffy/m23-text-editor` | [`agent-buffy-m23-text-editor.md`](agent-buffy-m23-text-editor.md) |
 | `agent/buffy/m24-calc-features` | [`agent-buffy-m24-calc-features.md`](agent-buffy-m24-calc-features.md) |
 | agent/buffy/m26-netstat-fetch | [`agent-buffy-m26-netstat-fetch.md`](agent-buffy-m26-netstat-fetch.md) |
