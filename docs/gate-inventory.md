@@ -153,6 +153,11 @@ The fixed-width block (`GATE id=… class=… ci=… apple=… gate=… cmd=…`
 between `<!-- GATE_INVENTORY:START -->` / `END`) moved verbatim to
 [`archive/gate-inventory-detail.md`](archive/gate-inventory-detail.md);
 CI extracts it from there to list the class-B gates it does not prove.
+The dedicated [`VZ hardware gates`](../.github/workflows/vz-gates.yml)
+workflow shards the same block across a self-hosted macOS 27+ runner as
+a required check — SKIPPED until the repository variable
+`VZ_RUNNER_LABEL` names a registered runner (see
+[`vz-runner.md`](vz-runner.md)).
 
 ## Known flakes (evidence registry)
 

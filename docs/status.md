@@ -68,6 +68,7 @@ byte-perfect and gated by `zig build run`).
 |------|---------|--------|---------------|
 | Format | `zig fmt --check boot/src/*.zig kernel/src/*.zig build.zig` | ✅ pass | re-run 2026-08-08 (preflight); re-verified at `076ddf1` (claim 8073) |
 | Guest build | `zig build` | ✅ pass | re-run 2026-08-08 (preflight); re-verified at `076ddf1` (claim 8073) |
+| VZ hardware gates in CI | `.github/workflows/vz-gates.yml` — all class-B gates sharded ×4 on a self-hosted macOS 27+ runner, aggregate **VZ hardware gates** context required by branch protection | 🔶 wired / skipped until enforced | 2026-08-25: SKIPPED honestly until repo variable `VZ_RUNNER_LABEL` names a registered runner — registration steps in `docs/vz-runner.md`; hosted runners top out at macOS 26, below the project's documented floor |
 | Disk image | `zig build image` | ✅ pass | re-run 2026-08-08 (preflight); re-verified at `076ddf1` (claim 8073) |
 | Binary + image inspect | `zig build inspect` | ✅ pass | re-run 2026-08-08 (preflight); re-verified at `076ddf1` (claim 8073) |
 | Swift runner build | `swift build --package-path host/vm-runner` | ✅ pass | re-run 2026-08-08 (preflight); re-verified at `076ddf1` (claim 8073) |
