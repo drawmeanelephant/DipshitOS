@@ -226,7 +226,8 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
                        jingle_bytes=None, chime_bytes=None, globals_bytes=None,                      guard_bytes=None, spin_bytes=None, apps_txt_bytes=None,
                        hello_bytes=None, asm_bytes=None, settings_bytes=None,
                        crash_bytes=None, disas_bytes=None, edit_bytes=None, ps_bytes=None,
-                       resmon_bytes=None, devcons_bytes=None, netstat_bytes=None):
+                       resmon_bytes=None, devcons_bytes=None, netstat_bytes=None,
+                       m21demo_bytes=None):
     """Write a FAT32 volume (boot sector, FSInfo, FATs, directories, files)
     into `img` at the volume's offset.
 
@@ -289,6 +290,7 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
     resmon_clusters = (len(resmon_bytes) + bps - 1) // bps if resmon_bytes else 0
     devcons_clusters = (len(devcons_bytes) + bps - 1) // bps if devcons_bytes else 0
     netstat_clusters = (len(netstat_bytes) + bps - 1) // bps if netstat_bytes else 0
+    m21demo_clusters = (len(m21demo_bytes) + bps - 1) // bps if m21demo_bytes else 0
     file_clusters = (len(efi_bytes) + bps - 1) // bps
     root_entries_count = 2  # vol_label + efi_entry
     if kernel_bytes: root_entries_count += 1
@@ -333,6 +335,7 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
     if resmon_bytes: root_entries_count += 1
     if devcons_bytes: root_entries_count += 1
     if netstat_bytes: root_entries_count += 1
+    if m21demo_bytes: root_entries_count += 1
 
     root_clusters = (root_entries_count * 32 + bps - 1) // bps
     efi_dir_cluster = 2 + root_clusters
@@ -377,7 +380,8 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
     resmon_start = ps_start + ps_clusters
     devcons_start = resmon_start + resmon_clusters
     netstat_start = devcons_start + devcons_clusters
-    apps_txt_start = netstat_start + netstat_clusters
+    m21demo_start = netstat_start + netstat_clusters
+    apps_txt_start = m21demo_start + m21demo_clusters
     hello_start = apps_txt_start + apps_txt_clusters
     efi_start = hello_start + hello_clusters
     allocated = efi_start + file_clusters - 2  # clusters used beyond root(2)
@@ -478,6 +482,8 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
         chain(devcons_start, devcons_clusters)      # DEVCONS.BIN data
     if netstat_bytes:
         chain(netstat_start, netstat_clusters)      # NETSTAT.BIN data
+    if m21demo_bytes:
+        chain(m21demo_start, m21demo_clusters)      # M21DEMO.BIN data
     if apps_txt_bytes:
         chain(apps_txt_start, apps_txt_clusters)  # APPS.TXT data
     if hello_bytes:
@@ -592,6 +598,8 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
         root_entries += dir_entry(b"DEVCONS BIN", 0x20, devcons_start, len(devcons_bytes))
     if netstat_bytes:
         root_entries += dir_entry(b"NETSTAT BIN", 0x20, netstat_start, len(netstat_bytes))
+    if m21demo_bytes:
+        root_entries += dir_entry(b"M21DEMO BIN", 0x20, m21demo_start, len(m21demo_bytes))
     if apps_txt_bytes:
         root_entries += dir_entry(b"APPS    TXT", 0x20, apps_txt_start, len(apps_txt_bytes))
     if hello_bytes:
@@ -765,6 +773,10 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
         for i in range(netstat_clusters):
             chunk = netstat_bytes[i * bps:(i + 1) * bps]
             wsec(geo.cluster_sector(netstat_start + i), chunk.ljust(bps, b"\x00"))
+    if m21demo_bytes:
+        for i in range(m21demo_clusters):
+            chunk = m21demo_bytes[i * bps:(i + 1) * bps]
+            wsec(geo.cluster_sector(m21demo_start + i), chunk.ljust(bps, b"\x00"))
     if apps_txt_bytes:
         for i in range(apps_txt_clusters):
             chunk = apps_txt_bytes[i * bps:(i + 1) * bps]
@@ -1041,7 +1053,8 @@ def build_image(total_sectors, esp_offset, efi_bytes, kernel_bytes=None,
                 guard_bytes=None, spin_bytes=None, apps_txt_bytes=None,
                 hello_bytes=None, asm_bytes=None, settings_bytes=None,
                 crash_bytes=None, disas_bytes=None, edit_bytes=None, ps_bytes=None,
-                resmon_bytes=None, devcons_bytes=None, netstat_bytes=None):
+                resmon_bytes=None, devcons_bytes=None, netstat_bytes=None,
+                m21demo_bytes=None):
     img = bytearray(total_sectors * BYTES_PER_SECTOR)
     last_usable = total_sectors - 34
     first_usable = 34
@@ -1086,7 +1099,8 @@ def build_image(total_sectors, esp_offset, efi_bytes, kernel_bytes=None,
                       calc_bytes, notepad_bytes, top_bytes, desktop_bytes,
                       tcp_bytes, fetch_bytes, chat_bytes, file_bytes, fstest_bytes, timertest_bytes,
                       victim_bytes, harden_bytes, jingle_bytes, chime_bytes, globals_bytes, guard_bytes, spin_bytes, apps_txt_bytes, hello_bytes, asm_bytes, settings_bytes, crash_bytes, disas_bytes, edit_bytes, ps_bytes,
-                      resmon_bytes, devcons_bytes, netstat_bytes)
+                      resmon_bytes, devcons_bytes, netstat_bytes,
+                      m21demo_bytes)
     geo_data = Fat32Geometry(data_sectors, data_start)
     build_data_volume(img, geo_data)
     return bytes(img)
@@ -1182,6 +1196,8 @@ def main(argv):
                     help="optional flat user program (DEVCONS.BIN) to embed at the volume root (M22 D14, issue #337 -- developer console)")
     ap.add_argument("netstat_file", nargs="?",
                     help="optional SEGMENTED user program (NETSTAT.BIN) to embed at the volume root (M26 N2, issue #400 -- network dashboard)")
+    ap.add_argument("m21demo_file", nargs="?",
+                    help="optional flat user program (M21DEMO.BIN) to embed at the volume root (M21 W1/W2 gate payload, claim 8777 -- two-window tiling demo)")
     ap.add_argument("crash_file", nargs="?",
                     help="optional AArch64 ELF32 executable (CRASH.ELF) to embed at the volume root (M22 D3, issue #326 -- symbolized-crash gate)")
     ap.add_argument("hello_file", nargs="?",
@@ -1551,6 +1567,15 @@ def main(argv):
                   "not be a DipshitOS user program image" % args.netstat_file,
                   file=sys.stderr)
 
+    m21demo_bytes = None
+    if args.m21demo_file:
+        with open(args.m21demo_file, "rb") as f:
+            m21demo_bytes = f.read()
+        if m21demo_bytes[:4] != b"DSK1":
+            print("WARNING: %s does not start with the 'DSK1' magic; it may "
+                  "not be a DipshitOS user program image" % args.m21demo_file,
+                  file=sys.stderr)
+
     crash_bytes = None
     if args.crash_file:
         with open(args.crash_file, "rb") as f:
@@ -1577,7 +1602,8 @@ def main(argv):
                       dir_bytes, calc_bytes, notepad_bytes, top_bytes, desktop_bytes,
                       tcp_bytes, fetch_bytes, chat_bytes, file_bytes, fstest_bytes, timertest_bytes,
                       victim_bytes, harden_bytes, jingle_bytes, chime_bytes, globals_bytes, guard_bytes, spin_bytes, apps_txt_bytes, hello_bytes, asm_bytes, settings_bytes, crash_bytes, disas_bytes, edit_bytes, ps_bytes,
-                      resmon_bytes, devcons_bytes, netstat_bytes)
+                      resmon_bytes, devcons_bytes, netstat_bytes,
+                      m21demo_bytes)
     with open(args.image, "wb") as f:
         f.write(img)
     extra = ", %d-byte kernel image embedded" % len(kernel_bytes) if kernel_bytes else ""
@@ -1606,6 +1632,7 @@ def main(argv):
     extra += ", %d-byte resmon program embedded" % len(resmon_bytes) if resmon_bytes else ""
     extra += ", %d-byte devcons program embedded" % len(devcons_bytes) if devcons_bytes else ""
     extra += ", %d-byte netstat program embedded" % len(netstat_bytes) if netstat_bytes else ""
+    extra += ", %d-byte m21demo program embedded" % len(m21demo_bytes) if m21demo_bytes else ""
     print("wrote %s: %d MiB, ESP at LBA %d, %d-byte EFI application embedded%s" %
           (args.image, args.size_mb, args.esp_offset, len(efi_bytes), extra))
     return 0

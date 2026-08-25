@@ -2867,6 +2867,12 @@ fn paint(w: *Window) void {
         .user => {
             const idx = w.id - user_window_id_base;
             if (idx >= user_windows_max) return;
+            // The back-buffer is fixed user_buf_w × user_buf_h while the
+            // window rect may exceed it (M21 tiling grows rects up to
+            // 837×700): clamp the SOURCE dims so the blit never reads past
+            // the buffer (content occupies the tile's top-left corner).
+            const bw = @min(w.w, user_buf_w);
+            const bh = @min(w.h, user_buf_h);
             // Arc4 #239: during fade-in, blend with alpha over the
             // background (wallpaper/terminal already composited below).
             const alpha: u16 = if (w.fade_phase == 1)
@@ -2883,8 +2889,8 @@ fn paint(w: *Window) void {
                     user_buf_w * 4,
                     w.x,
                     w.y,
-                    w.w,
-                    w.h,
+                    bw,
+                    bh,
                     alpha,
                 );
             } else {
@@ -2895,8 +2901,8 @@ fn paint(w: *Window) void {
                     user_buf_w * 4,
                     w.x,
                     w.y,
-                    w.w,
-                    w.h,
+                    bw,
+                    bh,
                 );
             }
         },

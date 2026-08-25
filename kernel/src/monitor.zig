@@ -360,7 +360,7 @@ fn ensure_registry() []const Command {
             .{ .name = "uname", .help = "compact system identity", .usage = "uname", .category = .machine_identity, .handler = cmd_uname },
             .{ .name = "version", .help = "display build information", .usage = "version", .category = .machine_identity, .handler = cmd_version },
             .{ .name = "welcome", .help = "guided tour of the system for new users", .usage = "welcome", .category = .machine_identity, .handler = cmd_welcome },
-            .{ .name = "dui", .help = "Driving Award window manager: registry (with owner pids), z-order, focus, hit-testing ('dui focus <n>' focuses; 'dui raise <n>' raises; 'dui lower <n>' lowers to back; 'dui move <n> <x> <y>' moves a user window; 'dui close <n>' releases a user window; 'dui list <pid>' filters by owner; 'dui hit <x> <y>' hit-tests; 'dui cycle' cycles focus like Alt+Tab)", .usage = "dui [focus <n>|raise <n>|lower <n>|move <n> <x> <y>|close <n>|list <pid>|hit <x> <y>|cycle]", .category = .graphics_input, .max_args = 4, .handler = cmd_dui },
+            .{ .name = "dui", .help = "Driving Award window manager: registry (with owner pids), z-order, focus, hit-testing ('dui focus <n>' focuses; 'dui raise <n>' raises; 'dui lower <n>' lowers to back; 'dui move <n> <x> <y>' moves a user window; 'dui close <n>' releases a user window; 'dui list <pid>' filters by owner; 'dui hit <x> <y>' hit-tests; 'dui cycle' cycles focus like Alt+Tab; 'dui tile <n>' toggles a user window floating/tiled (M21 W1); 'dui master' swaps master/detail (M21 W2))", .usage = "dui [focus <n>|raise <n>|lower <n>|move <n> <x> <y>|close <n>|list <pid>|hit <x> <y>|cycle|tile <n>|master]", .category = .graphics_input, .max_args = 4, .handler = cmd_dui },
             .{ .name = "write", .help = "write text to a file on the ESP", .usage = "write <file> <text...>", .category = .storage, .min_args = 1, .handler = cmd_write },
             .{ .name = "mktemp", .help = "create a temporary file (empty, unique name)", .usage = "mktemp [prefix]", .category = .storage, .max_args = 1, .handler = cmd_mktemp },
             .{ .name = "stat", .help = "file metadata: size, type, cluster, path (D8)", .usage = "stat <file|path>", .category = .storage, .min_args = 1, .max_args = 1, .handler = cmd_stat },
@@ -2240,6 +2240,70 @@ fn cmd_dui(m: *Monitor, args: []const []const u8) ExecError {
             m.console.puts("\n");
             return .none;
         }
+        if (std.mem.eql(u8, args[0], "tile")) {
+            if (args.len != 2) {
+                print_usage(m, lookup("dui").?);
+                return .usage;
+            }
+            const id = parseInt(args[1]) catch {
+                err_prefix(m);
+                m.console.puts("invalid id: ");
+                m.console.puts(args[1]);
+                m.console.puts("\n");
+                return .invalid_argument;
+            };
+            if (id > 255) {
+                err_prefix(m);
+                m.console.print_line("id out of range");
+                return .invalid_argument;
+            }
+            if (!driving_award.focus(@intCast(id))) {
+                err_prefix(m);
+                m.console.print_line("no such window");
+                return .invalid_argument;
+            }
+            // The EL1h half of M21 W1's Ctrl+T chord: focus the window,
+            // then toggle it floating <-> tiled (driving_award owns the
+            // max-2 constraint and the layout math).
+            driving_award.toggle_tiling();
+            _ = driving_award.composite();
+            m.console.puts("dui tile: id=");
+            m.console.print_u64(id);
+            m.console.puts(" mode=");
+            m.console.puts(if (driving_award.tile_mode) "on" else "off");
+            if (driving_award.tile_master_id) |mid| {
+                m.console.puts(" master=");
+                m.console.print_u64(mid);
+            }
+            if (driving_award.tile_stack_id) |sid| {
+                m.console.puts(" stack=");
+                m.console.print_u64(sid);
+            }
+            m.console.puts("\n");
+            return .none;
+        }
+        if (std.mem.eql(u8, args[0], "master")) {
+            if (args.len != 1) {
+                print_usage(m, lookup("dui").?);
+                return .usage;
+            }
+            // The EL1h half of M21 W2's Ctrl+M chord: swap master/detail
+            // (a no-op unless two windows are tiled).
+            driving_award.swap_master();
+            _ = driving_award.composite();
+            m.console.puts("dui master: side=");
+            m.console.puts(if (driving_award.tile_master_side) "left" else "right");
+            if (driving_award.tile_master_id) |mid| {
+                m.console.puts(" master=");
+                m.console.print_u64(mid);
+            }
+            if (driving_award.tile_stack_id) |sid| {
+                m.console.puts(" stack=");
+                m.console.print_u64(sid);
+            }
+            m.console.puts("\n");
+            return .none;
+        }
         print_usage(m, lookup("dui").?);
         return .usage;
     }
@@ -2253,6 +2317,20 @@ fn cmd_dui(m: *Monitor, args: []const []const u8) ExecError {
     m.console.print_u64(driving_award.focused_window_id());
     m.console.puts(" presents=");
     m.console.print_u64(driving_award.presents_pushed());
+    m.console.puts("\n");
+    // M21 W1/W2 tiling state (the layout the tiled rects obey).
+    m.console.puts("dui: tiling=");
+    m.console.puts(if (driving_award.tile_mode) "on" else "off");
+    if (driving_award.tile_master_id) |mid| {
+        m.console.puts(" master=");
+        m.console.print_u64(mid);
+    }
+    if (driving_award.tile_stack_id) |sid| {
+        m.console.puts(" stack=");
+        m.console.print_u64(sid);
+    }
+    m.console.puts(" side=");
+    m.console.puts(if (driving_award.tile_master_side) "left" else "right");
     m.console.puts("\n");
     var i: usize = 0;
     while (i < driving_award.count()) : (i += 1) {
