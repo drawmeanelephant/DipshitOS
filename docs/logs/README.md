@@ -117,6 +117,7 @@ meaningful — on main.
 | agent/buffy/m21-compositor-w9-w11-w12 | [`agent-buffy-m21-compositor-w9-w11-w12.md`](agent-buffy-m21-compositor-w9-w11-w12.md) |
 | agent/buffy/m21-compositor | [`agent-buffy-m21-compositor.md`](agent-buffy-m21-compositor.md) |
 | `agent/buffy/m22-devtools-d8-d16` | [`agent-buffy-m22-devtools-d8-d16.md`](agent-buffy-m22-devtools-d8-d16.md) |
+| `agent/buffy/m23-m24-gate-sweep` | [`agent-buffy-m23-m24-gate-sweep.md`](agent-buffy-m23-m24-gate-sweep.md) |
 | `agent/buffy/m23-text-editor` | [`agent-buffy-m23-text-editor.md`](agent-buffy-m23-text-editor.md) |
 | `agent/buffy/m24-calc-features` | [`agent-buffy-m24-calc-features.md`](agent-buffy-m24-calc-features.md) |
 | agent/buffy/m25-file-manager-depth | [`agent-buffy-m25-file-manager-depth.md`](agent-buffy-m25-file-manager-depth.md) |
