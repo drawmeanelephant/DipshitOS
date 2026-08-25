@@ -80,6 +80,7 @@ pub const ipv4 = @import("ipv4.zig");
 pub const udp = @import("udp.zig");
 pub const dhcp = @import("dhcp.zig"); // N8 (claim 0351): the bounded RFC 2131 client (port 68)
 pub const tcp = @import("tcp.zig"); // N10 (claim 7026): the bounded RFC 793 client
+pub const net_log = @import("net_log.zig"); // M26 N15 (issue #442): network event ring buffer
 
 // ---------------------------------------------------------------------------
 // Split-ring structures (the blk/entropy/console shared layout)
