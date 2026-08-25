@@ -119,6 +119,7 @@ meaningful — on main.
 | `agent/buffy/m22-devtools-d8-d16` | [`agent-buffy-m22-devtools-d8-d16.md`](agent-buffy-m22-devtools-d8-d16.md) |
 | `agent/buffy/m23-text-editor` | [`agent-buffy-m23-text-editor.md`](agent-buffy-m23-text-editor.md) |
 | `agent/buffy/m24-calc-features` | [`agent-buffy-m24-calc-features.md`](agent-buffy-m24-calc-features.md) |
+| agent/buffy/m25-file-manager-depth | [`agent-buffy-m25-file-manager-depth.md`](agent-buffy-m25-file-manager-depth.md) |
 | `agent/buffy/m26-net-experience` | [`agent-buffy-m26-net-experience.md`](agent-buffy-m26-net-experience.md) |
 | agent/buffy/m26-netstat-fetch | [`agent-buffy-m26-netstat-fetch.md`](agent-buffy-m26-netstat-fetch.md) |
 | milestone nine interactive application events (claim 7463) | [`agent-buffy-m9-events.md`](agent-buffy-m9-events.md) |
