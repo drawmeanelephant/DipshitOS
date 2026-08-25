@@ -1,13 +1,15 @@
 # CI proves ONLY the portable/build gate set — class A in
 # docs/gate-inventory.md: formatting, unit tests, transcript mock test,
 # guest/image builds, inspect, Swift runner build, context generation, and
-# the coordination gates. It does NOT and cannot run the Apple-silicon
-# Virtualization.framework hardware gates (class B: bad-handoff, marker,
-# NVRAM console, host-console PTY, live serial takeover, live transcript/RX),
-# the interactive class-C console, or the class-D diagnostics. GitHub-hosted
-# runners do not prove VZ hardware behavior — a green CI badge means "the
-# portable gates passed", nothing more. Run `just verify-vz` on an Apple
-# silicon host for the VZ gates.
+# the coordination gates. It does NOT run the Apple-silicon
+# Virtualization.framework hardware gates (class B) — those live in the
+# dedicated `vz-gates` workflow (.github/workflows/vz-gates.yml), which
+# runs them on a self-hosted macOS 27+ Apple silicon runner once the
+# repository variable VZ_RUNNER_LABEL names its label (until then that
+# workflow reports SKIPPED honestly). GitHub-hosted runners top out at
+# macOS 26 and do not prove VZ hardware behavior — a green CI badge here
+# still means "the portable gates passed", nothing more. Run
+# `just verify-vz` on an Apple silicon host for local VZ gate runs.
 #
 # One build check requires the macOS 27 SDK (the custom-virtio spike): it
 # runs in a separate job on GitHub's `xcode-27` public-preview arm64 runner
@@ -81,12 +83,14 @@ jobs:
       - name: Verify the kernel `.bss` ceiling (class A — ADR 0013 D3.1)
         run: bash tools/verify-bss-budget.sh
 
-      # --- Class B: Apple-silicon VZ hardware gates are NOT run here ---
+      # --- Class B: Apple-silicon VZ hardware gates run in vz-gates.yml ---
 
       - name: State which gates this CI does NOT prove
         run: |
           echo "CI complete: portable/build gates (class A) passed."
-          echo "NOT proven by this CI — run on an Apple silicon host (just verify-vz):"
+          echo "Class-B VZ hardware gates run in the separate 'VZ hardware gates' workflow"
+          echo "(skipped until VZ_RUNNER_LABEL names a registered macOS 27+ runner)."
+          echo "NOT proven by THIS workflow — see also just verify-vz:"
           # The machine-readable GATE_INVENTORY block lives in
           # docs/archive/gate-inventory-detail.md (issue #265).
           sed -n '/^<!-- GATE_INVENTORY:START -->$/,/^<!-- GATE_INVENTORY:END -->$/p' docs/archive/gate-inventory-detail.md \

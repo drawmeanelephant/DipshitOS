@@ -381,6 +381,51 @@ if [ -f "$M21DEMO_BIN" ]; then
     fi
     M21DEMO_ARGS+=("$M21DEMO_BIN")
 fi
+# M26 N1 (issue #399): PING.BIN is a flat DSK1 program (ICMP ping CLI).
+PING_BIN="${43:-$ROOT_DIR/zig-out/bin/PING.BIN}"
+PING_ARGS=()
+if [ -f "$PING_BIN" ]; then
+    if [ "$(head -c 4 "$PING_BIN")" != "DSK1" ]; then
+        fail "'$PING_BIN' does not start with the 'DSK1' image magic -- run 'zig build' first."
+    fi
+    PING_ARGS+=("$PING_BIN")
+fi
+# M26 N5 (issue #403): DNS.BIN is a flat DSK1 program (DNS query tool).
+DNS_BIN="${44:-$ROOT_DIR/zig-out/bin/DNS.BIN}"
+DNS_ARGS=()
+if [ -f "$DNS_BIN" ]; then
+    if [ "$(head -c 4 "$DNS_BIN")" != "DSK1" ]; then
+        fail "'$DNS_BIN' does not start with the 'DSK1' image magic -- run 'zig build' first."
+    fi
+    DNS_ARGS+=("$DNS_BIN")
+fi
+# M26 N11 (issue #438): DOWNLOAD.BIN is a flat DSK1 program (HTTP download manager).
+DOWNLOAD_BIN="${45:-$ROOT_DIR/zig-out/bin/DOWNLOAD.BIN}"
+DOWNLOAD_ARGS=()
+if [ -f "$DOWNLOAD_BIN" ]; then
+    if [ "$(head -c 4 "$DOWNLOAD_BIN")" != "DSK1" ]; then
+        fail "'$DOWNLOAD_BIN' does not start with the 'DSK1' image magic -- run 'zig build' first."
+    fi
+    DOWNLOAD_ARGS+=("$DOWNLOAD_BIN")
+fi
+# M26 N7 (issue #434): TRACEROUTE.BIN is a flat DSK1 program (ICMP path traceroute).
+TRACEROUTE_BIN="${46:-$ROOT_DIR/zig-out/bin/TRACEROUTE.BIN}"
+TRACEROUTE_ARGS=()
+if [ -f "$TRACEROUTE_BIN" ]; then
+    if [ "$(head -c 4 "$TRACEROUTE_BIN")" != "DSK1" ]; then
+        fail "'$TRACEROUTE_BIN' does not start with the 'DSK1' image magic -- run 'zig build' first."
+    fi
+    TRACEROUTE_ARGS+=("$TRACEROUTE_BIN")
+fi
+# M26 N12 (issue #439): NETPROF.BIN is a flat DSK1 program (Network profile manager).
+NETPROF_BIN="${47:-$ROOT_DIR/zig-out/bin/NETPROF.BIN}"
+NETPROF_ARGS=()
+if [ -f "$NETPROF_BIN" ]; then
+    if [ "$(head -c 4 "$NETPROF_BIN")" != "DSK1" ]; then
+        fail "'$NETPROF_BIN' does not start with the 'DSK1' image magic -- run 'zig build' first."
+    fi
+    NETPROF_ARGS+=("$NETPROF_BIN")
+fi
 PS_ARGS=()
 if [ -f "$PS_BIN" ]; then
     if [ "$(head -c 4 "$PS_BIN")" != "DSK1" ]; then
@@ -430,7 +475,7 @@ if [ -f "$APPS_TXT" ]; then
     APPS_TXT_ARGS+=(--apps-txt "$APPS_TXT")
 fi
 
-python3 "$SCRIPT_DIR/mkfat32.py" --size-mb "$SIZE_MB" "$IMAGE" "$EFI_BIN" "$KERNEL_BIN" "${USER_ARGS[@]}" "${COUNTER_ARGS[@]}" "${PEER_ARGS[@]}" "${STATUS43_ARGS[@]}" "${UDP_ARGS[@]}" "${WIN_ARGS[@]}" "${WINCLOSE_ARGS[@]}" "${WINLOOP_ARGS[@]}" "${WINMOVE_ARGS[@]}" "${KEYTEST_ARGS[@]}" "${SAVETEXT_ARGS[@]}" "${TYPE_ARGS[@]}" "${DIR_ARGS[@]}" "${CALC_ARGS[@]}" "${NOTEPAD_ARGS[@]}" "${TOP_ARGS[@]}" "${DESKTOP_ARGS[@]}" "${TCP_ARGS[@]+"${TCP_ARGS[@]}"}" "${FETCH_ARGS[@]+"${FETCH_ARGS[@]}"}" "${CHAT_ARGS[@]+"${CHAT_ARGS[@]}"}" "${FILE_ARGS[@]+"${FILE_ARGS[@]}"}" "${FSTEST_ARGS[@]+"${FSTEST_ARGS[@]}"}" "${TIMERTEST_ARGS[@]+"${TIMERTEST_ARGS[@]}"}" "${VICTIM_ARGS[@]+"${VICTIM_ARGS[@]}"}" "${HARDEN_ARGS[@]+"${HARDEN_ARGS[@]}"}" "${JINGLE_ARGS[@]+"${JINGLE_ARGS[@]}"}" "${CHIME_ARGS[@]+"${CHIME_ARGS[@]}"}" "${GLOBALS_ARGS[@]+"${GLOBALS_ARGS[@]}"}" "${GUARD_ARGS[@]+"${GUARD_ARGS[@]}"}" "${SPIN_ARGS[@]+"${SPIN_ARGS[@]}"}" "${SETTINGS_ARGS[@]+"${SETTINGS_ARGS[@]}"}" "${ASM_ARGS[@]+"${ASM_ARGS[@]}"}" "${PS_ARGS[@]+"${PS_ARGS[@]}"}" "${DISAS_ARGS[@]+"${DISAS_ARGS[@]}"}" "${EDIT_ARGS[@]+"${EDIT_ARGS[@]}"}" "${RESMON_ARGS[@]+"${RESMON_ARGS[@]}"}" "${DEVCONS_ARGS[@]+"${DEVCONS_ARGS[@]}"}" "${NETSTAT_ARGS[@]+"${NETSTAT_ARGS[@]}"}" "${M21DEMO_ARGS[@]+"${M21DEMO_ARGS[@]}"}" "${CRASH_ARGS[@]+"${CRASH_ARGS[@]}"}" "$HELLO_ELF" "${APPS_TXT_ARGS[@]}" \
+python3 "$SCRIPT_DIR/mkfat32.py" --size-mb "$SIZE_MB" "$IMAGE" "$EFI_BIN" "$KERNEL_BIN" "${USER_ARGS[@]}" "${COUNTER_ARGS[@]}" "${PEER_ARGS[@]}" "${STATUS43_ARGS[@]}" "${UDP_ARGS[@]}" "${WIN_ARGS[@]}" "${WINCLOSE_ARGS[@]}" "${WINLOOP_ARGS[@]}" "${WINMOVE_ARGS[@]}" "${KEYTEST_ARGS[@]}" "${SAVETEXT_ARGS[@]}" "${TYPE_ARGS[@]}" "${DIR_ARGS[@]}" "${CALC_ARGS[@]}" "${NOTEPAD_ARGS[@]}" "${TOP_ARGS[@]}" "${DESKTOP_ARGS[@]}" "${TCP_ARGS[@]+"${TCP_ARGS[@]}"}" "${FETCH_ARGS[@]+"${FETCH_ARGS[@]}"}" "${CHAT_ARGS[@]+"${CHAT_ARGS[@]}"}" "${FILE_ARGS[@]+"${FILE_ARGS[@]}"}" "${FSTEST_ARGS[@]+"${FSTEST_ARGS[@]}"}" "${TIMERTEST_ARGS[@]+"${TIMERTEST_ARGS[@]}"}" "${VICTIM_ARGS[@]+"${VICTIM_ARGS[@]}"}" "${HARDEN_ARGS[@]+"${HARDEN_ARGS[@]}"}" "${JINGLE_ARGS[@]+"${JINGLE_ARGS[@]}"}" "${CHIME_ARGS[@]+"${CHIME_ARGS[@]}"}" "${GLOBALS_ARGS[@]+"${GLOBALS_ARGS[@]}"}" "${GUARD_ARGS[@]+"${GUARD_ARGS[@]}"}" "${SPIN_ARGS[@]+"${SPIN_ARGS[@]}"}" "${SETTINGS_ARGS[@]+"${SETTINGS_ARGS[@]}"}" "${ASM_ARGS[@]+"${ASM_ARGS[@]}"}" "${PS_ARGS[@]+"${PS_ARGS[@]}"}" "${DISAS_ARGS[@]+"${DISAS_ARGS[@]}"}" "${EDIT_ARGS[@]+"${EDIT_ARGS[@]}"}" "${RESMON_ARGS[@]+"${RESMON_ARGS[@]}"}" "${DEVCONS_ARGS[@]+"${DEVCONS_ARGS[@]}"}" "${NETSTAT_ARGS[@]+"${NETSTAT_ARGS[@]}"}" "${M21DEMO_ARGS[@]+"${M21DEMO_ARGS[@]}"}" "${PING_ARGS[@]+"${PING_ARGS[@]}"}" "${DNS_ARGS[@]+"${DNS_ARGS[@]}"}" "${DOWNLOAD_ARGS[@]+"${DOWNLOAD_ARGS[@]}"}" "${TRACEROUTE_ARGS[@]+"${TRACEROUTE_ARGS[@]}"}" "${NETPROF_ARGS[@]+"${NETPROF_ARGS[@]}"}" "${CRASH_ARGS[@]+"${CRASH_ARGS[@]}"}" "$HELLO_ELF" "${APPS_TXT_ARGS[@]}" \
     || fail "image creation failed (see output above)."
 
 # 5. Self-verify by listing the image we just wrote.
@@ -527,6 +572,12 @@ printf '%s\n' "$LISTING" | grep -q 'PS.BIN' || fail "PS.BIN missing from the ima
 printf '%s\n' "$LISTING" | grep -q 'HELLO.ELF' || fail "HELLO.ELF missing from the image listing"
 if [ -f "$M21DEMO_BIN" ]; then
     printf '%s\n' "$LISTING" | grep -q 'M21DEMO.BIN' || fail "M21DEMO.BIN missing from the image listing"
+fi
+if [ -f "$PING_BIN" ]; then
+    printf '%s\n' "$LISTING" | grep -q 'PING.BIN' || fail "PING.BIN missing from the image listing"
+fi
+if [ -f "$DNS_BIN" ]; then
+    printf '%s\n' "$LISTING" | grep -q 'DNS.BIN' || fail "DNS.BIN missing from the image listing"
 fi
 
 echo "make-image: done."

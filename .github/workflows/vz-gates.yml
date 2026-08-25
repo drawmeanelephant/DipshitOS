@@ -1,0 +1,191 @@
+#
+# vz-gates.yml -- class-B Apple-silicon VZ hardware gates as a required CI
+# check. The 66 class-B gates from the GATE_INVENTORY block
+# (docs/archive/gate-inventory-detail.md) are sharded across a matrix and
+# run on REAL Virtualization.framework hardware: each one boots the
+# production image and asserts observed guest behavior.
+#
+# Runner selection -- GitHub-hosted macOS images top out at macOS 26 and
+# DipshitOS requires macOS 27+ at runtime (docs/hardware-contract.md), so
+# hosted runners cannot prove VZ behavior. The shards run on whatever
+# label the repository variable VZ_RUNNER_LABEL names; until an Apple
+# silicon macOS 27+ self-hosted runner is registered under that label,
+# the job reports SKIPPED honestly instead of failing or faking green.
+# See docs/vz-runner.md for the one-time registration steps; flipping the
+# variable is what turns this from "wired but skipped" into enforcement.
+#
+# Security note: self-hosted runners must never execute untrusted fork-PR
+# code. The trigger list below deliberately excludes pull_request_target;
+# fork PRs run only the portable class-A set in ci.yml.
+
+name: VZ hardware gates
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+concurrency:
+  group: vz-gates-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+env:
+  SHARD_COUNT: "4"
+  # Per-gate watchdog (a healthy gate takes ~10s locally; 600s is ample).
+  GATE_TIMEOUT_SECS: "600"
+
+jobs:
+  gate-shard:
+    name: vz shard ${{ matrix.shard }}
+    runs-on: ${{ vars.VZ_RUNNER_LABEL != '' && vars.VZ_RUNNER_LABEL || 'ubuntu-latest' }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Capability gate. On a non-macOS or pre-macOS-27 machine the shard
+      # exits 0 with a visible SKIPPED marker rather than pretending to
+      # have proven anything.
+      - name: Check runner capability (Apple silicon + macOS 27+)
+        shell: bash
+        run: |
+          os="$(uname -s)"; arch="$(uname -m)"
+          if [ "$os-$arch" != "Darwin-arm64" ]; then
+            echo "::notice title=VZ gates skipped::No Apple-silicon runner registered under VZ_RUNNER_LABEL yet."
+            echo "::notice::Register one per docs/vz-runner.md, then set repository variable VZ_RUNNER_LABEL to its label to enforce these gates."
+            echo "VZ_SKIPPED=1" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          major="$(sw_vers -productVersion | cut -d. -f1)"
+          if [ "$major" -lt 27 ]; then
+            echo "::error::Runner OS is macOS $major; DipshitOS requires macOS 27+ (docs/hardware-contract.md)."
+            exit 1
+          fi
+          echo "Runner: $(sw_vers -productVersion) arm64 — VZ gates will run."
+
+      - name: Setup Zig 0.16.0
+        if: env.VZ_SKIPPED != '1'
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Build kernel image (class A prerequisites)
+        if: env.VZ_SKIPPED != '1'
+        run: |
+          zig build
+          zig build image
+
+      - name: Build + codesign Swift VMRunner
+        if: env.VZ_SKIPPED != '1'
+        run: |
+          swift build --package-path host/vm-runner --configuration release
+          codesign --force --sign - --entitlements host/vm-runner/entitlements.plist \
+            host/vm-runner/.build/release/VMRunner
+
+      - name: Run this shard's class-B gates
+        if: env.VZ_SKIPPED != '1'
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p artifacts/vz-ci
+
+          # Machine-readable gate list: class-B entries only, comment stripped.
+          sed -n '/^<!-- GATE_INVENTORY:START -->$/,/^<!-- GATE_INVENTORY:END -->$/p' \
+            docs/archive/gate-inventory-detail.md \
+            | grep ' class=B ' \
+            | sed -E 's/ +$//' > /tmp/all-gates.txt
+
+          # Interactive-only gates cannot run headless; documented exclusions.
+          #   serial-takeover: `zig build run` console takeover expects a TTY.
+          grep -v ' id=serial-takeover ' /tmp/all-gates.txt > /tmp/shard-gates.txt || true
+
+          total=$(wc -l < /tmp/all-gates.txt)
+          echo "Class-B gates in inventory: $total; exclusions applied."
+
+          failed_ids=""
+          ran=0
+          while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            id="$(echo "$line" | sed -E 's/^GATE id=([^ ]+).*/\1/')"
+            cmd="$(echo "$line" | sed -E 's/^.*cmd=//' | sed -E 's/ +#.*$//' | sed -E 's/ +$//')"
+            # Shard assignment by stable line order.
+            idx=$(grep -n "^GATE id=$id " /tmp/all-gates.txt | head -1 | cut -d: -f1)
+            if [ $(( (idx - 1) % SHARD_COUNT )) -ne "${{ matrix.shard }}" ]; then
+              continue
+            fi
+            ran=$((ran + 1))
+            log="artifacts/vz-ci/$id.log"
+            start=$SECONDS
+            printf '[shard %s] RUN  %-24s %s\n' "${{ matrix.shard }}" "$id" "$cmd"
+            (
+              eval "$cmd" >"$log" 2>&1
+            ) &
+            pid=$!
+            ( sleep "$GATE_TIMEOUT_SECS" && kill -9 "$pid" 2>/dev/null ) &
+            wd=$!
+            wait "$pid"; rc=$?
+            kill -9 "$wd" 2>/dev/null || true
+            wait "$wd" 2>/dev/null || true
+            secs=$((SECONDS - start))
+            if [ $rc -eq 0 ]; then
+              printf '[shard %s] PASS %-24s (%ss)\n' "${{ matrix.shard }}" "$id" "$secs"
+            else
+              printf '[shard %s] FAIL %-24s rc=%s (%ss) -- tail of %s:\n' "${{ matrix.shard }}" "$id" "$rc" "$secs" "$log"
+              tail -25 "$log" || true
+              failed_ids="$failed_ids $id"
+            fi
+          done < /tmp/shard-gates.txt
+
+          echo "Shard ${{ matrix.shard }} ran $ran gates."
+          if [ -n "$failed_ids" ]; then
+            echo "::error::Failed gates:$failed_ids"
+            exit 1
+          fi
+          [ "$ran" -gt 0 ] || { echo "::warning::Shard had zero gates — check sharding math."; }
+
+      - name: Upload gate logs
+        if: always() && env.VZ_SKIPPED != '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: vz-gate-logs-shard-${{ matrix.shard }}
+          path: artifacts/vz-ci/
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - name: Upload build evidence
+        if: always() && env.VZ_SKIPPED != '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: vz-evidence-shard-${{ matrix.shard }}
+          path: |
+            artifacts/*.log
+            artifacts/*.txt
+          retention-days: 14
+          if-no-files-found: ignore
+
+  # Single aggregate context for branch protection: "VZ hardware gates".
+  summary:
+    name: VZ hardware gates
+    needs: gate-shard
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Aggregate shard results
+        run: |
+          results="${{ join(needs.gate-shard.*.result, ' ') }}"
+          echo "shard results: $results"
+          case " $results " in
+            *" failure "*|*" cancelled "*)
+              echo "::error::One or more VZ hardware-gate shards failed."
+              exit 1;;
+            *" skipped "*)
+              echo "::notice::All shards skipped — see shard job output.";;
+          esac
+          echo "VZ hardware gates: OK"

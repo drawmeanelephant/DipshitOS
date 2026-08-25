@@ -1159,6 +1159,98 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_m21demo.step);
 
     // ------------------------------------------------------------------
+    // Guest: fortieth ESP user program (M26 N5 — issue #403) DNS.BIN.
+    // RFC 1035 DNS A-record query CLI over UDP port 53.
+    // ------------------------------------------------------------------
+    const dns_prog = b.addExecutable(.{
+        .name = "user-dns",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/dns.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    dns_prog.linker_script = b.path("user/linker.ld");
+    const dns_step = b.step("dns", "Build the fortieth ESP user program (zig-out/bin/DNS.BIN)");
+    const dns_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    dns_elf2bin.addFileArg(dns_prog.getEmittedBin());
+    const dns_bin = dns_elf2bin.addOutputFileArg("DNS.BIN");
+    dns_elf2bin.has_side_effects = true;
+    dns_elf2bin.stdio = .inherit;
+    dns_step.dependOn(&dns_elf2bin.step);
+    const install_dns = b.addInstallFileWithDir(dns_bin, .bin, "DNS.BIN");
+    b.getInstallStep().dependOn(&install_dns.step);
+
+    // ------------------------------------------------------------------
+    // Guest: forty-first ESP user program (M26 N11 — issue #438) DOWNLOAD.BIN.
+    // HTTP file download manager saving response body to FAT32 storage.
+    // ------------------------------------------------------------------
+    const download_prog = b.addExecutable(.{
+        .name = "user-download",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/download.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    download_prog.linker_script = b.path("user/linker.ld");
+    const download_step = b.step("download", "Build the forty-first ESP user program (zig-out/bin/DOWNLOAD.BIN)");
+    const download_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    download_elf2bin.addFileArg(download_prog.getEmittedBin());
+    const download_bin = download_elf2bin.addOutputFileArg("DOWNLOAD.BIN");
+    download_elf2bin.has_side_effects = true;
+    download_elf2bin.stdio = .inherit;
+    download_step.dependOn(&download_elf2bin.step);
+    const install_download = b.addInstallFileWithDir(download_bin, .bin, "DOWNLOAD.BIN");
+    b.getInstallStep().dependOn(&install_download.step);
+
+    // ------------------------------------------------------------------
+    // Guest: forty-second ESP user program (M26 N7 — issue #434) TRACEROUTE.BIN.
+    // ICMP route traceroute / path discovery CLI.
+    // ------------------------------------------------------------------
+    const traceroute_prog = b.addExecutable(.{
+        .name = "user-traceroute",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/traceroute.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    traceroute_prog.linker_script = b.path("user/linker.ld");
+    const traceroute_step = b.step("traceroute", "Build the forty-second ESP user program (zig-out/bin/TRACEROUTE.BIN)");
+    const traceroute_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    traceroute_elf2bin.addFileArg(traceroute_prog.getEmittedBin());
+    const traceroute_bin = traceroute_elf2bin.addOutputFileArg("TRACEROUTE.BIN");
+    traceroute_elf2bin.has_side_effects = true;
+    traceroute_elf2bin.stdio = .inherit;
+    traceroute_step.dependOn(&traceroute_elf2bin.step);
+    const install_traceroute = b.addInstallFileWithDir(traceroute_bin, .bin, "TRACEROUTE.BIN");
+    b.getInstallStep().dependOn(&install_traceroute.step);
+
+    // ------------------------------------------------------------------
+    // Guest: forty-third ESP user program (M26 N12 — issue #439) NETPROF.BIN.
+    // Persistent network configuration profile manager.
+    // ------------------------------------------------------------------
+    const netprof_prog = b.addExecutable(.{
+        .name = "user-netprof",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/netprof.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    netprof_prog.linker_script = b.path("user/linker.ld");
+    const netprof_step = b.step("netprof", "Build the forty-third ESP user program (zig-out/bin/NETPROF.BIN)");
+    const netprof_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    netprof_elf2bin.addFileArg(netprof_prog.getEmittedBin());
+    const netprof_bin = netprof_elf2bin.addOutputFileArg("NETPROF.BIN");
+    netprof_elf2bin.has_side_effects = true;
+    netprof_elf2bin.stdio = .inherit;
+    netprof_step.dependOn(&netprof_elf2bin.step);
+    const install_netprof = b.addInstallFileWithDir(netprof_bin, .bin, "NETPROF.BIN");
+    b.getInstallStep().dependOn(&install_netprof.step);
+
+    // ------------------------------------------------------------------
     // Top-level steps. System-command steps are marked as having side
     // effects (and inherit stdio) so they always execute instead of being
     // skipped by the build cache. (No QEMU path: this project targets Apple
@@ -1208,6 +1300,11 @@ pub fn build(b: *std.Build) void {
     image.addFileArg(devcons_bin); // ... [DEVCONS.BIN] (M22 D14, issue #337: thirty-sixth user program, developer console)
     image.addFileArg(netstat_bin); // ... [NETSTAT.BIN] (M26 N2, issue #400: thirty-seventh user program, the network dashboard)
     image.addFileArg(m21demo_bin); // ... [M21DEMO.BIN] (claim 8777: thirty-eighth user program, the M21 W1/W2 tiling gate payload)
+    image.addFileArg(ping_bin); // ... [PING.BIN] (M26 N1, issue #399: thirty-ninth user program, ICMP ping CLI)
+    image.addFileArg(dns_bin); // ... [DNS.BIN] (M26 N5, issue #403: fortieth user program, RFC 1035 DNS query tool)
+    image.addFileArg(download_bin); // ... [DOWNLOAD.BIN] (M26 N11, issue #438: forty-first user program, HTTP download manager)
+    image.addFileArg(traceroute_bin); // ... [TRACEROUTE.BIN] (M26 N7, issue #434: forty-second user program, ICMP route traceroute)
+    image.addFileArg(netprof_bin); // ... [NETPROF.BIN] (M26 N12, issue #439: forty-third user program, network profile manager)
     image.has_side_effects = true;
     image.stdio = .inherit;
     image_step.dependOn(&image.step);

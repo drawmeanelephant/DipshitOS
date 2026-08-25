@@ -262,18 +262,19 @@ fn run_ping(cfg: PingArgs) noreturn {
         var rtt: u32 = 1 + (seq % 3); // fallback simulated
 
         if (use_real) {
+            const prev_poll = ui.ping_poll();
             const rc = ui.ping_send(ip_u32);
             if (rc == 0) {
-                // Poll for pong — up to 100 × 10 ticks ≈ 1s window
+                // Poll for pong — up to 50 iterations with yield
                 var polls: usize = 0;
                 while (polls < 50) : (polls += 1) {
                     const poll = ui.ping_poll();
-                    if (poll != 0) {
+                    if (poll != 0 and poll != prev_poll) {
                         got = true;
                         rtt = @intCast(polls + 1); // ~10 ms per poll
                         break;
                     }
-                    ui.sleep_ticks(10);
+                    ui.yield_task();
                 }
                 if (got) {
                     stats.record(rtt);
@@ -282,7 +283,7 @@ fn run_ping(cfg: PingArgs) noreturn {
                     var buf: [96]u8 = undefined;
                     const s = std.fmt.bufPrint(&buf, "no answer from {s}: icmp_seq={d}\n", .{ ip_s, seq }) catch "";
                     ui.write_console(s);
-                    if (seq < cfg.count) ui.sleep_ticks(100);
+                    if (seq < cfg.count) ui.sleep_ticks(1);
                     continue;
                 }
             } else {
@@ -291,7 +292,7 @@ fn run_ping(cfg: PingArgs) noreturn {
                 const s = std.fmt.bufPrint(&buf, "ping: send to {s} failed ({d})\n", .{ ip_s, rc }) catch "";
                 ui.write_console(s);
                 stats.record_loss();
-                if (seq < cfg.count) ui.sleep_ticks(100);
+                if (seq < cfg.count) ui.sleep_ticks(1);
                 continue;
             }
         } else {
@@ -307,9 +308,7 @@ fn run_ping(cfg: PingArgs) noreturn {
 
         // 1-second interval between pings (except after last)
         if (seq < cfg.count) {
-            // 100 ticks ≈ 1s (ps uses 100 ticks for 1s refresh)
-            // Host builds stub sleep to no-op, so loop stays fast in tests
-            ui.sleep_ticks(100);
+            ui.sleep_ticks(1);
         }
     }
 
