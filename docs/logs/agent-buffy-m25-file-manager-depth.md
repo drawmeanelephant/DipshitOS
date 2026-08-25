@@ -42,9 +42,18 @@ Added full widget implementations and deep unit tests in `user/src/file_browser.
 - F9: Bookmarks storage (up to 16 paths) with `Ctrl+D` to add and `Ctrl+B` opening an interactive navigation overlay.
 - F13: `get_associated_app` extension resolver (.BIN -> EXEC, .TXT/.DOC -> NOTEPAD, .ZIG/.C/.H -> EDIT).
 
+## 2026-08-25 — PR #561 review feedback & coordination handover
+
+Addressed review blockers on PR #561:
+- Fixed data-loss bug in `user/src/file_browser.zig`: standardized `selection_bitmap` strictly on display row index ($0 \le i < \text{entry\_count}$) across `handle_mouse_events`, `draw_list`, and batch loops (`perform_delete`, `perform_move`, `perform_batch_rename`). Added test with reverse-sorted synthetic listings verifying no index misalignment.
+- Restored `docs/march-m25.md` to preserve the planned class-B live VZ gates (`verify-live-filemanager-*.sh`) and honest card tracker.
+- Acknowledged active claims 0434 and 2539 (`ox-alpha`) owning M25 Lanes A and B (including the kernel FAT32 directory creation work). Flipped claim 4379 to ⛔ in favor of `ox-alpha`.
+- Kept PR #561 in draft state with clean unit-tested UI widgets and index fix available for integration.
+
 Verification:
-- `zig test user/src/file_browser.zig`: 70/70 unit tests pass.
-- `bash tools/verify-unit-tests.sh`: all kernel/user test suites pass.
-- `zig build`: all user binaries and kernel image compile and link cleanly.
+- `zig test user/src/file_browser.zig`: 71/71 unit tests pass.
+- `bash tools/verify-unit-tests.sh`: all test suites pass.
+- `zig build`: clean build.
 - `bash tools/verify-coordination.sh`: ok.
+
 

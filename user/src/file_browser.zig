@@ -1512,7 +1512,7 @@ pub const AppState = struct {
             const entry = &self.entries[idx];
             const name = entry_name(entry);
             const is_sel = if (self.list.selected) |s| s == i else false;
-            const is_multi = self.is_selected(idx);
+            const is_multi = self.is_selected(i);
             draw_list_row(win, row, name, entry, is_sel, is_multi);
         }
         // GH #218: ScrollView thumb for the file list (proportional, draggable)
@@ -1705,8 +1705,7 @@ pub const AppState = struct {
                 const row = (ev.arg1 - (list_area.y + header_h)) / list_row_h;
                 const target_idx = self.list.scroll + row;
                 if (target_idx < self.entry_count) {
-                    const actual_idx = self.sort_indices[target_idx];
-                    self.toggle_select(actual_idx);
+                    self.toggle_select(target_idx);
                     self.set_status("Multi-select");
                     return true;
                 }
@@ -2774,4 +2773,25 @@ test "file: F8 — Ctrl+\\ toggles split pane" {
     // Toggle again closes split
     try std.testing.expect(app.handle_keyboard_event(&ev_bslash));
     try std.testing.expect(!app.split_pane);
+}
+
+test "file: selection index mapping correctly handles non-identity sort_indices (no data-loss)" {
+    var app = AppState.init();
+    app.entry_count = 2;
+    // Physical layout in entries: entry 0 is B.TXT, entry 1 is A.TXT
+    @memcpy(app.entries[0].name[0..5], "B.TXT");
+    @memcpy(app.entries[1].name[0..5], "A.TXT");
+
+    // Display sort order: row 0 is A.TXT (entry 1), row 1 is B.TXT (entry 0)
+    app.sort_indices[0] = 1;
+    app.sort_indices[1] = 0;
+
+    // Select row 0 (which displays A.TXT)
+    app.toggle_select(0);
+    try std.testing.expect(app.is_selected(0));
+    try std.testing.expect(!app.is_selected(1));
+
+    // Batch rename prefix "new_" on selected row 0 should rename A.TXT (entry 1), not B.TXT
+    app.perform_batch_rename("new_");
+    try std.testing.expectEqualStrings("Batch Renamed", app.status_msg[0..app.status_len]);
 }

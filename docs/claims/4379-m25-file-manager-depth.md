@@ -6,28 +6,13 @@
 - **Touches:** user/src/file_browser.zig, docs/march-m25.md, docs/claims/4379-m25-file-manager-depth.md, docs/logs/agent-buffy-m25-file-manager-depth.md
 - **Depends on:** —
 - **Heartbeat:** 2026-08-25
-- **Status:** ✅ agent/buffy/m25-file-manager-depth
+- **Status:** ⛔ agent/buffy/m25-file-manager-depth
 
 ## Notes
 
-Implements Milestone 25 / GitHub Milestone 13 (cards F1–F18):
-- F1: Multi-selection bitmap (`selection_bitmap [32]u8`), Ctrl+click, Ctrl+A select all, batch delete/move
-- F2: File properties panel (`Ctrl+I` / `P` inspector toggle with size, type, path, cluster info)
-- F3: Directory creation (`Ctrl+Shift+N`)
-- F4: Disk usage (`du`) summary in breadcrumb and details pane
-- F5: Recent files ring (last 10 opened/created files)
-- F6: Trash & restore mechanism (`.TRASH/` staging)
-- F7: Batch rename pattern
-- F8: Split panes view (`Ctrl+W` / `Tab` pane toggling)
-- F9: Bookmarks / favorites (`Ctrl+D` bookmarking)
-- F10: Recursive file search
-- F11: Column sorting (Name/Size/Type)
-- F12: Hidden files toggle (Ctrl+H)
-- F13: File associations (.TXT, .BIN, .MD, .C)
-- F14: Terminal here (Ctrl+T)
-- F15: Editor here (Ctrl+E)
-- F16: Path copy (Ctrl+Shift+C)
-- F17: Overwrite / conflict resolution
-- F18: Transactional delete confirmation UX
+Review feedback on PR #561:
+1. Fixed data-loss bug in `user/src/file_browser.zig`: standardized `selection_bitmap` strictly on display row indices across `handle_mouse_events`, `draw_list`, and batch loops (`perform_delete`, `perform_move`, `perform_batch_rename`). Added test with reverse-sorted synthetic listings verifying no index misalignment.
+2. Restored `docs/march-m25.md` to preserve the planned class-B live VZ gates (`verify-live-filemanager-*.sh`) and honest card tracker.
+3. Yielded Lane A (F1, F2) and Lane B (F3, F4, F5) back to `ox-alpha` (claims 0434 and 2539) which are actively implementing the kernel FAT32 directory creation and `du` builtin.
+4. Draft PR #561 holds the UI widget and index bug fix work for reference by `ox-alpha`.
 
-Verified via pure host-side class-A unit tests covering all data structures, selection bitmaps, properties formatting, split pane navigation, and keyboard routes.
