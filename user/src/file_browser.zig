@@ -394,7 +394,7 @@ pub const FileList = struct {
 // ---------------------------------------------------------------------------
 
 /// Render one list row (shared by AppState.draw_list).
-fn draw_list_row(win: u32, row: usize, name: []const u8, entry: *const DirEntry, is_sel: bool, is_multi: bool) void {
+fn draw_list_row(win: u32, row: usize, name: []const u8, entry: *const DirEntry, is_sel: bool, is_multi: bool, hl_at: usize, hl_len: usize) void {
     const row_y = list_area.y + header_h + @as(u32, @intCast(row)) * list_row_h;
     const row_rect = Rect.make(list_area.x, row_y, list_area.w, list_row_h);
     const bg = if (is_sel)
@@ -423,7 +423,21 @@ fn draw_list_row(win: u32, row: usize, name: []const u8, entry: *const DirEntry,
     }
     // Cap the drawn name to the row width (240 - 16 padding - 12 icon = 212px = 26 glyphs).
     const cap = @min(name.len, 24);
-    ui.draw_text(win, name[0..cap], row_rect.x + 20, row_rect.y + (list_row_h - 8) / 2, ui.COLOR_TEXT_PRIMARY);
+    const text_x = row_rect.x + 20;
+    const text_y = row_rect.y + (list_row_h - 8) / 2;
+    ui.draw_text(win, name[0..cap], text_x, text_y, ui.COLOR_TEXT_PRIMARY);
+    // M20-U3: highlight the searched substring inside the filename when
+    // the filter bar narrowed the listing (accent cell + white glyph,
+    // the same treatment notepad gives find matches).
+    if (hl_len > 0 and hl_at < cap) {
+        const hlen = @min(hl_len, cap - hl_at);
+        var k: usize = 0;
+        while (k < hlen) : (k += 1) {
+            const cx = text_x + @as(u32, @intCast(hl_at + k)) * glyph_w;
+            ui.draw_rect(win, Rect.make(cx, text_y, glyph_w, 8), ui.COLOR_ACCENT);
+            ui.draw_char(win, name[hl_at + k], cx, text_y, 0xffffff);
+        }
+    }
 }
 
 pub const AppState = struct {
@@ -991,7 +1005,14 @@ pub const AppState = struct {
 
     fn matches_filter(name: []const u8, pat: []const u8) bool {
         if (pat.len == 0) return true;
-        if (pat.len > name.len) return false;
+        return find_substring_ci(name, pat) != null;
+    }
+
+    /// M20-U3: case-insensitive substring position of `pat` in `name`
+    /// (the same rule matches_filter applies), null when absent or the
+    /// pattern is empty. Host-testable; backs the list-row highlight.
+    fn find_substring_ci(name: []const u8, pat: []const u8) ?usize {
+        if (pat.len == 0 or pat.len > name.len) return null;
         var i: usize = 0;
         while (i + pat.len <= name.len) : (i += 1) {
             var ok = true;
@@ -1004,9 +1025,9 @@ pub const AppState = struct {
                     break;
                 }
             }
-            if (ok) return true;
+            if (ok) return i;
         }
-        return false;
+        return null;
     }
 
     /// Rebuild the visible entries from the shadow per the filter text.
@@ -1030,6 +1051,15 @@ pub const AppState = struct {
         self.entry_count = n;
         self.rebuild_sort();
         if (n > 0) self.list.select(0, n);
+        // M20-U3: serial marker — the live gate's grep target. Only when
+        // the filter bar is actually open (internal rebuilds stay quiet).
+        if (self.filter_active) {
+            var fb: [72]u8 = undefined;
+            const line = std.fmt.bufPrint(&fb, "file: filter '{s}' shown={d} total={d}\n", .{
+                pat, n, self.shadow_count,
+            }) catch return;
+            ui.write_console(line);
+        }
     }
 
     /// F12: toggle hidden (dotfile) visibility. Returns true on state change.
@@ -1512,8 +1542,18 @@ pub const AppState = struct {
             const entry = &self.entries[idx];
             const name = entry_name(entry);
             const is_sel = if (self.list.selected) |s| s == i else false;
+            // M20-U3: highlight the searched substring in the row's name
+            // while the filter bar is active.
+            var hl_at: usize = 0;
+            var hl_len: usize = 0;
+            if (self.filter_active) {
+                if (find_substring_ci(name, self.filter_buf[0..self.filter_len])) |at| {
+                    hl_at = at;
+                    hl_len = self.filter_len;
+                }
+            }
             const is_multi = self.is_selected(i);
-            draw_list_row(win, row, name, entry, is_sel, is_multi);
+            draw_list_row(win, row, name, entry, is_sel, is_multi, hl_at, hl_len);
         }
         // GH #218: ScrollView thumb for the file list (proportional, draggable)
         self.scroll_view.draw(win);
@@ -2794,4 +2834,37 @@ test "file: selection index mapping correctly handles non-identity sort_indices 
     // Batch rename prefix "new_" on selected row 0 should rename A.TXT (entry 1), not B.TXT
     app.perform_batch_rename("new_");
     try std.testing.expectEqualStrings("Batch Renamed", app.status_msg[0..app.status_len]);
+}
+test "file_browser: M20-U3 — find_substring_ci locates the searched range" {
+    try std.testing.expectEqual(@as(?usize, 0), AppState.find_substring_ci("README.TXT", "read"));
+    try std.testing.expectEqual(@as(?usize, 7), AppState.find_substring_ci("README.TXT", "txt"));
+    try std.testing.expectEqual(@as(?usize, null), AppState.find_substring_ci("README.TXT", "zzz"));
+    // An empty pattern selects everything but highlights nothing.
+    try std.testing.expectEqual(@as(?usize, null), AppState.find_substring_ci("README.TXT", ""));
+    try std.testing.expect(AppState.matches_filter("README.TXT", ""));
+    // Case-insensitive parity with matches_filter.
+    try std.testing.expect(AppState.matches_filter("DATA.BIN", "bin"));
+}
+
+test "file_browser: M20-U3 — filter narrowing reports shown/total accounting" {
+    var app = AppState.init();
+    var n: usize = 0;
+    const names = [_][]const u8{ "ALPHA.TXT", "BETA.TXT", "GAMMA.BIN" };
+    for (names) |nm| {
+        var de = DirEntry{ .name = [_]u8{0} ** 32, .size = 8, .is_dir = 0, .reserved = .{ 0, 0, 0 } };
+        @memcpy(de.name[0..nm.len], nm);
+        app.entries[n] = de;
+        n += 1;
+    }
+    app.entry_count = n;
+    app.shadow_count = n;
+    for (0..n) |i| app.shadow[i] = app.entries[i];
+    app.filter_active = true;
+    @memcpy(app.filter_buf[0..3], "txt");
+    app.filter_len = 3;
+    app.apply_filter();
+    try std.testing.expectEqual(@as(usize, 2), app.entry_count);
+    try std.testing.expectEqual(@as(usize, 3), app.shadow_count);
+    // The first visible entry is the alphabetically-first match.
+    try std.testing.expectEqualStrings("ALPHA.TXT", entry_name(&app.entries[app.sort_indices[0]]));
 }

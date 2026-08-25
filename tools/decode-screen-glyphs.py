@@ -37,7 +37,23 @@ gates' inline PNG decoders).
 
 Usage:
   python3 tools/decode-screen-glyphs.py <capture.png|capture> [--mirror-lines N]
+  python3 tools/decode-screen-glyphs.py --raw <width> <height> <frame.raw>
   python3 tools/decode-screen-glyphs.py --self-test
+
+The `--raw` mode decodes a claim-0680 guest-scanout snapshot (byte-exact
+BGRX, written by the guest itself over custom-virtio queue 4 — no
+ScreenCaptureKit in the loop) against the FIXED terminal grid: origin
+(0,0), one 8x8 cell per glyph (kernel/src/text.zig cell_w/cell_h). No
+phase search is performed, so the decode is deterministic.
+
+ROOT-CAUSE CORRECTION (claim 8961, 2026-08-25): the fleet-remainder
+investigation attributed the old gates' missing leading glyphs
+(`dipshit>` decoding as `shit>`) to this tool's PNG grid search. That
+was wrong — the pixels are genuinely ABSENT from the scanout: the M21/
+M27 chrome pass draws the vertical DOCK at x=0..23 (dock_w=24,
+driving_award.zig), which occludes the terminal's first THREE glyph
+columns on every row. Gates that need specific cells must place their
+probes at column >= 3; no decoder can recover occluded pixels.
 
 The `--self-test` mode is the offline in-cell mirror simulation (class A —
 no capture, no VZ boot): it renders the clock window forward with the
@@ -284,9 +300,75 @@ def self_test():
     print("SELF-TEST PASS: the clock title/body tripwire reads forward and detects an in-cell mirror")
 
 # ------------------------------------------------------------------- main
+def decode_raw_frame(font, path, w, h):
+    """--raw mode: decode a guest-streamed BGRX scanout at the FIXED text
+    grid (origin 0,0, 8px cells) — the deterministic decoder for gates
+    that must not depend on ScreenCaptureKit or grid-search heuristics."""
+    d = open(path, "rb").read()
+    if len(d) != w * h * 4:
+        print("STATS_RAW error=\"frame is %d bytes, expected %d\"" % (len(d), w * h * 4))
+        sys.exit(1)
+
+    def px(x, y):
+        k = (y * w + x) * 4
+        return d[k + 2], d[k + 1], d[k]  # BGRX little-endian -> r,g,b
+
+    def is_greenish(r, g, b):
+        return g > 140 and g > r * 1.4 and g > b * 1.4
+
+    pitch = 8
+    lines = []
+    for row in range(h // pitch):
+        s = []
+        for col in range(w // pitch):
+            cell = []
+            for rr in range(8):
+                r8 = 0
+                for bb in range(8):
+                    cx = col * pitch + bb
+                    cy = row * pitch + rr
+                    pr, pg, pb = px(cx, cy)
+                    if is_greenish(pr, pg, pb):
+                        r8 |= 1 << (7 - bb)
+                cell.append(r8)
+            ink = sum(bin(r).count("1") for r in cell)
+            if ink == 0:
+                s.append(" ")
+                continue
+            best, bestc = 8 * 8 + 1, None
+            for idx, g in enumerate(font):
+                sc = sum(bin(cell[r] ^ source_row_to_screen(g[r])).count("1") for r in range(8))
+                if sc < best:
+                    best, bestc = sc, idx
+            s.append(chr(0x20 + bestc) if best <= 10 else "?")
+        lines.append("".join(s).rstrip())
+
+    ink_total = unknown_total = 0
+    for l in lines:
+        for ch in l:
+            if ch == " ":
+                continue
+            ink_total += 1
+            if ch == "?":
+                unknown_total += 1
+    print("--- decoded raw frame (fixed origin, pitch=%d) ---" % pitch)
+    for l in lines:
+        if l.strip():
+            print(l[:200])
+    print("STATS_RAW fwd_ink=%d fwd_unknowns=%d rows=%d cols=%d"
+          % (ink_total, unknown_total, h // pitch, w // pitch))
+
+
 def main():
     if "--self-test" in sys.argv:
         self_test()
+        return
+    font = load_font()
+    assert_orientation_golden(font)
+    if "--raw" in sys.argv:
+        i = sys.argv.index("--raw")
+        w, h, path = int(sys.argv[i + 1]), int(sys.argv[i + 2]), sys.argv[i + 3]
+        decode_raw_frame(font, path, w, h)
         return
     path = sys.argv[1]
     mirror_lines = 3
@@ -294,8 +376,6 @@ def main():
         if a == "--mirror-lines":
             mirror_lines = int(sys.argv[i + 3])
 
-    font = load_font()
-    assert_orientation_golden(font)
     w, h, bpp, out = load_png(path)
 
     def px(x, y):
