@@ -143,6 +143,7 @@ meaningful — on main.
 | agent/ox-alpha/m25-filemanager-depth | [`agent-ox-alpha-m25-filemanager-depth.md`](agent-ox-alpha-m25-filemanager-depth.md) |
 | run-isolated gates via DiskImageKit overlays | [`agent-ox-alpha-run-isolated-gates.md`](agent-ox-alpha-run-isolated-gates.md) |
 | `agent/oxalpha/archive-march-m4-m5` | [`agent-oxalpha-archive-march-m4-m5.md`](agent-oxalpha-archive-march-m4-m5.md) |
+| `agent/oxalpha/m20-text-unicode` | [`agent-oxalpha-m20-text-unicode.md`](agent-oxalpha-m20-text-unicode.md) |
 | t3code/c259b00a (cvc-echo host-push spike) | [`agent-t3code-c259b00a-cvc-echo.md`](agent-t3code-c259b00a-cvc-echo.md) |
 | agent/virtio virtio-input-channel | [`agent-virtio-virtio-input-channel.md`](agent-virtio-virtio-input-channel.md) |
 | milestone eight cards U4+U5: pointer focus/cursor + window HIG (zcode) | [`agent-zcode-m8-u4-u5-windows.md`](agent-zcode-m8-u4-u5-windows.md) |
