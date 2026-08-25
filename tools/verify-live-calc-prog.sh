@@ -74,17 +74,23 @@ codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/
 gate_begin live-calc-prog
 echo "run dir: $RUN_DIR"
 SCRIPT="$RUN_DIR/script.txt"
+SCRIPT2="$RUN_DIR/script2.txt"
 
-
-# --- phase 1: launch CALC.BIN from the monitor ------------------------------
+# GUI apps are launched BY the desktop (the window server); a bare monitor
+# `exec CALC.BIN` fails with `calc: failed to open window`. The desktop owns
+# synthesized keyboard input (focused window); the monitor shell stays on the
+# serial console, which is what scripts talk to.
 cat > "$SCRIPT" <<'EOF'
-exec CALC.BIN
+exec DESKTOP.BIN
+EOF
+cat > "$SCRIPT2" <<'EOF'
+echo calc-prog-live-ok
 EOF
 
-# --- phase 2: Ctrl+P x2 + success marker (after calc: ready) ----------------
-# Ctrl+P = ctrl-p chord (the runner maps ctrl-a..ctrl-z to macOS keycodes)
-CTRL_P=$'ctrl-p'
-INPUT_CHORDS="${CTRL_P},${CTRL_P},echo calc-prog-live-ok"
+# Chord stage (sent once `desktop: menu ready` appears, one chord per
+# --input-chords-delay): Return launches manifest index 0 = CALC.BIN, then
+# Ctrl+P x2 toggles programmer mode on and off once `calc: ready` has printed.
+CHORDS="return,ctrl-p,ctrl-p"
 
 run_one() {
     local tag="$1"
@@ -92,11 +98,15 @@ run_one() {
     set +e
     host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
         --serial "$RUN_DIR/vm-serial-$tag.log" \
+        --display --input --screen "$RUN_DIR/gpu-screen-$tag" \
         --script "$SCRIPT" \
-        --input-chords "$INPUT_CHORDS" \
-        --input-chords-after "calc: ready" \
+        --script2 "$SCRIPT2" \
+        --script2-after "calc: prog-off" \
+        --input-chords "$CHORDS" \
+        --input-chords-after "desktop: menu ready" \
+        --input-chords-delay 3.0 \
         --script-expect "calc-prog-live-ok" \
-        --timeout 45 \
+        --timeout 60 \
         > "$(art live-calc-prog-run-$tag.txt)" 2>&1
     local RC=$?
     set -e
