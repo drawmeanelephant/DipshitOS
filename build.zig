@@ -1082,6 +1082,8 @@ pub fn build(b: *std.Build) void {
     // Guest: thirty-fifth ESP user program (M22 D10 — issue #333) RESMON.BIN.
     // Lightweight resource monitor window: shows process count, scheduler
     // state, and uptime via sys_procs (slot 7). Auto-refreshes at 1 Hz.
+    // Writable BSS snapshot state -> SEGMENTED DSK3 image (the GLOBALS.BIN
+    // pattern; claim 5220 — the flat DSK1 mapping has no writable segment).
     // ------------------------------------------------------------------
     const resmon_prog = b.addExecutable(.{
         .name = "user-resmon",
@@ -1091,9 +1093,9 @@ pub fn build(b: *std.Build) void {
             .optimize = .ReleaseSmall,
         }),
     });
-    resmon_prog.linker_script = b.path("user/linker.ld");
-    const resmon_step = b.step("resmon", "Build the thirty-fifth ESP user program (zig-out/bin/RESMON.BIN)");
-    const resmon_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    resmon_prog.linker_script = b.path("user/linker-segmented.ld");
+    const resmon_step = b.step("resmon", "Build the thirty-fifth ESP user program (zig-out/bin/RESMON.BIN) — segmented DSK3");
+    const resmon_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py", "--segments" });
     resmon_elf2bin.addFileArg(resmon_prog.getEmittedBin());
     const resmon_bin = resmon_elf2bin.addOutputFileArg("RESMON.BIN");
     resmon_elf2bin.has_side_effects = true;
@@ -1106,6 +1108,9 @@ pub fn build(b: *std.Build) void {
     // Guest: thirty-sixth ESP user program (M22 D14 — issue #337) DEVCONS.BIN.
     // Developer console: split-screen log viewer + command prompt window.
     // Auto-refreshes on key input; output on serial console.
+    // Writable log-ring BSS -> SEGMENTED DSK3 image (the GLOBALS.BIN
+    // pattern; claim 5220 — observed live: the flat image data-aborted on
+    // the first log_append, far=0x400928, status 139 before `ready`).
     // ------------------------------------------------------------------
     const devcons_prog = b.addExecutable(.{
         .name = "user-devcons",
@@ -1115,9 +1120,9 @@ pub fn build(b: *std.Build) void {
             .optimize = .ReleaseSmall,
         }),
     });
-    devcons_prog.linker_script = b.path("user/linker.ld");
-    const devcons_step = b.step("devcons", "Build the thirty-sixth ESP user program (zig-out/bin/DEVCONS.BIN)");
-    const devcons_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    devcons_prog.linker_script = b.path("user/linker-segmented.ld");
+    const devcons_step = b.step("devcons", "Build the thirty-sixth ESP user program (zig-out/bin/DEVCONS.BIN) — segmented DSK3");
+    const devcons_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py", "--segments" });
     devcons_elf2bin.addFileArg(devcons_prog.getEmittedBin());
     const devcons_bin = devcons_elf2bin.addOutputFileArg("DEVCONS.BIN");
     devcons_elf2bin.has_side_effects = true;

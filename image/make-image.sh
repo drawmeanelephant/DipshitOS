@@ -344,6 +344,9 @@ fi
 # M22 D14 (issue #337): DEVCONS.BIN is a flat DSK1 program (developer console).
 # M26 N2 (issue #400): NETSTAT.BIN is a SEGMENTED DSK3 program (the network
 # dashboard's writable snapshot needs the RW aperture, like EDIT/GLOBALS).
+# M22 D10/D14 (issues #333/#337, claim 5220): RESMON.BIN + DEVCONS.BIN are
+# SEGMENTED DSK3 programs — their writable BSS state needs the RW aperture
+# (observed live: DEVCONS data-aborted on the flat DSK1 mapping).
 RESMON_BIN="${39:-$ROOT_DIR/zig-out/bin/RESMON.BIN}"
 DEVCONS_BIN="${40:-$ROOT_DIR/zig-out/bin/DEVCONS.BIN}"
 NETSTAT_BIN="${41:-$ROOT_DIR/zig-out/bin/NETSTAT.BIN}"
@@ -352,15 +355,15 @@ NETSTAT_BIN="${41:-$ROOT_DIR/zig-out/bin/NETSTAT.BIN}"
 M21DEMO_BIN="${42:-$ROOT_DIR/zig-out/bin/M21DEMO.BIN}"
 RESMON_ARGS=()
 if [ -f "$RESMON_BIN" ]; then
-    if [ "$(head -c 4 "$RESMON_BIN")" != "DSK1" ]; then
-        fail "'$RESMON_BIN' does not start with the 'DSK1' image magic -- run 'zig build' first."
+    if [ "$(head -c 4 "$RESMON_BIN")" != "DSK3" ]; then
+        fail "'$RESMON_BIN' does not start with the 'DSK3' segmented-image magic -- run 'zig build' first."
     fi
     RESMON_ARGS+=("$RESMON_BIN")
 fi
 DEVCONS_ARGS=()
 if [ -f "$DEVCONS_BIN" ]; then
-    if [ "$(head -c 4 "$DEVCONS_BIN")" != "DSK1" ]; then
-        fail "'$DEVCONS_BIN' does not start with the 'DSK1' image magic -- run 'zig build' first."
+    if [ "$(head -c 4 "$DEVCONS_BIN")" != "DSK3" ]; then
+        fail "'$DEVCONS_BIN' does not start with the 'DSK3' segmented-image magic -- run 'zig build' first."
     fi
     DEVCONS_ARGS+=("$DEVCONS_BIN")
 fi
