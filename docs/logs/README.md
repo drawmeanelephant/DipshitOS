@@ -161,5 +161,6 @@ meaningful — on main.
 | t3code/fix-issue-267-git-current (docs/logs hygiene) | [`t3code-fix-issue-267-git-current.md`](t3code-fix-issue-267-git-current.md) |
 | `t3code/handle-issue-268-git-current` | [`t3code-handle-issue-268-git-current.md`](t3code-handle-issue-268-git-current.md) |
 | `t3code/issue-265-fix` | [`t3code-issue-265-fix.md`](t3code-issue-265-fix.md) |
+| `t3code/milestone-nine-triage` | [`t3code-milestone-nine-triage.md`](t3code-milestone-nine-triage.md) |
 | t3code/prune-claims-269 | [`t3code-prune-claims-269.md`](t3code-prune-claims-269.md) |
 <!-- LOGS_INDEX:END -->
