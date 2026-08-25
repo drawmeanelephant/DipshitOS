@@ -9,19 +9,24 @@
 # `sys_win_get` / `sys_win_query` / `sys_win_set_visible`) entirely from EL0:
 # open -> fill -> present -> move to (800,400) -> move to (1200,700) (the
 # CLAMP proof: it falls off the 1280x720 scanout, so it clamps to the
-# bottom-right corner (1024,528)) -> raise -> present -> get (reads the
+# bottom-right corner (768,336)) -> raise -> present -> get (reads the
 # clamped rect back through slot 18, printing `winmove: get
-# 1024,528,256,192`) -> query (reads the FULL window state back through
-# slot 19, printing `winmove: query 1024,528,256,192 z=2 focused=1
+# 768,336,512,384`) -> query (reads the FULL window state back through
+# slot 19, printing `winmove: query 768,336,512,384 z=2 focused=1
 # visible=1 dirty=1`) -> hide (slot 20) -> sleep 2 ticks (hidden while the
 # gate's marker-driven capture snaps the GONE frame) -> show (slot 20) ->
 # yield-forever.
+#
+# Geometry note (claim 8777 sweep fix, 2026-08-24): 19a6335 resized the
+# window 256x192 -> 512x384 but left this gate pinning the old clamp corner
+# (1024,528) — red since Aug 20. All rects/pixel coords below are the
+# CURRENT reality: open (64,64) 512x384, clamp corner (768,336).
 #
 # Phases:
 #   * script1:  `exec WINMOVE.BIN` (open/fill/present/move/move/raise/get/
 #               query/hide/sleep/show/loop).
 #   * script2:  (after `winmove: loop ok`) `win` + `syscalls` + the EL1h
-#               monitor halves `dui move 2 1024 528` + `dui raise 2` on the
+#               monitor halves `dui move 2 768 336` + `dui raise 2` on the
 #               SAME kernel state (the window still at its clamped spot).
 #   * pixel proof (two captures): the marker-driven capture
 #     (`--screenshot-after "winmove: hide ok"`) shows the window GONE from
@@ -86,13 +91,18 @@ gate_begin live-win-move
 echo "run dir: $RUN_DIR"
 
 # --- scripted session ---------------------------------------------------------
+# Both script phases are written into the private RUN_DIR (created by
+# gate_begin above) so the gate is self-contained — it must never depend on
+# uncommitted artifacts/ files (claim 8777: the old --script path pointed at
+# artifacts/live-win-move-script.txt, which only existed on the machine that
+# first ran this gate).
 cat > "$RUN_DIR/script.txt" <<'EOF'
 exec WINMOVE.BIN
 EOF
 cat > "$RUN_DIR/script2.txt" <<'EOF'
 dui
 syscalls
-dui move 2 1024 528
+dui move 2 768 336
 dui raise 2
 EOF
 
@@ -108,7 +118,7 @@ run_one() {
         --serial "$RUN_DIR/vm-serial.log" \
         --display --screen "$RUN_DIR/gpu-screen" \
         --screenshot-after "winmove: hide ok" \
-        --script artifacts/live-win-move-script.txt \
+        --script "$RUN_DIR/script.txt" \
         --script2 "$RUN_DIR/script2.txt" --script2-after "winmove: loop ok" \
         --script-expect "timer heartbeat ticks=20 irq=20 poll=0" \
         --timeout 60 \
@@ -138,27 +148,32 @@ if [ -f "$SERIAL" ]; then
     grep -a -q -F -- "winmove: loop ok" "$SERIAL" && LOOP=1
     # sys_win_get (slot 18): the EL0 program reads its CLAMPED rect back and
     # prints it — the read-back proof the move was silent but observable.
-    grep -a -q -F -- "winmove: get 1024,528,256,192" "$SERIAL" && GET=1
+    grep -a -q -F -- "winmove: get 768,336,512,384" "$SERIAL" && GET=1
     # sys_win_query (slot 19): the EL0 program reads its FULL window state
     # back — z-order rank + focus + visible/dirty flags, not just the rect.
-    grep -a -q -F -- "winmove: query 1024,528,256,192 z=2 focused=1 visible=1 dirty=1" "$SERIAL" && QUERY=1
+    # (z=4: the desktop gained wallpaper/taskbar/dock windows below the
+    # user window — observed 2026-08-24, claim 8777.)
+    grep -a -q -F -- "winmove: query 768,336,512,384 z=4 focused=1 visible=1 dirty=1" "$SERIAL" && QUERY=1
     # sys_win_set_visible (slot 20): the hide/show round trip from EL0 — the
     # program hides its window, sleeps 6 ticks (so the 5s capture catches it
     # gone), then shows it again.
     grep -a -q -F -- "winmove: hide ok" "$SERIAL" && HIDE=1
     grep -a -q -F -- "winmove: show ok" "$SERIAL" && SHOW=1
     # The window persists at its CLAMPED position (the second move to
-    # (1200,700) fell off the 1280x720 scanout -> (1024,528)), owned by a
-    # numeric pid (per-process ownership visible at runtime).
-    grep -a -q -F -- "dui: windows=3" "$SERIAL" && WIN3=1
-    grep -a -q -F -- "dui[2]: user user rect=1024,528,256,192" "$SERIAL" && RECT=1
-    grep -a -E -q 'dui\[2\]: user user rect=1024,528,256,192 .* owner=[0-9]+' "$SERIAL" && OWNER=1
+    # (1200,700) fell off the 1280x720 scanout -> (768,336)), owned by a
+    # numeric pid (per-process ownership visible at runtime). The desktop
+    # now has FIVE windows (terminal, wallpaper, taskbar, dock, user — the
+    # user window is dui[4]; observed 2026-08-24, claim 8777).
+    grep -a -q -F -- "dui: windows=5" "$SERIAL" && WIN3=1
+    grep -a -q -F -- "dui[4]: user user rect=768,336,512,384" "$SERIAL" && RECT=1
+    grep -a -E -q 'dui\[4\]: user user rect=768,336,512,384 .* owner=[0-9]+' "$SERIAL" && OWNER=1
     # The final registry state: the window is VISIBLE again (the show landed).
-    grep -a -E -q 'dui\[2\]: user user rect=1024,528,256,192 dirty=[01] visible=1' "$SERIAL" && VIS=1
+    grep -a -E -q 'dui\[4\]: user user rect=768,336,512,384 dirty=[01] visible=1' "$SERIAL" && VIS=1
     # The syscall counters: open=1, fill=4, present=3, move=2, raise=1,
     # get=1, query=1, set_visible=2, close=0 (the window persists — WINMOVE
-    # yield-loops forever).
-    grep -a -q -F -- "syscalls: slots=64 implemented=46" "$SERIAL" && IMPL=1
+    # yield-loops forever). implemented=63 on current main (observed
+    # 2026-08-24, claim 8777).
+    grep -a -q -F -- "syscalls: slots=64 implemented=63" "$SERIAL" && IMPL=1
     grep -a -q -F -- "  16 sys_win_move calls=2" "$SERIAL" && \
         grep -a -q -F -- "  17 sys_win_raise calls=1" "$SERIAL" && \
         grep -a -q -F -- "  18 sys_win_get calls=1" "$SERIAL" && \
@@ -168,7 +183,7 @@ if [ -f "$SERIAL" ]; then
         grep -a -q -F -- "  15 sys_win_close calls=0" "$SERIAL" && CNT=1
     # The EL1h monitor halves (the same primitives, privileged): a no-op
     # move to the SAME clamped spot + a raise.
-    grep -a -q -F -- "dui move: moved=2 to 1024,528" "$SERIAL" && MMOVE=1
+    grep -a -q -F -- "dui move: moved=2 to 768,336" "$SERIAL" && MMOVE=1
     grep -a -q -F -- "dui raise: raised=2" "$SERIAL" && MRAISE=1
 fi
 
@@ -261,23 +276,25 @@ def region(x0, y0, x1, y1, step=3):
             counts[k] = counts.get(k, 0) + 1
     return counts
 
-# The CLAMPED window rect in retina coords: logical (1024,528,256,192) x2.
-NX0, NY0, NX1, NY1 = 2048, 1056, 2560, 1440
+# The CLAMPED window rect in retina coords: logical (768,336,512,384) x2.
+NX0, NY0, NX1, NY1 = 1536, 672, 2560, 1440
 
 # (a) The three blocks are GONE from their new spots (window-local (8,8),
-# (64,8), (120,8) 48x48 -> retina centers (2112,1120), (2224,1120),
-# (2336,1120)).
-h_red = classify(*px(2112, 1120))
-h_cyan = classify(*px(2224, 1120))
-h_white = classify(*px(2336, 1120))
+# (64,8), (120,8) 48x48 -> retina centers (1600,736), (1712,736),
+# (1824,736)).
+h_red = classify(*px(1600, 736))
+h_cyan = classify(*px(1712, 736))
+h_white = classify(*px(1824, 736))
 print(f"hidden blocks: red={h_red} cyan={h_cyan} white={h_white}")
 if h_red == 'red' or h_cyan == 'cyan' or h_white == 'white':
     sys.exit(f"FAIL: a colored block still sits at the new spot while hidden ({h_red}/{h_cyan}/{h_white}) — the hide did not land")
 
-# (b) No red/cyan/white anywhere in the clamped rect — the window's OWN
-# rendered content is gone (the terminal's slate background + green text is
-# revealed underneath).
-h_whole = region(NX0 + 4, NY0 + 4, NX1 - 4, NY1 - 4, step=2)
+# (b) No red/cyan/white anywhere in the clamped rect MINUS the taskbar
+# strip (the bottom 20 logical px hold white tray glyphs of their own —
+# observed 2026-08-24, claim 8777) — the window's OWN rendered content is
+# gone (the terminal's slate background + green text is revealed beneath;
+# both classify as darkblue/other here).
+h_whole = region(NX0 + 4, NY0 + 4, NX1 - 4, NY1 - 48, step=2)
 print(f"hidden whole rect: {h_whole}")
 if h_whole.get('red', 0) or h_whole.get('cyan', 0) or h_whole.get('white', 0):
     sys.exit(f"FAIL: window content (red/cyan/white) still present in the clamped rect while hidden ({h_whole})")
@@ -291,9 +308,19 @@ EOF
 fi
 
 # Phase 2 — the pixel proof. The runner writes `--screen <base>` captures as
-# <base>-Ns (2560x1440 retina). The LATEST capture (mtime) holds the settled
-# frame (the 15s capture — WINMOVE's window persists at its clamped spot).
-LATEST="$(ls -t artifacts/gpu-screen-*s 2>/dev/null | head -1 || true)"
+# <base>-Ns (2560x1440 retina) at 5/10/15 s and <base>-after on the marker.
+# The whole scripted session completes inside ~5 s of boot on current
+# hardware, so pick the HIGHEST-numbered periodic capture explicitly —
+# mtime order is a tie after the artifacts copy (observed 2026-08-24,
+# claim 8777) — and it holds the settled POST-MOVE frame.
+LATEST=""
+for n in 15 10 5; do
+    CAND="$(art "gpu-screen-${n}s")"
+    if [ -f "$CAND" ]; then LATEST="$CAND"; break; fi
+done
+if [ -z "$LATEST" ]; then
+    LATEST="$(ls -t artifacts/gpu-screen-*s 2>/dev/null | head -1 || true)"
+fi
 if [ -z "$LATEST" ]; then
     echo "FAIL: no gpu-screen PNG captured"
     PASS=0
@@ -368,15 +395,15 @@ def frac(counts, key):
     tot = sum(counts.values())
     return (counts.get(key, 0) / tot) if tot else 0.0
 
-# The CLAMPED window rect in retina coords: logical (1024,528,256,192) x2.
-NX0, NY0, NX1, NY1 = 2048, 1056, 2560, 1440
+# The CLAMPED window rect in retina coords: logical (768,336,512,384) x2.
+NX0, NY0, NX1, NY1 = 1536, 672, 2560, 1440
 
 # (a) The three filled blocks sit at their expected spots at the NEW
 # position (window-local (8,8), (64,8), (120,8) 48x48 -> retina centers
-# (2112,1120), (2224,1120), (2336,1120)).
-new_red = classify(*px(2112, 1120))
-new_cyan = classify(*px(2224, 1120))
-new_white = classify(*px(2336, 1120))
+# (1600,736), (1712,736), (1824,736)).
+new_red = classify(*px(1600, 736))
+new_cyan = classify(*px(1712, 736))
+new_white = classify(*px(1824, 736))
 print(f"blocks-at-new: red={new_red} cyan={new_cyan} white={new_white}")
 if new_red != 'red':
     sys.exit(f"FAIL: the red block is not red at its NEW spot ({new_red}) — the move did not land")
@@ -420,7 +447,7 @@ fi
     echo "DIPSHITOS live draw/window-move gate (claim 0487, milestone six card G6 move/raise follow-on) — EL0 move/restack on real VZ hardware"
     echo "revision: $REVISION branch=$BRANCH dirty-files=$DIRTY"
     echo "phase: scripted exec of WINMOVE.BIN (open/fill/present/move/move-clamp/raise/get/query/hide/sleep/show/loop), then dui + syscalls + the EL1h dui move/raise halves on the same kernel state, then the two-capture decode"
-    echo "assertions: winmove open/fill/present/move/raise/get/query/hide/show/loop markers (winmove: get 1024,528,256,192 through slot 18 + winmove: query 1024,528,256,192 z=2 focused=1 visible=1 dirty=1 through slot 19 + hide ok/show ok through slot 20), dui: windows=3 + dui[2]: user user rect=1024,528,256,192 owner=<pid> visible=1, syscalls implemented=46 with open=1/fill=4/present=3/move=2/raise=1/get=1/query=1/set_visible=2/close=0, dui move 2 1024 528 + dui raise 2 (EL1h), the HIDDEN capture shows no red/cyan/white blocks at the clamped spot (the window disappeared), and the LATEST capture shows red+cyan+white blocks at the NEW spot + dark-blue background dominant + no terminal foreground inside the new rect + the old spot free of the colored blocks (the window returned)"
+    echo "assertions: winmove open/fill/present/move/raise/get/query/hide/show/loop markers (winmove: get 768,336,512,384 through slot 18 + winmove: query 768,336,512,384 z=2 focused=1 visible=1 dirty=1 through slot 19 + hide ok/show ok through slot 20), dui: windows=3 + dui[2]: user user rect=768,336,512,384 owner=<pid> visible=1, syscalls implemented=46 with open=1/fill=4/present=3/move=2/raise=1/get=1/query=1/set_visible=2/close=0, dui move 2 768 336 + dui raise 2 (EL1h), the HIDDEN capture shows no red/cyan/white blocks at the clamped spot (the window disappeared), and the LATEST capture shows red+cyan+white blocks at the NEW spot + dark-blue background dominant + no terminal foreground inside the new rect + the old spot free of the colored blocks (the window returned)"
     echo "date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     echo
 } > "$REPORT"
@@ -428,7 +455,7 @@ fi
 echo
 echo "=== result ==="
 if [ "$PASS" = 1 ]; then
-    echo "verify-live-win-move: PASS — WINMOVE.BIN opened a user window, filled it, presented it, moved it (to (800,400) then the clamped (1024,528) corner), raised it, READ THE CLAMPED RECT BACK through slot 18 (winmove: get 1024,528,256,192), READ THE FULL WINDOW STATE through slot 19 (winmove: query 1024,528,256,192 z=2 focused=1 visible=1 dirty=1), HID it then SHOWED it through slot 20 (winmove: hide ok / show ok, sys_win_set_visible calls=2), and kept it alive entirely from EL0 through the ADR 0007 slots 16/17/18/19/20, with syscalls reporting implemented=46 — and the two-capture decode proves the PIXEL DISAPPEARS (the marker capture taken while hidden shows no red/cyan/white blocks at the clamped spot) and RETURNS (the LATEST capture shows the window's own colors back at the NEW position with the old spot showing the terminal). The default VM is untouched: without --display, the window manager is unarmed and sys_win_set_visible returns EINVAL — every existing gate stays byte-identical."
+    echo "verify-live-win-move: PASS — WINMOVE.BIN opened a user window, filled it, presented it, moved it (to (800,400) then the clamped (768,336) corner), raised it, READ THE CLAMPED RECT BACK through slot 18 (winmove: get 768,336,512,384), READ THE FULL WINDOW STATE through slot 19 (winmove: query 768,336,512,384 z=4 focused=1 visible=1 dirty=1), HID it then SHOWED it through slot 20 (winmove: hide ok / show ok, sys_win_set_visible calls=2), and kept it alive entirely from EL0 through the ADR 0007 slots 16/17/18/19/20, with syscalls reporting implemented=63 — and the two-capture decode proves the PIXEL DISAPPEARS (the marker capture taken while hidden shows no red/cyan/white blocks at the clamped spot) and RETURNS (the LATEST capture shows the window's own colors back at the NEW position with the old spot showing the terminal). The default VM is untouched: without --display, the window manager is unarmed and sys_win_set_visible returns EINVAL — every existing gate stays byte-identical."
     echo "PASS: $PASS" >> "$REPORT"
     sleep 0.5
     exit 0

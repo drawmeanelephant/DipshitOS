@@ -166,7 +166,7 @@ export fn _start() callconv(.naked) noreturn {
         \\cmp x0, #0
         \\b.ne 0f
         \\// sys_win_move(2, 1200, 700) — the CLAMP proof (slot 16): the
-        \\// window would fall off the scanout, so it clamps to (1024, 528).
+        \\// window would fall off the scanout, so it clamps to (768, 336).
         \\mov x0, #2
         \\mov x1, #1200
         \\mov x2, #700
@@ -192,7 +192,7 @@ export fn _start() callconv(.naked) noreturn {
         \\b.ne 0f
         \\// Phase 5 — sys_win_get(2, sp) (slot 18): read the CLAMPED rect
         \\// back into a 16-byte stack buffer (four u32 LE words), then print
-        \\// it as "winmove: get 1024,528,256,192".
+        \\// it as "winmove: get 768,336,512,384".
         \\sub sp, sp, #64
         \\mov x0, #2
         \\mov x1, sp
@@ -237,7 +237,7 @@ export fn _start() callconv(.naked) noreturn {
         \\// Phase 6 — sys_win_query(2, sp) (slot 19): read the FULL window
         \\// state back into a 32-byte stack buffer (eight u32 LE words: x, y,
         \\// w, h, z, focused, visible, dirty), then print it as
-        \\// "winmove: query 1024,528,256,192 z=2 focused=1 visible=1 dirty=1".
+        \\// "winmove: query 768,336,512,384 z=2 focused=1 visible=1 dirty=1".
         \\sub sp, sp, #64
         \\mov x0, #2
         \\mov x1, sp
@@ -451,12 +451,12 @@ test "user winmove: the marker shapes are pinned (live-gate grep targets)" {
     try std.testing.expectEqual(@as(usize, 17), loop_line.len);
     // The sys_win_get (slot 18) marker — the CLAMPED rect read back from
     // EL0 (a drift breaks the live gate's `winmove: get ...` assertion).
-    try std.testing.expectEqualStrings("winmove: get 1024,528,256,192\n", get_line);
-    try std.testing.expectEqual(@as(usize, 30), get_line.len);
+    try std.testing.expectEqualStrings("winmove: get 768,336,512,384\n", get_line);
+    try std.testing.expectEqual(@as(usize, 29), get_line.len);
     // The sys_win_query (slot 19) marker — the FULL window state read back
     // from EL0 (a drift breaks the live gate's `winmove: query ...` assertion).
-    try std.testing.expectEqualStrings("winmove: query 1024,528,256,192 z=2 focused=1 visible=1 dirty=1\n", query_line);
-    try std.testing.expectEqual(@as(usize, 64), query_line.len);
+    try std.testing.expectEqualStrings("winmove: query 768,336,512,384 z=2 focused=1 visible=1 dirty=1\n", query_line);
+    try std.testing.expectEqual(@as(usize, 63), query_line.len);
     // The sys_win_set_visible (slot 20) markers — the hide/show round trip
     // read back from EL0 (a drift breaks the live gate's `winmove: hide ok`
     // / `winmove: show ok` assertions).

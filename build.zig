@@ -1127,6 +1127,33 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_devcons.step);
 
     // ------------------------------------------------------------------
+    // Guest: thirty-eighth ESP user program (milestone twenty-one W1/W2
+    // gate payload — claim 8777) M21DEMO.BIN. Opens TWO distinctively-
+    // colored user windows (A dark-blue + red block, B black + cyan block),
+    // presents both, and yield-loops forever so the live tiling gate can
+    // drive `dui tile <n>` / `dui master` against them and decode the
+    // tiled-layout captures.
+    // ------------------------------------------------------------------
+    const m21demo = b.addExecutable(.{
+        .name = "user-m21demo",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/m21demo.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    m21demo.linker_script = b.path("user/linker.ld");
+    const m21demo_step = b.step("m21demo", "Build the thirty-eighth ESP user program (zig-out/bin/M21DEMO.BIN; class A tooling, no VM)");
+    const m21demo_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    m21demo_elf2bin.addFileArg(m21demo.getEmittedBin());
+    const m21demo_bin = m21demo_elf2bin.addOutputFileArg("M21DEMO.BIN");
+    m21demo_elf2bin.has_side_effects = true;
+    m21demo_elf2bin.stdio = .inherit;
+    m21demo_step.dependOn(&m21demo_elf2bin.step);
+    const install_m21demo = b.addInstallFileWithDir(m21demo_bin, .bin, "M21DEMO.BIN");
+    b.getInstallStep().dependOn(&install_m21demo.step);
+
+    // ------------------------------------------------------------------
     // Top-level steps. System-command steps are marked as having side
     // effects (and inherit stdio) so they always execute instead of being
     // skipped by the build cache. (No QEMU path: this project targets Apple
@@ -1175,6 +1202,7 @@ pub fn build(b: *std.Build) void {
     image.addFileArg(resmon_bin); // ... [RESMON.BIN] (M22 D10, issue #333: thirty-fifth user program, resource monitor)
     image.addFileArg(devcons_bin); // ... [DEVCONS.BIN] (M22 D14, issue #337: thirty-sixth user program, developer console)
     image.addFileArg(netstat_bin); // ... [NETSTAT.BIN] (M26 N2, issue #400: thirty-seventh user program, the network dashboard)
+    image.addFileArg(m21demo_bin); // ... [M21DEMO.BIN] (claim 8777: thirty-eighth user program, the M21 W1/W2 tiling gate payload)
     image.has_side_effects = true;
     image.stdio = .inherit;
     image_step.dependOn(&image.step);

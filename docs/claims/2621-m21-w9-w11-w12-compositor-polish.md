@@ -6,7 +6,7 @@
 - **Touches:** kernel/src/driving_award.zig, kernel/src/syscall.zig, kernel/src/shell.zig, kernel/src/monitor.zig
 - **Depends on:** M21 W1–W16 landed (tiling, minimize, fullscreen, etc.)
 - **Heartbeat:** 2026-08-24 — code complete, tests green, PR opened
-- **Status:** 🔄 agent/buffy/m21-compositor-w9-w11-w12
+- **Status:** ✅ done 2026-08-24 — work merged to main as 1a8dedf ("feat(m21): compositor polish — W9 focus rings, W11 window persistence, W12 window titles", verified `git merge-base --is-ancestor`); flipped from 🔄 by t3code in worktree `t3code/milestone-nine-triage` (claim 8777) per the claim-6637 precedent so the ACTIVE-Touches gate stops holding these files; recorded here and in `docs/logs/t3code-milestone-nine-triage.md`
 
 ## Notes
 
