@@ -9,12 +9,15 @@
 
 const std = @import("std");
 const ui = @import("lib/ui.zig");
+const netstats = @import("lib/netstats.zig");
 const Rect = ui.Rect;
 const Button = ui.Button;
 const Label = ui.Label;
 const Event = ui.Event;
 const ProcInfo = ui.ProcInfo;
 const ProcState = ui.ProcState;
+
+pub const ActiveTab = enum { procs, network };
 
 pub const window_id: u32 = 3;
 pub const window_x: u32 = 40;
@@ -190,16 +193,27 @@ pub fn name_contains(haystack: []const u8, needle: []const u8) bool {
 
 pub const AppState = struct {
     table: ProcessTable = .{},
-    btn_refresh: Button = Button.init(Rect.make(6, 6, 60, 20), "Refresh"),
-    btn_kill: Button = Button.init(Rect.make(70, 6, 46, 20), "Kill"),
-    btn_auto: Button = Button.init(Rect.make(122, 6, 50, 20), "Auto"),
+    btn_refresh: Button = Button.init(Rect.make(6, 6, 54, 20), "Refresh"),
+    btn_kill: Button = Button.init(Rect.make(64, 6, 38, 20), "Kill"),
+    btn_auto: Button = Button.init(Rect.make(106, 6, 42, 20), "Auto"),
+    btn_tab_procs: Button = Button.init(Rect.make(152, 6, 44, 20), "Procs"),
+    btn_tab_net: Button = Button.init(Rect.make(200, 6, 38, 20), "Net"),
     auto_mode: bool = false,
+    tab: ActiveTab = .procs,
     proc_history: [history_len]u16 = [_]u16{0} ** history_len,
     history_pos: usize = 0,
+    // Network stats and rate deltas
+    net_stats: netstats.NetStats = .{},
+    prev_rx_bytes: u64 = 0,
+    prev_tx_bytes: u64 = 0,
+    rx_rate_bps: u64 = 0,
+    tx_rate_bps: u64 = 0,
+    net_history: [history_len]u16 = [_]u16{0} ** history_len,
+    net_history_pos: usize = 0,
     // C8 sorting / filtering
     sort_column: SortColumn = .pid,
     sort_asc: bool = true,
-    filter_input: ui.TextInput = ui.TextInput.init(Rect.make(260, 6, 110, 20)),
+    filter_input: ui.TextInput = ui.TextInput.init(Rect.make(296, 6, 80, 20)),
     display_indices: [max_display_procs]usize = [_]usize{0} ** max_display_procs,
     display_count: usize = 0,
 
@@ -207,9 +221,12 @@ pub const AppState = struct {
         var s = AppState{};
         s.btn_refresh.bg_color = ui.COLOR_ACCENT;
         s.btn_kill.bg_color = ui.COLOR_DANGER;
+        s.btn_tab_procs.bg_color = ui.COLOR_ACCENT;
+        s.btn_tab_net.bg_color = ui.COLOR_SURFACE;
         _ = s.table.refresh_from_system();
         s.push_history();
         s.rebuild_display();
+        s.refresh_net_stats();
         return s;
     }
 
@@ -304,6 +321,45 @@ pub const AppState = struct {
     }
 
     /// Map filtered display row to absolute table index.
+    pub fn set_tab(self: *AppState, tab: ActiveTab) void {
+        self.tab = tab;
+        if (tab == .procs) {
+            self.btn_tab_procs.bg_color = ui.COLOR_ACCENT;
+            self.btn_tab_net.bg_color = ui.COLOR_SURFACE;
+            ui.write_console("top: tab=procs\n");
+        } else {
+            self.btn_tab_procs.bg_color = ui.COLOR_SURFACE;
+            self.btn_tab_net.bg_color = ui.COLOR_ACCENT;
+            self.refresh_net_stats();
+            ui.write_console("top: tab=network\n");
+        }
+    }
+
+    pub fn refresh_net_stats(self: *AppState) void {
+        const prev_rx = self.net_stats.rx_bytes;
+        const prev_tx = self.net_stats.tx_bytes;
+        const ok = netstats.read_stats(&self.net_stats);
+        if (ok) {
+            if (self.prev_rx_bytes > 0 and self.net_stats.rx_bytes >= prev_rx) {
+                self.rx_rate_bps = self.net_stats.rx_bytes - prev_rx;
+            } else if (self.prev_rx_bytes == 0) {
+                self.rx_rate_bps = 0;
+            }
+            if (self.prev_tx_bytes > 0 and self.net_stats.tx_bytes >= prev_tx) {
+                self.tx_rate_bps = self.net_stats.tx_bytes - prev_tx;
+            } else if (self.prev_tx_bytes == 0) {
+                self.tx_rate_bps = 0;
+            }
+            self.prev_rx_bytes = self.net_stats.rx_bytes;
+            self.prev_tx_bytes = self.net_stats.tx_bytes;
+        }
+        const sum = self.rx_rate_bps + self.tx_rate_bps;
+        const combined: u16 = @intCast(@min(sum, 65535));
+        self.net_history[self.net_history_pos] = combined;
+        self.net_history_pos = (self.net_history_pos + 1) % history_len;
+    }
+
+    /// Map filtered display row to absolute table index.
     pub fn display_to_absolute(self: *const AppState, display_row: usize) ?usize {
         if (display_row >= self.display_count) return null;
         return self.display_indices[display_row];
@@ -312,6 +368,14 @@ pub const AppState = struct {
     fn push_history(self: *AppState) void {
         self.proc_history[self.history_pos] = @intCast(self.table.count);
         self.history_pos = (self.history_pos + 1) % history_len;
+    }
+
+    fn format_ip(ip: [4]u8, buf: []u8) []const u8 {
+        return std.fmt.bufPrint(buf, "{d}.{d}.{d}.{d}", .{ ip[0], ip[1], ip[2], ip[3] }) catch buf[0..0];
+    }
+
+    fn format_mac(mac: [6]u8, buf: []u8) []const u8 {
+        return std.fmt.bufPrint(buf, "{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}", .{ mac[0], mac[1], mac[2], mac[3], mac[4], mac[5] }) catch buf[0..0];
     }
 
     fn draw_cpu_bar(self: *const AppState, win: u32) void {
@@ -379,6 +443,103 @@ pub const AppState = struct {
         ui.draw_text(win, "History", sp_x + sp_w - 48, sp_y + 3, ui.COLOR_TEXT_MUTED);
     }
 
+    fn draw_network_tab(self: *const AppState, win: u32) void {
+        // Divider line below toolbar
+        ui.draw_rect(win, Rect.make(0, 32, window_w, 1), ui.COLOR_BORDER);
+
+        // Section 1: Interface & Protocols (y=38..106)
+        const s1_rect = Rect.make(6, 38, window_w - 12, 68);
+        ui.draw_rect(win, s1_rect, ui.COLOR_SURFACE);
+        ui.draw_rect_outline(win, s1_rect, 1, ui.COLOR_BORDER);
+        ui.draw_text(win, "NETWORK INTERFACE & PROTOCOLS", s1_rect.x + 6, s1_rect.y + 4, ui.COLOR_ACCENT);
+
+        var ip_buf: [16]u8 = undefined;
+        var gw_buf: [16]u8 = undefined;
+        var mac_buf: [20]u8 = undefined;
+        const own_ip_s = format_ip(self.net_stats.own_ip, &ip_buf);
+        const gw_s = format_ip(self.net_stats.gateway, &gw_buf);
+        const mac_s = format_mac(self.net_stats.mac, &mac_buf);
+
+        var line1_buf: [80]u8 = undefined;
+        const line1 = std.fmt.bufPrint(&line1_buf, "IP: {s}  GW: {s}  MAC: {s}", .{ own_ip_s, gw_s, mac_s }) catch "";
+        ui.draw_text(win, line1, s1_rect.x + 6, s1_rect.y + 20, ui.COLOR_TEXT_PRIMARY);
+
+        var lease_buf: [16]u8 = undefined;
+        const lease_s = format_ip(self.net_stats.lease_ip, &lease_buf);
+        var line2_buf: [80]u8 = undefined;
+        const dhcp_name = netstats.dhcp_state_name(self.net_stats.dhcp_state);
+        const line2 = std.fmt.bufPrint(&line2_buf, "DHCP: {s}  Lease: {s} ({d}s)", .{ dhcp_name, lease_s, self.net_stats.lease_secs }) catch "";
+        ui.draw_text(win, line2, s1_rect.x + 6, s1_rect.y + 36, ui.COLOR_TEXT_MUTED);
+
+        var peer_buf: [16]u8 = undefined;
+        const peer_s = format_ip(self.net_stats.tcp_peer_ip, &peer_buf);
+        const tcp_name = netstats.tcp_state_name(self.net_stats.tcp_state);
+        var line3_buf: [80]u8 = undefined;
+        const line3 = std.fmt.bufPrint(&line3_buf, "TCP: {s} ({s}:{d})  UDP Listeners: {d}", .{ tcp_name, peer_s, self.net_stats.tcp_peer_port, self.net_stats.udp_count }) catch "";
+        ui.draw_text(win, line3, s1_rect.x + 6, s1_rect.y + 52, ui.COLOR_TEXT_MUTED);
+
+        // Section 2: Traffic Statistics (y=112..192)
+        const s2_rect = Rect.make(6, 112, window_w - 12, 80);
+        ui.draw_rect(win, s2_rect, ui.COLOR_SURFACE);
+        ui.draw_rect_outline(win, s2_rect, 1, ui.COLOR_BORDER);
+        ui.draw_text(win, "TRAFFIC & ACTIVITY", s2_rect.x + 6, s2_rect.y + 4, ui.COLOR_ACCENT);
+
+        var rx_line_buf: [80]u8 = undefined;
+        const rx_line = std.fmt.bufPrint(&rx_line_buf, "RX Rate: {d} B/s  (Total: {d} frames, {d} bytes)", .{ self.rx_rate_bps, self.net_stats.rx_frames, self.net_stats.rx_bytes }) catch "";
+        ui.draw_text(win, rx_line, s2_rect.x + 6, s2_rect.y + 20, ui.COLOR_TEXT_PRIMARY);
+
+        var tx_line_buf: [80]u8 = undefined;
+        const tx_line = std.fmt.bufPrint(&tx_line_buf, "TX Rate: {d} B/s  (Total: {d} frames, {d} bytes)", .{ self.tx_rate_bps, self.net_stats.tx_frames, self.net_stats.tx_bytes }) catch "";
+        ui.draw_text(win, tx_line, s2_rect.x + 6, s2_rect.y + 36, ui.COLOR_TEXT_PRIMARY);
+
+        var err_line_buf: [80]u8 = undefined;
+        const err_line = std.fmt.bufPrint(&err_line_buf, "Filtered: {d}  Overflow: {d}  UDP Sent/Recv: {d}/{d}", .{ self.net_stats.rx_filtered, self.net_stats.rx_overflow, self.net_stats.udp_dgrams[1], self.net_stats.udp_dgrams[0] }) catch "";
+        ui.draw_text(win, err_line, s2_rect.x + 6, s2_rect.y + 52, ui.COLOR_TEXT_MUTED);
+
+        var tcp_line_buf: [80]u8 = undefined;
+        const tcp_line = std.fmt.bufPrint(&tcp_line_buf, "TCP Segs: syn={d} ack={d} data_tx={d} data_rx={d}", .{ self.net_stats.tcp_segs[0], self.net_stats.tcp_segs[2], self.net_stats.tcp_segs[3], self.net_stats.tcp_segs[4] }) catch "";
+        ui.draw_text(win, tcp_line, s2_rect.x + 6, s2_rect.y + 66, ui.COLOR_TEXT_MUTED);
+
+        // Section 3: Bandwidth Graph (y=198..376)
+        const sp_x: u32 = 6;
+        const sp_y: u32 = 198;
+        const sp_w: u32 = window_w - 12;
+        const sp_h: u32 = window_h - sp_y - 8;
+
+        ui.draw_rect(win, Rect.make(sp_x, sp_y, sp_w, sp_h), ui.COLOR_SURFACE);
+        ui.draw_rect_outline(win, Rect.make(sp_x, sp_y, sp_w, sp_h), 1, ui.COLOR_BORDER);
+
+        var max_val: u16 = 1;
+        var i: usize = 0;
+        while (i < history_len) : (i += 1) {
+            if (self.net_history[i] > max_val) {
+                max_val = self.net_history[i];
+            }
+        }
+
+        ui.draw_text(win, "BANDWIDTH HISTORY (RX+TX B/s)", sp_x + 6, sp_y + 4, ui.COLOR_ACCENT);
+
+        var peak_buf: [32]u8 = undefined;
+        const peak_s = std.fmt.bufPrint(&peak_buf, "Peak: {d} B/s", .{max_val}) catch "";
+        ui.draw_text(win, peak_s, sp_x + sp_w - 100, sp_y + 4, ui.COLOR_TEXT_MUTED);
+
+        const bar_w_px: u32 = 6;
+        const gap: u32 = 2;
+        const step: u32 = bar_w_px + gap;
+        var x_off: u32 = 6;
+        const graph_h: u32 = sp_h - 26;
+        i = 0;
+        while (i < history_len and x_off + bar_w_px <= sp_w - 6) : (i += 1) {
+            const idx = (self.net_history_pos + i) % history_len;
+            const val = self.net_history[idx];
+            const h: u32 = if (max_val > 0) @intCast(@as(u32, @intCast(val)) * (graph_h - 4) / @as(u32, @intCast(max_val))) else 0;
+            if (h > 0) {
+                ui.draw_rect(win, Rect.make(sp_x + x_off, sp_y + sp_h - 4 - h, bar_w_px, h), ui.COLOR_ACCENT);
+            }
+            x_off += step;
+        }
+    }
+
     pub fn draw(self: *const AppState, win: u32) void {
         // Window background
         ui.draw_rect(win, Rect.make(0, 0, window_w, window_h), ui.COLOR_BG);
@@ -387,88 +548,100 @@ pub const AppState = struct {
         self.btn_refresh.draw(win);
         self.btn_kill.draw(win);
         self.btn_auto.draw(win);
-        // Filter input (C8)
-        ui.draw_text(win, "Filter:", 215, 12, ui.COLOR_TEXT_MUTED);
-        self.filter_input.draw(win);
+        self.btn_tab_procs.draw(win);
+        self.btn_tab_net.draw(win);
 
-        // Stats header (shifted to avoid filter overlap)
-        var stats_buf: [40]u8 = undefined;
-        const running_cnt = self.table.count_running();
-        const stats_str = std.fmt.bufPrint(&stats_buf, "Procs: {d} Run: {d}", .{ self.display_count, running_cnt }) catch "Procs: ?";
-        ui.draw_text(win, stats_str, 380, 12, ui.COLOR_TEXT_MUTED);
+        if (self.tab == .procs) {
+            // Filter input (C8)
+            ui.draw_text(win, "Filter:", 248, 12, ui.COLOR_TEXT_MUTED);
+            self.filter_input.draw(win);
 
-        // CPU usage bar
-        self.draw_cpu_bar(win);
+            // Stats header (shifted to avoid filter overlap)
+            var stats_buf: [40]u8 = undefined;
+            const running_cnt = self.table.count_running();
+            const stats_str = std.fmt.bufPrint(&stats_buf, "Procs: {d} Run: {d}", .{ self.display_count, running_cnt }) catch "Procs: ?";
+            ui.draw_text(win, stats_str, 384, 12, ui.COLOR_TEXT_MUTED);
 
-        // Divider line
-        ui.draw_rect(win, Rect.make(0, 48, window_w, 1), ui.COLOR_BORDER);
+            // CPU usage bar
+            self.draw_cpu_bar(win);
 
-        // Table Header — clickable sortable columns (C8)
-        const header_rect = Rect.make(6, 52, window_w - 12, 16);
-        ui.draw_rect(win, header_rect, ui.COLOR_SURFACE);
-        ui.draw_rect_outline(win, header_rect, 1, ui.COLOR_BORDER);
-        const pid_active = self.sort_column == .pid;
-        const name_active = self.sort_column == .name;
-        const state_active = self.sort_column == .state;
-        const exit_active = self.sort_column == .exit;
-        const pid_ind: []const u8 = if (pid_active) (if (self.sort_asc) "^" else "v") else "";
-        const name_ind: []const u8 = if (name_active) (if (self.sort_asc) "^" else "v") else "";
-        const state_ind: []const u8 = if (state_active) (if (self.sort_asc) "^" else "v") else "";
-        const exit_ind: []const u8 = if (exit_active) (if (self.sort_asc) "^" else "v") else "";
-        // Draw header text with indicator; active column in accent.
-        ui.draw_text(win, "PID", header_rect.x + 4, header_rect.y + 4, if (pid_active) ui.COLOR_ACCENT else ui.COLOR_TEXT_MUTED);
-        if (pid_active) ui.draw_text(win, pid_ind, header_rect.x + 24, header_rect.y + 4, ui.COLOR_ACCENT);
-        ui.draw_text(win, "NAME", header_rect.x + 32, header_rect.y + 4, if (name_active) ui.COLOR_ACCENT else ui.COLOR_TEXT_MUTED);
-        if (name_active) ui.draw_text(win, name_ind, header_rect.x + 62, header_rect.y + 4, ui.COLOR_ACCENT);
-        ui.draw_text(win, "STATE", header_rect.x + 130, header_rect.y + 4, if (state_active) ui.COLOR_ACCENT else ui.COLOR_TEXT_MUTED);
-        if (state_active) ui.draw_text(win, state_ind, header_rect.x + 170, header_rect.y + 4, ui.COLOR_ACCENT);
-        ui.draw_text(win, "EXIT", header_rect.x + 196, header_rect.y + 4, if (exit_active) ui.COLOR_ACCENT else ui.COLOR_TEXT_MUTED);
-        if (exit_active) ui.draw_text(win, exit_ind, header_rect.x + 226, header_rect.y + 4, ui.COLOR_ACCENT);
+            // Divider line
+            ui.draw_rect(win, Rect.make(0, 48, window_w, 1), ui.COLOR_BORDER);
 
-        // Table Rows — filtered + sorted view (C8)
-        const row_h: u32 = 16;
-        var row_y: u32 = 70;
-        var i: usize = 0;
-        while (i < self.display_count and row_y + row_h <= window_h - 44) : (i += 1) {
-            const abs = self.display_indices[i];
-            const proc = &self.table.procs[abs];
-            const is_selected = if (self.table.selected_row) |sel| sel == i else false;
-            const row_rect = Rect.make(6, row_y, window_w - 12, row_h);
+            // Table Header — clickable sortable columns (C8)
+            const header_rect = Rect.make(6, 52, window_w - 12, 16);
+            ui.draw_rect(win, header_rect, ui.COLOR_SURFACE);
+            ui.draw_rect_outline(win, header_rect, 1, ui.COLOR_BORDER);
+            const pid_active = self.sort_column == .pid;
+            const name_active = self.sort_column == .name;
+            const state_active = self.sort_column == .state;
+            const exit_active = self.sort_column == .exit;
+            const pid_ind: []const u8 = if (pid_active) (if (self.sort_asc) "^" else "v") else "";
+            const name_ind: []const u8 = if (name_active) (if (self.sort_asc) "^" else "v") else "";
+            const state_ind: []const u8 = if (state_active) (if (self.sort_asc) "^" else "v") else "";
+            const exit_ind: []const u8 = if (exit_active) (if (self.sort_asc) "^" else "v") else "";
+            // Draw header text with indicator; active column in accent.
+            ui.draw_text(win, "PID", header_rect.x + 4, header_rect.y + 4, if (pid_active) ui.COLOR_ACCENT else ui.COLOR_TEXT_MUTED);
+            if (pid_active) ui.draw_text(win, pid_ind, header_rect.x + 24, header_rect.y + 4, ui.COLOR_ACCENT);
+            ui.draw_text(win, "NAME", header_rect.x + 32, header_rect.y + 4, if (name_active) ui.COLOR_ACCENT else ui.COLOR_TEXT_MUTED);
+            if (name_active) ui.draw_text(win, name_ind, header_rect.x + 62, header_rect.y + 4, ui.COLOR_ACCENT);
+            ui.draw_text(win, "STATE", header_rect.x + 130, header_rect.y + 4, if (state_active) ui.COLOR_ACCENT else ui.COLOR_TEXT_MUTED);
+            if (state_active) ui.draw_text(win, state_ind, header_rect.x + 170, header_rect.y + 4, ui.COLOR_ACCENT);
+            ui.draw_text(win, "EXIT", header_rect.x + 196, header_rect.y + 4, if (exit_active) ui.COLOR_ACCENT else ui.COLOR_TEXT_MUTED);
+            if (exit_active) ui.draw_text(win, exit_ind, header_rect.x + 226, header_rect.y + 4, ui.COLOR_ACCENT);
 
-            // Row background
-            if (is_selected) {
-                ui.draw_rect(win, row_rect, ui.COLOR_BTN_HOVER);
-                ui.draw_rect_outline(win, row_rect, 1, ui.COLOR_ACCENT);
-            } else if (i % 2 == 1) {
-                ui.draw_rect(win, row_rect, 0x1e293b);
+            // Table Rows — filtered + sorted view (C8)
+            const row_h: u32 = 16;
+            var row_y: u32 = 70;
+            var i: usize = 0;
+            while (i < self.display_count and row_y + row_h <= window_h - 44) : (i += 1) {
+                const abs = self.display_indices[i];
+                const proc = &self.table.procs[abs];
+                const is_selected = if (self.table.selected_row) |sel| sel == i else false;
+                const row_rect = Rect.make(6, row_y, window_w - 12, row_h);
+
+                // Row background
+                if (is_selected) {
+                    ui.draw_rect(win, row_rect, ui.COLOR_BTN_HOVER);
+                    ui.draw_rect_outline(win, row_rect, 1, ui.COLOR_ACCENT);
+                } else if (i % 2 == 1) {
+                    ui.draw_rect(win, row_rect, 0x1e293b);
+                }
+
+                // PID
+                var pid_buf: [8]u8 = undefined;
+                const pid_str = std.fmt.bufPrint(&pid_buf, "{d}", .{proc.pid}) catch "?";
+                ui.draw_text(win, pid_str, row_rect.x + 4, row_y + 4, ui.COLOR_TEXT_PRIMARY);
+
+                // Name
+                const name_slice = if (proc.name_len > 0) proc.name[0..proc.name_len] else "unknown";
+                ui.draw_text(win, name_slice, row_rect.x + 32, row_y + 4, ui.COLOR_TEXT_PRIMARY);
+
+                // State
+                ui.draw_text(win, state_str(proc.state), row_rect.x + 130, row_y + 4, state_color(proc.state));
+
+                // Exit status
+                if (proc.state == .exited) {
+                    var exit_buf: [8]u8 = undefined;
+                    const exit_str = std.fmt.bufPrint(&exit_buf, "{d}", .{proc.exit_status}) catch "?";
+                    ui.draw_text(win, exit_str, row_rect.x + 196, row_y + 4, ui.COLOR_TEXT_MUTED);
+                } else {
+                    ui.draw_text(win, "-", row_rect.x + 196, row_y + 4, ui.COLOR_TEXT_MUTED);
+                }
+
+                row_y += row_h;
             }
 
-            // PID
-            var pid_buf: [8]u8 = undefined;
-            const pid_str = std.fmt.bufPrint(&pid_buf, "{d}", .{proc.pid}) catch "?";
-            ui.draw_text(win, pid_str, row_rect.x + 4, row_y + 4, ui.COLOR_TEXT_PRIMARY);
+            // Sparkline at bottom
+            self.draw_sparkline(win);
+        } else {
+            // Rate display on toolbar
+            var rate_buf: [48]u8 = undefined;
+            const rate_str = std.fmt.bufPrint(&rate_buf, "RX: {d} B/s  TX: {d} B/s", .{ self.rx_rate_bps, self.tx_rate_bps }) catch "";
+            ui.draw_text(win, rate_str, 248, 12, ui.COLOR_TEXT_MUTED);
 
-            // Name
-            const name_slice = if (proc.name_len > 0) proc.name[0..proc.name_len] else "unknown";
-            ui.draw_text(win, name_slice, row_rect.x + 32, row_y + 4, ui.COLOR_TEXT_PRIMARY);
-
-            // State
-            ui.draw_text(win, state_str(proc.state), row_rect.x + 130, row_y + 4, state_color(proc.state));
-
-            // Exit status
-            if (proc.state == .exited) {
-                var exit_buf: [8]u8 = undefined;
-                const exit_str = std.fmt.bufPrint(&exit_buf, "{d}", .{proc.exit_status}) catch "?";
-                ui.draw_text(win, exit_str, row_rect.x + 196, row_y + 4, ui.COLOR_TEXT_MUTED);
-            } else {
-                ui.draw_text(win, "-", row_rect.x + 196, row_y + 4, ui.COLOR_TEXT_MUTED);
-            }
-
-            row_y += row_h;
+            self.draw_network_tab(win);
         }
-
-        // Sparkline at bottom
-        self.draw_sparkline(win);
     }
 
     pub fn toggle_auto_refresh(self: *AppState) void {
@@ -487,18 +660,27 @@ pub const AppState = struct {
     pub fn handle_mouse_events(self: *AppState, ev: *const Event) bool {
         var changed = false;
 
-        // Filter input handles mouse focus (C8).
-        if (self.filter_input.handle_event(ev)) {
-            // Focus changed; no filter text yet.
+        if (self.btn_tab_procs.handle_event(ev)) {
+            self.set_tab(.procs);
             return true;
         }
-        // If filter input is focused, its text may have changed via KEY_DOWN handled elsewhere,
-        // but mouse click outside will have already unfocused it above.
+        if (self.btn_tab_net.handle_event(ev)) {
+            self.set_tab(.network);
+            return true;
+        }
+
+        if (self.tab == .procs) {
+            // Filter input handles mouse focus (C8).
+            if (self.filter_input.handle_event(ev)) {
+                return true;
+            }
+        }
 
         if (self.btn_refresh.handle_event(ev)) {
             _ = self.table.refresh_from_system();
             self.rebuild_display();
             self.push_history();
+            self.refresh_net_stats();
             ui.write_console("top: refreshed ok\n");
             changed = true;
         } else if (self.btn_kill.handle_event(ev)) {
@@ -508,7 +690,7 @@ pub const AppState = struct {
         } else if (self.btn_auto.handle_event(ev)) {
             self.toggle_auto_refresh();
             changed = true;
-        } else if (ev.kind == ui.MOUSE_DOWN and (ev.flags & ui.BTN_LEFT) != 0) {
+        } else if (self.tab == .procs and ev.kind == ui.MOUSE_DOWN and (ev.flags & ui.BTN_LEFT) != 0) {
             const click_x = ev.arg0;
             const click_y = ev.arg1;
             // Header click → sort (C8).
@@ -538,46 +720,64 @@ pub const AppState = struct {
 
     pub fn handle_keyboard_event(self: *AppState, ev: *const Event) bool {
         if (ev.kind != ui.KEY_DOWN) return false;
-        // Filter input has priority when focused (C8).
-        if (self.filter_input.focused) {
-            // Let TextInput handle typing / backspace.
-            const prev_len = self.filter_input.len;
-            const handled = self.filter_input.handle_event(ev);
-            if (handled or self.filter_input.len != prev_len) {
-                self.rebuild_display();
-                return true;
-            }
-            // Even if not handled, keep focus (e.g., arrow keys should not move selection).
-            // Allow Escape to unfocus.
-            if (ev.arg0 == 0x29) { // Esc
-                self.filter_input.focused = false;
-                return true;
-            }
-            return false;
+
+        // 'n' or 'N' -> switch to Network tab
+        if (ev.arg1 == 'n' or ev.arg1 == 'N') {
+            self.set_tab(.network);
+            return true;
         }
-
-        const keycode = ev.arg0;
-
-        // Up arrow — navigate filtered view (C8).
-        if (keycode == 0x52) {
-            if (self.display_count == 0) return false;
-            if (self.table.selected_row) |sel| {
-                if (sel > 0) self.table.selected_row = sel - 1;
-            } else {
-                self.table.selected_row = 0;
-            }
+        // 'p' or 'P' -> switch to Procs tab
+        if (ev.arg1 == 'p' or ev.arg1 == 'P') {
+            self.set_tab(.procs);
             return true;
         }
 
-        // Down arrow — navigate filtered view (C8).
-        if (keycode == 0x51) {
-            if (self.display_count == 0) return false;
-            if (self.table.selected_row) |sel| {
-                if (sel + 1 < self.display_count) self.table.selected_row = sel + 1;
-            } else {
-                self.table.selected_row = 0;
+        if (self.tab == .procs) {
+            // Filter input has priority when focused (C8).
+            if (self.filter_input.focused) {
+                // Let TextInput handle typing / backspace.
+                const prev_len = self.filter_input.len;
+                const handled = self.filter_input.handle_event(ev);
+                if (handled or self.filter_input.len != prev_len) {
+                    self.rebuild_display();
+                    return true;
+                }
+                if (ev.arg0 == 0x29) { // Esc
+                    self.filter_input.focused = false;
+                    return true;
+                }
+                return false;
             }
-            return true;
+
+            const keycode = ev.arg0;
+
+            // Up arrow — navigate filtered view (C8).
+            if (keycode == 0x52) {
+                if (self.display_count == 0) return false;
+                if (self.table.selected_row) |sel| {
+                    if (sel > 0) self.table.selected_row = sel - 1;
+                } else {
+                    self.table.selected_row = 0;
+                }
+                return true;
+            }
+
+            // Down arrow — navigate filtered view (C8).
+            if (keycode == 0x51) {
+                if (self.display_count == 0) return false;
+                if (self.table.selected_row) |sel| {
+                    if (sel + 1 < self.display_count) self.table.selected_row = sel + 1;
+                } else {
+                    self.table.selected_row = 0;
+                }
+                return true;
+            }
+
+            // '/' or 'f' focuses filter (convenience).
+            if (ev.arg1 == '/' or ev.arg1 == 'f' or ev.arg1 == 'F') {
+                self.filter_input.focused = true;
+                return true;
+            }
         }
 
         // 'r' or 'R' -> Refresh
@@ -585,6 +785,7 @@ pub const AppState = struct {
             _ = self.table.refresh_from_system();
             self.rebuild_display();
             self.push_history();
+            self.refresh_net_stats();
             ui.write_console("top: refreshed ok\n");
             return true;
         }
@@ -603,15 +804,6 @@ pub const AppState = struct {
             return true;
         }
 
-        // '/' or 'f' focuses filter (convenience).
-        if (ev.arg1 == '/' or ev.arg1 == 'f' or ev.arg1 == 'F') {
-            self.filter_input.focused = true;
-            return true;
-        }
-
-        // If filter has text, allow typing without focus via direct insert (fallback).
-        // But prefer focused mode; ungrabbed keys are table nav.
-
         return false;
     }
 
@@ -619,6 +811,7 @@ pub const AppState = struct {
         _ = self.table.refresh_from_system();
         self.rebuild_display();
         self.push_history();
+        self.refresh_net_stats();
         // Re-arm timer if still in auto mode
         if (self.auto_mode) {
             _ = ui.timer_set(auto_refresh_ticks);
@@ -945,6 +1138,55 @@ test "top: row click selects filtered row (C8)" {
     try std.testing.expectEqual(@as(?usize, 1), app.table.selected_row);
     const abs = app.display_to_absolute(1).?;
     try std.testing.expectEqual(@as(u64, 2), app.table.procs[abs].pid);
+}
+
+test "top: AppState network tab switching and mouse/keyboard events" {
+    var app = AppState.init();
+    try std.testing.expectEqual(ActiveTab.procs, app.tab);
+
+    // Switch to network tab via set_tab
+    app.set_tab(.network);
+    try std.testing.expectEqual(ActiveTab.network, app.tab);
+
+    // Switch back to procs via mouse event on btn_tab_procs (x=160, y=10)
+    var ev_down = Event{ .kind = ui.MOUSE_DOWN, .flags = ui.BTN_LEFT, .seq = 1, .arg0 = 160, .arg1 = 10 };
+    _ = app.handle_mouse_events(&ev_down);
+    var ev_up = Event{ .kind = ui.MOUSE_UP, .flags = 0, .seq = 2, .arg0 = 160, .arg1 = 10 };
+    _ = app.handle_mouse_events(&ev_up);
+    try std.testing.expectEqual(ActiveTab.procs, app.tab);
+
+    // Switch to network via keyboard 'n'
+    var ev_k_net = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 2, .arg0 = 0, .arg1 = 'n' };
+    _ = app.handle_keyboard_event(&ev_k_net);
+    try std.testing.expectEqual(ActiveTab.network, app.tab);
+
+    // Switch to procs via keyboard 'p'
+    var ev_k_proc = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 3, .arg0 = 0, .arg1 = 'p' };
+    _ = app.handle_keyboard_event(&ev_k_proc);
+    try std.testing.expectEqual(ActiveTab.procs, app.tab);
+}
+
+test "top: network stats delta rate calculation" {
+    var app = AppState.init();
+    app.prev_rx_bytes = 1000;
+    app.prev_tx_bytes = 2000;
+    app.net_stats.rx_bytes = 1500;
+    app.net_stats.tx_bytes = 2800;
+
+    // Simulate refresh without hardware syscall
+    const prev_rx = app.net_stats.rx_bytes;
+    const prev_tx = app.net_stats.tx_bytes;
+    if (app.prev_rx_bytes > 0 and app.net_stats.rx_bytes >= prev_rx) {
+        app.rx_rate_bps = app.net_stats.rx_bytes - app.prev_rx_bytes;
+    }
+    if (app.prev_tx_bytes > 0 and app.net_stats.tx_bytes >= prev_tx) {
+        app.tx_rate_bps = app.net_stats.tx_bytes - app.prev_tx_bytes;
+    }
+    app.prev_rx_bytes = app.net_stats.rx_bytes;
+    app.prev_tx_bytes = app.net_stats.tx_bytes;
+
+    try std.testing.expectEqual(@as(u64, 500), app.rx_rate_bps);
+    try std.testing.expectEqual(@as(u64, 800), app.tx_rate_bps);
 }
 
 test "top: AppState fits EL0 stack (C8, <4 KiB)" {

@@ -223,11 +223,14 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
                       tcp_bytes=None, fetch_bytes=None,
                       chat_bytes=None, file_bytes=None, fstest_bytes=None, timertest_bytes=None,
                       victim_bytes=None, harden_bytes=None,
-                       jingle_bytes=None, chime_bytes=None, globals_bytes=None,                      guard_bytes=None, spin_bytes=None, apps_txt_bytes=None,
-                       hello_bytes=None, asm_bytes=None, settings_bytes=None,
-                       crash_bytes=None, disas_bytes=None, edit_bytes=None, ps_bytes=None,
-                       resmon_bytes=None, devcons_bytes=None, netstat_bytes=None,
-                       m21demo_bytes=None):
+                      jingle_bytes=None, chime_bytes=None, globals_bytes=None,
+                      guard_bytes=None, spin_bytes=None, apps_txt_bytes=None,
+                      hello_bytes=None, asm_bytes=None, settings_bytes=None,
+                      crash_bytes=None, disas_bytes=None, edit_bytes=None, ps_bytes=None,
+                      resmon_bytes=None, devcons_bytes=None, netstat_bytes=None,
+                      m21demo_bytes=None, ping_bytes=None, dns_bytes=None,
+                      download_bytes=None, traceroute_bytes=None,
+                      netprof_bytes=None):
     """Write a FAT32 volume (boot sector, FSInfo, FATs, directories, files)
     into `img` at the volume's offset.
 
@@ -291,6 +294,11 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
     devcons_clusters = (len(devcons_bytes) + bps - 1) // bps if devcons_bytes else 0
     netstat_clusters = (len(netstat_bytes) + bps - 1) // bps if netstat_bytes else 0
     m21demo_clusters = (len(m21demo_bytes) + bps - 1) // bps if m21demo_bytes else 0
+    ping_clusters = (len(ping_bytes) + bps - 1) // bps if ping_bytes else 0
+    dns_clusters = (len(dns_bytes) + bps - 1) // bps if dns_bytes else 0
+    download_clusters = (len(download_bytes) + bps - 1) // bps if download_bytes else 0
+    traceroute_clusters = (len(traceroute_bytes) + bps - 1) // bps if traceroute_bytes else 0
+    netprof_clusters = (len(netprof_bytes) + bps - 1) // bps if netprof_bytes else 0
     file_clusters = (len(efi_bytes) + bps - 1) // bps
     root_entries_count = 2  # vol_label + efi_entry
     if kernel_bytes: root_entries_count += 1
@@ -336,6 +344,11 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
     if devcons_bytes: root_entries_count += 1
     if netstat_bytes: root_entries_count += 1
     if m21demo_bytes: root_entries_count += 1
+    if ping_bytes: root_entries_count += 1
+    if dns_bytes: root_entries_count += 1
+    if download_bytes: root_entries_count += 1
+    if traceroute_bytes: root_entries_count += 1
+    if netprof_bytes: root_entries_count += 1
 
     root_clusters = (root_entries_count * 32 + bps - 1) // bps
     efi_dir_cluster = 2 + root_clusters
@@ -381,7 +394,12 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
     devcons_start = resmon_start + resmon_clusters
     netstat_start = devcons_start + devcons_clusters
     m21demo_start = netstat_start + netstat_clusters
-    apps_txt_start = m21demo_start + m21demo_clusters
+    ping_start = m21demo_start + m21demo_clusters
+    dns_start = ping_start + ping_clusters
+    download_start = dns_start + dns_clusters
+    traceroute_start = download_start + download_clusters
+    netprof_start = traceroute_start + traceroute_clusters
+    apps_txt_start = netprof_start + netprof_clusters
     hello_start = apps_txt_start + apps_txt_clusters
     efi_start = hello_start + hello_clusters
     allocated = efi_start + file_clusters - 2  # clusters used beyond root(2)
@@ -397,7 +415,7 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
 
     def chain(start, count):
         for i in range(count):
-            fat[start + i] = start + i + 1 if i < count - 1 else FAT_EOC
+            fat[start + i] = start + i + 1 if i < count - 1 else 0x0FFFFFFF
 
     chain(2, root_clusters)           # root directory
     chain(efi_dir_cluster, 1)         # EFI directory
@@ -484,6 +502,16 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
         chain(netstat_start, netstat_clusters)      # NETSTAT.BIN data
     if m21demo_bytes:
         chain(m21demo_start, m21demo_clusters)      # M21DEMO.BIN data
+    if ping_bytes:
+        chain(ping_start, ping_clusters)            # PING.BIN data
+    if dns_bytes:
+        chain(dns_start, dns_clusters)              # DNS.BIN data
+    if download_bytes:
+        chain(download_start, download_clusters)    # DOWNLOAD.BIN data
+    if traceroute_bytes:
+        chain(traceroute_start, traceroute_clusters)    # TRACEROUTE.BIN data
+    if netprof_bytes:
+        chain(netprof_start, netprof_clusters)      # NETPROF.BIN data
     if apps_txt_bytes:
         chain(apps_txt_start, apps_txt_clusters)  # APPS.TXT data
     if hello_bytes:
@@ -600,6 +628,16 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
         root_entries += dir_entry(b"NETSTAT BIN", 0x20, netstat_start, len(netstat_bytes))
     if m21demo_bytes:
         root_entries += dir_entry(b"M21DEMO BIN", 0x20, m21demo_start, len(m21demo_bytes))
+    if ping_bytes:
+        root_entries += dir_entry(b"PING    BIN", 0x20, ping_start, len(ping_bytes))
+    if dns_bytes:
+        root_entries += dir_entry(b"DNS     BIN", 0x20, dns_start, len(dns_bytes))
+    if download_bytes:
+        root_entries += dir_entry(b"DOWNLOADBIN", 0x20, download_start, len(download_bytes))
+    if traceroute_bytes:
+        root_entries += dir_entry(b"TRACEROUBIN", 0x20, traceroute_start, len(traceroute_bytes))
+    if netprof_bytes:
+        root_entries += dir_entry(b"NETPROF BIN", 0x20, netprof_start, len(netprof_bytes))
     if apps_txt_bytes:
         root_entries += dir_entry(b"APPS    TXT", 0x20, apps_txt_start, len(apps_txt_bytes))
     if hello_bytes:
@@ -612,7 +650,7 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
     wsec(geo.cluster_sector(efi_dir_cluster), (dot_efi + dotdot_efi + boot_entry).ljust(bps, b"\x00"))
     wsec(geo.cluster_sector(boot_dir_cluster), (dot_boot + dotdot_boot + file_entry).ljust(bps, b"\x00"))
 
-    # --- file data --------------------------------------------------------
+    # --- file data -----------------------------------------------------
     if kernel_bytes:
         for i in range(kernel_clusters):
             chunk = kernel_bytes[i * bps:(i + 1) * bps]
@@ -777,6 +815,26 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
         for i in range(m21demo_clusters):
             chunk = m21demo_bytes[i * bps:(i + 1) * bps]
             wsec(geo.cluster_sector(m21demo_start + i), chunk.ljust(bps, b"\x00"))
+    if ping_bytes:
+        for i in range(ping_clusters):
+            chunk = ping_bytes[i * bps:(i + 1) * bps]
+            wsec(geo.cluster_sector(ping_start + i), chunk.ljust(bps, b"\x00"))
+    if dns_bytes:
+        for i in range(dns_clusters):
+            chunk = dns_bytes[i * bps:(i + 1) * bps]
+            wsec(geo.cluster_sector(dns_start + i), chunk.ljust(bps, b"\x00"))
+    if download_bytes:
+        for i in range(download_clusters):
+            chunk = download_bytes[i * bps:(i + 1) * bps]
+            wsec(geo.cluster_sector(download_start + i), chunk.ljust(bps, b"\x00"))
+    if traceroute_bytes:
+        for i in range(traceroute_clusters):
+            chunk = traceroute_bytes[i * bps:(i + 1) * bps]
+            wsec(geo.cluster_sector(traceroute_start + i), chunk.ljust(bps, b"\x00"))
+    if netprof_bytes:
+        for i in range(netprof_clusters):
+            chunk = netprof_bytes[i * bps:(i + 1) * bps]
+            wsec(geo.cluster_sector(netprof_start + i), chunk.ljust(bps, b"\x00"))
     if apps_txt_bytes:
         for i in range(apps_txt_clusters):
             chunk = apps_txt_bytes[i * bps:(i + 1) * bps]
@@ -1054,7 +1112,8 @@ def build_image(total_sectors, esp_offset, efi_bytes, kernel_bytes=None,
                 hello_bytes=None, asm_bytes=None, settings_bytes=None,
                 crash_bytes=None, disas_bytes=None, edit_bytes=None, ps_bytes=None,
                 resmon_bytes=None, devcons_bytes=None, netstat_bytes=None,
-                m21demo_bytes=None):
+                m21demo_bytes=None, ping_bytes=None, dns_bytes=None,
+                download_bytes=None, traceroute_bytes=None, netprof_bytes=None):
     img = bytearray(total_sectors * BYTES_PER_SECTOR)
     last_usable = total_sectors - 34
     first_usable = 34
@@ -1074,7 +1133,7 @@ def build_image(total_sectors, esp_offset, efi_bytes, kernel_bytes=None,
     backup_entries_lba = last_usable + 1  # == total_sectors - 33
 
     img[0:BYTES_PER_SECTOR] = protective_mbr(total_sectors)
-    # NOTE: every write below uses closed slices whose length matches the
+    # NOTE: every write below uses closed slices wholes length matches the
     # RHS length. A mismatched slice assignment would silently grow or shrink
     # the bytearray and corrupt the image.
     hdr = gpt_header(1, total_sectors - 1, first_usable, last_usable,
@@ -1100,7 +1159,8 @@ def build_image(total_sectors, esp_offset, efi_bytes, kernel_bytes=None,
                       tcp_bytes, fetch_bytes, chat_bytes, file_bytes, fstest_bytes, timertest_bytes,
                       victim_bytes, harden_bytes, jingle_bytes, chime_bytes, globals_bytes, guard_bytes, spin_bytes, apps_txt_bytes, hello_bytes, asm_bytes, settings_bytes, crash_bytes, disas_bytes, edit_bytes, ps_bytes,
                       resmon_bytes, devcons_bytes, netstat_bytes,
-                      m21demo_bytes)
+                      m21demo_bytes, ping_bytes, dns_bytes, download_bytes,
+                      traceroute_bytes, netprof_bytes)
     geo_data = Fat32Geometry(data_sectors, data_start)
     build_data_volume(img, geo_data)
     return bytes(img)
@@ -1198,6 +1258,16 @@ def main(argv):
                     help="optional SEGMENTED user program (NETSTAT.BIN) to embed at the volume root (M26 N2, issue #400 -- network dashboard)")
     ap.add_argument("m21demo_file", nargs="?",
                     help="optional flat user program (M21DEMO.BIN) to embed at the volume root (M21 W1/W2 gate payload, claim 8777 -- two-window tiling demo)")
+    ap.add_argument("ping_file", nargs="?",
+                    help="optional flat user program (PING.BIN) to embed at the volume root (M26 N1, issue #399 -- ICMP ping CLI)")
+    ap.add_argument("dns_file", nargs="?",
+                    help="optional flat user program (DNS.BIN) to embed at the volume root (M26 N5, issue #403 -- RFC 1035 DNS client)")
+    ap.add_argument("download_file", nargs="?",
+                    help="optional flat user program (DOWNLOAD.BIN) to embed at the volume root (M26 N11, issue #438 -- HTTP download manager)")
+    ap.add_argument("traceroute_file", nargs="?",
+                    help="optional flat user program (TRACEROUTE.BIN) to embed at the volume root (M26 N7, issue #434 -- ICMP traceroute CLI)")
+    ap.add_argument("netprof_file", nargs="?",
+                    help="optional flat user program (NETPROF.BIN) to embed at the volume root (M26 N12, issue #439 -- network profile manager)")
     ap.add_argument("crash_file", nargs="?",
                     help="optional AArch64 ELF32 executable (CRASH.ELF) to embed at the volume root (M22 D3, issue #326 -- symbolized-crash gate)")
     ap.add_argument("hello_file", nargs="?",
@@ -1576,6 +1646,51 @@ def main(argv):
                   "not be a DipshitOS user program image" % args.m21demo_file,
                   file=sys.stderr)
 
+    ping_bytes = None
+    if args.ping_file:
+        with open(args.ping_file, "rb") as f:
+            ping_bytes = f.read()
+        if ping_bytes[:4] != b"DSK1":
+            print("WARNING: %s does not start with the 'DSK1' magic; it may "
+                  "not be a DipshitOS user program image" % args.ping_file,
+                  file=sys.stderr)
+
+    dns_bytes = None
+    if args.dns_file:
+        with open(args.dns_file, "rb") as f:
+            dns_bytes = f.read()
+        if dns_bytes[:4] != b"DSK1":
+            print("WARNING: %s does not start with the 'DSK1' magic; it may "
+                  "not be a DipshitOS user program image" % args.dns_file,
+                  file=sys.stderr)
+
+    download_bytes = None
+    if args.download_file:
+        with open(args.download_file, "rb") as f:
+            download_bytes = f.read()
+        if download_bytes[:4] != b"DSK1":
+            print("WARNING: %s does not start with the 'DSK1' magic; it may "
+                  "not be a DipshitOS user program image" % args.download_file,
+                  file=sys.stderr)
+
+    traceroute_bytes = None
+    if args.traceroute_file:
+        with open(args.traceroute_file, "rb") as f:
+            traceroute_bytes = f.read()
+        if traceroute_bytes[:4] != b"DSK1":
+            print("WARNING: %s does not start with the 'DSK1' magic; it may "
+                  "not be a DipshitOS user program image" % args.traceroute_file,
+                  file=sys.stderr)
+
+    netprof_bytes = None
+    if args.netprof_file:
+        with open(args.netprof_file, "rb") as f:
+            netprof_bytes = f.read()
+        if netprof_bytes[:4] != b"DSK1":
+            print("WARNING: %s does not start with the 'DSK1' magic; it may "
+                  "not be a DipshitOS user program image" % args.netprof_file,
+                  file=sys.stderr)
+
     crash_bytes = None
     if args.crash_file:
         with open(args.crash_file, "rb") as f:
@@ -1603,7 +1718,8 @@ def main(argv):
                       tcp_bytes, fetch_bytes, chat_bytes, file_bytes, fstest_bytes, timertest_bytes,
                       victim_bytes, harden_bytes, jingle_bytes, chime_bytes, globals_bytes, guard_bytes, spin_bytes, apps_txt_bytes, hello_bytes, asm_bytes, settings_bytes, crash_bytes, disas_bytes, edit_bytes, ps_bytes,
                       resmon_bytes, devcons_bytes, netstat_bytes,
-                      m21demo_bytes)
+                      m21demo_bytes, ping_bytes, dns_bytes, download_bytes,
+                      traceroute_bytes, netprof_bytes)
     with open(args.image, "wb") as f:
         f.write(img)
     extra = ", %d-byte kernel image embedded" % len(kernel_bytes) if kernel_bytes else ""
@@ -1633,6 +1749,11 @@ def main(argv):
     extra += ", %d-byte devcons program embedded" % len(devcons_bytes) if devcons_bytes else ""
     extra += ", %d-byte netstat program embedded" % len(netstat_bytes) if netstat_bytes else ""
     extra += ", %d-byte m21demo program embedded" % len(m21demo_bytes) if m21demo_bytes else ""
+    extra += ", %d-byte ping program embedded" % len(ping_bytes) if ping_bytes else ""
+    extra += ", %d-byte dns program embedded" % len(dns_bytes) if dns_bytes else ""
+    extra += ", %d-byte download program embedded" % len(download_bytes) if download_bytes else ""
+    extra += ", %d-byte traceroute program embedded" % len(traceroute_bytes) if traceroute_bytes else ""
+    extra += ", %d-byte netprof program embedded" % len(netprof_bytes) if netprof_bytes else ""
     print("wrote %s: %d MiB, ESP at LBA %d, %d-byte EFI application embedded%s" %
           (args.image, args.size_mb, args.esp_offset, len(efi_bytes), extra))
     return 0
