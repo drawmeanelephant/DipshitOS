@@ -1680,15 +1680,21 @@ fn cmd_which(m: *Monitor, args: []const []const u8) ExecError {
 }
 
 /// Check if a name is a shell builtin (from shell.zig dispatch_line).
+///
+/// ADR 0005: a const []const u8 table would land in rodata holding
+/// ABSOLUTE link-time pointers, which the flat kernel loader never
+/// relocates — on real hardware the first comparison dereferenced a
+/// garbage pointer and took a data abort (observed live 2026-08-25,
+/// claim 5220: far=0x4129a on `which type`). `inline for` keeps the list
+/// comptime so every literal is referenced PC-relative.
 fn is_shell_builtin(name: []const u8) bool {
-    const builtins = [_][]const u8{
+    inline for (.{
         "export", "set",     "unset", "env",   "printenv",
         "alias",  "unalias", "exit",  "sh",    "prompt",
         "type",   "true",    "false", "jobs",  "fg",
         "if",     "for",     "while", "break", "continue",
         "fn",     "cd",
-    };
-    for (builtins) |b| {
+    }) |b| {
         if (std.mem.eql(u8, name, b)) return true;
     }
     return false;
@@ -7845,4 +7851,21 @@ test "monitor: sound volume/mute drive the bounded stream state (claim 9297)" {
     // Restore the honest default.
     virtio_snd.stream_volume = 100;
     virtio_snd.stream_muted = false;
+}
+
+test "monitor: which resolves builtin, monitor, app, and not-found names (D16)" {
+    esp.reset();
+    try std.testing.expect(esp.add_esp_entry("NOTEPAD.BIN", 123, ""));
+
+    var env = TestEnv.init();
+    var mon = env.monitor();
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "which", "type" }));
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "which", "stat" }));
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "which", "NOTEPAD.BIN" }));
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "which", "nope.bin" }));
+    const out = env.mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "type: shell builtin") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "stat: monitor command") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "NOTEPAD.BIN: ESP application") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "nope.bin: not found") != null);
 }
