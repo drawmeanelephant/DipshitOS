@@ -30,3 +30,64 @@ Reconnaissance findings recorded up front:
   input.zig, build.zig are ACTIVE-held by claim 8777 — none are touched;
   docs/status.md is also 8777-held so milestone-row flips stay in
   march-m20.md + logs this branch.
+
+## 2026-08-25 — U3 implemented + all five cards live-gated ✅
+
+Code (userland only — no 8777-held files touched):
+
+- `notepad.zig`: **Ctrl+G goto-line bar** (the one piece of march-U3
+  scope that had never been implemented), mutually exclusive with the
+  find bar; `line_start_offset`/`count_lines` host-testable helpers;
+  bounded serial markers on find Enter (`notepad: find 'wor' hit=1/1`)
+  and goto (`notepad: goto line=2 offset=6` / `miss lines=N`). Printables
+  in the goto bar are swallowed, never leaked into the buffer. Tests:
+  53/53.
+- `file_browser.zig`: `apply_filter` now reports `file: filter '<pat>'
+  shown=N total=M`; list rows highlight the matched substring under an
+  active filter (`find_substring_ci`). Tests: 58/58.
+
+New/rewritten class-B gates (all run on THIS Apple silicon macOS 27
+host, evidence under `artifacts/live-*`):
+
+- `verify-live-text-search.sh` PASS 2/2 — headline mechanism: ctrl-chords
+  ride the claim-9588 custom-virtio INPUT queue whose kind-1 messages
+  carry the HID modifier byte, so **Ctrl+F/Ctrl+G reach the focused user
+  window headlessly** — the modifier wall does not apply on this path.
+  Focus returns to the terminal via serial `dui focus 0` (serial input
+  reaches the monitor regardless of window focus).
+- `verify-live-tabs.sh` rewritten from red to green. Two root causes
+  corrected en route (honest corrections to the fleet-remainder log):
+  1. The "leading glyph loss" in decodes is REAL PIXEL ABSENCE — the
+     M21/M27 vertical dock paints over terminal columns 0–2 of every
+     row. It was never a decoder grid bug; `decode-screen-glyphs.py`
+     docstring now records this.
+  2. The Lane C putraw `\t` escape is DEAD CODE since the M19 P5 word
+     tokenizer landed: unquoted `\X` unescapes to `X` before cmd_text's
+     own backslash conversion can fire. text.zig tab rendering itself is
+     intact and now proven live by passing a REAL tab through the
+     tokenizer's double-quote `"…\t…"` escape. Probe row asserts the
+     exact stop-16 landing with eight materialized spaces vs adjacent
+     control. Evidence: `live-tabs-screen-{A,B}.raw`.
+- `verify-live-chrome.sh` new, PASS 3/3 — chrome measured from
+  claim-0680 raw scanouts: focused boot (M21-W9 accent ring, label ink,
+  close glyph), unfocused boot (border EXACTLY 2px incl negative probe,
+  16px title band bg, client bg distinct), boot C clicks the close glyph
+  → `notepad: win_close`. Engineering note recorded in-gate: kind-4
+  snapshots stream the LIVE framebuffer, so interactions must not be
+  scheduled alongside a stream (first attempt corrupted its own frame).
+
+Re-runs at HEAD for fresh evidence: font-sizes PASS 1/1, unicode PASS
+1/1. Environment observation (pre-existing, NOT caused by this branch):
+`verify-live-glyphs.sh` fails on this session's ScreenCaptureKit captures
+(stale-frame family, claim 4769/fleet item 3); its PNG decode path is
+byte-identical after my edit and the forward-rendering intent is proven
+by the raw-snapshot gates at `fwd_unknowns=0`. Also noted for fresh
+worktrees: gate-run seeds an EMPTY efi-vars.bin when artifacts/ has none,
+which VZ rejects — seeded a valid store locally to run the glyphs gate;
+worth a follow-up in whoever owns gate-run.sh.
+
+Portable set green: fmt, verify-unit-tests (all modules), test-console
+transcript byte-exact, inspect, bss-budget (1.45 MiB headroom),
+coordination ok, context. march-m20.md rows flipped with evidence
+pointers. docs/status.md deliberately untouched (held ACTIVE by claim
+8777).
