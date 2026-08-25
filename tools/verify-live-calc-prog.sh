@@ -18,14 +18,9 @@
 #
 # Run isolation (#523 item 2 / issue #528, claim 5069): every boot attaches
 # a private DiskImageKit stacked disk (read-only base + throwaway ASIF
-# overlay), a private EFI var store (recreated fresh per boot, as the
-# pre-isolation gate did), and a private serial log under $RUN_DIR — two
-# concurrent instances cannot clobber each other's disks, NVRAM, or
-# evidence. Set DIPSHIT_GATE_SUFFIX=_alt to give this instance its own
-# canonical evidence names (two simultaneous instances MUST differ), and
-# DIPSHIT_KEEP_RUN=1 to keep the scratch dir.
+# overlay), a private EFI var store, and a private serial log under $RUN_DIR.
 #
-# Class B — Apple silicon + VZ only; boots a real VM.
+# Class B -- Apple silicon + VZ only; boots a real VM.
 #
 # Usage:
 #   bash tools/verify-live-calc-prog.sh            # BOOTS boots (default 1)
@@ -52,9 +47,8 @@ trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
 BOOTS="${BOOTS:-1}"
 REPORT="$(art live-calc-prog-report.txt)"
 
-echo "=== verify-live-calc-prog: M24 K1 — programmer mode on VZ, $BOOTS boot(s) ==="
+echo "=== verify-live-calc-prog: M24 K1 -- programmer mode on VZ, $BOOTS boot(s) ==="
 
-# Tool versions + revision
 zig version; swift --version 2>&1 | head -1; sw_vers
 REVISION="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
 BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
@@ -65,16 +59,14 @@ echo "revision: $REVISION branch=$BRANCH boots=$BOOTS dirty-files=$DIRTY"
 zig fmt --check boot/src/*.zig kernel/src/*.zig build.zig
 zig build
 zig build image
-swift build --package-path host/vm-runner --configuration release
+# SPIKE build: macOS 27 SDK types + custom-virtio INPUT queue (#179 bypass)
+swift build --package-path host/vm-runner --configuration release -Xswiftc -DSPIKE
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
-# --- per-run isolation -------------------------------------------------------------
-# Private scratch dir + pristine-boot overlay for EVERY boot.
-# See tools/lib/gate-run.sh.
+# --- per-run isolation ------------------------------------------------------
 gate_begin live-calc-prog
 echo "run dir: $RUN_DIR"
 SCRIPT="$RUN_DIR/script.txt"
-
 
 # --- phase 1: launch CALC.BIN from the monitor ------------------------------
 cat > "$SCRIPT" <<'EOF'
@@ -82,8 +74,9 @@ exec CALC.BIN
 EOF
 
 # --- phase 2: Ctrl+P x2 + success marker (after calc: ready) ----------------
-# Ctrl+P = ctrl-p chord (the runner maps ctrl-a..ctrl-z to macOS keycodes)
-CTRL_P=$'ctrl-p'
+# Ctrl+P = ctrl-p chord delivered through the claim-9588 custom-virtio
+# INPUT queue (queue 3) -- no VZ view activation wall (#179), no silent drop.
+CTRL_P=$'\x10'
 INPUT_CHORDS="${CTRL_P},${CTRL_P},echo calc-prog-live-ok"
 
 run_one() {
@@ -92,6 +85,8 @@ run_one() {
     set +e
     host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
         --serial "$RUN_DIR/vm-serial-$tag.log" \
+        --display --screen "$RUN_DIR/gpu-screen-$tag" \
+        --via-virtio \
         --script "$SCRIPT" \
         --input-chords "$INPUT_CHORDS" \
         --input-chords-after "calc: ready" \
@@ -121,7 +116,7 @@ run_one() {
 
 : > "$REPORT"
 {
-    echo "DIPSHITOS live-calc-prog gate (M24 K1) — programmer mode on VZ"
+    echo "DIPSHITOS live-calc-prog gate (M24 K1) -- programmer mode on VZ"
     echo "revision: $REVISION branch=$BRANCH boots=$BOOTS dirty-files=$DIRTY"
     echo "phase 1: exec CALC.BIN from monitor"
     echo "phase 2: Ctrl+P toggle x2 (on/off), assert markers, final echo"
@@ -143,12 +138,12 @@ done
 echo
 echo "=== result ==="
 if [ "$PASS" = "$BOOTS" ]; then
-    echo "verify-live-calc-prog: PASS — programmer mode toggles via Ctrl+P, serial markers observed ($PASS/$BOOTS boot(s))."
+    echo "verify-live-calc-prog: PASS -- programmer mode toggles via Ctrl+P, serial markers observed ($PASS/$BOOTS boot(s))."
     echo "PASS: $PASS/$BOOTS" >> "$REPORT"
     sleep 0.5
     exit 0
 else
-    echo "verify-live-calc-prog: FAILED — $PASS/$BOOTS boot(s) passed; see artifacts/live-calc-prog-report.txt"
+    echo "verify-live-calc-prog: FAILED -- $PASS/$BOOTS boot(s) passed; see artifacts/live-calc-prog-report.txt"
     echo "FAIL: $PASS/$BOOTS" >> "$REPORT"
     sleep 0.5
     exit 1
