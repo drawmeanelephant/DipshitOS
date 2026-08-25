@@ -37,7 +37,15 @@
 - **Touches:** user/src/notepad.zig, user/src/file_browser.zig, tools/verify-live-text-search.sh, tools/verify-live-chrome.sh, tools/verify-live-tabs.sh, tools/decode-screen-glyphs.py, docs/march-m20.md, docs/logs/agent-oxalpha-m20-text-unicode.md
 - **Depends on:** claim 5127 ✅ (all five cards' code merged via #500); claim 0680 ✅ (snapshot channel); claim 9367 ✅ (virtio input transport)
 - **Heartbeat:** 2026-08-25
-- **Status:** 🔄 agent/oxalpha/m20-text-unicode
+- **Status:** ✅ done 2026-08-25 — all five march-m20 cards live-gated on
+  real Apple silicon VZ at HEAD: U1 font-sizes PASS 1/1, U2 unicode PASS
+  1/1, U3 text-search PASS 2/2 (Ctrl+G goto-line landed; find/filter
+  serial markers), U4 chrome PASS 3/3 (raw-scanout metrics + close
+  click), U5 tabs PASS 2/2 (was red-on-main; rewritten onto claim-0680
+  raw scanouts). Two cross-milestone findings recorded in the log and
+  gate docstrings: dock occlusion of terminal columns 0–2 (the real
+  "leading glyph loss"), and the putraw `\t` seam dead since the M19 P5
+  tokenizer unescape.
 
 ## Notes
 
