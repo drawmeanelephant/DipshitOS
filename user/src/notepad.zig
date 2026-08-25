@@ -395,6 +395,12 @@ pub const AppState = struct {
     find_current: usize = 0,
     find_case_sensitive: bool = false,
 
+    /// M20-U3 (claim 8961): the Ctrl+G goto-line bar. Mutually exclusive
+    /// with the find bar — opening one closes the other.
+    goto_active: bool = false,
+    goto_buf: [8]u8 = [_]u8{0} ** 8,
+    goto_len: usize = 0,
+
     // Arc4 #242: unsaved-changes flag — set on any text modification,
     // cleared on save/load. Drives the compositor's close-button dialog.
     content_modified: bool = false,
@@ -552,6 +558,67 @@ pub const AppState = struct {
             }
         }
         return true;
+    }
+
+    /// M20-U3: byte offset of the first byte of 1-based buffer line
+    /// `target` (lines split on '\n'; a trailing newline yields a final
+    /// empty line). null when the buffer has no such line. Host-testable.
+    pub fn line_start_offset(buf: []const u8, target: usize) ?usize {
+        if (target == 0) return null;
+        if (target == 1) return 0;
+        var line: usize = 1;
+        for (buf, 0..) |ch, i| {
+            if (ch == '\n') {
+                line += 1;
+                if (line == target) return i + 1;
+            }
+        }
+        return null;
+    }
+
+    /// M20-U3: number of buffer lines ('\n'-separated; minimum 1).
+    pub fn count_lines(buf: []const u8) usize {
+        var n: usize = 1;
+        for (buf) |ch| {
+            if (ch == '\n') n += 1;
+        }
+        return n;
+    }
+
+    /// Parse the goto bar's digits as a 1-based line number; null when
+    /// empty, non-digit, or beyond the 5-digit bound.
+    fn parse_goto(self: *const AppState) ?usize {
+        if (self.goto_len == 0) return null;
+        var v: usize = 0;
+        for (self.goto_buf[0..self.goto_len]) |c| {
+            if (c < '0' or c > '9') return null;
+            v = v * 10 + (c - '0');
+            if (v > 99999) return null;
+        }
+        return if (v == 0) null else v;
+    }
+
+    /// M20-U3: the goto result marker on the serial console — the live
+    /// gate's grep target (`notepad: goto line=N offset=O` on success,
+    /// `notepad: goto line=N miss lines=L` when the buffer is shorter).
+    fn report_goto(target: usize, ok: bool, info: usize) void {
+        var b: [72]u8 = undefined;
+        const s = (if (ok)
+            std.fmt.bufPrint(&b, "notepad: goto line={d} offset={d}\n", .{ target, info })
+        else
+            std.fmt.bufPrint(&b, "notepad: goto line={d} miss lines={d}\n", .{ target, info })) catch return;
+        ui.write_console(s);
+    }
+
+    /// M20-U3: the find-result marker — `notepad: find '<pat>' hit=N/M`
+    /// (N the 1-based ordinal among all matches) or `no-match`.
+    fn report_find(pat: []const u8, ordinal: ?usize, total: usize) void {
+        var b: [80]u8 = undefined;
+        const s = (if (ordinal) |ord|
+            std.fmt.bufPrint(&b, "notepad: find '{s}' hit={d}/{d}\n", .{ pat, ord + 1, total })
+        else
+            std.fmt.bufPrint(&b, "notepad: find '{s}' no-match\n", .{pat})) catch return;
+        ui.write_console(s);
     }
 
     /// Ordinal (0-based) of the current match among all matches, or
@@ -825,6 +892,16 @@ pub const AppState = struct {
             ui.draw_text(win, stbuf[0..stpos], 6, window_h - 12, ui.COLOR_TEXT_MUTED);
         }
 
+        // M20-U3: goto-line bar at the bottom of text_area when active
+        // (same zone the find bar uses; the two are mutually exclusive).
+        if (self.goto_active) {
+            const bar_y = text_area.y + text_area.h - 18;
+            ui.draw_rect(win, Rect.make(text_area.x, bar_y, text_area.w, 18), ui.COLOR_SURFACE);
+            ui.draw_rect_outline(win, Rect.make(text_area.x, bar_y, text_area.w, 18), 1, ui.COLOR_ACCENT);
+            ui.draw_text(win, "Goto:", text_area.x + 4, bar_y + 5, ui.COLOR_TEXT_MUTED);
+            ui.draw_text(win, self.goto_buf[0..self.goto_len], text_area.x + 40, bar_y + 5, ui.COLOR_TEXT_PRIMARY);
+        }
+
         // M15 C6: find bar at bottom of text_area when active.
         if (self.find_active) {
             const bar_y = text_area.y + text_area.h - 18;
@@ -963,6 +1040,19 @@ pub const AppState = struct {
                     self.find_match_start = null;
                 } else {
                     self.find_match_start = null;
+                    // M20-U3: the find and goto bars are mutually exclusive.
+                    self.goto_active = false;
+                    self.goto_len = 0;
+                }
+                return true;
+            }
+            if (keycode == 0x0a) { // g — M20-U3: the goto-line bar.
+                self.goto_active = !self.goto_active;
+                self.goto_len = 0;
+                if (self.goto_active) {
+                    self.find_active = false;
+                    self.find_replace_active = false;
+                    self.find_match_start = null;
                 }
                 return true;
             }
@@ -972,6 +1062,53 @@ pub const AppState = struct {
                     return true;
                 }
             }
+        }
+
+        // M20-U3: goto-line bar input — when active, Esc/Enter/Backspace/
+        // digits go to the bar; Enter jumps and reports over serial.
+        if (self.goto_active) {
+            if (keycode == 0x29) { // Escape HID 0x29
+                self.goto_active = false;
+                self.goto_len = 0;
+                return true;
+            }
+            if (keycode == 0x28 or ascii == '\r' or ascii == '\n') { // Enter
+                const lines = count_lines(slice);
+                if (self.parse_goto()) |target| {
+                    if (line_start_offset(slice, target)) |off| {
+                        self.buffer.cursor = off;
+                        _ = self.layout.ensure_visible(slice, off);
+                        self.layout.clamp_scroll(slice);
+                        self.set_status("Line");
+                        self.goto_active = false;
+                        self.goto_len = 0;
+                        report_goto(target, true, off);
+                        return true;
+                    }
+                    report_goto(target, false, lines);
+                } else {
+                    report_goto(0, false, lines);
+                }
+                self.set_status("No Line");
+                return true;
+            }
+            if (ascii == 0x08 or keycode == 0x2a) { // Backspace
+                if (self.goto_len > 0) self.goto_len -= 1;
+                return true;
+            }
+            if (ascii >= '0' and ascii <= '9') {
+                if (self.goto_len < self.goto_buf.len) {
+                    self.goto_buf[self.goto_len] = ascii;
+                    self.goto_len += 1;
+                }
+                return true;
+            }
+            if (ascii >= 0x20 and ascii <= 0x7e) {
+                // Other printables are swallowed by the bar — they must
+                // not leak into the document buffer.
+                return false;
+            }
+            // Arrows etc. fall through to main buffer navigation.
         }
 
         // M15 C6: find bar input — when active, Esc/Enter/Backspace/printable go to find bar.
@@ -985,8 +1122,12 @@ pub const AppState = struct {
             if (keycode == 0x28) { // Enter
                 if (self.find_next()) {
                     self.set_status("Found");
+                    // M20-U3: serial marker with the 1-based ordinal among
+                    // all matches (the live gate's grep target).
+                    report_find(self.find_buf[0..self.find_len], self.find_current_ordinal(), self.find_all_count());
                 } else {
                     self.set_status("No Match");
+                    report_find(self.find_buf[0..self.find_len], null, 0);
                 }
                 return true;
             }
@@ -1838,4 +1979,82 @@ test "notepad: M20-U8 — Match N of M ordinal and case-sensitive toggle" {
     // Toggling again restores case-insensitive matching.
     try std.testing.expect(app.handle_keyboard_event(&ev_cs));
     try std.testing.expect(!app.find_case_sensitive);
+}
+
+test "notepad: M20-U3 — line_start_offset and count_lines" {
+    try std.testing.expectEqual(@as(usize, 1), AppState.count_lines(""));
+    try std.testing.expectEqual(@as(usize, 3), AppState.count_lines("a\nbc\ndef"));
+    // A trailing newline yields a final empty line.
+    try std.testing.expectEqual(@as(usize, 2), AppState.count_lines("a\n"));
+    try std.testing.expectEqual(@as(?usize, 0), AppState.line_start_offset("a\nbc\ndef", 1));
+    try std.testing.expectEqual(@as(?usize, 2), AppState.line_start_offset("a\nbc\ndef", 2));
+    try std.testing.expectEqual(@as(?usize, 5), AppState.line_start_offset("a\nbc\ndef", 3));
+    // The offset of a trailing empty line is the buffer length.
+    try std.testing.expectEqual(@as(?usize, 2), AppState.line_start_offset("a\n", 2));
+    try std.testing.expectEqual(@as(?usize, null), AppState.line_start_offset("a\nbc", 3));
+    try std.testing.expectEqual(@as(?usize, null), AppState.line_start_offset("abc", 0));
+}
+
+test "notepad: M20-U3 — Ctrl+G goto-line bar jumps and reports" {
+    var app = AppState.init();
+    app.buffer.set_content("one\ntwo\nthree");
+    const ctrl_g = Event{ .kind = ui.KEY_DOWN, .flags = ui.MOD_CTRL, .seq = 1, .arg0 = 0x0a, .arg1 = 0 };
+    // Ctrl+G opens the bar (and it is mutually exclusive with find).
+    app.find_active = true;
+    try std.testing.expect(app.handle_keyboard_event(&ctrl_g));
+    try std.testing.expect(app.goto_active);
+    try std.testing.expect(!app.find_active);
+    try std.testing.expectEqual(@as(usize, 0), app.goto_len);
+    // Digits land in the bar; other printables do not.
+    const d2 = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 2, .arg0 = 0, .arg1 = '2' };
+    try std.testing.expect(app.handle_keyboard_event(&d2));
+    try std.testing.expectEqual(@as(usize, 1), app.goto_len);
+    const dx = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 3, .arg0 = 0, .arg1 = 'x' };
+    try std.testing.expect(!app.handle_keyboard_event(&dx));
+    try std.testing.expectEqual(@as(usize, 1), app.goto_len);
+    // The swallowed printable did not leak into the document buffer.
+    try std.testing.expectEqualStrings("one\ntwo\nthree", app.buffer.get_slice());
+    // Enter jumps to the start of buffer line 2 ("two").
+    const enter = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 4, .arg0 = 0x28, .arg1 = 0 };
+    try std.testing.expect(app.handle_keyboard_event(&enter));
+    try std.testing.expect(!app.goto_active);
+    try std.testing.expectEqualStrings("two\nthree", app.buffer.get_slice()[app.buffer.cursor..]);
+    // A miss reports honestly and keeps the bar open (the find bar's
+    // No-Match behavior); the caret does not move.
+    const miss_at = app.buffer.cursor;
+    _ = app.handle_keyboard_event(&ctrl_g);
+    const d9 = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 5, .arg0 = 0, .arg1 = '9' };
+    _ = app.handle_keyboard_event(&d9);
+    try std.testing.expect(app.handle_keyboard_event(&enter));
+    try std.testing.expect(app.goto_active);
+    try std.testing.expectEqual(miss_at, app.buffer.cursor);
+    // Escape closes the still-open bar.
+    const esc = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 6, .arg0 = 0x29, .arg1 = 0 };
+    try std.testing.expect(app.handle_keyboard_event(&esc));
+    try std.testing.expect(!app.goto_active);
+}
+
+test "notepad: M20-U3 — find Enter reports hit ordinal / no-match markers" {
+    var app = AppState.init();
+    app.buffer.set_content("hat hat");
+    @memcpy(app.find_buf[0..3], "hat");
+    app.find_len = 3;
+    app.find_active = true;
+    const enter = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 1, .arg0 = 0x28, .arg1 = 0 };
+    try std.testing.expect(app.handle_keyboard_event(&enter));
+    try std.testing.expectEqual(@as(?usize, 0), app.find_current_ordinal());
+    // find_next searches from the buffer cursor (pre-existing M15 C6
+    // semantics — it highlights, it does not move the caret), so advance
+    // the cursor past match 1 before the next Enter walks to match 2.
+    app.buffer.cursor = 1;
+    try std.testing.expect(app.handle_keyboard_event(&enter));
+    try std.testing.expectEqual(@as(?usize, 1), app.find_current_ordinal());
+    // A pattern that matches nothing reports no-match.
+    var miss = AppState.init();
+    miss.buffer.set_content("nothing here");
+    @memcpy(miss.find_buf[0..3], "zzz");
+    miss.find_len = 3;
+    miss.find_active = true;
+    try std.testing.expect(miss.handle_keyboard_event(&enter));
+    try std.testing.expectEqual(@as(?usize, null), miss.find_current_ordinal());
 }
