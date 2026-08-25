@@ -48,3 +48,4 @@ and no disk usage information. M25 turns the file browser into a file
 5. **Scope exclusions:** No archive/compression (tar, zip). No file
    permissions model. No file content search (use Ctrl+F in EDIT.BIN).
    No file size sorting (deferred to a future polish pass).
+
