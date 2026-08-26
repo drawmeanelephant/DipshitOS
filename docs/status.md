@@ -133,7 +133,7 @@ are complete. The forward roadmap is M18–M27 — the experience layer:
 | M22 | Developer tools | D1–D5 (ELF loader, assembler, symbols, disassembler, strace) |
 | M23 | The text editor | E1–E6 (EDIT.BIN, undo/redo, goto, tabs, syntax, console split) |
 | M24 | CALC grows up | K1–K5 (programmer mode, memory, units, constants, history persist) |
-| M25 | File manager depth | ✅ done 2026-08-26 (claims 0434/2539/4379, F1–F18, 5/5 live gates) |
+| M25 | File manager depth | ✅ core done 2026-08-26 (claims 0434/2539/4379, F1–F5 5/5 live gates on VZ; F6–F18 unit-tested) |
 | M26 | Network experience | N1–N5 (ping, netstat, HTTP fetch display, bandwidth, connection mgr) |
 | M27 | Desktop polish & completeness | G1–G30 = issues #444–#473 (splash, wizard, about, previews, sounds, sysmon, tooltips, consistency helpers, audits, dogfood) — tracker renumbered 2026-08-26 to match the issue list |
 

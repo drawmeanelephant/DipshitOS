@@ -3627,6 +3627,7 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "  write       write text to a file on the ESP\n" ++
         "  mktemp      create a temporary file (empty, unique name)\n" ++
         "  stat        file metadata: size, type, cluster, path (D8)\n" ++
+        "  du          recursive directory disk usage (M25 F4)\n" ++
         "  find        recursive file search with glob patterns ('find / -name \"*.BIN\"' — bounded 3 levels, 256 results)\n" ++
         "  inventory   list all installed applications from APPS.TXT with sizes and types (D16)\n" ++
         "networking\n" ++
