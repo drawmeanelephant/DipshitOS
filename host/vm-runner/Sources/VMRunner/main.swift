@@ -2332,6 +2332,8 @@ func macChord(_ token: String) -> (UInt16, NSEvent.ModifierFlags, String)? {
     switch token {
     case "return": return (0x24, [], "\r")
     case "space": return (0x31, [], " ")
+    case "comma": return (0x2B, [], ",") // K12/K16: the CSV token separator cannot carry a literal comma
+    case "ctrl-comma": return (0x2B, [.control], ",")
     case "tab": return (0x30, [], "\t")
     case "up": return (0x7E, [], "\u{F700}")
     case "down": return (0x7D, [], "\u{F701}")
@@ -3792,6 +3794,8 @@ enum CustomVirtioSpike {
     static func hidChord(_ token: String) -> (mods: UInt8, usage: UInt8)? {        switch token {
         case "return": return (0, 0x28)
         case "space": return (0, 0x2C)
+        case "comma": return (0, 0x36) // K12/K16: the CSV token separator cannot carry a literal comma
+        case "ctrl-comma": return (hidModCtrl, 0x36)
         case "tab": return (0, 0x2B)
         case "escape": return (0, 0x29)
         case "up": return (0, 0x52)

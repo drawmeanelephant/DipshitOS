@@ -73,11 +73,17 @@ cat > "$SCRIPT" <<'EOF'
 exec CALC.BIN
 EOF
 
-# --- phase 2: Ctrl+P x2 + success marker (after calc: ready) ----------------
-# Ctrl+P = ctrl-p chord delivered through the claim-9588 custom-virtio
+# --- phase 2: Ctrl+P x2 (after calc: ready) + scripted success marker ----
+# Ctrl+P is the named chord token ctrl-p over the claim-9588 custom-virtio
 # INPUT queue (queue 3) -- no VZ view activation wall (#179), no silent drop.
-CTRL_P=$'\x10'
-INPUT_CHORDS="${CTRL_P},${CTRL_P},echo calc-prog-live-ok"
+# The chord vocabulary is named tokens (ctrl-a..ctrl-z), NOT raw ASCII bytes
+# (the old $'\x10' form aborted with "no HID mapping"). The two toggles route
+# to CALC (the focused user window); the success marker must come from the
+# SHELL, so it rides --script2 after a heartbeat tick (typing it through the
+# chord channel would land in CALC's keypad instead).
+cat > "$RUN_DIR/script2.txt" <<'EOF'
+echo calc-prog-live-ok
+EOF
 
 run_one() {
     local tag="$1"
@@ -88,8 +94,10 @@ run_one() {
         --display --screen "$RUN_DIR/gpu-screen-$tag" \
         --via-virtio \
         --script "$SCRIPT" \
-        --input-chords "$INPUT_CHORDS" \
+        --input-chords "ctrl-p,ctrl-p" \
         --input-chords-after "calc: ready" \
+        --script2 "$RUN_DIR/script2.txt" \
+        --script2-after "timer heartbeat ticks=10" \
         --script-expect "calc-prog-live-ok" \
         --timeout 45 \
         > "$(art live-calc-prog-run-$tag.txt)" 2>&1

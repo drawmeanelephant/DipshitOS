@@ -121,11 +121,30 @@ pub fn arm() void {
     asm volatile ("isb");
 }
 
+/// Grant EL0 access to the counter registers (CNTPCT_EL0, CNTFRQ_EL0,
+/// CNTP_CTL_EL0) so EL0 processes can read time without a syscall slot.
+/// M24 K13/K14 (calc/dates.zig `now()`) read CNTPCT_EL0/CNTFRQ_EL0
+/// directly — the march card claims "EL0-accessible", which is only true
+/// once CNTKCTL_EL1.EL0PCTEN is set. Without it, an EL0 `mrs cntpct_el0`
+/// traps as a data abort (far=0, ec=0x18) and the fault dispatcher reaps
+/// the process (observed live: CALC's `r` key, verify-live-calc-depth).
+/// Set EL0PCTEN|EL0VCTEN|EL0PTEN|EL0VTEN (bits 0-3). No-op on non-aarch64
+/// hosts (never meaningful in a host test process).
+pub fn allow_el0_counter() void {
+    if (comptime builtin.cpu.arch != .aarch64) return;
+    asm volatile ("msr cntkctl_el1, %[v]"
+        :
+        : [v] "r" (@as(u64, 0b1111)),
+    );
+    asm volatile ("isb");
+}
+
 /// Program the timer: read the frequency, compute the 1 s period, arm.
 /// Caller is responsible for the GIC being programmed first (the PPI must
 /// be enabled for the tick to be delivered) and for unmasking IRQs after.
 pub fn init() void {
     if (comptime builtin.cpu.arch != .aarch64) return;
+    allow_el0_counter();
     freq = cntfrq();
     if (freq == 0) return;
     period_ticks = freq * period_ns / 1_000_000_000;
