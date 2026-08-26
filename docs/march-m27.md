@@ -3,6 +3,16 @@
 > [`docs/status.md`](status.md) is the canonical source for milestone-level
 > facts. This file holds M27's per-card detail and agent split.
 > A card's row flips to ✅ only with real observed evidence.
+>
+> **Renumbered 2026-08-26**: this tracker previously compressed M27 into
+> six cards (G1–G6). It now uses the canonical issue numbering — GitHub
+> issues #444–#473, cards G1–G30. The active claim 4402
+> (`agent/buffy/m21-compositor`, old "G1–G7": splash, about, previews,
+> sound, sysmon, tooltips) maps onto new G1, G3–G7 (#444, #446–#450);
+> new-G2 (first-boot wizard, #445) was folded into old-G1 there and is
+> unaffected. Six audit-shaped cards (G9, G11–G13, G22, G23) were
+> rewritten on their issues the same day for single-file ownership —
+> read the issue body before starting any of them.
 
 ## Where we are
 
@@ -16,42 +26,63 @@ capabilities, but polish that turns a collection of features into an OS.
 **Zero new syscall slots.** All cards are pure compositor paint, app
 development, or audio reuse.
 
-## The cards, in order
+## The cards
 
-| # | Card | Status | Evidence | Notes |
-|---:|------|--------|----------|-------|
-| G1 | **Boot experience.** Boot splash screen: "DipshitOS" logo (8×8 text art) + version string + "loading…" indicator. Displayed for 2 seconds during kernel init (before shell appears). First-boot wizard: SETTINGS.BIN detects no theme saved → launches a 3-step wizard (select theme: dark/light/amber, select font size, confirm). Persists to SETTINGS.TXT. | ⬜ | — | `kernel/src/main.zig` splash paint (before shell init). `user/src/settings_panel.zig` first-boot wizard. The splash is painted to the framebuffer during the 2-second init delay. The wizard is a `ui.zig` multi-step flow. |
-| G2 | **About dialog.** Ctrl+Shift+A opens a centered dialog showing: "DipshitOS", version string, kernel build date, "AArch64 on Apple Virtualization.framework", credits ("built with Zig"), license ("MIT" or whatever). Close button. Uses M17 Dialog widget. | ⬜ | — | `kernel/src/driving_award.zig` + new `user/src/about.zig` (tiny app). The dialog is a `Kind.window` with the about text. The version string comes from a comptime constant in `main.zig`. |
-| G3 | **Window previews in alt-tab.** Alt+Tab shows a live mini-preview of each window (current: just icons/labels). Each preview is the window's framebuffer content scaled down to 64×48. The overlay shows 4 windows across with preview + name. | ⬜ | — | `kernel/src/driving_award.zig` composite preview. New BSS: `preview_buffer` (64 × 48 × 4 = 12,288 bytes) for the scaled preview. The scaling is nearest-neighbor (every Nth pixel). The overlay is a special paint mode during the alt-tab hold. |
-| G4 | **Sound design.** Audio feedback for common actions: notification ping (short 440Hz beep, 50ms), error beep (880Hz, 100ms), window open (descending tone), window close (ascending tone), copy/paste (click). Uses M15 audio syscalls (sys_audio_play). | ⬜ | — | `kernel/src/driving_award.zig` + `user/src/chime.zig` (extend). PCM waveform generation: sine wave at specified frequency/duration. Comptime waveform tables (440Hz, 880Hz, sweep). The compositor calls the audio play syscall on window events. |
-| G5 | **System monitor dashboard.** `sysmon` — a full-screen dashboard showing: CPU usage (from scheduler tick count), memory usage (from `mem` command), disk usage (from FAT), network I/O (from net counters), running processes (from `sys_procs`), uptime. Auto-refresh at 1 Hz. | ⬜ | — | New userland app `user/src/sysmon.zig`. Uses existing syscalls: `sys_procs` (slot 7), window syscalls (slots 12–20). Reads kernel globals for CPU/memory/net stats via monitor commands. Full-window layout with labeled sections. |
-| G6 | **Tooltip system.** Hover over UI elements for 1 second → tooltip appears with description text. Bounded: 32-char string per tooltip. Tooltips appear below the cursor, offset by 4px. Disappear on mouse move. | ⬜ | — | `kernel/src/driving_award.zig` tooltip timer + paint. New BSS: `tooltip_timer`, `tooltip_x/y`, `tooltip_text[32]`, `tooltip_visible`. The compositor checks hover duration during pointer_tick. Tooltip is a small `Kind.window` painted above all windows. |
+Issue bodies are the authoritative spec; this table holds owning file +
+coordination state only.
 
-## Agent split
+| # | Card | Issue | Status | Notes |
+|---:|------|-------|--------|-------|
+| G1 | Boot splash screen | [#444](https://github.com/drawmeanelephant/DipshitOS/issues/444) | 🔄 claim 4402 | `kernel/src/main.zig`. |
+| G2 | First-boot wizard | [#445](https://github.com/drawmeanelephant/DipshitOS/issues/445) | ⬜ | `user/src/settings_panel.zig`. |
+| G3 | About dialog (Ctrl+Shift+A) | [#446](https://github.com/drawmeanelephant/DipshitOS/issues/446) | 🔄 claim 4402 | New `user/src/about.zig` + overlay. |
+| G4 | Window previews in alt-tab | [#447](https://github.com/drawmeanelephant/DipshitOS/issues/447) | 🔄 claim 4402 | `driving_award.zig`, ~12 KiB BSS; mind the blit clamp lesson (claim 8777). |
+| G5 | Sound design | [#448](https://github.com/drawmeanelephant/DipshitOS/issues/448) | 🔄 claim 4402 | `driving_award.zig` + `user/src/chime.zig`; gate asserts serial audio-play log. |
+| G6 | System monitor dashboard | [#449](https://github.com/drawmeanelephant/DipshitOS/issues/449) | 🔄 claim 4402 | New `user/src/sysmon.zig`. |
+| G7 | Tooltip system | [#450](https://github.com/drawmeanelephant/DipshitOS/issues/450) | 🔄 claim 4402 | `driving_award.zig` hover timer. |
+| G8 | Consistent keyboard shortcuts | [#451](https://github.com/drawmeanelephant/DipshitOS/issues/451) | ⬜ blocked | Merge candidate with G29 — one canonical table (#472 displays it). Reconcile before claiming either. |
+| G9 | Consistent menu structure | [#452](https://github.com/drawmeanelephant/DipshitOS/issues/452) | ⬜ rewritten | `ui.zig` ONLY (`menu_build()`); app adoption split out. |
+| G10 | Consistent dialog style | [#453](https://github.com/drawmeanelephant/DipshitOS/issues/453) | ⬜ | `ui.zig` (`show_dialog()`). |
+| G11 | Clipboard consistency everywhere | [#454](https://github.com/drawmeanelephant/DipshitOS/issues/454) | ⬜ rewritten | Phase 1 = read-only 4×4 matrix as issue comment (no claim); phase 2 = one PR per broken cell. |
+| G12 | Drag/drop consistency | [#455](https://github.com/drawmeanelephant/DipshitOS/issues/455) | ⬜ rewritten | Cursor feedback during existing drags only; `driving_award.zig`. |
+| G13 | Focus behavior polish | [#456](https://github.com/drawmeanelephant/DipshitOS/issues/456) | ⬜ rewritten | Focus-follows-mouse setting + dialog-close restore; `driving_award.zig` + `settings.zig`. |
+| G14 | Button states | [#457](https://github.com/drawmeanelephant/DipshitOS/issues/457) | ⬜ | `ui.zig` widget state enum. |
+| G15 | Confirmation dialogs for dangerous actions | [#458](https://github.com/drawmeanelephant/DipshitOS/issues/458) | ⬜ blocked | Overlaps M21 W13 (#429). Reconcile scope before claiming. |
+| G16 | Settings persistence & reset | [#459](https://github.com/drawmeanelephant/DipshitOS/issues/459) | ⬜ | `kernel/src/settings.zig`. |
+| G17 | Startup behavior | [#460](https://github.com/drawmeanelephant/DipshitOS/issues/460) | ⬜ blocked | Integration sequencing — waits on G1+G2, T14 (.dipshitrc), M21 W11 persistence. |
+| G18 | Shutdown/restart polish | [#461](https://github.com/drawmeanelephant/DipshitOS/issues/461) | ⬜ blocked | `monitor.zig`; save hooks depend on W11's format — sequence after it merges. |
+| G19 | Crash recovery for apps | [#462](https://github.com/drawmeanelephant/DipshitOS/issues/462) | ⬜ | `tombstone.zig` + orphan cleanup (pairs with M21 W14 #430). |
+| G20 | Theme consistency | [#463](https://github.com/drawmeanelephant/DipshitOS/issues/463) | ⬜ | `settings.zig` owns theme_id; app reads are follow-ups. |
+| G21 | Font consistency | [#464](https://github.com/drawmeanelephant/DipshitOS/issues/464) | ⬜ | `text.zig` + settings.font_size (M20 U1). |
+| G22 | Polished empty states | [#465](https://github.com/drawmeanelephant/DipshitOS/issues/465) | ⬜ rewritten | `draw_empty_state()` in ui.zig + three named surfaces. |
+| G23 | Polished error states | [#466](https://github.com/drawmeanelephant/DipshitOS/issues/466) | ⬜ rewritten | `format_error()` in ui.zig + two adoptions (FILE.BIN, EDIT.BIN). |
+| G24 | Performance pass | [#467](https://github.com/drawmeanelephant/DipshitOS/issues/467) | ⬜ | Measure-first: baselines under `artifacts/` before optimizing. Levers: glyph cache (U13), dirty regions. |
+| G25 | Memory leak audit | [#468](https://github.com/drawmeanelephant/DipshitOS/issues/468) | ⬜ | Cross-kernel audit; unit tests per leak check. |
+| G26 | Keyboard-only navigation pass | [#469](https://github.com/drawmeanelephant/DipshitOS/issues/469) | ⬜ | `driving_award.zig` traversal + `ui.zig` widget keyboard handling; large scope, sequence late. |
+| G27 | Screenshot capability | [#470](https://github.com/drawmeanelephant/DipshitOS/issues/470) | ⬜ recommended-first | `monitor.zig`, BMP to FAT. Pull early — upgrades evidence tooling for every other G gate. |
+| G28 | Help system | [#471](https://github.com/drawmeanelephant/DipshitOS/issues/471) | ⬜ | `monitor.zig`; extends M8 U1 grouping. |
+| G29 | Keyboard shortcut reference | [#472](https://github.com/drawmeanelephant/DipshitOS/issues/472) | ⬜ blocked | Display half of the G8 merge — wait for the canonical table decision. |
+| G30 | Dogfood development session | [#473](https://github.com/drawmeanelephant/DipshitOS/issues/473) | ⬜ last | Meta-card, no code. Output: bug-list doc under `docs/`. Always final card of the milestone. |
 
-| Agent | Owns | Depends on |
-|-------|------|------------|
-| **A — Compositor polish** | `kernel/src/driving_award.zig` for G1 (splash), G3 (previews), G6 (tooltips). `kernel/src/main.zig` for splash timing. | M20 done (font sizes for splash/preview). |
-| **B — Apps & dialog** | `user/src/about.zig` (new) + `kernel/src/driving_award.zig` for G2 (about). `user/src/settings_panel.zig` for G1 wizard. | M17 done (Dialog widget for about). |
-| **C — Audio & monitor** | `kernel/src/driving_award.zig` + `user/src/chime.zig` for G4 (sounds). `user/src/sysmon.zig` (new) for G5 (dashboard). | M15 done (audio syscalls). M18 done (scrollback for sysmon output). |
+## Suggested order
+
+1. **G27 screenshots** first — every later class-B gate gets easier.
+2. Buffy's open claim 4402 (G1, G3–G7), then G2.
+3. Single-file helper cards: G10, G14, G9, G22, G23 (all `ui.zig` —
+   strictly sequential between agents), plus G16, G12, G13, G5-adjacent
+   kernel work as lanes free up.
+4. Blocked/blocked-on-decision cards: G8+G29 merge, G15 vs W13, then
+   integration cards G17/G18 once their dependencies land.
+5. Audits and capstones: G11 matrix, G24, G25, G26.
+6. **G30 dogfood** dead last; its output feeds the next milestone.
 
 ## Notes
 
 1. **ABI budget:** Zero new syscall slots.
-2. **BSS budget:** Preview buffer ~12 KiB. Tooltip state ~48 bytes.
-   Sound waveform tables ~1 KiB (comptime, not BSS). Sysmon dashboard
-   ~256 bytes. Total M27 BSS delta: ~12.4 KiB.
-3. **Gate shape:** G1: `verify-live-boot-splash.sh` — splash text observed
-   in framebuffer. G2: `verify-live-about.sh` — about dialog opens. G3:
-   `verify-live-alttab-preview.sh` — preview thumbnails visible. G4:
-   `verify-live-sound.sh` — audio feedback observed via serial. G5:
-   `verify-live-sysmon.sh` — dashboard output. G6:
-   `verify-live-tooltip.sh` — tooltip appears on hover.
-4. **Splash timing:** The splash is painted during the kernel's 2-second
-   init delay (before the shell prompt appears). This is a cosmetic overlay —
-   the kernel is still initializing underneath. The splash disappears when
-   the shell prompt is ready.
-5. **Scope exclusions:** No accessibility (screen reader, high contrast
-   beyond theme). No localization (English only). No remote desktop. No
-   system tray extensions. No lock screen. This is polish, not a platform
-   rewrite.
+2. **BSS budget:** unchanged from prior estimate (~12.4 KiB dominant
+   term is G4 preview buffers).
+3. **Gate shapes:** per-card gates named in each issue body;
+   convention stays `tools/verify-live-m27-<card>.sh`.
+4. **Scope exclusions:** No accessibility beyond theme, no localization,
+   no remote desktop, no tray extensions, no lock screen. Polish, not a
+   platform rewrite.
