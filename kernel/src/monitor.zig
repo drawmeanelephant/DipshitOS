@@ -3236,6 +3236,9 @@ fn cmd_net(m: *Monitor, args: []const []const u8) ExecError {
         if (std.mem.eql(u8, args[0], "dhcp")) return cmd_net_dhcp(m, args[1..]);
         if (std.mem.eql(u8, args[0], "tcp")) return cmd_net_tcp(m, args[1..]);
         if (std.mem.eql(u8, args[0], "dns")) return cmd_net_dns(m, args[1..]);
+        if (std.mem.eql(u8, args[0], "status")) return cmd_net_status(m, args[1..]);
+        if (std.mem.eql(u8, args[0], "route")) return cmd_net_route(m, args[1..]);
+        if (std.mem.eql(u8, args[0], "log")) return cmd_net_log(m, args[1..]);
         print_usage(m, lookup("net").?);
         return .usage;
     }
@@ -3913,6 +3916,108 @@ fn cmd_net_dns(m: *Monitor, args: []const []const u8) ExecError {
     return .none;
 }
 
+/// M26 N8 (issue #435): `net status` prints a concise one-line summary:
+/// IP, Gateway, DNS server, DHCP state, and link connectivity.
+fn cmd_net_status(m: *Monitor, args: []const []const u8) ExecError {
+    _ = args;
+    var ipbuf: [15]u8 = undefined;
+    var gwbuf: [15]u8 = undefined;
+    var dnsbuf: [15]u8 = undefined;
+
+    const ip_s: []const u8 = if (virtio_net.arp.ip_set())
+        ipbuf[0..virtio_net.arp.format_ip(virtio_net.arp.own_ip, &ipbuf)]
+    else
+        "0.0.0.0";
+
+    const gw: [4]u8 = if (virtio_net.dhcp.state == .bound and (virtio_net.dhcp.lease_gw[0] != 0 or virtio_net.dhcp.lease_gw[1] != 0 or virtio_net.dhcp.lease_gw[2] != 0 or virtio_net.dhcp.lease_gw[3] != 0))
+        virtio_net.dhcp.lease_gw
+    else if (virtio_net.arp.ip_set())
+        .{ 10, 0, 0, 2 }
+    else
+        .{ 0, 0, 0, 0 };
+    const gw_s: []const u8 = gwbuf[0..virtio_net.arp.format_ip(gw, &gwbuf)];
+
+    const dns_srv: [4]u8 = if (virtio_net.dhcp.state == .bound and (virtio_net.dhcp.lease_server[0] != 0 or virtio_net.dhcp.lease_server[1] != 0 or virtio_net.dhcp.lease_server[2] != 0 or virtio_net.dhcp.lease_server[3] != 0))
+        virtio_net.dhcp.lease_server
+    else if (virtio_net.arp.ip_set())
+        .{ 10, 0, 0, 2 }
+    else
+        .{ 0, 0, 0, 0 };
+    const dns_s: []const u8 = dnsbuf[0..virtio_net.arp.format_ip(dns_srv, &dnsbuf)];
+
+    const dhcp_str = switch (virtio_net.dhcp.state) {
+        .idle => "idle",
+        .selecting => "selecting",
+        .requesting => "requesting",
+        .bound => "bound",
+        .renewing => "renewing",
+        .rebinding => "rebinding",
+    };
+
+    const link_status = if (!virtio_net.net_ready)
+        "disconnected"
+    else if (virtio_net.arp.ip_set())
+        "connected"
+    else
+        "idle";
+
+    m.console.puts("net status: IP: ");
+    m.console.puts(ip_s);
+    m.console.puts(" Gateway: ");
+    m.console.puts(gw_s);
+    m.console.puts(" DNS: ");
+    m.console.puts(dns_s);
+    m.console.puts(" DHCP: ");
+    m.console.puts(dhcp_str);
+    m.console.puts(" (");
+    m.console.puts(link_status);
+    m.console.puts(")\n");
+    return .none;
+}
+
+/// M26 N16 (issue #443): `net route` displays the active IPv4 routing table.
+fn cmd_net_route(m: *Monitor, args: []const []const u8) ExecError {
+    _ = args;
+    var gwbuf: [15]u8 = undefined;
+    const gw: [4]u8 = if (virtio_net.dhcp.state == .bound and (virtio_net.dhcp.lease_gw[0] != 0 or virtio_net.dhcp.lease_gw[1] != 0 or virtio_net.dhcp.lease_gw[2] != 0 or virtio_net.dhcp.lease_gw[3] != 0))
+        virtio_net.dhcp.lease_gw
+    else if (virtio_net.arp.ip_set())
+        .{ 10, 0, 0, 2 }
+    else
+        .{ 0, 0, 0, 0 };
+    const gw_s: []const u8 = gwbuf[0..virtio_net.arp.format_ip(gw, &gwbuf)];
+
+    m.console.puts("net route: table\n");
+    m.console.puts("Destination     Gateway         Interface       Metric\n");
+    m.console.puts("0.0.0.0/0       ");
+    m.console.puts(gw_s);
+    var pad: usize = gw_s.len;
+    while (pad < 16) : (pad += 1) m.console.putc(' ');
+    m.console.puts("eth0            1\n");
+    return .none;
+}
+
+/// M26 N15 (issue #442): `net log` displays the in-memory ring buffer of network events.
+fn cmd_net_log(m: *Monitor, args: []const []const u8) ExecError {
+    _ = args;
+    const count = virtio_net.net_log.get_count();
+    m.console.puts("net log: entries=");
+    m.console.print_u64(@intCast(count));
+    m.console.puts("\n");
+
+    var i: usize = 0;
+    while (i < count) : (i += 1) {
+        if (virtio_net.net_log.get_entry(i)) |entry| {
+            m.console.puts("  [");
+            m.console.print_u64(@intCast(i));
+            m.console.puts("] ");
+            m.console.puts(entry.getText());
+            m.console.puts("\n");
+        }
+    }
+    return .none;
+}
+
 /// Print the TCP connection's peer as `a.b.c.d:port`.
 fn print_tcp_peer(m: *Monitor) void {
     var tibuf: [15]u8 = undefined;
@@ -4322,6 +4427,7 @@ fn cmd_net_ip(m: *Monitor, args: []const []const u8) ExecError {
         return .invalid_argument;
     };
     virtio_net.arp.own_ip = ip;
+    virtio_net.net_log.log_fmt("IP: assigned {d}.{d}.{d}.{d}", .{ ip[0], ip[1], ip[2], ip[3] });
     m.console.puts("net ip: ip=");
     var ipbuf: [15]u8 = undefined;
     const n = virtio_net.arp.format_ip(ip, &ipbuf);
@@ -4410,6 +4516,7 @@ fn cmd_net_arp(m: *Monitor, args: []const []const u8) ExecError {
     switch (virtio_net.net_arp_request(ip, &frame_len)) {
         .ok => {
             virtio_net.arp.requests_sent += 1;
+            virtio_net.net_log.log_fmt("ARP: request {d}.{d}.{d}.{d}", .{ ip[0], ip[1], ip[2], ip[3] });
             m.console.puts("net arp: request for ");
             var ipbuf: [15]u8 = undefined;
             const in = virtio_net.arp.format_ip(ip, &ipbuf);

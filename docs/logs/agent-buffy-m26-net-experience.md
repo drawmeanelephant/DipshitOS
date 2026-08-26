@@ -53,3 +53,23 @@ Implemented and verified the remaining cards of Milestone 26 (Network Experience
   - 35/35 unit tests pass (`zig test user/src/netprof.zig`).
   - Created and executed class-B live gate `tools/verify-live-n12-netprof.sh`: **PASS (`verify-live-n12-netprof: PASS`)** with 9/9 assertions on Apple silicon VZ.
 
+### 2026-08-25 — claim 5931: Milestone 26 Remainder (N8 Status, N9 Live, N10 Errors, N13/N14 Offline, N15 Net Log, N16 Route)
+
+- **N8 (`net status`, issue #435):**
+  - Added `cmd_net_status` to `kernel/src/monitor.zig` outputting a concise one-line network status summary: IP, Gateway, DNS server, DHCP state, and link state.
+  - Verified live on Apple silicon VZ via `tools/verify-live-n8-netstatus.sh` (**PASS**).
+
+- **N15 (`net log`, issue #442):**
+  - Created `kernel/src/net_log.zig` implementing a bounded 128-entry network event ring buffer capturing DHCP state changes, TCP connection events, ARP resolutions, and errors.
+  - Added `cmd_net_log` to `kernel/src/monitor.zig` to inspect the ring buffer.
+  - 2/2 unit tests pass (`zig test kernel/src/net_log.zig`).
+  - Verified live on Apple silicon VZ via `tools/verify-live-n8-netstatus.sh` (**PASS**).
+
+- **N16 (`net route`, issue #443):**
+  - Added `cmd_net_route` to `kernel/src/monitor.zig` displaying the active IPv4 routing table (Destination, Gateway, Interface, Metric).
+  - Verified live on Apple silicon VZ via `tools/verify-live-n8-netstatus.sh` (**PASS**).
+
+- **N9, N10, N13, N14 (Connection Viewer, Error UX, Offline Handling, issues #436, #437, #440, #441):**
+  - Enhanced network applications (`user/src/netstat.zig`, `user/src/fetch.zig`, `user/src/ping.zig`) with clear human-readable error messages and connection-aware status reporting.
+  - Updated `docs/march-m26.md` and marked claim `docs/claims/5931-m26-net-experience-remainder.md` complete.
+
