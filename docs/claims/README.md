@@ -78,6 +78,7 @@ loudly if the generator or a table is broken.
 <!-- CLAIMS_INDEX:START -->
 | Claim | Owner (branch) | Status |
 |-------|----------------|--------|
+| [0130-m23-editor-depth-wave2](0130-m23-editor-depth-wave2.md) | Buffy (`agent/buffy/m23-editor-wave2`) | ✅ done — 96/96 host tests pass, build clean, live gate `tools/verify-live-editor.sh` PASS on VZ (9/9 assertions) |
 | [0162-logs-cleanup](0162-logs-cleanup.md) | opencode (`t3code/fix-issue-267-git-current`) | ✅ done 2026-08-21 |
 | [0163-m18-t5-colors](0163-m18-t5-colors.md) | buffy (`agent/buffy/m18-t5-colors`) | ✅ done 2026-08-22 |
 | [0265-top-sort-filter](0265-top-sort-filter.md) | buffy (`agent/buffy/m15-c8-top-sort`) | ✅ done 2026-08-21 — `user/src/top.zig` sortable columns + filtering (`SortColumn pid/name/state/exit`, `compare_procs`, `name_contains` case-insensitive, stable insertion sort on `display_indices`, `filter_input TextInput 260,6,110,20` with label `Filter:`, header hit-test 52..68 click_column toggle ↑/↓, `rebuild_display` filtered+sorted, `handle_mouse_events` header+filter+row (display), `handle_keyboard_event` filter-focused priority + filtered Up/Down, `handle_timer`/`kill_selected` rebuild, `draw` header indicator accent + filtered rows). Host tests 23/23 PASS (8 new: compare, contains, sortable, filter, sort+filter, auto-refresh preserve, header click, row click), `TOP AppState 1352 <4KiB`, `zig build` PASS `TOP.BIN 10526` (+2355B), `verify-bss-budget` PASS `9788088/11534336` headroom `1746248`, `zig fmt --check` PASS. |
