@@ -548,6 +548,18 @@ pub fn parseInt(text: []const u8) error{ Empty, InvalidDigit, Overflow }!u64 {
     return value;
 }
 
+pub fn parseSignedInt(text: []const u8) error{ Empty, InvalidDigit, Overflow }!i64 {
+    if (text.len == 0) return error.Empty;
+    if (text[0] == '-') {
+        const u = try parseInt(text[1..]);
+        if (u > @as(u64, @intCast(std.math.maxInt(i64))) + 1) return error.Overflow;
+        return -@as(i64, @intCast(u));
+    }
+    const u = try parseInt(text);
+    if (u > @as(u64, @intCast(std.math.maxInt(i64)))) return error.Overflow;
+    return @as(i64, @intCast(u));
+}
+
 /// Hex-only parse (an optional 0x/0X prefix is accepted; the documented
 /// `screen fill <rrggbb>` form is bare hex) — used for the color argument.
 pub fn parseHex(text: []const u8) error{ Empty, InvalidDigit, Overflow }!u64 {
@@ -2310,6 +2322,333 @@ fn cmd_dui(m: *Monitor, args: []const []const u8) ExecError {
             m.console.puts("\n");
             return .none;
         }
+        if (std.mem.eql(u8, args[0], "minimize")) {
+            if (args.len != 2) {
+                print_usage(m, lookup("dui").?);
+                return .usage;
+            }
+            const id = parseInt(args[1]) catch return .invalid_argument;
+            if (id > 255) return .invalid_argument;
+            if (!driving_award.minimize_window(@intCast(id))) {
+                err_prefix(m);
+                m.console.print_line("minimize failed: no such user window");
+                return .invalid_argument;
+            }
+            _ = driving_award.composite();
+            m.console.puts("dui minimize: minimized id=");
+            m.console.print_u64(id);
+            m.console.puts("\n");
+            return .none;
+        }
+        if (std.mem.eql(u8, args[0], "restore")) {
+            if (args.len != 2) {
+                print_usage(m, lookup("dui").?);
+                return .usage;
+            }
+            const id = parseInt(args[1]) catch return .invalid_argument;
+            if (id > 255) return .invalid_argument;
+            if (!driving_award.restore_from_dock(@intCast(id))) {
+                err_prefix(m);
+                m.console.print_line("restore failed: window not minimized or unknown");
+                return .invalid_argument;
+            }
+            _ = driving_award.composite();
+            m.console.puts("dui restore: restored id=");
+            m.console.print_u64(id);
+            m.console.puts("\n");
+            return .none;
+        }
+        if (std.mem.eql(u8, args[0], "maximize")) {
+            if (args.len != 2) {
+                print_usage(m, lookup("dui").?);
+                return .usage;
+            }
+            const id = parseInt(args[1]) catch return .invalid_argument;
+            if (id > 255) return .invalid_argument;
+            if (!driving_award.toggle_maximize(@intCast(id))) {
+                err_prefix(m);
+                m.console.print_line("maximize failed: no such user window");
+                return .invalid_argument;
+            }
+            _ = driving_award.composite();
+            const w = driving_award.find_user_window(@intCast(id));
+            m.console.puts("dui maximize: id=");
+            m.console.print_u64(id);
+            m.console.puts(" max=");
+            m.console.puts(if (w != null and w.?.maximized) "on" else "off");
+            m.console.puts("\n");
+            return .none;
+        }
+        if (std.mem.eql(u8, args[0], "fullscreen")) {
+            if (args.len != 2) {
+                print_usage(m, lookup("dui").?);
+                return .usage;
+            }
+            const id = parseInt(args[1]) catch return .invalid_argument;
+            if (id > 255) return .invalid_argument;
+            if (!driving_award.toggle_fullscreen(@intCast(id))) {
+                err_prefix(m);
+                m.console.print_line("fullscreen failed: no such user window");
+                return .invalid_argument;
+            }
+            _ = driving_award.composite();
+            m.console.puts("dui fullscreen: id=");
+            m.console.print_u64(id);
+            m.console.puts(" on=");
+            m.console.puts(if (driving_award.fullscreen_active) "yes" else "no");
+            m.console.puts("\n");
+            return .none;
+        }
+        if (std.mem.eql(u8, args[0], "aot")) {
+            if (args.len != 2) {
+                print_usage(m, lookup("dui").?);
+                return .usage;
+            }
+            const id = parseInt(args[1]) catch return .invalid_argument;
+            if (id > 255) return .invalid_argument;
+            if (!driving_award.toggle_always_on_top(@intCast(id))) {
+                err_prefix(m);
+                m.console.print_line("always-on-top failed: no such user window");
+                return .invalid_argument;
+            }
+            _ = driving_award.composite();
+            const w = driving_award.find_user_window(@intCast(id));
+            m.console.puts("dui always-on-top: id=");
+            m.console.print_u64(id);
+            m.console.puts(" flag=");
+            m.console.puts(if (w != null and w.?.always_on_top) "on" else "off");
+            m.console.puts("\n");
+            return .none;
+        }
+        if (std.mem.eql(u8, args[0], "kmove")) {
+            if (args.len != 4) {
+                print_usage(m, lookup("dui").?);
+                return .usage;
+            }
+            const id = parseInt(args[1]) catch return .invalid_argument;
+            const dx = parseSignedInt(args[2]) catch return .invalid_argument;
+            const dy = parseSignedInt(args[3]) catch return .invalid_argument;
+            if (id > 255) return .invalid_argument;
+            if (!driving_award.move_window_keyboard(@intCast(id), @intCast(dx), @intCast(dy))) {
+                err_prefix(m);
+                m.console.print_line("keyboard move failed: no such user window");
+                return .invalid_argument;
+            }
+            _ = driving_award.composite();
+            m.console.puts("dui kmove: id=");
+            m.console.print_u64(id);
+            m.console.puts("\n");
+            return .none;
+        }
+        if (std.mem.eql(u8, args[0], "kresize")) {
+            if (args.len != 4) {
+                print_usage(m, lookup("dui").?);
+                return .usage;
+            }
+            const id = parseInt(args[1]) catch return .invalid_argument;
+            const dw = parseSignedInt(args[2]) catch return .invalid_argument;
+            const dh = parseSignedInt(args[3]) catch return .invalid_argument;
+            if (id > 255) return .invalid_argument;
+            if (!driving_award.resize_window_keyboard(@intCast(id), @intCast(dw), @intCast(dh))) {
+                err_prefix(m);
+                m.console.print_line("keyboard resize failed: no such user window");
+                return .invalid_argument;
+            }
+            _ = driving_award.composite();
+            m.console.puts("dui kresize: id=");
+            m.console.print_u64(id);
+            m.console.puts("\n");
+            return .none;
+        }
+        if (std.mem.eql(u8, args[0], "title")) {
+            if (args.len != 3) {
+                print_usage(m, lookup("dui").?);
+                return .usage;
+            }
+            const id = parseInt(args[1]) catch return .invalid_argument;
+            if (id > 255) return .invalid_argument;
+            if (!driving_award.set_window_title(@intCast(id), args[2])) {
+                err_prefix(m);
+                m.console.print_line("title update failed: no such user window");
+                return .invalid_argument;
+            }
+            _ = driving_award.composite();
+            m.console.puts("dui title: id=");
+            m.console.print_u64(id);
+            m.console.puts(" title=");
+            m.console.puts(args[2]);
+            m.console.puts("\n");
+            return .none;
+        }
+        if (std.mem.eql(u8, args[0], "modal")) {
+            if (args.len != 3) {
+                print_usage(m, lookup("dui").?);
+                return .usage;
+            }
+            const id = parseInt(args[1]) catch return .invalid_argument;
+            const flag = parseInt(args[2]) catch return .invalid_argument;
+            if (id > 255) return .invalid_argument;
+            if (!driving_award.set_modal(@intCast(id), flag != 0)) {
+                err_prefix(m);
+                m.console.print_line("modal failed: no such user window");
+                return .invalid_argument;
+            }
+            _ = driving_award.composite();
+            m.console.puts("dui modal: id=");
+            m.console.print_u64(id);
+            m.console.puts(" flag=");
+            m.console.print_u64(flag);
+            m.console.puts("\n");
+            return .none;
+        }
+        if (std.mem.eql(u8, args[0], "transient")) {
+            if (args.len != 3) {
+                print_usage(m, lookup("dui").?);
+                return .usage;
+            }
+            const id = parseInt(args[1]) catch return .invalid_argument;
+            const timeout = parseInt(args[2]) catch return .invalid_argument;
+            if (id > 255) return .invalid_argument;
+            if (!driving_award.set_transient(@intCast(id), @intCast(timeout))) {
+                err_prefix(m);
+                m.console.print_line("transient failed: no such user window");
+                return .invalid_argument;
+            }
+            _ = driving_award.composite();
+            m.console.puts("dui transient: id=");
+            m.console.print_u64(id);
+            m.console.puts(" timeout=");
+            m.console.print_u64(timeout);
+            m.console.puts("\n");
+            return .none;
+        }
+        if (std.mem.eql(u8, args[0], "notif")) {
+            if (args.len != 2) {
+                print_usage(m, lookup("dui").?);
+                return .usage;
+            }
+            driving_award.notify_push(args[1], 0);
+            _ = driving_award.composite();
+            m.console.puts("dui notif: pushed=");
+            m.console.puts(args[1]);
+            m.console.puts("\n");
+            return .none;
+        }
+        if (std.mem.eql(u8, args[0], "notif-center")) {
+            if (args.len != 1) {
+                print_usage(m, lookup("dui").?);
+                return .usage;
+            }
+            driving_award.notif_center_toggle();
+            _ = driving_award.composite();
+            m.console.puts("dui notif-center: open=");
+            m.console.puts(if (driving_award.notif_center_open) "yes" else "no");
+            m.console.puts("\n");
+            return .none;
+        }
+        if (std.mem.eql(u8, args[0], "notif-dismiss")) {
+            if (args.len != 2) {
+                print_usage(m, lookup("dui").?);
+                return .usage;
+            }
+            const idx = parseInt(args[1]) catch return .invalid_argument;
+            const ok = driving_award.notif_center_dismiss(@intCast(idx));
+            _ = driving_award.composite();
+            m.console.puts("dui notif-dismiss: idx=");
+            m.console.print_u64(idx);
+            m.console.puts(" ok=");
+            m.console.puts(if (ok) "1" else "0");
+            m.console.puts("\n");
+            return .none;
+        }
+        if (std.mem.eql(u8, args[0], "notif-clear")) {
+            if (args.len != 1) {
+                print_usage(m, lookup("dui").?);
+                return .usage;
+            }
+            driving_award.notif_center_clear_all();
+            _ = driving_award.composite();
+            m.console.puts("dui notif-clear: cleared\n");
+            return .none;
+        }
+        if (std.mem.eql(u8, args[0], "ws")) {
+            if (args.len != 2) {
+                print_usage(m, lookup("dui").?);
+                return .usage;
+            }
+            const ws = parseInt(args[1]) catch return .invalid_argument;
+            if (ws > 2) return .invalid_argument;
+            driving_award.switch_workspace(@intCast(ws));
+            _ = driving_award.composite();
+            m.console.puts("dui ws: workspace=");
+            m.console.print_u64(ws);
+            m.console.puts("\n");
+            return .none;
+        }
+        if (std.mem.eql(u8, args[0], "ws-cycle")) {
+            if (args.len != 1) {
+                print_usage(m, lookup("dui").?);
+                return .usage;
+            }
+            driving_award.cycle_workspace();
+            _ = driving_award.composite();
+            m.console.puts("dui ws-cycle: workspace=");
+            m.console.print_u64(driving_award.current_workspace);
+            m.console.puts("\n");
+            return .none;
+        }
+        if (std.mem.eql(u8, args[0], "unsaved")) {
+            if (args.len != 3) {
+                print_usage(m, lookup("dui").?);
+                return .usage;
+            }
+            const id = parseInt(args[1]) catch return .invalid_argument;
+            const flag = parseInt(args[2]) catch return .invalid_argument;
+            if (id > 255) return .invalid_argument;
+            _ = driving_award.user_set_unsaved(@intCast(id), flag != 0);
+            _ = driving_award.composite();
+            m.console.puts("dui unsaved: id=");
+            m.console.print_u64(id);
+            m.console.puts(" flag=");
+            m.console.print_u64(flag);
+            m.console.puts("\n");
+            return .none;
+        }
+        if (std.mem.eql(u8, args[0], "dialog-show")) {
+            if (args.len != 2) {
+                print_usage(m, lookup("dui").?);
+                return .usage;
+            }
+            const id = parseInt(args[1]) catch return .invalid_argument;
+            if (id > 255) return .invalid_argument;
+            driving_award.unsaved_dialog_show(@intCast(id));
+            _ = driving_award.composite();
+            m.console.puts("dui dialog-show: target=");
+            m.console.print_u64(id);
+            m.console.puts(" open=");
+            m.console.puts(if (driving_award.unsaved_dialog_is_open()) "yes" else "no");
+            m.console.puts("\n");
+            return .none;
+        }
+        if (std.mem.eql(u8, args[0], "dialog-click")) {
+            if (args.len != 2) {
+                print_usage(m, lookup("dui").?);
+                return .usage;
+            }
+            const choice = if (std.mem.eql(u8, args[1], "save"))
+                driving_award.unsaved_dialog_click(640 - 100 + 40, 360 + 20)
+            else if (std.mem.eql(u8, args[1], "dont_save") or std.mem.eql(u8, args[1], "discard"))
+                driving_award.unsaved_dialog_click(640 - 100 + 110, 360 + 20)
+            else
+                driving_award.unsaved_dialog_click(640 - 100 + 175, 360 + 20);
+            _ = driving_award.composite();
+            m.console.puts("dui dialog-click: result=");
+            m.console.puts(@tagName(choice));
+            m.console.puts(" open=");
+            m.console.puts(if (driving_award.unsaved_dialog_is_open()) "yes" else "no");
+            m.console.puts("\n");
+            return .none;
+        }
         print_usage(m, lookup("dui").?);
         return .usage;
     }
@@ -2375,6 +2714,15 @@ fn print_win_row(m: *Monitor, i: usize, w: *const driving_award.Window) void {
         m.console.print_u64(@intCast(pid));
     } else {
         m.console.puts("-");
+    }
+    if (w.minimized) m.console.puts(" minimized=1");
+    if (w.maximized) m.console.puts(" maximized=1");
+    if (w.always_on_top) m.console.puts(" aot=1");
+    if (w.modal) m.console.puts(" modal=1");
+    if (w.transient) m.console.puts(" transient=1");
+    if (w.kind == .user) {
+        m.console.puts(" ws=");
+        m.console.print_u64(w.workspace);
     }
     m.console.puts("\n");
 }

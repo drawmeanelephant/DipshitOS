@@ -6,7 +6,7 @@
 - **Touches:** docs/march-m21.md docs/status.md kernel/src/monitor.zig kernel/src/driving_award.zig kernel/src/input.zig kernel/src/shell.zig user/src/m21demo.zig user/src/winmove.zig tools/verify-live-m21* tools/verify-live-win-move.sh build.zig
 - **Depends on:** #488 (W1–W5 implementation) + 1a8dedf (W9/W11/W12 polish) — both already on main
 - **Heartbeat:** 2026-08-25
-- **Status:** 🔄 t3code/milestone-nine-triage — W1+W2 live-gated ✅ (2026-08-25); W3–W16 sweep continues
+- **Status:** ⛔ superseded by claim 1306 (`agent/buffy/m21-window-depth`)
 
 ## Notes
 
