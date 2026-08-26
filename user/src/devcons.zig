@@ -54,20 +54,27 @@ pub export fn _start() callconv(.c) noreturn {
                 ui.exit_process(0);
             },
             ui.KEY_DOWN => {
-                const key = ev.arg0;
-                if (key == 0x0a or key == 0x0d) {
+                // ADR 0009 event convention (as EDIT.BIN consumes it): arg0 is
+                // the raw HID usage (Enter 0x28, Backspace 0x2a), arg1 is the
+                // ASCII byte for printable keys. Comparing arg0 against ASCII
+                // ranges rejects every printable key (usage 0x07 for 'd'), so
+                // the typed-input gate (issue #553) caught this live: the
+                // prompt buffered nothing and Enter executed nothing.
+                const usage = ev.arg0;
+                const ascii = ev.arg1;
+                if (usage == 0x28) {
                     // Enter: execute command
                     if (input_len > 0) {
                         execute_command(input_buf[0..input_len]);
                         input_len = 0;
                     }
                     refresh(win);
-                } else if (key == 0x08 or key == 0x7f) {
+                } else if (usage == 0x2a) {
                     // Backspace
                     if (input_len > 0) input_len -= 1;
                     refresh(win);
-                } else if (key >= 0x20 and key < 0x7f and input_len < input_max) {
-                    input_buf[input_len] = @intCast(key);
+                } else if (ascii >= 0x20 and ascii < 0x7f and input_len < input_max) {
+                    input_buf[input_len] = @intCast(ascii);
                     input_len += 1;
                     refresh(win);
                 }

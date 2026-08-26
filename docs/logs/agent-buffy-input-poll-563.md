@@ -36,3 +36,33 @@ Result: `verify-live-desktop.sh` PASS (CALC/NOTEPAD/TOP/DESKTOP/
 MANIFEST/LAUNCH/SYS_EXEC), `verify-live-desktop-typing.sh` PASS (92 glyph
 samples), unit tests + fmt + coordination gate green. Full details in
 `docs/claims/0478-desktop-gate-calc-enoent.md`.
+## 2026-08-26 — claim 0590: issue #553 DEVCONS.BIN typed-input gate proof
+
+Took issue #553 (the only remaining open non-milestone issue): the
+verify-live-devcons.sh gate only proves the window path, not typed input at
+the in-window prompt. The blocker (#179) is closed and claim 9588's
+custom-virtio INPUT channel is productionized (proven end-to-end by the
+#563 typing gate). Extending the devcons gate: after `devcons: ready`,
+type `dir.bin\n` at the prompt via `--input-string`/`--input-string-after`,
+assert the `input` events counter, the sys_exec of DIR.BIN, the child's
+serial output, and a screenshot pixel proof of the `> dir.bin` echo in the
+log pane.
+## 2026-08-26 — claim 0590 DONE: issue #553 DEVCONS.BIN typed-input gate proof
+
+verify-live-devcons.sh now PASSes with the typed-input phase (2/2 boots on
+VZ): `dir.bin\n` typed at the in-window prompt over the claim 9588
+custom-virtio INPUT queue; `input` events=8; child DIR.BIN prints
+`dir: listing /data` / `dir: success` on serial; the `> dir.bin` +
+`exec: ok` echoes render in the log pane (pixel proof, 493 white samples).
+The phase caught a real pre-existing bug in DEVCONS.BIN: the KEY_DOWN
+handler compared ev.arg0 (raw HID usage) against ASCII ranges, rejecting
+every printable key and never matching Enter — typing was dead in the app
+all along, masked by #179. Fixed to the ADR 0009 convention (arg1 ASCII,
+arg0 usage). One transient observed: a single earlier gate run failed at
+win_open (`devcons: failed to open window`) with no kernel change between
+runs — the same class of host-side latency flake seen during #578's
+virtio-blk investigation; the gate passes repeatedly on the fixed code.
+Also worth recording: `events` counts DECODED reports in BOTH routing
+branches, so events=N alone does not prove delivery to a user window —
+the gate asserts delivery via the child's serial output + the rendered
+echo instead.
