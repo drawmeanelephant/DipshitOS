@@ -39,3 +39,28 @@ All five Wave 2 M23 text editor depth features implemented in `user/src/edit.zig
 - Coordination: `tools/verify-coordination.sh` passes cleanly (`ok`).
 - Class-B Hardware Gate: `tools/verify-live-editor.sh` **PASS 1/1 boots** on Apple Silicon VZ hardware:
   - 9/9 assertions green: `banner=1`, `edit-ready=1`, `undo=1`, `lines=1`, `find=1`, `repl=1`, `del=1`, `tab=1`, `goto=1`.
+
+## 2026-08-26 — M23 Text Editor Completeness Wave 3 (Claim 4341)
+
+Implemented all 14 remaining cards for Milestone 23 (issues #349, #351–#360, #362–#364):
+
+- **E10 (#349) Word Wrap:** Real viewport word wrapping across column boundaries without altering underlying buffer.
+- **E12 (#351) Multiple Cursors:** Multi-cursor simultaneous typing & deletion with stable coordinate shifting across all sibling cursors.
+- **E13 (#352) Rectangular Selection:** `Alt+R` column selection mode, rectangular cursor bounding box, and block typing/fill.
+- **E14 (#353) Command Palette:** `Ctrl+Shift+P` fuzzy search overlay with 23 action items.
+- **E15 (#354) Recent Files:** `Ctrl+R` MRU picker for up to 10 files, opening cleanly into tabs.
+- **E16 (#355) Unsaved Changes Handling:** Dirty flag tracking, close confirmation modal on `Ctrl+W` / palette `.close_tab`, abort on untitled save failures, `Ctrl+S` save.
+- **E17 (#356) Crash Recovery:** Persistent `/data/EDIT_REC.TXT` recovery file writing and startup restore prompt (`[R] to restore`).
+- **E18 (#357) Configurable Keybindings:** `KeyAction` enum and unified `execute_key_action` dispatcher.
+- **E19 (#358) Editor Themes:** Dark, Light, and Amber palettes with `Ctrl+Shift+T` cycle.
+- **E20 (#359) Indentation Controls:** Tab indent / Shift+Tab dedent with dirty flag accuracy.
+- **E21 (#360) Bookmarks:** `Ctrl+B` toggle, gutter `*` indicator, `Ctrl+Shift+Down/Up` navigation.
+- **E23 (#362) Jump to Definition:** `Ctrl+]` identifier resolution and definition jump.
+- **E24 (#363) File Tree Sidebar:** `Ctrl+Shift+F` directory explorer with interactive arrow navigation and Enter to open files.
+- **E25 (#364) Minibuffer & Status Bar:** Dynamic status bar with wrap, mode, hints, and transient feedback.
+
+### Verification
+
+- Unit tests: `zig test user/src/edit.zig` all pass.
+- Live hardware gate: `tools/verify-live-editor.sh` passes on Apple Silicon VZ with all assertions.
+- Coordination: `tools/verify-coordination.sh` ok.
