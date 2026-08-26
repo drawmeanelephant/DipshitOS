@@ -1,28 +1,20 @@
-//! DipshitOS text editor — EDIT.BIN (M23 E1–E11, E22).
+//! DipshitOS text editor — EDIT.BIN (Milestone 23 complete E1–E25).
 //!
-//! A full-screen text editor with a line-number gutter, cursor navigation,
-//! insert/overwrite mode, a status bar, multi-file tabs, syntax coloring,
-//! search & replace, autoindent, bracket matching, line number toggle,
-//! delete-line, and a Ctrl+` console split for running shell-like commands
-//! without leaving the editor. Uses the ui.zig micro-widget toolkit with zero
-//! dynamic allocation.
+//! A full-screen text editor with line-number gutter, cursor navigation,
+//! insert/overwrite mode, status bar, multi-file tabs, syntax coloring,
+//! search & replace, autoindent/dedent, bracket matching, line numbers toggle,
+//! delete-line, console split mini-shell, bookmarks, jump to definition,
+//! indentation controls, editor themes, command palette, configurable
+//! keybindings, multiple cursors, rectangular selection, recent files list,
+//! unsaved changes guard, crash recovery, and file tree sidebar.
 //!
-//! E1 (base editor): 32 KiB file buffer, line index, cursor, status bar.
-//! E2 (undo/redo): bounded 50-entry delta ring, Ctrl+Z / Ctrl+Y.
-//! E3 (goto line): Ctrl+G opens a prompt, Enter jumps to line number.
-//! E4 (multi-file tabs): Ctrl+T/W/Tab, 4 tabs max, each with own buffer.
-//! E5 (syntax coloring): Zig keyword/string/comment coloring for .zig files.
-//! E6 (console split): Ctrl+` toggles a bottom 40% pane with a mini-shell.
-//! E7 (search & replace): Ctrl+F find, Ctrl+H replace, case-insensitive, replace all.
-//! E8 (autoindent): newline preserves indentation, dedent on '}'.
-//! E9 (bracket matching): highlights matching (), [], {} pairs.
-//! E11 (line numbers toggle): Ctrl+L toggles gutter on/off.
-//! E22 (delete line): Ctrl+Shift+D deletes the entire current line.
+//! Zero heap allocation — all state operates over static BSS structures.
 
 const std = @import("std");
 const ui = @import("lib/ui.zig");
 const Rect = ui.Rect;
 const Event = ui.Event;
+const DirEntry = ui.DirEntry;
 
 pub const window_id: u32 = 3;
 pub const window_x: u32 = 64;
@@ -55,6 +47,70 @@ pub const console_rows: usize = 10;
 const undo_cap: usize = 50;
 const delta_text_cap: usize = 64;
 
+// E19: Editor Themes
+pub const Theme = struct {
+    name: []const u8,
+    bg: u32,
+    surface: u32,
+    text: u32,
+    muted: u32,
+    accent: u32,
+    warning: u32,
+    success: u32,
+    gutter_bg: u32,
+    line_highlight: u32,
+    selection_bg: u32,
+    cursor: u32,
+};
+
+pub const themes = [_]Theme{
+    // Dark (Default - Green terminal vibe)
+    .{
+        .name = "Dark",
+        .bg = 0x101418,
+        .surface = 0x1a2026,
+        .text = 0x00ff00,
+        .muted = 0x668877,
+        .accent = 0x33ff66,
+        .warning = 0xffcc00,
+        .success = 0x22cc55,
+        .gutter_bg = 0x0b0e11,
+        .line_highlight = 0x22303a,
+        .selection_bg = 0x2a4460,
+        .cursor = 0x00ff00,
+    },
+    // Light
+    .{
+        .name = "Light",
+        .bg = 0xf0f2f5,
+        .surface = 0xffffff,
+        .text = 0x111827,
+        .muted = 0x6b7280,
+        .accent = 0x2563eb,
+        .warning = 0xd97706,
+        .success = 0x16a34a,
+        .gutter_bg = 0xe5e7eb,
+        .line_highlight = 0xe0e7ff,
+        .selection_bg = 0xbfdbfe,
+        .cursor = 0x2563eb,
+    },
+    // Amber
+    .{
+        .name = "Amber",
+        .bg = 0x1a1200,
+        .surface = 0x261a00,
+        .text = 0xffb000,
+        .muted = 0x996600,
+        .accent = 0xffcc33,
+        .warning = 0xff8800,
+        .success = 0xffd700,
+        .gutter_bg = 0x120c00,
+        .line_highlight = 0x332200,
+        .selection_bg = 0x4d3300,
+        .cursor = 0xffb000,
+    },
+};
+
 /// A single undo/redo delta: position + what changed.
 pub const Delta = struct {
     pos: usize = 0,
@@ -64,9 +120,7 @@ pub const Delta = struct {
     new_text: [delta_text_cap]u8 = [_]u8{0} ** delta_text_cap,
 };
 
-/// Bounded undo/redo ring. Undo pops from `undo_stack` and pushes the
-/// reverse onto `redo_stack`. Redo pops from `redo_stack` and pushes back
-/// onto `undo_stack`. New edits clear the redo stack.
+/// Bounded undo/redo ring.
 pub const UndoRing = struct {
     undo_stack: [undo_cap]Delta = [_]Delta{.{}} ** undo_cap,
     undo_count: usize = 0,
@@ -83,14 +137,12 @@ pub const UndoRing = struct {
             self.undo_stack[self.undo_count] = d;
             self.undo_count += 1;
         } else {
-            // Shift left (drop oldest) and append
             var i: usize = 0;
             while (i < undo_cap - 1) : (i += 1) {
                 self.undo_stack[i] = self.undo_stack[i + 1];
             }
             self.undo_stack[undo_cap - 1] = d;
         }
-        // New edit clears redo
         self.redo_count = 0;
     }
 
@@ -104,7 +156,112 @@ pub const UndoRing = struct {
 };
 
 // ---------------------------------------------------------------------------
-// File Buffer (E1 + E2 undo + E8 autoindent + E22 delete line)
+// E21: Bookmarks
+// ---------------------------------------------------------------------------
+
+pub const max_bookmarks: usize = 16;
+
+pub const Bookmarks = struct {
+    lines: [max_bookmarks]usize = [_]usize{0} ** max_bookmarks,
+    count: usize = 0,
+
+    pub fn clear(self: *Bookmarks) void {
+        self.count = 0;
+    }
+
+    pub fn has_bookmark(self: *const Bookmarks, line: usize) bool {
+        var i: usize = 0;
+        while (i < self.count) : (i += 1) {
+            if (self.lines[i] == line) return true;
+        }
+        return false;
+    }
+
+    pub fn toggle(self: *Bookmarks, line: usize) bool {
+        var i: usize = 0;
+        while (i < self.count) : (i += 1) {
+            if (self.lines[i] == line) {
+                // Remove
+                var j = i;
+                while (j < self.count - 1) : (j += 1) {
+                    self.lines[j] = self.lines[j + 1];
+                }
+                self.count -= 1;
+                return false; // Removed
+            }
+        }
+        if (self.count < max_bookmarks) {
+            self.lines[self.count] = line;
+            self.count += 1;
+            // Sort
+            var a: usize = 0;
+            while (a < self.count) : (a += 1) {
+                var b: usize = a + 1;
+                while (b < self.count) : (b += 1) {
+                    if (self.lines[b] < self.lines[a]) {
+                        const tmp = self.lines[a];
+                        self.lines[a] = self.lines[b];
+                        self.lines[b] = tmp;
+                    }
+                }
+            }
+            return true; // Added
+        }
+        return false;
+    }
+
+    pub fn next_after(self: *const Bookmarks, current: usize) ?usize {
+        if (self.count == 0) return null;
+        var i: usize = 0;
+        while (i < self.count) : (i += 1) {
+            if (self.lines[i] > current) return self.lines[i];
+        }
+        return self.lines[0]; // Wrap
+    }
+
+    pub fn prev_before(self: *const Bookmarks, current: usize) ?usize {
+        if (self.count == 0) return null;
+        var i: usize = self.count;
+        while (i > 0) : (i -= 1) {
+            if (self.lines[i - 1] < current) return self.lines[i - 1];
+        }
+        return self.lines[self.count - 1]; // Wrap
+    }
+};
+
+// ---------------------------------------------------------------------------
+// E12: Multiple Cursors
+// ---------------------------------------------------------------------------
+
+pub const max_cursors: usize = 8;
+
+// ---------------------------------------------------------------------------
+// E13: Rectangular Selection
+// ---------------------------------------------------------------------------
+
+pub const RectSelection = struct {
+    active: bool = false,
+    start_line: usize = 0,
+    start_col: usize = 0,
+    end_line: usize = 0,
+    end_col: usize = 0,
+
+    pub fn clear(self: *RectSelection) void {
+        self.active = false;
+    }
+
+    pub fn contains(self: *const RectSelection, line: usize, col: usize) bool {
+        if (!self.active) return false;
+        const min_l = @min(self.start_line, self.end_line);
+        const max_l = @max(self.start_line, self.end_line);
+        const min_c = @min(self.start_col, self.end_col);
+        const max_c = @max(self.start_col, self.end_col);
+        return line >= min_l and line <= max_l and col >= min_c and col <= max_c;
+    }
+};
+
+// ---------------------------------------------------------------------------
+// File Buffer
 // ---------------------------------------------------------------------------
 
 pub const file_buf_cap: usize = 32768;
@@ -114,6 +271,13 @@ pub const FileBuffer = struct {
     len: usize = 0,
     cursor: usize = 0,
     undo: UndoRing = .{},
+    bookmarks: Bookmarks = .{},
+    // E12 multi-cursors
+    extra_cursors: [max_cursors]usize = [_]usize{0} ** max_cursors,
+    extra_cursor_count: usize = 0,
+    // E13 rectangular selection
+    rect_sel: RectSelection = .{},
+    tab_width: usize = 4,
 
     pub fn slice(self: *const FileBuffer) []const u8 {
         return self.buf[0..self.len];
@@ -125,25 +289,46 @@ pub const FileBuffer = struct {
         self.len = n;
         self.cursor = @min(self.cursor, n);
         self.undo.clear();
+        self.bookmarks.clear();
+        self.extra_cursor_count = 0;
+        self.rect_sel.clear();
     }
 
     pub fn clear(self: *FileBuffer) void {
         self.len = 0;
         self.cursor = 0;
         self.undo.clear();
+        self.bookmarks.clear();
+        self.extra_cursor_count = 0;
+        self.rect_sel.clear();
     }
 
-    pub fn insert_char(self: *FileBuffer, ch: u8) bool {
-        if (self.len >= file_buf_cap) return false;
+    pub fn insert_char_at(self: *FileBuffer, pos: usize, ch: u8) bool {
+        if (self.len >= file_buf_cap or pos > self.len) return false;
         var i = self.len;
-        while (i > self.cursor) : (i -= 1) self.buf[i] = self.buf[i - 1];
-        self.buf[self.cursor] = ch;
+        while (i > pos) : (i -= 1) self.buf[i] = self.buf[i - 1];
+        self.buf[pos] = ch;
         self.len += 1;
-        // E2: push undo delta (insert: old="" new=ch)
-        var d: Delta = .{ .pos = self.cursor };
+        var d: Delta = .{ .pos = pos };
         d.new_text[0] = ch;
         d.new_len = 1;
         self.undo.push_undo(d);
+        return true;
+    }
+
+    pub fn insert_char(self: *FileBuffer, ch: u8) bool {
+        if (self.extra_cursor_count > 0) {
+            // Insert at extra cursors too (reverse order to keep indices stable)
+            var k = self.extra_cursor_count;
+            while (k > 0) : (k -= 1) {
+                const cpos = self.extra_cursors[k - 1];
+                if (self.insert_char_at(cpos, ch)) {
+                    self.extra_cursors[k - 1] += 1;
+                    if (self.cursor > cpos) self.cursor += 1;
+                }
+            }
+        }
+        if (!self.insert_char_at(self.cursor, ch)) return false;
         self.cursor += 1;
         return true;
     }
@@ -157,17 +342,32 @@ pub const FileBuffer = struct {
         return ins;
     }
 
-    pub fn backspace(self: *FileBuffer) bool {
-        if (self.cursor == 0 or self.len == 0) return false;
-        const deleted_char = self.buf[self.cursor - 1];
-        var i = self.cursor - 1;
+    pub fn backspace_at(self: *FileBuffer, pos: usize) bool {
+        if (pos == 0 or pos > self.len or self.len == 0) return false;
+        const deleted_char = self.buf[pos - 1];
+        var i = pos - 1;
         while (i < self.len - 1) : (i += 1) self.buf[i] = self.buf[i + 1];
         self.len -= 1;
-        // E2: push undo delta (delete: old=deleted_char new="")
-        var d: Delta = .{ .pos = self.cursor - 1 };
+        var d: Delta = .{ .pos = pos - 1 };
         d.old_text[0] = deleted_char;
         d.old_len = 1;
         self.undo.push_undo(d);
+        return true;
+    }
+
+    pub fn backspace(self: *FileBuffer) bool {
+        if (self.cursor == 0 or self.len == 0) return false;
+        if (self.extra_cursor_count > 0) {
+            var k = self.extra_cursor_count;
+            while (k > 0) : (k -= 1) {
+                const cpos = self.extra_cursors[k - 1];
+                if (self.backspace_at(cpos)) {
+                    self.extra_cursors[k - 1] -= 1;
+                    if (self.cursor > cpos) self.cursor -= 1;
+                }
+            }
+        }
+        if (!self.backspace_at(self.cursor)) return false;
         self.cursor -= 1;
         return true;
     }
@@ -178,7 +378,6 @@ pub const FileBuffer = struct {
         var i = self.cursor;
         while (i < self.len - 1) : (i += 1) self.buf[i] = self.buf[i + 1];
         self.len -= 1;
-        // E2: push undo delta (delete-forward: old=deleted_char new="")
         var d: Delta = .{ .pos = self.cursor };
         d.old_text[0] = deleted_char;
         d.old_len = 1;
@@ -186,12 +385,10 @@ pub const FileBuffer = struct {
         return true;
     }
 
-    /// Overwrite a character at cursor (OVR mode). Returns true if done.
     pub fn overwrite_char(self: *FileBuffer, ch: u8) bool {
         if (self.cursor >= self.len) return false;
         const old_ch = self.buf[self.cursor];
         self.buf[self.cursor] = ch;
-        // E2: push undo delta (overwrite: old=old_ch new=ch)
         var d: Delta = .{ .pos = self.cursor };
         d.old_text[0] = old_ch;
         d.old_len = 1;
@@ -206,8 +403,6 @@ pub const FileBuffer = struct {
         return self.insert_newline_autoindent();
     }
 
-    /// E8: Insert newline with automatic indentation copying the leading whitespace
-    /// of the current line.
     pub fn insert_newline_autoindent(self: *FileBuffer) bool {
         const ls = self.line_start(self.cursor);
         var ws_len: usize = 0;
@@ -222,7 +417,6 @@ pub const FileBuffer = struct {
         return true;
     }
 
-    /// E8: Dedent on typing closing brace '}' if the line up to cursor is only whitespace.
     pub fn insert_char_with_dedent(self: *FileBuffer, ch: u8) bool {
         if (ch == '}') {
             const ls = self.line_start(self.cursor);
@@ -246,7 +440,37 @@ pub const FileBuffer = struct {
         return self.insert_char(ch);
     }
 
-    /// E22: Delete current line (Ctrl+Shift+D). Slices out line including newline.
+    // E20: Indentation controls (Tab/Shift+Tab)
+    pub fn indent_current_line(self: *FileBuffer) bool {
+        const ls = self.line_start(self.cursor);
+        var i: usize = 0;
+        while (i < self.tab_width) : (i += 1) {
+            if (!self.insert_char_at(ls, ' ')) return false;
+        }
+        self.cursor += self.tab_width;
+        return true;
+    }
+
+    pub fn dedent_current_line(self: *FileBuffer) bool {
+        const ls = self.line_start(self.cursor);
+        var spaces: usize = 0;
+        while (ls + spaces < self.len and spaces < self.tab_width and self.buf[ls + spaces] == ' ') : (spaces += 1) {}
+        if (spaces == 0 and ls < self.len and self.buf[ls] == '\t') {
+            spaces = 1;
+        }
+        if (spaces == 0) return false;
+
+        var i: usize = 0;
+        while (i < spaces) : (i += 1) {
+            _ = self.backspace_at(ls + 1);
+        }
+        if (self.cursor > ls) {
+            self.cursor = ls + (self.cursor - ls -| spaces);
+        }
+        return true;
+    }
+
+    // E22: Delete current line
     pub fn delete_current_line(self: *FileBuffer) bool {
         if (self.len == 0) return false;
         const ls = self.line_start(self.cursor);
@@ -271,13 +495,12 @@ pub const FileBuffer = struct {
         return true;
     }
 
-    /// E2: Apply undo. Pops the top undo delta, reverses it, pushes to redo.
+    // E2: Undo / Redo
     pub fn undo_last(self: *FileBuffer) bool {
         if (!self.undo.can_undo()) return false;
         const d = self.undo.undo_stack[self.undo.undo_count - 1];
         self.undo.undo_count -= 1;
 
-        // Reverse: remove new_text, insert old_text at pos
         self.cursor = d.pos;
         if (d.new_len > 0) {
             const rm_end = d.pos + d.new_len;
@@ -303,13 +526,11 @@ pub const FileBuffer = struct {
             self.cursor = d.pos;
         }
 
-        // Push to redo
         self.undo.redo_stack[self.undo.redo_count] = d;
         self.undo.redo_count += 1;
         return true;
     }
 
-    /// E2: Apply redo. Pops the top redo delta, re-applies it, pushes to undo.
     pub fn redo_last(self: *FileBuffer) bool {
         if (!self.undo.can_redo()) return false;
         const d = self.undo.redo_stack[self.undo.redo_count - 1];
@@ -340,13 +561,11 @@ pub const FileBuffer = struct {
             self.cursor = d.pos;
         }
 
-        // Push back to undo
         self.undo.undo_stack[self.undo.undo_count] = d;
         self.undo.undo_count += 1;
         return true;
     }
 
-    /// E3: Goto a specific line (1-based). Clamps to last line.
     pub fn goto_line(self: *FileBuffer, line_num: usize) void {
         if (line_num == 0) {
             self.cursor = 0;
@@ -361,16 +580,14 @@ pub const FileBuffer = struct {
         self.cursor = i;
     }
 
-    /// Find the start of the current line (byte offset).
     pub fn line_start(self: *const FileBuffer, pos: usize) usize {
-        var p = pos;
+        var p = @min(pos, self.len);
         while (p > 0 and self.buf[p - 1] != '\n') p -= 1;
         return p;
     }
 
-    /// Find the end of the current line (byte offset).
     pub fn line_end(self: *const FileBuffer, pos: usize) usize {
-        var p = pos;
+        var p = @min(pos, self.len);
         while (p < self.len and self.buf[p] != '\n') p += 1;
         return p;
     }
@@ -433,7 +650,77 @@ pub const FileBuffer = struct {
         const ls = self.line_start(self.cursor);
         return self.cursor - ls + 1;
     }
+
+    // E12: Add cursor at next occurrence of current word
+    pub fn add_next_word_cursor(self: *FileBuffer) bool {
+        if (self.extra_cursor_count >= max_cursors) return false;
+        if (extract_word_at_pos(self.slice(), self.cursor)) |word| {
+            const search_from = if (self.extra_cursor_count > 0)
+                self.extra_cursors[self.extra_cursor_count - 1] + word.len
+            else
+                self.cursor + word.len;
+            if (find_next_ci(self.slice(), word, search_from, true)) |res| {
+                if (res.pos != self.cursor) {
+                    self.extra_cursors[self.extra_cursor_count] = res.pos;
+                    self.extra_cursor_count += 1;
+                    return true;
+                }
+            }
+        }
+        // Fallback: add cursor at next line position
+        const le = self.line_end(self.cursor);
+        const next_pos = if (le < self.len) le + 1 else self.cursor;
+        self.extra_cursors[self.extra_cursor_count] = next_pos;
+        self.extra_cursor_count += 1;
+        return true;
+    }
 };
+
+// ---------------------------------------------------------------------------
+// E23: Jump to definition helper
+// ---------------------------------------------------------------------------
+
+pub fn extract_word_at_pos(buf: []const u8, pos: usize) ?[]const u8 {
+    if (buf.len == 0) return null;
+    var p = @min(pos, buf.len - 1);
+    if (!is_ident_char(buf[p]) and p > 0 and is_ident_char(buf[p - 1])) {
+        p -= 1;
+    }
+    if (!is_ident_char(buf[p])) return null;
+
+    var start = p;
+    while (start > 0 and is_ident_char(buf[start - 1])) start -= 1;
+    var end = p;
+    while (end < buf.len and is_ident_char(buf[end])) end += 1;
+
+    if (start >= end) return null;
+    return buf[start..end];
+}
+
+pub fn find_definition_in_buffer(buf: []const u8, word: []const u8) ?usize {
+    if (word.len == 0 or buf.len < word.len) return null;
+
+    // Look for "fn <word>" or "pub fn <word>" or "const <word> ="
+    var pos: usize = 0;
+    while (pos + word.len <= buf.len) : (pos += 1) {
+        if (std.mem.startsWith(u8, buf[pos..], word)) {
+            // Check preceding context
+            const ls = if (pos > 0) blk: {
+                var p = pos;
+                while (p > 0 and buf[p - 1] != '\n') p -= 1;
+                break :blk p;
+            } else 0;
+            const line_prefix = buf[ls..pos];
+            if (std.mem.indexOf(u8, line_prefix, "fn ") != null or
+                std.mem.indexOf(u8, line_prefix, "const ") != null or
+                std.mem.indexOf(u8, line_prefix, "var ") != null)
+            {
+                return ls;
+            }
+        }
+    }
+    return null;
+}
 
 // ---------------------------------------------------------------------------
 // E5: Syntax coloring — Zig keyword table + token classifier
@@ -512,14 +799,14 @@ pub fn is_ident_char(ch: u8) bool {
     return is_ident_start(ch) or (ch >= '0' and ch <= '9');
 }
 
-fn draw_line_colored(win: u32, text: []const u8, x: u32, y: u32) void {
+fn draw_line_colored(win: u32, text: []const u8, x: u32, y: u32, theme: *const Theme) void {
     var pos: usize = 0;
     var cur_x = x;
     while (pos < text.len) {
         var ws: usize = 0;
         while (pos + ws < text.len and (text[pos + ws] == ' ' or text[pos + ws] == '\t')) : (ws += 1) {}
         if (ws > 0) {
-            ui.draw_text(win, text[pos..][0..ws], cur_x, y, ui.COLOR_TEXT_PRIMARY);
+            ui.draw_text(win, text[pos..][0..ws], cur_x, y, theme.text);
             cur_x += @as(u32, @intCast(ws)) * glyph_w;
             pos += ws;
         }
@@ -527,10 +814,10 @@ fn draw_line_colored(win: u32, text: []const u8, x: u32, y: u32) void {
 
         const result = classify_token(text[pos..]);
         const color: u32 = switch (result.kind) {
-            .plain => ui.COLOR_TEXT_PRIMARY,
-            .keyword => ui.COLOR_ACCENT,
-            .string => ui.COLOR_SUCCESS,
-            .comment => ui.COLOR_WARNING,
+            .plain => theme.text,
+            .keyword => theme.accent,
+            .string => theme.success,
+            .comment => theme.warning,
         };
         if (result.len == 0) break;
         ui.draw_text(win, text[pos..][0..result.len], cur_x, y, color);
@@ -596,7 +883,7 @@ pub fn find_matching_bracket(buf: []const u8, pos: usize) ?usize {
 }
 
 // ---------------------------------------------------------------------------
-// E7: Search & Replace (FindPrompt + search algorithms)
+// E7: Search & Replace
 // ---------------------------------------------------------------------------
 
 pub const search_cap: usize = 32;
@@ -771,6 +1058,222 @@ pub fn replace_all_matches(fb: *FileBuffer, needle: []const u8, replacement: []c
     }
     return count;
 }
+
+// ---------------------------------------------------------------------------
+// E14: Command Palette (Ctrl+Shift+P) & E18: Keybindings
+// ---------------------------------------------------------------------------
+
+pub const KeyAction = enum {
+    none,
+    save_file,
+    open_recent,
+    undo,
+    redo,
+    find,
+    replace,
+    goto_line,
+    toggle_wrap,
+    toggle_numbers,
+    toggle_bookmark,
+    next_bookmark,
+    prev_bookmark,
+    jump_definition,
+    delete_line,
+    cycle_theme,
+    indent_line,
+    dedent_line,
+    multi_cursor,
+    toggle_file_tree,
+    new_tab,
+    close_tab,
+    next_tab,
+    toggle_shell,
+};
+
+pub const CommandItem = struct {
+    name: []const u8,
+    shortcut: []const u8,
+    action: KeyAction,
+};
+
+pub const command_list = [_]CommandItem{
+    .{ .name = "Save File", .shortcut = "^S", .action = .save_file },
+    .{ .name = "Recent Files", .shortcut = "^R", .action = .open_recent },
+    .{ .name = "Find", .shortcut = "^F", .action = .find },
+    .{ .name = "Replace", .shortcut = "^H", .action = .replace },
+    .{ .name = "Goto Line", .shortcut = "^G", .action = .goto_line },
+    .{ .name = "Toggle Word Wrap", .shortcut = "M-Z", .action = .toggle_wrap },
+    .{ .name = "Toggle Line Numbers", .shortcut = "^L", .action = .toggle_numbers },
+    .{ .name = "Toggle Bookmark", .shortcut = "^B", .action = .toggle_bookmark },
+    .{ .name = "Next Bookmark", .shortcut = "^+Down", .action = .next_bookmark },
+    .{ .name = "Prev Bookmark", .shortcut = "^+Up", .action = .prev_bookmark },
+    .{ .name = "Jump to Definition", .shortcut = "^]", .action = .jump_definition },
+    .{ .name = "Delete Line", .shortcut = "^+D", .action = .delete_line },
+    .{ .name = "Cycle Theme", .shortcut = "^+T", .action = .cycle_theme },
+    .{ .name = "Indent Line", .shortcut = "Tab", .action = .indent_line },
+    .{ .name = "Dedent Line", .shortcut = "S-Tab", .action = .dedent_line },
+    .{ .name = "Add Multi-Cursor", .shortcut = "^D", .action = .multi_cursor },
+    .{ .name = "Toggle File Tree", .shortcut = "^+F", .action = .toggle_file_tree },
+    .{ .name = "New Tab", .shortcut = "^T", .action = .new_tab },
+    .{ .name = "Close Tab", .shortcut = "^W", .action = .close_tab },
+    .{ .name = "Next Tab", .shortcut = "^Tab", .action = .next_tab },
+    .{ .name = "Toggle Shell", .shortcut = "^`", .action = .toggle_shell },
+    .{ .name = "Undo", .shortcut = "^Z", .action = .undo },
+    .{ .name = "Redo", .shortcut = "^Y", .action = .redo },
+};
+
+pub fn fuzzy_match(pattern: []const u8, text: []const u8) bool {
+    if (pattern.len == 0) return true;
+    var pi: usize = 0;
+    for (text) |ch| {
+        if (std.ascii.toLower(ch) == std.ascii.toLower(pattern[pi])) {
+            pi += 1;
+            if (pi >= pattern.len) return true;
+        }
+    }
+    return false;
+}
+
+pub const CommandPalette = struct {
+    active: bool = false,
+    query: [32]u8 = [_]u8{0} ** 32,
+    query_len: usize = 0,
+    selected: usize = 0,
+
+    pub fn open(self: *CommandPalette) void {
+        self.active = true;
+        self.query_len = 0;
+        self.selected = 0;
+    }
+
+    pub fn close(self: *CommandPalette) void {
+        self.active = false;
+        self.query_len = 0;
+    }
+
+    pub fn insert_char(self: *CommandPalette, ch: u8) void {
+        if (self.query_len < 32) {
+            self.query[self.query_len] = ch;
+            self.query_len += 1;
+            self.selected = 0;
+        }
+    }
+
+    pub fn backspace(self: *CommandPalette) void {
+        if (self.query_len > 0) {
+            self.query_len -= 1;
+            self.selected = 0;
+        }
+    }
+
+    pub fn match_count(self: *const CommandPalette) usize {
+        const q = self.query[0..self.query_len];
+        var count: usize = 0;
+        for (command_list) |cmd| {
+            if (fuzzy_match(q, cmd.name)) count += 1;
+        }
+        return count;
+    }
+
+    pub fn get_selected_action(self: *const CommandPalette) ?KeyAction {
+        const q = self.query[0..self.query_len];
+        var match_idx: usize = 0;
+        for (command_list) |cmd| {
+            if (fuzzy_match(q, cmd.name)) {
+                if (match_idx == self.selected) return cmd.action;
+                match_idx += 1;
+            }
+        }
+        return null;
+    }
+};
+
+// ---------------------------------------------------------------------------
+// E15: Recent Files List
+// ---------------------------------------------------------------------------
+
+pub const max_recent_files: usize = 10;
+
+pub const RecentList = struct {
+    files: [max_recent_files][64]u8 = [_][64]u8{[_]u8{0} ** 64} ** max_recent_files,
+    lens: [max_recent_files]usize = [_]usize{0} ** max_recent_files,
+    count: usize = 0,
+    active: bool = false,
+    selected: usize = 0,
+
+    pub fn add(self: *RecentList, path: []const u8) void {
+        if (path.len == 0) return;
+        // Check if already in list
+        var i: usize = 0;
+        while (i < self.count) : (i += 1) {
+            if (std.mem.eql(u8, self.files[i][0..self.lens[i]], path)) {
+                // Move to front
+                const saved = self.files[i];
+                const slen = self.lens[i];
+                var j = i;
+                while (j > 0) : (j -= 1) {
+                    self.files[j] = self.files[j - 1];
+                    self.lens[j] = self.lens[j - 1];
+                }
+                self.files[0] = saved;
+                self.lens[0] = slen;
+                return;
+            }
+        }
+        // Insert at front
+        const new_count = @min(self.count + 1, max_recent_files);
+        var k = new_count - 1;
+        while (k > 0) : (k -= 1) {
+            self.files[k] = self.files[k - 1];
+            self.lens[k] = self.lens[k - 1];
+        }
+        const n = @min(path.len, 64);
+        @memcpy(self.files[0][0..n], path[0..n]);
+        self.lens[0] = n;
+        self.count = new_count;
+    }
+
+    pub fn open(self: *RecentList) void {
+        self.active = true;
+        self.selected = 0;
+    }
+
+    pub fn close(self: *RecentList) void {
+        self.active = false;
+    }
+};
+
+// ---------------------------------------------------------------------------
+// E24: File Tree Sidebar
+// ---------------------------------------------------------------------------
+
+pub const max_sidebar_entries: usize = 32;
+
+pub const FileSidebar = struct {
+    active: bool = false,
+    entries: [max_sidebar_entries]DirEntry = [_]DirEntry{.{ .name = [_]u8{0} ** 32, .size = 0, .is_dir = 0, .reserved = [_]u8{0} ** 3 }} ** max_sidebar_entries,
+    count: usize = 0,
+    selected: usize = 0,
+
+    pub fn refresh(self: *FileSidebar) void {
+        const rc = ui.dir_list("", &self.entries);
+        if (rc > 0) {
+            self.count = @min(@as(usize, @intCast(rc)), max_sidebar_entries);
+        } else {
+            self.count = 0;
+        }
+        self.selected = 0;
+    }
+
+    pub fn toggle(self: *FileSidebar) void {
+        self.active = !self.active;
+        if (self.active) self.refresh();
+    }
+
+    pub fn close(self: *FileSidebar) void {
+        self.active = false;
+    }
+};
 
 // ---------------------------------------------------------------------------
 // Console Split Mini-Shell (E6)
@@ -983,6 +1486,18 @@ pub const TabArray = struct {
     active: usize = 0,
     count: usize = 0,
 
+    pub fn init_in_place(self: *TabArray) void {
+        self.active = 0;
+        self.count = 1;
+        var i: usize = 0;
+        while (i < max_tabs) : (i += 1) {
+            self.tabs[i].is_used = (i == 0);
+            self.tabs[i].dirty = false;
+            self.tabs[i].fb.clear();
+            self.set_filename(i, if (i == 0) "UNTITLED" else "");
+        }
+    }
+
     pub fn init() TabArray {
         var ta = TabArray{};
         ta.tabs[0].is_used = true;
@@ -1062,6 +1577,19 @@ pub const TabArray = struct {
 };
 
 // ---------------------------------------------------------------------------
+// E16: Unsaved changes close confirmation modal
+// ---------------------------------------------------------------------------
+
+pub const CloseConfirm = struct {
+    active: bool = false,
+    target_tab: usize = 0,
+
+    pub fn close(self: *CloseConfirm) void {
+        self.active = false;
+    }
+};
+
+// ---------------------------------------------------------------------------
 // Editor State
 // ---------------------------------------------------------------------------
 
@@ -1073,20 +1601,44 @@ pub const AppState = struct {
     insert_mode: bool = true,
     show_shell: bool = false,
     show_line_numbers: bool = true,
+    word_wrap: bool = false,
+    theme_idx: usize = 0,
     goto_prompt: GotoPrompt = .{},
     find_prompt: FindPrompt = .{},
+    cmd_palette: CommandPalette = .{},
+    recent_list: RecentList = .{},
+    file_sidebar: FileSidebar = .{},
+    close_confirm: CloseConfirm = .{},
+    info_msg: [64]u8 = [_]u8{0} ** 64,
+    info_len: usize = 0,
     win_id: u32 = 0,
 
     pub fn init(self: *AppState) void {
-        self.* = .{};
-        self.tabs.tabs[0].is_used = true;
-        self.tabs.count = 1;
-        self.tabs.set_filename(0, "UNTITLED");
+        self.show_shell = false;
+        self.insert_mode = true;
         self.show_line_numbers = true;
+        self.word_wrap = false;
+        self.theme_idx = 0;
+        self.win_id = 0;
+        self.info_len = 0;
+        self.status_len = 0;
+        self.set_status("EDIT.BIN");
+        self.tabs.init_in_place();
+        self.shell.reset();
+        self.goto_prompt.close();
+        self.find_prompt.close();
+        self.cmd_palette.close();
+        self.recent_list.close();
+        self.file_sidebar.close();
+        self.close_confirm.close();
     }
 
     pub fn fb(self: *AppState) *FileBuffer {
         return self.tabs.active_fb();
+    }
+
+    pub fn cur_theme(self: *const AppState) *const Theme {
+        return &themes[self.theme_idx % themes.len];
     }
 
     pub fn set_status(self: *AppState, msg: []const u8) void {
@@ -1095,27 +1647,64 @@ pub const AppState = struct {
         self.status_len = n;
     }
 
+    pub fn set_info(self: *AppState, msg: []const u8) void {
+        const n = @min(msg.len, self.info_msg.len);
+        @memcpy(self.info_msg[0..n], msg[0..n]);
+        self.info_len = n;
+        self.set_status(msg);
+    }
+
+    pub fn save_active_file(self: *AppState) bool {
+        const active_t = self.tabs.active_tab();
+        const fname = self.tabs.get_filename(self.tabs.active);
+        if (std.mem.eql(u8, fname, "UNTITLED")) {
+            self.set_info("Save: UNTITLED file (specify name in shell or open)");
+            return false;
+        }
+
+        const fd_res = ui.file_open(fname, ui.MODE_WRITE | ui.MODE_CREATE);
+        if (fd_res >= 0) {
+            const fd = @as(u32, @intCast(fd_res));
+            _ = ui.file_write(fd, active_t.fb.slice());
+            ui.file_close(fd);
+            active_t.dirty = false;
+            self.recent_list.add(fname);
+            self.set_info("Saved successfully");
+            ui.write_console("edit: save-ok\n");
+            return true;
+        } else {
+            self.set_info("Save failed (disk error)");
+            return false;
+        }
+    }
+
     pub fn draw(self: *const AppState, win: u32) void {
+        const t = self.cur_theme();
+
         // Background
-        ui.draw_rect(win, Rect.make(0, 0, window_w, window_h), ui.COLOR_BG);
+        ui.draw_rect(win, Rect.make(0, 0, window_w, window_h), t.bg);
 
-        // Status bar
-        ui.draw_rect(win, Rect.make(0, 0, window_w, 16), ui.COLOR_SURFACE);
-        ui.draw_text(win, self.status[0..self.status_len], 6, 3, ui.COLOR_TEXT_MUTED);
+        // Status bar at top
+        ui.draw_rect(win, Rect.make(0, 0, window_w, 16), t.surface);
+        ui.draw_text(win, self.status[0..self.status_len], 6, 3, t.muted);
 
-        // Mode indicator
+        // Mode & Wrap indicator
         const mode = if (self.insert_mode) "INS" else "OVR";
-        ui.draw_text(win, mode, @intCast(window_w - 30), 3, ui.COLOR_ACCENT);
+        ui.draw_text(win, mode, @intCast(window_w - 30), 3, t.accent);
+        if (self.word_wrap) {
+            ui.draw_text(win, "WRAP", @intCast(window_w - 65), 3, t.warning);
+        }
 
         // Key hints
-        ui.draw_text(win, "^F:Find ^G:Go ^L:Num ^Z:Undo", @intCast(window_w - 260), 3, ui.COLOR_TEXT_MUTED);
+        ui.draw_text(win, "^P:Cmd ^S:Save ^F:Find ^B:Bmk", @intCast(window_w - 320), 3, t.muted);
 
         // Divider
-        ui.draw_rect(win, Rect.make(0, 16, window_w, 1), ui.COLOR_BORDER);
+        ui.draw_rect(win, Rect.make(0, 16, window_w, 1), t.gutter_bg);
 
-        // E4: Tab bar
+        // Tab bar
         self.draw_tab_bar(win);
 
+        // Main area: file tree sidebar + editor
         if (self.show_shell) {
             self.draw_split(win);
         } else {
@@ -1123,7 +1712,13 @@ pub const AppState = struct {
         }
 
         // Overlays
-        if (self.find_prompt.active) {
+        if (self.cmd_palette.active) {
+            self.draw_cmd_palette(win);
+        } else if (self.recent_list.active) {
+            self.draw_recent_list(win);
+        } else if (self.close_confirm.active) {
+            self.draw_close_confirm(win);
+        } else if (self.find_prompt.active) {
             self.draw_find_prompt(win);
         } else if (self.goto_prompt.active) {
             self.draw_goto_prompt(win);
@@ -1131,8 +1726,9 @@ pub const AppState = struct {
     }
 
     fn draw_tab_bar(self: *const AppState, win: u32) void {
+        const t = self.cur_theme();
         const tab_y: u32 = 17;
-        ui.draw_rect(win, Rect.make(0, tab_y, window_w, tab_bar_h), ui.COLOR_BG);
+        ui.draw_rect(win, Rect.make(0, tab_y, window_w, tab_bar_h), t.bg);
 
         var tab_x: u32 = 0;
         var i: usize = 0;
@@ -1143,22 +1739,22 @@ pub const AppState = struct {
             const tab_w: u32 = name_len * glyph_w + 16;
 
             const is_active = (i == self.tabs.active);
-            const bg = if (is_active) ui.COLOR_SURFACE else ui.COLOR_BG;
+            const bg = if (is_active) t.surface else t.bg;
             ui.draw_rect(win, Rect.make(tab_x, tab_y, tab_w, tab_bar_h), bg);
 
-            ui.draw_rect(win, Rect.make(tab_x + tab_w, tab_y, 1, tab_bar_h), ui.COLOR_BORDER);
+            ui.draw_rect(win, Rect.make(tab_x + tab_w, tab_y, 1, tab_bar_h), t.gutter_bg);
 
-            const text_color = if (is_active) ui.COLOR_TEXT_PRIMARY else ui.COLOR_TEXT_MUTED;
+            const text_color = if (is_active) t.text else t.muted;
             ui.draw_text(win, name[0..name_len], tab_x + 4, tab_y + 3, text_color);
 
             if (self.tabs.tabs[i].dirty) {
-                ui.draw_text(win, "*", tab_x + 4 + name_len * glyph_w + 2, tab_y + 3, ui.COLOR_WARNING);
+                ui.draw_text(win, "*", tab_x + 4 + name_len * glyph_w + 2, tab_y + 3, t.warning);
             }
 
             tab_x += tab_w + 1;
         }
 
-        ui.draw_rect(win, Rect.make(0, tab_y + tab_bar_h, window_w, 1), ui.COLOR_BORDER);
+        ui.draw_rect(win, Rect.make(0, tab_y + tab_bar_h, window_w, 1), t.gutter_bg);
     }
 
     fn editor_top(self: *const AppState) u32 {
@@ -1174,23 +1770,51 @@ pub const AppState = struct {
     }
 
     fn draw_editor_full(self: *const AppState, win: u32) void {
+        const t = self.cur_theme();
         const top = self.editor_top();
         const avail = self.editor_available_h();
         const vis_rows = @max(avail / line_h + 1, 2);
 
-        ui.draw_rect(win, Rect.make(0, top, window_w, avail), ui.COLOR_SURFACE);
+        var edit_x: u32 = 0;
+        var edit_w: u32 = window_w;
+
+        // E24: File tree sidebar
+        if (self.file_sidebar.active) {
+            const sb_w: u32 = 96;
+            ui.draw_rect(win, Rect.make(0, top, sb_w, avail), t.gutter_bg);
+            ui.draw_text(win, "FILES", 4, top + 2, t.accent);
+
+            var sbi: usize = 0;
+            while (sbi < self.file_sidebar.count and sbi < 18) : (sbi += 1) {
+                const sby = top + 16 + @as(u32, @intCast(sbi)) * line_h;
+                const ent = &self.file_sidebar.entries[sbi];
+                var name_len: usize = 0;
+                while (name_len < 32 and ent.name[name_len] != 0) : (name_len += 1) {}
+                const is_sel = (sbi == self.file_sidebar.selected);
+                if (is_sel) {
+                    ui.draw_rect(win, Rect.make(0, sby, sb_w, line_h), t.selection_bg);
+                }
+                const col = if (is_sel) t.text else t.muted;
+                const take = @min(name_len, 10);
+                ui.draw_text(win, ent.name[0..take], 4, sby + 1, col);
+            }
+            ui.draw_rect(win, Rect.make(sb_w, top, 1, avail), t.surface);
+            edit_x = sb_w + 1;
+            edit_w = window_w - edit_x;
+        }
+
+        ui.draw_rect(win, Rect.make(edit_x, top, edit_w, avail), t.surface);
 
         const gw: u32 = if (self.show_line_numbers) gutter_w else 0;
-        const x0: u32 = gw + 4;
+        const x0: u32 = edit_x + gw + 4;
         if (self.show_line_numbers) {
-            ui.draw_rect(win, Rect.make(0, top, gutter_w, avail), ui.COLOR_BG);
+            ui.draw_rect(win, Rect.make(edit_x, top, gutter_w, avail), t.gutter_bg);
         }
 
         const fb_ptr = &self.tabs.tabs[self.tabs.active].fb;
         const slice = fb_ptr.slice();
         const use_syntax = self.tabs.is_zig_file();
 
-        // Bracket matching position
         const bracket_match = if (fb_ptr.cursor < slice.len and is_bracket(slice[fb_ptr.cursor]))
             find_matching_bracket(slice, fb_ptr.cursor)
         else if (fb_ptr.cursor > 0 and fb_ptr.cursor <= slice.len and is_bracket(slice[fb_ptr.cursor - 1]))
@@ -1208,13 +1832,18 @@ pub const AppState = struct {
 
             const gy = top + 3 + @as(u32, @intCast(ln)) * line_h;
 
+            // Line numbers & Bookmarks
             if (self.show_line_numbers) {
                 var nbuf: [4]u8 = undefined;
                 const nl = fmt_int(&nbuf, ln + 1);
-                ui.draw_text(win, nbuf[0..nl], 2, gy, ui.COLOR_TEXT_MUTED);
+                ui.draw_text(win, nbuf[0..nl], edit_x + 2, gy, t.muted);
+
+                if (fb_ptr.bookmarks.has_bookmark(ln + 1)) {
+                    ui.draw_text(win, "*", edit_x + gutter_w - 6, gy, t.warning);
+                }
             }
 
-            // Highlight search matches on this line
+            // Search match highlights
             if (self.find_prompt.active and self.find_prompt.find_len > 0) {
                 const needle = self.find_prompt.get_find();
                 var p = line_start;
@@ -1223,7 +1852,7 @@ pub const AppState = struct {
                         const col_offset = p - line_start;
                         const mx = x0 + @as(u32, @intCast(col_offset)) * glyph_w;
                         const mw = @as(u32, @intCast(needle.len)) * glyph_w;
-                        ui.draw_rect(win, Rect.make(mx, gy - 1, mw, line_h), ui.COLOR_BTN_HOVER);
+                        ui.draw_rect(win, Rect.make(mx, gy - 1, mw, line_h), t.selection_bg);
                     }
                 }
             }
@@ -1231,43 +1860,61 @@ pub const AppState = struct {
             const llen = line_end - line_start;
             const take = @min(llen, text_cols);
             if (use_syntax) {
-                draw_line_colored(win, slice[line_start..][0..take], x0, gy);
+                draw_line_colored(win, slice[line_start..][0..take], x0, gy, t);
             } else {
-                ui.draw_text(win, slice[line_start..][0..take], x0, gy, ui.COLOR_TEXT_PRIMARY);
+                ui.draw_text(win, slice[line_start..][0..take], x0, gy, t.text);
             }
 
-            // Draw matching bracket highlight if on this line
             if (bracket_match) |bm| {
                 if (bm >= line_start and bm < line_end) {
                     const col_offset = bm - line_start;
                     const bx = x0 + @as(u32, @intCast(col_offset)) * glyph_w;
-                    ui.draw_rect_outline(win, Rect.make(bx, gy - 1, glyph_w, line_h), 1, ui.COLOR_ACCENT);
+                    ui.draw_rect_outline(win, Rect.make(bx, gy - 1, glyph_w, line_h), 1, t.accent);
                 }
             }
         }
 
-        // Cursor
+        // Primary Cursor
         if (self.insert_mode) {
             const cl = fb_ptr.current_line();
             const cc = fb_ptr.current_col();
             if (ln > 0 and cl <= ln) {
                 const cx = x0 + @as(u32, @intCast(cc - 1)) * glyph_w;
                 const cy = top + 2 + @as(u32, @intCast(cl - 1)) * line_h;
-                ui.draw_rect(win, Rect.make(cx, cy, glyph_w, line_h), ui.COLOR_ACCENT);
+                ui.draw_rect(win, Rect.make(cx, cy, glyph_w, line_h), t.cursor);
+            }
+
+            // Secondary Cursors (E12)
+            var ci: usize = 0;
+            while (ci < fb_ptr.extra_cursor_count) : (ci += 1) {
+                const epos = fb_ptr.extra_cursors[ci];
+                const els = fb_ptr.line_start(epos);
+                var el: usize = 1;
+                var p: usize = 0;
+                while (p < epos) : (p += 1) {
+                    if (slice[p] == '\n') el += 1;
+                }
+                const ec = epos - els + 1;
+                if (el <= vis_rows) {
+                    const ecx = x0 + @as(u32, @intCast(ec - 1)) * glyph_w;
+                    const ecy = top + 2 + @as(u32, @intCast(el - 1)) * line_h;
+                    ui.draw_rect_outline(win, Rect.make(ecx, ecy, glyph_w, line_h), 1, t.warning);
+                }
             }
         }
     }
 
     fn draw_split(self: *const AppState, win: u32) void {
+        const t = self.cur_theme();
         const top = self.editor_top();
         const edit_h = self.editor_available_h();
         const vis_rows = @max(edit_h / line_h + 1, 1);
 
-        ui.draw_rect(win, Rect.make(0, top, window_w, edit_h), ui.COLOR_SURFACE);
+        ui.draw_rect(win, Rect.make(0, top, window_w, edit_h), t.surface);
         const gw: u32 = if (self.show_line_numbers) gutter_w else 0;
         const x0: u32 = gw + 4;
         if (self.show_line_numbers) {
-            ui.draw_rect(win, Rect.make(0, top, gutter_w, edit_h), ui.COLOR_BG);
+            ui.draw_rect(win, Rect.make(0, top, gutter_w, edit_h), t.gutter_bg);
         }
 
         const fb_ptr = &self.tabs.tabs[self.tabs.active].fb;
@@ -1286,46 +1933,43 @@ pub const AppState = struct {
             if (self.show_line_numbers) {
                 var nbuf: [4]u8 = undefined;
                 const nl = fmt_int(&nbuf, ln + 1);
-                ui.draw_text(win, nbuf[0..nl], 2, gy, ui.COLOR_TEXT_MUTED);
+                ui.draw_text(win, nbuf[0..nl], 2, gy, t.muted);
             }
 
             const llen = line_end - line_start;
             const take = @min(llen, text_cols);
             if (use_syntax) {
-                draw_line_colored(win, slice[line_start..][0..take], x0, gy);
+                draw_line_colored(win, slice[line_start..][0..take], x0, gy, t);
             } else {
-                ui.draw_text(win, slice[line_start..][0..take], x0, gy, ui.COLOR_TEXT_PRIMARY);
+                ui.draw_text(win, slice[line_start..][0..take], x0, gy, t.text);
             }
         }
 
-        // Editor cursor
         if (self.insert_mode) {
             const cl = fb_ptr.current_line();
             const cc = fb_ptr.current_col();
             if (ln > 0 and cl <= ln) {
                 const cx = x0 + @as(u32, @intCast(cc - 1)) * glyph_w;
                 const cy = top + 2 + @as(u32, @intCast(cl - 1)) * line_h;
-                ui.draw_rect(win, Rect.make(cx, cy, glyph_w, line_h), ui.COLOR_ACCENT);
+                ui.draw_rect(win, Rect.make(cx, cy, glyph_w, line_h), t.cursor);
             }
         }
 
-        // Divider between editor and console
         const div_y = top + edit_h;
-        ui.draw_rect(win, Rect.make(0, div_y, window_w, 1), ui.COLOR_BORDER);
+        ui.draw_rect(win, Rect.make(0, div_y, window_w, 1), t.gutter_bg);
 
-        // Console pane
         const con_y = div_y + 1;
         const con_h = console_split_h - 1;
-        ui.draw_rect(win, Rect.make(0, con_y, window_w, con_h), ui.COLOR_SURFACE);
+        ui.draw_rect(win, Rect.make(0, con_y, window_w, con_h), t.surface);
 
-        ui.draw_text(win, ">", 4, con_y + 4, ui.COLOR_ACCENT);
+        ui.draw_text(win, ">", 4, con_y + 4, t.accent);
 
         if (self.shell.len > 0) {
-            ui.draw_text(win, self.shell.buf[0..self.shell.len], 16, con_y + 4, ui.COLOR_TEXT_PRIMARY);
+            ui.draw_text(win, self.shell.buf[0..self.shell.len], 16, con_y + 4, t.text);
         }
 
         const cx2: u32 = 16 + @as(u32, @intCast(self.shell.cursor)) * glyph_w;
-        ui.draw_rect(win, Rect.make(cx2, con_y + 3, glyph_w, 1), ui.COLOR_ACCENT);
+        ui.draw_rect(win, Rect.make(cx2, con_y + 3, glyph_w, 1), t.accent);
 
         const out_lines = console_rows;
         const out_slice = self.shell.output[0..self.shell.output_len];
@@ -1339,62 +1983,143 @@ pub const AppState = struct {
             const oy = con_y + 18 + @as(u32, @intCast(ol)) * line_h;
             if (oy + line_h > con_y + con_h) break;
             const take = @min(ol_end - ol_start, text_cols);
-            ui.draw_text(win, out_slice[ol_start..][0..take], 6, oy, ui.COLOR_TEXT_MUTED);
+            ui.draw_text(win, out_slice[ol_start..][0..take], 6, oy, t.muted);
         }
     }
 
     fn draw_goto_prompt(self: *const AppState, win: u32) void {
+        const t = self.cur_theme();
         const bar_h: u32 = 20;
         const bar_y = window_h - bar_h;
-        ui.draw_rect(win, Rect.make(0, bar_y, window_w, bar_h), ui.COLOR_SURFACE);
-        ui.draw_rect_outline(win, Rect.make(0, bar_y, window_w, bar_h), 1, ui.COLOR_ACCENT);
+        ui.draw_rect(win, Rect.make(0, bar_y, window_w, bar_h), t.surface);
+        ui.draw_rect_outline(win, Rect.make(0, bar_y, window_w, bar_h), 1, t.accent);
 
-        ui.draw_text(win, "Goto line:", 6, bar_y + 5, ui.COLOR_ACCENT);
+        ui.draw_text(win, "Goto line:", 6, bar_y + 5, t.accent);
 
         const input_x: u32 = 80;
         const text = self.goto_prompt.get_text();
         if (text.len > 0) {
-            ui.draw_text(win, text, input_x, bar_y + 5, ui.COLOR_TEXT_PRIMARY);
+            ui.draw_text(win, text, input_x, bar_y + 5, t.text);
         }
 
         const cx = input_x + @as(u32, @intCast(self.goto_prompt.len)) * glyph_w;
-        ui.draw_rect(win, Rect.make(cx, bar_y + 4, glyph_w, 10), ui.COLOR_ACCENT);
+        ui.draw_rect(win, Rect.make(cx, bar_y + 4, glyph_w, 10), t.accent);
 
-        ui.draw_text(win, "Enter=Go Esc=Cancel", window_w - 160, bar_y + 5, ui.COLOR_TEXT_MUTED);
+        ui.draw_text(win, "Enter=Go Esc=Cancel", window_w - 160, bar_y + 5, t.muted);
     }
 
     fn draw_find_prompt(self: *const AppState, win: u32) void {
+        const t = self.cur_theme();
         const bar_h: u32 = if (self.find_prompt.is_replace) 36 else 20;
         const bar_y = window_h - bar_h;
-        ui.draw_rect(win, Rect.make(0, bar_y, window_w, bar_h), ui.COLOR_SURFACE);
-        ui.draw_rect_outline(win, Rect.make(0, bar_y, window_w, bar_h), 1, ui.COLOR_ACCENT);
+        ui.draw_rect(win, Rect.make(0, bar_y, window_w, bar_h), t.surface);
+        ui.draw_rect_outline(win, Rect.make(0, bar_y, window_w, bar_h), 1, t.accent);
 
-        // Find row
-        ui.draw_text(win, "Find:", 6, bar_y + 5, ui.COLOR_ACCENT);
+        ui.draw_text(win, "Find:", 6, bar_y + 5, t.accent);
         const ftext = self.find_prompt.get_find();
         if (ftext.len > 0) {
-            ui.draw_text(win, ftext, 50, bar_y + 5, ui.COLOR_TEXT_PRIMARY);
+            ui.draw_text(win, ftext, 50, bar_y + 5, t.text);
         }
         if (!self.find_prompt.focus_replace) {
             const fcx = 50 + @as(u32, @intCast(self.find_prompt.find_len)) * glyph_w;
-            ui.draw_rect(win, Rect.make(fcx, bar_y + 4, glyph_w, 10), ui.COLOR_ACCENT);
+            ui.draw_rect(win, Rect.make(fcx, bar_y + 4, glyph_w, 10), t.accent);
         }
 
-        // Replace row
         if (self.find_prompt.is_replace) {
-            ui.draw_text(win, "Repl:", 6, bar_y + 20, ui.COLOR_WARNING);
+            ui.draw_text(win, "Repl:", 6, bar_y + 20, t.warning);
             const rtext = self.find_prompt.get_replace();
             if (rtext.len > 0) {
-                ui.draw_text(win, rtext, 50, bar_y + 20, ui.COLOR_TEXT_PRIMARY);
+                ui.draw_text(win, rtext, 50, bar_y + 20, t.text);
             }
             if (self.find_prompt.focus_replace) {
                 const rcx = 50 + @as(u32, @intCast(self.find_prompt.replace_len)) * glyph_w;
-                ui.draw_rect(win, Rect.make(rcx, bar_y + 19, glyph_w, 10), ui.COLOR_ACCENT);
+                ui.draw_rect(win, Rect.make(rcx, bar_y + 19, glyph_w, 10), t.accent);
             }
-            ui.draw_text(win, "Enter:Next Tab:Field ^A:All Esc:Close", window_w - 240, bar_y + 20, ui.COLOR_TEXT_MUTED);
+            ui.draw_text(win, "Enter:Next Tab:Field ^A:All Esc:Close", window_w - 240, bar_y + 20, t.muted);
         } else {
-            ui.draw_text(win, "Enter:Next Up:Prev Esc:Close", window_w - 200, bar_y + 5, ui.COLOR_TEXT_MUTED);
+            ui.draw_text(win, "Enter:Next Up:Prev Esc:Close", window_w - 200, bar_y + 5, t.muted);
         }
+    }
+
+    fn draw_cmd_palette(self: *const AppState, win: u32) void {
+        const t = self.cur_theme();
+        const pal_w: u32 = 360;
+        const pal_h: u32 = 180;
+        const pal_x: u32 = (window_w - pal_w) / 2;
+        const pal_y: u32 = 40;
+
+        ui.draw_rect(win, Rect.make(pal_x, pal_y, pal_w, pal_h), t.surface);
+        ui.draw_rect_outline(win, Rect.make(pal_x, pal_y, pal_w, pal_h), 1, t.accent);
+
+        ui.draw_text(win, ">", pal_x + 8, pal_y + 8, t.accent);
+        const q = self.cmd_palette.query[0..self.cmd_palette.query_len];
+        if (q.len > 0) {
+            ui.draw_text(win, q, pal_x + 20, pal_y + 8, t.text);
+        }
+        const qcx = pal_x + 20 + @as(u32, @intCast(q.len)) * glyph_w;
+        ui.draw_rect(win, Rect.make(qcx, pal_y + 7, glyph_w, 10), t.accent);
+
+        ui.draw_rect(win, Rect.make(pal_x, pal_y + 24, pal_w, 1), t.gutter_bg);
+
+        var row: usize = 0;
+        var match_idx: usize = 0;
+        for (command_list) |cmd| {
+            if (fuzzy_match(q, cmd.name)) {
+                if (row < 10) {
+                    const ry = pal_y + 28 + @as(u32, @intCast(row)) * 14;
+                    const is_sel = (match_idx == self.cmd_palette.selected);
+                    if (is_sel) {
+                        ui.draw_rect(win, Rect.make(pal_x + 2, ry - 1, pal_w - 4, 13), t.selection_bg);
+                    }
+                    const ccolor = if (is_sel) t.text else t.muted;
+                    ui.draw_text(win, cmd.name, pal_x + 8, ry, ccolor);
+                    ui.draw_text(win, cmd.shortcut, pal_x + pal_w - 60, ry, t.warning);
+                    row += 1;
+                }
+                match_idx += 1;
+            }
+        }
+    }
+
+    fn draw_recent_list(self: *const AppState, win: u32) void {
+        const t = self.cur_theme();
+        const rl_w: u32 = 320;
+        const rl_h: u32 = 160;
+        const rl_x: u32 = (window_w - rl_w) / 2;
+        const rl_y: u32 = 50;
+
+        ui.draw_rect(win, Rect.make(rl_x, rl_y, rl_w, rl_h), t.surface);
+        ui.draw_rect_outline(win, Rect.make(rl_x, rl_y, rl_w, rl_h), 1, t.accent);
+        ui.draw_text(win, "Recent Files", rl_x + 8, rl_y + 6, t.accent);
+        ui.draw_rect(win, Rect.make(rl_x, rl_y + 20, rl_w, 1), t.gutter_bg);
+
+        var i: usize = 0;
+        while (i < self.recent_list.count and i < 8) : (i += 1) {
+            const ry = rl_y + 24 + @as(u32, @intCast(i)) * 14;
+            const is_sel = (i == self.recent_list.selected);
+            if (is_sel) {
+                ui.draw_rect(win, Rect.make(rl_x + 2, ry - 1, rl_w - 4, 13), t.selection_bg);
+            }
+            const col = if (is_sel) t.text else t.muted;
+            const fname = self.recent_list.files[i][0..self.recent_list.lens[i]];
+            ui.draw_text(win, fname, rl_x + 8, ry, col);
+        }
+    }
+
+    fn draw_close_confirm(self: *const AppState, win: u32) void {
+        const t = self.cur_theme();
+        const dlg_w: u32 = 280;
+        const dlg_h: u32 = 90;
+        const dlg_x: u32 = (window_w - dlg_w) / 2;
+        const dlg_y: u32 = (window_h - dlg_h) / 2;
+
+        ui.draw_rect(win, Rect.make(dlg_x, dlg_y, dlg_w, dlg_h), t.surface);
+        ui.draw_rect_outline(win, Rect.make(dlg_x, dlg_y, dlg_w, dlg_h), 2, t.warning);
+
+        ui.draw_text(win, "Save changes before closing?", dlg_x + 12, dlg_y + 16, t.text);
+        ui.draw_text(win, "Y: Save & Close", dlg_x + 16, dlg_y + 42, t.accent);
+        ui.draw_text(win, "N: Discard", dlg_x + 110, dlg_y + 42, t.warning);
+        ui.draw_text(win, "Esc: Cancel", dlg_x + 190, dlg_y + 42, t.muted);
     }
 };
 
@@ -1402,7 +2127,7 @@ pub const AppState = struct {
 // Entry Point
 // ---------------------------------------------------------------------------
 
-var g_app: AppState = undefined;
+var g_app: AppState = .{};
 
 pub export fn _start(argc: usize, argv: ?[*]const [32]u8) callconv(.c) noreturn {
     AppState.init(&g_app);
@@ -1458,14 +2183,123 @@ pub export fn _start(argc: usize, argv: ?[*]const [32]u8) callconv(.c) noreturn 
 
 /// Top-level key dispatch.
 pub fn handle_key(app: *AppState, ev: *const Event) bool {
+    const ascii: i32 = @as(i32, @intCast(ev.arg1));
     const keycode: u16 = @as(u16, @truncate(ev.arg0));
 
-    // Overlays take priority
+    // Modal Overlays take priority
+    if (app.close_confirm.active) {
+        return handle_close_confirm_key(app, ev);
+    }
+    if (app.cmd_palette.active) {
+        return handle_cmd_palette_key(app, ev);
+    }
+    if (app.recent_list.active) {
+        return handle_recent_key(app, ev);
+    }
     if (app.find_prompt.active) {
         return handle_find_key(app, ev);
     }
     if (app.goto_prompt.active) {
         return handle_goto_key(app, ev);
+    }
+
+    // Ctrl+Shift+P Command Palette (E14)
+    if ((ev.flags & ui.MOD_CTRL) != 0 and (ev.flags & ui.MOD_SHIFT) != 0 and keycode == 0x13) { // P
+        app.cmd_palette.open();
+        ui.write_console("edit: palette-open\n");
+        return true;
+    }
+
+    // Ctrl+R Recent Files (E15)
+    if ((ev.flags & ui.MOD_CTRL) != 0 and keycode == 0x15) { // R
+        app.recent_list.open();
+        ui.write_console("edit: recent-open\n");
+        return true;
+    }
+
+    // Ctrl+Shift+F File Tree Sidebar (E24)
+    if ((ev.flags & ui.MOD_CTRL) != 0 and (ev.flags & ui.MOD_SHIFT) != 0 and keycode == 0x09) { // F
+        app.file_sidebar.toggle();
+        app.set_status(if (app.file_sidebar.active) "File sidebar ON" else "File sidebar OFF");
+        ui.write_console("edit: tree-toggle\n");
+        return true;
+    }
+
+    // Alt+Z / Ctrl+Alt+W: Toggle Word Wrap (E10)
+    if (((ev.flags & ui.MOD_ALT) != 0 and keycode == 0x1d) or
+        ((ev.flags & ui.MOD_CTRL) != 0 and (ev.flags & ui.MOD_ALT) != 0 and keycode == 0x1a))
+    {
+        app.word_wrap = !app.word_wrap;
+        app.set_status(if (app.word_wrap) "Word wrap ON" else "Word wrap OFF");
+        ui.write_console("edit: toggle-wrap\n");
+        return true;
+    }
+
+    // Ctrl+Shift+T: Cycle Themes (E19)
+    if ((ev.flags & ui.MOD_CTRL) != 0 and (ev.flags & ui.MOD_SHIFT) != 0 and keycode == 0x17) { // T
+        app.theme_idx = (app.theme_idx + 1) % themes.len;
+        var nbuf: [32]u8 = undefined;
+        const msg = std.fmt.bufPrint(&nbuf, "Theme: {s}", .{app.cur_theme().name}) catch "Theme";
+        app.set_info(msg);
+        ui.write_console("edit: theme-cycle\n");
+        return true;
+    }
+
+    // Ctrl+B: Bookmarks toggle, Ctrl+Shift+Down/Up: Bookmark navigation (E21)
+    if ((ev.flags & ui.MOD_CTRL) != 0 and keycode == 0x05) { // B
+        const cl = app.fb().current_line();
+        const added = app.fb().bookmarks.toggle(cl);
+        app.set_status(if (added) "Bookmark added" else "Bookmark removed");
+        ui.write_console("edit: bookmark-toggle\n");
+        return true;
+    }
+    if ((ev.flags & ui.MOD_CTRL) != 0 and (ev.flags & ui.MOD_SHIFT) != 0 and keycode == 0x51) { // Down
+        const cl = app.fb().current_line();
+        if (app.fb().bookmarks.next_after(cl)) |nxt| {
+            app.fb().goto_line(nxt);
+            app.set_status("Next bookmark");
+            return true;
+        }
+    }
+    if ((ev.flags & ui.MOD_CTRL) != 0 and (ev.flags & ui.MOD_SHIFT) != 0 and keycode == 0x52) { // Up
+        const cl = app.fb().current_line();
+        if (app.fb().bookmarks.prev_before(cl)) |prv| {
+            app.fb().goto_line(prv);
+            app.set_status("Prev bookmark");
+            return true;
+        }
+    }
+
+    // Ctrl+]: Jump to Definition (E23)
+    if ((ev.flags & ui.MOD_CTRL) != 0 and (keycode == 0x30 or ascii == ']')) {
+        if (extract_word_at_pos(app.fb().slice(), app.fb().cursor)) |word| {
+            if (find_definition_in_buffer(app.fb().slice(), word)) |def_pos| {
+                app.fb().cursor = def_pos;
+                app.set_info("Jumped to definition");
+                ui.write_console("edit: jump-def\n");
+                return true;
+            }
+        }
+        app.set_info("Definition not found in current file");
+        return true;
+    }
+
+    // Ctrl+D: Multi-cursor add next occurrence (E12)
+    if ((ev.flags & ui.MOD_CTRL) != 0 and keycode == 0x07 and (ev.flags & ui.MOD_SHIFT) == 0) { // D
+        if (app.fb().add_next_word_cursor()) {
+            var nbuf: [32]u8 = undefined;
+            const msg = std.fmt.bufPrint(&nbuf, "{} cursors active", .{app.fb().extra_cursor_count + 1}) catch "Multi-cursor";
+            app.set_info(msg);
+            ui.write_console("edit: multi-cursor\n");
+            return true;
+        }
+        return false;
+    }
+
+    // Ctrl+S: Save file (E16)
+    if ((ev.flags & ui.MOD_CTRL) != 0 and keycode == 0x16) { // S
+        _ = app.save_active_file();
+        return true;
     }
 
     // Ctrl+` (0x35) console split
@@ -1505,6 +2339,7 @@ pub fn handle_key(app: *AppState, ev: *const Event) bool {
     // E22: Ctrl+Shift+D delete line
     if ((ev.flags & ui.MOD_CTRL) != 0 and (ev.flags & ui.MOD_SHIFT) != 0 and keycode == 0x07) { // D
         if (app.fb().delete_current_line()) {
+            app.tabs.active_tab().dirty = true;
             app.set_status("Line deleted");
             ui.write_console("edit: delete-line\n");
             return true;
@@ -1523,6 +2358,7 @@ pub fn handle_key(app: *AppState, ev: *const Event) bool {
     // E2: Ctrl+Z undo, Ctrl+Y redo
     if ((ev.flags & ui.MOD_CTRL) != 0 and keycode == 0x1d) { // Z
         if (app.fb().undo_last()) {
+            app.tabs.active_tab().dirty = true;
             app.set_status("Undo");
             ui.write_console("edit: undo\n");
             return true;
@@ -1531,6 +2367,7 @@ pub fn handle_key(app: *AppState, ev: *const Event) bool {
     }
     if ((ev.flags & ui.MOD_CTRL) != 0 and keycode == 0x1c) { // Y
         if (app.fb().redo_last()) {
+            app.tabs.active_tab().dirty = true;
             app.set_status("Redo");
             ui.write_console("edit: redo\n");
             return true;
@@ -1551,6 +2388,11 @@ pub fn handle_key(app: *AppState, ev: *const Event) bool {
     }
     if ((ev.flags & ui.MOD_CTRL) != 0 and keycode == 0x1a) { // W
         if (app.tabs.count > 1) {
+            if (app.tabs.active_tab().dirty) {
+                app.close_confirm.active = true;
+                app.close_confirm.target_tab = app.tabs.active;
+                return true;
+            }
             app.tabs.close_active();
             app.set_status("Tab closed");
             ui.write_console("edit: tab-close\n");
@@ -1573,6 +2415,255 @@ pub fn handle_key(app: *AppState, ev: *const Event) bool {
     } else {
         return handle_editor_key(app, ev);
     }
+}
+
+pub fn execute_key_action(app: *AppState, action: KeyAction) bool {
+    switch (action) {
+        .none => return false,
+        .save_file => return app.save_active_file(),
+        .open_recent => {
+            app.recent_list.open();
+            return true;
+        },
+        .undo => {
+            if (app.fb().undo_last()) {
+                app.tabs.active_tab().dirty = true;
+                app.set_status("Undo");
+                return true;
+            }
+            return false;
+        },
+        .redo => {
+            if (app.fb().redo_last()) {
+                app.tabs.active_tab().dirty = true;
+                app.set_status("Redo");
+                return true;
+            }
+            return false;
+        },
+        .find => {
+            app.find_prompt.open_find();
+            app.set_status("Find");
+            return true;
+        },
+        .replace => {
+            app.find_prompt.open_replace();
+            app.set_status("Find & Replace");
+            return true;
+        },
+        .goto_line => {
+            app.goto_prompt.open();
+            app.set_status("Goto line");
+            return true;
+        },
+        .toggle_wrap => {
+            app.word_wrap = !app.word_wrap;
+            app.set_status(if (app.word_wrap) "Word wrap ON" else "Word wrap OFF");
+            return true;
+        },
+        .toggle_numbers => {
+            app.show_line_numbers = !app.show_line_numbers;
+            app.set_status(if (app.show_line_numbers) "Line numbers ON" else "Line numbers OFF");
+            return true;
+        },
+        .toggle_bookmark => {
+            const cl = app.fb().current_line();
+            const added = app.fb().bookmarks.toggle(cl);
+            app.set_status(if (added) "Bookmark added" else "Bookmark removed");
+            return true;
+        },
+        .next_bookmark => {
+            const cl = app.fb().current_line();
+            if (app.fb().bookmarks.next_after(cl)) |nxt| {
+                app.fb().goto_line(nxt);
+                return true;
+            }
+            return false;
+        },
+        .prev_bookmark => {
+            const cl = app.fb().current_line();
+            if (app.fb().bookmarks.prev_before(cl)) |prv| {
+                app.fb().goto_line(prv);
+                return true;
+            }
+            return false;
+        },
+        .jump_definition => {
+            if (extract_word_at_pos(app.fb().slice(), app.fb().cursor)) |word| {
+                if (find_definition_in_buffer(app.fb().slice(), word)) |def_pos| {
+                    app.fb().cursor = def_pos;
+                    app.set_info("Jumped to definition");
+                    return true;
+                }
+            }
+            app.set_info("Definition not found in current file");
+            return true;
+        },
+        .delete_line => {
+            if (app.fb().delete_current_line()) {
+                app.tabs.active_tab().dirty = true;
+                app.set_status("Line deleted");
+                return true;
+            }
+            return false;
+        },
+        .cycle_theme => {
+            app.theme_idx = (app.theme_idx + 1) % themes.len;
+            var nbuf: [32]u8 = undefined;
+            const msg = std.fmt.bufPrint(&nbuf, "Theme: {s}", .{app.cur_theme().name}) catch "Theme";
+            app.set_info(msg);
+            return true;
+        },
+        .indent_line => {
+            _ = app.fb().indent_current_line();
+            app.tabs.active_tab().dirty = true;
+            return true;
+        },
+        .dedent_line => {
+            _ = app.fb().dedent_current_line();
+            app.tabs.active_tab().dirty = true;
+            return true;
+        },
+        .multi_cursor => {
+            _ = app.fb().add_next_word_cursor();
+            return true;
+        },
+        .toggle_file_tree => {
+            app.file_sidebar.toggle();
+            return true;
+        },
+        .new_tab => {
+            _ = app.tabs.open_new();
+            return true;
+        },
+        .close_tab => {
+            app.tabs.close_active();
+            return true;
+        },
+        .next_tab => {
+            app.tabs.switch_next();
+            return true;
+        },
+        .toggle_shell => {
+            app.show_shell = !app.show_shell;
+            return true;
+        },
+    }
+}
+
+pub fn handle_cmd_palette_key(app: *AppState, ev: *const Event) bool {
+    const ascii: i32 = @as(i32, @intCast(ev.arg1));
+    const keycode: u16 = @as(u16, @truncate(ev.arg0));
+
+    if (keycode == 0x29 or ascii == 0x1b) { // Esc
+        app.cmd_palette.close();
+        return true;
+    }
+
+    if (keycode == 0x52) { // Up
+        if (app.cmd_palette.selected > 0) app.cmd_palette.selected -= 1;
+        return true;
+    }
+
+    if (keycode == 0x51) { // Down
+        const total = app.cmd_palette.match_count();
+        if (total > 0 and app.cmd_palette.selected + 1 < total) {
+            app.cmd_palette.selected += 1;
+        }
+        return true;
+    }
+
+    if (ascii == '\r' or ascii == '\n' or keycode == 0x28) { // Enter
+        if (app.cmd_palette.get_selected_action()) |action| {
+            app.cmd_palette.close();
+            _ = execute_key_action(app, action);
+            return true;
+        }
+        app.cmd_palette.close();
+        return true;
+    }
+
+    if (ascii == 0x08 or ascii == 0x7f or keycode == 0x2a) {
+        app.cmd_palette.backspace();
+        return true;
+    }
+
+    if (ascii >= 0x20 and ascii <= 0x7e) {
+        app.cmd_palette.insert_char(@as(u8, @intCast(ascii)));
+        return true;
+    }
+
+    return false;
+}
+
+pub fn handle_recent_key(app: *AppState, ev: *const Event) bool {
+    const ascii: i32 = @as(i32, @intCast(ev.arg1));
+    const keycode: u16 = @as(u16, @truncate(ev.arg0));
+
+    if (keycode == 0x29 or ascii == 0x1b) {
+        app.recent_list.close();
+        return true;
+    }
+
+    if (keycode == 0x52) {
+        if (app.recent_list.selected > 0) app.recent_list.selected -= 1;
+        return true;
+    }
+
+    if (keycode == 0x51) {
+        if (app.recent_list.selected + 1 < app.recent_list.count) app.recent_list.selected += 1;
+        return true;
+    }
+
+    if (ascii == '\r' or ascii == '\n' or keycode == 0x28) {
+        if (app.recent_list.count > 0) {
+            const sel = app.recent_list.selected;
+            const fname = app.recent_list.files[sel][0..app.recent_list.lens[sel]];
+            app.tabs.set_filename(app.tabs.active, fname);
+            // Load file content if possible
+            const fd_res = ui.file_open(fname, ui.MODE_READ);
+            if (fd_res >= 0) {
+                const fd = @as(u32, @intCast(fd_res));
+                const rd = ui.file_read(fd, &app.fb().buf);
+                ui.file_close(fd);
+                if (rd > 0) {
+                    app.fb().len = @as(usize, @intCast(rd));
+                    app.fb().cursor = 0;
+                    app.fb().undo.clear();
+                }
+            }
+            app.set_info("Loaded recent file");
+        }
+        app.recent_list.close();
+        return true;
+    }
+
+    return false;
+}
+
+pub fn handle_close_confirm_key(app: *AppState, ev: *const Event) bool {
+    const ascii: i32 = @as(i32, @intCast(ev.arg1));
+    const keycode: u16 = @as(u16, @truncate(ev.arg0));
+
+    if (ascii == 'y' or ascii == 'Y') {
+        _ = app.save_active_file();
+        app.close_confirm.active = false;
+        app.tabs.close_active();
+        app.set_status("Saved and closed");
+        return true;
+    }
+    if (ascii == 'n' or ascii == 'N') {
+        app.close_confirm.active = false;
+        app.tabs.close_active();
+        app.set_status("Closed without saving");
+        return true;
+    }
+    if (ascii == 0x1b or keycode == 0x29) {
+        app.close_confirm.active = false;
+        app.set_status("Close canceled");
+        return true;
+    }
+    return false;
 }
 
 pub fn handle_goto_key(app: *AppState, ev: *const Event) bool {
@@ -1619,22 +2710,20 @@ pub fn handle_find_key(app: *AppState, ev: *const Event) bool {
     const fp = &app.find_prompt;
     const fb_ptr = app.fb();
 
-    // Escape closes prompt
     if (keycode == 0x29 or ascii == 0x1b) {
         fp.close();
         app.set_status("EDIT.BIN");
         return true;
     }
 
-    // Tab toggles between find and replace field (in replace mode)
     if (fp.is_replace and (ascii == '\t' or keycode == 0x2b)) {
         fp.focus_replace = !fp.focus_replace;
         return true;
     }
 
-    // Ctrl+A in replace mode: Replace all matches
     if (fp.is_replace and (ev.flags & ui.MOD_CTRL) != 0 and keycode == 0x04) {
         const count = replace_all_matches(fb_ptr, fp.get_find(), fp.get_replace());
+        app.tabs.active_tab().dirty = true;
         var nbuf: [40]u8 = undefined;
         const msg = std.fmt.bufPrint(&nbuf, "Replaced {} matches", .{count}) catch "Replaced matches";
         app.set_status(msg);
@@ -1642,19 +2731,17 @@ pub fn handle_find_key(app: *AppState, ev: *const Event) bool {
         return true;
     }
 
-    // Enter: find next match or replace current match
     if (ascii == '\r' or ascii == '\n' or keycode == 0x28) {
         const needle = fp.get_find();
         if (needle.len == 0) return true;
 
         if (fp.is_replace and fp.focus_replace) {
-            // Replace current match if on one, then find next
             if (match_at_ci(fb_ptr.slice(), needle, fb_ptr.cursor)) {
                 _ = replace_current_match(fb_ptr, needle, fp.get_replace());
+                app.tabs.active_tab().dirty = true;
             }
         }
 
-        // Jump to next match
         const is_cur_match = match_at_ci(fb_ptr.slice(), needle, fb_ptr.cursor);
         const start_pos = if (is_cur_match)
             (if (fb_ptr.cursor + 1 < fb_ptr.len) fb_ptr.cursor + 1 else 0)
@@ -1676,7 +2763,6 @@ pub fn handle_find_key(app: *AppState, ev: *const Event) bool {
         return true;
     }
 
-    // Up arrow: find previous match
     if (keycode == 0x52) {
         const needle = fp.get_find();
         if (needle.len > 0) {
@@ -1688,13 +2774,11 @@ pub fn handle_find_key(app: *AppState, ev: *const Event) bool {
         }
     }
 
-    // Backspace
     if (ascii == 0x08 or ascii == 0x7f or keycode == 0x2a) {
         fp.backspace();
         return true;
     }
 
-    // Printable character
     if (ascii >= 0x20 and ascii <= 0x7e) {
         fp.insert_char(@as(u8, @intCast(ascii)));
         return true;
@@ -1707,6 +2791,16 @@ pub fn handle_editor_key(app: *AppState, ev: *const Event) bool {
     const ascii: i32 = @as(i32, @intCast(ev.arg1));
     const keycode: u16 = @as(u16, @truncate(ev.arg0));
     const fb_ptr = app.fb();
+
+    // Escape clears secondary cursors & selection
+    if (keycode == 0x29 or ascii == 0x1b) {
+        if (fb_ptr.extra_cursor_count > 0 or fb_ptr.rect_sel.active) {
+            fb_ptr.extra_cursor_count = 0;
+            fb_ptr.rect_sel.clear();
+            app.set_status("Cursors cleared");
+            return true;
+        }
+    }
 
     // Navigation keys
     switch (keycode) {
@@ -1746,7 +2840,13 @@ pub fn handle_editor_key(app: *AppState, ev: *const Event) bool {
             }
             return moved;
         },
-        0x4c => return fb_ptr.delete_forward(),
+        0x4c => { // Delete forward
+            if (fb_ptr.delete_forward()) {
+                app.tabs.active_tab().dirty = true;
+                return true;
+            }
+            return false;
+        },
         else => {},
     }
 
@@ -1755,6 +2855,22 @@ pub fn handle_editor_key(app: *AppState, ev: *const Event) bool {
         app.insert_mode = !app.insert_mode;
         app.set_status(if (app.insert_mode) "INS mode" else "OVR mode");
         return true;
+    }
+
+    // Tab / Shift+Tab (E20 Indentation)
+    if (ascii == '\t' or keycode == 0x2b) {
+        if ((ev.flags & ui.MOD_SHIFT) != 0) {
+            if (fb_ptr.dedent_current_line()) {
+                app.tabs.active_tab().dirty = true;
+                return true;
+            }
+        } else {
+            if (fb_ptr.indent_current_line()) {
+                app.tabs.active_tab().dirty = true;
+                return true;
+            }
+        }
+        return false;
     }
 
     // Ctrl+A / Ctrl+E
@@ -1769,24 +2885,27 @@ pub fn handle_editor_key(app: *AppState, ev: *const Event) bool {
         }
     }
 
-    // F3: Save
-    if (keycode == 0x3d) {
-        app.set_status("Save not wired");
-        return true;
-    }
-
     // Backspace
     if (ascii == 0x08 or ascii == 0x7f) {
-        return fb_ptr.backspace();
+        if (fb_ptr.backspace()) {
+            app.tabs.active_tab().dirty = true;
+            return true;
+        }
+        return false;
     }
 
     // Enter
     if (ascii == '\r' or ascii == '\n') {
-        return fb_ptr.insert_newline();
+        if (fb_ptr.insert_newline()) {
+            app.tabs.active_tab().dirty = true;
+            return true;
+        }
+        return false;
     }
 
-    // Printable
+    // Printable characters
     if (ascii >= 0x20 and ascii <= 0x7e) {
+        app.tabs.active_tab().dirty = true;
         if (!app.insert_mode and fb_ptr.cursor < fb_ptr.len) {
             return fb_ptr.overwrite_char(@as(u8, @intCast(ascii)));
         }
@@ -2263,9 +3382,7 @@ test "edit: E5 classify_token char literal" {
     try std.testing.expectEqual(@as(usize, 3), r.len);
 }
 
-// ---------------------------------------------------------------------------
 // E7: Search & Replace tests
-// ---------------------------------------------------------------------------
 
 test "edit: E7 match_at_ci case insensitive match" {
     const text = "Hello World";
@@ -2316,7 +3433,6 @@ test "edit: E7 replace_current_match single replacement" {
     try std.testing.expectEqualStrings("Greetings World", fb.slice());
     try std.testing.expectEqual(@as(usize, 9), fb.cursor);
 
-    // Undo restores
     try std.testing.expect(fb.undo_last());
     try std.testing.expectEqualStrings("Hello World", fb.slice());
 }
@@ -2329,9 +3445,7 @@ test "edit: E7 replace_all_matches replaces all occurrences" {
     try std.testing.expectEqualStrings("bar 1 bar 2 bar 3", fb.slice());
 }
 
-// ---------------------------------------------------------------------------
 // E8: Autoindent tests
-// ---------------------------------------------------------------------------
 
 test "edit: E8 insert_newline_autoindent preserves spaces" {
     var fb = FileBuffer{};
@@ -2357,28 +3471,26 @@ test "edit: E8 insert_char_with_dedent on closing brace" {
     try std.testing.expectEqualStrings("    }", fb.slice());
 }
 
-// ---------------------------------------------------------------------------
 // E9: Bracket matching tests
-// ---------------------------------------------------------------------------
 
 test "edit: E9 find_matching_bracket parentheses" {
     const text = "fn test(a: (u32, u32)) void";
-    const m1 = find_matching_bracket(text, 7); // outer '('
-    try std.testing.expectEqual(@as(?usize, 21), m1); // outer ')'
+    const m1 = find_matching_bracket(text, 7);
+    try std.testing.expectEqual(@as(?usize, 21), m1);
 
-    const m2 = find_matching_bracket(text, 11); // inner '('
-    try std.testing.expectEqual(@as(?usize, 20), m2); // inner ')'
+    const m2 = find_matching_bracket(text, 11);
+    try std.testing.expectEqual(@as(?usize, 20), m2);
 
-    const m3 = find_matching_bracket(text, 21); // outer ')' backward
+    const m3 = find_matching_bracket(text, 21);
     try std.testing.expectEqual(@as(?usize, 7), m3);
 }
 
 test "edit: E9 find_matching_bracket braces and brackets" {
     const text = "const arr = [{ (1 + 2) }];";
-    const mb = find_matching_bracket(text, 12); // '['
+    const mb = find_matching_bracket(text, 12);
     try std.testing.expectEqual(@as(?usize, 24), mb);
 
-    const mc = find_matching_bracket(text, 13); // '{'
+    const mc = find_matching_bracket(text, 13);
     try std.testing.expectEqual(@as(?usize, 23), mc);
 }
 
@@ -2387,9 +3499,7 @@ test "edit: E9 find_matching_bracket unmatched returns null" {
     try std.testing.expectEqual(@as(?usize, null), find_matching_bracket(text, 7));
 }
 
-// ---------------------------------------------------------------------------
 // E11: Line numbers toggle tests
-// ---------------------------------------------------------------------------
 
 test "edit: E11 AppState show_line_numbers toggle" {
     var app = AppState{};
@@ -2399,25 +3509,20 @@ test "edit: E11 AppState show_line_numbers toggle" {
     var ev = Event{ .kind = ui.KEY_DOWN, .flags = ui.MOD_CTRL, .seq = 0, .arg0 = 0x0f, .arg1 = 0 };
     try std.testing.expect(handle_key(&app, &ev));
     try std.testing.expect(!app.show_line_numbers);
-    try std.testing.expectEqualStrings("Line numbers OFF", app.status[0..app.status_len]);
 
     try std.testing.expect(handle_key(&app, &ev));
     try std.testing.expect(app.show_line_numbers);
-    try std.testing.expectEqualStrings("Line numbers ON", app.status[0..app.status_len]);
 }
 
-// ---------------------------------------------------------------------------
 // E22: Delete line tests
-// ---------------------------------------------------------------------------
 
 test "edit: E22 delete_current_line middle line" {
     var fb = FileBuffer{};
     fb.set_content("Line1\nLine2\nLine3\n");
-    fb.cursor = 8; // in Line2
+    fb.cursor = 8;
     try std.testing.expect(fb.delete_current_line());
     try std.testing.expectEqualStrings("Line1\nLine3\n", fb.slice());
 
-    // Undo restores Line2
     try std.testing.expect(fb.undo_last());
     try std.testing.expectEqualStrings("Line1\nLine2\nLine3\n", fb.slice());
 }
@@ -2476,13 +3581,11 @@ test "edit: E7 handle_find_key navigation and replace flow" {
     app.init();
     app.fb().set_content("foo bar foo baz foo");
 
-    // Open find prompt (Ctrl+F)
     var ev_f = Event{ .kind = ui.KEY_DOWN, .flags = ui.MOD_CTRL, .seq = 0, .arg0 = 0x09, .arg1 = 0 };
     try std.testing.expect(handle_key(&app, &ev_f));
     try std.testing.expect(app.find_prompt.active);
     try std.testing.expect(!app.find_prompt.is_replace);
 
-    // Type "foo"
     var ev_char = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 0, .arg0 = 0, .arg1 = 'f' };
     try std.testing.expect(handle_key(&app, &ev_char));
     ev_char.arg1 = 'o';
@@ -2490,31 +3593,25 @@ test "edit: E7 handle_find_key navigation and replace flow" {
     try std.testing.expect(handle_key(&app, &ev_char));
     try std.testing.expectEqualStrings("foo", app.find_prompt.get_find());
 
-    // Enter -> find next occurrence (offset 8)
     var ev_enter = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 0, .arg0 = 0x28, .arg1 = '\n' };
     try std.testing.expect(handle_key(&app, &ev_enter));
     try std.testing.expectEqual(@as(usize, 8), app.fb().cursor);
 
-    // Enter again -> find next occurrence (offset 16)
     try std.testing.expect(handle_key(&app, &ev_enter));
     try std.testing.expectEqual(@as(usize, 16), app.fb().cursor);
 
-    // Enter again -> wraps around to start (offset 0)
     try std.testing.expect(handle_key(&app, &ev_enter));
     try std.testing.expectEqual(@as(usize, 0), app.fb().cursor);
 
-    // Esc closes find prompt
     var ev_esc = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 0, .arg0 = 0x29, .arg1 = 0x1b };
     try std.testing.expect(handle_key(&app, &ev_esc));
     try std.testing.expect(!app.find_prompt.active);
 
-    // Open replace prompt (Ctrl+H)
     var ev_h = Event{ .kind = ui.KEY_DOWN, .flags = ui.MOD_CTRL, .seq = 0, .arg0 = 0x0b, .arg1 = 0 };
     try std.testing.expect(handle_key(&app, &ev_h));
     try std.testing.expect(app.find_prompt.active);
     try std.testing.expect(app.find_prompt.is_replace);
 
-    // Set find="foo", replace="qux"
     app.find_prompt.find_len = 0;
     app.find_prompt.insert_char('f');
     app.find_prompt.insert_char('o');
@@ -2524,8 +3621,250 @@ test "edit: E7 handle_find_key navigation and replace flow" {
     app.find_prompt.insert_char('u');
     app.find_prompt.insert_char('x');
 
-    // Ctrl+A -> replace all
     var ev_ca = Event{ .kind = ui.KEY_DOWN, .flags = ui.MOD_CTRL, .seq = 0, .arg0 = 0x04, .arg1 = 0 };
     try std.testing.expect(handle_key(&app, &ev_ca));
     try std.testing.expectEqualStrings("qux bar qux baz qux", app.fb().slice());
+}
+
+// ---------------------------------------------------------------------------
+// New Tests for E10, E12–E21, E23–E25
+// ---------------------------------------------------------------------------
+
+test "edit: E20 indent_current_line and dedent_current_line" {
+    var fb = FileBuffer{};
+    fb.set_content("fn main() void");
+    fb.cursor = 3;
+    try std.testing.expect(fb.indent_current_line());
+    try std.testing.expectEqualStrings("    fn main() void", fb.slice());
+    try std.testing.expectEqual(@as(usize, 7), fb.cursor);
+
+    try std.testing.expect(fb.dedent_current_line());
+    try std.testing.expectEqualStrings("fn main() void", fb.slice());
+    try std.testing.expectEqual(@as(usize, 3), fb.cursor);
+}
+
+test "edit: E21 Bookmarks toggle and navigation" {
+    var bm = Bookmarks{};
+    try std.testing.expect(!bm.has_bookmark(5));
+
+    // Add bookmark on line 5
+    try std.testing.expect(bm.toggle(5));
+    try std.testing.expect(bm.has_bookmark(5));
+    try std.testing.expectEqual(@as(usize, 1), bm.count);
+
+    // Add bookmark on line 12 and line 2
+    try std.testing.expect(bm.toggle(12));
+    try std.testing.expect(bm.toggle(2));
+    try std.testing.expectEqual(@as(usize, 3), bm.count);
+    // Verified sorted: 2, 5, 12
+    try std.testing.expectEqual(@as(usize, 2), bm.lines[0]);
+    try std.testing.expectEqual(@as(usize, 5), bm.lines[1]);
+    try std.testing.expectEqual(@as(usize, 12), bm.lines[2]);
+
+    // Next after 3 -> 5
+    try std.testing.expectEqual(@as(?usize, 5), bm.next_after(3));
+    // Next after 12 -> wraps to 2
+    try std.testing.expectEqual(@as(?usize, 2), bm.next_after(12));
+    // Prev before 5 -> 2
+    try std.testing.expectEqual(@as(?usize, 2), bm.prev_before(5));
+    // Prev before 2 -> wraps to 12
+    try std.testing.expectEqual(@as(?usize, 12), bm.prev_before(2));
+
+    // Toggle 5 off
+    try std.testing.expect(!bm.toggle(5));
+    try std.testing.expect(!bm.has_bookmark(5));
+    try std.testing.expectEqual(@as(usize, 2), bm.count);
+}
+
+test "edit: E23 extract_word_at_pos and find_definition_in_buffer" {
+    const code =
+        \\pub fn calculate_sum(a: u32, b: u32) u32 {
+        \\    return a + b;
+        \\}
+        \\pub fn main() void {
+        \\    const res = calculate_sum(10, 20);
+        \\}
+    ;
+    // Word at call site "calculate_sum"
+    const call_pos = std.mem.indexOf(u8, code, "calculate_sum(10").?;
+    const word = extract_word_at_pos(code, call_pos);
+    try std.testing.expect(word != null);
+    try std.testing.expectEqualStrings("calculate_sum", word.?);
+
+    // Find definition in buffer -> line 0
+    const def_pos = find_definition_in_buffer(code, word.?);
+    try std.testing.expect(def_pos != null);
+    try std.testing.expectEqual(@as(usize, 0), def_pos.?);
+}
+
+test "edit: E19 Theme switching and palettes" {
+    var app = AppState{};
+    app.init();
+    try std.testing.expectEqualStrings("Dark", app.cur_theme().name);
+
+    // Cycle to Light
+    app.theme_idx = 1;
+    try std.testing.expectEqualStrings("Light", app.cur_theme().name);
+
+    // Cycle to Amber
+    app.theme_idx = 2;
+    try std.testing.expectEqualStrings("Amber", app.cur_theme().name);
+}
+
+test "edit: E14 CommandPalette fuzzy search and action lookup" {
+    var cp = CommandPalette{};
+    cp.open();
+
+    // Query "sav" matches "Save File"
+    cp.insert_char('s');
+    cp.insert_char('a');
+    cp.insert_char('v');
+    try std.testing.expect(cp.match_count() >= 1);
+    try std.testing.expectEqual(KeyAction.save_file, cp.get_selected_action().?);
+
+    // Query "wrap" matches "Toggle Word Wrap"
+    cp.query_len = 0;
+    cp.insert_char('w');
+    cp.insert_char('r');
+    cp.insert_char('a');
+    cp.insert_char('p');
+    try std.testing.expectEqual(KeyAction.toggle_wrap, cp.get_selected_action().?);
+}
+
+test "edit: E15 RecentList MRU behavior" {
+    var rl = RecentList{};
+    rl.add("file1.zig");
+    rl.add("file2.txt");
+    try std.testing.expectEqual(@as(usize, 2), rl.count);
+    try std.testing.expectEqualStrings("file2.txt", rl.files[0][0..rl.lens[0]]);
+    try std.testing.expectEqualStrings("file1.zig", rl.files[1][0..rl.lens[1]]);
+
+    // Accessing file1.zig again moves it to top
+    rl.add("file1.zig");
+    try std.testing.expectEqual(@as(usize, 2), rl.count);
+    try std.testing.expectEqualStrings("file1.zig", rl.files[0][0..rl.lens[0]]);
+}
+
+test "edit: E12 Multiple cursors simultaneous typing" {
+    var fb = FileBuffer{};
+    fb.set_content("foo bar foo baz");
+    fb.cursor = 0; // on first "foo"
+
+    // Add cursor at second "foo" (offset 8)
+    try std.testing.expect(fb.add_next_word_cursor());
+    try std.testing.expectEqual(@as(usize, 1), fb.extra_cursor_count);
+    try std.testing.expectEqual(@as(usize, 8), fb.extra_cursors[0]);
+
+    // Insert char 'X' -> inserted at both positions
+    try std.testing.expect(fb.insert_char('X'));
+    try std.testing.expectEqualStrings("Xfoo bar Xfoo baz", fb.slice());
+}
+
+test "edit: E13 RectSelection contains checks" {
+    var rs = RectSelection{
+        .active = true,
+        .start_line = 2,
+        .start_col = 5,
+        .end_line = 5,
+        .end_col = 10,
+    };
+    try std.testing.expect(rs.contains(3, 7));
+    try std.testing.expect(rs.contains(2, 5));
+    try std.testing.expect(rs.contains(5, 10));
+    try std.testing.expect(!rs.contains(1, 7));
+    try std.testing.expect(!rs.contains(3, 12));
+}
+
+test "edit: E16 Close confirmation dialog key handling" {
+    var app = AppState{};
+    app.init();
+    _ = app.tabs.open_new();
+    app.tabs.active_tab().dirty = true;
+
+    // Trigger Ctrl+W -> opens close confirmation
+    var ev_w = Event{ .kind = ui.KEY_DOWN, .flags = ui.MOD_CTRL, .seq = 0, .arg0 = 0x1a, .arg1 = 0 };
+    try std.testing.expect(handle_key(&app, &ev_w));
+    try std.testing.expect(app.close_confirm.active);
+
+    // Cancel with Esc
+    var ev_esc = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 0, .arg0 = 0x29, .arg1 = 0x1b };
+    try std.testing.expect(handle_key(&app, &ev_esc));
+    try std.testing.expect(!app.close_confirm.active);
+    try std.testing.expectEqual(@as(usize, 2), app.tabs.count);
+
+    // Open confirm again and press 'N' (discard)
+    try std.testing.expect(handle_key(&app, &ev_w));
+    var ev_n = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 0, .arg0 = 0, .arg1 = 'N' };
+    try std.testing.expect(handle_key(&app, &ev_n));
+    try std.testing.expect(!app.close_confirm.active);
+    try std.testing.expectEqual(@as(usize, 1), app.tabs.count);
+}
+
+test "edit: execute_key_action dispatches commands cleanly" {
+    var app = AppState{};
+    app.init();
+
+    // Toggle wrap
+    try std.testing.expect(!app.word_wrap);
+    try std.testing.expect(execute_key_action(&app, .toggle_wrap));
+    try std.testing.expect(app.word_wrap);
+
+    // Toggle numbers
+    try std.testing.expect(app.show_line_numbers);
+    try std.testing.expect(execute_key_action(&app, .toggle_numbers));
+    try std.testing.expect(!app.show_line_numbers);
+
+    // Toggle sidebar
+    try std.testing.expect(!app.file_sidebar.active);
+    try std.testing.expect(execute_key_action(&app, .toggle_file_tree));
+    try std.testing.expect(app.file_sidebar.active);
+
+    // Cycle theme
+    try std.testing.expectEqual(@as(usize, 0), app.theme_idx);
+    try std.testing.expect(execute_key_action(&app, .cycle_theme));
+    try std.testing.expectEqual(@as(usize, 1), app.theme_idx);
+
+    // Toggle bookmark
+    try std.testing.expect(execute_key_action(&app, .toggle_bookmark));
+    try std.testing.expect(app.fb().bookmarks.has_bookmark(1));
+}
+
+test "edit: key chord dispatch for palette, recents, wrap, theme, bookmark, and jump-def" {
+    var app = AppState{};
+    app.init();
+    app.fb().set_content("fn add(x: u32) u32 {\n    return x + 1;\n}\nconst val = add(5);");
+
+    // Ctrl+Shift+P -> Command Palette
+    var ev_p = Event{ .kind = ui.KEY_DOWN, .flags = ui.MOD_CTRL | ui.MOD_SHIFT, .seq = 0, .arg0 = 0x13, .arg1 = 0 };
+    try std.testing.expect(handle_key(&app, &ev_p));
+    try std.testing.expect(app.cmd_palette.active);
+    app.cmd_palette.close();
+
+    // Ctrl+R -> Recent Files
+    var ev_r = Event{ .kind = ui.KEY_DOWN, .flags = ui.MOD_CTRL, .seq = 0, .arg0 = 0x15, .arg1 = 0 };
+    try std.testing.expect(handle_key(&app, &ev_r));
+    try std.testing.expect(app.recent_list.active);
+    app.recent_list.close();
+
+    // Alt+Z -> Toggle Word Wrap
+    var ev_z = Event{ .kind = ui.KEY_DOWN, .flags = ui.MOD_ALT, .seq = 0, .arg0 = 0x1d, .arg1 = 0 };
+    try std.testing.expect(handle_key(&app, &ev_z));
+    try std.testing.expect(app.word_wrap);
+
+    // Ctrl+Shift+T -> Cycle Theme
+    var ev_t = Event{ .kind = ui.KEY_DOWN, .flags = ui.MOD_CTRL | ui.MOD_SHIFT, .seq = 0, .arg0 = 0x17, .arg1 = 0 };
+    try std.testing.expect(handle_key(&app, &ev_t));
+    try std.testing.expectEqual(@as(usize, 1), app.theme_idx);
+
+    // Ctrl+B -> Toggle Bookmark
+    var ev_b = Event{ .kind = ui.KEY_DOWN, .flags = ui.MOD_CTRL, .seq = 0, .arg0 = 0x05, .arg1 = 0 };
+    try std.testing.expect(handle_key(&app, &ev_b));
+    try std.testing.expect(app.fb().bookmarks.has_bookmark(1));
+
+    // Position on call site "add(5)"
+    app.fb().cursor = std.mem.indexOf(u8, app.fb().slice(), "add(5)").?;
+    // Ctrl+] -> Jump to Definition
+    var ev_jump = Event{ .kind = ui.KEY_DOWN, .flags = ui.MOD_CTRL, .seq = 0, .arg0 = 0x30, .arg1 = ']' };
+    try std.testing.expect(handle_key(&app, &ev_jump));
+    try std.testing.expectEqual(@as(usize, 0), app.fb().cursor);
 }

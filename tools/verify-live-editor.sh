@@ -74,19 +74,10 @@ cat > "$SCRIPT" <<'EOF'
 exec EDIT.BIN
 EOF
 
-# --- phase 2: exercise undo, line numbers toggle, search, replace, delete line, tab, goto
-# The editor starts with an empty buffer, so we type 'h', 'i', then:
-#   ctrl-z (undo -> 'edit: undo')
-#   ctrl-l (toggle line numbers -> 'edit: toggle-lines')
-#   ctrl-f (find prompt -> 'edit: find-open')
-#   escape (close find prompt)
-#   ctrl-h (replace prompt -> 'edit: replace-open')
-#   escape (close replace prompt)
-#   ctrl-shift-d (delete line -> 'edit: delete-line')
-#   ctrl-t (new tab -> 'edit: tab-open')
-#   ctrl-g (goto prompt -> 'edit: goto-open')
+# --- phase 2: exercise undo, line numbers toggle, search, replace, delete line,
+# command palette, recent files, theme cycle, bookmark, multi-cursor, file tree, tab, goto
 # Each chord rides the custom-virtio INPUT queue headless-safe.
-INPUT_CHORDS="h,i,ctrl-z,ctrl-l,ctrl-f,escape,ctrl-h,escape,ctrl-shift-d,ctrl-t,ctrl-g"
+INPUT_CHORDS="h,i,ctrl-z,ctrl-l,ctrl-f,escape,ctrl-h,escape,ctrl-shift-d,ctrl-shift-p,escape,ctrl-r,escape,ctrl-shift-t,ctrl-b,ctrl-d,ctrl-shift-f,ctrl-t,ctrl-g"
 
 run_one() {
     local tag="$1"
@@ -109,6 +100,7 @@ run_one() {
 
     local SERIAL_BYTES=0 BANNER=0 EDIT_READY=0 TAB_OPEN=0 UNDO=0 GOTO_OPEN=0
     local TOGGLE_LINES=0 FIND_OPEN=0 REPLACE_OPEN=0 DELETE_LINE=0
+    local PALETTE_OPEN=0 RECENT_OPEN=0 THEME_CYCLE=0 BOOKMARK_TOGGLE=0 MULTI_CURSOR=0 TREE_TOGGLE=0
     if [ -f "$SER" ]; then
         SERIAL_BYTES=$(wc -c < "$SER" 2>/dev/null | tr -d ' ')
         grep -qF -- "DipshitOS kernel has seized control." "$SER" && BANNER=1
@@ -118,25 +110,33 @@ run_one() {
         grep -qF -- "edit: find-open" "$SER" && FIND_OPEN=1
         grep -qF -- "edit: replace-open" "$SER" && REPLACE_OPEN=1
         grep -qF -- "edit: delete-line" "$SER" && DELETE_LINE=1
+        grep -qF -- "edit: palette-open" "$SER" && PALETTE_OPEN=1
+        grep -qF -- "edit: recent-open" "$SER" && RECENT_OPEN=1
+        grep -qF -- "edit: theme-cycle" "$SER" && THEME_CYCLE=1
+        grep -qF -- "edit: bookmark-toggle" "$SER" && BOOKMARK_TOGGLE=1
+        grep -qF -- "edit: multi-cursor" "$SER" && MULTI_CURSOR=1
+        grep -qF -- "edit: tree-toggle" "$SER" && TREE_TOGGLE=1
         grep -qF -- "edit: tab-open" "$SER" && TAB_OPEN=1
         grep -qF -- "edit: goto-open" "$SER" && GOTO_OPEN=1
     fi
     {
-        echo "$tag: rc=$RC serial-bytes=$SERIAL_BYTES banner=$BANNER edit-ready=$EDIT_READY undo=$UNDO lines=$TOGGLE_LINES find=$FIND_OPEN repl=$REPLACE_OPEN del=$DELETE_LINE tab=$TAB_OPEN goto=$GOTO_OPEN"
+        echo "$tag: rc=$RC serial-bytes=$SERIAL_BYTES banner=$BANNER edit-ready=$EDIT_READY undo=$UNDO lines=$TOGGLE_LINES find=$FIND_OPEN repl=$REPLACE_OPEN del=$DELETE_LINE pal=$PALETTE_OPEN rec=$RECENT_OPEN theme=$THEME_CYCLE bmk=$BOOKMARK_TOGGLE cur=$MULTI_CURSOR tree=$TREE_TOGGLE tab=$TAB_OPEN goto=$GOTO_OPEN"
     } >> "$REPORT"
-    echo "$tag rc=$RC serial-bytes=$SERIAL_BYTES banner=$BANNER edit-ready=$EDIT_READY undo=$UNDO lines=$TOGGLE_LINES find=$FIND_OPEN repl=$REPLACE_OPEN del=$DELETE_LINE tab=$TAB_OPEN goto=$GOTO_OPEN"
+    echo "$tag rc=$RC serial-bytes=$SERIAL_BYTES banner=$BANNER edit-ready=$EDIT_READY undo=$UNDO lines=$TOGGLE_LINES find=$FIND_OPEN repl=$REPLACE_OPEN del=$DELETE_LINE pal=$PALETTE_OPEN rec=$RECENT_OPEN theme=$THEME_CYCLE bmk=$BOOKMARK_TOGGLE cur=$MULTI_CURSOR tree=$TREE_TOGGLE tab=$TAB_OPEN goto=$GOTO_OPEN"
     [ "$RC" = 0 ] && [ "$BANNER" = 1 ] && [ "$EDIT_READY" = 1 ] && \
     [ "$UNDO" = 1 ] && [ "$TOGGLE_LINES" = 1 ] && [ "$FIND_OPEN" = 1 ] && \
-    [ "$REPLACE_OPEN" = 1 ] && [ "$DELETE_LINE" = 1 ] && [ "$TAB_OPEN" = 1 ] && [ "$GOTO_OPEN" = 1 ]
+    [ "$REPLACE_OPEN" = 1 ] && [ "$DELETE_LINE" = 1 ] && [ "$PALETTE_OPEN" = 1 ] && \
+    [ "$RECENT_OPEN" = 1 ] && [ "$THEME_CYCLE" = 1 ] && [ "$BOOKMARK_TOGGLE" = 1 ] && \
+    [ "$MULTI_CURSOR" = 1 ] && [ "$TREE_TOGGLE" = 1 ] && [ "$TAB_OPEN" = 1 ] && [ "$GOTO_OPEN" = 1 ]
 }
 
 : > "$REPORT"
 {
-    echo "DIPSHITOS live-editor gate (M23 E2-E11, E22) — undo, search, replace, autoindent, brackets, lines, delete-line, goto, tabs on VZ"
+    echo "DIPSHITOS live-editor gate (Milestone 23 complete E1-E25) — undo, search, replace, autoindent, brackets, lines, delete-line, palette, recents, themes, bookmarks, multi-cursor, tree, goto, tabs on VZ"
     echo "revision: $REVISION branch=$BRANCH boots=$BOOTS dirty-files=$DIRTY"
     echo "phase 1: exec EDIT.BIN from monitor"
     echo "phase 2: input chords via custom-virtio input queue"
-    echo "assertions: edit: ready, undo, toggle-lines, find-open, replace-open, delete-line, tab-open, goto-open"
+    echo "assertions: edit: ready, undo, toggle-lines, find-open, replace-open, delete-line, palette-open, recent-open, theme-cycle, bookmark-toggle, multi-cursor, tree-toggle, tab-open, goto-open"
     echo "date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     echo
 } >> "$REPORT"
