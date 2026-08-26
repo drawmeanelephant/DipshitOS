@@ -19,7 +19,8 @@
   aggregate.
 - **Depends on:** — (the U2 `intr_slot_index` wrap fix, claim 1809, is the
   precondition this re-test builds on; already on `main`).
-- **Status:** 🔄 agent/buffy/audit-followup-2-input-depth
+- **Heartbeat:** 2026-08-26
+- **Status:** ✅ done — the XHCI input-depth work landed on main: `max_report_bytes = 10` per-device report buffers + `intr_depth = 8` multi-TRB interrupt-IN with top-up re-arming, verified present in main's xhci.zig (lines ~304/332). Flipped from 🔄 by claim 0590's owner per the 6204/6637 precedent during the 2026-08-26 open-claim sweep (log entry in docs/logs/agent-buffy-input-poll-563.md).
 
 ## Notes
 

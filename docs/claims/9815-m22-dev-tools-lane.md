@@ -9,7 +9,8 @@
   ls -l/which/inventory/crash-viewer/sysinfo extension). One PR per issue,
   closed against its GitHub issue.
 - **Depends on:** M18 done ✅ (main); no other lane dependency (Phase 1 lane).
-- **Status:** 🔄 in progress
+- **Heartbeat:** 2026-08-26
+- **Status:** ✅ done — M22 developer-tools lane complete on main: all D1–D16 cards closed in march-m22.md with PASS gates (ELF loader, strace seam, disas/asm, monitor dev utilities, resmon, crash-viewer, dmesg, time, ls -l, which/inventory, devcons). Flipped from 🔄 by claim 0590's owner per the 6204/6637 precedent during the 2026-08-26 open-claim sweep (log entry in docs/logs/agent-buffy-input-poll-563.md).
 
 ## Notes
 

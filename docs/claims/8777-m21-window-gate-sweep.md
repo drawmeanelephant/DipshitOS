@@ -5,8 +5,8 @@
 - **Scope:** Milestone twenty-one (GitHub milestone 9) — verification-first sweep of all 15 open cards: per-card class-B gates, small implementation gaps fixed as found (known: W14 orphan cleanup unimplemented; W15/W16 modal/transient appear unwired), march/status doc flips, issue close-outs with observed evidence.
 - **Touches:** docs/march-m21.md docs/status.md kernel/src/monitor.zig kernel/src/driving_award.zig kernel/src/input.zig kernel/src/shell.zig user/src/m21demo.zig user/src/winmove.zig tools/verify-live-m21* tools/verify-live-win-move.sh build.zig
 - **Depends on:** #488 (W1–W5 implementation) + 1a8dedf (W9/W11/W12 polish) — both already on main
-- **Heartbeat:** 2026-08-25
-- **Status:** ⛔ superseded by claim 1306 (`agent/buffy/m21-window-depth`)
+- **Heartbeat:** 2026-08-26
+- **Status:** ✅ resolved — superseded by claim 1306 (`agent/buffy/m21-window-depth`), which is itself ✅ done 2026-08-26, so this sweep's scope is fully closed (the M21 W1–W16 gates landed via #488 + 1a8dedf + claim 1306). Flipped from ⛔ by claim 0590's owner during the 2026-08-26 open-claim sweep (log entry in docs/logs/agent-buffy-input-poll-563.md).
 
 ## Notes
 

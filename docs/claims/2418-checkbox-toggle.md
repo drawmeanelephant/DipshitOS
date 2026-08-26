@@ -4,7 +4,8 @@
 - **Prompt / plan:** `docs/m17-desktop-completeness.md` + GH #219
 - **Scope:** Arc1 Widget Toolkit Depth — pure `user/src/lib/ui.zig` Checkbox (12×12) + Toggle (48×20 pill) per #219, no ABI, post-#218
 - **Depends on:** M17 done (3046bc8) + Arc1 #218 ScrollView done (3046bc8), no dep on #234/#236
-- **Status:** 🔄 `agent/buffy/arc1-checkbox-toggle`
+- **Heartbeat:** 2026-08-26
+- **Status:** ✅ done — Checkbox + Toggle landed on main (GH #219, Arc1): `user/src/lib/ui.zig` Checkbox (12×12) + Toggle (48×20 pill) components, verified present in main's ui.zig (lines ~1497/1530). Flipped from 🔄 by claim 0590's owner per the 6204/6637 precedent during the 2026-08-26 open-claim sweep (log entry in docs/logs/agent-buffy-input-poll-563.md).
 
 ## Notes
 

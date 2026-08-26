@@ -14,7 +14,8 @@
 - **Depends on:** M18 done ✅ (merged to main as `4d11713`, PR #485).
   Lane A is the critical path — Lane C (M20 text) and Lane E (M21
   compositor) depend on it.
-- **Status:** 🔄 in progress — P1 (pipes) ✅ done 2026-08-22; P2 (redirection) ✅ done 2026-08-23; P3 (env vars) ✅ done 2026-08-23; P4 (functions) ✅ done 2026-08-23; P8 (function args) ✅ done 2026-08-23; P9 (command substitution) ✅ done 2026-08-23; P10 (arithmetic expansion) ✅ done 2026-08-23; P11 (conditionals) ✅ done 2026-08-23; P12 (loops) ✅ done 2026-08-23; P13 (here-documents) ✅ done 2026-08-23; P14 (pipe to/from files) ✅ done 2026-08-23; P15 (set -x tracing) ✅ done 2026-08-23; P16 (temp files) ✅ done 2026-08-23
+- **Heartbeat:** 2026-08-26
+- **Status:** ✅ done — M19 Lane A complete on main: all 16 P-cards (pipes → P16 temp files) landed and march-m19.md rows all closed (P1 `verify-live-pipe.sh` PASS on VZ; P2–P16 with host tests 693/693 shell + 526/526 monitor green). Flipped from 🔄 by claim 0590's owner per the 6204/6637 precedent during the 2026-08-26 open-claim sweep (log entry in docs/logs/agent-buffy-input-poll-563.md).
 
 ## Notes
 
