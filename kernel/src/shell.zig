@@ -3480,11 +3480,29 @@ fn persist_window_state_tick() void {
 }
 
 /// M21 W11: save current window state to ESP as WINDOWS.SAV.
+///
+/// #563: skip the write when the serialized state is byte-identical to the
+/// last one actually written. The persist tick fires every 300 idle cycles
+/// — at the real (~250 Hz) idle-loop rate that is roughly once a second —
+/// and each write's cluster-allocation scan reads ~170 FAT sectors (the
+/// ESP's file region spans ~21.8k clusters). A stable desktop was rewriting
+/// identical WINDOWS.SAV content every tick, keeping the virtio-blk
+/// transport continuously busy and starving concurrent reads (the
+/// verify-live-desktop CALC exec hit a transport timeout and surfaced as
+/// ENOENT). Unchanged state is not persisted: no disk traffic, same
+/// restore semantics.
+var last_saved_windows: [driving_award.persist_max_bytes]u8 = undefined;
+var last_saved_windows_len: usize = 0;
+var have_last_saved_windows: bool = false;
 fn save_windows() void {
     var buf: [driving_award.persist_max_bytes]u8 = undefined;
     const n = driving_award.serialize_state(&buf);
-    if (n > 0) {
-        _ = esp.write_file("WINDOWS.SAV", buf[0..n]);
+    if (n == 0) return;
+    if (have_last_saved_windows and last_saved_windows_len == n and std.mem.eql(u8, last_saved_windows[0..n], buf[0..n])) return;
+    if (esp.write_file("WINDOWS.SAV", buf[0..n]) == .ok) {
+        @memcpy(last_saved_windows[0..n], buf[0..n]);
+        last_saved_windows_len = n;
+        have_last_saved_windows = true;
     }
 }
 

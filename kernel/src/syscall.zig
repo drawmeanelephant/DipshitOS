@@ -2801,7 +2801,11 @@ test "syscall: win open/fill/present/close round-trips with per-process ownershi
     // Error mapping in the OWNING context: invalid geometry, out-of-bounds
     // rects, unknown ids, and the fixed windows are all EINVAL.
     try std.testing.expectEqual(error_result(.einval), dispatch(sys_win_open, .{ 0, 0, 0, 10, 0, 0 }, &frame));
-    try std.testing.expectEqual(error_result(.einval), dispatch(sys_win_open, .{ 0, 0, 10, 385, 0, 0 }, &frame));
+    // 425 exceeds the user back-buffer height (user_buf_h=424, grown for
+    // CALC.BIN's M24 424-tall window); 385 now fits the buffer, so with
+    // the full registry it maps to ENOSPC (geometry is no longer EINVAL).
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_win_open, .{ 0, 0, 10, 425, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.enospc), dispatch(sys_win_open, .{ 0, 0, 10, 385, 0, 0 }, &frame));
     try std.testing.expectEqual(error_result(.einval), dispatch(sys_win_fill, .{ 99, 0, 0, 10, 10, 0 }, &frame));
     try std.testing.expectEqual(error_result(.einval), dispatch(sys_win_fill, .{ 2, 255, 191, 2, 2, 0 }, &frame));
     try std.testing.expectEqual(error_result(.einval), dispatch(sys_win_present, .{ 99, 0, 0, 0, 0, 0 }, &frame));

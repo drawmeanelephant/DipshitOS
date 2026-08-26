@@ -92,7 +92,12 @@ pub const cursor_h: usize = 8;
 pub const user_window_id_base: u8 = 2;
 pub const user_windows_max: usize = 4;
 pub const user_buf_w: u32 = 512;
-pub const user_buf_h: u32 = 384;
+/// 424 (not 384): M24 (commit 595bc71) grew CALC.BIN's window to 424
+/// tall for the statistics mode rows — the back-buffer must fit the
+/// tallest app window or `sys_win_open` rejects it (the M11 desktop gate
+/// surfaced this as `calc: failed to open window` once the exec ENOENT
+/// was fixed). 424 is the tallest window across the app fleet.
+pub const user_buf_h: u32 = 424;
 
 /// Step 8 (Issue #211): the system taskbar at the bottom of the scanout.
 pub const taskbar_h: u32 = 20;
@@ -1311,7 +1316,7 @@ pub fn is_resize_hit(win: Window, px: u32, py: u32) bool {
     return px >= rx and px < win.x + win.w and py >= ry and py < win.y + win.h;
 }
 
-/// Clamp helpers — pure, host-testable. Buffer bounds 128×64..512×384 plus
+/// Clamp helpers — pure, host-testable. Buffer bounds 128×64..512×424 plus
 /// on-scanout containment (so a resize never writes beyond the framebuffer).
 pub fn clamp_resize_w(req_w: i32, win_x: u32) u32 {
     var w: i32 = req_w;
@@ -1336,7 +1341,7 @@ pub fn clamp_resize_h(req_h: i32, win_y: u32) u32 {
     return @intCast(h);
 }
 
-/// Resize a user window to (w, h), clamped to 128×64..512×384 and on-scanout.
+/// Resize a user window to (w, h), clamped to 128×64..512×424 and on-scanout.
 /// Marks the window dirty + the terminal dirty (reveal old rect + chrome repaint
 /// on next `composite()`), and emits `WIN_RESIZE` to the owning pid. Returns
 /// false for an unknown id / non-user window. The EL0 `sys_win_resize` enforces
@@ -3788,7 +3793,9 @@ test "driving_award: user_open bounds and the four slots fill the registry" {
     // Invalid geometry: zero size, oversize back-buffer, off-scanout.
     try std.testing.expectEqual(UserOpenResult.invalid, user_open(0, 0, 0, 10, 7));
     try std.testing.expectEqual(UserOpenResult.invalid, user_open(0, 0, 513, 10, 7));
-    try std.testing.expectEqual(UserOpenResult.invalid, user_open(0, 0, 10, 385, 7));
+    // 425 exceeds the back-buffer height (user_buf_h=424, grown for
+    // CALC.BIN's M24 424-tall window); 385 now fits.
+    try std.testing.expectEqual(UserOpenResult.invalid, user_open(0, 0, 10, 425, 7));
     try std.testing.expectEqual(UserOpenResult.invalid, user_open(virtio_gpu.fb_width, 0, 10, 10, 7));
     try std.testing.expectEqual(UserOpenResult.invalid, user_open(virtio_gpu.fb_width - 4, 0, 10, 10, 7));
     // Four opens fill all slots (ids 2..5); the fifth is ENOSPC-shaped (.full).
@@ -4255,14 +4262,15 @@ test "driving_award: M15 C3 — snap_window and snap_restore with per-window las
     _ = user_open(64, 64, 200, 100, 7);
     const before = user_rect(2).?;
     try std.testing.expect(!snap_is_snapped(2));
-    // Snap to left half — zone 640×700, win clamped to 512×384 centered.
+    // Snap to left half — zone 640×700, win clamped to 512×424 centered
+    // (the buffer height, grown for CALC.BIN's M24 424-tall window).
     try std.testing.expect(snap_window(2, .left));
     try std.testing.expect(snap_is_snapped(2));
     const after_left = user_rect(2).?;
     try std.testing.expectEqual(@as(u32, 64), after_left.x);
-    try std.testing.expectEqual(@as(u32, 158), after_left.y);
+    try std.testing.expectEqual(@as(u32, 138), after_left.y);
     try std.testing.expectEqual(@as(u32, 512), after_left.w);
-    try std.testing.expectEqual(@as(u32, 384), after_left.h);
+    try std.testing.expectEqual(@as(u32, 424), after_left.h);
     // Restore.
     try std.testing.expect(snap_restore(2));
     try std.testing.expect(!snap_is_snapped(2));
@@ -4329,8 +4337,10 @@ test "driving_award: Arc2 W1 — clamp_resize_w/h clamp to 128×64..512×384 and
     try std.testing.expectEqual(@as(u32, 64), clamp_resize_h(10, 0));
     try std.testing.expectEqual(@as(u32, 64), clamp_resize_h(64, 0));
     try std.testing.expectEqual(@as(u32, 100), clamp_resize_h(100, 0));
-    try std.testing.expectEqual(@as(u32, 384), clamp_resize_h(384, 0));
-    try std.testing.expectEqual(@as(u32, 384), clamp_resize_h(500, 0));
+    // Buffer bound is user_buf_h=424 (grown for CALC.BIN's M24 424-tall
+    // window); 500 clamps to it.
+    try std.testing.expectEqual(@as(u32, 424), clamp_resize_h(424, 0));
+    try std.testing.expectEqual(@as(u32, 424), clamp_resize_h(500, 0));
     // Screen containment: fb is 1280×720.
     try std.testing.expectEqual(@as(u32, 280), clamp_resize_w(512, 1000)); // 1280-1000=280
     try std.testing.expectEqual(@as(u32, 128), clamp_resize_w(128, 1152)); // 1280-1152=128 exactly min
@@ -4370,14 +4380,15 @@ test "driving_award: Arc2 W1 — user_resize clamps and emits WIN_RESIZE" {
     try std.testing.expectEqual(events.WIN_RESIZE, ev.kind);
     try std.testing.expectEqual(@as(u32, 128), ev.arg0);
     try std.testing.expectEqual(@as(u32, 64), ev.arg1);
-    // Above max clamps to 512×384.
+    // Above max clamps to 512×user_buf_h (424 — grown for CALC.BIN's M24
+    // 424-tall window).
     try std.testing.expect(user_resize(2, 800, 500));
     try std.testing.expectEqual(@as(u32, 512), find_user_window(2).?.w);
-    try std.testing.expectEqual(@as(u32, 384), find_user_window(2).?.h);
+    try std.testing.expectEqual(@as(u32, 424), find_user_window(2).?.h);
     ev = events.pop(9).?;
     try std.testing.expectEqual(events.WIN_RESIZE, ev.kind);
     try std.testing.expectEqual(@as(u32, 512), ev.arg0);
-    try std.testing.expectEqual(@as(u32, 384), ev.arg1);
+    try std.testing.expectEqual(@as(u32, 424), ev.arg1);
     // Chrome dirty + terminal dirty for repaint.
     try std.testing.expect(find_user_window(2).?.dirty);
     try std.testing.expect(windows[0].dirty);

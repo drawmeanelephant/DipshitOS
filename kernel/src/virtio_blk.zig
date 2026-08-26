@@ -392,43 +392,64 @@ fn wait_completion() bool {
 /// device reported status OK. `out` selects a write (device reads `data`)
 /// vs a read (device writes `data`). One request at a time; a stuck device
 /// (completion timeout) returns false without touching the rings again.
+///
+/// Transient recovery: on a first completion timeout the request is usually
+/// still in flight — the stacked overlay disk's host-side I/O can push a
+/// single sector completion just past the poll budget (observed ~2s+ε, a
+/// handful of times per boot). The guest then waits once more for the
+/// outstanding request's late completion (the drain) and re-issues it: a
+/// latency spike must not become a hard read failure for the caller (e.g.
+/// the exec path turning ENOENT). A genuinely dead device still fails
+/// honestly after the second budget.
 fn submit(sector: u64, data: *[512]u8, out: bool) bool {
     if (!blk_ready) return false;
-    // Drain any previous completion first: a timed-out poll leaves the
-    // request outstanding, and its used-ring advance must not be attributed
-    // to the next request (which would shift every later read/write by one
-    // sector). With queue size 1 the invariant is "zero outstanding"; fail
-    // honestly if the previous request is still un-drained.
-    mmu.invalidate_dcache_range(@intFromPtr(&blk_used), @sizeOf(VirtqUsed));
-    if (blk_avail.idx != blk_used.idx) {
-        if (!wait_completion()) return false;
+    var retry: usize = 0;
+    while (true) : (retry += 1) {
+        // Drain any previous completion first: a timed-out poll leaves the
+        // request outstanding, and its used-ring advance must not be
+        // attributed to the next request (which would shift every later
+        // read/write by one sector). With queue size 1 the invariant is
+        // "zero outstanding"; fail honestly if the previous request is
+        // still un-drained after the retry budget too.
+        mmu.invalidate_dcache_range(@intFromPtr(&blk_used), @sizeOf(VirtqUsed));
+        if (blk_avail.idx != blk_used.idx) {
+            if (!wait_completion()) {
+                if (retry == 0 and wait_completion()) continue; // late drain; re-issue
+                return false;
+            }
+        }
+        blk_req.header = .{ .type = if (out) req_out else req_in, .reserved = 0, .sector = sector };
+        blk_req.status = 0xff;
+        if (out) @memcpy(&blk_req.data, data);
+        blk_desc[desc_header] = .{ .addr = mmu.to_phys(@intFromPtr(&blk_req.header)), .len = 16, .flags = virtq_f_next, .next = desc_data };
+        blk_desc[desc_data] = .{ .addr = mmu.to_phys(@intFromPtr(&blk_req.data)), .len = 512, .flags = virtq_f_next | (if (out) 0 else virtq_f_write), .next = desc_status };
+        blk_desc[desc_status] = .{ .addr = mmu.to_phys(@intFromPtr(&blk_req.status)), .len = 1, .flags = virtq_f_write, .next = 0xffff };
+        // Spec indexing: entry `avail.idx` lives in ring[avail.idx % qsize]
+        // (with a single request chain every slot carries desc 0).
+        blk_avail.ring[blk_avail.idx % queue_size] = desc_header;
+        blk_avail.idx +%= 1;
+        // Clean the rings + driver-written buffers so the device's DMA reads
+        // the real contents.
+        mmu.clean_dcache_range(@intFromPtr(&blk_desc), @sizeOf([3]VirtqDesc));
+        mmu.clean_dcache_range(@intFromPtr(&blk_avail), @sizeOf(VirtqAvail));
+        mmu.clean_dcache_range(@intFromPtr(&blk_req.header), 16 + @as(u64, if (out) 512 else 0));
+        // Virtio 1.3 §4.1.5.2.1: without VIRTIO_F_NOTIFICATION_DATA the
+        // notification is a 16-bit write of the queue index (0).
+        mmio.mmio_write16(blk_notify + @as(u64, blk_queue_notify_off) * blk_notify_mult, 0);
+        if (!wait_completion()) {
+            if (retry == 0 and wait_completion()) continue; // late completion; re-issue
+            return false;
+        }
+        // The device wrote data (reads) and the status byte; invalidate both
+        // before the CPU reads them.
+        mmu.invalidate_dcache_range(@intFromPtr(&blk_req.data), 512);
+        mmu.invalidate_dcache_range(@intFromPtr(&blk_req.status), 1);
+        if (blk_req.status != 0) {
+            return false;
+        }
+        if (!out) @memcpy(data, &blk_req.data);
+        return true;
     }
-    blk_req.header = .{ .type = if (out) req_out else req_in, .reserved = 0, .sector = sector };
-    blk_req.status = 0xff;
-    if (out) @memcpy(&blk_req.data, data);
-    blk_desc[desc_header] = .{ .addr = mmu.to_phys(@intFromPtr(&blk_req.header)), .len = 16, .flags = virtq_f_next, .next = desc_data };
-    blk_desc[desc_data] = .{ .addr = mmu.to_phys(@intFromPtr(&blk_req.data)), .len = 512, .flags = virtq_f_next | (if (out) 0 else virtq_f_write), .next = desc_status };
-    blk_desc[desc_status] = .{ .addr = mmu.to_phys(@intFromPtr(&blk_req.status)), .len = 1, .flags = virtq_f_write, .next = 0xffff };
-    // Spec indexing: entry `avail.idx` lives in ring[avail.idx % qsize]
-    // (with a single request chain every slot carries desc 0).
-    blk_avail.ring[blk_avail.idx % queue_size] = desc_header;
-    blk_avail.idx +%= 1;
-    // Clean the rings + driver-written buffers so the device's DMA reads
-    // the real contents.
-    mmu.clean_dcache_range(@intFromPtr(&blk_desc), @sizeOf([3]VirtqDesc));
-    mmu.clean_dcache_range(@intFromPtr(&blk_avail), @sizeOf(VirtqAvail));
-    mmu.clean_dcache_range(@intFromPtr(&blk_req.header), 16 + @as(u64, if (out) 512 else 0));
-    // Virtio 1.3 §4.1.5.2.1: without VIRTIO_F_NOTIFICATION_DATA the
-    // notification is a 16-bit write of the queue index (0).
-    mmio.mmio_write16(blk_notify + @as(u64, blk_queue_notify_off) * blk_notify_mult, 0);
-    if (!wait_completion()) return false;
-    // The device wrote data (reads) and the status byte; invalidate both
-    // before the CPU reads them.
-    mmu.invalidate_dcache_range(@intFromPtr(&blk_req.data), 512);
-    mmu.invalidate_dcache_range(@intFromPtr(&blk_req.status), 1);
-    if (blk_req.status != 0) return false;
-    if (!out) @memcpy(data, &blk_req.data);
-    return true;
 }
 
 /// Read one 512-byte sector into `buf`. Returns false on transport failure

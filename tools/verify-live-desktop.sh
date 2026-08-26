@@ -79,9 +79,9 @@ exec DESKTOP.BIN
 EOF
 
 cat > "$RUN_DIR/script2.txt" <<'EOF'
-echo done-desktop-sweep
 procs
 syscalls
+echo done-desktop-sweep
 EOF
 
 STATIC_EXIT_LINE="tasks user-el0 exited status=7"

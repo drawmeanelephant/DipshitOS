@@ -372,7 +372,16 @@ pub export fn _start() callconv(.c) noreturn {
     }
     const win = @as(u32, @intCast(win_res));
 
-    ui.write_console("desktop: open id=4\n");
+    // Issue #563: print the REAL returned window id (the first free user
+    // slot — restored WINDOWS.SAV state or other apps shift it from the
+    // naive id=4; a hardcoded marker made the desktop's actual window
+    // unobservable in gates).
+    var id_buf: [32]u8 = undefined;
+    var id_len: usize = 0;
+    id_len = append_str(&id_buf, id_len, "desktop: open id=");
+    id_len = append_str(&id_buf, id_len, fmt_u64(id_buf[id_len..], win));
+    id_buf[id_len] = '\n';
+    ui.write_console(id_buf[0 .. id_len + 1]);
 
     // 2. Initial Draw & Present
     app.draw(win);
