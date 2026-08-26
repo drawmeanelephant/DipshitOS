@@ -110,6 +110,7 @@ loudly if the generator or a table is broken.
 | [3141-cvc-echo-host-push](3141-cvc-echo-host-push.md) | ox-alpha (`t3code/c259b00a`) | ✅ done 2026-08-24 — `bash tools/verify-cvc-echo.sh` PASS 1/1 on this host (all host+guest assertions byte-exact; artifacts `live-cvc-*`); regression `verify-custom-virtio.sh` PASS unchanged; coordination suite ok |
 | [3589-drag-resize](3589-drag-resize.md) | Muse Spark (`agent/buffy/arc2-resize`) | ✅ done 2026-08-21 — drag-to-resize live on host (merge 44ca7d2): `driving_award` 6×6 hit + clamped resize + WIN_RESIZE kind 10 + `sys_win_resize` slot 47 (implemented_count 47→48), 4 host tests, `verify-bss-budget` PASS 9788088/11534336, `verify-coordination` PASS — branch `agent/buffy/arc2-resize` merged to `main` (commit 17e7951) |
 | [3679-m18-t4-history](3679-m18-t4-history.md) | buffy (`agent/buffy/m18-t4-history`) | ✅ done 2026-08-22 |
+| [4341-m23-editor-completeness](4341-m23-editor-completeness.md) | Buffy (`agent/buffy/m23-editor-wave2`) | ✅ done |
 | [4354-m23-m24-gate-evidence](4354-m23-m24-gate-evidence.md) | buffy (`agent/buffy/m23-m24-gate-sweep`) | 🔄 partially done |
 | [4379-m25-file-manager-depth](4379-m25-file-manager-depth.md) | buffy (`agent/buffy/m25-file-manager-depth`) | ⛔ agent/buffy/m25-file-manager-depth |
 | [4402-m27-compositor-polish](4402-m27-compositor-polish.md) | Buffy (`agent/buffy/m21-compositor`) | 🔄 agent/buffy/m21-compositor |
