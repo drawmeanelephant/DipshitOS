@@ -46,10 +46,15 @@ pub fn log(msg: []const u8) void {
     total_logged += 1;
 }
 
+/// Truncating formatted log: overlong events are cut at max_text_len.
+/// Formatted into an oversized staging buffer, then clamped — a bare
+/// `catch buf[0..]` around a same-sized bufPrint would log uninitialized
+/// tail bytes.
 pub fn log_fmt(comptime fmt: []const u8, args: anytype) void {
-    var buf: [max_text_len]u8 = undefined;
-    const slice = std.fmt.bufPrint(&buf, fmt, args) catch buf[0..];
-    log(slice);
+    var big: [512]u8 = undefined;
+    const full = std.fmt.bufPrint(&big, fmt, args) catch big[0..big.len];
+    const len = @min(full.len, max_text_len);
+    log(full[0..len]);
 }
 
 pub fn get_count() usize {
