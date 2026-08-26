@@ -3,10 +3,10 @@
 - **Owner:** buffy (`agent/buffy/input-poll-563`)
 - **Prompt / plan:** `docs/claims/1382-issue-563-input-poll-gui-app.md`
 - **Scope:** issue #563 — virtio INPUT queue stops polling after DESKTOP.BIN launches a GUI app; root-cause + fix + live proof on VZ
-- **Touches:** user/src/desktop.zig,tools/verify-live-desktop-typing.sh
+- **Touches:** kernel/src/input.zig,kernel/src/driving_award.zig,kernel/src/virtio_custom.zig,kernel/src/shell.zig,tools/verify-live-desktop.sh,tools/repro563.sh,artifacts/repro563-*
 - **Depends on:** —
 - **Heartbeat:** 2026-08-26
-- **Status:** ✅ done 2026-08-26 — root-caused: NOT a poll stall — guest routing is healthy; the repro burst drained into the in-flight `sys_exec` (strokes consumed by DESKTOP before EDIT's window existed), and the apparent `focused=3` misreading came from the desktop's hardcoded `open id=4` marker while real ids shift with restored WINDOWS.SAV state. Deliverables: `user/src/desktop.zig` prints the real window id; `tools/verify-live-desktop-typing.sh` live gate (split-injection: launch, then type `abcde` after `edit: ready`) PASSES — EDIT decodes all 5 strokes and renders them pixel-proof (92 white-glyph samples on screen). Note: `tools/verify-live-desktop.sh` currently fails on clean main (`err=6` ENOENT for CALC.BIN) — pre-existing, out of scope.
+- **Status:** 🔄 agent/buffy/input-poll-563
 
 ## Notes
 
