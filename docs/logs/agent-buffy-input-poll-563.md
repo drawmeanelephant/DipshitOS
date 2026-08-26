@@ -66,3 +66,17 @@ Also worth recording: `events` counts DECODED reports in BOTH routing
 branches, so events=N alone does not prove delivery to a user window —
 the gate asserts delivery via the child's serial output + the rendered
 echo instead.
+## 2026-08-26 — coordination hygiene: claim 6204 flipped 🔄 → ✅
+
+The coordination gate warned that claim 6204 (audit-2026 maintenance,
+owner agent/maintenance/audit-2026-issues) had no commit for 14+ days
+while still 🔄. Investigation: the claim's entire scope merged 2026-08-11
+via PR #98 (commit 90625fc, merge 4c51c4c) — #93 timer-gate evidence
+restored (PASS 3/3), #94 AGENTS.md current-milestone drift fixed
+(verified on main), #95 claim 7948 superseded annotation (rode 90625fc;
+the file later moved to docs/archive/claims/ by the claim-1601 hygiene
+prune). The claim was simply never flipped at merge time, and its branch
+log was pruned with the archive, leaving no completion record. Per the
+coordination rules (past 14 days, work verifiably complete), this log
+entry flips 6204 to ✅ done with a Heartbeat of 2026-08-26. No code
+changes; docs-only hygiene.
