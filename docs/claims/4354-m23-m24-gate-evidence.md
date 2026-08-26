@@ -10,8 +10,8 @@
   they surface (with regression tests), flip march rows only on observed PASS.
 - **Touches:** tools/verify-live-calc-prog.sh, docs/march-m23.md, docs/march-m24.md
 - **Depends on:** —
-- **Heartbeat:** 2026-08-25
-- **Status:** 🔄 partially done
+- **Heartbeat:** 2026-08-26
+- **Status:** 🔄 partially done — **blocker resolved 2026-08-26:** the #562 ENOENT (`sys_exec("CALC.BIN")` from DESKTOP) that blocked the K1–K10/K12–K16 desktop-launched CALC gates was fixed and merged via PR #579 (root cause: FAT allocator scan amplification + virtio-blk timeouts + the M24 window-height regression). The remaining K-row sweep is unblocked; `tools/verify-live-desktop.sh` now launches CALC.BIN on VZ end to end.
 
 ## Notes
 

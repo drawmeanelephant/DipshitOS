@@ -80,3 +80,31 @@ log was pruned with the archive, leaving no completion record. Per the
 coordination rules (past 14 days, work verifiably complete), this log
 entry flips 6204 to ✅ done with a Heartbeat of 2026-08-26. No code
 changes; docs-only hygiene.
+## 2026-08-26 — open-claim sweep: eight stale 🔄/⛔ claims closed (merged-but-never-flipped)
+
+Follow-up to the 6204 flip: swept every open 🔄/⛔ claim in docs/claims/
+against main's history and closed the ones whose scope had actually
+landed — the same "merged but never flipped" pattern, at milestone scale:
+
+- claim 0819 (ScrollView, Arc1 #218) — ui.zig ScrollView + FILE.BIN
+  integration on main.
+- claim 2418 (Checkbox/Toggle, Arc1 #219) — both widgets in ui.zig on main.
+- claim 2616 (audit-followup-3, DHCP autonomy) — dhcp.step_lifecycle +
+  net_dhcp_poll on main; reworked live gates PASS.
+- claim 7127 (audit-followup-1, gates/docs) — verify-vz aggregate +
+  win-move dedup + site U4–U8 + AGENTS.md/status.md prose + gate-inventory
+  flake registry, all verified on main.
+- claim 7302 (audit-followup-2, XHCI depth) — max_report_bytes=10 +
+  intr_depth=8 in xhci.zig on main.
+- claim 7033 (M19 Lane A shell) — P1–P16 all landed; march-m19 rows closed
+  (693/693 shell, 526/526 monitor tests).
+- claim 9815 (M22 dev-tools lane) — D1–D16 all closed in march-m22.md with
+  PASS gates.
+- claim 8777 (M21 window sweep) — ⛔ superseded by 1306, which is itself
+  ✅ done 2026-08-26; flipped to ✅ resolved.
+
+Kept open as genuinely active: 2539 (ox-alpha M25 Lane B, heartbeat
+08-25), 4354 (M23/M24 gate sweep, partial — noted that its #562 blocker
+was fixed by PR #579), 4379 (⛔ intentional lane handoff), 4402 (M27
+compositor polish, unimplemented cards). Each flip carries a Heartbeat
+and a pointer to this log entry per the 6204/6637 precedent.

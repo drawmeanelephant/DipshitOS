@@ -24,7 +24,8 @@
   the `verify-vz` aggregate.
 - **Depends on:** — (the N9 lease clock + counters, claim 9489, are the
   base this builds on).
-- **Status:** 🔄 agent/buffy/audit-followup-3-dhcp-autonomy
+- **Heartbeat:** 2026-08-26
+- **Status:** ✅ done — the autonomous DHCP lifecycle landed on main: `dhcp.step_lifecycle()` (RFC 2131 §4.4.5) + `net_dhcp_poll()` in virtio_net, driven from the shell idle loop; both reworked live gates PASS on VZ (per the branch log). Flipped from 🔄 by claim 0590's owner per the 6204/6637 precedent during the 2026-08-26 open-claim sweep (log entry in docs/logs/agent-buffy-input-poll-563.md).
 
 ## Notes
 

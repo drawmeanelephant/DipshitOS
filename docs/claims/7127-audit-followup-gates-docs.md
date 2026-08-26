@@ -19,7 +19,8 @@
   ARP-learn flake whose baseline evidence was lost to `.gitignore` (issue
   #123).
 - **Depends on:** — (docs/gate only; no kernel behavior change).
-- **Status:** 🔄 agent/buffy/audit-followup-1-gates-docs
+- **Heartbeat:** 2026-08-26
+- **Status:** ✅ done — all mechanical/doc items verified on main: verify-vz aggregate includes verify-live-exceptions.sh; win-move recipe dedup (single line); site/roadmap.md names the U4–U8 ladder; AGENTS.md current-milestone fixed ("Milestones zero through twelve…") with the obsolete G4–G6 sentence gone; status.md gains the milestone-eight row; docs/gate-inventory.md has the known-flakes registry. Flipped from 🔄 by claim 0590's owner per the 6204/6637 precedent during the 2026-08-26 open-claim sweep (log entry in docs/logs/agent-buffy-input-poll-563.md).
 
 ## Notes
 
