@@ -129,7 +129,7 @@ are complete. The forward roadmap is M18–M27 — the experience layer:
 | M18 | Terminal & shell depth | T1–T5 (scrollback, selection, search, history, colors) |
 | M19 | Shell as programming environment | P1–P5 (pipes, redirection, env vars, functions, scripts) |
 | M20 | Text rendering & Unicode | U1–U5 (font sizes, Unicode glyphs, search, chrome, tabs) |
-| M21 | Window management depth | W1–W5 (tiling, master-detail, minimize, workspace alt-tab, notifications) |
+| M21 | Window management depth | ✅ done 2026-08-26 (claim 1306, W1–W16, 5/5 live gates) |
 | M22 | Developer tools | D1–D5 (ELF loader, assembler, symbols, disassembler, strace) |
 | M23 | The text editor | E1–E6 (EDIT.BIN, undo/redo, goto, tabs, syntax, console split) |
 | M24 | CALC grows up | K1–K5 (programmer mode, memory, units, constants, history persist) |

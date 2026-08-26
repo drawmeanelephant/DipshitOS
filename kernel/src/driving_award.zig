@@ -2061,6 +2061,25 @@ pub fn move_window_keyboard(id: u8, dx: i32, dy: i32) bool {
     return true;
 }
 
+/// M21 W10: resize the focused window by (dw, dh) pixels. Used for
+/// Alt+Ctrl+arrow keyboard resizing (16px normal).
+pub fn resize_window_keyboard(id: u8, dw: i32, dh: i32) bool {
+    const w = find_user_window(id) orelse return false;
+    const min_w: u32 = 128;
+    const min_h: u32 = 64;
+    const max_w: u32 = if (virtio_gpu.fb_width > w.x) virtio_gpu.fb_width - w.x else min_w;
+    const max_h: u32 = if (virtio_gpu.fb_height > taskbar_h + w.y) virtio_gpu.fb_height - taskbar_h - w.y else min_h;
+    const new_w: i32 = @as(i32, @intCast(w.w)) + dw;
+    const new_h: i32 = @as(i32, @intCast(w.h)) + dh;
+    const clamped_w: u32 = if (new_w < @as(i32, @intCast(min_w))) min_w else @min(@as(u32, @intCast(new_w)), max_w);
+    const clamped_h: u32 = if (new_h < @as(i32, @intCast(min_h))) min_h else @min(@as(u32, @intCast(new_h)), max_h);
+    w.w = clamped_w;
+    w.h = clamped_h;
+    w.dirty = true;
+    _ = mark_dirty(0);
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 // M21 W15 — Modal windows
 // ---------------------------------------------------------------------------
@@ -3169,6 +3188,10 @@ fn draw_chrome() void {
         draw_glyph(fb, stride, w.x + w.w - 14, w.y + 4, 'x', 0xef4444);
         // Step 7: minimize button ("—" — muted glyph left of close).
         draw_glyph(fb, stride, w.x + w.w - 26, w.y + 4, '-', 0x94a3b8);
+        // M21 W8: pin indicator for always-on-top windows ("*" — cyan glyph left of minimize).
+        if (w.always_on_top and w.w >= 50) {
+            draw_glyph(fb, stride, w.x + w.w - 38, w.y + 4, '*', 0x38bdf8);
+        }
     }
     // The focus ring: on the focused window's rect (D4 — focus is always
     // visible). 0xff = none (no ring). The full-screen TERMINAL never

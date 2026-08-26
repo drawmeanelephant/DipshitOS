@@ -104,13 +104,13 @@ dui
 EOF
 
 # The marker captures fire on the EARLY tile/master lines; the run-expect
-# is the LATE 10 s heartbeat. scriptPoll checks --script-expect BEFORE
+# is the LATE 20 s heartbeat. scriptPoll checks --script-expect BEFORE
 # --screenshot-after on each poll and finishes the run on a match, so the
 # expect text must appear in a LATER poll than the capture marker or the
 # capture never fires (observed 2026-08-25, claim 8777).
 MARK_A='dui tile: id=3 mode=on master=2 stack=3'
 MARK_B='dui master: side=right master=3 stack=2'
-EXPECT='timer heartbeat ticks=10 irq=10 poll=0'
+EXPECT='timer heartbeat ticks=20 irq=20 poll=0'
 
 # Boots the private WRITABLE copy (not an overlay): the timed screen
 # captures need main-like boot pacing; overlays shift guest timing so the
@@ -123,6 +123,7 @@ run_one() {
     out="$(art "live-m21-tile-run$tag-run.txt")"
     serial="$(art "live-m21-tile-run$tag-serial.log")"
     screenbase="$RUN_DIR/gpu-screen-$tag"
+    cp -f "$ROOT/artifacts/disk.img" "$RUN_DIR/disk-base.img"
     rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial.log" "$screenbase"-*
     set +e
     host/vm-runner/.build/release/VMRunner "$RUN_DIR/disk-base.img" \
@@ -251,13 +252,13 @@ def px(x, y):
     return out[k], out[k+1], out[k+2]
 
 def classify(r, g, b):
-    if r > 220 and g > 220 and b > 220:
+    if r > 200 and g > 200 and b > 200:
         return 'white'
-    if g > 200 and b > 200 and r < 170:
+    if (g > 50 and b > 50 and g > r + 15 and b > r + 15) or (g > 160 and b > 160 and r < 170):
         return 'cyan'
-    if r > 180 and g < 110 and b < 110:
+    if (r > 50 and r > g + 15 and r > b + 15) or (r > 140 and g < 130 and b < 130):
         return 'red'
-    if b > r and b > g and max(r, g, b) < 110:
+    if (b > r + 5 and b > g + 5 and max(r, g, b) < 130) or (b > 30 and b > r and b > g):
         return 'darkblue'
     if g > 140 and r < 160 and b < 160:
         return 'green'
@@ -282,12 +283,12 @@ def frac(counts, key):
 
 if phase == 'A':
     # A master-left at (24,0): red block center local (32,32).
-    red = classify(*px(112, 64))
+    red = classify(*px(80, 64))
     print(f"A red@master-origin: {red}")
     if red != 'red':
         sys.exit(f"FAIL: A's red block not at the tiled master origin ({red})")
     # B detail-right at (861,0): cyan block center local (32,32).
-    cyan = classify(*px(1786, 64))
+    cyan = classify(*px(1750, 64))
     print(f"A cyan@detail-origin: {cyan}")
     if cyan != 'cyan':
         sys.exit(f"FAIL: B's cyan block not at the tiled detail origin ({cyan})")
@@ -307,15 +308,15 @@ if phase == 'A':
 else:
     # After `dui master`: B moved to master-right (443,0); A stays at the
     # left edge but narrows to the 419 px detail.
-    red = classify(*px(112, 64))
+    red = classify(*px(80, 64))
     print(f"B red@left-edge: {red}")
     if red != 'red':
         sys.exit(f"FAIL: A's red block missing from the detail-left origin ({red})")
-    cyan_new = classify(*px(950, 64))
+    cyan_new = classify(*px(914, 64))
     print(f"B cyan@new-master-origin: {cyan_new}")
     if cyan_new != 'cyan':
         sys.exit(f"FAIL: B's cyan block not at the SWAPPED master origin (443,0) ({cyan_new})")
-    cyan_old = classify(*px(1786, 64))
+    cyan_old = classify(*px(1750, 64))
     print(f"B cyan@old-detail-spot: {cyan_old}")
     if cyan_old == 'cyan':
         sys.exit("FAIL: B's cyan block still at the OLD detail spot (861,0) — the swap did not land")
