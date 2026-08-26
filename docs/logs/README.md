@@ -79,6 +79,7 @@ meaningful — on main.
 | issue 125 follow-on: refresh the public site screenshot | [`agent-buffy-glyph-mirror-fix.md`](agent-buffy-glyph-mirror-fix.md) |
 | glyph raster convention gate (claim 9100) | [`agent-buffy-glyph-raster-gate.md`](agent-buffy-glyph-raster-gate.md) |
 | `agent/buffy/hygiene-archive-m5-m6-prompts` | [`agent-buffy-hygiene-archive-m5-m6-prompts.md`](agent-buffy-hygiene-archive-m5-m6-prompts.md) |
+| agent/buffy/input-poll-563 | [`agent-buffy-input-poll-563.md`](agent-buffy-input-poll-563.md) |
 | milestone ten userland filesystem & storage ABI (claim 0662) | [`agent-buffy-m10-fs.md`](agent-buffy-m10-fs.md) |
 | milestone ten tracker (claim 2412) | [`agent-buffy-m10-tracker.md`](agent-buffy-m10-tracker.md) |
 | Architecture & UI contract (ADR 0011) | [`agent-buffy-m11-a0-adr.md`](agent-buffy-m11-a0-adr.md) |
@@ -117,6 +118,7 @@ meaningful — on main.
 | `agent/buffy/m19-lane-a-shell` | [`agent-buffy-m19-lane-a-shell.md`](agent-buffy-m19-lane-a-shell.md) |
 | agent/buffy/m21-compositor-w9-w11-w12 | [`agent-buffy-m21-compositor-w9-w11-w12.md`](agent-buffy-m21-compositor-w9-w11-w12.md) |
 | agent/buffy/m21-compositor | [`agent-buffy-m21-compositor.md`](agent-buffy-m21-compositor.md) |
+| agent/buffy/m21-window-depth | [`agent-buffy-m21-window-depth.md`](agent-buffy-m21-window-depth.md) |
 | `agent/buffy/m22-devtools-d8-d16` | [`agent-buffy-m22-devtools-d8-d16.md`](agent-buffy-m22-devtools-d8-d16.md) |
 | `agent/buffy/m23-editor-wave2` | [`agent-buffy-m23-editor-wave2.md`](agent-buffy-m23-editor-wave2.md) |
 | `agent/buffy/m23-m24-gate-sweep` | [`agent-buffy-m23-m24-gate-sweep.md`](agent-buffy-m23-m24-gate-sweep.md) |
@@ -149,6 +151,7 @@ meaningful — on main.
 | `agent/oxalpha/archive-march-m4-m5` | [`agent-oxalpha-archive-march-m4-m5.md`](agent-oxalpha-archive-march-m4-m5.md) |
 | `agent/oxalpha/m20-text-unicode` | [`agent-oxalpha-m20-text-unicode.md`](agent-oxalpha-m20-text-unicode.md) |
 | t3code/c259b00a (cvc-echo host-push spike) | [`agent-t3code-c259b00a-cvc-echo.md`](agent-t3code-c259b00a-cvc-echo.md) |
+| agent/t3code/m27-doc-sync | [`agent-t3code-m27-doc-sync.md`](agent-t3code-m27-doc-sync.md) |
 | agent/virtio virtio-input-channel | [`agent-virtio-virtio-input-channel.md`](agent-virtio-virtio-input-channel.md) |
 | milestone eight cards U4+U5: pointer focus/cursor + window HIG (zcode) | [`agent-zcode-m8-u4-u5-windows.md`](agent-zcode-m8-u4-u5-windows.md) |
 | `docs-calm-lavoisier-memorial`: Memorial to calm-lavoisier & Git Alignment (claim 9357) | [`docs-calm-lavoisier-memorial.md`](docs-calm-lavoisier-memorial.md) |
