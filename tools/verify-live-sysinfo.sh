@@ -3,17 +3,16 @@
 # verify-live-sysinfo.sh -- M22 D9 (issue #332) class-B gate:
 # the extended `sysinfo` system information dashboard on real VZ hardware.
 #
-# Mechanism: boots the production image, runs `mount esp` for a
-# deterministic FAT volume handle, then runs `sysinfo`, asserting the full
-# dashboard shape: header, cpu, memory (EFI map + allocator), storage
+# Mechanism: boots the production image and runs `sysinfo`, asserting the
+# full dashboard shape: header, cpu, memory (EFI map + allocator), storage
 # (FAT volume with free/total), network, graphics, input, and the D9-added
-# uptime section.
+# uptime section — all on a FRESH boot.
 #
-# KNOWN GAP (observed 2026-08-25, claim 5220): on a FRESH boot the storage
-# section prints without free=/total — fat.geometry() reads empty until an
-# explicit `mount esp`, even though ls/stat/find work off the boot window.
-# The gate pins the post-mount behavior; the boot-path gap is recorded in
-# docs/march-m22.md and needs its own follow-up issue.
+# Note (#552, resolved not-a-bug): a one-shot boot debug line ("syscall:
+# write ok n=23") can interleave mid-print and split the storage line
+# across two serial lines, so the free=/total assertion is deliberately
+# unanchored — the free=0x…/0x… slash shape is unique to the storage
+# section.
 #
 # Class B — Apple silicon + VZ only; boots a real VM.
 #
@@ -61,7 +60,6 @@ echo "run dir: $RUN_DIR"
 SCRIPT="$RUN_DIR/script.txt"
 
 cat > "$SCRIPT" <<'EOF'
-mount esp
 sysinfo
 echo rx-sysinfo-ok
 EOF
