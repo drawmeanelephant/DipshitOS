@@ -42,6 +42,7 @@ storage
   write       write text to a file on the ESP
   mktemp      create a temporary file (empty, unique name)
   stat        file metadata: size, type, cluster, path (D8)
+  du          recursive directory disk usage (M25 F4)
   find        recursive file search with glob patterns ('find / -name "*.BIN"' — bounded 3 levels, 256 results)
   inventory   list all installed applications from APPS.TXT with sizes and types (D16)
 networking

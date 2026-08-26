@@ -52,7 +52,7 @@ Addressed review blockers on PR #561:
 Swept and closed Milestone 13 (M25 — File Manager Depth, cards F1–F18):
 - F4 completed: `cmd_du` implemented in `kernel/src/monitor.zig`, wired to `fat.dir_size_recursive`, registered in monitor table (`registry_count` 65 -> 66).
 - New class-B live gate `tools/verify-live-filemanager-du.sh` added and PASS (1/1 on VZ).
-- Corrected `kernel/src/shell.zig` test fixture (`"shell: mock-fed end-to-end session produces the exact transcript"`) to include the `du` storage help row.
+- Corrected `kernel/src/shell.zig` test fixture and `tests/transcript-console.txt` fixture to include the `du` storage help row (verified via `zig build test-console`).
 - Re-verified all 5 M25 class-B live gates on Apple silicon Virtualization.framework:
   - `tools/verify-live-filemanager-bulk.sh`: PASS (F1 bulk operations + F18 transactional delete)
   - `tools/verify-live-filemanager-props.sh`: PASS (F2 file properties panel + F13 open with)
