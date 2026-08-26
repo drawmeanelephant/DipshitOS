@@ -279,9 +279,10 @@ pub fn last_fail_lba() u64 {
 pub fn free_clusters() u32 {
     if (!state.mounted) return 0;
     var free: u32 = 0;
+    var scan = FatScan{};
     var c: u32 = 2;
     while (c < state.geo.total_clusters and free < 0x7fffffff) : (c += 1) {
-        if (fat_entry(c) == 0) free += 1;
+        if (scan.entry(c) == 0) free += 1;
     }
     return free;
 }
@@ -442,9 +443,10 @@ pub fn write_file(path: []const u8, content: []const u8) WriteResult {
     var alloc: [max_alloc_clusters]u32 = undefined;
     var got: usize = 0;
     if (needed > 0) {
+        var scan = FatScan{};
         var c: u32 = 2;
         while (c < state.geo.total_clusters and got < needed) : (c += 1) {
-            if (fat_entry(c) == 0) {
+            if (scan.entry(c) == 0) {
                 alloc[got] = c;
                 got += 1;
             }
@@ -814,6 +816,34 @@ fn fat_entry(cluster: u32) u32 {
     if (off + 4 > sector_size) return fat_eoc;
     return read_le(u32, buf[off .. off + 4]) & 0x0fffffff;
 }
+
+/// First-fit FAT allocation scan with one sector of read caching. The
+/// scan may walk tens of thousands of clusters (the ESP is a 94 MiB
+/// volume), and 128 clusters share a single 512-byte FAT sector — without
+/// the cache each `fat_entry` re-reads the same sector 128 times in a
+/// row. The cache turns a worst-case full-volume scan into ~1 read per
+/// FAT sector (1434 reads, not ~183k). The cache is call-local: scans are
+/// read-only and no write can interleave, so it never goes stale.
+const FatScan = struct {
+    sector: u64 = 0,
+    have: bool = false,
+    buf: [sector_size]u8 = undefined,
+
+    /// FAT entry value for `cluster`, or null when the cluster is out of
+    /// range or the sector read failed. Callers treat null as "not free"
+    /// (identical to `fat_entry` returning `fat_eoc` on a read failure).
+    fn entry(self: *FatScan, cluster: u32) ?u32 {
+        if (cluster < 2 or cluster >= state.geo.total_clusters) return null;
+        const lba = fat_lba() + @as(u64, cluster) * 4 / sector_size;
+        if (!self.have or self.sector != lba) {
+            if (!read_sector(lba, &self.buf)) return null;
+            self.sector = lba;
+            self.have = true;
+        }
+        const off = @as(usize, cluster * 4) % sector_size;
+        return read_le(u32, self.buf[off .. off + 4]) & 0x0fffffff;
+    }
+};
 
 /// Write a FAT entry to ALL FAT copies. Returns false on a sector failure.
 fn set_fat_entry(cluster: u32, value: u32) bool {
