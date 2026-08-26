@@ -47,6 +47,9 @@ pub const console_rows: usize = 10;
 const undo_cap: usize = 50;
 const delta_text_cap: usize = 64;
 
+// E17: crash recovery
+pub const recovery_path: []const u8 = "/data/EDIT_REC.TXT";
+
 // E19: Editor Themes
 pub const Theme = struct {
     name: []const u8,
@@ -241,22 +244,32 @@ pub const max_cursors: usize = 8;
 
 pub const RectSelection = struct {
     active: bool = false,
-    start_line: usize = 0,
-    start_col: usize = 0,
-    end_line: usize = 0,
-    end_col: usize = 0,
+    start_line: usize = 1,
+    start_col: usize = 1,
+    end_line: usize = 1,
+    end_col: usize = 1,
 
     pub fn clear(self: *RectSelection) void {
         self.active = false;
     }
 
+    pub fn min_line(self: *const RectSelection) usize {
+        return @min(self.start_line, self.end_line);
+    }
+    pub fn max_line(self: *const RectSelection) usize {
+        return @max(self.start_line, self.end_line);
+    }
+    pub fn min_col(self: *const RectSelection) usize {
+        return @min(self.start_col, self.end_col);
+    }
+    pub fn max_col(self: *const RectSelection) usize {
+        return @max(self.start_col, self.end_col);
+    }
+
     pub fn contains(self: *const RectSelection, line: usize, col: usize) bool {
         if (!self.active) return false;
-        const min_l = @min(self.start_line, self.end_line);
-        const max_l = @max(self.start_line, self.end_line);
-        const min_c = @min(self.start_col, self.end_col);
-        const max_c = @max(self.start_col, self.end_col);
-        return line >= min_l and line <= max_l and col >= min_c and col <= max_c;
+        return line >= self.min_line() and line <= self.max_line() and
+            col >= self.min_col() and col <= self.max_col();
     }
 };
 
@@ -317,19 +330,62 @@ pub const FileBuffer = struct {
     }
 
     pub fn insert_char(self: *FileBuffer, ch: u8) bool {
-        if (self.extra_cursor_count > 0) {
-            // Insert at extra cursors too (reverse order to keep indices stable)
-            var k = self.extra_cursor_count;
-            while (k > 0) : (k -= 1) {
-                const cpos = self.extra_cursors[k - 1];
-                if (self.insert_char_at(cpos, ch)) {
-                    self.extra_cursors[k - 1] += 1;
-                    if (self.cursor > cpos) self.cursor += 1;
+        if (self.len >= file_buf_cap) return false;
+        if (self.extra_cursor_count == 0) {
+            if (!self.insert_char_at(self.cursor, ch)) return false;
+            self.cursor += 1;
+            return true;
+        }
+
+        const total = self.extra_cursor_count + 1;
+        var cursors: [max_cursors + 1]usize = undefined;
+        cursors[0] = self.cursor;
+        var ci: usize = 0;
+        while (ci < self.extra_cursor_count) : (ci += 1) {
+            cursors[ci + 1] = self.extra_cursors[ci];
+        }
+
+        var order: [max_cursors + 1]usize = undefined;
+        var oi: usize = 0;
+        while (oi < total) : (oi += 1) order[oi] = oi;
+
+        var a: usize = 0;
+        while (a < total) : (a += 1) {
+            var b: usize = a + 1;
+            while (b < total) : (b += 1) {
+                if (cursors[order[b]] > cursors[order[a]]) {
+                    const tmp = order[a];
+                    order[a] = order[b];
+                    order[b] = tmp;
                 }
             }
         }
-        if (!self.insert_char_at(self.cursor, ch)) return false;
-        self.cursor += 1;
+
+        for (order[0..total]) |idx| {
+            const pos = cursors[idx];
+            if (self.len >= file_buf_cap or pos > self.len) continue;
+            var i = self.len;
+            while (i > pos) : (i -= 1) self.buf[i] = self.buf[i - 1];
+            self.buf[pos] = ch;
+            self.len += 1;
+            var d: Delta = .{ .pos = pos };
+            d.new_text[0] = ch;
+            d.new_len = 1;
+            self.undo.push_undo(d);
+
+            var cj: usize = 0;
+            while (cj < total) : (cj += 1) {
+                if (cj == idx or cursors[cj] > pos) {
+                    cursors[cj] += 1;
+                }
+            }
+        }
+
+        self.cursor = cursors[0];
+        ci = 0;
+        while (ci < self.extra_cursor_count) : (ci += 1) {
+            self.extra_cursors[ci] = cursors[ci + 1];
+        }
         return true;
     }
 
@@ -356,32 +412,195 @@ pub const FileBuffer = struct {
     }
 
     pub fn backspace(self: *FileBuffer) bool {
-        if (self.cursor == 0 or self.len == 0) return false;
-        if (self.extra_cursor_count > 0) {
-            var k = self.extra_cursor_count;
-            while (k > 0) : (k -= 1) {
-                const cpos = self.extra_cursors[k - 1];
-                if (self.backspace_at(cpos)) {
-                    self.extra_cursors[k - 1] -= 1;
-                    if (self.cursor > cpos) self.cursor -= 1;
+        if (self.len == 0) return false;
+        if (self.extra_cursor_count == 0) {
+            if (self.cursor == 0) return false;
+            if (!self.backspace_at(self.cursor)) return false;
+            self.cursor -= 1;
+            return true;
+        }
+
+        const total = self.extra_cursor_count + 1;
+        var cursors: [max_cursors + 1]usize = undefined;
+        cursors[0] = self.cursor;
+        var ci: usize = 0;
+        while (ci < self.extra_cursor_count) : (ci += 1) {
+            cursors[ci + 1] = self.extra_cursors[ci];
+        }
+
+        var order: [max_cursors + 1]usize = undefined;
+        var oi: usize = 0;
+        while (oi < total) : (oi += 1) order[oi] = oi;
+
+        var a: usize = 0;
+        while (a < total) : (a += 1) {
+            var b: usize = a + 1;
+            while (b < total) : (b += 1) {
+                if (cursors[order[b]] > cursors[order[a]]) {
+                    const tmp = order[a];
+                    order[a] = order[b];
+                    order[b] = tmp;
                 }
             }
         }
-        if (!self.backspace_at(self.cursor)) return false;
-        self.cursor -= 1;
-        return true;
+
+        var changed = false;
+        for (order[0..total]) |idx| {
+            const pos = cursors[idx];
+            if (pos == 0 or pos > self.len or self.len == 0) continue;
+            const del_pos = pos - 1;
+            const deleted_char = self.buf[del_pos];
+            var i = del_pos;
+            while (i < self.len - 1) : (i += 1) self.buf[i] = self.buf[i + 1];
+            self.len -= 1;
+            var d: Delta = .{ .pos = del_pos };
+            d.old_text[0] = deleted_char;
+            d.old_len = 1;
+            self.undo.push_undo(d);
+            changed = true;
+
+            var cj: usize = 0;
+            while (cj < total) : (cj += 1) {
+                if (cj == idx or cursors[cj] > del_pos) {
+                    cursors[cj] -= 1;
+                }
+            }
+        }
+
+        self.cursor = cursors[0];
+        ci = 0;
+        while (ci < self.extra_cursor_count) : (ci += 1) {
+            self.extra_cursors[ci] = cursors[ci + 1];
+        }
+        return changed;
     }
 
     pub fn delete_forward(self: *FileBuffer) bool {
-        if (self.cursor >= self.len) return false;
-        const deleted_char = self.buf[self.cursor];
-        var i = self.cursor;
-        while (i < self.len - 1) : (i += 1) self.buf[i] = self.buf[i + 1];
-        self.len -= 1;
-        var d: Delta = .{ .pos = self.cursor };
-        d.old_text[0] = deleted_char;
-        d.old_len = 1;
-        self.undo.push_undo(d);
+        if (self.len == 0) return false;
+        if (self.extra_cursor_count == 0) {
+            if (self.cursor >= self.len) return false;
+            const deleted_char = self.buf[self.cursor];
+            var i = self.cursor;
+            while (i < self.len - 1) : (i += 1) self.buf[i] = self.buf[i + 1];
+            self.len -= 1;
+            var d: Delta = .{ .pos = self.cursor };
+            d.old_text[0] = deleted_char;
+            d.old_len = 1;
+            self.undo.push_undo(d);
+            return true;
+        }
+
+        const total = self.extra_cursor_count + 1;
+        var cursors: [max_cursors + 1]usize = undefined;
+        cursors[0] = self.cursor;
+        var ci: usize = 0;
+        while (ci < self.extra_cursor_count) : (ci += 1) {
+            cursors[ci + 1] = self.extra_cursors[ci];
+        }
+
+        var order: [max_cursors + 1]usize = undefined;
+        var oi: usize = 0;
+        while (oi < total) : (oi += 1) order[oi] = oi;
+
+        var a: usize = 0;
+        while (a < total) : (a += 1) {
+            var b: usize = a + 1;
+            while (b < total) : (b += 1) {
+                if (cursors[order[b]] > cursors[order[a]]) {
+                    const tmp = order[a];
+                    order[a] = order[b];
+                    order[b] = tmp;
+                }
+            }
+        }
+
+        var changed = false;
+        for (order[0..total]) |idx| {
+            const pos = cursors[idx];
+            if (pos >= self.len) continue;
+            const deleted_char = self.buf[pos];
+            var i = pos;
+            while (i < self.len - 1) : (i += 1) self.buf[i] = self.buf[i + 1];
+            self.len -= 1;
+            var d: Delta = .{ .pos = pos };
+            d.old_text[0] = deleted_char;
+            d.old_len = 1;
+            self.undo.push_undo(d);
+            changed = true;
+
+            var cj: usize = 0;
+            while (cj < total) : (cj += 1) {
+                if (cursors[cj] > pos) {
+                    cursors[cj] -= 1;
+                }
+            }
+        }
+
+        self.cursor = cursors[0];
+        ci = 0;
+        while (ci < self.extra_cursor_count) : (ci += 1) {
+            self.extra_cursors[ci] = cursors[ci + 1];
+        }
+        return changed;
+    }
+
+    pub fn insert_rect_char(self: *FileBuffer, ch: u8) bool {
+        if (!self.rect_sel.active) return false;
+        const min_l = self.rect_sel.min_line();
+        const max_l = self.rect_sel.max_line();
+        const col = self.rect_sel.min_col();
+
+        var p: usize = 0;
+        var cur_line: usize = 1;
+        while (p < self.len and cur_line <= max_l) {
+            const ls = p;
+            while (p < self.len and self.buf[p] != '\n') p += 1;
+            const le = p;
+            if (cur_line >= min_l and cur_line <= max_l) {
+                const line_len = le - ls;
+                const insert_pos = ls + @min(col -| 1, line_len);
+                _ = self.insert_char_at(insert_pos, ch);
+                p += 1;
+            }
+            if (p < self.len and self.buf[p] == '\n') {
+                p += 1;
+            }
+            cur_line += 1;
+        }
+        self.rect_sel.start_col += 1;
+        self.rect_sel.end_col += 1;
+        return true;
+    }
+
+    pub fn backspace_rect_char(self: *FileBuffer) bool {
+        if (!self.rect_sel.active) return false;
+        const min_l = self.rect_sel.min_line();
+        const max_l = self.rect_sel.max_line();
+        const col = self.rect_sel.min_col();
+        if (col <= 1) return false;
+
+        var p: usize = 0;
+        var cur_line: usize = 1;
+        while (p < self.len and cur_line <= max_l) {
+            const ls = p;
+            while (p < self.len and self.buf[p] != '\n') p += 1;
+            const le = p;
+            if (cur_line >= min_l and cur_line <= max_l) {
+                const line_len = le - ls;
+                const del_col = col - 1;
+                if (del_col <= line_len) {
+                    const del_pos = ls + del_col;
+                    _ = self.backspace_at(del_pos);
+                    p -= 1;
+                }
+            }
+            if (p < self.len and self.buf[p] == '\n') {
+                p += 1;
+            }
+            cur_line += 1;
+        }
+        if (self.rect_sel.start_col > 1) self.rect_sel.start_col -= 1;
+        if (self.rect_sel.end_col > 1) self.rect_sel.end_col -= 1;
         return true;
     }
 
@@ -1256,7 +1475,10 @@ pub const FileSidebar = struct {
     selected: usize = 0,
 
     pub fn refresh(self: *FileSidebar) void {
-        const rc = ui.dir_list("", &self.entries);
+        var rc = ui.dir_list("/esp", &self.entries);
+        if (rc <= 0) {
+            rc = ui.dir_list("", &self.entries);
+        }
         if (rc > 0) {
             self.count = @min(@as(usize, @intCast(rc)), max_sidebar_entries);
         } else {
@@ -1612,6 +1834,8 @@ pub const AppState = struct {
     info_msg: [64]u8 = [_]u8{0} ** 64,
     info_len: usize = 0,
     win_id: u32 = 0,
+    has_recovery: bool = false,
+    recovery_len: usize = 0,
 
     pub fn init(self: *AppState) void {
         self.show_shell = false;
@@ -1622,6 +1846,8 @@ pub const AppState = struct {
         self.win_id = 0;
         self.info_len = 0;
         self.status_len = 0;
+        self.has_recovery = false;
+        self.recovery_len = 0;
         self.set_status("EDIT.BIN");
         self.tabs.init_in_place();
         self.shell.reset();
@@ -1654,23 +1880,66 @@ pub const AppState = struct {
         self.set_status(msg);
     }
 
+    pub fn save_recovery_backup(self: *AppState) void {
+        const slice = self.fb().slice();
+        if (slice.len == 0) return;
+        const fd_res = ui.file_open(recovery_path, ui.MODE_WRITE | ui.MODE_CREATE);
+        if (fd_res >= 0) {
+            const fd = @as(u32, @intCast(fd_res));
+            _ = ui.file_write(fd, slice);
+            ui.file_close(fd);
+        }
+    }
+
+    pub fn clear_recovery_backup() void {
+        const fd_res = ui.file_open(recovery_path, ui.MODE_WRITE | ui.MODE_CREATE);
+        if (fd_res >= 0) {
+            ui.file_close(@as(u32, @intCast(fd_res)));
+        }
+    }
+
+    pub fn check_crash_recovery(self: *AppState) void {
+        const fd_res = ui.file_open(recovery_path, ui.MODE_READ);
+        if (fd_res >= 0) {
+            const fd = @as(u32, @intCast(fd_res));
+            const rd = ui.file_read(fd, &self.fb().buf);
+            ui.file_close(fd);
+            if (rd > 0) {
+                self.has_recovery = true;
+                self.recovery_len = @as(usize, @intCast(rd));
+                self.set_info("Recovery backup found! Press [R]estore or [D]iscard");
+                ui.write_console("edit: recovery-found\n");
+            }
+        }
+    }
+
     pub fn save_active_file(self: *AppState) bool {
         const active_t = self.tabs.active_tab();
         const fname = self.tabs.get_filename(self.tabs.active);
-        if (std.mem.eql(u8, fname, "UNTITLED")) {
-            self.set_info("Save: UNTITLED file (specify name in shell or open)");
-            return false;
-        }
+        var target_buf: [64]u8 = undefined;
+        const target_path = if (std.mem.eql(u8, fname, "UNTITLED") or fname.len == 0)
+            "/data/UNTITLED.TXT"
+        else if (fname[0] == '/')
+            fname
+        else
+            std.fmt.bufPrint(&target_buf, "/data/{s}", .{fname}) catch fname;
 
-        const fd_res = ui.file_open(fname, ui.MODE_WRITE | ui.MODE_CREATE);
+        var fd_res = ui.file_open(target_path, ui.MODE_WRITE | ui.MODE_CREATE);
+        if (fd_res < 0) {
+            fd_res = ui.file_open(fname, ui.MODE_WRITE | ui.MODE_CREATE);
+        }
         if (fd_res >= 0) {
             const fd = @as(u32, @intCast(fd_res));
             _ = ui.file_write(fd, active_t.fb.slice());
             ui.file_close(fd);
             active_t.dirty = false;
-            self.recent_list.add(fname);
+            if (std.mem.eql(u8, fname, "UNTITLED")) {
+                self.tabs.set_filename(self.tabs.active, target_path);
+            }
+            self.recent_list.add(target_path);
             self.set_info("Saved successfully");
             ui.write_console("edit: save-ok\n");
+            clear_recovery_backup();
             return true;
         } else {
             self.set_info("Save failed (disk error)");
@@ -1822,84 +2091,125 @@ pub const AppState = struct {
         else
             null;
 
+        const max_c = @max((edit_w - gw - 8) / glyph_w, 10);
         var ln: usize = 0;
         var byte_pos: usize = 0;
-        while (byte_pos < slice.len and ln < vis_rows) : (ln += 1) {
+        var logical_line_num: usize = 1;
+
+        if (slice.len == 0 and ln < vis_rows) {
+            const gy = top + 3;
+            if (self.show_line_numbers) {
+                ui.draw_text(win, "1", edit_x + 2, gy, t.muted);
+            }
+            if (self.insert_mode) {
+                ui.draw_rect(win, Rect.make(x0, top + 2, glyph_w, line_h), t.cursor);
+            }
+            ln = 1;
+        }
+
+        while (byte_pos < slice.len and ln < vis_rows) : (logical_line_num += 1) {
             const line_start = byte_pos;
             while (byte_pos < slice.len and slice[byte_pos] != '\n') byte_pos += 1;
             const line_end = byte_pos;
             if (byte_pos < slice.len) byte_pos += 1;
+            const llen = line_end - line_start;
 
-            const gy = top + 3 + @as(u32, @intCast(ln)) * line_h;
+            var chunk_off: usize = 0;
+            var is_first_chunk = true;
 
-            // Line numbers & Bookmarks
-            if (self.show_line_numbers) {
-                var nbuf: [4]u8 = undefined;
-                const nl = fmt_int(&nbuf, ln + 1);
-                ui.draw_text(win, nbuf[0..nl], edit_x + 2, gy, t.muted);
+            while ((chunk_off < llen or is_first_chunk) and ln < vis_rows) {
+                const chunk_len = if (self.word_wrap)
+                    @min(llen - chunk_off, max_c)
+                else
+                    @min(llen, max_c);
+                const c_start = line_start + chunk_off;
+                const c_end = c_start + chunk_len;
+                const gy = top + 3 + @as(u32, @intCast(ln)) * line_h;
 
-                if (fb_ptr.bookmarks.has_bookmark(ln + 1)) {
-                    ui.draw_text(win, "*", edit_x + gutter_w - 6, gy, t.warning);
-                }
-            }
+                // Line numbers & Bookmarks (only on first wrapped chunk)
+                if (self.show_line_numbers and is_first_chunk) {
+                    var nbuf: [4]u8 = undefined;
+                    const nl = fmt_int(&nbuf, logical_line_num);
+                    ui.draw_text(win, nbuf[0..nl], edit_x + 2, gy, t.muted);
 
-            // Search match highlights
-            if (self.find_prompt.active and self.find_prompt.find_len > 0) {
-                const needle = self.find_prompt.get_find();
-                var p = line_start;
-                while (p + needle.len <= line_end) : (p += 1) {
-                    if (match_at_ci(slice, needle, p)) {
-                        const col_offset = p - line_start;
-                        const mx = x0 + @as(u32, @intCast(col_offset)) * glyph_w;
-                        const mw = @as(u32, @intCast(needle.len)) * glyph_w;
-                        ui.draw_rect(win, Rect.make(mx, gy - 1, mw, line_h), t.selection_bg);
+                    if (fb_ptr.bookmarks.has_bookmark(logical_line_num)) {
+                        ui.draw_text(win, "*", edit_x + gutter_w - 6, gy, t.warning);
                     }
                 }
-            }
 
-            const llen = line_end - line_start;
-            const take = @min(llen, text_cols);
-            if (use_syntax) {
-                draw_line_colored(win, slice[line_start..][0..take], x0, gy, t);
-            } else {
-                ui.draw_text(win, slice[line_start..][0..take], x0, gy, t.text);
-            }
-
-            if (bracket_match) |bm| {
-                if (bm >= line_start and bm < line_end) {
-                    const col_offset = bm - line_start;
-                    const bx = x0 + @as(u32, @intCast(col_offset)) * glyph_w;
-                    ui.draw_rect_outline(win, Rect.make(bx, gy - 1, glyph_w, line_h), 1, t.accent);
+                // Rectangular Selection Highlight
+                if (fb_ptr.rect_sel.active and logical_line_num >= fb_ptr.rect_sel.min_line() and logical_line_num <= fb_ptr.rect_sel.max_line()) {
+                    const sel_min_c = fb_ptr.rect_sel.min_col();
+                    const sel_max_c = fb_ptr.rect_sel.max_col();
+                    if (sel_max_c >= sel_min_c) {
+                        const sel_x = x0 + @as(u32, @intCast(sel_min_c -| 1)) * glyph_w;
+                        const sel_w = @as(u32, @intCast(sel_max_c - sel_min_c + 1)) * glyph_w;
+                        ui.draw_rect(win, Rect.make(sel_x, gy - 1, sel_w, line_h), t.selection_bg);
+                    }
                 }
-            }
-        }
 
-        // Primary Cursor
-        if (self.insert_mode) {
-            const cl = fb_ptr.current_line();
-            const cc = fb_ptr.current_col();
-            if (ln > 0 and cl <= ln) {
-                const cx = x0 + @as(u32, @intCast(cc - 1)) * glyph_w;
-                const cy = top + 2 + @as(u32, @intCast(cl - 1)) * line_h;
-                ui.draw_rect(win, Rect.make(cx, cy, glyph_w, line_h), t.cursor);
-            }
+                // Search match highlights
+                if (self.find_prompt.active and self.find_prompt.find_len > 0) {
+                    const needle = self.find_prompt.get_find();
+                    var p = c_start;
+                    while (p + needle.len <= c_end) : (p += 1) {
+                        if (match_at_ci(slice, needle, p)) {
+                            const col_offset = p - c_start;
+                            const mx = x0 + @as(u32, @intCast(col_offset)) * glyph_w;
+                            const mw = @as(u32, @intCast(needle.len)) * glyph_w;
+                            ui.draw_rect(win, Rect.make(mx, gy - 1, mw, line_h), t.selection_bg);
+                        }
+                    }
+                }
 
-            // Secondary Cursors (E12)
-            var ci: usize = 0;
-            while (ci < fb_ptr.extra_cursor_count) : (ci += 1) {
-                const epos = fb_ptr.extra_cursors[ci];
-                const els = fb_ptr.line_start(epos);
-                var el: usize = 1;
-                var p: usize = 0;
-                while (p < epos) : (p += 1) {
-                    if (slice[p] == '\n') el += 1;
+                if (chunk_len > 0) {
+                    if (use_syntax) {
+                        draw_line_colored(win, slice[c_start..c_end], x0, gy, t);
+                    } else {
+                        ui.draw_text(win, slice[c_start..c_end], x0, gy, t.text);
+                    }
                 }
-                const ec = epos - els + 1;
-                if (el <= vis_rows) {
-                    const ecx = x0 + @as(u32, @intCast(ec - 1)) * glyph_w;
-                    const ecy = top + 2 + @as(u32, @intCast(el - 1)) * line_h;
-                    ui.draw_rect_outline(win, Rect.make(ecx, ecy, glyph_w, line_h), 1, t.warning);
+
+                if (bracket_match) |bm| {
+                    if (bm >= c_start and bm < c_end) {
+                        const col_offset = bm - c_start;
+                        const bx = x0 + @as(u32, @intCast(col_offset)) * glyph_w;
+                        ui.draw_rect_outline(win, Rect.make(bx, gy - 1, glyph_w, line_h), 1, t.accent);
+                    }
                 }
+
+                // Primary Cursor
+                if (self.insert_mode) {
+                    const is_cur_in_chunk = if (c_end == line_end)
+                        (fb_ptr.cursor >= c_start and fb_ptr.cursor <= c_end)
+                    else
+                        (fb_ptr.cursor >= c_start and fb_ptr.cursor < c_end);
+                    if (is_cur_in_chunk) {
+                        const cx = x0 + @as(u32, @intCast(fb_ptr.cursor - c_start)) * glyph_w;
+                        const cy = top + 2 + @as(u32, @intCast(ln)) * line_h;
+                        ui.draw_rect(win, Rect.make(cx, cy, glyph_w, line_h), t.cursor);
+                    }
+
+                    // Secondary Cursors
+                    var ci: usize = 0;
+                    while (ci < fb_ptr.extra_cursor_count) : (ci += 1) {
+                        const epos = fb_ptr.extra_cursors[ci];
+                        const is_ecur_in_chunk = if (c_end == line_end)
+                            (epos >= c_start and epos <= c_end)
+                        else
+                            (epos >= c_start and epos < c_end);
+                        if (is_ecur_in_chunk) {
+                            const ecx = x0 + @as(u32, @intCast(epos - c_start)) * glyph_w;
+                            const ecy = top + 2 + @as(u32, @intCast(ln)) * line_h;
+                            ui.draw_rect_outline(win, Rect.make(ecx, ecy, glyph_w, line_h), 1, t.warning);
+                        }
+                    }
+                }
+
+                ln += 1;
+                is_first_chunk = false;
+                if (!self.word_wrap) break;
+                chunk_off += chunk_len;
             }
         }
     }
@@ -1942,6 +2252,16 @@ pub const AppState = struct {
                 draw_line_colored(win, slice[line_start..][0..take], x0, gy, t);
             } else {
                 ui.draw_text(win, slice[line_start..][0..take], x0, gy, t.text);
+            }
+        }
+
+        if (self.insert_mode) {
+            const cl = fb_ptr.current_line();
+            const cc = fb_ptr.current_col();
+            if (ln > 0 and cl <= ln) {
+                const cx = x0 + @as(u32, @intCast(cc - 1)) * glyph_w;
+                const cy = top + 2 + @as(u32, @intCast(cl - 1)) * line_h;
+                ui.draw_rect(win, Rect.make(cx, cy, glyph_w, line_h), t.cursor);
             }
         }
 
@@ -2143,6 +2463,8 @@ pub export fn _start(argc: usize, argv: ?[*]const [32]u8) callconv(.c) noreturn 
     const win = @as(u32, @intCast(win_res));
     g_app.win_id = win;
 
+    g_app.check_crash_recovery();
+
     g_app.draw(win);
     ui.win_present(win);
     ui.write_console("edit: ready\n");
@@ -2171,6 +2493,9 @@ pub export fn _start(argc: usize, argv: ?[*]const [32]u8) callconv(.c) noreturn 
         }
 
         if (dirty) {
+            if (g_app.tabs.active_tab().dirty) {
+                g_app.save_recovery_backup();
+            }
             g_app.draw(win);
             ui.win_present(win);
         }
@@ -2186,6 +2511,25 @@ pub fn handle_key(app: *AppState, ev: *const Event) bool {
     const ascii: i32 = @as(i32, @intCast(ev.arg1));
     const keycode: u16 = @as(u16, @truncate(ev.arg0));
 
+    // Recovery prompt handling (E17)
+    if (app.has_recovery) {
+        if (ascii == 'r' or ascii == 'R') {
+            app.fb().len = app.recovery_len;
+            app.fb().cursor = 0;
+            app.has_recovery = false;
+            app.tabs.active_tab().dirty = true;
+            app.set_info("Restored buffer from crash backup!");
+            ui.write_console("edit: recovery-restored\n");
+            return true;
+        }
+        if (ascii == 'd' or ascii == 'D' or ascii == 0x1b or keycode == 0x29) {
+            app.has_recovery = false;
+            AppState.clear_recovery_backup();
+            app.set_info("Discarded recovery backup");
+            return true;
+        }
+    }
+
     // Modal Overlays take priority
     if (app.close_confirm.active) {
         return handle_close_confirm_key(app, ev);
@@ -2195,6 +2539,9 @@ pub fn handle_key(app: *AppState, ev: *const Event) bool {
     }
     if (app.recent_list.active) {
         return handle_recent_key(app, ev);
+    }
+    if (app.file_sidebar.active) {
+        if (handle_file_sidebar_key(app, ev)) return true;
     }
     if (app.find_prompt.active) {
         return handle_find_key(app, ev);
@@ -2222,6 +2569,24 @@ pub fn handle_key(app: *AppState, ev: *const Event) bool {
         app.file_sidebar.toggle();
         app.set_status(if (app.file_sidebar.active) "File sidebar ON" else "File sidebar OFF");
         ui.write_console("edit: tree-toggle\n");
+        return true;
+    }
+
+    // Alt+R: Toggle rectangular selection (E13)
+    if ((ev.flags & ui.MOD_ALT) != 0 and (keycode == 0x15 or ascii == 'r' or ascii == 'R')) {
+        const cur_l = app.fb().current_line();
+        const cur_c = app.fb().current_col();
+        app.fb().rect_sel.active = !app.fb().rect_sel.active;
+        if (app.fb().rect_sel.active) {
+            app.fb().rect_sel.start_line = cur_l;
+            app.fb().rect_sel.start_col = cur_c;
+            app.fb().rect_sel.end_line = cur_l;
+            app.fb().rect_sel.end_col = cur_c;
+            app.set_status("Rect select ON (Alt+R to toggle)");
+            ui.write_console("edit: rect-sel-on\n");
+        } else {
+            app.set_status("Rect select OFF");
+        }
         return true;
     }
 
@@ -2515,18 +2880,21 @@ pub fn execute_key_action(app: *AppState, action: KeyAction) bool {
             return true;
         },
         .indent_line => {
-            _ = app.fb().indent_current_line();
-            app.tabs.active_tab().dirty = true;
-            return true;
+            if (app.fb().indent_current_line()) {
+                app.tabs.active_tab().dirty = true;
+                return true;
+            }
+            return false;
         },
         .dedent_line => {
-            _ = app.fb().dedent_current_line();
-            app.tabs.active_tab().dirty = true;
-            return true;
+            if (app.fb().dedent_current_line()) {
+                app.tabs.active_tab().dirty = true;
+                return true;
+            }
+            return false;
         },
         .multi_cursor => {
-            _ = app.fb().add_next_word_cursor();
-            return true;
+            return app.fb().add_next_word_cursor();
         },
         .toggle_file_tree => {
             app.file_sidebar.toggle();
@@ -2537,7 +2905,17 @@ pub fn execute_key_action(app: *AppState, action: KeyAction) bool {
             return true;
         },
         .close_tab => {
-            app.tabs.close_active();
+            if (app.tabs.active_tab().dirty) {
+                app.close_confirm.active = true;
+                app.close_confirm.target_tab = app.tabs.active;
+                return true;
+            }
+            if (app.tabs.count > 1) {
+                app.tabs.close_active();
+                app.set_status("Tab closed");
+                return true;
+            }
+            app.set_status("Cannot close last tab");
             return true;
         },
         .next_tab => {
@@ -2549,6 +2927,67 @@ pub fn execute_key_action(app: *AppState, action: KeyAction) bool {
             return true;
         },
     }
+}
+
+pub fn handle_file_sidebar_key(app: *AppState, ev: *const Event) bool {
+    const ascii: i32 = @as(i32, @intCast(ev.arg1));
+    const keycode: u16 = @as(u16, @truncate(ev.arg0));
+
+    if ((ev.flags & ui.MOD_CTRL) != 0 and (ev.flags & ui.MOD_SHIFT) != 0 and keycode == 0x09) {
+        app.file_sidebar.close();
+        ui.write_console("edit: tree-toggle\n");
+        return true;
+    }
+    if (keycode == 0x29 or ascii == 0x1b) {
+        app.file_sidebar.close();
+        return true;
+    }
+
+    if (keycode == 0x52) {
+        if (app.file_sidebar.selected > 0) app.file_sidebar.selected -= 1;
+        return true;
+    }
+    if (keycode == 0x51) {
+        if (app.file_sidebar.count > 0 and app.file_sidebar.selected + 1 < app.file_sidebar.count) {
+            app.file_sidebar.selected += 1;
+        }
+        return true;
+    }
+
+    if (ascii == '\r' or ascii == '\n' or keycode == 0x28) {
+        if (app.file_sidebar.count > 0) {
+            const ent = &app.file_sidebar.entries[app.file_sidebar.selected];
+            var name_len: usize = 0;
+            while (name_len < 32 and ent.name[name_len] != 0) : (name_len += 1) {}
+            const base_name = ent.name[0..name_len];
+
+            var full_path_buf: [64]u8 = undefined;
+            const open_path = std.fmt.bufPrint(&full_path_buf, "/esp/{s}", .{base_name}) catch base_name;
+
+            if (app.tabs.active_tab().dirty and app.tabs.count < max_tabs) {
+                _ = app.tabs.open_new();
+            }
+
+            app.tabs.set_filename(app.tabs.active, open_path);
+            const fd_res = ui.file_open(open_path, ui.MODE_READ);
+            if (fd_res >= 0) {
+                const fd = @as(u32, @intCast(fd_res));
+                const rd = ui.file_read(fd, &app.fb().buf);
+                ui.file_close(fd);
+                if (rd > 0) {
+                    app.fb().len = @as(usize, @intCast(rd));
+                    app.fb().cursor = 0;
+                    app.fb().undo.clear();
+                }
+            }
+            app.set_info("Opened file from tree");
+        }
+        ui.write_console("edit: tree-open-ok\n");
+        app.file_sidebar.close();
+        return true;
+    }
+
+    return false;
 }
 
 pub fn handle_cmd_palette_key(app: *AppState, ev: *const Event) bool {
@@ -2619,8 +3058,18 @@ pub fn handle_recent_key(app: *AppState, ev: *const Event) bool {
         if (app.recent_list.count > 0) {
             const sel = app.recent_list.selected;
             const fname = app.recent_list.files[sel][0..app.recent_list.lens[sel]];
+
+            if (app.tabs.active_tab().dirty) {
+                if (app.tabs.count < max_tabs) {
+                    _ = app.tabs.open_new();
+                } else {
+                    app.set_info("Active tab modified - save before opening file");
+                    app.recent_list.close();
+                    return true;
+                }
+            }
+
             app.tabs.set_filename(app.tabs.active, fname);
-            // Load file content if possible
             const fd_res = ui.file_open(fname, ui.MODE_READ);
             if (fd_res >= 0) {
                 const fd = @as(u32, @intCast(fd_res));
@@ -2646,10 +3095,15 @@ pub fn handle_close_confirm_key(app: *AppState, ev: *const Event) bool {
     const keycode: u16 = @as(u16, @truncate(ev.arg0));
 
     if (ascii == 'y' or ascii == 'Y') {
-        _ = app.save_active_file();
-        app.close_confirm.active = false;
-        app.tabs.close_active();
-        app.set_status("Saved and closed");
+        const saved = app.save_active_file();
+        if (saved) {
+            app.close_confirm.active = false;
+            app.tabs.close_active();
+            app.set_status("Saved and closed");
+        } else {
+            app.close_confirm.active = false;
+            app.set_info("Cannot save UNTITLED file - close aborted");
+        }
         return true;
     }
     if (ascii == 'n' or ascii == 'N') {
@@ -2804,14 +3258,46 @@ pub fn handle_editor_key(app: *AppState, ev: *const Event) bool {
 
     // Navigation keys
     switch (keycode) {
-        0x4f => return fb_ptr.move_left(),
-        0x50 => return fb_ptr.move_right(),
-        0x52 => return fb_ptr.move_up(),
-        0x51 => return fb_ptr.move_down(),
+        0x4f => {
+            const moved = fb_ptr.move_left();
+            if (moved and fb_ptr.rect_sel.active) {
+                fb_ptr.rect_sel.end_line = fb_ptr.current_line();
+                fb_ptr.rect_sel.end_col = fb_ptr.current_col();
+            }
+            return moved;
+        },
+        0x50 => {
+            const moved = fb_ptr.move_right();
+            if (moved and fb_ptr.rect_sel.active) {
+                fb_ptr.rect_sel.end_line = fb_ptr.current_line();
+                fb_ptr.rect_sel.end_col = fb_ptr.current_col();
+            }
+            return moved;
+        },
+        0x52 => {
+            const moved = fb_ptr.move_up();
+            if (moved and fb_ptr.rect_sel.active) {
+                fb_ptr.rect_sel.end_line = fb_ptr.current_line();
+                fb_ptr.rect_sel.end_col = fb_ptr.current_col();
+            }
+            return moved;
+        },
+        0x51 => {
+            const moved = fb_ptr.move_down();
+            if (moved and fb_ptr.rect_sel.active) {
+                fb_ptr.rect_sel.end_line = fb_ptr.current_line();
+                fb_ptr.rect_sel.end_col = fb_ptr.current_col();
+            }
+            return moved;
+        },
         0x4a => { // Home
             const ls = fb_ptr.line_start(fb_ptr.cursor);
             if (fb_ptr.cursor != ls) {
                 fb_ptr.cursor = ls;
+                if (fb_ptr.rect_sel.active) {
+                    fb_ptr.rect_sel.end_line = fb_ptr.current_line();
+                    fb_ptr.rect_sel.end_col = fb_ptr.current_col();
+                }
                 return true;
             }
             return false;
@@ -2820,6 +3306,10 @@ pub fn handle_editor_key(app: *AppState, ev: *const Event) bool {
             const le = fb_ptr.line_end(fb_ptr.cursor);
             if (fb_ptr.cursor != le) {
                 fb_ptr.cursor = le;
+                if (fb_ptr.rect_sel.active) {
+                    fb_ptr.rect_sel.end_line = fb_ptr.current_line();
+                    fb_ptr.rect_sel.end_col = fb_ptr.current_col();
+                }
                 return true;
             }
             return false;
@@ -2830,6 +3320,10 @@ pub fn handle_editor_key(app: *AppState, ev: *const Event) bool {
             while (i < 10) : (i += 1) {
                 if (fb_ptr.move_up()) moved = true else break;
             }
+            if (moved and fb_ptr.rect_sel.active) {
+                fb_ptr.rect_sel.end_line = fb_ptr.current_line();
+                fb_ptr.rect_sel.end_col = fb_ptr.current_col();
+            }
             return moved;
         },
         0x4e => { // PageDown
@@ -2837,6 +3331,10 @@ pub fn handle_editor_key(app: *AppState, ev: *const Event) bool {
             var moved = false;
             while (i < 10) : (i += 1) {
                 if (fb_ptr.move_down()) moved = true else break;
+            }
+            if (moved and fb_ptr.rect_sel.active) {
+                fb_ptr.rect_sel.end_line = fb_ptr.current_line();
+                fb_ptr.rect_sel.end_col = fb_ptr.current_col();
             }
             return moved;
         },
@@ -2887,6 +3385,13 @@ pub fn handle_editor_key(app: *AppState, ev: *const Event) bool {
 
     // Backspace
     if (ascii == 0x08 or ascii == 0x7f) {
+        if (fb_ptr.rect_sel.active) {
+            if (fb_ptr.backspace_rect_char()) {
+                app.tabs.active_tab().dirty = true;
+                return true;
+            }
+            return false;
+        }
         if (fb_ptr.backspace()) {
             app.tabs.active_tab().dirty = true;
             return true;
@@ -2906,6 +3411,9 @@ pub fn handle_editor_key(app: *AppState, ev: *const Event) bool {
     // Printable characters
     if (ascii >= 0x20 and ascii <= 0x7e) {
         app.tabs.active_tab().dirty = true;
+        if (fb_ptr.rect_sel.active) {
+            return fb_ptr.insert_rect_char(@as(u8, @intCast(ascii)));
+        }
         if (!app.insert_mode and fb_ptr.cursor < fb_ptr.len) {
             return fb_ptr.overwrite_char(@as(u8, @intCast(ascii)));
         }
@@ -3509,9 +4017,11 @@ test "edit: E11 AppState show_line_numbers toggle" {
     var ev = Event{ .kind = ui.KEY_DOWN, .flags = ui.MOD_CTRL, .seq = 0, .arg0 = 0x0f, .arg1 = 0 };
     try std.testing.expect(handle_key(&app, &ev));
     try std.testing.expect(!app.show_line_numbers);
+    try std.testing.expectEqualStrings("Line numbers OFF", app.status[0..app.status_len]);
 
     try std.testing.expect(handle_key(&app, &ev));
     try std.testing.expect(app.show_line_numbers);
+    try std.testing.expectEqualStrings("Line numbers ON", app.status[0..app.status_len]);
 }
 
 // E22: Delete line tests
@@ -3745,9 +4255,9 @@ test "edit: E15 RecentList MRU behavior" {
     try std.testing.expectEqualStrings("file1.zig", rl.files[0][0..rl.lens[0]]);
 }
 
-test "edit: E12 Multiple cursors simultaneous typing" {
+test "edit: E12 Multiple cursors simultaneous multi-character typing and backspace" {
     var fb = FileBuffer{};
-    fb.set_content("foo bar foo baz");
+    fb.set_content("foo bar foo");
     fb.cursor = 0; // on first "foo"
 
     // Add cursor at second "foo" (offset 8)
@@ -3755,12 +4265,32 @@ test "edit: E12 Multiple cursors simultaneous typing" {
     try std.testing.expectEqual(@as(usize, 1), fb.extra_cursor_count);
     try std.testing.expectEqual(@as(usize, 8), fb.extra_cursors[0]);
 
-    // Insert char 'X' -> inserted at both positions
+    // Type "X"
     try std.testing.expect(fb.insert_char('X'));
-    try std.testing.expectEqualStrings("Xfoo bar Xfoo baz", fb.slice());
+    try std.testing.expectEqualStrings("Xfoo bar Xfoo", fb.slice());
+    try std.testing.expectEqual(@as(usize, 1), fb.cursor);
+    try std.testing.expectEqual(@as(usize, 10), fb.extra_cursors[0]);
+
+    // Type "Y" -> must produce "XYfoo bar XYfoo" (no coordinate stale corruption)
+    try std.testing.expect(fb.insert_char('Y'));
+    try std.testing.expectEqualStrings("XYfoo bar XYfoo", fb.slice());
+    try std.testing.expectEqual(@as(usize, 2), fb.cursor);
+    try std.testing.expectEqual(@as(usize, 12), fb.extra_cursors[0]);
+
+    // Backspace 'Y'
+    try std.testing.expect(fb.backspace());
+    try std.testing.expectEqualStrings("Xfoo bar Xfoo", fb.slice());
+    try std.testing.expectEqual(@as(usize, 1), fb.cursor);
+    try std.testing.expectEqual(@as(usize, 10), fb.extra_cursors[0]);
+
+    // Backspace 'X'
+    try std.testing.expect(fb.backspace());
+    try std.testing.expectEqualStrings("foo bar foo", fb.slice());
+    try std.testing.expectEqual(@as(usize, 0), fb.cursor);
+    try std.testing.expectEqual(@as(usize, 8), fb.extra_cursors[0]);
 }
 
-test "edit: E13 RectSelection contains checks" {
+test "edit: E13 RectSelection contains and block typing" {
     var rs = RectSelection{
         .active = true,
         .start_line = 2,
@@ -3773,6 +4303,15 @@ test "edit: E13 RectSelection contains checks" {
     try std.testing.expect(rs.contains(5, 10));
     try std.testing.expect(!rs.contains(1, 7));
     try std.testing.expect(!rs.contains(3, 12));
+
+    var fb = FileBuffer{};
+    fb.set_content("Line1\nLine2\nLine3\n");
+    fb.rect_sel = .{ .active = true, .start_line = 1, .start_col = 1, .end_line = 3, .end_col = 1 };
+    try std.testing.expect(fb.insert_rect_char('>'));
+    try std.testing.expectEqualStrings(">Line1\n>Line2\n>Line3\n", fb.slice());
+
+    try std.testing.expect(fb.backspace_rect_char());
+    try std.testing.expectEqualStrings("Line1\nLine2\nLine3\n", fb.slice());
 }
 
 test "edit: E16 Close confirmation dialog key handling" {
@@ -3792,12 +4331,44 @@ test "edit: E16 Close confirmation dialog key handling" {
     try std.testing.expect(!app.close_confirm.active);
     try std.testing.expectEqual(@as(usize, 2), app.tabs.count);
 
-    // Open confirm again and press 'N' (discard)
+    // Trigger Ctrl+W again and press 'N' (discard) -> closes tab
     try std.testing.expect(handle_key(&app, &ev_w));
     var ev_n = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 0, .arg0 = 0, .arg1 = 'N' };
     try std.testing.expect(handle_key(&app, &ev_n));
     try std.testing.expect(!app.close_confirm.active);
     try std.testing.expectEqual(@as(usize, 1), app.tabs.count);
+
+    // Now open new tab, mark dirty, press 'Y' -> saves and closes
+    _ = app.tabs.open_new();
+    app.tabs.active_tab().dirty = true;
+    try std.testing.expect(handle_key(&app, &ev_w));
+    var ev_y = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 0, .arg0 = 0, .arg1 = 'Y' };
+    try std.testing.expect(handle_key(&app, &ev_y));
+    try std.testing.expect(!app.close_confirm.active);
+    try std.testing.expectEqual(@as(usize, 1), app.tabs.count);
+}
+
+test "edit: E24 FileSidebar interactive navigation" {
+    var app = AppState{};
+    app.init();
+    app.file_sidebar.active = true;
+    app.file_sidebar.count = 3;
+    app.file_sidebar.selected = 0;
+
+    // Down arrow moves selection
+    var ev_down = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 0, .arg0 = 0x51, .arg1 = 0 };
+    try std.testing.expect(handle_key(&app, &ev_down));
+    try std.testing.expectEqual(@as(usize, 1), app.file_sidebar.selected);
+
+    // Up arrow moves selection
+    var ev_up = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 0, .arg0 = 0x52, .arg1 = 0 };
+    try std.testing.expect(handle_key(&app, &ev_up));
+    try std.testing.expectEqual(@as(usize, 0), app.file_sidebar.selected);
+
+    // Esc closes sidebar
+    var ev_esc = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 0, .arg0 = 0x29, .arg1 = 0x1b };
+    try std.testing.expect(handle_key(&app, &ev_esc));
+    try std.testing.expect(!app.file_sidebar.active);
 }
 
 test "edit: execute_key_action dispatches commands cleanly" {
