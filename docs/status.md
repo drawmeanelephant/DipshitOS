@@ -135,7 +135,7 @@ are complete. The forward roadmap is M18–M27 — the experience layer:
 | M24 | CALC grows up | K1–K5 (programmer mode, memory, units, constants, history persist) |
 | M25 | File manager depth | F1–F5 (bulk ops, properties, mkdir, du, recent files) |
 | M26 | Network experience | N1–N5 (ping, netstat, HTTP fetch display, bandwidth, connection mgr) |
-| M27 | Desktop polish & completeness | G1–G6 (boot splash, about, previews, sounds, sysmon, tooltips) |
+| M27 | Desktop polish & completeness | G1–G30 = issues #444–#473 (splash, wizard, about, previews, sounds, sysmon, tooltips, consistency helpers, audits, dogfood) — tracker renumbered 2026-08-26 to match the issue list |
 
 Full card detail: [`docs/roadmap-post-arc5.md`](roadmap-post-arc5.md).
 ABI budget: 56/64 slots used, 8 remaining (M19+M20+M22 consume 5, leaving 3).
