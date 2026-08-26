@@ -16,7 +16,8 @@
   Non-goal: no kernel/runner code changes, no status.md edits (owned by
   the active M5 cards).
 - **Depends on:** — (docs-only + one local class-B gate run)
-- **Status:** 🔄 agent/maintenance/audit-2026-issues
+- **Heartbeat:** 2026-08-26
+- **Status:** ✅ done — all three scope items landed 2026-08-11 via PR #98 (commit 90625fc, merged 4c51c4c): #93 timer-gate evidence restored (verify-live-timer.sh PASS 3/3, artifacts/live-timer-*), #94 AGENTS.md current-milestone drift fixed (verified on main), #95 claim 7948 annotated as superseded (later archived to docs/archive/claims/7948-gic-timer-interrupts.md by the claim-1601 hygiene prune, since the annotation's 14 lines rode 90625fc). The claim was left 🔄 at merge time (no completion flip, no heartbeat), which is why the coordination gate flagged it 14+ days later; flipped to ✅ 2026-08-26 by claim 0590's owner per the coordination rules (log entry in docs/logs/agent-buffy-input-poll-563.md).
 
 ## Notes
 
