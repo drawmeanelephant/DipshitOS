@@ -574,6 +574,207 @@ pub fn free_space() u64 {
 }
 
 // ---------------------------------------------------------------------------
+// Directory creation + recursive size (M25 Lane B — claims 2539/0434)
+// ---------------------------------------------------------------------------
+
+pub const MkdirResult = enum { ok, no_disk, exists, name_too_long, bad_path, disk_full, io_failed };
+
+/// Create a directory by `/`-path (the last component is the new name).
+/// FAT32-honest: allocates one cluster, zeroes it, writes the `.`
+/// / `..` dot entries (self / parent clusters; root parent is cluster 0)
+/// and emits a directory-attribute slot in the parent. The listing seam
+/// (`list_dir`) skips dot entries, so the new directory shows only its
+/// own contents.
+pub fn create_dir(path: []const u8) MkdirResult {
+    var name: []const u8 = path;
+    var parent: []const u8 = "";
+    if (std.mem.lastIndexOfScalar(u8, path, '/')) |idx| {
+        parent = path[0..idx];
+        name = path[idx + 1 ..];
+    }
+    if (name.len == 0) return .name_too_long; // trailing '/'
+    var short: [11]u8 = undefined;
+    if (!encode_83(name, &short)) return .name_too_long;
+    if (!state.mounted) return .no_disk;
+    const dir_cluster = dir_cluster_of_path(parent) orelse return .bad_path;
+
+    // Collision check first: an existing entry (file OR directory) with
+    // that name refuses — mkdir never overwrites.
+    if (find_slot_in(dir_cluster, name) != null) return .exists;
+
+    // Locate a free slot (0x00 end marker or 0xE5 deleted) — same search
+    // discipline as write_file's replace path, minus the overwrite case.
+    var slots: [max_root_slots]SlotRef = undefined;
+    const n = collect_dir_slots(dir_cluster, &slots);
+    var target: ?SlotRef = null;
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        var raw: [32]u8 = undefined;
+        if (!read_dir_slot(slots[i], &raw)) continue;
+        const first = raw[0];
+        if (first == 0x00) {
+            target = slots[i]; // end-of-directory marker: consume it
+            break;
+        }
+        if (first == 0xe5 and target == null) target = slots[i];
+    }
+    const slot = target orelse return .disk_full;
+
+    // Allocate one cluster for the directory contents.
+    var dir_cl: u32 = 0;
+    var c: u32 = 2;
+    while (c < state.geo.total_clusters) : (c += 1) {
+        if (fat_entry(c) == 0) {
+            dir_cl = c;
+            break;
+        }
+    }
+    if (dir_cl == 0) return .disk_full;
+    if (!set_fat_entry(dir_cl, fat_eoc)) return .io_failed;
+
+    // Zero the cluster, then write the dot entries:
+    //   `.`  → this directory's own cluster
+    //   `..` → the parent's cluster (0 when the parent is the root)
+    var zero: [sector_size]u8 = [_]u8{0} ** sector_size;
+    var s: u8 = 0;
+    while (s < state.geo.spc) : (s += 1) {
+        if (!write_sector(cluster_lba(dir_cl) + s, &zero)) {
+            _ = set_fat_entry(dir_cl, 0); // release on failure — no orphans
+            return .io_failed;
+        }
+    }
+    const dot_self = make_dot_entry(".", dir_cl);
+    const dot_parent = make_dot_entry("..", if (dir_cluster == state.geo.root_cluster) 0 else dir_cluster);
+    if (!write_bytes_at_cluster(dir_cl, 0, &dot_self) or !write_bytes_at_cluster(dir_cl, 32, &dot_parent)) {
+        _ = set_fat_entry(dir_cl, 0); // release on failure — no orphans
+        return .io_failed;
+    }
+
+    // The parent's directory slot: 8.3 name, directory attribute,
+    // first cluster, size 0 (directories always report size 0).
+    var raw: [32]u8 = @splat(0);
+    @memcpy(raw[0..11], short[0..11]);
+    raw[11] = attr_directory;
+    std.mem.writeInt(u16, raw[20..22], @truncate(dir_cl >> 16), .little);
+    std.mem.writeInt(u16, raw[26..28], @truncate(dir_cl), .little);
+    if (!write_dir_slot(slot, &raw)) {
+        _ = set_fat_entry(dir_cl, 0);
+        return .io_failed;
+    }
+    return .ok;
+}
+
+/// ATTR_DIRECTORY (FAT32 spec §11.1): marks a directory-entry subdirectory.
+pub const attr_directory: u8 = 0x10;
+
+/// Build one 32-byte dot entry (`.` / `..`, padded to short-name width).
+fn make_dot_entry(comptime dot: []const u8, cluster: u32) [32]u8 {
+    comptime std.debug.assert(dot.len <= 11);
+    var raw: [32]u8 = @splat(' ');
+    @memcpy(raw[0..dot.len], dot);
+    raw[11] = attr_directory;
+    std.mem.writeInt(u16, raw[20..22], @truncate(cluster >> 16), .little);
+    std.mem.writeInt(u16, raw[26..28], @truncate(cluster), .little);
+    return raw;
+}
+
+/// Write `bytes` at `off` inside the FIRST cluster `start` (single-sector
+/// read-modify-write; the dot entries this serves are 64 bytes at offsets
+/// 0/32 of a freshly zeroed cluster). Returns false when the range would
+/// cross a sector boundary or the I/O fails.
+fn write_bytes_at_cluster(start: u32, off: usize, bytes: []const u8) bool {
+    if (off >= sector_size or off + bytes.len > sector_size) return false;
+    var buf: [sector_size]u8 = undefined;
+    const lba = cluster_lba(start) + off / sector_size;
+    const within = off % sector_size;
+    if (!read_sector(lba, &buf)) return false;
+    @memcpy(buf[within .. within + bytes.len], bytes);
+    return write_sector(lba, &buf);
+}
+
+/// True when `path` resolves to an existing DIRECTORY entry (du uses this
+/// to validate its argument).
+pub fn path_is_dir(path: []const u8) bool {
+    if (!state.mounted) return false;
+    const found = find_slot_path(path) orelse return false;
+    return found.entry.is_dir;
+}
+
+/// Recursive byte total of `path`'s subtree: files count their sizes,
+/// directories recurse into their listings. Breadth-first with
+/// MODULE-SCOPE buffers — a per-level `[128]DirEntry` listing would sit
+/// on the 16 KiB kernel stack at every recursion depth (claim 1809's
+/// lesson), so the walk queues child paths instead. Bounded at
+/// `max_du_depth` levels of nesting (the march note's non-blocking cap).
+pub const max_du_depth: usize = 3;
+
+/// Children queued per walk (bounds the BSS; overflow skips the tail —
+/// reported via `.truncated` by the du seam below).
+const du_queue_max: usize = 64;
+
+const DuResult = struct {
+    bytes: u64 = 0,
+    dirs_walked: u32 = 0,
+    truncated: bool = false,
+};
+
+var du_listing: [max_root_slots]DirEntry = undefined;
+var du_paths: [du_queue_max][name_max * 2 + 2]u8 = undefined;
+var du_depths: [du_queue_max]usize = undefined;
+var du_lens: [du_queue_max]usize = undefined;
+
+pub fn dir_size_recursive(root: []const u8) DuResult {
+    var res: DuResult = .{};
+    if (!state.mounted) return res;
+    // Seed the queue with the root directory itself.
+    if (root.len > du_paths[0].len) return res;
+    @memcpy(du_paths[0][0..root.len], root);
+    du_lens[0] = root.len;
+    du_depths[0] = 0;
+    var head: usize = 0;
+    var tail: usize = 1;
+    while (head < tail) : (head += 1) {
+        const cur = du_paths[head][0..du_lens[head]];
+        const depth = du_depths[head];
+        if (depth >= max_du_depth) continue;
+        const n = list_path(cur, &du_listing);
+        for (du_listing[0..n]) |e| {
+            res.bytes += e.size;
+            if (!e.is_dir) continue;
+            if (tail >= du_queue_max) {
+                res.truncated = true;
+                continue;
+            }
+            const parent = du_paths[head][0..du_lens[head]];
+            if (join_child_path(parent, e.name[0..e.name_len], &du_paths[tail])) |joined| {
+                du_lens[tail] = joined.len;
+                du_depths[tail] = depth + 1;
+                tail += 1;
+                res.dirs_walked += 1;
+            }
+        }
+    }
+    return res;
+}
+
+/// Join a parent directory path and a child name into a `/`-path (stack
+/// buffer; returns null when it would overflow — those subtrees are
+/// skipped rather than miscounted).
+pub fn join_child_path(parent: []const u8, name: []const u8, buf: []u8) ?[]const u8 {
+    if (parent.len == 0 or (parent.len == 1 and parent[0] == '/')) {
+        if (1 + name.len > buf.len) return null;
+        buf[0] = '/';
+        @memcpy(buf[1 .. 1 + name.len], name);
+        return buf[0 .. 1 + name.len];
+    }
+    if (parent.len + 1 + name.len > buf.len) return null;
+    @memcpy(buf[0..parent.len], parent);
+    buf[parent.len] = '/';
+    @memcpy(buf[parent.len + 1 ..][0..name.len], name);
+    return buf[0 .. parent.len + 1 + name.len];
+}
+
+// ---------------------------------------------------------------------------
 // Sector helpers
 // ---------------------------------------------------------------------------
 
@@ -1611,4 +1812,88 @@ test "fat: file_size reports sizes by name and /-path, null for dirs" {
     try std.testing.expect(file_size("EFI") == null); // a directory
     try std.testing.expect(file_size("EFI/BOOT") == null); // a directory
     try std.testing.expect(file_size("NOPE.TXT") == null);
+}
+
+// ---------------------------------------------------------------------------
+// M25 Lane B (claim 2539): FAT32 directory creation + recursive size
+// ---------------------------------------------------------------------------
+
+test "fat: create_dir makes a real directory with dot entries (claim 2539)" {
+    var fxt = try build_fixture(test_allocator, false);
+    defer test_allocator.free(fxt.buf);
+    make_state_fixture(&fxt);
+    try std.testing.expectEqual(MountResult.ok, mount(test_ops()));
+
+    try std.testing.expectEqual(MkdirResult.ok, create_dir("DOCS"));
+    // Visible in the root listing as a directory entry.
+    var out: [32]DirEntry = undefined;
+    const n = list_root(&out);
+    var found: ?DirEntry = null;
+    for (out[0..n]) |e| {
+        if (std.mem.eql(u8, e.name[0..e.name_len], "DOCS")) found = e;
+    }
+    const docs = found orelse return error.TestUnexpectedResult;
+    try std.testing.expect(docs.is_dir);
+    try std.testing.expectEqual(@as(u32, 0), docs.size); // dirs report size 0
+    try std.testing.expect(docs.cluster >= 2); // a real data cluster
+
+    // The listing seam skips dot entries; the new dir lists as empty.
+    try std.testing.expectEqual(@as(usize, 0), list_path("/DOCS", &out));
+    try std.testing.expect(path_is_dir("/DOCS"));
+    try std.testing.expect(!path_is_dir("/DOCS/missing"));
+
+    // Dot entries on disk: `.` → self, `..` → parent (root cluster 2),
+    // both ATTR_DIRECTORY.
+    const self_raw = blk: {
+        var raw: [32]u8 = undefined;
+        const lba = cluster_lba(docs.cluster);
+        try std.testing.expect(read_dir_slot(.{ .lba = lba, .byte_off = 0 }, &raw));
+        break :blk raw;
+    };
+    try std.testing.expectEqual(@as(u8, '.'), self_raw[0]);
+    try std.testing.expectEqual(attr_directory, self_raw[11]);
+    try std.testing.expectEqual(docs.cluster, cluster_of_raw(self_raw));
+    const parent_raw = blk: {
+        var raw: [32]u8 = undefined;
+        const lba = cluster_lba(docs.cluster);
+        try std.testing.expect(read_dir_slot(.{ .lba = lba, .byte_off = 32 }, &raw));
+        break :blk raw;
+    };
+    try std.testing.expectEqual(@as(u8, '.'), parent_raw[0]);
+    try std.testing.expectEqual(@as(u8, '.'), parent_raw[1]);
+    // Spec §6.5: `..` stores 0 when the parent is the root (the root has
+    // no cluster number).
+    try std.testing.expectEqual(@as(u32, 0), cluster_of_raw(parent_raw));
+
+    // Files can be written INTO it and read back by path.
+    try std.testing.expectEqual(WriteResult.ok, write_file("/DOCS/NOTE.TXT", "in a real dir"));
+    var buf: [64]u8 = undefined;
+    const got = (read_file("/DOCS/NOTE.TXT", &buf) orelse return error.TestUnexpectedResult);
+    try std.testing.expectEqualStrings("in a real dir", buf[0..got]);
+
+    // Collision refuses — against files and directories alike.
+    try std.testing.expectEqual(MkdirResult.exists, create_dir("DOCS"));
+    try std.testing.expectEqual(MkdirResult.exists, create_dir("KERNEL.BIN"));
+}
+
+test "fat: dir_size_recursive sums files across bounded depth (claim 2539 F4)" {
+    var fxt = try build_fixture(test_allocator, false);
+    defer test_allocator.free(fxt.buf);
+    make_state_fixture(&fxt);
+    try std.testing.expectEqual(MountResult.ok, mount(test_ops()));
+
+    // Tree: /DU (10) + /DU/SUB (20 + nested 40).
+    try std.testing.expectEqual(WriteResult.ok, write_file("/DU_A.TXT", &([_]u8{'a'} ** 10)));
+    try std.testing.expectEqual(MkdirResult.ok, create_dir("DU"));
+    try std.testing.expectEqual(WriteResult.ok, write_file("/DU/B.TXT", &([_]u8{'b'} ** 20)));
+    try std.testing.expectEqual(MkdirResult.ok, create_dir("/DU/SUB"));
+    try std.testing.expectEqual(WriteResult.ok, write_file("/DU/SUB/C.TXT", &([_]u8{'c'} ** 40)));
+
+    const sub = dir_size_recursive("/DU");
+    try std.testing.expectEqual(@as(u64, 60), sub.bytes); // 20 + 40
+    try std.testing.expect(!sub.truncated);
+
+    // The whole volume from the root: fixture files + the DU tree.
+    const all = dir_size_recursive("");
+    try std.testing.expect(all.bytes >= 10 + 60);
 }

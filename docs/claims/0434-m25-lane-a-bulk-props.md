@@ -7,9 +7,14 @@
   machine and batch delete/move in `user/src/file_browser.zig`, plus the
   file-properties readout in the preview pane. Zero new syscall slots;
   uses existing file syscalls per card.
+- **Touches:** user/src/file_browser.zig, user/src/fstest.zig, kernel/src/scheduler.zig, host/vm-runner/Sources/VMRunner/main.swift, tools/verify-live-filemanager-bulk.sh, tools/verify-live-filemanager-props.sh
 - **Depends on:** M13 mutating FS (delete/rename landed); M17 Dialog +
-  ProgressBar widgets (landed).
-- **Status:** 🔄 agent/ox-alpha/m25-filemanager-depth
+  ProgressBar widgets (landed); claim 4379's merged selection groundwork
+  (PR #561).
+- **Heartbeat:** 2026-08-25
+- **Status:** ✅ agent/ox-alpha/m25-filemanager-depth — F1+F2 live-gated
+  (bulk + props gates PASS on VZ); see log for the stepwise-progress and
+  context-menu notes.
 
 ## Notes
 

@@ -21,6 +21,10 @@ pub const MODE_READ: u32 = 0x0001;
 pub const MODE_WRITE: u32 = 0x0002;
 pub const MODE_CREATE: u32 = 0x0004;
 pub const MODE_APPEND: u32 = 0x0008;
+/// M25 Lane B (claim 2539): with MODE_CREATE, create a DIRECTORY instead
+/// of an empty file (FAT32 cluster + dot entries; fat.create_dir). The
+/// returned handle rejects read/write — it only marks the creation.
+pub const MODE_DIR: u32 = 0x0010;
 
 // Wire DirEntry layout (ADR 0010 D3: exactly 40 bytes)
 pub const DirEntry = extern struct {
@@ -43,6 +47,10 @@ pub const FileHandle = struct {
     size: u32 = 0,
     path: [max_path_len]u8 = [_]u8{0} ** max_path_len,
     path_len: u8 = 0,
+    /// M25 Lane B (claim 2539): set when MODE_DIR created the entry —
+    /// the handle must never be read or written (a directory write would
+    /// overwrite FAT metadata through fat.write_file's replace path).
+    is_dir: bool = false,
 };
 
 pub const ParsedPath = struct {
@@ -207,11 +215,14 @@ pub fn parse_path(raw: []const u8) ?ParsedPath {
 /// - `-5` (`ENOSPC`): Handle table full (8 open handles) or disk full
 /// - `-6` (`ENOENT`): File not found and MODE_CREATE not set
 /// - `-8` (`ENAMETOOLONG`): Path length > 64
+/// - `-9` (`EEXIST`): MODE_DIR create and the name already exists
 pub fn open(pid: u64, path_bytes: []const u8, flags: u32) i64 {
     if (pid >= process.max_processes) return -1;
     if (flags == 0) return -1;
-    if ((flags & ~(MODE_READ | MODE_WRITE | MODE_CREATE | MODE_APPEND)) != 0) return -1;
+    if ((flags & ~(MODE_READ | MODE_WRITE | MODE_CREATE | MODE_APPEND | MODE_DIR)) != 0) return -1;
     if ((flags & (MODE_READ | MODE_WRITE)) == 0) return -1;
+    // M25 Lane B: directory creation rides the mutating open flags.
+    if ((flags & MODE_DIR) != 0 and (flags & (MODE_CREATE | MODE_WRITE)) != (MODE_CREATE | MODE_WRITE)) return -1;
 
     if (path_bytes.len > max_path_len) return -8;
     const parsed = parse_path(path_bytes) orelse return -1;
@@ -235,6 +246,9 @@ pub fn open(pid: u64, path_bytes: []const u8, flags: u32) i64 {
     var cursor_val: u32 = 0;
 
     if (existing_size) |sz| {
+        // MODE_DIR is create-only: an existing entry (file or directory)
+        // with that name refuses rather than reopening.
+        if ((flags & MODE_DIR) != 0) return -9; // EEXIST
         file_size_val = sz;
         if ((flags & MODE_APPEND) != 0) {
             cursor_val = sz;
@@ -246,17 +260,34 @@ pub fn open(pid: u64, path_bytes: []const u8, flags: u32) i64 {
         if ((flags & MODE_CREATE) == 0) {
             return -6; // ENOENT
         }
-        // MODE_CREATE is set: create empty file
-        const wr = fat.write_file(subpath, "");
-        if (wr != .ok) {
-            return switch (wr) {
-                .disk_full => -5,
-                .name_too_long => -8,
-                .content_too_long => -5,
-                .bad_path => -6,
-                .no_disk => -6,
-                else => -1,
-            };
+        if ((flags & MODE_DIR) != 0) {
+            // M25 Lane B (claim 2539): create a real FAT32 directory —
+            // cluster allocation, zeroed contents, `.` / `..` dot entries,
+            // ATTR_DIRECTORY slot in the parent.
+            const md = fat.create_dir(subpath);
+            if (md != .ok) {
+                return switch (md) {
+                    .exists => -9,
+                    .name_too_long => -8,
+                    .disk_full => -5,
+                    .bad_path => -6,
+                    .no_disk => -6,
+                    else => -1,
+                };
+            }
+        } else {
+            // MODE_CREATE is set: create empty file
+            const wr = fat.write_file(subpath, "");
+            if (wr != .ok) {
+                return switch (wr) {
+                    .disk_full => -5,
+                    .name_too_long => -8,
+                    .content_too_long => -5,
+                    .bad_path => -6,
+                    .no_disk => -6,
+                    else => -1,
+                };
+            }
         }
         file_size_val = 0;
         cursor_val = 0;
@@ -270,6 +301,7 @@ pub fn open(pid: u64, path_bytes: []const u8, flags: u32) i64 {
         .size = file_size_val,
         .path = parsed.path,
         .path_len = parsed.path_len,
+        .is_dir = (flags & MODE_DIR) != 0,
     };
 
     return @intCast(slot);
@@ -282,6 +314,7 @@ pub fn read(pid: u64, fd: u64, out_buf: []u8) i64 {
     var h = &handles[pid][fd];
     if (!h.in_use) return -2; // EBADF
     if ((h.flags & MODE_READ) == 0) return -7; // EACCES
+    if (h.is_dir) return 0; // M25 Lane B: a dir handle reads as empty
 
     if (out_buf.len == 0) return 0;
     if (h.cursor >= h.size) return 0; // EOF
@@ -308,6 +341,7 @@ pub fn write(pid: u64, fd: u64, in_buf: []const u8) i64 {
     var h = &handles[pid][fd];
     if (!h.in_use) return -2; // EBADF
     if ((h.flags & MODE_WRITE) == 0) return -7; // EACCES
+    if (h.is_dir) return -7; // M25 Lane B: never write through a dir handle
 
     if (in_buf.len == 0) return 0;
     if (h.cursor + in_buf.len > fat.write_content_max) return -5; // ENOSPC
@@ -441,6 +475,7 @@ pub fn truncate(pid: u64, fd: u64, new_size: u32) i64 {
     var h = &handles[pid][fd];
     if (!h.in_use) return -2; // EBADF
     if ((h.flags & MODE_WRITE) == 0) return -7; // EACCES
+    if (h.is_dir) return -7; // M25 Lane B: never truncate through a dir handle
     if (!mount_partition(h.partition)) return -6;
 
     const subpath = h.path[0..h.path_len];

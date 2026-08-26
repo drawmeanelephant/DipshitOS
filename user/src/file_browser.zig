@@ -85,6 +85,20 @@ fn fmt_u64(buf: []u8, value: u64) []const u8 {
     return buf[i..];
 }
 
+/// Signed companion to fmt_u64 (error codes in serial markers).
+fn fmt_i64(buf: []u8, value: i64) []const u8 {
+    if (value >= 0) return fmt_u64(buf, @intCast(value));
+    if (buf.len < 2) return buf[0..0];
+    // fmt_u64 right-aligns within its buffer; compact the digits after
+    // placing the sign.
+    const mag: u64 = @intCast(-value);
+    const digits = fmt_u64(buf[1..], mag);
+    buf[0] = '-';
+    var i: usize = 0;
+    while (i < digits.len) : (i += 1) buf[1 + i] = digits[i];
+    return buf[0 .. 1 + digits.len];
+}
+
 // ---------------------------------------------------------------------------
 // Entry helpers (pure, host-testable)
 // ---------------------------------------------------------------------------
@@ -111,6 +125,26 @@ fn ascii_lower(c: u8) u8 {
 // ---------------------------------------------------------------------------
 
 pub const SortColumn = enum { name, size, col_type };
+
+/// Lane A (claim 0434): the unit of work processed per `batch_step` call.
+pub const BatchKind = enum { none, del, move_to, rename };
+
+/// Lane A (claim 0434): right-click menu items (labels are static; the
+/// action dispatch reads `selected_idx` after `handle_event` closes it).
+pub const ctx_menu_items = [_]ui.ContextMenuItem{
+    .{ .label = "Open" },
+    .{ .label = "Rename" },
+    .{ .label = "Delete" },
+    .{ .label = "Properties" },
+};
+
+/// Lane B (claim 2539): F5 persistence path for the recent-files ring.
+/// Plain 8.3 name — leading-dot names are not representable in FAT
+/// short names (encode_83 rejects them), matching the WINDOWS.SAV /
+/// HISTORY.TXT house pattern for persisted state on this volume.
+pub const recent_file_path: []const u8 = "/data/RECENT.SAV";
+/// The virtual first entry at the DATA root that opens the ring listing.
+pub const recent_virtual_name: []const u8 = "RECENT";
 
 /// Case-insensitive name comparison. Returns -1 if a<b, 1 if a>b, 0 if equal.
 pub fn name_cmp_ignore_case(a: []const u8, b: []const u8) i8 {
@@ -530,6 +564,32 @@ pub const AppState = struct {
     progress_bar: ui.ProgressBar = ui.ProgressBar.init(Rect.make(6, 350, 500, 16)),
     progress_active: bool = false,
 
+    // Lane A (claim 0434): stepwise batch machinery — one unit per
+    // `batch_step` call so the ProgressBar advances across real frames and
+    // each unit emits a serial marker (`file: del i/n NAME`). The event
+    // loop busy-polls while `progress_active`.
+    batch_kind: BatchKind = .none,
+    batch_cursor: usize = 0,
+    batch_done: usize = 0,
+    batch_total: usize = 0,
+    batch_target: [64]u8 = [_]u8{0} ** 64,
+    batch_target_len: usize = 0,
+
+    // Lane A (claim 0434): right-click context menu on the listing.
+    ctx_menu: ui.ContextMenu = ui.ContextMenu.init(&ctx_menu_items),
+
+    // Lane B (claim 2539): F4 breadcrumb directory total (bounded walk).
+    dir_total_bytes: u64 = 0,
+
+    // Lane B (claim 2539): F5 recent-files virtual listing mode.
+    recent_mode: bool = false,
+
+    // Set when an operation finished and wants a re-listing; the _start
+    // event loop performs it AFTER the input handler unwinds, so the
+    // dir_walk recursion never rides on top of deep handler frames
+    // (the EL0 stack budget lesson behind claim 1809).
+    pending_refresh: bool = false,
+
     btn_open: Button = Button.init(btn_open_rect, "Open"),
     btn_rename: Button = Button.init(btn_rename_rect, "Rename"),
     btn_delete: Button = Button.init(btn_delete_rect, "Delete"),
@@ -547,6 +607,9 @@ pub const AppState = struct {
         s.btn_back.bg_color = ui.COLOR_SUCCESS;
         s.progress_bar.set_value(0);
         s.progress_bar.set_label("Progress");
+        // Lane B (claim 2539): restore the persisted recent-files ring so
+        // it survives reboot (no-op when /data/RECENT.SAV is absent).
+        s.load_recent();
         return s;
     }
 
@@ -587,6 +650,12 @@ pub const AppState = struct {
             self.set_selected(i, true);
         }
         self.set_status("All Selected");
+        var buf: [32]u8 = undefined;
+        var pos: usize = 0;
+        pos = append_str(&buf, pos, "file: select all n=");
+        pos = append_str(&buf, pos, fmt_u64(buf[pos..], self.entry_count));
+        buf[pos] = '\n';
+        ui.write_console(buf[0 .. pos + 1]);
     }
 
     pub fn clear_selection(self: *AppState) void {
@@ -603,9 +672,12 @@ pub const AppState = struct {
 
     // --- F2 / F4: Properties & Disk Usage ---
 
+    // --- F2: Properties inspector (claim 0434 Lane A) ---
+
     pub fn toggle_properties(self: *AppState) bool {
         self.properties_mode = !self.properties_mode;
         self.set_status(if (self.properties_mode) "Props On" else "Props Off");
+        ui.write_console(if (self.properties_mode) "file: props on\n" else "file: props off\n");
         return true;
     }
 
@@ -624,8 +696,10 @@ pub const AppState = struct {
         self.create_dir_len = 0;
         if (self.create_dir_active) {
             self.set_status("New Dir:");
+            ui.write_console("file: mkdir overlay on\n");
         } else {
             self.set_status("Ready");
+            ui.write_console("file: mkdir overlay off\n");
         }
         return true;
     }
@@ -662,11 +736,16 @@ pub const AppState = struct {
         }
         var path_buf: [64]u8 = undefined;
         const path = build_path(self.current_path_slice(), dir_name, &path_buf);
-        const fd = ui.file_open(path, ui.MODE_WRITE);
+        // Lane B (claim 2539): real FAT32 directory creation through the
+        // slot 23 MODE_DIR extension — a cluster with `.` / `..` dot
+        // entries and an ATTR_DIRECTORY slot in the parent, not a file.
+        const fd = ui.file_mkdir(path);
         if (fd >= 0) {
-            ui.file_close(@as(u32, @intCast(fd)));
             self.create_dir_active = false;
             self.create_dir_len = 0;
+            // Deferred re-listing (see pending_refresh): keeps the
+            // dir_walk recursion off the keyboard-handler call chain.
+            self.pending_refresh = true;
             self.set_status("Created");
             var obuf: [64]u8 = undefined;
             var opos: usize = 0;
@@ -674,27 +753,150 @@ pub const AppState = struct {
             opos = append_str(&obuf, opos, dir_name);
             obuf[opos] = '\n';
             ui.write_console(obuf[0 .. opos + 1]);
-            self.refresh();
             return true;
         } else {
             self.set_status("Mkdir Err");
+            var ebuf: [48]u8 = undefined;
+            var epos: usize = 0;
+            epos = append_str(&ebuf, epos, "file: mkdir err ");
+            epos = append_str(&ebuf, epos, fmt_i64(ebuf[epos..], fd));
+            ebuf[epos] = '\n';
+            ui.write_console(ebuf[0 .. epos + 1]);
             return false;
         }
     }
 
-    // --- F5: Recent Files Ring ---
+    // --- F5: Recent Files Ring (persisted to /data/RECENT.SAV, claim 2539) ---
 
     pub fn add_recent(self: *AppState, path: []const u8) void {
         if (path.len == 0) return;
+        // Local copy first: callers may pass slices INTO recent_ring
+        // (open_selected does), which would alias the shifts below.
+        var local: [64]u8 = undefined;
+        const n = @min(path.len, 64);
+        @memcpy(local[0..n], path[0..n]);
+        const item = local[0..n];
+        // Deduplicate: an existing entry moves to the front.
+        var found: usize = 10;
+        for (0..self.recent_count) |ri| {
+            if (std.mem.eql(u8, self.recent_ring[ri][0..self.recent_lens[ri]], item)) {
+                found = ri;
+                break;
+            }
+        }
+        if (found < self.recent_count) {
+            var shift: usize = found;
+            while (shift > 0) : (shift -= 1) {
+                self.recent_ring[shift] = self.recent_ring[shift - 1];
+                self.recent_lens[shift] = self.recent_lens[shift - 1];
+            }
+            @memcpy(self.recent_ring[0][0..item.len], item);
+            self.recent_lens[0] = item.len;
+            self.save_recent();
+            return;
+        }
         var i: usize = 9;
         while (i > 0) : (i -= 1) {
             self.recent_ring[i] = self.recent_ring[i - 1];
             self.recent_lens[i] = self.recent_lens[i - 1];
         }
-        const n = @min(path.len, 64);
-        @memcpy(self.recent_ring[0][0..n], path[0..n]);
-        self.recent_lens[0] = n;
+        @memcpy(self.recent_ring[0][0..item.len], item);
+        self.recent_lens[0] = item.len;
         if (self.recent_count < 10) self.recent_count += 1;
+        self.save_recent();
+    }
+
+    /// Persist the ring to `/data/RECENT.SAV` (one path per line, newest
+    /// first). Best-effort: a failed write is reported on the console and
+    /// the in-memory ring stays authoritative.
+    pub fn save_recent(self: *AppState) void {
+        var body: [10 * 65]u8 = undefined;
+        var len: usize = 0;
+        for (0..self.recent_count) |ri| {
+            const p = self.recent_ring[ri][0..self.recent_lens[ri]];
+            if (len + p.len + 1 > body.len) break;
+            @memcpy(body[len .. len + p.len], p);
+            len += p.len;
+            body[len] = '\n';
+            len += 1;
+        }
+        const fd = ui.file_open(recent_file_path, ui.MODE_WRITE | ui.MODE_CREATE);
+        if (fd < 0) {
+            ui.write_console("file: recent save err\n");
+            return;
+        }
+        _ = ui.file_write(@as(u32, @intCast(fd)), body[0..len]);
+        ui.file_close(@as(u32, @intCast(fd)));
+        var buf: [32]u8 = undefined;
+        var pos: usize = 0;
+        pos = append_str(&buf, pos, "file: recent saved n=");
+        pos = append_str(&buf, pos, fmt_u64(buf[pos..], self.recent_count));
+        buf[pos] = '\n';
+        ui.write_console(buf[0 .. pos + 1]);
+    }
+
+    /// Load the ring from `/data/RECENT.SAV` at startup so it survives reboot.
+    pub fn load_recent(self: *AppState) void {
+        const fd = ui.file_open(recent_file_path, ui.MODE_READ);
+        if (fd < 0) return; // no file yet — first boot or wiped volume
+        var body: [10 * 65]u8 = undefined;
+        const n = ui.file_read(@as(u32, @intCast(fd)), &body);
+        ui.file_close(@as(u32, @intCast(fd)));
+        if (n <= 0) return;
+        self.recent_count = 0;
+        var it = std.mem.splitScalar(u8, body[0..@intCast(n)], '\n');
+        while (it.next()) |line| {
+            if (line.len == 0 or self.recent_count >= 10) continue;
+            const cn = @min(line.len, 64);
+            @memcpy(self.recent_ring[self.recent_count][0..cn], line[0..cn]);
+            self.recent_lens[self.recent_count] = cn;
+            self.recent_count += 1;
+        }
+        var buf: [32]u8 = undefined;
+        var pos: usize = 0;
+        pos = append_str(&buf, pos, "file: recent loaded n=");
+        pos = append_str(&buf, pos, fmt_u64(buf[pos..], self.recent_count));
+        buf[pos] = '\n';
+        ui.write_console(buf[0 .. pos + 1]);
+    }
+
+    /// Lane B (claim 2539): open the virtual RECENT pseudo-listing — the
+    /// ring rendered as rows; Enter opens the selected full path.
+    pub fn open_recent_listing(self: *AppState) bool {
+        if (self.recent_count == 0) {
+            self.set_status("No Recents");
+            return false;
+        }
+        self.recent_mode = true;
+        self.entry_count = self.recent_count;
+        for (0..self.recent_count) |ri| {
+            self.entries[ri] = .{ .name = [_]u8{0} ** 32, .size = 0, .is_dir = 0, .reserved = .{ 0, 0, 0 } };
+            const p = self.recent_ring[ri][0..self.recent_lens[ri]];
+            const cn = @min(p.len, self.entries[ri].name.len - 1);
+            @memcpy(self.entries[ri].name[0..cn], p[0..cn]);
+            self.entries[ri].size = 0;
+            self.entries[ri].is_dir = 0;
+        }
+        self.shadow_count = self.entry_count;
+        for (0..self.entry_count) |i| self.shadow[i] = self.entries[i];
+        self.rebuild_sort();
+        self.list.select(0, self.entry_count);
+        self.sync_scroll_view();
+        self.set_status("Recents");
+        var buf: [32]u8 = undefined;
+        var pos: usize = 0;
+        pos = append_str(&buf, pos, "file: recent open n=");
+        pos = append_str(&buf, pos, fmt_u64(buf[pos..], self.entry_count));
+        buf[pos] = '\n';
+        ui.write_console(buf[0 .. pos + 1]);
+        return true;
+    }
+
+    /// Leave the RECENT pseudo-listing back to the DATA root.
+    pub fn close_recent_listing(self: *AppState) void {
+        if (!self.recent_mode) return;
+        self.recent_mode = false;
+        self.list_directory();
     }
 
     // --- F6: Trash & Restore (/data/.trash/ with 32-file limit and auto-purge) ---
@@ -762,55 +964,165 @@ pub const AppState = struct {
         return true;
     }
 
-    pub fn perform_batch_rename(self: *AppState, prefix: []const u8) void {
-        if (prefix.len == 0) return;
+    // --- Lane A (claim 0434): stepwise batch engine -----------------------
+    // One unit per `batch_step` call: the ProgressBar advances across real
+    // compositor frames and each unit emits a `file: <verb> i/n NAME`
+    // serial marker, so progress is observable rather than painted over.
+    // The public perform_* wrappers drain the queue synchronously (the
+    // shape the host tests drive); the event loop steps it while
+    // `progress_active`.
+
+    /// Begin a batch op over the selection. `target` is the move
+    /// destination or rename prefix (empty for delete).
+    pub fn batch_begin(self: *AppState, kind: BatchKind, target: []const u8) void {
+        self.batch_kind = kind;
+        const tn = @min(target.len, self.batch_target.len);
+        @memcpy(self.batch_target[0..tn], target[0..tn]);
+        self.batch_target_len = tn;
+        self.batch_cursor = 0;
+        self.batch_done = 0;
         const multi = self.selected_count();
+        var total: usize = multi;
+        if (total == 0) {
+            if (self.list.selected) |sel| {
+                if (sel < self.entry_count) total = 1;
+            }
+        }
+        self.batch_total = total;
+        if (total == 0) {
+            self.progress_active = false;
+            return;
+        }
         self.progress_active = true;
-        self.progress_bar.set_label("Renaming...");
-        if (multi > 0) {
-            var count: usize = 0;
-            for (0..self.entry_count) |i| {
-                if (self.is_selected(i)) {
-                    const entry = &self.entries[self.sort_indices[i]];
-                    const name = entry_name(entry);
-                    var new_name: [32]u8 = [_]u8{0} ** 32;
-                    var p: usize = 0;
-                    p = append_str(&new_name, p, prefix);
-                    const n = @min(name.len, 32 - p);
-                    @memcpy(new_name[p .. p + n], name[0..n]);
-                    const full_new = new_name[0 .. p + n];
-                    var old_path: [64]u8 = undefined;
-                    var new_path: [64]u8 = undefined;
-                    const op = build_path(self.current_path_slice(), name, &old_path);
-                    const np = build_path(self.current_path_slice(), full_new, &new_path);
-                    _ = ui.file_rename(op, np);
-                    count += 1;
-                    const pct: u8 = @intCast((count * 100) / multi);
-                    self.progress_bar.set_value(pct);
+        self.progress_bar.set_value(0);
+        self.progress_bar.set_label(switch (kind) {
+            .del => "Deleting...",
+            .move_to => "Moving...",
+            .rename => "Renaming...",
+            .none => "Progress",
+        });
+    }
+
+    fn batch_marker(self: *AppState, verb: []const u8, name: []const u8) void {
+        var buf: [96]u8 = undefined;
+        var pos: usize = 0;
+        pos = append_str(&buf, pos, "file: ");
+        pos = append_str(&buf, pos, verb);
+        pos = append_str(&buf, pos, " ");
+        pos = append_str(&buf, pos, fmt_u64(buf[pos..], self.batch_done));
+        pos = append_str(&buf, pos, "/");
+        pos = append_str(&buf, pos, fmt_u64(buf[pos..], self.batch_total));
+        pos = append_str(&buf, pos, " ");
+        pos = append_str(&buf, pos, name);
+        buf[pos] = '\n';
+        ui.write_console(buf[0 .. pos + 1]);
+    }
+
+    fn batch_finish(self: *AppState) void {
+        const final_status: []const u8 = switch (self.batch_kind) {
+            .del => "Batch Deleted",
+            .move_to => "Moved",
+            .rename => "Batch Renamed",
+            .none => "Ready",
+        };
+        var buf: [48]u8 = undefined;
+        var pos: usize = 0;
+        pos = append_str(&buf, pos, "file: batch done n=");
+        pos = append_str(&buf, pos, fmt_u64(buf[pos..], self.batch_done));
+        buf[pos] = '\n';
+        ui.write_console(buf[0 .. pos + 1]);
+        self.progress_active = false;
+        self.progress_bar.set_value(100);
+        self.clear_selection();
+        // Deferred: the event loop re-lists after the handler unwinds
+        // (keeps the dir_walk recursion off this call chain).
+        self.pending_refresh = true;
+        self.set_status(final_status);
+    }
+
+    /// Process ONE unit of the active batch. Returns true while work
+    /// remains; false when drained (or nothing was active).
+    pub fn batch_step(self: *AppState) bool {
+        if (!self.progress_active) return false;
+
+        // Locate the next unit: a selected row at/after the cursor in
+        // multi mode, else the single selected row exactly once.
+        var row: ?usize = null;
+        if (self.selected_count() > 0) {
+            while (self.batch_cursor < self.entry_count) : (self.batch_cursor += 1) {
+                if (self.is_selected(self.batch_cursor)) {
+                    row = self.batch_cursor;
+                    break;
                 }
             }
+            if (row == null) {
+                self.batch_finish();
+                return false;
+            }
         } else if (self.list.selected) |sel| {
-            if (sel < self.entry_count) {
-                const entry = &self.entries[self.sort_indices[sel]];
-                const name = entry_name(entry);
+            if (self.batch_done == 0 and sel < self.entry_count) {
+                row = sel;
+            } else {
+                self.batch_finish();
+                return false;
+            }
+        } else {
+            self.batch_finish();
+            return false;
+        }
+
+        const r = row.?;
+        const entry = &self.entries[self.sort_indices[r]];
+        const name = entry_name(entry);
+        var path_buf: [64]u8 = undefined;
+
+        self.set_selected(r, false); // consume so the cursor scan advances
+        self.batch_done += 1;
+        switch (self.batch_kind) {
+            .del => {
+                const path = build_path(self.current_path_slice(), name, &path_buf);
+                _ = ui.file_delete(path);
+                self.batch_marker("del", name);
+            },
+            .move_to => {
+                const target = self.batch_target[0..self.batch_target_len];
+                var np_buf: [64]u8 = undefined;
+                const old_p = build_path(self.current_path_slice(), name, &path_buf);
+                const new_p = build_path(target, name, &np_buf);
+                _ = ui.file_rename(old_p, new_p);
+                self.batch_marker("mov", name);
+            },
+            .rename => {
+                const prefix = self.batch_target[0..self.batch_target_len];
                 var new_name: [32]u8 = [_]u8{0} ** 32;
                 var p: usize = 0;
                 p = append_str(&new_name, p, prefix);
                 const n = @min(name.len, 32 - p);
                 @memcpy(new_name[p .. p + n], name[0..n]);
                 const full_new = new_name[0 .. p + n];
-                var old_path: [64]u8 = undefined;
-                var new_path: [64]u8 = undefined;
-                const op = build_path(self.current_path_slice(), name, &old_path);
-                const np = build_path(self.current_path_slice(), full_new, &new_path);
+                var np_buf: [64]u8 = undefined;
+                const op = build_path(self.current_path_slice(), name, &path_buf);
+                const np = build_path(self.current_path_slice(), full_new, &np_buf);
                 _ = ui.file_rename(op, np);
-                self.progress_bar.set_value(100);
-            }
+                self.batch_marker("ren", full_new);
+            },
+            .none => {},
         }
-        self.progress_active = false;
-        self.clear_selection();
-        self.refresh();
-        self.set_status("Batch Renamed");
+        self.batch_cursor += 1;
+        const pct: f32 = @as(f32, @floatFromInt(self.batch_done)) / @as(f32, @floatFromInt(self.batch_total));
+        self.progress_bar.set_value(pct * 100.0);
+        if (self.batch_done >= self.batch_total) {
+            self.batch_finish();
+            return false;
+        }
+        return true;
+    }
+
+    pub fn perform_batch_rename(self: *AppState, prefix: []const u8) void {
+        if (prefix.len == 0) return;
+        if (self.selected_count() == 0 and self.list.selected == null) return;
+        self.batch_begin(.rename, prefix);
+        while (self.batch_step()) {}
     }
 
     pub fn batch_rename_prefix(self: *AppState, prefix: []const u8) usize {
@@ -895,37 +1207,26 @@ pub const AppState = struct {
 
     pub fn delete_prompt(self: *AppState) bool {
         if (self.selected_count() == 0 and self.list.selected == null) return false;
-        if (self.selected_count() > 1) {
+        const multi = self.selected_count();
+        if (multi > 1) {
             self.delete_dialog.message = "Delete selected files?";
         } else {
             self.delete_dialog.message = "Delete file?";
         }
         self.delete_dialog.show();
+        var buf: [32]u8 = undefined;
+        var pos: usize = 0;
+        pos = append_str(&buf, pos, "file: del prompt n=");
+        pos = append_str(&buf, pos, fmt_u64(buf[pos..], if (multi > 0) multi else 1));
+        buf[pos] = '\n';
+        ui.write_console(buf[0 .. pos + 1]);
         return true;
     }
 
     pub fn perform_delete(self: *AppState) void {
-        const multi = self.selected_count();
-        if (multi > 0) {
-            self.progress_active = true;
-            self.progress_bar.set_label("Deleting...");
-            var deleted: usize = 0;
-            for (0..self.entry_count) |i| {
-                if (self.is_selected(i)) {
-                    const entry = &self.entries[self.sort_indices[i]];
-                    const name = entry_name(entry);
-                    var path_buf: [64]u8 = undefined;
-                    const path = build_path(self.current_path_slice(), name, &path_buf);
-                    _ = ui.file_delete(path);
-                    deleted += 1;
-                    const pct: u8 = @intCast((deleted * 100) / multi);
-                    self.progress_bar.set_value(pct);
-                }
-            }
-            self.progress_active = false;
-            self.clear_selection();
-            self.refresh();
-            self.set_status("Batch Deleted");
+        if (self.selected_count() > 0) {
+            self.batch_begin(.del, "");
+            while (self.batch_step()) {}
         } else {
             _ = self.delete_selected();
         }
@@ -940,45 +1241,28 @@ pub const AppState = struct {
 
     pub fn perform_move(self: *AppState, target_dir: []const u8) void {
         if (target_dir.len == 0) return;
-        const multi = self.selected_count();
-        self.progress_active = true;
-        self.progress_bar.set_label("Moving...");
-        if (multi > 0) {
-            var moved: usize = 0;
-            for (0..self.entry_count) |i| {
-                if (self.is_selected(i)) {
-                    const entry = &self.entries[self.sort_indices[i]];
-                    const name = entry_name(entry);
-                    var op_buf: [64]u8 = undefined;
-                    var np_buf: [64]u8 = undefined;
-                    const old_p = build_path(self.current_path_slice(), name, &op_buf);
-                    const new_p = build_path(target_dir, name, &np_buf);
-                    _ = ui.file_rename(old_p, new_p);
-                    moved += 1;
-                    const pct: u8 = @intCast((moved * 100) / multi);
-                    self.progress_bar.set_value(pct);
-                }
-            }
-        } else if (self.list.selected) |sel| {
-            if (sel < self.entry_count) {
-                const entry = &self.entries[self.sort_indices[sel]];
-                const name = entry_name(entry);
-                var op_buf: [64]u8 = undefined;
-                var np_buf: [64]u8 = undefined;
-                const old_p = build_path(self.current_path_slice(), name, &op_buf);
-                const new_p = build_path(target_dir, name, &np_buf);
-                _ = ui.file_rename(old_p, new_p);
-                self.progress_bar.set_value(100);
-            }
-        }
-        self.progress_active = false;
-        self.clear_selection();
-        self.refresh();
-        self.set_status("Moved");
+        if (self.selected_count() == 0 and self.list.selected == null) return;
+        self.batch_begin(.move_to, target_dir);
+        while (self.batch_step()) {}
     }
 
     pub fn delete_action(self: *AppState) bool {
         return self.delete_prompt();
+    }
+
+    /// Lane A (claim 0434): context-menu picks map to the same actions as
+    /// their keyboard/button equivalents.
+    fn dispatch_context_action(self: *AppState, pick: usize) void {
+        switch (pick) {
+            0 => _ = self.open_selected(),
+            1 => _ = self.rename_selected(),
+            2 => _ = self.delete_prompt(),
+            3 => {
+                if (!self.properties_mode) _ = self.toggle_properties();
+                ui.write_console("file: props on\n");
+            },
+            else => {},
+        }
     }
 
     /// M20-U8: toggle the Ctrl+F filter bar. Activation snapshots the
@@ -1097,7 +1381,8 @@ pub const AppState = struct {
     }
 
     /// F11: rebuild the sort_indices indirection layer. Uses insertion sort
-    /// (stable, matches TOP.BIN pattern).
+    /// (stable, matches TOP.BIN pattern). The virtual RECENT entry (claim
+    /// 2539 F5) pins to the front of the root listing regardless of sort.
     pub fn rebuild_sort(self: *AppState) void {
         // Initialize identity mapping.
         for (0..self.entry_count) |i| self.sort_indices[i] = i;
@@ -1116,6 +1401,19 @@ pub const AppState = struct {
                 k -= 1;
             }
             self.sort_indices[k] = key;
+        }
+        // Pin the virtual RECENT entry to row 0.
+        if (std.mem.eql(u8, self.current_path_slice(), data_path)) {
+            for (0..self.entry_count) |si| {
+                const e = &self.entries[self.sort_indices[si]];
+                if (e.is_dir != 0 and name_cmp_ignore_case(entry_name(e), recent_virtual_name) == 0) {
+                    const picked = self.sort_indices[si];
+                    var k = si;
+                    while (k > 0) : (k -= 1) self.sort_indices[k] = self.sort_indices[k - 1];
+                    self.sort_indices[0] = picked;
+                    break;
+                }
+            }
         }
     }
 
@@ -1176,7 +1474,9 @@ pub const AppState = struct {
     }
 
     /// Enumerate current_path via `sys_dir_list` (slot 27). Emits a
-    /// `file: listing N entries` marker for the live gate.
+    /// `file: listing N entries` marker for the live gate. At the DATA
+    /// root, injects the virtual RECENT entry (claim 2539 F5) when the
+    /// ring is non-empty and computes the bounded directory total (F4).
     pub fn list_directory(self: *AppState) void {
         const res = ui.dir_list(self.current_path_slice(), &self.entries);
         if (res < 0) {
@@ -1186,6 +1486,20 @@ pub const AppState = struct {
             return;
         }
         self.entry_count = @intCast(res);
+        // Lane B (claim 2539): the virtual RECENT first entry at the root —
+        // a pseudo-directory that opens the persisted ring as a listing.
+        const at_root = std.mem.eql(u8, self.current_path_slice(), data_path);
+        var injected_recent = false;
+        if (at_root and !self.filter_active and self.recent_count > 0 and self.entry_count < max_entries) {
+            var i = self.entry_count;
+            while (i > 0) : (i -= 1) self.entries[i] = self.entries[i - 1];
+            self.entries[0] = .{ .name = [_]u8{0} ** 32, .size = 0, .is_dir = 1, .reserved = .{ 0, 0, 0 } };
+            @memcpy(self.entries[0].name[0..recent_virtual_name.len], recent_virtual_name);
+            self.entries[0].size = 0;
+            self.entries[0].is_dir = 1;
+            self.entry_count += 1;
+            injected_recent = true;
+        }
         // Snapshot full (unfiltered) listing for Ctrl+F filter and F12 toggle.
         self.shadow_count = self.entry_count;
         for (0..self.entry_count) |i| self.shadow[i] = self.entries[i];
@@ -1195,18 +1509,68 @@ pub const AppState = struct {
         self.sync_scroll_view();
         // Auto-load preview for the new selection (C7).
         self.refresh_preview();
+        // Lane B (claim 2539): F4 breadcrumb total — bounded recursive
+        // byte sum of the current directory (depth ≤ 3), cached per listing.
+        self.dir_total_bytes = self.compute_dir_total();
         self.set_status("Listed");
 
-        var buf: [48]u8 = undefined;
+        var buf: [64]u8 = undefined;
         var pos: usize = 0;
         pos = append_str(&buf, pos, "file: listing ");
         pos = append_str(&buf, pos, fmt_u64(buf[pos..], self.entry_count));
-        pos = append_str(&buf, pos, " entries\n");
-        ui.write_console(buf[0..pos]);
+        pos = append_str(&buf, pos, " entries");
+        if (injected_recent) pos = append_str(&buf, pos, " recent=virtual");
+        pos = append_str(&buf, pos, " du=");
+        pos = append_str(&buf, pos, fmt_u64(buf[pos..], self.dir_total_bytes));
+        buf[pos] = '\n';
+        ui.write_console(buf[0 .. pos + 1]);
+    }
+
+    /// F4 (claim 2539): bounded recursive byte total of the current
+    /// directory over `sys_dir_list` — depth ≤ 3, small per-level windows,
+    /// no heap. Directories at the depth cap count as 0 (not descended).
+    fn compute_dir_total(self: *const AppState) u64 {
+        return dir_walk(self.current_path_slice(), 0, self.show_hidden);
+    }
+
+    fn dir_walk(path: []const u8, depth: usize, show_hidden: bool) u64 {
+        if (depth >= 3) return 0;
+        // One window per level, sized to the main listing cap. sys_dir_list
+        // has no offset parameter, so a directory with more children than
+        // this window is counted only for its first `win.len` entries —
+        // the bound is stated in the march notes.
+        var win: [max_entries]DirEntry = undefined;
+        var sub_buf: [path_max]u8 = undefined;
+        var total: u64 = 0;
+        const n = ui.dir_list(path, &win);
+        if (n <= 0) return 0;
+        for (win[0..@intCast(n)]) |e| {
+            const name = entry_name(&e);
+            if (!show_hidden and name.len > 0 and name[0] == '.') continue;
+            const child = build_path(path, name, &sub_buf);
+            if (e.is_dir != 0) {
+                total += dir_walk(child, depth + 1, show_hidden);
+            } else {
+                total += e.size;
+            }
+        }
+        return total;
     }
 
     /// Navigate into a subdirectory named `name` (must be a dir entry).
+    /// The virtual RECENT entry at the root opens the ring pseudo-listing
+    /// instead of touching the path (claim 2539 F5).
     pub fn enter_directory(self: *AppState, name: []const u8) bool {
+        if (self.recent_mode) {
+            // Inside the pseudo-listing every row is a full path; Enter
+            // routes through open_selected, not navigation.
+            return false;
+        }
+        if (std.mem.eql(u8, self.current_path_slice(), data_path) and
+            name_cmp_ignore_case(name, recent_virtual_name) == 0)
+        {
+            return self.open_recent_listing();
+        }
         if (self.current_path_len + 1 + name.len > path_max) return false;
         self.current_path[self.current_path_len] = '/';
         @memcpy(self.current_path[self.current_path_len + 1 .. self.current_path_len + 1 + name.len], name);
@@ -1274,9 +1638,13 @@ pub const AppState = struct {
             return self.enter_directory(name);
         }
 
-        // Build "<current_path>/<name>" (current_path len + 1 + name).
         var path_buf: [64]u8 = undefined;
-        const path = build_path(self.current_path_slice(), name, &path_buf);
+        // Lane B (claim 2539): inside the RECENT pseudo-listing the row
+        // name IS the stored full path.
+        const path = if (self.recent_mode)
+            self.recent_ring[sel][0..self.recent_lens[sel]]
+        else
+            build_path(self.current_path_slice(), name, &path_buf);
 
         const fd = ui.file_open(path, ui.MODE_READ);
         if (fd < 0) {
@@ -1316,14 +1684,38 @@ pub const AppState = struct {
     }
 
     pub fn back_to_list(self: *AppState) void {
-        self.view_mode = false;
-        self.content_len = 0;
+        // Lane B (claim 2539): leaving a FILE opened from the RECENT
+        // pseudo-listing returns to that pseudo-listing.
+        // Leaving a FILE opened from the DATA listing: re-list so state
+        // changed by the view (e.g. a freshly persisted RECENT entry,
+        // claim 2539 F5) shows up immediately.
+        if (self.view_mode) {
+            self.view_mode = false;
+            self.content_len = 0;
+            if (self.recent_mode) {
+                _ = self.open_recent_listing();
+                return;
+            }
+            self.refresh();
+            return;
+        }
+        // Leaving the pseudo-listing itself returns to the DATA root.
+        if (self.recent_mode) {
+            self.close_recent_listing();
+            return;
+        }
         self.set_status("Listed");
         ui.write_console("file: back\n");
     }
 
     /// Re-list `/data/`, preserving the selection when it still fits.
     pub fn refresh(self: *AppState) void {
+        // Lane B (claim 2539): a refresh inside the RECENT pseudo-listing
+        // rebuilds it from the ring, not from disk.
+        if (self.recent_mode) {
+            _ = self.open_recent_listing();
+            return;
+        }
         const prev = self.list.selected;
         self.list_directory();
         if (self.entry_count > 0) {
@@ -1415,25 +1807,46 @@ pub const AppState = struct {
         } else {
             ui.draw_text(win, "Files:", 8, 8, ui.COLOR_TEXT_PRIMARY);
             // Breadcrumb bar at y=4 (inside title), 8x8 muted per spec.
+            // Lane B (claim 2539): in RECENT pseudo-listing mode show a
+            // synthetic last segment instead of the (unchanged) path.
             var bx: u32 = 60;
             var si: usize = 0;
             var idx: usize = 0;
-            // Iterate over path segments for drawing.
-            while (idx < self.current_path_len) {
-                while (idx < self.current_path_len and self.current_path[idx] == '/') : (idx += 1) {}
-                if (idx >= self.current_path_len) break;
-                const start = idx;
-                while (idx < self.current_path_len and self.current_path[idx] != '/') : (idx += 1) {}
-                const seg = self.current_path[start..idx];
-                if (si > 0) {
-                    ui.draw_text(win, ">", bx, 8, ui.COLOR_TEXT_MUTED);
-                    bx += 16; // " > " is 3*8 but we draw ">" centered in 16px
+            if (self.recent_mode) {
+                ui.draw_text(win, ">", bx, 8, ui.COLOR_TEXT_MUTED);
+                bx += 16;
+                ui.draw_text(win, recent_virtual_name, bx, 8, ui.COLOR_ACCENT);
+                bx += @as(u32, @intCast(recent_virtual_name.len)) * glyph_w + 4;
+            } else {
+                // Iterate over path segments for drawing.
+                while (idx < self.current_path_len) {
+                    while (idx < self.current_path_len and self.current_path[idx] == '/') : (idx += 1) {}
+                    if (idx >= self.current_path_len) break;
+                    const start = idx;
+                    while (idx < self.current_path_len and self.current_path[idx] != '/') : (idx += 1) {}
+                    const seg = self.current_path[start..idx];
+                    if (si > 0) {
+                        ui.draw_text(win, ">", bx, 8, ui.COLOR_TEXT_MUTED);
+                        bx += 16; // " > " is 3*8 but we draw ">" centered in 16px
+                    }
+                    const is_last = idx >= self.current_path_len;
+                    const col = if (is_last) ui.COLOR_ACCENT else ui.COLOR_TEXT_MUTED;
+                    ui.draw_text(win, seg, bx, 8, col);
+                    bx += @as(u32, @intCast(seg.len)) * glyph_w + 4;
+                    si += 1;
                 }
-                const is_last = idx >= self.current_path_len;
-                const col = if (is_last) ui.COLOR_ACCENT else ui.COLOR_TEXT_MUTED;
-                ui.draw_text(win, seg, bx, 8, col);
-                bx += @as(u32, @intCast(seg.len)) * glyph_w + 4;
-                si += 1;
+            }
+            // Lane B (claim 2539): F4 directory size in the breadcrumb
+            // bar — "(N B)" after the segments.
+            if (!self.recent_mode and self.dir_total_bytes > 0) {
+                var tb: [24]u8 = undefined;
+                var tp: usize = 0;
+                tp = append_str(&tb, tp, "(");
+                tp = append_str(&tb, tp, fmt_u64(tb[tp..], self.dir_total_bytes));
+                tp = append_str(&tb, tp, " B)");
+                if (bx + @as(u32, @intCast(tp)) * glyph_w < title_rect.w - 120) {
+                    ui.draw_text(win, tb[0..tp], bx, 8, ui.COLOR_TEXT_MUTED);
+                }
             }
         }
 
@@ -1507,6 +1920,9 @@ pub const AppState = struct {
                 }
             }
         }
+
+        // Lane A (claim 0434): the context menu draws above everything.
+        self.ctx_menu.draw(win);
     }
 
     fn draw_list(self: *const AppState, win: u32) void {
@@ -1723,13 +2139,45 @@ pub const AppState = struct {
             return false;
         }
 
+        // Lane A (claim 0434): right-click on the listing opens the
+        // context menu (and selects the row under the cursor, like a
+        // desktop file manager). While open it consumes mouse events.
+        if (self.ctx_menu.is_open()) {
+            const was_open = self.ctx_menu.is_open();
+            _ = self.ctx_menu.handle_event(ev);
+            if (ev.kind == ui.MOUSE_DOWN and was_open and !self.ctx_menu.is_open()) {
+                // The menu just closed: either an item was picked or the
+                // click dismissed it.
+                if (self.ctx_menu.selected_idx) |pick| {
+                    self.dispatch_context_action(pick);
+                    self.ctx_menu.selected_idx = null;
+                }
+                return true;
+            }
+            return true;
+        }
+        if (ev.kind == ui.MOUSE_RIGHT_DOWN and list_area.contains(ev.arg0, ev.arg1) and !self.recent_mode) {
+            // Select the row under the cursor before showing the menu.
+            if (ev.arg1 >= list_area.y + header_h) {
+                const row = (ev.arg1 - (list_area.y + header_h)) / list_row_h;
+                const target_idx = self.list.scroll + row;
+                if (target_idx < self.entry_count) {
+                    self.list.select(target_idx, self.entry_count);
+                    self.refresh_preview();
+                }
+            }
+            self.ctx_menu.show(ev.arg0, ev.arg1);
+            self.set_status("Menu");
+            return true;
+        }
+
         if (self.btn_open.handle_event(ev)) {
             return self.open_selected();
         }
-        if (self.btn_rename.handle_event(ev)) {
+        if (self.btn_rename.handle_event(ev) and !self.recent_mode) {
             return self.rename_selected();
         }
-        if (self.btn_delete.handle_event(ev)) {
+        if (self.btn_delete.handle_event(ev) and !self.recent_mode) {
             return self.delete_prompt();
         }
         // GH #218: ScrollView thumb drag / track click / wheel — must sync before and after
@@ -1802,6 +2250,31 @@ pub const AppState = struct {
         if (ev.kind != ui.KEY_DOWN) return false;
         const keycode = ev.arg0;
         const ascii_char: u8 = @truncate(ev.arg1);
+
+        // Lane A (claim 0434): Escape dismisses the context menu.
+        if (self.ctx_menu.is_open()) {
+            if (keycode == 0x29) { // Escape
+                self.ctx_menu.dismiss();
+                self.set_status("Ready");
+                return true;
+            }
+        }
+
+        // Lane B (claim 2539): the RECENT pseudo-listing is read-only —
+        // navigation and Enter work; destructive verbs/chords consume as
+        // no-ops (rows are stored paths, not entries of current_path).
+        if (self.recent_mode) {
+            if (keycode == 0x29) { // Escape
+                self.close_recent_listing();
+                return true;
+            }
+            if ((ev.flags & ui.MOD_CTRL) != 0) return true; // chords off
+            if (ascii_char == 'd' or ascii_char == 'D' or ascii_char == 'r' or
+                ascii_char == 'R' or ascii_char == 'u' or ascii_char == 'U')
+            {
+                return true; // consumed: nothing destructive applies here
+            }
+        }
 
         // Modal dialogs intercept all keyboard events when open
         if (self.delete_dialog.is_open()) {
@@ -2086,8 +2559,25 @@ pub export fn _start() callconv(.c) noreturn {
 
     var ev: Event = undefined;
     while (true) {
-        const wait_rc = ui.wait_event(&ev);
-        if (wait_rc < 0) break;
+        // Lane A/B (claims 0434/2539): deferred work runs at LOOP DEPTH,
+        // before the loop can park in wait_event — batch units step one
+        // per frame while active, and finished ops re-list here instead
+        // of inside deep input-handler frames.
+        if (app.progress_active) {
+            _ = app.batch_step();
+            app.draw(win);
+            ui.win_present(win);
+            if (ui.poll_event(&ev) <= 0) continue;
+        } else {
+            if (app.pending_refresh) {
+                app.pending_refresh = false;
+                app.refresh();
+                app.draw(win);
+                ui.win_present(win);
+            }
+            const wait_rc = ui.wait_event(&ev);
+            if (wait_rc < 0) break;
+        }
 
         var dirty = false;
 
@@ -2867,4 +3357,135 @@ test "file_browser: M20-U3 — filter narrowing reports shown/total accounting" 
     try std.testing.expectEqual(@as(usize, 3), app.shadow_count);
     // The first visible entry is the alphabetically-first match.
     try std.testing.expectEqualStrings("ALPHA.TXT", entry_name(&app.entries[app.sort_indices[0]]));
+}
+
+// ---------------------------------------------------------------------------
+// M25 Lanes A+B (claims 0434/2539): mkdir seam, stepwise batch engine,
+// persisted recent ring + virtual RECENT entry, context menu
+// ---------------------------------------------------------------------------
+
+test "file: F3 — confirm_create_dir routes through the MODE_DIR seam" {
+    var app = AppState.init();
+    // No collision: host syscalls return fd 0 → success path.
+    app.create_dir_active = true;
+    @memcpy(app.create_dir_buf[0..4], "NEW1");
+    app.create_dir_len = 4;
+    try std.testing.expect(app.confirm_create_dir());
+    try std.testing.expectEqualStrings("Created", app.status_msg[0..app.status_len]);
+    try std.testing.expect(!app.create_dir_active);
+
+    // Collision refuses before any syscall.
+    app.entry_count = 1;
+    @memcpy(app.entries[0].name[0..5], "TAKEN");
+    app.create_dir_active = true;
+    @memcpy(app.create_dir_buf[0..5], "taken"); // case-insensitive
+    app.create_dir_len = 5;
+    try std.testing.expect(!app.confirm_create_dir());
+    try std.testing.expectEqualStrings("Exists!", app.status_msg[0..app.status_len]);
+}
+
+test "file: F5 — recent ring dedups to front and persists (claim 2539)" {
+    var app = AppState.init();
+    app.add_recent("/data/A.TXT");
+    app.add_recent("/data/B.TXT");
+    app.add_recent("/data/C.TXT");
+    try std.testing.expectEqual(@as(usize, 3), app.recent_count);
+    // Re-opening A moves it to the front without duplicating.
+    app.add_recent("/data/A.TXT");
+    try std.testing.expectEqual(@as(usize, 3), app.recent_count);
+    try std.testing.expectEqualStrings("/data/A.TXT", app.recent_ring[0][0..app.recent_lens[0]]);
+    try std.testing.expectEqualStrings("/data/C.TXT", app.recent_ring[1][0..app.recent_lens[1]]);
+}
+
+test "file: F5 — virtual RECENT entry pins to the root listing and opens the ring" {
+    var app = AppState.init();
+    _ = app.add_recent("/data/NOTES.TXT");
+    _ = app.add_recent("/data/DIARY.TXT");
+
+    // Root listing injects RECENT as the pinned first row even with an
+    // otherwise-empty directory.
+    app.current_path_len = 5; // "/data"
+    app.list_directory();
+    try std.testing.expectEqual(@as(usize, 1), app.entry_count);
+    const vrow = &app.entries[app.sort_indices[0]];
+    try std.testing.expect(vrow.is_dir != 0);
+    try std.testing.expectEqualStrings("RECENT", entry_name(vrow));
+
+    // Entering it swaps to the pseudo-listing of stored full paths
+    // (newest first: DIARY was added after NOTES).
+    try std.testing.expect(app.enter_directory("RECENT"));
+    try std.testing.expect(app.recent_mode);
+    try std.testing.expectEqual(@as(usize, 2), app.entry_count);
+    try std.testing.expectEqualStrings("/data/DIARY.TXT", entry_name(&app.entries[app.sort_indices[0]]));
+
+    // Opening a row views the stored path directly.
+    try std.testing.expect(app.open_selected());
+    try std.testing.expect(app.view_mode);
+    try std.testing.expectEqualStrings("Viewing", app.status_msg[0..app.status_len]);
+
+    // Back returns to the pseudo-listing; back again leaves it entirely.
+    app.back_to_list();
+    try std.testing.expect(!app.view_mode);
+    try std.testing.expect(app.recent_mode);
+    try std.testing.expectEqualStrings("Recents", app.status_msg[0..app.status_len]);
+    app.back_to_list();
+    try std.testing.expect(!app.recent_mode);
+}
+
+test "file: F1 — batch engine steps one unit at a time with markers (claim 0434)" {
+    var app = AppState.init();
+    app.entry_count = 3;
+    @memcpy(app.entries[0].name[0..5], "A.TXT");
+    @memcpy(app.entries[1].name[0..5], "B.TXT");
+    @memcpy(app.entries[2].name[0..5], "C.TXT");
+    app.toggle_select(0);
+    app.toggle_select(2);
+
+    app.batch_begin(.del, "");
+    try std.testing.expect(app.progress_active);
+    // First step consumes one unit and keeps the op active.
+    try std.testing.expect(app.batch_step());
+    try std.testing.expect(app.progress_active);
+    try std.testing.expect(!app.is_selected(0));
+    try std.testing.expect(app.is_selected(2)); // untouched yet
+    // The second step drains the queue and finalizes (returns false).
+    try std.testing.expect(!app.batch_step());
+    try std.testing.expect(!app.progress_active);
+    try std.testing.expectEqual(@as(usize, 2), app.batch_done);
+    try std.testing.expectEqualStrings("Batch Deleted", app.status_msg[0..app.status_len]);
+    // perform_* parity: synchronous drain reaches the same state.
+    try std.testing.expectEqual(@as(usize, 0), app.selected_count());
+}
+
+test "file: Lane A — right-click opens the context menu; Properties dispatches" {
+    var app = AppState.init();
+    app.entry_count = 1;
+    @memcpy(app.entries[0].name[0..5], "A.TXT");
+    app.list.select(0, 1);
+
+    // Right-click inside the list area shows the menu.
+    const ev_rc = Event{ .kind = ui.MOUSE_RIGHT_DOWN, .flags = ui.BTN_RIGHT, .seq = 1, .arg0 = list_area.x + 40, .arg1 = list_area.y + header_h + 4 };
+    _ = app.handle_mouse_events(&ev_rc);
+    try std.testing.expect(app.ctx_menu.is_open());
+
+    // Clicking the Properties row (index 3) dispatches the inspector.
+    const pick_y = app.ctx_menu.y + 3 * app.ctx_menu.row_h + 2;
+    const ev_pick = Event{ .kind = ui.MOUSE_DOWN, .flags = ui.BTN_LEFT, .seq = 2, .arg0 = app.ctx_menu.x + 10, .arg1 = pick_y };
+    _ = app.handle_mouse_events(&ev_pick);
+    try std.testing.expect(!app.ctx_menu.is_open());
+    try std.testing.expect(app.properties_mode);
+
+    // Escape dismisses a re-opened menu.
+    _ = app.handle_mouse_events(&ev_rc);
+    try std.testing.expect(app.ctx_menu.is_open());
+    const ev_esc = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 3, .arg0 = 0x29, .arg1 = 0 };
+    try std.testing.expect(app.handle_keyboard_event(&ev_esc));
+    try std.testing.expect(!app.ctx_menu.is_open());
+}
+
+test "file: fmt_i64 formats error codes for serial markers" {
+    var buf: [16]u8 = undefined;
+    try std.testing.expectEqualStrings("-9", fmt_i64(&buf, -9));
+    try std.testing.expectEqualStrings("0", fmt_i64(&buf, 0));
+    try std.testing.expectEqualStrings("-64", fmt_i64(&buf, -64));
 }

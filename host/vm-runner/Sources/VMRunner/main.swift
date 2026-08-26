@@ -1437,7 +1437,7 @@ if let s = inputChords {
     if viaVirtioEnabled {
         print("  input-chords: ENABLED (milestone eight card U2, claim 1809) — typing \(s.debugDescription) over the custom-virtio INPUT queue (claim 9588; HID-shaped messages, no view) after \"\(inputChordsAfter ?? "userspace: el0=1")\"")
     } else {
-        print("  input-chords: ENABLED (milestone eight card U2, claim 1809) — typing \(s.debugDescription) into the view after \"\(inputChordsAfter ?? "userspace: el0=1")\" (keyDown + keyUp per chord: printable chars, return/up/down/left/right/home/end/delete/tab, ctrl-a..ctrl-z; \(inputChordsDelay) s per keystroke)")
+        print("  input-chords: ENABLED (milestone eight card U2, claim 1809) — typing \(s.debugDescription) into the view after \"\(inputChordsAfter ?? "userspace: el0=1")\" (keyDown + keyUp per chord: printable chars, return/up/down/left/right/home/end/delete/tab, ctrl-a..ctrl-z, ctrl-shift-a..ctrl-shift-z; \(inputChordsDelay) s per keystroke)")
     }
 }
 if viaVirtioEnabled {
@@ -2344,6 +2344,12 @@ func macChord(_ token: String) -> (UInt16, NSEvent.ModifierFlags, String)? {
     case "pagedown": return (0x79, [], "\u{F72D}")
     case "escape": return (0x35, [], "\u{1B}")
     default:
+        if token.hasPrefix("ctrl-shift-"), token.count == 12 {
+            let letter = token[token.index(token.startIndex, offsetBy: 11)]
+            if let (code, _) = macKey(for: letter) {
+                return (code, [.control, .shift], String(letter))
+            }
+        }
         if token.hasPrefix("ctrl-"), token.count == 6 {
             let letter = token[token.index(token.startIndex, offsetBy: 5)]
             if let (code, _) = macKey(for: letter) {
@@ -3798,6 +3804,13 @@ enum CustomVirtioSpike {
         case "pageup": return (0, 0x4B)
         case "pagedown": return (0, 0x4E)
         default: break
+        }
+        if token.hasPrefix("ctrl-shift-"), token.count == 12 {
+            let letter = token[token.index(token.startIndex, offsetBy: 11)]
+            if let (usage, shift) = hidUsage(for: letter), !shift {
+                return (hidModCtrl | hidModShift, usage)
+            }
+            return nil
         }
         if token.hasPrefix("ctrl-"), token.count == 6 {
             let letter = token[token.index(token.startIndex, offsetBy: 5)]

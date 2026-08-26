@@ -110,6 +110,10 @@ pub const MODE_READ: u32 = 0x0001;
 pub const MODE_WRITE: u32 = 0x0002;
 pub const MODE_CREATE: u32 = 0x0004;
 pub const MODE_APPEND: u32 = 0x0008;
+/// M25 Lane B (claim 2539): with MODE_CREATE|MODE_WRITE, open() creates a
+/// real FAT32 directory (kernel-side cluster + dot entries) instead of an
+/// empty file. Zero new syscall slots — the slot 23 flag contract extends.
+pub const MODE_DIR: u32 = 0x0010;
 
 pub const DirEntry = extern struct {
     name: [32]u8,
@@ -434,6 +438,16 @@ pub fn poll_event(ev: *Event) i64 {
 
 pub fn file_open(path: []const u8, flags: u32) i64 {
     return syscall3(sys_file_open_num, @intFromPtr(path.ptr), path.len, flags);
+}
+
+/// M25 Lane B (claim 2539): create a directory by `/`-path through the
+/// slot 23 MODE_DIR flag extension. Returns the fd (close it), or a
+/// negative error: -8 name too long, -9 exists, -5 disk full, -6 bad
+/// path / no disk. The handle rejects read/write — creation only.
+pub fn file_mkdir(path: []const u8) i64 {
+    const fd = syscall3(sys_file_open_num, @intFromPtr(path.ptr), path.len, MODE_WRITE | MODE_CREATE | MODE_DIR);
+    if (fd >= 0) file_close(@intCast(fd));
+    return fd;
 }
 
 pub fn file_read(handle: u32, buf: []u8) i64 {
