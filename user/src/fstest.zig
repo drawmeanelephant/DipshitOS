@@ -120,6 +120,33 @@ pub export fn _start() callconv(.c) noreturn {
     }
     ui.write_console("fstest: deleted-gone\n");
 
+    // 8. M25 Lane B (claim 2539): REAL FAT32 directory creation through
+    // the slot 23 MODE_DIR extension — cluster + dot entries +
+    // ATTR_DIRECTORY parent slot, not a regular file.
+    const m = ui.file_mkdir("/data/M25DIR");
+    if (m < 0) {
+        ui.write_console("fstest: mkdir failed\n");
+        ui.exit_process(1);
+    }
+    ui.write_console("fstest: mkdir ok\n");
+    // The created directory lists EMPTY (dot entries are skipped by the
+    // listing seam — a file would have failed the open-for-dir-list too,
+    // but an empty LISTING plus mkdir-ok pins real directory semantics).
+    var dlbuf: [4]ui.DirEntry = undefined;
+    const dn = ui.dir_list("/data/M25DIR", &dlbuf);
+    if (dn != 0) {
+        ui.write_console("fstest: mkdir list failed\n");
+        ui.exit_process(1);
+    }
+    ui.write_console("fstest: mkdir dir-empty\n");
+    // Collision refuses (mkdir never overwrites).
+    const m2 = ui.file_mkdir("/data/M25DIR");
+    if (m2 != -9) {
+        ui.write_console("fstest: mkdir exists-refuse failed\n");
+        ui.exit_process(1);
+    }
+    ui.write_console("fstest: mkdir exists-refused\n");
+
     ui.write_console("fstest: done\n");
     ui.exit_process(0);
 }

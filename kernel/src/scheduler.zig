@@ -110,7 +110,14 @@ pub const idle_id: usize = max_tasks - 1;
 // user-stack pages (exec allocates text/stack/kstack consecutively) and
 // clobbered DESKTOP's AppState with FAT bytes. The user stack doubles too
 // — GUI apps get more headroom at no real cost.
-pub const task_stack_size: usize = 16 * 1024;
+/// Per-task stacks. Doubled 16 → 32 KiB for M25 Lane A/B (claims
+/// 0434/2539): FILE.BIN's AppState alone occupies ~7.3 KiB of its EL0
+/// stack, and real feature chains (batch ops + deferred listing walks)
+/// overflowed the remaining headroom — observed live as guard-page
+/// status=139 faults on VZ. Cost: +16 KiB BSS per static stack (well
+/// inside the verify-bss-budget headroom) and 2 extra pages per exec'd
+/// process.
+pub const task_stack_size: usize = 32 * 1024;
 
 /// SPSR modes for synthetic first entry. The kernel's observed M=0x5 is
 /// architecturally EL1h (SP_EL1), not EL1t; EL0t is M=0x0. DAIF bits are

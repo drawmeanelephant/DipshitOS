@@ -670,11 +670,11 @@ fn fake_write(lba: u64, data: *const [fat.sector_size]u8) bool {
 // programs, and each exec'd program owns 9 pages (text 1 + user stack 4 +
 // EL1 exception stack 4), so the fixture pool must back 8 × 9 = 72 pages
 // plus headroom.
-var fixture_pool: [128 * 4096]u8 align(4096) = undefined;
+var fixture_pool: [256 * 4096]u8 align(4096) = undefined;
 
 fn arm_allocator() void {
     const descriptors = [_]memmap.MemoryDescriptor{
-        .{ .type = .conventional_memory, .physical_start = @intFromPtr(&fixture_pool), .virtual_start = 0, .number_of_pages = 128, .attribute = 0 },
+        .{ .type = .conventional_memory, .physical_start = @intFromPtr(&fixture_pool), .virtual_start = 0, .number_of_pages = 256, .attribute = 0 },
     };
     const view = memmap.MapView.init(std.mem.asBytes(&descriptors), @sizeOf(memmap.MemoryDescriptor), descriptors.len);
     _ = alloc.init(view, &.{});
@@ -807,15 +807,15 @@ test "exec: ok path loads, validates, builds the root, and spawns the task" {
     try std.testing.expectEqual(@as(u64, 25), exec_proc.content_len);
     try std.testing.expectEqual(userspace.text_va, exec_proc.entry_va);
     try std.testing.expectEqual(mmu.user_root_phys(), exec_proc.root_phys);
-    try std.testing.expectEqual(@as(u64, 16384), exec_proc.stack_len);
+    try std.testing.expectEqual(@as(u64, 32768), exec_proc.stack_len);
     // Claim 0826: the process owns its own text/stack/kernel-stack pages
     // from the physical allocator (the boot payload owns none of these).
     try std.testing.expect(exec_proc.text_phys != 0);
     try std.testing.expectEqual(@as(u64, 1), exec_proc.text_pages);
     try std.testing.expect(exec_proc.stack_phys != 0);
-    try std.testing.expectEqual(@as(u64, 4), exec_proc.stack_pages);
+    try std.testing.expectEqual(@as(u64, 8), exec_proc.stack_pages);
     try std.testing.expect(exec_proc.kernel_stack_phys != 0);
-    try std.testing.expectEqual(@as(u64, 4), exec_proc.kernel_stack_pages);
+    try std.testing.expectEqual(@as(u64, 8), exec_proc.kernel_stack_pages);
     // The loaded bytes landed in the process's OWN text page.
     const text_dst: [*]const u8 = @ptrFromInt(exec_proc.text_phys);
     try std.testing.expectEqualStrings("user: hello from the ESP\n", text_dst[0..25]);
@@ -1135,10 +1135,11 @@ test "exec: permanent occupant + recycle — one spare slot, pool_full, then the
     // The capacity gate: a ninth exec while all eight programs are live is
     // pool_full, checked BEFORE any allocation — nothing leaks.
     try std.testing.expectEqual(ExecResult.pool_full, exec_file("USER.BIN", &.{}));
-    try std.testing.expectEqual(free_after_counter - 63, alloc.stats().free_pages);
+    try std.testing.expectEqual(free_after_counter - 119, alloc.stats().free_pages);
 
     // Drive the FIRST short program's exit + reap (the idle task's
-    // lifecycle reap): its 9 pages return to the allocator and its
+    // lifecycle reap): its 17 pages (text 1 + stack 8 + kstack 8) return
+    // to the allocator and its
     // executor slot becomes spawnable again — while the counter stays
     // running.
     try std.testing.expect(scheduler.yield_current()); // idle -> shell
@@ -1149,11 +1150,11 @@ test "exec: permanent occupant + recycle — one spare slot, pool_full, then the
     try std.testing.expect(scheduler.exit_current(43)); // user -> idle
     try std.testing.expectEqual(process.State.exited, process.info(2).?.state);
     // The exited process holds its pages until the reap...
-    try std.testing.expectEqual(free_after_counter - 63, alloc.stats().free_pages);
+    try std.testing.expectEqual(free_after_counter - 119, alloc.stats().free_pages);
     // ...the scheduler reap returns them (claim 4613) while the exited
     // descriptor stays in the procs table with its status.
     try std.testing.expect(scheduler.reap(3));
-    try std.testing.expectEqual(free_after_counter - 54, alloc.stats().free_pages);
+    try std.testing.expectEqual(free_after_counter - 102, alloc.stats().free_pages);
     try std.testing.expectEqual(process.State.exited, process.info(2).?.state);
     try std.testing.expectEqual(@as(u64, 43), process.info(2).?.exit_status);
     try std.testing.expectEqual(@as(u64, 0), process.info(2).?.text_pages);
@@ -1169,7 +1170,7 @@ test "exec: permanent occupant + recycle — one spare slot, pool_full, then the
     // again: a subsequent exec is pool_full, still leak-free.
     try std.testing.expect(!scheduler.has_free_slot());
     try std.testing.expectEqual(ExecResult.pool_full, exec_file("USER.BIN", &.{}));
-    try std.testing.expectEqual(free_after_counter - 63, alloc.stats().free_pages);
+    try std.testing.expectEqual(free_after_counter - 119, alloc.stats().free_pages);
     try std.testing.expectEqual(process.State.running, process.info(1).?.state);
 }
 
@@ -1233,11 +1234,11 @@ test "exec: kill reaps a permanent occupant — pages return, the slot is re-exe
     try std.testing.expectEqual(process.State.exited, killed.state);
     try std.testing.expectEqual(@as(u64, 137), killed.exit_status);
     // The exited process holds its 9 pages until the reap (the free
-    // count is unchanged from right after the exec — 9 still out)...
+    // count is unchanged from right after the exec — 17 still out)...
     try std.testing.expectEqual(free_after_counter, alloc.stats().free_pages);
-    // ...then the scheduler reap returns them (exact +9 recovery).
+    // ...then the scheduler reap returns them (exact +17 recovery).
     try std.testing.expect(scheduler.reap(2));
-    try std.testing.expectEqual(free_after_counter + 9, alloc.stats().free_pages);
+    try std.testing.expectEqual(free_after_counter + 17, alloc.stats().free_pages);
     try std.testing.expect(scheduler.has_free_slot());
     // A subsequent exec lands in the freed slot.
     try std.testing.expectEqual(ExecResult.ok, exec_file("USER.BIN", &.{}));
