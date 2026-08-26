@@ -108,3 +108,23 @@ Kept open as genuinely active: 2539 (ox-alpha M25 Lane B, heartbeat
 was fixed by PR #579), 4379 (⛔ intentional lane handoff), 4402 (M27
 compositor polish, unimplemented cards). Each flip carries a Heartbeat
 and a pointer to this log entry per the 6204/6637 precedent.
+
+## 2026-08-26 — claim 4354 M24 K-row sweep complete (calc-depth gate + two real bugs)
+
+- **verify-live-calc-depth.sh PASS 2/2 on VZ**: one booted image drives K16
+  stats, K13 dates, K12 settings, K14 rand, K2 memory, K3 units, K10
+  clipboard via `--input-chords`, then K4 PI / K7 DEG-RAD / K6 SCI / K9 EXPR
+  via `--pointer-virtio` clicks; success marker rides --script2 after the
+  LAST pointer marker. K1 prog gate re-verified PASS.
+- **Bug 1 (kernel, hardware-only):** CALC `r` key faulted the app — `fault:
+  CALC.BIN far=0x0 ec=0x18` (EL0 data abort at addr 0). Root cause: K13/K14
+  read CNTPCT_EL0/CNTFRQ_EL0 from EL0 but CNTKCTL_EL1.EL0PCTEN was never
+  set, so the read trapped and the fault dispatcher reaped the process.
+  Fixed: `timer.allow_el0_counter()` (bits 0-3) called from `timer.init()`.
+- **Bug 2 (user):** CALC compared `ev.flags & 0x04` (MOD_ALT) for Ctrl
+  chords; ADR 0009 MOD_CTRL = 0x0002, so every Ctrl chord was dead in the
+  GUI. Fixed to `ui.MOD_CTRL` (runtime + 12 test fixtures).
+- **Plumbing:** `comma`/`ctrl-comma` chord tokens (CSV separator can't carry
+  a literal `,`); success markers moved to --script2 after the last input
+  marker; K4 pixel proof calibrated to the right-aligned display region.
+- Rows flipped ✅ gate on observed PASS; claim 4354 → ✅ done.

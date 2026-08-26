@@ -1919,7 +1919,7 @@ pub const AppState = struct {
         if (ev.kind != ui.KEY_DOWN) return false;
         const keycode = ev.arg0;
         const ascii = @as(u8, @truncate(ev.arg1));
-        const ctrl = (ev.flags & 0x04) != 0; // Ctrl flag (bit 2)
+        const ctrl = (ev.flags & ui.MOD_CTRL) != 0; // Ctrl flag (ADR 0009: MOD_CTRL = 0x0002, not ALT's 0x04)
 
         // Ctrl+P: toggle programmer mode
         if (ctrl and (ascii == 'p' or ascii == 'P')) {
@@ -2406,11 +2406,11 @@ test "calc: programmer mode toggle" {
     var app = AppState.init();
     try std.testing.expect(!app.prog_mode.active);
 
-    var ev = Event{ .kind = ui.KEY_DOWN, .flags = 0x04, .seq = 1, .arg0 = 0x13, .arg1 = 'p' }; // Ctrl+P
+    var ev = Event{ .kind = ui.KEY_DOWN, .flags = ui.MOD_CTRL, .seq = 1, .arg0 = 0x13, .arg1 = 'p' }; // Ctrl+P
     try std.testing.expect(app.handle_keyboard_event(&ev));
     try std.testing.expect(app.prog_mode.active);
 
-    ev.flags = 0x04;
+    ev.flags = ui.MOD_CTRL;
     ev.arg1 = 'p';
     try std.testing.expect(app.handle_keyboard_event(&ev));
     try std.testing.expect(!app.prog_mode.active);
@@ -2447,7 +2447,7 @@ test "calc: K2 memory 4-slot store/recall" {
 
 test "calc: K2 Ctrl+1/2/3/4 slot selection" {
     var app = AppState.init();
-    var ev = Event{ .kind = ui.KEY_DOWN, .flags = 0x04, .seq = 1, .arg0 = 0x1e, .arg1 = '2' }; // Ctrl+2
+    var ev = Event{ .kind = ui.KEY_DOWN, .flags = ui.MOD_CTRL, .seq = 1, .arg0 = 0x1e, .arg1 = '2' }; // Ctrl+2
     try std.testing.expect(app.handle_keyboard_event(&ev));
     try std.testing.expectEqual(@as(usize, 1), app.mem_active_slot);
 
@@ -2550,11 +2550,11 @@ test "calc: K3 unit conversion toggle" {
     var app = AppState.init();
     try std.testing.expect(!app.convert_active);
 
-    var ev = Event{ .kind = ui.KEY_DOWN, .flags = 0x04, .seq = 1, .arg0 = 0x18, .arg1 = 'u' }; // Ctrl+U
+    var ev = Event{ .kind = ui.KEY_DOWN, .flags = ui.MOD_CTRL, .seq = 1, .arg0 = 0x18, .arg1 = 'u' }; // Ctrl+U
     try std.testing.expect(app.handle_keyboard_event(&ev));
     try std.testing.expect(app.convert_active);
 
-    ev.flags = 0x04;
+    ev.flags = ui.MOD_CTRL;
     ev.arg1 = 'u';
     try std.testing.expect(app.handle_keyboard_event(&ev));
     try std.testing.expect(!app.convert_active);
@@ -2658,7 +2658,7 @@ test "calc K6: SCI button toggles mode" {
 }
 
 fn tap_key(app: *AppState, ascii: u8, ctrl: bool) bool {
-    var ev = Event{ .kind = ui.KEY_DOWN, .flags = if (ctrl) 0x04 else 0, .seq = 1, .arg0 = 0, .arg1 = ascii };
+    var ev = Event{ .kind = ui.KEY_DOWN, .flags = if (ctrl) ui.MOD_CTRL else 0, .seq = 1, .arg0 = 0, .arg1 = ascii };
     return app.handle_keyboard_event(&ev);
 }
 
@@ -2787,13 +2787,13 @@ test "calc K10: copy/paste chords are consumed" {
     var app = AppState.init();
     app.engine.current_val = 42;
     // Ctrl+C
-    var evc = Event{ .kind = ui.KEY_DOWN, .flags = 0x04, .seq = 1, .arg0 = 0, .arg1 = 'c' };
+    var evc = Event{ .kind = ui.KEY_DOWN, .flags = ui.MOD_CTRL, .seq = 1, .arg0 = 0, .arg1 = 'c' };
     try std.testing.expect(app.handle_keyboard_event(&evc));
     // Ctrl+Shift+C
-    var evcs = Event{ .kind = ui.KEY_DOWN, .flags = 0x04 | ui.MOD_SHIFT, .seq = 2, .arg0 = 0, .arg1 = 'C' };
+    var evcs = Event{ .kind = ui.KEY_DOWN, .flags = ui.MOD_CTRL | ui.MOD_SHIFT, .seq = 2, .arg0 = 0, .arg1 = 'C' };
     try std.testing.expect(app.handle_keyboard_event(&evcs));
     // Ctrl+V — host clipboard stub returns 0, paste is a no-op but consumed
-    var evv = Event{ .kind = ui.KEY_DOWN, .flags = 0x04, .seq = 3, .arg0 = 0, .arg1 = 'v' };
+    var evv = Event{ .kind = ui.KEY_DOWN, .flags = ui.MOD_CTRL, .seq = 3, .arg0 = 0, .arg1 = 'v' };
     try std.testing.expect(app.handle_keyboard_event(&evv));
     // Plain c still clears (no clash)
     app.engine.current_val = 5;
@@ -2920,7 +2920,7 @@ test "calc K12: config parse/write round-trip" {
 test "calc K12: Ctrl+, opens the settings bar; keys adjust" {
     var app = AppState.init();
     try std.testing.expect(!app.cfg_active);
-    var ev = Event{ .kind = ui.KEY_DOWN, .flags = 0x04, .seq = 1, .arg0 = 0, .arg1 = ',' };
+    var ev = Event{ .kind = ui.KEY_DOWN, .flags = ui.MOD_CTRL, .seq = 1, .arg0 = 0, .arg1 = ',' };
     try std.testing.expect(app.handle_keyboard_event(&ev));
     try std.testing.expect(app.cfg_active);
 
@@ -2968,7 +2968,7 @@ test "calc K12: display honors thousands separator" {
 test "calc K13: Ctrl+D opens date bar; diff command works" {
     var app = AppState.init();
     try std.testing.expect(!app.date_active);
-    var evd = Event{ .kind = ui.KEY_DOWN, .flags = 0x04, .seq = 1, .arg0 = 0, .arg1 = 'd' };
+    var evd = Event{ .kind = ui.KEY_DOWN, .flags = ui.MOD_CTRL, .seq = 1, .arg0 = 0, .arg1 = 'd' };
     try std.testing.expect(app.handle_keyboard_event(&evd));
     try std.testing.expect(app.date_active);
 
@@ -3139,7 +3139,7 @@ test "calc K15: unknown name and bad def raise errors" {
 test "calc K16: Ctrl+S opens stats; [1,2,3,4,5] computes" {
     var app = AppState.init();
     try std.testing.expect(!app.stats_active);
-    var evs = Event{ .kind = ui.KEY_DOWN, .flags = 0x04, .seq = 1, .arg0 = 0, .arg1 = 's' };
+    var evs = Event{ .kind = ui.KEY_DOWN, .flags = ui.MOD_CTRL, .seq = 1, .arg0 = 0, .arg1 = 's' };
     try std.testing.expect(app.handle_keyboard_event(&evs));
     try std.testing.expect(app.stats_active);
 
