@@ -74,13 +74,19 @@ cat > "$SCRIPT" <<'EOF'
 exec EDIT.BIN
 EOF
 
-# --- phase 2: type text, then Ctrl+Z (undo), Ctrl+T (new tab), Ctrl+G (goto)
-# The editor starts with an empty buffer, so the undo chord needs two typed
-# characters first: 'h', 'i', then ctrl-z undoes them ('edit: undo'),
-# ctrl-t opens a tab ('edit: tab-open'), ctrl-g opens the goto prompt
-# ('edit: goto-open'). Each chord rides the claim-9588 custom-virtio INPUT
-# queue headless-safe (no VZ view, no activation wall).
-INPUT_CHORDS="h,i,ctrl-z,ctrl-t,ctrl-g"
+# --- phase 2: exercise undo, line numbers toggle, search, replace, delete line, tab, goto
+# The editor starts with an empty buffer, so we type 'h', 'i', then:
+#   ctrl-z (undo -> 'edit: undo')
+#   ctrl-l (toggle line numbers -> 'edit: toggle-lines')
+#   ctrl-f (find prompt -> 'edit: find-open')
+#   escape (close find prompt)
+#   ctrl-h (replace prompt -> 'edit: replace-open')
+#   escape (close replace prompt)
+#   ctrl-shift-d (delete line -> 'edit: delete-line')
+#   ctrl-t (new tab -> 'edit: tab-open')
+#   ctrl-g (goto prompt -> 'edit: goto-open')
+# Each chord rides the custom-virtio INPUT queue headless-safe.
+INPUT_CHORDS="h,i,ctrl-z,ctrl-l,ctrl-f,escape,ctrl-h,escape,ctrl-shift-d,ctrl-t,ctrl-g"
 
 run_one() {
     local tag="$1"
@@ -102,29 +108,35 @@ run_one() {
     local SER="$(art live-editor-serial-$tag.log)"
 
     local SERIAL_BYTES=0 BANNER=0 EDIT_READY=0 TAB_OPEN=0 UNDO=0 GOTO_OPEN=0
+    local TOGGLE_LINES=0 FIND_OPEN=0 REPLACE_OPEN=0 DELETE_LINE=0
     if [ -f "$SER" ]; then
         SERIAL_BYTES=$(wc -c < "$SER" 2>/dev/null | tr -d ' ')
         grep -qF -- "DipshitOS kernel has seized control." "$SER" && BANNER=1
         grep -qF -- "edit: ready" "$SER" && EDIT_READY=1
-        grep -qF -- "edit: tab-open" "$SER" && TAB_OPEN=1
         grep -qF -- "edit: undo" "$SER" && UNDO=1
+        grep -qF -- "edit: toggle-lines" "$SER" && TOGGLE_LINES=1
+        grep -qF -- "edit: find-open" "$SER" && FIND_OPEN=1
+        grep -qF -- "edit: replace-open" "$SER" && REPLACE_OPEN=1
+        grep -qF -- "edit: delete-line" "$SER" && DELETE_LINE=1
+        grep -qF -- "edit: tab-open" "$SER" && TAB_OPEN=1
         grep -qF -- "edit: goto-open" "$SER" && GOTO_OPEN=1
     fi
     {
-        echo "$tag: rc=$RC serial-bytes=$SERIAL_BYTES banner=$BANNER edit-ready=$EDIT_READY tab-open=$TAB_OPEN undo=$UNDO goto-open=$GOTO_OPEN"
+        echo "$tag: rc=$RC serial-bytes=$SERIAL_BYTES banner=$BANNER edit-ready=$EDIT_READY undo=$UNDO lines=$TOGGLE_LINES find=$FIND_OPEN repl=$REPLACE_OPEN del=$DELETE_LINE tab=$TAB_OPEN goto=$GOTO_OPEN"
     } >> "$REPORT"
-    echo "$tag rc=$RC serial-bytes=$SERIAL_BYTES banner=$BANNER edit-ready=$EDIT_READY tab-open=$TAB_OPEN undo=$UNDO goto-open=$GOTO_OPEN"
+    echo "$tag rc=$RC serial-bytes=$SERIAL_BYTES banner=$BANNER edit-ready=$EDIT_READY undo=$UNDO lines=$TOGGLE_LINES find=$FIND_OPEN repl=$REPLACE_OPEN del=$DELETE_LINE tab=$TAB_OPEN goto=$GOTO_OPEN"
     [ "$RC" = 0 ] && [ "$BANNER" = 1 ] && [ "$EDIT_READY" = 1 ] && \
-    [ "$TAB_OPEN" = 1 ] && [ "$UNDO" = 1 ] && [ "$GOTO_OPEN" = 1 ]
+    [ "$UNDO" = 1 ] && [ "$TOGGLE_LINES" = 1 ] && [ "$FIND_OPEN" = 1 ] && \
+    [ "$REPLACE_OPEN" = 1 ] && [ "$DELETE_LINE" = 1 ] && [ "$TAB_OPEN" = 1 ] && [ "$GOTO_OPEN" = 1 ]
 }
 
 : > "$REPORT"
 {
-    echo "DIPSHITOS live-editor gate (M23 E2-E5) — undo, goto, tabs on VZ"
+    echo "DIPSHITOS live-editor gate (M23 E2-E11, E22) — undo, search, replace, autoindent, brackets, lines, delete-line, goto, tabs on VZ"
     echo "revision: $REVISION branch=$BRANCH boots=$BOOTS dirty-files=$DIRTY"
     echo "phase 1: exec EDIT.BIN from monitor"
-    echo "phase 2: Ctrl+T (new tab), Ctrl+Z (undo), Ctrl+G (goto) via input-chords"
-    echo "assertions: edit: ready, edit: tab-open, edit: undo, edit: goto-open"
+    echo "phase 2: input chords via custom-virtio input queue"
+    echo "assertions: edit: ready, undo, toggle-lines, find-open, replace-open, delete-line, tab-open, goto-open"
     echo "date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     echo
 } >> "$REPORT"
