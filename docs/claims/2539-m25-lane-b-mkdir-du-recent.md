@@ -17,11 +17,10 @@
   branch lands the reusable `fat.zig` recursive-size walker + the
   FILE.BIN breadcrumb total, and the shell command follows when the file
   frees.
-- **Heartbeat:** 2026-08-25
-- **Status:** 🔄 agent/ox-alpha/m25-filemanager-depth — F3 ✅ (mkdir gate
-  PASS headless; Ctrl+Shift+N chord walk deferred on the input.zig W3
-  collision, claim 8777), F5 ✅ (recent gate PASS), F4 🔶 (walker +
-  FILE.BIN breadcrumb live; shell `du` registry row pending monitor.zig).
+- **Heartbeat:** 2026-08-26
+- **Status:** ✅ agent/ox-alpha/m25-filemanager-depth — F3 ✅ (mkdir gate
+  PASS headless), F5 ✅ (recent gate PASS), F4 walker + breadcrumb
+  landed via PR #569; monitor command swept under claim 4379.
 
 ## Notes
 

@@ -283,7 +283,7 @@ pub const Command = struct {
 /// grows it 54 -> 55 (`sym`). Milestone twenty-two D5 (issue #328)
 /// grows it 55 -> 56 (`strace`). Milestone twenty-two D6 (issue #329)
 /// grows it 56 -> 57 (`ps`).
-pub const registry_count: usize = 65; // 51 + sh/calc + `font` (M20 U1) + sym/strace/ps (M22 D3/D5/D6) + `type` (M19 P1) + `mktemp` (M19 P16) + stat/find/dmesg/time/which/inventory (M22 D8/D12/D13/D16)
+pub const registry_count: usize = 66; // 51 + sh/calc + `font` (M20 U1) + sym/strace/ps (M22 D3/D5/D6) + `type` (M19 P1) + `mktemp` (M19 P16) + stat/find/dmesg/time/which/inventory (M22 D8/D12/D13/D16) + du (M25 F4)
 
 /// `sym <file>` reads at most this many bytes for on-disk symtab inspection
 /// (M22 D3). ELF symbol tables live near the file tail; 64 KiB covers every
@@ -364,6 +364,7 @@ fn ensure_registry() []const Command {
             .{ .name = "write", .help = "write text to a file on the ESP", .usage = "write <file> <text...>", .category = .storage, .min_args = 1, .handler = cmd_write },
             .{ .name = "mktemp", .help = "create a temporary file (empty, unique name)", .usage = "mktemp [prefix]", .category = .storage, .max_args = 1, .handler = cmd_mktemp },
             .{ .name = "stat", .help = "file metadata: size, type, cluster, path (D8)", .usage = "stat <file|path>", .category = .storage, .min_args = 1, .max_args = 1, .handler = cmd_stat },
+            .{ .name = "du", .help = "recursive directory disk usage (M25 F4)", .usage = "du [<path>]", .category = .storage, .max_args = 1, .handler = cmd_du },
             .{ .name = "find", .help = "recursive file search with glob patterns ('find / -name \"*.BIN\"' — bounded 3 levels, 256 results)", .usage = "find <dir> -name <pattern>", .category = .storage, .min_args = 3, .max_args = 3, .handler = cmd_find },
             .{ .name = "dmesg", .help = "system log viewer: last bytes of serial output (D12)", .usage = "dmesg", .category = .system, .handler = cmd_dmesg },
             .{ .name = "time", .help = "command timing: measure elapsed ticks and wall-clock time (D13)", .usage = "time <command> [args...]", .category = .system, .min_args = 1, .handler = cmd_time },
@@ -1513,6 +1514,24 @@ fn print_stat_entry(m: *Monitor, e: *const fat.DirEntry, path: []const u8) void 
     m.console.puts("  Cluster: ");
     m.console.print_hex(e.cluster);
     m.console.puts("\n");
+}
+
+/// M25 F4 (issue #384): `du [<path>]` — estimate file space usage recursively
+/// (bounded: 3 levels deep).
+fn cmd_du(m: *Monitor, args: []const []const u8) ExecError {
+    const path = if (args.len > 0) args[0] else "";
+    const res = fat.dir_size_recursive(path);
+    m.console.puts("du: ");
+    m.console.puts(if (path.len > 0) path else "/");
+    m.console.puts(" ");
+    m.console.print_u64(res.bytes);
+    m.console.puts(" bytes (dirs=");
+    m.console.print_u64(res.dirs_walked);
+    if (res.truncated) {
+        m.console.puts(", truncated");
+    }
+    m.console.print_line(")");
+    return .none;
 }
 
 /// M22 D8 (issue #331): `find <dir> -name <pattern>` — recursive file
@@ -8323,4 +8342,13 @@ test "monitor: which resolves builtin, monitor, app, and not-found names (D16)" 
     try std.testing.expect(std.mem.indexOf(u8, out, "stat: monitor command") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "NOTEPAD.BIN: ESP application") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "nope.bin: not found") != null);
+}
+
+test "monitor: du reports recursive directory size (M25 F4)" {
+    var env = TestEnv.init();
+    var mon = env.monitor();
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"du"}));
+    const out = env.mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "du: /") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "bytes (dirs=") != null);
 }
