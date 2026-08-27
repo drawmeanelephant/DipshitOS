@@ -701,6 +701,97 @@ fn user_leaf(original: u64, writable: bool, executable: bool) ?u64 {
     return entry;
 }
 
+/// Software-defined bit in Stage 1 leaf descriptor (bit 55) marking Copy-on-Write page.
+pub const sw_cow: u64 = @as(u64, 1) << 55;
+
+/// Invalidate TLB entry for a single virtual address across inner shareable domain.
+pub fn invalidate_tlb_va(va: u64) void {
+    if (builtin.is_test) return;
+    asm volatile ("tlbi vaae1is, %[v]\n" ++
+            "dsb ish\n" ++
+            "isb\n"
+        :
+        : [v] "r" (va >> 12),
+    );
+}
+
+/// Dynamically map a 4 KiB user page at `va` -> `pa` under the given user root.
+/// Intermediate level tables are allocated from table_storage as needed.
+pub fn map_user_page(root_phys: u64, va: u64, pa: u64, writable: bool, executable: bool) bool {
+    if (root_phys == 0) return false;
+    const root: *align(4096) [512]u64 = @ptrFromInt(root_phys);
+    const ix = indices(va);
+    const l1 = ensure_table(&root[ix.l0]) orelse return false;
+    clean_dcache_range(@intFromPtr(&root[ix.l0]), 8);
+    const l2 = ensure_table(&l1[ix.l1]) orelse return false;
+    clean_dcache_range(@intFromPtr(&l1[ix.l1]), 8);
+    if (l2[ix.l2] != 0 and (l2[ix.l2] & 3) == 1) {
+        if (!split_block(&l2[ix.l2])) return false;
+    }
+    const l3 = ensure_table(&l2[ix.l2]) orelse return false;
+    clean_dcache_range(@intFromPtr(&l2[ix.l2]), 8);
+    const normal = (pa & ~@as(u64, 0xfff)) | attr_bits(.normal, true);
+    const leaf = user_leaf(normal, writable, executable) orelse return false;
+    l3[ix.l3] = leaf;
+    clean_dcache_range(@intFromPtr(&l3[ix.l3]), 8);
+    invalidate_tlb_va(va);
+    return true;
+}
+
+/// Map a Copy-on-Write 4 KiB user page (EL0-RO + sw_cow bit) under user root.
+pub fn map_user_cow_page(root_phys: u64, va: u64, pa: u64) bool {
+    if (root_phys == 0) return false;
+    const root: *align(4096) [512]u64 = @ptrFromInt(root_phys);
+    const ix = indices(va);
+    const l1 = ensure_table(&root[ix.l0]) orelse return false;
+    clean_dcache_range(@intFromPtr(&root[ix.l0]), 8);
+    const l2 = ensure_table(&l1[ix.l1]) orelse return false;
+    clean_dcache_range(@intFromPtr(&l1[ix.l1]), 8);
+    if (l2[ix.l2] != 0 and (l2[ix.l2] & 3) == 1) {
+        if (!split_block(&l2[ix.l2])) return false;
+    }
+    const l3 = ensure_table(&l2[ix.l2]) orelse return false;
+    clean_dcache_range(@intFromPtr(&l2[ix.l2]), 8);
+    const normal = (pa & ~@as(u64, 0xfff)) | attr_bits(.normal, true);
+    const leaf = user_leaf(normal, false, false) orelse return false;
+    l3[ix.l3] = leaf | sw_cow;
+    clean_dcache_range(@intFromPtr(&l3[ix.l3]), 8);
+    invalidate_tlb_va(va);
+    return true;
+}
+
+/// Lookup the L3 descriptor pointer for `va` in the user root (or null if not mapped).
+pub fn get_user_leaf(root_phys: u64, va: u64) ?*u64 {
+    if (root_phys == 0) return null;
+    const root: *align(4096) [512]u64 = @ptrFromInt(root_phys);
+    const ix = indices(va);
+    const l1 = table_entry(&root[ix.l0]) orelse return null;
+    const l2 = table_entry(&l1[ix.l1]) orelse return null;
+    if ((l2[ix.l2] & 3) == 1) return null; // block leaf, not page table
+    const l3 = table_entry(&l2[ix.l2]) orelse return null;
+    return &l3[ix.l3];
+}
+
+/// Unmap a 4 KiB user page at `va`, returning the physical address previously mapped.
+pub fn unmap_user_page(root_phys: u64, va: u64) ?u64 {
+    const leaf = get_user_leaf(root_phys, va) orelse return null;
+    if ((leaf.* & 3) != 3) return null;
+    const pa = leaf.* & 0x0000_ffff_ffff_f000;
+    leaf.* = 0;
+    clean_dcache_range(@intFromPtr(leaf), 8);
+    invalidate_tlb_va(va);
+    return pa;
+}
+
+/// Promote an existing EL0 leaf descriptor to writable and clear sw_cow.
+pub fn set_user_leaf_writable(leaf: *u64, writable: bool) void {
+    if ((leaf.* & 3) != 3) return;
+    const ap_mask: u64 = 3 << 6;
+    leaf.* &= ~(ap_mask | sw_cow);
+    leaf.* |= if (writable) @as(u64, 1 << 6) else @as(u64, 3 << 6);
+    clean_dcache_range(@intFromPtr(leaf), 8);
+}
+
 test "mmu: build_user_root returns a fresh root per call (per-process roots)" {
     reset();
     // Host roots clone the (empty) identity tree — the clone machinery
@@ -984,4 +1075,47 @@ fn walk_level(table_phys: u64, level: u8, stats: *LeafStats) void {
             }
         }
     }
+}
+
+test "mmu: map_user_page and unmap_user_page dynamic lifecycle" {
+    reset();
+    const root = build_user_root(userspace.text_va, 0x1000, 64, userspace.stack_va, 0x2000, 8192).?;
+    const test_va: u64 = 0x0000_0000_1000_0000;
+    const test_pa: u64 = 0x0000_0000_0500_0000;
+
+    // Initially unmapped
+    try std.testing.expect(get_user_leaf(root, test_va) == null);
+
+    // Map RW page
+    const ok = map_user_page(root, test_va, test_pa, true, false);
+    try std.testing.expect(ok);
+
+    const leaf_ptr = get_user_leaf(root, test_va).?;
+    const leaf = leaf_ptr.*;
+    try std.testing.expectEqual(test_pa, leaf & 0x0000_ffff_ffff_f000);
+    try std.testing.expectEqual(@as(u64, 1), (leaf >> 6) & 3); // EL0 RW
+
+    // Unmap page
+    const unmapped_pa = unmap_user_page(root, test_va).?;
+    try std.testing.expectEqual(test_pa, unmapped_pa);
+    try std.testing.expect(leaf_ptr.* == 0);
+}
+
+test "mmu: map_user_cow_page and set_user_leaf_writable" {
+    reset();
+    const root = build_user_root(userspace.text_va, 0x1000, 64, userspace.stack_va, 0x2000, 8192).?;
+    const test_va: u64 = 0x0000_0000_1000_4000;
+    const test_pa: u64 = 0x0000_0000_0500_4000;
+
+    const ok = map_user_cow_page(root, test_va, test_pa);
+    try std.testing.expect(ok);
+
+    const leaf_ptr = get_user_leaf(root, test_va).?;
+    try std.testing.expectEqual(@as(u64, 3), (leaf_ptr.* >> 6) & 3); // EL0 RO
+    try std.testing.expect((leaf_ptr.* & sw_cow) != 0); // sw_cow set
+
+    // Promote to writable
+    set_user_leaf_writable(leaf_ptr, true);
+    try std.testing.expectEqual(@as(u64, 1), (leaf_ptr.* >> 6) & 3); // EL0 RW
+    try std.testing.expect((leaf_ptr.* & sw_cow) == 0); // sw_cow cleared
 }

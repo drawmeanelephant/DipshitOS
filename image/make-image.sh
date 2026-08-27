@@ -444,6 +444,15 @@ if [ -f "$HTTPD_BIN" ]; then
     fi
     HTTPD_ARGS+=("$HTTPD_BIN")
 fi
+# Milestone 29 (Issue #598): VMTEST.BIN is a flat DSK1 program (VM depth test).
+VMTEST_BIN="${50:-$ROOT_DIR/zig-out/bin/VMTEST.BIN}"
+VMTEST_ARGS=()
+if [ -f "$VMTEST_BIN" ]; then
+    if [ "$(head -c 4 "$VMTEST_BIN")" != "DSK1" ]; then
+        fail "'$VMTEST_BIN' does not start with the 'DSK1' image magic -- run 'zig build' first."
+    fi
+    VMTEST_ARGS+=("$VMTEST_BIN")
+fi
 PS_ARGS=()
 if [ -f "$PS_BIN" ]; then
     if [ "$(head -c 4 "$PS_BIN")" != "DSK1" ]; then
@@ -480,17 +489,27 @@ if [ "$(head -c 4 "$HELLO_ELF")" != "$(printf '\x7fELF')" ]; then
     fail "'$HELLO_ELF' does not start with the ELF magic."
 fi
 
-# M30 (claim 7921): Freestanding Dynamic Linker & Shared Libraries (LD.SO, LIBUI.SO, LIBFONT.SO, DYNAPP.ELF)
+# M30/M31 (claims 7921, 4001): Freestanding Dynamic Linker, Shared Libraries & Dynamic Apps
 python3 "$ROOT_DIR/tools/mkdyn-elf.py" "$ROOT_DIR/zig-out/bin" || fail "mkdyn-elf.py generation failed."
 LD_SO="$ROOT_DIR/zig-out/bin/LD.SO"
 LIBUI_SO="$ROOT_DIR/zig-out/bin/LIBUI.SO"
 LIBFONT_SO="$ROOT_DIR/zig-out/bin/LIBFONT.SO"
+PLUGIN_SO="$ROOT_DIR/zig-out/bin/PLUGIN.SO"
 DYNAPP_ELF="$ROOT_DIR/zig-out/bin/DYNAPP.ELF"
+CALC_ELF="$ROOT_DIR/zig-out/bin/CALC.ELF"
+NOTEPAD_ELF="$ROOT_DIR/zig-out/bin/NOTEPAD.ELF"
+FILE_ELF="$ROOT_DIR/zig-out/bin/FILE.ELF"
+DESKTOP_ELF="$ROOT_DIR/zig-out/bin/DESKTOP.ELF"
 DYN_ARGS=()
 if [ -f "$LD_SO" ]; then DYN_ARGS+=("$LD_SO"); fi
 if [ -f "$LIBUI_SO" ]; then DYN_ARGS+=("$LIBUI_SO"); fi
 if [ -f "$LIBFONT_SO" ]; then DYN_ARGS+=("$LIBFONT_SO"); fi
+if [ -f "$PLUGIN_SO" ]; then DYN_ARGS+=("$PLUGIN_SO"); fi
 if [ -f "$DYNAPP_ELF" ]; then DYN_ARGS+=("$DYNAPP_ELF"); fi
+if [ -f "$CALC_ELF" ]; then DYN_ARGS+=("$CALC_ELF"); fi
+if [ -f "$NOTEPAD_ELF" ]; then DYN_ARGS+=("$NOTEPAD_ELF"); fi
+if [ -f "$FILE_ELF" ]; then DYN_ARGS+=("$FILE_ELF"); fi
+if [ -f "$DESKTOP_ELF" ]; then DYN_ARGS+=("$DESKTOP_ELF"); fi
 
 # 3. Builder script.
 [ -f "$SCRIPT_DIR/mkfat32.py" ] || fail "missing $SCRIPT_DIR/mkfat32.py."
@@ -505,7 +524,7 @@ if [ -f "$APPS_TXT" ]; then
     APPS_TXT_ARGS+=(--apps-txt "$APPS_TXT")
 fi
 
-python3 "$SCRIPT_DIR/mkfat32.py" --size-mb "$SIZE_MB" "$IMAGE" "$EFI_BIN" "$KERNEL_BIN" "${USER_ARGS[@]}" "${COUNTER_ARGS[@]}" "${PEER_ARGS[@]}" "${STATUS43_ARGS[@]}" "${UDP_ARGS[@]}" "${WIN_ARGS[@]}" "${WINCLOSE_ARGS[@]}" "${WINLOOP_ARGS[@]}" "${WINMOVE_ARGS[@]}" "${KEYTEST_ARGS[@]}" "${SAVETEXT_ARGS[@]}" "${TYPE_ARGS[@]}" "${DIR_ARGS[@]}" "${CALC_ARGS[@]}" "${NOTEPAD_ARGS[@]}" "${TOP_ARGS[@]}" "${DESKTOP_ARGS[@]}" "${TCP_ARGS[@]+"${TCP_ARGS[@]}"}" "${FETCH_ARGS[@]+"${FETCH_ARGS[@]}"}" "${CHAT_ARGS[@]+"${CHAT_ARGS[@]}"}" "${FILE_ARGS[@]+"${FILE_ARGS[@]}"}" "${FSTEST_ARGS[@]+"${FSTEST_ARGS[@]}"}" "${TIMERTEST_ARGS[@]+"${TIMERTEST_ARGS[@]}"}" "${VICTIM_ARGS[@]+"${VICTIM_ARGS[@]}"}" "${HARDEN_ARGS[@]+"${HARDEN_ARGS[@]}"}" "${JINGLE_ARGS[@]+"${JINGLE_ARGS[@]}"}" "${CHIME_ARGS[@]+"${CHIME_ARGS[@]}"}" "${GLOBALS_ARGS[@]+"${GLOBALS_ARGS[@]}"}" "${GUARD_ARGS[@]+"${GUARD_ARGS[@]}"}" "${SPIN_ARGS[@]+"${SPIN_ARGS[@]}"}" "${SETTINGS_ARGS[@]+"${SETTINGS_ARGS[@]}"}" "${ASM_ARGS[@]+"${ASM_ARGS[@]}"}" "${PS_ARGS[@]+"${PS_ARGS[@]}"}" "${DISAS_ARGS[@]+"${DISAS_ARGS[@]}"}" "${EDIT_ARGS[@]+"${EDIT_ARGS[@]}"}" "${RESMON_ARGS[@]+"${RESMON_ARGS[@]}"}" "${DEVCONS_ARGS[@]+"${DEVCONS_ARGS[@]}"}" "${NETSTAT_ARGS[@]+"${NETSTAT_ARGS[@]}"}" "${M21DEMO_ARGS[@]+"${M21DEMO_ARGS[@]}"}" "${PING_ARGS[@]+"${PING_ARGS[@]}"}" "${DNS_ARGS[@]+"${DNS_ARGS[@]}"}" "${DOWNLOAD_ARGS[@]+"${DOWNLOAD_ARGS[@]}"}" "${TRACEROUTE_ARGS[@]+"${TRACEROUTE_ARGS[@]}"}" "${NETPROF_ARGS[@]+"${NETPROF_ARGS[@]}"}" "${SYSMON_ARGS[@]+"${SYSMON_ARGS[@]}"}" "${HTTPD_ARGS[@]+"${HTTPD_ARGS[@]}"}" "${CRASH_ARGS[@]+"${CRASH_ARGS[@]}"}" "$HELLO_ELF" "${DYN_ARGS[@]+"${DYN_ARGS[@]}"}" "${APPS_TXT_ARGS[@]}" \
+python3 "$SCRIPT_DIR/mkfat32.py" --size-mb "$SIZE_MB" "$IMAGE" "$EFI_BIN" "$KERNEL_BIN" "${USER_ARGS[@]}" "${COUNTER_ARGS[@]}" "${PEER_ARGS[@]}" "${STATUS43_ARGS[@]}" "${UDP_ARGS[@]}" "${WIN_ARGS[@]}" "${WINCLOSE_ARGS[@]}" "${WINLOOP_ARGS[@]}" "${WINMOVE_ARGS[@]}" "${KEYTEST_ARGS[@]}" "${SAVETEXT_ARGS[@]}" "${TYPE_ARGS[@]}" "${DIR_ARGS[@]}" "${CALC_ARGS[@]}" "${NOTEPAD_ARGS[@]}" "${TOP_ARGS[@]}" "${DESKTOP_ARGS[@]}" "${TCP_ARGS[@]+"${TCP_ARGS[@]}"}" "${FETCH_ARGS[@]+"${FETCH_ARGS[@]}"}" "${CHAT_ARGS[@]+"${CHAT_ARGS[@]}"}" "${FILE_ARGS[@]+"${FILE_ARGS[@]}"}" "${FSTEST_ARGS[@]+"${FSTEST_ARGS[@]}"}" "${TIMERTEST_ARGS[@]+"${TIMERTEST_ARGS[@]}"}" "${VICTIM_ARGS[@]+"${VICTIM_ARGS[@]}"}" "${HARDEN_ARGS[@]+"${HARDEN_ARGS[@]}"}" "${JINGLE_ARGS[@]+"${JINGLE_ARGS[@]}"}" "${CHIME_ARGS[@]+"${CHIME_ARGS[@]}"}" "${GLOBALS_ARGS[@]+"${GLOBALS_ARGS[@]}"}" "${GUARD_ARGS[@]+"${GUARD_ARGS[@]}"}" "${SPIN_ARGS[@]+"${SPIN_ARGS[@]}"}" "${SETTINGS_ARGS[@]+"${SETTINGS_ARGS[@]}"}" "${ASM_ARGS[@]+"${ASM_ARGS[@]}"}" "${PS_ARGS[@]+"${PS_ARGS[@]}"}" "${DISAS_ARGS[@]+"${DISAS_ARGS[@]}"}" "${EDIT_ARGS[@]+"${EDIT_ARGS[@]}"}" "${RESMON_ARGS[@]+"${RESMON_ARGS[@]}"}" "${DEVCONS_ARGS[@]+"${DEVCONS_ARGS[@]}"}" "${NETSTAT_ARGS[@]+"${NETSTAT_ARGS[@]}"}" "${M21DEMO_ARGS[@]+"${M21DEMO_ARGS[@]}"}" "${PING_ARGS[@]+"${PING_ARGS[@]}"}" "${DNS_ARGS[@]+"${DNS_ARGS[@]}"}" "${DOWNLOAD_ARGS[@]+"${DOWNLOAD_ARGS[@]}"}" "${TRACEROUTE_ARGS[@]+"${TRACEROUTE_ARGS[@]}"}" "${NETPROF_ARGS[@]+"${NETPROF_ARGS[@]}"}" "${SYSMON_ARGS[@]+"${SYSMON_ARGS[@]}"}" "${HTTPD_ARGS[@]+"${HTTPD_ARGS[@]}"}" "${VMTEST_ARGS[@]+"${VMTEST_ARGS[@]}"}" "${CRASH_ARGS[@]+"${CRASH_ARGS[@]}"}" "$HELLO_ELF" "${DYN_ARGS[@]+"${DYN_ARGS[@]}"}" "${APPS_TXT_ARGS[@]}" \
     || fail "image creation failed (see output above)."
 
 # 5. Self-verify by listing the image we just wrote.
@@ -614,6 +633,9 @@ if [ -f "$SYSMON_BIN" ]; then
 fi
 if [ -f "$HTTPD_BIN" ]; then
     printf '%s\n' "$LISTING" | grep -q 'HTTPD.BIN' || fail "HTTPD.BIN missing from the image listing"
+fi
+if [ -f "$VMTEST_BIN" ]; then
+    printf '%s\n' "$LISTING" | grep -q 'VMTEST.BIN' || fail "VMTEST.BIN missing from the image listing"
 fi
 if [ -f "$LD_SO" ]; then
     printf '%s\n' "$LISTING" | grep -q 'LD.SO' || fail "LD.SO missing from the image listing"

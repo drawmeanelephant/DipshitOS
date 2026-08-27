@@ -371,6 +371,73 @@ pub fn largest_free_run() u64 {
 }
 
 // ---------------------------------------------------------------------------
+// M29: Physical page reference counting for Copy-on-Write (COW) page sharing
+// ---------------------------------------------------------------------------
+
+pub const PageRef = struct {
+    pa: u64 = 0,
+    count: u16 = 0,
+};
+
+pub const max_shared_pages: usize = 256;
+var shared_pages: [max_shared_pages]PageRef = [_]PageRef{.{}} ** max_shared_pages;
+
+pub fn reset_refcounts() void {
+    @memset(&shared_pages, PageRef{});
+}
+
+/// Increment reference count for a physical page.
+pub fn ref_page(pa: u64) void {
+    const page_pa = pa & ~@as(u64, 0xfff);
+    if (page_pa == 0) return;
+    for (&shared_pages) |*entry| {
+        if (entry.pa == page_pa and entry.count > 0) {
+            entry.count += 1;
+            return;
+        }
+    }
+    // New entry in shared table: was 1 owner, now 2
+    for (&shared_pages) |*entry| {
+        if (entry.count == 0) {
+            entry.pa = page_pa;
+            entry.count = 2;
+            return;
+        }
+    }
+}
+
+/// Decrement reference count for a physical page. Returns true if the page
+/// reached 0 references and was freed back to the physical allocator.
+pub fn unref_page(pa: u64) bool {
+    const page_pa = pa & ~@as(u64, 0xfff);
+    if (page_pa == 0) return false;
+    for (&shared_pages) |*entry| {
+        if (entry.pa == page_pa and entry.count > 0) {
+            entry.count -= 1;
+            if (entry.count == 0) {
+                entry.* = .{};
+                return free_pages(page_pa, 1);
+            }
+            return false;
+        }
+    }
+    // Unshared page (count was 1): free directly
+    return free_pages(page_pa, 1);
+}
+
+/// Query current reference count of a physical page.
+pub fn page_refcount(pa: u64) u16 {
+    const page_pa = pa & ~@as(u64, 0xfff);
+    if (page_pa == 0) return 0;
+    for (&shared_pages) |*entry| {
+        if (entry.pa == page_pa and entry.count > 0) {
+            return entry.count;
+        }
+    }
+    return 1;
+}
+
+// ---------------------------------------------------------------------------
 // Tests (host-side; fixture maps, no hardware)
 // ---------------------------------------------------------------------------
 
@@ -915,4 +982,36 @@ test "alloc: reset isolation and uninited state contract" {
 
     // Old address from map1 is rejected by free.
     try std.testing.expect(!st.free_pages(0x104000, 5));
+}
+
+test "alloc: ref_page and unref_page lifecycle" {
+    reset_refcounts();
+    const map_desc = [_]memmap.MemoryDescriptor{
+        .{ .type = .conventional_memory, .physical_start = 0x100000, .virtual_start = 0, .number_of_pages = 10, .attribute = 0 },
+    };
+    const view = memmap.MapView.init(std.mem.asBytes(&map_desc), @sizeOf(memmap.MemoryDescriptor), map_desc.len);
+    try std.testing.expect(init(view, &.{}));
+
+    const pa = alloc_pages(1).?;
+    try std.testing.expectEqual(@as(u16, 1), page_refcount(pa));
+
+    // Share page (2 owners)
+    ref_page(pa);
+    try std.testing.expectEqual(@as(u16, 2), page_refcount(pa));
+
+    // Share again (3 owners)
+    ref_page(pa);
+    try std.testing.expectEqual(@as(u16, 3), page_refcount(pa));
+
+    // First unref (down to 2, not freed)
+    try std.testing.expect(!unref_page(pa));
+    try std.testing.expectEqual(@as(u16, 2), page_refcount(pa));
+
+    // Second unref (down to 1, not freed)
+    try std.testing.expect(!unref_page(pa));
+    try std.testing.expectEqual(@as(u16, 1), page_refcount(pa));
+
+    // Final unref (down to 0, freed)
+    try std.testing.expect(unref_page(pa));
+    try std.testing.expectEqual(@as(u64, 10), stats().free_pages);
 }

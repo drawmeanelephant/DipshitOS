@@ -469,6 +469,45 @@ export fn ld_main(auxv_ptr: [*]const u64) u64 {
 }
 
 // ---------------------------------------------------------------------------
+// Runtime Dynamic Plugin API (dlopen / dlsym / dlclose)
+// ---------------------------------------------------------------------------
+
+pub export fn dlopen(filename: [*:0]const u8, flags: i32) ?*anyopaque {
+    _ = flags;
+    const name = std.mem.sliceTo(filename, 0);
+    const lib = load_shared_library(name) orelse return null;
+    return @ptrCast(lib);
+}
+
+pub export fn dlsym(handle: ?*anyopaque, symbol: [*:0]const u8) ?*anyopaque {
+    const sym_name = std.mem.sliceTo(symbol, 0);
+    if (handle) |h| {
+        const lib: *LoadedLib = @ptrCast(@alignCast(h));
+        if (lib.strtab == null or lib.symtab == null) return null;
+        var i: usize = 0;
+        while (i < lib.sym_count) : (i += 1) {
+            const sym = lib.symtab.?[i];
+            const name_ptr = lib.strtab.? + sym.st_name;
+            const name_slice = std.mem.sliceTo(name_ptr, 0);
+            if (std.mem.eql(u8, name_slice, sym_name)) {
+                return @ptrFromInt(lib.base_va + sym.st_value);
+            }
+        }
+        return null;
+    } else {
+        if (lookup_symbol_in_libs(sym_name)) |addr| {
+            return @ptrFromInt(addr);
+        }
+        return null;
+    }
+}
+
+pub export fn dlclose(handle: ?*anyopaque) i32 {
+    _ = handle;
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
 // Host Unit Tests
 // ---------------------------------------------------------------------------
 
@@ -516,4 +555,14 @@ test "ld: symbol lookup across loaded libraries" {
     try testing.expectEqual(@as(?u64, 0x0100_0100), lookup_symbol_in_libs("ui_win_open"));
     try testing.expectEqual(@as(?u64, 0x0100_0200), lookup_symbol_in_libs("ui_win_fill"));
     try testing.expectEqual(@as(?u64, null), lookup_symbol_in_libs("nonexistent"));
+
+    const sym_ptr = dlsym(@ptrCast(lib), "ui_win_open");
+    try testing.expect(sym_ptr != null);
+    try testing.expectEqual(@as(usize, 0x0100_0100), @intFromPtr(sym_ptr.?));
+
+    const sym_global = dlsym(null, "ui_win_fill");
+    try testing.expect(sym_global != null);
+    try testing.expectEqual(@as(usize, 0x0100_0200), @intFromPtr(sym_global.?));
+
+    try testing.expect(dlsym(null, "missing") == null);
 }

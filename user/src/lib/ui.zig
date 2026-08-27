@@ -62,6 +62,14 @@ pub const sys_timer_cancel_num: u64 = 41;
 pub const sys_udp_listen_num: u64 = 9;
 pub const sys_udp_send_num: u64 = 10;
 pub const sys_udp_recv_num: u64 = 11;
+pub const sys_mmap_num: u64 = 63;
+pub const sys_munmap_num: u64 = 64;
+pub const PROT_READ: u64 = 1;
+pub const PROT_WRITE: u64 = 2;
+pub const PROT_EXEC: u64 = 4;
+pub const MAP_PRIVATE: u64 = 0x02;
+pub const MAP_ANONYMOUS: u64 = 0x20;
+pub const MAP_POPULATE: u64 = 0x8000;
 pub const datagram_max: usize = 72;
 pub const payload_max: usize = 64;
 
@@ -658,6 +666,16 @@ pub fn tcp_recv(buf: []u8) i64 {
 
 pub fn tcp_close() i64 {
     return syscall0(sys_tcp_close_num);
+}
+
+/// M29 (issue #598): sys_mmap wrapper — allocate anonymous user memory.
+pub fn mmap(addr: u64, len: u64, prot: u64, flags: u64) i64 {
+    return syscall4(sys_mmap_num, addr, len, prot, flags);
+}
+
+/// M29 (issue #598): sys_munmap wrapper — free anonymous user memory.
+pub fn munmap(addr: u64, len: u64) i64 {
+    return syscall2(sys_munmap_num, addr, len);
 }
 
 pub const sys_ping_send_num: u64 = 59;

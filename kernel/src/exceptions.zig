@@ -38,6 +38,12 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const uaccess = @import("uaccess.zig"); // claim 6120: fault-safe copy-in/copy-out window
+const mmu = @import("mmu.zig");
+const alloc = @import("alloc.zig");
+const process = @import("process.zig");
+const scheduler = @import("scheduler.zig");
+const memmap = @import("memmap.zig");
+const userspace = @import("userspace.zig");
 
 // ---------------------------------------------------------------------------
 // Exception kinds (the x5 value each stub passes; also the vector offset's
@@ -462,6 +468,104 @@ fn source_sp_el0(frame: *const VectorFrame, spsr: u64) u64 {
     return read_sp_el0();
 }
 
+fn zero_phys_page(pa: u64) void {
+    if (builtin.is_test) return;
+    const pa_ptr: [*]u8 = @ptrFromInt(pa);
+    @memset(pa_ptr[0..4096], 0);
+}
+
+fn copy_phys_page(dst_pa: u64, src_pa: u64) void {
+    if (builtin.is_test) return;
+    const dst_ptr: [*]u8 = @ptrFromInt(dst_pa);
+    const src_ptr: [*]const u8 = @ptrFromInt(src_pa);
+    @memcpy(dst_ptr[0..4096], src_ptr[0..4096]);
+}
+
+pub var demand_fault_count: u64 = 0;
+pub var cow_fault_count: u64 = 0;
+
+/// M29 VM Depth: Attempt to resolve a synchronous page fault from EL0.
+/// Handles zero-fill demand faults (translation faults DFSC=0x4..0x7) and
+/// Copy-on-Write (permission faults DFSC=0xc..0xf on write).
+pub fn try_handle_page_fault(esr: u64, far: u64) bool {
+    const ec = (esr >> 26) & 0x3f;
+    // Only handle EL0 Data Aborts (0x24)
+    if (ec != 0x24) return false;
+
+    const pid = if (process.find_by_task(scheduler.current_id())) |p|
+        p
+    else if (process.current()) |p|
+        p
+    else
+        return false;
+    const pinfo = process.info(pid) orelse return false;
+    const root = pinfo.root_phys;
+    if (root == 0) return false;
+
+    const dfsc = esr & 0x3f;
+    const is_write = ((esr >> 6) & 1) != 0;
+
+    // Case 1: Permission fault (0xc..0xf) on write -> Copy-on-Write (COW)
+    if (is_write and (dfsc >= 0xc and dfsc <= 0xf)) {
+        if (mmu.get_user_leaf(root, far)) |leaf_ptr| {
+            if ((leaf_ptr.* & mmu.sw_cow) != 0) {
+                const old_pa = leaf_ptr.* & 0x0000_ffff_ffff_f000;
+                if (alloc.page_refcount(old_pa) <= 1) {
+                    mmu.set_user_leaf_writable(leaf_ptr, true);
+                    mmu.invalidate_tlb_va(far);
+                    cow_fault_count += 1;
+                    return true;
+                } else {
+                    const new_pa = alloc.alloc_pages(1) orelse return false;
+                    copy_phys_page(new_pa, old_pa);
+                    const page_va = far & ~@as(u64, 0xfff);
+                    if (!mmu.map_user_page(root, page_va, new_pa, true, false)) {
+                        _ = alloc.free_pages(new_pa, 1);
+                        return false;
+                    }
+                    _ = alloc.unref_page(old_pa);
+                    _ = process.record_dynamic_page(pid, new_pa);
+                    cow_fault_count += 1;
+                    return true;
+                }
+            }
+        }
+    }
+
+    // Case 2: Zero-fill demand paging (translation fault 0x4..0x7 OR permission fault 0xc..0xf on unmapped address)
+    // Check anonymous mmap regions
+    if (process.find_mmap_region(pid, far)) |mreg| {
+        const writable = (mreg.prot & 2) != 0;
+        const executable = (mreg.prot & 4) != 0;
+        const pa = alloc.alloc_pages(1) orelse return false;
+        zero_phys_page(pa);
+        const page_va = far & ~@as(u64, 0xfff);
+        if (!mmu.map_user_page(root, page_va, pa, writable, executable)) {
+            _ = alloc.free_pages(pa, 1);
+            return false;
+        }
+        _ = process.record_dynamic_page(pid, pa);
+        demand_fault_count += 1;
+        return true;
+    }
+
+    // Check stack expansion
+    if (pinfo.stack_len > 0 and far >= pinfo.stack_va and far < pinfo.stack_va + pinfo.stack_len) {
+        const pa = alloc.alloc_pages(1) orelse return false;
+        zero_phys_page(pa);
+        const page_va = far & ~@as(u64, 0xfff);
+        if (!mmu.map_user_page(root, page_va, pa, true, false)) {
+            _ = alloc.free_pages(pa, 1);
+            return false;
+        }
+        _ = process.record_dynamic_page(pid, pa);
+        demand_fault_count += 1;
+        return true;
+    }
+
+    return false;
+}
+
 export fn exc_dispatch(
     frame: *VectorFrame,
     esr: u64,
@@ -509,13 +613,14 @@ export fn exc_dispatch(
         return .{ .frame = @intFromPtr(frame), .sp_el0 = resume_sp_el0 };
     }
     // Milestone sixteen C2 (claim 8403): a synchronous exception from EL0
-    // that is not an SVC and not a recoverable uaccess fault is a hostile
-    // program touching a guard page / unmapped memory / a non-executable
-    // region. The fault dispatcher reaps the faulting process and stages the
-    // next task through the same resume_frame seam the exit path uses — the
-    // shell survives and the machine never parks on a user fault. EL1h
-    // faults (kernel bugs) still fall through to the report/park path below.
+    // that is not an SVC and not a recoverable uaccess fault is checked for
+    // M29 VM Depth (demand paging zero-fill translation fault or COW permission
+    // fault). If handleable, the page is mapped/promoted and resumed transparently.
+    // If not, the fault dispatcher reaps the faulting process safely.
     if (kind == kind_sync and is_from_el0(spsr)) {
+        if (try_handle_page_fault(esr, far)) {
+            return .{ .frame = @intFromPtr(frame), .sp_el0 = resume_sp_el0 };
+        }
         if (fault_dispatcher) |d| {
             // M22 D3 (issue #326): ELR rides along — BRK faults carry a
             // meaningless FAR but their PC names the crashing function.
@@ -1198,4 +1303,63 @@ test "exceptions: report buffer is bounded (max-size fields never overflow)" {
     try std.testing.expect(report.len < buf.len);
     try std.testing.expect(std.mem.indexOf(u8, report, "ec=0x3f") != null);
     try std.testing.expect(std.mem.indexOf(u8, report, "count=18446744073709551615") != null);
+}
+
+test "exceptions: try_handle_page_fault demand zero-fill and COW splitting" {
+    mmu.reset();
+    alloc.reset_refcounts();
+    process.init();
+
+    const map_desc = [_]memmap.MemoryDescriptor{
+        .{ .type = .conventional_memory, .physical_start = 0x100000, .virtual_start = 0, .number_of_pages = 20, .attribute = 0 },
+    };
+    const view = memmap.MapView.init(std.mem.asBytes(&map_desc), @sizeOf(memmap.MemoryDescriptor), map_desc.len);
+    try std.testing.expect(alloc.init(view, &.{}));
+
+    const root = mmu.build_user_root(userspace.text_va, 0x1000, 64, userspace.stack_va, 0x2000, 8192).?;
+    const pid = process.create("TEST_VM", .{}, .{
+        .root_phys = root,
+        .text_va = userspace.text_va,
+        .text_len = 64,
+        .stack_va = userspace.stack_va,
+        .stack_len = 8192,
+    }, .{}).?;
+    _ = process.bind(pid, 2);
+
+    // Register an anonymous mmap region
+    const mmap_va: u64 = 0x0000_0000_1000_0000;
+    try std.testing.expect(process.add_mmap_region(pid, mmap_va, 8192, 3, 0x22)); // RW
+
+    // 1. Demand translation fault (EC=0x24 Data Abort from lower EL, DFSC=0x7 translation fault L3)
+    const esr_trans_fault: u64 = (0x24 << 26) | 0x7;
+    const handled_demand = try_handle_page_fault(esr_trans_fault, mmap_va + 64);
+    try std.testing.expect(handled_demand);
+    try std.testing.expectEqual(@as(u64, 1), demand_fault_count);
+
+    // Leaf is now present and RW
+    const leaf = mmu.get_user_leaf(root, mmap_va).?;
+    try std.testing.expect((leaf.* & 3) == 3);
+    try std.testing.expectEqual(@as(u64, 1), (leaf.* >> 6) & 3); // RW
+
+    // 2. COW page test: Map a shared COW page
+    const cow_va: u64 = 0x0000_0000_1000_4000;
+    const shared_pa = alloc.alloc_pages(1).?;
+    _ = mmu.map_user_cow_page(root, cow_va, shared_pa);
+    alloc.ref_page(shared_pa); // refcount = 2
+
+    // Permission fault on write (DFSC=0xf permission fault L3, WnR=1 (bit 6))
+    const esr_perm_write: u64 = (0x24 << 26) | (1 << 6) | 0xf;
+    const handled_cow = try_handle_page_fault(esr_perm_write, cow_va + 12);
+    try std.testing.expect(handled_cow);
+    try std.testing.expectEqual(@as(u64, 1), cow_fault_count);
+
+    // Old page refcount dropped to 1
+    try std.testing.expectEqual(@as(u16, 1), alloc.page_refcount(shared_pa));
+
+    // New leaf is present, RW, and not sw_cow
+    const new_leaf = mmu.get_user_leaf(root, cow_va).?;
+    try std.testing.expect((new_leaf.* & 3) == 3);
+    try std.testing.expectEqual(@as(u64, 1), (new_leaf.* >> 6) & 3); // RW
+    try std.testing.expect((new_leaf.* & mmu.sw_cow) == 0);
+    try std.testing.expect((new_leaf.* & 0x0000_ffff_ffff_f000) != shared_pa);
 }
