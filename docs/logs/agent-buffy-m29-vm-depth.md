@@ -1,4 +1,4 @@
-# agent-buffy-m29-vm-depth log
+# Log — `agent/buffy/m29-vm-depth`
 
 ## 2026-08-27 — Claim 8247: M29 VM Depth (Demand Paging, COW, Anonymous mmap)
 

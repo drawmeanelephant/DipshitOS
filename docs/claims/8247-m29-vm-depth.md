@@ -6,7 +6,7 @@
 - **Touches:** kernel/src/alloc.zig, kernel/src/exceptions.zig, kernel/src/mmu.zig, kernel/src/process.zig, kernel/src/syscall.zig, kernel/src/uaccess.zig, user/src/lib/ui.zig, user/src/vmtest.zig, build.zig, image/make-image.sh, image/mkfat32.py, tools/verify-live-vm-depth.sh, docs/march-m29.md, docs/status.md
 - **Depends on:** —
 - **Heartbeat:** 2026-08-27
-- **Status:** PASSED ✅
+- **Status:** ✅ done
 
 ## Notes
 

@@ -6,7 +6,7 @@
 - **Touches:** tools/mkdyn-elf.py, user/src/ld.zig, image/apps.txt, image/make-image.sh, image/mkfat32.py, tools/verify-live-dynamic-ecosystem.sh, docs/march-m31.md, docs/status.md
 - **Depends on:** 7921 (Milestone 30)
 - **Heartbeat:** 2026-08-27
-- **Status:** PASSED ✅
+- **Status:** ✅ done
 
 ## Notes
 

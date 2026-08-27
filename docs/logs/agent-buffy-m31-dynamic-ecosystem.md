@@ -1,4 +1,4 @@
-# agent-buffy-m31-dynamic-ecosystem log
+# Log — `agent/buffy/m31-dynamic-ecosystem`
 
 ## 2026-08-27 — Claim 4001: M31 Dynamic Linking Ecosystem & Userland Migration
 
