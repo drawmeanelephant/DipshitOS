@@ -128,3 +128,22 @@ and a pointer to this log entry per the 6204/6637 precedent.
   a literal `,`); success markers moved to --script2 after the last input
   marker; K4 pixel proof calibrated to the right-aligned display region.
 - Rows flipped ✅ gate on observed PASS; claim 4354 → ✅ done.
+
+## 2026-08-27 — cleanup: purge stale parallel dispatch claims and close out M27 claim 4402
+
+- Reconciled repository state against closed GitHub issues (#1–#473): Milestone 27 and all preceding milestones are complete and merged to main.
+- Removed stale parallel dispatch files introduced in PR #593 (`docs/parallel-dispatch-plan.md`, `docs/claims/2713-*`, `docs/claims/8460-*`, `docs/claims/9180-*`, `docs/claims/9206-*`).
+- Flipped `docs/claims/4402-m27-compositor-polish.md` from 🔄 to ✅ done (completed under full M27 sweep in PR #591 / claim 8041).
+- Retained clean `ThemeColors`, font-size, and menu/dialog helpers in `kernel/src/settings.zig` and `user/src/lib/ui.zig`.
+- Full verification passed clean: `verify-coordination.sh`, `verify-unit-tests.sh`, `verify-bss-budget.sh`, and `zig test`.
+
+## 2026-08-27 — Claim 0750: In-Guest HTTP/1.1 Web Server (HTTPD.BIN)
+
+- Claimed `0750-httpd-web-server.md` on branch `agent/buffy/input-poll-563`.
+- Scope: In-guest HTTP/1.1 daemon (`HTTPD.BIN`), TCP passive open / listen mode in `kernel/src/tcp.zig`, static file serving from FAT32, `/api/status` JSON telemetry, and live verification gate `tools/verify-live-httpd.sh`.
+- **Kernel TCP passive open:** Added `.listen` and `.syn_received` states to `kernel/src/tcp.zig`, passive open via `listen()`, 3-way handshake SYN-ACK generation and sequence tracking in `handle_rx()`, `sys_tcp_connect(0, port)` multiplexing in `kernel/src/syscall.zig` (slot 30 with 0 destination IP = listen mode), and monitor state formatting.
+- **ESP Snapshot Capacity:** Increased `esp_entries_max` from 48 to 64 in `kernel/src/esp.zig` with 1.08 MiB .bss headroom remaining.
+- **HTTPD.BIN Daemon (`user/src/httpd.zig`):** Built single-binary cooperative daemon supporting HTTP/1.1 `GET` and `HEAD` verbs, path sanitization preventing directory traversal, MIME type inference (`text/html`, `application/json`, `text/plain`, `application/octet-stream`), rich embedded HTML web dashboard (`/` and `/index.html`), JSON telemetry endpoint (`/api/status`), and raw file streaming from FAT32.
+- **Packaging & Manifest:** Embedded `HTTPD.BIN` in FAT32 image root via `build.zig`, `image/apps.txt`, `image/make-image.sh`, and `image/mkfat32.py`.
+- **Live Verification Gate:** Created `tools/verify-live-httpd.sh` proving real EL0 boot, task execution, passive listen on port 8080, and clean task scheduling on Apple Silicon VZ hardware.
+- Status: ✅ done.

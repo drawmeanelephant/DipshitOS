@@ -1274,6 +1274,29 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_sysmon.step);
 
     // ------------------------------------------------------------------
+    // Guest: forty-fifth ESP user program (Claim 0750) HTTPD.BIN.
+    // In-guest HTTP/1.1 web server and status dashboard daemon.
+    // ------------------------------------------------------------------
+    const httpd_prog = b.addExecutable(.{
+        .name = "user-httpd",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/httpd.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    httpd_prog.linker_script = b.path("user/linker.ld");
+    const httpd_step = b.step("httpd", "Build the forty-fifth ESP user program (zig-out/bin/HTTPD.BIN)");
+    const httpd_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    httpd_elf2bin.addFileArg(httpd_prog.getEmittedBin());
+    const httpd_bin = httpd_elf2bin.addOutputFileArg("HTTPD.BIN");
+    httpd_elf2bin.has_side_effects = true;
+    httpd_elf2bin.stdio = .inherit;
+    httpd_step.dependOn(&httpd_elf2bin.step);
+    const install_httpd = b.addInstallFileWithDir(httpd_bin, .bin, "HTTPD.BIN");
+    b.getInstallStep().dependOn(&install_httpd.step);
+
+    // ------------------------------------------------------------------
     // Top-level steps. System-command steps are marked as having side
     // effects (and inherit stdio) so they always execute instead of being
     // skipped by the build cache. (No QEMU path: this project targets Apple
@@ -1329,6 +1352,7 @@ pub fn build(b: *std.Build) void {
     image.addFileArg(traceroute_bin); // ... [TRACEROUTE.BIN] (M26 N7, issue #434: forty-second user program, ICMP route traceroute)
     image.addFileArg(netprof_bin); // ... [NETPROF.BIN] (M26 N12, issue #439: forty-third user program, network profile manager)
     image.addFileArg(sysmon_bin); // ... [SYSMON.BIN] (M27 G6, issue #449: forty-fourth user program, system monitor dashboard)
+    image.addFileArg(httpd_bin); // ... [HTTPD.BIN] (Claim 0750: forty-fifth user program, HTTP web server)
     image.has_side_effects = true;
     image.stdio = .inherit;
     image_step.dependOn(&image.step);

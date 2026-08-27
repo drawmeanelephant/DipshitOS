@@ -142,6 +142,93 @@ pub fn get_focus_follows_mouse() bool {
     return std.mem.eql(u8, val, "on") or std.mem.eql(u8, val, "1") or std.mem.eql(u8, val, "true");
 }
 
+// ---------------------------------------------------------------------------
+// Theme & Font Settings API (M27 G20 #463, G21 #464)
+// ---------------------------------------------------------------------------
+
+pub const ThemeColors = struct {
+    bg: u32,
+    fg: u32,
+    accent: u32,
+    border: u32,
+    title_bg: u32,
+    title_fg: u32,
+    @"error": u32,
+    success: u32,
+};
+
+/// Retrieve active theme identifier: 0=dark, 1=light, 2=amber.
+pub fn get_theme_id() u8 {
+    const val = get("theme") orelse "dark";
+    if (std.mem.eql(u8, val, "light")) return 1;
+    if (std.mem.eql(u8, val, "amber")) return 2;
+    return 0; // dark / default
+}
+
+/// Set active theme by ID: 0=dark, 1=light, 2=amber.
+pub fn set_theme_id(id: u8) void {
+    const name: []const u8 = switch (id) {
+        1 => "light",
+        2 => "amber",
+        else => "dark",
+    };
+    _ = set("theme", name);
+}
+
+/// Get the active theme color palette for UI rendering.
+pub fn get_theme_colors() ThemeColors {
+    return switch (get_theme_id()) {
+        1 => .{ // Light
+            .bg = 0xf1f5f9,
+            .fg = 0x0f172a,
+            .accent = 0x2563eb,
+            .border = 0xcbd5e1,
+            .title_bg = 0xe2e8f0,
+            .title_fg = 0x0f172a,
+            .@"error" = 0xdc2626,
+            .success = 0x16a34a,
+        },
+        2 => .{ // Amber
+            .bg = 0x1a1000,
+            .fg = 0xffcc00,
+            .accent = 0xff8800,
+            .border = 0x5a4000,
+            .title_bg = 0x3a2800,
+            .title_fg = 0xffcc00,
+            .@"error" = 0xff4444,
+            .success = 0x88cc00,
+        },
+        else => .{ // Dark (0)
+            .bg = 0x182026,
+            .fg = 0xffffff,
+            .accent = 0x3b82f6,
+            .border = 0x334155,
+            .title_bg = 0x222d35,
+            .title_fg = 0xffffff,
+            .@"error" = 0xef4444,
+            .success = 0x22c55e,
+        },
+    };
+}
+
+/// Retrieve terminal font size identifier: 0=8x8 (small), 1=16x16 (medium), 2=24x24 (large).
+pub fn get_font_size() u8 {
+    const val = get("font_size") orelse return 0;
+    if (std.mem.eql(u8, val, "1") or std.mem.eql(u8, val, "medium") or std.mem.eql(u8, val, "16x16")) return 1;
+    if (std.mem.eql(u8, val, "2") or std.mem.eql(u8, val, "large") or std.mem.eql(u8, val, "24x24")) return 2;
+    return 0; // 0 = 8x8 / small
+}
+
+/// Set terminal font size by identifier: 0=8x8, 1=16x16, 2=24x24.
+pub fn set_font_size(size: u8) void {
+    const val: []const u8 = switch (size) {
+        1 => "medium",
+        2 => "large",
+        else => "small",
+    };
+    _ = set("font_size", val);
+}
+
 fn set_internal(key: []const u8, val: []const u8) SetResult {
     if (key.len == 0 or key.len > max_key_len) return .invalid_key;
     if (val.len > max_val_len) return .invalid_value;
@@ -197,11 +284,11 @@ fn apply_focus_follows_mouse(val: []const u8) void {
 
 /// Apply the font_size key to the framebuffer text layer.
 fn apply_font_size(val: []const u8) void {
-    const size: ?text.FontSize = if (std.mem.eql(u8, val, "small"))
+    const size: ?text.FontSize = if (std.mem.eql(u8, val, "small") or std.mem.eql(u8, val, "0") or std.mem.eql(u8, val, "8x8"))
         .small
-    else if (std.mem.eql(u8, val, "medium"))
+    else if (std.mem.eql(u8, val, "medium") or std.mem.eql(u8, val, "1") or std.mem.eql(u8, val, "16x16"))
         .medium
-    else if (std.mem.eql(u8, val, "large"))
+    else if (std.mem.eql(u8, val, "large") or std.mem.eql(u8, val, "2") or std.mem.eql(u8, val, "24x24"))
         .large
     else
         null;
@@ -443,4 +530,44 @@ test "settings: version header is present" {
 test "settings: current_version constant" {
     try std.testing.expect(current_version >= 1);
     try std.testing.expect(current_version <= 100);
+}
+
+test "settings: theme colors and IDs (M27 G20)" {
+    init();
+    try std.testing.expectEqual(@as(u8, 0), get_theme_id());
+    const dark_colors = get_theme_colors();
+    try std.testing.expectEqual(@as(u32, 0x182026), dark_colors.bg);
+    try std.testing.expectEqual(@as(u32, 0xef4444), dark_colors.@"error");
+
+    set_theme_id(1); // Light
+    try std.testing.expectEqual(@as(u8, 1), get_theme_id());
+    const light_colors = get_theme_colors();
+    try std.testing.expectEqual(@as(u32, 0xf1f5f9), light_colors.bg);
+    try std.testing.expectEqual(@as(u32, 0xdc2626), light_colors.@"error");
+
+    set_theme_id(2); // Amber
+    try std.testing.expectEqual(@as(u8, 2), get_theme_id());
+    const amber_colors = get_theme_colors();
+    try std.testing.expectEqual(@as(u32, 0x1a1000), amber_colors.bg);
+    try std.testing.expectEqual(@as(u32, 0xff4444), amber_colors.@"error");
+
+    set_theme_id(0); // Reset to dark
+    try std.testing.expectEqual(@as(u8, 0), get_theme_id());
+}
+
+test "settings: font size getters and setters (M27 G21)" {
+    init();
+    try std.testing.expectEqual(@as(u8, 0), get_font_size());
+
+    set_font_size(1);
+    try std.testing.expectEqual(@as(u8, 1), get_font_size());
+    try std.testing.expectEqualStrings("medium", get("font_size").?);
+
+    set_font_size(2);
+    try std.testing.expectEqual(@as(u8, 2), get_font_size());
+    try std.testing.expectEqualStrings("large", get("font_size").?);
+
+    set_font_size(0);
+    try std.testing.expectEqual(@as(u8, 0), get_font_size());
+    try std.testing.expectEqualStrings("small", get("font_size").?);
 }

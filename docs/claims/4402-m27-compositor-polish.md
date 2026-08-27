@@ -4,7 +4,8 @@
 - **Prompt / plan:** `docs/march-m27.md`, `docs/agent-concurrency-plan.md` (Lane E)
 - **Scope:** M27 G1-G7: boot splash, about dialog, window previews, sound design, sysmon, tooltips
 - **Depends on:** M21 done ✅ (W1-W16 landed)
-- **Status:** 🔄 agent/buffy/m21-compositor
+- **Heartbeat:** 2026-08-26
+- **Status:** ✅ done 2026-08-26 — completed and merged under full M27 sweep (claim 8041, PR #591)
 
 ## Notes
 

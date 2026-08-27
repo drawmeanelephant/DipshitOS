@@ -1746,13 +1746,29 @@ fn tcp_owned_by_caller() bool {
     return owner == current;
 }
 
-/// Slot 30: `sys_tcp_connect(ip, port)`: Connect to target IPv4:port.
+/// Slot 30: `sys_tcp_connect(ip, port)`: Connect to target IPv4:port (or listen on port if ip==0).
 fn handle_tcp_connect(args: Args, _: *exceptions.VectorFrame) u64 {
     const ip_raw = args[0];
     const dst_port = args[1];
     if (dst_port == 0 or dst_port > 0xffff) return error_result(.einval);
     if (!virtio_net.net_ready) return error_result(.einval);
     if (!virtio_net.arp.ip_set()) return error_result(.einval);
+
+    // Passive open (Listen mode) when ip == 0
+    if (ip_raw == 0) {
+        if (tcp.state == .closed) {
+            tcp.reset();
+        }
+        if (tcp.state != .idle and tcp.state != .listen) {
+            return error_result(.einval);
+        }
+        tcp.listen(@truncate(dst_port));
+        if (process.find_by_task(scheduler.current_id())) |pid| {
+            tcp.owner_pid = pid;
+        }
+        return 0;
+    }
+
     const ip: [4]u8 = .{
         @truncate(ip_raw >> 24),
         @truncate(ip_raw >> 16),
@@ -1847,7 +1863,7 @@ fn handle_tcp_recv(args: Args, _: *exceptions.VectorFrame) u64 {
     var max = args[1];
     if (max == 0) return 0;
     if (max > tcp.payload_max) max = tcp.payload_max;
-    if (tcp.state != .established and tcp.state != .closed and tcp.state != .fin_sent) {
+    if (tcp.state != .established and tcp.state != .closed and tcp.state != .fin_sent and tcp.state != .listen and tcp.state != .syn_received) {
         return error_result(.einval);
     }
     if (!tcp_owned_by_caller()) return error_result(.eacces);
@@ -1862,6 +1878,10 @@ fn handle_tcp_recv(args: Args, _: *exceptions.VectorFrame) u64 {
         }
     }
 
+    if (tcp.state != .established and tcp.state != .closed and tcp.state != .fin_sent) {
+        return 0;
+    }
+
     if (!tcp.rx_pending) return 0;
 
     const take = @min(@as(usize, @intCast(max)), tcp.rx_len);
@@ -1874,6 +1894,10 @@ fn handle_tcp_recv(args: Args, _: *exceptions.VectorFrame) u64 {
 fn handle_tcp_close(_: Args, _: *exceptions.VectorFrame) u64 {
     if (tcp.state == .idle) return 0;
     if (!tcp_owned_by_caller()) return error_result(.eacces);
+    if (tcp.state == .listen) {
+        tcp.reset();
+        return 0;
+    }
     if (tcp.state == .established) {
         tcp.build_fin_msg();
         var out_len: usize = 0;
@@ -1898,10 +1922,12 @@ fn handle_tcp_close(_: Args, _: *exceptions.VectorFrame) u64 {
                 tcp.ack_sent += 1;
             }
         }
-        tcp.state = .idle;
+        tcp.release_conn();
     }
 
-    tcp.owner_pid = null;
+    if (!tcp.is_server) {
+        tcp.owner_pid = null;
+    }
     return 0;
 }
 

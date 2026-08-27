@@ -11,4 +11,5 @@ FILE.BIN | File Browser | b | dock=true
 SETTINGS.BIN | Settings | s | dock=true
 EDIT.BIN | Text Editor | e
 SYSMON.BIN | System Monitor | y | dock=true
+HTTPD.BIN | HTTP Web Server | h
 
