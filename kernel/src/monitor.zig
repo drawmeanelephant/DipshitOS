@@ -3901,7 +3901,9 @@ fn cmd_net(m: *Monitor, args: []const []const u8) ExecError {
     m.console.puts(" tcp=");
     m.console.puts(switch (virtio_net.tcp.state) {
         .idle => "idle",
+        .listen => "listen",
         .syn_sent => "syn_sent",
+        .syn_received => "syn_received",
         .established => "established",
         .fin_sent => "fin_sent",
         .closed => "closed",
@@ -4463,6 +4465,25 @@ fn cmd_net_tcp_drive(m: *Monitor) ExecError {
     switch (virtio_net.tcp.state) {
         .idle => {
             m.console.print_line("net tcp: no connection (net tcp connect <addr> <port>)");
+            return .none;
+        },
+        .listen => {
+            m.console.puts("net tcp: listening on port ");
+            m.console.print_u64(virtio_net.tcp.listen_port);
+            m.console.puts("\n");
+            return .none;
+        },
+        .syn_received => {
+            if (virtio_net.tcp.ack_pending) {
+                var out_len: usize = 0;
+                if (virtio_net.net_tcp_send(virtio_net.tcp.msg[0..virtio_net.tcp.msg_len], &out_len) == .ok) {
+                    virtio_net.tcp.ack_pending = false;
+                    virtio_net.tcp.ack_sent += 1;
+                }
+            }
+            m.console.puts("net tcp: syn_received (peer=");
+            print_tcp_peer(m);
+            m.console.puts(")\n");
             return .none;
         },
         .syn_sent => {

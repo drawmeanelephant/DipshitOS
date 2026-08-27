@@ -199,6 +199,31 @@ pub const THEME_AMBER: Theme = .{
 
 pub var current_theme: Theme = THEME_DARK;
 
+pub const ThemeColors = struct {
+    bg: u32,
+    fg: u32,
+    accent: u32,
+    border: u32,
+    title_bg: u32,
+    title_fg: u32,
+    @"error": u32,
+    success: u32,
+};
+
+/// Get active theme colors palette struct.
+pub fn get_theme_colors() ThemeColors {
+    return .{
+        .bg = current_theme.bg,
+        .fg = current_theme.text_primary,
+        .accent = current_theme.accent,
+        .border = current_theme.border,
+        .title_bg = current_theme.surface,
+        .title_fg = current_theme.text_primary,
+        .@"error" = current_theme.danger,
+        .success = current_theme.success,
+    };
+}
+
 /// Select a theme by name. Returns true if found and applied.
 pub fn set_theme(name: []const u8) bool {
     if (eql(name, "dark")) {
@@ -615,6 +640,10 @@ pub fn udp_recv(port: u16, buf: []u8) i64 {
     return syscall3(sys_udp_recv_num, port, @intFromPtr(buf.ptr), buf.len);
 }
 
+pub fn tcp_listen(port: u16) i64 {
+    return syscall2(sys_tcp_connect_num, 0, port);
+}
+
 pub fn tcp_connect(ip: u32, port: u16) i64 {
     return syscall2(sys_tcp_connect_num, ip, port);
 }
@@ -847,11 +876,13 @@ pub const ButtonState = enum {
     pressed,
     disabled,
     focused,
+    normal,
+    hovered,
 
     pub fn to_widget_state(self: ButtonState) WidgetState {
         return switch (self) {
-            .idle => .normal,
-            .hover => .hover,
+            .idle, .normal => .normal,
+            .hover, .hovered => .hover,
             .pressed => .pressed,
             .disabled => .disabled,
             .focused => .focused,
@@ -1273,8 +1304,32 @@ pub const DropDown = struct {
 };
 
 // ---------------------------------------------------------------------------
-// Component: ContextMenu — right-click popup (GH #228, Arc2 W2)
+// Component: ContextMenu & Menu Builder (GH #228, Arc2 W2, M27 G9 #452)
 // ---------------------------------------------------------------------------
+
+pub const CanonicalMenuCategory = enum {
+    file,
+    edit,
+    view,
+    help,
+};
+
+pub const canonical_menu_bar = [_][]const u8{ "File", "Edit", "View", "Help" };
+
+pub const StandardShortcut = struct {
+    pub const save = "Ctrl+S";
+    pub const open = "Ctrl+O";
+    pub const quit = "Ctrl+Q";
+    pub const undo = "Ctrl+Z";
+    pub const redo = "Ctrl+Y";
+    pub const find = "Ctrl+F";
+    pub const help = "Ctrl+H";
+    pub const cut = "Ctrl+X";
+    pub const copy = "Ctrl+C";
+    pub const paste = "Ctrl+V";
+    pub const select_all = "Ctrl+A";
+    pub const new_file = "Ctrl+N";
+};
 
 pub const MenuItemKind = enum {
     action,
@@ -1294,6 +1349,56 @@ pub const MenuSection = struct {
     title: []const u8 = "",
     items: []const MenuItemSpec = &[_]MenuItemSpec{},
 };
+
+pub const MenuBuilder = struct {
+    items: [16]MenuItemSpec = [_]MenuItemSpec{.{}} ** 16,
+    count: usize = 0,
+
+    pub fn init() MenuBuilder {
+        return .{};
+    }
+
+    pub fn add_item(self: *MenuBuilder, label: []const u8, shortcut: []const u8) *MenuBuilder {
+        if (self.count < self.items.len) {
+            self.items[self.count] = .{ .label = label, .shortcut = shortcut, .kind = .action };
+            self.count += 1;
+        }
+        return self;
+    }
+
+    pub fn add_action(self: *MenuBuilder, label: []const u8, shortcut: []const u8, action_fn: ?*const fn () void) *MenuBuilder {
+        if (self.count < self.items.len) {
+            self.items[self.count] = .{ .label = label, .shortcut = shortcut, .kind = .action, .action = action_fn };
+            self.count += 1;
+        }
+        return self;
+    }
+
+    pub fn add_separator(self: *MenuBuilder) *MenuBuilder {
+        if (self.count < self.items.len) {
+            self.items[self.count] = .{ .kind = .separator };
+            self.count += 1;
+        }
+        return self;
+    }
+
+    pub fn add_header(self: *MenuBuilder, title: []const u8) *MenuBuilder {
+        if (self.count < self.items.len) {
+            self.items[self.count] = .{ .label = title, .kind = .header };
+            self.count += 1;
+        }
+        return self;
+    }
+
+    pub fn slice(self: *const MenuBuilder) []const MenuItemSpec {
+        return self.items[0..self.count];
+    }
+};
+
+/// Build a standardized ContextMenu from a slice of MenuItemSpecs (M27 G9).
+pub fn menu_build(specs: []const MenuItemSpec) ContextMenu {
+    return ContextMenu.initWithSpecs(specs);
+}
 
 pub const ContextMenuItem = struct {
     label: []const u8,
@@ -1898,11 +2003,27 @@ pub const ProgressBar = struct {
 // Component: Dialog — modal child window helper (GH #221, Arc1)
 // ---------------------------------------------------------------------------
 
-pub const DialogResult = enum { none, ok, cancel };
+pub const DialogResult = enum {
+    none,
+    ok,
+    cancel,
+    button_0,
+    button_1,
+    button_2,
+
+    pub fn is_ok(self: DialogResult) bool {
+        return self == .ok or self == .button_0;
+    }
+
+    pub fn is_cancel(self: DialogResult) bool {
+        return self == .cancel or self == .button_1;
+    }
+};
 
 pub const Dialog = struct {
     parent_rect: Rect,
     rect: Rect,
+    title: []const u8 = "",
     message: []const u8 = "",
     has_input: bool = false,
     input: TextInput,
@@ -1929,6 +2050,7 @@ pub const Dialog = struct {
         var dlg = Dialog{
             .parent_rect = parent_rect,
             .rect = r,
+            .title = "",
             .message = message,
             .has_input = has_input,
             .input = TextInput.init(Rect.make(r.x + 10, r.y + 60, if (r.w > 20) r.w - 20 else 0, 20)),
@@ -1938,6 +2060,25 @@ pub const Dialog = struct {
             .open = false,
         };
         dlg.input.focused = has_input;
+        return dlg;
+    }
+
+    pub fn initWithButtons(parent_rect: Rect, title: []const u8, message: []const u8, buttons: []const []const u8) Dialog {
+        const r = centered_rect(parent_rect);
+        const btn0 = if (buttons.len > 0) buttons[0] else "OK";
+        const btn1 = if (buttons.len > 1) buttons[1] else "Cancel";
+        const dlg = Dialog{
+            .parent_rect = parent_rect,
+            .rect = r,
+            .title = title,
+            .message = message,
+            .has_input = false,
+            .input = TextInput.init(Rect.make(r.x + 10, r.y + 60, if (r.w > 20) r.w - 20 else 0, 20)),
+            .ok_button = Button.init(Rect.make(if (r.w > 140) r.x + r.w - 140 else r.x, r.y + r.h - 30, 60, 20), btn0),
+            .cancel_button = Button.init(Rect.make(if (r.w > 70) r.x + r.w - 70 else r.x, r.y + r.h - 30, 60, 20), btn1),
+            .result = .none,
+            .open = false,
+        };
         return dlg;
     }
 
@@ -2117,6 +2258,25 @@ pub fn draw_empty_state(win_id: u32, rect: Rect, title: []const u8, subtitle: []
     }
 }
 
+/// Draw an empty-state message with an icon character (M27 G22 #465).
+pub fn draw_empty_state_icon(win_id: u32, rect: Rect, message: []const u8, icon_char: u8) void {
+    if (rect.w == 0 or rect.h == 0) return;
+    draw_rect(win_id, rect, theme_surface());
+    draw_rect_outline(win_id, rect, 1, theme_border());
+
+    const center_y = rect.y + rect.h / 2;
+    const icon_x = if (rect.w >= 8) rect.x + (rect.w - 8) / 2 else rect.x + 4;
+    const icon_y = if (center_y >= 20) center_y - 16 else rect.y + 4;
+    if (icon_char >= 0x20 and icon_char <= 0x7e) {
+        draw_char(win_id, icon_char, icon_x, icon_y, theme_text_muted());
+    }
+
+    const msg_w = @as(u32, @intCast(message.len)) * 8;
+    const msg_x = if (rect.w > msg_w) rect.x + (rect.w - msg_w) / 2 else rect.x + 4;
+    const msg_y = icon_y + 14;
+    draw_text(win_id, message, msg_x, msg_y, theme_text_muted());
+}
+
 // ---------------------------------------------------------------------------
 // Error Display Consistency (M27 G23 #466)
 // ---------------------------------------------------------------------------
@@ -2158,6 +2318,20 @@ pub fn format_error(code: i64, buf: []u8) []const u8 {
     }
     return std.fmt.bufPrint(buf, "System error ({d})", .{code}) catch "System error";
 }
+
+/// Format error with optional context prefix (e.g. "Save failed: File or directory not found").
+pub fn format_error_ctx(buf: []u8, code: i64, context: []const u8) []const u8 {
+    var raw_buf: [128]u8 = undefined;
+    const err_str = format_error(code, &raw_buf);
+    if (context.len == 0) {
+        const n = @min(err_str.len, buf.len);
+        @memcpy(buf[0..n], err_str[0..n]);
+        return buf[0..n];
+    }
+    return std.fmt.bufPrint(buf, "{s}: {s}", .{ context, err_str }) catch err_str;
+}
+
+pub const format_error_with_context = format_error_ctx;
 
 // ---------------------------------------------------------------------------
 // Component: HScrollBar — horizontal scroll track (GH #222, Arc1)
@@ -3249,4 +3423,58 @@ test "ui: show_dialog, draw_empty_state, and format_error" {
 
     const msg_custom = format_error(-999, &err_buf);
     try std.testing.expect(std.mem.startsWith(u8, msg_custom, "System error"));
+}
+
+test "ui: MenuBuilder and canonical shortcuts (M27 G9)" {
+    var mb = MenuBuilder.init();
+    _ = mb.add_item("Save", StandardShortcut.save);
+    _ = mb.add_item("Open", StandardShortcut.open);
+    _ = mb.add_separator();
+    _ = mb.add_item("Quit", StandardShortcut.quit);
+
+    const specs = mb.slice();
+    try std.testing.expectEqual(@as(usize, 4), specs.len);
+    try std.testing.expectEqualStrings("Save", specs[0].label);
+    try std.testing.expectEqualStrings("Ctrl+S", specs[0].shortcut);
+    try std.testing.expectEqual(MenuItemKind.separator, specs[2].kind);
+
+    var menu = menu_build(specs);
+    try std.testing.expectEqual(@as(usize, 4), menu.count());
+    try std.testing.expectEqualStrings("File", canonical_menu_bar[0]);
+    try std.testing.expectEqualStrings("Help", canonical_menu_bar[3]);
+}
+
+test "ui: Dialog with custom buttons and DialogResult (M27 G10)" {
+    const parent = Rect.make(0, 0, 400, 300);
+    const buttons = [_][]const u8{ "Yes", "No" };
+    var dlg = Dialog.initWithButtons(parent, "Confirm", "Do you wish to proceed?", buttons[0..]);
+    dlg.show();
+    try std.testing.expect(dlg.is_open());
+    try std.testing.expectEqualStrings("Yes", dlg.ok_button.label);
+    try std.testing.expectEqualStrings("No", dlg.cancel_button.label);
+
+    dlg.dismiss(.button_0);
+    try std.testing.expect(!dlg.is_open());
+    try std.testing.expect(dlg.get_result().is_ok());
+
+    dlg.show();
+    dlg.dismiss(.button_1);
+    try std.testing.expect(dlg.get_result().is_cancel());
+}
+
+test "ui: ButtonState variants and ThemeColors (M27 G14, G20)" {
+    try std.testing.expectEqual(WidgetState.normal, ButtonState.normal.to_widget_state());
+    try std.testing.expectEqual(WidgetState.hover, ButtonState.hovered.to_widget_state());
+
+    const tc = get_theme_colors();
+    try std.testing.expect(tc.bg != 0);
+    try std.testing.expect(tc.accent != 0);
+}
+
+test "ui: draw_empty_state_icon and format_error_ctx (M27 G22, G23)" {
+    draw_empty_state_icon(0, Rect.make(10, 10, 200, 100), "Empty Directory", '>');
+
+    var buf: [128]u8 = undefined;
+    const err = format_error_ctx(&buf, -2, "File open");
+    try std.testing.expectEqualStrings("File open: File or directory not found", err);
 }

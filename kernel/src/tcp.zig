@@ -115,13 +115,17 @@ pub var dropped_malformed: u64 = 0; // an unparseable / unexpected / out-of-boun
 
 pub const State = enum {
     idle,
+    listen, // passive open — listening for incoming connection
     syn_sent, // the SYN went out — awaiting the SYN-ACK
+    syn_received, // incoming SYN received — SYN-ACK sent, awaiting ACK
     established, // the handshake ACK went out — data can flow
     fin_sent, // the FIN went out — awaiting the FIN-ACK
     closed, // the close completed (clean FIN-ACK) or a RST killed the connection
 };
 
 pub var state: State = .idle;
+pub var listen_port: u16 = 0;
+pub var is_server: bool = false;
 /// The peer: its IP, port, and MAC (the caller resolved the MAC with
 /// `net arp <ip>` — the seam resolves nothing).
 pub var peer_ip: [4]u8 = .{ 0, 0, 0, 0 };
@@ -331,6 +335,8 @@ pub fn close_owner(pid: u64) void {
 /// Reset the client (tests only — the live kernel never re-initializes).
 pub fn reset() void {
     state = .idle;
+    is_server = false;
+    listen_port = 0;
     owner_pid = null;
     peer_ip = .{ 0, 0, 0, 0 };
     peer_port = 0;
@@ -365,10 +371,30 @@ pub fn reset() void {
     syn_ticks = 0;
 }
 
+/// Enter LISTEN state on a local port (passive open).
+pub fn listen(port: u16) void {
+    state = .listen;
+    listen_port = port;
+    is_server = true;
+    peer_ip = .{ 0, 0, 0, 0 };
+    peer_port = 0;
+    peer_mac = .{ 0, 0, 0, 0, 0, 0 };
+    isn = 0;
+    srv_isn = 0;
+    snd_una = 0;
+    rcv_nxt = 0;
+    msg_len = 0;
+    ack_pending = false;
+    rx_len = 0;
+    rx_pending = false;
+    clear_pending();
+}
+
 /// Build the next outbound segment into `msg` for THE connection (the
 /// fixed src port + the stored peer).
 fn build_msg(seq: u32, ack: u32, flags: u8, payload: []const u8) void {
-    msg_len = build_segment(&msg, arp.own_ip, peer_ip, default_src_port, peer_port, seq, ack, flags, payload);
+    const local_port = if (is_server) listen_port else default_src_port;
+    msg_len = build_segment(&msg, arp.own_ip, peer_ip, local_port, peer_port, seq, ack, flags, payload);
 }
 
 /// IDLE -> SYN_SENT: record the peer (the caller resolved the MAC), draw
@@ -377,6 +403,7 @@ fn build_msg(seq: u32, ack: u32, flags: u8, payload: []const u8) void {
 /// counts `syn_sent`, and advances `snd_una` by 1 (the SYN consumes one
 /// sequence number).
 pub fn start(peer_ip_in: [4]u8, dst_port: u16, isn_in: u32, peer_mac_in: [6]u8) void {
+    is_server = false;
     peer_ip = peer_ip_in;
     peer_port = dst_port;
     peer_mac = peer_mac_in;
@@ -410,11 +437,11 @@ pub fn abort_timeout() void {
 }
 
 /// Release the connection state honestly (the N10 `abort_timeout` shape
-/// — no RST, no TX): IDLE, the peer cleared, the pending buffers
+/// — no RST, no TX): IDLE (or LISTEN if server), the peer cleared, the pending buffers
 /// cleared. Called by the connect refusal, the retransmission abort
 /// (card N11), and any death path.
 pub fn release_conn() void {
-    state = .idle;
+    state = if (is_server) .listen else .idle;
     peer_ip = .{ 0, 0, 0, 0 };
     peer_port = 0;
     peer_mac = .{ 0, 0, 0, 0, 0, 0 };
@@ -549,11 +576,12 @@ pub fn handle_rx(frame: []const u8) Event {
     }
     const src_port = (@as(u16, segment[0]) << 8) | segment[1];
     const dst_port = (@as(u16, segment[2]) << 8) | segment[3];
-    if (dst_port != default_src_port) {
+    const expected_dst = if (is_server) listen_port else default_src_port;
+    if (dst_port != expected_dst) {
         dropped_malformed += 1; // a segment for a port we do not own
         return .none;
     }
-    if (src_port != peer_port) {
+    if (state != .listen and src_port != peer_port) {
         dropped_malformed += 1; // not the peer we connected to
         return .none;
     }
@@ -572,6 +600,54 @@ pub fn handle_rx(frame: []const u8) Event {
     switch (state) {
         .idle => {
             dropped_malformed += 1; // a segment with no connection
+            return .none;
+        },
+        .listen => {
+            if ((flags & flag_syn) != 0 and (flags & flag_ack) == 0) {
+                // Incoming client SYN on listening port
+                peer_ip = src;
+                peer_port = src_port;
+                @memcpy(&peer_mac, frame[6..12]);
+                srv_isn = seq;
+                rcv_nxt = srv_isn +% 1;
+                isn = 0x54321098; // Server ISN
+                snd_una = isn;
+                build_msg(isn, rcv_nxt, flag_syn | flag_ack, &.{});
+                ack_pending = true;
+                syn_sent += 1;
+                advance_snd(1); // SYN-ACK consumes 1 sequence number
+                record_pending();
+                state = .syn_received;
+                return .synack_recv;
+            }
+            dropped_malformed += 1;
+            return .none;
+        },
+        .syn_received => {
+            if ((flags & flag_rst) != 0) {
+                rst_recv += 1;
+                clear_pending();
+                state = .listen;
+                return .rst_recv;
+            }
+            if ((flags & flag_ack) != 0) {
+                if (ack == snd_una) {
+                    clear_pending();
+                    state = .established;
+                    if (payload.len != 0) {
+                        @memcpy(rx_payload[0..payload.len], payload);
+                        rx_len = payload.len;
+                        rx_pending = true;
+                        rcv_nxt = seq +% @as(u32, @intCast(payload.len));
+                        data_recv += 1;
+                        build_msg(snd_una, rcv_nxt, flag_ack, &.{});
+                        ack_pending = true;
+                        return .data_recv;
+                    }
+                    return .none;
+                }
+            }
+            dropped_malformed += 1;
             return .none;
         },
         .syn_sent => {
@@ -1087,4 +1163,51 @@ test "tcp: card N11 — the pending FIN is retransmitted in FIN_SENT" {
     try std.testing.expect(!tx_pending);
     now_ticks = 200;
     try std.testing.expectEqual(RtoEvent.none, poll_rto());
+}
+
+test "tcp: passive open and server handshake (listen -> syn_received -> established -> data -> close)" {
+    arp.own_ip = ip_guest;
+    defer arp.own_ip = .{ 0, 0, 0, 0 };
+    reset();
+    defer reset();
+
+    // 1. Enter LISTEN on port 8080
+    listen(8080);
+    try std.testing.expectEqual(State.listen, state);
+    try std.testing.expect(is_server);
+    try std.testing.expectEqual(@as(u16, 8080), listen_port);
+
+    // 2. Incoming client SYN from host 10.0.0.2:54321
+    const syn_frame = craft_frame(ip_host, host_mac, ip_guest, test_mac, 54321, 8080, 0x10000000, 0, flag_syn, &.{});
+    const ev1 = handle_rx(&syn_frame);
+    try std.testing.expectEqual(Event.synack_recv, ev1);
+    try std.testing.expectEqual(State.syn_received, state);
+    try std.testing.expect(ack_pending);
+    try std.testing.expectEqualSlices(u8, &ip_host, &peer_ip);
+    try std.testing.expectEqual(@as(u16, 54321), peer_port);
+    try std.testing.expectEqualSlices(u8, &host_mac, &peer_mac);
+    try std.testing.expectEqual(@as(u32, 0x10000001), rcv_nxt);
+
+    // Verify SYN-ACK outbound segment built
+    try std.testing.expectEqual(@as(u8, flag_syn | flag_ack), msg[13]);
+    try std.testing.expectEqualSlices(u8, &.{ 0x10, 0x00, 0x00, 0x01 }, msg[8..12]); // ack = client ISN+1
+
+    // 3. Client sends ACK for our SYN-ACK
+    const ack_frame = craft_frame(ip_host, host_mac, ip_guest, test_mac, 54321, 8080, 0x10000001, snd_una, flag_ack, &.{});
+    const ev2 = handle_rx(&ack_frame);
+    try std.testing.expectEqual(Event.none, ev2);
+    try std.testing.expectEqual(State.established, state);
+
+    // 4. Client sends HTTP GET request payload
+    const get_payload = "GET / HTTP/1.1\r\n\r\n";
+    const data_frame = craft_frame(ip_host, host_mac, ip_guest, test_mac, 54321, 8080, 0x10000001, snd_una, flag_ack, get_payload);
+    const ev3 = handle_rx(&data_frame);
+    try std.testing.expectEqual(Event.data_recv, ev3);
+    try std.testing.expect(rx_pending);
+    try std.testing.expectEqualStrings(get_payload, take_rx());
+
+    // 5. Server sends response and releases connection back to LISTEN
+    release_conn();
+    try std.testing.expectEqual(State.listen, state);
+    try std.testing.expectEqual(@as(u16, 0), peer_port);
 }
