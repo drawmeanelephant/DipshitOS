@@ -79,6 +79,7 @@ pub fn init() void {
     _ = set_internal("prompt", "dipshit> ");
     _ = set_internal("theme", "dark");
     _ = set_internal("scrollback", "1000");
+    _ = set_internal("focus_follows_mouse", "off");
     initialized = true;
 }
 
@@ -135,6 +136,12 @@ pub fn get_color() bool {
     return std.mem.eql(u8, val, "on") or std.mem.eql(u8, val, "1") or std.mem.eql(u8, val, "true");
 }
 
+/// M27 G13 (#456): whether focus follows mouse pointer.
+pub fn get_focus_follows_mouse() bool {
+    const val = get("focus_follows_mouse") orelse return false;
+    return std.mem.eql(u8, val, "on") or std.mem.eql(u8, val, "1") or std.mem.eql(u8, val, "true");
+}
+
 fn set_internal(key: []const u8, val: []const u8) SetResult {
     if (key.len == 0 or key.len > max_key_len) return .invalid_key;
     if (val.len > max_val_len) return .invalid_value;
@@ -176,7 +183,16 @@ pub fn set(key: []const u8, val: []const u8) SetResult {
     if (result == .ok and std.mem.eql(u8, key, "font_size")) {
         apply_font_size(val);
     }
+    // M27 G13 (#456): focus_follows_mouse setting
+    if (result == .ok and std.mem.eql(u8, key, "focus_follows_mouse")) {
+        apply_focus_follows_mouse(val);
+    }
     return result;
+}
+
+fn apply_focus_follows_mouse(val: []const u8) void {
+    const is_on = std.mem.eql(u8, val, "on") or std.mem.eql(u8, val, "1") or std.mem.eql(u8, val, "true");
+    driving_award.focus_follows_mouse = is_on;
 }
 
 /// Apply the font_size key to the framebuffer text layer.

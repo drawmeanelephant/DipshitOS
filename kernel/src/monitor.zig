@@ -283,7 +283,7 @@ pub const Command = struct {
 /// grows it 54 -> 55 (`sym`). Milestone twenty-two D5 (issue #328)
 /// grows it 55 -> 56 (`strace`). Milestone twenty-two D6 (issue #329)
 /// grows it 56 -> 57 (`ps`).
-pub const registry_count: usize = 66; // 51 + sh/calc + `font` (M20 U1) + sym/strace/ps (M22 D3/D5/D6) + `type` (M19 P1) + `mktemp` (M19 P16) + stat/find/dmesg/time/which/inventory (M22 D8/D12/D13/D16) + du (M25 F4)
+pub const registry_count: usize = 68; // 51 + sh/calc + `font` (M20 U1) + sym/strace/ps (M22 D3/D5/D6) + `type` (M19 P1) + `mktemp` (M19 P16) + stat/find/dmesg/time/which/inventory (M22 D8/D12/D13/D16) + du (M25 F4) + screenshot/shortcuts (M27 G27/G29)
 
 /// `sym <file>` reads at most this many bytes for on-disk symtab inspection
 /// (M22 D3). ELF symbol tables live near the file tail; 64 KiB covers every
@@ -341,7 +341,9 @@ fn ensure_registry() []const Command {
             .{ .name = "sh", .help = "run a script file of shell commands ('sh <script>' executes it line by line; 64 lines max, 256 chars per line; '#' comments; 'exit' stops early)", .usage = "sh <script>", .category = .system, .min_args = 1, .max_args = 1, .handler = cmd_sh },
             .{ .name = "roadpops", .help = "Road Pops framebuffer console: armed/dirty/present counters (the boot terminal on the screen)", .usage = "roadpops", .category = .graphics_input, .handler = cmd_roadpops },
             .{ .name = "screen", .help = "virtio-gpu transport + framebuffer: device DID, features, scanout, status, re-arm ('screen fill <rrggbb>' fills the framebuffer and flushes it to the scanout)", .usage = "screen [fill <rrggbb>]", .category = .graphics_input, .max_args = 2, .handler = cmd_screen },
+            .{ .name = "screenshot", .help = "capture the current framebuffer (1280x720) and save as BMP to disk (G27)", .usage = "screenshot [<file>]", .category = .graphics_input, .max_args = 1, .handler = cmd_screenshot },
             .{ .name = "settings", .help = "persistent configuration: `settings [list]`, `settings get <key>`, `settings set <key> <val>`, `settings reset`", .usage = "settings [list|get <key>|set <key> <val>|reset]", .category = .system, .max_args = 3, .handler = cmd_settings },
+            .{ .name = "shortcuts", .help = "keyboard shortcut reference card (G29)", .usage = "shortcuts", .category = .system, .handler = cmd_shortcuts },
             .{ .name = "sound", .help = "virtio-snd transport: device DID, class, status, control-queue state, device-config counts (jacks/streams/channel-maps), re-arm; stream-state control: 'sound volume <0-100>' and 'sound mute <on|off>'", .usage = "sound [volume <0-100> | mute <on|off>]", .category = .system, .min_args = 0, .max_args = 2, .handler = cmd_sound },
             .{ .name = "text", .help = "framebuffer text: text region, cursor, scrollback ('text put <string...>' renders + flushes to the scanout; 'text clear' clears; 'text putraw' skips the trailing newline; 'text fontdebug [on|off]' missing-glyph stats)", .usage = "text [put <string...>|putraw <string...>|clear|fontdebug [on|off]]", .category = .graphics_input, .min_args = 0, .max_args = 9, .handler = cmd_text },
             .{ .name = "shutdown", .help = "request power-off", .usage = "shutdown", .category = .system, .handler = cmd_shutdown },
@@ -627,13 +629,13 @@ fn report_machine(m: *Monitor, verb: []const u8, result: MachineResult) ExecErro
 // Identity and inspection commands
 // ---------------------------------------------------------------------------
 
-/// `help <topic>` pages (ADR 0008 D1). Bodies are returned as string
+/// `help <topic>` pages (ADR 0008 D1, M27 G28 #471). Bodies are returned as string
 /// literals from code (PC-relative at any load base — the claim-0015
 /// lesson), never stored in a const table of pointers. Topics are
 /// non-command keywords; `syscalls` is a command, so its `help <cmd>` detail
 /// is the syscall page rather than a shadowed topic.
 fn topic_body(name: []const u8) ?[]const u8 {
-    if (std.mem.eql(u8, name, "networking")) {
+    if (std.mem.eql(u8, name, "networking") or std.mem.eql(u8, name, "network")) {
         return "networking\n" ++
             "  virtio-net (DID 0x1041), flag-gated by the runner's --net mode: TX + RX,\n" ++
             "  ARP, IPv4/ICMP, UDP, a bounded DHCP client, and an outward-only bounded TCP\n" ++
@@ -655,17 +657,68 @@ fn topic_body(name: []const u8) ?[]const u8 {
             "  DATA partition. `mount <esp|data>` switches volumes; `ls`/`cat`/`write` read\n" ++
             "  and write files, and writes persist on the disk across reboot.\n";
     }
+    if (std.mem.eql(u8, name, "files")) {
+        return "files\n" ++
+            "  GPT + FAT32 filesystem access: `ls`, `cat`, `write`, `find`, `stat`,\n" ++
+            "  `du`, and `inventory`. Persistent file operations on ESP and DATA partitions.\n";
+    }
     if (std.mem.eql(u8, name, "graphics")) {
         return "graphics\n" ++
             "  virtio-gpu (DID 0x1050) framebuffer: `screen` reports/fills the scanout,\n" ++
             "  `text` renders the 8x8 font, Road Pops is the on-screen terminal, and Driving\n" ++
             "  Award composites windows over it. 1280x720 B8G8R8X8, 2D blits only.\n";
     }
+    if (std.mem.eql(u8, name, "editor")) {
+        return "editor\n" ++
+            "  Full-screen and windowed text editing via EDIT.BIN and NOTEPAD.BIN.\n" ++
+            "  Shortcuts: Ctrl+S save, Ctrl+O open, Ctrl+N new, Ctrl+Z undo, Ctrl+Y redo,\n" ++
+            "  Ctrl+F find, Ctrl+Q quit. Full clipboard integration on Ctrl+C/Ctrl+V/Ctrl+X.\n";
+    }
+    if (std.mem.eql(u8, name, "calc")) {
+        return "calc\n" ++
+            "  64-bit Programmer, Scientific, and Basic calculator modes (CALC.BIN).\n" ++
+            "  Base conversions (HEX/DEC/OCT/BIN), bitwise logic (AND/OR/XOR/NOT/SHL/SHR),\n" ++
+            "  scientific functions (trig, exp, log), and persistent calculation history.\n";
+    }
+    if (std.mem.eql(u8, name, "system")) {
+        return "system\n" ++
+            "  Machine management and diagnostic commands: `sysinfo`, `uname`, `version`,\n" ++
+            "  `settings` (theme, prompt, font, scrollback), `shutdown`, `reboot`,\n" ++
+            "  `dmesg`, `time`, and crash tombstone viewing with `crash`.\n";
+    }
+    if (std.mem.eql(u8, name, "shortcuts")) {
+        return "shortcuts\n" ++
+            "  Global: Ctrl+Shift+A (About), Ctrl+Shift+/ (Shortcuts), Alt+Tab (Switch window),\n" ++
+            "  Alt+F4 (Close window), F11 (Fullscreen/Tile), Ctrl+Alt+Del (Reboot).\n" ++
+            "  Navigation: Tab / Shift+Tab (Focus control), Enter/Space (Activate), Esc (Dismiss).\n" ++
+            "  Editing: Ctrl+C (Copy), Ctrl+X (Cut), Ctrl+V (Paste), Ctrl+Z (Undo), Ctrl+S (Save).\n" ++
+            "  Run `shortcuts` command for full list.\n";
+    }
+    if (std.mem.eql(u8, name, "dev") or std.mem.eql(u8, name, "diag")) {
+        return "dev / diag\n" ++
+            "  Developer tools and diagnostics: `strace` (syscall tracer), `sym` (symbol table),\n" ++
+            "  `disas` (AArch64 disassembler), `asm` (assembler), `ps` (process table),\n" ++
+            "  `crash` (tombstone viewer), `resources` (pool audit), `which` / `inventory`.\n";
+    }
     return null;
 }
 
 fn cmd_help(m: *Monitor, args: []const []const u8) ExecError {
     if (args.len == 1) {
+        if (std.mem.eql(u8, args[0], "--all")) {
+            m.console.print_line("all monitor commands:");
+            const reg = ensure_registry();
+            for (reg) |cmd| {
+                m.console.puts("  ");
+                m.console.puts(cmd.name);
+                m.console.puts(" - ");
+                m.console.puts(cmd.help);
+                m.console.puts("\n    usage: ");
+                m.console.puts(cmd.usage);
+                m.console.puts("\n");
+            }
+            return .none;
+        }
         if (lookup(args[0])) |cmd| {
             m.console.puts(cmd.name);
             m.console.puts(" - ");
@@ -5443,6 +5496,73 @@ fn cmd_screen_peek(m: *Monitor) ExecError {
     m.console.puts(" p3=");
     m.console.print_hex(virtio_gpu.gpu_fb[3]);
     m.console.puts("\n");
+    return .none;
+}
+
+/// M27 G27 (Issue #470): capture current framebuffer and save as BMP to FAT.
+fn cmd_screenshot(m: *Monitor, args: []const []const u8) ExecError {
+    if (!virtio_gpu.gpu_ready) {
+        err_prefix(m);
+        m.console.print_line("screenshot: GPU framebuffer not ready");
+        return .none;
+    }
+    const path = if (args.len > 0) args[0] else "SCREEN.BMP";
+    const res = fat.write_fb_bmp(path, virtio_gpu.fb_width, virtio_gpu.fb_height, @ptrCast(&virtio_gpu.gpu_fb));
+    if (res != .ok) {
+        err_prefix(m);
+        m.console.puts("screenshot: write failed: ");
+        m.console.puts(@tagName(res));
+        m.console.puts("\n");
+        return .none;
+    }
+    const row_raw: usize = @as(usize, virtio_gpu.fb_width) * 3;
+    const row_pad: usize = (4 - (row_raw % 4)) % 4;
+    const row_stride: usize = row_raw + row_pad;
+    const total_bytes: usize = 54 + row_stride * @as(usize, virtio_gpu.fb_height);
+    m.console.puts("screenshot: saved ");
+    m.console.print_u64(virtio_gpu.fb_width);
+    m.console.puts("x");
+    m.console.print_u64(virtio_gpu.fb_height);
+    m.console.puts(" BMP to ");
+    m.console.puts(path);
+    m.console.puts(" (");
+    m.console.print_u64(total_bytes);
+    m.console.puts(" bytes)\n");
+    return .none;
+}
+
+/// M27 G29 (Issue #472): display keyboard shortcuts reference table.
+fn cmd_shortcuts(m: *Monitor, args: []const []const u8) ExecError {
+    _ = args;
+    m.console.print_line("Keyboard Shortcut Reference:");
+    m.console.print_line("  Global:");
+    m.console.print_line("    Ctrl+Shift+A   About DipshitOS dialog");
+    m.console.print_line("    Ctrl+Shift+/   Display this shortcut reference");
+    m.console.print_line("    Alt+Tab        Cycle open windows (Hold Alt, press Tab/Shift+Tab)");
+    m.console.print_line("    Alt+F4         Close active window");
+    m.console.print_line("    F11            Toggle window fullscreen / tile");
+    m.console.print_line("    Ctrl+Alt+Del   Reboot system");
+    m.console.print_line("  Window & Navigation:");
+    m.console.print_line("    Tab            Focus next control");
+    m.console.print_line("    Shift+Tab      Focus previous control");
+    m.console.print_line("    Enter / Space  Activate focused button or toggle control");
+    m.console.print_line("    Escape         Dismiss modal dialog / cancel action");
+    m.console.print_line("    Ctrl+Q / Ctrl+W Close current window / quit application");
+    m.console.print_line("  Editing & Clipboard:");
+    m.console.print_line("    Ctrl+C         Copy selected text to clipboard");
+    m.console.print_line("    Ctrl+X         Cut selected text to clipboard");
+    m.console.print_line("    Ctrl+V         Paste text from clipboard");
+    m.console.print_line("    Ctrl+Z         Undo last action");
+    m.console.print_line("    Ctrl+Y         Redo last undone action");
+    m.console.print_line("    Ctrl+S         Save file");
+    m.console.print_line("    Ctrl+O         Open file");
+    m.console.print_line("    Ctrl+N         New file");
+    m.console.print_line("    Ctrl+F         Find in file");
+    m.console.print_line("  Shell / Console:");
+    m.console.print_line("    Ctrl+L         Clear screen");
+    m.console.print_line("    Ctrl+C         Interrupt current command");
+    m.console.print_line("    Up / Down      Navigate command history");
+    m.console.print_line("    Ctrl+R         Reverse search command history");
     return .none;
 }
 

@@ -489,6 +489,244 @@ pub fn write_file(path: []const u8, content: []const u8) WriteResult {
     return .ok;
 }
 
+/// M27 G27 (Issue #470): write the framebuffer to a 24-bpp BMP file on the active FAT volume.
+/// Streams 24-bpp BGR bottom-up rows directly from the 32-bpp BGRA/BGRX framebuffer with 54-byte BMP header.
+pub fn write_fb_bmp(path: []const u8, width: u32, height: u32, fb: [*]const u8) WriteResult {
+    var name: []const u8 = path;
+    var parent: []const u8 = "";
+    if (std.mem.lastIndexOfScalar(u8, path, '/')) |idx| {
+        parent = path[0..idx];
+        name = path[idx + 1 ..];
+    }
+    if (name.len == 0) return .name_too_long;
+    var short: [11]u8 = undefined;
+    if (!encode_83(name, &short)) return .name_too_long;
+    if (!state.mounted) return .no_disk;
+    const dir_cluster = dir_cluster_of_path(parent) orelse return .bad_path;
+
+    var slots: [max_root_slots]SlotRef = undefined;
+    const n = collect_dir_slots(dir_cluster, &slots);
+    var target: ?SlotRef = null;
+    var old_cluster_to_free: u32 = 0;
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        var raw: [32]u8 = undefined;
+        if (!read_dir_slot(slots[i], &raw)) continue;
+        const first = raw[0];
+        if (first == 0x00 and target == null) target = slots[i];
+        if (first == 0x00) break;
+        if (first == 0xe5) {
+            if (target == null) target = slots[i];
+            continue;
+        }
+        const attr = raw[11];
+        if (attr & 0x0f == 0x0f or attr & 0x08 != 0) continue;
+        if (std.mem.eql(u8, raw[0..11], &short)) {
+            target = slots[i];
+            const oc = cluster_of_raw(raw);
+            if (oc >= 2) old_cluster_to_free = oc;
+            break;
+        }
+    }
+    const slot = target orelse return .disk_full;
+
+    const row_raw: usize = @as(usize, width) * 3;
+    const row_pad: usize = (4 - (row_raw % 4)) % 4;
+    const row_stride: usize = row_raw + row_pad;
+    const total_pixel_bytes: usize = row_stride * @as(usize, height);
+    const total_file_size: usize = 54 + total_pixel_bytes;
+
+    var scan = FatScan{};
+    var first_cl: u32 = 0;
+    var prev_cl: u32 = 0;
+    var cl_search: u32 = 2;
+
+    var sec_buf: [sector_size + 4]u8 = undefined;
+    var sec_buf_len: usize = 0;
+    var cluster_sec_idx: u8 = 0;
+
+    // 54-byte standard BMP header
+    var header: [54]u8 = @splat(0);
+    header[0] = 'B';
+    header[1] = 'M';
+    std.mem.writeInt(u32, header[2..6], @intCast(total_file_size), .little);
+    std.mem.writeInt(u32, header[10..14], 54, .little);
+    std.mem.writeInt(u32, header[14..18], 40, .little);
+    std.mem.writeInt(i32, header[18..22], @intCast(width), .little);
+    std.mem.writeInt(i32, header[22..26], @intCast(height), .little);
+    std.mem.writeInt(u16, header[26..28], 1, .little);
+    std.mem.writeInt(u16, header[28..30], 24, .little);
+    std.mem.writeInt(u32, header[30..34], 0, .little);
+    std.mem.writeInt(u32, header[34..38], @intCast(total_pixel_bytes), .little);
+    std.mem.writeInt(i32, header[38..42], 2835, .little);
+    std.mem.writeInt(i32, header[42..46], 2835, .little);
+
+    @memcpy(sec_buf[0..54], header[0..54]);
+    sec_buf_len = 54;
+
+    const fb_stride = @as(usize, width) * 4;
+    var cur_y: usize = height;
+    while (cur_y > 0) {
+        cur_y -= 1;
+        const row_start = cur_y * fb_stride;
+        var x: usize = 0;
+        while (x < width) : (x += 1) {
+            const px_off = row_start + x * 4;
+            sec_buf[sec_buf_len] = fb[px_off];
+            sec_buf[sec_buf_len + 1] = fb[px_off + 1];
+            sec_buf[sec_buf_len + 2] = fb[px_off + 2];
+            sec_buf_len += 3;
+
+            if (sec_buf_len >= sector_size) {
+                if (cluster_sec_idx == 0) {
+                    var next_cl: u32 = 0;
+                    while (cl_search < state.geo.total_clusters) : (cl_search += 1) {
+                        if (scan.entry(cl_search) == 0) {
+                            next_cl = cl_search;
+                            cl_search += 1;
+                            break;
+                        }
+                    }
+                    if (next_cl == 0) {
+                        if (first_cl >= 2) _ = free_chain(first_cl);
+                        return .disk_full;
+                    }
+                    if (first_cl == 0) {
+                        first_cl = next_cl;
+                    } else {
+                        if (!set_fat_entry(prev_cl, next_cl)) {
+                            if (first_cl >= 2) _ = free_chain(first_cl);
+                            return .io_failed;
+                        }
+                    }
+                    prev_cl = next_cl;
+                }
+
+                if (!write_sector(cluster_lba(prev_cl) + cluster_sec_idx, sec_buf[0..sector_size])) {
+                    if (first_cl >= 2) _ = free_chain(first_cl);
+                    return .io_failed;
+                }
+                cluster_sec_idx += 1;
+                if (cluster_sec_idx >= state.geo.spc) cluster_sec_idx = 0;
+
+                const excess = sec_buf_len - sector_size;
+                if (excess > 0) {
+                    var k: usize = 0;
+                    while (k < excess) : (k += 1) {
+                        sec_buf[k] = sec_buf[sector_size + k];
+                    }
+                }
+                sec_buf_len = excess;
+            }
+        }
+
+        if (row_pad > 0) {
+            var p: usize = 0;
+            while (p < row_pad) : (p += 1) {
+                sec_buf[sec_buf_len] = 0;
+                sec_buf_len += 1;
+                if (sec_buf_len >= sector_size) {
+                    if (cluster_sec_idx == 0) {
+                        var next_cl: u32 = 0;
+                        while (cl_search < state.geo.total_clusters) : (cl_search += 1) {
+                            if (scan.entry(cl_search) == 0) {
+                                next_cl = cl_search;
+                                cl_search += 1;
+                                break;
+                            }
+                        }
+                        if (next_cl == 0) {
+                            if (first_cl >= 2) _ = free_chain(first_cl);
+                            return .disk_full;
+                        }
+                        if (first_cl == 0) {
+                            first_cl = next_cl;
+                        } else {
+                            if (!set_fat_entry(prev_cl, next_cl)) {
+                                if (first_cl >= 2) _ = free_chain(first_cl);
+                                return .io_failed;
+                            }
+                        }
+                        prev_cl = next_cl;
+                    }
+
+                    if (!write_sector(cluster_lba(prev_cl) + cluster_sec_idx, sec_buf[0..sector_size])) {
+                        if (first_cl >= 2) _ = free_chain(first_cl);
+                        return .io_failed;
+                    }
+                    cluster_sec_idx += 1;
+                    if (cluster_sec_idx >= state.geo.spc) cluster_sec_idx = 0;
+
+                    const excess = sec_buf_len - sector_size;
+                    if (excess > 0) {
+                        var k: usize = 0;
+                        while (k < excess) : (k += 1) {
+                            sec_buf[k] = sec_buf[sector_size + k];
+                        }
+                    }
+                    sec_buf_len = excess;
+                }
+            }
+        }
+    }
+
+    if (sec_buf_len > 0) {
+        if (cluster_sec_idx == 0) {
+            var next_cl: u32 = 0;
+            while (cl_search < state.geo.total_clusters) : (cl_search += 1) {
+                if (scan.entry(cl_search) == 0) {
+                    next_cl = cl_search;
+                    cl_search += 1;
+                    break;
+                }
+            }
+            if (next_cl == 0) {
+                if (first_cl >= 2) _ = free_chain(first_cl);
+                return .disk_full;
+            }
+            if (first_cl == 0) {
+                first_cl = next_cl;
+            } else {
+                if (!set_fat_entry(prev_cl, next_cl)) {
+                    if (first_cl >= 2) _ = free_chain(first_cl);
+                    return .io_failed;
+                }
+            }
+            prev_cl = next_cl;
+        }
+        while (sec_buf_len < sector_size) : (sec_buf_len += 1) {
+            sec_buf[sec_buf_len] = 0;
+        }
+        if (!write_sector(cluster_lba(prev_cl) + cluster_sec_idx, sec_buf[0..sector_size])) {
+            if (first_cl >= 2) _ = free_chain(first_cl);
+            return .io_failed;
+        }
+    }
+
+    if (prev_cl >= 2) {
+        if (!set_fat_entry(prev_cl, fat_eoc)) {
+            if (first_cl >= 2) _ = free_chain(first_cl);
+            return .io_failed;
+        }
+    }
+
+    var raw: [32]u8 = @splat(0);
+    @memcpy(raw[0..11], short[0..11]);
+    raw[11] = 0x20;
+    std.mem.writeInt(u16, raw[20..22], @truncate(first_cl >> 16), .little);
+    std.mem.writeInt(u16, raw[26..28], @truncate(first_cl), .little);
+    std.mem.writeInt(u32, raw[28..32], @intCast(total_file_size), .little);
+    if (!write_dir_slot(slot, &raw)) {
+        if (first_cl >= 2) _ = free_chain(first_cl);
+        return .io_failed;
+    }
+
+    if (old_cluster_to_free >= 2 and old_cluster_to_free != first_cl) {
+        _ = free_chain(old_cluster_to_free);
+    }
+    return .ok;
+}
+
 // ---------------------------------------------------------------------------
 // Mutating operations (Milestone 13, card B1 — claim 5801)
 // ---------------------------------------------------------------------------
