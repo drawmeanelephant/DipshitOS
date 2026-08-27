@@ -155,12 +155,12 @@ echo "DESKTOP.BIN: OK"
 # the manifest content is embedded in the image (verified above by the
 # image list).
 # Expectation revised to OBSERVED BYTES (2026-08-24, claim 2259): the
-# serial marker reads `desktop: manifest apps=11` today — image/apps.txt
+# serial marker reads `desktop: manifest apps=12` today — image/apps.txt
 # grew from 9 entries at M13 close (d62c933) to 10 with M15 C4's
-# SETTINGS.BIN dock row (6c8b5b3, 2026-08-20) and to 11 with M23 E1's
-# EDIT.BIN row (ee3da3e, 2026-08-23).
-grep -q "desktop: manifest apps=11" "$SER" || {
-    echo "ERROR: DESKTOP.BIN manifest marker (apps=11) missing from serial log"
+# SETTINGS.BIN dock row (6c8b5b3, 2026-08-20), to 11 with M23 E1's
+# EDIT.BIN row (ee3da3e, 2026-08-23), and to 12 with M27 G6's SYSMON.BIN row.
+grep -q "desktop: manifest apps=12" "$SER" || {
+    echo "ERROR: DESKTOP.BIN manifest marker (apps=12) missing from serial log"
     exit 1
 }
 echo "DESKTOP.MANIFEST: OK"

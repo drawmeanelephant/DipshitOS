@@ -4,6 +4,7 @@
 //! via the M10 file seam, displays them in labeled TextInput widgets,
 //! and writes them back on Save. Uses zero heap allocation.
 
+const std = @import("std");
 const ui = @import("lib/ui.zig");
 const Rect = ui.Rect;
 const Button = ui.Button;
@@ -126,6 +127,16 @@ pub const AppState = struct {
 
     btn_save: Button,
     btn_reset: Button,
+    btn_defaults: Button,
+    btn_wizard: Button,
+
+    // M27 G2: First-boot wizard mode & steps (1..3)
+    wizard_mode: bool = false,
+    wizard_step: u8 = 1,
+    btn_wizard_back: Button,
+    btn_wizard_next: Button,
+    btn_wizard_finish: Button,
+    btn_wizard_skip: Button,
 
     // C10 live preview: in-memory last_saved_theme for Reset and same-frame preview.
     last_saved_theme: [max_value]u8 = [_]u8{0} ** max_value,
@@ -139,17 +150,41 @@ pub const AppState = struct {
             .input_hostname = TextInput.init(Rect.make(input_x, row_y0, input_w, input_h)),
             .dropdown_theme = DropDown.init(Rect.make(input_x, row_y0 + row_h, input_w, input_h), &theme_options),
             .input_prompt = TextInput.init(Rect.make(input_x, row_y0 + row_h * 2, input_w, input_h)),
-            .btn_save = Button.init(Rect.make(16, row_y0 + row_h * 3 + 16, 80, 24), "Save"),
-            .btn_reset = Button.init(Rect.make(106, row_y0 + row_h * 3 + 16, 80, 24), "Reset"),
+            .btn_save = Button.init(Rect.make(16, row_y0 + row_h * 3 + 16, 70, 24), "Save"),
+            .btn_reset = Button.init(Rect.make(96, row_y0 + row_h * 3 + 16, 70, 24), "Reset"),
+            .btn_defaults = Button.init(Rect.make(176, row_y0 + row_h * 3 + 16, 85, 24), "Defaults"),
+            .btn_wizard = Button.init(Rect.make(271, row_y0 + row_h * 3 + 16, 75, 24), "Wizard"),
+            .btn_wizard_back = Button.init(Rect.make(input_x, row_y0 + row_h * 3 + 16, 75, 24), "< Back"),
+            .btn_wizard_next = Button.init(Rect.make(input_x + 90, row_y0 + row_h * 3 + 16, 75, 24), "Next >"),
+            .btn_wizard_finish = Button.init(Rect.make(input_x + 90, row_y0 + row_h * 3 + 16, 75, 24), "Finish"),
+            .btn_wizard_skip = Button.init(Rect.make(16, row_y0 + row_h * 3 + 16, 65, 24), "Skip"),
         };
+    }
+
+    pub fn update_widget_layout(self: *AppState) void {
+        if (self.wizard_mode) {
+            self.input_hostname.rect = Rect.make(input_x, row_y0 + 16, input_w, input_h);
+            self.dropdown_theme.rect = Rect.make(input_x, row_y0 + 16, input_w, input_h);
+            self.input_prompt.rect = Rect.make(input_x, row_y0 + 16, input_w, input_h);
+        } else {
+            self.input_hostname.rect = Rect.make(input_x, row_y0, input_w, input_h);
+            self.dropdown_theme.rect = Rect.make(input_x, row_y0 + row_h, input_w, input_h);
+            self.input_prompt.rect = Rect.make(input_x, row_y0 + row_h * 2, input_w, input_h);
+        }
     }
 
     pub fn load(self: *AppState) void {
         var buf: [2048]u8 = undefined;
         const n = read_settings_file(&buf);
         if (n == 0) {
-            self.set_status("No settings file");
-            // Ensure a sane default theme even when file is missing.
+            self.set_status("First boot setup");
+            self.wizard_mode = true;
+            self.wizard_step = 1;
+            self.update_widget_layout();
+            // Set sane defaults
+            self.input_hostname.set_text("dipshitos");
+            self.dropdown_theme.set_selected_by_name("dark");
+            self.input_prompt.set_text("$ ");
             if (self.last_saved_theme_len == 0) {
                 const def = "dark";
                 @memcpy(self.last_saved_theme[0..def.len], def);
@@ -171,8 +206,8 @@ pub const AppState = struct {
         self.input_hostname.set_text(self.settings.hostname[0..self.settings.hostname_len]);
         self.dropdown_theme.set_selected_by_name(self.settings.theme[0..self.settings.theme_len]);
         self.input_prompt.set_text(self.settings.prompt[0..self.settings.prompt_len]);
+        self.update_widget_layout();
         // C10: cache last_saved_theme and apply live preview via ui.set_theme (EL0 palette).
-        // Kernel chrome (driving_award.theme_id) stays via `settings set theme` / reboot — EL1 hook deferred per doc.
         self.last_saved_theme_len = self.settings.theme_len;
         if (self.last_saved_theme_len > 0) {
             @memcpy(self.last_saved_theme[0..self.last_saved_theme_len], self.settings.theme[0..self.settings.theme_len]);
@@ -184,6 +219,15 @@ pub const AppState = struct {
             _ = ui.set_theme(def);
         }
         self.set_status("Loaded");
+    }
+
+    pub fn reset_defaults(self: *AppState) void {
+        self.input_hostname.set_text("dipshitos");
+        self.dropdown_theme.set_selected_by_name("dark");
+        self.input_prompt.set_text("$ ");
+        _ = ui.set_theme("dark");
+        self.save();
+        self.set_status("Defaults restored");
     }
 
     pub fn save(self: *AppState) void {
@@ -200,7 +244,9 @@ pub const AppState = struct {
             _ = ui.set_theme(sel);
             self.set_status("Saved OK");
         } else {
-            self.set_status("Save failed");
+            var err_buf: [64]u8 = undefined;
+            const err_msg = ui.format_error(-5, &err_buf);
+            self.set_status(err_msg);
         }
     }
 
@@ -225,12 +271,48 @@ pub const AppState = struct {
     }
 
     pub fn handle_mouse(self: *AppState, ev: *const Event) bool {
+        if (self.wizard_mode) {
+            if (self.btn_wizard_skip.handle_event(ev)) {
+                self.wizard_mode = false;
+                self.update_widget_layout();
+                self.reset_defaults();
+                return true;
+            }
+            if (self.wizard_step > 1 and self.btn_wizard_back.handle_event(ev)) {
+                self.wizard_step -= 1;
+                return true;
+            }
+            if (self.wizard_step < 3 and self.btn_wizard_next.handle_event(ev)) {
+                self.wizard_step += 1;
+                return true;
+            }
+            if (self.wizard_step == 3 and self.btn_wizard_finish.handle_event(ev)) {
+                self.wizard_mode = false;
+                self.update_widget_layout();
+                self.save();
+                return true;
+            }
+            if (self.wizard_step == 1) {
+                return self.input_hostname.handle_event(ev);
+            } else if (self.wizard_step == 2) {
+                const old_sel = self.dropdown_theme.selected;
+                const dd_handled = self.dropdown_theme.handle_event(ev);
+                if (old_sel != self.dropdown_theme.selected) {
+                    _ = ui.set_theme(self.dropdown_theme.selected_text());
+                    return true;
+                }
+                return dd_handled;
+            } else if (self.wizard_step == 3) {
+                return self.input_prompt.handle_event(ev);
+            }
+            return false;
+        }
+
         if (self.btn_save.handle_event(ev)) {
             self.save();
             return true;
         }
         if (self.btn_reset.handle_event(ev)) {
-            // C10: Reset reverts to in-memory last_saved_theme, not just disk reload.
             if (self.last_saved_theme_len > 0) {
                 self.dropdown_theme.set_selected_by_name(self.last_saved_theme[0..self.last_saved_theme_len]);
                 _ = ui.set_theme(self.last_saved_theme[0..self.last_saved_theme_len]);
@@ -238,8 +320,17 @@ pub const AppState = struct {
             self.load();
             return true;
         }
+        if (self.btn_defaults.handle_event(ev)) {
+            self.reset_defaults();
+            return true;
+        }
+        if (self.btn_wizard.handle_event(ev)) {
+            self.wizard_mode = true;
+            self.wizard_step = 1;
+            self.update_widget_layout();
+            return true;
+        }
         _ = self.input_hostname.handle_event(ev);
-        // C10: live preview on dropdown selection change — EL0 palette updates same frame.
         const old_sel = self.dropdown_theme.selected;
         const old_open = self.dropdown_theme.open;
         const dd_handled = self.dropdown_theme.handle_event(ev);
@@ -256,6 +347,20 @@ pub const AppState = struct {
     }
 
     pub fn handle_key(self: *AppState, ev: *const Event) bool {
+        if (self.wizard_mode) {
+            if (self.wizard_step == 1) return self.input_hostname.handle_event(ev);
+            if (self.wizard_step == 2) {
+                const old_sel = self.dropdown_theme.selected;
+                const dd_h = self.dropdown_theme.handle_event(ev);
+                if (old_sel != self.dropdown_theme.selected) {
+                    _ = ui.set_theme(self.dropdown_theme.selected_text());
+                    return true;
+                }
+                return dd_h;
+            }
+            if (self.wizard_step == 3) return self.input_prompt.handle_event(ev);
+            return false;
+        }
         if (self.input_hostname.handle_event(ev)) return true;
         const old_sel = self.dropdown_theme.selected;
         const old_open = self.dropdown_theme.open;
@@ -279,21 +384,49 @@ pub const AppState = struct {
         // Title bar.
         ui.draw_rect(win, Rect.make(0, 0, window_w, 28), ui.theme_surface());
         ui.draw_rect_outline(win, Rect.make(0, 0, window_w, 28), 1, ui.theme_border());
-        ui.draw_text_large(win, "Settings", 16, 6, ui.theme_text_primary());
 
-        // Labels.
-        ui.draw_text(win, "Hostname:", label_x, row_y0 + 7, ui.theme_text_muted());
-        ui.draw_text(win, "Theme:", label_x, row_y0 + row_h + 7, ui.theme_text_muted());
-        ui.draw_text(win, "Prompt:", label_x, row_y0 + row_h * 2 + 7, ui.theme_text_muted());
+        if (self.wizard_mode) {
+            ui.draw_text_large(win, "Setup Wizard", 16, 6, ui.theme_text_primary());
+            var step_hdr: [32]u8 = undefined;
+            const step_txt = std.fmt.bufPrint(&step_hdr, "Step {d} of 3", .{self.wizard_step}) catch "Step 1/3";
+            ui.draw_text(win, step_txt, window_w - 100, 8, ui.theme_accent());
 
-        // Input fields.
-        self.input_hostname.draw(win);
-        self.dropdown_theme.draw(win);
-        self.input_prompt.draw(win);
+            if (self.wizard_step == 1) {
+                ui.draw_text(win, "Welcome! Set your system hostname:", label_x, row_y0 - 8, ui.theme_text_primary());
+                ui.draw_text(win, "Hostname:", label_x, row_y0 + 16 + 7, ui.theme_text_muted());
+                self.input_hostname.draw(win);
+            } else if (self.wizard_step == 2) {
+                ui.draw_text(win, "Choose your color theme (live preview):", label_x, row_y0 - 8, ui.theme_text_primary());
+                ui.draw_text(win, "Theme:", label_x, row_y0 + 16 + 7, ui.theme_text_muted());
+                self.dropdown_theme.draw(win);
+            } else if (self.wizard_step == 3) {
+                ui.draw_text(win, "Configure your shell command prompt:", label_x, row_y0 - 8, ui.theme_text_primary());
+                ui.draw_text(win, "Prompt:", label_x, row_y0 + 16 + 7, ui.theme_text_muted());
+                self.input_prompt.draw(win);
+            }
 
-        // Buttons.
-        self.btn_save.draw(win);
-        self.btn_reset.draw(win);
+            self.btn_wizard_skip.draw(win);
+            if (self.wizard_step > 1) self.btn_wizard_back.draw(win);
+            if (self.wizard_step < 3) self.btn_wizard_next.draw(win) else self.btn_wizard_finish.draw(win);
+        } else {
+            ui.draw_text_large(win, "Settings", 16, 6, ui.theme_text_primary());
+
+            // Labels.
+            ui.draw_text(win, "Hostname:", label_x, row_y0 + 7, ui.theme_text_muted());
+            ui.draw_text(win, "Theme:", label_x, row_y0 + row_h + 7, ui.theme_text_muted());
+            ui.draw_text(win, "Prompt:", label_x, row_y0 + row_h * 2 + 7, ui.theme_text_muted());
+
+            // Input fields.
+            self.input_hostname.draw(win);
+            self.dropdown_theme.draw(win);
+            self.input_prompt.draw(win);
+
+            // Buttons.
+            self.btn_save.draw(win);
+            self.btn_reset.draw(win);
+            self.btn_defaults.draw(win);
+            self.btn_wizard.draw(win);
+        }
 
         // Status bar.
         ui.draw_rect(win, Rect.make(0, window_h - 20, window_w, 20), ui.theme_surface());
@@ -363,4 +496,56 @@ pub export fn _start() callconv(.c) noreturn {
     ui.write_console("settings: exiting\n");
     ui.win_close(win);
     ui.exit_process(exit_status);
+}
+
+test "settings: AppState wizard flow and reset_defaults" {
+    var app = AppState.init();
+    app.wizard_mode = true;
+    app.wizard_step = 1;
+
+    // Next step in wizard (MOUSE_DOWN + MOUSE_UP)
+    const btn_next_rect = app.btn_wizard_next.rect;
+    var ev_down_next = Event{
+        .kind = ui.MOUSE_DOWN,
+        .flags = ui.BTN_LEFT,
+        .seq = 1,
+        .arg0 = btn_next_rect.x + 2,
+        .arg1 = btn_next_rect.y + 2,
+    };
+    _ = app.handle_mouse(&ev_down_next);
+    var ev_up_next = Event{
+        .kind = ui.MOUSE_UP,
+        .flags = ui.BTN_LEFT,
+        .seq = 2,
+        .arg0 = btn_next_rect.x + 2,
+        .arg1 = btn_next_rect.y + 2,
+    };
+    _ = app.handle_mouse(&ev_up_next);
+    try std.testing.expectEqual(@as(u8, 2), app.wizard_step);
+
+    // Back step (MOUSE_DOWN + MOUSE_UP)
+    const btn_back_rect = app.btn_wizard_back.rect;
+    var ev_down_back = Event{
+        .kind = ui.MOUSE_DOWN,
+        .flags = ui.BTN_LEFT,
+        .seq = 3,
+        .arg0 = btn_back_rect.x + 2,
+        .arg1 = btn_back_rect.y + 2,
+    };
+    _ = app.handle_mouse(&ev_down_back);
+    var ev_up_back = Event{
+        .kind = ui.MOUSE_UP,
+        .flags = ui.BTN_LEFT,
+        .seq = 4,
+        .arg0 = btn_back_rect.x + 2,
+        .arg1 = btn_back_rect.y + 2,
+    };
+    _ = app.handle_mouse(&ev_up_back);
+    try std.testing.expectEqual(@as(u8, 1), app.wizard_step);
+
+    // Reset defaults
+    app.reset_defaults();
+    try std.testing.expectEqualStrings("dipshitos", app.input_hostname.get_text());
+    try std.testing.expectEqualStrings("dark", app.dropdown_theme.selected_text());
+    try std.testing.expectEqualStrings("$ ", app.input_prompt.get_text());
 }

@@ -260,6 +260,45 @@ pub fn theme_warning() u32 {
     return current_theme.warning;
 }
 
+// ---------------------------------------------------------------------------
+// Widget State & Styling Accessors (M27 G14 #457)
+// ---------------------------------------------------------------------------
+
+pub const WidgetState = enum {
+    normal,
+    hover,
+    pressed,
+    disabled,
+    focused,
+};
+
+pub fn widget_bg(state: WidgetState) u32 {
+    return switch (state) {
+        .normal => theme_btn_idle(),
+        .hover => theme_btn_hover(),
+        .pressed => theme_btn_pressed(),
+        .disabled => theme_surface(),
+        .focused => theme_btn_hover(),
+    };
+}
+
+pub fn widget_border(state: WidgetState) u32 {
+    return switch (state) {
+        .normal => theme_border(),
+        .hover => theme_accent(),
+        .pressed => theme_accent(),
+        .disabled => theme_border(),
+        .focused => theme_accent(),
+    };
+}
+
+pub fn widget_text(state: WidgetState) u32 {
+    return switch (state) {
+        .normal, .hover, .pressed, .focused => theme_text_primary(),
+        .disabled => theme_text_muted(),
+    };
+}
+
 // Backward-compatible pub const aliases for app code that references
 // ui.COLOR_*. These match the default (dark) theme. The widget draw
 // functions use theme_*() for dynamic theming.
@@ -802,7 +841,23 @@ pub fn draw_text_centered_large(win_id: u32, text: []const u8, rect: Rect, fg_rg
 // Component: Button
 // ---------------------------------------------------------------------------
 
-pub const ButtonState = enum { idle, hover, pressed };
+pub const ButtonState = enum {
+    idle,
+    hover,
+    pressed,
+    disabled,
+    focused,
+
+    pub fn to_widget_state(self: ButtonState) WidgetState {
+        return switch (self) {
+            .idle => .normal,
+            .hover => .hover,
+            .pressed => .pressed,
+            .disabled => .disabled,
+            .focused => .focused,
+        };
+    }
+};
 
 pub const Button = struct {
     rect: Rect,
@@ -850,19 +905,27 @@ pub const Button = struct {
     }
 
     pub fn draw(self: *const Button, win_id: u32) void {
+        const ws = self.state.to_widget_state();
         const bg = if (self.is_active)
             theme_accent()
         else if (self.bg_color) |c|
             c
-        else switch (self.state) {
-            .idle => theme_btn_idle(),
-            .hover => theme_btn_hover(),
-            .pressed => theme_btn_pressed(),
-        };
+        else
+            widget_bg(ws);
+
+        const border = if (self.is_active)
+            theme_text_primary()
+        else
+            widget_border(ws);
+
+        const text_col = if (self.state == .disabled)
+            widget_text(ws)
+        else
+            self.text_color;
 
         draw_rect(win_id, self.rect, bg);
-        draw_rect_outline(win_id, self.rect, 1, if (self.is_active) theme_text_primary() else theme_border());
-        draw_text_centered(win_id, self.label, self.rect, self.text_color);
+        draw_rect_outline(win_id, self.rect, 1, border);
+        draw_text_centered(win_id, self.label, self.rect, text_col);
     }
 };
 
@@ -1213,6 +1276,25 @@ pub const DropDown = struct {
 // Component: ContextMenu — right-click popup (GH #228, Arc2 W2)
 // ---------------------------------------------------------------------------
 
+pub const MenuItemKind = enum {
+    action,
+    separator,
+    header,
+};
+
+pub const MenuItemSpec = struct {
+    label: []const u8 = "",
+    shortcut: []const u8 = "",
+    kind: MenuItemKind = .action,
+    disabled: bool = false,
+    action: ?*const fn () void = null,
+};
+
+pub const MenuSection = struct {
+    title: []const u8 = "",
+    items: []const MenuItemSpec = &[_]MenuItemSpec{},
+};
+
 pub const ContextMenuItem = struct {
     label: []const u8,
     // Optional callback — not used in host tests, reserved for app wiring.
@@ -1221,6 +1303,7 @@ pub const ContextMenuItem = struct {
 
 pub const ContextMenu = struct {
     items: []const ContextMenuItem = &[_]ContextMenuItem{},
+    specs: []const MenuItemSpec = &[_]MenuItemSpec{},
     x: u32 = 0,
     y: u32 = 0,
     width: u32 = 120,
@@ -1230,7 +1313,11 @@ pub const ContextMenu = struct {
     selected_idx: ?usize = null,
 
     pub fn init(items: []const ContextMenuItem) ContextMenu {
-        return .{ .items = items };
+        return .{ .items = items, .specs = &[_]MenuItemSpec{} };
+    }
+
+    pub fn initWithSpecs(specs: []const MenuItemSpec) ContextMenu {
+        return .{ .items = &[_]ContextMenuItem{}, .specs = specs };
     }
 
     pub fn show(self: *ContextMenu, x: u32, y: u32) void {
@@ -1250,8 +1337,20 @@ pub const ContextMenu = struct {
         return self.open;
     }
 
+    pub fn count(self: *const ContextMenu) usize {
+        return if (self.specs.len > 0) self.specs.len else self.items.len;
+    }
+
     pub fn bounds(self: *const ContextMenu) Rect {
-        return Rect.make(self.x, self.y, self.width, @as(u32, @intCast(self.items.len)) * self.row_h);
+        return Rect.make(self.x, self.y, self.width, @as(u32, @intCast(self.count())) * self.row_h);
+    }
+
+    fn is_item_selectable(self: *const ContextMenu, idx: usize) bool {
+        if (self.specs.len > 0) {
+            if (idx >= self.specs.len) return false;
+            return self.specs[idx].kind == .action and !self.specs[idx].disabled;
+        }
+        return idx < self.items.len;
     }
 
     fn hit_test(self: *const ContextMenu, px: u32, py: u32) ?usize {
@@ -1260,43 +1359,97 @@ pub const ContextMenu = struct {
         if (!b.contains(px, py)) return null;
         const rel_y = py - b.y;
         const idx = rel_y / self.row_h;
-        if (idx < self.items.len) return idx;
+        if (idx < self.count()) return idx;
         return null;
     }
 
     pub fn handle_event(self: *ContextMenu, ev: *const Event) bool {
         switch (ev.kind) {
-            MOUSE_RIGHT_DOWN => {
-                // Show at click position — caller may also call show() directly.
-                // We treat right-down as show if not already open.
-                if (!self.open) {
-                    self.show(ev.arg0, ev.arg1);
+            KEY_DOWN => {
+                if (!self.open) return false;
+                const kc = ev.arg0;
+                const total = self.count();
+                if (total == 0) return false;
+                if (kc == 0x52) { // Up arrow
+                    var cur = if (self.hover_idx) |h| h else 0;
+                    var tries: usize = 0;
+                    while (tries < total) : (tries += 1) {
+                        cur = if (cur == 0) total - 1 else cur - 1;
+                        if (self.is_item_selectable(cur)) {
+                            self.hover_idx = cur;
+                            return true;
+                        }
+                    }
+                    return true;
+                } else if (kc == 0x51) { // Down arrow
+                    var cur = if (self.hover_idx) |h| h else total - 1;
+                    var tries: usize = 0;
+                    while (tries < total) : (tries += 1) {
+                        cur = if (cur + 1 >= total) 0 else cur + 1;
+                        if (self.is_item_selectable(cur)) {
+                            self.hover_idx = cur;
+                            return true;
+                        }
+                    }
+                    return true;
+                } else if (kc == 0x28) { // Enter
+                    if (self.hover_idx) |idx| {
+                        if (self.is_item_selectable(idx)) {
+                            self.selected_idx = idx;
+                            self.open = false;
+                            if (self.specs.len > 0) {
+                                if (self.specs[idx].action) |act| act();
+                            } else if (self.items.len > 0) {
+                                if (self.items[idx].action) |act| act();
+                            }
+                            return true;
+                        }
+                    }
+                    return false;
+                } else if (kc == 0x29) { // Escape
+                    self.dismiss();
                     return true;
                 }
-                // If already open, treat as reposition.
+                return false;
+            },
+            MOUSE_RIGHT_DOWN => {
                 self.show(ev.arg0, ev.arg1);
                 return true;
             },
             MOUSE_DOWN => {
                 if (!self.open) return false;
                 if (self.hit_test(ev.arg0, ev.arg1)) |idx| {
-                    self.selected_idx = idx;
-                    self.open = false;
-                    self.hover_idx = null;
-                    if (self.items[idx].action) |act| act();
+                    if (self.is_item_selectable(idx)) {
+                        self.selected_idx = idx;
+                        self.open = false;
+                        self.hover_idx = null;
+                        if (self.specs.len > 0) {
+                            if (self.specs[idx].action) |act| act();
+                        } else if (self.items.len > 0) {
+                            if (self.items[idx].action) |act| act();
+                        }
+                        return true;
+                    }
                     return true;
                 }
-                // Outside click dismisses.
                 self.dismiss();
                 return false;
             },
             MOUSE_MOVE => {
                 if (!self.open) return false;
-                self.hover_idx = self.hit_test(ev.arg0, ev.arg1);
+                const hit = self.hit_test(ev.arg0, ev.arg1);
+                if (hit) |idx| {
+                    if (self.is_item_selectable(idx)) {
+                        self.hover_idx = idx;
+                    } else {
+                        self.hover_idx = null;
+                    }
+                } else {
+                    self.hover_idx = null;
+                }
                 return false;
             },
             MOUSE_RIGHT_UP => {
-                // No action — just consume if open to prevent fall-through.
                 if (self.open) return true;
                 return false;
             },
@@ -1307,19 +1460,41 @@ pub const ContextMenu = struct {
     pub fn draw(self: *const ContextMenu, win_id: u32) void {
         if (!self.open) return;
         const b = self.bounds();
-        // Background + border — above windows like dropdown.
         draw_rect(win_id, b, theme_surface());
         draw_rect_outline(win_id, b, 1, theme_border());
+        const total = self.count();
         var i: usize = 0;
-        while (i < self.items.len) : (i += 1) {
+        while (i < total) : (i += 1) {
             const row_y = b.y + @as(u32, @intCast(i)) * self.row_h;
             const row_rect = Rect.make(b.x + 1, row_y, b.w - 2, self.row_h);
-            const bg = if (self.hover_idx != null and self.hover_idx.? == i)
-                theme_btn_hover()
-            else
-                theme_surface();
-            win_fill(win_id, row_rect.x, row_rect.y, row_rect.w, row_rect.h, bg);
-            draw_text(win_id, self.items[i].label, row_rect.x + 4, row_rect.y + (self.row_h - 8) / 2, theme_text_primary());
+
+            if (self.specs.len > 0) {
+                const spec = self.specs[i];
+                if (spec.kind == .separator) {
+                    const mid_y = row_y + self.row_h / 2;
+                    draw_rect(win_id, Rect.make(b.x + 4, mid_y, if (b.w > 8) b.w - 8 else 0, 1), theme_border());
+                    continue;
+                }
+                const bg = if (self.hover_idx != null and self.hover_idx.? == i and !spec.disabled)
+                    theme_btn_hover()
+                else
+                    theme_surface();
+                win_fill(win_id, row_rect.x, row_rect.y, row_rect.w, row_rect.h, bg);
+                const text_col = if (spec.disabled) theme_text_muted() else theme_text_primary();
+                draw_text(win_id, spec.label, row_rect.x + 6, row_rect.y + (self.row_h - 8) / 2, text_col);
+                if (spec.shortcut.len > 0) {
+                    const sc_w = @as(u32, @intCast(spec.shortcut.len)) * 8;
+                    const sc_x = if (row_rect.w > sc_w + 6) row_rect.x + row_rect.w - sc_w - 6 else row_rect.x;
+                    draw_text(win_id, spec.shortcut, sc_x, row_rect.y + (self.row_h - 8) / 2, theme_text_muted());
+                }
+            } else {
+                const bg = if (self.hover_idx != null and self.hover_idx.? == i)
+                    theme_btn_hover()
+                else
+                    theme_surface();
+                win_fill(win_id, row_rect.x, row_rect.y, row_rect.w, row_rect.h, bg);
+                draw_text(win_id, self.items[i].label, row_rect.x + 6, row_rect.y + (self.row_h - 8) / 2, theme_text_primary());
+            }
         }
     }
 };
@@ -1891,6 +2066,98 @@ pub const Dialog = struct {
         self.cancel_button.draw(win_id);
     }
 };
+
+// ---------------------------------------------------------------------------
+// Standard Dialog Helper (M27 G10 #453)
+// ---------------------------------------------------------------------------
+
+pub const DialogSeverity = enum {
+    info,
+    warning,
+    error_type,
+    question,
+};
+
+pub const DialogButtons = enum {
+    ok,
+    ok_cancel,
+    yes_no,
+    yes_no_cancel,
+    save_dont_cancel,
+};
+
+/// Helper to configure and present a standardized modal dialog.
+pub fn show_dialog(dlg: *Dialog, message: []const u8, has_input: bool) void {
+    dlg.message = message;
+    dlg.has_input = has_input;
+    dlg.show();
+}
+
+// ---------------------------------------------------------------------------
+// Empty State Presenter (M27 G22 #465)
+// ---------------------------------------------------------------------------
+
+/// Draw an empty-state message inside `rect` when a view/list has no items.
+pub fn draw_empty_state(win_id: u32, rect: Rect, title: []const u8, subtitle: []const u8) void {
+    if (rect.w == 0 or rect.h == 0) return;
+    draw_rect(win_id, rect, theme_surface());
+    draw_rect_outline(win_id, rect, 1, theme_border());
+
+    const center_y = rect.y + rect.h / 2;
+    const title_w = @as(u32, @intCast(title.len)) * 8;
+    const title_x = if (rect.w > title_w) rect.x + (rect.w - title_w) / 2 else rect.x + 4;
+    const title_y = if (center_y >= 14) center_y - 14 else rect.y + 4;
+
+    draw_text(win_id, title, title_x, title_y, theme_text_primary());
+
+    if (subtitle.len > 0) {
+        const sub_w = @as(u32, @intCast(subtitle.len)) * 8;
+        const sub_x = if (rect.w > sub_w) rect.x + (rect.w - sub_w) / 2 else rect.x + 4;
+        draw_text(win_id, subtitle, sub_x, title_y + 14, theme_text_muted());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Error Display Consistency (M27 G23 #466)
+// ---------------------------------------------------------------------------
+
+/// Format standard OS error code into a user-friendly message.
+pub fn format_error(code: i64, buf: []u8) []const u8 {
+    const msg: []const u8 = switch (code) {
+        -1 => "Operation not permitted",
+        -2 => "File or directory not found",
+        -3 => "No such process",
+        -4 => "Interrupted system call",
+        -5 => "Input/output error",
+        -6 => "No such device or address",
+        -7 => "Argument list too long",
+        -8 => "Exec format error",
+        -9 => "Bad file descriptor",
+        -12 => "Out of memory",
+        -13 => "Permission denied",
+        -14 => "Bad memory address",
+        -16 => "Device or resource busy",
+        -17 => "File already exists",
+        -19 => "No such device",
+        -20 => "Not a directory",
+        -21 => "Is a directory",
+        -22 => "Invalid argument",
+        -24 => "Too many open files",
+        -27 => "File too large",
+        -28 => "No space left on device",
+        -30 => "Read-only file system",
+        -38 => "Function not implemented",
+        -110 => "Connection timed out",
+        -111 => "Connection refused",
+        else => "",
+    };
+    if (msg.len > 0) {
+        const n = @min(msg.len, buf.len);
+        @memcpy(buf[0..n], msg[0..n]);
+        return buf[0..n];
+    }
+    return std.fmt.bufPrint(buf, "System error ({d})", .{code}) catch "System error";
+}
 
 // ---------------------------------------------------------------------------
 // Component: HScrollBar — horizontal scroll track (GH #222, Arc1)
@@ -2912,4 +3179,74 @@ test "ui: ContextMenu via MOUSE_RIGHT_DOWN and NOTEPAD/FILE/TOP integration" {
     m1.draw(0);
     m2.draw(0);
     m3.draw(0);
+}
+
+test "ui: WidgetState styling accessors" {
+    try std.testing.expect(widget_bg(.normal) != 0);
+    try std.testing.expect(widget_bg(.hover) != 0);
+    try std.testing.expect(widget_border(.normal) != 0);
+    try std.testing.expect(widget_text(.normal) != 0);
+    try std.testing.expect(widget_text(.disabled) != 0);
+}
+
+test "ui: ContextMenu with MenuItemSpec, separators, shortcuts, and keyboard navigation" {
+    const specs = [_]MenuItemSpec{
+        .{ .label = "New", .shortcut = "Ctrl+N" },
+        .{ .label = "Open", .shortcut = "Ctrl+O" },
+        .{ .kind = .separator },
+        .{ .label = "Save", .shortcut = "Ctrl+S", .disabled = true },
+        .{ .label = "Quit", .shortcut = "Ctrl+Q" },
+    };
+    var menu = ContextMenu.initWithSpecs(specs[0..]);
+    menu.show(10, 20);
+    try std.testing.expect(menu.is_open());
+    try std.testing.expectEqual(@as(usize, 5), menu.count());
+
+    // Down arrow should select first item (0: "New")
+    var ev_down = Event{ .kind = KEY_DOWN, .flags = 0, .seq = 1, .arg0 = 0x51, .arg1 = 0 };
+    _ = menu.handle_event(&ev_down);
+    try std.testing.expectEqual(@as(?usize, 0), menu.hover_idx);
+
+    // Down arrow again should select second item (1: "Open")
+    _ = menu.handle_event(&ev_down);
+    try std.testing.expectEqual(@as(?usize, 1), menu.hover_idx);
+
+    // Down arrow again should skip separator (2) and disabled item (3) to select (4: "Quit")
+    _ = menu.handle_event(&ev_down);
+    try std.testing.expectEqual(@as(?usize, 4), menu.hover_idx);
+
+    // Enter on "Quit" should select index 4 and close menu
+    var ev_enter = Event{ .kind = KEY_DOWN, .flags = 0, .seq = 2, .arg0 = 0x28, .arg1 = 0 };
+    _ = menu.handle_event(&ev_enter);
+    try std.testing.expect(!menu.is_open());
+    try std.testing.expectEqual(@as(?usize, 4), menu.selected_idx);
+
+    // Reopen and test Escape dismissal
+    menu.show(10, 20);
+    var ev_esc = Event{ .kind = KEY_DOWN, .flags = 0, .seq = 3, .arg0 = 0x29, .arg1 = 0 };
+    _ = menu.handle_event(&ev_esc);
+    try std.testing.expect(!menu.is_open());
+
+    menu.draw(0);
+}
+
+test "ui: show_dialog, draw_empty_state, and format_error" {
+    const parent = Rect.make(0, 0, 400, 300);
+    var dlg = Dialog.init(parent, "Test Dialog", false);
+    show_dialog(&dlg, "Updated Message", true);
+    try std.testing.expect(dlg.is_open());
+    try std.testing.expectEqualStrings("Updated Message", dlg.message);
+    try std.testing.expect(dlg.has_input);
+
+    draw_empty_state(0, Rect.make(10, 10, 200, 100), "No Files Found", "Create a file or mount volume");
+
+    var err_buf: [64]u8 = undefined;
+    const msg_enoent = format_error(-2, &err_buf);
+    try std.testing.expectEqualStrings("File or directory not found", msg_enoent);
+
+    const msg_eacces = format_error(-13, &err_buf);
+    try std.testing.expectEqualStrings("Permission denied", msg_eacces);
+
+    const msg_custom = format_error(-999, &err_buf);
+    try std.testing.expect(std.mem.startsWith(u8, msg_custom, "System error"));
 }

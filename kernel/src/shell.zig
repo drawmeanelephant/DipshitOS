@@ -3627,6 +3627,7 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "  write       write text to a file on the ESP\n" ++
         "  mktemp      create a temporary file (empty, unique name)\n" ++
         "  stat        file metadata: size, type, cluster, path (D8)\n" ++
+        "  du          recursive directory disk usage (M25 F4)\n" ++
         "  find        recursive file search with glob patterns ('find / -name \"*.BIN\"' — bounded 3 levels, 256 results)\n" ++
         "  inventory   list all installed applications from APPS.TXT with sizes and types (D16)\n" ++
         "networking\n" ++
@@ -3637,6 +3638,7 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "  input       keyboard/pointer event FIFO: armed state, occupancy, drop count, last keyboard + pointer events\n" ++
         "  roadpops    Road Pops framebuffer console: armed/dirty/present counters (the boot terminal on the screen)\n" ++
         "  screen      virtio-gpu transport + framebuffer: device DID, features, scanout, status, re-arm ('screen fill <rrggbb>' fills the framebuffer and flushes it to the scanout)\n" ++
+        "  screenshot  capture the current framebuffer (1280x720) and save as BMP to disk (G27)\n" ++
         "  text        framebuffer text: text region, cursor, scrollback ('text put <string...>' renders + flushes to the scanout; 'text clear' clears; 'text putraw' skips the trailing newline; 'text fontdebug [on|off]' missing-glyph stats)\n" ++
         "  usb         XHCI host controller: `usb` transport report, `usb devices` enumerated HID devices, `usb report` last HID report\n" ++
         "  dui         Driving Award window manager: registry (with owner pids), z-order, focus, hit-testing ('dui focus <n>' focuses; 'dui raise <n>' raises; 'dui lower <n>' lowers to back; 'dui move <n> <x> <y>' moves a user window; 'dui close <n>' releases a user window; 'dui list <pid>' filters by owner; 'dui hit <x> <y>' hit-tests; 'dui cycle' cycles focus like Alt+Tab; 'dui tile <n>' toggles a user window floating/tiled (M21 W1); 'dui master' swaps master/detail (M21 W2))\n" ++
@@ -3655,6 +3657,7 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "  repeat      repeat text, safely bounded\n" ++
         "  sh          run a script file of shell commands ('sh <script>' executes it line by line; 64 lines max, 256 chars per line; '#' comments; 'exit' stops early)\n" ++
         "  settings    persistent configuration: `settings [list]`, `settings get <key>`, `settings set <key> <val>`, `settings reset`\n" ++
+        "  shortcuts   keyboard shortcut reference card (G29)\n" ++
         "  sound       virtio-snd transport: device DID, class, status, control-queue state, device-config counts (jacks/streams/channel-maps), re-arm; stream-state control: 'sound volume <0-100>' and 'sound mute <on|off>'\n" ++
         "  shutdown    request power-off\n" ++
         "  type        echo stdin (the pipe source) to stdout — the right half of `a | type`\n" ++

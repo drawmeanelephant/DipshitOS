@@ -42,6 +42,7 @@ storage
   write       write text to a file on the ESP
   mktemp      create a temporary file (empty, unique name)
   stat        file metadata: size, type, cluster, path (D8)
+  du          recursive directory disk usage (M25 F4)
   find        recursive file search with glob patterns ('find / -name "*.BIN"' — bounded 3 levels, 256 results)
   inventory   list all installed applications from APPS.TXT with sizes and types (D16)
 networking
@@ -52,6 +53,7 @@ graphics / input
   input       keyboard/pointer event FIFO: armed state, occupancy, drop count, last keyboard + pointer events
   roadpops    Road Pops framebuffer console: armed/dirty/present counters (the boot terminal on the screen)
   screen      virtio-gpu transport + framebuffer: device DID, features, scanout, status, re-arm ('screen fill <rrggbb>' fills the framebuffer and flushes it to the scanout)
+  screenshot  capture the current framebuffer (1280x720) and save as BMP to disk (G27)
   text        framebuffer text: text region, cursor, scrollback ('text put <string...>' renders + flushes to the scanout; 'text clear' clears; 'text putraw' skips the trailing newline; 'text fontdebug [on|off]' missing-glyph stats)
   usb         XHCI host controller: `usb` transport report, `usb devices` enumerated HID devices, `usb report` last HID report
   dui         Driving Award window manager: registry (with owner pids), z-order, focus, hit-testing ('dui focus <n>' focuses; 'dui raise <n>' raises; 'dui lower <n>' lowers to back; 'dui move <n> <x> <y>' moves a user window; 'dui close <n>' releases a user window; 'dui list <pid>' filters by owner; 'dui hit <x> <y>' hit-tests; 'dui cycle' cycles focus like Alt+Tab; 'dui tile <n>' toggles a user window floating/tiled (M21 W1); 'dui master' swaps master/detail (M21 W2))
@@ -70,6 +72,7 @@ system
   repeat      repeat text, safely bounded
   sh          run a script file of shell commands ('sh <script>' executes it line by line; 64 lines max, 256 chars per line; '#' comments; 'exit' stops early)
   settings    persistent configuration: `settings [list]`, `settings get <key>`, `settings set <key> <val>`, `settings reset`
+  shortcuts   keyboard shortcut reference card (G29)
   sound       virtio-snd transport: device DID, class, status, control-queue state, device-config counts (jacks/streams/channel-maps), re-arm; stream-state control: 'sound volume <0-100>' and 'sound mute <on|off>'
   shutdown    request power-off
   type        echo stdin (the pipe source) to stdout — the right half of `a | type`

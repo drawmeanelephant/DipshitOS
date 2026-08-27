@@ -45,9 +45,12 @@ const virtio_gpu = @import("virtio_gpu.zig");
 const fbtext = @import("text.zig");
 const events = @import("events.zig"); // Milestone 9 (claim 9228): application events
 const clipboard = @import("clipboard.zig"); // Arc2 W3 (claim 1264): tray clipboard indicator
+const virtio_snd = @import("virtio_snd.zig"); // M27 G5 (#448): action sound feedback
+const settings = @import("settings.zig");
 
-// ---------------------------------------------------------------------------
-// Geometry + colors (fixed constants — the live record lives in the claim)
+/// M27 G13: Focus-follows-mouse configuration and dialog previous-focus tracking
+pub var focus_follows_mouse: bool = false;
+pub var previous_focus: ?u8 = null;
 // ---------------------------------------------------------------------------
 
 /// Bounded window registry size (fixed BSS, M15 C4 dock adds one fixed window).
@@ -506,6 +509,14 @@ pub fn notify_push(text: []const u8, level: u8) void {
     } else {
         // Drop-oldest: advance head.
         notify_head = (notify_head + 1) % notify_max;
+    }
+    // M27 G5: sound feedback for notifications
+    if (virtio_snd.snd_status() == 0x0f) {
+        if (level == 2) {
+            _ = virtio_snd.snd_beep(880, 100);
+        } else {
+            _ = virtio_snd.snd_beep(440, 50);
+        }
     }
 }
 
@@ -2201,10 +2212,32 @@ pub fn tooltip_advance_tick() void {
 // M27 G2 — About dialog
 // ---------------------------------------------------------------------------
 
+pub fn about_dialog_open_dialog() void {
+    if (!about_dialog_open) {
+        previous_focus = focused_id;
+        about_dialog_open = true;
+        _ = mark_dirty(0);
+    }
+}
+
+pub fn about_dialog_close() void {
+    if (about_dialog_open) {
+        about_dialog_open = false;
+        if (previous_focus) |pf| {
+            _ = focus(pf);
+            previous_focus = null;
+        }
+        _ = mark_dirty(0);
+    }
+}
+
 /// M27 G2: toggle the about dialog.
 pub fn about_dialog_toggle() void {
-    about_dialog_open = !about_dialog_open;
-    _ = mark_dirty(0);
+    if (!about_dialog_open) {
+        about_dialog_open_dialog();
+    } else {
+        about_dialog_close();
+    }
 }
 
 /// M27 G3: scale a window's framebuffer content into the preview buffer
@@ -2259,8 +2292,13 @@ pub fn about_dialog_hit_test(x: u32, y: u32) bool {
     const dlg_x: u32 = if (virtio_gpu.fb_width > dlg_w) (virtio_gpu.fb_width - dlg_w) / 2 else 0;
     const dlg_y: u32 = if (virtio_gpu.fb_height > dlg_h) (virtio_gpu.fb_height - dlg_h) / 2 else 0;
     // Close button: top-right corner (8x8).
-    return x >= dlg_x + dlg_w - 12 and x < dlg_x + dlg_w - 4 and
-        y >= dlg_y + 4 and y < dlg_y + 12;
+    if (x >= dlg_x + dlg_w - 12 and x < dlg_x + dlg_w - 4 and
+        y >= dlg_y + 4 and y < dlg_y + 12)
+    {
+        about_dialog_close();
+        return true;
+    }
+    return false;
 }
 
 /// Helper: user window slot index (id - base) or null.
@@ -2550,6 +2588,14 @@ pub fn pointer_tick(st: input.PointerState, click: ?input.Click) ?u8 {
                     snap_zone = .none;
                     _ = mark_dirty(0);
                 }
+            }
+        } else if (moved and !cur_left and !cur_right and focus_follows_mouse) {
+            // M27 G13: Focus-follows-mouse
+            if (focus_at(cursor_x, cursor_y)) {
+                const id = focused_id;
+                _ = raise(id);
+                _ = mark_dirty(0);
+                focused_changed = id;
             }
         } else {
             if (snap_zone != .none) {
@@ -3229,7 +3275,15 @@ fn draw_chrome() void {
         const cy: usize = cursor_y;
         const cw = if (cx + cursor_w > wspan) wspan - cx else cursor_w;
         const ch = if (cy + cursor_h > hspan) hspan - cy else cursor_h;
-        fill_rect(fb, stride, cx, cy, cw, ch, cursor_rgb);
+        if (resize_id != null) {
+            // M27 G12: resize glyph
+            fill_rect(fb, stride, cx, cy, cw, ch, 0xffaa00);
+        } else if (drag_id != null) {
+            // M27 G12: move glyph
+            fill_rect(fb, stride, cx, cy, cw, ch, 0x00aaff);
+        } else {
+            fill_rect(fb, stride, cx, cy, cw, ch, cursor_rgb);
+        }
     }
     // M15 C2 (Alt+Tab overlay, #225): centered window previews while Alt held.
     // Topmost below notification (D7 ordering), above user chrome. Dim the
