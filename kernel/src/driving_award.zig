@@ -2212,19 +2212,32 @@ pub fn tooltip_advance_tick() void {
 // M27 G2 — About dialog
 // ---------------------------------------------------------------------------
 
-/// M27 G2: toggle the about dialog.
-pub fn about_dialog_toggle() void {
+pub fn about_dialog_open_dialog() void {
     if (!about_dialog_open) {
         previous_focus = focused_id;
         about_dialog_open = true;
-    } else {
+        _ = mark_dirty(0);
+    }
+}
+
+pub fn about_dialog_close() void {
+    if (about_dialog_open) {
         about_dialog_open = false;
         if (previous_focus) |pf| {
             _ = focus(pf);
             previous_focus = null;
         }
+        _ = mark_dirty(0);
     }
-    _ = mark_dirty(0);
+}
+
+/// M27 G2: toggle the about dialog.
+pub fn about_dialog_toggle() void {
+    if (!about_dialog_open) {
+        about_dialog_open_dialog();
+    } else {
+        about_dialog_close();
+    }
 }
 
 /// M27 G3: scale a window's framebuffer content into the preview buffer
@@ -2282,12 +2295,7 @@ pub fn about_dialog_hit_test(x: u32, y: u32) bool {
     if (x >= dlg_x + dlg_w - 12 and x < dlg_x + dlg_w - 4 and
         y >= dlg_y + 4 and y < dlg_y + 12)
     {
-        about_dialog_open = false;
-        if (previous_focus) |pf| {
-            _ = focus(pf);
-            previous_focus = null;
-        }
-        _ = mark_dirty(0);
+        about_dialog_close();
         return true;
     }
     return false;

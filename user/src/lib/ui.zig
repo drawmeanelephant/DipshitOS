@@ -841,7 +841,23 @@ pub fn draw_text_centered_large(win_id: u32, text: []const u8, rect: Rect, fg_rg
 // Component: Button
 // ---------------------------------------------------------------------------
 
-pub const ButtonState = enum { idle, hover, pressed };
+pub const ButtonState = enum {
+    idle,
+    hover,
+    pressed,
+    disabled,
+    focused,
+
+    pub fn to_widget_state(self: ButtonState) WidgetState {
+        return switch (self) {
+            .idle => .normal,
+            .hover => .hover,
+            .pressed => .pressed,
+            .disabled => .disabled,
+            .focused => .focused,
+        };
+    }
+};
 
 pub const Button = struct {
     rect: Rect,
@@ -889,19 +905,27 @@ pub const Button = struct {
     }
 
     pub fn draw(self: *const Button, win_id: u32) void {
+        const ws = self.state.to_widget_state();
         const bg = if (self.is_active)
             theme_accent()
         else if (self.bg_color) |c|
             c
-        else switch (self.state) {
-            .idle => theme_btn_idle(),
-            .hover => theme_btn_hover(),
-            .pressed => theme_btn_pressed(),
-        };
+        else
+            widget_bg(ws);
+
+        const border = if (self.is_active)
+            theme_text_primary()
+        else
+            widget_border(ws);
+
+        const text_col = if (self.state == .disabled)
+            widget_text(ws)
+        else
+            self.text_color;
 
         draw_rect(win_id, self.rect, bg);
-        draw_rect_outline(win_id, self.rect, 1, if (self.is_active) theme_text_primary() else theme_border());
-        draw_text_centered(win_id, self.label, self.rect, self.text_color);
+        draw_rect_outline(win_id, self.rect, 1, border);
+        draw_text_centered(win_id, self.label, self.rect, text_col);
     }
 };
 

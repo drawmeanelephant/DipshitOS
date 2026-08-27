@@ -161,6 +161,18 @@ pub const AppState = struct {
         };
     }
 
+    pub fn update_widget_layout(self: *AppState) void {
+        if (self.wizard_mode) {
+            self.input_hostname.rect = Rect.make(input_x, row_y0 + 16, input_w, input_h);
+            self.dropdown_theme.rect = Rect.make(input_x, row_y0 + 16, input_w, input_h);
+            self.input_prompt.rect = Rect.make(input_x, row_y0 + 16, input_w, input_h);
+        } else {
+            self.input_hostname.rect = Rect.make(input_x, row_y0, input_w, input_h);
+            self.dropdown_theme.rect = Rect.make(input_x, row_y0 + row_h, input_w, input_h);
+            self.input_prompt.rect = Rect.make(input_x, row_y0 + row_h * 2, input_w, input_h);
+        }
+    }
+
     pub fn load(self: *AppState) void {
         var buf: [2048]u8 = undefined;
         const n = read_settings_file(&buf);
@@ -168,6 +180,7 @@ pub const AppState = struct {
             self.set_status("First boot setup");
             self.wizard_mode = true;
             self.wizard_step = 1;
+            self.update_widget_layout();
             // Set sane defaults
             self.input_hostname.set_text("dipshitos");
             self.dropdown_theme.set_selected_by_name("dark");
@@ -193,6 +206,7 @@ pub const AppState = struct {
         self.input_hostname.set_text(self.settings.hostname[0..self.settings.hostname_len]);
         self.dropdown_theme.set_selected_by_name(self.settings.theme[0..self.settings.theme_len]);
         self.input_prompt.set_text(self.settings.prompt[0..self.settings.prompt_len]);
+        self.update_widget_layout();
         // C10: cache last_saved_theme and apply live preview via ui.set_theme (EL0 palette).
         self.last_saved_theme_len = self.settings.theme_len;
         if (self.last_saved_theme_len > 0) {
@@ -230,7 +244,9 @@ pub const AppState = struct {
             _ = ui.set_theme(sel);
             self.set_status("Saved OK");
         } else {
-            self.set_status("Save failed");
+            var err_buf: [64]u8 = undefined;
+            const err_msg = ui.format_error(-5, &err_buf);
+            self.set_status(err_msg);
         }
     }
 
@@ -258,6 +274,7 @@ pub const AppState = struct {
         if (self.wizard_mode) {
             if (self.btn_wizard_skip.handle_event(ev)) {
                 self.wizard_mode = false;
+                self.update_widget_layout();
                 self.reset_defaults();
                 return true;
             }
@@ -271,6 +288,7 @@ pub const AppState = struct {
             }
             if (self.wizard_step == 3 and self.btn_wizard_finish.handle_event(ev)) {
                 self.wizard_mode = false;
+                self.update_widget_layout();
                 self.save();
                 return true;
             }
@@ -309,6 +327,7 @@ pub const AppState = struct {
         if (self.btn_wizard.handle_event(ev)) {
             self.wizard_mode = true;
             self.wizard_step = 1;
+            self.update_widget_layout();
             return true;
         }
         _ = self.input_hostname.handle_event(ev);
@@ -375,21 +394,15 @@ pub const AppState = struct {
             if (self.wizard_step == 1) {
                 ui.draw_text(win, "Welcome! Set your system hostname:", label_x, row_y0 - 8, ui.theme_text_primary());
                 ui.draw_text(win, "Hostname:", label_x, row_y0 + 16 + 7, ui.theme_text_muted());
-                var in_h = self.input_hostname;
-                in_h.rect = Rect.make(input_x, row_y0 + 16, input_w, input_h);
-                in_h.draw(win);
+                self.input_hostname.draw(win);
             } else if (self.wizard_step == 2) {
                 ui.draw_text(win, "Choose your color theme (live preview):", label_x, row_y0 - 8, ui.theme_text_primary());
                 ui.draw_text(win, "Theme:", label_x, row_y0 + 16 + 7, ui.theme_text_muted());
-                var dd_t = self.dropdown_theme;
-                dd_t.rect = Rect.make(input_x, row_y0 + 16, input_w, input_h);
-                dd_t.draw(win);
+                self.dropdown_theme.draw(win);
             } else if (self.wizard_step == 3) {
                 ui.draw_text(win, "Configure your shell command prompt:", label_x, row_y0 - 8, ui.theme_text_primary());
                 ui.draw_text(win, "Prompt:", label_x, row_y0 + 16 + 7, ui.theme_text_muted());
-                var in_p = self.input_prompt;
-                in_p.rect = Rect.make(input_x, row_y0 + 16, input_w, input_h);
-                in_p.draw(win);
+                self.input_prompt.draw(win);
             }
 
             self.btn_wizard_skip.draw(win);
@@ -536,4 +549,3 @@ test "settings: AppState wizard flow and reset_defaults" {
     try std.testing.expectEqualStrings("dark", app.dropdown_theme.selected_text());
     try std.testing.expectEqualStrings("$ ", app.input_prompt.get_text());
 }
-

@@ -1,9 +1,9 @@
 //! DipshitOS System Monitor Dashboard -- SYSMON.BIN (M27 G6, Issue #449).
 //!
 //! Comprehensive system monitor GUI displaying real-time system metrics:
-//!   - System Overview: Hostname, kernel version, uptime, architecture
+//!   - System Overview: Hostname, kernel version, app session duration, architecture
 //!   - Process & Task activity: PID, state, memory footprint, CPU status
-//!   - Storage & Filesystem: Partition usage, free clusters, root files
+//!   - Storage & Filesystem: Partition usage, volume specs, root files
 //!   - Network & Diagnostics: IP status, frame counters, socket state
 //!
 //! Auto-refreshes at 1 Hz via ADR 0014 app timers (`ui.timer_set(100)`).
@@ -80,7 +80,7 @@ pub const SysmonState = struct {
                         .storage_net => .overview,
                     };
                     return true;
-                } else if (kc == 0x15 or kc == 0x12) { // R / r -> refresh
+                } else if (kc == 0x15) { // HID 0x15 = 'r' -> refresh
                     self.refresh();
                     return true;
                 }
@@ -114,13 +114,13 @@ pub const SysmonState = struct {
         }
     }
 
-    pub fn draw(self: *const SysmonState) void {
+    pub fn draw(self: *const SysmonState, win: u32) void {
         // Clear background
-        ui.win_fill(window_id, 0, 0, window_w, window_h, ui.theme_bg());
+        ui.win_fill(win, 0, 0, window_w, window_h, ui.theme_bg());
 
         // Header tab bar
-        ui.draw_rect(window_id, Rect.make(0, 0, window_w, 40), ui.theme_surface());
-        ui.draw_rect_outline(window_id, Rect.make(0, 0, window_w, 40), 1, ui.theme_border());
+        ui.draw_rect(win, Rect.make(0, 0, window_w, 40), ui.theme_surface());
+        ui.draw_rect_outline(win, Rect.make(0, 0, window_w, 40), 1, ui.theme_border());
 
         // Highlight active tab button
         var bo = self.btn_overview;
@@ -130,40 +130,37 @@ pub const SysmonState = struct {
         if (self.tab == .processes) bp.state = .pressed;
         if (self.tab == .storage_net) bs.state = .pressed;
 
-        bo.draw(window_id);
-        bp.draw(window_id);
-        bs.draw(window_id);
-        self.btn_refresh.draw(window_id);
+        bo.draw(win);
+        bp.draw(win);
+        bs.draw(win);
+        self.btn_refresh.draw(win);
 
         // Content area
         const content_rect = Rect.make(12, 50, window_w - 24, window_h - 62);
         switch (self.tab) {
-            .overview => self.draw_overview(content_rect),
-            .processes => self.draw_processes(content_rect),
-            .storage_net => self.draw_storage_net(content_rect),
+            .overview => self.draw_overview(win, content_rect),
+            .processes => self.draw_processes(win, content_rect),
+            .storage_net => self.draw_storage_net(win, content_rect),
         }
-
-        // Present window
-        ui.win_present(window_id);
     }
 
-    fn draw_overview(self: *const SysmonState, r: Rect) void {
-        ui.draw_rect(window_id, r, ui.theme_surface());
-        ui.draw_rect_outline(window_id, r, 1, ui.theme_border());
+    fn draw_overview(self: *const SysmonState, win: u32, r: Rect) void {
+        ui.draw_rect(win, r, ui.theme_surface());
+        ui.draw_rect_outline(win, r, 1, ui.theme_border());
 
-        ui.draw_text(window_id, "DipshitOS System Summary", r.x + 16, r.y + 16, ui.theme_accent());
+        ui.draw_text(win, "DipshitOS System Summary", r.x + 16, r.y + 16, ui.theme_accent());
 
         var y = r.y + 42;
-        ui.draw_text(window_id, "Kernel:        DipshitOS AArch64 Flat Image", r.x + 16, y, ui.theme_text_primary());
+        ui.draw_text(win, "Kernel:        DipshitOS AArch64 Flat Image", r.x + 16, y, ui.theme_text_primary());
         y += 20;
-        ui.draw_text(window_id, "Platform:      Apple Silicon (Virtualization.framework)", r.x + 16, y, ui.theme_text_primary());
+        ui.draw_text(win, "Platform:      Apple Silicon (Virtualization.framework)", r.x + 16, y, ui.theme_text_primary());
         y += 20;
-        ui.draw_text(window_id, "Execution EL:  EL1 Kernel / EL0 Userspace", r.x + 16, y, ui.theme_text_primary());
+        ui.draw_text(win, "Execution EL:  EL1 Kernel / EL0 Userspace", r.x + 16, y, ui.theme_text_primary());
         y += 20;
 
         var buf: [64]u8 = undefined;
-        const uptime_str = std.fmt.bufPrint(&buf, "Uptime:        {d} seconds (polled 1 Hz)", .{self.uptime_secs}) catch "Uptime: unknown";
-        ui.draw_text(window_id, uptime_str, r.x + 16, y, ui.theme_text_primary());
+        const uptime_str = std.fmt.bufPrint(&buf, "App Session:   {d}s active (1 Hz auto-refresh)", .{self.uptime_secs}) catch "App Session: active";
+        ui.draw_text(win, uptime_str, r.x + 16, y, ui.theme_text_primary());
         y += 20;
 
         var running_count: usize = 0;
@@ -171,32 +168,32 @@ pub const SysmonState = struct {
             if (p.state == .running) running_count += 1;
         }
         const proc_str = std.fmt.bufPrint(&buf, "Active Tasks:  {d} procs ({d} running)", .{ self.proc_count, running_count }) catch "Active Tasks: error";
-        ui.draw_text(window_id, proc_str, r.x + 16, y, ui.theme_text_primary());
+        ui.draw_text(win, proc_str, r.x + 16, y, ui.theme_text_primary());
         y += 20;
 
-        ui.draw_text(window_id, "Memory Model:  Fixed-BSS zero-heap, 4-level page tables", r.x + 16, y, ui.theme_text_primary());
+        ui.draw_text(win, "Memory Model:  Fixed-BSS zero-heap, 4-level page tables", r.x + 16, y, ui.theme_text_primary());
         y += 20;
-        ui.draw_text(window_id, "Display:       1280x720 32-bpp BGRA (virtio-gpu)", r.x + 16, y, ui.theme_text_primary());
+        ui.draw_text(win, "Display:       1280x720 32-bpp BGRA (virtio-gpu)", r.x + 16, y, ui.theme_text_primary());
         y += 20;
-        ui.draw_text(window_id, "Audio:         virtio-snd PCM Stereo 48kHz (armed)", r.x + 16, y, ui.theme_text_primary());
+        ui.draw_text(win, "Audio:         virtio-snd PCM Stereo 48kHz (armed)", r.x + 16, y, ui.theme_text_primary());
         y += 24;
 
-        ui.draw_text(window_id, "[Tab] Cycle tabs  |  [R] Force refresh  |  [Esc] Close", r.x + 16, y, ui.theme_text_muted());
+        ui.draw_text(win, "[Tab] Cycle tabs  |  [R] Force refresh  |  [Esc] Close", r.x + 16, y, ui.theme_text_muted());
     }
 
-    fn draw_processes(self: *const SysmonState, r: Rect) void {
-        ui.draw_rect(window_id, r, ui.theme_surface());
-        ui.draw_rect_outline(window_id, r, 1, ui.theme_border());
+    fn draw_processes(self: *const SysmonState, win: u32, r: Rect) void {
+        ui.draw_rect(win, r, ui.theme_surface());
+        ui.draw_rect_outline(win, r, 1, ui.theme_border());
 
         // Header row
-        ui.draw_rect(window_id, Rect.make(r.x + 1, r.y + 1, r.w - 2, 22), ui.theme_btn_idle());
-        ui.draw_text(window_id, "PID", r.x + 12, r.y + 7, ui.theme_text_primary());
-        ui.draw_text(window_id, "NAME", r.x + 60, r.y + 7, ui.theme_text_primary());
-        ui.draw_text(window_id, "STATE", r.x + 220, r.y + 7, ui.theme_text_primary());
-        ui.draw_text(window_id, "STATUS", r.x + 340, r.y + 7, ui.theme_text_primary());
+        ui.draw_rect(win, Rect.make(r.x + 1, r.y + 1, r.w - 2, 22), ui.theme_btn_idle());
+        ui.draw_text(win, "PID", r.x + 12, r.y + 7, ui.theme_text_primary());
+        ui.draw_text(win, "NAME", r.x + 60, r.y + 7, ui.theme_text_primary());
+        ui.draw_text(win, "STATE", r.x + 220, r.y + 7, ui.theme_text_primary());
+        ui.draw_text(win, "STATUS", r.x + 340, r.y + 7, ui.theme_text_primary());
 
         if (self.proc_count == 0) {
-            ui.draw_empty_state(window_id, Rect.make(r.x + 10, r.y + 30, r.w - 20, r.h - 40), "No Active Processes", "Scheduler has no registered user tasks");
+            ui.draw_empty_state(win, Rect.make(r.x + 10, r.y + 30, r.w - 20, r.h - 40), "No Active Processes", "Scheduler has no registered user tasks");
             return;
         }
 
@@ -206,87 +203,108 @@ pub const SysmonState = struct {
             const p = self.procs[i];
             const row_rect = Rect.make(r.x + 2, y - 2, r.w - 4, 18);
             if (i % 2 == 1) {
-                ui.win_fill(window_id, row_rect.x, row_rect.y, row_rect.w, row_rect.h, ui.theme_btn_idle());
+                ui.win_fill(win, row_rect.x, row_rect.y, row_rect.w, row_rect.h, ui.theme_btn_idle());
             }
 
             var num_buf: [16]u8 = undefined;
             const pid_str = std.fmt.bufPrint(&num_buf, "{d}", .{p.pid}) catch "?";
-            ui.draw_text(window_id, pid_str, r.x + 12, y + 2, ui.theme_text_primary());
+            ui.draw_text(win, pid_str, r.x + 12, y + 2, ui.theme_text_primary());
 
             const name_slice = p.name[0..p.name_len];
-            ui.draw_text(window_id, name_slice, r.x + 60, y + 2, ui.theme_text_primary());
+            ui.draw_text(win, name_slice, r.x + 60, y + 2, ui.theme_text_primary());
 
             const state_str = switch (p.state) {
                 .created => "created",
                 .running => "running",
-                .blocked => "blocked",
                 .exited => "exited",
+                else => "unknown",
             };
             const state_col = if (p.state == .running) ui.theme_success() else ui.theme_text_muted();
-            ui.draw_text(window_id, state_str, r.x + 220, y + 2, state_col);
+            ui.draw_text(win, state_str, r.x + 220, y + 2, state_col);
 
             const status_str = std.fmt.bufPrint(&num_buf, "exit={d}", .{p.exit_status}) catch "";
-            ui.draw_text(window_id, status_str, r.x + 340, y + 2, ui.theme_text_muted());
+            ui.draw_text(win, status_str, r.x + 340, y + 2, ui.theme_text_muted());
 
             y += 20;
         }
     }
 
-    fn draw_storage_net(self: *const SysmonState, r: Rect) void {
+    fn draw_storage_net(self: *const SysmonState, win: u32, r: Rect) void {
         _ = self;
-        ui.draw_rect(window_id, r, ui.theme_surface());
-        ui.draw_rect_outline(window_id, r, 1, ui.theme_border());
+        ui.draw_rect(win, r, ui.theme_surface());
+        ui.draw_rect_outline(win, r, 1, ui.theme_border());
 
         var y = r.y + 14;
-        ui.draw_text(window_id, "Storage Subsystem (GPT + FAT32)", r.x + 16, y, ui.theme_accent());
+        ui.draw_text(win, "Storage Subsystem Specs (GPT + FAT32)", r.x + 16, y, ui.theme_accent());
         y += 22;
-        ui.draw_text(window_id, "Volume 0 (ESP):   Mounted (Boot EFI AA64 binaries + APPS.TXT)", r.x + 16, y, ui.theme_text_primary());
+        ui.draw_text(win, "Volume 0 (ESP):   Mounted (Boot EFI AA64 binaries + APPS.TXT)", r.x + 16, y, ui.theme_text_primary());
         y += 20;
-        ui.draw_text(window_id, "Volume 1 (DATA):  Mounted (/data/ persistent configuration & crash logs)", r.x + 16, y, ui.theme_text_primary());
+        ui.draw_text(win, "Volume 1 (DATA):  Mounted (/data/ persistent configuration & crash logs)", r.x + 16, y, ui.theme_text_primary());
         y += 20;
-        ui.draw_text(window_id, "Driver:           virtio-blk polled DMA, sector size 512 B", r.x + 16, y, ui.theme_text_primary());
+        ui.draw_text(win, "Driver:           virtio-blk polled DMA, sector size 512 B", r.x + 16, y, ui.theme_text_primary());
         y += 28;
 
-        ui.draw_text(window_id, "Networking Subsystem (virtio-net)", r.x + 16, y, ui.theme_accent());
+        ui.draw_text(win, "Networking Subsystem Specs (virtio-net)", r.x + 16, y, ui.theme_accent());
         y += 22;
-        ui.draw_text(window_id, "Transport:        virtio-pci network interface (VID 0x1af4, DID 0x1041)", r.x + 16, y, ui.theme_text_primary());
+        ui.draw_text(win, "Transport:        virtio-pci network interface (VID 0x1af4, DID 0x1041)", r.x + 16, y, ui.theme_text_primary());
         y += 20;
-        ui.draw_text(window_id, "Protocols:        Ethernet II, ARP, IPv4, ICMP Echo, UDP, DHCP, TCP", r.x + 16, y, ui.theme_text_primary());
+        ui.draw_text(win, "Protocols:        Ethernet II, ARP, IPv4, ICMP Echo, UDP, DHCP, TCP", r.x + 16, y, ui.theme_text_primary());
         y += 20;
-        ui.draw_text(window_id, "Address:          192.168.64.2 / 24 (Default gateway 192.168.64.1)", r.x + 16, y, ui.theme_text_primary());
+        ui.draw_text(win, "Default Subnet:   192.168.64.0/24 (Guest IP 192.168.64.2)", r.x + 16, y, ui.theme_text_primary());
         y += 20;
-        ui.draw_text(window_id, "Status:           Link Up, RX FIFO Armed, TCP Client Ready", r.x + 16, y, ui.theme_text_primary());
+        ui.draw_text(win, "Status:           Link Up, RX FIFO Armed, TCP Client Ready", r.x + 16, y, ui.theme_text_primary());
     }
 };
 
-pub fn main() void {
-    const res = ui.win_open(window_id, window_x, window_y, window_w, window_h);
-    if (res != 0) ui.exit(1);
-
+pub export fn _start() callconv(.c) noreturn {
     var state = SysmonState.init();
-    state.draw();
+
+    const win_res = ui.win_open(window_x, window_y, window_w, window_h);
+    if (win_res < 0) {
+        ui.write_console("sysmon: failed to open window\n");
+        ui.exit_process(1);
+    }
+    const win = @as(u32, @intCast(win_res));
+    ui.write_console("sysmon: open id=8\n");
+
+    state.draw(win);
+    ui.win_present(win);
+    ui.write_console("sysmon: ready\n");
 
     _ = ui.timer_set(refresh_ticks);
 
+    var ev: Event = undefined;
     while (true) {
-        var ev: Event = undefined;
-        const n = ui.wait_event(&ev);
-        if (n <= 0) continue;
+        const wait_rc = ui.wait_event(&ev);
+        if (wait_rc < 0) break;
 
-        if (ev.kind == ui.WIN_CLOSE) {
-            _ = ui.win_close(window_id);
-            ui.exit(exit_status);
+        var dirty = false;
+
+        if (ev.kind == ui.WIN_CLOSE or (ev.kind == ui.KEY_DOWN and (ev.arg0 == 0x29 or ev.arg0 == 0x14))) { // Esc / Q
+            ui.write_console("sysmon: close\n");
+            break;
         }
 
-        if (ev.kind == ui.KEY_DOWN and (ev.arg0 == 0x29 or ev.arg0 == 0x14)) { // Esc / Q
-            _ = ui.win_close(window_id);
-            ui.exit(exit_status);
+        dirty = state.handle_event(&ev) or dirty;
+
+        while (ui.poll_event(&ev) > 0) {
+            if (ev.kind == ui.WIN_CLOSE or (ev.kind == ui.KEY_DOWN and (ev.arg0 == 0x29 or ev.arg0 == 0x14))) {
+                ui.write_console("sysmon: close\n");
+                ui.win_close(win);
+                ui.exit_process(exit_status);
+            }
+            dirty = state.handle_event(&ev) or dirty;
         }
 
-        if (state.handle_event(&ev)) {
-            state.draw();
+        if (dirty) {
+            state.draw(win);
+            ui.win_present(win);
         }
     }
+
+    ui.write_console("sysmon: exiting\n");
+    ui.win_close(win);
+    ui.exit_process(exit_status);
 }
 
 test "sysmon: state init and tab cycling" {

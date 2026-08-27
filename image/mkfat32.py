@@ -230,7 +230,7 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
                       resmon_bytes=None, devcons_bytes=None, netstat_bytes=None,
                       m21demo_bytes=None, ping_bytes=None, dns_bytes=None,
                       download_bytes=None, traceroute_bytes=None,
-                      netprof_bytes=None):
+                      netprof_bytes=None, sysmon_bytes=None):
     """Write a FAT32 volume (boot sector, FSInfo, FATs, directories, files)
     into `img` at the volume's offset.
 
@@ -299,6 +299,7 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
     download_clusters = (len(download_bytes) + bps - 1) // bps if download_bytes else 0
     traceroute_clusters = (len(traceroute_bytes) + bps - 1) // bps if traceroute_bytes else 0
     netprof_clusters = (len(netprof_bytes) + bps - 1) // bps if netprof_bytes else 0
+    sysmon_clusters = (len(sysmon_bytes) + bps - 1) // bps if sysmon_bytes else 0
     file_clusters = (len(efi_bytes) + bps - 1) // bps
     root_entries_count = 2  # vol_label + efi_entry
     if kernel_bytes: root_entries_count += 1
@@ -349,6 +350,7 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
     if download_bytes: root_entries_count += 1
     if traceroute_bytes: root_entries_count += 1
     if netprof_bytes: root_entries_count += 1
+    if sysmon_bytes: root_entries_count += 1
 
     root_clusters = (root_entries_count * 32 + bps - 1) // bps
     efi_dir_cluster = 2 + root_clusters
@@ -399,7 +401,8 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
     download_start = dns_start + dns_clusters
     traceroute_start = download_start + download_clusters
     netprof_start = traceroute_start + traceroute_clusters
-    apps_txt_start = netprof_start + netprof_clusters
+    sysmon_start = netprof_start + netprof_clusters
+    apps_txt_start = sysmon_start + sysmon_clusters
     hello_start = apps_txt_start + apps_txt_clusters
     efi_start = hello_start + hello_clusters
     allocated = efi_start + file_clusters - 2  # clusters used beyond root(2)
@@ -512,6 +515,8 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
         chain(traceroute_start, traceroute_clusters)    # TRACEROUTE.BIN data
     if netprof_bytes:
         chain(netprof_start, netprof_clusters)      # NETPROF.BIN data
+    if sysmon_bytes:
+        chain(sysmon_start, sysmon_clusters)        # SYSMON.BIN data
     if apps_txt_bytes:
         chain(apps_txt_start, apps_txt_clusters)  # APPS.TXT data
     if hello_bytes:
@@ -638,6 +643,8 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
         root_entries += dir_entry(b"TRACEROUBIN", 0x20, traceroute_start, len(traceroute_bytes))
     if netprof_bytes:
         root_entries += dir_entry(b"NETPROF BIN", 0x20, netprof_start, len(netprof_bytes))
+    if sysmon_bytes:
+        root_entries += dir_entry(b"SYSMON  BIN", 0x20, sysmon_start, len(sysmon_bytes))
     if apps_txt_bytes:
         root_entries += dir_entry(b"APPS    TXT", 0x20, apps_txt_start, len(apps_txt_bytes))
     if hello_bytes:
@@ -835,6 +842,10 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
         for i in range(netprof_clusters):
             chunk = netprof_bytes[i * bps:(i + 1) * bps]
             wsec(geo.cluster_sector(netprof_start + i), chunk.ljust(bps, b"\x00"))
+    if sysmon_bytes:
+        for i in range(sysmon_clusters):
+            chunk = sysmon_bytes[i * bps:(i + 1) * bps]
+            wsec(geo.cluster_sector(sysmon_start + i), chunk.ljust(bps, b"\x00"))
     if apps_txt_bytes:
         for i in range(apps_txt_clusters):
             chunk = apps_txt_bytes[i * bps:(i + 1) * bps]
@@ -1113,7 +1124,8 @@ def build_image(total_sectors, esp_offset, efi_bytes, kernel_bytes=None,
                 crash_bytes=None, disas_bytes=None, edit_bytes=None, ps_bytes=None,
                 resmon_bytes=None, devcons_bytes=None, netstat_bytes=None,
                 m21demo_bytes=None, ping_bytes=None, dns_bytes=None,
-                download_bytes=None, traceroute_bytes=None, netprof_bytes=None):
+                download_bytes=None, traceroute_bytes=None, netprof_bytes=None,
+                sysmon_bytes=None):
     img = bytearray(total_sectors * BYTES_PER_SECTOR)
     last_usable = total_sectors - 34
     first_usable = 34
@@ -1160,7 +1172,7 @@ def build_image(total_sectors, esp_offset, efi_bytes, kernel_bytes=None,
                       victim_bytes, harden_bytes, jingle_bytes, chime_bytes, globals_bytes, guard_bytes, spin_bytes, apps_txt_bytes, hello_bytes, asm_bytes, settings_bytes, crash_bytes, disas_bytes, edit_bytes, ps_bytes,
                       resmon_bytes, devcons_bytes, netstat_bytes,
                       m21demo_bytes, ping_bytes, dns_bytes, download_bytes,
-                      traceroute_bytes, netprof_bytes)
+                      traceroute_bytes, netprof_bytes, sysmon_bytes)
     geo_data = Fat32Geometry(data_sectors, data_start)
     build_data_volume(img, geo_data)
     return bytes(img)
@@ -1268,6 +1280,8 @@ def main(argv):
                     help="optional flat user program (TRACEROUTE.BIN) to embed at the volume root (M26 N7, issue #434 -- ICMP traceroute CLI)")
     ap.add_argument("netprof_file", nargs="?",
                     help="optional flat user program (NETPROF.BIN) to embed at the volume root (M26 N12, issue #439 -- network profile manager)")
+    ap.add_argument("sysmon_file", nargs="?",
+                    help="optional flat user program (SYSMON.BIN) to embed at the volume root (M27 G6, issue #449 -- system monitor dashboard)")
     ap.add_argument("crash_file", nargs="?",
                     help="optional AArch64 ELF32 executable (CRASH.ELF) to embed at the volume root (M22 D3, issue #326 -- symbolized-crash gate)")
     ap.add_argument("hello_file", nargs="?",
@@ -1691,6 +1705,15 @@ def main(argv):
                   "not be a DipshitOS user program image" % args.netprof_file,
                   file=sys.stderr)
 
+    sysmon_bytes = None
+    if args.sysmon_file:
+        with open(args.sysmon_file, "rb") as f:
+            sysmon_bytes = f.read()
+        if sysmon_bytes[:4] != b"DSK1":
+            print("WARNING: %s does not start with the 'DSK1' magic; it may "
+                  "not be a DipshitOS user program image" % args.sysmon_file,
+                  file=sys.stderr)
+
     crash_bytes = None
     if args.crash_file:
         with open(args.crash_file, "rb") as f:
@@ -1719,7 +1742,7 @@ def main(argv):
                       victim_bytes, harden_bytes, jingle_bytes, chime_bytes, globals_bytes, guard_bytes, spin_bytes, apps_txt_bytes, hello_bytes, asm_bytes, settings_bytes, crash_bytes, disas_bytes, edit_bytes, ps_bytes,
                       resmon_bytes, devcons_bytes, netstat_bytes,
                       m21demo_bytes, ping_bytes, dns_bytes, download_bytes,
-                      traceroute_bytes, netprof_bytes)
+                      traceroute_bytes, netprof_bytes, sysmon_bytes)
     with open(args.image, "wb") as f:
         f.write(img)
     extra = ", %d-byte kernel image embedded" % len(kernel_bytes) if kernel_bytes else ""
@@ -1754,6 +1777,7 @@ def main(argv):
     extra += ", %d-byte download program embedded" % len(download_bytes) if download_bytes else ""
     extra += ", %d-byte traceroute program embedded" % len(traceroute_bytes) if traceroute_bytes else ""
     extra += ", %d-byte netprof program embedded" % len(netprof_bytes) if netprof_bytes else ""
+    extra += ", %d-byte sysmon program embedded" % len(sysmon_bytes) if sysmon_bytes else ""
     print("wrote %s: %d MiB, ESP at LBA %d, %d-byte EFI application embedded%s" %
           (args.image, args.size_mb, args.esp_offset, len(efi_bytes), extra))
     return 0

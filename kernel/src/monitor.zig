@@ -5515,9 +5515,19 @@ fn cmd_screenshot(m: *Monitor, args: []const []const u8) ExecError {
         m.console.puts("\n");
         return .none;
     }
-    m.console.puts("screenshot: saved 1280x720 BMP to ");
+    const row_raw: usize = @as(usize, virtio_gpu.fb_width) * 3;
+    const row_pad: usize = (4 - (row_raw % 4)) % 4;
+    const row_stride: usize = row_raw + row_pad;
+    const total_bytes: usize = 54 + row_stride * @as(usize, virtio_gpu.fb_height);
+    m.console.puts("screenshot: saved ");
+    m.console.print_u64(virtio_gpu.fb_width);
+    m.console.puts("x");
+    m.console.print_u64(virtio_gpu.fb_height);
+    m.console.puts(" BMP to ");
     m.console.puts(path);
-    m.console.puts(" (2764854 bytes)\n");
+    m.console.puts(" (");
+    m.console.print_u64(total_bytes);
+    m.console.puts(" bytes)\n");
     return .none;
 }
 

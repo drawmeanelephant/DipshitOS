@@ -1251,6 +1251,29 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_netprof.step);
 
     // ------------------------------------------------------------------
+    // Guest: forty-fourth ESP user program (M27 G6 — issue #449) SYSMON.BIN.
+    // System Monitor Dashboard: overview, processes, storage/net, 1 Hz timer.
+    // ------------------------------------------------------------------
+    const sysmon_prog = b.addExecutable(.{
+        .name = "user-sysmon",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/sysmon.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    sysmon_prog.linker_script = b.path("user/linker.ld");
+    const sysmon_step = b.step("sysmon", "Build the forty-fourth ESP user program (zig-out/bin/SYSMON.BIN)");
+    const sysmon_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    sysmon_elf2bin.addFileArg(sysmon_prog.getEmittedBin());
+    const sysmon_bin = sysmon_elf2bin.addOutputFileArg("SYSMON.BIN");
+    sysmon_elf2bin.has_side_effects = true;
+    sysmon_elf2bin.stdio = .inherit;
+    sysmon_step.dependOn(&sysmon_elf2bin.step);
+    const install_sysmon = b.addInstallFileWithDir(sysmon_bin, .bin, "SYSMON.BIN");
+    b.getInstallStep().dependOn(&install_sysmon.step);
+
+    // ------------------------------------------------------------------
     // Top-level steps. System-command steps are marked as having side
     // effects (and inherit stdio) so they always execute instead of being
     // skipped by the build cache. (No QEMU path: this project targets Apple
@@ -1305,6 +1328,7 @@ pub fn build(b: *std.Build) void {
     image.addFileArg(download_bin); // ... [DOWNLOAD.BIN] (M26 N11, issue #438: forty-first user program, HTTP download manager)
     image.addFileArg(traceroute_bin); // ... [TRACEROUTE.BIN] (M26 N7, issue #434: forty-second user program, ICMP route traceroute)
     image.addFileArg(netprof_bin); // ... [NETPROF.BIN] (M26 N12, issue #439: forty-third user program, network profile manager)
+    image.addFileArg(sysmon_bin); // ... [SYSMON.BIN] (M27 G6, issue #449: forty-fourth user program, system monitor dashboard)
     image.has_side_effects = true;
     image.stdio = .inherit;
     image_step.dependOn(&image.step);

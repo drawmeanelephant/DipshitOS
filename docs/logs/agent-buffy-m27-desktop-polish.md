@@ -1,4 +1,4 @@
-# agent/buffy/m27-desktop-polish branch log
+# Log — agent/buffy/m27-desktop-polish
 
 ## 2026-08-26 — M27 (Milestone 15) Desktop polish & completeness sweep (G1–G30, issues #444–#473)
 
@@ -21,7 +21,12 @@
   - Implemented `SYSMON.BIN` (`user/src/sysmon.zig`) System Monitor Dashboard with 1 Hz auto-refresh and tabs.
   - Implemented 3-step First-Boot Setup Wizard and Defaults Reset in `SETTINGS.BIN` (`user/src/settings_panel.zig`).
   - Verified `settings reset` in monitor shell and settings file persistence.
-- **Phase 5 (G8, G11, G24, G25, G26, G30):**
-  - Conducted contrast audit, memory leak audit, boundary sanity checks, and timer cancellation verification.
-  - Documented complete M27 dogfood and verification records in `docs/dogfood-m27.md`.
-  - Ran `zig build test-console`, `tools/verify-unit-tests.sh`, `tools/verify-bss-budget.sh`, and `tools/verify-coordination.sh` — all 100% green.
+- **Review Fixes (PR #591):**
+  - Formatted `user/src/settings_panel.zig` with `zig fmt` to unblock CI.
+  - Fully wired `SYSMON.BIN` into `build.zig`, `image/make-image.sh`, `image/mkfat32.py`, and `image/apps.txt` (bumped manifest apps to 12 in `verify-live-desktop.sh` and `verify-live-file-browser.sh`).
+  - Fixed Wizard widget layout in `SETTINGS.BIN` (added `update_widget_layout` and direct drawing) so click hit-boxes and dropdown open-state match 1:1.
+  - Hardened `fat.write_fb_bmp` cluster allocation with atomic rollback on shortfall, old cluster chain preservation, and 4-byte BMP row stride padding.
+  - Fixed `cmd_screenshot` dynamic byte size computation and default filename.
+  - Connected `focus_follows_mouse` to `settings.zig`, refactored `about_dialog_close()`, wired `WidgetState` to `Button`/`TextInput`, fixed `sysmon` hotkeys/honest labels, and updated `docs/dogfood-m27.md` and claim 8041 with exact Touches and audit distinctions.
+  - Verified all unit test suites, coordination, BSS budgets, and image build green.
+
