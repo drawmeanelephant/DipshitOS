@@ -104,6 +104,12 @@ pub const AddrSpace = struct {
     /// 0 = static `.userbss`).
     stack_phys: u64 = 0,
     stack_pages: u64 = 0,
+    /// Physical interpreter pages (PT_INTERP / LD.SO, claim 7921).
+    interp_phys: u64 = 0,
+    interp_pages: u64 = 0,
+    /// Physical shared library staging/heap pages (claim 7921).
+    lib_phys: u64 = 0,
+    lib_pages: u64 = 0,
 };
 
 /// Kernel-side resources the process owns with its program (freed at
@@ -184,6 +190,8 @@ pub fn init() void {
 fn release_resources(p: *Process) void {
     if (p.addr_space.text_pages > 0) _ = alloc.free_pages(p.addr_space.text_phys, p.addr_space.text_pages);
     if (p.addr_space.data_pages > 0) _ = alloc.free_pages(p.addr_space.data_phys, p.addr_space.data_pages);
+    if (p.addr_space.interp_pages > 0) _ = alloc.free_pages(p.addr_space.interp_phys, p.addr_space.interp_pages);
+    if (p.addr_space.lib_pages > 0) _ = alloc.free_pages(p.addr_space.lib_phys, p.addr_space.lib_pages);
     if (p.addr_space.stack_pages > 0) _ = alloc.free_pages(p.addr_space.stack_phys, p.addr_space.stack_pages);
     if (p.kernel_stack.pages > 0) _ = alloc.free_pages(p.kernel_stack.phys, p.kernel_stack.pages);
 }
@@ -306,6 +314,10 @@ pub fn release_pages_on_reap(task_id: usize) bool {
         processes[id].addr_space.text_pages = 0;
         processes[id].addr_space.data_phys = 0;
         processes[id].addr_space.data_pages = 0;
+        processes[id].addr_space.interp_phys = 0;
+        processes[id].addr_space.interp_pages = 0;
+        processes[id].addr_space.lib_phys = 0;
+        processes[id].addr_space.lib_pages = 0;
         processes[id].addr_space.stack_phys = 0;
         processes[id].addr_space.stack_pages = 0;
         processes[id].kernel_stack = .{};

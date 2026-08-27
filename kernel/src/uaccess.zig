@@ -51,12 +51,14 @@ pub const efault: u64 = @bitCast(@as(i64, -3));
 /// active. Revisit if the blanket or BAR placement ever grows.
 pub const diagnostic_unmapped: u64 = 0x1_2000_0000;
 
-/// EL0-readable regions (copy-in sources): user text (RX) + user stack (RW).
-var read_regions: [2]Region = .{ .{ .base = 0, .len = 0 }, .{ .base = 0, .len = 0 } };
+/// EL0-readable regions (copy-in sources): user text (RX) + user stack (RW) + dynamic segments.
+var read_regions: [8]Region = [_]Region{.{ .base = 0, .len = 0 }} ** 8;
+var read_region_count: usize = 0;
 /// EL0-writable regions (copy-out destinations): the user stack only — the
 /// text aperture is read-only at EL0, so copying into it is a permission
 /// fault (rejected at validation).
-var write_regions: [2]Region = .{ .{ .base = 0, .len = 0 }, .{ .base = 0, .len = 0 } };
+var write_regions: [8]Region = [_]Region{.{ .base = 0, .len = 0 }} ** 8;
+var write_region_count: usize = 0;
 
 /// The window state is VOLATILE on purpose. `window_active` has no reader
 /// inside the copy loop, so without volatile semantics the optimizer
@@ -115,8 +117,10 @@ pub const Stats = struct {
 /// Reset module state (kernel boot / host tests). Regions are re-configured
 /// with `set_regions` immediately after.
 pub fn init() void {
-    read_regions = .{ .{ .base = 0, .len = 0 }, .{ .base = 0, .len = 0 } };
-    write_regions = .{ .{ .base = 0, .len = 0 }, .{ .base = 0, .len = 0 } };
+    read_regions = [_]Region{.{ .base = 0, .len = 0 }} ** 8;
+    write_regions = [_]Region{.{ .base = 0, .len = 0 }} ** 8;
+    read_region_count = 0;
+    write_region_count = 0;
     set_window_active(false);
     set_latch(false);
     saved_daif = 0;
@@ -128,8 +132,31 @@ pub fn init() void {
 /// Configure the claim-8215 EL0 apertures (text readable, stack read-write).
 /// The syscall layer delegates its `set_user_regions` here.
 pub fn set_regions(text: Region, stack: Region) void {
-    read_regions = .{ text, stack };
-    write_regions = .{ .{ .base = 0, .len = 0 }, stack };
+    read_regions = [_]Region{.{ .base = 0, .len = 0 }} ** 8;
+    write_regions = [_]Region{.{ .base = 0, .len = 0 }} ** 8;
+    read_regions[0] = text;
+    read_regions[1] = stack;
+    read_region_count = 2;
+    write_regions[0] = stack;
+    write_region_count = 1;
+}
+
+/// Add an additional readable EL0 aperture (e.g. interpreter text, dynamic segments, shared libs).
+pub fn add_read_region(reg: Region) void {
+    if (reg.len == 0) return;
+    if (read_region_count < read_regions.len) {
+        read_regions[read_region_count] = reg;
+        read_region_count += 1;
+    }
+}
+
+/// Add an additional writable EL0 aperture (e.g. data segment, heap).
+pub fn add_write_region(reg: Region) void {
+    if (reg.len == 0) return;
+    if (write_region_count < write_regions.len) {
+        write_regions[write_region_count] = reg;
+        write_region_count += 1;
+    }
 }
 
 pub fn stats() Stats {
@@ -148,6 +175,7 @@ fn range_ok(regions: []const Region, address: u64, len: u64) bool {
     const end = address +% len;
     if (end < address) return false; // overflow: bad pointer
     for (regions) |region| {
+        if (region.len == 0) continue;
         const region_end = region.base +% region.len;
         if (region_end < region.base) continue;
         if (address >= region.base and end <= region_end) return true;
@@ -167,7 +195,7 @@ fn range_ok(regions: []const Region, address: u64, len: u64) bool {
 pub fn copy_in(dst: []u8, address: u64, len: usize) Outcome {
     if (len == 0) return .ok;
     if (len > dst.len) return .fault; // caller bug: bounded by the buffer
-    if (!range_ok(&read_regions, address, @intCast(len))) {
+    if (!range_ok(read_regions[0..read_region_count], address, @intCast(len))) {
         validation_faults_value +%= 1;
         return .fault;
     }
@@ -184,7 +212,7 @@ pub fn copy_in(dst: []u8, address: u64, len: usize) Outcome {
 pub fn copy_out(address: u64, src: []const u8, len: usize) Outcome {
     if (len == 0) return .ok;
     if (len > src.len) return .fault; // caller bug: bounded by the buffer
-    if (!range_ok(&write_regions, address, @intCast(len))) {
+    if (!range_ok(write_regions[0..write_region_count], address, @intCast(len))) {
         validation_faults_value +%= 1;
         return .fault;
     }

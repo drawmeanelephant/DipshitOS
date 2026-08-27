@@ -136,6 +136,8 @@ are complete. The forward roadmap is M18–M27 — the experience layer:
 | M25 | File manager depth | ✅ core done 2026-08-26 (claims 0434/2539/4379, F1–F5 5/5 live gates on VZ; F6–F18 unit-tested) |
 | M26 | Network experience | N1–N5 (ping, netstat, HTTP fetch display, bandwidth, connection mgr) |
 | M27 | Desktop polish & completeness | G1–G30 = issues #444–#473 (splash, wizard, about, previews, sounds, sysmon, tooltips, consistency helpers, audits, dogfood) — tracker renumbered 2026-08-26 to match the issue list |
+| M30 | Dynamic linking & shared libraries | ✅ done 2026-08-27 (claim 7921, issue #599, D1–D4, live hardware gate) |
+| M31 | Dynamic linking app ecosystem | E1–E6 (dynamic app migration, dlopen/dlsym, lazy PLT binding) |
 
 Full card detail: [`docs/roadmap-post-arc5.md`](roadmap-post-arc5.md).
 ABI budget: 56/64 slots used, 8 remaining (M19+M20+M22 consume 5, leaving 3).

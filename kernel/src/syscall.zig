@@ -542,6 +542,12 @@ pub fn handle_svc(frame: *exceptions.VectorFrame, immediate: u16) bool {
     const regions = scheduler.current_user_regions();
     if (regions.text.len != 0 or regions.stack.len != 0) {
         set_user_regions(regions.text, regions.stack);
+        for (regions.extra_reads[0..regions.extra_read_count]) |r| {
+            uaccess.add_read_region(.{ .base = r.base, .len = r.len });
+        }
+        for (regions.extra_writes[0..regions.extra_write_count]) |r| {
+            uaccess.add_write_region(.{ .base = r.base, .len = r.len });
+        }
     }
     var args: Args = undefined;
     for (&args, 0..) |*arg, reg| arg.* = exceptions.frame_read(frame, @intCast(reg));

@@ -36,6 +36,7 @@ Deterministic: the same inputs always produce byte-identical images.
 """
 
 import argparse
+import os
 import struct
 import sys
 import zlib
@@ -230,7 +231,8 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
                       resmon_bytes=None, devcons_bytes=None, netstat_bytes=None,
                       m21demo_bytes=None, ping_bytes=None, dns_bytes=None,
                       download_bytes=None, traceroute_bytes=None,
-                      netprof_bytes=None, sysmon_bytes=None, httpd_bytes=None):
+                      netprof_bytes=None, sysmon_bytes=None, httpd_bytes=None,
+                      extra_files=None):
     """Write a FAT32 volume (boot sector, FSInfo, FATs, directories, files)
     into `img` at the volume's offset.
 
@@ -353,6 +355,7 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
     if netprof_bytes: root_entries_count += 1
     if sysmon_bytes: root_entries_count += 1
     if httpd_bytes: root_entries_count += 1
+    if extra_files: root_entries_count += len(extra_files)
 
     root_clusters = (root_entries_count * 32 + bps - 1) // bps
     efi_dir_cluster = 2 + root_clusters
@@ -407,7 +410,16 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
     httpd_start = sysmon_start + sysmon_clusters
     apps_txt_start = httpd_start + httpd_clusters
     hello_start = apps_txt_start + apps_txt_clusters
-    efi_start = hello_start + hello_clusters
+
+    extra_file_info = []
+    curr_extra_start = hello_start + hello_clusters
+    if extra_files:
+        for name83, b in extra_files:
+            clus = (len(b) + bps - 1) // bps
+            extra_file_info.append((name83, b, curr_extra_start, clus))
+            curr_extra_start += clus
+
+    efi_start = curr_extra_start
     allocated = efi_start + file_clusters - 2  # clusters used beyond root(2)
     if allocated > geo.clusters:
         raise ValueError(
@@ -526,6 +538,8 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
         chain(apps_txt_start, apps_txt_clusters)  # APPS.TXT data
     if hello_bytes:
         chain(hello_start, hello_clusters)          # HELLO.ELF data
+    for _, _, start, clus in extra_file_info:
+        chain(start, clus)                          # Extra files (.SO, .ELF)
     chain(efi_start, file_clusters)            # BOOTAA64.EFI data
 
     def wsec(sector, data):
@@ -656,6 +670,8 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
         root_entries += dir_entry(b"APPS    TXT", 0x20, apps_txt_start, len(apps_txt_bytes))
     if hello_bytes:
         root_entries += dir_entry(b"HELLO   ELF", 0x20, hello_start, len(hello_bytes))
+    for name83, b, start, _ in extra_file_info:
+        root_entries += dir_entry(name83, 0x20, start, len(b))
 
     root_entries = root_entries.ljust(root_clusters * bps, b"\x00")
     for i in range(root_clusters):
@@ -865,6 +881,10 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
         for i in range(hello_clusters):
             chunk = hello_bytes[i * bps:(i + 1) * bps]
             wsec(geo.cluster_sector(hello_start + i), chunk.ljust(bps, b"\x00"))
+    for _, b, start, clus in extra_file_info:
+        for i in range(clus):
+            chunk = b[i * bps:(i + 1) * bps]
+            wsec(geo.cluster_sector(start + i), chunk.ljust(bps, b"\x00"))
     for i in range(file_clusters):
         chunk = efi_bytes[i * bps:(i + 1) * bps]
         wsec(geo.cluster_sector(efi_start + i), chunk.ljust(bps, b"\x00"))
@@ -1136,7 +1156,7 @@ def build_image(total_sectors, esp_offset, efi_bytes, kernel_bytes=None,
                 resmon_bytes=None, devcons_bytes=None, netstat_bytes=None,
                 m21demo_bytes=None, ping_bytes=None, dns_bytes=None,
                 download_bytes=None, traceroute_bytes=None, netprof_bytes=None,
-                sysmon_bytes=None, httpd_bytes=None):
+                sysmon_bytes=None, httpd_bytes=None, extra_files=None):
     img = bytearray(total_sectors * BYTES_PER_SECTOR)
     last_usable = total_sectors - 34
     first_usable = 34
@@ -1183,7 +1203,8 @@ def build_image(total_sectors, esp_offset, efi_bytes, kernel_bytes=None,
                       victim_bytes, harden_bytes, jingle_bytes, chime_bytes, globals_bytes, guard_bytes, spin_bytes, apps_txt_bytes, hello_bytes, asm_bytes, settings_bytes, crash_bytes, disas_bytes, edit_bytes, ps_bytes,
                       resmon_bytes, devcons_bytes, netstat_bytes,
                       m21demo_bytes, ping_bytes, dns_bytes, download_bytes,
-                      traceroute_bytes, netprof_bytes, sysmon_bytes, httpd_bytes)
+                      traceroute_bytes, netprof_bytes, sysmon_bytes, httpd_bytes,
+                      extra_files=extra_files)
     geo_data = Fat32Geometry(data_sectors, data_start)
     build_data_volume(img, geo_data)
     return bytes(img)
@@ -1299,6 +1320,8 @@ def main(argv):
                     help="optional AArch64 ELF32 executable (CRASH.ELF) to embed at the volume root (M22 D3, issue #326 -- symbolized-crash gate)")
     ap.add_argument("hello_file", nargs="?",
                     help="optional AArch64 ELF32 executable (HELLO.ELF) to embed at the volume root (M22 D1, issue #324 -- ELF-loader gate)")
+    ap.add_argument("extra_files", nargs="*",
+                    help="optional additional files (e.g. shared libraries .SO, dynamic binaries .ELF) to embed at the volume root")
     ap.add_argument("--apps-txt", metavar="FILE",
                     help="optional plain-text application manifest (APPS.TXT) to embed at the "
                          "volume root (milestone 13, card B2 -- claim 8877)")
@@ -1754,6 +1777,18 @@ def main(argv):
                   "not be an AArch64 executable" % args.hello_file,
                   file=sys.stderr)
 
+    extra_files_data = []
+    if args.extra_files:
+        for fpath in args.extra_files:
+            with open(fpath, "rb") as f:
+                fb = f.read()
+            fname = os.path.basename(fpath).upper()
+            base, ext = os.path.splitext(fname)
+            ext = ext.lstrip(".")[:3].ljust(3)
+            base = base[:8].ljust(8)
+            name83 = (base + ext).encode("ascii")
+            extra_files_data.append((name83, fb))
+
     total_sectors = args.size_mb * 1024 * 1024 // BYTES_PER_SECTOR
     img = build_image(total_sectors, args.esp_offset, efi_bytes, kernel_bytes,
                       user_bytes, counter_bytes, peer_bytes, status43_bytes,
@@ -1764,7 +1799,8 @@ def main(argv):
                       victim_bytes, harden_bytes, jingle_bytes, chime_bytes, globals_bytes, guard_bytes, spin_bytes, apps_txt_bytes, hello_bytes, asm_bytes, settings_bytes, crash_bytes, disas_bytes, edit_bytes, ps_bytes,
                       resmon_bytes, devcons_bytes, netstat_bytes,
                       m21demo_bytes, ping_bytes, dns_bytes, download_bytes,
-                      traceroute_bytes, netprof_bytes, sysmon_bytes, httpd_bytes)
+                      traceroute_bytes, netprof_bytes, sysmon_bytes, httpd_bytes,
+                      extra_files=extra_files_data)
     with open(args.image, "wb") as f:
         f.write(img)
     extra = ", %d-byte kernel image embedded" % len(kernel_bytes) if kernel_bytes else ""
