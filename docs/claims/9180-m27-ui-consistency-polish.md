@@ -1,6 +1,6 @@
 # Claim: M27 UI consistency polish (G9/G10/G14/G20/G21/G22/G23)
 
-- **Owner:** TBD (`<branch>`)
+- **Owner:** buffy (`agent/buffy/input-poll-563`)
 - **Prompt / plan:** `docs/parallel-dispatch-plan.md` Stream D
 - **Scope:** M27 G9 (consistent menus), G10 (consistent dialogs), G14 (button states), G20 (theme consistency), G21 (font consistency), G22 (empty states), G23 (error states)
 - **Touches:** `user/src/lib/ui.zig`, `kernel/src/settings.zig`

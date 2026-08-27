@@ -1,6 +1,6 @@
 # Claim: M18 T16 + M19 P5 — shell script mode
 
-- **Owner:** TBD (`<branch>`)
+- **Owner:** buffy (`agent/buffy/input-poll-563`)
 - **Prompt / plan:** `docs/parallel-dispatch-plan.md` Stream A
 - **Scope:** M18 T16 (basic scripting: `sh script.BIN` reads FAT file, executes line-by-line, `exit` stops early, 64 lines max) + M19 P5 (full script execution: pipes/redirections/functions work inside scripts, error handling with line numbers)
 - **Touches:** `kernel/src/shell.zig`, `tools/verify-live-script.sh` (new)

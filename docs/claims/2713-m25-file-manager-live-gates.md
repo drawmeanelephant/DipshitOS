@@ -1,6 +1,6 @@
 # Claim: M25 file manager live gates (F6–F18)
 
-- **Owner:** TBD (`<branch>`)
+- **Owner:** buffy (`agent/buffy/input-poll-563`)
 - **Prompt / plan:** `docs/parallel-dispatch-plan.md` Stream B
 - **Scope:** Class-B VZ live gates for M25 file manager cards F6–F10, F12–F18. Code already exists and passes host unit tests (79/79 suite); this stream writes live gates and flips march rows to ✅.
 - **Touches:** `tools/verify-live-filemanager-trash.sh` (new), `tools/verify-live-filemanager-rename.sh` (new), `tools/verify-live-filemanager-split.sh` (new), `tools/verify-live-filemanager-favorites.sh` (new), `tools/verify-live-filemanager-search.sh` (new), `tools/verify-live-filemanager-hidden.sh` (new), `docs/march-m25.md`, `user/src/file_browser.zig` (serial marker additions only if needed)

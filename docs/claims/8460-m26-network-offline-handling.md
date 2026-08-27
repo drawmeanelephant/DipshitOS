@@ -1,6 +1,6 @@
 # Claim: M26 N13 + N14 — network-aware apps & offline handling
 
-- **Owner:** TBD (`<branch>`)
+- **Owner:** buffy (`agent/buffy/input-poll-563`)
 - **Prompt / plan:** `docs/parallel-dispatch-plan.md` Stream C
 - **Scope:** M26 N13 (network-aware preflight in fetch/ping) + N14 (user-friendly offline error messages)
 - **Touches:** `user/src/fetch.zig`, `user/src/ping.zig`, `user/src/lib/netstatus.zig` (new), `tools/verify-live-n13-offline.sh` (new)
