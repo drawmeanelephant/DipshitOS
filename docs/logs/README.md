@@ -127,6 +127,7 @@ meaningful — on main.
 | agent/buffy/m25-file-manager-depth | [`agent-buffy-m25-file-manager-depth.md`](agent-buffy-m25-file-manager-depth.md) |
 | `agent/buffy/m26-net-experience` | [`agent-buffy-m26-net-experience.md`](agent-buffy-m26-net-experience.md) |
 | agent/buffy/m26-netstat-fetch | [`agent-buffy-m26-netstat-fetch.md`](agent-buffy-m26-netstat-fetch.md) |
+| agent/buffy/m27-desktop-polish | [`agent-buffy-m27-desktop-polish.md`](agent-buffy-m27-desktop-polish.md) |
 | milestone nine interactive application events (claim 7463) | [`agent-buffy-m9-events.md`](agent-buffy-m9-events.md) |
 | milestone nine tracker (claim 8234) | [`agent-buffy-m9-tracker.md`](agent-buffy-m9-tracker.md) |
 | Roadmap refinement (claim 4951) | [`agent-buffy-roadmap-refinement.md`](agent-buffy-roadmap-refinement.md) |
