@@ -128,7 +128,9 @@ meaningful — on main.
 | `agent/buffy/m26-net-experience` | [`agent-buffy-m26-net-experience.md`](agent-buffy-m26-net-experience.md) |
 | agent/buffy/m26-netstat-fetch | [`agent-buffy-m26-netstat-fetch.md`](agent-buffy-m26-netstat-fetch.md) |
 | agent/buffy/m27-desktop-polish | [`agent-buffy-m27-desktop-polish.md`](agent-buffy-m27-desktop-polish.md) |
+| `agent/buffy/m29-vm-depth` | [`agent-buffy-m29-vm-depth.md`](agent-buffy-m29-vm-depth.md) |
 | `agent/buffy/m30-dynamic-linking` | [`agent-buffy-m30-dynamic-linking.md`](agent-buffy-m30-dynamic-linking.md) |
+| `agent/buffy/m31-dynamic-ecosystem` | [`agent-buffy-m31-dynamic-ecosystem.md`](agent-buffy-m31-dynamic-ecosystem.md) |
 | milestone nine interactive application events (claim 7463) | [`agent-buffy-m9-events.md`](agent-buffy-m9-events.md) |
 | milestone nine tracker (claim 8234) | [`agent-buffy-m9-tracker.md`](agent-buffy-m9-tracker.md) |
 | Roadmap refinement (claim 4951) | [`agent-buffy-roadmap-refinement.md`](agent-buffy-roadmap-refinement.md) |
