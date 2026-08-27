@@ -217,6 +217,9 @@ Multiple agents/humans develop this repo concurrently. Binding rules (mirrored i
 - [`march-m25.md`](march-m25.md) — M25 tracker (file manager depth).
 - [`march-m26.md`](march-m26.md) — M26 tracker (network experience).
 - [`march-m27.md`](march-m27.md) — M27 tracker (desktop polish & completeness).
+- [`march-m29.md`](march-m29.md) — M29 tracker (VM depth: demand paging, COW, and anonymous mmap; done).
+- [`march-m30.md`](march-m30.md) — M30 tracker (dynamic linking & shared libraries; done).
+- [`march-m31.md`](march-m31.md) — M31 tracker (dynamic linking ecosystem & userland migration; done).
 - [`testing.md`](testing.md) — verification sequence & evidence policy.
 - [`hardware-contract.md`](hardware-contract.md) — hardware `[observed]`/`[inferred]`.
 - [`architecture.md`](architecture.md) — components & data flow.

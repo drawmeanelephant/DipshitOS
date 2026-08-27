@@ -77,6 +77,18 @@ pub const Image = struct {
 
 /// The address space a process runs in (what its TTBR0 user root maps).
 /// Claim 0826: the process OWNS the backing pages for exec'd programs —
+pub const max_mmap_regions: usize = 8;
+pub const max_dynamic_pages: usize = 128;
+
+pub const MmapRegion = struct {
+    base_va: u64 = 0,
+    len: u64 = 0,
+    prot: u64 = 0,
+    flags: u64 = 0,
+};
+
+/// The address space a process runs in (what its TTBR0 user root maps).
+/// Claim 0826: the process OWNS the backing pages for exec'd programs —
 /// the allocator-backed text/user-stack phys + page counts (0 counts = the
 /// backing is static, e.g. the boot payload's `.usertext`/`.userbss`,
 /// which is never freed).
@@ -110,6 +122,12 @@ pub const AddrSpace = struct {
     /// Physical shared library staging/heap pages (claim 7921).
     lib_phys: u64 = 0,
     lib_pages: u64 = 0,
+    /// M29 VM Depth: Anonymous mmap regions and dynamic page allocations
+    mmap_regions: [max_mmap_regions]MmapRegion = [_]MmapRegion{.{}} ** max_mmap_regions,
+    mmap_region_count: usize = 0,
+    mmap_next_va: u64 = 0x0000_0000_1000_0000,
+    dynamic_pages: [max_dynamic_pages]u64 = [_]u64{0} ** max_dynamic_pages,
+    dynamic_page_count: usize = 0,
 };
 
 /// Kernel-side resources the process owns with its program (freed at
@@ -194,6 +212,71 @@ fn release_resources(p: *Process) void {
     if (p.addr_space.lib_pages > 0) _ = alloc.free_pages(p.addr_space.lib_phys, p.addr_space.lib_pages);
     if (p.addr_space.stack_pages > 0) _ = alloc.free_pages(p.addr_space.stack_phys, p.addr_space.stack_pages);
     if (p.kernel_stack.pages > 0) _ = alloc.free_pages(p.kernel_stack.phys, p.kernel_stack.pages);
+    // M29 VM Depth: unref/free all dynamically faulted and mmap'd pages
+    var i: usize = 0;
+    while (i < p.addr_space.dynamic_page_count) : (i += 1) {
+        const pa = p.addr_space.dynamic_pages[i];
+        if (pa != 0) _ = alloc.unref_page(pa);
+    }
+    p.addr_space.dynamic_page_count = 0;
+    p.addr_space.mmap_region_count = 0;
+    @memset(&p.addr_space.mmap_regions, MmapRegion{});
+}
+
+pub fn add_mmap_region(pid: usize, va: u64, len: u64, prot: u64, flags: u64) bool {
+    if (pid >= max_processes or processes[pid].state == .free) return false;
+    var space = &processes[pid].addr_space;
+    if (space.mmap_region_count >= max_mmap_regions) return false;
+    for (&space.mmap_regions) |*r| {
+        if (r.len == 0) {
+            r.* = .{ .base_va = va, .len = len, .prot = prot, .flags = flags };
+            space.mmap_region_count += 1;
+            return true;
+        }
+    }
+    return false;
+}
+
+pub fn remove_mmap_region(pid: usize, va: u64, len: u64) bool {
+    if (pid >= max_processes or processes[pid].state == .free) return false;
+    var space = &processes[pid].addr_space;
+    for (&space.mmap_regions) |*r| {
+        if (r.base_va == va and (len == 0 or r.len == len)) {
+            r.* = .{};
+            space.mmap_region_count -%= 1;
+            return true;
+        }
+    }
+    return false;
+}
+
+pub fn find_mmap_region(pid: usize, va: u64) ?*const MmapRegion {
+    if (pid >= max_processes or processes[pid].state == .free) return null;
+    const space = &processes[pid].addr_space;
+    for (&space.mmap_regions) |*r| {
+        if (r.len > 0 and va >= r.base_va and va < r.base_va + r.len) {
+            return r;
+        }
+    }
+    return null;
+}
+
+pub fn record_dynamic_page(pid: usize, pa: u64) bool {
+    if (pid >= max_processes or processes[pid].state == .free) return false;
+    var space = &processes[pid].addr_space;
+    if (space.dynamic_page_count >= max_dynamic_pages) return false;
+    space.dynamic_pages[space.dynamic_page_count] = pa;
+    space.dynamic_page_count += 1;
+    return true;
+}
+
+pub fn next_mmap_va(pid: usize, len: u64) u64 {
+    if (pid >= max_processes) return 0x1000_0000;
+    var space = &processes[pid].addr_space;
+    const aligned_len = (len + 4095) & ~@as(u64, 4095);
+    const va = space.mmap_next_va;
+    space.mmap_next_va += aligned_len;
+    return va;
 }
 
 /// Create a process for a loaded program: `name` is copied into the
@@ -894,4 +977,31 @@ test "process: snapshot marshals non-free rows in id order with the fixed 40-byt
     // The recycled slot is pid 0 again (the freed descriptor's id is
     // reused), so `third` is 0 — the snapshot reflects the live registry.
     try std.testing.expectEqual(@as(usize, 0), third);
+}
+
+test "process: mmap regions and dynamic page tracking" {
+    init();
+    const pid = create("VMAPP.ELF", .{}, .{}, .{}).?;
+    _ = bind(pid, 2);
+
+    const mmap_va = next_mmap_va(pid, 8192);
+    try std.testing.expectEqual(@as(u64, 0x1000_0000), mmap_va);
+    try std.testing.expect(add_mmap_region(pid, mmap_va, 8192, 3, 0x22));
+
+    // Find region
+    const found = find_mmap_region(pid, mmap_va + 100).?;
+    try std.testing.expectEqual(@as(u64, 8192), found.len);
+    try std.testing.expectEqual(@as(u64, 3), found.prot);
+
+    // Record dynamic page allocations
+    try std.testing.expect(record_dynamic_page(pid, 0x200000));
+    try std.testing.expect(record_dynamic_page(pid, 0x201000));
+
+    // Remove region
+    try std.testing.expect(remove_mmap_region(pid, mmap_va, 8192));
+    try std.testing.expect(find_mmap_region(pid, mmap_va) == null);
+
+    // Reap frees all dynamic pages
+    _ = on_task_exit(2, 0);
+    try std.testing.expect(reap(pid));
 }

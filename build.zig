@@ -1315,6 +1315,29 @@ pub fn build(b: *std.Build) void {
     ld_step.dependOn(&install_ld.step);
 
     // ------------------------------------------------------------------
+    // Guest: forty-sixth ESP user program (Milestone 29, Issue #598)
+    // VMTEST.BIN. Headless VM depth proof (mmap, demand paging, COW, munmap).
+    // ------------------------------------------------------------------
+    const vmtest_prog = b.addExecutable(.{
+        .name = "user-vmtest",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/vmtest.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    vmtest_prog.linker_script = b.path("user/linker.ld");
+    const vmtest_step = b.step("vmtest", "Build the forty-sixth ESP user program (zig-out/bin/VMTEST.BIN)");
+    const vmtest_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    vmtest_elf2bin.addFileArg(vmtest_prog.getEmittedBin());
+    const vmtest_bin = vmtest_elf2bin.addOutputFileArg("VMTEST.BIN");
+    vmtest_elf2bin.has_side_effects = true;
+    vmtest_elf2bin.stdio = .inherit;
+    vmtest_step.dependOn(&vmtest_elf2bin.step);
+    const install_vmtest = b.addInstallFileWithDir(vmtest_bin, .bin, "VMTEST.BIN");
+    b.getInstallStep().dependOn(&install_vmtest.step);
+
+    // ------------------------------------------------------------------
     // Top-level steps. System-command steps are marked as having side
     // effects (and inherit stdio) so they always execute instead of being
     // skipped by the build cache. (No QEMU path: this project targets Apple
@@ -1371,6 +1394,7 @@ pub fn build(b: *std.Build) void {
     image.addFileArg(netprof_bin); // ... [NETPROF.BIN] (M26 N12, issue #439: forty-third user program, network profile manager)
     image.addFileArg(sysmon_bin); // ... [SYSMON.BIN] (M27 G6, issue #449: forty-fourth user program, system monitor dashboard)
     image.addFileArg(httpd_bin); // ... [HTTPD.BIN] (Claim 0750: forty-fifth user program, HTTP web server)
+    image.addFileArg(vmtest_bin); // ... [VMTEST.BIN] (Milestone 29: forty-sixth user program, VM depth test)
     image.has_side_effects = true;
     image.stdio = .inherit;
     image_step.dependOn(&image.step);

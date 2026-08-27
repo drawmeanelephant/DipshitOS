@@ -159,6 +159,20 @@ pub fn add_write_region(reg: Region) void {
     }
 }
 
+/// Remove a dynamic EL0 aperture by base and len.
+pub fn remove_region(base: u64, len: u64) void {
+    for (&read_regions) |*r| {
+        if (r.base == base and (len == 0 or r.len == len)) {
+            r.* = .{ .base = 0, .len = 0 };
+        }
+    }
+    for (&write_regions) |*r| {
+        if (r.base == base and (len == 0 or r.len == len)) {
+            r.* = .{ .base = 0, .len = 0 };
+        }
+    }
+}
+
 pub fn stats() Stats {
     return .{
         .copies = copies_value,

@@ -78,14 +78,19 @@ const app_timers = @import("app_timers.zig"); // Milestone 14 (claim 7323): the 
 const virtio_snd = @import("virtio_snd.zig"); // Milestone 15 (claim 7636): the virtio-snd playback path behind sys_audio_*
 const fbtext = @import("text.zig"); // M20-U1 (claim 5127): sys_font_size's terminal font state
 
-pub const slot_count: usize = 64;
+const builtin = @import("builtin");
+const mmu = @import("mmu.zig");
+const alloc = @import("alloc.zig");
+
+pub const slot_count: usize = 128;
 /// 56 through M18 + slot 58 `sys_font_size` (M20-U1); 56/57 are Lane A's
 /// reserved pipe slots (M19) — the gap is intentional, see
 /// docs/agent-concurrency-plan.md §8.
 /// M19 P1 (issue #290): slots 56/57 are the bounded pipe.
 /// M26 N1 (issue #399): slots 59/60 are ping send/poll.
 /// M26 N2 (issue #400): slot 62 is the net-stats snapshot.
-pub const implemented_count: usize = 63;
+/// M29 (issue #598): slots 63/64 are sys_mmap/sys_munmap.
+pub const implemented_count: usize = 65;
 /// Card G6 (claim 0487) follow-on (slot 18): the fixed `sys_win_get` shape —
 /// four u32 LE words (x, y, w, h), 16 bytes, marshaled per call and copy_out'd
 /// through uaccess (the procs snapshot pattern).
@@ -257,6 +262,10 @@ pub const sys_ping_poll: u64 = 60;
 /// snapshots; `buf_len < snapshot size` copies nothing (honest
 /// truncation, like the process table's whole-rows rule).
 pub const sys_net_stats: u64 = 62;
+/// M29 (issue #598): sys_mmap(addr, len, prot, flags) — slot 63.
+pub const sys_mmap: u64 = 63;
+/// M29 (issue #598): sys_munmap(addr, len) — slot 64.
+pub const sys_munmap: u64 = 64;
 
 pub const ErrorCode = enum(i64) {
     einval = -1,
@@ -268,6 +277,7 @@ pub const ErrorCode = enum(i64) {
     eacces = -7,
     enametoolong = -8,
     enxio = -9, // "no such device" — the sys_audio_* seam's honest no-device refusal
+    enomem = -10, // "out of memory"
 };
 
 pub fn error_result(code: ErrorCode) u64 {
@@ -404,6 +414,9 @@ fn ensure_table() *const [slot_count]Entry {
         table_storage[sys_ping_poll] = .{ .name = "sys_ping_poll", .handler = handle_ping_poll };
         // M26 N2 (issue #400): slot 62 — net-stats snapshot.
         table_storage[sys_net_stats] = .{ .name = "sys_net_stats", .handler = handle_net_stats };
+        // M29 (issue #598): slots 63/64 — sys_mmap / sys_munmap.
+        table_storage[sys_mmap] = .{ .name = "sys_mmap", .handler = handle_mmap };
+        table_storage[sys_munmap] = .{ .name = "sys_munmap", .handler = handle_munmap };
         table_ready = true;
     }
     return &table_storage;
@@ -1937,6 +1950,80 @@ fn handle_tcp_close(_: Args, _: *exceptions.VectorFrame) u64 {
     return 0;
 }
 
+/// M29 VM Depth: sys_mmap(addr, len, prot, flags) — slot 63.
+/// Maps an anonymous memory region into user address space.
+/// prot: 1=PROT_READ, 2=PROT_WRITE, 4=PROT_EXEC.
+/// flags: 0x20=MAP_ANONYMOUS, 0x02=MAP_PRIVATE, 0x8000=MAP_POPULATE.
+/// Returns allocated virtual address on success, or -error.
+fn handle_mmap(args: Args, _: *exceptions.VectorFrame) u64 {
+    const addr = args[0];
+    const len = args[1];
+    const prot = args[2];
+    const flags = args[3];
+
+    if (len == 0 or len > 16 * 1024 * 1024) return error_result(.einval);
+    const pid = process.find_by_task(scheduler.current_id()) orelse return error_result(.einval);
+    const pinfo = process.info(pid) orelse return error_result(.einval);
+
+    const aligned_len = (len + 4095) & ~@as(u64, 4095);
+    var va: u64 = 0;
+    if (addr != 0 and (addr & 4095) == 0) {
+        va = addr;
+    } else {
+        va = process.next_mmap_va(pid, aligned_len);
+    }
+
+    if (!process.add_mmap_region(pid, va, aligned_len, prot, flags)) return error_result(.enomem);
+
+    if ((prot & 2) != 0) {
+        uaccess.add_write_region(.{ .base = va, .len = aligned_len });
+    }
+    if ((prot & 1) != 0) {
+        uaccess.add_read_region(.{ .base = va, .len = aligned_len });
+    }
+
+    // MAP_POPULATE (eager allocation)
+    if ((flags & 0x8000) != 0) {
+        const pages = aligned_len / 4096;
+        var i: u64 = 0;
+        while (i < pages) : (i += 1) {
+            const pa = alloc.alloc_pages(1) orelse return error_result(.enomem);
+            if (!builtin.is_test) {
+                @memset(@as([*]u8, @ptrFromInt(pa))[0..4096], 0);
+            }
+            _ = mmu.map_user_page(pinfo.root_phys, va + i * 4096, pa, (prot & 2) != 0, (prot & 4) != 0);
+            _ = process.record_dynamic_page(pid, pa);
+        }
+    }
+
+    return va;
+}
+
+/// M29 VM Depth: sys_munmap(addr, len) — slot 64.
+/// Unmaps an anonymous memory region and frees physical pages.
+fn handle_munmap(args: Args, _: *exceptions.VectorFrame) u64 {
+    const addr = args[0];
+    const len = args[1];
+
+    if (addr == 0 or (addr & 4095) != 0 or len == 0) return error_result(.einval);
+    const pid = process.find_by_task(scheduler.current_id()) orelse return error_result(.einval);
+    const pinfo = process.info(pid) orelse return error_result(.einval);
+
+    const aligned_len = (len + 4095) & ~@as(u64, 4095);
+    const pages = aligned_len / 4096;
+    var i: u64 = 0;
+    while (i < pages) : (i += 1) {
+        const page_va = addr + i * 4096;
+        if (mmu.unmap_user_page(pinfo.root_phys, page_va)) |pa| {
+            _ = alloc.unref_page(pa);
+        }
+    }
+
+    _ = process.remove_mmap_region(pid, addr, aligned_len);
+    uaccess.remove_region(addr, aligned_len);
+    return 0;
+}
+
 /// Deterministic monitor output for the implemented rows and their counters.
 pub fn report(con: *console.Console) void {
     var live: usize = 0;
@@ -1979,10 +2066,10 @@ fn capture_marshaled_args(args: Args, _: *exceptions.VectorFrame) u64 {
     return 0xcafe;
 }
 
-test "syscall: runtime table has 64 slots and sixty-three unique implemented rows" {
+test "syscall: runtime table has 128 slots and sixty-five unique implemented rows" {
     init(test_writer);
     const table = ensure_table();
-    try std.testing.expectEqual(@as(usize, 64), table.len);
+    try std.testing.expectEqual(@as(usize, 128), table.len);
     var seen: [slot_count]bool = [_]bool{false} ** slot_count;
     var implemented: usize = 0;
     for (table, 0..) |entry, number| {
@@ -1992,7 +2079,7 @@ test "syscall: runtime table has 64 slots and sixty-three unique implemented row
             implemented += 1;
         }
     }
-    try std.testing.expectEqual(@as(usize, 63), implemented);
+    try std.testing.expectEqual(@as(usize, 65), implemented);
     try std.testing.expectEqualStrings("sys_pipe_read", entry_info(sys_pipe_read).?.name);
     try std.testing.expectEqualStrings("sys_pipe_write", entry_info(sys_pipe_write).?.name);
     try std.testing.expectEqualStrings("sys_font_size", entry_info(sys_font_size).?.name);
@@ -2049,7 +2136,9 @@ test "syscall: runtime table has 64 slots and sixty-three unique implemented row
     try std.testing.expectEqualStrings("sys_ping_send", entry_info(sys_ping_send).?.name);
     try std.testing.expectEqualStrings("sys_ping_poll", entry_info(sys_ping_poll).?.name);
     try std.testing.expectEqualStrings("sys_net_stats", entry_info(sys_net_stats).?.name);
-    try std.testing.expect(entry_info(63) == null);
+    try std.testing.expectEqualStrings("sys_mmap", entry_info(sys_mmap).?.name);
+    try std.testing.expectEqualStrings("sys_munmap", entry_info(sys_munmap).?.name);
+    try std.testing.expect(entry_info(65) == null);
 }
 
 test "syscall: adapter decodes x8 and x0-x5 and unknown numbers return ENOSYS" {
@@ -2062,12 +2151,12 @@ test "syscall: adapter decodes x8 and x0-x5 and unknown numbers return ENOSYS" {
     try std.testing.expectEqual(@as(u64, 41), exceptions.frame_read(&frame, 0));
     try std.testing.expectEqual(@as(u64, 1), call_count(sys_ping));
 
-    try std.testing.expect(exceptions.frame_write(&frame, 8, 63));
+    try std.testing.expect(exceptions.frame_write(&frame, 8, 65));
     try std.testing.expect(handle_svc(&frame, svc_immediate));
     try std.testing.expectEqual(error_result(.enosys), exceptions.frame_read(&frame, 0));
-    try std.testing.expectEqual(@as(u64, 1), call_count(63));
+    try std.testing.expectEqual(@as(u64, 1), call_count(65));
 
-    try std.testing.expect(exceptions.frame_write(&frame, 8, 64));
+    try std.testing.expect(exceptions.frame_write(&frame, 8, 66));
     try std.testing.expect(handle_svc(&frame, svc_immediate));
     try std.testing.expectEqual(error_result(.enosys), exceptions.frame_read(&frame, 0));
 }
@@ -2075,9 +2164,9 @@ test "syscall: adapter decodes x8 and x0-x5 and unknown numbers return ENOSYS" {
 test "syscall: handle_svc marshals every x0-x5 argument before replacing x0" {
     init(test_writer);
     _ = ensure_table();
-    const saved = table_storage[63];
-    defer table_storage[63] = saved;
-    table_storage[63] = .{ .name = "test_capture", .handler = capture_marshaled_args };
+    const saved = table_storage[65];
+    defer table_storage[65] = saved;
+    table_storage[65] = .{ .name = "test_capture", .handler = capture_marshaled_args };
     var frame = fresh_frame();
     const expected: Args = .{
         0x0101_0101_0101_0101,
@@ -2088,7 +2177,7 @@ test "syscall: handle_svc marshals every x0-x5 argument before replacing x0" {
         0x5656_5656_5656_5656,
     };
     for (expected, 0..) |value, reg| try std.testing.expect(exceptions.frame_write(&frame, @intCast(reg), value));
-    try std.testing.expect(exceptions.frame_write(&frame, 8, 63));
+    try std.testing.expect(exceptions.frame_write(&frame, 8, 65));
     try std.testing.expect(handle_svc(&frame, svc_immediate));
     try std.testing.expectEqual(expected, test_marshaled_args);
     try std.testing.expectEqual(@as(u64, 0xcafe), exceptions.frame_read(&frame, 0));
@@ -3027,7 +3116,7 @@ test "syscall: counters are monotonic and report is deterministic" {
     var con = mock.console();
     report(&con);
     try std.testing.expectEqualStrings(
-        "syscalls: slots=64 implemented=63\n" ++
+        "syscalls: slots=64 implemented=65\n" ++
             "  0 sys_ping calls=2\n" ++
             "  1 sys_write calls=0\n" ++
             "  2 sys_yield calls=0\n" ++
@@ -3090,7 +3179,9 @@ test "syscall: counters are monotonic and report is deterministic" {
             "  59 sys_ping_send calls=0\n" ++
             "  60 sys_ping_poll calls=0\n" ++
             "  61 sys_win_set_title calls=0\n" ++
-            "  62 sys_net_stats calls=0\n",
+            "  62 sys_net_stats calls=0\n" ++
+            "  63 sys_mmap calls=0\n" ++
+            "  64 sys_munmap calls=0\n",
         mock.contents(),
     );
 }
@@ -3722,4 +3813,39 @@ test "syscall: slots 44/45 — sys_audio_volume/sys_audio_mute are bounded and p
     // Restore the honest default.
     virtio_snd.stream_volume = 100;
     virtio_snd.stream_muted = false;
+}
+
+test "syscall: sys_mmap and sys_munmap anonymous allocation and teardown" {
+    mmu.reset();
+    alloc.reset_refcounts();
+    process.init();
+    userspace.init();
+    init(test_writer);
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0); // task 2 = process 0 (boot payload)
+    scheduler.start();
+
+    var frame = fresh_frame();
+
+    // In task 0 (shell), calls return EINVAL
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_mmap, .{ 0, 4096, 3, 0x22, 0, 0 }, &frame));
+
+    // Yield to user task (task 2, pid 0)
+    try std.testing.expect(scheduler.yield_current()); // shell -> worker
+    try std.testing.expect(scheduler.yield_current()); // worker -> user (2)
+    try std.testing.expectEqual(@as(usize, 2), scheduler.current_id());
+
+    // mmap 8192 bytes
+    const mapped_va = dispatch(sys_mmap, .{ 0, 8192, 3, 0x22, 0, 0 }, &frame);
+    try std.testing.expect(mapped_va >= 0x1000_0000);
+    try std.testing.expectEqual(@as(u64, 2), call_count(sys_mmap));
+
+    // munmap the region
+    const unmap_res = dispatch(sys_munmap, .{ mapped_va, 8192, 0, 0, 0, 0 }, &frame);
+    try std.testing.expectEqual(@as(u64, 0), unmap_res);
+    try std.testing.expectEqual(@as(u64, 1), call_count(sys_munmap));
+
+    // Invalid munmap (unaligned addr)
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_munmap, .{ mapped_va + 1, 4096, 0, 0, 0, 0 }, &frame));
 }

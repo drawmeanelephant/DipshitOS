@@ -13,4 +13,8 @@ EDIT.BIN | Text Editor | e
 SYSMON.BIN | System Monitor | y | dock=true
 HTTPD.BIN | HTTP Web Server | h
 DYNAPP.ELF | Dynamic App | l | dock=true
+CALC.ELF | Dynamic Calc | c
+NOTEPAD.ELF | Dynamic Editor | n
+FILE.ELF | Dynamic Files | b
+DESKTOP.ELF | Dynamic Desktop | d
 
