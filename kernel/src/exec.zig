@@ -163,6 +163,8 @@ pub const ExecResult = enum {
 /// The loaded program image (BSS, page-aligned so the user root can map the
 /// whole page at `userspace.text_va`).
 var program: [exec_program_max]u8 align(4096) = undefined;
+/// Staging buffer for dynamic ELF interpreter (PT_INTERP / LD.SO, claim 7921).
+var interp_program: [exec_program_max]u8 align(4096) = undefined;
 
 pub const LoadedInfo = struct {
     name: []const u8,
@@ -311,6 +313,12 @@ pub fn exec_file(name: []const u8, args: []const []const u8) ExecResult {
             for (syms[0..sym_n]) |si| {
                 _ = symbol.add(si.name, si.addr, si.size);
             }
+
+            if (image.interp) |interp_name| {
+                // Dynamic ELF executable (claim 7921): load runtime interpreter (LD.SO), setup auxv and shared library aperture.
+                return exec_dynamic_elf(name, args, program[0..got], image, interp_name);
+            }
+
             const seg0 = image.segments[0];
             // The loader contract (elf.zig): segment 0 sits at
             // userspace.text_va, an optional writable segment 1 directly
@@ -492,6 +500,303 @@ pub fn exec_file(name: []const u8, args: []const []const u8) ExecResult {
     }
     // Claim 6359 (slot 28 `sys_exec`): record the spawned pid at the true
     // success point so the EL0 caller can read it back.
+    last_pid = proc_id;
+    return .ok;
+}
+
+fn exec_dynamic_elf(
+    name: []const u8,
+    args: []const []const u8,
+    prog_buf: []const u8,
+    image: elf_mod.Image,
+    interp_name: []const u8,
+) ExecResult {
+    if (!scheduler.has_free_slot()) return .pool_full;
+
+    const interp_got = fat.read_file(interp_name, &interp_program) orelse return .not_found;
+    const interp_image = elf_mod.parse_at(interp_program[0..interp_got], null) catch |err| return elf_exec_error(err);
+
+    const seg0 = image.segments[0];
+    const text_len: usize = seg0.mem_size;
+    const text_pages: u64 = (text_len + alloc.page_size - 1) / alloc.page_size;
+    const text_phys = alloc.alloc_pages(text_pages) orelse return .out_of_memory;
+
+    const data_file_size: usize = if (image.segment_count == 2) image.segments[1].file_size else 0;
+    const data_mem_size: usize = if (image.segment_count == 2) image.segments[1].mem_size else 0;
+    const data_pages: u64 = if (data_mem_size > 0) (data_mem_size + alloc.page_size - 1) / alloc.page_size else 0;
+    const data_phys: u64 = if (data_pages > 0) (alloc.alloc_pages(data_pages) orelse {
+        _ = alloc.free_pages(text_phys, text_pages);
+        return .out_of_memory;
+    }) else 0;
+
+    const interp_seg0 = interp_image.segments[0];
+    const interp_text_len: usize = interp_seg0.mem_size;
+    const interp_text_pages: u64 = (interp_text_len + alloc.page_size - 1) / alloc.page_size;
+    const interp_text_phys = alloc.alloc_pages(interp_text_pages) orelse {
+        _ = alloc.free_pages(text_phys, text_pages);
+        if (data_pages > 0) _ = alloc.free_pages(data_phys, data_pages);
+        return .out_of_memory;
+    };
+
+    const interp_data_file_size: usize = if (interp_image.segment_count == 2) interp_image.segments[1].file_size else 0;
+    const interp_data_mem_size: usize = if (interp_image.segment_count == 2) interp_image.segments[1].mem_size else 0;
+    const interp_data_pages: u64 = if (interp_data_mem_size > 0) (interp_data_mem_size + alloc.page_size - 1) / alloc.page_size else 0;
+    const interp_data_phys: u64 = if (interp_data_pages > 0) (alloc.alloc_pages(interp_data_pages) orelse {
+        _ = alloc.free_pages(text_phys, text_pages);
+        if (data_pages > 0) _ = alloc.free_pages(data_phys, data_pages);
+        _ = alloc.free_pages(interp_text_phys, interp_text_pages);
+        return .out_of_memory;
+    }) else 0;
+
+    const lib_pages: u64 = 64; // 256 KiB shared library heap aperture
+    const lib_phys = alloc.alloc_pages(lib_pages) orelse {
+        _ = alloc.free_pages(text_phys, text_pages);
+        if (data_pages > 0) _ = alloc.free_pages(data_phys, data_pages);
+        _ = alloc.free_pages(interp_text_phys, interp_text_pages);
+        if (interp_data_pages > 0) _ = alloc.free_pages(interp_data_phys, interp_data_pages);
+        return .out_of_memory;
+    };
+
+    const stack_pages: u64 = (scheduler.task_stack_size + alloc.page_size - 1) / alloc.page_size;
+    const stack_phys = alloc.alloc_pages(stack_pages) orelse {
+        _ = alloc.free_pages(text_phys, text_pages);
+        if (data_pages > 0) _ = alloc.free_pages(data_phys, data_pages);
+        _ = alloc.free_pages(interp_text_phys, interp_text_pages);
+        if (interp_data_pages > 0) _ = alloc.free_pages(interp_data_phys, interp_data_pages);
+        _ = alloc.free_pages(lib_phys, lib_pages);
+        return .out_of_memory;
+    };
+
+    const kstack_pages: u64 = stack_pages;
+    const kstack_phys = alloc.alloc_pages(kstack_pages) orelse {
+        _ = alloc.free_pages(text_phys, text_pages);
+        if (data_pages > 0) _ = alloc.free_pages(data_phys, data_pages);
+        _ = alloc.free_pages(interp_text_phys, interp_text_pages);
+        if (interp_data_pages > 0) _ = alloc.free_pages(interp_data_phys, interp_data_pages);
+        _ = alloc.free_pages(lib_phys, lib_pages);
+        _ = alloc.free_pages(stack_phys, stack_pages);
+        return .out_of_memory;
+    };
+
+    // Copy program text and data
+    const text_dst: [*]u8 = @ptrFromInt(text_phys);
+    @memcpy(text_dst[0..seg0.file_size], prog_buf[seg0.file_offset..][0..seg0.file_size]);
+    if (seg0.mem_size > seg0.file_size) @memset(text_dst[seg0.file_size..seg0.mem_size], 0);
+
+    if (data_pages > 0) {
+        const data_dst: [*]u8 = @ptrFromInt(data_phys);
+        if (data_file_size > 0) @memcpy(data_dst[0..data_file_size], prog_buf[image.segments[1].file_offset..][0..data_file_size]);
+        @memset(data_dst[data_file_size..data_mem_size], 0);
+    }
+
+    // Copy interpreter text and data
+    const interp_text_dst: [*]u8 = @ptrFromInt(interp_text_phys);
+    @memcpy(interp_text_dst[0..interp_seg0.file_size], interp_program[interp_seg0.file_offset..][0..interp_seg0.file_size]);
+    if (interp_seg0.mem_size > interp_seg0.file_size) @memset(interp_text_dst[interp_seg0.file_size..interp_seg0.mem_size], 0);
+
+    if (interp_data_pages > 0) {
+        const interp_data_dst: [*]u8 = @ptrFromInt(interp_data_phys);
+        if (interp_data_file_size > 0) @memcpy(interp_data_dst[0..interp_data_file_size], interp_program[interp_image.segments[1].file_offset..][0..interp_data_file_size]);
+        @memset(interp_data_dst[interp_data_file_size..interp_data_mem_size], 0);
+    }
+
+    // Pre-stage shared libraries into lib_phys (R-X shared library aperture at 0x01000000)
+    const lib_dst: [*]u8 = @ptrFromInt(lib_phys);
+    @memset(lib_dst[0 .. lib_pages * alloc.page_size], 0);
+    var lib_offset: usize = 0;
+    if (fat.read_file("LIBUI.SO", &interp_program)) |got| {
+        @memcpy(lib_dst[lib_offset..][0..got], interp_program[0..got]);
+        lib_offset += 0x10000;
+    }
+    if (fat.read_file("LIBFONT.SO", &interp_program)) |got| {
+        @memcpy(lib_dst[lib_offset..][0..got], interp_program[0..got]);
+        lib_offset += 0x10000;
+    }
+
+    // Initial stack frame & Auxv setup
+    const stack_va = csprng.random_stack_va();
+    userspace.set_stack_va(stack_va);
+    const stack_bytes: [*]u8 = @ptrFromInt(stack_phys);
+    const frame_size: usize = 256;
+    const frame_off: usize = scheduler.task_stack_size - frame_size;
+    const frame_va: u64 = stack_va + frame_off;
+    const frame = stack_bytes[frame_off..scheduler.task_stack_size];
+    @memset(frame, 0);
+
+    const argc = args.len;
+    std.mem.writeInt(u64, frame[0..8], argc, .little);
+    // frame[8..16] = 0 (argv NULL)
+    // frame[16..24] = 0 (envp NULL)
+    const auxv_entries = [_]elf_mod.AuxvEntry{
+        .{ .a_type = elf_mod.at_phdr, .a_val = image.base_vaddr + image.phoff },
+        .{ .a_type = elf_mod.at_phent, .a_val = image.phentsize },
+        .{ .a_type = elf_mod.at_phnum, .a_val = image.phnum },
+        .{ .a_type = elf_mod.at_entry, .a_val = image.base_vaddr + image.entry_rel },
+        .{ .a_type = elf_mod.at_base, .a_val = interp_image.base_vaddr },
+        .{ .a_type = elf_mod.at_pagesz, .a_val = 4096 },
+        .{ .a_type = elf_mod.at_null, .a_val = 0 },
+    };
+    _ = elf_mod.encode_auxv(frame[24..], &auxv_entries);
+
+    // Build TTBR0 multi-aperture root
+    const data_va = userspace.text_va + text_len;
+    const lib_va: u64 = 0x0100_0000;
+    var aps: [6]mmu.UserAperture = undefined;
+    var ap_count: usize = 0;
+
+    // 0: Main text
+    aps[ap_count] = .{
+        .va_start = userspace.text_va,
+        .va_end = userspace.text_va + text_len,
+        .phys = text_phys,
+        .writable = false,
+        .executable = true,
+    };
+    ap_count += 1;
+
+    // 1: Main data
+    if (data_pages > 0) {
+        aps[ap_count] = .{
+            .va_start = data_va,
+            .va_end = data_va + data_mem_size,
+            .phys = data_phys,
+            .writable = true,
+            .executable = false,
+        };
+        ap_count += 1;
+    }
+
+    // 2: Interp text
+    aps[ap_count] = .{
+        .va_start = interp_image.base_vaddr,
+        .va_end = interp_image.base_vaddr + interp_text_len,
+        .phys = interp_text_phys,
+        .writable = false,
+        .executable = true,
+    };
+    ap_count += 1;
+
+    // 3: Interp data
+    if (interp_data_pages > 0) {
+        const interp_data_va = interp_image.segments[1].vaddr;
+        aps[ap_count] = .{
+            .va_start = interp_data_va,
+            .va_end = interp_data_va + interp_data_mem_size,
+            .phys = interp_data_phys,
+            .writable = true,
+            .executable = false,
+        };
+        ap_count += 1;
+    }
+
+    // 4: Lib staging pool (R-X shared library text)
+    aps[ap_count] = .{
+        .va_start = lib_va,
+        .va_end = lib_va + lib_pages * alloc.page_size,
+        .phys = lib_phys,
+        .writable = false,
+        .executable = true,
+    };
+    ap_count += 1;
+
+    // 5: User stack
+    aps[ap_count] = .{
+        .va_start = stack_va,
+        .va_end = stack_va + scheduler.task_stack_size,
+        .phys = stack_phys,
+        .writable = true,
+        .executable = false,
+    };
+    ap_count += 1;
+
+    const root_phys = mmu.build_user_root_apertures(aps[0..ap_count]) orelse {
+        _ = alloc.free_pages(text_phys, text_pages);
+        if (data_pages > 0) _ = alloc.free_pages(data_phys, data_pages);
+        _ = alloc.free_pages(interp_text_phys, interp_text_pages);
+        if (interp_data_pages > 0) _ = alloc.free_pages(interp_data_phys, interp_data_pages);
+        _ = alloc.free_pages(lib_phys, lib_pages);
+        _ = alloc.free_pages(stack_phys, stack_pages);
+        _ = alloc.free_pages(kstack_phys, kstack_pages);
+        return .table_full;
+    };
+
+    mmu.clean_table_storage();
+    mmu.clean_dcache_range(text_phys, text_len);
+    if (data_pages > 0) mmu.clean_dcache_range(data_phys, data_mem_size);
+    mmu.clean_dcache_range(interp_text_phys, interp_text_len);
+    if (interp_data_pages > 0) mmu.clean_dcache_range(interp_data_phys, interp_data_mem_size);
+    mmu.clean_dcache_range(lib_phys, lib_pages * alloc.page_size);
+    syscall.set_user_regions(userspace.text_va_region(), userspace.stack_va_region());
+    if (data_mem_size > 0) {
+        uaccess.add_read_region(.{ .base = data_va, .len = data_mem_size });
+        uaccess.add_write_region(.{ .base = data_va, .len = data_mem_size });
+    }
+    uaccess.add_read_region(.{ .base = interp_image.base_vaddr, .len = interp_text_pages * alloc.page_size });
+    if (interp_data_pages > 0 and interp_image.segment_count == 2) {
+        const interp_data_va = interp_image.segments[1].vaddr;
+        uaccess.add_read_region(.{ .base = interp_data_va, .len = interp_data_pages * alloc.page_size });
+        uaccess.add_write_region(.{ .base = interp_data_va, .len = interp_data_pages * alloc.page_size });
+    }
+    uaccess.add_read_region(.{ .base = lib_va, .len = lib_pages * alloc.page_size });
+
+    const interp_entry_va = interp_image.base_vaddr + interp_image.entry_rel;
+    const proc_id = process.create(
+        name,
+        .{ .entry_va = interp_entry_va, .content_len = text_len },
+        .{
+            .root_phys = root_phys,
+            .text_va = userspace.text_va,
+            .text_len = @intCast(text_len),
+            .text_phys = text_phys,
+            .text_pages = text_pages,
+            .data_va = data_va,
+            .data_len = @intCast(data_mem_size),
+            .data_phys = data_phys,
+            .data_pages = data_pages,
+            .stack_va = stack_va,
+            .stack_len = scheduler.task_stack_size,
+            .stack_phys = stack_phys,
+            .stack_pages = stack_pages,
+            .interp_phys = interp_text_phys,
+            .interp_pages = interp_text_pages + interp_data_pages,
+            .lib_phys = lib_phys,
+            .lib_pages = lib_pages,
+        },
+        .{ .phys = kstack_phys, .pages = kstack_pages },
+    ) orelse {
+        _ = alloc.free_pages(text_phys, text_pages);
+        if (data_pages > 0) _ = alloc.free_pages(data_phys, data_pages);
+        _ = alloc.free_pages(interp_text_phys, interp_text_pages);
+        if (interp_data_pages > 0) _ = alloc.free_pages(interp_data_phys, interp_data_pages);
+        _ = alloc.free_pages(lib_phys, lib_pages);
+        _ = alloc.free_pages(stack_phys, stack_pages);
+        _ = alloc.free_pages(kstack_phys, kstack_pages);
+        return .process_full;
+    };
+
+    mailbox.reset(proc_id);
+    events.reset(proc_id);
+    file_table.reset_process(proc_id);
+    app_timers.reset(proc_id);
+
+    const kstack: []u8 = @as(*[scheduler.task_stack_size]u8, @ptrFromInt(kstack_phys))[0..];
+    if (scheduler.register_exec_user_auxv(interp_entry_va, root_phys, @intCast(text_len), stack_va, frame_off, kstack, @intCast(argc), 0, frame_va + 24)) |task_id| {
+        if (data_mem_size > 0) {
+            scheduler.add_task_read_region(task_id, .{ .base = data_va, .len = data_mem_size });
+            scheduler.add_task_write_region(task_id, .{ .base = data_va, .len = data_mem_size });
+        }
+        scheduler.add_task_read_region(task_id, .{ .base = interp_image.base_vaddr, .len = interp_text_pages * alloc.page_size });
+        if (interp_data_pages > 0 and interp_image.segment_count == 2) {
+            const interp_data_va = interp_image.segments[1].vaddr;
+            scheduler.add_task_read_region(task_id, .{ .base = interp_data_va, .len = interp_data_pages * alloc.page_size });
+            scheduler.add_task_write_region(task_id, .{ .base = interp_data_va, .len = interp_data_pages * alloc.page_size });
+        }
+        scheduler.add_task_read_region(task_id, .{ .base = lib_va, .len = lib_pages * alloc.page_size });
+        _ = process.bind(proc_id, task_id);
+    } else {
+        _ = process.reap(proc_id);
+        return .pool_full;
+    }
     last_pid = proc_id;
     return .ok;
 }

@@ -1297,6 +1297,24 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_httpd.step);
 
     // ------------------------------------------------------------------
+    // Guest: Dynamic Linker & Shared Libraries (Milestone 30, claim 7921)
+    // ------------------------------------------------------------------
+    const ld_prog = b.addExecutable(.{
+        .name = "ld.so",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/ld.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    ld_prog.linker_script = b.path("user/ld.ld");
+    const ld_step = b.step("ld", "Build the freestanding dynamic runtime linker (zig-out/bin/LD.SO)");
+    const ld_bin = ld_prog.getEmittedBin();
+    const install_ld = b.addInstallFileWithDir(ld_bin, .bin, "LD.SO");
+    b.getInstallStep().dependOn(&install_ld.step);
+    ld_step.dependOn(&install_ld.step);
+
+    // ------------------------------------------------------------------
     // Top-level steps. System-command steps are marked as having side
     // effects (and inherit stdio) so they always execute instead of being
     // skipped by the build cache. (No QEMU path: this project targets Apple

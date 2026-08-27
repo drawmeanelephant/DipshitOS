@@ -526,9 +526,8 @@ fn map_page(va: u64, attr: Attr) bool {
 }
 
 /// One EL0 aperture in the user root: a VA range backed by a physical
-/// range, W^X enforced (executable regions are EL0 RO + PXN; writable
-/// regions are EL0 RW + UXN + PXN).
-const UserAperture = struct {
+/// range (text RO+X, data/stack RW, or runtime-linked shared library aperture).
+pub const UserAperture = struct {
     va_start: u64,
     va_end: u64,
     phys: u64,
@@ -567,13 +566,11 @@ fn split_block_view(desc: u64) ?*align(4096) [512]u64 {
 /// that straddle a user aperture are split so the override reaches the
 /// page level. Must run BEFORE `install_identity_map` (the table allocator
 /// stores physical addresses; pre-install `@intFromPtr` is identity).
-fn clone_into_user_root(
+fn clone_into_user_root_apertures(
     src: *const [512]u64,
     level: u8,
     va_base: u64,
-    text: ?UserAperture,
-    data: ?UserAperture,
-    stack: ?UserAperture,
+    apertures: []const UserAperture,
 ) ?*align(4096) [512]u64 {
     const dst = new_table() orelse return null;
     const shift = slot_shift(level);
@@ -584,10 +581,14 @@ fn clone_into_user_root(
         if (desc == 0) continue;
         const slot_va = va_base + @as(u64, i) * slot_bytes;
         const slot_end = slot_va + slot_bytes;
-        const in_text = text != null and slot_va < text.?.va_end and slot_end > text.?.va_start;
-        const in_data = data != null and slot_va < data.?.va_end and slot_end > data.?.va_start;
-        const in_stack = stack != null and slot_va < stack.?.va_end and slot_end > stack.?.va_start;
-        const hits_user = in_text or in_data or in_stack;
+        var matching_ap: ?UserAperture = null;
+        for (apertures) |ap| {
+            if (slot_va < ap.va_end and slot_end > ap.va_start) {
+                matching_ap = ap;
+                break;
+            }
+        }
+        const hits_user = (matching_ap != null);
         if (hits_user and level < 3) {
             // The slot intersects a user aperture: the clone must descend
             // to the page level, splitting a covering block if needed.
@@ -595,17 +596,17 @@ fn clone_into_user_root(
                 table_entry(&src[i]) orelse return null
             else
                 split_block_view(desc) orelse return null;
-            const child = clone_into_user_root(child_src, level + 1, slot_va, text, data, stack) orelse return null;
+            const child = clone_into_user_root_apertures(child_src, level + 1, slot_va, apertures) orelse return null;
             dst[i] = @intFromPtr(child) | 3;
         } else if (hits_user and level == 3) {
             // Page leaf inside a user aperture: the ONLY place EL0
             // permission is granted in the whole root.
-            const ap = if (in_text) text.? else if (in_data) data.? else stack.?;
+            const ap = matching_ap.?;
             const pa = ap.phys + (slot_va - ap.va_start);
             const normal = (pa & ~@as(u64, 0xfff)) | attr_bits(.normal, true);
             dst[i] = user_leaf(normal, ap.writable, ap.executable) orelse return null;
         } else if ((desc & 3) == 3 and level < 3) {
-            const child = clone_into_user_root(table_entry(&src[i]) orelse return null, level + 1, slot_va, text, data, stack) orelse return null;
+            const child = clone_into_user_root_apertures(table_entry(&src[i]) orelse return null, level + 1, slot_va, apertures) orelse return null;
             dst[i] = @intFromPtr(child) | 3;
         } else {
             dst[i] = desc; // block or page leaf — EL1-only AP=0b00, copy verbatim
@@ -614,34 +615,19 @@ fn clone_into_user_root(
     return dst;
 }
 
-/// Build an EL0 task's TTBR0 user root: a clone of the kernel identity
-/// tree (the EL1-only overlay that keeps the kernel reachable under this
-/// root) with user text (EL0 RO + PXN) at `text_va` and user stack (EL0
-/// RW + UXN + PXN) at `stack_va`, backed by the physical ranges passed in.
-/// EL0 can reach ONLY those leaves — every kernel/firmware/MMIO leaf is
-/// EL1-only. Call BEFORE `install_identity_map` (the table allocator
-/// stores physical addresses; pre-install `@intFromPtr` is identity).
-///
-/// Claim 0826 (concurrent processes): every call builds a FRESH root and
-/// RETURNS its physical address — the caller (the process) owns it. The
-/// previous single-root design stored only the global
-/// `user_root_value`, which is why the exec gate had to forbid a second
-/// live task (rebuilding the root under it would strand it). The global
-/// still tracks the most recently built root for the diagnostics. Returns
-/// null when the fixed table carve-out cannot hold another clone (the
-/// `table_full` bound).
+/// Build a per-process TTBR0 user root with arbitrary user apertures.
+pub fn build_user_root_apertures(apertures: []const UserAperture) ?u64 {
+    const root = clone_into_user_root_apertures(&table_storage[0], 0, 0, apertures) orelse return null;
+    const root_phys = @intFromPtr(root);
+    user_root_value = root_phys;
+    roots_ready = true;
+    return root_phys;
+}
+
 /// Full multi-aperture user root (milestone sixteen C1, claim 3805): like
 /// `build_user_root` but with an optional writable DATA aperture (EL0 RW +
 /// UXN) mapped between text and stack — the segmented image's `.data`/`.bss`
 /// region. `data_len == 0` (or `data_phys == 0`) omits the data aperture.
-///
-/// Milestone sixteen C2 (claim 8403): the GUARD PAGES are the natural
-/// consequence of this root mapping ONLY the explicit apertures. The page
-/// below the stack bottom (`stack_va - 4 KiB`) and the page above the data
-/// region (`data_va + data_len`, rounded up to the page) are left UNMAPPED,
-/// so an EL0 store stepping off either faults (FAR lands in the guard) and
-/// the fault dispatcher reaps the process — the stack can never grow into
-/// the data/text region and the data region can never spill past its end.
 pub fn build_user_root_full(
     text_va: u64,
     text_phys: u64,
@@ -653,32 +639,35 @@ pub fn build_user_root_full(
     stack_phys: u64,
     stack_len: u64,
 ) ?u64 {
-    const text_ap = UserAperture{
+    var aps: [3]UserAperture = undefined;
+    var count: usize = 0;
+    aps[count] = .{
         .va_start = text_va,
         .va_end = text_va + text_len,
         .phys = text_phys,
         .writable = false,
         .executable = true,
     };
-    const data_ap: ?UserAperture = if (data_len == 0 or data_phys == 0) null else UserAperture{
-        .va_start = data_va,
-        .va_end = data_va + data_len,
-        .phys = data_phys,
-        .writable = true,
-        .executable = false,
-    };
-    const stack_ap = UserAperture{
+    count += 1;
+    if (data_len > 0 and data_phys > 0) {
+        aps[count] = .{
+            .va_start = data_va,
+            .va_end = data_va + data_len,
+            .phys = data_phys,
+            .writable = true,
+            .executable = false,
+        };
+        count += 1;
+    }
+    aps[count] = .{
         .va_start = stack_va,
         .va_end = stack_va + stack_len,
         .phys = stack_phys,
         .writable = true,
         .executable = false,
     };
-    const root = clone_into_user_root(&table_storage[0], 0, 0, text_ap, data_ap, stack_ap) orelse return null;
-    const root_phys = @intFromPtr(root);
-    user_root_value = root_phys;
-    roots_ready = true;
-    return root_phys;
+    count += 1;
+    return build_user_root_apertures(aps[0..count]);
 }
 
 pub fn build_user_root(

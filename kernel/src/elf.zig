@@ -33,17 +33,113 @@ const std = @import("std");
 pub const magic = [4]u8{ 0x7f, 'E', 'L', 'F' };
 /// EM_AARCH64.
 pub const em_aarch64: u16 = 0xB7;
-/// PT_LOAD.
-const pt_load: u32 = 1;
-/// PF_W — writable segment flag.
-const pf_w: u32 = 2;
+
+// Program header types (PT_*)
+pub const pt_null: u32 = 0;
+pub const pt_load: u32 = 1;
+pub const pt_dynamic: u32 = 2;
+pub const pt_interp: u32 = 3;
+pub const pt_note: u32 = 4;
+pub const pt_shlib: u32 = 5;
+pub const pt_phdr: u32 = 6;
+pub const pt_tls: u32 = 7;
+
+// Program header flags (PF_*)
+pub const pf_x: u32 = 1;
+pub const pf_w: u32 = 2;
+pub const pf_r: u32 = 4;
+
+// Dynamic section tags (DT_*)
+pub const dt_null: u64 = 0;
+pub const dt_needed: u64 = 1;
+pub const dt_pltrelsz: u64 = 2;
+pub const dt_pltgot: u64 = 3;
+pub const dt_hash: u64 = 4;
+pub const dt_strtab: u64 = 5;
+pub const dt_symtab: u64 = 6;
+pub const dt_rela: u64 = 7;
+pub const dt_relasz: u64 = 8;
+pub const dt_relaent: u64 = 9;
+pub const dt_strsz: u64 = 10;
+pub const dt_syment: u64 = 11;
+pub const dt_init: u64 = 12;
+pub const dt_fini: u64 = 13;
+pub const dt_soname: u64 = 14;
+pub const dt_rpath: u64 = 15;
+pub const dt_symbolic: u64 = 16;
+pub const dt_rel: u64 = 17;
+pub const dt_relsz: u64 = 18;
+pub const dt_relent: u64 = 19;
+pub const dt_pltrel: u64 = 20;
+pub const dt_debug: u64 = 21;
+pub const dt_textrel: u64 = 22;
+pub const dt_jmprel: u64 = 23;
+pub const dt_bind_now: u64 = 24;
+pub const dt_init_array: u64 = 25;
+pub const dt_fini_array: u64 = 26;
+pub const dt_init_arraysz: u64 = 27;
+pub const dt_fini_arraysz: u64 = 28;
+pub const dt_runpath: u64 = 29;
+pub const dt_flags: u64 = 30;
+
+// AArch64 dynamic relocations
+pub const r_aarch64_none: u32 = 0;
+pub const r_aarch64_abs64: u32 = 257;
+pub const r_aarch64_copy: u32 = 1024;
+pub const r_aarch64_glob_dat: u32 = 1025;
+pub const r_aarch64_jump_slot: u32 = 1026;
+pub const r_aarch64_relative: u32 = 1027;
+
+// Auxiliary vector types (AT_*)
+pub const at_null: u64 = 0;
+pub const at_ignore: u64 = 1;
+pub const at_execfd: u64 = 2;
+pub const at_phdr: u64 = 3;
+pub const at_phent: u64 = 4;
+pub const at_phnum: u64 = 5;
+pub const at_pagesz: u64 = 6;
+pub const at_base: u64 = 7;
+pub const at_flags: u64 = 8;
+pub const at_entry: u64 = 9;
+
+pub const AuxvEntry = struct {
+    a_type: u64,
+    a_val: u64,
+};
+
+pub const Elf64Dyn = struct {
+    d_tag: u64,
+    d_val: u64,
+};
+
+pub const Elf64Rela = struct {
+    r_offset: u64,
+    r_info: u64,
+    r_addend: i64,
+
+    pub inline fn sym(self: Elf64Rela) u32 {
+        return @intCast(self.r_info >> 32);
+    }
+
+    pub inline fn r_type(self: Elf64Rela) u32 {
+        return @intCast(self.r_info & 0xffffffff);
+    }
+};
+
+pub const Elf64Sym = struct {
+    st_name: u32,
+    st_info: u8,
+    st_other: u8,
+    st_shndx: u16,
+    st_value: u64,
+    st_size: u64,
+};
 
 /// The required p_vaddr of the first PT_LOAD segment — the kernel's fixed
 /// EL0 text aperture (`userspace.text_va`). Kept as a local constant so
 /// this module stays dependency-free for host tests; exec.zig asserts the
 /// two agree.
 pub const text_base: u64 = 0x0040_0000;
-/// Page size used for the text/data aperture boundary check.
 /// Total load bound — mirrors `exec.exec_program_max` (the shared staging
 /// buffer). A program whose PT_LOAD memory exceeds this is rejected.
 pub const load_max: usize = 256 * 1024;
@@ -92,10 +188,12 @@ pub const Error = error{
 pub const Segment = struct {
     /// Byte offset of the segment's initialized bytes in the FILE buffer.
     file_offset: usize,
-    /// Initialized byte count copied from the file (p_filesz).
+    /// Number of initialized bytes in the FILE buffer.
     file_size: usize,
-    /// In-memory byte count including the zero-filled BSS tail (p_memsz).
+    /// Number of bytes in the virtual MEMORY image.
     mem_size: usize,
+    /// Virtual address of this segment in memory.
+    vaddr: u64 = 0,
 };
 
 pub const Image = struct {
@@ -104,6 +202,20 @@ pub const Image = struct {
     entry_rel: u64,
     segments: [max_segments]Segment,
     segment_count: usize,
+    /// Absolute entry address in ELF header (e_entry).
+    e_entry: u64 = 0,
+    /// Base address of segment 0 (p_vaddr).
+    base_vaddr: u64 = text_base,
+    /// Program header offset, entry size, and count (for Aux Vector / AT_PHDR).
+    phoff: u64 = 0,
+    phentsize: usize = 0,
+    phnum: usize = 0,
+    /// Dynamic interpreter path (from PT_INTERP, e.g. "LD.SO").
+    interp: ?[]const u8 = null,
+    /// PT_DYNAMIC segment location if present.
+    dynamic_vaddr: u64 = 0,
+    dynamic_size: u64 = 0,
+    has_dynamic: bool = false,
 };
 
 /// Quick magic sniff for the exec dispatch: true when the buffer starts
@@ -251,6 +363,12 @@ const RawSegment = struct {
 /// Parse + validate an ELF executable image. `buf` holds the whole file as
 /// read from the volume. On success returns the bounded load plan.
 pub fn parse(buf: []const u8) Error!Image {
+    return parse_at(buf, text_base);
+}
+
+/// Parse + validate an ELF image with an optional expected base address.
+/// If `expected_base` is null, segment 0's declared vaddr is accepted.
+pub fn parse_at(buf: []const u8, expected_base: ?u64) Error!Image {
     // e_ident needs 16 bytes; the shortest header table (ELF32) ends at
     // byte 44 with phentsize/phnum at 42/44 — checked below per class.
     if (!is_elf(buf)) return error.not_elf;
@@ -289,12 +407,35 @@ pub fn parse(buf: []const u8) Error!Image {
     const table_bytes = @as(u64, phnum) * @as(u64, phentsize);
     if (phoff > buf.len or table_bytes > buf.len - phoff) return error.truncated;
 
-    // Walk once, collecting PT_LOAD records (skip every other type).
+    // Walk program headers, collecting PT_LOAD, PT_INTERP, PT_DYNAMIC.
     var raws: [max_segments]RawSegment = undefined;
     var count: usize = 0;
+    var interp_slice: ?[]const u8 = null;
+    var dyn_vaddr: u64 = 0;
+    var dyn_size: u64 = 0;
+    var has_dyn = false;
+
     var i: usize = 0;
     while (i < phnum) : (i += 1) {
         const rec = phoff + @as(u64, i) * @as(u64, phentsize);
+        const p_type = read_u32(buf, @intCast(rec));
+        if (p_type == pt_interp) {
+            const p_offset = if (ei_class == 1) read_u32(buf, @intCast(rec + 4)) else read_u64(buf, @intCast(rec + 8));
+            const p_filesz = if (ei_class == 1) read_u32(buf, @intCast(rec + 16)) else read_u64(buf, @intCast(rec + 32));
+            if (p_offset <= buf.len and p_filesz <= buf.len - p_offset and p_filesz > 0) {
+                const raw_interp = buf[@intCast(p_offset)..][0..@intCast(p_filesz)];
+                interp_slice = std.mem.sliceTo(raw_interp, 0);
+            }
+            continue;
+        }
+        if (p_type == pt_dynamic) {
+            dyn_vaddr = if (ei_class == 1) read_u32(buf, @intCast(rec + 8)) else read_u64(buf, @intCast(rec + 16));
+            dyn_size = if (ei_class == 1) read_u32(buf, @intCast(rec + 20)) else read_u64(buf, @intCast(rec + 40));
+            has_dyn = true;
+            continue;
+        }
+        if (p_type != pt_load) continue;
+
         const r: RawSegment = switch (ei_class) {
             1 => .{
                 .offset = read_u32(buf, @intCast(rec + 4)),
@@ -311,7 +452,6 @@ pub fn parse(buf: []const u8) Error!Image {
                 .memsz = read_u64(buf, @intCast(rec + 40)),
             },
         };
-        if (read_u32(buf, @intCast(rec)) != pt_load) continue;
         if (count == max_segments) return error.too_many_segments;
         raws[count] = r;
         count += 1;
@@ -338,13 +478,17 @@ pub fn parse(buf: []const u8) Error!Image {
         if (a_end > b_start) return error.overlapping_segments;
     }
 
-    // Placement contract: text at the fixed EL0 aperture; optional data
-    // DIRECTLY after the text segment's memory image (the kernel maps the
-    // data aperture at text_base + text_memsz, so absolute data references
-    // stay valid only under exact adjacency).
-    if (raws[0].vaddr != text_base) return error.bad_text_base;
+    // Placement contract: text at the expected base aperture; optional data
+    // DIRECTLY after the text segment's memory image.
+    if (expected_base) |exp| {
+        if (raws[0].vaddr != exp) return error.bad_text_base;
+    }
     if (count == 2) {
-        if (raws[1].vaddr != raws[0].vaddr + raws[0].memsz) return error.bad_data_base;
+        if (expected_base != null) {
+            if (raws[1].vaddr != raws[0].vaddr + raws[0].memsz) return error.bad_data_base;
+        } else {
+            if (raws[1].vaddr < raws[0].vaddr + raws[0].memsz) return error.bad_data_base;
+        }
     }
 
     // Entry must land in segment 0's INITIALIZED bytes (executing the
@@ -357,15 +501,77 @@ pub fn parse(buf: []const u8) Error!Image {
         .file_offset = @intCast(raws[0].offset),
         .file_size = @intCast(raws[0].filesz),
         .mem_size = @intCast(raws[0].memsz),
+        .vaddr = raws[0].vaddr,
     };
     if (count == 2) {
         segments[1] = .{
             .file_offset = @intCast(raws[1].offset),
             .file_size = @intCast(raws[1].filesz),
             .mem_size = @intCast(raws[1].memsz),
+            .vaddr = raws[1].vaddr,
         };
     }
-    return .{ .entry_rel = entry - raws[0].vaddr, .segments = segments, .segment_count = count };
+    return .{
+        .entry_rel = entry - raws[0].vaddr,
+        .segments = segments,
+        .segment_count = count,
+        .e_entry = entry,
+        .base_vaddr = raws[0].vaddr,
+        .phoff = phoff,
+        .phentsize = phentsize,
+        .phnum = phnum,
+        .interp = interp_slice,
+        .dynamic_vaddr = dyn_vaddr,
+        .dynamic_size = dyn_size,
+        .has_dynamic = has_dyn,
+    };
+}
+
+/// Parse dynamic tags from a raw dynamic section buffer.
+pub fn parse_dynamic_tags(dyn_bytes: []const u8, out: []Elf64Dyn) usize {
+    const entry_size = @sizeOf(Elf64Dyn); // 16 bytes
+    const count = dyn_bytes.len / entry_size;
+    const n = @min(count, out.len);
+    for (0..n) |i| {
+        const off = i * entry_size;
+        const tag = std.mem.readInt(u64, dyn_bytes[off..][0..8], .little);
+        const val = std.mem.readInt(u64, dyn_bytes[off + 8 ..][0..8], .little);
+        out[i] = .{ .d_tag = tag, .d_val = val };
+        if (tag == dt_null) return i + 1;
+    }
+    return n;
+}
+
+/// Find a specific dynamic tag value in a list of parsed Elf64Dyn tags.
+pub fn find_dynamic_tag(tags: []const Elf64Dyn, tag: u64) ?u64 {
+    for (tags) |entry| {
+        if (entry.d_tag == tag) return entry.d_val;
+        if (entry.d_tag == dt_null) break;
+    }
+    return null;
+}
+
+/// Encode auxiliary vector entries into a byte slice.
+pub fn encode_auxv(buf: []u8, entries: []const AuxvEntry) usize {
+    var off: usize = 0;
+    for (entries) |entry| {
+        if (off + 16 > buf.len) break;
+        std.mem.writeInt(u64, buf[off..][0..8], entry.a_type, .little);
+        std.mem.writeInt(u64, buf[off + 8 ..][0..8], entry.a_val, .little);
+        off += 16;
+        if (entry.a_type == at_null) break;
+    }
+    return off;
+}
+
+/// Resolve a standard AArch64 dynamic relocation.
+pub fn resolve_relocation(rel: Elf64Rela, base: u64, sym_addr: u64) ?u64 {
+    return switch (rel.r_type()) {
+        r_aarch64_none => null,
+        r_aarch64_relative => @as(u64, @bitCast(@as(i64, @intCast(base)) +% rel.r_addend)),
+        r_aarch64_glob_dat, r_aarch64_jump_slot, r_aarch64_abs64 => @as(u64, @bitCast(@as(i64, @intCast(sym_addr)) +% rel.r_addend)),
+        else => null,
+    };
 }
 
 // ---------------------------------------------------------------------------
@@ -619,4 +825,112 @@ test "elf: collect_symbols reads a hand-built symtab" {
     var bare = elf32_one(&[_]u8{0} ** 4, 0x400000, 0, 0, 5);
     _ = &bare;
     try testing.expectEqual(@as(usize, 0), collect_symbols(&bare, &out));
+}
+
+test "elf: PT_INTERP and PT_DYNAMIC program headers are parsed" {
+    var img = [_]u8{0} ** 512;
+    @memcpy(img[0..4], &magic);
+    img[4] = 2; // ELF64
+    img[5] = 1; // little-endian
+    img[6] = 1;
+    std.mem.writeInt(u16, img[16..18], 2, .little); // EXEC
+    std.mem.writeInt(u16, img[18..20], em_aarch64, .little);
+    std.mem.writeInt(u32, img[20..24], 1, .little);
+    std.mem.writeInt(u64, img[24..32], 0x400000, .little); // e_entry
+    std.mem.writeInt(u64, img[32..40], 64, .little); // e_phoff
+    std.mem.writeInt(u16, img[52..54], 64, .little); // e_ehsize
+    std.mem.writeInt(u16, img[54..56], 56, .little); // e_phentsize
+    std.mem.writeInt(u16, img[56..58], 3, .little); // e_phnum (PT_PHDR, PT_INTERP, PT_LOAD, PT_DYNAMIC) -> 3 phdrs
+
+    // phdr 0 @64: PT_INTERP
+    std.mem.writeInt(u32, img[64..68], pt_interp, .little);
+    std.mem.writeInt(u32, img[68..72], 4, .little); // R
+    std.mem.writeInt(u64, img[72..80], 232, .little); // p_offset
+    std.mem.writeInt(u64, img[80..88], 0x400000 + 232, .little); // p_vaddr
+    std.mem.writeInt(u64, img[96..104], 6, .little); // p_filesz ("LD.SO\0")
+    std.mem.writeInt(u64, img[104..112], 6, .little); // p_memsz
+
+    // phdr 1 @120: PT_LOAD R+X
+    std.mem.writeInt(u32, img[120..124], pt_load, .little);
+    std.mem.writeInt(u32, img[124..128], 5, .little); // R+X
+    std.mem.writeInt(u64, img[128..136], 232, .little); // p_offset
+    std.mem.writeInt(u64, img[136..144], 0x400000, .little); // p_vaddr
+    std.mem.writeInt(u64, img[152..160], 128, .little); // p_filesz
+    std.mem.writeInt(u64, img[160..168], 128, .little); // p_memsz
+
+    // phdr 2 @176: PT_DYNAMIC
+    std.mem.writeInt(u32, img[176..180], pt_dynamic, .little);
+    std.mem.writeInt(u32, img[176 + 4 ..][0..4], 6, .little); // RW
+    std.mem.writeInt(u64, img[176 + 8 ..][0..8], 300, .little); // p_offset
+    std.mem.writeInt(u64, img[176 + 16 ..][0..8], 0x400000 + 300, .little); // p_vaddr
+    std.mem.writeInt(u64, img[176 + 32 ..][0..8], 32, .little); // p_filesz
+    std.mem.writeInt(u64, img[176 + 40 ..][0..8], 32, .little); // p_memsz
+
+    // Interp string at offset 232: "LD.SO\0"
+    @memcpy(img[232..238], "LD.SO\x00");
+
+    const image = try parse(&img);
+    try testing.expect(image.interp != null);
+    try testing.expectEqualStrings("LD.SO", image.interp.?);
+    try testing.expect(image.has_dynamic);
+    try testing.expectEqual(@as(u64, 0x400000 + 300), image.dynamic_vaddr);
+    try testing.expectEqual(@as(u64, 32), image.dynamic_size);
+    try testing.expectEqual(@as(u64, 0x400000), image.e_entry);
+    try testing.expectEqual(@as(usize, 56), image.phentsize);
+    try testing.expectEqual(@as(usize, 3), image.phnum);
+}
+
+test "elf: auxv encoding and decoding" {
+    var buf: [128]u8 = [_]u8{0} ** 128;
+    const entries = [_]AuxvEntry{
+        .{ .a_type = at_phdr, .a_val = 0x400040 },
+        .{ .a_type = at_phent, .a_val = 56 },
+        .{ .a_type = at_phnum, .a_val = 3 },
+        .{ .a_type = at_entry, .a_val = 0x400080 },
+        .{ .a_type = at_base, .a_val = 0x800000 },
+        .{ .a_type = at_pagesz, .a_val = 4096 },
+        .{ .a_type = at_null, .a_val = 0 },
+    };
+    const len = encode_auxv(&buf, &entries);
+    try testing.expectEqual(@as(usize, 7 * 16), len);
+
+    // Read back
+    try testing.expectEqual(@as(u64, at_phdr), std.mem.readInt(u64, buf[0..8], .little));
+    try testing.expectEqual(@as(u64, 0x400040), std.mem.readInt(u64, buf[8..16], .little));
+    try testing.expectEqual(@as(u64, at_base), std.mem.readInt(u64, buf[64..72], .little));
+    try testing.expectEqual(@as(u64, 0x800000), std.mem.readInt(u64, buf[72..80], .little));
+}
+
+test "elf: dynamic tags parsing and relocation resolution" {
+    var dyn_sec: [48]u8 = [_]u8{0} ** 48;
+    // Entry 0: DT_NEEDED = 1
+    std.mem.writeInt(u64, dyn_sec[0..8], dt_needed, .little);
+    std.mem.writeInt(u64, dyn_sec[8..16], 1, .little); // strtab offset 1 ("LIBUI.SO")
+    // Entry 1: DT_STRTAB = 0x401000
+    std.mem.writeInt(u64, dyn_sec[16..24], dt_strtab, .little);
+    std.mem.writeInt(u64, dyn_sec[24..32], 0x401000, .little);
+    // Entry 2: DT_NULL
+    std.mem.writeInt(u64, dyn_sec[32..40], dt_null, .little);
+    std.mem.writeInt(u64, dyn_sec[40..48], 0, .little);
+
+    var tags: [4]Elf64Dyn = undefined;
+    const n = parse_dynamic_tags(&dyn_sec, &tags);
+    try testing.expectEqual(@as(usize, 3), n);
+    try testing.expectEqual(@as(u64, 0x401000), find_dynamic_tag(&tags, dt_strtab).?);
+    try testing.expectEqual(@as(?u64, null), find_dynamic_tag(&tags, dt_symtab));
+
+    // Relocations
+    const rel_rel = Elf64Rela{
+        .r_offset = 0x402000,
+        .r_info = r_aarch64_relative,
+        .r_addend = 0x100,
+    };
+    try testing.expectEqual(@as(?u64, 0x500100), resolve_relocation(rel_rel, 0x500000, 0));
+
+    const rel_glob = Elf64Rela{
+        .r_offset = 0x402008,
+        .r_info = (@as(u64, 5) << 32) | r_aarch64_glob_dat,
+        .r_addend = 0,
+    };
+    try testing.expectEqual(@as(?u64, 0x700010), resolve_relocation(rel_glob, 0x500000, 0x700010));
 }

@@ -184,6 +184,10 @@ pub fn state_name(state: State) []const u8 {
 pub const UserRegions = struct {
     text: userspace.Region = .{ .base = 0, .len = 0 },
     stack: userspace.Region = .{ .base = 0, .len = 0 },
+    extra_reads: [6]userspace.Region = [_]userspace.Region{.{ .base = 0, .len = 0 }} ** 6,
+    extra_read_count: usize = 0,
+    extra_writes: [6]userspace.Region = [_]userspace.Region{.{ .base = 0, .len = 0 }} ** 6,
+    extra_write_count: usize = 0,
 };
 
 const Task = struct {
@@ -435,6 +439,20 @@ pub fn register_exec_user(
     argc: u64,
     argv_va: u64,
 ) ?usize {
+    return register_exec_user_auxv(entry_va, root_phys, text_len, stack_va, stack_len, kstack, argc, argv_va, 0);
+}
+
+pub fn register_exec_user_auxv(
+    entry_va: u64,
+    root_phys: u64,
+    text_len: u64,
+    stack_va: u64,
+    stack_len: u64,
+    kstack: []u8,
+    argc: u64,
+    argv_va: u64,
+    auxv_va: u64,
+) ?usize {
     const sp_el0 = stack_va + stack_len;
     const id = spawn("user-exec", entry_va, spsr_el0t_irqs, kstack, root_phys, sp_el0) orelse return null;
     tasks[id].regions = .{
@@ -443,15 +461,26 @@ pub fn register_exec_user(
     };
     // Card 3e (claim 4636): the entry-contract extension — the exec'd
     // program's `_start` receives argc in x0 and the argv block VA in x1.
-    // `build_initial_frame` zeroes the whole frame (x0/x1 are 0 at the
-    // boot payload's entry), so write the two slots here — the same seam
-    // `register_user` uses for the timer-witness VA in slot x9. A no-args
-    // exec passes argc=0/argv_va=0: identical to the zeroed frame, so
-    // earlier cards' no-args behavior is byte-for-byte unchanged.
+    // Dynamic linking (claim 7921): interpreter receives auxv_va in x2.
     const frame: *exceptions.VectorFrame = @ptrFromInt(tasks[id].sp);
     _ = exceptions.frame_write(frame, 0, argc);
     _ = exceptions.frame_write(frame, 1, argv_va);
+    _ = exceptions.frame_write(frame, 2, auxv_va);
     return id;
+}
+
+pub fn add_task_read_region(id: usize, reg: userspace.Region) void {
+    if (id < max_tasks and tasks[id].regions.extra_read_count < tasks[id].regions.extra_reads.len) {
+        tasks[id].regions.extra_reads[tasks[id].regions.extra_read_count] = reg;
+        tasks[id].regions.extra_read_count += 1;
+    }
+}
+
+pub fn add_task_write_region(id: usize, reg: userspace.Region) void {
+    if (id < max_tasks and tasks[id].regions.extra_write_count < tasks[id].regions.extra_writes.len) {
+        tasks[id].regions.extra_writes[tasks[id].regions.extra_write_count] = reg;
+        tasks[id].regions.extra_write_count += 1;
+    }
 }
 
 /// Claim 0826: the pool has at least one free slot (the exec gate — a new
