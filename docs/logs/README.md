@@ -158,6 +158,7 @@ meaningful — on main.
 | t3code/c259b00a (cvc-echo host-push spike) | [`agent-t3code-c259b00a-cvc-echo.md`](agent-t3code-c259b00a-cvc-echo.md) |
 | agent/t3code/m27-doc-sync | [`agent-t3code-m27-doc-sync.md`](agent-t3code-m27-doc-sync.md) |
 | agent/virtio virtio-input-channel | [`agent-virtio-virtio-input-channel.md`](agent-virtio-virtio-input-channel.md) |
+| agent/zcode/m26-net-offline-preflight | [`agent-zcode-m26-net-offline-preflight.md`](agent-zcode-m26-net-offline-preflight.md) |
 | milestone eight cards U4+U5: pointer focus/cursor + window HIG (zcode) | [`agent-zcode-m8-u4-u5-windows.md`](agent-zcode-m8-u4-u5-windows.md) |
 | `docs-calm-lavoisier-memorial`: Memorial to calm-lavoisier & Git Alignment (claim 9357) | [`docs-calm-lavoisier-memorial.md`](docs-calm-lavoisier-memorial.md) |
 | `docs/site-current-state-m15`: refresh the public GitHub Pages site to current reality (claim 7489) | [`docs-site-current-state-m15.md`](docs-site-current-state-m15.md) |
