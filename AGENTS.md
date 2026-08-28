@@ -14,26 +14,35 @@ These rules bind any AI agent or human contributor working in this project.
 
 ## Current milestone
 
-Milestones zero through twelve are implemented and closed (boot pipeline;
-kernel handoff; kernel proper — VZ serial gate since claim 1517;
+Milestones zero through **thirty-one** are implemented and closed — the boot
+pipeline; kernel handoff; kernel proper (VZ serial gate since claim 1517);
 `m1.5-interactive-monitor`; `m3-userspace`; `m4-processes`; milestone five
 networking — virtio-net through TCP; milestone six graphics — Road Pops +
 Driving Award; milestone seven input — USB XHCI + HID; milestone eight
 usability — ADR 0008; milestone nine app events — ADR 0009; milestone ten
 userland storage — ADR 0010; milestone eleven desktop platform — ADR 0011;
-milestone twelve userland network applications — ADR 0012). Milestone
-thirteen — **files & applications** — has all four cards live 2026-08-16
-(claims 5801/8877/4742/4046): the mutating filesystem seam (ADR 0007
-slots 34–37), the `APPS.TXT` application manifest, the `FILE.BIN` file
-browser, and manifest-driven desktop composition. The current stream is
-**milestone fourteen — shared user services** (planned 2026-08-16,
-issues #175–#178, per `docs/march-m14.md`): S1 clipboard (slots 38–39),
-S2 app timers (slots 40–41), S3 composition capstone, S4
-security/isolation hardening. Known open threads: M8 U4 pointer focus is
-class-C-only for its live proof (issue #151, claim 4769), and the
-synthesized keyboard seam reports `events=0` (issue #179). For the
-canonical, always-current answer to "where are we, and what's next", read
-`docs/status.md`.
+milestone twelve userland network applications — ADR 0012; milestone
+thirteen files & applications (ADR 0007 slots 34–37, the `APPS.TXT`
+manifest, `FILE.BIN`, manifest-driven desktop); milestone fourteen shared
+user services (clipboard, app timers, hardening); milestone fifteen audio;
+milestone sixteen kernel consolidation; milestone seventeen desktop
+completeness plus the post-M17 arcs; M18 terminal & shell depth; M19 shell
+as a programming environment; M20 text rendering & Unicode; M21 window
+management depth; M22 developer tools; M23 the text editor; M24 CALC grows
+up; M25 file manager depth; M26 network experience; M27 desktop polish &
+completeness; M28 SMP; M29 VM depth (demand paging, COW, anonymous mmap);
+M30 dynamic linking & shared libraries (`LD.SO`, `LIBUI.SO`, `LIBFONT.SO`);
+and M31 the dynamic linking ecosystem (dynamic desktop apps, `dlopen`/
+`dlsym`).
+
+All GitHub milestones are closed and the issue tracker is at **zero open
+issues** (2026-08-28); the two long-running threads are resolved — the M8 U4
+pointer-focus proof is now class-B-headless via custom-virtio pointer
+injection (claim 9367, issue #151), and the synthesized-keyboard `events=0`
+report is fixed by the headless virtio input channel (claims 9588/0680,
+issue #179). There is **no M32 defined yet** — the repo sits between
+milestones. For the canonical, always-current answer to "where are we, and
+what's next", read `docs/status.md`.
 
 ## Milestone scope rules
 

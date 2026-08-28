@@ -29,49 +29,58 @@ is the canonical, always-current source; this is the readable summary.
 | 13 | Files & applications B1–B4: mutating filesystem seam (B1, slots 34–37), `APPS.TXT` identity manifest (B2), the `FILE.BIN` graphical data browser (B3), and manifest-driven desktop composition (B4) |
 | 14 | Shared user services S1–S4: the clipboard (slots 38–39), app timers (slots 40–41), the NOTEPAD composition capstone, and security/isolation hardening (the TCP owner fix + the hostile-EL0 gate) |
 | 15 | Audio A1–A4: virtio-snd transport, PCM playback + `beep`, the EL0 audio seam (slots 42–45), `JINGLE.BIN`, the boot chime, and `CHIME.BIN` |
+| 16 | Kernel consolidation C1–C4: multi-segment user images, guard pages + per-segment permissions, measured pools, one-session composition |
+| 17 | Desktop completeness C1–C10 + Arc1–5: widget depth, window management, app upgrades, rich interactions, system polish |
+| 18 | Terminal & shell depth: scrollback, selection, search, persistent history, colors, scripting mode |
+| 19 | Shell as a programming environment: pipes (slots 56/57), redirection, env vars, functions + args, substitution, arithmetic, conditionals |
+| 20 | Text rendering & Unicode: font sizes, Unicode glyphs, search, chrome, tabs |
+| 21 | Window management depth: tiling, master-detail, minimize, alt-tab, notification center, maximize, focus rings |
+| 22 | Developer tools: ELF loader, assembler, symbols, disassembler, strace |
+| 23 | The text editor: `EDIT.BIN` with undo/redo, goto, tabs, syntax, console split |
+| 24 | CALC grows up: programmer mode, memory, units, constants, history persist |
+| 25 | File manager depth: du, sort, overwrite/conflict, path copy |
+| 26 | Network experience: ping, netstat, traceroute, HTTP fetch display, offline preflight |
+| 27 | Desktop polish & completeness G1–G30 (issues #444–#473): splash, wizard, about, previews, sounds, sysmon, tooltips, audits, dogfood |
+| 28 | SMP: a second CPU core via PSCI, per-core schedulers, spinlocks, GICv3 IPIs |
+| 29 | VM depth: demand paging, copy-on-write, anonymous `sys_mmap`/`sys_munmap` (slots 63/64) |
+| 30 | Dynamic linking: freestanding `LD.SO`, `LIBUI.SO`/`LIBFONT.SO`, W^X multi-aperture isolation |
+| 31 | Dynamic linking ecosystem: `CALC.ELF`/`NOTEPAD.ELF`/`FILE.ELF`/`DESKTOP.ELF`, `dlopen`/`dlsym` |
 
-Every milestone through fifteen is **done** and live-gated; milestone
-sixteen is the active stream.
+Every milestone through **thirty-one** is **done** and live-gated. Post-milestone
+landings include the `HTTPD.BIN` in-guest HTTP/1.1 web server (TCP passive
+open, claim 0750), the M26 offline-preflight cards N13/N14 (claim 8852), and
+the `sys_tcp_connect` wall-clock fix (issue #613, claim 2572).
 
 ## Current
 
-**Milestone sixteen — the kernel grows up (internals consolidation)** is the
-active milestone. It is the internals-consolidation milestone the M11–M15
-apps now force — the M15-era claims recorded the pressure directly: a 33 KB
-`JINGLE.BIN` would not load (the 16 KiB exec bound), a global BSS buffer
-faulted on write from EL0 (the W^X single-segment layout), and the fixed
-pools refused a fifth concurrent user program. Its cards:
-
-- ⬜ **C1 — multi-segment user image.** Real writable globals and a lifted
-  16 KiB load bound (wishlist 15).
-- ⬜ **C2 — guard pages + per-segment permissions.** The wishlist-14 address
-  space depth.
-- ⬜ **C3 — measured pools.** The fixed pools grown only where the demo apps
-  actually hurt (wishlist 13).
-- ⬜ **C4 — composition capstone.** All three proven in one session.
-
-Issues #190–#193 are filed (one per card, the M14 way); the march deck is
-`docs/march-m16.md`.
+**There is no active milestone.** Every GitHub milestone is closed, the issue
+tracker is at **zero open issues** (2026-08-28), and no claim is active on a
+branch — the project sits between milestones, with no M32 defined yet. The
+canonical answer to "what's next" lives in the repository's
+`docs/status.md`.
 
 Honest-bound edges that remain planned regardless of milestone:
 
-- **The balloon device** — the last unattached virtio surface (low priority
-  while the guest is a fixed 256 MiB).
-- **Networking edges** — TCP server/listen and any routing beyond the NAT
-  gateway; RTO stays fixed (no adaptive estimation).
-- **Deeper filesystem semantics** — wishlist 17 stays deferred: M13's B1
-  already shipped delete/rename/truncate/free and no app has produced new
-  pressure.
-- **The M8 U4 pointer-focus live seam** — the window manager's pointer-driven
-  focus is guest-complete and host-tested, but the live proof rides a
-  real-mouse class-C gate (`verify-pointer-manual`) and a class-B CG gate
-  (`verify-live-pointer-cg`) that self-gates on Accessibility trust.
+- **The balloon device** — the last unattached virtio surface (low priority;
+  the guest is a fixed 256 MiB, and demand paging now exists but does not
+  make memory reclaimable).
+- **Routing beyond the NAT gateway** and any IPv6 stack; TCP RTO stays fixed
+  (no adaptive estimation), and the TCP client is single-connection.
+- **Deeper filesystem semantics** — M13's B1 shipped delete/rename/
+  truncate/free and no app has produced new pressure.
+- **Multi-display and accelerated/3D graphics** — the guest stays
+  single-display, 2D-blit-only.
+
+Both former "open thread" caveats are resolved and shipped: the M8 U4
+pointer-focus proof is now class-B-headless via custom-virtio pointer
+injection (claim 9367), and the synthesized-keyboard `events=0` report is
+fixed by the headless virtio input channel (claims 9588/0680).
 
 <Aside kind="note">
 
-**PLANNED.** C1–C4 are defined with gates in `docs/march-m16.md`; nothing is
-shipped until it has a gate. The tracker, not this page, is the live per-card
-status.
+**PLANNED.** Nothing on this page is shipped until it has a gate; the march
+trackers (`docs/march-m*.md`) are the live per-card status, and this page
+reports only what has actually landed.
 
 </Aside>
 

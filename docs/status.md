@@ -48,6 +48,21 @@
 | Fourteen — shared services | Clipboard (38–39), app timers (40–41), NOTEPAD composition, hardening (S4) | ✅ done 2026-08-18 (claims 0169/7323/3289/4482, S1–S4) |
 | Fifteen — audio | Virtio-snd (DID 0x1059), PCM playback, sys_audio 42–45, JINGLE/CHIME.BIN, volume/mute | ✅ done 2026-08-18 (claim 3206, A1–A4) |
 | Sixteen — kernel grows up | DSK3 segmented image + data/BSS, guard pages (139), grown pools (tasks 11/processes 16/tables 512), composition | ✅ done 2026-08-19 (claims 3805/8403/0339/2714, C1–C4) |
+| Seventeen — desktop completeness | C1–C10 + Arc1–5: widget depth, window management, app upgrades, rich interactions, system polish | ✅ done 2026-08-21 (GH milestones 1–5) |
+| Eighteen — terminal & shell depth | T1–T16: scrollback, selection, search, persistent history, colors, scripting mode | ✅ done 2026-08-24 (GH milestone 6) |
+| Nineteen — shell programming | P1–P16: pipes (slots 56/57), redirection, env vars, functions + args, substitution, arithmetic, conditionals | ✅ done 2026-08-24 (GH milestone 7) |
+| Twenty — text & Unicode | U1–U5: font sizes, Unicode glyphs, search, chrome, tabs | ✅ done 2026-08-23 (GH milestone 8) |
+| Twenty-one — window depth | W1–W16: tiling, master-detail, minimize, alt-tab, notification center, maximize, focus rings | ✅ done 2026-08-26 (claim 1306, GH milestone 9) |
+| Twenty-two — developer tools | D1–D16: ELF loader, assembler, symbols, disassembler, strace, ps, dmesg, sysinfo, dev console | ✅ done 2026-08-25 (GH milestone 10) |
+| Twenty-three — the text editor | E1–E25: EDIT.BIN, undo/redo, goto, tabs, syntax, console split | ✅ done 2026-08-26 (GH milestone 11) |
+| Twenty-four — CALC grows up | K1–K16: programmer mode, memory, units, constants, history persist | ✅ done 2026-08-23 (GH milestone 12) |
+| Twenty-five — file manager depth | F1–F18: du, sort, overwrite/conflict, path copy, … — 5/5 live gates on VZ | ✅ done 2026-08-26 (GH milestone 13) |
+| Twenty-six — network experience | N1–N16: ping, netstat, traceroute, HTTP fetch display, download mgr, net profile, offline preflight | ✅ done 2026-08-26 (GH milestone 14; N13/N14 closed out 2026-08-28, claim 8852) |
+| Twenty-seven — desktop polish | G1–G30 = issues #444–#473: splash, wizard, about, previews, sounds, sysmon, tooltips, audits, dogfood | ✅ done 2026-08-27 (GH milestone 15) |
+| Twenty-eight — SMP | PSCI CPU_ON bringup of core 1, per-core schedulers, spinlocks, GICv3 SGI IPIs | ✅ done 2026-08-27 (issue #595, claim 6438, PR #611) |
+| Twenty-nine — VM depth | Demand paging, COW page sharing, anonymous mmap (slots 63/64), zero-leak teardown | ✅ done 2026-08-27 (issue #598, claim 8247) |
+| Thirty — dynamic linking | Freestanding `LD.SO` linker, `LIBUI.SO`/`LIBFONT.SO`, W^X multi-aperture, live gate | ✅ done 2026-08-27 (issue #599, claim 7921) |
+| Thirty-one — dyn linking ecosystem | CALC/NOTEPAD/FILE/DESKTOP → `.ELF`, runtime `dlopen`/`dlsym` | ✅ done 2026-08-27 (issue #602, claim 4001) |
 
 > **Narratives for M3–M16** are archived per milestone under `docs/archive/status-m{N}-detail.md` (issue #262).
 > Each archive preserves the verbatim pre-compression table row plus march/claim pointers; the live table above is the one-line summary.
@@ -108,7 +123,7 @@ byte-perfect and gated by `zig build run`).
 
 ## The march tracker (per milestone)
 
-> Per-milestone card detail lives in `docs/march-m*.md` (M3, M6–M16);
+> Per-milestone card detail lives in `docs/march-m*.md` (M3, M6–M31);
 > completed-milestone trackers are archived — `docs/archive/march-m4.md` (M4),
 > `docs/archive/march-m5.md` (M5), and `docs/archive/march-m15.md` (M1.5, closed 2026-08-09).
 > `docs/status.md` holds only milestone-level facts; update a card's row in its march file, never here.
@@ -120,28 +135,27 @@ The ordered `## What comes immediately afterward` list (previously 223 lines, it
 and the `## Milestone 1.5 — the call` spec (56 lines) plus the `## What we directly observe` serial-gate
 archaeology (115 lines) are preserved in git history (`aa4f111`) and in the per-milestone archives.
 
-**M17 — desktop completeness** (C1–C10 + Arc1–5): ✅ done 2026-08-21.
-All post-M17 arcs (widget depth, window management, app upgrades, rich interactions, system polish)
-are complete. The forward roadmap is M18–M27 — the experience layer:
+**M17 — desktop completeness** (C1–C10 + Arc1–5): ✅ done 2026-08-21, and the
+entire M18–M27 experience layer that followed is closed too — every row above
+from Seventeen through Thirty-one is ✅ done with its own GitHub milestone
+(GH milestones #6–#15 for M18–M27; issues #595/#598/#599/#602 for M28–M31)
+and march tracker (`docs/march-m18.md` … `docs/march-m31.md`; card detail in
+[`docs/roadmap-post-arc5.md`](roadmap-post-arc5.md)).
 
-| Milestone | Focus | Cards |
-|-----------|-------|-------|
-| M18 | Terminal & shell depth | T1–T5 (scrollback, selection, search, history, colors) |
-| M19 | Shell as programming environment | P1–P5 (pipes, redirection, env vars, functions, scripts) |
-| M20 | Text rendering & Unicode | U1–U5 (font sizes, Unicode glyphs, search, chrome, tabs) |
-| M21 | Window management depth | ✅ done 2026-08-26 (claim 1306, W1–W16, 5/5 live gates) |
-| M22 | Developer tools | D1–D5 (ELF loader, assembler, symbols, disassembler, strace) |
-| M23 | The text editor | E1–E6 (EDIT.BIN, undo/redo, goto, tabs, syntax, console split) |
-| M24 | CALC grows up | K1–K5 (programmer mode, memory, units, constants, history persist) |
-| M25 | File manager depth | ✅ core done 2026-08-26 (claims 0434/2539/4379, F1–F5 5/5 live gates on VZ; F6–F18 unit-tested) |
-| M26 | Network experience | N1–N5 (ping, netstat, HTTP fetch display, bandwidth, connection mgr) |
-| M27 | Desktop polish & completeness | G1–G30 = issues #444–#473 (splash, wizard, about, previews, sounds, sysmon, tooltips, consistency helpers, audits, dogfood) — tracker renumbered 2026-08-26 to match the issue list |
-| M30 | Dynamic linking & shared libraries | ✅ done 2026-08-27 (claim 7921, issue #599, D1–D4, live hardware gate) |
-| M31 | Dynamic linking app ecosystem | E1–E6 (dynamic app migration, dlopen/dlsym, lazy PLT binding) |
+Post-milestone landings since M31: the in-guest HTTP/1.1 web server
+`HTTPD.BIN` with TCP passive open (claim 0750, PR #596), the M26 offline-
+preflight cards N13/N14 (claim 8852), and the `sys_tcp_connect` wall-clock
+bounding fix (issue #613, claim 2572, PR #615).
 
-Full card detail: [`docs/roadmap-post-arc5.md`](roadmap-post-arc5.md).
-ABI budget: 56/64 slots used, 8 remaining (M19+M20+M22 consume 5, leaving 3).
-Known open threads: U4 pointer class-C (issue #151), keyboard events=0 (issue #179).
+**There is no M32 yet.** Every GitHub milestone is closed, the issue tracker
+is at **zero open issues** (2026-08-28), and no claim is active on a branch —
+the repo sits between milestones. The ABI is effectively full: a 128-slot
+table with **65 implemented** (ADR 0013 reserved slots 52–54), so the next
+milestone is likely predominantly userland unless an ADR amendment grants
+more slots. Both former open threads are resolved: the M8 U4 pointer-focus
+proof is class-B-headless via custom-virtio pointer injection (claim 9367,
+issue #151) and the synthesized-keyboard `events=0` report is fixed by the
+headless virtio input channel (claims 9588/0680, issue #179).
 
 ## Assumptions & gaps (checked against merged `main`)
 
@@ -206,7 +220,7 @@ Multiple agents/humans develop this repo concurrently. Binding rules (mirrored i
 - [`march-m15.md`](march-m15.md) — M15 tracker (audio).
 - [`march-m16.md`](march-m16.md) — M16 tracker (kernel consolidation).
 - [`m17-desktop-completeness.md`](m17-desktop-completeness.md) — M17 (widgets, menus, resize, tray; done).
-- [`roadmap-post-arc5.md`](roadmap-post-arc5.md) — M18–M27 the experience layer (forward roadmap).
+- [`roadmap-post-arc5.md`](roadmap-post-arc5.md) — M18–M27 the experience layer (card detail; all closed).
 - [`march-m18.md`](march-m18.md) — M18 tracker (terminal & shell depth).
 - [`march-m19.md`](march-m19.md) — M19 tracker (shell programming environment).
 - [`march-m20.md`](march-m20.md) — M20 tracker (text rendering & Unicode).

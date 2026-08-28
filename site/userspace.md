@@ -14,8 +14,8 @@ scheduled as processes. The syscall boundary is a frozen, numbered ABI.
 
 The syscall ABI is frozen in `docs/decisions/0007-syscall-abi.md`: the syscall
 number goes in x8, arguments in x0–x5, the result in x0, dispatched through a
-runtime-built 64-slot table. Forty-six slots (0–45) are implemented; the
-rest return `ENOSYS`.
+runtime-built **128-slot** table. **Sixty-five slots are implemented**
+(0–64, with reserved gaps); the rest return `ENOSYS`.
 
 | Slot | Name | What it does |
 |-----:|------|--------------|
@@ -39,6 +39,19 @@ rest return `ENOSYS`.
 | 40/41 | `timer_set` / `timer_cancel` | one countdown timer per process, posting `TIMER` events |
 | 42/43 | `audio_info` / `audio_play` | the EL0 audio seam: learn the negotiated PCM state, play bounded chunks |
 | 44/45 | `audio_volume` / `audio_mute` | bounded, process-only sound-state control |
+| 46 | `win_fill_batch` | batched window fills for the compositor |
+| 47 | `win_resize` | drag-to-resize (Arc2) |
+| 49 | `win_raise_front` | raise to the front of the z-order |
+| 50 | `win_lower_back` | lower to the back of the z-order |
+| 51 | `notify` | post a system notification |
+| 53 | `win_set_unsaved` | unsaved-changes marker (Arc4/Arc5) |
+| 55 | `drag_read` | read a drag-and-drop payload (Arc4) |
+| 56/57 | `pipe_read` / `pipe_write` | the M19 shell pipe (4 KiB bounded) |
+| 58 | `font_size` | terminal font size (M20) |
+| 59/60 | `ping_send` / `ping_poll` | the M26 ICMP-ping seam |
+| 61 | `win_set_title` | set a window title |
+| 62 | `net_stats` | net-stats snapshot (M26) |
+| 63/64 | `mmap` / `munmap` | anonymous user memory (M29) |
 
 ## Fault-safe uaccess
 
@@ -52,7 +65,10 @@ clean `EFAULT`. The `uaccess` command proves the recovery live.
 
 `exec <file> [args...]` reads a flat `DSK1` image through the FAT path, strips
 its header, rebuilds the EL0 user root around its page, packs a bounded argv
-block into the text page, and spawns it. Programs are real processes with a
+block into the text page, and spawns it. Dynamic ELF executables (M30/M31)
+ride the same seam: `LD.SO` inspects `PT_DYNAMIC`, resolves imports against
+the pre-staged shared-library aperture, relocates the GOT, and jumps to
+`AT_ENTRY` — still zero libc, zero POSIX. Programs are real processes with a
 lifecycle: `running → exited → zombie → reaped`, with exit status preserved
 past the reap.
 
