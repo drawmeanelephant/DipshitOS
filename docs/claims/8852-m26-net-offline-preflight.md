@@ -19,7 +19,7 @@
 - **Depends on:** — `sys_net_stats` (slot 62, M26 N2) and the userland
   mirror `user/src/lib/netstats.zig` are on main
 - **Heartbeat:** 2026-08-28
-- **Status:** 🔄 `agent/zcode/m26-net-offline-preflight`
+- **Status:** ✅ done 2026-08-28 — class-B gate `tools/verify-live-net-offline.sh` PASS 24/24 (evidence `artifacts/live-net-offline-*`); regressions `verify-live-n1-ping.sh`, `verify-live-fetch.sh`, `verify-live-netstat.sh` PASS; class A green (fmt, unit tests incl. 9 new netstatus tests, transcript byte-identical, build/image/inspect, coordination ×2, bss-budget, swift build). Two gate-engineering lessons recorded in the log: an empty `--vars` file is not a valid EFI variable store (`gate_begin` seeds one when `artifacts/efi-vars.bin` is absent — delete it like every net gate does), and the exit-report FIFO drains at the NEXT shell idle pass — a gate's `--script-expect` must key on the drained report line (or a later phase), never on an echo typed while the exiting task still owns the ring slot (the claim-1384/N6 lesson, relearned live).
 
 ## Notes
 

@@ -30,6 +30,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const ui = @import("lib/ui.zig");
+const netstatus = @import("lib/netstatus.zig");
 
 // ---------------------------------------------------------------------------
 // Pure logic — host-testable
@@ -39,6 +40,11 @@ pub const default_count: u8 = 5;
 pub const max_count: u8 = 100;
 pub const exit_ok: u64 = 0;
 pub const exit_usage: u64 = 1;
+/// M26 N13/N14: preflight exit statuses — distinct from usage/ok so the
+/// gate can tell a diagnosis from an error. `.unknown` keeps the legacy
+/// path (exit_ok/loss), never guesses.
+pub const exit_offline: u64 = 2;
+pub const exit_no_route: u64 = 3;
 
 /// Parse dotted IPv4 "a.b.c.d" into bytes. Rejects leading zeros? No,
 /// just decimal 0..255 per octet, exactly 3 dots.
@@ -244,6 +250,27 @@ fn cli_main(argc: usize, argv_va: u64) noreturn {
 fn run_ping(cfg: PingArgs) noreturn {
     var ip_txt: [16]u8 = undefined;
     const ip_s = format_ip(cfg.ip, &ip_txt);
+
+    // M26 N13: network preflight — one sys_net_stats snapshot before the
+    // first send. Offline/no-route exit FAST with the N14 message instead
+    // of burning the per-ping bounded poll; on the host build (or a kernel
+    // without slot 62) the verdict is .unknown and we keep the legacy path.
+    if (builtin.os.tag == .freestanding) {
+        const verdict = netstatus.check(cfg.ip);
+        switch (verdict.diagnosis) {
+            .offline_no_ip => {
+                var buf: [128]u8 = undefined;
+                ui.write_console(netstatus.format_message(&buf, "ping", .offline_no_ip, cfg.ip));
+                ui.exit_process(exit_offline);
+            },
+            .no_route => {
+                var buf: [128]u8 = undefined;
+                ui.write_console(netstatus.format_message(&buf, "ping", .no_route, cfg.ip));
+                ui.exit_process(exit_no_route);
+            },
+            .ready, .unknown => {},
+        }
+    }
 
     // Header
     {
