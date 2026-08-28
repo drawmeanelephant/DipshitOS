@@ -118,6 +118,7 @@ card's close-out and graduate to the archive when their milestone closes.
 | `live-m16-guards` | B | `bash tools/verify-live-m16-guards.sh` | ✅ pass | 2026-08-24* |
 | `live-m16-resources` | B | `bash tools/verify-live-m16-resources.sh` | ✅ pass | 2026-08-24* |
 | `live-m16-composition` | B | `bash tools/verify-live-m16-composition.sh` | ✅ pass | 2026-08-24* |
+| `live-net-offline` | B | `bash tools/verify-live-net-offline.sh` | ✅ pass — M26 N13+N14: offline/no-route fast-exit preflight in PING.BIN/FETCH.BIN (claim 8852); 24/24 across offline boot, no-route boot, online control | 2026-08-28 |
 | `cvc-echo` | B | `bash tools/verify-cvc-echo.sh` | ✅ pass | 2026-08-24 |
 | `verify-vz` | B | `just verify-vz` (aggregate — every class-B gate above) | aggregate | 2026-08-19 |
 

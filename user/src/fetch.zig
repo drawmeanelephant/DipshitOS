@@ -2,7 +2,9 @@
 //!
 //! Connects over TCP (slot 30), transmits HTTP/1.0 GET request (slot 31),
 //! streams response headers and body to the console (slot 32 + slot 1),
-//! cleanly tears down the connection (slot 33), and exits status 42 (slot 3).
+//! cleanly tears down the connection (slot 33), and exits status 42 (slot 3)
+//! on success — or 3 (offline, no IP) / 4 (no route to 10.0.0.2) from the
+//! M26 N13/N14 preflight, 1/2 on mid-session failures.
 //!
 //! M26 N3 (issue #401): the terminal display now separates the response
 //! into a "--- response headers ---" section (buffered through the bare
@@ -11,12 +13,29 @@
 //! the class-B gate. The splitter is a pure, host-tested function.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const ui = @import("lib/ui.zig");
+const netstatus = @import("lib/netstatus.zig");
 
 pub const default_ip: u32 = 0x0a000002; // 10.0.0.2
 pub const default_port: u16 = 80;
 pub const exit_status: u32 = 42;
 pub const header_scratch_max: usize = 1024;
+/// M26 N13/N14: preflight exit statuses, distinct from the existing
+/// connect/send failures (1/2) so the gate can tell a diagnosis from a
+/// mid-session error.
+pub const exit_offline: u32 = 3;
+pub const exit_no_route: u32 = 4;
+
+/// The fixed destination as bytes — the preflight classifier's input.
+fn dest_ip_bytes() [4]u8 {
+    return .{
+        @truncate(default_ip >> 24),
+        @truncate(default_ip >> 16),
+        @truncate(default_ip >> 8),
+        @truncate(default_ip),
+    };
+}
 
 /// M26 N3: find the end of the HTTP header block (the first `\r\n\r\n`).
 /// Returns the index ONE PAST the terminator, or null when not yet present.
@@ -34,6 +53,28 @@ pub fn header_end(buf: []const u8) ?usize {
 
 pub export fn _start() callconv(.c) noreturn {
     ui.write_console("fetch: starting\n");
+
+    // M26 N13: network preflight — one sys_net_stats snapshot before the
+    // connect. Offline/no-route exit FAST with the N14 message instead of
+    // the bounded connect loop; on the host build (or a kernel without
+    // slot 62) the verdict is .unknown and the legacy path is kept.
+    if (builtin.os.tag == .freestanding) {
+        const dest = dest_ip_bytes();
+        const verdict = netstatus.check(dest);
+        switch (verdict.diagnosis) {
+            .offline_no_ip => {
+                var buf: [128]u8 = undefined;
+                ui.write_console(netstatus.format_message(&buf, "fetch", .offline_no_ip, dest));
+                ui.exit_process(exit_offline);
+            },
+            .no_route => {
+                var buf: [128]u8 = undefined;
+                ui.write_console(netstatus.format_message(&buf, "fetch", .no_route, dest));
+                ui.exit_process(exit_no_route);
+            },
+            .ready, .unknown => {},
+        }
+    }
 
     // 1. Connect to HTTP server (default 10.0.0.2:80)
     const conn_rc = ui.tcp_connect(default_ip, default_port);
