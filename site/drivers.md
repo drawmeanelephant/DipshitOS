@@ -21,6 +21,7 @@ the real host, and its device identity is recorded as observed, not assumed.
 | Network (0x1041) | `virtio_net.zig` — TX/RX + ARP/IPv4/UDP/TCP above it | done, live-gated |
 | Graphics (0x1050) | `virtio_gpu.zig` — spec 2D path, B8G8R8X8 framebuffer | done, live-gated |
 | Sound (0x1059) | `virtio_snd.zig` — control queue, PCM_INFO/SET_PARAMS/PREPARE/START/STOP/RELEASE, bounded playback | done, live-gated |
+| Custom control plane (0x1082) | host-implemented control device — input injection, structured console, raw scanout channels (claims 3141/9367/0680) | done, live-gated |
 | Balloon | `VZMemoryBalloonDeviceConfiguration` | not started — low priority |
 
 ## USB: the XHCI controller
@@ -53,7 +54,8 @@ and drive the per-device post-exit re-arm logic.
 <Aside kind="note">
 
 **PLANNED.** The balloon device is the last unattached virtio surface. It is
-explicitly low priority while the guest stays at a fixed 256 MiB with no
-demand paging.
+explicitly low priority while the guest stays at a fixed 256 MiB reservation
+(demand paging recycles guest pages but cannot return host memory to the
+hypervisor).
 
 </Aside>

@@ -7,8 +7,8 @@ tags: [architecture, mmu, memory]
 
 # Memory model
 
-DipshitOS is identity-mapped with per-task user roots. There is no demand
-paging, no swap, and no kernel heap in the device paths.
+DipshitOS is identity-mapped with per-task user roots. There is no swap and
+no kernel heap in the device paths.
 
 ## Physical allocation
 
@@ -35,17 +35,27 @@ reports totals, free counts, and the exclusions.
   into the same text page (zero extra pages) so even process arguments stay
   read-only.
 
+## Demand paging, COW, and mmap (M29)
+
+Milestone 29 added virtual-memory depth (issue #598): a translation fault on
+an unmapped EL0 leaf allocates a zero-filled physical page and resumes, COW
+shares pages read-only until a write faults a private copy, and
+`sys_mmap`/`sys_munmap` (slots 63/64) expose anonymous user memory.
+`VMTEST.BIN` and the `verify-live-vm-depth` gate prove the whole surface
+including zero-leak teardown on exit.
+
 ## Storage discipline
 
 Rings, FIFOs, window back-buffers, and frame buffers are fixed-size BSS
-carve-outs. Capacity is a documented constant — the scheduler pool is 7 slots,
-the IPC mailbox is 8 × 64 B per process, the window registry is bounded — and
-overflow refuses or drops-oldest rather than allocating.
+carve-outs. Capacity is a documented constant — the scheduler pool is 11
+slots (shell + worker + 8 EL0 + idle), the IPC mailbox is 8 × 64 B per
+process, the window registry is bounded — and overflow refuses or
+drops-oldest rather than allocating.
 
 <Aside kind="warning">
 
-**LIMITATION.** No demand paging, no overcommit, no swap. The 256 MiB guest is
-a fixed reservation, which is exactly why the balloon device (memory reclaim)
-is still unstarted and low priority.
+**LIMITATION.** No swap and no overcommit beyond what demand paging provides.
+The 256 MiB guest is a fixed reservation, which is exactly why the balloon
+device (memory reclaim) is still unstarted and low priority.
 
 </Aside>

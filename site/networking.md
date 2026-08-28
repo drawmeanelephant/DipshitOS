@@ -20,8 +20,9 @@ virtio-net transport, built in bounded fixed-BSS staging.
 | UDP | `udp.zig` | RFC 768; pseudo-header checksum always computed; bounded listen table; loopback |
 | DHCP | `dhcp.zig` | RFC 2131 client: DISCOVER → OFFER → REQUEST → ACK, plus renew/rebind/expiry |
 | DNS | `dns.zig` | RFC 1035 client: A-record queries over UDP, parse + extract, `net dns <hostname>` |
-| TCP | `tcp.zig` | RFC 793 client: handshake, one in-flight segment, bounded retransmission |
+| TCP | `tcp.zig` | RFC 793: client (handshake, one in-flight segment, bounded retransmission) + passive-open server |
 | TCP seam | `syscall.zig` slots 30–33 | `sys_tcp_connect`/`sys_tcp_send`/`sys_tcp_recv`/`sys_tcp_close` for EL0 |
+| HTTPD | `user/src/httpd.zig` | in-guest HTTP/1.1 web server over the passive-open listener (claim 0750) |
 
 ## What works end to end
 
@@ -33,16 +34,20 @@ virtio-net transport, built in bounded fixed-BSS staging.
   peers, and the EL0 syscall seam (`sys_udp_listen/send/recv`).
 - **DHCP** — a bounded client that binds a lease, then renews, rebinds, and
   expires it on the lease timer.
-- **TCP** — a bounded client: connect, send, receive, close, plus fixed-RTO
-  retransmission with an abort bound, exposed to EL0 through the slot 30–33
-  syscall seam (`TCP.BIN` proves it from a user program).
+- **TCP** — a bounded client (connect, send, receive, close, plus fixed-RTO
+  retransmission with an abort bound) **and a passive-open server**, exposed
+  to EL0 through the slot 30–33 syscall seam (`TCP.BIN` proves the client;
+  `HTTPD.BIN` proves the server).
 - **DNS** — a bounded RFC 1035 resolver (`net dns <hostname>`) that queries
   port 53 and extracts A records, live-gated against a deterministic
   `--net-dns-respond` answer.
 - **NAT** — the launcher's `--net-nat` mode attaches a real
   `VZNATNetworkDeviceAttachment`; the guest pings the NAT gateway.
+- **HTTP server** — `HTTPD.BIN` accepts a connection on the passive-open
+  listener and serves the guest's own files over HTTP/1.1 (claim 0750).
 - **Userland network apps** — `TCP.BIN` (echo client), `FETCH.BIN` (HTTP/1.0
-  client), and `CHAT.BIN` (graphical UDP chat) run the seam end to end.
+  client), `PING.BIN`, `NETSTAT.BIN`, `TRACEROUTE.BIN`, and `CHAT.BIN`
+  (graphical UDP chat) run the seam end to end.
 
 <Aside kind="info">
 
@@ -56,8 +61,9 @@ translates the frames — that is the point of NAT.
 
 ## Honest bounds
 
-- TCP is **outward-only**: no server/listen, no TCP loopback, no congestion
-  control, fixed window 4096, payload ≤ 64 bytes in one segment.
+- TCP is **single-connection**: one client connect and one passive-open
+  listener; no TCP loopback, no congestion control, fixed window 4096,
+  payload ≤ 64 bytes in one segment.
 - RTO is fixed (3 ticks) with no Karn/exponential backoff; 10 retransmissions
   then an honest abort.
 - DHCP has no hostname/DNS options and no relay; the lease is enforced but the
@@ -68,8 +74,8 @@ translates the frames — that is the point of NAT.
 
 <Aside kind="warning">
 
-**LIMITATION.** There is no TCP server/listen and no routing beyond the NAT
-gateway. The stack is designed to prove the protocol shapes and the syscall
-seam, not to be a drop-in userspace network library.
+**LIMITATION.** No routing beyond the NAT gateway and no IPv6. TCP is a
+single-connection client + passive-open listener, not a general-purpose
+network stack — the tower proves the protocol shapes and the syscall seam.
 
 </Aside>

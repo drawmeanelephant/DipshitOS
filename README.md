@@ -17,33 +17,39 @@ to GitHub Pages).
 
 ## Status
 
-Every milestone planned so far has landed: boot/kernel proper, the interactive
-`dipshit>` monitor, userspace (allocator, scheduler, EL0 + syscalls), processes
-(IPC, wait, kill), networking (virtio-net → ARP → IPv4/ICMP → UDP → DHCP →
-TCP), graphics (framebuffer → Road Pops terminal → Driving Award window
-manager), input (USB XHCI + HID), and — **milestone eleven (2026-08-16)** — a
-full **desktop platform**: the ADR 0011 GUI contract, a zero-heap micro-widget
-toolkit, and four real apps (`CALC.BIN`, `NOTEPAD.BIN`, `TOP.BIN`,
-`DESKTOP.BIN`) with an EL0 `sys_exec`/`sys_kill` process-control seam so the
-desktop launcher actually launches apps and the task manager can kill them.
+Every milestone through **thirty-one** has landed and closed — the boot
+pipeline, the interactive `dipshit>` monitor, userspace (allocator,
+scheduler, EL0 + syscalls), processes (IPC, wait, kill), networking
+(virtio-net → ARP → IPv4/ICMP → UDP → DHCP → TCP), graphics (framebuffer →
+Road Pops terminal → Driving Award window manager), input (USB XHCI + HID),
+usability, app events, the userland filesystem, the desktop platform
+(`CALC.BIN`, `NOTEPAD.BIN`, `TOP.BIN`, `FILE.BIN`, `DESKTOP.BIN`), network
+apps, shared services (clipboard + app timers), audio, kernel consolidation,
+desktop completeness and the post-M17 arcs, and the M18–M27 experience layer
+(terminal & shell depth, shell programming, text rendering & Unicode, window
+management depth, developer tools, the text editor, CALC, file manager depth,
+network experience, desktop polish).
 
-**Milestone twelve landed 2026-08-16:** userland network applications — a TCP
-syscall seam (`sys_tcp_connect/send/recv/close`, ADR 0007 slots 30–33), a
-bounded RFC 1035 DNS client, and the `FETCH.BIN` HTTP/1.0 client +
-`CHAT.BIN` graphical chat capstone, all live-verified on VZ.
+The 2026-08-27 hardware-depth trio rounded it out:
 
-**Milestone thirteen landed 2026-08-16:** files & applications — the
-mutating filesystem seam (`sys_file_delete/rename/truncate/free`, ADR 0007
-slots 34–37), the `APPS.TXT` application identity manifest (the launcher
-stops hardcoding its app list), the `FILE.BIN` graphical file browser, and
-manifest-driven desktop composition, all live-verified on VZ.
+- **M28 — SMP:** a second CPU core online via PSCI, per-core schedulers,
+  spinlocks, and GICv3 IPIs — `smp: cores=2 online=2` live-gated on real VZ.
+- **M29 — VM depth:** demand paging, copy-on-write, and anonymous
+  `sys_mmap`/`sys_munmap` (ADR 0007 slots 63/64).
+- **M30 — dynamic linking:** a freestanding runtime linker (`LD.SO`) plus
+  `LIBUI.SO`/`LIBFONT.SO` shared libraries, zero libc, W^X multi-aperture
+  isolation, live-gated.
+- **M31 — dynamic linking ecosystem:** the desktop apps migrated to dynamic
+  executables (`CALC.ELF`, `NOTEPAD.ELF`, `FILE.ELF`, `DESKTOP.ELF`) with
+  runtime `dlopen`/`dlsym` plugin loading.
 
-**Now in progress (milestone fourteen):** shared user services — a clipboard
-(`sys_clipboard_set/get`, ADR 0007 slots 38–39), application timers
-(slots 40–41), a NOTEPAD copy/paste + timer composition capstone, and
-security/isolation hardening (issues #175–#178).
+Also landed: an in-guest HTTP/1.1 web server (`HTTPD.BIN`, TCP passive open,
+claim 0750), offline preflight for the M26 network apps (N13/N14), and a
+wall-clock bounding fix for `sys_tcp_connect` (#613).
 
-The canonical, always-current accounting is
+**Right now:** every GitHub milestone is closed and the issue tracker is at
+**zero open issues** — the repo sits between milestones, with no M32 defined
+yet. The canonical, always-current accounting is
 [`docs/status.md`](docs/status.md); the readable summary is the
 [documentation site](https://drawmeanelephant.github.io/DipshitOS/).
 
@@ -82,7 +88,8 @@ just verify-vz         # class B, Apple silicon, boots real VMs
 
 - `boot/` — the AArch64 UEFI boot loader.
 - `kernel/` — the freestanding kernel and every subsystem.
-- `user/` — EL0 demo programs (`.BIN` images loaded by `exec`).
+- `user/` — EL0 programs: flat `.BIN` images, dynamic `.ELF` executables,
+  and the `LD.SO`/`LIBUI.SO`/`LIBFONT.SO` shared libraries.
 - `host/vm-runner/` — the Swift Virtualization.framework launcher.
 - `site/` — the public documentation corpus (compiled by Boris).
 - `docs/` — the engineering warehouse: claims, decisions (ADRs), status,

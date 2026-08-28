@@ -14,20 +14,21 @@ map; the satellites below carry the detail.
 
 ```text
 ┌───────────────────────────────────────────────┐
-│  EL0 user programs + desktop apps (CALC.BIN,   │
-│  NOTEPAD.BIN, DESKTOP.BIN, FETCH.BIN, …)      │
-│  syscalls: ping/write/…/ipc/win/events/file/  │
-│             exec/kill/tcp/fs/clip/timer/audio │
-│             (0–45)                            │
+│  EL0 user programs + desktop apps (CALC.ELF,   │
+│  NOTEPAD.ELF, DESKTOP.BIN, FETCH.BIN, …)      │
+│  runtime linker LD.SO + LIBUI.SO/LIBFONT.SO   │
+│  syscalls: 65 implemented slots (of 128):     │
+│  ipc/win/events/file/exec/kill/tcp/fs/clip/   │
+│  timer/audio/pipe/font/ping/net/mmap          │
 ├───────────────────────────────────────────────┤
 │  Monitor + shell (dipshit>)                   │
 │  Road Pops terminal · Driving Award compositor │
 ├───────────────────────────────────────────────┤
-│  Scheduler (round-robin, 7 tasks) · processes │
-│  Physical allocator · identity-map MMU        │
+│  SMP scheduler (round-robin, 2 cores)         │
+│  Physical allocator · MMU + demand paging     │
 ├───────────────────────────────────────────────┤
 │  Drivers: virtio console/blk/entropy/gpu/net/ │
-│  snd + USB XHCI + HID · GICv3 · generic timer │
+│  snd/custom + USB XHCI + HID · GICv3 · timer │
 ├───────────────────────────────────────────────┤
 │  UEFI boot loader (BOOTAA64.EFI)              │
 └───────────────────────────────────────────────┘
@@ -60,23 +61,26 @@ Three rules show up everywhere:
 | Subsystem | What it does |
 |-----------|--------------|
 | Boot loader | loads `KERNEL.BIN`, writes `BOOTED.TXT`/`RC.TXT` evidence, jumps to the kernel |
-| MMU | identity-map TTBR0_EL1 tables (T0SZ=16), per-task user roots, EL1-only kernel overlay |
+| MMU | identity-map TTBR0_EL1 tables (T0SZ=16), per-task user roots, EL1-only kernel overlay, demand paging + COW (M29) |
 | Allocator | first-fit bitmap over the captured EFI map, with exclusion ranges |
-| Scheduler | tick-driven round-robin; 7 slots (shell + worker + 4 EL0 + idle) |
+| Scheduler | tick-driven round-robin across 2 cores (SMP, M28); 11 slots (shell + worker + 8 EL0 + idle) |
 | Processes | bounded registry, lifecycle states, exit-status propagation, IPC mailboxes |
-| Syscalls | ADR 0007: 64-slot table, 46 implemented (0–45), deterministic counters |
+| SMP | PSCI `CPU_ON` core bringup, per-core schedulers, spinlocks, GICv3 SGI IPIs (M28) |
+| Syscalls | ADR 0007: 128-slot table, 65 implemented, deterministic counters |
 | Networking | virtio-net → ARP → IPv4/ICMP → UDP → DHCP → DNS → TCP, plus a NAT mode and the EL0 TCP seam |
 | Graphics | virtio-gpu framebuffer → text → Road Pops → Driving Award compositor |
 | Audio | virtio-snd → PCM playback → `beep` → the EL0 audio seam (slots 42–45) |
 | Input | XHCI host controller → USB enumeration → HID boot protocol → event FIFO → per-process event queues |
 | Events | keyboard/pointer/window events routed to focused EL0 apps (`sys_poll_event`/`sys_wait_event`), plus `TIMER` events from the app-timer facility |
 | Shared services | the machine-global clipboard (slots 38/39) + per-process app timers (slots 40/41) |
+| Dynamic linking | freestanding `LD.SO` runtime linker, `LIBUI.SO`/`LIBFONT.SO`, W^X multi-aperture userland (M30/M31) |
 | Desktop | the zero-heap `ui.zig` widget toolkit + CALC/NOTEPAD/TOP/DESKTOP/FILE applications |
 
 <Aside kind="note">
 
-**PLANNED.** The architecture deliberately stays single-CPU, single-display,
-and 2D-blit-only. SMP, multi-display, and accelerated/3D paths are explicit
-non-goals for now.
+**SMP IS SHIPPED.** The architecture was single-CPU until M28; it now boots
+two cores (PSCI `CPU_ON`, per-core schedulers, spinlocks, GICv3 IPIs) but
+stays single-display and 2D-blit-only. Multi-display and accelerated/3D
+paths remain explicit non-goals for now.
 
 </Aside>
