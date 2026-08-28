@@ -97,7 +97,9 @@ fn cntfrq() u64 {
     return v;
 }
 
-fn cntpct() u64 {
+/// Read the physical counter register (CNTPCT_EL0) on AArch64; 0 in host tests or on non-aarch64.
+pub fn cntpct() u64 {
+    if (comptime builtin.cpu.arch != .aarch64 or builtin.is_test) return 0;
     var v: u64 = 0;
     asm volatile ("mrs %[v], cntpct_el0"
         : [v] "=r" (v),

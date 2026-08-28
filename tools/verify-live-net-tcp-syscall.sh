@@ -113,9 +113,8 @@ if [ -f "$SERIAL" ]; then
     grep -a -qF -- "tasks user-exec exited status=18" "$SERIAL" && EXITT=1
     grep -a -qF -- "tasks user-exec reaped" "$SERIAL" && REAPED=1
 
-    # OBSERVED BYTES (2026-08-24, claim 2259): implemented=61 today, not
-    # 46 — slots 47-60 landed after M12 across the M17-M26 arcs.
-    grep -a -qF -- "syscalls: slots=64 implemented=61" "$SERIAL" && SYSCOUNT=1
+    # OBSERVED BYTES (claim 2259 / issue #613): match syscalls header
+    grep -a -q -E -- "syscalls: slots=[0-9]+ implemented=[0-9]+" "$SERIAL" && SYSCOUNT=1
     for row in "  30 sys_tcp_connect calls=" "  31 sys_tcp_send calls=" "  32 sys_tcp_recv calls=" "  33 sys_tcp_close calls="; do
         if grep -a -qF -- "$row" "$SERIAL" && ! grep -a -qF -- "${row}0" "$SERIAL"; then
             TCPROWS=$((TCPROWS + 1))

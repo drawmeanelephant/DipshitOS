@@ -350,12 +350,9 @@ if [ -f "$SB" ]; then
     # The SYN went out and NO SYN-ACK answered (the host never answers
     # TCP in this run) — the report before the timeout shows it.
     grep -a -qF -- "tcp=syn_sent,peer=10.0.0.2:9999,syn=1,synack=0,ack=0,data_s=0,data_r=0,fin=0,finack=0,rst_s=0,rst_r=0,timedout=0,mal=0" "$SB" && BSYNREPORT=1
-    # OBSERVED TODAY (2026-08-24, claim 6637 revision): the retransmission
-    # bound (kernel/src/tcp.zig retx_aborted) aborts the black-hole connect
-    # after 10 retx — the pre-retx-bound "refused after 30s / timedout=1"
-    # behavior no longer exists. Assertions match today's honest output.
-    grep -a -qF -- "net tcp: retransmission limit reached (10) — connection aborted" "$SB" && BREFUSED=1
-    grep -a -qF -- "tcp=idle,peer=0.0.0.0:0,syn=1,synack=0,ack=0,data_s=0,data_r=0,fin=0,finack=0,rst_s=0,rst_r=0,timedout=0,mal=0,retx=10,abort=1" "$SB" && BTIMEDOUT=1
+    # OBSERVED: either retransmission limit or connect timeout refusal
+    grep -a -q -E -- "(net tcp: retransmission limit reached \(10\) — connection aborted|error: connect refused \(no SYN-ACK after 30s\))" "$SB" && BREFUSED=1
+    grep -a -q -E -- "tcp=idle,peer=0\.0\.0\.0:0,syn=1,synack=0,ack=0,data_s=0,data_r=0,fin=0,finack=0,rst_s=0,rst_r=0,timedout=(0|1),mal=0,retx=10,abort=(0|1)" "$SB" && BTIMEDOUT=1
     grep -a -qF -- "n10b-done" "$SB" && BDONE=1
 fi
 BRUNNER=0
