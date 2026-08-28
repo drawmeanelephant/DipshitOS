@@ -53,6 +53,7 @@ const dns = @import("dns.zig"); // milestone twelve card N2 (claim 7566): DNS re
 const events = @import("events.zig"); // milestone sixteen C3 (claim 0339): per-process event queue bound behind `resources`
 const file_table = @import("file_table.zig"); // milestone sixteen C3 (claim 0339): per-process handle bound behind `resources`
 const serial_ring = @import("serial_ring.zig"); // Arc5 issue #243: serial output ring buffer behind `dmesg`
+const smp = @import("smp.zig");
 
 // ---------------------------------------------------------------------------
 // Limits (fixed-size, explicit bounds)
@@ -283,7 +284,7 @@ pub const Command = struct {
 /// grows it 54 -> 55 (`sym`). Milestone twenty-two D5 (issue #328)
 /// grows it 55 -> 56 (`strace`). Milestone twenty-two D6 (issue #329)
 /// grows it 56 -> 57 (`ps`).
-pub const registry_count: usize = 68; // 51 + sh/calc + `font` (M20 U1) + sym/strace/ps (M22 D3/D5/D6) + `type` (M19 P1) + `mktemp` (M19 P16) + stat/find/dmesg/time/which/inventory (M22 D8/D12/D13/D16) + du (M25 F4) + screenshot/shortcuts (M27 G27/G29)
+pub const registry_count: usize = 69; // 51 + sh/calc + `font` (M20 U1) + sym/strace/ps (M22 D3/D5/D6) + `type` (M19 P1) + `mktemp` (M19 P16) + stat/find/dmesg/time/which/inventory (M22 D8/D12/D13/D16) + du (M25 F4) + screenshot/shortcuts (M27 G27/G29) + smp (M28)
 
 /// `sym <file>` reads at most this many bytes for on-disk symtab inspection
 /// (M22 D3). ELF symbol tables live near the file tail; 64 KiB covers every
@@ -354,6 +355,7 @@ fn ensure_registry() []const Command {
             .{ .name = "sym", .help = "crash-report symbol table: 'sym' lists symbols loaded from the last ELF exec; 'sym <file>' parses an ELF's symtab from disk", .usage = "sym [<file>]", .category = .tasks_processes, .max_args = 1, .handler = cmd_sym },
             .{ .name = "syscalls", .help = "numbered syscall table and counters", .usage = "syscalls", .category = .tasks_processes, .handler = cmd_syscalls },
             .{ .name = "tasks", .help = "tick-driven task scheduler status", .usage = "tasks", .category = .tasks_processes, .handler = cmd_tasks },
+            .{ .name = "smp", .help = "multiprocessor topology, online CPU cores, and per-core task state", .usage = "smp", .category = .tasks_processes, .handler = cmd_smp },
             .{ .name = "type", .help = "echo stdin (the pipe source) to stdout — the right half of `a | type`", .usage = "type", .category = .system, .handler = cmd_type },
             .{ .name = "timer", .help = "interrupt controller + timer status", .usage = "timer", .category = .memory_state, .handler = cmd_timer },
             .{ .name = "tour", .help = "guided tour of the system for new users", .usage = "tour", .category = .machine_identity, .handler = cmd_welcome },
@@ -3440,6 +3442,42 @@ fn cmd_tasks(m: *Monitor, args: []const []const u8) ExecError {
         m.console.print_u64(info.advances);
         m.console.puts(" state=");
         m.console.puts(scheduler.state_name(info.state));
+        m.console.puts("\n");
+    }
+    return .none;
+}
+
+fn cmd_smp(m: *Monitor, args: []const []const u8) ExecError {
+    _ = args;
+    m.console.puts("smp: cores=");
+    m.console.print_u64(@as(u64, smp.num_cores));
+    var online_count: u64 = 0;
+    var c: usize = 0;
+    while (c < smp.max_cores) : (c += 1) {
+        if (smp.core_online[c]) online_count += 1;
+    }
+    m.console.puts(" online=");
+    m.console.print_u64(online_count);
+    m.console.puts("\n");
+
+    c = 0;
+    while (c < smp.max_cores) : (c += 1) {
+        if (c >= smp.num_cores and !smp.core_online[c]) continue;
+        m.console.puts("  core ");
+        m.console.print_u64(c);
+        m.console.puts(": ");
+        if (c == 0) m.console.puts("bsp ") else m.console.puts("ap  ");
+        m.console.puts("mpidr=");
+        m.console.print_hex(smp.core_mpidr[c]);
+        m.console.puts(" state=");
+        m.console.puts(if (smp.core_online[c]) "online" else "offline");
+        m.console.puts(" task=");
+        const cur_tid = scheduler.current_task_for_core(c);
+        if (scheduler.task_info(cur_tid)) |info| {
+            m.console.puts(info.name);
+        } else {
+            m.console.puts("none");
+        }
         m.console.puts("\n");
     }
     return .none;

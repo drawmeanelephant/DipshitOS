@@ -152,6 +152,13 @@ pub fn init() void {
     armed_flag = true;
 }
 
+/// Initialize local physical timer for a secondary CPU core.
+pub fn init_secondary() void {
+    if (comptime builtin.cpu.arch != .aarch64) return;
+    allow_el0_counter();
+    arm();
+}
+
 const TickSource = enum { test_only, irq, poll };
 
 /// Record a fired comparator and where it was consumed. Host tests use

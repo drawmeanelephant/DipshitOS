@@ -102,6 +102,7 @@ verify-vz:
     bash tools/verify-live-win-syscall.sh
     bash tools/verify-live-win-close.sh
     bash tools/verify-live-win-move.sh
+    bash tools/verify-live-smp.sh
 
 # Compile the AArch64 UEFI application and kernel image (class A — zig build)
 build:
@@ -335,6 +336,10 @@ verify-live-entropy:
 # Verify the live kill gate (class B — boots VZ VMs; the kernel force-terminates a never-exiting COUNTER.BIN with the reserved status 137, pages return, the slot is re-exec'd; claim 7786; Apple silicon only)
 verify-live-kill:
     bash tools/verify-live-kill.sh
+
+# Verify Milestone 28 SMP multi-core bringup (class B — boots VZ VMs with 2 CPUs; asserts secondary core wake, GICv3 redistributor, timer, and smp command; claim 6438; Apple silicon only)
+verify-live-smp:
+    bash tools/verify-live-smp.sh
 
 # Verify the M1.5 host-side interactive serial plumbing (class B — boots VZ VMs; Apple silicon only)
 verify-host-console:

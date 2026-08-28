@@ -188,7 +188,7 @@ pub fn irq_unmask() void {
 /// (the module must stay `zig test`-able on x86_64 CI). The vector region
 /// is emitted only for aarch64 targets (see `exception_vectors`).
 pub fn install() void {
-    if (comptime builtin.cpu.arch != .aarch64) return;
+    if (comptime builtin.is_test or builtin.cpu.arch != .aarch64) return;
     const table_addr = @intFromPtr(&exception_vectors);
     asm volatile ("msr vbar_el1, %[addr]"
         :
