@@ -35,6 +35,7 @@ tasks / processes
   sym         crash-report symbol table: 'sym' lists symbols loaded from the last ELF exec; 'sym <file>' parses an ELF's symtab from disk
   syscalls    numbered syscall table and counters
   tasks       tick-driven task scheduler status
+  smp         multiprocessor topology, online CPU cores, and per-core task state
 storage
   cat         print a file from the ESP (by name or /path)
   ls          list files on the ESP (or a directory by path); '-l' for long format (D15)
