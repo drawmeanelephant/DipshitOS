@@ -940,6 +940,55 @@ pub fn install_identity_map() void {
     // reachable even under the user root.
 }
 
+/// Setup MMU on a secondary CPU core (Milestone 28 SMP, claim 6438).
+pub fn setup_secondary_core() void {
+    if (comptime builtin.cpu.arch != .aarch64) return;
+    const mmfr0 = read_mmfr0();
+    const ips: u64 = mmfr0 & 0b111;
+    const tcr: u64 = plan_t0sz | (25 << 16) | (ips << 32);
+    const mair: u64 = 0x000000000000ff00;
+    const root0 = kernel_root_phys();
+
+    asm volatile ("dsb ishst" ::: .{ .memory = true });
+    asm volatile ("msr mair_el1, %[value]"
+        :
+        : [value] "r" (mair),
+    );
+    asm volatile ("msr tcr_el1, %[value]"
+        :
+        : [value] "r" (tcr),
+    );
+    asm volatile ("msr ttbr1_el1, %[value]"
+        :
+        : [value] "r" (@as(u64, 0)),
+    );
+    asm volatile ("msr ttbr0_el1, %[value]"
+        :
+        : [value] "r" (root0),
+    );
+    asm volatile ("isb");
+    asm volatile ("dsb ish" ::: .{ .memory = true });
+    asm volatile ("isb");
+    asm volatile ("tlbi vmalle1" ::: .{ .memory = true });
+    asm volatile ("dsb ish" ::: .{ .memory = true });
+    asm volatile ("isb");
+
+    // Enable MMU and Caches in SCTLR_EL1
+    var sctlr: u64 = 0;
+    asm volatile ("mrs %[value], sctlr_el1"
+        : [value] "=r" (sctlr),
+    );
+    sctlr |= (1 << 0); // M: MMU enable
+    sctlr |= (1 << 2); // C: Data cache enable
+    sctlr |= (1 << 12); // I: Instruction cache enable
+    sctlr |= (1 << 3); // SA: Stack alignment check
+    asm volatile ("msr sctlr_el1, %[value]"
+        :
+        : [value] "r" (sctlr),
+    );
+    asm volatile ("isb");
+}
+
 // ---------------------------------------------------------------------------
 // Claim 5804: TTBR0 switching (scheduler + firmware/runtime-services calls)
 // ---------------------------------------------------------------------------

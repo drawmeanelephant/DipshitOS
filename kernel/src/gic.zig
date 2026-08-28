@@ -210,6 +210,73 @@ pub fn init(private_intid: u32, edge_triggered: bool) void {
     programmed = true;
 }
 
+/// Program the GIC CPU interface and local redistributor for a secondary CPU core.
+pub fn init_secondary(private_intid: u32, edge_triggered: bool) void {
+    if (comptime builtin.cpu.arch != .aarch64) return;
+    if (kind != .v3) return;
+    const rbase = select_redist_frame();
+    // GICR_WAKER: wake the redistributor
+    var waker = mmio.mmio_read32(rbase + gicr_waker);
+    waker &= ~@as(u32, 1);
+    mmio.mmio_write32(rbase + gicr_waker, waker);
+    var spins: usize = 0;
+    while ((mmio.mmio_read32(rbase + gicr_waker) & 2) != 0 and spins < 100_000) : (spins += 1) {}
+
+    const bit: u32 = @as(u32, 1) << @as(u5, @intCast(private_intid));
+    mmio.mmio_write32(rbase + gicr_icenabler0, bit);
+    mmio.mmio_write32(rbase + gicr_icpendr0, bit);
+    mmio.mmio_write32(rbase + gicr_icactiver0, bit);
+    var igroup = mmio.mmio_read32(rbase + gicr_igroup0);
+    igroup |= bit;
+    mmio.mmio_write32(rbase + gicr_igroup0, igroup);
+    wait_rwp(rbase);
+
+    // Enable SGIs (INTID 0..15) in Group 1
+    var sgi_igroup = mmio.mmio_read32(rbase + gicr_igroup0);
+    sgi_igroup |= 0xFFFF;
+    mmio.mmio_write32(rbase + gicr_igroup0, sgi_igroup);
+    mmio.mmio_write32(rbase + gicr_isenabler0, 0xFFFF);
+    wait_rwp(rbase);
+
+    // Priority for private intid
+    const priority_word = private_intid / 4;
+    const priority_shift: u5 = @intCast((private_intid % 4) * 8);
+    const priority_addr = rbase + gicr_ipriority0 + @as(u64, priority_word) * 4;
+    var priority = mmio.mmio_read32(priority_addr);
+    priority &= ~(@as(u32, 0xff) << priority_shift);
+    priority |= @as(u32, 0x80) << priority_shift;
+    mmio.mmio_write32(priority_addr, priority);
+    wait_rwp(rbase);
+
+    const icfgr_addr = rbase + gicr_icfgr0 + @as(u64, private_intid / 16) * 4;
+    const icfg = private_icfgr(mmio.mmio_read32(icfgr_addr), private_intid, edge_triggered);
+    mmio.mmio_write32(icfgr_addr, icfg);
+    wait_rwp(rbase);
+    mmio.mmio_write32(rbase + gicr_isenabler0, bit);
+    wait_rwp(rbase);
+
+    // CPU interface via system registers (GICv3)
+    var sre: u64 = 0;
+    asm volatile ("mrs %[v], icc_sre_el1"
+        : [v] "=r" (sre),
+    );
+    sre |= 1;
+    asm volatile ("msr icc_sre_el1, %[v]"
+        :
+        : [v] "r" (sre),
+    );
+    asm volatile ("msr icc_pmr_el1, %[v]"
+        :
+        : [v] "r" (@as(u64, 0xff)),
+    );
+    asm volatile ("msr icc_igrpen1_el1, %[v]"
+        :
+        : [v] "r" (@as(u64, 1)),
+    );
+    asm volatile ("dsb sy");
+    asm volatile ("isb");
+}
+
 fn current_affinity() u32 {
     var mpidr: u64 = 0;
     asm volatile ("mrs %[v], mpidr_el1"
@@ -218,24 +285,15 @@ fn current_affinity() u32 {
     return @as(u32, @intCast((mpidr & 0x00ffffff) | ((mpidr >> 8) & 0xff000000)));
 }
 
-/// Select the redistributor RD frame whose GICR_TYPER affinity matches the
-/// boot CPU. VZ boots on affinity 0, so a RAZ TYPER still selects frame 0;
-/// the bounded scan keeps the path safe on a multi-frame implementation.
+/// Select the redistributor RD frame for the calling CPU core.
 fn select_redist_frame() u64 {
-    const target = current_affinity();
-    var base = redist_base;
-    var frame: usize = 0;
-    while (frame < 256) : (frame += 1) {
-        const typer = read64(base + gicr_typer);
-        const affinity: u32 = @truncate(typer >> 32);
-        if (affinity == target) return base;
-        if ((typer & (@as(u64, 1) << 4)) != 0) break; // Last
-        base += if ((typer & (@as(u64, 1) << 1)) != 0)
-            gicr_vlpi_frame_stride
-        else
-            gicr_frame_stride;
-    }
-    return redist_base;
+    if (comptime builtin.cpu.arch != .aarch64) return redist_base;
+    var mpidr: u64 = 0;
+    asm volatile ("mrs %[v], mpidr_el1"
+        : [v] "=r" (mpidr),
+    );
+    const cid: u64 = mpidr & 0xff;
+    return redist_base + cid * gicr_frame_stride;
 }
 
 fn private_icfgr(value: u32, intid: u32, edge_triggered: bool) u32 {

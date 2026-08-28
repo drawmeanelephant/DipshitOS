@@ -3620,6 +3620,7 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "  sym         crash-report symbol table: 'sym' lists symbols loaded from the last ELF exec; 'sym <file>' parses an ELF's symtab from disk\n" ++
         "  syscalls    numbered syscall table and counters\n" ++
         "  tasks       tick-driven task scheduler status\n" ++
+        "  smp         multiprocessor topology, online CPU cores, and per-core task state\n" ++
         "storage\n" ++
         "  cat         print a file from the ESP (by name or /path)\n" ++
         "  ls          list files on the ESP (or a directory by path); '-l' for long format (D15)\n" ++

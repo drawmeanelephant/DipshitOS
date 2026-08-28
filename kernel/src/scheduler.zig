@@ -85,6 +85,8 @@ const driving_award = @import("driving_award.zig");
 const tombstone = @import("tombstone.zig");
 const serial_ring = @import("serial_ring.zig"); // Arc5 #243: serial snapshot for tombstones
 const virtio_blk = @import("virtio_blk.zig"); // Arc5 #243: disk write for tombstones
+const smp = @import("smp.zig");
+const spinlock = @import("spinlock.zig");
 
 const user_stack_section = if (builtin.object_format == .elf) ".userbss" else "__DATA,__userbss";
 
@@ -253,7 +255,9 @@ const Task = struct {
 
 var tasks: [max_tasks]Task = [_]Task{.{}} ** max_tasks;
 var task_count: usize = 0;
-var current: usize = 0;
+pub var current: usize = 0;
+pub var current_by_core: [smp.max_cores]usize = [_]usize{ 0, idle_id, idle_id, idle_id };
+pub var sched_lock = spinlock.Spinlock.init();
 var enabled_flag: bool = false;
 var switches: u64 = 0;
 var cooperative_yields: u64 = 0;
@@ -685,10 +689,14 @@ fn park() noreturn {
 /// claim-9746 stub (`mov sp, x0` + pop + `eret`) using the staged frame.
 fn next_runnable(after: usize) ?usize {
     if (task_count == 0) return null;
+    const cid = smp.core_id();
     var offset: usize = 1;
     while (offset <= max_tasks) : (offset += 1) {
         const candidate = (after + offset) % max_tasks;
-        if (tasks[candidate].state == .ready) return candidate;
+        if (tasks[candidate].state == .ready) {
+            if (cid != 0 and candidate == 0) continue;
+            return candidate;
+        }
     }
     return null;
 }
@@ -1325,6 +1333,14 @@ pub fn task_info(id: usize) ?TaskInfo {
 
 pub fn current_id() usize {
     return current;
+}
+
+pub fn current_task_for_core(cid: usize) usize {
+    if (cid == 0) return current;
+    if (cid < smp.max_cores) {
+        return current_by_core[cid];
+    }
+    return 0;
 }
 
 /// The TTBR0 root (physical) a task runs under (claim 5804; the

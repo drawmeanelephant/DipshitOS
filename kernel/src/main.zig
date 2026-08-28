@@ -53,6 +53,7 @@ const road_pops = @import("road_pops.zig"); // milestone six card G3 (claim 1574
 const xhci = @import("xhci.zig"); // milestone seven card I1 (claim 4272): the XHCI host-controller transport (keyboard/pointer live behind it)
 const input = @import("input.zig"); // milestone seven card I3 (claim 6050): the keyboard/pointer event FIFO + keycode decode feeding Road Pops
 const driving_award = @import("driving_award.zig"); // milestone six card G5 (claim 1543): Driving Award, the window manager (Road Pops is window 0; a clock overlay is window 1)
+const smp = @import("smp.zig"); // milestone twenty-eight (claim 6438): SMP secondary core bringup and IPI
 
 // Road Pops (claim 1574) framebuffer-text target: G2's text layer through
 // the tee's injectable Target. The text layer is a fixed BSS singleton, so
@@ -1008,6 +1009,8 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
     _ = scheduler.init();
     _ = scheduler.register_worker(@intFromPtr(&worker_entry));
     _ = scheduler.register_user(@intFromPtr(&userspace.entry), base);
+    smp.init();
+    smp.boot_secondary_cores();
     scheduler.start();
     shell.boot_and_park(&mon, m15.rx_wired());
     // No return after takeover. WFE is a terminal state, not a firmware call.
@@ -1724,9 +1727,15 @@ fn irq_dispatch() void {
     const intid = gic.ack();
     if (gic.is_spurious(intid)) return;
     gic.note_irq(intid);
-    if (timer.is_ppi(intid)) {
-        timer.handle();
-        scheduler.tick();
+    if (intid < 16) {
+        smp.handle_sgi(intid);
+    } else if (timer.is_ppi(intid)) {
+        if (smp.core_id() == 0) {
+            timer.handle();
+            scheduler.tick();
+        } else {
+            timer.arm();
+        }
     } else {
         virtio_custom.note_irq(intid);
     }
