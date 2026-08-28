@@ -83,3 +83,22 @@ Verification evidence (all under `artifacts/`, this branch):
   (10 713 728 / 11 534 336 B), swift build (debug + release).
 
 Claim flipped ✅. Branch ready for review — STOP before PR (owner gate).
+
+## 2026-08-29 — adversarial gate passed (CLEAN); rebased on post-SMP main
+
+- Adversarial review (peer agent + owner-executed closure): 2 minors, 2 nits,
+  0 blockers — all amended in `3c88f70` (assertion-count docs 23→24; run A's
+  expect rekeyed on the drained report line; exit statuses documented in
+  PING.BIN -h and the fetch header). Record:
+  ~/org/ops/reviews/dme-2026-08-28/adversarial-dipshitos-8852.md (fleet-side).
+- M28-SMP (PR #611) merged to main mid-gate → rebased 3a89648 → ba9c50a
+  (no conflicts; zero kernel files in the branch, userland-only invariant
+  intact). Re-verified at the rebased HEAD `58acf52`, clean tree: class A
+  green (fmt, unit tests incl. smp, transcript, image, context,
+  coordination ×2, bss-budget 10 843 776 B) and class B green
+  (live-net-offline PASS 24/24; n1-ping, fetch, netstat regressions PASS).
+- Consumer sweep: no other gate execs PING.BIN/FETCH.BIN without --net —
+  no existing assertion can see the new fast-exit path.
+- The transient connect race observed during gate development is filed
+  upstream as issue #613 (not this branch's defect; preflight verdict was
+  .ready in that run).
