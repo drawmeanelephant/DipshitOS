@@ -86,7 +86,7 @@ set +e
     --serial "$RUN_DIR/vm-serial.log" \
     --script "$RUN_DIR/script-1.txt" \
     --script2 "$RUN_DIR/script-2.txt" --script2-after 'offline — no IP address' \
-    --script-expect $'echo offline-ok' --timeout 90 \
+    --script-expect $'FETCH.BIN exited status=3' --timeout 90 \
     > "$(art live-net-offline-a-run.txt)" 2>&1
 RC_A=$?
 set -e

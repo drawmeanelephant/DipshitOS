@@ -185,6 +185,8 @@ fn print_help() void {
         "usage: exec PING.BIN [-c count] <a.b.c.d>\n" ++
         "       exec PING.BIN -h   show this help\n" ++
         "  -c count  number of pings, 1..100 (default 5)\n" ++
+        "exit statuses: 0 ok, 1 usage, 2 offline (no IP — net ip/net dhcp),\n" ++
+        "               3 no route (net arp <a.b.c.d> first)\n" ++
         "example: exec PING.BIN -c 5 10.0.0.2\n");
 }
 

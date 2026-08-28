@@ -2,7 +2,9 @@
 //!
 //! Connects over TCP (slot 30), transmits HTTP/1.0 GET request (slot 31),
 //! streams response headers and body to the console (slot 32 + slot 1),
-//! cleanly tears down the connection (slot 33), and exits status 42 (slot 3).
+//! cleanly tears down the connection (slot 33), and exits status 42 (slot 3)
+//! on success — or 3 (offline, no IP) / 4 (no route to 10.0.0.2) from the
+//! M26 N13/N14 preflight, 1/2 on mid-session failures.
 //!
 //! M26 N3 (issue #401): the terminal display now separates the response
 //! into a "--- response headers ---" section (buffered through the bare
