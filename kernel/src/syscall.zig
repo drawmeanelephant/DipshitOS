@@ -71,6 +71,7 @@ const file_table = @import("file_table.zig"); // Milestone 10 (claim 3570): user
 const esp_exec = @import("exec.zig"); // Claim 6359 (ADR 0007 slot 28): the EL0 exec seam — reuse the EL1h loader
 const esp = @import("esp.zig"); // Claim 6359: the ESP name bound for the path check
 const tcp = @import("tcp.zig"); // Milestone 12 (claim 7483): TCP client seam
+const timer = @import("timer.zig"); // Hardware cycle counter + ticks for TCP timeouts
 const csprng = @import("csprng.zig"); // ISN generation for TCP connect
 const clipboard = @import("clipboard.zig"); // Milestone 14 (claim 0169): the shared kernel clipboard
 const pipe = @import("pipe.zig"); // M19 P1 (issue #290): the bounded pipe buffer behind slots 56/57
@@ -1830,8 +1831,12 @@ fn handle_tcp_connect(args: Args, _: *exceptions.VectorFrame) u64 {
         },
     }
 
-    var iterations: usize = 0;
-    while (tcp.state == .syn_sent and iterations < 1000000) : (iterations += 1) {
+    const start_pct = timer.cntpct();
+    const start_ticks = timer.ticks;
+    tcp.now_ticks = start_ticks;
+    var test_iterations: usize = 0;
+
+    while (tcp.state == .syn_sent) {
         virtio_net.net_rx_drain();
         if (tcp.ack_pending) {
             var ack_len: usize = 0;
@@ -1841,14 +1846,47 @@ fn handle_tcp_connect(args: Args, _: *exceptions.VectorFrame) u64 {
             }
         }
         if (tcp.state == .established) return 0;
-        if (tcp.state == .closed) return error_result(.einval);
+        if (tcp.state == .closed) {
+            tcp.release_conn();
+            return error_result(.einval);
+        }
+
+        if (timer.freq != 0) {
+            const now_pct = timer.cntpct();
+            const elapsed_s = (now_pct -| start_pct) / timer.freq;
+            tcp.now_ticks = start_ticks + elapsed_s;
+        }
+
+        switch (tcp.poll_rto()) {
+            .none => {},
+            .retransmit => {
+                var retx_len: usize = 0;
+                _ = virtio_net.net_tcp_send(tcp.msg[0..tcp.msg_len], &retx_len);
+            },
+            .abort => return error_result(.einval),
+        }
+
         if (tcp.connect_timed_out()) {
             tcp.abort_timeout();
             return error_result(.einval);
         }
+
+        if (timer.freq == 0 or comptime builtin.is_test) {
+            test_iterations += 1;
+            if (test_iterations > 1000) {
+                tcp.abort_timeout();
+                return error_result(.einval);
+            }
+        }
+
+        if (comptime builtin.cpu.arch == .aarch64) {
+            var spins: usize = 0;
+            while (spins < 1000) : (spins += 1) asm volatile ("nop");
+        }
     }
 
     if (tcp.state == .established) return 0;
+    tcp.release_conn();
     return error_result(.einval);
 }
 
@@ -3652,6 +3690,70 @@ test "syscall: tcp connect, send, recv, close slots 30..33 and sys_kill slot 29"
 
     // Slot 33: sys_tcp_close when idle returns 0
     try std.testing.expectEqual(@as(u64, 0), dispatch(sys_tcp_close, .{ 0, 0, 0, 0, 0, 0 }, &frame));
+}
+
+fn test_net_read8(_: u32) u8 {
+    return 0;
+}
+fn test_net_read16(_: u32) u16 {
+    return 0;
+}
+fn test_net_read32(_: u32) u32 {
+    return 0;
+}
+fn test_net_write8(_: u32, _: u8) void {}
+fn test_net_write16(_: u32, _: u16) void {}
+fn test_net_write32(_: u32, _: u32) void {}
+fn test_net_notify(q: u16) void {
+    _ = q;
+    virtio_net.net_dev.tx_used.idx = virtio_net.net_dev.tx_avail.idx;
+}
+fn test_net_to_phys(va: usize) u64 {
+    return va;
+}
+fn test_net_clean(_: usize, _: usize) void {}
+fn test_net_invalidate(_: usize, _: usize) void {}
+
+fn test_net_ops() virtio_net.Ops {
+    return .{
+        .dev_read32 = test_net_read32,
+        .cfg_read8 = test_net_read8,
+        .cfg_read16 = test_net_read16,
+        .cfg_read32 = test_net_read32,
+        .cfg_write8 = test_net_write8,
+        .cfg_write16 = test_net_write16,
+        .cfg_write32 = test_net_write32,
+        .notify = test_net_notify,
+        .to_phys = test_net_to_phys,
+        .clean = test_net_clean,
+        .invalidate = test_net_invalidate,
+    };
+}
+
+test "syscall: sys_tcp_connect timeout aborts cleanly and increments timed_out" {
+    userspace.init();
+    init(test_writer);
+    var frame = fresh_frame();
+
+    const saved_ops = virtio_net.net_ops;
+    virtio_net.net_ops = test_net_ops();
+    defer virtio_net.net_ops = saved_ops;
+
+    virtio_net.net_ready = true;
+    virtio_net.arp.own_ip = .{ 10, 0, 0, 1 };
+    virtio_net.arp.upsert(.{ 10, 0, 0, 2 }, .{ 0x02, 0x00, 0x00, 0x00, 0x00, 0x02 });
+    tcp.reset();
+    const initial_timeouts = tcp.timed_out;
+
+    // Connect to peer that never responds in test mode
+    const rc = dispatch(sys_tcp_connect, .{ 0x0a000002, 80, 0, 0, 0, 0 }, &frame);
+    try std.testing.expectEqual(error_result(.einval), rc);
+    try std.testing.expectEqual(tcp.State.idle, tcp.state);
+    try std.testing.expectEqual(initial_timeouts + 1, tcp.timed_out);
+
+    tcp.reset();
+    virtio_net.net_ready = false;
+    virtio_net.arp.own_ip = .{ 0, 0, 0, 0 };
 }
 
 test "syscall: TCP connection is process-owned — non-owner send/recv/close/connect refused EACCES (claim 4482)" {
