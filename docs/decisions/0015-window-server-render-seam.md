@@ -1,0 +1,155 @@
+# ADR 0015: Window-server render seam (userland window manager migration) (proposed)
+
+Status: **PROPOSED — needs ack** · Date: 2026-08-28 · Milestone: thirty-two+ (planned)
+
+> **Planning-only until accepted.** This ADR defines the architectural seam a
+> userland window-manager server rides on. Slot 65 and event kind 18 below are
+> **reservations**: each becomes frozen in the live `docs/decisions/0007-syscall-abi.md`
+> table one row at a time as individual M32 claims land, citing this ADR for the
+> reservation. Until a claim lands, slot 65 returns `-ENOSYS` (`-4`) and kind 18
+> is not delivered.
+
+## Context
+
+The desktop composition + window-management *policy* today lives entirely in the
+kernel, in `kernel/src/driving_award.zig` (~4,740 lines): window registry,
+z-order, hit-testing, chrome (title bars, borders, focus ring, close/minimize/
+pin buttons), geometry (move/resize/tile/snap/workspaces/minimize/maximize/
+fullscreen/always-on-top), and the desktop chrome (notification center, dock,
+tray, alt-tab, tooltips, modal/transient dialogs, about/preview). Three couplings
+are too deep:
+
+1. **Policy in the privileged component.** Every desktop behavior is a kernel
+   change — high blast radius, no isolation, no hot-reload, cannot grow without
+   a new milestone.
+2. **Compositing rides the shell idle loop.** `shell.zig:3425` calls
+   `driving_award.drain(...)`. Present pacing, animation, and click handling all
+   inherit the shell's idle cadence (the reason pointer gates pace clicks at
+   ~2.5 s).
+3. **Apps touch the desktop only through syscalls.** No app↔WM↔desktop
+   message protocol; the toolkit (`user/src/lib/ui.zig`, `LIBUI.SO`) issues
+   per-rect fill syscalls (one `win_fill` per 1×1 glyph pixel).
+
+The downside is not a missing feature — it is a missing *boundary*. This ADR
+moves desktop policy out of the kernel and into a userland **window-manager
+server process**, leaving the kernel a thin **render + input + surface server**.
+
+## Enabling seams that already exist
+
+- **Per-process event queues** (`events.zig`): input already flows as kinds
+  (KEY_*, MOUSE_MOVE/DOWN/UP, WIN_FOCUS/BLUR, WIN_RESIZE, DRAG_*, WIN_UNSAVED)
+  to owning processes.
+- **Cross-process IPC** slots 5/6 (`sys_ipc_send`/`sys_ipc_recv`, bounded
+  per-process mailboxes) — the transport for an app↔WM protocol.
+- **Process lifecycle**: `sys_exec` (28), `sys_kill` (29), `sys_wait` (8),
+  anonymous mmap (63/64), dynamic linking (M30/M31) — a long-lived EL0 server
+  process is a supported shape.
+- **Thin GPU interface**: `virtio_gpu` is transfer+flush of a 3.52 MiB BSS
+  scanout; all the *weight* is policy stacked on `driving_award`.
+
+## Decisions
+
+### D1. Target architecture — seam A (render-server)
+
+The kernel keeps **surfaces + blit + input fan-out**; a userland **WM server
+process** owns all *policy*:
+
+```
++---------------+   IPC (slots 5/6)   +------------------+   sys_wmctl (65)   +----------------------+
+|  Apps (EL0)   | <-----------------> |  WM server (EL0) | <----------------> | kernel: render server |
+| talk win-msgs  |   win-open/close/   |   registry, z-ish,|   submit window   | surfaces + blit +     |
+| to server       |   raise/move/frame  |   chrome, hittest,|   list/chrome,    | input fan-out; hands  |
++---------------+                    |   geometry, nodes |   request-present  | event 18 (composite   |
+                                     +------------------+                    | tick) to the WM        |
+                                      * policy lives here *                  +----------------------+
+```
+
+- The kernel keeps **kernel-owned per-window surfaces and the blitter**, but
+  exercises them **only on the WM server's instruction** via a single control
+  syscall (D2) — it makes no policy decision of its own.
+- The WM server drives present pacing itself (D3) instead of the shell idle.
+- Apps keep rendering into their own kernel-owned surface slots for now; the
+  toolkit's *policy* queries (open/raise/move/request-frame/config) re-point to
+  the WM server over IPC, not to syscall slots.
+
+### D2. Syscall reservation — slot 65 `sys_wmctl`
+
+`0x41 (65)` — first free slot in the 128-wide table (highest used today: 64,
+`sys_munmap`).
+
+| Slot | Name | Signature | One-line semantics |
+|:---:|:---|:---|:---|
+| 65 | `sys_wmctl` | `wmctl(cmd, a0, a1, a2, ptr, len) -> i64` | The **WM server's** exclusive control surface over the kernel render server. Subcommands (a design sketch; each implementing claim freezes its exact encoding): `REGISTER` (this process becomes the active compositor — ownership of composite pacing moves off the shell idle; refused if another is registered), `SET_WINDOW` (submit one window's z-order rank, rect, chrome kind/colors, visibility, workspace — the kernel blits that surface per this geometry), `REQUEST_PRESENT` (ask the kernel to transfer+flush now). Calls from any process other than the registered WM return `EPERM`; no WM registered → `ENOSYS`. |
+
+The moving policy (D1's right-hand side) is **not** part of this syscall — it
+is WM-server-internal and exposed to apps only via IPC.
+
+### D3. Event-kind reservation — kind 18 `COMPOSITE_TICK`
+
+Kind 18 is the present/composite cadence the kernel delivers to the **registered
+WM server** (arg0 = present sequence, arg1 = reserved). The WM server uses it to
+drive its own composite loop, releasing the shell idle dependency. Kind 17
+(`WIN_UNSAVED`) remains the highest live kind; 18 reserves the first free value.
+
+### D4. Shim-and-slim migration (extract, don't rewrite)
+
+- **Shim phase (frozen ABI stays the shim):** slots 12–20 (`sys_win_*`) and the
+  existing kernel `driving_award` compositor remain fully functional and fully
+  gated. Every M18–M31 gate stays green. The userland WM server (new EL0
+  process under `user/src/`) grows beside it, reusing `driving_award`'s *pure*
+  geometry/logic as userland code so the two never drift behaviorally.
+- **Prove parity** through the shim: the WM server commands the kernel render
+  server (D2) to reproduce what the kernel WM did — same geometry, chrome,
+  z-order, focus rules.
+- **Slim the kernel:** once parity is observed behind the shim, the policy code
+  drains out of `driving_award.zig`, which shrinks to "surfaces + blit + input
+  fan-out + the D2/D3 registers." Slots 12–20 remain frozen (back-compat, and
+  used by the shim path until removed); individual claims delete one policy
+  block at a time, each behind its gate.
+- **Rewire the toolkit** (`ui.zig`/`LIBUI.SO`) on the surface seam (batched
+  spans, not per-pixel fills) as the desktop-wide performance side effect.
+
+### D5. Deferred option — seam B (full pixel ownership)
+
+The deeper end-state — apps render into their own mmap'd memory and the WM
+composites + presents one final buffer — is **not** chosen for the first pass.
+It requires **cross-process shared anonymous mmap** (shared surface between two
+EL0 address spaces), a genuinely new MMU fundamental. It is deferred; seam B
+can be layered on top of the D1 render-server boundary without re-architecting
+it (the render server already separates policy from blit).
+
+## What this is not
+
+- Not POSIX, libc, `errno`, or a compatibility ABI. The WM protocol uses the
+  Mailbox IPC (slots 5/6), not signals or sockets.
+- Not a kernel rewrite. Seam A keeps the blitter; only *policy* moves.
+- Not a uaccess change, scheduler change, or MMU change (in this pass).
+- Not a commit. Each M32 claim amends ADR 0007 (slot 65) or the event table
+  (kind 18), citing **this** ADR.
+
+## Consequences
+
+- Desktop policy becomes a **hot-replaceable userland component** with its own
+  process boundary, own memory, own fault tombstone — the kernel no longer
+  faults on find-the-typo-in-my-focus-rule.
+- The shell idle loop no longer owns compositing; the WM server does (D3).
+- Apps grow a real app↔WM message protocol instead of a syscall-drawn surface.
+- Existing behavior is preserved the whole way through the shim (D4) — no
+  capability regression at any intermediate commit.
+
+## Amendment log
+
+Not yet accepted. Once M32 closes, the first implementing claim SHOULD mark this
+ADR `accepted` and append its implementing claim.
+
+## Open issues (left to implementing claims)
+
+- Exact `sys_wmctl` subcommand encoding (opcode constants, arg layout, return
+  codes) and the `SET_WINDOW` chrome descriptor. Freeze in the slot-65 claim.
+- Kernel BSS for the WM registry (the D2 register + composite-tick sequence);
+  the scanout fb (3.52 MiB) is untouched.
+- Whether mailboxes (8 × 64 B today) suffice for the app↔WM protocol or a larger
+  bounded message type is needed — the WM-server claim decides; prefer growing
+  the mailbox data-path constant over a new syscall.
+- Which `driving_award` policy block drains out of the kernel first (recommended:
+  chrome, being minimal and highly observable).

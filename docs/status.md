@@ -157,6 +157,26 @@ proof is class-B-headless via custom-virtio pointer injection (claim 9367,
 issue #151) and the synthesized-keyboard `events=0` report is fixed by the
 headless virtio input channel (claims 9588/0680, issue #179).
 
+**M32 is being scoped (planning only).** The target is the window-manager
+*boundary*, not features: today desktop policy is a ~4,740-line kernel
+component (`driving_award.zig`) composited from the shell idle loop, with apps
+touching it only through draw syscalls. The plan moves policy out into a
+userland **WM server** (seam A render-server), leaving the kernel a thin
+render + input + surface server, shim-and-slim so nothing regresses. Binding
+artifacts: ADR 0015 (slot 65 `sys_wmctl`, event kind 18 `COMPOSITE_TICK`), the
+card plan in `docs/march-m32-wm-migration.md` (claim 2852), and **GitHub
+milestone 16** (`M32 — Window manager server migration`) carrying the
+WMS1–WMS10 cards as issues **#621–#630**. All ten issue bodies are scoped
+(2026-08-28, claim 2852): per-card goal, in/out of scope, acceptance gate,
+risks and touched files; the work order is pinned in the march tracker's
+dependency-phases map (WMS1 contract → WMS2/WMS3 unlock → WMS4–WMS6
+drain-out → WMS7 protocol → WMS8/WMS9 payoff → WMS10 deferred).
+
+> https://github.com/drawmeanelephant/DipshitOS/milestone/16
+
+Full detail lives in that ADR and march tracker; this line is pointer-level
+only.
+
 ## Assumptions & gaps (checked against merged `main`)
 
 - **ADR 0004 console:** polled TX-only virtio-pci (DID 0x1043, BAR 0x100010000, post-MMU TX fixed claim 1517, RX claim 6684).

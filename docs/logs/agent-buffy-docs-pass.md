@@ -37,3 +37,69 @@ kernel sources, build manifest, and march trackers.
   build (dynamic ELF pipeline note), drivers (custom-virtio row, balloon
   note corrected).
 - No kernel/userland/host behavior changes — docs only. ✅ done.
+
+## 2026-08-28 — M32 WM-server migration planning (docs only; claim 2852)
+
+- ADR 0015 (proposed): route desktop *policy* out of the kernel compositor into
+  a userland WM server; kernel becomes a thin render + input + surface server
+  (seam A). Reserves slot 65 `sys_wmctl` (register/set-window/request-present,
+  WM-exclusive) + event kind 18 `COMPOSITE_TICK` (WM drives pacing, off the
+  shell idle). Shim-and-slim so M18–M31 gates never regress; seam B (full pixel
+  ownership via cross-process shared mmap) explicitly deferred.
+- docs/march-m32-wm-migration.md: WMS1–WMS10 card plan (ADR/slot, render-server
+  register, WM server scaffold, chrome→geometry→desktop-chrome drain-out,
+  app↔WM IPC, kernel slimming, surface-seam perf, deferred seam B).
+- docs/status.md: "What comes next" M32-scope pointer line (claim 2852).
+- No kernel/userland/host behavior changes — planning docs only.
+
+## 2026-08-28 — M32 GitHub milestone created (issues #621-#630)
+
+- Created GitHub milestone 16 "M32 — Window manager server migration"
+  (https://github.com/drawmeanelephant/DipshitOS/milestone/16).
+- Filed 10 open issues against it, one per WMS card: #621 WMS1 (ADR 0015 +
+  slot 65), #622 WMS2 (render-server register), #623 WMS3 (WM server scaffold),
+  #624 WMS4 (chrome out), #625 WMS5 (geometry out), #626 WMS6 (desktop chrome
+  out), #627 WMS7 (app↔WM IPC), #628 WMS8 (slim kernel), #629 WMS9 (surface-seam
+  perf), #630 WMS10 (deferred seam B). All bodies cite ADR 0015 /
+  docs/march-m32-wm-migration.md.
+- docs/status.md milestone-16 pointer + issue range (claim 2852).
+- Docs-only coordination change; no code.
+
+## 2026-08-28 — M32 issue bodies scoped (#621–#630, milestone 16)
+
+- Rewrote all ten issue bodies from one-line sketches into scoped cards, one
+  fixed template each: Goal / Why this order (depends + blocks) / In scope
+  (checkboxes) / Out of scope / Acceptance (gate) / Risks / Touches. Drafted
+  under `artifacts/m32-issue-bodies/621..630.md` (evidence), then pushed with
+  `gh issue edit` (authenticated as the repo owner).
+- Scoping additions beyond the original draft (marked per-issue as "new — not
+  in the draft"):
+  - #622 (WMS2): WM-death teardown — kernel unregisters a dead WM and pacing
+    falls back to the shim; present-sequence counter as the parity cards'
+    observability primitive; new gate `verify-live-wmctl-register.sh`.
+  - #623 (WMS3): bootstrap decision (who execs WND.BIN; default VM stays
+    shim-only so all gates are non-interference green); hung-WM watchdog;
+    single-source pure-logic extraction mechanism decision.
+  - #625 (WMS5): input-seam handover scoped — the WM hit-tests and decides
+    focus/drag; the kernel only fans the raw stream out (today the kernel
+    does it: `driving_award.zig:2328`, `input.zig:384`); pointer-pacing
+    latency must be measured against the ~2.5 s shell-idle cadence.
+  - #627 (WMS7): mailbox-size decision grounded in the real bound (mailbox is
+    8 slots × 64 B, `mailbox.zig`); prefer growing the constant over a new
+    syscall; sync-shaped toolkit API over async transport decided explicitly.
+  - #629 (WMS9): prior-art correction — slot 46 `sys_win_fill_batch` already
+    exists (issue #205); measure it first, extend its payload instead of
+    adding a slot; pixel-identical output is the bar.
+  - #630 (WMS10): deferred card turned into a scoping seed (shared-anon mmap
+    requirements, damage tracking, capability/security ADR) so the post-M32
+    end-state is written down but fenced off.
+- docs/march-m32-wm-migration.md: table gains Phase/Depends columns + issue
+  links; new "Dependency phases" diagram (WMS1 contract → WMS2/WMS3 unlock →
+  WMS4–WMS6 drain-out → WMS7 protocol → WMS8/WMS9 payoff → WMS10 deferred)
+  with the hard edges called out; WMS9 row corrected for slot 46; Notes 2–6
+  updated (zero-regression per drained feature, ABI budget at 66, robustness
+  properties, verification-first ordering).
+- docs/status.md M32 paragraph: pointer to the scoped bodies + order.
+- docs/claims/2852-wm-server-migration.md: scoping addendum section.
+- Docs-only change (issues + planning docs); no kernel/userland behavior
+  change. Claim 2852 stays 🔄 until the milestone-scoping branch merges.
