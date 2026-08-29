@@ -57,6 +57,7 @@ graphics / input
   screenshot  capture the current framebuffer (1280x720) and save as BMP to disk (G27)
   text        framebuffer text: text region, cursor, scrollback ('text put <string...>' renders + flushes to the scanout; 'text clear' clears; 'text putraw' skips the trailing newline; 'text fontdebug [on|off]' missing-glyph stats)
   wm          M32 WMS2 render-server register: the registered WM server pid, the present-sequence counter, presents, and COMPOSITE_TICK count ('wm none' means the shell idle shim is compositing)
+  wnd         M32 WMS3 WM server: 'wnd' reports the registered WM server (pid, present seq/count, tick count; 'wnd: none' = shell-shim compositing); 'wnd start' launches the long-lived EL0 WND.BIN server (infrastructure — not in APPS.TXT; the default VM stays shim-only)
   usb         XHCI host controller: `usb` transport report, `usb devices` enumerated HID devices, `usb report` last HID report
   dui         Driving Award window manager: registry (with owner pids), z-order, focus, hit-testing ('dui focus <n>' focuses; 'dui raise <n>' raises; 'dui lower <n>' lowers to back; 'dui move <n> <x> <y>' moves a user window; 'dui close <n>' releases a user window; 'dui list <pid>' filters by owner; 'dui hit <x> <y>' hit-tests; 'dui cycle' cycles focus like Alt+Tab; 'dui tile <n>' toggles a user window floating/tiled (M21 W1); 'dui master' swaps master/detail (M21 W2))
 system
