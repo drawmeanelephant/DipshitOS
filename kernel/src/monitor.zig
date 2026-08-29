@@ -285,7 +285,7 @@ pub const Command = struct {
 /// grows it 54 -> 55 (`sym`). Milestone twenty-two D5 (issue #328)
 /// grows it 55 -> 56 (`strace`). Milestone twenty-two D6 (issue #329)
 /// grows it 56 -> 57 (`ps`).
-pub const registry_count: usize = 70; // 51 + sh/calc + `font` (M20 U1) + sym/strace/ps (M22 D3/D5/D6) + `type` (M19 P1) + `mktemp` (M19 P16) + stat/find/dmesg/time/which/inventory (M22 D8/D12/D13/D16) + du (M25 F4) + screenshot/shortcuts (M27 G27/G29) + smp (M28) + `wm` (M32 WMS2, issue #622)
+pub const registry_count: usize = 71; // 51 + sh/calc + `font` (M20 U1) + sym/strace/ps (M22 D3/D5/D6) + `type` (M19 P1) + `mktemp` (M19 P16) + stat/find/dmesg/time/which/inventory (M22 D8/D12/D13/D16) + du (M25 F4) + screenshot/shortcuts (M27 G27/G29) + smp (M28) + `wm` (M32 WMS2, issue #622) + `wnd` (M32 WMS3, issue #623)
 
 /// `sym <file>` reads at most this many bytes for on-disk symtab inspection
 /// (M22 D3). ELF symbol tables live near the file tail; 64 KiB covers every
@@ -356,6 +356,7 @@ fn ensure_registry() []const Command {
             .{ .name = "sym", .help = "crash-report symbol table: 'sym' lists symbols loaded from the last ELF exec; 'sym <file>' parses an ELF's symtab from disk", .usage = "sym [<file>]", .category = .tasks_processes, .max_args = 1, .handler = cmd_sym },
             .{ .name = "syscalls", .help = "numbered syscall table and counters", .usage = "syscalls", .category = .tasks_processes, .handler = cmd_syscalls },
             .{ .name = "wm", .help = "M32 WMS2 render-server register: the registered WM server pid, the present-sequence counter, presents, and COMPOSITE_TICK count ('wm none' means the shell idle shim is compositing)", .usage = "wm", .category = .graphics_input, .handler = cmd_wm },
+            .{ .name = "wnd", .help = "M32 WMS3 WM server: 'wnd' reports the registered WM server (pid, present seq/count, tick count; 'wnd: none' = shell-shim compositing); 'wnd start' launches the long-lived EL0 WND.BIN server (infrastructure — not in APPS.TXT; the default VM stays shim-only)", .usage = "wnd [start]", .category = .graphics_input, .max_args = 1, .handler = cmd_wnd },
             .{ .name = "tasks", .help = "tick-driven task scheduler status", .usage = "tasks", .category = .tasks_processes, .handler = cmd_tasks },
             .{ .name = "smp", .help = "multiprocessor topology, online CPU cores, and per-core task state", .usage = "smp", .category = .tasks_processes, .handler = cmd_smp },
             .{ .name = "type", .help = "echo stdin (the pipe source) to stdout — the right half of `a | type`", .usage = "type", .category = .system, .handler = cmd_type },
@@ -6399,6 +6400,37 @@ fn cmd_wm(m: *Monitor, args: []const []const u8) ExecError {
         m.console.puts("\n");
     } else {
         m.console.print_line("wm: none (shim compositing)");
+    }
+    return .none;
+}
+
+/// M32 WMS3 (issue #623): the WM-server command. `wnd start` execs the
+/// long-lived EL0 WND.BIN server (the DEFINED bootstrap — infrastructure,
+/// not in APPS.TXT; the default VM stays shim-only because nothing
+/// auto-starts it). Bare `wnd` reports the same seated-server state as
+/// `wm` (registered pid + present/tick counters; `wnd: none` when the
+/// shell idle shim is still compositing). Because WND.BIN never exits, the
+/// crash story uses `kill <pid>` (claim 7786) + WMS2 exit-path teardown
+/// (claim 0622) + a fresh `wnd start` — re-registering into the freed seat.
+fn cmd_wnd(m: *Monitor, args: []const []const u8) ExecError {
+    if (args.len >= 1 and std.mem.eql(u8, args[0], "start")) {
+        // The bootstrap: launch the long-lived WM server. Reuse the exec
+        // seam (WND.BIN is on the ESP); it becomes process WND.BIN.
+        return cmd_exec(m, &.{"WND.BIN"});
+    }
+    const info = wm_server.info();
+    if (info.pid) |pid| {
+        m.console.puts("wnd: registered pid=");
+        m.console.print_u64(pid);
+        m.console.puts(" present_seq=");
+        m.console.print_u64(info.present_seq);
+        m.console.puts(" presents=");
+        m.console.print_u64(info.present_count);
+        m.console.puts(" ticks=");
+        m.console.print_u64(info.tick_count);
+        m.console.puts("\n");
+    } else {
+        m.console.print_line("wnd: none (shim compositing)");
     }
     return .none;
 }

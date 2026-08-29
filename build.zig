@@ -1366,6 +1366,39 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_wndstub.step);
 
     // ------------------------------------------------------------------
+    // Guest: forty-eighth ESP user program (M32 WMS3, issue #623)
+    // WND.BIN — the long-lived EL0 WM server: REGISTERs (slot 65), then
+    // loops on sys_wait_event servicing kind-18 COMPOSITE_TICK and
+    // REQUEST_PRESENTs at its own cadence (pacing the desktop while the
+    // shell idle drain is gated off by WMS2). Never exits. It is NOT in
+    // APPS.TXT (infrastructure, launched via the `wnd start` bootstrap);
+    // the default VM stays shim-only.
+    // ------------------------------------------------------------------
+    const wnd_mod = b.createModule(.{
+        .root_source_file = b.path("user/src/wnd.zig"),
+        .target = kernel_target,
+        .optimize = .ReleaseSmall,
+    });
+    // M32 WMS3 drift guard: WND.BIN compiles the SAME pure rules source as
+    // the kernel shim (kernel/src/wnd_core.zig). It lives in a different
+    // module tree, so expose it as an anonymous import shared by both.
+    wnd_mod.addAnonymousImport("wnd_core", .{ .root_source_file = b.path("kernel/src/wnd_core.zig") });
+    const wnd_prog = b.addExecutable(.{
+        .name = "user-wnd",
+        .root_module = wnd_mod,
+    });
+    wnd_prog.linker_script = b.path("user/linker.ld");
+    const wnd_step = b.step("wnd", "Build the forty-eighth ESP user program (zig-out/bin/WND.BIN)");
+    const wnd_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    wnd_elf2bin.addFileArg(wnd_prog.getEmittedBin());
+    const wnd_bin = wnd_elf2bin.addOutputFileArg("WND.BIN");
+    wnd_elf2bin.has_side_effects = true;
+    wnd_elf2bin.stdio = .inherit;
+    wnd_step.dependOn(&wnd_elf2bin.step);
+    const install_wnd = b.addInstallFileWithDir(wnd_bin, .bin, "WND.BIN");
+    b.getInstallStep().dependOn(&install_wnd.step);
+
+    // ------------------------------------------------------------------
     // Top-level steps. System-command steps are marked as having side
     // effects (and inherit stdio) so they always execute instead of being
     // skipped by the build cache. (No QEMU path: this project targets Apple
@@ -1424,6 +1457,7 @@ pub fn build(b: *std.Build) void {
     image.addFileArg(httpd_bin); // ... [HTTPD.BIN] (Claim 0750: forty-fifth user program, HTTP web server)
     image.addFileArg(vmtest_bin); // ... [VMTEST.BIN] (Milestone 29: forty-sixth user program, VM depth test)
     image.addFileArg(wndstub_bin); // ... [WNDSTUB.BIN] (M32 WMS2, issue #622: forty-seventh user program, the WM-server registrant stub)
+    image.addFileArg(wnd_bin); // ... [WND.BIN] (M32 WMS3, issue #623: forty-eighth user program, the long-lived EL0 WM server)
     image.has_side_effects = true;
     image.stdio = .inherit;
     image_step.dependOn(&image.step);
