@@ -1,0 +1,242 @@
+//! DipshitOS M32 WMS2 render-server register (issue #622) — the kernel half
+//! of the ADR 0015 seam-A render-server boundary, implemented BESIDE the
+//! unchanged shim (`kernel/src/driving_award.zig`).
+//!
+//! This module owns the render-server seam's minimal observable state:
+//! the single WM registrant (one seat), the present-sequence counter (the
+//! parity-cards' observability primitive), and the kind-18 `COMPOSITE_TICK`
+//! tick-delivery seam. It deliberately holds NO desktop policy — that stays
+//! in the shim until the WM-server drain-out cards (WMS4–WMS6); this card
+//! only puts the register the future userland WM will drive in place.
+//!
+//! Zero-regression contract (the WMS2 binding rule): when no WM is
+//! registered nothing changes — the shell idle `drain` keeps compositing
+//! exactly as today and every pre-M32 gate stays byte-identical. Only after
+//! `REGISTER` does composite pacing move to the tick path (the shell guards
+//! its idle `drain` call on `registered()`, one flag check on the hot path).
+//!
+//! Routing restriction (ADR 0009 D2): kind 18 `COMPOSITE_TICK` is the FIRST
+//! routing-restricted kernel event kind — delivered EXCLUSIVELY to the
+//! registered WM's process queue via `events.push`, never generated when no
+//! WM is registered.
+//!
+//! No allocation, no libc, no POSIX — pure kernel BSS + the existing
+//! `events` / `virtio_gpu` seams (both leaf modules, no import cycle).
+//! WM-death teardown mirrors the `close_owner(pid)` window-teardown semantic
+//! in the scheduler exit path: on WM process exit the kernel unregisters it
+//! and pacing automatically falls back to the shell idle shim.
+
+const std = @import("std");
+const builtin = @import("builtin");
+const events = @import("events.zig");
+const process = @import("process.zig"); // the registry row bound (max_processes) — used only by the host tests
+const virtio_gpu = @import("virtio_gpu.zig");
+
+/// Slot-65 subcommand encoding — frozen by WMS1 (claim 1484) in the ADR 0007
+/// amendment. Do NOT renumber these; WMS4+ implement `SET_WINDOW` against
+/// the same opcode.
+pub const wmctl_register: u64 = 1;
+pub const wmctl_set_window: u64 = 2;
+pub const wmctl_request_present: u64 = 3;
+
+/// The single registered WM server process id; null = no WM registered
+/// (shim mode, the default — every pre-M32 gate runs in this state).
+var wm_pid: ?usize = null;
+/// Monotonic present sequence (arg0 of every COMPOSITE_TICK), wraps at 2³².
+/// Advanced only by REQUEST_PRESENT — a stalled WM shows a frozen sequence,
+/// so parity gates can detect that it stopped presenting.
+var present_seq: u32 = 0;
+/// Total REQUEST_PRESENT calls accepted (the observable present counter).
+var present_count: u64 = 0;
+/// Total COMPOSITE_TICK events delivered to the registered WM.
+var tick_count: u64 = 0;
+/// Set when the registered WM exits (teardown) — the shell idle loop drains
+/// this into the `wm: unregistered, shim resumed` report (the exit path is
+/// IRQ context and console-free, so the report is drained like the process
+/// exit reports, not printed inline).
+var fallback_pending: bool = false;
+
+/// Reset the seam (kernel boot + host-test setups).
+pub fn init() void {
+    wm_pid = null;
+    present_seq = 0;
+    present_count = 0;
+    tick_count = 0;
+    fallback_pending = false;
+}
+
+/// True when a WM is registered (composite pacing has moved to the tick path).
+pub fn registered() bool {
+    return wm_pid != null;
+}
+
+/// The registered WM's process id, if any.
+pub fn registered_pid() ?usize {
+    return wm_pid;
+}
+
+/// Accept the registering process as the active compositor. One seat: a
+/// second registration while a WM is already registered is refused (the
+/// handler maps that to `EACCES` — seat taken). The gpu/unarmed check is
+/// the handler's (it needs the module-level error result); this is the pure
+/// state transition. Returns true on success.
+pub fn register(pid: usize) bool {
+    if (wm_pid != null) return false;
+    wm_pid = pid;
+    fallback_pending = false;
+    return true;
+}
+
+/// WM-death teardown: unregister `pid`. Returns true only when `pid` WAS the
+/// registrant (mirrors the `close_owner(caller)` window-teardown contract in
+/// the scheduler exit path, which calls this per exiting process) — a false
+/// return is a no-op for unrelated exits.
+pub fn unregister(pid: usize) bool {
+    if (wm_pid != pid) return false;
+    wm_pid = null;
+    fallback_pending = true;
+    return true;
+}
+
+/// Consolidate (drain-as-report): true ONCE after a teardown fallback, then
+/// false until the next unregister. Called by the shell idle loop to print
+/// `wm: unregistered, shim resumed` — the exit path itself (IRQ context,
+/// claim 9187) cannot print; this is the report-drain pattern shared with
+/// the process exit reports.
+pub fn take_fallback_report() bool {
+    if (!fallback_pending) return false;
+    fallback_pending = false;
+    return true;
+}
+
+/// Scheduler tick seam (the SAME host-testable tick seam `app_timers.on_tick`
+/// fires from — WMS1 frozen decision 3): while a WM is registered, deliver
+/// ONE `COMPOSITE_TICK` (kind 18) into the registrant's process event queue,
+/// arg0 = present sequence, arg1 = reserved (0). Routing restritriction:
+/// this is delivered ONLY to `wm_pid`. A no-op when no WM is registered
+/// (nothing changes in shim mode). `events.push` wakes a blocked
+/// `sys_wait_event` caller via the `on_event_pushed` hook.
+pub fn on_tick() void {
+    const pid = wm_pid orelse return;
+    tick_count +%= 1;
+    events.push(pid, .{
+        .kind = events.COMPOSITE_TICK,
+        .flags = 0,
+        .seq = 0,
+        .arg0 = present_seq,
+        .arg1 = 0,
+    });
+}
+
+/// REQUEST_PRESENT (cmd 3): transfer+flush the scanout now through the G1
+/// seam and advance the present-sequence counter (the parity-cards'
+/// observability primitive) + the present count. Returns false when no WM is
+/// registered (the handler refuses the caller EACCES BEFORE this). The
+/// transfer+flush is a no-op-safe attempt when the transport is unarmed; the
+/// counters reflect what the WM requested, which is the observable present.
+pub fn request_present() bool {
+    _ = wm_pid orelse return false;
+    present_seq +%= 1;
+    present_count +%= 1;
+    // The G1 transfer+flush is real-hardware work: exec_cmd runs `dc ivac`
+    // cache-maintenance asm, which is illegal at EL0 in host test binaries
+    // (and other tests in an aggregated binary may have armed the transport).
+    // Gate it the established way (the handle_mmap `!builtin.is_test`
+    // pattern): on a host test the counters still advance — the present was
+    // SCHEDULED, which is the observable contract — and the live gate runs
+    // the real transfer+flush on the kernel image.
+    if (!builtin.is_test) {
+        _ = virtio_gpu.gpu_transfer();
+        _ = virtio_gpu.gpu_flush();
+    }
+    return true;
+}
+
+/// Read-only snapshot for the monitor `wm` report row.
+pub const WmInfo = struct {
+    pid: ?usize,
+    present_seq: u32,
+    present_count: u64,
+    tick_count: u64,
+};
+
+pub fn info() WmInfo {
+    return .{
+        .pid = wm_pid,
+        .present_seq = present_seq,
+        .present_count = present_count,
+        .tick_count = tick_count,
+    };
+}
+
+// ---------------------------------------------------------------------------
+// Host tests (Class A) — the pure register/teardown/tick/present contracts
+// ---------------------------------------------------------------------------
+
+test "wm_server: register is one-seat and teardown falls back to the shim" {
+    init();
+    // No WM registered: shim mode.
+    try std.testing.expect(!registered());
+    try std.testing.expect(registered_pid() == null);
+
+    // First register wins; a second is refused (the handler maps it to EACCES).
+    try std.testing.expect(register(3));
+    try std.testing.expect(registered());
+    try std.testing.expectEqual(@as(?usize, 3), registered_pid());
+    try std.testing.expect(!register(5));
+
+    // Teardown unregisters the registrant; a non-owner exit is a no-op.
+    try std.testing.expect(!unregister(4));
+    try std.testing.expect(unregister(3));
+    try std.testing.expect(!registered());
+    try std.testing.expect(registered_pid() == null);
+
+    // The fallback report is drained exactly once after a teardown.
+    try std.testing.expect(take_fallback_report());
+    try std.testing.expect(!take_fallback_report());
+    // ... and re-registering clears the pending flag.
+    try std.testing.expect(register(7));
+    try std.testing.expect(!take_fallback_report());
+}
+
+test "wm_server: COMPOSITE_TICK is delivered only to the registered WM with the present sequence" {
+    events.init();
+    init();
+    events.on_event_pushed = null;
+
+    // No WM registered: on_tick is a no-op, nothing is generated.
+    on_tick();
+    var i: usize = 0;
+    while (i < process.max_processes) : (i += 1) {
+        try std.testing.expectEqual(@as(usize, 0), events.pending(i));
+    }
+
+    // Register pid 3; the next tick delivers kind 18 with arg0 = present seq.
+    try std.testing.expect(register(3));
+    on_tick();
+    on_tick();
+    try std.testing.expectEqual(@as(usize, 2), events.pending(3));
+    const ev = events.pop(3).?;
+    try std.testing.expectEqual(events.COMPOSITE_TICK, ev.kind);
+    try std.testing.expectEqual(@as(u32, present_seq), ev.arg0);
+    try std.testing.expectEqual(@as(u32, 0), ev.arg1);
+
+    // No other process's queue received a tick (the routing restriction).
+    var j: usize = 0;
+    while (j < process.max_processes) : (j += 1) {
+        if (j != 3) try std.testing.expectEqual(@as(usize, 0), events.pending(j));
+    }
+    try std.testing.expectEqual(@as(u64, 2), info().tick_count);
+}
+
+test "wm_server: REQUEST_PRESENT advances the present sequence and count" {
+    init();
+    try std.testing.expect(!request_present()); // no WM registered
+    try std.testing.expect(register(3));
+    try std.testing.expect(request_present());
+    try std.testing.expect(request_present());
+    const inf = info();
+    try std.testing.expectEqual(@as(?usize, 3), inf.pid);
+    try std.testing.expectEqual(@as(u32, 2), inf.present_seq);
+    try std.testing.expectEqual(@as(u64, 2), inf.present_count);
+}

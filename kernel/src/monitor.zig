@@ -47,6 +47,7 @@ const fbtext = @import("text.zig"); // milestone six card G2 (claim 3194): frame
 const xhci = @import("xhci.zig"); // milestone seven card I1 (claim 4272): the XHCI host-controller transport behind `usb`
 const input = @import("input.zig"); // milestone seven card I3 (claim 6050): the keyboard/pointer event FIFO behind `input`
 const driving_award = @import("driving_award.zig"); // milestone six card G5 (claim 1543): Driving Award, the window manager behind `dui`
+const wm_server = @import("wm_server.zig"); // M32 WMS2 (issue #622): the render-server register behind `wm`
 const settings = @import("settings.zig"); // milestone eight card U8 (claim 2649): persistent settings engine
 const tombstone = @import("tombstone.zig"); // Arc5 issue #243: crash tombstone engine
 const dns = @import("dns.zig"); // milestone twelve card N2 (claim 7566): DNS resolver
@@ -284,7 +285,7 @@ pub const Command = struct {
 /// grows it 54 -> 55 (`sym`). Milestone twenty-two D5 (issue #328)
 /// grows it 55 -> 56 (`strace`). Milestone twenty-two D6 (issue #329)
 /// grows it 56 -> 57 (`ps`).
-pub const registry_count: usize = 69; // 51 + sh/calc + `font` (M20 U1) + sym/strace/ps (M22 D3/D5/D6) + `type` (M19 P1) + `mktemp` (M19 P16) + stat/find/dmesg/time/which/inventory (M22 D8/D12/D13/D16) + du (M25 F4) + screenshot/shortcuts (M27 G27/G29) + smp (M28)
+pub const registry_count: usize = 70; // 51 + sh/calc + `font` (M20 U1) + sym/strace/ps (M22 D3/D5/D6) + `type` (M19 P1) + `mktemp` (M19 P16) + stat/find/dmesg/time/which/inventory (M22 D8/D12/D13/D16) + du (M25 F4) + screenshot/shortcuts (M27 G27/G29) + smp (M28) + `wm` (M32 WMS2, issue #622)
 
 /// `sym <file>` reads at most this many bytes for on-disk symtab inspection
 /// (M22 D3). ELF symbol tables live near the file tail; 64 KiB covers every
@@ -354,6 +355,7 @@ fn ensure_registry() []const Command {
             .{ .name = "strace", .help = "trace a program's syscalls: 'strace exec APP.BIN [args]' arms the tracer around an exec and prints one line per syscall; 'strace off' disarms", .usage = "strace exec <file> [args...] | off", .category = .tasks_processes, .handler = cmd_strace },
             .{ .name = "sym", .help = "crash-report symbol table: 'sym' lists symbols loaded from the last ELF exec; 'sym <file>' parses an ELF's symtab from disk", .usage = "sym [<file>]", .category = .tasks_processes, .max_args = 1, .handler = cmd_sym },
             .{ .name = "syscalls", .help = "numbered syscall table and counters", .usage = "syscalls", .category = .tasks_processes, .handler = cmd_syscalls },
+            .{ .name = "wm", .help = "M32 WMS2 render-server register: the registered WM server pid, the present-sequence counter, presents, and COMPOSITE_TICK count ('wm none' means the shell idle shim is compositing)", .usage = "wm", .category = .graphics_input, .handler = cmd_wm },
             .{ .name = "tasks", .help = "tick-driven task scheduler status", .usage = "tasks", .category = .tasks_processes, .handler = cmd_tasks },
             .{ .name = "smp", .help = "multiprocessor topology, online CPU cores, and per-core task state", .usage = "smp", .category = .tasks_processes, .handler = cmd_smp },
             .{ .name = "type", .help = "echo stdin (the pipe source) to stdout — the right half of `a | type`", .usage = "type", .category = .system, .handler = cmd_type },
@@ -6375,6 +6377,32 @@ fn cmd_syscalls(m: *Monitor, args: []const []const u8) ExecError {
     return .none;
 }
 
+/// M32 WMS2 (issue #622): the render-server register report row. The
+/// present-sequence counter is the parity-cards' observability primitive
+/// (WMS4–WMS6 assert against it), so `wm` reports it from day one. When no
+/// WM is registered it reports shim mode ("/ none").
+fn cmd_wm(m: *Monitor, args: []const []const u8) ExecError {
+    _ = args;
+    const info = wm_server.info();
+    if (info.pid) |pid| {
+        m.console.puts("wm: registered pid=");
+        m.console.print_u64(pid);
+        m.console.puts(" present=");
+        m.console.puts("\n");
+        // present_seq is u32; report it as a fixed decimal for grep-ability.
+        m.console.puts("wm: present_seq=");
+        m.console.print_u64(info.present_seq);
+        m.console.puts(" presents=");
+        m.console.print_u64(info.present_count);
+        m.console.puts(" ticks=");
+        m.console.print_u64(info.tick_count);
+        m.console.puts("\n");
+    } else {
+        m.console.print_line("wm: none (shim compositing)");
+    }
+    return .none;
+}
+
 // ---------------------------------------------------------------------------
 // Per-task address-space command (claim 5804)
 // ---------------------------------------------------------------------------
@@ -8166,7 +8194,7 @@ test "monitor: syscalls is registered and reports deterministic rows" {
     try std.testing.expectEqualStrings("numbered syscall table and counters", lookup("syscalls").?.help);
     try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"syscalls"}));
     try std.testing.expectEqualStrings(
-        "syscalls: slots=64 implemented=65\n" ++
+        "syscalls: slots=64 implemented=66\n" ++
             "  0 sys_ping calls=0\n" ++
             "  1 sys_write calls=0\n" ++
             "  2 sys_yield calls=0\n" ++
@@ -8231,7 +8259,8 @@ test "monitor: syscalls is registered and reports deterministic rows" {
             "  61 sys_win_set_title calls=0\n" ++
             "  62 sys_net_stats calls=0\n" ++
             "  63 sys_mmap calls=0\n" ++
-            "  64 sys_munmap calls=0\n",
+            "  64 sys_munmap calls=0\n" ++
+            "  65 sys_wmctl calls=0\n",
         env.mock.contents(),
     );
 }

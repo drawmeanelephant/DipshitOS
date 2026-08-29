@@ -40,6 +40,7 @@ const virtio_net = @import("virtio_net.zig"); // claim 6076 (card N2): polled RX
 const road_pops = @import("road_pops.zig"); // claim 1574 (milestone six G3): Road Pops framebuffer drain in the idle loop
 const input = @import("input.zig"); // claim 6050 (milestone seven I3): keyboard/pointer event FIFO drain in the idle loop
 const driving_award = @import("driving_award.zig"); // claim 1543 (milestone six G5): Driving Award window-manager drain (clock refresh + composite)
+const wm_server = @import("wm_server.zig"); // M32 WMS2 (issue #622): when a WM registers, pacing moves off this idle drain to the tick path
 const scrollback_mod = @import("scrollback.zig"); // M18 T1 (issue #404): terminal scrollback ring
 const clipboard = @import("clipboard.zig"); // M18 T2 (issue #405): shared clipboard for copy/paste
 
@@ -3421,8 +3422,19 @@ pub fn boot_and_park(mon: *monitor.Monitor, rx_wired: bool) void {
             // window from the 1 Hz generic timer and composite any dirty
             // windows. This is the clock-only present path (the tee's
             // present above already composites terminal output); no-op
-            // when the manager is unarmed (default VM) or clean.
-            _ = driving_award.drain(timer.ticks);
+            // when the manager is unarmed (default VM) or clean. M32 WMS2
+            // (issue #622): when a WM is registered, composite pacing moves
+            // to the scheduler tick path (the WM drives presents from its
+            // COMPOSITE_TICK events) — this idle drain becomes a no-op so
+            // it does not fight the WM. One flag check on the hot path;
+            // no WM registered → runs exactly as before (zero-regression).
+            if (!wm_server.registered()) _ = driving_award.drain(timer.ticks);
+            // M32 WMS2 (issue #622): drain the once-per-teardown report —
+            // the exit path is IRQ context so the fallback is surfaced here
+            // (the process-exit-report pattern).
+            if (wm_server.take_fallback_report()) {
+                mon.console.print_line("wm: unregistered, shim resumed");
+            }
             // Card N11 (claim 5357): the bounded retransmission timer —
             // polled here (the idle loop is the time engine — the
             // card-N9 clock pattern). AFTER the drain, so an ACK the
@@ -3641,6 +3653,7 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "  screen      virtio-gpu transport + framebuffer: device DID, features, scanout, status, re-arm ('screen fill <rrggbb>' fills the framebuffer and flushes it to the scanout)\n" ++
         "  screenshot  capture the current framebuffer (1280x720) and save as BMP to disk (G27)\n" ++
         "  text        framebuffer text: text region, cursor, scrollback ('text put <string...>' renders + flushes to the scanout; 'text clear' clears; 'text putraw' skips the trailing newline; 'text fontdebug [on|off]' missing-glyph stats)\n" ++
+        "  wm          M32 WMS2 render-server register: the registered WM server pid, the present-sequence counter, presents, and COMPOSITE_TICK count ('wm none' means the shell idle shim is compositing)\n" ++
         "  usb         XHCI host controller: `usb` transport report, `usb devices` enumerated HID devices, `usb report` last HID report\n" ++
         "  dui         Driving Award window manager: registry (with owner pids), z-order, focus, hit-testing ('dui focus <n>' focuses; 'dui raise <n>' raises; 'dui lower <n>' lowers to back; 'dui move <n> <x> <y>' moves a user window; 'dui close <n>' releases a user window; 'dui list <pid>' filters by owner; 'dui hit <x> <y>' hit-tests; 'dui cycle' cycles focus like Alt+Tab; 'dui tile <n>' toggles a user window floating/tiled (M21 W1); 'dui master' swaps master/detail (M21 W2))\n" ++
         "system\n" ++

@@ -173,9 +173,28 @@ dependency-phases map (WMS1 contract → WMS2/WMS3 unlock → WMS4–WMS6
 drain-out → WMS7 protocol → WMS8/WMS9 payoff → WMS10 deferred).**WMS1 is
 done (claim 1484, issue #621): ADR 0015 accepted; slot-65 `sys_wmctl`
 subcommand encoding + error contract frozen in ADR 0007; kind-18
-`COMPOSITE_TICK` (routing-restricted) in ADR 0009; the `COMPOSITE_TICK`
-constant is reserved in `events.zig` (no handler yet — slot 65 still
-`-ENOSYS`). WMS2 next (kernel render-server register).**
+`COMPOSITE_TICK` (routing-restricted) in ADR 0009.
+
+**WMS2 is done (claim 0622, issue #622): the kernel render-server register.**
+A new host-testable `kernel/src/wm_server.zig` owns the single WM seat +
+the present-sequence counter BESIDE the unchanged shim; slot 65
+`sys_wmctl` runs — REGISTER (one seat; `ENXIO` on an unarmed compositor),
+SEAT taken by a second registrant → `EACCES`; SET_WINDOW reserved
+(`EINVAL`) until WMS4 freezes the chrome-descriptor layout; REQUEST_PRESENT
+→ G1 transfer+flush advancing the present counter (`ENOSYS` with no WM
+registered; outsider → `EACCES`). While a WM is registered the kernel
+delivers kind-18 `COMPOSITE_TICK` to the registrant's process queue off the
+scheduler-tick seam (`implemented_count` 65→66). WM-death teardown
+unregisters the dying WM in the scheduler exit path; composite pacing
+falls back to the shell idle shim automatically (`wm: unregistered, shim
+resumed`) — the desktop survives a crashed WM. Zero-regression: no WM
+registered is byte-identical to pre-M32 (the shim path reads unchanged),
+so every earlier gate keeps passing. New class-B gate
+`tools/verify-live-wmctl-register.sh` **PASS on VZ (2026-08-29)**: `WNDSTUB.BIN`
+registers, receives a COMPOSITE_TICK, issues REQUEST_PRESENT (present
+counter advances), exits, is reaped, the kernel reports the shim fallback,
+and `syscalls` shows `65 sys_wmctl calls=2` + `implemented=66`. **WMS3 next
+(WM server process scaffold, #623).**
 
 > https://github.com/drawmeanelephant/DipshitOS/milestone/16
 
