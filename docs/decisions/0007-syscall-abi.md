@@ -605,6 +605,7 @@ syscall number 0–64 stays frozen):
 | ALT_TAB | `WMCTL_ALT_TAB` | 5 | a0 = window id, a1 = action (1 activate, 2 cycle, 3 commit, 4 dismiss) | 0 = applied | `EACCES` caller not the WM; `EINVAL` bad id / action |
 | NOTIF_CENTER | `WMCTL_NOTIF_CENTER` | 6 | a0 = 0 close / 1 open / 2 clear-all | 0 = applied | `EACCES` caller not the WM; `EINVAL` bad action |
 | NOTIF_DISMISS | `WMCTL_NOTIF_DISMISS` | 7 | a0 = row index | 0 = applied | `EACCES` caller not the WM; `EINVAL` out-of-range index |
+| TOOLTIP | `WMCTL_TOOLTIP` | 8 | a0 = 0 hide / 1 show (show: `ptr/len` carry the text, ≤ 32 bytes) | 0 = applied | `EACCES` caller not the WM; `EINVAL` bad action / over-length; `EFAULT` bad text pointer |
 
 Unknown/zero `cmd` → `EINVAL`. `REGISTER` is one-seat: a second registration
 refuses `EACCES`; the registered pid is observable in the monitor's `wm`
@@ -710,3 +711,17 @@ click (kind 19 `WM_POINTER` carries the HID button byte) out, its OWN tray-click
 toggle + panel dismiss/clear are gated behind `!wm_owns_input`, and the WM hit-tests the
 tray (the same `fb_w - 80` slice as `tray_rect`), decides, and issues `NOTIF_CENTER`.
 No WM registered → shim byte-identical.
+
+### Amendment (2026-08-29, claim 6154 — the WMS6 Gate-C TOOLTIP channel)
+
+The third desktop-chrome surface to leave the kernel is the **read-mostly hover
+chrome**: the tooltip (issue #626). The M27 G6 tooltip was a DORMANT stub (nothing ever
+called `tooltip_set`); Gate C activates it under WM ownership. `TOOLTIP` (cmd 8) `a0` =
+0 hide / 1 show; for show, `ptr/len` carry the text (≤ 32 bytes — the M27 bound, copied
+in like the chrome descriptor; `EFAULT` bad pointer, `EINVAL` over-length). The kernel
+applies through `tooltip_clear` / a new immediate `tooltip_show` (the WM owns the
+hover-dwell policy by choosing WHEN to show) and blits the box below its own cursor. The
+hover input path: while a WM is registered the kernel fans the raw hover (kind 19
+`WM_POINTER` carries absolute moves) out, and the WM hit-tests the tray, decides what the
+tooltip says, and issues `TOOLTIP`. The kernel never self-triggered a tooltip and still
+doesn't; no WM registered → the dormant shim stays dormant.

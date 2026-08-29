@@ -2274,6 +2274,33 @@ fn handle_wmctl(args: Args, _: *exceptions.VectorFrame) u64 {
             wm_server.note_notif_dismiss();
             return 0;
         },
+        wm_server.wmctl_tooltip => {
+            // M32 WMS6 Gate C (issue #626): the WM — not the kernel — decides
+            // WHEN a tooltip shows and WHAT it says (the raw hover already
+            // fanned to it as kind 19). a0 = 0 hide / 1 show; for show,
+            // ptr/len carry the text (the 32-byte M27 bound, copied in like
+            // the chrome descriptor). The kernel clamps + places + blits the
+            // box below its own cursor.
+            if (!wm_server.registered()) return error_result(.enosys);
+            if (wm_server.registered_pid() != pid) return error_result(.eacces);
+            const action = args[1];
+            switch (action) {
+                0 => driving_award.tooltip_clear(),
+                1 => {
+                    const len = args[5];
+                    if (len == 0 or len > 32) return error_result(.einval); // frozen bound
+                    var text: [32]u8 = undefined;
+                    const text_bytes: *[32]u8 = @ptrCast(&text);
+                    if (uaccess.copy_in(text_bytes, args[4], len) != .ok) {
+                        return error_result(.efault); // bad text pointer
+                    }
+                    driving_award.tooltip_show(text[0..@intCast(len)]);
+                },
+                else => return error_result(.einval), // unknown action
+            }
+            wm_server.note_tooltip();
+            return 0;
+        },
         wm_server.wmctl_request_present => {
             if (!wm_server.registered()) return error_result(.enosys);
             if (wm_server.registered_pid() != pid) return error_result(.eacces);
@@ -4059,6 +4086,52 @@ test "syscall: NOTIF_CENTER / NOTIF_DISMISS (cmd 6/7, claim 7557) drive the cent
     // A malformed NOTIF_CENTER action -> EINVAL, not counted.
     try std.testing.expectEqual(error_result(.einval), dispatch(sys_wmctl, .{ wm_server.wmctl_notif_center, 9, 0, 0, 0, 0 }, &frame));
     try std.testing.expectEqual(@as(u64, 3), wm_server.info().notif_center_count);
+
+    // Teardown: no leaked input ownership into the aggregated binary.
+    try std.testing.expect(wm_server.unregister(0));
+    try std.testing.expect(!driving_award.wm_owns_input);
+}
+
+test "syscall: TOOLTIP (cmd 8, claim 6154) shows/hides the tooltip from the WM's text" {
+    userspace.init();
+    init(test_writer);
+    wm_server.init();
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0); // task 2 = process 0 (boot payload)
+    scheduler.start();
+    var frame = fresh_frame();
+    try std.testing.expect(scheduler.yield_current()); // shell -> worker
+    try std.testing.expect(scheduler.yield_current()); // worker -> user (2)
+
+    // No WM registered: TOOLTIP -> ENOSYS (the ADR 0007 "no WM" case).
+    try std.testing.expectEqual(error_result(.enosys), dispatch(sys_wmctl, .{ wm_server.wmctl_tooltip, 1, 0, 0, 0, 3 }, &frame));
+
+    // Seed the WM as pid 0.
+    try std.testing.expect(wm_server.register(0));
+    // A valid text pointer (registered region) shows the tooltip immediately.
+    var txt: [5]u8 = "Clock".*;
+    const txt_ptr = @intFromPtr(&txt);
+    set_user_regions(.{ .base = txt_ptr, .len = 5 }, .{ .base = 0, .len = 0 });
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_wmctl, .{ wm_server.wmctl_tooltip, 1, 0, 0, txt_ptr, 5 }, &frame));
+    try std.testing.expect(driving_award.tooltip_visible);
+    try std.testing.expectEqual(@as(u8, 5), driving_award.tooltip_text_len);
+    try std.testing.expectEqualStrings("Clock", driving_award.tooltip_text[0..5]);
+    try std.testing.expectEqual(@as(u64, 1), wm_server.info().tooltip_count);
+    // Hide (a0 = 0) clears it.
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_wmctl, .{ wm_server.wmctl_tooltip, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expect(!driving_award.tooltip_visible);
+    try std.testing.expectEqual(@as(u8, 0), driving_award.tooltip_text_len);
+    try std.testing.expectEqual(@as(u64, 2), wm_server.info().tooltip_count);
+    // Over-length (> 32) / zero-length text -> EINVAL, not counted.
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_wmctl, .{ wm_server.wmctl_tooltip, 1, 0, 0, txt_ptr, 33 }, &frame));
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_wmctl, .{ wm_server.wmctl_tooltip, 1, 0, 0, txt_ptr, 0 }, &frame));
+    // A bad text pointer -> EFAULT.
+    set_user_regions(.{ .base = 0, .len = 0 }, .{ .base = 0, .len = 0 });
+    try std.testing.expectEqual(error_result(.efault), dispatch(sys_wmctl, .{ wm_server.wmctl_tooltip, 1, 0, 0, 0x2000, 5 }, &frame));
+    // A malformed action -> EINVAL.
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_wmctl, .{ wm_server.wmctl_tooltip, 9, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u64, 2), wm_server.info().tooltip_count);
 
     // Teardown: no leaked input ownership into the aggregated binary.
     try std.testing.expect(wm_server.unregister(0));
