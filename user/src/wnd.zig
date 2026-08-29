@@ -85,6 +85,20 @@ const tooltip_hide_act: u64 = 0;
 // icon index (0..4) — the WM decides which icon a click hits; the kernel
 // applies the same clamped chain the shim runs (restore/focus/open).
 const wmctl_dock: u64 = 9;
+// WMS6 Gate E (issue #626): the tray decision channel. TRAY (cmd 10) — the
+// WM owns the tray WIDGET CONTENT: the clock string, theme letter, and
+// clipboard indicator. a0 = flags (bit 0 clock, bit 1 theme, bit 2
+// clipboard); a1 = the 5-byte "HH:MM" clock text packed little-endian; a2 =
+// theme letter (low byte) | clipboard filled (bit 8). The kernel clamps +
+// stores + repaints; the shim fallback re-derives all three from its own
+// state (no-WM mode is byte-identical).
+const wmctl_tray: u64 = 10;
+const tray_flag_clock: u64 = 0b001;
+const tray_flag_theme: u64 = 0b010;
+const tray_flag_clip: u64 = 0b100;
+/// sys_clipboard_get (slot 39) — the WM probes the clipboard each tray
+/// refresh (filled = return length != 0) to decide the indicator state.
+const sys_clipboard_get: u64 = 39;
 
 // ---------------------------------------------------------------------------
 // Syscall wrappers (AArch64 `svc #0` — the fixed-register ABI).
@@ -234,6 +248,24 @@ pub const tray_tooltip_text: []const u8 = "Clock";
 // glyphs are c n t b s — Calc, Notes, Terminal, Browser, Settings).
 pub const dock_marker: []const u8 = "wnd: dock";
 pub const dock_labels = [_][]const u8{ "Calc", "Notes", "Terminal", "Browser", "Settings" };
+
+// WMS6 Gate E (issue #626): the tray decision marker — written when the WM
+// issues TRAY with CHANGED content (`wnd: tray clock=HH:MM theme=D
+// clip=yes/no`). The live gate greps it to prove the WM — not the kernel —
+// owns the tray widgets (the kernel render is source-selected off the
+// WM-declared values once set).
+pub const tray_marker: []const u8 = "wnd: tray";
+/// The theme letter the WM declares — the WM is the theme owner; parity
+/// with the shim's default 'D' (the kernel clamps to D/L/A).
+pub const tray_theme_letter: u8 = 'D';
+/// The tray refresh cadence: re-decide the widget content every Nth
+/// COMPOSITE_TICK (kind-18 ticks are 1 Hz on VZ = seconds). The clock
+/// REFRESHES under the WM — it was frozen while a WM was registered (the
+/// kernel's drain is gated off), the exact gap this gate closes.
+pub const tray_refresh_every: u64 = 10;
+/// The clipboard probe buffer the WM reads each refresh (filled = returned
+/// length != 0). The kernel clamps to its capacity.
+pub const tray_clip_probe: usize = 32;
 
 // ADR 0009 modifier bits (must match kernel events MOD_*).
 pub const mod_shift: u16 = 0x0001;
@@ -650,6 +682,67 @@ fn handle_dock_hover(prev: ?u8, cur: ?u8) void {
 }
 
 // ---------------------------------------------------------------------------
+// WMS6 Gate E (issue #626): the tray widget-content policy. The WM — not the
+// kernel — owns what the tray shows: the clock string (formatted from its own
+// 1 Hz tick counter, the same minute-rollover formula the shim's format_hhmm
+// uses — parity by value), the theme letter (the WM is the theme owner;
+// parity 'D'), and the clipboard indicator (a sys_clipboard_get probe).
+// ---------------------------------------------------------------------------
+
+/// The last content the WM declared (so a refresh only re-issues on change,
+/// mirroring the shim's drain: repaint when something changed, not every
+/// tick).
+const TrayState = struct {
+    clock: [5]u8 = .{ '0', '0', ':', '0', '0' },
+    clock_set: bool = false,
+    clip: bool = false,
+};
+
+/// Format HH:MM from the 1 Hz tick count (seconds since this WM registered)
+/// — the same formula the shim's format_hhmm uses (minute rollover, 24 h
+/// wrap), so parity-by-value holds.
+pub fn format_wm_hhmm(buf: *[5]u8, ticks: u64) []const u8 {
+    const total_minutes = (ticks / 60) % (24 * 60);
+    const hh = total_minutes / 60;
+    const mm = total_minutes % 60;
+    buf[0] = @as(u8, @intCast('0' + hh / 10));
+    buf[1] = @as(u8, @intCast('0' + hh % 10));
+    buf[2] = ':';
+    buf[3] = @as(u8, @intCast('0' + mm / 10));
+    buf[4] = @as(u8, @intCast('0' + mm % 10));
+    return buf[0..5];
+}
+
+/// The tray refresh decision: compute the widget content from the WM's own
+/// state and, when it differs from what was last declared, issue TRAY (cmd
+/// 10) and write the `wnd: tray` marker. Returns true when it issued.
+pub fn tray_tick_policy(ticks: u64, clip_filled: bool, state: *TrayState) bool {
+    var clock_buf: [5]u8 = undefined;
+    const clock = format_wm_hhmm(&clock_buf, ticks);
+    if (state.clock_set and std.mem.eql(u8, state.clock[0..], clock) and state.clip == clip_filled) {
+        return false; // nothing changed — no re-issue (mirrors the shim drain)
+    }
+    state.clock = clock_buf;
+    state.clip = clip_filled;
+    state.clock_set = true;
+    // Pack the 5-byte clock text little-endian into a1 (the frozen encoding).
+    var clock_packed: u64 = 0;
+    var i: usize = 0;
+    while (i < 5) : (i += 1) clock_packed |= @as(u64, clock_buf[i]) << @intCast(i * 8);
+    const a2 = @as(u64, tray_theme_letter) | (if (clip_filled) @as(u64, 1) << 8 else 0);
+    _ = syscall6(sys_wmctl, wmctl_tray, tray_flag_clock | tray_flag_theme | tray_flag_clip, clock_packed, a2, 0, 0);
+    var buf: [48]u8 = undefined;
+    const s = std.fmt.bufPrint(&buf, "{s} clock={s} theme={c} clip={s}\n", .{
+        tray_marker,
+        clock,
+        tray_theme_letter,
+        if (clip_filled) "yes" else "no",
+    }) catch "wnd: tray\n";
+    write_marker(s);
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 // The WMS5 keyboard chord decoder (kind 21 WM_KEY).
 // ---------------------------------------------------------------------------
 fn handle_wm_key(usage: u8, flags: u16) void {
@@ -757,6 +850,8 @@ fn main() noreturn {
     var grab_dy: u32 = 0;
     var prev_btn: u8 = 0;
     var notif_open: bool = false;
+    // WMS6 Gate E (issue #626): the tray widget-content state the WM owns.
+    var tray_state: TrayState = .{};
     var prev_in_tray: bool = false;
     var prev_dock_idx: ?u8 = null;
 
@@ -785,6 +880,18 @@ fn main() noreturn {
                     if (presents % marker_every == 0) {
                         write_marker(present_marker);
                     }
+                }
+                // WMS6 Gate E (issue #626): the tray refresh cadence — every
+                // `tray_refresh_every` ticks the WM re-decides the tray
+                // widget content from its own state (the clock string from
+                // the tick counter, the clipboard indicator from a
+                // sys_clipboard_get probe) and issues TRAY on change. Before
+                // this gate the tray froze while a WM was registered (the
+                // kernel's drain is gated off); now the WM drives it.
+                if (ticks % tray_refresh_every == 0) {
+                    var clip_buf: [tray_clip_probe]u8 = undefined;
+                    const clip_len = syscall3(sys_clipboard_get, @intFromPtr(&clip_buf), clip_buf.len, 0);
+                    _ = tray_tick_policy(ticks, clip_len != 0, &tray_state);
                 }
             },
             wm_window_kind => {
@@ -992,9 +1099,35 @@ test "wnd: the marker/tuning shapes are pinned (live-gate grep targets)" {
     try std.testing.expectEqualStrings("Browser", dock_labels[3]);
     try std.testing.expectEqualStrings("Settings", dock_labels[4]);
     try std.testing.expectEqual(@as(u64, 9), wmctl_dock);
+    // WMS6 Gate E (issue #626): the tray marker + policy constants.
+    try std.testing.expectEqualStrings("wnd: tray", tray_marker);
+    try std.testing.expectEqual(@as(u8, 'D'), tray_theme_letter);
+    try std.testing.expectEqual(@as(u64, 10), tray_refresh_every);
+    try std.testing.expectEqual(@as(u64, 10), wmctl_tray);
+    try std.testing.expectEqual(@as(u64, 39), sys_clipboard_get);
     try std.testing.expectEqual(@as(u8, 0x17), usage_t);
     try std.testing.expectEqual(@as(u8, 0x10), usage_m);
     try std.testing.expectEqual(@as(u8, 0x11), usage_n);
+}
+
+test "wnd: the WMS6 tray policy formats HH:MM and issues TRAY on change only" {
+    // The WM's clock mirrors the shim's minute-rollover formula (parity).
+    var buf: [5]u8 = undefined;
+    try std.testing.expectEqualStrings("00:00", format_wm_hhmm(&buf, 0));
+    try std.testing.expectEqualStrings("00:01", format_wm_hhmm(&buf, 60));
+    try std.testing.expectEqualStrings("01:00", format_wm_hhmm(&buf, 3600));
+    try std.testing.expectEqualStrings("12:34", format_wm_hhmm(&buf, 12 * 3600 + 34 * 60));
+    // The policy issues on the FIRST refresh (content differs from unset)...
+    var st: TrayState = .{};
+    try std.testing.expect(tray_tick_policy(0, false, &st));
+    try std.testing.expect(st.clock_set);
+    // ...and not again while the content is unchanged (mirrors the shim drain).
+    try std.testing.expect(!tray_tick_policy(5, false, &st));
+    // A minute rollover re-issues.
+    try std.testing.expect(tray_tick_policy(60, false, &st));
+    // A clipboard change re-issues.
+    try std.testing.expect(tray_tick_policy(61, true, &st));
+    try std.testing.expect(!tray_tick_policy(62, true, &st));
 }
 
 test "wnd: the WMS5 drag-grab rule matches the shared title-bar rule (drift guard)" {
@@ -1024,7 +1157,11 @@ test "wnd: the WMS6 dock icon hit-test matches the shim's grid (drift guard)" {
 
 test "wnd: the WMS6 Alt+Tab target rule (drift guard against the shim snapshot)" {
     // Two visible windows on the current workspace (mirrors built from kind-20).
-    mirrors = undefined;
+    // Zero-fill FIRST: `= undefined` left slots 4+ with garbage `.valid` bits
+    // that made this drift guard flaky standalone (the pure rule iterates the
+    // WHOLE table; unset slots must read `valid=false`, as in the zeroed BSS
+    // of the real EL0 binary). Pre-existing Gate-A bug, fixed with Gate E.
+    mirrors = [_]MirrorWin{.{}} ** max_user_windows;
     mirrors[0] = MirrorWin{ .id = 2, .visible = true, .workspace = 0, .valid = true, .focused = true };
     mirrors[1] = MirrorWin{ .id = 3, .visible = true, .workspace = 0, .valid = true, .focused = false };
     // Hidden + off-workspace windows never cycled (M21 W3/W4).
@@ -1037,10 +1174,16 @@ test "wnd: the WMS6 Alt+Tab target rule (drift guard against the shim snapshot)"
     mirrors[1].visible = false;
     try std.testing.expectEqual(@as(?u8, null), next_alt_tab_target());
     mirrors[1].visible = true;
-    // A stale/corrupt mirror slot (id < 2) is skipped, not a target.
+    // A stale/corrupt mirror slot (id < 2) is skipped, not a target — with
+    // TWO real candidates left (3, 5) the cycle runs over them only (no
+    // focused window -> start at slot 0 -> next is 5; the corrupt id-1 slot
+    // is never selected). Pre-existing Gate-A assertion bug (it expected 3
+    // with a single candidate, which the rule correctly no-ops), fixed with
+    // Gate E.
     mirrors[0].id = 1;
     mirrors[0].focused = false;
-    try std.testing.expectEqual(@as(?u8, 3), next_alt_tab_target());
+    mirrors[3].visible = true;
+    try std.testing.expectEqual(@as(?u8, 5), next_alt_tab_target());
 }
 
 test "wnd: the WMS5 Gate 2 policy issues the SAME rects as the kernel shim (drift guard)" {

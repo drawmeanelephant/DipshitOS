@@ -70,6 +70,13 @@ pub const wmctl_tooltip: u64 = 8;
 /// which dock icon a click hits (restore/focus/open); the kernel applies the
 /// same clamped chain the shim runs.
 pub const wmctl_dock: u64 = 9;
+/// M32 WMS6 Gate E (issue #626): TRAY — the final chrome gate. The WM owns
+/// the tray WIDGET CONTENT: the clock string, theme letter, and clipboard
+/// indicator. a0 = flags (bit 0 clock, bit 1 theme, bit 2 clipboard), a1 =
+/// the 5-byte "HH:MM" clock text packed little-endian, a2 = theme letter
+/// (low byte) | clipboard filled (bit 8). The kernel clamps + stores +
+/// repaints; the shim fallback re-derives all three from its own state.
+pub const wmctl_tray: u64 = 10;
 
 /// The single registered WM server process id; null = no WM registered
 /// (shim mode, the default — every pre-M32 gate runs in this state).
@@ -98,6 +105,9 @@ var notif_dismiss_count: u64 = 0;
 var tooltip_count: u64 = 0;
 /// M32 WMS6 Gate D (issue #626): DOCK submissions accepted (icon clicks).
 var dock_count: u64 = 0;
+/// M32 WMS6 Gate E (issue #626): TRAY submissions accepted — the WM's tray
+/// widget-content decisions (clock/theme/clipboard) applied.
+var tray_count: u64 = 0;
 /// Set when the registered WM exits (teardown) — the shell idle loop drains
 /// this into the `wm: unregistered, shim resumed` report (the exit path is
 /// IRQ context and console-free, so the report is drained like the process
@@ -117,6 +127,7 @@ pub fn init() void {
     notif_dismiss_count = 0;
     tooltip_count = 0;
     dock_count = 0;
+    tray_count = 0;
     pointer_fan_count = 0;
     window_mirror_count = 0;
     key_fan_count = 0;
@@ -256,6 +267,7 @@ pub const WmInfo = struct {
     notif_dismiss_count: u64,
     tooltip_count: u64,
     dock_count: u64,
+    tray_count: u64,
     pointer_fan_count: u64,
     window_mirror_count: u64,
     key_fan_count: u64,
@@ -274,6 +286,7 @@ pub fn info() WmInfo {
         .notif_dismiss_count = notif_dismiss_count,
         .tooltip_count = tooltip_count,
         .dock_count = dock_count,
+        .tray_count = tray_count,
         .pointer_fan_count = pointer_fan_count,
         .window_mirror_count = window_mirror_count,
         .key_fan_count = key_fan_count,
@@ -388,6 +401,11 @@ pub fn note_tooltip() void {
 /// Note a DOCK (cmd 9) submission — the WM's dock-icon click decision.
 pub fn note_dock() void {
     dock_count +%= 1;
+}
+
+/// Note a TRAY (cmd 10) submission — the WM's tray widget-content decision.
+pub fn note_tray() void {
+    tray_count +%= 1;
 }
 
 // ---------------------------------------------------------------------------

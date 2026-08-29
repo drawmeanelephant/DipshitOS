@@ -607,6 +607,7 @@ syscall number 0–64 stays frozen):
 | NOTIF_DISMISS | `WMCTL_NOTIF_DISMISS` | 7 | a0 = row index | 0 = applied | `EACCES` caller not the WM; `EINVAL` out-of-range index |
 | TOOLTIP | `WMCTL_TOOLTIP` | 8 | a0 = 0 hide / 1 show (show: `ptr/len` carry the text, ≤ 32 bytes) | 0 = applied | `EACCES` caller not the WM; `EINVAL` bad action / over-length; `EFAULT` bad text pointer |
 | DOCK | `WMCTL_DOCK` | 9 | a0 = icon index (0–4) | 0 = applied | `EACCES` caller not the WM; `EINVAL` out-of-range icon |
+| TRAY | `WMCTL_TRAY` | 10 | a0 = flags (bit 0 clock, bit 1 theme, bit 2 clipboard); a1 = 5-byte `HH:MM` clock text packed LE; a2 = theme letter (low byte) \| clipboard filled (bit 8) | 0 = applied | `EACCES` caller not the WM; `EINVAL` unknown flag bits / non-`HH:MM` clock char / theme outside `D`/`L`/`A` |
 
 Unknown/zero `cmd` → `EINVAL`. `REGISTER` is one-seat: a second registration
 refuses `EACCES`; the registered pid is observable in the monitor's `wm`
@@ -739,3 +740,23 @@ dock-click handler gates behind `!wm_owns_input`. The dock is also the first rea
 hover-label consumer of cmd 8 (TOOLTIP): the WM issues the icon's label on hover, and
 the kernel's blanket tooltip-clear-on-move gates behind `!wm_owns_input` so it cannot
 fight the WM's hide decisions. No WM registered → shim byte-identical.
+
+### Amendment (2026-08-29, claim 3744 — the WMS6 Gate-E TRAY channel)
+
+The fifth — and final — desktop-chrome surface to leave the kernel is the **tray
+widget content** (issue #626): the clock string, theme letter, and clipboard indicator.
+Before this gate the tray froze while a WM was registered: the shell idle's `drain`
+(which refreshed the clock from the 1 Hz tick counter) is gated off when a WM is
+registered, so the WM had no way to keep it alive. `TRAY` (cmd 10) closes that gap —
+the WM declares the widget content, `a0` = flags (bit 0 clock, bit 1 theme, bit 2
+clipboard), `a1` = the 5-byte `HH:MM` clock text packed little-endian, `a2` = theme
+letter (low byte, clamped to `D`/`L`/`A`) | clipboard filled (bit 8). Each field is
+OPTIONAL (a flag bit missing leaves that widget on the shim fallback); the kernel
+clamps + stores + marks the taskbar dirty, and the render is source-selected —
+WM-declared values when a `_set` flag is true, shim-derived otherwise (no WM →
+byte-identical). WM teardown (`clear_wm_chrome`) resets the `_set` flags so the shim
+fallback re-derives all three. The WM refreshes at its own cadence (every 10 ticks =
+10 s), reformatting the clock from its own 1 Hz tick counter via the same
+minute-rollover formula the shim's `format_hhmm` uses (parity by value) and probing the
+clipboard via `sys_clipboard_get` (slot 39). This closes WMS6: all five issue-626 chrome
+surfaces (alt-tab, notification center, tooltip, dock, tray) now drain into WND.BIN.
