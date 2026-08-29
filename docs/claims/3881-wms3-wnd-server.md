@@ -3,10 +3,10 @@
 - **Owner:** buffy (`agent/buffy/wms3-wnd-server`)
 - **Issue:** https://github.com/drawmeanelephant/DipshitOS/issues/623 (WMS3 of 10, milestone 16)
 - **Stacked on:** `agent/buffy/wms2-wmctl-register` (PR #633) — the WMS3 PR builds on WMS2's code
-- **ADR:** 0015 (seam A render-server); slot-65 encoding + kind-18 from WMS1/WMS2 (claims 1484/0622)
+- **ADR:** 0015 (seam A render-server); slot-65 encoding + kind-18 from WMS1/WMS2 (claims 1484/8482)
 - **Status:** 🔄 agent/buffy/wms3-wnd-server
 - **Heartbeat:** 2026-08-29
-- **Depends on:** WMS2 (claim 0622) — `sys_wmctl` slot 65 + kind-18 `COMPOSITE_TICK` delivery + WM-death teardown must be present (this branch is cut from the WMS2 branch so it builds on them)
+- **Depends on:** WMS2 (claim 8482) — `sys_wmctl` slot 65 + kind-18 `COMPOSITE_TICK` delivery + WM-death teardown must be present (this branch is cut from the WMS2 branch so it builds on them)
 - **Blocks:** WMS4–WMS6 (policy drain-out), WMS7
 
 ## Scope (from issue #623)
@@ -32,7 +32,7 @@ New class-B sibling of `verify-live-wmctl-register.sh`: WND.BIN boots, registers
 - Shared module placement: `kernel/src/wnd_core.zig`, dependency-free (pure math + a minimal pure `WindowGeom` row; NO kernel-module imports). `@import` from `user/src/wnd.zig` via a relative path. Single-source (not a checked copy), which is the whole point of the drift guard.
 - The kernel side keeps its public API identical; each pure helper delegates to `wnd_core` with the same inputs, so behavior is unchanged.
 - Present cadence: WND.BIN issues REQUEST_PRESENT every N COMPOSITE_TICKS (its own pacing), writing a periodic alive marker so the live gate can observe it pacing while the shell idle drain is a no-op (WM registered → shell `drain` path is gated off by WMS2).
-- Kill+re-register: the `kill <pid>` monitor command (claim 7786) + WMS2 exit-path unregister (claim 0622) + a fresh `wnd start` — the seat is free after teardown, so re-register succeeds.
+- Kill+re-register: the `kill <pid>` monitor command (claim 7786) + WMS2 exit-path unregister (claim 8482) + a fresh `wnd start` — the seat is free after teardown, so re-register succeeds.
 
 ## Touches
 `kernel/src/wnd_core.zig` (new — shared pure module), `kernel/src/driving_award.zig` (delegate pure helpers), `user/src/wnd.zig` (new — WND.BIN), `build.zig` (forty-eighth ESP program), `image/make-image.sh` + `image/mkfat32.py` (WND.BIN embedding), `kernel/src/monitor.zig` + `kernel/src/shell.zig` (`wnd start` bootstrap + server report), `tools/verify-live-wnd-server.sh` (new class-B gate), `tools/sweep-vz.sh`, `tools/verify-unit-tests.sh`, docs (claim/log/march/status).

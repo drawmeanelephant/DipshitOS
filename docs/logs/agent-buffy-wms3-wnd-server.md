@@ -5,7 +5,7 @@
 ## 2026-08-29 — WMS3 claimed (issue #623)
 
 - Claimed **WMS3 — WM server process scaffold (WND.BIN + drift-guard extraction)**
-  as `docs/claims/0623-wms3-wnd-server.md` (status 🔄, heartbeat 2026-08-29).
+  as `docs/claims/3881-wms3-wnd-server.md` (status 🔄, heartbeat 2026-08-29).
   Branch `agent/buffy/wms3-wnd-server` cut from the WMS2 branch (PR #633,
   commit f8dbe39) so it builds on the slot-65 register + kind-18 tick
   delivery — WMS3 legitimately depends on WMS2's code being present, so the
@@ -19,5 +19,5 @@
   a checked copy); a `wnd start` shell bootstrap (infrastructure, NOT in
   `APPS.TXT`; default VM stays shim-only); kill+re-register crash story.
 - Declared touches in the claim's `Touches:` list; depends on claims 1484
-  (WMS1) + 0622 (WMS2) + 7786 (kill).
+  (WMS1) + 8482 (WMS2) + 7786 (kill).
 - **Heartbeat:** 2026-08-29.
