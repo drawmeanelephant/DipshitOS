@@ -176,6 +176,14 @@ context:
 ragshit *ARGS:
     python3 tools/ragshit/ragshit {{ARGS}}
 
+# Sanity-check the host toolchain at session start (class A — sourceable, no VM):
+# verifies bash/sed/jq/yq resolve to the MODERN Homebrew builds, re-prepends
+# /opt/homebrew/bin to PATH, and bitches vocally about any 2007-era /bin/bash
+# or BSD sed it finds. Run `just check-env` directly, or `source tools/env-check.sh`
+# from your login/agent startup so every session checks once.
+check-env:
+    bash tools/env-check.sh
+
 # Verify the MMU takeover contract is intact (class A — ADR 0006 supersession + kernel T0SZ=16/TLBI comments; deterministic, no VM — claims 0022/1517)
 verify-mmu-debt:
     bash tools/verify-mmu-debt.sh
