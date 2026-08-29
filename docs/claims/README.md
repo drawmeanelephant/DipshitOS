@@ -122,6 +122,7 @@ loudly if the generator or a table is broken.
 | [3679-m18-t4-history](3679-m18-t4-history.md) | buffy (`agent/buffy/m18-t4-history`) | ✅ done 2026-08-22 |
 | [3881-wms3-wnd-server](3881-wms3-wnd-server.md) | buffy (`agent/buffy/wms3-wnd-server`) | ✅ done (2026-08-29, PR closing #623) |
 | [4001-m31-dynamic-ecosystem](4001-m31-dynamic-ecosystem.md) | buffy (`agent/buffy/m30-dynamic-linking`) | ✅ done |
+| [4278-wms5-gate2-geometry-policy](4278-wms5-gate2-geometry-policy.md) | buffy (`agent/buffy/wms5-gate2-geometry-policy`) | ✅ complete |
 | [4341-m23-editor-completeness](4341-m23-editor-completeness.md) | Buffy (`agent/buffy/m23-editor-wave2`) | ✅ done |
 | [4354-m23-m24-gate-evidence](4354-m23-m24-gate-evidence.md) | buffy (`agent/buffy/m23-m24-gate-sweep`) | ✅ done — the full K-row sweep landed 2026-08-26: `verify-live-calc-prog.sh` (K1) and the new `verify-live-calc-depth.sh` (K2/K3/K4/K6/K7/K9/K10/K12/K13/K14/K16) both PASS on VZ; two real bugs surfaced and fixed (see Notes). |
 | [4379-m25-file-manager-depth](4379-m25-file-manager-depth.md) | buffy (`agent/buffy/m25-file-manager-depth`) | ✅ done 2026-08-26 (`agent/buffy/m25-file-manager-depth`) |
