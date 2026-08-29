@@ -193,8 +193,38 @@ so every earlier gate keeps passing. New class-B gate
 `tools/verify-live-wmctl-register.sh` **PASS on VZ (2026-08-29)**: `WNDSTUB.BIN`
 registers, receives a COMPOSITE_TICK, issues REQUEST_PRESENT (present
 counter advances), exits, is reaped, the kernel reports the shim fallback,
-and `syscalls` shows `65 sys_wmctl calls=2` + `implemented=66`. **WMS3 next
-(WM server process scaffold, #623).**
+and `syscalls` shows `65 sys_wmctl calls=2` + `implemented=66`.
+
+**WMS3 is done (claim 3881, issue #623): the long-lived EL0 WM server.**
+`user/src/wnd.zig` (WND.BIN) REGISTERs at startup and then runs a
+wait-event loop servicing kind-18 `COMPOSITE_TICK` and issuing
+REQUEST_PRESENT at its own cadence (every 2 ticks, alive marker
+`wnd: present`) — the first pacing that is NOT the shell idle. The `wnd
+start` monitor command is the defined bootstrap (the default VM stays
+shim-only because nothing auto-starts it); `kill WND.BIN` exercises the
+full WMS2 teardown → shim-fallback → re-register round-trip. Gate
+`tools/verify-live-wnd-server.sh` **PASS on VZ (2026-08-29)**: registered →
+present → kill 137 → reaped → `wm: unregistered, shim resumed` → fresh
+re-register → shell responsive. (Root cause from the bring-up: the marker
+write used a 14-byte count for a 13-byte string, crossing the program's
+content region and EFAULTing silently — found via `strace exec WND.BIN`.)
+
+**WMS4 is done (claim 2491, issue #624): chrome policy drained out via
+SET_WINDOW descriptors.** The 40-byte flat `ChromeDesc` (kind bitmask +
+flags + 8 theme colors) is frozen in `kernel/src/wnd_core.zig` + ADR 0007;
+`SET_WINDOW` (cmd 2) accepts a broadcast ALL policy or per-window
+overrides (unknown bits/ids/len → `EINVAL`; geometry still kernel-owned
+until WMS5). While a WM is registered, REQUEST_PRESENT composites and
+`draw_chrome` paints from descriptors; with no WM the shim paints
+byte-identically (one registration-flag branch). WM teardown clears the
+chrome policy → shim fallback. WND.BIN issues the dark-theme policy at
+startup — the WM becomes the theme owner. Gate
+`tools/verify-live-wnd4-chrome.sh` **PASS on VZ (2026-08-29)**: with WND.BIN
+driving chrome, the measured scanout (focused ring 31/31 px, label ink
+156, close-red 19; unfocused border/title/client metrics) matches the
+shim gates' measurements exactly — the drain-out parity proof — plus `wm`
+observability (`submissions=1 policy_kind=0x3f`, per-window `id=2
+kind=0x3f`). **WMS5 next (geometry drain-out, #625).**
 
 > https://github.com/drawmeanelephant/DipshitOS/milestone/16
 
