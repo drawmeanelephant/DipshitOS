@@ -617,6 +617,14 @@ pub fn notif_center_toggle() void {
     _ = mark_dirty(0);
 }
 
+/// M32 WMS6 Gate B (issue #626): open/close the panel explicitly — the
+/// decision channel for the registered WM (NOTIF_CENTER cmd 6). The kernel
+/// clamps + blits; the WM says open or closed.
+pub fn notif_center_set_open(open: bool) void {
+    notif_center_open = open;
+    _ = mark_dirty(0);
+}
+
 /// M21 W5: dismiss a notification by index in the center panel.
 pub fn notif_center_dismiss(index: usize) bool {
     const result = notify_dismiss(index);
@@ -2582,7 +2590,12 @@ pub fn pointer_tick(st: input.PointerState, click: ?input.Click) ?u8 {
                 }
             }
             // M21 W5: tray clock click — toggle notification center panel.
-            if (!handled_btn) {
+            // M32 WMS6 Gate B (issue #626): while a WM owns input the raw
+            // click already fanned to it (kind 19 WM_POINTER carries the
+            // button byte); the WM decides open/close/dismiss/clear via
+            // NOTIF_CENTER / NOTIF_DISMISS, so the kernel gates its OWN
+            // tray-click decision off (like the keyboard geometry path).
+            if (!handled_btn and !wm_owns_input) {
                 const tr = tray_rect();
                 if (cursor_x >= tr.x and cursor_x < tr.x + tr.w and
                     cursor_y >= tr.y and cursor_y < tr.y + tr.h)
@@ -2592,7 +2605,7 @@ pub fn pointer_tick(st: input.PointerState, click: ?input.Click) ?u8 {
                 }
             }
             // M21 W5: notification center panel click handling.
-            if (!handled_btn and notif_center_open) {
+            if (!handled_btn and !wm_owns_input and notif_center_open) {
                 if (notif_center_hit_test(cursor_x, cursor_y)) |hit| {
                     if (hit == ~@as(usize, 0)) {
                         notif_center_clear_all();

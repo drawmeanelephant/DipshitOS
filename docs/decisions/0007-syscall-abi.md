@@ -603,6 +603,8 @@ syscall number 0–64 stays frozen):
 | REQUEST_PRESENT | `WMCTL_REQUEST_PRESENT` | 3 | all reserved (0) | 0 = present scheduled | `EACCES` caller not the WM |
 | SET_STATE | `WMCTL_SET_STATE` | 4 | a0 = window id (or `0xFFFF_FFFF` for the ALL workspace broadcast), a1 = visible (bits 0–1) \| workspace << 8 \| always-on-top bit 16 | 0 = applied | `EACCES` caller not the WM; `EINVAL` bad id / workspace / visibility |
 | ALT_TAB | `WMCTL_ALT_TAB` | 5 | a0 = window id, a1 = action (1 activate, 2 cycle, 3 commit, 4 dismiss) | 0 = applied | `EACCES` caller not the WM; `EINVAL` bad id / action |
+| NOTIF_CENTER | `WMCTL_NOTIF_CENTER` | 6 | a0 = 0 close / 1 open / 2 clear-all | 0 = applied | `EACCES` caller not the WM; `EINVAL` bad action |
+| NOTIF_DISMISS | `WMCTL_NOTIF_DISMISS` | 7 | a0 = row index | 0 = applied | `EACCES` caller not the WM; `EINVAL` out-of-range index |
 
 Unknown/zero `cmd` → `EINVAL`. `REGISTER` is one-seat: a second registration
 refuses `EACCES`; the registered pid is observable in the monitor's `wm`
@@ -694,3 +696,17 @@ registered the kernel fans the raw Alt+Tab chord to the WM (kind 21 `WM_KEY`
 with `MOD_ALT`), its own `alt_tab_pending` is gated behind `!wm_owns_input`,
 and the WM decides the target from its kind-20 mirror registry via the shared
 wnd_core rule, issuing `ALT_TAB commit`. No WM registered → shim byte-identical.
+
+### Amendment (2026-08-29, claim 7557 — the WMS6 Gate-B NOTIF_CENTER channel)
+
+The second desktop-chrome surface to leave the kernel is the flagship **click-driven**
+notification center (issue #626). `NOTIF_CENTER` (cmd 6) `a0` = 0 close / 1 open /
+2 clear-all — the kernel sets `notif_center_open` / clears the ring through the same
+`notif_center_set_open`/`notif_center_clear_all` primitives the shim uses (clamped, and
+the panel blits from `notif_center_open` + the ring). `NOTIF_DISMISS` (cmd 7) `a0` = row
+index dismisses one notification (an out-of-range index is `EINVAL`, no silent no-op). The
+tray-click input path it rides: while a WM is registered the kernel fans the raw pointer
+click (kind 19 `WM_POINTER` carries the HID button byte) out, its OWN tray-click
+toggle + panel dismiss/clear are gated behind `!wm_owns_input`, and the WM hit-tests the
+tray (the same `fb_w - 80` slice as `tray_rect`), decides, and issues `NOTIF_CENTER`.
+No WM registered → shim byte-identical.

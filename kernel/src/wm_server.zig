@@ -56,6 +56,12 @@ pub const alt_tab_activate: u64 = 1;
 pub const alt_tab_cycle: u64 = 2;
 pub const alt_tab_commit: u64 = 3;
 pub const alt_tab_dismiss: u64 = 4;
+/// M32 WMS6 Gate B (issue #626): NOTIF_CENTER — the notification-center
+/// surface. a0 = 0 close, 1 open, 2 clear-all. The WM decides the panel's
+/// open/close/clear; the kernel clamps + blits from its own `notif_center_open`.
+pub const wmctl_notif_center: u64 = 6;
+/// NOTIF_DISMISS — a0 = row index; the WM dismisses one notification.
+pub const wmctl_notif_dismiss: u64 = 7;
 
 /// The single registered WM server process id; null = no WM registered
 /// (shim mode, the default — every pre-M32 gate runs in this state).
@@ -76,6 +82,10 @@ var set_window_count: u64 = 0;
 /// M32 WMS6 Gate A (issue #626): total ALT_TAB submissions accepted (the
 /// observability counter — how many desktop-chrome decisions the WM made).
 var alt_tab_apply_count: u64 = 0;
+/// M32 WMS6 Gate B (issue #626): NOTIF_CENTER / NOTIF_DISMISS submissions
+/// accepted — the notification-center decisions the WM made.
+var notif_center_count: u64 = 0;
+var notif_dismiss_count: u64 = 0;
 /// Set when the registered WM exits (teardown) — the shell idle loop drains
 /// this into the `wm: unregistered, shim resumed` report (the exit path is
 /// IRQ context and console-free, so the report is drained like the process
@@ -91,6 +101,8 @@ pub fn init() void {
     set_window_count = 0;
     set_state_count = 0;
     alt_tab_apply_count = 0;
+    notif_center_count = 0;
+    notif_dismiss_count = 0;
     pointer_fan_count = 0;
     window_mirror_count = 0;
     key_fan_count = 0;
@@ -226,6 +238,8 @@ pub const WmInfo = struct {
     set_window_count: u64,
     set_state_count: u64,
     alt_tab_apply_count: u64,
+    notif_center_count: u64,
+    notif_dismiss_count: u64,
     pointer_fan_count: u64,
     window_mirror_count: u64,
     key_fan_count: u64,
@@ -240,6 +254,8 @@ pub fn info() WmInfo {
         .set_window_count = set_window_count,
         .set_state_count = set_state_count,
         .alt_tab_apply_count = alt_tab_apply_count,
+        .notif_center_count = notif_center_count,
+        .notif_dismiss_count = notif_dismiss_count,
         .pointer_fan_count = pointer_fan_count,
         .window_mirror_count = window_mirror_count,
         .key_fan_count = key_fan_count,
@@ -334,6 +350,16 @@ pub fn note_set_state() void {
 /// made (activate/cycle/commit/dismiss).
 pub fn note_alt_tab() void {
     alt_tab_apply_count +%= 1;
+}
+
+/// Note a NOTIF_CENTER (cmd 6) submission — the WM's open/close/clear call.
+pub fn note_notif_center() void {
+    notif_center_count +%= 1;
+}
+
+/// Note a NOTIF_DISMISS (cmd 7) submission — the WM dismissing a row.
+pub fn note_notif_dismiss() void {
+    notif_dismiss_count +%= 1;
 }
 
 // ---------------------------------------------------------------------------
