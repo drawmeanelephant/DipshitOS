@@ -47,6 +47,7 @@ const events = @import("events.zig"); // Milestone 9 (claim 9228): application e
 const clipboard = @import("clipboard.zig"); // Arc2 W3 (claim 1264): tray clipboard indicator
 const virtio_snd = @import("virtio_snd.zig"); // M27 G5 (#448): action sound feedback
 const settings = @import("settings.zig");
+const geom = @import("wnd_core.zig"); // M32 WMS3 (issue #623): the shared pure rules (hit-test / workspace / clamps / title-layout) — compiled by the kernel AND the WM server so they cannot drift
 
 /// M27 G13: Focus-follows-mouse configuration and dialog previous-focus tracking
 pub var focus_follows_mouse: bool = false;
@@ -94,13 +95,13 @@ pub const cursor_h: usize = 8;
 /// bound (no heap, no allocation).
 pub const user_window_id_base: u8 = 2;
 pub const user_windows_max: usize = 4;
-pub const user_buf_w: u32 = 512;
+pub const user_buf_w: u32 = geom.user_buf_w;
 /// 424 (not 384): M24 (commit 595bc71) grew CALC.BIN's window to 424
 /// tall for the statistics mode rows — the back-buffer must fit the
 /// tallest app window or `sys_win_open` rejects it (the M11 desktop gate
 /// surfaced this as `calc: failed to open window` once the exec ENOENT
 /// was fixed). 424 is the tallest window across the app fleet.
-pub const user_buf_h: u32 = 424;
+pub const user_buf_h: u32 = geom.user_buf_h;
 
 /// Step 8 (Issue #211): the system taskbar at the bottom of the scanout.
 pub const taskbar_h: u32 = 20;
@@ -243,9 +244,9 @@ pub fn cycle_workspace() void {
 
 /// Arc4 #241: check if a window is visible in the current workspace.
 pub fn workspace_visible(w: *const Window) bool {
-    // Fixed layers are always visible.
-    if (w.kind != .user) return true;
-    return w.workspace == current_workspace;
+    // Delegated to the shared wnd_core rule (single source with the WM
+    // server — the drift guard). Fixed layers are always visible.
+    return geom.workspace_visible(to_geom(w), current_workspace);
 }
 
 /// The clock's back-buffer (fixed BSS, contiguous B8G8R8X8). The
@@ -270,9 +271,11 @@ var drag_offset_x: u32 = 0;
 var drag_offset_y: u32 = 0;
 
 /// Arc2 W1 (claim 3589, #224): drag-to-resize — 6×6 bottom-right corner.
-pub const resize_min_w: u32 = 128;
-pub const resize_min_h: u32 = 64;
-pub const resize_hit_size: u32 = 6;
+/// Bounds + hit size are the shared wnd_core policy (single source with
+/// the WM server).
+pub const resize_min_w: u32 = geom.resize_min_w;
+pub const resize_min_h: u32 = geom.resize_min_h;
+pub const resize_hit_size: u32 = geom.resize_hit_size;
 var resize_id: ?u8 = null;
 var resize_start_x: u32 = 0;
 var resize_start_y: u32 = 0;
@@ -659,25 +662,9 @@ pub fn user_border_unfocused() u32 {
 /// many bytes of it to draw, given a window width and label length.
 /// Leaves room for the minimize+close buttons on the right; labels too
 /// wide for the remaining span truncate with a trailing "...".
-pub fn chrome_title_layout(win_w: usize, label_len: usize) struct { x_off: usize, draw_len: usize, truncated: bool } {
-    const btn_reserve: usize = 34; // minimize + close + margins (right side)
-    const min_pad: usize = 4; // never start left of x+4
-    const usable = if (win_w > btn_reserve + min_pad) win_w - btn_reserve else win_w;
-    const max_chars = usable / 8;
-    var draw_len = label_len;
-    var truncated = false;
-    if (draw_len > max_chars and max_chars >= 4) {
-        draw_len = max_chars - 3;
-        truncated = true;
-    } else if (draw_len > max_chars) {
-        draw_len = max_chars;
-        truncated = true;
-    }
-    const text_px = if (truncated) (draw_len + 3) * 8 else draw_len * 8;
-    var x_off: usize = 0;
-    if (win_w > text_px) x_off = (win_w - text_px) / 2;
-    if (x_off < min_pad) x_off = min_pad;
-    return .{ .x_off = x_off, .draw_len = draw_len, .truncated = truncated };
+pub fn chrome_title_layout(win_w: usize, label_len: usize) geom.TitleLayout {
+    // Single source: the shared wnd_core layout rule.
+    return geom.chrome_title_layout(win_w, label_len);
 }
 
 /// Theme color for the user window title bar.
@@ -1016,20 +1003,29 @@ pub fn raise(id: u8) bool {
     return false;
 }
 
+/// Adapter: the pure wnd_core geometry view of a kernel Window. The ONLY
+/// rule logic lives in wnd_core (the drift guard); this is pure glue.
+fn to_geom(w: *const Window) geom.Geom {
+    return .{
+        .id = w.id,
+        .kind = @enumFromInt(@intFromEnum(w.kind)),
+        .x = w.x,
+        .y = w.y,
+        .w = w.w,
+        .h = w.h,
+        .visible = w.visible,
+        .workspace = w.workspace,
+    };
+}
+
 /// The topmost visible window containing (x, y), or null when none does.
 pub fn hit_test(x: u32, y: u32) ?u8 {
-    var i: usize = win_count;
-    while (i > 0) {
-        i -= 1;
-        const w = &windows[i];
-        if (!w.visible) continue;
-        // Arc4 #241: skip windows not in the current workspace.
-        if (!workspace_visible(w)) continue;
-        // Wallpaper is background-only — not interactive.
-        if (w.kind == .wallpaper) continue;
-        if (x >= w.x and x < w.x + w.w and y >= w.y and y < w.y + w.h) return w.id;
-    }
-    return null;
+    // Delegated to the shared wnd_core hit-test rule (single source with
+    // the WM server). The registry order IS the z-order (0 = bottom).
+    var gbuf: [max_windows]geom.Geom = undefined;
+    var i: usize = 0;
+    while (i < win_count) : (i += 1) gbuf[i] = to_geom(&windows[i]);
+    return geom.hit_test(gbuf[0..win_count], current_workspace, x, y);
 }
 
 /// Focus the topmost window at (x, y). Returns false when nothing is there.
@@ -1330,26 +1326,14 @@ pub fn is_resize_hit(win: Window, px: u32, py: u32) bool {
 /// Clamp helpers — pure, host-testable. Buffer bounds 128×64..512×424 plus
 /// on-scanout containment (so a resize never writes beyond the framebuffer).
 pub fn clamp_resize_w(req_w: i32, win_x: u32) u32 {
-    var w: i32 = req_w;
-    if (w < @as(i32, resize_min_w)) w = @as(i32, resize_min_w);
-    if (w > @as(i32, user_buf_w)) w = @as(i32, user_buf_w);
-    // Screen containment: max is remaining width from win_x.
-    const max_screen = @as(i32, @intCast(virtio_gpu.fb_width -| win_x));
-    if (w > max_screen) w = max_screen;
-    if (w < @as(i32, resize_min_w)) w = @as(i32, resize_min_w);
-    if (w < 0) w = @as(i32, resize_min_w);
-    return @intCast(w);
+    // Delegated to the shared wnd_core clamp rule (single source with the
+    // WM server).
+    return geom.clamp_resize_w(req_w, win_x, virtio_gpu.fb_width, resize_min_w, user_buf_w);
 }
 
 pub fn clamp_resize_h(req_h: i32, win_y: u32) u32 {
-    var h: i32 = req_h;
-    if (h < @as(i32, resize_min_h)) h = @as(i32, resize_min_h);
-    if (h > @as(i32, user_buf_h)) h = @as(i32, user_buf_h);
-    const max_screen = @as(i32, @intCast(virtio_gpu.fb_height -| win_y));
-    if (h > max_screen) h = max_screen;
-    if (h < @as(i32, resize_min_h)) h = @as(i32, resize_min_h);
-    if (h < 0) h = @as(i32, resize_min_h);
-    return @intCast(h);
+    // Delegated to the shared wnd_core clamp rule.
+    return geom.clamp_resize_h(req_h, win_y, virtio_gpu.fb_height, resize_min_h, user_buf_h);
 }
 
 /// Resize a user window to (w, h), clamped to 128×64..512×424 and on-scanout.

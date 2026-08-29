@@ -1,0 +1,250 @@
+//! M32 WMS3 (issue #623) — shared PURE window-manager logic (the drift
+//! guard).
+//!
+//! The single-source home for the window manager's pure geometry and
+//! policy RULES: rect math, hit-testing, z-order reasoning, resize
+//! clamping, workspace visibility, and chrome title layout. It is compiled
+//! by BOTH the kernel shim (`kernel/src/driving_award.zig`) and the
+//! long-lived EL0 WM server (`user/src/wnd.zig`), so the two cannot
+//! behaviorally drift while both are live — the whole point of WMS3's
+//! single-source extraction (one physical file, not a checked copy).
+//!
+//! DEPENDENCY-FREE CONTRACT: this module imports NOTHING (no kernel
+//! modules, no `std` at comptime-only is allowed for tests) — it is pure
+//! computation over plain value types. It deliberately does NOT render and
+//! holds NO kernel state (no framebuffer, no `virtio_gpu`, no event
+//! queues); it only returns decisions the caller applies. This is what
+//! lets the same file compile at EL1 (kernel) and EL0 (user), freestanding,
+//! no libc, no POSIX.
+//!
+//! WMS4–WMS6 drain-out contract: as chrome / geometry / z-order / focus
+//! policy moves to the WM server, the POLICY RULES live HERE; the kernel
+//! keeps only blit/present/input-fan-out. When the two disagree about a
+//! rule, they both get the fix from this one file — that is the no-drift
+//! guarantee.
+//!
+//! Extraction discipline (issue #623 risk note): only what WMS4–WMS6 need
+//! (rects, registry, z-order, hit-test, focus/clamp) lives here — NOT the
+//! whole 4,740-line `driving_award.zig`.
+
+/// The window-kind tags (the terminal and the fixed chrome layers).
+pub const Kind = enum {
+    terminal,
+    clock,
+    user,
+    taskbar,
+    wallpaper,
+    dock,
+};
+
+/// The pure, kernel-agnostic geometry row the rules operate on. The kernel
+/// shim adapts its runtime `Window` to this via `Geom.of`; the WM server
+/// can carry the same rows to make decisions. This is deliberately NOT the
+/// kernel's full `Window` (which owns back-buffers, event state, animation
+/// phases, dynamic titles — none of which are policy decisions).
+pub const Geom = struct {
+    id: u8,
+    kind: Kind,
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+    visible: bool,
+    workspace: u8,
+};
+
+/// The resize bounds and hit size (the numeric policy; single source).
+/// The kernel re-exports these so the two sides can never use different
+/// numbers for the same rule.
+pub const resize_min_w: u32 = 128;
+pub const resize_min_h: u32 = 64;
+pub const resize_hit_size: u32 = 6;
+pub const user_buf_w: u32 = 512;
+pub const user_buf_h: u32 = 424;
+
+/// True when (x, y) is inside the geometry row's rect (left-inclusive,
+/// right-exclusive — the same convention the compositor uses).
+pub fn rect_contains(g: Geom, x: u32, y: u32) bool {
+    return x >= g.x and x < g.x + g.w and y >= g.y and y < g.y + g.h;
+}
+
+/// Arc4 #241: is a window visible in the current workspace? Fixed layers
+/// (everything non-`.user`) are visible on all workspaces; user windows
+/// only on their own. Pure.
+pub fn workspace_visible(g: Geom, current_workspace: u8) bool {
+    if (g.kind != .user) return true;
+    return g.workspace == current_workspace;
+}
+
+/// The topmost visible, in-workspace, interactive window containing
+/// (x, y), or null. Iterates the z-order from TOP (last) to bottom, skips
+/// hidden windows, out-of-workspace windows, and the non-interactive
+/// wallpaper layer. Pure — the ONLY hit-test rule; the compositor's input
+/// fan-out and the WM server's hit-testing both call this.
+///
+/// `geoms` must be in registry order (index 0 = bottom of the z-order, the
+/// last index = top) — exactly the z-order convention the compositor uses.
+pub fn hit_test(geoms: []const Geom, current_workspace: u8, x: u32, y: u32) ?u8 {
+    var i: usize = geoms.len;
+    while (i > 0) {
+        i -= 1;
+        const g = geoms[i];
+        if (!g.visible) continue;
+        if (!workspace_visible(g, current_workspace)) continue;
+        if (g.kind == .wallpaper) continue;
+        if (rect_contains(g, x, y)) return g.id;
+    }
+    return null;
+}
+
+/// The z-order rank of a window by id (the registry index, 0 = bottom), or
+/// null. Pure — the number the kernel's monitor row and the EL0
+/// `sys_win_query` both report; the WM server uses it once it owns the
+/// registry (WMS4).
+pub fn z_rank(geoms: []const Geom, id: u8) ?usize {
+    for (geoms, 0..) |el, i| {
+        if (el.id == id) return i;
+    }
+    return null;
+}
+
+/// Clamp a requested window width to `min_w..max_buf_w` AND on-scanout
+/// (never wider than the framebuffer minus the window's x). Pure.
+pub fn clamp_resize_w(req_w: i32, win_x: u32, fb_w: u32, min_w: u32, max_buf_w: u32) u32 {
+    var w: i32 = req_w;
+    if (w < @as(i32, @intCast(min_w))) w = @as(i32, @intCast(min_w));
+    if (w > @as(i32, @intCast(max_buf_w))) w = @as(i32, @intCast(max_buf_w));
+    // Screen containment: max is remaining width from win_x.
+    const max_screen = @as(i32, @intCast(fb_w -| win_x));
+    if (w > max_screen) w = max_screen;
+    if (w < @as(i32, @intCast(min_w))) w = @as(i32, @intCast(min_w));
+    if (w < 0) w = @as(i32, @intCast(min_w));
+    return @intCast(w);
+}
+
+/// Clamp a requested window height to `min_h..max_buf_h` AND on-scanout.
+/// Pure.
+pub fn clamp_resize_h(req_h: i32, win_y: u32, fb_h: u32, min_h: u32, max_buf_h: u32) u32 {
+    var h: i32 = req_h;
+    if (h < @as(i32, @intCast(min_h))) h = @as(i32, @intCast(min_h));
+    if (h > @as(i32, @intCast(max_buf_h))) h = @as(i32, @intCast(max_buf_h));
+    const max_screen = @as(i32, @intCast(fb_h -| win_y));
+    if (h > max_screen) h = max_screen;
+    if (h < @as(i32, @intCast(min_h))) h = @as(i32, @intCast(min_h));
+    if (h < 0) h = @as(i32, @intCast(min_h));
+    return @intCast(h);
+}
+
+/// M20-U9 layout helper: where the centered title text starts and how many
+/// bytes to draw, given a window width and label length. Leaves room for
+/// the minimize+close buttons; too-wide labels truncate with "...". Pure.
+/// The title-layout result (named so BOTH sides return the SAME type — an
+/// anonymous struct would create two distinct types the delegating kernel
+/// could not return directly).
+pub const TitleLayout = struct { x_off: usize, draw_len: usize, truncated: bool };
+
+pub fn chrome_title_layout(win_w: usize, label_len: usize) TitleLayout {
+    const btn_reserve: usize = 34; // minimize + close + margins (right side)
+    const min_pad: usize = 4; // never start left of x+4
+    const usable = if (win_w > btn_reserve + min_pad) win_w - btn_reserve else win_w;
+    const max_chars = usable / 8;
+    var draw_len = label_len;
+    var truncated = false;
+    if (draw_len > max_chars and max_chars >= 4) {
+        draw_len = max_chars - 3;
+        truncated = true;
+    } else if (draw_len > max_chars) {
+        draw_len = max_chars;
+        truncated = true;
+    }
+    const text_px = if (truncated) (draw_len + 3) * 8 else draw_len * 8;
+    var x_off: usize = 0;
+    if (win_w > text_px) x_off = (win_w - text_px) / 2;
+    if (x_off < min_pad) x_off = min_pad;
+    return .{ .x_off = x_off, .draw_len = draw_len, .truncated = truncated };
+}
+
+// ---------------------------------------------------------------------------
+// Host tests (Class A) — pin the RULES so the shim and the WM server provably
+// share identical decision logic (the drift guard's machine check).
+// ---------------------------------------------------------------------------
+
+fn mk(id: u8, kind: Kind, x: u32, y: u32, w: u32, h: u32) Geom {
+    return .{ .id = id, .kind = kind, .x = x, .y = y, .w = w, .h = h, .visible = true, .workspace = 0 };
+}
+
+const std = @import("std");
+
+test "wnd_core: hit_test returns the topmost visible interactive window" {
+    const geoms = [_]Geom{
+        mk(0, .terminal, 0, 0, 1280, 720), // bottom
+        mk(254, .wallpaper, 0, 0, 1280, 720),
+        mk(255, .taskbar, 0, 700, 1280, 20),
+        mk(2, .user, 100, 100, 400, 300), // top
+    };
+    // Wallpaper is skipped, topmost user wins.
+    try std.testing.expectEqual(@as(?u8, 2), hit_test(&geoms, 0, 200, 200));
+    // Taskbar (skipping the overlapping user window? no — taskbar is above here)...
+    try std.testing.expectEqual(@as(?u8, 255), hit_test(&geoms, 0, 640, 710));
+    // Genuine miss (outside every window).
+    try std.testing.expectEqual(@as(?u8, null), hit_test(&geoms, 0, 2000, 2000));
+    // User window's right edge is exclusive: x == w falls through to the
+    // full-screen terminal underneath, so the topmost is the terminal (0).
+    try std.testing.expectEqual(@as(?u8, 0), hit_test(&geoms, 0, 500, 200)); // x == user.w, exclusive
+    // One pixel inside the user window top-right.
+    try std.testing.expectEqual(@as(?u8, 2), hit_test(&geoms, 0, 499, 399)); // inside
+}
+
+test "wnd_core: hit_test honours workspace and visibility" {
+    var geoms = [_]Geom{
+        mk(0, .terminal, 0, 0, 1280, 720),
+        mk(2, .user, 100, 100, 400, 300),
+        mk(3, .user, 200, 200, 300, 200),
+    };
+    geoms[1].workspace = 1; // window 2 only on ws 1
+    // Current ws 0: window 2 hidden, window 3 (ws 0) wins.
+    try std.testing.expectEqual(@as(?u8, 3), hit_test(&geoms, 0, 250, 250));
+    // Current ws 1: window 3 hidden, window 2 wins.
+    try std.testing.expectEqual(@as(?u8, 2), hit_test(&geoms, 1, 250, 250));
+    // Hidden window is never hit — only the full-screen terminal remains.
+    geoms[2].visible = false;
+    try std.testing.expectEqual(@as(?u8, 0), hit_test(&geoms, 0, 250, 250));
+}
+
+test "wnd_core: resize clamps are the on-scanout bounds" {
+    // Under min, inside buffer, screen-bounded.
+    try std.testing.expectEqual(@as(u32, resize_min_w), clamp_resize_w(10, 0, 1280, resize_min_w, user_buf_w));
+    // Requested from x=1200: remaining screen = 80 → clamps to 128 (min).
+    try std.testing.expectEqual(@as(u32, 128), clamp_resize_w(300, 1200, 1280, resize_min_w, user_buf_w));
+    // Max buffer bound.
+    try std.testing.expectEqual(@as(u32, user_buf_w), clamp_resize_w(99999, 0, 1280, resize_min_w, user_buf_w));
+    try std.testing.expectEqual(@as(u32, 400), clamp_resize_w(400, 100, 1280, resize_min_w, user_buf_w));
+}
+
+test "wnd_core: workspace visibility rule (fixed layers always visible)" {
+    try std.testing.expect(workspace_visible(mk(255, .taskbar, 0, 0, 1, 1), 2));
+    try std.testing.expect(workspace_visible(mk(254, .wallpaper, 0, 0, 1, 1), 2));
+    try std.testing.expect(!workspace_visible(mk(2, .user, 0, 0, 1, 1), 1)); // ws 0 vs current 1
+    try std.testing.expect(workspace_visible(mk(3, .user, 0, 0, 1, 1), 0));
+}
+
+test "wnd_core: chrome title layout (the shared truncation rule)" {
+    const wide = chrome_title_layout(400, 100);
+    try std.testing.expect(wide.truncated);
+    try std.testing.expect(wide.draw_len < 100);
+    const narrow = chrome_title_layout(400, 4);
+    try std.testing.expect(!narrow.truncated);
+    try std.testing.expectEqual(@as(usize, 8), narrow.draw_len * 8 / 4); // 4 chars
+    // Symmetric centring for a small label.
+    const small = chrome_title_layout(200, 2);
+    try std.testing.expectEqual(@as(usize, (200 - 16) / 2), small.x_off);
+    try std.testing.expectEqual(@as(usize, 2), small.draw_len);
+}
+
+test "wnd_core: z_rank reports registry order (0 = bottom)" {
+    const geoms = [_]Geom{ mk(0, .terminal, 0, 0, 1, 1), mk(2, .user, 0, 0, 1, 1), mk(3, .user, 0, 0, 1, 1) };
+    try std.testing.expectEqual(@as(?usize, 0), z_rank(&geoms, 0));
+    try std.testing.expectEqual(@as(?usize, 1), z_rank(&geoms, 2));
+    try std.testing.expectEqual(@as(?usize, 2), z_rank(&geoms, 3));
+    try std.testing.expectEqual(@as(?usize, null), z_rank(&geoms, 99));
+}
