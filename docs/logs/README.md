@@ -151,6 +151,7 @@ meaningful — on main.
 | `agent/buffy/wms5-gate2-geometry-policy` | [`agent-buffy-wms5-gate2-geometry-policy.md`](agent-buffy-wms5-gate2-geometry-policy.md) |
 | WMS5 geometry policy drain-out (input seam + SET_WINDOW rects) | [`agent-buffy-wms5-geometry-seam.md`](agent-buffy-wms5-geometry-seam.md) |
 | `agent/buffy/wms6-altab-drain` | [`agent-buffy-wms6-altab-drain.md`](agent-buffy-wms6-altab-drain.md) |
+| `agent/buffy/wms6-dock-drain` | [`agent-buffy-wms6-dock-drain.md`](agent-buffy-wms6-dock-drain.md) |
 | `agent/buffy/wms6-notif-drain` | [`agent-buffy-wms6-notif-drain.md`](agent-buffy-wms6-notif-drain.md) |
 | `agent/buffy/wms6-tooltip-drain` | [`agent-buffy-wms6-tooltip-drain.md`](agent-buffy-wms6-tooltip-drain.md) |
 | agent/gates fleet-remainder | [`agent-gates-fleet-remainder.md`](agent-gates-fleet-remainder.md) |
