@@ -68,14 +68,22 @@ milestone 32's WMS1):
 | 7 | `WIN_BLUR` | Window lost focus | Window ID (`2..3`) | Newly focused window ID | 0 |
 | 8 | `WIN_CLOSE` | Close requested | Window ID (`2..3`) | 0 | 0 |
 | 18 | `COMPOSITE_TICK` | Composite/present cadence tick, delivered ONLY to the registered WM server's process queue (ADR 0015 D3). | Present sequence (monotonic, wraps at 2³²) | 0 (reserved) | 0 |
+| 19 | `WM_POINTER` | Raw absolute-pointer sample, delivered ONLY to the registered WM server (M32 WMS5, issue #625). | X \| (Y << 16) in framebuffer pixels (top-left origin) | 0 (reserved) | Low byte = the raw HID button byte (0x01 left, 0x02 right, 0x04 middle) |
+| 20 | `WM_WINDOW` | Window-registry mirror — one kernel window row fanned out so the registered WM can hit-test (M32 WMS5, issue #625). | X \| (Y << 16) | W \| (H << 16) | Low byte = window id; bit 8 = visible; bit 9 = focused; bits 10–11 = workspace |
 
-> **Routing restriction (kind 18).** Kind 18 is the first kind with a
+> **Routing restriction (kinds 18–20).** Kind 18 was the first kind with a
 > ROUTING RESTRICTION: every kind 1–17 fans out to the owning/focused
-> process per its own contract; kind 18 is delivered exclusively to the
-> process that registered via `sys_wmctl REGISTER` (slot 65). When no WM is
-> registered, kind 18 is never generated. Routing lives in `events.push`'s
-> caller (the WMS2 kernel path); the wire format is unchanged. Adopted by
-> M32 WMS1 (claim 1484).
+> process per its own contract; kinds 18–20 are delivered exclusively to
+> the process that registered via `sys_wmctl REGISTER` (slot 65). When no
+> WM is registered, they are never generated. Routing lives in
+> `events.push`'s caller (the WMS2/WMS5 kernel paths); the wire format is
+> unchanged. Kinds 19/20 form the M32 WMS5 input seam: while a WM is
+> registered the kernel stops consuming pointer GEOMETRY (drag/resize/
+> snap/focus-at are gated off behind `wm_owns_input`; the cursor stays a
+> kernel blit surface) and instead fans the raw stream + registry mirrors
+> out, so the WM — not the kernel — decides geometry and hit-tests.
+> Kind 18 adopted by M32 WMS1 (claim 1484); kinds 19/20 by M32 WMS5
+> (claim 9849).
 
 ---
 

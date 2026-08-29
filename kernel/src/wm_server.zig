@@ -69,7 +69,17 @@ pub fn init() void {
     present_count = 0;
     tick_count = 0;
     set_window_count = 0;
+    pointer_fan_count = 0;
+    window_mirror_count = 0;
     fallback_pending = false;
+    // M32 WMS5: a reset is a teardown — input ownership returns to the
+    // shim and the fan-out hooks are detached (a stale `wm_owns_input=true`
+    // stranded by a mid-test re-init would silently gate the kernel's
+    // geometry off in later aggregated tests). init() is the one place
+    // every setup path converges, so the reset is complete here.
+    driving_award.wm_owns_input = false;
+    driving_award.wm_pointer_hook = null;
+    driving_award.wm_window_hook = null;
 }
 
 /// True when a WM is registered (composite pacing has moved to the tick path).
@@ -91,6 +101,14 @@ pub fn register(pid: usize) bool {
     if (wm_pid != null) return false;
     wm_pid = pid;
     fallback_pending = false;
+    // M32 WMS5: the WM now owns input — the kernel stops consuming pointer
+    // geometry (the flag gate in driving_award.pointer_tick). The cursor
+    // stays a kernel blit; only the geometry DECISIONS move out. The raw
+    // pointer + registry mirrors fan out through these hooks (set at
+    // register, nulled at unregister — null hook = no WM = no-op).
+    driving_award.wm_owns_input = true;
+    driving_award.wm_pointer_hook = fan_pointer;
+    driving_award.wm_window_hook = fan_window;
     return true;
 }
 
@@ -107,6 +125,11 @@ pub fn unregister(pid: usize) bool {
     // painted). driving_award imports only wnd_core, so this import is
     // cycle-free (the seam delegates render-state teardown to the renderer).
     driving_award.clear_wm_chrome();
+    // M32 WMS5: the WM's input ownership dies with it — the kernel resumes
+    // consuming pointer geometry (shim fallback, byte-identical to pre-WMS5).
+    driving_award.wm_owns_input = false;
+    driving_award.wm_pointer_hook = null;
+    driving_award.wm_window_hook = null;
     return true;
 }
 
@@ -171,6 +194,8 @@ pub const WmInfo = struct {
     present_count: u64,
     tick_count: u64,
     set_window_count: u64,
+    pointer_fan_count: u64,
+    window_mirror_count: u64,
 };
 
 pub fn info() WmInfo {
@@ -180,6 +205,8 @@ pub fn info() WmInfo {
         .present_count = present_count,
         .tick_count = tick_count,
         .set_window_count = set_window_count,
+        .pointer_fan_count = pointer_fan_count,
+        .window_mirror_count = window_mirror_count,
     };
 }
 
@@ -187,6 +214,56 @@ pub fn info() WmInfo {
 /// calls this AFTER the descriptor was validated and stored).
 pub fn note_set_window() void {
     set_window_count +%= 1;
+}
+
+// ---------------------------------------------------------------------------
+// M32 WMS5 (issue #625): the INPUT SEAM — the registered WM receives the raw
+// pointer stream (kind 19 WM_POINTER) and the window-registry mirrors (kind
+// 20 WM_WINDOW); the kernel stops consuming pointer geometry while a WM is
+// registered (cursor stays a kernel blit surface). Routing restriction = the
+// kind-18 discipline: every fan-out is a no-op when no WM is registered.
+// ---------------------------------------------------------------------------
+
+/// Total WM_POINTER raw-stream events fanned out to the registered WM.
+var pointer_fan_count: u64 = 0;
+/// Total WM_WINDOW registry-mirror events fanned out to the registered WM.
+var window_mirror_count: u64 = 0;
+
+/// Fan ONE raw absolute-pointer sample to the registered WM (the input
+/// handover): kind 19, `arg0` = x|(y<<16) in fb pixels, `flags` low byte =
+/// the raw HID button byte. No-op when no WM is registered (shim mode —
+/// the kernel's own pointer_tick keeps consuming geometry exactly as
+/// before; zero regression). Caller maps HID logicals to pixels first.
+pub fn fan_pointer(x: u32, y: u32, buttons: u8) void {
+    const pid = wm_pid orelse return;
+    pointer_fan_count +%= 1;
+    events.push(pid, .{
+        .kind = events.WM_POINTER,
+        .flags = buttons,
+        .seq = 0,
+        .arg0 = x | (y << 16),
+        .arg1 = 0,
+    });
+}
+
+/// Fan ONE window-registry mirror to the registered WM (so it can
+/// hit-test): kind 20, `flags` = id | visible<<8 | focused<<9 |
+/// workspace<<10, `arg0` = x|(y<<16), `arg1` = w|(h<<16). No-op when no WM
+/// is registered.
+pub fn fan_window(id: u8, x: u32, y: u32, w: u32, h: u32, visible: bool, focused: bool, workspace: u8) void {
+    const pid = wm_pid orelse return;
+    window_mirror_count +%= 1;
+    var flags: u16 = id;
+    if (visible) flags |= 1 << 8;
+    if (focused) flags |= 1 << 9;
+    flags |= @as(u16, workspace & 0x3) << 10;
+    events.push(pid, .{
+        .kind = events.WM_WINDOW,
+        .flags = flags,
+        .seq = 0,
+        .arg0 = x | (y << 16),
+        .arg1 = w | (h << 16),
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -205,18 +282,75 @@ test "wm_server: register is one-seat and teardown falls back to the shim" {
     try std.testing.expectEqual(@as(?usize, 3), registered_pid());
     try std.testing.expect(!register(5));
 
+    // WMS5 (issue #625): registering hands input ownership to the WM — the
+    // kernel stops consuming pointer geometry and the raw-stream fan-out
+    // hooks go live (they no-op when no WM is registered).
+    try std.testing.expect(driving_award.wm_owns_input);
+    try std.testing.expect(driving_award.wm_pointer_hook != null);
+    try std.testing.expect(driving_award.wm_window_hook != null);
+
     // Teardown unregisters the registrant; a non-owner exit is a no-op.
     try std.testing.expect(!unregister(4));
     try std.testing.expect(unregister(3));
     try std.testing.expect(!registered());
     try std.testing.expect(registered_pid() == null);
 
+    // WMS5: input ownership and the fan-out hooks die with the WM (shim
+    // fallback — the kernel resumes consuming pointer geometry exactly as
+    // before; zero regression).
+    try std.testing.expect(!driving_award.wm_owns_input);
+    try std.testing.expect(driving_award.wm_pointer_hook == null);
+    try std.testing.expect(driving_award.wm_window_hook == null);
+
     // The fallback report is drained exactly once after a teardown.
     try std.testing.expect(take_fallback_report());
     try std.testing.expect(!take_fallback_report());
-    // ... and re-registering clears the pending flag.
+    // ... and re-registering clears the pending flag (then tear down so the
+    // aggregated test binary does not leak input ownership into later tests).
     try std.testing.expect(register(7));
     try std.testing.expect(!take_fallback_report());
+    try std.testing.expect(unregister(7));
+    try std.testing.expect(!driving_award.wm_owns_input);
+}
+
+test "wm_server: WMS5 raw-pointer and window-mirror fan-out is WM-only (kind 19/20 routing)" {
+    events.init();
+    init();
+    events.on_event_pushed = null;
+
+    // No WM: fan-outs are no-ops (nothing is generated, nothing changes).
+    fan_pointer(100, 200, 0x01);
+    fan_window(2, 10, 20, 30, 40, true, true, 0);
+    try std.testing.expectEqual(@as(u64, 0), info().pointer_fan_count);
+    try std.testing.expectEqual(@as(u64, 0), info().window_mirror_count);
+
+    // Register pid 3: the fan-outs deliver kind 19/20 ONLY to the WM.
+    try std.testing.expect(register(3));
+    fan_pointer(100, 200, 0x01);
+    fan_window(2, 10, 20, 30, 40, true, true, 0);
+    try std.testing.expectEqual(@as(u64, 1), info().pointer_fan_count);
+    try std.testing.expectEqual(@as(u64, 1), info().window_mirror_count);
+
+    const p = events.pop(3).?;
+    try std.testing.expectEqual(events.WM_POINTER, p.kind);
+    try std.testing.expectEqual(@as(u16, 0x01), p.flags); // button byte
+    try std.testing.expectEqual(@as(u32, 100 | (200 << 16)), p.arg0); // x|(y<<16)
+
+    const w = events.pop(3).?;
+    try std.testing.expectEqual(events.WM_WINDOW, w.kind);
+    try std.testing.expectEqual(@as(u16, 2 | (1 << 8) | (1 << 9)), w.flags); // id | visible | focused
+    try std.testing.expectEqual(@as(u32, 10 | (20 << 16)), w.arg0);
+    try std.testing.expectEqual(@as(u32, 30 | (40 << 16)), w.arg1);
+
+    // No other process's queue received anything (the kind-18 discipline).
+    var i: usize = 0;
+    while (i < process.max_processes) : (i += 1) {
+        if (i != 3) try std.testing.expectEqual(@as(usize, 0), events.pending(i));
+    }
+    // Teardown: fan-outs stop again (and the flag is clean for later tests).
+    try std.testing.expect(unregister(3));
+    fan_pointer(100, 200, 0x01);
+    try std.testing.expectEqual(@as(u64, 1), info().pointer_fan_count); // unchanged
 }
 
 test "wm_server: COMPOSITE_TICK is delivered only to the registered WM with the present sequence" {
@@ -247,6 +381,9 @@ test "wm_server: COMPOSITE_TICK is delivered only to the registered WM with the 
         if (j != 3) try std.testing.expectEqual(@as(usize, 0), events.pending(j));
     }
     try std.testing.expectEqual(@as(u64, 2), info().tick_count);
+    // Tear down so the aggregated test binary does not leak input ownership.
+    try std.testing.expect(unregister(3));
+    try std.testing.expect(!driving_award.wm_owns_input);
 }
 
 test "wm_server: REQUEST_PRESENT advances the present sequence and count" {
@@ -259,4 +396,7 @@ test "wm_server: REQUEST_PRESENT advances the present sequence and count" {
     try std.testing.expectEqual(@as(?usize, 3), inf.pid);
     try std.testing.expectEqual(@as(u32, 2), inf.present_seq);
     try std.testing.expectEqual(@as(u64, 2), inf.present_count);
+    // Tear down so the aggregated test binary does not leak input ownership.
+    try std.testing.expect(unregister(3));
+    try std.testing.expect(!driving_award.wm_owns_input);
 }

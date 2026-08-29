@@ -224,7 +224,30 @@ driving chrome, the measured scanout (focused ring 31/31 px, label ink
 156, close-red 19; unfocused border/title/client metrics) matches the
 shim gates' measurements exactly — the drain-out parity proof — plus `wm`
 observability (`submissions=1 policy_kind=0x3f`, per-window `id=2
-kind=0x3f`). **WMS5 next (geometry drain-out, #625).**
+kind=0x3f`).
+
+**WMS5 is done (claim 9849, issue #625) — Gate 1 of the geometry
+card: the input-seam handover + SET_WINDOW rect transport.** While a WM is
+registered the kernel stops consuming pointer GEOMETRY (drag/resize/snap/
+focus-at are gated off behind `wm_owns_input`; the cursor stays a kernel
+blit surface) and instead fans the raw pointer stream (kind 19
+`WM_POINTER`) and window-registry mirrors (kind 20 `WM_WINDOW`) out to the
+WM (ADR 0009 D2, the kind-18 routing discipline). `SET_WINDOW`'s frozen
+`a1/a2` rect encoding activates — the WM proposes geometry, the kernel
+clamps via `user_move`/`user_resize` (the ALL broadcast stays chrome-only;
+a call may carry rect and/or chrome). WND.BIN mirrors the registry,
+hit-tests the raw pointer against the title band (the single-source
+`wnd_core.title_bar_contains` rule), and drives a title-bar drag via
+SET_WINDOW rects — all naked asm with `wnd: grab/drag/drop` markers. Gate
+`tools/verify-live-wnd5-geometry.sh` **PASS on VZ (2026-08-29)**: headless
+custom-virtio pointer injection (grammar extended with held-button
+`d`/`u` steps) drove a WM-owned drag — `grab → 2× drag → drop`, `wm:
+ptr_fan=1 win_mirror=2`, and NOTEPAD's registry row moved (56,56) →
+(256,292), the exact drag math, while the kernel's own geometry was gated
+off (no `dui: pointer focus=` decision) — so only the WM moved it. The
+card's Gate 2 (tile/snap/workspaces/min-max as WM policy + the W1–W16
+registered matrix) rides this seam and is claimed separately. **WMS6 next
+(desktop chrome drain-out, #626).**
 
 > https://github.com/drawmeanelephant/DipshitOS/milestone/16
 

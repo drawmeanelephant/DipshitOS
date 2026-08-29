@@ -2764,16 +2764,30 @@ func startPointerVirtioInject() {
                 for part in script.split(separator: ";") {
                     let fields = part.split(separator: ",", omittingEmptySubsequences: false).map { String($0).trimmingCharacters(in: .whitespaces) }
                     guard fields.count >= 2, let gx = Double(fields[0]), let gy = Double(fields[1]), gx >= 0, gy >= 0, gx <= 1280, gy <= 720 else {
-                        FileHandle.standardError.write(Data("ERROR: --pointer-virtio step '\(part)' is not <x>,<y>[,c] with 0<=x<=1280, 0<=y<=720\n".utf8))
+                        FileHandle.standardError.write(Data("ERROR: --pointer-virtio step '\(part)' is not <x>,<y>[,c|d|u] with 0<=x<=1280, 0<=y<=720\n".utf8))
                         steps = []
                         break
                     }
-                    let click = fields.count >= 3 && (fields[2] == "c" || fields[2] == "1")
+                    // Grammar: bare = move (buttons 0); `c`/`1` = click
+                    // (down+up at one point, the claim 9367 shape); `d`/`2`
+                    // = press-and-hold (down); `u`/`3` = release (up). The
+                    // WMS5 drag choreography is `<title>,d ; x1,y1 ; x2,y2 ;
+                    // ...,u` — held moves between down and up.
+                    let mode: CustomVirtioSpike.PtrStep.Mode
+                    if fields.count >= 3 && (fields[2] == "d" || fields[2] == "2") {
+                        mode = .down
+                    } else if fields.count >= 3 && (fields[2] == "u" || fields[2] == "3") {
+                        mode = .up
+                    } else if fields.count >= 3 && (fields[2] == "c" || fields[2] == "1") {
+                        mode = .click
+                    } else {
+                        mode = .move
+                    }
                     // Guest pixels -> HID absolute logical (the inverse of
                     // driving_award.map_pointer_axis on the 1280x720 fb).
                     let lx = UInt16(min(32767, Int((gx * 32768.0 / 1280.0).rounded())))
                     let ly = UInt16(min(32767, Int((gy * 32768.0 / 720.0).rounded())))
-                    steps.append(CustomVirtioSpike.PtrStep(x: lx, y: ly, buttons: click ? 0x01 : 0))
+                    steps.append(CustomVirtioSpike.PtrStep(x: lx, y: ly, mode: mode))
                 }
                 if !steps.isEmpty {
                     FileHandle.standardOutput.write(Data("PTR-CV-SEQ: \(steps.count) pointer steps scheduled after \"\(marker)\" transport=cv-input\n".utf8))
@@ -3730,11 +3744,19 @@ enum CustomVirtioSpike {
     /// Claim 9367: one injected pointer report — absolute logical coords
     /// (HID 0..32767 convention; the guest maps them onto the framebuffer)
     /// plus the button byte (bit0 = button 1).
+    /// M32 WMS5 (issue #625): the step grammar gains `d` (down, held) and
+    /// `u` (up) so a DRAG can be expressed: move to the title bar, down,
+    /// move while held, up — the established `c` click still expands to
+    /// down+up at one point (zero regression for the claim 9367 gates).
     struct PtrStep {
+        enum Mode {
+            case move, click, down, up
+        }
+
         let x: UInt16
         let y: UInt16
-        let buttons: UInt8
-        var label: String { "buttons=0x\(String(buttons, radix: 16)) x=\(x) y=\(y)" }
+        let mode: Mode
+        var label: String { "mode=\(mode) x=\(x) y=\(y)" }
     }
 
     /// Map one character of the `macKey` vocabulary to its HID usage ID +
@@ -3972,11 +3994,30 @@ enum CustomVirtioSpike {
     static func injectPointerSteps(_ steps: [PtrStep], sequenceTag: String, pacingSeconds: Double = 2.5) {
         deviceQueue.async {
             var msgs: [(Data, String)] = []
+            var held = false
             for s in steps {
-                msgs.append((inputPointerMessage(x: s.x, y: s.y, buttons: 0), "\(sequenceTag) move buttons=0x0 x=\(s.x) y=\(s.y)"))
-                if s.buttons & 0x01 != 0 {
+                switch s.mode {
+                case .move:
+                    // A move between down and up carries the held button
+                    // (the WMS5 drag choreography); a leading move is a bare
+                    // hover (buttons 0) exactly like the claim 9367 gates.
+                    let buttons: UInt8 = held ? 0x01 : 0
+                    msgs.append((inputPointerMessage(x: s.x, y: s.y, buttons: buttons), "\(sequenceTag) move buttons=0x\(String(buttons, radix: 16)) x=\(s.x) y=\(s.y)"))
+                case .click:
+                    msgs.append((inputPointerMessage(x: s.x, y: s.y, buttons: 0), "\(sequenceTag) move buttons=0x0 x=\(s.x) y=\(s.y)"))
                     msgs.append((inputPointerMessage(x: s.x, y: s.y, buttons: 0x01), "\(sequenceTag) down buttons=0x1 x=\(s.x) y=\(s.y)"))
                     msgs.append((inputPointerMessage(x: s.x, y: s.y, buttons: 0), "\(sequenceTag) up buttons=0x0 x=\(s.x) y=\(s.y)"))
+                case .down:
+                    msgs.append((inputPointerMessage(x: s.x, y: s.y, buttons: 0), "\(sequenceTag) move buttons=0x0 x=\(s.x) y=\(s.y)"))
+                    msgs.append((inputPointerMessage(x: s.x, y: s.y, buttons: 0x01), "\(sequenceTag) down buttons=0x1 x=\(s.x) y=\(s.y)"))
+                    held = true
+                case .up:
+                    // Land at the target WHILE held (the guest issues its
+                    // final SET_WINDOW there), then release — a physical
+                    // mouse's up lands at the drag's final position.
+                    msgs.append((inputPointerMessage(x: s.x, y: s.y, buttons: 0x01), "\(sequenceTag) move buttons=0x1 x=\(s.x) y=\(s.y)"))
+                    msgs.append((inputPointerMessage(x: s.x, y: s.y, buttons: 0), "\(sequenceTag) up buttons=0x0 x=\(s.x) y=\(s.y)"))
+                    held = false
                 }
             }
             deliverMessages(msgs, sequenceTag: sequenceTag, index: 0, attempts: 0, pacingSeconds: pacingSeconds)

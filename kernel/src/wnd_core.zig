@@ -97,6 +97,22 @@ pub fn hit_test(geoms: []const Geom, current_workspace: u8, x: u32, y: u32) ?u8 
     return null;
 }
 
+/// M32 WMS5 (issue #625, claim 9849): the title-bar band height — the
+/// drag-grab zone. Single source: the kernel shim's drag initiation and
+/// the WM server's drag hit-test use the SAME number (driving_award's
+/// `user_title_h` re-exports this).
+pub const title_bar_h: u32 = 16;
+
+/// M32 WMS5 (issue #625): the title-bar drag-grab rule — true when
+/// (x, y) is inside the window's title band (the top `title_bar_h` rows
+/// of its rect, full width — the close/minimize buttons sit inside it,
+/// which is why the kernel checks buttons BEFORE the drag). Pure, single
+/// source: the kernel shim's drag initiation and WND.BIN's EL0 hit-test
+/// are both this shape (the live gate proves WND.BIN's asm obeys it).
+pub fn title_bar_contains(g: Geom, x: u32, y: u32) bool {
+    return x >= g.x and x < g.x + g.w and y >= g.y and y < g.y + title_bar_h;
+}
+
 /// The z-order rank of a window by id (the registry index, 0 = bottom), or
 /// null. Pure — the number the kernel's monitor row and the EL0
 /// `sys_win_query` both report; the WM server uses it once it owns the
@@ -331,6 +347,23 @@ test "wnd_core: workspace visibility rule (fixed layers always visible)" {
     try std.testing.expect(workspace_visible(mk(254, .wallpaper, 0, 0, 1, 1), 2));
     try std.testing.expect(!workspace_visible(mk(2, .user, 0, 0, 1, 1), 1)); // ws 0 vs current 1
     try std.testing.expect(workspace_visible(mk(3, .user, 0, 0, 1, 1), 0));
+}
+
+test "wnd_core: WMS5 title-bar drag-grab rule (single source)" {
+    const g = mk(2, .user, 100, 100, 400, 300);
+    // Inside the 16px title band, full width: left, middle, right edges.
+    try std.testing.expect(title_bar_contains(g, 100, 100));
+    try std.testing.expect(title_bar_contains(g, 300, 110));
+    try std.testing.expect(title_bar_contains(g, 499, 115)); // x == right edge - 1
+    // Below the band (client area) → NOT a drag grab.
+    try std.testing.expect(!title_bar_contains(g, 300, 116)); // y == band end
+    try std.testing.expect(!title_bar_contains(g, 300, 200));
+    // Outside the window entirely.
+    try std.testing.expect(!title_bar_contains(g, 99, 100)); // left edge exclusive
+    try std.testing.expect(!title_bar_contains(g, 500, 100)); // right edge exclusive
+    try std.testing.expect(!title_bar_contains(g, 300, 99)); // above
+    // The band is exactly title_bar_h rows tall.
+    try std.testing.expect(title_bar_contains(g, 100, 100 + title_bar_h - 1));
 }
 
 test "wnd_core: chrome title layout (the shared truncation rule)" {

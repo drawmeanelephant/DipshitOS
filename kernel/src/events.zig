@@ -61,6 +61,26 @@ pub const WIN_UNSAVED: u16 = 17;
 /// WM (the first routing-restricted kind, ADR 0009 D2 note).
 pub const COMPOSITE_TICK: u16 = 18;
 
+/// M32 WMS5 (issue #625, claim 9849): the raw absolute pointer stream for
+/// the registered WM — the input-seam handover. `arg0` = x|(y<<16) in
+/// framebuffer pixels (top-left origin), `flags` low byte = the raw HID
+/// button byte (0x01 = left, 0x02 = right, 0x04 = middle — the same bits
+/// the XHCI pointer report carries). Routing-restricted like kind 18:
+/// pushed ONLY to the registered WM's queue, once per shell-idle pass when
+/// the pointer state changed; never generated in shim mode. The WM — not
+/// the kernel — hit-tests and decides geometry from this stream.
+pub const WM_POINTER: u16 = 19;
+
+/// M32 WMS5 (issue #625, claim 9849): a registry MIRROR push for the
+/// registered WM — the kernel's window data, fanned out so the WM can
+/// hit-test (it cannot read the kernel's registry directly). `flags` low
+/// byte = window id, bit 8 = visible, bit 9 = focused, bits 10–11 =
+/// workspace; `arg0` = x|(y<<16), `arg1` = w|(h<<16) (framebuffer pixels,
+/// top-left origin). Pushed on every user-window open/close/move/resize/
+/// visibility/focus change while a WM is registered; routing-restricted
+/// like kind 18 (never generated in shim mode).
+pub const WM_WINDOW: u16 = 20;
+
 /// Modifier bitmasks (flags bits 0..7).
 pub const MOD_SHIFT: u16 = 0x0001;
 pub const MOD_CTRL: u16 = 0x0002;
