@@ -70,10 +70,11 @@ milestone 32's WMS1):
 | 18 | `COMPOSITE_TICK` | Composite/present cadence tick, delivered ONLY to the registered WM server's process queue (ADR 0015 D3). | Present sequence (monotonic, wraps at 2³²) | 0 (reserved) | 0 |
 | 19 | `WM_POINTER` | Raw absolute-pointer sample, delivered ONLY to the registered WM server (M32 WMS5, issue #625). | X \| (Y << 16) in framebuffer pixels (top-left origin) | 0 (reserved) | Low byte = the raw HID button byte (0x01 left, 0x02 right, 0x04 middle) |
 | 20 | `WM_WINDOW` | Window-registry mirror — one kernel window row fanned out so the registered WM can hit-test (M32 WMS5, issue #625). | X \| (Y << 16) | W \| (H << 16) | Low byte = window id; bit 8 = visible; bit 9 = focused; bits 10–11 = workspace |
+| 21 | `WM_KEY` | Raw keyboard sample, delivered ONLY to the registered WM server on key-DOWN edges (M32 WMS5 Gate 2, issue #625, claim 4278). | HID usage (or decoded key byte) | 0 (reserved) | ADR 0009 modifier bits (`MOD_SHIFT`/`MOD_CTRL`/`MOD_ALT`) |
 
-> **Routing restriction (kinds 18–20).** Kind 18 was the first kind with a
+> **Routing restriction (kinds 18–21).** Kind 18 was the first kind with a
 > ROUTING RESTRICTION: every kind 1–17 fans out to the owning/focused
-> process per its own contract; kinds 18–20 are delivered exclusively to
+> process per its own contract; kinds 18–21 are delivered exclusively to
 > the process that registered via `sys_wmctl REGISTER` (slot 65). When no
 > WM is registered, they are never generated. Routing lives in
 > `events.push`'s caller (the WMS2/WMS5 kernel paths); the wire format is
@@ -82,8 +83,15 @@ milestone 32's WMS1):
 > snap/focus-at are gated off behind `wm_owns_input`; the cursor stays a
 > kernel blit surface) and instead fans the raw stream + registry mirrors
 > out, so the WM — not the kernel — decides geometry and hit-tests.
+> Kind 21 completes the seam's keyboard half: the raw key stream fans out
+> on key-DOWN edges and the kernel's own keyboard geometry consumers
+> (Ctrl+T tile, Ctrl+M master-swap, Ctrl+N minimize, Ctrl+Shift+M
+> maximize, F11 fullscreen, Ctrl+Shift+T always-on-top, Ctrl+F1-3
+> workspace, Alt+` cycle, Alt+arrow move) gate behind `!wm_owns_input`,
+> so the WM — not the kernel — decides geometry from chords, issuing
+> SET_WINDOW rects (slot 65 cmd 2) and SET_STATE (slot 65 cmd 4).
 > Kind 18 adopted by M32 WMS1 (claim 1484); kinds 19/20 by M32 WMS5
-> (claim 9849).
+> (claim 9849); kind 21 by M32 WMS5 Gate 2 (claim 4278).
 
 ---
 
