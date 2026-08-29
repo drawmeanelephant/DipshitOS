@@ -601,6 +601,7 @@ syscall number 0–64 stays frozen):
 | REGISTER | `WMCTL_REGISTER` | 1 | all reserved (0) | 0 = registered | `EACCES` seat taken; `ENXIO` no gpu / unarmed compositor; `EINVAL` non-process caller |
 | SET_WINDOW | `WMCTL_SET_WINDOW` | 2 | a0 = window id, a1 = packed rect (x\|y<<16), a2 = packed wh (w\|h<<16); `ptr` → chrome descriptor (WMS4; 0 = none), `len` = descriptor length | 0 = accepted | `EACCES` caller not the WM; `EINVAL` bad id/rect/len |
 | REQUEST_PRESENT | `WMCTL_REQUEST_PRESENT` | 3 | all reserved (0) | 0 = present scheduled | `EACCES` caller not the WM |
+| SET_STATE | `WMCTL_SET_STATE` | 4 | a0 = window id (or `0xFFFF_FFFF` for the ALL workspace broadcast), a1 = visible (bits 0–1) \| workspace << 8 \| always-on-top bit 16 | 0 = applied | `EACCES` caller not the WM; `EINVAL` bad id / workspace / visibility |
 
 Unknown/zero `cmd` → `EINVAL`. `REGISTER` is one-seat: a second registration
 refuses `EACCES`; the registered pid is observable in the monitor's `wm`
@@ -659,3 +660,20 @@ x8 number, x0–x5 arguments, x0 result, reserved 66–127, error codes — is
 otherwise unchanged. (`slot_count` is already 128, so "reserved 66–127" is
 the true remaining space — the 128-wide table has been live since M16; this
 amendment writes the honest bound.)
+
+### Amendment (2026-08-29, claim 4278 — the WMS5 Gate-2 SET_STATE channel)
+
+Gate 2 activates the **state half of the geometry seam**. `SET_STATE` (cmd 4)
+`a1` encoding: bits 0–1 carry the visibility request — `0` = hidden
+(minimize), `1` = shown (restore), `2` = unchanged (no visibility effect) —
+bits 8–15 carry the destination workspace, and bit 16 sets always-on-top
+(1 = on). The kernel applies visibility/workspace through the same clamped
+primitives the shim uses (`user_set_visible` + move-to-workspace), so the WM
+cannot escape the kernel's geometry bounds. `a0 = 0xFFFF_FFFF` is the one
+broadcast form — a GLOBAL workspace switch (the WM's Ctrl+F1-3 / Alt+`
+channels), refusing any per-window payload on the broadcast (`EINVAL`). The
+keyboard input seam it rides: while a WM is registered the kernel fans the
+raw key stream (kind 21 `WM_KEY`, ADR 0009 D2) out — the kernel's own
+keyboard geometry consumers are gated behind `!wm_owns_input` — and the WM
+decides tile/snap/workspace/minimize/maximize, issuing SET_WINDOW rects
+(cmd 2) + SET_STATE state (cmd 4). No WM registered → shim byte-identical.

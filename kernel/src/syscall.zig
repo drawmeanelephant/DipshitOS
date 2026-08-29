@@ -2140,10 +2140,12 @@ fn handle_wmctl(args: Args, _: *exceptions.VectorFrame) u64 {
                 const y: u32 = @intCast(rect_xy >> 16);
                 const w: u32 = @intCast(rect_wh & 0xffff);
                 const h: u32 = @intCast(rect_wh >> 16);
-                // Move first so the resize clamp sees the new position (the
-                // window is clamped on-scanout by both primitives).
-                if (!driving_award.user_move(@intCast(window_id), x, y)) return error_result(.einval); // bad id
-                _ = driving_award.user_resize(@intCast(window_id), w, h); // bad-id already ruled out by user_move
+                // M32 WMS5 Gate 2 (claim 4278): apply with LAYOUT semantics
+                // — on-scanout clamping only (no back-buffer clamp), so the
+                // WM can produce the SAME rects the shim's tile/maximize
+                // write directly (the W1–W16 registered-matrix parity bar).
+                // WM proposes, kernel clamps to the scanout, mirror follows.
+                if (!driving_award.wm_apply_rect(@intCast(window_id), x, y, w, h)) return error_result(.einval); // bad id
             }
             // Chrome: len 40 = descriptor (WMS4, unchanged); len 0 = chrome
             // left as-is (a pure geometry call). Any other length is refused.
@@ -2160,6 +2162,59 @@ fn handle_wmctl(args: Args, _: *exceptions.VectorFrame) u64 {
                 if (!driving_award.set_window_chrome(window_id, desc)) return error_result(.einval); // bad id
             }
             wm_server.note_set_window();
+            return 0;
+        },
+        wm_server.wmctl_set_state => {
+            // M32 WMS5 Gate 2 (issue #625, claim 4278): the visibility /
+            // workspace / always-on-top channel of the geometry seam.
+            // Encoding (frozen in ADR 0007 by this claim):
+            //   a0 = window id; 0xFFFFFFFF = GLOBAL (workspace switch)
+            //   a1 bits 0-1   = visibility: 0 = hide (minimize), 1 = show
+            //                   (restore), 2/3 = no change
+            //   a1 bits 8-15  = workspace (0-2), or 0xff = no change
+            //   a1 bit 16     = always-on-top toggle (1 = toggle)
+            // Per-window: applied through the SAME clamped kernel primitives
+            // the shim uses (user_set_visible / user_move_to_workspace /
+            // toggle_always_on_top). GLOBAL (a0 = ALL): bits 8-15 name the
+            // target workspace and the kernel switches the current workspace
+            // (switch_workspace — the W4 ws-switch path); EINVAL if absent.
+            if (!wm_server.registered()) return error_result(.enosys);
+            if (wm_server.registered_pid() != pid) return error_result(.eacces);
+            const window_id = args[1];
+            const state = args[2];
+            if (window_id == wnd_core.chrome_window_all) {
+                const ws = @as(u8, @intCast((state >> 8) & 0xff));
+                // `switch_workspace` itself refuses `>= workspace_max` — the
+                // handler validates BEFORE the call so the refusal is honest
+                // (EINVAL, not a silent no-op).
+                if (ws >= driving_award.workspace_max) return error_result(.einval);
+                driving_award.switch_workspace(ws);
+                wm_server.note_set_state();
+                return 0;
+            }
+            if (window_id > 0xff) return error_result(.einval);
+            const visible: ?bool = switch (state & 0x3) {
+                0 => false, // explicit hide (minimize)
+                1 => true, // explicit show (restore)
+                else => null, // 2/3: no visibility change
+            };
+            const ws = @as(u8, @intCast((state >> 8) & 0xff));
+            if (visible) |v| {
+                if (!driving_award.user_set_visible(@intCast(window_id), v)) return error_result(.einval); // bad id
+            } else if (ws >= driving_award.workspace_max and ws != 0xff) {
+                return error_result(.einval); // out-of-range workspace
+            } else {
+                // No visibility change and no valid workspace: the window id
+                // is still validated (a pure state call must name a window).
+                if (driving_award.find_user_window(@intCast(window_id)) == null) return error_result(.einval);
+            }
+            if (ws < driving_award.workspace_max) {
+                _ = driving_award.user_move_to_workspace(@intCast(window_id), ws);
+            }
+            if ((state & (1 << 16)) != 0) {
+                _ = driving_award.toggle_always_on_top(@intCast(window_id));
+            }
+            wm_server.note_set_state();
             return 0;
         },
         wm_server.wmctl_request_present => {
@@ -3802,6 +3857,7 @@ test "syscall: sys_wmctl (slot 65) enforces the render-server register contract"
     try std.testing.expectEqual(error_result(.eacces), dispatch(sys_wmctl, .{ wm_server.wmctl_register, 0, 0, 0, 0, 0 }, &frame));
     try std.testing.expectEqual(error_result(.eacces), dispatch(sys_wmctl, .{ wm_server.wmctl_set_window, 0, 0, 0, 0, 0 }, &frame));
     try std.testing.expectEqual(error_result(.eacces), dispatch(sys_wmctl, .{ wm_server.wmctl_request_present, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.eacces), dispatch(sys_wmctl, .{ wm_server.wmctl_set_state, 0, 0, 0, 0, 0 }, &frame));
     // WMS5: the input seam is part of the register contract — registering
     // hands the raw pointer stream + window mirrors to the WM (kind 19/20);
     // teardown restores shim input consumption. Tear down so the aggregated
@@ -3809,6 +3865,61 @@ test "syscall: sys_wmctl (slot 65) enforces the render-server register contract"
     try std.testing.expect(driving_award.wm_owns_input);
     try std.testing.expect(wm_server.unregister(1));
     try std.testing.expect(!driving_award.wm_owns_input);
+}
+
+test "syscall: SET_STATE (cmd 4, claim 4278) applies visibility/workspace/ws-switch with the seam refusals" {
+    userspace.init();
+    init(test_writer);
+    wm_server.init();
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0); // task 2 = process 0 (boot payload)
+    scheduler.start();
+    var frame = fresh_frame();
+    try std.testing.expect(scheduler.yield_current()); // shell -> worker
+    try std.testing.expect(scheduler.yield_current()); // worker -> user (2)
+
+    // No WM registered: SET_STATE -> ENOSYS (the ADR 0007 "no WM" case).
+    try std.testing.expectEqual(error_result(.enosys), dispatch(sys_wmctl, .{ wm_server.wmctl_set_state, 2, 0, 0, 0, 0 }, &frame));
+
+    // Seed the WM as pid 0 and arm the compositor state for window tests.
+    try std.testing.expect(wm_server.register(0));
+    // No such window -> EINVAL (id validated even with no visible change).
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_wmctl, .{ wm_server.wmctl_set_state, 9, 2, 0, 0, 0 }, &frame));
+    // Out-of-range workspace (bits 8-15 >= workspace_max and not 0xff) -> EINVAL.
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_wmctl, .{ wm_server.wmctl_set_state, 2, 0x0900, 0, 0, 0 }, &frame));
+    // The ALL broadcast with an OUT-OF-RANGE workspace -> EINVAL (the
+    // global ws-switch validates its target; ws 0 IS valid, 3 is not —
+    // `switch_workspace` refuses `>= workspace_max`, and the handler
+    // validates before the call so the refusal is an honest EINVAL).
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_wmctl, .{ wm_server.wmctl_set_state, wnd_core.chrome_window_all, 0x0300, 0, 0, 0 }, &frame));
+
+    // Open a real user window (id 2), then drive the seam from the WM:
+    const open_res = driving_award.user_open(64, 64, 512, 384, 0);
+    try std.testing.expectEqual(@as(u8, 2), open_res.opened); // window id 2
+    //   GLOBAL workspace switch (a0 = ALL, bits 8-15 = 1): current ws moves.
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_wmctl, .{ wm_server.wmctl_set_state, wnd_core.chrome_window_all, 0x0100, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u8, 1), driving_award.current_workspace);
+    //   Per-window hide (minimize): visible -> false, counter advanced.
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_wmctl, .{ wm_server.wmctl_set_state, 2, 0, 0, 0, 0 }, &frame));
+    const w2 = driving_award.find_user_window(2).?;
+    try std.testing.expect(!w2.visible);
+    //   Per-window show (restore): visible -> true.
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_wmctl, .{ wm_server.wmctl_set_state, 2, 1, 0, 0, 0 }, &frame));
+    try std.testing.expect(driving_award.find_user_window(2).?.visible);
+    //   Per-window workspace move (bits 8-15 = 2): w.workspace -> 2.
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_wmctl, .{ wm_server.wmctl_set_state, 2, 0x0200, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u8, 2), driving_award.find_user_window(2).?.workspace);
+    //   Always-on-top toggle (bit 16): the flag flips.
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_wmctl, .{ wm_server.wmctl_set_state, 2, (1 << 16) | 2, 0, 0, 0 }, &frame));
+    try std.testing.expect(driving_award.find_user_window(2).?.always_on_top);
+    // The counter observed every accepted call (global + 4 per-window).
+    try std.testing.expectEqual(@as(u64, 5), wm_server.info().set_state_count);
+
+    // Teardown: no leaked input ownership into the aggregated binary.
+    try std.testing.expect(wm_server.unregister(0));
+    try std.testing.expect(!driving_award.wm_owns_input);
+    _ = driving_award.user_close(2);
 }
 
 test "syscall: wait_event block+wake preserves the event buffer across the svc re-execution (claim 6359)" {

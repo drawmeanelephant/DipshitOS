@@ -396,6 +396,24 @@ pub fn decode_keyboard_report(rep: []const u8) void {
     // chord is consumed as a window-manager signal across all windows.
     // C2 (M15): capture Shift for reverse cycling.
     for (keys) |k| {
+        // M32 WMS5 Gate 2 (claim 4278): while a WM owns input, the raw
+        // key stream fans out to it on key-DOWN edges (kind 21 WM_KEY) —
+        // the WM, not the kernel, decides geometry from chords. The
+        // kernel's own geometry pending flags below are gated behind
+        // !wm_owns_input; plain KEY_DOWN/KEY_UP delivery to the focused
+        // window (card E2) is unchanged.
+        if (k != 0 and driving_award.wm_owns_input) {
+            var edge = true;
+            for (kb_held) |h| {
+                if (h == k) {
+                    edge = false;
+                    break;
+                }
+            }
+            if (edge) {
+                if (driving_award.wm_key_hook) |hook| hook(k, flags);
+            }
+        }
         if (k == 0x2b and alt) {
             var held = false;
             for (kb_held) |h| {
@@ -404,7 +422,7 @@ pub fn decode_keyboard_report(rep: []const u8) void {
                     break;
                 }
             }
-            if (!held) {
+            if (!held and !driving_award.wm_owns_input) {
                 alt_tab_pending = true;
                 alt_tab_shift = shift;
             }
@@ -418,7 +436,7 @@ pub fn decode_keyboard_report(rep: []const u8) void {
                     break;
                 }
             }
-            if (!held) {
+            if (!held and !driving_award.wm_owns_input) {
                 workspace_cycle_pending = true;
             }
         }
@@ -431,7 +449,7 @@ pub fn decode_keyboard_report(rep: []const u8) void {
                     break;
                 }
             }
-            if (!held) {
+            if (!held and !driving_award.wm_owns_input) {
                 lower_back_pending = true;
             }
         }
@@ -449,7 +467,7 @@ pub fn decode_keyboard_report(rep: []const u8) void {
                         break;
                     }
                 }
-                if (!held) {
+                if (!held and !driving_award.wm_owns_input) {
                     workspace_switch_pending = ws;
                 }
             }
@@ -462,7 +480,7 @@ pub fn decode_keyboard_report(rep: []const u8) void {
                         break;
                     }
                 }
-                if (!held) {
+                if (!held and !driving_award.wm_owns_input) {
                     tile_toggle_pending = true;
                 }
             }
@@ -475,7 +493,7 @@ pub fn decode_keyboard_report(rep: []const u8) void {
                         break;
                     }
                 }
-                if (!held) {
+                if (!held and !driving_award.wm_owns_input) {
                     tile_swap_master_pending = true;
                 }
             }
@@ -488,7 +506,7 @@ pub fn decode_keyboard_report(rep: []const u8) void {
                         break;
                     }
                 }
-                if (!held) {
+                if (!held and !driving_award.wm_owns_input) {
                     minimize_pending = true;
                 }
             }
@@ -501,7 +519,7 @@ pub fn decode_keyboard_report(rep: []const u8) void {
                         break;
                     }
                 }
-                if (!held) {
+                if (!held and !driving_award.wm_owns_input) {
                     maximize_pending = true;
                 }
             }
@@ -514,7 +532,7 @@ pub fn decode_keyboard_report(rep: []const u8) void {
                         break;
                     }
                 }
-                if (!held) {
+                if (!held and !driving_award.wm_owns_input) {
                     always_on_top_pending = true;
                 }
             }
@@ -541,7 +559,7 @@ pub fn decode_keyboard_report(rep: []const u8) void {
                     break;
                 }
             }
-            if (!held) {
+            if (!held and !driving_award.wm_owns_input) {
                 fullscreen_pending = true;
             }
         }
@@ -561,7 +579,7 @@ pub fn decode_keyboard_report(rep: []const u8) void {
                         break;
                     }
                 }
-                if (!held) {
+                if (!held and !driving_award.wm_owns_input) {
                     // Alt+Shift = fine movement (1px).
                     move_pending_dx = if (shift) @divTrunc(dx, 16) else dx;
                     move_pending_dy = if (shift) @divTrunc(dy, 16) else dy;
@@ -969,6 +987,61 @@ test "input: hid_to_bytes maps ctrl+a-z to ASCII control codes" {
     try std.testing.expectEqual(@as(u8, 0x1a), out[0]);
     // Ctrl + non-letter is outside the usable subset (no invented bytes).
     try std.testing.expectEqual(@as(usize, 0), hid_to_bytes(0x28, false, true, &out)); // Ctrl+Enter
+}
+
+test "input: WMS5 Gate 2 — keyboard geometry chords gate off and the raw key fans out when a WM owns input (claim 4278)" {
+    // Pristine state; no WM registered (shim mode) -> the Ctrl+T chord sets
+    // the tile pending flag exactly as before (zero regression).
+    _ = driving_award.focus(0);
+    fifo_count = 0;
+    fifo_head = 0;
+    events = 0;
+    kb_held = [_]u8{0} ** 6;
+    var key_calls: usize = 0;
+    var last_usage: u8 = 0;
+    var last_flags: u16 = 0;
+    const capture = struct {
+        var calls: *usize = undefined;
+        var usage: *u8 = undefined;
+        var flags: *u16 = undefined;
+        fn hook(u: u8, f: u16) void {
+            calls.* += 1;
+            usage.* = u;
+            flags.* = f;
+        }
+    };
+    capture.calls = &key_calls;
+    capture.usage = &last_usage;
+    capture.flags = &last_flags;
+
+    driving_award.wm_owns_input = false;
+    driving_award.wm_key_hook = capture.hook;
+    // Ctrl+T (mods 0x01, usage 0x17): shim mode -> the kernel consumes it.
+    decode_keyboard_report(&[_]u8{ 0x01, 0, 0x17, 0, 0, 0, 0, 0 });
+    try std.testing.expect(take_tile_toggle());
+    try std.testing.expectEqual(@as(usize, 0), key_calls); // no fan-out in shim mode
+    decode_keyboard_report(&[_]u8{ 0, 0, 0, 0, 0, 0, 0, 0 }); // release
+
+    // With a WM registered: the pending flag is NOT set (the kernel stops
+    // consuming keyboard geometry) and the raw key fans out to the WM.
+    driving_award.wm_owns_input = true;
+    decode_keyboard_report(&[_]u8{ 0x01, 0, 0x17, 0, 0, 0, 0, 0 });
+    try std.testing.expect(!take_tile_toggle()); // kernel did not consume it
+    try std.testing.expectEqual(@as(usize, 1), key_calls); // ...the WM got it
+    try std.testing.expectEqual(@as(u8, 0x17), last_usage);
+    try std.testing.expectEqual(@as(u16, app_events.MOD_CTRL), last_flags);
+    decode_keyboard_report(&[_]u8{ 0, 0, 0, 0, 0, 0, 0, 0 }); // release
+
+    // Same for Ctrl+N (minimize) and Ctrl+Shift+M (maximize).
+    driving_award.wm_key_hook = null;
+    decode_keyboard_report(&[_]u8{ 0x01, 0, 0x11, 0, 0, 0, 0, 0 });
+    try std.testing.expect(!take_minimize());
+    decode_keyboard_report(&[_]u8{ 0x01 | 0x02, 0, 0x10, 0, 0, 0, 0, 0 });
+    try std.testing.expect(!take_maximize());
+    decode_keyboard_report(&[_]u8{ 0, 0, 0, 0, 0, 0, 0, 0 });
+
+    // Cleanup: shim mode restored.
+    driving_award.wm_owns_input = false;
 }
 
 test "input: keyboard report decode pushes a ctrl chord and an arrow sequence" {

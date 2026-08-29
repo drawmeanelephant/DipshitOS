@@ -244,10 +244,29 @@ custom-virtio pointer injection (grammar extended with held-button
 `d`/`u` steps) drove a WM-owned drag — `grab → 2× drag → drop`, `wm:
 ptr_fan=1 win_mirror=2`, and NOTEPAD's registry row moved (56,56) →
 (256,292), the exact drag math, while the kernel's own geometry was gated
-off (no `dui: pointer focus=` decision) — so only the WM moved it. The
-card's Gate 2 (tile/snap/workspaces/min-max as WM policy + the W1–W16
-registered matrix) rides this seam and is claimed separately. **WMS6 next
-(desktop chrome drain-out, #626).**
+off (no `dui: pointer focus=` decision) — so only the WM moved it. **Gate 2
+is done (claim 4278, same issue #625): the keyboard half of the seam +
+geometry policy drains into WND.BIN.** Kind 21 `WM_KEY` fans the raw key
+stream out on key-DOWN edges; the kernel's own keyboard geometry consumers
+(Ctrl+T tile, Ctrl+M master-swap, Ctrl+N minimize, Ctrl+Shift+M maximize,
+F11 fullscreen, Ctrl+Shift+T always-on-top, Ctrl+F1-3 workspace,
+Alt+` cycle, Alt+arrow move) gate behind `!wm_owns_input`; and a new
+slot-65 subcommand `SET_STATE` (cmd 4) closes the state half of the seam
+(visibility/workspace/always-on-top over the same clamped primitives).
+WND.BIN became a real Zig program (segmented DSK3 loader path — its
+writable policy state needs the data segment the flat path lacks) that
+now **decides** geometry: tile/master-swap, snap-on-drop, minimize/restore,
+maximize/restore, fullscreen, always-on-top and workspace switch/cycle,
+all issued as SET_WINDOW rects (layout semantics — scanout-clamped, not
+back-buffer-clamped) + SET_STATE state computed from the shared
+`wnd_core` rules (the single-source drift guard). The live gate
+`tools/verify-live-wnd5-gate2-policy.sh` **PASS on VZ (2026-08-29)**: the
+W1–W16 `dui` matrix re-runs green with the WM registered (zero
+regression), AND a real headless Ctrl+T chord was fanned to the WM
+(`key_fan=1`), the WM emitted `wnd: tile`, the kernel consumed nothing
+(gated), and NOTEPAD's registry row moved to the tiled master rect
+`24,0,837,700` — the WM decided. Drain-out continues in **WMS6 (desktop
+chrome drain-out, #626).**
 
 > https://github.com/drawmeanelephant/DipshitOS/milestone/16
 
