@@ -321,6 +321,49 @@ pub const chrome_desc_bytes: usize = 40;
 /// that window's override.
 pub const chrome_window_all: u64 = 0xFFFF_FFFF;
 
+// ---------------------------------------------------------------------------
+// M32 WMS7 Gate A (issue #627): the app↔WM mailbox protocol (WM_RPC) wire
+// format — frozen in ADR 0015. WND.BIN (the server) and WMRPC.BIN (the test
+// app) compile this SAME source, so the two cannot drift; the kernel imports
+// wnd_core already, so a future in-kernel consumer gets the same ABI. It rides
+// the EXISTING per-process mailbox (sys_ipc_send/recv, slots 5/6) and FITS the
+// frozen 64-byte slot — the sanctioned size decision is "grow nothing".
+// ---------------------------------------------------------------------------
+
+/// A request (or reply — `kind` carries the reply flag bit 7). Frozen
+/// little-endian layout. Applies through the WM's existing clamped
+/// primitives: WIN_RAISE -> ALT_TAB commit (focus+raise), WIN_CONFIG ->
+/// SET_WINDOW rect (clamped move/resize).
+pub const WmRpc = extern struct {
+    /// 1 = WIN_RAISE, 2 = WIN_CONFIG; a reply is `kind | wm_rpc_reply_flag`.
+    kind: u8,
+    /// Target window id (WMRPC never legitimately targets the ALL sentinel).
+    id: u8,
+    /// Request/reply correlation sequence (the app echoes it back).
+    seq: u8,
+    /// Reply destination process id (max_processes < 256).
+    reply_to: u8,
+    /// Reply flag: 1 = applied, 0 = refused (unknown kind / bad id).
+    applied: u8,
+    /// Explicit pad so the u16 rect is 2-aligned (size pinned by test).
+    pad: u8,
+    x: u16,
+    y: u16,
+    w: u16,
+    h: u16,
+    /// WIN_CONFIG bounded title (NUL-safe). The WM logs it (does not render
+    /// it yet — Gate B's toolkit round-trip will). Zero-padded.
+    title: [wm_rpc_title_max]u8,
+};
+
+pub const wm_rpc_title_max: usize = 24;
+pub const wm_rpc_kind_raise: u8 = 1;
+pub const wm_rpc_kind_config: u8 = 2;
+pub const wm_rpc_reply_flag: u8 = 0x80;
+/// The frozen mailbox slot bound the message must fit (ADR 0015 size
+/// decision — the compact fixed layout fits 64 B, so message_max stays).
+pub const wm_rpc_max: usize = 64;
+
 /// Element-kind bits (the chrome the WM wants drawn per window).
 pub const chrome_border: u32 = 0x01;
 pub const chrome_title: u32 = 0x02;

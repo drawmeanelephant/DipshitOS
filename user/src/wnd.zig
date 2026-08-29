@@ -99,6 +99,12 @@ const tray_flag_clip: u64 = 0b100;
 /// sys_clipboard_get (slot 39) — the WM probes the clipboard each tray
 /// refresh (filled = return length != 0) to decide the indicator state.
 const sys_clipboard_get: u64 = 39;
+/// WMS7 (issue #627, Gate A): the app↔WM mailbox protocol rides the frozen
+/// mailbox syscalls — sys_ipc_recv (slot 6) drains the WM's own request
+/// inbox; sys_ipc_send (slot 5) returns the ack to the requester. No new
+/// ABI; the mailbox.service loop below is EL0 policy.
+const sys_ipc_recv: u64 = 6;
+const sys_ipc_send: u64 = 5;
 
 // ---------------------------------------------------------------------------
 // Syscall wrappers (AArch64 `svc #0` — the fixed-register ABI).
@@ -120,6 +126,18 @@ fn syscall1(num: u64, arg0: u64) i64 {
         : [res] "={x0}" (res),
         : [num] "{x8}" (num),
           [arg0] "{x0}" (arg0),
+        : .{ .memory = true });
+    return res;
+}
+
+fn syscall2(num: u64, arg0: u64, arg1: u64) i64 {
+    if (@import("builtin").os.tag != .freestanding) return 0;
+    var res: i64 = undefined;
+    asm volatile ("svc #0"
+        : [res] "={x0}" (res),
+        : [num] "{x8}" (num),
+          [arg0] "{x0}" (arg0),
+          [arg1] "{x1}" (arg1),
         : .{ .memory = true });
     return res;
 }
@@ -266,6 +284,14 @@ pub const tray_refresh_every: u64 = 10;
 /// The clipboard probe buffer the WM reads each refresh (filled = returned
 /// length != 0). The kernel clamps to its capacity.
 pub const tray_clip_probe: usize = 32;
+
+// WMS7 Gate A (issue #627): the app↔WM mailbox protocol marker — written per
+// applied request (`wnd: mail kind=N id=M seq=S applied=yes|no title=..`).
+// The live gate greps it to prove the WM SERVED a mail request (the app asked
+// the WM, not the kernel, over the mailbox).
+pub const mail_marker: []const u8 = "wnd: mail";
+/// The 64-B mailbox slot bound the WM_RPC message must fit (wnd_core owns it).
+pub const mail_inbox_max: usize = wnd_core.wm_rpc_max;
 
 // ADR 0009 modifier bits (must match kernel events MOD_*).
 pub const mod_shift: u16 = 0x0001;
@@ -743,6 +769,88 @@ pub fn tray_tick_policy(ticks: u64, clip_filled: bool, state: *TrayState) bool {
 }
 
 // ---------------------------------------------------------------------------
+// WMS7 Gate A (issue #627): the app↔WM mailbox service loop. The WM serves
+// bounded IPC requests from apps (the wire format, WM_RPC, is single-sourced
+// in wnd_core so the server and the app cannot drift). Runs once per tick
+// (kind-18 at 1 Hz => <= 1 s request latency — accepted + documented).
+// ---------------------------------------------------------------------------
+
+/// Send a WM_RPC reply to `reply_to` (the requesting app's pid) — the echo
+/// kind + seq with the applied flag, so the app's bounded poll has something
+/// definitive to match. A dead/unknown reply target is simply dropped (the
+/// sys_ipc_send returns EINVAL before any copy — honest, no loss inside the
+/// kernel mailbox).
+fn wnd_mail_reply(reply_to: u8, req: *const wnd_core.WmRpc, applied: bool) void {
+    var rep: wnd_core.WmRpc = .{
+        .kind = req.kind | wnd_core.wm_rpc_reply_flag,
+        .id = req.id,
+        .seq = req.seq,
+        .reply_to = reply_to,
+        .applied = if (applied) 1 else 0,
+        .pad = 0,
+        .x = 0,
+        .y = 0,
+        .w = 0,
+        .h = 0,
+        .title = [_]u8{0} ** wnd_core.wm_rpc_title_max,
+    };
+    const rep_bytes = std.mem.asBytes(&rep);
+    _ = syscall3(sys_ipc_send, reply_to, @intFromPtr(rep_bytes.ptr), rep_bytes.len);
+}
+
+/// Apply ONE WM_RPC request through the WM's OWN clamped primitives — the
+/// same paths its native decisions use, so a mail-driven raise/config is
+/// byte-identical to a WM-native one. Returns whether it applied.
+fn wnd_mail_apply(req: *const wnd_core.WmRpc) bool {
+    switch (req.kind & 0x7f) {
+        wnd_core.wm_rpc_kind_raise => {
+            // WIN_RAISE: focus + raise via the ALT_TAB-commit path (the
+            // proven WMS6 Gate-A primitive; a bad id returns EINVAL).
+            const rc = syscall6(sys_wmctl, wmctl_alt_tab, req.id, alt_tab_commit, 0, 0, 0);
+            return rc == 0;
+        },
+        wnd_core.wm_rpc_kind_config => {
+            // WIN_CONFIG: clamped move/resize via the SET_WINDOW rect path.
+            const rc = syscall6(sys_wmctl, wmctl_set_window, req.id, @as(u64, req.x) | (@as(u64, req.y) << 16), @as(u64, req.w) | (@as(u64, req.h) << 16), 0, 0);
+            return rc == 0;
+        },
+        else => return false, // unknown kind — refused honestly
+    }
+}
+
+/// Drain the WM's own inbox: recv (non-blocking), bound each message to the
+/// frozen WM_RPC shape, apply, reply, and print the `wnd: mail` marker. The
+/// loop empties the whole inbox each tick (bounded work per wake).
+fn wnd_mail_loop() void {
+    var raw: [mail_inbox_max]u8 = undefined;
+    while (true) {
+        const got = syscall2(sys_ipc_recv, @intFromPtr(&raw), raw.len);
+        if (got <= 0) return; // empty inbox — drained
+        if (got < @sizeOf(wnd_core.WmRpc)) continue; // truncated junk — skip
+        var req: wnd_core.WmRpc = undefined;
+        @memcpy(std.mem.asBytes(&req), raw[0..@sizeOf(wnd_core.WmRpc)]);
+        const reply_to = req.reply_to;
+        if (req.kind & wnd_core.wm_rpc_reply_flag != 0) continue; // a reply, not a request
+        const applied = wnd_mail_apply(&req);
+        // Marker: wnd: mail kind=N id=M seq=S applied=yes|no [title=..]
+        var title_slice: []const u8 = req.title[0..];
+        for (req.title, 0..) |c, i| {
+            if (c == 0) {
+                title_slice = req.title[0..i];
+                break;
+            }
+        }
+        var buf: [72]u8 = undefined;
+        const s = if (title_slice.len == 0)
+            std.fmt.bufPrint(&buf, "{s} kind={d} id={d} seq={d} applied={s}\n", .{ mail_marker, req.kind, req.id, req.seq, if (applied) "yes" else "no" }) catch "wnd: mail\n"
+        else
+            std.fmt.bufPrint(&buf, "{s} kind={d} id={d} seq={d} applied={s} title={s}\n", .{ mail_marker, req.kind, req.id, req.seq, if (applied) "yes" else "no", title_slice }) catch "wnd: mail\n";
+        write_marker(s);
+        wnd_mail_reply(reply_to, &req, applied);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The WMS5 keyboard chord decoder (kind 21 WM_KEY).
 // ---------------------------------------------------------------------------
 fn handle_wm_key(usage: u8, flags: u16) void {
@@ -893,6 +1001,10 @@ fn main() noreturn {
                     const clip_len = syscall3(sys_clipboard_get, @intFromPtr(&clip_buf), clip_buf.len, 0);
                     _ = tray_tick_policy(ticks, clip_len != 0, &tray_state);
                 }
+                // WMS7 Gate A (issue #627): the app↔WM mailbox service loop —
+                // serve any WM_RPC requests an app queued in the WM's inbox
+                // since the last wake (<= 1 s latency at the 1 Hz tick).
+                wnd_mail_loop();
             },
             wm_window_kind => {
                 // WM_WINDOW (kind 20) registry mirror: flags low byte = id,
@@ -1105,6 +1217,11 @@ test "wnd: the marker/tuning shapes are pinned (live-gate grep targets)" {
     try std.testing.expectEqual(@as(u64, 10), tray_refresh_every);
     try std.testing.expectEqual(@as(u64, 10), wmctl_tray);
     try std.testing.expectEqual(@as(u64, 39), sys_clipboard_get);
+    // WMS7 Gate A (issue #627): the mailbox-service marker + slot consts.
+    try std.testing.expectEqualStrings("wnd: mail", mail_marker);
+    try std.testing.expectEqual(@as(u64, 6), sys_ipc_recv);
+    try std.testing.expectEqual(@as(u64, 5), sys_ipc_send);
+    try std.testing.expectEqual(@as(usize, 64), mail_inbox_max);
     try std.testing.expectEqual(@as(u8, 0x17), usage_t);
     try std.testing.expectEqual(@as(u8, 0x10), usage_m);
     try std.testing.expectEqual(@as(u8, 0x11), usage_n);

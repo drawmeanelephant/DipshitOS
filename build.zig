@@ -1406,6 +1406,37 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_wnd.step);
 
     // ------------------------------------------------------------------
+    // Guest: forty-ninth ESP user program (M32 WMS7 Gate A, issue #627)
+    // WMRPC.BIN — the app↔WM mailbox-protocol test app behind the live
+    // verify-live-wm-ipc.sh gate: reads sys_procs (slot 7) to find the WM,
+    // opens a window, sends WIN_RAISE/WIN_CONFIG over the mailbox (slots
+    // 5/6), polls for the ack. Real Zig (like NOTEPAD) with the SAME
+    // wnd_core anon import as WND.BIN (the single-source WM_RPC wire
+    // format). Flat DSK1 — it has no writable module globals (all scratch is
+    // stack), unlike WND.BIN's segmented image.
+    // ------------------------------------------------------------------
+    const wmrpc_mod = b.createModule(.{
+        .root_source_file = b.path("user/src/wmrpc.zig"),
+        .target = kernel_target,
+        .optimize = .ReleaseSmall,
+    });
+    wmrpc_mod.addAnonymousImport("wnd_core", .{ .root_source_file = b.path("kernel/src/wnd_core.zig") });
+    const wmrpc_prog = b.addExecutable(.{
+        .name = "user-wmrpc",
+        .root_module = wmrpc_mod,
+    });
+    wmrpc_prog.linker_script = b.path("user/linker.ld");
+    const wmrpc_step = b.step("wmrpc", "Build the forty-ninth ESP user program (zig-out/bin/WMRPC.BIN)");
+    const wmrpc_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    wmrpc_elf2bin.addFileArg(wmrpc_prog.getEmittedBin());
+    const wmrpc_bin = wmrpc_elf2bin.addOutputFileArg("WMRPC.BIN");
+    wmrpc_elf2bin.has_side_effects = true;
+    wmrpc_elf2bin.stdio = .inherit;
+    wmrpc_step.dependOn(&wmrpc_elf2bin.step);
+    const install_wmrpc = b.addInstallFileWithDir(wmrpc_bin, .bin, "WMRPC.BIN");
+    b.getInstallStep().dependOn(&install_wmrpc.step);
+
+    // ------------------------------------------------------------------
     // Top-level steps. System-command steps are marked as having side
     // effects (and inherit stdio) so they always execute instead of being
     // skipped by the build cache. (No QEMU path: this project targets Apple

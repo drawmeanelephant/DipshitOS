@@ -162,5 +162,18 @@ it (the render server already separates policy from blit).
 - Whether mailboxes (8 × 64 B today) suffice for the app↔WM protocol or a larger
   bounded message type is needed — the WM-server claim decides; prefer growing
   the mailbox data-path constant over a new syscall.
+  **Resolved by WMS7 Gate A (claim 9604, issue #627):** the WM_RPC wire format
+  fits the FROZEN 64-byte slot — the size decision is "grow nothing". `WmRpc`
+  (single-sourced in `kernel/src/wnd_core.zig`, compiled by both WND.BIN and
+  WMRPC.BIN) packs kind / target id / seq / reply pid / applied flag / u16 rect /
+  a ≤24-byte bounded title into 64 B, so `message_max` (8 × 64 B, the
+  `verify-live-ipc.sh` exact-capacity contract) and BSS are untouched. Requests
+  ride `sys_ipc_send`/`sys_ipc_recv` (slots 5/6) to the registered WM's own
+  inbox; the WM serves them in its 1 Hz kind-18 wake (≤ 1 s latency, accepted),
+  applies through its OWN clamped primitives (WIN_RAISE → the ALT_TAB-commit
+  path, WIN_CONFIG → the SET_WINDOW rect path), replies an ack (kind | 0x80) to
+  the requesting app's pid, and emits `wnd: mail` (the gate grep target). Apps
+  poll their own inbox for the ack; with no WM the app prints `wmrpc: no-wm`
+  and parks (additive back-compat — frozen syscalls untouched).
 - Which `driving_award` policy block drains out of the kernel first (recommended:
   chrome, being minimal and highly observable).
