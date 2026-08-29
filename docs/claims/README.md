@@ -120,6 +120,7 @@ loudly if the generator or a table is broken.
 | [3377-docs-pass-m31-sync](3377-docs-pass-m31-sync.md) | buffy (`agent/buffy/docs-pass`) | ✅ done |
 | [3589-drag-resize](3589-drag-resize.md) | Muse Spark (`agent/buffy/arc2-resize`) | ✅ done 2026-08-21 — drag-to-resize live on host (merge 44ca7d2): `driving_award` 6×6 hit + clamped resize + WIN_RESIZE kind 10 + `sys_win_resize` slot 47 (implemented_count 47→48), 4 host tests, `verify-bss-budget` PASS 9788088/11534336, `verify-coordination` PASS — branch `agent/buffy/arc2-resize` merged to `main` (commit 17e7951) |
 | [3679-m18-t4-history](3679-m18-t4-history.md) | buffy (`agent/buffy/m18-t4-history`) | ✅ done 2026-08-22 |
+| [3744-wms6-tray-drain](3744-wms6-tray-drain.md) | buffy (`agent/buffy/wms6-tray-drain`) | ✅ (2026-08-29 — live gate PASS on VZ; all five issue-626 surfaces drain) |
 | [3881-wms3-wnd-server](3881-wms3-wnd-server.md) | buffy (`agent/buffy/wms3-wnd-server`) | ✅ done (2026-08-29, PR closing #623) |
 | [4001-m31-dynamic-ecosystem](4001-m31-dynamic-ecosystem.md) | buffy (`agent/buffy/m30-dynamic-linking`) | ✅ done |
 | [4278-wms5-gate2-geometry-policy](4278-wms5-gate2-geometry-policy.md) | buffy (`agent/buffy/wms5-gate2-geometry-policy`) | ✅ complete |
