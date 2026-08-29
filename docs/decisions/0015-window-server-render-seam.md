@@ -1,13 +1,15 @@
-# ADR 0015: Window-server render seam (userland window manager migration) (proposed)
+# ADR 0015: Window-server render seam (userland window manager migration)
 
-Status: **PROPOSED — needs ack** · Date: 2026-08-28 · Milestone: thirty-two+ (planned)
+Status: **ACCEPTED** · Date: 2026-08-28 · Milestone: thirty-two (M32) ·
+Accepted by: claim 1484 (WMS1, issue #621)
 
-> **Planning-only until accepted.** This ADR defines the architectural seam a
-> userland window-manager server rides on. Slot 65 and event kind 18 below are
-> **reservations**: each becomes frozen in the live `docs/decisions/0007-syscall-abi.md`
-> table one row at a time as individual M32 claims land, citing this ADR for the
-> reservation. Until a claim lands, slot 65 returns `-ENOSYS` (`-4`) and kind 18
-> is not delivered.
+> **Accepted by M32 WMS1 (claim 1484).** Slot 65 and event kind 18 below are now
+> **freeze reservations**: the exact `sys_wmctl` subcommand encoding is frozen
+> in the live `docs/decisions/0007-syscall-abi.md` slot-65 amendment, and kind
+> 18 `COMPOSITE_TICK` (with its routing restriction) in ADR 0009 D2. Each later
+> WMS claim implements one reservation, citing this ADR. Until the relevant
+> claim lands its handler, slot 65 is not in `dispatch_table` (a call returns
+> `-ENOSYS` -4 naturally) and kind 18 is not delivered.
 
 ## Context
 
@@ -139,13 +141,22 @@ it (the render server already separates policy from blit).
 
 ## Amendment log
 
-Not yet accepted. Once M32 closes, the first implementing claim SHOULD mark this
-ADR `accepted` and append its implementing claim.
+- 2026-08-28 — claim 1484 (WMS1, issue #621): **accepted as binding**; slot 65
+  `sys_wmctl` + kind 18 `COMPOSITE_TICK` reservations frozen in ADR 0007 /
+  ADR 0009. The `sys_wmctl` subcommand encoding and error contract are frozen in
+  the ADR 0007 slot-65 amendment — `EACCES` (-7) for the WM-exclusive refusal
+  (the draft's `EPERM` does not exist in the frozen `ErrorCode` enum; see claim
+  1484), seat-taken also `EACCES` (EL1h force-unregister escapes), no-GPU
+  `REGISTER` → `ENXIO` (-9), `COMPOSITE_TICK` on the scheduler tick seam; the
+  ADR 0007 amendment writes the honest `reserved 66–127` tail (`slot_count` is
+  128). The `SET_WINDOW` chrome-descriptor layout remains open (WMS4).
 
 ## Open issues (left to implementing claims)
 
-- Exact `sys_wmctl` subcommand encoding (opcode constants, arg layout, return
-  codes) and the `SET_WINDOW` chrome descriptor. Freeze in the slot-65 claim.
+- ~~Exact `sys_wmctl` subcommand encoding (opcode constants, arg layout, return
+  codes)~~ — **resolved by WMS1 (claim 1484)**: freezed in the ADR 0007
+  slot-65 amendment (REGISTER=1 / SET_WINDOW=2 / REQUEST_PRESENT=3 + error
+  contract). The `SET_WINDOW` **chrome descriptor** layout stays open (WMS4).
 - Kernel BSS for the WM registry (the D2 register + composite-tick sequence);
   the scanout fb (3.52 MiB) is untouched.
 - Whether mailboxes (8 × 64 B today) suffice for the app↔WM protocol or a larger

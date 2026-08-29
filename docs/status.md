@@ -157,7 +157,7 @@ proof is class-B-headless via custom-virtio pointer injection (claim 9367,
 issue #151) and the synthesized-keyboard `events=0` report is fixed by the
 headless virtio input channel (claims 9588/0680, issue #179).
 
-**M32 is being scoped (planning only).** The target is the window-manager
+**M32 is underway (WMS1 done, planning complete).** The target is the window-manager
 *boundary*, not features: today desktop policy is a ~4,740-line kernel
 component (`driving_award.zig`) composited from the shell idle loop, with apps
 touching it only through draw syscalls. The plan moves policy out into a
@@ -170,7 +170,12 @@ WMS1–WMS10 cards as issues **#621–#630**. All ten issue bodies are scoped
 (2026-08-28, claim 2852): per-card goal, in/out of scope, acceptance gate,
 risks and touched files; the work order is pinned in the march tracker's
 dependency-phases map (WMS1 contract → WMS2/WMS3 unlock → WMS4–WMS6
-drain-out → WMS7 protocol → WMS8/WMS9 payoff → WMS10 deferred).
+drain-out → WMS7 protocol → WMS8/WMS9 payoff → WMS10 deferred).**WMS1 is
+done (claim 1484, issue #621): ADR 0015 accepted; slot-65 `sys_wmctl`
+subcommand encoding + error contract frozen in ADR 0007; kind-18
+`COMPOSITE_TICK` (routing-restricted) in ADR 0009; the `COMPOSITE_TICK`
+constant is reserved in `events.zig` (no handler yet — slot 65 still
+`-ENOSYS`). WMS2 next (kernel render-server register).**
 
 > https://github.com/drawmeanelephant/DipshitOS/milestone/16
 

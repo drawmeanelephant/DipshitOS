@@ -582,3 +582,37 @@ same `kernel/src/virtio_snd.zig` state. Proof program: CHIME.BIN calls
 both slots (vol=50, unmuted) before its first blip — the composition
 session proves the seam mutated kernel state; live gate
 `tools/verify-live-sound-control.sh`.
+
+## Amendment (2026-08-28, claim 1484 — the WMS1 render-server reservation)
+
+Milestone 32 card WMS1 accepts ADR 0015 (window-server render seam) and
+freezes slot 65 `sys_wmctl` — the WM server's exclusive control surface over
+the kernel render server (following slot 64 `sys_munmap`; every existing
+syscall number 0–64 stays frozen):
+
+| 65 | `sys_wmctl` | `wmctl(cmd, a0, a1, a2, ptr, len) -> i64` | The registered WM server's control surface over the kernel render server (ADR 0015 seam A). Subcommands below; `ptr/len` are reserved for descriptor payloads (first used by SET_WINDOW chrome descriptors, WMS4). Calls from any process other than the registered WM return `EACCES`; with no WM registered, every call returns `ENOSYS`; an unknown `cmd` returns `EINVAL`. Reserved until the WMS2 claim registers the handler — until then slot 65 is not in `dispatch_table` and a call returns `-ENOSYS` naturally (the ADR 0013 reserved posture). |
+
+### Slot-65 subcommand encoding (frozen by this amendment)
+
+`cmd` values (x0), with argument mapping for x1–x5 (`a0..a2` + `ptr` + `len`):
+
+| cmd | Name | Value | Args | Returns | Errors |
+|:----|:-----|:-----:|:-----|:--------|:-------|
+| REGISTER | `WMCTL_REGISTER` | 1 | all reserved (0) | 0 = registered | `EACCES` seat taken; `ENXIO` no gpu / unarmed compositor; `EINVAL` non-process caller |
+| SET_WINDOW | `WMCTL_SET_WINDOW` | 2 | a0 = window id, a1 = packed rect (x\|y<<16), a2 = packed wh (w\|h<<16); `ptr` → chrome descriptor (WMS4; 0 = none), `len` = descriptor length | 0 = accepted | `EACCES` caller not the WM; `EINVAL` bad id/rect/len |
+| REQUEST_PRESENT | `WMCTL_REQUEST_PRESENT` | 3 | all reserved (0) | 0 = present scheduled | `EACCES` caller not the WM |
+
+Unknown/zero `cmd` → `EINVAL`. `REGISTER` is one-seat: a second registration
+refuses `EACCES`; the registered pid is observable in the monitor's `wm`
+report (WMS2).
+
+`implemented_count` becomes 66 when WMS2 registers the handler (this
+amendment reserves the row; the `syscalls` report prints rows 0–64 until
+then). Proof program and live gate ride the WMS2 claim
+(`tools/verify-live-wmctl-register.sh`).
+
+As with slots 63/64, this is the milestone-32 set's ABI amendment; the ABI —
+x8 number, x0–x5 arguments, x0 result, reserved 66–127, error codes — is
+otherwise unchanged. (`slot_count` is already 128, so "reserved 66–127" is
+the true remaining space — the 128-wide table has been live since M16; this
+amendment writes the honest bound.)

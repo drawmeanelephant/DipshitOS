@@ -126,3 +126,29 @@ kernel sources, build manifest, and march trackers.
   seam. Slot-count tail corrected: `slot_count` is 128, so the amendment
   writes the honest "reserved 66–127" bound.
 - Docs/planning only; no kernel/userland behavior change.
+
+## 2026-08-28 — WMS1 implemented (accept ADR 0015; freeze slot 65 + kind 18; claim 1484)
+
+- Added `docs/claims/1484-wms1-slot65-reservation.md` (claim 1484) before
+  code, per the coordination rules.
+- ADR 0015 flipped PROPOSED → ACCEPTED (Date 2026-08-28, accepted by claim
+  1484); the top scope note amended to reflect it is now binding; amendment
+  log entry appended.
+- ADR 0007: appended the slot 65 `sys_wmctl` amendment — row + the frozen
+  three-subcommand encoding table (WMCTL_REGISTER=1 / WMCTL_SET_WINDOW=2 /
+  WMCTL_REQUEST_PRESENT=3 with arg layout and per-command errors) + the
+  reserved-66-127 tail (slots 63/64 precedent; honest `slot_count`=128
+  bound). Error contract frozen: EACCES for non-WM callers (fixing the
+  draft's nonexistent EPERM), ENXIO for no-GPU REGISTER, EINVAL for unknown
+  cmd / non-process caller, ENOSYS when no WM registered.
+- ADR 0009 D2: added kind 18 `COMPOSITE_TICK` row + the routing-restriction
+  note (delivered ONLY to the registered WM process; never generated with no
+  WM registered) — the first routing-restricted kind.
+- kernel/src/events.zig: added `pub const COMPOSITE_TICK: u16 = 18;` with the
+  ADR 0015 comment (reserved constant only — no pusher, so kind 18 is not
+  delivered and slot 65 still returns -ENOSYS; no behavior change).
+- docs/march-m32-wm-migration.md WMS1 row → ✅ (issue link already present);
+  docs/status.md M32 paragraph notes ADR 0015 accepted.
+- No handler registered / no gate behavior change: the 40+ gate scripts are
+  non-interference evidence (untouched). Zig fmt + build + coordination gate
+  re-run green.

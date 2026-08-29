@@ -52,7 +52,10 @@ pub const Event = extern struct {
 
 ### D2. Event kinds and argument encoding
 
-The `kind` field identifies the event type (values 1..8; 0 is reserved/invalid):
+The `kind` field identifies the event type (0 is reserved/invalid; kinds
+1–8 below are this ADR's core set, kinds 9–17 are addended in ADR 0013 D2,
+and kind 18 `COMPOSITE_TICK` is the first routing-restricted kind, added by
+milestone 32's WMS1):
 
 | Value | Constant | Description | `arg0` | `arg1` | `flags` |
 |:-----:|:---------|:------------|:-------|:-------|:--------|
@@ -64,6 +67,15 @@ The `kind` field identifies the event type (values 1..8; 0 is reserved/invalid):
 | 6 | `WIN_FOCUS` | Window gained focus | Window ID (`2..3`) | Previous focused window ID | 0 |
 | 7 | `WIN_BLUR` | Window lost focus | Window ID (`2..3`) | Newly focused window ID | 0 |
 | 8 | `WIN_CLOSE` | Close requested | Window ID (`2..3`) | 0 | 0 |
+| 18 | `COMPOSITE_TICK` | Composite/present cadence tick, delivered ONLY to the registered WM server's process queue (ADR 0015 D3). | Present sequence (monotonic, wraps at 2³²) | 0 (reserved) | 0 |
+
+> **Routing restriction (kind 18).** Kind 18 is the first kind with a
+> ROUTING RESTRICTION: every kind 1–17 fans out to the owning/focused
+> process per its own contract; kind 18 is delivered exclusively to the
+> process that registered via `sys_wmctl REGISTER` (slot 65). When no WM is
+> registered, kind 18 is never generated. Routing lives in `events.push`'s
+> caller (the WMS2 kernel path); the wire format is unchanged. Adopted by
+> M32 WMS1 (claim 1484).
 
 ---
 

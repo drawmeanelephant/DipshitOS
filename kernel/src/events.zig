@@ -55,6 +55,12 @@ pub const DROP: u16 = 16;
 /// 1 (don't save), 2 (cancel). App must consume within 5 ticks.
 pub const WIN_UNSAVED: u16 = 17;
 
+/// ADR 0015 (M32 WMS1, claim 1484): composite/present cadence tick for the
+/// registered WM server. RESERVED — no kernel path pushes it until the WMS2
+/// claim lands the render-server register; delivered ONLY to the registered
+/// WM (the first routing-restricted kind, ADR 0009 D2 note).
+pub const COMPOSITE_TICK: u16 = 18;
+
 /// Modifier bitmasks (flags bits 0..7).
 pub const MOD_SHIFT: u16 = 0x0001;
 pub const MOD_CTRL: u16 = 0x0002;
