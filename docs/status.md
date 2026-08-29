@@ -175,6 +175,19 @@ done (claim 1484, issue #621): ADR 0015 accepted; slot-65 `sys_wmctl`
 subcommand encoding + error contract frozen in ADR 0007; kind-18
 `COMPOSITE_TICK` (routing-restricted) in ADR 0009.
 
+**WMS7 Gate A is done (claim 9604, issue #627): the app↔WM mailbox protocol,
+proven end-to-end.** The ADR 0015 size decision is answered — "grow nothing":
+the bounded WM_RPC wire format (single-sourced in `kernel/src/wnd_core.zig`,
+compiled by both WND.BIN and WMRPC.BIN) fits the frozen 64-byte mailbox slot
+(`message_max` untouched, `verify-live-ipc.sh` re-runs green). WND.BIN drains
+its own inbox each kind-18 wake and serves requests through its OWN clamped
+primitives — WIN_RAISE via the ALT_TAB-commit path, WIN_CONFIG via the
+SET_WINDOW-rect path — replying an ack to the requester. New WMRPC.BIN test
+app sends raise/config over the mailbox and polls for the acks; the live gate
+proves the whole round-trip on VZ (`wnd: mail`, `wmrpc: *-ack`, focus moved,
+rect applied) plus the no-WM back-compat boot (`wmrpc: no-wm`). The issue's
+remaining scope is Gate B — the toolkit (`ui.zig`/`LIBUI.SO`) re-point.
+
 **WMS2 is done (claim 8482, issue #622): the kernel render-server register.**
 A new host-testable `kernel/src/wm_server.zig` owns the single WM seat +
 the present-sequence counter BESIDE the unchanged shim; slot 65

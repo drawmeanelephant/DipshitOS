@@ -533,6 +533,14 @@ if [ -f "$CALC_ELF" ]; then DYN_ARGS+=("$CALC_ELF"); fi
 if [ -f "$NOTEPAD_ELF" ]; then DYN_ARGS+=("$NOTEPAD_ELF"); fi
 if [ -f "$FILE_ELF" ]; then DYN_ARGS+=("$FILE_ELF"); fi
 if [ -f "$DESKTOP_ELF" ]; then DYN_ARGS+=("$DESKTOP_ELF"); fi
+# M32 WMS7 Gate A (issue #627): WMRPC.BIN — the app↔WM mailbox-protocol
+# test app. Embedded at the volume root via the extra-files path (landing
+# in mkfat32's `extra_files` binder as "WMRPC BIN") so it can be launched
+# with `exec WMRPC.BIN <target-id> [wm-name]`.
+WMRPC_BIN="$ROOT_DIR/zig-out/bin/WMRPC.BIN"
+if [ -f "$WMRPC_BIN" ]; then
+    DYN_ARGS+=("$WMRPC_BIN")
+fi
 
 # 3. Builder script.
 [ -f "$SCRIPT_DIR/mkfat32.py" ] || fail "missing $SCRIPT_DIR/mkfat32.py."
