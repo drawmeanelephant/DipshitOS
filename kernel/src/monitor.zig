@@ -355,7 +355,7 @@ fn ensure_registry() []const Command {
             .{ .name = "strace", .help = "trace a program's syscalls: 'strace exec APP.BIN [args]' arms the tracer around an exec and prints one line per syscall; 'strace off' disarms", .usage = "strace exec <file> [args...] | off", .category = .tasks_processes, .handler = cmd_strace },
             .{ .name = "sym", .help = "crash-report symbol table: 'sym' lists symbols loaded from the last ELF exec; 'sym <file>' parses an ELF's symtab from disk", .usage = "sym [<file>]", .category = .tasks_processes, .max_args = 1, .handler = cmd_sym },
             .{ .name = "syscalls", .help = "numbered syscall table and counters", .usage = "syscalls", .category = .tasks_processes, .handler = cmd_syscalls },
-            .{ .name = "wm", .help = "M32 WMS2/WMS4 render-server register: the registered WM server pid, present-sequence counter, presents, COMPOSITE_TICK count, and SET_WINDOW chrome submissions ('wm none' means the shell idle shim is compositing)", .usage = "wm", .category = .graphics_input, .handler = cmd_wm },
+            .{ .name = "wm", .help = "M32 WMS2/WMS4/WMS5 render-server register: the registered WM server pid, present-sequence counter, presents, COMPOSITE_TICK count, SET_WINDOW chrome submissions, and the WMS5 input-seam fan-out counters (ptr_fan = raw pointer samples, win_mirror = registry mirrors; 'wm none' means the shell idle shim is compositing)", .usage = "wm", .category = .graphics_input, .handler = cmd_wm },
             .{ .name = "wnd", .help = "M32 WMS3 WM server: 'wnd' reports the registered WM server (pid, present seq/count, tick count; 'wnd: none' = shell-shim compositing); 'wnd start' launches the long-lived EL0 WND.BIN server (infrastructure — not in APPS.TXT; the default VM stays shim-only)", .usage = "wnd [start]", .category = .graphics_input, .max_args = 1, .handler = cmd_wnd },
             .{ .name = "tasks", .help = "tick-driven task scheduler status", .usage = "tasks", .category = .tasks_processes, .handler = cmd_tasks },
             .{ .name = "smp", .help = "multiprocessor topology, online CPU cores, and per-core task state", .usage = "smp", .category = .tasks_processes, .handler = cmd_smp },
@@ -6405,6 +6405,15 @@ fn cmd_wm(m: *Monitor, args: []const []const u8) ExecError {
         m.console.print_u64(info.set_window_count);
         m.console.puts(" policy_kind=");
         m.console.print_hex_min(driving_award.wm_chrome_policy_kind());
+        m.console.puts("\n");
+        // M32 WMS5 (issue #625): the input-seam observability — how many
+        // raw pointer samples (kind 19) and registry mirrors (kind 20) the
+        // kernel has fanned out to the registered WM. The gate greps these
+        // to prove the WM — not the kernel — received the stream.
+        m.console.puts("wm: ptr_fan=");
+        m.console.print_u64(info.pointer_fan_count);
+        m.console.puts(" win_mirror=");
+        m.console.print_u64(info.window_mirror_count);
         m.console.puts("\n");
         var rows: [driving_award.max_windows]driving_award.ChromeRow = undefined;
         const n = driving_award.wm_chrome_rows(&rows);

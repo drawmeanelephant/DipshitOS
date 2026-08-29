@@ -51,6 +51,21 @@ pub const marker_every: u32 = 1;
 /// The kind-18 event the loop services (must match kernel events.COMPOSITE_TICK).
 pub const composite_tick_kind: u64 = 18;
 
+// WMS5 (issue #625): the event kinds the WM services — the raw pointer
+// stream (19, WM_POINTER) and the window-registry mirrors (20, WM_WINDOW).
+// Pinned against kernel events (drift guard), like kind 18.
+pub const wm_pointer_kind: u64 = 19;
+pub const wm_window_kind: u64 = 20;
+/// Left-button bit inside the WM_POINTER `flags` byte (must match the HID
+/// button byte the kernel fans out: 0x01 = left).
+pub const btn_left: u8 = 0x01;
+/// The title-bar drag markers — written on grab / move-while-held / drop.
+/// The live gate greps these to prove the WM — not the kernel — moved the
+/// window (the kernel's own geometry is gated off while a WM is registered).
+pub const grab_marker: []const u8 = "wnd: grab\n";
+pub const drag_marker: []const u8 = "wnd: drag\n";
+pub const drop_marker: []const u8 = "wnd: drop\n";
+
 // WMS4 (issue #624): the EXACT values the chrome-descriptor blob (label 3
 // in the naked payload) embeds. Pinned against the shared wnd_core parity
 // policy below, so the EL0 blob cannot drift from the kernel's expectation
@@ -104,20 +119,35 @@ export fn _start() callconv(.naked) noreturn {
         \\mov x20, #0
         \\mov x21, #2
         \\mov x22, #1
-        \\// event buffer on the stack (wait_event writes the event here).
+        \\// WMS5 mirror + drag state: x26 = mirrored window id (0 = none),
+        \\// x27 = mirrored x|(y<<16), x28 = mirrored w|(h<<16). Stack holds
+        \\// the grab state: [sp+16] grabbing (0/1), [sp+20] grab dx,
+        \\// [sp+24] grab dy, [sp+28] previous pointer button byte.
+        \\mov x26, #0
+        \\mov x27, #0
+        \\mov x28, #0
         \\sub sp, sp, #32
+        \\str wzr, [sp, #16]
+        \\str wzr, [sp, #20]
+        \\str wzr, [sp, #24]
+        \\str wzr, [sp, #28]
         \\10:
         \\// sys_wait_event(sp) — BLOCKS until an event is queued for this
-        \\// process; the kernel delivers COMPOSITE_TICK (kind 18) here once
-        \\// per scheduler tick while we are registered.
+        \\// process. The kernel delivers COMPOSITE_TICK (kind 18) once per
+        \\// scheduler tick, WM_POINTER (kind 19) on pointer state changes,
+        \\// and WM_WINDOW (kind 20) registry mirrors while we are registered.
         \\mov x0, sp
         \\mov x8, #22
         \\svc #0
         \\cmp x0, #1
         \\b.ne 10b            // spurious/no event: keep waiting
         \\ldrh w23, [sp, #0]  // event kind (u16 at offset 0)
+        \\cmp w23, #20
+        \\b.eq 20f            // WM_WINDOW registry mirror
+        \\cmp w23, #19
+        \\b.eq 19f            // WM_POINTER raw stream
         \\cmp w23, #18
-        \\b.ne 10b            // not a COMPOSITE_TICK: keep waiting
+        \\b.ne 10b            // unknown kind: keep waiting
         \\add x19, x19, #1
         \\// if (ticks % present_every == 0) -> REQUEST_PRESENT
         \\udiv x24, x19, x21
@@ -140,6 +170,101 @@ export fn _start() callconv(.naked) noreturn {
         \\svc #0
         \\11:
         \\12:
+        \\b 8f                // shared tail: yield + loop
+        \\20:
+        \\// WM_WINDOW (kind 20) registry mirror: the kernel's window row,
+        \\// fanned out so the WM can hit-test. flags low byte = id, arg0 =
+        \\// x|(y<<16), arg1 = w|(h<<16). One slot: the LAST pushed window
+        \\// (the live gate opens exactly one — NOTEPAD).
+        \\ldrh w24, [sp, #2]  // flags
+        \\and w26, w24, #0xff // mirrored window id
+        \\ldr w24, [sp, #8]   // arg0 = x|(y<<16)
+        \\mov x27, x24
+        \\ldr w24, [sp, #12]  // arg1 = w|(h<<16)
+        \\mov x28, x24
+        \\b 8f
+        \\19:
+        \\// WM_POINTER (kind 19): the raw absolute pointer. arg0 = px|(py<<16)
+        \\// (framebuffer pixels), flags low byte = HID button byte (0x01 =
+        \\// left). The WM — not the kernel — hit-tests and decides geometry.
+        \\ldr w24, [sp, #8]   // arg0
+        \\and w25, w24, #0xffff   // px
+        \\lsr w24, w24, #16       // py
+        \\ldrh w23, [sp, #2]  // flags
+        \\and w23, w23, #0xff     // buttons
+        \\ldr w0, [sp, #28]   // previous buttons
+        \\and w0, w0, #1      // prev_left
+        \\and w1, w23, #1     // cur_left
+        \\ldr w2, [sp, #16]   // grabbing
+        \\cbnz w2, wheld
+        \\// Not grabbing: a left-button DOWN EDGE starts a drag — but only
+        \\// when the pointer is inside the mirrored window's TITLE BAR
+        \\// (the wnd_core.title_bar_contains rule: [my, my+16), full width).
+        \\cbnz w0, wdone      // was already down (no edge)
+        \\cbz w1, wdone       // not down (no edge)
+        \\cbz x26, wdone      // no mirrored window yet
+        \\and w2, w27, #0xffff    // mx
+        \\lsr w3, w27, #16        // my
+        \\and w4, w28, #0xffff    // mw
+        \\cmp w25, w2
+        \\b.lo wdone          // px < mx
+        \\add w5, w2, w4
+        \\cmp w25, w5
+        \\b.hs wdone          // px >= mx+mw
+        \\cmp w24, w3
+        \\b.lo wdone          // py < my
+        \\add w5, w3, #16     // my + title_bar_h
+        \\cmp w24, w5
+        \\b.hs wdone          // py >= my+16
+        \\// GRAB: remember the grab offset so the window follows the pointer
+        \\// (no jump when the drag starts), then mark the grab.
+        \\sub w5, w25, w2
+        \\str w5, [sp, #20]   // grab dx = px - mx
+        \\sub w5, w24, w3
+        \\str w5, [sp, #24]   // grab dy = py - my
+        \\mov w5, #1
+        \\str w5, [sp, #16]   // grabbing = 1
+        \\mov x0, #1
+        \\adr x1, 4f
+        \\mov x2, #10         // "wnd: grab\n" = 10 bytes
+        \\mov x8, #1
+        \\svc #0
+        \\b wdone
+        \\wheld:
+        \\// While held: still down -> MOVE via SET_WINDOW rect; released ->
+        \\// DROP. The kernel clamps whatever we propose (WM proposes,
+        \\// kernel clamps) and mirrors the clamped truth back at us.
+        \\cbz w1, wdrop
+        \\ldr w2, [sp, #20]   // grab dx
+        \\ldr w3, [sp, #24]   // grab dy
+        \\sub w2, w25, w2     // nx = px - dx
+        \\sub w3, w24, w3     // ny = py - dy
+        \\// sys_wmctl(SET_WINDOW, a0=id, a1=nx|(ny<<16), a2=w|(h<<16),
+        \\// ptr=0, len=0) — a pure-geometry call (no chrome change).
+        \\mov x0, #2
+        \\mov x1, x26         // window id
+        \\orr w2, w2, w3, lsl #16
+        \\mov x3, x28         // mirrored w|(h<<16)
+        \\mov x4, #0
+        \\mov x5, #0
+        \\mov x8, #65
+        \\svc #0
+        \\mov x0, #1
+        \\adr x1, 5f
+        \\mov x2, #10         // "wnd: drag\n" = 10 bytes
+        \\mov x8, #1
+        \\svc #0
+        \\b wdone
+        \\wdrop:
+        \\str wzr, [sp, #16]  // grabbing = 0
+        \\mov x0, #1
+        \\adr x1, 6f
+        \\mov x2, #10         // "wnd: drop\n" = 10 bytes
+        \\mov x8, #1
+        \\svc #0
+        \\wdone:
+        \\str w23, [sp, #28]  // prev buttons = this sample's buttons
+        \\8:
         \\// cooperative yield keeps the round-robin ring live around the
         \\// blocking wait (bounded work per wake — a WM cannot spin forever).
         \\mov x8, #2
@@ -151,6 +276,12 @@ export fn _start() callconv(.naked) noreturn {
         \\.ascii "wnd: registered\n"
         \\2:
         \\.ascii "wnd: present\n"
+        \\4:
+        \\.ascii "wnd: grab\n"
+        \\5:
+        \\.ascii "wnd: drag\n"
+        \\6:
+        \\.ascii "wnd: drop\n"
         \\3:
         \\// The WMS4 chrome descriptor blob (40 bytes — kind, flags, then
         \\// the 8 theme colors). Values MUST equal the kernel shim's
@@ -202,4 +333,29 @@ test "wnd: the marker/tuning shapes are pinned (live-gate grep targets)" {
     try std.testing.expectEqual(@as(u32, 2), present_every);
     try std.testing.expectEqual(@as(u32, 1), marker_every);
     try std.testing.expectEqual(@as(u64, 18), composite_tick_kind);
+    // WMS5: the drag markers + kinds (the live gate greps these).
+    try std.testing.expectEqualStrings("wnd: grab\n", grab_marker);
+    try std.testing.expectEqual(@as(usize, 10), grab_marker.len);
+    try std.testing.expectEqualStrings("wnd: drag\n", drag_marker);
+    try std.testing.expectEqual(@as(usize, 10), drag_marker.len);
+    try std.testing.expectEqualStrings("wnd: drop\n", drop_marker);
+    try std.testing.expectEqual(@as(usize, 10), drop_marker.len);
+    try std.testing.expectEqual(@as(u64, 19), wm_pointer_kind);
+    try std.testing.expectEqual(@as(u64, 20), wm_window_kind);
+    try std.testing.expectEqual(@as(u8, 0x01), btn_left);
+}
+
+test "wnd: the WMS5 drag-grab rule matches the shared title-bar rule (drift guard)" {
+    // The EL0 blob hit-tests the title band as [my, my+16) full width — the
+    // SAME rule wnd_core.title_bar_contains is; the kernel shim's drag
+    // initiation uses the same re-exported user_title_h. Pin the rule's
+    // shape here so a rule change on either side fails this test.
+    const g = wnd_core.Geom{ .id = 2, .kind = .user, .x = 100, .y = 100, .w = 400, .h = 300, .visible = true, .workspace = 0 };
+    try std.testing.expect(wnd_core.title_bar_contains(g, 100, 100)); // top-left
+    try std.testing.expect(wnd_core.title_bar_contains(g, 300, 115)); // mid band
+    try std.testing.expect(!wnd_core.title_bar_contains(g, 300, 116)); // one below the band
+    try std.testing.expect(!wnd_core.title_bar_contains(g, 300, 200)); // client area
+    try std.testing.expectEqual(@as(usize, 16), wnd_core.title_bar_h);
+    // The kernel re-exports the SAME number (no second constant to drift).
+    _ = wnd_core.hit_test;
 }

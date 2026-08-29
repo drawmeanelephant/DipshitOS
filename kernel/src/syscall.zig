@@ -2117,24 +2117,48 @@ fn handle_wmctl(args: Args, _: *exceptions.VectorFrame) u64 {
         },
         wm_server.wmctl_set_window => {
             // M32 WMS4 (issue #624): the WM submits a chrome descriptor.
-            // The frozen ADR 0007 encoding: a0 = window id (0xFFFFFFFF =
-            // broadcast policy), a1/a2 = the WM's view of the rect/wh —
-            // reserved 0 in WMS4 (geometry stays kernel-owned until WMS5;
-            // nonzero is refused), ptr = 40-byte descriptor, len = 40.
+            // M32 WMS5 (issue #625): the frozen ADR 0007 a1/a2 encoding
+            // ACTIVATES — the same call carries the WM's proposed rect
+            // (a1 = x|(y<<16), a2 = w|(h<<16)) and/or the 40-byte chrome
+            // descriptor (len 40; len 0 = chrome unchanged). A nonzero a1
+            // or a2 means geometry; the kernel applies it through the
+            // clamped user_move/user_resize (WM proposes, kernel clamps).
+            // The ALL broadcast stays chrome-only (a0 = 0xFFFFFFFF with
+            // geometry is refused — geometry is per-window).
             if (!wm_server.registered()) return error_result(.enosys);
             if (wm_server.registered_pid() != pid) return error_result(.eacces);
             const window_id = args[1];
-            if (args[2] != 0 or args[3] != 0) return error_result(.einval); // geometry not drainable yet (WMS5)
-            if (args[5] != wnd_core.chrome_desc_bytes) return error_result(.einval); // frozen length
-            var desc: wnd_core.ChromeDesc = undefined;
-            const desc_bytes: *[wnd_core.chrome_desc_bytes]u8 = @ptrCast(&desc);
-            if (uaccess.copy_in(desc_bytes, args[4], wnd_core.chrome_desc_bytes) != .ok) {
-                return error_result(.efault); // bad descriptor pointer
+            const rect_xy = args[2];
+            const rect_wh = args[3];
+            const have_geom = (rect_xy != 0 or rect_wh != 0);
+            if (have_geom) {
+                // Per-window only: the broadcast sets the chrome POLICY, and
+                // geometry for every window at once is a WMS6 concern.
+                if (window_id == wnd_core.chrome_window_all) return error_result(.einval);
+                if (window_id > 0xff) return error_result(.einval);
+                const x: u32 = @intCast(rect_xy & 0xffff);
+                const y: u32 = @intCast(rect_xy >> 16);
+                const w: u32 = @intCast(rect_wh & 0xffff);
+                const h: u32 = @intCast(rect_wh >> 16);
+                // Move first so the resize clamp sees the new position (the
+                // window is clamped on-scanout by both primitives).
+                if (!driving_award.user_move(@intCast(window_id), x, y)) return error_result(.einval); // bad id
+                _ = driving_award.user_resize(@intCast(window_id), w, h); // bad-id already ruled out by user_move
             }
-            // The one validation rule (single source in wnd_core): unknown
-            // kind/flag bits and a zero kind are refused with EINVAL.
-            if (!wnd_core.chrome_valid(desc)) return error_result(.einval);
-            if (!driving_award.set_window_chrome(window_id, desc)) return error_result(.einval); // bad id
+            // Chrome: len 40 = descriptor (WMS4, unchanged); len 0 = chrome
+            // left as-is (a pure geometry call). Any other length is refused.
+            if (args[5] != 0 and args[5] != wnd_core.chrome_desc_bytes) return error_result(.einval); // frozen length
+            if (args[5] == wnd_core.chrome_desc_bytes) {
+                var desc: wnd_core.ChromeDesc = undefined;
+                const desc_bytes: *[wnd_core.chrome_desc_bytes]u8 = @ptrCast(&desc);
+                if (uaccess.copy_in(desc_bytes, args[4], wnd_core.chrome_desc_bytes) != .ok) {
+                    return error_result(.efault); // bad descriptor pointer
+                }
+                // The one validation rule (single source in wnd_core): unknown
+                // kind/flag bits and a zero kind are refused with EINVAL.
+                if (!wnd_core.chrome_valid(desc)) return error_result(.einval);
+                if (!driving_award.set_window_chrome(window_id, desc)) return error_result(.einval); // bad id
+            }
             wm_server.note_set_window();
             return 0;
         },
@@ -3758,7 +3782,8 @@ test "syscall: sys_wmctl (slot 65) enforces the render-server register contract"
     try std.testing.expectEqual(error_result(.einval), dispatch(sys_wmctl, .{ wm_server.wmctl_set_window, 7, 0, 0, desc_ptr, wnd_core.chrome_desc_bytes }, &frame));
     // Bad length (not the frozen 40) -> EINVAL.
     try std.testing.expectEqual(error_result(.einval), dispatch(sys_wmctl, .{ wm_server.wmctl_set_window, wnd_core.chrome_window_all, 0, 0, desc_ptr, 39 }, &frame));
-    // Nonzero rect/wh — geometry is not drainable until WMS5 -> EINVAL.
+    // WMS5 (issue #625): the ALL broadcast stays chrome-only — nonzero
+    // rect on the broadcast -> EINVAL (geometry is per-window).
     try std.testing.expectEqual(error_result(.einval), dispatch(sys_wmctl, .{ wm_server.wmctl_set_window, wnd_core.chrome_window_all, 1, 0, desc_ptr, wnd_core.chrome_desc_bytes }, &frame));
     // Unknown kind bit -> EINVAL (the single wnd_core refusal rule).
     const bad = wnd_core.ChromeDesc{ .kind = wnd_core.chrome_kind_all | 0x40, .flags = 0, .border_rgb = 0, .border_unfocus_rgb = 0, .title_bg_rgb = 0, .title_fg_rgb = 0, .ring_rgb = 0, .close_rgb = 0, .min_rgb = 0, .pin_rgb = 0 };
@@ -3777,6 +3802,13 @@ test "syscall: sys_wmctl (slot 65) enforces the render-server register contract"
     try std.testing.expectEqual(error_result(.eacces), dispatch(sys_wmctl, .{ wm_server.wmctl_register, 0, 0, 0, 0, 0 }, &frame));
     try std.testing.expectEqual(error_result(.eacces), dispatch(sys_wmctl, .{ wm_server.wmctl_set_window, 0, 0, 0, 0, 0 }, &frame));
     try std.testing.expectEqual(error_result(.eacces), dispatch(sys_wmctl, .{ wm_server.wmctl_request_present, 0, 0, 0, 0, 0 }, &frame));
+    // WMS5: the input seam is part of the register contract — registering
+    // hands the raw pointer stream + window mirrors to the WM (kind 19/20);
+    // teardown restores shim input consumption. Tear down so the aggregated
+    // test binary does not leak input ownership into later tests.
+    try std.testing.expect(driving_award.wm_owns_input);
+    try std.testing.expect(wm_server.unregister(1));
+    try std.testing.expect(!driving_award.wm_owns_input);
 }
 
 test "syscall: wait_event block+wake preserves the event buffer across the svc re-execution (claim 6359)" {

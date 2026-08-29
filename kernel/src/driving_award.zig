@@ -80,7 +80,10 @@ pub const clock_accent_rgb: u32 = 0xffaa00; // amber accent (mascot line)
 /// it unambiguously.
 pub const focus_ring_rgb: u32 = 0xffffff;
 pub const focus_ring_w: usize = 3;
-pub const user_title_h: usize = 16;
+/// M32 WMS5: the title-bar band height — single source is wnd_core (the
+/// WM server's drag hit-test uses the SAME number). Re-export, not a
+/// second constant.
+pub const user_title_h: usize = geom.title_bar_h;
 pub const user_title_bg_rgb: u32 = 0x1a2b3c;
 pub const user_title_fg_rgb: u32 = 0xffffff;
 pub const cursor_rgb: u32 = 0xff00ff;
@@ -218,6 +221,21 @@ var win_count: usize = 0;
 /// Focused window id (stable across raises); 0xff = none.
 var focused_id: u8 = 0xff;
 var armed_global: bool = false;
+/// M32 WMS5 (issue #625, claim 9849): while a WM is registered it owns
+/// pointer geometry — `pointer_tick` keeps tracking the cursor (a kernel
+/// blit surface) but skips ALL geometry consumption (drag, resize, snap,
+/// focus-at, minimize/close buttons) and instead fans the raw stream out
+/// through `wm_pointer_hook`. Flipped by `wm_server.register/unregister`;
+/// false in shim mode (the default VM) → byte-identical to pre-WMS5.
+pub var wm_owns_input: bool = false;
+/// The raw-pointer fan-out (set by wm_server at REGISTER time; null when
+/// no WM — the hook style of `events.on_event_pushed`). Callback gets the
+/// mapped fb pixels + the raw HID button byte; the WM edge-detects.
+pub var wm_pointer_hook: ?*const fn (x: u32, y: u32, buttons: u8) void = null;
+/// The window-registry mirror fan-out (set by wm_server at REGISTER time;
+/// null when no WM). Callback gets the id + full rect + state; wm_server
+/// packs kind 20 WM_WINDOW. Called from the user-window mutation points.
+pub var wm_window_hook: ?*const fn (id: u8, x: u32, y: u32, w: u32, h: u32, visible: bool, focused: bool, workspace: u8) void = null;
 /// M32 WMS4: the WM's broadcast chrome policy (SET_WINDOW with a0 = ALL).
 /// When set, every user window without its own override renders chrome
 /// from this descriptor; null = no WM chrome (shim rules — the default
@@ -981,6 +999,8 @@ pub fn focus(id: u8) bool {
                         .arg1 = old_id,
                     });
                 }
+                // M32 WMS5: the old window's focused bit cleared — mirror it.
+                if (find_user_window(old_id)) |old_win| wm_mirror(old_win.id);
                 _ = mark_dirty(0);
             }
             // Step 7 (Issue #210): auto-show a hidden window on focus.
@@ -990,6 +1010,9 @@ pub fn focus(id: u8) bool {
                 _ = mark_dirty(0);
             }
             focused_id = id;
+            // M32 WMS5: focus is the WM's hit-test input — mirror the new
+            // focused window.
+            wm_mirror(id);
             return true;
         }
     }
@@ -1138,6 +1161,8 @@ pub fn user_open(x: u32, y: u32, w: u32, h: u32, owner: usize) UserOpenResult {
         };
         win_count += 1;
         _ = focus(id);
+        // M32 WMS5: the registered WM must see the new window to hit-test it.
+        wm_mirror(id);
         return .{ .opened = id };
     }
     return .full;
@@ -1184,6 +1209,9 @@ pub fn user_move(id: u8, x: u32, y: u32) bool {
     win.dirty = true;
     // Reveal whatever sat under the window's old rect (the terminal repaint).
     _ = mark_dirty(0);
+    // M32 WMS5: the WM's mirror follows the clamped move (it proposes, the
+    // kernel clamps — the mirror carries the clamped truth).
+    wm_mirror(id);
     return true;
 }
 
@@ -1243,6 +1271,13 @@ pub fn user_move_to_workspace(id: u8, ws: u8) bool {
 /// EL0 `sys_win_close` enforces ownership on top of it.
 pub fn user_close(id: u8) bool {
     const idx = find_user_window_index(id) orelse return false;
+    // M32 WMS5: tell the registered WM BEFORE the row is removed (the
+    // mirror reads live state). The mirror goes out with visible=false so
+    // the WM drops its hit-test target.
+    if (wm_window_hook) |hook| {
+        const w = &windows[idx];
+        hook(w.id, w.x, w.y, w.w, w.h, false, w.id == focused_id, w.workspace);
+    }
     remove_user_at(idx);
     return true;
 }
@@ -1271,6 +1306,18 @@ pub const WinRect = struct {
 pub fn user_rect(id: u8) ?WinRect {
     const win = find_user_window(id) orelse return null;
     return .{ .x = win.x, .y = win.y, .w = win.w, .h = win.h };
+}
+
+/// M32 WMS5 (issue #625): push ONE registry mirror (kind 20 WM_WINDOW)
+/// through the `wm_window_hook` for window `id` — the kernel's window data
+/// fanned out so the registered WM can hit-test. A no-op when no WM is
+/// registered (hook null) or the window is gone. Called from the user-
+/// window mutation points (open/close/move/resize/visibility/focus) so the
+/// WM's mirror stays current.
+fn wm_mirror(id: u8) void {
+    const hook = wm_window_hook orelse return;
+    const win = find_user_window(id) orelse return;
+    hook(id, win.x, win.y, win.w, win.h, win.visible, win.id == focused_id, win.workspace);
 }
 
 /// Card G6 (claim 0487) follow-on (slot 19): the FULL state of a user
@@ -1321,6 +1368,7 @@ pub fn user_set_visible(id: u8, visible: bool) bool {
     win.visible = visible;
     win.dirty = true;
     if (!visible) _ = mark_dirty(0); // reveal whatever sat under the hidden window
+    wm_mirror(id); // M32 WMS5: visibility changes must reach the WM's mirror
     return true;
 }
 
@@ -1362,6 +1410,7 @@ pub fn user_resize(id: u8, w: u32, h: u32) bool {
     win.dirty = true;
     _ = mark_dirty(0);
     _ = mark_dirty(1);
+    wm_mirror(id); // M32 WMS5: the WM's mirror follows the clamped resize
     if (win.owner) |owner| {
         events.push(owner, .{
             .kind = events.WIN_RESIZE,
@@ -2336,6 +2385,24 @@ pub fn pointer_tick(st: input.PointerState, click: ?input.Click) ?u8 {
             // M27 G6: clear tooltip on mouse move.
             tooltip_clear();
             _ = mark_dirty(0); // the cursor moves over a full repaint
+        }
+
+        // M32 WMS5 (issue #625): the input-seam handover — while a WM is
+        // registered it owns pointer GEOMETRY. The kernel keeps tracking the
+        // cursor (a blit surface) but fans the raw stream out and consumes
+        // nothing: no drag, no resize, no snap, no focus-at, no minimize/
+        // close buttons. The WM hit-tests and issues SET_WINDOW rects; the
+        // kernel clamps + blits those. Zero regression: shim mode (the
+        // default) runs the full geometry block below byte-identically.
+        if (wm_owns_input) {
+            // Deliver the sample when the pointer state CHANGED — motion OR
+            // a button edge (a release with no motion must still be seen).
+            const btn_changed = st.buttons != prev_ptr_buttons;
+            if (moved or btn_changed) {
+                if (wm_pointer_hook) |hook| hook(nx, ny, st.buttons);
+            }
+            prev_ptr_buttons = st.buttons;
+            return null; // no kernel geometry decision while the WM owns input
         }
 
         const kb_flags = input.hid_modifiers_to_flags(input.report().kb_mods);
@@ -4012,6 +4079,121 @@ test "driving_award: WMS4 SET_WINDOW chrome policy + per-window overrides (issue
     try std.testing.expectEqual(@as(usize, 1), n);
     try std.testing.expectEqual(@as(u8, 2), rows[0].id);
     try std.testing.expectEqual(@as(u32, 0x3), rows[0].kind);
+
+    _ = user_close(2);
+}
+
+// WMS5 test capture state — module-level so the naked fn-pointer hooks
+// (which cannot capture) can record what they receive.
+var wms5_mirror_calls: usize = 0;
+var wms5_last_id: u8 = 0;
+var wms5_last_x: u32 = 0;
+var wms5_last_y: u32 = 0;
+var wms5_last_w: u32 = 0;
+var wms5_last_h: u32 = 0;
+var wms5_last_vis: bool = false;
+var wms5_last_foc: bool = false;
+var wms5_ptr_calls: usize = 0;
+var wms5_ptr_x: u32 = 0;
+var wms5_ptr_y: u32 = 0;
+var wms5_ptr_btn: u8 = 0;
+
+fn wms5_mirror_capture(id: u8, x: u32, y: u32, w: u32, h: u32, visible: bool, focused: bool, workspace: u8) void {
+    _ = workspace;
+    wms5_mirror_calls += 1;
+    wms5_last_id = id;
+    wms5_last_x = x;
+    wms5_last_y = y;
+    wms5_last_w = w;
+    wms5_last_h = h;
+    wms5_last_vis = visible;
+    wms5_last_foc = focused;
+}
+
+fn wms5_ptr_capture(x: u32, y: u32, buttons: u8) void {
+    wms5_ptr_calls += 1;
+    wms5_ptr_x = x;
+    wms5_ptr_y = y;
+    wms5_ptr_btn = buttons;
+}
+
+test "driving_award: WMS5 registry mirrors fire on window mutations (issue #625)" {
+    arm();
+    wm_owns_input = true; // a WM is registered — the mirrors go live
+    wm_window_hook = wms5_mirror_capture;
+    wms5_mirror_calls = 0;
+
+    // user_open -> mirror (visible, focused — the new window is focused).
+    _ = user_open(64, 64, 512, 384, 7); // window id 2
+    try std.testing.expect(wms5_mirror_calls >= 1);
+    try std.testing.expectEqual(@as(u8, 2), wms5_last_id);
+    try std.testing.expectEqual(@as(u32, 64), wms5_last_x);
+    try std.testing.expectEqual(@as(u32, 64), wms5_last_y);
+    try std.testing.expectEqual(@as(u32, 512), wms5_last_w);
+    try std.testing.expectEqual(@as(u32, 384), wms5_last_h);
+    try std.testing.expect(wms5_last_vis);
+    try std.testing.expect(wms5_last_foc);
+
+    // user_move -> the clamped move is mirrored (the WM proposes, the
+    // kernel clamps — the mirror carries the clamped truth).
+    try std.testing.expect(user_move(2, 200, 100));
+    try std.testing.expectEqual(@as(u32, 200), wms5_last_x);
+    try std.testing.expectEqual(@as(u32, 100), wms5_last_y);
+
+    // user_resize -> the clamped resize is mirrored.
+    try std.testing.expect(user_resize(2, 300, 200));
+    try std.testing.expectEqual(@as(u32, 300), wms5_last_w);
+    try std.testing.expectEqual(@as(u32, 200), wms5_last_h);
+
+    // user_set_visible(false) -> mirror with visible=false (the WM drops
+    // its hit-test target).
+    try std.testing.expect(user_set_visible(2, false));
+    try std.testing.expect(!wms5_last_vis);
+
+    // user_close -> a mirror goes out BEFORE the row is removed.
+    _ = user_close(2);
+    try std.testing.expect(!wms5_last_vis);
+
+    // No hook (shim mode) -> all of the above are silent no-ops.
+    wm_owns_input = false;
+    wm_window_hook = null;
+    _ = user_open(10, 10, 100, 100, 7); // window id 3 — no crash, no call
+    const calls_before = wms5_mirror_calls;
+    _ = user_close(3);
+    try std.testing.expectEqual(calls_before, wms5_mirror_calls); // the hook never fired
+}
+
+test "driving_award: WMS5 input ownership gates kernel geometry consumption (issue #625)" {
+    arm();
+    wm_owns_input = false;
+    wm_pointer_hook = null;
+    // A click on the terminal focuses it in shim mode (kernel geometry).
+    const st: input.PointerState = .{ .x = 26000, .y = 8000, .buttons = 0x01, .valid = true };
+    try std.testing.expectEqual(@as(?u8, 0), pointer_tick(st, .{ .x = st.x, .y = st.y }));
+
+    // With a WM registered: the raw stream fans out and the kernel consumes
+    // NOTHING (no focus change, no drag, no buttons) — the WM decides. A
+    // FRESH position (the shim click above already consumed st's position
+    // and buttons, so this must be a new state to count as "changed").
+    const st2: input.PointerState = .{ .x = 10000, .y = 12000, .buttons = 0x03, .valid = true };
+    wm_owns_input = true;
+    wm_pointer_hook = wms5_ptr_capture;
+    wms5_ptr_calls = 0;
+    try std.testing.expectEqual(@as(?u8, null), pointer_tick(st2, null)); // no kernel decision
+    try std.testing.expect(wms5_ptr_calls >= 1); // ...but the raw sample reached the WM
+    // The hook gets the MAPPED fb pixels (the WM operates in pixels — the
+    // same space its kind-20 mirrors and its SET_WINDOW rects use).
+    const exp_x = map_pointer_axis(st2.x, virtio_gpu.fb_width);
+    const exp_y = map_pointer_axis(st2.y, virtio_gpu.fb_height);
+    try std.testing.expectEqual(exp_x, wms5_ptr_x);
+    try std.testing.expectEqual(exp_y, wms5_ptr_y);
+    try std.testing.expectEqual(@as(u8, 0x03), wms5_ptr_btn);
+
+    // Cleanup: shim mode restored (the wm_server init() path also does this).
+    wm_owns_input = false;
+    wm_pointer_hook = null;
+    _ = user_close(2);
+    _ = user_close(3);
 }
 
 test "driving_award: user_open bounds and the four slots fill the registry" {

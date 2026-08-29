@@ -628,12 +628,26 @@ bytes = 10 × u32, no pointers, per the issue's bounded-struct rule):
 `a0 = 0xFFFFFFFF` broadcasts the WM's chrome POLICY (applied to every
 user window and inherited by windows created later); a specific id sets
 that window's override (unknown id → `EINVAL`). Unknown kind bits / flag
-bits / `len != 40` → `EINVAL`. `a1`/`a2` (geometry) must be 0 until WMS5
-(nonzero → `EINVAL`); the kernel still owns window data — the WM owns the
-look. While a WM is registered, `REQUEST_PRESENT` composites with
-`draw_chrome` painting from descriptors; with no WM, the shim's own rules
-paint byte-identically to pre-M32 (one registration-flag branch in
-driving_award).
+bits → `EINVAL`; `len` is 0 (no chrome change) or 40 (the descriptor),
+anything else → `EINVAL`. While a WM is registered, `REQUEST_PRESENT`
+composites with `draw_chrome` painting from descriptors; with no WM, the
+shim's own rules paint byte-identically to pre-M32 (one
+registration-flag branch in driving_award).
+
+### Amendment (2026-08-29, claim 9849 — the WMS5 rect activation)
+
+The `a1`/`a2` geometry encoding reserved in the row above ACTIVATES: the
+WM proposes a window rect (`a1` = x|y<<16, `a2` = w|h<<16, framebuffer
+pixels) and the kernel applies it through the existing clamped
+`user_move`/`user_resize` — WM proposes, kernel clamps + blits. A nonzero
+`a1` or `a2` means geometry; a call may carry rect and/or chrome (len 0
+or 40). The `a0 = 0xFFFFFFFF` broadcast stays chrome-only — geometry is
+per-window (a rect on the broadcast → `EINVAL`). The input seam behind
+it: while a WM is registered the kernel stops consuming pointer GEOMETRY
+and fans the raw stream (kind 19 `WM_POINTER`) + registry mirrors (kind
+20 `WM_WINDOW`) out to the WM (ADR 0009 D2); the WM hit-tests and issues
+SET_WINDOW rects. Shims never see any of this (no WM registered →
+byte-identical pre-WMS5 behavior; the W1–W16 gates stay green untouched).
 
 `implemented_count` becomes 66 when WMS2 registers the handler (this
 amendment reserves the row; the `syscalls` report prints rows 0–64 until
