@@ -6414,9 +6414,36 @@ fn cmd_wm(m: *Monitor, args: []const []const u8) ExecError {
 /// (claim 0622) + a fresh `wnd start` — re-registering into the freed seat.
 fn cmd_wnd(m: *Monitor, args: []const []const u8) ExecError {
     if (args.len >= 1 and std.mem.eql(u8, args[0], "start")) {
-        // The bootstrap: launch the long-lived WM server. Reuse the exec
-        // seam (WND.BIN is on the ESP); it becomes process WND.BIN.
-        return cmd_exec(m, &.{"WND.BIN"});
+        // The bootstrap: launch the long-lived WM server. Go through the
+        // exec seam DIRECTLY with a fixed file name — the same pattern as
+        // `calc`'s exec_file("CALC.BIN", args) (a direct string literal,
+        // no argv indirection): an argv handoff to cmd_exec showed garbage
+        // in the exec error path under ReleaseSmall, so this is the honest,
+        // proven shape. WND.BIN becomes process WND.BIN on the ESP.
+        switch (esp_exec.exec_file("WND.BIN", &.{})) {
+            .ok => {
+                m.console.puts("wnd: starting ");
+                const info = esp_exec.loaded().?;
+                m.console.puts(info.name);
+                m.console.puts("\n");
+                return .none;
+            },
+            .no_disk => {
+                err_prefix(m);
+                m.console.print_line("no disk (ESP FAT volume unavailable)");
+                return .not_implemented;
+            },
+            .not_found => {
+                err_prefix(m);
+                m.console.print_line("WND.BIN not found on the ESP (must be a DSK1 flat image)");
+                return .invalid_argument;
+            },
+            else => {
+                err_prefix(m);
+                m.console.print_line("WND.BIN failed to load (see `exec WND.BIN` for the full diagnosis)");
+                return .invalid_argument;
+            },
+        }
     }
     const info = wm_server.info();
     if (info.pid) |pid| {

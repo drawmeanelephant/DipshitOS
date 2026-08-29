@@ -4,7 +4,7 @@
 - **Issue:** https://github.com/drawmeanelephant/DipshitOS/issues/623 (WMS3 of 10, milestone 16)
 - **Stacked on:** `agent/buffy/wms2-wmctl-register` (PR #633) — the WMS3 PR builds on WMS2's code
 - **ADR:** 0015 (seam A render-server); slot-65 encoding + kind-18 from WMS1/WMS2 (claims 1484/8482)
-- **Status:** 🔄 agent/buffy/wms3-wnd-server
+- **Status:** ✅ done (2026-08-29, PR closing #623)
 - **Heartbeat:** 2026-08-29
 - **Depends on:** WMS2 (claim 8482) — `sys_wmctl` slot 65 + kind-18 `COMPOSITE_TICK` delivery + WM-death teardown must be present (this branch is cut from the WMS2 branch so it builds on them)
 - **Blocks:** WMS4–WMS6 (policy drain-out), WMS7

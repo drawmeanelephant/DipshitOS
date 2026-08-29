@@ -43,9 +43,11 @@ pub const registered_marker: []const u8 = "wnd: registered\n";
 /// cadence (a marker per present would flood the serial over a long run).
 pub const present_marker: []const u8 = "wnd: present\n";
 /// Present every Nth COMPOSITE_TICK (its own cadence, not every tick).
+/// Ticks are 1 Hz on VZ, so every 2 ticks = a present every 2 s.
 pub const present_every: u32 = 2;
-/// Write a present marker every Nth present (bounds serial volume).
-pub const marker_every: u32 = 8;
+/// Write a present marker every Nth present. With cadence 2 s this bounds
+/// serial volume to one line per present.
+pub const marker_every: u32 = 1;
 /// The kind-18 event the loop services (must match kernel events.COMPOSITE_TICK).
 pub const composite_tick_kind: u64 = 18;
 
@@ -70,7 +72,7 @@ export fn _start() callconv(.naked) noreturn {
         \\mov x19, #0
         \\mov x20, #0
         \\mov x21, #2
-        \\mov x22, #8
+        \\mov x22, #1
         \\// event buffer on the stack (wait_event writes the event here).
         \\sub sp, sp, #32
         \\10:
@@ -100,7 +102,9 @@ export fn _start() callconv(.naked) noreturn {
         \\cbnz x25, 11f
         \\mov x0, #1
         \\adr x1, 2f
-        \\mov x2, #14         // "wnd: present\n"
+        \\mov x2, #13         // "wnd: present\n" = 13 bytes (a 14-byte count
+        \\                  // would cross the content-region end and EFAULT
+        \\                  // — the exact bug this marker is designed to catch)
         \\mov x8, #1
         \\svc #0
         \\11:
@@ -130,8 +134,8 @@ test "wnd: the marker/tuning shapes are pinned (live-gate grep targets)" {
     try std.testing.expectEqualStrings("wnd: registered\n", registered_marker);
     try std.testing.expectEqual(@as(usize, 16), registered_marker.len);
     try std.testing.expectEqualStrings("wnd: present\n", present_marker);
-    try std.testing.expectEqual(@as(usize, 14), present_marker.len);
+    try std.testing.expectEqual(@as(usize, 13), present_marker.len); // NOT 14 — an over-count crosses the content region and EFAULTs (observed live)
     try std.testing.expectEqual(@as(u32, 2), present_every);
-    try std.testing.expectEqual(@as(u32, 8), marker_every);
+    try std.testing.expectEqual(@as(u32, 1), marker_every);
     try std.testing.expectEqual(@as(u64, 18), composite_tick_kind);
 }
