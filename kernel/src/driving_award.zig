@@ -1963,6 +1963,50 @@ pub fn restore_from_dock(id: u8) bool {
     return true;
 }
 
+/// M32 WMS6 Gate D (issue #626): the dock-icon click ACTION — the exact chain
+/// the shim's dock-click handler runs (restore the first minimized user
+/// window, else focus + raise a user window, else open one), applied by the
+/// registered WM via DOCK (cmd 9). Clamped: the bar has exactly 5 icons
+/// (c n t b s), so an out-of-range index is refused (EINVAL). The action
+/// itself is byte-identical to the shim's, so a WM decision and a shim click
+/// are identical actions.
+pub fn dock_icon_click(idx: u32) bool {
+    if (idx >= 5) return false; // the bar has 5 icons
+    var restored = false;
+    var k: usize = 0;
+    while (k < win_count) : (k += 1) {
+        if (windows[k].kind == .user and windows[k].minimized) {
+            _ = restore_from_dock(windows[k].id);
+            restored = true;
+            break;
+        }
+    }
+    if (!restored) {
+        var has_user = false;
+        var kk: usize = 0;
+        while (kk < win_count) : (kk += 1) {
+            if (windows[kk].kind == .user) {
+                has_user = true;
+                break;
+            }
+        }
+        if (!has_user) {
+            _ = user_open(64, 64, 512, 384, 99);
+        } else {
+            var kkk: usize = 0;
+            while (kkk < win_count) : (kkk += 1) {
+                if (windows[kkk].kind == .user) {
+                    _ = focus(windows[kkk].id);
+                    _ = raise(windows[kkk].id);
+                    break;
+                }
+            }
+        }
+    }
+    _ = mark_dirty(0);
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 // M21 W6 — Maximize / restore
 // ---------------------------------------------------------------------------
@@ -2489,8 +2533,13 @@ pub fn pointer_tick(st: input.PointerState, click: ?input.Click) ?u8 {
             cursor_x = nx;
             cursor_y = ny;
             cursor_shown = true;
-            // M27 G6: clear tooltip on mouse move.
-            tooltip_clear();
+            // M27 G6: clear tooltip on mouse move. M32 WMS6 Gate D (issue
+            // #626): while a WM owns input the tooltip policy lives in the WM
+            // — it receives the move (kind 19) and decides when to hide
+            // (TOOLTIP cmd 8), so the kernel's blanket move-clear must NOT
+            // fight its decisions (it gates behind !wm_owns_input like the
+            // other shim decisions).
+            if (!wm_owns_input) tooltip_clear();
             _ = mark_dirty(0); // the cursor moves over a full repaint
         }
 
@@ -2563,7 +2612,11 @@ pub fn pointer_tick(st: input.PointerState, click: ?input.Click) ?u8 {
                 }
             }
             // M15 C4: dock icon click — 24 px left bar, 20×20 icons at (2,8+idx*32).
-            if (cursor_x < dock_w and cursor_y < dock_h) {
+            // M32 WMS6 Gate D (issue #626): while a WM owns input the raw click
+            // already fanned to it (kind 19 carries the button byte); the WM
+            // hit-tests the icon grid and issues DOCK, so the kernel gates its
+            // OWN dock-click decision off (like the tray-click path, Gate B).
+            if (!wm_owns_input and cursor_x < dock_w and cursor_y < dock_h) {
                 if (cursor_x >= 2 and cursor_x < 22) {
                     var idx: usize = 0;
                     while (idx < 5) : (idx += 1) {
