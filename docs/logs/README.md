@@ -146,6 +146,7 @@ meaningful — on main.
 | persistent settings (claim 2649) | [`agent-buffy-u8-persistent-settings.md`](agent-buffy-u8-persistent-settings.md) |
 | `agent/buffy/vz-gates-in-ci` | [`agent-buffy-vz-gates-in-ci.md`](agent-buffy-vz-gates-in-ci.md) |
 | agent/buffy/wms2-wmctl-register | [`agent-buffy-wms2-wmctl-register.md`](agent-buffy-wms2-wmctl-register.md) |
+| agent/buffy/wms3-wnd-server | [`agent-buffy-wms3-wnd-server.md`](agent-buffy-wms3-wnd-server.md) |
 | agent/gates fleet-remainder | [`agent-gates-fleet-remainder.md`](agent-gates-fleet-remainder.md) |
 | per-agent worktrees | [`agent-ox-alpha-agent-worktrees.md`](agent-ox-alpha-agent-worktrees.md) |
 | claim lifecycle: declared files + staleness | [`agent-ox-alpha-claim-lifecycle.md`](agent-ox-alpha-claim-lifecycle.md) |

@@ -119,6 +119,7 @@ loudly if the generator or a table is broken.
 | [3377-docs-pass-m31-sync](3377-docs-pass-m31-sync.md) | buffy (`agent/buffy/docs-pass`) | ✅ done |
 | [3589-drag-resize](3589-drag-resize.md) | Muse Spark (`agent/buffy/arc2-resize`) | ✅ done 2026-08-21 — drag-to-resize live on host (merge 44ca7d2): `driving_award` 6×6 hit + clamped resize + WIN_RESIZE kind 10 + `sys_win_resize` slot 47 (implemented_count 47→48), 4 host tests, `verify-bss-budget` PASS 9788088/11534336, `verify-coordination` PASS — branch `agent/buffy/arc2-resize` merged to `main` (commit 17e7951) |
 | [3679-m18-t4-history](3679-m18-t4-history.md) | buffy (`agent/buffy/m18-t4-history`) | ✅ done 2026-08-22 |
+| [3881-wms3-wnd-server](3881-wms3-wnd-server.md) | buffy (`agent/buffy/wms3-wnd-server`) | ✅ done (2026-08-29, PR closing #623) |
 | [4001-m31-dynamic-ecosystem](4001-m31-dynamic-ecosystem.md) | buffy (`agent/buffy/m30-dynamic-linking`) | ✅ done |
 | [4341-m23-editor-completeness](4341-m23-editor-completeness.md) | Buffy (`agent/buffy/m23-editor-wave2`) | ✅ done |
 | [4354-m23-m24-gate-evidence](4354-m23-m24-gate-evidence.md) | buffy (`agent/buffy/m23-m24-gate-sweep`) | ✅ done — the full K-row sweep landed 2026-08-26: `verify-live-calc-prog.sh` (K1) and the new `verify-live-calc-depth.sh` (K2/K3/K4/K6/K7/K9/K10/K12/K13/K14/K16) both PASS on VZ; two real bugs surfaced and fixed (see Notes). |
