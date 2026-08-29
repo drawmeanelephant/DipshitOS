@@ -170,6 +170,7 @@ loudly if the generator or a table is broken.
 | [9697-dock](9697-dock.md) | buffy (`agent/buffy/m15-c4-dock`) | ✅ done 2026-08-20 — `driving_award.zig:107` `Kind.dock` + `dock_*` BSS + `arm` window 253 + `paint` dock bar + `pointer_tick` dock launch/raise + `image/apps.txt` `dock=true` (5 apps) + `desktop.zig:27` `dock` parse, host tests `arm` 5→`count` + `hit_test` + `user_open` + `syscall` `win_query` + `monitor` `resources` update, `verify-bss-budget` PASS `9788k/11534k` |
 | [9731-env-check](9731-env-check.md) | Buffy (`agent/buffy/toolchain-env-check`) | 🔄 agent/buffy/toolchain-env-check |
 | [9815-m22-dev-tools-lane](9815-m22-dev-tools-lane.md) | ox-alpha (`lane-d/m22-dev-tools`) | ✅ done — M22 developer-tools lane complete on main: all D1–D16 cards closed in march-m22.md with PASS gates (ELF loader, strace seam, disas/asm, monitor dev utilities, resmon, crash-viewer, dmesg, time, ls -l, which/inventory, devcons). Flipped from 🔄 by claim 0590's owner per the 6204/6637 precedent during the 2026-08-26 open-claim sweep (log entry in docs/logs/agent-buffy-input-poll-563.md). |
+| [9849-wms5-geometry-seam](9849-wms5-geometry-seam.md) | buffy (`agent/buffy/wms5-geometry-seam`) | ✅ done — PR #639 (WMS4, the dependency) + this claim's PR both merged |
 | [9867-m18-t1-scrollback](9867-m18-t1-scrollback.md) | buffy (`agent/buffy/m18-t1-scrollback`) | ✅ done 2026-08-22 |
 <!-- CLAIMS_INDEX:END -->
 

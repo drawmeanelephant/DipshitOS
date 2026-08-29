@@ -148,6 +148,7 @@ meaningful — on main.
 | agent/buffy/wms2-wmctl-register | [`agent-buffy-wms2-wmctl-register.md`](agent-buffy-wms2-wmctl-register.md) |
 | agent/buffy/wms3-wnd-server | [`agent-buffy-wms3-wnd-server.md`](agent-buffy-wms3-wnd-server.md) |
 | WMS4 chrome policy drain-out (SET_WINDOW descriptors) | [`agent-buffy-wms4-chrome-drain.md`](agent-buffy-wms4-chrome-drain.md) |
+| WMS5 geometry policy drain-out (input seam + SET_WINDOW rects) | [`agent-buffy-wms5-geometry-seam.md`](agent-buffy-wms5-geometry-seam.md) |
 | agent/gates fleet-remainder | [`agent-gates-fleet-remainder.md`](agent-gates-fleet-remainder.md) |
 | per-agent worktrees | [`agent-ox-alpha-agent-worktrees.md`](agent-ox-alpha-agent-worktrees.md) |
 | claim lifecycle: declared files + staleness | [`agent-ox-alpha-claim-lifecycle.md`](agent-ox-alpha-claim-lifecycle.md) |
