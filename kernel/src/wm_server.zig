@@ -44,6 +44,18 @@ pub const wmctl_request_present: u64 = 3;
 /// workspace (bits 8-11); applied through the same clamped kernel
 /// primitives the shim uses (user_set_visible + move-to-workspace).
 pub const wmctl_set_state: u64 = 4;
+/// M32 WMS6 Gate A (issue #626): ALT_TAB — the desktop-chrome drain's first
+/// read-mostly surface. a0 = window id, a1 = action: the WM (not the kernel)
+/// decides WHICH window Alt+Tab switches to; the kernel clamps + repaints
+/// the overlay blit from WM-declared state. The action encoding is frozen
+/// here (ADR 0007 amendment by this claim).
+pub const wmctl_alt_tab: u64 = 5;
+/// ALT_TAB actions (a1) — mirror the kernel shim's overlay state machine
+/// (activate/cycle/commit/dismiss) but driven by the WM's chosen id.
+pub const alt_tab_activate: u64 = 1;
+pub const alt_tab_cycle: u64 = 2;
+pub const alt_tab_commit: u64 = 3;
+pub const alt_tab_dismiss: u64 = 4;
 
 /// The single registered WM server process id; null = no WM registered
 /// (shim mode, the default — every pre-M32 gate runs in this state).
@@ -61,6 +73,9 @@ var tick_count: u64 = 0;
 /// descriptors themselves live in `driving_award` (per-window + policy);
 /// this seam only counts, per its no-policy charter.
 var set_window_count: u64 = 0;
+/// M32 WMS6 Gate A (issue #626): total ALT_TAB submissions accepted (the
+/// observability counter — how many desktop-chrome decisions the WM made).
+var alt_tab_apply_count: u64 = 0;
 /// Set when the registered WM exits (teardown) — the shell idle loop drains
 /// this into the `wm: unregistered, shim resumed` report (the exit path is
 /// IRQ context and console-free, so the report is drained like the process
@@ -75,6 +90,7 @@ pub fn init() void {
     tick_count = 0;
     set_window_count = 0;
     set_state_count = 0;
+    alt_tab_apply_count = 0;
     pointer_fan_count = 0;
     window_mirror_count = 0;
     key_fan_count = 0;
@@ -209,6 +225,7 @@ pub const WmInfo = struct {
     tick_count: u64,
     set_window_count: u64,
     set_state_count: u64,
+    alt_tab_apply_count: u64,
     pointer_fan_count: u64,
     window_mirror_count: u64,
     key_fan_count: u64,
@@ -222,6 +239,7 @@ pub fn info() WmInfo {
         .tick_count = tick_count,
         .set_window_count = set_window_count,
         .set_state_count = set_state_count,
+        .alt_tab_apply_count = alt_tab_apply_count,
         .pointer_fan_count = pointer_fan_count,
         .window_mirror_count = window_mirror_count,
         .key_fan_count = key_fan_count,
@@ -310,6 +328,12 @@ pub fn fan_key(usage: u8, flags: u16) void {
 /// Note a SET_STATE (cmd 4) call — the WM's visibility/workspace change.
 pub fn note_set_state() void {
     set_state_count +%= 1;
+}
+
+/// Note an ALT_TAB (cmd 5) submission — a desktop-chrome decision the WM
+/// made (activate/cycle/commit/dismiss).
+pub fn note_alt_tab() void {
+    alt_tab_apply_count +%= 1;
 }
 
 // ---------------------------------------------------------------------------

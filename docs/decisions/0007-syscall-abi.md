@@ -602,6 +602,7 @@ syscall number 0–64 stays frozen):
 | SET_WINDOW | `WMCTL_SET_WINDOW` | 2 | a0 = window id, a1 = packed rect (x\|y<<16), a2 = packed wh (w\|h<<16); `ptr` → chrome descriptor (WMS4; 0 = none), `len` = descriptor length | 0 = accepted | `EACCES` caller not the WM; `EINVAL` bad id/rect/len |
 | REQUEST_PRESENT | `WMCTL_REQUEST_PRESENT` | 3 | all reserved (0) | 0 = present scheduled | `EACCES` caller not the WM |
 | SET_STATE | `WMCTL_SET_STATE` | 4 | a0 = window id (or `0xFFFF_FFFF` for the ALL workspace broadcast), a1 = visible (bits 0–1) \| workspace << 8 \| always-on-top bit 16 | 0 = applied | `EACCES` caller not the WM; `EINVAL` bad id / workspace / visibility |
+| ALT_TAB | `WMCTL_ALT_TAB` | 5 | a0 = window id, a1 = action (1 activate, 2 cycle, 3 commit, 4 dismiss) | 0 = applied | `EACCES` caller not the WM; `EINVAL` bad id / action |
 
 Unknown/zero `cmd` → `EINVAL`. `REGISTER` is one-seat: a second registration
 refuses `EACCES`; the registered pid is observable in the monitor's `wm`
@@ -677,3 +678,19 @@ raw key stream (kind 21 `WM_KEY`, ADR 0009 D2) out — the kernel's own
 keyboard geometry consumers are gated behind `!wm_owns_input` — and the WM
 decides tile/snap/workspace/minimize/maximize, issuing SET_WINDOW rects
 (cmd 2) + SET_STATE state (cmd 4). No WM registered → shim byte-identical.
+
+### Amendment (2026-08-29, claim 4510 — the WMS6 Gate-A ALT_TAB channel)
+
+The first desktop-chrome surface to leave the kernel is the read-mostly,
+keyboard-driven **Alt+Tab** (issue #626). `ALT_TAB` (cmd 5) is the exact
+overlay state machine the kernel shim runs — `a1` 1 activate, 2 cycle,
+3 commit, 4 dismiss — but driven by the WM's chosen window id (`a0`). On
+commit (3) the kernel `focus(a0)` + `raise(a0)` + dismisses the overlay; on
+activate/cycle (1/2) it builds the snapshot and highlights `a0`. The kernel
+clamps: `a0` must name a live user window (commit) or a live alt-tab target
+(activate/cycle — the M21 W3/W4 visible/non-minimized/current-workspace
+rules), else `EINVAL`. The Alt+Tab input path it rides: while a WM is
+registered the kernel fans the raw Alt+Tab chord to the WM (kind 21 `WM_KEY`
+with `MOD_ALT`), its own `alt_tab_pending` is gated behind `!wm_owns_input`,
+and the WM decides the target from its kind-20 mirror registry via the shared
+wnd_core rule, issuing `ALT_TAB commit`. No WM registered → shim byte-identical.

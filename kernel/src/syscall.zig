@@ -2217,6 +2217,33 @@ fn handle_wmctl(args: Args, _: *exceptions.VectorFrame) u64 {
             wm_server.note_set_state();
             return 0;
         },
+        wm_server.wmctl_alt_tab => {
+            // M32 WMS6 Gate A (issue #626): the WM — not the kernel —
+            // decides which window Alt+Tab switches to. a0 = window id,
+            // a1 = action: 1/2 activate|cycle (highlight the id in the
+            // overlay snapshot), 3 commit (focus + raise + dismiss to the
+            // id), 4 dismiss (drop the overlay). The kernel clamps (id must
+            // name a live user / alt-tab window, the M21 W3/W4 rules) and
+            // repaints the overlay blit from the WM's declared choice.
+            if (!wm_server.registered()) return error_result(.enosys);
+            if (wm_server.registered_pid() != pid) return error_result(.eacces);
+            const window_id = args[1];
+            const action = args[2];
+            switch (action) {
+                wm_server.alt_tab_commit => {
+                    if (window_id > 0xff) return error_result(.einval);
+                    if (!driving_award.alt_tab_wm_commit(@intCast(window_id))) return error_result(.einval); // bad id
+                },
+                wm_server.alt_tab_activate, wm_server.alt_tab_cycle => {
+                    if (window_id > 0xff) return error_result(.einval);
+                    if (!driving_award.alt_tab_overlay_focus(@intCast(window_id))) return error_result(.einval); // not a live alt-tab target
+                },
+                wm_server.alt_tab_dismiss => driving_award.alt_tab_dismiss(),
+                else => return error_result(.einval), // unknown action
+            }
+            wm_server.note_alt_tab();
+            return 0;
+        },
         wm_server.wmctl_request_present => {
             if (!wm_server.registered()) return error_result(.enosys);
             if (wm_server.registered_pid() != pid) return error_result(.eacces);
@@ -3920,6 +3947,54 @@ test "syscall: SET_STATE (cmd 4, claim 4278) applies visibility/workspace/ws-swi
     try std.testing.expect(wm_server.unregister(0));
     try std.testing.expect(!driving_award.wm_owns_input);
     _ = driving_award.user_close(2);
+}
+
+test "syscall: ALT_TAB (cmd 5, claim 4510) drives the overlay from the WM's chosen id" {
+    userspace.init();
+    init(test_writer);
+    wm_server.init();
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0); // task 2 = process 0 (boot payload)
+    scheduler.start();
+    var frame = fresh_frame();
+    try std.testing.expect(scheduler.yield_current()); // shell -> worker
+    try std.testing.expect(scheduler.yield_current()); // worker -> user (2)
+
+    // No WM registered: ALT_TAB -> ENOSYS (the ADR 0007 "no WM" case).
+    try std.testing.expectEqual(error_result(.enosys), dispatch(sys_wmctl, .{ wm_server.wmctl_alt_tab, 2, wm_server.alt_tab_commit, 0, 0, 0 }, &frame));
+
+    // Seed the WM as pid 0 + open two real user windows.
+    try std.testing.expect(wm_server.register(0));
+    const o2 = driving_award.user_open(64, 64, 400, 300, 0);
+    const o3 = driving_award.user_open(200, 100, 400, 300, 0);
+    try std.testing.expectEqual(@as(u8, 2), o2.opened);
+    try std.testing.expectEqual(@as(u8, 3), o3.opened);
+    // The WM proposes focus on window 3; the kernel focuses/raises + dismisses,
+    // and the submission is counted.
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_wmctl, .{ wm_server.wmctl_alt_tab, 3, wm_server.alt_tab_commit, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u8, 3), driving_award.focused_window_id());
+    try std.testing.expectEqual(@as(u64, 1), wm_server.info().alt_tab_apply_count);
+    // activate highlights the WM's chosen id in the overlay snapshot.
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_wmctl, .{ wm_server.wmctl_alt_tab, 2, wm_server.alt_tab_activate, 0, 0, 0 }, &frame));
+    try std.testing.expect(driving_award.alt_tab_is_active());
+    try std.testing.expectEqual(@as(u8, 2), driving_award.alt_tab_selected_id().?);
+    // dismiss drops the overlay.
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_wmctl, .{ wm_server.wmctl_alt_tab, 0, wm_server.alt_tab_dismiss, 0, 0, 0 }, &frame));
+    try std.testing.expect(!driving_award.alt_tab_is_active());
+    try std.testing.expectEqual(@as(u64, 3), wm_server.info().alt_tab_apply_count);
+    // A commit to a window that does not exist -> EINVAL (kernel clamps).
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_wmctl, .{ wm_server.wmctl_alt_tab, 9, wm_server.alt_tab_commit, 0, 0, 0 }, &frame));
+    // A malformed action -> EINVAL.
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_wmctl, .{ wm_server.wmctl_alt_tab, 2, 77, 0, 0, 0 }, &frame));
+    // The counter only counted the accepted calls.
+    try std.testing.expectEqual(@as(u64, 3), wm_server.info().alt_tab_apply_count);
+
+    // Teardown: no leaked input ownership into the aggregated binary.
+    try std.testing.expect(wm_server.unregister(0));
+    try std.testing.expect(!driving_award.wm_owns_input);
+    _ = driving_award.user_close(2);
+    _ = driving_award.user_close(3);
 }
 
 test "syscall: wait_event block+wake preserves the event buffer across the svc re-execution (claim 6359)" {

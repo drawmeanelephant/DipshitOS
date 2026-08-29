@@ -63,6 +63,10 @@ const wmctl_register: u64 = 1;
 const wmctl_set_window: u64 = 2;
 const wmctl_request_present: u64 = 3;
 const wmctl_set_state: u64 = 4;
+const wmctl_alt_tab: u64 = 5;
+/// ALT_TAB action 3 (commit) — the WM tells the kernel which window to
+/// focus+raise+dismiss to. The kernel clamps + repaints the overlay blit.
+const alt_tab_commit: u64 = 3;
 
 // ---------------------------------------------------------------------------
 // Syscall wrappers (AArch64 `svc #0` — the fixed-register ABI).
@@ -180,6 +184,11 @@ pub const ws_marker: []const u8 = "wnd: ws\n";
 pub const fs_marker: []const u8 = "wnd: fs\n";
 pub const aot_marker: []const u8 = "wnd: aot\n";
 
+// WMS6 Gate A (issue #626): the Alt+Tab decision marker. The WM prints the
+// target id after the pinned prefix (`wnd: alt-tab id=N`) so the live gate
+// can prove the WM — not the kernel — picked the window that gets focus.
+pub const alt_tab_marker: []const u8 = "wnd: alt-tab";
+
 // ADR 0009 modifier bits (must match kernel events MOD_*).
 pub const mod_shift: u16 = 0x0001;
 pub const mod_ctrl: u16 = 0x0002;
@@ -197,6 +206,7 @@ pub const usage_f2: u8 = 0x59;
 pub const usage_f3: u8 = 0x5a;
 pub const usage_backtick: u8 = 0x35;
 pub const usage_f11: u8 = 0x5c;
+pub const usage_tab: u8 = 0x2b;
 
 // WMS4 (issue #624): the EXACT values the chrome-descriptor blob embeds.
 // Pinned against the shared wnd_core parity policy below, so the EL0 blob
@@ -503,6 +513,50 @@ fn snap_window_to(id: u8, px: u32, py: u32) void {
 }
 
 // ---------------------------------------------------------------------------
+// WMS6 Gate A — the Alt+Tab policy (which window gets focus).
+// ---------------------------------------------------------------------------
+
+/// Print the Alt+Tab decision with its target id (the live gate greps the
+/// pinned prefix + the value).
+fn write_alt_tab_marker(id: u8) void {
+    var buf: [40]u8 = undefined;
+    const s = std.fmt.bufPrint(&buf, "{s} id={d}\n", .{ alt_tab_marker, id }) catch "wnd: alt-tab id=0\n";
+    write_marker(s);
+}
+
+/// The next Alt+Tab target: the window AFTER the focused one in the mirror
+/// registry (wrap), skipping hidden or off-workspace windows — the same
+/// M21 W3/W4 rules the shim's snapshot uses. Pure (host-testable). Returns
+/// null when fewer than two windows are cyclable (mirror the shim's no-op).
+fn next_alt_tab_target() ?u8 {
+    // Collect the cyclable candidates (valid + visible + current workspace).
+    var cands: [max_user_windows]u8 = undefined;
+    var cnt: usize = 0;
+    var focus_idx: ?usize = null;
+    for (&mirrors) |*m| {
+        if (!m.valid or m.id < 2) continue;
+        if (!m.visible) continue;
+        if (m.workspace != current_workspace) continue;
+        if (cnt < max_user_windows) cands[cnt] = m.id;
+        if (m.focused) focus_idx = cnt;
+        cnt += 1;
+    }
+    if (cnt < 2) return null; // not enough windows to Alt+Tab (mirror the shim)
+    // Pick the next window after the focused one (starting slot 0 if none).
+    const start = focus_idx orelse 0;
+    return cands[(start + 1) % cnt];
+}
+
+/// The WM's Alt+Tab policy: decide the switch target via `next_alt_tab_target`,
+/// then issue ALT_TAB commit so the kernel focuses/raises the WM's choice
+/// (the kernel clamps + repaints).
+fn handle_alt_tab() void {
+    const target = next_alt_tab_target() orelse return;
+    _ = syscall6(sys_wmctl, wmctl_alt_tab, target, alt_tab_commit, 0, 0, 0);
+    write_alt_tab_marker(target);
+}
+
+// ---------------------------------------------------------------------------
 // The WMS5 keyboard chord decoder (kind 21 WM_KEY).
 // ---------------------------------------------------------------------------
 fn handle_wm_key(usage: u8, flags: u16) void {
@@ -510,6 +564,12 @@ fn handle_wm_key(usage: u8, flags: u16) void {
     const shift = (flags & mod_shift) != 0;
     const alt = (flags & mod_alt) != 0;
 
+    if (alt and usage == usage_tab) {
+        // WMS6 Gate A: the WM, not the kernel, decides which window Alt+Tab
+        // switches to.
+        handle_alt_tab();
+        return;
+    }
     if (alt and usage == usage_backtick) {
         // Alt+` cycles workspaces (W4).
         current_workspace = (current_workspace + 1) % 3;
@@ -773,6 +833,10 @@ test "wnd: the marker/tuning shapes are pinned (live-gate grep targets)" {
     try std.testing.expectEqualStrings("wnd: ws\n", ws_marker);
     try std.testing.expectEqualStrings("wnd: fs\n", fs_marker);
     try std.testing.expectEqualStrings("wnd: aot\n", aot_marker);
+    try std.testing.expectEqualStrings("wnd: alt-tab", alt_tab_marker);
+    try std.testing.expectEqual(@as(u8, 0x2b), usage_tab);
+    try std.testing.expectEqual(@as(u64, 5), wmctl_alt_tab);
+    try std.testing.expectEqual(@as(u64, 3), alt_tab_commit);
     try std.testing.expectEqual(@as(u8, 0x17), usage_t);
     try std.testing.expectEqual(@as(u8, 0x10), usage_m);
     try std.testing.expectEqual(@as(u8, 0x11), usage_n);
@@ -787,6 +851,27 @@ test "wnd: the WMS5 drag-grab rule matches the shared title-bar rule (drift guar
     try std.testing.expectEqual(@as(usize, 16), wnd_core.title_bar_h);
     // The kernel re-exports the SAME number (no second constant to drift).
     _ = wnd_core.hit_test;
+}
+
+test "wnd: the WMS6 Alt+Tab target rule (drift guard against the shim snapshot)" {
+    // Two visible windows on the current workspace (mirrors built from kind-20).
+    mirrors = undefined;
+    mirrors[0] = MirrorWin{ .id = 2, .visible = true, .workspace = 0, .valid = true, .focused = true };
+    mirrors[1] = MirrorWin{ .id = 3, .visible = true, .workspace = 0, .valid = true, .focused = false };
+    // Hidden + off-workspace windows never cycled (M21 W3/W4).
+    mirrors[2] = MirrorWin{ .id = 4, .visible = true, .workspace = 1, .valid = true, .focused = false };
+    mirrors[3] = MirrorWin{ .id = 5, .visible = false, .workspace = 0, .valid = true, .focused = false };
+    current_workspace = 0;
+    // Focused (2) -> next is 3.
+    try std.testing.expectEqual(@as(?u8, 3), next_alt_tab_target());
+    // One candidate only (hide 3) -> null (shim no-op).
+    mirrors[1].visible = false;
+    try std.testing.expectEqual(@as(?u8, null), next_alt_tab_target());
+    mirrors[1].visible = true;
+    // A stale/corrupt mirror slot (id < 2) is skipped, not a target.
+    mirrors[0].id = 1;
+    mirrors[0].focused = false;
+    try std.testing.expectEqual(@as(?u8, 3), next_alt_tab_target());
 }
 
 test "wnd: the WMS5 Gate 2 policy issues the SAME rects as the kernel shim (drift guard)" {
