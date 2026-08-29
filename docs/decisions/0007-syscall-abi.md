@@ -606,6 +606,35 @@ Unknown/zero `cmd` → `EINVAL`. `REGISTER` is one-seat: a second registration
 refuses `EACCES`; the registered pid is observable in the monitor's `wm`
 report (WMS2).
 
+### Amendment (2026-08-29, claim 2491 — the WMS4 chrome-descriptor freeze)
+
+`SET_WINDOW` (cmd 2) now takes the **chrome descriptor** whose layout this
+amendment freezes, defined in `kernel/src/wnd_core.zig` (`ChromeDesc`, 40
+bytes = 10 × u32, no pointers, per the issue's bounded-struct rule):
+
+| Offset | Field | Meaning |
+|-------:|-------|---------|
+| 0 | `kind_mask` | element bitmask: BORDER=1, TITLE=2, CLOSE=4, MINIMIZE=8, PIN=16, RING=32 |
+| 4 | `flags` | per-window flags (bit 0 = FOCUS_ACCENT) |
+| 8 | `border_focus_rgb` | 0xRRGGBB |
+| 12 | `border_unfocus_rgb` | 0xRRGGBB |
+| 16 | `title_bg_rgb` | 0xRRGGBB |
+| 20 | `title_fg_rgb` | 0xRRGGBB |
+| 24 | `ring_rgb` | focus-ring color |
+| 28 | `close_rgb` | close-glyph color |
+| 32 | `minimize_rgb` | minimize-glyph color |
+| 36 | `pin_rgb` | pin-glyph color |
+
+`a0 = 0xFFFFFFFF` broadcasts the WM's chrome POLICY (applied to every
+user window and inherited by windows created later); a specific id sets
+that window's override (unknown id → `EINVAL`). Unknown kind bits / flag
+bits / `len != 40` → `EINVAL`. `a1`/`a2` (geometry) must be 0 until WMS5
+(nonzero → `EINVAL`); the kernel still owns window data — the WM owns the
+look. While a WM is registered, `REQUEST_PRESENT` composites with
+`draw_chrome` painting from descriptors; with no WM, the shim's own rules
+paint byte-identically to pre-M32 (one registration-flag branch in
+driving_award).
+
 `implemented_count` becomes 66 when WMS2 registers the handler (this
 amendment reserves the row; the `syscalls` report prints rows 0–64 until
 then). Proof program and live gate ride the WMS2 claim

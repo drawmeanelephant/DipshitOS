@@ -196,6 +196,12 @@ pub const Window = struct {
     /// filename.txt (*)" plus room.
     title_buf: [64]u8 = [_]u8{0} ** 64,
     title_len: u8 = 0,
+    /// M32 WMS4 (issue #624): the WM server's chrome descriptor for THIS
+    /// window (a per-window SET_WINDOW override). When invalid, the draw
+    /// path falls back to the broadcast policy, then to the shim's own
+    /// rules — the two paths coexist behind the presence of WM chrome.
+    chrome_valid: bool = false,
+    chrome: geom.ChromeDesc = undefined,
 };
 
 /// Arc4 #239: fade-in constants. The window is at 25% opacity for
@@ -212,6 +218,12 @@ var win_count: usize = 0;
 /// Focused window id (stable across raises); 0xff = none.
 var focused_id: u8 = 0xff;
 var armed_global: bool = false;
+/// M32 WMS4: the WM's broadcast chrome policy (SET_WINDOW with a0 = ALL).
+/// When set, every user window without its own override renders chrome
+/// from this descriptor; null = no WM chrome (shim rules — the default
+/// VM, zero-regression). New windows inherit it automatically via the
+/// draw-time fallback.
+var wm_chrome_policy: ?geom.ChromeDesc = null;
 /// Scanout presents pushed by the compositor since arm.
 var presents: usize = 0;
 
@@ -3166,10 +3178,119 @@ pub fn composite() virtio_gpu.CmdResult {
     return virtio_gpu.gpu_flush();
 }
 
+// ---------------------------------------------------------------------------
+// M32 WMS4 (issue #624): the SET_WINDOW chrome-descriptor seam. The WM
+// server (userland) is the chrome-policy owner; the kernel stores the
+// descriptors it submits and blits whatever they dictate. No WM chrome is
+// present in the default VM — the shim's own rules (the "default
+// descriptor" below) render byte-identically, so every pre-WMS4 gate is
+// untouched.
+// ---------------------------------------------------------------------------
+
+/// Store a chrome descriptor for `id`, or the broadcast policy when `id`
+/// is `geom.chrome_window_all`. Returns false for an unknown per-window
+/// id (the broadcast always succeeds). The kernel does NOT validate the
+/// descriptor here — the syscall layer ran `geom.chrome_valid` before
+/// this.
+/// Drop every WM chrome decision (the broadcast policy + per-window
+/// overrides). Called on WM teardown (unregister) so the shim fallback
+/// restores its own chrome rules — a dead WM must not leave its look
+/// painted on the desktop.
+pub fn clear_wm_chrome() void {
+    wm_chrome_policy = null;
+    var i: usize = 0;
+    while (i < win_count) : (i += 1) {
+        windows[i].chrome_valid = false;
+    }
+}
+
+pub fn set_window_chrome(id_in: u64, desc: geom.ChromeDesc) bool {
+    if (id_in == geom.chrome_window_all) {
+        wm_chrome_policy = desc;
+        return true;
+    }
+    if (id_in > 0xff) return false;
+    const id: u8 = @intCast(id_in);
+    var i: usize = 0;
+    while (i < win_count) : (i += 1) {
+        if (windows[i].id != id) continue;
+        windows[i].chrome = desc;
+        windows[i].chrome_valid = true;
+        return true;
+    }
+    return false;
+}
+
+/// The broadcast policy's chrome kind (0 when no WM chrome is set) — the
+/// `wm` observability row.
+pub fn wm_chrome_policy_kind() u32 {
+    return if (wm_chrome_policy) |p| p.kind else 0;
+}
+
+/// The last chrome kind stored for window `id` (its override, else the
+/// policy, else 0 = shim rules / unknown window) — the "last chrome kind
+/// per window" observability.
+pub fn wm_chrome_kind(id: u8) u32 {
+    var i: usize = 0;
+    while (i < win_count) : (i += 1) {
+        if (windows[i].id != id) continue;
+        if (windows[i].chrome_valid) return windows[i].chrome.kind;
+        return if (wm_chrome_policy) |p| p.kind else 0;
+    }
+    return 0; // no such window
+}
+
+/// One observability row for the `wm` report: a user window's id and its
+/// effective last chrome kind (its override, else the policy, else 0).
+pub const ChromeRow = struct { id: u8, kind: u32 };
+
+/// Fill `rows` with one ChromeRow per user window in registry order.
+/// Returns the count written. Pure over the registry.
+pub fn wm_chrome_rows(rows: *[max_windows]ChromeRow) usize {
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < win_count) : (i += 1) {
+        const w = &windows[i];
+        if (w.kind != .user) continue;
+        if (n >= rows.len) break;
+        rows[n] = .{ .id = w.id, .kind = wm_chrome_kind(w.id) };
+        n += 1;
+    }
+    return n;
+}
+
+/// The chrome decision for a window: its per-window override, else the
+/// WM's broadcast policy, else the shim's own rules expressed as a
+/// descriptor (the dark-theme defaults — byte-identical to the pre-WMS4
+/// paint). The shim is thus just a default descriptor; parity is by
+/// construction.
+fn effective_chrome(w: *const Window) geom.ChromeDesc {
+    if (w.chrome_valid) return w.chrome;
+    if (wm_chrome_policy) |p| return p;
+    return .{
+        .kind = geom.chrome_kind_all,
+        .flags = geom.chrome_flag_focus_accent,
+        .border_rgb = user_border(),
+        .border_unfocus_rgb = user_border_unfocused(),
+        .title_bg_rgb = user_title_bg(),
+        .title_fg_rgb = user_title_fg_rgb,
+        .ring_rgb = focus_ring(),
+        .close_rgb = 0xef4444,
+        .min_rgb = 0x94a3b8,
+        .pin_rgb = 0x38bdf8,
+    };
+}
+
 /// Card U5/U4: the chrome pass, drawn on the framebuffer AFTER the window
 /// paints and BEFORE the transfer — user title bars, the focus ring on the
 /// focused window, and the pointer cursor. Chrome never touches a window's
 /// back-buffer (user buffers stay EL0-owned).
+///
+/// M32 WMS4: the per-window chrome decision (elements + colors) comes from
+/// the WM's descriptor (`effective_chrome`) — the kernel blits what the
+/// descriptor dictates; it no longer decides chrome. The element gating
+/// that is DATA, not policy (focus, always-on-top, workspace, terminal)
+/// stays kernel-side exactly as before.
 fn draw_chrome() void {
     const fb: [*]u8 = @ptrCast(&virtio_gpu.gpu_fb);
     const stride = virtio_gpu.fb_width * 4;
@@ -3181,10 +3302,14 @@ fn draw_chrome() void {
         if (w.kind != .user or !w.visible) continue;
         // Arc4 #241: skip chrome for windows not in the current workspace.
         if (!workspace_visible(w)) continue;
+        // M32 WMS4: the chrome LOOK (elements + colors) is the WM's
+        // descriptor; the shim's own rules are just the default descriptor.
+        const ch = effective_chrome(w);
+        const focus_accent = (ch.flags & geom.chrome_flag_focus_accent) != 0;
         // M20-U9: 2px border around the whole window first (paint order:
         // background → border → title bar → buttons → title → content).
-        {
-            const b = if (w.id == focused_id) user_border() else user_border_unfocused();
+        if (ch.kind & geom.chrome_border != 0) {
+            const b = if (focus_accent and w.id == focused_id) ch.border_rgb else ch.border_unfocus_rgb;
             const bw = chrome_border_w;
             const ww: usize = if (w.w > wspan) wspan else w.w;
             const wh: usize = if (w.h > hspan) hspan else w.h;
@@ -3194,38 +3319,45 @@ fn draw_chrome() void {
             if (ww > bw) fill_rect(fb, stride, w.x + ww - bw, w.y, bw, wh, b); // right
         }
         // Title bar: "dui<id> pid=<pid>" (the owning pid when known),
-        // CENTERED with "..." truncation when it does not fit (M20-U9).
-        fill_rect(fb, stride, w.x, w.y, w.w, user_title_h, user_title_bg());
-        var tb: [24]u8 = undefined;
-        var n: usize = 0;
-        const label = "dui";
-        @memcpy(tb[0..3], label);
-        n = 3;
-        const idstr = fmt_decimal(tb[n..], w.id);
-        n += idstr.len;
-        if (w.owner) |pid| {
-            const ps = " pid=";
-            @memcpy(tb[n..][0..ps.len], ps);
-            n += ps.len;
-            const pids = fmt_decimal(tb[n..], pid);
-            n += pids.len;
-        }
-        const lay = chrome_title_layout(w.w, n);
-        if (!lay.truncated) {
-            draw_string_16(fb, stride, w.x + lay.x_off, w.y, tb[0..lay.draw_len], user_title_fg_rgb);
-        } else {
-            var tt: [24]u8 = undefined;
-            @memcpy(tt[0..lay.draw_len], tb[0..lay.draw_len]);
-            @memcpy(tt[lay.draw_len..][0..3], "...");
-            draw_string_16(fb, stride, w.x + lay.x_off, w.y, tt[0 .. lay.draw_len + 3], user_title_fg_rgb);
+        // CENTERED with "..." truncation when it does not fit (M20-U9). The
+        // label is DATA (kernel-owned); its colors are the WM's.
+        if (ch.kind & geom.chrome_title != 0) {
+            fill_rect(fb, stride, w.x, w.y, w.w, user_title_h, ch.title_bg_rgb);
+            var tb: [24]u8 = undefined;
+            var n: usize = 0;
+            const label = "dui";
+            @memcpy(tb[0..3], label);
+            n = 3;
+            const idstr = fmt_decimal(tb[n..], w.id);
+            n += idstr.len;
+            if (w.owner) |pid| {
+                const ps = " pid=";
+                @memcpy(tb[n..][0..ps.len], ps);
+                n += ps.len;
+                const pids = fmt_decimal(tb[n..], pid);
+                n += pids.len;
+            }
+            const lay = chrome_title_layout(w.w, n);
+            if (!lay.truncated) {
+                draw_string_16(fb, stride, w.x + lay.x_off, w.y, tb[0..lay.draw_len], ch.title_fg_rgb);
+            } else {
+                var tt: [24]u8 = undefined;
+                @memcpy(tt[0..lay.draw_len], tb[0..lay.draw_len]);
+                @memcpy(tt[lay.draw_len..][0..3], "...");
+                draw_string_16(fb, stride, w.x + lay.x_off, w.y, tt[0 .. lay.draw_len + 3], ch.title_fg_rgb);
+            }
         }
         // Step 6: close button ("×" — red glyph at top-right of title bar).
-        draw_glyph(fb, stride, w.x + w.w - 14, w.y + 4, 'x', 0xef4444);
+        if (ch.kind & geom.chrome_close != 0) {
+            draw_glyph(fb, stride, w.x + w.w - 14, w.y + 4, 'x', ch.close_rgb);
+        }
         // Step 7: minimize button ("—" — muted glyph left of close).
-        draw_glyph(fb, stride, w.x + w.w - 26, w.y + 4, '-', 0x94a3b8);
+        if (ch.kind & geom.chrome_minimize != 0) {
+            draw_glyph(fb, stride, w.x + w.w - 26, w.y + 4, '-', ch.min_rgb);
+        }
         // M21 W8: pin indicator for always-on-top windows ("*" — cyan glyph left of minimize).
-        if (w.always_on_top and w.w >= 50) {
-            draw_glyph(fb, stride, w.x + w.w - 38, w.y + 4, '*', 0x38bdf8);
+        if (ch.kind & geom.chrome_pin != 0 and w.always_on_top and w.w >= 50) {
+            draw_glyph(fb, stride, w.x + w.w - 38, w.y + 4, '*', ch.pin_rgb);
         }
     }
     // The focus ring: on the focused window's rect (D4 — focus is always
@@ -3242,14 +3374,18 @@ fn draw_chrome() void {
             if (w.kind == .terminal) break;
             // Arc4 #241: don't draw focus ring on off-workspace windows.
             if (!workspace_visible(w)) break;
+            // M32 WMS4: the ring is drawn only when the WM's descriptor
+            // enables it, in the WM's ring color (shim: always, accent).
+            if (effective_chrome(w).kind & geom.chrome_ring == 0) break;
             const rx: usize = w.x;
             const ry: usize = w.y;
             const rw: usize = if (w.w > wspan) wspan else w.w;
             const rh: usize = if (w.h > hspan) hspan else w.h;
-            fill_rect(fb, stride, rx, ry, rw, focus_ring_w, focus_ring());
-            fill_rect(fb, stride, rx, ry + rh - focus_ring_w, rw, focus_ring_w, focus_ring());
-            fill_rect(fb, stride, rx, ry, focus_ring_w, rh, focus_ring());
-            fill_rect(fb, stride, rx + rw - focus_ring_w, ry, focus_ring_w, rh, focus_ring());
+            const ring_rgb = effective_chrome(w).ring_rgb;
+            fill_rect(fb, stride, rx, ry, rw, focus_ring_w, ring_rgb);
+            fill_rect(fb, stride, rx, ry + rh - focus_ring_w, rw, focus_ring_w, ring_rgb);
+            fill_rect(fb, stride, rx, ry, focus_ring_w, rh, ring_rgb);
+            fill_rect(fb, stride, rx + rw - focus_ring_w, ry, focus_ring_w, rh, ring_rgb);
             break;
         }
     }
@@ -3847,6 +3983,35 @@ test "driving_award: user_open/fill/present round-trips a bounded user window" {
     try std.testing.expectEqual(@as(u8, 0), user_bufs[0][(100 * user_buf_w + 200) * 4 + 0]);
     try std.testing.expect(user_present(2));
     try std.testing.expect(windows[4].dirty);
+}
+
+test "driving_award: WMS4 SET_WINDOW chrome policy + per-window overrides (issue #624)" {
+    arm();
+    clear_wm_chrome(); // an earlier test in an aggregated binary may have set the policy
+    _ = user_open(64, 64, 512, 384, 7); // window id 2
+    // No WM chrome yet: policy kind 0, per-window kind 0 (shim rules).
+    try std.testing.expectEqual(@as(u32, 0), wm_chrome_policy_kind());
+    try std.testing.expectEqual(@as(u32, 0), wm_chrome_kind(2));
+    // Unknown window id -> 0.
+    try std.testing.expectEqual(@as(u32, 0), wm_chrome_kind(99));
+    // Broadcast policy (a0 = ALL): every window falls back to it.
+    const p = geom.chrome_parity_policy();
+    try std.testing.expect(set_window_chrome(geom.chrome_window_all, p));
+    try std.testing.expectEqual(@as(u32, 0x3f), wm_chrome_policy_kind());
+    try std.testing.expectEqual(@as(u32, 0x3f), wm_chrome_kind(2));
+    // Per-window override: a custom kind for window 2 only.
+    var custom = p;
+    custom.kind = geom.chrome_border | geom.chrome_title; // minimal chrome
+    try std.testing.expect(set_window_chrome(2, custom));
+    try std.testing.expectEqual(@as(u32, 0x3), wm_chrome_kind(2));
+    // Unknown per-window id -> false (the broadcast always succeeds).
+    try std.testing.expect(!set_window_chrome(99, p));
+    // The observability rows: one per user window with its effective kind.
+    var rows: [max_windows]ChromeRow = undefined;
+    const n = wm_chrome_rows(&rows);
+    try std.testing.expectEqual(@as(usize, 1), n);
+    try std.testing.expectEqual(@as(u8, 2), rows[0].id);
+    try std.testing.expectEqual(@as(u32, 0x3), rows[0].kind);
 }
 
 test "driving_award: user_open bounds and the four slots fill the registry" {

@@ -31,6 +31,7 @@ const builtin = @import("builtin");
 const events = @import("events.zig");
 const process = @import("process.zig"); // the registry row bound (max_processes) — used only by the host tests
 const virtio_gpu = @import("virtio_gpu.zig");
+const driving_award = @import("driving_award.zig"); // M32 WMS4: the renderer owns the chrome state the seam's teardown clears
 
 /// Slot-65 subcommand encoding — frozen by WMS1 (claim 1484) in the ADR 0007
 /// amendment. Do NOT renumber these; WMS4+ implement `SET_WINDOW` against
@@ -50,6 +51,11 @@ var present_seq: u32 = 0;
 var present_count: u64 = 0;
 /// Total COMPOSITE_TICK events delivered to the registered WM.
 var tick_count: u64 = 0;
+/// M32 WMS4 (issue #624): total SET_WINDOW chrome-descriptor submissions
+/// accepted (the `wm` observability counter — submissions counted). The
+/// descriptors themselves live in `driving_award` (per-window + policy);
+/// this seam only counts, per its no-policy charter.
+var set_window_count: u64 = 0;
 /// Set when the registered WM exits (teardown) — the shell idle loop drains
 /// this into the `wm: unregistered, shim resumed` report (the exit path is
 /// IRQ context and console-free, so the report is drained like the process
@@ -62,6 +68,7 @@ pub fn init() void {
     present_seq = 0;
     present_count = 0;
     tick_count = 0;
+    set_window_count = 0;
     fallback_pending = false;
 }
 
@@ -95,6 +102,11 @@ pub fn unregister(pid: usize) bool {
     if (wm_pid != pid) return false;
     wm_pid = null;
     fallback_pending = true;
+    // M32 WMS4: the WM's chrome decisions die with it — the shim fallback
+    // must restore its own chrome rules (a dead WM's look must not stay
+    // painted). driving_award imports only wnd_core, so this import is
+    // cycle-free (the seam delegates render-state teardown to the renderer).
+    driving_award.clear_wm_chrome();
     return true;
 }
 
@@ -158,6 +170,7 @@ pub const WmInfo = struct {
     present_seq: u32,
     present_count: u64,
     tick_count: u64,
+    set_window_count: u64,
 };
 
 pub fn info() WmInfo {
@@ -166,7 +179,14 @@ pub fn info() WmInfo {
         .present_seq = present_seq,
         .present_count = present_count,
         .tick_count = tick_count,
+        .set_window_count = set_window_count,
     };
+}
+
+/// M32 WMS4: count one accepted SET_WINDOW submission (the syscall layer
+/// calls this AFTER the descriptor was validated and stored).
+pub fn note_set_window() void {
+    set_window_count +%= 1;
 }
 
 // ---------------------------------------------------------------------------

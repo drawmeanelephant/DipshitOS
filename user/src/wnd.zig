@@ -51,6 +51,21 @@ pub const marker_every: u32 = 1;
 /// The kind-18 event the loop services (must match kernel events.COMPOSITE_TICK).
 pub const composite_tick_kind: u64 = 18;
 
+// WMS4 (issue #624): the EXACT values the chrome-descriptor blob (label 3
+// in the naked payload) embeds. Pinned against the shared wnd_core parity
+// policy below, so the EL0 blob cannot drift from the kernel's expectation
+// without a test failure — the drift guard extended to the chrome policy.
+pub const policy_kind: u32 = 0x3f;
+pub const policy_flags: u32 = 0x01;
+pub const policy_border_rgb: u32 = 0x0c1826;
+pub const policy_border_unfocus_rgb: u32 = 0x475569;
+pub const policy_title_bg_rgb: u32 = 0x1a2b3c;
+pub const policy_title_fg_rgb: u32 = 0xffffff;
+pub const policy_ring_rgb: u32 = 0x3b82f6;
+pub const policy_close_rgb: u32 = 0xef4444;
+pub const policy_min_rgb: u32 = 0x94a3b8;
+pub const policy_pin_rgb: u32 = 0x38bdf8;
+
 export fn _start() callconv(.naked) noreturn {
     asm volatile (
         \\// sys_wmctl(REGISTER) — slot 65, cmd 1. Only seated when the kernel
@@ -66,6 +81,22 @@ export fn _start() callconv(.naked) noreturn {
         \\adr x1, 1f
         \\mov x2, #16
         \\mov x8, #1
+        \\svc #0
+        \\// WMS4 (issue #624): submit the chrome POLICY — one
+        \\// sys_wmctl(SET_WINDOW, a0=ALL, a1=0, a2=0, ptr=desc, len=40).
+        \\// The WM becomes the theme owner: the kernel blits chrome from
+        \\// this descriptor (dark-theme values, byte-equal to the shim's
+        \\// own constants — parity by value). Issued right after REGISTER,
+        \\// before any window exists, so every window created later
+        \\// inherits it (the kernel's draw-time fallback).
+        \\mov x0, #2
+        \\mov x1, #0xffff
+        \\movk x1, #0xffff, lsl #16   // a0 = 0xFFFFFFFF (all windows)
+        \\mov x2, #0
+        \\mov x3, #0
+        \\adr x4, 3f
+        \\mov x5, #40                 // len = the frozen 40-byte descriptor
+        \\mov x8, #65
         \\svc #0
         \\// counters: x19 = ticks serviced, x20 = presents issued.
         \\// thresholds: x21 = present_every, x22 = marker_every.
@@ -120,6 +151,23 @@ export fn _start() callconv(.naked) noreturn {
         \\.ascii "wnd: registered\n"
         \\2:
         \\.ascii "wnd: present\n"
+        \\3:
+        \\// The WMS4 chrome descriptor blob (40 bytes — kind, flags, then
+        \\// the 8 theme colors). Values MUST equal the kernel shim's
+        \\// dark-theme chrome constants (user_border/user_border_unfocused/
+        \\// user_title_bg/user_title_fg/focus_ring + the fixed button
+        \\// colors); the parity host tests pin this against wnd_core's
+        \\// chrome_parity_policy and the live gate proves it pixel-exact.
+        \\.word 0x0000003f             // kind: border|title|close|minimize|pin|ring
+        \\.word 0x00000001             // flags: focus accent
+        \\.word 0x000c1826             // border_rgb (focused)
+        \\.word 0x00475569             // border_unfocus_rgb
+        \\.word 0x001a2b3c             // title_bg_rgb
+        \\.word 0x00ffffff             // title_fg_rgb
+        \\.word 0x003b82f6             // ring_rgb
+        \\.word 0x00ef4444             // close_rgb
+        \\.word 0x0094a3b8             // min_rgb
+        \\.word 0x0038bdf8             // pin_rgb
     );
 }
 
@@ -128,6 +176,22 @@ test "wnd: module compiles and exports the EL0 entry (drift guard import)" {
     // The WM binary is built against the SAME shared rules as the kernel shim.
     _ = wnd_core.hit_test;
     _ = wnd_core.clamp_resize_w;
+}
+
+test "wnd: the WMS4 chrome policy matches the shared parity values (drift guard)" {
+    const p = wnd_core.chrome_parity_policy();
+    try std.testing.expectEqual(policy_kind, p.kind);
+    try std.testing.expectEqual(policy_flags, p.flags);
+    try std.testing.expectEqual(policy_border_rgb, p.border_rgb);
+    try std.testing.expectEqual(policy_border_unfocus_rgb, p.border_unfocus_rgb);
+    try std.testing.expectEqual(policy_title_bg_rgb, p.title_bg_rgb);
+    try std.testing.expectEqual(policy_title_fg_rgb, p.title_fg_rgb);
+    try std.testing.expectEqual(policy_ring_rgb, p.ring_rgb);
+    try std.testing.expectEqual(policy_close_rgb, p.close_rgb);
+    try std.testing.expectEqual(policy_min_rgb, p.min_rgb);
+    try std.testing.expectEqual(policy_pin_rgb, p.pin_rgb);
+    // The descriptor itself validates under the kernel's single refusal rule.
+    try std.testing.expect(wnd_core.chrome_valid(p));
 }
 
 test "wnd: the marker/tuning shapes are pinned (live-gate grep targets)" {

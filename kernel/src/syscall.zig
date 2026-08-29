@@ -66,6 +66,7 @@ const virtio_net = @import("virtio_net.zig"); // claim 1384 (card N6): net_udp_s
 const uaccess = @import("uaccess.zig"); // claim 6120: fault-safe copy-in
 const userspace = @import("userspace.zig");
 const driving_award = @import("driving_award.zig"); // claim 1543/0487 (cards G5/G6): the window manager this seam renders into
+const wnd_core = @import("wnd_core.zig"); // M32 WMS4 (issue #624): the SET_WINDOW chrome-descriptor ABI (single source with the WM server)
 const virtio_gpu = @import("virtio_gpu.zig"); // M32 WMS2 (issue #622): the G1 gpu-armed signal for the REGISTER ENXIO check
 const wm_server = @import("wm_server.zig"); // M32 WMS2 (issue #622): the render-server register backing slot 65
 const events = @import("events.zig"); // Milestone 9 (claim 1016): application event queues
@@ -2115,16 +2116,43 @@ fn handle_wmctl(args: Args, _: *exceptions.VectorFrame) u64 {
             return 0;
         },
         wm_server.wmctl_set_window => {
-            // Reserved until WMS4 freezes the chrome-descriptor layout: no
-            // window submission exists in WMS2 yet. Refuse an outsider
-            // first, then EINVAL (no-opcode support) for the WM itself.
+            // M32 WMS4 (issue #624): the WM submits a chrome descriptor.
+            // The frozen ADR 0007 encoding: a0 = window id (0xFFFFFFFF =
+            // broadcast policy), a1/a2 = the WM's view of the rect/wh —
+            // reserved 0 in WMS4 (geometry stays kernel-owned until WMS5;
+            // nonzero is refused), ptr = 40-byte descriptor, len = 40.
             if (!wm_server.registered()) return error_result(.enosys);
             if (wm_server.registered_pid() != pid) return error_result(.eacces);
-            return error_result(.einval);
+            const window_id = args[1];
+            if (args[2] != 0 or args[3] != 0) return error_result(.einval); // geometry not drainable yet (WMS5)
+            if (args[5] != wnd_core.chrome_desc_bytes) return error_result(.einval); // frozen length
+            var desc: wnd_core.ChromeDesc = undefined;
+            const desc_bytes: *[wnd_core.chrome_desc_bytes]u8 = @ptrCast(&desc);
+            if (uaccess.copy_in(desc_bytes, args[4], wnd_core.chrome_desc_bytes) != .ok) {
+                return error_result(.efault); // bad descriptor pointer
+            }
+            // The one validation rule (single source in wnd_core): unknown
+            // kind/flag bits and a zero kind are refused with EINVAL.
+            if (!wnd_core.chrome_valid(desc)) return error_result(.einval);
+            if (!driving_award.set_window_chrome(window_id, desc)) return error_result(.einval); // bad id
+            wm_server.note_set_window();
+            return 0;
         },
         wm_server.wmctl_request_present => {
             if (!wm_server.registered()) return error_result(.enosys);
             if (wm_server.registered_pid() != pid) return error_result(.eacces);
+            // M32 WMS4: the present path COMPOSITES — paint dirty windows
+            // and the WM's descriptor chrome, then transfer+flush (a
+            // no-op when the scene is clean; request_present's own flush
+            // still advances the scanout and the counters). Without this
+            // the desktop would freeze while a WM is registered (WMS2
+            // gated the shell idle drain off; WMS3 only flushed). The
+            // composite is real-hardware work (draw_chrome + gpu transfer
+            // runs `dc ivac` asm, illegal at EL0 in host test binaries and
+            // after another test in an aggregated binary armed the
+            // transport) — gate it the established `!builtin.is_test` way;
+            // the live gate runs the real composite.
+            if (!builtin.is_test) _ = driving_award.composite();
             if (!wm_server.request_present()) return error_result(.einval); // defensive: registrant vanished
             return 0;
         },
@@ -3716,9 +3744,30 @@ test "syscall: sys_wmctl (slot 65) enforces the render-server register contract"
     try std.testing.expectEqual(@as(u64, 1), wm_server.info().present_count);
     //   A second REGISTER while the seat is taken -> EACCES.
     try std.testing.expectEqual(error_result(.eacces), dispatch(sys_wmctl, .{ wm_server.wmctl_register, 0, 0, 0, 0, 0 }, &frame));
-    //   SET_WINDOW from the WM is reserved (chrome descriptors frozen by
-    //   WMS4) -> EINVAL, not a false success.
-    try std.testing.expectEqual(error_result(.einval), dispatch(sys_wmctl, .{ wm_server.wmctl_set_window, 2, 0, 0, 0, 0 }, &frame));
+    //   SET_WINDOW (WMS4): a valid descriptor from the WM is accepted and
+    //   stored; every malformed submission is refused honestly.
+    var desc: wnd_core.ChromeDesc = wnd_core.chrome_parity_policy();
+    const desc_ptr = @intFromPtr(&desc);
+    set_user_regions(.{ .base = desc_ptr, .len = wnd_core.chrome_desc_bytes }, .{ .base = 0, .len = 0 });
+    // Broadcast (ALL): accepted, the policy is stored, submissions counted.
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_wmctl, .{ wm_server.wmctl_set_window, wnd_core.chrome_window_all, 0, 0, desc_ptr, wnd_core.chrome_desc_bytes }, &frame));
+    try std.testing.expectEqual(@as(u64, 1), wm_server.info().set_window_count);
+    try std.testing.expectEqual(@as(u32, 0x3f), driving_award.wm_chrome_policy_kind());
+    // Per-window id with no such window -> EINVAL (the broadcast always
+    // succeeds; a specific id must exist).
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_wmctl, .{ wm_server.wmctl_set_window, 7, 0, 0, desc_ptr, wnd_core.chrome_desc_bytes }, &frame));
+    // Bad length (not the frozen 40) -> EINVAL.
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_wmctl, .{ wm_server.wmctl_set_window, wnd_core.chrome_window_all, 0, 0, desc_ptr, 39 }, &frame));
+    // Nonzero rect/wh — geometry is not drainable until WMS5 -> EINVAL.
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_wmctl, .{ wm_server.wmctl_set_window, wnd_core.chrome_window_all, 1, 0, desc_ptr, wnd_core.chrome_desc_bytes }, &frame));
+    // Unknown kind bit -> EINVAL (the single wnd_core refusal rule).
+    const bad = wnd_core.ChromeDesc{ .kind = wnd_core.chrome_kind_all | 0x40, .flags = 0, .border_rgb = 0, .border_unfocus_rgb = 0, .title_bg_rgb = 0, .title_fg_rgb = 0, .ring_rgb = 0, .close_rgb = 0, .min_rgb = 0, .pin_rgb = 0 };
+    const bad_ptr = @intFromPtr(&bad);
+    set_user_regions(.{ .base = bad_ptr, .len = wnd_core.chrome_desc_bytes }, .{ .base = 0, .len = 0 });
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_wmctl, .{ wm_server.wmctl_set_window, wnd_core.chrome_window_all, 0, 0, bad_ptr, wnd_core.chrome_desc_bytes }, &frame));
+    // Bad descriptor pointer (no readable region) -> EFAULT.
+    set_user_regions(.{ .base = 0, .len = 0 }, .{ .base = 0, .len = 0 });
+    try std.testing.expectEqual(error_result(.efault), dispatch(sys_wmctl, .{ wm_server.wmctl_set_window, wnd_core.chrome_window_all, 0, 0, 0x1000, wnd_core.chrome_desc_bytes }, &frame));
 
     // Seed a DIFFERENT pid as the WM; pid 0 becomes an outsider:
     wm_server.init();

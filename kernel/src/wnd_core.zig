@@ -143,6 +143,111 @@ pub fn clamp_resize_h(req_h: i32, win_y: u32, fb_h: u32, min_h: u32, max_buf_h: 
 /// could not return directly).
 pub const TitleLayout = struct { x_off: usize, draw_len: usize, truncated: bool };
 
+// ---------------------------------------------------------------------------
+// WMS4 (issue #624) — the SET_WINDOW chrome descriptor ABI (ADR 0007
+// amendment). The single source of the chrome LOOK: element kinds, per-
+// window flags, and the theme colors. The WM server (userland) computes
+// chrome from these rules and issues descriptors; the kernel blits whatever
+// the descriptor dictates. BOTH sides compile this same struct, so the
+// two cannot drift about what a descriptor means.
+// ---------------------------------------------------------------------------
+
+/// The 40-byte flat SET_WINDOW chrome descriptor (10 × u32 — no pointers;
+/// the frozen ADR 0007 encoding: `sys_wmctl(SET_WINDOW, a0=window_id,
+/// a1=0, a2=0, ptr=descriptor, len=40)`). Colors are 0xRRGGBB. The
+/// kernel copies it in via uaccess, validates, and stores it per window
+/// (or as the broadcast policy when a0 = ALL).
+pub const ChromeDesc = extern struct {
+    /// Element bitmask (chrome_border | chrome_title | ... ). Zero is
+    /// invalid — a descriptor must say what chrome it wants.
+    kind: u32,
+    /// Per-window flags (chrome_flag_focus_accent | ...). Reserved bits
+    /// must be zero.
+    flags: u32,
+    /// 2px window border, focused (or accent when FOCUS_ACCENT).
+    border_rgb: u32,
+    /// 2px window border, unfocused (muted).
+    border_unfocus_rgb: u32,
+    /// 16px title band background.
+    title_bg_rgb: u32,
+    /// Title label ink.
+    title_fg_rgb: u32,
+    /// 3px focus ring on the focused window.
+    ring_rgb: u32,
+    /// Close glyph ("×").
+    close_rgb: u32,
+    /// Minimize glyph ("—").
+    min_rgb: u32,
+    /// Pin glyph ("*", always-on-top windows).
+    pin_rgb: u32,
+};
+
+/// Descriptor byte size — the frozen `len` for SET_WINDOW (the kernel
+/// refuses any other length with EINVAL).
+pub const chrome_desc_bytes: usize = 40;
+
+/// Window-id broadcast: SET_WINDOW with a0 = ALL sets the WM's chrome
+/// POLICY — applied to every user window and inherited by windows created
+/// afterwards (the kernel stores it as the fallback). A specific id sets
+/// that window's override.
+pub const chrome_window_all: u64 = 0xFFFF_FFFF;
+
+/// Element-kind bits (the chrome the WM wants drawn per window).
+pub const chrome_border: u32 = 0x01;
+pub const chrome_title: u32 = 0x02;
+pub const chrome_close: u32 = 0x04;
+pub const chrome_minimize: u32 = 0x08;
+pub const chrome_pin: u32 = 0x10;
+pub const chrome_ring: u32 = 0x20;
+/// Every element bit that exists (the mask valid kinds are checked
+/// against; reserved bits are refused).
+pub const chrome_kind_all: u32 = 0x3f;
+
+/// Per-window flag bits.
+pub const chrome_flag_focus_accent: u32 = 0x01;
+/// Every flag bit that exists.
+pub const chrome_flags_all: u32 = 0x01;
+
+/// True when every set kind bit is a known element (zero is refused: a
+/// descriptor that wants no chrome is a bug, not a decision). Pure.
+pub fn chrome_kind_valid(kind: u32) bool {
+    return kind != 0 and (kind & ~chrome_kind_all) == 0;
+}
+
+/// True when every set flag bit is a known flag. Pure.
+pub fn chrome_flags_valid(flags: u32) bool {
+    return (flags & ~chrome_flags_all) == 0;
+}
+
+/// Full descriptor validity (kind + flags). Pure — the kernel's refusal
+/// predicate and the WM's own self-check share this one rule.
+pub fn chrome_valid(d: ChromeDesc) bool {
+    return chrome_kind_valid(d.kind) and chrome_flags_valid(d.flags);
+}
+
+/// The WMS4 parity policy: the chrome descriptor WND.BIN issues at
+/// startup — the dark-theme values, byte-equal to the kernel shim's own
+/// chrome constants (user_border()/user_border_unfocused()/user_title_bg()/
+/// user_title_fg_rgb/focus_ring()/0xef4444/0x94a3b8/0x38bdf8 on theme 0).
+/// The WM becomes the theme owner by carrying the values, not theme
+/// references; parity is provable because the values are equal, and this
+/// single source is what both the EL0 blob test and the kernel pin
+/// against.
+pub fn chrome_parity_policy() ChromeDesc {
+    return .{
+        .kind = chrome_border | chrome_title | chrome_close | chrome_minimize | chrome_pin | chrome_ring,
+        .flags = chrome_flag_focus_accent,
+        .border_rgb = 0x0c1826,
+        .border_unfocus_rgb = 0x475569,
+        .title_bg_rgb = 0x1a2b3c,
+        .title_fg_rgb = 0xffffff,
+        .ring_rgb = 0x3b82f6,
+        .close_rgb = 0xef4444,
+        .min_rgb = 0x94a3b8,
+        .pin_rgb = 0x38bdf8,
+    };
+}
+
 pub fn chrome_title_layout(win_w: usize, label_len: usize) TitleLayout {
     const btn_reserve: usize = 34; // minimize + close + margins (right side)
     const min_pad: usize = 4; // never start left of x+4
@@ -247,4 +352,57 @@ test "wnd_core: z_rank reports registry order (0 = bottom)" {
     try std.testing.expectEqual(@as(?usize, 1), z_rank(&geoms, 2));
     try std.testing.expectEqual(@as(?usize, 2), z_rank(&geoms, 3));
     try std.testing.expectEqual(@as(?usize, null), z_rank(&geoms, 99));
+}
+
+test "wnd_core: chrome descriptor validity refuses unknown kind/flags and zero kind" {
+    const p = chrome_parity_policy();
+    try std.testing.expect(chrome_valid(p));
+    // Zero kind is a bug, not a decision.
+    var d = p;
+    d.kind = 0;
+    try std.testing.expect(!chrome_valid(d));
+    // Reserved kind bit (0x40) is refused.
+    d = p;
+    d.kind = chrome_kind_all | 0x40;
+    try std.testing.expect(!chrome_kind_valid(d.kind));
+    try std.testing.expect(!chrome_valid(d));
+    // Reserved flag bit (0x2) is refused.
+    d = p;
+    d.flags = chrome_flags_all | 0x2;
+    try std.testing.expect(!chrome_flags_valid(d.flags));
+    try std.testing.expect(!chrome_valid(d));
+    // Every element bit is individually known.
+    d = p;
+    d.kind = chrome_border;
+    try std.testing.expect(chrome_valid(d));
+    d.kind = chrome_title;
+    try std.testing.expect(chrome_valid(d));
+    d.kind = chrome_close;
+    try std.testing.expect(chrome_valid(d));
+    d.kind = chrome_minimize;
+    try std.testing.expect(chrome_valid(d));
+    d.kind = chrome_pin;
+    try std.testing.expect(chrome_valid(d));
+    d.kind = chrome_ring;
+    try std.testing.expect(chrome_valid(d));
+}
+
+test "wnd_core: chrome descriptor is a flat 40-byte number struct (the frozen ABI)" {
+    try std.testing.expectEqual(@as(usize, 40), chrome_desc_bytes);
+    try std.testing.expectEqual(@as(usize, 40), @sizeOf(ChromeDesc));
+    // extern struct: no padding beyond the 10 u32s — the byte layout the
+    // EL0 blob and the kernel both compile from.
+    try std.testing.expectEqual(@as(usize, 10 * 4), @sizeOf(ChromeDesc));
+    const p = chrome_parity_policy();
+    // The broadcast id is the frozen "all windows" target.
+    try std.testing.expectEqual(@as(u64, 0xFFFF_FFFF), chrome_window_all);
+    // Parity values: the dark-theme chrome the shim renders today.
+    try std.testing.expectEqual(@as(u32, 0x0c1826), p.border_rgb);
+    try std.testing.expectEqual(@as(u32, 0x475569), p.border_unfocus_rgb);
+    try std.testing.expectEqual(@as(u32, 0x1a2b3c), p.title_bg_rgb);
+    try std.testing.expectEqual(@as(u32, 0xffffff), p.title_fg_rgb);
+    try std.testing.expectEqual(@as(u32, 0x3b82f6), p.ring_rgb);
+    try std.testing.expectEqual(@as(u32, 0xef4444), p.close_rgb);
+    try std.testing.expectEqual(@as(u32, 0x94a3b8), p.min_rgb);
+    try std.testing.expectEqual(@as(u32, 0x38bdf8), p.pin_rgb);
 }

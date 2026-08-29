@@ -355,7 +355,7 @@ fn ensure_registry() []const Command {
             .{ .name = "strace", .help = "trace a program's syscalls: 'strace exec APP.BIN [args]' arms the tracer around an exec and prints one line per syscall; 'strace off' disarms", .usage = "strace exec <file> [args...] | off", .category = .tasks_processes, .handler = cmd_strace },
             .{ .name = "sym", .help = "crash-report symbol table: 'sym' lists symbols loaded from the last ELF exec; 'sym <file>' parses an ELF's symtab from disk", .usage = "sym [<file>]", .category = .tasks_processes, .max_args = 1, .handler = cmd_sym },
             .{ .name = "syscalls", .help = "numbered syscall table and counters", .usage = "syscalls", .category = .tasks_processes, .handler = cmd_syscalls },
-            .{ .name = "wm", .help = "M32 WMS2 render-server register: the registered WM server pid, the present-sequence counter, presents, and COMPOSITE_TICK count ('wm none' means the shell idle shim is compositing)", .usage = "wm", .category = .graphics_input, .handler = cmd_wm },
+            .{ .name = "wm", .help = "M32 WMS2/WMS4 render-server register: the registered WM server pid, present-sequence counter, presents, COMPOSITE_TICK count, and SET_WINDOW chrome submissions ('wm none' means the shell idle shim is compositing)", .usage = "wm", .category = .graphics_input, .handler = cmd_wm },
             .{ .name = "wnd", .help = "M32 WMS3 WM server: 'wnd' reports the registered WM server (pid, present seq/count, tick count; 'wnd: none' = shell-shim compositing); 'wnd start' launches the long-lived EL0 WND.BIN server (infrastructure — not in APPS.TXT; the default VM stays shim-only)", .usage = "wnd [start]", .category = .graphics_input, .max_args = 1, .handler = cmd_wnd },
             .{ .name = "tasks", .help = "tick-driven task scheduler status", .usage = "tasks", .category = .tasks_processes, .handler = cmd_tasks },
             .{ .name = "smp", .help = "multiprocessor topology, online CPU cores, and per-core task state", .usage = "smp", .category = .tasks_processes, .handler = cmd_smp },
@@ -6398,6 +6398,24 @@ fn cmd_wm(m: *Monitor, args: []const []const u8) ExecError {
         m.console.puts(" ticks=");
         m.console.print_u64(info.tick_count);
         m.console.puts("\n");
+        // M32 WMS4 (issue #624): chrome observability — SET_WINDOW
+        // submissions counted, the broadcast policy's chrome kind, and the
+        // effective last chrome kind of every user window (0 = shim rules).
+        m.console.puts("wm: chrome submissions=");
+        m.console.print_u64(info.set_window_count);
+        m.console.puts(" policy_kind=");
+        m.console.print_hex_min(driving_award.wm_chrome_policy_kind());
+        m.console.puts("\n");
+        var rows: [driving_award.max_windows]driving_award.ChromeRow = undefined;
+        const n = driving_award.wm_chrome_rows(&rows);
+        var i: usize = 0;
+        while (i < n) : (i += 1) {
+            m.console.puts("wm: chrome window id=");
+            m.console.print_u64(rows[i].id);
+            m.console.puts(" kind=");
+            m.console.print_hex_min(rows[i].kind);
+            m.console.puts("\n");
+        }
     } else {
         m.console.print_line("wm: none (shim compositing)");
     }
