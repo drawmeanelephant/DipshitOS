@@ -2341,6 +2341,25 @@ pub fn tooltip_advance_tick() void {
     }
 }
 
+/// M32 WMS6 Gate C (issue #626): show the tooltip IMMEDIATELY — the decision
+/// channel for the registered WM (TOOLTIP cmd 8). The WM owns the dwell policy
+/// by choosing WHEN to show; the shim's 10-tick timer is not a WM concern and
+/// dies with WMS8. The kernel still clamps + places + blits the box.
+pub fn tooltip_show_now() void {
+    if (tooltip_text_len == 0) return;
+    tooltip_timer = tooltip_hover_ticks;
+    tooltip_visible = true;
+    _ = mark_dirty(0);
+}
+
+/// M32 WMS6 Gate C (issue #626): set + show the tooltip at the kernel's own
+/// cursor (the `cursor_x/cursor_y` the box renders below) — the one call the
+/// registered WM's TOOLTIP show reaches through (clamped 32-byte bound).
+pub fn tooltip_show(text: []const u8) void {
+    tooltip_set(cursor_x, cursor_y, text);
+    tooltip_show_now();
+}
+
 // ---------------------------------------------------------------------------
 // M27 G2 — About dialog
 // ---------------------------------------------------------------------------

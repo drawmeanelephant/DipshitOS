@@ -2637,6 +2637,21 @@ fn cmd_dui(m: *Monitor, args: []const []const u8) ExecError {
             m.console.puts("\n");
             return .none;
         }
+        if (std.mem.eql(u8, args[0], "tooltip-state")) {
+            // WMS6 Gate C (issue #626): a PURE state report (does not change
+            // anything) — the live gate reads the tooltip's visibility + text
+            // after an injected hover to prove the WM showed it.
+            if (args.len != 1) {
+                print_usage(m, lookup("dui").?);
+                return .usage;
+            }
+            m.console.puts("dui tooltip-state: visible=");
+            m.console.puts(if (driving_award.tooltip_visible) "yes" else "no");
+            m.console.puts(" text=");
+            m.console.puts(driving_award.tooltip_text[0..driving_award.tooltip_text_len]);
+            m.console.puts("\n");
+            return .none;
+        }
         if (std.mem.eql(u8, args[0], "notif-dismiss")) {
             if (args.len != 2) {
                 print_usage(m, lookup("dui").?);
@@ -6446,6 +6461,10 @@ fn cmd_wm(m: *Monitor, args: []const []const u8) ExecError {
         m.console.print_u64(info.notif_center_count);
         m.console.puts(" notif_dismiss=");
         m.console.print_u64(info.notif_dismiss_count);
+        // M32 WMS6 Gate C (issue #626): the tooltip observability — TOOLTIP
+        // (cmd 8) show/hide decisions applied.
+        m.console.puts(" tooltip=");
+        m.console.print_u64(info.tooltip_count);
         m.console.puts("\n");
         var rows: [driving_award.max_windows]driving_award.ChromeRow = undefined;
         const n = driving_award.wm_chrome_rows(&rows);

@@ -75,6 +75,12 @@ const notif_close_act: u64 = 0;
 const notif_open_act: u64 = 1;
 const notif_clear_act: u64 = 2;
 const wmctl_notif_dismiss: u64 = 7;
+// WMS6 Gate C (issue #626): the tooltip decision channel. TOOLTIP (cmd 8)
+// a0 = 0 hide / 1 show (text via ptr/len, the 32-byte M27 bound). The WM
+// decides when/what; the kernel clamps + blits below its own cursor.
+const wmctl_tooltip: u64 = 8;
+const tooltip_show_act: u64 = 1;
+const tooltip_hide_act: u64 = 0;
 
 // ---------------------------------------------------------------------------
 // Syscall wrappers (AArch64 `svc #0` — the fixed-register ABI).
@@ -209,6 +215,14 @@ pub const notif_dismiss_marker: []const u8 = "wnd: notif-dismiss\n";
 // click — must mirror the kernel shim's tray_rect (fb_w - 80, taskbar row)
 // so the injected click hits BOTH surfaces in the gate's two boots.
 pub const tray_w: u32 = 80;
+
+// WMS6 Gate C (issue #626): the tooltip decision markers — the WM shows /
+// hides a tooltip via TOOLTIP (cmd 8). The live gate greps `wnd: tooltip`
+// to prove the WM — not the kernel — decided what the hover shows.
+pub const tooltip_show_marker: []const u8 = "wnd: tooltip\n";
+pub const tooltip_hide_marker: []const u8 = "wnd: tooltip-hide\n";
+/// The tooltip text the WM decides for a tray hover (rides ptr/len).
+pub const tray_tooltip_text: []const u8 = "Clock";
 
 // ADR 0009 modifier bits (must match kernel events MOD_*).
 pub const mod_shift: u16 = 0x0001;
@@ -685,6 +699,7 @@ fn main() noreturn {
     var grab_dy: u32 = 0;
     var prev_btn: u8 = 0;
     var notif_open: bool = false;
+    var prev_in_tray: bool = false;
 
     while (true) {
         // BLOCK until at least one event is queued for this process. The
@@ -805,6 +820,19 @@ fn main() noreturn {
                         }
                     }
                 }
+                // WMS6 Gate C (issue #626): hover (move, no click) over the
+                // TRAY shows a tooltip — the WM, not the kernel, decides when
+                // and what (kind 19 already fanned the hover; the kernel's
+                // own tooltip system is a dormant stub that WMS8 deletes).
+                const in_tray = (py >= fb_h - taskbar_h and px >= fb_w - tray_w);
+                if (in_tray and !prev_in_tray) {
+                    _ = syscall6(sys_wmctl, wmctl_tooltip, tooltip_show_act, 0, 0, @intFromPtr(tray_tooltip_text.ptr), tray_tooltip_text.len);
+                    write_marker(tooltip_show_marker);
+                } else if (!in_tray and prev_in_tray) {
+                    _ = syscall6(sys_wmctl, wmctl_tooltip, tooltip_hide_act, 0, 0, 0, 0);
+                    write_marker(tooltip_hide_marker);
+                }
+                prev_in_tray = in_tray;
                 prev_btn = btn;
             },
             wm_key_kind => {
@@ -880,6 +908,13 @@ test "wnd: the marker/tuning shapes are pinned (live-gate grep targets)" {
     try std.testing.expectEqual(@as(u64, 6), wmctl_notif_center);
     try std.testing.expectEqual(@as(u64, 7), wmctl_notif_dismiss);
     try std.testing.expectEqual(@as(u32, 80), tray_w);
+    // WMS6 Gate C (issue #626): the tooltip markers + subcommand.
+    try std.testing.expectEqualStrings("wnd: tooltip\n", tooltip_show_marker);
+    try std.testing.expectEqualStrings("wnd: tooltip-hide\n", tooltip_hide_marker);
+    try std.testing.expectEqualStrings("Clock", tray_tooltip_text);
+    try std.testing.expectEqual(@as(u64, 8), wmctl_tooltip);
+    try std.testing.expectEqual(@as(u64, 1), tooltip_show_act);
+    try std.testing.expectEqual(@as(u64, 0), tooltip_hide_act);
     try std.testing.expectEqual(@as(u8, 0x17), usage_t);
     try std.testing.expectEqual(@as(u8, 0x10), usage_m);
     try std.testing.expectEqual(@as(u8, 0x11), usage_n);

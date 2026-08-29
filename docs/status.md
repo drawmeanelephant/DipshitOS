@@ -294,7 +294,20 @@ row); the kernel's tray-click toggle + panel dismiss/clear gate behind
 tray click still opens the panel in shim mode (`dui notif-center-state:
 open=yes`, zero regression), and with WND.BIN registered the WM decided
 (`wnd: notif-open`), the kernel applied (`wm: notif=1` + `ptr_fan=3`) and did
-not self-toggle, panel open. Dock / tray / tooltips / modal dialogs remain
+not self-toggle, panel open.
+
+**WMS6 Gate C is done (claim 6154, issue #626) — the tooltip surface drains.**
+The read-mostly hover chrome. The M27 G6 tooltip was a dormant stub (nothing
+ever called `tooltip_set`); new slot-65 `TOOLTIP` (cmd 8) activates it under
+WM ownership: hide, or show with the text via `ptr/len` (the 32-byte M27
+bound). WND.BIN decides on a kind-19 hover over the tray and issues
+`TOOLTIP show "Clock"`, emitting `wnd: tooltip`; the kernel clamps + blits
+the box below its own cursor. Headless CI via a bare `--pointer-virtio` move
+(claim 9367). Gate `tools/verify-live-wnd6-tooltip-drain.sh` **PASS on VZ
+(2026-08-29)**: in shim mode a hover changes nothing (the dormant stub — zero
+regression), and with WND.BIN registered the WM decided (`wnd: tooltip`), the
+kernel applied (`wm: tooltip=1` + `ptr_fan=1`) and the box renders the WM's
+text (`visible=yes text=Clock`). Dock / tray widgets / modal dialogs remain
 for the later gates of **WMS6 desktop chrome drain-out (#626).**
 
 > https://github.com/drawmeanelephant/DipshitOS/milestone/16
