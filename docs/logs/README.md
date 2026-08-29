@@ -154,6 +154,7 @@ meaningful — on main.
 | `agent/buffy/wms6-dock-drain` | [`agent-buffy-wms6-dock-drain.md`](agent-buffy-wms6-dock-drain.md) |
 | `agent/buffy/wms6-notif-drain` | [`agent-buffy-wms6-notif-drain.md`](agent-buffy-wms6-notif-drain.md) |
 | `agent/buffy/wms6-tooltip-drain` | [`agent-buffy-wms6-tooltip-drain.md`](agent-buffy-wms6-tooltip-drain.md) |
+| `agent/buffy/wms6-tray-drain` | [`agent-buffy-wms6-tray-drain.md`](agent-buffy-wms6-tray-drain.md) |
 | agent/gates fleet-remainder | [`agent-gates-fleet-remainder.md`](agent-gates-fleet-remainder.md) |
 | per-agent worktrees | [`agent-ox-alpha-agent-worktrees.md`](agent-ox-alpha-agent-worktrees.md) |
 | claim lifecycle: declared files + staleness | [`agent-ox-alpha-claim-lifecycle.md`](agent-ox-alpha-claim-lifecycle.md) |
