@@ -1670,6 +1670,63 @@ pub fn alt_tab_dismiss() void {
     _ = mark_dirty(0);
 }
 
+/// M32 WMS6 Gate A (issue #626): the WM, not the kernel, picks which window
+/// Alt+Tab switches to. The kernel keeps the overlay SNAPSHOT + blit (WMS8
+/// deletes it) but exposes focus-by-id so the WM's decision drives it. The
+/// WM proposes the highlighted id; the kernel clamps (id must name a live
+/// alt-tab window: visible, non-minimized, on the current workspace — the
+/// M21 W3/W4 rules) and repaints. Returns false when `id` is not a valid
+/// alt-tab target (the handler maps that to EINVAL).
+pub fn alt_tab_overlay_focus(id: u8) bool {
+    // Build the snapshot if the overlay isn't active (the same rules
+    // alt_tab_activate uses — visible, non-minimized, current workspace).
+    if (!overlay_active) {
+        var ids: [max_windows]u8 = undefined;
+        var cnt: usize = 0;
+        var i: usize = 0;
+        while (i < win_count) : (i += 1) {
+            const w = &windows[i];
+            if (!w.visible) continue;
+            if (w.kind != .user) continue;
+            if (w.minimized) continue;
+            if (!workspace_visible(w)) continue;
+            if (cnt < max_windows) {
+                ids[cnt] = w.id;
+                cnt += 1;
+            }
+        }
+        if (cnt <= 1) return false; // not enough windows to Alt+Tab
+        var j: usize = 0;
+        while (j < cnt) : (j += 1) overlay_ids[j] = ids[j];
+        overlay_count = cnt;
+        overlay_active = true;
+    }
+    // Find the WM's proposed id in the snapshot and make it the highlight.
+    var k: usize = 0;
+    while (k < overlay_count) : (k += 1) {
+        if (overlay_ids[k] == id) {
+            overlay_selected = k;
+            _ = mark_dirty(0);
+            return true;
+        }
+    }
+    return false; // id not a live alt-tab window
+}
+
+/// WMS6 Gate A: commit the WM's chosen id directly (focus + raise + dismiss),
+/// the same final action `alt_tab_commit` performs (by value, not by snapshot
+/// index). Returns false when `id` does not name a live user window (the
+/// handler maps that to EINVAL).
+pub fn alt_tab_wm_commit(id: u8) bool {
+    if (find_user_window_index(id) == null) return false;
+    overlay_active = false;
+    overlay_count = 0;
+    _ = focus(id);
+    _ = raise(id);
+    _ = mark_dirty(0);
+    return true;
+}
+
 /// M15 C3 (Snap zones, #227): 20 px threshold, corners first, then edges.
 pub fn snap_zone_for_point(x: u32, y: u32) SnapZone {
     // Delegated to the shared wnd_core rule (single source with the WM

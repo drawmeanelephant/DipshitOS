@@ -265,8 +265,24 @@ W1–W16 `dui` matrix re-runs green with the WM registered (zero
 regression), AND a real headless Ctrl+T chord was fanned to the WM
 (`key_fan=1`), the WM emitted `wnd: tile`, the kernel consumed nothing
 (gated), and NOTEPAD's registry row moved to the tiled master rect
-`24,0,837,700` — the WM decided. Drain-out continues in **WMS6 (desktop
-chrome drain-out, #626).**
+`24,0,837,700` — the WM decided.
+
+**WMS6 Gate A is done (claim 4510, issue #626) — Alt+Tab drains.** This is the
+issue's sanctioned read-mostly, keyboard-driven first slice. New slot-65
+subcommand `ALT_TAB` (cmd 5): the WM proposes a window id and an action
+(activate/cycle/commit/dismiss); the kernel clamps (id must name a live
+user / alt-tab window — the M21 W3/W4 rules) and repaints the overlay blit.
+The WM's Alt+Tab input path gates behind `!wm_owns_input`; WND.BIN decides the
+switch target from its kind-20 mirror registry via the shared `wnd_core` rule
+and issues `ALT_TAB commit`. The host runner gained the `alt-tab` HID chord
+(LAlt + usage 0x2B) over the headless custom-virtio channel. Gate
+`tools/verify-live-wnd6-altab-drain.sh` **PASS on VZ (2026-08-29)**: a real
+Alt+Tab still self-cycles in shim mode (`dui: alt-tab active count=2`; zero
+regression), AND with WND.BIN registered the WM decided (`wnd: alt-tab id=2`),
+the kernel applied (`wm: alt_tab=1`) and did **not** self-decide (`dui:
+alt-tab` count 0). Notification-center (click-driven, class-B trust), dock,
+tooltips and modal dialogs remain for the later gates of **WMS6 desktop chrome
+drain-out (#626).**
 
 > https://github.com/drawmeanelephant/DipshitOS/milestone/16
 

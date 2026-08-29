@@ -2335,6 +2335,7 @@ func macChord(_ token: String) -> (UInt16, NSEvent.ModifierFlags, String)? {
     case "comma": return (0x2B, [], ",") // K12/K16: the CSV token separator cannot carry a literal comma
     case "ctrl-comma": return (0x2B, [.control], ",")
     case "tab": return (0x30, [], "\t")
+    case "alt-tab": return (0x30, [.option], "\t") // WMS6 Gate A: Option+Tab
     case "up": return (0x7E, [], "\u{F700}")
     case "down": return (0x7D, [], "\u{F701}")
     case "left": return (0x7B, [], "\u{F702}")
@@ -3732,6 +3733,7 @@ enum CustomVirtioSpike {
     // reads exactly these: bit0 LCtrl, bit1 LShift, bit2 LAlt, bit3 LCmd).
     static let hidModCtrl: UInt8 = 0x01
     static let hidModShift: UInt8 = 0x02
+    static let hidModAlt: UInt8 = 0x04 // USB HID keyboard modifier bit 2 = LAlt
 
     /// One injected key report: (modifier byte, usage ID, down or up).
     struct HidStroke {
@@ -3819,6 +3821,9 @@ enum CustomVirtioSpike {
         case "comma": return (0, 0x36) // K12/K16: the CSV token separator cannot carry a literal comma
         case "ctrl-comma": return (hidModCtrl, 0x36)
         case "tab": return (0, 0x2B)
+        // WMS6 Gate A (issue #626): a real Alt+Tab chord over the HID channel
+        // (LAlt modifier + Tab usage) — the WM's alt-tab policy hook.
+        case "alt-tab": return (hidModAlt, 0x2B)
         case "escape": return (0, 0x29)
         case "up": return (0, 0x52)
         case "down": return (0, 0x51)

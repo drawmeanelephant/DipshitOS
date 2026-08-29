@@ -6421,6 +6421,11 @@ fn cmd_wm(m: *Monitor, args: []const []const u8) ExecError {
         m.console.print_u64(info.key_fan_count);
         m.console.puts(" set_state=");
         m.console.print_u64(info.set_state_count);
+        // M32 WMS6 Gate A (issue #626): the desktop-chrome observability —
+        // ALT_TAB (cmd 5) decisions the WM made (activate/cycle/commit/
+        // dismiss), applied by the kernel (the gate greps `alt_tab=`).
+        m.console.puts(" alt_tab=");
+        m.console.print_u64(info.alt_tab_apply_count);
         m.console.puts("\n");
         var rows: [driving_award.max_windows]driving_award.ChromeRow = undefined;
         const n = driving_award.wm_chrome_rows(&rows);
