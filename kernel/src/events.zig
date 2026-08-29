@@ -81,6 +81,17 @@ pub const WM_POINTER: u16 = 19;
 /// like kind 18 (never generated in shim mode).
 pub const WM_WINDOW: u16 = 20;
 
+/// M32 WMS5 Gate 2 (issue #625, claim 9850): the raw KEYBOARD stream for
+/// the registered WM — the keyboard half of the input seam (kind 19 was
+/// the pointer half). `arg0` = the raw HID keyboard usage byte, `flags` =
+/// the ADR 0009 modifier bits (MOD_SHIFT/CTRL/ALT/CMD). Pushed on key-DOWN
+/// edges once per shell-idle pass; routing-restricted like kinds 18/19/20
+/// (never generated in shim mode). While a WM is registered the kernel
+/// stops consuming keyboard GEOMETRY chords (tile/minimize/maximize/etc. —
+/// gated behind `wm_owns_input` in the shell idle) and the WM decides them
+/// from this stream instead.
+pub const WM_KEY: u16 = 21;
+
 /// Modifier bitmasks (flags bits 0..7).
 pub const MOD_SHIFT: u16 = 0x0001;
 pub const MOD_CTRL: u16 = 0x0002;

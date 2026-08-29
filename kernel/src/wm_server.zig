@@ -39,6 +39,11 @@ const driving_award = @import("driving_award.zig"); // M32 WMS4: the renderer ow
 pub const wmctl_register: u64 = 1;
 pub const wmctl_set_window: u64 = 2;
 pub const wmctl_request_present: u64 = 3;
+/// M32 WMS5 Gate 2 (claim 9850): SET_STATE — the visibility/workspace
+/// channel of the geometry seam. a0 = window id, a1 = visible (bit 0) |
+/// workspace (bits 8-11); applied through the same clamped kernel
+/// primitives the shim uses (user_set_visible + move-to-workspace).
+pub const wmctl_set_state: u64 = 4;
 
 /// The single registered WM server process id; null = no WM registered
 /// (shim mode, the default — every pre-M32 gate runs in this state).
@@ -69,8 +74,10 @@ pub fn init() void {
     present_count = 0;
     tick_count = 0;
     set_window_count = 0;
+    set_state_count = 0;
     pointer_fan_count = 0;
     window_mirror_count = 0;
+    key_fan_count = 0;
     fallback_pending = false;
     // M32 WMS5: a reset is a teardown — input ownership returns to the
     // shim and the fan-out hooks are detached (a stale `wm_owns_input=true`
@@ -80,6 +87,8 @@ pub fn init() void {
     driving_award.wm_owns_input = false;
     driving_award.wm_pointer_hook = null;
     driving_award.wm_window_hook = null;
+    // M32 WMS5 Gate 2 (claim 9850): the keyboard fan-out hook detaches too.
+    driving_award.wm_key_hook = null;
 }
 
 /// True when a WM is registered (composite pacing has moved to the tick path).
@@ -109,6 +118,10 @@ pub fn register(pid: usize) bool {
     driving_award.wm_owns_input = true;
     driving_award.wm_pointer_hook = fan_pointer;
     driving_award.wm_window_hook = fan_window;
+    // M32 WMS5 Gate 2 (claim 9850): the keyboard half of the input seam —
+    // the raw key stream fans out to the WM (the shell idle's keyboard
+    // geometry consumers are gated off behind `wm_owns_input`).
+    driving_award.wm_key_hook = fan_key;
     return true;
 }
 
@@ -130,6 +143,7 @@ pub fn unregister(pid: usize) bool {
     driving_award.wm_owns_input = false;
     driving_award.wm_pointer_hook = null;
     driving_award.wm_window_hook = null;
+    driving_award.wm_key_hook = null;
     return true;
 }
 
@@ -194,8 +208,10 @@ pub const WmInfo = struct {
     present_count: u64,
     tick_count: u64,
     set_window_count: u64,
+    set_state_count: u64,
     pointer_fan_count: u64,
     window_mirror_count: u64,
+    key_fan_count: u64,
 };
 
 pub fn info() WmInfo {
@@ -205,8 +221,10 @@ pub fn info() WmInfo {
         .present_count = present_count,
         .tick_count = tick_count,
         .set_window_count = set_window_count,
+        .set_state_count = set_state_count,
         .pointer_fan_count = pointer_fan_count,
         .window_mirror_count = window_mirror_count,
+        .key_fan_count = key_fan_count,
     };
 }
 
@@ -228,6 +246,12 @@ pub fn note_set_window() void {
 var pointer_fan_count: u64 = 0;
 /// Total WM_WINDOW registry-mirror events fanned out to the registered WM.
 var window_mirror_count: u64 = 0;
+/// Total WM_KEY raw-keyboard events fanned out to the registered WM (WMS5
+/// Gate 2, claim 9850 — the keyboard half of the input seam).
+var key_fan_count: u64 = 0;
+/// Total SET_STATE (cmd 4) calls applied by the registered WM (visibility /
+/// workspace changes — the geometry seam's state channel, claim 9850).
+var set_state_count: u64 = 0;
 
 /// Fan ONE raw absolute-pointer sample to the registered WM (the input
 /// handover): kind 19, `arg0` = x|(y<<16) in fb pixels, `flags` low byte =
@@ -266,6 +290,28 @@ pub fn fan_window(id: u8, x: u32, y: u32, w: u32, h: u32, visible: bool, focused
     });
 }
 
+/// Fan ONE raw keyboard sample to the registered WM (the input handover's
+/// keyboard half): kind 21, `arg0` = the raw HID keyboard usage byte,
+/// `flags` = ADR 0009 modifier bits. No-op when no WM is registered (shim
+/// mode — the kernel's own keyboard geometry consumers keep working exactly
+/// as before; zero regression). Caller edge-detects (key-DOWN only).
+pub fn fan_key(usage: u8, flags: u16) void {
+    const pid = wm_pid orelse return;
+    key_fan_count +%= 1;
+    events.push(pid, .{
+        .kind = events.WM_KEY,
+        .flags = flags,
+        .seq = 0,
+        .arg0 = usage,
+        .arg1 = 0,
+    });
+}
+
+/// Note a SET_STATE (cmd 4) call — the WM's visibility/workspace change.
+pub fn note_set_state() void {
+    set_state_count +%= 1;
+}
+
 // ---------------------------------------------------------------------------
 // Host tests (Class A) — the pure register/teardown/tick/present contracts
 // ---------------------------------------------------------------------------
@@ -288,6 +334,8 @@ test "wm_server: register is one-seat and teardown falls back to the shim" {
     try std.testing.expect(driving_award.wm_owns_input);
     try std.testing.expect(driving_award.wm_pointer_hook != null);
     try std.testing.expect(driving_award.wm_window_hook != null);
+    // WMS5 Gate 2 (claim 9850): the keyboard fan-out hook goes live too.
+    try std.testing.expect(driving_award.wm_key_hook != null);
 
     // Teardown unregisters the registrant; a non-owner exit is a no-op.
     try std.testing.expect(!unregister(4));
@@ -301,6 +349,7 @@ test "wm_server: register is one-seat and teardown falls back to the shim" {
     try std.testing.expect(!driving_award.wm_owns_input);
     try std.testing.expect(driving_award.wm_pointer_hook == null);
     try std.testing.expect(driving_award.wm_window_hook == null);
+    try std.testing.expect(driving_award.wm_key_hook == null);
 
     // The fallback report is drained exactly once after a teardown.
     try std.testing.expect(take_fallback_report());
@@ -321,15 +370,19 @@ test "wm_server: WMS5 raw-pointer and window-mirror fan-out is WM-only (kind 19/
     // No WM: fan-outs are no-ops (nothing is generated, nothing changes).
     fan_pointer(100, 200, 0x01);
     fan_window(2, 10, 20, 30, 40, true, true, 0);
+    fan_key(0x17, events.MOD_CTRL); // Gate 2: Ctrl+T usage
     try std.testing.expectEqual(@as(u64, 0), info().pointer_fan_count);
     try std.testing.expectEqual(@as(u64, 0), info().window_mirror_count);
+    try std.testing.expectEqual(@as(u64, 0), info().key_fan_count);
 
-    // Register pid 3: the fan-outs deliver kind 19/20 ONLY to the WM.
+    // Register pid 3: the fan-outs deliver kind 19/20/21 ONLY to the WM.
     try std.testing.expect(register(3));
     fan_pointer(100, 200, 0x01);
     fan_window(2, 10, 20, 30, 40, true, true, 0);
+    fan_key(0x17, events.MOD_CTRL); // Gate 2: Ctrl+T usage
     try std.testing.expectEqual(@as(u64, 1), info().pointer_fan_count);
     try std.testing.expectEqual(@as(u64, 1), info().window_mirror_count);
+    try std.testing.expectEqual(@as(u64, 1), info().key_fan_count);
 
     const p = events.pop(3).?;
     try std.testing.expectEqual(events.WM_POINTER, p.kind);
@@ -342,6 +395,13 @@ test "wm_server: WMS5 raw-pointer and window-mirror fan-out is WM-only (kind 19/
     try std.testing.expectEqual(@as(u32, 10 | (20 << 16)), w.arg0);
     try std.testing.expectEqual(@as(u32, 30 | (40 << 16)), w.arg1);
 
+    // Gate 2 (claim 9850): kind 21 WM_KEY carries the raw usage + modifier
+    // bits — the WM's chord decoder input.
+    const k = events.pop(3).?;
+    try std.testing.expectEqual(events.WM_KEY, k.kind);
+    try std.testing.expectEqual(@as(u16, events.MOD_CTRL), k.flags);
+    try std.testing.expectEqual(@as(u32, 0x17), k.arg0); // Ctrl+T usage
+
     // No other process's queue received anything (the kind-18 discipline).
     var i: usize = 0;
     while (i < process.max_processes) : (i += 1) {
@@ -350,7 +410,24 @@ test "wm_server: WMS5 raw-pointer and window-mirror fan-out is WM-only (kind 19/
     // Teardown: fan-outs stop again (and the flag is clean for later tests).
     try std.testing.expect(unregister(3));
     fan_pointer(100, 200, 0x01);
+    fan_key(0x17, events.MOD_CTRL);
     try std.testing.expectEqual(@as(u64, 1), info().pointer_fan_count); // unchanged
+    try std.testing.expectEqual(@as(u64, 1), info().key_fan_count); // unchanged
+}
+
+test "wm_server: SET_STATE counter + keyboard fan-out (claim 9850, WMS5 Gate 2)" {
+    events.init();
+    init();
+    events.on_event_pushed = null;
+    // The SET_STATE counter is monotonically incremented by the syscall
+    // layer's handler; here we just pin the note contract (no WM needed).
+    note_set_state();
+    try std.testing.expectEqual(@as(u64, 1), info().set_state_count);
+    init();
+    try std.testing.expectEqual(@as(u64, 0), info().set_state_count);
+    // Fan-out of a raw key with NO WM registered is a silent no-op (shim).
+    fan_key(0x17, events.MOD_CTRL);
+    try std.testing.expectEqual(@as(u64, 0), info().key_fan_count);
 }
 
 test "wm_server: COMPOSITE_TICK is delivered only to the registered WM with the present sequence" {

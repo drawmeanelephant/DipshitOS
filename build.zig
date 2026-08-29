@@ -1383,13 +1383,20 @@ pub fn build(b: *std.Build) void {
     // the kernel shim (kernel/src/wnd_core.zig). It lives in a different
     // module tree, so expose it as an anonymous import shared by both.
     wnd_mod.addAnonymousImport("wnd_core", .{ .root_source_file = b.path("kernel/src/wnd_core.zig") });
+    // Gate 2 (claim 9850) turned WND.BIN from naked asm into a real Zig
+    // program with EL0 policy state (mirror registry, tile/snap/ws tables,
+    // counters) — module globals need a writable segment, so the build uses
+    // the SEGMENTED DSK3 path (linker-segmented.ld + elf2bin --segments,
+    // the GLOBALS.BIN precedent). The loader maps text EL0-RO+PXN and
+    // data+bss EL0-RW+UXN; the WMS3-era flat naked-asm payload had no
+    // globals and stayed on the flat path.
     const wnd_prog = b.addExecutable(.{
         .name = "user-wnd",
         .root_module = wnd_mod,
     });
-    wnd_prog.linker_script = b.path("user/linker.ld");
+    wnd_prog.linker_script = b.path("user/linker-segmented.ld");
     const wnd_step = b.step("wnd", "Build the forty-eighth ESP user program (zig-out/bin/WND.BIN)");
-    const wnd_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    const wnd_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py", "--segments" });
     wnd_elf2bin.addFileArg(wnd_prog.getEmittedBin());
     const wnd_bin = wnd_elf2bin.addOutputFileArg("WND.BIN");
     wnd_elf2bin.has_side_effects = true;

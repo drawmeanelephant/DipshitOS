@@ -126,7 +126,8 @@ pub fn z_rank(geoms: []const Geom, id: u8) ?usize {
 
 /// Clamp a requested window width to `min_w..max_buf_w` AND on-scanout
 /// (never wider than the framebuffer minus the window's x). Pure.
-pub fn clamp_resize_w(req_w: i32, win_x: u32, fb_w: u32, min_w: u32, max_buf_w: u32) u32 {
+pub fn clamp_resize_w(req_w: i32, win_x: u32, sw: u32, min_w: u32, max_buf_w: u32) u32 {
+    _ = sw; // the shared fb_w constant is the scanout width (fixed 1280)
     var w: i32 = req_w;
     if (w < @as(i32, @intCast(min_w))) w = @as(i32, @intCast(min_w));
     if (w > @as(i32, @intCast(max_buf_w))) w = @as(i32, @intCast(max_buf_w));
@@ -140,7 +141,8 @@ pub fn clamp_resize_w(req_w: i32, win_x: u32, fb_w: u32, min_w: u32, max_buf_w: 
 
 /// Clamp a requested window height to `min_h..max_buf_h` AND on-scanout.
 /// Pure.
-pub fn clamp_resize_h(req_h: i32, win_y: u32, fb_h: u32, min_h: u32, max_buf_h: u32) u32 {
+pub fn clamp_resize_h(req_h: i32, win_y: u32, sw: u32, min_h: u32, max_buf_h: u32) u32 {
+    _ = sw; // the shared fb_h constant is the scanout height (fixed 720)
     var h: i32 = req_h;
     if (h < @as(i32, @intCast(min_h))) h = @as(i32, @intCast(min_h));
     if (h > @as(i32, @intCast(max_buf_h))) h = @as(i32, @intCast(max_buf_h));
@@ -157,6 +159,117 @@ pub fn clamp_resize_h(req_h: i32, win_y: u32, fb_h: u32, min_h: u32, max_buf_h: 
 /// The title-layout result (named so BOTH sides return the SAME type — an
 /// anonymous struct would create two distinct types the delegating kernel
 /// could not return directly).
+// ---------------------------------------------------------------------------
+// WMS5 Gate 2 (issue #625, claim 9850) — the shared GEOMETRY POLICY rules.
+// The pure math the WM server issues over SET_WINDOW rects: tile/master-
+// detail layout, snap zones, maximize rect, and the scanout chrome
+// geometry (framebuffer dims + taskbar + dock). Compiled by BOTH the
+// kernel shim and WND.BIN — a rule change on either side fails the
+// drift-guard tests, so the WM's proposed rects can never disagree with
+// the shim's own numbers while both are live.
+// ---------------------------------------------------------------------------
+
+/// The scanout chrome geometry — single source for BOTH sides (the shim's
+/// `taskbar_h`/`dock_w`/fb constants re-export these; the WM computes
+/// tile/snap/max rects from them). The framebuffer is a fixed 1280x720
+/// scanout (virtio_gpu) with a 20 px bottom taskbar and 24 px left dock.
+pub const fb_w: u32 = 1280;
+pub const fb_h: u32 = 720;
+pub const taskbar_h: u32 = 20;
+pub const dock_w: u32 = 24;
+
+/// M15 C3 (snap zones, #227) + M21 W1/W2 (tiling): the zone tags the WM
+/// hit-tests against. `none` = free (no snap).
+pub const SnapZone = enum { none, left, right, top, bottom, top_left, top_right, bottom_left, bottom_right };
+
+/// The snap threshold (px from a scanout edge that counts as "near").
+pub const snap_thresh: u32 = 20;
+
+/// M15 C3 (snap zones, #227): 20 px threshold, corners first, then edges.
+/// Pure — the WM hit-tests a pointer position against this on drag-drop,
+/// and the shim uses the identical rule for its own pointer path.
+pub fn snap_zone_for_point(x: u32, y: u32, sw: u32, sh: u32) SnapZone {
+    const fbw = sw;
+    const fbh = sh;
+    const near_left = x < snap_thresh;
+    const near_right = x + snap_thresh >= fbw;
+    const near_top = y < snap_thresh;
+    const near_bottom = y + snap_thresh >= fbh;
+    // Corners take precedence (avoid flicker when corner zones overlap edges).
+    if (near_left and near_top) return .top_left;
+    if (near_right and near_top) return .top_right;
+    if (near_left and near_bottom) return .bottom_left;
+    if (near_right and near_bottom) return .bottom_right;
+    if (near_left) return .left;
+    if (near_right) return .right;
+    if (near_top) return .top;
+    if (near_bottom) return .bottom;
+    return .none;
+}
+
+/// Zone bounds in scanout coordinates (taskbar excluded for bottom zones).
+/// Pure — the WM snaps a window to this rect (then the kernel clamps); the
+/// shim uses the same numbers.
+/// The snap-zone rect type (named so BOTH sides return the SAME type — an
+/// anonymous struct would create two distinct types the delegating kernel
+/// could not return directly).
+pub const SnapBounds = struct { x: u32, y: u32, w: u32, h: u32 };
+
+pub fn snap_zone_bounds(zone: SnapZone, sw: u32, sh: u32, tb_h: u32) ?SnapBounds {
+    const fbw = sw;
+    const fbh = sh;
+    const half_w = fbw / 2;
+    const half_h = (fbh - tb_h) / 2;
+    return switch (zone) {
+        .none => null,
+        .left => .{ .x = 0, .y = 0, .w = half_w, .h = fbh - tb_h },
+        .right => .{ .x = half_w, .y = 0, .w = fbw - half_w, .h = fbh - tb_h },
+        .top => .{ .x = 0, .y = 0, .w = fbw, .h = half_h },
+        .bottom => .{ .x = 0, .y = half_h, .w = fbw, .h = fbh - half_h - tb_h },
+        .top_left => .{ .x = 0, .y = 0, .w = half_w, .h = half_h },
+        .top_right => .{ .x = half_w, .y = 0, .w = fbw - half_w, .h = half_h },
+        .bottom_left => .{ .x = 0, .y = half_h, .w = half_w, .h = half_h },
+        .bottom_right => .{ .x = half_w, .y = half_h, .w = fbw - half_w, .h = half_h },
+    };
+}
+
+/// M21 W1/W2 tiling layout: the two tiled rects (master + detail) for the
+/// current master side and percentage. Master gets `master_pct`/1000 of the
+/// usable width (the scanout minus the dock); detail gets the rest; both
+/// fill the usable height (scanout minus the taskbar). Pure — the WM
+/// computes the rects it issues via SET_WINDOW, and the shim's
+/// `apply_tile_layout` uses the identical rule.
+pub const TileLayout = struct { master_x: u32, master_w: u32, detail_x: u32, detail_w: u32, y: u32, h: u32 };
+
+pub fn tile_layout(sw: u32, sh: u32, tb_h: u32, dk_w: u32, master_pct: u32, master_side_left: bool) TileLayout {
+    const fbw = sw;
+    const fbh = sh;
+    const usable_w = fbw - dk_w;
+    const usable_h = fbh - tb_h;
+    const master_w = usable_w * master_pct / 1000;
+    const detail_w = usable_w - master_w;
+    if (master_side_left) {
+        return .{ .master_x = dk_w, .master_w = master_w, .detail_x = dk_w + master_w, .detail_w = detail_w, .y = 0, .h = usable_h };
+    }
+    return .{ .master_x = dk_w + detail_w, .master_w = master_w, .detail_x = dk_w, .detail_w = detail_w, .y = 0, .h = usable_h };
+}
+
+/// M21 W6 maximize rect: fill the workspace area (scanout minus the dock
+/// and taskbar; title bar stays visible). Pure — the WM issues this rect
+/// via SET_WINDOW; the shim's `toggle_maximize` uses the same numbers.
+pub fn maximize_rect(sw: u32, sh: u32, tb_h: u32, dk_w: u32) struct { x: u32, y: u32, w: u32, h: u32 } {
+    const fbw = sw;
+    const fbh = sh;
+    return .{ .x = dk_w, .y = 0, .w = fbw - dk_w, .h = fbh - tb_h };
+}
+
+/// M21 W7 fullscreen rect: the ENTIRE scanout (no title bar, no taskbar).
+pub fn fullscreen_rect(sw: u32, sh: u32) struct { x: u32, y: u32, w: u32, h: u32 } {
+    const fbw = sw;
+    const fbh = sh;
+    return .{ .x = 0, .y = 0, .w = fbw, .h = fbh };
+}
+
 pub const TitleLayout = struct { x_off: usize, draw_len: usize, truncated: bool };
 
 // ---------------------------------------------------------------------------
@@ -418,6 +531,56 @@ test "wnd_core: chrome descriptor validity refuses unknown kind/flags and zero k
     try std.testing.expect(chrome_valid(d));
     d.kind = chrome_ring;
     try std.testing.expect(chrome_valid(d));
+}
+
+test "wnd_core: WMS5 Gate 2 geometry rules are pinned (tile/snap/max — the WM's rect math)" {
+    // Scanout constants: the fixed 1280x720 scanout + the chrome geometry.
+    try std.testing.expectEqual(@as(u32, 1280), fb_w);
+    try std.testing.expectEqual(@as(u32, 720), fb_h);
+    try std.testing.expectEqual(@as(u32, 20), taskbar_h);
+    try std.testing.expectEqual(@as(u32, 24), dock_w);
+
+    // Snap zone hit-test: 20 px threshold, corners first, then edges.
+    try std.testing.expectEqual(SnapZone.top_left, snap_zone_for_point(5, 5, fb_w, fb_h));
+    try std.testing.expectEqual(SnapZone.top_right, snap_zone_for_point(fb_w - 5, 5, fb_w, fb_h));
+    try std.testing.expectEqual(SnapZone.left, snap_zone_for_point(5, 360, fb_w, fb_h));
+    try std.testing.expectEqual(SnapZone.right, snap_zone_for_point(fb_w - 5, 360, fb_w, fb_h));
+    try std.testing.expectEqual(SnapZone.bottom, snap_zone_for_point(640, fb_h - 5, fb_w, fb_h));
+    try std.testing.expectEqual(SnapZone.none, snap_zone_for_point(640, 360, fb_w, fb_h));
+
+    // Snap bounds: left/right halves, bottom zones exclude the taskbar.
+    const l = snap_zone_bounds(.left, fb_w, fb_h, taskbar_h).?;
+    try std.testing.expectEqual(@as(u32, 0), l.x);
+    try std.testing.expectEqual(@as(u32, 640), l.w);
+    try std.testing.expectEqual(@as(u32, fb_h - taskbar_h), l.h);
+    const bl = snap_zone_bounds(.bottom_left, fb_w, fb_h, taskbar_h).?;
+    try std.testing.expectEqual(@as(u32, (fb_h - taskbar_h) / 2), bl.y);
+
+    // Tile layout: master gets 667/1000 of the usable width; sides flip.
+    const tl = tile_layout(fb_w, fb_h, taskbar_h, dock_w, 667, true);
+    const usable_w = fb_w - dock_w; // 1256
+    try std.testing.expectEqual(@as(u32, 1256), usable_w);
+    try std.testing.expectEqual(@as(u32, 837), tl.master_w); // 1256*667/1000
+    try std.testing.expectEqual(@as(u32, 419), tl.detail_w); // 1256-837
+    try std.testing.expectEqual(@as(u32, 24), tl.master_x); // dock left
+    try std.testing.expectEqual(@as(u32, 24 + 837), tl.detail_x);
+    try std.testing.expectEqual(@as(u32, fb_h - taskbar_h), tl.h);
+    const tr = tile_layout(fb_w, fb_h, taskbar_h, dock_w, 667, false);
+    try std.testing.expectEqual(@as(u32, 24 + 419), tr.master_x); // master right
+    try std.testing.expectEqual(@as(u32, 24), tr.detail_x);
+
+    // Maximize: the workspace area (dock + taskbar excluded).
+    const mx = maximize_rect(fb_w, fb_h, taskbar_h, dock_w);
+    try std.testing.expectEqual(@as(u32, 24), mx.x);
+    try std.testing.expectEqual(@as(u32, 0), mx.y);
+    try std.testing.expectEqual(@as(u32, fb_w - 24), mx.w);
+    try std.testing.expectEqual(@as(u32, fb_h - taskbar_h), mx.h);
+
+    // Fullscreen: the ENTIRE scanout.
+    const fs = fullscreen_rect(fb_w, fb_h);
+    try std.testing.expectEqual(@as(u32, 0), fs.x);
+    try std.testing.expectEqual(@as(u32, fb_w), fs.w);
+    try std.testing.expectEqual(@as(u32, fb_h), fs.h);
 }
 
 test "wnd_core: chrome descriptor is a flat 40-byte number struct (the frozen ABI)" {

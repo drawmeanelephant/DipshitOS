@@ -463,13 +463,16 @@ if [ -f "$WNDSTUB_BIN" ]; then
     fi
     WNDSTUB_ARGS+=("$WNDSTUB_BIN")
 fi
-# M32 WMS3 (issue #623): WND.BIN is a flat DSK1 program (the long-lived EL0
-# WM server behind verify-live-wnd-server.sh; launched via `wnd start`).
+# M32 WMS3 (issue #623): WND.BIN is the long-lived EL0 WM server behind
+# verify-live-wnd-server.sh (launched via `wnd start`). Since WMS5 Gate 2
+# (claim 9850) it is a SEGMENTED DSK3 image (real Zig policy code with
+# module globals — mirror registry, tile/snap/ws tables — needs the writable
+# data+bss aperture; the GLOBALS.BIN precedent), not flat DSK1.
 WND_BIN="${52:-$ROOT_DIR/zig-out/bin/WND.BIN}"
 WND_ARGS=()
 if [ -f "$WND_BIN" ]; then
-    if [ "$(head -c 4 "$WND_BIN")" != "DSK1" ]; then
-        fail "'$WND_BIN' does not start with the 'DSK1' image magic -- run 'zig build' first."
+    if [ "$(head -c 4 "$WND_BIN")" != "DSK3" ]; then
+        fail "'$WND_BIN' does not start with the 'DSK3' segmented-image magic -- run 'zig build' first (it produces zig-out/bin/WND.BIN)."
     fi
     WND_ARGS+=("$WND_BIN")
 fi

@@ -491,6 +491,18 @@ pub fn exec_file(name: []const u8, args: []const []const u8) ExecResult {
     file_table.reset_process(proc_id);
     app_timers.reset(proc_id); // claim 7323: a recycled pid inherits no stale app timer
     if (scheduler.register_exec_user(entry_va, rebuild.root_phys, @intCast(text_len), rebuild.stack_va, scheduler.task_stack_size, kstack, @intCast(argc), argv_va)) |task_id| {
+        // M32 WMS5 Gate 2 (claim 9850): a segmented (DSK3) image's writable
+        // data+bss segment must be in the task's per-process uaccess
+        // regions, like the dynamic-ELF path does below (the module-global
+        // `uaccess.add_*_region` in `rebuild_user_root_full` is re-armed
+        // away at every SVC entry by `handle_svc`, so the TCB copy is the
+        // one that survives). Without it, `sys_wait_event`'s copy_out to a
+        // buffer inside the data segment EFAULTs forever and a segmented
+        // program with globals spins instead of blocking.
+        if (data_mem_size > 0) {
+            scheduler.add_task_read_region(task_id, .{ .base = data_va, .len = data_mem_size });
+            scheduler.add_task_write_region(task_id, .{ .base = data_va, .len = data_mem_size });
+        }
         _ = process.bind(proc_id, task_id);
     } else {
         // Defensive rollback (the upfront slot check makes this

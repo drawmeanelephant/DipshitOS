@@ -107,7 +107,9 @@ pub const user_buf_w: u32 = geom.user_buf_w;
 pub const user_buf_h: u32 = geom.user_buf_h;
 
 /// Step 8 (Issue #211): the system taskbar at the bottom of the scanout.
-pub const taskbar_h: u32 = 20;
+/// M32 WMS5 Gate 2 (claim 9850): single-sourced with the WM server —
+/// wnd_core owns the number; this re-exports it (the drift guard).
+pub const taskbar_h: u32 = geom.taskbar_h;
 pub const taskbar_y: u32 = virtio_gpu.fb_height - taskbar_h;
 pub const taskbar_bg_rgb: u32 = 0x0f172a;
 pub const taskbar_entry_active_rgb: u32 = 0x3b82f6;
@@ -121,8 +123,9 @@ pub const tray_x: u32 = virtio_gpu.fb_width - tray_w;
 pub const tray_h: u32 = taskbar_h;
 pub const tray_y: u32 = taskbar_y;
 
-/// M15 C4 (Dock, #229): 24 px left dock, topmost fixed layer.
-pub const dock_w: u32 = 24;
+/// M15 C4 (Dock, #229): 24 px left dock, topmost fixed layer. M32 WMS5
+/// Gate 2 (claim 9850): single-sourced with the WM server via wnd_core.
+pub const dock_w: u32 = geom.dock_w;
 pub const dock_x: u32 = 0;
 pub const dock_y: u32 = 0;
 pub const dock_h: u32 = virtio_gpu.fb_height - taskbar_h;
@@ -236,6 +239,13 @@ pub var wm_pointer_hook: ?*const fn (x: u32, y: u32, buttons: u8) void = null;
 /// null when no WM). Callback gets the id + full rect + state; wm_server
 /// packs kind 20 WM_WINDOW. Called from the user-window mutation points.
 pub var wm_window_hook: ?*const fn (id: u8, x: u32, y: u32, w: u32, h: u32, visible: bool, focused: bool, workspace: u8) void = null;
+/// WMS5 Gate 2 (claim 9850): the raw-keyboard fan-out (set by wm_server at
+/// REGISTER time; null when no WM — the hook style of the pointer/window
+/// hooks). Callback gets the raw HID keyboard usage byte + the ADR 0009
+/// modifier bits on key-DOWN edges; wm_server packs kind 21 WM_KEY. The
+/// kernel's own keyboard geometry consumers are gated behind
+/// `wm_owns_input` (shell idle), so the WM — not the kernel — decides.
+pub var wm_key_hook: ?*const fn (usage: u8, flags: u16) void = null;
 /// M32 WMS4: the WM's broadcast chrome policy (SET_WINDOW with a0 = ALL).
 /// When set, every user window without its own override renders chrome
 /// from this descriptor; null = no WM chrome (shim rules — the default
@@ -439,7 +449,9 @@ var overlay_ids: [max_windows]u8 = undefined;
 var overlay_count: usize = 0;
 
 /// M15 C3 (Snap zones, #227): drag snap state — BSS, no heap.
-pub const SnapZone = enum { none, left, right, top, bottom, top_left, top_right, bottom_left, bottom_right };
+/// M32 WMS5 Gate 2 (claim 9850): the zone tags are single-sourced with
+/// the WM server (wnd_core owns the enum; this re-exports it).
+pub const SnapZone = geom.SnapZone;
 var snap_zone: SnapZone = .none;
 var snap_last_x: [user_windows_max]u32 = [_]u32{0} ** user_windows_max;
 var snap_last_y: [user_windows_max]u32 = [_]u32{0} ** user_windows_max;
@@ -1423,6 +1435,40 @@ pub fn user_resize(id: u8, w: u32, h: u32) bool {
     return true;
 }
 
+/// M32 WMS5 Gate 2 (claim 9850): apply a WM-proposed rect with LAYOUT
+/// semantics — on-scanout clamping only, NO back-buffer clamp. The shim's
+/// own tile/maximize/fullscreen write 837-wide rects directly (the blit
+/// source-clamps to the app's 512x424 buffer, claim 8777); the WM must be
+/// able to produce the SAME rects (the W1–W16 registered-matrix parity bar
+/// of issue #625). `sys_win_move`/`sys_win_resize` keep the back-buffer
+/// clamp (an APP asking its window to grow past its own buffer is refused);
+/// this is the WM deciding LAYOUT, so the back-buffer is not the limit.
+/// WM proposes, kernel clamps to the scanout, mirror follows.
+pub fn wm_apply_rect(id: u8, x: u32, y: u32, w: u32, h: u32) bool {
+    const win = find_user_window(id) orelse return false;
+    // Move FIRST so the size clamp sees the final position (the shim's
+    // user_move-then-user_resize order, per the WMS4 comment). The max is
+    // the SCANOUT, not the app's back buffer: the shim's own
+    // tile/maximize/fullscreen write 837-wide rects directly, and the WM
+    // must be able to produce the SAME rects (the W1–W16 registered-matrix
+    // parity bar). WM proposes, kernel clamps on-scanout, mirror follows.
+    const max_x = virtio_gpu.fb_width -| win.w;
+    const max_y = virtio_gpu.fb_height -| win.h;
+    const nx = @min(x, max_x);
+    const ny = @min(y, max_y);
+    const cw = geom.clamp_resize_w(@intCast(w), nx, virtio_gpu.fb_width, resize_min_w, virtio_gpu.fb_width);
+    const ch = geom.clamp_resize_h(@intCast(h), ny, virtio_gpu.fb_height, resize_min_h, virtio_gpu.fb_height);
+    win.x = nx;
+    win.y = ny;
+    win.w = cw;
+    win.h = ch;
+    win.dirty = true;
+    _ = mark_dirty(0);
+    _ = mark_dirty(1);
+    wm_mirror(id); // M32 WMS5: the WM's mirror follows the clamped layout
+    return true;
+}
+
 /// True when a resize drag is active.
 pub fn resize_active() bool {
     return resize_id != null;
@@ -1626,43 +1672,20 @@ pub fn alt_tab_dismiss() void {
 
 /// M15 C3 (Snap zones, #227): 20 px threshold, corners first, then edges.
 pub fn snap_zone_for_point(x: u32, y: u32) SnapZone {
-    const thresh: u32 = 20;
-    const w = virtio_gpu.fb_width;
-    const h = virtio_gpu.fb_height;
-    const near_left = x < thresh;
-    const near_right = x + thresh >= w;
-    const near_top = y < thresh;
-    const near_bottom = y + thresh >= h;
-    // Corners take precedence (avoid flicker when corner zones overlap edges).
-    if (near_left and near_top) return .top_left;
-    if (near_right and near_top) return .top_right;
-    if (near_left and near_bottom) return .bottom_left;
-    if (near_right and near_bottom) return .bottom_right;
-    if (near_left) return .left;
-    if (near_right) return .right;
-    if (near_top) return .top;
-    if (near_bottom) return .bottom;
-    return .none;
+    // Delegated to the shared wnd_core rule (single source with the WM
+    // server — the drift guard; the fb dims are the same fixed scanout).
+    return geom.snap_zone_for_point(x, y, virtio_gpu.fb_width, virtio_gpu.fb_height);
 }
 
 /// Zone bounds in scanout coordinates (taskbar excluded for bottom zones).
 /// Returns the zone's full rect; caller clamps to `user_buf_w`/`h` for the window.
-pub fn snap_zone_bounds(zone: SnapZone) ?struct { x: u32, y: u32, w: u32, h: u32 } {
-    const w = virtio_gpu.fb_width;
-    const h = virtio_gpu.fb_height;
-    const half_w = w / 2;
-    const half_h = (h - taskbar_h) / 2;
-    return switch (zone) {
-        .none => null,
-        .left => .{ .x = 0, .y = 0, .w = half_w, .h = h - taskbar_h },
-        .right => .{ .x = half_w, .y = 0, .w = w - half_w, .h = h - taskbar_h },
-        .top => .{ .x = 0, .y = 0, .w = w, .h = half_h },
-        .bottom => .{ .x = 0, .y = half_h, .w = w, .h = h - half_h - taskbar_h },
-        .top_left => .{ .x = 0, .y = 0, .w = half_w, .h = half_h },
-        .top_right => .{ .x = half_w, .y = 0, .w = w - half_w, .h = half_h },
-        .bottom_left => .{ .x = 0, .y = half_h, .w = half_w, .h = half_h },
-        .bottom_right => .{ .x = half_w, .y = half_h, .w = w - half_w, .h = half_h },
-    };
+/// The snap-zone rect type (single-sourced with the WM server).
+pub const SnapBounds = geom.SnapBounds;
+
+pub fn snap_zone_bounds(zone: SnapZone) ?SnapBounds {
+    // Delegated to the shared wnd_core rule (single source with the WM
+    // server; the taskbar exclusion is the shared constant).
+    return geom.snap_zone_bounds(zone, virtio_gpu.fb_width, virtio_gpu.fb_height, taskbar_h);
 }
 
 /// Per-window slot for snap state (user windows 2..5 → 0..3).
@@ -4289,6 +4312,37 @@ test "driving_award: user_move clamps on-scanout and user_raise reorders z" {
     try std.testing.expect(user_move(2, 1200, 700));
     try std.testing.expectEqual(@as(u32, virtio_gpu.fb_width - 512), find_user_window(2).?.x);
     try std.testing.expectEqual(@as(u32, virtio_gpu.fb_height - 384), find_user_window(2).?.y);
+}
+
+test "driving_award: wm_apply_rect uses LAYOUT semantics (WMS5 Gate 2, claim 9850)" {
+    arm();
+    try std.testing.expectEqual(UserOpenResult{ .opened = 2 }, user_open(64, 64, 512, 384, 7));
+    // Window 2 opens at the natural 512x384. The WM proposes the tiled
+    // master rect (24,0,837,700) — WIDER than the app's 512x424 back
+    // buffer. The shim's own apply_tile_layout writes 837 directly; the WM
+    // must be able to produce the SAME rects (the W1–W16 registered-matrix
+    // parity bar). wm_apply_rect clamps on-scanout only.
+    try std.testing.expect(wm_apply_rect(2, 24, 0, 837, 700));
+    try std.testing.expectEqual(@as(u32, 24), find_user_window(2).?.x);
+    try std.testing.expectEqual(@as(u32, 0), find_user_window(2).?.y);
+    try std.testing.expectEqual(@as(u32, 837), find_user_window(2).?.w);
+    try std.testing.expectEqual(@as(u32, 700), find_user_window(2).?.h);
+    // On-scanout clamp: proposing (1200, 700) with an 837x700 rect pulls the
+    // position back so the window stays fully visible.
+    try std.testing.expect(wm_apply_rect(2, 1200, 700, 837, 700));
+    try std.testing.expectEqual(@as(u32, virtio_gpu.fb_width - 837), find_user_window(2).?.x);
+    try std.testing.expectEqual(@as(u32, virtio_gpu.fb_height - 700), find_user_window(2).?.y);
+    // A too-big proposal is clamped to the shared scanout constant, not the
+    // app back-buffer (the layout-semantics rule).
+    try std.testing.expect(wm_apply_rect(2, 0, 0, 9999, 9999));
+    try std.testing.expect(find_user_window(2).?.w <= virtio_gpu.fb_width);
+    try std.testing.expect(find_user_window(2).?.h <= virtio_gpu.fb_height);
+    // Minimum-size clamp still holds (the shared wnd_core rule).
+    try std.testing.expect(wm_apply_rect(2, 100, 100, 10, 10));
+    try std.testing.expectEqual(@as(u32, geom.resize_min_w), find_user_window(2).?.w);
+    // Unknown / non-user id -> false.
+    try std.testing.expect(!wm_apply_rect(9, 0, 0, 100, 100));
+    try std.testing.expect(!wm_apply_rect(0, 0, 0, 100, 100));
 }
 
 test "driving_award: user_rect reads back the clamped geometry (the sys_win_get seam)" {
