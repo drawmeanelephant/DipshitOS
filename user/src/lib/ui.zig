@@ -92,6 +92,10 @@ pub const MOUSE_RIGHT_UP: u16 = 13;
 /// Arc4 #242 (ADR 0013 D2): unsaved-changes warning from compositor.
 /// arg0 = 0 (save), 1 (don't save), 2 (cancel).
 pub const WIN_UNSAVED: u16 = 17;
+/// ADR 0015 (M32 WMS1, claim 1484): composite/present cadence tick for the
+/// registered WM server; reserved until the WMS2 kernel push path exists
+/// (kernel mirror: kernel/src/events.zig).
+pub const COMPOSITE_TICK: u16 = 18;
 
 pub const MOD_SHIFT: u16 = 0x0001;
 pub const MOD_CTRL: u16 = 0x0002;
