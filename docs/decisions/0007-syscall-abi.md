@@ -606,6 +606,7 @@ syscall number 0–64 stays frozen):
 | NOTIF_CENTER | `WMCTL_NOTIF_CENTER` | 6 | a0 = 0 close / 1 open / 2 clear-all | 0 = applied | `EACCES` caller not the WM; `EINVAL` bad action |
 | NOTIF_DISMISS | `WMCTL_NOTIF_DISMISS` | 7 | a0 = row index | 0 = applied | `EACCES` caller not the WM; `EINVAL` out-of-range index |
 | TOOLTIP | `WMCTL_TOOLTIP` | 8 | a0 = 0 hide / 1 show (show: `ptr/len` carry the text, ≤ 32 bytes) | 0 = applied | `EACCES` caller not the WM; `EINVAL` bad action / over-length; `EFAULT` bad text pointer |
+| DOCK | `WMCTL_DOCK` | 9 | a0 = icon index (0–4) | 0 = applied | `EACCES` caller not the WM; `EINVAL` out-of-range icon |
 
 Unknown/zero `cmd` → `EINVAL`. `REGISTER` is one-seat: a second registration
 refuses `EACCES`; the registered pid is observable in the monitor's `wm`
@@ -725,3 +726,16 @@ hover input path: while a WM is registered the kernel fans the raw hover (kind 1
 `WM_POINTER` carries absolute moves) out, and the WM hit-tests the tray, decides what the
 tooltip says, and issues `TOOLTIP`. The kernel never self-triggered a tooltip and still
 doesn't; no WM registered → the dormant shim stays dormant.
+
+### Amendment (2026-08-29, claim 9197 — the WMS6 Gate-D DOCK channel)
+
+The fourth desktop-chrome surface to leave the kernel is the **dock** (issue #626, M15
+C4). `DOCK` (cmd 9) `a0` = icon index (0–4) — the WM maps a dock click to the icon; the
+kernel applies through `dock_icon_click` which is the shim's EXACT clamped chain
+(restore the first minimized user window, else focus + raise a user window, else open
+one), so a WM decision and a shim click are identical actions. The dock-click input path:
+while a WM is registered the kernel fans the raw click (kind 19) out and its own
+dock-click handler gates behind `!wm_owns_input`. The dock is also the first real
+hover-label consumer of cmd 8 (TOOLTIP): the WM issues the icon's label on hover, and
+the kernel's blanket tooltip-clear-on-move gates behind `!wm_owns_input` so it cannot
+fight the WM's hide decisions. No WM registered → shim byte-identical.

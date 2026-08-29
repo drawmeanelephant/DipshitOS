@@ -307,8 +307,24 @@ the box below its own cursor. Headless CI via a bare `--pointer-virtio` move
 (2026-08-29)**: in shim mode a hover changes nothing (the dormant stub — zero
 regression), and with WND.BIN registered the WM decided (`wnd: tooltip`), the
 kernel applied (`wm: tooltip=1` + `ptr_fan=1`) and the box renders the WM's
-text (`visible=yes text=Clock`). Dock / tray widgets / modal dialogs remain
-for the later gates of **WMS6 desktop chrome drain-out (#626).**
+text (`visible=yes text=Clock`).
+
+**WMS6 Gate D is done (claim 9197, issue #626) — the dock drains.** The 24 px
+left icon bar (M15 C4). New slot-65 `DOCK` (cmd 9): the WM maps a click to the
+icon index and the kernel applies `dock_icon_click` — the shim's exact
+clamped chain (restore-first-minimized → focus/raise → open). The kernel's
+dock-click handler gates behind `!wm_owns_input`. WND.BIN hit-tests the
+kind-19 click on the icon grid and issues `DOCK <idx>`, emitting `wnd: dock
+idx=N`; hover labels ride the Gate-C TOOLTIP seam (the dock is the first real
+consumer of cmd 8 — `visible=yes text=Calc`), and the kernel's blanket
+tooltip-clear-on-move gates behind `!wm_owns_input` so it can't fight the
+WM's hide decisions. Headless CI via `--pointer-virtio` (a hover + click on
+icon 0, claim 9367). Gate `tools/verify-live-wnd6-dock-drain.sh` **PASS on
+VZ (2026-08-29)**: the shim still restores on a dock click (zero regression),
+and with WND.BIN registered the WM decided (`wnd: dock idx=0`), the kernel
+applied (`wm: dock=1`) and NOTEPAD was restored + focused (`focused=2`).
+Tray widgets / modal dialogs remain for the later gates of **WMS6 desktop
+chrome drain-out (#626).**
 
 > https://github.com/drawmeanelephant/DipshitOS/milestone/16
 

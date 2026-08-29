@@ -2301,6 +2301,21 @@ fn handle_wmctl(args: Args, _: *exceptions.VectorFrame) u64 {
             wm_server.note_tooltip();
             return 0;
         },
+        wm_server.wmctl_dock => {
+            // M32 WMS6 Gate D (issue #626): the WM — not the kernel — decides
+            // which dock icon a click hits (the raw click already fanned to it
+            // as kind 19 with the button byte). a0 = icon index (0..4); the
+            // kernel applies the SAME clamped chain the shim runs
+            // (restore-first-minimized -> focus/raise -> open), so a WM
+            // decision and a shim click are identical actions.
+            if (!wm_server.registered()) return error_result(.enosys);
+            if (wm_server.registered_pid() != pid) return error_result(.eacces);
+            const idx = args[1];
+            if (idx > 4) return error_result(.einval); // the bar has 5 icons
+            if (!driving_award.dock_icon_click(@intCast(idx))) return error_result(.einval);
+            wm_server.note_dock();
+            return 0;
+        },
         wm_server.wmctl_request_present => {
             if (!wm_server.registered()) return error_result(.enosys);
             if (wm_server.registered_pid() != pid) return error_result(.eacces);
@@ -4136,6 +4151,45 @@ test "syscall: TOOLTIP (cmd 8, claim 6154) shows/hides the tooltip from the WM's
     // Teardown: no leaked input ownership into the aggregated binary.
     try std.testing.expect(wm_server.unregister(0));
     try std.testing.expect(!driving_award.wm_owns_input);
+}
+
+test "syscall: DOCK (cmd 9, claim 9197) restores/focuses through the WM's icon decision" {
+    userspace.init();
+    init(test_writer);
+    wm_server.init();
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0); // task 2 = process 0 (boot payload)
+    scheduler.start();
+    var frame = fresh_frame();
+    try std.testing.expect(scheduler.yield_current()); // shell -> worker
+    try std.testing.expect(scheduler.yield_current()); // worker -> user (2)
+
+    // No WM registered: DOCK -> ENOSYS (the ADR 0007 "no WM" case).
+    try std.testing.expectEqual(error_result(.enosys), dispatch(sys_wmctl, .{ wm_server.wmctl_dock, 0, 0, 0, 0, 0 }, &frame));
+
+    // Seed the WM as pid 0 and open a real user window.
+    try std.testing.expect(wm_server.register(0));
+    const o2 = driving_award.user_open(64, 64, 400, 300, 0);
+    try std.testing.expectEqual(@as(u8, 2), o2.opened);
+    // Minimize it — the dock restore chain's target.
+    var w2 = driving_award.find_user_window(2).?;
+    w2.minimized = true;
+    w2.visible = false;
+    // The WM's DOCK decision (icon 0) restores + focuses it.
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_wmctl, .{ wm_server.wmctl_dock, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expect(!w2.minimized);
+    try std.testing.expect(w2.visible);
+    try std.testing.expectEqual(@as(u8, 2), driving_award.focused_window_id());
+    try std.testing.expectEqual(@as(u64, 1), wm_server.info().dock_count);
+    // An out-of-range icon (the bar has 5) -> EINVAL, not counted.
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_wmctl, .{ wm_server.wmctl_dock, 5, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u64, 1), wm_server.info().dock_count);
+
+    // Teardown: no leaked input ownership into the aggregated binary.
+    try std.testing.expect(wm_server.unregister(0));
+    try std.testing.expect(!driving_award.wm_owns_input);
+    _ = driving_award.user_close(2);
 }
 
 test "syscall: wait_event block+wake preserves the event buffer across the svc re-execution (claim 6359)" {

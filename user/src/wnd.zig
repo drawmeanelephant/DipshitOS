@@ -81,6 +81,10 @@ const wmctl_notif_dismiss: u64 = 7;
 const wmctl_tooltip: u64 = 8;
 const tooltip_show_act: u64 = 1;
 const tooltip_hide_act: u64 = 0;
+// WMS6 Gate D (issue #626): the dock decision channel. DOCK (cmd 9) a0 =
+// icon index (0..4) — the WM decides which icon a click hits; the kernel
+// applies the same clamped chain the shim runs (restore/focus/open).
+const wmctl_dock: u64 = 9;
 
 // ---------------------------------------------------------------------------
 // Syscall wrappers (AArch64 `svc #0` — the fixed-register ABI).
@@ -223,6 +227,13 @@ pub const tooltip_show_marker: []const u8 = "wnd: tooltip\n";
 pub const tooltip_hide_marker: []const u8 = "wnd: tooltip-hide\n";
 /// The tooltip text the WM decides for a tray hover (rides ptr/len).
 pub const tray_tooltip_text: []const u8 = "Clock";
+
+// WMS6 Gate D (issue #626): the dock decision marker (the live gate greps
+// `wnd: dock` to prove the WM — not the kernel — hit-tested the icon) and the
+// icon hover labels the WM issues over the Gate-C TOOLTIP seam (the bar's
+// glyphs are c n t b s — Calc, Notes, Terminal, Browser, Settings).
+pub const dock_marker: []const u8 = "wnd: dock";
+pub const dock_labels = [_][]const u8{ "Calc", "Notes", "Terminal", "Browser", "Settings" };
 
 // ADR 0009 modifier bits (must match kernel events MOD_*).
 pub const mod_shift: u16 = 0x0001;
@@ -592,6 +603,53 @@ fn handle_alt_tab() void {
 }
 
 // ---------------------------------------------------------------------------
+// WMS6 Gate D — the dock policy (icon clicks + hover labels).
+// ---------------------------------------------------------------------------
+
+/// Hit-test the dock icon grid — mirrors the shim's M15 C4 geometry: 24 px
+/// left bar, 20×20 icons at (2, 8+idx*32), 5 icons. Returns the icon index.
+fn dock_icon_at(px: u32, py: u32) ?u8 {
+    if (px < 2 or px >= 22) return null;
+    if (py < 8) return null;
+    const rel = py - 8;
+    const idx = rel / 32;
+    if (idx >= 5) return null;
+    if (rel - idx * 32 >= 20) return null;
+    return @intCast(idx);
+}
+
+/// Print the dock decision with its icon index (the live gate greps the
+/// pinned prefix + the value).
+fn write_dock_marker(idx: u8) void {
+    var buf: [40]u8 = undefined;
+    const s = std.fmt.bufPrint(&buf, "{s} idx={d}\n", .{ dock_marker, idx }) catch "wnd: dock idx=0\n";
+    write_marker(s);
+}
+
+/// The dock icon-click decision: issue DOCK <idx> so the kernel applies the
+/// same clamped chain the shim runs (restore-first-minimized -> focus/raise
+/// -> open). The kernel clamps + blits.
+fn handle_dock_click(idx: u8) void {
+    _ = syscall6(sys_wmctl, wmctl_dock, idx, 0, 0, 0, 0);
+    write_dock_marker(idx);
+}
+
+/// The dock hover-label decision: entering an icon (or moving to a new one)
+/// shows the icon's label via the Gate-C TOOLTIP seam; leaving hides it.
+fn handle_dock_hover(prev: ?u8, cur: ?u8) void {
+    if (cur) |c| {
+        if (prev == null or prev.? != c) {
+            const label = dock_labels[c];
+            _ = syscall6(sys_wmctl, wmctl_tooltip, tooltip_show_act, 0, 0, @intFromPtr(label.ptr), label.len);
+            write_marker(tooltip_show_marker);
+        }
+    } else if (prev != null) {
+        _ = syscall6(sys_wmctl, wmctl_tooltip, tooltip_hide_act, 0, 0, 0, 0);
+        write_marker(tooltip_hide_marker);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The WMS5 keyboard chord decoder (kind 21 WM_KEY).
 // ---------------------------------------------------------------------------
 fn handle_wm_key(usage: u8, flags: u16) void {
@@ -700,6 +758,7 @@ fn main() noreturn {
     var prev_btn: u8 = 0;
     var notif_open: bool = false;
     var prev_in_tray: bool = false;
+    var prev_dock_idx: ?u8 = null;
 
     while (true) {
         // BLOCK until at least one event is queued for this process. The
@@ -798,6 +857,11 @@ fn main() noreturn {
                             _ = syscall6(sys_wmctl, wmctl_notif_center, if (notif_open) notif_open_act else notif_close_act, 0, 0, 0, 0);
                             write_marker(if (notif_open) notif_open_marker else notif_close_marker);
                         }
+                        // WMS6 Gate D (issue #626): a left-button DOWN EDGE on a
+                        // dock icon issues DOCK — the WM, not the kernel, decides.
+                        if (dock_icon_at(px, py)) |didx| {
+                            handle_dock_click(didx);
+                        }
                         // WMS5: a title-bar grab starts a drag.
                         const fm = focused_mirror();
                         if (fm) |m| {
@@ -833,6 +897,11 @@ fn main() noreturn {
                     write_marker(tooltip_hide_marker);
                 }
                 prev_in_tray = in_tray;
+                // WMS6 Gate D (issue #626): hover over a DOCK icon shows its
+                // label (via the Gate-C TOOLTIP seam); leaving hides it.
+                const didx = dock_icon_at(px, py);
+                handle_dock_hover(prev_dock_idx, didx);
+                prev_dock_idx = didx;
                 prev_btn = btn;
             },
             wm_key_kind => {
@@ -915,6 +984,14 @@ test "wnd: the marker/tuning shapes are pinned (live-gate grep targets)" {
     try std.testing.expectEqual(@as(u64, 8), wmctl_tooltip);
     try std.testing.expectEqual(@as(u64, 1), tooltip_show_act);
     try std.testing.expectEqual(@as(u64, 0), tooltip_hide_act);
+    // WMS6 Gate D (issue #626): the dock marker + labels + subcommand.
+    try std.testing.expectEqualStrings("wnd: dock", dock_marker);
+    try std.testing.expectEqualStrings("Calc", dock_labels[0]);
+    try std.testing.expectEqualStrings("Notes", dock_labels[1]);
+    try std.testing.expectEqualStrings("Terminal", dock_labels[2]);
+    try std.testing.expectEqualStrings("Browser", dock_labels[3]);
+    try std.testing.expectEqualStrings("Settings", dock_labels[4]);
+    try std.testing.expectEqual(@as(u64, 9), wmctl_dock);
     try std.testing.expectEqual(@as(u8, 0x17), usage_t);
     try std.testing.expectEqual(@as(u8, 0x10), usage_m);
     try std.testing.expectEqual(@as(u8, 0x11), usage_n);
@@ -929,6 +1006,20 @@ test "wnd: the WMS5 drag-grab rule matches the shared title-bar rule (drift guar
     try std.testing.expectEqual(@as(usize, 16), wnd_core.title_bar_h);
     // The kernel re-exports the SAME number (no second constant to drift).
     _ = wnd_core.hit_test;
+}
+
+test "wnd: the WMS6 dock icon hit-test matches the shim's grid (drift guard)" {
+    // The shim's M15 C4 grid: 20×20 icons at (2, 8+idx*32), 5 icons.
+    try std.testing.expectEqual(@as(?u8, 0), dock_icon_at(12, 18)); // icon 0 center
+    try std.testing.expectEqual(@as(?u8, 1), dock_icon_at(12, 40)); // icon 1 (8+32)
+    try std.testing.expectEqual(@as(?u8, 4), dock_icon_at(12, 8 + 4 * 32 + 5)); // icon 4
+    try std.testing.expectEqual(@as(?u8, 1), dock_icon_at(12, 8 + 1 * 32 + 19)); // icon 1 bottom edge
+    // The 12 px gap between icons (20 px box, 32 px pitch) is a miss.
+    try std.testing.expectEqual(@as(?u8, null), dock_icon_at(12, 8 + 20));
+    // Outside the icon x-band / below the 5 icons is a miss.
+    try std.testing.expectEqual(@as(?u8, null), dock_icon_at(0, 18)); // left of the band
+    try std.testing.expectEqual(@as(?u8, null), dock_icon_at(22, 18)); // right of the band
+    try std.testing.expectEqual(@as(?u8, null), dock_icon_at(12, 8 + 5 * 32)); // below icon 4
 }
 
 test "wnd: the WMS6 Alt+Tab target rule (drift guard against the shim snapshot)" {

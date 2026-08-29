@@ -66,6 +66,10 @@ pub const wmctl_notif_dismiss: u64 = 7;
 /// 0 hide / 1 show (text via ptr/len, the 32-byte M27 bound). The WM decides
 /// WHEN/what; the kernel clamps + blits the box below its own cursor.
 pub const wmctl_tooltip: u64 = 8;
+/// M32 WMS6 Gate D (issue #626): DOCK — a0 = icon index (0..4). The WM decides
+/// which dock icon a click hits (restore/focus/open); the kernel applies the
+/// same clamped chain the shim runs.
+pub const wmctl_dock: u64 = 9;
 
 /// The single registered WM server process id; null = no WM registered
 /// (shim mode, the default — every pre-M32 gate runs in this state).
@@ -92,6 +96,8 @@ var notif_center_count: u64 = 0;
 var notif_dismiss_count: u64 = 0;
 /// M32 WMS6 Gate C (issue #626): TOOLTIP submissions accepted (show/hide).
 var tooltip_count: u64 = 0;
+/// M32 WMS6 Gate D (issue #626): DOCK submissions accepted (icon clicks).
+var dock_count: u64 = 0;
 /// Set when the registered WM exits (teardown) — the shell idle loop drains
 /// this into the `wm: unregistered, shim resumed` report (the exit path is
 /// IRQ context and console-free, so the report is drained like the process
@@ -110,6 +116,7 @@ pub fn init() void {
     notif_center_count = 0;
     notif_dismiss_count = 0;
     tooltip_count = 0;
+    dock_count = 0;
     pointer_fan_count = 0;
     window_mirror_count = 0;
     key_fan_count = 0;
@@ -248,6 +255,7 @@ pub const WmInfo = struct {
     notif_center_count: u64,
     notif_dismiss_count: u64,
     tooltip_count: u64,
+    dock_count: u64,
     pointer_fan_count: u64,
     window_mirror_count: u64,
     key_fan_count: u64,
@@ -265,6 +273,7 @@ pub fn info() WmInfo {
         .notif_center_count = notif_center_count,
         .notif_dismiss_count = notif_dismiss_count,
         .tooltip_count = tooltip_count,
+        .dock_count = dock_count,
         .pointer_fan_count = pointer_fan_count,
         .window_mirror_count = window_mirror_count,
         .key_fan_count = key_fan_count,
@@ -374,6 +383,11 @@ pub fn note_notif_dismiss() void {
 /// Note a TOOLTIP (cmd 8) submission — the WM's show/hide decision.
 pub fn note_tooltip() void {
     tooltip_count +%= 1;
+}
+
+/// Note a DOCK (cmd 9) submission — the WM's dock-icon click decision.
+pub fn note_dock() void {
+    dock_count +%= 1;
 }
 
 // ---------------------------------------------------------------------------

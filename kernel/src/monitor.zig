@@ -6465,6 +6465,10 @@ fn cmd_wm(m: *Monitor, args: []const []const u8) ExecError {
         // (cmd 8) show/hide decisions applied.
         m.console.puts(" tooltip=");
         m.console.print_u64(info.tooltip_count);
+        // M32 WMS6 Gate D (issue #626): the dock observability — DOCK (cmd 9)
+        // icon-click decisions applied.
+        m.console.puts(" dock=");
+        m.console.print_u64(info.dock_count);
         m.console.puts("\n");
         var rows: [driving_award.max_windows]driving_award.ChromeRow = undefined;
         const n = driving_award.wm_chrome_rows(&rows);
