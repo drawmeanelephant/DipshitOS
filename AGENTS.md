@@ -87,6 +87,26 @@ what's next", read `docs/status.md`.
   deterministic LLM-context bundles, no network calls). It is developer
   tooling, not guest software, and counts toward no milestone.
 
+## Host toolchain sanity check (source me first)
+
+This repo's build + gate scripts assume the **modern Homebrew builds** of the
+Unix toolchain. macOS still ships 2007-era GNU bash 3.2 under `/bin/bash` and
+BSD sed under `/usr/bin/sed`; non-interactive agents frequently get PATH with
+`/usr/bin`/`/bin` in front of `/opt/homebrew/bin`, so `bash`/`sed` silently
+resolve to the old system versions and the gates misbehave in confusing ways.
+
+**Before starting any work in a fresh session, run:**
+
+```bash
+source tools/env-check.sh        # or: just check-env; or: bash tools/env-check.sh
+```
+
+It ensures `$HOMEBREW_BIN` leads PATH, verifies the resolved `bash`/`sed`/
+`jq`/`yq` are the modern builds, and prints a very loud red complaint (returning
+non-zero) when the system versions win. Fix with
+`brew install bash gnu-sed jq yq &&` fix PATH, then re-source. Safe and
+idempotent — run it from your login/agent startup once per session.
+
 ## Multiagent coordination rules
 
 Multiple agents and humans develop this repo, sometimes in parallel. The
