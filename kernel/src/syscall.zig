@@ -66,6 +66,8 @@ const virtio_net = @import("virtio_net.zig"); // claim 1384 (card N6): net_udp_s
 const uaccess = @import("uaccess.zig"); // claim 6120: fault-safe copy-in
 const userspace = @import("userspace.zig");
 const driving_award = @import("driving_award.zig"); // claim 1543/0487 (cards G5/G6): the window manager this seam renders into
+const virtio_gpu = @import("virtio_gpu.zig"); // M32 WMS2 (issue #622): the G1 gpu-armed signal for the REGISTER ENXIO check
+const wm_server = @import("wm_server.zig"); // M32 WMS2 (issue #622): the render-server register backing slot 65
 const events = @import("events.zig"); // Milestone 9 (claim 1016): application event queues
 const file_table = @import("file_table.zig"); // Milestone 10 (claim 3570): userland storage ABI
 const esp_exec = @import("exec.zig"); // Claim 6359 (ADR 0007 slot 28): the EL0 exec seam — reuse the EL1h loader
@@ -91,7 +93,8 @@ pub const slot_count: usize = 128;
 /// M26 N1 (issue #399): slots 59/60 are ping send/poll.
 /// M26 N2 (issue #400): slot 62 is the net-stats snapshot.
 /// M29 (issue #598): slots 63/64 are sys_mmap/sys_munmap.
-pub const implemented_count: usize = 65;
+/// M32 WMS2 (issue #622): slot 65 is sys_wmctl (ADR 0015).
+pub const implemented_count: usize = 66;
 /// Card G6 (claim 0487) follow-on (slot 18): the fixed `sys_win_get` shape —
 /// four u32 LE words (x, y, w, h), 16 bytes, marshaled per call and copy_out'd
 /// through uaccess (the procs snapshot pattern).
@@ -267,6 +270,13 @@ pub const sys_net_stats: u64 = 62;
 pub const sys_mmap: u64 = 63;
 /// M29 (issue #598): sys_munmap(addr, len) — slot 64.
 pub const sys_munmap: u64 = 64;
+/// M32 WMS2 (issue #622, ADR 0015 seam A): `sys_wmctl(cmd, a0, a1, a2,
+/// ptr, len)` — slot 65. The REGISTERED WM server's exclusive control
+/// surface over the kernel render server. Subcommand encoding frozen by
+/// WMS1 (claim 1484) in the ADR 0007 amendment: 1=REGISTER, 2=SET_WINDOW,
+/// 3=REQUEST_PRESENT. Calls from any process other than the registered WM
+/// return EACCES; no WM registered → ENOSYS; unknown cmd → EINVAL.
+pub const sys_wmctl: u64 = 65;
 
 pub const ErrorCode = enum(i64) {
     einval = -1,
@@ -418,6 +428,8 @@ fn ensure_table() *const [slot_count]Entry {
         // M29 (issue #598): slots 63/64 — sys_mmap / sys_munmap.
         table_storage[sys_mmap] = .{ .name = "sys_mmap", .handler = handle_mmap };
         table_storage[sys_munmap] = .{ .name = "sys_munmap", .handler = handle_munmap };
+        // M32 WMS2 (issue #622): slot 65 — sys_wmctl (the render-server register).
+        table_storage[sys_wmctl] = .{ .name = "sys_wmctl", .handler = handle_wmctl };
         table_ready = true;
     }
     return &table_storage;
@@ -2062,6 +2074,64 @@ fn handle_munmap(args: Args, _: *exceptions.VectorFrame) u64 {
     return 0;
 }
 
+// ---------------------------------------------------------------------------
+// M32 WMS2 (issue #622): slot 65 — sys_wmctl, the render-server register
+// ---------------------------------------------------------------------------
+
+/// `sys_wmctl(cmd, a0, a1, a2, ptr, len)` — slot 65. The REGISTERED WM
+/// server's exclusive control surface over the kernel render server
+/// (ADR 0015 seam A). Subcommand encoding frozen by WMS1 (claim 1484):
+/// 1=REGISTER, 2=SET_WINDOW, 3=REQUEST_PRESENT.
+///
+/// Error contract (ADR 0007 slot-65 amendment):
+///   - non-process caller (an EL1h task) → EINVAL
+///   - REGISTER: second registration → EACCES (seat taken); no GPU /
+///     unarmed compositor → ENXIO (the sys_audio_play no-device precedent);
+///     success → 0.
+///   - SET_WINDOW / REQUEST_PRESENT with no WM registered → ENOSYS.
+///   - SET_WINDOW / REQUEST_PRESENT from a process other than the registered
+///     WM → EACCES.
+///   - SET_WINDOW: reserved — the chrome-descriptor layout is not frozen
+///     until WMS4; the opcode validates the caller is the WM then returns
+///     EINVAL (no window submission exists in WMS2).
+///   - unknown / zero `cmd` → EINVAL.
+///
+/// Zero-regression: when no WM is registered, SET_WINDOW / REQUEST_PRESENT
+/// return ENOSYS and the shell idle shim composites exactly as today. Only
+/// REGISTER (which requires an armed compositor) puts the seam to work.
+fn handle_wmctl(args: Args, _: *exceptions.VectorFrame) u64 {
+    const pid = process.find_by_task(scheduler.current_id()) orelse return error_result(.einval);
+    const cmd = args[0];
+    switch (cmd) {
+        wm_server.wmctl_register => {
+            // One seat (ADR 0007: seat taken → EACCES).
+            if (wm_server.registered()) return error_result(.eacces);
+            // No GPU / unarmed compositor → ENXIO (the no-device precedent).
+            // `gpu_setup_ok` is the honest G1-armed signal (a flushed
+            // scanout) and is deterministically false in host tests and in
+            // the headless default VM.
+            if (!virtio_gpu.gpu_setup_ok) return error_result(.enxio);
+            _ = wm_server.register(pid);
+            return 0;
+        },
+        wm_server.wmctl_set_window => {
+            // Reserved until WMS4 freezes the chrome-descriptor layout: no
+            // window submission exists in WMS2 yet. Refuse an outsider
+            // first, then EINVAL (no-opcode support) for the WM itself.
+            if (!wm_server.registered()) return error_result(.enosys);
+            if (wm_server.registered_pid() != pid) return error_result(.eacces);
+            return error_result(.einval);
+        },
+        wm_server.wmctl_request_present => {
+            if (!wm_server.registered()) return error_result(.enosys);
+            if (wm_server.registered_pid() != pid) return error_result(.eacces);
+            if (!wm_server.request_present()) return error_result(.einval); // defensive: registrant vanished
+            return 0;
+        },
+        else => return error_result(.einval), // unknown / zero cmd
+    }
+}
+
 /// Deterministic monitor output for the implemented rows and their counters.
 pub fn report(con: *console.Console) void {
     var live: usize = 0;
@@ -2104,7 +2174,7 @@ fn capture_marshaled_args(args: Args, _: *exceptions.VectorFrame) u64 {
     return 0xcafe;
 }
 
-test "syscall: runtime table has 128 slots and sixty-five unique implemented rows" {
+test "syscall: runtime table has 128 slots and sixty-six unique implemented rows" {
     init(test_writer);
     const table = ensure_table();
     try std.testing.expectEqual(@as(usize, 128), table.len);
@@ -2117,7 +2187,7 @@ test "syscall: runtime table has 128 slots and sixty-five unique implemented row
             implemented += 1;
         }
     }
-    try std.testing.expectEqual(@as(usize, 65), implemented);
+    try std.testing.expectEqual(@as(usize, 66), implemented);
     try std.testing.expectEqualStrings("sys_pipe_read", entry_info(sys_pipe_read).?.name);
     try std.testing.expectEqualStrings("sys_pipe_write", entry_info(sys_pipe_write).?.name);
     try std.testing.expectEqualStrings("sys_font_size", entry_info(sys_font_size).?.name);
@@ -2176,7 +2246,8 @@ test "syscall: runtime table has 128 slots and sixty-five unique implemented row
     try std.testing.expectEqualStrings("sys_net_stats", entry_info(sys_net_stats).?.name);
     try std.testing.expectEqualStrings("sys_mmap", entry_info(sys_mmap).?.name);
     try std.testing.expectEqualStrings("sys_munmap", entry_info(sys_munmap).?.name);
-    try std.testing.expect(entry_info(65) == null);
+    // M32 WMS2 (issue #622): slot 65 is the render-server register.
+    try std.testing.expectEqualStrings("sys_wmctl", entry_info(sys_wmctl).?.name);
 }
 
 test "syscall: adapter decodes x8 and x0-x5 and unknown numbers return ENOSYS" {
@@ -2189,10 +2260,13 @@ test "syscall: adapter decodes x8 and x0-x5 and unknown numbers return ENOSYS" {
     try std.testing.expectEqual(@as(u64, 41), exceptions.frame_read(&frame, 0));
     try std.testing.expectEqual(@as(u64, 1), call_count(sys_ping));
 
-    try std.testing.expect(exceptions.frame_write(&frame, 8, 65));
+    // Unimplemented in-range slots still return ENOSYS (previously this
+    // example used 65; that slot is now sys_wmctl, M32 WMS2 — use 67/66,
+    // which remain genuinely unregistered).
+    try std.testing.expect(exceptions.frame_write(&frame, 8, 67));
     try std.testing.expect(handle_svc(&frame, svc_immediate));
     try std.testing.expectEqual(error_result(.enosys), exceptions.frame_read(&frame, 0));
-    try std.testing.expectEqual(@as(u64, 1), call_count(65));
+    try std.testing.expectEqual(@as(u64, 1), call_count(67));
 
     try std.testing.expect(exceptions.frame_write(&frame, 8, 66));
     try std.testing.expect(handle_svc(&frame, svc_immediate));
@@ -3154,7 +3228,7 @@ test "syscall: counters are monotonic and report is deterministic" {
     var con = mock.console();
     report(&con);
     try std.testing.expectEqualStrings(
-        "syscalls: slots=64 implemented=65\n" ++
+        "syscalls: slots=64 implemented=66\n" ++
             "  0 sys_ping calls=2\n" ++
             "  1 sys_write calls=0\n" ++
             "  2 sys_yield calls=0\n" ++
@@ -3219,7 +3293,8 @@ test "syscall: counters are monotonic and report is deterministic" {
             "  61 sys_win_set_title calls=0\n" ++
             "  62 sys_net_stats calls=0\n" ++
             "  63 sys_mmap calls=0\n" ++
-            "  64 sys_munmap calls=0\n",
+            "  64 sys_munmap calls=0\n" ++
+            "  65 sys_wmctl calls=0\n",
         mock.contents(),
     );
 }
@@ -3599,6 +3674,60 @@ test "syscall: sys_poll_event and sys_wait_event handle events, blocking, and ua
 
     // Task 2 should now be ready
     try std.testing.expectEqual(@as(usize, 1), events.pending(0));
+}
+
+test "syscall: sys_wmctl (slot 65) enforces the render-server register contract" {
+    userspace.init();
+    init(test_writer);
+    wm_server.init();
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0); // task 2 = process 0 (boot payload)
+    scheduler.start();
+    var frame = fresh_frame();
+
+    // In task 0 (shell, not a registered process) REGISTER is EINVAL — an
+    // EL1h task can never be the WM (non-process caller).
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_wmctl, .{ wm_server.wmctl_register, 0, 0, 0, 0, 0 }, &frame));
+
+    // Drive to the caller (task 2, pid 0).
+    try std.testing.expect(scheduler.yield_current()); // shell -> worker
+    try std.testing.expect(scheduler.yield_current()); // worker -> user (2)
+    try std.testing.expectEqual(@as(usize, 2), scheduler.current_id());
+    try std.testing.expectEqual(@as(usize, 0), process.find_by_task(2).?);
+
+    // No WM registered, no GPU (host test):
+    //   REGISTER -> ENXIO (no gpu / unarmed compositor)
+    //   SET_WINDOW / REQUEST_PRESENT -> ENOSYS (the ADR 0007 "no WM" case)
+    //   unknown cmd -> EINVAL
+    try std.testing.expectEqual(error_result(.enxio), dispatch(sys_wmctl, .{ wm_server.wmctl_register, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.enosys), dispatch(sys_wmctl, .{ wm_server.wmctl_set_window, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.enosys), dispatch(sys_wmctl, .{ wm_server.wmctl_request_present, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_wmctl, .{ 99, 0, 0, 0, 0, 0 }, &frame));
+
+    // The slot is counted like every other implemented row.
+    try std.testing.expectEqual(@as(u64, 5), call_count(sys_wmctl));
+
+    // Seed the WM as pid 0; the registrant drives the seam:
+    try std.testing.expect(wm_server.register(0));
+    try std.testing.expectEqual(@as(u64, 0), wm_server.info().present_count);
+    //   REQUEST_PRESENT from the WM -> 0, and the present counter advanced.
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_wmctl, .{ wm_server.wmctl_request_present, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u64, 1), wm_server.info().present_count);
+    //   A second REGISTER while the seat is taken -> EACCES.
+    try std.testing.expectEqual(error_result(.eacces), dispatch(sys_wmctl, .{ wm_server.wmctl_register, 0, 0, 0, 0, 0 }, &frame));
+    //   SET_WINDOW from the WM is reserved (chrome descriptors frozen by
+    //   WMS4) -> EINVAL, not a false success.
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_wmctl, .{ wm_server.wmctl_set_window, 2, 0, 0, 0, 0 }, &frame));
+
+    // Seed a DIFFERENT pid as the WM; pid 0 becomes an outsider:
+    wm_server.init();
+    try std.testing.expect(wm_server.register(1));
+    //   REGISTER -> EACCES (seat taken); SET_WINDOW / REQUEST_PRESENT ->
+    //   EACCES (the ADR 0007 WM-exclusive refusal).
+    try std.testing.expectEqual(error_result(.eacces), dispatch(sys_wmctl, .{ wm_server.wmctl_register, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.eacces), dispatch(sys_wmctl, .{ wm_server.wmctl_set_window, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.eacces), dispatch(sys_wmctl, .{ wm_server.wmctl_request_present, 0, 0, 0, 0, 0 }, &frame));
 }
 
 test "syscall: wait_event block+wake preserves the event buffer across the svc re-execution (claim 6359)" {

@@ -232,7 +232,7 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
                       m21demo_bytes=None, ping_bytes=None, dns_bytes=None,
                       download_bytes=None, traceroute_bytes=None,
                       netprof_bytes=None, sysmon_bytes=None, httpd_bytes=None,
-                      vmtest_bytes=None, extra_files=None):
+                      vmtest_bytes=None, wndstub_bytes=None, extra_files=None):
     """Write a FAT32 volume (boot sector, FSInfo, FATs, directories, files)
     into `img` at the volume's offset.
 
@@ -304,6 +304,7 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
     sysmon_clusters = (len(sysmon_bytes) + bps - 1) // bps if sysmon_bytes else 0
     httpd_clusters = (len(httpd_bytes) + bps - 1) // bps if httpd_bytes else 0
     vmtest_clusters = (len(vmtest_bytes) + bps - 1) // bps if vmtest_bytes else 0
+    wndstub_clusters = (len(wndstub_bytes) + bps - 1) // bps if wndstub_bytes else 0
     file_clusters = (len(efi_bytes) + bps - 1) // bps
     root_entries_count = 2  # vol_label + efi_entry
     if kernel_bytes: root_entries_count += 1
@@ -357,6 +358,7 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
     if sysmon_bytes: root_entries_count += 1
     if httpd_bytes: root_entries_count += 1
     if vmtest_bytes: root_entries_count += 1
+    if wndstub_bytes: root_entries_count += 1
     if extra_files: root_entries_count += len(extra_files)
 
     root_clusters = (root_entries_count * 32 + bps - 1) // bps
@@ -411,7 +413,8 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
     sysmon_start = netprof_start + netprof_clusters
     httpd_start = sysmon_start + sysmon_clusters
     vmtest_start = httpd_start + httpd_clusters
-    apps_txt_start = vmtest_start + vmtest_clusters
+    wndstub_start = vmtest_start + vmtest_clusters
+    apps_txt_start = wndstub_start + wndstub_clusters
     hello_start = apps_txt_start + apps_txt_clusters
 
     extra_file_info = []
@@ -539,6 +542,8 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
         chain(httpd_start, httpd_clusters)          # HTTPD.BIN data
     if vmtest_bytes:
         chain(vmtest_start, vmtest_clusters)        # VMTEST.BIN data
+    if wndstub_bytes:
+        chain(wndstub_start, wndstub_clusters)      # WNDSTUB.BIN data
     if apps_txt_bytes:
         chain(apps_txt_start, apps_txt_clusters)  # APPS.TXT data
     if hello_bytes:
@@ -673,6 +678,8 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
         root_entries += dir_entry(b"HTTPD   BIN", 0x20, httpd_start, len(httpd_bytes))
     if vmtest_bytes:
         root_entries += dir_entry(b"VMTEST  BIN", 0x20, vmtest_start, len(vmtest_bytes))
+    if wndstub_bytes:
+        root_entries += dir_entry(b"WNDSTUB BIN", 0x20, wndstub_start, len(wndstub_bytes))
     if apps_txt_bytes:
         root_entries += dir_entry(b"APPS    TXT", 0x20, apps_txt_start, len(apps_txt_bytes))
     if hello_bytes:
@@ -884,6 +891,10 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
         for i in range(vmtest_clusters):
             chunk = vmtest_bytes[i * bps:(i + 1) * bps]
             wsec(geo.cluster_sector(vmtest_start + i), chunk.ljust(bps, b"\x00"))
+    if wndstub_bytes:
+        for i in range(wndstub_clusters):
+            chunk = wndstub_bytes[i * bps:(i + 1) * bps]
+            wsec(geo.cluster_sector(wndstub_start + i), chunk.ljust(bps, b"\x00"))
     if apps_txt_bytes:
         for i in range(apps_txt_clusters):
             chunk = apps_txt_bytes[i * bps:(i + 1) * bps]
@@ -1167,7 +1178,8 @@ def build_image(total_sectors, esp_offset, efi_bytes, kernel_bytes=None,
                 resmon_bytes=None, devcons_bytes=None, netstat_bytes=None,
                 m21demo_bytes=None, ping_bytes=None, dns_bytes=None,
                 download_bytes=None, traceroute_bytes=None, netprof_bytes=None,
-                sysmon_bytes=None, httpd_bytes=None, vmtest_bytes=None, extra_files=None):
+                sysmon_bytes=None, httpd_bytes=None, vmtest_bytes=None,
+                wndstub_bytes=None, extra_files=None):
     img = bytearray(total_sectors * BYTES_PER_SECTOR)
     last_usable = total_sectors - 34
     first_usable = 34
@@ -1215,7 +1227,7 @@ def build_image(total_sectors, esp_offset, efi_bytes, kernel_bytes=None,
                       resmon_bytes, devcons_bytes, netstat_bytes,
                       m21demo_bytes, ping_bytes, dns_bytes, download_bytes,
                       traceroute_bytes, netprof_bytes, sysmon_bytes, httpd_bytes,
-                      vmtest_bytes, extra_files=extra_files)
+                      vmtest_bytes, wndstub_bytes=wndstub_bytes, extra_files=extra_files)
     geo_data = Fat32Geometry(data_sectors, data_start)
     build_data_volume(img, geo_data)
     return bytes(img)
@@ -1329,6 +1341,8 @@ def main(argv):
                     help="optional flat user program (HTTPD.BIN) to embed at the volume root (Claim 0750 -- in-guest HTTP/1.1 web server)")
     ap.add_argument("vmtest_file", nargs="?",
                     help="optional flat user program (VMTEST.BIN) to embed at the volume root (Milestone 29, Issue #598 -- VM depth test)")
+    ap.add_argument("wndstub_file", nargs="?",
+                    help="optional flat user program (WNDSTUB.BIN) to embed at the volume root (M32 WMS2, Issue #622 -- the WM-server registrant stub)")
     ap.add_argument("crash_file", nargs="?",
                     help="optional AArch64 ELF32 executable (CRASH.ELF) to embed at the volume root (M22 D3, issue #326 -- symbolized-crash gate)")
     ap.add_argument("hello_file", nargs="?",
@@ -1781,6 +1795,15 @@ def main(argv):
                   "not be a DipshitOS user program image" % args.vmtest_file,
                   file=sys.stderr)
 
+    wndstub_bytes = None
+    if args.wndstub_file:
+        with open(args.wndstub_file, "rb") as f:
+            wndstub_bytes = f.read()
+        if wndstub_bytes[:4] != b"DSK1":
+            print("WARNING: %s does not start with the 'DSK1' magic; it may "
+                  "not be a DipshitOS user program image" % args.wndstub_file,
+                  file=sys.stderr)
+
     crash_bytes = None
     if args.crash_file:
         with open(args.crash_file, "rb") as f:
@@ -1822,7 +1845,8 @@ def main(argv):
                       resmon_bytes, devcons_bytes, netstat_bytes,
                       m21demo_bytes, ping_bytes, dns_bytes, download_bytes,
                       traceroute_bytes, netprof_bytes, sysmon_bytes, httpd_bytes,
-                      vmtest_bytes, extra_files=extra_files_data)
+                      vmtest_bytes, wndstub_bytes=wndstub_bytes,
+                      extra_files=extra_files_data)
     with open(args.image, "wb") as f:
         f.write(img)
     extra = ", %d-byte kernel image embedded" % len(kernel_bytes) if kernel_bytes else ""
@@ -1860,6 +1884,7 @@ def main(argv):
     extra += ", %d-byte sysmon program embedded" % len(sysmon_bytes) if sysmon_bytes else ""
     extra += ", %d-byte httpd program embedded" % len(httpd_bytes) if httpd_bytes else ""
     extra += ", %d-byte vmtest program embedded" % len(vmtest_bytes) if vmtest_bytes else ""
+    extra += ", %d-byte wndstub program embedded" % len(wndstub_bytes) if wndstub_bytes else ""
     print("wrote %s: %d MiB, ESP at LBA %d, %d-byte EFI application embedded%s" %
           (args.image, args.size_mb, args.esp_offset, len(efi_bytes), extra))
     return 0

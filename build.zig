@@ -1338,6 +1338,34 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_vmtest.step);
 
     // ------------------------------------------------------------------
+    // Guest: forty-seventh ESP user program (M32 WMS2, issue #622)
+    // WNDSTUB.BIN — the minimal WM-server registrant behind the live
+    // verify-live-wmctl-register.sh gate: registers through the render-
+    // server register (slot 65 REGISTER), receives a COMPOSITE_TICK
+    // (kind 18) via sys_wait_event, issues REQUEST_PRESENT (slot 65),
+    // and exits — the kernel then reports the shim fallback. Same
+    // freestanding target/linker/elf2bin/ESP-embedding as the others.
+    // ------------------------------------------------------------------
+    const wndstub_prog = b.addExecutable(.{
+        .name = "user-wndstub",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/wndstub.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    wndstub_prog.linker_script = b.path("user/linker.ld");
+    const wndstub_step = b.step("wndstub", "Build the forty-seventh ESP user program (zig-out/bin/WNDSTUB.BIN)");
+    const wndstub_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    wndstub_elf2bin.addFileArg(wndstub_prog.getEmittedBin());
+    const wndstub_bin = wndstub_elf2bin.addOutputFileArg("WNDSTUB.BIN");
+    wndstub_elf2bin.has_side_effects = true;
+    wndstub_elf2bin.stdio = .inherit;
+    wndstub_step.dependOn(&wndstub_elf2bin.step);
+    const install_wndstub = b.addInstallFileWithDir(wndstub_bin, .bin, "WNDSTUB.BIN");
+    b.getInstallStep().dependOn(&install_wndstub.step);
+
+    // ------------------------------------------------------------------
     // Top-level steps. System-command steps are marked as having side
     // effects (and inherit stdio) so they always execute instead of being
     // skipped by the build cache. (No QEMU path: this project targets Apple
@@ -1395,6 +1423,7 @@ pub fn build(b: *std.Build) void {
     image.addFileArg(sysmon_bin); // ... [SYSMON.BIN] (M27 G6, issue #449: forty-fourth user program, system monitor dashboard)
     image.addFileArg(httpd_bin); // ... [HTTPD.BIN] (Claim 0750: forty-fifth user program, HTTP web server)
     image.addFileArg(vmtest_bin); // ... [VMTEST.BIN] (Milestone 29: forty-sixth user program, VM depth test)
+    image.addFileArg(wndstub_bin); // ... [WNDSTUB.BIN] (M32 WMS2, issue #622: forty-seventh user program, the WM-server registrant stub)
     image.has_side_effects = true;
     image.stdio = .inherit;
     image_step.dependOn(&image.step);

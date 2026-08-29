@@ -79,6 +79,10 @@ const tcp = @import("tcp.zig");
 // auto-closes the exiting process's user windows via `close_owner`. Pure
 // BSS writes, safe in the exception context `exit_current` runs in.
 const driving_award = @import("driving_award.zig");
+// M32 WMS2 (issue #622): the render-server register. Fired from the SAME
+// host-testable tick seam as app_timers; the exit path unregisters a dying
+// WM so pacing falls back to the shell idle shim automatically.
+const wm_server = @import("wm_server.zig");
 // Arc5 issue #243: crash tombstone recording — written in the exit path
 // when status is 139 (fault) or non-zero unexpected exits. Pure BSS
 // writes, safe in the exception context `exit_current` runs in.
@@ -370,6 +374,7 @@ pub fn init() usize {
     events.init();
     events.on_event_pushed = wake_event_waiters;
     app_timers.init();
+    wm_server.init();
     tasks[0] = .{ .name = "shell", .state = .ready, .ttbr0 = mmu.kernel_root_phys() };
     tasks[idle_id] = .{
         .name = "idle",
@@ -968,6 +973,11 @@ pub fn on_tick() void {
     // the due ones (one TIMER event per process into its ADR 0009 queue,
     // which wakes a blocked sys_wait_event caller via on_event_pushed).
     app_timers.on_tick();
+    // M32 WMS2 (issue #622): while a WM is registered, deliver one
+    // COMPOSITE_TICK (kind 18) to the registrant's process queue — the
+    // composite pacing moves OFF the shell idle to this tick path. A no-op
+    // when no WM is registered (zero-regression: shim mode unchanged).
+    wm_server.on_tick();
     // Arc5 issue #246: per-process CPU limit enforcement. Increment the
     // current process's tick counter; if the limit is exceeded, terminate
     // the process with status 141 (distinct from guard-page 139).
@@ -1046,6 +1056,12 @@ pub fn exit_current(status: u64) bool {
         // Milestone 14 (claim 7323): a dead process's app timer is disarmed
         // now — no stale fire can ever reach a recycled pid.
         app_timers.reset(pid);
+        // M32 WMS2 (issue #622): if the exited process was the registered
+        // WM, unregister it NOW — pacing falls back to the shell idle shim
+        // (the desktop survives a crashed WM, mirroring the close_owner
+        // window-teardown semantic right above). Pure BSS write; the shell
+        // idle loop drains the `wm: unregistered, shim resumed` report.
+        _ = wm_server.unregister(pid);
     }
     const next = next_runnable(exiting) orelse {
         // No successor: roll back (the always-ready idle task makes this
