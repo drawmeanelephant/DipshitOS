@@ -2316,6 +2316,46 @@ fn handle_wmctl(args: Args, _: *exceptions.VectorFrame) u64 {
             wm_server.note_dock();
             return 0;
         },
+        wm_server.wmctl_tray => {
+            // M32 WMS6 Gate E (issue #626): the WM — not the kernel — owns
+            // the tray widget content (clock string, theme letter, clipboard
+            // indicator). a0 = flags (bit 0 clock, bit 1 theme, bit 2
+            // clipboard); a1 = the 5-byte "HH:MM" clock text packed
+            // little-endian; a2 = theme letter (low byte) | clipboard filled
+            // (bit 8). The kernel clamps each declared field to the frozen
+            // bounds and repaints; a missing field leaves the shim fallback
+            // for that widget (and WM teardown restores all three).
+            if (!wm_server.registered()) return error_result(.enosys);
+            if (wm_server.registered_pid() != pid) return error_result(.eacces);
+            const flags = args[1];
+            if (flags & ~@as(u64, 0b111) != 0) return error_result(.einval); // unknown flag bits
+            var clock: ?[]const u8 = null;
+            var text: [5]u8 = undefined;
+            if ((flags & 0b001) != 0) {
+                const clock_packed = args[2];
+                var i: usize = 0;
+                while (i < 5) : (i += 1) {
+                    const ch: u8 = @intCast((clock_packed >> @intCast(i * 8)) & 0xff);
+                    const ok = (ch >= '0' and ch <= '9') or ch == ':'; // HH:MM charset
+                    if (!ok) return error_result(.einval);
+                    text[i] = ch;
+                }
+                clock = text[0..5];
+            }
+            var theme: ?u8 = null;
+            var clip: ?bool = null;
+            if ((flags & 0b110) != 0) {
+                const letter: u8 = @intCast(args[3] & 0xff);
+                if ((flags & 0b010) != 0) {
+                    if (letter != 'D' and letter != 'L' and letter != 'A') return error_result(.einval);
+                    theme = letter;
+                }
+                if ((flags & 0b100) != 0) clip = (args[3] >> 8) & 1 != 0;
+            }
+            driving_award.tray_set(clock, theme, clip);
+            wm_server.note_tray();
+            return 0;
+        },
         wm_server.wmctl_request_present => {
             if (!wm_server.registered()) return error_result(.enosys);
             if (wm_server.registered_pid() != pid) return error_result(.eacces);
@@ -4190,6 +4230,57 @@ test "syscall: DOCK (cmd 9, claim 9197) restores/focuses through the WM's icon d
     try std.testing.expect(wm_server.unregister(0));
     try std.testing.expect(!driving_award.wm_owns_input);
     _ = driving_award.user_close(2);
+}
+
+test "syscall: TRAY (cmd 10, claim 3744) stores the WM's tray widget content" {
+    userspace.init();
+    init(test_writer);
+    wm_server.init();
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0); // task 2 = process 0 (boot payload)
+    scheduler.start();
+    var frame = fresh_frame();
+    try std.testing.expect(scheduler.yield_current()); // shell -> worker
+    try std.testing.expect(scheduler.yield_current()); // worker -> user (2)
+
+    // No WM registered: TRAY -> ENOSYS (the ADR 0007 "no WM" case).
+    try std.testing.expectEqual(error_result(.enosys), dispatch(sys_wmctl, .{ wm_server.wmctl_tray, 0b111, 0, 0, 0, 0 }, &frame));
+
+    // Seed the WM as pid 0.
+    try std.testing.expect(wm_server.register(0));
+    // The WM's TRAY decision: clock "12:34" packed little-endian, theme 'D',
+    // clipboard filled. a0 = flags 0b111 (all three), a1 = packed clock,
+    // a2 = 'D' | (1 << 8).
+    const clock_packed = @as(u64, '1') | (@as(u64, '2') << 8) | (@as(u64, ':') << 16) | (@as(u64, '3') << 24) | (@as(u64, '4') << 32);
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_wmctl, .{ wm_server.wmctl_tray, 0b111, clock_packed, @as(u64, 'D') | (@as(u64, 1) << 8), 0, 0 }, &frame));
+    try std.testing.expect(driving_award.wm_tray_clock_set);
+    try std.testing.expectEqualStrings("12:34", driving_award.wm_tray_clock_text[0..5]);
+    try std.testing.expect(driving_award.wm_tray_theme_set);
+    try std.testing.expectEqual(@as(u8, 'D'), driving_award.wm_tray_theme);
+    try std.testing.expect(driving_award.wm_tray_clip_set);
+    try std.testing.expect(driving_award.wm_tray_clip);
+    try std.testing.expectEqual(@as(u64, 1), wm_server.info().tray_count);
+    // A partial decision (clock only) leaves the other widgets untouched.
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_wmctl, .{ wm_server.wmctl_tray, 0b001, clock_packed, 0, 0, 0 }, &frame));
+    try std.testing.expect(driving_award.wm_tray_theme_set); // unchanged (still set)
+    try std.testing.expectEqual(@as(u64, 2), wm_server.info().tray_count);
+    // Unknown flag bits -> EINVAL, not counted.
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_wmctl, .{ wm_server.wmctl_tray, 0b1000, 0, 0, 0, 0 }, &frame));
+    // A non-HH:MM clock char -> EINVAL ('Z' in slot 0).
+    const bad2 = (@as(u64, 'Z') << 0) | (@as(u64, '1') << 8);
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_wmctl, .{ wm_server.wmctl_tray, 0b001, bad2, 0, 0, 0 }, &frame));
+    // A theme letter outside D/L/A -> EINVAL.
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_wmctl, .{ wm_server.wmctl_tray, 0b010, 0, 'Z', 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u64, 2), wm_server.info().tray_count);
+
+    // Teardown: no leaked input ownership into the aggregated binary, and the
+    // WM's tray content dies with it (clear_wm_chrome resets the _set flags).
+    try std.testing.expect(wm_server.unregister(0));
+    try std.testing.expect(!driving_award.wm_owns_input);
+    try std.testing.expect(!driving_award.wm_tray_clock_set);
+    try std.testing.expect(!driving_award.wm_tray_theme_set);
+    try std.testing.expect(!driving_award.wm_tray_clip_set);
 }
 
 test "syscall: wait_event block+wake preserves the event buffer across the svc re-execution (claim 6359)" {

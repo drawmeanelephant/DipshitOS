@@ -323,8 +323,25 @@ icon 0, claim 9367). Gate `tools/verify-live-wnd6-dock-drain.sh` **PASS on
 VZ (2026-08-29)**: the shim still restores on a dock click (zero regression),
 and with WND.BIN registered the WM decided (`wnd: dock idx=0`), the kernel
 applied (`wm: dock=1`) and NOTEPAD was restored + focused (`focused=2`).
-Tray widgets / modal dialogs remain for the later gates of **WMS6 desktop
-chrome drain-out (#626).**
+**WMS6 Gate E is done (claim 3744, issue #626) — the tray widgets drain, and
+WMS6 CLOSES.** The final chrome surface. Before this gate the tray froze
+while a WM was registered (the shell idle's `drain` — which refreshed the
+clock — is gated off); new slot-65 `TRAY` (cmd 10) closes the gap: the WM
+declares the clock string, theme letter, and clipboard indicator (each
+optional; flags in `a0`, the 5-byte `HH:MM` clock packed LE in `a1`, theme
+letter + clipboard bit in `a2`). The kernel clamps + stores + repaints, and
+the render is source-selected — WM values when set, shim-derived otherwise
+(no WM → byte-identical). WND.BIN re-decides every 10 s from its own 1 Hz
+tick counter (the same minute-rollover formula as the shim — parity) and a
+`sys_clipboard_get` probe. Gate `tools/verify-live-wnd6-tray-drain.sh`
+**PASS on VZ (2026-08-29)** — no pointer injection needed (time-driven): in
+shim mode the clock stays kernel-derived (`clock_set=no`, zero regression),
+and with WND.BIN registered the WM decided (`wnd: tray clock=00:00 theme=D
+clip=no`), the kernel applied (`wm: tray=1` → `2`), the counter grew between
+probes (the clock REFRESHES under the WM), the WM's string matched the probe
+clock, and after `clip hello` the WM's clipboard probe flipped the indicator
+(`clip=yes clip_set=yes`). **All five issue-626 surfaces — alt-tab,
+notification center, tooltip, dock, tray — now drain into WND.BIN.**
 
 > https://github.com/drawmeanelephant/DipshitOS/milestone/16
 

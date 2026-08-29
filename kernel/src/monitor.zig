@@ -2652,6 +2652,31 @@ fn cmd_dui(m: *Monitor, args: []const []const u8) ExecError {
             m.console.puts("\n");
             return .none;
         }
+        if (std.mem.eql(u8, args[0], "tray-state")) {
+            // WMS6 Gate E (issue #626): a PURE state report (does not change
+            // anything) — the live gate reads the effective tray widget
+            // content after the WM's TRAY decision to prove the WM's values
+            // (not the shim's) are what renders.
+            if (args.len != 1) {
+                print_usage(m, lookup("dui").?);
+                return .usage;
+            }
+            m.console.puts("dui tray-state: clock=");
+            m.console.puts(driving_award.wm_tray_clock_text[0..5]);
+            m.console.puts(" clock_set=");
+            m.console.puts(if (driving_award.wm_tray_clock_set) "yes" else "no");
+            m.console.puts(" theme=");
+            var tlet: [1]u8 = .{driving_award.wm_tray_theme};
+            m.console.puts(tlet[0..1]);
+            m.console.puts(" theme_set=");
+            m.console.puts(if (driving_award.wm_tray_theme_set) "yes" else "no");
+            m.console.puts(" clip=");
+            m.console.puts(if (driving_award.wm_tray_clip) "yes" else "no");
+            m.console.puts(" clip_set=");
+            m.console.puts(if (driving_award.wm_tray_clip_set) "yes" else "no");
+            m.console.puts("\n");
+            return .none;
+        }
         if (std.mem.eql(u8, args[0], "notif-dismiss")) {
             if (args.len != 2) {
                 print_usage(m, lookup("dui").?);
@@ -6469,6 +6494,10 @@ fn cmd_wm(m: *Monitor, args: []const []const u8) ExecError {
         // icon-click decisions applied.
         m.console.puts(" dock=");
         m.console.print_u64(info.dock_count);
+        // M32 WMS6 Gate E (issue #626): the tray observability — TRAY (cmd 10)
+        // widget-content decisions applied (the gate greps `tray=`).
+        m.console.puts(" tray=");
+        m.console.print_u64(info.tray_count);
         m.console.puts("\n");
         var rows: [driving_award.max_windows]driving_award.ChromeRow = undefined;
         const n = driving_award.wm_chrome_rows(&rows);

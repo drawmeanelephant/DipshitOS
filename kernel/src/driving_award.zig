@@ -499,6 +499,18 @@ var tray_tick: u64 = 0;
 var tray_has_tick: bool = false;
 var tray_last_theme: u8 = 0xff;
 var tray_last_clip_len: usize = 0;
+/// M32 WMS6 Gate E (issue #626): WM-declared tray widget content — the
+/// clock string, theme letter, and clipboard indicator the registered WM
+/// owns (the final WMS6 chrome gate). When a field's `_set` flag is true
+/// the renderer draws the WM's value; otherwise it falls back to the
+/// shim's derived value (no-WM mode is byte-identical). Reset by
+/// clear_wm_chrome on WM teardown.
+pub var wm_tray_clock_text: [5]u8 = .{ '0', '0', ':', '0', '0' };
+pub var wm_tray_clock_set: bool = false;
+pub var wm_tray_theme: u8 = 'D';
+pub var wm_tray_theme_set: bool = false;
+pub var wm_tray_clip: bool = false;
+pub var wm_tray_clip_set: bool = false;
 
 /// Arc4 #240/M21 W5: desktop notification toasts — bounded BSS FIFO,
 /// 10 entries (expanded from 4 for the notification center). Follows the
@@ -824,6 +836,28 @@ pub fn tray_clipboard_filled() bool {
     return clipboard.current_len() != 0;
 }
 
+/// M32 WMS6 Gate E (issue #626): apply the registered WM's TRAY decision —
+/// the clock string, theme letter, and clipboard indicator (each optional;
+/// a null field leaves the current value untouched). The kernel clamps to
+/// the frozen bounds (5-char clock, one of D/L/A, clip bool) and marks the
+/// taskbar (window 255) dirty so composite repaints it.
+pub fn tray_set(clock: ?[]const u8, theme: ?u8, clip: ?bool) void {
+    if (clock) |c| {
+        var i: usize = 0;
+        while (i < 5 and i < c.len) : (i += 1) wm_tray_clock_text[i] = c[i];
+        wm_tray_clock_set = true;
+    }
+    if (theme) |t| {
+        wm_tray_theme = t;
+        wm_tray_theme_set = true;
+    }
+    if (clip) |v| {
+        wm_tray_clip = v;
+        wm_tray_clip_set = true;
+    }
+    _ = mark_dirty(255); // taskbar
+}
+
 /// Current tray tick (for tests).
 pub fn tray_current_tick() u64 {
     return tray_tick;
@@ -904,6 +938,10 @@ pub fn arm() void {
     tray_has_tick = false;
     tray_last_theme = 0xff;
     tray_last_clip_len = 0;
+    // M32 WMS6 Gate E: no WM-declared tray content at boot.
+    wm_tray_clock_set = false;
+    wm_tray_theme_set = false;
+    wm_tray_clip_set = false;
     cursor_shown = false;
     prev_ptr_buttons = 0;
     drag_id = null;
@@ -3247,19 +3285,24 @@ fn paint(w: *Window) void {
                 entry_x += entry_w + 4;
             }
             // Arc2 W3: tray in right 80px — HH:MM, D/L/A, clipboard rect.
-            // HH:MM from tray_tick (tick-derived, 1 Hz).
+            // HH:MM from tray_tick (tick-derived, 1 Hz). M32 WMS6 Gate E:
+            // when the registered WM has declared a field (its `_set` flag),
+            // draw ITS value; the shim fallback (no WM) stays derived.
             var tbuf: [5]u8 = undefined;
-            const hhmm = format_hhmm(&tbuf, if (tray_has_tick) tray_tick else 0);
+            const hhmm: []const u8 = if (wm_tray_clock_set)
+                wm_tray_clock_text[0..]
+            else
+                format_hhmm(&tbuf, if (tray_has_tick) tray_tick else 0);
             draw_string(fb, stride, tray_x + 4, tray_y + 6, hhmm, 0xffffff);
             // Theme letter in accent
-            var tletter: [1]u8 = .{theme_letter()};
+            var tletter: [1]u8 = .{if (wm_tray_theme_set) wm_tray_theme else theme_letter()};
             draw_string(fb, stride, tray_x + 48, tray_y + 6, tletter[0..1], tray_theme_accent());
             // Clipboard indicator: filled when has content, outline when empty.
             const clip_x = tray_x + 64;
             const clip_y = tray_y + 6;
             const clip_w: usize = 10;
             const clip_h: usize = 8;
-            if (tray_clipboard_filled()) {
+            if (if (wm_tray_clip_set) wm_tray_clip else tray_clipboard_filled()) {
                 fill_rect(fb, stride, clip_x, clip_y, clip_w, clip_h, 0xffffff);
             } else {
                 fill_rect(fb, stride, clip_x, clip_y, clip_w, 1, 0xffffff);
@@ -3434,6 +3477,12 @@ pub fn clear_wm_chrome() void {
     while (i < win_count) : (i += 1) {
         windows[i].chrome_valid = false;
     }
+    // M32 WMS6 Gate E (issue #626): the WM's tray widget content dies with
+    // it — the shim fallback re-derives clock/theme/clipboard from its own
+    // state (a dead WM's declared values must not stay painted).
+    wm_tray_clock_set = false;
+    wm_tray_theme_set = false;
+    wm_tray_clip_set = false;
 }
 
 pub fn set_window_chrome(id_in: u64, desc: geom.ChromeDesc) bool {
