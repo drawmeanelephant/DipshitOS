@@ -175,7 +175,7 @@ done (claim 1484, issue #621): ADR 0015 accepted; slot-65 `sys_wmctl`
 subcommand encoding + error contract frozen in ADR 0007; kind-18
 `COMPOSITE_TICK` (routing-restricted) in ADR 0009.
 
-**WMS2 is done (claim 0622, issue #622): the kernel render-server register.**
+**WMS2 is done (claim 8482, issue #622): the kernel render-server register.**
 A new host-testable `kernel/src/wm_server.zig` owns the single WM seat +
 the present-sequence counter BESIDE the unchanged shim; slot 65
 `sys_wmctl` runs — REGISTER (one seat; `ENXIO` on an unarmed compositor),

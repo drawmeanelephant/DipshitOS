@@ -1,11 +1,11 @@
 # Claim: WMS2 — kernel render-server register (slot 65 `sys_wmctl`, kind 18 `COMPOSITE_TICK`)
 
+- **Owner:** buffy (`agent/buffy/wms2-wmctl-register`)
 - **Issue:** https://github.com/drawmeanelephant/DipshitOS/issues/622 (WMS2 of 10, milestone 16)
-- **Branch:** `agent/buffy/wms2-wmctl-register` (worktree of the shared checkout)
 - **ADR:** 0015 (seam A render-server) as accepted by claim 1484 (WMS1, #621); slot-65 subcommand encoding frozen in the ADR 0007 amendment (claim 1484): `WMCTL_REGISTER=1` / `WMCTL_SET_WINDOW=2` / `WMCTL_REQUEST_PRESENT=3`; error contract `EACCES` (-7) WM-exclusive refusal (seat taken / caller not the WM), `ENOSYS` (-4) no WM registered, `EINVAL` (-1) unknown cmd / bad args, `ENXIO` (-9) REGISTER with no GPU / unarmed compositor.
 - **Status:** ✅ done
 - **Heartbeat:** 2026-08-29
-- **Touches:** `kernel/src/wm_server.zig` (new — the render-server register module), `kernel/src/syscall.zig` (slot 65 handler + dispatch row + `implemented_count` 65→66), `kernel/src/scheduler.zig` (tick-seam tick delivery + exit-path teardown), `kernel/src/monitor.zig` (`wm` report row + `syscalls` implemented=66), `kernel/src/shell.zig` (idle-drain guard + fallback report), `user/src/wndstub.zig` + `build.zig` + `image/make-image.sh` (WNDSTUB.BIN registrant stub + ESP embedding), `tools/verify-live-wmctl-register.sh` (new class-B gate), `tools/sweep-vz.sh` (gate registration), `tools/verify-unit-tests.sh` (wm_server module in the suite), `docs/march-m32-wm-migration.md` (WMS2 row), `docs/status.md` (M32 paragraph), `docs/logs/agent-buffy-wms2-wmctl-register.md`, `docs/claims/0622-wms2-wmctl-register.md`
+- **Touches:** `kernel/src/wm_server.zig` (new — the render-server register module), `kernel/src/syscall.zig` (slot 65 handler + dispatch row + `implemented_count` 65→66), `kernel/src/scheduler.zig` (tick-seam tick delivery + exit-path teardown), `kernel/src/monitor.zig` (`wm` report row + `syscalls` implemented=66), `kernel/src/shell.zig` (idle-drain guard + fallback report), `user/src/wndstub.zig` + `build.zig` + `image/make-image.sh` (WNDSTUB.BIN registrant stub + ESP embedding), `tools/verify-live-wmctl-register.sh` (new class-B gate), `tools/sweep-vz.sh` (gate registration), `tools/verify-unit-tests.sh` (wm_server module in the suite), `docs/march-m32-wm-migration.md` (WMS2 row), `docs/status.md` (M32 paragraph), `docs/logs/agent-buffy-wms2-wmctl-register.md`, `docs/claims/8482-wms2-wmctl-register-seam.md`
 - **Depends on:** WMS1 (claim 1484, merged via PR #631) — slot-65 encoding frozen in ADR 0007 amendment; kind 18 routing-restricted per ADR 0009 D2
 - **Blocks:** WMS3 (WM server process), WMS4–WMS6 (policy drain-out), WMS8
 - **Heartbeat:** 2026-08-29

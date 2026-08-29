@@ -1,11 +1,11 @@
-# Branch log — agent/buffy/wms2-wmctl-register
+# Log — agent/buffy/wms2-wmctl-register
 
 > Append-only per-branch changelog (AGENTS.md multiagent rules). Newest last.
 
 ## 2026-08-29 — WMS2 claimed (issue #622)
 
 - Claimed **WMS2 — kernel render-server register (slot 65 `sys_wmctl`, kind 18
-  `COMPOSITE_TICK`)** as `docs/claims/0622-wms2-wmctl-register.md` (status 🔄,
+  `COMPOSITE_TICK`)** as `docs/claims/8482-wms2-wmctl-register-seam.md` (status 🔄,
   heartbeat 2026-08-29). Branch `agent/buffy/wms2-wmctl-register` cut from
   `agent/buffy/docs-pass` @ 80a9c88 and fast-forwarded to `origin/main`
   (1e0cda5, PR #631 merged the WMS1 docs).
