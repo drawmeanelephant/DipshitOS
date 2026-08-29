@@ -103,3 +103,26 @@ kernel sources, build manifest, and march trackers.
 - docs/claims/2852-wm-server-migration.md: scoping addendum section.
 - Docs-only change (issues + planning docs); no kernel/userland behavior
   change. Claim 2852 stays 🔄 until the milestone-scoping branch merges.
+
+## 2026-08-28 — WMS1 proposal drafted, posted, folded into claim 2852
+
+- Drafted `docs/m32-wms1-acceptance-proposal.md`: the ready-to-apply WMS1
+  (#621) acceptance checklist with verbatim ADR 0007 slot-65 amendment
+  (three-subcommand encoding table: REGISTER/SET_WINDOW/REQUEST_PRESENT with
+  arg + per-command error layout), the ADR 0009 kind-18 row + routing-
+  restriction note, the events.zig constant, and the ADR 0015 status-flip
+  block. Committed (1dea17d) and pushed on this branch (PR #631).
+- Posted the full proposal as a comment on issue #621
+  (comment-5459368923) so the implementing agent finds it in the tracker.
+- Folded the proposal into claim 2852's scoping addendum as the canonical
+  copy (subheaders demoted to nest under the addendum; the standalone
+  `docs/m32-wms1-acceptance-proposal.md` was removed to keep one canonical
+  source on the PR).
+- Frozen-enum fix resolved: ADR 0015's draft `EPERM` for non-WM callers
+  **does not exist** in the kernel `ErrorCode` enum (syscall.zig:285, top
+  at -10 ENOMEM); the proposal assigns `EACCES` (-7) for the WM-exclusive
+  refusal, plus seat-taken → EACCES (with an EL1h force-unregister escape),
+  no-GPU REGISTER → ENXIO (-9), and COMPOSITE_TICK on the scheduler tick
+  seam. Slot-count tail corrected: `slot_count` is 128, so the amendment
+  writes the honest "reserved 66–127" bound.
+- Docs/planning only; no kernel/userland behavior change.
