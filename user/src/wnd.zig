@@ -67,6 +67,14 @@ const wmctl_alt_tab: u64 = 5;
 /// ALT_TAB action 3 (commit) — the WM tells the kernel which window to
 /// focus+raise+dismiss to. The kernel clamps + repaints the overlay blit.
 const alt_tab_commit: u64 = 3;
+// WMS6 Gate B (issue #626): the notification-center decision channel.
+// NOTIF_CENTER (cmd 6) a0 = 0 close / 1 open / 2 clear-all; NOTIF_DISMISS
+// (cmd 7) a0 = row index. The kernel clamps + blits from its own state.
+const wmctl_notif_center: u64 = 6;
+const notif_close_act: u64 = 0;
+const notif_open_act: u64 = 1;
+const notif_clear_act: u64 = 2;
+const wmctl_notif_dismiss: u64 = 7;
 
 // ---------------------------------------------------------------------------
 // Syscall wrappers (AArch64 `svc #0` — the fixed-register ABI).
@@ -188,6 +196,19 @@ pub const aot_marker: []const u8 = "wnd: aot\n";
 // target id after the pinned prefix (`wnd: alt-tab id=N`) so the live gate
 // can prove the WM — not the kernel — picked the window that gets focus.
 pub const alt_tab_marker: []const u8 = "wnd: alt-tab";
+
+// WMS6 Gate B (issue #626): the notification-center decision markers — the
+// WM opens/closes/clears/dismisses via NOTIF_CENTER/NOTIF_DISMISS. The live
+// gate greps `wnd: notif` to prove the WM — not the kernel — decided.
+pub const notif_open_marker: []const u8 = "wnd: notif-open\n";
+pub const notif_close_marker: []const u8 = "wnd: notif-close\n";
+pub const notif_clear_marker: []const u8 = "wnd: notif-clear\n";
+pub const notif_dismiss_marker: []const u8 = "wnd: notif-dismiss\n";
+
+// WMS6 Gate B: the tray region the WM hit-tests for a notification-center
+// click — must mirror the kernel shim's tray_rect (fb_w - 80, taskbar row)
+// so the injected click hits BOTH surfaces in the gate's two boots.
+pub const tray_w: u32 = 80;
 
 // ADR 0009 modifier bits (must match kernel events MOD_*).
 pub const mod_shift: u16 = 0x0001;
@@ -663,6 +684,7 @@ fn main() noreturn {
     var grab_dx: u32 = 0;
     var grab_dy: u32 = 0;
     var prev_btn: u8 = 0;
+    var notif_open: bool = false;
 
     while (true) {
         // BLOCK until at least one event is queued for this process. The
@@ -749,6 +771,19 @@ fn main() noreturn {
                     // window's TITLE BAR (the wnd_core.title_bar_contains
                     // rule: [my, my+16), full width).
                     if (!prev_left and left) {
+                        // WMS6 Gate B (issue #626): a left-button DOWN EDGE on
+                        // the TRAY (the taskbar's right slice) toggles the
+                        // notification center — the WM, not the kernel,
+                        // decides (the kernel's own tray-click handler is
+                        // gated behind !wm_owns_input). Mirrors the shim's
+                        // tray_rect so the live gate's injected click is
+                        // visible to both surfaces.
+                        if (py >= fb_h - taskbar_h and px >= fb_w - tray_w) {
+                            notif_open = !notif_open;
+                            _ = syscall6(sys_wmctl, wmctl_notif_center, if (notif_open) notif_open_act else notif_close_act, 0, 0, 0, 0);
+                            write_marker(if (notif_open) notif_open_marker else notif_close_marker);
+                        }
+                        // WMS5: a title-bar grab starts a drag.
                         const fm = focused_mirror();
                         if (fm) |m| {
                             const g = wnd_core.Geom{
@@ -837,6 +872,14 @@ test "wnd: the marker/tuning shapes are pinned (live-gate grep targets)" {
     try std.testing.expectEqual(@as(u8, 0x2b), usage_tab);
     try std.testing.expectEqual(@as(u64, 5), wmctl_alt_tab);
     try std.testing.expectEqual(@as(u64, 3), alt_tab_commit);
+    // WMS6 Gate B (issue #626): the notification-center markers + subcommands.
+    try std.testing.expectEqualStrings("wnd: notif-open\n", notif_open_marker);
+    try std.testing.expectEqualStrings("wnd: notif-close\n", notif_close_marker);
+    try std.testing.expectEqualStrings("wnd: notif-clear\n", notif_clear_marker);
+    try std.testing.expectEqualStrings("wnd: notif-dismiss\n", notif_dismiss_marker);
+    try std.testing.expectEqual(@as(u64, 6), wmctl_notif_center);
+    try std.testing.expectEqual(@as(u64, 7), wmctl_notif_dismiss);
+    try std.testing.expectEqual(@as(u32, 80), tray_w);
     try std.testing.expectEqual(@as(u8, 0x17), usage_t);
     try std.testing.expectEqual(@as(u8, 0x10), usage_m);
     try std.testing.expectEqual(@as(u8, 0x11), usage_n);

@@ -280,9 +280,22 @@ and issues `ALT_TAB commit`. The host runner gained the `alt-tab` HID chord
 Alt+Tab still self-cycles in shim mode (`dui: alt-tab active count=2`; zero
 regression), AND with WND.BIN registered the WM decided (`wnd: alt-tab id=2`),
 the kernel applied (`wm: alt_tab=1`) and did **not** self-decide (`dui:
-alt-tab` count 0). Notification-center (click-driven, class-B trust), dock,
-tooltips and modal dialogs remain for the later gates of **WMS6 desktop chrome
-drain-out (#626).**
+alt-tab` count 0).
+
+**WMS6 Gate B is done (claim 7557, issue #626) — the notification center
+drains.** The flagship click-driven chrome surface. New slot-65 subcommands
+`NOTIF_CENTER` (cmd 6: open/close/clear) + `NOTIF_DISMISS` (cmd 7: dismiss a
+row); the kernel's tray-click toggle + panel dismiss/clear gate behind
+`!wm_owns_input`. WND.BIN hit-tests the kind-19 tray click (the shim's
+`fb_w - 80` slice), decides open/close, and issues `NOTIF_CENTER`, emitting
+`wnd: notif-open`. Fully CI-runnable headless via `--pointer-virtio` (claim
+9367 — custom-virtio absolute pointer, no Accessibility trust). Gate
+`tools/verify-live-wnd6-notif-drain.sh` **PASS on VZ (2026-08-29)**: a real
+tray click still opens the panel in shim mode (`dui notif-center-state:
+open=yes`, zero regression), and with WND.BIN registered the WM decided
+(`wnd: notif-open`), the kernel applied (`wm: notif=1` + `ptr_fan=3`) and did
+not self-toggle, panel open. Dock / tray / tooltips / modal dialogs remain
+for the later gates of **WMS6 desktop chrome drain-out (#626).**
 
 > https://github.com/drawmeanelephant/DipshitOS/milestone/16
 

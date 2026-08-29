@@ -2244,6 +2244,36 @@ fn handle_wmctl(args: Args, _: *exceptions.VectorFrame) u64 {
             wm_server.note_alt_tab();
             return 0;
         },
+        wm_server.wmctl_notif_center => {
+            // M32 WMS6 Gate B (issue #626): the WM — not the kernel —
+            // decides the notification center's open/close/clear (the raw
+            // tray click already fanned to it as kind 19 with the button
+            // byte). a0 = 0 close, 1 open, 2 clear-all. The kernel clamps +
+            // blits from its own `notif_center_open` / ring.
+            if (!wm_server.registered()) return error_result(.enosys);
+            if (wm_server.registered_pid() != pid) return error_result(.eacces);
+            const action = args[1];
+            switch (action) {
+                0 => driving_award.notif_center_set_open(false),
+                1 => driving_award.notif_center_set_open(true),
+                2 => driving_award.notif_center_clear_all(),
+                else => return error_result(.einval), // unknown action
+            }
+            wm_server.note_notif_center();
+            return 0;
+        },
+        wm_server.wmctl_notif_dismiss => {
+            // M32 WMS6 Gate B (issue #626): dismiss one notification row.
+            // a0 = index; the kernel dismisses it (honestly refusing an
+            // out-of-range index).
+            if (!wm_server.registered()) return error_result(.enosys);
+            if (wm_server.registered_pid() != pid) return error_result(.eacces);
+            const index = args[1];
+            if (index > 0xff) return error_result(.einval);
+            if (!driving_award.notif_center_dismiss(@intCast(index))) return error_result(.einval); // out of range
+            wm_server.note_notif_dismiss();
+            return 0;
+        },
         wm_server.wmctl_request_present => {
             if (!wm_server.registered()) return error_result(.enosys);
             if (wm_server.registered_pid() != pid) return error_result(.eacces);
@@ -3995,6 +4025,44 @@ test "syscall: ALT_TAB (cmd 5, claim 4510) drives the overlay from the WM's chos
     try std.testing.expect(!driving_award.wm_owns_input);
     _ = driving_award.user_close(2);
     _ = driving_award.user_close(3);
+}
+
+test "syscall: NOTIF_CENTER / NOTIF_DISMISS (cmd 6/7, claim 7557) drive the center from the WM's decision" {
+    userspace.init();
+    init(test_writer);
+    wm_server.init();
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0); // task 2 = process 0 (boot payload)
+    scheduler.start();
+    var frame = fresh_frame();
+    try std.testing.expect(scheduler.yield_current()); // shell -> worker
+    try std.testing.expect(scheduler.yield_current()); // worker -> user (2)
+
+    // No WM registered: NOTIF_CENTER -> ENOSYS (the ADR 0007 "no WM" case).
+    try std.testing.expectEqual(error_result(.enosys), dispatch(sys_wmctl, .{ wm_server.wmctl_notif_center, 1, 0, 0, 0, 0 }, &frame));
+
+    // Seed the WM as pid 0.
+    try std.testing.expect(wm_server.register(0));
+    // Open -> notif_center_open true.
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_wmctl, .{ wm_server.wmctl_notif_center, 1, 0, 0, 0, 0 }, &frame));
+    try std.testing.expect(driving_award.notif_center_open);
+    // Close -> false.
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_wmctl, .{ wm_server.wmctl_notif_center, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expect(!driving_award.notif_center_open);
+    // Clear-all is accepted with no notifications.
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_wmctl, .{ wm_server.wmctl_notif_center, 2, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u64, 3), wm_server.info().notif_center_count);
+    // Dismissing an out-of-range row -> EINVAL (honest, no silent no-op).
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_wmctl, .{ wm_server.wmctl_notif_dismiss, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u64, 0), wm_server.info().notif_dismiss_count);
+    // A malformed NOTIF_CENTER action -> EINVAL, not counted.
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_wmctl, .{ wm_server.wmctl_notif_center, 9, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u64, 3), wm_server.info().notif_center_count);
+
+    // Teardown: no leaked input ownership into the aggregated binary.
+    try std.testing.expect(wm_server.unregister(0));
+    try std.testing.expect(!driving_award.wm_owns_input);
 }
 
 test "syscall: wait_event block+wake preserves the event buffer across the svc re-execution (claim 6359)" {

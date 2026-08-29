@@ -2623,6 +2623,20 @@ fn cmd_dui(m: *Monitor, args: []const []const u8) ExecError {
             m.console.puts("\n");
             return .none;
         }
+        if (std.mem.eql(u8, args[0], "notif-center-state")) {
+            // WMS6 Gate B (issue #626): a PURE state report (does not toggle)
+            // — the live gate reads the panel's open/closed state after an
+            // injected tray click to prove the shim (boot A) or the WM
+            // (boot B) opened it.
+            if (args.len != 1) {
+                print_usage(m, lookup("dui").?);
+                return .usage;
+            }
+            m.console.puts("dui notif-center-state: open=");
+            m.console.puts(if (driving_award.notif_center_open) "yes" else "no");
+            m.console.puts("\n");
+            return .none;
+        }
         if (std.mem.eql(u8, args[0], "notif-dismiss")) {
             if (args.len != 2) {
                 print_usage(m, lookup("dui").?);
@@ -6426,6 +6440,12 @@ fn cmd_wm(m: *Monitor, args: []const []const u8) ExecError {
         // dismiss), applied by the kernel (the gate greps `alt_tab=`).
         m.console.puts(" alt_tab=");
         m.console.print_u64(info.alt_tab_apply_count);
+        // M32 WMS6 Gate B (issue #626): the notification-center observability
+        // — NOTIF_CENTER (cmd 6) and NOTIF_DISMISS (cmd 7) decisions applied.
+        m.console.puts(" notif=");
+        m.console.print_u64(info.notif_center_count);
+        m.console.puts(" notif_dismiss=");
+        m.console.print_u64(info.notif_dismiss_count);
         m.console.puts("\n");
         var rows: [driving_award.max_windows]driving_award.ChromeRow = undefined;
         const n = driving_award.wm_chrome_rows(&rows);
