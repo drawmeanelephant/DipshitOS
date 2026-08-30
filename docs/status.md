@@ -307,6 +307,31 @@ lower-back/move consumers. fmt/coordination clean, BSS budget re-ran green.
 **#628 stays open** — Gate 5 done; remaining: the geometry/desktop-chrome
 dead blocks beyond the keyboard layer and the registry/convergence path.
 
+**Gate 6 (claim 3687) — the pointer title-bar DRAG+SNAP decision layer is
+DELETED.** WMS5's input-seam handover already proved the WM owns pointer
+GEOMETRY (while registered, `pointer_tick` fans the raw stream — kind-19
+WM_POINTER — out to the WM and returns null, consuming no drag/resize/snap).
+Per WMS8's delete rule (the W5 geometry gate re-ran green with the WM
+registered), Gate 6 deletes the now-dormant kernel pointer-drag path from
+`driving_award.zig` (net −215 lines): the `drag_id`/`drag_offset_*` state,
+the title-bar drag-initiation branch, the drag-move + snap-on-release block,
+the `snap_zone`/`snap_last_*`/`snap_snapped` tracking, the applied
+`snap_window`/`snap_restore`/`snap_is_snapped`/`snap_current_zone`
+primitives, the snap-preview render, and the cursor move-glyph. KEPT (still
+live / no WM coverage): resize (kernel shim handle + clamp), close/minimize
+buttons, the modal blocking path, dock/tray/notification-center click
+decisions, pointer-event DELIVERY to apps (MOUSE_DOWN/UP/MOVE), and the
+separate app-level DnD payload system. Shim end-state consequence (intended):
+with NO WM, a title-bar drag does nothing instead of moving the window.
+New `verify-live-wnd8-ptr-drag-delete` gate **PASS on VZ**, both boots: boot
+A (no WM) a title-bar drag does nothing — rect stays `56,56,512,384`, no
+fault; boot B (WND.BIN registered) the WM owns the drag (`wnd: grab`,
+`drag=4`, `drop`, `ptr_fan=1`) and the registry row CHANGED via SET_WINDOW.
+The canonical `verify-live-wnd5-geometry` parity gate re-ran **PASS** (WM
+drag moved NOTEPAD via SET_WINDOW — unchanged WM). Host tests green
+(driving_award 212/212); fmt/coordination/BSS-gap clean. **#628 stays
+open** — Gate 6 done; remaining: the registry/convergence path.
+
 **WMS2 is done (claim 8482, issue #622): the kernel render-server register.**
 A new host-testable `kernel/src/wm_server.zig` owns the single WM seat +
 the present-sequence counter BESIDE the unchanged shim; slot 65

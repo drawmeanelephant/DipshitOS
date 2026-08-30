@@ -305,11 +305,13 @@ var cursor_y: u32 = 0;
 var cursor_shown: bool = false;
 var prev_ptr_buttons: u8 = 0;
 
-/// Step 5/6/7 (Issues #208/#209/#210): drag + close + minimize state.
-var drag_id: ?u8 = null;
-var drag_offset_x: u32 = 0;
-var drag_offset_y: u32 = 0;
-
+/// M32 WMS8 Gate 6 (issue #628): title-bar drag + snap-on-drop state is
+/// DELETED — WMS5 proved the WM owns pointer GEOMETRY: while registered it
+/// fans the raw pointer (kind 19), hit-tests the title bar, and issues
+/// SET_WINDOW rects (`user_move`); on release it snaps via its own mirror
+/// + the shared wnd_core rule. With a WM seated the kernel's drag_id /
+/// snap_zone tracking below was provably dormant (pointer_tick returns
+/// early), so it is removed. RESIZE stays (the WM has no resize path).
 /// Arc2 W1 (claim 3589, #224): drag-to-resize — 6×6 bottom-right corner.
 /// Bounds + hit size are the shared wnd_core policy (single source with
 /// the WM server).
@@ -459,18 +461,12 @@ var overlay_selected: usize = 0;
 var overlay_ids: [max_windows]u8 = undefined;
 var overlay_count: usize = 0;
 
-/// M15 C3 (Snap zones, #227): drag snap state — BSS, no heap.
-/// M32 WMS5 Gate 2 (claim 4278): the zone tags are single-sourced with
-/// the WM server (wnd_core owns the enum; this re-exports it).
-pub const SnapZone = geom.SnapZone;
-var snap_zone: SnapZone = .none;
-var snap_last_x: [user_windows_max]u32 = [_]u32{0} ** user_windows_max;
-var snap_last_y: [user_windows_max]u32 = [_]u32{0} ** user_windows_max;
-var snap_last_w: [user_windows_max]u32 = [_]u32{0} ** user_windows_max;
-var snap_last_h: [user_windows_max]u32 = [_]u32{0} ** user_windows_max;
-var snap_last_valid: [user_windows_max]bool = [_]bool{false} ** user_windows_max;
-var snap_snapped: [user_windows_max]bool = [_]bool{false} ** user_windows_max;
-
+/// M32 WMS8 Gate 6 (issue #628): the drag-snap state (snap_zone, the
+/// snap_last_*/snap_snapped per-window arrays, and the applied
+/// snap_window/snap_restore primitives) is DELETED — the WM owns snap-on-drop
+/// via its own mirror + the shared wnd_core rule (wnd_core.snap_zone_for_point/
+/// snap_zone_bounds stay, single-source for the WM). With a WM seated this
+/// kernel snap state was dormant behind the early-returning pointer_tick.
 /// M21 W1/W2: tiling state — BSS, no heap.
 /// `tile_mode` is true when the focused workspace uses tiling layout.
 /// `tile_master_id` / `tile_stack_id` are the window ids assigned to
@@ -955,17 +951,10 @@ pub fn arm() void {
     wm_tray_clip_set = false;
     cursor_shown = false;
     prev_ptr_buttons = 0;
-    drag_id = null;
     resize_id = null;
     overlay_active = false;
     overlay_count = 0;
     overlay_selected = 0;
-    snap_zone = .none;
-    var si: usize = 0;
-    while (si < user_windows_max) : (si += 1) {
-        snap_last_valid[si] = false;
-        snap_snapped[si] = false;
-    }
 }
 
 pub fn armed() bool {
@@ -1586,11 +1575,9 @@ fn remove_user_at(idx: usize) void {
         overlay_active = false;
         overlay_count = 0;
     }
-    // M15 C3: clear snap state for the closed window.
-    if (snap_slot(removed_id)) |s| {
-        snap_last_valid[s] = false;
-        snap_snapped[s] = false;
-    }
+    // M32 WMS8 Gate 6 (issue #628): the per-window snap-clear block is
+    // DELETED (the snap_last_*/snap_snapped arrays are gone — the WM owns
+    // snap). Tiling state clearing continues below.
     // M21 W1: clear tiling state if a tiled window is closed.
     if (tile_master_id) |mid| {
         if (mid == removed_id) {
@@ -1607,10 +1594,9 @@ fn remove_user_at(idx: usize) void {
             tile_stack_id = null;
         }
     }
-    if (drag_id != null and drag_id.? == removed_id) {
-        drag_id = null;
-        snap_zone = .none;
-    }
+    // M32 WMS8 Gate 6 (issue #628): the drag_id/snap_zone clear on window
+    // close is DELETED (the title-bar drag + snap state is gone). Resize
+    // state clearing stays.
     if (resize_id != null and resize_id.? == removed_id) {
         resize_id = null;
     }
@@ -1784,85 +1770,14 @@ pub fn alt_tab_wm_commit(id: u8) bool {
     return true;
 }
 
-/// M15 C3 (Snap zones, #227): 20 px threshold, corners first, then edges.
-pub fn snap_zone_for_point(x: u32, y: u32) SnapZone {
-    // Delegated to the shared wnd_core rule (single source with the WM
-    // server — the drift guard; the fb dims are the same fixed scanout).
-    return geom.snap_zone_for_point(x, y, virtio_gpu.fb_width, virtio_gpu.fb_height);
-}
-
-/// Zone bounds in scanout coordinates (taskbar excluded for bottom zones).
-/// Returns the zone's full rect; caller clamps to `user_buf_w`/`h` for the window.
-/// The snap-zone rect type (single-sourced with the WM server).
-pub const SnapBounds = geom.SnapBounds;
-
-pub fn snap_zone_bounds(zone: SnapZone) ?SnapBounds {
-    // Delegated to the shared wnd_core rule (single source with the WM
-    // server; the taskbar exclusion is the shared constant).
-    return geom.snap_zone_bounds(zone, virtio_gpu.fb_width, virtio_gpu.fb_height, taskbar_h);
-}
-
-/// Per-window slot for snap state (user windows 2..5 → 0..3).
-fn snap_slot(id: u8) ?usize {
-    if (id < user_window_id_base) return null;
-    const s = @as(usize, id - user_window_id_base);
-    if (s >= user_windows_max) return null;
-    return s;
-}
-
-/// True when the user window is currently snapped.
-pub fn snap_is_snapped(id: u8) bool {
-    const s = snap_slot(id) orelse return false;
-    return snap_snapped[s];
-}
-
-/// Snap the user window to the zone — saves last rect if not already snapped,
-/// clamps to `user_buf_w`/`h`, centers within zone, marks dirty, sets snapped.
-pub fn snap_window(id: u8, zone: SnapZone) bool {
-    const s = snap_slot(id) orelse return false;
-    const win = find_user_window(id) orelse return false;
-    const zb = snap_zone_bounds(zone) orelse return false;
-    if (!snap_snapped[s]) {
-        snap_last_x[s] = win.x;
-        snap_last_y[s] = win.y;
-        snap_last_w[s] = win.w;
-        snap_last_h[s] = win.h;
-        snap_last_valid[s] = true;
-    }
-    const win_w = @min(zb.w, user_buf_w);
-    const win_h = @min(zb.h, user_buf_h);
-    const win_x = zb.x + (zb.w - win_w) / 2;
-    const win_y = zb.y + (zb.h - win_h) / 2;
-    win.x = win_x;
-    win.y = win_y;
-    win.w = win_w;
-    win.h = win_h;
-    win.dirty = true;
-    snap_snapped[s] = true;
-    _ = mark_dirty(0);
-    return true;
-}
-
-/// Restore the window's pre-snap rect if it was snapped.
-pub fn snap_restore(id: u8) bool {
-    const s = snap_slot(id) orelse return false;
-    if (!snap_snapped[s] or !snap_last_valid[s]) return false;
-    const win = find_user_window(id) orelse return false;
-    win.x = snap_last_x[s];
-    win.y = snap_last_y[s];
-    win.w = snap_last_w[s];
-    win.h = snap_last_h[s];
-    win.dirty = true;
-    snap_snapped[s] = false;
-    snap_last_valid[s] = false;
-    _ = mark_dirty(0);
-    return true;
-}
-
-/// Current snap preview zone (for `draw_chrome`).
-pub fn snap_current_zone() SnapZone {
-    return snap_zone;
-}
+// M32 WMS8 Gate 6 (issue #628): the kernel's drag-snap applied primitives
+// (snap_zone_for_point / snap_zone_bounds / snap_window / snap_restore /
+// snap_is_snapped / snap_current_zone + the per-window snap state) are
+// DELETED — the WM owns snap-on-drop via its own mirror + the SHARED
+// wnd_core.snap_zone_for_point / wnd_core.snap_zone_bounds rules (which
+// stay). The kernel shim no longer snaps from the pointer.
+// Tiling (M21 W1/W2) is a SEPARATE geometry policy the WM also serves via
+// SET_STATE; it is NOT affected and its primitives remain below.
 
 // ---------------------------------------------------------------------------
 // M21 W1/W2 — Tiling mode
@@ -2748,25 +2663,12 @@ pub fn pointer_tick(st: input.PointerState, click: ?input.Click) ?u8 {
                         handled_btn = true;
                         break;
                     }
-                    // Title bar drag initiation.
-                    if (cursor_x >= w.x and cursor_x < w.x + w.w and
-                        cursor_y >= w.y and cursor_y < w.y + user_title_h)
-                    {
-                        // M15 C3: snapped windows restore on drag-out — restore before
-                        // capturing the drag offset so the offset tracks the restored rect.
-                        if (snap_is_snapped(w.id)) {
-                            _ = snap_restore(w.id);
-                        }
-                        drag_id = w.id;
-                        drag_offset_x = if (cursor_x >= w.x) cursor_x - w.x else 0;
-                        drag_offset_y = if (cursor_y >= w.y) cursor_y - w.y else 0;
-                        _ = focus(w.id);
-                        _ = raise(w.id);
-                        _ = mark_dirty(0);
-                        focused_changed = w.id;
-                        handled_btn = true;
-                        break;
-                    }
+                    // M32 WMS8 Gate 6 (issue #628): the title-bar DRAG-initiation
+                    // block is DELETED — WMS5 proved the WM owns title-bar drag
+                    // (kind 19 -> SET_WINDOW -> user_move). With a WM registered
+                    // pointer_tick returns early, so this was dormant. A title-bar
+                    // click below simply falls through to focus-at (focusing the
+                    // window) — no drag is started by the kernel shim.
                 }
             }
             // Fall through to normal focus-at if no button/title bar was hit.
@@ -2808,27 +2710,6 @@ pub fn pointer_tick(st: input.PointerState, click: ?input.Click) ?u8 {
             if (left_released) {
                 resize_id = null;
             }
-        } else if (drag_id) |did| {
-            if (moved and cur_left) {
-                const new_x: u32 = if (cursor_x >= drag_offset_x) cursor_x - drag_offset_x else 0;
-                const new_y: u32 = if (cursor_y >= drag_offset_y) cursor_y - drag_offset_y else 0;
-                _ = user_move(did, new_x, new_y);
-                const z = snap_zone_for_point(cursor_x, cursor_y);
-                if (z != snap_zone) {
-                    snap_zone = z;
-                    _ = mark_dirty(0);
-                }
-            }
-            if (left_released) {
-                if (snap_zone != .none) {
-                    _ = snap_window(did, snap_zone);
-                }
-                drag_id = null;
-                if (snap_zone != .none) {
-                    snap_zone = .none;
-                    _ = mark_dirty(0);
-                }
-            }
         } else if (moved and !cur_left and !cur_right and focus_follows_mouse) {
             // M27 G13: Focus-follows-mouse
             if (focus_at(cursor_x, cursor_y)) {
@@ -2836,11 +2717,6 @@ pub fn pointer_tick(st: input.PointerState, click: ?input.Click) ?u8 {
                 _ = raise(id);
                 _ = mark_dirty(0);
                 focused_changed = id;
-            }
-        } else {
-            if (snap_zone != .none) {
-                snap_zone = .none;
-                _ = mark_dirty(0);
             }
         }
 
@@ -3649,9 +3525,6 @@ fn draw_chrome() void {
         if (resize_id != null) {
             // M27 G12: resize glyph
             fill_rect(fb, stride, cx, cy, cw, ch, 0xffaa00);
-        } else if (drag_id != null) {
-            // M27 G12: move glyph
-            fill_rect(fb, stride, cx, cy, cw, ch, 0x00aaff);
         } else {
             fill_rect(fb, stride, cx, cy, cw, ch, cursor_rgb);
         }
@@ -3740,17 +3613,9 @@ fn draw_chrome() void {
             fill_rect(fb, stride, pv_x + pv_w - 1, pv_y, 1, pv_h, 0x64748b);
         }
     }
-    // M15 C3: snap preview — translucent zone highlight while dragging near edge.
-    if (drag_id != null and snap_zone != .none) {
-        if (snap_zone_bounds(snap_zone)) |zb| {
-            // Opaque accent fill (honest preview for host test; true alpha would be compositor-pricey).
-            fill_rect(fb, stride, zb.x, zb.y, zb.w, zb.h, 0x3b82f6);
-            fill_rect(fb, stride, zb.x, zb.y, zb.w, 2, 0xffffff);
-            fill_rect(fb, stride, zb.x, zb.y + zb.h - 2, zb.w, 2, 0xffffff);
-            fill_rect(fb, stride, zb.x, zb.y, 2, zb.h, 0xffffff);
-            fill_rect(fb, stride, zb.x + zb.w - 2, zb.y, 2, zb.h, 0xffffff);
-        }
-    }
+    // M32 WMS8 Gate 6 (issue #628): the kernel snap-preview render (dragging
+    // near an edge highlighted the zone) is DELETED — the WM owns snap-on-
+    // drop; with a WM registered pointer_tick never reaches this drag path.
     // Arc4 #242: unsaved-changes confirmation dialog — centered modal.
     if (unsaved_dialog_open) {
         const dlg_w: u32 = 200;
@@ -4868,86 +4733,6 @@ test "driving_award: M15 C2 — overlay renders centered list with highlight" {
     try std.testing.expectEqual(@as(u32, 0x3b82f6), px.at(fb, stride, ov_x + 10, sel_y));
 }
 
-test "driving_award: M15 C3 — snap_zone_for_point detects halves and quadrants with corner precedence" {
-    // Edges 20 px, corners first.
-    try std.testing.expectEqual(SnapZone.left, snap_zone_for_point(5, 360));
-    try std.testing.expectEqual(SnapZone.right, snap_zone_for_point(1275, 360));
-    try std.testing.expectEqual(SnapZone.top, snap_zone_for_point(640, 5));
-    try std.testing.expectEqual(SnapZone.bottom, snap_zone_for_point(640, 715));
-    try std.testing.expectEqual(SnapZone.top_left, snap_zone_for_point(5, 5));
-    try std.testing.expectEqual(SnapZone.top_right, snap_zone_for_point(1275, 5));
-    try std.testing.expectEqual(SnapZone.bottom_left, snap_zone_for_point(5, 715));
-    try std.testing.expectEqual(SnapZone.bottom_right, snap_zone_for_point(1275, 715));
-    try std.testing.expectEqual(SnapZone.none, snap_zone_for_point(640, 360));
-}
-
-test "driving_award: M15 C3 — snap_window and snap_restore with per-window last_rect" {
-    arm();
-    _ = user_open(64, 64, 200, 100, 7);
-    const before = user_rect(2).?;
-    try std.testing.expect(!snap_is_snapped(2));
-    // Snap to left half — zone 640×700, win clamped to 512×424 centered
-    // (the buffer height, grown for CALC.BIN's M24 424-tall window).
-    try std.testing.expect(snap_window(2, .left));
-    try std.testing.expect(snap_is_snapped(2));
-    const after_left = user_rect(2).?;
-    try std.testing.expectEqual(@as(u32, 64), after_left.x);
-    try std.testing.expectEqual(@as(u32, 138), after_left.y);
-    try std.testing.expectEqual(@as(u32, 512), after_left.w);
-    try std.testing.expectEqual(@as(u32, 424), after_left.h);
-    // Restore.
-    try std.testing.expect(snap_restore(2));
-    try std.testing.expect(!snap_is_snapped(2));
-    const restored = user_rect(2).?;
-    try std.testing.expectEqual(before.x, restored.x);
-    try std.testing.expectEqual(before.y, restored.y);
-    // Snap to top-right quadrant then drag-out restore via pointer_tick.
-    try std.testing.expect(snap_window(2, .top_right));
-    try std.testing.expect(snap_is_snapped(2));
-    // Simulate drag start on snapped window title bar — should restore before dragging.
-    // Use a mapped cursor over the snapped window's title bar.
-    const win = find_user_window(2).?;
-    const cx = @as(u16, @intCast((@as(u32, win.x + 4) * 32768) / virtio_gpu.fb_width));
-    const cy = @as(u16, @intCast((@as(u32, win.y + 4) * 32768) / virtio_gpu.fb_height));
-    const st_click: input.PointerState = .{ .x = cx, .y = cy, .buttons = 0x01, .valid = true };
-    _ = pointer_tick(st_click, .{ .x = cx, .y = cy });
-    // After click, window should have been restored (drag_id set, is_snapped cleared).
-    try std.testing.expect(!snap_is_snapped(2));
-    try std.testing.expectEqual(before.x, find_user_window(2).?.x);
-    _ = user_close(2);
-}
-
-test "driving_award: M15 C3 — snap preview renders and zone bounds are within scanout" {
-    arm();
-    _ = user_open(100, 100, 200, 100, 7);
-    // Simulate dragging near left edge (cursor at x=5).
-    const st_drag: input.PointerState = .{ .x = @as(u16, @intCast((@as(u32, 5) * 32768) / virtio_gpu.fb_width)), .y = @as(u16, @intCast((@as(u32, 100) * 32768) / virtio_gpu.fb_height)), .buttons = 0x01, .valid = true };
-    // Start drag on title bar first.
-    const win = find_user_window(2).?;
-    const cx0 = @as(u16, @intCast((@as(u32, win.x + 4) * 32768) / virtio_gpu.fb_width));
-    const cy0 = @as(u16, @intCast((@as(u32, win.y + 4) * 32768) / virtio_gpu.fb_height));
-    _ = pointer_tick(.{ .x = cx0, .y = cy0, .buttons = 0x01, .valid = true }, .{ .x = cx0, .y = cy0 });
-    // Now drag to left edge.
-    _ = pointer_tick(st_drag, null);
-    try std.testing.expectEqual(SnapZone.left, snap_current_zone());
-    // Composite should paint the preview.
-    _ = composite();
-    const stride = virtio_gpu.fb_width * 4;
-    const fb: [*]u8 = @ptrCast(&virtio_gpu.gpu_fb);
-    const zb = snap_zone_bounds(.left).?;
-    const px = struct {
-        fn at(f: [*]u8, st: usize, x: usize, y: usize) u32 {
-            const o = y * st + x * 4;
-            return @as(u32, f[o + 2]) << 16 | @as(u32, f[o + 1]) << 8 | f[o];
-        }
-    };
-    // Preview border is white at zone's top-left corner.
-    try std.testing.expectEqual(@as(u32, 0xffffff), px.at(fb, stride, zb.x, zb.y));
-    // Inside preview is accent 0x3b82f6.
-    try std.testing.expectEqual(@as(u32, 0x3b82f6), px.at(fb, stride, zb.x + 4, zb.y + 4));
-    _ = user_close(2);
-}
-
 test "driving_award: Arc2 W1 — clamp_resize_w/h clamp to 128×64..512×384 and screen" {
     // Pure clamp math — no window needed except screen containment.
     // Buffer bounds.
@@ -5060,8 +4845,8 @@ test "driving_award: Arc2 W1 — pointer_tick drag-to-resize via bottom-right co
     const st_up: input.PointerState = .{ .x = cx2, .y = cy2, .buttons = 0x00, .valid = true };
     _ = pointer_tick(st_up, null);
     try std.testing.expect(!resize_active());
-    // Drag should not have started.
-    try std.testing.expect(drag_id == null);
+    // M32 WMS8 Gate 6: the title-bar drag state is deleted (the WM owns it),
+    // so there is no drag_id to assert — resize remains a kernel surface.
     // Clamp test via pointer_tick: drag far negative — clamps to min.
     // Need to re-hit after move: window is now 230×120 at (100,50), corner at 327,167.
     const rx2 = find_user_window(2).?.x + find_user_window(2).?.w - 3;
