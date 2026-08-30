@@ -157,6 +157,7 @@ meaningful — on main.
 | `agent/buffy/wms6-tray-drain` | [`agent-buffy-wms6-tray-drain.md`](agent-buffy-wms6-tray-drain.md) |
 | `agent/buffy/wms7-gateb-toolkit-repoint` | [`agent-buffy-wms7-gateb-toolkit-repoint.md`](agent-buffy-wms7-gateb-toolkit-repoint.md) |
 | `agent/buffy/wms7-ipc-protocol` | [`agent-buffy-wms7-ipc-protocol.md`](agent-buffy-wms7-ipc-protocol.md) |
+| `agent/buffy/wms8-desktop-overlay-drain` | [`agent-buffy-wms8-desktop-overlay-drain.md`](agent-buffy-wms8-desktop-overlay-drain.md) |
 | agent/gates fleet-remainder | [`agent-gates-fleet-remainder.md`](agent-gates-fleet-remainder.md) |
 | per-agent worktrees | [`agent-ox-alpha-agent-worktrees.md`](agent-ox-alpha-agent-worktrees.md) |
 | claim lifecycle: declared files + staleness | [`agent-ox-alpha-claim-lifecycle.md`](agent-ox-alpha-claim-lifecycle.md) |
