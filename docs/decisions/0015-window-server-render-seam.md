@@ -229,6 +229,13 @@ it (the render server already separates policy from blit).
   close-button dirty-check, and the 5-tick auto-close timeout (the WM now
   decides duration). Shim end-state degradation (intended): closing a dirty
   window in shim mode closes it immediately — no dialog, the issue's "no
-  compositing policy" end-state.
+  compositing policy" end-state. **Review fixes (claim 7639, post-merge):**
+  the WM now CONSUMES the close-click DOWN EDGE (no fall-through into the
+  WMS5 title-bar grab — the shim's `handled_btn` discipline), scans mirrors
+  TOP-DOWN for the close button (the shim walks win_count..0), and cmd-11
+  DIALOG actions 4/5/6 return EINVAL when no dialog is open (the stale
+  BSS-zero target stays unreachable — the shim's click path returned
+  `.none` first); the shared Cancel rect matches the painted 30px button
+  (x+160..190).
 - Which `driving_award` policy block drains out of the kernel first (recommended:
   chrome, being minimal and highly observable).

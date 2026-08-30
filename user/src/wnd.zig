@@ -1169,10 +1169,25 @@ fn main() noreturn {
                         // unsaved_dialog_click applies, parity by construction).
                         // Otherwise a close-button click (title-bar top-right)
                         // on a DIRTY mirror (kind-20 unsaved bit) shows it.
+                        // Review fix (claim 7639): the DOWN EDGE is CONSUMED
+                        // when the dialog or a close button takes it — the
+                        // kernel shim set `handled_btn` and broke, and the WM
+                        // must not also start a title-bar grab (the close rect
+                        // sits inside the title band).
+                        var down_handled = false;
                         if (unsaved_dialog_open) {
                             apply_unsaved_choice(wnd_core.unsaved_dialog_choice_at(fb_w, fb_h, px, py));
+                            down_handled = true;
                         } else {
-                            for (&mirrors) |*m| {
+                            // Review fix (claim 7639): scan TOP-DOWN (the
+                            // kernel shim walks win_count..0) so an
+                            // overlapping higher window's title bar wins —
+                            // z-order == id order (raise() has no callers),
+                            // so reverse id order == top of the stack.
+                            var si: usize = max_user_windows;
+                            while (si > 0) {
+                                si -= 1;
+                                const m = &mirrors[si];
                                 if (!m.valid or !m.visible) continue;
                                 if (px >= m.x + m.w - 16 and px < m.x + m.w - 4 and
                                     py >= m.y and py < m.y + wnd_core.title_bar_h)
@@ -1180,28 +1195,33 @@ fn main() noreturn {
                                     if (m.unsaved) show_unsaved_dialog(m.id);
                                     // Not dirty: the WM has no close capability
                                     // yet (status quo — a later gate); ignore.
+                                    down_handled = true;
                                     break;
                                 }
                             }
                         }
-                        // WMS5: a title-bar grab starts a drag.
-                        const fm = focused_mirror();
-                        if (fm) |m| {
-                            const g = wnd_core.Geom{
-                                .id = m.id,
-                                .kind = .user,
-                                .x = m.x,
-                                .y = m.y,
-                                .w = m.w,
-                                .h = m.h,
-                                .visible = m.visible,
-                                .workspace = m.workspace,
-                            };
-                            if (wnd_core.title_bar_contains(g, px, py)) {
-                                grabbing = true;
-                                grab_dx = px -% m.x;
-                                grab_dy = py -% m.y;
-                                write_marker(grab_marker);
+                        // WMS5: a title-bar grab starts a drag — only when the
+                        // DOWN EDGE was not consumed above (the dialog or a
+                        // close button already took it).
+                        if (!down_handled) {
+                            const fm = focused_mirror();
+                            if (fm) |m| {
+                                const g = wnd_core.Geom{
+                                    .id = m.id,
+                                    .kind = .user,
+                                    .x = m.x,
+                                    .y = m.y,
+                                    .w = m.w,
+                                    .h = m.h,
+                                    .visible = m.visible,
+                                    .workspace = m.workspace,
+                                };
+                                if (wnd_core.title_bar_contains(g, px, py)) {
+                                    grabbing = true;
+                                    grab_dx = px -% m.x;
+                                    grab_dy = py -% m.y;
+                                    write_marker(grab_marker);
+                                }
                             }
                         }
                     }

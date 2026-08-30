@@ -38,6 +38,9 @@
 #     Serial proof: `wnd: unsaved-dialog` + `wnd: unsaved-discard` markers
 #     AND a nonzero `dialog=` count in the `wm` observability row AND the
 #     applied close (the kernel did not self-decide — it no longer can).
+#     Review fix (claim 7639): boot B ALSO asserts NO `wnd: grab`/`wnd: drag`/
+#     `wnd: drop` markers — the close click must not start a title-bar drag
+#     (the DOWN EDGE is consumed by the dialog).
 #
 # The pointer steps pace at 2.5 s each on the headless custom-virtio channel
 # (claim 9367), so two clicks in one sequence land as distinct DOWN EDGEs.
@@ -174,7 +177,13 @@ if [ "$RC_B" = 0 ] && [ -f "$SER_B" ]; then
     grep -a -qF -- "notepad: win_close" "$SER_B" && CLOSED=1
     # 5) The WM stayed seated + pacing.
     grep -a -qF -- "wnd: present" "$SER_B" && PRESENT=1
-    if [ "$WM_SHOW" = 1 ] && [ "$WM_DISCARD" = 1 ] && [ "$APPLY" = 1 ] && [ "$CLOSED" = 1 ] && [ "$PRESENT" = 1 ]; then
+    # 6) Review fix (claim 7639): the close click did NOT also start a
+    #    title-bar drag — the close rect is inside the title band, and the
+    #    DOWN EDGE must be consumed by the dialog (the kernel shim set
+    #    handled_btn and broke; the WM must match). No grab/drag/drop markers.
+    NODRAG=0
+    grep -a -qE -- "wnd: (grab|drag|drop)" "$SER_B" && NODRAG=1
+    if [ "$WM_SHOW" = 1 ] && [ "$WM_DISCARD" = 1 ] && [ "$APPLY" = 1 ] && [ "$CLOSED" = 1 ] && [ "$PRESENT" = 1 ] && [ "$NODRAG" = 0 ]; then
         B_OK=1
     fi
 fi

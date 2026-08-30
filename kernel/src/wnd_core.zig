@@ -129,7 +129,10 @@ pub fn unsaved_dialog_choice_at(fw: u32, fh: u32, x: u32, y: u32) UnsavedChoice 
     if (y >= dlg_y + unsaved_dialog_h - 30 and y < dlg_y + unsaved_dialog_h - 10) {
         if (x >= dlg_x + 20 and x < dlg_x + 80) return .save;
         if (x >= dlg_x + 90 and x < dlg_x + 150) return .dont_save;
-        if (x >= dlg_x + 160 and x < dlg_x + 220) return .cancel;
+        // Review fix (claim 7639): Cancel is the painted 30px button
+        // (x+160..190) — the old 60px rect (x+160..220) overran the 200px
+        // dialog by 20px and enshrined a dead zone.
+        if (x >= dlg_x + 160 and x < dlg_x + 190) return .cancel;
     }
     return .none;
 }
@@ -655,9 +658,10 @@ test "wnd_core: WMS5 Gate 2 geometry rules are pinned (tile/snap/max — the WM'
     try std.testing.expectEqual(@as(u32, 310), dy);
     try std.testing.expectEqual(UnsavedChoice.save, unsaved_dialog_choice_at(fb_w, fb_h, dx + 40, dy + 80));
     try std.testing.expectEqual(UnsavedChoice.dont_save, unsaved_dialog_choice_at(fb_w, fb_h, dx + 120, dy + 80));
-    try std.testing.expectEqual(UnsavedChoice.cancel, unsaved_dialog_choice_at(fb_w, fb_h, dx + 190, dy + 80));
+    try std.testing.expectEqual(UnsavedChoice.cancel, unsaved_dialog_choice_at(fb_w, fb_h, dx + 175, dy + 80)); // the 30px Cancel (review fix 7639)
     try std.testing.expectEqual(UnsavedChoice.none, unsaved_dialog_choice_at(fb_w, fb_h, dx + 40, dy + 40)); // outside the buttons
     try std.testing.expectEqual(UnsavedChoice.none, unsaved_dialog_choice_at(fb_w, fb_h, dx + 85, dy + 80)); // between Save/Don't Save
+    try std.testing.expectEqual(UnsavedChoice.none, unsaved_dialog_choice_at(fb_w, fb_h, dx + 195, dy + 80)); // past the 30px Cancel (review fix 7639)
 }
 
 test "wnd_core: chrome descriptor is a flat 40-byte number struct (the frozen ABI)" {

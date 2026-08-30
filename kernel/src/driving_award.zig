@@ -431,8 +431,9 @@ pub fn unsaved_dialog_click(x: u32, y: u32) enum { save, dont_save, cancel, none
         unsaved_dialog_dont_save();
         return .dont_save;
     }
-    // Cancel button: right.
-    if (x >= dlg_x + 160 and x < dlg_x + 220 and y >= dlg_y + dlg_h - 30 and y < dlg_y + dlg_h - 10) {
+    // Cancel button: right — the painted 30px button (review fix, claim
+    // 7639: the old 60px rect overran the 200px dialog).
+    if (x >= dlg_x + 160 and x < dlg_x + 190 and y >= dlg_y + dlg_h - 30 and y < dlg_y + dlg_h - 10) {
         unsaved_dialog_cancel();
         return .cancel;
     }
@@ -444,6 +445,9 @@ pub fn unsaved_dialog_click(x: u32, y: u32) enum { save, dont_save, cancel, none
 /// dirty state as it changes (the WM's unsaved-dialog decision input).
 pub fn user_set_unsaved(id: u8, flag: bool) bool {
     const w = find_user_window(id) orelse return false;
+    // Review fix (claim 7639): no-op when the flag is unchanged — don't
+    // fan a redundant mirror.
+    if (w.unsaved == flag) return true;
     w.unsaved = flag;
     wm_mirror(id);
     return true;
