@@ -3,7 +3,7 @@
 ## 2026-08-30 — WMS8 Gate 6 claimed (issue #628)
 
 - Claimed **WMS8 Gate 6 — delete the kernel's dormant pointer drag/snap
-  geometry-decision layer** as `docs/claims/4576-wms8-gate6-pointer-drag-delete.md`
+  geometry-decision layer** as `docs/claims/3687-wms8-gate6-pointer-drag-delete.md`
   (status 🔄, heartbeat 2026-08-30). Branch `agent/buffy/wms8-gate6-pointer-drag-delete`
   cut from `origin/main` (c75129b).
 - Scope per the parity rule: WMS5 proved the WM owns title-bar drag->move +
@@ -13,9 +13,9 @@
   snap-on-release). KEEP: resize (no WM coverage), close/minimize buttons,
   modal, dock/tray/notif clicks, MOUSE delivery to apps, and the app-level
   DnD payload system (separate from title-bar drag).
-## 2026-08-30 — WMS8 Gate 6 complete (claim 4576, issue #628)
+## 2026-08-30 — WMS8 Gate 6 complete (claim 3687, issue #628)
 
-- Claim **4576** flipped 🔄 → ✅. The kernel's dormant pointer title-bar
+- Claim **3687** flipped 🔄 → ✅. The kernel's dormant pointer title-bar
   drag+snap decision layer is deleted from `driving_award.zig` (net −215
   lines); resize/buttons/modal/dock-tray-notif/MOUSE-delivery/DnD kept.
 - Gates **PASS on VZ**: new `verify-live-wnd8-ptr-drag-delete` (boot A

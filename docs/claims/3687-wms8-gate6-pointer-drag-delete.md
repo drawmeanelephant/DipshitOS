@@ -1,4 +1,4 @@
-# Claim 4576: WMS8 Gate 6 — delete the kernel's dormant pointer drag/snap geometry-decision layer
+# Claim 3687: WMS8 Gate 6 — delete the kernel's dormant pointer drag/snap geometry-decision layer
 
 - **Owner:** buffy (`agent/buffy/wms8-gate6-pointer-drag-delete`)
 - **Prompt / plan:** issue #628 (WMS8, sixth of a multi-gate deletion sequence)

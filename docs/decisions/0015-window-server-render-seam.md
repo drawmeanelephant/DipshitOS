@@ -249,7 +249,7 @@ it (the render server already separates policy from blit).
   (no WM coverage yet — deleting would regress shim mode); Alt+Tab stays
   (separate WMS6 focus surface). Shim consequence (intended): a drained
   geometry chord now does nothing in shim (no-WM) mode — the "no compositing
-  policy" end-state. **Gate 6 (claim 4576) DELETED the pointer title-bar
+  policy" end-state. **Gate 6 (claim 3687) DELETED the pointer title-bar
   DRAG+SNAP decision layer.** WMS5's input seam proved the WM owns pointer
   geometry (kind-19 fan-out, kernel consumes none); with the W5 geometry
   gate re-ran green, WMS8's delete rule is satisfied, so the kernel's drag

@@ -307,7 +307,7 @@ lower-back/move consumers. fmt/coordination clean, BSS budget re-ran green.
 **#628 stays open** — Gate 5 done; remaining: the geometry/desktop-chrome
 dead blocks beyond the keyboard layer and the registry/convergence path.
 
-**Gate 6 (claim 4576) — the pointer title-bar DRAG+SNAP decision layer is
+**Gate 6 (claim 3687) — the pointer title-bar DRAG+SNAP decision layer is
 DELETED.** WMS5's input-seam handover already proved the WM owns pointer
 GEOMETRY (while registered, `pointer_tick` fans the raw stream — kind-19
 WM_POINTER — out to the WM and returns null, consuming no drag/resize/snap).
