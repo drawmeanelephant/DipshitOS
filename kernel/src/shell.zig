@@ -3310,91 +3310,14 @@ pub fn boot_and_park(mon: *monitor.Monitor, rx_wired: bool) void {
                     mon.console.puts("\n");
                 }
             }
-            // Arc4 #241: Ctrl+F1/F2/F3 workspace switch.
-            if (input.take_workspace_switch()) |ws| {
-                driving_award.switch_workspace(ws);
-                mon.console.puts("dui: workspace=");
-                mon.console.print_u64(ws);
-                mon.console.puts("\n");
-            }
-            // M21 W4: Alt+` cycles workspaces directly.
-            if (input.take_workspace_cycle()) {
-                driving_award.cycle_workspace();
-                mon.console.puts("dui: workspace-cycle ws=");
-                mon.console.print_u64(driving_award.current_workspace);
-                mon.console.puts("\n");
-            }
-            // M21 W1: Ctrl+T toggles tiling mode.
-            if (input.take_tile_toggle()) {
-                driving_award.toggle_tiling();
-                mon.console.puts("dui: tile=");
-                mon.console.puts(if (driving_award.tile_mode) "on" else "off");
-                if (driving_award.tile_master_id) |mid| {
-                    mon.console.puts(" master=");
-                    mon.console.print_u64(mid);
-                }
-                if (driving_award.tile_stack_id) |sid| {
-                    mon.console.puts(" stack=");
-                    mon.console.print_u64(sid);
-                }
-                mon.console.puts("\n");
-            }
-            // M21 W2: Ctrl+M swaps master/detail in tiled mode.
-            if (input.take_tile_swap_master()) {
-                driving_award.swap_master();
-                mon.console.puts("dui: master-swap side=");
-                mon.console.puts(if (driving_award.tile_master_side) "left" else "right");
-                mon.console.puts("\n");
-            }
-            // M21 W3: Ctrl+N minimizes the focused window.
-            if (input.take_minimize()) {
-                const fid = driving_award.focused_window_id();
-                if (driving_award.minimize_window(fid)) {
-                    mon.console.puts("dui: minimized id=");
-                    mon.console.print_u64(fid);
-                    mon.console.puts("\n");
-                } else {
-                    mon.console.puts("dui: minimize-failed id=");
-                    mon.console.print_u64(fid);
-                    mon.console.puts("\n");
-                }
-            }
-            // M21 W6: Ctrl+Shift+M toggles maximize.
-            if (input.take_maximize()) {
-                const fid = driving_award.focused_window_id();
-                if (driving_award.toggle_maximize(fid)) {
-                    const w = driving_award.find_user_window(fid);
-                    mon.console.puts("dui: maximize id=");
-                    mon.console.print_u64(fid);
-                    mon.console.puts(" max=");
-                    mon.console.puts(if (w != null and w.?.maximized) "on" else "off");
-                    mon.console.puts("\n");
-                }
-            }
-            // M21 W7: F11 toggles fullscreen.
-            if (input.take_fullscreen()) {
-                const fid = driving_award.focused_window_id();
-                if (driving_award.toggle_fullscreen(fid)) {
-                    mon.console.puts("dui: fullscreen id=");
-                    mon.console.print_u64(fid);
-                    mon.console.puts(" on=");
-                    mon.console.puts(if (driving_award.fullscreen_active) "yes" else "no");
-                    mon.console.puts("\n");
-                }
-            }
-            // M21 W8: Ctrl+Shift+T toggles always-on-top.
-            if (input.take_always_on_top()) {
-                const fid = driving_award.focused_window_id();
-                if (driving_award.toggle_always_on_top(fid)) {
-                    const w = driving_award.find_user_window(fid);
-                    mon.console.puts("dui: always-on-top id=");
-                    mon.console.print_u64(fid);
-                    mon.console.puts(" flag=");
-                    mon.console.puts(if (w != null and w.?.always_on_top) "on" else "off");
-                    mon.console.puts("\n");
-                }
-            }
-            // M21 W10: Alt+arrow keyboard window movement.
+            // M32 WMS8 Gate 5 (issue #628): the idle-loop consumers for the
+            // drained geometry chords are DELETED — WMS5 Gate 2 moved those
+            // decisions to the WM (tile/master/minimize/maximize/fullscreen/
+            // always-on-top/workspace switch+cycle); the applied primitives
+            // remain, driven by the `dui` monitor commands + SET_STATE, and
+            // the matrix re-runs green through them.
+            // M21 W10: Alt+arrow keyboard window movement (KEPT — no WM
+            // coverage yet).
             if (input.take_move()) |mv| {
                 const fid = driving_award.focused_window_id();
                 if (driving_award.move_window_keyboard(fid, mv.dx, mv.dy)) {

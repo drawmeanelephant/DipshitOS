@@ -85,31 +85,30 @@ var ptr_valid: bool = false;
 var ptr_click_pending: bool = false;
 /// Card U5 (claim 0935): the Alt+Tab chord (modifier 0x04/0x40 + Tab
 /// usage 0x2b) latches here — the shell idle loop consumes it as a
-/// focus-cycle request (ADR 0008 D4's keyboard cycling).
+/// focus-cycle request (ADR 0008 D4's keyboard cycling). M32 WMS8 Gate 5
+/// (issue #628): the OTHER geometry chords (tile/master/min/max/ws/
+/// fullscreen/aot) are DELETED — WMS5 Gate 2 drained them to the WM; the
+/// applied primitives remain, driven by `dui`/SET_STATE, but the kernel no
+/// longer self-decides them from the keyboard.
 var alt_tab_pending: bool = false;
 var alt_tab_shift: bool = false;
-/// Arc4 #238: Ctrl+Shift+B lowers the focused window to back.
+/// Arc4 #238: Ctrl+Shift+B lowers the focused window to back. KEPT — the WM
+/// does not serve this chord yet (no WM coverage would regress shim mode).
 var lower_back_pending: bool = false;
-/// Arc4 #241: Ctrl+F1/F2/F3 switches workspace. 0xff = no switch pending.
-var workspace_switch_pending: u8 = 0xff;
-/// M21 W4: Alt+` cycles workspaces directly.
-var workspace_cycle_pending: bool = false;
-/// M21 W1: Ctrl+T toggles tiling mode.
-var tile_toggle_pending: bool = false;
-/// M21 W2: Ctrl+M swaps master/detail in tiled mode.
-var tile_swap_master_pending: bool = false;
-/// M21 W3: Ctrl+N minimizes the focused window.
-var minimize_pending: bool = false;
-/// M21 W6: Ctrl+Shift+M toggles maximize.
-var maximize_pending: bool = false;
-/// M21 W7: F11 toggles fullscreen.
-var fullscreen_pending: bool = false;
-/// M21 W8: Ctrl+Shift+T toggles always-on-top.
-var always_on_top_pending: bool = false;
-/// M21 W10: Alt+arrow movement. 0xff = no movement pending.
+/// M21 W10: Alt+arrow movement. KEPT — the WM does not serve this chord yet.
 var move_pending_dx: i32 = 0;
 var move_pending_dy: i32 = 0;
 var move_pending_fine: bool = false;
+
+// M32 WMS8 Gate 5 (issue #628): the geometry chord pending flags for
+// workspace switch/cycle, tile toggle, master swap, minimize, maximize,
+// fullscreen, and always-on-top are DELETED — WMS5 Gate 2 drained the
+// geometry-policy decision to the WM (kind-21 WM_KEY -> handle_wm_key ->
+// SET_WINDOW/SET_STATE). With a WM registered the kernel's own consumers
+// were provably dormant (gated behind !wm_owns_input); per WMS8's delete
+// rule (the W5 matrix re-ran green while seated) they are removed. Shim
+// end-state: the drained geometry chords now do nothing with no WM (the
+// issue's "no compositing policy" end-state).
 
 /// Diagnostic hooks (kernel/src/main.zig wires these to uart_puts/uart_hex
 /// under `--input`; null in host tests and the default VM).
@@ -425,20 +424,11 @@ pub fn decode_keyboard_report(rep: []const u8) void {
                 alt_tab_shift = shift;
             }
         }
-        // M21 W4: Alt+` (backtick, usage 0x35) cycles workspaces.
-        if (k == 0x35 and alt) {
-            var held = false;
-            for (kb_held) |h| {
-                if (h == k) {
-                    held = true;
-                    break;
-                }
-            }
-            if (!held and !driving_award.wm_owns_input) {
-                workspace_cycle_pending = true;
-            }
-        }
-        // Arc4 #238: Ctrl+Shift+B lowers focused window to back.
+        // M21 W4: Alt+` workspace-CYCLE is DELETED (M32 WMS8 Gate 5, issue
+        // #628) — WMS5 Gate 2 drained it to the WM (kind-21 -> handle_wm_key
+        // usage 0x35). The kernel no longer self-cycles workspaces.
+        // Arc4 #238: Ctrl+Shift+B lowers focused window to back (KEPT — no
+        // WM coverage yet).
         if (k == 0x05 and (flags & app_events.MOD_CTRL) != 0 and (flags & app_events.MOD_SHIFT) != 0) {
             var held = false;
             for (kb_held) |h| {
@@ -451,109 +441,16 @@ pub fn decode_keyboard_report(rep: []const u8) void {
                 lower_back_pending = true;
             }
         }
-        // Arc4 #241: Ctrl+F1/F2/F3 switches workspace.
-        if ((flags & app_events.MOD_CTRL) != 0) {
-            var ws: u8 = 0xff;
-            if (k == 0x58) ws = 0; // F1
-            if (k == 0x59) ws = 1; // F2
-            if (k == 0x5a) ws = 2; // F3
-            if (ws != 0xff) {
-                var held = false;
-                for (kb_held) |h| {
-                    if (h == k) {
-                        held = true;
-                        break;
-                    }
-                }
-                if (!held and !driving_award.wm_owns_input) {
-                    workspace_switch_pending = ws;
-                }
-            }
-            // M21 W1: Ctrl+T toggles tiling mode.
-            if (k == 0x17) { // 't' usage
-                var held = false;
-                for (kb_held) |h| {
-                    if (h == k) {
-                        held = true;
-                        break;
-                    }
-                }
-                if (!held and !driving_award.wm_owns_input) {
-                    tile_toggle_pending = true;
-                }
-            }
-            // M21 W2: Ctrl+M swaps master/detail in tiled mode.
-            if (k == 0x10) { // 'm' usage
-                var held = false;
-                for (kb_held) |h| {
-                    if (h == k) {
-                        held = true;
-                        break;
-                    }
-                }
-                if (!held and !driving_award.wm_owns_input) {
-                    tile_swap_master_pending = true;
-                }
-            }
-            // M21 W3: Ctrl+N minimizes the focused window.
-            if (k == 0x11) { // 'n' usage
-                var held = false;
-                for (kb_held) |h| {
-                    if (h == k) {
-                        held = true;
-                        break;
-                    }
-                }
-                if (!held and !driving_award.wm_owns_input) {
-                    minimize_pending = true;
-                }
-            }
-            // M21 W6: Ctrl+Shift+M toggles maximize.
-            if (k == 0x10 and (flags & app_events.MOD_SHIFT) != 0) { // 'm' + Shift
-                var held = false;
-                for (kb_held) |h| {
-                    if (h == k) {
-                        held = true;
-                        break;
-                    }
-                }
-                if (!held and !driving_award.wm_owns_input) {
-                    maximize_pending = true;
-                }
-            }
-            // M21 W8: Ctrl+Shift+T toggles always-on-top.
-            if (k == 0x17 and (flags & app_events.MOD_SHIFT) != 0) { // 't' + Shift
-                var held = false;
-                for (kb_held) |h| {
-                    if (h == k) {
-                        held = true;
-                        break;
-                    }
-                }
-                if (!held and !driving_award.wm_owns_input) {
-                    always_on_top_pending = true;
-                }
-            }
-            // M27 G2: Ctrl+Shift+A (about dialog) is DELETED (M32 WMS8 Gate 3,
-            // issue #628) — WMS8 Gate 2 drained the about-dialog decision to the
-            // WM (slot-65 DIALOG, cmd 11) with parity green; the kernel no longer
-            // self-toggles it. The chord still fans to the WM as kind 21, which
-            // decides (usage 0x04 + shift) and issues DIALOG.
-        }
-        // M21 W7: F11 (usage 0x5c) toggles fullscreen.
-        if (k == 0x5c) {
-            var held = false;
-            for (kb_held) |h| {
-                if (h == k) {
-                    held = true;
-                    break;
-                }
-            }
-            if (!held and !driving_award.wm_owns_input) {
-                fullscreen_pending = true;
-            }
-        }
-        // M21 W10: Alt+arrow for keyboard window movement.
+        // M32 WMS8 Gate 5 (issue #628): the Ctrl chord consumers for
+        // workspace-switch (Ctrl+F1/F2/F3), tile (Ctrl+T), master-swap
+        // (Ctrl+M), minimize (Ctrl+N), maximize (Ctrl+Shift+M), always-
+        // on-top (Ctrl+Shift+T), and F11 fullscreen are DELETED — WMS5
+        // Gate 2 drained all of them to the WM (kind-21 -> handle_wm_key >
+        // SET_WINDOW/SET_STATE). The Ctrl+Shift+A about chord was already
+        // deleted in Gate 3. The WM serves these; the kernel no longer
+        // self-decides them.
+        // M21 W10: Alt+arrow for keyboard window movement (KEPT — no WM
+        // coverage yet).
         if (alt) {
             var dx: i32 = 0;
             var dy: i32 = 0;
@@ -831,63 +728,10 @@ pub fn take_lower_back() bool {
     return true;
 }
 
-/// Arc4 #241: consume the Ctrl+F1/F2/F3 workspace switch edge.
-pub fn take_workspace_switch() ?u8 {
-    if (workspace_switch_pending == 0xff) return null;
-    const ws = workspace_switch_pending;
-    workspace_switch_pending = 0xff;
-    return ws;
-}
-
-/// M21 W1: consume the Ctrl+T tiling toggle edge.
-pub fn take_tile_toggle() bool {
-    if (!tile_toggle_pending) return false;
-    tile_toggle_pending = false;
-    return true;
-}
-
-/// M21 W2: consume the Ctrl+M master swap edge.
-pub fn take_tile_swap_master() bool {
-    if (!tile_swap_master_pending) return false;
-    tile_swap_master_pending = false;
-    return true;
-}
-
-/// M21 W3: consume the Ctrl+N minimize edge.
-pub fn take_minimize() bool {
-    if (!minimize_pending) return false;
-    minimize_pending = false;
-    return true;
-}
-
-/// M21 W4: consume the Alt+` workspace cycle edge.
-pub fn take_workspace_cycle() bool {
-    if (!workspace_cycle_pending) return false;
-    workspace_cycle_pending = false;
-    return true;
-}
-
-/// M21 W6: consume the Ctrl+Shift+M maximize toggle edge.
-pub fn take_maximize() bool {
-    if (!maximize_pending) return false;
-    maximize_pending = false;
-    return true;
-}
-
-/// M21 W7: consume the F11 fullscreen toggle edge.
-pub fn take_fullscreen() bool {
-    if (!fullscreen_pending) return false;
-    fullscreen_pending = false;
-    return true;
-}
-
-/// M21 W8: consume the Ctrl+Shift+T always-on-top toggle edge.
-pub fn take_always_on_top() bool {
-    if (!always_on_top_pending) return false;
-    always_on_top_pending = false;
-    return true;
-}
-
+/// M32 WMS8 Gate 5 (issue #628): the take_* accessors for the drained
+/// geometry chords (workspace switch/cycle, tile toggle, master swap,
+/// minimize, maximize, fullscreen, always-on-top) are DELETED — the WM owns
+/// those decisions now; the kernel no longer self-consumes them.
 pub const MoveDelta = struct { dx: i32, dy: i32 };
 
 /// M21 W10: consume the Alt+arrow movement edge. Returns (dx, dy) or
@@ -972,9 +816,13 @@ test "input: hid_to_bytes maps ctrl+a-z to ASCII control codes" {
     try std.testing.expectEqual(@as(usize, 0), hid_to_bytes(0x28, false, true, &out)); // Ctrl+Enter
 }
 
-test "input: WMS5 Gate 2 — keyboard geometry chords gate off and the raw key fans out when a WM owns input (claim 4278)" {
-    // Pristine state; no WM registered (shim mode) -> the Ctrl+T chord sets
-    // the tile pending flag exactly as before (zero regression).
+test "input: WMS8 Gate 5 — the drained geometry chords fan out but the kernel no longer consumes them (claim 9879)" {
+    // WMS5 Gate 2 drained the geometry chords (tile/master/min/max/ws/
+    // fullscreen/aot) to the WM; WMS8 Gate 5 DELETES the kernel's chord
+    // consumers. The raw key stream STILL fans out to the WM (kind 21) on
+    // key-DOWN edges, and the kernel has no pending-flag/take_* for those
+    // chords anymore. Ctrl+Shift+B (lower-back) and Alt+arrows (move) stay
+    // kernel-consumed until the WM covers them.
     _ = driving_award.focus(0);
     fifo_count = 0;
     fifo_head = 0;
@@ -997,33 +845,38 @@ test "input: WMS5 Gate 2 — keyboard geometry chords gate off and the raw key f
     capture.usage = &last_usage;
     capture.flags = &last_flags;
 
+    // No WM (shim mode): the drained Ctrl+T does NOT set a pending flag
+    // (the consumer is deleted) and does NOT fan out (no WM).
     driving_award.wm_owns_input = false;
     driving_award.wm_key_hook = capture.hook;
-    // Ctrl+T (mods 0x01, usage 0x17): shim mode -> the kernel consumes it.
-    decode_keyboard_report(&[_]u8{ 0x01, 0, 0x17, 0, 0, 0, 0, 0 });
-    try std.testing.expect(take_tile_toggle());
-    try std.testing.expectEqual(@as(usize, 0), key_calls); // no fan-out in shim mode
+    decode_keyboard_report(&[_]u8{ 0x01, 0, 0x17, 0, 0, 0, 0, 0 }); // Ctrl+T
+    try std.testing.expectEqual(@as(usize, 0), key_calls); // no fan-out without a WM
     decode_keyboard_report(&[_]u8{ 0, 0, 0, 0, 0, 0, 0, 0 }); // release
 
-    // With a WM registered: the pending flag is NOT set (the kernel stops
-    // consuming keyboard geometry) and the raw key fans out to the WM.
+    // With a WM registered: the raw key fans out to the WM (kind 21); the
+    // kernel has no chord consumer left to trigger.
     driving_award.wm_owns_input = true;
-    decode_keyboard_report(&[_]u8{ 0x01, 0, 0x17, 0, 0, 0, 0, 0 });
-    try std.testing.expect(!take_tile_toggle()); // kernel did not consume it
+    decode_keyboard_report(&[_]u8{ 0x01, 0, 0x17, 0, 0, 0, 0, 0 }); // Ctrl+T
     try std.testing.expectEqual(@as(usize, 1), key_calls); // ...the WM got it
     try std.testing.expectEqual(@as(u8, 0x17), last_usage);
     try std.testing.expectEqual(@as(u16, app_events.MOD_CTRL), last_flags);
     decode_keyboard_report(&[_]u8{ 0, 0, 0, 0, 0, 0, 0, 0 }); // release
 
-    // Same for Ctrl+N (minimize) and Ctrl+Shift+M (maximize).
+    // KEPT chord — Ctrl+Shift+B (lower-back): while no WM, the kernel still
+    // self-consumes it (no WM coverage yet -> zero regression).
     driving_award.wm_key_hook = null;
-    decode_keyboard_report(&[_]u8{ 0x01, 0, 0x11, 0, 0, 0, 0, 0 });
-    try std.testing.expect(!take_minimize());
-    decode_keyboard_report(&[_]u8{ 0x01 | 0x02, 0, 0x10, 0, 0, 0, 0, 0 });
-    try std.testing.expect(!take_maximize());
-    decode_keyboard_report(&[_]u8{ 0, 0, 0, 0, 0, 0, 0, 0 });
+    driving_award.wm_owns_input = false;
+    decode_keyboard_report(&[_]u8{ 0x01 | 0x02, 0, 0x05, 0, 0, 0, 0, 0 }); // Ctrl+Shift+B
+    try std.testing.expect(take_lower_back());
+    decode_keyboard_report(&[_]u8{ 0, 0, 0, 0, 0, 0, 0, 0 }); // release
+    // KEPT chord — Alt+Right (move): still self-consumed in shim mode.
+    decode_keyboard_report(&[_]u8{ 0x04, 0, 0x4f, 0, 0, 0, 0, 0 }); // Alt+Right
+    const mv = take_move().?;
+    try std.testing.expectEqual(@as(i32, 16), mv.dx);
+    try std.testing.expectEqual(@as(i32, 0), mv.dy);
+    decode_keyboard_report(&[_]u8{ 0, 0, 0, 0, 0, 0, 0, 0 }); // release
 
-    // Cleanup: shim mode restored.
+    // Cleanup: WM mode restored (the raw fan-out stays available).
     driving_award.wm_owns_input = false;
 }
 
