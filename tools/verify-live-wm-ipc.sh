@@ -18,13 +18,14 @@
 #
 # Two boots prove both halves:
 #   * Boot A (WM registered): `wnd start` + NOTEPAD (window 2) +
-#     `exec WMRPC.BIN 2 WND.BIN`. Serial proof: `wnd: mail kind=1 id=2
+#     `exec WMRPC.BIN` (no args — the gate topology is hardcoded: target 2 = NOTEPAD's
+#     window, wm = WND.BIN; WMRPC ignores argv so it never needs argv room). Serial proof: `wnd: mail kind=1 id=2
 #     seq=1 applied=yes` + `kind=2 ... title=wm-rpc` (the WM SERVED the
 #     requests), `wmrpc: raise-ack applied=yes` + `config-ack applied=yes`
 #     (the replies RETURNED to the app), the raise moved focus
 #     (`dui: windows=.. focused=2` — WMRPC's own window had focused 3 first),
 #     and the config applied (`dui[2]: user user rect=40,40,360,260`).
-#   * Boot B (shim, no WM): `exec WMRPC.BIN 2 WND.BIN` finds no WM server,
+#   * Boot B (shim, no WM): `exec WMRPC.BIN` finds no WM server,
 #     prints `wmrpc: no-wm` and parks — the protocol is additive (apps that
 #     can't reach a WM keep working through the frozen syscalls).
 #
@@ -97,7 +98,7 @@ run_boot() {
 # No WM registered -> WMRPC finds no WND.BIN in the process table, prints
 # `wmrpc: no-wm` and parks. The shim desktop is untouched — additive.
 echo "--- boot B: no WM — WMRPC degrades gracefully (additive back-compat) ---"
-printf 'exec WMRPC.BIN 2 WND.BIN\n' > "$RUN_DIR/sB.txt"
+printf 'exec WMRPC.BIN\n' > "$RUN_DIR/sB.txt"
 # Expect the app's OWN marker: the runner exits 0 the moment `wmrpc: no-wm`
 # lands in the serial log — proving the app actually ran, found no WM server,
 # and degraded gracefully (an instant `echo` would tear the VM down before
@@ -130,7 +131,7 @@ fi
 # 360,260 + title "wm-rpc"), each acked back to the app over the mailbox.
 echo "--- boot A: WMRPC raises + configures a window THROUGH the WM (mail, not syscalls) ---"
 printf 'wnd start\nexec NOTEPAD.BIN\n' > "$RUN_DIR/script-A.txt"
-printf 'exec WMRPC.BIN 2 WND.BIN\necho wmipc-a-go\n' > "$RUN_DIR/s2-A.txt"
+printf 'exec WMRPC.BIN\necho wmipc-a-go\n' > "$RUN_DIR/s2-A.txt"
 printf 'dui\nwm\necho wmipc-a-done\n' > "$RUN_DIR/s3-A.txt"
 set +e
 run_boot A \
