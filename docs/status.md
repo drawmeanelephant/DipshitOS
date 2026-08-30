@@ -281,6 +281,32 @@ flag. Gate re-ran **PASS on VZ** with the no-drag assertion. **#628 stays
 open** — Gate 4 + review fixes done; remaining: the geometry/desktop-chrome
 dead blocks and the registry/convergence path.
 
+**Gate 5 (claim 9879) — the geometry-policy KEYBOARD-DECISION layer is
+DELETED.** WMS5 Gate 2 drained the geometry chords (tile/master/min/max/ws/
+fullscreen/aot) to the WM (kind-21 -> handle_wm_key -> SET_WINDOW/SET_STATE);
+the kernel's own chord consumers were provably dormant whenever a WM is
+registered (their pending flags gated behind `!wm_owns_input`). Per WMS8's
+delete rule (the W5 matrix already re-ran green while seated), Gate 5 deletes
+that dormant keyboard layer: the geometry pending-flag vars + chord-decode
+branches + `take_*` accessors in `input.zig`, and the shell idle consumer
+blocks that called the applied primitives. KEPT: the applied primitives (the
+`dui` monitor commands + SET_STATE drive them — the W1–W16 matrix re-runs
+green THROUGH them), lower-back (Ctrl+Shift+B) + move (Alt+arrows) keyboard
+consumers (no WM coverage yet), and Alt+Tab (separate WMS6 focus surface).
+Shim end-state consequence (intended): with no WM, the drained geometry
+chords now do NOTHING instead of self-toggling — the issue's "no compositing
+policy" end-state. New `verify-live-wnd8-geom-kbd-delete` gate **PASS on
+VZ**, both boots, and the canonical wnd5-gate2 matrix gate re-ran **PASS**: boot
+A the shim does nothing on a real Ctrl+T (no `dui: tile=`, NOTEPAD keeps its
+original rect, no fault); boot B the W1–W16 matrix re-runs green against the
+applied primitives AND a WM-driven Ctrl+T fans out (`key_fan=1`), the WM
+decides (`wnd: tile`), and the kernel APPLIES the SET_WINDOW rect
+(24,0,837,700) while printing no `dui: tile=` — the WM, not the kernel,
+decided. The `input.zig` host test pins the drained-chord fan-out + the kept
+lower-back/move consumers. fmt/coordination clean, BSS budget re-ran green.
+**#628 stays open** — Gate 5 done; remaining: the geometry/desktop-chrome
+dead blocks beyond the keyboard layer and the registry/convergence path.
+
 **WMS2 is done (claim 8482, issue #622): the kernel render-server register.**
 A new host-testable `kernel/src/wm_server.zig` owns the single WM seat +
 the present-sequence counter BESIDE the unchanged shim; slot 65

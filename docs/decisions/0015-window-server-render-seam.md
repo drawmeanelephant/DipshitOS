@@ -236,6 +236,19 @@ it (the render server already separates policy from blit).
   DIALOG actions 4/5/6 return EINVAL when no dialog is open (the stale
   BSS-zero target stays unreachable — the shim's click path returned
   `.none` first); the shared Cancel rect matches the painted 30px button
-  (x+160..190).
+  (x+160..190). **Gate 5 (claim 9879) DELETED the geometry-policy
+  KEYBOARD-DECISION layer.** WMS5 Gate 2 had already moved these chords to
+  the WM (kind-21 -> handle_wm_key -> SET_WINDOW/SET_STATE); with the W5
+  matrix re-running green while a WM is seated, WMS8's delete rule is
+  satisfied, so the kernel's own chord consumers (pending flags, decode
+  branches, `take_*` accessors in input.zig + the shell idle consumer
+  blocks) are removed for tile/master/minimize/maximize/workspace switch+
+  cycle/fullscreen/always-on-top. The applied primitives are KEPT and stay
+  monitor/dui + SET_STATE driven (the matrix re-runs green THROUGH them);
+  lower-back (Ctrl+Shift+B) + move (Alt+arrows) keyboard consumers are kept
+  (no WM coverage yet — deleting would regress shim mode); Alt+Tab stays
+  (separate WMS6 focus surface). Shim consequence (intended): a drained
+  geometry chord now does nothing in shim (no-WM) mode — the "no compositing
+  policy" end-state.
 - Which `driving_award` policy block drains out of the kernel first (recommended:
   chrome, being minimal and highly observable).
