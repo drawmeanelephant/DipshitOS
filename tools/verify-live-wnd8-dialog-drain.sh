@@ -1,40 +1,39 @@
 #!/usr/bin/env bash
 #
-# verify-live-wnd8-dialog-drain.sh — M32 WMS8 Gate 2 (issue #628) class-B gate:
-# the keyboard-driven about dialog (Ctrl+Shift+A) drains into WND.BIN policy.
+# verify-live-wnd8-dialog-drain.sh — M32 WMS8 Gates 2+3 (issue #628) class-B
+# gate: the keyboard-driven about dialog (Ctrl+Shift+A) drains into WND.BIN
+# policy (Gate 2) and the kernel decision is DELETED (Gate 3).
 #
 # WMS6 left the modal/transient dialogs on the WMS8 backlog ("modal dialogs
-# remain on the WMS8 delete-runbook backlog"). Unlike Gate 1 (the tooltip
-# dwell — provably dead with zero callers), the about dialog is still the
-# shim's ONLY implementation, reachable in default no-WM boots, which WMS8
-# forbids deleting. So this gate is a DRAIN (not a deletion): it gives the WM
-# dialog ownership via a new slot-65 DIALOG subcommand (cmd 11), gates the
-# kernel's own Ctrl+Shift+A self-toggle behind !wm_owns_input (input.zig),
-# keeps the shim copy byte-identical, and proves parity live. The DELETION of
-# the now-dormant kernel decision is a later WMS8 gate.
+# remain on the WMS8 delete-runbook backlog"). Gate 2 (claim 9980) DRAINED the
+# about dialog: a new slot-65 DIALOG subcommand (cmd 11) lets the WM decide
+# WHEN (it owns the kind-21 keyboard stream), applying the SAME
+# `about_dialog_*` primitives the shim's Ctrl+Shift+A chord ran (parity by
+# construction). That parity is green with the WM registered, which satisfies
+# WMS8's delete rule — so Gate 3 (claim 7736) DELETES the kernel's own
+# about-decision: `about_pending`/`take_about()` in input.zig, the shell idle
+# block, and the now-dead `about_dialog_hit_test` + pointer close-button path.
+# The applied primitives + the modal blit stay (cmd 11 still drives them).
 #
 # The about dialog is keyboard-driven: Ctrl+Shift+A (HID usage 0x04 + shift).
 # When a WM is registered the raw chord fans to the WM (kind 21 WM_KEY with
 # MOD_CTRL|MOD_SHIFT), the WM receives usage 0x04 in `handle_wm_key`, and
-# issues DIALOG (cmd 11) with a0=2 (toggle) — the SAME kernel primitive the
-# shim's Ctrl+Shift+A chord runs (parity by construction). The kernel applies
-# it and blits the modal from its own `about_dialog_open` state.
+# issues DIALOG (cmd 11) with a0=2 (toggle). The kernel applies it and blits
+# the modal from its own `about_dialog_open` state.
 #
 # Two boots prove both halves:
-#   * Boot A (shim regression): NO WM. A REAL Ctrl+Shift+A over the
-#     custom-virtio HID keyboard. The shell idle's shim path self-toggles the
-#     about dialog as before (zero regression).
-#     Serial proof: `dui: about=open` prints.
-#   * Boot B (WM-driven): `wnd start`, then a REAL Ctrl+Shift+A. The kernel
-#     must NOT consume it (no `dui: about` — the pending flag is gated behind
-#     !wm_owns_input); the WM receives kind 21, decides, and issues DIALOG.
+#   * Boot A (dormant shim, no WM): NO WM. A REAL Ctrl+Shift+A over the
+#     custom-virtio HID keyboard. The kernel's about-decision is DELETED, so
+#     the chord does NOTHING in shim mode (the issue's "no compositing policy"
+#     end-state) — no `dui: about` line, no fault, shell stays responsive.
+#   * Boot B (WM-driven): `wnd start`, then a REAL Ctrl+Shift+A. The WM
+#     receives kind 21, decides, and issues DIALOG; the kernel applies it.
 #     Serial proof: the WM's `wnd: about` marker AND a nonzero `dialog=` count
 #     in the `wm` observability row AND no `dui: about` line (the kernel did
-#     not decide).
+#     not decide — it no longer has the decision).
 #
-# Zero regression: no WM registered -> the shim Ctrl+Shift+A path is
-# byte-identical (boot A). The `ctrl-shift-a` HID chord token already exists
-# on the headless custom-virtio input channel (the generic `ctrl-shift-` map).
+# The `ctrl-shift-a` HID chord token already exists on the headless
+# custom-virtio input channel (the generic `ctrl-shift-` map).
 #
 # Class B -- Apple silicon + VZ, headless (custom-virtio, no view). CI=yes.
 #
@@ -58,7 +57,7 @@ exec > >(tee "$GATE_LOG") 2>&1
 trap 'sleep 0.5' EXIT
 REPORT="$(art live-wnd8-dialog-report.txt)"
 
-echo "=== verify-live-wnd8-dialog-drain: M32 WMS8 Gate 2 — the about dialog drains into WND.BIN (issue #628) ==="
+echo "=== verify-live-wnd8-dialog-drain: M32 WMS8 Gates 2+3 — the about dialog drains into WND.BIN and the kernel decision is deleted (issue #628) ==="
 
 # --- tool versions + revision ------------------------------------------------
 zig version; swift --version 2>&1 | head -1; sw_vers
@@ -97,10 +96,12 @@ run_boot() {
     return "$RC"
 }
 
-# --- boot A: shim regression (no WM) ------------------------------------------
-# No WM seated -> the shell idle shim still owns Ctrl+Shift+A: a REAL chord
-# over the virtio keyboard self-toggles the about dialog (zero regression).
-echo "--- boot A: no WM — the shim still self-toggles the about dialog (zero regression) ---"
+# --- boot A: dormant shim (no WM) ---------------------------------------------
+# No WM seated -> the kernel's about-decision is DELETED (Gate 3): a REAL
+# Ctrl+Shift+A over the virtio keyboard does NOTHING in shim mode (the issue's
+# "no compositing policy" end-state) — no `dui: about` line, no fault, and the
+# shell stays responsive (script-expect proves the boot is healthy).
+echo "--- boot A: no WM — the dormant shim does nothing on Ctrl+Shift+A (kernel decision deleted) ---"
 printf 'echo bootA-go\n' > "$RUN_DIR/script-A.txt"
 printf 'echo shim-go\n' > "$RUN_DIR/s2-A.txt"
 printf 'echo shim-done\n' > "$RUN_DIR/s3-A.txt"
@@ -115,14 +116,15 @@ run_boot A \
 RC_A=$?
 set -e
 A_OK=0
-SHIM=0
+DORMANT=0
 SER_A="$(art live-wnd8-dialog-serial-A.log)"
 if [ "$RC_A" = 0 ] && [ -f "$SER_A" ]; then
-    # The shim opened the about dialog from the real Ctrl+Shift+A (the `dui:
-    # about=open` line prints from the shell idle — proof the chord worked).
-    SHIM=0
-    grep -a -qF -- "dui: about=open" "$SER_A" && SHIM=1
-    if [ "$SHIM" = 1 ]; then
+    # The kernel's about-decision is DELETED: the shell never prints `dui:
+    # about` (no self-toggle at all). The chord must be a no-op — count 0 —
+    # and the boot must be healthy (rc=0 already implies script-expect met).
+    DORMANT=0
+    grep -a -qF -- "dui: about" "$SER_A" && DORMANT=1
+    if [ "$DORMANT" = 0 ]; then
         A_OK=1
     fi
 fi
@@ -171,16 +173,16 @@ fi
 
 # --- report ------------------------------------------------------------------
 {
-    echo "--- WMS8 Gate 2 live report ---"
-    echo "boot A (shim regression, no WM):"
-    echo "  runner rc=$RC_A  about_shim=$SHIM"
+    echo "--- WMS8 Gates 2+3 live report ---"
+    echo "boot A (dormant shim, no WM):"
+    echo "  runner rc=$RC_A  dui_about_count=$DORMANT (must be 0)"
     echo "  RESULT: $([ "$A_OK" = 1 ] && echo PASS || echo FAIL)"
     echo "boot B (WM-driven about dialog):"
     echo "  runner rc=$RC_B  wm_about=$WM_ABOUT  kernel_about=$KERNEL_ABOUT  key_fan=$KEYFAN  wm_present=$PRESENT  applied=$APPLY"
     echo "  RESULT: $([ "$B_OK" = 1 ] && echo PASS || echo FAIL)"
     echo "---"
     if [ "$A_OK" = 1 ] && [ "$B_OK" = 1 ]; then
-        echo "verify-live-wnd8-dialog-drain: PASS — the shim still self-toggles the about dialog (no WM) AND with WND.BIN registered the WM decided Ctrl+Shift+A (the kernel did not)"
+        echo "verify-live-wnd8-dialog-drain: PASS — with no WM the dormant shim does nothing on Ctrl+Shift+A (kernel decision deleted) AND with WND.BIN registered the WM decided Ctrl+Shift+A and the kernel applied it"
     else
         echo "verify-live-wnd8-dialog-drain: FAIL"
     fi
