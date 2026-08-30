@@ -164,6 +164,7 @@ meaningful — on main.
 | `agent/buffy/wms8-gate5-geometry-keyboard-delete` | [`agent-buffy-wms8-gate5-geometry-keyboard-delete.md`](agent-buffy-wms8-gate5-geometry-keyboard-delete.md) |
 | agent/buffy/wms8-gate6-pointer-drag-delete | [`agent-buffy-wms8-gate6-pointer-drag-delete.md`](agent-buffy-wms8-gate6-pointer-drag-delete.md) |
 | `agent/buffy/wms8-unsaved-drain` | [`agent-buffy-wms8-unsaved-drain.md`](agent-buffy-wms8-unsaved-drain.md) |
+| agent/buffy/wms9-surface-seam-perf | [`agent-buffy-wms9-surface-seam-perf.md`](agent-buffy-wms9-surface-seam-perf.md) |
 | agent/gates fleet-remainder | [`agent-gates-fleet-remainder.md`](agent-gates-fleet-remainder.md) |
 | per-agent worktrees | [`agent-ox-alpha-agent-worktrees.md`](agent-ox-alpha-agent-worktrees.md) |
 | claim lifecycle: declared files + staleness | [`agent-ox-alpha-claim-lifecycle.md`](agent-ox-alpha-claim-lifecycle.md) |
