@@ -533,15 +533,15 @@ pub const notif_center_w: u32 = 300;
 pub const notif_center_h: u32 = 400;
 var notify_ticks: [notify_max]u32 = [_]u32{0} ** notify_max;
 
-/// M27 G6: tooltip state — BSS, no heap.
-/// Hover over UI elements for 1 second → tooltip appears with description.
+/// M27 G6: tooltip state — BSS, no heap. M32 WMS8 Gate 1 (claim 4270): the
+/// dwell-decision is gone — the WM owns WHEN a tooltip shows via TOOLTIP
+/// (cmd 8); the kernel keeps only the clamp + place + blit surface (visible,
+/// position, text). No kernel hover timer remains.
 pub var tooltip_visible: bool = false;
-pub var tooltip_timer: u32 = 0;
 pub var tooltip_x: u32 = 0;
 pub var tooltip_y: u32 = 0;
 pub var tooltip_text: [32]u8 = undefined;
 pub var tooltip_text_len: u8 = 0;
-pub const tooltip_hover_ticks: u32 = 10; // ~1 second at 10 Hz composite
 
 /// M27 G2: about dialog state — BSS, no heap.
 pub var about_dialog_open: bool = false;
@@ -2393,43 +2393,23 @@ pub fn dismiss_transients() void {
 // M27 G6 — Tooltip system
 // ---------------------------------------------------------------------------
 
-/// M27 G6: set a tooltip at the current cursor position. Called by the
-/// compositor when hovering over a UI element. The tooltip appears after
-/// tooltip_hover_ticks of steady hover.
-pub fn tooltip_set(x: u32, y: u32, text: []const u8) void {
-    tooltip_x = x;
-    tooltip_y = y;
-    const len = @min(text.len, 32);
-    @memcpy(tooltip_text[0..len], text[0..len]);
-    tooltip_text_len = @intCast(len);
-    tooltip_timer = 0;
-    tooltip_visible = false;
-}
-
-/// M27 G6: clear the tooltip (called on mouse move).
+/// M27 G6 / M32 WMS8 Gate 1 (claim 4270): tooltip surface functions — the
+/// kernel clamps + places + blits; the dwell/hover decision is the WM's.
+/// M32 WMS6 Gate C (issue #626) / M32 WMS8 Gate 1 (claim 4270): clear the
+/// tooltip — the WM owns the WHEN/HIDE decision; its TOOLTIP (cmd 8) clear
+/// reaches through here. No kernel hover timer remains.
 pub fn tooltip_clear() void {
     tooltip_visible = false;
-    tooltip_timer = 0;
     tooltip_text_len = 0;
 }
 
-/// M27 G6: advance the tooltip hover timer. Called once per composite.
-/// Shows the tooltip after the hover delay.
-pub fn tooltip_advance_tick() void {
-    if (tooltip_text_len == 0) return;
-    tooltip_timer +|= 1;
-    if (tooltip_timer >= tooltip_hover_ticks) {
-        tooltip_visible = true;
-    }
-}
-
-/// M32 WMS6 Gate C (issue #626): show the tooltip IMMEDIATELY — the decision
-/// channel for the registered WM (TOOLTIP cmd 8). The WM owns the dwell policy
-/// by choosing WHEN to show; the shim's 10-tick timer is not a WM concern and
-/// dies with WMS8. The kernel still clamps + places + blits the box.
+/// M32 WMS6 Gate C (issue #626): set + show the tooltip IMMEDIATELY — the
+/// decision channel for the registered WM (TOOLTIP cmd 8). The WM owns the
+/// dwell policy by choosing WHEN to show; the kernel's old 10-tick hover timer
+/// and its dwell decision died with WMS8 Gate 1. The kernel still clamps +
+/// places + blits the box.
 pub fn tooltip_show_now() void {
     if (tooltip_text_len == 0) return;
-    tooltip_timer = tooltip_hover_ticks;
     tooltip_visible = true;
     _ = mark_dirty(0);
 }
@@ -2438,8 +2418,15 @@ pub fn tooltip_show_now() void {
 /// cursor (the `cursor_x/cursor_y` the box renders below) — the one call the
 /// registered WM's TOOLTIP show reaches through (clamped 32-byte bound).
 pub fn tooltip_show(text: []const u8) void {
-    tooltip_set(cursor_x, cursor_y, text);
-    tooltip_show_now();
+    // Place at the kernel's cursor; the WM decided WHEN + WHAT. The clamp is
+    // 32 bytes (the frozen WM_RPC bound) — WMS8 keeps only the surface.
+    tooltip_x = cursor_x;
+    tooltip_y = cursor_y;
+    const len = @min(text.len, 32);
+    @memcpy(tooltip_text[0..len], text[0..len]);
+    tooltip_text_len = @intCast(len);
+    tooltip_visible = true;
+    _ = mark_dirty(0);
 }
 
 // ---------------------------------------------------------------------------
@@ -3444,8 +3431,6 @@ pub fn composite() virtio_gpu.CmdResult {
     _ = unsaved_dialog_advance_tick();
     // M21 W16: advance transient window timeouts.
     _ = transient_advance_tick();
-    // M27 G6: advance tooltip hover timer.
-    tooltip_advance_tick();
     draw_chrome();
     if (!virtio_gpu.gpu_ready) return .not_ready;
     presents += 1;

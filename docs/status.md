@@ -195,6 +195,21 @@ that gate re-runs green), and the no-WM boot exercises the syscall fallback
 thunk lib (`mkdyn-elf.py`) that can't host async mail, so the client lives in
 `lib/ui.zig` (documented in ADR 0015).
 
+**WMS8 (issue #628) is in progress — Gate 1 landed (claim 4790): deleted the
+kernel tooltip dwell-decision.** The slimming card is explicitly multi-PR (one
+policy block per claim, down toward ~500 lines). Gate 1 removed a block that
+was provably dead — the kernel's `tooltip_set`/`tooltip_advance_tick` dwell
+timer had no callers and the 10-tick hover decision could never reveal the box;
+the WM owns WHEN a tooltip shows via the WMS6 Gate C TOOLTIP (cmd 8) seam. The
+kernel now keeps only the tooltip clamp/place/blit surface + the WM's decision
+channel (`tooltip_show`/`tooltip_show_now`/`tooltip_clear`) + `dui tooltip-state`
+observability. WMS6 Gate C re-ran **PASS on VZ** both boots (dormant shim shows
+nothing; WM still decides `visible=yes text=Clock`); 215 driving_award + 470
+syscall host tests green, fmt/coordination clean, BSS budget re-ran green with
+added headroom. **#628 stays open** — this is Gate 1 of the deletion sequence;
+remaining gates: the policy-introspection surface, geometry/desktop-chrome dead
+blocks, and the registry/convergence path.
+
 **WMS2 is done (claim 8482, issue #622): the kernel render-server register.**
 A new host-testable `kernel/src/wm_server.zig` owns the single WM seat +
 the present-sequence counter BESIDE the unchanged shim; slot 65
