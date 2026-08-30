@@ -34,3 +34,17 @@
 - Measurement artifact: `artifacts/wms9-fill-reduction.md` — baseline vs.
   after syscall-count math (~39x fewer SVC entries on a dense 80-char line).
 - Committed and pushed; PR #674 opened (Resolves #629).
+
+## 2026-08-30 — WMS9 libui_so follow-up landed; claim closed (claim 6156, issue #629)
+
+- Popped the "wip: libui_so batching follow-up" stash and completed it:
+  `user/src/libui_so.zig` now routes dynamically-linked apps through the same
+  batcher as the static toolkit — `ui_draw_char_8x8` → `ui.draw_char` (span
+  batching), `ui_draw_string` → `ui.draw_text`, `ui_draw_button` background +
+  4 border fills → `win_fill_batched`, `ui_draw_rect` → `ui.draw_rect`
+  (batched), plus new `ui_win_fill_batched`/`ui_flush_fills` exports.
+- Verified: `zig build` clean; `zig test user/src/lib/ui.zig` 44/44 green
+  (incl. the 4 WMS9 span/batcher tests); full `just test` green;
+  `zig fmt --check` clean.
+- Claim 6156 flipped to ✅ with the full result; march tracker WMS9 row →
+  ✅ done. WMS9 CLOSED. WMS10 (#630) remains deferred per ADR 0015 D5.
