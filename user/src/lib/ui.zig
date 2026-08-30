@@ -8,6 +8,34 @@ const std = @import("std");
 pub const font8x8 = @import("font8x8.zig");
 
 // ---------------------------------------------------------------------------
+// M32 WMS7 Gate B (issue #627): the app↔WM mailbox protocol (WM_RPC) wire.
+// This toolkit is compiled into 28 app modules whose module paths cannot
+// reach `kernel/src/`, so the wire mirror below is frozen HERE and the
+// live gate's byte-level round-trip (ui frame → WND.BIN parse → ack) is the
+// integration drift guard: if this ever drifts from `wnd_core.WmRpc`, the
+// WM's `wnd: mail` serve + the `wmrpc: *-ack` markers stop matching and the
+// gate fails loudly. Layout is byte-identical to kernel/src/wnd_core.zig.
+// ---------------------------------------------------------------------------
+pub const WmRpc = extern struct {
+    kind: u8,
+    id: u8,
+    seq: u8,
+    reply_to: u8,
+    applied: u8,
+    pad: u8,
+    x: u16,
+    y: u16,
+    w: u16,
+    h: u16,
+    title: [wm_rpc_title_max]u8,
+};
+pub const wm_rpc_title_max: usize = 24;
+pub const wm_rpc_kind_raise: u8 = 1;
+pub const wm_rpc_kind_config: u8 = 2;
+pub const wm_rpc_reply_flag: u8 = 0x80;
+pub const wm_rpc_max: usize = 64;
+
+// ---------------------------------------------------------------------------
 // Syscall Numbers & ABI Constants (ADR 0007 / ADR 0009 / ADR 0010)
 // ---------------------------------------------------------------------------
 
@@ -21,6 +49,8 @@ pub const sys_win_fill_num: u64 = 13;
 pub const sys_win_present_num: u64 = 14;
 pub const sys_win_close_num: u64 = 15;
 pub const sys_win_move_num: u64 = 16;
+pub const sys_ipc_send_num: u64 = 5;
+pub const sys_ipc_recv_num: u64 = 6;
 pub const sys_win_raise_num: u64 = 17;
 pub const sys_win_get_num: u64 = 18;
 pub const sys_win_query_num: u64 = 19;
@@ -468,7 +498,10 @@ pub fn win_close(id: u32) void {
     _ = syscall1(sys_win_close_num, id);
 }
 
-/// Arc4 #238: raise the window to the top of the z-order.
+/// Arc4 #238: raise the window to the top of the z-order — the frozen-syscall
+/// path (slot 49). WMS7 Gate B: `wm_raise_front` below is how the toolkit
+/// "asks the WM"; this syscall path is the shim-mode / no-WM fallback and
+/// stays intact for the frozen render-state ABI.
 pub fn win_raise_front(id: u32) bool {
     return syscall1(sys_win_raise_front_num, id) == 0;
 }
@@ -476,6 +509,162 @@ pub fn win_raise_front(id: u32) bool {
 /// Arc4 #238: lower the window to the bottom of the z-order.
 pub fn win_lower_back(id: u32) bool {
     return syscall1(sys_win_lower_back_num, id) == 0;
+}
+
+// ---------------------------------------------------------------------------
+// M32 WMS7 Gate B (issue #627): the toolkit WM_RPC client.
+//
+// Apps "ask the WM" instead of "syscall the desktop": these helpers build a
+// `WmRpc` frame (single-sourced in wnd_core), send it to the registered WM's
+// mailbox (sys_ipc_send, slot 5) and await its ack reply in OUR OWN inbox
+// (sys_ipc_recv, slot 6 — recv always reads the caller's own ring, so the
+// toolkit needs no separate self-pid). If no WM is registered (the shim
+// desktop), they fall back to the frozen syscalls — byte-identical behavior,
+// additive back-compat.
+//
+// The API is synchronized-shaped (send + bounded poll on the reply), the
+// issue's "async inversion" note answered explicitly: the WM serves at its
+// 1 Hz kind-18 wake, so a mail op takes ≤ 1 s; app code stays a plain call.
+// ---------------------------------------------------------------------------
+
+/// The registered WM server's process name (the WMS3 `wnd start` bootstrap
+/// execs WND.BIN; a future WM keeps the same name via ADR 0015).
+pub const wm_proc_name: []const u8 = "WND.BIN";
+/// The proc-snapshot buffer bound (16 rows × 40 B — plenty for any fleet).
+pub const wm_procs_buf: usize = 16 * 40;
+/// The mailbox slot bound the WM_RPC frame must fit (the frozen 64 B).
+pub const wm_rpc_slot_bytes: usize = wm_rpc_max;
+
+/// Scan `sys_procs` for a RUNNING process whose 16-byte name equals `want`
+/// (the claim-5799 snapshot row: u64 pid / u64 state / u64 exit / 16-byte
+/// NUL-padded name). Returns its pid, or 0 if absent. `sys_procs` returns the
+/// ROW COUNT, not bytes (the claim-5799 contract).
+pub fn wm_find_pid(want: []const u8) u64 {
+    var rows: [wm_procs_buf]u8 align(8) = undefined;
+    const row_count = get_procs(&rows);
+    if (row_count <= 0) return 0;
+    var infos: [16]ProcInfo = undefined;
+    const n = parse_procs(&rows, @intCast(row_count), &infos);
+    for (infos[0..n]) |p| {
+        if (p.state != .running) continue;
+        if (std.mem.eql(u8, p.name[0..p.name_len], want)) return p.pid;
+    }
+    return 0;
+}
+
+/// Resolve the WM's pid and the caller-specified self pid in ONE sys_procs
+/// scan — the WM acks to `reply_to`, so the requester must supply its own
+/// pid (resolved by its own process name, the WMRPC pattern). Returns
+/// (wm_pid, self_pid); a zero wm_pid means shim mode / no WM.
+pub fn wm_peers(self_name: []const u8) struct { wm: u64, self: u64 } {
+    var rows: [wm_procs_buf]u8 align(8) = undefined;
+    const row_count = get_procs(&rows);
+    var wm: u64 = 0;
+    var self_pid: u64 = 0;
+    if (row_count > 0) {
+        var infos: [16]ProcInfo = undefined;
+        const n = parse_procs(&rows, @intCast(row_count), &infos);
+        for (infos[0..n]) |p| {
+            if (p.state != .running) continue;
+            const nm = p.name[0..p.name_len];
+            if (std.mem.eql(u8, nm, wm_proc_name)) wm = p.pid;
+            if (self_name.len != 0 and std.mem.eql(u8, nm, self_name)) self_pid = p.pid;
+        }
+    }
+    return .{ .wm = wm, .self = self_pid };
+}
+
+/// Discover the registered WM's pid (0 = none / shim mode).
+pub fn wm_available() u64 {
+    return wm_find_pid(wm_proc_name);
+}
+
+/// Send one WM_RPC request and await its ack in our own inbox. Returns
+/// whether the WM applied it. `self_name` identifies THIS process so the
+/// WM's ack routes back through `sys_ipc_send(reply_to)`; recv then reads
+/// our own ring. With the WM's 1 Hz serve cadence the bounded poll is far
+/// more than enough; a timeout returns false (honest — the gate would then
+/// fail rather than fake it). No WM reachable → false (caller falls back to
+/// the frozen syscall).
+pub fn wm_mail_request(kind: u8, id: u32, x: u16, y: u16, w: u16, h: u16, title: []const u8, self_name: []const u8, seq: u8) bool {
+    const peers = wm_peers(self_name);
+    if (peers.wm == 0 or peers.self == 0) return false;
+    var req: WmRpc = .{
+        .kind = kind,
+        .id = @intCast(id & 0xff),
+        .seq = seq,
+        .reply_to = @intCast(peers.self & 0xff),
+        .applied = 0,
+        .pad = 0,
+        .x = x,
+        .y = y,
+        .w = w,
+        .h = h,
+        .title = [_]u8{0} ** wm_rpc_title_max,
+    };
+    const take = @min(title.len, wm_rpc_title_max);
+    @memcpy(req.title[0..take], title[0..take]);
+    const req_bytes = std.mem.asBytes(&req);
+    _ = syscall3(sys_ipc_send_num, peers.wm, @intFromPtr(req_bytes.ptr), req_bytes.len);
+    // Await our own inbox for the ack (recv reads the CALLER's ring, so no
+    // self-pid needed): a bounded poll over a sleep+yield.
+    var tries: u32 = 0;
+    while (tries < 4000) : (tries += 1) {
+        var raw: [wm_rpc_slot_bytes]u8 = undefined;
+        const got = syscall2(sys_ipc_recv_num, @intFromPtr(&raw), raw.len);
+        if (got >= @sizeOf(WmRpc)) {
+            var rep: WmRpc = undefined;
+            @memcpy(std.mem.asBytes(&rep), raw[0..@sizeOf(WmRpc)]);
+            if (rep.kind & wm_rpc_reply_flag != 0 and rep.seq == req.seq) {
+                return rep.applied != 0;
+            }
+        }
+        _ = syscall0(sys_yield_num);
+    }
+    return false; // timeout
+}
+
+/// Ask the WM to raise window `id` (WIN_RAISE, kind 1) — the toolkit's
+/// "ask the WM" raise. `self_name` is THIS process's own name (its pid is
+/// resolved for the ack's `reply_to`). Falls back to the frozen
+/// `sys_win_raise_front` when no WM is registered (shim mode), so behavior
+/// is identical either way.
+pub fn wm_raise_front(id: u32, self_name: []const u8) bool {
+    if (wm_mail_request(wm_rpc_kind_raise, id, 0, 0, 0, 0, "", self_name, 1)) return true;
+    return win_raise_front(id); // fallback
+}
+
+/// Ask the WM to move/resize window `id` to `x,y,w,h` (WIN_CONFIG, kind 2).
+/// `self_name` is THIS process's own name (ack routing). Falls back to the
+/// frozen `sys_win_move` when no WM is registered.
+pub fn wm_config(id: u32, x: u32, y: u32, w: u32, h: u32, self_name: []const u8) bool {
+    if (wm_mail_request(wm_rpc_kind_config, id, @intCast(x), @intCast(y), @intCast(w), @intCast(h), "", self_name, 1)) return true;
+    // Fallback: `sys_win_move(id, x, y)` takes x and y as SEPARATE args
+    // (slot 16 — clamp+move, owner-restricted); there is no syscall resize
+    // here, so the byte-identical frozen behavior is the move (static size
+    // keeps the shim path honest; a caller wanting resize still uses
+    // sys_win_resize when no WM is present).
+    return syscall3(sys_win_move_num, id, x, y) == 0;
+}
+
+test "WMS7 Gate B: the toolkit WM_RPC wire mirror matches the frozen wnd_core ABI" {
+    // The toolkit's mirror (user/src/lib/ui.zig) must stay byte-identical to
+    // kernel/src/wnd_core.zig's WmRpc (the WM server parses this exact
+    // layout). The live gate is the integration drift guard, but this host
+    // test locks the layout/consts to the frozen ADR-0015 values so a drift
+    // is caught WITHOUT a VM.
+    try std.testing.expectEqual(@as(u8, 1), wm_rpc_kind_raise);
+    try std.testing.expectEqual(@as(u8, 2), wm_rpc_kind_config);
+    try std.testing.expectEqual(@as(u8, 0x80), wm_rpc_reply_flag);
+    try std.testing.expectEqual(@as(u8, 24), wm_rpc_title_max);
+    try std.testing.expectEqual(@as(usize, 64), wm_rpc_max);
+    // The frozen little-endian layout: kind/id/seq/reply/applied/pad (6 B),
+    // x/y/w/h (8 B), 24-byte title = 38 total; the frame fits the 64-B slot.
+    try std.testing.expectEqual(@as(usize, 0), @offsetOf(WmRpc, "kind"));
+    try std.testing.expectEqual(@as(usize, 6), @offsetOf(WmRpc, "x"));
+    try std.testing.expectEqual(@as(usize, 14), @offsetOf(WmRpc, "title"));
+    try std.testing.expectEqual(@as(usize, 38), @sizeOf(WmRpc));
+    try std.testing.expect(@sizeOf(WmRpc) <= wm_rpc_max);
 }
 
 /// Arc4 #240: post a desktop notification toast. level: 0=info, 1=warn, 2=error.
