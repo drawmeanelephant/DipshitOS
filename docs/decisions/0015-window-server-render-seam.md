@@ -175,7 +175,7 @@ it (the render server already separates policy from blit).
   the requesting app's pid, and emits `wnd: mail` (the gate grep target). Apps
   poll their own inbox for the ack; with no WM the app prints `wmrpc: no-wm`
   and parks (additive back-compat — frozen syscalls untouched).
-- **Toolkit re-point (WMS7 Gate B, claim 9274):** `user/src/lib/ui.zig` — the
+- **Toolkit re-point (WMS7 Gate B, claim 9994):** `user/src/lib/ui.zig` — the
   toolkit compiled into every static app — carries the WM_RPC client. It holds a
   FROZEN wire mirror of `WmRpc` (byte-identical layout; `lib/ui.zig`'s module
   path cannot import `kernel/src/`, so the 28 app modules get the mirror and

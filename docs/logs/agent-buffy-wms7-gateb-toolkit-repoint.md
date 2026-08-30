@@ -1,9 +1,9 @@
-# Branch log — agent/buffy/wms7-gateb-toolkit-repoint
+# Log — `agent/buffy/wms7-gateb-toolkit-repoint`
 
 ## 2026-08-29 — WMS7 Gate B claimed (issue #627)
 
 - Claimed **WMS7 Gate B — the toolkit (ui.zig + LIBUI.SO) learns WM_RPC** as
-  `docs/claims/9274-wms7-gateb-toolkit-repoint.md` (status 🔄, heartbeat
+  `docs/claims/9994-wms7-gateb-toolkit-repoint.md` (status 🔄, heartbeat
   2026-08-29). Branch `agent/buffy/wms7-gateb-toolkit-repoint` cut from `main`
   at `51dac21` (post merge of Gate A, PR #656, and the index regen #657).
 - Depends on WMS7 Gate A (claim 9604): the `WmRpc` wire in `wnd_core.zig`
@@ -20,7 +20,7 @@
   boot; the syscall-render ABI (slots 12–20) stays frozen.
 ## 2026-08-29 — WMS7 Gate B complete; live gate PASS on VZ; WMS7 COMPLETE
 
-- **Implemented + landed Gate B (claim 9274, issue #627): the toolkit learns WM_RPC.**
+- **Implemented + landed Gate B (claim 9994, issue #627): the toolkit learns WM_RPC.**
 - `user/src/lib/ui.zig` (the toolkit every static app compiles) gains the WM_RPC
   client, fully self-contained:
   - A FROZEN wire mirror of `WmRpc` (kind / id / seq / reply_to / applied / pad /

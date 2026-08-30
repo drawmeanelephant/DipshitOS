@@ -175,7 +175,7 @@ done (claim 1484, issue #621): ADR 0015 accepted; slot-65 `sys_wmctl`
 subcommand encoding + error contract frozen in ADR 0007; kind-18
 `COMPOSITE_TICK` (routing-restricted) in ADR 0009.
 
-**WMS7 is done (claims 9604 + 9274, issue #627): the app↔WM mailbox protocol,
+**WMS7 is done (claims 9604 + 9994, issue #627): the app↔WM mailbox protocol,
 proven end-to-end — Gate A (wire + server loop) and Gate B (the toolkit learns
 it).** The ADR 0015 size decision is answered — "grow nothing": the bounded
 WM_RPC wire format fits the frozen 64-byte mailbox slot (`message_max`
