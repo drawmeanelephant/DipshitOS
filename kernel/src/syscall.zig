@@ -2356,6 +2356,28 @@ fn handle_wmctl(args: Args, _: *exceptions.VectorFrame) u64 {
             wm_server.note_tray();
             return 0;
         },
+        wm_server.wmctl_dialog => {
+            // M32 WMS8 Gate 2 (issue #628): the WM — not the kernel — owns
+            // the keyboard-driven modal-dialog decision (M27 G2 about,
+            // Ctrl+Shift+A). The WM receives kind 21 and issues DIALOG; the
+            // kernel applies the SAME clamped primitives the shim runs
+            // (`about_dialog_open_dialog` / `about_dialog_close` /
+            // `about_dialog_toggle`) so a WM decision and a shim chord are
+            // byte-identical (parity by construction). a0 = 0 close,
+            // 1 open, 2 toggle. The kernel still blits the modal from its
+            // own `about_dialog_open` state.
+            if (!wm_server.registered()) return error_result(.enosys);
+            if (wm_server.registered_pid() != pid) return error_result(.eacces);
+            const action = args[1];
+            switch (action) {
+                0 => driving_award.about_dialog_close(),
+                1 => driving_award.about_dialog_open_dialog(),
+                2 => driving_award.about_dialog_toggle(),
+                else => return error_result(.einval),
+            }
+            wm_server.note_dialog();
+            return 0;
+        },
         wm_server.wmctl_request_present => {
             if (!wm_server.registered()) return error_result(.enosys);
             if (wm_server.registered_pid() != pid) return error_result(.eacces);
@@ -4281,6 +4303,45 @@ test "syscall: TRAY (cmd 10, claim 3744) stores the WM's tray widget content" {
     try std.testing.expect(!driving_award.wm_tray_clock_set);
     try std.testing.expect(!driving_award.wm_tray_theme_set);
     try std.testing.expect(!driving_award.wm_tray_clip_set);
+}
+
+test "syscall: DIALOG (cmd 11, claim 9980) applies the WM's about-dialog decision" {
+    userspace.init();
+    init(test_writer);
+    wm_server.init();
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0); // task 2 = process 0 (boot payload)
+    scheduler.start();
+    var frame = fresh_frame();
+    try std.testing.expect(scheduler.yield_current()); // shell -> worker
+    try std.testing.expect(scheduler.yield_current()); // worker -> user (2)
+
+    // No WM registered: DIALOG -> ENOSYS (the ADR 0007 "no WM" case).
+    try std.testing.expectEqual(error_result(.enosys), dispatch(sys_wmctl, .{ wm_server.wmctl_dialog, 2, 0, 0, 0, 0 }, &frame));
+
+    // Seed the WM as pid 0.
+    try std.testing.expect(wm_server.register(0));
+    try std.testing.expect(!driving_award.about_dialog_open);
+    // The WM's DIALOG decision: a0=1 OPEN opens the about dialog.
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_wmctl, .{ wm_server.wmctl_dialog, 1, 0, 0, 0, 0 }, &frame));
+    try std.testing.expect(driving_award.about_dialog_open);
+    try std.testing.expectEqual(@as(u64, 1), wm_server.info().dialog_count);
+    // a0=2 TOGGLE closes it (was open) — parity with the shim's self-toggle.
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_wmctl, .{ wm_server.wmctl_dialog, 2, 0, 0, 0, 0 }, &frame));
+    try std.testing.expect(!driving_award.about_dialog_open);
+    try std.testing.expectEqual(@as(u64, 2), wm_server.info().dialog_count);
+    // a0=0 CLOSE is a no-op when already closed but still counted (an applied
+    // decision), and a0=9 is EINVAL (not counted).
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_wmctl, .{ wm_server.wmctl_dialog, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u64, 3), wm_server.info().dialog_count);
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_wmctl, .{ wm_server.wmctl_dialog, 9, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u64, 3), wm_server.info().dialog_count);
+
+    // Teardown: no leaked input ownership into the aggregated binary.
+    try std.testing.expect(wm_server.unregister(0));
+    try std.testing.expect(!driving_award.wm_owns_input);
+    try std.testing.expect(!driving_award.about_dialog_open); // teardown restores
 }
 
 test "syscall: wait_event block+wake preserves the event buffer across the svc re-execution (claim 6359)" {

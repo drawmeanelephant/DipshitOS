@@ -6498,6 +6498,10 @@ fn cmd_wm(m: *Monitor, args: []const []const u8) ExecError {
         // widget-content decisions applied (the gate greps `tray=`).
         m.console.puts(" tray=");
         m.console.print_u64(info.tray_count);
+        // M32 WMS8 Gate 2 (issue #628): the dialog observability — DIALOG
+        // (cmd 11) modal-dialog decisions (about open/close/toggle) applied.
+        m.console.puts(" dialog=");
+        m.console.print_u64(info.dialog_count);
         m.console.puts("\n");
         var rows: [driving_award.max_windows]driving_award.ChromeRow = undefined;
         const n = driving_award.wm_chrome_rows(&rows);

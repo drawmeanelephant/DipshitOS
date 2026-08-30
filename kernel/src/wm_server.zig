@@ -77,6 +77,15 @@ pub const wmctl_dock: u64 = 9;
 /// (low byte) | clipboard filled (bit 8). The kernel clamps + stores +
 /// repaints; the shim fallback re-derives all three from its own state.
 pub const wmctl_tray: u64 = 10;
+/// M32 WMS8 Gate 2 (issue #628): DIALOG — the keyboard-driven modal dialogs
+/// (M27 G2 about, Ctrl+Shift+A). The WM — not the kernel — decides WHEN to
+/// open/close/toggle the about dialog (it owns the kind-21 keyboard stream);
+/// the kernel applies the SAME clamped primitives the shim runs
+/// (`about_dialog_open_dialog` / `about_dialog_close` / `about_dialog_toggle`)
+/// and blits the modal from its own `about_dialog_open` state. a0 = action:
+/// 0 close, 1 open, 2 toggle. A WM decision and a shim chord are identical
+/// kernel actions (parity by construction).
+pub const wmctl_dialog: u64 = 11;
 
 /// The single registered WM server process id; null = no WM registered
 /// (shim mode, the default — every pre-M32 gate runs in this state).
@@ -108,6 +117,10 @@ var dock_count: u64 = 0;
 /// M32 WMS6 Gate E (issue #626): TRAY submissions accepted — the WM's tray
 /// widget-content decisions (clock/theme/clipboard) applied.
 var tray_count: u64 = 0;
+/// M32 WMS8 Gate 2 (issue #628): DIALOG (cmd 11) submissions accepted — the
+/// WM's keyboard-driven modal-dialog decisions (about open/close/toggle)
+/// applied by the kernel.
+var dialog_count: u64 = 0;
 /// Set when the registered WM exits (teardown) — the shell idle loop drains
 /// this into the `wm: unregistered, shim resumed` report (the exit path is
 /// IRQ context and console-free, so the report is drained like the process
@@ -128,6 +141,7 @@ pub fn init() void {
     tooltip_count = 0;
     dock_count = 0;
     tray_count = 0;
+    dialog_count = 0;
     pointer_fan_count = 0;
     window_mirror_count = 0;
     key_fan_count = 0;
@@ -268,6 +282,7 @@ pub const WmInfo = struct {
     tooltip_count: u64,
     dock_count: u64,
     tray_count: u64,
+    dialog_count: u64,
     pointer_fan_count: u64,
     window_mirror_count: u64,
     key_fan_count: u64,
@@ -287,6 +302,7 @@ pub fn info() WmInfo {
         .tooltip_count = tooltip_count,
         .dock_count = dock_count,
         .tray_count = tray_count,
+        .dialog_count = dialog_count,
         .pointer_fan_count = pointer_fan_count,
         .window_mirror_count = window_mirror_count,
         .key_fan_count = key_fan_count,
@@ -406,6 +422,11 @@ pub fn note_dock() void {
 /// Note a TRAY (cmd 10) submission — the WM's tray widget-content decision.
 pub fn note_tray() void {
     tray_count +%= 1;
+}
+
+/// Note a DIALOG (cmd 11) submission — the WM's modal-dialog decision.
+pub fn note_dialog() void {
+    dialog_count +%= 1;
 }
 
 // ---------------------------------------------------------------------------

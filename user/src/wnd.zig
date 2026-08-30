@@ -96,6 +96,13 @@ const wmctl_tray: u64 = 10;
 const tray_flag_clock: u64 = 0b001;
 const tray_flag_theme: u64 = 0b010;
 const tray_flag_clip: u64 = 0b100;
+// WMS8 Gate 2 (issue #628): the modal-dialog decision channel. DIALOG (cmd
+// 11) a0 = 0 close / 1 open / 2 toggle. The WM — not the kernel — decides
+// WHEN the about dialog opens/closes/toggles (it owns the kind-21 keyboard
+// stream); the kernel applies the same clamped primitives the shim runs and
+// blits the modal from its own `about_dialog_open` state.
+const wmctl_dialog: u64 = 11;
+const dialog_toggle_act: u64 = 2;
 /// sys_clipboard_get (slot 39) — the WM probes the clipboard each tray
 /// refresh (filled = return length != 0) to decide the indicator state.
 const sys_clipboard_get: u64 = 39;
@@ -267,6 +274,21 @@ pub const tray_tooltip_text: []const u8 = "Clock";
 pub const dock_marker: []const u8 = "wnd: dock";
 pub const dock_labels = [_][]const u8{ "Calc", "Notes", "Terminal", "Browser", "Settings" };
 
+// WMS8 Gate 2 (issue #628): the about-dialog decision marker (the live gate
+// greps `wnd: about` to prove the WM — not the kernel — decided Ctrl+Shift+A).
+pub const about_marker: []const u8 = "wnd: about\n";
+
+/// WMS8 Gate 2 (issue #628): the about-dialog decision. Ctrl+Shift+A (kind
+/// 21, usage 0x04) fans to the WM because it owns the keyboard stream; the WM
+/// issues DIALOG (cmd 11) toggle — the SAME kernel primitive the shim's
+/// Ctrl+Shift+A chord runs, so a WM decision and a shim chord are byte-
+/// identical (parity by construction). The kernel blits the modal from its
+/// own state.
+fn toggle_about() void {
+    _ = syscall6(sys_wmctl, wmctl_dialog, dialog_toggle_act, 0, 0, 0, 0);
+    write_marker(about_marker);
+}
+
 // WMS6 Gate E (issue #626): the tray decision marker — written when the WM
 // issues TRAY with CHANGED content (`wnd: tray clock=HH:MM theme=D
 // clip=yes/no`). The live gate greps it to prove the WM — not the kernel —
@@ -311,6 +333,7 @@ pub const usage_f3: u8 = 0x5a;
 pub const usage_backtick: u8 = 0x35;
 pub const usage_f11: u8 = 0x5c;
 pub const usage_tab: u8 = 0x2b;
+pub const usage_a: u8 = 0x04; // M27 G2 / WMS8 Gate 2: Ctrl+Shift+A toggles the about dialog
 
 // WMS4 (issue #624): the EXACT values the chrome-descriptor blob embeds.
 // Pinned against the shared wnd_core parity policy below, so the EL0 blob
@@ -912,6 +935,10 @@ fn handle_wm_key(usage: u8, flags: u16) void {
             toggle_always_on_top();
             return;
         }
+        if (usage == usage_a) {
+            toggle_about();
+            return;
+        }
     }
     if (usage == usage_f11) {
         toggle_fullscreen();
@@ -1225,6 +1252,13 @@ test "wnd: the marker/tuning shapes are pinned (live-gate grep targets)" {
     try std.testing.expectEqual(@as(u8, 0x17), usage_t);
     try std.testing.expectEqual(@as(u8, 0x10), usage_m);
     try std.testing.expectEqual(@as(u8, 0x11), usage_n);
+    // WMS8 Gate 2 (issue #628): the about-dialog channel — subcommand 11,
+    // toggle action 2, the Ctrl+Shift+A HID usage, and the decision marker
+    // (the live gate greps `wnd: about`).
+    try std.testing.expectEqualStrings("wnd: about\n", about_marker);
+    try std.testing.expectEqual(@as(u64, 11), wmctl_dialog);
+    try std.testing.expectEqual(@as(u64, 2), dialog_toggle_act);
+    try std.testing.expectEqual(@as(u8, 0x04), usage_a);
 }
 
 test "wnd: the WMS6 tray policy formats HH:MM and issues TRAY on change only" {
