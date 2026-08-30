@@ -113,6 +113,27 @@ pub fn title_bar_contains(g: Geom, x: u32, y: u32) bool {
     return x >= g.x and x < g.x + g.w and y >= g.y and y < g.y + title_bar_h;
 }
 
+/// WMS8 Gate 4 (issue #628): the unsaved-changes dialog's button geometry.
+/// Single source: the kernel's `unsaved_dialog_click` rects and WND.BIN's
+/// EL0 button hit-test use the SAME numbers (200x100 centered on the
+/// scanout; Save / Don't Save / Cancel on the bottom row) — parity by
+/// construction. Pure.
+pub const unsaved_dialog_w: u32 = 200;
+pub const unsaved_dialog_h: u32 = 100;
+
+pub const UnsavedChoice = enum { save, dont_save, cancel, none };
+
+pub fn unsaved_dialog_choice_at(fw: u32, fh: u32, x: u32, y: u32) UnsavedChoice {
+    const dlg_x: u32 = if (fw > unsaved_dialog_w) (fw - unsaved_dialog_w) / 2 else 0;
+    const dlg_y: u32 = if (fh > unsaved_dialog_h) (fh - unsaved_dialog_h) / 2 else 0;
+    if (y >= dlg_y + unsaved_dialog_h - 30 and y < dlg_y + unsaved_dialog_h - 10) {
+        if (x >= dlg_x + 20 and x < dlg_x + 80) return .save;
+        if (x >= dlg_x + 90 and x < dlg_x + 150) return .dont_save;
+        if (x >= dlg_x + 160 and x < dlg_x + 220) return .cancel;
+    }
+    return .none;
+}
+
 /// The z-order rank of a window by id (the registry index, 0 = bottom), or
 /// null. Pure — the number the kernel's monitor row and the EL0
 /// `sys_win_query` both report; the WM server uses it once it owns the
@@ -624,6 +645,19 @@ test "wnd_core: WMS5 Gate 2 geometry rules are pinned (tile/snap/max — the WM'
     try std.testing.expectEqual(@as(u32, 0), fs.x);
     try std.testing.expectEqual(@as(u32, fb_w), fs.w);
     try std.testing.expectEqual(@as(u32, fb_h), fs.h);
+
+    // WMS8 Gate 4 (issue #628): the unsaved-dialog button hit-test — the
+    // 200x100 centered dialog with Save / Don't Save / Cancel on the bottom
+    // row (x=540, y=310 on the 1280x720 scanout; buttons at y 380..400).
+    const dx = (fb_w - 200) / 2; // 540
+    const dy = (fb_h - 100) / 2; // 310
+    try std.testing.expectEqual(@as(u32, 540), dx);
+    try std.testing.expectEqual(@as(u32, 310), dy);
+    try std.testing.expectEqual(UnsavedChoice.save, unsaved_dialog_choice_at(fb_w, fb_h, dx + 40, dy + 80));
+    try std.testing.expectEqual(UnsavedChoice.dont_save, unsaved_dialog_choice_at(fb_w, fb_h, dx + 120, dy + 80));
+    try std.testing.expectEqual(UnsavedChoice.cancel, unsaved_dialog_choice_at(fb_w, fb_h, dx + 190, dy + 80));
+    try std.testing.expectEqual(UnsavedChoice.none, unsaved_dialog_choice_at(fb_w, fb_h, dx + 40, dy + 40)); // outside the buttons
+    try std.testing.expectEqual(UnsavedChoice.none, unsaved_dialog_choice_at(fb_w, fb_h, dx + 85, dy + 80)); // between Save/Don't Save
 }
 
 test "wnd_core: chrome descriptor is a flat 40-byte number struct (the frozen ABI)" {

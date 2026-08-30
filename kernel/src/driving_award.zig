@@ -238,7 +238,7 @@ pub var wm_pointer_hook: ?*const fn (x: u32, y: u32, buttons: u8) void = null;
 /// The window-registry mirror fan-out (set by wm_server at REGISTER time;
 /// null when no WM). Callback gets the id + full rect + state; wm_server
 /// packs kind 20 WM_WINDOW. Called from the user-window mutation points.
-pub var wm_window_hook: ?*const fn (id: u8, x: u32, y: u32, w: u32, h: u32, visible: bool, focused: bool, workspace: u8) void = null;
+pub var wm_window_hook: ?*const fn (id: u8, x: u32, y: u32, w: u32, h: u32, visible: bool, focused: bool, workspace: u8, unsaved: bool) void = null;
 /// WMS5 Gate 2 (claim 4278): the raw-keyboard fan-out (set by wm_server at
 /// REGISTER time; null when no WM — the hook style of the pointer/window
 /// hooks). Callback gets the raw HID keyboard usage byte + the ADR 0009
@@ -361,18 +361,17 @@ pub fn drag_cancel() void {
 }
 
 /// Arc4 #242: unsaved-changes confirmation dialog state — BSS, no heap.
-/// When the user clicks close on a dirty window, a Save/Don't Save/Cancel
-/// dialog appears. The app must respond within 5 ticks or auto-don't-save.
-pub const unsaved_timeout_ticks: u32 = 5;
+/// M32 WMS8 Gate 4 (issue #628): the WM — not the kernel — decides WHEN the
+/// dialog appears (a dirty window's close) and WHICH button applies; the
+/// kernel applies through the primitives below (cmd-11 DIALOG actions
+/// 3-6). The 5-tick auto-close timeout is DELETED (the WM decides duration).
 var unsaved_dialog_open: bool = false;
 var unsaved_dialog_target: u8 = 0; // window id being closed
-var unsaved_dialog_ticks: u32 = 0;
 
 /// Arc4 #242: open the unsaved-changes dialog for a window.
 pub fn unsaved_dialog_show(target_id: u8) void {
     unsaved_dialog_open = true;
     unsaved_dialog_target = target_id;
-    unsaved_dialog_ticks = 0;
 }
 
 /// Arc4 #242: check if the unsaved dialog is open.
@@ -380,21 +379,41 @@ pub fn unsaved_dialog_is_open() bool {
     return unsaved_dialog_open;
 }
 
-/// Arc4 #242: advance the timeout tick. Returns the action when it fires.
-pub fn unsaved_dialog_advance_tick() ?enum { auto_close, none } {
-    if (!unsaved_dialog_open) return .none;
-    unsaved_dialog_ticks +|= 1;
-    if (unsaved_dialog_ticks >= unsaved_timeout_ticks) {
-        // Auto-don't-save: close the window.
-        const tid = unsaved_dialog_target;
-        unsaved_dialog_open = false;
-        _ = user_close(tid);
-        return .auto_close;
+/// Arc4 #242: the Save button action — post WIN_UNSAVED arg0=0 (save) to
+/// the target app (the app saves; the window stays open). Extracted from
+/// the click hit-test so the WM's cmd-11 DIALOG save applies the SAME code.
+pub fn unsaved_dialog_save() void {
+    const tid = unsaved_dialog_target;
+    unsaved_dialog_open = false;
+    if (find_user_window(tid)) |w| {
+        if (w.owner) |pid| {
+            events.push(pid, .{
+                .kind = events.WIN_UNSAVED,
+                .flags = 0,
+                .seq = 0,
+                .arg0 = 0, // save
+                .arg1 = 0,
+            });
+        }
     }
-    return .none;
 }
 
-/// Arc4 #242: handle a click inside the unsaved dialog.
+/// Arc4 #242: the Don't Save button action — close the target window.
+/// Extracted from the click hit-test (parity by construction).
+pub fn unsaved_dialog_dont_save() void {
+    const tid = unsaved_dialog_target;
+    unsaved_dialog_open = false;
+    _ = user_close(tid);
+}
+
+/// Arc4 #242: the Cancel button action — dismiss the dialog.
+pub fn unsaved_dialog_cancel() void {
+    unsaved_dialog_open = false;
+}
+
+/// Arc4 #242: handle a click inside the unsaved dialog. The button rects
+/// are the SINGLE source the shared `wnd_core.unsaved_dialog_choice_at`
+/// rule mirrors (both sides agree — parity by construction).
 pub fn unsaved_dialog_click(x: u32, y: u32) enum { save, dont_save, cancel, none } {
     if (!unsaved_dialog_open) return .none;
     // Dialog rect: centered, 200×100.
@@ -404,41 +423,29 @@ pub fn unsaved_dialog_click(x: u32, y: u32) enum { save, dont_save, cancel, none
     const dlg_y: u32 = if (virtio_gpu.fb_height > dlg_h) (virtio_gpu.fb_height - dlg_h) / 2 else 0;
     // Save button: left, 60×20 at bottom of dialog.
     if (x >= dlg_x + 20 and x < dlg_x + 80 and y >= dlg_y + dlg_h - 30 and y < dlg_y + dlg_h - 10) {
-        const tid = unsaved_dialog_target;
-        unsaved_dialog_open = false;
-        // Post WIN_UNSAVED arg0=0 (save) to the target.
-        if (find_user_window(tid)) |w| {
-            if (w.owner) |pid| {
-                events.push(pid, .{
-                    .kind = events.WIN_UNSAVED,
-                    .flags = 0,
-                    .seq = 0,
-                    .arg0 = 0, // save
-                    .arg1 = 0,
-                });
-            }
-        }
+        unsaved_dialog_save();
         return .save;
     }
     // Don't Save button: middle.
     if (x >= dlg_x + 90 and x < dlg_x + 150 and y >= dlg_y + dlg_h - 30 and y < dlg_y + dlg_h - 10) {
-        const tid = unsaved_dialog_target;
-        unsaved_dialog_open = false;
-        _ = user_close(tid);
+        unsaved_dialog_dont_save();
         return .dont_save;
     }
     // Cancel button: right.
     if (x >= dlg_x + 160 and x < dlg_x + 220 and y >= dlg_y + dlg_h - 30 and y < dlg_y + dlg_h - 10) {
-        unsaved_dialog_open = false;
+        unsaved_dialog_cancel();
         return .cancel;
     }
     return .none;
 }
 
-/// Arc4 #242: set/clear the unsaved flag on a user window.
+/// Arc4 #242: set/clear the unsaved flag on a user window. M32 WMS8 Gate 4
+/// (issue #628): also fans a kind-20 mirror so the registered WM learns the
+/// dirty state as it changes (the WM's unsaved-dialog decision input).
 pub fn user_set_unsaved(id: u8, flag: bool) bool {
     const w = find_user_window(id) orelse return false;
     w.unsaved = flag;
+    wm_mirror(id);
     return true;
 }
 
@@ -1334,7 +1341,7 @@ pub fn user_close(id: u8) bool {
     // the WM drops its hit-test target.
     if (wm_window_hook) |hook| {
         const w = &windows[idx];
-        hook(w.id, w.x, w.y, w.w, w.h, false, w.id == focused_id, w.workspace);
+        hook(w.id, w.x, w.y, w.w, w.h, false, w.id == focused_id, w.workspace, w.unsaved);
     }
     remove_user_at(idx);
     return true;
@@ -1375,7 +1382,7 @@ pub fn user_rect(id: u8) ?WinRect {
 fn wm_mirror(id: u8) void {
     const hook = wm_window_hook orelse return;
     const win = find_user_window(id) orelse return;
-    hook(id, win.x, win.y, win.w, win.h, win.visible, win.id == focused_id, win.workspace);
+    hook(id, win.x, win.y, win.w, win.h, win.visible, win.id == focused_id, win.workspace, win.unsaved);
 }
 
 /// Card G6 (claim 0487) follow-on (slot 19): the FULL state of a user
@@ -2587,15 +2594,11 @@ pub fn pointer_tick(st: input.PointerState, click: ?input.Click) ?u8 {
         // M15 C4: dock handling must precede user windows — dock is at 0,0,24,700.
         if (left_pressed) {
             var handled_btn = false;
-            // Arc4 #242: unsaved-changes dialog intercepts all clicks while open.
-            if (unsaved_dialog_open) {
-                switch (unsaved_dialog_click(cursor_x, cursor_y)) {
-                    .save, .dont_save, .cancel => {
-                        handled_btn = true;
-                    },
-                    .none => {},
-                }
-            }
+            // Arc4 #242: the unsaved-dialog click intercept is DELETED (M32
+            // WMS8 Gate 4, issue #628) — the WM owns the unsaved-dialog
+            // decision via slot-65 DIALOG (cmd 11); with a WM registered
+            // pointer_tick returns early above, and without one the dialog
+            // can never open (the close dirty-check is deleted too).
             // M21 W15: modal windows block input to windows below.
             // Clicks outside the modal are ignored (except to dismiss).
             if (!handled_btn and modal_active()) {
@@ -2710,12 +2713,12 @@ pub fn pointer_tick(st: input.PointerState, click: ?input.Click) ?u8 {
                     if (cursor_x >= w.x + w.w - 16 and cursor_x < w.x + w.w - 4 and
                         cursor_y >= w.y and cursor_y < w.y + user_title_h)
                     {
-                        // Arc4 #242: dirty window → show unsaved-changes dialog.
-                        if (w.unsaved) {
-                            unsaved_dialog_show(w.id);
-                        } else {
-                            _ = user_close(w.id);
-                        }
+                        // Arc4 #242 / M32 WMS8 Gate 4 (issue #628): the dirty-
+                        // check is DELETED — the WM owns the unsaved-dialog
+                        // decision (cmd-11 DIALOG actions 3-6); in shim mode
+                        // closing a dirty window closes it immediately (the
+                        // issue's "no compositing policy" end-state).
+                        _ = user_close(w.id);
                         handled_btn = true;
                         break;
                     }
@@ -3407,8 +3410,6 @@ pub fn composite() virtio_gpu.CmdResult {
     }
     // Arc4 #240: advance notification dismiss ticks once per composite.
     notify_advance_ticks();
-    // Arc4 #242: advance unsaved-changes dialog timeout once per composite.
-    _ = unsaved_dialog_advance_tick();
     // M21 W16: advance transient window timeouts.
     _ = transient_advance_tick();
     draw_chrome();
@@ -4277,8 +4278,9 @@ var wms5_ptr_x: u32 = 0;
 var wms5_ptr_y: u32 = 0;
 var wms5_ptr_btn: u8 = 0;
 
-fn wms5_mirror_capture(id: u8, x: u32, y: u32, w: u32, h: u32, visible: bool, focused: bool, workspace: u8) void {
+fn wms5_mirror_capture(id: u8, x: u32, y: u32, w: u32, h: u32, visible: bool, focused: bool, workspace: u8, unsaved: bool) void {
     _ = workspace;
+    _ = unsaved;
     wms5_mirror_calls += 1;
     wms5_last_id = id;
     wms5_last_x = x;

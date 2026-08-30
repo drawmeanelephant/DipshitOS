@@ -241,6 +241,31 @@ done; remaining: the unsaved dialog (still needs the kind-20 `unsaved` mirror
 bit), then geometry/desktop-chrome dead blocks, and the registry/convergence
 path.
 
+**Gate 4 (claim 6155) — the unsaved-changes dialog drains and the kernel
+decision is DELETED.** The kind-20 WM_WINDOW mirror gains an UNSAVED bit
+(flags bit 12) fanned by `user_set_unsaved`, so the registered WM learns each
+window's dirty state as it changes; slot-65 cmd 11 `DIALOG` gains actions
+3 show / 4 save / 5 don't-save / 6 cancel applied through the kernel's OWN
+`unsaved_dialog_*` primitives (parity by construction — the shim's button
+clicks ran the same code); WND.BIN owns the decision: a close-button DOWN
+EDGE on a DIRTY mirror shows the dialog (DIALOG 3, `wnd: unsaved-dialog`), a
+dialog-button click applies the choice (DIALOG 4/5/6,
+`wnd: unsaved-save/discard/cancel`) via the SHARED
+`wnd_core.unsaved_dialog_choice_at` rule (same rects as the kernel's
+`unsaved_dialog_click`). DELETED: the pointer_tick dialog intercept, the
+close-button dirty-check, and the 5-tick auto-close timeout (the WM decides
+duration). Shim end-state degradation (intended): closing a dirty window in
+shim mode closes it immediately — no dialog, the issue's "no compositing
+policy" end-state. New `verify-live-wnd8-unsaved-drain` gate **PASS on VZ**,
+both boots: boot A the shim closes the dirty window immediately
+(`notepad: win_close`, `win_unsaved` count 0, no fault); boot B with WND.BIN
+registered the WM decided (`wnd: unsaved-dialog` + `wnd: unsaved-discard`),
+the kernel applied (`wm: dialog=2` from show+discard) and NOTEPAD closed
+(`notepad: win_close`). Host tests green incl. the `syscall: DIALOG (cmd 11)`
+unsaved-actions + wnd_core choice-rule pins; fmt/coordination clean, BSS
+budget re-ran green. **#628 stays open** — Gate 4 done; remaining: the
+geometry/desktop-chrome dead blocks and the registry/convergence path.
+
 **WMS2 is done (claim 8482, issue #622): the kernel render-server register.**
 A new host-testable `kernel/src/wm_server.zig` owns the single WM seat +
 the present-sequence counter BESIDE the unchanged shim; slot 65

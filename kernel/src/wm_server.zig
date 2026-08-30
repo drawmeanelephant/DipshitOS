@@ -353,15 +353,16 @@ pub fn fan_pointer(x: u32, y: u32, buttons: u8) void {
 
 /// Fan ONE window-registry mirror to the registered WM (so it can
 /// hit-test): kind 20, `flags` = id | visible<<8 | focused<<9 |
-/// workspace<<10, `arg0` = x|(y<<16), `arg1` = w|(h<<16). No-op when no WM
-/// is registered.
-pub fn fan_window(id: u8, x: u32, y: u32, w: u32, h: u32, visible: bool, focused: bool, workspace: u8) void {
+/// workspace<<10 | unsaved<<12, `arg0` = x|(y<<16), `arg1` = w|(h<<16).
+/// No-op when no WM is registered.
+pub fn fan_window(id: u8, x: u32, y: u32, w: u32, h: u32, visible: bool, focused: bool, workspace: u8, unsaved: bool) void {
     const pid = wm_pid orelse return;
     window_mirror_count +%= 1;
     var flags: u16 = id;
     if (visible) flags |= 1 << 8;
     if (focused) flags |= 1 << 9;
     flags |= @as(u16, workspace & 0x3) << 10;
+    if (unsaved) flags |= 1 << 12;
     events.push(pid, .{
         .kind = events.WM_WINDOW,
         .flags = flags,
@@ -486,7 +487,7 @@ test "wm_server: WMS5 raw-pointer and window-mirror fan-out is WM-only (kind 19/
 
     // No WM: fan-outs are no-ops (nothing is generated, nothing changes).
     fan_pointer(100, 200, 0x01);
-    fan_window(2, 10, 20, 30, 40, true, true, 0);
+    fan_window(2, 10, 20, 30, 40, true, true, 0, false);
     fan_key(0x17, events.MOD_CTRL); // Gate 2: Ctrl+T usage
     try std.testing.expectEqual(@as(u64, 0), info().pointer_fan_count);
     try std.testing.expectEqual(@as(u64, 0), info().window_mirror_count);
@@ -495,7 +496,7 @@ test "wm_server: WMS5 raw-pointer and window-mirror fan-out is WM-only (kind 19/
     // Register pid 3: the fan-outs deliver kind 19/20/21 ONLY to the WM.
     try std.testing.expect(register(3));
     fan_pointer(100, 200, 0x01);
-    fan_window(2, 10, 20, 30, 40, true, true, 0);
+    fan_window(2, 10, 20, 30, 40, true, true, 0, false);
     fan_key(0x17, events.MOD_CTRL); // Gate 2: Ctrl+T usage
     try std.testing.expectEqual(@as(u64, 1), info().pointer_fan_count);
     try std.testing.expectEqual(@as(u64, 1), info().window_mirror_count);
@@ -518,6 +519,15 @@ test "wm_server: WMS5 raw-pointer and window-mirror fan-out is WM-only (kind 19/
     try std.testing.expectEqual(events.WM_KEY, k.kind);
     try std.testing.expectEqual(@as(u16, events.MOD_CTRL), k.flags);
     try std.testing.expectEqual(@as(u32, 0x17), k.arg0); // Ctrl+T usage
+
+    // WMS8 Gate 4 (issue #628): the unsaved bit (12) rides the mirror —
+    // the WM's dirty-window decision input (pushed after the key so the
+    // FIFO pops in order).
+    fan_window(2, 10, 20, 30, 40, true, true, 0, true);
+    const wu = events.pop(3).?;
+    try std.testing.expectEqual(events.WM_WINDOW, wu.kind);
+    try std.testing.expectEqual(@as(u16, 2 | (1 << 8) | (1 << 9) | (1 << 12)), wu.flags); // + unsaved
+    try std.testing.expectEqual(@as(u64, 2), info().window_mirror_count);
 
     // No other process's queue received anything (the kind-18 discipline).
     var i: usize = 0;
