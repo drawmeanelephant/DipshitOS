@@ -220,10 +220,26 @@ gate **PASS on VZ**, both boots: boot A the shim still self-toggles
 (`dui: about=open`); boot B with WND.BIN registered the WM decided
 (`wnd: about`, `key_fan=1`) and the kernel applied (`wm: dialog=1`) and did not
 self-toggle (`dui: about` count 0). Host test `syscall: DIALOG (cmd 11)` green;
-fmt/coordination clean, BSS budget re-ran green. **#628 stays open** — Gate 2
-done; remaining: the now-dormant kernel about-decision + the unsaved dialog
-(still needs the kind-20 `unsaved` mirror bit), then geometry/desktop-chrome
-dead blocks, and the registry/convergence path.
+fmt/coordination clean, BSS budget re-ran green. **Gate 3 (claim 7736) — the
+kernel about-DECISION is DELETED.** Gate 2's parity is green with the WM
+registered, which satisfies WMS8's delete rule, so Gate 3 deletes the kernel's
+own decision: `about_pending` + the Ctrl+Shift+A decode branch + `take_about()`
+in input.zig, the shell idle `take_about()` block in shell.zig, and the now-
+provably-dead `about_dialog_hit_test` + the pointer_tick close-button path
+(with the shim decision gone, `about_dialog_open` is only settable via the
+WM-only cmd 11, and pointer_tick early-returns when a WM owns input). KEPT:
+the applied primitives + `about_dialog_open` + the modal blit — cmd 11 still
+drives them. Shim end-state degradation (intended): Ctrl+Shift+A is now
+WM-only (the issue's "no compositing policy" end-state). The gate re-ran
+**PASS on VZ**: boot A the dormant shim does nothing on Ctrl+Shift+A
+(`dui: about` count 0, no fault, shell responsive); boot B with WND.BIN
+registered the WM still decides (`wnd: about`, `key_fan=1`) and the kernel
+applies (`wm: dialog=1`). ~58 lines deleted (the "one policy block per PR, no
+rewrite" shape); host tests green incl. `syscall: DIALOG (cmd 11)`;
+fmt/coordination clean, BSS budget re-ran green. **#628 stays open** — Gate 3
+done; remaining: the unsaved dialog (still needs the kind-20 `unsaved` mirror
+bit), then geometry/desktop-chrome dead blocks, and the registry/convergence
+path.
 
 **WMS2 is done (claim 8482, issue #622): the kernel render-server register.**
 A new host-testable `kernel/src/wm_server.zig` owns the single WM seat +

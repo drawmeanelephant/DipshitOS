@@ -2504,24 +2504,6 @@ pub fn render_preview(id: u8) void {
     }
 }
 
-/// M27 G2: hit-test the about dialog. Returns true if a click landed
-/// on the close button.
-pub fn about_dialog_hit_test(x: u32, y: u32) bool {
-    if (!about_dialog_open) return false;
-    const dlg_w: u32 = 280;
-    const dlg_h: u32 = 160;
-    const dlg_x: u32 = if (virtio_gpu.fb_width > dlg_w) (virtio_gpu.fb_width - dlg_w) / 2 else 0;
-    const dlg_y: u32 = if (virtio_gpu.fb_height > dlg_h) (virtio_gpu.fb_height - dlg_h) / 2 else 0;
-    // Close button: top-right corner (8x8).
-    if (x >= dlg_x + dlg_w - 12 and x < dlg_x + dlg_w - 4 and
-        y >= dlg_y + 4 and y < dlg_y + 12)
-    {
-        about_dialog_close();
-        return true;
-    }
-    return false;
-}
-
 /// Helper: user window slot index (id - base) or null.
 fn user_window_slot(id: u8) ?usize {
     if (id < user_window_id_base) return null;
@@ -2712,13 +2694,11 @@ pub fn pointer_tick(st: input.PointerState, click: ?input.Click) ?u8 {
                     handled_btn = true;
                 }
             }
-            // M27 G2: about dialog close button click.
-            if (!handled_btn and about_dialog_open) {
-                if (about_dialog_hit_test(cursor_x, cursor_y)) {
-                    about_dialog_open = false;
-                    handled_btn = true;
-                }
-            }
+            // M27 G2: the about-dialog close-button hit-test is DELETED (M32
+            // WMS8 Gate 3, issue #628) — the WM owns the about dialog via
+            // slot-65 DIALOG (cmd 11); with a WM registered pointer_tick returns
+            // early above, and without one about_dialog_open can never be set,
+            // so the click path was provably dead.
             if (!handled_btn) {
                 // Check close/minimize buttons on user windows first.
                 var wi: usize = win_count;

@@ -203,9 +203,14 @@ it (the render server already separates policy from blit).
   already got from WMS5 Gate 2); the kernel still blits the modal from its own
   `about_dialog_open` state and its own about self-toggle gates behind
   `!wm_owns_input` (input.zig), so a registered WM cannot be fought. `dialog=`
-  joins the `wm` observability row; `key_fan` proves the kind-21 fan-out. The
-  DELETION of the now-dormant kernel about-decision (plus the unsaved dialog,
-  which still needs the kind-20 mirror to carry an `unsaved` bit) is a later
-  WMS8 gate.
+  joins the `wm` observability row; `key_fan` proves the kind-21 fan-out.
+  **Gate 3 (claim 7736) DELETED the kernel about-decision**: with Gate 2's
+  parity green, WMS8's delete rule is satisfied, so `about_pending` +
+  `take_about()` in input.zig, the shell idle self-toggle block, and the now-
+  provably-dead `about_dialog_hit_test` + pointer close-button path were
+  removed (~58 lines). The applied primitives + `about_dialog_open` + the
+  modal blit stay (cmd 11 still drives them). Ctrl+Shift+A is now WM-only
+  (the issue's shim "no compositing policy" end-state). Still ahead: the
+  unsaved dialog, which needs the kind-20 mirror to carry an `unsaved` bit.
 - Which `driving_award` policy block drains out of the kernel first (recommended:
   chrome, being minimal and highly observable).

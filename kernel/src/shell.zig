@@ -3407,13 +3407,10 @@ pub fn boot_and_park(mon: *monitor.Monitor, rx_wired: bool) void {
                     mon.console.puts("\n");
                 }
             }
-            // M27 G2: Ctrl+Shift+A opens about dialog.
-            if (input.take_about()) {
-                driving_award.about_dialog_toggle();
-                mon.console.puts("dui: about=");
-                mon.console.puts(if (driving_award.about_dialog_open) "open" else "closed");
-                mon.console.puts("\n");
-            }
+            // M27 G2: the Ctrl+Shift+A about-dialog self-toggle is DELETED
+            // (M32 WMS8 Gate 3, issue #628) — the WM owns the about-dialog
+            // decision via slot-65 DIALOG (cmd 11); the kernel no longer
+            // self-toggles it (Ctrl+Shift+A is WM-only now).
             // Claim 1574 (milestone six G3): Road Pops — one full-frame
             // present per dirty output batch (the card-3d drain pattern).
             // No-op when the tee is unarmed (default VM) or clean.
