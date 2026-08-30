@@ -131,6 +131,7 @@ loudly if the generator or a table is broken.
 | [4429-archive-m5-m6-prompts](4429-archive-m5-m6-prompts.md) | buffy (`agent/buffy/hygiene-archive-m5-m6-prompts`) | ✅ done |
 | [4510-wms6-altab-drain](4510-wms6-altab-drain.md) | buffy (`agent/buffy/wms6-altab-drain`) | ✅ complete |
 | [4516-archive-ragshit-test-artifacts](4516-archive-ragshit-test-artifacts.md) | oxalpha (`t3code/handle-issue-268-git-current`) | ✅ done |
+| [4790-wms8-tooltip-dwell-drain](4790-wms8-tooltip-dwell-drain.md) | buffy (`agent/buffy/wms8-desktop-overlay-drain`) | ✅ `agent/buffy/wms8-desktop-overlay-drain` |
 | [4928-per-agent-worktrees](4928-per-agent-worktrees.md) | ox-alpha (`agent/ox-alpha/agent-worktrees`) | ✅ done 2026-08-24 — PR #526 merged: `just new-agent/resume-agent/drop-agent/list-agents`, canonical naming (`../dipshitos-<name>`, `agent/<name>/<slug>`), AGENTS.md mandates one worktree per agent; round-trip selftest + gates green; `just` installed on dev host (v1.58.0) |
 | [5069-gate-fleet-migration](5069-gate-fleet-migration.md) | ox-alpha (`agent/ox-alpha/gate-fleet-migration`) | ✅ done |
 | [5093-scroll-keys-chords](5093-scroll-keys-chords.md) | buffy (`agent/buffy/m18-t16-scripting`) | ✅ done 2026-08-22 |
