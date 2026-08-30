@@ -263,8 +263,23 @@ registered the WM decided (`wnd: unsaved-dialog` + `wnd: unsaved-discard`),
 the kernel applied (`wm: dialog=2` from show+discard) and NOTEPAD closed
 (`notepad: win_close`). Host tests green incl. the `syscall: DIALOG (cmd 11)`
 unsaved-actions + wnd_core choice-rule pins; fmt/coordination clean, BSS
-budget re-ran green. **#628 stays open** — Gate 4 done; remaining: the
-geometry/desktop-chrome dead blocks and the registry/convergence path.
+budget re-ran green. **Review fixes PASS 2026-08-30 (claim 7639):** three
+real bugs found in post-merge review were fixed — (1) the close-click DOWN
+EDGE was CONSUMED by the dialog but then fell through to the WMS5 title-bar
+grab (`grabbing=true` + `snap_window_to` on release; the shim set
+`handled_btn` and broke) — the WM now sets `down_handled` and skips the
+grab, and the gate now asserts ZERO `wnd: grab/drag/drop` in boot B;
+(2) the close-button scan walked mirrors ids 2→5 (BOTTOM-up) while the
+kernel walks top-down — the WM scans reverse-id (z-order == id order,
+`raise()` has no callers) so the higher window wins on overlap; (3) cmd-11
+DIALOG actions 4/5/6 acted on the stale BSS-zero `unsaved_dialog_target`
+with no open-dialog check — now EINVAL when `!unsaved_dialog_is_open()`,
+with the stale path pinned in the host test. Nits: the shared Cancel rect
+fixed to the painted 30px button (x+160..190, was x+160..220 — overran the
+200px dialog) on both sides; `user_set_unsaved` early-outs on an unchanged
+flag. Gate re-ran **PASS on VZ** with the no-drag assertion. **#628 stays
+open** — Gate 4 + review fixes done; remaining: the geometry/desktop-chrome
+dead blocks and the registry/convergence path.
 
 **WMS2 is done (claim 8482, issue #622): the kernel render-server register.**
 A new host-testable `kernel/src/wm_server.zig` owns the single WM seat +
