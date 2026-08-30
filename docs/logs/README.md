@@ -160,6 +160,7 @@ meaningful — on main.
 | `agent/buffy/wms8-about-delete` | [`agent-buffy-wms8-about-delete.md`](agent-buffy-wms8-about-delete.md) |
 | `agent/buffy/wms8-desktop-overlay-drain` | [`agent-buffy-wms8-desktop-overlay-drain.md`](agent-buffy-wms8-desktop-overlay-drain.md) |
 | `agent/buffy/wms8-dialog-drain` | [`agent-buffy-wms8-dialog-drain.md`](agent-buffy-wms8-dialog-drain.md) |
+| `agent/buffy/wms8-unsaved-drain` | [`agent-buffy-wms8-unsaved-drain.md`](agent-buffy-wms8-unsaved-drain.md) |
 | agent/gates fleet-remainder | [`agent-gates-fleet-remainder.md`](agent-gates-fleet-remainder.md) |
 | per-agent worktrees | [`agent-ox-alpha-agent-worktrees.md`](agent-ox-alpha-agent-worktrees.md) |
 | claim lifecycle: declared files + staleness | [`agent-ox-alpha-claim-lifecycle.md`](agent-ox-alpha-claim-lifecycle.md) |
