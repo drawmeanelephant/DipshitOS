@@ -22,3 +22,15 @@
 - Host tests: 4 new WMS9 tests green (32-rect auto-flush, window-id-change
   flush, 1px spans for 8×8, 2px spans for 8×16); full `just test` green;
   `zig build` + `zig fmt --check` clean. Pixel-identity preserved.
+
+## 2026-08-30 — WMS9 verified and shipped (claim 6156, issue #629)
+
+- Fixed a corrupted docblock line in the FillBatcher comment (stray `///`
+  merged into the "window id changes" line).
+- Verified `sys_win_fill_batch_num = 46` const present in ui.zig (line 83),
+  matching kernel slot 46 handler in `kernel/src/syscall.zig`.
+- `zig build` clean; `just test` all green (44/44 ui tests incl. 4 WMS9
+  batcher/span tests); `zig fmt --check` clean.
+- Measurement artifact: `artifacts/wms9-fill-reduction.md` — baseline vs.
+  after syscall-count math (~39x fewer SVC entries on a dense 80-char line).
+- Committed and pushed; PR #674 opened (Resolves #629).
