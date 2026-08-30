@@ -206,9 +206,24 @@ channel (`tooltip_show`/`tooltip_show_now`/`tooltip_clear`) + `dui tooltip-state
 observability. WMS6 Gate C re-ran **PASS on VZ** both boots (dormant shim shows
 nothing; WM still decides `visible=yes text=Clock`); 215 driving_award + 470
 syscall host tests green, fmt/coordination clean, BSS budget re-ran green with
-added headroom. **#628 stays open** — this is Gate 1 of the deletion sequence;
-remaining gates: the policy-introspection surface, geometry/desktop-chrome dead
-blocks, and the registry/convergence path.
+added headroom. **Gate 2 (claim 9980) — the about dialog DRAINS (not a
+deletion).** The about dialog is still the shim's only implementation and is
+live in default no-WM boots, so Gate 2 gives the WM ownership rather than
+removing it: new slot-65 cmd 11 `DIALOG` (0 close / 1 open / 2 toggle), the WM
+decides WHEN via the kind-21 keyboard stream it already owns and issues the SAME
+`about_dialog_*` primitives the shim's Ctrl+Shift+A chord runs (parity by
+construction), and the kernel's own about self-toggle gates behind
+`!wm_owns_input` (input.zig) so it can't fight the WM. `dialog=` joins `wm`
+observability; WND.BIN decodes Ctrl+Shift+A (usage 0x04 + shift, kind 21) and
+issues DIALOG toggle, emitting `wnd: about`. New `verify-live-wnd8-dialog-drain`
+gate **PASS on VZ**, both boots: boot A the shim still self-toggles
+(`dui: about=open`); boot B with WND.BIN registered the WM decided
+(`wnd: about`, `key_fan=1`) and the kernel applied (`wm: dialog=1`) and did not
+self-toggle (`dui: about` count 0). Host test `syscall: DIALOG (cmd 11)` green;
+fmt/coordination clean, BSS budget re-ran green. **#628 stays open** — Gate 2
+done; remaining: the now-dormant kernel about-decision + the unsaved dialog
+(still needs the kind-20 `unsaved` mirror bit), then geometry/desktop-chrome
+dead blocks, and the registry/convergence path.
 
 **WMS2 is done (claim 8482, issue #622): the kernel render-server register.**
 A new host-testable `kernel/src/wm_server.zig` owns the single WM seat +

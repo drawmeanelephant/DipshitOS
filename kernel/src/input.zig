@@ -536,7 +536,11 @@ pub fn decode_keyboard_report(rep: []const u8) void {
                     always_on_top_pending = true;
                 }
             }
-            // M27 G2: Ctrl+Shift+A opens about dialog.
+            // M27 G2: Ctrl+Shift+A opens about dialog. M32 WMS8 Gate 2 (issue
+            // #628): gated behind !wm_owns_input exactly like the always-on-top
+            // chord above — when a WM is registered it receives this chord as
+            // kind 21 and owns the about-dialog decision (issuing DIALOG), so
+            // the kernel must not also self-toggle and fight it.
             if (k == 0x04 and (flags & app_events.MOD_SHIFT) != 0) { // 'a' + Shift
                 var held = false;
                 for (kb_held) |h| {
@@ -545,7 +549,7 @@ pub fn decode_keyboard_report(rep: []const u8) void {
                         break;
                     }
                 }
-                if (!held) {
+                if (!held and !driving_award.wm_owns_input) {
                     about_pending = true;
                 }
             }
