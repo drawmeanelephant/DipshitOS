@@ -195,7 +195,7 @@ that gate re-runs green), and the no-WM boot exercises the syscall fallback
 thunk lib (`mkdyn-elf.py`) that can't host async mail, so the client lives in
 `lib/ui.zig` (documented in ADR 0015).
 
-**WMS8 (issue #628) is in progress — Gate 1 landed (claim 4270): deleted the
+**WMS8 (issue #628) is in progress — Gate 1 landed (claim 4790): deleted the
 kernel tooltip dwell-decision.** The slimming card is explicitly multi-PR (one
 policy block per claim, down toward ~500 lines). Gate 1 removed a block that
 was provably dead — the kernel's `tooltip_set`/`tooltip_advance_tick` dwell

@@ -3,7 +3,7 @@
 ## 2026-08-29 — WMS8 Gate 1 claimed (issue #628), tooltip dwell-drain
 
 - Claimed **WMS8 Gate 1 — delete the kernel tooltip dwell-decision policy** as
-  `docs/claims/4270-wms8-tooltip-dwell-drain.md` (status 🔄, heartbeat
+  `docs/claims/4790-wms8-tooltip-dwell-drain.md` (status 🔄, heartbeat
   2026-08-29). Branch `agent/buffy/wms8-desktop-overlay-drain` cut from
   `origin/main` (`5f02a4f`).
 - WMS8 is the 5,316-line slimming card; the issue explicitly mandates one
@@ -13,7 +13,7 @@
   (the 10-tick hover decision) can never reveal the box; only the WM's TOOLTIP
   (cmd 8) seam shows it via `tooltip_show`/`tooltip_show_now`. Parity already
   proven by WMS6 Gate C (`verify-live-wnd6-tooltip-drain.sh`).
-## 2026-08-29 — WMS8 Gate 1 done (claim 4270), PR up
+## 2026-08-29 — WMS8 Gate 1 done (claim 4790), PR up
 
 - Deleted the tooltip dwell-decision from `kernel/src/driving_award.zig`:
   `tooltip_set`, `tooltip_advance_tick`, the composite idle call, and the
