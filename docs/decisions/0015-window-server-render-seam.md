@@ -212,5 +212,23 @@ it (the render server already separates policy from blit).
   modal blit stay (cmd 11 still drives them). Ctrl+Shift+A is now WM-only
   (the issue's shim "no compositing policy" end-state). Still ahead: the
   unsaved dialog, which needs the kind-20 mirror to carry an `unsaved` bit.
+  **Gate 4 (claim 6155) DRAINED + DELETED the unsaved-changes dialog.** The
+  kind-20 WM_WINDOW mirror gains an UNSAVED bit (flags bit 12) fanned by
+  `user_set_unsaved`, so the registered WM learns each window's dirty state
+  as it changes (the decision input Gate 3's close-out promised). DIALOG
+  (cmd 11) gains actions 3 show / 4 save / 5 don't-save / 6 cancel, applied
+  through the kernel's OWN `unsaved_dialog_show`/`save`/`dont_save`/`cancel`
+  primitives — parity by construction (the shim's button clicks ran the same
+  code). WND.BIN owns the decision: a close-button DOWN EDGE on a DIRTY
+  mirror issues DIALOG 3 (`wnd: unsaved-dialog`); a dialog-button click
+  issues DIALOG 4/5/6 (`wnd: unsaved-save/discard/cancel`) via the SHARED
+  `wnd_core.unsaved_dialog_choice_at` rule — the same centered 200×100 rects
+  the kernel's `unsaved_dialog_click` applies (parity by construction, both
+  sides single-sourced). DELETED per WMS8's delete rule (the drain parity is
+  green with the WM registered): the pointer_tick dialog intercept, the
+  close-button dirty-check, and the 5-tick auto-close timeout (the WM now
+  decides duration). Shim end-state degradation (intended): closing a dirty
+  window in shim mode closes it immediately — no dialog, the issue's "no
+  compositing policy" end-state.
 - Which `driving_award` policy block drains out of the kernel first (recommended:
   chrome, being minimal and highly observable).

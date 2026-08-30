@@ -2366,6 +2366,10 @@ fn handle_wmctl(args: Args, _: *exceptions.VectorFrame) u64 {
             // byte-identical (parity by construction). a0 = 0 close,
             // 1 open, 2 toggle. The kernel still blits the modal from its
             // own `about_dialog_open` state.
+            // M32 WMS8 Gate 4 (issue #628): the UNSAVED-changes dialog rides
+            // the same seam — a0 = 3 show (a1 = target window, validated),
+            // 4 save, 5 dont-save, 6 cancel — applied through the kernel's
+            // own `unsaved_dialog_*` primitives (parity by construction).
             if (!wm_server.registered()) return error_result(.enosys);
             if (wm_server.registered_pid() != pid) return error_result(.eacces);
             const action = args[1];
@@ -2373,6 +2377,14 @@ fn handle_wmctl(args: Args, _: *exceptions.VectorFrame) u64 {
                 0 => driving_award.about_dialog_close(),
                 1 => driving_award.about_dialog_open_dialog(),
                 2 => driving_award.about_dialog_toggle(),
+                3 => {
+                    const target: u8 = @truncate(args[2]);
+                    if (driving_award.find_user_window(target) == null) return error_result(.einval);
+                    driving_award.unsaved_dialog_show(target);
+                },
+                4 => driving_award.unsaved_dialog_save(),
+                5 => driving_award.unsaved_dialog_dont_save(),
+                6 => driving_award.unsaved_dialog_cancel(),
                 else => return error_result(.einval),
             }
             wm_server.note_dialog();
@@ -4342,6 +4354,59 @@ test "syscall: DIALOG (cmd 11, claim 9980) applies the WM's about-dialog decisio
     try std.testing.expect(wm_server.unregister(0));
     try std.testing.expect(!driving_award.wm_owns_input);
     try std.testing.expect(!driving_award.about_dialog_open); // teardown restores
+}
+
+test "syscall: DIALOG (cmd 11, claim 6155) applies the WM's unsaved-dialog decision" {
+    userspace.init();
+    init(test_writer);
+    wm_server.init();
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0); // task 2 = process 0 (boot payload)
+    scheduler.start();
+    var frame = fresh_frame();
+    try std.testing.expect(scheduler.yield_current()); // shell -> worker
+    try std.testing.expect(scheduler.yield_current()); // worker -> user (2)
+
+    // Seed the WM as pid 0, arm the compositor seam, and open a real user
+    // window (id 2) — arm() makes this test standalone (the dock test relies
+    // on a prior test having armed it).
+    driving_award.arm();
+    try std.testing.expect(wm_server.register(0));
+    const o2 = driving_award.user_open(64, 64, 400, 300, 0);
+    try std.testing.expectEqual(@as(u8, 2), o2.opened);
+    const id2: u8 = 2;
+
+    // No WM -> ENOSYS is covered by the about test; here a0=3 SHOW opens the
+    // unsaved dialog for the target window (a WM decision, applied).
+    try std.testing.expect(!driving_award.unsaved_dialog_is_open());
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_wmctl, .{ wm_server.wmctl_dialog, 3, id2, 0, 0, 0 }, &frame));
+    try std.testing.expect(driving_award.unsaved_dialog_is_open());
+    // A show for an unknown window -> EINVAL, not counted.
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_wmctl, .{ wm_server.wmctl_dialog, 3, 99, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u64, 1), wm_server.info().dialog_count);
+    // a0=5 DONT_SAVE closes the target window (the WM's discard decision).
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_wmctl, .{ wm_server.wmctl_dialog, 5, 0, 0, 0, 0 }, &frame));
+    try std.testing.expect(!driving_award.unsaved_dialog_is_open());
+    try std.testing.expect(driving_award.find_user_window(id2) == null);
+    try std.testing.expectEqual(@as(u64, 2), wm_server.info().dialog_count);
+    // a0=6 CANCEL on a closed dialog is a no-op but still counted.
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_wmctl, .{ wm_server.wmctl_dialog, 6, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u64, 3), wm_server.info().dialog_count);
+    // a0=4 SAVE posts WIN_UNSAVED to the owner and leaves the window open.
+    const o3 = driving_award.user_open(64, 64, 400, 300, 0);
+    // The freed slot is reused, so the second open gets id 2 again.
+    try std.testing.expectEqual(@as(u8, 2), o3.opened);
+    const id3: u8 = o3.opened;
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_wmctl, .{ wm_server.wmctl_dialog, 3, id3, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_wmctl, .{ wm_server.wmctl_dialog, 4, 0, 0, 0, 0 }, &frame));
+    try std.testing.expect(!driving_award.unsaved_dialog_is_open());
+    try std.testing.expect(driving_award.find_user_window(id3) != null); // save keeps the window
+    try std.testing.expectEqual(@as(u64, 5), wm_server.info().dialog_count);
+
+    // Teardown: no leaked input ownership into the aggregated binary.
+    try std.testing.expect(wm_server.unregister(0));
+    try std.testing.expect(!driving_award.wm_owns_input);
 }
 
 test "syscall: wait_event block+wake preserves the event buffer across the svc re-execution (claim 6359)" {

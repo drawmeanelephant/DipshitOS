@@ -103,6 +103,13 @@ const tray_flag_clip: u64 = 0b100;
 // blits the modal from its own `about_dialog_open` state.
 const wmctl_dialog: u64 = 11;
 const dialog_toggle_act: u64 = 2;
+// WMS8 Gate 4 (issue #628): the unsaved-changes dialog rides the same
+// DIALOG seam — a0 = 3 show (a1 = target window), 4 save, 5 dont-save,
+// 6 cancel — applied through the kernel's own unsaved_dialog_* primitives.
+const dialog_unsaved_show: u64 = 3;
+const dialog_unsaved_save: u64 = 4;
+const dialog_unsaved_dont_save: u64 = 5;
+const dialog_unsaved_cancel: u64 = 6;
 /// sys_clipboard_get (slot 39) — the WM probes the clipboard each tray
 /// refresh (filled = return length != 0) to decide the indicator state.
 const sys_clipboard_get: u64 = 39;
@@ -278,6 +285,14 @@ pub const dock_labels = [_][]const u8{ "Calc", "Notes", "Terminal", "Browser", "
 // greps `wnd: about` to prove the WM — not the kernel — decided Ctrl+Shift+A).
 pub const about_marker: []const u8 = "wnd: about\n";
 
+// WMS8 Gate 4 (issue #628): the unsaved-changes dialog decision markers — the
+// live gate greps `wnd: unsaved-*` to prove the WM — not the kernel — decided
+// when the dialog shows and which button applies.
+pub const unsaved_dialog_marker: []const u8 = "wnd: unsaved-dialog\n";
+pub const unsaved_save_marker: []const u8 = "wnd: unsaved-save\n";
+pub const unsaved_discard_marker: []const u8 = "wnd: unsaved-discard\n";
+pub const unsaved_cancel_marker: []const u8 = "wnd: unsaved-cancel\n";
+
 /// WMS8 Gate 2 (issue #628): the about-dialog decision. Ctrl+Shift+A (kind
 /// 21, usage 0x04) fans to the WM because it owns the keyboard stream; the WM
 /// issues DIALOG (cmd 11) toggle — the SAME kernel primitive the shim's
@@ -287,6 +302,37 @@ pub const about_marker: []const u8 = "wnd: about\n";
 fn toggle_about() void {
     _ = syscall6(sys_wmctl, wmctl_dialog, dialog_toggle_act, 0, 0, 0, 0);
     write_marker(about_marker);
+}
+
+/// WMS8 Gate 4 (issue #628): a dirty window's close button was clicked — the
+/// WM, not the kernel, decides to show the unsaved-changes dialog (DIALOG 3,
+/// target = the window id). The kernel applies its own `unsaved_dialog_show`.
+fn show_unsaved_dialog(id: u8) void {
+    _ = syscall6(sys_wmctl, wmctl_dialog, dialog_unsaved_show, id, 0, 0, 0);
+    unsaved_dialog_open = true;
+    write_marker(unsaved_dialog_marker);
+}
+
+/// WMS8 Gate 4 (issue #628): a dialog button was clicked — the WM decides the
+/// choice and issues DIALOG 4/5/6; the kernel applies the SAME primitives the
+/// shim's button click ran (parity by construction).
+fn apply_unsaved_choice(choice: wnd_core.UnsavedChoice) void {
+    switch (choice) {
+        .save => {
+            _ = syscall6(sys_wmctl, wmctl_dialog, dialog_unsaved_save, 0, 0, 0, 0);
+            write_marker(unsaved_save_marker);
+        },
+        .dont_save => {
+            _ = syscall6(sys_wmctl, wmctl_dialog, dialog_unsaved_dont_save, 0, 0, 0, 0);
+            write_marker(unsaved_discard_marker);
+        },
+        .cancel => {
+            _ = syscall6(sys_wmctl, wmctl_dialog, dialog_unsaved_cancel, 0, 0, 0, 0);
+            write_marker(unsaved_cancel_marker);
+        },
+        .none => return,
+    }
+    unsaved_dialog_open = false;
 }
 
 // WMS6 Gate E (issue #626): the tray decision marker — written when the WM
@@ -367,6 +413,9 @@ const MirrorWin = struct {
     visible: bool = false,
     focused: bool = false,
     workspace: u8 = 0,
+    // WMS8 Gate 4 (issue #628): the kernel's dirty flag, carried by the
+    // kind-20 mirror (bit 12) — the WM's unsaved-dialog decision input.
+    unsaved: bool = false,
     valid: bool = false,
     // Gate 2 policy state: the WM's own copies of what the kernel shim
     // tracked (tile slots, snap-restore rect, pre-max/pre-fs rects).
@@ -388,6 +437,10 @@ const MirrorWin = struct {
 
 /// The mirror table (id 2..5 -> slots 0..3).
 var mirrors: [max_user_windows]MirrorWin = undefined;
+// WMS8 Gate 4 (issue #628): the unsaved-changes dialog open state the WM
+// tracks to route dialog-button clicks (the kernel's open state is the
+// applied truth; this is the WM's decision-side mirror).
+var unsaved_dialog_open: bool = false;
 var current_workspace: u8 = 0;
 var tile_mode: bool = false;
 var tile_master_id: u8 = 0xff;
@@ -1049,6 +1102,7 @@ fn main() noreturn {
                 m.visible = (ev.flags & (1 << 8)) != 0;
                 m.focused = (ev.flags & (1 << 9)) != 0;
                 m.workspace = @intCast((ev.flags >> 10) & 0x3);
+                m.unsaved = (ev.flags & (1 << 12)) != 0;
             },
             wm_pointer_kind => {
                 // WM_POINTER (kind 19): raw absolute pointer. arg0 =
@@ -1107,6 +1161,28 @@ fn main() noreturn {
                         // dock icon issues DOCK — the WM, not the kernel, decides.
                         if (dock_icon_at(px, py)) |didx| {
                             handle_dock_click(didx);
+                        }
+                        // WMS8 Gate 4 (issue #628): the unsaved-changes dialog —
+                        // the WM, not the kernel, decides. While the dialog is
+                        // open, a click routes to its buttons (the shared
+                        // wnd_core rule — the same rects the kernel's
+                        // unsaved_dialog_click applies, parity by construction).
+                        // Otherwise a close-button click (title-bar top-right)
+                        // on a DIRTY mirror (kind-20 unsaved bit) shows it.
+                        if (unsaved_dialog_open) {
+                            apply_unsaved_choice(wnd_core.unsaved_dialog_choice_at(fb_w, fb_h, px, py));
+                        } else {
+                            for (&mirrors) |*m| {
+                                if (!m.valid or !m.visible) continue;
+                                if (px >= m.x + m.w - 16 and px < m.x + m.w - 4 and
+                                    py >= m.y and py < m.y + wnd_core.title_bar_h)
+                                {
+                                    if (m.unsaved) show_unsaved_dialog(m.id);
+                                    // Not dirty: the WM has no close capability
+                                    // yet (status quo — a later gate); ignore.
+                                    break;
+                                }
+                            }
                         }
                         // WMS5: a title-bar grab starts a drag.
                         const fm = focused_mirror();
@@ -1259,6 +1335,18 @@ test "wnd: the marker/tuning shapes are pinned (live-gate grep targets)" {
     try std.testing.expectEqual(@as(u64, 11), wmctl_dialog);
     try std.testing.expectEqual(@as(u64, 2), dialog_toggle_act);
     try std.testing.expectEqual(@as(u8, 0x04), usage_a);
+    // WMS8 Gate 4 (issue #628): the unsaved-dialog channel — DIALOG actions
+    // 3-6, the decision markers, and the mirror's unsaved bit (12).
+    try std.testing.expectEqualStrings("wnd: unsaved-dialog\n", unsaved_dialog_marker);
+    try std.testing.expectEqualStrings("wnd: unsaved-save\n", unsaved_save_marker);
+    try std.testing.expectEqualStrings("wnd: unsaved-discard\n", unsaved_discard_marker);
+    try std.testing.expectEqualStrings("wnd: unsaved-cancel\n", unsaved_cancel_marker);
+    try std.testing.expectEqual(@as(u64, 3), dialog_unsaved_show);
+    try std.testing.expectEqual(@as(u64, 4), dialog_unsaved_save);
+    try std.testing.expectEqual(@as(u64, 5), dialog_unsaved_dont_save);
+    try std.testing.expectEqual(@as(u64, 6), dialog_unsaved_cancel);
+    try std.testing.expectEqual(@as(u32, 200), wnd_core.unsaved_dialog_w);
+    try std.testing.expectEqual(@as(u32, 100), wnd_core.unsaved_dialog_h);
 }
 
 test "wnd: the WMS6 tray policy formats HH:MM and issues TRAY on change only" {
