@@ -42,8 +42,14 @@ pub const esp_entries_max: usize = 96;
 /// Per-file content cap for `cat` (larger files are listed with their size
 /// but not content-loaded; `cat` reports that honestly).
 pub const esp_content_max: usize = 2048;
-/// Total content pool (BSS) shared by all loaded entries.
-pub const content_pool_max: usize = 8192;
+/// Total content pool (BSS) shared by all loaded entries. Claim 6344:
+/// raised 8192 → 32768 — the M33 SB2 proof binaries pushed eligible root
+/// content (files ≤ esp_content_max) to ~26.5 KB across 40 files, so the
+/// old 8 KiB pool exhausted at root slot 23 and every later small file
+/// (HISTORY.TXT, BOOTED.TXT, APPS.TXT…) was listed but never content-loaded
+/// (len=0), silently reading as empty. 32 KiB fits all eligible content
+/// with headroom for runtime writes.
+pub const content_pool_max: usize = 32768;
 /// Total entry slots.
 pub const entries_max: usize = esp_entries_max;
 /// Per-file write cap (mirrors `fat.write_content_max` so every written
@@ -230,7 +236,28 @@ pub fn esp_count() usize {
 }
 
 /// Content bytes of an entry (empty when it was listed but not loaded).
+/// Claim 6344: if the entry was listed but not loaded (len==0, size>0 ≤ cap)
+/// and the disk is mounted, read it from the FAT volume now and cache it in
+/// the pool. This guarantees HISTORY.TXT (and any other small file that
+/// fell out of the snapshot) never silently reads as empty.
 pub fn content_of(e: *const Entry) []const u8 {
+    if (e.len == 0 and e.size > 0 and e.size <= esp_content_max and state.disk_ready and fat.mounted()) {
+        var tmp: [esp_content_max]u8 = undefined;
+        if (fat.read_file(e.name[0..e.name_len], &tmp)) |got| {
+            if (state.pool_used + got <= content_pool_max) {
+                const off = state.pool_used;
+                @memcpy(state.content[off..][0..got], tmp[0..got]);
+                state.pool_used += got;
+                // e is *const Entry; the entries array itself is stable in
+                // State, so casting away const is safe here (only the fields
+                // of this entry are mutated, never moved/reallocated).
+                const mut_e: *Entry = @ptrCast(@constCast(e));
+                mut_e.offset = @intCast(off);
+                mut_e.len = @intCast(got);
+                return state.content[off..][0..got];
+            }
+        }
+    }
     return state.content[e.offset..][0..e.len];
 }
 

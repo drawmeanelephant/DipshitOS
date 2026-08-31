@@ -5,7 +5,7 @@
   marker never echoes and fix the shell history keybinding path so it passes on main.
 - **Scope:** M18 T4 persistent-history gate. Investigation of the boot-2 recall
   no-op; no kernel milestone creep.
-- **Touches:** tools/verify-live-history.sh (analysis only — no code change landed)
+- **Touches:** kernel/src/esp.zig (fix), tools/verify-live-history.sh (temporary checkpoint diagnostics)
 - **Depends on:** —
 - **Heartbeat:** 2026-08-31
 - **Status:** 🔄 agent/buffy/history-recall-persistence
@@ -41,5 +41,33 @@ gate's own comments document). Boot-2's writes survive the SAME teardown, so
 the loss is timing/flush-specific to the shortest-lived writes at boot-1's
 exit, not a wholesale write failure.
 
-A durable fix (verified against a boot-1→boot-2 persistence checkpoint before
-landing) is the pending next step; no code has been landed blind.
+## Resolution (2026-08-31) — ROOT CAUSE: ESP window content-pool exhaustion
+
+The live boot-1→boot-2 checkpoint instrumentation (temporary additions to
+`tools/verify-live-history.sh`) changed the picture: boot-1's writes DO land
+on `artifacts/disk.img` (the disk contains `echo T4-third` after boot 1), but
+boot-2 reads HISTORY.TXT as empty and its saves clobber boot-1's bytes. The
+read-modify-write chain also broke *within* boot-1 (each save read back empty,
+so the file ended up as only the last line).
+
+Root cause confirmed against the real disk with `image/mkfat32.py --list`:
+the ESP window (`kernel/src/esp.zig`) content-loads only files ≤
+`esp_content_max` (2048 B) while the shared pool fits, and the M33 SB2 proof
+binaries pushed eligible root content to **26,564 bytes across 40 files** —
+far beyond `content_pool_max = 8192`. The pool exhausted at root slot 23
+(FSTEST.BIN), so every later small file — including `HISTORY.TXT` (slot 78,
+27 B), plus BOOTED.TXT, MEMMAP.TXT, APPS.TXT — was listed but never
+content-loaded (`len=0`). `load_history` and `save_to_history` both read
+through `esp.content_of`, which silently returned empty → recall no-op +
+clobbering writes. Not a VM-boundary flush problem at all.
+
+Fix landed in `kernel/src/esp.zig`:
+1. `content_pool_max` raised 8192 → 32768 (fits all 26.5 KB of eligible
+   content with headroom; .bss budget gate still passes with 660 KB spare).
+2. `content_of` now does load-on-demand: an entry with `len==0`, `size>0 ≤
+   cap`, disk mounted → read from the FAT volume and cache in the pool, so a
+   listed-but-not-loaded file can never silently read as empty again.
+
+Unit tests: esp.zig 26/26, fat.zig 21/21, shell.zig 792/792 pass;
+`verify-bss-budget.sh` PASS. Live validation with the checkpoint gate is the
+remaining step.

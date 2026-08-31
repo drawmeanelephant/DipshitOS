@@ -22,12 +22,40 @@ Investigated `verify-live-history` being red on main
   boot-1's per-submit `save_to_history` writes did not persist across the
   reboot for boot-2's `load_history`.
 - `esp.write_file` → `fat.write_file` runs synchronously and awaits the
-  virtio-blk completion; `esp.disk_ready()` is true pre-shell. The loss is at
-  the VM boundary: the runner kills boot-1 ≤0.5 s after the `T4-third-marker`
-  script-expect, intersecting the macOS-27 canonical-disk FAT-write/fresh-copy
-  fragility the gate's own comments document. Boot-2's writes survive the
-  same teardown, so it is a timing/flush-specific durability gap for
-  boot-1's shortest-lived writes, not a wholesale write failure.
+  virtio-blk completion; `esp.disk_ready()` is true pre-shell. ~~The loss is
+  at the VM boundary~~ **(SUPERSEDED by the checkpoint finding below — not a
+  VM-boundary flush problem).**
+
+## 2026-08-31 (later) — checkpoint instrumentation flipped the diagnosis
+
+Added temporary python checkpoints to `tools/verify-live-history.sh` dumping
+`artifacts/disk.img` after boot 1 and after boot 2:
+
+- After boot 1 the disk DOES contain `echo T4-third` (but not T4-first/
+  T4-second) — the write physically lands.
+- After boot 2 the disk contains only boot-2's own lines — boot-2 read
+  HISTORY.TXT as empty and clobbered boot-1's bytes.
+- Boot-1's file ended up as only the LAST line → the read-modify-write chain
+  broke WITHIN boot-1: every save read back empty.
+
+Root cause found by simulating `kernel/src/esp.zig`'s window accounting over
+the real disk (`image/mkfat32.py --list`): 40 files are eligible for
+content-loading (≤ `esp_content_max` 2048 B) totaling **26,564 B**, but
+`content_pool_max = 8192` — the pool exhausted at root slot 23 (FSTEST.BIN),
+so `HISTORY.TXT` (slot 78) and every other late small file was listed but
+never content-loaded (`len=0`). `load_history`/`save_to_history` read via
+`esp.content_of` → silent empty → recall no-op + clobbering saves.
+
+Fix (this branch, `kernel/src/esp.zig`):
+1. `content_pool_max` 8192 → 32768 (fits 26.5 KB eligible content +
+   headroom; bss-budget gate still PASS).
+2. `content_of` load-on-demand: entries listed-but-not-loaded (len==0,
+   size>0 ≤ cap, disk mounted) are read from the FAT volume on first access
+   and cached in the pool — a small file can never silently read as empty.
+
+Validated live: `verify-live-history` **PASS 1/1** — checkpoints show boot-1
+persisted all T4 lines AND boot-2 recalled `echo T4-third-marker` on the
+synthesized Up chord.
 - No code landed blind. The durable fix — verify boot-1→boot-2 persistence
   survives (e.g. a settled/graceful teardown or an explicit durable-history
   surface), gated on a live checkpoint that HISTORY.TXT is present before
