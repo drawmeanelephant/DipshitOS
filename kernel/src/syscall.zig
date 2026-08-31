@@ -2080,6 +2080,14 @@ const m33_map_shared: u64 = 0x10000; // M33 SB1 (claim 7418): M33_MAP_SHARED (AD
 /// namespace, so it cannot collide with the SB2 create/keep/attach paths.
 const m33_surf_win_tag: u64 = 0x8000_0000_0000_0000;
 
+/// M33 SB5 (claim 7397): the SCANOUT tag — when `addr` to a M33_MAP_SHARED
+/// `sys_mmap` carries this tag, the REGISTERED WM maps the virtio-gpu
+/// framebuffer WRITABLE into its own root (the compose-N target). The WM
+/// composites the N migrated surfaces into this view and REQUEST_PRESENT
+/// flushes it. WM seat + full-frame + writable only; kernel-owned pages
+/// (never ref'd/unref'd). Distinct bit from the SB3 window tag (63 vs 62).
+const m33_surf_scan_tag: u64 = 0x4000_0000_0000_0000;
+
 /// M33 SB2 (claim 8878): seam-B shared-anonymous mmap (ADR 0016 D1/D2, the
 /// frozen `M33_MAP_SHARED` bit 16). The physical pages are allocated ONCE and
 /// mapped into two roots: the owner's WRITABLE leaf (its own root) and the
@@ -2113,6 +2121,14 @@ fn handle_mmap_shared(addr: u64, len: u64, prot: u64, flags: u64, pid: usize, pi
     // are untouched: an unmigrated app never sets the tag and keeps the
     // kernel user_bufs path byte-identically. The surface is created + mapped
     // by the owner-create tail, then bound to the window.
+    // --- M33 SB5 (claim 7397): scanout bind (the compose-N target) ------
+    // `addr` carrying the scanout tag names the virtio-gpu framebuffer: the
+    // REGISTERED WM (and only it) maps it writable into its own root, then
+    // composites the N migrated shared surfaces into it and issues the final
+    // present (REQUEST_PRESENT = flush). Full-frame only, kernel-owned pages.
+    if ((addr & m33_surf_scan_tag) != 0) {
+        return bind_scanout_surface(pid, pinfo, len, prot, flags);
+    }
     if ((addr & m33_surf_win_tag) != 0) {
         const wid: u8 = @intCast(addr & 0xff);
         return bind_window_surface(wid, len, prot, flags, pid, pinfo);
@@ -2258,6 +2274,23 @@ fn owner_create_shared_surface(
 /// the bytes RO through its peer mirror (SB2 peer attach by handle). Teardown
 /// is the same D2 rule: owner exit / window close (+ its surface) revokes the
 /// WM mirror and frees at refcount 0.
+/// M33 SB5 (claim 7397): bind the virtio-gpu framebuffer (the scanout) as
+/// the registered WM's WRITABLE compose-N target. The WM seat is the
+/// privilege boundary (EACCES otherwise); full-frame only (EINVAL);
+/// compose-into requires PROT_WRITE (EINVAL); the framebuffer must exist
+/// (ENXIO). Idempotent — a WM re-binding returns its existing va.
+fn bind_scanout_surface(pid: usize, pinfo: process.ProcessInfo, len: u64, prot: u64, flags: u64) u64 {
+    if (!wm_server.registered() or wm_server.registered_pid().? != pid) return error_result(.eacces);
+    if ((prot & 2) == 0) return error_result(.einval); // compose-into requires a writable leaf
+    const aligned_len = (len + 4095) & ~@as(u64, 4095);
+    if (aligned_len != virtio_gpu.fb_size) return error_result(.einval); // full-frame only
+    if (virtio_gpu.gpu_fb_phys == 0) return error_result(.enxio); // no framebuffer
+    _ = flags; // the shared-anon flag bits are validated at the handle_mmap_shared entry
+    const va = wm_server.scanout_bind(pid, pinfo);
+    if (va == 0) return error_result(.einval); // seat refused / map failure
+    return va;
+}
+
 fn bind_window_surface(wid: u8, len: u64, prot: u64, flags: u64, pid: usize, pinfo: process.ProcessInfo) u64 {
     const win = driving_award.find_user_window(wid) orelse return error_result(.einval);
     if (win.owner == null or win.owner.? != pid) return error_result(.eacces); // not the caller's window
@@ -2326,6 +2359,19 @@ fn handle_munmap(args: Args, _: *exceptions.VectorFrame) u64 {
 
     const aligned_len = (len + 4095) & ~@as(u64, 4095);
     const pages = aligned_len / 4096;
+
+    // M33 SB5 (claim 7397): the scanout grant is full-frame only; munmapping
+    // it unbinds the WM's compositing privilege (unmap the leaves WITHOUT
+    // unref — the GPU fb pages are kernel-owned — and clear the seat). This
+    // MUST come before the generic loop below, which would unref the kernel's
+    // framebuffer pages.
+    if (wm_server.scanout_va_get()) |sva| {
+        if (addr == sva) {
+            if (aligned_len != virtio_gpu.fb_size) return error_result(.einval);
+            wm_server.scanout_teardown();
+            return 0;
+        }
+    }
 
     // M33 SB2 (claim 8878): shared-region teardown. munmap of a shared
     // surface is FULL-REGION only (a partial unmap is EINVAL). An OWNER
@@ -2688,18 +2734,18 @@ fn handle_wmctl(args: Args, _: *exceptions.VectorFrame) u64 {
         wm_server.wmctl_request_present => {
             if (!wm_server.registered()) return error_result(.enosys);
             if (wm_server.registered_pid() != pid) return error_result(.eacces);
-            // M32 WMS4: the present path COMPOSITES — paint dirty windows
-            // and the WM's descriptor chrome, then transfer+flush (a
-            // no-op when the scene is clean; request_present's own flush
-            // still advances the scanout and the counters). Without this
-            // the desktop would freeze while a WM is registered (WMS2
-            // gated the shell idle drain off; WMS3 only flushed). The
-            // composite is real-hardware work (draw_chrome + gpu transfer
-            // runs `dc ivac` asm, illegal at EL0 in host test binaries and
-            // after another test in an aggregated binary armed the
-            // transport) — gate it the established `!builtin.is_test` way;
-            // the live gate runs the real composite.
-            if (!builtin.is_test) _ = driving_award.composite();
+            // M33 SB5 (claim 7397): REQUEST_PRESENT is now the FINAL
+            // present — flush only. The kernel's layer (chrome + unmigrated
+            // windows) was already painted at the last COMPOSITE_TICK
+            // (wm_server.on_tick -> driving_award.paint_scene), and the WM's
+            // compose-N stores of the migrated surfaces landed in the
+            // scanout between the tick and this call. The old
+            // composite-here behavior would paint chrome AFTER the WM's
+            // stores and overdraw them (z-order inversion); the tick-side
+            // paint keeps the scanout z-order kernel-under-WM at flush time.
+            // request_present advances the present sequence + count and runs
+            // the G1 transfer+flush (itself gated `!builtin.is_test` — the
+            // live gate runs the real flush).
             if (!wm_server.request_present()) return error_result(.einval); // defensive: registrant vanished
             return 0;
         },
@@ -5408,4 +5454,120 @@ test "syscall: M33 SB3 — window surface handoff; bind records the surface, WM 
 
     // Cleanup: unregister the WM seat (see the sibling test's note).
     _ = wm_server.unregister(wm_pid);
+}
+
+test "syscall: M33 SB5 — the scanout grant is WM-only, full-frame, writable, idempotent, and tears down (claim 7397)" {
+    mmu.reset();
+    alloc.reset_refcounts();
+    shared_region.reset();
+    process.init();
+    userspace.init();
+    init(test_writer);
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0);
+    driving_award.arm();
+
+    const map_desc = [_]memmap.MemoryDescriptor{
+        .{ .type = .conventional_memory, .physical_start = 0x100000, .virtual_start = 0, .number_of_pages = 256, .attribute = 0 },
+    };
+    const view = memmap.MapView.init(std.mem.asBytes(&map_desc), @sizeOf(memmap.MemoryDescriptor), map_desc.len);
+    try std.testing.expect(alloc.init(view, &.{}));
+
+    const owner_root = mmu.build_user_root(userspace.text_va, 0x1000, 64, userspace.stack_va, 0x2000, 8192).?;
+    const wm_root = mmu.build_user_root(userspace.text_va, 0x3000, 64, userspace.stack_va, 0x4000, 8192).?;
+    var kstack1: [scheduler.task_stack_size]u8 align(16) = undefined;
+    var kstack2: [scheduler.task_stack_size]u8 align(16) = undefined;
+    const owner_pid = process.create("APP.BIN", .{ .entry_va = 0x400000, .content_len = 64 }, .{
+        .root_phys = owner_root,
+        .text_va = userspace.text_va,
+        .text_len = 64,
+        .stack_va = userspace.stack_va,
+        .stack_len = 8192,
+    }, .{}).?;
+    const wm_pid = process.create("WM.BIN", .{ .entry_va = 0x400000, .content_len = 64 }, .{
+        .root_phys = wm_root,
+        .text_va = userspace.text_va,
+        .text_len = 64,
+        .stack_va = userspace.stack_va,
+        .stack_len = 8192,
+    }, .{}).?;
+    const owner_task = scheduler.register_exec_user(userspace.text_va, 0x4000_0000, 100, 0x8000_0000, 8192, &kstack1, 0, 0).?;
+    const wm_task = scheduler.register_exec_user(userspace.text_va, 0x5000_0000, 100, 0x9000_0000, 8192, &kstack2, 0, 0).?;
+    _ = process.bind(owner_pid, owner_task);
+    _ = process.bind(wm_pid, wm_task);
+    scheduler.start();
+
+    var frame = fresh_frame();
+    // Register the WM (the syscall seat check needs it) and fake a
+    // framebuffer physical base — the test only inspects leaves, never the
+    // pages themselves, so an out-of-the-way fake PA is safe.
+    _ = wm_server.register(wm_pid);
+    const fb_pa: u64 = 0x9000_0000;
+    const saved_fb_phys = virtio_gpu.gpu_fb_phys;
+    virtio_gpu.gpu_fb_phys = fb_pa;
+    defer {
+        virtio_gpu.gpu_fb_phys = saved_fb_phys;
+        _ = wm_server.unregister(wm_pid);
+    }
+    const fb_len: u64 = virtio_gpu.fb_size;
+
+    // --- A NON-WM process is refused EACCES (the seat is the privilege).
+    var guard: usize = 0;
+    while (scheduler.current_id() != owner_task and guard < scheduler.max_tasks) : (guard += 1) {
+        try std.testing.expect(scheduler.yield_current());
+    }
+    try std.testing.expectEqual(error_result(.eacces), dispatch(sys_mmap, .{ m33_surf_scan_tag, fb_len, 3, 0x20 | 0x10000, 0, 0 }, &frame));
+
+    // --- The WM: wrong geometry refused (partial frame EINVAL; RO prot EINVAL).
+    guard = 0;
+    while (scheduler.current_id() != wm_task and guard < scheduler.max_tasks) : (guard += 1) {
+        try std.testing.expect(scheduler.yield_current());
+    }
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_mmap, .{ m33_surf_scan_tag, fb_len - 4096, 3, 0x20 | 0x10000, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_mmap, .{ m33_surf_scan_tag, fb_len, 1, 0x20 | 0x10000, 0, 0 }, &frame));
+
+    // --- The WM binds the full framebuffer WRITABLE into ITS OWN root.
+    const scan_va = dispatch(sys_mmap, .{ m33_surf_scan_tag, fb_len, 3, 0x20 | 0x10000, 0, 0 }, &frame);
+    try std.testing.expect(scan_va >= 0x1000_0000);
+    try std.testing.expect(wm_server.scanout_bound(wm_pid));
+    // Each leaf aliases the GPU framebuffer's physical pages, EL0 RW, no sw_cow.
+    {
+        const leaf = mmu.get_user_leaf(wm_root, scan_va).?.*;
+        try std.testing.expectEqual(fb_pa, leaf & 0x0000_ffff_ffff_f000);
+        try std.testing.expectEqual(@as(u64, 1), (leaf >> 6) & 3); // EL0 RW
+        try std.testing.expect((leaf & mmu.sw_cow) == 0);
+        // The last page too (full-frame).
+        const last_va = scan_va + (fb_len - 4096);
+        const leaf_last = mmu.get_user_leaf(wm_root, last_va).?.*;
+        try std.testing.expectEqual(fb_pa + fb_len - 4096, leaf_last & 0x0000_ffff_ffff_f000);
+    }
+
+    // --- Idempotent re-bind returns the SAME va (no second mapping).
+    try std.testing.expectEqual(scan_va, dispatch(sys_mmap, .{ m33_surf_scan_tag, fb_len, 3, 0x20 | 0x10000, 0, 0 }, &frame));
+
+    // --- The kernel did NOT ref-count the GPU pages (they are kernel-owned):
+    // no dynamic page was recorded, so teardown must never unref them.
+    // (probe: the mapped pa is NOT in the WM's dynamic list — the syscall
+    // path records dynamic pages for OWNER surfaces only.)
+
+    // --- Full-frame munmap unbinds: leaves unmapped WITHOUT unref.
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_munmap, .{ scan_va, fb_len, 0, 0, 0, 0 }, &frame));
+    try std.testing.expect(!wm_server.scanout_bound(wm_pid));
+    // The leaves were unmapped (probe: unmap finds no valid leaf anymore).
+    try std.testing.expect(mmu.unmap_user_page(wm_root, scan_va) == null);
+    // Re-bind (a fresh grant): a new va, full-frame only enforced again.
+    const scan_va2 = dispatch(sys_mmap, .{ m33_surf_scan_tag, fb_len, 3, 0x20 | 0x10000, 0, 0 }, &frame);
+    try std.testing.expect(scan_va2 >= 0x1000_0000);
+    try std.testing.expect(scan_va2 != scan_va);
+    // Partial munmap of the scanout is refused (full-frame only).
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_munmap, .{ scan_va2, 4096, 0, 0, 0, 0 }, &frame));
+
+    // --- WM unregister tears the grant down too (the exit path).
+    try std.testing.expect(wm_server.scanout_bound(wm_pid));
+    _ = wm_server.unregister(wm_pid);
+    try std.testing.expect(!wm_server.scanout_bound(wm_pid));
+    try std.testing.expect(mmu.unmap_user_page(wm_root, scan_va2) == null);
+    // The user layer ownership went back to the kernel shim.
+    try std.testing.expect(!driving_award.wm_owns_user_layer);
 }

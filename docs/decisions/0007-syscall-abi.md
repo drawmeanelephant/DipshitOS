@@ -842,3 +842,16 @@ redefined from `arg1 = 0 (reserved)` to `arg1 = per-surface damage bitmask`
 (bit i <=> user surface i + `user_window_id_base`) — the WM's damage-notify
 payload. No dispatch-table row changes; no new slots; `sys_win_fill`/`present`
 stay frozen.
+
+**M33 SB5 (claim 7397, 2026-08-31):** a second `sys_mmap` addr-tag —
+`M33_SURF_SCAN_TAG` = `0x4000_0000_0000_0000` (bit 62, distinct from the SB3
+window tag at bit 63). `sys_mmap(addr = M33_SURF_SCAN_TAG, len = fb_size,
+prot & PROT_WRITE, MAP_ANON|SHARED)` by the REGISTERED WM maps the virtio-gpu
+framebuffer WRITABLE into its own root (the compose-N target). WM seat only
+(EACCES otherwise), full-frame only (EINVAL), writable required (EINVAL), no
+framebuffer → ENXIO; idempotent. The GPU fb pages are kernel-owned — mapped
+without ref, torn down (WM exit / full-frame munmap) without unref. The final
+present: REQUEST_PRESENT (slot 65 cmd 3) is now FLUSH ONLY — the kernel paints
+its layer at COMPOSITE_TICK time (`paint_scene`), the WM's compose-N stores
+land after, and the present flushes (the kernel never re-paints over the WM's
+stores). No dispatch-table row changes; no new slots.

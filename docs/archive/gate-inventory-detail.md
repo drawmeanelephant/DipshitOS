@@ -157,6 +157,7 @@ Notes:
 Fixed-width prefix, `cmd=` is the last field and may contain spaces. A
 preflight can extract records with
 `sed -n '/^<!-- GATE_INVENTORY:START -->$/,/^
+GATE id=live-sb5-wm-compose-n class=B kind=gate ci=yes apple=yes gate=yes cmd=bash tools/verify-live-sb5-wm-compose-n.sh  # claim 7397 (seam B, issue #692): M33 SB5 WM compose-N + one final present - SB5WM.BIN registers, binds the scanout writable (M33_SURF_SCAN_TAG), peers the migrated surface RO, COMPOSES it into the scanout, reads the byte back (sb5: wm readback=0x5B), and issues the FINAL present (REQUEST_PRESENT = flush only); SB5OWN.BIN renders with plain stores ONLY (never sys_win_fill) so the syscalls report shows `13 sys_win_fill calls=0` - a registered-WM desktop composites entirely from shared surfaces with zero fill SVCs
 GATE id=live-sb4-damage-tracking class=B kind=gate ci=no apple=yes gate=yes cmd=bash tools/verify-live-sb4-damage-tracking.sh  # claim 2382 (seam B, issue #630): M33 SB4 rect-granular damage - SB4DAM.BIN fills two rects (8,8,48,48)+(100,60,16,16) with no yield so they union into {8,8,108,68}; dui's new last= column shows composite repainted exactly that union, not the whole 128x96 window - one rect writes -> one rect repaints
 <!-- GATE_INVENTORY:END -->$/p'`
 and filter on `class=…`, `ci=…`, `apple=…`, `gate=…`.

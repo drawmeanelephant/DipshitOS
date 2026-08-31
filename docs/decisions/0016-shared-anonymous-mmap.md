@@ -243,3 +243,19 @@ tick; the exact rects come via a kernel `user_damage(id)` accessor, and the
 kernel's own user-window compositor repaints only the tracked damage rect
 (recorded in `dui`'s `damage=`/`last=` columns).
 
+Compose-N + one final present LANDED by claim 7397 (M33 SB5, 2026-08-31): the
+registered WM maps the scanout (`gpu_fb`) WRITABLE via the `M33_SURF_SCAN_TAG`
+addr-tag (ADR 0007), composites the N migrated RO surfaces into it (plain byte
+copies — the WM does the compositing), and REQUEST_PRESENT is the final,
+flush-only present. The kernel paints its own layer (chrome + unmigrated
+windows) at tick time — `wm_server.on_tick` runs `driving_award.paint_scene()`
+BEFORE the COMPOSITE_TICK event — so the scanout z-order is kernel-layer UNDER
+the WM's compose-N stores at flush time (the old composite-at-present painted
+chrome after the WM's stores and could overdraw them). Migrated
+(surface-backed) windows are skipped by `paint_scene` while the WM owns the
+user layer (set on scanout bind, cleared on teardown). The SB5 gate proves the
+D2 "zero kernel fill for migrated apps" promise: a migrated app renders with
+plain stores only, and the kernel's per-slot counter shows `sys_win_fill
+calls=0` while the WM's compose-N delivers the bytes to the scanout (live VZ
+readback `0x5B`).
+
