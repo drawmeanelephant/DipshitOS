@@ -53,15 +53,17 @@ const SetVariableFn = *const fn (
 /// while ~2.6 KB+ re-writes hang).
 pub const chunk_cap: usize = 256;
 
-/// Total chunk budget (soft cap): 128 chunks ≈ 33 KiB of console output.
-/// Observed on VZ: the full gate session (takeover banner + 25-descriptor
-/// map + probe records + shell banner + version/mem/echo/help) is ~4.4 KiB
-/// but lands as ~100 chunks because every newline emits one; the old cap of
-/// 64 cut the help listing off mid-way even though the store still had
-/// ~47 KiB free. 128 is generous, keeps the store bounded, and the store
-/// write budget (~61 KiB writable) is the real ceiling anyway. One extra
-/// chunk is reserved for the overflow notice.
-pub const max_chunks: usize = 128;
+/// Total chunk budget (soft cap). Chunks are one per newline (short help/
+/// banner lines average ~75 B, not the 256 B chunk_cap), so the cap is a
+/// LINE-count bound, not a byte bound. Observed on VZ 2026-08-31: the full
+/// gate session (takeover banner + descriptor map + probe records + shell
+/// banner + version/mem/help) is ~12.7 KiB but lands as **168 chunks**. The
+/// cap has historically been raised as the help catalog grew (64 → 128 cut
+/// the help listing off mid-way even with ~47 KiB free); 128 now cuts it off
+/// again at ~10470 B/129 chunks. 256 fits today's session (~1.5× headroom)
+/// while the EFI variable store write budget (~61 KiB writable) is the real
+/// ceiling anyway. One extra chunk is reserved for the overflow notice.
+pub const max_chunks: usize = 256;
 
 /// In-band chunk marker, 14 bytes: "VIRELAIC " + 4 zero-padded decimal
 /// digits + ":". Distinctive enough that no real console output collides
@@ -257,7 +259,10 @@ pub fn debug_mark(byte: u8) void {
 // Tests (host-side; injected fakes, no hardware)
 // ---------------------------------------------------------------------------
 
-const spy_max_calls: usize = 160;
+// Big enough for the "output past the chunk cap" test to observe
+// max_chunks+1 calls (the full cap plus the overflow notice); sized off
+// max_chunks so the two stay in sync if the cap is ever raised again.
+const spy_max_calls: usize = max_chunks + 64;
 const spy_value_max: usize = marker_len + chunk_cap + end_marker_len;
 var spy_count: usize = 0;
 // Variable names are ASCII, so they are stored as bytes for easy
