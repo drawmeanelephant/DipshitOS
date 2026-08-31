@@ -63,6 +63,8 @@
 | Twenty-nine — VM depth | Demand paging, COW page sharing, anonymous mmap (slots 63/64), zero-leak teardown | ✅ done 2026-08-27 (issue #598, claim 8247) |
 | Thirty — dynamic linking | Freestanding `LD.SO` linker, `LIBUI.SO`/`LIBFONT.SO`, W^X multi-aperture, live gate | ✅ done 2026-08-27 (issue #599, claim 7921) |
 | Thirty-one — dyn linking ecosystem | CALC/NOTEPAD/FILE/DESKTOP → `.ELF`, runtime `dlopen`/`dlsym` | ✅ done 2026-08-27 (issue #602, claim 4001) |
+| Thirty-two — WM server migration | Seam A: desktop policy moved to a userland WM server (slot 65, kind 18); kernel slimmed WMS1–WMS9 (issues #621–#629) | ✅ done 2026-08-30 (issues #621–#629; WMS10 → M33, claim 9612) |
+| Thirty-three — seam B (proposed) | Full pixel ownership: cross-process shared-anon mmap, apps render into their own buffers, WM composes one final present | 🔄 planned (ADR 0016 DRAFT; `docs/march-m33-seam-b-pixel-ownership.md`) |
 
 > **Narratives for M3–M16** are archived per milestone under `docs/archive/status-m{N}-detail.md` (issue #262).
 > Each archive preserves the verbatim pre-compression table row plus march/claim pointers; the live table above is the one-line summary.
@@ -147,17 +149,24 @@ Post-milestone landings since M31: the in-guest HTTP/1.1 web server
 preflight cards N13/N14 (claim 8852), and the `sys_tcp_connect` wall-clock
 bounding fix (issue #613, claim 2572, PR #615).
 
-**There is no M32 yet.** Every GitHub milestone is closed, the issue tracker
-is at **zero open issues** (2026-08-28), and no claim is active on a branch —
-the repo sits between milestones. The ABI is effectively full: a 128-slot
-table with **65 implemented** (ADR 0013 reserved slots 52–54), so the next
-milestone is likely predominantly userland unless an ADR amendment grants
-more slots. Both former open threads are resolved: the M8 U4 pointer-focus
+**M32 is complete.** Every WMS1–WMS9 issue (#621–#629) is closed; the sole
+remaining M32 card (#630, WMS10 / seam B) is proposed as the next milestone
+(M33). The ABI is effectively full: a 128-slot table with **65 implemented**
+(ADR 0013 reserved slots 52–54), and ADR 0016 proposes slot-64-flag
+shared-anon mmap (a new slot only if the flag namespace proves too tight) so
+M33 is predominantly userland + this one MMU capability. Both former open threads are resolved: the M8 U4 pointer-focus
 proof is class-B-headless via custom-virtio pointer injection (claim 9367,
 issue #151) and the synthesized-keyboard `events=0` report is fixed by the
 headless virtio input channel (claims 9588/0680, issue #179).
 
-**M32 is underway (WMS1 done, planning complete).** The target is the window-manager
+**M32 is COMPLETE (2026-08-30) — WMS1–WMS9 closed (issues #621–#629); WMS10 moved to M33 (ADR 0016).** The target is the window-manager
+
+**Where the M32 narrative ends:** WMS8 slimmed the kernel through Gate 6
+(pointer drag/snap) and its final gates; the per-gate detail lives in
+`docs/march-m32-wm-migration.md`. **WMS10 (seam B, #630) is moved to M33** —
+the capability/security decision is drafted in `docs/decisions/0016-`
+`shared-anonymous-mmap.md` and the gated cards (SB1–SB6) in `docs/march-m33-`
+`seam-b-pixel-ownership.md`.
 *boundary*, not features: today desktop policy is a ~4,740-line kernel
 component (`driving_award.zig`) composited from the shell idle loop, with apps
 touching it only through draw syscalls. The plan moves policy out into a
@@ -583,6 +592,8 @@ Multiple agents/humans develop this repo concurrently. Binding rules (mirrored i
 - [`march-m29.md`](march-m29.md) — M29 tracker (VM depth: demand paging, COW, and anonymous mmap; done).
 - [`march-m30.md`](march-m30.md) — M30 tracker (dynamic linking & shared libraries; done).
 - [`march-m31.md`](march-m31.md) — M31 tracker (dynamic linking ecosystem & userland migration; done).
+- [`march-m32-wm-migration.md`](march-m32-wm-migration.md) — M32 tracker (WM server migration; done — WMS1–WMS9).
+- [`march-m33-seam-b-pixel-ownership.md`](march-m33-seam-b-pixel-ownership.md) — M33 tracker (seam B / full pixel ownership; proposed, ADR 0016).
 - [`testing.md`](testing.md) — verification sequence & evidence policy.
 - [`hardware-contract.md`](hardware-contract.md) — hardware `[observed]`/`[inferred]`.
 - [`architecture.md`](architecture.md) — components & data flow.

@@ -1,0 +1,73 @@
+# Milestone thirty-three march — seam B: full pixel ownership (living tracker)
+
+> [`docs/status.md`](status.md) is the canonical milestone-level source. This
+> file holds M33's per-card detail, order, and ABI notes. A card's row flips to
+> ✅ only with real observed evidence.
+> Architectural binding: **[ADR 0016](decisions/0016-shared-anonymous-mmap.md)**
+> (DRAFT, claim 9612) — seam B, split from ADR 0015 D5 / issue #630.
+
+## Where we are
+
+M32 (issues #621–#629) is closed: the WM server is real, all nine policy cards
+landed, WMS8 slimmed the kernel to a thin render + input + surface server, and
+WMS9's span batching is the perf baseline. WMS10 (issue **#630**) was the sole
+open card — an explicitly deferred **scoping/tracker** card whose checkboxes are
+the *next* milestone's seed. This milestone (M33) is that milestone: seam B,
+**full pixel ownership**.
+
+Today apps reach the desktop only through `sys_win_fill` (slot 13) /
+`sys_win_present` (slot 14) per-rect fill syscalls; the kernel keeps per-app
+back-buffers. Seam B moves pixels to the apps: each migrated app renders into a
+**cross-process shared anonymous mmap** surface, the WM composes N shared RO
+surfaces + one final present, and the kernel sheds the per-rect fill hot path
+for migrated apps. Unmigrated apps keep the frozen slots working. The M29 COW
+machinery (`map_user_cow_page`/`sw_cow` bit 55) is the foundation the new
+capability generalizes (ADR 0016 D1).
+
+## The cards, in order
+
+> **Phase 0 contract → 1 capability → 2 surface → 3 compose → 4 payoff/perf.**
+> The capability must exist and be security-reviewed before any surface is
+> mapped; surfaces before compose; compose before the perf win is measured.
+
+| SB# | Card | Phase | Depends on | Status | ABI | Notes |
+|----:|------|:------|------------|--------|-----|-------|
+| SB1 | **ADR 0016 accepted + slot reservation** — shared-anon mmap mechanism, flag-vs-new-slot decision, `SharedRegion` table shape, security/capability rules (D2). | 0 — contract | — | 🔄 claim 9612 | slot-64 flag (or new slot) | The proposal is ADR 0016. The implementing claim freezes the encoding in ADR 0007 + writes the security review. **Gate: ADR ACCEPTED + slot reserved; D2 revocation rule unit-tested.** |
+| SB2 | **Shared-anon mmap capability** — `sys_mmap` gains the shared flag; kernel allocates a `SharedRegion` (refcount + owner + va/pa set), maps RO leaves into peer roots, grants read access to the registered WM server + (future) authorized apps. | 1 — capability | SB1 | ⬜ | slot 63/64 flag | Engineer the refcount/teardown from M29 COW (region-level, not per-page). **Gate: two EL0 spaces map one physical region; owner writes, WM reads RO; munmap-on-close revokes peers (unit + headless VZ proof).** |
+| SB3 | **Surface handoff** — apps render into a shared surface (plain stores); `sys_win_fill`/`sys_win_present` hand off for migrated apps; frozen slots keep working for unmigrated ones. | 2 — surface | SB2 | ⬜ | slots 12–20 frozen | `uaccess` registration stays owner-side only. **Gate: a migrated app draws to its buffer and the WM sees the bytes (parity vs. the old fill path).** |
+| SB4 | **Damage tracking** — the WM consumes per-surface dirty flags each `COMPOSITE_TICK` instead of full-window presents; decide flag-poll vs. kernel notify event. | 3 — compose | SB3 | ⬜ | kind 18 (extend) | The kernel already carries per-surface dirty. **Gate: damage is repaint-granular (one rect writes → one rect repaints).** |
+| SB5 | **WM compose-N + one final present** — the WM copies RO surfaces into the scanout (or a single composited back-buffer) and issues the final present; per-rect fills gone for migrated apps. | 3 — compose | SB4 | ⬜ | — | **Gate: a registered-WM desktop composites entirely from shared surfaces; kernel prints zero fill SVCs for migrated apps.** |
+| SB6 | **Perf payoff** — measure seam B vs. the WMS9 baselines (`artifacts/wms9-fill-reduction.md`). | 4 — payoff/perf | SB5 | ⬜ | — | The issue's "measured, not asserted" requirement. **Gate: documented before/after on the WMS9 dynamic + static apps.** |
+
+### Dependency phases (why this order)
+
+```text
+Phase 0  contract       SB1 ───────────────────────────────┐ capability + security review
+Phase 1  capability     SB2 ───────────────────────────────┘ map into two EL0 spaces
+Phase 2  surface        SB3  ─────────────────────────────┐ apps render into shared bufs
+Phase 3  compose        SB4 → SB5 ────────────────────────┘ damage → one final present
+Phase 4  payoff         SB6  (measured vs WMS9 baselines)
+```
+
+Hard edges: SB1 before SB2 (can't engineer the capability without the frozen
+mechanism + the security model). SB2 before SB3 (surfaces can't be shared until
+the capability exists). SB3 before SB4/SB5 (damage and compose consume real
+surfaces). SB6 strictly last (measurement needs the whole path). SB5 is where
+per-rect fills actually disappear for migrated apps.
+
+## Notes
+
+1. **Out of scope until every prior card lands:** general shared-*write* mmap
+   (ADR 0016 D4 explicit non-goal); any ABI break to slots 12–20 / 63/64; a
+   second writer per surface.
+2. **Zero-regression contract:** the shim path and unmigrated apps keep
+   working exactly as before through the frozen syscalls; migration is opt-in
+   one app at a time (the WMS7 mailbox seam is the re-point lever).
+3. **The security surface is real and new:** SB2 carries the grant/bound/revoke
+   rules of ADR 0016 D2 and must land its close-path unit test — the milestone's
+   highest-risk change, exactly why it is card SB2, gated.
+4. **WMS9 is the baseline, not SB6's invention.** Any perf claim in SB6 is a
+   before/after against `artifacts/wms9-fill-reduction.md`, never an assertion.
+
+_Created by claim 9612 (2026-08-30), splitting issue #630's scoping seed into
+gated cards._
