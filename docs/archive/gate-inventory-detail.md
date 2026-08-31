@@ -156,7 +156,10 @@ Notes:
 
 Fixed-width prefix, `cmd=` is the last field and may contain spaces. A
 preflight can extract records with
-`sed -n '/^<!-- GATE_INVENTORY:START -->$/,/^<!-- GATE_INVENTORY:END -->$/p'`
+`sed -n '/^<!-- GATE_INVENTORY:START -->$/,/^
+GATE id=live-sb5-wm-compose-n class=B kind=gate ci=yes apple=yes gate=yes cmd=bash tools/verify-live-sb5-wm-compose-n.sh  # claim 7397 (seam B, issue #692): M33 SB5 WM compose-N + one final present - SB5WM.BIN registers, binds the scanout writable (M33_SURF_SCAN_TAG), peers the migrated surface RO, COMPOSES it into the scanout, reads the byte back (sb5: wm readback=0x5B), and issues the FINAL present (REQUEST_PRESENT = flush only); SB5OWN.BIN renders with plain stores ONLY (never sys_win_fill) so the syscalls report shows `13 sys_win_fill calls=0` - a registered-WM desktop composites entirely from shared surfaces with zero fill SVCs
+GATE id=live-sb4-damage-tracking class=B kind=gate ci=no apple=yes gate=yes cmd=bash tools/verify-live-sb4-damage-tracking.sh  # claim 2382 (seam B, issue #630): M33 SB4 rect-granular damage - SB4DAM.BIN fills two rects (8,8,48,48)+(100,60,16,16) with no yield so they union into {8,8,108,68}; dui's new last= column shows composite repainted exactly that union, not the whole 128x96 window - one rect writes -> one rect repaints
+<!-- GATE_INVENTORY:END -->$/p'`
 and filter on `class=…`, `ci=…`, `apple=…`, `gate=…`.
 
 <!-- GATE_INVENTORY:START -->
@@ -252,6 +255,7 @@ GATE id=fw-mmu-capture class=D kind=diagnostic ci=no apple=yes gate=no cmd=bash 
 GATE id=t0sz25 class=D kind=diagnostic ci=no apple=yes gate=no cmd=bash tools/verify-t0sz16.sh
 GATE id=walk-probe class=D kind=diagnostic ci=no apple=yes gate=no cmd=zig build kernel -Dwalk-probe
 GATE id=t0sz16-walkprobe class=D kind=diagnostic ci=no apple=yes gate=no cmd=bash tools/verify-t0sz16-walkprobe.sh
+GATE id=live-sb3-surface-handoff class=B kind=gate ci=no apple=yes gate=yes cmd=bash tools/verify-live-sb3-surface-handoff.sh  # claim 3633 (seam B, issue #630): M33 SB3 surface handoff — the migrated app (SB3OWN.BIN) opens a window, binds a shared-anonymous surface as its back-buffer via sys_mmap(addr=M33_SURF_WIN_TAG|wid), renders with plain stores through its writable leaf (no kernel fill); the registered WM (SB3WM.BIN) peers the surface RO by handle and reads the exact bytes — sb3: wm registered / own opened / own bound / own stored / wm-read=0xAB / owner done / wm done, no fatal
 <!-- GATE_INVENTORY:END -->
 
 ## Known flakes (evidence registry)
@@ -269,3 +273,4 @@ then tell "documented pre-existing flake" from "new regression".
 A machine-readable prefix (`FLAKE id=... gate=... status=...`) may be added
 here alongside the table if a preflight ever needs to parse it; today the
 table is the record (docs only, no tooling depends on it).
+GATE id=live-sb6-perf-payoff class=B kind=gate ci=yes apple=yes gate=yes cmd=bash tools/verify-live-sb6-perf-payoff.sh  # claim 6864 (seam B, issue #693): M33 SB6 perf payoff - ONE boot measures before/after: SB6OLD.BIN (control) renders an 8x8 grid via the frozen per-rect path = 576 sys_win_fill SVCs (slot 13) + 9 kernel blits; SB6WM.BIN registers + binds the scanout; SB6NEW.BIN renders the SAME grid with plain stores into a shared surface (0 fills) and hands it to the WM which compose-Ns it into the scanout (bytes=196608 copy counter, readback=0x6B) and issues the final present; the syscalls snapshot must show `13 sys_win_fill calls=576` and dui blits=/skips= both >= 9 - the seam-B payoff vs the WMS9 baselines, measured not asserted

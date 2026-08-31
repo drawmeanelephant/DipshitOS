@@ -1508,6 +1508,213 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_sb2_own.step);
 
     // ------------------------------------------------------------------
+    // Guest: fifty-second + fifty-third ESP user programs (M33 SB3, claim 3633)
+    // SB3WM.BIN + SB3OWN.BIN — the two-process window surface handoff proof
+    // behind the verify-live-sb3-surface-handoff.sh gate: the migrated app
+    // opens a window, BINDS a shared-anonymous surface as its back-buffer via
+    // sys_mmap(addr=M33_SURF_WIN_TAG|wid), renders with PLAIN STORES through
+    // its writable leaf (no kernel fill), and the registered WM peers the
+    // surface RO and reads the exact bytes — the surface-handoff parity gate.
+    // Same freestanding target/linker/elf2bin/ESP-embedding as the others.
+    // ------------------------------------------------------------------
+    const sb3_wm_prog = b.addExecutable(.{
+        .name = "user-sb3-wm",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/sb3_wm.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    sb3_wm_prog.linker_script = b.path("user/linker.ld");
+    const sb3_wm_step = b.step("sb3wm", "Build the fifty-second ESP user program (zig-out/bin/SB3WM.BIN)");
+    const sb3_wm_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    sb3_wm_elf2bin.addFileArg(sb3_wm_prog.getEmittedBin());
+    const sb3_wm_bin = sb3_wm_elf2bin.addOutputFileArg("SB3WM.BIN");
+    sb3_wm_elf2bin.has_side_effects = true;
+    sb3_wm_elf2bin.stdio = .inherit;
+    sb3_wm_step.dependOn(&sb3_wm_elf2bin.step);
+    const install_sb3_wm = b.addInstallFileWithDir(sb3_wm_bin, .bin, "SB3WM.BIN");
+    b.getInstallStep().dependOn(&install_sb3_wm.step);
+
+    const sb3_own_prog = b.addExecutable(.{
+        .name = "user-sb3-own",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/sb3_own.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    sb3_own_prog.linker_script = b.path("user/linker.ld");
+    const sb3_own_step = b.step("sb3own", "Build the fifty-third ESP user program (zig-out/bin/SB3OWN.BIN)");
+    const sb3_own_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    sb3_own_elf2bin.addFileArg(sb3_own_prog.getEmittedBin());
+    const sb3_own_bin = sb3_own_elf2bin.addOutputFileArg("SB3OWN.BIN");
+    sb3_own_elf2bin.has_side_effects = true;
+    sb3_own_elf2bin.stdio = .inherit;
+    sb3_own_step.dependOn(&sb3_own_elf2bin.step);
+    const install_sb3_own = b.addInstallFileWithDir(sb3_own_bin, .bin, "SB3OWN.BIN");
+    b.getInstallStep().dependOn(&install_sb3_own.step);
+
+    // ------------------------------------------------------------------
+    // Guest: fifty-fourth ESP user program (M33 SB4, claim 2382)
+    // SB4DAM.BIN — the rect-granular damage proof behind
+    // verify-live-sb4-damage-tracking.sh: a migrated-free app fills two rects
+    // into its window (the kernel-visible fill path, which KNOWS the rect), so
+    // they coalesce into ONE union damage rect; the compositor repaints ONLY
+    // that union (dui's `last=` column), proving one-fill -> one-rect repaint.
+    // ------------------------------------------------------------------
+    const sb4dam_prog = b.addExecutable(.{
+        .name = "user-sb4dam",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/sb4dam.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    sb4dam_prog.linker_script = b.path("user/linker.ld");
+    const sb4dam_step = b.step("sb4dam", "Build the fifty-fourth ESP user program (zig-out/bin/SB4DAM.BIN)");
+    const sb4dam_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    sb4dam_elf2bin.addFileArg(sb4dam_prog.getEmittedBin());
+    const sb4dam_bin = sb4dam_elf2bin.addOutputFileArg("SB4DAM.BIN");
+    sb4dam_elf2bin.has_side_effects = true;
+    sb4dam_elf2bin.stdio = .inherit;
+    sb4dam_step.dependOn(&sb4dam_elf2bin.step);
+    const install_sb4dam = b.addInstallFileWithDir(sb4dam_bin, .bin, "SB4DAM.BIN");
+    b.getInstallStep().dependOn(&install_sb4dam.step);
+
+    // ------------------------------------------------------------------
+    // Guest: fifty-fifth ESP user program (M33 SB5, claim 7397)
+    // SB5WM.BIN — the registered-WM half of the WM compose-N + one final
+    // present proof: registers, binds the scanout writable (the SB5 grant),
+    // peers the migrated surface RO, COMPOSES it into the scanout, reads
+    // the byte back from the scanout, issues the FINAL present (flush only).
+    // ------------------------------------------------------------------
+    const sb5_wm_prog = b.addExecutable(.{
+        .name = "user-sb5wm",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/sb5_wm.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    sb5_wm_prog.linker_script = b.path("user/linker.ld");
+    const sb5_wm_step = b.step("sb5wm", "Build the fifty-fifth ESP user program (zig-out/bin/SB5WM.BIN)");
+    const sb5_wm_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    sb5_wm_elf2bin.addFileArg(sb5_wm_prog.getEmittedBin());
+    const sb5_wm_bin = sb5_wm_elf2bin.addOutputFileArg("SB5WM.BIN");
+    sb5_wm_elf2bin.has_side_effects = true;
+    sb5_wm_elf2bin.stdio = .inherit;
+    sb5_wm_step.dependOn(&sb5_wm_elf2bin.step);
+    const install_sb5_wm = b.addInstallFileWithDir(sb5_wm_bin, .bin, "SB5WM.BIN");
+    b.getInstallStep().dependOn(&install_sb5_wm.step);
+
+    // ------------------------------------------------------------------
+    // Guest: fifty-sixth ESP user program (M33 SB5, claim 7397)
+    // SB5OWN.BIN — the migrated-app half: opens a window, binds a shared
+    // surface, renders with PLAIN STORES ONLY (never sys_win_fill), and
+    // hands the surface to the WM for compose-N. The gate observes ZERO
+    // slot-13 fill SVCs via the `syscalls` monitor.
+    // ------------------------------------------------------------------
+    const sb5_own_prog = b.addExecutable(.{
+        .name = "user-sb5own",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/sb5_own.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    sb5_own_prog.linker_script = b.path("user/linker.ld");
+    const sb5_own_step = b.step("sb5own", "Build the fifty-sixth ESP user program (zig-out/bin/SB5OWN.BIN)");
+    const sb5_own_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    sb5_own_elf2bin.addFileArg(sb5_own_prog.getEmittedBin());
+    const sb5_own_bin = sb5_own_elf2bin.addOutputFileArg("SB5OWN.BIN");
+    sb5_own_elf2bin.has_side_effects = true;
+    sb5_own_elf2bin.stdio = .inherit;
+    sb5_own_step.dependOn(&sb5_own_elf2bin.step);
+    const install_sb5_own = b.addInstallFileWithDir(sb5_own_bin, .bin, "SB5OWN.BIN");
+    b.getInstallStep().dependOn(&install_sb5_own.step);
+
+    // ------------------------------------------------------------------
+    // Guest: fifty-seventh ESP user program (M33 SB6, claim 6864)
+    // SB6WM.BIN — the registered-WM half of the perf-payoff measurement:
+    // registers, binds the scanout writable, peers the migrated surface
+    // RO, COMPOSES it into the scanout COUNTING every copied byte (the
+    // compose-N copy volume: 256*192*4 = 196,608), reads the byte back,
+    // issues the FINAL present (flush only), acks the owner.
+    // ------------------------------------------------------------------
+    const sb6_wm_prog = b.addExecutable(.{
+        .name = "user-sb6wm",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/sb6_wm.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    sb6_wm_prog.linker_script = b.path("user/linker.ld");
+    const sb6_wm_step = b.step("sb6wm", "Build the fifty-seventh ESP user program (zig-out/bin/SB6WM.BIN)");
+    const sb6_wm_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    sb6_wm_elf2bin.addFileArg(sb6_wm_prog.getEmittedBin());
+    const sb6_wm_bin = sb6_wm_elf2bin.addOutputFileArg("SB6WM.BIN");
+    sb6_wm_elf2bin.has_side_effects = true;
+    sb6_wm_elf2bin.stdio = .inherit;
+    sb6_wm_step.dependOn(&sb6_wm_elf2bin.step);
+    const install_sb6_wm = b.addInstallFileWithDir(sb6_wm_bin, .bin, "SB6WM.BIN");
+    b.getInstallStep().dependOn(&install_sb6_wm.step);
+
+    // ------------------------------------------------------------------
+    // Guest: fifty-eighth ESP user program (M33 SB6, claim 6864)
+    // SB6OLD.BIN — the PRE-seam-B control: opens a window and renders the
+    // same 8x8 grid (static + 8 dynamic redraws) with sys_win_fill (slot
+    // 13) = 576 fill SVCs + 9 presents (kernel blits). The "before"
+    // number the gate compares against SB6NEW's zero-fill seam-B path.
+    // ------------------------------------------------------------------
+    const sb6_old_prog = b.addExecutable(.{
+        .name = "user-sb6old",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/sb6_old.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    sb6_old_prog.linker_script = b.path("user/linker.ld");
+    const sb6_old_step = b.step("sb6old", "Build the fifty-eighth ESP user program (zig-out/bin/SB6OLD.BIN)");
+    const sb6_old_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    sb6_old_elf2bin.addFileArg(sb6_old_prog.getEmittedBin());
+    const sb6_old_bin = sb6_old_elf2bin.addOutputFileArg("SB6OLD.BIN");
+    sb6_old_elf2bin.has_side_effects = true;
+    sb6_old_elf2bin.stdio = .inherit;
+    sb6_old_step.dependOn(&sb6_old_elf2bin.step);
+    const install_sb6_old = b.addInstallFileWithDir(sb6_old_bin, .bin, "SB6OLD.BIN");
+    b.getInstallStep().dependOn(&install_sb6_old.step);
+
+    // ------------------------------------------------------------------
+    // Guest: fifty-ninth ESP user program (M33 SB6, claim 6864)
+    // SB6NEW.BIN — the SEAM-B half: the SAME grid rendered with PLAIN
+    // STORES into a bound shared surface (zero sys_win_fill), then hands
+    // {owner_pid, handle, magic} to the registered WM which compose-N's
+    // the surface into the scanout. The gate's syscalls diff proves
+    // ZERO additional slot-13 fills after the control phase.
+    // ------------------------------------------------------------------
+    const sb6_new_prog = b.addExecutable(.{
+        .name = "user-sb6new",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/sb6_new.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    sb6_new_prog.linker_script = b.path("user/linker.ld");
+    const sb6_new_step = b.step("sb6new", "Build the fifty-ninth ESP user program (zig-out/bin/SB6NEW.BIN)");
+    const sb6_new_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    sb6_new_elf2bin.addFileArg(sb6_new_prog.getEmittedBin());
+    const sb6_new_bin = sb6_new_elf2bin.addOutputFileArg("SB6NEW.BIN");
+    sb6_new_elf2bin.has_side_effects = true;
+    sb6_new_elf2bin.stdio = .inherit;
+    sb6_new_step.dependOn(&sb6_new_elf2bin.step);
+    const install_sb6_new = b.addInstallFileWithDir(sb6_new_bin, .bin, "SB6NEW.BIN");
+    b.getInstallStep().dependOn(&install_sb6_new.step);
+
+    // ------------------------------------------------------------------
     // Top-level steps. System-command steps are marked as having side
     // effects (and inherit stdio) so they always execute instead of being
     // skipped by the build cache. (No QEMU path: this project targets Apple
@@ -1570,6 +1777,14 @@ pub fn build(b: *std.Build) void {
     image.addFileArg(sb2_wm_bin); // ... [SB2WM.BIN] (M33 SB2, claim 8878: fiftieth user program, the shared-anon WM half)
     image.addFileArg(sb2_own_bin); // ... [SB2OWN.BIN] (M33 SB2, claim 8878: fifty-first user program, the shared-anon owner half)
     image.addFileArg(zc_bin); // ... [ZC.BIN] (M32, issue #620: fifty-second user program, the Zig subset compiler)
+    image.addFileArg(sb3_wm_bin); // ... [SB3WM.BIN] (M33 SB3, claim 3633: fifty-third user program, the surface-handoff WM half)
+    image.addFileArg(sb3_own_bin); // ... [SB3OWN.BIN] (M33 SB3, claim 3633: fifty-fourth user program, the surface-handoff owner half)
+    image.addFileArg(sb4dam_bin); // ... [SB4DAM.BIN] (M33 SB4, claim 2382: fifty-fifth user program, the rect-granular damage proof)
+    image.addFileArg(sb5_wm_bin); // ... [SB5WM.BIN] (M33 SB5, claim 7397: fifty-sixth user program, the WM compose-N half)
+    image.addFileArg(sb5_own_bin); // ... [SB5OWN.BIN] (M33 SB5, claim 7397: fifty-seventh user program, the compose-N owner half)
+    image.addFileArg(sb6_wm_bin); // ... [SB6WM.BIN] (M33 SB6, claim 6864: fifty-eighth user program, the perf-payoff WM half)
+    image.addFileArg(sb6_old_bin); // ... [SB6OLD.BIN] (M33 SB6, claim 6864: fifty-ninth user program, the perf-payoff pre-seam-B control)
+    image.addFileArg(sb6_new_bin); // ... [SB6NEW.BIN] (M33 SB6, claim 6864: sixtieth user program, the perf-payoff seam-B half)
     image.has_side_effects = true;
     image.stdio = .inherit;
     image_step.dependOn(&image.step);

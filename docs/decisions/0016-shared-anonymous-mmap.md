@@ -215,4 +215,47 @@ results and unmap them on revoke.
 ---
 
 _Split from ADR 0015 D5's seam-B option and issue #630 by claim 9612 (2026-08-30).
-Accepted by claim 7418 (M33 SB1, 2026-08-30)._
+Accepted by claim 7418 (M33 SB1, 2026-08-30).
+Implemented by claim 8878 (M33 SB2, 2026-08-31): `sys_mmap` slot 63 honors
+`M33_MAP_SHARED` (bit 16) — owner `MAP_ANON|SHARED` allocates one region, maps
+WRITABLE leaves into the owner's root, registers a `SharedRegion`; the registered
+WM attaches by handle (`addr=handle, prot=R, SHARED`) → `authorize_read` (D2:
+non-owner RO only) → `ref_page` → EL0-RO `sw_cow` in the WM's OWN root
+(`kernel/src/shared_mmap.zig`, wired into the scheduler exit seam); owner
+munmap/exit revokes the WM view and frees at refcount 0. Live gate PASS
+(`verify-live-sb2-shared-anon.sh`, headless VZ).
+Elevated to WINDOWS by claim 3633 (M33 SB3, 2026-08-31): the surface-handoff
+card. A user window binds a shared-anonymous surface via
+`sys_mmap(addr = M33_SURF_WIN_TAG | window_id, MAP_ANON|M33_MAP_SHARED)` — the
+addr-tag reuses SB2's owner-create + peer-attach wholesale, the frozen
+`sys_win_open`/`fill`/`present` slots (12-14) stay byte-identical for unmigrated
+apps, `composite()` blits from the surface's `pa_base`, and a registered WM
+auto-mirrors RO at bind time (the SB2 mirror in the WM's own root).
+`M33_SURF_WIN_TAG` = `0x8000_0000_0000_0000` (bit 63) is frozen in ADR 0007.
+Live gate PASS (`verify-live-sb3-surface-handoff.sh`, headless VZ): a migrated
+app stored `0xAB` with a plain write and the registered WM read it RO — the
+parity proof vs the old fill path._
+Damage transport FREEZED by claim 2382 (M33 SB4, 2026-08-31): the
+COMPOSITE_TICK (kind 18) message is extended — its previously-reserved `arg1`
+now carries a per-surface dirty bitmask (bit i <=> user surface i +
+`user_window_id_base`) so the registered WM learns which surfaces changed each
+tick; the exact rects come via a kernel `user_damage(id)` accessor, and the
+kernel's own user-window compositor repaints only the tracked damage rect
+(recorded in `dui`'s `damage=`/`last=` columns).
+
+Compose-N + one final present LANDED by claim 7397 (M33 SB5, 2026-08-31): the
+registered WM maps the scanout (`gpu_fb`) WRITABLE via the `M33_SURF_SCAN_TAG`
+addr-tag (ADR 0007), composites the N migrated RO surfaces into it (plain byte
+copies — the WM does the compositing), and REQUEST_PRESENT is the final,
+flush-only present. The kernel paints its own layer (chrome + unmigrated
+windows) at tick time — `wm_server.on_tick` runs `driving_award.paint_scene()`
+BEFORE the COMPOSITE_TICK event — so the scanout z-order is kernel-layer UNDER
+the WM's compose-N stores at flush time (the old composite-at-present painted
+chrome after the WM's stores and could overdraw them). Migrated
+(surface-backed) windows are skipped by `paint_scene` while the WM owns the
+user layer (set on scanout bind, cleared on teardown). The SB5 gate proves the
+D2 "zero kernel fill for migrated apps" promise: a migrated app renders with
+plain stores only, and the kernel's per-slot counter shows `sys_win_fill
+calls=0` while the WM's compose-N delivers the bytes to the scanout (live VZ
+readback `0x5B`).
+

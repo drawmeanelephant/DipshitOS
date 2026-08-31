@@ -2793,6 +2793,12 @@ fn cmd_dui(m: *Monitor, args: []const []const u8) ExecError {
     m.console.print_u64(driving_award.focused_window_id());
     m.console.puts(" presents=");
     m.console.print_u64(driving_award.presents_pushed());
+    // M33 SB6 (claim 6864): the composite-cost observables — user windows
+    // the kernel blitted vs surface-backed windows skipped (WM-owned).
+    m.console.puts(" blits=");
+    m.console.print_u64(driving_award.user_blits);
+    m.console.puts(" skips=");
+    m.console.print_u64(driving_award.migrated_skips);
     m.console.puts("\n");
     // M21 W1/W2 tiling state (the layout the tiled rects obey).
     m.console.puts("dui: tiling=");
@@ -2854,6 +2860,31 @@ fn print_win_row(m: *Monitor, i: usize, w: *const driving_award.Window) void {
     if (w.kind == .user) {
         m.console.puts(" ws=");
         m.console.print_u64(w.workspace);
+        // M33 SB4 (claim 2382): the rect-granular damage observable for the
+        // damage-tracking gate. `full` when no partial damage is pending
+        // (whole-window), else the EXACT pending rect.
+        m.console.puts(" damage=");
+        if (w.damaged) {
+            m.console.print_u64(w.dx);
+            m.console.puts(",");
+            m.console.print_u64(w.dy);
+            m.console.puts(",");
+            m.console.print_u64(w.dw);
+            m.console.puts(",");
+            m.console.print_u64(w.dh);
+        } else {
+            m.console.puts("full");
+        }
+        // M33 SB4: the LAST rect composite repainted (consumed damage) —
+        // observable even after the drain. 0,0,0,0 = no partial repaint yet.
+        m.console.puts(" last=");
+        m.console.print_u64(w.last_dx);
+        m.console.puts(",");
+        m.console.print_u64(w.last_dy);
+        m.console.puts(",");
+        m.console.print_u64(w.last_dw);
+        m.console.puts(",");
+        m.console.print_u64(w.last_dh);
     }
     m.console.puts("\n");
 }

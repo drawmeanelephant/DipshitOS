@@ -563,6 +563,83 @@ if [ -f "$ZC_BIN" ]; then
     fi
     ZC_ARGS+=("$ZC_BIN")
 fi
+# M33 SB3 (claim 3633): SB3WM.BIN + SB3OWN.BIN are flat DSK1 programs (the
+# two-process window surface handoff proof behind
+# verify-live-sb3-surface-handoff.sh).
+SB3WM_BIN="${56:-$ROOT_DIR/zig-out/bin/SB3WM.BIN}"
+SB3WM_ARGS=()
+if [ -f "$SB3WM_BIN" ]; then
+    if [ "$(head -c 4 "$SB3WM_BIN")" != "DSK1" ]; then
+        fail "'$SB3WM_BIN' does not start with the 'DSK1' image magic -- run 'zig build' first."
+    fi
+    SB3WM_ARGS+=("$SB3WM_BIN")
+fi
+SB3OWN_BIN="${57:-$ROOT_DIR/zig-out/bin/SB3OWN.BIN}"
+SB3OWN_ARGS=()
+if [ -f "$SB3OWN_BIN" ]; then
+    if [ "$(head -c 4 "$SB3OWN_BIN")" != "DSK1" ]; then
+        fail "'$SB3OWN_BIN' does not start with the 'DSK1' image magic -- run 'zig build' first."
+    fi
+    SB3OWN_ARGS+=("$SB3OWN_BIN")
+fi
+# M33 SB4 (claim 2382): SB4DAM.BIN is a flat DSK1 program (the rect-granular
+# damage proof behind verify-live-sb4-damage-tracking.sh).
+SB4DAM_BIN="${58:-$ROOT_DIR/zig-out/bin/SB4DAM.BIN}"
+SB4DAM_ARGS=()
+if [ -f "$SB4DAM_BIN" ]; then
+    if [ "$(head -c 4 "$SB4DAM_BIN")" != "DSK1" ]; then
+        fail "'$SB4DAM_BIN' does not start with the 'DSK1' image magic -- run 'zig build' first."
+    fi
+    SB4DAM_ARGS+=("$SB4DAM_BIN")
+fi
+# M33 SB5 (claim 7397): SB5WM.BIN + SB5OWN.BIN are flat DSK1 programs (the
+# WM compose-N + one final present proof behind
+# verify-live-sb5-wm-compose-n.sh).
+SB5WM_BIN="${59:-$ROOT_DIR/zig-out/bin/SB5WM.BIN}"
+SB5WM_ARGS=()
+if [ -f "$SB5WM_BIN" ]; then
+    if [ "$(head -c 4 "$SB5WM_BIN")" != "DSK1" ]; then
+        fail "'$SB5WM_BIN' does not start with the 'DSK1' image magic -- run 'zig build' first."
+    fi
+    SB5WM_ARGS+=("$SB5WM_BIN")
+fi
+SB5OWN_BIN="${60:-$ROOT_DIR/zig-out/bin/SB5OWN.BIN}"
+SB5OWN_ARGS=()
+if [ -f "$SB5OWN_BIN" ]; then
+    if [ "$(head -c 4 "$SB5OWN_BIN")" != "DSK1" ]; then
+        fail "'$SB5OWN_BIN' does not start with the 'DSK1' image magic -- run 'zig build' first."
+    fi
+    SB5OWN_ARGS+=("$SB5OWN_BIN")
+fi
+# M33 SB6 (claim 6864): SB6WM.BIN + SB6OLD.BIN + SB6NEW.BIN are flat DSK1
+# programs (the perf-payoff before/after behind
+# verify-live-sb6-perf-payoff.sh). SB6OLD is the pre-seam-B control (576
+# slot-13 fills), SB6NEW is the seam-B half (plain stores, zero fills),
+# SB6WM is the registered WM that compose-N's the surface (byte counter).
+SB6WM_BIN="${61:-$ROOT_DIR/zig-out/bin/SB6WM.BIN}"
+SB6WM_ARGS=()
+if [ -f "$SB6WM_BIN" ]; then
+    if [ "$(head -c 4 "$SB6WM_BIN")" != "DSK1" ]; then
+        fail "'$SB6WM_BIN' does not start with the 'DSK1' image magic -- run 'zig build' first."
+    fi
+    SB6WM_ARGS+=("$SB6WM_BIN")
+fi
+SB6OLD_BIN="${62:-$ROOT_DIR/zig-out/bin/SB6OLD.BIN}"
+SB6OLD_ARGS=()
+if [ -f "$SB6OLD_BIN" ]; then
+    if [ "$(head -c 4 "$SB6OLD_BIN")" != "DSK1" ]; then
+        fail "'$SB6OLD_BIN' does not start with the 'DSK1' image magic -- run 'zig build' first."
+    fi
+    SB6OLD_ARGS+=("$SB6OLD_BIN")
+fi
+SB6NEW_BIN="${63:-$ROOT_DIR/zig-out/bin/SB6NEW.BIN}"
+SB6NEW_ARGS=()
+if [ -f "$SB6NEW_BIN" ]; then
+    if [ "$(head -c 4 "$SB6NEW_BIN")" != "DSK1" ]; then
+        fail "'$SB6NEW_BIN' does not start with the 'DSK1' image magic -- run 'zig build' first."
+    fi
+    SB6NEW_ARGS+=("$SB6NEW_BIN")
+fi
 WMRPC_BIN="$ROOT_DIR/zig-out/bin/WMRPC.BIN"
 if [ -f "$WMRPC_BIN" ]; then
     DYN_ARGS+=("$WMRPC_BIN")
@@ -581,7 +658,7 @@ if [ -f "$APPS_TXT" ]; then
     APPS_TXT_ARGS+=(--apps-txt "$APPS_TXT")
 fi
 
-python3 "$SCRIPT_DIR/mkfat32.py" --size-mb "$SIZE_MB" "$IMAGE" "$EFI_BIN" "$KERNEL_BIN" "${USER_ARGS[@]}" "${COUNTER_ARGS[@]}" "${PEER_ARGS[@]}" "${STATUS43_ARGS[@]}" "${UDP_ARGS[@]}" "${WIN_ARGS[@]}" "${WINCLOSE_ARGS[@]}" "${WINLOOP_ARGS[@]}" "${WINMOVE_ARGS[@]}" "${KEYTEST_ARGS[@]}" "${SAVETEXT_ARGS[@]}" "${TYPE_ARGS[@]}" "${DIR_ARGS[@]}" "${CALC_ARGS[@]}" "${NOTEPAD_ARGS[@]}" "${TOP_ARGS[@]}" "${DESKTOP_ARGS[@]}" "${TCP_ARGS[@]+"${TCP_ARGS[@]}"}" "${FETCH_ARGS[@]+"${FETCH_ARGS[@]}"}" "${CHAT_ARGS[@]+"${CHAT_ARGS[@]}"}" "${FILE_ARGS[@]+"${FILE_ARGS[@]}"}" "${FSTEST_ARGS[@]+"${FSTEST_ARGS[@]}"}" "${TIMERTEST_ARGS[@]+"${TIMERTEST_ARGS[@]}"}" "${VICTIM_ARGS[@]+"${VICTIM_ARGS[@]}"}" "${HARDEN_ARGS[@]+"${HARDEN_ARGS[@]}"}" "${JINGLE_ARGS[@]+"${JINGLE_ARGS[@]}"}" "${CHIME_ARGS[@]+"${CHIME_ARGS[@]}"}" "${GLOBALS_ARGS[@]+"${GLOBALS_ARGS[@]}"}" "${GUARD_ARGS[@]+"${GUARD_ARGS[@]}"}" "${SPIN_ARGS[@]+"${SPIN_ARGS[@]}"}" "${SETTINGS_ARGS[@]+"${SETTINGS_ARGS[@]}"}" "${ASM_ARGS[@]+"${ASM_ARGS[@]}"}" "${PS_ARGS[@]+"${PS_ARGS[@]}"}" "${DISAS_ARGS[@]+"${DISAS_ARGS[@]}"}" "${EDIT_ARGS[@]+"${EDIT_ARGS[@]}"}" "${RESMON_ARGS[@]+"${RESMON_ARGS[@]}"}" "${DEVCONS_ARGS[@]+"${DEVCONS_ARGS[@]}"}" "${NETSTAT_ARGS[@]+"${NETSTAT_ARGS[@]}"}" "${M21DEMO_ARGS[@]+"${M21DEMO_ARGS[@]}"}" "${PING_ARGS[@]+"${PING_ARGS[@]}"}" "${DNS_ARGS[@]+"${DNS_ARGS[@]}"}" "${DOWNLOAD_ARGS[@]+"${DOWNLOAD_ARGS[@]}"}" "${TRACEROUTE_ARGS[@]+"${TRACEROUTE_ARGS[@]}"}" "${NETPROF_ARGS[@]+"${NETPROF_ARGS[@]}"}" "${SYSMON_ARGS[@]+"${SYSMON_ARGS[@]}"}" "${HTTPD_ARGS[@]+"${HTTPD_ARGS[@]}"}" "${VMTEST_ARGS[@]+"${VMTEST_ARGS[@]}"}" "${WNDSTUB_ARGS[@]+"${WNDSTUB_ARGS[@]}"}" "${WND_ARGS[@]+"${WND_ARGS[@]}"}" "${CRASH_ARGS[@]+"${CRASH_ARGS[@]}"}" "$HELLO_ELF" "${DYN_ARGS[@]+"${DYN_ARGS[@]}"}" "${SB2WM_ARGS[@]+"${SB2WM_ARGS[@]}"}" "${SB2OWN_ARGS[@]+"${SB2OWN_ARGS[@]}"}" "${ZC_ARGS[@]+"${ZC_ARGS[@]}"}" "${APPS_TXT_ARGS[@]}" \
+python3 "$SCRIPT_DIR/mkfat32.py" --size-mb "$SIZE_MB" "$IMAGE" "$EFI_BIN" "$KERNEL_BIN" "${USER_ARGS[@]}" "${COUNTER_ARGS[@]}" "${PEER_ARGS[@]}" "${STATUS43_ARGS[@]}" "${UDP_ARGS[@]}" "${WIN_ARGS[@]}" "${WINCLOSE_ARGS[@]}" "${WINLOOP_ARGS[@]}" "${WINMOVE_ARGS[@]}" "${KEYTEST_ARGS[@]}" "${SAVETEXT_ARGS[@]}" "${TYPE_ARGS[@]}" "${DIR_ARGS[@]}" "${CALC_ARGS[@]}" "${NOTEPAD_ARGS[@]}" "${TOP_ARGS[@]}" "${DESKTOP_ARGS[@]}" "${TCP_ARGS[@]+"${TCP_ARGS[@]}"}" "${FETCH_ARGS[@]+"${FETCH_ARGS[@]}"}" "${CHAT_ARGS[@]+"${CHAT_ARGS[@]}"}" "${FILE_ARGS[@]+"${FILE_ARGS[@]}"}" "${FSTEST_ARGS[@]+"${FSTEST_ARGS[@]}"}" "${TIMERTEST_ARGS[@]+"${TIMERTEST_ARGS[@]}"}" "${VICTIM_ARGS[@]+"${VICTIM_ARGS[@]}"}" "${HARDEN_ARGS[@]+"${HARDEN_ARGS[@]}"}" "${JINGLE_ARGS[@]+"${JINGLE_ARGS[@]}"}" "${CHIME_ARGS[@]+"${CHIME_ARGS[@]}"}" "${GLOBALS_ARGS[@]+"${GLOBALS_ARGS[@]}"}" "${GUARD_ARGS[@]+"${GUARD_ARGS[@]}"}" "${SPIN_ARGS[@]+"${SPIN_ARGS[@]}"}" "${SETTINGS_ARGS[@]+"${SETTINGS_ARGS[@]}"}" "${ASM_ARGS[@]+"${ASM_ARGS[@]}"}" "${PS_ARGS[@]+"${PS_ARGS[@]}"}" "${DISAS_ARGS[@]+"${DISAS_ARGS[@]}"}" "${EDIT_ARGS[@]+"${EDIT_ARGS[@]}"}" "${RESMON_ARGS[@]+"${RESMON_ARGS[@]}"}" "${DEVCONS_ARGS[@]+"${DEVCONS_ARGS[@]}"}" "${NETSTAT_ARGS[@]+"${NETSTAT_ARGS[@]}"}" "${M21DEMO_ARGS[@]+"${M21DEMO_ARGS[@]}"}" "${PING_ARGS[@]+"${PING_ARGS[@]}"}" "${DNS_ARGS[@]+"${DNS_ARGS[@]}"}" "${DOWNLOAD_ARGS[@]+"${DOWNLOAD_ARGS[@]}"}" "${TRACEROUTE_ARGS[@]+"${TRACEROUTE_ARGS[@]}"}" "${NETPROF_ARGS[@]+"${NETPROF_ARGS[@]}"}" "${SYSMON_ARGS[@]+"${SYSMON_ARGS[@]}"}" "${HTTPD_ARGS[@]+"${HTTPD_ARGS[@]}"}" "${VMTEST_ARGS[@]+"${VMTEST_ARGS[@]}"}" "${WNDSTUB_ARGS[@]+"${WNDSTUB_ARGS[@]}"}" "${WND_ARGS[@]+"${WND_ARGS[@]}"}" "${CRASH_ARGS[@]+"${CRASH_ARGS[@]}"}" "$HELLO_ELF" "${DYN_ARGS[@]+"${DYN_ARGS[@]}"}" "${SB2WM_ARGS[@]+"${SB2WM_ARGS[@]}"}" "${SB2OWN_ARGS[@]+"${SB2OWN_ARGS[@]}"}" "${ZC_ARGS[@]+"${ZC_ARGS[@]}"}" "${SB3WM_ARGS[@]+"${SB3WM_ARGS[@]}"}" "${SB3OWN_ARGS[@]+"${SB3OWN_ARGS[@]}"}" "${SB4DAM_ARGS[@]+"${SB4DAM_ARGS[@]}"}" "${SB5WM_ARGS[@]+"${SB5WM_ARGS[@]}"}" "${SB5OWN_ARGS[@]+"${SB5OWN_ARGS[@]}"}" "${SB6WM_ARGS[@]+"${SB6WM_ARGS[@]}"}" "${SB6OLD_ARGS[@]+"${SB6OLD_ARGS[@]}"}" "${SB6NEW_ARGS[@]+"${SB6NEW_ARGS[@]}"}" "${APPS_TXT_ARGS[@]}" \
     || fail "image creation failed (see output above)."
 
 # 5. Self-verify by listing the image we just wrote.

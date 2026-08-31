@@ -160,6 +160,25 @@ pub const Window = struct {
     kind: Kind,
     visible: bool,
     dirty: bool,
+    /// M33 SB4 (claim 2382): rect-granular damage. `damaged` means the
+    /// tracked `dx/dy/dw/dh` union is valid; when false the whole window
+    /// is treated as dirty (the pre-SB4 whole-window repaint), so every
+    /// existing `.dirty = true` site keeps its current behavior. `user_fill`
+    /// sets the EXACT written rect so composite repaints only that region.
+    damaged: bool = false,
+    dx: u32 = 0,
+    dy: u32 = 0,
+    dw: u32 = 0,
+    dh: u32 = 0,
+    /// M33 SB4 (claim 2382): the LAST damage rect composite consumed (what
+    /// paint() actually repainted) — populated with the exact rect for a
+    /// partial repaint; 0,0,0,0 means no partial repaint was recorded yet
+    /// (whole-window or never). Makes the rect-granular gate observable on
+    /// serial even AFTER the drain consumes the pending damage (no race).
+    last_dx: u32 = 0,
+    last_dy: u32 = 0,
+    last_dw: u32 = 0,
+    last_dh: u32 = 0,
     /// Card G6 teardown follow-on (per-process ownership): the owning
     /// process id for a `.user` window (null for the fixed terminal +
     /// clock, which are kernel-owned). The syscall layer records the
@@ -208,6 +227,19 @@ pub const Window = struct {
     /// rules — the two paths coexist behind the presence of WM chrome.
     chrome_valid: bool = false,
     chrome: geom.ChromeDesc = undefined,
+    /// M33 SB3 (claim 9361): when a `.user` window is SURFACE-BACKED, its
+    /// rendering lives in a shared-anonymous region (M33_MAP_SHARED) instead
+    /// of the kernel `user_bufs[id]` copy. The kernel records the region's
+    /// handle + physical base here so `composite()` blits from the surface's
+    /// OWN pages (identity-mapped into the kernel root) and the registered WM
+    /// mirrors the same region RO. 0 = unmigrated (frozen kernel-buffer path,
+    /// byte-identical to pre-SB3). The surface is owned by the WINDOW's owner
+    /// pid; close/owner-exit drops the binding and revokes the WM mirror.
+    surface_handle: u32 = 0,
+    /// Physical base of the shared surface (for composite's direct blit).
+    surface_pa: u64 = 0,
+    /// Page count of the shared surface (for composite's source bounds).
+    surface_pages: u32 = 0,
 };
 
 /// Arc4 #239: fade-in constants. The window is at 25% opacity for
@@ -231,6 +263,19 @@ var armed_global: bool = false;
 /// through `wm_pointer_hook`. Flipped by `wm_server.register/unregister`;
 /// false in shim mode (the default VM) → byte-identical to pre-WMS5.
 pub var wm_owns_input: bool = false;
+/// M33 SB5 (claim 7397): the registered WM owns the migrated USER layer —
+/// true once the WM has bound the scanout (wm_server.scanout_bind) and false
+/// after teardown/unbind. While true, paint_scene() SKIPS surface-backed
+/// (migrated) user windows: their bytes are already in the scanout via the
+/// WM's compose-N stores (written between the COMPOSITE_TICK and the final
+/// present), so a kernel blit would double-draw them.
+pub var wm_owns_user_layer: bool = false;
+/// M33 SB6 (claim 6864): how many `.user` windows paint_scene actually
+/// BLITTED (the pre-seam-B composite cost) vs how many surface-backed
+/// (migrated) windows were SKIPPED while the WM owns the user layer (the
+/// seam-B saving). Monotonic per boot; the gate diffs snapshots.
+pub var user_blits: u64 = 0;
+pub var migrated_skips: u64 = 0;
 /// The raw-pointer fan-out (set by wm_server at REGISTER time; null when
 /// no WM — the hook style of `events.on_event_pushed`). Callback gets the
 /// mapped fb pixels + the raw HID button byte; the WM edge-detects.
@@ -1144,6 +1189,86 @@ pub fn mark_dirty(id: u8) bool {
     return false;
 }
 
+/// M33 SB4 (claim 2382): union-rect a partial damage region into a window's
+/// tracked damage rect, marking it dirty. When called while `damaged` is
+/// already true, the tracked rect EXPANDS to the bounding box of the new
+/// rect (damage is monotonic until composite consumes it). Returns false for
+/// an unknown id. The rect is CLAMPED to the window's own bounds so a caller
+/// can never push damage outside the repaintable surface.
+pub fn mark_damage(id: u8, x: u32, y: u32, w: u32, h: u32) bool {
+    if (w == 0 or h == 0) return false;
+    var i: usize = 0;
+    while (i < win_count) : (i += 1) {
+        if (windows[i].id != id) continue;
+        const win = &windows[i];
+        // Clamp to the window (local coords; caller passes in-window rects).
+        const cx = x;
+        const cy = y;
+        var cw = w;
+        var ch = h;
+        if (x >= win.w or y >= win.h) return true; // out-of-window -> ignore
+        if (x + w > win.w) cw = win.w - x;
+        if (y + h > win.h) ch = win.h - y;
+        const ex = cx + cw;
+        const ey = cy + ch;
+        if (win.damaged) {
+            const ox = win.dx;
+            const oy = win.dy;
+            const oex = ox + win.dw;
+            const oey = oy + win.dh;
+            win.dx = @min(ox, cx);
+            win.dy = @min(oy, cy);
+            win.dw = @max(oex, ex) - win.dx;
+            win.dh = @max(oey, ey) - win.dy;
+        } else {
+            win.dx = cx;
+            win.dy = cy;
+            win.dw = cw;
+            win.dh = ch;
+            win.damaged = true;
+        }
+        win.dirty = true;
+        return true;
+    }
+    return false;
+}
+
+/// M33 SB4: the per-surface damage rect for a user window, or null when it
+/// has no rect-granular (partial) damage pending (whole-window dirty only).
+pub const DamageRect = struct {
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+};
+pub fn user_damage(id: u8) ?DamageRect {
+    const win = find_user_window(id) orelse return null;
+    if (!win.damaged) return null;
+    return .{ .x = win.dx, .y = win.dy, .w = win.dw, .h = win.dh };
+}
+
+/// M33 SB4: a per-surface dirty bitmask for the COMPOSITE_TICK (kind-18)
+/// damage payload — bit i is set when user window (i + user_window_id_base)
+/// has pending damage this tick. The registered WM consumes this to know
+/// WHICH surfaces changed (the rects come via `user_damage`); SB5's compose-N
+/// repaints only those.
+pub fn user_damage_mask() u32 {
+    var mask: u32 = 0;
+    var i: usize = 0;
+    while (i < win_count) : (i += 1) {
+        // Only `.user` surfaces carry the bitmask — the fixed layers (terminal
+        // 0, wallpaper 254, taskbar 255, dock 253) are compositor-owned, not
+        // user surfaces, and their ids would overflow the mask shift.
+        if (windows[i].kind != .user) continue;
+        const idx = windows[i].id - user_window_id_base;
+        if (idx >= user_windows_max) continue;
+        if (windows[i].dirty) {
+            mask |= (@as(u32, 1) << @intCast(idx));
+        }
+    }
+    return mask;
+}
+
 /// Mark the terminal (window 0) dirty — the Road Pops tee's write path.
 pub fn mark_terminal_dirty() void {
     if (win_count > 0) windows[0].dirty = true;
@@ -1234,10 +1359,24 @@ pub fn user_fill(id: u8, x: u32, y: u32, w: u32, h: u32, rgb: u32) bool {
     if (w == 0 or h == 0) return false;
     if (x >= win.w or y >= win.h) return false;
     if (w > win.w - x or h > win.h - y) return false;
-    const idx = id - user_window_id_base;
-    if (idx >= user_windows_max) return false;
-    fill_rect(@ptrCast(&user_bufs[idx]), user_buf_w * 4, x, y, w, h, rgb);
-    win.dirty = true;
+    // M33 SB3 (claim 9361): a surface-backed window FILLS ITS OWN SHARED
+    // PAGES, not the kernel user_bufs copy — the frozen slot hands off to the
+    // surface. fill_rect writes the same B8G8R8X8 bytes into the region the
+    // WM mirrors RO, so parity between the migrated fill and the legacy path
+    // is exact (identical pixel encoding). An unmigrated window is unchanged.
+    const surface = user_surface(id);
+    if (surface) |sf| {
+        fill_rect(@as([*]u8, @ptrFromInt(sf.pa_base)), win.w * 4, x, y, w, h, rgb);
+    } else {
+        const idx = id - user_window_id_base;
+        if (idx >= user_windows_max) return false;
+        fill_rect(@ptrCast(&user_bufs[idx]), user_buf_w * 4, x, y, w, h, rgb);
+    }
+    // M33 SB4 (claim 2382): record the EXACT written rect as the surface's
+    // damage, so composite (and, via COMPOSITE_TICK, the WM) repaints only
+    // this region — the rect-granular gate (one rect writes -> one rect
+    // repaints), not a whole-window present.
+    _ = mark_damage(id, x, y, w, h);
     return true;
 }
 
@@ -1249,6 +1388,46 @@ pub fn user_present(id: u8) bool {
     const win = find_user_window(id) orelse return false;
     win.dirty = true;
     return true;
+}
+
+/// M33 SB3 (claim 9361): the surface info a surface-backed user window
+/// holds (the kernel's composite source + the WM-mirror identity). Returns
+/// null for an unknown / non-user / unmigrated window.
+pub const SurfaceInfo = struct {
+    handle: u32,
+    pa_base: u64,
+    page_count: u32,
+};
+
+/// Bind user window `id` to the shared surface described by `si`. The
+/// caller (the `sys_mmap` window-tag path) has already created the region,
+/// mapped the owner's writable leaves into the window owner's root, and
+/// granted the WM its RO mirror; this records the identity on the window so
+/// `composite()` blits from the surface's own pages. Returns false if the
+/// window is unknown / not `.user` / already surface-backed (a window binds
+/// ONE surface; unbind before rebind).
+pub fn user_bind_surface(id: u8, si: SurfaceInfo) bool {
+    const win = find_user_window(id) orelse return false;
+    if (win.surface_handle != 0) return false; // already migrated
+    win.surface_handle = si.handle;
+    win.surface_pa = si.pa_base;
+    win.surface_pages = si.page_count;
+    win.dirty = true;
+    return true;
+}
+
+/// The surface a user window is bound to, or null when unmigrated.
+pub fn user_surface(id: u8) ?SurfaceInfo {
+    const win = find_user_window(id) orelse return null;
+    if (win.surface_handle == 0) return null;
+    return .{ .handle = win.surface_handle, .pa_base = win.surface_pa, .page_count = win.surface_pages };
+}
+
+/// True when user window `id` is surface-backed (migrated). An unmigrated
+/// window is `false` (the frozen kernel-buffer path, byte-identical).
+pub fn user_is_surface_backed(id: u8) bool {
+    const win = find_user_window(id) orelse return false;
+    return win.surface_handle != 0;
 }
 
 /// Move a user window's top-left corner to (x, y), CLAMPED so the whole
@@ -2987,12 +3166,46 @@ fn paint(w: *Window) void {
         .user => {
             const idx = w.id - user_window_id_base;
             if (idx >= user_windows_max) return;
-            // The back-buffer is fixed user_buf_w × user_buf_h while the
-            // window rect may exceed it (M21 tiling grows rects up to
-            // 837×700): clamp the SOURCE dims so the blit never reads past
-            // the buffer (content occupies the tile's top-left corner).
+            // M33 SB3 (claim 9361): a SURFACE-BACKED window's rendering lives
+            // in its shared-anonymous pages (mapped into the owner's root and
+            // mirrored RO into the registered WM), NOT the kernel user_bufs
+            // copy. The kernel root identity-maps the low physical space, so
+            // composite() blits directly from the surface's OWN pages — the
+            // on-scanout bytes are the app's plain stores, byte-identical to
+            // what the old fill path produced (parity). An unmigrated window
+            // keeps the frozen user_bufs path exactly as before.
+            const surface = user_surface(w.id);
+            const src_ptr: [*]const u8 = if (surface) |sf|
+                @as([*]const u8, @ptrFromInt(sf.pa_base))
+            else
+                @ptrCast(&user_bufs[idx]);
+            const src_stride: usize = if (surface != null) w.w * 4 else user_buf_w * 4;
+            // The source is the window's own back-buffer (surface is sized
+            // exactly win.w × win.h); clamp SOURCE dims for the legacy rect
+            // overflow (M21 tiling) on the unmigrated path, and to the
+            // window/surface size on the migrated path.
             const bw = @min(w.w, user_buf_w);
             const bh = @min(w.h, user_buf_h);
+            // M33 SB4 (claim 2382): rect-granular repaint — when this window
+            // carries a partial damage rect, blit ONLY that region (from its
+            // back-buffer origin to the scanout origin), not the whole window.
+            // Whole-window ops (move/focus/fade) leave `damaged` false -> full
+            // blit, so the pre-SB4 path is unchanged.
+            var src_off: usize = 0;
+            var dest_x: u32 = w.x;
+            var dest_y: u32 = w.y;
+            var sw = bw;
+            var sh = bh;
+            if (w.damaged) {
+                const sx = @min(w.dx, bw);
+                const sy = @min(w.dy, bh);
+                sw = @min(w.dw, bw - @min(w.dx, bw));
+                sh = @min(w.dh, bh - @min(w.dy, bh));
+                dest_x = w.x + sx;
+                dest_y = w.y + sy;
+                src_off = @as(usize, sy) * src_stride + @as(usize, sx) * 4;
+            }
+            const src_ptr2: [*]const u8 = src_ptr + src_off;
             // Arc4 #239: during fade-in, blend with alpha over the
             // background (wallpaper/terminal already composited below).
             const alpha: u16 = if (w.fade_phase == 1)
@@ -3005,24 +3218,24 @@ fn paint(w: *Window) void {
                 blit_rect_alpha(
                     @ptrCast(&virtio_gpu.gpu_fb),
                     virtio_gpu.fb_width * 4,
-                    @ptrCast(&user_bufs[idx]),
-                    user_buf_w * 4,
-                    w.x,
-                    w.y,
-                    bw,
-                    bh,
+                    src_ptr2,
+                    src_stride,
+                    dest_x,
+                    dest_y,
+                    sw,
+                    sh,
                     alpha,
                 );
             } else {
                 blit_rect(
                     @ptrCast(&virtio_gpu.gpu_fb),
                     virtio_gpu.fb_width * 4,
-                    @ptrCast(&user_bufs[idx]),
-                    user_buf_w * 4,
-                    w.x,
-                    w.y,
-                    bw,
-                    bh,
+                    src_ptr2,
+                    src_stride,
+                    dest_x,
+                    dest_y,
+                    sw,
+                    sh,
                 );
             }
         },
@@ -3151,7 +3364,16 @@ fn repaint_start() ?usize {
 /// push one transfer + flush. Returns the flush result; `.ok` with no work
 /// when the scene is clean (dirty-rect: unchanged windows are never
 /// repainted).
-pub fn composite() virtio_gpu.CmdResult {
+/// M33 SB5 (claim 7397): the kernel's compositor LAYER — paint chrome +
+/// unmigrated windows into the scanout framebuffer WITHOUT a transfer/flush.
+/// While a WM is registered, wm_server.on_tick calls this BEFORE pushing the
+/// COMPOSITE_TICK, so the kernel layer is UNDER the WM's compose-N stores
+/// (correct z-order at flush time). Surface-backed (migrated) user windows
+/// are skipped when `wm_owns_user_layer` — the WM owns those pixels. Pure
+/// BSS writes: only gpu_transfer's `dc ivac` cache-clean is EL0-illegal, so
+/// this half is host-test safe (the established `!builtin.is_test` gate stays
+/// on the flush half).
+pub fn paint_scene() virtio_gpu.CmdResult {
     if (!armed_global) return .not_ready;
     // Arc2 W3: tray clock ticks on composite() without timer — detect theme/
     // clipboard changes that happened since last composite and mark taskbar
@@ -3172,7 +3394,11 @@ pub fn composite() virtio_gpu.CmdResult {
         }
         if (need) _ = mark_dirty(255);
     }
+    // M33 SB5: whether this scene painted anything (drives composite()'s
+    // decision to flush — a clean scene is not flushed, pre-SB5 behavior).
+    scene_dirty = false;
     const start = repaint_start() orelse return .ok;
+    scene_dirty = true;
     // Step 9: render the wallpaper gradient BEFORE windows so it is the background.
     if (start <= 1) {
         // The wallpaper is at index 1 (after tray migration); if it or anything below is dirty, render gradient.
@@ -3202,8 +3428,38 @@ pub fn composite() virtio_gpu.CmdResult {
             w.dirty = false;
             continue;
         }
+        // M33 SB5 (claim 7397): while the registered WM owns the user layer
+        // (scanout bound), surface-backed (migrated) user windows are the
+        // WM's compositing job — their bytes are already in the scanout via
+        // the WM's compose-N stores (written after this tick's chrome paint,
+        // before the final present). Skip the kernel blit entirely; the
+        // damage is consumed (the WM composites from the same tick mask).
+        if (w.kind == .user and wm_owns_user_layer and user_surface(w.id) != null) {
+            w.dirty = false;
+            w.damaged = false;
+            // M33 SB6 (claim 6864): the seam-B composite-cost saving — the
+            // kernel did NOT blit this migrated window (the WM's compose-N
+            // stores are the pixels).
+            migrated_skips +%= 1;
+            continue;
+        }
+        if (w.kind == .user) {
+            // M33 SB6 (claim 6864): the pre-seam-B composite cost — a user
+            // window the kernel actually blitted this scene.
+            user_blits +%= 1;
+        }
         paint(w);
+        // M33 SB4 (claim 2382): record the rect paint() actually repainted so
+        // the gate can observe it after the drain (unless whole-window, in
+        // which case damaged was false and we leave the prior last_*).
+        if (w.damaged) {
+            w.last_dx = w.dx;
+            w.last_dy = w.dy;
+            w.last_dw = w.dw;
+            w.last_dh = w.dh;
+        }
         w.dirty = false;
+        w.damaged = false; // the tracked damage rect was consumed by paint
     }
     // Arc4 #239: advance fade-in ticks after painting. Each composite
     // frame increments the tick; after 2 × fade_half_frames the fade
@@ -3227,6 +3483,22 @@ pub fn composite() virtio_gpu.CmdResult {
     // M21 W16: advance transient window timeouts.
     _ = transient_advance_tick();
     draw_chrome();
+    return .ok;
+}
+
+/// Whether the last paint_scene() actually repainted anything (drives the
+/// clean-scene no-flush decision in composite()). Read by composite() only.
+var scene_dirty: bool = false;
+
+/// The shim composite: paint the scene, then transfer+flush the scanout
+/// (the G1 seam). When the scene is clean, nothing is flushed (pre-SB5
+/// behavior). The transfer/flush half runs `dc ivac` cache-maintenance asm
+/// — EL0-illegal in host test binaries — so the flush half keeps the
+/// established `!builtin.is_test` gating at ITS call sites (the WM path
+/// flushes via wm_server.request_present, which already gates).
+pub fn composite() virtio_gpu.CmdResult {
+    if (paint_scene() != .ok) return .not_ready;
+    if (!scene_dirty) return .ok; // clean scene: no flush
     if (!virtio_gpu.gpu_ready) return .not_ready;
     presents += 1;
     if (virtio_gpu.gpu_transfer() != .ok) return .timeout;
@@ -4033,6 +4305,109 @@ test "driving_award: user_open/fill/present round-trips a bounded user window" {
     try std.testing.expectEqual(@as(u8, 0), user_bufs[0][(100 * user_buf_w + 200) * 4 + 0]);
     try std.testing.expect(user_present(2));
     try std.testing.expect(windows[4].dirty);
+}
+
+test "driving_award: SB4 rect-granular damage is exact, unions, and masks (claim 2382)" {
+    arm();
+    // One 512x384 window (id 2). A single fill records the EXACT written rect.
+    try std.testing.expectEqual(UserOpenResult{ .opened = 2 }, user_open(64, 64, 512, 384, 7));
+    try std.testing.expect(user_fill(2, 8, 8, 48, 48, 0xff0000));
+    // The damage is the written rect — NOT the whole 512x384 window.
+    try std.testing.expectEqual(DamageRect{ .x = 8, .y = 8, .w = 48, .h = 48 }, user_damage(2).?);
+    // Union-rect: a second fill expands to the bounding box.
+    try std.testing.expect(user_fill(2, 120, 60, 16, 16, 0x00ff00));
+    try std.testing.expectEqual(DamageRect{ .x = 8, .y = 8, .w = 128, .h = 68 }, user_damage(2).?);
+    // The COMPOSITE_TICK damage mask has bit 0 for surface id 2.
+    try std.testing.expect(user_damage_mask() & 1 != 0);
+    // A second window (id 3) damages its own surface bit, not window 2's.
+    try std.testing.expectEqual(UserOpenResult{ .opened = 3 }, user_open(320, 64, 512, 384, 8));
+    try std.testing.expect(user_fill(3, 0, 0, 10, 10, 0x0000ff));
+    const mask = user_damage_mask();
+    try std.testing.expect(mask & 1 != 0);
+    try std.testing.expect(mask & (1 << 1) != 0);
+    // mark_damage clamps to window bounds and ignores an out-of-window rect.
+    try std.testing.expect(mark_damage(3, 500, 0, 50, 10)); // x+w spills -> clamp, unions to x=0
+    try std.testing.expectEqual(DamageRect{ .x = 0, .y = 0, .w = 512, .h = 10 }, user_damage(3).?);
+    _ = mark_damage(3, 1000, 1000, 5, 5); // out-of-window -> ignored
+    try std.testing.expectEqual(DamageRect{ .x = 0, .y = 0, .w = 512, .h = 10 }, user_damage(3).?);
+    // The drain captures and consumes the damage: after composite, window 2's
+    // LAST-repainted rect == the union {8,8,128,68}, and no pending damage remains.
+    _ = composite();
+    try std.testing.expect(user_damage(2) == null);
+    try std.testing.expect(user_damage(3) == null);
+    {
+        var li: usize = 0;
+        while (li < win_count) : (li += 1) {
+            if (windows[li].id == 2) break;
+        }
+        try std.testing.expect(li < win_count);
+        try std.testing.expectEqual(@as(u32, 8), windows[li].last_dx);
+        try std.testing.expectEqual(@as(u32, 8), windows[li].last_dy);
+        try std.testing.expectEqual(@as(u32, 128), windows[li].last_dw);
+        try std.testing.expectEqual(@as(u32, 68), windows[li].last_dh);
+    }
+}
+
+test "driving_award: SB5 paint_scene skips migrated windows when the WM owns the user layer (claim 7397)" {
+    arm();
+    wm_owns_user_layer = false; // an earlier test in an aggregated binary may have left it
+    try std.testing.expectEqual(UserOpenResult{ .opened = 2 }, user_open(64, 64, 512, 384, 7));
+    // Migrate window 2 with a fake surface identity (the paint path only
+    // reads the surface's pa for the source pointer — never dereferences it
+    // when the skip is active, and the kernel-blit path below is only
+    // exercised while the window is dirty-but-not-yet-painted; a page-aligned
+    // fake keeps the test pure).
+    try std.testing.expect(user_bind_surface(2, .{ .handle = 1, .pa_base = 0x1000_0000, .page_count = 48 }));
+    try std.testing.expect(user_is_surface_backed(2));
+
+    // WHILE the WM owns the user layer (scanout bound), paint_scene SKIPS
+    // the migrated window: its damage is consumed but NO kernel blit happens
+    // (last_* untouched — the WM's compose-N stores are the pixels; the
+    // kernel never dereferences the surface here, so the fake pa is safe).
+    wm_owns_user_layer = true;
+    defer wm_owns_user_layer = false;
+    try std.testing.expect(mark_damage(2, 20, 20, 30, 30));
+    try std.testing.expect(user_damage(2) != null);
+    _ = composite();
+    try std.testing.expect(user_damage(2) == null); // damage consumed by the skip
+    {
+        var li: usize = 0;
+        while (li < win_count) : (li += 1) {
+            if (windows[li].id == 2) break;
+        }
+        try std.testing.expect(li < win_count);
+        // The kernel did NOT blit: last_* is untouched (still 0 — the shim
+        // blit never ran for this window), NOT the new {20,20,30,30}.
+        try std.testing.expectEqual(@as(u32, 0), windows[li].last_dx);
+        try std.testing.expectEqual(@as(u32, 0), windows[li].last_dy);
+        try std.testing.expectEqual(@as(u32, 0), windows[li].last_dw);
+        try std.testing.expectEqual(@as(u32, 0), windows[li].last_dh);
+    }
+}
+
+test "driving_award: SB6 user_blits vs migrated_skips move on the blit vs skip paths (claim 6864)" {
+    arm();
+    wm_owns_user_layer = false;
+    user_blits = 0;
+    migrated_skips = 0;
+    try std.testing.expectEqual(UserOpenResult{ .opened = 2 }, user_open(64, 64, 512, 384, 7));
+    // Pre-seam-B path (no WM layer ownership): an unmigrated window blit is
+    // counted as a kernel user-blit, never a skip.
+    try std.testing.expect(mark_damage(2, 0, 0, 16, 16));
+    _ = composite();
+    try std.testing.expectEqual(@as(u64, 1), user_blits);
+    try std.testing.expectEqual(@as(u64, 0), migrated_skips);
+    // Migrate the window (fake surface identity — the skip path never
+    // dereferences it).
+    try std.testing.expect(user_bind_surface(2, .{ .handle = 1, .pa_base = 0x1000_0000, .page_count = 48 }));
+    // Seam-B path (WM owns the user layer): the migrated window is SKIPPED —
+    // the kernel blit count stays, the skip count moves.
+    wm_owns_user_layer = true;
+    defer wm_owns_user_layer = false;
+    try std.testing.expect(mark_damage(2, 0, 0, 16, 16));
+    _ = composite();
+    try std.testing.expectEqual(@as(u64, 1), user_blits); // still 1 (no new blit)
+    try std.testing.expectEqual(@as(u64, 1), migrated_skips); // skipped once
 }
 
 test "driving_award: WMS4 SET_WINDOW chrome policy + per-window overrides (issue #624)" {
