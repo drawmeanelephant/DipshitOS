@@ -208,6 +208,19 @@ pub const Window = struct {
     /// rules — the two paths coexist behind the presence of WM chrome.
     chrome_valid: bool = false,
     chrome: geom.ChromeDesc = undefined,
+    /// M33 SB3 (claim 9361): when a `.user` window is SURFACE-BACKED, its
+    /// rendering lives in a shared-anonymous region (M33_MAP_SHARED) instead
+    /// of the kernel `user_bufs[id]` copy. The kernel records the region's
+    /// handle + physical base here so `composite()` blits from the surface's
+    /// OWN pages (identity-mapped into the kernel root) and the registered WM
+    /// mirrors the same region RO. 0 = unmigrated (frozen kernel-buffer path,
+    /// byte-identical to pre-SB3). The surface is owned by the WINDOW's owner
+    /// pid; close/owner-exit drops the binding and revokes the WM mirror.
+    surface_handle: u32 = 0,
+    /// Physical base of the shared surface (for composite's direct blit).
+    surface_pa: u64 = 0,
+    /// Page count of the shared surface (for composite's source bounds).
+    surface_pages: u32 = 0,
 };
 
 /// Arc4 #239: fade-in constants. The window is at 25% opacity for
@@ -1234,9 +1247,19 @@ pub fn user_fill(id: u8, x: u32, y: u32, w: u32, h: u32, rgb: u32) bool {
     if (w == 0 or h == 0) return false;
     if (x >= win.w or y >= win.h) return false;
     if (w > win.w - x or h > win.h - y) return false;
-    const idx = id - user_window_id_base;
-    if (idx >= user_windows_max) return false;
-    fill_rect(@ptrCast(&user_bufs[idx]), user_buf_w * 4, x, y, w, h, rgb);
+    // M33 SB3 (claim 9361): a surface-backed window FILLS ITS OWN SHARED
+    // PAGES, not the kernel user_bufs copy — the frozen slot hands off to the
+    // surface. fill_rect writes the same B8G8R8X8 bytes into the region the
+    // WM mirrors RO, so parity between the migrated fill and the legacy path
+    // is exact (identical pixel encoding). An unmigrated window is unchanged.
+    const surface = user_surface(id);
+    if (surface) |sf| {
+        fill_rect(@as([*]u8, @ptrFromInt(sf.pa_base)), win.w * 4, x, y, w, h, rgb);
+    } else {
+        const idx = id - user_window_id_base;
+        if (idx >= user_windows_max) return false;
+        fill_rect(@ptrCast(&user_bufs[idx]), user_buf_w * 4, x, y, w, h, rgb);
+    }
     win.dirty = true;
     return true;
 }
@@ -1249,6 +1272,46 @@ pub fn user_present(id: u8) bool {
     const win = find_user_window(id) orelse return false;
     win.dirty = true;
     return true;
+}
+
+/// M33 SB3 (claim 9361): the surface info a surface-backed user window
+/// holds (the kernel's composite source + the WM-mirror identity). Returns
+/// null for an unknown / non-user / unmigrated window.
+pub const SurfaceInfo = struct {
+    handle: u32,
+    pa_base: u64,
+    page_count: u32,
+};
+
+/// Bind user window `id` to the shared surface described by `si`. The
+/// caller (the `sys_mmap` window-tag path) has already created the region,
+/// mapped the owner's writable leaves into the window owner's root, and
+/// granted the WM its RO mirror; this records the identity on the window so
+/// `composite()` blits from the surface's own pages. Returns false if the
+/// window is unknown / not `.user` / already surface-backed (a window binds
+/// ONE surface; unbind before rebind).
+pub fn user_bind_surface(id: u8, si: SurfaceInfo) bool {
+    const win = find_user_window(id) orelse return false;
+    if (win.surface_handle != 0) return false; // already migrated
+    win.surface_handle = si.handle;
+    win.surface_pa = si.pa_base;
+    win.surface_pages = si.page_count;
+    win.dirty = true;
+    return true;
+}
+
+/// The surface a user window is bound to, or null when unmigrated.
+pub fn user_surface(id: u8) ?SurfaceInfo {
+    const win = find_user_window(id) orelse return null;
+    if (win.surface_handle == 0) return null;
+    return .{ .handle = win.surface_handle, .pa_base = win.surface_pa, .page_count = win.surface_pages };
+}
+
+/// True when user window `id` is surface-backed (migrated). An unmigrated
+/// window is `false` (the frozen kernel-buffer path, byte-identical).
+pub fn user_is_surface_backed(id: u8) bool {
+    const win = find_user_window(id) orelse return false;
+    return win.surface_handle != 0;
 }
 
 /// Move a user window's top-left corner to (x, y), CLAMPED so the whole
@@ -2987,10 +3050,24 @@ fn paint(w: *Window) void {
         .user => {
             const idx = w.id - user_window_id_base;
             if (idx >= user_windows_max) return;
-            // The back-buffer is fixed user_buf_w × user_buf_h while the
-            // window rect may exceed it (M21 tiling grows rects up to
-            // 837×700): clamp the SOURCE dims so the blit never reads past
-            // the buffer (content occupies the tile's top-left corner).
+            // M33 SB3 (claim 9361): a SURFACE-BACKED window's rendering lives
+            // in its shared-anonymous pages (mapped into the owner's root and
+            // mirrored RO into the registered WM), NOT the kernel user_bufs
+            // copy. The kernel root identity-maps the low physical space, so
+            // composite() blits directly from the surface's OWN pages — the
+            // on-scanout bytes are the app's plain stores, byte-identical to
+            // what the old fill path produced (parity). An unmigrated window
+            // keeps the frozen user_bufs path exactly as before.
+            const surface = user_surface(w.id);
+            const src_ptr: [*]const u8 = if (surface) |sf|
+                @as([*]const u8, @ptrFromInt(sf.pa_base))
+            else
+                @ptrCast(&user_bufs[idx]);
+            const src_stride: usize = if (surface != null) w.w * 4 else user_buf_w * 4;
+            // The source is the window's own back-buffer (surface is sized
+            // exactly win.w × win.h); clamp SOURCE dims for the legacy rect
+            // overflow (M21 tiling) on the unmigrated path, and to the
+            // window/surface size on the migrated path.
             const bw = @min(w.w, user_buf_w);
             const bh = @min(w.h, user_buf_h);
             // Arc4 #239: during fade-in, blend with alpha over the
@@ -3005,8 +3082,8 @@ fn paint(w: *Window) void {
                 blit_rect_alpha(
                     @ptrCast(&virtio_gpu.gpu_fb),
                     virtio_gpu.fb_width * 4,
-                    @ptrCast(&user_bufs[idx]),
-                    user_buf_w * 4,
+                    src_ptr,
+                    src_stride,
                     w.x,
                     w.y,
                     bw,
@@ -3017,8 +3094,8 @@ fn paint(w: *Window) void {
                 blit_rect(
                     @ptrCast(&virtio_gpu.gpu_fb),
                     virtio_gpu.fb_width * 4,
-                    @ptrCast(&user_bufs[idx]),
-                    user_buf_w * 4,
+                    src_ptr,
+                    src_stride,
                     w.x,
                     w.y,
                     bw,

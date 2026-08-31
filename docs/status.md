@@ -49,25 +49,36 @@
 | Fifteen — audio | Virtio-snd (DID 0x1059), PCM playback, sys_audio 42–45, JINGLE/CHIME.BIN, volume/mute | ✅ done 2026-08-18 (claim 3206, A1–A4) |
 | Sixteen — kernel grows up | DSK3 segmented image + data/BSS, guard pages (139), grown pools (tasks 11/processes 16/tables 512), composition | ✅ done 2026-08-19 (claims 3805/8403/0339/2714, C1–C4) |
 | Seventeen — desktop completeness | C1–C10 + Arc1–5: widget depth, window management, app upgrades, rich interactions, system polish | ✅ done 2026-08-21 (GH milestones 1–5) |
-| Eighteen — terminal & shell depth | T1–T16: scrollback, selection, search, persistent history, colors, scripting mode | ✅ done 2026-08-24 (GH milestone 6) |
-| Nineteen — shell programming | P1–P16: pipes (slots 56/57), redirection, env vars, functions + args, substitution, arithmetic, conditionals | ✅ done 2026-08-24 (GH milestone 7) |
-| Twenty — text & Unicode | U1–U5: font sizes, Unicode glyphs, search, chrome, tabs | ✅ done 2026-08-23 (GH milestone 8) |
-| Twenty-one — window depth | W1–W16: tiling, master-detail, minimize, alt-tab, notification center, maximize, focus rings | ✅ done 2026-08-26 (claim 1306, GH milestone 9) |
-| Twenty-two — developer tools | D1–D16: ELF loader, assembler, symbols, disassembler, strace, ps, dmesg, sysinfo, dev console | ✅ done 2026-08-25 (GH milestone 10) |
-| Twenty-three — the text editor | E1–E25: EDIT.BIN, undo/redo, goto, tabs, syntax, console split | ✅ done 2026-08-26 (GH milestone 11) |
-| Twenty-four — CALC grows up | K1–K16: programmer mode, memory, units, constants, history persist | ✅ done 2026-08-23 (GH milestone 12) |
-| Twenty-five — file manager depth | F1–F18: du, sort, overwrite/conflict, path copy, … — 5/5 live gates on VZ | ✅ done 2026-08-26 (GH milestone 13) |
-| Twenty-six — network experience | N1–N16: ping, netstat, traceroute, HTTP fetch display, download mgr, net profile, offline preflight | ✅ done 2026-08-26 (GH milestone 14; N13/N14 closed out 2026-08-28, claim 8852) |
-| Twenty-seven — desktop polish | G1–G30 = issues #444–#473: splash, wizard, about, previews, sounds, sysmon, tooltips, audits, dogfood | ✅ done 2026-08-27 (GH milestone 15) |
+| Eighteen — terminal & shell depth | T1–T16: scrollback, selection, search, persistent history, colors, scripting mode | ✅ done 2026-08-24 ([GH milestone 6](https://github.com/drawmeanelephant/DipshitOS/milestone/6)) |
+| Nineteen — shell programming | P1–P16: pipes (slots 56/57), redirection, env vars, functions + args, substitution, arithmetic, conditionals | ✅ done 2026-08-24 ([GH milestone 7](https://github.com/drawmeanelephant/DipshitOS/milestone/7)) |
+| Twenty — text & Unicode | U1–U5: font sizes, Unicode glyphs, search, chrome, tabs | ✅ done 2026-08-23 ([GH milestone 8](https://github.com/drawmeanelephant/DipshitOS/milestone/8)) |
+| Twenty-one — window depth | W1–W16: tiling, master-detail, minimize, alt-tab, notification center, maximize, focus rings | ✅ done 2026-08-26 (claim 1306, [GH milestone 9](https://github.com/drawmeanelephant/DipshitOS/milestone/9)) |
+| Twenty-two — developer tools | D1–D16: ELF loader, assembler, symbols, disassembler, strace, ps, dmesg, sysinfo, dev console | ✅ done 2026-08-25 ([GH milestone 10](https://github.com/drawmeanelephant/DipshitOS/milestone/10)) |
+| Twenty-three — the text editor | E1–E25: EDIT.BIN, undo/redo, goto, tabs, syntax, console split | ✅ done 2026-08-26 ([GH milestone 11](https://github.com/drawmeanelephant/DipshitOS/milestone/11)) |
+| Twenty-four — CALC grows up | K1–K16: programmer mode, memory, units, constants, history persist | ✅ done 2026-08-23 ([GH milestone 12](https://github.com/drawmeanelephant/DipshitOS/milestone/12)) |
+| Twenty-five — file manager depth | F1–F18: du, sort, overwrite/conflict, path copy, … — 5/5 live gates on VZ | ✅ done 2026-08-26 ([GH milestone 13](https://github.com/drawmeanelephant/DipshitOS/milestone/13)) |
+| Twenty-six — network experience | N1–N16: ping, netstat, traceroute, HTTP fetch display, download mgr, net profile, offline preflight | ✅ done 2026-08-26 ([GH milestone 14](https://github.com/drawmeanelephant/DipshitOS/milestone/14); N13/N14 closed out 2026-08-28, claim 8852) |
+| Twenty-seven — desktop polish | G1–G30 = issues #444–#473: splash, wizard, about, previews, sounds, sysmon, tooltips, audits, dogfood | ✅ done 2026-08-27 ([GH milestone 15](https://github.com/drawmeanelephant/DipshitOS/milestone/15)) |
 | Twenty-eight — SMP | PSCI CPU_ON bringup of core 1, per-core schedulers, spinlocks, GICv3 SGI IPIs | ✅ done 2026-08-27 (issue #595, claim 6438, PR #611) |
 | Twenty-nine — VM depth | Demand paging, COW page sharing, anonymous mmap (slots 63/64), zero-leak teardown | ✅ done 2026-08-27 (issue #598, claim 8247) |
 | Thirty — dynamic linking | Freestanding `LD.SO` linker, `LIBUI.SO`/`LIBFONT.SO`, W^X multi-aperture, live gate | ✅ done 2026-08-27 (issue #599, claim 7921) |
 | Thirty-one — dyn linking ecosystem | CALC/NOTEPAD/FILE/DESKTOP → `.ELF`, runtime `dlopen`/`dlsym` | ✅ done 2026-08-27 (issue #602, claim 4001) |
-| Thirty-two — WM server migration | Seam A: desktop policy moved to a userland WM server (slot 65, kind 18); kernel slimmed WMS1–WMS9 (issues #621–#629) | ✅ done 2026-08-30 (issues #621–#629; WMS10 → M33, claim 9612) |
-| Thirty-three — seam B (proposed) | Full pixel ownership: cross-process shared-anon mmap, apps render into their own buffers, WM composes one final present | 🔄 in progress (ADR 0016 ACCEPTED; SB1 contract done 2026-08-30 claim 7418, SB2 capability done 2026-08-31 claim 8878 with a live headless VZ gate; `docs/march-m33-seam-b-pixel-ownership.md`) |
+| Thirty-two — WM server migration | Seam A: desktop policy moved to a userland WM server (slot 65, kind 18); kernel slimmed WMS1–WMS9 (issues #621–#629) | ✅ done 2026-08-30 (issues #621–#629; WMS10 → M33, claim 9612) — [GH milestone 16](https://github.com/drawmeanelephant/DipshitOS/milestone/16) |
+| Thirty-three — seam B (proposed) | Full pixel ownership: cross-process shared-anon mmap, apps render into their own buffers, WM composes one final present | 🔄 in progress (ADR 0016 ACCEPTED; SB1 contract done 2026-08-30 claim 7418, SB2 capability done 2026-08-31 claim 8878 with a live headless VZ gate, SB3 surface handoff done 2026-08-31 claim 3633 — migrated apps bind a window to a shared surface and the WM reads the bytes RO (live VZ gate); [`docs/march-m33-seam-b-pixel-ownership.md`](march-m33-seam-b-pixel-ownership.md); [GH milestone 17](https://github.com/drawmeanelephant/DipshitOS/milestone/17)) |
 
 > **Narratives for M3–M16** are archived per milestone under `docs/archive/status-m{N}-detail.md` (issue #262).
 > Each archive preserves the verbatim pre-compression table row plus march/claim pointers; the live table above is the one-line summary.
+
+### Open GitHub workstreams (non-milestone work tracked on GitHub)
+
+These parked threads each have their own GitHub milestone + card issues; click
+through for the up-to-date board:
+
+- **Rename — VirelaiOS** (issue #676) — [GH milestone 18](https://github.com/drawmeanelephant/DipshitOS/milestone/18)
+- **Sexiburger god menu** (issue #677) — [GH milestone 19](https://github.com/drawmeanelephant/DipshitOS/milestone/19)
+- **Self-hosting seed — in-guest compiler + window depth** (issue #620) — [GH milestone 20](https://github.com/drawmeanelephant/DipshitOS/milestone/20)
+- Numeric-milestone pointers for M32/M33 row above (milestones 16/17); the full
+  per-card M33 detail lives in [`docs/march-m33-seam-b-pixel-ownership.md`](march-m33-seam-b-pixel-ownership.md).
 > Per-milestone detail trackers: `docs/march-m*.md`; the completed milestones' roadmap plans are archived under `docs/archive/roadmap-m{N}.md` (issue #264).
 
 Resolved loose end: the milestone-one `KERNEL.TXT` corruption is **fixed**

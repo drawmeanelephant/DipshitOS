@@ -215,4 +215,24 @@ results and unmap them on revoke.
 ---
 
 _Split from ADR 0015 D5's seam-B option and issue #630 by claim 9612 (2026-08-30).
-Accepted by claim 7418 (M33 SB1, 2026-08-30)._
+Accepted by claim 7418 (M33 SB1, 2026-08-30).
+Implemented by claim 8878 (M33 SB2, 2026-08-31): `sys_mmap` slot 63 honors
+`M33_MAP_SHARED` (bit 16) — owner `MAP_ANON|SHARED` allocates one region, maps
+WRITABLE leaves into the owner's root, registers a `SharedRegion`; the registered
+WM attaches by handle (`addr=handle, prot=R, SHARED`) → `authorize_read` (D2:
+non-owner RO only) → `ref_page` → EL0-RO `sw_cow` in the WM's OWN root
+(`kernel/src/shared_mmap.zig`, wired into the scheduler exit seam); owner
+munmap/exit revokes the WM view and frees at refcount 0. Live gate PASS
+(`verify-live-sb2-shared-anon.sh`, headless VZ).
+Elevated to WINDOWS by claim 3633 (M33 SB3, 2026-08-31): the surface-handoff
+card. A user window binds a shared-anonymous surface via
+`sys_mmap(addr = M33_SURF_WIN_TAG | window_id, MAP_ANON|M33_MAP_SHARED)` — the
+addr-tag reuses SB2's owner-create + peer-attach wholesale, the frozen
+`sys_win_open`/`fill`/`present` slots (12-14) stay byte-identical for unmigrated
+apps, `composite()` blits from the surface's `pa_base`, and a registered WM
+auto-mirrors RO at bind time (the SB2 mirror in the WM's own root).
+`M33_SURF_WIN_TAG` = `0x8000_0000_0000_0000` (bit 63) is frozen in ADR 0007.
+Live gate PASS (`verify-live-sb3-surface-handoff.sh`, headless VZ): a migrated
+app stored `0xAB` with a plain write and the registered WM read it RO — the
+parity proof vs the old fill path._
+
