@@ -1,14 +1,18 @@
 # ADR 0016: Cross-process shared anonymous mmap (seam B foundation)
 
-Status: **DRAFT** (proposed) · Date: 2026-08-30 · Milestone: post-M32 (next
-milestone, seam B) · Proposed by: claim 9612 (WMS10 split, issue #630)
+Status: **ACCEPTED** (claim 7418, SB1) · Date: 2026-08-30 · Milestone: M33
+(seam B) · Proposed and authored by: claim 9612 (WMS10 split, issue #630);
+accepted by claim 7418 (M33 SB1, contract card)
 
-> **This is a proposal, not an accepted reservation.** It turns ADR 0015 D5's
+> **Accepted 2026-08-30 by claim 7418 (M33 SB1).** This turns ADR 0015 D5's
 > deferred seam-B option into the next milestone's foundation. It records the
-> design direction + the security (capability) decision so a later claim can
-> implement it behind its own gate. No slot is reserved and no code is written
-> in this ADR; a future claim ports the freeze form (slot-64 flag or a new
-> slot) into ADR 0007 when the implementation begins.
+> design direction + the security (capability) decision, freezes the ABI
+> encoding (a `M33_MAP_SHARED` flag bit on `sys_mmap`, slot 63 — resolved by
+> claim 7418 in this acceptance), and makes the D2 security rule a runnable,
+> host-tested kernel module. The ABI freeze (a `M33_MAP_SHARED` flag bit on
+> `sys_mmap`, slot 63, instead of a new syscall slot) and the D2 security
+> review land in ADR 0007 + `kernel/src/shared_region.zig` under this claim;
+> SB2 implements the actual capability. No new syscall slot is consumed.
 
 ## Context
 
@@ -46,7 +50,7 @@ MMU-scale dependency is closing that gap.
 
 ## Decisions
 
-### D1. Mechanism — extend anonymous mmap (slot-64 flag; new slot only if insufficient)
+### D1. Mechanism — extend anonymous mmap; DECIDED: flag on `sys_mmap` (slot 63)
 
 Shared-anon is a **MAP_SHARED-style flag on an otherwise-ordinary anonymous
 mmap**, not a new syscall family. The physical pages are allocated once and
@@ -58,7 +62,7 @@ the implementing claim:
    leaves are torn down independently; the physical region survives until the
    last ref drops). If the frozen flag namespace proves too tight, reserve a
    new slot instead — the ADR records the *mechanism*, not the exact encoding.
-2. **Lifetime/refcount**: a shared region needs a **kernel-owned refcount**
+2. **Lifetime/refcount (DECIDED shape — accepted by claim 7418)**: a shared region needs a **kernel-owned refcount**
    (physical page refs + a region descriptor), because no single process's
    teardown can free memory another still maps. This is coarser than M29's
    `record_dynamic_page` per-page list — it must be a *sharable* container. The
@@ -138,17 +142,62 @@ separate ADR, not an expansion of this one.
 - **New syscall family for sharing**: costs a reserved slot range up front;
   the slot-64 flag keeps the ABI additive. Prefer the flag until it proves
   insufficient.
+## Open items — resolved by claim 7418 (SB1, acceptance) vs. deferred to a later card
 
-## Open items for the implementing claim
+- **Flag vs. new slot — RESOLVED (claim 7418): a `M33_MAP_SHARED` flag bit (16)
+  on `sys_mmap` (slot 63).** Frozen in ADR 0007. No new dispatch row. See D1.
+- **`SharedRegion` handle encoding — RESOLVED (claim 7418): a kernel-issued
+  integer handle** (not the app's mmap va). The mmap va is per-root and can be
+  reused/replaced across roots (and a second process maps a DIFFERENT va into
+  its own root), so it is not a stable capability identity; a kernel integer
+  handle names the region regardless of each root's local va. Frozen in
+  `shared_region.create` (returns the handle) and ADR 0007.
+- **`SharedRegion` table size — RESOLVED (claim 7418): `max_shared_regions` = 8**
+  (the module constant). Seam-B migrates apps one at a time (the WMS7 mailbox
+  re-point lever), so 8 live surfaces covers the first stretching pass; SB2
+  sizes the actual array from this constant. BSS-bounded, per ADR 0013.
+- **Damage transport shape — DEFERRED to SB4** (feature-parity card). Not a
+  contract decision; the kernel already carries per-surface dirty.
+- **Refcount container — RESOLVED (claim 7418): a NEW region-level refcount in
+  `shared_region`**, distinct from M29's per-page `record_dynamic_page` list —
+  the coarser, sharable container D1.2 describes. The owner is NOT counted in
+  `refcount` (its writable map is the region's creation side and dies with the
+  owner); reads are counted, so `drop_owner` returns how many peers were revoked.
 
-- Slot-64 flag vs. new slot — decide after pinning the frozen flag namespace.
-- `SharedRegion` table size + handle encoding (kernel-issued integer handle vs.
-  the app's mmap va as the key).
-- Damage transport shape: does the WM poll dirty flags per tick, or does the
-  kernel fan a notify event? (Card SB4 answers this.)
-- Refcount container: reuse/augment M29's per-page container vs. a new
-  region-level one.
+## Acceptance — D2 security review (claim 7418, SB1)
+
+Mapping one process's render surface into another is a **capability**. This
+review turns D2's governing rules into a runnable, host-tested policy module
+(`kernel/src/shared_region.zig`, 6 host tests) that SB2 implements into
+`sys_mmap` — the milestone's highest-risk change, tested BEFORE the capability
+exists.
+
+The decision table (`shared_region.Grant`), as frozen:
+
+| Requestor | Desired view | Handles | Verdict | Why |
+|-----------|-------------|---------|---------|-----|
+| surface owner | read/write (its own) | its own `create` | `.grant` (read) at least; writable leaf is the region's creation side, SB2 | the creator always retains its own surface |
+| registered WM server | read-only | `authorize_read(wm, h, ro)` | `.grant` | D2 read-only-for-compositors; the WM is the trusted compositor |
+| registered WM server | writable | `authorize_read(wm, h, rw)` | `.writable_refused` | a peer NEVER holds a writable view (D2) |
+| any non-owner, non-WM app | read-only | `authorize_read(other, h, ro)` | `.not_authorized` | D2 trust boundary: only the WM reads another app's surface |
+| anyone, no WM registered | read-only | `authorize_read(*, h, ro, wm=0)` | `.not_authorized` | no compositor seat exists → no peer reads at all |
+| anyone, stale handle | any | `authorize_read(*, dead_h, …)` | `.gone` | region torn down; no stale access survives |
+
+The revocation rule, as frozen and host-tested (`drop_owner`): when the owner's
+window closes or the owner exits, EVERY peer read reference is revoked (the
+function returns the count revoked so a gate can assert peers were unmapped) and
+the region descriptor is freed (refcount 0 → free). `grant_read` on a freed
+handle is a defensively-refused no-op — a stale WM mirror cannot re-grant or
+retain access to freed physical memory.
+
+The test suite pins exactly this: `capacity bound`, `owner always granted; a
+peer is WM-only`, `no WM registered means no peer reads at all`,
+`grant_read / drop_read maintain the read refcount`, `teardown revokes every
+peer and frees the descriptor`, and `stale handle after teardown cannot
+re-grant old peers`. SB2 must map real `sw_cow` leaves only for `.grant`
+results and unmap them on revoke.
 
 ---
 
-_Split from ADR 0015 D5's seam-B option and issue #630 by claim 9612 (2026-08-30)._
+_Split from ADR 0015 D5's seam-B option and issue #630 by claim 9612 (2026-08-30).
+Accepted by claim 7418 (M33 SB1, 2026-08-30)._
