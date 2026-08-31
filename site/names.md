@@ -12,9 +12,19 @@ the names are jokes, and the engineering is not.
 ## VirelaiOS
 
 The project itself. A from-scratch AArch64 operating system that boots under
-real UEFI firmware on Apple silicon. The name is self-deprecating on purpose —
-the work underneath is taken seriously, and the evidence discipline is the
-tell.
+real UEFI firmware on Apple silicon. The name is the conservation law acting
+on the project's own past (ADR 0017): **VIRELAIOS is an exact anagram of
+LAVOISIER** — the chemist who proved that nothing is lost, nothing is
+created, and everything is transformed — and a virelai is a medieval French
+*forme fixe* (ballade, rondeau, virelai) built on a returning refrain. The
+refrain that returns on schedule here is a gate: every merge runs the same
+evidence discipline that built the machine.
+
+The name is unique to this project by construction: a sweep of Webster's
+Second International (1934) for 7-letter words over `{a,e,i,i,l,r,v}` returns
+zero hits — the dictionary does not even contain `virelai` itself. The
+retired name and its history are memorialized at
+`docs/archive/dipshitos-name.md`.
 
 ## Road Pops
 

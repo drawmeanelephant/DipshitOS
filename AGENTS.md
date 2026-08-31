@@ -14,7 +14,7 @@ These rules bind any AI agent or human contributor working in this project.
 
 ## Current milestone
 
-Milestones zero through **thirty-one** are implemented and closed — the boot
+Milestones zero through **thirty-two** are implemented and closed — the boot
 pipeline; kernel handoff; kernel proper (VZ serial gate since claim 1517);
 `m1.5-interactive-monitor`; `m3-userspace`; `m4-processes`; milestone five
 networking — virtio-net through TCP; milestone six graphics — Road Pops +
@@ -32,16 +32,19 @@ management depth; M22 developer tools; M23 the text editor; M24 CALC grows
 up; M25 file manager depth; M26 network experience; M27 desktop polish &
 completeness; M28 SMP; M29 VM depth (demand paging, COW, anonymous mmap);
 M30 dynamic linking & shared libraries (`LD.SO`, `LIBUI.SO`, `LIBFONT.SO`);
-and M31 the dynamic linking ecosystem (dynamic desktop apps, `dlopen`/
-`dlsym`).
+M31 the dynamic linking ecosystem (dynamic desktop apps, `dlopen`/
+`dlsym`); and M32 the WM server migration (WMS1–WMS9, issues #621–#629).
 
 All GitHub milestones are closed and the issue tracker is at **zero open
 issues** (2026-08-28); the two long-running threads are resolved — the M8 U4
 pointer-focus proof is now class-B-headless via custom-virtio pointer
 injection (claim 9367, issue #151), and the synthesized-keyboard `events=0`
 report is fixed by the headless virtio input channel (claims 9588/0680,
-issue #179). There is **no M32 defined yet** — the repo sits between
-milestones. For the canonical, always-current answer to "where are we, and
+issue #179). The project is now **VirelaiOS** (ADR 0017 ACCEPTED 2026-08-31,
+issue #676 — the DipshitOS name is retired to `docs/archive/dipshitos-name.md`
+and history). **M33 (seam B — full pixel ownership) is in progress** — SB1–SB4
+landed (ADR 0016 ACCEPTED, shared-anon mmap, surface handoff, damage
+tracking). For the canonical, always-current answer to "where are we, and
 what's next", read `docs/status.md`.
 
 ## Milestone scope rules

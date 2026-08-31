@@ -6,7 +6,7 @@
 - **Touches:** AGENTS.md, README.md, LICENSE, justfile, build.zig, build.zig.zon, publication-profile.example.json, .github/workflows/**, kernel/**, user/**, host/**, image/**, tools/**, site/**, tests/**, themes/**, docs/status.md, docs/march-*.md, docs/roadmap*.md, docs/testing.md, docs/gate-inventory.md, docs/hardware-contract.md, docs/branch-protection.md, docs/dogfood-m27.md, docs/prompts/**, docs/decisions/0017-virelaios-codename.md
 - **Depends on:** —
 - **Heartbeat:** 2026-08-31
-- **Status:** 🔄 freebuff/okay-i-think-we-need-to-work-through-this-big-one--076be815-d689-40da-9389-cfd56bae921f
+- **Status:** ✅ done 2026-08-31 — rename sweep landed (ADR 0017 ACCEPTED). Verification: `zig build` PASS, shell tests 792/792, full unit suite PASS, `test-console` byte-identical (golden regenerated from mock e2e), `image`/`inspect`/`context` PASS, `zig fmt --check` PASS, ragshit pytest 147/147, post-sweep `rg -i dipshit` audit = zero occurrences outside protected/historical locations and GitHub repo-slug URLs. Coordination gate flags only the documented Touches overlap with pre-existing 🔄 claims 2852 (docs-pass) and 9731 (toolchain-env-check). DipshitOS memorialized at `docs/archive/dipshitos-name.md` (dedicated commit b92a8cd, tag `dipshitos-final`).
 
 ## Notes
 

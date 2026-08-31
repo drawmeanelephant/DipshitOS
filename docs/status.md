@@ -74,7 +74,7 @@
 These parked threads each have their own GitHub milestone + card issues; click
 through for the up-to-date board:
 
-- **Rename — VirelaiOS** (issue #676) — [GH milestone 18](https://github.com/drawmeanelephant/DipshitOS/milestone/18)
+- **Rename — VirelaiOS** (issue #676) — ✅ **done 2026-08-31** (claim 5817, ADR 0017 ACCEPTED — guest identity, build/infra/themes, transcripts + golden, docs prose; the DipshitOS name is memorialized at `docs/archive/dipshitos-name.md`; [GH milestone 18](https://github.com/drawmeanelephant/DipshitOS/milestone/18))
 - **Sexiburger god menu** (issue #677) — [GH milestone 19](https://github.com/drawmeanelephant/DipshitOS/milestone/19)
 - **Self-hosting seed — in-guest compiler + window depth** (issue #620) — [GH milestone 20](https://github.com/drawmeanelephant/DipshitOS/milestone/20)
 - Numeric-milestone pointers for M32/M33 row above (milestones 16/17); the full
