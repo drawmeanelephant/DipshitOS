@@ -370,20 +370,39 @@ pub fn exec_file(name: []const u8, args: []const []const u8) ExecResult {
     const argc = args.len;
     var argv_va: u64 = 0;
     var text_len: usize = content_len;
+    // DSK3 (and ELF): the offset of the argv block inside the WRITABLE data
+    // region (0 = no argv / DSK1 — the flat path packs into the text page).
+    var argv_data_off: usize = 0;
     if (argc > 0) {
-        // Claim 3805: the segmented path does not yet reserve argv room in
-        // its page-aligned text region — an honest refusal (the flat DSK1
-        // path keeps the claim-4636 behavior). No current DSK3 program
-        // takes arguments; a later card packs argv into a reserved data
-        // tail when a DSK3 consumer needs it. M22 D1: ELF images share the
-        // refusal (their text region is fixed by the loader contract).
-        if (magic != dsk1_magic) return .no_args_room;
-        const block_off = (content_len + 7) & ~@as(usize, 7);
-        const page_limit = if (content_len == 0) alloc.page_size else ((content_len + alloc.page_size - 1) / alloc.page_size) * alloc.page_size;
-        if (block_off + arg_block_bytes > page_limit or block_off + arg_block_bytes > exec_program_max) return .no_args_room;
-        _ = pack_args(args, program[block_off..][0..arg_block_bytes]);
-        text_len = block_off + arg_block_bytes;
-        argv_va = userspace.text_va + block_off;
+        if (magic == dsk1_magic) {
+            // Card 3e (claim 4636): the flat path packs the block into the
+            // process's OWN text page right after the content — the text leaf
+            // is already EL0 read-only, so the block is a read-only leaf with
+            // no extra page.
+            const block_off = (content_len + 7) & ~@as(usize, 7);
+            const page_limit = if (content_len == 0) alloc.page_size else ((content_len + alloc.page_size - 1) / alloc.page_size) * alloc.page_size;
+            if (block_off + arg_block_bytes > page_limit or block_off + arg_block_bytes > exec_program_max) return .no_args_room;
+            _ = pack_args(args, program[block_off..][0..arg_block_bytes]);
+            text_len = block_off + arg_block_bytes;
+            argv_va = userspace.text_va + block_off;
+        } else if (magic == dsk3_magic) {
+            // Claim 3805's "later card": a segmented image's text region is
+            // page-aligned and its data starts right after, so there is no
+            // room in the RX leaf — pack the block into a RESERVED DATA TAIL
+            // (after the app's own bss, so no global overlaps it). The data
+            // aperture + task uaccess regions grow by arg_block_bytes to
+            // cover it; unlike the DSK1 read-only text-leaf block, this one
+            // lives in the writable data region (documented — the claim-4636
+            // read-only-argv property is DSK1-specific).
+            argv_data_off = data_mem_size;
+            if (text_size + data_mem_size + arg_block_bytes > exec_program_max) return .no_args_room;
+            _ = pack_args(args, program[text_size + argv_data_off ..][0..arg_block_bytes]);
+            data_mem_size += arg_block_bytes;
+            argv_va = userspace.text_va + text_size + argv_data_off;
+        } else {
+            // ELF images: their text region is fixed by the loader contract.
+            return .no_args_room;
+        }
     }
     // Claim 0826: per-process pages from the physical allocator — the
     // program's OWN text (1 page), user stack (8 KiB = 2 pages) and EL1
@@ -425,7 +444,14 @@ pub fn exec_file(name: []const u8, args: []const []const u8) ExecResult {
     if (data_pages > 0) {
         const data_dst: [*]u8 = @ptrFromInt(data_phys);
         if (data_file_size > 0) @memcpy(data_dst[0..data_file_size], program[text_size .. text_size + data_file_size]);
-        @memset(data_dst[data_file_size..data_mem_size], 0);
+        // Zero the app's own bss (data_file_size .. data_mem_size); a DSK3
+        // argv tail (packed at argv_data_off, after the app's bss) is copied
+        // AFTER the zeroing so the memset cannot wipe it.
+        const bss_end = if (argv_data_off > 0) argv_data_off else data_mem_size;
+        if (bss_end > data_file_size) @memset(data_dst[data_file_size..bss_end], 0);
+        if (argv_data_off > 0) {
+            @memcpy(data_dst[argv_data_off..][0..arg_block_bytes], program[text_size + argv_data_off ..][0..arg_block_bytes]);
+        }
     }
     const kstack: []u8 = @as(*[scheduler.task_stack_size]u8, @ptrFromInt(kstack_phys))[0..];
     // Milestone four (claim 2665): ASLR — the loaded program's EL0 stack
