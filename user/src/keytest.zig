@@ -1,4 +1,4 @@
-//! DipshitOS tenth ESP user program — KEYTEST.BIN (milestone nine, card E6,
+//! VirelaiOS tenth ESP user program — KEYTEST.BIN (milestone nine, card E6,
 //! claim 9328 — interactive EL0 event processing capstone).
 //!
 //! The FIRST interactive graphics application: this program opens a

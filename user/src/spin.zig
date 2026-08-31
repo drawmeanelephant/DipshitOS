@@ -1,4 +1,4 @@
-//! DipshitOS hostile-consumer test — SPIN.BIN (Arc5 issue #246).
+//! VirelaiOS hostile-consumer test — SPIN.BIN (Arc5 issue #246).
 //!
 //! Sets a CPU tick limit via sys_setrlimit (slot 54, type 1) then spins
 //! in an infinite loop. The kernel's scheduler tick enforcement kills the

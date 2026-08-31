@@ -1,6 +1,6 @@
 """Real-repository dogfood assertions for `ragshit review` (fix F).
 
-Runs `ragshit review` against the DipshitOS checkout that CONTAINS this
+Runs `ragshit review` against the VirelaiOS checkout that CONTAINS this
 test (auto-detected via `git rev-parse --show-toplevel`), so the suite
 regression-guards the exact classes of defects this hardening pass fixed:
 
@@ -15,8 +15,8 @@ regression-guards the exact classes of defects this hardening pass fixed:
     (they are low-scored when selected, never mandatory-class).
 
 The assertions are invariants, not exact numbers: they must hold on any
-reasonably sized DipshitOS range without depending on specific claim
-numbers or fragile history. Skipped outside a DipshitOS checkout (e.g. a
+reasonably sized VirelaiOS range without depending on specific claim
+numbers or fragile history. Skipped outside a VirelaiOS checkout (e.g. a
 bare ragshit checkout elsewhere).
 """
 from __future__ import annotations
@@ -30,10 +30,10 @@ import sys
 import pytest
 
 HERE = pathlib.Path(__file__).resolve().parent  # tools/ragshit/tests
-ROOT = HERE.parent.parent.parent  # repo root (DipshitOS)
+ROOT = HERE.parent.parent.parent  # repo root (VirelaiOS)
 
 
-def _dipshitos_root() -> pathlib.Path | None:
+def _virelaios_root() -> pathlib.Path | None:
     try:
         proc = subprocess.run(
             ["git", "-C", str(HERE), "rev-parse", "--show-toplevel"],
@@ -50,7 +50,7 @@ def _dipshitos_root() -> pathlib.Path | None:
     return None
 
 
-DIPSHITOS = _dipshitos_root()
+VIRELAIOS = _virelaios_root()
 
 
 def _run(args) -> tuple[int, str, str]:
@@ -74,9 +74,9 @@ def _pick_range(repo: pathlib.Path) -> str:
     return "HEAD~1..HEAD"
 
 
-@pytest.mark.skipif(DIPSHITOS is None, reason="not running inside a DipshitOS checkout")
+@pytest.mark.skipif(VIRELAIOS is None, reason="not running inside a VirelaiOS checkout")
 def test_review_dogfood_invariants():
-    repo = DIPSHITOS
+    repo = VIRELAIOS
     from ragshit.cli import main
     # Fresh deterministic index of the current checkout.
     assert main(["index", str(repo)]) == 0

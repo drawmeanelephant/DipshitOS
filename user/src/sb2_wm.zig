@@ -1,4 +1,4 @@
-//! DipshitOS M33 SB2 (claim 8878) live-gate test app — SB2WM.BIN: the WM
+//! VirelaiOS M33 SB2 (claim 8878) live-gate test app — SB2WM.BIN: the WM
 //! (peer) half of the shared-anon proof.
 //!
 //! Registers as the WM server (slot 65 REGISTER — the D2 trust boundary),

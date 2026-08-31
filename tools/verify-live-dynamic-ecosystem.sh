@@ -21,7 +21,7 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 GATE_LOG="$(art m31-dynamic-ecosystem-live.txt)"
@@ -73,7 +73,7 @@ test_one_app() {
 
     local banner=0 loaded=0 expected=0 exited=0 reaped=0 fatal=0
     if [ -f "$serial_copy" ]; then
-        [ "$(grep -aFxc -- "DipshitOS kernel has seized control." "$serial_copy" || true)" = 1 ] && banner=1
+        [ "$(grep -aFxc -- "VirelaiOS kernel has seized control." "$serial_copy" || true)" = 1 ] && banner=1
         [ "$(grep -aFc -- "exec: loaded $app" "$serial_copy" || true)" -ge 1 ] && loaded=1
         [ "$(grep -aFc -- "$expect_str" "$serial_copy" || true)" -ge 1 ] && expected=1
         [ "$(grep -aFc -- "$EXEC_EXIT_LINE" "$serial_copy" || true)" -ge 1 ] && exited=1

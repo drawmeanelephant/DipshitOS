@@ -23,7 +23,7 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 GATE_LOG="$(art live-dmesg-gate.txt)"
@@ -78,7 +78,7 @@ run_one() {
     local SERIAL_BYTES=0 BANNER=0 MARKER_COUNT=0 REPLY=0
     if [ -f "$SER" ]; then
         SERIAL_BYTES=$(wc -c < "$SER" 2>/dev/null | tr -d ' ')
-        grep -qF -- "DipshitOS kernel has seized control." "$SER" && BANNER=1
+        grep -qF -- "VirelaiOS kernel has seized control." "$SER" && BANNER=1
         # Once from the echo output, once again inside the dmesg ring dump.
         MARKER_COUNT=$(grep -acF -- "dmesg-marker-7777" "$SER" 2>/dev/null || true)
         grep -qF -- "rx-dmesg-ok" "$SER" && REPLY=1

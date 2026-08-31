@@ -87,7 +87,7 @@ rant() {
         env_crit "║   YOU ARE ABOUT TO RUN THE WRONG TOOLS, YOU MAGNIFICENT IDIOT.   ║"
         env_crit "╚══════════════════════════════════════════════════════════════════╝"
         env_crit ""
-        env_crit "This repo (DipshitOS) needs the MODERN Homebrew builds of the Unix"
+        env_crit "This repo (VirelaiOS) needs the MODERN Homebrew builds of the Unix"
         env_crit "toolchain. macOS still ships 2007-era /bin/bash 3.2 and BSD sed."
         env_crit "The build + gate scripts behave differently under those. Pretty sure"
         env_crit "you do not want to debug THAT again."

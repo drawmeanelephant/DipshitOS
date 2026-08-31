@@ -6,7 +6,7 @@
 #
 # Mechanism: the kernel's real EFI Runtime Services ResetSystem calls
 # (claim 0011, kernel/src/machine.zig: cold for `reboot`, shutdown for
-# `shutdown`) are driven from a LIVE dipshit> shell using the runner's
+# `shutdown`) are driven from a LIVE virelai> shell using the runner's
 # scripted-input mode (claim 6684 --script / --script-expect: waits for the
 # guest terminal state, forwards keystrokes into the serial attachment,
 # tees guest output to vm-serial.log). The live shell itself is reachable
@@ -18,13 +18,13 @@
 #   reboot   -- the machine genuinely resets: the serial log contains a
 #              SECOND complete takeover (fresh banner + memory-map print
 #              with a NEW ExitBootServices key -- impossible within one
-#              boot) after the echoed `dipshit> reboot`, and the VM keeps
+#              boot) after the echoed `virelai> reboot`, and the VM keeps
 #              running (the runner times out with the VM in boot 2, it does
 #              NOT report a stop).
 #   shutdown -- the machine powers off: the runner reports the VM left the
 #              running state (`VM ended before the expected transcript
 #              appeared (state=0)` -- VZVirtualMachine.State.stopped = 0),
-#              and the serial log ends at the echoed `dipshit> shutdown`
+#              and the serial log ends at the echoed `virelai> shutdown`
 #              with no second boot.
 #
 # The claim-0011 M2_RST! NVRAM marker (persisted immediately before the
@@ -41,7 +41,7 @@
 #   serial-bytes    vm-serial.log size
 #   banners         number of "kernel has seized control" occurrences
 #   keys            number of distinct memory-map key= values
-#   echoed          whether the echoed `dipshit> <cmd>` is in the log
+#   echoed          whether the echoed `virelai> <cmd>` is in the log
 #   rst-marker      whether M2_RST! is in the EFI variable store (reported)
 #
 # Class B -- Apple silicon + VZ only; boots real VMs. A green CI badge
@@ -52,9 +52,9 @@
 # overlay), a private EFI var store (recreated fresh per boot, as the
 # pre-isolation gate did), and a private serial log under $RUN_DIR — two
 # concurrent instances cannot clobber each other's disks, NVRAM, or
-# evidence. Set DIPSHIT_GATE_SUFFIX=_alt to give this instance its own
+# evidence. Set VIRELAI_GATE_SUFFIX=_alt to give this instance its own
 # canonical evidence names (two simultaneous instances MUST differ), and
-# DIPSHIT_KEEP_RUN=1 to keep the scratch dir.
+# VIRELAI_KEEP_RUN=1 to keep the scratch dir.
 #
 # Usage:
 #   bash tools/verify-live-reboot.sh          # BOOTS boot(s) of each command
@@ -72,7 +72,7 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 GATE_LOG="$(art live-reboot-gate.txt)"
@@ -83,7 +83,7 @@ BOOTS="${BOOTS:-1}"
 REPORT="$(art live-reboot-report.txt)"
 TIMEOUT="${LIVE_REBOOT_TIMEOUT:-50}"
 
-echo "=== verify-live-reboot: claim 0527 — live reboot/shutdown (real EFI ResetSystem from a live dipshit> shell), $BOOTS boot(s) per command ==="
+echo "=== verify-live-reboot: claim 0527 — live reboot/shutdown (real EFI ResetSystem from a live virelai> shell), $BOOTS boot(s) per command ==="
 
 
 # --- tool versions + revision -----------------------------------------------
@@ -136,9 +136,9 @@ run_one() {
     KEYS=$(grep -a -o -- "key=0x[0-9a-f]*" "$SER" 2>/dev/null | sort -u | wc -l | tr -d ' ')
     # OBSERVED TODAY (2026-08-24, claim 5069): M18 T5 (claim 0163) colors
     # the prompt — the echo line's serial bytes are
-    # `\x1b[32mdipshit> \x1b[0m<cmd>\r`, so the historical "dipshit> <cmd>"
+    # `\x1b[32mvirelai> \x1b[0m<cmd>\r`, so the historical "virelai> <cmd>"
     # can never match again.
-    if grep -a -qF -- $'\x1b[32mdipshit> \x1b[0m'"$cmd" "$SER" 2>/dev/null; then ECHOED=1; else ECHOED=0; fi
+    if grep -a -qF -- $'\x1b[32mvirelai> \x1b[0m'"$cmd" "$SER" 2>/dev/null; then ECHOED=1; else ECHOED=0; fi
     if grep -a -qF -- "VM ended before the expected transcript appeared" "$(art live-reboot-run-$tag.txt)"; then STOPPED=1; else STOPPED=0; fi
     # Claim-0011 M2_RST! marker in the EFI variable store (REPORTED, not a
     # pass criterion -- best-effort channel; see header). The store is the
@@ -181,7 +181,7 @@ print(1 if any(data[i:i+8] == needle for i in range(len(data))) else 0)
 
 : > "$REPORT"
 {
-    echo "DIPSHITOS live reboot/shutdown gate (claim 0527) — real EFI ResetSystem from a live dipshit> shell"
+    echo "VIRELAIOS live reboot/shutdown gate (claim 0527) — real EFI ResetSystem from a live virelai> shell"
     echo "revision: $REVISION branch=$BRANCH boots=$BOOTS dirty-files=$DIRTY"
     echo "scripts: reboot (cold reset), shutdown (power-off) — forwarded after the guest terminal state"
     echo "date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"

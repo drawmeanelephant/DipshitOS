@@ -1,4 +1,4 @@
-//! DipshitOS FAT32 storage driver (milestone-three card, claim 6420).
+//! VirelaiOS FAT32 storage driver (milestone-three card, claim 6420).
 //!
 //! A real FAT32 filesystem over the ESP: GPT partition discovery, FAT32
 //! mount, root-directory listing, file reads (short + long names), and file
@@ -1488,7 +1488,7 @@ fn test_ops() DiskOps {
 /// Build an in-memory disk image in the exact layout mkfat32.py produces:
 /// protective MBR, GPT header + ESP partition entry, then a FAT32 volume at
 /// LBA 2048 with spc=1, reserved=32, 2 FATs, root cluster 2. Contents:
-/// /DIPSHITOS (volume label), /EFI/ and /EFI/BOOT/ (dirs), /KERNEL.BIN
+/// /VIRELAIOS (volume label), /EFI/ and /EFI/BOOT/ (dirs), /KERNEL.BIN
 /// (cluster 5), /BOOTED.TXT (cluster 6), /BOOTAA64.EFI (cluster 7), and —
 /// when `with_lfn` is set — /Long File Name.TXT (cluster 8) behind an LFN
 /// chain.
@@ -1568,12 +1568,12 @@ fn build_fixture(alloc: std.mem.Allocator, with_lfn: bool) !Fixture {
     alloc.free(fat);
 
     // Root directory (cluster 2).
-    const booted = "DIPSHITOS BOOTLOADER\nfirmware has agreed to cooperate\n";
+    const booted = "VIRELAIOS BOOTLOADER\nfirmware has agreed to cooperate\n";
     const root_lba = esp_offset + data_start; // cluster 2
     const root_off: usize = @intCast(root_lba * sector_size);
     var root = [_]u8{0} ** sector_size;
     var slot: usize = 0;
-    write_entry(&root, slot, "DIPSHITOS  ", 0x08, 0, 0);
+    write_entry(&root, slot, "VIRELAIOS  ", 0x08, 0, 0);
     slot += 1;
     write_entry(&root, slot, "EFI        ", 0x10, 3, 0);
     slot += 1;
@@ -1710,7 +1710,7 @@ test "fat: list_root decodes entries, skips volume label and dot entries" {
     try std.testing.expectEqualStrings("KERNEL.BIN", out[1].name[0..out[1].name_len]);
     try std.testing.expectEqual(@as(u32, 0x100), out[1].size);
     try std.testing.expectEqualStrings("BOOTED.TXT", out[2].name[0..out[2].name_len]);
-    try std.testing.expectEqual(@as(u32, 54), out[2].size); // "DIPSHITOS BOOTLOADER\nfirmware has agreed to cooperate\n"
+    try std.testing.expectEqual(@as(u32, 54), out[2].size); // "VIRELAIOS BOOTLOADER\nfirmware has agreed to cooperate\n"
 }
 
 test "fat: read_file returns content by 8.3 name, case-insensitive" {
@@ -1720,7 +1720,7 @@ test "fat: read_file returns content by 8.3 name, case-insensitive" {
     try std.testing.expectEqual(MountResult.ok, mount(test_ops()));
     var buf: [512]u8 = undefined;
     const n = (read_file("BOOTED.TXT", &buf) orelse return error.TestUnexpectedResult);
-    try std.testing.expectEqualStrings("DIPSHITOS BOOTLOADER\nfirmware has agreed to cooperate\n", buf[0..n]);
+    try std.testing.expectEqualStrings("VIRELAIOS BOOTLOADER\nfirmware has agreed to cooperate\n", buf[0..n]);
     // Case-insensitive lookup (FAT semantics).
     try std.testing.expect((read_file("booted.txt", &buf) orelse return error.TestUnexpectedResult) == n);
     try std.testing.expect(read_file("KERNEL.BIN", &buf) != null);
@@ -2000,7 +2000,7 @@ test "fat: paths reach subdirectories (EFI/BOOT/BOOTAA64.EFI)" {
     _ = (read_file("/EFI/BOOT/BOOTAA64.EFI", &buf) orelse return error.TestUnexpectedResult);
     try std.testing.expectEqualStrings("BOOTAA64.EFI payload, padded to 0x200", buf[0..37]);
     const got3 = (read_file("EFI/BOOT/../../BOOTED.TXT", &buf) orelse return error.TestUnexpectedResult);
-    try std.testing.expectEqualStrings("DIPSHITOS BOOTLOADER\nfirmware has agreed to cooperate\n", buf[0..got3]);
+    try std.testing.expectEqualStrings("VIRELAIOS BOOTLOADER\nfirmware has agreed to cooperate\n", buf[0..got3]);
 
     // Directories, absent paths, and trailing '/' stay null.
     try std.testing.expect(read_file("EFI/BOOT", &buf) == null); // a directory

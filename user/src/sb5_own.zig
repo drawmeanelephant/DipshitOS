@@ -1,4 +1,4 @@
-//! DipshitOS M33 SB5 (claim 7397) live-gate test app — SB5OWN.BIN: the
+//! VirelaiOS M33 SB5 (claim 7397) live-gate test app — SB5OWN.BIN: the
 //! migrated-app half of the WM compose-N + one final present proof.
 //!
 //! Opens a user window (frozen slot 12) at (320,64) 256x192, BINDS a shared

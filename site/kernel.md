@@ -39,7 +39,7 @@ in [[evidence]].
 
 ## The monitor
 
-The kernel serves a live `dipshit>` command monitor over the serial console.
+The kernel serves a live `virelai>` command monitor over the serial console.
 The registry is 47 commands at the current tree, spanning:
 
 - **Identity / machine** — `about`, `version`, `uname`, `elephant`, `beans`, `sysinfo`, `welcome`/`tour`
@@ -56,7 +56,7 @@ beans), but each handler is bounded and deterministic.
 <Aside kind="info">
 
 **VERIFIED.** The monitor's transcript is pinned by a byte-identical mock test
-(`zig build test-console`) in class A, and the live `dipshit>` session is
+(`zig build test-console`) in class A, and the live `virelai>` session is
 asserted end to end by the class B transcript gate.
 
 </Aside>

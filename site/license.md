@@ -6,13 +6,13 @@ tags: [project, license, legal]
 
 # License
 
-DipshitOS is **source-available, not open source**.
+VirelaiOS is **source-available, not open source**.
 
 You can read the code — that is deliberate and part of the project's
 personality. But "publicly visible" is not the same as "free to take." The
 binding terms are the
 [`LICENSE`](https://github.com/drawmeanelephant/DipshitOS/blob/main/LICENSE)
-file in the repository (the *DipshitOS Proprietary Source-Available License*,
+file in the repository (the *VirelaiOS Proprietary Source-Available License*,
 version 1.0). This page is a plain-language summary, not the license.
 
 <Aside kind="warning">
@@ -50,7 +50,7 @@ it.
 
 ## Why this matters
 
-DipshitOS is a from-scratch operating system whose engineering is taken
+VirelaiOS is a from-scratch operating system whose engineering is taken
 seriously enough that every subsystem is either verified deterministically or
 live-gated on real hardware. The license keeps that seriousness intact: the
 source stays *visible* so the work can be reviewed and learned from, while the

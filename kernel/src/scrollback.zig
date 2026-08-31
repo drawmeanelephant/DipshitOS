@@ -1,4 +1,4 @@
-//! DipshitOS terminal scrollback ring (M18 T1, issue #404).
+//! VirelaiOS terminal scrollback ring (M18 T1, issue #404).
 //!
 //! A bounded ring buffer that captures terminal output line-by-line so the
 //! user can scroll back through command history. The ring stores the last

@@ -60,18 +60,18 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 # Run isolation (#523 item 2 / issue #528; fleet remainder claim 2259):
 # private stacked disk (pristine-per-boot overlay), EFI var store, serial
 # logs, captures, and scripts under $RUN_DIR for BOTH phases; fresh EFI
 # vars per boot as before. Expectation note (#528 rot class 1, claim
-# 2259): the historical $'...ndipshit> ' script-expects died with M18 T5's
+# 2259): the historical $'...nvirelai> ' script-expects died with M18 T5's
 # ANSI-colored prompt (claim 0163); both phases now anchor on the
 # OUTPUT-ONLY success echo, which exists only in command output.
-# Set DIPSHIT_GATE_SUFFIX=_alt for distinct canonical evidence names;
-# DIPSHIT_KEEP_RUN=1 keeps the scratch dir.
+# Set VIRELAI_GATE_SUFFIX=_alt for distinct canonical evidence names;
+# VIRELAI_KEEP_RUN=1 keeps the scratch dir.
 
 GATE_LOG="$(art live-net-dhcp-gate.txt)"
 exec > >(tee "$GATE_LOG") 2>&1
@@ -288,7 +288,7 @@ fi
 
 : > "$REPORT"
 {
-    echo "DIPSHITOS live DHCP gate (claim 0351, milestone five card N8) — the bounded RFC 2131 client on the N5/N6 UDP layer, on real VZ hardware"
+    echo "VIRELAIOS live DHCP gate (claim 0351, milestone five card N8) — the bounded RFC 2131 client on the N5/N6 UDP layer, on real VZ hardware"
     echo "revision: $REVISION branch=$BRANCH dirty-files=$DIRTY"
     echo "phase 1 (deterministic file-handle): --net + --net-dhcp-respond 10.0.0.2 — net dhcp -> DISCOVER (286 B, byte-exact in the capture) -> OFFER -> REQUEST -> ACK -> BOUND"
     echo "assertions: runner rc, DISCOVER-sent line, the bound lease (ip=10.0.0.2 mask=255.255.255.0 gw=10.0.0.1 server=10.0.0.2 lease=3600), the report counters (discover=1,offer=1,request=1,ack=1,nack=0,timeout=0,mal=0), the host's NET-DHCP OFFER + ACK lines, the 584-byte capture (the 286-B DISCOVER + the 298-B REQUEST, both byte-exact at the load-bearing offsets: dst ff*6, src 02:00:00:00:00:01, ethertype 0x0800, 68->67, op 1, cookie 0x63825363, option 53 = 1 then 3, the SAME xid), the gate echo, the runner's net-dhcp-respond flag"

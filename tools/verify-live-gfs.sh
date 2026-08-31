@@ -30,8 +30,8 @@
 # fresh from artifacts/disk.img after the build), a private EFI var store,
 # and private serial logs under $RUN_DIR — same shape as verify-live-fs.sh
 # (the writable copy is required: run B proves run A's write persisted on
-# the SAME image through a reboot). DIPSHIT_GATE_SUFFIX=_alt gives distinct
-# canonical evidence names; DIPSHIT_KEEP_RUN=1 keeps the scratch dir.
+# the SAME image through a reboot). VIRELAI_GATE_SUFFIX=_alt gives distinct
+# canonical evidence names; VIRELAI_KEEP_RUN=1 keeps the scratch dir.
 #
 # Class B — Apple silicon + VZ only; boots real VMs.
 #
@@ -49,7 +49,7 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 GATE_LOG="$(art live-gfs-gate.txt)"
@@ -157,7 +157,7 @@ run_one() {
 
 : > "$REPORT"
 {
-    echo "DIPSHITOS live general-filesystem gate (claim 3678) — the DATA partition mounted by GUID, listed, read, written, and persistent across reboot (VZ hardware)"
+    echo "VIRELAIOS live general-filesystem gate (claim 3678) — the DATA partition mounted by GUID, listed, read, written, and persistent across reboot (VZ hardware)"
     echo "revision: $REVISION branch=$BRANCH pairs=$PAIRS dirty-files=$DIRTY"
     echo "run A: mount data + write hello.txt 'hello world' + ls + cat README.TXT + cat DATA.TXT (fresh disk image)"
     echo "run B: mount data + ls + cat hello.txt (SAME image — persistence through reboot on the DATA volume)"
@@ -178,11 +178,11 @@ while [ "$n" -lt "$PAIRS" ]; do
     # Reply+idle-prompt anchor (colored prompt bytes; see fs gate note):
     # fires only at shell idle after the reply, so the pair's second boot
     # never reads a mid-writeback image.
-    run_one "A-$n" "$RUN_DIR/script-A.txt" $'general data volume contents: 1234567890\n\x1b[32mdipshit> ' 1 && AOK=1 || true
+    run_one "A-$n" "$RUN_DIR/script-A.txt" $'general data volume contents: 1234567890\n\x1b[32mvirelai> ' 1 && AOK=1 || true
     echo "=== live-gfs pair $n, run B (persistence through reboot, same disk) ==="
     BOK=0
     sleep 3
-    run_one "B-$n" "$RUN_DIR/script-B.txt" $'hello world\n\x1b[32mdipshit> ' 0 && BOK=1 || true
+    run_one "B-$n" "$RUN_DIR/script-B.txt" $'hello world\n\x1b[32mvirelai> ' 0 && BOK=1 || true
     if [ "$AOK" = 1 ] && [ "$BOK" = 1 ]; then
         PASS=$((PASS + 1))
     fi

@@ -78,12 +78,12 @@ echo
 
 # Build the kernel. `zig build kernel` runs elf2bin.py on the linked ELF;
 # the linked ELF (the input to elf2bin) is what we inspect, and it lives
-# at .zig-cache/o/*/dipshit-kernel.
+# at .zig-cache/o/*/virelai-kernel.
 echo "-- building kernel --"
 rm -rf .zig-cache
 zig build kernel 2>&1 | tail -1
 
-KERNEL_ELF="$(find .zig-cache -name 'dipshit-kernel' -type f 2>/dev/null | head -1 || true)"
+KERNEL_ELF="$(find .zig-cache -name 'virelai-kernel' -type f 2>/dev/null | head -1 || true)"
 if [ -z "$KERNEL_ELF" ]; then
     echo
     echo "verify-bss-budget: FAIL — kernel ELF not found in .zig-cache after build."

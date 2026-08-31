@@ -1,4 +1,4 @@
-//! DipshitOS network dashboard — NETSTAT.BIN (Milestone 26, Card N2, Issue #400).
+//! VirelaiOS network dashboard — NETSTAT.BIN (Milestone 26, Card N2, Issue #400).
 //!
 //! A full-window dashboard rendered from `sys_net_stats` (slot 62): the
 //! interface (MAC/IP/GW), TCP connection state + peer, UDP listeners,

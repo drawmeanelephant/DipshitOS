@@ -16,7 +16,7 @@ engineering documents live.
 
 ```bash
 git clone https://github.com/drawmeanelephant/DipshitOS.git
-cd DipshitOS
+cd VirelaiOS
 zig build            # build
 just verify-portable # class A (mirrors CI)
 just verify-vz       # class B (Apple silicon, real VMs)

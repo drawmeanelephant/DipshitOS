@@ -1,11 +1,11 @@
-//! DipshitOS persistent settings engine (Milestone 8 Card U8, claim 2649).
+//! VirelaiOS persistent settings engine (Milestone 8 Card U8, claim 2649).
 //!
 //! Provides in-memory key-value configuration backed by `SETTINGS.TXT` on
 //! the second FAT32 partition (`DATA` partition, Linux-FS type GUID).
 //!
 //! Keys supported:
-//!   - `hostname`: system host identifier (default: "dipshit")
-//!   - `prompt`: interactive shell prompt string (default: "dipshit> ")
+//!   - `hostname`: system host identifier (default: "virelai")
+//!   - `prompt`: interactive shell prompt string (default: "virelai> ")
 //!   - `theme`: UI visual color accent (default: "default")
 //!   - `scrollback`: terminal scrollback buffer lines (default: "1000")
 //!
@@ -34,8 +34,8 @@
 //!   `migrate()`, and document the schema change here.
 //!
 //! Schema (keys, types, defaults, valid values):
-//!   hostname   string  "dipshit"     1..32 chars, system host identifier
-//!   prompt     string  "dipshit> "   1..64 chars, interactive shell prompt
+//!   hostname   string  "virelai"     1..32 chars, system host identifier
+//!   prompt     string  "virelai> "   1..64 chars, interactive shell prompt
 //!   theme      string  "dark"        "dark"|"light"|"amber", UI color accent
 //!   scrollback string  "1000"        positive integer, terminal scrollback lines
 //!   color      string  "on"          "on"|"off", ANSI terminal colors in shell
@@ -75,8 +75,8 @@ var initialized: bool = false;
 /// Populate default settings table.
 pub fn init() void {
     entry_count = 0;
-    _ = set_internal("hostname", "dipshit");
-    _ = set_internal("prompt", "dipshit> ");
+    _ = set_internal("hostname", "virelai");
+    _ = set_internal("prompt", "virelai> ");
     _ = set_internal("theme", "dark");
     _ = set_internal("scrollback", "1000");
     _ = set_internal("focus_follows_mouse", "off");
@@ -122,12 +122,12 @@ pub fn get(key: []const u8) ?[]const u8 {
 
 /// Dynamic helper for shell prompt string.
 pub fn get_prompt() []const u8 {
-    return get("prompt") orelse "dipshit> ";
+    return get("prompt") orelse "virelai> ";
 }
 
 /// Dynamic helper for system hostname.
 pub fn get_hostname() []const u8 {
-    return get("hostname") orelse "dipshit";
+    return get("hostname") orelse "virelai";
 }
 
 /// M18 T5: whether ANSI terminal colors are enabled.
@@ -463,8 +463,8 @@ pub fn init_from_disk(ops: ?fat.DiskOps) void {
 
 test "settings: default initialization and getters" {
     init();
-    try std.testing.expectEqualStrings("dipshit", get_hostname());
-    try std.testing.expectEqualStrings("dipshit> ", get_prompt());
+    try std.testing.expectEqualStrings("virelai", get_hostname());
+    try std.testing.expectEqualStrings("virelai> ", get_prompt());
     try std.testing.expectEqualStrings("dark", get("theme").?);
     try std.testing.expectEqualStrings("1000", get("scrollback").?);
 }

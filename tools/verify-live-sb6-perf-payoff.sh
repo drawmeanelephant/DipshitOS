@@ -158,7 +158,7 @@ fi
 echo "wm_reg=$A_WM_REG scanout=$A_SCANOUT old_fills=$A_OLD_FILLS old_done=$A_OLD_DONE new_ready=$A_NEW_READY new_bound=$A_NEW_BOUND new_stored=$A_NEW_STORED new_done=$A_NEW_DONE bytes=$A_BYTES readback=$A_READBACK present=$A_PRESENT wm_done=$A_WM_DONE fills576=$A_FILLS576 blits=$A_BLITS skips=$A_SKIPS fatal=$A_FAULT" | tee -a "$REPORT"
 
 {
-    echo "DIPSHITOS live seam-B perf-payoff gate (claim 6864) — SB6OLD (before): 576 slot-13 fills + kernel blits; SB6NEW (after): 0 fills, plain stores into a shared surface; SB6WM compose-N moved 196,608 bytes into the scanout (readback=0x6B); syscalls snapshot shows '13 sys_win_fill calls=576' and dui blits/skips both >= 9 — the measured before/after in one boot"
+    echo "VIRELAIOS live seam-B perf-payoff gate (claim 6864) — SB6OLD (before): 576 slot-13 fills + kernel blits; SB6NEW (after): 0 fills, plain stores into a shared surface; SB6WM compose-N moved 196,608 bytes into the scanout (readback=0x6B); syscalls snapshot shows '13 sys_win_fill calls=576' and dui blits/skips both >= 9 — the measured before/after in one boot"
     echo "revision: $REVISION branch=$BRANCH dirty-files=$DIRTY"
     echo "date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     echo

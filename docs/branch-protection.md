@@ -1,4 +1,4 @@
-# DipshitOS Branch Protection & Multi-Agent Workflow Guide
+# VirelaiOS Branch Protection & Multi-Agent Workflow Guide
 
 This document outlines the recommended branch protection configuration for the GitHub repository (`https://github.com/drawmeanelephant/DipshitOS`) and details best practices for multi-agent parallel development.
 

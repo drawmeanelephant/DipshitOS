@@ -39,7 +39,7 @@ trap 'sleep 0.5' EXIT
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 # Run isolation (#523 item 2 / issue #528; fleet remainder claim 2259):
@@ -48,8 +48,8 @@ art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 # to the documented claim-4769 activation wall / issue #179 machine-state
 # dependency — a walled run self-reports KEY-SEQ window key/main/active
 # false; re-run when the machine is idle (no code fix exists).
-# Set DIPSHIT_GATE_SUFFIX=_alt for distinct canonical evidence names;
-# DIPSHIT_KEEP_RUN=1 keeps the scratch dir.
+# Set VIRELAI_GATE_SUFFIX=_alt for distinct canonical evidence names;
+# VIRELAI_KEEP_RUN=1 keeps the scratch dir.
 
 GATE_LOG="$(art live-sys-kill-gate.txt)"
 exec > >(tee "$GATE_LOG") 2>&1

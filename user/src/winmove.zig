@@ -1,4 +1,4 @@
-//! DipshitOS ninth ESP user program — WINMOVE.BIN (milestone six, card G6
+//! VirelaiOS ninth ESP user program — WINMOVE.BIN (milestone six, card G6
 //! move/raise follow-on, claim 0487).
 //!
 //! WIN.BIN proved an EL0 program can OPEN a window, WINLOOP.BIN keeps one

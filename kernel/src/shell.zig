@@ -1,4 +1,4 @@
-//! Interactive `dipshit>` shell loop (Milestone 1.5, console & shell core).
+//! Interactive `virelai>` shell loop (Milestone 1.5, console & shell core).
 //!
 //! Wires the bounded line editor (`lineedit.zig`) and the fixed-arity
 //! tokenizer (`tokenizer.zig`) to the existing monitor registry
@@ -3191,9 +3191,9 @@ pub fn boot_and_park(mon: *monitor.Monitor, rx_wired: bool) void {
     // M21 W11: restore window state from previous session.
     restore_windows();
 
-    // M18 T14: run startup file (.dipshitrc) if present
+    // M18 T14: run startup file (.virelairc) if present
     if (esp.disk_ready()) {
-        if (esp.lookup(".dipshitrc")) |entry| {
+        if (esp.lookup(".virelairc")) |entry| {
             const rc = esp.content_of(entry);
             var start: usize = 0;
             var i: usize = 0;
@@ -3515,11 +3515,11 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
     // tokenizer refuses the line before any handler sees it.
     const too_many_tokens = "echo t t t t t t t t t t t t t t t t t";
     const expected =
-        "DipshitOS - AArch64 firmware-assisted kernel monitor\n" ++
-        "DipshitOS: memory is a map, not a territory.\n" ++
+        "VirelaiOS - AArch64 firmware-assisted kernel monitor\n" ++
+        "VirelaiOS: memory is a map, not a territory.\n" ++
         "motd: aarch64 el1 kernel live; scheduler, uaccess, fs, net, gfx, xhci armed.\n" ++
         "Type 'help' before touching anything expensive.\n" ++
-        "dipshit> help\r\n" ++
+        "virelai> help\r\n" ++
         "available commands:\n" ++
         "machine / identity\n" ++
         "  about       explain this questionable system\n" ++
@@ -3601,12 +3601,12 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "  which       locate a command: shell builtin, monitor command, or ESP application (D16)\n" ++
         "type 'help <command>' for details on a single command.\n" ++
         "type 'help <topic>' for a topic page (networking, windows, storage, graphics).\n" ++
-        "dipshit> version\r\n" ++
-        "dipshit-kernel\n" ++
+        "virelai> version\r\n" ++
+        "virelai-kernel\n" ++
         "milestone-two kernel proper (ADR 0004)\n" ++
         "handoff ABI v2\n" ++
         "build label: m1.5 commands & personality (mock console)\n" ++
-        "dipshit> mem\r\n" ++
+        "virelai> mem\r\n" ++
         "mem: descriptors=0x0000000000000006 size=0x0000000000000028 version=0x0000000000000002 key=0x0000000000000042\n" ++
         "  usable: 0x0000000000480000 bytes (0x0000000000000480 pages)\n" ++
         "  conventional: 0x00000000003c0000 bytes (0x00000000000003c0 pages)\n" ++
@@ -3616,9 +3616,9 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "  reserved: 0x0000000000009000 bytes (0x0000000000000009 pages)\n" ++
         "  mmio: 0x0000000000010000 bytes (0x0000000000000010 pages)\n" ++
         "  kernel: 0x000000007e4df000..0x000000007e5613e8 (0x00000000000823e8 bytes)\n" ++
-        "dipshit> pages\r\n" ++
+        "virelai> pages\r\n" ++
         "pages: armed=1 total=0x0000000000000480 free=0x0000000000000480 excluded=0x0000000000000000 regions=0x0000000000000003 span=0x0000000000007f80\n" ++
-        "dipshit> pages selftest\r\n" ++
+        "virelai> pages selftest\r\n" ++
         "pages selftest: alloc 1 -> 0x0000000000100000\n" ++
         "pages selftest: free ok\n" ++
         "pages selftest: alloc 8 -> 0x0000000000100000\n" ++
@@ -3630,44 +3630,44 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "pages selftest: free ok\n" ++
         "pages selftest: alloc 1153 -> none (out of memory)\n" ++
         "pages selftest: ok free=0x0000000000000480\n" ++
-        "dipshit> tasks\r\n" ++
+        "virelai> tasks\r\n" ++
         "tasks: enabled=0 current=0 switches=0 pool=4/11 zombies=0\n" ++
         "  shell    saves=0 resumes=0 advances=0 state=ready\n" ++
         "  worker   saves=0 resumes=0 advances=0 state=ready\n" ++
         "  user-el0 saves=0 resumes=0 advances=0 state=ready\n" ++
         "  idle     saves=0 resumes=0 advances=0 state=ready\n" ++
-        "dipshit> echo \"elephant business\"\r\n" ++
+        "virelai> echo \"elephant business\"\r\n" ++
         "elephant business\n" ++
-        "dipshit> ls\r\n" ++
+        "virelai> ls\r\n" ++
         "ls: esp=0x0000000000000003\n" ++
         "  KERNEL.BIN  0x0000000000088b38  [esp]\n" ++
         "  EFI         0x0000000000000000  [dir]\n" ++
         "  BOOTED.TXT  0x0000000000000029  [esp]\n" ++
-        "dipshit> cat BOOTED.TXT\r\n" ++
-        "DIPSHITOS BOOTLOADER\n" ++
+        "virelai> cat BOOTED.TXT\r\n" ++
+        "VIRELAIOS BOOTLOADER\n" ++
         "firmware has agreed to cooperate\n" ++
-        "dipshit> write hello.txt hello world\r\n" ++
+        "virelai> write hello.txt hello world\r\n" ++
         "error: hello.txt: not persisted - no disk (FAT volume unavailable)\n" ++
-        "dipshit> cat hello.txt\r\n" ++
+        "virelai> cat hello.txt\r\n" ++
         "error: hello.txt: not found (no such file on the ESP)\n" ++
         // ADR 0008 D3: the three shapes are gate-tested here byte-exactly,
         // so a command that invents a fourth shape fails CI.
         // Shape 1 (misuse): the usage line PLUS the registry's one-line hint.
-        "dipshit> pages bogus\r\n" ++
+        "virelai> pages bogus\r\n" ++
         "usage: pages [selftest]\n" ++
         "physical page allocator pool\n" ++
         // Shape 3 (unknown verb).
-        "dipshit> " ++ long ++ "\r\n" ++
+        "virelai> " ++ long ++ "\r\n" ++
         "unknown command '" ++ long ++ "' -- try 'help'\n" ++
         // Shape 2 (failure), from the dispatch layer: an over-long argv.
-        "dipshit> " ++ too_many_tokens ++ "\r\n" ++
+        "virelai> " ++ too_many_tokens ++ "\r\n" ++
         "error: too many arguments (max 17 tokens)\n" ++
-        "dipshit> ^C\r\n" ++
+        "virelai> ^C\r\n" ++
         // Enter pressed after the cancel submits an empty line, which the
         // registry answers in shape 2 (then a new prompt).
-        "dipshit> \r\n" ++
+        "virelai> \r\n" ++
         "error: no command given; type 'help' for a list of commands\n" ++
-        "dipshit> ";
+        "virelai> ";
 
     var mock = console.MockConsole(16384){};
     var shell = make_shell(&mock, make_view());
@@ -3690,7 +3690,7 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
     esp.reset();
     _ = esp.add_esp_entry("KERNEL.BIN", 0x88b38, "");
     _ = esp.add_dir_entry("EFI");
-    _ = esp.add_esp_entry("BOOTED.TXT", 0x29, "DIPSHITOS BOOTLOADER\nfirmware has agreed to cooperate\n");
+    _ = esp.add_esp_entry("BOOTED.TXT", 0x29, "VIRELAIOS BOOTLOADER\nfirmware has agreed to cooperate\n");
     mock.feed("help\nversion\nmem\npages\npages selftest\ntasks\necho \"elephant business\"\nls\ncat BOOTED.TXT\nwrite hello.txt hello world\ncat hello.txt\npages bogus\n");
     mock.feed(long);
     mock.feed("\n");
@@ -3747,7 +3747,7 @@ test "shell: unbalanced quote warns and executes the literal" {
     while (shell.poll() != .idle) {}
     const out = mock.contents();
     try std.testing.expect(std.mem.indexOf(u8, out, "unterminated quote: rest of line treated as literal\n") != null);
-    try std.testing.expect(std.mem.endsWith(u8, out, "elephant business\n" ++ "dipshit> "));
+    try std.testing.expect(std.mem.endsWith(u8, out, "elephant business\n" ++ "virelai> "));
 }
 
 test "shell: empty line reports no command via the registry" {
@@ -3770,7 +3770,7 @@ test "shell: tab completion completes a command name (ADR 0008 D2)" {
     while (shell.poll() != .idle) {}
     const out = mock.contents();
     try std.testing.expect(std.mem.indexOf(u8, out, "version\r\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "dipshit-kernel\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "virelai-kernel\n") != null);
 }
 
 test "shell: ctrl-l clears the screen and repaints the prompt + line" {
@@ -3783,7 +3783,7 @@ test "shell: ctrl-l clears the screen and repaints the prompt + line" {
     // Ctrl-L emitted the ANSI clear; the shell restored the prompt + line,
     // then Enter ran the echo.
     try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[2J\x1b[H") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "dipshit> echo hi") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "virelai> echo hi") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "hi\n") != null);
 }
 
@@ -4699,7 +4699,7 @@ test "shell: T15 prompt: prompt builtin changes the prompt" {
     // Verify the settings API — prompt reads back what was set
     _ = settings.set("prompt", "test$ ");
     try std.testing.expectEqualStrings("test$ ", settings.get_prompt());
-    _ = settings.set("prompt", "dipshit> "); // restore default
+    _ = settings.set("prompt", "virelai> "); // restore default
 }
 
 test "shell: T16 script: sh executes a script file line by line" {

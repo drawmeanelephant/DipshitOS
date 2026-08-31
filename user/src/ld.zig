@@ -1,4 +1,4 @@
-//! DipshitOS Freestanding Runtime Linker (LD.SO, Milestone 30 Dynamic Linking).
+//! VirelaiOS Freestanding Runtime Linker (LD.SO, Milestone 30 Dynamic Linking).
 //!
 //! Zero libc/POSIX, zero external runtime. Maps and relocates ELF dynamic
 //! executables and shared libraries (LIBUI.SO, LIBFONT.SO) on Apple Silicon AArch64.

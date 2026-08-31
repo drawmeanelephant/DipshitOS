@@ -29,9 +29,9 @@
 # overlay), a private EFI var store (recreated fresh per boot, as the
 # pre-isolation gate did), and a private serial log under $RUN_DIR — two
 # concurrent instances cannot clobber each other's disks, NVRAM, or
-# evidence. Set DIPSHIT_GATE_SUFFIX=_alt to give this instance its own
+# evidence. Set VIRELAI_GATE_SUFFIX=_alt to give this instance its own
 # canonical evidence names (two simultaneous instances MUST differ), and
-# DIPSHIT_KEEP_RUN=1 to keep the scratch dir.
+# VIRELAI_KEEP_RUN=1 to keep the scratch dir.
 #
 # Class B — Apple silicon + VZ only; boots a real VM.
 #
@@ -50,7 +50,7 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 GATE_LOG="$(art live-clipboard-gate.txt)"
@@ -110,7 +110,7 @@ run_one() {
     SERIAL_BYTES=$(wc -c < "$SER" 2>/dev/null | tr -d ' ')
     local BANNER=0 STORED11=0 PASTE11=0 STORED6=0 PASTE6=0 IMPL=0 SLOT38=0 SLOT39=0 ECHO=0
     if [ -f "$SER" ]; then
-        grep -qF -- "DipshitOS kernel has seized control." "$SER" && BANNER=1
+        grep -qF -- "VirelaiOS kernel has seized control." "$SER" && BANNER=1
         grep -qF -- "clip: stored 11 bytes" "$SER" && STORED11=1
         grep -qF -- "clip: hello world" "$SER" && PASTE11=1
         grep -qF -- "clip: stored 6 bytes" "$SER" && STORED6=1
@@ -131,7 +131,7 @@ run_one() {
 
 : > "$REPORT"
 {
-    echo "DIPSHITOS live-clipboard gate (claim 0169) — the bounded shared kernel clipboard on real VZ hardware"
+    echo "VIRELAIOS live-clipboard gate (claim 0169) — the bounded shared kernel clipboard on real VZ hardware"
     echo "revision: $REVISION branch=$BRANCH boots=$BOOTS dirty-files=$DIRTY"
     echo "script: $SCRIPT (clip set/get x2 + syscalls + echo clip-live-ok)"
     echo "date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"

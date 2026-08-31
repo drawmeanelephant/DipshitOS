@@ -1,4 +1,4 @@
-//! DipshitOS exception vectors (claim 9746 — the first half of roadmap
+//! VirelaiOS exception vectors (claim 9746 — the first half of roadmap
 //! item 5; GIC + timer programming is the next card).
 //!
 //! Installs a real VBAR_EL1 vector table with basic synchronous and IRQ
@@ -27,7 +27,7 @@
 //! fire; if one does, reporting and parking beats silently running off
 //! into firmware vectors. The synchronous handler's resume path is the
 //! only place ELR_EL1 is rewritten, and only while `resume_armed` is set
-//! by `trigger_test_fault` (the `dipshit> fault` command). The dispatcher
+//! by `trigger_test_fault` (the `virelai> fault` command). The dispatcher
 //! runs in IRQ context with a register frame on the stack and MUST NOT
 //! touch the console (claim 7948: heartbeats print from the shell idle
 //! loop).
@@ -413,7 +413,7 @@ pub fn format_report(
 }
 
 // ---------------------------------------------------------------------------
-// Deliberate test fault (`dipshit> fault`)
+// Deliberate test fault (`virelai> fault`)
 // ---------------------------------------------------------------------------
 
 /// Arm the resume flag and execute a permanently-undefined instruction.

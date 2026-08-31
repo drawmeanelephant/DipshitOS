@@ -45,7 +45,7 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 GATE_LOG="$(art m32-wms2-wmctl-live.txt)"
@@ -107,7 +107,7 @@ run_one() {
         reaped=0 fallback=0 wmctl_row=0 calls2=0 impl66=0 echo_ok=0 fatal=0
     if [ -f "$SER" ]; then
         bytes="$(wc -c < "$SER" | tr -d ' ')"
-        [ "$(grep -aFxc -- "DipshitOS kernel has seized control." "$SER" || true)" = 1 ] && banner=1
+        [ "$(grep -aFxc -- "VirelaiOS kernel has seized control." "$SER" || true)" = 1 ] && banner=1
         [ "$(grep -aFc -- "wm: none (shim compositing)" "$SER" || true)" -ge 2 ] && shim=1
         [ "$(grep -aFc -- "wndstub: registered" "$SER" || true)" = 1 ] && registered=1
         [ "$(grep -aFc -- "wndstub: tick" "$SER" || true)" = 1 ] && tick=1

@@ -1,4 +1,4 @@
-//! DipshitOS virtio-pci console transport (extracted verbatim from the
+//! VirelaiOS virtio-pci console transport (extracted verbatim from the
 //! former kernel/src/main.zig junk drawer; claim 0023 mechanical split —
 //! no behavior change).
 //!
@@ -667,7 +667,7 @@ pub fn rx_armed() bool {
 // that line stays in the in-RAM buffer only (harmless; the placement after
 // persistence is deliberate so a hang cannot lose the probe evidence).
 // ---------------------------------------------------------------------------
-const preexit_tx_line = "DIPSHITOS PREEXIT VIRTIO TX\n";
+const preexit_tx_line = "VIRELAIOS PREEXIT VIRTIO TX\n";
 pub fn preexit_tx_experiment(st: *const SystemTable) void {
     if (!vp_ready or vp_tx_len != 0) return;
     st_tx = st; // the flush's TXST/TXNT/TXPL stage markers now persist pre-exit
@@ -696,7 +696,7 @@ pub fn preexit_tx_experiment(st: *const SystemTable) void {
 // (transport not armed). The FIRST failed phase names the transition that
 // destroys console access (see the claim file's interpretation table).
 // ---------------------------------------------------------------------------
-const transition_tx_line = "DIPSHITOS TRANSITION TX\n";
+const transition_tx_line = "VIRELAIOS TRANSITION TX\n";
 const TxPhase = enum { a, b, c, d };
 
 pub fn transition_tx_experiment(st: *const SystemTable, phase: TxPhase) void {

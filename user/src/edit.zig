@@ -1,4 +1,4 @@
-//! DipshitOS text editor — EDIT.BIN (Milestone 23 complete E1–E25).
+//! VirelaiOS text editor — EDIT.BIN (Milestone 23 complete E1–E25).
 //!
 //! A full-screen text editor with line-number gutter, cursor navigation,
 //! insert/overwrite mode, status bar, multi-file tabs, syntax coloring,

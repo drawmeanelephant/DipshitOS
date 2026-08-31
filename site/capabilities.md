@@ -25,7 +25,7 @@ capability is partial or hardware-specific, the page says so.
 Put together, a single boot proves the whole stack in sequence:
 
 1. Firmware hands a UEFI app a machine; the kernel takes it over.
-2. A serial `dipshit>` shell answers commands with deterministic replies.
+2. A serial `virelai>` shell answers commands with deterministic replies.
 3. The screen shows a working graphical terminal (**Road Pops**) composited by
    a window manager (**Driving Award**).
 4. User programs run at EL0 as processes, with syscalls, IPC, and exit statuses.

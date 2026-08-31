@@ -1,4 +1,4 @@
-//! DipshitOS HTTP/1.0 Client — FETCH.BIN (Milestone 12, Card N3, Issue #150).
+//! VirelaiOS HTTP/1.0 Client — FETCH.BIN (Milestone 12, Card N3, Issue #150).
 //!
 //! Connects over TCP (slot 30), transmits HTTP/1.0 GET request (slot 31),
 //! streams response headers and body to the console (slot 32 + slot 1),
@@ -85,7 +85,7 @@ pub export fn _start() callconv(.c) noreturn {
     ui.write_console("fetch: connected\n");
 
     // 2. Format & send HTTP/1.0 GET request
-    const request = "GET / HTTP/1.0\r\nHost: 10.0.0.2\r\nUser-Agent: DipshitOS/1.0\r\n\r\n";
+    const request = "GET / HTTP/1.0\r\nHost: 10.0.0.2\r\nUser-Agent: VirelaiOS/1.0\r\n\r\n";
     const send_rc = ui.tcp_send(request);
     if (send_rc < 0) {
         ui.write_console("fetch: send failed\n");

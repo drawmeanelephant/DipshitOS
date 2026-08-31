@@ -26,9 +26,9 @@
 # overlay), a private EFI var store (recreated fresh per boot, as the
 # pre-isolation gate did), and a private serial log under $RUN_DIR — two
 # concurrent instances cannot clobber each other's disks, NVRAM, or
-# evidence. Set DIPSHIT_GATE_SUFFIX=_alt to give this instance its own
+# evidence. Set VIRELAI_GATE_SUFFIX=_alt to give this instance its own
 # canonical evidence names (two simultaneous instances MUST differ), and
-# DIPSHIT_KEEP_RUN=1 to keep the scratch dir.
+# VIRELAI_KEEP_RUN=1 to keep the scratch dir.
 #
 # Class B — Apple silicon + VZ only.
 
@@ -39,7 +39,7 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 GATE_LOG="$(art live-chain-gate.txt)"
@@ -95,7 +95,7 @@ run_one() {
     local SERIAL_BYTES BANNER=0 AND=0 SKIP=0 SEQ=0 EXECFAIL=0 STATUS=0 DONE=0
     SERIAL_BYTES=$(wc -c < "$SER" 2>/dev/null | tr -d ' ')
     if [ -f "$SER" ]; then
-        grep -qF "DipshitOS kernel" "$SER" && BANNER=1
+        grep -qF "VirelaiOS kernel" "$SER" && BANNER=1
         # P3: `&&` ran the right half on success — exact output lines.
         [ "$(grep -x -c "chain-a" "$SER" | tr -d ' ')" = 1 ] && AND=1
         [ "$(grep -x -c "chain-b" "$SER" | tr -d ' ')" = 1 ] || AND=0

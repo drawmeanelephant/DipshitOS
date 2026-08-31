@@ -1,4 +1,4 @@
-//! DipshitOS tick-driven round-robin kernel task scheduler (claim 5275 —
+//! VirelaiOS tick-driven round-robin kernel task scheduler (claim 5275 —
 //! the first milestone-three "tasks" card).
 //!
 //! Preemptive at the tick only: the claim-9187 timer PPI enters the

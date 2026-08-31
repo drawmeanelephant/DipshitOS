@@ -2,7 +2,7 @@
 #
 # verify-live-transcript.sh -- claim 6684 class-B gate: live RX. Host
 # scripted keystrokes reach the kernel end to end through the polled virtio
-# receive queue (queue 0), and the exact `dipshit>` transcript lands in
+# receive queue (queue 0), and the exact `virelai>` transcript lands in
 # vm-serial.log on a real VZ run.
 #
 # Mechanism: the production image is booted with the runner's non-interactive
@@ -14,7 +14,7 @@
 #
 # The script drives real commands: help, version, mem, and an echo whose
 # reply ("rx-live-ok") is the runner's success signal. The gate then asserts
-# the live transcript in vm-serial.log: the takeover banner, the `dipshit>`
+# the live transcript in vm-serial.log: the takeover banner, the `virelai>`
 # prompt with the echoed keystrokes, the command outputs, and the echo reply.
 #
 # Per boot this reports:
@@ -27,9 +27,9 @@
 # overlay), a private EFI var store (recreated fresh per boot, as the
 # pre-isolation gate did), and a private serial log under $RUN_DIR — two
 # concurrent instances cannot clobber each other's disks, NVRAM, or
-# evidence. Set DIPSHIT_GATE_SUFFIX=_alt to give this instance its own
+# evidence. Set VIRELAI_GATE_SUFFIX=_alt to give this instance its own
 # canonical evidence names (two simultaneous instances MUST differ), and
-# DIPSHIT_KEEP_RUN=1 to keep the scratch dir.
+# VIRELAI_KEEP_RUN=1 to keep the scratch dir.
 #
 # Class B — Apple silicon + VZ only; boots a real VM. A green CI badge
 # proves class A only and says nothing about this gate.
@@ -49,7 +49,7 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 GATE_LOG="$(art live-transcript-gate.txt)"
@@ -108,15 +108,15 @@ run_one() {
     local BANNER=0 PROMPT=0 HELP=0 VERSION=0 MEM=0 ECHO=0
     [ -f "$SER" ] || { SERIAL_BYTES=0; }
     if [ -f "$SER" ]; then
-        grep -qF -- "DipshitOS kernel has seized control." "$SER" && BANNER=1
+        grep -qF -- "VirelaiOS kernel has seized control." "$SER" && BANNER=1
         # OBSERVED TODAY (2026-08-24, claim 5069): M18 T5 (claim 0163) made
         # the shell prompt ANSI-colored — the echo line's serial bytes are
-        # `\x1b[32mdipshit> \x1b[0mhelp\r`, so the historical "dipshit>
+        # `\x1b[32mvirelai> \x1b[0mhelp\r`, so the historical "virelai>
         # help" can never match again. Match the observed colored form
         # (prompt + the first echoed keystroke).
-        grep -qF $'\x1b[32mdipshit> \x1b[0mhelp' "$SER" && PROMPT=1
+        grep -qF $'\x1b[32mvirelai> \x1b[0mhelp' "$SER" && PROMPT=1
         grep -qF -- "available commands:" "$SER" && HELP=1
-        grep -qF -- "dipshit-kernel" "$SER" && VERSION=1
+        grep -qF -- "virelai-kernel" "$SER" && VERSION=1
         grep -qF -- "mem: descriptors=" "$SER" && MEM=1
         grep -qF -- "rx-live-ok" "$SER" && ECHO=1
     fi
@@ -131,7 +131,7 @@ run_one() {
 
 : > "$REPORT"
 {
-    echo "DIPSHITOS live-transcript gate (claim 6684) — live RX on real VZ hardware"
+    echo "VIRELAIOS live-transcript gate (claim 6684) — live RX on real VZ hardware"
     echo "revision: $REVISION branch=$BRANCH boots=$BOOTS dirty-files=$DIRTY"
     echo "script: $SCRIPT (help/version/mem/echo rx-live-ok)"
     echo "date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
@@ -152,7 +152,7 @@ done
 echo
 echo "=== result ==="
 if [ "$PASS" = "$BOOTS" ]; then
-    echo "verify-live-transcript: PASS — live RX confirmed: host keystrokes reached the kernel end to end and the live dipshit> transcript is in the serial log ($PASS/$BOOTS boot(s))."
+    echo "verify-live-transcript: PASS — live RX confirmed: host keystrokes reached the kernel end to end and the live virelai> transcript is in the serial log ($PASS/$BOOTS boot(s))."
     echo "PASS: $PASS/$BOOTS" >> "$REPORT"
     sleep 0.5
     exit 0

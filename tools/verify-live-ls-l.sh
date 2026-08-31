@@ -23,7 +23,7 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 GATE_LOG="$(art live-ls-l-gate.txt)"
@@ -77,7 +77,7 @@ run_one() {
     local SERIAL_BYTES=0 BANNER=0 FILE_BITS=0 DIR_BITS=0 OWNER=0 SIZE=0 KERNEL_L=0 PLAIN_LS=0 REPLY=0
     if [ -f "$SER" ]; then
         SERIAL_BYTES=$(wc -c < "$SER" 2>/dev/null | tr -d ' ')
-        grep -qF -- "DipshitOS kernel has seized control." "$SER" && BANNER=1
+        grep -qF -- "VirelaiOS kernel has seized control." "$SER" && BANNER=1
         # Long format wraps each entry over two lines: bits+owner line,
         # then an indented size + name line.
         grep -qE -- "^-rw- +1 +root$" "$SER" && FILE_BITS=1

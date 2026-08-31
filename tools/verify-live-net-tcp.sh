@@ -37,7 +37,7 @@
 #   timedout=1`.
 #   Expect markers (#523 item 2 revision): the shell prompt is ANSI-
 #   COLORED since M18 T5 (claim 0163), so the historical
-#   '<marker>\ndipshit> ' expects could never match again — observed
+#   '<marker>\nvirelai> ' expects could never match again — observed
 #   failing identically on unmodified main (2026-08-24) BEFORE this
 #   branch's changes. The three expects now match REPORT substrings that
 #   exist only in command OUTPUT (never in the typed echo), which is
@@ -62,9 +62,9 @@
 # DiskImageKit stacked disk (read-only base + throwaway ASIF overlay), a
 # private EFI var store, and a private serial log under $RUN_DIR — two
 # concurrent instances (of this or any converted gate) cannot clobber
-# each other's disks, NVRAM, or evidence. Set DIPSHIT_GATE_SUFFIX=_alt to
+# each other's disks, NVRAM, or evidence. Set VIRELAI_GATE_SUFFIX=_alt to
 # give this instance its own canonical evidence names (two simultaneous
-# instances MUST differ), and DIPSHIT_KEEP_RUN=1 to keep the scratch dir.
+# instances MUST differ), and VIRELAI_KEEP_RUN=1 to keep the scratch dir.
 #
 # Class B — Apple silicon + VZ only; boots real VMs. A green CI badge
 # proves class A only and says nothing about this gate.
@@ -84,7 +84,7 @@ source tools/lib/gate-run.sh
 
 # Per-instance evidence names: empty suffix = the canonical names every
 # doc references; concurrent instances must set distinct suffixes.
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 GATE_LOG="$(art live-net-tcp-gate.txt)"
@@ -177,11 +177,11 @@ net
 echo n10c-done
 EOF
 
-# Run selection: DIPSHIT_NET_TCP_RUNS (default "A,B,C"). C is the
+# Run selection: VIRELAI_NET_TCP_RUNS (default "A,B,C"). C is the
 # CLAIM-TIME OBSERVATION run — it depends on how THIS host's VZ NAT
 # gateway answers a SYN to an unused port (see its assertion block); on a
 # host whose NAT drops instead of RSTs, run "A,B".
-RUNS="${DIPSHIT_NET_TCP_RUNS:-A,B,C}"
+RUNS="${VIRELAI_NET_TCP_RUNS:-A,B,C}"
 
 # --- per-run gate ------------------------------------------------------------
 # Run A (the full lifecycle + reset): $1 = runner output, $2 = serial

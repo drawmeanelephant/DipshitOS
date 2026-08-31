@@ -49,7 +49,7 @@
 # private DiskImageKit stacked disk (read-only base + throwaway ASIF
 # overlay), a private EFI var store, and writes its serial log and screen
 # captures under $RUN_DIR before they are copied to the canonical evidence
-# names. DIPSHIT_GATE_SUFFIX=_alt / DIPSHIT_KEEP_RUN=1 supported.
+# names. VIRELAI_GATE_SUFFIX=_alt / VIRELAI_KEEP_RUN=1 supported.
 #
 # Class B — Apple silicon + VZ only; boots real VMs. A green CI badge
 # proves class A only and says nothing about this gate.
@@ -67,7 +67,7 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 GATE_LOG="$(art live-roadpops-gate.txt)"
@@ -148,9 +148,9 @@ grep -q "text: boot banner presented" "$(art live-roadpops-serial.log)" || fail 
 # catch the echo pending its drain (dirty=1) — the honest assert is
 # armed=1 with at least the boot present already pushed.
 grep -qE "roadpops: armed=1 dirty=[01] presents=[1-9][0-9]*" "$(art live-roadpops-serial.log)" || fail "the roadpops report does not show armed=1 with presents>=1"
-grep -q "DipshitOS - AArch64 firmware-assisted kernel monitor" "$(art live-roadpops-serial.log)" || fail "serial transcript lost the banner (shared-seam regression)"
+grep -q "VirelaiOS - AArch64 firmware-assisted kernel monitor" "$(art live-roadpops-serial.log)" || fail "serial transcript lost the banner (shared-seam regression)"
 grep -q "ROADPOPS" "$(art live-roadpops-serial.log)" || fail "the echo reply never reached serial (shared-seam regression)"
-grep -q "DipshitOS aarch64" "$(art live-roadpops-serial.log)" || fail "the uname reply never reached serial (shared-seam regression)"
+grep -q "VirelaiOS aarch64" "$(art live-roadpops-serial.log)" || fail "the uname reply never reached serial (shared-seam regression)"
 
 # Phase 2 — the pixel proof: decode the captured PNG and assert a WORKING
 # terminal. The runner writes `--screen <base>` captures as <base>-Ns.

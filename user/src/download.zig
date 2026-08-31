@@ -1,4 +1,4 @@
-//! DipshitOS HTTP Download Manager — DOWNLOAD.BIN (M26 N11, Issue #438).
+//! VirelaiOS HTTP Download Manager — DOWNLOAD.BIN (M26 N11, Issue #438).
 //!
 //! Connects over TCP (slot 30), transmits HTTP/1.0 GET request (slot 31),
 //! parses HTTP response headers, streams the response body directly into a
@@ -218,7 +218,7 @@ pub export fn _start() callconv(.c) noreturn {
 
     // 2. Transmit HTTP/1.0 GET request
     var req_buf: [256]u8 = undefined;
-    const req_str = std.fmt.bufPrint(&req_buf, "GET {s} HTTP/1.0\r\nHost: 10.0.0.2\r\nUser-Agent: DipshitOS/1.0\r\nConnection: close\r\n\r\n", .{target_path}) catch "GET / HTTP/1.0\r\nHost: 10.0.0.2\r\nUser-Agent: DipshitOS/1.0\r\n\r\n";
+    const req_str = std.fmt.bufPrint(&req_buf, "GET {s} HTTP/1.0\r\nHost: 10.0.0.2\r\nUser-Agent: VirelaiOS/1.0\r\nConnection: close\r\n\r\n", .{target_path}) catch "GET / HTTP/1.0\r\nHost: 10.0.0.2\r\nUser-Agent: VirelaiOS/1.0\r\n\r\n";
 
     const send_rc = ui.tcp_send(req_str);
     if (send_rc < 0) {

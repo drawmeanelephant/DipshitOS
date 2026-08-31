@@ -15,13 +15,13 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 # Run isolation (#523 item 2 / issue #528; fleet remainder claim 2259):
 # private stacked disk (pristine-per-boot overlay), EFI var store, serial
-# log, capture, and scripts under $RUN_DIR. Set DIPSHIT_GATE_SUFFIX=_alt
-# for distinct canonical evidence names; DIPSHIT_KEEP_RUN=1 keeps the
+# log, capture, and scripts under $RUN_DIR. Set VIRELAI_GATE_SUFFIX=_alt
+# for distinct canonical evidence names; VIRELAI_KEEP_RUN=1 keeps the
 # scratch dir.
 
 GATE_LOG="$(art live-fetch-gate.txt)"
@@ -91,7 +91,7 @@ if [ -f "$SERIAL" ]; then
     grep -a -qF -- "fetch: connected" "$SERIAL" && F_CONN=1
     grep -a -qF -- "fetch: request sent" "$SERIAL" && F_REQ=1
     grep -a -qF -- "HTTP/1.0 200 OK" "$SERIAL" && F_HTTP200=1
-    grep -a -qF -- "Hello from DipshitOS Host!" "$SERIAL" && F_BODY=1
+    grep -a -qF -- "Hello from VirelaiOS Host!" "$SERIAL" && F_BODY=1
     grep -a -qF -- "fetch: done" "$SERIAL" && F_DONE=1
     grep -a -qF -- "fetch: headers" "$SERIAL" && F_HDRS=1
     grep -a -qF -- "--- response headers ---" "$SERIAL" && F_HDRSEC=1

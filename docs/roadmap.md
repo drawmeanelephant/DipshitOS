@@ -1,4 +1,4 @@
-# DipshitOS roadmap
+# VirelaiOS roadmap
 
 > Live gate-by-gate status is tracked in [`docs/status.md`](status.md). This
 > roadmap is the milestone plan; it does not track day-to-day gate progress.
@@ -20,7 +20,7 @@
 - **M2 — the kernel proper** — done; ExitBootServices, identity-map MMU,
   polled virtio TX console (ADR 0004); VZ serial gate passed 2026-08-08
   (claim 1517) → [roadmap-m2.md](archive/roadmap-m2.md).
-- **M1.5 — interactive kernel monitor ("Dipshit Monitor")** — closed
+- **M1.5 — interactive kernel monitor ("Virelai Monitor")** — closed
   2026-08-09, tag `m1.5-interactive-monitor`, 7/7 gates →
   [roadmap-m1.5.md](archive/roadmap-m1.5.md).
 - **M3 — allocator, interrupts, tasks, EL0/SVC, syscalls, uaccess,
@@ -139,7 +139,7 @@ app/launcher model** (items 2, 5, 4, and 10 below).
    process viewer, network monitor, a dumb paint thing. Architectural probes
    disguised as toys: if every one needs a kernel modification, the app
    boundary is wrong.
-5. **Userland filesystem access.** Handles (or a Dipshit-native equivalent),
+5. **Userland filesystem access.** Handles (or a Virelai-native equivalent),
    read/write/create, directory enumeration, metadata, paths — deliberately
    **before** any graphical file manager.
 6. **A graphical file browser.** Read-mostly at first: browse DATA, open text
@@ -154,7 +154,7 @@ app/launcher model** (items 2, 5, 4, and 10 below).
    concept: name, executable, maybe an icon later, the file types it
    understands — so the launcher/file manager stop hardcoding knowledge.
 10. **A launcher.** Could start hilariously simple: list installed apps, run
-    one. Alongside the file browser, this is when DipshitOS gets a recognizable
+    one. Alongside the file browser, this is when VirelaiOS gets a recognizable
     "desktop" shape.
 11. **Clipboard / shared user-interaction services.** Probably later; text
     apps will make the absence obvious. Discover the right IPC/service model
@@ -182,12 +182,12 @@ app/launcher model** (items 2, 5, 4, and 10 below).
 16. **Reusable UI toolkit, but late.** Buttons, labels, text fields, lists,
     scrolling, layout — *after* two or three hand-built apps have shown what
     the common pieces actually are. Otherwise someone lovingly architects
-    GTKdipshit before anyone has clicked a button.
+    GTKvirelai before anyone has clicked a button.
 17. **Better filesystem semantics eventually.** Atomic-ish updates, truncation,
     deletion, rename, free-space management, corruption handling, maybe beyond
     FAT32 someday — but let applications create the pressure first.
 18. **Audio eventually.** Fun, and another real device/service pipeline. Not
-    remotely urgent; on the "DipshitOS becomes a computer" list.
+    remotely urgent; on the "VirelaiOS becomes a computer" list.
 19. **Security/isolation hardening.** More permissions around resources,
     stronger validation of userspace-controlled arguments, process ownership
     everywhere, maybe capabilities — grown *alongside* userland power, not as

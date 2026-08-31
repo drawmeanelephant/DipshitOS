@@ -1,4 +1,4 @@
-//! DipshitOS ESP user program — RESMON.BIN (M22 D10, issue #333, claim 9815).
+//! VirelaiOS ESP user program — RESMON.BIN (M22 D10, issue #333, claim 9815).
 //!
 //! Lightweight resource monitor window: shows process count, scheduler state,
 //! and uptime via sys_procs (slot 7) + timer ticks. Auto-refreshes at 1 Hz.

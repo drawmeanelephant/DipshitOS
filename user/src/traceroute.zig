@@ -1,4 +1,4 @@
-//! DipshitOS Traceroute / Tracehost CLI — TRACEROUTE.BIN (M26 N7, Issue #434).
+//! VirelaiOS Traceroute / Tracehost CLI — TRACEROUTE.BIN (M26 N7, Issue #434).
 //!
 //! Network path discovery and connectivity diagnostics: probes route hops
 //! toward a target IPv4 address using ICMP echo requests (slots 59/60),

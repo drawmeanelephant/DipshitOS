@@ -1,4 +1,4 @@
-//! DipshitOS boot application (the loader).
+//! VirelaiOS boot application (the loader).
 //!
 //! A minimal AArch64 UEFI application. It prints a fixed two-line message to
 //! the UEFI Simple Text Output protocol (ConOut), writes the same two lines
@@ -44,14 +44,14 @@ fn utf16z(comptime s: []const u8) [s.len + 1:0]u16 {
     return buf;
 }
 
-const line_banner = utf16z("DIPSHITOS BOOTLOADER\r\n");
+const line_banner = utf16z("VIRELAIOS BOOTLOADER\r\n");
 const line_confirm = utf16z("firmware has agreed to cooperate\r\n");
 const line_loading = utf16z("loading kernel from \\KERNEL.BIN\r\n");
 const line_jumping = utf16z("jumping to kernel entry point\r\n");
 const line_rc_ok = utf16z("kernel handoff complete (rc=0)\r\n");
 const line_rc_bad = utf16z("kernel returned nonzero rc\r\n");
 const marker_path = utf16z("\\BOOTED.TXT");
-const marker_text = "DIPSHITOS BOOTLOADER\nfirmware has agreed to cooperate\n";
+const marker_text = "VIRELAIOS BOOTLOADER\nfirmware has agreed to cooperate\n";
 // Loader trace: where the kernel image landed, written before the jump. The
 // kernel writes its own observed base into KERNEL.TXT; the two must match
 // (cross-check of the handoff ABI).
@@ -275,7 +275,7 @@ fn dump_memory_map(st: *const uefi.tables.SystemTable) void {
     // iterator walks with the firmware-reported descriptor_size stride.
     var header: [96]u8 = undefined;
     var hn: usize = 0;
-    hn += copy_into(header[hn..], "DIPSHITOS MEMORY MAP\n");
+    hn += copy_into(header[hn..], "VIRELAIOS MEMORY MAP\n");
     hn += copy_into(header[hn..], "descriptors=");
     hn += append_hex(header[hn..], mm.info.len);
     hn += copy_into(header[hn..], " descriptor_size=");
@@ -320,7 +320,7 @@ fn write_loader_trace(root: *uefi.protocol.File, header: *const [kernel_header_s
 
     var content: [320]u8 = undefined;
     var n: usize = 0;
-    n += copy_into(content[n..], "DIPSHITOS LOADER\n");
+    n += copy_into(content[n..], "VIRELAIOS LOADER\n");
     n += copy_into(content[n..], "kernel image loaded\n");
     n += copy_into(content[n..], "base=");
     n += append_hex(content[n..], base);

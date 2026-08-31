@@ -64,7 +64,7 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 GATE_LOG="$(art live-calc-depth-gate.txt)"
@@ -145,7 +145,7 @@ run_one() {
     local CFG_OPEN=0 CFG_CLOSE=0 RAND=0 MEM_SLOT=0 CONV_ON=0 CONV_OFF=0 CLIP=0
     local DEG=0 RAD=0 SCI_ON=0 SCI_OFF=0 EXPR_ON=0 EXPR_OFF=0 DONE=0 PIX=0
     if [ -f "$SER" ]; then
-        grep -qF -- "DipshitOS kernel has seized control." "$SER" && BANNER=1
+        grep -qF -- "VirelaiOS kernel has seized control." "$SER" && BANNER=1
         grep -qF -- "calc: ready" "$SER" && READY=1
         grep -qF -- "calc: stats-on" "$SER" && STATS_ON=1
         grep -qF -- "calc: stats-ok" "$SER" && STATS_OK=1
@@ -252,7 +252,7 @@ PYEOF
 
 : > "$REPORT"
 {
-    echo "DIPSHITOS live-calc-depth gate (M24 K2-K16) -- depth sweep on VZ"
+    echo "VIRELAIOS live-calc-depth gate (M24 K2-K16) -- depth sweep on VZ"
     echo "revision: $REVISION branch=$BRANCH boots=$BOOTS dirty-files=$DIRTY"
     echo "chords: $CHORDS"
     echo "pointer: $PTR"

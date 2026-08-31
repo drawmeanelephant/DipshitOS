@@ -1,4 +1,4 @@
-/* DipshitOS Shared Library linker script (LIBUI.SO / LIBFONT.SO, claim 7921).
+/* VirelaiOS Shared Library linker script (LIBUI.SO / LIBFONT.SO, claim 7921).
  */
 SECTIONS {
     . = 0x00000000;

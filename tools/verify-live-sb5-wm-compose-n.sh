@@ -119,7 +119,7 @@ fi
 echo "wm_reg=$A_WM_REG scanout=$A_SCANOUT own_open=$A_OWN_OPEN own_bound=$A_OWN_BOUND own_stored=$A_OWN_STORED readback=$A_READBACK present=$A_PRESENT owner_done=$A_OWNER_DONE wm_done=$A_WM_DONE zerofill=$A_ZEROFILL fatal=$A_FAULT" | tee -a "$REPORT"
 
 {
-    echo "DIPSHITOS live WM compose-N + one final present gate (claim 7397) — the registered WM composited the migrated surface into the scanout (readback=0x5B) and issued the final present; zero sys_win_fill SVCs (slot 13 calls=0)"
+    echo "VIRELAIOS live WM compose-N + one final present gate (claim 7397) — the registered WM composited the migrated surface into the scanout (readback=0x5B) and issued the final present; zero sys_win_fill SVCs (slot 13 calls=0)"
     echo "revision: $REVISION branch=$BRANCH dirty-files=$DIRTY"
     echo "date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     echo

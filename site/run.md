@@ -12,7 +12,7 @@ Virtualization.framework. There is no other host.
 
 ```bash
 zig build run      # boot to the kernel's serial console; output -> artifacts/vm-serial.log
-zig build console  # boot an interactive dipshit> console over a live serial attachment
+zig build console  # boot an interactive virelai> console over a live serial attachment
 ```
 
 The launcher supports flag-gated device modes, all **off by default** so the
@@ -37,9 +37,9 @@ A successful `zig build run` ends with the kernel's banner in
 `artifacts/vm-serial.log`:
 
 ```text
-DipshitOS - AArch64 firmware-assisted kernel monitor
+VirelaiOS - AArch64 firmware-assisted kernel monitor
 Type 'help' before touching anything expensive.
-dipshit>
+virelai>
 ```
 
 From there the interactive monitor serves the [[architecture|kernel]]'s

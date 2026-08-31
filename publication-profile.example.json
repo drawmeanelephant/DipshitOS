@@ -16,7 +16,7 @@
       "name": "public",
       "output": "dist",
       "public": true,
-      "theme": "themes/dipshitos",
+      "theme": "themes/virelaios",
       "sitemap": { "path": "sitemap.xml" }
     }
   ]

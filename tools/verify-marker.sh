@@ -4,7 +4,7 @@
 # (docs/status.md gate work item 3, claim 0009).
 #
 # Gate: after a VZ boot, the kernel persists each takeover stage as the EFI
-# non-volatile variable `DipshitM2` (runtime SetVariable survives
+# non-volatile variable `VirelaiM2` (runtime SetVariable survives
 # ExitBootServices on VZ — observed). The runner saves the ordered ladder of
 # marker instances to artifacts/marker-dump.txt; this script asserts the
 # ladder is present and names the kernel's final stage. This discriminates
@@ -64,7 +64,7 @@ rm -f artifacts/efi-vars.bin
 set +e
 host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log \
     --dump-marker artifacts/marker-dump.txt --timeout 25 \
-    --expect "DipshitOS kernel has seized control." \
+    --expect "VirelaiOS kernel has seized control." \
     --terminal-marker "kernel terminal state" \
     > artifacts/m2-marker-run.txt 2>&1
 RUNNER_RC=$?

@@ -1,4 +1,4 @@
-# DipshitOS verification gate inventory
+# VirelaiOS verification gate inventory
 
 > Canonical classification of every verification command. **A green GitHub CI
 > badge proves class A only** — it says nothing about the Apple-silicon
@@ -188,7 +188,7 @@ the three rot classes from issue #528. Per-gate status after migration:
   `live-pointer-cg` (Accessibility, issue #151) — reproduced identically
   on unmodified main.
 - **Host-dependent / flaky, selection supported**: `live-net-nat`
-  (`DIPSHIT_NET_NAT_RUNS`), net-tcp Run C (`DIPSHIT_NET_TCP_RUNS`,
+  (`VIRELAI_NET_NAT_RUNS`), net-tcp Run C (`VIRELAI_NET_TCP_RUNS`,
   issue #123 family).
 - **Platform finding**: guest FAT writes against freshly-copied images are
   unreliable on this macOS 27.0 host while writes to the long-lived

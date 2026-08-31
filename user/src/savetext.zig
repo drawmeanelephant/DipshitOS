@@ -1,8 +1,8 @@
-//! DipshitOS eleventh ESP user program — SAVETEXT.BIN (milestone ten, card F4, claim 0510).
+//! VirelaiOS eleventh ESP user program — SAVETEXT.BIN (milestone ten, card F4, claim 0510).
 //!
 //! Creates and writes persistent data to `/data/hello.txt` from EL0:
 //!   1. `sys_file_open("/data/hello.txt", 15, MODE_CREATE | MODE_WRITE)` (slot 23).
-//!   2. `sys_file_write(fd, "Hello from DipshitOS EL0 Storage!\n", 34)` (slot 25).
+//!   2. `sys_file_write(fd, "Hello from VirelaiOS EL0 Storage!\n", 34)` (slot 25).
 //!   3. `sys_file_close(fd)` (slot 26).
 //!   4. `sys_write(1, "savetext: wrote /data/hello.txt\n", 32)` (slot 1).
 //!   5. `sys_exit(0)` (slot 3).
@@ -10,7 +10,7 @@
 const std = @import("std");
 
 pub const filename: []const u8 = "/data/hello.txt";
-pub const content: []const u8 = "Hello from DipshitOS EL0 Storage!\n";
+pub const content: []const u8 = "Hello from VirelaiOS EL0 Storage!\n";
 pub const done_line: []const u8 = "savetext: wrote /data/hello.txt\n";
 
 export fn _start() callconv(.naked) noreturn {
@@ -62,7 +62,7 @@ export fn _start() callconv(.naked) noreturn {
         \\// Literals
         \\.p2align 2
         \\1: .ascii "/data/hello.txt"
-        \\2: .ascii "Hello from DipshitOS EL0 Storage!\n"
+        \\2: .ascii "Hello from VirelaiOS EL0 Storage!\n"
         \\3: .ascii "savetext: wrote /data/hello.txt\n"
     );
 }

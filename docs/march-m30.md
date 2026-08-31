@@ -6,7 +6,7 @@
 
 ## Where we are
 
-DipshitOS userland has evolved into a rich graphical, multitasking environment
+VirelaiOS userland has evolved into a rich graphical, multitasking environment
 with windowing, widgets, networking, audio, and shell commands. However, all
 applications historically statically compiled duplicate UI routines, font
 tables, and syscall wrappers, consuming redundant memory and ESP disk space.

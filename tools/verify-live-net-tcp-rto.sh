@@ -70,17 +70,17 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 # Run isolation (#523 item 2 / issue #528; fleet remainder claim 2259):
 # private stacked disk (pristine-per-boot overlay), EFI var store, serial
 # logs, captures, and scripts under $RUN_DIR for all three runs; rc
 # handoff files moved under $RUN_DIR too. Expectation note (#528 rot
-# class 1, claim 2259): the historical $'...ndipshit> ' script-expects
+# class 1, claim 2259): the historical $'...nvirelai> ' script-expects
 # died with M18 T5's ANSI-colored prompt (claim 0163); all three runs
-# anchor on the OUTPUT-ONLY done echo. Set DIPSHIT_GATE_SUFFIX=_alt for
-# distinct canonical evidence names; DIPSHIT_KEEP_RUN=1 keeps the
+# anchor on the OUTPUT-ONLY done echo. Set VIRELAI_GATE_SUFFIX=_alt for
+# distinct canonical evidence names; VIRELAI_KEEP_RUN=1 keeps the
 # scratch dir.
 
 GATE_LOG="$(art live-net-tcp-rto-gate.txt)"

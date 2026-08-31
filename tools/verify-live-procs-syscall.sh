@@ -37,9 +37,9 @@
 # overlay), a private EFI var store (recreated fresh per boot, as the
 # pre-isolation gate did), and a private serial log under $RUN_DIR — two
 # concurrent instances cannot clobber each other's disks, NVRAM, or
-# evidence. Set DIPSHIT_GATE_SUFFIX=_alt to give this instance its own
+# evidence. Set VIRELAI_GATE_SUFFIX=_alt to give this instance its own
 # canonical evidence names (two simultaneous instances MUST differ), and
-# DIPSHIT_KEEP_RUN=1 to keep the scratch dir.
+# VIRELAI_KEEP_RUN=1 to keep the scratch dir.
 #
 set -euo pipefail
 
@@ -48,7 +48,7 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 GATE_LOG="$(art live-procs-syscall-gate.txt)"
@@ -120,7 +120,7 @@ run_one() {
         flow=0 final_running=0 never_exited=0 echo1=0 echo2=0 fatal=0
     if [ -f "$SER" ]; then
         bytes="$(wc -c < "$SER" | tr -d ' ')"
-        [ "$(grep -aFxc -- "DipshitOS kernel has seized control." "$SER" || true)" = 1 ] && banner=1
+        [ "$(grep -aFxc -- "VirelaiOS kernel has seized control." "$SER" || true)" = 1 ] && banner=1
         [ "$(grep -aFc -- "PEER.BIN" "$SER" || true)" -ge 2 ] && peer_listed=1
         [ "$(grep -aFc -- "exec: loaded PEER.BIN size=" "$SER" || true)" -ge 1 ] && peer_loaded=1
         [ "$(grep -aFc -- "exec: loaded COUNTER.BIN size=" "$SER" || true)" -ge 1 ] && counter_loaded=1
@@ -182,7 +182,7 @@ run_one() {
 
 : > "$REPORT"
 {
-    echo "DIPSHITOS live procs-syscall gate (claim 5799) — the process table read FROM EL0 via sys_procs (slot 7)"
+    echo "VIRELAIOS live procs-syscall gate (claim 5799) — the process table read FROM EL0 via sys_procs (slot 7)"
     echo "revision: $REVISION branch=$BRANCH boots=$BOOTS dirty-files=$DIRTY"
     echo "script: $(cat "$SCRIPT" | tr '\n' '|')"
     echo "script2: $(cat "$(art live-procs-syscall-script2.txt)" | tr '\n' '|')"

@@ -1,4 +1,4 @@
-//! DipshitOS PCI config-space access + discovery (extracted verbatim from
+//! VirelaiOS PCI config-space access + discovery (extracted verbatim from
 //! the former kernel/src/main.zig junk drawer; claim 0023 mechanical split
 //! — no behavior change).
 //!

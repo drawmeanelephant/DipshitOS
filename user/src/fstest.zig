@@ -1,4 +1,4 @@
-//! DipshitOS twenty-second ESP user program — FSTEST.BIN (Milestone 13, Card B1).
+//! VirelaiOS twenty-second ESP user program — FSTEST.BIN (Milestone 13, Card B1).
 //!
 //! Headless class-B proof for the mutating filesystem seam (ADR 0007 slots
 //! 34–37, claim 5801): create + write, truncate, read back, rename, free-space

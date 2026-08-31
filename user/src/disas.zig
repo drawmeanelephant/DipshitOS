@@ -1,4 +1,4 @@
-//! DipshitOS ESP user program — DISAS.BIN (M22 D4, issue #327, claim 9815).
+//! VirelaiOS ESP user program — DISAS.BIN (M22 D4, issue #327, claim 9815).
 //!
 //! Reads up to 4 KiB of raw bytes from the mounted filesystems and prints
 //! one line per AArch64 instruction: address, the four bytes, and the

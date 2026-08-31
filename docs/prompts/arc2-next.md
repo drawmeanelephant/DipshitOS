@@ -4,7 +4,7 @@ Copy-paste this prompt to start the next session.
 
 ---
 
-You are working in dipshitos at `/Users/tbuddy/dev/t3/dipshitos` on `main` after Arc2 W1+W2 landed.
+You are working in virelaios at `/Users/tbuddy/dev/t3/virelaios` on `main` after Arc2 W1+W2 landed.
 
 **Current position (2026-08-21, main 19f3d66 + 2 direct commits):**
 - **Arc1 widget depth** — done 2026-08-21 (ScrollView 0819, Checkbox/Toggle 2418, ProgressBar/Dialog/HScrollBar 6437/0835/1872) — `main` 3d7f59b.

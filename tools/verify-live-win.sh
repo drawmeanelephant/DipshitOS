@@ -20,7 +20,7 @@
 #   * `dui hit 100 400`      -> hit-tests the terminal (below the clock) and
 #                              re-focuses it.
 #   Then the KEYBOARD (--input-string, the I3 seam) types `uname\n` into the
-#   focused terminal — the `DipshitOS aarch64` reply is the proof that
+#   focused terminal — the `VirelaiOS aarch64` reply is the proof that
 #   screen-side input lands in the FOCUSED window.
 #
 # Phase 2 (pixel proof): the host decodes the captured PNG (2560x1440, the
@@ -41,7 +41,7 @@
 #
 # Run isolation (#523 item 2 / issue #528, claim 5069): private stacked
 # disk + EFI vars + serial log + screen captures under $RUN_DIR;
-# DIPSHIT_GATE_SUFFIX/_KEEP_RUN supported.
+# VIRELAI_GATE_SUFFIX/_KEEP_RUN supported.
 #
 # Class B — Apple silicon + VZ only; boots real VMs. A green CI badge
 # proves class A only and says nothing about this gate.
@@ -59,7 +59,7 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 GATE_LOG="$(art live-win-gate.txt)"
@@ -111,7 +111,7 @@ run_one() {
         --display --input --screen "$RUN_DIR/gpu-screen" \
         --script "$RUN_DIR/script.txt" \
         --input-string "uname"$'\n' --input-string-after "dui hit: 100,400 -> 0" \
-        --script-expect "DipshitOS aarch64" \
+        --script-expect "VirelaiOS aarch64" \
         --timeout 60 \
         > "$out" 2>&1
     local RC=$?
@@ -138,7 +138,7 @@ if [ -f "$SERIAL" ]; then
     grep -a -qF -- "dui hit: 100,400 -> 0" "$SERIAL" && HIT0=1
     # The keyboard-typed `uname` reply (the script never runs uname — this
     # is the proof that screen-side input landed in the focused terminal).
-    grep -a -qF -- "DipshitOS aarch64" "$SERIAL" && KB_UNAME=1
+    grep -a -qF -- "VirelaiOS aarch64" "$SERIAL" && KB_UNAME=1
 fi
 grep -a -qF -- "input-string: ENABLED" artifacts/live-win-run.txt && RUNNERFLAG=1
 
@@ -263,7 +263,7 @@ EOF
 fi
 
 {
-    echo "DIPSHITOS live window-manager gate (claim 1543, milestone six card G5) — Driving Award on real VZ hardware"
+    echo "VIRELAIOS live window-manager gate (claim 1543, milestone six card G5) — Driving Award on real VZ hardware"
     echo "revision: $REVISION branch=$BRANCH dirty-files=$DIRTY"
     echo "phase: scripted registry exercise (win/win hit) + a keyboard-typed uname into the focused terminal; the captured PNG is decoded and asserted for two overlapping windows with the right z-order"
     echo "assertions: windows=2 (roadpops terminal + clock), the two rects, hit-test -> clock + focus switch, hit-test -> terminal, keyboard-typed uname reply, amber title bar + navy clock body over the terminal, no terminal foreground inside the clock rect, terminal foreground left of the clock"
@@ -274,7 +274,7 @@ fi
 echo
 echo "=== result ==="
 if [ "$PASS" = 1 ]; then
-    echo "verify-live-win: PASS — Driving Award composites two overlapping windows on real VZ: Road Pops (window 0, the terminal) with a 1 Hz clock overlay (window 1) on top; hit-testing focuses the clock then the terminal, and a keyboard-typed uname landed in the focused terminal (DipshitOS aarch64). The decoded capture shows the clock's amber title bar + navy body over the terminal with the terminal's green glyphs beside it — distinct windows, right z-order. The default VM is untouched: without --display/--input, no windows are armed and every existing gate stays byte-identical."
+    echo "verify-live-win: PASS — Driving Award composites two overlapping windows on real VZ: Road Pops (window 0, the terminal) with a 1 Hz clock overlay (window 1) on top; hit-testing focuses the clock then the terminal, and a keyboard-typed uname landed in the focused terminal (VirelaiOS aarch64). The decoded capture shows the clock's amber title bar + navy body over the terminal with the terminal's green glyphs beside it — distinct windows, right z-order. The default VM is untouched: without --display/--input, no windows are armed and every existing gate stays byte-identical."
     echo "PASS: $PASS" >> "$REPORT"
     sleep 0.5
     exit 0

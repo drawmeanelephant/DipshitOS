@@ -1,8 +1,8 @@
-DipshitOS - AArch64 firmware-assisted kernel monitor
-DipshitOS: memory is a map, not a territory.
+VirelaiOS - AArch64 firmware-assisted kernel monitor
+VirelaiOS: memory is a map, not a territory.
 motd: aarch64 el1 kernel live; scheduler, uaccess, fs, net, gfx, xhci armed.
 Type 'help' before touching anything expensive.
-dipshit> help
+virelai> help
 available commands:
 machine / identity
   about       explain this questionable system
@@ -84,12 +84,12 @@ system
   which       locate a command: shell builtin, monitor command, or ESP application (D16)
 type 'help <command>' for details on a single command.
 type 'help <topic>' for a topic page (networking, windows, storage, graphics).
-dipshit> version
-dipshit-kernel
+virelai> version
+virelai-kernel
 milestone-two kernel proper (ADR 0004)
 handoff ABI v2
 build label: m1.5 commands & personality (mock console)
-dipshit> mem
+virelai> mem
 mem: descriptors=0x0000000000000006 size=0x0000000000000028 version=0x0000000000000002 key=0x0000000000000042
   usable: 0x0000000000480000 bytes (0x0000000000000480 pages)
   conventional: 0x00000000003c0000 bytes (0x00000000000003c0 pages)
@@ -99,9 +99,9 @@ mem: descriptors=0x0000000000000006 size=0x0000000000000028 version=0x0000000000
   reserved: 0x0000000000009000 bytes (0x0000000000000009 pages)
   mmio: 0x0000000000010000 bytes (0x0000000000000010 pages)
   kernel: 0x000000007e4df000..0x000000007e5613e8 (0x00000000000823e8 bytes)
-dipshit> pages
+virelai> pages
 pages: armed=1 total=0x0000000000000480 free=0x0000000000000480 excluded=0x0000000000000000 regions=0x0000000000000003 span=0x0000000000007f80
-dipshit> pages selftest
+virelai> pages selftest
 pages selftest: alloc 1 -> 0x0000000000100000
 pages selftest: free ok
 pages selftest: alloc 8 -> 0x0000000000100000
@@ -113,34 +113,34 @@ pages selftest: alloc 960 -> 0x0000000000100000
 pages selftest: free ok
 pages selftest: alloc 1153 -> none (out of memory)
 pages selftest: ok free=0x0000000000000480
-dipshit> tasks
+virelai> tasks
 tasks: enabled=0 current=0 switches=0 pool=4/11 zombies=0
   shell    saves=0 resumes=0 advances=0 state=ready
   worker   saves=0 resumes=0 advances=0 state=ready
   user-el0 saves=0 resumes=0 advances=0 state=ready
   idle     saves=0 resumes=0 advances=0 state=ready
-dipshit> echo "elephant business"
+virelai> echo "elephant business"
 elephant business
-dipshit> ls
+virelai> ls
 ls: esp=0x0000000000000003
   KERNEL.BIN  0x0000000000088b38  [esp]
   EFI         0x0000000000000000  [dir]
   BOOTED.TXT  0x0000000000000029  [esp]
-dipshit> cat BOOTED.TXT
-DIPSHITOS BOOTLOADER
+virelai> cat BOOTED.TXT
+VIRELAIOS BOOTLOADER
 firmware has agreed to cooperate
-dipshit> write hello.txt hello world
+virelai> write hello.txt hello world
 error: hello.txt: not persisted - no disk (FAT volume unavailable)
-dipshit> cat hello.txt
+virelai> cat hello.txt
 error: hello.txt: not found (no such file on the ESP)
-dipshit> pages bogus
+virelai> pages bogus
 usage: pages [selftest]
 physical page allocator pool
-dipshit> aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+virelai> aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 unknown command 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' -- try 'help'
-dipshit> echo t t t t t t t t t t t t t t t t t
+virelai> echo t t t t t t t t t t t t t t t t t
 error: too many arguments (max 17 tokens)
-dipshit> ^C
-dipshit> 
+virelai> ^C
+virelai> 
 error: no command given; type 'help' for a list of commands
-dipshit> 
+virelai> 

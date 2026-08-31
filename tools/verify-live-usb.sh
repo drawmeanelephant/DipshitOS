@@ -49,7 +49,7 @@
 # responsive shell.
 #
 # Run isolation (#523 item 2 / issue #528, claim 5069): private stacked
-# disk + EFI vars + serial log under $RUN_DIR; DIPSHIT_GATE_SUFFIX/_KEEP_RUN
+# disk + EFI vars + serial log under $RUN_DIR; VIRELAI_GATE_SUFFIX/_KEEP_RUN
 # supported.
 #
 # Class B — Apple silicon + VZ only; boots a real VM. A green CI badge
@@ -68,7 +68,7 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 GATE_LOG="$(art live-usb-gate.txt)"
@@ -178,7 +178,7 @@ if [ "$RC" = 0 ] && [ "$ENUMOK" = 1 ] && [ "$COUNT" = 1 ] && [ "$KBD" = 1 ] && \
 fi
 
 {
-    echo "DIPSHITOS live USB gate (claim 4116, milestone seven card I2) — USB enumeration + HID, on real VZ hardware"
+    echo "VIRELAIOS live USB gate (claim 4116, milestone seven card I2) — USB enumeration + HID, on real VZ hardware"
     echo "revision: $REVISION branch=$BRANCH dirty-files=$DIRTY"
     echo "phase: usb devices + usb report (after the synthesized keyDown)"
     echo "assertions: enumeration of BOTH devices, the keyboard row (port 9/slot 1, PID 0x8105, boot protocol, boot=1), the pointer row (port 10/slot 2, PID 0x8106, non-boot absolute pointer, boot=0), the observed 8-byte keyboard report 00 00 04 00 00 00 00 00 + its decode (mod 0, keys 0x4), the runner's KEY-INJECT line, a responsive shell"

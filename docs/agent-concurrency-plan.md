@@ -1,6 +1,6 @@
 # Agent concurrency plan — M19–M27
 
-> **Purpose:** enable 3–5 agents to work simultaneously on DipshitOS's
+> **Purpose:** enable 3–5 agents to work simultaneously on VirelaiOS's
 > forward roadmap (M19–M27) without file-level collisions. This document
 > is the coordination surface for parallel agent dispatch.
 >

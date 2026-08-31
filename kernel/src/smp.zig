@@ -1,4 +1,4 @@
-//! DipshitOS Symmetric Multi-Processing (SMP) Subsystem (Milestone 28, claim 6438).
+//! VirelaiOS Symmetric Multi-Processing (SMP) Subsystem (Milestone 28, claim 6438).
 //!
 //! Manages CPU core discovery, secondary core bringup via PSCI CPU_ON,
 //! per-core stacks and state, and cross-core Inter-Processor Interrupts (IPIs).

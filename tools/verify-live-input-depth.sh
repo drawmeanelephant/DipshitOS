@@ -51,7 +51,7 @@
 # proves class A only and says nothing about this gate.
 #
 # Run isolation (#523 item 2 / issue #528, claim 5069): private stacked
-# disk + EFI vars + serial log under $RUN_DIR; DIPSHIT_GATE_SUFFIX/_KEEP_RUN
+# disk + EFI vars + serial log under $RUN_DIR; VIRELAI_GATE_SUFFIX/_KEEP_RUN
 # supported.
 #
 # Usage:
@@ -67,7 +67,7 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 GATE_LOG="$(art live-input-depth-gate.txt)"
@@ -165,7 +165,7 @@ if [ "$RC" = 0 ] && [ "$ARMED" = 1 ] && [ "$FASTOK" = 1 ] && [ "$NODROP" = 1 ] &
 fi
 
 {
-    echo "DIPSHITOS live input-depth gate (issue #117, audit follow-up 2026-08-15) — multi-TRB depth 8 at the measured VZ delivery ceiling, on real VZ hardware"
+    echo "VIRELAIOS live input-depth gate (issue #117, audit follow-up 2026-08-15) — multi-TRB depth 8 at the measured VZ delivery ceiling, on real VZ hardware"
     echo "revision: $REVISION branch=$BRANCH dirty-files=$DIRTY"
     echo "phase: keyboard types 'echo fastok <Enter> input <Enter>' at 2.0 s per keyDown/keyUp after the boot self-test"
     echo "assertions: input arming, the typed echo fastok landed exactly once (all 11 chars + Enter), dropped=0 in the typed input report, events=18 (echo fastok = 12, input = 6), kb-usage=0x28 kb-byte=0xa, the serial marker, the runner's input-chords flag line with the 2.0 s delay"

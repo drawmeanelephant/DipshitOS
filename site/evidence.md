@@ -6,7 +6,7 @@ tags: [evidence, testing]
 
 # Evidence & testing
 
-DipshitOS has unusually serious verification machinery for a hobby OS. The
+VirelaiOS has unusually serious verification machinery for a hobby OS. The
 core rule: **a feature is only "observed" when a matching gate passes.** No
 evidence, no claim.
 

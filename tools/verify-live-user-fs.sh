@@ -24,8 +24,8 @@
 # against a PRIVATE WRITABLE disk image ($RUN_DIR/disk-base.img, seeded
 # fresh after the build), a private EFI var store, and private serial logs
 # under $RUN_DIR — the writable copy is required because Boot B proves
-# Boot A's write persisted across a reboot. DIPSHIT_GATE_SUFFIX=_alt /
-# DIPSHIT_KEEP_RUN=1 supported.
+# Boot A's write persisted across a reboot. VIRELAI_GATE_SUFFIX=_alt /
+# VIRELAI_KEEP_RUN=1 supported.
 #
 # Usage:
 #   bash tools/verify-live-user-fs.sh
@@ -38,7 +38,7 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 GATE_LOG="$(art live-user-fs-gate.txt)"
@@ -146,7 +146,7 @@ fi
 # success` — "type: success" split by an interleaved write). Assert on the
 # long unique payload (survives merges) plus the exit statuses; the short
 # success markers stay diagnostic-only via the payload/status proof.
-grep -q "Hello from DipshitOS EL0 Storage!" "$(art live-user-fs-serial-B.log)" || {
+grep -q "Hello from VirelaiOS EL0 Storage!" "$(art live-user-fs-serial-B.log)" || {
     echo "ERROR: TYPE.BIN read payload missing or incorrect"
     exit 1
 }

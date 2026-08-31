@@ -1,4 +1,4 @@
-//! DipshitOS kernel symbol table (M22 D3, issue #326, claim 9815).
+//! VirelaiOS kernel symbol table (M22 D3, issue #326, claim 9815).
 //!
 //! A fixed BSS table populated when the M22 D1 ELF loader loads an image:
 //! function/object symbols from the file's `.symtab` are copied here so

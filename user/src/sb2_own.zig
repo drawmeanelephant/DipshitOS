@@ -1,4 +1,4 @@
-//! DipshitOS M33 SB2 (claim 8878) live-gate test app — SB2OWN.BIN: the
+//! VirelaiOS M33 SB2 (claim 8878) live-gate test app — SB2OWN.BIN: the
 //! owner half of the shared-anon proof.
 //!
 //! Creates a shared-anonymous surface (`sys_mmap` with M33_MAP_SHARED —

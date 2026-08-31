@@ -56,7 +56,7 @@
 # verify-vz aggregate is re-run separately as proof).
 #
 # Run isolation (#523 item 2 / issue #528, claim 5069): private stacked
-# disk + EFI vars + serial log under $RUN_DIR; DIPSHIT_GATE_SUFFIX/_KEEP_RUN
+# disk + EFI vars + serial log under $RUN_DIR; VIRELAI_GATE_SUFFIX/_KEEP_RUN
 # supported.
 #
 # Class B — Apple silicon + VZ only; boots a real VM. A green CI badge
@@ -75,7 +75,7 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 GATE_LOG="$(art live-xhci-gate.txt)"
@@ -185,7 +185,7 @@ if [ "$RC" = 0 ] && [ "$INITOK" = 1 ] && [ "$IDENT" = 1 ] && [ "$BARS" = 1 ] && 
 fi
 
 {
-    echo "DIPSHITOS live XHCI gate (claim 4272, milestone seven card I1) — XHCI host-controller transport, on real VZ hardware"
+    echo "VIRELAIOS live XHCI gate (claim 4272, milestone seven card I1) — XHCI host-controller transport, on real VZ hardware"
     echo "revision: $REVISION branch=$BRANCH dirty-files=$DIRTY"
     echo "phase: usb (full report) + echo marker"
     echo "assertions: boot-time init, device identity (DID 0x1a06/class 0x0c0330/dev 8), MMIO BARs + base, parsed register map, HCSPARAMS decode (16 slots/32 intrs/16 ports), pre-reset USBSTS/USBCMD observation, NO-OP completion cc=1, ports 9+10 connected (the two HID devices), ports 1-8/11-16 unconnected, shell responsive, runner attached the input devices"

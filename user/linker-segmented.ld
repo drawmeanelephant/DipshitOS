@@ -1,4 +1,4 @@
-/* DipshitOS SEGMENTED user program linker script (milestone sixteen card C1,
+/* VirelaiOS SEGMENTED user program linker script (milestone sixteen card C1,
  * claim 3805). Used ONLY for DSK3 images (elf2bin.py --segments); the flat
  * DSK1 programs keep user/linker.ld unchanged.
  *

@@ -18,7 +18,7 @@ printf '%s' "$RC" | grep -Eq 'kernel_rc=0x0*[1-9a-f]' || {
     echo "bad handoff did not produce a non-zero RC.TXT" >&2
     exit 1
 }
-if grep -q 'DipshitOS kernel has seized control.' artifacts/bad-handoff-serial.log 2>/dev/null; then
+if grep -q 'VirelaiOS kernel has seized control.' artifacts/bad-handoff-serial.log 2>/dev/null; then
     echo "bad handoff unexpectedly produced the takeover banner" >&2
     exit 1
 fi

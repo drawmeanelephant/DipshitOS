@@ -2,7 +2,7 @@
 #
 # verify-live-exceptions.sh -- claim 9746 class-B gate: live exception
 # vectors. The production image boots on real VZ hardware with the VBAR_EL1
-# vector table installed; host scripted keystrokes drive `dipshit> fault`,
+# vector table installed; host scripted keystrokes drive `virelai> fault`,
 # which deliberately triggers a synchronous exception (`udf`). The kernel's
 # exception handler emits the `[EXC]` report (ESR/FAR/ELR/SPSR + x0/x30),
 # skips the faulting instruction, and the shell resumes. The gate asserts
@@ -25,9 +25,9 @@
 # overlay), a private EFI var store (recreated fresh per boot, as the
 # pre-isolation gate did), and a private serial log under $RUN_DIR — two
 # concurrent instances cannot clobber each other's disks, NVRAM, or
-# evidence. Set DIPSHIT_GATE_SUFFIX=_alt to give this instance its own
+# evidence. Set VIRELAI_GATE_SUFFIX=_alt to give this instance its own
 # canonical evidence names (two simultaneous instances MUST differ), and
-# DIPSHIT_KEEP_RUN=1 to keep the scratch dir.
+# VIRELAI_KEEP_RUN=1 to keep the scratch dir.
 #
 # Class B — Apple silicon + VZ only; boots a real VM. A green CI badge
 # proves class A only and says nothing about this gate.
@@ -48,7 +48,7 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 GATE_LOG="$(art live-exceptions-gate.txt)"
@@ -108,7 +108,7 @@ run_one() {
     local BANNER=0 HELP=0 TRIGGER=0 EXC_SYNC=0 EXC_EC=0 EXC_RESUME=0 RESUMED=0 ECHO=0
     [ -f "$SER" ] || { SERIAL_BYTES=0; }
     if [ -f "$SER" ]; then
-        grep -qF -- "DipshitOS kernel has seized control." "$SER" && BANNER=1
+        grep -qF -- "VirelaiOS kernel has seized control." "$SER" && BANNER=1
         grep -qF -- "available commands:" "$SER" && HELP=1
         grep -qF -- "fault: triggering udf (synchronous exception)..." "$SER" && TRIGGER=1
         grep -qF -- "[EXC] sync from EL1" "$SER" && EXC_SYNC=1
@@ -128,7 +128,7 @@ run_one() {
 
 : > "$REPORT"
 {
-    echo "DIPSHITOS live-exceptions gate (claim 9746) — VBAR_EL1 vectors + sync handler on real VZ hardware"
+    echo "VIRELAIOS live-exceptions gate (claim 9746) — VBAR_EL1 vectors + sync handler on real VZ hardware"
     echo "revision: $REVISION branch=$BRANCH boots=$BOOTS dirty-files=$DIRTY"
     echo "script: $SCRIPT (help/fault/echo rx-exc-ok)"
     echo "date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"

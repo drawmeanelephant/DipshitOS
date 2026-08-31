@@ -1,4 +1,4 @@
-//! DipshitOS CALC.BIN — Milestone 11 Card A2 + M15 C9 + M24 K1–K5.
+//! VirelaiOS CALC.BIN — Milestone 11 Card A2 + M15 C9 + M24 K1–K5.
 //!
 //! Interactive graphical calculator with checked 64-bit integer engine,
 //! scrollable history, clickable button grid, and keyboard input.
@@ -2274,7 +2274,7 @@ fn cli_main(argc: usize, argv_va: u64) noreturn {
     while (i < argc) : (i += 1) {
         const arg = cli_arg(block, i);
         if (argc == 1 and (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help"))) {
-            ui.write_console("CALC.BIN - DipshitOS calculator\n" ++
+            ui.write_console("CALC.BIN - VirelaiOS calculator\n" ++
                 "usage: exec CALC.BIN [expression]\n" ++
                 "       exec CALC.BIN -h      show this help\n" ++
                 "examples: exec CALC.BIN '2+3*4'   -> 2+3*4 = 14\n" ++

@@ -1,4 +1,4 @@
-//! DipshitOS twelfth ESP user program — TYPE.BIN (milestone ten, card F4, claim 0510).
+//! VirelaiOS twelfth ESP user program — TYPE.BIN (milestone ten, card F4, claim 0510).
 //!
 //! Reads and echoes persistent data from `/data/hello.txt` from EL0:
 //!   1. `sys_file_open("/data/hello.txt", 15, MODE_READ(1))` (slot 23).

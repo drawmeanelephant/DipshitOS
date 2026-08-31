@@ -1,4 +1,4 @@
-//! DipshitOS AArch64 ELF loader (M22 D1, issue #324, claim 9815).
+//! VirelaiOS AArch64 ELF loader (M22 D1, issue #324, claim 9815).
 //!
 //! Pure parse + validate for statically linked AArch64 ELF32/ELF64
 //! executables. The consumer is `exec.exec_file` (magic sniff: a file whose

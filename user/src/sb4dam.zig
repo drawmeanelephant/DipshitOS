@@ -1,4 +1,4 @@
-//! DipshitOS M33 SB4 (claim 2382) live-gate test app — SB4DAM.BIN: the
+//! VirelaiOS M33 SB4 (claim 2382) live-gate test app — SB4DAM.BIN: the
 //! rect-granular damage proof.
 //!
 //! Opens a user window (frozen slot 12, 128x96), then FILLS TWO rects via the

@@ -14,11 +14,11 @@ $$\Large\mathbf{calm\text{-}lavoisier}$$
 
 It could have been `eager-curie`, `quirky-torvalds`, or `distracted-turing`. But the universe chose **`calm-lavoisier`**.
 
-And in retrospect, no name could have been more prophetic, hilarious, or spiritually aligned with what DipshitOS became.
+And in retrospect, no name could have been more prophetic, hilarious, or spiritually aligned with what VirelaiOS became.
 
 ---
 
-## The Lavoisier Spirit in DipshitOS
+## The Lavoisier Spirit in VirelaiOS
 
 Antoine Lavoisier is revered as the Father of Modern Chemistry because he dragged alchemy out of the mystical dark ages into the light of **rigid quantitative measurement and empirical truth**. He destroyed Phlogiston theory with an airtight balance scale.
 
@@ -28,14 +28,14 @@ In an ecosystem where OS hobby projects often degenerate into copy-pasted Linux 
 > *"State what was directly observed versus inferred. Never present a guess as a result."*
 
 ### 1. Conservation of Mass → Conservation of Memory Pages
-Just as Lavoisier balanced chemical equations down to the microgram, DipshitOS balanced its memory down to the exact 4 KiB frame:
+Just as Lavoisier balanced chemical equations down to the microgram, VirelaiOS balanced its memory down to the exact 4 KiB frame:
 - The **5-page per-process budget** that refused a 6th page without hesitation.
 - The **7-slot scheduler pool** where every descriptor, kernel stack, and user root was accounted for (`addrspaces: tables=150/256`).
 - Zero-allocation BSS ring buffers for mailboxes, DHCP packets, and TCP segments.
 - Page allocators where every freed page was verified to return to the pool upon task reap.
 
 ### 2. The Rejection of Alchemy → The Rejection of POSIX & Libc
-DipshitOS took Lavoisier's rejection of Phlogiston and applied it to operating systems:
+VirelaiOS took Lavoisier's rejection of Phlogiston and applied it to operating systems:
 - **No libc.**
 - **No POSIX.**
 - **No QEMU emulator.**
@@ -56,7 +56,7 @@ Across **359 commits**, **180 pull requests**, **168 claimed tasks**, and **123 
 | **M0: Boot Pipeline** | First UEFI AArch64 binary | Boots under real Apple firmware; writes `\BOOTED.TXT` on FAT32 ESP. |
 | **M1: Kernel Handoff** | Separate freestanding `KERNEL.BIN` | Slew the *KERNEL.TXT Scramble* (loading at base+0, not base+24); clean return to UEFI with `kernel_rc=0x0`. |
 | **M2: Kernel Proper** | `ExitBootServices` & Identity MMU | Root-caused the MMU-takeover death with the NVRAM ladder; survived translation table level switches. |
-| **M1.5: Dipshit Monitor** | Interactive serial command shell | 14 original commands, line editing, tokenizer, machine reboot/shutdown via EFI ResetSystem. |
+| **M1.5: Virelai Monitor** | Interactive serial command shell | 14 original commands, line editing, tokenizer, machine reboot/shutdown via EFI ResetSystem. |
 | **M3: Userspace & Tasks** | Allocator, GICv3, Timer, EL0/SVC | The 64-slot syscall ABI, fault-safe `uaccess`, per-task TTBR0 spaces, task lifecycle + zombie reap, and `USER.BIN` ESP exec. |
 | **M4: Real Processes** | CSPRNG, ASLR, General FS, IPC | ChaCha20 entropy, DATA partition mounting, `procs` table, `COUNTER.BIN`, reserved status 137 kill, ordered exit FIFOs, argv passing, and `PEER.BIN` mailbox IPC. |
 | **M5: Networking** | Full IPv4 / UDP / DHCP / TCP stack | Virtio-net transport, 1530-B RX wall conquered, ARP (RFC 826), ICMP echo, UDP loopback, DHCP lease lifecycle (T1/T2/expire), and TCP client with RTO retransmit. |

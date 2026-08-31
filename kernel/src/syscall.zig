@@ -1,4 +1,4 @@
-//! DipshitOS milestone-three syscall ABI (claim 3594).
+//! VirelaiOS milestone-three syscall ABI (claim 3594).
 //!
 //! The claim-8215 EL0 boundary owns exception entry and return. This module
 //! layers a fixed numbered contract on that seam: x8 is the syscall number,

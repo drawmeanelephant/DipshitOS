@@ -1,4 +1,4 @@
-//! DipshitOS bounded per-process application timer facility (milestone
+//! VirelaiOS bounded per-process application timer facility (milestone
 //! fourteen, card S2 — claim 7323, issue #176).
 //!
 //! ONE countdown timer per process: `sys_timer_set` (slot 40) arms the

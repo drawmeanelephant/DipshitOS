@@ -31,9 +31,9 @@
 # overlay), a private EFI var store (recreated fresh per boot, as the
 # pre-isolation gate did), and a private serial log under $RUN_DIR — two
 # concurrent instances cannot clobber each other's disks, NVRAM, or
-# evidence. Set DIPSHIT_GATE_SUFFIX=_alt to give this instance its own
+# evidence. Set VIRELAI_GATE_SUFFIX=_alt to give this instance its own
 # canonical evidence names (two simultaneous instances MUST differ), and
-# DIPSHIT_KEEP_RUN=1 to keep the scratch dir.
+# VIRELAI_KEEP_RUN=1 to keep the scratch dir.
 #
 set -euo pipefail
 
@@ -42,7 +42,7 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 GATE_LOG="$(art m4-entropy-live.txt)"
@@ -103,7 +103,7 @@ run_one() {
     local hex="" stack_hex="" boot_stack=""
     if [ -f "$SER" ]; then
         bytes="$(wc -c < "$SER" | tr -d ' ')"
-        [ "$(grep -aFxc -- "DipshitOS kernel has seized control." "$SER" || true)" = 1 ] && banner=1
+        [ "$(grep -aFxc -- "VirelaiOS kernel has seized control." "$SER" || true)" = 1 ] && banner=1
         [ "$(grep -aFxc -- "entropy: seeded n=64" "$SER" || true)" = 1 ] && seed=1
         [ "$(grep -aFc -- "DID=0x0000000000001044" "$SER" || true)" -ge 1 ] && did1044=1
         # Boot-time ASLR (claim 3693): the static EL0 payload's stack is
@@ -143,7 +143,7 @@ run_one() {
 
 : > "$REPORT"
 {
-    echo "DIPSHITOS live entropy gate (claim 2665) — REAL virtio entropy -> CSPRNG seed -> random command"
+    echo "VIRELAIOS live entropy gate (claim 2665) — REAL virtio entropy -> CSPRNG seed -> random command"
     echo "revision: $REVISION branch=$BRANCH boots=$BOOTS dirty-files=$DIRTY"
     echo "script: $(cat "$SCRIPT" | tr '\n' '|')"
     echo "date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"

@@ -1,4 +1,4 @@
-//! DipshitOS WMS7 Gate A test app — WMRPC.BIN (issue #627).
+//! VirelaiOS WMS7 Gate A test app — WMRPC.BIN (issue #627).
 //!
 //! The app-facing half of the app↔WM mailbox protocol. It discovers the
 //! registered WM server and its OWN pid by reading `sys_procs` (slot 7 —

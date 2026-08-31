@@ -1,4 +1,4 @@
-# GitHub Pages publication for DipshitOS's public documentation.
+# GitHub Pages publication for VirelaiOS's public documentation.
 #
 # Adapted from drawmeanelephant/boris's official workflow
 # (.github/workflows/github-pages.yml) with three deliberate deltas:
@@ -7,9 +7,9 @@
 #      `content`); the profile declares `input: "site"` and the compile step
 #      passes `--input site` explicitly. `docs/` is the engineering warehouse
 #      and is NOT published.
-#   2. The layout theme is this repository's own `themes/dipshitos`.
+#   2. The layout theme is this repository's own `themes/virelaios`.
 #   3. The toolchain is a Boris binary built from a PINNED Boris revision
-#      (DipshitOS cannot build Boris from its own source). The revision is the
+#      (VirelaiOS cannot build Boris from its own source). The revision is the
 #      single pin in .github/boris-pin.json, shared with the docs gate
 #      (.github/workflows/docs-gate.yml); bump it only after locally
 #      re-validating (boris validate + compile against `site/` with the
@@ -119,7 +119,7 @@ jobs:
                 name: "public",
                 output: "dist",
                 public: true,
-                theme: "themes/dipshitos",
+                theme: "themes/virelaios",
                 sitemap: {path: "sitemap.xml"}
               }]
             }' > .boris-pages-profile.json
@@ -139,7 +139,7 @@ jobs:
           boris/zig-out/bin/boris \
             --input site \
             --target public=dist \
-            --target-layout public=themes/dipshitos/layouts/main.html \
+            --target-layout public=themes/virelaios/layouts/main.html \
             --sitemap \
             --pages-base-url "$PAGES_BASE_URL" \
             --pages-origin "$PAGES_ORIGIN" \
@@ -167,7 +167,7 @@ jobs:
           mkdir -p evidence/proof
           cp -R dist/_boris/proof/. evidence/proof/
           BORIS_VERSION="$(sed -n 's/.*\.version = "\([^"]*\)".*/\1/p' boris/build.zig.zon | head -1)"
-          DIPSHITOS_REV="$GITHUB_SHA"
+          VIRELAIOS_REV="$GITHUB_SHA"
           INVENTORY_SHA256="$(jq -r '.inventory_sha256' evidence/public-artifact-verification.json)"
           PUBLIC_MANIFEST_SHA256="$(jq -r '.public_manifest_sha256' evidence/public-artifact-verification.json)"
           PUBLIC_FILES="$(jq -r '.files' evidence/public-artifact-verification.json)"
@@ -180,7 +180,7 @@ jobs:
             --arg source_commit "$GITHUB_SHA" \
             --arg boris_version "$BORIS_VERSION" \
             --arg boris_revision "${{ steps.boris-pin.outputs.revision }}" \
-            --arg dipshitos_revision "$DIPSHITOS_REV" \
+            --arg virelaios_revision "$VIRELAIOS_REV" \
             --arg workflow_ref "$GITHUB_WORKFLOW_REF" \
             --arg workflow_sha "$GITHUB_WORKFLOW_SHA" \
             --arg inventory_sha256 "$INVENTORY_SHA256" \
@@ -201,7 +201,7 @@ jobs:
               toolchain: {
                 boris_version: $boris_version,
                 boris_revision: $boris_revision,
-                dipshitos_revision: $dipshitos_revision,
+                virelaios_revision: $virelaios_revision,
                 workflow_ref: $workflow_ref,
                 workflow_sha: $workflow_sha
               },
@@ -276,7 +276,7 @@ jobs:
       # This is an optional, separate observer. It consumes the exact plan and
       # target-local inventory retained by build; it never mutates the public
       # Pages artifact or rewrites target-local evidence.
-      - name: Checkout DipshitOS
+      - name: Checkout VirelaiOS
         if: ${{ inputs.audit_deployment == true }}
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:

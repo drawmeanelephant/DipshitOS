@@ -9,7 +9,7 @@ tags: [lore, names]
 The project has a naming scheme. It is legible once you know the one rule:
 the names are jokes, and the engineering is not.
 
-## DipshitOS
+## VirelaiOS
 
 The project itself. A from-scratch AArch64 operating system that boots under
 real UEFI firmware on Apple silicon. The name is self-deprecating on purpose —

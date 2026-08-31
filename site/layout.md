@@ -8,7 +8,7 @@ tags: [development, layout]
 # Repository layout
 
 ```text
-dipshitos/
+virelaios/
 ├── AGENTS.md                  project rules (read first)
 ├── README.md                  concise landing surface → this site
 ├── build.zig / build.zig.zon  root build system (Zig 0.16)
@@ -21,7 +21,7 @@ dipshitos/
 ├── image/                     the pure-Python GPT+FAT32 image builder
 ├── tools/                     gate scripts, elf2bin, status indexes, ragshit
 ├── site/                      THIS public documentation corpus (compiled by Boris)
-├── themes/dipshitos/          the site theme
+├── themes/virelaios/          the site theme
 ├── docs/                      the engineering warehouse (claims/decisions/status/…)
 └── artifacts/                 build evidence (gitignored)
 ```
@@ -48,7 +48,7 @@ the subsystem map.
 ## Site + theme
 
 - `site/` — Boris-authored Markdown (trunks and satellites, wiki-linked).
-- `themes/dipshitos/` — the Boris theme (layout, CSS, footer).
+- `themes/virelaios/` — the Boris theme (layout, CSS, footer).
 - `.github/boris-pin.json` — the single pinned Boris toolchain revision.
 - `.github/workflows/` — the docs gate and the Pages publish workflow.
 

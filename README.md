@@ -1,4 +1,4 @@
-# DipshitOS
+# VirelaiOS
 
 [![CI](https://github.com/drawmeanelephant/DipshitOS/actions/workflows/ci.yml/badge.svg)](https://github.com/drawmeanelephant/DipshitOS/actions/workflows/ci.yml)
 
@@ -18,7 +18,7 @@ to GitHub Pages).
 ## Status
 
 Every milestone through **thirty-one** has landed and closed — the boot
-pipeline, the interactive `dipshit>` monitor, userspace (allocator,
+pipeline, the interactive `virelai>` monitor, userspace (allocator,
 scheduler, EL0 + syscalls), processes (IPC, wait, kill), networking
 (virtio-net → ARP → IPv4/ICMP → UDP → DHCP → TCP), graphics (framebuffer →
 Road Pops terminal → Driving Award window manager), input (USB XHCI + HID),
@@ -57,14 +57,14 @@ yet. The canonical, always-current accounting is
 
 ```bash
 git clone https://github.com/drawmeanelephant/DipshitOS.git
-cd DipshitOS
+cd VirelaiOS
 zig build            # compile the AArch64 UEFI application
 zig build image      # build the GPT+FAT32 disk image
 zig build run        # boot it with Swift + Virtualization.framework
 ```
 
 `zig build run` boots the whole thing and writes the kernel's serial output to
-`artifacts/vm-serial.log`. `zig build console` boots an interactive `dipshit>`
+`artifacts/vm-serial.log`. `zig build console` boots an interactive `virelai>`
 console; `zig build test-console` runs the deterministic transcript test.
 
 **Requirements:** Apple silicon, macOS 27+, Zig 0.16.0, Swift + Xcode command
@@ -101,7 +101,7 @@ for how the pieces fit.
 
 ## License
 
-DipshitOS is **source-available, not open source** — the code is publicly
+VirelaiOS is **source-available, not open source** — the code is publicly
 visible so it can be reviewed and learned from, but you may not use, modify,
 redistribute, or incorporate it without written permission. Forks are not
 freedom. The binding terms are [`LICENSE`](LICENSE); a plain-language summary

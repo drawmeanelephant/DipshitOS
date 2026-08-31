@@ -24,7 +24,7 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 GATE_LOG="$(art live-vm-depth-gate.txt)"
@@ -88,7 +88,7 @@ run_one() {
     local BANNER=0 MMAP=0 DEMAND_READ=0 DEMAND_WRITE=0 MUNMAP=0 EAGER=0 ALL_PASSED=0 ECHO=0
     [ -f "$SER" ] || { SERIAL_BYTES=0; }
     if [ -f "$SER" ]; then
-        grep -qF -- "DipshitOS kernel has seized control." "$SER" && BANNER=1
+        grep -qF -- "VirelaiOS kernel has seized control." "$SER" && BANNER=1
         grep -qF -- "vmtest: mmap ok" "$SER" && MMAP=1
         grep -qF -- "vmtest: demand read ok" "$SER" && DEMAND_READ=1
         grep -qF -- "vmtest: demand write ok" "$SER" && DEMAND_WRITE=1
@@ -107,7 +107,7 @@ run_one() {
 
 : > "$REPORT"
 {
-    echo "DIPSHITOS live-vm-depth gate (Milestone 29, Claim 8247) — Demand paging, COW, anonymous mmap on VZ"
+    echo "VIRELAIOS live-vm-depth gate (Milestone 29, Claim 8247) — Demand paging, COW, anonymous mmap on VZ"
     echo "revision: $REVISION branch=$BRANCH boots=$BOOTS dirty-files=$DIRTY"
     echo "date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     echo

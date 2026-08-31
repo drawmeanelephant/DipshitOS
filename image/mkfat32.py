@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build or inspect a bootable FAT32 + GPT disk image for DipshitOS.
+"""Build or inspect a bootable FAT32 + GPT disk image for VirelaiOS.
 
 Pure Python 3 standard library only -- no mtools, no root, no loopback
 devices. Used by image/make-image.sh and tools/inspect.sh.
@@ -186,7 +186,7 @@ def boot_sector(geo):
     b[64] = 0x80                              # drive number
     b[66] = 0x29                              # extended boot signature
     struct.pack_into("<I", b, 67, 0x44495031)  # volume id
-    b[71:82] = b"DIPSHITOS  "
+    b[71:82] = b"VIRELAIOS  "
     b[82:90] = b"FAT32   "
     b[510:512] = b"\x55\xaa"
     return bytes(b)
@@ -237,7 +237,7 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
     into `img` at the volume's offset.
 
     Directory layout:
-      /              DIPSHITOS volume label, EFI/, KERNEL.BIN (when given),
+      /              VIRELAIOS volume label, EFI/, KERNEL.BIN (when given),
                      USER.BIN (when given), COUNTER.BIN (when given), PEER.BIN (when given), STATUS43.BIN (when given),
                      UDP.BIN (when given), WIN.BIN (when given),
                      WINCLOSE.BIN (when given), WINLOOP.BIN (when given),
@@ -575,7 +575,7 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
         wsec(geo.fat_sector(i), fat_bytes)
 
     # --- directory tree --------------------------------------------------
-    vol_label = dir_entry(b"DIPSHITOS  ", 0x08, 0, 0)
+    vol_label = dir_entry(b"VIRELAIOS  ", 0x08, 0, 0)
     efi_entry = dir_entry(b"EFI        ", 0x10, efi_dir_cluster, 0)
     boot_entry = dir_entry(b"BOOT       ", 0x10, boot_dir_cluster, 0)
     file_entry = dir_entry(b"BOOTAA64EFI", 0x20, efi_start, len(efi_bytes))
@@ -927,12 +927,12 @@ def build_data_volume(img, geo):
     """Write the second (data) FAT32 volume — the milestone-four card 2
     general-filesystem partition (arbitrary disk layout, not the ESP).
 
-    Directory layout: / DIPSHITOS volume label, README.TXT (cluster 3),
+    Directory layout: / VIRELAIOS volume label, README.TXT (cluster 3),
     DATA.TXT (cluster 4). Deterministic, like the ESP volume.
     """
     geo.checks()
     bps = geo.bps
-    readme = (b"DipshitOS general filesystem: a second FAT32 volume on the "
+    readme = (b"VirelaiOS general filesystem: a second FAT32 volume on the "
               b"same disk (claim 3678, milestone four card 2)\n")
     data = b"general data volume contents: 1234567890\n"
 
@@ -957,7 +957,7 @@ def build_data_volume(img, geo):
     for i in range(geo.nfats):
         wsec(geo.fat_sector(i), fat_bytes)
 
-    root_entries = (dir_entry(b"DIPSHITOS  ", 0x08, 0, 0) +
+    root_entries = (dir_entry(b"VIRELAIOS  ", 0x08, 0, 0) +
                     dir_entry(b"README  TXT", 0x20, 3, len(readme)) +
                     dir_entry(b"DATA    TXT", 0x20, 4, len(data)))
     wsec(geo.cluster_sector(2), root_entries.ljust(bps, b"\x00"))
@@ -1114,7 +1114,7 @@ def list_image(path):
         hdr_crc = struct.unpack_from("<I", data, 512 + 16)[0]
         print("GPT: valid signature, header crc32=0x%08x" % hdr_crc)
     else:
-        print("GPT: no GPT signature at LBA 1 (expecting one for DipshitOS images)")
+        print("GPT: no GPT signature at LBA 1 (expecting one for VirelaiOS images)")
 
     esp_offset = find_esp_offset(data)
     if esp_offset == 0:
@@ -1205,7 +1205,7 @@ def build_image(total_sectors, esp_offset, efi_bytes, kernel_bytes=None,
     entries = bytearray(128 * 128)
     entries[0:128] = partition_entry(ESP_GUID, esp_offset, esp_last, "EFI SYSTEM")
     entries[128:256] = partition_entry(DATA_GUID, data_start, last_usable,
-                                       "DIPSHITOS DATA", unique_guid=DATA_PART_GUID)
+                                       "VIRELAIOS DATA", unique_guid=DATA_PART_GUID)
     entries_crc = zlib.crc32(bytes(entries)) & 0xFFFFFFFF
     backup_entries_lba = last_usable + 1  # == total_sectors - 33
 
@@ -1388,7 +1388,7 @@ def main(argv):
             kernel_bytes = f.read()
         if kernel_bytes[:4] != b"DSK1":
             print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a DipshitOS kernel image" % args.kernel_file,
+                  "not be a VirelaiOS kernel image" % args.kernel_file,
                   file=sys.stderr)
 
     user_bytes = None
@@ -1397,7 +1397,7 @@ def main(argv):
             user_bytes = f.read()
         if user_bytes[:4] != b"DSK1":
             print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a DipshitOS user program image" % args.user_file,
+                  "not be a VirelaiOS user program image" % args.user_file,
                   file=sys.stderr)
 
     counter_bytes = None
@@ -1406,7 +1406,7 @@ def main(argv):
             counter_bytes = f.read()
         if counter_bytes[:4] != b"DSK1":
             print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a DipshitOS user program image" % args.counter_file,
+                  "not be a VirelaiOS user program image" % args.counter_file,
                   file=sys.stderr)
 
     peer_bytes = None
@@ -1415,7 +1415,7 @@ def main(argv):
             peer_bytes = f.read()
         if peer_bytes[:4] != b"DSK1":
             print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a DipshitOS user program image" % args.peer_file,
+                  "not be a VirelaiOS user program image" % args.peer_file,
                   file=sys.stderr)
 
     status43_bytes = None
@@ -1424,7 +1424,7 @@ def main(argv):
             status43_bytes = f.read()
         if status43_bytes[:4] != b"DSK1":
             print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a DipshitOS user program image" % args.status43_file,
+                  "not be a VirelaiOS user program image" % args.status43_file,
                   file=sys.stderr)
 
     udp_bytes = None
@@ -1433,7 +1433,7 @@ def main(argv):
             udp_bytes = f.read()
         if udp_bytes[:4] != b"DSK1":
             print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a DipshitOS user program image" % args.udp_file,
+                  "not be a VirelaiOS user program image" % args.udp_file,
                   file=sys.stderr)
 
     win_bytes = None
@@ -1442,7 +1442,7 @@ def main(argv):
             win_bytes = f.read()
         if win_bytes[:4] != b"DSK1":
             print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a DipshitOS user program image" % args.win_file,
+                  "not be a VirelaiOS user program image" % args.win_file,
                   file=sys.stderr)
 
     winclose_bytes = None
@@ -1451,7 +1451,7 @@ def main(argv):
             winclose_bytes = f.read()
         if winclose_bytes[:4] != b"DSK1":
             print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a DipshitOS user program image" % args.winclose_file,
+                  "not be a VirelaiOS user program image" % args.winclose_file,
                   file=sys.stderr)
 
     winloop_bytes = None
@@ -1460,7 +1460,7 @@ def main(argv):
             winloop_bytes = f.read()
         if winloop_bytes[:4] != b"DSK1":
             print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a DipshitOS user program image" % args.winloop_file,
+                  "not be a VirelaiOS user program image" % args.winloop_file,
                   file=sys.stderr)
 
     winmove_bytes = None
@@ -1469,7 +1469,7 @@ def main(argv):
             winmove_bytes = f.read()
         if winmove_bytes[:4] != b"DSK1":
             print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a DipshitOS user program image" % args.winmove_file,
+                  "not be a VirelaiOS user program image" % args.winmove_file,
                   file=sys.stderr)
 
     keytest_bytes = None
@@ -1478,7 +1478,7 @@ def main(argv):
             keytest_bytes = f.read()
         if keytest_bytes[:4] != b"DSK1":
             print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a DipshitOS user program image" % args.keytest_file,
+                  "not be a VirelaiOS user program image" % args.keytest_file,
                   file=sys.stderr)
 
     savetext_bytes = None
@@ -1487,7 +1487,7 @@ def main(argv):
             savetext_bytes = f.read()
         if savetext_bytes[:4] != b"DSK1":
             print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a DipshitOS user program image" % args.savetext_file,
+                  "not be a VirelaiOS user program image" % args.savetext_file,
                   file=sys.stderr)
 
     type_bytes = None
@@ -1496,7 +1496,7 @@ def main(argv):
             type_bytes = f.read()
         if type_bytes[:4] != b"DSK1":
             print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a DipshitOS user program image" % args.type_file,
+                  "not be a VirelaiOS user program image" % args.type_file,
                   file=sys.stderr)
 
     dir_bytes = None
@@ -1505,7 +1505,7 @@ def main(argv):
             dir_bytes = f.read()
         if dir_bytes[:4] != b"DSK1":
             print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a DipshitOS user program image" % args.dir_file,
+                  "not be a VirelaiOS user program image" % args.dir_file,
                   file=sys.stderr)
 
     calc_bytes = None
@@ -1514,7 +1514,7 @@ def main(argv):
             calc_bytes = f.read()
         if calc_bytes[:4] != b"DSK1":
             print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a DipshitOS user program image" % args.calc_file,
+                  "not be a VirelaiOS user program image" % args.calc_file,
                   file=sys.stderr)
 
     notepad_bytes = None
@@ -1523,7 +1523,7 @@ def main(argv):
             notepad_bytes = f.read()
         if notepad_bytes[:4] != b"DSK1":
             print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a DipshitOS user program image" % args.notepad_file,
+                  "not be a VirelaiOS user program image" % args.notepad_file,
                   file=sys.stderr)
 
     top_bytes = None
@@ -1532,7 +1532,7 @@ def main(argv):
             top_bytes = f.read()
         if top_bytes[:4] != b"DSK1":
             print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a DipshitOS user program image" % args.top_file,
+                  "not be a VirelaiOS user program image" % args.top_file,
                   file=sys.stderr)
 
     desktop_bytes = None
@@ -1541,7 +1541,7 @@ def main(argv):
             desktop_bytes = f.read()
         if desktop_bytes[:4] != b"DSK1":
             print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a DipshitOS user program image" % args.desktop_file,
+                  "not be a VirelaiOS user program image" % args.desktop_file,
                   file=sys.stderr)
 
     tcp_bytes = None
@@ -1550,7 +1550,7 @@ def main(argv):
             tcp_bytes = f.read()
         if tcp_bytes[:4] != b"DSK1":
             print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a DipshitOS user program image" % args.tcp_file,
+                  "not be a VirelaiOS user program image" % args.tcp_file,
                   file=sys.stderr)
 
     fetch_bytes = None
@@ -1559,7 +1559,7 @@ def main(argv):
             fetch_bytes = f.read()
         if fetch_bytes[:4] != b"DSK1":
             print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a DipshitOS user program image" % args.fetch_file,
+                  "not be a VirelaiOS user program image" % args.fetch_file,
                   file=sys.stderr)
 
     chat_bytes = None
@@ -1568,7 +1568,7 @@ def main(argv):
             chat_bytes = f.read()
         if chat_bytes[:4] != b"DSK1":
             print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a DipshitOS user program image" % args.chat_file,
+                  "not be a VirelaiOS user program image" % args.chat_file,
                   file=sys.stderr)
 
     file_bytes = None
@@ -1577,7 +1577,7 @@ def main(argv):
             file_bytes = f.read()
         if file_bytes[:4] != b"DSK1":
             print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a DipshitOS user program image" % args.file_file,
+                  "not be a VirelaiOS user program image" % args.file_file,
                   file=sys.stderr)
 
     fstest_bytes = None
@@ -1586,7 +1586,7 @@ def main(argv):
             fstest_bytes = f.read()
         if fstest_bytes[:4] != b"DSK1":
             print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a DipshitOS user program image" % args.fstest_file,
+                  "not be a VirelaiOS user program image" % args.fstest_file,
                   file=sys.stderr)
 
     timertest_bytes = None
@@ -1595,7 +1595,7 @@ def main(argv):
             timertest_bytes = f.read()
         if timertest_bytes[:4] != b"DSK1":
             print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a DipshitOS user program image" % args.timertest_file,
+                  "not be a VirelaiOS user program image" % args.timertest_file,
                   file=sys.stderr)
 
     victim_bytes = None
@@ -1604,7 +1604,7 @@ def main(argv):
             victim_bytes = f.read()
         if victim_bytes[:4] != b"DSK1":
             print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a DipshitOS user program image" % args.victim_file,
+                  "not be a VirelaiOS user program image" % args.victim_file,
                   file=sys.stderr)
 
     harden_bytes = None
@@ -1613,7 +1613,7 @@ def main(argv):
             harden_bytes = f.read()
         if harden_bytes[:4] != b"DSK1":
             print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a DipshitOS user program image" % args.harden_file,
+                  "not be a VirelaiOS user program image" % args.harden_file,
                   file=sys.stderr)
 
     jingle_bytes = None
@@ -1622,7 +1622,7 @@ def main(argv):
             jingle_bytes = f.read()
         if jingle_bytes[:4] != b"DSK1":
             print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a DipshitOS user program image" % args.jingle_file,
+                  "not be a VirelaiOS user program image" % args.jingle_file,
                   file=sys.stderr)
 
     chime_bytes = None
@@ -1631,7 +1631,7 @@ def main(argv):
             chime_bytes = f.read()
         if chime_bytes[:4] != b"DSK1":
             print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a DipshitOS user program image" % args.chime_file,
+                  "not be a VirelaiOS user program image" % args.chime_file,
                   file=sys.stderr)
 
     globals_bytes = None
@@ -1640,7 +1640,7 @@ def main(argv):
             globals_bytes = f.read()
         if globals_bytes[:4] != b"DSK3":
             print("WARNING: %s does not start with the 'DSK3' segmented-image "
-                  "magic; it may not be a DipshitOS user program image"
+                  "magic; it may not be a VirelaiOS user program image"
                   % args.globals_file, file=sys.stderr)
 
     guard_bytes = None
@@ -1649,7 +1649,7 @@ def main(argv):
             guard_bytes = f.read()
         if guard_bytes[:4] != b"DSK1":
             print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a DipshitOS user program image" % args.guard_file,
+                  "not be a VirelaiOS user program image" % args.guard_file,
                   file=sys.stderr)
 
     spin_bytes = None
@@ -1658,7 +1658,7 @@ def main(argv):
             spin_bytes = f.read()
         if spin_bytes[:4] != b"DSK1":
             print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a DipshitOS user program image" % args.spin_file,
+                  "not be a VirelaiOS user program image" % args.spin_file,
                   file=sys.stderr)
 
     apps_txt_bytes = None
@@ -1672,7 +1672,7 @@ def main(argv):
             asm_bytes = f.read()
         if asm_bytes[:4] != b"DSK1":
             print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a DipshitOS user program image" % args.asm_file,
+                  "not be a VirelaiOS user program image" % args.asm_file,
                   file=sys.stderr)
 
     settings_bytes = None
@@ -1681,7 +1681,7 @@ def main(argv):
             settings_bytes = f.read()
         if settings_bytes[:4] != b"DSK1":
             print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a DipshitOS user program image" % args.settings_file,
+                  "not be a VirelaiOS user program image" % args.settings_file,
                   file=sys.stderr)
 
     ps_bytes = None
@@ -1690,7 +1690,7 @@ def main(argv):
             ps_bytes = f.read()
         if ps_bytes[:4] != b"DSK1":
             print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a DipshitOS user program image" % args.ps_file,
+                  "not be a VirelaiOS user program image" % args.ps_file,
                   file=sys.stderr)
 
     disas_bytes = None
@@ -1699,7 +1699,7 @@ def main(argv):
             disas_bytes = f.read()
         if disas_bytes[:4] != b"DSK1":
             print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a DipshitOS user program image" % args.disas_file,
+                  "not be a VirelaiOS user program image" % args.disas_file,
                   file=sys.stderr)
 
     edit_bytes = None
@@ -1708,7 +1708,7 @@ def main(argv):
             edit_bytes = f.read()
         if edit_bytes[:4] not in (b"DSK1", b"DSK3"):
             print("WARNING: %s does not start with the 'DSK1'/'DSK3' magic; it may "
-                  "not be a DipshitOS user program image" % args.edit_file,
+                  "not be a VirelaiOS user program image" % args.edit_file,
                   file=sys.stderr)
 
     resmon_bytes = None
@@ -1725,7 +1725,7 @@ def main(argv):
             netstat_bytes = f.read()
         if netstat_bytes[:4] not in (b"DSK1", b"DSK3"):
             print("WARNING: %s does not start with the 'DSK1'/'DSK3' magic; it may "
-                  "not be a DipshitOS user program image" % args.netstat_file,
+                  "not be a VirelaiOS user program image" % args.netstat_file,
                   file=sys.stderr)
 
     m21demo_bytes = None
@@ -1734,7 +1734,7 @@ def main(argv):
             m21demo_bytes = f.read()
         if m21demo_bytes[:4] != b"DSK1":
             print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a DipshitOS user program image" % args.m21demo_file,
+                  "not be a VirelaiOS user program image" % args.m21demo_file,
                   file=sys.stderr)
 
     ping_bytes = None
@@ -1743,7 +1743,7 @@ def main(argv):
             ping_bytes = f.read()
         if ping_bytes[:4] != b"DSK1":
             print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a DipshitOS user program image" % args.ping_file,
+                  "not be a VirelaiOS user program image" % args.ping_file,
                   file=sys.stderr)
 
     dns_bytes = None
@@ -1752,7 +1752,7 @@ def main(argv):
             dns_bytes = f.read()
         if dns_bytes[:4] != b"DSK1":
             print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a DipshitOS user program image" % args.dns_file,
+                  "not be a VirelaiOS user program image" % args.dns_file,
                   file=sys.stderr)
 
     download_bytes = None
@@ -1761,7 +1761,7 @@ def main(argv):
             download_bytes = f.read()
         if download_bytes[:4] != b"DSK1":
             print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a DipshitOS user program image" % args.download_file,
+                  "not be a VirelaiOS user program image" % args.download_file,
                   file=sys.stderr)
 
     traceroute_bytes = None
@@ -1770,7 +1770,7 @@ def main(argv):
             traceroute_bytes = f.read()
         if traceroute_bytes[:4] != b"DSK1":
             print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a DipshitOS user program image" % args.traceroute_file,
+                  "not be a VirelaiOS user program image" % args.traceroute_file,
                   file=sys.stderr)
 
     netprof_bytes = None
@@ -1779,7 +1779,7 @@ def main(argv):
             netprof_bytes = f.read()
         if netprof_bytes[:4] != b"DSK1":
             print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a DipshitOS user program image" % args.netprof_file,
+                  "not be a VirelaiOS user program image" % args.netprof_file,
                   file=sys.stderr)
 
     sysmon_bytes = None
@@ -1788,7 +1788,7 @@ def main(argv):
             sysmon_bytes = f.read()
         if sysmon_bytes[:4] != b"DSK1":
             print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a DipshitOS user program image" % args.sysmon_file,
+                  "not be a VirelaiOS user program image" % args.sysmon_file,
                   file=sys.stderr)
 
     httpd_bytes = None
@@ -1797,7 +1797,7 @@ def main(argv):
             httpd_bytes = f.read()
         if httpd_bytes[:4] != b"DSK1":
             print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a DipshitOS user program image" % args.httpd_file,
+                  "not be a VirelaiOS user program image" % args.httpd_file,
                   file=sys.stderr)
 
     vmtest_bytes = None
@@ -1806,7 +1806,7 @@ def main(argv):
             vmtest_bytes = f.read()
         if vmtest_bytes[:4] != b"DSK1":
             print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a DipshitOS user program image" % args.vmtest_file,
+                  "not be a VirelaiOS user program image" % args.vmtest_file,
                   file=sys.stderr)
 
     wndstub_bytes = None
@@ -1820,7 +1820,7 @@ def main(argv):
             wnd_bytes = f.read()
         if wndstub_bytes[:4] != b"DSK1":
             print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a DipshitOS user program image" % args.wndstub_file,
+                  "not be a VirelaiOS user program image" % args.wndstub_file,
                   file=sys.stderr)
 
     crash_bytes = None

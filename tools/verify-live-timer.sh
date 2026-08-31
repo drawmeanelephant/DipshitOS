@@ -31,9 +31,9 @@
 # overlay), a private EFI var store (recreated fresh per boot, as the
 # pre-isolation gate did), and a private serial log under $RUN_DIR — two
 # concurrent instances cannot clobber each other's disks, NVRAM, or
-# evidence. Set DIPSHIT_GATE_SUFFIX=_alt to give this instance its own
+# evidence. Set VIRELAI_GATE_SUFFIX=_alt to give this instance its own
 # canonical evidence names (two simultaneous instances MUST differ), and
-# DIPSHIT_KEEP_RUN=1 to keep the scratch dir.
+# VIRELAI_KEEP_RUN=1 to keep the scratch dir.
 #
 # Class B — Apple silicon + VZ only; boots a real VM. A green CI badge
 # proves class A only and says nothing about this gate.
@@ -53,7 +53,7 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 GATE_LOG="$(art live-timer-gate.txt)"
@@ -112,7 +112,7 @@ run_one() {
     local BANNER=0 INTERRUPTS=0 CMD_ARMED=0 ECHO=0 IRQ=0 HEARTBEAT=0
     [ -f "$SER" ] || { SERIAL_BYTES=0; }
     if [ -f "$SER" ]; then
-        grep -qF -- "DipshitOS kernel has seized control." "$SER" && BANNER=1
+        grep -qF -- "VirelaiOS kernel has seized control." "$SER" && BANNER=1
         grep -qF -- "interrupts: gic=" "$SER" && INTERRUPTS=1
         grep -qF -- "timer: armed=1" "$SER" && CMD_ARMED=1
         grep -qF -- "rx-timer-ok" "$SER" && ECHO=1
@@ -130,7 +130,7 @@ run_one() {
 
 : > "$REPORT"
 {
-    echo "DIPSHITOS live-timer gate (claim 9187) — real CNTP PPI delivery through the EL1 IRQ vector on VZ"
+    echo "VIRELAIOS live-timer gate (claim 9187) — real CNTP PPI delivery through the EL1 IRQ vector on VZ"
     echo "revision: $REVISION branch=$BRANCH boots=$BOOTS dirty-files=$DIRTY"
     echo "script: $SCRIPT (timer / echo rx-timer-ok; expect heartbeat ticks=5 irq=5 poll=0)"
     echo "date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"

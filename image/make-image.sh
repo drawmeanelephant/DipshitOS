@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# make-image.sh -- build the bootable FAT32+GPT boot disk image for DipshitOS.
+# make-image.sh -- build the bootable FAT32+GPT boot disk image for VirelaiOS.
 #
 # Usage: make-image.sh [EFI_BINARY] [IMAGE_PATH] [KERNEL_BINARY] [USER_BINARY] [COUNTER_BINARY] [PEER_BINARY] [STATUS43_BINARY] [UDP_BINARY] [WIN_BINARY] [WINCLOSE_BINARY] [WINLOOP_BINARY] [WINMOVE_BINARY] [KEYTEST_BINARY]
 # Defaults: zig-out/bin/BOOTAA64.EFI   artifacts/disk.img
@@ -67,7 +67,7 @@ CHIME_BIN="${30:-$ROOT_DIR/zig-out/bin/CHIME.BIN}"
 GLOBALS_BIN="${31:-$ROOT_DIR/zig-out/bin/GLOBALS.BIN}"
 GUARD_BIN="${32:-$ROOT_DIR/zig-out/bin/GUARD.BIN}"
 SPIN_BIN="${33:-$ROOT_DIR/zig-out/bin/SPIN.BIN}"
-SIZE_MB="${DIPSHITOS_IMAGE_SIZE_MB:-128}"
+SIZE_MB="${VIRELAIOS_IMAGE_SIZE_MB:-128}"
 
 cd "$ROOT_DIR"
 

@@ -1,4 +1,4 @@
-// DipshitOS VM runner for the Apple Virtualization.framework path.
+// VirelaiOS VM runner for the Apple Virtualization.framework path.
 //
 // Usage: VMRunner <disk-image> [serial-log] [--screen <png>]
 //        VMRunner --overlay-base <base.img> [serial-log] [flags...]
@@ -112,10 +112,10 @@
 //   before exiting, reconstruct the kernel's post-exit console stream from
 //   the EFI variable store (artifacts/efi-vars.bin). In nvram-console
 //   builds the kernel writes every console byte as chunked EFI variables
-//   `DipshitC0`, `DipshitC1`, ... via runtime SetVariable — the one
+//   `VirelaiC0`, `VirelaiC1`, ... via runtime SetVariable — the one
 //   post-exit-safe device channel on VZ (post-exit access to the
 //   virtio-pci transport hangs, claim 0013). Each chunk value is prefixed
-//   with the in-band marker `DIPSHITC <idx>:`; the host byte-scans the
+//   with the in-band marker `VIRELAIC <idx>:`; the host byte-scans the
 //   store (file order == write order), validates the chunk indices, and
 //   concatenates the payloads. The reconstructed text is written to
 //   <file> and printed. In this mode the exit code is 0 iff reconstructed
@@ -131,7 +131,7 @@
 //   work item 3, claim 0009): before exiting, read the EFI variable store
 //   (artifacts/efi-vars.bin) and save the ordered ladder of M2_* marker
 //   instances the kernel wrote (the kernel persists each takeover stage as
-//   the non-volatile variable `DipshitM2` via runtime SetVariable, which
+//   the non-volatile variable `VirelaiM2` via runtime SetVariable, which
 //   survives ExitBootServices on VZ). In this mode the exit code is 0 iff at
 //   least one marker instance was found — the marker channel, not the
 //   (silent) serial channel, is the gate. The serial evidence gate above is
@@ -238,7 +238,7 @@ var inputKeyAfter: String?
 // `--input-string <ascii>` types the literal string (keyDown + keyUp per
 // char, shift for uppercase, `\n` = Enter) into the VZVirtualMachineView
 // after `--input-string-after <marker>` (default: the shell's first
-// `dipshit> ` prompt — typing before the idle loop starts drops keystrokes,
+// `virelai> ` prompt — typing before the idle loop starts drops keystrokes,
 // the interrupt-IN ring buffers one report). This types a real command into
 // Road Pops.
 var inputString: String?
@@ -841,10 +841,10 @@ atexit { restoreTerminal() }
 // Issue #523 item 2 (claim 6637): when --overlay-base is used, the throwaway
 // ASIF overlay layer lives in this directory; it is removed at exit so
 // concurrent runs never share (or leave behind) writable state. Set
-// DIPSHIT_KEEP_OVERLAY=1 to keep it for post-mortem.
+// VIRELAI_KEEP_OVERLAY=1 to keep it for post-mortem.
 var overlayCleanupPath: String?
 atexit {
-    if let p = overlayCleanupPath, ProcessInfo.processInfo.environment["DIPSHIT_KEEP_OVERLAY"] == nil {
+    if let p = overlayCleanupPath, ProcessInfo.processInfo.environment["VIRELAI_KEEP_OVERLAY"] == nil {
         try? FileManager.default.removeItem(atPath: p)
     }
 }
@@ -923,7 +923,7 @@ do {
             fail("Overlay base image not found at '\(base)'.")
         }
         let stackDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("dipshit-overlay-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("virelai-overlay-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: stackDir, withIntermediateDirectories: true)
         overlayCleanupPath = stackDir.path
         let diskBase = try DiskImage(opening: .open(url: baseURL, mode: .readOnly))
@@ -1263,7 +1263,7 @@ if let netCapturePath {
                         var responsePayload = payload
                         let isGet = payload.count >= 4 && payload[0] == 0x47 && payload[1] == 0x45 && payload[2] == 0x54 && payload[3] == 0x20
                         if hostPort == 80 || hostPort == 8080 || isGet {
-                            let httpBody = "HTTP/1.0 200 OK\r\n\r\nHello from DipshitOS Host!\n"
+                            let httpBody = "HTTP/1.0 200 OK\r\n\r\nHello from VirelaiOS Host!\n"
                             responsePayload = Array(httpBody.utf8)
                         }
                         let replyLen = buildTcpReply(&reply, buf, n, arpHostMAC, hostPort, netTcpSrvNxt, seq &+ UInt32(payload.count), 0x10, responsePayload)
@@ -1351,7 +1351,7 @@ do { try config.validate() } catch { fail("Invalid VM configuration: \(error)") 
 
 final class Runner: NSObject {
     let vm: VZVirtualMachine
-    let queue = DispatchQueue(label: "dipshitos.vm")
+    let queue = DispatchQueue(label: "virelaios.vm")
     init(configuration: VZVirtualMachineConfiguration) {
         vm = VZVirtualMachine(configuration: configuration, queue: queue)
         super.init()
@@ -1374,7 +1374,7 @@ var terminalMatched = terminalMarker == nil
 var evidenceSince: Date?
 let terminalDwell: TimeInterval = 2
 
-print("DIPSHITOS VM runner")
+print("VIRELAIOS VM runner")
 print("  host: arm64 (Apple silicon), macOS \(osVersion.majorVersion).\(osVersion.minorVersion)")
 print("  disk: \(diskImagePath)")
 print("  memory: 256 MiB, cpus: 2")
@@ -1428,9 +1428,9 @@ if let kc = inputKeyCode {
 }
 if let s = inputString {
     if viaVirtioEnabled {
-        print("  input-string: ENABLED (milestone seven card I3, claim 6050) — typing \(s.debugDescription) over the custom-virtio INPUT queue (claim 9588; HID-shaped messages, no view) after \"\(inputStringAfter ?? "dipshit> ")\"")
+        print("  input-string: ENABLED (milestone seven card I3, claim 6050) — typing \(s.debugDescription) over the custom-virtio INPUT queue (claim 9588; HID-shaped messages, no view) after \"\(inputStringAfter ?? "virelai> ")\"")
     } else {
-        print("  input-string: ENABLED (milestone seven card I3, claim 6050) — typing \(s.debugDescription) into the view after \"\(inputStringAfter ?? "dipshit> ")\" (keyDown + keyUp per char, shift for uppercase)")
+        print("  input-string: ENABLED (milestone seven card I3, claim 6050) — typing \(s.debugDescription) into the view after \"\(inputStringAfter ?? "virelai> ")\" (keyDown + keyUp per char, shift for uppercase)")
     }
 }
 if let s = inputChords {
@@ -1724,7 +1724,7 @@ func finish(success: Bool) {
             if wantDump, let dumpPath = markerDumpPath {
                 // ADR 0004 D4 fixed-memory-marker fallback (working form, claim
                 // 0009): the kernel persists its takeover stage as the EFI
-                // non-volatile variable `DipshitM2` (runtime SetVariable survives
+                // non-volatile variable `VirelaiM2` (runtime SetVariable survives
                 // ExitBootServices on VZ — observed), and the host reads the
                 // store after the VM stops. The memory-scan variant is impossible
                 // on VZ: guest RAM is not mapped into the runner process
@@ -1774,7 +1774,7 @@ func finish(success: Bool) {
 // ---------------------------------------------------------------------------
 // ADR 0004 D4 fixed-memory-marker fallback (working form, claim 0009): the
 // kernel writes each takeover stage as the EFI non-volatile variable
-// `DipshitM2` (VendorGuid M2M2_DIPSHITOS-M). EFI runtime services survive
+// `VirelaiM2` (VendorGuid M2M2_VIRELAIOS-M). EFI runtime services survive
 // ExitBootServices on VZ, so after the run the host reads the variable store
 // (artifacts/efi-vars.bin) and sees the ordered ladder of stages the kernel
 // reached. A missing later stage names the crash window: a ladder ending at
@@ -1862,9 +1862,9 @@ func readMarkerLadder(from storeURL: URL) -> [(name: String, offset: Int)] {
 
 // ---------------------------------------------------------------------------
 // Claim 0015: NVRAM console reconstruction. The kernel persists console
-// bytes as chunked EFI variables DipshitC0..N (runtime SetVariable — the
+// bytes as chunked EFI variables VirelaiC0..N (runtime SetVariable — the
 // proven post-exit-safe channel on VZ), each value prefixed with the
-// in-band marker "DIPSHITC <4-digit-index>:" inside the value bytes. A
+// in-band marker "VIRELAIC <4-digit-index>:" inside the value bytes. A
 // plain byte scan of the store finds every chunk in file order (the store
 // is append-per-write), exactly like the marker ladder — no struct-layout
 // parsing. Payloads are concatenated after validating the indices are
@@ -1883,8 +1883,8 @@ func readNvramConsole(from storeURL: URL) -> NvramConsoleResult {
     var result = NvramConsoleResult()
     guard let data = try? Data(contentsOf: storeURL) else { return result }
     let bytes = [UInt8](data)
-    let prefix = Array("DIPSHITC ".utf8) // 9 bytes; +4 digits + ":" = marker at i+13
-    let endMarker = Array("DIPSHITC-END".utf8) // 12 bytes; closes every chunk value
+    let prefix = Array("VIRELAIC ".utf8) // 9 bytes; +4 digits + ":" = marker at i+13
+    let endMarker = Array("VIRELAIC-END".utf8) // 12 bytes; closes every chunk value
     guard prefix.count == 9, endMarker.count == 12 else { return result }
 
     // Find every chunk start marker, in file order.
@@ -1909,7 +1909,7 @@ func readNvramConsole(from storeURL: URL) -> NvramConsoleResult {
     }
 
     // Payload of each chunk = bytes between its start marker and the first
-    // DIPSHITC-END after it. The end marker is written atomically with the
+    // VIRELAIC-END after it. The end marker is written atomically with the
     // value by the kernel, so this delimits payloads exactly without parsing
     // the store's structure (variable headers / GUIDs / other variables sit
     // between chunks). Validate the index sequence 0..n-1: a dropped
@@ -1953,7 +1953,7 @@ func readNvramConsole(from storeURL: URL) -> NvramConsoleResult {
 
 func writeNvramConsole(to path: String, result: NvramConsoleResult) {
     var lines: [String] = []
-    lines.append("DIPSHITOS nvram console — claim 0015 (post-exit console bytes via the NVRAM variable channel)")
+    lines.append("VIRELAIOS nvram console — claim 0015 (post-exit console bytes via the NVRAM variable channel)")
     lines.append("date=\(ISO8601DateFormatter().string(from: Date()))")
     lines.append("store=\(varsURL.path)")
     lines.append("chunks=\(result.chunks) complete=\(result.complete)\(result.missing.map { " missing=\($0)" } ?? "") bytes=\(result.text.count)")
@@ -1973,7 +1973,7 @@ func writeNvramConsole(to path: String, result: NvramConsoleResult) {
 
 func writeMarkerDump(to path: String, ladder: [(name: String, offset: Int)]) {
     var lines: [String] = []
-    lines.append("DIPSHITOS marker dump — ADR 0004 D4 fixed-memory-marker fallback (NVRAM ladder)")
+    lines.append("VIRELAIOS marker dump — ADR 0004 D4 fixed-memory-marker fallback (NVRAM ladder)")
     lines.append("date=\(ISO8601DateFormatter().string(from: Date()))")
     lines.append("store=\(varsURL.path)")
     lines.append("")
@@ -2095,7 +2095,7 @@ func fireSnapshotsIfMarker(_ text: String) {
 func startGuestOutputTee() {
     // Guest output → terminal + serial log. Streaming tee: each chunk is
     // written as it arrives; the log is never reloaded to show new bytes.
-    let teeQueue = DispatchQueue(label: "dipshitos.tee")
+    let teeQueue = DispatchQueue(label: "virelaios.tee")
     var logWriteWarned = false
     teeQueue.async {
         let fd = consoleOutputPipe.fileHandleForReading.fileDescriptor
@@ -2121,7 +2121,7 @@ func startGuestOutputTee() {
 
 func startStdinForwarding() {
     // Host stdin → guest serial input (raw bytes, character-oriented).
-    let inputQueue = DispatchQueue(label: "dipshitos.stdin")
+    let inputQueue = DispatchQueue(label: "virelaios.stdin")
     inputQueue.async {
         var buf = [UInt8](repeating: 0, count: 1024)
         while true {
@@ -2212,7 +2212,7 @@ func reportKeyboardKeyState(_ view: VZVirtualMachineView, label: String) {
 // key-sequence surface that types into Road Pops is I3.
 func startKeyInject() {
     guard let keyCode = inputKeyCode else { return }
-    let q = DispatchQueue(label: "dipshitos.keyinject")
+    let q = DispatchQueue(label: "virelaios.keyinject")
     q.async {
         let marker = inputKeyAfter ?? "usb: enumerated"
         let waitDeadline = Date().addingTimeInterval(40)
@@ -2373,7 +2373,7 @@ func macChord(_ token: String) -> (UInt16, NSEvent.ModifierFlags, String)? {
 // real hardware.
 func startChordInject() {
     guard let csv = inputChords else { return }
-    let q = DispatchQueue(label: "dipshitos.chords")
+    let q = DispatchQueue(label: "virelaios.chords")
     q.async {
         let marker = inputChordsAfter ?? "userspace: el0=1"
         let waitDeadline = Date().addingTimeInterval(60)
@@ -2649,7 +2649,7 @@ func startPointerInject() {
         let nowTrusted = AXIsProcessTrustedWithOptions(opts)
         FileHandle.standardOutput.write(Data("PTR-TRUST: requested accessibility prompt, now-trusted=\(nowTrusted ? 1 : 0)\n".utf8))
     }
-    let q = DispatchQueue(label: "dipshitos.ptrseq")
+    let q = DispatchQueue(label: "virelaios.ptrseq")
     q.async {
         let marker = pointerAfter ?? "tasks user-el0 reaped"
         let waitDeadline = Date().addingTimeInterval(120)
@@ -2747,7 +2747,7 @@ func startPointerInject() {
 // log (deterministic choreography, not a sleep).
 func startPointerVirtioInject() {
     guard let script = pointerVirtioScript else { return }
-    let q = DispatchQueue(label: "dipshitos.ptrcv")
+    let q = DispatchQueue(label: "virelaios.ptrcv")
     q.async {
         let marker = pointerVirtioAfter ?? "winloop: present ok"
         let waitDeadline = Date().addingTimeInterval(120)
@@ -2816,9 +2816,9 @@ func startPointerVirtioInject() {
 // API, so each keystroke is a synthesized NSEvent dispatched to the view.
 func startKeyStringInject() {
     guard let text = inputString else { return }
-    let q = DispatchQueue(label: "dipshitos.keyseq")
+    let q = DispatchQueue(label: "virelaios.keyseq")
     q.async {
-        let marker = inputStringAfter ?? "dipshit> "
+        let marker = inputStringAfter ?? "virelai> "
         let waitDeadline = Date().addingTimeInterval(40)
         var sent = false
         while Date() < waitDeadline {
@@ -2923,7 +2923,7 @@ func startKeyStringInject() {
 /// appears in the serial log (default: the kernel terminal state). Shared
 /// by the primary script (claim 6684) and the second phase (claim 4613).
 func forwardScriptOnce(path: String, after: String?, label: String, settle: Double) {
-    let q = DispatchQueue(label: "dipshitos.\(label)")
+    let q = DispatchQueue(label: "virelaios.\(label)")
     q.async {
         let scriptData: Data
         do {
@@ -2986,7 +2986,7 @@ func forwardScriptOnce(path: String, after: String?, label: String, settle: Doub
 // Requires --net (validated at parse time); a no-op without it.
 func startNetInject() {
     guard let path = netInjectPath, let socket = netCaptureReadSocket else { return }
-    let q = DispatchQueue(label: "dipshitos.netinject")
+    let q = DispatchQueue(label: "virelaios.netinject")
     q.async {
         let injectData: Data
         do {
@@ -3212,7 +3212,7 @@ func buildDnsReply(_ reply: inout [UInt8], _ req: [UInt8], _ n: Int, _ hostMAC: 
     var resolvedIP: [UInt8] = [93, 184, 216, 34]
     if qname == "myhost.local" || qname == "gateway.local" {
         resolvedIP = [10, 0, 0, 2]
-    } else if qname == "dipshit.local" {
+    } else if qname == "virelai.local" {
         resolvedIP = [10, 0, 0, 1]
     }
 
@@ -4106,7 +4106,7 @@ enum CustomVirtioSpike {
     /// THE device delegate queue, created here so the injection paths can
     /// schedule their element access onto the SAME serial queue the
     /// callbacks run on (all queue-element access single-threaded).
-    static let deviceQueue = DispatchQueue(label: "dipshitos.customvirtio")
+    static let deviceQueue = DispatchQueue(label: "virelaios.customvirtio")
 
     /// The live device (captured at didCreateDevice; strong — lives as long
     /// as the VM). The input-injection paths dereference it on deviceQueue.

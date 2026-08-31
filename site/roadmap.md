@@ -15,7 +15,7 @@ is the canonical, always-current source; this is the readable summary.
 | Milestone | What landed |
 |-----------|-------------|
 | 0–2 | Boot pipeline, kernel handoff, `ExitBootServices`, identity-map MMU, polled serial console |
-| 1.5 | The interactive `dipshit>` monitor: shell, filesystem, reboot/shutdown |
+| 1.5 | The interactive `virelai>` monitor: shell, filesystem, reboot/shutdown |
 | 3 | Allocator, GIC + timer, scheduler, EL0 + syscalls, uaccess, address spaces, exec |
 | 4 | Entropy/ChaCha20 + ASLR, general filesystem, process registry, IPC, wait, kill, scale |
 | 5 | Networking N1–N11: net TX/RX, ARP, IPv4/ICMP, UDP, the UDP syscall seam, NAT, DHCP, DHCP renew, TCP, TCP retransmission |

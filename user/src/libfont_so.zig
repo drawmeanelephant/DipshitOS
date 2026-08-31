@@ -1,4 +1,4 @@
-//! DipshitOS Shared Font Library (LIBFONT.SO, Milestone 30 Dynamic Linking).
+//! VirelaiOS Shared Font Library (LIBFONT.SO, Milestone 30 Dynamic Linking).
 //!
 //! Freestanding shared library implementing glyph lookup, string metrics,
 //! and 8x8 bitmap font rendering for userland applications.

@@ -1,4 +1,4 @@
-//! DipshitOS ESP user program — DEVCONS.BIN (M22 D14, issue #337, claim 9815).
+//! VirelaiOS ESP user program — DEVCONS.BIN (M22 D14, issue #337, claim 9815).
 //!
 //! Developer console window: split-screen layout with a log pane (top) and
 //! a command prompt (bottom). Commands typed at the prompt execute through
@@ -36,7 +36,7 @@ pub export fn _start() callconv(.c) noreturn {
     const win: u32 = @intCast(win_res);
     ui.write_console("devcons: open\n");
 
-    log_append("DipshitOS Developer Console (M22 D14)");
+    log_append("VirelaiOS Developer Console (M22 D14)");
     log_append("Type commands at the prompt below.");
     log_append("---");
     refresh(win);

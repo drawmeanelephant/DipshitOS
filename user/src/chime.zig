@@ -1,4 +1,4 @@
-//! DipshitOS twenty-seventh ESP user program — CHIME.BIN (Milestone 15,
+//! VirelaiOS twenty-seventh ESP user program — CHIME.BIN (Milestone 15,
 //! Card A4, claim 3206).
 //!
 //! The composition capstone's event-triggered sound: a sound that FIRES ON

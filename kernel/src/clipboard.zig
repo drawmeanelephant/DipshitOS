@@ -1,4 +1,4 @@
-//! DipshitOS bounded kernel clipboard (milestone fourteen, card S1 — claim
+//! VirelaiOS bounded kernel clipboard (milestone fourteen, card S1 — claim
 //! 0169, issue #175).
 //!
 //! ONE shared text buffer for the whole machine: `sys_clipboard_set` (slot

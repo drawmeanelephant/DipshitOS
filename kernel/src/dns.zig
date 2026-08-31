@@ -1,4 +1,4 @@
-//! DipshitOS DNS client (RFC 1035) — milestone twelve, card N2 (claim 7566, Issue #149).
+//! VirelaiOS DNS client (RFC 1035) — milestone twelve, card N2 (claim 7566, Issue #149).
 //!
 //! Encodes standard RFC 1035 A-record queries targeting DNS port 53 over UDP,
 //! parses DNS responses, extracts IPv4 addresses, and handles label decompression.

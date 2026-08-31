@@ -1,4 +1,4 @@
-//! DipshitOS M33 SB6 (claim 6864) live-gate test app — SB6WM.BIN: the
+//! VirelaiOS M33 SB6 (claim 6864) live-gate test app — SB6WM.BIN: the
 //! registered-WM half of the perf-payoff measurement.
 //!
 //! Registers as the WM server (slot 65 REGISTER), binds the SCANOUT writable

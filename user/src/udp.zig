@@ -1,4 +1,4 @@
-//! DipshitOS fifth ESP user program — UDP.BIN (milestone five, card N6,
+//! VirelaiOS fifth ESP user program — UDP.BIN (milestone five, card N6,
 //! claim 1384 — the UDP syscall seam).
 //!
 //! The FIRST network syscall user: this program exercises the milestone-

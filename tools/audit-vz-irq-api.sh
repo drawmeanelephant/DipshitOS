@@ -14,7 +14,7 @@ SDK_PATH="$(xcrun --sdk macosx --show-sdk-path)"
 VZ_PATH="$SDK_PATH/System/Library/Frameworks/Virtualization.framework"
 HV_HEADERS="$SDK_PATH/System/Library/Frameworks/Hypervisor.framework/Headers"
 
-echo "DIPSHITOS VZ IRQ public-API audit (claim 9187)"
+echo "VIRELAIOS VZ IRQ public-API audit (claim 9187)"
 date -u '+date: %Y-%m-%dT%H:%M:%SZ'
 uname -m
 sw_vers

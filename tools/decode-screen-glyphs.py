@@ -48,7 +48,7 @@ phase search is performed, so the decode is deterministic.
 
 ROOT-CAUSE CORRECTION (claim 8961, 2026-08-25): the fleet-remainder
 investigation attributed the old gates' missing leading glyphs
-(`dipshit>` decoding as `shit>`) to this tool's PNG grid search. That
+(`virelai>` decoding as `shit>`) to this tool's PNG grid search. That
 was wrong — the pixels are genuinely ABSENT from the scanout: the M21/
 M27 chrome pass draws the vertical DOCK at x=0..23 (dock_w=24,
 driving_award.zig), which occludes the terminal's first THREE glyph

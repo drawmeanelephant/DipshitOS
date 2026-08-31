@@ -1,6 +1,6 @@
-# Critique prompt: DipshitOS milestone zero
+# Critique prompt: VirelaiOS milestone zero
 
-You are reviewing the milestone-zero deliverables of DipshitOS, a from-scratch
+You are reviewing the milestone-zero deliverables of VirelaiOS, a from-scratch
 AArch64 operating system. Milestone zero must prove only that a Zig-compiled
 AArch64 UEFI application boots and prints a fixed message. There is no kernel,
 no loader, no libc, no POSIX, no graphics, no networking, no filesystem code,

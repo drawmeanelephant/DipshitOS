@@ -1,4 +1,4 @@
-//! DipshitOS NVRAM console channel (M1.5 VZ serial-gate successor work,
+//! VirelaiOS NVRAM console channel (M1.5 VZ serial-gate successor work,
 //! claim 0015).
 //!
 //! The VZ serial gate is blocked because post-exit access to the
@@ -7,13 +7,13 @@
 //! The only proven post-exit device channel is EFI runtime `SetVariable`
 //! (the claim-0009 marker ladder persists post-exit on VZ, observed), so
 //! this module carries console bytes over the same channel: output is
-//! buffered in RAM and persisted as chunked EFI variables `DipshitC0`,
-//! `DipshitC1`, ... Each chunk payload is ≤ 256 bytes — comfortably under
+//! buffered in RAM and persisted as chunked EFI variables `VirelaiC0`,
+//! `VirelaiC1`, ... Each chunk payload is ≤ 256 bytes — comfortably under
 //! the proven-safe post-exit write budget — and each chunk is a FRESH
 //! variable (never a re-write of a big variable, which is what hangs
 //! post-exit on VZ, claim 0013).
 //!
-//! Chunk encoding: the stored value is `DIPSHITC <4-digit-index>:` followed
+//! Chunk encoding: the stored value is `VIRELAIC <4-digit-index>:` followed
 //! by the raw payload bytes. The prefix rides INSIDE the value so the host
 //! can find every chunk with a plain byte scan of the variable store
 //! (file order == write order, same technique as the marker ladder) — no
@@ -49,7 +49,7 @@ const SetVariableFn = *const fn (
 
 /// Payload bytes per persisted chunk. 256 keeps the whole value ≤ ~270
 /// bytes — well under the ~512-byte post-exit write budget proven on VZ
-/// (claim 0013: the ≤512-byte `DipshitP2` probe tail persists post-exit,
+/// (claim 0013: the ≤512-byte `VirelaiP2` probe tail persists post-exit,
 /// while ~2.6 KB+ re-writes hang).
 pub const chunk_cap: usize = 256;
 
@@ -63,26 +63,26 @@ pub const chunk_cap: usize = 256;
 /// chunk is reserved for the overflow notice.
 pub const max_chunks: usize = 128;
 
-/// In-band chunk marker, 14 bytes: "DIPSHITC " + 4 zero-padded decimal
+/// In-band chunk marker, 14 bytes: "VIRELAIC " + 4 zero-padded decimal
 /// digits + ":". Distinctive enough that no real console output collides
 /// (the monitor prints hex/decimal/ASCII, never this exact string).
 pub const marker_len: usize = 14;
-const marker_prefix = "DIPSHITC ";
+const marker_prefix = "VIRELAIC ";
 
 /// In-band end marker appended after every chunk's payload, so the host can
 /// delimit each chunk's payload without parsing the EFI variable store's
 /// structure (the store also holds variable headers, GUIDs, and other
 /// variables between chunk values — a raw byte scan to the NEXT start
 /// marker would swallow them). Console output never contains this string.
-pub const end_marker = "DIPSHITC-END";
+pub const end_marker = "VIRELAIC-END";
 pub const end_marker_len = end_marker.len;
 
-/// Variable naming: `DipshitC` + decimal chunk index (e.g. `DipshitC0`).
-const variable_prefix = "DipshitC";
+/// Variable naming: `VirelaiC` + decimal chunk index (e.g. `VirelaiC0`).
+const variable_prefix = "VirelaiC";
 const variable_name_max: usize = 16;
 
 /// Same vendor GUID as the marker ladder / machine controls
-/// (`M2M2_DIPSHITOS-M`) so one store namespace holds all kernel variables.
+/// (`M2M2_VIRELAIOS-M`) so one store namespace holds all kernel variables.
 const vendor_guid = uefi.Guid{
     .time_low = 0x4d324d32, // "M2M2"
     .time_mid = 0x5f44, // "_D"
@@ -231,7 +231,7 @@ pub fn flush() void {
 
 /// Claim 0015 diagnostic (currently uninvoked from the kernel; kept as a
 /// boot-time aid for future debugging, covered by its own test): persist a
-/// single byte to the fixed variable `DipshitX` the first time it is
+/// single byte to the fixed variable `VirelaiX` the first time it is
 /// called. Used to distinguish "the console write path was never entered"
 /// from "a write hung/failed" when the chunk stream stops. Best effort,
 /// once per boot.
@@ -240,7 +240,7 @@ pub fn debug_mark(byte: u8) void {
     state.debug_marked = true;
     const set_var = state.set_var orelse return;
     var name: [variable_name_max:0]u16 = undefined;
-    const prefix = "DipshitX";
+    const prefix = "VirelaiX";
     for (prefix, 0..) |ch, i| name[i] = ch;
     name[prefix.len] = 0;
     const value = [1]u8{byte};
@@ -303,10 +303,10 @@ test "nvram-console: writes persist newline-terminated chunks in order" {
     write("hello\n");
     write("world\n");
     try std.testing.expectEqual(@as(usize, 2), spy_count);
-    try std.testing.expectEqualStrings("DipshitC0", spy_name(0));
-    try std.testing.expectEqualStrings("DIPSHITC 0000:hello\n" ++ end_marker, spy_values[0][0..spy_lens[0]]);
-    try std.testing.expectEqualStrings("DipshitC1", spy_name(1));
-    try std.testing.expectEqualStrings("DIPSHITC 0001:world\n" ++ end_marker, spy_values[1][0..spy_lens[1]]);
+    try std.testing.expectEqualStrings("VirelaiC0", spy_name(0));
+    try std.testing.expectEqualStrings("VIRELAIC 0000:hello\n" ++ end_marker, spy_values[0][0..spy_lens[0]]);
+    try std.testing.expectEqualStrings("VirelaiC1", spy_name(1));
+    try std.testing.expectEqualStrings("VIRELAIC 0001:world\n" ++ end_marker, spy_values[1][0..spy_lens[1]]);
 }
 
 test "nvram-console: a full buffer persists without a newline" {
@@ -315,11 +315,11 @@ test "nvram-console: a full buffer persists without a newline" {
     write(&many);
     // First chunk filled the 256-byte buffer; 40 bytes remain buffered.
     try std.testing.expectEqual(@as(usize, 1), spy_count);
-    try std.testing.expectEqualStrings("DIPSHITC 0000:", spy_values[0][0..marker_len]);
+    try std.testing.expectEqualStrings("VIRELAIC 0000:", spy_values[0][0..marker_len]);
     try std.testing.expectEqual(@as(usize, chunk_cap), spy_lens[0] - marker_len - end_marker_len);
     flush();
     try std.testing.expectEqual(@as(usize, 2), spy_count);
-    try std.testing.expectEqualStrings("DIPSHITC 0001:", spy_values[1][0..marker_len]);
+    try std.testing.expectEqualStrings("VIRELAIC 0001:", spy_values[1][0..marker_len]);
     try std.testing.expectEqual(@as(usize, 40), spy_lens[1] - marker_len - end_marker_len);
 }
 
@@ -334,7 +334,7 @@ test "nvram-console: a single large write splits across chunks" {
     try std.testing.expectEqual(@as(usize, chunk_cap), spy_lens[1] - marker_len - end_marker_len);
     flush();
     try std.testing.expectEqual(@as(usize, 3), spy_count);
-    try std.testing.expectEqualStrings("DIPSHITC 0002:", spy_values[2][0..marker_len]);
+    try std.testing.expectEqualStrings("VIRELAIC 0002:", spy_values[2][0..marker_len]);
     try std.testing.expectEqual(@as(usize, 10), spy_lens[2] - marker_len - end_marker_len);
 }
 
@@ -343,7 +343,7 @@ test "nvram-console: debug_mark persists once with a fixed name" {
     debug_mark('W');
     debug_mark('W');
     try std.testing.expectEqual(@as(usize, 1), spy_count);
-    try std.testing.expectEqualStrings("DipshitX", spy_name(0));
+    try std.testing.expectEqualStrings("VirelaiX", spy_name(0));
     try std.testing.expectEqual(@as(usize, 1), spy_lens[0]);
     try std.testing.expectEqual(@as(u8, 'W'), spy_values[0][0]);
 }

@@ -1,4 +1,4 @@
-//! DipshitOS seventeenth ESP user program — DESKTOP.BIN (Milestone 11, Card A5).
+//! VirelaiOS seventeenth ESP user program — DESKTOP.BIN (Milestone 11, Card A5).
 //!
 //! Desktop Launcher & Environment Panel.
 //! Provides system diagnostics, a quick application launcher bar, and
@@ -219,7 +219,7 @@ pub const AppState = struct {
         const title_rect = Rect.make(0, 0, window_w, 24);
         ui.draw_rect(win, title_rect, ui.COLOR_SURFACE);
         ui.draw_rect_outline(win, title_rect, 1, ui.COLOR_BORDER);
-        ui.draw_text(win, "DipshitOS", 8, 8, ui.COLOR_TEXT_PRIMARY);
+        ui.draw_text(win, "VirelaiOS", 8, 8, ui.COLOR_TEXT_PRIMARY);
 
         var diag_buf: [32]u8 = undefined;
         var diag_len: usize = 0;

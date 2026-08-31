@@ -1,4 +1,4 @@
-//! DipshitOS Network Profile Manager — NETPROF.BIN (M26 N12, Issue #439).
+//! VirelaiOS Network Profile Manager — NETPROF.BIN (M26 N12, Issue #439).
 //!
 //! Manages persistent network configuration profiles stored in `/data/NET.TXT`.
 //! Supports listing profiles, displaying profile parameters (IP, Gateway, DNS),

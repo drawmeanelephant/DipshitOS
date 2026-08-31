@@ -5,9 +5,9 @@ These rules bind any AI agent or human contributor working in this project.
 ## Project identity
 
 - Ragshit is a local, Git-aware repository context and retrieval engine.
-- It ships inside the DipshitOS repository at `tools/ragshit/`; it can
+- It ships inside the VirelaiOS repository at `tools/ragshit/`; it can
   index any local Git checkout.
-- Its first real customer is the DipshitOS repository; DipshitOS-specific
+- Its first real customer is the VirelaiOS repository; VirelaiOS-specific
   expectations live only in `tests/acceptance/`, never in the core engine.
 - Python 3.12+ standard library first; small dependencies only where they
   provide substantial value. SQLite (FTS5 when available) is the index.

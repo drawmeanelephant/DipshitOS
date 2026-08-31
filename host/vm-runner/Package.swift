@@ -1,6 +1,6 @@
 // swift-tools-version:6.2
 //
-// DipshitOS milestone-zero host launcher.
+// VirelaiOS milestone-zero host launcher.
 // A minimal macOS CLI built on Apple's Virtualization framework that boots a
 // raw GPT+FAT disk image under UEFI (VZEFIBootLoader) and captures the
 // guest's serial console into a log file.

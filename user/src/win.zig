@@ -1,4 +1,4 @@
-//! DipshitOS sixth ESP user program — WIN.BIN (milestone six, card G6,
+//! VirelaiOS sixth ESP user program — WIN.BIN (milestone six, card G6,
 //! claim 0487 — the draw/window syscall seam).
 //!
 //! The FIRST graphics syscall user: this program opens a kernel-owned user

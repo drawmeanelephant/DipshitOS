@@ -6,7 +6,7 @@
 #
 # Mechanism: builds the kernel with -Dfw-mmu-capture=true (default off; the
 # default build is byte-identical), boots it once in a VZ VM with a fresh
-# variable store, and extracts the ASCII variable `DipshitMmu` from
+# variable store, and extracts the ASCII variable `VirelaiMmu` from
 # artifacts/efi-vars.bin. The captured lines record the firmware's
 # SCTLR/TCR/MAIR/TTBR0/TTBR1/ID_AA64MMFR0, a bounded walk of the firmware's
 # TTBR0 tables for the virtio BAR0 window (0x100010000 — the claim-0020

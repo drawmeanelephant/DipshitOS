@@ -12,8 +12,8 @@
 # This gate: build the kernel with -Dnvram-console=true (console TX rides
 # the NVRAM channel, never touching the hanging transport), boot it in a
 # VZ VM, reconstruct the console stream from the chunk variables the kernel
-# wrote (DipshitC0..N, prefix "DIPSHITC <idx>:"), and assert the stream
-# contains the takeover banner, the terminal state line, the dipshit>
+# wrote (VirelaiC0..N, prefix "VIRELAIC <idx>:"), and assert the stream
+# contains the takeover banner, the terminal state line, the virelai>
 # prompt, and real command output (version, mem) from the scripted session.
 #
 # Flakiness: the VZ post-exit window is a documented flaky death site
@@ -66,10 +66,10 @@ needs_stream() {
         return 1
     fi
     for needle in \
-        "DipshitOS kernel has seized control." \
+        "VirelaiOS kernel has seized control." \
         "kernel terminal state" \
-        "dipshit> " \
-        "dipshit-kernel" \
+        "virelai> " \
+        "virelai-kernel" \
         "mem: descriptors=" \
         "nvram-console-ok" \
         "available commands:" \

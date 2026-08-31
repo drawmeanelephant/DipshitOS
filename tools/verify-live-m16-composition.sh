@@ -35,8 +35,8 @@
 #
 # Run isolation (#523 item 2 / issue #528; fleet remainder claim 2259):
 # private stacked disk (pristine-per-boot overlay), EFI var store, serial
-# log, and scripts under $RUN_DIR per boot. Set DIPSHIT_GATE_SUFFIX=_alt
-# for distinct canonical evidence names; DIPSHIT_KEEP_RUN=1 keeps the
+# log, and scripts under $RUN_DIR per boot. Set VIRELAI_GATE_SUFFIX=_alt
+# for distinct canonical evidence names; VIRELAI_KEEP_RUN=1 keeps the
 # scratch dir.
 #
 # Evidence saved under artifacts/: live-m16-composition-gate.txt,
@@ -50,7 +50,7 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 GATE_LOG="$(art live-m16-composition-gate.txt)"
@@ -130,13 +130,13 @@ run_one() {
         guard_row=0 echo_ok=0 fatal=0
     if [ -f "$serial_copy" ]; then
         bytes="$(wc -c < "$serial_copy" | tr -d ' ')"
-        [ "$(grep -aFxc -- "DipshitOS kernel has seized control." "$serial_copy" || true)" = 1 ] && banner=1
+        [ "$(grep -aFxc -- "VirelaiOS kernel has seized control." "$serial_copy" || true)" = 1 ] && banner=1
 
         # C1: the bigger app with real globals — 28 KiB image (past the old
         # 16 KiB bound), exact data-page accounting, the success marker, exit 42.
         [ "$(grep -aFc -- "exec: loaded GLOBALS.BIN size=0x0000000000007000" "$serial_copy" || true)" = 1 ] && globals_loaded=1
         grep -a -qF -- "data=0x0000000000001010 datapages=2" "$serial_copy" && globals_data=1
-        # Substring match (the marker can land right after the "dipshit> "
+        # Substring match (the marker can land right after the "virelai> "
         # prompt on the same serial line).
         [ "$(grep -aFc -- "globals: data bss ok" "$serial_copy" || true)" -ge 1 ] && globals_ok=1
         grep -a -qE -- "procs: id=[0-9]+ name=GLOBALS.BIN state=exited .*exit=42" "$serial_copy" && globals_exit=1
@@ -193,7 +193,7 @@ run_one() {
 
 : > "$REPORT"
 {
-    echo "DIPSHITOS live M16 composition gate (claim 2714) — the 'kernel grew up' capstone on VZ"
+    echo "VIRELAIOS live M16 composition gate (claim 2714) — the 'kernel grew up' capstone on VZ"
     echo "revision: $REVISION branch=$BRANCH boots=$BOOTS dirty-files=$DIRTY"
     echo "script1: $(cat "$SCRIPT1" | tr '\n' '|')"
     echo "script2: $(cat "$SCRIPT2" | tr '\n' '|')"

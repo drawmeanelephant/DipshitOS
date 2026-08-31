@@ -94,7 +94,7 @@ fi
 echo "filled=$A_FILLED rect=$A_RECT fatal=$A_FAULT" | tee -a "$REPORT"
 
 {
-    echo "DIPSHITOS live rect-granular damage gate (claim 2382) — the compositor repainted exactly the written union rect {8,8,108,68}, not the whole 128x96 window"
+    echo "VIRELAIOS live rect-granular damage gate (claim 2382) — the compositor repainted exactly the written union rect {8,8,108,68}, not the whole 128x96 window"
     echo "revision: $REVISION branch=$BRANCH dirty-files=$DIRTY"
     echo "date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     echo

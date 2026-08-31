@@ -1,4 +1,4 @@
-//! DipshitOS virtio-pci sound transport (milestone fifteen — claim 6140
+//! VirelaiOS virtio-pci sound transport (milestone fifteen — claim 6140
 //! card A1 transport, claim 5877 card A2 PCM playback).
 //!
 //! Drives the device the runner attaches as `VZVirtioSoundDeviceConfiguration`

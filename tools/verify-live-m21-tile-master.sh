@@ -39,7 +39,7 @@
 # target sits inside that strip.
 #
 # Run isolation (#523 item 2): private stacked disk + EFI vars + serial log
-# + screen captures under $RUN_DIR; DIPSHIT_GATE_SUFFIX/_KEEP_RUN supported.
+# + screen captures under $RUN_DIR; VIRELAI_GATE_SUFFIX/_KEEP_RUN supported.
 #
 # Class B — Apple silicon + VZ only; boots real VMs. A green CI badge proves
 # class A only and says nothing about this gate.
@@ -58,7 +58,7 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 GATE_LOG="$(art live-m21-tile-gate.txt)"
@@ -367,7 +367,7 @@ else
 fi
 
 {
-    echo "DIPSHITOS M21 W1/W2 tiling + master-detail gate (claim 8777) — compositor geometry + paint, live on VZ hardware"
+    echo "VIRELAIOS M21 W1/W2 tiling + master-detail gate (claim 8777) — compositor geometry + paint, live on VZ hardware"
     echo "revision: $REVISION branch=$BRANCH dirty-files=$DIRTY"
     echo "phase: exec M21DEMO.BIN (two colored user windows), then EL1h halves — run A: dui tile 2 + dui tile 3 + dui; run B: + dui master + dui; marker-driven capture decoded per run"
     echo "assertions: m21demo open/fill/present/loop markers for both windows; dui tile: id=2 mode=on master=2 + dui tile: id=3 mode=on master=2 stack=3; run A registry rows rect=24,0,837,700 (master-left) + rect=861,0,419,700 (detail-right) + dui: tiling=on master=2 stack=3 side=left; run B adds dui master: side=right master=3 stack=2 + rows rect=24,0,419,700 + rect=443,0,837,700 + tiling=on master=3 stack=2 side=right; run-A capture shows red@ (112,64) + cyan@(1786,64) + darkblue-dominant master strip + black-dominant detail strip; run-B capture shows cyan MOVED to (950,64) and gone from (1786,64)"

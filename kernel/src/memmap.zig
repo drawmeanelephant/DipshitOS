@@ -1,4 +1,4 @@
-//! Captured EFI memory-map view for the Dipshit Monitor `mem` command
+//! Captured EFI memory-map view for the Virelai Monitor `mem` command
 //! (Milestone 1.5, commands & personality).
 //!
 //! ADR 0004 D2: the map the kernel captured *before* ExitBootServices is

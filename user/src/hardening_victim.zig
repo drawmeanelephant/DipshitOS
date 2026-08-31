@@ -1,4 +1,4 @@
-//! DipshitOS twenty-fourth ESP user program — VICTIM.BIN (Milestone 14,
+//! VirelaiOS twenty-fourth ESP user program — VICTIM.BIN (Milestone 14,
 //! Card S4, claim 4482).
 //!
 //! The hostile-consumer proof's VICTIM: opens user window 2 (OWNED by this

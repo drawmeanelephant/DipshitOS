@@ -1,4 +1,4 @@
-//! DipshitOS third ESP user program — PEER.BIN (milestone-four follow-on 3,
+//! VirelaiOS third ESP user program — PEER.BIN (milestone-four follow-on 3,
 //! card 3f — claim 5965; extended by follow-on 4 card 4a — claim 5799).
 //!
 //! The receiving half of the first inter-process data path. COUNTER.BIN

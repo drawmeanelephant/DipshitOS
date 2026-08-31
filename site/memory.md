@@ -7,7 +7,7 @@ tags: [architecture, mmu, memory]
 
 # Memory model
 
-DipshitOS is identity-mapped with per-task user roots. There is no swap and
+VirelaiOS is identity-mapped with per-task user roots. There is no swap and
 no kernel heap in the device paths.
 
 ## Physical allocation

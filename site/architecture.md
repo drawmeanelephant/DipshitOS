@@ -6,7 +6,7 @@ tags: [architecture, overview]
 
 # Architecture
 
-DipshitOS is a layered, freestanding kernel with no libc and no heap in the
+VirelaiOS is a layered, freestanding kernel with no libc and no heap in the
 boot-critical paths — bounded fixed-BSS storage is the norm. This page is the
 map; the satellites below carry the detail.
 
@@ -21,7 +21,7 @@ map; the satellites below carry the detail.
 │  ipc/win/events/file/exec/kill/tcp/fs/clip/   │
 │  timer/audio/pipe/font/ping/net/mmap          │
 ├───────────────────────────────────────────────┤
-│  Monitor + shell (dipshit>)                   │
+│  Monitor + shell (virelai>)                   │
 │  Road Pops terminal · Driving Award compositor │
 ├───────────────────────────────────────────────┤
 │  SMP scheduler (round-robin, 2 cores)         │

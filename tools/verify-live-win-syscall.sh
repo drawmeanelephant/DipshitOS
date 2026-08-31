@@ -36,7 +36,7 @@
 #
 # Run isolation (#523 item 2 / issue #528, claim 5069): private stacked
 # disk + EFI vars + serial log + screen captures under $RUN_DIR;
-# DIPSHIT_GATE_SUFFIX/_KEEP_RUN supported.
+# VIRELAI_GATE_SUFFIX/_KEEP_RUN supported.
 #
 # Class B — Apple silicon + VZ only; boots real VMs. A green CI badge proves
 # class A only and says nothing about this gate.
@@ -54,7 +54,7 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 GATE_LOG="$(art live-win-syscall-gate.txt)"
@@ -297,7 +297,7 @@ EOF
 fi
 
 {
-    echo "DIPSHITOS live draw/window-syscall gate (claim 0487, milestone six card G6) — EL0 graphics + ownership on real VZ hardware"
+    echo "VIRELAIOS live draw/window-syscall gate (claim 0487, milestone six card G6) — EL0 graphics + ownership on real VZ hardware"
     echo "revision: $REVISION branch=$BRANCH dirty-files=$DIRTY"
     echo "phase: scripted exec of WIN.BIN (open/fill/present/exit -> AUTO-CLOSE on exit), then win + syscalls on the same kernel state, then exec of WINLOOP.BIN (the persistent window) with win + syscalls observation + the decoded capture"
     echo "assertions: win: fill ok / present ok + procs WIN.BIN exited status=87, dui: windows=2 after the exit (auto-close, close=0), winloop: loop ok, dui: windows=3 + dui[2]: user user rect=64,64,256,192 owner=2 (fixed windows owner=-), dui list 2 -> matches=1 + dui list 0 -> matches=0, syscalls implemented=46 with open=1/close=0 (pre-WINLOOP) + open=2/fill=8/present=2 (post-WINLOOP), red + cyan + white blocks at their spots, dark-blue background dominant, no terminal foreground inside the window rect"

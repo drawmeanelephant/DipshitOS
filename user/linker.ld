@@ -1,4 +1,4 @@
-/* DipshitOS user program linker script (milestone-three card 6, claim 6783).
+/* VirelaiOS user program linker script (milestone-three card 6, claim 6783).
  *
  * The user program is a flat AArch64 image (tools/elf2bin.py, DSK1 format —
  * the same tooling as KERNEL.BIN) loaded from the ESP by the kernel's `exec`

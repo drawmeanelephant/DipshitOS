@@ -1,4 +1,4 @@
-//! DipshitOS M33 SB3 (claim 3633) live-gate test app — SB3OWN.BIN: the
+//! VirelaiOS M33 SB3 (claim 3633) live-gate test app — SB3OWN.BIN: the
 //! migrated-app half of the window surface handoff proof.
 //!
 //! Opens a user window (frozen slot 12), BINDS a shared-anonymous surface as

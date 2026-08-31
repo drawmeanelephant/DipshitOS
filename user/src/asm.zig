@@ -1,4 +1,4 @@
-//! DipshitOS ESP user program — ASM.BIN (M22 D2, issue #325, claim 9815).
+//! VirelaiOS ESP user program — ASM.BIN (M22 D2, issue #325, claim 9815).
 //!
 //! A tiny two-pass AArch64 assembler running ON the machine: reads a
 //! bounded source file from the mounted filesystems (sys_file_open/read,

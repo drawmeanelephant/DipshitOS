@@ -47,7 +47,7 @@
 # private DiskImageKit stacked disk (read-only base + throwaway ASIF
 # overlay), a private EFI var store, and writes its serial log and screen
 # captures under $RUN_DIR before they are copied to the canonical evidence
-# names. DIPSHIT_GATE_SUFFIX=_alt / DIPSHIT_KEEP_RUN=1 supported.
+# names. VIRELAI_GATE_SUFFIX=_alt / VIRELAI_KEEP_RUN=1 supported.
 #
 # Class B — Apple silicon + VZ only; boots real VMs. A green CI badge
 # proves class A only and says nothing about this gate.
@@ -65,7 +65,7 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 GATE_LOG="$(art live-screen-gate.txt)"

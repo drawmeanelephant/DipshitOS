@@ -51,7 +51,7 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 GATE_LOG="$(art win-hig-gate.txt)"
@@ -202,7 +202,7 @@ if [ "$RC" = 0 ] && [ "$CYCLED" = 1 ] && [ "$THREE" = 1 ] && [ "$OBSDONE" = 1 ] 
 fi
 
 {
-    echo "DIPSHITOS win HIG gate (milestone eight card U5, claim 0935) — the focus ring + title bars are visible and move with focus, on real VZ"
+    echo "VIRELAIOS win HIG gate (milestone eight card U5, claim 0935) — the focus ring + title bars are visible and move with focus, on real VZ"
     echo "revision: $REVISION branch=$BRANCH dirty-files=$DIRTY"
     echo "session: dui cycle (focus -> clock) + exec WINLOOP.BIN (a user window) + dui report; capture on windows=3"
     echo "assertions: cycle marker, winloop present marker, serial marker, runner capture flag, ring-on-focused-window + edge-not-ringed + title-bar pixels"

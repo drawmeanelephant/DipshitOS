@@ -1,4 +1,4 @@
-//! DipshitOS twenty-fifth ESP user program — HARDEN.BIN (Milestone 14,
+//! VirelaiOS twenty-fifth ESP user program — HARDEN.BIN (Milestone 14,
 //! Card S4, claim 4482).
 //!
 //! The hostile-consumer proof: a SEPARATE process from VICTIM.BIN attempts

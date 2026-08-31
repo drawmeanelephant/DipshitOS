@@ -1,4 +1,4 @@
-//! DipshitOS milestone-three uaccess card (claim 6120), extended by the
+//! VirelaiOS milestone-three uaccess card (claim 6120), extended by the
 //! per-task address-space card (claim 5804).
 //!
 //! Fault-safe, bounded user-memory transfer primitives over the EL0

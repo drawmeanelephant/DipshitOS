@@ -1,4 +1,4 @@
-//! DipshitOS VM Depth Test Binary — VMTEST.BIN (Milestone 29, Issue #598).
+//! VirelaiOS VM Depth Test Binary — VMTEST.BIN (Milestone 29, Issue #598).
 //!
 //! Verifies userland anonymous mmap, lazy demand-zero fault resolution,
 //! write faults, eager MAP_POPULATE, and munmap teardown.

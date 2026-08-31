@@ -48,8 +48,8 @@
 #
 # Run isolation (#523 item 2 / issue #528; fleet remainder claim 2259):
 # private stacked disk (pristine-per-boot overlay), EFI var store, serial
-# log, and scripts under $RUN_DIR per boot. Set DIPSHIT_GATE_SUFFIX=_alt
-# for distinct canonical evidence names; DIPSHIT_KEEP_RUN=1 keeps the
+# log, and scripts under $RUN_DIR per boot. Set VIRELAI_GATE_SUFFIX=_alt
+# for distinct canonical evidence names; VIRELAI_KEEP_RUN=1 keeps the
 # scratch dir.
 #
 # Evidence saved under artifacts/: live-m16-resources-gate.txt,
@@ -63,7 +63,7 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 GATE_LOG="$(art live-m16-resources-gate.txt)"
@@ -121,7 +121,7 @@ run_one() {
         bounded_left=0 echo_ok=0 fatal=0
     if [ -f "$serial_copy" ]; then
         bytes="$(wc -c < "$serial_copy" | tr -d ' ')"
-        [ "$(grep -aFxc -- "DipshitOS kernel has seized control." "$serial_copy" || true)" = 1 ] && banner=1
+        [ "$(grep -aFxc -- "VirelaiOS kernel has seized control." "$serial_copy" || true)" = 1 ] && banner=1
 
         # 1. The BEFORE `resources` read: the baseline before filling (the
         # first resources line in the log).
@@ -198,7 +198,7 @@ run_one() {
 
 : > "$REPORT"
 {
-    echo "DIPSHITOS live M16 resources gate (claim 0339) — measure the pools, grow the exhausted one"
+    echo "VIRELAIOS live M16 resources gate (claim 0339) — measure the pools, grow the exhausted one"
     echo "revision: $REVISION branch=$BRANCH boots=$BOOTS dirty-files=$DIRTY"
     echo "script: $(cat "$SCRIPT" | tr '\n' '|')"
     echo "date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"

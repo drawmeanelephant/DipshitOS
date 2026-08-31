@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Convert a Zig aarch64-freestanding ELF executable into the DipshitOS flat
+"""Convert a Zig aarch64-freestanding ELF executable into the VirelaiOS flat
 kernel image (KERNEL.BIN). Pure Python 3 standard library only.
 
 Format v1 (see docs/decisions/0002-kernel-handoff.md):
@@ -197,7 +197,7 @@ def main(argv):
               "image_size=%d" % (argv[1], h["magic"], h["flags"],
                                  h["entry_offset"], h["image_size"]))
         if h["magic"] not in (MAGIC, MAGIC_SEGMENTS):
-            print("elf2bin: WARNING: magic mismatch (not a DipshitOS kernel "
+            print("elf2bin: WARNING: magic mismatch (not a VirelaiOS kernel "
                   "image?)", file=sys.stderr)
             return 1
         return 0

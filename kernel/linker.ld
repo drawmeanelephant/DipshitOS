@@ -1,4 +1,4 @@
-/* DipshitOS kernel linker script.
+/* VirelaiOS kernel linker script.
  *
  * The default lld layout aligns LOAD segments to the 64 KiB max page size,
  * which would pad the flat kernel image (KERNEL.BIN) with ~64 KiB of zeros.

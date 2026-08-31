@@ -1,4 +1,4 @@
-//! DipshitOS fifteenth ESP user program — NOTEPAD.BIN (Milestone 11, Card A3).
+//! VirelaiOS fifteenth ESP user program — NOTEPAD.BIN (Milestone 11, Card A3).
 //!
 //! Interactive graphical text editor with multi-line editing, cursor navigation,
 //! and persistent load/save from `/data/notes.txt` using M10 storage syscalls.

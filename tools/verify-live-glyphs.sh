@@ -49,7 +49,7 @@
 # private DiskImageKit stacked disk (read-only base + throwaway ASIF
 # overlay), a private EFI var store, and writes its serial log and screen
 # captures under $RUN_DIR before they are copied to the canonical evidence
-# names. DIPSHIT_GATE_SUFFIX=_alt / DIPSHIT_KEEP_RUN=1 supported.
+# names. VIRELAI_GATE_SUFFIX=_alt / VIRELAI_KEEP_RUN=1 supported.
 #
 # Class B — Apple silicon + VZ only; boots real VMs.
 #
@@ -71,7 +71,7 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 GATE_LOG="$(art live-glyphs-gate.txt)"
@@ -143,7 +143,7 @@ fi
 # Phase 1 — the shared-seam serial evidence (the session IS on screen).
 grep -q "roadpops: armed target=fbtext" "$(art live-glyphs-serial.log)" || fail "the Road Pops tee was not armed with the framebuffer target"
 grep -q "text: boot banner presented" "$(art live-glyphs-serial.log)" || fail "boot banner not presented (the tee's first present)"
-grep -q "DipshitOS - AArch64 firmware-assisted kernel monitor" "$(art live-glyphs-serial.log)" || fail "serial transcript lost the banner (shared-seam regression)"
+grep -q "VirelaiOS - AArch64 firmware-assisted kernel monitor" "$(art live-glyphs-serial.log)" || fail "serial transcript lost the banner (shared-seam regression)"
 
 # Phase 2 — THE MIRROR TRIPWIRE: decode the captured PNG against the
 # kernel's own LSB-left font table in both orientations and assert the text
@@ -192,10 +192,10 @@ echo "mirrored decode: $mir_u unknown cells of $mir_i ink — decisively worse (
 
 # 2c. The semantic proof: the decoded session contains the boot banner's
 # first word and the prompt — the text is not just glyph-shaped, it reads.
-if ! printf '%s\n' "$DECODE" | grep -q "DipshitOS - AArch64"; then
+if ! printf '%s\n' "$DECODE" | grep -q "VirelaiOS - AArch64"; then
     fail "the decoded session does not contain the boot banner line — the text does not read forward"
 fi
-if ! printf '%s\n' "$DECODE" | grep -q "dipshit>"; then
+if ! printf '%s\n' "$DECODE" | grep -q "virelai>"; then
     fail "the decoded session does not contain the prompt — the terminal session did not render"
 fi
 echo "decoded session reads forward (banner + prompt present)"

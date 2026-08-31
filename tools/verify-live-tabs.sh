@@ -36,12 +36,12 @@
 # No ScreenCaptureKit, no Screen Recording TCC permission, no activation
 # wall, and NO GRID SEARCH in the decoder — tools/decode-screen-glyphs.py
 # --raw decodes at the kernel's fixed text grid (origin 0,0, 8px cells),
-# which is also the fix for the leading-glyph-loss decode bug (`dipshit>`
+# which is also the fix for the leading-glyph-loss decode bug (`virelai>`
 # decoding as `shit>`) that hid every probe row from the old gate.
 #
 # Run isolation (#523 item 2, claim 6637): private stacked disk + EFI
 # vars + serial log + snapshot file per boot under $RUN_DIR.
-# DIPSHIT_GATE_SUFFIX for concurrent instances, DIPSHIT_KEEP_RUN=1 to
+# VIRELAI_GATE_SUFFIX for concurrent instances, VIRELAI_KEEP_RUN=1 to
 # keep the scratch dir.
 #
 # Class B — Apple silicon + VZ only.
@@ -53,7 +53,7 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 GATE_LOG="$(art live-tabs-gate.txt)"

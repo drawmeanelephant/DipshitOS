@@ -25,9 +25,9 @@
 # overlay), a private EFI var store (recreated fresh per boot, as the
 # pre-isolation gate did), and a private serial log under $RUN_DIR — two
 # concurrent instances cannot clobber each other's disks, NVRAM, or
-# evidence. Set DIPSHIT_GATE_SUFFIX=_alt to give this instance its own
+# evidence. Set VIRELAI_GATE_SUFFIX=_alt to give this instance its own
 # canonical evidence names (two simultaneous instances MUST differ), and
-# DIPSHIT_KEEP_RUN=1 to keep the scratch dir.
+# VIRELAI_KEEP_RUN=1 to keep the scratch dir.
 #
 # Class B — Apple silicon + VZ only; boots a real VM.
 #
@@ -45,7 +45,7 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 GATE_LOG="$(art live-help-gate.txt)"
@@ -105,7 +105,7 @@ run_one() {
     SERIAL_BYTES=$(wc -c < "$SER" 2>/dev/null | tr -d ' ')
     local BANNER=0 GROUP_ID=0 GROUP_MEM=0 GROUP_GFX=0 FOOTER=0 CMD_DETAIL=0 CMD_USAGE=0 TOPIC_NET=0 TOPIC_WIN=0 TOPIC_STORAGE=0 TOPIC_GFX=0 CMD_WINS=0 ECHO=0
     if [ -f "$SER" ]; then
-        grep -qF -- "DipshitOS kernel has seized control." "$SER" && BANNER=1
+        grep -qF -- "VirelaiOS kernel has seized control." "$SER" && BANNER=1
         # Grouped catalog: the ADR 0008 D1 group headers (not the flat list).
         # One grep per flag, each on its own line — bash 3.2 `set -e` misbehaves
         # on a backslash-continued `&&` chain inside a function.
@@ -134,7 +134,7 @@ run_one() {
 
 : > "$REPORT"
 {
-    echo "DIPSHITOS live-help gate (claim 3275) — the ADR 0008 help walk on real VZ hardware"
+    echo "VIRELAIOS live-help gate (claim 3275) — the ADR 0008 help walk on real VZ hardware"
     echo "revision: $REVISION branch=$BRANCH boots=$BOOTS dirty-files=$DIRTY"
     echo "script: $SCRIPT (help / help net / help <topics> / help syscalls / echo help-live-ok)"
     echo "date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"

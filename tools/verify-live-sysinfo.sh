@@ -29,7 +29,7 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 GATE_LOG="$(art live-sysinfo-gate.txt)"
@@ -82,8 +82,8 @@ run_one() {
     local SERIAL_BYTES=0 BANNER=0 HEADER=0 CPU=0 MEMORY=0 ALLOC=0 STORAGE=0 FREE=0 NETWORK=0 GRAPHICS=0 INPUT=0 UPTIME=0 REPLY=0
     if [ -f "$SER" ]; then
         SERIAL_BYTES=$(wc -c < "$SER" 2>/dev/null | tr -d ' ')
-        grep -qF -- "DipshitOS kernel has seized control." "$SER" && BANNER=1
-        grep -qF -- "sysinfo: DipshitOS AArch64 support snapshot" "$SER" && HEADER=1
+        grep -qF -- "VirelaiOS kernel has seized control." "$SER" && BANNER=1
+        grep -qF -- "sysinfo: VirelaiOS AArch64 support snapshot" "$SER" && HEADER=1
         grep -qF -- "  cpu:        arch=aarch64" "$SER" && CPU=1
         grep -qF -- "  memory:     descriptors=" "$SER" && MEMORY=1
         grep -qF -- "  allocator:  armed=" "$SER" && ALLOC=1

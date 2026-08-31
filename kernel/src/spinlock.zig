@@ -1,4 +1,4 @@
-//! DipshitOS kernel spinlock synchronization primitives (Milestone 28, claim 6438).
+//! VirelaiOS kernel spinlock synchronization primitives (Milestone 28, claim 6438).
 //!
 //! Provides mutual exclusion across multi-core processors (AArch64 SMP) without
 //! allocation or external dependencies.

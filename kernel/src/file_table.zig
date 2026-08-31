@@ -1,4 +1,4 @@
-//! DipshitOS Milestone 10: Kernel Per-Process File Handle Table (ADR 0010, Cards F1 & F2).
+//! VirelaiOS Milestone 10: Kernel Per-Process File Handle Table (ADR 0010, Cards F1 & F2).
 //!
 //! Exposes a bounded in-memory file handle table for EL0 userland storage:
 //! - 8 open file handles per process slot (`max_handles_per_process = 8`).

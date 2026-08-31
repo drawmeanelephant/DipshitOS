@@ -1,4 +1,4 @@
-//! DipshitOS virtio-pci network transport (milestone five, card N1 —
+//! VirelaiOS virtio-pci network transport (milestone five, card N1 —
 //! claim 1373).
 //!
 //! Drives the device the runner attaches as `VZVirtioNetworkDeviceConfiguration`

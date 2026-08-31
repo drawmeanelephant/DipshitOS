@@ -35,7 +35,7 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 GATE_LOG="$(art live-editor-gate.txt)"
@@ -103,7 +103,7 @@ run_one() {
     local PALETTE_OPEN=0 RECENT_OPEN=0 THEME_CYCLE=0 BOOKMARK_TOGGLE=0 MULTI_CURSOR=0 TREE_TOGGLE=0 TREE_OPEN=0 SAVE_OK=0
     if [ -f "$SER" ]; then
         SERIAL_BYTES=$(wc -c < "$SER" 2>/dev/null | tr -d ' ')
-        grep -qF -- "DipshitOS kernel has seized control." "$SER" && BANNER=1
+        grep -qF -- "VirelaiOS kernel has seized control." "$SER" && BANNER=1
         grep -qF -- "edit: ready" "$SER" && EDIT_READY=1
         grep -qF -- "edit: undo" "$SER" && UNDO=1
         grep -qF -- "edit: toggle-lines" "$SER" && TOGGLE_LINES=1
@@ -135,7 +135,7 @@ run_one() {
 
 : > "$REPORT"
 {
-    echo "DIPSHITOS live-editor gate (Milestone 23 complete E1-E25) — undo, search, replace, autoindent, brackets, lines, delete-line, palette, recents, themes, bookmarks, multi-cursor, tree, save, goto, tabs on VZ"
+    echo "VIRELAIOS live-editor gate (Milestone 23 complete E1-E25) — undo, search, replace, autoindent, brackets, lines, delete-line, palette, recents, themes, bookmarks, multi-cursor, tree, save, goto, tabs on VZ"
     echo "revision: $REVISION branch=$BRANCH boots=$BOOTS dirty-files=$DIRTY"
     echo "phase 1: exec EDIT.BIN from monitor"
     echo "phase 2: input chords via custom-virtio input queue"

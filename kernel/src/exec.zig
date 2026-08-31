@@ -1,4 +1,4 @@
-//! DipshitOS ESP exec (milestone-three card 6, claim 6783; extended by the
+//! VirelaiOS ESP exec (milestone-three card 6, claim 6783; extended by the
 //! milestone-four follow-on claim 0826 — concurrent processes).
 //!
 //! Loads a real user program from the ESP and enters it at EL0. The
@@ -1744,7 +1744,7 @@ fn build_image(alloc_arg: std.mem.Allocator) !void {
 
     const root_off: usize = @intCast((esp_offset + data_start) * 512);
     var root = [_]u8{0} ** 512;
-    write_entry(&root, 0, "DIPSHITOS  ", 0x08, 0, 0);
+    write_entry(&root, 0, "VIRELAIOS  ", 0x08, 0, 0);
     write_entry(&root, 1, "BOOTED  TXT", 0x20, 5, 3);
     @memcpy(saved_image[root_off .. root_off + 512], &root);
     const b_off: usize = @intCast((esp_offset + data_start + 3) * 512);

@@ -50,7 +50,7 @@
 # verify-vz aggregate is re-run separately as proof).
 #
 # Run isolation (#523 item 2 / issue #528, claim 5069): private stacked
-# disk + EFI vars + serial log under $RUN_DIR; DIPSHIT_GATE_SUFFIX/_KEEP_RUN
+# disk + EFI vars + serial log under $RUN_DIR; VIRELAI_GATE_SUFFIX/_KEEP_RUN
 # supported.
 #
 # ---------------------------------------------------------------------------
@@ -93,7 +93,7 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 GATE_LOG="$(art live-input-gate.txt)"
@@ -197,7 +197,7 @@ if [ "$RC" = 0 ] && [ "$ARMED" = 1 ] && [ "$REPORTED" = 1 ] && [ "$EVENTS" = 1 ]
 fi
 
 {
-    echo "DIPSHITOS live input gate (claim 6050, milestone seven card I3) — scripted keystrokes drive Road Pops, on real VZ hardware"
+    echo "VIRELAIOS live input gate (claim 6050, milestone seven card I3) — scripted keystrokes drive Road Pops, on real VZ hardware"
     echo "revision: $REVISION branch=$BRANCH dirty-files=$DIRTY"
     echo "phase: keyboard types input\\n (the I3 monitor command) after the boot self-test"
     echo "assertions: boot-time input arming, the typed input command's report (events=6 = i,n,p,u,t,Enter; dropped=0; kb-usage=0x28 kb-byte=0xa = Enter), the serial marker, the runner's input-string flag line"
@@ -321,7 +321,7 @@ if [ "$VRC" = 0 ] && [ "$G_DEVICE" = 1 ] && [ "$G_Q3ARMED" = 1 ] && [ "$G_REPORT
 fi
 
 {
-    echo "DIPSHITOS live input gate — claim 9588 phase: injected keys arrive over the custom-virtio INPUT queue, HEADLESS, on real VZ hardware"
+    echo "VIRELAIOS live input gate — claim 9588 phase: injected keys arrive over the custom-virtio INPUT queue, HEADLESS, on real VZ hardware"
     echo "revision: $REVISION branch=$BRANCH dirty-files=$DIRTY"
     echo "phase: --via-virtio injects input\\n as HID-shaped 16-byte messages (queue 3); no --display, no --input, no window"
     echo "assertions: guest q3 pool armed; input report events=6 kb-usage=0x28 kb-byte=0xa WITH armed=0 (no USB keyboard attached); q2 push-echo coexistence; serial marker; host DRIVER_OK + enqueues + transport=cv-input; negative: no synthesis/window lines"

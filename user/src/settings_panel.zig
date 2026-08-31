@@ -1,4 +1,4 @@
-//! DipshitOS thirtieth ESP user program -- SETTINGS.BIN (Issue #214).
+//! VirelaiOS thirtieth ESP user program -- SETTINGS.BIN (Issue #214).
 //!
 //! GUI settings panel. Reads current settings from `/data/SETTINGS.TXT`
 //! via the M10 file seam, displays them in labeled TextInput widgets,
@@ -182,7 +182,7 @@ pub const AppState = struct {
             self.wizard_step = 1;
             self.update_widget_layout();
             // Set sane defaults
-            self.input_hostname.set_text("dipshitos");
+            self.input_hostname.set_text("virelaios");
             self.dropdown_theme.set_selected_by_name("dark");
             self.input_prompt.set_text("$ ");
             if (self.last_saved_theme_len == 0) {
@@ -222,7 +222,7 @@ pub const AppState = struct {
     }
 
     pub fn reset_defaults(self: *AppState) void {
-        self.input_hostname.set_text("dipshitos");
+        self.input_hostname.set_text("virelaios");
         self.dropdown_theme.set_selected_by_name("dark");
         self.input_prompt.set_text("$ ");
         _ = ui.set_theme("dark");
@@ -545,7 +545,7 @@ test "settings: AppState wizard flow and reset_defaults" {
 
     // Reset defaults
     app.reset_defaults();
-    try std.testing.expectEqualStrings("dipshitos", app.input_hostname.get_text());
+    try std.testing.expectEqualStrings("virelaios", app.input_hostname.get_text());
     try std.testing.expectEqualStrings("dark", app.dropdown_theme.selected_text());
     try std.testing.expectEqualStrings("$ ", app.input_prompt.get_text());
 }

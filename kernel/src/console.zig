@@ -1,4 +1,4 @@
-//! Dipshit Monitor console abstraction (Milestone 1.5, commands & personality).
+//! Virelai Monitor console abstraction (Milestone 1.5, commands & personality).
 //!
 //! A tiny, transport-agnostic console interface. The command layer never
 //! knows whether bytes eventually reach a PL011, a 16550, a virtio-console,

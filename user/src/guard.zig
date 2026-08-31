@@ -1,4 +1,4 @@
-//! DipshitOS twenty-ninth ESP user program — GUARD.BIN (Milestone 16, Card
+//! VirelaiOS twenty-ninth ESP user program — GUARD.BIN (Milestone 16, Card
 //! C2, claim 8403).
 //!
 //! The hostile-EL0-refused proof: a program that steps OFF its own stack

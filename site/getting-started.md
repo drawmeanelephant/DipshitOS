@@ -6,7 +6,7 @@ tags: [guides]
 
 # Getting started
 
-DipshitOS is built and run on **Apple silicon** with **macOS 27 or newer**.
+VirelaiOS is built and run on **Apple silicon** with **macOS 27 or newer**.
 There is no cross-compilation-to-QEMU escape hatch and no Linux host path —
 that is a deliberate constraint, not a bug.
 
@@ -14,7 +14,7 @@ The short version:
 
 ```bash
 git clone https://github.com/drawmeanelephant/DipshitOS.git
-cd DipshitOS
+cd VirelaiOS
 zig build            # compile the AArch64 UEFI application
 zig build image      # build the GPT+FAT32 disk image
 zig build run        # boot it under Virtualization.framework
@@ -38,7 +38,7 @@ image is built by a small pure-Python builder.
 ## Two ways to look at it
 
 - [[build|Building]] — every build target and what each one produces.
-- [[run|Running the VM]] — the `dipshit>` console, the graphical display, and the flag-gated device modes.
+- [[run|Running the VM]] — the `virelai>` console, the graphical display, and the flag-gated device modes.
 
 ## Verifying your work
 

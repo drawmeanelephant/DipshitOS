@@ -9,7 +9,7 @@ tags: [capabilities, input, usb]
 
 Screen-side input is a real USB stack, because Virtualization.framework has no
 virtio-input device. The keyboard and pointing device appear behind an **Apple
-XHCI USB host controller**, so DipshitOS enumerates them itself.
+XHCI USB host controller**, so VirelaiOS enumerates them itself.
 
 ## The three rungs
 

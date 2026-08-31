@@ -1,4 +1,4 @@
-# DipshitOS teams & file ownership
+# VirelaiOS teams & file ownership
 
 > Rule: **don't touch another team's files — file a GitHub issue against them.**
 > This isn't enforced by tooling; it's a convention that lets 3–5 agents

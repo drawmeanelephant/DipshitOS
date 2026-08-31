@@ -116,7 +116,7 @@ rules are:
 
 - **One worktree per agent.** Concurrent agents never share a checkout.
   Create yours with `just new-agent <name> <slug>` (worktree at
-  `../dipshitos-<name>`, branch `agent/<name>/<slug>` off `origin/main`),
+  `../virelaios-<name>`, branch `agent/<name>/<slug>` off `origin/main`),
   reattach later with `just resume-agent`, clean up with `just drop-agent`.
   Each worktree has its own `.build/` and `artifacts/`, so builds and
   class-B VM gates cannot collide. Claim and log from inside your own

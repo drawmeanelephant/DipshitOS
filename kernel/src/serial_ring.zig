@@ -1,4 +1,4 @@
-//! DipshitOS serial output ring buffer (Arc5 issue #243).
+//! VirelaiOS serial output ring buffer (Arc5 issue #243).
 //!
 //! Captures the last 512 bytes of serial output so crash tombstones
 //! can include a snapshot of what was on screen when the fault occurred.

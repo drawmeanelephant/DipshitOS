@@ -1,4 +1,4 @@
-//! DipshitOS twenty-third ESP user program — TIMER.BIN (Milestone 14, Card
+//! VirelaiOS twenty-third ESP user program — TIMER.BIN (Milestone 14, Card
 //! S2, claim 7323).
 //!
 //! Headless class-B proof for the per-process application timer seam (ADR

@@ -70,14 +70,14 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 # Run isolation (#523 item 2 / issue #528; fleet remainder claim 2259):
 # private stacked disk (pristine-per-boot overlay), EFI var store, serial
 # log, capture, fixture, and scripts under $RUN_DIR. Set
-# DIPSHIT_GATE_SUFFIX=_alt for distinct canonical evidence names;
-# DIPSHIT_KEEP_RUN=1 keeps the scratch dir.
+# VIRELAI_GATE_SUFFIX=_alt for distinct canonical evidence names;
+# VIRELAI_KEEP_RUN=1 keeps the scratch dir.
 
 GATE_LOG="$(art live-net-udp-syscall-gate.txt)"
 exec > >(tee "$GATE_LOG") 2>&1
@@ -273,7 +273,7 @@ CAPSIZE=0
 [ -f "$RUN_DIR/cap.bin" ] && CAPSIZE=$(wc -c < "$RUN_DIR/cap.bin" | tr -d ' ')
 
 {
-    echo "DIPSHITOS live UDP-syscall gate (claim 1384, milestone five card N6) — UDP.BIN from EL0 on real VZ hardware"
+    echo "VIRELAIOS live UDP-syscall gate (claim 1384, milestone five card N6) — UDP.BIN from EL0 on real VZ hardware"
     echo "revision: $REVISION branch=$BRANCH dirty-files=$DIRTY"
     echo "phase 1: exec UDP.BIN — sys_udp_listen(7000) -> 'udp: listen ok'; loopback send+recv -> 'udp: loop ping'; peer send (10.0.0.2:9999) + poll recv of the host's echoed answer -> 'udp: got ping'; unbound-port recv + unresolved-peer send -> 'udp: recv err -1' / 'udp: send err -1' (EINVAL from EL0); sys_exit(17) -> 'procs UDP.BIN exited status=17' — the markers IN ORDER"
     echo "phase 1 capture: the 42-byte ARP request + the 46-byte datagram (src 10.0.0.1:7000 -> 10.0.0.2:9999, payload 'ping') byte-exact"
