@@ -64,6 +64,7 @@ meaningful — on main.
 | Branch | Log file |
 |--------|----------|
 | `freebuff/m22-lane-d-wave2` | [`0720-m22-lane-d-wave2.md`](0720-m22-lane-d-wave2.md) |
+| agent/antigravity/in-guest-compiler | [`agent-antigravity-in-guest-compiler.md`](agent-antigravity-in-guest-compiler.md) |
 | `agent/buffy/arc1-checkbox-toggle` | [`agent-buffy-arc1-checkbox-toggle.md`](agent-buffy-arc1-checkbox-toggle.md) |
 | `agent/buffy/arc1-progressbar` | [`agent-buffy-arc1-progressbar.md`](agent-buffy-arc1-progressbar.md) |
 | `agent/buffy/arc1-scrollview` | [`agent-buffy-arc1-scrollview.md`](agent-buffy-arc1-scrollview.md) |
