@@ -1559,6 +1559,58 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_sb4dam.step);
 
     // ------------------------------------------------------------------
+    // Guest: fifty-fifth ESP user program (M33 SB5, claim 7397)
+    // SB5WM.BIN — the registered-WM half of the WM compose-N + one final
+    // present proof: registers, binds the scanout writable (the SB5 grant),
+    // peers the migrated surface RO, COMPOSES it into the scanout, reads
+    // the byte back from the scanout, issues the FINAL present (flush only).
+    // ------------------------------------------------------------------
+    const sb5_wm_prog = b.addExecutable(.{
+        .name = "user-sb5wm",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/sb5_wm.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    sb5_wm_prog.linker_script = b.path("user/linker.ld");
+    const sb5_wm_step = b.step("sb5wm", "Build the fifty-fifth ESP user program (zig-out/bin/SB5WM.BIN)");
+    const sb5_wm_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    sb5_wm_elf2bin.addFileArg(sb5_wm_prog.getEmittedBin());
+    const sb5_wm_bin = sb5_wm_elf2bin.addOutputFileArg("SB5WM.BIN");
+    sb5_wm_elf2bin.has_side_effects = true;
+    sb5_wm_elf2bin.stdio = .inherit;
+    sb5_wm_step.dependOn(&sb5_wm_elf2bin.step);
+    const install_sb5_wm = b.addInstallFileWithDir(sb5_wm_bin, .bin, "SB5WM.BIN");
+    b.getInstallStep().dependOn(&install_sb5_wm.step);
+
+    // ------------------------------------------------------------------
+    // Guest: fifty-sixth ESP user program (M33 SB5, claim 7397)
+    // SB5OWN.BIN — the migrated-app half: opens a window, binds a shared
+    // surface, renders with PLAIN STORES ONLY (never sys_win_fill), and
+    // hands the surface to the WM for compose-N. The gate observes ZERO
+    // slot-13 fill SVCs via the `syscalls` monitor.
+    // ------------------------------------------------------------------
+    const sb5_own_prog = b.addExecutable(.{
+        .name = "user-sb5own",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/sb5_own.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    sb5_own_prog.linker_script = b.path("user/linker.ld");
+    const sb5_own_step = b.step("sb5own", "Build the fifty-sixth ESP user program (zig-out/bin/SB5OWN.BIN)");
+    const sb5_own_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    sb5_own_elf2bin.addFileArg(sb5_own_prog.getEmittedBin());
+    const sb5_own_bin = sb5_own_elf2bin.addOutputFileArg("SB5OWN.BIN");
+    sb5_own_elf2bin.has_side_effects = true;
+    sb5_own_elf2bin.stdio = .inherit;
+    sb5_own_step.dependOn(&sb5_own_elf2bin.step);
+    const install_sb5_own = b.addInstallFileWithDir(sb5_own_bin, .bin, "SB5OWN.BIN");
+    b.getInstallStep().dependOn(&install_sb5_own.step);
+
+    // ------------------------------------------------------------------
     // Top-level steps. System-command steps are marked as having side
     // effects (and inherit stdio) so they always execute instead of being
     // skipped by the build cache. (No QEMU path: this project targets Apple

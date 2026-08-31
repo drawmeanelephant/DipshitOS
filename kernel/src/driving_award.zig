@@ -263,6 +263,13 @@ var armed_global: bool = false;
 /// through `wm_pointer_hook`. Flipped by `wm_server.register/unregister`;
 /// false in shim mode (the default VM) → byte-identical to pre-WMS5.
 pub var wm_owns_input: bool = false;
+/// M33 SB5 (claim 7397): the registered WM owns the migrated USER layer —
+/// true once the WM has bound the scanout (wm_server.scanout_bind) and false
+/// after teardown/unbind. While true, paint_scene() SKIPS surface-backed
+/// (migrated) user windows: their bytes are already in the scanout via the
+/// WM's compose-N stores (written between the COMPOSITE_TICK and the final
+/// present), so a kernel blit would double-draw them.
+pub var wm_owns_user_layer: bool = false;
 /// The raw-pointer fan-out (set by wm_server at REGISTER time; null when
 /// no WM — the hook style of `events.on_event_pushed`). Callback gets the
 /// mapped fb pixels + the raw HID button byte; the WM edge-detects.
@@ -3351,7 +3358,16 @@ fn repaint_start() ?usize {
 /// push one transfer + flush. Returns the flush result; `.ok` with no work
 /// when the scene is clean (dirty-rect: unchanged windows are never
 /// repainted).
-pub fn composite() virtio_gpu.CmdResult {
+/// M33 SB5 (claim 7397): the kernel's compositor LAYER — paint chrome +
+/// unmigrated windows into the scanout framebuffer WITHOUT a transfer/flush.
+/// While a WM is registered, wm_server.on_tick calls this BEFORE pushing the
+/// COMPOSITE_TICK, so the kernel layer is UNDER the WM's compose-N stores
+/// (correct z-order at flush time). Surface-backed (migrated) user windows
+/// are skipped when `wm_owns_user_layer` — the WM owns those pixels. Pure
+/// BSS writes: only gpu_transfer's `dc ivac` cache-clean is EL0-illegal, so
+/// this half is host-test safe (the established `!builtin.is_test` gate stays
+/// on the flush half).
+pub fn paint_scene() virtio_gpu.CmdResult {
     if (!armed_global) return .not_ready;
     // Arc2 W3: tray clock ticks on composite() without timer — detect theme/
     // clipboard changes that happened since last composite and mark taskbar
@@ -3372,7 +3388,11 @@ pub fn composite() virtio_gpu.CmdResult {
         }
         if (need) _ = mark_dirty(255);
     }
+    // M33 SB5: whether this scene painted anything (drives composite()'s
+    // decision to flush — a clean scene is not flushed, pre-SB5 behavior).
+    scene_dirty = false;
     const start = repaint_start() orelse return .ok;
+    scene_dirty = true;
     // Step 9: render the wallpaper gradient BEFORE windows so it is the background.
     if (start <= 1) {
         // The wallpaper is at index 1 (after tray migration); if it or anything below is dirty, render gradient.
@@ -3400,6 +3420,17 @@ pub fn composite() virtio_gpu.CmdResult {
         // Wallpaper is rendered via the gradient path above.
         if (w.kind == .wallpaper) {
             w.dirty = false;
+            continue;
+        }
+        // M33 SB5 (claim 7397): while the registered WM owns the user layer
+        // (scanout bound), surface-backed (migrated) user windows are the
+        // WM's compositing job — their bytes are already in the scanout via
+        // the WM's compose-N stores (written after this tick's chrome paint,
+        // before the final present). Skip the kernel blit entirely; the
+        // damage is consumed (the WM composites from the same tick mask).
+        if (w.kind == .user and wm_owns_user_layer and user_surface(w.id) != null) {
+            w.dirty = false;
+            w.damaged = false;
             continue;
         }
         paint(w);
@@ -3437,6 +3468,22 @@ pub fn composite() virtio_gpu.CmdResult {
     // M21 W16: advance transient window timeouts.
     _ = transient_advance_tick();
     draw_chrome();
+    return .ok;
+}
+
+/// Whether the last paint_scene() actually repainted anything (drives the
+/// clean-scene no-flush decision in composite()). Read by composite() only.
+var scene_dirty: bool = false;
+
+/// The shim composite: paint the scene, then transfer+flush the scanout
+/// (the G1 seam). When the scene is clean, nothing is flushed (pre-SB5
+/// behavior). The transfer/flush half runs `dc ivac` cache-maintenance asm
+/// — EL0-illegal in host test binaries — so the flush half keeps the
+/// established `!builtin.is_test` gating at ITS call sites (the WM path
+/// flushes via wm_server.request_present, which already gates).
+pub fn composite() virtio_gpu.CmdResult {
+    if (paint_scene() != .ok) return .not_ready;
+    if (!scene_dirty) return .ok; // clean scene: no flush
     if (!virtio_gpu.gpu_ready) return .not_ready;
     presents += 1;
     if (virtio_gpu.gpu_transfer() != .ok) return .timeout;
@@ -4283,6 +4330,43 @@ test "driving_award: SB4 rect-granular damage is exact, unions, and masks (claim
         try std.testing.expectEqual(@as(u32, 8), windows[li].last_dy);
         try std.testing.expectEqual(@as(u32, 128), windows[li].last_dw);
         try std.testing.expectEqual(@as(u32, 68), windows[li].last_dh);
+    }
+}
+
+test "driving_award: SB5 paint_scene skips migrated windows when the WM owns the user layer (claim 7397)" {
+    arm();
+    wm_owns_user_layer = false; // an earlier test in an aggregated binary may have left it
+    try std.testing.expectEqual(UserOpenResult{ .opened = 2 }, user_open(64, 64, 512, 384, 7));
+    // Migrate window 2 with a fake surface identity (the paint path only
+    // reads the surface's pa for the source pointer — never dereferences it
+    // when the skip is active, and the kernel-blit path below is only
+    // exercised while the window is dirty-but-not-yet-painted; a page-aligned
+    // fake keeps the test pure).
+    try std.testing.expect(user_bind_surface(2, .{ .handle = 1, .pa_base = 0x1000_0000, .page_count = 48 }));
+    try std.testing.expect(user_is_surface_backed(2));
+
+    // WHILE the WM owns the user layer (scanout bound), paint_scene SKIPS
+    // the migrated window: its damage is consumed but NO kernel blit happens
+    // (last_* untouched — the WM's compose-N stores are the pixels; the
+    // kernel never dereferences the surface here, so the fake pa is safe).
+    wm_owns_user_layer = true;
+    defer wm_owns_user_layer = false;
+    try std.testing.expect(mark_damage(2, 20, 20, 30, 30));
+    try std.testing.expect(user_damage(2) != null);
+    _ = composite();
+    try std.testing.expect(user_damage(2) == null); // damage consumed by the skip
+    {
+        var li: usize = 0;
+        while (li < win_count) : (li += 1) {
+            if (windows[li].id == 2) break;
+        }
+        try std.testing.expect(li < win_count);
+        // The kernel did NOT blit: last_* is untouched (still 0 — the shim
+        // blit never ran for this window), NOT the new {20,20,30,30}.
+        try std.testing.expectEqual(@as(u32, 0), windows[li].last_dx);
+        try std.testing.expectEqual(@as(u32, 0), windows[li].last_dy);
+        try std.testing.expectEqual(@as(u32, 0), windows[li].last_dw);
+        try std.testing.expectEqual(@as(u32, 0), windows[li].last_dh);
     }
 }
 

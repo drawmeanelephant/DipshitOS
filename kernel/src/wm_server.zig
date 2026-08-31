@@ -31,6 +31,7 @@ const builtin = @import("builtin");
 const events = @import("events.zig");
 const process = @import("process.zig"); // the registry row bound (max_processes) — used only by the host tests
 const virtio_gpu = @import("virtio_gpu.zig");
+const mmu = @import("mmu.zig");
 const driving_award = @import("driving_award.zig"); // M32 WMS4: the renderer owns the chrome state the seam's teardown clears
 
 /// Slot-65 subcommand encoding — frozen by WMS1 (claim 1484) in the ADR 0007
@@ -126,6 +127,15 @@ var dialog_count: u64 = 0;
 /// IRQ context and console-free, so the report is drained like the process
 /// exit reports, not printed inline).
 var fallback_pending: bool = false;
+/// M33 SB5 (claim 7397): the SCANOUT grant — the registered WM's WRITABLE
+/// view of the virtio-gpu framebuffer (the compose-N target). One seat
+/// (the WM seat), kernel-owned pages: the GPU fb is never alloc'd to the
+/// WM, so these pages are NEVER ref'd/unref'd — teardown unmaps the leaves
+/// without touching the refcount. `wm_owns_user_layer` (driving_award)
+/// mirrors this: set on bind, cleared on teardown.
+var scanout_pid: u64 = 0;
+var scanout_va: u64 = 0;
+var scanout_pages: u32 = 0;
 
 /// Reset the seam (kernel boot + host-test setups).
 pub fn init() void {
@@ -146,6 +156,10 @@ pub fn init() void {
     window_mirror_count = 0;
     key_fan_count = 0;
     fallback_pending = false;
+    // M33 SB5: a reset unbinds the scanout grant (unmap leaves without
+    // unref — kernel pages) and the user-layer ownership goes back to the
+    // kernel shim.
+    scanout_teardown();
     // M32 WMS5: a reset is a teardown — input ownership returns to the
     // shim and the fan-out hooks are detached (a stale `wm_owns_input=true`
     // stranded by a mid-test re-init would silently gate the kernel's
@@ -192,6 +206,76 @@ pub fn register(pid: usize) bool {
     return true;
 }
 
+/// M33 SB5 (claim 7397): grant the registered WM a WRITABLE view of the
+/// virtio-gpu framebuffer (the compose-N target). WM seat only; full-frame
+/// (the whole fb); idempotent (a re-bind by the same WM returns the same
+/// va). The GPU fb pages are kernel-owned — they are mapped WITHOUT ref and
+/// torn down WITHOUT unref. Returns the WM's va, or 0 on refusal
+/// (not-the-WM / already granted elsewhere / no framebuffer / map failure).
+pub fn scanout_bind(pid: usize, pinfo: process.ProcessInfo) u64 {
+    if (wm_pid == null or wm_pid.? != pid) return 0; // the WM seat is the privilege
+    if (scanout_pid != 0) {
+        // Idempotent keep: the same WM re-binding its scanout is a no-op
+        // (mirrors the D2 creator-retains-its-surface rule).
+        return if (scanout_pid == @as(u64, pid)) scanout_va else 0;
+    }
+    const len = virtio_gpu.fb_size;
+    const pages: u32 = @intCast(len / 4096);
+    const pa_base = virtio_gpu.gpu_fb_phys;
+    if (pa_base == 0 or pages == 0) return 0; // no framebuffer (unarmed)
+    const va = process.next_mmap_va(pid, len);
+    if (!process.add_mmap_region(pid, va, len, 3, 0x20)) return 0; // prot RW + MAP_ANON
+    var i: u32 = 0;
+    while (i < pages) : (i += 1) {
+        const pa = pa_base + @as(u64, i) * 4096;
+        if (!mmu.map_user_page(pinfo.root_phys, va + @as(u64, i) * 4096, pa, true, false)) { // writable, NOT executable
+            var j: u32 = 0;
+            while (j < i) : (j += 1) {
+                _ = mmu.unmap_user_page(pinfo.root_phys, va + @as(u64, j) * 4096);
+            }
+            _ = process.remove_mmap_region(pid, va, len);
+            return 0;
+        }
+    }
+    scanout_pid = @as(u64, pid);
+    scanout_va = va;
+    scanout_pages = pages;
+    // The WM now owns the migrated user layer: paint_scene skips
+    // surface-backed windows (their bytes land here via compose-N).
+    driving_award.wm_owns_user_layer = true;
+    return va;
+}
+
+/// True when the scanout is currently granted to `pid` (the WM seat).
+pub fn scanout_bound(pid: usize) bool {
+    return scanout_pid == @as(u64, pid) and scanout_va != 0;
+}
+
+/// The granted scanout va, if any (for the munmap special-case + tests).
+pub fn scanout_va_get() ?u64 {
+    return if (scanout_va != 0) scanout_va else null;
+}
+
+/// Tear the scanout grant down: unmap the WM's leaves WITHOUT unref (the GPU
+/// fb pages are kernel-owned and never ref-counted to the WM), drop the mmap
+/// region, clear the seat, and give the user layer back to the kernel shim.
+/// Called from WM unregister/exit, a full-frame munmap, and init().
+pub fn scanout_teardown() void {
+    if (scanout_va == 0) return;
+    const pid: usize = @intCast(scanout_pid);
+    if (process.info(pid)) |pinfo| {
+        var i: u32 = 0;
+        while (i < scanout_pages) : (i += 1) {
+            _ = mmu.unmap_user_page(pinfo.root_phys, scanout_va + @as(u64, i) * 4096);
+        }
+    }
+    _ = process.remove_mmap_region(pid, scanout_va, @as(u64, scanout_pages) * 4096);
+    scanout_pid = 0;
+    scanout_va = 0;
+    scanout_pages = 0;
+    driving_award.wm_owns_user_layer = false;
+}
+
 /// WM-death teardown: unregister `pid`. Returns true only when `pid` WAS the
 /// registrant (mirrors the `close_owner(caller)` window-teardown contract in
 /// the scheduler exit path, which calls this per exiting process) — a false
@@ -200,6 +284,9 @@ pub fn unregister(pid: usize) bool {
     if (wm_pid != pid) return false;
     wm_pid = null;
     fallback_pending = true;
+    // M33 SB5: the WM's scanout grant dies with it — unmap the leaves (no
+    // unref; kernel pages) and give the user layer back to the shim.
+    scanout_teardown();
     // M32 WMS4: the WM's chrome decisions die with it — the shim fallback
     // must restore its own chrome rules (a dead WM's look must not stay
     // painted). driving_award imports only wnd_core, so this import is
@@ -235,6 +322,13 @@ pub fn take_fallback_report() bool {
 pub fn on_tick() void {
     const pid = wm_pid orelse return;
     tick_count +%= 1;
+    // M33 SB5 (claim 7397): the kernel paints its layer (chrome + unmigrated
+    // windows) at TICK time, BEFORE the WM's compose-N stores land — so at
+    // flush time the scanout z-order is kernel-layer UNDER the WM's user
+    // surfaces. The damage mask is captured BEFORE the paint consumes it, so
+    // the WM's compose hint still reflects what changed this tick.
+    const damage_mask = driving_award.user_damage_mask();
+    _ = driving_award.paint_scene();
     events.push(pid, .{
         .kind = events.COMPOSITE_TICK,
         .flags = 0,
@@ -246,7 +340,7 @@ pub fn on_tick() void {
         // pending rect damage this tick (the rects come via
         // `driving_award.user_damage(id)`). SB5's compose-N repaints only
         // those. 0 when the scene is clean.
-        .arg1 = driving_award.user_damage_mask(),
+        .arg1 = damage_mask,
     });
 }
 
@@ -594,6 +688,20 @@ test "wm_server: COMPOSITE_TICK is delivered only to the registered WM with the 
     // Tear down so the aggregated test binary does not leak input ownership.
     try std.testing.expect(unregister(3));
     try std.testing.expect(!driving_award.wm_owns_input);
+}
+
+test "wm_server: the scanout grant is WM-seat-only; teardown clears the seat (claim 7397)" {
+    init();
+    try std.testing.expect(!scanout_bound(1));
+    try std.testing.expect(scanout_va_get() == null);
+    // A non-WM caller is refused BEFORE any MMU work (the seat is the
+    // privilege) — the dummy ProcessInfo is never read on this path.
+    const dummy: process.ProcessInfo = undefined;
+    try std.testing.expectEqual(@as(u64, 0), scanout_bind(1, dummy));
+    try std.testing.expectEqual(@as(u64, 0), scanout_bind(2, dummy));
+    // Teardown with nothing bound is a safe no-op.
+    scanout_teardown();
+    try std.testing.expect(!driving_award.wm_owns_user_layer);
 }
 
 test "wm_server: REQUEST_PRESENT advances the present sequence and count" {
