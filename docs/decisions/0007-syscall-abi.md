@@ -760,3 +760,51 @@ fallback re-derives all three. The WM refreshes at its own cadence (every 10 tic
 minute-rollover formula the shim's `format_hhmm` uses (parity by value) and probing the
 clipboard via `sys_clipboard_get` (slot 39). This closes WMS6: all five issue-626 chrome
 surfaces (alt-tab, notification center, tooltip, dock, tray) now drain into WND.BIN.
+
+## Amendment (2026-08-30, claim 7418 — the M33 SB1 shared-anon flag reservation)
+
+Milestone 33 card SB1 (ADR 0016, ACCEPTED by this claim) freezes the ABI binding
+for seam-B cross-process shared anonymous mmap. The encoding is a **flag on the
+existing `sys_mmap` (slot 63)** — NOT a new syscall slot — following the
+map-vs-new-slot resolution recorded in D1. The dispatch table stays 128 rows and
+every existing syscall number 0–65 stays frozen.
+
+### `sys_mmap` (slot 63) flags — new reserved bit
+
+The flags argument of `sys_mmap` gains one reserved bit:
+
+| Bit | Value | Name | Meaning |
+|----:|------:|------|---------|
+| 15 | `0x8000` | `MAP_POPULATE` (existing, M29) | eager per-page allocation |
+| 5 | `0x0020` | `MAP_ANONYMOUS` (existing, M29) | anonymous (non-file) region |
+| 1 | `0x0002` | `MAP_PRIVATE` (existing, M29) | private copy semantics |
+| **16** | `0x10000` | **`M33_MAP_SHARED` (RESERVED by claim 7418)** | request a CROSS-PROCESS shared-anonymous surface (ADR 0016 seam B) |
+
+`M33_MAP_SHARED` is **reserved, not yet implemented**: until the claim-7418
+follow-on SB2 wires the handler, a `sys_mmap` call carrying bit 16 still behaves
+as the M29 per-process mmap behaves today (the SB1 contract card does NOT touch
+`syscall.handle_mmap` behavior). SB2 interprets the bit: allocate the physical
+pages once, create a `shared_region.SharedRegion` descriptor (kernel-issued
+integer handle, `max_shared_regions` = 8 BSS), map an EL0-RO `sw_cow` leaf into
+the registered WM server's root, and keep the owner's writable leaf — with the
+D2 grant/revoke rules frozen in `kernel/src/shared_region.zig` (6 host tests).
+
+**Error contract (SB2, following ADR 0016 D2 + the shared_region Grant table):**
+- `EINVAL` — a requestor other than the surface owner asks with a WRITABLE view
+  (`.writable_refused`), or the flag is used with an inapplicable `prot`/geometry.
+- `EACCES` — a requestor other than the owner tries to RE-MAP a peer region
+  they are not authorized to read (`.not_authorized`).
+- `ENOSPC` — the `shared_region` table is full (`.capacity`, region already at
+  `max_shared_regions`).
+- `EFAULT` — a stale/revoked handle is re-mapped after the owner tore it down
+  (`.gone`).
+
+**Lifetime/revocation (frozen, host-tested in `shared_region`):** the owner is
+NOT counted in the read refcount (its writable map is the region's creation side
+and dies with the owner); reads are counted; owner teardown (`win_close` /
+`sys_exit`) revokes EVERY peer RO leaf and frees the descriptor at refcount 0 —
+a stale WM mirror cannot retain access past that point.
+
+The ABI — x8 number, x0–x5 arguments, x0 result, reserved 66–127, error codes —
+is otherwise unchanged. No dispatch-table row is added; this amendment only
+resolves how seam B attaches to the frozen `sys_mmap` row.

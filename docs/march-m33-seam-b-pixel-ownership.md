@@ -24,6 +24,12 @@ for migrated apps. Unmigrated apps keep the frozen slots working. The M29 COW
 machinery (`map_user_cow_page`/`sw_cow` bit 55) is the foundation the new
 capability generalizes (ADR 0016 D1).
 
+**SB1 (contract) is DONE (claim 7418, 2026-08-30):** ADR 0016 is ACCEPTED, the
+`M33_MAP_SHARED` flag bit (16) on `sys_mmap` slot 63 is frozen in ADR 0007, and
+the D2 security rule (`kernel/src/shared_region.zig`, 6 host tests) is the frozen
+spec SB2 wires into `sys_mmap`. Next card: SB2 (the shared-anon capability —
+two EL0 roots mapping one physical region).
+
 ## The cards, in order
 
 > **Phase 0 contract → 1 capability → 2 surface → 3 compose → 4 payoff/perf.**
@@ -32,7 +38,7 @@ capability generalizes (ADR 0016 D1).
 
 | SB# | Card | Phase | Depends on | Status | ABI | Notes |
 |----:|------|:------|------------|--------|-----|-------|
-| SB1 | **ADR 0016 accepted + slot reservation** — shared-anon mmap mechanism, flag-vs-new-slot decision, `SharedRegion` table shape, security/capability rules (D2). | 0 — contract | — | 🔄 claim 9612 | slot-64 flag (or new slot) | The proposal is ADR 0016. The implementing claim freezes the encoding in ADR 0007 + writes the security review. **Gate: ADR ACCEPTED + slot reserved; D2 revocation rule unit-tested.** |
+| SB1 | **ADR 0016 accepted + slot reservation** — shared-anon mmap mechanism, flag-vs-new-slot decision, `SharedRegion` table shape, security/capability rules (D2). | 0 — contract | — | ✅ claim 7418 | slot-63 flag (bit 16) | **DONE 2026-08-30 (claim 7418).** ADR 0016 → **ACCEPTED** with the D2 security review; open items resolved (flag over new slot → `M33_MAP_SHARED` bit 16 on `sys_mmap` slot 63; `SharedRegion` integer handle, `max_shared_regions` = 8 BSS; refcount-to-zero on owner teardown). Encoding frozen in ADR 0007 (no new dispatch row — ADR 0013 posture holds until SB2). New `kernel/src/shared_region.zig` (pure D2 rule, no MMU touch): `create`/`authorize_read`/`grant_read`/`drop_read`/`drop_owner`, 6 host tests pinning owner-write / WM-read-only / non-WM-peer-deny / revoke-every-peer-on-teardown / refcount-to-zero / stale-handle isolation. Pre-merge review (claim-7418) fixed the peer-only writable guard (owner-write is granted, not `.writable_refused`; owner identity checked first) and pinned SB2's mapping duty (do NOT map a redundant `sw_cow` leaf for the owner — only non-owner peers get RO from `.grant`). Build clean, full host suite green, fmt/coordination/BSS clean. **Gate PASSED: ADR ACCEPTED + slot reserved; D2 revocation rule unit-tested.** SB2 implements this rule into `sys_mmap`. |
 | SB2 | **Shared-anon mmap capability** — `sys_mmap` gains the shared flag; kernel allocates a `SharedRegion` (refcount + owner + va/pa set), maps RO leaves into peer roots, grants read access to the registered WM server + (future) authorized apps. | 1 — capability | SB1 | ⬜ | slot 63/64 flag | Engineer the refcount/teardown from M29 COW (region-level, not per-page). **Gate: two EL0 spaces map one physical region; owner writes, WM reads RO; munmap-on-close revokes peers (unit + headless VZ proof).** |
 | SB3 | **Surface handoff** — apps render into a shared surface (plain stores); `sys_win_fill`/`sys_win_present` hand off for migrated apps; frozen slots keep working for unmigrated ones. | 2 — surface | SB2 | ⬜ | slots 12–20 frozen | `uaccess` registration stays owner-side only. **Gate: a migrated app draws to its buffer and the WM sees the bytes (parity vs. the old fill path).** |
 | SB4 | **Damage tracking** — the WM consumes per-surface dirty flags each `COMPOSITE_TICK` instead of full-window presents; decide flag-poll vs. kernel notify event. | 3 — compose | SB3 | ⬜ | kind 18 (extend) | The kernel already carries per-surface dirty. **Gate: damage is repaint-granular (one rect writes → one rect repaints).** |

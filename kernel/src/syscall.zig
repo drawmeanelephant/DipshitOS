@@ -2005,6 +2005,12 @@ fn handle_tcp_close(_: Args, _: *exceptions.VectorFrame) u64 {
 /// Maps an anonymous memory region into user address space.
 /// prot: 1=PROT_READ, 2=PROT_WRITE, 4=PROT_EXEC.
 /// flags: 0x20=MAP_ANONYMOUS, 0x02=MAP_PRIVATE, 0x8000=MAP_POPULATE.
+///
+/// M33 SB1 (claim 7418): bit 16 (0x10000) `M33_MAP_SHARED` is a RESERVED flag
+/// for seam-B cross-process shared anonymous mmap (ADR 0016, ACCEPTED). It is
+/// not yet implemented — until the SB2 follow-on wires a `shared_region` leaf,
+/// a request carrying bit 16 still maps privately, exactly as M29 does today
+/// (no ABI behavior change on this contract card).
 /// Returns allocated virtual address on success, or -error.
 fn handle_mmap(args: Args, _: *exceptions.VectorFrame) u64 {
     const addr = args[0];
