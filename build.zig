@@ -513,6 +513,8 @@ pub fn build(b: *std.Build) void {
     // ------------------------------------------------------------------
     // Guest: fourteenth ESP user program (milestone eleven, card A2 — claim 8401)
     // CALC.BIN. Interactive graphical calculator with 64-bit engine.
+    // DSK3 segmented (writable .data/.bss — the WMS9 fill-batcher global needs
+    // the RW data+bss aperture; the EDIT/GLOBALS precedent).
     // ------------------------------------------------------------------
     const calc_prog = b.addExecutable(.{
         .name = "user-calc",
@@ -522,9 +524,9 @@ pub fn build(b: *std.Build) void {
             .optimize = .ReleaseSmall,
         }),
     });
-    calc_prog.linker_script = b.path("user/linker.ld");
-    const calc_step = b.step("calc", "Build the fourteenth ESP user program (zig-out/bin/CALC.BIN)");
-    const calc_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    calc_prog.linker_script = b.path("user/linker-segmented.ld");
+    const calc_step = b.step("calc", "Build the fourteenth ESP user program (zig-out/bin/CALC.BIN) — DSK3 segmented (writable .data/.bss)");
+    const calc_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py", "--segments" });
     calc_elf2bin.addFileArg(calc_prog.getEmittedBin());
     const calc_bin = calc_elf2bin.addOutputFileArg("CALC.BIN");
     calc_elf2bin.has_side_effects = true;
@@ -536,6 +538,9 @@ pub fn build(b: *std.Build) void {
     // ------------------------------------------------------------------
     // Guest: fifteenth ESP user program (milestone eleven, card A3 — claim 3234)
     // NOTEPAD.BIN. Interactive graphical text editor with /data persistence.
+    // DSK3 segmented (writable .data/.bss — the WMS9 fill-batcher global needs
+    // the RW data+bss aperture; observed live: NOTEPAD data-aborted on the flat
+    // DSK1 mapping at its .bss tail once draw primitives batched fills).
     // ------------------------------------------------------------------
     const notepad_prog = b.addExecutable(.{
         .name = "user-notepad",
@@ -545,9 +550,9 @@ pub fn build(b: *std.Build) void {
             .optimize = .ReleaseSmall,
         }),
     });
-    notepad_prog.linker_script = b.path("user/linker.ld");
-    const notepad_step = b.step("notepad", "Build the fifteenth ESP user program (zig-out/bin/NOTEPAD.BIN)");
-    const notepad_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    notepad_prog.linker_script = b.path("user/linker-segmented.ld");
+    const notepad_step = b.step("notepad", "Build the fifteenth ESP user program (zig-out/bin/NOTEPAD.BIN) — DSK3 segmented (writable .data/.bss)");
+    const notepad_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py", "--segments" });
     notepad_elf2bin.addFileArg(notepad_prog.getEmittedBin());
     const notepad_bin = notepad_elf2bin.addOutputFileArg("NOTEPAD.BIN");
     notepad_elf2bin.has_side_effects = true;
@@ -559,6 +564,7 @@ pub fn build(b: *std.Build) void {
     // ------------------------------------------------------------------
     // Guest: sixteenth ESP user program (milestone eleven, card A4 — claim 0680)
     // TOP.BIN. Graphical task manager & process monitor.
+    // DSK3 segmented (writable .data/.bss — the WMS9 fill-batcher global).
     // ------------------------------------------------------------------
     const top_prog = b.addExecutable(.{
         .name = "user-top",
@@ -568,9 +574,9 @@ pub fn build(b: *std.Build) void {
             .optimize = .ReleaseSmall,
         }),
     });
-    top_prog.linker_script = b.path("user/linker.ld");
-    const top_step = b.step("top", "Build the sixteenth ESP user program (zig-out/bin/TOP.BIN)");
-    const top_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    top_prog.linker_script = b.path("user/linker-segmented.ld");
+    const top_step = b.step("top", "Build the sixteenth ESP user program (zig-out/bin/TOP.BIN) — DSK3 segmented (writable .data/.bss)");
+    const top_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py", "--segments" });
     top_elf2bin.addFileArg(top_prog.getEmittedBin());
     const top_bin = top_elf2bin.addOutputFileArg("TOP.BIN");
     top_elf2bin.has_side_effects = true;
@@ -582,6 +588,7 @@ pub fn build(b: *std.Build) void {
     // ------------------------------------------------------------------
     // Guest: seventeenth ESP user program (milestone eleven, card A5 — claim 2427)
     // DESKTOP.BIN. Desktop launcher & environment panel.
+    // DSK3 segmented (writable .data/.bss — the WMS9 fill-batcher global).
     // ------------------------------------------------------------------
     const desktop_prog = b.addExecutable(.{
         .name = "user-desktop",
@@ -591,9 +598,9 @@ pub fn build(b: *std.Build) void {
             .optimize = .ReleaseSmall,
         }),
     });
-    desktop_prog.linker_script = b.path("user/linker.ld");
-    const desktop_step = b.step("desktop", "Build the seventeenth ESP user program (zig-out/bin/DESKTOP.BIN)");
-    const desktop_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    desktop_prog.linker_script = b.path("user/linker-segmented.ld");
+    const desktop_step = b.step("desktop", "Build the seventeenth ESP user program (zig-out/bin/DESKTOP.BIN) — DSK3 segmented (writable .data/.bss)");
+    const desktop_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py", "--segments" });
     desktop_elf2bin.addFileArg(desktop_prog.getEmittedBin());
     const desktop_bin = desktop_elf2bin.addOutputFileArg("DESKTOP.BIN");
     desktop_elf2bin.has_side_effects = true;
@@ -677,6 +684,7 @@ pub fn build(b: *std.Build) void {
     // ------------------------------------------------------------------
     // Guest: twentieth ESP user program (milestone twelve, card N3 — claim 5416)
     // CHAT.BIN. Userland graphical P2P chat application.
+    // DSK3 segmented (writable .data/.bss — the WMS9 fill-batcher global).
     // ------------------------------------------------------------------
     const chat_prog = b.addExecutable(.{
         .name = "user-chat",
@@ -686,9 +694,9 @@ pub fn build(b: *std.Build) void {
             .optimize = .ReleaseSmall,
         }),
     });
-    chat_prog.linker_script = b.path("user/linker.ld");
-    const chat_step = b.step("chat", "Build the twentieth ESP user program (zig-out/bin/CHAT.BIN)");
-    const chat_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    chat_prog.linker_script = b.path("user/linker-segmented.ld");
+    const chat_step = b.step("chat", "Build the twentieth ESP user program (zig-out/bin/CHAT.BIN) — DSK3 segmented (writable .data/.bss)");
+    const chat_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py", "--segments" });
     chat_elf2bin.addFileArg(chat_prog.getEmittedBin());
     const chat_bin = chat_elf2bin.addOutputFileArg("CHAT.BIN");
     chat_elf2bin.has_side_effects = true;
@@ -709,9 +717,9 @@ pub fn build(b: *std.Build) void {
             .optimize = .ReleaseSmall,
         }),
     });
-    file_prog.linker_script = b.path("user/linker.ld");
-    const file_step = b.step("file", "Build the twenty-first ESP user program (zig-out/bin/FILE.BIN)");
-    const file_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    file_prog.linker_script = b.path("user/linker-segmented.ld");
+    const file_step = b.step("file", "Build the twenty-first ESP user program (zig-out/bin/FILE.BIN) — DSK3 segmented (writable .data/.bss)");
+    const file_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py", "--segments" });
     file_elf2bin.addFileArg(file_prog.getEmittedBin());
     const file_bin = file_elf2bin.addOutputFileArg("FILE.BIN");
     file_elf2bin.has_side_effects = true;
@@ -945,9 +953,9 @@ pub fn build(b: *std.Build) void {
             .optimize = .ReleaseSmall,
         }),
     });
-    settings_prog.linker_script = b.path("user/linker.ld");
-    const settings_step = b.step("settings", "Build the thirtieth ESP user program (zig-out/bin/SETTINGS.BIN)");
-    const settings_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    settings_prog.linker_script = b.path("user/linker-segmented.ld");
+    const settings_step = b.step("settings", "Build the thirtieth ESP user program (zig-out/bin/SETTINGS.BIN) — DSK3 segmented (writable .data/.bss)");
+    const settings_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py", "--segments" });
     settings_elf2bin.addFileArg(settings_prog.getEmittedBin());
     const settings_bin = settings_elf2bin.addOutputFileArg("SETTINGS.BIN");
     settings_elf2bin.has_side_effects = true;
@@ -1041,9 +1049,9 @@ pub fn build(b: *std.Build) void {
             .optimize = .ReleaseSmall,
         }),
     });
-    ps_prog.linker_script = b.path("user/linker.ld");
-    const ps_step = b.step("ps", "Build the thirty-third ESP user program (zig-out/bin/PS.BIN)");
-    const ps_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    ps_prog.linker_script = b.path("user/linker-segmented.ld");
+    const ps_step = b.step("ps", "Build the thirty-third ESP user program (zig-out/bin/PS.BIN) — DSK3 segmented (writable .data/.bss)");
+    const ps_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py", "--segments" });
     ps_elf2bin.addFileArg(ps_prog.getEmittedBin());
     const ps_bin = ps_elf2bin.addOutputFileArg("PS.BIN");
     ps_elf2bin.has_side_effects = true;
@@ -1286,9 +1294,9 @@ pub fn build(b: *std.Build) void {
             .optimize = .ReleaseSmall,
         }),
     });
-    sysmon_prog.linker_script = b.path("user/linker.ld");
-    const sysmon_step = b.step("sysmon", "Build the forty-fourth ESP user program (zig-out/bin/SYSMON.BIN)");
-    const sysmon_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    sysmon_prog.linker_script = b.path("user/linker-segmented.ld");
+    const sysmon_step = b.step("sysmon", "Build the forty-fourth ESP user program (zig-out/bin/SYSMON.BIN) — DSK3 segmented (writable .data/.bss)");
+    const sysmon_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py", "--segments" });
     sysmon_elf2bin.addFileArg(sysmon_prog.getEmittedBin());
     const sysmon_bin = sysmon_elf2bin.addOutputFileArg("SYSMON.BIN");
     sysmon_elf2bin.has_side_effects = true;

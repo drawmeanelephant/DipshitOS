@@ -179,31 +179,41 @@ if [ -f "$DIR_BIN" ]; then
     fi
     DIR_ARGS+=("$DIR_BIN")
 fi
+# CALC.BIN is a SEGMENTED DSK3 program (writable .data/.bss — the WMS9
+# fill-batcher global needs the RW data+bss aperture; the EDIT/GLOBALS
+# precedent).
 CALC_ARGS=()
 if [ -f "$CALC_BIN" ]; then
-    if [ "$(head -c 4 "$CALC_BIN")" != "DSK1" ]; then
-        fail "'$CALC_BIN' does not start with the 'DSK1' image magic -- run 'zig build' first (it produces zig-out/bin/CALC.BIN)."
+    if [ "$(head -c 4 "$CALC_BIN")" != "DSK3" ]; then
+        fail "'$CALC_BIN' does not start with the 'DSK3' segmented-image magic -- run 'zig build' first (it produces zig-out/bin/CALC.BIN)."
     fi
     CALC_ARGS+=("$CALC_BIN")
 fi
+# NOTEPAD.BIN is a SEGMENTED DSK3 program (writable .data/.bss — observed
+# live: NOTEPAD data-aborted on the flat DSK1 mapping at its .bss tail once
+# draw primitives batched fills).
 NOTEPAD_ARGS=()
 if [ -f "$NOTEPAD_BIN" ]; then
-    if [ "$(head -c 4 "$NOTEPAD_BIN")" != "DSK1" ]; then
-        fail "'$NOTEPAD_BIN' does not start with the 'DSK1' image magic -- run 'zig build' first (it produces zig-out/bin/NOTEPAD.BIN)."
+    if [ "$(head -c 4 "$NOTEPAD_BIN")" != "DSK3" ]; then
+        fail "'$NOTEPAD_BIN' does not start with the 'DSK3' segmented-image magic -- run 'zig build' first (it produces zig-out/bin/NOTEPAD.BIN)."
     fi
     NOTEPAD_ARGS+=("$NOTEPAD_BIN")
 fi
+# TOP.BIN is a SEGMENTED DSK3 program (writable .data/.bss — the WMS9
+# fill-batcher global needs the RW data+bss aperture).
 TOP_ARGS=()
 if [ -f "$TOP_BIN" ]; then
-    if [ "$(head -c 4 "$TOP_BIN")" != "DSK1" ]; then
-        fail "'$TOP_BIN' does not start with the 'DSK1' image magic -- run 'zig build' first (it produces zig-out/bin/TOP.BIN)."
+    if [ "$(head -c 4 "$TOP_BIN")" != "DSK3" ]; then
+        fail "'$TOP_BIN' does not start with the 'DSK3' segmented-image magic -- run 'zig build' first (it produces zig-out/bin/TOP.BIN)."
     fi
     TOP_ARGS+=("$TOP_BIN")
 fi
+# DESKTOP.BIN is a SEGMENTED DSK3 program (writable .data/.bss — the WMS9
+# fill-batcher global needs the RW data+bss aperture).
 DESKTOP_ARGS=()
 if [ -f "$DESKTOP_BIN" ]; then
-    if [ "$(head -c 4 "$DESKTOP_BIN")" != "DSK1" ]; then
-        fail "'$DESKTOP_BIN' does not start with the 'DSK1' image magic -- run 'zig build' first (it produces zig-out/bin/DESKTOP.BIN)."
+    if [ "$(head -c 4 "$DESKTOP_BIN")" != "DSK3" ]; then
+        fail "'$DESKTOP_BIN' does not start with the 'DSK3' segmented-image magic -- run 'zig build' first (it produces zig-out/bin/DESKTOP.BIN)."
     fi
     DESKTOP_ARGS+=("$DESKTOP_BIN")
 fi
@@ -221,17 +231,21 @@ if [ -f "$FETCH_BIN" ]; then
     fi
     FETCH_ARGS+=("$FETCH_BIN")
 fi
+# CHAT.BIN is a SEGMENTED DSK3 program (writable .data/.bss — the WMS9
+# fill-batcher global needs the RW data+bss aperture).
 CHAT_ARGS=()
 if [ -f "$CHAT_BIN" ]; then
-    if [ "$(head -c 4 "$CHAT_BIN")" != "DSK1" ]; then
-        fail "'$CHAT_BIN' does not start with the 'DSK1' image magic -- run 'zig build' first (it produces zig-out/bin/CHAT.BIN)."
+    if [ "$(head -c 4 "$CHAT_BIN")" != "DSK3" ]; then
+        fail "'$CHAT_BIN' does not start with the 'DSK3' segmented-image magic -- run 'zig build' first (it produces zig-out/bin/CHAT.BIN)."
     fi
     CHAT_ARGS+=("$CHAT_BIN")
 fi
+# FILE.BIN is a SEGMENTED DSK3 program (writable .data/.bss — the WMS9
+# fill-batcher global needs the RW data+bss aperture).
 FILE_ARGS=()
 if [ -f "$FILE_BIN" ]; then
-    if [ "$(head -c 4 "$FILE_BIN")" != "DSK1" ]; then
-        fail "'$FILE_BIN' does not start with the 'DSK1' image magic -- run 'zig build' first (it produces zig-out/bin/FILE.BIN)."
+    if [ "$(head -c 4 "$FILE_BIN")" != "DSK3" ]; then
+        fail "'$FILE_BIN' does not start with the 'DSK3' segmented-image magic -- run 'zig build' first (it produces zig-out/bin/FILE.BIN)."
     fi
     FILE_ARGS+=("$FILE_BIN")
 fi
@@ -303,14 +317,15 @@ if [ -f "$SPIN_BIN" ]; then
     SPIN_ARGS+=("$SPIN_BIN")
 fi
 
-# SETTINGS.BIN is a flat DSK1 program (Issue #214, GUI settings panel).
+# SETTINGS.BIN is a SEGMENTED DSK3 program (Issue #214, GUI settings
+# panel — the WMS9 fill-batcher global needs the RW data+bss aperture).
 # build.zig passes it as a positional but no slot consumed it before --
 # restored here so the desktop's APPS.TXT-driven launcher has its app.
 SETTINGS_BIN="${34:-$ROOT_DIR/zig-out/bin/SETTINGS.BIN}"
 SETTINGS_ARGS=()
 if [ -f "$SETTINGS_BIN" ]; then
-    if [ "$(head -c 4 "$SETTINGS_BIN")" != "DSK1" ]; then
-        fail "'$SETTINGS_BIN' does not start with the 'DSK1' image magic."
+    if [ "$(head -c 4 "$SETTINGS_BIN")" != "DSK3" ]; then
+        fail "'$SETTINGS_BIN' does not start with the 'DSK3' segmented-image magic."
     fi
     SETTINGS_ARGS+=("$SETTINGS_BIN")
 fi
@@ -426,12 +441,14 @@ if [ -f "$NETPROF_BIN" ]; then
     fi
     NETPROF_ARGS+=("$NETPROF_BIN")
 fi
-# M27 G6 (issue #449): SYSMON.BIN is a flat DSK1 program (system monitor dashboard).
+# M27 G6 (issue #449): SYSMON.BIN is a SEGMENTED DSK3 program (system
+# monitor dashboard — the WMS9 fill-batcher global needs the RW data+bss
+# aperture).
 SYSMON_BIN="${48:-$ROOT_DIR/zig-out/bin/SYSMON.BIN}"
 SYSMON_ARGS=()
 if [ -f "$SYSMON_BIN" ]; then
-    if [ "$(head -c 4 "$SYSMON_BIN")" != "DSK1" ]; then
-        fail "'$SYSMON_BIN' does not start with the 'DSK1' image magic -- run 'zig build' first."
+    if [ "$(head -c 4 "$SYSMON_BIN")" != "DSK3" ]; then
+        fail "'$SYSMON_BIN' does not start with the 'DSK3' segmented-image magic -- run 'zig build' first."
     fi
     SYSMON_ARGS+=("$SYSMON_BIN")
 fi
@@ -476,10 +493,12 @@ if [ -f "$WND_BIN" ]; then
     fi
     WND_ARGS+=("$WND_BIN")
 fi
+# PS.BIN is a SEGMENTED DSK3 program (the M22 D6 process table — the WMS9
+# fill-batcher global needs the RW data+bss aperture).
 PS_ARGS=()
 if [ -f "$PS_BIN" ]; then
-    if [ "$(head -c 4 "$PS_BIN")" != "DSK1" ]; then
-        fail "'$PS_BIN' does not start with the 'DSK1' image magic -- run 'zig build' first."
+    if [ "$(head -c 4 "$PS_BIN")" != "DSK3" ]; then
+        fail "'$PS_BIN' does not start with the 'DSK3' segmented-image magic -- run 'zig build' first."
     fi
     PS_ARGS+=("$PS_BIN")
 fi
