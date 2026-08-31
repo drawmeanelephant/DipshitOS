@@ -64,7 +64,7 @@
 | Thirty — dynamic linking | Freestanding `LD.SO` linker, `LIBUI.SO`/`LIBFONT.SO`, W^X multi-aperture, live gate | ✅ done 2026-08-27 (issue #599, claim 7921) |
 | Thirty-one — dyn linking ecosystem | CALC/NOTEPAD/FILE/DESKTOP → `.ELF`, runtime `dlopen`/`dlsym` | ✅ done 2026-08-27 (issue #602, claim 4001) |
 | Thirty-two — WM server migration | Seam A: desktop policy moved to a userland WM server (slot 65, kind 18); kernel slimmed WMS1–WMS9 (issues #621–#629) | ✅ done 2026-08-30 (issues #621–#629; WMS10 → M33, claim 9612) |
-| Thirty-three — seam B (proposed) | Full pixel ownership: cross-process shared-anon mmap, apps render into their own buffers, WM composes one final present | 🔄 in progress (ADR 0016 ACCEPTED; SB1 contract done 2026-08-30 claim 7418, SB2 capability done 2026-08-31 claim 8878 with a live headless VZ gate; `docs/march-m33-seam-b-pixel-ownership.md`) |
+| Thirty-three — seam B (proposed) | Full pixel ownership: cross-process shared-anon mmap, apps render into their own buffers, WM composes one final present | 🔄 in progress (ADR 0016 ACCEPTED; SB1 contract done 2026-08-30 claim 7418, SB2 capability done 2026-08-31 claim 8878 with a live headless VZ gate, SB3 surface handoff done 2026-08-31 claim 3633 — migrated apps bind a window to a shared surface and the WM reads the bytes RO (live VZ gate); `docs/march-m33-seam-b-pixel-ownership.md`) |
 
 > **Narratives for M3–M16** are archived per milestone under `docs/archive/status-m{N}-detail.md` (issue #262).
 > Each archive preserves the verbatim pre-compression table row plus march/claim pointers; the live table above is the one-line summary.

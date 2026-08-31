@@ -808,3 +808,31 @@ a stale WM mirror cannot retain access past that point.
 The ABI — x8 number, x0–x5 arguments, x0 result, reserved 66–127, error codes —
 is otherwise unchanged. No dispatch-table row is added; this amendment only
 resolves how seam B attaches to the frozen `sys_mmap` row.
+
+---
+
+## Amendment (2026-08-31, claims 8878 + 3633 — shared-anon IMPLEMENTED + window surface tag)
+
+The M33 seam-B shared-anonymous flag is now **implemented**, not just reserved.
+
+- **SB2 (claim 8878):** `M33_MAP_SHARED` (bit 16, `0x10000`) on `sys_mmap`
+  (slot 63): owner `MAP_ANON|SHARED` allocates one contiguous region, maps
+  WRITABLE leaves into the owner's root, registers a `SharedRegion` (kernel
+  integer handle, `max_shared_regions` = 8 BSS). A registered WM attaches RO by
+  handle (`addr=<handle>, prot=R, SHARED`) → `authorize_read` (D2: non-owner RO
+  only) → `ref_page` → EL0-RO `sw_cow` in the WM's OWN root (`shared_mmap`,
+  wired into the scheduler exit seam). Owner munmap/exit revokes the WM view.
+  Live gate `verify-live-sb2-shared-anon.sh` PASS (headless VZ).
+- **SB3 (claim 3633) — NEW reserved bit:** the `addr` argument carries a
+  window-binding tag at bit 63, `M33_SURF_WIN_TAG` = `0x8000_0000_0000_0000`.
+  `sys_mmap(addr = M33_SURF_WIN_TAG | window_id, len, prot, MAP_ANON|SHARED)`
+  binds the named user window to a shared surface (back-buffer): the owner gets
+  its writable leaves, a registered WM auto-mirrors RO, and `composite()` blits
+  from the surface's `pa_base`. The frozen `sys_win_open`/`fill`/`present`
+  slots (12–14) stay byte-identical for unmigrated apps; `sys_win_fill` routes
+  into the surface when a window is bound. Live gate
+  `verify-live-sb3-surface-handoff.sh` PASS (headless VZ): a migrated app stored
+  `0xAB` with a plain write and the registered WM read it RO.
+
+The dispatch table stays 128 rows; all numbers 0–65 and the error codes are
+unchanged.

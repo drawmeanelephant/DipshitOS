@@ -1484,6 +1484,54 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_sb2_own.step);
 
     // ------------------------------------------------------------------
+    // Guest: fifty-second + fifty-third ESP user programs (M33 SB3, claim 3633)
+    // SB3WM.BIN + SB3OWN.BIN — the two-process window surface handoff proof
+    // behind the verify-live-sb3-surface-handoff.sh gate: the migrated app
+    // opens a window, BINDS a shared-anonymous surface as its back-buffer via
+    // sys_mmap(addr=M33_SURF_WIN_TAG|wid), renders with PLAIN STORES through
+    // its writable leaf (no kernel fill), and the registered WM peers the
+    // surface RO and reads the exact bytes — the surface-handoff parity gate.
+    // Same freestanding target/linker/elf2bin/ESP-embedding as the others.
+    // ------------------------------------------------------------------
+    const sb3_wm_prog = b.addExecutable(.{
+        .name = "user-sb3-wm",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/sb3_wm.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    sb3_wm_prog.linker_script = b.path("user/linker.ld");
+    const sb3_wm_step = b.step("sb3wm", "Build the fifty-second ESP user program (zig-out/bin/SB3WM.BIN)");
+    const sb3_wm_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    sb3_wm_elf2bin.addFileArg(sb3_wm_prog.getEmittedBin());
+    const sb3_wm_bin = sb3_wm_elf2bin.addOutputFileArg("SB3WM.BIN");
+    sb3_wm_elf2bin.has_side_effects = true;
+    sb3_wm_elf2bin.stdio = .inherit;
+    sb3_wm_step.dependOn(&sb3_wm_elf2bin.step);
+    const install_sb3_wm = b.addInstallFileWithDir(sb3_wm_bin, .bin, "SB3WM.BIN");
+    b.getInstallStep().dependOn(&install_sb3_wm.step);
+
+    const sb3_own_prog = b.addExecutable(.{
+        .name = "user-sb3-own",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/sb3_own.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    sb3_own_prog.linker_script = b.path("user/linker.ld");
+    const sb3_own_step = b.step("sb3own", "Build the fifty-third ESP user program (zig-out/bin/SB3OWN.BIN)");
+    const sb3_own_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    sb3_own_elf2bin.addFileArg(sb3_own_prog.getEmittedBin());
+    const sb3_own_bin = sb3_own_elf2bin.addOutputFileArg("SB3OWN.BIN");
+    sb3_own_elf2bin.has_side_effects = true;
+    sb3_own_elf2bin.stdio = .inherit;
+    sb3_own_step.dependOn(&sb3_own_elf2bin.step);
+    const install_sb3_own = b.addInstallFileWithDir(sb3_own_bin, .bin, "SB3OWN.BIN");
+    b.getInstallStep().dependOn(&install_sb3_own.step);
+
+    // ------------------------------------------------------------------
     // Top-level steps. System-command steps are marked as having side
     // effects (and inherit stdio) so they always execute instead of being
     // skipped by the build cache. (No QEMU path: this project targets Apple
@@ -1545,6 +1593,8 @@ pub fn build(b: *std.Build) void {
     image.addFileArg(wnd_bin); // ... [WND.BIN] (M32 WMS3, issue #623: forty-eighth user program, the long-lived EL0 WM server)
     image.addFileArg(sb2_wm_bin); // ... [SB2WM.BIN] (M33 SB2, claim 8878: fiftieth user program, the shared-anon WM half)
     image.addFileArg(sb2_own_bin); // ... [SB2OWN.BIN] (M33 SB2, claim 8878: fifty-first user program, the shared-anon owner half)
+    image.addFileArg(sb3_wm_bin); // ... [SB3WM.BIN] (M33 SB3, claim 3633: fifty-second user program, the surface-handoff WM half)
+    image.addFileArg(sb3_own_bin); // ... [SB3OWN.BIN] (M33 SB3, claim 3633: fifty-third user program, the surface-handoff owner half)
     image.has_side_effects = true;
     image.stdio = .inherit;
     image_step.dependOn(&image.step);

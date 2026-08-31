@@ -252,6 +252,7 @@ GATE id=fw-mmu-capture class=D kind=diagnostic ci=no apple=yes gate=no cmd=bash 
 GATE id=t0sz25 class=D kind=diagnostic ci=no apple=yes gate=no cmd=bash tools/verify-t0sz16.sh
 GATE id=walk-probe class=D kind=diagnostic ci=no apple=yes gate=no cmd=zig build kernel -Dwalk-probe
 GATE id=t0sz16-walkprobe class=D kind=diagnostic ci=no apple=yes gate=no cmd=bash tools/verify-t0sz16-walkprobe.sh
+GATE id=live-sb3-surface-handoff class=B kind=gate ci=no apple=yes gate=yes cmd=bash tools/verify-live-sb3-surface-handoff.sh  # claim 3633 (seam B, issue #630): M33 SB3 surface handoff — the migrated app (SB3OWN.BIN) opens a window, binds a shared-anonymous surface as its back-buffer via sys_mmap(addr=M33_SURF_WIN_TAG|wid), renders with plain stores through its writable leaf (no kernel fill); the registered WM (SB3WM.BIN) peers the surface RO by handle and reads the exact bytes — sb3: wm registered / own opened / own bound / own stored / wm-read=0xAB / owner done / wm done, no fatal
 <!-- GATE_INVENTORY:END -->
 
 ## Known flakes (evidence registry)
