@@ -6,7 +6,7 @@
 - **Touches:** kernel/src/esp.zig (fix), tools/verify-live-history.sh (boot-1/boot-2 disk checkpoints as permanent diagnostics)
 - **Depends on:** —
 - **Heartbeat:** 2026-08-31
-- **Status:** 🔄 agent/buffy/history-recall-persistence
+- **Status:** ✅ done — landed via PR #724 (2026-08-31).
 
 ## Notes
 

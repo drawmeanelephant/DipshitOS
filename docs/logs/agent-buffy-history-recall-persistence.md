@@ -57,3 +57,9 @@ Fix (this branch, `kernel/src/esp.zig`):
 Validated live: `verify-live-history` **PASS 1/1** — checkpoints show boot-1
 persisted all T4 lines AND boot-2 recalled `echo T4-third-marker` on the
 synthesized Up chord.
+
+## 2026-08-31 — landed via PR #724
+
+Merged to main as PR #724; claim flipped ✅ — recall no-op fix landed so the
+VirelaiOS rename claim 5817 (`kernel/**`) keeps no ACTIVE-file overlap on
+main after landing.
