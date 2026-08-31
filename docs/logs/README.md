@@ -145,6 +145,7 @@ meaningful — on main.
 | sysinfo support snapshot (claim 2990) | [`agent-buffy-u7-sysinfo.md`](agent-buffy-u7-sysinfo.md) |
 | persistent settings (claim 2649) | [`agent-buffy-u8-persistent-settings.md`](agent-buffy-u8-persistent-settings.md) |
 | `agent/buffy/vz-gates-in-ci` | [`agent-buffy-vz-gates-in-ci.md`](agent-buffy-vz-gates-in-ci.md) |
+| agent/buffy/wms10-split-adr | [`agent-buffy-wms10-split-adr.md`](agent-buffy-wms10-split-adr.md) |
 | agent/buffy/wms2-wmctl-register | [`agent-buffy-wms2-wmctl-register.md`](agent-buffy-wms2-wmctl-register.md) |
 | agent/buffy/wms3-wnd-server | [`agent-buffy-wms3-wnd-server.md`](agent-buffy-wms3-wnd-server.md) |
 | WMS4 chrome policy drain-out (SET_WINDOW descriptors) | [`agent-buffy-wms4-chrome-drain.md`](agent-buffy-wms4-chrome-drain.md) |
