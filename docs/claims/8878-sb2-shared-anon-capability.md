@@ -3,7 +3,7 @@
 - **Owner:** buffy (`agent/buffy/m33-sb2-shared-anon-capability`)
 - **Prompt / plan:** `docs/march-m33-seam-b-pixel-ownership.md` (SB2 card), `docs/decisions/0016-shared-anonymous-mmap.md` (accepted), `docs/decisions/0007-syscall-abi.md` (M33_MAP_SHARED reservation, claim 7418)
 - **Scope:** M33 SB2 (phase 1 — capability). Implement the cross-process shared-anonymous mmap capability behind the frozen `M33_MAP_SHARED` flag (bit 16) on `sys_mmap` (slot 63): the owner creates a `SharedRegion` + allocates the physical pages once + maps its writable leaves; when a WM is registered it grants read to the WM and maps EL0-RO `sw_cow` leaves into the WM's root; owner `munmap`/exit revokes every peer and frees at refcount 0. Honors the reviewed D2 rule exactly. No syscall-slot addition and no MMU change beyond the existing M29 seam.
-- **Touches:** kernel/src/syscall.zig kernel/src/shared_region.zig kernel/src/process.zig kernel/src/alloc.zig docs/march-m33-seam-b-pixel-ownership.md docs/claims/8878-sb2-shared-anon-capability.md docs/logs/agent-buffy-m33-sb2-shared-anon-capability.md tools/verify-live-m33-sb2-shared-anon.sh tools/verify-unit-tests.sh
+- **Touches:** kernel/src/syscall.zig kernel/src/shared_region.zig kernel/src/shared_mmap.zig kernel/src/scheduler.zig kernel/src/esp.zig user/src/sb2_own.zig user/src/sb2_wm.zig build.zig image/make-image.sh tools/verify-live-sb2-shared-anon.sh docs/march-m33-seam-b-pixel-ownership.md docs/claims/8878-sb2-shared-anon-capability.md docs/logs/agent-buffy-m33-sb2-shared-anon-capability.md
 - **Depends on:** SB1 accepted (claim 7418, PR #686) — ADR 0016 + `M33_MAP_SHARED` flag + `shared_region.zig` D2 rule on `main`
 - **Heartbeat:** 2026-08-30
 - **Status:** ✅ done
@@ -27,6 +27,19 @@ shared_region page-proof tests, fmt, coordination, BSS budget):
 - **Host proof (the gate's "two EL0 spaces map one physical region"):** a new
   test builds two roots (owner + WM), maps the same `pa` RW in the owner root
   and RO+`sw_cow` in the WM root, then teardown unmaps the WM leaf + frees.
+- **Live gate (PASS, headless VZ on Apple silicon):** `tools/verify-live-sb2-shared-anon.sh`
+  runs the full D2 proof end to end with `--screen` (GPU armed so the WM
+  REGISTER ENXIO guard passes): `SB2OWN.BIN` creates the shared surface
+  (handle 1, one page), writes `0xAB` through its WRITABLE leaf, handshakes
+  the registered `SB2WM.BIN` over the mailbox; the WM attaches by handle,
+  reads `0xAB` through its EL0-RO `sw_cow` leaf in ITS OWN root
+  (`sb2: wm-read=0xAB`); the owner acks, sends "bye", exits — the scheduler
+  exit seam revokes the WM's RO view — and the WM's stale re-attach returns
+  `EFAULT` (`sb2: wm-reattach=EFAULT`). Full marker chain + zero faults.
+- **`kernel/src/esp.zig`** — the ESP root window 64→96: the image's 68 root
+  files (the M30 dynamic-linker set + SB2's two proofs) exceeded the old cap,
+  and `exec` silently couldn't see tail entries (the SB2 binaries were dropped
+  from the boot snapshot). +1,536 B BSS (within budget).
 - **`docs/march-m33-seam-b-pixel-ownership.md`** — SB2 row flipped ✅.
 
 ## Notes

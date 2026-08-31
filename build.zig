@@ -1437,6 +1437,53 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_wmrpc.step);
 
     // ------------------------------------------------------------------
+    // Guest: fiftieth + fifty-first ESP user programs (M33 SB2, claim 8878)
+    // SB2WM.BIN + SB2OWN.BIN — the two-process shared-anon proof behind the
+    // verify-live-sb2-shared-anon.sh gate: the owner creates a shared surface
+    // (M33_MAP_SHARED), renders a magic byte; the registered WM attaches it
+    // READ-ONLY by handle, reads the byte, and — after the owner exits —
+    // re-attaches the stale handle to prove EFAULT revocation. Same
+    // freestanding target/linker/elf2bin/ESP-embedding as the others.
+    // ------------------------------------------------------------------
+    const sb2_wm_prog = b.addExecutable(.{
+        .name = "user-sb2-wm",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/sb2_wm.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    sb2_wm_prog.linker_script = b.path("user/linker.ld");
+    const sb2_wm_step = b.step("sb2wm", "Build the fiftieth ESP user program (zig-out/bin/SB2WM.BIN)");
+    const sb2_wm_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    sb2_wm_elf2bin.addFileArg(sb2_wm_prog.getEmittedBin());
+    const sb2_wm_bin = sb2_wm_elf2bin.addOutputFileArg("SB2WM.BIN");
+    sb2_wm_elf2bin.has_side_effects = true;
+    sb2_wm_elf2bin.stdio = .inherit;
+    sb2_wm_step.dependOn(&sb2_wm_elf2bin.step);
+    const install_sb2_wm = b.addInstallFileWithDir(sb2_wm_bin, .bin, "SB2WM.BIN");
+    b.getInstallStep().dependOn(&install_sb2_wm.step);
+
+    const sb2_own_prog = b.addExecutable(.{
+        .name = "user-sb2-own",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/sb2_own.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    sb2_own_prog.linker_script = b.path("user/linker.ld");
+    const sb2_own_step = b.step("sb2own", "Build the fifty-first ESP user program (zig-out/bin/SB2OWN.BIN)");
+    const sb2_own_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    sb2_own_elf2bin.addFileArg(sb2_own_prog.getEmittedBin());
+    const sb2_own_bin = sb2_own_elf2bin.addOutputFileArg("SB2OWN.BIN");
+    sb2_own_elf2bin.has_side_effects = true;
+    sb2_own_elf2bin.stdio = .inherit;
+    sb2_own_step.dependOn(&sb2_own_elf2bin.step);
+    const install_sb2_own = b.addInstallFileWithDir(sb2_own_bin, .bin, "SB2OWN.BIN");
+    b.getInstallStep().dependOn(&install_sb2_own.step);
+
+    // ------------------------------------------------------------------
     // Top-level steps. System-command steps are marked as having side
     // effects (and inherit stdio) so they always execute instead of being
     // skipped by the build cache. (No QEMU path: this project targets Apple
@@ -1496,6 +1543,8 @@ pub fn build(b: *std.Build) void {
     image.addFileArg(vmtest_bin); // ... [VMTEST.BIN] (Milestone 29: forty-sixth user program, VM depth test)
     image.addFileArg(wndstub_bin); // ... [WNDSTUB.BIN] (M32 WMS2, issue #622: forty-seventh user program, the WM-server registrant stub)
     image.addFileArg(wnd_bin); // ... [WND.BIN] (M32 WMS3, issue #623: forty-eighth user program, the long-lived EL0 WM server)
+    image.addFileArg(sb2_wm_bin); // ... [SB2WM.BIN] (M33 SB2, claim 8878: fiftieth user program, the shared-anon WM half)
+    image.addFileArg(sb2_own_bin); // ... [SB2OWN.BIN] (M33 SB2, claim 8878: fifty-first user program, the shared-anon owner half)
     image.has_side_effects = true;
     image.stdio = .inherit;
     image_step.dependOn(&image.step);

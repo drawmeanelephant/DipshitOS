@@ -35,7 +35,10 @@ const fat = @import("fat.zig");
 /// Maximum file-name length (bytes, ASCII) listed or written.
 pub const name_max: usize = 32;
 /// Maximum ESP snapshot entries (files + directories, root only).
-pub const esp_entries_max: usize = 64;
+/// 96: the ESP root grew past 64 with the M33 SB2 proof binaries (and the
+/// M30 dynamic-linker set); the window must hold every root file or `exec`
+/// silently can't see tail entries.
+pub const esp_entries_max: usize = 96;
 /// Per-file content cap for `cat` (larger files are listed with their size
 /// but not content-loaded; `cat` reports that honestly).
 pub const esp_content_max: usize = 2048;
