@@ -58,6 +58,7 @@ const console = @import("console.zig");
 const exceptions = @import("exceptions.zig");
 const mmu = @import("mmu.zig"); // claim 5804: per-task TTBR0 roots
 const userspace = @import("userspace.zig"); // claim 5804: user-VA layout
+const shared_mmap = @import("shared_mmap.zig"); // M33 SB2 (claim 8878): shared-anon revoke-on-exit (ADR 0016 D2)
 // Milestone four (claim 3848): the process registry — the task pool is the
 // executor, the process owns the program (image + address space + lifecycle
 // + exit status). One-way import: process.zig knows nothing about this
@@ -1051,6 +1052,16 @@ pub fn exit_current(status: u64) bool {
         // until reboot). Pure BSS writes (registry compaction + dirty
         // marks), safe in this exception context.
         _ = driving_award.close_owner(pid);
+        // M33 SB2 (claim 8878): the exiting process's shared surfaces die
+        // with it. Regions it OWNED are revoked NOW — every peer RO leaf
+        // unmapped and the descriptors dropped BEFORE the reap unrefs the
+        // owner's pages, so a peer can never retain access into freed
+        // physical memory (ADR 0016 D2 revocation-on-teardown). Regions it
+        // PEER-mapped (the WM role) are detached — unmap + unref 2->1 — and
+        // the owner's surface survives. Pure BSS + leaf writes, safe in this
+        // exception context.
+        _ = shared_mmap.revoke_owner(pid);
+        _ = shared_mmap.revoke_peer_role(pid);
         file_table.reset_process(pid);
         tcp.close_owner(pid);
         // Milestone 14 (claim 7323): a dead process's app timer is disarmed

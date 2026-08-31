@@ -5,9 +5,12 @@
 //! (who may read whose surface, read-only-vs-writable grant, who gets revoked
 //! on teardown, and when a region is freed) as deterministic, host-testable
 //! functions with NO effect on the MMU or any page table. It is the frozen,
-//! runnable spec that SB2 (claim next) implements into `sys_mmap`: SB2 wires
+//! runnable spec that SB2 (claim 8878) implements into `sys_mmap`: SB2 wires
 //! these decisions to actual `mmu.map_user_cow_page` leaves under two EL0
 //! roots (owner writable, WM read-only) and to `unmap_user_page` on teardown.
+//! The physical mapping set (owner va, page count, contiguous pa base) and
+//! the single peer seat are carried here as SB2 data fields; the DECISION
+//! functions below stay pure (no MMU effect).
 //!
 //! The capability model (ADR 0016 D2):
 //!   - Requestor-vs-owner. A shared surface is created and OWNED by the app
@@ -60,10 +63,12 @@ pub const Grant = union(enum) {
 };
 
 /// A fixed descriptor row (the ADR 0016 D1 "small fixed SharedRegion table"
-/// shape, keyed by a kernel-issued integer handle). SB2 owns the physical
-/// va/pa set; this policy row owns the capability identity — owner, refcount,
-/// and the WM peer grant. The `pages`/`va` fields are reserved placeholders
-/// for SB2's mmap wiring and are NOT set by this policy module (kept 0).
+/// shape, keyed by a kernel-issued integer handle). The policy rows own the
+/// capability identity — owner, refcount, and the WM peer grant — and, since
+/// SB2 (claim 8878), the region's physical mapping set + peer seat so one
+/// descriptor is the whole capability (D1.2: "refcount + owner + the va/pa
+/// set"). The DECISION functions are pure (no MMU effect); the wiring fields
+/// are data, written by SB2.
 pub const SharedRegion = struct {
     in_use: bool,
     handle: u32,
@@ -75,9 +80,22 @@ pub const SharedRegion = struct {
     /// Whether the peer WM server holds the current read grant for this region.
     wm_granted: bool,
 
-    /// -reserved for SB2- mmap wiring (always 0 in this policy module).
-    _pages: u32,
-    _va: u64,
+    /// SB2 wiring (claim 8878): the va the OWNER mapped the region at in its
+    /// own root — the owner-side identity key (owner sys_munmap / re-map
+    /// lookup). 0 until SB2 fills it at create.
+    owner_va: u64,
+    /// SB2 wiring: number of 4 KiB pages (the region is `alloc.alloc_pages(n)`
+    /// contiguous, so one base + count describes the whole physical set).
+    page_count: u32,
+    /// SB2 wiring: physical base of the region's contiguous pages.
+    pa_base: u64,
+    /// SB2 wiring: the single live PEER seat (the registered WM's RO mapping),
+    /// its pid, or 0 when no peer holds a view. The D2 trust boundary admits
+    /// one peer seat per region today — the WM; a second seat is refused.
+    peer_pid: u64,
+    /// SB2 wiring: the va the peer mapped the region at IN THE PEER'S OWN ROOT
+    /// (each root's leaves are independent; the peer's va is its own).
+    peer_va: u64,
 };
 
 /// The module-level fixed table (BSS). Reset explicitly; no hidden global
@@ -93,8 +111,11 @@ pub fn reset() void {
         r.owner_pid = 0;
         r.refcount = 0;
         r.wm_granted = false;
-        r._pages = 0;
-        r._va = 0;
+        r.owner_va = 0;
+        r.page_count = 0;
+        r.pa_base = 0;
+        r.peer_pid = 0;
+        r.peer_va = 0;
     }
     next_handle = 1;
 }
@@ -115,6 +136,14 @@ pub fn create(owner_pid: u64) u32 {
             r.owner_pid = owner_pid;
             r.refcount = 0;
             r.wm_granted = false;
+            // SB2 wiring (claim 8878): a reused slot must start CLEAN — a
+            // stale peer seat or va/pa set from a previously dropped region
+            // would make a later revoke unmap the wrong leaves.
+            r.owner_va = 0;
+            r.page_count = 0;
+            r.pa_base = 0;
+            r.peer_pid = 0;
+            r.peer_va = 0;
             return r.handle;
         }
     }
@@ -187,6 +216,12 @@ pub fn drop_owner(handle: u32) u32 {
     r.wm_granted = false;
     r.owner_pid = 0;
     r.handle = 0;
+    // SB2 wiring (claim 8878): a dropped descriptor carries nothing stale.
+    r.owner_va = 0;
+    r.page_count = 0;
+    r.pa_base = 0;
+    r.peer_pid = 0;
+    r.peer_va = 0;
     return revoked;
 }
 
@@ -196,6 +231,100 @@ pub fn read_count(handle: u32) u32 {
     const r = find(handle) orelse return 0;
     if (!r.in_use) return 0;
     return r.refcount;
+}
+
+/// SB2 wiring: record the region's physical mapping set (owner va, page
+/// count, contiguous pa base) — the D1.2 va/pa set the descriptor carries.
+/// Returns false when `handle` is not a live region.
+pub fn set_mapping(handle: u32, owner_va: u64, page_count: u32, pa_base: u64) bool {
+    const r = find(handle) orelse return false;
+    if (!r.in_use) return false;
+    r.owner_va = owner_va;
+    r.page_count = page_count;
+    r.pa_base = pa_base;
+    return true;
+}
+
+/// SB2 wiring: record the peer's RO mapping (its pid + the va in ITS root).
+/// One peer seat per region today (the D2 trust boundary); a second seat is
+/// refused by the syscall caller. Returns false when not a live region.
+pub fn set_peer(handle: u32, peer_pid: u64, peer_va: u64) bool {
+    const r = find(handle) orelse return false;
+    if (!r.in_use) return false;
+    r.peer_pid = peer_pid;
+    r.peer_va = peer_va;
+    return true;
+}
+
+/// SB2 wiring: clear the peer seat (peer detach / owner teardown).
+pub fn clear_peer(handle: u32) void {
+    const r = find(handle) orelse return;
+    r.peer_pid = 0;
+    r.peer_va = 0;
+}
+
+/// Handle of the live region OWNED by `owner_pid` whose owner-side va is
+/// `owner_va` (the owner's sys_munmap / owner re-map lookup), or null.
+pub fn find_owner(owner_pid: u64, owner_va: u64) ?u32 {
+    for (&regions) |*r| {
+        if (r.in_use and r.owner_pid == owner_pid and r.owner_va == owner_va) return r.handle;
+    }
+    return null;
+}
+
+/// Handle of the live region whose PEER seat is `peer_pid` mapping at
+/// `peer_va` (the peer's per-root sys_munmap lookup), or null.
+pub fn find_peer(peer_pid: u64, peer_va: u64) ?u32 {
+    for (&regions) |*r| {
+        if (r.in_use and r.peer_pid == peer_pid and r.peer_va == peer_va) return r.handle;
+    }
+    return null;
+}
+
+/// Whether any live region is OWNED by `pid` or peer-mapped by `pid` and
+/// spans `va` — the shared-munmap guard: teardown of a shared surface is
+/// FULL-REGION only; a partial unmap is refused (EINVAL) by the handler.
+pub fn covers(pid: u64, va: u64) bool {
+    for (&regions) |*r| {
+        if (!r.in_use) continue;
+        const len = @as(u64, r.page_count) * 4096;
+        const owned = r.owner_pid == pid and r.owner_va <= va and va < r.owner_va + len;
+        const peered = r.peer_pid == pid and r.peer_va <= va and va < r.peer_va + len;
+        if (owned or peered) return true;
+    }
+    return false;
+}
+
+/// Collect the handles of every live region OWNED by `pid` (the owner-exit
+/// revoke sweep). Returns the count written to `out`.
+pub fn owned_handles(owner_pid: u64, out: []u32) usize {
+    var n: usize = 0;
+    for (&regions) |*r| {
+        if (r.in_use and r.owner_pid == owner_pid) {
+            if (n < out.len) out[n] = r.handle;
+            n += 1;
+        }
+    }
+    return n;
+}
+
+/// Collect the handles of every live region PEER-mapped by `pid` (the
+/// peer-exit detach sweep). Returns the count written to `out`.
+pub fn peer_handles(peer_pid: u64, out: []u32) usize {
+    var n: usize = 0;
+    for (&regions) |*r| {
+        if (r.in_use and r.peer_pid == peer_pid) {
+            if (n < out.len) out[n] = r.handle;
+            n += 1;
+        }
+    }
+    return n;
+}
+
+/// Read-only view of a live region's wiring (SB2's MMU module reads the
+/// physical set + peer seat to map/unmap leaves). Null when gone.
+pub fn info(handle: u32) ?*const SharedRegion {
+    return find(handle);
 }
 
 fn find(handle: u32) ?*SharedRegion {
@@ -298,4 +427,40 @@ test "shared_region: stale handle after teardown cannot re-grant old peers" {
     try std.testing.expect(fresh != 0);
     try std.testing.expect(read_count(fresh) == 0);
     try std.testing.expect(authorize_read(wm, fresh, false, wm) == .grant);
+}
+
+test "shared_region: a reused slot starts clean — no stale SB2 wiring survives" {
+    reset();
+    const owner: u64 = 42;
+    const wm: u64 = 7;
+    const h = create(owner);
+    try std.testing.expect(h != 0);
+    // Fully wire the region (SB2 fields): mapping set + peer seat.
+    try std.testing.expect(authorize_read(wm, h, false, wm) == .grant);
+    try std.testing.expect(grant_read(h));
+    try std.testing.expect(set_mapping(h, 0x1000_0000, 2, 0x200000));
+    try std.testing.expect(set_peer(h, wm, 0x2000_0000));
+    try std.testing.expect(find_owner(owner, 0x1000_0000) == h);
+    try std.testing.expect(find_peer(wm, 0x2000_0000) == h);
+    try std.testing.expect(covers(owner, 0x1000_0000));
+    try std.testing.expect(covers(wm, 0x2000_0000));
+    var out: [max_shared_regions]u32 = undefined;
+    try std.testing.expectEqual(@as(usize, 1), owned_handles(owner, &out));
+    try std.testing.expectEqual(@as(usize, 1), peer_handles(wm, &out));
+    // Owner teardown: descriptor freed, lookups go dark.
+    _ = drop_owner(h);
+    try std.testing.expect(info(h) == null);
+    try std.testing.expect(find_owner(owner, 0x1000_0000) == null);
+    try std.testing.expect(find_peer(wm, 0x2000_0000) == null);
+    try std.testing.expect(!covers(owner, 0x1000_0000));
+    // A NEW region reuses the (dropped) slot: no stale owner va, page set,
+    // or peer seat survives — a later revoke can never unmap wrong leaves.
+    const h2 = create(owner);
+    try std.testing.expect(h2 != 0);
+    const r = info(h2).?;
+    try std.testing.expectEqual(@as(u64, 0), r.owner_va);
+    try std.testing.expectEqual(@as(u32, 0), r.page_count);
+    try std.testing.expectEqual(@as(u64, 0), r.pa_base);
+    try std.testing.expectEqual(@as(u64, 0), r.peer_pid);
+    try std.testing.expectEqual(@as(u64, 0), r.peer_va);
 }

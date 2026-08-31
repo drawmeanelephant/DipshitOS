@@ -81,10 +81,13 @@ const pipe = @import("pipe.zig"); // M19 P1 (issue #290): the bounded pipe buffe
 const app_timers = @import("app_timers.zig"); // Milestone 14 (claim 7323): the per-process app timer facility
 const virtio_snd = @import("virtio_snd.zig"); // Milestone 15 (claim 7636): the virtio-snd playback path behind sys_audio_*
 const fbtext = @import("text.zig"); // M20-U1 (claim 5127): sys_font_size's terminal font state
+const shared_region = @import("shared_region.zig"); // M33 SB1 (claim 7418): the D2 shared-anon capability policy (ADR 0016)
+const shared_mmap = @import("shared_mmap.zig"); // M33 SB2 (claim 8878): the shared-anon MMU wiring (owner RW / WM RO leaves)
 
 const builtin = @import("builtin");
 const mmu = @import("mmu.zig");
 const alloc = @import("alloc.zig");
+const memmap = @import("memmap.zig"); // host tests: arm the physical allocator for eager shared-anon create
 
 pub const slot_count: usize = 128;
 /// 56 through M18 + slot 58 `sys_font_size` (M20-U1); 56/57 are Lane A's
@@ -2006,11 +2009,11 @@ fn handle_tcp_close(_: Args, _: *exceptions.VectorFrame) u64 {
 /// prot: 1=PROT_READ, 2=PROT_WRITE, 4=PROT_EXEC.
 /// flags: 0x20=MAP_ANONYMOUS, 0x02=MAP_PRIVATE, 0x8000=MAP_POPULATE.
 ///
-/// M33 SB1 (claim 7418): bit 16 (0x10000) `M33_MAP_SHARED` is a RESERVED flag
-/// for seam-B cross-process shared anonymous mmap (ADR 0016, ACCEPTED). It is
-/// not yet implemented — until the SB2 follow-on wires a `shared_region` leaf,
-/// a request carrying bit 16 still maps privately, exactly as M29 does today
-/// (no ABI behavior change on this contract card).
+/// M33 SB1/SB2 (claims 7418/8878): bit 16 (0x10000) `M33_MAP_SHARED` is the
+/// seam-B shared-anonymous flag (ADR 0016, ACCEPTED; ABI frozen in ADR 0007).
+/// Implemented by SB2: a request carrying bit 16 is handled by
+/// `handle_mmap_shared` (owner create / owner re-map keep / registered-WM RO
+/// attach by handle); every other call takes the plain M29 path below.
 /// Returns allocated virtual address on success, or -error.
 fn handle_mmap(args: Args, _: *exceptions.VectorFrame) u64 {
     const addr = args[0];
@@ -2021,6 +2024,15 @@ fn handle_mmap(args: Args, _: *exceptions.VectorFrame) u64 {
     if (len == 0 or len > 16 * 1024 * 1024) return error_result(.einval);
     const pid = process.find_by_task(scheduler.current_id()) orelse return error_result(.einval);
     const pinfo = process.info(pid) orelse return error_result(.einval);
+
+    // M33 SB2 (claim 8878): seam-B cross-process shared-anonymous surfaces
+    // (ADR 0016, the `M33_MAP_SHARED` flag bit 16 — implemented now). Three
+    // shapes are resolved in handle_mmap_shared: owner-create, owner re-map
+    // (idempotent keep), and the registered WM's RO attach by handle. The
+    // plain M29 path below is untouched for every other call.
+    if ((flags & m33_map_shared) != 0) {
+        return handle_mmap_shared(addr, len, prot, flags, pid, pinfo);
+    }
 
     const aligned_len = (len + 4095) & ~@as(u64, 4095);
     var va: u64 = 0;
@@ -2056,6 +2068,134 @@ fn handle_mmap(args: Args, _: *exceptions.VectorFrame) u64 {
     return va;
 }
 
+/// M29 / M33 flags on `sys_mmap` (slot 63).
+const map_anonymous: u64 = 0x20; // M29: MAP_ANONYMOUS
+const map_populate: u64 = 0x8000; // M29: MAP_POPULATE (eager allocation)
+const m33_map_shared: u64 = 0x10000; // M33 SB1 (claim 7418): M33_MAP_SHARED (ADR 0016 seam B, frozen in ADR 0007)
+
+/// M33 SB2 (claim 8878): seam-B shared-anonymous mmap (ADR 0016 D1/D2, the
+/// frozen `M33_MAP_SHARED` bit 16). The physical pages are allocated ONCE and
+/// mapped into two roots: the owner's WRITABLE leaf (its own root) and the
+/// registered WM's EL0-RO `sw_cow` leaf (the WM's own root, at its own va).
+///
+/// Call encoding (the handle is the capability identity per ADR 0016 D1.2 and
+/// no new syscall slot exists, so `addr` carries it for a peer attach):
+///   - owner CREATE: `sys_mmap(addr=0|<va>, len, prot >= WRITE, MAP_ANON|SHARED)`
+///   - owner re-map of its own region: same call at its owner_va -> returns
+///     the existing va (idempotent keep; D2 "the creator always retains its
+///     own surface").
+///   - WM attach: `sys_mmap(addr=<handle>, len, prot=READ, MAP_ANON|SHARED)`
+///     -> maps the region RO into the WM's root, returns the WM's own va.
+///
+/// Error contract (ADR 0007): EINVAL (writable peer view / inapplicable
+/// prot-geometry / full-region-only violation), EACCES (unauthorized peer
+/// re-map), ENOSPC (region table full), EFAULT (stale/revoked handle),
+/// ENOMEM (physical allocation or region-list exhaustion).
+fn handle_mmap_shared(addr: u64, len: u64, prot: u64, flags: u64, pid: usize, pinfo: process.ProcessInfo) u64 {
+    // The flag means shared-ANONYMOUS: a shared surface without MAP_ANONYMOUS
+    // is inapplicable geometry (EINVAL).
+    if ((flags & map_anonymous) == 0) return error_result(.einval);
+    const aligned_len = (len + 4095) & ~@as(u64, 4095);
+
+    // --- Owner re-map (idempotent keep) ---------------------------------
+    // An owner re-mapping its own live region keeps it (D2: the creator
+    // always retains its own surface); the return is the existing owner va.
+    if (addr != 0 and (addr & 4095) == 0) {
+        if (shared_region.find_owner(pid, addr) != null) return addr;
+    }
+
+    // --- WM (peer) attach by handle -------------------------------------
+    // Handles are small kernel integers (1..max_shared_regions); real user
+    // vais are page-aligned and >= 0x10000000, so `addr < 0x1000`
+    // unambiguously names a handle-based peer attach.
+    if (addr != 0 and addr < 0x1000) {
+        const handle: u32 = @intCast(addr);
+        const r = shared_region.info(handle) orelse return error_result(.efault); // .gone
+        // The OWNER attaching by handle keeps its writable surface (D2 "the
+        // creator always retains its own surface"); it NEVER maps a redundant
+        // RO/COW view of itself (the SB1 review fix: `.grant` for the owner
+        // is permission-to-keep, not a leaf to install).
+        if (r.owner_pid == @as(u64, pid)) return r.owner_va;
+        // One peer seat per region (the D2 trust boundary: the WM only).
+        if (r.peer_pid != 0) {
+            if (r.peer_pid == @as(u64, pid)) return r.peer_va; // idempotent keep
+            return error_result(.eacces); // a second peer seat is refused today
+        }
+        if ((prot & 1) == 0) return error_result(.einval); // a read view is required
+        const want_writable = (prot & 2) != 0;
+        const wm_peer = wm_server.registered_pid() orelse 0;
+        switch (shared_region.authorize_read(pid, handle, want_writable, wm_peer)) {
+            .grant => {},
+            .writable_refused => return error_result(.einval),
+            .not_authorized => return error_result(.eacces),
+            .gone => return error_result(.efault),
+            .capacity => return error_result(.enospc),
+        }
+        // Full-region attach only (teardown is full-region only, D2).
+        if (aligned_len != @as(u64, r.page_count) * 4096) return error_result(.einval);
+        // The peer maps at ITS OWN va in ITS OWN root (ADR 0016 D1).
+        const peer_va = process.next_mmap_va(pid, aligned_len);
+        if (!process.add_mmap_region(pid, peer_va, aligned_len, prot, flags)) return error_result(.enomem);
+        if (!shared_mmap.map_peer_leaves(pinfo.root_phys, peer_va, r.page_count, r.pa_base)) {
+            _ = process.remove_mmap_region(pid, peer_va, aligned_len);
+            return error_result(.enomem);
+        }
+        _ = shared_region.grant_read(handle);
+        _ = shared_region.set_peer(handle, pid, peer_va);
+        uaccess.add_read_region(.{ .base = peer_va, .len = aligned_len });
+        return peer_va;
+    }
+
+    // --- Owner create ----------------------------------------------------
+    // The shared surface is render-into: the owner's leaf is writable, so a
+    // create without PROT_WRITE is inapplicable geometry (EINVAL).
+    if ((prot & 2) == 0) return error_result(.einval);
+    var va: u64 = 0;
+    if (addr != 0 and (addr & 4095) == 0) {
+        va = addr;
+    } else {
+        va = process.next_mmap_va(pid, aligned_len);
+    }
+    const handle = shared_region.create(pid);
+    if (handle == 0) return error_result(.enospc); // .capacity — the table is full
+    if (!process.add_mmap_region(pid, va, aligned_len, prot, flags)) {
+        _ = shared_region.drop_owner(handle);
+        return error_result(.enomem);
+    }
+    const pages = aligned_len / 4096;
+    const pa_base = alloc.alloc_pages(pages) orelse {
+        _ = shared_region.drop_owner(handle);
+        _ = process.remove_mmap_region(pid, va, aligned_len);
+        return error_result(.enomem);
+    };
+    if (!builtin.is_test) {
+        @memset(@as([*]u8, @ptrFromInt(pa_base))[0..aligned_len], 0);
+    }
+    const page_count: u32 = @intCast(pages);
+    if (!shared_mmap.map_owner_leaves(pinfo.root_phys, va, page_count, pa_base, prot)) {
+        var ui: u64 = 0;
+        while (ui < pages) : (ui += 1) {
+            _ = mmu.unmap_user_page(pinfo.root_phys, va + ui * 4096);
+        }
+        _ = alloc.free_pages(pa_base, pages);
+        _ = shared_region.drop_owner(handle);
+        _ = process.remove_mmap_region(pid, va, aligned_len);
+        return error_result(.enomem);
+    }
+    var di: u64 = 0;
+    while (di < pages) : (di += 1) {
+        _ = process.record_dynamic_page(pid, pa_base + di * 4096);
+    }
+    _ = shared_region.set_mapping(handle, va, page_count, pa_base);
+    if ((prot & 2) != 0) {
+        uaccess.add_write_region(.{ .base = va, .len = aligned_len });
+    }
+    if ((prot & 1) != 0) {
+        uaccess.add_read_region(.{ .base = va, .len = aligned_len });
+    }
+    return va;
+}
+
 /// M29 VM Depth: sys_munmap(addr, len) — slot 64.
 /// Unmaps an anonymous memory region and frees physical pages.
 fn handle_munmap(args: Args, _: *exceptions.VectorFrame) u64 {
@@ -2068,6 +2208,28 @@ fn handle_munmap(args: Args, _: *exceptions.VectorFrame) u64 {
 
     const aligned_len = (len + 4095) & ~@as(u64, 4095);
     const pages = aligned_len / 4096;
+
+    // M33 SB2 (claim 8878): shared-region teardown. munmap of a shared
+    // surface is FULL-REGION only (a partial unmap is EINVAL). An OWNER
+    // munmap revokes the peer RO seat first — the loop below then unmaps the
+    // owner's own leaves and unrefs 1->0 (free), and since the descriptor is
+    // already gone the loop never re-enters this path. A PEER munmap detaches
+    // its RO seat (per-root teardown, ADR 0016 D1) and returns directly.
+    if (shared_region.covers(@as(u64, pid), addr)) {
+        if (shared_region.find_owner(pid, addr)) |h| {
+            const r = shared_region.info(h).?;
+            if (aligned_len != @as(u64, r.page_count) * 4096) return error_result(.einval);
+            _ = shared_mmap.revoke_owner_va(pid, addr);
+        } else if (shared_region.find_peer(pid, addr)) |h| {
+            const r = shared_region.info(h).?;
+            if (aligned_len != @as(u64, r.page_count) * 4096) return error_result(.einval);
+            _ = shared_mmap.detach_peer(pid, addr);
+            _ = process.remove_mmap_region(pid, addr, aligned_len);
+            uaccess.remove_region(addr, aligned_len);
+            return 0;
+        } else return error_result(.einval); // partial unmap of a shared surface
+    }
+
     var i: u64 = 0;
     while (i < pages) : (i += 1) {
         const page_va = addr + i * 4096;
@@ -4777,4 +4939,238 @@ test "syscall: sys_mmap and sys_munmap anonymous allocation and teardown" {
 
     // Invalid munmap (unaligned addr)
     try std.testing.expectEqual(error_result(.einval), dispatch(sys_munmap, .{ mapped_va + 1, 4096, 0, 0, 0, 0 }, &frame));
+}
+
+test "syscall: shared anon mmap — two EL0 roots map one region; owner RW, WM RO; munmap revokes the peer seat" {
+    mmu.reset();
+    alloc.reset_refcounts();
+    shared_region.reset(); // the region table is global — a fresh table per test
+    process.init();
+    userspace.init();
+    init(test_writer);
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0); // task 2 = process 0 (boot payload)
+
+    // Arm the physical allocator (SB2's create allocates its pages eagerly).
+    const map_desc = [_]memmap.MemoryDescriptor{
+        .{ .type = .conventional_memory, .physical_start = 0x100000, .virtual_start = 0, .number_of_pages = 64, .attribute = 0 },
+    };
+    const view = memmap.MapView.init(std.mem.asBytes(&map_desc), @sizeOf(memmap.MemoryDescriptor), map_desc.len);
+    try std.testing.expect(alloc.init(view, &.{}));
+
+    // Two REAL TTBR0 roots: the owner renders into its shared surface; the WM
+    // peer reads it EL0-RO from ITS OWN root at ITS OWN va.
+    const owner_root = mmu.build_user_root(userspace.text_va, 0x1000, 64, userspace.stack_va, 0x2000, 8192).?;
+    const peer_root = mmu.build_user_root(userspace.text_va, 0x3000, 64, userspace.stack_va, 0x4000, 8192).?;
+    var kstack1: [scheduler.task_stack_size]u8 align(16) = undefined;
+    var kstack2: [scheduler.task_stack_size]u8 align(16) = undefined;
+    const owner_pid = process.create("OWNER.BIN", .{ .entry_va = 0x400000, .content_len = 64 }, .{
+        .root_phys = owner_root,
+        .text_va = userspace.text_va,
+        .text_len = 64,
+        .stack_va = userspace.stack_va,
+        .stack_len = 8192,
+    }, .{}).?;
+    const peer_pid = process.create("PEER.BIN", .{ .entry_va = 0x400000, .content_len = 64 }, .{
+        .root_phys = peer_root,
+        .text_va = userspace.text_va,
+        .text_len = 64,
+        .stack_va = userspace.stack_va,
+        .stack_len = 8192,
+    }, .{}).?;
+    const owner_task = scheduler.register_exec_user(userspace.text_va, 0x4000_0000, 100, 0x8000_0000, 8192, &kstack1, 0, 0).?;
+    const peer_task = scheduler.register_exec_user(userspace.text_va, 0x5000_0000, 100, 0x9000_0000, 8192, &kstack2, 0, 0).?;
+    _ = process.bind(owner_pid, owner_task);
+    _ = process.bind(peer_pid, peer_task);
+    scheduler.start();
+
+    var frame = fresh_frame();
+    // Drive the ring to the OWNER's task.
+    var guard: usize = 0;
+    while (scheduler.current_id() != owner_task and guard < scheduler.max_tasks) : (guard += 1) {
+        try std.testing.expect(scheduler.yield_current());
+    }
+    try std.testing.expectEqual(owner_task, scheduler.current_id());
+
+    // --- Owner creates the shared surface (1 page, RW, MAP_ANON|M33_MAP_SHARED).
+    const owner_va = dispatch(sys_mmap, .{ 0, 4096, 3, 0x20 | 0x10000, 0, 0 }, &frame);
+    try std.testing.expect(owner_va >= 0x1000_0000);
+    const h: u32 = 1; // first kernel-issued handle
+    const r = shared_region.info(h).?;
+    try std.testing.expectEqual(@as(u64, owner_pid), r.owner_pid);
+    try std.testing.expectEqual(@as(u32, 1), r.page_count);
+    try std.testing.expectEqual(owner_va, r.owner_va);
+    const pa_base: u64 = r.pa_base; // captured BEFORE teardown (the descriptor is zeroed on drop)
+    try std.testing.expect(pa_base != 0);
+    // The owner's leaf is WRITABLE (AP=0b01), maps the region's pa, no sw_cow.
+    const owner_leaf = mmu.get_user_leaf(owner_root, owner_va).?.*;
+    try std.testing.expectEqual(r.pa_base, owner_leaf & 0x0000_ffff_ffff_f000);
+    try std.testing.expectEqual(@as(u64, 1), (owner_leaf >> 6) & 3); // EL0 RW
+    try std.testing.expect((owner_leaf & mmu.sw_cow) == 0);
+    // The OWNER attaching by handle keeps its writable surface (never maps a
+    // redundant COW view of itself — the SB1 review duty).
+    try std.testing.expectEqual(owner_va, dispatch(sys_mmap, .{ h, 4096, 1, 0x20 | 0x10000, 0, 0 }, &frame));
+
+    // Drive the ring to the PEER's task.
+    guard = 0;
+    while (scheduler.current_id() != peer_task and guard < scheduler.max_tasks) : (guard += 1) {
+        try std.testing.expect(scheduler.yield_current());
+    }
+    try std.testing.expectEqual(peer_task, scheduler.current_id());
+
+    // --- A stranger (the peer, pre-WM) cannot attach by handle: EACCES.
+    try std.testing.expectEqual(error_result(.eacces), dispatch(sys_mmap, .{ h, 4096, 1, 0x20 | 0x10000, 0, 0 }, &frame));
+
+    // --- A writable peer request is EINVAL (D2: peers are read-only).
+    _ = wm_server.register(peer_pid);
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_mmap, .{ h, 4096, 3, 0x20 | 0x10000, 0, 0 }, &frame));
+
+    // --- The WM attaches RO by handle: its OWN root, EL0-RO + sw_cow, SAME pa.
+    const peer_va = dispatch(sys_mmap, .{ h, 4096, 1, 0x20 | 0x10000, 0, 0 }, &frame);
+    try std.testing.expect(peer_va >= 0x1000_0000);
+    const peer_leaf = mmu.get_user_leaf(peer_root, peer_va).?.*;
+    try std.testing.expectEqual(r.pa_base, peer_leaf & 0x0000_ffff_ffff_f000); // SAME physical page
+    try std.testing.expectEqual(@as(u64, 3), (peer_leaf >> 6) & 3); // EL0 RO
+    try std.testing.expect((peer_leaf & mmu.sw_cow) != 0);
+    // Roots are independent: the peer's va may even coincide with the owner's
+    // (both va allocators start at 0x1000_0000). The OWNER's leaf at that va,
+    // if present, must never be the peer's RO/COW view.
+    if (mmu.get_user_leaf(owner_root, peer_va)) |ol| {
+        try std.testing.expect((ol.* & mmu.sw_cow) == 0);
+    }
+    // The peer seat + read ref were recorded.
+    try std.testing.expectEqual(@as(u32, 1), shared_region.read_count(h));
+    try std.testing.expectEqual(@as(u64, peer_pid), shared_region.info(h).?.peer_pid);
+    // Re-attach is idempotent (keeps the existing seat).
+    try std.testing.expectEqual(peer_va, dispatch(sys_mmap, .{ h, 4096, 1, 0x20 | 0x10000, 0, 0 }, &frame));
+
+    // Drive back to the OWNER's task for teardown.
+    guard = 0;
+    while (scheduler.current_id() != owner_task and guard < scheduler.max_tasks) : (guard += 1) {
+        try std.testing.expect(scheduler.yield_current());
+    }
+    try std.testing.expectEqual(owner_task, scheduler.current_id());
+
+    // --- A PARTIAL munmap of the shared surface is refused: EINVAL.
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_munmap, .{ owner_va, 8192, 0, 0, 0, 0 }, &frame));
+
+    // --- Owner munmap revokes the peer seat: peer leaf unmapped, descriptor
+    // gone, pages freed; the owner's own leaf is unmapped too.
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_munmap, .{ owner_va, 4096, 0, 0, 0, 0 }, &frame));
+    // A revoked leaf is value-zeroed (the intermediate table may remain — mmu
+    // unmap semantics), so "gone" means the leaf is absent OR zero; a second
+    // unmap of a zeroed leaf returns null (the honest probe).
+    try std.testing.expect(mmu.unmap_user_page(peer_root, peer_va) == null);
+    try std.testing.expect(mmu.unmap_user_page(owner_root, owner_va) == null);
+    try std.testing.expect(shared_region.info(h) == null);
+    // The physical page is FREED: a second free attempt returns false (the
+    // allocator bit is already clear, and no shared_pages entry remains).
+    try std.testing.expect(!alloc.unref_page(pa_base));
+    // A stale handle re-attach is EFAULT (.gone).
+    try std.testing.expectEqual(error_result(.efault), dispatch(sys_mmap, .{ h, 4096, 1, 0x20 | 0x10000, 0, 0 }, &frame));
+
+    // --- ENOSPC: fill the shared_region table, then a syscall create refuses.
+    var n: u32 = 0;
+    while (n < shared_region.max_shared_regions) : (n += 1) {
+        const hh = shared_region.create(@as(u64, owner_pid));
+        try std.testing.expect(hh != 0);
+    }
+    try std.testing.expectEqual(error_result(.enospc), dispatch(sys_mmap, .{ 0, 4096, 3, 0x20 | 0x10000, 0, 0 }, &frame));
+
+    // Cleanup: unregister the WM seat — a leftover registration would hand
+    // later tests (the input routing test uses pid 2) the driving_award
+    // window/input hooks and cross-deliver events.
+    _ = wm_server.unregister(peer_pid);
+}
+
+test "syscall: shared anon revoke-on-exit — owner exit revokes the peer seat; WM exit detaches only its seat" {
+    mmu.reset();
+    alloc.reset_refcounts();
+    shared_region.reset(); // the region table is global — a fresh table per test
+    process.init();
+    userspace.init();
+    init(test_writer);
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0); // task 2 = process 0 (boot payload)
+
+    const map_desc = [_]memmap.MemoryDescriptor{
+        .{ .type = .conventional_memory, .physical_start = 0x100000, .virtual_start = 0, .number_of_pages = 64, .attribute = 0 },
+    };
+    const view = memmap.MapView.init(std.mem.asBytes(&map_desc), @sizeOf(memmap.MemoryDescriptor), map_desc.len);
+    try std.testing.expect(alloc.init(view, &.{}));
+
+    const owner_root = mmu.build_user_root(userspace.text_va, 0x1000, 64, userspace.stack_va, 0x2000, 8192).?;
+    const peer_root = mmu.build_user_root(userspace.text_va, 0x3000, 64, userspace.stack_va, 0x4000, 8192).?;
+    var kstack1: [scheduler.task_stack_size]u8 align(16) = undefined;
+    var kstack2: [scheduler.task_stack_size]u8 align(16) = undefined;
+    const owner_pid = process.create("OWNER.BIN", .{ .entry_va = 0x400000, .content_len = 64 }, .{
+        .root_phys = owner_root,
+        .text_va = userspace.text_va,
+        .text_len = 64,
+        .stack_va = userspace.stack_va,
+        .stack_len = 8192,
+    }, .{}).?;
+    const peer_pid = process.create("PEER.BIN", .{ .entry_va = 0x400000, .content_len = 64 }, .{
+        .root_phys = peer_root,
+        .text_va = userspace.text_va,
+        .text_len = 64,
+        .stack_va = userspace.stack_va,
+        .stack_len = 8192,
+    }, .{}).?;
+    const owner_task = scheduler.register_exec_user(userspace.text_va, 0x4000_0000, 100, 0x8000_0000, 8192, &kstack1, 0, 0).?;
+    const peer_task = scheduler.register_exec_user(userspace.text_va, 0x5000_0000, 100, 0x9000_0000, 8192, &kstack2, 0, 0).?;
+    _ = process.bind(owner_pid, owner_task);
+    _ = process.bind(peer_pid, peer_task);
+    scheduler.start();
+
+    var frame = fresh_frame();
+    var guard: usize = 0;
+    while (scheduler.current_id() != owner_task and guard < scheduler.max_tasks) : (guard += 1) {
+        try std.testing.expect(scheduler.yield_current());
+    }
+    try std.testing.expectEqual(owner_task, scheduler.current_id());
+
+    const owner_va = dispatch(sys_mmap, .{ 0, 4096, 3, 0x20 | 0x10000, 0, 0 }, &frame);
+    try std.testing.expect(owner_va >= 0x1000_0000);
+    const h: u32 = 1;
+    const pa_base = shared_region.info(h).?.pa_base;
+
+    guard = 0;
+    while (scheduler.current_id() != peer_task and guard < scheduler.max_tasks) : (guard += 1) {
+        try std.testing.expect(scheduler.yield_current());
+    }
+    try std.testing.expectEqual(peer_task, scheduler.current_id());
+    _ = wm_server.register(peer_pid);
+    const peer_va = dispatch(sys_mmap, .{ h, 4096, 1, 0x20 | 0x10000, 0, 0 }, &frame);
+    try std.testing.expect(peer_va >= 0x1000_0000);
+    // Owner (1) + peer (1): the page is 2-ref'd while both roots map it.
+    try std.testing.expectEqual(@as(u16, 2), alloc.page_refcount(pa_base));
+
+    // --- The WM (peer) exits first: only ITS seat detaches. The region and
+    // the owner's writable leaf survive; the page drops back to the owner's
+    // single ref. (This is scheduler's revoke_peer_role at exit.)
+    _ = shared_mmap.revoke_peer_role(peer_pid);
+    try std.testing.expect(mmu.unmap_user_page(peer_root, peer_va) == null); // peer RO leaf gone
+    try std.testing.expect(shared_region.info(h) != null); // region survives
+    try std.testing.expectEqual(@as(u32, 0), shared_region.read_count(h));
+    try std.testing.expectEqual(@as(u64, 0), shared_region.info(h).?.peer_pid); // seat cleared
+    try std.testing.expectEqual(@as(u16, 1), alloc.page_refcount(pa_base));
+    // The owner's writable leaf is untouched.
+    try std.testing.expect(mmu.unmap_user_page(owner_root, owner_va) != null); // still mapped (probe returns its pa)
+
+    // --- The owner exits: the region dies; the page is only held by the
+    // owner's dynamic_pages list now (1) — the reap unrefs it to 0 (free).
+    _ = shared_mmap.revoke_owner(owner_pid);
+    try std.testing.expect(shared_region.info(h) == null);
+    try std.testing.expectEqual(@as(u16, 1), alloc.page_refcount(pa_base));
+    // Simulate the reap's release_resources unref of the owner's dynamic page.
+    // The reap's release_resources unref frees the page (1 -> 0); a second
+    // free attempt then does nothing (the honest "already freed" probe).
+    try std.testing.expect(alloc.unref_page(pa_base));
+    try std.testing.expect(!alloc.unref_page(pa_base));
+
+    // Cleanup: unregister the WM seat (see the sibling test's note).
+    _ = wm_server.unregister(peer_pid);
 }
