@@ -519,7 +519,7 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
     // is probed below (console_kind == .none); the GIC is NOT programmed
     // here — that is the next card.
     userspace.init();
-    syscall.init(exception_report_writer);
+    syscall.init(process_stdout);
     // Claim 5804: the EL0 task runs in its own address space, so the
     // uaccess regions are USER VAs (what the user root maps and what the
     // task's syscall pointers refer to) — not the physical image ranges
@@ -1162,10 +1162,29 @@ fn pl011_init() void {
 
 const serial_ring = @import("serial_ring.zig"); // Arc5 #243: capture last 512B for tombstones
 
+/// Whether the serial cursor sits at the start of a line right now. Every
+/// byte reaches the TX through `uart_putc`, so tracking the delimiter here
+/// captures all output (the kernel banner, the shell's prompt, process
+/// stdout, tracer lines) from one choke point. A process launched by an
+/// async exec can write while the shell is idle at a live prompt (`virelai> `
+/// drawn, cursor mid-line); `process_stdout` consults this flag so foreign
+/// output starts on its own line instead of merging onto the prompt (which
+/// swallowed the `elf: hello from HELLO.ELF` marker in the strace gate).
+var serial_at_bol: bool = true;
+
+fn uart_at_bol() bool {
+    return serial_at_bol;
+}
+
 fn uart_putc(byte: u8) void {
     // Arc5 #243: capture every serial byte into the ring buffer so
     // crash tombstones can include the last 512 bytes of serial output.
     serial_ring.append(&[_]u8{byte});
+    if (byte == '\n' or byte == '\r') {
+        serial_at_bol = true;
+    } else {
+        serial_at_bol = false;
+    }
     // Claim 0680 (issue #523 item 3): when the host armed the structured
     // console, every console byte is DUPLICATED onto custom-virtio queue 1
     // (line-buffered; partial lines flush from the idle seam). One cheap
@@ -1705,6 +1724,20 @@ fn custom_virtio_spike() void {
 /// Console writer for the claim-9746 exception report. Wraps the polled
 /// uart; a no-op until the console is probed (console_kind == .none).
 fn exception_report_writer(text: []const u8) void {
+    uart_puts(text);
+}
+
+/// `write_fn` (process stdout) seam. `exception_report_writer` forwards to
+/// uart verbatim; this wrapper additionally starts the output on a fresh
+/// serial line when the cursor is mid-line — the case where an async-exec'd
+/// program writes while the shell is idle at a drawn prompt. Without it the
+/// program's first line merges onto the `virelai> ` prompt and the exact-line
+/// marker grep misses it (the strace gate). The prefixed newline flushes the
+/// buffered virtio prompt line first, then the program's output lands at
+/// column 0. When the shell already sits at a fresh line (the common
+/// foreground case) nothing is prepended.
+fn process_stdout(text: []const u8) void {
+    if (!uart_at_bol()) uart_puts("\n");
     uart_puts(text);
 }
 
