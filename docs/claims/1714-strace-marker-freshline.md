@@ -8,7 +8,7 @@
 - **Touches:** kernel/src/main.zig
 - **Depends on:** —
 - **Heartbeat:** 2026-08-31
-- **Status:** 🔄 agent/buffy/strace-marker-freshline
+- **Status:** ✅ done — landed via PR #723 (2026-08-31).
 
 ## Notes
 

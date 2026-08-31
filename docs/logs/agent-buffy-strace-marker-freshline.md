@@ -48,3 +48,9 @@ elf: hello from HELLO.ELF
 
 Also green: `zig build`, `zig fmt --check`, `zig build test-console` (792/792
 unit tests + byte-identical mock transcript).
+
+## 2026-08-31 — landed via PR #723
+
+Merged to main as PR #723; claim flipped ✅. Coordination surface: claim 1714
+is now done, so the VirelaiOS rename claim 5817 (`kernel/**`) keeps no
+ACTIVE-file overlap on main after landing.
