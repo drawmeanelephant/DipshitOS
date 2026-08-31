@@ -80,6 +80,7 @@ meaningful — on main.
 | generalized bit-order mutation gate (claim 1027) | [`agent-buffy-generalized-mutations.md`](agent-buffy-generalized-mutations.md) |
 | issue 125 follow-on: refresh the public site screenshot | [`agent-buffy-glyph-mirror-fix.md`](agent-buffy-glyph-mirror-fix.md) |
 | glyph raster convention gate (claim 9100) | [`agent-buffy-glyph-raster-gate.md`](agent-buffy-glyph-raster-gate.md) |
+| history recall persistence (claim 6344) | [`agent-buffy-history-recall-persistence.md`](agent-buffy-history-recall-persistence.md) |
 | `agent/buffy/hygiene-archive-m5-m6-prompts` | [`agent-buffy-hygiene-archive-m5-m6-prompts.md`](agent-buffy-hygiene-archive-m5-m6-prompts.md) |
 | agent/buffy/input-poll-563 | [`agent-buffy-input-poll-563.md`](agent-buffy-input-poll-563.md) |
 | agent/buffy/issue-613-tcp-connect-spin | [`agent-buffy-issue-613-tcp-connect-spin.md`](agent-buffy-issue-613-tcp-connect-spin.md) |
@@ -145,6 +146,7 @@ meaningful — on main.
 | milestone nine tracker (claim 8234) | [`agent-buffy-m9-tracker.md`](agent-buffy-m9-tracker.md) |
 | Roadmap refinement (claim 4951) | [`agent-buffy-roadmap-refinement.md`](agent-buffy-roadmap-refinement.md) |
 | `agent/buffy/status-compress` | [`agent-buffy-status-compress.md`](agent-buffy-status-compress.md) |
+| agent/buffy/strace-marker-freshline | [`agent-buffy-strace-marker-freshline.md`](agent-buffy-strace-marker-freshline.md) |
 | agent/buffy/toolchain-env-check | [`agent-buffy-toolchain-env-check.md`](agent-buffy-toolchain-env-check.md) |
 | U4 CG-pointer route follow-on (claim 3692) | [`agent-buffy-u4-pointer-cg.md`](agent-buffy-u4-pointer-cg.md) |
 | U4 real-mouse pointer follow-on (claim 9015) | [`agent-buffy-u4-pointer-classc.md`](agent-buffy-u4-pointer-classc.md) |
@@ -201,6 +203,7 @@ meaningful — on main.
 | freebuff/hey-bestie-the-chat-got-lost-so-we-re-so-back-can--53baf792-c2f8-470d-a9f1-6344aa90847a (M14 shared user services) | [`freebuff-20260818-001.md`](freebuff-20260818-001.md) |
 | `m14-s1-clipboard`: the bounded kernel clipboard (claim 0169) | [`freebuff-20260818-002.md`](freebuff-20260818-002.md) |
 | freebuff/can-you-review-issues-223-247-and-try-to-provide-h (planning pass for issues #223–#247) | [`freebuff-20260820-001.md`](freebuff-20260820-001.md) |
+| freebuff/okay-i-think-we-need-to-work-through-this-big-one--076be815-d689-40da-9389-cfd56bae921f (Milestone 18 — Rename — VirelaiOS) | [`freebuff-20260831-001.md`](freebuff-20260831-001.md) |
 | lane-b/m24-calc-features | [`lane-b-m24-calc-features.md`](lane-b-m24-calc-features.md) |
 | `lane-c/m20-text-rendering` | [`lane-c-m20-text-rendering.md`](lane-c-m20-text-rendering.md) |
 | `lane-d/m22-dev-tools` | [`lane-d-m22-dev-tools.md`](lane-d-m22-dev-tools.md) |
