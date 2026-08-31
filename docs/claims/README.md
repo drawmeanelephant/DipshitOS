@@ -78,6 +78,7 @@ loudly if the generator or a table is broken.
 <!-- CLAIMS_INDEX:START -->
 | Claim | Owner (branch) | Status |
 |-------|----------------|--------|
+| [0098-in-guest-compiler](0098-in-guest-compiler.md) | antigravity (`agent/antigravity/in-guest-compiler`) | ✅ agent/antigravity/in-guest-compiler |
 | [0130-m23-editor-depth-wave2](0130-m23-editor-depth-wave2.md) | Buffy (`agent/buffy/m23-editor-wave2`) | ✅ done — 96/96 host tests pass, build clean, live gate `tools/verify-live-editor.sh` PASS on VZ (9/9 assertions) |
 | [0162-logs-cleanup](0162-logs-cleanup.md) | opencode (`t3code/fix-issue-267-git-current`) | ✅ done 2026-08-21 |
 | [0163-m18-t5-colors](0163-m18-t5-colors.md) | buffy (`agent/buffy/m18-t5-colors`) | ✅ done 2026-08-22 |
