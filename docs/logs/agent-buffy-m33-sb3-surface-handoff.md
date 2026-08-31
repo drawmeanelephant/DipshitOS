@@ -1,4 +1,4 @@
-# Log - agent/buffy/m33-sb3-surface-handoff
+# Log — agent/buffy/m33-sb3-surface-handoff
 
 ## 2026-08-31 - claim 9361 opened (SB3: window surface handoff)
 

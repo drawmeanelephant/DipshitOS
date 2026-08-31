@@ -7,7 +7,7 @@
 - **Depends on:** SB2 landed (claim 8878, PR #688) - `sys_mmap` owner create/WM peer-attach + `shared_mmap.map_peer_leaves` + the ESP window fix.
 - **Touches:** kernel/src/syscall.zig kernel/src/driving_award.zig kernel/src/shared_region.zig kernel/src/shared_mmap.zig kernel/src/wm_server.zig docs/march-m33-seam-b-pixel-ownership.md docs/claims/9361-sb3-surface-handoff.md docs/logs/agent-buffy-m33-sb3-surface-handoff.md tools/verify-live-sb3-surface-handoff.sh
 - **Heartbeat:** 2026-08-31
-- **Status:** in-progress
+- **Status:** 🔄
 
 ## Plan
 
