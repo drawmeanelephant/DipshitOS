@@ -270,6 +270,12 @@ pub var wm_owns_input: bool = false;
 /// WM's compose-N stores (written between the COMPOSITE_TICK and the final
 /// present), so a kernel blit would double-draw them.
 pub var wm_owns_user_layer: bool = false;
+/// M33 SB6 (claim 6864): how many `.user` windows paint_scene actually
+/// BLITTED (the pre-seam-B composite cost) vs how many surface-backed
+/// (migrated) windows were SKIPPED while the WM owns the user layer (the
+/// seam-B saving). Monotonic per boot; the gate diffs snapshots.
+pub var user_blits: u64 = 0;
+pub var migrated_skips: u64 = 0;
 /// The raw-pointer fan-out (set by wm_server at REGISTER time; null when
 /// no WM — the hook style of `events.on_event_pushed`). Callback gets the
 /// mapped fb pixels + the raw HID button byte; the WM edge-detects.
@@ -3431,7 +3437,16 @@ pub fn paint_scene() virtio_gpu.CmdResult {
         if (w.kind == .user and wm_owns_user_layer and user_surface(w.id) != null) {
             w.dirty = false;
             w.damaged = false;
+            // M33 SB6 (claim 6864): the seam-B composite-cost saving — the
+            // kernel did NOT blit this migrated window (the WM's compose-N
+            // stores are the pixels).
+            migrated_skips +%= 1;
             continue;
+        }
+        if (w.kind == .user) {
+            // M33 SB6 (claim 6864): the pre-seam-B composite cost — a user
+            // window the kernel actually blitted this scene.
+            user_blits +%= 1;
         }
         paint(w);
         // M33 SB4 (claim 2382): record the rect paint() actually repainted so
@@ -4368,6 +4383,31 @@ test "driving_award: SB5 paint_scene skips migrated windows when the WM owns the
         try std.testing.expectEqual(@as(u32, 0), windows[li].last_dw);
         try std.testing.expectEqual(@as(u32, 0), windows[li].last_dh);
     }
+}
+
+test "driving_award: SB6 user_blits vs migrated_skips move on the blit vs skip paths (claim 6864)" {
+    arm();
+    wm_owns_user_layer = false;
+    user_blits = 0;
+    migrated_skips = 0;
+    try std.testing.expectEqual(UserOpenResult{ .opened = 2 }, user_open(64, 64, 512, 384, 7));
+    // Pre-seam-B path (no WM layer ownership): an unmigrated window blit is
+    // counted as a kernel user-blit, never a skip.
+    try std.testing.expect(mark_damage(2, 0, 0, 16, 16));
+    _ = composite();
+    try std.testing.expectEqual(@as(u64, 1), user_blits);
+    try std.testing.expectEqual(@as(u64, 0), migrated_skips);
+    // Migrate the window (fake surface identity — the skip path never
+    // dereferences it).
+    try std.testing.expect(user_bind_surface(2, .{ .handle = 1, .pa_base = 0x1000_0000, .page_count = 48 }));
+    // Seam-B path (WM owns the user layer): the migrated window is SKIPPED —
+    // the kernel blit count stays, the skip count moves.
+    wm_owns_user_layer = true;
+    defer wm_owns_user_layer = false;
+    try std.testing.expect(mark_damage(2, 0, 0, 16, 16));
+    _ = composite();
+    try std.testing.expectEqual(@as(u64, 1), user_blits); // still 1 (no new blit)
+    try std.testing.expectEqual(@as(u64, 1), migrated_skips); // skipped once
 }
 
 test "driving_award: WMS4 SET_WINDOW chrome policy + per-window overrides (issue #624)" {

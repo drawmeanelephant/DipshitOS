@@ -7,7 +7,7 @@
 - **Depends on:** SB5 landed (claim 7397, PR #715) - compose-N + scanout grant + the migrated-window skip.
 - **Touches:** kernel/src/driving_award.zig kernel/src/monitor.zig docs/claims/6864-m33-sb6-perf-payoff.md docs/logs/agent-buffy-m33-sb6-perf-payoff.md tools/verify-live-sb6-perf-payoff.sh docs/archive/gate-inventory-detail.md build.zig image/make-image.sh user/src/sb6_old.zig user/src/sb6_new.zig user/src/sb6_wm.zig artifacts/m33-sb6-perf-payoff.md docs/march-m33-seam-b-pixel-ownership.md
 - **Heartbeat:** 2026-08-31
-- **Status:** 🔄
+- **Status:** ✅
 
 ## Plan
 
@@ -38,4 +38,39 @@
 
 ## Result
 
-_Pending._
+**DONE 2026-08-31 — the seam-B payoff is measured, not asserted.** ONE headless
+VZ boot, SAME 8x8-grid frame (static + 8 dynamic redraws), two paths:
+
+- **Before (SB6OLD.BIN, pre-seam-B control):** 576 `sys_win_fill` (slot 13)
+  SVCs + 9 `sys_win_present` (slot 14) SVCs; the kernel blitted the window on
+  20 paint_scene visits (`dui blits=20`).
+- **After (SB6WM.BIN + SB6NEW.BIN, seam B):** SB6NEW renders the SAME grid
+  with PLAIN STORES into a bound shared surface — ZERO fill SVCs; the kernel
+  SKIPPED the migrated window on 22 visits (`dui skips=22`, never a blit); the
+  WM compose-N'd the surface into its scanout view (`sb6: wm bytes=196608`
+  copy counter; `sb6: wm readback=0x6B` byte parity) and issued the FINAL
+  present (REQUEST_PRESENT, flush-only).
+- **Snapshot (syscalls + dui, ticks=45):** `13 sys_win_fill calls=576`
+  (exactly the control's fills — the seam-B app added zero); `dui: windows=4
+  presents=24 blits=20 skips=22` (blits>=9 and skips>=9 both hold).
+
+Gate: `tools/verify-live-sb6-perf-payoff.sh` — **PASS** (runner-rc=0, zero
+faults). Documented before/after (fills, composite cost, copy volume) in
+`artifacts/m33-sb6-perf-payoff.md`. New kernel observables: `user_blits` /
+`migrated_skips` monotonic counters + `dui blits=`/`skips=` columns; host test
+pins the counter semantics (blit vs skip paths). Build clean, full host suite
+green (221 driving_award tests), fmt/coordination ok, BSS PASS (685128 B
+headroom).
+
+**Honest finding (pre-existing, out of this card's scope):** the first bring-up
+paced frames with cooperative yield-spins; a user task in a SUSTAINED
+yield-spin stalls after the first timer preemption (~1 s, ~9-17 yields) — the
+task stops being scheduled while the kernel's shell/worker keep advancing (no
+fault line, no exit). Reproduces with a single app and no WM (SB6OLD alone),
+so it is independent of the seam-B machinery. Existing gates that yield-loop
+forever (WINLOOP, WINMOVE, SB4DAM) pass only because their evidence is
+captured before the stall. SB6 apps pace with `sys_sleep(1)` (blocking — the
+proven app pacing) and the gate is green. Candidate root cause: the EL0 timer
+preemption vs the cooperative-yield resume path in
+`scheduler.tick()`/`switch_context` — worth its own scheduler investigation
+card.

@@ -1611,6 +1611,86 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_sb5_own.step);
 
     // ------------------------------------------------------------------
+    // Guest: fifty-seventh ESP user program (M33 SB6, claim 6864)
+    // SB6WM.BIN — the registered-WM half of the perf-payoff measurement:
+    // registers, binds the scanout writable, peers the migrated surface
+    // RO, COMPOSES it into the scanout COUNTING every copied byte (the
+    // compose-N copy volume: 256*192*4 = 196,608), reads the byte back,
+    // issues the FINAL present (flush only), acks the owner.
+    // ------------------------------------------------------------------
+    const sb6_wm_prog = b.addExecutable(.{
+        .name = "user-sb6wm",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/sb6_wm.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    sb6_wm_prog.linker_script = b.path("user/linker.ld");
+    const sb6_wm_step = b.step("sb6wm", "Build the fifty-seventh ESP user program (zig-out/bin/SB6WM.BIN)");
+    const sb6_wm_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    sb6_wm_elf2bin.addFileArg(sb6_wm_prog.getEmittedBin());
+    const sb6_wm_bin = sb6_wm_elf2bin.addOutputFileArg("SB6WM.BIN");
+    sb6_wm_elf2bin.has_side_effects = true;
+    sb6_wm_elf2bin.stdio = .inherit;
+    sb6_wm_step.dependOn(&sb6_wm_elf2bin.step);
+    const install_sb6_wm = b.addInstallFileWithDir(sb6_wm_bin, .bin, "SB6WM.BIN");
+    b.getInstallStep().dependOn(&install_sb6_wm.step);
+
+    // ------------------------------------------------------------------
+    // Guest: fifty-eighth ESP user program (M33 SB6, claim 6864)
+    // SB6OLD.BIN — the PRE-seam-B control: opens a window and renders the
+    // same 8x8 grid (static + 8 dynamic redraws) with sys_win_fill (slot
+    // 13) = 576 fill SVCs + 9 presents (kernel blits). The "before"
+    // number the gate compares against SB6NEW's zero-fill seam-B path.
+    // ------------------------------------------------------------------
+    const sb6_old_prog = b.addExecutable(.{
+        .name = "user-sb6old",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/sb6_old.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    sb6_old_prog.linker_script = b.path("user/linker.ld");
+    const sb6_old_step = b.step("sb6old", "Build the fifty-eighth ESP user program (zig-out/bin/SB6OLD.BIN)");
+    const sb6_old_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    sb6_old_elf2bin.addFileArg(sb6_old_prog.getEmittedBin());
+    const sb6_old_bin = sb6_old_elf2bin.addOutputFileArg("SB6OLD.BIN");
+    sb6_old_elf2bin.has_side_effects = true;
+    sb6_old_elf2bin.stdio = .inherit;
+    sb6_old_step.dependOn(&sb6_old_elf2bin.step);
+    const install_sb6_old = b.addInstallFileWithDir(sb6_old_bin, .bin, "SB6OLD.BIN");
+    b.getInstallStep().dependOn(&install_sb6_old.step);
+
+    // ------------------------------------------------------------------
+    // Guest: fifty-ninth ESP user program (M33 SB6, claim 6864)
+    // SB6NEW.BIN — the SEAM-B half: the SAME grid rendered with PLAIN
+    // STORES into a bound shared surface (zero sys_win_fill), then hands
+    // {owner_pid, handle, magic} to the registered WM which compose-N's
+    // the surface into the scanout. The gate's syscalls diff proves
+    // ZERO additional slot-13 fills after the control phase.
+    // ------------------------------------------------------------------
+    const sb6_new_prog = b.addExecutable(.{
+        .name = "user-sb6new",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/sb6_new.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    sb6_new_prog.linker_script = b.path("user/linker.ld");
+    const sb6_new_step = b.step("sb6new", "Build the fifty-ninth ESP user program (zig-out/bin/SB6NEW.BIN)");
+    const sb6_new_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    sb6_new_elf2bin.addFileArg(sb6_new_prog.getEmittedBin());
+    const sb6_new_bin = sb6_new_elf2bin.addOutputFileArg("SB6NEW.BIN");
+    sb6_new_elf2bin.has_side_effects = true;
+    sb6_new_elf2bin.stdio = .inherit;
+    sb6_new_step.dependOn(&sb6_new_elf2bin.step);
+    const install_sb6_new = b.addInstallFileWithDir(sb6_new_bin, .bin, "SB6NEW.BIN");
+    b.getInstallStep().dependOn(&install_sb6_new.step);
+
+    // ------------------------------------------------------------------
     // Top-level steps. System-command steps are marked as having side
     // effects (and inherit stdio) so they always execute instead of being
     // skipped by the build cache. (No QEMU path: this project targets Apple
@@ -1675,6 +1755,11 @@ pub fn build(b: *std.Build) void {
     image.addFileArg(sb3_wm_bin); // ... [SB3WM.BIN] (M33 SB3, claim 3633: fifty-second user program, the surface-handoff WM half)
     image.addFileArg(sb3_own_bin); // ... [SB3OWN.BIN] (M33 SB3, claim 3633: fifty-third user program, the surface-handoff owner half)
     image.addFileArg(sb4dam_bin); // ... [SB4DAM.BIN] (M33 SB4, claim 2382: fifty-fourth user program, the rect-granular damage proof)
+    image.addFileArg(sb5_wm_bin); // ... [SB5WM.BIN] (M33 SB5, claim 7397: fifty-fifth user program, the WM compose-N half)
+    image.addFileArg(sb5_own_bin); // ... [SB5OWN.BIN] (M33 SB5, claim 7397: fifty-sixth user program, the compose-N owner half)
+    image.addFileArg(sb6_wm_bin); // ... [SB6WM.BIN] (M33 SB6, claim 6864: fifty-seventh user program, the perf-payoff WM half)
+    image.addFileArg(sb6_old_bin); // ... [SB6OLD.BIN] (M33 SB6, claim 6864: fifty-eighth user program, the perf-payoff pre-seam-B control)
+    image.addFileArg(sb6_new_bin); // ... [SB6NEW.BIN] (M33 SB6, claim 6864: fifty-ninth user program, the perf-payoff seam-B half)
     image.has_side_effects = true;
     image.stdio = .inherit;
     image_step.dependOn(&image.step);

@@ -2793,6 +2793,12 @@ fn cmd_dui(m: *Monitor, args: []const []const u8) ExecError {
     m.console.print_u64(driving_award.focused_window_id());
     m.console.puts(" presents=");
     m.console.print_u64(driving_award.presents_pushed());
+    // M33 SB6 (claim 6864): the composite-cost observables — user windows
+    // the kernel blitted vs surface-backed windows skipped (WM-owned).
+    m.console.puts(" blits=");
+    m.console.print_u64(driving_award.user_blits);
+    m.console.puts(" skips=");
+    m.console.print_u64(driving_award.migrated_skips);
     m.console.puts("\n");
     // M21 W1/W2 tiling state (the layout the tiled rects obey).
     m.console.puts("dui: tiling=");
