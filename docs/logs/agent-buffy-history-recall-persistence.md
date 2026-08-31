@@ -1,4 +1,4 @@
-# Log — `agent/buffy/history-recall-persistence`
+# Log — history recall persistence (claim 6344)
 
 Claim: [6344](../claims/6344-history-recall-persistence.md)
 
@@ -12,7 +12,7 @@ Investigated `verify-live-history` being red on main
   triggers to `virelai> `; this run used the `dipshit>` prompt and failed
   identically.)
 - **Signature:** the Up-arrow keyboard chord decodes once
-  (`events=1 kb-usage=0x52`, runs-through the tee read path, FIFO drained to
+  (`events=1 kb-usage=0x52`, runs through the tee read path, FIFO drained to
   0), but the recalled `echo T4-third-marker` never echoes and `recall_older`
   never beeps (only the timer-heartbeat BEL is present) → boot-2 history ring
   is empty.
@@ -47,6 +47,7 @@ never content-loaded (`len=0`). `load_history`/`save_to_history` read via
 `esp.content_of` → silent empty → recall no-op + clobbering saves.
 
 Fix (this branch, `kernel/src/esp.zig`):
+
 1. `content_pool_max` 8192 → 32768 (fits 26.5 KB eligible content +
    headroom; bss-budget gate still PASS).
 2. `content_of` load-on-demand: entries listed-but-not-loaded (len==0,
@@ -56,7 +57,3 @@ Fix (this branch, `kernel/src/esp.zig`):
 Validated live: `verify-live-history` **PASS 1/1** — checkpoints show boot-1
 persisted all T4 lines AND boot-2 recalled `echo T4-third-marker` on the
 synthesized Up chord.
-- No code landed blind. The durable fix — verify boot-1→boot-2 persistence
-  survives (e.g. a settled/graceful teardown or an explicit durable-history
-  surface), gated on a live checkpoint that HISTORY.TXT is present before
-  boot-2 mounts — remains as the next step.
