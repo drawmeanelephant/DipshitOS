@@ -90,7 +90,7 @@ fi
 REPORT="artifacts/tx-diag-report.txt"
 : > "$REPORT"
 {
-    echo "DIPSHITOS tx-diag report — claim 0018 (post-exit virtio TX bisect)"
+    echo "VIRELAIOS tx-diag report — claim 0018 (post-exit virtio TX bisect)"
     echo "revision: $REVISION branch=$BRANCH build=-Dtx-diag=true boots=$BOOTS dirty-files=$DIRTY"
     echo "date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     echo

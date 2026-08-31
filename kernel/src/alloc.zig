@@ -1,4 +1,4 @@
-//! DipshitOS physical page allocator over the captured EFI map.
+//! VirelaiOS physical page allocator over the captured EFI map.
 //!
 //! Next-card milestone (canonical ordering: `docs/status.md`): a first-fit
 //! **bitmap** allocator whose pool is the RAM regions of the map the

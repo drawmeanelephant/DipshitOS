@@ -112,7 +112,7 @@ fi
 echo "wm-reg=$A_WM_REG own-create=$A_OWN_CREATE wm-read=$A_WM_READ own-ack=$A_OWN_ACK own-done=$A_OWN_DONE reattach=$A_REATTACH wm-done=$A_WM_DONE fatal=$A_FAULT" | tee -a "$REPORT"
 
 {
-    echo "DIPSHITOS live shared-anon gate (claim 8878) — two EL0 roots, one physical region; owner RW, WM RO; owner exit revokes the peer (ADR 0016)"
+    echo "VIRELAIOS live shared-anon gate (claim 8878) — two EL0 roots, one physical region; owner RW, WM RO; owner exit revokes the peer (ADR 0016)"
     echo "revision: $REVISION branch=$BRANCH dirty-files=$DIRTY"
     echo "date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     echo

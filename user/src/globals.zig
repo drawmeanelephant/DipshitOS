@@ -1,4 +1,4 @@
-//! DipshitOS GLOBALS.BIN — milestone sixteen card C1 (claim 3805) proof
+//! VirelaiOS GLOBALS.BIN — milestone sixteen card C1 (claim 3805) proof
 //! program: the first SEGMENTED DSK3 user image. Its `.data` global is real
 //! writable memory and its `.bss` global is zero-filled — reversing the M15
 //! JINGLE finding (a writable global faulted because the flat image had no

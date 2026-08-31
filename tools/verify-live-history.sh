@@ -30,7 +30,7 @@
 # (the macOS 27.0 fresh-copy FAT-write defect makes private copies/
 # overlays unusable here; observed claim 5069). Two concurrent instances
 # serialize on the lock instead of corrupting the shared disk. Set
-# DIPSHIT_GATE_SUFFIX=_alt for distinct canonical evidence names.
+# VIRELAI_GATE_SUFFIX=_alt for distinct canonical evidence names.
 #
 # Class B — Apple silicon + VZ only. Two boots required.
 
@@ -41,7 +41,7 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 GATE_LOG="$(art live-history-gate.txt)"
@@ -142,9 +142,9 @@ PY
         --serial "$RUN_DIR/vm-serial-$tag-boot2.log" \
         --input --display \
         --script "$RUN_DIR/empty.txt" \
-        --input-chords "$CHORDS" --input-chords-after "dipshit> " \
+        --input-chords "$CHORDS" --input-chords-after "virelai> " \
         --input-chords-delay 2.0 \
-        --script2 "$RUN_DIR/keys.txt" --script2-after "dipshit> " --script2-delay 15 \
+        --script2 "$RUN_DIR/keys.txt" --script2-after "virelai> " --script2-delay 15 \
         --script-expect "history-live-ok" \
         --timeout 60 \
         > "$(art live-history-run-$tag-boot2.txt)" 2>&1
@@ -159,7 +159,7 @@ PY
     SERIAL_BYTES=$(wc -c < "$SER" 2>/dev/null | tr -d ' ')
     local BANNER=0 MARKER=0 INREPORT=0 OK=0 RUNNERFLAG=0
     if [ -f "$SER" ]; then
-        grep -qF -- "DipshitOS kernel has seized control." "$SER" && BANNER=1
+        grep -qF -- "VirelaiOS kernel has seized control." "$SER" && BANNER=1
         # Only present if the keyboard Up chord recalled the persisted line
         # (history is not printed at load in boot 2).
         grep -qF -- "T4-third-marker" "$SER" && MARKER=1
@@ -188,7 +188,7 @@ PY
 
 : > "$REPORT"
 {
-    echo "DIPSHITOS live-history gate (M18 T4, issue #407) — persistent history on VZ"
+    echo "VIRELAIOS live-history gate (M18 T4, issue #407) — persistent history on VZ"
     echo "revision: $REVISION branch=$BRANCH dirty-files=$DIRTY"
     echo "boot 1: build history with distinctive commands (canonical artifacts/disk.img under gate_shared_disk_lock)"
     echo "boot 2: keyboard Up chord recalls T4-third-marker; serial \r submits, input report (events=1), marker echo"

@@ -6,13 +6,13 @@
 #
 #   A. pre-ExitBootServices
 #   B. immediately after successful ExitBootServices, while the firmware's
-#      translation regime is still active (before DipshitOS page tables)
-#   C. immediately after installing the DipshitOS identity map (before any
+#      translation regime is still active (before VirelaiOS page tables)
+#   C. immediately after installing the VirelaiOS identity map (before any
 #      unrelated runtime-service/diagnostic work)
 #   D. at the normal final location (the banner TX site)
 #
 # Each phase build (-Dtx-transition-{a,b,c,d}, default off) runs ONE
-# controlled TX attempt of the SAME fixed payload ("DIPSHITOS TRANSITION
+# controlled TX attempt of the SAME fixed payload ("VIRELAIOS TRANSITION
 # TX\n") through the SAME armed transport and SAME virtio_pci_flush(),
 # bracketed by persistent NVRAM markers:
 #
@@ -79,7 +79,7 @@ MATRIX="artifacts/transition-matrix.txt"
 : > "$REPORT"
 : > "$MATRIX"
 {
-    echo "DIPSHITOS TX-transition matrix — claim 0020"
+    echo "VIRELAIOS TX-transition matrix — claim 0020"
     echo "revision: $REVISION branch=$BRANCH boots-per-phase=$PHASE_BOOTS dirty-files=$DIRTY"
     echo "date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     echo
@@ -177,7 +177,7 @@ for idx in 0 1 2 3; do
 
         # Payload bytes reaching the host (vm-serial.log).
         PAYLOAD=0
-        [ -f "artifacts/transition-serial-$tag.log" ] && grep -qF -- "DIPSHITOS TRANSITION TX" "artifacts/transition-serial-$tag.log" && PAYLOAD=1
+        [ -f "artifacts/transition-serial-$tag.log" ] && grep -qF -- "VIRELAIOS TRANSITION TX" "artifacts/transition-serial-$tag.log" && PAYLOAD=1
         SERIAL_BYTES=$(wc -c < "artifacts/transition-serial-$tag.log" 2>/dev/null | tr -d ' ')
 
         {

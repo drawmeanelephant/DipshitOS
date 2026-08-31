@@ -44,7 +44,7 @@ The ceremony is not optional — it is how the project keeps "observed" honest.
 
 ## One-way toolchain boundary
 
-Boris compiles this site; DipshitOS does not own Boris. The revision is pinned
+Boris compiles this site; VirelaiOS does not own Boris. The revision is pinned
 once (`.github/boris-pin.json`) and shared by the docs gate and the Pages
 workflow. Updating it is a ritual: bump the pin → build → validate → compile
 with the project-site flags → run the gates → commit the bump with evidence.

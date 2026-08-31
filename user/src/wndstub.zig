@@ -1,4 +1,4 @@
-//! DipshitOS M32 WMS2 registrant stub — WNDSTUB.BIN (issue #622, the live
+//! VirelaiOS M32 WMS2 registrant stub — WNDSTUB.BIN (issue #622, the live
 //! `verify-live-wmctl-register.sh` gate payload).
 //!
 //! The MINIMAL window-manager-server registrant: it registers through the

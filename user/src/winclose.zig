@@ -1,4 +1,4 @@
-//! DipshitOS seventh ESP user program — WINCLOSE.BIN (milestone six, card
+//! VirelaiOS seventh ESP user program — WINCLOSE.BIN (milestone six, card
 //! G6 teardown follow-on, claim 0487 — the draw/window syscall seam's
 //! release half).
 //!

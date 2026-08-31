@@ -25,7 +25,7 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 GATE_LOG="$(art live-time-gate.txt)"
@@ -78,7 +78,7 @@ run_one() {
     local SERIAL_BYTES=0 BANNER=0 REAL_LINE=0 TICKS_NONZERO=0 REPLY=0
     if [ -f "$SER" ]; then
         SERIAL_BYTES=$(wc -c < "$SER" 2>/dev/null | tr -d ' ')
-        grep -qF -- "DipshitOS kernel has seized control." "$SER" && BANNER=1
+        grep -qF -- "VirelaiOS kernel has seized control." "$SER" && BANNER=1
         grep -qE -- "^real +[0-9]+m[0-9]+s$" "$SER" && REAL_LINE=1
         # Nonzero elapsed ticks — only possible if the timer advanced
         # across the wrapped command's real execution.

@@ -1,4 +1,4 @@
-//! DipshitOS ARM Power State Coordination Interface (PSCI) client (Milestone 28, claim 6438).
+//! VirelaiOS ARM Power State Coordination Interface (PSCI) client (Milestone 28, claim 6438).
 //!
 //! Implements ARM PSCI v0.2+ calling convention via HVC for secondary CPU
 //! core wakeups (PSCI CPU_ON, func_id 0xC4000003).

@@ -37,7 +37,7 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 GATE_LOG="$(art live-calc-prog-gate.txt)"
@@ -109,7 +109,7 @@ run_one() {
     local SERIAL_BYTES=0 BANNER=0 CALC_READY=0 PROG_ON=0 PROG_OFF=0 DONE=0
     if [ -f "$SER" ]; then
         SERIAL_BYTES=$(wc -c < "$SER" 2>/dev/null | tr -d ' ')
-        grep -qF -- "DipshitOS kernel has seized control." "$SER" && BANNER=1
+        grep -qF -- "VirelaiOS kernel has seized control." "$SER" && BANNER=1
         grep -qF -- "calc: ready" "$SER" && CALC_READY=1
         grep -qF -- "calc: prog-on" "$SER" && PROG_ON=1
         grep -qF -- "calc: prog-off" "$SER" && PROG_OFF=1
@@ -124,7 +124,7 @@ run_one() {
 
 : > "$REPORT"
 {
-    echo "DIPSHITOS live-calc-prog gate (M24 K1) -- programmer mode on VZ"
+    echo "VIRELAIOS live-calc-prog gate (M24 K1) -- programmer mode on VZ"
     echo "revision: $REVISION branch=$BRANCH boots=$BOOTS dirty-files=$DIRTY"
     echo "phase 1: exec CALC.BIN from monitor"
     echo "phase 2: Ctrl+P toggle x2 (on/off), assert markers, final echo"

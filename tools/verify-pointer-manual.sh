@@ -209,7 +209,7 @@ if [ "$RC" = 0 ] && [ "$READY" = 1 ] && [ "$DISTINCT_FOCUS" -ge 2 ] && \
 fi
 
 {
-    echo "DIPSHITOS manual pointer-focus gate (milestone eight card U4, claim 4993) -- a REAL mouse moves focus under pointer_tick, on real VZ (class C)"
+    echo "VIRELAIOS manual pointer-focus gate (milestone eight card U4, claim 4993) -- a REAL mouse moves focus under pointer_tick, on real VZ (class C)"
     echo "revision: $REVISION branch=$BRANCH dirty-files=$DIRTY"
     echo "session: setup opens WINLOOP.BIN; the HUMAN moves a real mouse and clicks clock -> WINLOOP -> terminal, types input, then echo pointer-gate-done"
     echo "assertions: ready marker, >=2 distinct focus lines, ptr-reports>0, the magenta cursor pixel, the done marker + runner exit 0"

@@ -1,4 +1,4 @@
-//! DipshitOS M1.5 machine controls — real `reboot`/`shutdown` via EFI
+//! VirelaiOS M1.5 machine controls — real `reboot`/`shutdown` via EFI
 //! Runtime Services `ResetSystem` (machine-controls slice).
 //!
 //! Implements the monitor's `MachineControl` interface (`kernel/src/
@@ -18,7 +18,7 @@
 //! kernel parks in a WFE loop instead of running off the end.
 //!
 //! Evidence: immediately before the reset call the kernel persists the
-//! `M2_RST!` stage as the claim-0009 NVRAM variable (`DipshitM2`), so the
+//! `M2_RST!` stage as the claim-0009 NVRAM variable (`VirelaiM2`), so the
 //! host can see in `artifacts/efi-vars.bin` that the call fired.
 //!
 //! No libc, no POSIX, no allocation, no interrupts.
@@ -166,7 +166,7 @@ fn park() noreturn {
 /// artifacts/efi-vars.bin can prove the call fired.
 const marker_rst: u64 = 0x00215453525f324d;
 
-const marker_variable_name = utf16z("DipshitM2");
+const marker_variable_name = utf16z("VirelaiM2");
 const marker_vendor_guid = uefi.Guid{
     .time_low = 0x4d324d32, // "M2M2"
     .time_mid = 0x5f44, // "_D"

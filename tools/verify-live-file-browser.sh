@@ -29,8 +29,8 @@
 # claim 2259): private stacked disk (pristine-per-boot overlay), EFI var
 # store, serial log, and screen captures under $RUN_DIR. The browse arc is
 # read-only by design, so the throwaway overlay is the right disk mode.
-# Set DIPSHIT_GATE_SUFFIX=_alt for distinct canonical evidence names;
-# DIPSHIT_KEEP_RUN=1 keeps the scratch dir.
+# Set VIRELAI_GATE_SUFFIX=_alt for distinct canonical evidence names;
+# VIRELAI_KEEP_RUN=1 keeps the scratch dir.
 #
 # Usage:
 #   bash tools/verify-live-file-browser.sh
@@ -43,7 +43,7 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 GATE_LOG="$(art live-file-browser-gate.txt)"

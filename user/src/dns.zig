@@ -1,4 +1,4 @@
-//! DipshitOS DNS.BIN — M26 N5 (Issue #403, Lane D-NetApps).
+//! VirelaiOS DNS.BIN — M26 N5 (Issue #403, Lane D-NetApps).
 //!
 //! Standalone userland DNS query tool (RFC 1035).
 //! Queries DNS A-records over UDP (port 53) using existing UDP syscalls
@@ -250,7 +250,7 @@ fn cli_arg(block: [*]u8, i: usize) []const u8 {
 }
 
 fn print_help() void {
-    ui.write_console("DNS.BIN - DipshitOS DNS query tool (M26 N5)\n" ++
+    ui.write_console("DNS.BIN - VirelaiOS DNS query tool (M26 N5)\n" ++
         "usage: exec DNS.BIN <hostname> [<server_ip>]\n" ++
         "       exec DNS.BIN -h   show this help\n" ++
         "example: exec DNS.BIN example.com 10.0.0.2\n");

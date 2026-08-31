@@ -54,9 +54,9 @@
 # overlay), a private EFI var store (recreated fresh per boot, as the
 # pre-isolation gate did), and a private serial log under $RUN_DIR — two
 # concurrent instances cannot clobber each other's disks, NVRAM, or
-# evidence. Set DIPSHIT_GATE_SUFFIX=_alt to give this instance its own
+# evidence. Set VIRELAI_GATE_SUFFIX=_alt to give this instance its own
 # canonical evidence names (two simultaneous instances MUST differ), and
-# DIPSHIT_KEEP_RUN=1 to keep the scratch dir.
+# VIRELAI_KEEP_RUN=1 to keep the scratch dir.
 #
 # Class B — Apple silicon + VZ only; boots real VMs. A green CI badge
 # proves class A only and says nothing about this gate.
@@ -74,7 +74,7 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 GATE_LOG="$(art live-net-icmp-gate.txt)"
@@ -276,7 +276,7 @@ run_one() {
     local tag="$1" script="$2" script2="$3" after2="$4" inject="$5" capture="$6" extra="$7"
     rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial-$tag.log" "$capture"
     set +e
-        # Rot class 1 (#528): the colored prompt killed '<marker>\ndipshit> '
+        # Rot class 1 (#528): the colored prompt killed '<marker>\nvirelai> '
         # anchors; this marker reply is output-only and last.
     local ARGS=()
     [ -n "$inject" ] && ARGS+=(--net-inject "$inject" --net-inject-after "net ip: ip=10.0.0.1")
@@ -353,7 +353,7 @@ run_one() {
 
 : > "$REPORT"
 {
-    echo "DIPSHITOS live IPv4/ICMP gate (claim 0148, milestone five card N4) — answer an echo for our address, ping a peer, scope check, on real VZ hardware"
+    echo "VIRELAIOS live IPv4/ICMP gate (claim 0148, milestone five card N4) — answer an echo for our address, ping a peer, scope check, on real VZ hardware"
     echo "revision: $REVISION branch=$BRANCH dirty-files=$DIRTY"
     echo "phase 1: inject the 46-byte echo request 10.0.0.2 -> 10.0.0.1 (id 0x1234, seq 0x5678) -> net recv observes it, the reply (02:00:00:00:00:01/10.0.0.1) is byte-exact in the capture, repl=1"
     echo "phase 2: guest net arp 10.0.0.2 then net ping 10.0.0.2 -> the ARP request + the 46-byte echo request are byte-exact in the capture; --net-icmp-respond 10.0.0.2 answers; net shows pong=1, seq=1"

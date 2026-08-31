@@ -18,7 +18,7 @@
 #     read-only base; guest writes land in a throwaway ASIF overlay the
 #     runner deletes at exit).
 # gate_end:
-#   - removes RUN_DIR unless DIPSHIT_KEEP_RUN=1 (post-mortem escape hatch).
+#   - removes RUN_DIR unless VIRELAI_KEEP_RUN=1 (post-mortem escape hatch).
 #
 # Evidence policy: copy what you need back into artifacts/ BEFORE gate_end
 # using the gate's canonical names. Two concurrent instances of the SAME
@@ -34,10 +34,10 @@ GATE_RUNNER_ARGS=()
 gate_begin() {
     GATE_NAME="$1"
     # Base directory is overridable for experiments/debugging:
-    #   DIPSHIT_RUN_DIR_BASE=<dir>  (default: ${TMPDIR:-/tmp})
-    local base="${DIPSHIT_RUN_DIR_BASE:-${TMPDIR:-/tmp}}"
+    #   VIRELAI_RUN_DIR_BASE=<dir>  (default: ${TMPDIR:-/tmp})
+    local base="${VIRELAI_RUN_DIR_BASE:-${TMPDIR:-/tmp}}"
     mkdir -p "$base"
-    RUN_DIR="$(mktemp -d "$base/dipshit-${GATE_NAME}.XXXXXX")"
+    RUN_DIR="$(mktemp -d "$base/virelai-${GATE_NAME}.XXXXXX")"
     # APFS clonefile when available: preserves the source image's extent
     # personality (observed 2026-08-24, claim 5069 — see notes in
     # verify-live-scripting.sh about guest FAT writes on copied images).
@@ -52,8 +52,8 @@ gate_begin() {
 
 gate_end() {
     [ -n "$RUN_DIR" ] || return 0
-    if [ "${DIPSHIT_KEEP_RUN:-0}" = "1" ]; then
-        echo "gate-run: keeping $RUN_DIR (DIPSHIT_KEEP_RUN=1)"
+    if [ "${VIRELAI_KEEP_RUN:-0}" = "1" ]; then
+        echo "gate-run: keeping $RUN_DIR (VIRELAI_KEEP_RUN=1)"
     else
         rm -rf "$RUN_DIR"
     fi

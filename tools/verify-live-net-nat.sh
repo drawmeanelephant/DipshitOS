@@ -64,7 +64,7 @@
 # Host-dependent observation (#528 rot class 3): this WHOLE gate observes
 # how THIS host's VZ NAT gateway answers a ping to 192.168.64.1 — the
 # learn counters vary per host exactly like net-tcp's Run C. Selectable
-# via DIPSHIT_NET_NAT_RUNS (default "A" = run it; set empty to skip on a
+# via VIRELAI_NET_NAT_RUNS (default "A" = run it; set empty to skip on a
 # host whose NAT behaves differently).
 #
 # Class B — Apple silicon + VZ only; boots a real VM. A green CI badge
@@ -83,7 +83,7 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 GATE_LOG="$(art live-net-nat-gate.txt)"
@@ -144,7 +144,7 @@ run_one() {
     # Capture the host's NAT bridge state DURING the run (documentation
     # only — the interface name (bridge0 here) and the router MAC vary
     # per host/boot; the guest-observed learn counters are the gate).
-    # Rot class 1 (#528): colored prompt killed the '<marker>\ndipshit> '
+    # Rot class 1 (#528): colored prompt killed the '<marker>\nvirelai> '
     # anchor; this marker reply is output-only and last.
     host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
         --serial "$RUN_DIR/vm-serial.log" \
@@ -163,7 +163,7 @@ run_one() {
     echo "$RC" > "$RUN_DIR/rc.txt"
 }
 
-RUNS="${DIPSHIT_NET_NAT_RUNS:-A}"
+RUNS="${VIRELAI_NET_NAT_RUNS:-A}"
 if [ "$RUNS" != "" ] && [ "$RUNS" != "none" ]; then
     set +e
     run_one "$(art live-net-nat-run.txt)" "$(art live-net-nat-serial.log)"
@@ -217,7 +217,7 @@ fi
 
 : > "$REPORT"
 {
-    echo "DIPSHITOS live NAT gate (claim 4678, milestone five card N7) — outbound connectivity through VZNATNetworkDeviceAttachment, on real VZ hardware"
+    echo "VIRELAIOS live NAT gate (claim 4678, milestone five card N7) — outbound connectivity through VZNATNetworkDeviceAttachment, on real VZ hardware"
     echo "revision: $REVISION branch=$BRANCH dirty-files=$DIRTY"
     echo "phase 1: net ip 192.168.64.5 (the OBSERVED NAT subnet) + net arp 192.168.64.1 + net ping 192.168.64.1"
     echo "phase 2: net arp 192.168.64.1 (gateway MAC learned) + net arp table + the full net report"

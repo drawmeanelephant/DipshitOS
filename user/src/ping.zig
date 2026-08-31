@@ -1,4 +1,4 @@
-//! DipshitOS PING.BIN — M26 N1 (issue #399, Lane D-NetApps).
+//! VirelaiOS PING.BIN — M26 N1 (issue #399, Lane D-NetApps).
 //!
 //! Sends ICMP echo requests, displays RTT, packet loss, continuous mode.
 //! Zero new syscall slots — this first cut is a pure userland CLI that
@@ -181,7 +181,7 @@ fn write_line(msg: []const u8) void {
 }
 
 fn print_help() void {
-    ui.write_console("PING.BIN - DipshitOS ICMP ping (M26 N1)\n" ++
+    ui.write_console("PING.BIN - VirelaiOS ICMP ping (M26 N1)\n" ++
         "usage: exec PING.BIN [-c count] <a.b.c.d>\n" ++
         "       exec PING.BIN -h   show this help\n" ++
         "  -c count  number of pings, 1..100 (default 5)\n" ++

@@ -1,11 +1,11 @@
-//! DipshitOS evidence channel (extracted verbatim from the former
+//! VirelaiOS evidence channel (extracted verbatim from the former
 //! kernel/src/main.zig junk drawer; claim 0023 mechanical split — no
 //! behavior change).
 //!
 //! Takeover markers (the ADR 0004 D4 ladder: stage names, values, and
 //! write ordering are preserved byte-for-byte), the NVRAM persistence
-//! channel (`SetVariable` into the `DipshitM2`/`DipshitProbe`/
-//! `DipshitMmu` variables), and the bounded diagnostic dump helpers (the
+//! channel (`SetVariable` into the `VirelaiM2`/`VirelaiProbe`/
+//! `VirelaiMmu` variables), and the bounded diagnostic dump helpers (the
 //! pre-exit probe dump + the claim-0021 firmware-MMU-state capture).
 //!
 //! The marker NVRAM channel: EFI Runtime Services `SetVariable` survives
@@ -111,7 +111,7 @@ pub const marker_wp03: u64 = 0x4d325f57505f3033; // "M2_WP_03"
 pub const marker_wp04: u64 = 0x4d325f57505f3034; // "M2_WP_04"
 pub const marker_wp05: u64 = 0x4d325f57505f3035; // "M2_WP_05"
 
-const marker_variable_name = utf16z("DipshitM2");
+const marker_variable_name = utf16z("VirelaiM2");
 pub const marker_vendor_guid = uefi.Guid{
     .time_low = 0x4d324d32, // "M2M2"
     .time_mid = 0x5f44, // "_D"
@@ -173,13 +173,13 @@ pub fn write_marker_var(st: *const SystemTable, value: u64) void {
 
 // ---------------------------------------------------------------------------
 // Claim 0013 diagnostic: the probe's ground truth is persisted to the NVRAM
-// channel (a second variable, `DipshitProbe`, same vendor GUID as the marker
+// channel (a second variable, `VirelaiProbe`, same vendor GUID as the marker
 // ladder) so the host can read exactly what each declared MMIO window
-// contains even though the serial log is silent. The ladder (DipshitM2) is
+// contains even though the serial log is silent. The ladder (VirelaiM2) is
 // untouched. Lines are plain ASCII so `strings artifacts/efi-vars.bin` shows
 // them.
 // ---------------------------------------------------------------------------
-const probe_variable_name = utf16z("DipshitProbe");
+const probe_variable_name = utf16z("VirelaiProbe");
 var probe_dump: [32768]u8 = undefined;
 var probe_dump_len: usize = 0;
 
@@ -268,7 +268,7 @@ pub fn dump_sel(kind: Kind, base: u64) void {
 }
 
 /// Persist the probe dump to the NVRAM channel as a sequence of ≤ 2048-byte
-/// chunks (variables `DipshitP0`, `DipshitP1`, ...). Chunked because a
+/// chunks (variables `VirelaiP0`, `VirelaiP1`, ...). Chunked because a
 /// single large SetVariable silently FAILS on VZ above ~4-5 KB (claim 0013:
 /// a ~6 KB write vanished while a ~4.5 KB instance persisted). Best effort
 /// per chunk; a failed call never changes control flow. Used PRE-EXIT only:
@@ -281,7 +281,7 @@ pub fn write_probe_var(st: *const SystemTable) void {
     while (pos < probe_dump_len) : (pos += probe_chunk_size) {
         const len = @min(probe_chunk_size, probe_dump_len - pos);
         var name: [16:0]u16 = undefined;
-        const prefix = "DipshitP";
+        const prefix = "VirelaiP";
         var i: usize = 0;
         while (i < prefix.len) : (i += 1) name[i] = prefix[i];
         var digits: [4]u8 = undefined;
@@ -310,9 +310,9 @@ pub fn write_probe_var(st: *const SystemTable) void {
 
 /// POST-EXIT variant: persist only the newest tail of the dump buffer (≤ 512
 /// bytes) as a SEPARATE variable, so post-exit probe additions (candidate
-/// hits, SEL) are observable without a large re-write of `DipshitProbe`
+/// hits, SEL) are observable without a large re-write of `VirelaiProbe`
 /// (which hangs post-exit on VZ). Best effort; a failure is ignored.
-const probe_tail_variable_name = utf16z("DipshitP2");
+const probe_tail_variable_name = utf16z("VirelaiP2");
 pub fn write_probe_tail(st: *const SystemTable) void {
     if (probe_dump_len == 0) return;
     const start: usize = if (probe_dump_len > 512) probe_dump_len - 512 else 0;
@@ -445,11 +445,11 @@ pub fn dump_mmio_descriptors(map: MemoryMapSlice) void {
 // of the firmware's TTBR0 tables for the virtio BAR0 window (the
 // claim-0020 post-switch hang target) and a RAM control address, and the
 // kernel's planned values — so the host can diff the two translation
-// regimes. Persisted as the single small ASCII variable `DipshitMmu` via
+// regimes. Persisted as the single small ASCII variable `VirelaiMmu` via
 // the proven pre-exit SetVariable channel (no re-write of the big
-// `DipshitProbe` chunks — the store budget is ~61 KB on VZ, claim 0015).
+// `VirelaiProbe` chunks — the store budget is ~61 KB on VZ, claim 0015).
 // ---------------------------------------------------------------------------
-const mmu_var_name = utf16z("DipshitMmu");
+const mmu_var_name = utf16z("VirelaiMmu");
 var mmu_dump: [4096]u8 = undefined;
 var mmu_dump_len: usize = 0;
 

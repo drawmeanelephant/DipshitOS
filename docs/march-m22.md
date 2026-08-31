@@ -6,7 +6,7 @@
 
 ## Where we are
 
-DipshitOS can run userland apps, but every app is built on the host and
+VirelaiOS can run userland apps, but every app is built on the host and
 loaded as a flat binary or DSK3 image. There's no way to write, assemble,
 or inspect code *on the machine itself*. The tombstone system (M15 #243)
 crashes with addresses but no symbol names. M22 gives the machine basic

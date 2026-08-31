@@ -1,4 +1,4 @@
-//! DipshitOS XHCI host-controller transport + USB enumeration + HID
+//! VirelaiOS XHCI host-controller transport + USB enumeration + HID
 //! (milestone seven, cards I1 + I2 — claims 4272 + 4116).
 //!
 //! Drives the device the runner attaches as `VZUSBKeyboardConfiguration` +

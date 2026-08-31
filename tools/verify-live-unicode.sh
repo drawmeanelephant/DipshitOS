@@ -30,14 +30,14 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 # Run isolation (#523 item 2 / issue #528; fleet remainder claim 2259):
 # private stacked disk (pristine-per-boot overlay), EFI var store, serial
 # log, screen captures, and scripts under $RUN_DIR. Set
-# DIPSHIT_GATE_SUFFIX=_alt for distinct canonical evidence names;
-# DIPSHIT_KEEP_RUN=1 keeps the scratch dir.
+# VIRELAI_GATE_SUFFIX=_alt for distinct canonical evidence names;
+# VIRELAI_KEEP_RUN=1 keeps the scratch dir.
 
 GATE_LOG="$(art live-unicode-gate.txt)"
 exec > >(tee "$GATE_LOG") 2>&1
@@ -93,7 +93,7 @@ run_one() {
     local SERIAL_BYTES BANNER=0 PUT_OK=0 ZERO_MISS=0 TWO_MISS=0 LAST_CP=0 DONE=0
     SERIAL_BYTES=$(wc -c < "$SERIAL" 2>/dev/null | tr -d ' ')
     if [ -f "$SERIAL" ]; then
-        grep -qF "DipshitOS kernel" "$SERIAL" && BANNER=1
+        grep -qF "VirelaiOS kernel" "$SERIAL" && BANNER=1
         # café flushed through the compositor without transport error.
         grep -qF "text put: ok" "$SERIAL" && PUT_OK=1
         # After café alone: no missing glyphs (é is in the Latin-1 table).

@@ -19,9 +19,9 @@
 # overlay), a private EFI var store (recreated fresh per boot, as the
 # pre-isolation gate did), and a private serial log under $RUN_DIR — two
 # concurrent instances cannot clobber each other's disks, NVRAM, or
-# evidence. Set DIPSHIT_GATE_SUFFIX=_alt to give this instance its own
+# evidence. Set VIRELAI_GATE_SUFFIX=_alt to give this instance its own
 # canonical evidence names (two simultaneous instances MUST differ), and
-# DIPSHIT_KEEP_RUN=1 to keep the scratch dir.
+# VIRELAI_KEEP_RUN=1 to keep the scratch dir.
 #
 set -euo pipefail
 
@@ -30,7 +30,7 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 GATE_LOG="$(art m22-strace-live.txt)"
@@ -89,7 +89,7 @@ run_one() {
     local bytes=0 banner=0 armed=0 trace_write=0 trace_exit=0 hello=0 exited=0 off=0 echo_ok=0 fatal=0
     if [ -f "$SER" ]; then
         bytes="$(wc -c < "$SER" | tr -d ' ')"
-        [ "$(grep -aFxc -- "DipshitOS kernel has seized control." "$SER" || true)" = 1 ] && banner=1
+        [ "$(grep -aFxc -- "VirelaiOS kernel has seized control." "$SER" || true)" = 1 ] && banner=1
         [ "$(grep -aFxc -- "strace: armed" "$SER" || true)" = 1 ] && armed=1
         [ "$(grep -aFc -- "] sys_write(" "$SER" || true)" -ge 1 ] && trace_write=1
         [ "$(grep -aFc -- "] sys_exit(" "$SER" || true)" -ge 1 ] && trace_exit=1
@@ -107,7 +107,7 @@ run_one() {
 
 : > "$REPORT"
 {
-    echo "DIPSHITOS live strace gate (M22 D5, issue #328, claim 9815)"
+    echo "VIRELAIOS live strace gate (M22 D5, issue #328, claim 9815)"
     echo "revision: $REVISION branch=$BRANCH boots=$BOOTS dirty-files=$DIRTY"
     echo "script: $(cat "$SCRIPT" | tr '\n' '|')"
     echo "date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"

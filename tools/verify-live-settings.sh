@@ -25,9 +25,9 @@
 # overlay), a private EFI var store (recreated fresh per boot, as the
 # pre-isolation gate did), and a private serial log under $RUN_DIR — two
 # concurrent instances cannot clobber each other's disks, NVRAM, or
-# evidence. Set DIPSHIT_GATE_SUFFIX=_alt to give this instance its own
+# evidence. Set VIRELAI_GATE_SUFFIX=_alt to give this instance its own
 # canonical evidence names (two simultaneous instances MUST differ), and
-# DIPSHIT_KEEP_RUN=1 to keep the scratch dir.
+# VIRELAI_KEEP_RUN=1 to keep the scratch dir.
 #
 # Class B — Apple silicon + VZ only; boots real VMs.
 #
@@ -42,7 +42,7 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 GATE_LOG="$(art live-settings-gate.txt)"
@@ -112,7 +112,7 @@ run_one() {
     if [ -f "$SER" ]; then
         SERIAL_BYTES=$(wc -c < "$SER" | tr -d ' ')
         # Check initial default or list
-        grep -a -qF -- "hostname=dipshit" "$SER" && DEFAULTS_OK=1
+        grep -a -qF -- "hostname=virelai" "$SER" && DEFAULTS_OK=1
         # Check set responses
         grep -a -qF -- "settings: hostname=elephant-box (persisted)" "$SER" && SET_HOST_OK=1
         grep -a -qF -- "settings: prompt=elephant> (persisted)" "$SER" && SET_PROMPT_OK=1
@@ -141,7 +141,7 @@ run_one() {
 
 : > "$REPORT"
 {
-    echo "DIPSHITOS live persistent settings gate (claim 2649) — settings set in run A, persisted to DATA partition, verified on reboot in run B"
+    echo "VIRELAIOS live persistent settings gate (claim 2649) — settings set in run A, persisted to DATA partition, verified on reboot in run B"
     echo "revision: $REVISION branch=$BRANCH pairs=$PAIRS dirty-files=$DIRTY"
     echo "run A: settings set hostname elephant-box + settings set prompt elephant> "
     echo "run B: settings get hostname + settings list (SAME disk image across reboot)"

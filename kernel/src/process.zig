@@ -1,4 +1,4 @@
-//! DipshitOS process abstraction (milestone four, card 3 — claim 3848).
+//! VirelaiOS process abstraction (milestone four, card 3 — claim 3848).
 //!
 //! The task pool (scheduler.zig) is the EXECUTOR: context, TTBR0 switch,
 //! quantum bookkeeping, zombie/reap. This module is the unit that owns the

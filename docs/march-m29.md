@@ -6,7 +6,7 @@
 
 ## Where we are
 
-Milestone 29 introduces virtual memory depth to DipshitOS (Issue #598):
+Milestone 29 introduces virtual memory depth to VirelaiOS (Issue #598):
 demand-paged zero-fill translation faults, Copy-on-Write (COW) page sharing,
 anonymous userland `sys_mmap` / `sys_munmap` syscalls, dynamic process memory
 tracking, and leak-free resource reclamation on process exit.

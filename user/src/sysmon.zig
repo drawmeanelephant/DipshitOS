@@ -1,4 +1,4 @@
-//! DipshitOS System Monitor Dashboard -- SYSMON.BIN (M27 G6, Issue #449).
+//! VirelaiOS System Monitor Dashboard -- SYSMON.BIN (M27 G6, Issue #449).
 //!
 //! Comprehensive system monitor GUI displaying real-time system metrics:
 //!   - System Overview: Hostname, kernel version, app session duration, architecture
@@ -148,10 +148,10 @@ pub const SysmonState = struct {
         ui.draw_rect(win, r, ui.theme_surface());
         ui.draw_rect_outline(win, r, 1, ui.theme_border());
 
-        ui.draw_text(win, "DipshitOS System Summary", r.x + 16, r.y + 16, ui.theme_accent());
+        ui.draw_text(win, "VirelaiOS System Summary", r.x + 16, r.y + 16, ui.theme_accent());
 
         var y = r.y + 42;
-        ui.draw_text(win, "Kernel:        DipshitOS AArch64 Flat Image", r.x + 16, y, ui.theme_text_primary());
+        ui.draw_text(win, "Kernel:        VirelaiOS AArch64 Flat Image", r.x + 16, y, ui.theme_text_primary());
         y += 20;
         ui.draw_text(win, "Platform:      Apple Silicon (Virtualization.framework)", r.x + 16, y, ui.theme_text_primary());
         y += 20;

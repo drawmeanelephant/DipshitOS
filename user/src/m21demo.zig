@@ -1,4 +1,4 @@
-//! DipshitOS M21 ESP user program — M21DEMO.BIN (milestone twenty-one,
+//! VirelaiOS M21 ESP user program — M21DEMO.BIN (milestone twenty-one,
 //! claim 8777: the W1/W2 tiling + master-detail gate payload).
 //!
 //! The W1/W2 entries are CHORD-driven (Ctrl+T / Ctrl+M), which the serial

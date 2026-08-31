@@ -15,7 +15,7 @@ multitasking, virtual memory, FAT32 kernel storage, virtio-net networking,
 virtio-gpu windowing (Driving Award), USB xHCI input, human interface
 tooling, and interactive application events.
 
-Milestone ten turns DipshitOS into a **persistent storage platform for user applications**
+Milestone ten turns VirelaiOS into a **persistent storage platform for user applications**
 by exposing a bounded, safe per-process file handle table and syscall ABI (ADR 0007 slots 23–27).
 
 The cards, in order:

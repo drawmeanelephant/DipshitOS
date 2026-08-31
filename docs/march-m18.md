@@ -36,7 +36,7 @@ Legend: ⬜ not started · 🔄 in progress · ✅ done · ⛔ blocked (note why
 | T5 | **Terminal colors.** ANSI-style colored prompt: green for success (last command exit 0), red for error (non-zero). `ls`-style output: directories in bold, files in normal weight. `color` command toggles color on/off. Color state persisted in SETTINGS.TXT. | ✅ | claim 0163 — `verify-live-colors.sh` PASS on VZ | PR #480, commit `ff9a7c9`. |
 | T6 | **Bracketed paste mode.** Terminal enters/exits bracketed paste mode to distinguish typed input from pasted content. | ✅ | commit `3e50339` | |
 | T7–T11 | **ANSI/VT compatibility pass.** Basic ANSI escape sequence handling, cursor movement, screen clearing, alternate screen buffer, bell/visual bell, cursor shape & style. | ✅ | commit `0165d0a` | |
-| T12–T15 | **Shell environment & configuration.** Environment variables, shell aliases, startup files (`.dipshitrc`), prompt customization (PS1). | ✅ | PR #481, commit `4265ea3` | |
+| T12–T15 | **Shell environment & configuration.** Environment variables, shell aliases, startup files (`.virelairc`), prompt customization (PS1). | ✅ | PR #481, commit `4265ea3` | |
 | T16 | **Basic scripting mode.** `sh script.BIN` — reads a file of shell commands from FAT and executes them line-by-line. | 🔄 | — | In progress on `agent/buffy/m18-t16-scripting`. |
 
 ## Agent split

@@ -40,7 +40,7 @@ Milestone 27 combines new user-facing functionality and micro-widget toolkit ext
 | **G14**| #457 | Widget states | New Delivery | ✅ PASS | `WidgetState` (.normal, .hover, .pressed, .disabled, .focused) wired to Button |
 | **G15**| #458 | App manifest | New Delivery | ✅ PASS | `APPS.TXT` updated to 12 apps including `SYSMON.BIN`, gates updated |
 | **G16**| #459 | Settings reset | New Delivery | ✅ PASS | `settings reset` command & GUI Defaults button in `SETTINGS.BIN` |
-| **G17**| #460 | Startup flow | Audit | ✅ PASS | Orderly boot sequence (Splash -> Settings -> .dipshitrc -> GUI) |
+| **G17**| #460 | Startup flow | Audit | ✅ PASS | Orderly boot sequence (Splash -> Settings -> .virelairc -> GUI) |
 | **G18**| #461 | Shutdown polish | Audit | ✅ PASS | Clean buffer flushing, unmounting, and sync |
 | **G19**| #462 | Crash recovery | Audit | ✅ PASS | Process tombstone recording & window cleanup |
 | **G20**| #463 | Resource release | Audit | ✅ PASS | File handles & timer cancellations on task exit |

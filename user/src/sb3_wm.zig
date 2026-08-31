@@ -1,4 +1,4 @@
-//! DipshitOS M33 SB3 (claim 3633) live-gate test app — SB3WM.BIN: the
+//! VirelaiOS M33 SB3 (claim 3633) live-gate test app — SB3WM.BIN: the
 //! registered-WM half of the window surface handoff proof.
 //!
 //! Registers as the WM server (slot 65 REGISTER — the D2 trust boundary),

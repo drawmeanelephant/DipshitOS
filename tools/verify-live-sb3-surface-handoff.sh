@@ -113,7 +113,7 @@ fi
 echo "wm-reg=$A_WM_REG own-open=$A_OWN_OPEN own-bound=$A_OWN_BOUND own-stored=$A_OWN_STORED wm-read=$A_WM_READ own-done=$A_OWN_DONE wm-done=$A_WM_DONE fatal=$A_FAULT" | tee -a "$REPORT"
 
 {
-    echo "DIPSHITOS live surface-handoff gate (claim 3633) — migrated app renders with plain stores into its shared surface; the registered WM reads the bytes RO (ADR 0016)"
+    echo "VIRELAIOS live surface-handoff gate (claim 3633) — migrated app renders with plain stores into its shared surface; the registered WM reads the bytes RO (ADR 0016)"
     echo "revision: $REVISION branch=$BRANCH dirty-files=$DIRTY"
     echo "date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     echo

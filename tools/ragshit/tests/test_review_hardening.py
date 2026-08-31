@@ -1,6 +1,6 @@
 """Regression tests for the `ragshit review` dogfood-hardening fixes.
 
-Covers the classes of defects exposed by real dogfood on DipshitOS:
+Covers the classes of defects exposed by real dogfood on VirelaiOS:
 
   A — packet-size accounting: every public size value (markdown "Actual size"
       line, markdown "budget utilization" line, JSON actual_size, JSON

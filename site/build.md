@@ -18,7 +18,7 @@ zig build image          # build the GPT+FAT32 boot image -> artifacts/disk.img
 zig build inspect        # inspect the EFI binary and the disk image
 zig build context        # regenerate artifacts/context.md (deterministic project snapshot)
 zig build test-console   # byte-identical transcript test (mock console, no VM)
-zig build console        # boot an interactive dipshit> console (Apple silicon)
+zig build console        # boot an interactive virelai> console (Apple silicon)
 zig build run            # boot with Swift + Virtualization.framework (Apple silicon)
 ```
 

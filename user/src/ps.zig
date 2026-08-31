@@ -1,4 +1,4 @@
-//! DipshitOS ESP user program — PS.BIN (M22 D6, issue #329, claim 9815).
+//! VirelaiOS ESP user program — PS.BIN (M22 D6, issue #329, claim 9815).
 //!
 //! Windowed process viewer: polls `sys_procs` (slot 7) once per second via
 //! the M14 app-timer (`sys_timer_set`, slot 40) and renders one row per

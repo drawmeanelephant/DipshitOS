@@ -1,4 +1,4 @@
-//! DipshitOS M33 SB6 (claim 6864) live-gate test app — SB6OLD.BIN: the
+//! VirelaiOS M33 SB6 (claim 6864) live-gate test app — SB6OLD.BIN: the
 //! PRE-seam-B control half of the perf-payoff measurement.
 //!
 //! Opens a user window (slot 12) and renders a text-like frame using the

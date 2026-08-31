@@ -49,8 +49,8 @@
 # PERSISTED on the same image through a reboot — a pristine-per-boot overlay
 # would erase the phenomenon under test. Two concurrent instances still
 # cannot clobber each other (each gets its own image). Set
-# DIPSHIT_GATE_SUFFIX=_alt for distinct canonical evidence names; set
-# DIPSHIT_KEEP_RUN=1 to keep the scratch dir.
+# VIRELAI_GATE_SUFFIX=_alt for distinct canonical evidence names; set
+# VIRELAI_KEEP_RUN=1 to keep the scratch dir.
 #
 # Class B — Apple silicon + VZ only; boots real VMs. A green CI badge
 # proves class A only and says nothing about this gate.
@@ -71,7 +71,7 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 GATE_LOG="$(art live-fs-gate.txt)"
@@ -106,7 +106,7 @@ codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/
 
 # --- scripted keystrokes -----------------------------------------------------
 # The trailing `version` gives the guest two more shell cycles after the
-# subdirectory cat before the runner exits on its output ("dipshit-kernel"
+# subdirectory cat before the runner exits on its output ("virelai-kernel"
 # never appears in any typed echo): killing the VM the instant a reply
 # lands can interrupt the loader/kernel's own boot-time FAT writes and
 # leave the image dirty for the NEXT boot of the pair (observed
@@ -199,7 +199,7 @@ run_one() {
 
 : > "$REPORT"
 {
-    echo "DIPSHITOS live FAT32 storage gate (claim 6420) — ls/cat/write persist through reboot on the real disk (VZ hardware)"
+    echo "VIRELAIOS live FAT32 storage gate (claim 6420) — ls/cat/write persist through reboot on the real disk (VZ hardware)"
     echo "revision: $REVISION branch=$BRANCH pairs=$PAIRS dirty-files=$DIRTY"
     echo "run A: write hello.txt 'hello world' + ls + cat + ls EFI/BOOT + cat EFI/BOOT/BOOTAA64.EFI (fresh disk image)"
     echo "run B: ls + cat hello.txt (SAME image — persistence through reboot on the disk)"
@@ -220,19 +220,19 @@ while [ "$n" -lt "$PAIRS" ]; do
     # echo contains "hello world" too, so that must not be the exit
     # trigger).
     # Expect (#528 rot class 1, revised claim 5069): the historical
-    # '<reply>\ndipshit> ' anchor died with M18 T5's ANSI-colored prompt
+    # '<reply>\nvirelai> ' anchor died with M18 T5's ANSI-colored prompt
     # (claim 0163). The trailing-prompt half is NOT droppable though:
     # OBSERVED TODAY (2026-08-24) a runner exit that fires the instant a
     # reply lands kills the guest before its FAT write-back settles and
     # leaves the image UNBOOTABLE for the next boot of the pair (empty
     # serial; reproduced raw). Anchoring on the reply + the OBSERVED
     # colored prompt bytes restores fire-at-idle semantics:
-    # `direct read caps at 0x0000000000000800 bytes\n\x1b[32mdipshit> `.
+    # `direct read caps at 0x0000000000000800 bytes\n\x1b[32mvirelai> `.
     # OBSERVED COLOR DETAIL (2026-08-24): the prompt is RED (\x1b[31m)
     # after an ERROR reply and GREEN (\x1b[32m) after success — this
     # script ends on the honest direct-read-cap ERROR, so the anchor is
     # the red form.
-    run_one "A-$n" "$RUN_DIR/script-A.txt" $'direct read caps at 0x0000000000000800 bytes\n\x1b[31mdipshit> ' 1 && AOK=1 || true
+    run_one "A-$n" "$RUN_DIR/script-A.txt" $'direct read caps at 0x0000000000000800 bytes\n\x1b[31mvirelai> ' 1 && AOK=1 || true
     echo "=== live-fs pair $n, run B (persistence through reboot, same disk) ==="
     BOK=0
     # Same reply+idle-prompt anchor as run A (see above): "hello world"
@@ -246,7 +246,7 @@ while [ "$n" -lt "$PAIRS" ]; do
     # empirically; the residual flake is documented in the claim file
     # and gate inventory rather than hidden.
     sleep 3
-    run_one "B-$n" "$RUN_DIR/script-B.txt" $'hello world\n\x1b[32mdipshit> ' 0 && BOK=1 || true
+    run_one "B-$n" "$RUN_DIR/script-B.txt" $'hello world\n\x1b[32mvirelai> ' 0 && BOK=1 || true
     if [ "$AOK" = 1 ] && [ "$BOK" = 1 ]; then
         PASS=$((PASS + 1))
     fi

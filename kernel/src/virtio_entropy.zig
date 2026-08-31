@@ -1,4 +1,4 @@
-//! DipshitOS virtio-pci entropy transport (milestone four, card 1 —
+//! VirelaiOS virtio-pci entropy transport (milestone four, card 1 —
 //! claim 2665).
 //!
 //! Drives the device the runner attaches as

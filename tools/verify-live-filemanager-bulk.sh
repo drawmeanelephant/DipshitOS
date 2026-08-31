@@ -16,7 +16,7 @@
 #
 # Run isolation (claim 6637): private stacked disk + EFI vars + serial log
 # per boot. The deletion lands in the throwaway overlay; the canonical
-# image is untouched. DIPSHIT_GATE_SUFFIX / DIPSHIT_KEEP_RUN as usual.
+# image is untouched. VIRELAI_GATE_SUFFIX / VIRELAI_KEEP_RUN as usual.
 #
 # Usage:
 #   bash tools/verify-live-filemanager-bulk.sh
@@ -29,7 +29,7 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 GATE_LOG="$(art live-filemanager-bulk-gate.txt)"

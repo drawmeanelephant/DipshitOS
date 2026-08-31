@@ -1,4 +1,4 @@
-//! DipshitOS custom-virtio guest driver (macOS 27 capability-audit step
+//! VirelaiOS custom-virtio guest driver (macOS 27 capability-audit step
 //! 4/5, claims 0828/4374/9492/9737/4837): the guest driver for the spike
 //! device the runner attaches as `VZCustomVirtioDeviceConfiguration`
 //! (`zig build spike-virtio`, claim 5844). To the guest it is a modern
@@ -197,7 +197,7 @@ pub const payload_len: usize = 16;
 /// descriptor would point at guest RAM near 0 (observed d0.addr=0xdbb2
 /// vs the loaded base 0x7e49d000). init_payload() copies these bytes
 /// into the BSS `payload`, whose address is runtime-correct.
-const payload_bytes = "DIPSHITOS-CV0x42".*;
+const payload_bytes = "VIRELAIOS-CV0x42".*;
 /// The BSS payload buffer the driver hands to the device (runtime
 /// address; filled by init_payload before the first submit).
 pub var payload: [payload_len]u8 align(16) = undefined;
@@ -1393,7 +1393,7 @@ fn test_pointer_hook(rep: []const u8) void {
 test "virtio_custom: payload is the 16-byte known string, reply cap 64, big payload 12340" {
     try std.testing.expectEqual(@as(usize, 16), payload.len);
     init_payload();
-    try std.testing.expectEqualStrings("DIPSHITOS-CV0x42", &payload);
+    try std.testing.expectEqualStrings("VIRELAIOS-CV0x42", &payload);
     try std.testing.expectEqual(@as(usize, 64), reply_cap);
     try std.testing.expectEqual(@as(usize, 12340), big_payload_len);
     try std.testing.expectEqual(@as(u32, 0x1082), custom_did);

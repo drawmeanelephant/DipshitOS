@@ -18,9 +18,9 @@
 # overlay), a private EFI var store (recreated fresh per boot, as the
 # pre-isolation gate did), and a private serial log under $RUN_DIR — two
 # concurrent instances cannot clobber each other's disks, NVRAM, or
-# evidence. Set DIPSHIT_GATE_SUFFIX=_alt to give this instance its own
+# evidence. Set VIRELAI_GATE_SUFFIX=_alt to give this instance its own
 # canonical evidence names (two simultaneous instances MUST differ), and
-# DIPSHIT_KEEP_RUN=1 to keep the scratch dir.
+# VIRELAI_KEEP_RUN=1 to keep the scratch dir.
 #
 set -euo pipefail
 
@@ -29,7 +29,7 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 GATE_LOG="$(art m3-uaccess-live.txt)"
@@ -85,7 +85,7 @@ run_one() {
     local bytes=0 banner=0 write_ok=0 marker=0 ping=0 write_count=0 mon=0 echo_ok=0 userspace_ok=0 fatal=0
     if [ -f "$SER" ]; then
         bytes="$(wc -c < "$SER" | tr -d ' ')"
-        [ "$(grep -aFxc -- "DipshitOS kernel has seized control." "$SER" || true)" = 1 ] && banner=1
+        [ "$(grep -aFxc -- "VirelaiOS kernel has seized control." "$SER" || true)" = 1 ] && banner=1
         [ "$(grep -aFc -- "syscall: write ok n=23" "$SER" || true)" -ge 1 ] && write_ok=1
         [ "$(grep -aFc -- "uaccess: efault ok n=8" "$SER" || true)" -ge 1 ] && marker=1
         [ "$(grep -aFxc -- "  0 sys_ping calls=2" "$SER" || true)" = 1 ] && ping=1
@@ -104,7 +104,7 @@ run_one() {
 
 : > "$REPORT"
 {
-    echo "DIPSHITOS live uaccess gate (claim 6120) — EFAULT contract + fault recovery on VZ"
+    echo "VIRELAIOS live uaccess gate (claim 6120) — EFAULT contract + fault recovery on VZ"
     echo "revision: $REVISION branch=$BRANCH boots=$BOOTS dirty-files=$DIRTY"
     echo "monitor line: $MON_LINE"
     echo "date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"

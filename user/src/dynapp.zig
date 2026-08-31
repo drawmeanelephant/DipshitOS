@@ -1,4 +1,4 @@
-//! DipshitOS Dynamically Linked User Application (DYNAPP.BIN, Milestone 30).
+//! VirelaiOS Dynamically Linked User Application (DYNAPP.BIN, Milestone 30).
 //!
 //! Uses LIBUI.SO and LIBFONT.SO loaded by LD.SO runtime linker at EL0.
 
@@ -44,7 +44,7 @@ pub export fn _start() callconv(.c) noreturn {
 
     _ = ui_win_fill(wid, 0, 0, 320, 200, ui_theme_bg());
     _ = ui_win_fill(wid, 10, 10, 300, 30, ui_theme_surface());
-    ui_draw_string(wid, "DipshitOS Dynamic Linking", 20, 20, ui_theme_accent());
+    ui_draw_string(wid, "VirelaiOS Dynamic Linking", 20, 20, ui_theme_accent());
 
     ui_draw_string(wid, "Shared libraries: LIBUI.SO, LIBFONT.SO", 20, 55, ui_theme_text_primary());
     ui_draw_button(wid, "Click Me", 20, 85, 100, 28, false, false);

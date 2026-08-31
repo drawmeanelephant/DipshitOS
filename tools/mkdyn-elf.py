@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate freestanding dynamic ELF binaries for DipshitOS.
+"""Generate freestanding dynamic ELF binaries for VirelaiOS.
 
 Milestone 30 & 31: Freestanding Runtime Linker, Shared Libraries & Ecosystem.
 Generates:

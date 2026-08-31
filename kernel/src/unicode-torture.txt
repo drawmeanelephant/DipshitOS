@@ -1,4 +1,4 @@
-# DipshitOS Unicode torture document (M20-U14)
+# VirelaiOS Unicode torture document (M20-U14)
 # Every line exercises one tricky rendering case. The host golden test
 # renders this whole file through kernel/src/text.zig and pins the pixel
 # fingerprint. Lines starting with '#' are prose (they still render).

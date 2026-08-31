@@ -1,4 +1,4 @@
-//! DipshitOS milestone-two kernel proper.
+//! VirelaiOS milestone-two kernel proper.
 //!
 //! The boot stub passes the v2 contract in x3. The kernel validates it, moves
 //! to the stub-allocated stack, captures the EFI map, calls ExitBootServices,
@@ -13,7 +13,7 @@ const SystemTable = uefi.tables.SystemTable;
 const BootServices = uefi.tables.BootServices;
 const MemoryMapSlice = uefi.tables.MemoryMapSlice;
 
-// M1.5 console & shell core (agent B): the interactive `dipshit>` monitor
+// M1.5 console & shell core (agent B): the interactive `virelai>` monitor
 // runs on the polled TX console through these modules. The takeover path
 // below is untouched; this is the seam's import surface.
 const console = @import("console.zig");
@@ -216,7 +216,7 @@ export fn _start(
 
 fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *HandoffV2) callconv(.c) u64 {
     if (!valid_handoff(base, size, st, handoff_rec)) {
-        print_pre_exit_error(st, "DipshitOS: invalid handoff\r\n");
+        print_pre_exit_error(st, "VirelaiOS: invalid handoff\r\n");
         return bad_handoff;
     }
 
@@ -232,7 +232,7 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
     // writes are never called.
     nvram_console.init(st.runtime_services);
 
-    print_pre_exit_error(st, "DipshitOS: kernel entered\r\n");
+    print_pre_exit_error(st, "VirelaiOS: kernel entered\r\n");
     evidence.set_marker(marker_entry);
     evidence.write_marker_var(st, marker_entry);
     // Second pre-exit write immediately after the first: if the persisted
@@ -242,12 +242,12 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
     evidence.write_marker_var(st, marker_cmap);
 
     const bs = st.boot_services orelse {
-        print_pre_exit_error(st, "DipshitOS: no Boot Services\r\n");
+        print_pre_exit_error(st, "VirelaiOS: no Boot Services\r\n");
         return map_failure;
     };
 
     var map_buffer = capture_map(bs) catch {
-        print_pre_exit_error(st, "DipshitOS: GetMemoryMap failed\r\n");
+        print_pre_exit_error(st, "VirelaiOS: GetMemoryMap failed\r\n");
         return map_failure;
     };
 
@@ -400,26 +400,26 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
         } else |err| switch (err) {
             error.InvalidParameter => {
                 const refreshed = bs.getMemoryMap(map_buffer.buffer) catch {
-                    print_pre_exit_error(st, "DipshitOS: map refresh failed\r\n");
+                    print_pre_exit_error(st, "VirelaiOS: map refresh failed\r\n");
                     return map_failure;
                 };
                 map_buffer.map = refreshed;
             },
             else => {
-                print_pre_exit_error(st, "DipshitOS: ExitBootServices failed\r\n");
+                print_pre_exit_error(st, "VirelaiOS: ExitBootServices failed\r\n");
                 return exit_failure;
             },
         }
     }
     if (!exited) {
-        print_pre_exit_error(st, "DipshitOS: ExitBootServices failed after 8 attempts\r\n");
+        print_pre_exit_error(st, "VirelaiOS: ExitBootServices failed after 8 attempts\r\n");
         halt_forever();
     }
     evidence.set_marker(marker_exit);
     evidence.write_marker_var(st, marker_exit); // first post-exit runtime-services call
     // Claim 0020 phase B: the FIRST post-exit TX attempt, immediately after
     // a successful ExitBootServices while the firmware's translation regime
-    // is still active (DipshitOS page tables are not yet built). This is
+    // is still active (VirelaiOS page tables are not yet built). This is
     // the controlled test of whether ExitBootServices itself destroys
     // access to the transport window.
     if (comptime tx_transition_b) virtio_console.transition_tx_experiment(st, .b);
@@ -554,7 +554,7 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
     // Claim 0020 phase C: the FIRST MMIO access to the transport after the
     // identity-map switch, before the post-switch probe (M2_RAW!) or any
     // other runtime-service/diagnostic work. Tests whether installing the
-    // DipshitOS page tables destroys access (the claim-0013/0018
+    // VirelaiOS page tables destroys access (the claim-0013/0018
     // hypothesis), with the marker write above being the only prior
     // post-switch call.
     if (comptime tx_transition_c) virtio_console.transition_tx_experiment(st, .c);
@@ -575,7 +575,7 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
     // Claim 0020 phase D: TX at the normal final location — the same site
     // where the production banner transmits. Same payload as phases A/B/C.
     if (comptime tx_transition_d) virtio_console.transition_tx_experiment(st, .d);
-    uart_puts("DipshitOS kernel has seized control.\n");
+    uart_puts("VirelaiOS kernel has seized control.\n");
     // Claim 0013: after the first TX, record whether the TX path returned
     // (bytes may still be dropped by the device; the serial log is the gate,
     // but M2_TXOK! separates "TX hung" from "TX returned silently").

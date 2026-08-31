@@ -1,4 +1,4 @@
-//! DipshitOS bounded per-process IPC mailbox (milestone-four follow-on 3,
+//! VirelaiOS bounded per-process IPC mailbox (milestone-four follow-on 3,
 //! card 3f — claim 5965).
 //!
 //! The first inter-process data path: `sys_ipc_send` (slot 5) copies the

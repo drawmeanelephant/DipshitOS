@@ -1,4 +1,4 @@
-//! DipshitOS virtio-pci block transport (milestone-three storage card, claim 6420).
+//! VirelaiOS virtio-pci block transport (milestone-three storage card, claim 6420).
 //!
 //! Drives the disk the runner attaches as `VZVirtioBlockDeviceConfiguration`
 //! — to the guest a modern virtio-pci block device (VID 0x1af4, DID 0x1041

@@ -1,4 +1,4 @@
-//! DipshitOS second ESP user program — COUNTER.BIN (milestone-four
+//! VirelaiOS second ESP user program — COUNTER.BIN (milestone-four
 //! follow-on 2, claim 4613; extended by follow-on 3 card 3f, claim 5965 —
 //! the IPC sender; extended by follow-on 4 card 4b, claim 3179 — the
 //! burst cadence; extended by follow-on 4 card 4c, claim 9946 — the

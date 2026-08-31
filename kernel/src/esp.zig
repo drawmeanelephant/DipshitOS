@@ -1,8 +1,8 @@
-//! DipshitOS ESP file window (milestone-three storage card, claim 6420).
+//! VirelaiOS ESP file window (milestone-three storage card, claim 6420).
 //!
 //! M1.5's `ls`/`cat`/`write` started life over claim 3475's two fallback
 //! channels — a PRE-EXIT EFI Simple File System snapshot (the ESP, read
-//! only) and POST-exit NVRAM runtime variables (`DipshitF:*`, the
+//! only) and POST-exit NVRAM runtime variables (`VirelaiF:*`, the
 //! persistence medium). This module replaces both with a **real FAT32
 //! driver on the live ESP** (see `fat.zig` + `virtio_blk.zig`):
 //!
@@ -397,7 +397,7 @@ fn fake_write(lba: u64, data: *const [512]u8) bool {
 const esp_guid = [16]u8{ 0x28, 0x73, 0x2a, 0xc1, 0x1f, 0xf8, 0xd2, 0x11, 0xba, 0x4b, 0x00, 0xa0, 0xc9, 0x3e, 0xc9, 0x3b };
 
 /// Build the minimal FAT32+GPT image: MBR, GPT with the ESP entry, and a
-/// FAT32 volume holding DIPSHITOS (label), EFI/ (dir), KERNEL.BIN (1
+/// FAT32 volume holding VIRELAIOS (label), EFI/ (dir), KERNEL.BIN (1
 /// cluster) and BOOTED.TXT (1 cluster).
 fn build_image(alloc: std.mem.Allocator) !void {
     const total_sectors: u64 = 128 * 1024 * 1024 / 512;
@@ -458,7 +458,7 @@ fn build_image(alloc: std.mem.Allocator) !void {
 
     const root_off: usize = @intCast((esp_offset + data_start) * 512);
     var root = [_]u8{0} ** 512;
-    write_entry(&root, 0, "DIPSHITOS  ", 0x08, 0, 0);
+    write_entry(&root, 0, "VIRELAIOS  ", 0x08, 0, 0);
     write_entry(&root, 1, "EFI        ", 0x10, 3, 0);
     write_entry(&root, 2, "KERNEL  BIN", 0x20, 5, 0x9000); // > esp_content_max: listed, not loaded
     write_entry(&root, 3, "BOOTED  TXT", 0x20, 6, 54);
@@ -468,7 +468,7 @@ fn build_image(alloc: std.mem.Allocator) !void {
     write_entry(&efi, 0, ".          ", 0x10, 3, 0);
     write_entry(&efi, 1, "..         ", 0x10, 2, 0);
     @memcpy(test_image[efi_off .. efi_off + 512], &efi);
-    const booted = "DIPSHITOS BOOTLOADER\nfirmware has agreed to cooperate\n";
+    const booted = "VIRELAIOS BOOTLOADER\nfirmware has agreed to cooperate\n";
     const b_off: usize = @intCast((esp_offset + data_start + 4) * 512);
     @memcpy(test_image[b_off .. b_off + booted.len], booted);
 }
@@ -499,7 +499,7 @@ test "esp: set_disk mounts the FAT volume and snapshots the root window" {
     try std.testing.expectEqual(@as(usize, 0), content_of(big).len); // listed, not loaded
     const booted = lookup("booted.txt").?; // case-insensitive
     try std.testing.expectEqualStrings("BOOTED.TXT", booted.name[0..booted.name_len]);
-    try std.testing.expectEqualStrings("DIPSHITOS BOOTLOADER\nfirmware has agreed to cooperate\n", content_of(booted));
+    try std.testing.expectEqualStrings("VIRELAIOS BOOTLOADER\nfirmware has agreed to cooperate\n", content_of(booted));
     try std.testing.expect(lookup("NOPE.TXT") == null);
 }
 

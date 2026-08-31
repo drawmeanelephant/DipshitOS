@@ -43,7 +43,7 @@
 #
 # Run isolation (#523 item 2 / issue #528, claim 5069): private stacked
 # disk + EFI vars + serial log + screen captures under $RUN_DIR;
-# DIPSHIT_GATE_SUFFIX/_KEEP_RUN supported.
+# VIRELAI_GATE_SUFFIX/_KEEP_RUN supported.
 #
 # Class B — Apple silicon + VZ only; boots real VMs. A green CI badge proves
 # class A only and says nothing about this gate.
@@ -61,7 +61,7 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 GATE_LOG="$(art live-win-move-gate.txt)"
@@ -444,7 +444,7 @@ EOF
 fi
 
 {
-    echo "DIPSHITOS live draw/window-move gate (claim 0487, milestone six card G6 move/raise follow-on) — EL0 move/restack on real VZ hardware"
+    echo "VIRELAIOS live draw/window-move gate (claim 0487, milestone six card G6 move/raise follow-on) — EL0 move/restack on real VZ hardware"
     echo "revision: $REVISION branch=$BRANCH dirty-files=$DIRTY"
     echo "phase: scripted exec of WINMOVE.BIN (open/fill/present/move/move-clamp/raise/get/query/hide/sleep/show/loop), then dui + syscalls + the EL1h dui move/raise halves on the same kernel state, then the two-capture decode"
     echo "assertions: winmove open/fill/present/move/raise/get/query/hide/show/loop markers (winmove: get 768,336,512,384 through slot 18 + winmove: query 768,336,512,384 z=2 focused=1 visible=1 dirty=1 through slot 19 + hide ok/show ok through slot 20), dui: windows=3 + dui[2]: user user rect=768,336,512,384 owner=<pid> visible=1, syscalls implemented=46 with open=1/fill=4/present=3/move=2/raise=1/get=1/query=1/set_visible=2/close=0, dui move 2 768 336 + dui raise 2 (EL1h), the HIDDEN capture shows no red/cyan/white blocks at the clamped spot (the window disappeared), and the LATEST capture shows red+cyan+white blocks at the NEW spot + dark-blue background dominant + no terminal foreground inside the new rect + the old spot free of the colored blocks (the window returned)"

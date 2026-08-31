@@ -27,7 +27,7 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 GATE_LOG="$(art live-inventory-gate.txt)"
@@ -84,7 +84,7 @@ run_one() {
     local SERIAL_BYTES=0 BANNER=0 BUILTIN=0 MONITOR=0 APP=0 NOTFOUND=0 INV_HEADER=0 INV_APP=0 REPLY=0
     if [ -f "$SER" ]; then
         SERIAL_BYTES=$(wc -c < "$SER" 2>/dev/null | tr -d ' ')
-        grep -qF -- "DipshitOS kernel has seized control." "$SER" && BANNER=1
+        grep -qF -- "VirelaiOS kernel has seized control." "$SER" && BANNER=1
         grep -qF -- "type: shell builtin" "$SER" && BUILTIN=1
         grep -qF -- "stat: monitor command" "$SER" && MONITOR=1
         grep -qF -- "NOTEPAD.BIN: ESP application" "$SER" && APP=1

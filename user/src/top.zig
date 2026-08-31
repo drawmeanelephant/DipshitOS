@@ -1,4 +1,4 @@
-//! DipshitOS sixteenth ESP user program -- TOP.BIN (Milestone 11, Card A4).
+//! VirelaiOS sixteenth ESP user program -- TOP.BIN (Milestone 11, Card A4).
 //!
 //! Graphical Task Manager & Process Monitor. Polls `sys_procs` (slot 7) to
 //! inspect active processes, renders live process tables and system statistics,

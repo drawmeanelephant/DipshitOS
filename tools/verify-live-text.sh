@@ -11,10 +11,10 @@
 # transport + framebuffer (DID 0x1050, virtio-gpu 1.2 display_info, B8G8R8X8
 # resource, post-exit re-arm — all claim-6053 observations), and G2's
 # text.zig paints the SAME banner + prompt the serial log carries:
-#   "DipshitOS - AArch64 firmware-assisted kernel monitor"
-#   "DipshitOS: terminal loop, meet the monitor."
+#   "VirelaiOS - AArch64 firmware-assisted kernel monitor"
+#   "VirelaiOS: terminal loop, meet the monitor."
 #   "Type 'help' before touching anything expensive."
-#   "dipshit> "
+#   "virelai> "
 # (fg 0x00ff00 over bg 0x101418), then G1's transfer/flush pushes it to the
 # scanout.
 #
@@ -51,7 +51,7 @@
 # private DiskImageKit stacked disk (read-only base + throwaway ASIF
 # overlay), a private EFI var store, and writes its serial log and screen
 # captures under $RUN_DIR before they are copied to the canonical evidence
-# names. DIPSHIT_GATE_SUFFIX=_alt / DIPSHIT_KEEP_RUN=1 supported.
+# names. VIRELAI_GATE_SUFFIX=_alt / VIRELAI_KEEP_RUN=1 supported.
 #
 # Class B — Apple silicon + VZ only; boots real VMs. A green CI badge
 # proves class A only and says nothing about this gate.
@@ -69,7 +69,7 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 GATE_LOG="$(art live-text-gate.txt)"
@@ -151,8 +151,8 @@ grep -q "text: boot banner presented" "$(art live-text-serial.log)" || fail "boo
 # the cell, and the fg/bg colors, which is what G2 proves.
 grep -q "text: rows=90 cols=160 cell=8x8" "$(art live-text-serial.log)" || fail "the text report does not show the 90x160 region with 8x8 cells"
 grep -q "text: rows=90 cols=160 cell=8x8 .*fg=0x000000000000ff00 bg=0x0000000000101418" "$(art live-text-serial.log)" || fail "the text report does not show the G2 fg/bg colors"
-grep -q "DipshitOS - AArch64 firmware-assisted kernel monitor" "$(art live-text-serial.log)" || fail "serial transcript lost the banner (shared-seam regression)"
-grep -q "dipshit> " "$(art live-text-serial.log)" || fail "serial transcript lost the prompt (shared-seam regression)"
+grep -q "VirelaiOS - AArch64 firmware-assisted kernel monitor" "$(art live-text-serial.log)" || fail "serial transcript lost the banner (shared-seam regression)"
+grep -q "virelai> " "$(art live-text-serial.log)" || fail "serial transcript lost the prompt (shared-seam regression)"
 
 # Phase 2 — the pixel proof: decode the captured PNG and assert TEXT.
 # The runner writes `--screen <base>` captures as <base>-Ns (no extension).

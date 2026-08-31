@@ -1,4 +1,4 @@
-# DipshitOS app manifest (M13 B2, claim 8877; M15 C4 dock flag). NAME.BIN | Display Name | icon | dock=true
+# VirelaiOS app manifest (M13 B2, claim 8877; M15 C4 dock flag). NAME.BIN | Display Name | icon | dock=true
 CALC.BIN | 64-bit Calc | c | dock=true
 NOTEPAD.BIN | Text Editor | n | dock=true
 TOP.BIN | Task Manager | t | dock=true

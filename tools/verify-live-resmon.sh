@@ -25,7 +25,7 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 GATE_LOG="$(art live-resmon-gate.txt)"
@@ -78,7 +78,7 @@ run_one() {
     local SERIAL_BYTES=0 BANNER=0 LOADED=0 OPEN=0 READY=0 REPLY=0
     if [ -f "$SER" ]; then
         SERIAL_BYTES=$(wc -c < "$SER" 2>/dev/null | tr -d ' ')
-        grep -qF -- "DipshitOS kernel has seized control." "$SER" && BANNER=1
+        grep -qF -- "VirelaiOS kernel has seized control." "$SER" && BANNER=1
         grep -qF -- "exec: loaded RESMON.BIN size=" "$SER" && LOADED=1
         grep -qF -- "resmon: open" "$SER" && OPEN=1
         grep -qF -- "resmon: ready" "$SER" && READY=1

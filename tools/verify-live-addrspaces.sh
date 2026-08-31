@@ -28,9 +28,9 @@
 # overlay), a private EFI var store (recreated fresh per boot, as the
 # pre-isolation gate did), and a private serial log under $RUN_DIR — two
 # concurrent instances cannot clobber each other's disks, NVRAM, or
-# evidence. Set DIPSHIT_GATE_SUFFIX=_alt to give this instance its own
+# evidence. Set VIRELAI_GATE_SUFFIX=_alt to give this instance its own
 # canonical evidence names (two simultaneous instances MUST differ), and
-# DIPSHIT_KEEP_RUN=1 to keep the scratch dir.
+# VIRELAI_KEEP_RUN=1 to keep the scratch dir.
 #
 set -euo pipefail
 
@@ -39,7 +39,7 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 GATE_LOG="$(art m3-addrspaces-live.txt)"
@@ -96,11 +96,11 @@ run_one() {
     local t0sz=0 user_va=0 el0dev0=0 el0ok=0 leaves_ok=0 shell_root=0 worker_root=0 user_own=0
     if [ -f "$SER" ]; then
         bytes="$(wc -c < "$SER" | tr -d ' ')"
-        [ "$(grep -aFxc -- "DipshitOS kernel has seized control." "$SER" || true)" = 1 ] && banner=1
+        [ "$(grep -aFxc -- "VirelaiOS kernel has seized control." "$SER" || true)" = 1 ] && banner=1
         # OBSERVED TODAY (2026-08-24, claim 5069): M18 T5 (claim 0163) colored
         # the prompt — the reply line's serial bytes are now
-        # `\x1b[32mdipshit> \x1b[0msyscall: write ok n=23` (prompt + reply merged
-        # on one line), so the historical "dipshit> syscall: ..." needle can
+        # `\x1b[32mvirelai> \x1b[0msyscall: write ok n=23` (prompt + reply merged
+        # on one line), so the historical "virelai> syscall: ..." needle can
         # never match again. Match the output-only reply substring.
         [ "$(grep -aFc -- "syscall: write ok n=23" "$SER" || true)" -ge 1 ] && write_ok=1
         [ "$(grep -aFxc -- "uaccess: efault ok n=8" "$SER" || true)" = 1 ] && marker=1
@@ -165,7 +165,7 @@ run_one() {
 
 : > "$REPORT"
 {
-    echo "DIPSHITOS live addrspaces gate (claim 5804) — per-task TTBR0, EL1-only kernel overlay, MMIO excluded from EL0 (VZ TTBR1 fallback)"
+    echo "VIRELAIOS live addrspaces gate (claim 5804) — per-task TTBR0, EL1-only kernel overlay, MMIO excluded from EL0 (VZ TTBR1 fallback)"
     echo "revision: $REVISION branch=$BRANCH boots=$BOOTS dirty-files=$DIRTY"
     echo "monitor line: $MON_LINE"
     echo "date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"

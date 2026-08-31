@@ -1,4 +1,4 @@
-# DIPSHITOS PROPRIETARY SOURCE-AVAILABLE LICENSE
+# VIRELAIOS PROPRIETARY SOURCE-AVAILABLE LICENSE
 
 ## Version 1.0
 
@@ -8,7 +8,7 @@ All rights reserved.
 
 ### 1. Yes, You Can See the Source
 
-The source code and related materials for DipshitOS (collectively, the “Software”) have been made publicly visible.
+The source code and related materials for VirelaiOS (collectively, the “Software”) have been made publicly visible.
 
 That means you may look at them.
 
@@ -24,7 +24,7 @@ You may:
 
 1. View and inspect the publicly available source code for personal evaluation, commentary, criticism, security review, or educational study.
 
-2. Link to the official DipshitOS repository.
+2. Link to the official VirelaiOS repository.
 
 3. Exercise any limited rights that the operator of the repository hosting service separately requires the copyright holder to grant to users of that service, but only to the extent and for the purposes provided by that service's terms.
 
@@ -50,7 +50,7 @@ Unless you first obtain express written permission from the Copyright Holder, yo
 
 7. remove, conceal, alter, or misrepresent any copyright, attribution, authorship, trademark, license, or other proprietary notice;
 
-8. represent yourself or anyone else as the author, owner, maintainer, official distributor, or authorized representative of DipshitOS;
+8. represent yourself or anyone else as the author, owner, maintainer, official distributor, or authorized representative of VirelaiOS;
 
 9. use the Software or substantial portions of it as training data, fine-tuning data, evaluation data, benchmark data, retrieval material, corpus material, or other input for a machine-learning or artificial-intelligence system, except where the Copyright Holder has separately authorized that use in writing or where such rights have been separately granted to the repository hosting provider under its applicable terms;
 
@@ -82,7 +82,7 @@ A public Git repository does not mean “please help yourself.”
 
 ### 6. Contributions
 
-Unless a separate written contributor agreement applies, you should not submit code, documentation, artwork, patches, pull requests, or other copyrightable material to DipshitOS unless you have the legal authority to do so and understand that additional contribution terms may be required before the contribution is accepted.
+Unless a separate written contributor agreement applies, you should not submit code, documentation, artwork, patches, pull requests, or other copyrightable material to VirelaiOS unless you have the legal authority to do so and understand that additional contribution terms may be required before the contribution is accepted.
 
 The Copyright Holder may reject, close, ignore, ridicule, or otherwise decline any proposed contribution for any reason or no reason.
 
@@ -90,21 +90,21 @@ Opening a pull request does not obligate anybody to merge your masterpiece.
 
 ### 7. Third-Party Software and Services
 
-DipshitOS may interact with, target, reference, or depend upon software, APIs, frameworks, specifications, platforms, trademarks, or other materials owned by third parties.
+VirelaiOS may interact with, target, reference, or depend upon software, APIs, frameworks, specifications, platforms, trademarks, or other materials owned by third parties.
 
 Those materials remain subject to their respective owners' rights and applicable terms.
 
-This License applies only to rights in DipshitOS that the Copyright Holder is legally entitled to license.
+This License applies only to rights in VirelaiOS that the Copyright Holder is legally entitled to license.
 
 Nothing in this License grants rights to Apple Inc., Apple technologies, Apple trademarks, Virtualization.framework, Zig, GitHub, or any other third-party property.
 
 ### 8. Names and Trademarks
 
-No permission is granted to use the names “DipshitOS,” its logos, mascots, branding, trade dress, or other identifying marks in a manner that suggests endorsement, affiliation, sponsorship, authorship, or official status.
+No permission is granted to use the names “VirelaiOS,” its logos, mascots, branding, trade dress, or other identifying marks in a manner that suggests endorsement, affiliation, sponsorship, authorship, or official status.
 
-You may use the name factually when referring to the actual DipshitOS project.
+You may use the name factually when referring to the actual VirelaiOS project.
 
-Do not make “DipshitOS Enterprise Edition,” put an elephant on it, and act surprised when somebody objects.
+Do not make “VirelaiOS Enterprise Edition,” put an elephant on it, and act surprised when somebody objects.
 
 ### 9. No Warranty
 
@@ -112,7 +112,7 @@ THE SOFTWARE IS PROVIDED FOR VIEWING ON AN “AS IS” AND “AS AVAILABLE” BA
 
 TO THE MAXIMUM EXTENT PERMITTED BY LAW, THE COPYRIGHT HOLDER DISCLAIMS ALL WARRANTIES, INCLUDING WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, TITLE, NON-INFRINGEMENT, ACCURACY, RELIABILITY, SECURITY, AND FREEDOM FROM DEFECTS.
 
-THIS IS AN OPERATING SYSTEM CALLED DIPSHITOS.
+THIS IS AN OPERATING SYSTEM CALLED VIRELAIOS.
 
 ADJUST YOUR EXPECTATIONS ACCORDINGLY.
 
@@ -126,7 +126,7 @@ THIS INCLUDES, WITHOUT LIMITATION, LOSS OF DATA, LOSS OF PROFITS, LOSS OF BUSINE
 
 The Copyright Holder may grant additional rights under a separate written agreement.
 
-If you want to use, modify, redistribute, incorporate, commercialize, research with, teach with, or otherwise do something with DipshitOS that this License does not permit, ask first.
+If you want to use, modify, redistribute, incorporate, commercialize, research with, teach with, or otherwise do something with VirelaiOS that this License does not permit, ask first.
 
 The answer might even be yes.
 
@@ -168,17 +168,17 @@ README files, jokes, issue comments, commit messages, screenshots, social-media 
 
 ---
 
-## TL;DR FOR DIPSHITS
+## TL;DR FOR VIRELAIS
 
-You may **look at DipshitOS**.
+You may **look at VirelaiOS**.
 
-You may **talk about DipshitOS**.
+You may **talk about VirelaiOS**.
 
-You may **link to DipshitOS**.
+You may **link to VirelaiOS**.
 
-GitHub may let you **fork DipshitOS on GitHub** because that is part of using GitHub.
+GitHub may let you **fork VirelaiOS on GitHub** because that is part of using GitHub.
 
-You may **not take DipshitOS code and use it for your own shit** unless you get written permission.
+You may **not take VirelaiOS code and use it for your own shit** unless you get written permission.
 
 The source is public.
 

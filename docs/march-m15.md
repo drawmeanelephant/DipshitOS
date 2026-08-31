@@ -15,7 +15,7 @@ Every "bridge the maintainer would be most disappointed to see omitted" is
 now shipped — EL0 application events (M9), userland filesystem access
 (M10), consumer GUI apps + a launcher (M11), and the shared-services arc
 (M14). The next **concrete, non-conditional** wishlist item is **audio**
-(item 18, "DipshitOS becomes a computer"): another real device/service
+(item 18, "VirelaiOS becomes a computer"): another real device/service
 pipeline exactly like the virtio-net work, but for sound. The host side
 exists — Apple's Virtualization.framework has shipped virtio-snd
 (`VZVirtioSoundDeviceConfiguration` with PCM stream configs) since macOS
@@ -32,7 +32,7 @@ SMP, 3D, dynamic linking, POSIX) stay visible, not climbed.
 **Meta-requirement (roadmap):** every infrastructure card names the small
 experience that consumes it, and the milestone ends in a composition test
 a human can perceive. Audio's composition test is audible — the strongest
-"DipshitOS is a computer" signal yet.
+"VirelaiOS is a computer" signal yet.
 
 ## The cards, in order
 

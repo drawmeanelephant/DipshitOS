@@ -17,7 +17,7 @@ and a polished human interface.
 However, EL0 user programs are currently **output-only or batch-driven**:
 user processes can open windows and write pixels, but cannot receive
 interactive keystrokes, pointer clicks, or window lifecycle events from the
-user. Milestone nine turns DipshitOS from "a kernel with graphical demos" into
+user. Milestone nine turns VirelaiOS from "a kernel with graphical demos" into
 **an interactive application platform** by routing user events into per-process
 event queues and providing event syscalls.
 

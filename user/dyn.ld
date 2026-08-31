@@ -1,4 +1,4 @@
-/* DipshitOS Dynamically Linked Executable linker script (DYNAPP.BIN, claim 7921).
+/* VirelaiOS Dynamically Linked Executable linker script (DYNAPP.BIN, claim 7921).
  */
 ENTRY(_start)
 SECTIONS {

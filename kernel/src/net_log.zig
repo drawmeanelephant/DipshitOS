@@ -1,4 +1,4 @@
-//! DipshitOS kernel network event log ring buffer (M26 N15 — issue #442).
+//! VirelaiOS kernel network event log ring buffer (M26 N15 — issue #442).
 //!
 //! Maintains a bounded in-memory ring buffer (128 entries) of network events:
 //! - DHCP state transitions (discover, offer, request, bound, renew, expired)

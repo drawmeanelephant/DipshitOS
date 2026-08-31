@@ -1,4 +1,4 @@
-//! DipshitOS first EL0 execution boundary (claim 8215, re-homed onto
+//! VirelaiOS first EL0 execution boundary (claim 8215, re-homed onto
 //! per-task address spaces by claim 5804).
 //!
 //! One statically linked EL0t task, one static user stack, and a tiny fixed

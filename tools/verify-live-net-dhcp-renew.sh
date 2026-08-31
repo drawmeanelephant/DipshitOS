@@ -77,7 +77,7 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 # Run isolation (#523 item 2 / issue #528; fleet remainder claim 2259):
@@ -85,10 +85,10 @@ art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 # logs, captures, and scripts under $RUN_DIR for both runs; the rc
 # handoff files live under $RUN_DIR too (they were /tmp globals).
 # Expectation note (#528 rot class 1, claim 2259): the historical
-# $'...ndipshit> ' script-expects died with M18 T5's ANSI-colored prompt
+# $'...nvirelai> ' script-expects died with M18 T5's ANSI-colored prompt
 # (claim 0163); both runs anchor on the OUTPUT-ONLY done echo.
-# Set DIPSHIT_GATE_SUFFIX=_alt for distinct canonical evidence names;
-# DIPSHIT_KEEP_RUN=1 keeps the scratch dir.
+# Set VIRELAI_GATE_SUFFIX=_alt for distinct canonical evidence names;
+# VIRELAI_KEEP_RUN=1 keeps the scratch dir.
 
 GATE_LOG="$(art live-net-dhcp-renew-gate.txt)"
 exec > >(tee "$GATE_LOG") 2>&1
@@ -315,7 +315,7 @@ fi
 
 : > "$REPORT"
 {
-    echo "DIPSHITOS live DHCP lease-lifecycle gate (claim 9489, milestone five card N9) — RFC 2131 §4.4.5 on real VZ hardware"
+    echo "VIRELAIOS live DHCP lease-lifecycle gate (claim 9489, milestone five card N9) — RFC 2131 §4.4.5 on real VZ hardware"
     echo "revision: $REVISION branch=$BRANCH dirty-files=$DIRTY"
     echo "run A (renewing + rebinding, --net-dhcp-respond-norenew): lease 100 s — the AUTONOMOUS poll RENEWs at T1=50 (UNICAST REQUEST, REFUSED by the host), stays RENEWING, and at T2=87 ESCALATES to REBINDING (BROADCAST REQUEST, ACKed); no net dhcp is typed after phase 1"
     echo "assertions: runner rc, the bound lease, the renewing (T1) line, the rebinding (T2) line, the counters renew=1,rebind=1,renewed=1,expired=0, the host's REFUSED unicast line + the answered broadcast-REQUEST line, the capture (1222 B: DISCOVER 286 + REQUEST 298 + the ARP 42 + RENEW 298 UNICAST dst 02:00:00:00:00:02 / src+dst IP 10.0.0.2 / ciaddr 10.0.0.2 + REBIND 298 broadcast), the gate echo, the runner's net-dhcp-respond flags"

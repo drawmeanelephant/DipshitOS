@@ -100,7 +100,7 @@ jobs:
       - name: Upload Build Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: dipshitos-artifacts-macos
+          name: virelaios-artifacts-macos
           path: |
             zig-out/
             artifacts/

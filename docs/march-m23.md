@@ -9,7 +9,7 @@
 NOTEPAD exists (M11 A3, M17 C5/C6) — it's a basic text viewer with word
 wrap, find/replace, and cursor blink. But it's not a *text editor*. No
 undo, no goto-line, no multi-file support, no syntax awareness. A developer
-writing code on DipshitOS needs an editor, not a notepad. M23 builds one.
+writing code on VirelaiOS needs an editor, not a notepad. M23 builds one.
 
 **Zero new syscall slots.** EDIT.BIN is a pure userland app that uses the
 existing toolkit, event system, and file syscalls.

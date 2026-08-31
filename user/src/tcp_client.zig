@@ -1,4 +1,4 @@
-//! DipshitOS TCP proof program — TCP.BIN (milestone twelve, card N1, Issue #148).
+//! VirelaiOS TCP proof program — TCP.BIN (milestone twelve, card N1, Issue #148).
 //!
 //! Exercises the userland TCP syscall seam end-to-end:
 //!   1. `sys_tcp_connect(10.0.0.2, 9999)` (slot 30) -> 0.

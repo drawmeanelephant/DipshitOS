@@ -1,4 +1,4 @@
-# DipshitOS roadmap: the experience layer (M18–M27)
+# VirelaiOS roadmap: the experience layer (M18–M27)
 
 > **Status:** DRAFT — maintainer review needed.
 >
@@ -24,7 +24,7 @@
 
 > Full card detail: [`docs/march-m18.md`](march-m18.md).
 
-The shell is the most-used interface in DipshitOS. This milestone makes it
+The shell is the most-used interface in VirelaiOS. This milestone makes it
 actually comfortable to work in.
 
 | Card | What | ABI? | Notes |
@@ -233,7 +233,7 @@ The final milestone in this arc. Not new capabilities — making everything
 
 | Card | What | ABI? | Notes |
 |------|------|------|-------|
-| **G1 Boot experience.** Boot splash screen (DipshitOS logo, version, loading indicator). First-boot wizard (language, theme, timezone). | — | `boot.zig` splash + `settings_panel.zig` wizard. |
+| **G1 Boot experience.** Boot splash screen (VirelaiOS logo, version, loading indicator). First-boot wizard (language, theme, timezone). | — | `boot.zig` splash + `settings_panel.zig` wizard. |
 | **G2 About dialog.** Ctrl+Shift+A shows a polished About window: OS name, version, kernel build date, credits, license. | — | `driving_award.zig` + new widget. |
 | **G3 Window previews.** Alt+Tab shows a live mini-preview of each window (current: just icons). Renders each window's buffer scaled down. | — | `driving_award.zig` composite preview. |
 | **G4 Sound design.** Audio feedback for common actions: notification ping, error beep, window open/close, copy/paste. Reuses M15 audio syscalls. | — | `driving_award.zig` + `chime.zig` + sys_audio. |
@@ -295,7 +295,7 @@ climbed:
   loading (M22 D1) is the bridge.
 - **Virtual memory depth.** COW, mmap, demand paging. Guard pages exist
   (M16). More only when apps need it.
-- **POSIX / Linux compat.** Not DipshitOS's identity.
+- **POSIX / Linux compat.** Not VirelaiOS's identity.
 - **Browser / HTTP server.** A TCP client exists. A full HTTP stack is a
   different project.
 - **USB-everything.** HID works. Mass storage, serial, etc. are future work.

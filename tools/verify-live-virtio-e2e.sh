@@ -32,7 +32,7 @@
 #   bash tools/verify-live-virtio-e2e.sh
 #
 # Run isolation (#523 item 2): private stacked disk + EFI vars + serial log
-# under $RUN_DIR; DIPSHIT_GATE_SUFFIX/_KEEP_RUN supported.
+# under $RUN_DIR; VIRELAI_GATE_SUFFIX/_KEEP_RUN supported.
 #
 # Evidence: artifacts/live-virtio-e2e-gate.txt, -report.txt, -run.txt
 # (runner output), -serial.log (guest serial), -cvc-console.log (the
@@ -45,7 +45,7 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 GATE_LOG="$(art live-virtio-e2e-gate.txt)"
@@ -141,7 +141,7 @@ if [ -f "$CVFILE" ]; then
     grep -a -qF -- "events=6" "$CVFILE" && CV_EVENTS=1
     grep -aF -- "input: armed=0 " "$CVFILE" >/dev/null && CV_EVENTS=1
     # The idle-seam partial flush delivered the newline-less prompt.
-    grep -a -qF -- "dipshit> " "$CVFILE" && CV_PROMPT=1
+    grep -a -qF -- "virelai> " "$CVFILE" && CV_PROMPT=1
 fi
 
 # --- raw snapshot assertions --------------------------------------------------------
@@ -233,7 +233,7 @@ if [ "$RC" = 0 ] \
 fi
 
 {
-    echo "DIPSHITOS virtio-e2e gate (claim 0680, issue #523 item 3 capstone) — injected input in, structured console + framebuffer snapshot out, all over the custom-virtio control plane, headless, on real VZ hardware"
+    echo "VIRELAIOS virtio-e2e gate (claim 0680, issue #523 item 3 capstone) — injected input in, structured console + framebuffer snapshot out, all over the custom-virtio control plane, headless, on real VZ hardware"
     echo "revision: $REVISION branch=$BRANCH dirty-files=$DIRTY"
     echo "session: --screen (GPU attached, no display window, no USB HID devices); five-queue custom virtio (--via-virtio --cvc-snap); script opens WINLOOP.BIN; --input-string types input\\n over queue 3; kind-3 arms the console tee on \"cvconsole-ready\"; kind-4 requests one snapshot after \"snap-now\""
     echo "assertions: typed keys complete (12 messages, transport=cv-input); console tee armed AND the typed command's report (events=6, armed=0 — nothing USB attached) appears in the STRUCTURED FILE; snapshot header/done byte counts exact (113 chunks, 3686400 bytes, checksum verified host-side); raw frame decodes with real screen content; negative: no PTR-EVT/window-key synthesis lines, no ScreenCaptureKit capture anywhere"

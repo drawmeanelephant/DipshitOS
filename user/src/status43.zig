@@ -1,4 +1,4 @@
-//! DipshitOS fourth ESP user program — STATUS43.BIN (milestone-four
+//! VirelaiOS fourth ESP user program — STATUS43.BIN (milestone-four
 //! follow-on 4, card 4c — claim 9946).
 //!
 //! The SHORT third program in the exit-status-propagation gate: the

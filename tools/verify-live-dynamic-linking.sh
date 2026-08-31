@@ -20,7 +20,7 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 GATE_LOG="$(art m30-dynamic-linking-live.txt)"
@@ -73,7 +73,7 @@ run_one() {
     local bytes=0 banner=0 listed=0 loaded=0 ld_init=0 dyn_run=0 exited=0 reaped=0 echo_ok=0 fatal=0
     if [ -f "$SER" ]; then
         bytes="$(wc -c < "$SER" | tr -d ' ')"
-        [ "$(grep -aFxc -- "DipshitOS kernel has seized control." "$SER" || true)" = 1 ] && banner=1
+        [ "$(grep -aFxc -- "VirelaiOS kernel has seized control." "$SER" || true)" = 1 ] && banner=1
         [ "$(grep -aFc -- "DYNAPP.ELF" "$SER" || true)" -ge 2 ] && listed=1
         [ "$(grep -aFc -- "exec: loaded DYNAPP.ELF" "$SER" || true)" -ge 1 ] && loaded=1
         [ "$(grep -aFc -- "ld.so:" "$SER" || true)" -ge 1 ] && ld_init=1

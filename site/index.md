@@ -4,9 +4,9 @@ status: published
 tags: [home, overview]
 ---
 
-# DipshitOS
+# VirelaiOS
 
-DipshitOS is a from-scratch AArch64 operating system. It boots under real UEFI
+VirelaiOS is a from-scratch AArch64 operating system. It boots under real UEFI
 firmware on **Apple silicon**, hosted by Apple's **Virtualization.framework**
 (macOS **27 or newer**). It is **not Linux, not Unix, and not QEMU** — no
 libc, no POSIX, no existing guest OS, no emulator anywhere in the boot path.
@@ -27,7 +27,7 @@ Every milestone through **thirty-one** has landed and closed:
 | Milestone | What it is | Status |
 |-----------|-----------|--------|
 | Boot → kernel proper | UEFI boot pipeline, handoff, `ExitBootServices`, identity-map MMU, polled serial console | Done |
-| Monitor | Interactive `dipshit>` kernel monitor (shell, filesystem, reboot/shutdown) | Done |
+| Monitor | Interactive `virelai>` kernel monitor (shell, filesystem, reboot/shutdown) | Done |
 | Userspace | Allocator, GIC + timer, scheduler, EL0 + syscalls, uaccess, address spaces, exec | Done |
 | Processes | Entropy/CSPRNG, process registry, IPC, wait, kill, concurrent programs | Done |
 | Networking | virtio-net, ARP, IPv4/ICMP, UDP, DHCP, TCP, NAT | Done |
@@ -76,10 +76,10 @@ which.
 
 ## What runs today
 
-A single boot of DipshitOS gets you, in order:
+A single boot of VirelaiOS gets you, in order:
 
 - A UEFI boot loader that hands off to a freestanding kernel.
-- A live interactive monitor (`dipshit>` prompt) over the serial console.
+- A live interactive monitor (`virelai>` prompt) over the serial console.
 - A graphical framebuffer with a real terminal on screen — **Road Pops**.
 - A window manager — **Driving Award** — compositing a terminal and a live
   clock overlay.
@@ -112,7 +112,7 @@ A single boot of DipshitOS gets you, in order:
 - Sound: a virtio-snd device, PCM playback from EL0, a boot chime, and a
   melody app that plays Twinkle Twinkle Little Star.
 
-![A live DipshitOS boot: the Road Pops terminal showing the boot banner and an echoed session, with the Driving Award clock overlay in the top-right corner](index.assets/screenshot.png "A live DipshitOS boot")
+![A live VirelaiOS boot: the Road Pops terminal showing the boot banner and an echoed session, with the Driving Award clock overlay in the top-right corner](index.assets/screenshot.png "A live VirelaiOS boot")
 
 *A live boot captured by the ScreenCaptureKit evidence path: Road Pops renders
 real echoed commands on screen while the Driving Award clock overlay composites
@@ -136,7 +136,7 @@ in the top-right corner.*
 
 ## Who this is for
 
-Someone who looks at an operating system called *DipshitOS* and still wants to
+Someone who looks at an operating system called *VirelaiOS* and still wants to
 know how the MMU handoff works, how the compositor repaints, or how a DHCP
 lease is renewed — and who appreciates that the answer comes with a gate and a
 claim number instead of a screenshot and a shrug.

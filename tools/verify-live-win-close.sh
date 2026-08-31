@@ -23,7 +23,7 @@
 #
 # Run isolation (#523 item 2 / issue #528, claim 5069): private stacked
 # disk + EFI vars + serial log + screen captures under $RUN_DIR;
-# DIPSHIT_GATE_SUFFIX/_KEEP_RUN supported.
+# VIRELAI_GATE_SUFFIX/_KEEP_RUN supported.
 #
 # Class B — Apple silicon + VZ only; boots real VMs. A green CI badge proves
 # class A only and says nothing about this gate.
@@ -41,7 +41,7 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 GATE_LOG="$(art live-win-close-gate.txt)"
@@ -146,7 +146,7 @@ if [ "$RC" = 0 ] && [ "$OPEN2" = 1 ] && [ "$NO3" = 1 ] && [ "$CLOSE2" = 1 ] && \
 fi
 
 {
-    echo "DIPSHITOS live draw/window-close gate (claim 0487 follow-on, milestone six card G6) — EL0 window release on real VZ hardware"
+    echo "VIRELAIOS live draw/window-close gate (claim 0487 follow-on, milestone six card G6) — EL0 window release on real VZ hardware"
     echo "revision: $REVISION branch=$BRANCH dirty-files=$DIRTY"
     echo "phase: scripted exec of WINCLOSE.BIN (sys_win_open/fill/present/close, slots 12-15), then win + syscalls observation on the same kernel state, then a re-exec proving the freed slot is reused"
     echo "assertions: win: close ok x2, win: open id=2 x2 (never id=3), procs WINCLOSE.BIN exited status=88 x2, dui: windows=2 (window gone) + no dui[2]: row, syscalls implemented=46 with open=1/close=1 in the pre-re-exec snapshot"

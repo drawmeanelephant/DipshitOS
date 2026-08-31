@@ -7,7 +7,7 @@ tags: [architecture, syscalls, el0]
 
 # Userspace & syscalls
 
-Real EL0 user programs run under DipshitOS, loaded from the disk by `exec` and
+Real EL0 user programs run under VirelaiOS, loaded from the disk by `exec` and
 scheduled as processes. The syscall boundary is a frozen, numbered ABI.
 
 ## The ABI (ADR 0007)

@@ -20,7 +20,7 @@
 #   * STILL INDETERMINATE: no bracket and no bytes (transport never armed).
 #
 # Mechanism: build with -Dpreexit-tx=true (a fixed line
-# "DIPSHITOS PREEXIT VIRTIO TX" is TX'd through the SAME virtio transport
+# "VIRELAIOS PREEXIT VIRTIO TX" is TX'd through the SAME virtio transport
 # -- same device, BAR, capability decoding, negotiated features, TX queue,
 # desc/avail/used rings, 16-bit notify -- before ExitBootServices), boot in
 # a VZ VM, and check vm-serial.log for the exact string while reading the
@@ -73,7 +73,7 @@ rm -f artifacts/efi-vars.bin
 set +e
 host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log \
     --dump-marker artifacts/preexit-marker-dump.txt --timeout 25 \
-    --expect "DIPSHITOS PREEXIT VIRTIO TX" \
+    --expect "VIRELAIOS PREEXIT VIRTIO TX" \
     > artifacts/preexit-tx-run.txt 2>&1
 RUNNER_RC=$?
 set -e
@@ -100,7 +100,7 @@ LOADER_TXT="$(python3 image/mkfat32.py --cat-file /LOADER.TXT artifacts/disk.img
 printf '%s\n' "$LOADER_TXT"
 
 # --- interpretation -------------------------------------------------------------
-if grep -qF -- "DIPSHITOS PREEXIT VIRTIO TX" artifacts/vm-serial.log; then
+if grep -qF -- "VIRELAIOS PREEXIT VIRTIO TX" artifacts/vm-serial.log; then
     echo
     echo "VERDICT: A. PRE-EXIT TX WORKS -- OBSERVED (the exact diagnostic string reached vm-serial.log while Boot Services and the firmware address space were still active)"
     echo "  The same device/BAR/features/queue/desc-avail-used/notify communicate pre-exit; the residual failure is somewhere across ExitBootServices/MMU/post-exit access."

@@ -1,4 +1,4 @@
-//! DipshitOS M32 WMS3+WMS5 — WND.BIN, the long-lived EL0 window-manager SERVER
+//! VirelaiOS M32 WMS3+WMS5 — WND.BIN, the long-lived EL0 window-manager SERVER
 //! (issues #623/#625).
 //!
 //! WMS3 (issue #623): REGISTERs via `sys_wmctl` (slot 65, cmd 1) at startup,

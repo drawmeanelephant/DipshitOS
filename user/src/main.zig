@@ -1,4 +1,4 @@
-//! DipshitOS user program loaded from the ESP (milestone-three card 6,
+//! VirelaiOS user program loaded from the ESP (milestone-three card 6,
 //! claim 6783; extended by card 7, claim 0635 — blocking syscalls; card
 //! 3e, claim 4636 — exec args).
 //!

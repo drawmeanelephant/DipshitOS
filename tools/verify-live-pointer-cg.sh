@@ -74,13 +74,13 @@ codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/
 # responsible process (the terminal). Report the truth; a gate cannot
 # grant TCC. CGPreflightPostEventAccess is the precise check (posting, not
 # listening).
-cat > /tmp/dipshitos-trust-probe.swift <<'EOF'
+cat > /tmp/virelaios-trust-probe.swift <<'EOF'
 import ApplicationServices
 import CoreGraphics
 print(CGPreflightPostEventAccess() && AXIsProcessTrusted() ? "1" : "0")
 EOF
-TRUST="$(swift /tmp/dipshitos-trust-probe.swift 2>/dev/null | tail -1 || echo 0)"
-rm -f /tmp/dipshitos-trust-probe.swift
+TRUST="$(swift /tmp/virelaios-trust-probe.swift 2>/dev/null | tail -1 || echo 0)"
+rm -f /tmp/virelaios-trust-probe.swift
 TRUST="${TRUST:-0}"
 echo "accessibility-trust: post=$TRUST"
 
@@ -105,7 +105,7 @@ Until then the honest result is the class-C real-mouse gate:
 
 EOF
     {
-        echo "DIPSHITOS pointer CG gate (milestone eight card U4, claim 4993 follow-on, claim 3692) -- SKIP (TRUST PRECONDITION NOT MET)"
+        echo "VIRELAIOS pointer CG gate (milestone eight card U4, claim 4993 follow-on, claim 3692) -- SKIP (TRUST PRECONDITION NOT MET)"
         echo "revision: $REVISION branch=$BRANCH dirty-files=$DIRTY"
         echo "accessibility-trust: $TRUST (the CG HID-tap post is dropped without it)"
         echo "action: grant Accessibility to the terminal in System Settings, then re-run (or use --request-trust)"
@@ -241,7 +241,7 @@ if [ "$RC" = 0 ] && [ "$READY" = 1 ] && [ "$DISTINCT_FOCUS" -ge 2 ] && \
 fi
 
 {
-    echo "DIPSHITOS pointer CG gate (milestone eight card U4, claim 4993 follow-on, claim 3692) -- the CGEventPost route drives pointer reports + focus, on real VZ (class B)"
+    echo "VIRELAIOS pointer CG gate (milestone eight card U4, claim 4993 follow-on, claim 3692) -- the CGEventPost route drives pointer reports + focus, on real VZ (class B)"
     echo "revision: $REVISION branch=$BRANCH dirty-files=$DIRTY"
     echo "accessibility-trust: $TRUST"
     echo "session: setup opens WINLOOP.BIN; the --pointer seam posts clock -> WINLOOP -> terminal clicks over route cg (global HID tap); echo pointer-cg-ready ends the scripted session"

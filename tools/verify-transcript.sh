@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# M1.5 march step 19 gate: the automated `dipshit>` transcript test.
+# M1.5 march step 19 gate: the automated `virelai>` transcript test.
 #
 # Proves the prompt + command loop without manual typing:
 #   1. `zig test kernel/src/shell.zig` must pass (the mock-fed end-to-end

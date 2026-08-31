@@ -1,4 +1,4 @@
-//! DipshitOS M33 SB5 (claim 7397) live-gate test app — SB5WM.BIN: the
+//! VirelaiOS M33 SB5 (claim 7397) live-gate test app — SB5WM.BIN: the
 //! registered-WM half of the WM compose-N + one final present proof.
 //!
 //! Registers as the WM server (slot 65 REGISTER), binds the SCANOUT writable

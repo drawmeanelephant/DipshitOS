@@ -1,4 +1,4 @@
-//! DipshitOS Generic Interrupt Controller (claims 7948/9187 — roadmap
+//! VirelaiOS Generic Interrupt Controller (claims 7948/9187 — roadmap
 //! item 5's remaining half; claim 9746 supplied the IRQ vector).
 //!
 //! Two phases, split by the ExitBootServices boundary:

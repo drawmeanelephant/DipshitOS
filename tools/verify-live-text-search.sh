@@ -25,8 +25,8 @@
 # host unit tests (notepad/file_browser test modules).
 #
 # Run isolation (#523 item 2, claim 6637): private stacked disk + EFI
-# vars + serial log per boot under $RUN_DIR. DIPSHIT_GATE_SUFFIX for
-# concurrent instances, DIPSHIT_KEEP_RUN=1 to keep the scratch dir.
+# vars + serial log per boot under $RUN_DIR. VIRELAI_GATE_SUFFIX for
+# concurrent instances, VIRELAI_KEEP_RUN=1 to keep the scratch dir.
 #
 # Class B — Apple silicon + VZ only.
 
@@ -37,7 +37,7 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 GATE_LOG="$(art live-text-search-gate.txt)"

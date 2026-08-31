@@ -1,4 +1,4 @@
-//! DipshitOS twenty-first ESP user program — FILE.BIN (Milestone 13, Card B3).
+//! VirelaiOS twenty-first ESP user program — FILE.BIN (Milestone 13, Card B3).
 //!
 //! Graphical file browser for the DATA partition (`/data/`). Browses the
 //! directory in a scrollable list, shows the selected entry's size/type, and

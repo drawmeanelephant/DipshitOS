@@ -29,7 +29,7 @@
 # Devices stay [] and every existing gate stays byte-identical.
 #
 # Run isolation (#523 item 2 / issue #528, claim 5069): private stacked
-# disk + EFI vars + serial log under $RUN_DIR; DIPSHIT_GATE_SUFFIX/_KEEP_RUN
+# disk + EFI vars + serial log under $RUN_DIR; VIRELAI_GATE_SUFFIX/_KEEP_RUN
 # supported.
 #
 # Class B -- Apple silicon + VZ only; boots a real VM.
@@ -47,7 +47,7 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 GATE_LOG="$(art live-editing-gate.txt)"
@@ -181,7 +181,7 @@ if [ "$RC" = 0 ] && [ "$ARMED" = 1 ] && [ "$ACB2" = 1 ] && [ "$DONE" = 1 ] && \
 fi
 
 {
-    echo "DIPSHITOS live editing gate (claim 1809, milestone eight card U2) — scripted chords drive history recall + cursor editing, on real VZ hardware"
+    echo "VIRELAIOS live editing gate (claim 1809, milestone eight card U2) — scripted chords drive history recall + cursor editing, on real VZ hardware"
     echo "revision: $REVISION branch=$BRANCH dirty-files=$DIRTY"
     echo "phase 1 (USB keyboard): types 'echo ab <Left> c <Enter> <Up> <Enter> echo u2done <Enter>' after the boot self-test"
     echo "phase 2 (serial bytes): the six D2 Ctrl chords — Ctrl-A/E/K/U/L/C — each proven by the command that ends up running"

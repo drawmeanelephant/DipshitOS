@@ -1,4 +1,4 @@
-# DipshitOS testing
+# VirelaiOS testing
 
 > For the current state of each verification gate (pass/fail/blocked), see
 > [`docs/status.md`](status.md). This file is the sequence and policy. The
@@ -54,7 +54,7 @@ Every verification command belongs to exactly one class (canonical inventory:
 9. Build the Swift VM runner: `swift build --package-path host/vm-runner`.
 10. Boot with Apple Virtualization.framework (Apple silicon only):
     `zig build run`. Milestone two gates on `vm-serial.log` containing the
-    exact banner `DipshitOS kernel has seized control.`, a
+    exact banner `VirelaiOS kernel has seized control.`, a
     `memory-map descriptors=0x...` line, and `kernel terminal state`. The
     pre-exit loader marker `\\BOOTED.TXT` remains required. `RC.TXT` is
     expected only for a deliberate pre-exit failure fixture, not success.
@@ -71,7 +71,7 @@ Every verification command belongs to exactly one class (canonical inventory:
     0009/0010): `bash tools/verify-marker.sh` (also `just verify-marker` /
     `zig build marker`) boots the VM and asserts the NVRAM marker ladder —
     the kernel persists each takeover stage as the EFI variable
-    `DipshitM2`, and the runner saves the ordered ladder to
+    `VirelaiM2`, and the runner saves the ordered ladder to
     `artifacts/marker-dump.txt`. The gate passes iff at least one marker
     instance is present; the final stage names the death/crash site. Claim
     0009 observed the ladder ending at `M2_MAPD!` (MMU-takeover window);
@@ -131,7 +131,7 @@ Every verification command belongs to exactly one class (canonical inventory:
     verify-live-transcript`) — boots the production image, forwards
     scripted keystrokes (`help`/`version`/`mem`/`echo`) into the guest's
     virtio receive queue after the takeover, and asserts the live
-    `dipshit>` transcript (banner, echoed commands, command output, echo
+    `virelai>` transcript (banner, echoed commands, command output, echo
     reply) in `vm-serial.log`. **Passing 2026-08-08** (3/3 boots,
     byte-identical transcripts; evidence `artifacts/live-transcript-*`).
 
@@ -156,7 +156,7 @@ Every verification command belongs to exactly one class (canonical inventory:
 |----------|-------------|----------|
 | `artifacts/inspect.txt` | `zig build inspect > artifacts/inspect.txt` | `file`, PE/COFF headers, sections, disassembly, FAT/GPT listing |
 | `artifacts/vm-serial.log` | `zig build run` | Kernel serial probe, exact banner, map hex view, and terminal marker |
-| `artifacts/efi-vars.bin` | VZ runner | Persisted EFI NVRAM; holds the `DipshitM2` marker ladder after a marker-gate run |
+| `artifacts/efi-vars.bin` | VZ runner | Persisted EFI NVRAM; holds the `VirelaiM2` marker ladder after a marker-gate run |
 | `artifacts/marker-dump.txt` | `zig build marker` / `verify-marker.sh` | Ordered M2_* NVRAM marker ladder (ADR 0004 D4 fallback) |
 | `artifacts/m2-marker-gate.txt` | `verify-marker.sh` | Full marker-gate run log (2026-08-07: ladder ends `M2_MAPD!`) |
 | `artifacts/context.md` | `zig build context` | Full deterministic project snapshot |
@@ -247,8 +247,8 @@ Every verification command belongs to exactly one class (canonical inventory:
       production image, forwards scripted keystrokes (`help`/`version`/
       `mem`/`echo rx-live-ok`) into the guest's polled virtio receive
       queue after the takeover terminal state, and asserts the live
-      `dipshit>` transcript in `vm-serial.log` — banner, echoed keystrokes,
-      `available commands:`, `dipshit-kernel` version output, `mem:` map
+      `virelai>` transcript in `vm-serial.log` — banner, echoed keystrokes,
+      `available commands:`, `virelai-kernel` version output, `mem:` map
       summary, and the `rx-live-ok` echo reply. 3/3 boots, byte-identical
       4421-byte transcripts. Evidence: `artifacts/live-transcript-*`
       (`live-transcript-gate.txt`, `live-transcript-report.txt`,

@@ -1,4 +1,4 @@
-//! DipshitOS In-Guest HTTP/1.1 Web Server — HTTPD.BIN
+//! VirelaiOS In-Guest HTTP/1.1 Web Server — HTTPD.BIN
 //!
 //! Listens for incoming TCP connections (passive open), parses HTTP/1.1 requests,
 //! serves an interactive HTML dashboard on `/`, dynamic JSON system telemetry
@@ -104,7 +104,7 @@ pub const html_dashboard: []const u8 =
     \\<head>
     \\  <meta charset="utf-8">
     \\  <meta name="viewport" content="width=device-width, initial-scale=1">
-    \\  <title>DipshitOS Control Center</title>
+    \\  <title>VirelaiOS Control Center</title>
     \\  <style>
     \\    :root { --bg: #0f172a; --card: #1e293b; --border: #334155; --text: #f8fafc; --muted: #94a3b8; --accent: #38bdf8; --green: #22c55e; --blue: #3b82f6; }
     \\    * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -136,7 +136,7 @@ pub const html_dashboard: []const u8 =
     \\<body>
     \\  <div class="container">
     \\    <header>
-    \\      <h1><span class="pulse"></span> DipshitOS Control Center</h1>
+    \\      <h1><span class="pulse"></span> VirelaiOS Control Center</h1>
     \\      <span class="badge">ONLINE &bull; PORT 8080</span>
     \\    </header>
     \\    <div class="grid">
@@ -178,7 +178,7 @@ pub const html_dashboard: []const u8 =
     \\      <a href="/APPS.TXT" class="btn btn-outline" target="_blank">View APPS.TXT</a>
     \\    </div>
     \\    <footer>
-    \\      DipshitOS v0.27.0 &bull; Freestanding Bare-Metal Operating System &bull; Built with Zig &amp; Swift
+    \\      VirelaiOS v0.27.0 &bull; Freestanding Bare-Metal Operating System &bull; Built with Zig &amp; Swift
     \\    </footer>
     \\  </div>
     \\  <script>
@@ -229,7 +229,7 @@ pub fn format_api_status(buf: []u8) []const u8 {
 
     return std.fmt.bufPrint(buf,
         \\{{
-        \\  "os": "DipshitOS",
+        \\  "os": "VirelaiOS",
         \\  "arch": "aarch64",
         \\  "version": "0.27.0",
         \\  "status": "online",
@@ -247,7 +247,7 @@ pub fn format_api_status(buf: []u8) []const u8 {
         ticks,
         freq,
         proc_count,
-    }) catch "{\n  \"os\": \"DipshitOS\",\n  \"status\": \"online\"\n}\n";
+    }) catch "{\n  \"os\": \"VirelaiOS\",\n  \"status\": \"online\"\n}\n";
 }
 
 /// Format dynamic JSON process table endpoint.
@@ -304,7 +304,7 @@ pub fn format_file_browser(buf: []u8) []const u8 {
         \\<html lang="en">
         \\<head>
         \\  <meta charset="utf-8">
-        \\  <title>DipshitOS Storage Explorer</title>
+        \\  <title>VirelaiOS Storage Explorer</title>
         \\  <style>
         \\    body { font-family: -apple-system, monospace; background: #0f172a; color: #f8fafc; padding: 32px 24px; line-height: 1.5; }
         \\    .container { max-width: 960px; margin: 0 auto; }
@@ -386,14 +386,14 @@ pub fn send_all(data: []const u8) void {
 /// Send standard HTTP response headers.
 pub fn send_headers(status_code: []const u8, content_type: []const u8, content_len: usize) void {
     var hdr_buf: [256]u8 = undefined;
-    const hdr = std.fmt.bufPrint(&hdr_buf, "HTTP/1.1 {s}\r\nServer: DipshitOS\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{ status_code, content_type, content_len }) catch "HTTP/1.1 200 OK\r\nServer: DipshitOS\r\nConnection: close\r\n\r\n";
+    const hdr = std.fmt.bufPrint(&hdr_buf, "HTTP/1.1 {s}\r\nServer: VirelaiOS\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{ status_code, content_type, content_len }) catch "HTTP/1.1 200 OK\r\nServer: VirelaiOS\r\nConnection: close\r\n\r\n";
     send_all(hdr);
 }
 
 /// Handle a single parsed HTTP request.
 pub fn handle_request(req: Request) void {
     if (req.method == .unsupported) {
-        const err_body = "HTTP/1.1 405 Method Not Allowed\r\nServer: DipshitOS\r\nContent-Length: 22\r\nConnection: close\r\n\r\n405 Method Not Allowed\n";
+        const err_body = "HTTP/1.1 405 Method Not Allowed\r\nServer: VirelaiOS\r\nContent-Length: 22\r\nConnection: close\r\n\r\n405 Method Not Allowed\n";
         send_all(err_body);
         return;
     }
@@ -439,7 +439,7 @@ pub fn handle_request(req: Request) void {
     // Static file serving from FAT32
     const clean_path = sanitize_path(req.path);
     if (clean_path == null) {
-        const err_400 = "HTTP/1.1 400 Bad Request\r\nServer: DipshitOS\r\nContent-Length: 16\r\nConnection: close\r\n\r\n400 Bad Request\n";
+        const err_400 = "HTTP/1.1 400 Bad Request\r\nServer: VirelaiOS\r\nContent-Length: 16\r\nConnection: close\r\n\r\n400 Bad Request\n";
         send_all(err_400);
         return;
     }
@@ -447,7 +447,7 @@ pub fn handle_request(req: Request) void {
     const file_path = clean_path.?;
     const fd = ui.file_open(file_path, ui.MODE_READ);
     if (fd < 0) {
-        const not_found = "<!DOCTYPE html><html><body><h1>404 Not Found</h1><p>File not found on DipshitOS.</p></body></html>\n";
+        const not_found = "<!DOCTYPE html><html><body><h1>404 Not Found</h1><p>File not found on VirelaiOS.</p></body></html>\n";
         send_headers("404 Not Found", "text/html; charset=utf-8", not_found.len);
         if (req.method == .get) {
             send_all(not_found);
@@ -458,7 +458,7 @@ pub fn handle_request(req: Request) void {
 
     const mime = mime_for_path(file_path);
     var hdr_buf: [256]u8 = undefined;
-    const hdr = std.fmt.bufPrint(&hdr_buf, "HTTP/1.1 200 OK\r\nServer: DipshitOS\r\nContent-Type: {s}\r\nConnection: close\r\n\r\n", .{mime}) catch "HTTP/1.1 200 OK\r\nServer: DipshitOS\r\nConnection: close\r\n\r\n";
+    const hdr = std.fmt.bufPrint(&hdr_buf, "HTTP/1.1 200 OK\r\nServer: VirelaiOS\r\nContent-Type: {s}\r\nConnection: close\r\n\r\n", .{mime}) catch "HTTP/1.1 200 OK\r\nServer: VirelaiOS\r\nConnection: close\r\n\r\n";
     send_all(hdr);
 
     if (req.method == .get) {
@@ -553,7 +553,7 @@ test "httpd: mime_for_path maps known extensions" {
 test "httpd: format_api_status contains valid JSON keys" {
     var buf: [1024]u8 = undefined;
     const json = format_api_status(&buf);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"os\": \"DipshitOS\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"os\": \"VirelaiOS\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"uptime_seconds\":") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"procs_count\":") != null);
 }

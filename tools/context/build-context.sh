@@ -27,7 +27,7 @@ fence() {
 section() { printf '\n## %s\n\n' "$1"; }
 
 {
-    section "DipshitOS project context"
+    section "VirelaiOS project context"
     printf 'Generated: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     printf 'Host: %s, macOS %s\n' "$(uname -m)" "$(sw_vers -productVersion 2>/dev/null || echo unknown)"
     printf 'Zig: %s\n' "$(zig version 2>/dev/null || echo 'not found')"

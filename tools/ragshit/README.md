@@ -8,7 +8,7 @@ from.
 
 The name is a joke. The retrieval is not.
 
-The tool ships inside the DipshitOS repository at `tools/ragshit/`, but it
+The tool ships inside the VirelaiOS repository at `tools/ragshit/`, but it
 indexes any local Git checkout — pass any repository path to the
 subcommands.
 
@@ -35,7 +35,7 @@ Python 3.12+ recommended (3.9/3.10 work with a built-in minimal TOML
 reader). No third-party dependencies — standard library only.
 
 ```bash
-# from the DipshitOS repo root (the tool lives at tools/ragshit/):
+# from the VirelaiOS repo root (the tool lives at tools/ragshit/):
 ./tools/ragshit/ragshit --version
 
 # from inside the tool checkout, without installing anything:
@@ -69,7 +69,7 @@ resolved to the **repository root** (via `git rev-parse --show-toplevel`).
 ```
 
 `just ragshit <subcommand> <args>` aliases the launcher from the repo root
-(see the DipshitOS `justfile`). `ragshit query` optionally explains its
+(see the VirelaiOS `justfile`). `ragshit query` optionally explains its
 scoring:
 
 ```bash
@@ -139,7 +139,7 @@ contains only content and metadata from that repository.
   by default.
 * Only the root `.gitignore` is honored; nested `.gitignore` files in
   subdirectories are not read.
-* Retrieval quality is validated by acceptance tests against DipshitOS,
+* Retrieval quality is validated by acceptance tests against VirelaiOS,
   not by LLM judgment.
 
 ## Relationship to Git

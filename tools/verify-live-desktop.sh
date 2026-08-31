@@ -21,8 +21,8 @@
 # Run isolation (#523 item 2 / issue #528, claim 5069; fleet remainder
 # claim 2259): private stacked disk (pristine-per-boot overlay), EFI var
 # store, serial log, and screen captures under $RUN_DIR — concurrent
-# instances cannot clobber each other. Set DIPSHIT_GATE_SUFFIX=_alt for
-# distinct canonical evidence names; DIPSHIT_KEEP_RUN=1 keeps the scratch
+# instances cannot clobber each other. Set VIRELAI_GATE_SUFFIX=_alt for
+# distinct canonical evidence names; VIRELAI_KEEP_RUN=1 keeps the scratch
 # dir. Nothing here asserts CROSS-BOOT persistence, so the throwaway
 # overlay is the right disk mode (the shell-history FAT write lands in
 # the overlay and is discarded).
@@ -38,7 +38,7 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 GATE_LOG="$(art live-desktop-gate.txt)"

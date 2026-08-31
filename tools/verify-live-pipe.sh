@@ -23,9 +23,9 @@
 # overlay), a private EFI var store (recreated fresh per boot, as the
 # pre-isolation gate did), and a private serial log under $RUN_DIR — two
 # concurrent instances cannot clobber each other's disks, NVRAM, or
-# evidence. Set DIPSHIT_GATE_SUFFIX=_alt to give this instance its own
+# evidence. Set VIRELAI_GATE_SUFFIX=_alt to give this instance its own
 # canonical evidence names (two simultaneous instances MUST differ), and
-# DIPSHIT_KEEP_RUN=1 to keep the scratch dir.
+# VIRELAI_KEEP_RUN=1 to keep the scratch dir.
 #
 # Class B — Apple silicon + VZ only.
 
@@ -36,7 +36,7 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 GATE_LOG="$(art live-pipe-gate.txt)"
@@ -91,7 +91,7 @@ run_one() {
     local SERIAL_BYTES BANNER=0 PIPE=0 LS=0 CHAIN=0 DONE=0
     SERIAL_BYTES=$(wc -c < "$SER" 2>/dev/null | tr -d ' ')
     if [ -f "$SER" ]; then
-        grep -qF "DipshitOS kernel" "$SER" && BANNER=1
+        grep -qF "VirelaiOS kernel" "$SER" && BANNER=1
         # The pipe proof: a line that is EXACTLY "pipe-left-marker" can
         # only come from `type` echoing the pipe content (the typed line
         # is "echo pipe-left-marker | type", not an exact match).

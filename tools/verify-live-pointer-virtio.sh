@@ -42,7 +42,7 @@
 #   bash tools/verify-live-pointer-virtio.sh
 #
 # Run isolation (#523 item 2, claim 6637): private stacked disk + EFI vars
-# + serial log under $RUN_DIR; DIPSHIT_GATE_SUFFIX/_KEEP_RUN supported.
+# + serial log under $RUN_DIR; VIRELAI_GATE_SUFFIX/_KEEP_RUN supported.
 #
 # Evidence: artifacts/live-pointer-virtio-gate.txt (full output),
 # artifacts/live-pointer-virtio-report.txt (detail),
@@ -56,7 +56,7 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 GATE_LOG="$(art live-pointer-virtio-gate.txt)"
@@ -200,7 +200,7 @@ if [ "$RC" = 0 ] && [ "$ARMED" = 1 ] && [ "$PTR_GT0" = 1 ] && [ "$DISTINCT_FOCUS
 fi
 
 {
-    echo "DIPSHITOS pointer-virtio gate (claim 9367, issue #523 item 3 / #151) — injected pointer reports drive click-to-focus over the custom-virtio INPUT queue, HEADLESS, on real VZ hardware"
+    echo "VIRELAIOS pointer-virtio gate (claim 9367, issue #523 item 3 / #151) — injected pointer reports drive click-to-focus over the custom-virtio INPUT queue, HEADLESS, on real VZ hardware"
     echo "revision: $REVISION branch=$BRANCH dirty-files=$DIRTY"
     echo "session: --screen (GPU attached, no display window, no USB HID devices); script opens WINLOOP.BIN; --pointer-virtio enqueues kind-2 absolute-pointer messages after \"winloop: present ok\" (clock -> WINLOOP -> terminal); script2 runs \`input\` and echoes ptr-cv-done"
     echo "assertions: input armed=0 (nothing USB attached) yet ptr-reports>0; >=2 distinct dui pointer-focus lines; q3 armed + q2 push echo green in the same boot; host seq/down/up/complete evidence over transport=cv-input; four-queue attach; negative: no PTR-EVT/window-key synthesis lines"

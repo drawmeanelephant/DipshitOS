@@ -40,9 +40,9 @@
 # overlay), a private EFI var store (recreated fresh per boot, as the
 # pre-isolation gate did), and a private serial log under $RUN_DIR — two
 # concurrent instances cannot clobber each other's disks, NVRAM, or
-# evidence. Set DIPSHIT_GATE_SUFFIX=_alt to give this instance its own
+# evidence. Set VIRELAI_GATE_SUFFIX=_alt to give this instance its own
 # canonical evidence names (two simultaneous instances MUST differ), and
-# DIPSHIT_KEEP_RUN=1 to keep the scratch dir.
+# VIRELAI_KEEP_RUN=1 to keep the scratch dir.
 #
 # Class B — Apple silicon + VZ only; boots a real VM. A green CI badge
 # proves class A only and says nothing about this gate.
@@ -63,7 +63,7 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 GATE_LOG="$(art live-tasks-gate.txt)"
@@ -126,7 +126,7 @@ run_one() {
     local BANNER=0 INTERRUPTS=0 CMD=0 SHELL_ROW=0 WORKER_ROW=0 WORKER_ADV=0 WORKER_REPORT=0 ECHO=0 HEARTBEAT=0 SWITCHES=0
     [ -f "$SER" ] || { SERIAL_BYTES=0; }
     if [ -f "$SER" ]; then
-        grep -qF -- "DipshitOS kernel has seized control." "$SER" && BANNER=1
+        grep -qF -- "VirelaiOS kernel has seized control." "$SER" && BANNER=1
         grep -qF -- "interrupts: gic=" "$SER" && INTERRUPTS=1
         grep -qF -- "tasks: enabled=1" "$SER" && CMD=1
         grep -qE -- "shell +saves=[0-9]+ resumes=[0-9]+ advances=0" "$SER" && SHELL_ROW=1
@@ -156,7 +156,7 @@ run_one() {
 
 : > "$REPORT"
 {
-    echo "DIPSHITOS live-tasks gate (claim 5275) — tick-driven round-robin: shell + worker advance across timer ticks on VZ"
+    echo "VIRELAIOS live-tasks gate (claim 5275) — tick-driven round-robin: shell + worker advance across timer ticks on VZ"
     echo "revision: $REVISION branch=$BRANCH boots=$BOOTS dirty-files=$DIRTY"
     echo "script: $SCRIPT (tasks / echo rx-tasks-ok; expect the worker report 'tasks worker advances=')"
     echo "date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"

@@ -1,4 +1,4 @@
-//! DipshitOS Shared UI Library (LIBUI.SO, Milestone 30 Dynamic Linking, ADR 0011).
+//! VirelaiOS Shared UI Library (LIBUI.SO, Milestone 30 Dynamic Linking, ADR 0011).
 //!
 //! Freestanding shared library implementing GUI window primitives, micro-widgets,
 //! theme styling, and event polling with zero libc/POSIX dependencies.

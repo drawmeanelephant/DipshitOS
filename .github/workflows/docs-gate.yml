@@ -81,7 +81,7 @@ jobs:
           boris/zig-out/bin/boris validate \
             --input site \
             --target public=dist \
-            --target-layout public=themes/dipshitos/layouts/main.html \
+            --target-layout public=themes/virelaios/layouts/main.html \
             --sitemap \
             --pages-base-url https://drawmeanelephant.github.io/DipshitOS \
             --pages-origin https://drawmeanelephant.github.io \

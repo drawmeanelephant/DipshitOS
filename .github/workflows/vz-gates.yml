@@ -6,7 +6,7 @@
 # production image and asserts observed guest behavior.
 #
 # Runner selection -- GitHub-hosted macOS images top out at macOS 26 and
-# DipshitOS requires macOS 27+ at runtime (docs/hardware-contract.md), so
+# VirelaiOS requires macOS 27+ at runtime (docs/hardware-contract.md), so
 # hosted runners cannot prove VZ behavior. The shards run on whatever
 # label the repository variable VZ_RUNNER_LABEL names; until an Apple
 # silicon macOS 27+ self-hosted runner is registered under that label,
@@ -65,7 +65,7 @@ jobs:
           fi
           major="$(sw_vers -productVersion | cut -d. -f1)"
           if [ "$major" -lt 27 ]; then
-            echo "::error::Runner OS is macOS $major; DipshitOS requires macOS 27+ (docs/hardware-contract.md)."
+            echo "::error::Runner OS is macOS $major; VirelaiOS requires macOS 27+ (docs/hardware-contract.md)."
             exit 1
           fi
           echo "Runner: $(sw_vers -productVersion) arm64 — VZ gates will run."

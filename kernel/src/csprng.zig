@@ -1,4 +1,4 @@
-//! DipshitOS CSPRNG (milestone four, card 1 — claim 2665).
+//! VirelaiOS CSPRNG (milestone four, card 1 — claim 2665).
 //!
 //! A freestanding, no-libc, no-heap ChaCha20 stream cipher (RFC 7539) used
 //! as the kernel's cryptographically secure pseudo-random number generator.
@@ -140,7 +140,7 @@ pub fn seed(seed_bytes: *const [seed_len]u8) void {
 /// false — this is honest, not a substitute for the real path.
 pub fn seed_fallback() void {
     var fb: [seed_len]u8 = [_]u8{0} ** seed_len;
-    const tag = "DIPSHITOS-ENTROPY-FALLBACK";
+    const tag = "VIRELAIOS-ENTROPY-FALLBACK";
     @memcpy(fb[0..tag.len], tag);
     init_state(&fb);
     seeded_flag = false;

@@ -1,4 +1,4 @@
-//! DipshitOS M33 SB6 (claim 6864) live-gate test app — SB6NEW.BIN: the
+//! VirelaiOS M33 SB6 (claim 6864) live-gate test app — SB6NEW.BIN: the
 //! SEAM-B half of the perf-payoff measurement.
 //!
 //! Renders the SAME 8x8 grid frame as SB6OLD.BIN (static + 8 dynamic

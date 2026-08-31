@@ -68,16 +68,16 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 # Run isolation (#523 item 2 / issue #528; fleet remainder claim 2259):
 # private stacked disk (pristine-per-boot overlay), EFI var store, serial
 # log, capture, and scripts under $RUN_DIR. Expectation note (#528 rot
-# class 1, claim 2259): the historical $'...ndipshit> ' script-expect
+# class 1, claim 2259): the historical $'...nvirelai> ' script-expect
 # died with M18 T5's ANSI-colored prompt (claim 0163); the run anchors on
-# the OUTPUT-ONLY done echo. Set DIPSHIT_GATE_SUFFIX=_alt for distinct
-# canonical evidence names; DIPSHIT_KEEP_RUN=1 keeps the scratch dir.
+# the OUTPUT-ONLY done echo. Set VIRELAI_GATE_SUFFIX=_alt for distinct
+# canonical evidence names; VIRELAI_KEEP_RUN=1 keeps the scratch dir.
 
 GATE_LOG="$(art live-net-dhcp-autonomous-gate.txt)"
 exec > >(tee "$GATE_LOG") 2>&1
@@ -197,7 +197,7 @@ if [ "$RC" = 0 ] && [ "$BOUND" = 1 ] && [ "$ARENEW" = 1 ] && [ "$AREBIND" = 1 ] 
 fi
 
 {
-    echo "DIPSHITOS live net-dhcp-autonomous gate (issue #119, audit follow-up 2026-08-15) — the DHCP lease lifecycle advances from the shell idle loop, on real VZ hardware"
+    echo "VIRELAIOS live net-dhcp-autonomous gate (issue #119, audit follow-up 2026-08-15) — the DHCP lease lifecycle advances from the shell idle loop, on real VZ hardware"
     echo "revision: $REVISION branch=$BRANCH dirty-files=$DIRTY"
     echo "phase: lease 100 s, --net-dhcp-respond-norenew — phase 1 binds + resolves the server MAC; phase 2 (delay 92) types NO net dhcp (a marker + a net report only); the poll must RENEW at T1=50 (REFUSED), stay RENEWING, and ESCALATE to REBINDING at T2=87 (ACKed)"
     echo "assertions: the bound lease; the renewing (T1) + rebinding (T2) transition lines; the report renew=1,rebind=1,renewed=1,expired=0; the host's refused-unicast line; the 1222-B capture (RENEW unicast dst 02:00:00:00:00:02 / dst IP + ciaddr 10.0.0.2, REBIND broadcast); the phase-2 script contains no net dhcp (premise self-check); the runner flags; the serial markers"

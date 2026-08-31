@@ -1,4 +1,4 @@
-# DipshitOS architecture
+# VirelaiOS architecture
 
 **Host identity:** this project is Apple silicon running macOS 27 or newer
 only — the guest runs under Apple's Virtualization.framework UEFI firmware
@@ -69,9 +69,9 @@ VZEFIBootLoader (macOS VZ)
         └── ConOut ──▶ virtio console ──▶ artifacts/vm-serial.log  (empty: firmware doesn't route ConOut here)
         └── loader loads \\KERNEL.BIN ──▶ kernel entry
              │  milestone two: ExitBootServices, identity-map MMU
-             │  post-exit evidence channel: NVRAM ladder (EFI var DipshitM2) ──▶ artifacts/efi-vars.bin  [observed: ladder reaches M2_READY; NVRAM console channel (claim 0015) carries post-exit console bytes — shell + commands observed]
+             │  post-exit evidence channel: NVRAM ladder (EFI var VirelaiM2) ──▶ artifacts/efi-vars.bin  [observed: ladder reaches M2_READY; NVRAM console channel (claim 0015) carries post-exit console bytes — shell + commands observed]
              └── serial probe ──▶ declared windows decoded (efivars store + debug UART, claim 0013); real console = virtio-pci @ BAR 0x100010000 ──▶ post-MMU TX fixed (claim 1517: T0SZ=16 + TLBI at the switch) ──▶ vm-serial.log has banner + memory-map + terminal state
-             └── M1.5 monitor loop (console/lineedit/tokenizer/shell) ──▶ live on VZ: TX post-MMU (claim 1517) + RX via the polled virtio receive queue (claim 6684) — host keystrokes reach the dipshit> shell
+             └── M1.5 monitor loop (console/lineedit/tokenizer/shell) ──▶ live on VZ: TX post-MMU (claim 1517) + RX via the polled virtio receive queue (claim 6684) — host keystrokes reach the virelai> shell
 ```
 
 ## Interfaces
@@ -212,7 +212,7 @@ VZEFIBootLoader (macOS VZ)
   `0x100010000`). Post-MMU transport access hung on VZ (claims
   0018/0020) until claim 1517 fixed it in production (T0SZ=16 + TLBI at
   the switch); the console is now driven post-MMU — TX is observed
-  (banner + `dipshit>` prompt in `vm-serial.log`) and **RX is live**
+  (banner + `virelai>` prompt in `vm-serial.log`) and **RX is live**
   (claim 6684: the polled virtio receive queue delivers host keystrokes;
   the RX register layout is `[observed]` for the receive queue — see
   `docs/hardware-contract.md`). The M1.5 monitor runs against a mock
@@ -241,7 +241,7 @@ VZEFIBootLoader (macOS VZ)
   0x20–0x7e, fixed BSS glyph table) plus a pure raster layer (putc/puts,
   cursor, line wrap, a bounded 128-line scrollback ring, `clear`)
   host-tested against an injectable mock canvas (golden glyphs). At boot
-  the kernel paints the SAME banner + `dipshit>` prompt the serial log
+  the kernel paints the SAME banner + `virelai>` prompt the serial log
   carries onto G1's framebuffer (fg 0x00ff00 on bg 0x101418) and pushes
   it through G1's transfer/flush unchanged (`text: boot banner
   presented`); the `text` / `text put <string>` / `text clear` monitor

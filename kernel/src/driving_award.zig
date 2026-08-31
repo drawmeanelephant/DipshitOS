@@ -3939,7 +3939,7 @@ fn draw_chrome() void {
         fill_rect(fb, stride, dlg_x, dlg_y, 2, dlg_h, 0x3b82f6);
         fill_rect(fb, stride, dlg_x + dlg_w - 2, dlg_y, 2, dlg_h, 0x3b82f6);
         // Title.
-        draw_string(fb, stride, dlg_x + 10, dlg_y + 10, "DipshitOS", clock_accent_rgb);
+        draw_string(fb, stride, dlg_x + 10, dlg_y + 10, "VirelaiOS", clock_accent_rgb);
         // Version.
         draw_string(fb, stride, dlg_x + 10, dlg_y + 26, "v0.1  (M21+M27)", 0x94a3b8);
         // Info lines.
@@ -3976,9 +3976,9 @@ pub fn render_splash(max_ticks: u64) void {
     const stride = virtio_gpu.fb_width * 4;
     // Fill background.
     fill_rect(fb, stride, 0, 0, virtio_gpu.fb_width, virtio_gpu.fb_height, wallpaper_top());
-    // Title: "DipshitOS" centered, using 8×16 font (the draw_glyph path,
+    // Title: "VirelaiOS" centered, using 8×16 font (the draw_glyph path,
     // stretched to 2× height).
-    const title = "DipshitOS";
+    const title = "VirelaiOS";
     const title_x: usize = (virtio_gpu.fb_width - title.len * 8) / 2;
     const title_y: usize = virtio_gpu.fb_height / 2 - 40;
     // Render each glyph at 2× height (simple stretch).

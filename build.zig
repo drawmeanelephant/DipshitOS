@@ -1,9 +1,9 @@
-//! DipshitOS root build system (milestone zero).
+//! VirelaiOS root build system (milestone zero).
 //!
 //! Written against Zig 0.16.0 (pinned in .zigversion). Notable 0.16
 //! differences from older tutorials that this file accounts for:
 //!   * `b.addExecutable` takes `.root_module = b.createModule(...)`.
-//!   * `build.zig.zon` uses `.name = .dipshitos`, `.fingerprint`,
+//!   * `build.zig.zon` uses `.name = .virelaios`, `.fingerprint`,
 //!     `.minimum_zig_version` and a `.paths` allowlist.
 //!   * `Step.Run` exposes settable `has_side_effects` and `stdio` fields
 //!     (verified against the installed 0.16.0 std sources).
@@ -58,12 +58,12 @@ pub fn build(b: *std.Build) void {
     // unchanged.
     const nvram_console = b.option(bool, "nvram-console", "Route kernel console TX through the NVRAM variable channel instead of the MMIO serial transport (claim 0015; for the VZ post-exit evidence gate)") orelse false;
     // Claim 0017: `-Dpreexit-tx` transmits a fixed diagnostic line
-    // ("DIPSHITOS PREEXIT VIRTIO TX") through the virtio-pci console
+    // ("VIRELAIOS PREEXIT VIRTIO TX") through the virtio-pci console
     // transport BEFORE ExitBootServices, while Boot Services and the
     // firmware address space are still active — using the same device, BAR,
     // rings and notify mechanism as the post-exit path. Default off: the
     // post-exit TX path and every existing gate are byte-identical.
-    const preexit_tx = b.option(bool, "preexit-tx", "Transmit 'DIPSHITOS PREEXIT VIRTIO TX' through the virtio-pci transport before ExitBootServices (claim 0017 diagnostic)") orelse false;
+    const preexit_tx = b.option(bool, "preexit-tx", "Transmit 'VIRELAIOS PREEXIT VIRTIO TX' through the virtio-pci transport before ExitBootServices (claim 0017 diagnostic)") orelse false;
     // Claim 0018: `-Dtx-diag` replaces the flush's coarse TXST/TXNT/TXPL
     // markers with ten ordered per-stage NVRAM markers around each
     // potentially fatal operation of the first post-exit virtio TX, and
@@ -79,24 +79,24 @@ pub fn build(b: *std.Build) void {
     // location). Same payload + same transport + same flush in every phase.
     // Default builds stay byte-identical.
     const tx_transition_a = b.option(bool, "tx-transition-a", "Phase A: one virtio TX attempt before ExitBootServices (claim 0020 diagnostic)") orelse false;
-    const tx_transition_b = b.option(bool, "tx-transition-b", "Phase B: one virtio TX attempt immediately after ExitBootServices, before DipshitOS page tables (claim 0020 diagnostic)") orelse false;
+    const tx_transition_b = b.option(bool, "tx-transition-b", "Phase B: one virtio TX attempt immediately after ExitBootServices, before VirelaiOS page tables (claim 0020 diagnostic)") orelse false;
     const tx_transition_c = b.option(bool, "tx-transition-c", "Phase C: one virtio TX attempt immediately after the identity-map install, before unrelated work (claim 0020 diagnostic)") orelse false;
     const tx_transition_d = b.option(bool, "tx-transition-d", "Phase D: one virtio TX attempt at the normal final location (claim 0020 diagnostic)") orelse false;
     // Claim 0021: firmware MMU-state capture. `-Dfw-mmu-capture` records the
     // firmware's live SCTLR/TCR/MAIR/TTBR0/TTBR1 + a bounded walk of the
     // firmware TTBR0 tables for the virtio BAR0 window and a RAM control
     // address, plus the kernel's planned values, persisted pre-exit as the
-    // ASCII variable `DipshitMmu` for a host-side firmware-vs-kernel diff.
+    // ASCII variable `VirelaiMmu` for a host-side firmware-vs-kernel diff.
     // Default off: the default build is byte-identical.
     const fw_mmu_capture = b.option(bool, "fw-mmu-capture", "Capture firmware MMU registers + a virtio BAR-window table walk pre-exit, persisted to NVRAM (claim 0021 diagnostic)") orelse false;
     // Claim 3475: `-Dprobe-var` persists the claim-0013 probe dump (the raw
     // declared-MMIO-window / config-table / ACPI evidence) as the chunked
-    // `DipshitP0..N` variables. Default OFF: the serial log carries the
+    // `VirelaiP0..N` variables. Default OFF: the serial log carries the
     // probe records, and VZ's variable store is append-per-write, so the
     // ~32 KiB persist per boot starved the store and left no room for the
     // ESP file window's `write` (claim 3475; claim 0015 already gated the
     // persist off in nvram-console builds for the same starvation).
-    const probe_var = b.option(bool, "probe-var", "Persist the claim-0013 probe dump as DipshitP* NVRAM variables (diagnostic; default off — the serial log carries the probe records, and the persist starves the variable store)") orelse false;
+    const probe_var = b.option(bool, "probe-var", "Persist the claim-0013 probe dump as VirelaiP* NVRAM variables (diagnostic; default off — the serial log carries the probe records, and the persist starves the variable store)") orelse false;
     // Claim 1517: production T0SZ is 16 (correct start level for the built
     // L0-rooted hierarchy). `-Dt0sz25` selects the legacy 25 (W=39, walk
     // starts at level 1 — the claim-6460/7896 start-level mismatch that
@@ -127,7 +127,7 @@ pub fn build(b: *std.Build) void {
     kernel_options.addOption(bool, "t0sz25", t0sz25);
     kernel_options.addOption(bool, "walk_probe", walk_probe);
     const kernel = b.addExecutable(.{
-        .name = "dipshit-kernel",
+        .name = "virelai-kernel",
         .root_module = b.createModule(.{
             .root_source_file = b.path("kernel/src/main.zig"),
             .target = kernel_target,
@@ -1857,7 +1857,7 @@ pub fn build(b: *std.Build) void {
 
     // ADR 0004 D4 fixed-memory-marker fallback (status.md gate work item 3):
     // boot the VM and save the host-side NVRAM marker ladder (the kernel
-    // persists each takeover stage as the EFI variable `DipshitM2`, which
+    // persists each takeover stage as the EFI variable `VirelaiM2`, which
     // runtime SetVariable keeps alive past ExitBootServices on VZ). The gate
     // here is the marker channel, not the serial channel: the runner exits 0
     // iff an M2_* marker was found. The hard gate lives in
@@ -1870,12 +1870,12 @@ pub fn build(b: *std.Build) void {
     marker_step.dependOn(&marker.step);
 
     // M1.5 march step 19: automated transcript test. No VM, no live RX —
-    // the shell's mock-fed e2e test asserts the exact `dipshit>` transcript
+    // the shell's mock-fed e2e test asserts the exact `virelai>` transcript
     // in-test and emits the captured bytes to artifacts/, which this gate
     // diffs byte-for-byte against the canonical fixture
     // tests/transcript-console.txt. The live vm-serial.log assertion stays
     // gated on the VZ serial gate (claim 0002).
-    const test_console_step = b.step("test-console", "Run the automated 'dipshit>' transcript test (M1.5 march step 19; class A — mock console, no VM)");
+    const test_console_step = b.step("test-console", "Run the automated 'virelai>' transcript test (M1.5 march step 19; class A — mock console, no VM)");
     const test_console = b.addSystemCommand(&.{ "bash", "tools/verify-transcript.sh" });
     test_console.has_side_effects = true;
     test_console.stdio = .inherit;
@@ -1927,7 +1927,7 @@ const run_vm_command =
     \\# message to \\BOOTED.TXT on the ESP (UEFI Simple File System).
     \\# The runner waits for the kernel's terminal marker. It accepts the
     \\# serial banner and marker as the milestone-two success signal.
-    \\host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log --screen artifacts/vm-screen.png --expect "DipshitOS kernel has seized control." --terminal-marker "kernel terminal state"
+    \\host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log --screen artifacts/vm-screen.png --expect "VirelaiOS kernel has seized control." --terminal-marker "kernel terminal state"
     \\echo
     \\echo "=== guest execution evidence: \\BOOTED.TXT on the ESP ==="
     \\EVIDENCE="$(python3 image/mkfat32.py --cat-file /BOOTED.TXT artifacts/disk.img)" || { echo "evidence missing: the guest did not write BOOTED.TXT"; exit 1; }
@@ -1940,7 +1940,7 @@ const run_vm_command =
     \\echo "=== milestone-two serial evidence ==="
     \\SERIAL="$(cat artifacts/vm-serial.log)" || { echo "serial log missing"; exit 1; }
     \\printf '%s\n' "$SERIAL"
-    \\printf '%s' "$SERIAL" | grep -q "DipshitOS kernel has seized control." || { echo "kernel banner missing from vm-serial.log"; exit 1; }
+    \\printf '%s' "$SERIAL" | grep -q "VirelaiOS kernel has seized control." || { echo "kernel banner missing from vm-serial.log"; exit 1; }
     \\printf '%s' "$SERIAL" | grep -q "memory-map descriptors=0x" || { echo "kernel memory-map print missing from vm-serial.log"; exit 1; }
     \\printf '%s' "$SERIAL" | grep -q "kernel terminal state" || { echo "kernel terminal state missing from vm-serial.log"; exit 1; }
     \\echo "run: milestone-two takeover observed (serial banner, memory-map view, terminal state)"
@@ -2016,7 +2016,7 @@ const marker_vm_command =
     \\# store is append-per-write and survives across runs otherwise).
     \\rm -f artifacts/efi-vars.bin
     \\set +e
-    \\host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log --dump-marker artifacts/marker-dump.txt --timeout 25 --expect "DipshitOS kernel has seized control." --terminal-marker "kernel terminal state"
+    \\host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log --dump-marker artifacts/marker-dump.txt --timeout 25 --expect "VirelaiOS kernel has seized control." --terminal-marker "kernel terminal state"
     \\RUNNER_RC=$?
     \\set -e
     \\echo
@@ -2070,7 +2070,7 @@ const preexit_tx_vm_command =
     \\# Fresh variable store so the ladder bracket is exactly this run's writes.
     \\rm -f artifacts/efi-vars.bin
     \\set +e
-    \\host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log --dump-marker artifacts/preexit-marker-dump.txt --timeout 25 --expect "DIPSHITOS PREEXIT VIRTIO TX"
+    \\host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log --dump-marker artifacts/preexit-marker-dump.txt --timeout 25 --expect "VIRELAIOS PREEXIT VIRTIO TX"
     \\RUNNER_RC=$?
     \\set -e
     \\echo
@@ -2080,7 +2080,7 @@ const preexit_tx_vm_command =
     \\echo "=== vm-serial.log (artifacts/vm-serial.log) ==="
     \\cat artifacts/vm-serial.log 2>/dev/null || true
     \\echo
-    \\if grep -qF -- "DIPSHITOS PREEXIT VIRTIO TX" artifacts/vm-serial.log; then
+    \\if grep -qF -- "VIRELAIOS PREEXIT VIRTIO TX" artifacts/vm-serial.log; then
     \\  echo "PREEXIT-TX: OBSERVED in vm-serial.log (interpretation A — pre-exit TX works; the residual failure is across ExitBootServices/MMU/post-exit)"
     \\  exit 0
     \\else

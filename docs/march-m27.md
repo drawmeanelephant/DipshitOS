@@ -49,7 +49,7 @@ coordination state only.
 | G14 | Button states | [#457](https://github.com/drawmeanelephant/DipshitOS/issues/457) | ⬜ | `ui.zig` widget state enum. |
 | G15 | Confirmation dialogs for dangerous actions | [#458](https://github.com/drawmeanelephant/DipshitOS/issues/458) | ⬜ blocked | Overlaps M21 W13 (#429). Reconcile scope before claiming. |
 | G16 | Settings persistence & reset | [#459](https://github.com/drawmeanelephant/DipshitOS/issues/459) | ⬜ | `kernel/src/settings.zig`. |
-| G17 | Startup behavior | [#460](https://github.com/drawmeanelephant/DipshitOS/issues/460) | ⬜ blocked | Integration sequencing — waits on G1+G2, T14 (.dipshitrc), M21 W11 persistence. |
+| G17 | Startup behavior | [#460](https://github.com/drawmeanelephant/DipshitOS/issues/460) | ⬜ blocked | Integration sequencing — waits on G1+G2, T14 (.virelairc), M21 W11 persistence. |
 | G18 | Shutdown/restart polish | [#461](https://github.com/drawmeanelephant/DipshitOS/issues/461) | ⬜ blocked | `monitor.zig`; save hooks depend on W11's format — sequence after it merges. |
 | G19 | Crash recovery for apps | [#462](https://github.com/drawmeanelephant/DipshitOS/issues/462) | ⬜ | `tombstone.zig` + orphan cleanup (pairs with M21 W14 #430). |
 | G20 | Theme consistency | [#463](https://github.com/drawmeanelephant/DipshitOS/issues/463) | ⬜ | `settings.zig` owns theme_id; app reads are follow-ups. |

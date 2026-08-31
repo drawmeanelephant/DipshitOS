@@ -29,7 +29,7 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 GATE_LOG="$(art live-netstat-gate.txt)"
@@ -89,7 +89,7 @@ run_one() {
     local SERIAL_BYTES=0 BANNER=0 N_READY=0 N_IFACE=0 N_DHCP=0 N_TCP=0 N_UDP=0 N_ARP=0 N_CNT=0
     if [ -f "$SER" ]; then
         SERIAL_BYTES=$(wc -c < "$SER" 2>/dev/null | tr -d ' ')
-        grep -qF -- "DipshitOS kernel has seized control." "$SER" && BANNER=1
+        grep -qF -- "VirelaiOS kernel has seized control." "$SER" && BANNER=1
         grep -qF -- "netstat: ready" "$SER" && N_READY=1
         grep -qF -- "netstat: section iface" "$SER" && N_IFACE=1
         grep -qF -- "netstat: section dhcp" "$SER" && N_DHCP=1

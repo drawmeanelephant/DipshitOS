@@ -148,7 +148,7 @@ run_one() {
 
 : > "$REPORT"
 {
-    echo "DIPSHITOS cvc-echo gate (claim 3141) — HOST-initiated custom-virtio round trip (host app enqueues -> guest receives -> guest replies -> host delegate observes) on VZ (macOS 27)"
+    echo "VIRELAIOS cvc-echo gate (claim 3141) — HOST-initiated custom-virtio round trip (host app enqueues -> guest receives -> guest replies -> host delegate observes) on VZ (macOS 27)"
     echo "revision: $REVISION branch=$BRANCH boots=$BOOTS dirty-files=$DIRTY"
     echo "script: $SCRIPT (pci / echo cvc-shell-ok)"
     echo "host evidence source: runner stdout (CUSTOM-VIRTIO / CUSTOM-VIRTIO-PUSH lines in live-cvc-run-*.txt)"

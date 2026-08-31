@@ -1,7 +1,7 @@
-//! Dipshit Monitor command layer (Milestone 1.5, commands & personality).
+//! Virelai Monitor command layer (Milestone 1.5, commands & personality).
 //!
 //! A reusable, host-testable command registry for the future interactive
-//! monitor (`dipshit>`). It depends only on the console abstraction
+//! monitor (`virelai>`). It depends only on the console abstraction
 //! (`console.zig`), the handoff-v2 contract (`handoff.zig`), and the
 //! captured EFI map view (`memmap.zig`); it never touches hardware, so it
 //! runs unchanged under `zig test` against a mock console and, later,
@@ -768,7 +768,7 @@ fn cmd_help(m: *Monitor, args: []const []const u8) ExecError {
 
 fn cmd_about(m: *Monitor, args: []const []const u8) ExecError {
     _ = args;
-    m.console.print_line("DipshitOS is a from-scratch AArch64 operating system.");
+    m.console.print_line("VirelaiOS is a from-scratch AArch64 operating system.");
     m.console.print_line("Written in freestanding Zig: no libc, no POSIX.");
     m.console.print_line("Hosted under Apple Virtualization.framework on Apple silicon.");
     m.console.print_line("Core subsystems: identity-map MMU, GICv3 PPI timer, round-robin");
@@ -781,7 +781,7 @@ fn cmd_about(m: *Monitor, args: []const []const u8) ExecError {
 
 fn cmd_welcome(m: *Monitor, args: []const []const u8) ExecError {
     _ = args;
-    m.console.print_line("Welcome to DipshitOS! Here is a quick tour to get you oriented:");
+    m.console.print_line("Welcome to VirelaiOS! Here is a quick tour to get you oriented:");
     m.console.print_line("  1. Discovery: Type 'help' to see grouped commands, or 'help <cmd>' / 'help <topic>' for details.");
     m.console.print_line("  2. System Info: Type 'version', 'uname', or 'about' for architectural details.");
     m.console.print_line("  3. Tasks & Procs: Type 'procs' to view active processes or 'tasks' for scheduler states.");
@@ -803,10 +803,10 @@ fn cmd_sysinfo(m: *Monitor, args: []const []const u8) ExecError {
     const rp_rep = road_pops.report();
     const in_rep = input.report();
 
-    m.console.print_line("sysinfo: DipshitOS AArch64 support snapshot");
+    m.console.print_line("sysinfo: VirelaiOS AArch64 support snapshot");
 
     // System & Handoff
-    m.console.puts("  system:     kernel=dipshit-kernel handoff=v2 status=");
+    m.console.puts("  system:     kernel=virelai-kernel handoff=v2 status=");
     if (handoff.validate(h) == .none) {
         m.console.print_line("valid");
     } else {
@@ -924,7 +924,7 @@ fn cmd_sysinfo(m: *Monitor, args: []const []const u8) ExecError {
 
 fn cmd_version(m: *Monitor, args: []const []const u8) ExecError {
     _ = args;
-    m.console.print_line("dipshit-kernel");
+    m.console.print_line("virelai-kernel");
     m.console.print_line("milestone-two kernel proper (ADR 0004)");
     m.console.print_line("handoff ABI v2");
     m.console.print_line("build label: m1.5 commands & personality (mock console)");
@@ -933,7 +933,7 @@ fn cmd_version(m: *Monitor, args: []const []const u8) ExecError {
 
 fn cmd_uname(m: *Monitor, args: []const []const u8) ExecError {
     _ = args;
-    m.console.print_line("DipshitOS aarch64");
+    m.console.print_line("VirelaiOS aarch64");
     m.console.print_line("freestanding kernel; no POSIX compatibility");
     return .none;
 }
@@ -3362,7 +3362,7 @@ fn write_shutdown_marker(reason: []const u8) void {
     var buf: [128]u8 = undefined;
     var pos: usize = 0;
 
-    const header = "DipshitOS Shutdown\n";
+    const header = "VirelaiOS Shutdown\n";
     @memcpy(buf[0..header.len], header);
     pos = header.len;
 
@@ -5683,7 +5683,7 @@ fn cmd_shortcuts(m: *Monitor, args: []const []const u8) ExecError {
     _ = args;
     m.console.print_line("Keyboard Shortcut Reference:");
     m.console.print_line("  Global:");
-    m.console.print_line("    Ctrl+Shift+A   About DipshitOS dialog");
+    m.console.print_line("    Ctrl+Shift+A   About VirelaiOS dialog");
     m.console.print_line("    Ctrl+Shift+/   Display this shortcut reference");
     m.console.print_line("    Alt+Tab        Cycle open windows (Hold Alt, press Tab/Shift+Tab)");
     m.console.print_line("    Alt+F4         Close active window");
@@ -6965,12 +6965,12 @@ pub const BootMessages = struct {
     var ready = false;
     pub fn messages() []const []const u8 {
         if (!ready) {
-            storage[0] = "DipshitOS: the elephant has left the building.";
-            storage[1] = "DipshitOS: 42 beans, zero dignity.";
-            storage[2] = "DipshitOS: memory is a map, not a territory.";
-            storage[3] = "DipshitOS: no libc was harmed in the making of this kernel.";
-            storage[4] = "DipshitOS: terminal loop, meet the monitor.";
-            storage[5] = "DipshitOS: from scratch, with love and beans.";
+            storage[0] = "VirelaiOS: the elephant has left the building.";
+            storage[1] = "VirelaiOS: 42 beans, zero dignity.";
+            storage[2] = "VirelaiOS: memory is a map, not a territory.";
+            storage[3] = "VirelaiOS: no libc was harmed in the making of this kernel.";
+            storage[4] = "VirelaiOS: terminal loop, meet the monitor.";
+            storage[5] = "VirelaiOS: from scratch, with love and beans.";
             ready = true;
         }
         return &storage;
@@ -6986,7 +6986,7 @@ pub const BootMessages = struct {
 };
 
 /// Banner text the later shell-core stream prints at boot. Deliberately
-/// does not print "DIPSHITOS 0.1" (the repository defines no release
+/// does not print "VIRELAIOS 0.1" (the repository defines no release
 /// number) or a hardcoded "256 MiB detected" (memory must be derived from
 /// the captured map — `mem` does exactly that).
 /// Arc5 #244: read /data/SHUTDOWN.TXT and print the last shutdown reason
@@ -7020,7 +7020,7 @@ fn show_last_shutdown(m: *Monitor) void {
 }
 
 pub fn banner(m: *Monitor) void {
-    m.console.print_line("DipshitOS - AArch64 firmware-assisted kernel monitor");
+    m.console.print_line("VirelaiOS - AArch64 firmware-assisted kernel monitor");
     m.console.puts(BootMessages.pick(m.state.handoff.image_handle));
     m.console.puts("\n");
     m.console.print_line("motd: aarch64 el1 kernel live; scheduler, uaccess, fs, net, gfx, xhci armed.");
@@ -7887,13 +7887,13 @@ test "monitor: identity commands produce fixed output" {
 
     try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"version"}));
     try std.testing.expectEqualStrings(
-        "dipshit-kernel\nmilestone-two kernel proper (ADR 0004)\nhandoff ABI v2\nbuild label: m1.5 commands & personality (mock console)\n",
+        "virelai-kernel\nmilestone-two kernel proper (ADR 0004)\nhandoff ABI v2\nbuild label: m1.5 commands & personality (mock console)\n",
         env.mock.contents(),
     );
     env.mock.reset();
 
     try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"uname"}));
-    try std.testing.expectEqualStrings("DipshitOS aarch64\nfreestanding kernel; no POSIX compatibility\n", env.mock.contents());
+    try std.testing.expectEqualStrings("VirelaiOS aarch64\nfreestanding kernel; no POSIX compatibility\n", env.mock.contents());
     env.mock.reset();
 
     try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"about"}));
@@ -7907,7 +7907,7 @@ test "monitor: identity commands produce fixed output" {
 
     try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"welcome"}));
     const tour_out = env.mock.contents();
-    try std.testing.expect(std.mem.indexOf(u8, tour_out, "Welcome to DipshitOS!") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tour_out, "Welcome to VirelaiOS!") != null);
     try std.testing.expect(std.mem.indexOf(u8, tour_out, "1. Discovery: Type 'help'") != null);
     try std.testing.expect(std.mem.indexOf(u8, tour_out, "docs/") != null);
     env.mock.reset();
@@ -7918,8 +7918,8 @@ test "monitor: identity commands produce fixed output" {
 
     try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"sysinfo"}));
     const sys_out = env.mock.contents();
-    try std.testing.expect(std.mem.indexOf(u8, sys_out, "sysinfo: DipshitOS AArch64 support snapshot") != null);
-    try std.testing.expect(std.mem.indexOf(u8, sys_out, "kernel=dipshit-kernel handoff=v2 status=valid") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sys_out, "sysinfo: VirelaiOS AArch64 support snapshot") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sys_out, "kernel=virelai-kernel handoff=v2 status=valid") != null);
     try std.testing.expect(std.mem.indexOf(u8, sys_out, "arch=aarch64") != null);
     try std.testing.expect(std.mem.indexOf(u8, sys_out, "descriptors=") != null);
     try std.testing.expect(std.mem.indexOf(u8, sys_out, "scheduler:") != null);
@@ -7938,7 +7938,7 @@ test "monitor: identity commands produce fixed output" {
     env.mock.reset();
 
     try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "settings", "get", "hostname" }));
-    try std.testing.expectEqualStrings("settings: hostname=dipshit\n", env.mock.contents());
+    try std.testing.expectEqualStrings("settings: hostname=virelai\n", env.mock.contents());
     env.mock.reset();
 
     try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "settings", "set", "hostname", "testnode" }));
@@ -8548,7 +8548,7 @@ test "monitor: banner is deterministic and avoids invented claims" {
     var mon = env.monitor();
     banner(&mon);
     const out = env.mock.contents();
-    try std.testing.expect(std.mem.indexOf(u8, out, "DipshitOS - AArch64 firmware-assisted kernel monitor") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "VirelaiOS - AArch64 firmware-assisted kernel monitor") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, BootMessages.messages()[2]) != null); // image_handle=2
     try std.testing.expect(std.mem.indexOf(u8, out, "Type 'help' before touching anything expensive.") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "0.1") == null);
@@ -8559,7 +8559,7 @@ test "monitor: ls lists the ESP files deterministically" {
     esp.reset();
     try std.testing.expect(esp.add_esp_entry("KERNEL.BIN", 0x88b38, ""));
     try std.testing.expect(esp.add_dir_entry("EFI"));
-    try std.testing.expect(esp.add_esp_entry("BOOTED.TXT", 0x29, "DIPSHITOS BOOTLOADER\nfirmware has agreed to cooperate\n"));
+    try std.testing.expect(esp.add_esp_entry("BOOTED.TXT", 0x29, "VIRELAIOS BOOTLOADER\nfirmware has agreed to cooperate\n"));
     try std.testing.expect(esp.add_esp_entry("HELLO.TXT", 11, "hello world"));
 
     var env = TestEnv.init();
@@ -8580,7 +8580,7 @@ test "monitor: ls lists the ESP files deterministically" {
 
 test "monitor: cat prints ESP content with honest errors" {
     esp.reset();
-    try std.testing.expect(esp.add_esp_entry("BOOTED.TXT", 0x29, "DIPSHITOS BOOTLOADER\nfirmware has agreed to cooperate\n"));
+    try std.testing.expect(esp.add_esp_entry("BOOTED.TXT", 0x29, "VIRELAIOS BOOTLOADER\nfirmware has agreed to cooperate\n"));
     try std.testing.expect(esp.add_esp_entry("KERNEL.BIN", 0x88b38, ""));
     try std.testing.expect(esp.add_dir_entry("EFI"));
     try std.testing.expect(esp.add_esp_entry("hello.txt", 11, "hello world"));
@@ -8589,7 +8589,7 @@ test "monitor: cat prints ESP content with honest errors" {
     var mon = env.monitor();
     try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "cat", "BOOTED.TXT" }));
     // The file already ends with a newline — cat prints it verbatim.
-    try std.testing.expectEqualStrings("DIPSHITOS BOOTLOADER\nfirmware has agreed to cooperate\n", env.mock.contents());
+    try std.testing.expectEqualStrings("VIRELAIOS BOOTLOADER\nfirmware has agreed to cooperate\n", env.mock.contents());
     env.mock.reset();
     // Case-insensitive lookup.
     try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "cat", "HELLO.TXT" }));

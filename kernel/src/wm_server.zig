@@ -1,4 +1,4 @@
-//! DipshitOS M32 WMS2 render-server register (issue #622) — the kernel half
+//! VirelaiOS M32 WMS2 render-server register (issue #622) — the kernel half
 //! of the ADR 0015 seam-A render-server boundary, implemented BESIDE the
 //! unchanged shim (`kernel/src/driving_award.zig`).
 //!

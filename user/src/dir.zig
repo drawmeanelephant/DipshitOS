@@ -1,4 +1,4 @@
-//! DipshitOS thirteenth ESP user program — DIR.BIN (milestone ten, card F4, claim 0510).
+//! VirelaiOS thirteenth ESP user program — DIR.BIN (milestone ten, card F4, claim 0510).
 //!
 //! Enumerates directory entries from EL0:
 //!   1. `sys_dir_list("/data", 5, buf, 8)` (slot 27).

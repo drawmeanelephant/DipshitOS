@@ -130,7 +130,7 @@ run_one() {
         all_grep "$RUN" "CUSTOM-VIRTIO: guest set DRIVER_OK" && HOST_DRIVER_OK=1
         all_grep "$RUN" "CUSTOM-VIRTIO: guest notified queue 0" && HOST_NOTIFIED_Q0=1
         all_grep "$RUN" "CUSTOM-VIRTIO: guest notified queue 1" && HOST_NOTIFIED_Q1=1
-        all_grep "$RUN" "CUSTOM-VIRTIO: dequeued 16 byte(s)" 'ascii="DIPSHITOS-CV0x42"' && HOST_DEQUEUED=1
+        all_grep "$RUN" "CUSTOM-VIRTIO: dequeued 16 byte(s)" 'ascii="VIRELAIOS-CV0x42"' && HOST_DEQUEUED=1
         # Claim 9492: the host reassembled the three read spans into the
         # full 12,340-byte payload (readBuffersByteCount matches).
         all_grep "$RUN" "CUSTOM-VIRTIO: dequeued 12340 byte(s) (read 12340)" && HOST_BIG=1
@@ -139,7 +139,7 @@ run_one() {
         all_grep "$RUN" "CUSTOM-VIRTIO: returned element" && HOST_RETURNED=1
     fi
     if [ -f "$SER" ]; then
-        all_grep "$SER" "cvspike: init ok" "cvspike: dev=" 'cvspike: payload="DIPSHITOS-CV0x42"' && GUEST_READY=1
+        all_grep "$SER" "cvspike: init ok" "cvspike: dev=" 'cvspike: payload="VIRELAIOS-CV0x42"' && GUEST_READY=1
         # Claim 9737: the feature report structure (feat/acc words, the
         # per-feature flags, and the negotiated kick width).
         all_grep "$SER" "cvspike: feat=0x" " acc=0x" " nd=" " al=" " notify=" && GUEST_FEAT=1
@@ -179,7 +179,7 @@ run_one() {
 
 : > "$REPORT"
 {
-    echo "DIPSHITOS custom-virtio gate (claims 0828/4374/9492/9737/4837) — queue transport + used-ring IRQ + ring allocator + multi-queue + multi-descriptor payloads + feature negotiation + log transport on VZ (macOS 27)"
+    echo "VIRELAIOS custom-virtio gate (claims 0828/4374/9492/9737/4837) — queue transport + used-ring IRQ + ring allocator + multi-queue + multi-descriptor payloads + feature negotiation + log transport on VZ (macOS 27)"
     echo "revision: $REVISION branch=$BRANCH boots=$BOOTS dirty-files=$DIRTY"
     echo "script: $SCRIPT (pci / echo cvspike-shell-ok; expect the cvspike report in the serial log)"
     echo "host evidence source: runner stdout (CUSTOM-VIRTIO lines in live-cvspike-run-*.txt)"

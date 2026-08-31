@@ -1,4 +1,4 @@
-//! DipshitOS bounded per-process event queue (Milestone 9, card E1 — claim 7670).
+//! VirelaiOS bounded per-process event queue (Milestone 9, card E1 — claim 7670).
 //!
 //! Provides fixed-capacity in-memory event FIFOs for EL0 processes (ADR 0009):
 //! - 16 events per process slot (`max_events = 16`).

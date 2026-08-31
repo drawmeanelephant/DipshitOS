@@ -41,9 +41,9 @@
 # overlay), a private EFI var store (recreated fresh per boot, as the
 # pre-isolation gate did), and a private serial log under $RUN_DIR — two
 # concurrent instances cannot clobber each other's disks, NVRAM, or
-# evidence. Set DIPSHIT_GATE_SUFFIX=_alt to give this instance its own
+# evidence. Set VIRELAI_GATE_SUFFIX=_alt to give this instance its own
 # canonical evidence names (two simultaneous instances MUST differ), and
-# DIPSHIT_KEEP_RUN=1 to keep the scratch dir.
+# VIRELAI_KEEP_RUN=1 to keep the scratch dir.
 #
 # Class B — Apple silicon + VZ only; boots real VMs. A green CI badge
 # proves class A only and says nothing about this gate.
@@ -61,7 +61,7 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 GATE_LOG="$(art live-net-tx-gate.txt)"
@@ -129,7 +129,7 @@ run_one() {
     local tag="$1" script="$2" capture="$3"
     rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial-$tag.log" "$capture"
     set +e
-        # Rot class 1 (#528): the colored prompt killed '<marker>\ndipshit> '
+        # Rot class 1 (#528): the colored prompt killed '<marker>\nvirelai> '
         # anchors; this marker reply is output-only and last.
     host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
         --serial "$RUN_DIR/vm-serial-$tag.log" \
@@ -167,7 +167,7 @@ run_one() {
 
 : > "$REPORT"
 {
-    echo "DIPSHITOS live virtio-net TX gate (claim 1373, milestone five card N1) — transport + TX on real VZ hardware"
+    echo "VIRELAIOS live virtio-net TX gate (claim 1373, milestone five card N1) — transport + TX on real VZ hardware"
     echo "revision: $REVISION branch=$BRANCH dirty-files=$DIRTY"
     echo "phase 1: net + netsend 32 -> host capture must be byte-exactly the 46-byte known frame"
     echo "phase 2: netsend 32 / 32 / 3000 -> ring reuse + honest truncation (46 + 46 + 1514 bytes)"

@@ -1,4 +1,4 @@
-//! DipshitOS MMU (claim 0023 split, extended by claim 5804 — per-task
+//! VirelaiOS MMU (claim 0023 split, extended by claim 5804 — per-task
 //! user address spaces).
 //!
 //! Page-table construction, attributes, table allocation, D-cache

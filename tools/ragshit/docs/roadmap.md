@@ -4,7 +4,7 @@
 
 Implemented: repository discovery, parsing and chunking, SQLite index
 with FTS5 (LIKE fallback), hybrid Git-aware ranking, Markdown/JSONL
-bundles, the full CLI, tests, and DipshitOS acceptance checks.
+bundles, the full CLI, tests, and VirelaiOS acceptance checks.
 
 Explicitly excluded from milestone zero: real embeddings, LLM calls,
 autonomous agents, daemon mode, web UI, editor extension, remote
@@ -27,7 +27,7 @@ Steps implied by that milestone:
    pipeline is untouched.
 3. Add an optional similarity signal to `ranking.py`, weighted far below
    the lexical signals (seasoning, not soup).
-4. Add a comparison harness that runs the DipshitOS acceptance queries
+4. Add a comparison harness that runs the VirelaiOS acceptance queries
    against lexical-only and hybrid, reporting exact score changes and
    whether any expected path moved.
 5. Do not ship a provider that requires a network connection before the

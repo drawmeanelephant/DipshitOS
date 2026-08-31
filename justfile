@@ -1,4 +1,4 @@
-# DipshitOS command aliases.
+# VirelaiOS command aliases.
 # Requires: just (https://github.com/casey/just)
 # All recipes simply delegate to the Zig build system.
 #
@@ -112,7 +112,7 @@ build:
 test:
     bash tools/verify-unit-tests.sh
 
-# Run the automated dipshit> transcript test — mock console, no VM (class A; M1.5 march step 19)
+# Run the automated virelai> transcript test — mock console, no VM (class A; M1.5 march step 19)
 test-console:
     zig build test-console
 
@@ -206,32 +206,32 @@ refresh-indexes:
 
 # Create an isolated per-agent checkout (issue #523 item 1; claim 4928):
 #   just new-agent buffy m18-t16-scripting
-# → worktree at ../dipshitos-<name>, branch agent/<name>/<slug> off origin/main.
+# → worktree at ../virelaios-<name>, branch agent/<name>/<slug> off origin/main.
 # Each worktree has its own .build/ and artifacts/, so concurrent agents
 # never contend for build caches or live VM gate files. Claim your work
 # INSIDE the new worktree (docs/claims/TEMPLATE.md), not from the main one.
 new-agent NAME SLUG:
-    @test ! -e "../dipshitos-{{NAME}}" \
-        || { echo "error: ../dipshitos-{{NAME}} already exists (just resume-agent {{NAME}} <branch>?)"; exit 1; }
+    @test ! -e "../virelaios-{{NAME}}" \
+        || { echo "error: ../virelaios-{{NAME}} already exists (just resume-agent {{NAME}} <branch>?)"; exit 1; }
     git fetch -q origin
     @git show-ref --verify -q "refs/heads/agent/{{NAME}}/{{SLUG}}" \
         && { echo "error: branch agent/{{NAME}}/{{SLUG}} already exists — use: just resume-agent {{NAME}} agent/{{NAME}}/{{SLUG}}"; exit 1; } || true
-    git worktree add "../dipshitos-{{NAME}}" -b "agent/{{NAME}}/{{SLUG}}" origin/main
-    @echo "→ cd ../dipshitos-{{NAME}}"
+    git worktree add "../virelaios-{{NAME}}" -b "agent/{{NAME}}/{{SLUG}}" origin/main
+    @echo "→ cd ../virelaios-{{NAME}}"
 
 # Reattach an existing branch into its own worktree:
 #   just resume-agent buffy agent/buffy/m18-t16-scripting
 resume-agent NAME BRANCH:
-    @test ! -e "../dipshitos-{{NAME}}" \
-        || { echo "error: ../dipshitos-{{NAME}} already exists"; exit 1; }
+    @test ! -e "../virelaios-{{NAME}}" \
+        || { echo "error: ../virelaios-{{NAME}} already exists"; exit 1; }
     @git show-ref --verify -q "refs/heads/{{BRANCH}}" \
         || { echo "error: no local branch {{BRANCH}} (git fetch + retry?)"; exit 1; }
-    git worktree add "../dipshitos-{{NAME}}" "{{BRANCH}}"
-    @echo "→ cd ../dipshitos-{{NAME}}"
+    git worktree add "../virelaios-{{NAME}}" "{{BRANCH}}"
+    @echo "→ cd ../virelaios-{{NAME}}"
 
 # Remove an agent worktree when its work is merged (branch kept until you delete it)
 drop-agent NAME:
-    git worktree remove "../dipshitos-{{NAME}}"
+    git worktree remove "../virelaios-{{NAME}}"
 
 # Show every checkout/worktree and its branch
 list-agents:
@@ -241,7 +241,7 @@ list-agents:
 verify-bad-handoff:
     bash tools/verify-bad-handoff.sh
 
-# Verify the live RX path + live dipshit> transcript (class B — boots a VZ VM; host scripted keystrokes reach the kernel end to end; claim 6684; Apple silicon only)
+# Verify the live RX path + live virelai> transcript (class B — boots a VZ VM; host scripted keystrokes reach the kernel end to end; claim 6684; Apple silicon only)
 verify-live-transcript:
     bash tools/verify-live-transcript.sh
 
@@ -285,7 +285,7 @@ verify-live-fs:
 verify-live-gfs:
     bash tools/verify-live-gfs.sh
 
-# Verify the live reboot/shutdown observation (class B — boots VZ VMs; a real EFI ResetSystem from a live dipshit> shell: reboot resets the machine, shutdown powers it off; claim 0527, hard gate 6; Apple silicon only)
+# Verify the live reboot/shutdown observation (class B — boots VZ VMs; a real EFI ResetSystem from a live virelai> shell: reboot resets the machine, shutdown powers it off; claim 0527, hard gate 6; Apple silicon only)
 verify-live-reboot:
     bash tools/verify-live-reboot.sh
 

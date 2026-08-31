@@ -128,7 +128,7 @@ run_one() {
         [ "$m" = "M2_TRCU!" ] && USED=1
     done
     local PAYLOAD=0
-    [ -f "artifacts/walkprobe-$tag-serial.log" ] && grep -qF -- "DIPSHITOS TRANSITION TX" "artifacts/walkprobe-$tag-serial.log" && PAYLOAD=1
+    [ -f "artifacts/walkprobe-$tag-serial.log" ] && grep -qF -- "VIRELAIOS TRANSITION TX" "artifacts/walkprobe-$tag-serial.log" && PAYLOAD=1
     local SERIAL_BYTES
     SERIAL_BYTES=$(wc -c < "artifacts/walkprobe-$tag-serial.log" 2>/dev/null | tr -d ' ')
 
@@ -146,7 +146,7 @@ for c in ${CELLS//,/ }; do
     REPORT="$(report_for "$c")"
     : > "$REPORT"
     {
-        echo "DIPSHITOS walk-probe cell $c — claim 7896"
+        echo "VIRELAIOS walk-probe cell $c — claim 7896"
         echo "revision: $REVISION branch=$BRANCH boots=$BOOTS dirty-files=$DIRTY"
         echo "flags: $(flags_for "$c")"
         echo "date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"

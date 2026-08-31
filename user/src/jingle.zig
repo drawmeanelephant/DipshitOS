@@ -1,4 +1,4 @@
-//! DipshitOS twenty-sixth ESP user program — JINGLE.BIN (Milestone 15,
+//! VirelaiOS twenty-sixth ESP user program — JINGLE.BIN (Milestone 15,
 //! Card A3, claim 7636).
 //!
 //! Headless class-B proof for the EL0 audio seam (ADR 0007 slots 42–43):

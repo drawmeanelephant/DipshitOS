@@ -1,4 +1,4 @@
-//! DipshitOS eighth ESP user program — WINLOOP.BIN (milestone six, card G6
+//! VirelaiOS eighth ESP user program — WINLOOP.BIN (milestone six, card G6
 //! per-process-window-ownership follow-on, claim 0487).
 //!
 //! WIN.BIN proves an EL0 program can OPEN a window but exits immediately, so

@@ -1,4 +1,4 @@
-//! DipshitOS ARM generic timer (claims 7948/9187 — roadmap item 5's
+//! VirelaiOS ARM generic timer (claims 7948/9187 — roadmap item 5's
 //! remaining half; delivers into claim 9746's EL1 IRQ vector via the GIC).
 //!
 //! The EL1 *physical* timer (CNTP_*): the comparator CNTP_CVAL_EL0 is

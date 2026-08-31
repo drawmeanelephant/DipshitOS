@@ -1,4 +1,4 @@
-//! DipshitOS virtio-pci graphics transport (milestone six, card G1 — claim
+//! VirelaiOS virtio-pci graphics transport (milestone six, card G1 — claim
 //! 6053).
 //!
 //! Drives the device the runner attaches as `VZVirtioGraphicsDeviceConfiguration`

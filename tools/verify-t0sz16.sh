@@ -24,7 +24,7 @@
 #   entered        M2_TRC1! present (phase C entered)
 #   returned       M2_TRC2! present (flush returned)
 #   used-advanced  M2_TRCU! present (used.idx advanced)
-#   payload        exact "DIPSHITOS TRANSITION TX" line in vm-serial.log
+#   payload        exact "VIRELAIOS TRANSITION TX" line in vm-serial.log
 #   last marker    the last persisted ladder marker
 #
 # SUPPORT FOR THE HYPOTHESIS requires ALL of: baseline reproduces the known
@@ -157,7 +157,7 @@ run_one() {
     fi
 
     local PAYLOAD=0
-    [ -f "artifacts/t0sz16-$tag-serial.log" ] && grep -qF -- "DIPSHITOS TRANSITION TX" "artifacts/t0sz16-$tag-serial.log" && PAYLOAD=1
+    [ -f "artifacts/t0sz16-$tag-serial.log" ] && grep -qF -- "VIRELAIOS TRANSITION TX" "artifacts/t0sz16-$tag-serial.log" && PAYLOAD=1
     local SERIAL_BYTES
     SERIAL_BYTES=$(wc -c < "artifacts/t0sz16-$tag-serial.log" 2>/dev/null | tr -d ' ')
 
@@ -171,7 +171,7 @@ run_one() {
 if [ "$VARIANT" = "baseline" ] || [ "$VARIANT" = "both" ]; then
     : > "$REPORT_BASE"
     {
-        echo "DIPSHITOS T0SZ start-level A/B (baseline) — claim 6460"
+        echo "VIRELAIOS T0SZ start-level A/B (baseline) — claim 6460"
         echo "revision: $REVISION branch=$BRANCH boots=$BOOTS dirty-files=$DIRTY"
         echo "flags: $BASELINE_FLAGS   (T0SZ=25, legacy start level)"
         echo "date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
@@ -189,7 +189,7 @@ fi
 if [ "$VARIANT" = "candidate" ] || [ "$VARIANT" = "both" ]; then
     : > "$REPORT_CAND"
     {
-        echo "DIPSHITOS T0SZ start-level A/B (candidate) — claim 6460"
+        echo "VIRELAIOS T0SZ start-level A/B (candidate) — claim 6460"
         echo "revision: $REVISION branch=$BRANCH boots=$BOOTS dirty-files=$DIRTY"
         echo "flags: $CANDIDATE_FLAGS   (T0SZ=16, production)"
         echo "date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"

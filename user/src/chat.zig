@@ -1,4 +1,4 @@
-//! DipshitOS Peer-to-Peer Chat — CHAT.BIN (Milestone 12, Card N3, Issue #150).
+//! VirelaiOS Peer-to-Peer Chat — CHAT.BIN (Milestone 12, Card N3, Issue #150).
 //!
 //! Graphical peer-to-peer messaging application:
 //! - Driving Award GUI windowing (`sys_win_open`, `sys_win_present`, `ui.zig`)
@@ -79,7 +79,7 @@ pub const ChatApp = struct {
         const title_rect = Rect.make(0, 0, window_w, 24);
         ui.draw_rect(win_id, title_rect, ui.COLOR_SURFACE);
         ui.draw_rect_outline(win_id, title_rect, 1, ui.COLOR_BORDER);
-        ui.draw_text(win_id, "Dipshit Chat", 8, 8, ui.COLOR_TEXT_PRIMARY);
+        ui.draw_text(win_id, "Virelai Chat", 8, 8, ui.COLOR_TEXT_PRIMARY);
         ui.draw_text(win_id, ":7777", 230, 8, ui.COLOR_TEXT_MUTED);
 
         // Chat message history container

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""DipshitOS acceptance verification for Ragshit.
+"""VirelaiOS acceptance verification for Ragshit.
 
-Runs the seven milestone acceptance queries against a local DipshitOS
+Runs the seven milestone acceptance queries against a local VirelaiOS
 checkout and checks that the expected files appear in the top-N results.
 Expectations live only here — never in the core retrieval engine.
 
@@ -52,7 +52,7 @@ EXPECTATIONS = [
     },
     {
         # Coupling note: hardware-contract stays in the top-N only because
-        # the DipshitOS repo's .ragshitignore excludes tools/ragshit/ from
+        # the VirelaiOS repo's .ragshitignore excludes tools/ragshit/ from
         # the OS index (the tool's README/sources contain this query string
         # as an example and would crowd it out). If that exclusion is
         # removed or the directory renamed, re-check this expectation.
@@ -76,7 +76,7 @@ def run_ragshit(ragshit: str, repo: str, *args: str, timeout: int = 120) -> subp
 
 def main(argv: list | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("repo", help="path to a local DipshitOS checkout")
+    parser.add_argument("repo", help="path to a local VirelaiOS checkout")
     parser.add_argument("--top", type=int, default=10, help="check the top-N results")
     parser.add_argument("--ragshit", default="", help="path to the ragshit executable (default: python -m ragshit)")
     args = parser.parse_args(argv)

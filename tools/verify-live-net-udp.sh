@@ -61,9 +61,9 @@
 # overlay), a private EFI var store (recreated fresh per boot, as the
 # pre-isolation gate did), and a private serial log under $RUN_DIR — two
 # concurrent instances cannot clobber each other's disks, NVRAM, or
-# evidence. Set DIPSHIT_GATE_SUFFIX=_alt to give this instance its own
+# evidence. Set VIRELAI_GATE_SUFFIX=_alt to give this instance its own
 # canonical evidence names (two simultaneous instances MUST differ), and
-# DIPSHIT_KEEP_RUN=1 to keep the scratch dir.
+# VIRELAI_KEEP_RUN=1 to keep the scratch dir.
 #
 # Class B — Apple silicon + VZ only; boots real VMs. A green CI badge
 # proves class A only and says nothing about this gate.
@@ -81,7 +81,7 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 GATE_LOG="$(art live-net-udp-gate.txt)"
@@ -281,7 +281,7 @@ run_one() {
     local tag="$1" script="$2" script2="$3" after2="$4" inject="$5" capture="$6" extra="$7"
     rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial-$tag.log" "$capture"
     set +e
-        # Rot class 1 (#528): the colored prompt killed '<marker>\ndipshit> '
+        # Rot class 1 (#528): the colored prompt killed '<marker>\nvirelai> '
         # anchors; this marker reply is output-only and last.
     local ARGS=()
     [ -n "$inject" ] && ARGS+=(--net-inject "$inject" --net-inject-after "net ip: ip=10.0.0.1")
@@ -360,7 +360,7 @@ run_one() {
 
 : > "$REPORT"
 {
-    echo "DIPSHITOS live UDP gate (claim 8552, milestone five card N5) — loopback, host->guest, round trip, closed-port scope check, on real VZ hardware"
+    echo "VIRELAIOS live UDP gate (claim 8552, milestone five card N5) — loopback, host->guest, round trip, closed-port scope check, on real VZ hardware"
     echo "revision: $REVISION branch=$BRANCH dirty-files=$DIRTY"
     echo "phase 1: net udp send 10.0.0.1 7000 4 (our OWN IP) -> net udp recv prints the 12-byte datagram byte-exact (src 7000, dst 7000), rx=1 tx=1 loop=1, the capture stays EMPTY (no device round trip)"
     echo "phase 2: inject 10.0.0.2:9999 -> 10.0.0.1:7000 -> net udp recv prints it byte-exact, net recv observes the frame (len 58), rx=1 drop=0"

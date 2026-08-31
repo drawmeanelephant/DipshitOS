@@ -1,4 +1,4 @@
-//! DipshitOS crash tombstone engine (Arc5 issue #243).
+//! VirelaiOS crash tombstone engine (Arc5 issue #243).
 //!
 //! Writes crash information to `/data/crash/<pid>-<name>.txt` when a process
 //! exits with status 139 (guard page fault) or other non-zero unexpected
@@ -145,7 +145,7 @@ pub fn format_tombstone(t: *const Tombstone, out: []u8) usize {
     var pos: usize = 0;
 
     // Header
-    const header = "DipshitOS Crash Tombstone\n========================\n";
+    const header = "VirelaiOS Crash Tombstone\n========================\n";
     if (header.len <= out.len) {
         @memcpy(out[0..header.len], header);
         pos = header.len;
@@ -376,7 +376,7 @@ test "tombstone: format includes header" {
     const len = format_tombstone(get(0).?, &buf);
 
     try std.testing.expect(len > 0);
-    try std.testing.expect(std.mem.indexOf(u8, buf[0..len], "DipshitOS Crash Tombstone") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..len], "VirelaiOS Crash Tombstone") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf[0..len], "CRASH.BIN") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf[0..len], "PID: 42") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf[0..len], "Exit Status: 139") != null);

@@ -20,7 +20,7 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
-SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 # Run isolation (#523 item 2 / issue #528; fleet remainder claim 2259):
@@ -28,8 +28,8 @@ art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 # log, and scripts under $RUN_DIR. The mutation walk is SELF-CLEANING
 # within its single boot (FSTEST.BIN deletes what it creates), nothing
 # asserts cross-boot persistence, so the throwaway overlay absorbs the
-# writes. Set DIPSHIT_GATE_SUFFIX=_alt for distinct canonical evidence
-# names; DIPSHIT_KEEP_RUN=1 keeps the scratch dir.
+# writes. Set VIRELAI_GATE_SUFFIX=_alt for distinct canonical evidence
+# names; VIRELAI_KEEP_RUN=1 keeps the scratch dir.
 
 GATE_LOG="$(art live-fs-mutation-gate.txt)"
 exec > >(tee "$GATE_LOG") 2>&1

@@ -1,4 +1,4 @@
-# DipshitOS hardware contract
+# VirelaiOS hardware contract
 
 This file records every hardware and firmware assumption the project makes.
 Anything listed here is a commitment: code in later milestones must either
@@ -313,7 +313,7 @@ Non-PCI platform facts:
   hung (claims 0013/0018/0020); the start-level mismatch was isolated
   (claims 6460/7896) and the production fix landed (claim 1517). With the
   fix, **post-MMU virtio TX is [observed]** end to end on real VZ: the
-  takeover banner + memory-map print + `dipshit>` prompt land in
+  takeover banner + memory-map print + `virelai>` prompt land in
   `vm-serial.log`. The invalidation list in **ADR 0006**
   (`docs/decisions/0006-mmu-debt-boundary.md`) remains binding for every
   later re-mapping milestone.

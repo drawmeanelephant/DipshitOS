@@ -1,4 +1,4 @@
-//! DipshitOS Micro-Widget Toolkit & Runtime (ADR 0011, Milestone 11).
+//! VirelaiOS Micro-Widget Toolkit & Runtime (ADR 0011, Milestone 11).
 //!
 //! Reusable, lightweight GUI primitives with ZERO heap allocation.
 //! All widget structures are pure value types operating over static BSS
