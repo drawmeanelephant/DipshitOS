@@ -1006,6 +1006,30 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_disas.step);
 
     // ------------------------------------------------------------------
+    // Guest: fifty-second ESP user program (M32 — issue #620) ZC.BIN.
+    // The on-machine Zig subset compiler: compiles a small Zig dialect
+    // to native AArch64 ELF32 in-guest.
+    // ------------------------------------------------------------------
+    const zc_prog = b.addExecutable(.{
+        .name = "user-zc",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/zc.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    zc_prog.linker_script = b.path("user/linker-segmented.ld");
+    const zc_step = b.step("zc", "Build the fifty-second ESP user program (zig-out/bin/ZC.BIN)");
+    const zc_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py", "--segments" });
+    zc_elf2bin.addFileArg(zc_prog.getEmittedBin());
+    const zc_bin = zc_elf2bin.addOutputFileArg("ZC.BIN");
+    zc_elf2bin.has_side_effects = true;
+    zc_elf2bin.stdio = .inherit;
+    zc_step.dependOn(&zc_elf2bin.step);
+    const install_zc = b.addInstallFileWithDir(zc_bin, .bin, "ZC.BIN");
+    b.getInstallStep().dependOn(&install_zc.step);
+
+    // ------------------------------------------------------------------
     // Guest: thirty-third ESP user program (M22 D6 — issue #329) PS.BIN.
     // Windowed process viewer: 1 Hz sys_procs snapshot rendered as rows.
     // ------------------------------------------------------------------
@@ -1545,6 +1569,7 @@ pub fn build(b: *std.Build) void {
     image.addFileArg(wnd_bin); // ... [WND.BIN] (M32 WMS3, issue #623: forty-eighth user program, the long-lived EL0 WM server)
     image.addFileArg(sb2_wm_bin); // ... [SB2WM.BIN] (M33 SB2, claim 8878: fiftieth user program, the shared-anon WM half)
     image.addFileArg(sb2_own_bin); // ... [SB2OWN.BIN] (M33 SB2, claim 8878: fifty-first user program, the shared-anon owner half)
+    image.addFileArg(zc_bin); // ... [ZC.BIN] (M32, issue #620: fifty-second user program, the Zig subset compiler)
     image.has_side_effects = true;
     image.stdio = .inherit;
     image_step.dependOn(&image.step);

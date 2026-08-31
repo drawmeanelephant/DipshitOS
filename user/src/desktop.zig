@@ -47,8 +47,8 @@ pub const installed_apps = [_]AppEntry{
     .{ .name = "FILE.BIN", .desc = "File Browser", .status = "/data Browse", .icon = 'b' },
 };
 
-pub const manifest_max_bytes: usize = 512;
-pub const manifest_max_apps: usize = 16;
+pub const manifest_max_bytes: usize = 1024;
+pub const manifest_max_apps: usize = 24;
 
 /// Parse the APPS.TXT manifest text (`NAME.BIN | Display Name | icon-char`
 /// per line, `#` comments and blank lines ignored) into `out`, returning
