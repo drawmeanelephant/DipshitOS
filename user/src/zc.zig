@@ -1,0 +1,1086 @@
+//! The in-guest compiler (zc): compiles a Zig subset to AArch64 ELF32.
+//! Bounded: <=32 functions, <=512 lines, zero heap.
+//!
+//! Usage: exec ZC.BIN <source.z> [<output.elf>]
+
+const std = @import("std");
+const asmenc = @import("lib/asmenc.zig");
+
+// Encoders and constants from asmenc
+const enc_movz = asmenc.enc_movz;
+const enc_movk = asmenc.enc_movk;
+const enc_mov_reg = asmenc.enc_mov_reg;
+const enc_add_imm = asmenc.enc_add_imm;
+const enc_add_reg = asmenc.enc_add_reg;
+const enc_sub_imm = asmenc.enc_sub_imm;
+const enc_sub_reg = asmenc.enc_sub_reg;
+const enc_cmp_imm = asmenc.enc_cmp_imm;
+const enc_cmp_reg = asmenc.enc_cmp_reg;
+const enc_and_reg = asmenc.enc_and_reg;
+const enc_orr_reg = asmenc.enc_orr_reg;
+const enc_eor_reg = asmenc.enc_eor_reg;
+const enc_b = asmenc.enc_b;
+const enc_bl = asmenc.enc_bl;
+const enc_b_cond = asmenc.enc_b_cond;
+const enc_ldr = asmenc.enc_ldr;
+const enc_str = asmenc.enc_str;
+const enc_ldrb = asmenc.enc_ldrb;
+const enc_strb = asmenc.enc_strb;
+const enc_ret = asmenc.enc_ret;
+const enc_svc = asmenc.enc_svc;
+const enc_mul = asmenc.enc_mul;
+const enc_udiv = asmenc.enc_udiv;
+const enc_lsl = asmenc.enc_lsl;
+const enc_lsr = asmenc.enc_lsr;
+const enc_lsl_reg = asmenc.enc_lsl_reg;
+const enc_lsr_reg = asmenc.enc_lsr_reg;
+const build_elf32 = asmenc.build_elf32;
+const elf_code_offset = asmenc.elf_code_offset;
+
+// ---------------------------------------------------------------------------
+// EL0 syscall seam
+// ---------------------------------------------------------------------------
+fn sys_write(buf: []const u8) i64 {
+    return asm volatile ("svc #0"
+        : [ret] "={x0}" (-> i64),
+        : [num] "{x8}" (@as(u64, 1)),
+          [fd] "{x0}" (@as(u64, 1)),
+          [ptr] "{x1}" (@as(u64, @intFromPtr(buf.ptr))),
+          [len] "{x2}" (@as(u64, buf.len)),
+    );
+}
+
+fn console_puts(text: []const u8) void {
+    if (text.len == 0) return;
+    _ = sys_write(text);
+}
+
+fn append_str(buf: []u8, pos: usize, src: []const u8) usize {
+    const take = @min(src.len, buf.len - pos);
+    @memcpy(buf[pos .. pos + take], src[0..take]);
+    return pos + take;
+}
+
+fn fmt_u64(buf: []u8, value: u64) []const u8 {
+    var v = value;
+    var i: usize = buf.len;
+    if (v == 0) {
+        i -= 1;
+        buf[i] = '0';
+        return buf[i..];
+    }
+    while (v > 0) : (v /= 10) {
+        i -= 1;
+        buf[i] = @intCast('0' + (v % 10));
+    }
+    return buf[i..];
+}
+
+fn print_err(msg: []const u8, line: usize, detail: []const u8) void {
+    var buf: [128]u8 = undefined;
+    var pos: usize = 0;
+    pos = append_str(&buf, pos, "Compile error at line ");
+    var num_buf: [20]u8 = undefined;
+    pos = append_str(&buf, pos, fmt_u64(&num_buf, line));
+    pos = append_str(&buf, pos, ": ");
+    pos = append_str(&buf, pos, msg);
+    if (detail.len > 0) {
+        pos = append_str(&buf, pos, " '");
+        pos = append_str(&buf, pos, detail);
+        pos = append_str(&buf, pos, "'");
+    }
+    pos = append_str(&buf, pos, "\n");
+    console_puts(buf[0..pos]);
+}
+
+fn sys_exit(status: u64) noreturn {
+    asm volatile ("svc #0"
+        :
+        : [num] "{x8}" (@as(u64, 3)),
+          [code] "{x0}" (status),
+    );
+    unreachable;
+}
+
+const MODE_READ: u32 = 0x1;
+const MODE_WRITE: u32 = 0x2;
+const MODE_CREATE: u32 = 0x4;
+
+fn file_open(path: []const u8, flags: u32) i64 {
+    return asm volatile ("svc #0"
+        : [ret] "={x0}" (-> i64),
+        : [num] "{x8}" (@as(u64, 23)),
+          [p] "{x0}" (@as(u64, @intFromPtr(path.ptr))),
+          [l] "{x1}" (@as(u64, path.len)),
+          [f] "{x2}" (@as(u64, flags)),
+    );
+}
+
+fn file_read(fd: u32, buf: []u8) i64 {
+    return asm volatile ("svc #0"
+        : [ret] "={x0}" (-> i64),
+        : [num] "{x8}" (@as(u64, 24)),
+          [h] "{x0}" (@as(u64, fd)),
+          [p] "{x1}" (@as(u64, @intFromPtr(buf.ptr))),
+          [n] "{x2}" (@as(u64, buf.len)),
+    );
+}
+
+fn file_write(fd: u32, buf: []const u8) i64 {
+    return asm volatile ("svc #0"
+        : [ret] "={x0}" (-> i64),
+        : [num] "{x8}" (@as(u64, 25)),
+          [h] "{x0}" (@as(u64, fd)),
+          [p] "{x1}" (@as(u64, @intFromPtr(buf.ptr))),
+          [n] "{x2}" (@as(u64, buf.len)),
+    );
+}
+
+fn file_close(fd: u32) void {
+    asm volatile ("svc #0"
+        :
+        : [num] "{x8}" (@as(u64, 26)),
+          [h] "{x0}" (@as(u64, fd)),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Lexer
+// ---------------------------------------------------------------------------
+const TokenKind = enum {
+    eof,
+    invalid,
+    keyword_fn,
+    keyword_let,
+    keyword_var,
+    keyword_const,
+    keyword_if,
+    keyword_else,
+    keyword_while,
+    keyword_return,
+    keyword_svc,
+    ident,
+    number,
+    char_lit,
+    l_paren,
+    r_paren,
+    l_brace,
+    r_brace,
+    comma,
+    semicolon,
+    colon,
+    equal,
+    plus,
+    minus,
+    star,
+    slash,
+    percent,
+    ampersand,
+    pipe,
+    caret,
+    excl,
+    double_equal,
+    excl_equal,
+    less,
+    less_equal,
+    greater,
+    greater_equal,
+    less_less,
+    greater_greater,
+    double_ampersand,
+    double_pipe,
+};
+
+const Token = struct {
+    kind: TokenKind,
+    text: []const u8,
+    line: usize,
+};
+
+const Tokenizer = struct {
+    src: []const u8,
+    pos: usize = 0,
+    line: usize = 1,
+
+    fn next(self: *Tokenizer) Token {
+        while (self.pos < self.src.len) {
+            const c = self.src[self.pos];
+            if (c == '\n') {
+                self.pos += 1;
+                self.line += 1;
+                continue;
+            }
+            if (std.ascii.isWhitespace(c)) {
+                self.pos += 1;
+                continue;
+            }
+            if (c == '/' and self.pos + 1 < self.src.len and self.src[self.pos + 1] == '/') {
+                while (self.pos < self.src.len and self.src[self.pos] != '\n') self.pos += 1;
+                continue;
+            }
+            break;
+        }
+        if (self.pos >= self.src.len) return Token{ .kind = .eof, .text = "", .line = self.line };
+
+        const start = self.pos;
+        const c = self.src[self.pos];
+        self.pos += 1;
+
+        switch (c) {
+            '(' => return Token{ .kind = .l_paren, .text = self.src[start..self.pos], .line = self.line },
+            ')' => return Token{ .kind = .r_paren, .text = self.src[start..self.pos], .line = self.line },
+            '{' => return Token{ .kind = .l_brace, .text = self.src[start..self.pos], .line = self.line },
+            '}' => return Token{ .kind = .r_brace, .text = self.src[start..self.pos], .line = self.line },
+            ',' => return Token{ .kind = .comma, .text = self.src[start..self.pos], .line = self.line },
+            ';' => return Token{ .kind = .semicolon, .text = self.src[start..self.pos], .line = self.line },
+            ':' => return Token{ .kind = .colon, .text = self.src[start..self.pos], .line = self.line },
+            '+' => return Token{ .kind = .plus, .text = self.src[start..self.pos], .line = self.line },
+            '-' => return Token{ .kind = .minus, .text = self.src[start..self.pos], .line = self.line },
+            '*' => return Token{ .kind = .star, .text = self.src[start..self.pos], .line = self.line },
+            '/' => return Token{ .kind = .slash, .text = self.src[start..self.pos], .line = self.line },
+            '%' => return Token{ .kind = .percent, .text = self.src[start..self.pos], .line = self.line },
+            '^' => return Token{ .kind = .caret, .text = self.src[start..self.pos], .line = self.line },
+            '&' => {
+                if (self.pos < self.src.len and self.src[self.pos] == '&') {
+                    self.pos += 1;
+                    return Token{ .kind = .double_ampersand, .text = self.src[start..self.pos], .line = self.line };
+                }
+                return Token{ .kind = .ampersand, .text = self.src[start..self.pos], .line = self.line };
+            },
+            '|' => {
+                if (self.pos < self.src.len and self.src[self.pos] == '|') {
+                    self.pos += 1;
+                    return Token{ .kind = .double_pipe, .text = self.src[start..self.pos], .line = self.line };
+                }
+                return Token{ .kind = .pipe, .text = self.src[start..self.pos], .line = self.line };
+            },
+            '!' => {
+                if (self.pos < self.src.len and self.src[self.pos] == '=') {
+                    self.pos += 1;
+                    return Token{ .kind = .excl_equal, .text = self.src[start..self.pos], .line = self.line };
+                }
+                return Token{ .kind = .excl, .text = self.src[start..self.pos], .line = self.line };
+            },
+            '=' => {
+                if (self.pos < self.src.len and self.src[self.pos] == '=') {
+                    self.pos += 1;
+                    return Token{ .kind = .double_equal, .text = self.src[start..self.pos], .line = self.line };
+                }
+                return Token{ .kind = .equal, .text = self.src[start..self.pos], .line = self.line };
+            },
+            '<' => {
+                if (self.pos < self.src.len and self.src[self.pos] == '=') {
+                    self.pos += 1;
+                    return Token{ .kind = .less_equal, .text = self.src[start..self.pos], .line = self.line };
+                }
+                if (self.pos < self.src.len and self.src[self.pos] == '<') {
+                    self.pos += 1;
+                    return Token{ .kind = .less_less, .text = self.src[start..self.pos], .line = self.line };
+                }
+                return Token{ .kind = .less, .text = self.src[start..self.pos], .line = self.line };
+            },
+            '>' => {
+                if (self.pos < self.src.len and self.src[self.pos] == '=') {
+                    self.pos += 1;
+                    return Token{ .kind = .greater_equal, .text = self.src[start..self.pos], .line = self.line };
+                }
+                if (self.pos < self.src.len and self.src[self.pos] == '>') {
+                    self.pos += 1;
+                    return Token{ .kind = .greater_greater, .text = self.src[start..self.pos], .line = self.line };
+                }
+                return Token{ .kind = .greater, .text = self.src[start..self.pos], .line = self.line };
+            },
+            '\'' => {
+                if (self.pos < self.src.len and self.src[self.pos] != '\'') {
+                    self.pos += 1;
+                    if (self.pos < self.src.len and self.src[self.pos] == '\'') {
+                        self.pos += 1;
+                        return Token{ .kind = .char_lit, .text = self.src[start..self.pos], .line = self.line };
+                    }
+                }
+                return Token{ .kind = .invalid, .text = self.src[start..self.pos], .line = self.line };
+            },
+            else => {
+                if (std.ascii.isAlphabetic(c) or c == '_') {
+                    while (self.pos < self.src.len and (std.ascii.isAlphanumeric(self.src[self.pos]) or self.src[self.pos] == '_')) self.pos += 1;
+                    const text = self.src[start..self.pos];
+                    if (std.mem.eql(u8, text, "fn")) return Token{ .kind = .keyword_fn, .text = text, .line = self.line };
+                    if (std.mem.eql(u8, text, "let")) return Token{ .kind = .keyword_let, .text = text, .line = self.line };
+                    if (std.mem.eql(u8, text, "var")) return Token{ .kind = .keyword_var, .text = text, .line = self.line };
+                    if (std.mem.eql(u8, text, "const")) return Token{ .kind = .keyword_const, .text = text, .line = self.line };
+                    if (std.mem.eql(u8, text, "if")) return Token{ .kind = .keyword_if, .text = text, .line = self.line };
+                    if (std.mem.eql(u8, text, "else")) return Token{ .kind = .keyword_else, .text = text, .line = self.line };
+                    if (std.mem.eql(u8, text, "while")) return Token{ .kind = .keyword_while, .text = text, .line = self.line };
+                    if (std.mem.eql(u8, text, "return")) return Token{ .kind = .keyword_return, .text = text, .line = self.line };
+                    if (std.mem.eql(u8, text, "svc")) return Token{ .kind = .keyword_svc, .text = text, .line = self.line };
+                    return Token{ .kind = .ident, .text = text, .line = self.line };
+                }
+                if (std.ascii.isDigit(c)) {
+                    if (c == '0' and self.pos < self.src.len and (self.src[self.pos] == 'x' or self.src[self.pos] == 'X')) {
+                        self.pos += 1;
+                        while (self.pos < self.src.len and std.ascii.isHex(self.src[self.pos])) self.pos += 1;
+                    } else {
+                        while (self.pos < self.src.len and std.ascii.isDigit(self.src[self.pos])) self.pos += 1;
+                    }
+                    return Token{ .kind = .number, .text = self.src[start..self.pos], .line = self.line };
+                }
+                return Token{ .kind = .invalid, .text = self.src[start..self.pos], .line = self.line };
+            },
+        }
+    }
+};
+
+// ---------------------------------------------------------------------------
+// Compiler State & Symbols
+// ---------------------------------------------------------------------------
+const Function = struct {
+    name: []const u8,
+    address: u32,
+    param_count: usize,
+};
+
+const LocalVar = struct {
+    name: []const u8,
+    offset: usize,
+};
+
+const CallPatch = struct {
+    caller_pc: u32,
+    target_func_idx: usize,
+};
+
+var code: [8192]u8 = undefined;
+var code_len: usize = 0;
+
+var tokens_buf: [2048]Token = undefined;
+var tokens_count: usize = 0;
+
+var functions: [32]Function = undefined;
+var functions_count: usize = 0;
+
+var locals: [64]LocalVar = undefined;
+var locals_count: usize = 0;
+
+var call_patches: [64]CallPatch = undefined;
+var call_patches_count: usize = 0;
+
+fn emit(word: u32) void {
+    std.mem.writeInt(u32, code[code_len..][0..4], word, .little);
+    code_len += 4;
+}
+
+fn emitLoadImmediate(rd: u5, val: u64) void {
+    const v0: u16 = @intCast(val & 0xFFFF);
+    const v1: u16 = @intCast((val >> 16) & 0xFFFF);
+    const v2: u16 = @intCast((val >> 32) & 0xFFFF);
+    const v3: u16 = @intCast((val >> 48) & 0xFFFF);
+    emit(enc_movz(rd, v0, 0));
+    if (v1 != 0 or v2 != 0 or v3 != 0) emit(enc_movk(rd, v1, 1));
+    if (v2 != 0 or v3 != 0) emit(enc_movk(rd, v2, 2));
+    if (v3 != 0) emit(enc_movk(rd, v3, 3));
+}
+
+fn lookupFunc(name: []const u8) ?usize {
+    var i: usize = 0;
+    while (i < functions_count) : (i += 1) {
+        if (std.mem.eql(u8, functions[i].name, name)) return i;
+    }
+    return null;
+}
+
+fn lookupLocal(name: []const u8) ?usize {
+    var i: usize = locals_count;
+    while (i > 0) {
+        i -= 1;
+        if (std.mem.eql(u8, locals[i].name, name)) return locals[i].offset;
+    }
+    return null;
+}
+
+fn registerForwardFunc(name: []const u8) !usize {
+    if (lookupFunc(name)) |idx| return idx;
+    if (functions_count >= functions.len) return error.TooManyFunctions;
+    functions[functions_count] = Function{ .name = name, .address = 0, .param_count = 0 };
+    const idx = functions_count;
+    functions_count += 1;
+    return idx;
+}
+
+// ---------------------------------------------------------------------------
+// Parser
+// ---------------------------------------------------------------------------
+const Parser = struct {
+    tokens: []const Token,
+    idx: usize = 0,
+
+    fn peek(self: *Parser) TokenKind {
+        if (self.idx >= self.tokens.len) return .eof;
+        return self.tokens[self.idx].kind;
+    }
+
+    fn currentToken(self: *Parser) Token {
+        if (self.idx >= self.tokens.len) return Token{ .kind = .eof, .text = "", .line = 0 };
+        return self.tokens[self.idx];
+    }
+
+    fn advance(self: *Parser) Token {
+        const t = self.currentToken();
+        self.idx += 1;
+        return t;
+    }
+
+    fn expect(self: *Parser, kind: TokenKind) anyerror!Token {
+        const t = self.currentToken();
+        if (t.kind != kind) {
+            print_err("unexpected token", t.line, t.text);
+            return error.CompileError;
+        }
+        self.idx += 1;
+        return t;
+    }
+
+    fn accept(self: *Parser, kind: TokenKind) bool {
+        if (self.peek() == kind) {
+            self.idx += 1;
+            return true;
+        }
+        return false;
+    }
+};
+
+fn countParams(tokens: []const Token, start_idx: usize) usize {
+    var idx = start_idx;
+    if (tokens[idx].kind == .r_paren) return 0;
+    var commas: usize = 0;
+    while (idx < tokens.len and tokens[idx].kind != .r_paren) : (idx += 1) {
+        if (tokens[idx].kind == .comma) commas += 1;
+    }
+    return commas + 1;
+}
+
+fn compileExpr(p: *Parser) anyerror!void {
+    try parseLogicalOr(p);
+}
+
+fn parseLogicalOr(p: *Parser) anyerror!void {
+    try parseLogicalAnd(p);
+    while (p.accept(.double_pipe)) {
+        emit(enc_sub_imm(31, 31, 16));
+        emit(enc_str(31, 0, 0));
+        try parseLogicalAnd(p);
+        emit(enc_ldr(31, 1, 0));
+        emit(enc_add_imm(31, 31, 16));
+        emit(enc_orr_reg(1, 0, 0));
+    }
+}
+
+fn parseLogicalAnd(p: *Parser) anyerror!void {
+    try parseBitwiseOr(p);
+    while (p.accept(.double_ampersand)) {
+        emit(enc_sub_imm(31, 31, 16));
+        emit(enc_str(31, 0, 0));
+        try parseBitwiseOr(p);
+        emit(enc_ldr(31, 1, 0));
+        emit(enc_add_imm(31, 31, 16));
+        emit(enc_and_reg(1, 0, 0));
+    }
+}
+
+fn parseBitwiseOr(p: *Parser) anyerror!void {
+    try parseBitwiseXor(p);
+    while (p.accept(.pipe)) {
+        emit(enc_sub_imm(31, 31, 16));
+        emit(enc_str(31, 0, 0));
+        try parseBitwiseXor(p);
+        emit(enc_ldr(31, 1, 0));
+        emit(enc_add_imm(31, 31, 16));
+        emit(enc_orr_reg(1, 0, 0));
+    }
+}
+
+fn parseBitwiseXor(p: *Parser) anyerror!void {
+    try parseBitwiseAnd(p);
+    while (p.accept(.caret)) {
+        emit(enc_sub_imm(31, 31, 16));
+        emit(enc_str(31, 0, 0));
+        try parseBitwiseAnd(p);
+        emit(enc_ldr(31, 1, 0));
+        emit(enc_add_imm(31, 31, 16));
+        emit(enc_eor_reg(1, 0, 0));
+    }
+}
+
+fn parseBitwiseAnd(p: *Parser) anyerror!void {
+    try parseEquality(p);
+    while (p.accept(.ampersand)) {
+        emit(enc_sub_imm(31, 31, 16));
+        emit(enc_str(31, 0, 0));
+        try parseEquality(p);
+        emit(enc_ldr(31, 1, 0));
+        emit(enc_add_imm(31, 31, 16));
+        emit(enc_and_reg(1, 0, 0));
+    }
+}
+
+fn parseEquality(p: *Parser) anyerror!void {
+    try parseRelational(p);
+    while (true) {
+        const is_eq = p.accept(.double_equal);
+        const is_ne = !is_eq and p.accept(.excl_equal);
+        if (!is_eq and !is_ne) break;
+        emit(enc_sub_imm(31, 31, 16));
+        emit(enc_str(31, 0, 0));
+        try parseRelational(p);
+        emit(enc_ldr(31, 1, 0));
+        emit(enc_add_imm(31, 31, 16));
+        emit(enc_cmp_reg(1, 0));
+        if (is_eq) {
+            emit(enc_b_cond(.eq, 12));
+        } else {
+            emit(enc_b_cond(.ne, 12));
+        }
+        emit(enc_movz(0, 0, 0));
+        emit(enc_b(8));
+        emit(enc_movz(0, 1, 0));
+    }
+}
+
+fn parseRelational(p: *Parser) anyerror!void {
+    try parseShift(p);
+    while (true) {
+        const is_lt = p.accept(.less);
+        const is_le = !is_lt and p.accept(.less_equal);
+        const is_gt = !is_lt and !is_le and p.accept(.greater);
+        const is_ge = !is_lt and !is_le and !is_gt and p.accept(.greater_equal);
+        if (!is_lt and !is_le and !is_gt and !is_ge) break;
+        emit(enc_sub_imm(31, 31, 16));
+        emit(enc_str(31, 0, 0));
+        try parseShift(p);
+        emit(enc_ldr(31, 1, 0));
+        emit(enc_add_imm(31, 31, 16));
+        emit(enc_cmp_reg(1, 0));
+        if (is_lt) {
+            emit(enc_b_cond(.lt, 12));
+        } else if (is_le) {
+            emit(enc_b_cond(.le, 12));
+        } else if (is_gt) {
+            emit(enc_b_cond(.gt, 12));
+        } else {
+            emit(enc_b_cond(.ge, 12));
+        }
+        emit(enc_movz(0, 0, 0));
+        emit(enc_b(8));
+        emit(enc_movz(0, 1, 0));
+    }
+}
+
+fn parseShift(p: *Parser) anyerror!void {
+    try parseAdditive(p);
+    while (true) {
+        const is_lsl = p.accept(.less_less);
+        const is_lsr = !is_lsl and p.accept(.greater_greater);
+        if (!is_lsl and !is_lsr) break;
+        emit(enc_sub_imm(31, 31, 16));
+        emit(enc_str(31, 0, 0));
+        try parseAdditive(p);
+        emit(enc_ldr(31, 1, 0));
+        emit(enc_add_imm(31, 31, 16));
+        if (is_lsl) {
+            emit(enc_lsl_reg(1, 0, 0));
+        } else {
+            emit(enc_lsr_reg(1, 0, 0));
+        }
+    }
+}
+
+fn parseAdditive(p: *Parser) anyerror!void {
+    try parseMultiplicative(p);
+    while (true) {
+        const is_add = p.accept(.plus);
+        const is_sub = !is_add and p.accept(.minus);
+        if (!is_add and !is_sub) break;
+        emit(enc_sub_imm(31, 31, 16));
+        emit(enc_str(31, 0, 0));
+        try parseMultiplicative(p);
+        emit(enc_ldr(31, 1, 0));
+        emit(enc_add_imm(31, 31, 16));
+        if (is_add) {
+            emit(enc_add_reg(1, 0, 0));
+        } else {
+            emit(enc_sub_reg(1, 0, 0));
+        }
+    }
+}
+
+fn parseMultiplicative(p: *Parser) anyerror!void {
+    try parseUnary(p);
+    while (true) {
+        const is_mul = p.accept(.star);
+        const is_div = !is_mul and p.accept(.slash);
+        if (!is_mul and !is_div) break;
+        emit(enc_sub_imm(31, 31, 16));
+        emit(enc_str(31, 0, 0));
+        try parseUnary(p);
+        emit(enc_ldr(31, 1, 0));
+        emit(enc_add_imm(31, 31, 16));
+        if (is_mul) {
+            emit(enc_mul(1, 0, 0));
+        } else {
+            emit(enc_udiv(1, 0, 0));
+        }
+    }
+}
+
+fn parseUnary(p: *Parser) anyerror!void {
+    if (p.accept(.minus)) {
+        try parseUnary(p);
+        emit(enc_sub_reg(31, 0, 0));
+    } else if (p.accept(.excl)) {
+        try parseUnary(p);
+        emit(enc_cmp_imm(0, 0));
+        emit(enc_b_cond(.eq, 12));
+        emit(enc_movz(0, 0, 0));
+        emit(enc_b(8));
+        emit(enc_movz(0, 1, 0));
+    } else {
+        try parsePrimary(p);
+    }
+}
+
+fn parsePrimary(p: *Parser) anyerror!void {
+    const t = p.advance();
+    switch (t.kind) {
+        .number => {
+            const val = std.fmt.parseInt(u64, t.text, 0) catch return error.CompileError;
+            emitLoadImmediate(0, val);
+        },
+        .char_lit => {
+            const val = t.text[1];
+            emitLoadImmediate(0, val);
+        },
+        .ident => {
+            if (std.mem.eql(u8, t.text, "read8")) {
+                _ = try p.expect(.l_paren);
+                try compileExpr(p);
+                _ = try p.expect(.r_paren);
+                emit(enc_ldrb(0, 0, 0));
+            } else if (std.mem.eql(u8, t.text, "write8")) {
+                _ = try p.expect(.l_paren);
+                try compileExpr(p);
+                emit(enc_sub_imm(31, 31, 16));
+                emit(enc_str(31, 0, 0));
+                _ = try p.expect(.comma);
+                try compileExpr(p);
+                emit(enc_ldr(31, 1, 0));
+                emit(enc_add_imm(31, 31, 16));
+                emit(enc_strb(1, 0, 0));
+                emit(enc_movz(0, 0, 0));
+                _ = try p.expect(.r_paren);
+            } else if (std.mem.eql(u8, t.text, "read64")) {
+                _ = try p.expect(.l_paren);
+                try compileExpr(p);
+                _ = try p.expect(.r_paren);
+                emit(enc_ldr(0, 0, 0));
+            } else if (std.mem.eql(u8, t.text, "write64")) {
+                _ = try p.expect(.l_paren);
+                try compileExpr(p);
+                emit(enc_sub_imm(31, 31, 16));
+                emit(enc_str(31, 0, 0));
+                _ = try p.expect(.comma);
+                try compileExpr(p);
+                emit(enc_ldr(31, 1, 0));
+                emit(enc_add_imm(31, 31, 16));
+                emit(enc_str(1, 0, 0));
+                emit(enc_movz(0, 0, 0));
+                _ = try p.expect(.r_paren);
+            } else if (p.peek() == .l_paren) {
+                _ = p.advance();
+                var arg_count: usize = 0;
+                if (p.peek() != .r_paren) {
+                    try compileExpr(p);
+                    emit(enc_sub_imm(31, 31, 16));
+                    emit(enc_str(31, 0, 0));
+                    arg_count += 1;
+                    while (p.accept(.comma)) {
+                        try compileExpr(p);
+                        emit(enc_sub_imm(31, 31, 16));
+                        emit(enc_str(31, 0, 0));
+                        arg_count += 1;
+                    }
+                }
+                _ = try p.expect(.r_paren);
+                var i = arg_count;
+                while (i > 0) {
+                    i -= 1;
+                    emit(enc_ldr(31, @intCast(i), 0));
+                    emit(enc_add_imm(31, 31, 16));
+                }
+                const func_idx = lookupFunc(t.text);
+                if (func_idx) |idx| {
+                    const target = functions[idx].address;
+                    const rel = @as(i32, @intCast(target)) - @as(i32, @intCast(code_len));
+                    emit(enc_bl(rel));
+                } else {
+                    const f_idx = try registerForwardFunc(t.text);
+                    if (call_patches_count >= call_patches.len) return error.CompileError;
+                    call_patches[call_patches_count] = CallPatch{ .caller_pc = @intCast(code_len), .target_func_idx = f_idx };
+                    call_patches_count += 1;
+                    emit(0);
+                }
+            } else {
+                const offset = lookupLocal(t.text) orelse {
+                    print_err("undefined identifier", t.line, t.text);
+                    return error.CompileError;
+                };
+                emit(enc_ldr(19, 0, @intCast(offset)));
+            }
+        },
+        .keyword_svc => {
+            _ = try p.expect(.l_paren);
+            const num_tok = try p.expect(.number);
+            const syscall_num = std.fmt.parseInt(u16, num_tok.text, 0) catch return error.CompileError;
+            var arg_count: usize = 0;
+            while (p.accept(.comma)) {
+                try compileExpr(p);
+                emit(enc_sub_imm(31, 31, 16));
+                emit(enc_str(31, 0, 0));
+                arg_count += 1;
+            }
+            _ = try p.expect(.r_paren);
+            var i = arg_count;
+            while (i > 0) {
+                i -= 1;
+                emit(enc_ldr(31, @intCast(i), 0));
+                emit(enc_add_imm(31, 31, 16));
+            }
+            emit(enc_movz(8, syscall_num, 0));
+            emit(enc_svc(0));
+        },
+        .l_paren => {
+            try compileExpr(p);
+            _ = try p.expect(.r_paren);
+        },
+        else => return error.CompileError,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Statement Compiler
+// ---------------------------------------------------------------------------
+fn compileStatement(p: *Parser) anyerror!void {
+    const k = p.peek();
+    switch (k) {
+        .keyword_let, .keyword_var, .keyword_const => {
+            _ = p.advance();
+            const name_tok = try p.expect(.ident);
+            if (p.accept(.colon)) _ = try p.expect(.ident);
+            _ = try p.expect(.equal);
+            try compileExpr(p);
+            _ = try p.expect(.semicolon);
+            const offset = locals_count * 8;
+            emit(enc_str(19, 0, @intCast(offset)));
+            locals[locals_count] = LocalVar{ .name = name_tok.text, .offset = offset };
+            locals_count += 1;
+        },
+        .keyword_if => {
+            _ = p.advance();
+            _ = try p.expect(.l_paren);
+            try compileExpr(p);
+            _ = try p.expect(.r_paren);
+            emit(enc_cmp_imm(0, 0));
+            const else_branch_idx = code_len;
+            emit(0);
+            _ = try p.expect(.l_brace);
+            while (p.peek() != .r_brace and p.peek() != .eof) try compileStatement(p);
+            _ = try p.expect(.r_brace);
+            const end_branch_idx = code_len;
+            emit(0);
+            const else_pc = code_len;
+            const else_offset_bytes = @as(i32, @intCast(else_pc - else_branch_idx));
+            std.mem.writeInt(u32, code[else_branch_idx..][0..4], enc_b_cond(.eq, else_offset_bytes), .little);
+            if (p.accept(.keyword_else)) {
+                _ = try p.expect(.l_brace);
+                while (p.peek() != .r_brace and p.peek() != .eof) try compileStatement(p);
+                _ = try p.expect(.r_brace);
+            }
+            const end_pc = code_len;
+            const end_offset_bytes = @as(i32, @intCast(end_pc - end_branch_idx));
+            std.mem.writeInt(u32, code[end_branch_idx..][0..4], enc_b(end_offset_bytes), .little);
+        },
+        .keyword_while => {
+            _ = p.advance();
+            const start_pc = code_len;
+            _ = try p.expect(.l_paren);
+            try compileExpr(p);
+            _ = try p.expect(.r_paren);
+            emit(enc_cmp_imm(0, 0));
+            const end_branch_idx = code_len;
+            emit(0);
+            _ = try p.expect(.l_brace);
+            while (p.peek() != .r_brace and p.peek() != .eof) try compileStatement(p);
+            _ = try p.expect(.r_brace);
+            const jump_back_offset = @as(i32, @intCast(start_pc)) - @as(i32, @intCast(code_len));
+            emit(enc_b(jump_back_offset));
+            const end_pc = code_len;
+            const end_offset_bytes = @as(i32, @intCast(end_pc - end_branch_idx));
+            std.mem.writeInt(u32, code[end_branch_idx..][0..4], enc_b_cond(.eq, end_offset_bytes), .little);
+        },
+        .keyword_return => {
+            _ = p.advance();
+            if (p.peek() != .semicolon) try compileExpr(p);
+            _ = try p.expect(.semicolon);
+            emit(enc_mov_reg(31, 19));
+            emit(enc_add_imm(31, 31, 512));
+            emit(enc_ldr(31, 19, 0));
+            emit(enc_add_imm(31, 31, 16));
+            emit(enc_ldr(31, 30, 0));
+            emit(enc_add_imm(31, 31, 16));
+            emit(enc_ret(30));
+        },
+        else => {
+            if (p.peek() == .ident and p.idx + 1 < p.tokens.len and p.tokens[p.idx + 1].kind == .equal) {
+                const name_tok = p.advance();
+                _ = p.advance();
+                try compileExpr(p);
+                _ = try p.expect(.semicolon);
+                const offset = lookupLocal(name_tok.text) orelse return error.CompileError;
+                emit(enc_str(19, 0, @intCast(offset)));
+            } else {
+                try compileExpr(p);
+                _ = try p.expect(.semicolon);
+            }
+        },
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Compiler Main Driver
+// ---------------------------------------------------------------------------
+fn compile(src: []const u8) !usize {
+    var tokenizer = Tokenizer{ .src = src };
+    tokens_count = 0;
+    while (true) {
+        const t = tokenizer.next();
+        if (tokens_count >= tokens_buf.len) return error.TooManyTokens;
+        tokens_buf[tokens_count] = t;
+        tokens_count += 1;
+        if (t.kind == .eof) break;
+    }
+    const tokens = tokens_buf[0..tokens_count];
+
+    code_len = 0;
+    functions_count = 0;
+    call_patches_count = 0;
+
+    // Pass 1: Gather function declarations
+    var p1 = Parser{ .tokens = tokens };
+    while (p1.peek() != .eof) {
+        if (p1.peek() == .keyword_fn) {
+            _ = p1.advance();
+            const name_tok = try p1.expect(.ident);
+            _ = try p1.expect(.l_paren);
+            const param_count = countParams(tokens, p1.idx);
+            while (p1.peek() != .r_paren and p1.peek() != .eof) _ = p1.advance();
+            _ = try p1.expect(.r_paren);
+            _ = try p1.expect(.ident); // return type
+            _ = try p1.expect(.l_brace);
+            var brace_depth: usize = 1;
+            while (brace_depth > 0 and p1.peek() != .eof) {
+                const k = p1.advance().kind;
+                if (k == .l_brace) brace_depth += 1;
+                if (k == .r_brace) brace_depth -= 1;
+            }
+            if (functions_count >= functions.len) return error.TooManyFunctions;
+            functions[functions_count] = Function{ .name = name_tok.text, .address = 0, .param_count = param_count };
+            functions_count += 1;
+        } else {
+            _ = p1.advance();
+        }
+    }
+
+    // Emit startup entry: call main, then exit
+    emit(0);
+    emit(enc_movz(0, 0, 0));
+    emit(enc_movz(8, 3, 0));
+    emit(enc_svc(0));
+
+    // Pass 2: Compile function bodies
+    var p2 = Parser{ .tokens = tokens };
+    while (p2.peek() != .eof) {
+        if (p2.peek() == .keyword_fn) {
+            _ = p2.advance();
+            const name_tok = try p2.expect(.ident);
+            const f_idx = lookupFunc(name_tok.text).?;
+            functions[f_idx].address = @intCast(code_len);
+
+            _ = try p2.expect(.l_paren);
+            locals_count = 0;
+
+            // Load arguments
+            if (p2.peek() != .r_paren) {
+                const p_name = try p2.expect(.ident);
+                _ = try p2.expect(.colon);
+                _ = try p2.expect(.ident);
+                locals[locals_count] = LocalVar{ .name = p_name.text, .offset = locals_count * 8 };
+                locals_count += 1;
+                while (p2.accept(.comma)) {
+                    const next_p_name = try p2.expect(.ident);
+                    _ = try p2.expect(.colon);
+                    _ = try p2.expect(.ident);
+                    locals[locals_count] = LocalVar{ .name = next_p_name.text, .offset = locals_count * 8 };
+                    locals_count += 1;
+                }
+            }
+            _ = try p2.expect(.r_paren);
+            _ = try p2.expect(.ident); // return type
+            _ = try p2.expect(.l_brace);
+
+            // Function prologue
+            emit(enc_sub_imm(31, 31, 16));
+            emit(enc_str(31, 30, 0));
+            emit(enc_sub_imm(31, 31, 16));
+            emit(enc_str(31, 19, 0));
+            emit(enc_sub_imm(31, 31, 512));
+            emit(enc_mov_reg(19, 31));
+
+            var i: usize = 0;
+            while (i < functions[f_idx].param_count) : (i += 1) {
+                emit(enc_str(19, @intCast(i), @intCast(i * 8)));
+            }
+
+            while (p2.peek() != .r_brace and p2.peek() != .eof) try compileStatement(&p2);
+            _ = try p2.expect(.r_brace);
+
+            // Function epilogue
+            emit(enc_mov_reg(31, 19));
+            emit(enc_add_imm(31, 31, 512));
+            emit(enc_ldr(31, 19, 0));
+            emit(enc_add_imm(31, 31, 16));
+            emit(enc_ldr(31, 30, 0));
+            emit(enc_add_imm(31, 31, 16));
+            emit(enc_ret(30));
+        } else {
+            _ = p2.advance();
+        }
+    }
+
+    // Resolve patches
+    for (call_patches[0..call_patches_count]) |patch| {
+        const target_addr = functions[patch.target_func_idx].address;
+        if (target_addr == 0) return error.CompileError;
+        const rel = @as(i32, @intCast(target_addr)) - @as(i32, @intCast(patch.caller_pc));
+        std.mem.writeInt(u32, code[patch.caller_pc..][0..4], enc_bl(rel), .little);
+    }
+
+    const main_idx = lookupFunc("main") orelse return error.CompileError;
+    const main_addr = functions[main_idx].address;
+    std.mem.writeInt(u32, code[0..4], enc_bl(@intCast(main_addr)), .little);
+
+    return code_len;
+}
+
+// ---------------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------------
+pub export fn _start(argc: usize, argv: ?[*]const [32]u8) callconv(.c) noreturn {
+    var src_path_buf: [40]u8 = [_]u8{0} ** 40;
+    @memcpy(src_path_buf[0..11], "/esp/MAIN.Z");
+    var out_path_buf: [40]u8 = [_]u8{0} ** 40;
+    @memcpy(out_path_buf[0..13], "/esp/MAIN.ELF");
+    var src_len: usize = 11;
+    var out_len: usize = 13;
+
+    if (argc >= 1) {
+        if (argv) |slots| copy_arg(&src_path_buf, &src_len, slots[0]);
+    }
+    if (argc >= 2) {
+        if (argv) |slots| copy_arg(&out_path_buf, &out_len, slots[1]);
+    }
+
+    run(src_path_buf[0..src_len], out_path_buf[0..out_len]);
+}
+
+fn copy_arg(dst: *[40]u8, len: *usize, slot: [32]u8) void {
+    const n = std.mem.indexOfScalar(u8, &slot, 0) orelse slot.len;
+    const take = @min(n, dst.len);
+    @memcpy(dst[0..take], slot[0..take]);
+    len.* = take;
+}
+
+const source_cap: usize = 8192;
+
+fn run(src_path: []const u8, out_path: []const u8) noreturn {
+    var source_buf: [source_cap]u8 = undefined;
+    var image_buf: [elf_code_offset + 8192]u8 = undefined;
+
+    const fd = file_open(src_path, MODE_READ);
+    if (fd < 0) {
+        console_puts("zc: cannot open source\n");
+        sys_exit(1);
+    }
+    const n = file_read(@intCast(fd), &source_buf);
+    file_close(@intCast(fd));
+    if (n <= 0) {
+        console_puts("zc: empty or unreadable source\n");
+        sys_exit(2);
+    }
+
+    const bytes = compile(source_buf[0..@intCast(n)]) catch {
+        console_puts("zc: compile failed\n");
+        sys_exit(3);
+    };
+
+    const total = build_elf32(code[0..bytes], 0, &image_buf) catch {
+        console_puts("zc: image generation failed\n");
+        sys_exit(4);
+    };
+
+    const ofd = file_open(out_path, MODE_CREATE | MODE_WRITE);
+    if (ofd < 0) {
+        console_puts("zc: cannot create output\n");
+        sys_exit(5);
+    }
+    _ = file_write(@intCast(ofd), image_buf[0..total]);
+    file_close(@intCast(ofd));
+
+    console_puts("zc: successfully compiled in-guest\n");
+    sys_exit(0);
+}
+
+// ---------------------------------------------------------------------------
+// Host Tests
+// ---------------------------------------------------------------------------
+const testing = std.testing;
+
+test "zc: tokenizer handles keywords, identifiers, numbers, and symbols" {
+    const src = "fn main() void { let x: u64 = 42; return x; }";
+    var t = Tokenizer{ .src = src };
+    try testing.expectEqual(TokenKind.keyword_fn, t.next().kind);
+    try testing.expectEqual(TokenKind.ident, t.next().kind);
+    try testing.expectEqual(TokenKind.l_paren, t.next().kind);
+    try testing.expectEqual(TokenKind.r_paren, t.next().kind);
+    try testing.expectEqual(TokenKind.ident, t.next().kind);
+    try testing.expectEqual(TokenKind.l_brace, t.next().kind);
+    try testing.expectEqual(TokenKind.keyword_let, t.next().kind);
+    try testing.expectEqual(TokenKind.ident, t.next().kind);
+    try testing.expectEqual(TokenKind.colon, t.next().kind);
+    try testing.expectEqual(TokenKind.ident, t.next().kind);
+    try testing.expectEqual(TokenKind.equal, t.next().kind);
+    try testing.expectEqual(TokenKind.number, t.next().kind);
+    try testing.expectEqual(TokenKind.semicolon, t.next().kind);
+    try testing.expectEqual(TokenKind.keyword_return, t.next().kind);
+}
+
+test "zc: compiles trivial program to AArch64 machine code" {
+    const src = "fn main() void { return; }";
+    const bytes = try compile(src);
+    try testing.expect(bytes > 20);
+    // startup shim + prologue + epilogue
+    try testing.expectEqual(@as(u32, enc_bl(16)), std.mem.readInt(u32, code[0..4], .little));
+}
+
+test "zc: compiles simple expression arithmetic" {
+    const src = "fn main() void { let x = (3 + 4) * 5; return; }";
+    const bytes = try compile(src);
+    try testing.expect(bytes > 0);
+}

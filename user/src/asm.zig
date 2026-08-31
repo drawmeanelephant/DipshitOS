@@ -29,6 +29,55 @@
 //! defaults: /esp/PROG.S -> /esp/OUT.ELF)
 
 const std = @import("std");
+const asmenc = @import("lib/asmenc.zig");
+const Cond = asmenc.Cond;
+const Operands = asmenc.Operands;
+const split_operands = asmenc.split_operands;
+const strip_comment = asmenc.strip_comment;
+const parse_register = asmenc.parse_register;
+const parse_immediate = asmenc.parse_immediate;
+const parse_cond = asmenc.parse_cond;
+const build_elf32 = asmenc.build_elf32;
+const elf_header_size = asmenc.elf_header_size;
+const elf_phdr_size = asmenc.elf_phdr_size;
+const elf_code_offset = asmenc.elf_code_offset;
+
+const enc_movz = asmenc.enc_movz;
+const enc_movk = asmenc.enc_movk;
+const enc_mov_reg = asmenc.enc_mov_reg;
+const enc_add_imm = asmenc.enc_add_imm;
+const enc_add_reg = asmenc.enc_add_reg;
+const enc_sub_imm = asmenc.enc_sub_imm;
+const enc_sub_reg = asmenc.enc_sub_reg;
+const enc_cmp_imm = asmenc.enc_cmp_imm;
+const enc_cmp_reg = asmenc.enc_cmp_reg;
+const enc_and_reg = asmenc.enc_and_reg;
+const enc_orr_reg = asmenc.enc_orr_reg;
+const enc_eor_reg = asmenc.enc_eor_reg;
+const enc_b = asmenc.enc_b;
+const enc_bl = asmenc.enc_bl;
+const enc_b_cond = asmenc.enc_b_cond;
+const enc_cbz = asmenc.enc_cbz;
+const enc_cbnz = asmenc.enc_cbnz;
+const enc_adr = asmenc.enc_adr;
+const enc_adrp = asmenc.enc_adrp;
+const enc_ldr_literal = asmenc.enc_ldr_literal;
+const enc_ldr = asmenc.enc_ldr;
+const enc_str = asmenc.enc_str;
+const enc_blr = asmenc.enc_blr;
+const enc_ret = asmenc.enc_ret;
+const enc_svc = asmenc.enc_svc;
+const enc_brk = asmenc.enc_brk;
+const nop_enc = asmenc.nop_enc;
+
+const enc_mul = asmenc.enc_mul;
+const enc_udiv = asmenc.enc_udiv;
+const enc_lsl = asmenc.enc_lsl;
+const enc_lsr = asmenc.enc_lsr;
+const enc_lsl_reg = asmenc.enc_lsl_reg;
+const enc_lsr_reg = asmenc.enc_lsr_reg;
+const enc_ldrb = asmenc.enc_ldrb;
+const enc_strb = asmenc.enc_strb;
 
 // ---------------------------------------------------------------------------
 // EL0 seam (the claim-8215 ABI, direct SVCs — same shape as ui.zig)
@@ -108,9 +157,7 @@ pub const max_lines: usize = 256;
 pub const max_line_len: usize = 96;
 pub const max_labels: usize = 64;
 pub const code_max: usize = 4096;
-/// Fixed link address of emitted images — the M22 D1 ELF loader maps the
-/// first PT_LOAD segment here (kernel/src/elf.zig `text_base`).
-pub const image_base: u32 = 0x0040_0000;
+pub const image_base = asmenc.image_base;
 
 pub const ErrorKind = enum {
     too_many_lines,
@@ -163,236 +210,11 @@ const Label = struct {
 };
 
 // ---------------------------------------------------------------------------
-// Encoding helpers — each pinned against known encodings by host tests.
-// ---------------------------------------------------------------------------
-
-pub fn enc_movz(rd: u5, imm16: u16, hw: u2) u32 {
-    return 0xD2800000 | (@as(u32, hw) << 21) | (@as(u32, imm16) << 5) | rd;
-}
-
-pub fn enc_movk(rd: u5, imm16: u16, hw: u2) u32 {
-    return 0xF2800000 | (@as(u32, hw) << 21) | (@as(u32, imm16) << 5) | rd;
-}
-
-/// MOV (register) alias == ORR rd, xzr, rm.
-pub fn enc_mov_reg(rd: u5, rm: u5) u32 {
-    return 0xAA0003E0 | (@as(u32, rm) << 16) | rd;
-}
-
-pub fn enc_add_imm(rn: u5, rd: u5, imm12: u12) u32 {
-    return 0x91000000 | (@as(u32, imm12) << 10) | (@as(u32, rn) << 5) | rd;
-}
-
-pub fn enc_add_reg(rn: u5, rm: u5, rd: u5) u32 {
-    return 0x8B000000 | (@as(u32, rm) << 16) | (@as(u32, rn) << 5) | rd;
-}
-
-pub fn enc_sub_imm(rn: u5, rd: u5, imm12: u12) u32 {
-    return 0xD1000000 | (@as(u32, imm12) << 10) | (@as(u32, rn) << 5) | rd;
-}
-
-pub fn enc_sub_reg(rn: u5, rm: u5, rd: u5) u32 {
-    return 0xCB000000 | (@as(u32, rm) << 16) | (@as(u32, rn) << 5) | rd;
-}
-
-/// CMP immediate == SUBS xzr, rn, #imm12.
-pub fn enc_cmp_imm(rn: u5, imm12: u12) u32 {
-    return 0xF1000000 | (@as(u32, imm12) << 10) | (@as(u32, rn) << 5) | 31;
-}
-
-/// CMP register == SUBS xzr, rn, rm.
-pub fn enc_cmp_reg(rn: u5, rm: u5) u32 {
-    return 0xEB000000 | (@as(u32, rm) << 16) | (@as(u32, rn) << 5) | 31;
-}
-
-pub fn enc_and_reg(rn: u5, rm: u5, rd: u5) u32 {
-    return 0x8A000000 | (@as(u32, rm) << 16) | (@as(u32, rn) << 5) | rd;
-}
-
-pub fn enc_orr_reg(rn: u5, rm: u5, rd: u5) u32 {
-    return 0xAA000000 | (@as(u32, rm) << 16) | (@as(u32, rn) << 5) | rd;
-}
-
-pub fn enc_eor_reg(rn: u5, rm: u5, rd: u5) u32 {
-    return 0xCA000000 | (@as(u32, rm) << 16) | (@as(u32, rn) << 5) | rd;
-}
-
-/// B with a ±128 MiB pc-relative BYTE offset.
-pub fn enc_b(rel_bytes: i32) u32 {
-    const off: u32 = @bitCast(rel_bytes >> 2);
-    return 0x14000000 | (off & 0x03FF_FFFF);
-}
-
-/// BL with a ±128 MiB pc-relative BYTE offset.
-pub fn enc_bl(rel_bytes: i32) u32 {
-    const off: u32 = @bitCast(rel_bytes >> 2);
-    return 0x94000000 | (off & 0x03FF_FFFF);
-}
-
-pub const Cond = enum(u4) { eq = 0, ne = 1, cs = 2, cc = 3, mi = 4, pl = 5, vs = 6, vc = 7, hi = 8, ls = 9, ge = 10, lt = 11, gt = 12, le = 13, al = 14 };
-
-/// B.cond with a ±1 MiB pc-relative BYTE offset.
-pub fn enc_b_cond(cond: Cond, rel_bytes: i32) u32 {
-    const off: u32 = @bitCast(rel_bytes >> 2);
-    return 0x54000000 | ((off & 0x7FFFF) << 5) | @intFromEnum(cond);
-}
-
-pub fn parse_cond(name: []const u8) ?Cond {
-    const map = .{
-        .{ "eq", Cond.eq }, .{ "ne", Cond.ne }, .{ "cs", Cond.cs }, .{ "hs", Cond.cs },
-        .{ "cc", Cond.cc }, .{ "lo", Cond.cc }, .{ "mi", Cond.mi }, .{ "pl", Cond.pl },
-        .{ "vs", Cond.vs }, .{ "vc", Cond.vc }, .{ "hi", Cond.hi }, .{ "ls", Cond.ls },
-        .{ "ge", Cond.ge }, .{ "lt", Cond.lt }, .{ "gt", Cond.gt }, .{ "le", Cond.le },
-    };
-    inline for (map) |entry| {
-        if (std.mem.eql(u8, entry[0], name)) return entry[1];
-    }
-    return null;
-}
-
-/// CBZ with a ±1 MiB pc-relative BYTE offset.
-pub fn enc_cbz(rt: u5, rel_bytes: i32) u32 {
-    const off: u32 = @bitCast(rel_bytes >> 2);
-    return 0xB4000000 | ((off & 0x7FFFF) << 5) | rt;
-}
-
-/// CBNZ with a ±1 MiB pc-relative BYTE offset.
-pub fn enc_cbnz(rt: u5, rel_bytes: i32) u32 {
-    const off: u32 = @bitCast(rel_bytes >> 2);
-    return 0xB5000000 | ((off & 0x7FFFF) << 5) | rt;
-}
-
-/// ADR with a ±1 MiB pc-relative BYTE offset.
-pub fn enc_adr(rd: u5, rel_bytes: i32) u32 {
-    const off: u32 = @bitCast(rel_bytes);
-    const immlo: u32 = off & 0x3;
-    const immhi: u32 = (off >> 2) & 0x7FFFF;
-    return 0x10000000 | (immlo << 29) | (immhi << 5) | rd;
-}
-
-/// ADRP with a ±4 GiB PAGE offset (target_page - pc_page).
-pub fn enc_adrp(rd: u5, page_delta: i32) u32 {
-    const off: u32 = @bitCast(page_delta);
-    const immlo: u32 = off & 0x3;
-    const immhi: u32 = (off >> 2) & 0x7FFFF;
-    return 0x90000000 | (immlo << 29) | (immhi << 5) | rd;
-}
-
-/// LDR literal (64-bit) with a ±1 MiB pc-relative BYTE offset.
-pub fn enc_ldr_literal(rt: u5, rel_bytes: i32) u32 {
-    const off: u32 = @bitCast(rel_bytes >> 2);
-    return 0x58000000 | ((off & 0x7FFFF) << 5) | rt;
-}
-
-/// LDR unsigned offset: base register + scaled imm12 ([xn] or [xn, #imm]).
-pub fn enc_ldr(rn: u5, rt: u5, imm12: u12) u32 {
-    return 0xF9400000 | (@as(u32, imm12) << 10) | (@as(u32, rn) << 5) | rt;
-}
-
-/// STR unsigned offset: base register + scaled imm12.
-pub fn enc_str(rn: u5, rt: u5, imm12: u12) u32 {
-    return 0xF9000000 | (@as(u32, imm12) << 10) | (@as(u32, rn) << 5) | rt;
-}
-
-pub fn enc_blr(rn: u5) u32 {
-    return 0xD63F0000 | (@as(u32, rn) << 5);
-}
-
-pub fn enc_ret(rn: u5) u32 {
-    if (rn == 30) return 0xD65F03C0; // canonical RET encoding
-    return 0xD65F0000 | (@as(u32, rn) << 5);
-}
-
-pub const nop_enc: u32 = 0xD503201F;
-
-pub fn enc_svc(imm16: u16) u32 {
-    return 0xD4000001 | (@as(u32, imm16) << 5);
-}
-
-pub fn enc_brk(imm16: u16) u32 {
-    return 0xD4200000 | (@as(u32, imm16) << 5);
-}
-
-// ---------------------------------------------------------------------------
 // Lexical helpers
 // ---------------------------------------------------------------------------
 
 fn is_ident_char(c: u8) bool {
     return std.ascii.isAlphanumeric(c) or c == '_' or c == '.';
-}
-
-/// Parse "x0".."x30", "w0".."w30", "sp"/"xzr"/"wzr", "lr". Returns the 5-bit
-/// register number (sp/xzr/wzr = 31).
-pub fn parse_register(token: []const u8) ?u5 {
-    if (token.len == 0) return null;
-    var lower: [8]u8 = undefined;
-    if (token.len > lower.len) return null;
-    for (token, 0..) |c, i| lower[i] = std.ascii.toLower(c);
-    const t = lower[0..token.len];
-    if (std.mem.eql(u8, t, "xzr") or std.mem.eql(u8, t, "wzr") or std.mem.eql(u8, t, "sp")) return 31;
-    if (std.mem.eql(u8, t, "lr")) return 30;
-    if (t[0] != 'x' and t[0] != 'w') return null;
-    const num = std.fmt.parseInt(u8, t[1..], 10) catch return null;
-    if (num > 30) return null;
-    return @intCast(num);
-}
-
-/// Parse "#42", "#0x2a", "42", "0x2a" — decimal or hex immediate.
-pub fn parse_immediate(token: []const u8) ?u64 {
-    var t = token;
-    if (t.len > 0 and t[0] == '#') t = t[1..];
-    if (t.len == 0) return null;
-    if (t.len >= 3 and t[0] == '0' and (t[1] == 'x' or t[1] == 'X')) {
-        return std.fmt.parseInt(u64, t[2..], 16) catch null;
-    }
-    return std.fmt.parseInt(u64, t, 10) catch null;
-}
-
-const Operands = struct {
-    items: [4][]const u8 = [_][]const u8{""} ** 4,
-    count: usize = 0,
-    pub fn get(self: @This(), i: usize) []const u8 {
-        return self.items[i];
-    }
-};
-
-/// Split an operand field on commas (whitespace-trimmed). Bracket contents
-/// "[x1, #8]" stay ONE operand (comma splitting is bracket-aware).
-pub fn split_operands(field: []const u8) Operands {
-    var ops = Operands{};
-    var start: usize = 0;
-    var depth: usize = 0;
-    var i: usize = 0;
-    while (i <= field.len) : (i += 1) {
-        const at_end = i == field.len;
-        if (!at_end and field[i] == '[') depth += 1;
-        if (!at_end and field[i] == ']') depth -|= 1;
-        if ((at_end or field[i] == ',') and depth == 0) {
-            const raw = field[start..i];
-            var s: usize = 0;
-            var e: usize = raw.len;
-            while (s < e and std.ascii.isWhitespace(raw[s])) s += 1;
-            while (e > s and std.ascii.isWhitespace(raw[e - 1])) e -= 1;
-            if (e > s and ops.count < ops.items.len) {
-                ops.items[ops.count] = raw[s..e];
-                ops.count += 1;
-            }
-            start = i + 1;
-        }
-        if (at_end) break;
-    }
-    return ops;
-}
-
-/// Strip a trailing "// comment" and both-side whitespace from a line.
-pub fn strip_comment(raw: []const u8) []const u8 {
-    var line = raw;
-    if (std.mem.indexOf(u8, line, "//")) |idx| line = line[0..idx];
-    while (line.len > 0 and std.ascii.isWhitespace(line[0])) line = line[1..];
-    while (line.len > 0 and std.ascii.isWhitespace(line[line.len - 1])) line = line[0 .. line.len - 1];
-    // Also strip a trailing '\r' for CRLF sources.
-    if (line.len > 0 and line[line.len - 1] == '\r') line = line[0 .. line.len - 1];
-    return line;
 }
 
 /// Split "mnemonic operands" — mnemonic up to first whitespace.
@@ -544,6 +366,12 @@ fn encode(ctx: *const EncodeCtx, mnem_in: []const u8, ops: Operands) EncodeResul
     if (eq(mnem, "str")) {
         return encode_ldr_str(ctx, ops, false);
     }
+    if (eq(mnem, "ldrb")) {
+        return encode_ldrb_strb(ctx, ops, true);
+    }
+    if (eq(mnem, "strb")) {
+        return encode_ldrb_strb(ctx, ops, false);
+    }
     if (eq(mnem, "movz") or eq(mnem, "movk")) {
         if (ops.count < 2) return fail(ctx.line, .missing_operand);
         const rd = parse_register(ops.items[0]) orelse return fail(ctx.line, .bad_register);
@@ -609,6 +437,24 @@ fn encode(ctx: *const EncodeCtx, mnem_in: []const u8, ops: Operands) EncodeResul
         if (eq(mnem, "orr")) return .{ .word = enc_orr_reg(rn, rm, rd) };
         return .{ .word = enc_eor_reg(rn, rm, rd) };
     }
+    if (eq(mnem, "mul") or eq(mnem, "udiv")) {
+        if (ops.count != 3) return fail(ctx.line, .missing_operand);
+        const rd = parse_register(ops.items[0]) orelse return fail(ctx.line, .bad_register);
+        const rn = parse_register(ops.items[1]) orelse return fail(ctx.line, .bad_register);
+        const rm = parse_register(ops.items[2]) orelse return fail(ctx.line, .bad_register);
+        return .{ .word = if (eq(mnem, "mul")) enc_mul(rn, rm, rd) else enc_udiv(rn, rm, rd) };
+    }
+    if (eq(mnem, "lsl") or eq(mnem, "lsr")) {
+        if (ops.count != 3) return fail(ctx.line, .missing_operand);
+        const rd = parse_register(ops.items[0]) orelse return fail(ctx.line, .bad_register);
+        const rn = parse_register(ops.items[1]) orelse return fail(ctx.line, .bad_register);
+        if (parse_immediate(ops.items[2])) |imm| {
+            if (imm > 63) return fail(ctx.line, .bad_immediate);
+            return .{ .word = if (eq(mnem, "lsl")) enc_lsl(rn, rd, @intCast(imm)) else enc_lsr(rn, rd, @intCast(imm)) };
+        }
+        const rm = parse_register(ops.items[2]) orelse return fail(ctx.line, .bad_register);
+        return .{ .word = if (eq(mnem, "lsl")) enc_lsl_reg(rn, rm, rd) else enc_lsr_reg(rn, rm, rd) };
+    }
     return fail(ctx.line, .bad_instruction);
 }
 
@@ -654,6 +500,27 @@ fn encode_ldr_str(ctx: *const EncodeCtx, ops: Operands, is_load: bool) EncodeRes
     }
     const rn = parse_register(base_tok) orelse return fail(ctx.line, .bad_register);
     return .{ .word = if (is_load) enc_ldr(rn, rt, imm12) else enc_str(rn, rt, imm12) };
+}
+
+fn encode_ldrb_strb(ctx: *const EncodeCtx, ops: Operands, is_load: bool) EncodeResult {
+    if (ops.count != 2) return fail(ctx.line, .missing_operand);
+    const rt = parse_register(ops.items[0]) orelse return fail(ctx.line, .bad_register);
+    const mem = ops.items[1];
+    if (mem.len < 3 or mem[0] != '[') return fail(ctx.line, .bad_operand_form);
+    const close = std.mem.indexOfScalar(u8, mem, ']') orelse return fail(ctx.line, .bad_operand_form);
+    if (close != mem.len - 1) return fail(ctx.line, .bad_operand_form);
+    const inner = mem[1..close];
+    var base_tok = inner;
+    var imm12: u12 = 0;
+    if (std.mem.indexOfScalar(u8, inner, ',')) |ci| {
+        base_tok = std.mem.trim(u8, inner[0..ci], " \t");
+        const imm_tok = std.mem.trim(u8, inner[ci + 1 ..], " \t");
+        const imm = parse_immediate(imm_tok) orelse return fail(ctx.line, .bad_immediate);
+        if (imm > 4095) return fail(ctx.line, .bad_immediate);
+        imm12 = @intCast(imm);
+    }
+    const rn = parse_register(base_tok) orelse return fail(ctx.line, .bad_register);
+    return .{ .word = if (is_load) enc_ldrb(rn, rt, imm12) else enc_strb(rn, rt, imm12) };
 }
 
 // ---------------------------------------------------------------------------
@@ -778,56 +645,6 @@ pub fn error_name(kind: ErrorKind) []const u8 {
         .code_overflow => "output exceeds 4096 bytes",
         .no_start_label => "no '_start' label defined",
     };
-}
-
-// ---------------------------------------------------------------------------
-// Minimal AArch64 ELF32 emission (the M22 D1 loader contract): ELF header
-// (52 B) + one PT_LOAD phdr (32 B) + code, single R+X segment linked at
-// image_base. Byte-for-byte the same shape tools/mkhello-elf.py emits.
-// ---------------------------------------------------------------------------
-
-pub const elf_header_size: usize = 52;
-pub const elf_phdr_size: usize = 32;
-pub const elf_code_offset: usize = elf_header_size + elf_phdr_size;
-
-pub const ElfError = error{too_large};
-
-/// Build a complete ELF32 executable around `code` into `out`. Returns the
-/// total image size.
-pub fn build_elf32(code: []const u8, entry_off: u32, out: []u8) ElfError!usize {
-    const total = elf_code_offset + code.len;
-    if (total > out.len) return error.too_large;
-
-    @memset(out[0..total], 0);
-    // e_ident
-    out[0] = 0x7f;
-    out[1] = 'E';
-    out[2] = 'L';
-    out[3] = 'F';
-    out[4] = 1; // ELF32
-    out[5] = 1; // little-endian
-    out[6] = 1; // EV_CURRENT
-    std.mem.writeInt(u16, out[16..18], 2, .little); // e_type = ET_EXEC
-    std.mem.writeInt(u16, out[18..20], 0xB7, .little); // e_machine = EM_AARCH64
-    std.mem.writeInt(u32, out[20..24], 1, .little); // e_version
-    std.mem.writeInt(u32, out[24..28], image_base + entry_off, .little); // e_entry
-    std.mem.writeInt(u32, out[28..32], @intCast(elf_header_size), .little); // e_phoff
-    std.mem.writeInt(u16, out[40..42], @intCast(elf_header_size), .little); // e_ehsize
-    std.mem.writeInt(u16, out[42..44], @intCast(elf_phdr_size), .little); // e_phentsize
-    std.mem.writeInt(u16, out[44..46], 1, .little); // e_phnum
-
-    const p = elf_header_size;
-    std.mem.writeInt(u32, out[p..][0..4], 1, .little); // PT_LOAD
-    std.mem.writeInt(u32, out[p + 4 ..][0..4], @intCast(elf_code_offset), .little); // p_offset
-    std.mem.writeInt(u32, out[p + 8 ..][0..4], image_base, .little); // p_vaddr
-    std.mem.writeInt(u32, out[p + 12 ..][0..4], image_base, .little); // p_paddr
-    std.mem.writeInt(u32, out[p + 16 ..][0..4], @intCast(code.len), .little); // p_filesz
-    std.mem.writeInt(u32, out[p + 20 ..][0..4], @intCast(code.len), .little); // p_memsz
-    std.mem.writeInt(u32, out[p + 24 ..][0..4], 5, .little); // R+X
-    std.mem.writeInt(u32, out[p + 28 ..][0..4], 0x1000, .little); // page aligned
-
-    @memcpy(out[elf_code_offset..][0..code.len], code);
-    return total;
 }
 
 // ---------------------------------------------------------------------------
@@ -987,6 +804,14 @@ test "asm: single-instruction encodings match known words" {
     try testing.expectEqual(@as(u32, 0xCA010000), first_word("eor x0, x0, x1"));
     try testing.expectEqual(@as(u32, 0xD63F0040), first_word("blr x2"));
     try testing.expectEqual(@as(u32, 0xD4200000), first_word("brk #0"));
+
+    // Expanded instructions
+    try testing.expectEqual(@as(u32, 0x9B027C20), first_word("mul x0, x1, x2"));
+    try testing.expectEqual(@as(u32, 0x9AC20820), first_word("udiv x0, x1, x2"));
+    try testing.expectEqual(@as(u32, 0xD37CEC20), first_word("lsl x0, x1, #4"));
+    try testing.expectEqual(@as(u32, 0xD344FC20), first_word("lsr x0, x1, #4"));
+    try testing.expectEqual(@as(u32, 0x9AC22020), first_word("lsl x0, x1, x2"));
+    try testing.expectEqual(@as(u32, 0x9AC22420), first_word("lsr x0, x1, x2"));
 }
 test "asm: branch offsets resolve forward and backward through labels" {
     var code: [code_max]u8 = undefined;
@@ -1023,6 +848,10 @@ test "asm: ldr/str memory forms scale their immediate" {
     try testing.expectEqual(@as(u32, 0xF9400420), first_word("ldr x0, [x1, #8]")); // (8/8)<<10
     try testing.expectEqual(@as(u32, 0xF9000420), first_word("str x0, [x1, #8]"));
     try testing.expectEqual(@as(u32, 0xF90003E0), first_word("str x0, [sp]"));
+
+    // Byte forms (unscaled immediate)
+    try testing.expectEqual(@as(u32, 0x39400820), first_word("ldrb w0, [x1, #2]"));
+    try testing.expectEqual(@as(u32, 0x39000820), first_word("strb w0, [x1, #2]"));
 }
 
 test "asm: register and immediate parsing covers aliases" {

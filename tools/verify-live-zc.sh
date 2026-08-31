@@ -1,0 +1,126 @@
+#!/usr/bin/env bash
+#
+# verify-live-zc.sh -- M32 Lane 2 class-B gate (issue #620): the
+# on-machine Zig subset compiler produces an ELF the on-machine loader runs.
+#
+# The chain, all asserted in vm-serial.log:
+#   1. `write MAIN.Z ...` stages a simple Z program on the ESP.
+#   2. `exec ZC.BIN /esp/MAIN.Z /esp/MAIN.ELF` — ZC.BIN reads the source,
+#      compiles it, and writes a minimal AArch64 ELF32 executable.
+#   3. `exec MAIN.ELF` — the loader maps and runs the compiled ELF: it
+#      triggers sys_exit with status 72.
+#   4. The shell stays responsive.
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+source tools/lib/gate-run.sh
+
+SUFFIX="${DIPSHIT_GATE_SUFFIX:-}"
+art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
+
+GATE_LOG="$(art m32-zc-live.txt)"
+exec > >(tee "$GATE_LOG") 2>&1
+trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
+
+BOOTS="${BOOTS:-1}"
+REPORT="$(art live-zc-report.txt)"
+STATIC_EXIT_LINE="tasks user-el0 exited status=7"
+ZC_WROTE_LINE="zc: successfully compiled in-guest"
+EXIT_LINE="tasks user-exec exited status=72"
+REAP_LINE="tasks user-exec reaped"
+SCRIPT2="artifacts/live-zc-script2.txt"
+
+echo "=== verify-live-zc: M32 Lane 2 — compile ON the machine, run the output, $BOOTS boot(s) ==="
+zig version
+swift --version 2>&1 | head -1
+sw_vers
+REVISION="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
+BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
+DIRTY="$(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
+echo "revision: $REVISION branch=$BRANCH boots=$BOOTS dirty-files=$DIRTY"
+
+zig fmt --check boot/src/*.zig kernel/src/*.zig user/src/*.zig build.zig
+zig build
+zig build image
+swift build --package-path host/vm-runner --configuration release
+codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
+
+# --- per-run isolation -------------------------------------------------------------
+gate_begin live-zc
+echo "run dir: $RUN_DIR"
+SCRIPT="$RUN_DIR/script.txt"
+
+# Stage a tiny program that exits 72.
+# ZC.BIN is DSK3 so the kernel refuses args; use the no-arg form which
+# defaults to reading /esp/MAIN.Z and writing /esp/MAIN.ELF.
+SRC='fn main() void { svc(3, 72); }'
+printf 'ls\nwrite MAIN.Z '\''%s'\''\nexec ZC.BIN\n' "$SRC" > "$SCRIPT"
+printf 'mount esp\nls\nexec MAIN.ELF\necho rx-zc-ok\n' > "$SCRIPT2"
+
+run_one() {
+    local tag="$1"
+    local run_log="$(art live-zc-run-$tag.txt)"
+    local serial_copy="$(art live-zc-serial-$tag.log)"
+    rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial-$tag.log"
+
+    set +e
+    host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
+        --serial "$RUN_DIR/vm-serial-$tag.log" \
+        --script "$SCRIPT" --script-after "$STATIC_EXIT_LINE" \
+        --script2 "$SCRIPT2" --script2-after "$ZC_WROTE_LINE" \
+        --script-expect "$EXIT_LINE" --timeout 90 > "$run_log" 2>&1
+    local rc=$?
+    set -e
+    [ -f "$RUN_DIR/vm-serial-$tag.log" ] && cp "$RUN_DIR/vm-serial-$tag.log" "$(art live-zc-serial-$tag.log)" || true
+    local SER="$serial_copy"
+
+    local bytes=0 banner=0 listed=0 written=0 compiled=0 loaded=0 exit72=0 reaped=0 echo_ok=0 fatal=0
+    if [ -f "$SER" ]; then
+        bytes="$(wc -c < "$SER" | tr -d ' ')"
+        [ "$(grep -aFxc -- "DipshitOS kernel has seized control." "$SER" || true)" = 1 ] && banner=1
+        [ "$(grep -aFc -- "MAIN.Z" "$SER" || true)" -ge 2 ] && listed=1
+        [ "$(grep -aFc -- "write: ok" "$SER" || true)" = 1 ] && written=1
+        [ "$(grep -aFc -- "zc: successfully compiled in-guest" "$SER" || true)" = 1 ] && compiled=1
+        [ "$(grep -aFc -- "exec: loaded MAIN.ELF size=" "$SER" || true)" = 1 ] && loaded=1
+        [ "$(grep -aFxc -- "$EXIT_LINE" "$SER" || true)" -ge 1 ] && exit72=1
+        [ "$(grep -aFc -- "$REAP_LINE" "$SER" || true)" -ge 2 ] && reaped=1
+        [ "$(grep -aFxc -- "rx-zc-ok" "$SER" || true)" = 1 ] && echo_ok=1
+        grep -qF -- "[EXC] parking:" "$SER" && fatal=1 || true
+    fi
+    echo "$tag: runner-rc=$rc serial-bytes=$bytes banner=$banner listed=$listed written=$written compiled=$compiled loaded=$loaded exit72=$exit72 reaped=$reaped echo=$echo_ok fatal=$fatal" | tee -a "$REPORT"
+    [ "$rc" = 0 ] && [ "$banner" = 1 ] && [ "$listed" = 1 ] && [ "$written" = 1 ] && \
+        [ "$compiled" = 1 ] && [ "$loaded" = 1 ] && [ "$exit72" = 1 ] && \
+        [ "$reaped" = 1 ] && [ "$echo_ok" = 1 ] && [ "$fatal" = 0 ]
+}
+
+: > "$REPORT"
+{
+    echo "DIPSHITOS live compiler gate (M32 Lane 2, issue #620)"
+    echo "revision: $REVISION branch=$BRANCH boots=$BOOTS dirty-files=$DIRTY"
+    echo "script: $(cat "$SCRIPT" | tr '\n' '|')"
+    echo "date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    echo
+} >> "$REPORT"
+
+pass=0
+n=0
+while [ "$n" -lt "$BOOTS" ]; do
+    n=$((n + 1))
+    echo
+    echo "=== live-zc boot $n ==="
+    if run_one "$(printf '%02d' "$n")"; then pass=$((pass + 1)); fi
+done
+
+echo
+echo "=== result ==="
+if [ "$pass" = "$BOOTS" ]; then
+    echo "verify-live-zc: PASS — ZC.BIN compiled in-guest to a valid AArch64 ELF32 on the machine, and executed (exit status 72 observed) ($pass/$BOOTS boot(s))."
+    echo "PASS: $pass/$BOOTS" >> "$REPORT"
+    exit 0
+fi
+echo "verify-live-zc: FAILED — $pass/$BOOTS boot(s) passed; see $REPORT and per-boot logs."
+echo "FAIL: $pass/$BOOTS" >> "$REPORT"
+exit 1
