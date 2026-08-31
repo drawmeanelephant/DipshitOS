@@ -46,7 +46,7 @@ two EL0 roots mapping one physical region).
 | SB6 | **Perf payoff** — measure seam B vs. the WMS9 baselines (`artifacts/wms9-fill-reduction.md`). | 4 — payoff/perf | SB5 | ⬜ | — | The issue's "measured, not asserted" requirement. **Gate: documented before/after on the WMS9 dynamic + static apps.** |
 
 
-### GitHub tracking (milestone #17 — "M33 — Seam B: full pixel ownership")
+### GitHub tracking ([milestone #17](https://github.com/drawmeanelephant/DipshitOS/milestone/17) — "M33 — Seam B: full pixel ownership")
 
 Each card is a milestone issue: SB1 #694 (closed), SB2 #695 (closed), SB3 #696
 (closed), SB4 #691, SB5 #692, SB6 #693. The seam-B umbrella is issue #630.
