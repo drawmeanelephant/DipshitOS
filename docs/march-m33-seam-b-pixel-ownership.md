@@ -49,7 +49,7 @@ two EL0 roots mapping one physical region).
 ### GitHub tracking ([milestone #17](https://github.com/drawmeanelephant/DipshitOS/milestone/17) — "M33 — Seam B: full pixel ownership")
 
 Each card is a milestone issue: SB1 #694 (closed), SB2 #695 (closed), SB3 #696
-(closed), SB4 #691 (done, PR #713), SB5 #692, SB6 #693. The seam-B umbrella is issue #630.
+(closed), SB4 #691 (done, PR #713), SB5 #692 (done, PR #715), SB6 #693. The seam-B umbrella is issue #630.
 
 ### Dependency phases (why this order)
 
