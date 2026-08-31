@@ -235,4 +235,11 @@ auto-mirrors RO at bind time (the SB2 mirror in the WM's own root).
 Live gate PASS (`verify-live-sb3-surface-handoff.sh`, headless VZ): a migrated
 app stored `0xAB` with a plain write and the registered WM read it RO — the
 parity proof vs the old fill path._
+Damage transport FREEZED by claim 2382 (M33 SB4, 2026-08-31): the
+COMPOSITE_TICK (kind 18) message is extended — its previously-reserved `arg1`
+now carries a per-surface dirty bitmask (bit i <=> user surface i +
+`user_window_id_base`) so the registered WM learns which surfaces changed each
+tick; the exact rects come via a kernel `user_damage(id)` accessor, and the
+kernel's own user-window compositor repaints only the tracked damage rect
+(recorded in `dui`'s `damage=`/`last=` columns).
 

@@ -156,7 +156,9 @@ Notes:
 
 Fixed-width prefix, `cmd=` is the last field and may contain spaces. A
 preflight can extract records with
-`sed -n '/^<!-- GATE_INVENTORY:START -->$/,/^<!-- GATE_INVENTORY:END -->$/p'`
+`sed -n '/^<!-- GATE_INVENTORY:START -->$/,/^
+GATE id=live-sb4-damage-tracking class=B kind=gate ci=no apple=yes gate=yes cmd=bash tools/verify-live-sb4-damage-tracking.sh  # claim 2382 (seam B, issue #630): M33 SB4 rect-granular damage - SB4DAM.BIN fills two rects (8,8,48,48)+(100,60,16,16) with no yield so they union into {8,8,108,68}; dui's new last= column shows composite repainted exactly that union, not the whole 128x96 window - one rect writes -> one rect repaints
+<!-- GATE_INVENTORY:END -->$/p'`
 and filter on `class=…`, `ci=…`, `apple=…`, `gate=…`.
 
 <!-- GATE_INVENTORY:START -->

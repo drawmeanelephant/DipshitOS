@@ -160,6 +160,25 @@ pub const Window = struct {
     kind: Kind,
     visible: bool,
     dirty: bool,
+    /// M33 SB4 (claim 2382): rect-granular damage. `damaged` means the
+    /// tracked `dx/dy/dw/dh` union is valid; when false the whole window
+    /// is treated as dirty (the pre-SB4 whole-window repaint), so every
+    /// existing `.dirty = true` site keeps its current behavior. `user_fill`
+    /// sets the EXACT written rect so composite repaints only that region.
+    damaged: bool = false,
+    dx: u32 = 0,
+    dy: u32 = 0,
+    dw: u32 = 0,
+    dh: u32 = 0,
+    /// M33 SB4 (claim 2382): the LAST damage rect composite consumed (what
+    /// paint() actually repainted) — populated with the exact rect for a
+    /// partial repaint; 0,0,0,0 means no partial repaint was recorded yet
+    /// (whole-window or never). Makes the rect-granular gate observable on
+    /// serial even AFTER the drain consumes the pending damage (no race).
+    last_dx: u32 = 0,
+    last_dy: u32 = 0,
+    last_dw: u32 = 0,
+    last_dh: u32 = 0,
     /// Card G6 teardown follow-on (per-process ownership): the owning
     /// process id for a `.user` window (null for the fixed terminal +
     /// clock, which are kernel-owned). The syscall layer records the
@@ -1157,6 +1176,86 @@ pub fn mark_dirty(id: u8) bool {
     return false;
 }
 
+/// M33 SB4 (claim 2382): union-rect a partial damage region into a window's
+/// tracked damage rect, marking it dirty. When called while `damaged` is
+/// already true, the tracked rect EXPANDS to the bounding box of the new
+/// rect (damage is monotonic until composite consumes it). Returns false for
+/// an unknown id. The rect is CLAMPED to the window's own bounds so a caller
+/// can never push damage outside the repaintable surface.
+pub fn mark_damage(id: u8, x: u32, y: u32, w: u32, h: u32) bool {
+    if (w == 0 or h == 0) return false;
+    var i: usize = 0;
+    while (i < win_count) : (i += 1) {
+        if (windows[i].id != id) continue;
+        const win = &windows[i];
+        // Clamp to the window (local coords; caller passes in-window rects).
+        const cx = x;
+        const cy = y;
+        var cw = w;
+        var ch = h;
+        if (x >= win.w or y >= win.h) return true; // out-of-window -> ignore
+        if (x + w > win.w) cw = win.w - x;
+        if (y + h > win.h) ch = win.h - y;
+        const ex = cx + cw;
+        const ey = cy + ch;
+        if (win.damaged) {
+            const ox = win.dx;
+            const oy = win.dy;
+            const oex = ox + win.dw;
+            const oey = oy + win.dh;
+            win.dx = @min(ox, cx);
+            win.dy = @min(oy, cy);
+            win.dw = @max(oex, ex) - win.dx;
+            win.dh = @max(oey, ey) - win.dy;
+        } else {
+            win.dx = cx;
+            win.dy = cy;
+            win.dw = cw;
+            win.dh = ch;
+            win.damaged = true;
+        }
+        win.dirty = true;
+        return true;
+    }
+    return false;
+}
+
+/// M33 SB4: the per-surface damage rect for a user window, or null when it
+/// has no rect-granular (partial) damage pending (whole-window dirty only).
+pub const DamageRect = struct {
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+};
+pub fn user_damage(id: u8) ?DamageRect {
+    const win = find_user_window(id) orelse return null;
+    if (!win.damaged) return null;
+    return .{ .x = win.dx, .y = win.dy, .w = win.dw, .h = win.dh };
+}
+
+/// M33 SB4: a per-surface dirty bitmask for the COMPOSITE_TICK (kind-18)
+/// damage payload — bit i is set when user window (i + user_window_id_base)
+/// has pending damage this tick. The registered WM consumes this to know
+/// WHICH surfaces changed (the rects come via `user_damage`); SB5's compose-N
+/// repaints only those.
+pub fn user_damage_mask() u32 {
+    var mask: u32 = 0;
+    var i: usize = 0;
+    while (i < win_count) : (i += 1) {
+        // Only `.user` surfaces carry the bitmask — the fixed layers (terminal
+        // 0, wallpaper 254, taskbar 255, dock 253) are compositor-owned, not
+        // user surfaces, and their ids would overflow the mask shift.
+        if (windows[i].kind != .user) continue;
+        const idx = windows[i].id - user_window_id_base;
+        if (idx >= user_windows_max) continue;
+        if (windows[i].dirty) {
+            mask |= (@as(u32, 1) << @intCast(idx));
+        }
+    }
+    return mask;
+}
+
 /// Mark the terminal (window 0) dirty — the Road Pops tee's write path.
 pub fn mark_terminal_dirty() void {
     if (win_count > 0) windows[0].dirty = true;
@@ -1260,7 +1359,11 @@ pub fn user_fill(id: u8, x: u32, y: u32, w: u32, h: u32, rgb: u32) bool {
         if (idx >= user_windows_max) return false;
         fill_rect(@ptrCast(&user_bufs[idx]), user_buf_w * 4, x, y, w, h, rgb);
     }
-    win.dirty = true;
+    // M33 SB4 (claim 2382): record the EXACT written rect as the surface's
+    // damage, so composite (and, via COMPOSITE_TICK, the WM) repaints only
+    // this region — the rect-granular gate (one rect writes -> one rect
+    // repaints), not a whole-window present.
+    _ = mark_damage(id, x, y, w, h);
     return true;
 }
 
@@ -3070,6 +3173,26 @@ fn paint(w: *Window) void {
             // window/surface size on the migrated path.
             const bw = @min(w.w, user_buf_w);
             const bh = @min(w.h, user_buf_h);
+            // M33 SB4 (claim 2382): rect-granular repaint — when this window
+            // carries a partial damage rect, blit ONLY that region (from its
+            // back-buffer origin to the scanout origin), not the whole window.
+            // Whole-window ops (move/focus/fade) leave `damaged` false -> full
+            // blit, so the pre-SB4 path is unchanged.
+            var src_off: usize = 0;
+            var dest_x: u32 = w.x;
+            var dest_y: u32 = w.y;
+            var sw = bw;
+            var sh = bh;
+            if (w.damaged) {
+                const sx = @min(w.dx, bw);
+                const sy = @min(w.dy, bh);
+                sw = @min(w.dw, bw - @min(w.dx, bw));
+                sh = @min(w.dh, bh - @min(w.dy, bh));
+                dest_x = w.x + sx;
+                dest_y = w.y + sy;
+                src_off = @as(usize, sy) * src_stride + @as(usize, sx) * 4;
+            }
+            const src_ptr2: [*]const u8 = src_ptr + src_off;
             // Arc4 #239: during fade-in, blend with alpha over the
             // background (wallpaper/terminal already composited below).
             const alpha: u16 = if (w.fade_phase == 1)
@@ -3082,24 +3205,24 @@ fn paint(w: *Window) void {
                 blit_rect_alpha(
                     @ptrCast(&virtio_gpu.gpu_fb),
                     virtio_gpu.fb_width * 4,
-                    src_ptr,
+                    src_ptr2,
                     src_stride,
-                    w.x,
-                    w.y,
-                    bw,
-                    bh,
+                    dest_x,
+                    dest_y,
+                    sw,
+                    sh,
                     alpha,
                 );
             } else {
                 blit_rect(
                     @ptrCast(&virtio_gpu.gpu_fb),
                     virtio_gpu.fb_width * 4,
-                    src_ptr,
+                    src_ptr2,
                     src_stride,
-                    w.x,
-                    w.y,
-                    bw,
-                    bh,
+                    dest_x,
+                    dest_y,
+                    sw,
+                    sh,
                 );
             }
         },
@@ -3280,7 +3403,17 @@ pub fn composite() virtio_gpu.CmdResult {
             continue;
         }
         paint(w);
+        // M33 SB4 (claim 2382): record the rect paint() actually repainted so
+        // the gate can observe it after the drain (unless whole-window, in
+        // which case damaged was false and we leave the prior last_*).
+        if (w.damaged) {
+            w.last_dx = w.dx;
+            w.last_dy = w.dy;
+            w.last_dw = w.dw;
+            w.last_dh = w.dh;
+        }
         w.dirty = false;
+        w.damaged = false; // the tracked damage rect was consumed by paint
     }
     // Arc4 #239: advance fade-in ticks after painting. Each composite
     // frame increments the tick; after 2 × fade_half_frames the fade
@@ -4110,6 +4243,47 @@ test "driving_award: user_open/fill/present round-trips a bounded user window" {
     try std.testing.expectEqual(@as(u8, 0), user_bufs[0][(100 * user_buf_w + 200) * 4 + 0]);
     try std.testing.expect(user_present(2));
     try std.testing.expect(windows[4].dirty);
+}
+
+test "driving_award: SB4 rect-granular damage is exact, unions, and masks (claim 2382)" {
+    arm();
+    // One 512x384 window (id 2). A single fill records the EXACT written rect.
+    try std.testing.expectEqual(UserOpenResult{ .opened = 2 }, user_open(64, 64, 512, 384, 7));
+    try std.testing.expect(user_fill(2, 8, 8, 48, 48, 0xff0000));
+    // The damage is the written rect — NOT the whole 512x384 window.
+    try std.testing.expectEqual(DamageRect{ .x = 8, .y = 8, .w = 48, .h = 48 }, user_damage(2).?);
+    // Union-rect: a second fill expands to the bounding box.
+    try std.testing.expect(user_fill(2, 120, 60, 16, 16, 0x00ff00));
+    try std.testing.expectEqual(DamageRect{ .x = 8, .y = 8, .w = 128, .h = 68 }, user_damage(2).?);
+    // The COMPOSITE_TICK damage mask has bit 0 for surface id 2.
+    try std.testing.expect(user_damage_mask() & 1 != 0);
+    // A second window (id 3) damages its own surface bit, not window 2's.
+    try std.testing.expectEqual(UserOpenResult{ .opened = 3 }, user_open(320, 64, 512, 384, 8));
+    try std.testing.expect(user_fill(3, 0, 0, 10, 10, 0x0000ff));
+    const mask = user_damage_mask();
+    try std.testing.expect(mask & 1 != 0);
+    try std.testing.expect(mask & (1 << 1) != 0);
+    // mark_damage clamps to window bounds and ignores an out-of-window rect.
+    try std.testing.expect(mark_damage(3, 500, 0, 50, 10)); // x+w spills -> clamp, unions to x=0
+    try std.testing.expectEqual(DamageRect{ .x = 0, .y = 0, .w = 512, .h = 10 }, user_damage(3).?);
+    _ = mark_damage(3, 1000, 1000, 5, 5); // out-of-window -> ignored
+    try std.testing.expectEqual(DamageRect{ .x = 0, .y = 0, .w = 512, .h = 10 }, user_damage(3).?);
+    // The drain captures and consumes the damage: after composite, window 2's
+    // LAST-repainted rect == the union {8,8,128,68}, and no pending damage remains.
+    _ = composite();
+    try std.testing.expect(user_damage(2) == null);
+    try std.testing.expect(user_damage(3) == null);
+    {
+        var li: usize = 0;
+        while (li < win_count) : (li += 1) {
+            if (windows[li].id == 2) break;
+        }
+        try std.testing.expect(li < win_count);
+        try std.testing.expectEqual(@as(u32, 8), windows[li].last_dx);
+        try std.testing.expectEqual(@as(u32, 8), windows[li].last_dy);
+        try std.testing.expectEqual(@as(u32, 128), windows[li].last_dw);
+        try std.testing.expectEqual(@as(u32, 68), windows[li].last_dh);
+    }
 }
 
 test "driving_award: WMS4 SET_WINDOW chrome policy + per-window overrides (issue #624)" {
