@@ -2540,82 +2540,16 @@ pub fn pointer_tick(st: input.PointerState, click: ?input.Click) ?u8 {
                     }
                 }
             }
-            // M15 C4: dock icon click — 24 px left bar, 20×20 icons at (2,8+idx*32).
-            // M32 WMS6 Gate D (issue #626): while a WM owns input the raw click
-            // already fanned to it (kind 19 carries the button byte); the WM
-            // hit-tests the icon grid and issues DOCK, so the kernel gates its
-            // OWN dock-click decision off (like the tray-click path, Gate B).
-            if (!wm_owns_input and cursor_x < dock_w and cursor_y < dock_h) {
-                if (cursor_x >= 2 and cursor_x < 22) {
-                    var idx: usize = 0;
-                    while (idx < 5) : (idx += 1) {
-                        const iy = 8 + @as(u32, @intCast(idx)) * 32;
-                        if (cursor_y >= iy and cursor_y < iy + 20) {
-                            // M21 W3: first try to restore a minimized window.
-                            var restored = false;
-                            var k: usize = 0;
-                            while (k < win_count) : (k += 1) {
-                                if (windows[k].kind == .user and windows[k].minimized) {
-                                    _ = restore_from_dock(windows[k].id);
-                                    restored = true;
-                                    break;
-                                }
-                            }
-                            if (!restored) {
-                                var has_user = false;
-                                var kk: usize = 0;
-                                while (kk < win_count) : (kk += 1) {
-                                    if (windows[kk].kind == .user) {
-                                        has_user = true;
-                                        break;
-                                    }
-                                }
-                                if (!has_user) {
-                                    _ = user_open(64, 64, 512, 384, 99);
-                                } else {
-                                    var kkk: usize = 0;
-                                    while (kkk < win_count) : (kkk += 1) {
-                                        if (windows[kkk].kind == .user) {
-                                            _ = focus(windows[kkk].id);
-                                            _ = raise(windows[kkk].id);
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-                            _ = mark_dirty(0);
-                            handled_btn = true;
-                            break;
-                        }
-                    }
-                }
-            }
-            // M21 W5: tray clock click — toggle notification center panel.
-            // M32 WMS6 Gate B (issue #626): while a WM owns input the raw
-            // click already fanned to it (kind 19 WM_POINTER carries the
-            // button byte); the WM decides open/close/dismiss/clear via
-            // NOTIF_CENTER / NOTIF_DISMISS, so the kernel gates its OWN
-            // tray-click decision off (like the keyboard geometry path).
-            if (!handled_btn and !wm_owns_input) {
-                const tr = tray_rect();
-                if (cursor_x >= tr.x and cursor_x < tr.x + tr.w and
-                    cursor_y >= tr.y and cursor_y < tr.y + tr.h)
-                {
-                    notif_center_toggle();
-                    handled_btn = true;
-                }
-            }
-            // M21 W5: notification center panel click handling.
-            if (!handled_btn and !wm_owns_input and notif_center_open) {
-                if (notif_center_hit_test(cursor_x, cursor_y)) |hit| {
-                    if (hit == ~@as(usize, 0)) {
-                        notif_center_clear_all();
-                    } else {
-                        _ = notif_center_dismiss(hit);
-                    }
-                    handled_btn = true;
-                }
-            }
+            // M32 WMS8 Gate 7 (issue #628): the kernel's dock-click, tray-click,
+            // and notification-panel click DECISION blocks are deleted — WMS6
+            // Gates B and D proved the WM owns those decisions (kind-19 ->
+            // NOTIF_CENTER / NOTIF_DISMISS / DOCK) with parity gates green, so
+            // the !wm_owns_input-gated shim copies were dormant whenever a WM is
+            // registered. The applied primitives stay (slot-65 cmds 6/7/9 + the
+            // dui monitor commands drive them; the panel/blit rendering is
+            // unchanged). Shim end-state (intended): with no WM registered,
+            // dock/tray/panel clicks do nothing — the issue's "no compositing
+            // policy" end-state.
             // M27 G2: the about-dialog close-button hit-test is DELETED (M32
             // WMS8 Gate 3, issue #628) — the WM owns the about dialog via
             // slot-65 DIALOG (cmd 11); with a WM registered pointer_tick returns
