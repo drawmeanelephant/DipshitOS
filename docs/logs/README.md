@@ -136,6 +136,7 @@ meaningful — on main.
 | `agent/buffy/m31-dynamic-ecosystem` | [`agent-buffy-m31-dynamic-ecosystem.md`](agent-buffy-m31-dynamic-ecosystem.md) |
 | agent/buffy/m33-sb1-shared-anon-contract | [`agent-buffy-m33-sb1-shared-anon-contract.md`](agent-buffy-m33-sb1-shared-anon-contract.md) |
 | agent/buffy/m33-sb2-shared-anon-capability | [`agent-buffy-m33-sb2-shared-anon-capability.md`](agent-buffy-m33-sb2-shared-anon-capability.md) |
+| agent/buffy/m33-sb3-surface-handoff | [`agent-buffy-m33-sb3-surface-handoff.md`](agent-buffy-m33-sb3-surface-handoff.md) |
 | milestone nine interactive application events (claim 7463) | [`agent-buffy-m9-events.md`](agent-buffy-m9-events.md) |
 | milestone nine tracker (claim 8234) | [`agent-buffy-m9-tracker.md`](agent-buffy-m9-tracker.md) |
 | Roadmap refinement (claim 4951) | [`agent-buffy-roadmap-refinement.md`](agent-buffy-roadmap-refinement.md) |
