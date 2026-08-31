@@ -37,9 +37,16 @@ pub const max_shared_regions: usize = 8;
 /// The grant outcome the D2 rule computes before any leaf is touched. SB2 maps
 /// real pages only for `.grant` results.
 pub const Grant = union(enum) {
-    /// Grant the requestor a READ-ONLY (`sw_cow`) leaf for this region.
+    /// Grant the requestor a READ-ONLY (`sw_cow`) leaf for this region. For the
+    /// OWNER this means "permission to keep your surface" — SB2 does NOT map a
+    /// redundant sw_cow leaf for the owner (its writable leaf is the region's
+    /// creation side, mapped at create). Only NON-owner granted peers get an
+    /// RO/sw_cow leaf from a `.grant` result.
     grant,
-    /// Refuse the request: beat the region table (region already at max).
+    /// Refuse the request: beat the region table (region already at max). This
+    /// is the CREATE-side capacity signal — `create()` returns 0 for a full
+    /// table. `authorize_read` NEVER returns `.capacity` (reads consume no
+    /// descriptor slot); the variant documents the create path for SB2.
     capacity,
     /// Refuse the request: the requestor is not the owner and not an
     /// authorized reader (not the WM, or no WM registered).
@@ -101,7 +108,10 @@ pub fn create(owner_pid: u64) u32 {
         if (!r.in_use) {
             r.in_use = true;
             r.handle = next_handle;
+            // Skip wrap-to-0: 0 is the `create()` capacity/error sentinel and
+            // must never be issued to a live region (review fix, claim 7418).
             next_handle +%= 1;
+            if (next_handle == 0) next_handle = 1;
             r.owner_pid = owner_pid;
             r.refcount = 0;
             r.wm_granted = false;
@@ -127,11 +137,16 @@ pub fn authorize_read(
     wm_peer: u64,
 ) Grant {
     const r = find(handle) orelse return .gone;
-    // A peer may never hold a writable view (D2 read-only-for-compositors).
-    if (want_writable) return .writable_refused;
-    // The owner is always the creator; a read of one's own is granted (SB2
-    // keeps it; policy approves it).
+    // The owner is checked FIRST (not gated by want_writable): the owner is
+    // always the creator and may keep its surface — its WRITABLE view is the
+    // region's creation-side leaf (SB2 maps it at create, outside this rule),
+    // and its READ of its own surface is trivially granted. A writable request
+    // from the OWNER must NOT be turned into `.writable_refused` — the ADR D2
+    // decision table grants the owner read/write of its own surface; only PEERS
+    // are read-only (fix, claim-7418 review).
     if (requestor_pid == r.owner_pid) return .grant;
+    // A PEER may never hold a writable view (D2 read-only-for-compositors).
+    if (want_writable) return .writable_refused;
     // Only the registered WM may read another app's surface, and only when a
     // WM is registered (seat exists). Every other requestor is refused.
     if (wm_peer != 0 and requestor_pid == wm_peer) return .grant;
@@ -213,6 +228,11 @@ test "shared_region: owner always granted; a peer is WM-only" {
     try std.testing.expect(h != 0);
 
     try std.testing.expect(authorize_read(owner, h, false, wm) == .grant);
+    // The owner MAY WRITE its own surface: a writable request from the owner
+    // is granted, NOT `.writable_refused` -- the ADR D2 table grants the owner
+    // read/write of its own surface; only PEERS are read-only (review fix,
+    // claim-7418: the writable guard must not gate the owner).
+    try std.testing.expect(authorize_read(owner, h, true, wm) == .grant);
     try std.testing.expect(authorize_read(wm, h, true, wm) == .writable_refused);
     try std.testing.expect(authorize_read(wm, h, false, wm) == .grant);
     try std.testing.expect(authorize_read(stranger, h, false, wm) == .not_authorized);

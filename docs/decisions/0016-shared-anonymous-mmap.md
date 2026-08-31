@@ -183,6 +183,21 @@ The decision table (`shared_region.Grant`), as frozen:
 | anyone, no WM registered | read-only | `authorize_read(*, h, ro, wm=0)` | `.not_authorized` | no compositor seat exists → no peer reads at all |
 | anyone, stale handle | any | `authorize_read(*, dead_h, …)` | `.gone` | region torn down; no stale access survives |
 
+**Review fix (claim-7418, pre-merge): the writable guard is PEER-only.** A
+writable request from the OWNER is granted (`.grant`), not refused — the ADR
+decision table grants the owner read/write of its own surface; the writable
+leaf is the region's creation side, mapped by SB2 at create. Only a `want_writable`
+request from a NON-owner is `.writable_refused`. `authorize_read` checks the
+owner identity FIRST so an owner-write request cannot alias the peer-read-only
+guard.
+
+**SB2 mapping duty (must not drift):** a `.grant` for the OWNER is
+permission-to-keep, NOT an instruction to map a redundant `sw_cow` RO leaf —
+the owner's writable leaf already exists (created with the region). Only
+NON-owner granted peers (the WM) get an EL0-RO `sw_cow` leaf from `.grant`.
+Mis-mapping an RO/COW view for the owner would hand it a copy-on-write alias of
+its own surface instead of its write leaf.
+
 The revocation rule, as frozen and host-tested (`drop_owner`): when the owner's
 window closes or the owner exits, EVERY peer read reference is revoked (the
 function returns the count revoked so a gate can assert peers were unmapped) and

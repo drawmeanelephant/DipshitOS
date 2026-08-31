@@ -29,6 +29,14 @@ the capability is built. All observed green (`zig test shared_region`, full
   free descriptor). 6 host tests pin owner-write / WM-read-only /
   non-WM-peer-deny / revoke-on-teardown / refcount-to-zero / stale-handle isolation.
   Registered in `tools/verify-unit-tests.sh`.
+- **Pre-merge review (claim-7418, this claim):** fixed the peer-only writable
+  guard (`authorize_read` checks the owner identity FIRST so an owner-write
+  request is `.grant`, never `.writable_refused`); pinned SB2's mapping duty
+  (a `.grant` for the OWNER is permission-to-keep, NOT an instruction to map a
+  redundant `sw_cow` leaf); documented `.capacity` as the create-side signal
+  (`authorize_read` never returns it); guarded `next_handle` wrap-to-0. ADR 0016
+  records the review; ADR 0007's error contract already scoped `EINVAL` to a
+  non-owner requestor, consistent with the fix.
 
 ## Notes
 

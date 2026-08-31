@@ -27,3 +27,19 @@ owner-write, WM-read-only, non-WM-peer-deny, revoke-every-peer-on-teardown,
 refcount-to-zero, and stale-handle isolation. The D2 rule module is the spec
 SB2 implements into `sys_mmap` (two EL0 roots, one physical region; owner
 writes, WM reads RO, munmap/exit revokes peers).
+
+## 2026-08-30 — claim 7418 SB1 security review (peer-only writable guard) before merge
+
+Reviewed ADR 0016 D2 + shared_region.zig with a security reviewer's eye before
+PR #686 merges. Fixed four soundness gaps in the pure-policy module: (1) the
+writable guard was gating the OWNER too — reordered authorize_read to check the
+owner identity first so an owner-write request is `.grant`, not
+`.writable_refused` (the ADR table grants the owner read/write of its own
+surface); (2) pinned SB2's mapping duty in the `.grant` docs + ADR 0016 — a
+`.grant` for the OWNER is permission-to-keep, NOT an instruction to map a
+redundant sw_cow RO leaf (owner's write leaf is create-side); (3) documented
+`.capacity` as create-side (authorize_read never returns it); (4) guarded
+`next_handle` wrap-to-0 so the capacity/error sentinel 0 is never issued to a
+live region. ADR 0007's error contract already scoped EINVAL to a non-owner
+requestor — consistent with the fix. All 6 host tests still green (now pinning
+owner-write), fmt/coordination/BSS clean.
