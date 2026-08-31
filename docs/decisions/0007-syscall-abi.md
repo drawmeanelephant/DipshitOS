@@ -836,3 +836,9 @@ The M33 seam-B shared-anonymous flag is now **implemented**, not just reserved.
 
 The dispatch table stays 128 rows; all numbers 0–65 and the error codes are
 unchanged.
+
+**M33 SB4 (claim 2382, 2026-08-31):** the COMPOSITE_TICK (kind 18) event is
+redefined from `arg1 = 0 (reserved)` to `arg1 = per-surface damage bitmask`
+(bit i <=> user surface i + `user_window_id_base`) — the WM's damage-notify
+payload. No dispatch-table row changes; no new slots; `sys_win_fill`/`present`
+stay frozen.

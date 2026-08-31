@@ -1532,6 +1532,33 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_sb3_own.step);
 
     // ------------------------------------------------------------------
+    // Guest: fifty-fourth ESP user program (M33 SB4, claim 2382)
+    // SB4DAM.BIN — the rect-granular damage proof behind
+    // verify-live-sb4-damage-tracking.sh: a migrated-free app fills two rects
+    // into its window (the kernel-visible fill path, which KNOWS the rect), so
+    // they coalesce into ONE union damage rect; the compositor repaints ONLY
+    // that union (dui's `last=` column), proving one-fill -> one-rect repaint.
+    // ------------------------------------------------------------------
+    const sb4dam_prog = b.addExecutable(.{
+        .name = "user-sb4dam",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/sb4dam.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    sb4dam_prog.linker_script = b.path("user/linker.ld");
+    const sb4dam_step = b.step("sb4dam", "Build the fifty-fourth ESP user program (zig-out/bin/SB4DAM.BIN)");
+    const sb4dam_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    sb4dam_elf2bin.addFileArg(sb4dam_prog.getEmittedBin());
+    const sb4dam_bin = sb4dam_elf2bin.addOutputFileArg("SB4DAM.BIN");
+    sb4dam_elf2bin.has_side_effects = true;
+    sb4dam_elf2bin.stdio = .inherit;
+    sb4dam_step.dependOn(&sb4dam_elf2bin.step);
+    const install_sb4dam = b.addInstallFileWithDir(sb4dam_bin, .bin, "SB4DAM.BIN");
+    b.getInstallStep().dependOn(&install_sb4dam.step);
+
+    // ------------------------------------------------------------------
     // Top-level steps. System-command steps are marked as having side
     // effects (and inherit stdio) so they always execute instead of being
     // skipped by the build cache. (No QEMU path: this project targets Apple
@@ -1595,6 +1622,7 @@ pub fn build(b: *std.Build) void {
     image.addFileArg(sb2_own_bin); // ... [SB2OWN.BIN] (M33 SB2, claim 8878: fifty-first user program, the shared-anon owner half)
     image.addFileArg(sb3_wm_bin); // ... [SB3WM.BIN] (M33 SB3, claim 3633: fifty-second user program, the surface-handoff WM half)
     image.addFileArg(sb3_own_bin); // ... [SB3OWN.BIN] (M33 SB3, claim 3633: fifty-third user program, the surface-handoff owner half)
+    image.addFileArg(sb4dam_bin); // ... [SB4DAM.BIN] (M33 SB4, claim 2382: fifty-fourth user program, the rect-granular damage proof)
     image.has_side_effects = true;
     image.stdio = .inherit;
     image_step.dependOn(&image.step);

@@ -240,7 +240,13 @@ pub fn on_tick() void {
         .flags = 0,
         .seq = 0,
         .arg0 = present_seq,
-        .arg1 = 0,
+        // M33 SB4 (claim 2382): arg1 is the COMPOSITE_TICK damage payload — a
+        // per-surface dirty bitmask (bit i <=> user surface i +
+        // user_window_id_base) telling the registered WM WHICH surfaces have
+        // pending rect damage this tick (the rects come via
+        // `driving_award.user_damage(id)`). SB5's compose-N repaints only
+        // those. 0 when the scene is clean.
+        .arg1 = driving_award.user_damage_mask(),
     });
 }
 

@@ -2854,6 +2854,31 @@ fn print_win_row(m: *Monitor, i: usize, w: *const driving_award.Window) void {
     if (w.kind == .user) {
         m.console.puts(" ws=");
         m.console.print_u64(w.workspace);
+        // M33 SB4 (claim 2382): the rect-granular damage observable for the
+        // damage-tracking gate. `full` when no partial damage is pending
+        // (whole-window), else the EXACT pending rect.
+        m.console.puts(" damage=");
+        if (w.damaged) {
+            m.console.print_u64(w.dx);
+            m.console.puts(",");
+            m.console.print_u64(w.dy);
+            m.console.puts(",");
+            m.console.print_u64(w.dw);
+            m.console.puts(",");
+            m.console.print_u64(w.dh);
+        } else {
+            m.console.puts("full");
+        }
+        // M33 SB4: the LAST rect composite repainted (consumed damage) —
+        // observable even after the drain. 0,0,0,0 = no partial repaint yet.
+        m.console.puts(" last=");
+        m.console.print_u64(w.last_dx);
+        m.console.puts(",");
+        m.console.print_u64(w.last_dy);
+        m.console.puts(",");
+        m.console.print_u64(w.last_dw);
+        m.console.puts(",");
+        m.console.print_u64(w.last_dh);
     }
     m.console.puts("\n");
 }

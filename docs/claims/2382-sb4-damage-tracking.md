@@ -7,7 +7,7 @@
 - **Depends on:** SB3 landed (claim 3633, PR #690) - surface-bound windows + `sys_win_fill` routing + the window-tag binding.
 - **Touches:** kernel/src/driving_award.zig kernel/src/wm_server.zig kernel/src/syscall.zig docs/march-m33-seam-b-pixel-ownership.md docs/claims/2382-sb4-damage-tracking.md docs/logs/agent-buffy-m33-sb4-damage-tracking.md tools/verify-live-sb4-damage-tracking.sh docs/archive/gate-inventory-detail.md build.zig image/make-image.sh
 - **Heartbeat:** 2026-08-31
-- **Status:** 🔄
+- **Status:** ✅
 
 ## Plan
 
@@ -27,4 +27,14 @@
 
 ## Result
 
-_Pending._
+DONE (2026-08-31). Rect-granular damage delivered to the WM. `Window` now tracks a
+damage rect (dx/dy/dw/dh + damaged), union-clamped by `mark_damage`; `user_fill`
+records the exact written rect; `composite()`'s user-window blit repaints only the
+damaged region and records the consumed rect in `last_dx..`. KIND 18 COMPOSITE_TICK
+extended: `wm_server.on_tick` packs a per-surface dirty bitmask into arg1
+(`.user`-only spill guard). `dui` shows `damage=` (pending) + `last=` (consumed).
+
+Host tests pin exact-rect / two-rect union / bitmask / consume-clear / spill guard.
+Live gate PASS (headless VZ): SB4DAM fills two rects, compositor repaints exactly
+their union (`last=8,8,108,68`, not whole-window). Build clean, host suite green,
+fmt/coordination ok, BSS PASS.
