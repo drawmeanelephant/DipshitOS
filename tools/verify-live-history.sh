@@ -118,6 +118,17 @@ run_one() {
     set -e
     [ -f "$RUN_DIR/vm-serial-$tag-boot1.log" ] && cp "$RUN_DIR/vm-serial-$tag-boot1.log" "$(art live-history-serial-$tag-boot1.log)" || true
 
+    # CHECKPOINT (temporary diagnostics): did boot-1 actually persist the
+    # T4 commands into artifacts/disk.img before boot-2 mounts it?
+    python3 - <<'PY' > "$(art history-checkpoint-boot1.txt)" 2>&1 || true
+import re
+p='artifacts/disk.img'
+d=open(p,'rb').read()
+print('disk bytes', len(d))
+for kw in [b'echo T4-first', b'echo T4-second', b'echo T4-third', b'input', b'history-live-ok', b'HISTORY.TXT']:
+    print(kw.decode(), len(re.findall(re.escape(kw), d)))
+PY
+
     if [ "$RC1" != 0 ]; then
         echo "$tag: boot1 failed rc=$RC1" | tee -a "$REPORT"
         return 1
@@ -158,6 +169,16 @@ run_one() {
         grep -qF -- "history-live-ok" "$SER" && OK=1
     fi
     grep -a -qF -- "input-chords: ENABLED" "$RUN2" && RUNNERFLAG=1
+    # CHECKPOINT (temporary diagnostics): the disk's final HISTORY.TXT state.
+    python3 - <<'PY' > "$(art history-checkpoint-boot2.txt)" 2>&1 || true
+import re
+p='artifacts/disk.img'
+d=open(p,'rb').read()
+print('disk bytes', len(d))
+for kw in [b'echo T4-first', b'echo T4-second', b'echo T4-third', b'input', b'history-live-ok', b'HISTORY.TXT']:
+    print(kw.decode(), len(re.findall(re.escape(kw), d)))
+PY
+
     {
         echo "$tag: rc1=$RC1 rc2=$RC2 serial-bytes=$SERIAL_BYTES banner=$BANNER marker=$MARKER report=$INREPORT ok=$OK runner-flag=$RUNNERFLAG"
     } >> "$REPORT"
