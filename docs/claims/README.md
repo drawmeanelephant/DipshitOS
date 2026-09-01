@@ -191,6 +191,7 @@ loudly if the generator or a table is broken.
 | [7710-m34-hf1-hf2-wire-transport](7710-m34-hf1-hf2-wire-transport.md) | buffy (`agent/buffy/m34-hf1-hf2-host-file-channel`) | ✅ done |
 | [7736-wms8-about-delete](7736-wms8-about-delete.md) | buffy (`agent/buffy/wms8-about-delete`) | ✅ `agent/buffy/wms8-about-delete` |
 | [7746-m23-editor-undo-goto-tabs-syntax](7746-m23-editor-undo-goto-tabs-syntax.md) | Buffy (`agent/buffy/m23-text-editor`) | ✅ done — 75/75 host tests pass, build clean, gate written |
+| [7750-w2-run-entry](7750-w2-run-entry.md) | buffy (`freebuff/okay-shower-thoughts-here-we-re-using-fat32-for-so-b0ce3067-2b04-4b81-984d-9fd76bfcf123`) | ✅ done |
 | [7921-m30-dynamic-linking](7921-m30-dynamic-linking.md) | buffy (`agent/buffy/m30-dynamic-linking`) | ✅ agent/buffy/m30-dynamic-linking |
 | [8041-m27-desktop-polish](8041-m27-desktop-polish.md) | Buffy (`agent/buffy/m27-desktop-polish`) | ✅ done 2026-08-26 — M27 Desktop Polish & Completeness Sweep G1-G30 (#444-#473) complete: screenshot streaming BMP writer, help --all catalog, shortcuts matrix, WidgetState, ContextMenu separators/keys/shortcuts, standard Dialog helpers, empty state presenter, format_error, cursor feedback, focus restore, SYSMON.BIN dashboard, first-boot setup wizard in SETTINGS.BIN, dogfood audit report in docs/dogfood-m27.md, all unit tests pass. |
 | [8247-m29-vm-depth](8247-m29-vm-depth.md) | buffy (`agent/buffy/m30-dynamic-linking`) | ✅ done |
