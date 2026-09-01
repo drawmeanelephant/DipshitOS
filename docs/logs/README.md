@@ -217,6 +217,8 @@ meaningful — on main.
 | lane-b/m24-calc-features | [`lane-b-m24-calc-features.md`](lane-b-m24-calc-features.md) |
 | `lane-c/m20-text-rendering` | [`lane-c-m20-text-rendering.md`](lane-c-m20-text-rendering.md) |
 | `lane-d/m22-dev-tools` | [`lane-d-m22-dev-tools.md`](lane-d-m22-dev-tools.md) |
+| t3code/1145c9b5 (W1a import contract freeze) | [`t3code-1145c9b5.md`](t3code-1145c9b5.md) |
+| t3code/b2feefd3 | [`t3code-b2feefd3.md`](t3code-b2feefd3.md) |
 | t3code concurrent-agents merge conflicts | [`t3code-concurrent-agents-merge-conflicts.md`](t3code-concurrent-agents-merge-conflicts.md) |
 | `t3code/fetch-issue-264-details` | [`t3code-fetch-issue-264-details.md`](t3code-fetch-issue-264-details.md) |
 | t3code/finish-523-console-snapshots | [`t3code-finish-523-console-snapshots.md`](t3code-finish-523-console-snapshots.md) |
