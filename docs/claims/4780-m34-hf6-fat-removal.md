@@ -45,7 +45,7 @@
   `docs/logs/agent-buffy-m34-hf6-fat-removal.md`
 - **Depends on:** HF4 (app delivery), HF5 (user-data migration) — landed
 - **Heartbeat:** 2026-09-01
-- **Status:** 🔄
+- **Status:** ✅ done — implementation + representative live sweep green; flake #803 filed separately (see log)
 
 ## Notes
 
