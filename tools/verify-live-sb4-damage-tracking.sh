@@ -52,6 +52,7 @@ swift build --package-path host/vm-runner --configuration release -Xswiftc -DSPI
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
 gate_begin live-sb4-damage-tracking
+gate_seed_share
 echo "run dir: $RUN_DIR"
 SER_LOG="$(art live-sb4-damage-tracking-serial.log)"
 RUN_LOG="$(art live-sb4-damage-tracking-run.txt)"

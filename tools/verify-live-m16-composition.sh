@@ -85,11 +85,12 @@ echo "revision: $REVISION branch=$BRANCH boots=$BOOTS dirty-files=$DIRTY"
 zig fmt --check boot/src/*.zig kernel/src/*.zig user/src/*.zig build.zig
 zig build
 zig build image
-swift build --package-path host/vm-runner --configuration release
+swift build --package-path host/vm-runner --configuration release -Xswiftc -DSPIKE
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
 # --- per-run isolation -------------------------------------------------------
 gate_begin live-m16-composition
+gate_seed_share
 echo "run dir: $RUN_DIR"
 
 SCRIPT1="$RUN_DIR/script1.txt"

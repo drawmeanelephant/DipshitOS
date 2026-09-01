@@ -1,37 +1,32 @@
 #!/usr/bin/env python3
-"""Build or inspect a bootable FAT32 + GPT disk image for VirelaiOS.
+"""Build or inspect the bootable FAT32 + GPT disk image for VirelaiOS.
 
 Pure Python 3 standard library only -- no mtools, no root, no loopback
 devices. Used by image/make-image.sh and tools/inspect.sh.
 
 Modes:
-  create:  mkfat32.py [--size-mb 128] [--esp-offset 2048] IMAGE EFI_FILE [KERNEL_FILE] [USER_FILE] [COUNTER_FILE] [PEER_FILE] [STATUS43_FILE] [UDP_FILE] [WIN_FILE] [WINCLOSE_FILE] [WINLOOP_FILE] [WINMOVE_FILE]
+  create:  mkfat32.py [--size-mb 0] IMAGE EFI_FILE KERNEL_FILE
   list:    mkfat32.py --list IMAGE
+
+M34 HF6 (issue #740): the image is a BOOT VOLUME ONLY. It contains
+exactly two files -- EFI/BOOT/BOOTAA64.EFI and KERNEL.BIN -- parsed by
+Apple's firmware pre-exit (the loader writes \\BOOTED.TXT / \\MEMMAP.TXT /
+LOADER.TXT and reads \\KERNEL.BIN through the UEFI Simple File System
+protocol). NO guest code speaks FAT after boot: the DATA partition, the
+embedded-app machinery, and the guest FAT driver are all gone. Apps live
+in the macOS host share (runner flag --cvc-file <host-dir>).
 
 Layout produced:
   LBA 0        protective MBR
   LBA 1        GPT header (partition entries at LBA 2..33, backup at end)
-  LBA 2048..   ESP FAT32 volume (hidden_sectors = 2048) containing
-               EFI/BOOT/BOOTAA64.EFI, KERNEL.BIN when a KERNEL_FILE is
-               given (the milestone-one kernel image), USER.BIN when a
-               USER_FILE is given (the milestone-three ESP user program,
-               claim 6783), COUNTER.BIN when a COUNTER_FILE is given
-               (the milestone-four follow-on 2 never-exiting user program,
-               claim 4613), PEER.BIN when a PEER_FILE is given (the
-               follow-on 3 card 3f IPC peer, claim 5965), UDP.BIN when a
-               UDP_FILE is given (the milestone-five card N6 UDP-syscall
-               proof, claim 1384), WIN.BIN when a WIN_FILE is given
-               (the milestone-six card G6 draw/window-syscall proof,
-               claim 0487), WINCLOSE.BIN when a WINCLOSE_FILE is given
-               (the claim-0487 teardown follow-on release proof), and
-               WINLOOP.BIN when a WINLOOP_FILE is given (the claim-0487
-               ownership follow-on persistent-window proof), and
-               WINMOVE.BIN when a WINMOVE_FILE is given (the claim-0487
-               move/raise follow-on).
-  tail         DATA FAT32 partition (Linux-FS type GUID, 36 MiB) — a second
-               volume on the same disk for the general (non-ESP) filesystem
-               (milestone-four card 2, claim 3678); the kernel's `mount`
-               command switches to it.
+  LBA 2048..   one ESP FAT32 volume (hidden_sectors = 2048) containing
+               EFI/BOOT/BOOTAA64.EFI and KERNEL.BIN
+
+Size: the volume is pinned at the FAT32 cluster-count floor (> 65525
+clusters with spc=1, 512-byte sectors), which lands the raw image at
+~34 MiB (mostly zeros; the file content is ~1.5 MiB). --size-mb overrides
+when a larger image is wanted.
+
 Deterministic: the same inputs always produce byte-identical images.
 """
 
@@ -42,30 +37,22 @@ import sys
 import zlib
 
 BYTES_PER_SECTOR = 512
-ESP_OFFSET_DEFAULT = 2048  # 1 MiB
-# 128 MiB so TWO FAT32 volumes fit: FAT32 needs > 65525 clusters per volume
-# (spc=1, 512-byte sectors -> ~32 MiB each), and the image also holds the
-# ESP plus a second "data" partition (milestone-four card 2, claim 3678).
-SIZE_MB_DEFAULT = 128
-# Size of the second (data) partition, in MiB. 36 MiB > the FAT32 minimum.
-DATA_MB = 36
+ESP_OFFSET = 2048  # 1 MiB: LBA of the ESP volume (hidden_sectors = 2048)
+# FAT32 requires > 65525 clusters per volume (spc=1, 512-byte sectors).
+# The volume sector count below is the smallest that satisfies that with
+# room for two FATs; the fixed-point FAT-size iteration in Fat32Geometry
+# resolves the exact geometry. 0 means "compute the floor".
+SIZE_MB_DEFAULT = 0
 FAT_EOC = 0x0FFFFFFF  # end-of-chain marker for FAT32
 FAT_BAD = 0x0FFFFFF7
 # GPT type GUID for the EFI System Partition (mixed-endian byte layout).
 ESP_GUID = bytes([0x28, 0x73, 0x2A, 0xC1, 0x1F, 0xF8, 0xD2, 0x11,
                   0xBA, 0x4B, 0x00, 0xA0, 0xC9, 0x3E, 0xC9, 0x3B])
-# GPT type GUID for the data partition: the Linux filesystem GUID
-# (0FC63DAF-8483-4772-8E79-3D69D8477DE4, mixed-endian byte layout) — a
-# standard "general data" partition type, not the ESP.
-DATA_GUID = bytes([0xAF, 0x3D, 0xC6, 0x0F, 0x83, 0x84, 0x72, 0x47,
-                   0x8E, 0x79, 0x3D, 0x69, 0xD8, 0x47, 0x7D, 0xE4])
 # Fixed GUIDs so `zig build image` produces byte-identical images every run.
 DISK_GUID = bytes([0x44, 0x49, 0x50, 0x53, 0x48, 0x49, 0x54, 0x4F,
                    0x53, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x31])
 PART_GUID = bytes([0x44, 0x49, 0x50, 0x53, 0x48, 0x49, 0x54, 0x4F,
                    0x53, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x32])
-DATA_PART_GUID = bytes([0x44, 0x49, 0x50, 0x53, 0x48, 0x49, 0x54, 0x4F,
-                        0x53, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x33])
 
 
 # --------------------------------------------------------------------------
@@ -161,6 +148,16 @@ class Fat32Geometry:
             raise ValueError("volume too large for FAT32 (max 2 TiB)")
 
 
+def minimum_volume_sectors():
+    """Smallest sector count whose FAT32 geometry passes the > 65525 check."""
+    v = 66000
+    while True:
+        g = Fat32Geometry(v, 0)
+        if g.clusters > 65525:
+            return v
+        v += 512  # a full cluster of slack per step keeps iteration tiny
+
+
 def boot_sector(geo):
     b = bytearray(BYTES_PER_SECTOR)
     b[0:3] = b"\xeb\x58\x90"
@@ -213,223 +210,26 @@ def dir_entry(name11, attr, cluster, size):
     return bytes(e)
 
 
-def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
-                      counter_bytes=None, peer_bytes=None, status43_bytes=None,
-                      udp_bytes=None, win_bytes=None, winclose_bytes=None,
-                      winloop_bytes=None, winmove_bytes=None,
-                      keytest_bytes=None, savetext_bytes=None,
-                      type_bytes=None, dir_bytes=None,
-                      calc_bytes=None, notepad_bytes=None,
-                      top_bytes=None, desktop_bytes=None,
-                      tcp_bytes=None, fetch_bytes=None,
-                      chat_bytes=None, file_bytes=None, fstest_bytes=None, timertest_bytes=None,
-                      victim_bytes=None, harden_bytes=None,
-                      jingle_bytes=None, chime_bytes=None, globals_bytes=None,
-                      guard_bytes=None, spin_bytes=None, apps_txt_bytes=None,
-                      hello_bytes=None, asm_bytes=None, settings_bytes=None,
-                      crash_bytes=None, disas_bytes=None, edit_bytes=None, ps_bytes=None,
-                      resmon_bytes=None, devcons_bytes=None, netstat_bytes=None,
-                      m21demo_bytes=None, ping_bytes=None, dns_bytes=None,
-                      download_bytes=None, traceroute_bytes=None,
-                      netprof_bytes=None, sysmon_bytes=None, httpd_bytes=None,
-                      vmtest_bytes=None, wndstub_bytes=None, wnd_bytes=None, extra_files=None):
-    """Write a FAT32 volume (boot sector, FSInfo, FATs, directories, files)
-    into `img` at the volume's offset.
+def build_fat32_image(img, geo, efi_bytes, kernel_bytes):
+    """Write the single FAT32 volume (boot sector, FSInfo, FATs, root,
+    EFI/BOOT, KERNEL.BIN) into `img` at the volume's offset.
 
-    Directory layout:
-      /              VIRELAIOS volume label, EFI/, KERNEL.BIN (when given),
-                     USER.BIN (when given), COUNTER.BIN (when given), PEER.BIN (when given), STATUS43.BIN (when given),
-                     UDP.BIN (when given), WIN.BIN (when given),
-                     WINCLOSE.BIN (when given), WINLOOP.BIN (when given),
-                     WINMOVE.BIN (when given), KEYTEST.BIN (when given),
-                     SAVETEXT.BIN (when given), TYPE.BIN (when given),
-                     DIR.BIN (when given), CALC.BIN (when given),
-                     NOTEPAD.BIN (when given), TOP.BIN (when given),
-                     DESKTOP.BIN (when given), TCP.BIN (when given)
-      /EFI/          ., .., BOOT/
-      /EFI/BOOT/     ., .., BOOTAA64.EFI
-    Cluster layout: 2=root, 3=EFI, 4=BOOT, then file data in order.
-    Deterministic.
+    Cluster layout: 2=root, 3=EFI, 4=BOOT, 5=BOOTAA64.EFI data,
+    5+kernel_clusters..=KERNEL.BIN data. Deterministic.
     """
     geo.checks()
     bps = geo.bps
-    kernel_clusters = (len(kernel_bytes) + bps - 1) // bps if kernel_bytes else 0
-    user_clusters = (len(user_bytes) + bps - 1) // bps if user_bytes else 0
-    counter_clusters = (len(counter_bytes) + bps - 1) // bps if counter_bytes else 0
-    peer_clusters = (len(peer_bytes) + bps - 1) // bps if peer_bytes else 0
-    status43_clusters = (len(status43_bytes) + bps - 1) // bps if status43_bytes else 0
-    udp_clusters = (len(udp_bytes) + bps - 1) // bps if udp_bytes else 0
-    win_clusters = (len(win_bytes) + bps - 1) // bps if win_bytes else 0
-    winclose_clusters = (len(winclose_bytes) + bps - 1) // bps if winclose_bytes else 0
-    winloop_clusters = (len(winloop_bytes) + bps - 1) // bps if winloop_bytes else 0
-    winmove_clusters = (len(winmove_bytes) + bps - 1) // bps if winmove_bytes else 0
-    keytest_clusters = (len(keytest_bytes) + bps - 1) // bps if keytest_bytes else 0
-    savetext_clusters = (len(savetext_bytes) + bps - 1) // bps if savetext_bytes else 0
-    type_clusters = (len(type_bytes) + bps - 1) // bps if type_bytes else 0
-    dir_clusters = (len(dir_bytes) + bps - 1) // bps if dir_bytes else 0
-    calc_clusters = (len(calc_bytes) + bps - 1) // bps if calc_bytes else 0
-    notepad_clusters = (len(notepad_bytes) + bps - 1) // bps if notepad_bytes else 0
-    top_clusters = (len(top_bytes) + bps - 1) // bps if top_bytes else 0
-    desktop_clusters = (len(desktop_bytes) + bps - 1) // bps if desktop_bytes else 0
-    tcp_clusters = (len(tcp_bytes) + bps - 1) // bps if tcp_bytes else 0
-    fetch_clusters = (len(fetch_bytes) + bps - 1) // bps if fetch_bytes else 0
-    chat_clusters = (len(chat_bytes) + bps - 1) // bps if chat_bytes else 0
-    filebin_clusters = (len(file_bytes) + bps - 1) // bps if file_bytes else 0
-    fstest_clusters = (len(fstest_bytes) + bps - 1) // bps if fstest_bytes else 0
-    timertest_clusters = (len(timertest_bytes) + bps - 1) // bps if timertest_bytes else 0
-    victim_clusters = (len(victim_bytes) + bps - 1) // bps if victim_bytes else 0
-    harden_clusters = (len(harden_bytes) + bps - 1) // bps if harden_bytes else 0
-    jingle_clusters = (len(jingle_bytes) + bps - 1) // bps if jingle_bytes else 0
-    chime_clusters = (len(chime_bytes) + bps - 1) // bps if chime_bytes else 0
-    globals_clusters = (len(globals_bytes) + bps - 1) // bps if globals_bytes else 0
-    guard_clusters = (len(guard_bytes) + bps - 1) // bps if guard_bytes else 0
-    spin_clusters = (len(spin_bytes) + bps - 1) // bps if spin_bytes else 0
-    apps_txt_clusters = (len(apps_txt_bytes) + bps - 1) // bps if apps_txt_bytes else 0
-    hello_clusters = (len(hello_bytes) + bps - 1) // bps if hello_bytes else 0
-    asm_clusters = (len(asm_bytes) + bps - 1) // bps if asm_bytes else 0
-    settings_clusters = (len(settings_bytes) + bps - 1) // bps if settings_bytes else 0
-    crash_clusters = (len(crash_bytes) + bps - 1) // bps if crash_bytes else 0
-    disas_clusters = (len(disas_bytes) + bps - 1) // bps if disas_bytes else 0
-    edit_clusters = (len(edit_bytes) + bps - 1) // bps if edit_bytes else 0
-    ps_clusters = (len(ps_bytes) + bps - 1) // bps if ps_bytes else 0
-    resmon_clusters = (len(resmon_bytes) + bps - 1) // bps if resmon_bytes else 0
-    devcons_clusters = (len(devcons_bytes) + bps - 1) // bps if devcons_bytes else 0
-    netstat_clusters = (len(netstat_bytes) + bps - 1) // bps if netstat_bytes else 0
-    m21demo_clusters = (len(m21demo_bytes) + bps - 1) // bps if m21demo_bytes else 0
-    ping_clusters = (len(ping_bytes) + bps - 1) // bps if ping_bytes else 0
-    dns_clusters = (len(dns_bytes) + bps - 1) // bps if dns_bytes else 0
-    download_clusters = (len(download_bytes) + bps - 1) // bps if download_bytes else 0
-    traceroute_clusters = (len(traceroute_bytes) + bps - 1) // bps if traceroute_bytes else 0
-    netprof_clusters = (len(netprof_bytes) + bps - 1) // bps if netprof_bytes else 0
-    sysmon_clusters = (len(sysmon_bytes) + bps - 1) // bps if sysmon_bytes else 0
-    httpd_clusters = (len(httpd_bytes) + bps - 1) // bps if httpd_bytes else 0
-    vmtest_clusters = (len(vmtest_bytes) + bps - 1) // bps if vmtest_bytes else 0
-    wndstub_clusters = (len(wndstub_bytes) + bps - 1) // bps if wndstub_bytes else 0
-    wnd_clusters = (len(wnd_bytes) + bps - 1) // bps if wnd_bytes else 0
-    file_clusters = (len(efi_bytes) + bps - 1) // bps
-    root_entries_count = 2  # vol_label + efi_entry
-    if kernel_bytes: root_entries_count += 1
-    if user_bytes: root_entries_count += 1
-    if counter_bytes: root_entries_count += 1
-    if peer_bytes: root_entries_count += 1
-    if status43_bytes: root_entries_count += 1
-    if udp_bytes: root_entries_count += 1
-    if win_bytes: root_entries_count += 1
-    if winclose_bytes: root_entries_count += 1
-    if winloop_bytes: root_entries_count += 1
-    if winmove_bytes: root_entries_count += 1
-    if keytest_bytes: root_entries_count += 1
-    if savetext_bytes: root_entries_count += 1
-    if type_bytes: root_entries_count += 1
-    if dir_bytes: root_entries_count += 1
-    if calc_bytes: root_entries_count += 1
-    if notepad_bytes: root_entries_count += 1
-    if top_bytes: root_entries_count += 1
-    if desktop_bytes: root_entries_count += 1
-    if tcp_bytes: root_entries_count += 1
-    if fetch_bytes: root_entries_count += 1
-    if chat_bytes: root_entries_count += 1
-    if file_bytes: root_entries_count += 1
-    if fstest_bytes: root_entries_count += 1
-    if timertest_bytes: root_entries_count += 1
-    if victim_bytes: root_entries_count += 1
-    if harden_bytes: root_entries_count += 1
-    if jingle_bytes: root_entries_count += 1
-    if chime_bytes: root_entries_count += 1
-    if globals_bytes: root_entries_count += 1
-    if guard_bytes: root_entries_count += 1
-    if spin_bytes: root_entries_count += 1
-    if apps_txt_bytes: root_entries_count += 1
-    if hello_bytes: root_entries_count += 1
-    if asm_bytes: root_entries_count += 1
-    if settings_bytes: root_entries_count += 1
-    if crash_bytes: root_entries_count += 1
-    if disas_bytes: root_entries_count += 1
-    if edit_bytes: root_entries_count += 1
-    if ps_bytes: root_entries_count += 1
-    if resmon_bytes: root_entries_count += 1
-    if devcons_bytes: root_entries_count += 1
-    if netstat_bytes: root_entries_count += 1
-    if m21demo_bytes: root_entries_count += 1
-    if ping_bytes: root_entries_count += 1
-    if dns_bytes: root_entries_count += 1
-    if download_bytes: root_entries_count += 1
-    if traceroute_bytes: root_entries_count += 1
-    if netprof_bytes: root_entries_count += 1
-    if sysmon_bytes: root_entries_count += 1
-    if httpd_bytes: root_entries_count += 1
-    if vmtest_bytes: root_entries_count += 1
-    if wndstub_bytes: root_entries_count += 1
-    if wnd_bytes: root_entries_count += 1
-    if extra_files: root_entries_count += len(extra_files)
+    efi_clusters = (len(efi_bytes) + bps - 1) // bps
+    kernel_clusters = (len(kernel_bytes) + bps - 1) // bps
 
+    # root: vol label + EFI dir + KERNEL.BIN
+    root_entries_count = 3
     root_clusters = (root_entries_count * 32 + bps - 1) // bps
     efi_dir_cluster = 2 + root_clusters
     boot_dir_cluster = efi_dir_cluster + 1
-    kernel_start = boot_dir_cluster + 1
-    user_start = kernel_start + kernel_clusters
-    counter_start = user_start + user_clusters
-    peer_start = counter_start + counter_clusters
-    status43_start = peer_start + peer_clusters
-    udp_start = status43_start + status43_clusters
-    win_start = udp_start + udp_clusters
-    winclose_start = win_start + win_clusters
-    winloop_start = winclose_start + winclose_clusters
-    winmove_start = winloop_start + winloop_clusters
-    keytest_start = winmove_start + winmove_clusters
-    savetext_start = keytest_start + keytest_clusters
-    type_start = savetext_start + savetext_clusters
-    dir_start = type_start + type_clusters
-    calc_start = dir_start + dir_clusters
-    notepad_start = calc_start + calc_clusters
-    top_start = notepad_start + notepad_clusters
-    desktop_start = top_start + top_clusters
-    tcp_start = desktop_start + desktop_clusters
-    fetch_start = tcp_start + tcp_clusters
-    chat_start = fetch_start + fetch_clusters
-    filebin_start = chat_start + chat_clusters
-    fstest_start = filebin_start + filebin_clusters
-    timertest_start = fstest_start + fstest_clusters
-    victim_start = timertest_start + timertest_clusters
-    harden_start = victim_start + victim_clusters
-    jingle_start = harden_start + harden_clusters
-    chime_start = jingle_start + jingle_clusters
-    globals_start = chime_start + chime_clusters
-    guard_start = globals_start + globals_clusters
-    spin_start = guard_start + guard_clusters
-    asm_start = spin_start + spin_clusters
-    settings_start = asm_start + asm_clusters
-    crash_start = settings_start + settings_clusters
-    disas_start = crash_start + crash_clusters
-    edit_start = disas_start + disas_clusters
-    ps_start = edit_start + edit_clusters
-    resmon_start = ps_start + ps_clusters
-    devcons_start = resmon_start + resmon_clusters
-    netstat_start = devcons_start + devcons_clusters
-    m21demo_start = netstat_start + netstat_clusters
-    ping_start = m21demo_start + m21demo_clusters
-    dns_start = ping_start + ping_clusters
-    download_start = dns_start + dns_clusters
-    traceroute_start = download_start + download_clusters
-    netprof_start = traceroute_start + traceroute_clusters
-    sysmon_start = netprof_start + netprof_clusters
-    httpd_start = sysmon_start + sysmon_clusters
-    vmtest_start = httpd_start + httpd_clusters
-    wndstub_start = vmtest_start + vmtest_clusters
-    wnd_start = wndstub_start + wndstub_clusters
-    apps_txt_start = wnd_start + wnd_clusters
-    hello_start = apps_txt_start + apps_txt_clusters
-
-    extra_file_info = []
-    curr_extra_start = hello_start + hello_clusters
-    if extra_files:
-        for name83, b in extra_files:
-            clus = (len(b) + bps - 1) // bps
-            extra_file_info.append((name83, b, curr_extra_start, clus))
-            curr_extra_start += clus
-
-    efi_start = curr_extra_start
-    allocated = efi_start + file_clusters - 2  # clusters used beyond root(2)
+    efi_start = boot_dir_cluster + 1
+    kernel_start = efi_start + efi_clusters
+    allocated = kernel_start + kernel_clusters - 2  # clusters used beyond root(2)
     if allocated > geo.clusters:
         raise ValueError(
             "boot files need %d clusters but the volume has only %d; "
@@ -447,115 +247,8 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
     chain(2, root_clusters)           # root directory
     chain(efi_dir_cluster, 1)         # EFI directory
     chain(boot_dir_cluster, 1)        # BOOT directory
-    if kernel_bytes:
-        chain(kernel_start, kernel_clusters)  # KERNEL.BIN data
-    if user_bytes:
-        chain(user_start, user_clusters)      # USER.BIN data
-    if counter_bytes:
-        chain(counter_start, counter_clusters)  # COUNTER.BIN data
-    if peer_bytes:
-        chain(peer_start, peer_clusters)        # PEER.BIN data
-    if status43_bytes:
-        chain(status43_start, status43_clusters)  # STATUS43.BIN data
-    if udp_bytes:
-        chain(udp_start, udp_clusters)            # UDP.BIN data
-    if win_bytes:
-        chain(win_start, win_clusters)            # WIN.BIN data
-    if winclose_bytes:
-        chain(winclose_start, winclose_clusters)  # WINCLOSE.BIN data
-    if winloop_bytes:
-        chain(winloop_start, winloop_clusters)    # WINLOOP.BIN data
-    if winmove_bytes:
-        chain(winmove_start, winmove_clusters)    # WINMOVE.BIN data
-    if keytest_bytes:
-        chain(keytest_start, keytest_clusters)    # KEYTEST.BIN data
-    if savetext_bytes:
-        chain(savetext_start, savetext_clusters)  # SAVETEXT.BIN data
-    if type_bytes:
-        chain(type_start, type_clusters)          # TYPE.BIN data
-    if dir_bytes:
-        chain(dir_start, dir_clusters)            # DIR.BIN data
-    if calc_bytes:
-        chain(calc_start, calc_clusters)          # CALC.BIN data
-    if notepad_bytes:
-        chain(notepad_start, notepad_clusters)    # NOTEPAD.BIN data
-    if top_bytes:
-        chain(top_start, top_clusters)            # TOP.BIN data
-    if desktop_bytes:
-        chain(desktop_start, desktop_clusters)    # DESKTOP.BIN data
-    if tcp_bytes:
-        chain(tcp_start, tcp_clusters)            # TCP.BIN data
-    if fetch_bytes:
-        chain(fetch_start, fetch_clusters)        # FETCH.BIN data
-    if chat_bytes:
-        chain(chat_start, chat_clusters)          # CHAT.BIN data
-    if file_bytes:
-        chain(filebin_start, filebin_clusters)    # FILE.BIN data
-    if fstest_bytes:
-        chain(fstest_start, fstest_clusters)      # FSTEST.BIN data
-    if timertest_bytes:
-        chain(timertest_start, timertest_clusters)  # TIMER.BIN data
-    if victim_bytes:
-        chain(victim_start, victim_clusters)        # VICTIM.BIN data
-    if harden_bytes:
-        chain(harden_start, harden_clusters)        # HARDEN.BIN data
-    if jingle_bytes:
-        chain(jingle_start, jingle_clusters)        # JINGLE.BIN data
-    if chime_bytes:
-        chain(chime_start, chime_clusters)          # CHIME.BIN data
-    if globals_bytes:
-        chain(globals_start, globals_clusters)      # GLOBALS.BIN data
-    if guard_bytes:
-        chain(guard_start, guard_clusters)          # GUARD.BIN data
-    if spin_bytes:
-        chain(spin_start, spin_clusters)            # SPIN.BIN data
-    if asm_bytes:
-        chain(asm_start, asm_clusters)              # ASM.BIN data
-    if settings_bytes:
-        chain(settings_start, settings_clusters)  # SETTINGS.BIN data
-    if crash_bytes:
-        chain(crash_start, crash_clusters)          # CRASH.ELF data
-    if disas_bytes:
-        chain(disas_start, disas_clusters)          # DISAS.BIN data
-    if edit_bytes:
-        chain(edit_start, edit_clusters)            # EDIT.BIN data
-    if ps_bytes:
-        chain(ps_start, ps_clusters)                # PS.BIN data
-    if resmon_bytes:
-        chain(resmon_start, resmon_clusters)        # RESMON.BIN data
-    if devcons_bytes:
-        chain(devcons_start, devcons_clusters)      # DEVCONS.BIN data
-    if netstat_bytes:
-        chain(netstat_start, netstat_clusters)      # NETSTAT.BIN data
-    if m21demo_bytes:
-        chain(m21demo_start, m21demo_clusters)      # M21DEMO.BIN data
-    if ping_bytes:
-        chain(ping_start, ping_clusters)            # PING.BIN data
-    if dns_bytes:
-        chain(dns_start, dns_clusters)              # DNS.BIN data
-    if download_bytes:
-        chain(download_start, download_clusters)    # DOWNLOAD.BIN data
-    if traceroute_bytes:
-        chain(traceroute_start, traceroute_clusters)    # TRACEROUTE.BIN data
-    if netprof_bytes:
-        chain(netprof_start, netprof_clusters)      # NETPROF.BIN data
-    if sysmon_bytes:
-        chain(sysmon_start, sysmon_clusters)        # SYSMON.BIN data
-    if httpd_bytes:
-        chain(httpd_start, httpd_clusters)          # HTTPD.BIN data
-    if vmtest_bytes:
-        chain(vmtest_start, vmtest_clusters)        # VMTEST.BIN data
-    if wndstub_bytes:
-        chain(wndstub_start, wndstub_clusters)      # WNDSTUB.BIN data
-    if wnd_bytes:
-        chain(wnd_start, wnd_clusters)              # WND.BIN data
-    if apps_txt_bytes:
-        chain(apps_txt_start, apps_txt_clusters)  # APPS.TXT data
-    if hello_bytes:
-        chain(hello_start, hello_clusters)          # HELLO.ELF data
-    for _, _, start, clus in extra_file_info:
-        chain(start, clus)                          # Extra files (.SO, .ELF)
-    chain(efi_start, file_clusters)            # BOOTAA64.EFI data
+    chain(efi_start, efi_clusters)    # BOOTAA64.EFI data
+    chain(kernel_start, kernel_clusters)  # KERNEL.BIN data
 
     def wsec(sector, data):
         off = sector * bps
@@ -579,533 +272,96 @@ def build_fat32_image(img, geo, efi_bytes, kernel_bytes=None, user_bytes=None,
     efi_entry = dir_entry(b"EFI        ", 0x10, efi_dir_cluster, 0)
     boot_entry = dir_entry(b"BOOT       ", 0x10, boot_dir_cluster, 0)
     file_entry = dir_entry(b"BOOTAA64EFI", 0x20, efi_start, len(efi_bytes))
+    kernel_entry = dir_entry(b"KERNEL  BIN", 0x20, kernel_start, len(kernel_bytes))
     dot_efi = dir_entry(b".          ", 0x10, efi_dir_cluster, 0)
     dotdot_efi = dir_entry(b"..         ", 0x10, 2, 0)
     dot_boot = dir_entry(b".          ", 0x10, boot_dir_cluster, 0)
     dotdot_boot = dir_entry(b"..         ", 0x10, efi_dir_cluster, 0)
 
-    root_entries = vol_label + efi_entry
-    if kernel_bytes:
-        root_entries += dir_entry(b"KERNEL  BIN", 0x20, kernel_start, len(kernel_bytes))
-    if user_bytes:
-        root_entries += dir_entry(b"USER    BIN", 0x20, user_start, len(user_bytes))
-    if counter_bytes:
-        root_entries += dir_entry(b"COUNTER BIN", 0x20, counter_start, len(counter_bytes))
-    if peer_bytes:
-        root_entries += dir_entry(b"PEER    BIN", 0x20, peer_start, len(peer_bytes))
-    if status43_bytes:
-        root_entries += dir_entry(b"STATUS43BIN", 0x20, status43_start, len(status43_bytes))
-    if udp_bytes:
-        root_entries += dir_entry(b"UDP     BIN", 0x20, udp_start, len(udp_bytes))
-    if win_bytes:
-        root_entries += dir_entry(b"WIN     BIN", 0x20, win_start, len(win_bytes))
-    if winclose_bytes:
-        root_entries += dir_entry(b"WINCLOSEBIN", 0x20, winclose_start, len(winclose_bytes))
-    if winloop_bytes:
-        root_entries += dir_entry(b"WINLOOP BIN", 0x20, winloop_start, len(winloop_bytes))
-    if winmove_bytes:
-        root_entries += dir_entry(b"WINMOVE BIN", 0x20, winmove_start, len(winmove_bytes))
-    if keytest_bytes:
-        root_entries += dir_entry(b"KEYTEST BIN", 0x20, keytest_start, len(keytest_bytes))
-    if savetext_bytes:
-        root_entries += dir_entry(b"SAVETEXTBIN", 0x20, savetext_start, len(savetext_bytes))
-    if type_bytes:
-        root_entries += dir_entry(b"TYPE    BIN", 0x20, type_start, len(type_bytes))
-    if dir_bytes:
-        root_entries += dir_entry(b"DIR     BIN", 0x20, dir_start, len(dir_bytes))
-    if calc_bytes:
-        root_entries += dir_entry(b"CALC    BIN", 0x20, calc_start, len(calc_bytes))
-    if notepad_bytes:
-        root_entries += dir_entry(b"NOTEPAD BIN", 0x20, notepad_start, len(notepad_bytes))
-    if top_bytes:
-        root_entries += dir_entry(b"TOP     BIN", 0x20, top_start, len(top_bytes))
-    if desktop_bytes:
-        root_entries += dir_entry(b"DESKTOP BIN", 0x20, desktop_start, len(desktop_bytes))
-    if tcp_bytes:
-        root_entries += dir_entry(b"TCP     BIN", 0x20, tcp_start, len(tcp_bytes))
-    if fetch_bytes:
-        root_entries += dir_entry(b"FETCH   BIN", 0x20, fetch_start, len(fetch_bytes))
-    if chat_bytes:
-        root_entries += dir_entry(b"CHAT    BIN", 0x20, chat_start, len(chat_bytes))
-    if file_bytes:
-        root_entries += dir_entry(b"FILE    BIN", 0x20, filebin_start, len(file_bytes))
-    if fstest_bytes:
-        root_entries += dir_entry(b"FSTEST  BIN", 0x20, fstest_start, len(fstest_bytes))
-    if timertest_bytes:
-        root_entries += dir_entry(b"TIMER   BIN", 0x20, timertest_start, len(timertest_bytes))
-    if victim_bytes:
-        root_entries += dir_entry(b"VICTIM  BIN", 0x20, victim_start, len(victim_bytes))
-    if harden_bytes:
-        root_entries += dir_entry(b"HARDEN  BIN", 0x20, harden_start, len(harden_bytes))
-    if jingle_bytes:
-        root_entries += dir_entry(b"JINGLE  BIN", 0x20, jingle_start, len(jingle_bytes))
-    if chime_bytes:
-        root_entries += dir_entry(b"CHIME   BIN", 0x20, chime_start, len(chime_bytes))
-    if globals_bytes:
-        root_entries += dir_entry(b"GLOBALS BIN", 0x20, globals_start, len(globals_bytes))
-    if guard_bytes:
-        root_entries += dir_entry(b"GUARD   BIN", 0x20, guard_start, len(guard_bytes))
-    if spin_bytes:
-        root_entries += dir_entry(b"SPIN    BIN", 0x20, spin_start, len(spin_bytes))
-    if asm_bytes:
-        root_entries += dir_entry(b"ASM     BIN", 0x20, asm_start, len(asm_bytes))
-    if settings_bytes:
-        root_entries += dir_entry(b"SETTINGSBIN", 0x20, settings_start, len(settings_bytes))
-    if crash_bytes:
-        root_entries += dir_entry(b"CRASH   ELF", 0x20, crash_start, len(crash_bytes))
-    if disas_bytes:
-        root_entries += dir_entry(b"DISAS   BIN", 0x20, disas_start, len(disas_bytes))
-    if edit_bytes:
-        root_entries += dir_entry(b"EDIT    BIN", 0x20, edit_start, len(edit_bytes))
-    if ps_bytes:
-        root_entries += dir_entry(b"PS      BIN", 0x20, ps_start, len(ps_bytes))
-    if resmon_bytes:
-        root_entries += dir_entry(b"RESMON  BIN", 0x20, resmon_start, len(resmon_bytes))
-    if devcons_bytes:
-        root_entries += dir_entry(b"DEVCONS BIN", 0x20, devcons_start, len(devcons_bytes))
-    if netstat_bytes:
-        root_entries += dir_entry(b"NETSTAT BIN", 0x20, netstat_start, len(netstat_bytes))
-    if m21demo_bytes:
-        root_entries += dir_entry(b"M21DEMO BIN", 0x20, m21demo_start, len(m21demo_bytes))
-    if ping_bytes:
-        root_entries += dir_entry(b"PING    BIN", 0x20, ping_start, len(ping_bytes))
-    if dns_bytes:
-        root_entries += dir_entry(b"DNS     BIN", 0x20, dns_start, len(dns_bytes))
-    if download_bytes:
-        root_entries += dir_entry(b"DOWNLOADBIN", 0x20, download_start, len(download_bytes))
-    if traceroute_bytes:
-        root_entries += dir_entry(b"TRACEROUBIN", 0x20, traceroute_start, len(traceroute_bytes))
-    if netprof_bytes:
-        root_entries += dir_entry(b"NETPROF BIN", 0x20, netprof_start, len(netprof_bytes))
-    if sysmon_bytes:
-        root_entries += dir_entry(b"SYSMON  BIN", 0x20, sysmon_start, len(sysmon_bytes))
-    if httpd_bytes:
-        root_entries += dir_entry(b"HTTPD   BIN", 0x20, httpd_start, len(httpd_bytes))
-    if vmtest_bytes:
-        root_entries += dir_entry(b"VMTEST  BIN", 0x20, vmtest_start, len(vmtest_bytes))
-    if wndstub_bytes:
-        root_entries += dir_entry(b"WNDSTUB BIN", 0x20, wndstub_start, len(wndstub_bytes))
-    if wnd_bytes:
-        root_entries += dir_entry(b"WND     BIN", 0x20, wnd_start, len(wnd_bytes))
-    if apps_txt_bytes:
-        root_entries += dir_entry(b"APPS    TXT", 0x20, apps_txt_start, len(apps_txt_bytes))
-    if hello_bytes:
-        root_entries += dir_entry(b"HELLO   ELF", 0x20, hello_start, len(hello_bytes))
-    for name83, b, start, _ in extra_file_info:
-        root_entries += dir_entry(name83, 0x20, start, len(b))
-
-    root_entries = root_entries.ljust(root_clusters * bps, b"\x00")
+    root_entries = (vol_label + efi_entry + kernel_entry).ljust(
+        root_clusters * bps, b"\x00")
     for i in range(root_clusters):
         chunk = root_entries[i * bps:(i + 1) * bps]
         wsec(geo.cluster_sector(2 + i), chunk)
-    wsec(geo.cluster_sector(efi_dir_cluster), (dot_efi + dotdot_efi + boot_entry).ljust(bps, b"\x00"))
-    wsec(geo.cluster_sector(boot_dir_cluster), (dot_boot + dotdot_boot + file_entry).ljust(bps, b"\x00"))
+    wsec(geo.cluster_sector(efi_dir_cluster),
+         (dot_efi + dotdot_efi + boot_entry).ljust(bps, b"\x00"))
+    wsec(geo.cluster_sector(boot_dir_cluster),
+         (dot_boot + dotdot_boot + file_entry).ljust(bps, b"\x00"))
 
     # --- file data -----------------------------------------------------
-    if kernel_bytes:
-        for i in range(kernel_clusters):
-            chunk = kernel_bytes[i * bps:(i + 1) * bps]
-            wsec(geo.cluster_sector(kernel_start + i), chunk.ljust(bps, b"\x00"))
-    if user_bytes:
-        for i in range(user_clusters):
-            chunk = user_bytes[i * bps:(i + 1) * bps]
-            wsec(geo.cluster_sector(user_start + i), chunk.ljust(bps, b"\x00"))
-    if counter_bytes:
-        for i in range(counter_clusters):
-            chunk = counter_bytes[i * bps:(i + 1) * bps]
-            wsec(geo.cluster_sector(counter_start + i), chunk.ljust(bps, b"\x00"))
-    if peer_bytes:
-        for i in range(peer_clusters):
-            chunk = peer_bytes[i * bps:(i + 1) * bps]
-            wsec(geo.cluster_sector(peer_start + i), chunk.ljust(bps, b"\x00"))
-    if status43_bytes:
-        for i in range(status43_clusters):
-            chunk = status43_bytes[i * bps:(i + 1) * bps]
-            wsec(geo.cluster_sector(status43_start + i), chunk.ljust(bps, b"\x00"))
-    if udp_bytes:
-        for i in range(udp_clusters):
-            chunk = udp_bytes[i * bps:(i + 1) * bps]
-            wsec(geo.cluster_sector(udp_start + i), chunk.ljust(bps, b"\x00"))
-    if win_bytes:
-        for i in range(win_clusters):
-            chunk = win_bytes[i * bps:(i + 1) * bps]
-            wsec(geo.cluster_sector(win_start + i), chunk.ljust(bps, b"\x00"))
-    if winclose_bytes:
-        for i in range(winclose_clusters):
-            chunk = winclose_bytes[i * bps:(i + 1) * bps]
-            wsec(geo.cluster_sector(winclose_start + i), chunk.ljust(bps, b"\x00"))
-    if winloop_bytes:
-        for i in range(winloop_clusters):
-            chunk = winloop_bytes[i * bps:(i + 1) * bps]
-            wsec(geo.cluster_sector(winloop_start + i), chunk.ljust(bps, b"\x00"))
-    if winmove_bytes:
-        for i in range(winmove_clusters):
-            chunk = winmove_bytes[i * bps:(i + 1) * bps]
-            wsec(geo.cluster_sector(winmove_start + i), chunk.ljust(bps, b"\x00"))
-    if keytest_bytes:
-        for i in range(keytest_clusters):
-            chunk = keytest_bytes[i * bps:(i + 1) * bps]
-            wsec(geo.cluster_sector(keytest_start + i), chunk.ljust(bps, b"\x00"))
-    if savetext_bytes:
-        for i in range(savetext_clusters):
-            chunk = savetext_bytes[i * bps:(i + 1) * bps]
-            wsec(geo.cluster_sector(savetext_start + i), chunk.ljust(bps, b"\x00"))
-    if type_bytes:
-        for i in range(type_clusters):
-            chunk = type_bytes[i * bps:(i + 1) * bps]
-            wsec(geo.cluster_sector(type_start + i), chunk.ljust(bps, b"\x00"))
-    if dir_bytes:
-        for i in range(dir_clusters):
-            chunk = dir_bytes[i * bps:(i + 1) * bps]
-            wsec(geo.cluster_sector(dir_start + i), chunk.ljust(bps, b"\x00"))
-    if calc_bytes:
-        for i in range(calc_clusters):
-            chunk = calc_bytes[i * bps:(i + 1) * bps]
-            wsec(geo.cluster_sector(calc_start + i), chunk.ljust(bps, b"\x00"))
-    if notepad_bytes:
-        for i in range(notepad_clusters):
-            chunk = notepad_bytes[i * bps:(i + 1) * bps]
-            wsec(geo.cluster_sector(notepad_start + i), chunk.ljust(bps, b"\x00"))
-    if top_bytes:
-        for i in range(top_clusters):
-            chunk = top_bytes[i * bps:(i + 1) * bps]
-            wsec(geo.cluster_sector(top_start + i), chunk.ljust(bps, b"\x00"))
-    if desktop_bytes:
-        for i in range(desktop_clusters):
-            chunk = desktop_bytes[i * bps:(i + 1) * bps]
-            wsec(geo.cluster_sector(desktop_start + i), chunk.ljust(bps, b"\x00"))
-    if tcp_bytes:
-        for i in range(tcp_clusters):
-            chunk = tcp_bytes[i * bps:(i + 1) * bps]
-            wsec(geo.cluster_sector(tcp_start + i), chunk.ljust(bps, b"\x00"))
-    if fetch_bytes:
-        for i in range(fetch_clusters):
-            chunk = fetch_bytes[i * bps:(i + 1) * bps]
-            wsec(geo.cluster_sector(fetch_start + i), chunk.ljust(bps, b"\x00"))
-    if chat_bytes:
-        for i in range(chat_clusters):
-            chunk = chat_bytes[i * bps:(i + 1) * bps]
-            wsec(geo.cluster_sector(chat_start + i), chunk.ljust(bps, b"\x00"))
-    if file_bytes:
-        for i in range(filebin_clusters):
-            chunk = file_bytes[i * bps:(i + 1) * bps]
-            wsec(geo.cluster_sector(filebin_start + i), chunk.ljust(bps, b"\x00"))
-    if fstest_bytes:
-        for i in range(fstest_clusters):
-            chunk = fstest_bytes[i * bps:(i + 1) * bps]
-            wsec(geo.cluster_sector(fstest_start + i), chunk.ljust(bps, b"\x00"))
-    if timertest_bytes:
-        for i in range(timertest_clusters):
-            chunk = timertest_bytes[i * bps:(i + 1) * bps]
-            wsec(geo.cluster_sector(timertest_start + i), chunk.ljust(bps, b"\x00"))
-    if victim_bytes:
-        for i in range(victim_clusters):
-            chunk = victim_bytes[i * bps:(i + 1) * bps]
-            wsec(geo.cluster_sector(victim_start + i), chunk.ljust(bps, b"\x00"))
-    if harden_bytes:
-        for i in range(harden_clusters):
-            chunk = harden_bytes[i * bps:(i + 1) * bps]
-            wsec(geo.cluster_sector(harden_start + i), chunk.ljust(bps, b"\x00"))
-    if jingle_bytes:
-        for i in range(jingle_clusters):
-            chunk = jingle_bytes[i * bps:(i + 1) * bps]
-            wsec(geo.cluster_sector(jingle_start + i), chunk.ljust(bps, b"\x00"))
-    if chime_bytes:
-        for i in range(chime_clusters):
-            chunk = chime_bytes[i * bps:(i + 1) * bps]
-            wsec(geo.cluster_sector(chime_start + i), chunk.ljust(bps, b"\x00"))
-    if globals_bytes:
-        for i in range(globals_clusters):
-            chunk = globals_bytes[i * bps:(i + 1) * bps]
-            wsec(geo.cluster_sector(globals_start + i), chunk.ljust(bps, b"\x00"))
-    if guard_bytes:
-        for i in range(guard_clusters):
-            chunk = guard_bytes[i * bps:(i + 1) * bps]
-            wsec(geo.cluster_sector(guard_start + i), chunk.ljust(bps, b"\x00"))
-    if spin_bytes:
-        for i in range(spin_clusters):
-            chunk = spin_bytes[i * bps:(i + 1) * bps]
-            wsec(geo.cluster_sector(spin_start + i), chunk.ljust(bps, b"\x00"))
-    if asm_bytes:
-        for i in range(asm_clusters):
-            chunk = asm_bytes[i * bps:(i + 1) * bps]
-            wsec(geo.cluster_sector(asm_start + i), chunk.ljust(bps, b"\x00"))
-    if settings_bytes:
-        for i in range(settings_clusters):
-            chunk = settings_bytes[i * bps:(i + 1) * bps]
-            wsec(geo.cluster_sector(settings_start + i), chunk.ljust(bps, b"\x00"))
-    if crash_bytes:
-        for i in range(crash_clusters):
-            chunk = crash_bytes[i * bps:(i + 1) * bps]
-            wsec(geo.cluster_sector(crash_start + i), chunk.ljust(bps, b"\x00"))
-    if disas_bytes:
-        for i in range(disas_clusters):
-            chunk = disas_bytes[i * bps:(i + 1) * bps]
-            wsec(geo.cluster_sector(disas_start + i), chunk.ljust(bps, b"\x00"))
-    if edit_bytes:
-        for i in range(edit_clusters):
-            chunk = edit_bytes[i * bps:(i + 1) * bps]
-            wsec(geo.cluster_sector(edit_start + i), chunk.ljust(bps, b"\x00"))
-    if ps_bytes:
-        for i in range(ps_clusters):
-            chunk = ps_bytes[i * bps:(i + 1) * bps]
-            wsec(geo.cluster_sector(ps_start + i), chunk.ljust(bps, b"\x00"))
-    if resmon_bytes:
-        for i in range(resmon_clusters):
-            chunk = resmon_bytes[i * bps:(i + 1) * bps]
-            wsec(geo.cluster_sector(resmon_start + i), chunk.ljust(bps, b"\x00"))
-    if devcons_bytes:
-        for i in range(devcons_clusters):
-            chunk = devcons_bytes[i * bps:(i + 1) * bps]
-            wsec(geo.cluster_sector(devcons_start + i), chunk.ljust(bps, b"\x00"))
-    if netstat_bytes:
-        for i in range(netstat_clusters):
-            chunk = netstat_bytes[i * bps:(i + 1) * bps]
-            wsec(geo.cluster_sector(netstat_start + i), chunk.ljust(bps, b"\x00"))
-    if m21demo_bytes:
-        for i in range(m21demo_clusters):
-            chunk = m21demo_bytes[i * bps:(i + 1) * bps]
-            wsec(geo.cluster_sector(m21demo_start + i), chunk.ljust(bps, b"\x00"))
-    if ping_bytes:
-        for i in range(ping_clusters):
-            chunk = ping_bytes[i * bps:(i + 1) * bps]
-            wsec(geo.cluster_sector(ping_start + i), chunk.ljust(bps, b"\x00"))
-    if dns_bytes:
-        for i in range(dns_clusters):
-            chunk = dns_bytes[i * bps:(i + 1) * bps]
-            wsec(geo.cluster_sector(dns_start + i), chunk.ljust(bps, b"\x00"))
-    if download_bytes:
-        for i in range(download_clusters):
-            chunk = download_bytes[i * bps:(i + 1) * bps]
-            wsec(geo.cluster_sector(download_start + i), chunk.ljust(bps, b"\x00"))
-    if traceroute_bytes:
-        for i in range(traceroute_clusters):
-            chunk = traceroute_bytes[i * bps:(i + 1) * bps]
-            wsec(geo.cluster_sector(traceroute_start + i), chunk.ljust(bps, b"\x00"))
-    if netprof_bytes:
-        for i in range(netprof_clusters):
-            chunk = netprof_bytes[i * bps:(i + 1) * bps]
-            wsec(geo.cluster_sector(netprof_start + i), chunk.ljust(bps, b"\x00"))
-    if sysmon_bytes:
-        for i in range(sysmon_clusters):
-            chunk = sysmon_bytes[i * bps:(i + 1) * bps]
-            wsec(geo.cluster_sector(sysmon_start + i), chunk.ljust(bps, b"\x00"))
-    if httpd_bytes:
-        for i in range(httpd_clusters):
-            chunk = httpd_bytes[i * bps:(i + 1) * bps]
-            wsec(geo.cluster_sector(httpd_start + i), chunk.ljust(bps, b"\x00"))
-    if vmtest_bytes:
-        for i in range(vmtest_clusters):
-            chunk = vmtest_bytes[i * bps:(i + 1) * bps]
-            wsec(geo.cluster_sector(vmtest_start + i), chunk.ljust(bps, b"\x00"))
-    if wndstub_bytes:
-        for i in range(wndstub_clusters):
-            chunk = wndstub_bytes[i * bps:(i + 1) * bps]
-            wsec(geo.cluster_sector(wndstub_start + i), chunk.ljust(bps, b"\x00"))
-    if wnd_bytes:
-        for i in range(wnd_clusters):
-            chunk = wnd_bytes[i * bps:(i + 1) * bps]
-            wsec(geo.cluster_sector(wnd_start + i), chunk.ljust(bps, b"\x00"))
-    if apps_txt_bytes:
-        for i in range(apps_txt_clusters):
-            chunk = apps_txt_bytes[i * bps:(i + 1) * bps]
-            wsec(geo.cluster_sector(apps_txt_start + i), chunk.ljust(bps, b"\x00"))
-    if hello_bytes:
-        for i in range(hello_clusters):
-            chunk = hello_bytes[i * bps:(i + 1) * bps]
-            wsec(geo.cluster_sector(hello_start + i), chunk.ljust(bps, b"\x00"))
-    for _, b, start, clus in extra_file_info:
-        for i in range(clus):
-            chunk = b[i * bps:(i + 1) * bps]
-            wsec(geo.cluster_sector(start + i), chunk.ljust(bps, b"\x00"))
-    for i in range(file_clusters):
+    for i in range(efi_clusters):
         chunk = efi_bytes[i * bps:(i + 1) * bps]
         wsec(geo.cluster_sector(efi_start + i), chunk.ljust(bps, b"\x00"))
-
-
-def build_data_volume(img, geo):
-    """Write the second (data) FAT32 volume — the milestone-four card 2
-    general-filesystem partition (arbitrary disk layout, not the ESP).
-
-    Directory layout: / VIRELAIOS volume label, README.TXT (cluster 3),
-    DATA.TXT (cluster 4). Deterministic, like the ESP volume.
-    """
-    geo.checks()
-    bps = geo.bps
-    readme = (b"VirelaiOS general filesystem: a second FAT32 volume on the "
-              b"same disk (claim 3678, milestone four card 2)\n")
-    data = b"general data volume contents: 1234567890\n"
-
-    fat = [0] * (geo.clusters + 2)
-    fat[0] = 0x0FFFFFF8
-    fat[1] = 0x0FFFFFFF
-    fat[2] = FAT_EOC  # root directory
-    fat[3] = FAT_EOC  # README.TXT
-    fat[4] = FAT_EOC  # DATA.TXT
-
-    def wsec(sector, blob):
-        off = sector * bps
-        img[off:off + len(blob)] = blob
-
-    bs = boot_sector(geo)
-    wsec(geo.base_lba + 0, bs)
-    wsec(geo.base_lba + 1, fs_info_sector())
-    wsec(geo.base_lba + 6, bs)
-    wsec(geo.base_lba + 7, fs_info_sector())
-    fat_bytes = b"".join(struct.pack("<I", e) for e in fat)
-    fat_bytes = fat_bytes.ljust(geo.fat_sectors * bps, b"\x00")
-    for i in range(geo.nfats):
-        wsec(geo.fat_sector(i), fat_bytes)
-
-    root_entries = (dir_entry(b"VIRELAIOS  ", 0x08, 0, 0) +
-                    dir_entry(b"README  TXT", 0x20, 3, len(readme)) +
-                    dir_entry(b"DATA    TXT", 0x20, 4, len(data)))
-    wsec(geo.cluster_sector(2), root_entries.ljust(bps, b"\x00"))
-    wsec(geo.cluster_sector(3), readme.ljust(bps, b"\x00"))
-    wsec(geo.cluster_sector(4), data.ljust(bps, b"\x00"))
+    for i in range(kernel_clusters):
+        chunk = kernel_bytes[i * bps:(i + 1) * bps]
+        wsec(geo.cluster_sector(kernel_start + i), chunk.ljust(bps, b"\x00"))
 
 
 # --------------------------------------------------------------------------
-# Shared FAT/GPT parsing for --list and --cat-file
+# GPT + FAT32 volume assembly
 # --------------------------------------------------------------------------
 
-def find_partition_offset(data, type_guid):
-    """Return the start LBA of the first partition with `type_guid` (0 if
-    absent). Shared by the ESP lookup and the data-partition lookup. Entries
-    are 128 bytes, four per sector: entry i lives at
-    `entries_lba * sector + i * 128`."""
-    if data[512:520] != b"EFI PART":
-        return 0
-    entries_lba = struct.unpack_from("<Q", data, 512 + 72)[0]
-    num = struct.unpack_from("<I", data, 512 + 80)[0]
-    for i in range(min(num, 16)):
-        off = entries_lba * BYTES_PER_SECTOR + i * 128
-        e = data[off:off + 128]
-        if e[0:16] == type_guid:
-            return struct.unpack_from("<Q", e, 32)[0]
-    return 0
+def build_image(path, efi_bytes, kernel_bytes, size_mb):
+    if size_mb and size_mb > 0:
+        total_sectors = size_mb * 1024 * 1024 // BYTES_PER_SECTOR
+    else:
+        total_sectors = ESP_OFFSET + minimum_volume_sectors()
+    volume_sectors = total_sectors - ESP_OFFSET
+    geo = Fat32Geometry(volume_sectors, ESP_OFFSET)
 
+    img = bytearray(total_sectors * BYTES_PER_SECTOR)
+    img[0:BYTES_PER_SECTOR] = protective_mbr(total_sectors)
 
-def find_esp_offset(data):
-    return find_partition_offset(data, ESP_GUID)
+    # GPT header at LBA 1, entries at LBA 2..33, backup at the end.
+    first_usable = 34
+    last_usable = total_sectors - 34
+    entries_lba = 2
+    backup_entries_lba = last_usable + 1  # == total_sectors - 33
+    # Entries region: 128 entries of 128 bytes at LBA 2 (zero-filled).
+    entries = bytearray(128 * 128)
+    entries[0:128] = partition_entry(ESP_GUID, ESP_OFFSET, last_usable,
+                                     "EFI SYSTEM", PART_GUID)
+    entries_crc = zlib.crc32(bytes(entries)) & 0xFFFFFFFF
+    # NOTE: every in-place write below must be a same-length assignment.
+    # A shorter RHS (e.g. the 92-byte GPT header into a 512-byte slice)
+    # SHRINKS the bytearray and silently misaligns every later sector -
+    # exactly the bug that shipped the 35,364,444-byte un-bootable image.
+    img[BYTES_PER_SECTOR:2 * BYTES_PER_SECTOR] = gpt_header(
+        1, total_sectors - 1, first_usable, last_usable,
+        entries_lba, entries_crc, DISK_GUID).ljust(BYTES_PER_SECTOR, b"\x00")
+    img[2 * BYTES_PER_SECTOR:2 * BYTES_PER_SECTOR + len(entries)] = entries
+    img[(total_sectors - 1) * BYTES_PER_SECTOR:
+        (total_sectors - 1) * BYTES_PER_SECTOR + BYTES_PER_SECTOR] = gpt_header(
+            total_sectors - 1, 1, first_usable, last_usable,
+            backup_entries_lba, entries_crc, DISK_GUID).ljust(BYTES_PER_SECTOR, b"\x00")
+    img[backup_entries_lba * BYTES_PER_SECTOR:
+        backup_entries_lba * BYTES_PER_SECTOR + len(entries)] = entries
 
+    build_fat32_image(img, geo, efi_bytes, kernel_bytes)
 
-def find_data_offset(data):
-    return find_partition_offset(data, DATA_GUID)
-
-
-def read_fat_geometry(data, base_lba):
-    """Parse the FAT32 BPB at `base_lba` into a lightweight geo object."""
-    base = base_lba * BYTES_PER_SECTOR
-    if data[base + 510] != 0x55 or data[base + 511] != 0xAA:
-        raise ValueError("no FAT boot signature at LBA %d" % base_lba)
-    geo = Fat32Geometry.__new__(Fat32Geometry)
-    geo.bps = struct.unpack_from("<H", data, base + 11)[0]
-    geo.spc = data[base + 13]
-    geo.reserved = struct.unpack_from("<H", data, base + 14)[0]
-    geo.nfats = data[base + 16]
-    geo.fat_sectors = struct.unpack_from("<I", data, base + 36)[0]
-    geo.root_cluster = struct.unpack_from("<I", data, base + 44)[0]
-    geo.base_lba = base_lba
-    geo.data_start = geo.reserved + geo.nfats * geo.fat_sectors
-    geo.total_sectors = struct.unpack_from("<I", data, base + 32)[0]
-    geo.clusters = 0
-    return geo
-
-
-def encode_83(name):
-    """Encode a short path component as an 11-byte 8.3 name."""
-    stem, _, ext = name.upper().rpartition(".")
-    stem = stem[:8].ljust(8)
-    ext = ext[:3].ljust(3)
-    return (stem + ext).encode("latin-1")
-
-
-def cat_file(path, wanted):
-    """Print the contents of one file on the FAT volume, resolved by 8.3
-    path (e.g. /BOOTED.TXT). Returns 0 on success, 1 if not found."""
-    with open(path, "rb") as f:
-        data = f.read()
-    esp = find_esp_offset(data)
-    if esp == 0:
-        print("cat-file: no ESP partition found", file=sys.stderr)
-        return 1
-    geo = read_fat_geometry(data, esp)
-    parts = [p for p in wanted.strip("/\\").split("/") if p]
-    if not parts:
-        print("cat-file: empty path", file=sys.stderr)
-        return 1
-
-    def read_dir(cluster):
-        entries = []
-        seen = set()
-        while cluster not in (FAT_EOC, FAT_BAD) and cluster not in seen:
-            seen.add(cluster)
-            entries.extend(read_cluster(data, geo, cluster))
-            cluster = fat_next(data, geo, cluster)
-        return entries
-
-    cluster = geo.root_cluster
-    for part in parts:
-        target = encode_83(part)
-        found = None
-        for e in read_dir(cluster):
-            if e[0] in (0x00, 0xE5):
-                continue
-            if e[0:11] == target:
-                found = e
-                break
-        if found is None:
-            print("cat-file: %r not found in volume" % wanted, file=sys.stderr)
-            return 1
-        cluster = ((struct.unpack_from("<H", found, 20)[0] << 16)
-                   | struct.unpack_from("<H", found, 26)[0])
-        if not (found[11] & 0x10) and part is not parts[-1]:
-            print("cat-file: %r is not a directory" % part, file=sys.stderr)
-            return 1
-
-    size = struct.unpack_from("<I", found, 28)[0]
-    out = bytearray()
-    seen = set()
-    while cluster not in (FAT_EOC, FAT_BAD) and cluster not in seen and len(out) < size:
-        seen.add(cluster)
-        sec = geo.cluster_sector(cluster)
-        blob = data[sec * geo.bps:(sec + 1) * geo.bps]
-        out.extend(blob[:size - len(out)])
-        cluster = fat_next(data, geo, cluster)
-    sys.stdout.buffer.write(bytes(out))
-    if out and not out.endswith(b"\n"):
-        sys.stdout.buffer.write(b"\n")
-    return 0
+    with open(path, "wb") as f:
+        f.write(img)
 
 
 # --------------------------------------------------------------------------
-# Inspection (--list)
+# Listing (used by make-image.sh self-verify and tools/inspect.sh)
 # --------------------------------------------------------------------------
-
-def read_cluster(data, geo, cluster):
-    """Return the raw bytes of one cluster as a list of 32-byte entries."""
-    sec = geo.cluster_sector(cluster)
-    blob = data[sec * geo.bps:(sec + 1) * geo.bps]
-    return [blob[i * 32:(i + 1) * 32] for i in range(16)]
-
-
-def fat_next(data, geo, cluster):
-    """Read the FAT to find the next cluster in a chain (FAT copy 0)."""
-    off = geo.fat_sector(0) * geo.bps + cluster * 4
-    return struct.unpack_from("<I", data, off)[0] & 0x0FFFFFFF
-
 
 def decode_83(e):
+    """Decode an 11-byte 8.3 directory name ("KERNEL  BIN" -> "KERNEL.BIN")."""
     name = e[0:8].decode("latin-1", "replace").rstrip(" ")
     ext = e[8:11].decode("latin-1", "replace").rstrip(" ")
     return (name + "." + ext) if ext else name
 
 
 def list_image(path):
+    """Print the image's GPT + FAT contents in the historical --list format
+    (make-image.sh self-verify and tools/inspect.sh grep for "KERNEL.BIN" /
+    "BOOTAA64.EFI" in the decoded 8.3 names)."""
     with open(path, "rb") as f:
         data = f.read()
     total_sectors = len(data) // BYTES_PER_SECTOR
+    bps = BYTES_PER_SECTOR
 
     print("size: %d bytes (%d sectors)" % (len(data), total_sectors))
     print("LBA0: %s" % ("MBR present" if data[510:512] == b"\x55\xaa" else "no MBR signature"))
@@ -1115,36 +371,58 @@ def list_image(path):
         print("GPT: valid signature, header crc32=0x%08x" % hdr_crc)
     else:
         print("GPT: no GPT signature at LBA 1 (expecting one for VirelaiOS images)")
+        return 1
 
-    esp_offset = find_esp_offset(data)
-    if esp_offset == 0:
+    # Find the ESP partition entry (type ESP_GUID) in the primary GPT.
+    entries_lba = struct.unpack_from("<Q", data, 512 + 72)[0]
+    first_lba = None
+    for i in range(128):
+        e = data[entries_lba * bps + i * 128: entries_lba * bps + (i + 1) * 128]
+        if len(e) < 128:
+            break
+        if e[0:16] == ESP_GUID:
+            first_lba = struct.unpack_from("<Q", e, 32)[0]
+            break
+    if first_lba is None:
         print("FAT: no ESP partition found -- cannot list FAT contents")
         return 1
 
-    try:
-        geo = read_fat_geometry(data, esp_offset)
-    except ValueError as exc:
-        print("FAT: %s" % exc)
+    base = first_lba * bps
+    if data[base + 510:base + 512] != b"\x55\xaa" or data[base + 82:base + 90] != b"FAT32   ":
+        print("FAT: no boot signature / FAT32 label at the ESP volume")
         return 1
-    base = esp_offset * BYTES_PER_SECTOR
+    reserved = struct.unpack_from("<H", data, base + 14)[0]
+    fat_sectors = struct.unpack_from("<I", data, base + 36)[0]
+    root_cluster = struct.unpack_from("<I", data, base + 44)[0]
+    spc = data[base + 13]
+    total = struct.unpack_from("<I", data, base + 32)[0]
+    data_start = first_lba + reserved + 2 * fat_sectors
     vol_label = data[base + 71:base + 82].decode("latin-1", "replace").rstrip(" ")
-    print("GPT: ESP partition at LBA %d, %d sectors" %
-          (esp_offset, geo.total_sectors))
-    data_offset = find_data_offset(data)
-    if data_offset:
-        dgeo = read_fat_geometry(data, data_offset)
-        print("GPT: DATA partition at LBA %d, %d sectors" %
-              (data_offset, dgeo.total_sectors))
+
+    print("GPT: ESP partition at LBA %d, %d sectors" % (first_lba, total))
     print("FAT: boot sig ok, label=%r, %d-byte sectors, %d sector/cluster, "
           "%d reserved, %d FATs x %d sectors, root cluster %d" %
-          (vol_label, geo.bps, geo.spc, geo.reserved, geo.nfats,
-           geo.fat_sectors, geo.root_cluster))
+          (vol_label, bps, spc, reserved, 2, fat_sectors, root_cluster))
+
+    def cluster_sector(cluster):
+        return data_start + (cluster - root_cluster) * spc
+
+    def read_cluster_entries(cluster):
+        sec = cluster_sector(cluster)
+        blob = data[sec * bps:(sec + 1) * bps]
+        return [blob[i * 32:(i + 1) * 32] for i in range(bps // 32)]
+
+    def fat_next(cluster):
+        off = (first_lba + reserved) * bps + cluster * 4
+        return struct.unpack_from("<I", data, off)[0] & 0x0FFFFFFF
+
+    print("FAT: directory tree:")
 
     def walk(cluster, indent):
         seen = set()
         while cluster not in (FAT_EOC, FAT_BAD) and cluster not in seen:
             seen.add(cluster)
-            for e in read_cluster(data, geo, cluster):
+            for e in read_cluster_entries(cluster):
                 if e[0] == 0x00:
                     break
                 if e[0] == 0xE5:
@@ -1162,755 +440,44 @@ def list_image(path):
                     walk(cl, indent + "  ")
                 else:
                     print("%s%s  (%d bytes)" % (indent, name, size))
-            cluster = fat_next(data, geo, cluster)
+            cluster = fat_next(cluster)
 
-    print("FAT: directory tree:")
-    walk(geo.root_cluster, "  ")
+    walk(root_cluster, "  ")
     return 0
 
 
 # --------------------------------------------------------------------------
-# Main
+# main
 # --------------------------------------------------------------------------
 
-def build_image(total_sectors, esp_offset, efi_bytes, kernel_bytes=None,
-                user_bytes=None, counter_bytes=None, peer_bytes=None,
-                status43_bytes=None, udp_bytes=None, win_bytes=None,
-                winclose_bytes=None, winloop_bytes=None, winmove_bytes=None,
-                keytest_bytes=None, savetext_bytes=None, type_bytes=None,
-                dir_bytes=None, calc_bytes=None, notepad_bytes=None,
-                top_bytes=None, desktop_bytes=None, tcp_bytes=None,
-                fetch_bytes=None, chat_bytes=None, file_bytes=None, fstest_bytes=None, timertest_bytes=None,
-                victim_bytes=None, harden_bytes=None,
-                jingle_bytes=None, chime_bytes=None, globals_bytes=None,
-                guard_bytes=None, spin_bytes=None, apps_txt_bytes=None,
-                hello_bytes=None, asm_bytes=None, settings_bytes=None,
-                crash_bytes=None, disas_bytes=None, edit_bytes=None, ps_bytes=None,
-                resmon_bytes=None, devcons_bytes=None, netstat_bytes=None,
-                m21demo_bytes=None, ping_bytes=None, dns_bytes=None,
-                download_bytes=None, traceroute_bytes=None, netprof_bytes=None,
-                sysmon_bytes=None, httpd_bytes=None, vmtest_bytes=None,
-                wndstub_bytes=None, wnd_bytes=None, extra_files=None):
-    img = bytearray(total_sectors * BYTES_PER_SECTOR)
-    last_usable = total_sectors - 34
-    first_usable = 34
-    disk_guid = DISK_GUID
-
-    # Partition table: the ESP (LBA esp_offset..) plus a second "data"
-    # FAT32 partition at the tail of the disk (milestone-four card 2). The
-    # data partition must be > 65525 clusters (FAT32) — 36 MiB at spc=1.
-    data_sectors = DATA_MB * 1024 * 1024 // BYTES_PER_SECTOR
-    data_start = last_usable - data_sectors + 1
-    esp_last = data_start - 1
-    entries = bytearray(128 * 128)
-    entries[0:128] = partition_entry(ESP_GUID, esp_offset, esp_last, "EFI SYSTEM")
-    entries[128:256] = partition_entry(DATA_GUID, data_start, last_usable,
-                                       "VIRELAIOS DATA", unique_guid=DATA_PART_GUID)
-    entries_crc = zlib.crc32(bytes(entries)) & 0xFFFFFFFF
-    backup_entries_lba = last_usable + 1  # == total_sectors - 33
-
-    img[0:BYTES_PER_SECTOR] = protective_mbr(total_sectors)
-    # NOTE: every write below uses closed slices wholes length matches the
-    # RHS length. A mismatched slice assignment would silently grow or shrink
-    # the bytearray and corrupt the image.
-    hdr = gpt_header(1, total_sectors - 1, first_usable, last_usable,
-                     2, entries_crc, disk_guid)
-    img[BYTES_PER_SECTOR:2 * BYTES_PER_SECTOR] = hdr.ljust(BYTES_PER_SECTOR, b"\x00")
-    img[2 * BYTES_PER_SECTOR:2 * BYTES_PER_SECTOR + len(entries)] = entries
-    bhdr = gpt_header(total_sectors - 1, 1, first_usable, last_usable,
-                      backup_entries_lba, entries_crc, disk_guid)
-    img[(total_sectors - 1) * BYTES_PER_SECTOR:
-        (total_sectors - 1) * BYTES_PER_SECTOR + BYTES_PER_SECTOR] = \
-        bhdr.ljust(BYTES_PER_SECTOR, b"\x00")
-    img[backup_entries_lba * BYTES_PER_SECTOR:
-        backup_entries_lba * BYTES_PER_SECTOR + len(entries)] = entries
-
-    # FAT32 volumes: the ESP and the data partition.
-    volume_sectors = esp_last - esp_offset + 1
-    geo = Fat32Geometry(volume_sectors, esp_offset)
-    build_fat32_image(img, geo, efi_bytes, kernel_bytes, user_bytes,
-                      counter_bytes, peer_bytes, status43_bytes, udp_bytes,
-                      win_bytes, winclose_bytes, winloop_bytes, winmove_bytes,
-                      keytest_bytes, savetext_bytes, type_bytes, dir_bytes,
-                      calc_bytes, notepad_bytes, top_bytes, desktop_bytes,
-                      tcp_bytes, fetch_bytes, chat_bytes, file_bytes, fstest_bytes, timertest_bytes,
-                      victim_bytes, harden_bytes, jingle_bytes, chime_bytes, globals_bytes, guard_bytes, spin_bytes, apps_txt_bytes, hello_bytes, asm_bytes, settings_bytes, crash_bytes, disas_bytes, edit_bytes, ps_bytes,
-                      resmon_bytes, devcons_bytes, netstat_bytes,
-                      m21demo_bytes, ping_bytes, dns_bytes, download_bytes,
-                      traceroute_bytes, netprof_bytes, sysmon_bytes, httpd_bytes,
-                      vmtest_bytes, wndstub_bytes=wndstub_bytes,
-                      wnd_bytes=wnd_bytes, extra_files=extra_files)
-    geo_data = Fat32Geometry(data_sectors, data_start)
-    build_data_volume(img, geo_data)
-    return bytes(img)
-
-
-def main(argv):
-    ap = argparse.ArgumentParser(description=__doc__)
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--size-mb", type=int, default=SIZE_MB_DEFAULT,
-                    help="total image size in MiB (default %d)" % SIZE_MB_DEFAULT)
-    ap.add_argument("--esp-offset", type=int, default=ESP_OFFSET_DEFAULT,
-                    help="ESP start LBA (default %d)" % ESP_OFFSET_DEFAULT)
+                    help="image size in MiB (0 = the FAT32 floor, default)")
     ap.add_argument("--list", action="store_true",
-                    help="inspect an existing image instead of building")
-    ap.add_argument("--cat-file", metavar="PATH",
-                    help="print the contents of a file on the FAT volume")
-    ap.add_argument("image", help="disk image path")
-    ap.add_argument("efi_file", nargs="?", help="PE/COFF EFI application to embed")
-    ap.add_argument("kernel_file", nargs="?",
-                    help="optional flat kernel image (KERNEL.BIN) to embed at the volume root")
-    ap.add_argument("user_file", nargs="?",
-                    help="optional flat user program (USER.BIN) to embed at the volume root (claim 6783)")
-    ap.add_argument("counter_file", nargs="?",
-                    help="optional flat user program (COUNTER.BIN) to embed at the volume root (claim 4613)")
-    ap.add_argument("peer_file", nargs="?",
-                    help="optional flat user program (PEER.BIN) to embed at the volume root (claim 5965)")
-    ap.add_argument("status43_file", nargs="?",
-                    help="optional flat user program (STATUS43.BIN) to embed at the volume root (claim 9946)")
-    ap.add_argument("udp_file", nargs="?",
-                    help="optional flat user program (UDP.BIN) to embed at the volume root (claim 1384)")
-    ap.add_argument("win_file", nargs="?",
-                    help="optional flat user program (WIN.BIN) to embed at the volume root (claim 0487)")
-    ap.add_argument("winclose_file", nargs="?",
-                    help="optional flat user program (WINCLOSE.BIN) to embed at the volume root (claim 0487 teardown follow-on)")
-    ap.add_argument("winloop_file", nargs="?",
-                    help="optional flat user program (WINLOOP.BIN) to embed at the volume root (claim 0487 ownership follow-on)")
-    ap.add_argument("winmove_file", nargs="?",
-                    help="optional flat user program (WINMOVE.BIN) to embed at the volume root (claim 0487 move/raise follow-on)")
-    ap.add_argument("keytest_file", nargs="?",
-                    help="optional flat user program (KEYTEST.BIN) to embed at the volume root (claim 9328)")
-    ap.add_argument("savetext_file", nargs="?",
-                    help="optional flat user program (SAVETEXT.BIN) to embed at the volume root (claim 0510)")
-    ap.add_argument("type_file", nargs="?",
-                    help="optional flat user program (TYPE.BIN) to embed at the volume root (claim 0510)")
-    ap.add_argument("dir_file", nargs="?",
-                    help="optional flat user program (DIR.BIN) to embed at the volume root (claim 0510)")
-    ap.add_argument("calc_file", nargs="?",
-                    help="optional flat user program (CALC.BIN) to embed at the volume root (claim 8401)")
-    ap.add_argument("notepad_file", nargs="?",
-                    help="optional flat user program (NOTEPAD.BIN) to embed at the volume root")
-    ap.add_argument("top_file", nargs="?",
-                    help="optional flat user program (TOP.BIN) to embed at the volume root")
-    ap.add_argument("desktop_file", nargs="?",
-                    help="optional flat user program (DESKTOP.BIN) to embed at the volume root")
-    ap.add_argument("tcp_file", nargs="?",
-                    help="optional flat user program (TCP.BIN) to embed at the volume root")
-    ap.add_argument("fetch_file", nargs="?",
-                    help="optional flat user program (FETCH.BIN) to embed at the volume root")
-    ap.add_argument("chat_file", nargs="?",
-                    help="optional flat user program (CHAT.BIN) to embed at the volume root")
-    ap.add_argument("file_file", nargs="?",
-                    help="optional flat user program (FILE.BIN) to embed at the volume root (milestone 13, card B3 -- claim 4742)")
-    ap.add_argument("fstest_file", nargs="?",
-                    help="optional flat user program (FSTEST.BIN) to embed at the volume root (milestone 13, card B1 -- claim 5801)")
-    ap.add_argument("timertest_file", nargs="?",
-                    help="optional flat user program (TIMER.BIN) to embed at the volume root (milestone 14, card S2 -- claim 7323)")
-    ap.add_argument("victim_file", nargs="?",
-                    help="optional flat user program (VICTIM.BIN) to embed at the volume root (milestone 14, card S4 -- claim 4482)")
-    ap.add_argument("harden_file", nargs="?",
-                    help="optional flat user program (HARDEN.BIN) to embed at the volume root (milestone 14, card S4 -- claim 4482)")
-    ap.add_argument("jingle_file", nargs="?",
-                    help="optional flat user program (JINGLE.BIN) to embed at the volume root (milestone 15, card A3 -- claim 7636)")
-    ap.add_argument("chime_file", nargs="?",
-                    help="optional flat user program (CHIME.BIN) to embed at the volume root (milestone 15, card A4 -- claim 3206)")
-    ap.add_argument("globals_file", nargs="?",
-                    help="optional SEGMENTED user program (GLOBALS.BIN) to embed at the volume root (milestone 16, card C1 -- claim 3805)")
-    ap.add_argument("guard_file", nargs="?",
-                    help="optional flat user program (GUARD.BIN) to embed at the volume root (milestone 16, card C2 -- claim 8403)")
-    ap.add_argument("spin_file", nargs="?",
-                    help="optional flat user program (SPIN.BIN) to embed at the volume root (Arc5 issue #246 -- CPU limit test)")
-    ap.add_argument("settings_file", nargs="?",
-                    help="optional flat user program (SETTINGS.BIN) to embed at the volume root (Issue #214 -- GUI settings panel)")
-    ap.add_argument("asm_file", nargs="?",
-                    help="optional flat user program (ASM.BIN) to embed at the volume root (M22 D2, issue #325 -- on-machine assembler)")
-    ap.add_argument("ps_file", nargs="?",
-                    help="optional flat user program (PS.BIN) to embed at the volume root (M22 D6, issue #329 -- windowed process viewer)")
-    ap.add_argument("disas_file", nargs="?",
-                    help="optional flat user program (DISAS.BIN) to embed at the volume root (M22 D4, issue #327 -- disassembler)")
-    ap.add_argument("edit_file", nargs="?",
-                    help="optional flat user program (EDIT.BIN) to embed at the volume root (M23 E1, issue #507 -- text editor)")
-    ap.add_argument("resmon_file", nargs="?",
-                    help="optional flat user program (RESMON.BIN) to embed at the volume root (M22 D10, issue #333 -- resource monitor)")
-    ap.add_argument("devcons_file", nargs="?",
-                    help="optional flat user program (DEVCONS.BIN) to embed at the volume root (M22 D14, issue #337 -- developer console)")
-    ap.add_argument("netstat_file", nargs="?",
-                    help="optional SEGMENTED user program (NETSTAT.BIN) to embed at the volume root (M26 N2, issue #400 -- network dashboard)")
-    ap.add_argument("m21demo_file", nargs="?",
-                    help="optional flat user program (M21DEMO.BIN) to embed at the volume root (M21 W1/W2 gate payload, claim 8777 -- two-window tiling demo)")
-    ap.add_argument("ping_file", nargs="?",
-                    help="optional flat user program (PING.BIN) to embed at the volume root (M26 N1, issue #399 -- ICMP ping CLI)")
-    ap.add_argument("dns_file", nargs="?",
-                    help="optional flat user program (DNS.BIN) to embed at the volume root (M26 N5, issue #403 -- RFC 1035 DNS client)")
-    ap.add_argument("download_file", nargs="?",
-                    help="optional flat user program (DOWNLOAD.BIN) to embed at the volume root (M26 N11, issue #438 -- HTTP download manager)")
-    ap.add_argument("traceroute_file", nargs="?",
-                    help="optional flat user program (TRACEROUTE.BIN) to embed at the volume root (M26 N7, issue #434 -- ICMP traceroute CLI)")
-    ap.add_argument("netprof_file", nargs="?",
-                    help="optional flat user program (NETPROF.BIN) to embed at the volume root (M26 N12, issue #439 -- network profile manager)")
-    ap.add_argument("sysmon_file", nargs="?",
-                    help="optional flat user program (SYSMON.BIN) to embed at the volume root (M27 G6, issue #449 -- system monitor dashboard)")
-    ap.add_argument("httpd_file", nargs="?",
-                    help="optional flat user program (HTTPD.BIN) to embed at the volume root (Claim 0750 -- in-guest HTTP/1.1 web server)")
-    ap.add_argument("vmtest_file", nargs="?",
-                    help="optional flat user program (VMTEST.BIN) to embed at the volume root (Milestone 29, Issue #598 -- VM depth test)")
-    ap.add_argument("wndstub_file", nargs="?",
-                    help="optional flat user program (WNDSTUB.BIN) to embed at the volume root (M32 WMS2, Issue #622 -- the WM-server registrant stub)")
-    ap.add_argument("wnd_file", nargs="?",
-                    help="optional flat user program (WND.BIN) to embed at the volume root (M32 WMS3, Issue #623 -- the long-lived EL0 WM server)")
-    ap.add_argument("crash_file", nargs="?",
-                    help="optional AArch64 ELF32 executable (CRASH.ELF) to embed at the volume root (M22 D3, issue #326 -- symbolized-crash gate)")
-    ap.add_argument("hello_file", nargs="?",
-                    help="optional AArch64 ELF32 executable (HELLO.ELF) to embed at the volume root (M22 D1, issue #324 -- ELF-loader gate)")
-    ap.add_argument("extra_files", nargs="*",
-                    help="optional additional files (e.g. shared libraries .SO, dynamic binaries .ELF) to embed at the volume root")
-    ap.add_argument("--apps-txt", metavar="FILE",
-                    help="optional plain-text application manifest (APPS.TXT) to embed at the "
-                         "volume root (milestone 13, card B2 -- claim 8877)")
-    args = ap.parse_args(argv)
+                    help="list the image's partitions and files instead of creating")
+    ap.add_argument("args", nargs="*")
+    opts = ap.parse_args()
 
-    if args.list:
-        return list_image(args.image)
+    if opts.list:
+        if len(opts.args) != 1:
+            ap.error("--list takes exactly one IMAGE argument")
+        list_image(opts.args[0])
+        return
 
-    if args.cat_file:
-        return cat_file(args.image, args.cat_file)
-
-    if not args.efi_file:
-        ap.error("efi_file is required when not using --list")
-    with open(args.efi_file, "rb") as f:
+    if len(opts.args) != 3:
+        ap.error("create mode takes IMAGE EFI_FILE KERNEL_FILE "
+                 "(M34 HF6: the boot volume is exactly these two files)")
+    image, efi_file, kernel_file = opts.args
+    with open(efi_file, "rb") as f:
         efi_bytes = f.read()
-    if not efi_bytes.startswith(b"MZ"):
-        print("WARNING: %s does not start with 'MZ'; it may not be a valid "
-              "PE/COFF EFI application" % args.efi_file, file=sys.stderr)
-
-    kernel_bytes = None
-    if args.kernel_file:
-        with open(args.kernel_file, "rb") as f:
-            kernel_bytes = f.read()
-        if kernel_bytes[:4] != b"DSK1":
-            print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a VirelaiOS kernel image" % args.kernel_file,
-                  file=sys.stderr)
-
-    user_bytes = None
-    if args.user_file:
-        with open(args.user_file, "rb") as f:
-            user_bytes = f.read()
-        if user_bytes[:4] != b"DSK1":
-            print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a VirelaiOS user program image" % args.user_file,
-                  file=sys.stderr)
-
-    counter_bytes = None
-    if args.counter_file:
-        with open(args.counter_file, "rb") as f:
-            counter_bytes = f.read()
-        if counter_bytes[:4] != b"DSK1":
-            print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a VirelaiOS user program image" % args.counter_file,
-                  file=sys.stderr)
-
-    peer_bytes = None
-    if args.peer_file:
-        with open(args.peer_file, "rb") as f:
-            peer_bytes = f.read()
-        if peer_bytes[:4] != b"DSK1":
-            print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a VirelaiOS user program image" % args.peer_file,
-                  file=sys.stderr)
-
-    status43_bytes = None
-    if args.status43_file:
-        with open(args.status43_file, "rb") as f:
-            status43_bytes = f.read()
-        if status43_bytes[:4] != b"DSK1":
-            print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a VirelaiOS user program image" % args.status43_file,
-                  file=sys.stderr)
-
-    udp_bytes = None
-    if args.udp_file:
-        with open(args.udp_file, "rb") as f:
-            udp_bytes = f.read()
-        if udp_bytes[:4] != b"DSK1":
-            print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a VirelaiOS user program image" % args.udp_file,
-                  file=sys.stderr)
-
-    win_bytes = None
-    if args.win_file:
-        with open(args.win_file, "rb") as f:
-            win_bytes = f.read()
-        if win_bytes[:4] != b"DSK1":
-            print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a VirelaiOS user program image" % args.win_file,
-                  file=sys.stderr)
-
-    winclose_bytes = None
-    if args.winclose_file:
-        with open(args.winclose_file, "rb") as f:
-            winclose_bytes = f.read()
-        if winclose_bytes[:4] != b"DSK1":
-            print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a VirelaiOS user program image" % args.winclose_file,
-                  file=sys.stderr)
-
-    winloop_bytes = None
-    if args.winloop_file:
-        with open(args.winloop_file, "rb") as f:
-            winloop_bytes = f.read()
-        if winloop_bytes[:4] != b"DSK1":
-            print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a VirelaiOS user program image" % args.winloop_file,
-                  file=sys.stderr)
-
-    winmove_bytes = None
-    if args.winmove_file:
-        with open(args.winmove_file, "rb") as f:
-            winmove_bytes = f.read()
-        if winmove_bytes[:4] != b"DSK1":
-            print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a VirelaiOS user program image" % args.winmove_file,
-                  file=sys.stderr)
-
-    keytest_bytes = None
-    if args.keytest_file:
-        with open(args.keytest_file, "rb") as f:
-            keytest_bytes = f.read()
-        if keytest_bytes[:4] != b"DSK1":
-            print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a VirelaiOS user program image" % args.keytest_file,
-                  file=sys.stderr)
-
-    savetext_bytes = None
-    if args.savetext_file:
-        with open(args.savetext_file, "rb") as f:
-            savetext_bytes = f.read()
-        if savetext_bytes[:4] != b"DSK1":
-            print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a VirelaiOS user program image" % args.savetext_file,
-                  file=sys.stderr)
-
-    type_bytes = None
-    if args.type_file:
-        with open(args.type_file, "rb") as f:
-            type_bytes = f.read()
-        if type_bytes[:4] != b"DSK1":
-            print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a VirelaiOS user program image" % args.type_file,
-                  file=sys.stderr)
-
-    dir_bytes = None
-    if args.dir_file:
-        with open(args.dir_file, "rb") as f:
-            dir_bytes = f.read()
-        if dir_bytes[:4] != b"DSK1":
-            print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a VirelaiOS user program image" % args.dir_file,
-                  file=sys.stderr)
-
-    calc_bytes = None
-    if args.calc_file:
-        with open(args.calc_file, "rb") as f:
-            calc_bytes = f.read()
-        if calc_bytes[:4] != b"DSK1":
-            print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a VirelaiOS user program image" % args.calc_file,
-                  file=sys.stderr)
-
-    notepad_bytes = None
-    if args.notepad_file:
-        with open(args.notepad_file, "rb") as f:
-            notepad_bytes = f.read()
-        if notepad_bytes[:4] != b"DSK1":
-            print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a VirelaiOS user program image" % args.notepad_file,
-                  file=sys.stderr)
-
-    top_bytes = None
-    if args.top_file:
-        with open(args.top_file, "rb") as f:
-            top_bytes = f.read()
-        if top_bytes[:4] != b"DSK1":
-            print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a VirelaiOS user program image" % args.top_file,
-                  file=sys.stderr)
-
-    desktop_bytes = None
-    if args.desktop_file:
-        with open(args.desktop_file, "rb") as f:
-            desktop_bytes = f.read()
-        if desktop_bytes[:4] != b"DSK1":
-            print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a VirelaiOS user program image" % args.desktop_file,
-                  file=sys.stderr)
-
-    tcp_bytes = None
-    if args.tcp_file:
-        with open(args.tcp_file, "rb") as f:
-            tcp_bytes = f.read()
-        if tcp_bytes[:4] != b"DSK1":
-            print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a VirelaiOS user program image" % args.tcp_file,
-                  file=sys.stderr)
-
-    fetch_bytes = None
-    if args.fetch_file:
-        with open(args.fetch_file, "rb") as f:
-            fetch_bytes = f.read()
-        if fetch_bytes[:4] != b"DSK1":
-            print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a VirelaiOS user program image" % args.fetch_file,
-                  file=sys.stderr)
-
-    chat_bytes = None
-    if args.chat_file:
-        with open(args.chat_file, "rb") as f:
-            chat_bytes = f.read()
-        if chat_bytes[:4] != b"DSK1":
-            print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a VirelaiOS user program image" % args.chat_file,
-                  file=sys.stderr)
-
-    file_bytes = None
-    if args.file_file:
-        with open(args.file_file, "rb") as f:
-            file_bytes = f.read()
-        if file_bytes[:4] != b"DSK1":
-            print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a VirelaiOS user program image" % args.file_file,
-                  file=sys.stderr)
-
-    fstest_bytes = None
-    if args.fstest_file:
-        with open(args.fstest_file, "rb") as f:
-            fstest_bytes = f.read()
-        if fstest_bytes[:4] != b"DSK1":
-            print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a VirelaiOS user program image" % args.fstest_file,
-                  file=sys.stderr)
-
-    timertest_bytes = None
-    if args.timertest_file:
-        with open(args.timertest_file, "rb") as f:
-            timertest_bytes = f.read()
-        if timertest_bytes[:4] != b"DSK1":
-            print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a VirelaiOS user program image" % args.timertest_file,
-                  file=sys.stderr)
-
-    victim_bytes = None
-    if args.victim_file:
-        with open(args.victim_file, "rb") as f:
-            victim_bytes = f.read()
-        if victim_bytes[:4] != b"DSK1":
-            print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a VirelaiOS user program image" % args.victim_file,
-                  file=sys.stderr)
-
-    harden_bytes = None
-    if args.harden_file:
-        with open(args.harden_file, "rb") as f:
-            harden_bytes = f.read()
-        if harden_bytes[:4] != b"DSK1":
-            print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a VirelaiOS user program image" % args.harden_file,
-                  file=sys.stderr)
-
-    jingle_bytes = None
-    if args.jingle_file:
-        with open(args.jingle_file, "rb") as f:
-            jingle_bytes = f.read()
-        if jingle_bytes[:4] != b"DSK1":
-            print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a VirelaiOS user program image" % args.jingle_file,
-                  file=sys.stderr)
-
-    chime_bytes = None
-    if args.chime_file:
-        with open(args.chime_file, "rb") as f:
-            chime_bytes = f.read()
-        if chime_bytes[:4] != b"DSK1":
-            print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a VirelaiOS user program image" % args.chime_file,
-                  file=sys.stderr)
-
-    globals_bytes = None
-    if args.globals_file:
-        with open(args.globals_file, "rb") as f:
-            globals_bytes = f.read()
-        if globals_bytes[:4] != b"DSK3":
-            print("WARNING: %s does not start with the 'DSK3' segmented-image "
-                  "magic; it may not be a VirelaiOS user program image"
-                  % args.globals_file, file=sys.stderr)
-
-    guard_bytes = None
-    if args.guard_file:
-        with open(args.guard_file, "rb") as f:
-            guard_bytes = f.read()
-        if guard_bytes[:4] != b"DSK1":
-            print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a VirelaiOS user program image" % args.guard_file,
-                  file=sys.stderr)
-
-    spin_bytes = None
-    if args.spin_file:
-        with open(args.spin_file, "rb") as f:
-            spin_bytes = f.read()
-        if spin_bytes[:4] != b"DSK1":
-            print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a VirelaiOS user program image" % args.spin_file,
-                  file=sys.stderr)
-
-    apps_txt_bytes = None
-    if args.apps_txt:
-        with open(args.apps_txt, "rb") as f:
-            apps_txt_bytes = f.read()
-
-    asm_bytes = None
-    if args.asm_file:
-        with open(args.asm_file, "rb") as f:
-            asm_bytes = f.read()
-        if asm_bytes[:4] != b"DSK1":
-            print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a VirelaiOS user program image" % args.asm_file,
-                  file=sys.stderr)
-
-    settings_bytes = None
-    if args.settings_file:
-        with open(args.settings_file, "rb") as f:
-            settings_bytes = f.read()
-        if settings_bytes[:4] != b"DSK1":
-            print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a VirelaiOS user program image" % args.settings_file,
-                  file=sys.stderr)
-
-    ps_bytes = None
-    if args.ps_file:
-        with open(args.ps_file, "rb") as f:
-            ps_bytes = f.read()
-        if ps_bytes[:4] != b"DSK1":
-            print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a VirelaiOS user program image" % args.ps_file,
-                  file=sys.stderr)
-
-    disas_bytes = None
-    if args.disas_file:
-        with open(args.disas_file, "rb") as f:
-            disas_bytes = f.read()
-        if disas_bytes[:4] != b"DSK1":
-            print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a VirelaiOS user program image" % args.disas_file,
-                  file=sys.stderr)
-
-    edit_bytes = None
-    if args.edit_file:
-        with open(args.edit_file, "rb") as f:
-            edit_bytes = f.read()
-        if edit_bytes[:4] not in (b"DSK1", b"DSK3"):
-            print("WARNING: %s does not start with the 'DSK1'/'DSK3' magic; it may "
-                  "not be a VirelaiOS user program image" % args.edit_file,
-                  file=sys.stderr)
-
-    resmon_bytes = None
-    if args.resmon_file:
-        with open(args.resmon_file, "rb") as f:
-            resmon_bytes = f.read()
-    devcons_bytes = None
-    if args.devcons_file:
-        with open(args.devcons_file, "rb") as f:
-            devcons_bytes = f.read()
-    netstat_bytes = None
-    if args.netstat_file:
-        with open(args.netstat_file, "rb") as f:
-            netstat_bytes = f.read()
-        if netstat_bytes[:4] not in (b"DSK1", b"DSK3"):
-            print("WARNING: %s does not start with the 'DSK1'/'DSK3' magic; it may "
-                  "not be a VirelaiOS user program image" % args.netstat_file,
-                  file=sys.stderr)
-
-    m21demo_bytes = None
-    if args.m21demo_file:
-        with open(args.m21demo_file, "rb") as f:
-            m21demo_bytes = f.read()
-        if m21demo_bytes[:4] != b"DSK1":
-            print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a VirelaiOS user program image" % args.m21demo_file,
-                  file=sys.stderr)
-
-    ping_bytes = None
-    if args.ping_file:
-        with open(args.ping_file, "rb") as f:
-            ping_bytes = f.read()
-        if ping_bytes[:4] != b"DSK1":
-            print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a VirelaiOS user program image" % args.ping_file,
-                  file=sys.stderr)
-
-    dns_bytes = None
-    if args.dns_file:
-        with open(args.dns_file, "rb") as f:
-            dns_bytes = f.read()
-        if dns_bytes[:4] != b"DSK1":
-            print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a VirelaiOS user program image" % args.dns_file,
-                  file=sys.stderr)
-
-    download_bytes = None
-    if args.download_file:
-        with open(args.download_file, "rb") as f:
-            download_bytes = f.read()
-        if download_bytes[:4] != b"DSK1":
-            print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a VirelaiOS user program image" % args.download_file,
-                  file=sys.stderr)
-
-    traceroute_bytes = None
-    if args.traceroute_file:
-        with open(args.traceroute_file, "rb") as f:
-            traceroute_bytes = f.read()
-        if traceroute_bytes[:4] != b"DSK1":
-            print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a VirelaiOS user program image" % args.traceroute_file,
-                  file=sys.stderr)
-
-    netprof_bytes = None
-    if args.netprof_file:
-        with open(args.netprof_file, "rb") as f:
-            netprof_bytes = f.read()
-        if netprof_bytes[:4] != b"DSK1":
-            print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a VirelaiOS user program image" % args.netprof_file,
-                  file=sys.stderr)
-
-    sysmon_bytes = None
-    if args.sysmon_file:
-        with open(args.sysmon_file, "rb") as f:
-            sysmon_bytes = f.read()
-        if sysmon_bytes[:4] != b"DSK1":
-            print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a VirelaiOS user program image" % args.sysmon_file,
-                  file=sys.stderr)
-
-    httpd_bytes = None
-    if args.httpd_file:
-        with open(args.httpd_file, "rb") as f:
-            httpd_bytes = f.read()
-        if httpd_bytes[:4] != b"DSK1":
-            print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a VirelaiOS user program image" % args.httpd_file,
-                  file=sys.stderr)
-
-    vmtest_bytes = None
-    if args.vmtest_file:
-        with open(args.vmtest_file, "rb") as f:
-            vmtest_bytes = f.read()
-        if vmtest_bytes[:4] != b"DSK1":
-            print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a VirelaiOS user program image" % args.vmtest_file,
-                  file=sys.stderr)
-
-    wndstub_bytes = None
-    if args.wndstub_file:
-        with open(args.wndstub_file, "rb") as f:
-            wndstub_bytes = f.read()
-
-    wnd_bytes = None
-    if args.wnd_file:
-        with open(args.wnd_file, "rb") as f:
-            wnd_bytes = f.read()
-        if wndstub_bytes[:4] != b"DSK1":
-            print("WARNING: %s does not start with the 'DSK1' magic; it may "
-                  "not be a VirelaiOS user program image" % args.wndstub_file,
-                  file=sys.stderr)
-
-    crash_bytes = None
-    if args.crash_file:
-        with open(args.crash_file, "rb") as f:
-            crash_bytes = f.read()
-        if crash_bytes[:4] != b"\x7fELF":
-            print("WARNING: %s does not start with the ELF magic; it may "
-                  "not be an AArch64 executable" % args.crash_file,
-                  file=sys.stderr)
-
-    hello_bytes = None
-    if args.hello_file:
-        with open(args.hello_file, "rb") as f:
-            hello_bytes = f.read()
-        if hello_bytes[:4] != b"\x7fELF":
-            print("WARNING: %s does not start with the ELF magic; it may "
-                  "not be an AArch64 executable" % args.hello_file,
-                  file=sys.stderr)
-
-    extra_files_data = []
-    if args.extra_files:
-        for fpath in args.extra_files:
-            with open(fpath, "rb") as f:
-                fb = f.read()
-            fname = os.path.basename(fpath).upper()
-            base, ext = os.path.splitext(fname)
-            ext = ext.lstrip(".")[:3].ljust(3)
-            base = base[:8].ljust(8)
-            name83 = (base + ext).encode("ascii")
-            extra_files_data.append((name83, fb))
-
-    total_sectors = args.size_mb * 1024 * 1024 // BYTES_PER_SECTOR
-    img = build_image(total_sectors, args.esp_offset, efi_bytes, kernel_bytes,
-                      user_bytes, counter_bytes, peer_bytes, status43_bytes,
-                      udp_bytes, win_bytes, winclose_bytes, winloop_bytes,
-                      winmove_bytes, keytest_bytes, savetext_bytes, type_bytes,
-                      dir_bytes, calc_bytes, notepad_bytes, top_bytes, desktop_bytes,
-                      tcp_bytes, fetch_bytes, chat_bytes, file_bytes, fstest_bytes, timertest_bytes,
-                      victim_bytes, harden_bytes, jingle_bytes, chime_bytes, globals_bytes, guard_bytes, spin_bytes, apps_txt_bytes, hello_bytes, asm_bytes, settings_bytes, crash_bytes, disas_bytes, edit_bytes, ps_bytes,
-                      resmon_bytes, devcons_bytes, netstat_bytes,
-                      m21demo_bytes, ping_bytes, dns_bytes, download_bytes,
-                      traceroute_bytes, netprof_bytes, sysmon_bytes, httpd_bytes,
-                      vmtest_bytes, wndstub_bytes=wndstub_bytes,
-                      wnd_bytes=wnd_bytes,
-                      extra_files=extra_files_data)
-    with open(args.image, "wb") as f:
-        f.write(img)
-    extra = ", %d-byte kernel image embedded" % len(kernel_bytes) if kernel_bytes else ""
-    extra += ", %d-byte user program embedded" % len(user_bytes) if user_bytes else ""
-    extra += ", %d-byte counter program embedded" % len(counter_bytes) if counter_bytes else ""
-    extra += ", %d-byte peer program embedded" % len(peer_bytes) if peer_bytes else ""
-    extra += ", %d-byte status43 program embedded" % len(status43_bytes) if status43_bytes else ""
-    extra += ", %d-byte udp program embedded" % len(udp_bytes) if udp_bytes else ""
-    extra += ", %d-byte win program embedded" % len(win_bytes) if win_bytes else ""
-    extra += ", %d-byte winclose program embedded" % len(winclose_bytes) if winclose_bytes else ""
-    extra += ", %d-byte winloop program embedded" % len(winloop_bytes) if winloop_bytes else ""
-    extra += ", %d-byte winmove program embedded" % len(winmove_bytes) if winmove_bytes else ""
-    extra += ", %d-byte keytest program embedded" % len(keytest_bytes) if keytest_bytes else ""
-    extra += ", %d-byte savetext program embedded" % len(savetext_bytes) if savetext_bytes else ""
-    extra += ", %d-byte type program embedded" % len(type_bytes) if type_bytes else ""
-    extra += ", %d-byte dir program embedded" % len(dir_bytes) if dir_bytes else ""
-    extra += ", %d-byte calc program embedded" % len(calc_bytes) if calc_bytes else ""
-    extra += ", %d-byte notepad program embedded" % len(notepad_bytes) if notepad_bytes else ""
-    extra += ", %d-byte top program embedded" % len(top_bytes) if top_bytes else ""
-    extra += ", %d-byte desktop program embedded" % len(desktop_bytes) if desktop_bytes else ""
-    extra += ", %d-byte tcp program embedded" % len(tcp_bytes) if tcp_bytes else ""
-    extra += ", %d-byte fetch program embedded" % len(fetch_bytes) if fetch_bytes else ""
-    extra += ", %d-byte chat program embedded" % len(chat_bytes) if chat_bytes else ""
-    extra += ", %d-byte file program embedded" % len(file_bytes) if file_bytes else ""
-    extra += ", %d-byte fstest program embedded" % len(fstest_bytes) if fstest_bytes else ""
-    extra += ", %d-byte resmon program embedded" % len(resmon_bytes) if resmon_bytes else ""
-    extra += ", %d-byte devcons program embedded" % len(devcons_bytes) if devcons_bytes else ""
-    extra += ", %d-byte netstat program embedded" % len(netstat_bytes) if netstat_bytes else ""
-    extra += ", %d-byte m21demo program embedded" % len(m21demo_bytes) if m21demo_bytes else ""
-    extra += ", %d-byte ping program embedded" % len(ping_bytes) if ping_bytes else ""
-    extra += ", %d-byte dns program embedded" % len(dns_bytes) if dns_bytes else ""
-    extra += ", %d-byte download program embedded" % len(download_bytes) if download_bytes else ""
-    extra += ", %d-byte traceroute program embedded" % len(traceroute_bytes) if traceroute_bytes else ""
-    extra += ", %d-byte netprof program embedded" % len(netprof_bytes) if netprof_bytes else ""
-    extra += ", %d-byte sysmon program embedded" % len(sysmon_bytes) if sysmon_bytes else ""
-    extra += ", %d-byte httpd program embedded" % len(httpd_bytes) if httpd_bytes else ""
-    extra += ", %d-byte vmtest program embedded" % len(vmtest_bytes) if vmtest_bytes else ""
-    extra += ", %d-byte wndstub program embedded" % len(wndstub_bytes) if wndstub_bytes else ""
-    extra += ", %d-byte wnd program embedded" % len(wnd_bytes) if wnd_bytes else ""
-    print("wrote %s: %d MiB, ESP at LBA %d, %d-byte EFI application embedded%s" %
-          (args.image, args.size_mb, args.esp_offset, len(efi_bytes), extra))
-    return 0
-
+    with open(kernel_file, "rb") as f:
+        kernel_bytes = f.read()
+    build_image(image, efi_bytes, kernel_bytes, opts.size_mb)
+    print("mkfat32: wrote %s (%s EFI + %s kernel bytes)" %
+          (image, len(efi_bytes), len(kernel_bytes)))
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    main()

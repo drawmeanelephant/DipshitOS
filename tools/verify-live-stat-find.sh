@@ -46,18 +46,24 @@ echo "revision: $REVISION branch=$BRANCH boots=$BOOTS dirty-files=$DIRTY"
 zig fmt --check boot/src/*.zig kernel/src/*.zig user/src/*.zig build.zig
 zig build
 zig build image
-swift build --package-path host/vm-runner --configuration release
+# M34 HF6 (issue #740): `stat`/`find` walk the host share — the gate
+# seeds the app bundle (KERNEL.BIN + the .BIN fleet for find) and arms
+# the channel (SPIKE runner build).
+swift build --package-path host/vm-runner --configuration release -Xswiftc -DSPIKE
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
 # --- per-run isolation ------------------------------------------------------
 gate_begin live-stat-find
+gate_seed_share
 echo "run dir: $RUN_DIR"
 SCRIPT="$RUN_DIR/script.txt"
 
+# M34 HF6 (issue #740): the FAT-era `stat EFI` (directory + Cluster line)
+# is gone — stat reports size/type/volume for files on the host share
+# (directories are reported as not-found by the re-pointed command).
 cat > "$SCRIPT" <<'EOF'
 stat KERNEL.BIN
 stat /KERNEL.BIN
-stat EFI
 find / -name "*.BIN"
 echo rx-statfind-ok
 EOF
@@ -81,12 +87,11 @@ run_one() {
     if [ -f "$SER" ]; then
         SERIAL_BYTES=$(wc -c < "$SER" 2>/dev/null | tr -d ' ')
         grep -qF -- "VirelaiOS kernel has seized control." "$SER" && BANNER=1
-        grep -qF -- "  File:  KERNEL.BIN" "$SER" && STAT_FILE=1
-        grep -qF -- "  File:  KERNEL.BIN" "$SER" && STAT_FILE=1
-        grep -A3 -- "  File:  KERNEL.BIN" "$SER" | grep -qF -- "  Size:" && STAT_SIZE=1
-        grep -A5 -- "  File:  KERNEL.BIN" "$SER" | grep -qF -- "regular file" && STAT_TYPE=1
-        grep -A5 -- "  File:  EFI" "$SER" | grep -qF -- "directory" && STAT_DIR=1
-        grep -qF -- "  Cluster: " "$SER" && STAT_CLUSTER=1
+        grep -qF -- "  File:    KERNEL.BIN" "$SER" && STAT_FILE=1
+        grep -A3 -- "  File:    KERNEL.BIN" "$SER" | grep -qF -- "  Size:" && STAT_SIZE=1
+        grep -A5 -- "  File:    KERNEL.BIN" "$SER" | grep -qF -- "regular file" && STAT_TYPE=1
+        grep -A5 -- "  File:    KERNEL.BIN" "$SER" | grep -qF -- "  Volume:  host share" && STAT_DIR=1
+        grep -qF -- "  Volume:  host share" "$SER" && STAT_CLUSTER=1
         grep -qF -- "/KERNEL.BIN" "$SER" && FIND_KERNEL=1
         FIND_COUNT=$(grep -acE "^/[A-Za-z0-9_]+\.BIN$" "$SER" 2>/dev/null || true)
         grep -qF -- "rx-statfind-ok" "$SER" && REPLY=1

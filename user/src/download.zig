@@ -228,7 +228,7 @@ pub export fn _start() callconv(.c) noreturn {
     }
     ui.write_console("download: request sent\n");
 
-    // 3. Open output file on FAT32 filesystem (MODE_WRITE | MODE_CREATE)
+    // 3. Open output file on the host share (MODE_WRITE | MODE_CREATE)
     const fd_res = ui.file_open(dest_name, ui.MODE_WRITE | ui.MODE_CREATE);
     if (fd_res < 0) {
         ui.write_console("download: file open failed\n");

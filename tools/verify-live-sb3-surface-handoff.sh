@@ -67,6 +67,7 @@ codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/
 
 # --- per-run isolation -------------------------------------------------------
 gate_begin live-sb3-surface-handoff
+gate_seed_share
 echo "run dir: $RUN_DIR"
 
 SER_LOG="$(art live-sb3-surface-handoff-serial.log)"

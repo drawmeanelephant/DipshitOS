@@ -94,6 +94,7 @@ codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/
 
 # --- per-run isolation ------------------------------------------------------
 gate_begin live-calc-depth
+gate_seed_share
 echo "run dir: $RUN_DIR"
 SCRIPT="$RUN_DIR/script.txt"
 

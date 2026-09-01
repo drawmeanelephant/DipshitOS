@@ -736,9 +736,10 @@ pub const AppState = struct {
         }
         var path_buf: [64]u8 = undefined;
         const path = build_path(self.current_path_slice(), dir_name, &path_buf);
-        // Lane B (claim 2539): real FAT32 directory creation through the
-        // slot 23 MODE_DIR extension — a cluster with `.` / `..` dot
-        // entries and an ATTR_DIRECTORY slot in the parent, not a file.
+        // M25 Lane B (claim 2539): real directory creation through the
+        // slot 23 MODE_DIR extension — M34 HF6 (issue #740) routes it to
+        // the host share channel (the FAT DATA volume is gone), not a
+        // cluster allocator.
         const fd = ui.file_mkdir(path);
         if (fd >= 0) {
             self.create_dir_active = false;
@@ -2011,10 +2012,10 @@ pub const AppState = struct {
             ui.draw_text(win, dbuf[0..dpos], details_area.x + 6, details_area.y + 90, ui.COLOR_TEXT_PRIMARY);
 
             ui.draw_text(win, "Format:", details_area.x + 6, details_area.y + 106, ui.COLOR_TEXT_MUTED);
-            ui.draw_text(win, "FAT32 8.3", details_area.x + 6, details_area.y + 118, ui.COLOR_TEXT_PRIMARY);
+            ui.draw_text(win, "Host Share 8.3", details_area.x + 6, details_area.y + 118, ui.COLOR_TEXT_PRIMARY);
 
             ui.draw_text(win, "Timestamp:", details_area.x + 6, details_area.y + 134, ui.COLOR_TEXT_MUTED);
-            ui.draw_text(win, "N/A (FAT32)", details_area.x + 6, details_area.y + 146, ui.COLOR_TEXT_MUTED);
+            ui.draw_text(win, "N/A (host)", details_area.x + 6, details_area.y + 146, ui.COLOR_TEXT_MUTED);
             return;
         }
 

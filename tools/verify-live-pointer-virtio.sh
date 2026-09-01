@@ -86,6 +86,7 @@ codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/
 
 # --- per-run isolation -------------------------------------------------------
 gate_begin live-pointer-virtio
+gate_seed_share
 echo "run dir: $RUN_DIR"
 
 # --- choreography ------------------------------------------------------------

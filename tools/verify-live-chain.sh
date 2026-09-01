@@ -61,13 +61,14 @@ echo "revision: $REVISION branch=$BRANCH dirty-files=$DIRTY"
 zig fmt --check boot/src/*.zig kernel/src/*.zig build.zig
 zig build
 zig build image
-swift build --package-path host/vm-runner --configuration release
+swift build --package-path host/vm-runner --configuration release -Xswiftc -DSPIKE
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
 # --- per-run isolation -------------------------------------------------------------
 # Private scratch dir + pristine-boot overlay for EVERY boot.
 # See tools/lib/gate-run.sh.
 gate_begin live-chain
+gate_seed_share
 echo "run dir: $RUN_DIR"
 
 
@@ -104,7 +105,7 @@ run_one() {
         # …while the `;` tail always ran.
         [ "$(grep -x -c "chain-seq" "$SER" | tr -d ' ')" = 1 ] && SEQ=1
         # P4: dispatch-level failure propagates a nonzero status through $?.
-        grep -qF "not found on the ESP" "$SER" && grep -qF "exit=1" "$SER" && EXECFAIL=1
+        grep -qF "not found on the host share" "$SER" && grep -qF "exit=1" "$SER" && EXECFAIL=1
         # P4: success reads back as 0.
         grep -qF "ok=0" "$SER" && STATUS=1
         grep -qF "chain-done" "$SER" && DONE=1

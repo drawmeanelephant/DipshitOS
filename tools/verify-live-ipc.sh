@@ -108,7 +108,7 @@ echo "revision: $REVISION branch=$BRANCH boots=$BOOTS dirty-files=$DIRTY"
 zig fmt --check boot/src/*.zig kernel/src/*.zig user/src/*.zig build.zig
 zig build
 zig build image
-swift build --package-path host/vm-runner --configuration release
+swift build --package-path host/vm-runner --configuration release -Xswiftc -DSPIKE
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
 # --- per-run isolation -------------------------------------------------------------
@@ -120,6 +120,7 @@ codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/
 # overlay — reproducible). The writable copy keeps main's exact runner code
 # path while still isolating concurrent gates.
 gate_begin live-ipc
+gate_seed_share
 echo "run dir: $RUN_DIR"
 
 # Phase 1: list + the two execs (the counter's target pid is argv[0] — pid

@@ -80,11 +80,12 @@ echo "revision: $REVISION branch=$BRANCH dirty-files=$DIRTY"
 zig fmt --check boot/src/*.zig kernel/src/*.zig build.zig user/src/*.zig
 zig build
 zig build image
-swift build --package-path host/vm-runner --configuration release
+swift build --package-path host/vm-runner --configuration release -Xswiftc -DSPIKE
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
 # --- per-run isolation -------------------------------------------------------
 gate_begin live-m21-tile
+gate_seed_share
 echo "run dir: $RUN_DIR"
 
 cat > "$RUN_DIR/script1.txt" <<'EOF'

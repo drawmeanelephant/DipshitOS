@@ -235,13 +235,13 @@ pub const SysmonState = struct {
         ui.draw_rect_outline(win, r, 1, ui.theme_border());
 
         var y = r.y + 14;
-        ui.draw_text(win, "Storage Subsystem Specs (GPT + FAT32)", r.x + 16, y, ui.theme_accent());
+        ui.draw_text(win, "Storage Subsystem (ESP boot volume + host share)", r.x + 16, y, ui.theme_accent());
         y += 22;
-        ui.draw_text(win, "Volume 0 (ESP):   Mounted (Boot EFI AA64 binaries + APPS.TXT)", r.x + 16, y, ui.theme_text_primary());
+        ui.draw_text(win, "Boot Volume:      EFI boot volume (BOOTAA64.EFI + KERNEL.BIN)", r.x + 16, y, ui.theme_text_primary());
         y += 20;
-        ui.draw_text(win, "Volume 1 (DATA):  Mounted (/data/ persistent configuration & crash logs)", r.x + 16, y, ui.theme_text_primary());
+        ui.draw_text(win, "Host Share:       queue-5 file channel (APPS.TXT, user files)", r.x + 16, y, ui.theme_text_primary());
         y += 20;
-        ui.draw_text(win, "Driver:           virtio-blk polled DMA, sector size 512 B", r.x + 16, y, ui.theme_text_primary());
+        ui.draw_text(win, "Driver:           custom virtio file-channel, chunked I/O", r.x + 16, y, ui.theme_text_primary());
         y += 28;
 
         ui.draw_text(win, "Networking Subsystem Specs (virtio-net)", r.x + 16, y, ui.theme_accent());

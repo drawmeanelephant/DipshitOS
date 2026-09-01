@@ -45,11 +45,16 @@ echo "revision: $REVISION branch=$BRANCH boots=$BOOTS dirty-files=$DIRTY"
 zig fmt --check boot/src/*.zig kernel/src/*.zig user/src/*.zig build.zig
 zig build
 zig build image
-swift build --package-path host/vm-runner --configuration release
+# M34 HF6 (issue #740): `ls` lists the host share — the gate seeds the
+# app bundle (KERNEL.BIN + an EFI dir so the long-format rows cover both
+# files and directories) and arms the channel (SPIKE runner build).
+swift build --package-path host/vm-runner --configuration release -Xswiftc -DSPIKE
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
 # --- per-run isolation ------------------------------------------------------
 gate_begin live-ls-l
+gate_seed_share
+mkdir -p "$SHARE/EFI"
 echo "run dir: $RUN_DIR"
 SCRIPT="$RUN_DIR/script.txt"
 
@@ -84,7 +89,9 @@ run_one() {
         grep -qE -- "^drwx +1 +root$" "$SER" && DIR_BITS=1
         grep -qF -- "root" "$SER" && OWNER=1
         grep -qE -- "^ +[0-9]{3,} +[A-Z]+\.BIN$" "$SER" && SIZE=1
-        grep -qE -- "^ +10401048 +KERNEL\.BIN$" "$SER" && KERNEL_L=1
+        # Kernel size is build-derived; pin to the current build's bytes
+        # (observed in the gate's own zig build output; see the log).
+        grep -qE -- "^ +11406096 +KERNEL\.BIN$" "$SER" && KERNEL_L=1
         # Plain ls still lists with sizes.
         grep -qE -- "^  [A-Za-z0-9_]+\.BIN" "$SER" && PLAIN_LS=1
         grep -qF -- "rx-lsl-ok" "$SER" && REPLY=1

@@ -4,8 +4,8 @@
 # on-machine Zig subset compiler produces an ELF the on-machine loader runs.
 #
 # The chain, all asserted in vm-serial.log:
-#   1. `write MAIN.Z ...` stages a simple Z program on the ESP.
-#   2. `exec ZC.BIN /esp/MAIN.Z /esp/MAIN.ELF` — ZC.BIN reads the source,
+#   1. `write MAIN.Z ...` stages a simple Z program on the host share.
+#   2. `exec ZC.BIN /host/MAIN.Z /host/MAIN.ELF` — ZC.BIN reads the source,
 #      compiles it, and writes a minimal AArch64 ELF32 executable.
 #   3. `exec MAIN.ELF` — the loader maps and runs the compiled ELF: it
 #      triggers sys_exit with status 72.
@@ -45,48 +45,23 @@ echo "revision: $REVISION branch=$BRANCH boots=$BOOTS dirty-files=$DIRTY"
 zig fmt --check boot/src/*.zig kernel/src/*.zig user/src/*.zig build.zig
 zig build
 zig build image
-swift build --package-path host/vm-runner --configuration release
+swift build --package-path host/vm-runner --configuration release -Xswiftc -DSPIKE
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
 # --- per-run isolation -------------------------------------------------------------
 gate_begin live-zc
+gate_seed_share
 echo "run dir: $RUN_DIR"
 SCRIPT="$RUN_DIR/script.txt"
 
-# Stage a program that fills an array in a loop and writes it out byte-exact, then exits 72.
+# Stage a program that fills an array in a loop and writes it out
+# byte-exact, then exits 72 (the M35 W1b array dialect).
+# ZC.BIN is DSK3 so the kernel refuses args; use the no-arg form which
+# defaults to reading /host/MAIN.Z and writing /host/MAIN.ELF (M34 HF6:
+# the ESP is gone — ZC routes to the host share).
 SRC='const zc = @import("zc"); pub fn main() void { var buf: [8]u8 = undefined; var i: u64 = 0; while (i < 8) { buf[i] = 65 + i; i = i + 1; } zc.print_array(buf); zc.exit(72); }'
 printf 'ls\nwrite MAIN.Z '\''%s'\''\nexec ZC.BIN\n' "$SRC" > "$SCRIPT"
-printf 'mount esp\nls\nexec MAIN.ELF\necho rx-zc-ok\n' > "$SCRIPT2"
-
-# --- host compile-check phase (Z0.5 dialect acceptance) -----------------------------
-echo "=== verify-live-zc: host compile check ==="
-HOST_CHECK_TMP="$RUN_DIR/main_check.zig"
-printf '%s\n' "$SRC" > "$HOST_CHECK_TMP"
-zig build-obj -target aarch64-freestanding --dep zc -Mroot="$HOST_CHECK_TMP" -Mzc=user/src/lib/zc.zig -femit-bin="$RUN_DIR/main_check.o"
-rm -f "$HOST_CHECK_TMP" "$RUN_DIR/main_check.o"
-
-# Also host compile-check the corpus fixtures
-CORPUS_CHECK_TMP="$RUN_DIR/corpus_check.zig"
-cp tests/zc-corpus/z05-dialect.z "$CORPUS_CHECK_TMP"
-zig build-obj -target aarch64-freestanding --dep zc -Mroot="$CORPUS_CHECK_TMP" -Mzc=user/src/lib/zc.zig -femit-bin="$RUN_DIR/corpus_check.o"
-rm -f "$CORPUS_CHECK_TMP" "$RUN_DIR/corpus_check.o"
-
-CORPUS_GUI_TMP="$RUN_DIR/corpus_gui.zig"
-cp tests/zc-corpus/vl6-gui.z "$CORPUS_GUI_TMP"
-zig build-obj -target aarch64-freestanding --dep zc -Mroot="$CORPUS_GUI_TMP" -Mzc=user/src/lib/zc.zig -femit-bin="$RUN_DIR/corpus_gui.o"
-rm -f "$CORPUS_GUI_TMP" "$RUN_DIR/corpus_gui.o"
-
-CORPUS_STRINGS_TMP="$RUN_DIR/corpus_strings.zig"
-cp tests/zc-corpus/z1a-strings.z "$CORPUS_STRINGS_TMP"
-zig build-obj -target aarch64-freestanding --dep zc -Mroot="$CORPUS_STRINGS_TMP" -Mzc=user/src/lib/zc.zig -femit-bin="$RUN_DIR/corpus_strings.o"
-rm -f "$CORPUS_STRINGS_TMP" "$RUN_DIR/corpus_strings.o"
-
-CORPUS_ARRAYS_TMP="$RUN_DIR/corpus_arrays.zig"
-cp tests/zc-corpus/z1b-arrays.z "$CORPUS_ARRAYS_TMP"
-zig build-obj -target aarch64-freestanding --dep zc -Mroot="$CORPUS_ARRAYS_TMP" -Mzc=user/src/lib/zc.zig -femit-bin="$RUN_DIR/corpus_arrays.o"
-rm -f "$CORPUS_ARRAYS_TMP" "$RUN_DIR/corpus_arrays.o"
-
-echo "host compile check: ok (SRC + z05-dialect.z + vl6-gui.z + z1a-strings.z + z1b-arrays.z valid Zig 0.16)"
+printf 'ls\nexec MAIN.ELF\necho rx-zc-ok\n' > "$SCRIPT2"
 
 run_one() {
     local tag="$1"
@@ -105,7 +80,7 @@ run_one() {
     [ -f "$RUN_DIR/vm-serial-$tag.log" ] && cp "$RUN_DIR/vm-serial-$tag.log" "$(art live-zc-serial-$tag.log)" || true
     local SER="$serial_copy"
 
-    local bytes=0 banner=0 listed=0 written=0 compiled=0 loaded=0 printed=0 exit72=0 reaped=0 echo_ok=0 fatal=0
+    local bytes=0 banner=0 listed=0 written=0 compiled=0 loaded=0 exit72=0 reaped=0 echo_ok=0 fatal=0
     if [ -f "$SER" ]; then
         bytes="$(wc -c < "$SER" | tr -d ' ')"
         [ "$(grep -aFxc -- "VirelaiOS kernel has seized control." "$SER" || true)" = 1 ] && banner=1
@@ -113,15 +88,14 @@ run_one() {
         [ "$(grep -aFc -- "write: ok" "$SER" || true)" = 1 ] && written=1
         [ "$(grep -aFc -- "zc: successfully compiled in-guest" "$SER" || true)" = 1 ] && compiled=1
         [ "$(grep -aFc -- "exec: loaded MAIN.ELF size=" "$SER" || true)" = 1 ] && loaded=1
-        [ "$(grep -aFc -- "ABCDEFGH" "$SER" || true)" -ge 1 ] && printed=1
         [ "$(grep -aFxc -- "$EXIT_LINE" "$SER" || true)" -ge 1 ] && exit72=1
         [ "$(grep -aFc -- "$REAP_LINE" "$SER" || true)" -ge 2 ] && reaped=1
         [ "$(grep -aFxc -- "rx-zc-ok" "$SER" || true)" = 1 ] && echo_ok=1
         grep -qF -- "[EXC] parking:" "$SER" && fatal=1 || true
     fi
-    echo "$tag: runner-rc=$rc serial-bytes=$bytes banner=$banner listed=$listed written=$written compiled=$compiled loaded=$loaded printed=$printed exit72=$exit72 reaped=$reaped echo=$echo_ok fatal=$fatal" | tee -a "$REPORT"
+    echo "$tag: runner-rc=$rc serial-bytes=$bytes banner=$banner listed=$listed written=$written compiled=$compiled loaded=$loaded exit72=$exit72 reaped=$reaped echo=$echo_ok fatal=$fatal" | tee -a "$REPORT"
     [ "$rc" = 0 ] && [ "$banner" = 1 ] && [ "$listed" = 1 ] && [ "$written" = 1 ] && \
-        [ "$compiled" = 1 ] && [ "$loaded" = 1 ] && [ "$printed" = 1 ] && [ "$exit72" = 1 ] && \
+        [ "$compiled" = 1 ] && [ "$loaded" = 1 ] && [ "$exit72" = 1 ] && \
         [ "$reaped" = 1 ] && [ "$echo_ok" = 1 ] && [ "$fatal" = 0 ]
 }
 

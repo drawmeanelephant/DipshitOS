@@ -56,14 +56,17 @@ zig build image
 swift build --package-path host/vm-runner --configuration release -Xswiftc -DSPIKE
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
+# M34 HF5/HF6 (issues #739/#740): the share is FILE.BIN's root. The
+# share is CONTROLLED (NOT the app bundle): the RECENT virtual entry is
+# injected only while the listing is BELOW the app's entry cap (16), so a
+# bundle-seeded share (16+ rows) would suppress it and break the arc.
+# FILE.BIN + the byte-known DATA.TXT fixture + the boot-written HISTORY.TXT
+# make exactly 3 rows — the same small-listing shape the gate was written
+# for.
 gate_begin live-filemanager-recent
+gate_arm_share
 echo "run dir: $RUN_DIR"
-
-# M34 HF5 (issue #739): the share is FILE.BIN's root — seed the byte-known
-# DATA.TXT fixture (same bytes as image/mkfat32.py build_data_volume) so
-# the open/recent arc has an entry to select.
-SHARE="$RUN_DIR/share"
-mkdir -p "$SHARE"
+cp zig-out/bin/FILE.BIN "$SHARE/"
 printf '%s\n' 'general data volume contents: 1234567890' > "$SHARE/DATA.TXT"
 
 printf 'exec FILE.BIN\n' > "$RUN_DIR/script.txt"
@@ -75,7 +78,6 @@ rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial.log"
 set +e
 host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
     --serial "$RUN_DIR/vm-serial.log" \
-    --cvc-file "$SHARE" \
     --screen "$RUN_DIR/screen" \
     --via-virtio \
     --script "$RUN_DIR/script.txt" \

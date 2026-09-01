@@ -4,7 +4,7 @@
 # (issue #295): wildcard expansion against the ESP listing.
 #
 # Mechanism: boots the production image and drives the walk over serial:
-#   write ga.bin alpha       -> two files land on the ESP
+#   write ga.bin alpha       -> two files land on the host share
 #   write gb.bin beta
 #   echo *.bin               -> sorted expansion: "ga.bin gb.bin"
 #   echo g?.bin              -> question mark: "ga.bin gb.bin"
@@ -58,13 +58,16 @@ echo "revision: $REVISION branch=$BRANCH dirty-files=$DIRTY"
 zig fmt --check boot/src/*.zig kernel/src/*.zig build.zig
 zig build
 zig build image
-swift build --package-path host/vm-runner --configuration release
+# M34 HF6 (issue #740): glob walks the host share — `write` stages the
+# probe files there, so the gate arms the channel (SPIKE runner build).
+swift build --package-path host/vm-runner --configuration release -Xswiftc -DSPIKE
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
 # --- per-run isolation -------------------------------------------------------------
 # Private scratch dir + pristine-boot overlay for EVERY boot.
 # See tools/lib/gate-run.sh.
 gate_begin live-glob
+gate_arm_share
 echo "run dir: $RUN_DIR"
 
 

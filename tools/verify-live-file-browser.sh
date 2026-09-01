@@ -6,7 +6,7 @@
 #
 # The gate proves the full B4 arc end-to-end from EL0, composing B2's
 # manifest-driven launcher with B3's FILE.BIN:
-#   1. DESKTOP.BIN boots and reads its menu from /esp/APPS.TXT — 19 entries
+#   1. DESKTOP.BIN boots and reads its menu from /host/APPS.TXT — 19 entries
 #      today (9 at M13 close; grew via M15 C4, M23 E1, M27 G6, the M30/M31
 #      ELF rows, and M32's ZC.BIN), FILE.BIN included (the manifest, not the
 #      hardcoded fallback).
@@ -30,9 +30,8 @@
 #      PR #512 (658bd86, 2026-08-23) added alphabetical sorting to the
 #      listing (sort_column=.name, sort_asc=true), and DATA.TXT sorts
 #      before README.TXT, so the initial selection (index 0) changed.
-#      The DESKTOP manifest still reads apps=19 from /esp/APPS.TXT: the
-#      share deliberately carries NO APPS.TXT, so the HF4 host-first open
-#      fails and the ESP fallback (also the migration/fallback proof) wins.
+#      The DESKTOP manifest reads apps=19 from /host/APPS.TXT (M34 HF6:
+#      the share-seeded manifest is the ONLY source — the ESP is gone).
 #   4. The syscalls report proves the seam: sys_exec once, sys_dir_list
 #      twice (main listing + F4 du walk, claim 2539), file_open six times
 #      and file_read three times — desktop host-open (HF4, no APPS.TXT in
@@ -91,19 +90,28 @@ swift build --package-path host/vm-runner --configuration release -Xswiftc -DSPI
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
 # --- per-run isolation -------------------------------------------------------
+# M34 HF6 (issue #740): this gate seeds a CONTROLLED share (NOT the app
+# bundle — the desktop's manifest must come from APPS.TXT and the file
+# browser's listing stays small, so the arc stays deterministic). The
+# DESKTOP.BIN + FILE.BIN binaries, the APPS.TXT + README.TXT + DATA.TXT
+# fixtures, plus HISTORY.TXT (the shell's share re-point writes it at
+# boot) are the whole /host listing.
 gate_begin live-file-browser
+gate_arm_share
 echo "run dir: $RUN_DIR"
 
-# M34 HF5 (issue #739): FILE.BIN's root is the HOST SHARE. Seed it with
-# the same two byte-known fixtures the FAT DATA volume carries (byte-identical
-# to image/mkfat32.py build_data_volume), and deliberately NO APPS.TXT so
-# the desktop falls back to /esp/APPS.TXT (manifest apps=19 preserved).
-SHARE="$RUN_DIR/share"
-mkdir -p "$SHARE"
-printf '%s' 'VirelaiOS general filesystem: a second FAT32 volume on the same disk (claim 3678, milestone four card 2)' > "$SHARE/README.TXT"
+# FILE.BIN's root is the HOST SHARE. Seed it with the byte-known fixtures
+# (README.TXT / DATA.TXT) + the manifest + the two binaries this gate
+# needs (the desktop exec'd by the monitor, FILE.BIN launched by the
+# desktop): the desktop reads /host/APPS.TXT (the ONLY manifest source
+# since HF6 deleted the ESP fallback). The shell's boot-time HISTORY.TXT
+# write completes the 6-entry listing.
+cp zig-out/bin/DESKTOP.BIN zig-out/bin/FILE.BIN "$SHARE/"
+printf '%s' 'VirelaiOS general filesystem readme' > "$SHARE/README.TXT"
 printf '\n' >> "$SHARE/README.TXT"
 printf '%s' 'general data volume contents: 1234567890' > "$SHARE/DATA.TXT"
 printf '\n' >> "$SHARE/DATA.TXT"
+cp image/apps.txt "$SHARE/APPS.TXT"
 
 # Boot the desktop only; FILE.BIN is launched from EL0 by the desktop, never
 # exec'd by the monitor (the composition proof).
@@ -132,7 +140,6 @@ rm -f "$RUN_DIR"/gpu-screen-*
 set +e
 host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
     --serial "$RUN_DIR/vm-serial.log" \
-    --cvc-file "$SHARE" \
     --display --input --screen "$RUN_DIR/gpu-screen" \
     --script "$RUN_DIR/script.txt" \
     --script-after "$STATIC_EXIT_LINE" \
@@ -141,7 +148,7 @@ host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
     --input-chords-delay 2.0 \
     --chords-view \
     --script2 "$RUN_DIR/script2.txt" \
-    --script2-after "file: view DATA.TXT" \
+    --script2-after "file: view APPS.TXT" \
     --script-expect "done-file-sweep" \
     --timeout 120 > "$(art live-file-browser-run.txt)" 2>&1
 RC=$?
@@ -192,10 +199,12 @@ grep -q "file: ready" "$SER" || {
     exit 1
 }
 echo "FILE.READY: OK"
-# 3 entries: README.TXT + DATA.TXT (seeded) + HISTORY.TXT (the HF5 shell
-# history re-point writes the share at boot).
-grep -q "file: listing 3 entries" "$SER" || {
-    echo "ERROR: FILE.BIN listing marker (3 entries) missing from serial log"
+# 7 entries: README.TXT + DATA.TXT + APPS.TXT + DESKTOP.BIN + FILE.BIN
+# (seeded) + HISTORY.TXT (the HF5 shell history re-point writes the share
+# at boot) + WINDOWS.SAV (the WM persistence write). RECENT.SAV appears
+# only after FILE.BIN opens the entry, so it is not in the listing.
+grep -q "file: listing 7 entries" "$SER" || {
+    echo "ERROR: FILE.BIN listing marker (7 entries) missing from serial log"
     exit 1
 }
 echo "FILE.LIST: OK"
@@ -209,36 +218,37 @@ grep -q "27 sys_dir_list calls=2" "$SER" || {
 echo "SYS_DIR_LIST: OK"
 
 # 4. The second Enter opened the SELECTED entry read-only (the browse
-#    arc). Expectation revised to OBSERVED BYTES (2026-08-24, claim 2259):
-#    `file: open DATA.TXT` / `file: view DATA.TXT` — PR #512's sorted
-#    listing (658bd86, 2026-08-23) put DATA.TXT at selection index 0.
-grep -q "file: open DATA.TXT" "$SER" || {
+#    arc). Expectation revised (2026-08-24, claim 2259): PR #512's sorted
+#    listing (658bd86, 2026-08-23) puts the alphabetically-first entry at
+#    selection index 0 — APPS.TXT with the seed set below (it sorts before
+#    DATA.TXT/README.TXT), giving `file: open APPS.TXT` / `file: view
+#    APPS.TXT`.
+grep -q "file: open APPS.TXT" "$SER" || {
     echo "ERROR: FILE.BIN open marker missing from serial log"
     exit 1
 }
 echo "FILE.OPEN: OK"
-grep -q "file: view DATA.TXT" "$SER" || {
+grep -q "file: view APPS.TXT" "$SER" || {
     echo "ERROR: FILE.BIN view marker missing from serial log"
     exit 1
 }
 echo "FILE.VIEW: OK"
 
-#   5. File seam accounting — OBSERVED BYTES (2026-09-01, claims 1732 +
-#   3082; the count is IDENTICAL with the HF5 share armed, because the
-#    successes and failures swap roles without changing the totals):
-#    calls=6 today (was 3 at the 2026-08-24 revision):
-#      desktop host-manifest open /host/APPS.TXT — fails (no APPS.TXT in
-#        the share), still counts (M34 HF4 issue #738 host-first manifest)
-#      desktop /esp/APPS.TXT manifest open
+#   5. File seam accounting — M34 HF6 (issue #740) revision: the desktop's
+#    manifest read is the ONLY manifest open now (the /esp/APPS.TXT path
+#    was deleted with the ESP), which drops the count by one vs the HF5
+#    era: calls=5 today:
+#      desktop host-manifest open /host/APPS.TXT — succeeds (seeded), still
+#        counts (M34 HF4 issue #738 host-first manifest)
 #      FILE.BIN startup recent-ring load /host/RECENT.SAV — absent, still
 #        counts (M25 F5, claim 2539)
-#      FILE.BIN C7 inline preview open (DATA.TXT — succeeds on the share)
-#      FILE.BIN view open (DATA.TXT — succeeds on the share)
+#      FILE.BIN C7 inline preview open (APPS.TXT — succeeds on the share)
+#      FILE.BIN view open (APPS.TXT — succeeds on the share)
 #      FILE.BIN recent-ring save /host/RECENT.SAV (M25 F5 — succeeds on
 #        the share)
 #    file_read stays calls=3 (the two opens that failed never read).
-grep -q "23 sys_file_open calls=6" "$SER" || {
-    echo "ERROR: sys_file_open call count (calls=6) missing from syscalls report"
+grep -q "23 sys_file_open calls=5" "$SER" || {
+    echo "ERROR: sys_file_open call count (calls=5) missing from syscalls report"
     exit 1
 }
 echo "SYS_FILE_OPEN: OK"

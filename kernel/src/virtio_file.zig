@@ -38,6 +38,7 @@
 
 const virtio_custom = @import("virtio_custom.zig");
 const std = @import("std");
+const builtin = @import("builtin");
 
 // ---------------------------------------------------------------------------
 // Wire constants (mirrored by the host's VFWire module)
@@ -237,10 +238,39 @@ var vf_scatter: [1][]const u8 = undefined;
 /// buffer and the point of HF1: the host must write all 32 KiB into it.
 var vf_reply_buf: [reply_cap]u8 align(16) = undefined;
 
+/// Test-only share override: host tests that exercise the share-reading
+/// consumers (exec, settings, shell) serve STAT/READ from an in-memory map
+/// instead of the hardware. `set_test_share(null)` restores hardware mode.
+/// M34 HF6 (issue #740): with fat.zig gone, this is the ONLY way to host-
+/// test the consumers' read paths.
+pub const TestFile = struct {
+    name: []const u8,
+    data: []const u8,
+    /// HF6: a seeded DIRECTORY (stat reports is_dir; list emits a dir row
+    /// with size 0) — the shell pipe/transcript tests seed EFI etc.
+    is_dir: bool = false,
+};
+/// A caller-owned static table (never a stack literal: the slice must
+/// outlive the setter). `null` restores hardware mode; an empty slice
+/// arms the share with NO files (honest not_found for every name).
+var test_share: ?[]const TestFile = null;
+
+pub fn set_test_share(files: ?[]const TestFile) void {
+    test_share = files;
+}
+
+fn test_lookup(name: []const u8) ?[]const u8 {
+    const files = test_share orelse return null;
+    for (files) |f| if (std.mem.eql(u8, f.name, name)) return f.data;
+    return null;
+}
+
 /// True when the transport is usable (queue 5 armed by the runner's
-/// `--cvc-file`). Read by the monitor's `vf` commands to print the honest
-/// "no host file channel" line on default boots.
+/// `--cvc-file` — or the test override). Read by the monitor's `vf`
+/// commands to print the honest "no host file channel" line on default
+/// boots.
 pub fn available() bool {
+    if (builtin.is_test and test_share != null) return true;
     return virtio_custom.cv_ready and virtio_custom.has_file_queue;
 }
 
@@ -335,10 +365,30 @@ pub const ListResult = struct {
 };
 
 /// LIST a directory on the host share. `path` empty = the share root.
-/// Returns the reply status; rows land in `out`.
+/// Returns the reply status; rows land in `out`. Test override: serve
+/// the in-memory share table (flat root — every seeded name is a file
+/// at the root; nested paths return st_not_found).
 pub fn list(path: []const u8, out: *ListResult) u8 {
     out.* = .{};
     if (!available()) return st_host_error;
+    // Test override: serve the fixture map (root only).
+    if (builtin.is_test and test_share != null) {
+        if (path.len != 0) return st_not_found;
+        const files = test_share orelse return st_host_error;
+        for (files) |f| {
+            if (out.count >= list_max_entries) break;
+            var e = DirEntry{};
+            const nlen = @min(f.name.len, e.name.len);
+            @memcpy(e.name[0..nlen], f.name[0..nlen]);
+            e.name_len = nlen;
+            e.type = if (f.is_dir) dir_type_dir else dir_type_file;
+            e.size = if (f.is_dir) 0 else f.data.len;
+            out.entries[out.count] = e;
+            out.count += 1;
+        }
+        out.status = st_ok;
+        return st_ok;
+    }
     const n = exchange(op_list, 0, path, &vf_reply_buf) orelse return st_host_error;
     const rep = decode_reply(vf_reply_buf[0..n]);
     out.status = rep.status;
@@ -361,6 +411,19 @@ pub const StatResult = struct {
 pub fn stat(path: []const u8, out: *StatResult) u8 {
     out.* = .{};
     if (!available()) return st_host_error;
+    // Test override: serve the fixture map.
+    if (builtin.is_test and test_share != null) {
+        const files = test_share orelse return st_not_found;
+        for (files) |f| {
+            if (std.mem.eql(u8, f.name, path)) {
+                out.status = st_ok;
+                out.size = if (f.is_dir) 0 else f.data.len;
+                out.is_dir = f.is_dir;
+                return st_ok;
+            }
+        }
+        return st_not_found;
+    }
     const n = exchange(op_stat, 0, path, &vf_reply_buf) orelse return st_host_error;
     const rep = decode_reply(vf_reply_buf[0..n]);
     out.status = rep.status;
@@ -382,6 +445,13 @@ pub const ReadResult = struct {
 
 pub fn read(path: []const u8, offset: u64) ReadResult {
     if (!available()) return .{ .status = st_host_error, .data = "" };
+    // Test override: serve the fixture map (single-chunk reads — the
+    // hardware chunk loop is exercised live by the vf gate).
+    if (builtin.is_test and test_share != null) {
+        const data = test_lookup(path) orelse return .{ .status = st_not_found, .data = "" };
+        if (offset >= data.len) return .{ .status = st_ok, .data = "" };
+        return .{ .status = st_ok, .data = data[@intCast(offset)..] };
+    }
     var payload: [path_max + read_offset_len]u8 = undefined;
     const plen = build_read_payload(path, offset, &payload) orelse return .{ .status = st_host_error, .data = "" };
     const n = exchange(op_read, 0, payload[0..plen], &vf_reply_buf) orelse return .{ .status = st_host_error, .data = "" };

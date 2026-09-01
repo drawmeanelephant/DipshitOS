@@ -1,8 +1,10 @@
 //! VirelaiOS crash tombstone engine (Arc5 issue #243).
 //!
-//! Writes crash information to `/data/crash/<pid>-<name>.txt` when a process
-//! exits with status 139 (guard page fault) or other non-zero unexpected
-//! exits. Bounded: max 8 tombstones, drop-oldest on overflow.
+//! Writes crash information to `crash/<pid>-<name>.txt` on the host share
+//! when a process exits with status 139 (guard page fault) or other
+//! non-zero unexpected exits. Bounded: max 8 tombstones, drop-oldest on
+//! overflow. M34 HF6 (issue #740): the DATA partition is gone — the file
+//! channel (`--cvc-file`) is the tombstone destination.
 //!
 //! Tombstone contents:
 //!   - Process name, PID, exit status
@@ -14,16 +16,15 @@
 
 const std = @import("std");
 const symbol = @import("symbol.zig");
-const fat = @import("fat.zig");
-const esp = @import("esp.zig");
+const virtio_file = @import("virtio_file.zig");
 const timer = @import("timer.zig");
 const console = @import("console.zig");
 
 /// Maximum number of tombstones to keep (drop-oldest on overflow).
 pub const max_tombstones: usize = 8;
 
-/// Directory for crash tombstones on the DATA partition.
-pub const crash_dir = "/data/crash";
+/// Directory for crash tombstones on the host share (share-relative).
+pub const crash_dir = "crash";
 
 /// Maximum size of a tombstone file content.
 pub const tombstone_max_bytes: usize = 1024;
@@ -196,20 +197,19 @@ pub fn format_tombstone(t: *const Tombstone, out: []u8) usize {
     return pos;
 }
 
-/// Write a tombstone to the DATA partition.
-/// Returns true on success.
-pub fn write_to_disk(t: *const Tombstone, ops: ?fat.DiskOps) bool {
-    if (ops == null) return false;
+/// Write a tombstone to the host share (share-relative `crash/<pid>-<name>.txt`).
+/// Returns true on success. M34 HF6 (issue #740): the DATA partition is
+/// gone — write_whole rides the queue-5 file channel (open-create +
+/// truncate + chunked write + close, no allocation).
+pub fn write_to_disk(t: *const Tombstone) bool {
+    if (!virtio_file.available()) return false;
 
-    // Mount DATA partition
-    if (fat.mount_data(ops) != .ok) return false;
-
-    // Format filename: /data/crash/<pid>-<name>.txt
+    // Format filename: crash/<pid>-<name>.txt
     var filename_buf: [64]u8 = undefined;
     var pos: usize = 0;
 
-    // /data/crash/
-    const prefix = "/data/crash/";
+    // crash/
+    const prefix = "crash/";
     @memcpy(filename_buf[0..prefix.len], prefix);
     pos = prefix.len;
 
@@ -243,13 +243,10 @@ pub fn write_to_disk(t: *const Tombstone, ops: ?fat.DiskOps) bool {
     var content_buf: [tombstone_max_bytes]u8 = undefined;
     const content_len = format_tombstone(t, &content_buf);
 
-    // Write file
-    const result = fat.write_file(filename, content_buf[0..content_len]);
+    // Write file through the host channel
+    const result = virtio_file.write_whole(filename, content_buf[0..content_len]);
 
-    // Restore ESP window
-    _ = esp.set_disk(ops);
-
-    return result == .ok;
+    return result == virtio_file.st_ok;
 }
 
 /// List tombstone filenames for the crash monitor command.
