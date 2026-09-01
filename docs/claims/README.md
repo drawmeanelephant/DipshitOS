@@ -192,6 +192,7 @@ loudly if the generator or a table is broken.
 | [9197-wms6-dock-drain](9197-wms6-dock-drain.md) | buffy (`agent/buffy/wms6-dock-drain`) | ✅ complete |
 | [9363-host-file-channel-filed](9363-host-file-channel-filed.md) | buffy (`freebuff/okay-shower-thoughts-here-we-re-using-fat32-for-so-b0ce3067-2b04-4b81-984d-9fd76bfcf123`) | ✅ done |
 | [9367-virtio-pointer-injection](9367-virtio-pointer-injection.md) | t3code (`t3code/finish-issue-523-progress`) | ✅ done 2026-08-24 — PASS observed live (see Evidence) |
+| [9459-m34-hf3-mutation](9459-m34-hf3-mutation.md) | buffy (`agent/buffy/m34-hf3-mutation`) | ✅ done |
 | [9588-virtio-input-channel](9588-virtio-input-channel.md) | virtio (`agent/virtio/virtio-input-channel`) | ✅ done (2026-08-24) |
 | [9604-wms7-ipc-protocol](9604-wms7-ipc-protocol.md) | buffy (`agent/buffy/wms7-ipc-protocol`) | ✅ done 2026-08-29 — Gate A PASS on VZ (both boots), all host tests green, |
 | [9612-wms10-shared-anon-split](9612-wms10-shared-anon-split.md) | buffy (`agent/buffy/wms10-split-adr`) | ✅ done |
