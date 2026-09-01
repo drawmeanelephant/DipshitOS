@@ -53,8 +53,8 @@ gate_begin live-zc
 echo "run dir: $RUN_DIR"
 SCRIPT="$RUN_DIR/script.txt"
 
-# Stage a GUI program that opens a window, fills a rect, presents, closes, and exits 72.
-SRC='const zc = @import("zc"); pub fn main() void { const wid: u64 = zc.win_open(64, 64, 256, 192); _ = zc.win_fill(wid, 0, 0, 256, 192, 0x1a2b3c); _ = zc.win_present(wid); zc.win_close(wid); zc.exit(72); }'
+# Stage a program that prints a string literal and exits 72.
+SRC='const zc = @import("zc"); pub fn main() void { zc.print("Hello from live zc!\n"); zc.exit(72); }'
 printf 'ls\nwrite MAIN.Z '\''%s'\''\nexec ZC.BIN\n' "$SRC" > "$SCRIPT"
 printf 'mount esp\nls\nexec MAIN.ELF\necho rx-zc-ok\n' > "$SCRIPT2"
 
@@ -76,7 +76,12 @@ cp tests/zc-corpus/vl6-gui.z "$CORPUS_GUI_TMP"
 zig build-obj -target aarch64-freestanding --dep zc -Mroot="$CORPUS_GUI_TMP" -Mzc=user/src/lib/zc.zig -femit-bin="$RUN_DIR/corpus_gui.o"
 rm -f "$CORPUS_GUI_TMP" "$RUN_DIR/corpus_gui.o"
 
-echo "host compile check: ok (SRC + z05-dialect.z + vl6-gui.z valid Zig 0.16)"
+CORPUS_STRINGS_TMP="$RUN_DIR/corpus_strings.zig"
+cp tests/zc-corpus/z1a-strings.z "$CORPUS_STRINGS_TMP"
+zig build-obj -target aarch64-freestanding --dep zc -Mroot="$CORPUS_STRINGS_TMP" -Mzc=user/src/lib/zc.zig -femit-bin="$RUN_DIR/corpus_strings.o"
+rm -f "$CORPUS_STRINGS_TMP" "$RUN_DIR/corpus_strings.o"
+
+echo "host compile check: ok (SRC + z05-dialect.z + vl6-gui.z + z1a-strings.z valid Zig 0.16)"
 
 run_one() {
     local tag="$1"
@@ -95,7 +100,7 @@ run_one() {
     [ -f "$RUN_DIR/vm-serial-$tag.log" ] && cp "$RUN_DIR/vm-serial-$tag.log" "$(art live-zc-serial-$tag.log)" || true
     local SER="$serial_copy"
 
-    local bytes=0 banner=0 listed=0 written=0 compiled=0 loaded=0 exit72=0 reaped=0 echo_ok=0 fatal=0
+    local bytes=0 banner=0 listed=0 written=0 compiled=0 loaded=0 printed=0 exit72=0 reaped=0 echo_ok=0 fatal=0
     if [ -f "$SER" ]; then
         bytes="$(wc -c < "$SER" | tr -d ' ')"
         [ "$(grep -aFxc -- "VirelaiOS kernel has seized control." "$SER" || true)" = 1 ] && banner=1
@@ -103,14 +108,15 @@ run_one() {
         [ "$(grep -aFc -- "write: ok" "$SER" || true)" = 1 ] && written=1
         [ "$(grep -aFc -- "zc: successfully compiled in-guest" "$SER" || true)" = 1 ] && compiled=1
         [ "$(grep -aFc -- "exec: loaded MAIN.ELF size=" "$SER" || true)" = 1 ] && loaded=1
+        [ "$(grep -aFc -- "Hello from live zc!" "$SER" || true)" -ge 1 ] && printed=1
         [ "$(grep -aFxc -- "$EXIT_LINE" "$SER" || true)" -ge 1 ] && exit72=1
         [ "$(grep -aFc -- "$REAP_LINE" "$SER" || true)" -ge 2 ] && reaped=1
         [ "$(grep -aFxc -- "rx-zc-ok" "$SER" || true)" = 1 ] && echo_ok=1
         grep -qF -- "[EXC] parking:" "$SER" && fatal=1 || true
     fi
-    echo "$tag: runner-rc=$rc serial-bytes=$bytes banner=$banner listed=$listed written=$written compiled=$compiled loaded=$loaded exit72=$exit72 reaped=$reaped echo=$echo_ok fatal=$fatal" | tee -a "$REPORT"
+    echo "$tag: runner-rc=$rc serial-bytes=$bytes banner=$banner listed=$listed written=$written compiled=$compiled loaded=$loaded printed=$printed exit72=$exit72 reaped=$reaped echo=$echo_ok fatal=$fatal" | tee -a "$REPORT"
     [ "$rc" = 0 ] && [ "$banner" = 1 ] && [ "$listed" = 1 ] && [ "$written" = 1 ] && \
-        [ "$compiled" = 1 ] && [ "$loaded" = 1 ] && [ "$exit72" = 1 ] && \
+        [ "$compiled" = 1 ] && [ "$loaded" = 1 ] && [ "$printed" = 1 ] && [ "$exit72" = 1 ] && \
         [ "$reaped" = 1 ] && [ "$echo_ok" = 1 ] && [ "$fatal" = 0 ]
 }
 

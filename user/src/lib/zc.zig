@@ -20,6 +20,10 @@ pub fn write(fd: u64, buf: []const u8) i64 {
     );
 }
 
+pub fn print(msg: []const u8) void {
+    _ = write(1, msg);
+}
+
 pub fn yield() void {
     asm volatile ("svc #0"
         :

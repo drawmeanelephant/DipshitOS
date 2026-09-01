@@ -1,0 +1,7 @@
+const zc = @import("zc");
+
+pub fn main() void {
+    zc.print("Hello from zc strings!\n");
+    _ = zc.write(1, "Second line\n");
+    zc.exit(0);
+}

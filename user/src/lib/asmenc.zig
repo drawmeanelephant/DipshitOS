@@ -285,9 +285,8 @@ pub fn strip_comment(raw: []const u8) []const u8 {
 
 // ---------------------------------------------------------------------------
 // ELF32 Generator
-// ---------------------------------------------------------------------------
-pub fn build_elf32(code: []const u8, entry_off: u32, out: []u8) ElfError!usize {
-    const total = elf_code_offset + code.len;
+pub fn build_elf32_with_data(code: []const u8, data: []const u8, entry_off: u32, out: []u8) ElfError!usize {
+    const total = elf_code_offset + code.len + data.len;
     if (total > out.len) return error.too_large;
 
     @memset(out[0..total], 0);
@@ -309,15 +308,23 @@ pub fn build_elf32(code: []const u8, entry_off: u32, out: []u8) ElfError!usize {
     std.mem.writeInt(u16, out[44..46], 1, .little); // e_phnum
 
     const p = elf_header_size;
+    const seg_len: u32 = @intCast(code.len + data.len);
     std.mem.writeInt(u32, out[p..][0..4], 1, .little); // PT_LOAD
     std.mem.writeInt(u32, out[p + 4 ..][0..4], @intCast(elf_code_offset), .little); // p_offset
     std.mem.writeInt(u32, out[p + 8 ..][0..4], image_base, .little); // p_vaddr
     std.mem.writeInt(u32, out[p + 12 ..][0..4], image_base, .little); // p_paddr
-    std.mem.writeInt(u32, out[p + 16 ..][0..4], @intCast(code.len), .little); // p_filesz
-    std.mem.writeInt(u32, out[p + 20 ..][0..4], @intCast(code.len), .little); // p_memsz
+    std.mem.writeInt(u32, out[p + 16 ..][0..4], seg_len, .little); // p_filesz
+    std.mem.writeInt(u32, out[p + 20 ..][0..4], seg_len, .little); // p_memsz
     std.mem.writeInt(u32, out[p + 24 ..][0..4], 5, .little); // R+X
     std.mem.writeInt(u32, out[p + 28 ..][0..4], 0x1000, .little); // page aligned
 
     @memcpy(out[elf_code_offset..][0..code.len], code);
+    if (data.len > 0) {
+        @memcpy(out[elf_code_offset + code.len ..][0..data.len], data);
+    }
     return total;
+}
+
+pub fn build_elf32(code: []const u8, entry_off: u32, out: []u8) ElfError!usize {
+    return build_elf32_with_data(code, &.{}, entry_off, out);
 }

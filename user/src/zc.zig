@@ -34,7 +34,9 @@ const enc_lsl = asmenc.enc_lsl;
 const enc_lsr = asmenc.enc_lsr;
 const enc_lsl_reg = asmenc.enc_lsl_reg;
 const enc_lsr_reg = asmenc.enc_lsr_reg;
+const enc_adr = asmenc.enc_adr;
 const build_elf32 = asmenc.build_elf32;
+const build_elf32_with_data = asmenc.build_elf32_with_data;
 const elf_code_offset = asmenc.elf_code_offset;
 
 // ---------------------------------------------------------------------------
@@ -365,8 +367,20 @@ const CallPatch = struct {
     target_func_idx: usize,
 };
 
-var code: [8192]u8 = undefined;
+var code: [32768]u8 = undefined;
 var code_len: usize = 0;
+
+var data_buf: [32768]u8 = undefined;
+var data_len: usize = 0;
+
+const StringPatch = struct {
+    code_pc: usize,
+    data_off: usize,
+    rd: u5,
+};
+
+var string_patches: [256]StringPatch = undefined;
+var string_patches_count: usize = 0;
 
 var tokens_buf: [2048]Token = undefined;
 var tokens_count: usize = 0;
@@ -383,6 +397,77 @@ var call_patches_count: usize = 0;
 fn emit(word: u32) void {
     std.mem.writeInt(u32, code[code_len..][0..4], word, .little);
     code_len += 4;
+}
+
+fn unescape_string(raw: []const u8, out: []u8) usize {
+    if (raw.len < 2 or raw[0] != '"' or raw[raw.len - 1] != '"') return 0;
+    const content = raw[1 .. raw.len - 1];
+    var out_idx: usize = 0;
+    var i: usize = 0;
+    while (i < content.len and out_idx < out.len) {
+        if (content[i] == '\\' and i + 1 < content.len) {
+            i += 1;
+            switch (content[i]) {
+                'n' => {
+                    out[out_idx] = '\n';
+                    out_idx += 1;
+                },
+                'r' => {
+                    out[out_idx] = '\r';
+                    out_idx += 1;
+                },
+                't' => {
+                    out[out_idx] = '\t';
+                    out_idx += 1;
+                },
+                '0' => {
+                    out[out_idx] = 0;
+                    out_idx += 1;
+                },
+                '\\' => {
+                    out[out_idx] = '\\';
+                    out_idx += 1;
+                },
+                '"' => {
+                    out[out_idx] = '"';
+                    out_idx += 1;
+                },
+                '\'' => {
+                    out[out_idx] = '\'';
+                    out_idx += 1;
+                },
+                else => {
+                    out[out_idx] = content[i];
+                    out_idx += 1;
+                },
+            }
+        } else {
+            out[out_idx] = content[i];
+            out_idx += 1;
+        }
+        i += 1;
+    }
+    return out_idx;
+}
+
+fn addString(raw: []const u8) anyerror!struct { off: usize, len: usize } {
+    var tmp: [4096]u8 = undefined;
+    const unescaped_len = unescape_string(raw, &tmp);
+    if (data_len + unescaped_len > data_buf.len) return error.CompileError;
+    const off = data_len;
+    @memcpy(data_buf[off .. off + unescaped_len], tmp[0..unescaped_len]);
+    data_len += unescaped_len;
+    return .{ .off = off, .len = unescaped_len };
+}
+
+fn emitStringAdr(rd: u5, data_off: usize) void {
+    string_patches[string_patches_count] = StringPatch{
+        .code_pc = code_len,
+        .data_off = data_off,
+        .rd = rd,
+    };
+    string_patches_count += 1;
+    emit(0);
 }
 
 fn emitLoadImmediate(rd: u5, val: u64) void {
@@ -674,11 +759,35 @@ fn parsePrimary(p: *Parser) anyerror!void {
             const val = t.text[1];
             emitLoadImmediate(0, val);
         },
+        .string_lit => {
+            const res = try addString(t.text);
+            emitStringAdr(0, res.off);
+            emit(enc_movz(1, @intCast(res.len), 0));
+        },
         .ident => {
             if (p.accept(.dot)) {
                 const member_tok = try p.expect(.ident);
                 if (std.mem.eql(u8, t.text, "zc")) {
-                    if (std.mem.eql(u8, member_tok.text, "exit")) {
+                    if (std.mem.eql(u8, member_tok.text, "print")) {
+                        _ = try p.expect(.l_paren);
+                        if (p.peek() == .string_lit) {
+                            const str_tok = p.advance();
+                            const res = try addString(str_tok.text);
+                            emit(enc_movz(0, 1, 0)); // stdout fd = 1
+                            emitStringAdr(1, res.off); // x1 = ptr
+                            emit(enc_movz(2, @intCast(res.len), 0)); // x2 = len
+                            emit(enc_movz(8, 1, 0)); // sys_write
+                            emit(enc_svc(0));
+                        } else {
+                            try compileExpr(p);
+                            emit(enc_mov_reg(2, 1));
+                            emit(enc_mov_reg(1, 0));
+                            emit(enc_movz(0, 1, 0));
+                            emit(enc_movz(8, 1, 0));
+                            emit(enc_svc(0));
+                        }
+                        _ = try p.expect(.r_paren);
+                    } else if (std.mem.eql(u8, member_tok.text, "exit")) {
                         _ = try p.expect(.l_paren);
                         try compileExpr(p);
                         _ = try p.expect(.r_paren);
@@ -686,28 +795,42 @@ fn parsePrimary(p: *Parser) anyerror!void {
                         emit(enc_svc(0));
                     } else if (std.mem.eql(u8, member_tok.text, "write")) {
                         _ = try p.expect(.l_paren);
-                        var arg_count: usize = 0;
-                        if (p.peek() != .r_paren) {
-                            try compileExpr(p);
+                        try compileExpr(p); // fd into x0
+                        _ = try p.expect(.comma);
+                        if (p.peek() == .string_lit) {
+                            const str_tok = p.advance();
+                            const res = try addString(str_tok.text);
                             emit(enc_sub_imm(31, 31, 16));
-                            emit(enc_str(31, 0, 0));
-                            arg_count += 1;
-                            while (p.accept(.comma)) {
-                                try compileExpr(p);
+                            emit(enc_str(31, 0, 0)); // save fd
+                            emitStringAdr(1, res.off); // ptr into x1
+                            emit(enc_movz(2, @intCast(res.len), 0)); // len into x2
+                            emit(enc_ldr(31, 0, 0)); // restore fd
+                            emit(enc_add_imm(31, 31, 16));
+                            emit(enc_movz(8, 1, 0)); // sys_write
+                            emit(enc_svc(0));
+                        } else {
+                            emit(enc_sub_imm(31, 31, 16));
+                            emit(enc_str(31, 0, 0)); // save fd on stack
+                            try compileExpr(p); // evaluates 2nd arg into x0
+                            if (p.accept(.comma)) {
                                 emit(enc_sub_imm(31, 31, 16));
-                                emit(enc_str(31, 0, 0));
-                                arg_count += 1;
+                                emit(enc_str(31, 0, 0)); // save 2nd arg on stack
+                                try compileExpr(p); // evaluates 3rd arg into x0
+                                emit(enc_mov_reg(2, 0)); // len -> x2
+                                emit(enc_ldr(31, 1, 0)); // restore 2nd arg (ptr) -> x1
+                                emit(enc_add_imm(31, 31, 16));
+                                emit(enc_ldr(31, 0, 0)); // restore 1st arg (fd) -> x0
+                                emit(enc_add_imm(31, 31, 16));
+                            } else {
+                                emit(enc_mov_reg(2, 1));
+                                emit(enc_mov_reg(1, 0));
+                                emit(enc_ldr(31, 0, 0));
+                                emit(enc_add_imm(31, 31, 16));
                             }
+                            emit(enc_movz(8, 1, 0));
+                            emit(enc_svc(0));
                         }
                         _ = try p.expect(.r_paren);
-                        var i = arg_count;
-                        while (i > 0) {
-                            i -= 1;
-                            emit(enc_ldr(31, @intCast(i), 0));
-                            emit(enc_add_imm(31, 31, 16));
-                        }
-                        emit(enc_movz(8, 1, 0));
-                        emit(enc_svc(0));
                     } else if (std.mem.eql(u8, member_tok.text, "yield")) {
                         _ = try p.expect(.l_paren);
                         _ = try p.expect(.r_paren);
@@ -1069,6 +1192,9 @@ fn compile(src: []const u8) !usize {
     code_len = 0;
     functions_count = 0;
     call_patches_count = 0;
+    locals_count = 0;
+    data_len = 0;
+    string_patches_count = 0;
 
     // Pass 1: Gather function declarations
     var p1 = Parser{ .tokens = tokens };
@@ -1180,6 +1306,13 @@ fn compile(src: []const u8) !usize {
         std.mem.writeInt(u32, code[patch.caller_pc..][0..4], enc_bl(rel), .little);
     }
 
+    // Resolve string ADR patches
+    for (string_patches[0..string_patches_count]) |patch| {
+        const target_pc = code_len + patch.data_off;
+        const rel_bytes = @as(i32, @intCast(target_pc)) - @as(i32, @intCast(patch.code_pc));
+        std.mem.writeInt(u32, code[patch.code_pc..][0..4], enc_adr(patch.rd, rel_bytes), .little);
+    }
+
     const main_idx = lookupFunc("main") orelse return error.CompileError;
     const main_addr = functions[main_idx].address;
     std.mem.writeInt(u32, code[0..4], enc_bl(@intCast(main_addr)), .little);
@@ -1216,11 +1349,10 @@ fn copy_arg(dst: *[40]u8, len: *usize, slot: [32]u8) void {
 }
 
 const source_cap: usize = 8192;
+var source_buf: [source_cap]u8 = undefined;
+var image_buf: [elf_code_offset + 32768]u8 = undefined;
 
 fn run(src_path: []const u8, out_path: []const u8) noreturn {
-    var source_buf: [source_cap]u8 = undefined;
-    var image_buf: [elf_code_offset + 8192]u8 = undefined;
-
     const fd = file_open(src_path, MODE_READ);
     if (fd < 0) {
         console_puts("zc: cannot open source\n");
@@ -1238,7 +1370,7 @@ fn run(src_path: []const u8, out_path: []const u8) noreturn {
         sys_exit(3);
     };
 
-    const total = build_elf32(code[0..bytes], 0, &image_buf) catch {
+    const total = build_elf32_with_data(code[0..bytes], data_buf[0..data_len], 0, &image_buf) catch {
         console_puts("zc: image generation failed\n");
         sys_exit(4);
     };
@@ -1360,4 +1492,23 @@ test "zc: VL6 GUI consumer builtins (win_open, win_fill, win_present, win_close)
     try testing.expect(bytes > 0);
     // entry jumps to main
     try testing.expectEqual(@as(u32, enc_bl(16)), std.mem.readInt(u32, code[0..4], .little));
+}
+
+test "zc: Z1a string literal unescape and data segment emission" {
+    const src =
+        \\const zc = @import("zc");
+        \\
+        \\pub fn main() void {
+        \\    zc.print("Hello, world!\n");
+        \\    _ = zc.write(1, "Second line\n");
+        \\    zc.exit(0);
+        \\}
+    ;
+    const bytes = try compile(src);
+    try testing.expect(bytes > 0);
+    try testing.expect(data_len > 0);
+    try testing.expectEqualStrings("Hello, world!\nSecond line\n", data_buf[0..data_len]);
+
+    const total = try build_elf32_with_data(code[0..bytes], data_buf[0..data_len], 0, &image_buf);
+    try testing.expect(total == elf_code_offset + bytes + data_len);
 }
