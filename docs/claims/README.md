@@ -153,6 +153,7 @@ loudly if the generator or a table is broken.
 | [5227-notepad-wrap-find](5227-notepad-wrap-find.md) | buffy (`agent/buffy/m15-c5c6-notepad`) | ✅ done 2026-08-20 — `user/src/notepad.zig` soft-wrap (`TextLayout` last_space, gutter, `Line X of Y`) + `find_next`/`replace`/`replace_all` (case_sensitive=false) + `AppState` find bar (`find_active`/`find_buf`/`replace_buf`) + `draw` highlight + `handle_keyboard_event` Ctrl+F/H, host tests `soft-wrap`/`find` PASS, `verify-bss-budget` PASS `9788088/11534336` |
 | [5251-fix-args-console-split](5251-fix-args-console-split.md) | buffy (`agent/buffy/fix-args-console-split`) | ✅ done |
 | [5301-m24-calc-decompose-k1-k5](5301-m24-calc-decompose-k1-k5.md) | buffy (`agent/buffy/m24-calc-features`) | ✅ done 2026-08-22 — PR #482 |
+| [5335-contract-audit-fix](5335-contract-audit-fix.md) | buffy (`freebuff/okay-shower-thoughts-here-we-re-using-fat32-for-so-b0ce3067-2b04-4b81-984d-9fd76bfcf123`) | ✅ done |
 | [5381-m24-k6-k16-calc-features](5381-m24-k6-k16-calc-features.md) | ox-alpha (`lane-b/m24-calc-features`) | ✅ done (code + host tests; live-gate bring-up pass pending for the set) |
 | [5424-m19-p5-quoting-p6-globbing](5424-m19-p5-quoting-p6-globbing.md) | ox-alpha (`agent/ox-alpha/m19-p5p6-quoting-globbing`) | ✅ done (2026-08-23) |
 | [5512-archive-march-m4-m5-trackers](5512-archive-march-m4-m5-trackers.md) | oxalpha (`agent/oxalpha/archive-march-m4-m5`) | ✅ done |
