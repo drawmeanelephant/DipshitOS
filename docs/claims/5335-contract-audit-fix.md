@@ -6,7 +6,7 @@
 - **Touches:** docs/wasm-import-contract.md docs/claims/5335-contract-audit-fix.md docs/logs/freebuff-20260901-004.md
 - **Depends on:** the contract landed (PR #786, claim 7129); W1b/W3 not yet claimed
 - **Heartbeat:** 2026-09-01
-- **Status:** 🔄 in progress
+- **Status:** ✅ done
 
 ## Notes
 
