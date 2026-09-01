@@ -3,7 +3,7 @@
 - **Owner:** buffy (`agent/buffy/m34-flake803`)
 - **Prompt / plan:** `docs/claims/1432-m34-hf6-exec-flake803-rootcause1.md`
 - **Scope:** root-cause + fix the intermittent corrupted-exception-frame panic in `verify-live-exec` (flake #803, filed from the HF6 gate sweep)
-- **Touches:** kernel/src/exceptions.zig, kernel/src/main.zig, kernel/src/scheduler.zig, kernel/src/syscall.zig, kernel/src/console.zig, tools/verify-live-exec.sh, docs/claims/1432-*, docs/logs/agent-buffy-m34-flake803.md, docs/status.md
+- **Touches:** kernel/src/exceptions.zig, kernel/src/monitor.zig, docs/claims/1432-*, docs/logs/agent-buffy-m34-flake803.md
 - **Depends on:** HF6 (#740, PR #806) — merged
 - **Heartbeat:** 2026-09-01 — update while Status is 🔄 so staleness checks see life
 - **Status:** 🔄 agent/buffy/m34-flake803

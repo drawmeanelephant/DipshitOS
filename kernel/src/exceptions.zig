@@ -357,6 +357,26 @@ pub fn format_report(
     x2: u64,
     x29: u64,
     will_resume: bool,
+    /// Raw kernel SP_EL1 at vector entry (the pre-push stack pointer). The
+    /// stubs push the 32-slot GPR frame (256 bytes) below the SP that was
+    /// live at the fault, so "frame base + 256" recovers it exactly without
+    /// any asm change. Only meaningful for EL1h entries (SPSel=1 at entry:
+    /// kernel-mode faults). Pass 0 for EL0t/user faults.
+    raw_sp: u64,
+    /// Callee-saved registers x19..x28 (claim 6729: frame slots [30..21]).
+    /// These belong to the interrupted kernel function (they must survive
+    /// calls), so they identify WHERE the fault happened far better than the
+    /// volatile x0/x1/x2 already reported.
+    x19: u64,
+    x20: u64,
+    x21: u64,
+    x22: u64,
+    x23: u64,
+    x24: u64,
+    x25: u64,
+    x26: u64,
+    x27: u64,
+    x28: u64,
 ) []const u8 {
     var pos: usize = 0;
 
@@ -403,6 +423,33 @@ pub fn format_report(
     pos += append_slice(buf[pos..], " x29=0x");
     pos += append_hex(buf[pos..], x29, 16);
     pos += append_slice(buf[pos..], "\n");
+
+    if (raw_sp != 0) {
+        pos += append_slice(buf[pos..], "[EXC] raw_sp=0x");
+        pos += append_hex(buf[pos..], raw_sp, 16);
+        pos += append_slice(buf[pos..], " x19=0x");
+        pos += append_hex(buf[pos..], x19, 16);
+        pos += append_slice(buf[pos..], " x20=0x");
+        pos += append_hex(buf[pos..], x20, 16);
+        pos += append_slice(buf[pos..], " x21=0x");
+        pos += append_hex(buf[pos..], x21, 16);
+        pos += append_slice(buf[pos..], " x22=0x");
+        pos += append_hex(buf[pos..], x22, 16);
+        pos += append_slice(buf[pos..], "\n");
+        pos += append_slice(buf[pos..], "[EXC]     x23=0x");
+        pos += append_hex(buf[pos..], x23, 16);
+        pos += append_slice(buf[pos..], " x24=0x");
+        pos += append_hex(buf[pos..], x24, 16);
+        pos += append_slice(buf[pos..], " x25=0x");
+        pos += append_hex(buf[pos..], x25, 16);
+        pos += append_slice(buf[pos..], " x26=0x");
+        pos += append_hex(buf[pos..], x26, 16);
+        pos += append_slice(buf[pos..], " x27=0x");
+        pos += append_hex(buf[pos..], x27, 16);
+        pos += append_slice(buf[pos..], " x28=0x");
+        pos += append_hex(buf[pos..], x28, 16);
+        pos += append_slice(buf[pos..], "\n");
+    }
 
     if (will_resume) {
         pos += append_slice(buf[pos..], "[EXC] resume-armed: skipping faulting instruction\n");
@@ -629,7 +676,8 @@ export fn exc_dispatch(
         }
     }
     const will_resume = should_resume(kind, resume_armed);
-    var buf: [512]u8 = undefined;
+    var buf: [768]u8 = undefined;
+    const raw_sp: u64 = if ((spsr & 0xf) == 0x5) @intFromPtr(frame) + vector_frame_bytes else 0;
     const report = format_report(
         &buf,
         kind,
@@ -645,6 +693,17 @@ export fn exc_dispatch(
         frame_read(frame, 2),
         frame_read(frame, 29),
         will_resume,
+        raw_sp,
+        frame_read(frame, 19),
+        frame_read(frame, 20),
+        frame_read(frame, 21),
+        frame_read(frame, 22),
+        frame_read(frame, 23),
+        frame_read(frame, 24),
+        frame_read(frame, 25),
+        frame_read(frame, 26),
+        frame_read(frame, 27),
+        frame_read(frame, 28),
     );
     if (report_writer) |w| w(report);
     if (will_resume) {
@@ -1241,7 +1300,7 @@ test "exceptions: format_report is deterministic (resume path)" {
     var buf: [512]u8 = undefined;
     // A udf at EL1h: ESR EC=0x00 (unknown reason), SPSR.M=0x5 (EL1h).
     const esr: u64 = 0;
-    const report = format_report(&buf, kind_sync, esr, 0, 0x7e4dfabc, 0x5, 1, 0x2a, 0x7e4df000, 0x1234, 0x2b, 0x2c, 0x29, true);
+    const report = format_report(&buf, kind_sync, esr, 0, 0x7e4dfabc, 0x5, 1, 0x2a, 0x7e4df000, 0x1234, 0x2b, 0x2c, 0x29, true, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
     try std.testing.expectEqualStrings(
         "[EXC] sync from EL1h count=1\n" ++
             "[EXC] esr=0x0000000000000000 ec=0x00 unknown-reason iss=0x000000\n" ++
@@ -1257,7 +1316,7 @@ test "exceptions: format_report is deterministic (resume path)" {
 test "exceptions: format_report is deterministic (park path, irq)" {
     var buf: [512]u8 = undefined;
     const esr: u64 = 0x80000000; // EC=0x20 (instruction abort, lower EL)
-    const report = format_report(&buf, kind_irq, esr, 0xdead0000, 0x1234, 0x0, 7, 0, 0, 0, 0, 0, 0, false);
+    const report = format_report(&buf, kind_irq, esr, 0xdead0000, 0x1234, 0x0, 7, 0, 0, 0, 0, 0, 0, false, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
     try std.testing.expectEqualStrings(
         "[EXC] irq from EL0t count=7\n" ++
             "[EXC] esr=0x0000000080000000 ec=0x20 instruction-abort-lower iss=0x000000\n" ++
@@ -1299,6 +1358,17 @@ test "exceptions: report buffer is bounded (max-size fields never overflow)" {
         std.math.maxInt(u64),
         std.math.maxInt(u64),
         false,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
     );
     try std.testing.expect(report.len < buf.len);
     try std.testing.expect(std.mem.indexOf(u8, report, "ec=0x3f") != null);
