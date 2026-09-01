@@ -1,6 +1,7 @@
 # WASM core interpreter (M35 proposal) — scoping sketch and gated card split
 
 Status: **PROPOSED — filed W1a + W1b + W2–W5 (#778, #762–#766)** · Date: 2026-09-01 ·
+Frozen import contract: **`docs/wasm-import-contract.md` (W1a #778) — normative for W3 (#764) + W5 (#766)** ·
 Derived from: the custom-virtio file channel (M34 HF1–HF3, claims 7710/9459),
 ADR 0007's syscall ABI, the M32 in-guest compiler ladder (zc, #749–#761), and
 the M29 VM seam (`sys_mmap` slot 63).
