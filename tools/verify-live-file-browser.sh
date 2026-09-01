@@ -6,9 +6,10 @@
 #
 # The gate proves the full B4 arc end-to-end from EL0, composing B2's
 # manifest-driven launcher with B3's FILE.BIN:
-#   1. DESKTOP.BIN boots and reads its menu from /esp/APPS.TXT — 11 entries
-#      today (9 at M13 close; grew via M15 C4 + M23 E1), FILE.BIN included
-#      (the manifest, not the hardcoded fallback).
+#   1. DESKTOP.BIN boots and reads its menu from /esp/APPS.TXT — 19 entries
+#      today (9 at M13 close; grew via M15 C4, M23 E1, M27 G6, the M30/M31
+#      ELF rows, and M32's ZC.BIN), FILE.BIN included (the manifest, not the
+#      hardcoded fallback).
 #   2. The runner navigates the manifest menu to FILE.BIN and presses Enter;
 #      DESKTOP launches it through the M11 sys_exec seam (slot 28).
 #   3. FILE.BIN opens its own window (auto-focused), lists `/data/` via
@@ -18,8 +19,11 @@
 #      PR #512 (658bd86, 2026-08-23) added alphabetical sorting to the
 #      listing (sort_column=.name, sort_asc=true), and DATA.TXT sorts
 #      before README.TXT, so the initial selection (index 0) changed.
-#   4. The syscalls report proves the seam: sys_exec once, sys_dir_list once,
-#      and file_open/file_read twice each (desktop manifest + FILE.BIN read).
+#   4. The syscalls report proves the seam: sys_exec once, sys_dir_list
+#      twice (main listing + F4 du walk, claim 2539), file_open six times
+#      and file_read three times — desktop host-open (HF4, fails) + ESP
+#      manifest + FILE.BIN's recent-ring load (fails) + preview + view +
+#      recent-ring save (claim 2539) — see the needles below.
 #
 # Delete/rename (B1, slots 34-37) are proven separately by
 # tools/verify-live-fs-mutation.sh; this gate keeps the read-only browser
@@ -128,13 +132,13 @@ echo "--- Phase 2: Verifying the composition arc ---"
 
 # 1. The desktop menu came from the manifest (11 entries, FILE.BIN included),
 #    not the hardcoded fallback (claim 8877 + B4).
-# Expectation revised to OBSERVED BYTES (2026-08-24, claim 2259): the
-# serial marker reads `desktop: manifest apps=12` today — image/apps.txt
-# grew from 9 entries at M13 close (d62c933) to 10 with M15 C4's
-# SETTINGS.BIN dock row (6c8b5b3, 2026-08-20), to 11 with M23 E1's
-# EDIT.BIN row (ee3da3e, 2026-08-23), and to 12 with M27 G6's SYSMON.BIN row.
-grep -q "desktop: manifest apps=12" "$SER" || {
-    echo "ERROR: desktop manifest marker (apps=12) missing from serial log"
+# Expectation revised to OBSERVED BYTES (2026-09-01, claim 5251): the
+# serial marker reads `desktop: manifest apps=19` — image/apps.txt grew
+# from 9 entries at M13 close (d62c933) through M15 C4's SETTINGS.BIN
+# (6c8b5b3), M23 E1's EDIT.BIN (ee3da3e), M27 G6's SYSMON.BIN, the M30/M31
+# ELF rows, and M32's ZC.BIN. `#` comments are skipped by parse_manifest.
+grep -q "desktop: manifest apps=19" "$SER" || {
+    echo "ERROR: desktop manifest marker (apps=19) missing from serial log"
     exit 1
 }
 echo "DESKTOP.MANIFEST: OK"
@@ -162,8 +166,12 @@ grep -q "file: listing 2 entries" "$SER" || {
     exit 1
 }
 echo "FILE.LIST: OK"
-grep -q "27 sys_dir_list calls=1" "$SER" || {
-    echo "ERROR: sys_dir_list call count missing from syscalls report"
+# Expectation revised to OBSERVED BYTES (2026-09-01, claim 1732):
+# calls=2 — the main listing PLUS one recursive dir_list per level from
+# F4's bounded du total (claim 2539, depth ≤ 3; /data has no subdirs at
+# depth 1, so exactly one extra walk).
+grep -q "27 sys_dir_list calls=2" "$SER" || {
+    echo "ERROR: sys_dir_list call count (calls=2) missing from syscalls report"
     exit 1
 }
 echo "SYS_DIR_LIST: OK"
@@ -183,13 +191,19 @@ grep -q "file: view DATA.TXT" "$SER" || {
 }
 echo "FILE.VIEW: OK"
 
-# 5. File seam accounting — OBSERVED BYTES (2026-08-24, claim 2259):
-#    calls=3 today (was 2 at M13 close): desktop manifest read + FILE.BIN's
-#    preview read + FILE.BIN's view read. The third open/read/close is
-#    M15 C7's inline preview (990ecd8, 2026-08-20), which auto-loads the
-#    selected entry on every listing.
-grep -q "23 sys_file_open calls=3" "$SER" || {
-    echo "ERROR: sys_file_open call count (calls=3) missing from syscalls report"
+# 5. File seam accounting — OBSERVED BYTES (2026-09-01, claim 1732):
+#    calls=6 today (was 3 at the 2026-08-24 revision):
+#      desktop host-manifest open /host/APPS.TXT — fails, still counts
+#        (M34 HF4 issue #738 host-first manifest, claim 7599)
+#      desktop /esp/APPS.TXT manifest open
+#      FILE.BIN startup recent-ring load /data/RECENT.SAV — absent, still
+#        counts (M25 F5, claim 2539)
+#      FILE.BIN C7 inline preview open (DATA.TXT)
+#      FILE.BIN view open (DATA.TXT)
+#      FILE.BIN recent-ring save /data/RECENT.SAV (M25 F5, claim 2539)
+#    file_read stays calls=3 (the two opens that failed/saved never read).
+grep -q "23 sys_file_open calls=6" "$SER" || {
+    echo "ERROR: sys_file_open call count (calls=6) missing from syscalls report"
     exit 1
 }
 echo "SYS_FILE_OPEN: OK"
@@ -211,7 +225,7 @@ Revision: $REVISION ($BRANCH)
 Status: PASS (1/1 on Apple Virtualization.framework)
 
 Verified Components:
-- DESKTOP.BIN: manifest-driven launcher (9 apps incl FILE.BIN, claim 8877)
+- DESKTOP.BIN: manifest-driven launcher (19 apps incl FILE.BIN, claim 8877)
 - sys_exec (ADR 0007 slot 28): DESKTOP launches FILE.BIN from EL0
 - FILE.BIN: lists /data and opens the selected entry (DATA.TXT) read-only (claim 4742)
 - sys_dir_list (slot 27) / sys_file_open+read (slots 23/24)
