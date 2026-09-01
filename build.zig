@@ -1050,11 +1050,14 @@ pub fn build(b: *std.Build) void {
             .optimize = .ReleaseSmall,
         }),
     });
-    wasm_prog.linker_script = b.path("user/linker.ld");
-    const wasm_step = b.step("wasm", "Build the M35 W1b wasm interpreter marker (zig-out/bin/WASM.BIN)");
-    // Non-segmented: the W1b marker has no mutable globals (Machine is
-    // caller-owned); the `wasm run` entry (W2) can move to --segments.
-    const wasm_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    // DSK3 segmented: the W2 `_start` keeps the interpreter state
+    // (Module ~77 KiB, Machine ~30 KiB, module buffer 64 KiB) in .bss —
+    // the 32 KiB EL0 stack can never carry it — and argv rides the
+    // writable data tail (card 3e: ELF images cannot take args). The
+    // linear-memory store is mmap'd at runtime, not .bss.
+    wasm_prog.linker_script = b.path("user/linker-segmented.ld");
+    const wasm_step = b.step("wasm", "Build the M35 wasm interpreter (zig-out/bin/WASM.BIN)");
+    const wasm_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py", "--segments" });
     wasm_elf2bin.addFileArg(wasm_prog.getEmittedBin());
     const wasm_bin = wasm_elf2bin.addOutputFileArg("WASM.BIN");
     wasm_elf2bin.has_side_effects = true;
