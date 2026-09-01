@@ -80,9 +80,11 @@ printf 'exec FILE.BIN\n' > "$RUN_DIR/script.txt"
 # the batch delete (the host-side absence check below is the assertion).
 printf 'dui focus 0\nvf ls\nsyscalls\necho m25-bulk-ok\n' > "$RUN_DIR/settle.txt"
 
-# The pristine share root carries exactly two seeded files (DATA.TXT +
-# README.TXT) + the boot-written HISTORY.TXT. Select all, open the delete
-# dialog, confirm with Return.
+# The pristine share root carries two seeded fixtures (DATA.TXT +
+# README.TXT) + FILE.BIN (this gate execs it from the share — the running
+# binary is itself a listing entry) + the boot-written HISTORY.TXT.
+# Select all selects 4; the batch deletes the running FILE.BIN too (the
+# app keeps running — already mapped). Confirm with Return.
 CHORDS="ctrl-a,d,return"
 
 rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial.log"
@@ -93,7 +95,7 @@ host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
     --via-virtio \
     --script "$RUN_DIR/script.txt" \
     --input-chords "$CHORDS" --input-chords-after "file: ready" \
-    --script2 "$RUN_DIR/settle.txt" --script2-after "file: batch done n=3" --script2-delay 2 \
+    --script2 "$RUN_DIR/settle.txt" --script2-after "file: batch done n=4" --script2-delay 2 \
     --script-expect "m25-bulk-ok" \
     --timeout 150 > "$(art live-filemanager-bulk-run.txt)" 2>&1
 RC=$?
@@ -112,32 +114,34 @@ fi
 
 echo "--- Phase 2: Verifying the bulk-operation arc ---"
 
-grep -aqF "file: select all n=3" "$SER" || { echo "ERROR: select-all marker missing"; exit 1; }
+grep -aqF "file: select all n=4" "$SER" || { echo "ERROR: select-all marker missing"; exit 1; }
 echo "BULK.SELECT_ALL: OK"
 
-grep -aqF "file: del prompt n=3" "$SER" || { echo "ERROR: delete-dialog marker missing"; exit 1; }
+grep -aqF "file: del prompt n=4" "$SER" || { echo "ERROR: delete-dialog marker missing"; exit 1; }
 echo "BULK.DELETE_PROMPT: OK"
 
-grep -aqF "file: del 1/3 DATA.TXT" "$SER" || { echo "ERROR: per-unit del marker 1 missing"; exit 1; }
-grep -aqF "file: del 2/3 HISTORY.TXT" "$SER" || { echo "ERROR: per-unit del marker 2 missing"; exit 1; }
-grep -aqF "file: del 3/3 README.TXT" "$SER" || { echo "ERROR: per-unit del marker 3 missing"; exit 1; }
+grep -aqF "file: del 1/4 DATA.TXT" "$SER" || { echo "ERROR: per-unit del marker 1 missing"; exit 1; }
+grep -aqF "file: del 2/4 FILE.BIN" "$SER" || { echo "ERROR: per-unit del marker 2 missing"; exit 1; }
+grep -aqF "file: del 3/4 HISTORY.TXT" "$SER" || { echo "ERROR: per-unit del marker 3 missing"; exit 1; }
+grep -aqF "file: del 4/4 README.TXT" "$SER" || { echo "ERROR: per-unit del marker 4 missing"; exit 1; }
 echo "BULK.STEPWISE_MARKERS: OK"
 
-grep -aqF "file: batch done n=3" "$SER" || { echo "ERROR: batch completion marker missing"; exit 1; }
+grep -aqF "file: batch done n=4" "$SER" || { echo "ERROR: batch completion marker missing"; exit 1; }
 echo "BULK.BATCH_DONE: OK"
 
-# Slot 34 fired exactly three times (once per selected file).
-grep -aqF "34 sys_file_delete calls=3" "$SER" || { echo "ERROR: sys_file_delete calls=3 missing from syscalls report"; exit 1; }
-echo "SYS_FILE_DELETE x3: OK"
+# Slot 34 fired exactly four times (once per selected file).
+grep -aqF "34 sys_file_delete calls=4" "$SER" || { echo "ERROR: sys_file_delete calls=4 missing from syscalls report"; exit 1; }
+echo "SYS_FILE_DELETE x4: OK"
 
 # M34 HF5 (issue #739): FILE.BIN's root is the SHARE, so the ground truth
-# is the macOS filesystem itself — the batch delete must have removed both
-# fixtures from the host disk (`vf ls` in the settle shows the guest's view;
-# the host check below is the assertion). HISTORY.TXT may REAPPEAR at
-# shutdown (the shell's HF5 history re-point saves on exit) — background
-# writers are tolerated, exactly like the old M21 W11 persistence note:
-# absence of the TARGETS is the assertion, never total entry counts.
-if [ -e "$SHARE/DATA.TXT" ] || [ -e "$SHARE/README.TXT" ]; then
+# is the macOS filesystem itself — the batch delete must have removed the
+# fixtures AND the running FILE.BIN from the host disk (`vf ls` in the
+# settle shows the guest's view; the host check below is the assertion).
+# HISTORY.TXT may REAPPEAR at shutdown (the shell's HF5 history re-point
+# saves on exit) — background writers are tolerated, exactly like the old
+# M21 W11 persistence note: absence of the TARGETS is the assertion, never
+# total entry counts.
+if [ -e "$SHARE/DATA.TXT" ] || [ -e "$SHARE/README.TXT" ] || [ -e "$SHARE/FILE.BIN" ]; then
     echo "ERROR: a deleted target still present in the host share"
     ls -la "$SHARE"
     exit 1
@@ -150,12 +154,12 @@ Revision: $REVISION ($BRANCH)
 Status: PASS (1/1 boot on Apple Virtualization.framework)
 
 Verified:
-- Ctrl+A select-all over the virtio INPUT queue (n=2 marker)
+- Ctrl+A select-all over the virtio INPUT queue (n=4 marker)
 - Delete confirmation dialog ('d', prompt marker, Return confirms)
 - Stepwise batch engine: one serial marker per unit + final accounting
-- Slot 34 sys_file_delete calls=3 in the syscalls report
+- Slot 34 sys_file_delete calls=4 in the syscalls report
 - Post-delete re-listing reports 0 entries
-- Host disk: DATA.TXT + README.TXT gone from the --cvc-file share (HF5)
+- Host disk: DATA.TXT + README.TXT + FILE.BIN gone from the --cvc-file share
 EOF
 
 echo "verify-live-filemanager-bulk: PASS — multi-select + dialog + stepwise batch delete verified on VZ."

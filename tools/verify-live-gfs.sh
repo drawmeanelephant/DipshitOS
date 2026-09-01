@@ -77,7 +77,7 @@ codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/
 # listing/cat needles survive the re-point.
 gate_arm_share
 echo "VirelaiOS general store README" > "$SHARE/README.TXT"
-echo "general data volume contents" > "$SHARE/DATA.TXT"
+echo "general data volume contents: 1234567890" > "$SHARE/DATA.TXT"
 echo "fixtures: README.TXT + DATA.TXT seeded on the share root"
 
 # --- scripted keystrokes -----------------------------------------------------

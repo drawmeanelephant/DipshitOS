@@ -92,18 +92,21 @@ codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/
 # --- per-run isolation -------------------------------------------------------
 # M34 HF6 (issue #740): this gate seeds a CONTROLLED share (NOT the app
 # bundle — the desktop's manifest must come from APPS.TXT and the file
-# browser's listing must be exactly the fixtures, so the arc stays
-# deterministic). The APPS.TXT + README.TXT + DATA.TXT fixtures below,
-# plus HISTORY.TXT (the shell's share re-point writes it at boot), are the
-# whole /host listing.
+# browser's listing stays small, so the arc stays deterministic). The
+# DESKTOP.BIN + FILE.BIN binaries, the APPS.TXT + README.TXT + DATA.TXT
+# fixtures, plus HISTORY.TXT (the shell's share re-point writes it at
+# boot) are the whole /host listing.
 gate_begin live-file-browser
 gate_arm_share
 echo "run dir: $RUN_DIR"
 
 # FILE.BIN's root is the HOST SHARE. Seed it with the byte-known fixtures
-# (README.TXT / DATA.TXT) + the manifest: the desktop reads /host/APPS.TXT
-# (the ONLY manifest source since HF6 deleted the ESP fallback). The
-# shell's boot-time HISTORY.TXT write completes the 4-entry listing.
+# (README.TXT / DATA.TXT) + the manifest + the two binaries this gate
+# needs (the desktop exec'd by the monitor, FILE.BIN launched by the
+# desktop): the desktop reads /host/APPS.TXT (the ONLY manifest source
+# since HF6 deleted the ESP fallback). The shell's boot-time HISTORY.TXT
+# write completes the 6-entry listing.
+cp zig-out/bin/DESKTOP.BIN zig-out/bin/FILE.BIN "$SHARE/"
 printf '%s' 'VirelaiOS general filesystem readme' > "$SHARE/README.TXT"
 printf '\n' >> "$SHARE/README.TXT"
 printf '%s' 'general data volume contents: 1234567890' > "$SHARE/DATA.TXT"
@@ -145,7 +148,7 @@ host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
     --input-chords-delay 2.0 \
     --chords-view \
     --script2 "$RUN_DIR/script2.txt" \
-    --script2-after "file: view DATA.TXT" \
+    --script2-after "file: view APPS.TXT" \
     --script-expect "done-file-sweep" \
     --timeout 120 > "$(art live-file-browser-run.txt)" 2>&1
 RC=$?
@@ -196,10 +199,12 @@ grep -q "file: ready" "$SER" || {
     exit 1
 }
 echo "FILE.READY: OK"
-# 4 entries: README.TXT + DATA.TXT + APPS.TXT (seeded) + HISTORY.TXT (the
-# HF5 shell history re-point writes the share at boot).
-grep -q "file: listing 4 entries" "$SER" || {
-    echo "ERROR: FILE.BIN listing marker (4 entries) missing from serial log"
+# 7 entries: README.TXT + DATA.TXT + APPS.TXT + DESKTOP.BIN + FILE.BIN
+# (seeded) + HISTORY.TXT (the HF5 shell history re-point writes the share
+# at boot) + WINDOWS.SAV (the WM persistence write). RECENT.SAV appears
+# only after FILE.BIN opens the entry, so it is not in the listing.
+grep -q "file: listing 7 entries" "$SER" || {
+    echo "ERROR: FILE.BIN listing marker (7 entries) missing from serial log"
     exit 1
 }
 echo "FILE.LIST: OK"

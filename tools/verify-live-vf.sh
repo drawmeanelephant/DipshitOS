@@ -166,6 +166,11 @@ APP_SIZE="$(wc -c < "$SHARE/$HF4_APP" | tr -d ' ')"
 echo "HF4: built $HF4_APP on the host after image bake — $APP_SIZE bytes, dropped into the share (no image rebuild)"
 printf '%s | Host Hello | h\nCALC.BIN | 64-bit Calc | c\n' "$HF4_APP" > "$SHARE/APPS.TXT"
 echo "HF4: host APPS.TXT ($(wc -l < "$SHARE/APPS.TXT" | tr -d ' ') entries) — desktop must report apps=2, not the ESP's 19"
+# M34 HF6 (issue #740): DESKTOP.BIN is NOT baked into the image anymore —
+# it execs from the share like every app. Drop the built binary in (the
+# 2-entry APPS.TXT above stays the manifest it must read).
+cp zig-out/bin/DESKTOP.BIN "$SHARE/"
+echo "HF4: DESKTOP.BIN dropped into the share (HF6: apps live on the share, not the ESP)"
 
 # Host-disk verification (HF3): the mutation round-trip MUST land the exact
 # guest pattern stream on the host's own filesystem.
@@ -348,7 +353,11 @@ run_one() {
             # fields past the size= prefix — the other needles are full
             # lines, this one is a prefix).
             [ "$(grep -aFc -- "exec: loaded $HF4_APP size=" "$SER" || true)" -ge 1 ] || phase_needs=0
-            [ "$(grep -aFxc -- "$HF4_MARKER" "$SER" || true)" = 1 ] || phase_needs=0
+            # The app marker is a substring match, not a whole line: the
+            # console idle-seam partial flush can splice the marker's
+            # trailing newline (the marker text itself stays intact) —
+            # observed live on the app boot, same class as the a/v gate.
+            [ "$(grep -aFc -- "$HF4_MARKER" "$SER" || true)" -ge 1 ] || phase_needs=0
             [ "$(grep -aFxc -- "$HF4_EXIT" "$SER" || true)" = 1 ] || phase_needs=0
             [ "$(grep -aFxc -- "$HF4_MANIFEST_LINE" "$SER" || true)" = 1 ] || phase_needs=0
             [ "$(grep -aFxc -- "rx-hf4-app" "$SER" || true)" = 1 ] || phase_needs=0

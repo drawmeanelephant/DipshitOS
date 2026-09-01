@@ -168,8 +168,10 @@ run_one() {
         grep -a -qF -- "direct read caps at 0x0000000000000800" "$SER" && SUBDIRCAT=1
         # The cat reply.
         grep -a -qF -- "hello world" "$SER" && CATREPLY=1
-        # The boot-time window line proves the channel was armed.
-        grep -a -qF -- "host share: armed" "$SER" && WINDOW=1
+        # The boot-time "host share:" print runs BEFORE the queue-5 arm
+        # (custom_virtio_spike arms it later), so the arming evidence is
+        # the probe line, not the early boot print.
+        grep -a -qF -- "vf: probe 32k ok" "$SER" && WINDOW=1
     fi
     local PASS=0
     if [ "$RC" = 0 ] && [ "$WINDOW" = 1 ] && [ "$LSHEAD" = 1 ] && [ "$FILELISTED" = 1 ] && [ "$CATREPLY" = 1 ]; then

@@ -322,14 +322,18 @@ def build_image(path, efi_bytes, kernel_bytes, size_mb):
     entries[0:128] = partition_entry(ESP_GUID, ESP_OFFSET, last_usable,
                                      "EFI SYSTEM", PART_GUID)
     entries_crc = zlib.crc32(bytes(entries)) & 0xFFFFFFFF
+    # NOTE: every in-place write below must be a same-length assignment.
+    # A shorter RHS (e.g. the 92-byte GPT header into a 512-byte slice)
+    # SHRINKS the bytearray and silently misaligns every later sector -
+    # exactly the bug that shipped the 35,364,444-byte un-bootable image.
     img[BYTES_PER_SECTOR:2 * BYTES_PER_SECTOR] = gpt_header(
         1, total_sectors - 1, first_usable, last_usable,
-        entries_lba, entries_crc, DISK_GUID)
+        entries_lba, entries_crc, DISK_GUID).ljust(BYTES_PER_SECTOR, b"\x00")
     img[2 * BYTES_PER_SECTOR:2 * BYTES_PER_SECTOR + len(entries)] = entries
     img[(total_sectors - 1) * BYTES_PER_SECTOR:
         (total_sectors - 1) * BYTES_PER_SECTOR + BYTES_PER_SECTOR] = gpt_header(
             total_sectors - 1, 1, first_usable, last_usable,
-            backup_entries_lba, entries_crc, DISK_GUID)
+            backup_entries_lba, entries_crc, DISK_GUID).ljust(BYTES_PER_SECTOR, b"\x00")
     img[backup_entries_lba * BYTES_PER_SECTOR:
         backup_entries_lba * BYTES_PER_SECTOR + len(entries)] = entries
 

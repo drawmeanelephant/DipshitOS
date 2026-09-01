@@ -59,10 +59,10 @@ echo "run dir: $RUN_DIR"
 # the HOST SHARE (SAVETEXT/TYPE/DIR now use /host/...; the FAT volume is
 # gone). Both boots attach the SAME share dir under RUN_DIR, so "survived
 # reboot" is proven on the macOS filesystem itself — the gate then
-# verifies hello.txt ON THE HOST DISK. The share is seeded with the app
-# bundle so `exec SAVETEXT.BIN` / `exec TYPE.BIN` / `exec DIR.BIN` resolve.
-gate_seed_share
-
+# verifies hello.txt ON THE HOST DISK. The share is CONTROLLED (M34 HF6,
+# issue #740): only the three apps this gate execs are dropped in, so
+# DIR.BIN's fixed 8-entry enumeration (slot 27 caps at 16) lists hello.txt
+# — boot A adds it, boot B must enumerate it.
 # Tool versions + revision
 zig version; swift --version 2>&1 | head -1; sw_vers
 REVISION="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
@@ -80,6 +80,10 @@ zig build image
 # requires the SPIKE runner build (the custom-virtio FILE channel).
 swift build --package-path host/vm-runner --configuration release -Xswiftc -DSPIKE
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
+
+gate_arm_share
+cp zig-out/bin/SAVETEXT.BIN zig-out/bin/TYPE.BIN zig-out/bin/DIR.BIN "$SHARE/"
+echo "share: controlled ($(ls "$SHARE" | wc -l | tr -d ' ') files: SAVETEXT/TYPE/DIR.BIN) — DIR.BIN's 8-entry listing must show hello.txt"
 
 # Scripts for Boot A and Boot B
 cat > "$RUN_DIR/script-A.txt" <<'EOF'
