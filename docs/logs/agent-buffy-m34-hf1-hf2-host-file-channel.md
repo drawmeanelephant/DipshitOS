@@ -1,13 +1,13 @@
 # Log — `agent/buffy/m34-hf1-hf2-host-file-channel`
 
-Claim: [4515](../claims/4515-m34-hf1-hf2-wire-transport.md)
+Claim: [7710](../claims/7710-m34-hf1-hf2-wire-transport.md)
 
 ## 2026-09-01 — claimed M34 HF1+HF2 (issue #735 + #736, milestone #21)
 
 Per the M34 seed (PR #742, merged 2026-09-01): the guest's user-visible
 filesystem becomes a macOS folder served over the custom-virtio device.
 HF1+HF2 are deliberately one agent / one PR. Branch created off `origin/main`
-after the seed merge; claim 4515 filed; no code yet → 🔄 in progress.
+after the seed merge; claim 7710 filed; no code yet → 🔄 in progress.
 
 ## 2026-09-01 — implemented + verified (class A + class B green)
 
