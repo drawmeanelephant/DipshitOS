@@ -6,7 +6,7 @@
 - **Touches:** docs/line-of-sight.md docs/claims/0365-tracker-sync-new-cards.md docs/logs/freebuff-20260901-003.md
 - **Depends on:** issues #782/#783 filed (re-filed loose ends); #710–#712 closed; both prior tracker PRs merged (#777, #779)
 - **Heartbeat:** 2026-09-01
-- **Status:** 🔄 in progress
+- **Status:** ✅ done
 
 ## Notes
 
