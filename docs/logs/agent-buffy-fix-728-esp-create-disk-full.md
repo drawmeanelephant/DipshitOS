@@ -1,4 +1,6 @@
-# Changelog — `agent/buffy/fix-728-esp-create-disk-full`
+# Log — `agent/buffy/fix-728-esp-create-disk-full`
+
+Claim: [9930](../claims/9930-esp-create-disk-full.md)
 
 ## 2026-08-31 — issue #728: ESP create reports "disk full" on an 80/80-slot root
 
