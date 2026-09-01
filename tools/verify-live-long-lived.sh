@@ -52,11 +52,11 @@
 #      budget; the capacity gate's pool_full refusal now lives in the
 #      ipc/scale gates (the NINTH exec at 11/11).
 #   7. `pages` prints in BOTH phases; the exact-count relationship holds:
-#      phase-2 free == phase-1 free - 9 (phase 2 has ONE more live
+#      phase-2 free == phase-1 free - 17 (phase 2 has ONE more live
 #      USER.BIN than phase 1 — counter + 2 users vs counter + 1 — so the
-#      second program's 9 pages (1 text + 4 user-stack + 4 EL1-stack) are
-#      the exact difference; a leak would make the late count lower than
-#      that).
+#      second program's 17 pages (1 text + 8 user-stack + 8 EL1-stack at
+#      the M25-doubled 32 KiB task stacks) are the exact difference; a
+#      leak would make the late count lower than that).
 #   8. The counter is STILL `state=running` at the FINAL procs read; the
 #      shell stays responsive (both echo replies); no exception park.
 #
@@ -201,8 +201,9 @@ run_one() {
         # users = 6/11, six spare) — no pool_full refusal here (that proof
         # moved to the args/ipc/scale gates).
         # 7. Both pages reads present; the exact-count relationship holds:
-        # phase-2 free == phase-1 free - 5 (one more live USER.BIN's
-        # pages). A leak would show a bigger drop than 9.
+        # phase-2 free == phase-1 free - 17 (one more live USER.BIN's
+        # pages at the M25-doubled stack size). A leak would show a bigger
+        # drop than 17.
         local pages_lines p1 p2
         pages_lines="$(grep -aF -- "pages: armed=1 total=" "$SER" || true)"
         pages_reads="$(printf '%s\n' "$pages_lines" | grep -cF -- "pages: armed=1 total=" || true)"
@@ -211,7 +212,7 @@ run_one() {
         if [ -n "$p1" ] && [ -n "$p2" ]; then
             local diff
             diff=$((16#$p1 - 16#$p2))
-            [ "$diff" -eq 9 ] && free_recovered=1 || free_recovered=0
+            [ "$diff" -eq 17 ] && free_recovered=1 || free_recovered=0
         fi
         # 8. The counter is running at the FINAL procs read.
         local last_counter_row
@@ -264,7 +265,7 @@ done
 echo
 echo "=== result ==="
 if [ "$pass" = "$BOOTS" ]; then
-    echo "verify-live-long-lived: PASS — COUNTER.BIN ran forever (distinct markers across the whole log) while USER.BIN exited, was reaped (pages returned), and re-exec'd into the freed slot; at the 11-slot budget counter + two users leave six spare, and the page counts differ by exactly the second program's 9 pages ($pass/$BOOTS boot(s))."
+    echo "verify-live-long-lived: PASS — COUNTER.BIN ran forever (distinct markers across the whole log) while USER.BIN exited, was reaped (pages returned), and re-exec'd into the freed slot; at the 11-slot budget counter + two users leave six spare, and the page counts differ by exactly the second program's 17 pages at the M25-doubled stack size ($pass/$BOOTS boot(s))."
     echo "PASS: $pass/$BOOTS" >> "$REPORT"
     exit 0
 fi

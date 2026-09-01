@@ -1173,6 +1173,19 @@ const serial_ring = @import("serial_ring.zig"); // Arc5 #243: capture last 512B 
 /// swallowed the `elf: hello from HELLO.ELF` marker in the strace gate).
 var serial_at_bol: bool = true;
 
+/// Whether the CURRENT partial (mid-line) serial content was written by
+/// process stdout (sys_write). `process_stdout` consults it so the
+/// claim-1714 fresh-line prepend fires only when FOREIGN output (the
+/// shell's newline-less prompt, kernel/tracer prints) left the cursor
+/// mid-line — NOT when a program is mid-line composing its OWN multi-write
+/// line (USER.BIN's argv preamble is one logical line across three
+/// sys_write calls; the un-gated prepend fired on every call and split it,
+/// breaking verify-live-args). Cleared by any newline (a terminated line
+/// never continues) and by any non-stdout partial write from `uart_puts`
+/// (the prompt case — that open line belongs to the shell, so the next
+/// process write must fresh-line).
+var stdout_owns_open_line: bool = false;
+
 fn uart_at_bol() bool {
     return serial_at_bol;
 }
@@ -1183,6 +1196,7 @@ fn uart_putc(byte: u8) void {
     serial_ring.append(&[_]u8{byte});
     if (byte == '\n' or byte == '\r') {
         serial_at_bol = true;
+        stdout_owns_open_line = false;
     } else {
         serial_at_bol = false;
     }
@@ -1228,6 +1242,13 @@ fn uart_putc(byte: u8) void {
 
 fn uart_puts(text: []const u8) void {
     for (text) |byte| uart_putc(byte);
+    // A non-newline-terminated write from THIS path is shell/kernel output
+    // (the prompt): the open line belongs to the shell, so the next process
+    // write must fresh-line. (process_stdout re-asserts stdout ownership
+    // right after its own uart_puts call, so program lines stay open.)
+    if (text.len > 0 and text[text.len - 1] != '\n' and text[text.len - 1] != '\r') {
+        stdout_owns_open_line = false;
+    }
     // Claim 0013: a virtio-console line without a trailing newline (e.g. the
     // shell's prompt) must still reach the host — flush any buffered bytes.
     // In nvram-console builds the virtio transport is never touched; the
@@ -1772,8 +1793,14 @@ fn exception_report_writer(text: []const u8) void {
 /// column 0. When the shell already sits at a fresh line (the common
 /// foreground case) nothing is prepended.
 fn process_stdout(text: []const u8) void {
-    if (!uart_at_bol()) uart_puts("\n");
+    // Claim 1714: foreign output (the shell's drawn prompt) left the cursor
+    // mid-line — start the program's output on a fresh line. But only when
+    // the open line is NOT the program's own: a program composing one line
+    // across several sys_write calls (USER.BIN's argv preamble) must stay
+    // contiguous, or the markers split and the exact-line greps miss them.
+    if (!uart_at_bol() and !stdout_owns_open_line) uart_puts("\n");
     uart_puts(text);
+    stdout_owns_open_line = text.len > 0 and text[text.len - 1] != '\n' and text[text.len - 1] != '\r';
 }
 
 /// Claim 9187 IRQ chain, registered as the exception module's dispatcher:
