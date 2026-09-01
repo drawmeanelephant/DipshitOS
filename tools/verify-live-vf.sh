@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# verify-live-vf.sh -- M34 HF1+HF2+HF3 (issues #735/#736/#737) class-B gate:
-# the HOST FILE CHANNEL over custom-virtio queue 5 on real VZ.
+# verify-live-vf.sh -- M34 HF1+HF2+HF3+HF4 (issues #735/#736/#737/#738)
+# class-B gate: the HOST FILE CHANNEL over custom-virtio queue 5 on VZ.
 #
 #   Phase 1 (HF1): the guest's VF_PROBE spike proves the ONE unproven
 #   transport fact — a full 32,768-byte device-WRITE reply. Serial shows
@@ -28,7 +28,19 @@
 #       trips); python re-verifies the host disk bytes.
 #     boot 3 "delete": `vf rm hf3/renamed.bin` + a mkdir-exists honest
 #       error; python verifies the file is GONE and the hf3 dir survived.
-#   Every boot repeats phases 1+2, so a 3-boot run covers everything.
+#
+#   Phase 4 (HF4 — issue #738): APP DELIVERY, one boot: the gate compiles
+#   a tiny freestanding aarch64 `.ELF` on the HOST (after the image is
+#   baked — never in the ESP) and drops it + a 2-entry `APPS.TXT` into the
+#   share. The boot then proves the drop-and-exec workflow with NO image
+#   rebuild: `vf ls` lists HF4APP.ELF, `exec HF4APP.ELF` streams it across
+#   >= 2 READ round trips and runs it (the `hf4: hello from host` marker
+#   lands in serial; sys_exit closes with status 43), and `exec
+#   DESKTOP.BIN` prints `desktop: manifest apps=2` — the HOST manifest
+#   count (the ESP one has 19) — proving the desktop's manifest re-point
+#   to `/host/APPS.TXT`.
+#
+# Every boot repeats phases 1+2, so a 4-boot run covers everything.
 #
 # Run isolation per claim 5069 (tools/lib/gate-run.sh): the share dir
 # lives inside the private RUN_DIR, so parallel gate instances cannot
@@ -43,16 +55,20 @@ source tools/lib/gate-run.sh
 SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
-GATE_LOG="$(art m34-hf1-hf2-hf3-live.txt)"
+GATE_LOG="$(art m34-hf1-hf2-hf3-hf4-live.txt)"
 exec > >(tee "$GATE_LOG") 2>&1
 trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
 
-BOOTS="${BOOTS:-3}"
+BOOTS="${BOOTS:-4}"
 REPORT="$(art live-vf-report.txt)"
 STATIC_EXIT_LINE="tasks user-el0 exited status=7"
 PROBE_OK_LINE="vf: probe 32k ok len=0x8000 cksum=0x0000 free=0020"
+HF4_APP="HF4APP.ELF"
+HF4_MARKER="hf4: hello from host"
+HF4_EXIT="tasks user-exec exited status=43"
+HF4_MANIFEST_LINE="desktop: manifest apps=2"
 
-echo "=== verify-live-vf: M34 HF1+HF2+HF3 (issues #735/#736/#737) — host file channel on VZ, $BOOTS boot(s) ==="
+echo "=== verify-live-vf: M34 HF1+HF2+HF3+HF4 (issues #735/#736/#737/#738) — host file channel on VZ, $BOOTS boot(s) ==="
 zig version
 swift --version 2>&1 | head -1
 sw_vers
@@ -115,6 +131,37 @@ HF3_SIZE="$(grep '^HF3_SIZE=' "$GATE_LOG" | tail -1 | cut -d= -f2)"
 HF3_CKSUM="$(grep '^HF3_CKSUM=' "$GATE_LOG" | tail -1 | cut -d= -f2)"
 echo "share: big.bin size=$BIG_SIZE cksum=$BIG_CKSUM ; sub/hello.txt cksum=$HELLO_CKSUM ; hf3 expect size=$HF3_SIZE cksum=$HF3_CKSUM"
 
+# --- HF4 (issue #738): build the app ON THE HOST and drop it into the
+# share. The image was baked above (zig build image) and is NOT rebuilt —
+# this is the card's whole point: a host-compiled `.ELF` + a 2-entry
+# `APPS.TXT` dropped into the share run with no image rebuild. The app is
+# a freestanding aarch64 ELF (one PT_LOAD at userspace.text_va, built with
+# the repo's own user linker script) that sys_writes a marker and exits
+# with status 43.
+cat > "$RUN_DIR/hf4app.zig" <<'EOF'
+export fn _start() callconv(.naked) noreturn {
+    asm volatile (
+        \\mov x0, #1
+        \\adr x1, 1f
+        \\mov x2, #20
+        \\mov x8, #1
+        \\svc #0
+        \\mov x0, #43
+        \\mov x8, #3
+        \\svc #0
+        \\1:
+        \\.ascii "hf4: hello from host"
+        \\.byte 10
+    );
+}
+EOF
+zig build-exe -target aarch64-freestanding -O ReleaseSmall -T user/linker.ld \
+    "$RUN_DIR/hf4app.zig" -femit-bin="$SHARE/$HF4_APP" 2>&1 | tail -2
+APP_SIZE="$(wc -c < "$SHARE/$HF4_APP" | tr -d ' ')"
+echo "HF4: built $HF4_APP on the host after image bake — $APP_SIZE bytes, dropped into the share (no image rebuild)"
+printf '%s | Host Hello | h\nCALC.BIN | 64-bit Calc | c\n' "$HF4_APP" > "$SHARE/APPS.TXT"
+echo "HF4: host APPS.TXT ($(wc -l < "$SHARE/APPS.TXT" | tr -d ' ') entries) — desktop must report apps=2, not the ESP's 19"
+
 # Host-disk verification (HF3): the mutation round-trip MUST land the exact
 # guest pattern stream on the host's own filesystem.
 verify_hf3_disk() {
@@ -140,15 +187,17 @@ if phase in ("mutate", "readback"):
             print("HF3-DISK: renamed.bin %d bytes MATCH the guest pattern stream (%s)" % (len(got), phase))
     if os.path.exists(nb):
         print("HF3-DISK: FAIL — new.bin still present after RENAME"); ok = False
-elif phase == "delete":
+elif phase in ("delete", "app"):
+    # The HF4 "app" boot makes no HF3 mutations — it only asserts the
+    # delete phase's host-disk state persisted.
     if os.path.exists(rp):
-        print("HF3-DISK: FAIL — renamed.bin still present after DELETE"); ok = False
+        print("HF3-DISK: FAIL — renamed.bin still present after %s" % phase); ok = False
     else:
-        print("HF3-DISK: renamed.bin gone after DELETE")
+        print("HF3-DISK: renamed.bin gone after %s" % phase)
     if not os.path.isdir(hd):
-        print("HF3-DISK: FAIL — hf3 dir missing after DELETE"); ok = False
+        print("HF3-DISK: FAIL — hf3 dir missing after %s" % phase); ok = False
     else:
-        print("HF3-DISK: hf3 dir survived DELETE")
+        print("HF3-DISK: hf3 dir survived %s" % phase)
 sys.exit(0 if ok else 1)
 EOF
 }
@@ -178,7 +227,18 @@ printf 'vf cat hf3/renamed.bin\necho rx-vf3-readback\n' > "$SCRIPT_READBACK"
 SCRIPT_DELETE="$RUN_DIR/script-delete.txt"
 printf 'vf rm hf3/renamed.bin\nvf mkdir hf3\necho rx-vf3-delete\n' > "$SCRIPT_DELETE"
 
-PHASES=(mutate readback delete)
+# HF4 (issue #738): drop-and-exec — vf ls proves the file is visible, then
+# the kernel execs it from the SHARE (2+ READ round trips for the 65 KB
+# ELF) and DESKTOP.BIN re-reads its manifest from /host/APPS.TXT.
+SCRIPT_APP="$RUN_DIR/script-app.txt"
+cat > "$SCRIPT_APP" <<EOF
+vf ls
+exec $HF4_APP
+exec DESKTOP.BIN
+echo rx-hf4-app
+EOF
+
+PHASES=(mutate readback delete app)
 phase_of() { local t=$((10#$1)); echo "${PHASES[$(( (t - 1) % ${#PHASES[@]} ))]}"; }
 cat_script_of() {
     local p="$1"
@@ -191,6 +251,7 @@ cat_script_of() {
         mutate)   cat "$SCRIPT_MUTATE" >> "$out" ;;
         readback) cat "$SCRIPT_READBACK" >> "$out" ;;
         delete)   cat "$SCRIPT_DELETE" >> "$out" ;;
+        app)      cat "$SCRIPT_APP" >> "$out" ;;
     esac
     echo "$out"
 }
@@ -201,6 +262,12 @@ run_one() {
     local script; script="$(cat_script_of "$phase")"
     local run_log="$(art live-vf-run-$tag.txt)"
     local serial_copy="$(art live-vf-serial-$tag.log)"
+    # The HF4 app phase execs two programs (app marker + exit report then
+    # DESKTOP.BIN) after the H12 stream, so it needs a longer boot window
+    # than the HF1–HF3 phases — observed live: the 90 s default cut the
+    # app's final marker mid-write at the deadline.
+    local timeout=90
+    [ "$phase" = app ] && timeout=150
     rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial-$tag.log"
 
     set +e
@@ -208,7 +275,7 @@ run_one() {
         --cvc-file "$SHARE" \
         --serial "$RUN_DIR/vm-serial-$tag.log" \
         --script "$script" --script-after "$STATIC_EXIT_LINE" \
-        --timeout 90 > "$run_log" 2>&1
+        --timeout "$timeout" > "$run_log" 2>&1
     local rc=$?
     set -e
     [ -f "$RUN_DIR/vm-serial-$tag.log" ] && cp "$RUN_DIR/vm-serial-$tag.log" "$serial_copy" || true
@@ -236,7 +303,7 @@ run_one() {
         [ -n "$rts" ] && [ "$rts" -ge 2 ] || rts=0
     fi
 
-    # --- HF3 phase needles + host-disk verification ---
+    # --- HF3/HF4 phase needles + host-disk verification ---
     local phase_needs=1 hf3_disk=0
     case "$phase" in
         mutate)
@@ -266,6 +333,24 @@ run_one() {
             [ "$(grep -aFxc -- "rx-vf3-delete" "$SER" || true)" = 1 ] || phase_needs=0
             [ "$(grep -aFc -- "VF-FILE: DELETE hf3/renamed.bin" "$run_log" || true)" -ge 1 ] || phase_needs=0
             ;;
+        app)
+            # HF4 (issue #738): the host-compiled ELF is listed, exec'd
+            # from the SHARE (2+ READ round trips — 65 KB spans the 32 KB
+            # reply cap), its marker + exit status land in serial, and the
+            # DESKTOP re-point proves the HOST manifest was read (apps=2
+            # vs the ESP's 19).
+            # Substring match (the loaded line carries entry/stack/head
+            # fields past the size= prefix — the other needles are full
+            # lines, this one is a prefix).
+            [ "$(grep -aFc -- "exec: loaded $HF4_APP size=" "$SER" || true)" -ge 1 ] || phase_needs=0
+            [ "$(grep -aFxc -- "$HF4_MARKER" "$SER" || true)" = 1 ] || phase_needs=0
+            [ "$(grep -aFxc -- "$HF4_EXIT" "$SER" || true)" = 1 ] || phase_needs=0
+            [ "$(grep -aFxc -- "$HF4_MANIFEST_LINE" "$SER" || true)" = 1 ] || phase_needs=0
+            [ "$(grep -aFxc -- "rx-hf4-app" "$SER" || true)" = 1 ] || phase_needs=0
+            [ "$(grep -aFc -- "VF-FILE: READ $HF4_APP" "$run_log" || true)" -ge 2 ] || phase_needs=0
+            [ "$(grep -aFc -- "VF-FILE: READ APPS.TXT" "$run_log" || true)" -ge 1 ] || phase_needs=0
+            [ "$(grep -aFc -- "VF-FILE: STAT $HF4_APP" "$run_log" || true)" -ge 1 ] || phase_needs=0
+            ;;
     esac
     if verify_hf3_disk "$phase"; then
         hf3_disk=1
@@ -280,7 +365,7 @@ run_one() {
 
 : > "$REPORT"
 {
-    echo "VIRELAIOS live host-file-channel gate (M34 HF1+HF2+HF3, issues #735/#736/#737)"
+    echo "VIRELAIOS live host-file-channel gate (M34 HF1+HF2+HF3+HF4, issues #735/#736/#737/#738)"
     echo "revision: $REVISION branch=$BRANCH boots=$BOOTS dirty-files=$DIRTY"
     echo "date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     echo
@@ -298,7 +383,7 @@ done
 echo
 echo "=== result ==="
 if [ "$pass" = "$n" ]; then
-    echo "verify-live-vf: PASS — VF_PROBE 32 KiB spike + vf ls/cat + HF3 mutation round-trips verified HOST-SIDE ($pass/$n boot(s)); see $REPORT and $GATE_LOG"
+    echo "verify-live-vf: PASS — VF_PROBE 32 KiB spike + vf ls/cat + HF3 mutation round-trips (host-verified) + HF4 drop-and-exec app delivery ($pass/$n boot(s)); see $REPORT and $GATE_LOG"
     exit 0
 else
     echo "verify-live-vf: FAILED — $pass/$n boot(s) passed; see $REPORT and per-boot logs."

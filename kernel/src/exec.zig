@@ -59,6 +59,10 @@ const uaccess = @import("uaccess.zig"); // card 3e (claim 4636): the args range 
 const mmu = @import("mmu.zig");
 const esp = @import("esp.zig");
 const fat = @import("fat.zig");
+// M34 HF4 (issue #738): the HOST FILE CHANNEL is the primary exec source
+// when `--cvc-file` is attached — `stat` + `read_into` stream a dropped
+// `.ELF` into `program` with no ESP involvement.
+const virtio_file = @import("virtio_file.zig");
 const scheduler = @import("scheduler.zig");
 const userspace = @import("userspace.zig");
 // Milestone four (claim 2665): the seeded CSPRNG supplies the randomized
@@ -248,20 +252,45 @@ pub fn argv_va_for(content_len: usize) u64 {
     return userspace.text_va + block_off;
 }
 
-/// Load `name` from the ESP, rebuild the user root around it, and spawn it
-/// as an EL0t task. `args` (bounded to `max_exec_args`) are packed into the
-/// program's text page and passed at entry: `_start` receives argc in x0
-/// and the argv block VA in x1 (card 3e — an entry-contract extension, NOT
-/// a syscall; ADR 0007 frozen). See the module doc for the ordered steps.
+/// Load `name` from the host share OR the ESP, rebuild the user root
+/// around it, and spawn it as an EL0t task. `args` (bounded to
+/// `max_exec_args`) are packed into the program's text page and passed at
+/// entry: `_start` receives argc in x0 and the argv block VA in x1 (card
+/// 3e — an entry-contract extension, NOT a syscall; ADR 0007 frozen). See
+/// the module doc for the ordered steps.
+///
+/// M34 HF4 (issue #738): when the host file channel is present the SHARE
+/// is the primary app source — a `.ELF` compiled on the host and dropped
+/// into the share runs with NO image rebuild (the card's live proof). The
+/// ESP stays the fallback (dual path until HF6 deletes the FAT app path),
+/// so every default boot is byte-identical.
 pub fn exec_file(name: []const u8, args: []const []const u8) ExecResult {
     if (args.len > max_exec_args) return .too_many_args;
-    if (name.len == 0 or name.len > esp.name_max) return .not_found;
-    if (!esp.disk_ready()) return .no_disk;
-    const e = esp.lookup(name) orelse return .not_found;
-    if (e.kind != .esp_file) return .not_found;
-    // Read the raw volume directly (the ESP window only content-loads
-    // files ≤ esp_content_max; exec reads up to its own fixed buffer).
-    const got = fat.read_file(name, &program) orelse return .not_found;
+    if (name.len == 0) return .not_found;
+
+    var got: usize = 0;
+    // Host-share source first: STAT for the size, then stream the whole
+    // file into the shared staging buffer across READ round trips. A host
+    // name may exceed FAT's 8.3 window (`esp.name_max`) — the wire allows
+    // `virtio_file.path_max`; the process registry truncates long names.
+    if (virtio_file.available() and name.len <= virtio_file.path_max) {
+        var st = virtio_file.StatResult{};
+        if (virtio_file.stat(name, &st) == virtio_file.st_ok and !st.is_dir) {
+            if (st.size > program.len) return .too_large;
+            got = virtio_file.read_into(name, st.size, &program) orelse return .not_found;
+        }
+    }
+    if (got == 0) {
+        // ESP fallback (the pre-HF4 path, unchanged): the raw volume read
+        // (the ESP window only content-loads files ≤ esp_content_max; exec
+        // reads up to its own fixed buffer).
+        if (name.len > esp.name_max) return .not_found;
+        if (!esp.disk_ready()) return .no_disk;
+        const e = esp.lookup(name) orelse return .not_found;
+        if (e.kind != .esp_file) return .not_found;
+        got = fat.read_file(name, &program) orelse return .not_found;
+    }
+
     if (got < dsk1_header_size) return .bad_magic;
     const magic = std.mem.readInt(u32, program[0..4], .little);
     // Milestone sixteen C1 (claim 3805): two load paths. DSK1 (the flat

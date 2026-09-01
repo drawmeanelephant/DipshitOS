@@ -32,9 +32,11 @@ pub const AppEntry = struct {
     dock: bool = false,
 };
 
-/// The built-in catalog — used ONLY as a fallback when `/esp/APPS.TXT` is
-/// missing or unreadable (claim 8877). The live launcher reads the manifest
-/// from the ESP so adding an app means a manifest line, not a recompile.
+/// The built-in catalog — used ONLY as a fallback when neither
+/// `/host/APPS.TXT` nor `/esp/APPS.TXT` yields an app list (claim 8877).
+/// The live launcher reads the manifest from the HOST SHARE first (M34 HF4,
+/// issue #738 — drop a new APPS.TXT into the share, no image rebuild),
+/// then the ESP, so adding an app means a manifest line, not a recompile.
 pub const installed_apps = [_]AppEntry{
     .{ .name = "CALC.BIN", .desc = "64-bit Calc", .status = "GUI Active", .icon = 'c' },
     .{ .name = "NOTEPAD.BIN", .desc = "Text Editor", .status = "/data Storage", .icon = 'n' },
@@ -192,12 +194,11 @@ pub const AppState = struct {
         return s;
     }
 
-    /// Load `/esp/APPS.TXT` into the manifest-owned catalog. On any failure
-    /// (missing file, read error, empty manifest) the built-in catalog stays
-    /// — honest degradation, the desktop always has a launcher list.
-    /// Returns the number of apps loaded, or 0 when falling back.
-    pub fn load_manifest(self: *AppState) usize {
-        const fd = ui.file_open("/esp/APPS.TXT", ui.MODE_READ);
+    /// Load the manifest at `path` into the manifest-owned catalog. On any
+    /// failure (missing file, read error, empty manifest) returns 0 — the
+    /// caller decides the fallback. Returns the number of apps loaded.
+    fn load_manifest_path(self: *AppState, path: []const u8) usize {
+        const fd = ui.file_open(path, ui.MODE_READ);
         if (fd < 0) return 0;
         defer ui.file_close(@intCast(fd));
         const n = ui.file_read(@intCast(fd), &self.manifest_buf);
@@ -209,6 +210,19 @@ pub const AppState = struct {
         self.manifest_loaded = true;
         self.list_apps.item_count = count;
         return count;
+    }
+
+    /// Load the application manifest (claim 8877, M34 HF4 issue #738): the
+    /// HOST SHARE is the primary source when `--cvc-file` is attached — a
+    /// `APPS.TXT` dropped into the share changes the launcher catalog with
+    /// no image rebuild. `/esp/APPS.TXT` stays the fallback (dual path
+    /// until HF6 deletes the ESP app path), so default boots are
+    /// byte-identical. On any failure the built-in catalog stays — honest
+    /// degradation, the desktop always has a launcher list.
+    pub fn load_manifest(self: *AppState) usize {
+        const host = self.load_manifest_path("/host/APPS.TXT");
+        if (host > 0) return host;
+        return self.load_manifest_path("/esp/APPS.TXT");
     }
 
     pub fn draw(self: *const AppState, win: u32) void {
