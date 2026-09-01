@@ -6,7 +6,7 @@
 - **Touches:** user/src/zc.zig, user/src/lib/zc.zig, tools/verify-live-zc.sh, tests/zc-corpus/z1c-structs.z, docs/claims/5487-z1c-structs.md, docs/logs/t3code-z1c-structs.md
 - **Depends on:** 9685
 - **Heartbeat:** 2026-09-01
-- **Status:** 🔄 t3code/z1c-structs
+- **Status:** ✅ t3code/z1c-structs
 
 ## Notes
 
