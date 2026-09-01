@@ -801,7 +801,7 @@ fn frame_count(rate: u8, ms: u32) u32 {
 }
 
 /// The EL0 audio seam (claim 7636, milestone fifteen card A3): the info
-/// struct `sys_audio_info` copies out. 24 bytes, fixed layout.
+/// struct `sys_audio_info` copies out. 16 bytes, fixed layout.
 pub const AudioInfo = extern struct {
     ready: u32, // transport + stream armed
     format: u8, // negotiated FMT_* (0xff = none)
