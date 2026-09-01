@@ -53,8 +53,8 @@ gate_begin live-zc
 echo "run dir: $RUN_DIR"
 SCRIPT="$RUN_DIR/script.txt"
 
-# Stage a program that prints a string literal and exits 72.
-SRC='const zc = @import("zc"); pub fn main() void { zc.print("Hello from live zc!\n"); zc.exit(72); }'
+# Stage a program that fills an array in a loop and writes it out byte-exact, then exits 72.
+SRC='const zc = @import("zc"); pub fn main() void { var buf: [8]u8 = undefined; var i: u64 = 0; while (i < 8) { buf[i] = 65 + i; i = i + 1; } zc.print_array(buf); zc.exit(72); }'
 printf 'ls\nwrite MAIN.Z '\''%s'\''\nexec ZC.BIN\n' "$SRC" > "$SCRIPT"
 printf 'mount esp\nls\nexec MAIN.ELF\necho rx-zc-ok\n' > "$SCRIPT2"
 
@@ -81,7 +81,12 @@ cp tests/zc-corpus/z1a-strings.z "$CORPUS_STRINGS_TMP"
 zig build-obj -target aarch64-freestanding --dep zc -Mroot="$CORPUS_STRINGS_TMP" -Mzc=user/src/lib/zc.zig -femit-bin="$RUN_DIR/corpus_strings.o"
 rm -f "$CORPUS_STRINGS_TMP" "$RUN_DIR/corpus_strings.o"
 
-echo "host compile check: ok (SRC + z05-dialect.z + vl6-gui.z + z1a-strings.z valid Zig 0.16)"
+CORPUS_ARRAYS_TMP="$RUN_DIR/corpus_arrays.zig"
+cp tests/zc-corpus/z1b-arrays.z "$CORPUS_ARRAYS_TMP"
+zig build-obj -target aarch64-freestanding --dep zc -Mroot="$CORPUS_ARRAYS_TMP" -Mzc=user/src/lib/zc.zig -femit-bin="$RUN_DIR/corpus_arrays.o"
+rm -f "$CORPUS_ARRAYS_TMP" "$RUN_DIR/corpus_arrays.o"
+
+echo "host compile check: ok (SRC + z05-dialect.z + vl6-gui.z + z1a-strings.z + z1b-arrays.z valid Zig 0.16)"
 
 run_one() {
     local tag="$1"
@@ -108,7 +113,7 @@ run_one() {
         [ "$(grep -aFc -- "write: ok" "$SER" || true)" = 1 ] && written=1
         [ "$(grep -aFc -- "zc: successfully compiled in-guest" "$SER" || true)" = 1 ] && compiled=1
         [ "$(grep -aFc -- "exec: loaded MAIN.ELF size=" "$SER" || true)" = 1 ] && loaded=1
-        [ "$(grep -aFc -- "Hello from live zc!" "$SER" || true)" -ge 1 ] && printed=1
+        [ "$(grep -aFc -- "ABCDEFGH" "$SER" || true)" -ge 1 ] && printed=1
         [ "$(grep -aFxc -- "$EXIT_LINE" "$SER" || true)" -ge 1 ] && exit72=1
         [ "$(grep -aFc -- "$REAP_LINE" "$SER" || true)" -ge 2 ] && reaped=1
         [ "$(grep -aFxc -- "rx-zc-ok" "$SER" || true)" = 1 ] && echo_ok=1

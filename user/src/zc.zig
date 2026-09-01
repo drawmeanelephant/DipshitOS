@@ -171,6 +171,8 @@ const TokenKind = enum {
     r_paren,
     l_brace,
     r_brace,
+    l_bracket,
+    r_bracket,
     comma,
     semicolon,
     colon,
@@ -238,6 +240,8 @@ const Tokenizer = struct {
             ')' => return Token{ .kind = .r_paren, .text = self.src[start..self.pos], .line = self.line },
             '{' => return Token{ .kind = .l_brace, .text = self.src[start..self.pos], .line = self.line },
             '}' => return Token{ .kind = .r_brace, .text = self.src[start..self.pos], .line = self.line },
+            '[' => return Token{ .kind = .l_bracket, .text = self.src[start..self.pos], .line = self.line },
+            ']' => return Token{ .kind = .r_bracket, .text = self.src[start..self.pos], .line = self.line },
             ',' => return Token{ .kind = .comma, .text = self.src[start..self.pos], .line = self.line },
             ';' => return Token{ .kind = .semicolon, .text = self.src[start..self.pos], .line = self.line },
             ':' => return Token{ .kind = .colon, .text = self.src[start..self.pos], .line = self.line },
@@ -360,6 +364,9 @@ const Function = struct {
 const LocalVar = struct {
     name: []const u8,
     offset: usize,
+    is_array: bool = false,
+    array_len: usize = 0,
+    elem_size: usize = 8,
 };
 
 const CallPatch = struct {
@@ -390,6 +397,7 @@ var functions_count: usize = 0;
 
 var locals: [64]LocalVar = undefined;
 var locals_count: usize = 0;
+var frame_size: usize = 0;
 
 var call_patches: [64]CallPatch = undefined;
 var call_patches_count: usize = 0;
@@ -481,6 +489,16 @@ fn emitLoadImmediate(rd: u5, val: u64) void {
     if (v3 != 0) emit(enc_movk(rd, v3, 3));
 }
 
+fn elemShift(elem_size: usize) u6 {
+    return switch (elem_size) {
+        1 => 0,
+        2 => 1,
+        4 => 2,
+        8 => 3,
+        else => 0,
+    };
+}
+
 fn lookupFunc(name: []const u8) ?usize {
     var i: usize = 0;
     while (i < functions_count) : (i += 1) {
@@ -494,6 +512,15 @@ fn lookupLocal(name: []const u8) ?usize {
     while (i > 0) {
         i -= 1;
         if (std.mem.eql(u8, locals[i].name, name)) return locals[i].offset;
+    }
+    return null;
+}
+
+fn lookupLocalVar(name: []const u8) ?*LocalVar {
+    var i: usize = locals_count;
+    while (i > 0) {
+        i -= 1;
+        if (std.mem.eql(u8, locals[i].name, name)) return &locals[i];
     }
     return null;
 }
@@ -988,6 +1015,23 @@ fn parsePrimary(p: *Parser) anyerror!void {
                         }
                         emit(enc_movz(8, syscall_num, 0));
                         emit(enc_svc(0));
+                    } else if (std.mem.eql(u8, member_tok.text, "print_array")) {
+                        _ = try p.expect(.l_paren);
+                        const arr_tok = try p.expect(.ident);
+                        _ = try p.expect(.r_paren);
+                        const var_ptr = lookupLocalVar(arr_tok.text) orelse {
+                            print_err("undefined identifier", arr_tok.line, arr_tok.text);
+                            return error.CompileError;
+                        };
+                        if (!var_ptr.is_array) {
+                            print_err("not an array", arr_tok.line, arr_tok.text);
+                            return error.CompileError;
+                        }
+                        emit(enc_movz(0, 1, 0));
+                        emit(enc_add_imm(19, 1, @intCast(var_ptr.offset)));
+                        emit(enc_movz(2, @intCast(var_ptr.array_len * var_ptr.elem_size), 0));
+                        emit(enc_movz(8, 1, 0));
+                        emit(enc_svc(0));
                     } else {
                         print_err("unknown zc function", member_tok.line, member_tok.text);
                         return error.CompileError;
@@ -995,6 +1039,27 @@ fn parsePrimary(p: *Parser) anyerror!void {
                 } else {
                     print_err("unknown module", t.line, t.text);
                     return error.CompileError;
+                }
+            } else if (p.peek() == .l_bracket) {
+                const var_ptr = lookupLocalVar(t.text) orelse {
+                    print_err("undefined identifier", t.line, t.text);
+                    return error.CompileError;
+                };
+                if (!var_ptr.is_array) {
+                    print_err("not an array", t.line, t.text);
+                    return error.CompileError;
+                }
+                _ = p.advance(); // '['
+                try compileExpr(p); // index -> x0
+                _ = try p.expect(.r_bracket);
+                const shift = elemShift(var_ptr.elem_size);
+                if (shift != 0) emit(enc_lsl(0, 0, shift));
+                emit(enc_add_imm(19, 1, @intCast(var_ptr.offset)));
+                emit(enc_add_reg(1, 0, 1));
+                if (var_ptr.elem_size == 1) {
+                    emit(enc_ldrb(1, 0, 0));
+                } else {
+                    emit(enc_ldr(1, 0, 0));
                 }
             } else if (std.mem.eql(u8, t.text, "read8")) {
                 _ = try p.expect(.l_paren);
@@ -1089,14 +1154,60 @@ fn compileStatement(p: *Parser) anyerror!void {
         .keyword_let, .keyword_var, .keyword_const => {
             _ = p.advance();
             const name_tok = try p.expect(.ident);
-            if (p.accept(.colon)) _ = try p.expect(.ident);
-            _ = try p.expect(.equal);
-            try compileExpr(p);
-            _ = try p.expect(.semicolon);
-            const offset = locals_count * 8;
-            emit(enc_str(19, 0, @intCast(offset)));
-            locals[locals_count] = LocalVar{ .name = name_tok.text, .offset = offset };
-            locals_count += 1;
+            var is_array = false;
+            var arr_len: usize = 0;
+            var elem_size: usize = 8;
+            if (p.accept(.colon)) {
+                if (p.accept(.l_bracket)) {
+                    const len_tok = try p.expect(.number);
+                    arr_len = std.fmt.parseInt(usize, len_tok.text, 0) catch return error.CompileError;
+                    _ = try p.expect(.r_bracket);
+                    const elem_tok = try p.expect(.ident);
+                    if (std.mem.eql(u8, elem_tok.text, "u8")) elem_size = 1 else if (std.mem.eql(u8, elem_tok.text, "u64")) elem_size = 8 else if (std.mem.eql(u8, elem_tok.text, "u32")) elem_size = 4 else if (std.mem.eql(u8, elem_tok.text, "u16")) elem_size = 2 else return error.CompileError;
+                    is_array = true;
+                } else {
+                    _ = try p.expect(.ident);
+                }
+            }
+            if (is_array) {
+                const total = arr_len * elem_size;
+                const aligned = (total + 7) & ~@as(usize, 7);
+                if (frame_size + aligned > 512) return error.CompileError;
+                const offset = frame_size;
+                frame_size += aligned;
+                if (p.accept(.equal)) {
+                    if (p.peek() == .ident and std.mem.eql(u8, p.currentToken().text, "undefined")) {
+                        _ = p.advance();
+                    } else {
+                        print_err("array init not supported", name_tok.line, name_tok.text);
+                        return error.CompileError;
+                    }
+                }
+                _ = try p.expect(.semicolon);
+                if (locals_count >= locals.len) return error.CompileError;
+                locals[locals_count] = LocalVar{ .name = name_tok.text, .offset = offset, .is_array = true, .array_len = arr_len, .elem_size = elem_size };
+                locals_count += 1;
+            } else {
+                _ = try p.expect(.equal);
+                if (p.peek() == .ident and std.mem.eql(u8, p.currentToken().text, "undefined")) {
+                    _ = p.advance();
+                    _ = try p.expect(.semicolon);
+                    const offset = frame_size;
+                    frame_size += 8;
+                    if (locals_count >= locals.len) return error.CompileError;
+                    locals[locals_count] = LocalVar{ .name = name_tok.text, .offset = offset };
+                    locals_count += 1;
+                } else {
+                    try compileExpr(p);
+                    _ = try p.expect(.semicolon);
+                    const offset = frame_size;
+                    frame_size += 8;
+                    emit(enc_str(19, 0, @intCast(offset)));
+                    if (locals_count >= locals.len) return error.CompileError;
+                    locals[locals_count] = LocalVar{ .name = name_tok.text, .offset = offset };
+                    locals_count += 1;
+                }
+            }
         },
         .keyword_if => {
             _ = p.advance();
@@ -1166,6 +1277,44 @@ fn compileStatement(p: *Parser) anyerror!void {
                 _ = try p.expect(.semicolon);
                 const offset = lookupLocal(name_tok.text) orelse return error.CompileError;
                 emit(enc_str(19, 0, @intCast(offset)));
+            } else if (p.peek() == .ident and p.idx + 1 < p.tokens.len and p.tokens[p.idx + 1].kind == .l_bracket) {
+                // possible array store: look for ']' then '='
+                var found = false;
+                var j = p.idx + 2;
+                while (j < p.tokens.len) : (j += 1) {
+                    if (p.tokens[j].kind == .r_bracket) {
+                        if (j + 1 < p.tokens.len and p.tokens[j + 1].kind == .equal) found = true;
+                        break;
+                    }
+                    if (p.tokens[j].kind == .semicolon or p.tokens[j].kind == .eof) break;
+                }
+                if (found) {
+                    const arr_name = p.advance().text;
+                    const var_ptr = lookupLocalVar(arr_name) orelse return error.CompileError;
+                    if (!var_ptr.is_array) return error.CompileError;
+                    _ = p.advance(); // '['
+                    try compileExpr(p); // index -> x0
+                    _ = try p.expect(.r_bracket);
+                    _ = try p.expect(.equal);
+                    emit(enc_sub_imm(31, 31, 16));
+                    emit(enc_str(31, 0, 0)); // save idx
+                    try compileExpr(p); // value -> x0
+                    _ = try p.expect(.semicolon);
+                    emit(enc_ldr(31, 1, 0));
+                    emit(enc_add_imm(31, 31, 16));
+                    const shift = elemShift(var_ptr.elem_size);
+                    if (shift != 0) emit(enc_lsl(1, 1, shift));
+                    emit(enc_add_imm(19, 2, @intCast(var_ptr.offset)));
+                    emit(enc_add_reg(2, 1, 2));
+                    if (var_ptr.elem_size == 1) {
+                        emit(enc_strb(2, 0, 0));
+                    } else {
+                        emit(enc_str(2, 0, 0));
+                    }
+                } else {
+                    try compileExpr(p);
+                    _ = try p.expect(.semicolon);
+                }
             } else {
                 try compileExpr(p);
                 _ = try p.expect(.semicolon);
@@ -1193,6 +1342,7 @@ fn compile(src: []const u8) !usize {
     functions_count = 0;
     call_patches_count = 0;
     locals_count = 0;
+    frame_size = 0;
     data_len = 0;
     string_patches_count = 0;
 
@@ -1245,20 +1395,23 @@ fn compile(src: []const u8) !usize {
 
             _ = try p2.expect(.l_paren);
             locals_count = 0;
+            frame_size = 0;
 
             // Load arguments
             if (p2.peek() != .r_paren) {
                 const p_name = try p2.expect(.ident);
                 _ = try p2.expect(.colon);
                 _ = try p2.expect(.ident);
-                locals[locals_count] = LocalVar{ .name = p_name.text, .offset = locals_count * 8 };
+                locals[locals_count] = LocalVar{ .name = p_name.text, .offset = frame_size };
                 locals_count += 1;
+                frame_size += 8;
                 while (p2.accept(.comma)) {
                     const next_p_name = try p2.expect(.ident);
                     _ = try p2.expect(.colon);
                     _ = try p2.expect(.ident);
-                    locals[locals_count] = LocalVar{ .name = next_p_name.text, .offset = locals_count * 8 };
+                    locals[locals_count] = LocalVar{ .name = next_p_name.text, .offset = frame_size };
                     locals_count += 1;
+                    frame_size += 8;
                 }
             }
             _ = try p2.expect(.r_paren);
@@ -1511,4 +1664,69 @@ test "zc: Z1a string literal unescape and data segment emission" {
 
     const total = try build_elf32_with_data(code[0..bytes], data_buf[0..data_len], 0, &image_buf);
     try testing.expect(total == elf_code_offset + bytes + data_len);
+}
+
+test "zc: Z1b array allocation, indexed store/load, and print_array" {
+    const src =
+        \\const zc = @import("zc");
+        \\
+        \\pub fn main() void {
+        \\    var buf: [8]u8 = undefined;
+        \\    var i: u64 = 0;
+        \\    while (i < 8) {
+        \\        buf[i] = 65 + i;
+        \\        i = i + 1;
+        \\    }
+        \\    zc.print_array(buf);
+        \\    var sum: u64 = 0;
+        \\    i = 0;
+        \\    while (i < 8) {
+        \\        sum = sum + buf[i];
+        \\        i = i + 1;
+        \\    }
+        \\    if (sum == 548) {
+        \\        zc.exit(0);
+        \\    } else {
+        \\        zc.exit(1);
+        \\    }
+        \\}
+    ;
+    const bytes = try compile(src);
+    try testing.expect(bytes > 0);
+    const total = try build_elf32_with_data(code[0..bytes], data_buf[0..data_len], 0, &image_buf);
+    try testing.expect(total == elf_code_offset + bytes + data_len);
+}
+
+test "zc: Z1b u64 array with scaled index" {
+    const src =
+        \\const zc = @import("zc");
+        \\
+        \\pub fn main() void {
+        \\    var arr: [4]u64 = undefined;
+        \\    arr[0] = 10;
+        \\    arr[1] = 20;
+        \\    arr[2] = 30;
+        \\    arr[3] = 40;
+        \\    var s: u64 = arr[0] + arr[1] + arr[2] + arr[3];
+        \\    if (s == 100) {
+        \\        zc.exit(0);
+        \\    } else {
+        \\        zc.exit(1);
+        \\    }
+        \\}
+    ;
+    const bytes = try compile(src);
+    try testing.expect(bytes > 0);
+}
+
+test "zc: Z1b tokenizer handles brackets" {
+    const src = "var buf: [8]u8 = undefined; buf[0] = 65;";
+    var t = Tokenizer{ .src = src };
+    try testing.expectEqual(TokenKind.keyword_var, t.next().kind);
+    try testing.expectEqual(TokenKind.ident, t.next().kind);
+    try testing.expectEqual(TokenKind.colon, t.next().kind);
+    try testing.expectEqual(TokenKind.l_bracket, t.next().kind);
+    try testing.expectEqual(TokenKind.number, t.next().kind);
+    try testing.expectEqual(TokenKind.r_bracket, t.next().kind);
+    try testing.expectEqual(TokenKind.ident, t.next().kind);
 }
