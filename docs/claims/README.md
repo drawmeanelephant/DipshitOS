@@ -171,6 +171,7 @@ loudly if the generator or a table is broken.
 | [7397-m33-sb5-wm-compose-n](7397-m33-sb5-wm-compose-n.md) | buffy (`agent/buffy/m33-sb5-wm-compose-n`) | ✅ |
 | [7418-sb1-shared-anon-contract](7418-sb1-shared-anon-contract.md) | buffy (`agent/buffy/m33-sb1-shared-anon-contract`) | ✅ done |
 | [7557-wms6-notif-drain](7557-wms6-notif-drain.md) | buffy (`agent/buffy/wms6-notif-drain`) | ✅ complete |
+| [7599-m34-hf4-app-delivery](7599-m34-hf4-app-delivery.md) | buffy (`agent/buffy/m34-hf4-exec`) | ✅ done |
 | [7635-m26-netstat-fetch](7635-m26-netstat-fetch.md) | Buffy (`agent/buffy/m26-netstat-fetch`) | ✅ done — 428/428 kernel tests + all userland tests pass, |
 | [7639-wms8-gate4-review-fixes](7639-wms8-gate4-review-fixes.md) | buffy (`agent/buffy/wms8-gate4-review-fixes`) | ✅ `agent/buffy/wms8-gate4-review-fixes` |
 | [7656-plan-milestone-15-desktop-completeness](7656-plan-milestone-15-desktop-completeness.md) | buffy (`freebuff/can-you-review-issues-223-247-and-try-to-provide-h-f6c8d8a0-9349-4ada-9bca-1705150f0bde`) | ✅ done 2026-08-20 — `docs/m17-desktop-completeness.md` exists, 127 lines, 10 cards (C1–C10) with status legend, evidence column, dependency notes, best-agent split, notes section, and three open questions for the user. |
