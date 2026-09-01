@@ -75,6 +75,7 @@ meaningful — on main.
 | agent/buffy/audit-followup-2-input-depth | [`agent-buffy-audit-followup-2-input-depth.md`](agent-buffy-audit-followup-2-input-depth.md) |
 | agent/buffy/audit-followup-3-dhcp-autonomy | [`agent-buffy-audit-followup-3-dhcp-autonomy.md`](agent-buffy-audit-followup-3-dhcp-autonomy.md) |
 | agent/buffy/docs-pass | [`agent-buffy-docs-pass.md`](agent-buffy-docs-pass.md) |
+| `agent/buffy/fix-728-esp-create-disk-full` | [`agent-buffy-fix-728-esp-create-disk-full.md`](agent-buffy-fix-728-esp-create-disk-full.md) |
 | `agent/buffy/fix-boot-fat-geometry` | [`agent-buffy-fix-boot-fat-geometry.md`](agent-buffy-fix-boot-fat-geometry.md) |
 | full-table glyph goldens (issue 125 hardening) | [`agent-buffy-full-table-glyph-goldens.md`](agent-buffy-full-table-glyph-goldens.md) |
 | generalized bit-order mutation gate (claim 1027) | [`agent-buffy-generalized-mutations.md`](agent-buffy-generalized-mutations.md) |
@@ -204,6 +205,7 @@ meaningful — on main.
 | `m14-s1-clipboard`: the bounded kernel clipboard (claim 0169) | [`freebuff-20260818-002.md`](freebuff-20260818-002.md) |
 | freebuff/can-you-review-issues-223-247-and-try-to-provide-h (planning pass for issues #223–#247) | [`freebuff-20260820-001.md`](freebuff-20260820-001.md) |
 | freebuff/okay-i-think-we-need-to-work-through-this-big-one--076be815-d689-40da-9389-cfd56bae921f (Milestone 18 — Rename — VirelaiOS) | [`freebuff-20260831-001.md`](freebuff-20260831-001.md) |
+| freebuff/b0ce3067 (host file channel — M34 planning) | [`freebuff-20260831-002.md`](freebuff-20260831-002.md) |
 | lane-b/m24-calc-features | [`lane-b-m24-calc-features.md`](lane-b-m24-calc-features.md) |
 | `lane-c/m20-text-rendering` | [`lane-c-m20-text-rendering.md`](lane-c-m20-text-rendering.md) |
 | `lane-d/m22-dev-tools` | [`lane-d-m22-dev-tools.md`](lane-d-m22-dev-tools.md) |
