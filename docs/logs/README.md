@@ -209,6 +209,7 @@ meaningful — on main.
 | freebuff/can-you-review-issues-223-247-and-try-to-provide-h (planning pass for issues #223–#247) | [`freebuff-20260820-001.md`](freebuff-20260820-001.md) |
 | freebuff/okay-i-think-we-need-to-work-through-this-big-one--076be815-d689-40da-9389-cfd56bae921f (Milestone 18 — Rename — VirelaiOS) | [`freebuff-20260831-001.md`](freebuff-20260831-001.md) |
 | freebuff/b0ce3067 (host file channel — M34 planning) | [`freebuff-20260831-002.md`](freebuff-20260831-002.md) |
+| freebuff/okay-shower-thoughts-here-we-re-using-fat32-for-so-b0ce3067-2b04-4b81-984d-9fd76bfcf123 | [`freebuff-20260901-001.md`](freebuff-20260901-001.md) |
 | lane-b/m24-calc-features | [`lane-b-m24-calc-features.md`](lane-b-m24-calc-features.md) |
 | `lane-c/m20-text-rendering` | [`lane-c-m20-text-rendering.md`](lane-c-m20-text-rendering.md) |
 | `lane-d/m22-dev-tools` | [`lane-d-m22-dev-tools.md`](lane-d-m22-dev-tools.md) |

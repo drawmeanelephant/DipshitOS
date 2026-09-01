@@ -129,6 +129,7 @@ loudly if the generator or a table is broken.
 | [3687-wms8-gate6-pointer-drag-delete](3687-wms8-gate6-pointer-drag-delete.md) | buffy (`agent/buffy/wms8-gate6-pointer-drag-delete`) | ✅ `agent/buffy/wms8-gate6-pointer-drag-delete` |
 | [3744-wms6-tray-drain](3744-wms6-tray-drain.md) | buffy (`agent/buffy/wms6-tray-drain`) | ✅ (2026-08-29 — live gate PASS on VZ; all five issue-626 surfaces drain) |
 | [3881-wms3-wnd-server](3881-wms3-wnd-server.md) | buffy (`agent/buffy/wms3-wnd-server`) | ✅ done (2026-08-29, PR closing #623) |
+| [3904-wasm-line-of-sight-docs](3904-wasm-line-of-sight-docs.md) | buffy (`freebuff/okay-shower-thoughts-here-we-re-using-fat32-for-so-b0ce3067-2b04-4b81-984d-9fd76bfcf123`) | ✅ done |
 | [4001-m31-dynamic-ecosystem](4001-m31-dynamic-ecosystem.md) | buffy (`agent/buffy/m30-dynamic-linking`) | ✅ done |
 | [4278-wms5-gate2-geometry-policy](4278-wms5-gate2-geometry-policy.md) | buffy (`agent/buffy/wms5-gate2-geometry-policy`) | ✅ complete |
 | [4341-m23-editor-completeness](4341-m23-editor-completeness.md) | Buffy (`agent/buffy/m23-editor-wave2`) | ✅ done |
