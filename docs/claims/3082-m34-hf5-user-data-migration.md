@@ -38,7 +38,7 @@
   `docs/logs/agent-buffy-m34-hf5-user-data-migration.md`
 - **Depends on:** HF1–HF4 (issues #735–#738, landed)
 - **Heartbeat:** 2026-09-01
-- **Status:** ✅ — done 2026-09-01 (PR #???, branch merged; issue #739
+- **Status:** ✅ — done 2026-09-01 (PR #792, branch merged; issue #739
   closed). All persistence consumers re-pointed to `/host`; one-time
   migration + deprecation live-gated on VZ; every M10–M31 persistence
   gate re-pointed through the channel and verified host-side on disk.
