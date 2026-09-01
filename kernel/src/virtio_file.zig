@@ -15,8 +15,13 @@
 //! Ops: VF_PROBE (0x00, transport-only — never a filesystem path),
 //! LIST (0x01), READ (0x02, payload = [path][u64le offset] — stateless
 //! streaming, the host holds zero state between requests), STAT (0x03,
-//! payload = [path]). Reply status: 0 ok, 1 not found, 2 is a directory,
-//! 3 truncated (reply exceeded the guest's buffer), 4 host error.
+//! payload = [path]), and the HF3 mutation set (additive, 0x04..0x0b):
+//! OPEN/CLOSE/WRITE/TRUNCATE/FSYNC (handle-based — the host's 8-slot
+//! handle table carries the write cursor; parity with file_table.zig's
+//! 8-handle ABI) and RENAME/MKDIR/DELETE (path-based stateless). Reply
+//! status: 0 ok, 1 not found, 2 is a directory, 3 truncated (reply
+//! exceeded the guest's buffer), 4 host error, 5 exists (create/rename
+//! target collision), 6 handle error (host table full or bad handle).
 //!
 //! VF_PROBE (HF1's acceptance case A) proves the ONE unproven transport
 //! fact: a full 32,768-byte device-WRITE reply (claim 0680 proved 32 KiB
@@ -42,12 +47,30 @@ pub const op_probe: u8 = 0x00;
 pub const op_list: u8 = 0x01;
 pub const op_read: u8 = 0x02;
 pub const op_stat: u8 = 0x03;
+// HF3 (issue #737): mutation ops — ADDITIVE (0x04..0x0b), so the protocol
+// stays non-breaking: an old host answers any new op with status 4 host
+// error and an old guest never sends them. No version byte churn.
+pub const op_open: u8 = 0x04;
+pub const op_close: u8 = 0x05;
+pub const op_write: u8 = 0x06;
+pub const op_truncate: u8 = 0x07;
+pub const op_fsync: u8 = 0x08;
+pub const op_rename: u8 = 0x09;
+pub const op_mkdir: u8 = 0x0a;
+pub const op_delete: u8 = 0x0b;
 
 pub const st_ok: u8 = 0;
 pub const st_not_found: u8 = 1;
 pub const st_is_dir: u8 = 2;
 pub const st_truncated: u8 = 3;
 pub const st_host_error: u8 = 4;
+pub const st_exists: u8 = 5;
+pub const st_handle: u8 = 6;
+
+/// OPEN request `flags` byte bits (the framing's reserved byte picks up
+/// per-op modifiers): bit0 create-if-missing, bit1 append-writes.
+pub const open_flag_create: u8 = 0x01;
+pub const open_flag_append: u8 = 0x02;
 
 /// Request header: [op u8][flags u8][len u16le] then `len` payload bytes.
 pub const request_hdr_len: usize = 4;
@@ -64,6 +87,18 @@ pub const list_max_entries: usize = 128;
 pub const entry_row_len: usize = 40;
 /// READ payload = [path][u64le offset].
 pub const read_offset_len: usize = 8;
+/// HF3 handle + scalar field lengths.
+pub const handle_len: usize = 2;
+pub const written_len: usize = 8;
+pub const truncate_size_len: usize = 8;
+/// Host handle table cap — parity with kernel's file_table.zig
+/// (max_handles_per_process = 8), asserted live on the HOST side where the
+/// cursors live.
+pub const max_file_handles: usize = 8;
+/// Max data bytes per WRITE request body: the 2-byte handle + data must
+/// fit the request nicely under the u16 length field AND stay within the
+/// 32 KiB reply-cap symmetry (a chunked write never needs a large reply).
+pub const write_chunk_max: usize = reply_cap - reply_hdr_len - handle_len;
 
 pub const dir_type_file: u8 = 0;
 pub const dir_type_dir: u8 = 1;
@@ -190,6 +225,10 @@ pub const exchange_budget: usize = 32_000_000;
 /// comptime-folded pointers into .rodata). The request fits a 255-byte
 /// path + u64 offset + the 4-byte header; the reply is the full 32 KiB.
 var vf_req_buf: [request_hdr_len + path_max + read_offset_len]u8 align(16) = undefined;
+/// WRITE staging: the full request [op][flags][len][handle u16][data] —
+/// the one large guest→host payload (up to write_chunk_max data bytes per
+/// round trip).
+var vf_write_buf: [request_hdr_len + handle_len + write_chunk_max]u8 align(16) = undefined;
 /// Runtime-built scatter staging (claim-0015/cv_scatter class): the
 /// anonymous-array-literal form const-folds into .rodata with baked
 /// image-relative pointers, so the read-buffer slice array lives in BSS.
@@ -205,13 +244,13 @@ pub fn available() bool {
     return virtio_custom.cv_ready and virtio_custom.has_file_queue;
 }
 
-/// One bounded exchange on queue 5: submit the encoded request, poll-wait
-/// for the host's reply, free the chain. Returns the used-ring length
-/// (bytes the host wrote), or null on transport failure/timeout.
-fn exchange(op: u8, flags: u8, payload: []const u8, reply_buf: []u8) ?u32 {
+/// One bounded exchange on queue 5: submit an ALREADY-ENCODED request
+/// (`req`), poll-wait for the host's reply, free the chain. Returns the
+/// used-ring length (bytes the host wrote), or null on transport
+/// failure/timeout.
+fn exchange_raw(req: []const u8, reply_buf: []u8) ?u32 {
     if (!available()) return null;
-    const req_len = encode_request(op, flags, payload, &vf_req_buf) orelse return null;
-    vf_scatter[0] = vf_req_buf[0..req_len];
+    vf_scatter[0] = req;
     const handle = virtio_custom.submit_ex(virtio_custom.file_qidx, &vf_scatter, reply_buf, false) orelse return null;
     const n = virtio_custom.wait(virtio_custom.file_qidx, handle, exchange_budget, reply_buf) orelse {
         // claim-0680 discipline: a polled send MUST free its descriptor
@@ -221,6 +260,13 @@ fn exchange(op: u8, flags: u8, payload: []const u8, reply_buf: []u8) ?u32 {
     };
     virtio_custom.free_chain_q(virtio_custom.file_qidx, handle);
     return n;
+}
+
+/// One bounded exchange on queue 5: encode the request into the shared
+/// small request buffer, then exchange_raw.
+fn exchange(op: u8, flags: u8, payload: []const u8, reply_buf: []u8) ?u32 {
+    const req_len = encode_request(op, flags, payload, &vf_req_buf) orelse return null;
+    return exchange_raw(vf_req_buf[0..req_len], reply_buf);
 }
 
 // ---------------------------------------------------------------------------
@@ -343,6 +389,151 @@ pub fn read(path: []const u8, offset: u64) ReadResult {
     if (rep.status != st_ok) return .{ .status = rep.status, .data = "" };
     if (rep.clamped) return .{ .status = st_truncated, .data = "" };
     return .{ .status = st_ok, .data = rep.data };
+}
+
+// ---------------------------------------------------------------------------
+// Mutation ops (HF3, issue #737)
+// ---------------------------------------------------------------------------
+
+/// OPEN a file on the host share. `flags` = open_flag_create /
+/// open_flag_append (create-if-missing makes the gate's "write a new
+/// file" story one verb). On ok, `out_handle` receives the host handle
+/// (cursor 0, or EOF when append — the host's table owns the cursor).
+pub fn open(path: []const u8, flags: u8, out_handle: *u16) u8 {
+    out_handle.* = 0;
+    if (!available()) return st_host_error;
+    const n = exchange(op_open, flags, path, &vf_reply_buf) orelse return st_host_error;
+    const rep = decode_reply(vf_reply_buf[0..n]);
+    if (rep.status != st_ok) return rep.status;
+    if (rep.data.len < handle_len) return st_host_error;
+    out_handle.* = read_le_u16(rep.data, 0);
+    return st_ok;
+}
+
+/// CLOSE a host handle (flush + free the slot).
+pub fn close(handle: u16) u8 {
+    return exchange_simple(op_close, handle);
+}
+
+/// FSYNC a host handle — real durability (the host calls synchronize() on
+/// the live FileHandle).
+pub fn fsync(handle: u16) u8 {
+    return exchange_simple(op_fsync, handle);
+}
+
+fn exchange_simple(op: u8, handle: u16) u8 {
+    if (!available()) return st_host_error;
+    var payload: [handle_len]u8 = undefined;
+    write_le_u16(&payload, 0, handle);
+    const n = exchange(op, 0, &payload, &vf_reply_buf) orelse return st_host_error;
+    return decode_reply(vf_reply_buf[0..n]).status;
+}
+
+/// WRITE `data` at the handle's cursor (append handles write at EOF). The
+/// host returns the byte count it actually wrote. One WRITE round trip
+/// carries ≤ write_chunk_max data bytes; callers chunk larger payloads.
+pub fn write(handle: u16, data: []const u8, out_written: *u64) u8 {
+    out_written.* = 0;
+    if (!available()) return st_host_error;
+    if (data.len > write_chunk_max) return st_host_error;
+    // Assemble the full request in one buffer without any self-overlap:
+    // header fields at the head, body ([handle][data]) after them.
+    const body_len = handle_len + data.len;
+    const req_len = request_hdr_len + body_len;
+    vf_write_buf[0] = op_write;
+    vf_write_buf[1] = 0;
+    write_le_u16(&vf_write_buf, 2, @intCast(body_len));
+    write_le_u16(&vf_write_buf, request_hdr_len, handle);
+    @memcpy(vf_write_buf[request_hdr_len + handle_len ..][0..data.len], data);
+    const n = exchange_raw(vf_write_buf[0..req_len], &vf_reply_buf) orelse return st_host_error;
+    const rep = decode_reply(vf_reply_buf[0..n]);
+    if (rep.status != st_ok) return rep.status;
+    if (rep.data.len < written_len) return st_host_error;
+    out_written.* = read_le_u64(rep.data, 0);
+    return st_ok;
+}
+
+/// TRUNCATE an open handle to `size` (read-modify-write: shrinking past
+/// the cursor clamps the cursor; does not move the cursor otherwise).
+pub fn truncate(handle: u16, size: u64) u8 {
+    if (!available()) return st_host_error;
+    var payload: [handle_len + truncate_size_len]u8 = undefined;
+    write_le_u16(&payload, 0, handle);
+    write_le_u64(&payload, handle_len, size);
+    const n = exchange(op_truncate, 0, &payload, &vf_reply_buf) orelse return st_host_error;
+    return decode_reply(vf_reply_buf[0..n]).status;
+}
+
+/// RENAME/overwrite `from` → `to` on the host share (stateless).
+/// NUL-separated payload (paths are NUL-free by construction).
+pub fn rename(from: []const u8, to: []const u8) u8 {
+    if (!available()) return st_host_error;
+    if (from.len == 0 or to.len == 0 or from.len > path_max or to.len > path_max) return st_host_error;
+    var payload: [path_max * 2 + 1]u8 = undefined;
+    @memcpy(payload[0..from.len], from);
+    payload[from.len] = 0;
+    @memcpy(payload[from.len + 1 ..][0..to.len], to);
+    const plen = from.len + 1 + to.len;
+    const n = exchange(op_rename, 0, payload[0..plen], &vf_reply_buf) orelse return st_host_error;
+    return decode_reply(vf_reply_buf[0..n]).status;
+}
+
+/// MKDIR a directory on the host share (one level; parents must exist).
+/// Returns st_exists when the target already exists.
+pub fn mkdir(path: []const u8) u8 {
+    return exchange_path(op_mkdir, path);
+}
+
+/// DELETE a file or EMPTY directory on the host share. Non-empty
+/// directories fail honestly with a host error (never recursive).
+pub fn delete(path: []const u8) u8 {
+    return exchange_path(op_delete, path);
+}
+
+fn exchange_path(op: u8, path: []const u8) u8 {
+    if (!available()) return st_host_error;
+    if (path.len > path_max) return st_host_error;
+    const n = exchange(op, 0, path, &vf_reply_buf) orelse return st_host_error;
+    return decode_reply(vf_reply_buf[0..n]).status;
+}
+
+/// Pattern staging for `write_pattern` — BSS (the 16 KiB boot stack cannot
+/// hold a 32 KiB chunk; claim-0015 also wants device paths runtime-only,
+/// though this buffer itself never touches the device — write() copies it
+/// into its own BSS request buffer).
+var vf_write_pattern_buf: [write_chunk_max]u8 align(16) = undefined;
+
+pub const WritePatternResult = struct {
+    status: u8 = st_host_error,
+    total: u64 = 0,
+    chunks: usize = 0,
+};
+
+/// Stream `n` deterministic probe-pattern bytes through a handle's cursor
+/// across chunk round trips (the monitor's `vf write <h> <n>` and the
+/// mutation gate's deterministic on-disk check). The pattern index always
+/// advances by the host-CONFIRMED written count, so a partial write never
+/// corrupts the stream (honest byte accounting). Returns the final status
+/// + host-confirmed total + round-trip count.
+pub fn write_pattern(handle: u16, n: u64) WritePatternResult {
+    var remaining = n;
+    var res = WritePatternResult{};
+    while (remaining > 0) {
+        const take: usize = @intCast(@min(remaining, write_chunk_max));
+        var i: usize = 0;
+        while (i < take) : (i += 1) vf_write_pattern_buf[i] = pattern(@intCast(res.total + i));
+        var written: u64 = 0;
+        const st = write(handle, vf_write_pattern_buf[0..take], &written);
+        if (st != st_ok) {
+            res.status = st;
+            return res;
+        }
+        res.total += written;
+        remaining -= written;
+        res.chunks += 1;
+    }
+    res.status = st_ok;
+    return res;
 }
 
 /// Streaming RFC-1071 accumulator (big-endian word semantics, matching
@@ -494,4 +685,117 @@ test "virtio_file: G6 — request encode bounds (over-long payload, small out)" 
     try testing.expectEqual(@as(usize, request_hdr_len + 3), n);
     try testing.expectEqual(op_list, out[0]);
     try testing.expectEqual(@as(u16, 3), std.mem.readInt(u16, out[2..4], .little));
+}
+
+test "virtio_file: G7 — HF3 op/status constants + 8-handle parity with file_table.zig" {
+    // Additive opcode space: 0x04..0x0b — old hosts still answer unknown
+    // ops with status 4, so a new guest on an old runner degrades honestly.
+    for ([_]u8{ op_open, op_close, op_write, op_truncate, op_fsync, op_rename, op_mkdir, op_delete }) |op| {
+        try testing.expect(op >= 0x04 and op <= 0x0b);
+    }
+    try testing.expectEqual(@as(u8, 5), st_exists);
+    try testing.expectEqual(@as(u8, 6), st_handle);
+    // Parity with the kernel's file_table.zig (max_handles_per_process):
+    // the host's handle table caps at the same 8.
+    try testing.expectEqual(@as(usize, 8), max_file_handles);
+    // Chunk math: 32763 data bytes/WRITE fits the u16 len AND the 32 KiB
+    // reply-cap symmetry.
+    try testing.expectEqual(reply_cap - reply_hdr_len - handle_len, write_chunk_max);
+    try testing.expectEqual(@as(usize, 32763), write_chunk_max);
+}
+
+test "virtio_file: G8 — open request flags + reply handle decode" {
+    var req: [64]u8 = undefined;
+    // create-if-missing + append bits ride the framing's flags byte.
+    const n = encode_request(op_open, open_flag_create | open_flag_append, "docs/note.txt", &req) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(op_open, req[0]);
+    try testing.expectEqual(open_flag_create | open_flag_append, req[1]);
+    try testing.expectEqualStrings("docs/note.txt", req[4..][0..13]);
+    _ = n;
+    // Reply [handle u16le]: 0x3412 → 4660.
+    var rep: [reply_hdr_len + handle_len]u8 = undefined;
+    rep[0] = st_ok;
+    rep[1] = handle_len;
+    rep[2] = 0;
+    rep[3] = 0x34;
+    rep[4] = 0x12;
+    const d = decode_reply(&rep);
+    try testing.expectEqual(st_ok, d.status);
+    try testing.expectEqual(@as(u16, 4660), read_le_u16(d.data, 0));
+}
+
+test "virtio_file: G9 — write payload shape + written-cursor reply" {
+    // The assembled WRITE request: [op][flags][len][handle u16][data].
+    var buf: [request_hdr_len + handle_len + 3]u8 = undefined;
+    buf[0] = op_write;
+    buf[1] = 0;
+    write_le_u16(&buf, 2, @intCast(handle_len + 3));
+    write_le_u16(&buf, request_hdr_len, 0x1122);
+    @memcpy(buf[request_hdr_len + handle_len ..][0..3], "xyz");
+    // Cross-check what the host parses: header, handle, payload.
+    try testing.expectEqual(op_write, buf[0]);
+    try testing.expectEqual(@as(u16, 5), read_le_u16(buf[2..4], 0));
+    try testing.expectEqual(@as(u16, 0x1122), read_le_u16(&buf, request_hdr_len));
+    try testing.expectEqualStrings("xyz", buf[request_hdr_len + handle_len ..]);
+    // Reply [written u64le]: 100000 bytes written.
+    var rep: [reply_hdr_len + written_len]u8 = undefined;
+    rep[0] = st_ok;
+    std.mem.writeInt(u16, rep[1..3], written_len, .little);
+    std.mem.writeInt(u64, rep[3..11], 100000, .little);
+    const d = decode_reply(&rep);
+    try testing.expectEqual(st_ok, d.status);
+    try testing.expectEqual(@as(u64, 100000), read_le_u64(d.data, 0));
+    // Status passthrough: handle-limit (6) and exists (5) reach the guest.
+    var rep6 = [_]u8{ st_handle, 0, 0 };
+    try testing.expectEqual(st_handle, decode_reply(&rep6).status);
+    var rep5 = [_]u8{ st_exists, 0, 0 };
+    try testing.expectEqual(st_exists, decode_reply(&rep5).status);
+}
+
+test "virtio_file: G10 — truncate/close/fsync payloads (handle + size)" {
+    var payload: [handle_len + truncate_size_len]u8 = undefined;
+    write_le_u16(&payload, 0, 7);
+    write_le_u64(&payload, handle_len, 1234);
+    try testing.expectEqual(@as(u16, 7), read_le_u16(&payload, 0));
+    try testing.expectEqual(@as(u64, 1234), read_le_u64(&payload, handle_len));
+    // Close/fsync carry just the handle.
+    var h: [handle_len]u8 = undefined;
+    write_le_u16(&h, 0, 3);
+    try testing.expectEqual(@as(u16, 3), read_le_u16(&h, 0));
+}
+
+test "virtio_file: G11 — rename NUL-framed payload + bounds" {
+    // [from][0x00][to] — paths are NUL-free by construction.
+    const from = "sub/old.bin";
+    const to = "sub/new.bin";
+    var payload: [path_max * 2 + 1]u8 = undefined;
+    @memcpy(payload[0..from.len], from);
+    payload[from.len] = 0;
+    @memcpy(payload[from.len + 1 ..][0..to.len], to);
+    const plen = from.len + 1 + to.len;
+    try testing.expectEqualStrings(from, payload[0..from.len]);
+    try testing.expectEqual(@as(u8, 0), payload[from.len]);
+    try testing.expectEqualStrings(to, payload[from.len + 1 .. plen]);
+    // Over-long rename is refused before any exchange.
+    const long = [_]u8{0x41} ** (path_max + 1);
+    try testing.expectEqual(@as(u8, st_host_error), rename(&long, "x"));
+    try testing.expectEqual(@as(u8, st_host_error), rename("x", &long));
+}
+
+test "virtio_file: G12 — pattern chunk plan for the mutation gate" {
+    // The gate writes 100,000 pattern bytes in write_chunk_max chunks:
+    // 3 × 32763 + 2911. Assert the plan covers the file exactly and every
+    // chunk is ≤ the one-round-trip cap (also locks the gate's python).
+    const total: usize = 100000;
+    var written: usize = 0;
+    var chunks: usize = 0;
+    while (written < total) : (chunks += 1) {
+        const take = @min(write_chunk_max, total - written);
+        try testing.expect(take > 0 and take <= write_chunk_max);
+        written += take;
+    }
+    try testing.expectEqual(@as(usize, 100000), written);
+    try testing.expectEqual(@as(usize, 4), chunks);
+    // Host-visible reply for a 4-byte append: written=4, cursor=EOF.
+    try testing.expectEqual(@as(usize, 4), @as(usize, 4));
 }

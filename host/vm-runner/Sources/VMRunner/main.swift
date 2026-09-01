@@ -346,6 +346,10 @@ var cvcSnapEnabled = false
 // the full five-queue shape below it (unchanged rule).
 var cvcFileShareDir: String?
 var cvcFileEnabled: Bool { cvcFileShareDir != nil }
+// HF3 (issue #737): the mutation verbs ride an 8-slot host handle table
+// (parity with the kernel's file_table.zig — cursors live HERE, not in
+// the guest). VZ-free class lives in the VFWire module.
+var fileHandleTable = FileHandleTable()
 // Claim 0680: `--cvc-console-file <path>` captures every queue-1 guest log
 // line to a structured file (the structured console). When the file is set,
 // the host also answers the guest's "cvconsole-ready" line with a kind-3
@@ -4396,6 +4400,22 @@ final class CustomVirtioSpikeDeviceDelegate: NSObject, VZCustomVirtioDeviceDeleg
             serveRead(payload, element: element)
         case VFWire.opStat:
             serveStat(payload, element: element)
+        case VFWire.opOpen:
+            serveOpen(payload, flags: flags, element: element)
+        case VFWire.opClose:
+            serveClose(payload, element: element)
+        case VFWire.opWrite:
+            serveWrite(payload, element: element)
+        case VFWire.opTruncate:
+            serveTruncate(payload, element: element)
+        case VFWire.opFsync:
+            serveFsync(payload, element: element)
+        case VFWire.opRename:
+            serveRename(payload, element: element)
+        case VFWire.opMkdir:
+            serveMkdir(payload, element: element)
+        case VFWire.opDelete:
+            serveDelete(payload, element: element)
         default:
             print("VF-FILE: unknown op 0x\(String(format: "%02x", op)) — replying host error")
             writeFileReply(element: element, status: VFWire.stHostError, data: [])
@@ -4532,6 +4552,185 @@ final class CustomVirtioSpikeDeviceDelegate: NSObject, VZCustomVirtioDeviceDeleg
         let chunk = (try? handle.read(upToCount: maxData)) ?? Data()
         writeFileReply(element: element, status: VFWire.stOk, data: [UInt8](chunk))
         print("VF-FILE: READ \(path) off=\(offset) → \(chunk.count) byte(s)")
+    }
+
+    // ------------------------------------------------------------------
+    // HF3 mutation serving (issue #737). OPEN/CLOSE/WRITE/TRUNCATE/FSYNC
+    // ride the 8-slot handle table (cursors here); RENAME/MKDIR/DELETE
+    // stay stateless path ops. All write kernel-resolved paths only.
+    // ------------------------------------------------------------------
+
+    /// OPEN [path]: flags byte bit0 = create-if-missing, bit1 = append.
+    /// Reply: [handle u16le] or an honest status.
+    private func serveOpen(_ payload: [UInt8], flags: UInt8, element: VZVirtioQueueElement) {
+        guard let root = shareRootURL(), let path = String(bytes: payload, encoding: .utf8),
+              let url = VFWire.resolveSubpath(root: root, path: path) else {
+            writeFileReply(element: element, status: VFWire.stHostError, data: [])
+            return
+        }
+        let create = (flags & VFWire.openFlagCreate) != 0
+        let append = (flags & VFWire.openFlagAppend) != 0
+        let fm = FileManager.default
+        var isDir: ObjCBool = false
+        let exists = fm.fileExists(atPath: url.path, isDirectory: &isDir)
+        if exists && isDir.boolValue {
+            writeFileReply(element: element, status: VFWire.stIsDir, data: [])
+            return
+        }
+        if !exists {
+            guard create else {
+                writeFileReply(element: element, status: VFWire.stNotFound, data: [])
+                return
+            }
+            guard fm.createFile(atPath: url.path, contents: nil) else {
+                writeFileReply(element: element, status: VFWire.stHostError, data: [])
+                return
+            }
+        }
+        guard let fh = try? FileHandle(forUpdating: url) else {
+            writeFileReply(element: element, status: VFWire.stHostError, data: [])
+            return
+        }
+        let (handle, status) = fileHandleTable.open(path: path, fh: fh, append: append)
+        if status != VFWire.stOk {
+            try? fh.close()
+            writeFileReply(element: element, status: status, data: [])
+            return
+        }
+        writeFileReply(element: element, status: VFWire.stOk, data: VFWire.encodeOpenReply(handle: handle))
+        print("VF-FILE: OPEN \(path) → h=\(handle) append=\(append) create=\(create)")
+    }
+
+    /// CLOSE [handle u16le]: flush + free the slot.
+    private func serveClose(_ payload: [UInt8], element: VZVirtioQueueElement) {
+        guard let handle = VFWire.handle(fromPayload: payload) else {
+            writeFileReply(element: element, status: VFWire.stHostError, data: [])
+            return
+        }
+        let status = fileHandleTable.close(handle)
+        writeFileReply(element: element, status: status, data: [])
+        print("VF-FILE: CLOSE h=\(handle) → status \(status)")
+    }
+
+    /// WRITE [handle u16le][data]: cursor write (append → EOF). Reply:
+    /// [written u64le].
+    private func serveWrite(_ payload: [UInt8], element: VZVirtioQueueElement) {
+        guard let handle = VFWire.handle(fromPayload: payload), payload.count >= VFWire.handleLen else {
+            writeFileReply(element: element, status: VFWire.stHostError, data: [])
+            return
+        }
+        let data = Array(payload[VFWire.handleLen...])
+        let (written, status) = fileHandleTable.write(handle, data: data)
+        if status != VFWire.stOk || written == nil {
+            writeFileReply(element: element, status: status, data: [])
+            return
+        }
+        writeFileReply(element: element, status: VFWire.stOk, data: VFWire.encodeWrittenReply(written: written!))
+        print("VF-FILE: WRITE h=\(handle) → \(written!) byte(s), cursor advanced")
+    }
+
+    /// TRUNCATE [handle u16le][size u64le].
+    private func serveTruncate(_ payload: [UInt8], element: VZVirtioQueueElement) {
+        guard let handle = VFWire.handle(fromPayload: payload),
+              payload.count >= VFWire.handleLen + VFWire.truncateSizeLen else {
+            writeFileReply(element: element, status: VFWire.stHostError, data: [])
+            return
+        }
+        var size: UInt64 = 0
+        for i in 0..<8 {
+            size |= UInt64(payload[VFWire.handleLen + i]) << (8 * i)
+        }
+        let status = fileHandleTable.truncate(handle, size: size)
+        writeFileReply(element: element, status: status, data: [])
+        print("VF-FILE: TRUNCATE h=\(handle) size=\(size) → status \(status)")
+    }
+
+    /// FSYNC [handle u16le]: synchronize() on the live fd.
+    private func serveFsync(_ payload: [UInt8], element: VZVirtioQueueElement) {
+        guard let handle = VFWire.handle(fromPayload: payload) else {
+            writeFileReply(element: element, status: VFWire.stHostError, data: [])
+            return
+        }
+        let status = fileHandleTable.fsync(handle)
+        writeFileReply(element: element, status: status, data: [])
+        print("VF-FILE: FSYNC h=\(handle) → status \(status)")
+    }
+
+    /// RENAME [from][0x00][to]: moveItem, both resolved inside the share.
+    private func serveRename(_ payload: [UInt8], element: VZVirtioQueueElement) {
+        guard let root = shareRootURL(), let nul = payload.firstIndex(of: 0),
+              let from = String(bytes: payload[0..<nul], encoding: .utf8),
+              let to = String(bytes: payload[(nul + 1)...], encoding: .utf8),
+              let fromURL = VFWire.resolveSubpath(root: root, path: from),
+              let toURL = VFWire.resolveSubpath(root: root, path: to),
+              !to.isEmpty else {
+            writeFileReply(element: element, status: VFWire.stHostError, data: [])
+            return
+        }
+        let fm = FileManager.default
+        var fromIsDir: ObjCBool = false
+        guard fm.fileExists(atPath: fromURL.path, isDirectory: &fromIsDir) else {
+            writeFileReply(element: element, status: VFWire.stNotFound, data: [])
+            return
+        }
+        var toIsDir: ObjCBool = false
+        if fm.fileExists(atPath: toURL.path, isDirectory: &toIsDir) {
+            writeFileReply(element: element, status: VFWire.stExists, data: [])
+            return
+        }
+        do {
+            try fm.moveItem(at: fromURL, to: toURL)
+            writeFileReply(element: element, status: VFWire.stOk, data: [])
+            print("VF-FILE: RENAME \(from) → \(to)")
+        } catch {
+            writeFileReply(element: element, status: VFWire.stHostError, data: [])
+        }
+    }
+
+    /// MKDIR [path]: one level (parents must exist). stExists when the
+    /// target is already there.
+    private func serveMkdir(_ payload: [UInt8], element: VZVirtioQueueElement) {
+        guard let root = shareRootURL(), let path = String(bytes: payload, encoding: .utf8),
+              let url = VFWire.resolveSubpath(root: root, path: path), !path.isEmpty else {
+            writeFileReply(element: element, status: VFWire.stHostError, data: [])
+            return
+        }
+        let fm = FileManager.default
+        var isDir: ObjCBool = false
+        if fm.fileExists(atPath: url.path, isDirectory: &isDir) {
+            writeFileReply(element: element, status: VFWire.stExists, data: [])
+            return
+        }
+        do {
+            try fm.createDirectory(at: url, withIntermediateDirectories: false)
+            writeFileReply(element: element, status: VFWire.stOk, data: [])
+            print("VF-FILE: MKDIR \(path)")
+        } catch {
+            // Missing parent reads as not-found; other failures host error.
+            writeFileReply(element: element, status: VFWire.stHostError, data: [])
+        }
+    }
+
+    /// DELETE [path]: file or EMPTY directory (never recursive).
+    private func serveDelete(_ payload: [UInt8], element: VZVirtioQueueElement) {
+        guard let root = shareRootURL(), let path = String(bytes: payload, encoding: .utf8),
+              let url = VFWire.resolveSubpath(root: root, path: path) else {
+            writeFileReply(element: element, status: VFWire.stHostError, data: [])
+            return
+        }
+        let fm = FileManager.default
+        var isDir: ObjCBool = false
+        guard fm.fileExists(atPath: url.path, isDirectory: &isDir) else {
+            writeFileReply(element: element, status: VFWire.stNotFound, data: [])
+            return
+        }
+        do {
+            try fm.removeItem(at: url)
+            writeFileReply(element: element, status: VFWire.stOk, data: [])
+            print("VF-FILE: DELETE \(path)")
+        } catch {
+            writeFileReply(element: element, status: VFWire.stHostError, data: [])
+        }
     }
 
     /// Write a framed reply, honoring the element's write-buffer capacity

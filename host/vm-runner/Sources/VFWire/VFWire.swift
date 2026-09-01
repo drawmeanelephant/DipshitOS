@@ -23,6 +23,17 @@ public enum VFWire {
     public static let opList: UInt8 = 0x01
     public static let opRead: UInt8 = 0x02
     public static let opStat: UInt8 = 0x03
+    // HF3 (issue #737): mutation ops — ADDITIVE (0x04...0x0b), so the
+    // protocol stays non-breaking: an old host answers any new op with
+    // status 4 host error and an old guest never sends them.
+    public static let opOpen: UInt8 = 0x04
+    public static let opClose: UInt8 = 0x05
+    public static let opWrite: UInt8 = 0x06
+    public static let opTruncate: UInt8 = 0x07
+    public static let opFsync: UInt8 = 0x08
+    public static let opRename: UInt8 = 0x09
+    public static let opMkdir: UInt8 = 0x0a
+    public static let opDelete: UInt8 = 0x0b
 
     // Reply statuses
     public static let stOk: UInt8 = 0
@@ -30,6 +41,12 @@ public enum VFWire {
     public static let stIsDir: UInt8 = 2
     public static let stTruncated: UInt8 = 3
     public static let stHostError: UInt8 = 4
+    public static let stExists: UInt8 = 5
+    public static let stHandle: UInt8 = 6
+
+    // OPEN request flags byte (per-op modifiers in the reserved byte)
+    public static let openFlagCreate: UInt8 = 0x01
+    public static let openFlagAppend: UInt8 = 0x02
 
     // Frame constants (mirror kernel/src/virtio_file.zig)
     public static let requestHdrLen = 4 // [op][flags][len u16le]
@@ -39,6 +56,13 @@ public enum VFWire {
     public static let listMaxEntries = 128
     public static let entryRowLen = 40 // [name 31][type u8][size u64le]
     public static let readOffsetLen = 8
+    // HF3 scalar field lengths + the handle-table cap (parity with the
+    // kernel's file_table.zig — max_handles_per_process = 8).
+    public static let handleLen = 2
+    public static let writtenLen = 8
+    public static let truncateSizeLen = 8
+    public static let maxFileHandles = 8
+    public static let writeChunkMax = replyCap - replyHdrLen - handleLen
 
     public static let dirTypeFile: UInt8 = 0
     public static let dirTypeDir: UInt8 = 1
@@ -190,4 +214,158 @@ public enum VFWire {
         guard resolved == rootPath || resolved.hasPrefix(rootPath + "/") else { return nil }
         return URL(fileURLWithPath: resolved)
     }
+
+    // ------------------------------------------------------------------
+    // HF3 mutation wire (issue #737): payload builders + parsers.
+    // All little-endian, mirroring kernel/src/virtio_file.zig byte for
+    // byte (locked by the class-A unit tests on both sides).
+    // ------------------------------------------------------------------
+
+    /// WRITE payload: [handle u16le][data]. nil when data exceeds the
+    /// per-round-trip chunk cap.
+    public static func buildWritePayload(handle: Int, data: [UInt8]) -> [UInt8]? {
+        guard data.count <= writeChunkMax else { return nil }
+        var out = [UInt8(handle & 0xff), UInt8((handle >> 8) & 0xff)]
+        out.append(contentsOf: data)
+        return out
+    }
+
+    /// TRUNCATE payload: [handle u16le][size u64le].
+    public static func buildTruncatePayload(handle: Int, size: UInt64) -> [UInt8] {
+        var out = [UInt8(handle & 0xff), UInt8((handle >> 8) & 0xff)]
+        var s = size
+        for _ in 0..<8 { out.append(UInt8(s & 0xff)); s >>= 8 }
+        return out
+    }
+
+    /// RENAME payload: [from][0x00][to] (paths are NUL-free by
+    /// construction). nil for over-long or empty paths.
+    public static func buildRenamePayload(from: String, to: String) -> [UInt8]? {
+        let f = Array(from.utf8)
+        let t = Array(to.utf8)
+        guard !f.isEmpty, !t.isEmpty, f.count <= pathMax, t.count <= pathMax else { return nil }
+        var out = f
+        out.append(0)
+        out.append(contentsOf: t)
+        return out
+    }
+
+    /// Parse a u16le handle from the head of a request payload or reply
+    /// data. nil on a short buffer.
+    public static func handle(fromPayload bytes: [UInt8], at offset: Int = 0) -> Int? {
+        guard bytes.count >= offset + handleLen else { return nil }
+        return Int(bytes[offset]) | (Int(bytes[offset + 1]) << 8)
+    }
+
+    /// OPEN reply data: [handle u16le].
+    public static func encodeOpenReply(handle: Int) -> [UInt8] {
+        [UInt8(handle & 0xff), UInt8((handle >> 8) & 0xff)]
+    }
+
+    /// WRITE reply data: [written u64le].
+    public static func encodeWrittenReply(written: UInt64) -> [UInt8] {
+        var out: [UInt8] = []
+        var w = written
+        for _ in 0..<8 { out.append(UInt8(w & 0xff)); w >>= 8 }
+        return out
+    }
 }
+
+// --------------------------------------------------------------------------
+// HF3: the host's 8-slot OPEN-handle table (issue #737).
+//
+// VZ-FREE — a plain FileManager/FileHandle service, unit-testable on any
+// host (no Virtualization imports). This is exactly where cursors earn
+// their keep: OPEN allocates a slot, WRITE advances the cursor (append
+// handles write at EOF), TRUNCATE clamps it, FSYNC pushes real durability
+// (synchronize() on the live fd), CLOSE flushes and frees. The 8-slot cap
+// is parity with the kernel's file_table.zig ABI (max_handles_per_process).
+// --------------------------------------------------------------------------
+public final class FileHandleTable {
+    public struct Slot {
+        public var path: String = ""
+        public var fh: FileHandle? = nil
+        public var cursor: UInt64 = 0
+        public var append: Bool = false
+        public var inUse: Bool = false
+    }
+
+    public private(set) var slots: [Slot]
+
+    public init() {
+        slots = Array(repeating: Slot(), count: VFWire.maxFileHandles)
+    }
+
+    /// Allocate a slot for a live FileHandle. Returns the handle index,
+    /// or VFWire.stHandle when the table is full.
+    public func open(path: String, fh: FileHandle, append: Bool) -> (Int, UInt8) {
+        for i in slots.indices where !slots[i].inUse {
+            slots[i] = Slot(path: path, fh: fh, cursor: 0, append: append, inUse: true)
+            return (i, VFWire.stOk)
+        }
+        return (-1, VFWire.stHandle)
+    }
+
+    /// Look up a live slot; nil when the handle is not open.
+    public func slot(_ handle: Int) -> Slot? {
+        guard handle >= 0, handle < slots.count, slots[handle].inUse else { return nil }
+        return slots[handle]
+    }
+
+    /// WRITE data at the cursor (append → EOF first). Returns (written,
+    /// status) — nil written on failure.
+    public func write(_ handle: Int, data: [UInt8]) -> (UInt64?, UInt8) {
+        guard handle >= 0, handle < slots.count, slots[handle].inUse,
+              let fh = slots[handle].fh else { return (nil, VFWire.stHandle) }
+        do {
+            if slots[handle].append {
+                try fh.seekToEnd()
+                slots[handle].cursor = try fh.offset()
+            } else {
+                try fh.seek(toOffset: slots[handle].cursor)
+            }
+            try fh.write(contentsOf: data)
+            let count = UInt64(data.count)
+            slots[handle].cursor += count
+            return (count, VFWire.stOk)
+        } catch {
+            return (nil, VFWire.stHostError)
+        }
+    }
+
+    /// TRUNCATE an open file to `size`; clamp the cursor below it.
+    public func truncate(_ handle: Int, size: UInt64) -> UInt8 {
+        guard handle >= 0, handle < slots.count, slots[handle].inUse,
+              let fh = slots[handle].fh else { return VFWire.stHandle }
+        do {
+            try fh.truncate(atOffset: size)
+            slots[handle].cursor = min(slots[handle].cursor, size)
+            return VFWire.stOk
+        } catch {
+            return VFWire.stHostError
+        }
+    }
+
+    /// FSYNC: synchronize() on the live fd — real durability.
+    public func fsync(_ handle: Int) -> UInt8 {
+        guard handle >= 0, handle < slots.count, slots[handle].inUse,
+              let fh = slots[handle].fh else { return VFWire.stHandle }
+        do {
+            try fh.synchronize()
+            return VFWire.stOk
+        } catch {
+            return VFWire.stHostError
+        }
+    }
+
+    /// CLOSE: flush + close the fd, free the slot.
+    public func close(_ handle: Int) -> UInt8 {
+        guard handle >= 0, handle < slots.count, slots[handle].inUse else { return VFWire.stHandle }
+        if let fh = slots[handle].fh {
+            try? fh.close()
+        }
+        slots[handle] = Slot()
+        return VFWire.stOk
+    }
+}
+

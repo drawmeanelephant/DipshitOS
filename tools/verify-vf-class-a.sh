@@ -4,11 +4,15 @@
 # channel wire format is pinned BYTE-FOR-BYTE on both sides, and every
 # transport fact that needs no VM is asserted here.
 #
-#   G1-G6  kernel/src/virtio_file.zig host tests (generator parity,
-#          reply_len clamp math, probe framing, hostile envelopes, entry
-#          rows + streaming cksum, request encode bounds)
-#   S1-S4  host/vm-runner Tests/VMRunnerTests (fixture parity + path
-#          defense) via `swift test`
+#   G1-G12  kernel/src/virtio_file.zig host tests (generator parity,
+#           reply_len clamp math, probe framing, hostile envelopes, entry
+#           rows + streaming cksum, request encode bounds, HF3 mutation
+#           wire: op/status constants + 8-handle parity, open flags +
+#           reply handle, write/truncate payloads, rename NUL framing,
+#           chunk plan)
+#   S1-S10  host/vm-runner Tests/VMRunnerTests (fixture parity + path
+#           defense + HF3 wire parity + the 8-slot FileHandleTable cursor
+#           semantics) via `swift test`
 #   fixture sha256 pins: the checked-in tests/vf-*.bin must not drift, and
 #          python must regenerate vf-pattern-32k.bin byte-for-byte
 #   zig fmt/build/image, BSS budget (11.0 MiB), coordination
@@ -23,7 +27,7 @@ GATE_LOG="artifacts/m34-hf1-class-a.txt"
 mkdir -p artifacts
 exec > >(tee "$GATE_LOG") 2>&1
 
-echo "=== verify-vf-class-a: M34 HF1 (issue #735) — host file channel wire parity (class A) ==="
+echo "=== verify-vf-class-a: M34 HF1–HF3 (issues #735/#736/#737) — host file channel wire parity (class A) ==="
 zig version
 swift --version 2>&1 | head -1
 REVISION="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
@@ -43,13 +47,13 @@ zig build
 step "zig build image"
 zig build image
 
-step "virtio_file host tests (G1–G6)"
+step "virtio_file host tests (G1–G12)"
 zig test kernel/src/virtio_file.zig
 
 step "verify-unit-tests.sh (all monitor modules incl. virtio_file)"
 bash tools/verify-unit-tests.sh
 
-step "swift test (VFWire S1–S4)"
+step "swift test (VFWire S1–S10)"
 swift test --package-path host/vm-runner
 
 step "fixture sha256 pins + python generator cross-check"
@@ -107,3 +111,5 @@ bash tools/verify-coordination.sh
 
 echo
 echo "verify-vf-class-a: PASS — wire parity locked on both sides, budgets green."
+# HF3 (issue #737): the mutation-wire lock is complete — additive ops 0x04..0x0b, statuses 5/6,
+# the 8-slot host handle table (file_table.zig parity), and both sides' encode/decode agree.
