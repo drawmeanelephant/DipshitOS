@@ -148,6 +148,7 @@ meaningful — on main.
 | `agent/buffy/m34-hf1-hf2-host-file-channel` | [`agent-buffy-m34-hf1-hf2-host-file-channel.md`](agent-buffy-m34-hf1-hf2-host-file-channel.md) |
 | M34 HF3 mutation ops (issue #737) | [`agent-buffy-m34-hf3-mutation.md`](agent-buffy-m34-hf3-mutation.md) |
 | M34 HF4 app delivery from the host folder (issue #738) | [`agent-buffy-m34-hf4-exec.md`](agent-buffy-m34-hf4-exec.md) |
+| M34 HF5 user-data migration to the host folder (issue #739) | [`agent-buffy-m34-hf5-user-data-migration.md`](agent-buffy-m34-hf5-user-data-migration.md) |
 | milestone nine interactive application events (claim 7463) | [`agent-buffy-m9-events.md`](agent-buffy-m9-events.md) |
 | milestone nine tracker (claim 8234) | [`agent-buffy-m9-tracker.md`](agent-buffy-m9-tracker.md) |
 | Roadmap refinement (claim 4951) | [`agent-buffy-roadmap-refinement.md`](agent-buffy-roadmap-refinement.md) |
@@ -216,6 +217,7 @@ meaningful — on main.
 | freebuff/okay-shower-thoughts-here-we-re-using-fat32-for-so-b0ce3067-2b04-4b81-984d-9fd76bfcf123 | [`freebuff-20260901-003.md`](freebuff-20260901-003.md) |
 | freebuff/okay-shower-thoughts-here-we-re-using-fat32-for-so-b0ce3067-2b04-4b81-984d-9fd76bfcf123 | [`freebuff-20260901-004.md`](freebuff-20260901-004.md) |
 | freebuff/okay-shower-thoughts-here-we-re-using-fat32-for-so-b0ce3067-2b04-4b81-984d-9fd76bfcf123 | [`freebuff-20260901-005.md`](freebuff-20260901-005.md) |
+| freebuff/okay-shower-thoughts-here-we-re-using-fat32-for-so-b0ce3067-2b04-4b81-984d-9fd76bfcf123 | [`freebuff-20260901-006.md`](freebuff-20260901-006.md) |
 | lane-b/m24-calc-features | [`lane-b-m24-calc-features.md`](lane-b-m24-calc-features.md) |
 | `lane-c/m20-text-rendering` | [`lane-c-m20-text-rendering.md`](lane-c-m20-text-rendering.md) |
 | `lane-d/m22-dev-tools` | [`lane-d-m22-dev-tools.md`](lane-d-m22-dev-tools.md) |
