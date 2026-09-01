@@ -144,6 +144,7 @@ meaningful — on main.
 | agent/buffy/m33-sb5-wm-compose-n | [`agent-buffy-m33-sb5-wm-compose-n.md`](agent-buffy-m33-sb5-wm-compose-n.md) |
 | agent/buffy/m33-sb6-perf-payoff | [`agent-buffy-m33-sb6-perf-payoff.md`](agent-buffy-m33-sb6-perf-payoff.md) |
 | `agent/buffy/m34-hf1-hf2-host-file-channel` | [`agent-buffy-m34-hf1-hf2-host-file-channel.md`](agent-buffy-m34-hf1-hf2-host-file-channel.md) |
+| M34 HF3 mutation ops (issue #737) | [`agent-buffy-m34-hf3-mutation.md`](agent-buffy-m34-hf3-mutation.md) |
 | milestone nine interactive application events (claim 7463) | [`agent-buffy-m9-events.md`](agent-buffy-m9-events.md) |
 | milestone nine tracker (claim 8234) | [`agent-buffy-m9-tracker.md`](agent-buffy-m9-tracker.md) |
 | Roadmap refinement (claim 4951) | [`agent-buffy-roadmap-refinement.md`](agent-buffy-roadmap-refinement.md) |
