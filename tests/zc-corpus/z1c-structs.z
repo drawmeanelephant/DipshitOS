@@ -1,0 +1,19 @@
+const zc = @import("zc");
+
+const MyStruct = struct {
+    a: u8,
+    b: u8,
+};
+
+pub fn main() void {
+    var s: MyStruct = undefined;
+    s.a = 65;
+    s.b = 66;
+    zc.print_struct(s);
+    if (s.a == 65) {
+        if (s.b == 66) {
+            zc.exit(0);
+        }
+    }
+    zc.exit(1);
+}
