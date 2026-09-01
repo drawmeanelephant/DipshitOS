@@ -108,6 +108,7 @@ const userspace = @import("userspace.zig"); // claim 8215: first EL0t task + SVC
 const syscall = @import("syscall.zig"); // claim 3594: fixed syscall ABI + runtime dispatch table
 const exec = @import("exec.zig"); // milestone-three card 6: ESP exec — owns the shared rebuild_user_root (claims 2665/3693)
 const virtio_custom = @import("virtio_custom.zig"); // claim 0828: custom-virtio spike driver (DID 0x1082)
+const virtio_file = @import("virtio_file.zig"); // M34 HF1+HF2 (issues #735/#736): host file channel client (queue 5)
 const HandoffV2 = handoff.HandoffV2;
 
 // Claim 0020 phase selectors live with the transport (the exact-one-phase
@@ -1268,6 +1269,16 @@ fn uart_hex8(value: u8) void {
     uart_putc(hex_digit(value & 0xf));
 }
 
+/// Compact lowercase 4-digit hex (the vf probe line's needle style).
+fn hex16(value: u16) [4]u8 {
+    var out: [4]u8 = undefined;
+    out[0] = hex_digit(@intCast((value >> 12) & 0xf));
+    out[1] = hex_digit(@intCast((value >> 8) & 0xf));
+    out[2] = hex_digit(@intCast((value >> 4) & 0xf));
+    out[3] = hex_digit(@intCast(value & 0xf));
+    return out;
+}
+
 fn hex_digit(v: u8) u8 {
     return if (v < 10) '0' + v else 'a' + v - 10;
 }
@@ -1692,6 +1703,30 @@ fn custom_virtio_spike() void {
         }
     } else {
         uart_puts("cvspike: q3 absent\n");
+    }
+
+    // ---- M34 HF1 (issues #735/#736): the HOST FILE CHANNEL over queue 5.
+    // Only when the runner's --cvc-file attached the sixth queue; default
+    // boots keep one honest line. VF_PROBE proves the ONE unproven
+    // transport fact — a full 32 KiB device-WRITE reply (claim 0680
+    // proved 32 KiB device-reads; the claim-9492 echo is 12,340 bytes) —
+    // with two exchanges so chain reuse + the ring free count are proven
+    // at full scale (the claim-0680 leak class).
+    if (virtio_custom.has_file_queue) {
+        const pr = virtio_file.probe_spike();
+        uart_puts("vf: probe 32k ");
+        uart_puts(if (pr.ok) "ok" else "FAILED");
+        uart_puts(" len=0x");
+        uart_puts(hex16(virtio_file.probe_dlen)[0..]);
+        if (pr.ok) {
+            uart_puts(" cksum=0x");
+            uart_puts(hex16(pr.cksum)[0..]);
+        }
+        uart_puts(" free=");
+        uart_puts(hex16(pr.free)[0..]);
+        uart_puts("\n");
+    } else {
+        uart_puts("vf: queue 5 absent (no host file channel)\n");
     }
 
     // The used-ring advances are observed by poll (fast); the device IRQs

@@ -72,12 +72,54 @@ Device shape (queue count IS the capability signal, unchanged rule):
 | `--cvc-echo` | 3 | + 2 host-push echo |
 | `--via-virtio` | 4 | + **3 input** |
 | `--cvc-snap` | 5 | + **4 snapshot** (claim 0680) |
+| `--cvc-file <dir>` | 6 | + **5 host file channel** (M34, issues #735/#736) |
 
 Virtqueues are contiguous, so each deeper flag implies the full shape below
-it (`--cvc-snap` implies the four-queue world including push echo and
-input). The guest driver probes each optional queue's size through the
-common config: a non-zero read arms it; zero means absent and everything
-upstream stays byte-identical.
+it (`--cvc-file` implies the five-queue world including snapshot; the
+"deepest flag" rule). The guest driver probes each optional queue's size
+through the common config: a non-zero read arms it; zero means absent and
+everything upstream stays byte-identical.
+
+## Host file channel over the custom virtio device
+
+M34 HF1+HF2 (issues #735/#736): queue 5 is the HOST FILE CHANNEL — the
+guest userland filesystem becomes a macOS folder served by the runner with
+plain `FileManager` calls rooted at `--cvc-file <host-dir>`. Guest client
+`kernel/src/virtio_file.zig`; host wire module `Sources/VFWire/VFWire.swift`
+(pure Swift, zero Virtualization imports — `swift test` runs without a VM).
+The wire format is pinned byte-for-byte by the checked-in fixtures
+`tests/vf-*.bin` (sha256-pinned by `tools/verify-vf-class-a.sh`) and the
+host tests S1–S4 / guest tests G1–G6.
+
+Wire format (one request per element, polled like the exchange queue; the
+host holds ZERO state between requests — READ carries an explicit offset, so
+an untrusted guest cannot leak host fds):
+
+```
+request  [op u8][flags u8][len u16le][payload]      (len = payload length)
+reply    [status u8][dlen u16le][data]              (dlen = data length)
+```
+
+| Op | Payload | Reply data |
+|----|---------|-----------|
+| VF_PROBE `0x00` | (empty) | the RAW 32,768-byte pattern `pattern[i]=(i&0xff)^((i>>8)&0xff)` — **no frame** (transport-only; the op tells the guest what the reply means) |
+| LIST `0x01` | path (empty = root) | 40-byte rows `[name 31][type u8][size u64le]`, ≤128 rows, sorted by name |
+| READ `0x02` | `[path][u64le offset]` | ≤ 32,765 data bytes (the 3-byte frame leaves 32,765 of the 32 KiB reply cap) |
+| STAT `0x03` | path | `[size u64le][type u8]` |
+
+Status: `0` ok, `1` not found, `2` is a directory, `3` truncated (reply
+exceeded the guest's buffer), `4` host error (unknown op / bad request).
+
+VF_PROBE is HF1's acceptance case A — it proves the ONE unproven transport
+fact, a full **32,768-byte device-write reply** (claim 0680 proved 32 KiB
+device-reads; the claim-9492 echo was the largest device-write at 12,340
+bytes). The used ring must report the FULL writtenByteCount (32768); the
+guest regenerates and compares all 32,768 bytes. The XOR-symmetric pattern's
+RFC-1071 checksum folds to `0x0000` — genuine, and all three implementations
+(guest Zig, Swift, python) agree; the full byte compare is the real proof.
+Paths are ≤ 255 bytes, root-relative, `/`-separated; the host rejects
+absolute paths, `..`, and symlink escapes (`VFWire.resolveSubpath`).
+**[observed]** claims 4515
 
 Wire format — one message per receive buffer, written by the HOST into a
 buffer the GUEST pre-armed (the only host→guest data path the SDK exposes,

@@ -32,6 +32,7 @@ verify-portable:
     bash tools/verify-glyph-raster.sh
     bash tools/verify-mutations.sh
     bash tools/verify-bss-budget.sh
+    bash tools/verify-vf-class-a.sh
 
 # Run the Apple-silicon VZ hardware gates (class B): serial takeover
 # (zig build run, claim 1517), bad-handoff, marker, NVRAM console,
@@ -336,6 +337,20 @@ verify-live-procs-syscall:
 # Verify the live wait gate (class B — boots VZ VMs; STATUS43.BIN exits status 43 and COUNTER.BIN, blocked in sys_wait (slot 8) while the target was still running, wakes and reads the propagated status back from EL0; claim 9946; Apple silicon only)
 verify-live-wait:
     bash tools/verify-live-wait.sh
+    bash tools/verify-live-vf.sh
+
+# Verify the M34 host file channel wire parity (class A — pure host-side:
+# virtio_file G1–G6, VFWire S1–S4, fixture sha256 pins, BSS budget;
+# issues #735/#736, claim 4515)
+verify-vf-class-a:
+    bash tools/verify-vf-class-a.sh
+
+# Verify the M34 host file channel live on VZ (class B — boots VZ VMs with
+# --cvc-file <share>: the VF_PROBE 32 KiB device-write spike + vf ls / vf
+# cat streaming a >32 KiB fixture byte-exactly across >= 2 round trips;
+# issues #735/#736, claim 4515; Apple silicon only)
+verify-live-vf:
+    bash tools/verify-live-vf.sh
 
 # Verify the REAL virtio entropy -> CSPRNG seed -> random command path (class B — boots VZ VMs; asserts `entropy: seeded n=64`, `random 32` hex, a responsive shell, and DIFFERENT output across two boots; claim 2665)
 verify-live-entropy:
