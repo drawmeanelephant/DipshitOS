@@ -845,7 +845,7 @@ pub fn clipboard_get(buf: []u8) i64 {
 }
 
 /// The negotiated playback state `sys_audio_info` copies out (ADR 0007
-/// slot 42). 24 bytes, fixed layout.
+/// slot 42). 16 bytes, fixed layout.
 pub const AudioInfo = extern struct {
     ready: u32,
     format: u8, // negotiated FMT_* (0xff = none)
