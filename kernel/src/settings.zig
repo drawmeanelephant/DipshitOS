@@ -1,7 +1,8 @@
 //! VirelaiOS persistent settings engine (Milestone 8 Card U8, claim 2649).
 //!
 //! Provides in-memory key-value configuration backed by `SETTINGS.TXT` on
-//! the second FAT32 partition (`DATA` partition, Linux-FS type GUID).
+//! the HOST SHARE (M34 HF5/HF6, issues #739/#740): the queue-5 file
+//! channel is the persistence home — the DATA partition is gone.
 //!
 //! Keys supported:
 //!   - `hostname`: system host identifier (default: "virelai")
@@ -10,15 +11,13 @@
 //!   - `scrollback`: terminal scrollback buffer lines (default: "1000")
 //!
 //! Boot contract:
-//!   On kernel boot, after block-device arming, `settings.init_from_disk(ops)`
-//!   mounts the DATA partition, reads `SETTINGS.TXT` if present, parses
-//!   the key-values, and re-arms the ESP window so normal command operations
-//!   proceed from the ESP.
+//!   On kernel boot, after the file channel is armed, `init_from_share()`
+//!   reads `SETTINGS.TXT` from the share if present and parses the
+//!   key-values (defaults otherwise).
 //!
 //! Persistence:
-//!   `settings set <key> <value>` persists immediately to the DATA partition
-//!   by updating in-memory state, writing `SETTINGS.TXT`, and restoring the
-//!   active partition.
+//!   `settings set <key> <value>` persists immediately to the share by
+//!   updating in-memory state and writing `SETTINGS.TXT`.
 //!
 //! No libc, no POSIX, bounded BSS storage, no heap allocation.
 //!
@@ -41,8 +40,9 @@
 //!   color      string  "on"          "on"|"off", ANSI terminal colors in shell
 
 const std = @import("std");
-const fat = @import("fat.zig");
-const esp = @import("esp.zig");
+// M34 HF5 (issue #739): the host-share persistence path; HF6 (issue
+// #740) made it the ONLY path — the DATA partition is gone.
+const virtio_file = @import("virtio_file.zig");
 
 pub const filename = "SETTINGS.TXT";
 
@@ -348,23 +348,12 @@ pub fn serialize(out: []u8) usize {
     return pos;
 }
 
-/// Load configuration from `SETTINGS.TXT` on the DATA partition.
-/// Handles versioned (v1+) and legacy (no version header) files.
-pub fn load_from_disk(ops: ?fat.DiskOps) bool {
-    ensure_init();
-    if (ops == null) return false;
-
-    if (fat.mount_data(ops) != .ok) return false;
-    var file_buf: [2048]u8 = undefined;
-    const n = fat.read_file(filename, &file_buf);
-    if (n == null) {
-        _ = esp.set_disk(ops);
-        return false;
-    }
-
+/// Parse + apply a SETTINGS.TXT payload (versioned v1+ / legacy v0),
+/// shared by the DATA and host-share loaders. Returns false when a NEWER
+/// schema version is refused (honest degradation per issue #247).
+fn apply_bytes(bytes: []const u8) bool {
     var pos: usize = 0;
     var file_version: u32 = 0; // v0 = no header (legacy)
-    const bytes = file_buf[0..n.?];
 
     // Parse first line: check for version header
     if (bytes.len > 0) {
@@ -389,9 +378,7 @@ pub fn load_from_disk(ops: ?fat.DiskOps) bool {
 
     // Handle version-specific loading
     if (file_version > current_version) {
-        // Newer version than we support — refuse, use compiled defaults
-        // (honest degradation per issue #247)
-        _ = esp.set_disk(ops);
+        // Newer version than we support — refuse, use compiled defaults.
         return false;
     }
 
@@ -410,9 +397,17 @@ pub fn load_from_disk(ops: ?fat.DiskOps) bool {
     if (file_version < current_version) {
         migrate(file_version);
     }
-
-    _ = esp.set_disk(ops);
     return true;
+}
+
+/// M34 HF5 (issue #739): load settings from the HOST SHARE when the file
+/// channel is armed. No-op without a channel (defaults stay in force).
+pub fn load_from_share() bool {
+    ensure_init();
+    if (!virtio_file.available()) return false;
+    var file_buf: [2048]u8 = undefined;
+    const n = virtio_file.read_whole(filename, &file_buf) orelse return false;
+    return apply_bytes(file_buf[0..n]);
 }
 
 /// Migrate from one version to the current version.
@@ -428,33 +423,23 @@ fn migrate(from_version: u32) void {
     // Future: if (from_version < 2) { migrate_v1_to_v2(); }
 }
 
-/// Persist current in-memory configuration to `SETTINGS.TXT` on DATA partition.
-pub fn save_to_disk(ops: ?fat.DiskOps) bool {
+/// Persist current in-memory configuration to `SETTINGS.TXT` on the HOST
+/// SHARE (write_whole = open/create + truncate + write + close,
+/// host-verified on disk by the gate). HF6 (issue #740): the DATA
+/// fallback is gone — without a channel the save is an honest no-op.
+pub fn save_to_share() bool {
     ensure_init();
-    if (ops == null) return false;
-
-    const is_data_active = std.mem.eql(u8, esp.volume(), "data");
-
-    if (fat.mount_data(ops) != .ok) return false;
+    if (!virtio_file.available()) return false;
     var buf: [2048]u8 = undefined;
     const len = serialize(&buf);
-    const wr = fat.write_file(filename, buf[0..len]);
-
-    if (is_data_active) {
-        _ = fat.mount_data(ops);
-        esp.resnapshot();
-    } else {
-        _ = esp.set_disk(ops);
-    }
-    return wr == .ok;
+    return virtio_file.write_whole(filename, buf[0..len]) == virtio_file.st_ok;
 }
 
-/// Initializer called during kernel boot: resets defaults then attempts disk load.
-pub fn init_from_disk(ops: ?fat.DiskOps) void {
+/// Initializer called during kernel boot: resets defaults then attempts
+/// the share load (no-op without a channel).
+pub fn init_from_share() void {
     init();
-    if (ops != null) {
-        _ = load_from_disk(ops);
-    }
+    _ = load_from_share();
 }
 
 // ---------------------------------------------------------------------------

@@ -256,13 +256,42 @@ var inputStringAfter: String?
 // right/home/end/delete/tab, or ctrl-a..ctrl-z) — keyDown + keyUp per chord
 // after `--input-chords-after <marker>` (default: the boot self-test line),
 // so arrows and Ctrl chords reach the I3 keymap over a real VZ keyboard.
+//
+// DELIVERY TRANSPORT (read this before writing a gate): the chord sequence
+// rides the custom-virtio INPUT queue whenever via-virtio is on — implied by
+// --via-virtio, --cvc-file, --cvc-snap, --snapshot-after, and --pointer-virtio
+// (the deepest flag implies the shape below it). The cv-input transport needs
+// no view/window (headless-safe) but paces at a FIXED 0.25 s per stroke and
+// IGNORES --input-chords-delay. The VZVirtualMachineView path (default when
+// via-virtio is off) honors --input-chords-delay, so gates that need slow,
+// deterministic spacing for cross-process handoffs (launch-then-focus arcs
+// like the desktop → FILE.BIN composition) must pass --chords-view to force
+// the view path even when --cvc-file (etc.) armed the cv queue. Without it,
+// a 0.5 s gap between two Returns is not enough for a freshly exec'd app to
+// take focus (observed live 2026-09-01: the second Return re-launched
+// FILE.BIN from the desktop menu).
 var inputChords: String?
 var inputChordsAfter: String?
 // Milestone-eight audit follow-up (issue #117): the keyDown/keyUp spacing
 // for --input-chords. Default 3.0 s keeps every existing gate byte-identical;
 // the input-depth gate lowers it to ~0.3 s to stress the guest's
 // multi-TRB interrupt-IN depth. Only meaningful with --input-chords.
+// NOTE: only the VZ-view path honors this; the cv-input transport (via-virtio
+// armed) paces at a fixed 0.25 s per stroke regardless (see the delivery-
+// transport note in the --input-chords doc above).
 var inputChordsDelay: Double = 3.0
+// M34 HF5 (issue #739): force --input-chords through the VZVirtualMachineView
+// (NSEvents, honors --input-chords-delay) even when the custom-virtio INPUT
+// queue is attached. See the delivery-transport note in the --input-chords
+// doc above — the trigger is any flag that arms via-virtio (most commonly
+// --cvc-file), which switches chords to the cv-input transport paced at
+// 0.25 s per stroke and ignoring --input-chords-delay. That is too fast for
+// a launch-then-focus handoff (observed live: the desktop composition gate's
+// second Return hit the desktop before FILE.BIN's window took focus). The
+// view path restores the slow, deterministic pacing for display-equipped
+// gates. Requires --display (there is no view to post NSEvents into
+// otherwise). Only affects --input-chords, not --input-string.
+var chordsViaView = false
 // Milestone eight cards U4/U5 (claims 4993/0935): the pointer-synthesis
 // seam — "--pointer <x>,<y>[,c][;x2,y2[,c]...]" synthesizes one
 // NSEvent.mouseEvent per step (mouseMoved; + mouseDown/Up when the click
@@ -558,6 +587,10 @@ while idx < arguments.count {
         }
         inputChordsDelay = d
         idx += 2
+    } else if arg == "--chords-view" {
+        // M34 HF5 (issue #739): see the chordsViaView declaration above.
+        chordsViaView = true
+        idx += 1
     } else if arg == "--pointer", idx + 1 < arguments.count {
         pointerScript = arguments[idx + 1]
         idx += 2
@@ -1462,8 +1495,10 @@ if let s = inputString {
     }
 }
 if let s = inputChords {
-    if viaVirtioEnabled {
-        print("  input-chords: ENABLED (milestone eight card U2, claim 1809) — typing \(s.debugDescription) over the custom-virtio INPUT queue (claim 9588; HID-shaped messages, no view) after \"\(inputChordsAfter ?? "userspace: el0=1")\"")
+    if viaVirtioEnabled && !chordsViaView {
+        print("  input-chords: ENABLED (milestone eight card U2, claim 1809) — typing \(s.debugDescription) over the custom-virtio INPUT queue (claim 9588; HID-shaped messages, no view, 0.25 s/stroke fixed pacing) after \"\(inputChordsAfter ?? "userspace: el0=1")\"")
+    } else if chordsViaView {
+        print("  input-chords: ENABLED (milestone eight card U2, claim 1809) — typing \(s.debugDescription) into the VZVirtualMachineView (--chords-view forces the view path despite the armed custom-virtio INPUT queue; \(inputChordsDelay) s per keystroke) after \"\(inputChordsAfter ?? "userspace: el0=1")\"")
     } else {
         print("  input-chords: ENABLED (milestone eight card U2, claim 1809) — typing \(s.debugDescription) into the view after \"\(inputChordsAfter ?? "userspace: el0=1")\" (keyDown + keyUp per chord: printable chars, return/up/down/left/right/home/end/delete/tab, ctrl-a..ctrl-z, ctrl-shift-a..ctrl-shift-z; \(inputChordsDelay) s per keystroke)")
     }
@@ -2410,10 +2445,11 @@ func startChordInject() {
             if let log = try? String(contentsOf: serialURL, encoding: .utf8), log.contains(marker) {
                 Thread.sleep(forTimeInterval: 1.0) // let the armed ring settle
                 #if SPIKE
-                if viaVirtioEnabled {
+                if viaVirtioEnabled && !chordsViaView {
                     // Claim 9588: chords ride the custom-virtio INPUT queue —
                     // keyDown + keyUp per token as HID reports, no view, no
-                    // window, headless-safe.
+                    // window, headless-safe. (--chords-view forces the view
+                    // path below even when this queue is attached.)
                     guard #available(macOS 27.0, *) else {
                         fail("--via-virtio requires macOS 27 (VZCustomVirtioDevice).")
                     }

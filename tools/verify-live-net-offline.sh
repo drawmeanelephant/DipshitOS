@@ -48,7 +48,7 @@ echo "revision: $REVISION branch=$BRANCH dirty-files=$DIRTY"
 PATH=/opt/homebrew/bin:/bin:/usr/bin zig fmt --check boot/src/*.zig kernel/src/*.zig user/src/*.zig build.zig
 PATH=/opt/homebrew/bin:/bin:/usr/bin zig build
 PATH=/opt/homebrew/bin:/bin:/usr/bin zig build image
-swift build --package-path host/vm-runner --configuration release
+swift build --package-path host/vm-runner --configuration release -Xswiftc -DSPIKE
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
 RUNNER=host/vm-runner/.build/release/VMRunner
@@ -69,6 +69,7 @@ check() { # check <name> <actual> <want>
 # Run A — offline boot (no --net): both apps exit fast with the diagnosis
 # =============================================================================
 gate_begin live-net-offline-a
+gate_seed_share
 echo "--- run A: offline boot (no net device) ---"
 
 cat > "$RUN_DIR/script-1.txt" <<'SCRIPT1'

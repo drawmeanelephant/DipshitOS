@@ -729,29 +729,6 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_file.step);
 
     // ------------------------------------------------------------------
-    // Guest: twenty-second ESP user program (milestone thirteen, card B1 — claim 5801)
-    // FSTEST.BIN. Headless mutating-filesystem proof (delete/rename/truncate/free).
-    // ------------------------------------------------------------------
-    const fstest_prog = b.addExecutable(.{
-        .name = "user-fstest",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("user/src/fstest.zig"),
-            .target = kernel_target,
-            .optimize = .ReleaseSmall,
-        }),
-    });
-    fstest_prog.linker_script = b.path("user/linker.ld");
-    const fstest_step = b.step("fstest", "Build the twenty-second ESP user program (zig-out/bin/FSTEST.BIN)");
-    const fstest_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
-    fstest_elf2bin.addFileArg(fstest_prog.getEmittedBin());
-    const fstest_bin = fstest_elf2bin.addOutputFileArg("FSTEST.BIN");
-    fstest_elf2bin.has_side_effects = true;
-    fstest_elf2bin.stdio = .inherit;
-    fstest_step.dependOn(&fstest_elf2bin.step);
-    const install_fstest = b.addInstallFileWithDir(fstest_bin, .bin, "FSTEST.BIN");
-    b.getInstallStep().dependOn(&install_fstest.step);
-
-    // ------------------------------------------------------------------
     // Guest: twenty-third ESP user program (milestone fourteen, card S2 — claim 7323)
     // TIMER.BIN. Headless per-process app-timer proof (arm/wait/fire/cancel).
     // ------------------------------------------------------------------
@@ -1762,66 +1739,11 @@ pub fn build(b: *std.Build) void {
     image.addFileArg(efi.getEmittedBin());
     image.addArg("artifacts/disk.img");
     image.addFileArg(kernel_bin); // make-image.sh: [EFI_BIN] [IMAGE] [KERNEL_BIN]
-    image.addFileArg(user_bin); // ... [USER_BIN] (claim 6783: ESP user program)
-    image.addFileArg(counter_bin); // ... [COUNTER_BIN] (claim 4613: second, never-exiting user program)
-    image.addFileArg(peer_bin); // ... [PEER.BIN] (claim 5965: third user program, the IPC peer)
-    image.addFileArg(status43_bin); // ... [STATUS43.BIN] (claim 9946: fourth user program, the wait gate's short target)
-    image.addFileArg(udp_bin); // ... [UDP.BIN] (claim 1384: fifth user program, the UDP-syscall proof)
-    image.addFileArg(win_bin); // ... [WIN.BIN] (claim 0487: sixth user program, the draw/window-syscall proof)
-    image.addFileArg(winclose_bin); // ... [WINCLOSE.BIN] (claim 0487 follow-on: seventh user program, the draw/window-syscall RELEASE proof)
-    image.addFileArg(winloop_bin); // ... [WINLOOP.BIN] (claim 0487 follow-on: eighth user program, the PERSISTENT window proof)
-    image.addFileArg(winmove_bin); // ... [WINMOVE.BIN] (claim 0487 follow-on: ninth user program, the MOVE/RESTACK proof)
-    image.addFileArg(keytest_bin); // ... [KEYTEST.BIN] (claim 9328: tenth user program, interactive event app)
-    image.addFileArg(savetext_bin); // ... [SAVETEXT.BIN] (claim 0510: eleventh user program, write to /data)
-    image.addFileArg(type_bin); // ... [TYPE.BIN] (claim 0510: twelfth user program, read from /data)
-    image.addFileArg(dir_bin); // ... [DIR.BIN] (claim 0510: thirteenth user program, directory listing)
-    image.addFileArg(calc_bin); // ... [CALC.BIN] (claim 8401: fourteenth user program, GUI calculator)
-    image.addFileArg(notepad_bin); // ... [NOTEPAD.BIN] (claim 3234: fifteenth user program, GUI text editor)
-    image.addFileArg(top_bin); // ... [TOP.BIN] (claim 0680: sixteenth user program, GUI task manager)
-    image.addFileArg(desktop_bin); // ... [DESKTOP.BIN] (claim 2427: seventeenth user program, GUI desktop launcher)
-    image.addFileArg(tcp_bin); // ... [TCP.BIN] (claim 7483: eighteenth user program, TCP client)
-    image.addFileArg(fetch_bin); // ... [FETCH.BIN] (claim 5416: nineteenth user program, HTTP client)
-    image.addFileArg(chat_bin); // ... [CHAT.BIN] (claim 5416: twentieth user program, graphical P2P chat)
-    image.addFileArg(file_bin); // ... [FILE.BIN] (claim 4742: twenty-first user program, GUI file browser)
-    image.addFileArg(fstest_bin); // ... [FSTEST.BIN] (claim 5801: twenty-second user program, mutating-fs proof)
-    image.addFileArg(timertest_bin); // ... [TIMER.BIN] (claim 7323: twenty-third user program, app-timer proof)
-    image.addFileArg(victim_bin); // ... [VICTIM.BIN] (claim 4482: twenty-fourth user program, hostile-proof victim)
-    image.addFileArg(harden_bin); // ... [HARDEN.BIN] (claim 4482: twenty-fifth user program, hostile-consumer proof)
-    image.addFileArg(jingle_bin); // ... [JINGLE.BIN] (claim 7636: twenty-sixth user program, EL0 audio-seam proof)
-    image.addFileArg(chime_bin); // ... [CHIME.BIN] (claim 3206: twenty-seventh user program, composition capstone proof)
-    image.addFileArg(globals_bin); // ... [GLOBALS.BIN] (claim 3805: twenty-eighth user program, the first SEGMENTED DSK3 image)
-    image.addFileArg(guard_bin); // ... [GUARD.BIN] (claim 8403: twenty-ninth user program, the hostile guard-page proof)
-    image.addFileArg(spin_bin); // ... [SPIN.BIN] (Arc5 #246: hostile-consumer CPU limit test)
-    image.addFileArg(settings_bin); // ... [SETTINGS.BIN] (Issue #214: thirtieth user program, GUI settings panel)
-    image.addFileArg(asm_bin); // ... [ASM.BIN] (M22 D2, issue #325: thirty-first user program, the assembler)
-    image.addFileArg(disas_bin); // ... [DISAS.BIN] (M22 D4, issue #327: thirty-second user program, the disassembler)
-    image.addFileArg(ps_bin); // ... [PS.BIN] (M22 D6, issue #329: thirty-third user program, the process viewer)
-    image.addFileArg(edit_bin); // ... [EDIT.BIN] (M23 E1+E6, issue #507: thirty-fourth user program, the text editor with console split)
-    image.addFileArg(resmon_bin); // ... [RESMON.BIN] (M22 D10, issue #333: thirty-fifth user program, resource monitor)
-    image.addFileArg(devcons_bin); // ... [DEVCONS.BIN] (M22 D14, issue #337: thirty-sixth user program, developer console)
-    image.addFileArg(netstat_bin); // ... [NETSTAT.BIN] (M26 N2, issue #400: thirty-seventh user program, the network dashboard)
-    image.addFileArg(m21demo_bin); // ... [M21DEMO.BIN] (claim 8777: thirty-eighth user program, the M21 W1/W2 tiling gate payload)
-    image.addFileArg(ping_bin); // ... [PING.BIN] (M26 N1, issue #399: thirty-ninth user program, ICMP ping CLI)
-    image.addFileArg(dns_bin); // ... [DNS.BIN] (M26 N5, issue #403: fortieth user program, RFC 1035 DNS query tool)
-    image.addFileArg(download_bin); // ... [DOWNLOAD.BIN] (M26 N11, issue #438: forty-first user program, HTTP download manager)
-    image.addFileArg(traceroute_bin); // ... [TRACEROUTE.BIN] (M26 N7, issue #434: forty-second user program, ICMP route traceroute)
-    image.addFileArg(netprof_bin); // ... [NETPROF.BIN] (M26 N12, issue #439: forty-third user program, network profile manager)
-    image.addFileArg(sysmon_bin); // ... [SYSMON.BIN] (M27 G6, issue #449: forty-fourth user program, system monitor dashboard)
-    image.addFileArg(httpd_bin); // ... [HTTPD.BIN] (Claim 0750: forty-fifth user program, HTTP web server)
-    image.addFileArg(vmtest_bin); // ... [VMTEST.BIN] (Milestone 29: forty-sixth user program, VM depth test)
-    image.addFileArg(wndstub_bin); // ... [WNDSTUB.BIN] (M32 WMS2, issue #622: forty-seventh user program, the WM-server registrant stub)
-    image.addFileArg(wnd_bin); // ... [WND.BIN] (M32 WMS3, issue #623: forty-eighth user program, the long-lived EL0 WM server)
-    image.addFileArg(sb2_wm_bin); // ... [SB2WM.BIN] (M33 SB2, claim 8878: fiftieth user program, the shared-anon WM half)
-    image.addFileArg(sb2_own_bin); // ... [SB2OWN.BIN] (M33 SB2, claim 8878: fifty-first user program, the shared-anon owner half)
-    image.addFileArg(zc_bin); // ... [ZC.BIN] (M32, issue #620: fifty-second user program, the Zig subset compiler)
-    image.addFileArg(sb3_wm_bin); // ... [SB3WM.BIN] (M33 SB3, claim 3633: fifty-third user program, the surface-handoff WM half)
-    image.addFileArg(sb3_own_bin); // ... [SB3OWN.BIN] (M33 SB3, claim 3633: fifty-fourth user program, the surface-handoff owner half)
-    image.addFileArg(sb4dam_bin); // ... [SB4DAM.BIN] (M33 SB4, claim 2382: fifty-fifth user program, the rect-granular damage proof)
-    image.addFileArg(sb5_wm_bin); // ... [SB5WM.BIN] (M33 SB5, claim 7397: fifty-sixth user program, the WM compose-N half)
-    image.addFileArg(sb5_own_bin); // ... [SB5OWN.BIN] (M33 SB5, claim 7397: fifty-seventh user program, the compose-N owner half)
-    image.addFileArg(sb6_wm_bin); // ... [SB6WM.BIN] (M33 SB6, claim 6864: fifty-eighth user program, the perf-payoff WM half)
-    image.addFileArg(sb6_old_bin); // ... [SB6OLD.BIN] (M33 SB6, claim 6864: fifty-ninth user program, the perf-payoff pre-seam-B control)
-    image.addFileArg(sb6_new_bin); // ... [SB6NEW.BIN] (M33 SB6, claim 6864: sixtieth user program, the perf-payoff seam-B half)
+    // M34 HF6 (issue #740): the image is a BOOT VOLUME ONLY — EFI +
+    // KERNEL.BIN, no embedded apps (they live in the host share; see the
+    // gate_seed_share helper in tools/lib/gate-run.sh). The user programs
+    // above still BUILD into zig-out/bin for the share bundle; they are
+    // simply not embedded anymore.
     image.has_side_effects = true;
     image.stdio = .inherit;
     image_step.dependOn(&image.step);
@@ -1838,16 +1760,7 @@ pub fn build(b: *std.Build) void {
     const failure_image = b.addSystemCommand(&.{ "bash", "image/make-image.sh" });
     failure_image.addFileArg(efi.getEmittedBin());
     failure_image.addArg("artifacts/bad-handoff.img");
-    failure_image.addFileArg(kernel_bin);
-    failure_image.addFileArg(user_bin); // USER.BIN rides the same image builder
-    failure_image.addFileArg(counter_bin); // COUNTER.BIN too (claim 4613)
-    failure_image.addFileArg(peer_bin); // PEER.BIN too (claim 5965)
-    failure_image.addFileArg(status43_bin); // STATUS43.BIN too (claim 9946)
-    failure_image.addFileArg(udp_bin); // UDP.BIN too (claim 1384)
-    failure_image.addFileArg(win_bin); // WIN.BIN too (claim 0487)
-    failure_image.addFileArg(winclose_bin); // WINCLOSE.BIN too (claim 0487 follow-on)
-    failure_image.addFileArg(winloop_bin); // WINLOOP.BIN too (claim 0487 follow-on)
-    failure_image.addFileArg(winmove_bin); // WINMOVE.BIN too (claim 0487 follow-on)
+    failure_image.addFileArg(kernel_bin); // HF6: same two-file boot volume
     failure_image.has_side_effects = true;
     failure_image.stdio = .inherit;
     failure_step.dependOn(&failure_image.step);

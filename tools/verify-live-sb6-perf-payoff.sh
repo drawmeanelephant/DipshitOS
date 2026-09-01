@@ -74,6 +74,7 @@ swift build --package-path host/vm-runner --configuration release -Xswiftc -DSPI
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
 gate_begin live-sb6-perf-payoff
+gate_seed_share
 echo "run dir: $RUN_DIR"
 SER_LOG="$(art live-sb6-perf-payoff-serial.log)"
 RUN_LOG="$(art live-sb6-perf-payoff-run.txt)"

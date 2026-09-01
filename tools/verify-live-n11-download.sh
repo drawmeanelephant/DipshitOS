@@ -3,7 +3,11 @@
 # verify-live-n11-download.sh -- M26 N11 (issue #438, claim 0640) class-B gate:
 # HTTP download manager DOWNLOAD.BIN running at EL0 on real VZ hardware,
 # connecting over TCP to host HTTP server, sending HTTP GET, streaming response body
-# to a FAT32 file via userland file syscalls, and verifying file contents on disk.
+# to a file via userland file syscalls, and verifying file contents on disk.
+#
+# M34 HF5 (issue #739): the destination is the HOST SHARE (`/host/DOWNLOAD.OUT`
+# — the --cvc-file folder), and the gate verifies the file ON THE HOST DISK
+# after the guest writes it (the FAT DATA volume is deprecated).
 #
 # Class B — Apple silicon + VZ only; boots real VMs.
 
@@ -36,12 +40,21 @@ echo "revision: $REVISION branch=$BRANCH dirty-files=$DIRTY"
 PATH=/opt/homebrew/bin:/bin:/usr/bin zig fmt --check boot/src/*.zig kernel/src/*.zig user/src/*.zig build.zig
 PATH=/opt/homebrew/bin:/bin:/usr/bin zig build
 PATH=/opt/homebrew/bin:/bin:/usr/bin zig build image
-swift build --package-path host/vm-runner --configuration release
+# M34 HF5 (issue #739): the gate attaches the --cvc-file share, which
+# requires the SPIKE runner build (the custom-virtio FILE channel).
+swift build --package-path host/vm-runner --configuration release -Xswiftc -DSPIKE
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
 # --- per-run isolation -------------------------------------------------------
 gate_begin live-n11-download
+gate_seed_share
 echo "run dir: $RUN_DIR"
+
+# M34 HF5 (issue #739): DOWNLOAD.BIN's default destination is now
+# /host/DOWNLOAD.OUT — arm the SAME share the guest writes into, then
+# verify the bytes on the macOS filesystem after the run.
+SHARE="$RUN_DIR/share"
+mkdir -p "$SHARE"
 
 # --- scripted keystrokes -----------------------------------------------------
 cat > "$RUN_DIR/script-1.txt" <<'EOF'
@@ -104,6 +117,23 @@ echo "  d_done: $D_DONE"
 echo "  d_reaped: $D_REAPED"
 echo "  ok: $OK"
 
+# M34 HF5 (issue #739): the file must exist ON THE HOST DISK with the
+# exact HTTP body the runner served ("Hello from VirelaiOS Host!\n").
+# The serial-only proof would pass if the guest claimed success without
+# persisting; this is the host-side ground truth.
+HOST_OK=0
+if [ -f "$SHARE/DOWNLOAD.OUT" ]; then
+    EXPECT="Hello from VirelaiOS Host!";
+    if grep -aqF "$EXPECT" "$SHARE/DOWNLOAD.OUT"; then
+        HOST_OK=1
+        echo "HF5-DISK: DOWNLOAD.OUT on the host share carries the HTTP body"
+    else
+        echo "HF5-DISK: FAIL — DOWNLOAD.OUT content mismatch on the host share"
+    fi
+else
+    echo "HF5-DISK: FAIL — DOWNLOAD.OUT missing from the host share"
+fi
+
 # --- report -----------------------------------------------------------------
 cat > "$REPORT" <<EOF
 === M26 N11 (DOWNLOAD.BIN HTTP download manager) class-B live-VZ gate report ===
@@ -123,11 +153,12 @@ assertions:
   d_done: $D_DONE (expected 1)
   d_reaped: $D_REAPED (expected 1)
   ok: $OK (expected 1)
+  hf5_host_disk: $HOST_OK (expected 1)
 EOF
 
 if [ "$IPSET" -eq 1 ] && [ "$D_START" -eq 1 ] && [ "$D_CONN" -eq 1 ] && \
    [ "$D_REQ" -eq 1 ] && [ "$D_OPEN" -eq 1 ] && [ "$D_STATUS" -eq 1 ] && \
-   [ "$D_SAVE" -eq 1 ] && [ "$D_DONE" -eq 1 ] && [ "$D_REAPED" -eq 1 ] && [ "$OK" -eq 1 ]; then
+   [ "$D_SAVE" -eq 1 ] && [ "$D_DONE" -eq 1 ] && [ "$D_REAPED" -eq 1 ] && [ "$OK" -eq 1 ] && [ "$HOST_OK" -eq 1 ]; then
     echo "=== verify-live-n11-download: PASS ==="
     exit 0
 else

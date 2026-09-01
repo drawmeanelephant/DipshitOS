@@ -40,6 +40,11 @@
 #   count (the ESP one has 19) — proving the desktop's manifest re-point
 #   to `/host/APPS.TXT`.
 #
+#   Phase 5 (HF5 — issue #739) was the ONE-TIME user-data migration; M34
+#   HF6 (issue #740) DELETED it (migrate.zig is gone — the share is the
+#   only store, nothing left to migrate), so this gate runs four phases:
+#   mutate / readback / delete / app.
+#
 # Every boot repeats phases 1+2, so a 4-boot run covers everything.
 #
 # Run isolation per claim 5069 (tools/lib/gate-run.sh): the share dir
@@ -68,7 +73,7 @@ HF4_MARKER="hf4: hello from host"
 HF4_EXIT="tasks user-exec exited status=43"
 HF4_MANIFEST_LINE="desktop: manifest apps=2"
 
-echo "=== verify-live-vf: M34 HF1+HF2+HF3+HF4 (issues #735/#736/#737/#738) — host file channel on VZ, $BOOTS boot(s) ==="
+echo "=== verify-live-vf: M34 HF1+HF2+HF3+HF4 (issues #735/#736/#737/#738) — host file channel on VZ, $BOOTS boot(s); HF6 deleted the HF5 migration phase ==="
 zig version
 swift --version 2>&1 | head -1
 sw_vers
@@ -161,6 +166,11 @@ APP_SIZE="$(wc -c < "$SHARE/$HF4_APP" | tr -d ' ')"
 echo "HF4: built $HF4_APP on the host after image bake — $APP_SIZE bytes, dropped into the share (no image rebuild)"
 printf '%s | Host Hello | h\nCALC.BIN | 64-bit Calc | c\n' "$HF4_APP" > "$SHARE/APPS.TXT"
 echo "HF4: host APPS.TXT ($(wc -l < "$SHARE/APPS.TXT" | tr -d ' ') entries) — desktop must report apps=2, not the ESP's 19"
+# M34 HF6 (issue #740): DESKTOP.BIN is NOT baked into the image anymore —
+# it execs from the share like every app. Drop the built binary in (the
+# 2-entry APPS.TXT above stays the manifest it must read).
+cp zig-out/bin/DESKTOP.BIN "$SHARE/"
+echo "HF4: DESKTOP.BIN dropped into the share (HF6: apps live on the share, not the ESP)"
 
 # Host-disk verification (HF3): the mutation round-trip MUST land the exact
 # guest pattern stream on the host's own filesystem.
@@ -343,7 +353,11 @@ run_one() {
             # fields past the size= prefix — the other needles are full
             # lines, this one is a prefix).
             [ "$(grep -aFc -- "exec: loaded $HF4_APP size=" "$SER" || true)" -ge 1 ] || phase_needs=0
-            [ "$(grep -aFxc -- "$HF4_MARKER" "$SER" || true)" = 1 ] || phase_needs=0
+            # The app marker is a substring match, not a whole line: the
+            # console idle-seam partial flush can splice the marker's
+            # trailing newline (the marker text itself stays intact) —
+            # observed live on the app boot, same class as the a/v gate.
+            [ "$(grep -aFc -- "$HF4_MARKER" "$SER" || true)" -ge 1 ] || phase_needs=0
             [ "$(grep -aFxc -- "$HF4_EXIT" "$SER" || true)" = 1 ] || phase_needs=0
             [ "$(grep -aFxc -- "$HF4_MANIFEST_LINE" "$SER" || true)" = 1 ] || phase_needs=0
             [ "$(grep -aFxc -- "rx-hf4-app" "$SER" || true)" = 1 ] || phase_needs=0
@@ -355,7 +369,6 @@ run_one() {
     if verify_hf3_disk "$phase"; then
         hf3_disk=1
     fi
-
     echo "$tag(phase=$phase): runner-rc=$rc serial-bytes=$bytes banner=$banner probe=$probe listed=$listed statline=$statline catok=$catok catcksum=$catcksum rts=$rts sub=$sub hello=$hello runner-write=$runner_write phase=$phase_needs hf3-disk=$hf3_disk fatal=$fatal" | tee -a "$REPORT"
     [ "$rc" = 0 ] && [ "$banner" = 1 ] && [ "$probe" = 1 ] && [ "$listed" = 1 ] && \
         [ "$statline" = 1 ] && [ "$catok" = 1 ] && [ "$catcksum" = 1 ] && [ "$rts" -ge 2 ] && \

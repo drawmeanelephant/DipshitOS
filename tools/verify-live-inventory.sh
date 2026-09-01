@@ -49,11 +49,14 @@ echo "revision: $REVISION branch=$BRANCH boots=$BOOTS dirty-files=$DIRTY"
 zig fmt --check boot/src/*.zig kernel/src/*.zig user/src/*.zig build.zig
 zig build
 zig build image
-swift build --package-path host/vm-runner --configuration release
+# M34 HF6 (issue #740): `which`/`inventory` read the host share (APPS.TXT
+# + file sizes) — seed the bundle + SPIKE build for --cvc-file.
+swift build --package-path host/vm-runner --configuration release -Xswiftc -DSPIKE
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
 # --- per-run isolation ------------------------------------------------------
 gate_begin live-inventory
+gate_seed_share
 echo "run dir: $RUN_DIR"
 SCRIPT="$RUN_DIR/script.txt"
 
@@ -87,7 +90,7 @@ run_one() {
         grep -qF -- "VirelaiOS kernel has seized control." "$SER" && BANNER=1
         grep -qF -- "type: shell builtin" "$SER" && BUILTIN=1
         grep -qF -- "stat: monitor command" "$SER" && MONITOR=1
-        grep -qF -- "NOTEPAD.BIN: ESP application" "$SER" && APP=1
+        grep -qF -- "NOTEPAD.BIN: host-share application" "$SER" && APP=1
         grep -qF -- "nope.bin: not found" "$SER" && NOTFOUND=1
         grep -qE -- "^inventory: [0-9]+ application\(s\):$" "$SER" && INV_HEADER=1
         grep -A40 -- "application(s):" "$SER" | grep -qF -- "NOTEPAD.BIN" && INV_APP=1

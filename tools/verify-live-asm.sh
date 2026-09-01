@@ -5,11 +5,11 @@
 #
 # The chain, all asserted in vm-serial.log:
 #   1. `write PROG.S ...` stages a one-line (';'-separated) AArch64 source
-#      program on the ESP through the monitor's write command.
-#   2. `exec ASM.BIN /esp/PROG.S /esp/PROG.ELF` — ASM.BIN reads the source
+#      program on the host share through the monitor's write command.
+#   2. `exec ASM.BIN /host/PROG.S /host/PROG.ELF` — ASM.BIN reads the source
 #      through the M10 file seam (slots 23/24), assembles it two-pass, and
 #      writes a minimal AArch64 ELF32 executable back out (slot 25). The
-#      reply "asm: wrote N bytes to /esp/PROG.ELF" proves the assembly.
+#      reply "asm: wrote N bytes to /host/PROG.ELF" proves the assembly.
 #   3. `exec PROG.ELF` — the M22 D1 loader sniffs the ELF magic ASM.BIN
 #      just wrote, maps it at the EL0 text aperture, and runs it: the
 #      program's sys_write marker ("ASM HELLO") lands in the serial log
@@ -58,7 +58,7 @@ STATIC_EXIT_LINE="tasks user-el0 exited status=7"
 # claim-time 96 bytes to 84 and `exec PROG.ELF` failed with bad_entry.
 # The SRC is now single-quoted (the tokenizer's fully-literal quotes) so
 # the `;` separators reach ASM.BIN and the 96-byte needle holds again.
-ASM_WROTE_LINE="asm: wrote 96 bytes to /esp/PROG.ELF"
+ASM_WROTE_LINE="asm: wrote 96 bytes to /host/PROG.ELF"
 EXIT_LINE="tasks user-exec exited status=71"
 REAP_LINE="tasks user-exec reaped"
 SCRIPT2="artifacts/live-asm-script2.txt"
@@ -75,22 +75,24 @@ echo "revision: $REVISION branch=$BRANCH boots=$BOOTS dirty-files=$DIRTY"
 zig fmt --check boot/src/*.zig kernel/src/*.zig user/src/*.zig build.zig
 zig build
 zig build image
-swift build --package-path host/vm-runner --configuration release
+swift build --package-path host/vm-runner --configuration release -Xswiftc -DSPIKE
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
 # --- per-run isolation -------------------------------------------------------------
 # Private scratch dir + pristine-boot overlay for EVERY boot.
 # See tools/lib/gate-run.sh.
 gate_begin live-asm
+gate_seed_share
 echo "run dir: $RUN_DIR"
 SCRIPT="$RUN_DIR/script.txt"
 
 
 SRC="'_start:;mov x8, 3;mov x0, 71;svc 0'"
-# `mount esp` re-snapshots the ESP window so the freshly written ELF is
-# visible to exec's volume lookup (userland writes bypass the window).
-printf 'ls\nwrite PROG.S %s\nexec ASM.BIN /esp/PROG.S /esp/PROG.ELF\n' "$SRC" > "$SCRIPT"
-printf 'mount esp\nls\nexec PROG.ELF\necho rx-asm-ok\n' > "$SCRIPT2"
+# M34 HF6 (issue #740): the ESP is gone — write stages PROG.S on the host
+# share and ASM.BIN reads/writes /host paths (a bare name also routes to
+# the share; /host is explicit). `ls`/`exec PROG.ELF` then see the share.
+printf 'ls\nwrite PROG.S %s\nexec ASM.BIN /host/PROG.S /host/PROG.ELF\n' "$SRC" > "$SCRIPT"
+printf 'ls\nexec PROG.ELF\necho rx-asm-ok\n' > "$SCRIPT2"
 
 run_one() {
     local tag="$1"
@@ -115,7 +117,7 @@ run_one() {
         [ "$(grep -aFxc -- "VirelaiOS kernel has seized control." "$SER" || true)" = 1 ] && banner=1
         [ "$(grep -aFc -- "PROG.S" "$SER" || true)" -ge 2 ] && listed=1
         [ "$(grep -aFc -- "write: ok" "$SER" || true)" = 1 ] && written=1
-        [ "$(grep -aFc -- "asm: wrote 96 bytes to /esp/PROG.ELF" "$SER" || true)" = 1 ] && assembled=1
+        [ "$(grep -aFc -- "asm: wrote 96 bytes to /host/PROG.ELF" "$SER" || true)" = 1 ] && assembled=1
         [ "$(grep -aFc -- "exec: loaded PROG.ELF size=" "$SER" || true)" = 1 ] && loaded=1
         [ "$(grep -aFxc -- "$EXIT_LINE" "$SER" || true)" -ge 1 ] && exit71=1
         [ "$(grep -aFxc -- "$EXIT_LINE" "$SER" || true)" = 1 ] && exited=1

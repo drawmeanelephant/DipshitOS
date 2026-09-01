@@ -14,7 +14,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const ui = @import("lib/ui.zig");
 
-pub const profile_file_path = "/data/NET.TXT";
+pub const profile_file_path = "/host/NET.TXT"; // M34 HF5 (#739): user data lives in the host folder
 pub const max_profiles = 8;
 pub const max_name_len = 16;
 pub const max_file_size = 1024;
@@ -152,7 +152,7 @@ pub export fn _start() callconv(.c) noreturn {
     _ = table.put("default", .{ 10, 0, 0, 1 }, .{ 10, 0, 0, 2 }, .{ 1, 1, 1, 1 });
     _ = table.put("home", .{ 192, 168, 1, 50 }, .{ 192, 168, 1, 1 }, .{ 8, 8, 8, 8 });
 
-    // Read existing profiles from /data/NET.TXT if available
+    // Read existing profiles from /host/NET.TXT if available
     var file_buf: [max_file_size]u8 = undefined;
     const fd = ui.file_open(profile_file_path, ui.MODE_READ);
     if (fd >= 0) {
@@ -186,7 +186,7 @@ pub export fn _start() callconv(.c) noreturn {
         const wr_handle: u32 = @intCast(wr_fd);
         _ = ui.file_write(wr_handle, file_buf[0..out_len]);
         ui.file_close(wr_handle);
-        ui.write_console("netprof: saved to /data/NET.TXT\n");
+        ui.write_console("netprof: saved to /host/NET.TXT\n");
     }
 
     ui.write_console("netprof: complete\n");

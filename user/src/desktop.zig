@@ -39,14 +39,14 @@ pub const AppEntry = struct {
 /// then the ESP, so adding an app means a manifest line, not a recompile.
 pub const installed_apps = [_]AppEntry{
     .{ .name = "CALC.BIN", .desc = "64-bit Calc", .status = "GUI Active", .icon = 'c' },
-    .{ .name = "NOTEPAD.BIN", .desc = "Text Editor", .status = "/data Storage", .icon = 'n' },
+    .{ .name = "NOTEPAD.BIN", .desc = "Text Editor", .status = "Host Share", .icon = 'n' },
     .{ .name = "TOP.BIN", .desc = "Task Manager", .status = "sys_procs", .icon = 't' },
     .{ .name = "KEYTEST.BIN", .desc = "HID Input", .status = "USB Events", .icon = 'k' },
-    .{ .name = "TYPE.BIN", .desc = "File Reader", .status = "FAT32 Data", .icon = 'f' },
-    .{ .name = "DIR.BIN", .desc = "Directory List", .status = "FAT32 ESP", .icon = 'd' },
+    .{ .name = "TYPE.BIN", .desc = "File Reader", .status = "Host Share", .icon = 'f' },
+    .{ .name = "DIR.BIN", .desc = "Directory List", .status = "Host Share", .icon = 'd' },
     .{ .name = "FETCH.BIN", .desc = "HTTP/1.0 Client", .status = "TCP Syscall", .icon = 'w' },
     .{ .name = "CHAT.BIN", .desc = "P2P Net Chat", .status = "UDP Socket", .icon = 'm' },
-    .{ .name = "FILE.BIN", .desc = "File Browser", .status = "/data Browse", .icon = 'b' },
+    .{ .name = "FILE.BIN", .desc = "File Browser", .status = "Host Share", .icon = 'b' },
 };
 
 pub const manifest_max_bytes: usize = 1024;
@@ -212,17 +212,13 @@ pub const AppState = struct {
         return count;
     }
 
-    /// Load the application manifest (claim 8877, M34 HF4 issue #738): the
-    /// HOST SHARE is the primary source when `--cvc-file` is attached — a
-    /// `APPS.TXT` dropped into the share changes the launcher catalog with
-    /// no image rebuild. `/esp/APPS.TXT` stays the fallback (dual path
-    /// until HF6 deletes the ESP app path), so default boots are
-    /// byte-identical. On any failure the built-in catalog stays — honest
-    /// degradation, the desktop always has a launcher list.
+    /// Load the application manifest (claim 8877, M34 HF4 issue #738): a
+    /// `APPS.TXT` dropped into the HOST SHARE changes the launcher catalog
+    /// with no image rebuild — the share is the ONLY app source since HF6
+    /// deleted the ESP app path. On any failure the built-in catalog stays
+    /// — honest degradation, the desktop always has a launcher list.
     pub fn load_manifest(self: *AppState) usize {
-        const host = self.load_manifest_path("/host/APPS.TXT");
-        if (host > 0) return host;
-        return self.load_manifest_path("/esp/APPS.TXT");
+        return self.load_manifest_path("APPS.TXT");
     }
 
     pub fn draw(self: *const AppState, win: u32) void {

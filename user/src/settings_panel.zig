@@ -18,7 +18,7 @@ pub const window_y: u32 = 40;
 pub const window_w: u32 = 512;
 pub const window_h: u32 = 384;
 pub const exit_status: u32 = 43;
-pub const settings_path: []const u8 = "/data/SETTINGS.TXT";
+pub const settings_path: []const u8 = "/host/SETTINGS.TXT"; // M34 HF5 (#739): user data lives in the host folder
 
 // Layout constants.
 pub const row_y0: u32 = 40;

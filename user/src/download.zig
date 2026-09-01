@@ -14,7 +14,7 @@ const ui = @import("lib/ui.zig");
 pub const default_ip: u32 = 0x0a000002; // 10.0.0.2
 pub const default_port: u16 = 80;
 pub const default_path: []const u8 = "/file.bin";
-pub const default_dest: []const u8 = "DOWNLOAD.OUT";
+pub const default_dest: []const u8 = "/host/DOWNLOAD.OUT"; // M34 HF5 (#739): downloads land in the host folder
 pub const header_scratch_max: usize = 1024;
 
 pub const ParsedUrl = struct {
@@ -228,7 +228,7 @@ pub export fn _start() callconv(.c) noreturn {
     }
     ui.write_console("download: request sent\n");
 
-    // 3. Open output file on FAT32 filesystem (MODE_WRITE | MODE_CREATE)
+    // 3. Open output file on the host share (MODE_WRITE | MODE_CREATE)
     const fd_res = ui.file_open(dest_name, ui.MODE_WRITE | ui.MODE_CREATE);
     if (fd_res < 0) {
         ui.write_console("download: file open failed\n");

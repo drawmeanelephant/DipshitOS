@@ -19,10 +19,8 @@ const std = @import("std");
 const builtin = @import("builtin");
 const alloc = @import("alloc.zig");
 const console = @import("console.zig");
-const esp = @import("esp.zig");
-const esp_exec = @import("exec.zig"); // claim 6783: load a user program from the ESP and enter it at EL0
-const fat = @import("fat.zig");
-const syscall_mod = @import("syscall.zig"); // claim 6420: FAT write diagnostics (last failing LBA)
+const esp_exec = @import("exec.zig"); // claim 6783: load a user program from the host share and enter it at EL0
+const syscall_mod = @import("syscall.zig"); // the strace seam (sets syscall_mod.strace_pid)
 const exceptions = @import("exceptions.zig");
 const gic = @import("gic.zig");
 const handoff = @import("handoff.zig");
@@ -36,7 +34,7 @@ const syscall = @import("syscall.zig"); // claim 3594: syscall table + counters
 const timer = @import("timer.zig");
 const uaccess = @import("uaccess.zig"); // claim 6120: fault-safe copy-in/copy-out
 const userspace = @import("userspace.zig"); // claim 5804: user-VA layout
-const virtio_blk = @import("virtio_blk.zig"); // claim 6420: the sector interface behind `mount` (milestone four card 2)
+
 const virtio_file = @import("virtio_file.zig"); // M34 HF1+HF2 (issues #735/#736): the host file channel behind `vf`
 const csprng = @import("csprng.zig"); // milestone four (claim 2665): the seeded CSPRNG behind `random`
 const clipboard = @import("clipboard.zig"); // milestone fourteen (claim 0169): the shared kernel clipboard behind `clip`
@@ -312,7 +310,7 @@ fn ensure_registry() []const Command {
             .{ .name = "about", .help = "explain this questionable system", .usage = "about", .category = .machine_identity, .handler = cmd_about },
             .{ .name = "beans", .help = "count beans, probably", .usage = "beans [count]", .category = .machine_identity, .max_args = 1, .handler = cmd_beans },
             .{ .name = "calc", .help = "calculator utilities: 'calc history' shows saved calculation history from /data/calc_hst.txt", .usage = "calc [history]", .category = .system, .max_args = 1, .handler = cmd_calc },
-            .{ .name = "cat", .help = "print a file from the ESP (by name or /path)", .usage = "cat <file|path>", .category = .storage, .min_args = 1, .max_args = 1, .handler = cmd_cat },
+            .{ .name = "cat", .help = "print a file from the host share (by name or path)", .usage = "cat <file|path>", .category = .storage, .min_args = 1, .max_args = 1, .handler = cmd_cat },
             .{ .name = "clear", .help = "clean up the crime scene", .usage = "clear", .category = .system, .handler = cmd_clear },
             .{ .name = "font", .help = "terminal font size: small 8x8 (default), medium 16x16, large 24x24 (M20-U1)", .usage = "font [small|medium|large]", .category = .graphics_input, .min_args = 0, .max_args = 1, .handler = cmd_font },
             .{ .name = "compose", .help = "list available Alt+key compose sequences for accented characters", .usage = "compose", .category = .system, .handler = cmd_compose },
@@ -321,17 +319,17 @@ fn ensure_registry() []const Command {
             .{ .name = "color", .help = "toggle ANSI terminal colors ('color on'/'color off'; 'color' shows current)", .usage = "color [on|off]", .category = .system, .max_args = 1, .handler = cmd_color },
             .{ .name = "echo", .help = "repeat your regrettable decisions", .usage = "echo <text...>", .category = .system, .handler = cmd_echo },
             .{ .name = "elephant", .help = "operational mascot diagnostics", .usage = "elephant", .category = .machine_identity, .handler = cmd_elephant },
-            .{ .name = "exec", .help = "load a user program from the ESP and enter it at EL0", .usage = "exec [<file> [arg...]]", .category = .tasks_processes, .max_args = 1 + esp_exec.max_exec_args, .handler = cmd_exec },
+            .{ .name = "exec", .help = "load a user program from the host share and enter it at EL0", .usage = "exec [<file> [arg...]]", .category = .tasks_processes, .max_args = 1 + esp_exec.max_exec_args, .handler = cmd_exec },
             .{ .name = "fault", .help = "trigger a synchronous exception (diagnostic)", .usage = "fault", .category = .memory_state, .handler = cmd_fault },
             .{ .name = "handoff", .help = "display boot-to-kernel ABI data", .usage = "handoff", .category = .memory_state, .handler = cmd_handoff },
             .{ .name = "help", .help = "grouped command catalog and per-command/per-topic help", .usage = "help [<command>|<topic>]", .category = .system, .max_args = 1, .handler = cmd_help },
             .{ .name = "hex", .help = "format an integer in hexadecimal", .usage = "hex <number>...", .category = .memory_state, .min_args = 1, .handler = cmd_hex },
             .{ .name = "input", .help = "keyboard/pointer event FIFO: armed state, occupancy, drop count, last keyboard + pointer events", .usage = "input", .category = .graphics_input, .handler = cmd_input },
             .{ .name = "kill", .help = "terminate a running process (kernel-owned lifetime)", .usage = "kill <pid|name>", .category = .tasks_processes, .min_args = 1, .max_args = 1, .handler = cmd_kill },
-            .{ .name = "ls", .help = "list files on the ESP (or a directory by path); '-l' for long format (D15)", .usage = "ls [-l] [<dir>]", .category = .storage, .max_args = 2, .handler = cmd_ls },
+            .{ .name = "ls", .help = "list files on the host share (or a directory by path); '-l' for long format (D15)", .usage = "ls [-l] [<dir>]", .category = .storage, .max_args = 2, .handler = cmd_ls },
             .{ .name = "mem", .help = "summarize the EFI memory map", .usage = "mem", .category = .memory_state, .handler = cmd_mem },
             .{ .name = "mbox", .help = "per-process IPC mailbox: pending messages and drain counters", .usage = "mbox [<pid>]", .category = .tasks_processes, .max_args = 1, .handler = cmd_mbox },
-            .{ .name = "mount", .help = "switch the active FAT volume (esp or data)", .usage = "mount <esp|data>", .category = .storage, .min_args = 1, .max_args = 1, .handler = cmd_mount },
+            .{ .name = "mount", .help = "report the host-share file store (HF6: the FAT volumes are gone)", .usage = "mount", .category = .storage, .max_args = 1, .handler = cmd_mount },
             .{ .name = "net", .help = "virtio-net transport + RX + ARP + ICMP + UDP + DHCP + TCP + DNS: device DID, MAC, queues, feature bits, RX counters ('net recv' prints received frames; 'net ip <a.b.c.d>' sets the static IP; 'net arp [<a.b.c.d>]' shows/resolves the ARP table; 'net ping <a.b.c.d>' sends an ICMP echo request; 'net udp [listen <port>|close <port>|send <addr> <port> <len>|recv [<port>]]' drives UDP; 'net dhcp' runs the bounded DHCP client one step per invocation; 'net tcp [connect <addr> <port>|send <len>|recv|close|reset]' drives the bounded TCP client; 'net dns <hostname> [<server>]' resolves DNS A-records)", .usage = "net [recv|ip <addr>|arp [<addr>]|ping <addr>|udp [listen <port>|close <port>|send <addr> <port> <len>|recv [<port>]]|dhcp|tcp [connect <addr> <port>|send <len>|recv|close|reset]|dns <host> [<server>]]", .category = .networking, .max_args = 5, .handler = cmd_net },
             .{ .name = "netsend", .help = "send a known Ethernet frame (bounded staging, TX + used-ring drain)", .usage = "netsend <bytes>", .category = .networking, .min_args = 1, .max_args = 1, .handler = cmd_netsend },
             .{ .name = "pages", .help = "physical page allocator pool", .usage = "pages [selftest]", .category = .memory_state, .max_args = 1, .handler = cmd_pages },
@@ -370,14 +368,14 @@ fn ensure_registry() []const Command {
             .{ .name = "vf", .help = "host file channel (M34): 'vf ls/cat/mkdir/rm/mv <path>' read + mutate a macOS share over custom-virtio queue 5; 'vf open/close/write/truncate/fsync <h>' manage write handles (8-slot host cursor table)", .usage = "vf [ls [<path>]|cat <path>|mkdir <path>|rm <path>|mv <from> <to>|open <path> [append]|close <h>|write <h> <n>|truncate <h> <n>|fsync <h>]", .category = .storage, .max_args = 4, .handler = cmd_vf },
             .{ .name = "welcome", .help = "guided tour of the system for new users", .usage = "welcome", .category = .machine_identity, .handler = cmd_welcome },
             .{ .name = "dui", .help = "Driving Award window manager: registry (with owner pids), z-order, focus, hit-testing ('dui focus <n>' focuses; 'dui raise <n>' raises; 'dui lower <n>' lowers to back; 'dui move <n> <x> <y>' moves a user window; 'dui close <n>' releases a user window; 'dui list <pid>' filters by owner; 'dui hit <x> <y>' hit-tests; 'dui cycle' cycles focus like Alt+Tab; 'dui tile <n>' toggles a user window floating/tiled (M21 W1); 'dui master' swaps master/detail (M21 W2))", .usage = "dui [focus <n>|raise <n>|lower <n>|move <n> <x> <y>|close <n>|list <pid>|hit <x> <y>|cycle|tile <n>|master]", .category = .graphics_input, .max_args = 4, .handler = cmd_dui },
-            .{ .name = "write", .help = "write text to a file on the ESP", .usage = "write <file> <text...>", .category = .storage, .min_args = 1, .handler = cmd_write },
+            .{ .name = "write", .help = "write text to a file on the host share", .usage = "write <file> <text...>", .category = .storage, .min_args = 1, .handler = cmd_write },
             .{ .name = "mktemp", .help = "create a temporary file (empty, unique name)", .usage = "mktemp [prefix]", .category = .storage, .max_args = 1, .handler = cmd_mktemp },
             .{ .name = "stat", .help = "file metadata: size, type, cluster, path (D8)", .usage = "stat <file|path>", .category = .storage, .min_args = 1, .max_args = 1, .handler = cmd_stat },
             .{ .name = "du", .help = "recursive directory disk usage (M25 F4)", .usage = "du [<path>]", .category = .storage, .max_args = 1, .handler = cmd_du },
             .{ .name = "find", .help = "recursive file search with glob patterns ('find / -name \"*.BIN\"' — bounded 3 levels, 256 results)", .usage = "find <dir> -name <pattern>", .category = .storage, .min_args = 3, .max_args = 3, .handler = cmd_find },
             .{ .name = "dmesg", .help = "system log viewer: last bytes of serial output (D12)", .usage = "dmesg", .category = .system, .handler = cmd_dmesg },
             .{ .name = "time", .help = "command timing: measure elapsed ticks and wall-clock time (D13)", .usage = "time <command> [args...]", .category = .system, .min_args = 1, .handler = cmd_time },
-            .{ .name = "which", .help = "locate a command: shell builtin, monitor command, or ESP application (D16)", .usage = "which <name>", .category = .system, .min_args = 1, .max_args = 1, .handler = cmd_which },
+            .{ .name = "which", .help = "locate a command: shell builtin, monitor command, or host-share application (D16; HF6: the ESP is gone)", .usage = "which <name>", .category = .system, .min_args = 1, .max_args = 1, .handler = cmd_which },
             .{ .name = "inventory", .help = "list all installed applications from APPS.TXT with sizes and types (D16)", .usage = "inventory", .category = .storage, .handler = cmd_inventory },
         };
         registry_ready = true;
@@ -659,15 +657,17 @@ fn topic_body(name: []const u8) ?[]const u8 {
             "  are process-owned and auto-close when their process exits.\n";
     }
     if (std.mem.eql(u8, name, "storage")) {
+        // M34 HF6 (issue #740): the FAT volumes are gone — the macOS host
+        // share (custom-virtio queue 5, --cvc-file) is the only store.
         return "storage\n" ++
-            "  GPT + FAT32 over virtio-blk (DID 0x1042): the ESP boot volume and a second\n" ++
-            "  DATA partition. `mount <esp|data>` switches volumes; `ls`/`cat`/`write` read\n" ++
-            "  and write files, and writes persist on the disk across reboot.\n";
+            "  The macOS host share (custom-virtio queue 5, --cvc-file) is the only\n" ++
+            "  store. `vf ls/cat/mkdir/rm/mv` + `vf open/close/write/truncate/fsync`\n" ++
+            "  read and mutate it; writes persist on the host disk across reboot.\n";
     }
     if (std.mem.eql(u8, name, "files")) {
         return "files\n" ++
-            "  GPT + FAT32 filesystem access: `ls`, `cat`, `write`, `find`, `stat`,\n" ++
-            "  `du`, and `inventory`. Persistent file operations on ESP and DATA partitions.\n";
+            "  The host share filesystem: `ls`, `cat`, `write`, `find`, `stat`,\n" ++
+            "  `du`, and `inventory`. Persistent file operations on the --cvc-file share.\n";
     }
     if (std.mem.eql(u8, name, "graphics")) {
         return "graphics\n" ++
@@ -787,7 +787,7 @@ fn cmd_welcome(m: *Monitor, args: []const []const u8) ExecError {
     m.console.print_line("  1. Discovery: Type 'help' to see grouped commands, or 'help <cmd>' / 'help <topic>' for details.");
     m.console.print_line("  2. System Info: Type 'version', 'uname', or 'about' for architectural details.");
     m.console.print_line("  3. Tasks & Procs: Type 'procs' to view active processes or 'tasks' for scheduler states.");
-    m.console.print_line("  4. Storage: Type 'ls' and 'cat <file>' to view files on the ESP; 'mount data' to switch volumes.");
+    m.console.print_line("  4. Storage: Type 'ls' and 'cat <file>' to view files on the host share (--cvc-file).");
     m.console.print_line("  5. Windows & Graphics: Type 'win' to inspect window registry and z-order; 'dui cycle' to cycle focus.");
     m.console.print_line("  6. Networking: Type 'net' for device status, 'net ping <ip>' or 'net dhcp' to configure.");
     m.console.print_line("  7. Documentation: Architecture, decisions, and hardware contracts live in docs/.");
@@ -864,18 +864,16 @@ fn cmd_sysinfo(m: *Monitor, args: []const []const u8) ExecError {
     m.console.print_u64(process.max_processes);
     m.console.puts("\n");
 
-    // Storage
-    m.console.puts("  storage:    fat_volume=");
-    m.console.puts(esp.volume());
-    m.console.puts(" files=");
-    m.console.print_u64(@intCast(esp.esp_count()));
-    const free_bytes = fat.free_space();
-    const total_bytes = @as(u64, @intCast(fat.geometry().total_clusters)) * @as(u64, @intCast(fat.geometry().spc)) * fat.sector_size;
-    if (total_bytes > 0) {
-        m.console.puts(" free=");
-        m.console.print_hex(free_bytes);
-        m.console.puts("/");
-        m.console.print_hex(total_bytes);
+    // Storage — M34 HF6 (issue #740): the FAT volumes are gone; the host
+    // share (--cvc-file) is the only file store.
+    m.console.puts("  storage:    host_share=");
+    m.console.puts(if (virtio_file.available()) "armed" else "absent");
+    if (virtio_file.available()) {
+        var lr = virtio_file.ListResult{};
+        if (virtio_file.list("", &lr) == virtio_file.st_ok) {
+            m.console.puts(" files=");
+            m.console.print_u64(@intCast(lr.count));
+        }
     }
     m.console.puts("\n");
 
@@ -1036,25 +1034,28 @@ fn cmd_ls(m: *Monitor, args: []const []const u8) ExecError {
         }
     }
     if (path_arg) |path| return cmd_ls_path_long(m, path, long_mode);
-    // Root listing
-    m.console.puts("ls: ");
-    m.console.puts(esp.volume());
-    m.console.puts("=");
-    m.console.print_hex(@intCast(esp.esp_count()));
+    // Root listing — M34 HF6 (issue #740): the share is the only store.
+    var res: virtio_file.ListResult = .{};
+    const st = virtio_file.list("", &res);
+    if (st != virtio_file.st_ok) {
+        m.console.print_line("ls: no host file channel (boot the runner with --cvc-file <host-dir>)");
+        return .none;
+    }
+    m.console.puts("ls: host=");
+    m.console.print_hex(@intCast(res.count));
     m.console.puts("\n");
-    const list = esp.entries();
-    if (list.len == 0) {
-        m.console.print_line("ls: no files on the ESP (FAT volume unavailable or empty)");
+    if (res.count == 0) {
+        m.console.print_line("ls: no files on the host share");
         return .none;
     }
     if (long_mode) {
-        for (list) |e| {
-            print_ls_long_entry(m, e.name[0..e.name_len], e.size, e.kind == .esp_dir);
+        for (res.entries[0..res.count]) |e| {
+            print_ls_long_entry(m, e.name[0..e.name_len], e.size, e.type == virtio_file.dir_type_dir);
         }
     } else {
         var width: usize = 0;
-        for (list) |e| width = @max(width, e.name_len);
-        for (list) |e| {
+        for (res.entries[0..res.count]) |e| width = @max(width, e.name_len);
+        for (res.entries[0..res.count]) |e| {
             m.console.puts("  ");
             m.console.puts(e.name[0..e.name_len]);
             var pad: usize = e.name_len;
@@ -1062,10 +1063,7 @@ fn cmd_ls(m: *Monitor, args: []const []const u8) ExecError {
             m.console.puts("  ");
             m.console.print_hex(e.size);
             m.console.puts("  [");
-            m.console.puts(switch (e.kind) {
-                .esp_dir => "dir",
-                .esp_file => esp.volume(),
-            });
+            m.console.puts(if (e.type == virtio_file.dir_type_dir) "dir" else "host");
             m.console.puts("]\n");
         }
     }
@@ -1081,31 +1079,34 @@ fn cmd_ls_path(m: *Monitor, path: []const u8) ExecError {
 }
 
 fn cmd_ls_path_long(m: *Monitor, path: []const u8, long_mode: bool) ExecError {
-    var list: [esp.entries_max]fat.DirEntry = undefined;
-    const n = fat.list_path(path, &list);
-    if (n == 0) {
+    // M34 HF6 (issue #740): LIST the share directory through the channel.
+    var res: virtio_file.ListResult = .{};
+    const st = virtio_file.list(path, &res);
+    if (st != virtio_file.st_ok) {
         err_prefix(m);
         m.console.puts(path);
-        if (fat.file_size(path) != null) {
-            m.console.print_line(": is a file, not a directory");
+        if (st == virtio_file.st_not_found) {
+            m.console.print_line(": not found (no such directory on the host share)");
         } else {
-            m.console.print_line(": not found (no such directory on the FAT volume)");
+            m.console.puts(": ");
+            m.console.print_line(vf_status_text(st));
         }
         return .invalid_argument;
     }
+    const n = res.count;
     m.console.puts("ls: ");
     m.console.puts(path);
     m.console.puts(" entries=");
     m.console.print_hex(@intCast(n));
     m.console.puts("\n");
     if (long_mode) {
-        for (list[0..n]) |e| {
-            print_ls_long_entry(m, e.name[0..e.name_len], e.size, e.is_dir);
+        for (res.entries[0..n]) |e| {
+            print_ls_long_entry(m, e.name[0..e.name_len], e.size, e.type == virtio_file.dir_type_dir);
         }
     } else {
         var width: usize = 0;
-        for (list[0..n]) |e| width = @max(width, e.name_len);
-        for (list[0..n]) |e| {
+        for (res.entries[0..n]) |e| width = @max(width, e.name_len);
+        for (res.entries[0..n]) |e| {
             m.console.puts("  ");
             m.console.puts(e.name[0..e.name_len]);
             var pad: usize = e.name_len;
@@ -1113,7 +1114,7 @@ fn cmd_ls_path_long(m: *Monitor, path: []const u8, long_mode: bool) ExecError {
             m.console.puts("  ");
             m.console.print_hex(e.size);
             m.console.puts("  [");
-            m.console.puts(if (e.is_dir) "dir" else esp.volume());
+            m.console.puts(if (e.type == virtio_file.dir_type_dir) "dir" else "host");
             m.console.puts("]\n");
         }
     }
@@ -1154,89 +1155,39 @@ fn print_ls_long_entry(m: *Monitor, name: []const u8, size: u64, is_dir: bool) v
 /// re-mounts the EFI System Partition by its GPT type GUID; `mount data`
 /// mounts the second FAT32 partition (the general-filesystem volume) by
 /// its GUID. The window re-snapshots the newly active volume's root,
-/// labeled honestly (`ls: <volume>=..`, `[<volume>]`).
+/// M34 HF6 (issue #740): the FAT volumes are GONE — `mount` reports the
+/// host share's state (the command row stays for the storage-category
+/// surface; there is nothing to switch).
 fn cmd_mount(m: *Monitor, args: []const []const u8) ExecError {
-    const name = args[0];
-    const is_data = std.mem.eql(u8, name, "data");
-    if (!is_data and !std.mem.eql(u8, name, "esp")) {
-        err_prefix(m);
-        m.console.puts("unknown volume: ");
-        m.console.puts(name);
-        m.console.print_line(" (expected esp or data)");
-        return .invalid_argument;
+    _ = args;
+    if (!virtio_file.available()) {
+        m.console.print_line("mount: no host file channel (boot the runner with --cvc-file <host-dir>)");
+        return .none;
     }
-    const r = if (is_data) fat.mount_data(virtio_blk.disk_ops()) else fat.mount(virtio_blk.disk_ops());
-    switch (r) {
-        .ok => {
-            esp.set_volume(if (is_data) "data" else "esp");
-            esp.resnapshot();
-            m.console.puts("mount: ");
-            m.console.puts(name);
-            m.console.puts(" vol_lba=");
-            m.console.print_hex(fat.geometry().vol_lba);
-            m.console.puts(" files=");
-            m.console.print_hex(@intCast(esp.entry_count()));
-            m.console.puts("\n");
-            return .none;
-        },
-        .no_disk => {
-            err_prefix(m);
-            m.console.puts(name);
-            m.console.print_line(": no disk (FAT volume unavailable)");
-            return .not_implemented;
-        },
-        .bad_gpt => {
-            err_prefix(m);
-            m.console.puts(name);
-            m.console.print_line(": partition not found (bad GPT or no such type GUID)");
-            return .machine_failed;
-        },
-        .bad_bpb => {
-            err_prefix(m);
-            m.console.puts(name);
-            m.console.print_line(": not a FAT32 volume (bad BPB)");
-            return .machine_failed;
-        },
-        .io_failed => {
-            err_prefix(m);
-            m.console.puts(name);
-            m.console.puts(": sector I/O failed (last lba=");
-            m.console.print_hex_min(fat.last_fail_lba());
-            m.console.print_line(")");
-            return .machine_failed;
-        },
-    }
+    var res: virtio_file.ListResult = .{};
+    const st = virtio_file.list("", &res);
+    m.console.puts("mount: host share armed files=");
+    m.console.print_hex(if (st == virtio_file.st_ok) @as(u64, @intCast(res.count)) else 0);
+    m.console.puts("\n");
+    return .none;
 }
 
-/// Calculator utilities: 'calc history' reads and prints /data/calc_hst.txt
-/// (M24 K5 — the persisted calculation history ring).
+/// Calculator utilities: 'calc history' reads and prints calc_hst.txt on
+/// the HOST SHARE (M24 K5 — the persisted calculation history ring; HF6
+/// moved it from /data to the share).
 fn cmd_calc(m: *Monitor, args: []const []const u8) ExecError {
     if (args.len == 0 or std.mem.eql(u8, args[0], "history")) {
-        const path = "/data/calc_hst.txt";
-        const size = fat.file_size(path) orelse {
+        const path = "calc_hst.txt";
+        var buf: [2048]u8 = undefined;
+        const got = virtio_file.read_whole(path, &buf) orelse {
             err_prefix(m);
-            m.console.print_line("calc: no history file found (/data/calc_hst.txt)");
+            m.console.print_line("calc: no history file found (calc_hst.txt on the host share)");
             return .none;
         };
-        if (size == 0) {
+        if (got == 0) {
             m.console.print_line("calc: history is empty");
             return .none;
         }
-        var buf: [esp.write_content_max]u8 = undefined;
-        if (size > @as(u32, @intCast(buf.len))) {
-            err_prefix(m);
-            m.console.puts("calc: history file is ");
-            m.console.print_hex(size);
-            m.console.puts(" bytes; display caps at ");
-            m.console.print_hex(esp.write_content_max);
-            m.console.print_line(" bytes");
-            return .invalid_argument;
-        }
-        const got = fat.read_file(path, &buf) orelse {
-            err_prefix(m);
-            m.console.print_line("calc: failed to read history file");
-            return .invalid_argument;
-        };
         // Count lines for the header
         var lines: u32 = 0;
         for (buf[0..got]) |ch| {
@@ -1267,77 +1218,53 @@ fn cmd_calc(m: *Monitor, args: []const []const u8) ExecError {
     return .invalid_argument;
 }
 
-/// Print a file's content — a bare name serves the ESP window (unchanged
-/// behavior); a `/`-path reads the FAT volume directly (milestone four
-/// card 2 Stage C). Honest diagnostics for directories, files larger than
-/// the bounded read buffer, and unknown paths.
+/// Print a file's content from the HOST SHARE (M34 HF6, issue #740: the
+/// ESP window and FAT volume are gone — the share is the only store).
+/// Honest diagnostics for directories and files larger than the bounded
+/// read buffer.
 fn cmd_cat(m: *Monitor, args: []const []const u8) ExecError {
     const name = args[0];
-    if (std.mem.indexOfScalar(u8, name, '/') != null) return cmd_cat_path(m, name);
-    const e = esp.lookup(name) orelse {
+    var st = virtio_file.StatResult{};
+    if (virtio_file.stat(name, &st) != virtio_file.st_ok) {
         err_prefix(m);
         m.console.puts(name);
-        m.console.print_line(": not found (no such file on the ESP)");
+        m.console.print_line(": not found (no such file on the host share)");
         return .invalid_argument;
-    };
-    switch (e.kind) {
-        .esp_dir => {
-            err_prefix(m);
-            m.console.puts(name);
-            m.console.print_line(": is a directory");
-            return .invalid_argument;
-        },
-        .esp_file => {
-            if (e.len == 0 and e.size > 0) {
-                err_prefix(m);
-                m.console.puts(name);
-                m.console.puts(": content not loaded (file is ");
-                m.console.print_hex(e.size);
-                m.console.puts(" bytes; the window keeps files up to ");
-                m.console.print_hex(esp.esp_content_max);
-                m.console.print_line(" bytes)");
-                return .invalid_argument;
-            }
-        },
     }
-    const content = esp.content_of(e);
-    m.console.puts(content);
-    // A trailing newline keeps the shell prompt on its own line; a file
-    // that already ends with one is printed verbatim (no double blank).
-    if (content.len == 0 or content[content.len - 1] != '\n') m.console.puts("\n");
-    return .none;
-}
-
-/// Print a file by `/`-path, read straight from the FAT volume. The file's
-/// size is checked first: a file larger than the bounded read buffer is
-/// reported honestly (never silently truncated).
-fn cmd_cat_path(m: *Monitor, path: []const u8) ExecError {
-    const size = fat.file_size(path) orelse {
+    if (st.is_dir) {
         err_prefix(m);
-        m.console.puts(path);
-        m.console.print_line(": not found (no such file on the FAT volume)");
+        m.console.puts(name);
+        m.console.print_line(": is a directory");
         return .invalid_argument;
-    };
-    var buf: [esp.write_content_max]u8 = undefined;
-    if (size > @as(u32, @intCast(buf.len))) {
+    }
+    var buf: [2048]u8 = undefined;
+    if (st.size > @as(u64, @intCast(buf.len))) {
         err_prefix(m);
-        m.console.puts(path);
+        m.console.puts(name);
         m.console.puts(": file is ");
-        m.console.print_hex(size);
+        m.console.print_hex(st.size);
         m.console.puts(" bytes; direct read caps at ");
-        m.console.print_hex(esp.write_content_max);
+        m.console.print_hex(buf.len);
         m.console.print_line(" bytes");
         return .invalid_argument;
     }
-    const got = fat.read_file(path, &buf) orelse {
+    const got = virtio_file.read_into(name, st.size, &buf) orelse {
         err_prefix(m);
-        m.console.puts(path);
-        m.console.print_line(": not found (no such file on the FAT volume)");
+        m.console.puts(name);
+        m.console.print_line(": not found (no such file on the host share)");
         return .invalid_argument;
     };
     m.console.puts(buf[0..got]);
+    // A trailing newline keeps the shell prompt on its own line; a file
+    // that already ends with one is printed verbatim (no double blank).
     if (got == 0 or buf[got - 1] != '\n') m.console.puts("\n");
     return .none;
+}
+
+/// Print a file by path, read from the HOST SHARE (kept as the `/`-path
+/// entry point — the channel accepts share-relative paths with slashes).
+fn cmd_cat_path(m: *Monitor, path: []const u8) ExecError {
+    return cmd_cat(m, &.{path});
 }
 
 /// Write text to the ESP's FAT32 volume (claim 6420 — the real storage
@@ -1610,21 +1537,26 @@ fn vf_hex16(value: u16) [4]u8 {
     return out;
 }
 
+/// Write text to a file on the HOST SHARE (M34 HF5/HF6, issues
+/// #739/#740): write_whole = open/create + truncate + chunked write +
+/// close through the queue-5 channel — the file persists on the macOS
+/// host disk, verified by the gates. Capacity is checked before the
+/// write; a failed exchange is reported honestly, never faked.
 fn cmd_write(m: *Monitor, args: []const []const u8) ExecError {
     const name = args[0];
     const parts = args[1..];
     var len: usize = 0;
     for (parts, 0..) |p, i| len += p.len + (if (i > 0) @as(usize, 1) else 0);
-    if (len > esp.write_content_max) {
+    if (len > virtio_file.reply_cap) {
         err_prefix(m);
         m.console.puts("content too long (max ");
-        m.console.print_hex(esp.write_content_max);
+        m.console.print_hex(virtio_file.reply_cap);
         m.console.puts(" bytes, got ");
         m.console.print_hex(@intCast(len));
         m.console.print_line(")");
         return .invalid_argument;
     }
-    var buf: [esp.write_content_max]u8 = undefined;
+    var buf: [virtio_file.reply_cap]u8 = undefined;
     var n: usize = 0;
     for (parts, 0..) |p, i| {
         if (i > 0) {
@@ -1634,66 +1566,18 @@ fn cmd_write(m: *Monitor, args: []const []const u8) ExecError {
         @memcpy(buf[n..][0..p.len], p);
         n += p.len;
     }
-    switch (esp.write_file(name, buf[0..n])) {
-        .ok => {
-            m.console.puts("write: ok (persisted ");
-            m.console.print_u64(n);
-            m.console.puts(" bytes to FAT on the ");
-            m.console.puts(esp.volume());
-            m.console.puts(")\n");
-            return .none;
-        },
-        .no_disk => {
-            err_prefix(m);
-            m.console.puts(name);
-            m.console.print_line(": not persisted - no disk (FAT volume unavailable)");
-            return .not_implemented;
-        },
-        .name_invalid => {
-            err_prefix(m);
-            m.console.puts("invalid file name: ");
-            m.console.puts(name);
-            m.console.puts(" (max ");
-            m.console.print_u64(esp.name_max);
-            m.console.puts(" printable ASCII chars, no '/' or '\\')\n");
-            return .invalid_argument;
-        },
-        .name_too_long => {
-            err_prefix(m);
-            m.console.puts(name);
-            m.console.print_line(": does not fit FAT 8.3 (max 8 chars + 3-char extension)");
-            return .invalid_argument;
-        },
-        .content_too_long => {
-            err_prefix(m);
-            m.console.puts("content too long (max ");
-            m.console.print_hex(esp.write_content_max);
-            m.console.puts(" bytes, got ");
-            m.console.print_hex(@intCast(n));
-            m.console.print_line(")");
-            return .invalid_argument;
-        },
-        .bad_path => {
-            err_prefix(m);
-            m.console.puts(name);
-            m.console.print_line(": parent directory not found");
-            return .invalid_argument;
-        },
-        .disk_full => {
-            err_prefix(m);
-            m.console.puts(name);
-            m.console.print_line(": not persisted - disk full (no free cluster or root-directory slot)");
-            return .invalid_argument;
-        },
-        .write_failed => {
-            err_prefix(m);
-            m.console.puts(name);
-            m.console.puts(": FAT write failed (last lba=");
-            m.console.print_hex_min(fat.last_fail_lba());
-            m.console.print_line(") - file NOT persisted");
-            return .machine_failed;
-        },
+    const st = virtio_file.write_whole(name, buf[0..n]);
+    if (st == virtio_file.st_ok) {
+        m.console.puts("write: ok (persisted ");
+        m.console.print_u64(n);
+        m.console.puts(" bytes to the host share)\n");
+        return .none;
     }
+    err_prefix(m);
+    m.console.puts(name);
+    m.console.puts(": not persisted - ");
+    m.console.print_line(vf_status_text(st));
+    return .not_implemented;
 }
 
 /// M19 P16 (issue #305): create a temporary file with a unique name.
@@ -1727,32 +1611,18 @@ fn cmd_mktemp(m: *Monitor, args: []const []const u8) ExecError {
     @memcpy(name_buf[n..][0..4], ".BIN");
     n += 4;
     const name = name_buf[0..n];
-    // Create empty file.
-    switch (esp.write_file(name, "")) {
-        .ok => {
-            m.console.puts(name);
-            m.console.puts("\n");
-            return .none;
-        },
-        .no_disk => {
-            err_prefix(m);
-            m.console.puts(name);
-            m.console.print_line(": no disk available");
-            return .not_implemented;
-        },
-        .name_invalid => {
-            err_prefix(m);
-            m.console.puts(name);
-            m.console.print_line(": invalid filename");
-            return .invalid_argument;
-        },
-        else => {
-            err_prefix(m);
-            m.console.puts(name);
-            m.console.print_line(": write failed");
-            return .invalid_argument;
-        },
+    // Create the empty file on the host share (HF6: the ESP window is gone).
+    const st = virtio_file.write_whole(name, "");
+    if (st == virtio_file.st_ok) {
+        m.console.puts(name);
+        m.console.puts("\n");
+        return .none;
     }
+    err_prefix(m);
+    m.console.puts(name);
+    m.console.puts(": ");
+    m.console.print_line(vf_status_text(st));
+    return .not_implemented;
 }
 
 // ---------------------------------------------------------------------------
@@ -1761,101 +1631,80 @@ fn cmd_mktemp(m: *Monitor, args: []const []const u8) ExecError {
 // ---------------------------------------------------------------------------
 
 /// M22 D8 (issue #331): `stat <file|path>` — print file metadata from the
-/// FAT volume: size, type (file/dir), cluster, and path. Bare names check
-/// the ESP window; `/`-paths query the FAT directly.
+/// HOST SHARE (M34 HF6, issue #740: the FAT volume and ESP window are
+/// gone): size, type (file/dir), and path.
 fn cmd_stat(m: *Monitor, args: []const []const u8) ExecError {
     const name = args[0];
-    // Path-based stat: resolve through FAT directory listing
-    if (std.mem.indexOfScalar(u8, name, '/') != null) {
-        // Extract parent dir and filename from the path
-        const last_slash = std.mem.lastIndexOfScalar(u8, name, '/') orelse 0;
-        const parent = if (last_slash > 0) name[0..last_slash] else "/";
-        const filename = name[last_slash + 1 ..];
-        if (filename.len == 0) {
-            err_prefix(m);
-            m.console.puts("stat: ");
-            m.console.puts(name);
-            m.console.print_line(": not a file");
-            return .invalid_argument;
-        }
-        var entries: [esp.entries_max]fat.DirEntry = undefined;
-        const n = fat.list_path(parent, &entries);
-        var found = false;
-        for (entries[0..n]) |e| {
-            if (std.mem.eql(u8, e.name[0..e.name_len], filename)) {
-                print_stat_entry(m, &e, name);
-                found = true;
-                break;
-            }
-        }
-        if (!found) {
-            err_prefix(m);
-            m.console.puts("stat: ");
-            m.console.puts(name);
-            m.console.print_line(": not found");
-            return .invalid_argument;
-        }
-        return .none;
+    var st = virtio_file.StatResult{};
+    const sst = virtio_file.stat(name, &st);
+    if (sst != virtio_file.st_ok or st.is_dir) {
+        err_prefix(m);
+        m.console.puts("stat: ");
+        m.console.puts(name);
+        m.console.print_line(": not found");
+        return .invalid_argument;
     }
-    // Bare-name stat: check the ESP window first
-    if (esp.lookup(name)) |e| {
-        m.console.puts("  File:  ");
-        m.console.print_line(name);
-        m.console.puts("  Size:  ");
-        m.console.print_u64(e.size);
-        m.console.print_line(" bytes");
-        m.console.puts("  Type:  ");
-        m.console.print_line(switch (e.kind) {
-            .esp_dir => "directory",
-            .esp_file => "regular file",
-        });
-        m.console.puts("  Volume: ");
-        m.console.print_line(esp.volume());
-        return .none;
-    }
-    // Not in ESP window — try FAT path (it might be a subdirectory entry)
-    var entries: [esp.entries_max]fat.DirEntry = undefined;
-    const n = fat.list_path("/", &entries);
-    for (entries[0..n]) |e| {
-        if (std.mem.eql(u8, e.name[0..e.name_len], name)) {
-            print_stat_entry(m, &e, name);
-            return .none;
-        }
-    }
-    err_prefix(m);
-    m.console.puts("stat: ");
-    m.console.puts(name);
-    m.console.print_line(": not found");
-    return .invalid_argument;
-}
-
-fn print_stat_entry(m: *Monitor, e: *const fat.DirEntry, path: []const u8) void {
     m.console.puts("  File:    ");
-    m.console.print_line(path);
+    m.console.print_line(name);
     m.console.puts("  Size:    ");
-    m.console.print_u64(e.size);
+    m.console.print_u64(st.size);
     m.console.print_line(" bytes");
     m.console.puts("  Type:    ");
-    m.console.print_line(if (e.is_dir) "directory" else "regular file");
-    m.console.puts("  Cluster: ");
-    m.console.print_hex(e.cluster);
-    m.console.puts("\n");
+    m.console.print_line("regular file");
+    m.console.puts("  Volume:  ");
+    m.console.print_line("host share");
+    return .none;
 }
 
 /// M25 F4 (issue #384): `du [<path>]` — estimate file space usage recursively
 /// (bounded: 3 levels deep).
+/// M25 F4 (issue #384): `du [<path>]` — estimate file space usage
+/// recursively on the HOST SHARE (bounded: 3 levels deep, like the FAT
+/// walk it replaces — HF6, issue #740).
+const du_max_depth: usize = 3;
+
+fn du_walk(m: *Monitor, path: []const u8, depth: usize, bytes: *u64, dirs: *u64) void {
+    var res: virtio_file.ListResult = .{};
+    if (virtio_file.list(path, &res) != virtio_file.st_ok) return;
+    for (res.entries[0..res.count]) |e| {
+        if (e.type == virtio_file.dir_type_dir) {
+            if (depth < du_max_depth) {
+                dirs.* += 1;
+                var sub: [128]u8 = undefined;
+                const sub_path = if (path.len == 0)
+                    e.name[0..@min(e.name_len, sub.len)]
+                else blk: {
+                    const take = @min(path.len, sub.len - 1 - e.name_len);
+                    @memcpy(sub[0..take], path[0..take]);
+                    var p = take;
+                    if (p < sub.len and sub[p - 1] != '/') {
+                        sub[p] = '/';
+                        p += 1;
+                    }
+                    const nt = @min(e.name_len, sub.len - p);
+                    @memcpy(sub[p..][0..nt], e.name[0..nt]);
+                    p += nt;
+                    break :blk sub[0..p];
+                };
+                du_walk(m, sub_path, depth + 1, bytes, dirs);
+            }
+        } else {
+            bytes.* += e.size;
+        }
+    }
+}
+
 fn cmd_du(m: *Monitor, args: []const []const u8) ExecError {
     const path = if (args.len > 0) args[0] else "";
-    const res = fat.dir_size_recursive(path);
+    var bytes: u64 = 0;
+    var dirs: u64 = 0;
+    du_walk(m, path, 0, &bytes, &dirs);
     m.console.puts("du: ");
     m.console.puts(if (path.len > 0) path else "/");
     m.console.puts(" ");
-    m.console.print_u64(res.bytes);
+    m.console.print_u64(bytes);
     m.console.puts(" bytes (dirs=");
-    m.console.print_u64(res.dirs_walked);
-    if (res.truncated) {
-        m.console.puts(", truncated");
-    }
+    m.console.print_u64(dirs);
     m.console.print_line(")");
     return .none;
 }
@@ -1888,9 +1737,10 @@ const find_max_results: usize = 256;
 
 fn find_recursive(m: *Monitor, dir_path: []const u8, pattern: []const u8, depth: usize, count: *usize) void {
     if (depth >= find_max_depth or count.* >= find_max_results) return;
-    var entries: [esp.entries_max]fat.DirEntry = undefined;
-    const n = fat.list_path(dir_path, &entries);
-    for (entries[0..n]) |e| {
+    // M34 HF6 (issue #740): find walks the HOST SHARE (the FAT volume is gone).
+    var res: virtio_file.ListResult = .{};
+    if (virtio_file.list(dir_path, &res) != virtio_file.st_ok) return;
+    for (res.entries[0..res.count]) |e| {
         if (count.* >= find_max_results) break;
         const name = e.name[0..e.name_len];
         // Match against pattern
@@ -1898,6 +1748,7 @@ fn find_recursive(m: *Monitor, dir_path: []const u8, pattern: []const u8, depth:
             // Build full path
             var path_buf: [128]u8 = undefined;
             var pos: usize = 0;
+            const is_dir = e.type == virtio_file.dir_type_dir;
             if (std.mem.eql(u8, dir_path, "/")) {
                 path_buf[0] = '/';
                 pos = 1;
@@ -1914,12 +1765,12 @@ fn find_recursive(m: *Monitor, dir_path: []const u8, pattern: []const u8, depth:
             @memcpy(path_buf[pos..][0..name_take], name[0..name_take]);
             pos += name_take;
             m.console.puts(path_buf[0..pos]);
-            if (e.is_dir) m.console.putc('/');
+            if (is_dir) m.console.putc('/');
             m.console.putc('\n');
             count.* += 1;
         }
         // Recurse into directories
-        if (e.is_dir) {
+        if (e.type == virtio_file.dir_type_dir) {
             var sub_path: [128]u8 = undefined;
             var spos: usize = 0;
             if (std.mem.eql(u8, dir_path, "/")) {
@@ -2021,13 +1872,15 @@ fn cmd_which(m: *Monitor, args: []const []const u8) ExecError {
         m.console.print_line(": monitor command");
         return .none;
     }
-    // Check ESP file listing (applications)
-    const list = esp.entries();
-    for (list) |e| {
-        if (std.mem.eql(u8, e.name[0..e.name_len], name)) {
-            m.console.puts(name);
-            m.console.print_line(": ESP application");
-            return .none;
+    // Check the host share listing (applications) — HF6: the ESP is gone.
+    var res: virtio_file.ListResult = .{};
+    if (virtio_file.list("", &res) == virtio_file.st_ok) {
+        for (res.entries[0..res.count]) |e| {
+            if (std.mem.eql(u8, e.name[0..e.name_len], name)) {
+                m.console.puts(name);
+                m.console.print_line(": host-share application");
+                return .none;
+            }
         }
     }
     // Not found
@@ -2058,20 +1911,20 @@ fn is_shell_builtin(name: []const u8) bool {
 }
 
 /// M22 D16 (issue #339): `inventory` — list all installed applications
-/// from the ESP window with their sizes and types.
+/// from the HOST SHARE with their sizes and types (HF6: the ESP is gone).
 fn cmd_inventory(m: *Monitor, args: []const []const u8) ExecError {
     _ = args;
-    const list = esp.entries();
-    if (list.len == 0) {
-        m.console.print_line("inventory: no applications installed");
+    var res: virtio_file.ListResult = .{};
+    if (virtio_file.list("", &res) != virtio_file.st_ok or res.count == 0) {
+        m.console.print_line("inventory: no applications on the host share");
         return .none;
     }
     m.console.puts("inventory: ");
-    m.console.print_u64(@intCast(list.len));
+    m.console.print_u64(@intCast(res.count));
     m.console.print_line(" application(s):\n");
     var width: usize = 0;
-    for (list) |e| width = @max(width, e.name_len);
-    for (list) |e| {
+    for (res.entries[0..res.count]) |e| width = @max(width, e.name_len);
+    for (res.entries[0..res.count]) |e| {
         m.console.puts("  ");
         m.console.puts(e.name[0..e.name_len]);
         var pad: usize = e.name_len;
@@ -2079,10 +1932,7 @@ fn cmd_inventory(m: *Monitor, args: []const []const u8) ExecError {
         m.console.puts("  ");
         m.console.print_hex(e.size);
         m.console.puts(" bytes  [");
-        m.console.puts(switch (e.kind) {
-            .esp_dir => "dir",
-            .esp_file => esp.volume(),
-        });
+        m.console.puts(if (e.type == virtio_file.dir_type_dir) "dir" else "host");
         m.console.puts("]\n");
     }
     return .none;
@@ -3519,7 +3369,7 @@ fn cmd_settings(m: *Monitor, args: []const []const u8) ExecError {
             m.console.puts("\n");
             return .invalid_argument;
         }
-        const saved = settings.save_to_disk(virtio_blk.disk_ops());
+        const saved = settings.save_to_share();
         m.console.puts("settings: ");
         m.console.puts(key);
         m.console.puts("=");
@@ -3537,7 +3387,7 @@ fn cmd_settings(m: *Monitor, args: []const []const u8) ExecError {
             return .usage;
         }
         settings.reset();
-        const saved = settings.save_to_disk(virtio_blk.disk_ops());
+        const saved = settings.save_to_share();
         m.console.puts("settings: reset to defaults");
         if (saved) {
             m.console.puts(" (persisted)\n");
@@ -3619,12 +3469,11 @@ fn cmd_shutdown(m: *Monitor, args: []const []const u8) ExecError {
     return report_machine(m, "shutdown", m.machine.shutdown());
 }
 
-/// Write shutdown marker to /data/SHUTDOWN.TXT on the DATA partition.
-/// `reason` is a short label ("graceful", "reboot", etc.).
+/// Write shutdown marker to SHUTDOWN.TXT on the HOST SHARE (M34 HF6,
+/// issue #740: the DATA partition is gone). `reason` is a short label
+/// ("graceful", "reboot", etc.).
 fn write_shutdown_marker(reason: []const u8) void {
-    const ops = virtio_blk.disk_ops();
-
-    if (fat.mount_data(ops) != .ok) return;
+    if (!virtio_file.available()) return;
 
     // Format marker content: tick count + reason
     var buf: [128]u8 = undefined;
@@ -3650,23 +3499,19 @@ fn write_shutdown_marker(reason: []const u8) void {
     buf[pos] = '\n';
     pos += 1;
 
-    _ = fat.write_file("SHUTDOWN.TXT", buf[0..pos]);
-
-    _ = esp.set_disk(ops);
+    _ = virtio_file.write_whole("SHUTDOWN.TXT", buf[0..pos]);
 }
 
-/// Flush the shared clipboard to /data/clipboard.txt for persistence
-/// across reboot (Arc5 #244).
+/// Flush the shared clipboard to clipboard.txt on the HOST SHARE for
+/// persistence across reboot (Arc5 #244; HF6 moved it from /data).
 fn flush_clipboard_to_disk() void {
+    if (!virtio_file.available()) return;
     const clip_len = clipboard.current_len();
     if (clip_len == 0) return;
     var buf: [clipboard.capacity]u8 = undefined;
     const n = clipboard.get(&buf);
     if (n == 0) return;
-    const ops = virtio_blk.disk_ops();
-    if (fat.mount_data(ops) != .ok) return;
-    _ = fat.write_file("clipboard.txt", buf[0..n]);
-    _ = esp.set_disk(ops);
+    _ = virtio_file.write_whole("clipboard.txt", buf[0..n]);
 }
 
 fn write_u64_to(out: []u8, val: u64) usize {
@@ -5914,7 +5759,84 @@ fn cmd_screen_peek(m: *Monitor) ExecError {
     return .none;
 }
 
-/// M27 G27 (Issue #470): capture current framebuffer and save as BMP to FAT.
+/// M34 HF5 (issue #739): stream the framebuffer as a BMP to the HOST
+/// SHARE through queue 5 when the channel is armed (chunked WRITE round
+/// trips ≤ 32 KiB; a 1280×720 BMP is ~2.7 MiB ≈ 86 chunks — assembled in
+/// the module's BSS chunk_staging, never the 16 KiB boot stack). The 54-
+/// byte header layout is byte-identical to fat.write_fb_bmp (the host
+/// verifies the file on disk). Returns true on a fully-written file.
+fn vf_write_fb_bmp(path: []const u8, width: u32, height: u32, fb: [*]const u8) bool {
+    const row_raw: usize = @as(usize, width) * 3;
+    const row_pad: usize = (4 - (row_raw % 4)) % 4;
+    const row_stride: usize = row_raw + row_pad;
+    const total_pixel_bytes: usize = row_stride * @as(usize, height);
+    const total_file_size: usize = 54 + total_pixel_bytes;
+
+    var h: u16 = 0;
+    if (virtio_file.open(path, virtio_file.open_flag_create, &h) != virtio_file.st_ok) return false;
+    defer _ = virtio_file.close(h);
+    _ = virtio_file.truncate(h, 0);
+
+    const chunk = &virtio_file.chunk_staging;
+    var off: usize = 0;
+    // 54-byte standard BMP header (mirror of fat.write_fb_bmp).
+    @memset(chunk[0..54], 0);
+    chunk[0] = 'B';
+    chunk[1] = 'M';
+    std.mem.writeInt(u32, chunk[2..6], @intCast(total_file_size), .little);
+    std.mem.writeInt(u32, chunk[10..14], 54, .little);
+    std.mem.writeInt(u32, chunk[14..18], 40, .little);
+    std.mem.writeInt(i32, chunk[18..22], @intCast(width), .little);
+    std.mem.writeInt(i32, chunk[22..26], @intCast(height), .little);
+    std.mem.writeInt(u16, chunk[26..28], 1, .little);
+    std.mem.writeInt(u16, chunk[28..30], 24, .little);
+    std.mem.writeInt(u32, chunk[30..34], 0, .little);
+    std.mem.writeInt(u32, chunk[34..38], @intCast(total_pixel_bytes), .little);
+    std.mem.writeInt(i32, chunk[38..42], 2835, .little);
+    std.mem.writeInt(i32, chunk[42..46], 2835, .little);
+    off = 54;
+
+    const fb_stride = @as(usize, width) * 4;
+    var cur_y: usize = height;
+    while (cur_y > 0) {
+        cur_y -= 1;
+        const row_start = cur_y * fb_stride;
+        var x: usize = 0;
+        while (x < width) : (x += 1) {
+            const px_off = row_start + x * 4;
+            if (off + 3 > chunk.len) {
+                if (!vf_flush_chunk(h, chunk, &off)) return false;
+            }
+            chunk[off] = fb[px_off];
+            chunk[off + 1] = fb[px_off + 1];
+            chunk[off + 2] = fb[px_off + 2];
+            off += 3;
+        }
+        var pad: usize = 0;
+        while (pad < row_pad) : (pad += 1) {
+            if (off + 1 > chunk.len) {
+                if (!vf_flush_chunk(h, chunk, &off)) return false;
+            }
+            chunk[off] = 0;
+            off += 1;
+        }
+    }
+    return vf_flush_chunk(h, chunk, &off);
+}
+
+/// WRITE the assembled chunk and reset the offset (a zero-length flush is
+/// a no-op success).
+fn vf_flush_chunk(h: u16, chunk: []u8, off: *usize) bool {
+    if (off.* == 0) return true;
+    var written: u64 = 0;
+    const st = virtio_file.write(h, chunk[0..off.*], &written);
+    off.* = 0;
+    return st == virtio_file.st_ok;
+}
+
+/// M27 G27 (Issue #470): capture current framebuffer and save as BMP — to
+/// the HOST SHARE when the channel is armed (M34 HF5, issue #739), else
+/// to FAT (dual path until HF6).
 fn cmd_screenshot(m: *Monitor, args: []const []const u8) ExecError {
     if (!virtio_gpu.gpu_ready) {
         err_prefix(m);
@@ -5922,18 +5844,18 @@ fn cmd_screenshot(m: *Monitor, args: []const []const u8) ExecError {
         return .none;
     }
     const path = if (args.len > 0) args[0] else "SCREEN.BMP";
-    const res = fat.write_fb_bmp(path, virtio_gpu.fb_width, virtio_gpu.fb_height, @ptrCast(&virtio_gpu.gpu_fb));
-    if (res != .ok) {
-        err_prefix(m);
-        m.console.puts("screenshot: write failed: ");
-        m.console.puts(@tagName(res));
-        m.console.puts("\n");
-        return .none;
-    }
     const row_raw: usize = @as(usize, virtio_gpu.fb_width) * 3;
     const row_pad: usize = (4 - (row_raw % 4)) % 4;
     const row_stride: usize = row_raw + row_pad;
     const total_bytes: usize = 54 + row_stride * @as(usize, virtio_gpu.fb_height);
+
+    // M34 HF6 (issue #740): the FAT BMP writer is gone — screenshots
+    // always ride the host share.
+    if (!vf_write_fb_bmp(path, virtio_gpu.fb_width, virtio_gpu.fb_height, @ptrCast(&virtio_gpu.gpu_fb))) {
+        err_prefix(m);
+        m.console.print_line("screenshot: host write failed");
+        return .none;
+    }
     m.console.puts("screenshot: saved ");
     m.console.print_u64(virtio_gpu.fb_width);
     m.console.puts("x");
@@ -6436,13 +6358,13 @@ fn cmd_exec(m: *Monitor, args: []const []const u8) ExecError {
         },
         .no_disk => {
             err_prefix(m);
-            m.console.print_line("no disk (ESP FAT volume unavailable)");
+            m.console.print_line("no host file channel (boot the runner with --cvc-file <host-dir>)");
             return .not_implemented;
         },
         .not_found => {
             err_prefix(m);
             m.console.puts(name);
-            m.console.print_line(": not found on the ESP (must be a DSK1 flat image)");
+            m.console.print_line(": not found on the host share (must be a DSK1/DSK3/ELF image)");
             return .invalid_argument;
         },
         .too_large => {
@@ -6564,12 +6486,13 @@ fn cmd_sym(m: *Monitor, args: []const []const u8) ExecError {
         return .none;
     }
 
-    // File inspection: read up to sym_file_max bytes and walk sections.
+    // File inspection: read up to sym_file_max bytes and walk sections
+    // (HF6: from the host share — the FAT volume is gone).
     const name = args[0];
-    const got = fat.read_file(name, &sym_file_buf) orelse {
+    const got = virtio_file.read_whole(name, &sym_file_buf) orelse {
         err_prefix(m);
         m.console.puts(name);
-        m.console.print_line(": not found on the active volume");
+        m.console.print_line(": not found on the host share");
         return .invalid_argument;
     };
     var infos: [symbol.max_symbols]elf_mod.SymInfo = undefined;
@@ -7257,16 +7180,14 @@ pub const BootMessages = struct {
 /// does not print "VIRELAIOS 0.1" (the repository defines no release
 /// number) or a hardcoded "256 MiB detected" (memory must be derived from
 /// the captured map — `mem` does exactly that).
-/// Arc5 #244: read /data/SHUTDOWN.TXT and print the last shutdown reason
-/// on boot. Silent no-op when the file is absent or empty.
+/// Arc5 #244: read SHUTDOWN.TXT from the HOST SHARE (HF6: the DATA
+/// partition is gone) and print the last shutdown reason on boot. Silent
+/// no-op when the file is absent or empty.
 fn show_last_shutdown(m: *Monitor) void {
-    const ops = virtio_blk.disk_ops();
-    if (fat.mount_data(ops) != .ok) return;
+    if (!virtio_file.available()) return;
     var file_buf: [256]u8 = undefined;
-    const n = fat.read_file("SHUTDOWN.TXT", &file_buf);
-    _ = esp.set_disk(ops);
-    if (n == null) return;
-    const bytes = file_buf[0..n.?];
+    const n = virtio_file.read_whole("SHUTDOWN.TXT", &file_buf) orelse return;
+    const bytes = file_buf[0..n];
     // Extract the Reason: line if present
     var found_reason = false;
     var pos: usize = 0;
@@ -8823,35 +8744,59 @@ test "monitor: banner is deterministic and avoids invented claims" {
     try std.testing.expect(std.mem.indexOf(u8, out, "256 MiB") == null);
 }
 
-test "monitor: ls lists the ESP files deterministically" {
-    esp.reset();
-    try std.testing.expect(esp.add_esp_entry("KERNEL.BIN", 0x88b38, ""));
-    try std.testing.expect(esp.add_dir_entry("EFI"));
-    try std.testing.expect(esp.add_esp_entry("BOOTED.TXT", 0x29, "VIRELAIOS BOOTLOADER\nfirmware has agreed to cooperate\n"));
-    try std.testing.expect(esp.add_esp_entry("HELLO.TXT", 11, "hello world"));
+/// M34 HF6 (issue #740): monitor file-surface tests serve the in-memory
+/// share override (the ESP window and FAT volume are gone). Same upsert
+/// pattern as exec.zig's seam; `test_reset_share()` arms an EMPTY share
+/// (honest not_found for every name), `set_test_share(null)` restores the
+/// no-channel state.
+var test_share_files: [8]virtio_file.TestFile = undefined;
+var test_share_n: usize = 0;
+fn test_seed_share(name: []const u8, content: []const u8) void {
+    for (test_share_files[0..test_share_n]) |*f| {
+        if (std.mem.eql(u8, f.name, name)) {
+            f.* = .{ .name = name, .data = content };
+            virtio_file.set_test_share(test_share_files[0..test_share_n]);
+            return;
+        }
+    }
+    if (test_share_n < test_share_files.len) {
+        test_share_files[test_share_n] = .{ .name = name, .data = content };
+        test_share_n += 1;
+        virtio_file.set_test_share(test_share_files[0..test_share_n]);
+    }
+}
+fn test_reset_share() void {
+    test_share_n = 0;
+    virtio_file.set_test_share(test_share_files[0..0]);
+}
+
+test "monitor: ls lists the host-share files deterministically" {
+    test_reset_share();
+    defer virtio_file.set_test_share(null);
+    test_seed_share("KERNEL.BIN", "abcd");
+    test_seed_share("BOOTED.TXT", "VIRELAIOS BOOTLOADER\nfirmware has agreed to cooperate\n");
+    test_seed_share("HELLO.TXT", "hello world");
 
     var env = TestEnv.init();
     var mon = env.monitor();
     try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"ls"}));
-    // Entries are listed in the window's order (the FAT root walk) —
-    // deterministic per boot. The name column pads to the widest entry;
-    // sizes are 0x + 16 hex digits.
+    // Entries are listed in share order — deterministic per boot. The
+    // name column pads to the widest entry; sizes are 0x + 16 hex digits.
     try std.testing.expectEqualStrings(
-        "ls: esp=0x0000000000000004\n" ++
-            "  KERNEL.BIN  0x0000000000088b38  [esp]\n" ++
-            "  EFI         0x0000000000000000  [dir]\n" ++
-            "  BOOTED.TXT  0x0000000000000029  [esp]\n" ++
-            "  HELLO.TXT   0x000000000000000b  [esp]\n",
+        "ls: host=0x0000000000000003\n" ++
+            "  KERNEL.BIN  0x0000000000000004  [host]\n" ++
+            "  BOOTED.TXT  0x0000000000000036  [host]\n" ++
+            "  HELLO.TXT   0x000000000000000b  [host]\n",
         env.mock.contents(),
     );
 }
 
-test "monitor: cat prints ESP content with honest errors" {
-    esp.reset();
-    try std.testing.expect(esp.add_esp_entry("BOOTED.TXT", 0x29, "VIRELAIOS BOOTLOADER\nfirmware has agreed to cooperate\n"));
-    try std.testing.expect(esp.add_esp_entry("KERNEL.BIN", 0x88b38, ""));
-    try std.testing.expect(esp.add_dir_entry("EFI"));
-    try std.testing.expect(esp.add_esp_entry("hello.txt", 11, "hello world"));
+test "monitor: cat prints share content with honest errors" {
+    test_reset_share();
+    defer virtio_file.set_test_share(null);
+    test_seed_share("BOOTED.TXT", "VIRELAIOS BOOTLOADER\nfirmware has agreed to cooperate\n");
+    test_seed_share("KERNEL.BIN", "");
+    test_seed_share("hello.txt", "hello world");
 
     var env = TestEnv.init();
     var mon = env.monitor();
@@ -8859,90 +8804,81 @@ test "monitor: cat prints ESP content with honest errors" {
     // The file already ends with a newline — cat prints it verbatim.
     try std.testing.expectEqualStrings("VIRELAIOS BOOTLOADER\nfirmware has agreed to cooperate\n", env.mock.contents());
     env.mock.reset();
-    // Case-insensitive lookup.
-    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "cat", "HELLO.TXT" }));
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "cat", "hello.txt" }));
     try std.testing.expectEqualStrings("hello world\n", env.mock.contents());
     env.mock.reset();
-    try std.testing.expectEqual(ExecError.invalid_argument, exec(&mon, &.{ "cat", "KERNEL.BIN" }));
-    try std.testing.expect(std.mem.indexOf(u8, env.mock.contents(), "content not loaded") != null);
-    env.mock.reset();
-    try std.testing.expectEqual(ExecError.invalid_argument, exec(&mon, &.{ "cat", "EFI" }));
-    try std.testing.expectEqualStrings("error: EFI: is a directory\n", env.mock.contents());
+    // An empty file prints just the trailing newline (no error).
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "cat", "KERNEL.BIN" }));
+    try std.testing.expectEqualStrings("\n", env.mock.contents());
     env.mock.reset();
     try std.testing.expectEqual(ExecError.invalid_argument, exec(&mon, &.{ "cat", "NOPE.TXT" }));
     try std.testing.expect(std.mem.indexOf(u8, env.mock.contents(), "not found") != null);
 }
 
-test "monitor: ls/cat accept /-paths (honest no-volume errors in a test process)" {
-    esp.reset();
+test "monitor: ls/cat accept /-paths (honest not-found on the share)" {
+    test_reset_share(); // armed, empty — every path is an honest not_found
+    defer virtio_file.set_test_share(null);
     var env = TestEnv.init();
     var mon = env.monitor();
-    // No FAT volume in a host test process: the path branches resolve
-    // nothing and report it honestly (the success path is exercised live
-    // by verify-live-fs.sh — `ls EFI/BOOT` + `cat EFI/BOOT/BOOTAA64.EFI`).
+    // No host file channel in a host test process: the path branches
+    // resolve nothing and report it honestly (the success path is the
+    // live vf gate — `ls`/`cat` on a seeded share).
     try std.testing.expectEqual(ExecError.invalid_argument, exec(&mon, &.{ "ls", "EFI/BOOT" }));
-    try std.testing.expectEqualStrings("error: EFI/BOOT: not found (no such directory on the FAT volume)\n", env.mock.contents());
+    try std.testing.expectEqualStrings("error: EFI/BOOT: not found (no such directory on the host share)\n", env.mock.contents());
     env.mock.reset();
     try std.testing.expectEqual(ExecError.invalid_argument, exec(&mon, &.{ "cat", "EFI/BOOT/BOOTAA64.EFI" }));
-    try std.testing.expectEqualStrings("error: EFI/BOOT/BOOTAA64.EFI: not found (no such file on the FAT volume)\n", env.mock.contents());
+    try std.testing.expectEqualStrings("error: EFI/BOOT/BOOTAA64.EFI: not found (no such file on the host share)\n", env.mock.contents());
     env.mock.reset();
-    // The no-arg ls still lists the (empty) window.
+    // The no-arg ls lists the (empty) share.
     try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"ls"}));
-    try std.testing.expectEqualStrings("ls: esp=0x0000000000000000\nls: no files on the ESP (FAT volume unavailable or empty)\n", env.mock.contents());
+    try std.testing.expectEqualStrings("ls: host=0x0000000000000000\nls: no files on the host share\n", env.mock.contents());
 }
 
-test "monitor: mount is registered and reports honest transport errors in a test process" {
-    esp.reset();
+test "monitor: mount reports the host-share state (HF6)" {
+    virtio_file.set_test_share(null); // no channel
+    defer virtio_file.set_test_share(null);
     var env = TestEnv.init();
     var mon = env.monitor();
-    // No virtio-blk transport in a host test process (blk_ready=false): the
-    // sector ops fail, so both volumes report the I/O result honestly (the
-    // success path is the live gate).
-    try std.testing.expectEqual(ExecError.machine_failed, exec(&mon, &.{ "mount", "data" }));
-    try std.testing.expect(std.mem.indexOf(u8, env.mock.contents(), "error: data: sector I/O failed") != null);
-    env.mock.reset();
-    try std.testing.expectEqual(ExecError.invalid_argument, exec(&mon, &.{ "mount", "nvme0" }));
-    try std.testing.expect(std.mem.indexOf(u8, env.mock.contents(), "unknown volume") != null);
+    // No host file channel: mount reports it honestly (there are no FAT
+    // volumes to switch anymore — HF6 deleted them).
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "mount", "data" }));
+    try std.testing.expect(std.mem.indexOf(u8, env.mock.contents(), "mount: no host file channel") != null);
     env.mock.reset();
     // The registry documents the command.
-    try std.testing.expectEqualStrings("switch the active FAT volume (esp or data)", lookup("mount").?.help);
+    try std.testing.expectEqualStrings("report the host-share file store (HF6: the FAT volumes are gone)", lookup("mount").?.help);
 }
 
-test "monitor: write joins arguments and honestly reports no disk in a test process" {
-    esp.reset();
+test "monitor: write joins arguments and honestly reports no channel in a test process" {
+    virtio_file.set_test_share(null); // no channel
+    defer virtio_file.set_test_share(null);
     var env = TestEnv.init();
     var mon = env.monitor();
-    // In a host test process there is no disk (no FAT volume mounted); the
-    // write must be refused honestly, never faked.
+    // In a host test process there is no file channel; the write must be
+    // refused honestly, never faked (the live vf gate exercises the real
+    // host-disk write).
     try std.testing.expectEqual(ExecError.not_implemented, exec(&mon, &.{ "write", "hello.txt", "hello", "world" }));
     try std.testing.expectEqualStrings(
-        "error: hello.txt: not persisted - no disk (FAT volume unavailable)\n",
+        "error: hello.txt: not persisted - host file-channel error\n",
         env.mock.contents(),
     );
-    // Bounds are validated before any persistence attempt.
     env.mock.reset();
-    try std.testing.expectEqual(ExecError.invalid_argument, exec(&mon, &.{ "write", "bad/name.txt", "x" }));
-    try std.testing.expect(std.mem.indexOf(u8, env.mock.contents(), "invalid file name") != null);
-    env.mock.reset();
-    try std.testing.expectEqual(ExecError.invalid_argument, exec(&mon, &.{ "write", "verylongname.txt", "x" }));
-    try std.testing.expect(std.mem.indexOf(u8, env.mock.contents(), "does not fit FAT 8.3") != null);
-    env.mock.reset();
-    // Empty content is allowed (a zero-length file); still refused honestly.
+    // Empty content is still refused without a channel.
     try std.testing.expectEqual(ExecError.not_implemented, exec(&mon, &.{ "write", "n.txt" }));
-    try std.testing.expect(std.mem.indexOf(u8, env.mock.contents(), "content too long") == null);
+    try std.testing.expect(std.mem.indexOf(u8, env.mock.contents(), "not persisted") != null);
 }
 
-test "monitor: exec is registered and refuses honestly without a disk" {
-    esp.reset();
+test "monitor: exec is registered and refuses honestly without a channel" {
+    virtio_file.set_test_share(null); // no channel
+    defer virtio_file.set_test_share(null);
     var env = TestEnv.init();
     var mon = env.monitor();
     try std.testing.expect(lookup("exec") != null);
-    try std.testing.expectEqualStrings("load a user program from the ESP and enter it at EL0", lookup("exec").?.help);
-    // No FAT volume in a host test process: refused honestly, never faked.
-    // (The full load+spawn path is covered by exec.zig's own tests, which
-    // mount the in-memory FAT fixture and retire the static user task.)
+    try std.testing.expectEqualStrings("load a user program from the host share and enter it at EL0", lookup("exec").?.help);
+    // No host file channel in a host test process: refused honestly, never
+    // faked. (The full load+spawn path is covered by exec.zig's own tests,
+    // which serve the in-memory share fixture.)
     try std.testing.expectEqual(ExecError.not_implemented, exec(&mon, &.{"exec"}));
-    try std.testing.expectEqualStrings("error: no disk (ESP FAT volume unavailable)\n", env.mock.contents());
+    try std.testing.expectEqualStrings("error: no host file channel (boot the runner with --cvc-file <host-dir>)\n", env.mock.contents());
 }
 
 test "monitor: net dns command validation and execution" {
@@ -9011,8 +8947,9 @@ test "monitor: sound volume/mute drive the bounded stream state (claim 9297)" {
 }
 
 test "monitor: which resolves builtin, monitor, app, and not-found names (D16)" {
-    esp.reset();
-    try std.testing.expect(esp.add_esp_entry("NOTEPAD.BIN", 123, ""));
+    test_reset_share();
+    defer virtio_file.set_test_share(null);
+    test_seed_share("NOTEPAD.BIN", "x");
 
     var env = TestEnv.init();
     var mon = env.monitor();
@@ -9023,7 +8960,7 @@ test "monitor: which resolves builtin, monitor, app, and not-found names (D16)" 
     const out = env.mock.contents();
     try std.testing.expect(std.mem.indexOf(u8, out, "type: shell builtin") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "stat: monitor command") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "NOTEPAD.BIN: ESP application") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "NOTEPAD.BIN: host-share application") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "nope.bin: not found") != null);
 }
 

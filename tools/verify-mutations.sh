@@ -65,7 +65,7 @@ echo "=== verify-mutations: the generalized bit-order mutation check ==="
 # `old` and `new` are matched with fgrep -F (literal, no regex) and
 # replaced once. `modules` is a space-separated list of kernel modules
 # whose `zig test` MUST FAIL under the mutation.
-MUTATIONS=$'font8x8 row_pixel|kernel/src/font8x8.zig|    return ((row >> shift) & 1) != 0;|    return ((row >> (7 - shift)) & 1) != 0;|font8x8 text driving_award\nfat read_le endianness|kernel/src/fat.zig|return std.mem.readInt(T, bytes[0..@sizeOf(T)], .little);|return std.mem.readInt(T, bytes[0..@sizeOf(T)], .big);|fat\nvirtio chain-walk NEXT bit|kernel/src/virtio_custom.zig|if ((flags & vq_next) == 0) break;|if ((flags & vq_write) == 0) break;|virtio_custom'
+MUTATIONS=$'font8x8 row_pixel|kernel/src/font8x8.zig|    return ((row >> shift) & 1) != 0;|    return ((row >> (7 - shift)) & 1) != 0;|font8x8 text driving_award\nfile_table traversal boundary|kernel/src/file_table.zig|const prev_bound = (i == 0 or raw[i - 1] == \x27/\x27);|const prev_bound = (i == 0 and raw[i - 1] == \x27/\x27);|file_table\nvirtio chain-walk NEXT bit|kernel/src/virtio_custom.zig|if ((flags & vq_next) == 0) break;|if ((flags & vq_write) == 0) break;|virtio_custom'
 
 n=0
 detected=0

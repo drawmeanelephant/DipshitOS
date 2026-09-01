@@ -24,8 +24,7 @@ const monitor = @import("monitor.zig");
 const shell = @import("shell.zig");
 // Claim 3475: ESP file window. Claim 6420: now FAT-backed (live ESP via
 // the virtio-blk transport), replacing the NVRAM persistence medium.
-const esp = @import("esp.zig");
-const virtio_blk = @import("virtio_blk.zig");
+
 const settings = @import("settings.zig"); // milestone eight card U8 (claim 2649): persistent settings on DATA partition
 // Milestone four (claim 2665): virtio entropy driver + ChaCha20 CSPRNG.
 // The entropy device (DID 0x1044) seeds the CSPRNG post-MMU; `random` and
@@ -109,6 +108,8 @@ const syscall = @import("syscall.zig"); // claim 3594: fixed syscall ABI + runti
 const exec = @import("exec.zig"); // milestone-three card 6: ESP exec — owns the shared rebuild_user_root (claims 2665/3693)
 const virtio_custom = @import("virtio_custom.zig"); // claim 0828: custom-virtio spike driver (DID 0x1082)
 const virtio_file = @import("virtio_file.zig"); // M34 HF1+HF2 (issues #735/#736): host file channel client (queue 5)
+// M34 HF5 (issue #739): one-time /data → /host migration at boot.
+
 const HandoffV2 = handoff.HandoffV2;
 
 // Claim 0020 phase selectors live with the transport (the exact-one-phase
@@ -307,13 +308,9 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
     // instead means the kernel died in that window.
     evidence.write_marker_var(st, marker_prex);
 
-    // Claim 6420: the virtio-pci block transport (the runner's disk is a
-    // VZVirtioBlockDeviceConfiguration — modern virtio-blk, DID 0x1041).
-    // Armed PRE-EXIT like the console (config-space + BAR reads hang
-    // post-exit on VZ, claim 0013); its BAR0 window is handed to the
-    // identity map below so post-MMU sector I/O reaches the device
-    // (claim 1517's transport reliability applies).
-    const blk_ready = virtio_blk.virtio_blk_init();
+    // M34 HF6 (issue #740): the virtio-blk transport and the ESP/DATA
+    // FAT partitions are GONE — zero guest code speaks FAT after boot.
+    // (The boot volume is parsed by Apple's firmware pre-exit only.)
 
     // Milestone four (claim 2665): the virtio-pci entropy transport
     // (DID 0x1044 — the runner's VZVirtioEntropyDeviceConfiguration, seen
@@ -381,15 +378,6 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
     // BAR is handed to the identity map below like the console/blk windows.
     const cv_probed = virtio_custom.probe();
 
-    // Claim 6420: the ESP file window. The FAT32 volume on the ESP is
-    // mounted through the virtio-blk transport and the root directory
-    // snapshotted into the window (names/sizes/content for small files) —
-    // replacing claim 3475's pre-exit Simple File System snapshot AND its
-    // NVRAM persistence medium: `write` now writes the live FAT volume, so
-    // files survive reboot on the disk itself. Best effort; a failed mount
-    // leaves the window empty and the monitor reports it honestly.
-    if (blk_ready) _ = esp.set_disk(virtio_blk.disk_ops());
-
     var exited = false;
     var attempt: usize = 0;
     while (attempt < 8) : (attempt += 1) {
@@ -441,11 +429,9 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
         extra_windows[extra_count] = .{ .base = virtio_console.vp_bar0, .len = 0x10000 };
         extra_count += 1;
     }
-    if (virtio_blk.blk_ready and virtio_blk.blk_bar0 != 0) {
-        extra_windows[extra_count] = .{ .base = virtio_blk.blk_bar0, .len = 0x10000 };
-        extra_count += 1;
-    }
-    // Claim 0828: the custom-virtio transport BAR (pre-exit resolved).
+    // M34 HF6 (issue #740): the virtio-blk BAR window is gone with the
+    // transport. Claim 0828: the custom-virtio transport BAR (pre-exit
+    // resolved).
     // mmu.zig maps windows above the blanket; below it the 4 GiB blanket
     // already covers the BAR, so the entry is a harmless no-op there.
     if (cv_probed and virtio_custom.cv_bar != 0) {
@@ -648,28 +634,17 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
     uart_hex(timer.freq);
     uart_puts("\n");
 
-    // Claim 6420: the ESP file window summary (the FAT volume mount result
-    // + the root listing count). A second boot's line showing the file
-    // `write` stored in boot one is the persistence-through-reboot
-    // evidence in the serial log — the file now lives on the disk, not in
-    // NVRAM variables (claim 3475's medium is replaced).
-    uart_puts("esp window: esp=");
-    uart_hex(@intCast(esp.esp_count()));
-    uart_puts(" disk=");
-    uart_puts(if (esp.disk_ready()) "1" else "0");
+    // M34 HF6 (issue #740): the ESP window and FAT volumes are gone — the
+    // boot line reports the host file channel state instead (the queue-5
+    // share is the only file store).
+    uart_puts("host share: ");
+    uart_puts(if (virtio_file.available()) "armed" else "absent");
     uart_puts("\n");
 
-    // Claim 6420: VZ resets the virtio-blk device at ExitBootServices (its
-    // status reads 0 post-exit and the queue is dead). Re-arm the queue
-    // now that the identity map is live, so the shell's `write` (live FAT
-    // reads/writes through the transport) works. The pre-exit queue was
-    // used only for the boot-time ESP mount.
-    if (virtio_blk.blk_common != 0) {
-        _ = virtio_blk.blk_rearm();
-        settings.init_from_disk(virtio_blk.disk_ops());
-    } else {
-        settings.init();
-    }
+    // M34 HF6 (issue #740): the DATA partition and the post-exit
+    // virtio-blk path are gone — settings load from the host share (a
+    // no-op without a channel; defaults stay in force).
+    settings.init_from_share();
 
     uart_puts("kernel terminal state\n");
 
@@ -1173,18 +1148,23 @@ const serial_ring = @import("serial_ring.zig"); // Arc5 #243: capture last 512B 
 /// swallowed the `elf: hello from HELLO.ELF` marker in the strace gate).
 var serial_at_bol: bool = true;
 
-/// Whether the CURRENT partial (mid-line) serial content was written by
-/// process stdout (sys_write). `process_stdout` consults it so the
-/// claim-1714 fresh-line prepend fires only when FOREIGN output (the
-/// shell's newline-less prompt, kernel/tracer prints) left the cursor
-/// mid-line — NOT when a program is mid-line composing its OWN multi-write
-/// line (USER.BIN's argv preamble is one logical line across three
-/// sys_write calls; the un-gated prepend fired on every call and split it,
-/// breaking verify-live-args). Cleared by any newline (a terminated line
-/// never continues) and by any non-stdout partial write from `uart_puts`
-/// (the prompt case — that open line belongs to the shell, so the next
-/// process write must fresh-line).
-var stdout_owns_open_line: bool = false;
+/// WHICH PROCESS owns the current partial (mid-line) serial content, if
+/// any. `process_stdout` consults it so the claim-1714 fresh-line prepend
+/// fires only when FOREIGN output (the shell's newline-less prompt,
+/// kernel/tracer prints, or ANOTHER process's partial line) left the
+/// cursor mid-line — NOT when a program is mid-line composing its OWN
+/// multi-write line (USER.BIN's argv preamble is one logical line across
+/// three sys_write calls; the un-gated prepend fired on every call and
+/// split it, breaking verify-live-args). The owner pid makes two
+/// CONSECUTIVE programs distinct: HF4APP.ELF leaves its 20-byte marker
+/// mid-line and exits; DESKTOP.BIN's first write is foreign and must
+/// fresh-line (without the pid, the desktop appended directly onto the
+/// app's marker — `hostdesktop:` — breaking the vf gate's exact-line
+/// needles). Cleared by any newline (a terminated line never continues)
+/// and by any non-stdout partial write from `uart_puts` (the prompt case
+/// — that open line belongs to the shell, so the next process write must
+/// fresh-line).
+var stdout_line_owner_pid: ?usize = null;
 
 fn uart_at_bol() bool {
     return serial_at_bol;
@@ -1196,7 +1176,7 @@ fn uart_putc(byte: u8) void {
     serial_ring.append(&[_]u8{byte});
     if (byte == '\n' or byte == '\r') {
         serial_at_bol = true;
-        stdout_owns_open_line = false;
+        stdout_line_owner_pid = null;
     } else {
         serial_at_bol = false;
     }
@@ -1240,14 +1220,14 @@ fn uart_putc(byte: u8) void {
     }
 }
 
-fn uart_puts(text: []const u8) void {
+pub fn uart_puts(text: []const u8) void {
     for (text) |byte| uart_putc(byte);
     // A non-newline-terminated write from THIS path is shell/kernel output
     // (the prompt): the open line belongs to the shell, so the next process
     // write must fresh-line. (process_stdout re-asserts stdout ownership
     // right after its own uart_puts call, so program lines stay open.)
     if (text.len > 0 and text[text.len - 1] != '\n' and text[text.len - 1] != '\r') {
-        stdout_owns_open_line = false;
+        stdout_line_owner_pid = null;
     }
     // Claim 0013: a virtio-console line without a trailing newline (e.g. the
     // shell's prompt) must still reach the host — flush any buffered bytes.
@@ -1746,6 +1726,11 @@ fn custom_virtio_spike() void {
         uart_puts(" free=");
         uart_puts(hex16(pr.free)[0..]);
         uart_puts("\n");
+        // M34 HF5 (issue #739): re-load settings from the share — the
+        // share IS the settings home. M34 HF6 (issue #740): the /data
+        // migration is gone (its job finished in HF5; the share is the
+        // only store). No-op on default boots.
+        _ = settings.load_from_share();
     } else {
         uart_puts("vf: queue 5 absent (no host file channel)\n");
     }
@@ -1795,12 +1780,21 @@ fn exception_report_writer(text: []const u8) void {
 fn process_stdout(text: []const u8) void {
     // Claim 1714: foreign output (the shell's drawn prompt) left the cursor
     // mid-line — start the program's output on a fresh line. But only when
-    // the open line is NOT the program's own: a program composing one line
+    // the open line is NOT THIS PROCESS's own: a program composing one line
     // across several sys_write calls (USER.BIN's argv preamble) must stay
-    // contiguous, or the markers split and the exact-line greps miss them.
-    if (!uart_at_bol() and !stdout_owns_open_line) uart_puts("\n");
+    // contiguous, and a DIFFERENT process's partial line must not be
+    // continued (the HF4APP.ELF marker → DESKTOP.BIN merge above). The
+    // shell's prompt is not a process, so uart_puts clears the owner and
+    // the next process write fresh-lines (the claim-1714 intent).
+    const pid = scheduler.current_id();
+    const owns_open_line = stdout_line_owner_pid != null and stdout_line_owner_pid.? == pid;
+    if (!uart_at_bol() and !owns_open_line) uart_puts("\n");
     uart_puts(text);
-    stdout_owns_open_line = text.len > 0 and text[text.len - 1] != '\n' and text[text.len - 1] != '\r';
+    if (text.len > 0 and text[text.len - 1] != '\n' and text[text.len - 1] != '\r') {
+        stdout_line_owner_pid = pid;
+    } else {
+        stdout_line_owner_pid = null;
+    }
 }
 
 /// Claim 9187 IRQ chain, registered as the exception module's dispatcher:

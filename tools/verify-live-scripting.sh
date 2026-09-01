@@ -59,13 +59,17 @@ echo "revision: $REVISION branch=$BRANCH dirty-files=$DIRTY"
 zig fmt --check boot/src/*.zig kernel/src/*.zig build.zig
 zig build
 zig build image
-swift build --package-path host/vm-runner --configuration release
+# M34 HF6 (issue #740): `write`/`sh` operate on the --cvc-file host share,
+# which requires the SPIKE runner build (the custom-virtio FILE channel).
+swift build --package-path host/vm-runner --configuration release -Xswiftc -DSPIKE
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
 # --- per-run isolation -------------------------------------------------------------
 # Private scratch dir + pristine-boot overlay for EVERY boot.
 # See tools/lib/gate-run.sh.
 gate_begin live-scripting
+# M34 HF6 (issue #740): the scripting surface is the host share — arm it.
+gate_arm_share
 echo "run dir: $RUN_DIR"
 SCRIPT="$RUN_DIR/script.txt"
 
@@ -84,9 +88,11 @@ run_one() {
     local tag="$1"
     rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial-$tag.log"
     set +e
-    # WRITE-GATE: canonical image + inter-gate lock (see gate-run.sh note).
-    gate_shared_disk_lock
-    host/vm-runner/.build/release/VMRunner artifacts/disk.img \
+    # M34 HF6 (issue #740): the shared read-only boot image + private
+    # share — `write` and `sh` now operate on the host share (the FAT
+    # volume is gone), so the gate arms the channel instead of locking a
+    # writable disk.
+    host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
         --serial "$RUN_DIR/vm-serial-$tag.log" \
         --script "$SCRIPT" --script-expect "t16-scripting-ok" --timeout 30 \
         > "$(art live-scripting-run-$tag.txt)" 2>&1
@@ -108,7 +114,7 @@ run_one() {
         # echo). If INNER.TXT had run despite the refusal, its `echo`
         # output would add a second occurrence.
         [ "$(grep -oF -- 't16-inner-ran' "$SER" | wc -l | tr -d ' ')" = 1 ] && NOINNER=1
-        grep -qF "sh: MISSING.TXT: not found (no such file on the ESP)" "$SER" && MISSING=1
+        grep -qF "sh: MISSING.TXT: not found (no such file on the host share)" "$SER" && MISSING=1
         grep -qF "t16-scripting-ok" "$SER" && DONE=1
     fi
     echo "$tag: rc=$RC bytes=$SERIAL_BYTES banner=$BANNER ran=$RAN nested=$NESTED noinner=$NOINNER missing=$MISSING done=$DONE"

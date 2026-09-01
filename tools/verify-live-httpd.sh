@@ -3,7 +3,7 @@
 # verify-live-httpd.sh -- Claim 0750
 # Class-B hardware gate: in-guest HTTP/1.1 web server HTTPD.BIN running at EL0
 # on real VZ hardware, passive open / listen mode on port 8080, request parsing,
-# static file serving from FAT32, and /api/status telemetry.
+# static file serving from the host share, and /api/status telemetry.
 #
 # Class B — Apple silicon + VZ only; boots real VMs.
 
@@ -36,11 +36,12 @@ echo "revision: $REVISION branch=$BRANCH dirty-files=$DIRTY"
 zig fmt --check kernel/src/tcp.zig kernel/src/syscall.zig kernel/src/monitor.zig user/src/lib/ui.zig user/src/httpd.zig build.zig
 zig build
 zig build image
-swift build --package-path host/vm-runner --configuration release
+swift build --package-path host/vm-runner --configuration release -Xswiftc -DSPIKE
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
 # --- per-run isolation -------------------------------------------------------
 gate_begin live-httpd
+gate_seed_share
 echo "run dir: $RUN_DIR"
 
 # --- scripted keystrokes -----------------------------------------------------

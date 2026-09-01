@@ -10,6 +10,7 @@
 
 const std = @import("std");
 const console = @import("console.zig");
+const virtio_file = @import("virtio_file.zig"); // HF6: the host file channel is the only file store
 
 /// The capture buffer size — same as the pipe buffer (4 KiB).
 pub const capture_capacity: usize = 4096;
@@ -78,55 +79,33 @@ pub fn capture_console() console.Console {
     return .{ .ctx = &capture_ctx, .vtable = ensure_capture_vtable() };
 }
 
-/// Write captured bytes to a file. Uses the ESP layer for bare names and
-/// FAT directly for `/`-paths. Returns an error message for the console
-/// (or null on success).
+/// Write captured bytes to a file on the HOST SHARE through the queue-5
+/// file channel (open-create + truncate + chunked write + close). Returns
+/// an error message for the console (or null on success). M34 HF6 (issue
+/// #740): the ESP/FAT write paths are gone — the share is the only file
+/// store.
 pub fn write_captured_to_file(name: []const u8, content: []const u8) ?[]const u8 {
-    const esp_mod = @import("esp.zig");
-    const fat_mod = @import("fat.zig");
-    if (std.mem.indexOfScalar(u8, name, '/') != null) {
-        // FAT direct path
-        if (fat_mod.write_file(name, content) != .ok) return "redirect: FAT write failed";
-    } else {
-        // ESP path
-        switch (esp_mod.write_file(name, content)) {
-            .ok => {},
-            .no_disk => return "redirect: no disk (FAT volume unavailable)",
-            .name_invalid => return "redirect: invalid filename",
-            .name_too_long => return "redirect: filename too long",
-            .content_too_long => return "redirect: content too long for the file",
-            .bad_path => return "redirect: bad path",
-            .disk_full => return "redirect: disk full",
-            .write_failed => return "redirect: write I/O failed",
-        }
+    const st = virtio_file.write_whole(name, content);
+    if (st != virtio_file.st_ok) {
+        return switch (st) {
+            virtio_file.st_host_error => "redirect: no host file channel",
+            virtio_file.st_not_found => "redirect: file not found",
+            virtio_file.st_handle => "redirect: host handle table full",
+            else => "redirect: file write failed",
+        };
     }
     return null;
 }
 
-/// Read a file into a caller-provided buffer. Returns the slice of `out`
-/// holding the content, or null with an error message in `err_msg`.
+/// Read a file from the HOST SHARE into a caller-provided buffer. Returns
+/// the slice of `out` holding the content, or null (absent / too big / no
+/// channel). M34 HF6 (issue #740): the ESP/FAT read paths are gone.
 pub fn read_file_into(name: []const u8, out: []u8) ?[]const u8 {
-    const esp_mod = @import("esp.zig");
-    const fat_mod = @import("fat.zig");
-    if (std.mem.indexOfScalar(u8, name, '/') != null) {
-        // FAT direct path
-        const got = fat_mod.read_file(name, out) orelse return null;
-        return out[0..got];
-    } else {
-        // ESP path
-        const entry = esp_mod.lookup(name) orelse return null;
-        switch (entry.kind) {
-            .esp_dir => return null,
-            .esp_file => {
-                const content = esp_mod.content_of(entry);
-                if (content.len == 0 and entry.size > 0) return null;
-                const take = @min(content.len, out.len);
-                @memcpy(out[0..take], content[0..take]);
-                return out[0..take];
-            },
-        }
-    }
-    return null;
+    var st = virtio_file.StatResult{};
+    if (virtio_file.stat(name, &st) != virtio_file.st_ok or st.is_dir) return null;
+    if (st.size > out.len) return null;
+    const got = virtio_file.read_into(name, st.size, out) orelse return null;
+    return out[0..got];
 }
 
 // ---------------------------------------------------------------------------

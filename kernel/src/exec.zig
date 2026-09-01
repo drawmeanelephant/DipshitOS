@@ -57,11 +57,8 @@ const console = @import("console.zig"); // card 3c (claim 7786): the shell-side 
 const exceptions = @import("exceptions.zig"); // card 3e (claim 4636): the entry-contract frame slots (x0/x1) in host tests
 const uaccess = @import("uaccess.zig"); // card 3e (claim 4636): the args range is read-only (copy_in ok, copy_out fault)
 const mmu = @import("mmu.zig");
-const esp = @import("esp.zig");
-const fat = @import("fat.zig");
-// M34 HF4 (issue #738): the HOST FILE CHANNEL is the primary exec source
-// when `--cvc-file` is attached — `stat` + `read_into` stream a dropped
-// `.ELF` into `program` with no ESP involvement.
+// M34 HF4 (issue #738): the HOST FILE CHANNEL is the exec source — `stat`
+// + `read_into` stream a dropped `.ELF` into `program`.
 const virtio_file = @import("virtio_file.zig");
 const scheduler = @import("scheduler.zig");
 const userspace = @import("userspace.zig");
@@ -123,7 +120,8 @@ const elf_magic: u32 = 0x464c457f;
 
 pub const ExecResult = enum {
     ok,
-    /// ESP FAT volume not mounted (host test process, or blk init failed).
+    /// No host file channel (no `--cvc-file` share) — the only app source
+    /// since M34 HF6 deleted the ESP app path.
     no_disk,
     /// The named file is absent from the volume (or is a directory).
     not_found,
@@ -268,28 +266,18 @@ pub fn exec_file(name: []const u8, args: []const []const u8) ExecResult {
     if (args.len > max_exec_args) return .too_many_args;
     if (name.len == 0) return .not_found;
 
-    var got: usize = 0;
-    // Host-share source first: STAT for the size, then stream the whole
-    // file into the shared staging buffer across READ round trips. A host
-    // name may exceed FAT's 8.3 window (`esp.name_max`) — the wire allows
-    // `virtio_file.path_max`; the process registry truncates long names.
-    if (virtio_file.available() and name.len <= virtio_file.path_max) {
-        var st = virtio_file.StatResult{};
-        if (virtio_file.stat(name, &st) == virtio_file.st_ok and !st.is_dir) {
-            if (st.size > program.len) return .too_large;
-            got = virtio_file.read_into(name, st.size, &program) orelse return .not_found;
-        }
-    }
-    if (got == 0) {
-        // ESP fallback (the pre-HF4 path, unchanged): the raw volume read
-        // (the ESP window only content-loads files ≤ esp_content_max; exec
-        // reads up to its own fixed buffer).
-        if (name.len > esp.name_max) return .not_found;
-        if (!esp.disk_ready()) return .no_disk;
-        const e = esp.lookup(name) orelse return .not_found;
-        if (e.kind != .esp_file) return .not_found;
-        got = fat.read_file(name, &program) orelse return .not_found;
-    }
+    // M34 HF6 (issue #740): the host share is the ONLY app source — the
+    // ESP app path is gone (fat.zig deleted). STAT for the size, then
+    // stream the whole file into the shared staging buffer across READ
+    // round trips; a name may exceed FAT's old 8.3 window — the wire
+    // allows `virtio_file.path_max`; the process registry truncates long
+    // names.
+    if (name.len > virtio_file.path_max) return .not_found;
+    if (!virtio_file.available()) return .no_disk;
+    var st = virtio_file.StatResult{};
+    if (virtio_file.stat(name, &st) != virtio_file.st_ok or st.is_dir) return .not_found;
+    if (st.size > program.len) return .too_large;
+    const got = virtio_file.read_into(name, st.size, &program) orelse return .not_found;
 
     if (got < dsk1_header_size) return .bad_magic;
     const magic = std.mem.readInt(u32, program[0..4], .little);
@@ -580,7 +568,7 @@ fn exec_dynamic_elf(
 ) ExecResult {
     if (!scheduler.has_free_slot()) return .pool_full;
 
-    const interp_got = fat.read_file(interp_name, &interp_program) orelse return .not_found;
+    const interp_got = read_host_file(interp_name, &interp_program) orelse return .not_found;
     const interp_image = elf_mod.parse_at(interp_program[0..interp_got], null) catch |err| return elf_exec_error(err);
 
     const seg0 = image.segments[0];
@@ -671,11 +659,11 @@ fn exec_dynamic_elf(
     const lib_dst: [*]u8 = @ptrFromInt(lib_phys);
     @memset(lib_dst[0 .. lib_pages * alloc.page_size], 0);
     var lib_offset: usize = 0;
-    if (fat.read_file("LIBUI.SO", &interp_program)) |got| {
+    if (read_host_file("LIBUI.SO", &interp_program)) |got| {
         @memcpy(lib_dst[lib_offset..][0..got], interp_program[0..got]);
         lib_offset += 0x10000;
     }
-    if (fat.read_file("LIBFONT.SO", &interp_program)) |got| {
+    if (read_host_file("LIBFONT.SO", &interp_program)) |got| {
         @memcpy(lib_dst[lib_offset..][0..got], interp_program[0..got]);
         lib_offset += 0x10000;
     }
@@ -1004,6 +992,19 @@ pub fn parse_dsk3(buf: []const u8, got: usize) union(enum) { ok: Segments, err: 
     } };
 }
 
+/// M34 HF6 (issue #740): read a whole file from the HOST SHARE (STAT +
+/// chunked READ round trips into `buf`) — the share is the only app and
+/// shared-library source. Returns the byte count, or null when absent / a
+/// directory / too big for `buf` / the transport is down.
+fn read_host_file(name: []const u8, buf: []u8) ?usize {
+    if (!virtio_file.available()) return null;
+    if (name.len == 0 or name.len > virtio_file.path_max) return null;
+    var st = virtio_file.StatResult{};
+    if (virtio_file.stat(name, &st) != virtio_file.st_ok or st.is_dir) return null;
+    if (st.size > buf.len) return null;
+    return virtio_file.read_into(name, st.size, buf);
+}
+
 /// Build a minimal DSK1 flat image: header (entry at offset 24 = content
 /// start) + `content`.
 fn dsk1(content: []const u8, entry_off: u64, image_size: u64) [dsk1_header_size + 64]u8 {
@@ -1016,20 +1017,31 @@ fn dsk1(content: []const u8, entry_off: u64, image_size: u64) [dsk1_header_size 
     return img;
 }
 
-var saved_image: []u8 = undefined;
-
-fn fake_read(lba: u64, out: *[fat.sector_size]u8) bool {
-    const off = lba * fat.sector_size;
-    if (off + fat.sector_size > saved_image.len) return false;
-    @memcpy(out, saved_image[off .. off + fat.sector_size]);
-    return true;
-}
-
-fn fake_write(lba: u64, data: *const [fat.sector_size]u8) bool {
-    const off = lba * fat.sector_size;
-    if (off + fat.sector_size > saved_image.len) return false;
-    @memcpy(saved_image[off .. off + fat.sector_size], data);
-    return true;
+/// Test-only share seeding: M34 HF6 (issue #740) — with fat.zig gone the
+/// exec host tests serve files through virtio_file's in-memory share
+/// override (the ONLY host-testable read seam). The table holds multiple
+/// files so the PEER/pool tests can seed COUNTER + PEER + USER together
+/// (a single slot silently dropped the first seed); `test_seed` upserts
+/// by name so re-seeding USER.BIN with a different image replaces it.
+/// Every test that arms MUST restore with `defer virtio_file.set_test_share(null)`
+/// — the exec batch imports syscall's tests into the SAME test process,
+/// so a leaked armed share flips sys_exec's honest no-disk path into a
+/// not_found (the cross-module leak the old end-of-body restore missed).
+var test_share_files: [8]virtio_file.TestFile = undefined;
+var test_share_n: usize = 0;
+fn test_seed(name: []const u8, content: []const u8) void {
+    for (test_share_files[0..test_share_n]) |*f| {
+        if (std.mem.eql(u8, f.name, name)) {
+            f.* = .{ .name = name, .data = content };
+            virtio_file.set_test_share(test_share_files[0..test_share_n]);
+            return;
+        }
+    }
+    if (test_share_n < test_share_files.len) {
+        test_share_files[test_share_n] = .{ .name = name, .data = content };
+        test_share_n += 1;
+        virtio_file.set_test_share(test_share_files[0..test_share_n]);
+    }
 }
 
 /// Arm the module physical allocator with a small fixture map, the way the
@@ -1053,32 +1065,32 @@ fn arm_allocator() void {
 }
 
 test "exec: DSK1 header parse rejects bad magic, entry, and oversize images" {
-    try build_image(test_allocator);
-    defer test_allocator.free(saved_image);
-    esp.reset();
-    try std.testing.expectEqual(fat.MountResult.ok, esp.set_disk(.{ .read = &fake_read, .write = &fake_write }));
+    // Arm the share with an unrelated file so an absent name is a real
+    // not_found (no share at all reports no_disk — the next test).
+    defer virtio_file.set_test_share(null); // no-disk state on every exit
+    test_seed("BOOTED.TXT", "1\n");
     try std.testing.expectEqual(ExecResult.not_found, exec_file("NOPE.BIN", &.{}));
 
     // Bad magic.
-    try std.testing.expectEqual(esp.WriteResult.ok, esp.write_file("USER.BIN", "NOT A DSK1 IMAGE!"));
+    test_seed("USER.BIN", "NOT A DSK1 IMAGE!");
     try std.testing.expectEqual(ExecResult.bad_magic, exec_file("USER.BIN", &.{}));
 
     // entry_offset below the 24-byte header (and past the content).
     const bad_entry = dsk1("xx", 4, 24 + 2);
-    try std.testing.expectEqual(esp.WriteResult.ok, esp.write_file("USER.BIN", bad_entry[0 .. 24 + 2]));
+    test_seed("USER.BIN", bad_entry[0 .. 24 + 2]);
     try std.testing.expectEqual(ExecResult.bad_entry, exec_file("USER.BIN", &.{}));
     const bad_entry2 = dsk1("xx", 30, 24 + 2);
-    try std.testing.expectEqual(esp.WriteResult.ok, esp.write_file("USER.BIN", bad_entry2[0 .. 24 + 2]));
+    test_seed("USER.BIN", bad_entry2[0 .. 24 + 2]);
     try std.testing.expectEqual(ExecResult.bad_entry, exec_file("USER.BIN", &.{}));
 
     // image_size beyond the fixed buffer.
     const oversize = dsk1("xx", 24, exec_program_max + 1);
-    try std.testing.expectEqual(esp.WriteResult.ok, esp.write_file("USER.BIN", oversize[0 .. 24 + 2]));
+    test_seed("USER.BIN", oversize[0 .. 24 + 2]);
     try std.testing.expectEqual(ExecResult.too_large, exec_file("USER.BIN", &.{}));
 }
 
 test "exec: no disk is reported honestly" {
-    esp.reset();
+    virtio_file.set_test_share(null);
     try std.testing.expectEqual(ExecResult.no_disk, exec_file("USER.BIN", &.{}));
 }
 
@@ -1124,10 +1136,11 @@ test "exec: DSK3 header validation pins the segment bounds (claim 3805)" {
 }
 
 test "exec: ok path loads, validates, builds the root, and spawns the task" {
-    try build_image(test_allocator);
-    defer test_allocator.free(saved_image);
-    esp.reset();
-    try std.testing.expectEqual(fat.MountResult.ok, esp.set_disk(.{ .read = &fake_read, .write = &fake_write }));
+    virtio_file.set_test_share(null); // reset any prior test's armed share
+    // Restore hardware mode on EVERY exit (success or failure): the exec
+    // batch links syscall's tests into the SAME process, so a leaked
+    // armed share flips sys_exec's honest no-disk into a not_found.
+    defer virtio_file.set_test_share(null);
     arm_allocator();
     // Give the boot user root a real (non-zero) value so the payload's
     // task carries it: the EL1h tasks keep the kernel root (0).
@@ -1145,7 +1158,7 @@ test "exec: ok path loads, validates, builds the root, and spawns the task" {
     try std.testing.expect(scheduler.reap(2));
 
     const img = dsk1("user: hello from the ESP\n", 24, 24 + 25);
-    try std.testing.expectEqual(esp.WriteResult.ok, esp.write_file("USER.BIN", img[0 .. 24 + 25]));
+    test_seed("USER.BIN", img[0 .. 24 + 25]);
     try std.testing.expectEqual(ExecResult.ok, exec_file("USER.BIN", &.{}));
     const info = loaded().?;
     try std.testing.expectEqualStrings("USER.BIN", info.name);
@@ -1194,10 +1207,11 @@ test "exec: ok path loads, validates, builds the root, and spawns the task" {
 }
 
 test "exec: a second program loads and runs while the first is alive" {
-    try build_image(test_allocator);
-    defer test_allocator.free(saved_image);
-    esp.reset();
-    try std.testing.expectEqual(fat.MountResult.ok, esp.set_disk(.{ .read = &fake_read, .write = &fake_write }));
+    virtio_file.set_test_share(null); // reset any prior test's armed share
+    // Restore hardware mode on EVERY exit (success or failure): the exec
+    // batch links syscall's tests into the SAME process, so a leaked
+    // armed share flips sys_exec's honest no-disk into a not_found.
+    defer virtio_file.set_test_share(null);
     arm_allocator();
     _ = mmu.build_user_root(userspace.text_va, 0x1000, 64, userspace.stack_va, 0x2000, 8192) orelse return error.TestUnexpectedResult;
     _ = scheduler.init();
@@ -1212,7 +1226,7 @@ test "exec: a second program loads and runs while the first is alive" {
     try std.testing.expect(scheduler.exit_current(7));
     try std.testing.expect(scheduler.reap(2));
     const img = dsk1("user: hello from the ESP\n", 24, 24 + 25);
-    try std.testing.expectEqual(esp.WriteResult.ok, esp.write_file("USER.BIN", img[0 .. 24 + 25]));
+    test_seed("USER.BIN", img[0 .. 24 + 25]);
     // Claim 0826: the exec gate is gone — the FIRST exec succeeds with the
     // pool slot free, and the SECOND through EIGHTH succeed WITHOUT waiting
     // for the earlier programs to exit (the old `user_busy` refusal is
@@ -1266,10 +1280,11 @@ test "exec: a second program loads and runs while the first is alive" {
 }
 
 test "exec: a live user task does not block a second exec (gate is gone)" {
-    try build_image(test_allocator);
-    defer test_allocator.free(saved_image);
-    esp.reset();
-    try std.testing.expectEqual(fat.MountResult.ok, esp.set_disk(.{ .read = &fake_read, .write = &fake_write }));
+    virtio_file.set_test_share(null); // reset any prior test's armed share
+    // Restore hardware mode on EVERY exit (success or failure): the exec
+    // batch links syscall's tests into the SAME process, so a leaked
+    // armed share flips sys_exec's honest no-disk into a not_found.
+    defer virtio_file.set_test_share(null);
     arm_allocator();
     _ = mmu.build_user_root(userspace.text_va, 0x1000, 64, userspace.stack_va, 0x2000, 8192) orelse return error.TestUnexpectedResult;
     _ = scheduler.init();
@@ -1277,7 +1292,7 @@ test "exec: a live user task does not block a second exec (gate is gone)" {
     _ = scheduler.register_user(0x3000, 0);
     scheduler.start();
     const img = dsk1("user: hello from the ESP\n", 24, 24 + 25);
-    try std.testing.expectEqual(esp.WriteResult.ok, esp.write_file("USER.BIN", img[0 .. 24 + 25]));
+    test_seed("USER.BIN", img[0 .. 24 + 25]);
     // The boot payload's user task (slot 2) is STILL ALIVE — the old
     // `user_busy` gate is gone. The exec'd program gets its OWN root,
     // stack, and task, so it loads and runs alongside the payload.
@@ -1293,10 +1308,11 @@ test "exec: a live user task does not block a second exec (gate is gone)" {
 }
 
 test "exec: COUNTER.BIN loads by name with its own marker and process" {
-    try build_image(test_allocator);
-    defer test_allocator.free(saved_image);
-    esp.reset();
-    try std.testing.expectEqual(fat.MountResult.ok, esp.set_disk(.{ .read = &fake_read, .write = &fake_write }));
+    virtio_file.set_test_share(null); // reset any prior test's armed share
+    // Restore hardware mode on EVERY exit (success or failure): the exec
+    // batch links syscall's tests into the SAME process, so a leaked
+    // armed share flips sys_exec's honest no-disk into a not_found.
+    defer virtio_file.set_test_share(null);
     arm_allocator();
     _ = mmu.build_user_root(userspace.text_va, 0x1000, 64, userspace.stack_va, 0x2000, 8192) orelse return error.TestUnexpectedResult;
     _ = scheduler.init();
@@ -1315,7 +1331,7 @@ test "exec: COUNTER.BIN loads by name with its own marker and process" {
     // different from every USER.BIN marker so the serial log can tell the
     // two programs apart).
     const img = dsk1("counter: alive\n", 24, 24 + 15);
-    try std.testing.expectEqual(esp.WriteResult.ok, esp.write_file("COUNTER.BIN", img[0 .. 24 + 15]));
+    test_seed("COUNTER.BIN", img[0 .. 24 + 15]);
     try std.testing.expectEqual(ExecResult.ok, exec_file("COUNTER.BIN", &.{}));
     const info = loaded().?;
     try std.testing.expectEqualStrings("COUNTER.BIN", info.name);
@@ -1332,7 +1348,7 @@ test "exec: COUNTER.BIN loads by name with its own marker and process" {
     // processes are DISTINCT programs now (the claim-0826 gate ran two
     // copies of the same image).
     const img2 = dsk1("user: hello from the ESP\n", 24, 24 + 25);
-    try std.testing.expectEqual(esp.WriteResult.ok, esp.write_file("USER.BIN", img2[0 .. 24 + 25]));
+    test_seed("USER.BIN", img2[0 .. 24 + 25]);
     try std.testing.expectEqual(ExecResult.ok, exec_file("USER.BIN", &.{}));
     try std.testing.expectEqualStrings("USER.BIN", loaded().?.name);
     try std.testing.expectEqual(@as(usize, 3), process.count()); // boot exited + COUNTER + USER
@@ -1370,10 +1386,11 @@ fn elf32_hello() [128]u8 {
 }
 
 test "exec: a valid AArch64 ELF32 loads through the magic-sniff path" {
-    try build_image(test_allocator);
-    defer test_allocator.free(saved_image);
-    esp.reset();
-    try std.testing.expectEqual(fat.MountResult.ok, esp.set_disk(.{ .read = &fake_read, .write = &fake_write }));
+    virtio_file.set_test_share(null); // reset any prior test's armed share
+    // Restore hardware mode on EVERY exit (success or failure): the exec
+    // batch links syscall's tests into the SAME process, so a leaked
+    // armed share flips sys_exec's honest no-disk into a not_found.
+    defer virtio_file.set_test_share(null);
     arm_allocator();
     _ = mmu.build_user_root(userspace.text_va, 0x1000, 64, userspace.stack_va, 0x2000, 8192) orelse return error.TestUnexpectedResult;
     _ = scheduler.init();
@@ -1387,7 +1404,7 @@ test "exec: a valid AArch64 ELF32 loads through the magic-sniff path" {
     try std.testing.expect(scheduler.reap(2));
 
     const hello = elf32_hello();
-    try std.testing.expectEqual(esp.WriteResult.ok, esp.write_file("HELLO.ELF", hello[0..]));
+    test_seed("HELLO.ELF", hello[0..]);
     try std.testing.expectEqual(ExecResult.ok, exec_file("HELLO.ELF", &.{}));
     const info = loaded().?;
     try std.testing.expectEqualStrings("HELLO.ELF", info.name);
@@ -1404,10 +1421,10 @@ test "exec: a valid AArch64 ELF32 loads through the magic-sniff path" {
     // Honest refusals: an x86_64-marked image and a truncated header.
     var x86 = elf32_hello();
     std.mem.writeInt(u16, x86[18..20], 0x3e, .little); // EM_X86_64
-    try std.testing.expectEqual(esp.WriteResult.ok, esp.write_file("BAD.ELF", x86[0..]));
+    test_seed("BAD.ELF", x86[0..]);
     try std.testing.expectEqual(ExecResult.unsupported_arch, exec_file("BAD.ELF", &.{}));
     // Truncated ELF (magic intact, header cut short) → honest refusal.
-    try std.testing.expectEqual(esp.WriteResult.ok, esp.write_file("SHORT.ELF", hello[0..40]));
+    test_seed("SHORT.ELF", hello[0..40]);
     try std.testing.expectEqual(ExecResult.bad_elf, exec_file("SHORT.ELF", &.{}));
 }
 
@@ -1418,10 +1435,11 @@ test "exec: PEER.BIN loads by name — counter + peer fill the 11-slot pool" {
     // counter + peer + six USER.BINs = 11/11 (shell + worker + 8 users +
     // idle), so a NINTH exec is pool_full (the 3b capacity proof
     // re-derived at the grown budget).
-    try build_image(test_allocator);
-    defer test_allocator.free(saved_image);
-    esp.reset();
-    try std.testing.expectEqual(fat.MountResult.ok, esp.set_disk(.{ .read = &fake_read, .write = &fake_write }));
+    virtio_file.set_test_share(null); // reset any prior test's armed share
+    // Restore hardware mode on EVERY exit (success or failure): the exec
+    // batch links syscall's tests into the SAME process, so a leaked
+    // armed share flips sys_exec's honest no-disk into a not_found.
+    defer virtio_file.set_test_share(null);
     arm_allocator();
     _ = mmu.build_user_root(userspace.text_va, 0x1000, 64, userspace.stack_va, 0x2000, 8192) orelse return error.TestUnexpectedResult;
     _ = scheduler.init();
@@ -1436,9 +1454,9 @@ test "exec: PEER.BIN loads by name — counter + peer fill the 11-slot pool" {
     try std.testing.expect(scheduler.reap(2));
 
     const counter_img = dsk1("counter: alive\n", 24, 24 + 15);
-    try std.testing.expectEqual(esp.WriteResult.ok, esp.write_file("COUNTER.BIN", counter_img[0 .. 24 + 15]));
+    test_seed("COUNTER.BIN", counter_img[0 .. 24 + 15]);
     const peer_img = dsk1("peer: got \n", 24, 24 + 11);
-    try std.testing.expectEqual(esp.WriteResult.ok, esp.write_file("PEER.BIN", peer_img[0 .. 24 + 11]));
+    test_seed("PEER.BIN", peer_img[0 .. 24 + 11]);
     // Both load by name, each with its OWN process and executor slot.
     try std.testing.expectEqual(ExecResult.ok, exec_file("COUNTER.BIN", &.{})); // pid 1, slot 2
     try std.testing.expectEqual(ExecResult.ok, exec_file("PEER.BIN", &.{})); // pid 2, slot 3
@@ -1460,7 +1478,7 @@ test "exec: PEER.BIN loads by name — counter + peer fill the 11-slot pool" {
     // 11/11: a NINTH exec is pool_full, checked BEFORE any allocation
     // (nothing leaks).
     const user_img = dsk1("user: hello from the ESP\n", 24, 24 + 25);
-    try std.testing.expectEqual(esp.WriteResult.ok, esp.write_file("USER.BIN", user_img[0 .. 24 + 25]));
+    test_seed("USER.BIN", user_img[0 .. 24 + 25]);
     var n: usize = 0;
     while (n < 6) : (n += 1) {
         try std.testing.expectEqual(ExecResult.ok, exec_file("USER.BIN", &.{})); // pids 3..8, slots 4..9
@@ -1471,10 +1489,11 @@ test "exec: PEER.BIN loads by name — counter + peer fill the 11-slot pool" {
 }
 
 test "exec: permanent occupant + recycle — one spare slot, pool_full, then the re-exec lands" {
-    try build_image(test_allocator);
-    defer test_allocator.free(saved_image);
-    esp.reset();
-    try std.testing.expectEqual(fat.MountResult.ok, esp.set_disk(.{ .read = &fake_read, .write = &fake_write }));
+    virtio_file.set_test_share(null); // reset any prior test's armed share
+    // Restore hardware mode on EVERY exit (success or failure): the exec
+    // batch links syscall's tests into the SAME process, so a leaked
+    // armed share flips sys_exec's honest no-disk into a not_found.
+    defer virtio_file.set_test_share(null);
     arm_allocator();
     _ = mmu.build_user_root(userspace.text_va, 0x1000, 64, userspace.stack_va, 0x2000, 8192) orelse return error.TestUnexpectedResult;
     _ = scheduler.init();
@@ -1489,9 +1508,9 @@ test "exec: permanent occupant + recycle — one spare slot, pool_full, then the
     try std.testing.expect(scheduler.reap(2));
 
     const counter_img = dsk1("counter: alive\n", 24, 24 + 15);
-    try std.testing.expectEqual(esp.WriteResult.ok, esp.write_file("COUNTER.BIN", counter_img[0 .. 24 + 15]));
+    test_seed("COUNTER.BIN", counter_img[0 .. 24 + 15]);
     const user_img = dsk1("user: hello from the ESP\n", 24, 24 + 25);
-    try std.testing.expectEqual(esp.WriteResult.ok, esp.write_file("USER.BIN", user_img[0 .. 24 + 25]));
+    test_seed("USER.BIN", user_img[0 .. 24 + 25]);
 
     // The counter is the permanent occupant: it takes one slot and never
     // exits (this test never drives it to exit). Milestone sixteen C3
@@ -1553,10 +1572,11 @@ test "exec: kill reaps a permanent occupant — pages return, the slot is re-exe
     // status 137; its 9 allocator pages return at the reap (exact +9
     // free-count recovery), the slot frees, and a subsequent exec lands
     // in it.
-    try build_image(test_allocator);
-    defer test_allocator.free(saved_image);
-    esp.reset();
-    try std.testing.expectEqual(fat.MountResult.ok, esp.set_disk(.{ .read = &fake_read, .write = &fake_write }));
+    virtio_file.set_test_share(null); // reset any prior test's armed share
+    // Restore hardware mode on EVERY exit (success or failure): the exec
+    // batch links syscall's tests into the SAME process, so a leaked
+    // armed share flips sys_exec's honest no-disk into a not_found.
+    defer virtio_file.set_test_share(null);
     arm_allocator();
     _ = mmu.build_user_root(userspace.text_va, 0x1000, 64, userspace.stack_va, 0x2000, 8192) orelse return error.TestUnexpectedResult;
     _ = scheduler.init();
@@ -1576,9 +1596,9 @@ test "exec: kill reaps a permanent occupant — pages return, the slot is re-exe
     scheduler.maybe_report(&drain_con);
 
     const counter_img = dsk1("counter: alive\n", 24, 24 + 15);
-    try std.testing.expectEqual(esp.WriteResult.ok, esp.write_file("COUNTER.BIN", counter_img[0 .. 24 + 15]));
+    test_seed("COUNTER.BIN", counter_img[0 .. 24 + 15]);
     const user_img = dsk1("user: hello from the ESP\n", 24, 24 + 25);
-    try std.testing.expectEqual(esp.WriteResult.ok, esp.write_file("USER.BIN", user_img[0 .. 24 + 25]));
+    test_seed("USER.BIN", user_img[0 .. 24 + 25]);
 
     // The permanent occupant takes a slot and 9 pages (1 text + 4 stack +
     // 4 EL1 exception stack).
@@ -1652,7 +1672,7 @@ test "exec: more than 8 args is refused honestly (too_many_args)" {
     // Card 3e: the bounded block holds 8 args; a 9th is an honest refusal,
     // never silent truncation. Checked BEFORE any disk/file work (fails
     // even with no disk mounted).
-    esp.reset();
+    virtio_file.set_test_share(null);
     const args = [_][]const u8{ "a", "b", "c", "d", "e", "f", "g", "h", "i" };
     try std.testing.expectEqual(ExecResult.too_many_args, exec_file("USER.BIN", &args));
 }
@@ -1674,10 +1694,11 @@ test "exec: argv block is a read-only leaf — uaccess reads it, writes fault, p
     // its OWN text page; the block sits inside the (read-only) text
     // aperture, so uaccess copy_in reads it and copy_out is a permission
     // fault — the args range is never in the EL0 write aperture.
-    try build_image(test_allocator);
-    defer test_allocator.free(saved_image);
-    esp.reset();
-    try std.testing.expectEqual(fat.MountResult.ok, esp.set_disk(.{ .read = &fake_read, .write = &fake_write }));
+    virtio_file.set_test_share(null); // reset any prior test's armed share
+    // Restore hardware mode on EVERY exit (success or failure): the exec
+    // batch links syscall's tests into the SAME process, so a leaked
+    // armed share flips sys_exec's honest no-disk into a not_found.
+    defer virtio_file.set_test_share(null);
     arm_allocator();
     _ = mmu.build_user_root(userspace.text_va, 0x1000, 64, userspace.stack_va, 0x2000, 8192) orelse return error.TestUnexpectedResult;
     _ = scheduler.init();
@@ -1692,7 +1713,7 @@ test "exec: argv block is a read-only leaf — uaccess reads it, writes fault, p
     try std.testing.expect(scheduler.reap(2));
 
     const img = dsk1("user: hello from the ESP\n", 24, 24 + 25);
-    try std.testing.expectEqual(esp.WriteResult.ok, esp.write_file("USER.BIN", img[0 .. 24 + 25]));
+    test_seed("USER.BIN", img[0 .. 24 + 25]);
     try std.testing.expectEqual(ExecResult.ok, exec_file("USER.BIN", &.{"alpha"}));
     try std.testing.expectEqual(ExecResult.ok, exec_file("USER.BIN", &.{"beta"}));
     // Both processes live, each with its OWN text page and its own block.
@@ -1733,84 +1754,4 @@ test "exec: argv block is a read-only leaf — uaccess reads it, writes fault, p
     );
     try std.testing.expectEqual(uaccess.Outcome.fault, uaccess.copy_out(proc_a.text_phys + block_off, "12345678", 8));
     try std.testing.expectEqual(uaccess.Outcome.ok, uaccess.copy_out(proc_a.stack_phys, "12345678", 8));
-}
-
-fn build_image(alloc_arg: std.mem.Allocator) !void {
-    // Reuse the esp.zig fixture builder by importing its module-scope test
-    // image? No — esp.zig's fixture is private. Build a minimal GPT+FAT32
-    // image here with mkfat32's layout: 64 MiB, ESP at LBA 2048, root
-    // cluster 2 with BOOTED.TXT only.
-    const total_sectors: u64 = 64 * 1024 * 1024 / 512;
-    const esp_offset: u64 = 2048;
-    const last_usable: u64 = total_sectors - 34;
-    const volume_sectors: u32 = @intCast(last_usable - esp_offset + 1);
-    var fat_sectors: u32 = 1;
-    while (true) {
-        const clusters = volume_sectors - 32 - 2 * fat_sectors;
-        const need: u32 = @intCast((clusters * 4 + 511) / 512);
-        if (need == fat_sectors) break;
-        fat_sectors = need;
-    }
-    const data_start: u32 = 32 + 2 * fat_sectors;
-
-    saved_image = try alloc_arg.alloc(u8, @intCast(total_sectors * 512));
-    @memset(saved_image, 0);
-    saved_image[510] = 0x55;
-    saved_image[511] = 0xaa;
-    const hdr_off: usize = 1 * 512;
-    @memcpy(saved_image[hdr_off .. hdr_off + 8], "EFI PART");
-    std.mem.writeInt(u32, saved_image[hdr_off + 12 ..][0..4], 92, .little);
-    std.mem.writeInt(u64, saved_image[hdr_off + 24 ..][0..8], 1, .little);
-    std.mem.writeInt(u64, saved_image[hdr_off + 32 ..][0..8], total_sectors - 1, .little);
-    std.mem.writeInt(u64, saved_image[hdr_off + 72 ..][0..8], 2, .little);
-    std.mem.writeInt(u32, saved_image[hdr_off + 80 ..][0..4], 128, .little);
-    std.mem.writeInt(u32, saved_image[hdr_off + 84 ..][0..4], 128, .little);
-    const ent_off: usize = 2 * 512;
-    const esp_guid = [16]u8{ 0x28, 0x73, 0x2a, 0xc1, 0x1f, 0xf8, 0xd2, 0x11, 0xba, 0x4b, 0x00, 0xa0, 0xc9, 0x3e, 0xc9, 0x3b };
-    @memcpy(saved_image[ent_off .. ent_off + 16], &esp_guid);
-    std.mem.writeInt(u64, saved_image[ent_off + 32 ..][0..8], esp_offset, .little);
-    std.mem.writeInt(u64, saved_image[ent_off + 40 ..][0..8], last_usable, .little);
-
-    const base: usize = @intCast(esp_offset * 512);
-    const bs = saved_image[base .. base + 512];
-    const jmp_boot = [_]u8{ 0xeb, 0x58, 0x90 };
-    @memcpy(bs[0..3], &jmp_boot);
-    std.mem.writeInt(u16, bs[11..13], 512, .little);
-    bs[13] = 1;
-    std.mem.writeInt(u16, bs[14..16], 32, .little);
-    bs[16] = 2;
-    bs[21] = 0xf8;
-    std.mem.writeInt(u32, bs[28..32], @intCast(esp_offset), .little);
-    std.mem.writeInt(u32, bs[32..36], volume_sectors, .little);
-    std.mem.writeInt(u32, bs[36..40], fat_sectors, .little);
-    std.mem.writeInt(u32, bs[44..48], 2, .little);
-    bs[510] = 0x55;
-    bs[511] = 0xaa;
-
-    const fat_off: usize = @intCast((esp_offset + 32) * 512);
-    const fat_bytes = fat_sectors * 512;
-    const fat_buf = try alloc_arg.alloc(u8, fat_bytes);
-    @memset(fat_buf, 0);
-    std.mem.writeInt(u32, fat_buf[0..4], 0x0ffffff8, .little);
-    std.mem.writeInt(u32, fat_buf[4..8], 0x0fffffff, .little);
-    for ([_]u32{ 2, 3, 4, 5 }) |c| std.mem.writeInt(u32, fat_buf[@as(usize, c) * 4 ..][0..4], 0x0fffffff, .little);
-    for (0..2) |f| @memcpy(saved_image[fat_off + f * fat_bytes ..][0..fat_bytes], fat_buf);
-    alloc_arg.free(fat_buf);
-
-    const root_off: usize = @intCast((esp_offset + data_start) * 512);
-    var root = [_]u8{0} ** 512;
-    write_entry(&root, 0, "VIRELAIOS  ", 0x08, 0, 0);
-    write_entry(&root, 1, "BOOTED  TXT", 0x20, 5, 3);
-    @memcpy(saved_image[root_off .. root_off + 512], &root);
-    const b_off: usize = @intCast((esp_offset + data_start + 3) * 512);
-    @memcpy(saved_image[b_off .. b_off + 3], "ok\n");
-}
-
-fn write_entry(cluster: *[512]u8, slot: usize, name11: *const [11]u8, attr: u8, cluster_no: u32, size: u32) void {
-    const off = slot * 32;
-    @memcpy(cluster[off .. off + 11], name11[0..11]);
-    cluster[off + 11] = attr;
-    std.mem.writeInt(u16, cluster[off + 20 ..][0..2], @truncate(cluster_no >> 16), .little);
-    std.mem.writeInt(u16, cluster[off + 26 ..][0..2], @truncate(cluster_no), .little);
-    std.mem.writeInt(u32, cluster[off + 28 ..][0..4], size, .little);
 }

@@ -21,8 +21,6 @@ const std = @import("std");
 const builtin = @import("builtin");
 const alloc = @import("alloc.zig");
 const console = @import("console.zig");
-const esp = @import("esp.zig"); // claim 3475: ESP file window (ls/cat/write)
-const fat = @import("fat.zig"); // M18 T16 (issue #419): direct FAT script reads (the sh /path form)
 const lineedit = @import("lineedit.zig");
 const tokenizer = @import("tokenizer.zig");
 const pipe = @import("pipe.zig"); // M19 P1 (issue #290): the bounded pipe behind the `|` operator
@@ -43,6 +41,10 @@ const driving_award = @import("driving_award.zig"); // claim 1543 (milestone six
 const wm_server = @import("wm_server.zig"); // M32 WMS2 (issue #622): when a WM registers, pacing moves off this idle drain to the tick path
 const scrollback_mod = @import("scrollback.zig"); // M18 T1 (issue #404): terminal scrollback ring
 const clipboard = @import("clipboard.zig"); // M18 T2 (issue #405): shared clipboard for copy/paste
+// M34 HF5 (issue #739): shell history + env persist to the HOST SHARE
+// when the file channel is armed (ESP fallback otherwise — dual path
+// until HF6).
+const virtio_file = @import("virtio_file.zig");
 
 /// M18 T4: path for persistent shell history file.
 const history_path = "HISTORY.TXT";
@@ -379,9 +381,19 @@ fn env_unset(name: []const u8) bool {
     return false;
 }
 
-/// M19 P3: persist the full env table to FAT (one NAME=VAL per line).
+/// M19 P3: persist the full env table (one NAME=VAL per line) to the HOST
+/// SHARE. M34 HF6 (issue #740): the ESP fallback is gone — the share is
+/// the only file store; without a channel the read is an honest 0.
+fn env_read_existing(buf: []u8) usize {
+    return virtio_file.read_whole(env_path, buf) orelse 0;
+}
+
+/// HF5/HF6: write the whole env file to the share.
+fn env_write_all(bytes: []const u8) void {
+    _ = virtio_file.write_whole(env_path, bytes);
+}
+
 fn save_env() void {
-    if (!esp.disk_ready()) return;
     var buf: [2048]u8 = undefined;
     var pos: usize = 0;
     var i: usize = 0;
@@ -400,15 +412,14 @@ fn save_env() void {
         buf[pos] = '\n';
         pos += 1;
     }
-    _ = esp.write_file(env_path, buf[0..pos]);
+    env_write_all(buf[0..pos]);
 }
 
-/// M19 P3: restore the env table from the ESP window on boot.
-/// No disk_ready guard needed — esp.lookup searches the window
-/// and returns null when the file is absent.
+/// M19 P3: restore the env table on boot (share first when armed, ESP
+/// fallback).
 fn load_env() void {
-    const entry = esp.lookup(env_path) orelse return;
-    const content = esp.content_of(entry);
+    var content_buf: [2048]u8 = undefined;
+    const content = content_buf[0..env_read_existing(&content_buf)];
     if (content.len == 0) return;
     var start: usize = 0;
     var i: usize = 0;
@@ -1169,17 +1180,22 @@ pub const Shell = struct {
     }
 };
 
+/// HF5/HF6: read the existing history file from the HOST SHARE into
+/// `buf`. Returns the byte count (0 = absent/empty / no channel).
+fn history_read_existing(buf: []u8) usize {
+    return virtio_file.read_whole(history_path, buf) orelse 0;
+}
+
+/// HF5/HF6: write the whole history file to the share.
+fn history_write_all(bytes: []const u8) void {
+    _ = virtio_file.write_whole(history_path, bytes);
+}
+
 /// M18 T4: append a command line to the persistent history file.
 fn save_to_history(line: []const u8) void {
-    if (!esp.disk_ready()) return;
     // Read existing history, trim oldest if at capacity, append new line.
     var existing: [2048]u8 = undefined;
-    var existing_len: usize = 0;
-    if (esp.lookup(history_path)) |entry| {
-        const content = esp.content_of(entry);
-        existing_len = @min(content.len, 2048);
-        @memcpy(existing[0..existing_len], content[0..existing_len]);
-    }
+    const existing_len = history_read_existing(&existing);
     var line_count: usize = 0;
     var i: usize = 0;
     while (i < existing_len) : (i += 1) {
@@ -1200,14 +1216,13 @@ fn save_to_history(line: []const u8) void {
     pos += line.len;
     buf[pos] = '\n';
     pos += 1;
-    _ = esp.write_file(history_path, buf[0..pos]);
+    history_write_all(buf[0..pos]);
 }
 
 /// M18 T4: load persistent history from HISTORY.TXT into editor ring.
 fn load_history(editor: *lineedit.LineEditor) void {
-    if (!esp.disk_ready()) return;
-    const entry = esp.lookup(history_path) orelse return;
-    const content = esp.content_of(entry);
+    var content_buf: [2048]u8 = undefined;
+    const content = content_buf[0..history_read_existing(&content_buf)];
     if (content.len == 0) return;
     var line_starts: [64]usize = undefined;
     var line_lens: [64]usize = undefined;
@@ -1247,64 +1262,35 @@ fn load_history(editor: *lineedit.LineEditor) void {
     }
 }
 
-/// M18 T16 (issue #419): load a script file into the staging buffer.
-/// Bare names resolve through the ESP window (like `cat`); `/`-paths read
-/// the FAT volume directly, so files up to the full 16 KiB staging bound
-/// are reachable even when they exceed the window's per-file content cap.
-/// Prints the honest refusal and returns null on any miss.
+/// M18 T16 (issue #419): load a script file into the staging buffer from
+/// the HOST SHARE (STAT for the size, then read_into up to the 16 KiB
+/// staging bound). Prints the honest refusal and returns null on any
+/// miss. M34 HF6 (issue #740): the ESP/FAT read paths are gone.
 fn script_load(mon: *monitor.Monitor, name: []const u8) ?[]const u8 {
-    if (std.mem.indexOfScalar(u8, name, '/') != null) {
-        const size = fat.file_size(name) orelse {
-            mon.console.puts("sh: ");
-            mon.console.puts(name);
-            mon.console.print_line(": not found (no such file on the FAT volume)");
-            return null;
-        };
-        if (size > @as(u32, @intCast(script_staging_max))) {
-            mon.console.puts("sh: ");
-            mon.console.puts(name);
-            mon.console.puts(": file is ");
-            mon.console.print_hex(size);
-            mon.console.puts(" bytes; scripts cap at ");
-            mon.console.print_hex(script_staging_max);
-            mon.console.print_line(" bytes");
-            return null;
-        }
-        const got = fat.read_file(name, &script_staging) orelse {
-            mon.console.puts("sh: ");
-            mon.console.puts(name);
-            mon.console.print_line(": not found (no such file on the FAT volume)");
-            return null;
-        };
-        return script_staging[0..got];
-    }
-    const e = esp.lookup(name) orelse {
+    var st = virtio_file.StatResult{};
+    if (virtio_file.stat(name, &st) != virtio_file.st_ok or st.is_dir) {
         mon.console.puts("sh: ");
         mon.console.puts(name);
-        mon.console.print_line(": not found (no such file on the ESP)");
+        mon.console.print_line(": not found (no such file on the host share)");
+        return null;
+    }
+    if (st.size > @as(u64, @intCast(script_staging_max))) {
+        mon.console.puts("sh: ");
+        mon.console.puts(name);
+        mon.console.puts(": file is ");
+        mon.console.print_hex(st.size);
+        mon.console.puts(" bytes; scripts cap at ");
+        mon.console.print_hex(script_staging_max);
+        mon.console.print_line(" bytes");
+        return null;
+    }
+    const got = virtio_file.read_into(name, st.size, &script_staging) orelse {
+        mon.console.puts("sh: ");
+        mon.console.puts(name);
+        mon.console.print_line(": not found (no such file on the host share)");
         return null;
     };
-    switch (e.kind) {
-        .esp_dir => {
-            mon.console.puts("sh: ");
-            mon.console.puts(name);
-            mon.console.print_line(": is a directory");
-            return null;
-        },
-        .esp_file => {
-            if (e.len == 0 and e.size > 0) {
-                mon.console.puts("sh: ");
-                mon.console.puts(name);
-                mon.console.puts(": content not loaded (file is ");
-                mon.console.print_hex(e.size);
-                mon.console.puts(" bytes; the window keeps files up to ");
-                mon.console.print_hex(esp.esp_content_max);
-                mon.console.print_line(" bytes)");
-                return null;
-            }
-        },
-    }
-    return esp.content_of(e);
+    return script_staging[0..got];
 }
 
 /// M18 T16 (issue #419): execute a script file of shell commands, one
@@ -1926,8 +1912,16 @@ fn glob_expand_argv(
             count += 1;
             continue;
         }
+        // M34 HF6 (issue #740): globbing enumerates the HOST SHARE root
+        // (the ESP window is gone).
+        var lr = virtio_file.ListResult{};
+        if (virtio_file.list("", &lr) != virtio_file.st_ok) {
+            out[count] = arg; // no channel: literal passthrough
+            count += 1;
+            continue;
+        }
         var m: usize = 0;
-        for (esp.entries()) |*e| {
+        for (lr.entries[0..lr.count]) |e| {
             const ename = e.name[0..e.name_len];
             if (!glob_match(arg, ename)) continue;
             // Insertion sort by name (byte-wise ascending).
@@ -3191,21 +3185,21 @@ pub fn boot_and_park(mon: *monitor.Monitor, rx_wired: bool) void {
     // M21 W11: restore window state from previous session.
     restore_windows();
 
-    // M18 T14: run startup file (.virelairc) if present
-    if (esp.disk_ready()) {
-        if (esp.lookup(".virelairc")) |entry| {
-            const rc = esp.content_of(entry);
-            var start: usize = 0;
-            var i: usize = 0;
-            while (i < rc.len) : (i += 1) {
-                if (rc[i] == '\n' or rc[i] == '\r') {
-                    if (i > start) handle_line(mon, rc[start..i]);
-                    start = i + 1;
-                    if (rc[i] == '\r' and i + 1 < rc.len and rc[i + 1] == '\n') i += 1;
-                }
+    // M18 T14: run startup file (.virelairc) if present on the host
+    // share (HF6: the ESP window is gone).
+    var rc_buf: [2048]u8 = undefined;
+    if (virtio_file.read_whole(".virelairc", &rc_buf)) |rc_len| {
+        const rc = rc_buf[0..rc_len];
+        var start: usize = 0;
+        var i: usize = 0;
+        while (i < rc.len) : (i += 1) {
+            if (rc[i] == '\n' or rc[i] == '\r') {
+                if (i > start) handle_line(mon, rc[start..i]);
+                start = i + 1;
+                if (rc[i] == '\r' and i + 1 < rc.len and rc[i + 1] == '\n') i += 1;
             }
-            if (start < rc.len) handle_line(mon, rc[start..rc.len]);
         }
+        if (start < rc.len) handle_line(mon, rc[start..rc.len]);
     }
     while (true) {
         if (shell.poll() == .idle) {
@@ -3431,20 +3425,21 @@ fn save_windows() void {
     const n = driving_award.serialize_state(&buf);
     if (n == 0) return;
     if (have_last_saved_windows and last_saved_windows_len == n and std.mem.eql(u8, last_saved_windows[0..n], buf[0..n])) return;
-    if (esp.write_file("WINDOWS.SAV", buf[0..n]) == .ok) {
+    // M34 HF6 (issue #740): WINDOWS.SAV lives on the host share.
+    if (virtio_file.write_whole("WINDOWS.SAV", buf[0..n]) == virtio_file.st_ok) {
         @memcpy(last_saved_windows[0..n], buf[0..n]);
         last_saved_windows_len = n;
         have_last_saved_windows = true;
     }
 }
 
-/// M21 W11: restore window state from ESP's WINDOWS.SAV (if it exists).
+/// M21 W11: restore window state from the share's WINDOWS.SAV (if it
+/// exists). HF6: the ESP window is gone.
 fn restore_windows() void {
-    if (!esp.disk_ready()) return;
-    const entry = esp.lookup("WINDOWS.SAV") orelse return;
-    const content = esp.content_of(entry);
-    if (content.len == 0) return;
-    _ = driving_award.restore_state(content, 99);
+    var content: [driving_award.persist_max_bytes]u8 = undefined;
+    const n = virtio_file.read_whole("WINDOWS.SAV", &content) orelse return;
+    if (n == 0) return;
+    _ = driving_award.restore_state(content[0..n], 99);
 }
 
 /// Idle between input polls in RX-wired mode: a bounded nop delay, not WFE.
@@ -3509,6 +3504,38 @@ fn make_shell(mock: anytype, view: memmap.MapView) Shell {
     );
 }
 
+/// M34 HF6 (issue #740): shell persistence tests serve files through
+/// virtio_file's in-memory share override (the ESP window is gone). Same
+/// upsert pattern as exec.zig's seam; `test_reset_share()` arms an EMPTY
+/// share, `set_test_share(null)` restores the no-channel state.
+var test_share_files: [8]virtio_file.TestFile = undefined;
+var test_share_n: usize = 0;
+fn test_seed_share(name: []const u8, content: []const u8) void {
+    for (test_share_files[0..test_share_n]) |*f| {
+        if (std.mem.eql(u8, f.name, name)) {
+            f.* = .{ .name = name, .data = content };
+            virtio_file.set_test_share(test_share_files[0..test_share_n]);
+            return;
+        }
+    }
+    if (test_share_n < test_share_files.len) {
+        test_share_files[test_share_n] = .{ .name = name, .data = content };
+        test_share_n += 1;
+        virtio_file.set_test_share(test_share_files[0..test_share_n]);
+    }
+}
+fn test_seed_dir(name: []const u8) void {
+    if (test_share_n < test_share_files.len) {
+        test_share_files[test_share_n] = .{ .name = name, .data = "", .is_dir = true };
+        test_share_n += 1;
+        virtio_file.set_test_share(test_share_files[0..test_share_n]);
+    }
+}
+fn test_reset_share() void {
+    test_share_n = 0;
+    virtio_file.set_test_share(test_share_files[0..0]);
+}
+
 test "shell: mock-fed end-to-end session produces the exact transcript" {
     const long = "a" ** 256;
     // 18 tokens: one past the 17-token limit (verb + 16 args), so the
@@ -3542,7 +3569,7 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "  timer       interrupt controller + timer status\n" ++
         "  uaccess     user-memory copy diagnostics (valid, fault, recovery)\n" ++
         "tasks / processes\n" ++
-        "  exec        load a user program from the ESP and enter it at EL0\n" ++
+        "  exec        load a user program from the host share and enter it at EL0\n" ++
         "  kill        terminate a running process (kernel-owned lifetime)\n" ++
         "  mbox        per-process IPC mailbox: pending messages and drain counters\n" ++
         "  procs       process registry: image, address space, lifecycle, exit status\n" ++
@@ -3554,11 +3581,11 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "  tasks       tick-driven task scheduler status\n" ++
         "  smp         multiprocessor topology, online CPU cores, and per-core task state\n" ++
         "storage\n" ++
-        "  cat         print a file from the ESP (by name or /path)\n" ++
-        "  ls          list files on the ESP (or a directory by path); '-l' for long format (D15)\n" ++
-        "  mount       switch the active FAT volume (esp or data)\n" ++
+        "  cat         print a file from the host share (by name or path)\n" ++
+        "  ls          list files on the host share (or a directory by path); '-l' for long format (D15)\n" ++
+        "  mount       report the host-share file store (HF6: the FAT volumes are gone)\n" ++
         "  vf          host file channel (M34): 'vf ls/cat/mkdir/rm/mv <path>' read + mutate a macOS share over custom-virtio queue 5; 'vf open/close/write/truncate/fsync <h>' manage write handles (8-slot host cursor table)\n" ++
-        "  write       write text to a file on the ESP\n" ++
+        "  write       write text to a file on the host share\n" ++
         "  mktemp      create a temporary file (empty, unique name)\n" ++
         "  stat        file metadata: size, type, cluster, path (D8)\n" ++
         "  du          recursive directory disk usage (M25 F4)\n" ++
@@ -3599,7 +3626,7 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "  type        echo stdin (the pipe source) to stdout — the right half of `a | type`\n" ++
         "  dmesg       system log viewer: last bytes of serial output (D12)\n" ++
         "  time        command timing: measure elapsed ticks and wall-clock time (D13)\n" ++
-        "  which       locate a command: shell builtin, monitor command, or ESP application (D16)\n" ++
+        "  which       locate a command: shell builtin, monitor command, or host-share application (D16; HF6: the ESP is gone)\n" ++
         "type 'help <command>' for details on a single command.\n" ++
         "type 'help <topic>' for a topic page (networking, windows, storage, graphics).\n" ++
         "virelai> version\r\n" ++
@@ -3640,17 +3667,17 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "virelai> echo \"elephant business\"\r\n" ++
         "elephant business\n" ++
         "virelai> ls\r\n" ++
-        "ls: esp=0x0000000000000003\n" ++
-        "  KERNEL.BIN  0x0000000000088b38  [esp]\n" ++
+        "ls: host=0x0000000000000003\n" ++
+        "  KERNEL.BIN  0x0000000000000000  [host]\n" ++
         "  EFI         0x0000000000000000  [dir]\n" ++
-        "  BOOTED.TXT  0x0000000000000029  [esp]\n" ++
+        "  BOOTED.TXT  0x0000000000000036  [host]\n" ++
         "virelai> cat BOOTED.TXT\r\n" ++
         "VIRELAIOS BOOTLOADER\n" ++
         "firmware has agreed to cooperate\n" ++
         "virelai> write hello.txt hello world\r\n" ++
-        "error: hello.txt: not persisted - no disk (FAT volume unavailable)\n" ++
+        "error: hello.txt: not persisted - host file-channel error\n" ++
         "virelai> cat hello.txt\r\n" ++
-        "error: hello.txt: not found (no such file on the ESP)\n" ++
+        "error: hello.txt: not found (no such file on the host share)\n" ++
         // ADR 0008 D3: the three shapes are gate-tested here byte-exactly,
         // so a command that invents a fourth shape fails CI.
         // Shape 1 (misuse): the usage line PLUS the registry's one-line hint.
@@ -3688,10 +3715,11 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
     // FAT snapshot does (KERNEL.BIN listed-but-unloaded, an EFI directory,
     // BOOTED.TXT content-loaded). A test process has no disk (no FAT
     // volume mounted), so `write` honestly reports it cannot persist.
-    esp.reset();
-    _ = esp.add_esp_entry("KERNEL.BIN", 0x88b38, "");
-    _ = esp.add_dir_entry("EFI");
-    _ = esp.add_esp_entry("BOOTED.TXT", 0x29, "VIRELAIOS BOOTLOADER\nfirmware has agreed to cooperate\n");
+    test_reset_share();
+    defer virtio_file.set_test_share(null);
+    test_seed_share("KERNEL.BIN", "");
+    test_seed_dir("EFI");
+    test_seed_share("BOOTED.TXT", "VIRELAIOS BOOTLOADER\nfirmware has agreed to cooperate\n");
     mock.feed("help\nversion\nmem\npages\npages selftest\ntasks\necho \"elephant business\"\nls\ncat BOOTED.TXT\nwrite hello.txt hello world\ncat hello.txt\npages bogus\n");
     mock.feed(long);
     mock.feed("\n");
@@ -3882,10 +3910,11 @@ test "shell: host fuzz of the command handlers never panics on arbitrary argv (c
     _ = scheduler.register_worker(0);
     _ = scheduler.register_user(0, 0);
     userspace.init();
-    esp.reset();
-    _ = esp.add_esp_entry("KERNEL.BIN", 0x88b38, "");
-    _ = esp.add_dir_entry("EFI");
-    _ = esp.add_esp_entry("BOOTED.TXT", 0x29, "hello\n");
+    test_reset_share();
+    defer virtio_file.set_test_share(null);
+    test_seed_share("KERNEL.BIN", "");
+    test_seed_dir("EFI");
+    test_seed_share("BOOTED.TXT", "hello\n");
 
     var prng = std.Random.DefaultPrng.init(0x5543_0002);
     const rnd = prng.random();
@@ -3920,10 +3949,11 @@ test "shell: host fuzz of the full input path never panics (editor + tokenizer +
     _ = scheduler.register_worker(0);
     _ = scheduler.register_user(0, 0);
     userspace.init();
-    esp.reset();
-    _ = esp.add_esp_entry("KERNEL.BIN", 0x88b38, "");
-    _ = esp.add_dir_entry("EFI");
-    _ = esp.add_esp_entry("BOOTED.TXT", 0x29, "hello\n");
+    test_reset_share();
+    defer virtio_file.set_test_share(null);
+    test_seed_share("KERNEL.BIN", "");
+    test_seed_dir("EFI");
+    test_seed_share("BOOTED.TXT", "hello\n");
 
     var prng = std.Random.DefaultPrng.init(0x5543_0003);
     const rnd = prng.random();
@@ -4643,9 +4673,10 @@ test "shell: M19 P3 env: persistence round-trip through the ESP window" {
     // Direct serialization test: save_env writes to the ESP window;
     // load_env reads back. The mock ESP path supports add_esp_entry
     // with explicit content, so we seed the file directly.
-    esp.reset();
+    test_reset_share();
+    defer virtio_file.set_test_share(null);
     // Seed ENV.TXT as if it was written by a previous boot.
-    _ = esp.add_esp_entry("ENV.TXT", 0, "PERSIST_A=alpha\nPERSIST_B=beta\n");
+    test_seed_share("ENV.TXT", "PERSIST_A=alpha\nPERSIST_B=beta\n");
     load_env();
     try std.testing.expectEqualStrings("alpha", env_get("PERSIST_A").?);
     try std.testing.expectEqualStrings("beta", env_get("PERSIST_B").?);
@@ -4710,8 +4741,9 @@ test "shell: T16 script: sh executes a script file line by line" {
     var mock = console.MockConsole(4096){};
     var shell = make_shell(&mock, make_view());
     shell.boot();
-    esp.reset();
-    _ = esp.add_esp_entry("SCRIPT.TXT", 0, "echo script-first\n# a comment\n\necho script-second\n");
+    test_reset_share();
+    defer virtio_file.set_test_share(null);
+    test_seed_share("SCRIPT.TXT", "echo script-first\n# a comment\n\necho script-second\n");
     mock.feed("sh SCRIPT.TXT\n");
     while (shell.poll() != .idle) {}
     const out = mock.contents();
@@ -4727,8 +4759,9 @@ test "shell: T16 script: exit stops the script early" {
     var mock = console.MockConsole(4096){};
     var shell = make_shell(&mock, make_view());
     shell.boot();
-    esp.reset();
-    _ = esp.add_esp_entry("EXIT.TXT", 0, "echo before-exit\nexit\necho after-exit\n");
+    test_reset_share();
+    defer virtio_file.set_test_share(null);
+    test_seed_share("EXIT.TXT", "echo before-exit\nexit\necho after-exit\n");
     mock.feed("sh EXIT.TXT\n");
     while (shell.poll() != .idle) {}
     const out = mock.contents();
@@ -4740,9 +4773,10 @@ test "shell: T16 script: sh refuses nested script calls" {
     var mock = console.MockConsole(4096){};
     var shell = make_shell(&mock, make_view());
     shell.boot();
-    esp.reset();
-    _ = esp.add_esp_entry("OUTER.TXT", 0, "echo outer-line\nsh INNER.TXT\necho outer-tail\n");
-    _ = esp.add_esp_entry("INNER.TXT", 0, "echo inner-line\n");
+    test_reset_share();
+    defer virtio_file.set_test_share(null);
+    test_seed_share("OUTER.TXT", "echo outer-line\nsh INNER.TXT\necho outer-tail\n");
+    test_seed_share("INNER.TXT", "echo inner-line\n");
     mock.feed("sh OUTER.TXT\n");
     while (shell.poll() != .idle) {}
     const out = mock.contents();
@@ -4758,17 +4792,19 @@ test "shell: T16 script: missing script is reported honestly" {
     var mock = console.MockConsole(2048){};
     var shell = make_shell(&mock, make_view());
     shell.boot();
-    esp.reset();
+    test_reset_share();
+    defer virtio_file.set_test_share(null);
     mock.feed("sh NOPE.TXT\n");
     while (shell.poll() != .idle) {}
-    try std.testing.expect(std.mem.indexOf(u8, mock.contents(), "sh: NOPE.TXT: not found (no such file on the ESP)\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, mock.contents(), "sh: NOPE.TXT: not found (no such file on the host share)\n") != null);
 }
 
 test "shell: T16 script: sh with no arguments shows usage" {
     var mock = console.MockConsole(2048){};
     var shell = make_shell(&mock, make_view());
     shell.boot();
-    esp.reset();
+    test_reset_share();
+    defer virtio_file.set_test_share(null);
     mock.feed("sh\n");
     while (shell.poll() != .idle) {}
     try std.testing.expect(std.mem.indexOf(u8, mock.contents(), "sh: usage: sh <script>\n") != null);
@@ -4778,7 +4814,8 @@ test "shell: T16 script: bare exit at the prompt stays an unknown command" {
     var mock = console.MockConsole(2048){};
     var shell = make_shell(&mock, make_view());
     shell.boot();
-    esp.reset();
+    test_reset_share();
+    defer virtio_file.set_test_share(null);
     mock.feed("exit\n");
     while (shell.poll() != .idle) {}
     try std.testing.expect(std.mem.indexOf(u8, mock.contents(), "unknown command 'exit' -- try 'help'\n") != null);
@@ -4788,9 +4825,10 @@ test "shell: T16 script: line longer than 256 bytes is refused and skipped" {
     var mock = console.MockConsole(4096){};
     var shell = make_shell(&mock, make_view());
     shell.boot();
-    esp.reset();
+    test_reset_share();
+    defer virtio_file.set_test_share(null);
     const content = "echo before-long\n" ++ ("x" ** 300) ++ "\necho after-long\n";
-    _ = esp.add_esp_entry("LONG.TXT", 0, content);
+    test_seed_share("LONG.TXT", content);
     mock.feed("sh LONG.TXT\n");
     while (shell.poll() != .idle) {}
     const out = mock.contents();
@@ -4810,10 +4848,9 @@ test "shell: T4 history: load_history restores newest-first" {
     var mock = console.MockConsole(1024){};
     var shell = make_shell(&mock, make_view());
     shell.boot();
-    esp.reset();
-    _ = esp.add_esp_entry("HISTORY.TXT", 0, "echo first\necho second\necho third\n");
-    esp.set_disk_ready_for_test(true);
-    defer esp.set_disk_ready_for_test(false);
+    test_reset_share();
+    defer virtio_file.set_test_share(null);
+    test_seed_share("HISTORY.TXT", "echo first\necho second\necho third\n");
     load_history(&shell.editor);
     try std.testing.expectEqual(@as(usize, 3), shell.editor.hist_count);
     try std.testing.expectEqualStrings("echo third", shell.editor.history[0][0..shell.editor.hist_len[0]]);
@@ -4825,7 +4862,8 @@ test "shell: T16 script: more than 64 executable lines is refused" {
     var mock = console.MockConsole(8192){};
     var shell = make_shell(&mock, make_view());
     shell.boot();
-    esp.reset();
+    test_reset_share();
+    defer virtio_file.set_test_share(null);
     // 65 executable lines ("echo s0" .. "echo s64"); comments/blanks do
     // not count toward the bound.
     var content: [1500]u8 = undefined;
@@ -4844,7 +4882,7 @@ test "shell: T16 script: more than 64 executable lines is refused" {
         content[clen] = '\n';
         clen += 1;
     }
-    _ = esp.add_esp_entry("MANY.TXT", 0, content[0..clen]);
+    test_seed_share("MANY.TXT", content[0..clen]);
     mock.feed("sh MANY.TXT\n");
     while (shell.poll() != .idle) {}
     const out = mock.contents();
@@ -4890,9 +4928,10 @@ test "shell: M19 P1 pipe: ls | type lists the directory through the pipe" {
     var mock = console.MockConsole(8192){};
     var shell = make_shell(&mock, make_view());
     shell.boot();
-    esp.reset();
-    _ = esp.add_esp_entry("KERNEL.BIN", 0x88b38, "");
-    _ = esp.add_dir_entry("EFI");
+    test_reset_share();
+    defer virtio_file.set_test_share(null);
+    test_seed_share("KERNEL.BIN", "");
+    test_seed_dir("EFI");
     mock.feed("ls | type\n");
     while (shell.poll() != .idle) {}
     const out = mock.contents();
@@ -4964,14 +5003,14 @@ test "shell: M19 P2 redirect: echo hello > file captures and writes" {
     var mock = console.MockConsole(4096){};
     var shell = make_shell(&mock, make_view());
     shell.boot();
-    // Arm the ESP window so write_file works
-    esp.reset();
+    // No host file channel: the redirect write is refused honestly.
+    virtio_file.set_test_share(null);
+    defer virtio_file.set_test_share(null);
     _ = alloc.init(make_view(), &.{});
     _ = scheduler.init();
     _ = scheduler.register_worker(0);
     _ = scheduler.register_user(0, 0);
     userspace.init();
-    _ = esp.add_esp_entry("KERNEL.BIN", 0x88b38, "");
 
     mock.feed("echo redirected-content > test.out\n");
     while (shell.poll() != .idle) {}
@@ -4981,8 +5020,10 @@ test "shell: M19 P2 redirect: echo hello > file captures and writes" {
     // never reached the real console, so it only appears in the typed
     // line, not as a separate output line.
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, out, "redirected-content"));
-    // Without a mounted disk, the file write fails with an error.
-    try std.testing.expect(std.mem.indexOf(u8, out, "redirect: no disk") != null);
+    // Without a host file channel, the file write fails with an error.
+    // M34 HF6 (issue #740): the ESP/FAT write path is gone — the share
+    // is the only file store, and it is unarmed in this test.
+    try std.testing.expect(std.mem.indexOf(u8, out, "redirect: no host file channel") != null);
 }
 
 test "shell: M19 P2 redirect: redirect_split prefers >> over >" {

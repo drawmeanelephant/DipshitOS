@@ -17,7 +17,7 @@
 #      INPUT queue (claim 9588) via --input-string/--input-string-after
 #   3. DEVCONS buffers the keys and executes the command via sys_exec;
 #      DIR.BIN (headless, prints to serial, opens no window) runs as the
-#      child — its `dir: listing /data` / `dir: success` serial markers
+#      child — its `dir: listing /host` / `dir: success` serial markers
 #      prove the typed command actually executed
 #   4. assert the input path decoded every keystroke (input events=8:
 #      d i r . b i n Enter), and prove the in-window echo was RENDERED
@@ -75,6 +75,7 @@ codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/
 
 # --- per-run isolation ------------------------------------------------------
 gate_begin live-devcons
+gate_seed_share
 echo "run dir: $RUN_DIR"
 SCRIPT="$RUN_DIR/script.txt"
 
@@ -126,7 +127,7 @@ run_one() {
         grep -qF -- "devcons: ready" "$SER" && READY=1
         # The typed command reached the app: DIR.BIN ran as its child
         # (sys_exec) and printed to serial.
-        grep -qF -- "dir: listing /data" "$SER" && DIRLIST=1
+        grep -qF -- "dir: listing /host" "$SER" && DIRLIST=1
         grep -qF -- "dir: success" "$SER" && DIRSUC=1
         # All 8 keystrokes (d i r . b i n Enter) were decoded.
         grep -aq "input: armed=0 fifo=0/64 dropped=0 events=8" "$SER" && EVENTS=1

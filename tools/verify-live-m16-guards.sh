@@ -52,11 +52,12 @@ echo "revision: $REVISION branch=$BRANCH dirty-files=$DIRTY"
 # Build all binaries and disk image
 zig build
 zig build image
-swift build --package-path host/vm-runner --configuration release
+swift build --package-path host/vm-runner --configuration release -Xswiftc -DSPIKE
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
 # --- per-run isolation -------------------------------------------------------
 gate_begin live-m16-guards
+gate_seed_share
 echo "run dir: $RUN_DIR"
 
 # Phase 1: the benign neighbor (never exits) + the hostile program.

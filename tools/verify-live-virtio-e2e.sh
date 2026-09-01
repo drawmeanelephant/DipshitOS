@@ -72,6 +72,7 @@ codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/
 
 # --- per-run isolation ------------------------------------------------------------
 gate_begin live-virtio-e2e
+gate_seed_share
 echo "run dir: $RUN_DIR"
 
 # --- choreography -------------------------------------------------------------------

@@ -4,8 +4,8 @@
 # on-machine Zig subset compiler produces an ELF the on-machine loader runs.
 #
 # The chain, all asserted in vm-serial.log:
-#   1. `write MAIN.Z ...` stages a simple Z program on the ESP.
-#   2. `exec ZC.BIN /esp/MAIN.Z /esp/MAIN.ELF` — ZC.BIN reads the source,
+#   1. `write MAIN.Z ...` stages a simple Z program on the host share.
+#   2. `exec ZC.BIN /host/MAIN.Z /host/MAIN.ELF` — ZC.BIN reads the source,
 #      compiles it, and writes a minimal AArch64 ELF32 executable.
 #   3. `exec MAIN.ELF` — the loader maps and runs the compiled ELF: it
 #      triggers sys_exit with status 72.
@@ -45,20 +45,23 @@ echo "revision: $REVISION branch=$BRANCH boots=$BOOTS dirty-files=$DIRTY"
 zig fmt --check boot/src/*.zig kernel/src/*.zig user/src/*.zig build.zig
 zig build
 zig build image
-swift build --package-path host/vm-runner --configuration release
+swift build --package-path host/vm-runner --configuration release -Xswiftc -DSPIKE
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
 # --- per-run isolation -------------------------------------------------------------
 gate_begin live-zc
+gate_seed_share
 echo "run dir: $RUN_DIR"
 SCRIPT="$RUN_DIR/script.txt"
 
-# Stage a tiny program that exits 72.
+# Stage a program that fills an array in a loop and writes it out
+# byte-exact, then exits 72 (the M35 W1b array dialect).
 # ZC.BIN is DSK3 so the kernel refuses args; use the no-arg form which
-# defaults to reading /esp/MAIN.Z and writing /esp/MAIN.ELF.
-SRC='fn main() void { svc(3, 72); }'
+# defaults to reading /host/MAIN.Z and writing /host/MAIN.ELF (M34 HF6:
+# the ESP is gone — ZC routes to the host share).
+SRC='const zc = @import("zc"); pub fn main() void { var buf: [8]u8 = undefined; var i: u64 = 0; while (i < 8) { buf[i] = 65 + i; i = i + 1; } zc.print_array(buf); zc.exit(72); }'
 printf 'ls\nwrite MAIN.Z '\''%s'\''\nexec ZC.BIN\n' "$SRC" > "$SCRIPT"
-printf 'mount esp\nls\nexec MAIN.ELF\necho rx-zc-ok\n' > "$SCRIPT2"
+printf 'ls\nexec MAIN.ELF\necho rx-zc-ok\n' > "$SCRIPT2"
 
 run_one() {
     local tag="$1"

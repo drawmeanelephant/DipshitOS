@@ -54,11 +54,12 @@ zig build image
 # SPIKE build (macOS 27 SDK types) — the editor-gate pattern: no VZ view
 # keyboard, headless-safe evidence via claim-9588 (not needed here since
 # NETSTAT needs no keystrokes, but the same binary shape is verified).
-swift build --package-path host/vm-runner --configuration release
+swift build --package-path host/vm-runner --configuration release -Xswiftc -DSPIKE
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
 # --- per-run isolation ------------------------------------------------------
 gate_begin live-netstat
+gate_seed_share
 echo "run dir: $RUN_DIR"
 SCRIPT="$RUN_DIR/script.txt"
 

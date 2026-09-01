@@ -65,6 +65,9 @@ meaningful — on main.
 |--------|----------|
 | `freebuff/m22-lane-d-wave2` | [`0720-m22-lane-d-wave2.md`](0720-m22-lane-d-wave2.md) |
 | agent/antigravity/in-guest-compiler | [`agent-antigravity-in-guest-compiler.md`](agent-antigravity-in-guest-compiler.md) |
+| agent/antigravity/vl6-gui-consumer | [`agent-antigravity-vl6-gui-consumer.md`](agent-antigravity-vl6-gui-consumer.md) |
+| agent/antigravity/z05-dialect-contract | [`agent-antigravity-z05-dialect-contract.md`](agent-antigravity-z05-dialect-contract.md) |
+| agent/antigravity/z1a-data-segment | [`agent-antigravity-z1a-data-segment.md`](agent-antigravity-z1a-data-segment.md) |
 | `agent/buffy/arc1-checkbox-toggle` | [`agent-buffy-arc1-checkbox-toggle.md`](agent-buffy-arc1-checkbox-toggle.md) |
 | `agent/buffy/arc1-progressbar` | [`agent-buffy-arc1-progressbar.md`](agent-buffy-arc1-progressbar.md) |
 | `agent/buffy/arc1-scrollview` | [`agent-buffy-arc1-scrollview.md`](agent-buffy-arc1-scrollview.md) |
@@ -148,6 +151,7 @@ meaningful — on main.
 | `agent/buffy/m34-hf1-hf2-host-file-channel` | [`agent-buffy-m34-hf1-hf2-host-file-channel.md`](agent-buffy-m34-hf1-hf2-host-file-channel.md) |
 | M34 HF3 mutation ops (issue #737) | [`agent-buffy-m34-hf3-mutation.md`](agent-buffy-m34-hf3-mutation.md) |
 | M34 HF4 app delivery from the host folder (issue #738) | [`agent-buffy-m34-hf4-exec.md`](agent-buffy-m34-hf4-exec.md) |
+| M34 HF5 user-data migration to the host folder (issue #739) | [`agent-buffy-m34-hf5-user-data-migration.md`](agent-buffy-m34-hf5-user-data-migration.md) |
 | milestone nine interactive application events (claim 7463) | [`agent-buffy-m9-events.md`](agent-buffy-m9-events.md) |
 | milestone nine tracker (claim 8234) | [`agent-buffy-m9-tracker.md`](agent-buffy-m9-tracker.md) |
 | Roadmap refinement (claim 4951) | [`agent-buffy-roadmap-refinement.md`](agent-buffy-roadmap-refinement.md) |
@@ -216,6 +220,8 @@ meaningful — on main.
 | freebuff/okay-shower-thoughts-here-we-re-using-fat32-for-so-b0ce3067-2b04-4b81-984d-9fd76bfcf123 | [`freebuff-20260901-003.md`](freebuff-20260901-003.md) |
 | freebuff/okay-shower-thoughts-here-we-re-using-fat32-for-so-b0ce3067-2b04-4b81-984d-9fd76bfcf123 | [`freebuff-20260901-004.md`](freebuff-20260901-004.md) |
 | freebuff/okay-shower-thoughts-here-we-re-using-fat32-for-so-b0ce3067-2b04-4b81-984d-9fd76bfcf123 | [`freebuff-20260901-005.md`](freebuff-20260901-005.md) |
+| freebuff/okay-shower-thoughts-here-we-re-using-fat32-for-so-b0ce3067-2b04-4b81-984d-9fd76bfcf123 | [`freebuff-20260901-006.md`](freebuff-20260901-006.md) |
+| freebuff/okay-shower-thoughts-here-we-re-using-fat32-for-so-b0ce3067-2b04-4b81-984d-9fd76bfcf123 | [`freebuff-20260901-007.md`](freebuff-20260901-007.md) |
 | lane-b/m24-calc-features | [`lane-b-m24-calc-features.md`](lane-b-m24-calc-features.md) |
 | `lane-c/m20-text-rendering` | [`lane-c-m20-text-rendering.md`](lane-c-m20-text-rendering.md) |
 | `lane-d/m22-dev-tools` | [`lane-d-m22-dev-tools.md`](lane-d-m22-dev-tools.md) |

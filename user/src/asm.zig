@@ -25,8 +25,8 @@
 //! 64 labels, 4096 output bytes. Every refusal names its line. No libc,
 //! no POSIX, no heap.
 //!
-//! Usage: exec ASM.BIN <source> [<output>]  (paths route /esp/, /data/;
-//! defaults: /esp/PROG.S -> /esp/OUT.ELF)
+//! Usage: exec ASM.BIN <source> [<output>]  (paths route to the host
+//! share; defaults: PROG.S -> OUT.ELF)
 
 const std = @import("std");
 const asmenc = @import("lib/asmenc.zig");
@@ -652,12 +652,14 @@ pub fn error_name(kind: ErrorKind) []const u8 {
 // ---------------------------------------------------------------------------
 
 pub export fn _start(argc: usize, argv: ?[*]const [32]u8) callconv(.c) noreturn {
+    // M34 HF6 (issue #740): bare names route to the host share (the ESP
+    // is gone).
     var src_path_buf: [40]u8 = [_]u8{0} ** 40;
-    @memcpy(src_path_buf[0..11], "/esp/PROG.S");
+    @memcpy(src_path_buf[0..6], "PROG.S");
     var out_path_buf: [40]u8 = [_]u8{0} ** 40;
-    @memcpy(out_path_buf[0..12], "/esp/OUT.ELF");
-    var src_len: usize = 11;
-    var out_len: usize = 12;
+    @memcpy(out_path_buf[0..7], "OUT.ELF");
+    var src_len: usize = 6;
+    var out_len: usize = 7;
 
     if (argc >= 1) {
         if (argv) |slots| {

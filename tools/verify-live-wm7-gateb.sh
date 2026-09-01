@@ -64,6 +64,7 @@ codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/
 
 # --- per-run isolation -------------------------------------------------------
 gate_begin live-wm7-gateb
+gate_seed_share
 echo "run dir: $RUN_DIR"
 
 run_boot() {

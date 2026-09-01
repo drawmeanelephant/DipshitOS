@@ -48,7 +48,7 @@ const undo_cap: usize = 50;
 const delta_text_cap: usize = 64;
 
 // E17: crash recovery
-pub const recovery_path: []const u8 = "/data/EDIT_REC.TXT";
+pub const recovery_path: []const u8 = "/host/EDIT_REC.TXT"; // M34 HF5 (#739): user data lives in the host folder
 
 // E19: Editor Themes
 pub const Theme = struct {
@@ -1475,10 +1475,8 @@ pub const FileSidebar = struct {
     selected: usize = 0,
 
     pub fn refresh(self: *FileSidebar) void {
-        var rc = ui.dir_list("/esp", &self.entries);
-        if (rc <= 0) {
-            rc = ui.dir_list("", &self.entries);
-        }
+        // M34 HF6 (issue #740): the share root is the only listing.
+        const rc = ui.dir_list("", &self.entries);
         if (rc > 0) {
             self.count = @min(@as(usize, @intCast(rc)), max_sidebar_entries);
         } else {
@@ -1918,11 +1916,11 @@ pub const AppState = struct {
         const fname = self.tabs.get_filename(self.tabs.active);
         var target_buf: [64]u8 = undefined;
         const target_path = if (std.mem.eql(u8, fname, "UNTITLED") or fname.len == 0)
-            "/data/UNTITLED.TXT"
+            "/host/UNTITLED.TXT"
         else if (fname[0] == '/')
             fname
         else
-            std.fmt.bufPrint(&target_buf, "/data/{s}", .{fname}) catch fname;
+            std.fmt.bufPrint(&target_buf, "/host/{s}", .{fname}) catch fname;
 
         var fd_res = ui.file_open(target_path, ui.MODE_WRITE | ui.MODE_CREATE);
         if (fd_res < 0) {
@@ -2962,7 +2960,7 @@ pub fn handle_file_sidebar_key(app: *AppState, ev: *const Event) bool {
             const base_name = ent.name[0..name_len];
 
             var full_path_buf: [64]u8 = undefined;
-            const open_path = std.fmt.bufPrint(&full_path_buf, "/esp/{s}", .{base_name}) catch base_name;
+            const open_path = std.fmt.bufPrint(&full_path_buf, "{s}", .{base_name}) catch base_name;
 
             if (app.tabs.active_tab().dirty and app.tabs.count < max_tabs) {
                 _ = app.tabs.open_new();

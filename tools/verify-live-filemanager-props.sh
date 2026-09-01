@@ -10,7 +10,7 @@
 #      path is pinned by host unit tests; synthesized RIGHT clicks hit
 #      the claim-4769 activation wall and stay class-C).
 #   2. The panel renders size / type / full path / directory total /
-#      FAT32 format + N/A timestamp in the details pane (screenshot
+#      Host Share format + N/A timestamp in the details pane (screenshot
 #      evidence captured alongside).
 #   3. Ctrl+I again reports `file: props off` (toggle symmetry).
 #
@@ -53,7 +53,16 @@ swift build --package-path host/vm-runner --configuration release -Xswiftc -DSPI
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
 gate_begin live-filemanager-props
+gate_seed_share
 echo "run dir: $RUN_DIR"
+
+# M34 HF5 (issue #739): FILE.BIN's root is the HOST SHARE — seed the two
+# byte-known DATA fixtures so the listing carries real entries + a live
+# F4 du= total (same bytes as image/mkfat32.py build_data_volume).
+SHARE="$RUN_DIR/share"
+mkdir -p "$SHARE"
+printf '%s\n' 'VirelaiOS general filesystem: host share fixtures' > "$SHARE/README.TXT"
+printf '%s\n' 'general data volume contents: 1234567890' > "$SHARE/DATA.TXT"
 
 printf 'exec FILE.BIN\n' > "$RUN_DIR/script.txt"
 printf 'dui focus 0\necho m25-props-ok\n' > "$RUN_DIR/settle.txt"
@@ -115,4 +124,4 @@ Verified:
 - Right-click dispatch path covered by host unit tests (claim-4769 wall)
 EOF
 
-echo "verify-live-filemanager-props: PASS — properties inspector + du total verified on VZ."
+echo "verify-live-filemanager-props: PASS — properties inspector + du total verified on VZ (HF5 share root)."
