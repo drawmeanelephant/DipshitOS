@@ -785,6 +785,66 @@ fn parsePrimary(p: *Parser) anyerror!void {
                         _ = try p.expect(.r_paren);
                         emit(enc_movz(8, 26, 0));
                         emit(enc_svc(0));
+                    } else if (std.mem.eql(u8, member_tok.text, "win_open")) {
+                        _ = try p.expect(.l_paren);
+                        var arg_count: usize = 0;
+                        if (p.peek() != .r_paren) {
+                            try compileExpr(p);
+                            emit(enc_sub_imm(31, 31, 16));
+                            emit(enc_str(31, 0, 0));
+                            arg_count += 1;
+                            while (p.accept(.comma)) {
+                                try compileExpr(p);
+                                emit(enc_sub_imm(31, 31, 16));
+                                emit(enc_str(31, 0, 0));
+                                arg_count += 1;
+                            }
+                        }
+                        _ = try p.expect(.r_paren);
+                        var i = arg_count;
+                        while (i > 0) {
+                            i -= 1;
+                            emit(enc_ldr(31, @intCast(i), 0));
+                            emit(enc_add_imm(31, 31, 16));
+                        }
+                        emit(enc_movz(8, 12, 0));
+                        emit(enc_svc(0));
+                    } else if (std.mem.eql(u8, member_tok.text, "win_fill")) {
+                        _ = try p.expect(.l_paren);
+                        var arg_count: usize = 0;
+                        if (p.peek() != .r_paren) {
+                            try compileExpr(p);
+                            emit(enc_sub_imm(31, 31, 16));
+                            emit(enc_str(31, 0, 0));
+                            arg_count += 1;
+                            while (p.accept(.comma)) {
+                                try compileExpr(p);
+                                emit(enc_sub_imm(31, 31, 16));
+                                emit(enc_str(31, 0, 0));
+                                arg_count += 1;
+                            }
+                        }
+                        _ = try p.expect(.r_paren);
+                        var i = arg_count;
+                        while (i > 0) {
+                            i -= 1;
+                            emit(enc_ldr(31, @intCast(i), 0));
+                            emit(enc_add_imm(31, 31, 16));
+                        }
+                        emit(enc_movz(8, 13, 0));
+                        emit(enc_svc(0));
+                    } else if (std.mem.eql(u8, member_tok.text, "win_present")) {
+                        _ = try p.expect(.l_paren);
+                        try compileExpr(p);
+                        _ = try p.expect(.r_paren);
+                        emit(enc_movz(8, 14, 0));
+                        emit(enc_svc(0));
+                    } else if (std.mem.eql(u8, member_tok.text, "win_close")) {
+                        _ = try p.expect(.l_paren);
+                        try compileExpr(p);
+                        _ = try p.expect(.r_paren);
+                        emit(enc_movz(8, 15, 0));
+                        emit(enc_svc(0));
                     } else if (std.mem.eql(u8, member_tok.text, "svc")) {
                         _ = try p.expect(.l_paren);
                         const num_tok = try p.expect(.number);
@@ -962,7 +1022,7 @@ fn compileStatement(p: *Parser) anyerror!void {
             _ = p.advance();
             if (p.peek() != .semicolon) try compileExpr(p);
             _ = try p.expect(.semicolon);
-            emit(enc_mov_reg(31, 19));
+            emit(enc_add_imm(19, 31, 0));
             emit(enc_add_imm(31, 31, 512));
             emit(enc_ldr(31, 19, 0));
             emit(enc_add_imm(31, 31, 16));
@@ -1085,7 +1145,7 @@ fn compile(src: []const u8) !usize {
             emit(enc_sub_imm(31, 31, 16));
             emit(enc_str(31, 19, 0));
             emit(enc_sub_imm(31, 31, 512));
-            emit(enc_mov_reg(19, 31));
+            emit(enc_add_imm(31, 19, 0));
 
             var i: usize = 0;
             while (i < functions[f_idx].param_count) : (i += 1) {
@@ -1096,7 +1156,7 @@ fn compile(src: []const u8) !usize {
             _ = try p2.expect(.r_brace);
 
             // Function epilogue
-            emit(enc_mov_reg(31, 19));
+            emit(enc_add_imm(19, 31, 0));
             emit(enc_add_imm(31, 31, 512));
             emit(enc_ldr(31, 19, 0));
             emit(enc_add_imm(31, 31, 16));
@@ -1281,4 +1341,23 @@ test "zc: tokenizer handles dot, at, string literals, and pub keyword" {
     try testing.expectEqual(TokenKind.keyword_pub, t.next().kind);
     try testing.expectEqual(TokenKind.keyword_fn, t.next().kind);
     try testing.expectEqual(TokenKind.ident, t.next().kind);
+}
+
+test "zc: VL6 GUI consumer builtins (win_open, win_fill, win_present, win_close)" {
+    const src =
+        \\const zc = @import("zc");
+        \\
+        \\pub fn main() void {
+        \\    const wid: u64 = zc.win_open(64, 64, 256, 192);
+        \\    _ = zc.win_fill(wid, 0, 0, 256, 192, 0x1a2b3c);
+        \\    _ = zc.win_fill(wid, 8, 8, 48, 48, 0xff0000);
+        \\    _ = zc.win_present(wid);
+        \\    zc.win_close(wid);
+        \\    zc.exit(72);
+        \\}
+    ;
+    const bytes = try compile(src);
+    try testing.expect(bytes > 0);
+    // entry jumps to main
+    try testing.expectEqual(@as(u32, enc_bl(16)), std.mem.readInt(u32, code[0..4], .little));
 }

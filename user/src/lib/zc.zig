@@ -73,6 +73,46 @@ pub fn file_close(fd: u32) void {
     );
 }
 
+pub fn win_open(x: u64, y: u64, w: u64, h: u64) u64 {
+    return asm volatile ("svc #0"
+        : [ret] "={x0}" (-> u64),
+        : [num] "{x8}" (@as(u64, 12)),
+          [x] "{x0}" (x),
+          [y] "{x1}" (y),
+          [w] "{x2}" (w),
+          [h] "{x3}" (h),
+    );
+}
+
+pub fn win_fill(wid: u64, x: u64, y: u64, w: u64, h: u64, rgb: u64) u64 {
+    return asm volatile ("svc #0"
+        : [ret] "={x0}" (-> u64),
+        : [num] "{x8}" (@as(u64, 13)),
+          [wid] "{x0}" (wid),
+          [x] "{x1}" (x),
+          [y] "{x2}" (y),
+          [w] "{x3}" (w),
+          [h] "{x4}" (h),
+          [rgb] "{x5}" (rgb),
+    );
+}
+
+pub fn win_present(wid: u64) u64 {
+    return asm volatile ("svc #0"
+        : [ret] "={x0}" (-> u64),
+        : [num] "{x8}" (@as(u64, 14)),
+          [wid] "{x0}" (wid),
+    );
+}
+
+pub fn win_close(wid: u64) void {
+    asm volatile ("svc #0"
+        :
+        : [num] "{x8}" (@as(u64, 15)),
+          [wid] "{x0}" (wid),
+    );
+}
+
 pub fn svc(comptime num: u16, arg0: u64) i64 {
     return asm volatile ("svc #0"
         : [ret] "={x0}" (-> i64),
